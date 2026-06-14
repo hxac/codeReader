@@ -1,0 +1,12 @@
+# 被分析仓库列表。analyze.py 会顺序处理这里的每一项，为每个项目生成 <Project>-tutorial/ 教程。
+# 字段：
+#   name    必填，"owner/repo"。不写 url 时自动推导为 https://github.com/<name>.git
+#   url     可选，显式克隆地址（私有仓/自托管/GitLab 等用它）
+#   branch  可选，缺省=仓库默认分支
+#   project 可选，教程文件夹名前缀；缺省= name 的最后一段（如 kvcache-ai/Mooncake → Mooncake）
+#   focus   可选，user_focus：希望教程侧重的内容，会进 prompt
+repos:
+  - name: kvcache-ai/Mooncake
+    focus: "分离式 KVCache：Store / Master / Transfer Engine / Executor 各子系统的设计与实现，以及 PDC 分离架构的取舍"
+  - name: HazyResearch/Megakernels
+    focus: "GPU Megakernel（持久内核）编排：计算与通信的重叠、PMI/CUTLASS/算子生成、端到端 attention pipeline"

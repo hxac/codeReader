@@ -1,0 +1,130 @@
+name: tutorial
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full（首次/全量重建） | incremental | auto"
+        required: true
+        default: "auto"
+      repo_name:
+        description: "只处理某个项目(owner/repo)；留空=repos.yml 全部"
+        required: false
+      force_full:
+        description: "强制全量重建"
+        type: boolean
+        required: false
+        default: false
+      ignore_timing:
+        description: "忽略死区时间守卫（仅调试用；定时触发强制为 false）"
+        type: boolean
+        required: false
+        default: false
+  # 两个便宜/高速窗口开头自动恢复上次未完成的工作（UTC）：
+  #   00:03 UTC = 北京 08:03（北京 8-12 便宜段，额度已于北京 05 恢复）
+  #   10:03 UTC = 北京 18:03（北京 18-22 便宜段，额度已于北京 15 恢复）
+  schedule:
+    - cron: "3 0 * * *"
+    - cron: "3 10 * * *"
+
+permissions:
+  contents: write
+
+# 全局串行：绝不并发跑两个 tutorial（保护单一 repos_state.json + 有限额度）。
+concurrency:
+  group: tutorial
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 分支合并需要完整历史
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Claude Code (latest)
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      # 切到 tutorial-cache 分支（首次从 main 建；之后累积进度并同步 main 的脚手架改动）
+      - name: Switch to tutorial-cache branch
+        if: ${{ env.ACT != 'true' }}   # act 本地调试无 origin，跳过分支切换，直接用当前检出
+        run: |
+          git config user.name  "readcode-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git fetch origin --prune
+          if git ls-remote --heads origin tutorial-cache | grep -q tutorial-cache; then
+            git checkout -B tutorial-cache origin/tutorial-cache
+            git merge origin/main --no-edit -m "chore: sync scaffold from main" || true
+          else
+            git checkout -B tutorial-cache
+          fi
+          git log -1 --oneline
+
+      # 跑管线；捕获退出码（0=完成 / 75=未完成待续传 / 1=错误），本步恒成功以便后续提交
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL:   ${{ secrets.ANTHROPIC_BASE_URL }}
+          RC_MODE:           ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
+          RC_REPO_NAME:      ${{ github.event_name == 'schedule' && '' || inputs.repo_name }}
+          RC_FORCE_FULL:     ${{ github.event_name == 'schedule' && 'false' || inputs.force_full }}
+          RC_ALLOW_DEADZONE: ${{ github.event_name == 'schedule' && 'false' || inputs.ignore_timing }}
+          RC_CONCURRENCY:    ${{ vars.RC_CONCURRENCY || '2' }}
+          RC_MODEL:          ${{ vars.RC_MODEL || 'claude-sonnet-4-6' }}
+          RC_MAX_TURNS:      ${{ vars.RC_MAX_TURNS || '50' }}
+          RC_MAX_BUDGET_USD: ${{ vars.RC_MAX_BUDGET_USD || '10.00' }}
+          RC_TIMEOUT:        ${{ vars.RC_TIMEOUT || '3600' }}
+          RC_PLANNER_MAX_TURNS:   ${{ vars.RC_PLANNER_MAX_TURNS || '30' }}
+          RC_PLANNER_MAX_BUDGET_USD: ${{ vars.RC_PLANNER_MAX_BUDGET_USD || '3.00' }}
+          RC_BACKOFF_SEC:    ${{ vars.RC_BACKOFF_SEC || '0' }}
+          RC_MAX_RETRIES:    ${{ vars.RC_MAX_RETRIES || '5' }}
+          RC_DEADZONE_UTC_START:       ${{ vars.RC_DEADZONE_UTC_START || '6' }}
+          RC_DEADZONE_UTC_END:         ${{ vars.RC_DEADZONE_UTC_END || '10' }}
+          RC_DEADZONE_SOFT_MARGIN_MIN: ${{ vars.RC_DEADZONE_SOFT_MARGIN_MIN || '30' }}
+          TZ: UTC
+        run: |
+          set +e
+          python scripts/analyze.py
+          code=$?
+          set -e
+          echo "RC_EXIT=$code" >> "$GITHUB_ENV"
+          exit 0
+
+      # 进度（state + tutorials，含未完成的）总是提交到 tutorial-cache —— 额度耗尽也不丢
+      - name: Commit progress to tutorial-cache
+        if: ${{ env.ACT != 'true' }}
+        run: |
+          git add state/ tutorials/ || true
+          git commit -m "tutorial: progress (exit ${{ env.RC_EXIT }})" || echo "nothing to commit"
+          git push origin tutorial-cache
+
+      # 仅当本轮全部完成（退出 0）时，把 cache 合并发布到 main
+      - name: Publish completed tutorials to main
+        if: ${{ env.ACT != 'true' && env.RC_EXIT == '0' }}
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          git merge tutorial-cache --no-ff --no-edit -m "tutorial: publish completed lectures" || echo "main already up to date"
+          git push origin main || echo "main push skipped (already up to date)"
+          git checkout tutorial-cache
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tutorials-${{ github.run_id }}
+          path: tutorials/
+          if-no-files-found: warn
