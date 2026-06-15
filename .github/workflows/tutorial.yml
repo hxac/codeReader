@@ -91,7 +91,7 @@ jobs:
           RC_ALLOW_DEADZONE: ${{ github.event_name == 'schedule' && 'false' || inputs.ignore_timing }}
           RC_MOCK:           ${{ github.event_name == 'schedule' && 'false' || inputs.mock }}
           RC_CONCURRENCY:    ${{ vars.RC_CONCURRENCY || '2' }}
-          RC_MODEL:          ${{ vars.RC_MODEL || 'claude-sonnet-4-6' }}
+          RC_MODEL:          ${{ secrets.RC_MODEL || vars.RC_MODEL || 'claude-sonnet-4-6' }}
           RC_MAX_TURNS:      ${{ vars.RC_MAX_TURNS || '50' }}
           RC_MAX_BUDGET_USD: ${{ vars.RC_MAX_BUDGET_USD || '10.00' }}
           RC_TIMEOUT:        ${{ vars.RC_TIMEOUT || '3600' }}
