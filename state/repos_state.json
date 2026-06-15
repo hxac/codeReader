@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "repos": {
+    "HazyResearch/Megakernels": {
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.01
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.01
+        }
+      },
+      "manifest_head": "7309cec801537b61fea3b50d7dfe454a6cde578e",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/HazyResearch/Megakernels/Megakernels-tutorial",
+      "last_head": "7309cec801537b61fea3b50d7dfe454a6cde578e",
+      "last_run_at": "2026-06-15T01:13:38Z",
+      "version": 1,
+      "last_error": null
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "project": "Megakernels",
+  "head": "7309cec801537b61fea3b50d7dfe454a6cde578e",
+  "rationale": "mock 大纲",
+  "units": [
+    {
+      "id": "u1",
+      "title": "单元1",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "讲义1",
+          "order": 1,
+          "filename": "u1-l1.md",
+          "topic": "topic1",
+          "source_files": [
+            "src/a.rs"
+          ],
+          "minimal_modules": [
+            "m1"
+          ],
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "讲义2",
+          "order": 2,
+          "filename": "u1-l2.md",
+          "topic": "topic2",
+          "source_files": [
+            "src/b.rs"
+          ],
+          "minimal_modules": [
+            "m2"
+          ],
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
