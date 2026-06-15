@@ -7,6 +7,4 @@
 #   focus   可选，user_focus：希望教程侧重的内容，会进 prompt
 repos:
   - name: kvcache-ai/Mooncake
-    focus: "分离式 KVCache：Store / Master / Transfer Engine / Executor 各子系统的设计与实现，以及 PDC 分离架构的取舍"
   - name: HazyResearch/Megakernels
-    focus: "GPU Megakernel（持久内核）编排：计算与通信的重叠、PMI/CUTLASS/算子生成、端到端 attention pipeline"

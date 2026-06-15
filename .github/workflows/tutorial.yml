@@ -20,6 +20,11 @@ on:
         type: boolean
         required: false
         default: false
+      mock:
+        description: "MOCK 模式（不调 claude、不烧额度，仅验证 CI 管线；定时触发强制为 false）"
+        type: boolean
+        required: false
+        default: false
   # 两个便宜/高速窗口开头自动恢复上次未完成的工作（UTC）：
   #   00:03 UTC = 北京 08:03（北京 8-12 便宜段，额度已于北京 05 恢复）
   #   10:03 UTC = 北京 18:03（北京 18-22 便宜段，额度已于北京 15 恢复）
@@ -84,6 +89,7 @@ jobs:
           RC_REPO_NAME:      ${{ github.event_name == 'schedule' && '' || inputs.repo_name }}
           RC_FORCE_FULL:     ${{ github.event_name == 'schedule' && 'false' || inputs.force_full }}
           RC_ALLOW_DEADZONE: ${{ github.event_name == 'schedule' && 'false' || inputs.ignore_timing }}
+          RC_MOCK:           ${{ github.event_name == 'schedule' && 'false' || inputs.mock }}
           RC_CONCURRENCY:    ${{ vars.RC_CONCURRENCY || '2' }}
           RC_MODEL:          ${{ vars.RC_MODEL || 'claude-sonnet-4-6' }}
           RC_MAX_TURNS:      ${{ vars.RC_MAX_TURNS || '50' }}
