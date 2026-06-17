@@ -1,0 +1,410 @@
+{
+  "project": "Mooncake",
+  "head": "8b884bcd131009f5b02a981abcb83cfdb5e21736",
+  "rationale": "Mooncake 是一个面向 LLM 推理的高性能分布式 KVCache 系统，核心技术创新在于 Transfer Engine（支持 RDMA/NVLink 等多传输协议的零拷贝数据传输）、Mooncake Store（基于 TE 构建的分布式对象存储）以及 EP/PG（专家并行通信与弹性进程组）。本教程按照\"基础概念→核心机制→高级特性→生产实践→生态集成\"的递进顺序设计，首先通过架构概览与快速上手让读者建立整体认知，然后深入 Transfer Engine 的多传输协议、拓扑感知与动态路径选择等核心机制，接着剖析 Mooncake Store 的 Master-Client 架构、内存分配驱逐策略以及高可用容错机制，再进一步探讨分层存储、性能调优等生产级特性，最后扩展到专家并行 EP、弹性进程组 PG 以及与 vLLM/SGLang 等主流推理框架的生态集成。这样的设计既保证了知识的系统性（从底层传输到上层应用），也突出了 Mooncake 在 LLM 推理场景下的核心价值（通过 KVCache 分离与高效传输实现算力解耦、吞吐提升与成本优化）。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与快速上手",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Mooncake 架构概览与应用场景",
+          "order": 1,
+          "filename": "u1-l1-architecture-overview.md",
+          "topic": "讲解 Mooncake 的整体架构（KVCache 中心型解耦设计）、核心组件（Transfer Engine、Mooncake Store、EP/PG）以及在实际 LLM 推理场景中的应用价值（PD 分离、专家并行、KVCache 共享），帮助读者建立对项目全局视角的认知。",
+          "source_files": [
+            "README.md",
+            "docs/source/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "架构概览",
+            "KVCache 分离",
+            "PD 分离推理",
+            "专家并行"
+          ],
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与快速开始",
+          "order": 2,
+          "filename": "u1-l2-quick-start.md",
+          "topic": "指导读者从零开始搭建 Mooncake 运行环境（依赖 RDMA 驱动、CUDA、Python），通过 Python 包安装或源码编译的方式部署 Transfer Engine 与 Mooncake Store，运行 Hello World 示例验证环境正确性，为后续深入学习做好准备。",
+          "source_files": [
+            "README.md",
+            "docs/source/getting_started/quick-start.md",
+            "CMakeLists.txt",
+            "dependencies.sh"
+          ],
+          "minimal_modules": [
+            "依赖安装",
+            "编译构建",
+            "Python 包安装",
+            "Hello World 示例"
+          ],
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Transfer Engine 核心机制",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Transfer Engine 基础 API 与核心概念",
+          "order": 1,
+          "filename": "u2-l1-te-basics.md",
+          "topic": "介绍 Transfer Engine 的基础概念（Segment、Batch、TransferRequest）与核心 API（registerLocalMemory、submitTransfer、allocateBatchID），通过简单的点对点传输示例理解 TE 如何抽象底层传输细节、实现批量提交与零拷贝数据移动。",
+          "source_files": [
+            "mooncake-transfer-engine/include/transfer_engine.h",
+            "mooncake-transfer-engine/include/transport/transport.h",
+            "docs/source/getting_started/quick-start.md"
+          ],
+          "minimal_modules": [
+            "Segment 抽象",
+            "内存注册",
+            "批量传输",
+            "零拷贝机制"
+          ],
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "多传输协议支持与设备发现",
+          "order": 2,
+          "filename": "u2-l2-multi-transport.md",
+          "topic": "深入分析 Transfer Engine 如何支持 RDMA、TCP、NVLink、NVMe-oF、EFA 等多种传输协议，讲解 transport 抽象接口、设备自动发现机制、拓扑感知路径选择，以及如何通过 installTransport/uninstallTransport 动态管理传输后端。",
+          "source_files": [
+            "mooncake-transfer-engine/include/transport/rdma_transport/rdma_transport.h",
+            "mooncake-transfer-engine/include/transport/tcp_transport/tcp_transport.h",
+            "mooncake-transfer-engine/include/topology.h",
+            "docs/source/getting_started/supported-protocols.md"
+          ],
+          "minimal_modules": [
+            "传输后端抽象",
+            "设备发现",
+            "拓扑感知",
+            "多传输管理"
+          ],
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "TENT 架构与动态传输选择",
+          "order": 3,
+          "filename": "u2-l3-tent-architecture.md",
+          "topic": "讲解 TENT（Transfer Engine NEXT）如何通过动态传输选择、细粒度调度与运行时故障处理提升传输效率与可靠性，剖析 segment 抽象、路径选择器、切片 spraying 机制以及如何在 heterogeneous 环境下自动构造多跳传输路径。",
+          "source_files": [
+            "docs/source/design/tent/overview.md",
+            "docs/source/design/tent/transport-selector.md",
+            "docs/source/design/tent/failover.md",
+            "mooncake-transfer-engine/tent/src/runtime"
+          ],
+          "minimal_modules": [
+            "TENT 运行时",
+            "动态传输选择",
+            "切片调度",
+            "故障处理"
+          ],
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Mooncake Store 分布式存储",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Store 架构与 Master-Client 模型",
+          "order": 1,
+          "filename": "u3-l1-store-architecture.md",
+          "topic": "剖析 Mooncake Store 的整体架构（Master Service 统一管理元数据与空间分配、Client 同时扮演请求发起者与存储节点角色），讲解控制流与数据流分离的设计理念，以及 Master-Client 之间的 RPC 协议（MountSegment、PutStart、GetReplicaList 等）。",
+          "source_files": [
+            "docs/source/design/mooncake-store.md",
+            "mooncake-store/include/client_service.h",
+            "mooncake-store/include/master_service.h"
+          ],
+          "minimal_modules": [
+            "Master-Client 架构",
+            "控制流与数据流分离",
+            "RPC 协议",
+            "元数据管理"
+          ],
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "内存分配与驱逐策略",
+          "order": 2,
+          "filename": "u3-l2-allocation-eviction.md",
+          "topic": "深入讲解 Mooncake Store 的内存管理机制，包括 BufferAllocator（OffsetAllocator 与 CachelibAllocator）、AllocationStrategy（random、free_ratio_first、cxl）的负载均衡策略、近似 LRU 驱逐策略、软 pin 与 hard pin 的生命周期控制，以及如何通过 Lease 机制保证读写一致性。",
+          "source_files": [
+            "docs/source/design/mooncake-store.md",
+            "mooncake-store/include/allocator.h",
+            "mooncake-store/include/allocation_strategy.h",
+            "mooncake-store/include/eviction_strategy.h"
+          ],
+          "minimal_modules": [
+            "内存分配器",
+            "分配策略",
+            "驱逐策略",
+            "Lease 机制"
+          ],
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "对象生命周期管理",
+          "order": 3,
+          "filename": "u3-l3-object-lifecycle.md",
+          "topic": "讲解对象在 Mooncake Store 中的完整生命周期，从 PutStart/PutEnd 两阶段写入保证原子性，到 Get 操作如何通过 replica_list 选择最优副本，再到 Remove/RemoveByRegex 的元数据删除流程，以及 zombie 对象清理、Upsert 原地更新、Copy/Move 异步任务等高级特性。",
+          "source_files": [
+            "docs/source/design/mooncake-store.md",
+            "mooncake-store/src/client_service.cc",
+            "mooncake-store/include/replica.h"
+          ],
+          "minimal_modules": [
+            "Put 两阶段",
+            "Get 副本选择",
+            "Remove 删除",
+            "Upsert 更新",
+            "异步任务"
+          ],
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "高可用与生产实践",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "高可用架构与容错机制",
+          "order": 1,
+          "filename": "u4-l1-high-availability.md",
+          "topic": "剖析 Mooncake Store 的高可用架构，包括 Master 主备切换（基于 etcd 领导选举）、Client 心跳与故障检测、segment 副本管理、oplog 复制与恢复、snapshot 持久化机制，以及如何在 Master/Client 故障场景下保证系统持续正确服务。",
+          "source_files": [
+            "docs/source/design/mooncake-store.md",
+            "mooncake-store/include/ha/leadership/leader_coordinator.h",
+            "mooncake-store/include/ha/oplog/oplog_manager.h",
+            "mooncake-store/include/ha/snapshot"
+          ],
+          "minimal_modules": [
+            "高可用架构",
+            "领导选举",
+            "故障检测",
+            "oplog 复制",
+            "snapshot 持久化"
+          ],
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "分层存储与 SSD 卸载",
+          "order": 2,
+          "filename": "u4-l2-tiered-storage.md",
+          "topic": "讲解 Mooncake Store 的分层存储机制（DRAM + SSD/NVMe 两级缓存），包括 L1 内存缓存到 L2 磁盘的异步卸载流程、冷数据 L2→L1 主动提升机制、FileStorage 抽象接口、PromotionTaskItem 任务调度，以及如何通过分层存储在成本与性能之间取得平衡。",
+          "source_files": [
+            "docs/source/design/ssd-offload.md",
+            "mooncake-store/include/file_storage.h",
+            "mooncake-store/include/storage_backend.h",
+            "mooncake-store/src/file_storage.cc"
+          ],
+          "minimal_modules": [
+            "分层存储架构",
+            "SSD 卸载",
+            "数据提升",
+            "FileStorage 接口"
+          ],
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "监控指标与性能调优",
+          "order": 3,
+          "filename": "u4-l3-monitoring-tuning.md",
+          "topic": "介绍 Mooncake 的可观测性体系，包括 Prometheus 指导暴露、关键性能指标（带宽利用率、缓存命中率、分配延迟、驱逐频率）、常见性能瓶颈诊断方法，以及参数调优指南（RDMA 配置、并发度、内存分配策略、驱逐阈值）。",
+          "source_files": [
+            "docs/source/getting_started/observability.md",
+            "mooncake-store/include/client_metric.h",
+            "mooncake-store/include/master_metric_manager.h",
+            "docs/source/performance"
+          ],
+          "minimal_modules": [
+            "指标暴露",
+            "性能监控",
+            "瓶颈诊断",
+            "参数调优"
+          ],
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家并行与弹性分布式执行",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Mooncake EP 机制与编程模型",
+          "order": 1,
+          "filename": "u5-l1-ep-mechanism.md",
+          "topic": "讲解 Mooncake EP（Expert Parallel）如何基于 Mooncake Transport 实现 MoE 推理的 token dispatch 与 combine 操作，剖析 dispatch/combine 三阶段数据流、Buffer 布局、IBGDA/RDMA fast path 与 Python fallback 的执行模式选择，以及如何通过 active_ranks tensor 感知 rank 健康状态。",
+          "source_files": [
+            "docs/source/design/mooncake-ep.md",
+            "mooncake-ep/include/mooncake_ep_buffer.h",
+            "mooncake-ep/tests/test_ep_grid.py"
+          ],
+          "minimal_modules": [
+            "EP 编程模型",
+            "Dispatch/Combine",
+            "Fast path 选择",
+            "Rank 健康感知"
+          ],
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Mooncake PG 弹性进程组",
+          "order": 2,
+          "filename": "u5-l2-elastic-pg.md",
+          "topic": "深入分析 Mooncake PG（Process Group）作为 PyTorch 分布式后端的实现机制，讲解如何通过 MooncakeBackendOptions 扩展 PyTorch 进程组、active_ranks 状态追踪、弹性恢复协议（get_peer_state、recover_ranks、join_group 三阶段），以及如何与 EP buffer 协同实现容错 MoE 推理。",
+          "source_files": [
+            "docs/source/design/mooncake-backend-pg.md",
+            "mooncake-pg/include",
+            "mooncake-pg/tests"
+          ],
+          "minimal_modules": [
+            "PyTorch 后端集成",
+            "弹性恢复协议",
+            "Active ranks 追踪",
+            "PG-EP 协同"
+          ],
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "生态系统集成与最佳实践",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "与 vLLM 集成：PD 分离与 KVCache 共享",
+          "order": 1,
+          "filename": "u6-l1-vllm-integration.md",
+          "topic": "讲解 Mooncake 如何与 vLLM 深度集成实现 prefill-decode 分离推理与跨实例 KVCache 共享，剖析 vLLM connector 的工作原理（MooncakeConnector、MooncakeStoreConnector）、KVCache block 传输流程、HiCache 分层缓存集成，以及在 Kimi K2 等大规模生产环境中的部署实践。",
+          "source_files": [
+            "docs/source/getting_started/examples/vllm-integration",
+            "docs/source/performance/vllm"
+          ],
+          "minimal_modules": [
+            "vLLM connector",
+            "PD 分离",
+            "KVCache 共享",
+            "HiCache 集成"
+          ],
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "与 SGLang 集成：从 PD 分离到弹性 EP",
+          "order": 2,
+          "filename": "u6-l2-sglang-integration.md",
+          "topic": "剖析 Mooncake 与 SGLang 的多层次集成，包括 PD 分离 prefill-decode、HiCache 分层 KV 缓存、弹性专家并行（Elastic EP）、Encode-Prefill-Decode 多模态流水线解耦、RDMA P2P 权重传输，以及如何在 SGLang 中利用 Mooncake 构建高吞吐、低延迟的 MoE 推理服务。",
+          "source_files": [
+            "docs/source/getting_started/examples/sglang-integration",
+            "docs/source/performance/sglang"
+          ],
+          "minimal_modules": [
+            "PD 分离",
+            "HiCache 集成",
+            "弹性 EP",
+            "多模态流水线",
+            "权重传输"
+          ],
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "生产环境最佳实践与案例",
+          "order": 3,
+          "filename": "u6-l3-production-practices.md",
+          "topic": "总结 Mooncake 在大规模生产环境中的部署最佳实践，包括集群规划（RDMA 网络拓扑、GPU/CPU 配置）、容量规划（Segment 大小、副本数、SSD 容量）、故障排查指南（常见错误码、RDMA 问题诊断）、性能优化技巧，以及 Kimi K2、TorchSpec 等真实生产案例的经验总结。",
+          "source_files": [
+            "docs/source/deployment/mooncake-store-deployment-guide.md",
+            "docs/source/troubleshooting",
+            "README.md",
+            ".claude/skills"
+          ],
+          "minimal_modules": [
+            "集群规划",
+            "容量规划",
+            "故障排查",
+            "性能优化",
+            "生产案例"
+          ],
+          "depends_on": [
+            "u4-l3",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
