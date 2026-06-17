@@ -1,0 +1,19 @@
+# act 本地复刻 GitHub Actions 的默认参数（act 读取本文件）。见 CLAUDE.local.md「用 act 复刻 CI」。
+#
+# 关键：本仓 actions 为 checkout/setup-node/setup-python v6 + upload-artifact v7，
+# 全是 Node20+ 的 JS action —— 必须用 large 镜像（full-22.04）。
+# medium 镜像（act-22.04）只有 Node16，setup-node 的 post 步骤会 node not found。
+-P ubuntu-latest=catthehacker/ubuntu:full-22.04
+-P ubuntu-22.04=catthehacker/ubuntu:full-22.04
+
+# Windows Docker Desktop 上强制 linux/amd64，避免架构不匹配
+--container-architecture linux/amd64
+
+# 容器工作区挂载到宿主 → tutorials/ 产物直接落到本地工作目录（无需 artifact server 也能看）
+--bind
+
+# checkout 等需要知道默认分支
+--defaultbranch main
+
+# 密钥文件（已 gitignore）。MOCK 模式可不填真值，但文件需存在（cp .secrets.example .secrets）
+--secret-file .secrets

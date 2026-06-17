@@ -7,7 +7,7 @@
   3) 上游新提交 → incremental：planner 重跑、keep 讲义保留、退出 0
   4) 断点续传（手动置一篇 pending + phase=workers）→ 只补该篇、planner 不调、回到 done
 
-跑法：uv run --no-project --with pyyaml python scripts/selftest.py
+跑法：uv run --no-project --with pyyaml --with jinja2 python scripts/selftest.py
 """
 import json
 import os

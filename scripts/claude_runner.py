@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -31,10 +32,15 @@ READONLY_TOOLS = [
     "Bash(git ls-files *)", "Bash(git rev-parse *)", "Bash(git remote *)",
 ]
 
-# 额度/限流/计费类错误特征（命中 → QuotaExhaustedError，整体停）。
-_QUOTA_RE = re.compile(r"rate.?limit|429|overloaded|credit|quota|billing|insufficient|exceeded|capacity|try again later", re.I)
+# 单篇轮次超限特征（命中 --max-turns → 普通失败，只停这一篇；必须先于额度判断，
+# 否则 "max turns exceeded" 会被 _QUOTA_RE 误判成额度耗尽而停掉整批）。
+# 这些词（turn/max turns）不会出现在真实额度(429/rate_limit/credit/billing…)报文里，故可放宽。
+_MAXTURNS_RE = re.compile(r"max(?:imum)?[\s_-]*turns?|turns?[\s_-]*(?:limit|exceed|reach)|reached[\s\w]{0,20}turn", re.I)
 # 单篇预算超限特征（命中 → 普通失败，只停这一篇）。
 _BUDGET_RE = re.compile(r"budget|max.?budget|cost|spend|usage limit", re.I)
+# 额度/限流/计费类错误特征（命中 → QuotaExhaustedError，整体停）。
+# 注：不含裸词 "exceeded"（max-turns 也会带 exceeded，见上 _MAXTURNS_RE 先行分流）。
+_QUOTA_RE = re.compile(r"rate.?limit|429|overloaded|credit|quota|billing|insufficient|capacity|try again later", re.I)
 
 
 @dataclass
@@ -81,6 +87,11 @@ def _worker_tools(tutorial_dir: str) -> list[str]:
 
 def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int) -> dict:
     """跑一次 claude 子进程，返回解析后的 JSON payload。失败按特征分类抛错。"""
+    # Windows：npm 全局 claude 是 .cmd 垫片，CreateProcess 找不到无扩展名的 "claude"。
+    # 改用显式 "claude.cmd"（subprocess 可直接执行），且保持 shell=False——这样 argv 引号由
+    # Python 的 list2cmdline 正确处理，--json-schema 的 JSON 等参数不会被 cmd.exe 破坏。
+    if sys.platform == "win32" and cmd and cmd[0] == "claude":
+        cmd = ["claude.cmd", *cmd[1:]]
     try:
         proc = subprocess.run(
             cmd, cwd=str(repo_dir), input=prompt_text,
@@ -97,11 +108,13 @@ def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int) -> d
     if proc.returncode != 0:
         text = (proc.stderr or "") + "\n" + (proc.stdout or "")
         tail = text[-2000:]
+        if _MAXTURNS_RE.search(text):               # 单篇轮次上限（--max-turns）→ 只停这一篇
+            raise ClaudeRunnerError(f"单篇轮次超限（--max-turns），调高 RC_MAX_TURNS 后续传：\n{tail}")
         if _BUDGET_RE.search(text):                 # 单篇预算/用量上限 → 只停这一篇
             raise ClaudeRunnerError(f"单篇预算/用量超限：\n{tail}")
         if _QUOTA_RE.search(text):                  # 额度/限流/计费 → 整体停
             raise QuotaExhaustedError(f"API 额度/限流耗尽：\n{tail}")
-        raise ClaudeRunnerError(f"claude 退出码 {proc.returncode}（可能命中 --max-turns）：\n{tail}")
+        raise ClaudeRunnerError(f"claude 退出码 {proc.returncode}：\n{tail}")
 
     try:
         return json.loads(proc.stdout)

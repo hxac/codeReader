@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,13 +33,22 @@ from pathlib import Path
 import yaml
 
 import claude_runner
+import promptkit
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# debug 模式（RC_DEBUG）：固定单仓库 + 只生成 1 篇 + 忽略死区；默认把 state/work/tutorials
+# 重定向到 .debug/ 沙箱，避免污染正式进度（RC_DEBUG_PERSIST=1 则沿用正式路径）。
+# 任何 RC_* 路径变量显式设置时仍优先之。
+DEBUG = os.environ.get("RC_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+DEBUG_PERSIST = os.environ.get("RC_DEBUG_PERSIST", "").strip().lower() in ("1", "true", "yes", "on")
+_DEBUG_SANDBOX = DEBUG and not DEBUG_PERSIST
+
 # 关键路径可被环境变量覆盖（selftest 用），缺省指向控制仓库内。
 REPOS_YML = Path(os.environ.get("RC_REPOS_YML") or (ROOT / "repos.yml"))
-STATE_FILE = Path(os.environ.get("RC_STATE_FILE") or (ROOT / "state" / "repos_state.json"))
-WORK_DIR = Path(os.environ.get("RC_WORK_DIR") or (ROOT / "work"))
-TUTORIALS_DIR = Path(os.environ.get("RC_TUTORIALS_DIR") or (ROOT / "tutorials"))
+STATE_FILE = Path(os.environ.get("RC_STATE_FILE") or ((ROOT / ".debug" / "state.json") if _DEBUG_SANDBOX else (ROOT / "state" / "repos_state.json")))
+WORK_DIR = Path(os.environ.get("RC_WORK_DIR") or ((ROOT / ".debug" / "work") if _DEBUG_SANDBOX else (ROOT / "work")))
+TUTORIALS_DIR = Path(os.environ.get("RC_TUTORIALS_DIR") or ((ROOT / ".debug" / "tutorials") if _DEBUG_SANDBOX else (ROOT / "tutorials")))
 PROMPTS_DIR = Path(os.environ.get("RC_PROMPTS_DIR") or (ROOT / "prompts"))
 PLANNER_TEMPLATE = PROMPTS_DIR / "planner.prompt.md"
 WORKER_TEMPLATE = PROMPTS_DIR / "worker.prompt.md"
@@ -49,6 +59,10 @@ DEAD_END = float(os.environ.get("RC_DEADZONE_UTC_END", "10"))
 SOFT_MARGIN_HOURS = float(os.environ.get("RC_DEADZONE_SOFT_MARGIN_MIN", "30")) / 60.0
 CONCURRENCY = max(1, int(os.environ.get("RC_CONCURRENCY", "2")))
 MAX_RETRIES = int(os.environ.get("RC_MAX_RETRIES", "5"))
+# 同一窗口内单篇 worker 的瞬时重试次数（额度耗尽不在此列，仍立即停整批）；
+# 与 RC_BACKOFF_SEC 配合：失败后按该秒数退避再重试。耗尽后才计 retries+=1（→ MAX_RETRIES 为窗口数上限）。
+INRUN_RETRIES = max(0, int(os.environ.get("RC_WORKER_INRUN_RETRIES", "1")))
+BACKOFF_SEC = float(os.environ.get("RC_BACKOFF_SEC", "0"))
 MOCK = os.environ.get("RC_MOCK", "").strip().lower() in ("1", "true", "yes", "on")
 MOCK_PLANNER_CALLS = 0   # selftest 用：统计 mock planner 被调次数
 
@@ -111,6 +125,17 @@ def env_truthy(name: str, default: bool = False) -> bool:
     if v is None:
         return default
     return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _rel_to_root(p: Path) -> str:
+    """优先返回相对 ROOT 的 posix 路径（持久化 tutorial_path 用）；不可相对则回退绝对路径。
+
+    用 resolve()+relative_to 取代字符串前缀比较，避免 Windows 下大小写/分隔符误判。
+    """
+    try:
+        return p.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,60 +317,52 @@ def harvest(clone_tutorial: Path, control_tutorial: Path) -> None:
     shutil.copytree(clone_tutorial, control_tutorial)
 
 
+def _normalize_filename(fn: str) -> str:
+    """filename 只允许是裸文件名：丢弃任何目录前缀、统一正斜杠、保 `.md`。
+
+    防御 planner 偶发把 `<项目名>-tutorial/` 前缀写进 filename，导致与 tutorial_dir
+    拼接后出现双层路径（如 `Mooncake-tutorial/Mooncake-tutorial/u1-l1.md`）。"""
+    fn = (fn or "").replace("\\", "/").strip().strip("/")
+    fn = fn.split("/")[-1]            # basename，丢弃任何目录前缀
+    if fn and not fn.lower().endswith(".md"):
+        fn += ".md"
+    return fn or "lecture.md"
+
+
+def normalize_manifest_filenames(manifest: dict) -> None:
+    """就地规范 manifest 中所有讲义的 filename 为裸 basename（写盘前调用一次即可）。"""
+    for u in manifest.get("units", []):
+        for lec in u.get("lectures", []):
+            if "filename" in lec:
+                lec["filename"] = _normalize_filename(lec["filename"])
+
+
 # --------------------------------------------------------------------------- #
 # prompt 组装
 # --------------------------------------------------------------------------- #
 def compose_planner_prompt(repo: Repo, mode: str, head: str, prev_head: str | None,
                            existing_manifest: str | None, tutorial_dir: str,
                            permalink_base: str) -> str:
-    lines = [
-        "# 大纲规划任务", "",
-        f"项目仓库: {repo.name}",
-        f"项目名: {repo.project}",
-        f"讲义目录: {tutorial_dir}/",
-        f"模式: {mode}",
-        f"当前 HEAD: {head}",
-        f"代码永久链接 base: {permalink_base}",
-        f"user_focus: {repo.focus or '（无）'}",
-    ]
-    if mode == "incremental" and prev_head:
-        lines += [f"上次 HEAD（previous_head）: {prev_head}",
-                  "", "## 现有大纲（manifest）", "```json", existing_manifest or "{}", "```"]
-    lines += ["", "## 执行", "按 system prompt 中对应模式（full/incremental）产出 manifest JSON。"]
-    return "\n".join(lines) + "\n"
+    """任务提示词由 prompts/planner.task.md（Jinja2）渲染；此处只负责注入参数。"""
+    return promptkit.render(PROMPTS_DIR, "planner.task.md",
+        repo_name=repo.name, project=repo.project, tutorial_dir=tutorial_dir,
+        mode=mode, head=head, permalink_base=permalink_base,
+        user_focus=repo.focus or "（无）",
+        prev_head=prev_head, existing_manifest=existing_manifest or "{}")
 
 
 def compose_worker_prompt(repo: Repo, lec: dict, action: str, head: str,
                           prev_head: str | None, tutorial_dir: str,
                           permalink_base: str) -> str:
-    fn = lec.get("filename", f"{lec.get('id', 'lecture')}.md")
-    lines = [
-        "# 单篇讲义生成任务", "",
-        f"项目仓库: {repo.name}",
-        f"项目名: {repo.project}",
-        f"讲义目录（Write/Edit 仅限）: {tutorial_dir}/",
-        f"代码永久链接 base: {permalink_base}",
-        f"当前 HEAD: {head}",
-        f"动作: {action}",
-    ]
-    if action == "update" and prev_head:
-        lines.append(f"上次 HEAD（previous_head）: {prev_head}")
-    lines += [
-        "", "## 本讲义规格（来自大纲）",
-        f"- id: {lec.get('id')}",
-        f"- 文件名: {fn}   ← 写到 {tutorial_dir}/{fn}",
-        f"- 标题: {lec.get('title')}",
-        f"- 主题: {lec.get('topic')}",
-        f"- 应覆盖的最小模块: {', '.join(lec.get('minimal_modules') or []) or '（自行规划）'}",
-        f"- 关键源码: {', '.join(lec.get('source_files') or []) or '（自行定位）'}",
-        f"- 依赖讲义: {', '.join(lec.get('depends_on') or []) or '无'}",
-        "", "## 任务",
-        "按 worker 方法论生成这一篇讲义（最小模块 6 要素）。",
-        "- new/rebuild：从零写该文件。",
-        "- update：先 Read 现有文件，结合 git diff previous_head..current_head 就地更新。",
-        f"只写 `{tutorial_dir}/{fn}` 这一个文件。完成后用一句话总结。",
-    ]
-    return "\n".join(lines) + "\n"
+    """任务提示词由 prompts/worker.task.md（Jinja2）渲染；此处只负责注入参数。"""
+    fn = lec.get("filename") or f"{lec.get('id', 'lecture')}.md"
+    return promptkit.render(PROMPTS_DIR, "worker.task.md",
+        repo_name=repo.name, project=repo.project, tutorial_dir=tutorial_dir,
+        permalink_base=permalink_base, head=head, action=action, prev_head=prev_head,
+        lec_id=lec.get("id"), filename=fn, title=lec.get("title"), topic=lec.get("topic"),
+        minimal_modules=lec.get("minimal_modules") or [],
+        source_files=lec.get("source_files") or [],
+        depends_on=lec.get("depends_on") or [])
 
 
 # --------------------------------------------------------------------------- #
@@ -362,7 +379,7 @@ def run_workers(repo: Repo, repo_dir: Path, todo: list[dict], state: dict,
     def do_one(lec: dict) -> None:
         if stop.is_set():
             return
-        if in_dead_zone() or near_dead_zone():
+        if not DEBUG and (in_dead_zone() or near_dead_zone()):
             stop.set()
             with lock:
                 res["deferred"] = True
@@ -370,33 +387,42 @@ def run_workers(repo: Repo, repo_dir: Path, todo: list[dict], state: dict,
         lid = lec.get("id")
         action = lec.get("action", "new")
         prompt = compose_worker_prompt(repo, lec, action, head, prev_head, tutorial_dir, permalink_base)
-        try:
-            r = call_worker(repo, repo_dir, lec, prompt, worker_cfg)
-            with lock:
-                prev = entry.get("lectures", {}).get(lid, {})
-                entry.setdefault("lectures", {})[lid] = {
-                    "status": "done", "action": action,
-                    "retries": prev.get("retries", 0), "cost": r.cost_usd,
-                }
-                res["done"] += 1
-        except claude_runner.QuotaExhaustedError as e:
-            stop.set()
-            with lock:
-                prev = entry.get("lectures", {}).get(lid, {})
-                entry.setdefault("lectures", {})[lid] = {
-                    "status": "failed", "action": action,
-                    "retries": prev.get("retries", 0), "error": f"quota: {str(e)[:200]}",
-                }
-                res["quota"] = True
-        except Exception as e:  # noqa: BLE001
-            with lock:
-                prev = entry.get("lectures", {}).get(lid, {})
-                entry.setdefault("lectures", {})[lid] = {
-                    "status": "failed", "action": action,
-                    "retries": prev.get("retries", 0) + 1,
-                    "error": f"{type(e).__name__}: {str(e)[:200]}",
-                }
-                res["failed"] += 1
+        last_err: Exception | None = None
+        for attempt in range(INRUN_RETRIES + 1):
+            if stop.is_set():
+                return
+            try:
+                r = call_worker(repo, repo_dir, lec, prompt, worker_cfg)
+                with lock:
+                    prev = entry.get("lectures", {}).get(lid, {})
+                    entry.setdefault("lectures", {})[lid] = {
+                        "status": "done", "action": action,
+                        "retries": prev.get("retries", 0), "cost": r.cost_usd,
+                    }
+                    res["done"] += 1
+                return
+            except claude_runner.QuotaExhaustedError as e:
+                stop.set()
+                with lock:
+                    prev = entry.get("lectures", {}).get(lid, {})
+                    entry.setdefault("lectures", {})[lid] = {
+                        "status": "failed", "action": action,
+                        "retries": prev.get("retries", 0), "error": f"quota: {str(e)[:200]}",
+                    }
+                    res["quota"] = True
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt < INRUN_RETRIES and BACKOFF_SEC > 0:
+                    time.sleep(BACKOFF_SEC)
+        with lock:
+            prev = entry.get("lectures", {}).get(lid, {})
+            entry.setdefault("lectures", {})[lid] = {
+                "status": "failed", "action": action,
+                "retries": prev.get("retries", 0) + 1,
+                "error": f"{type(last_err).__name__}: {str(last_err)[:200]}",
+            }
+            res["failed"] += 1
 
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
         futs = [ex.submit(do_one, lec) for lec in todo]
@@ -430,8 +456,24 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
         old_head = entry.get("manifest_head")        # 本次规划前的 head（worker diff 基准）
         head_changed = has_state and old_head != head
 
+        # 提示词签名：任何 prompts/*.md（系统或任务）被编辑 → 该仓库全量重构。
+        # debug 模式跳过（避免 debug 也触发全跑）。sig 仅在此处计算，下方两处安全落盘复用。
+        prompt_changed = False
+        sig = None
+        if not DEBUG:
+            sig = promptkit.signature(PROMPTS_DIR)
+            prompt_changed = entry.get("prompt_hash") is not None and entry.get("prompt_hash") != sig
+            if prompt_changed:
+                log(f"  检测到提示词变更（{entry.get('prompt_hash')}→{sig}）→ 全量重构")
+                force = True
+
         # 已完成且 HEAD 未变且非强制 → 无事可做
         if entry.get("phase") == "done" and not head_changed and not force:
+            # 兜底：历史/手造状态可能没记 prompt_hash → 记当前签名作基线，
+            # 此后任何提示词变更都能被检测（否则 prompt_hash 缺失时变更会被漏检、旧讲义不重写）。
+            # 想立即重建用 RC_FORCE_FULL，这里不烧额度。
+            if sig is not None and entry.get("prompt_hash") is None:
+                entry["prompt_hash"] = sig
             log(f"  已完成且 HEAD 未变（{head[:8]}），跳过")
             entry["last_run_at"] = generated_at
             save_state(state)
@@ -442,6 +484,11 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
         # 先把旧讲义/manifest 注入 clone（full 清空），再据其存在性判断是否需重新规划
         # —— 修复：注入必须先于 need_planner，否则续传会误判 manifest 缺失而重复规划
         if plan_mode == "full":
+            if prompt_changed:
+                # 提交新签名：即使重构中途额度耗尽（exit 75），下次续传签名已匹配、
+                # 不再重复清空，已生成的部分讲义得以保留继续（避免「每次清空重来」死循环）。
+                entry["prompt_hash"] = sig
+                save_state(state)
             clear_clone_tutorial(clone_tutorial)
         else:
             inject_prior(control_tutorial, clone_tutorial)
@@ -451,7 +498,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                         or entry.get("phase") != "workers")
 
         if need_planner:
-            if in_dead_zone() or near_dead_zone():
+            if not DEBUG and (in_dead_zone() or near_dead_zone()):
                 log(f"  临近/处于死区，暂缓规划 {repo.name}（保留进度，下次窗口续传）")
                 entry["last_run_at"] = generated_at
                 save_state(state)
@@ -466,6 +513,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                 compose_planner_prompt(repo, plan_mode, head, old_head, existing, tutorial_dir, permalink_base),
                 planner_cfg, json.dumps(MANIFEST_SCHEMA),
             )
+            normalize_manifest_filenames(manifest)   # filename 规范为裸 basename，防双层路径
             clone_tutorial.mkdir(parents=True, exist_ok=True)
             (clone_tutorial / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -504,6 +552,17 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                      for lec in u.get("lectures", []) if lec.get("id")}
         todo = [lec_specs[lid] for lid, p in entry.get("lectures", {}).items()
                 if p.get("status") in ("pending", "failed") and lid in lec_specs]
+        if DEBUG:
+            # debug 模式：只生成 1 篇——RC_DEBUG_LECTURE_ID 指定，否则首个单元首篇
+            target = (os.environ.get("RC_DEBUG_LECTURE_ID") or "").strip()
+            spec = lec_specs.get(target) if (target and target in lec_specs) \
+                else (next(iter(lec_specs.values()), None) if lec_specs else None)
+            if not spec:
+                log(f"  DEBUG：未找到目标讲义（RC_DEBUG_LECTURE_ID={target!r}），跳过")
+                entry["last_error"] = "debug: target lecture not found"
+                save_state(state)
+                return "incomplete"
+            todo = [spec]
         worker_cfg = claude_runner.ClaudeConfig.from_env(WORKER_TEMPLATE, tutorial_dir)
         if todo:
             log(f"  生成 {len(todo)} 篇讲义（并发 {CONCURRENCY}）…")
@@ -512,8 +571,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                               entry.get("prev_head"), tutorial_dir, permalink_base,
                               worker_cfg, generated_at)
             harvest(clone_tutorial, control_tutorial)
-            entry["tutorial_path"] = control_tutorial.relative_to(ROOT).as_posix() \
-                if str(control_tutorial).startswith(str(ROOT)) else str(control_tutorial)
+            entry["tutorial_path"] = _rel_to_root(control_tutorial)
             entry["last_head"] = head
             entry["last_run_at"] = generated_at
             if res["quota"]:
@@ -528,10 +586,17 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                 save_state(state)
                 log(f"  临近死区，暂停；剩余讲义下次续传 → {entry['tutorial_path']}")
                 return "incomplete"
+            if DEBUG:
+                # debug：单篇已生成即视为完成，跳过「剩余讲义」判定，退出 0
+                entry["phase"] = "done"
+                entry["last_error"] = None
+                entry["last_run_at"] = generated_at
+                save_state(state)
+                log(f"  DEBUG 完成：已生成 {todo[0].get('id')} → {entry['tutorial_path']}")
+                return "done"
         else:
             harvest(clone_tutorial, control_tutorial)
-            entry["tutorial_path"] = control_tutorial.relative_to(ROOT).as_posix() \
-                if str(control_tutorial).startswith(str(ROOT)) else str(control_tutorial)
+            entry["tutorial_path"] = _rel_to_root(control_tutorial)
             entry["last_head"] = head
             entry["last_run_at"] = generated_at
 
@@ -542,6 +607,8 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                 entry["version"] = int(entry.get("version", 0)) + 1
             entry["phase"] = "done"
             entry["last_error"] = None
+            if not DEBUG and sig is not None:
+                entry["prompt_hash"] = sig   # 首次构建/每次完成都记当前签名，供后续变更检测
             save_state(state)
             log(f"  全部完成 → {entry['tutorial_path']}（v{entry.get('version', 0)}）")
             return "done"
@@ -575,14 +642,21 @@ def main() -> int:
     if override_mode in ("clone", "major", "rebuild"):
         override_mode = "full"
 
-    if in_dead_zone() and not env_truthy("RC_ALLOW_DEADZONE"):
+    if in_dead_zone() and not env_truthy("RC_ALLOW_DEADZONE") and not DEBUG:
         log(f"处于死区 UTC {DEAD_START:g}-{DEAD_END:g}（北京 14-18），本次跳过")
         return 0
+
+    if DEBUG:
+        log("=== DEBUG 模式：固定单仓库 + 只生成 1 篇讲义 + 忽略死区"
+            + ("（进度写入 .debug/ 沙箱）" if _DEBUG_SANDBOX else "（沿用正式进度）") + " ===")
 
     repos = load_repos()
     if not repos:
         log("没有可处理的项目，退出")
         return 0
+    if DEBUG and len(repos) > 1:
+        log(f"DEBUG：固定仓库 {repos[0].name}（忽略其余 {len(repos) - 1} 个）")
+        repos = [repos[0]]
 
     state = load_state()
     any_incomplete = False
