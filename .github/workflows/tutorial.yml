@@ -51,7 +51,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 自托管 runner：Docker 容器 c8312a1bf521（Ubuntu 24.04 + git/curl/bash；node/python/claude 由 setup-* 装）。
+    # 标签精确点名该容器；所有触发（手动 + 4 个定时 cron）都在此容器内执行，不消耗 GitHub 托管分钟。
+    runs-on: [self-hosted, c8312a1bf521]
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
