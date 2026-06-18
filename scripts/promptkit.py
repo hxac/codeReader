@@ -45,6 +45,9 @@ def signature(prompts_dir: Path) -> str:
     for fn in files:
         h.update(fn.encode("utf-8"))
         h.update(b"\0")
-        h.update((prompts_dir / fn).read_bytes())
+        # normalize 换行为 LF，避免 Windows autocrlf=true 下本地 checkout
+        # 产生 CRLF 而 CI(Linux) 是 LF，导致 signature 不一致 → 误触发全量重构。
+        content = (prompts_dir / fn).read_bytes().replace(b"\r\n", b"\n")
+        h.update(content)
         h.update(b"\0")
     return h.hexdigest()[:16]

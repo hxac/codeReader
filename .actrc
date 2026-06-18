@@ -15,5 +15,8 @@
 # checkout 等需要知道默认分支
 --defaultbranch main
 
-# 密钥文件（已 gitignore）。MOCK 模式可不填真值，但文件需存在（cp .secrets.example .secrets）
---secret-file .secrets
+# 所有配置统一在 .env（secrets + vars + env 三合一） + .input（workflow_dispatch inputs）
+# act 默认值即 .env / .secrets / .vars；显式指向防歧义
+--env-file .env
+--secret-file .env
+--var-file .env

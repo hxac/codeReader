@@ -68,6 +68,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Claude Code (latest)
+        if: ${{ !(env.ACT == 'true' && inputs.mock == 'true') }}
         run: npm install -g @anthropic-ai/claude-code@latest
 
       - name: Install Python deps

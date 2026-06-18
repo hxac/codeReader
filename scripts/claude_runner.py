@@ -34,13 +34,14 @@ READONLY_TOOLS = [
 
 # 单篇轮次超限特征（命中 --max-turns → 普通失败，只停这一篇；必须先于额度判断，
 # 否则 "max turns exceeded" 会被 _QUOTA_RE 误判成额度耗尽而停掉整批）。
-# 这些词（turn/max turns）不会出现在真实额度(429/rate_limit/credit/billing…)报文里，故可放宽。
 _MAXTURNS_RE = re.compile(r"max(?:imum)?[\s_-]*turns?|turns?[\s_-]*(?:limit|exceed|reach)|reached[\s\w]{0,20}turn", re.I)
 # 单篇预算超限特征（命中 → 普通失败，只停这一篇）。
-_BUDGET_RE = re.compile(r"budget|max.?budget|cost|spend|usage limit", re.I)
+# 注意：不含 cost/usage 裸词——第三方端点 quota/credit 报文常含 "cost limit"/"usage limit"，
+# 会先命中 _QUOTA_RE 判为整体停。这里只匹配明确的单篇预算相关词组。
+_BUDGET_RE = re.compile(r"max.?budget|budget[\s_-]*(?:limit|exceed|reach)|spend(?:ing)?[\s_-]*(?:limit|exceed)|exceeded[\s\w]{0,15}(?:budget|spend)", re.I)
 # 额度/限流/计费类错误特征（命中 → QuotaExhaustedError，整体停）。
-# 注：不含裸词 "exceeded"（max-turns 也会带 exceeded，见上 _MAXTURNS_RE 先行分流）。
-_QUOTA_RE = re.compile(r"rate.?limit|429|overloaded|credit|quota|billing|insufficient|capacity|try again later", re.I)
+# 含 cost/usage limit 模式——第三方端点常用 "cost limit exceeded" 表示账户额度耗尽。
+_QUOTA_RE = re.compile(r"rate.?limit|429|overloaded|credit|quota|billing|insufficient|capacity|try again later|cost[\s_-]*limit|usage[\s_-]*limit|exceeded[\s\w]{0,15}(?:credit|quota|limit)", re.I)
 
 
 @dataclass
@@ -85,6 +86,17 @@ def _worker_tools(tutorial_dir: str) -> list[str]:
     return READONLY_TOOLS + [f"Write({tutorial_dir}/**)", f"Edit({tutorial_dir}/**)"]
 
 
+def _classify_error(text: str) -> type | None:
+    """按特征分类 claude 的非零退出 stderr/stdout；返回异常类型或 None（未匹配）。"""
+    if _MAXTURNS_RE.search(text):
+        return ClaudeRunnerError
+    if _BUDGET_RE.search(text):
+        return ClaudeRunnerError
+    if _QUOTA_RE.search(text):
+        return QuotaExhaustedError
+    return None
+
+
 def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int) -> dict:
     """跑一次 claude 子进程，返回解析后的 JSON payload。失败按特征分类抛错。"""
     # Windows：npm 全局 claude 是 .cmd 垫片，CreateProcess 找不到无扩展名的 "claude"。
@@ -108,12 +120,11 @@ def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int) -> d
     if proc.returncode != 0:
         text = (proc.stderr or "") + "\n" + (proc.stdout or "")
         tail = text[-2000:]
-        if _MAXTURNS_RE.search(text):               # 单篇轮次上限（--max-turns）→ 只停这一篇
-            raise ClaudeRunnerError(f"单篇轮次超限（--max-turns），调高 RC_MAX_TURNS 后续传：\n{tail}")
-        if _BUDGET_RE.search(text):                 # 单篇预算/用量上限 → 只停这一篇
-            raise ClaudeRunnerError(f"单篇预算/用量超限：\n{tail}")
-        if _QUOTA_RE.search(text):                  # 额度/限流/计费 → 整体停
+        err_type = _classify_error(text)
+        if err_type is QuotaExhaustedError:
             raise QuotaExhaustedError(f"API 额度/限流耗尽：\n{tail}")
+        if err_type is ClaudeRunnerError:
+            raise ClaudeRunnerError(f"claude 非零退出（分类匹配）：\n{tail}")
         raise ClaudeRunnerError(f"claude 退出码 {proc.returncode}：\n{tail}")
 
     try:
@@ -125,16 +136,21 @@ def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int) -> d
 
 
 def run_planner(repo_dir: Path, prompt_text: str, cfg: ClaudeConfig,
-                schema_json: str, max_turns: str | None = None,
-                max_budget: str | None = None) -> dict:
-    """读项目 → 输出大纲 manifest（dict）。用 --json-schema 强制结构。"""
+                schema_json: str) -> dict:
+    """读项目 → 输出大纲 manifest（dict）。用 --json-schema 强制结构。
+
+    max_turns / max_budget 用 planner 专用环境变量 RC_PLANNER_MAX_TURNS（默认 30）
+    / RC_PLANNER_MAX_BUDGET_USD（默认 3.00），**不用 cfg.max_turns / cfg.max_budget**
+    ——planner 是只读单次调用，上限应远小于 worker（50/$10），避免烧额度。
+    cfg 仅用于 model / template_path / timeout（这些 planner 与 worker 共享）。
+    """
     cmd = [
         "claude", "-p",
         "--model", cfg.model,
         "--output-format", "json",
         "--json-schema", schema_json,
-        "--max-turns", max_turns or os.environ.get("RC_PLANNER_MAX_TURNS", "30"),
-        "--max-budget-usd", max_budget or os.environ.get("RC_PLANNER_MAX_BUDGET_USD", "3.00"),
+        "--max-turns", os.environ.get("RC_PLANNER_MAX_TURNS", "30"),
+        "--max-budget-usd", os.environ.get("RC_PLANNER_MAX_BUDGET_USD", "3.00"),
         "--allowedTools", ",".join(READONLY_TOOLS),
         "--append-system-prompt-file", str(cfg.template_path),
         "--exclude-dynamic-system-prompt-sections",

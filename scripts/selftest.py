@@ -149,6 +149,76 @@ print("\n=== 检查：prev_head 持久化（修复 #2）===")
 e = state_entry()
 check(e.get("prev_head") == HEAD1, f"prev_head 持久化为旧 HEAD（got {e.get('prev_head')})")
 
+# ---- Run 5：单元回归（离线，不烧额度）----
+print("\n=== Run 5: 单元回归（classify / signature CRLF / deadzone wrap / render 无 None）===")
+
+# --- 5a. _classify_error 分类 ---
+import claude_runner  # noqa: E402 (alread imported by analyze above)
+
+cls = claude_runner._classify_error
+check(cls("Error: max turns reached") is claude_runner.ClaudeRunnerError,
+      "max turns reached → ClaudeRunnerError")
+check(cls("Error: turns limit exceeded") is claude_runner.ClaudeRunnerError,
+      "turns limit exceeded → ClaudeRunnerError")
+check(cls("Error: max budget exceeded") is claude_runner.ClaudeRunnerError,
+      "max budget exceeded → ClaudeRunnerError")
+check(cls("Error: spending limit hit") is claude_runner.ClaudeRunnerError,
+      "spend limit hit → ClaudeRunnerError")
+check(cls("Error: rate_limit_exceeded (429)") is claude_runner.QuotaExhaustedError,
+      "rate_limit 429 → QuotaExhaustedError")
+check(cls("insufficient credit balance") is claude_runner.QuotaExhaustedError,
+      "insufficient credit → QuotaExhaustedError")
+check(cls("Error: cost limit exceeded") is claude_runner.QuotaExhaustedError,
+      "cost limit exceeded (第三方端点) → QuotaExhausted（整体停，非单篇）")
+check(cls("Error: credit balance too low") is claude_runner.QuotaExhaustedError,
+      "credit balance → QuotaExhaustedError")
+check(cls("Error: exceeded credit limit") is claude_runner.QuotaExhaustedError,
+      "exceeded credit limit → QuotaExhaustedError")
+check(cls("Random unexpected error text 12345") is None,
+      "未匹配文本 → None（走 fallback ClaudeRunnerError）")
+
+# --- 5b. signature CRLF normalize ---
+import promptkit  # noqa: E402
+tmp_prompts = TMP / "test_prompts"; tmp_prompts.mkdir(exist_ok=True)
+(tmp_prompts / "a.md").write_bytes(b"hello\nworld\n")
+(tmp_prompts / "b.md").write_bytes(b"hello\r\nworld\r\n")
+sig_lf = promptkit.signature(tmp_prompts)
+(tmp_prompts / "b.md").write_bytes(b"hello\nworld\n")
+sig_crlf_normalized = promptkit.signature(tmp_prompts)
+check(sig_lf == sig_crlf_normalized,
+      f"signature CRLF normalised: LF={sig_lf} vs CRLF→LF={sig_crlf_normalized}")
+shutil.rmtree(tmp_prompts, ignore_errors=True)
+
+# --- 5c. deadzone wrap-around ---
+from datetime import datetime as dt_mod, timezone as tz_mod  # noqa: E402
+orig_s, orig_e = analyze.DEAD_START, analyze.DEAD_END
+analyze.DEAD_START = 22; analyze.DEAD_END = 2
+check(analyze.in_dead_zone(dt_mod(2026,1,1,23,0, tzinfo=tz_mod.utc)) is True,
+      "跨午夜 23:00 → True")
+check(analyze.in_dead_zone(dt_mod(2026,1,1,0,30, tzinfo=tz_mod.utc)) is True,
+      "跨午夜 00:30 → True")
+check(analyze.in_dead_zone(dt_mod(2026,1,1,5,0, tzinfo=tz_mod.utc)) is False,
+      "跨午夜 05:00 → False")
+check(analyze.in_dead_zone(dt_mod(2026,1,1,12,0, tzinfo=tz_mod.utc)) is False,
+      "跨午夜 12:00 → False")
+# no-wrap 路径
+analyze.DEAD_START = 6; analyze.DEAD_END = 10
+check(analyze.in_dead_zone(dt_mod(2026,1,1,8,0, tzinfo=tz_mod.utc)) is True,
+      "正常 08:00 → True")
+check(analyze.in_dead_zone(dt_mod(2026,1,1,5,0, tzinfo=tz_mod.utc)) is False,
+      "正常 05:00 → False")
+analyze.DEAD_START, analyze.DEAD_END = orig_s, orig_e
+
+# --- 5d. compose_worker_prompt 对 None 兜底 ---
+lec_none = {"id": "u1-l9", "title": "测试", "topic": "主题", "filename": "u1-l9.md"}
+prompt = analyze.compose_worker_prompt(
+    analyze.Repo(name="test/x", url="", branch=None, project="X", focus=""),
+    lec_none, "new", "HEAD", None, "X-tutorial", "https://example.com/base/")
+check("None" not in prompt and "自动判断" in prompt,
+      "level=None 时渲染含兜底文案，无字面 None")
+check("由 worker 根据主题和源码自行设计" in prompt,
+      "practice_task=None 时渲染含兜底文案")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\n" + ("SELFTEST PASSED ✅" if not failures
              else f"SELFTEST FAILED ❌ ({len(failures)}): " + "; ".join(failures)))

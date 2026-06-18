@@ -57,6 +57,11 @@ WORKER_TEMPLATE = PROMPTS_DIR / "worker.prompt.md"
 DEAD_START = float(os.environ.get("RC_DEADZONE_UTC_START", "6"))
 DEAD_END = float(os.environ.get("RC_DEADZONE_UTC_END", "10"))
 SOFT_MARGIN_HOURS = float(os.environ.get("RC_DEADZONE_SOFT_MARGIN_MIN", "30")) / 60.0
+# 校验：死区起止必须在 [0,24)，且 margin < 24h（否则软停窗口覆盖全天，永远软停）
+if not (0 <= DEAD_START < 24 and 0 <= DEAD_END < 24):
+    raise SystemExit(f"RC_DEADZONE_UTC_START/END 必须在 [0,24)：got {DEAD_START}/{DEAD_END}")
+if not (0 <= SOFT_MARGIN_HOURS < 24):
+    raise SystemExit(f"RC_DEADZONE_SOFT_MARGIN_MIN 必须在 [0,1440)：got {SOFT_MARGIN_HOURS*60}")
 CONCURRENCY = max(1, int(os.environ.get("RC_CONCURRENCY", "2")))
 MAX_RETRIES = int(os.environ.get("RC_MAX_RETRIES", "5"))
 # 同一窗口内单篇 worker 的瞬时重试次数（额度耗尽不在此列，仍立即停整批）；
@@ -200,13 +205,24 @@ def _utc_hour(now: datetime) -> float:
 
 
 def in_dead_zone(now: datetime | None = None) -> bool:
+    """是否处于死区（UTC）。支持跨午夜（DEAD_START > DEAD_END 时按 wrap-around 判定）。"""
     h = _utc_hour(now or _now())
-    return DEAD_START <= h < DEAD_END
+    if DEAD_START < DEAD_END:
+        return DEAD_START <= h < DEAD_END
+    # 跨午夜：死区 = [START, 24) ∪ [0, END)
+    return h >= DEAD_START or h < DEAD_END
 
 
 def near_dead_zone(now: datetime | None = None) -> bool:
+    """是否临近死区（margin 也正确处理跨午夜）。"""
     h = _utc_hour(now or _now())
-    return (DEAD_START - SOFT_MARGIN_HOURS) <= h < DEAD_START
+    start = DEAD_START - SOFT_MARGIN_HOURS   # 软停窗口起点（可 < 0，表示跨午夜）
+    end = DEAD_START                          # 软停窗口终点 = 死区起点
+    if start < end:
+        return start <= h < end
+    # 软停窗口跨午夜（如 START=1, margin=2 → start=-1 → %24=23 → [23, 1)）
+    start %= 24
+    return h >= start or h < end
 
 
 # --------------------------------------------------------------------------- #
@@ -275,8 +291,26 @@ def sync_repo(repo: Repo) -> Path:
         log(f"  fetch {repo.name}")
         _git(["fetch", "--all", "--tags"], repo_dir)
         if repo.branch:
-            _git(["checkout", repo.branch], repo_dir)
-            _git(["reset", "--hard", f"origin/{repo.branch}"], repo_dir)
+            # 校验 origin/<branch> 是否存在（上游可能删/改分支）；缺失则 fallback 到默认分支
+            ref = f"origin/{repo.branch}"
+            check = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", ref],
+                cwd=str(repo_dir), capture_output=True, text=True)
+            if check.returncode != 0:
+                log(f"  WARN 分支 {repo.branch!r} 在 origin 不存在，"
+                    f"fallback 到默认分支（repos.yml 的 branch 配置可能过期）")
+                # 取 origin/HEAD 指向的默认分支
+                try:
+                    default = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo_dir)
+                    default = default.replace("origin/", "")
+                except RuntimeError:
+                    default = "main"
+                    log(f"  WARN 无法确定默认分支，fallback 到 'main'")
+                _git(["checkout", default], repo_dir)
+                _git(["reset", "--hard", f"origin/{default}"], repo_dir)
+            else:
+                _git(["checkout", repo.branch], repo_dir)
+                _git(["reset", "--hard", ref], repo_dir)
         else:
             _git(["pull", "--ff-only"], repo_dir)
     else:
@@ -284,7 +318,15 @@ def sync_repo(repo: Repo) -> Path:
             shutil.rmtree(repo_dir, ignore_errors=True)
         log(f"  clone {repo.name}")
         if repo.branch:
-            _git(["clone", "--branch", repo.branch, repo.url, str(repo_dir)], ROOT)
+            # 先 clone 默认分支，再检查目标分支是否存在
+            _git(["clone", repo.url, str(repo_dir)], ROOT)
+            check = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"origin/{repo.branch}"],
+                cwd=str(repo_dir), capture_output=True, text=True)
+            if check.returncode == 0:
+                _git(["checkout", repo.branch], repo_dir)
+            else:
+                log(f"  WARN clone 后分支 {repo.branch!r} 在 origin 不存在，留在默认分支")
         else:
             _git(["clone", repo.url, str(repo_dir)], ROOT)
     return repo_dir
@@ -313,12 +355,38 @@ def clear_clone_tutorial(clone_tutorial: Path) -> None:
 
 
 def harvest(clone_tutorial: Path, control_tutorial: Path) -> None:
+    """把 clone 里的讲义收割到 control 目录（原子替换，中途崩溃不丢旧讲义）。
+
+    Windows 上 os.replace / os.rename 不能原子替换非空目录，故采用三步法：
+    先 copytree 到同盘 staging，再 rename 旧目录→.old、rename staging→目标，
+    最后 rmtree .old。任一步失败都可回滚，旧讲义不丢。
+    """
     if not clone_tutorial.exists() or not any(clone_tutorial.iterdir()):
         raise RuntimeError(f"未生成讲义目录（或为空）：{clone_tutorial}")
     control_tutorial.parent.mkdir(parents=True, exist_ok=True)
+
+    # 临时目录必须与 control_tutorial 同盘（跨盘 rename 会失败）
+    staging = control_tutorial.parent / (control_tutorial.name + ".new")
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    shutil.copytree(clone_tutorial, staging)
+
     if control_tutorial.exists():
-        shutil.rmtree(control_tutorial)
-    shutil.copytree(clone_tutorial, control_tutorial)
+        old = control_tutorial.parent / (control_tutorial.name + ".old")
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+        control_tutorial.rename(old)             # 步骤1：旧 → .old（原子）
+        try:
+            staging.rename(control_tutorial)     # 步骤2：staging → 目标（原子）
+        except OSError:
+            old.rename(control_tutorial)         # 回滚
+            raise
+        try:
+            shutil.rmtree(old, ignore_errors=True)  # 步骤3：清理 .old
+        except OSError:
+            pass   # Windows 上偶发文件被占用，下次 harvest 先 ignore_errors 清
+    else:
+        staging.rename(control_tutorial)
 
 
 def _normalize_filename(fn: str) -> str:
@@ -363,10 +431,11 @@ def compose_worker_prompt(repo: Repo, lec: dict, action: str, head: str,
     return promptkit.render(PROMPTS_DIR, "worker.task.md",
         repo_name=repo.name, project=repo.project, tutorial_dir=tutorial_dir,
         permalink_base=permalink_base, head=head, action=action, prev_head=prev_head,
-        lec_id=lec.get("id"), filename=fn, title=lec.get("title"), topic=lec.get("topic"),
-        level=lec.get("level"),
+        lec_id=lec.get("id") or "lecture",
+        filename=fn, title=lec.get("title") or "（无标题）", topic=lec.get("topic") or "（无主题）",
+        level=lec.get("level") or "自动判断",
         learning_goals=lec.get("learning_goals") or [],
-        practice_task=lec.get("practice_task"),
+        practice_task=lec.get("practice_task") or "由 worker 根据主题和源码自行设计",
         minimal_modules=lec.get("minimal_modules") or [],
         source_files=lec.get("source_files") or [],
         depends_on=lec.get("depends_on") or [])
@@ -386,7 +455,7 @@ def run_workers(repo: Repo, repo_dir: Path, todo: list[dict], state: dict,
     def do_one(lec: dict) -> None:
         if stop.is_set():
             return
-        if not DEBUG and (in_dead_zone() or near_dead_zone()):
+        if not (DEBUG or env_truthy("RC_ALLOW_DEADZONE")) and (in_dead_zone() or near_dead_zone()):
             stop.set()
             with lock:
                 res["deferred"] = True
@@ -505,7 +574,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                         or entry.get("phase") != "workers")
 
         if need_planner:
-            if not DEBUG and (in_dead_zone() or near_dead_zone()):
+            if not (DEBUG or env_truthy("RC_ALLOW_DEADZONE")) and (in_dead_zone() or near_dead_zone()):
                 log(f"  临近/处于死区，暂缓规划 {repo.name}（保留进度，下次窗口续传）")
                 entry["last_run_at"] = generated_at
                 save_state(state)
@@ -594,8 +663,9 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                 log(f"  临近死区，暂停；剩余讲义下次续传 → {entry['tutorial_path']}")
                 return "incomplete"
             if DEBUG:
-                # debug：单篇已生成即视为完成，跳过「剩余讲义」判定，退出 0
-                entry["phase"] = "done"
+                # debug：单篇已生成即视为本轮完成（return "done" 让 main 退出 0），
+                # 但**不写 phase=done**——RC_DEBUG_PERSIST=1 时会污染正式 state，
+                # 下次正式跑被 line 478 短路，剩余讲义永不生成。phase 保持 "workers"。
                 entry["last_error"] = None
                 entry["last_run_at"] = generated_at
                 save_state(state)

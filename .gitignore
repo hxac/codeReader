@@ -9,13 +9,15 @@
 /.act-artifacts/
 .act-artifacts/
 
-# act 本地调试用的密钥文件
+# act 本地调试配置（全在 .env；.env.example 是模板入 git）
+/.env
+.env
 /.secrets
 .secrets
-
-# act 本地 var 覆盖（从 .vars.example 复制；非密钥但属本地调参，不入库）
 /.vars
 .vars
+/.input
+.input
 
 # 个人本地 agent 操作手册（CLAUDE.local.md 约定，不入库）
 /CLAUDE.local.md
