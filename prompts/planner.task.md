@@ -6,19 +6,30 @@
 模式: {{ mode }}
 当前 HEAD: {{ head }}
 代码永久链接 base: {{ permalink_base }}
-user_focus: {{ user_focus }}
+用户关注点: {{ user_focus }}
 
 {% if mode == "incremental" and prev_head %}
-上次 HEAD（previous_head）: {{ prev_head }}
+上次 HEAD: {{ prev_head }}
 
-## 现有大纲（manifest）
+## 现有大纲 manifest
+
 ```json
 {{ existing_manifest }}
-````
-
+```
 {% endif %}
 
-## 任务
+---
 
-根据 `planner.prompt.md` 的规则，输出对应模式下的 manifest JSON。
-只输出 JSON，不要输出解释、备注或额外文字。
+## 执行要求
+
+请按照 planner prompt 中的规则执行。
+
+你需要输出：
+
+- 一个完整 manifest JSON。
+- full 模式下，所有讲义 `action` 为 `"new"`。
+- incremental 模式下，根据 diff 判断每篇讲义的 `action`。
+
+不要写任何 Markdown 讲义文件。
+
+不要输出 JSON 以外的任何文字。

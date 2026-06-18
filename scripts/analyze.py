@@ -81,6 +81,7 @@ MANIFEST_SCHEMA = {
                 "properties": {
                     "id": {"type": "string"},
                     "title": {"type": "string"},
+                    "level": {"type": "string", "enum": ["beginner", "intermediate", "advanced"]},
                     "order": {"type": "integer"},
                     "lectures": {
                         "type": "array",
@@ -93,6 +94,9 @@ MANIFEST_SCHEMA = {
                                 "order": {"type": "integer"},
                                 "filename": {"type": "string"},
                                 "topic": {"type": "string"},
+                                "level": {"type": "string", "enum": ["beginner", "intermediate", "advanced"]},
+                                "learning_goals": {"type": "array", "items": {"type": "string"}},
+                                "practice_task": {"type": "string"},
                                 "source_files": {"type": "array", "items": {"type": "string"}},
                                 "minimal_modules": {"type": "array", "items": {"type": "string"}},
                                 "depends_on": {"type": "array", "items": {"type": "string"}},
@@ -360,6 +364,9 @@ def compose_worker_prompt(repo: Repo, lec: dict, action: str, head: str,
         repo_name=repo.name, project=repo.project, tutorial_dir=tutorial_dir,
         permalink_base=permalink_base, head=head, action=action, prev_head=prev_head,
         lec_id=lec.get("id"), filename=fn, title=lec.get("title"), topic=lec.get("topic"),
+        level=lec.get("level"),
+        learning_goals=lec.get("learning_goals") or [],
+        practice_task=lec.get("practice_task"),
         minimal_modules=lec.get("minimal_modules") or [],
         source_files=lec.get("source_files") or [],
         depends_on=lec.get("depends_on") or [])
