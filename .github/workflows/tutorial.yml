@@ -132,13 +132,32 @@ jobs:
           git commit -m "tutorial: progress (exit ${{ env.RC_EXIT }})" || echo "nothing to commit"
           git push origin tutorial-cache
 
-      # 仅当本轮全部完成（退出 0）时，把 cache 合并发布到 main
-      - name: Publish completed tutorials to main
-        if: ${{ env.ACT != 'true' && env.RC_EXIT == '0' }}
+      # 逐仓库发布：每轮把 phase==done 的仓库从 cache 逐个 checkout 到 main（半成品不进 main，幂等）
+      - name: Publish completed repos to main
+        if: ${{ env.ACT != 'true' }}
         run: |
           git fetch origin main
+          # 解析 repos_state.json：列出 phase==done 仓库的 "name<TAB>tutorial_path"
+          mapfile -t DONE < <(python3 <<'PY'
+          import json
+          s = json.load(open("repos_state.json"))
+          for name, e in s.get("repos", {}).items():
+              if e.get("phase") == "done" and e.get("tutorial_path"):
+                  print(f"{name}\t{e['tutorial_path']}")
+          PY
+          )
           git checkout -B main origin/main
-          git merge tutorial-cache --no-ff --no-edit -m "tutorial: publish completed lectures" || echo "main already up to date"
+          for line in "${DONE[@]}"; do
+            line="${line%$'\r'}"            # 防御 CRLF（Linux 下无 \r，无副作用）
+            name="${line%%$'\t'*}"
+            path="${line#*$'\t'}"
+            git checkout tutorial-cache -- "$path" || { echo "skip (missing in cache): $path"; continue; }
+            git add "$path"
+            git commit -m "tutorial: publish $name" || echo "up to date: $name"
+          done
+          git checkout tutorial-cache -- repos_state.json
+          git add repos_state.json
+          git commit -m "tutorial: sync repos_state.json" || true
           git push origin main || echo "main push skipped (already up to date)"
           git checkout tutorial-cache
 
