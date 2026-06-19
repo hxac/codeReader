@@ -5,6 +5,171 @@
 #   branch  可选，缺省=仓库默认分支
 #   project 可选，教程文件夹名前缀；缺省= name 的最后一段（如 kvcache-ai/Mooncake → Mooncake）
 #   focus   可选，user_focus：希望教程侧重的内容，会进 prompt
+#
+# 说明：本清单由 F:/read_code 扫描结果（2026-06-16，155 个含 GitHub 远程的仓库）去重后并入。
+# 已去除跨目录重复（3FS / DeepGEMM / scipy 在 archive+main 各一份；crossbeam / vllm 在 main+usat 各一份）。
+# en_cl_fix 有两个不同 owner 的同名仓 → paulscherrerinstitute 版显式改名 project 以避教程目录冲突。
 repos:
+  # ── 已发布（保留在队首，已 done/keep，会被跳过）──
   - name: kvcache-ai/Mooncake
   - name: HazyResearch/Megakernels
+
+  # ── 来自 archive/（已归档阅读）──
+  - name: deepseek-ai/3FS
+  - name: microsoft/AI-For-Beginners
+  - name: tokio-rs/axum
+  - name: funstory-ai/BabelDOC
+  - name: alttch/busrt
+  - name: farion1231/cc-switch
+  - name: mutouyun/cpp-ipc
+  - name: deepseek-ai/DeepGEMM
+  - name: deepseek-ai/DualPipe
+  - name: longbridge/gpui-component
+  - name: hxac/helloRust
+  - name: unicode-org/icu4x
+  - name: kotauskas/interprocess
+  - name: nginxinc/kubernetes-ingress
+  - name: lancedb/lancedb
+  - name: rasbt/LLMs-from-scratch
+  - name: mihomo-party-org/mihomo-party
+  - name: ArtifexSoftware/mupdf
+  - name: nginxinc/nginx-gateway-fabric
+  - name: nginx/njs
+  - name: pku-minic/online-doc
+  - name: nnethercote/perf-book
+  - name: agerasev/ringbuf
+  - name: longbridge/rust-i18n
+  - name: scipy/scipy
+  - name: latex-lsp/texlab.wiki
+  - name: Distributed-EPFL/tokio-udt
+  - name: EttusResearch/uhd
+  - name: eclipse-zenoh/zenoh
+
+  # ── 来自 main/（主力阅读；3FS/DeepGEMM/scipy 见 archive，已去重）──
+  - name: tms4517/2D-Systolic-Array-Multiplier
+  - name: abdelazeem201/ASIC-Design-Roadmap
+  - name: abdelazeem201/ASIC-implementation-of-AES
+  - name: pulp-platform/axi
+  - name: pConst/basic_verilog
+  - name: BerkeleyLab/Bedrock
+  - name: chipsalliance/chisel
+  - name: google-coral/coralnpu
+  - name: crossbeam-rs/crossbeam
+  - name: NVlabs/cuda-oxide
+  - name: NVIDIA/cuda-tile
+  - name: nvidia/cutile-python
+  - name: NVIDIA/cutlass
+  - name: deepseek-ai/DeepEP
+  - name: abdelazeem201/Design-and-ASIC-Implementation-of-32-Point-FFT-Processor
+  - name: antirez/ds4
+  - name: NVIDIA/FasterTransformer
+  - name: xlite-dev/ffpa-attn
+  - name: Dao-AILab/flash-attention
+  - name: flashinfer-ai/flashinfer
+  - name: deepseek-ai/FlashMLA
+  - name: WangXuan95/FPGA-FixedPoint
+  - name: WangXuan95/FPGA-FOC
+  - name: dtysky/FPGA-Imaging-Library
+  - name: laforest/FPGADesignElements
+  - name: embedeep/FREE-TPU-V3plus-for-FPGA
+  - name: git/git
+  - name: hdl-modules/hdl-modules
+  - name: nvdla/hw
+  - name: NVlabs/instant-ngp
+  - name: yqian4/Koala-GPGPU
+  - name: kvcache-ai/ktransformers
+  - name: xlite-dev/LeetCUDA
+  - name: ModelTC/lightllm
+  - name: karpathy/llm.c
+  - name: RCoeurjoly/LLM2FPGA
+  - name: THU-DSP-LAB/llvm-project
+  - name: LMCache/LMCache
+  - name: InternLM/lmdeploy
+  - name: Lumen-Laboratory/Mayoiuta
+  - name: jingyaogong/minimind
+  - name: mlc-ai/mlc-llm
+  - name: modelscope/ms-swift
+  - name: GeeeekExplorer/nano-vllm
+  - name: futz12/ncnn_llm
+  - name: NJU-ProjectN/nemu
+  - name: nginx/nginx
+  - name: numpy/numpy
+  - name: jbush001/NyuziProcessor
+  - name: open-logic/open-logic
+  - name: open-logic/en_cl_fix
+  - name: huggingface/open-r1
+  - name: lnis-uofu/OpenFPGA
+  - name: verilog-to-routing/vtr-verilog-to-routing
+  - name: YosysHQ/yosys
+  - name: povik/yosys-slang
+  - name: bentoml/OpenLLM
+  - name: open-sdr/openwifi-hw
+  - name: open-sdr/openofdm
+  - name: ufrisk/pcileech-fpga
+  - name: YosysHQ/picorv32
+  - name: NawfalMotii79/PLFM_RADAR
+  - name: VLSI-EDA/PoC
+  - name: paulscherrerinstitute/psi_fpga_all
+  - name: paulscherrerinstitute/PsiFpgaLibDependencies
+  - name: paulscherrerinstitute/PsiPyUtils
+  - name: paulscherrerinstitute/TbGenerator
+  - name: paulscherrerinstitute/PsiSim
+  - name: paulscherrerinstitute/en_cl_fix
+    project: en_cl_fix-psi          # 与 open-logic/en_cl_fix 同名仓，改名避免 <Project>-tutorial 目录冲突
+  - name: paulscherrerinstitute/psi_common
+  - name: paulscherrerinstitute/psi_fix
+  - name: paulscherrerinstitute/psi_multi_stream_daq
+  - name: paulscherrerinstitute/psi_tb
+  - name: paulscherrerinstitute/vivadoIP_axi_mm_reader
+  - name: paulscherrerinstitute/vivadoIP_data_rec
+  - name: paulscherrerinstitute/vivadoIP_fpga_base
+  - name: paulscherrerinstitute/vivadoIP_mem_test
+  - name: paulscherrerinstitute/vivadoIP_psi_ms_daq
+  - name: paulscherrerinstitute/vivadoIP_spi_simple
+  - name: pytorch/pytorch
+  - name: rime/ibus-rime
+  - name: rime/librime
+  - name: rime/plum
+  - name: rime/squirrel
+  - name: rime/weasel
+  - name: ic-lab-duth/RISC-V-Vector
+  - name: hkust-zhiyao/RTL-Coder
+  - name: alan-turing-institute/sar-vessel-detection-fpga
+  - name: sgl-project/sglang
+  - name: slaclab/surf
+  - name: google-deepmind/synthid-text
+  - name: abdelazeem201/Systolic-array-implementation-in-RTL-for-TPU
+  - name: tensorflow/tensorflow
+  - name: NVIDIA/TensorRT-Edge-LLM
+  - name: NVIDIA/TensorRT-LLM
+  - name: lnay/texpresso-lsp
+  - name: NVIDIA/TileGym
+  - name: deepseek-ai/TileKernels
+  - name: tile-ai/tilelang
+  - name: tile-ai/tilelang-ascend
+  - name: tile-ai/tilelang-benchmark
+  - name: tile-ai/tilelang-puzzles
+  - name: tile-ai/TileOPs
+  - name: tile-ai/TileRT
+  - name: tile-ai/tilescale
+  - name: NVIDIA/tilus
+  - name: adam-maj/tiny-gpu
+  - name: Jiayi-Pan/TinyZero
+  - name: huggingface/transformers
+  - name: triton-lang/triton
+  - name: typst/typst
+  - name: THU-DSP-LAB/ventus-gpgpu
+  - name: THU-DSP-LAB/ventus-gpgpu-verilog
+  - name: alexforencich/verilog-ethernet
+  - name: vllm-project/vllm
+  - name: vllm-project/vllm-omni
+  - name: vortexgpgpu/vortex
+  - name: chili-chips-ba/wireguard-fpga
+  - name: WireGuard/wireguard-rs
+  - name: google/xls
+  - name: ZipCPU/zipcpu
+
+  # ── usat/ 下两项（crossbeam / vllm）均为 main 的重复，已去重，不重复列入 ──
+
+  # ── 追加（扫描清单外的 URL）──
+  - name: mpskex/chisel-npu
