@@ -29,7 +29,7 @@ SCRIPTS = Path(__file__).resolve().parent
 TMP = Path(tempfile.mkdtemp(prefix="readcode_selftest_"))
 CTRL = TMP / "ctrl"; CTRL.mkdir()
 WORK = TMP / "work"; WORK.mkdir()
-STATE = CTRL / "state" / "repos_state.json"
+STATE = CTRL / "repos_state.json"
 TUTORIALS = CTRL / "tutorials"
 FIX = TMP / "fixture"; FIX.mkdir()
 (FIX / "README.md").write_text("# fixture project\n", encoding="utf-8")

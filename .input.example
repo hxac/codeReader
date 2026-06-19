@@ -1,9 +1,0 @@
-# act --input-file 的默认输入。workflow_dispatch inputs 放这里。
-# 每行一个 KEY=VALUE；行首 # 为注释。
-# 每次 run 前按需改这些值，不改 .env（.env 存密钥和调参，不存 inputs）。
-mode=auto
-# repo_name=HazyResearch/Megakernels
-# debug=true
-# mock=true
-# ignore_timing=true
-# force_full=true

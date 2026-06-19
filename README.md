@@ -17,7 +17,7 @@ codeReader/  (控制仓库)
 │  └─ claude_runner.py              # `claude -p` 封装（planner/worker + 额度错误分类）
 ├─ repos.yml                        # 项目列表（当前：Mooncake、Megakernels）
 ├─ requirements.txt
-├─ state/repos_state.json           # 持久状态 + 每篇讲义进度（运行时生成）
+├─ repos_state.json                 # 持久状态 + 每篇讲义进度（运行时生成）
 ├─ tutorials/<owner>/<repo>/<Project>-tutorial/   # 产物：manifest.json + 每讲义一个 .md
 └─ work/                            # clone 工作副本（gitignore）
 ```
@@ -55,7 +55,7 @@ GitHub Actions 跑在 **UTC**。换算：
 
 ## 分支策略（进度不丢）
 
-- **`tutorial-cache`**（自动建/维护）：每次运行都把 `state/` + `tutorials/`（含未完成的）提交到这里 —— 额度耗尽也不丢。
+- **`tutorial-cache`**（自动建/维护）：每次运行都把 `repos_state.json` + `tutorials/`（含未完成的）提交到这里 —— 额度耗尽也不丢。
 - **`main`**：仅当某次运行**退出 0（全部完成）**时，把 `tutorial-cache` 合并发布到 `main`。
 - 下次运行从 `tutorial-cache` 续传（`analyze.py` 按 per-lecture 状态只跑 pending/failed 的讲义）。
 
@@ -98,7 +98,7 @@ repos:
   ```
 - **自动续传**：已配置 `00:01` / `02:01` / `10:01` / `12:01` UTC 四个 cron，无需干预。或手动 `mode=auto` 续传。
 
-## 状态文件 `state/repos_state.json`
+## 状态文件 `repos_state.json`
 
 ```json
 {
@@ -121,41 +121,6 @@ repos:
 }
 ```
 `phase`: `planner` → `workers` → `done`。续传只跑 `pending`/`failed` 讲义；`keep` 与 `done` 跳过。
-
-## 本地调试（act）
-
-所有本地配置统一在 `.env`（secrets + vars + env 三合一）和 `.input`（workflow_dispatch inputs），
-与 GitHub Actions 的 Settings → Secrets/Variables 透传方式一致。act 默认读取 `.env` 和 `.input`。
-
-```bash
-cp .env.example .env        # 初次：填密钥和调参
-cp .input.example .input     # 初次：填本次要跑的 inputs
-```
-
-### 零成本冒烟（MOCK，不烧额度，需联网 clone 目标仓）
-
-```bash
-# .input 里设 mock=true，.env 可全留占位（MOCK 不需要密钥）
-act workflow_dispatch -W
-# → tutorials/<owner>/<repo>/<Project>-tutorial/{manifest.json,u1-l1.md,u1-l2.md}
-# env.ACT 守卫跳过 git push / publish / 分支切换 / claude 安装（mock 下不需要）
-```
-
-### 有额度真跑（debug 单篇，最低成本验证提示词）
-
-```bash
-# .env 填真 ANTHROPIC_API_KEY（或 AUTH_TOKEN+BASE_URL）
-# .input 设 debug=true repo_name=HazyResearch/Megakernels
-act workflow_dispatch -W
-# → 只生成 1 篇讲义（debug 自动 ignore_timing、固定单仓、默认写 .debug/ 沙箱不污染正式产物）
-```
-
-### 有额度真跑（全量单仓）
-
-```bash
-# .input 设 mode=full repo_name=HazyResearch/Megakernels ignore_timing=true
-act workflow_dispatch -W
-```
 
 ## 设计要点
 

@@ -46,7 +46,7 @@ _DEBUG_SANDBOX = DEBUG and not DEBUG_PERSIST
 
 # 关键路径可被环境变量覆盖（selftest 用），缺省指向控制仓库内。
 REPOS_YML = Path(os.environ.get("RC_REPOS_YML") or (ROOT / "repos.yml"))
-STATE_FILE = Path(os.environ.get("RC_STATE_FILE") or ((ROOT / ".debug" / "state.json") if _DEBUG_SANDBOX else (ROOT / "state" / "repos_state.json")))
+STATE_FILE = Path(os.environ.get("RC_STATE_FILE") or ((ROOT / ".debug" / "state.json") if _DEBUG_SANDBOX else (ROOT / "repos_state.json")))
 WORK_DIR = Path(os.environ.get("RC_WORK_DIR") or ((ROOT / ".debug" / "work") if _DEBUG_SANDBOX else (ROOT / "work")))
 TUTORIALS_DIR = Path(os.environ.get("RC_TUTORIALS_DIR") or ((ROOT / ".debug" / "tutorials") if _DEBUG_SANDBOX else (ROOT / "tutorials")))
 PROMPTS_DIR = Path(os.environ.get("RC_PROMPTS_DIR") or (ROOT / "prompts"))

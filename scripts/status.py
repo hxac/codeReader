@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""打印各项目讲义生成进度仪表盘（读 state/repos_state.json）。
+"""打印各项目讲义生成进度仪表盘（读 repos_state.json）。
 
 跑法：python scripts/status.py
 """
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-STATE = Path(os.environ.get("RC_STATE_FILE") or (ROOT / "state" / "repos_state.json"))
+STATE = Path(os.environ.get("RC_STATE_FILE") or (ROOT / "repos_state.json"))
 
 if not STATE.exists():
     print(f"无状态文件：{STATE}")

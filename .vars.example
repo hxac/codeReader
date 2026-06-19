@@ -1,9 +1,0 @@
-# 可选：act --var-file .vars 注入 vars.RC_*。workflow 里这些 vars 全部带默认，不提供也能跑。
-#   cp .vars.example .vars && act ... --var-file .vars
-RC_CONCURRENCY=2
-RC_MODEL=claude-sonnet-4-6
-RC_MAX_TURNS=50
-RC_MAX_BUDGET_USD=10.00
-# in-run 退避（worker 瞬时失败在同窗口内重试，见 analyze.py）：
-RC_BACKOFF_SEC=2
-RC_WORKER_INRUN_RETRIES=1

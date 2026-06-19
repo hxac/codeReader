@@ -128,7 +128,7 @@ jobs:
       - name: Commit progress to tutorial-cache
         if: ${{ env.ACT != 'true' }}
         run: |
-          git add state/ tutorials/ || true
+          git add repos_state.json tutorials/ || true
           git commit -m "tutorial: progress (exit ${{ env.RC_EXIT }})" || echo "nothing to commit"
           git push origin tutorial-cache
 
