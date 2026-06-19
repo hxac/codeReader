@@ -30,6 +30,11 @@ on:
         type: boolean
         required: false
         default: false
+      use_github_runner:
+        description: "用 GitHub 官方 runner（ubuntu-latest）而非自托管容器；定时触发恒为自托管（省官方分钟）"
+        type: boolean
+        required: false
+        default: false
   # 两个便宜/高速窗口开头自动恢复上次未完成的工作（UTC）：
   #   定时窗口（cron 为 UTC；北京 = UTC+8）：8:01 / 10:01 / 18:01 / 20:01 北京
   #     00:01 UTC = 北京 08:01      02:01 UTC = 北京 10:01
@@ -51,9 +56,9 @@ concurrency:
 
 jobs:
   build:
-    # 自托管 runner：Docker 容器 c8312a1bf521（Ubuntu 24.04 + git/curl/bash；node/python/claude 由 setup-* 装）。
-    # 标签精确点名该容器；所有触发（手动 + 4 个定时 cron）都在此容器内执行，不消耗 GitHub 托管分钟。
-    runs-on: [self-hosted, c8312a1bf521]
+    # Runner：默认/定时用自托管容器 c8312a1bf521（Ubuntu 24.04，不消耗 GitHub 托管分钟）；
+    # 手动触发勾选 use_github_runner 时改用官方 ubuntu-latest。两类 runner 均靠下方 setup-node/setup-python/npm 装依赖。
+    runs-on: ${{ (github.event_name == 'schedule' || inputs.use_github_runner != true) && fromJSON('["self-hosted", "c8312a1bf521"]') || 'ubuntu-latest' }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
