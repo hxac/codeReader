@@ -31,15 +31,15 @@ on:
         required: false
         default: false
       runner:
-        description: "运行环境"
+        description: "运行环境：默认 GitHub 官方 ubuntu-latest；选 self-hosted 走变量 RC_RUNNER_LABELS（未设回退 self-hosted）"
         type: choice
         required: false
-        default: default
+        default: ubuntu-latest
         options:
-          - default
           - ubuntu-latest
+          - self-hosted
   # 定时窗口（UTC，北京=UTC+8）：00:01/02:01/10:01/12:01 = 北京 08:01/10:01/18:01/20:01，避开高消耗词元死区 UTC 6–10。
-  # 定时触发已注释禁用 —— 当前只走 workflow_dispatch 手动触发。
+  # 定时触发已注释禁用 —— 当前只走 workflow_dispatch 手动 / API 触发。
   # 需要恢复定时，去掉下面每行行首的 # 即可。
   # schedule:
   #   - cron: "1 0 * * *"
@@ -57,12 +57,9 @@ concurrency:
 
 jobs:
   build:
-    # Runner 标签：
-    # 读仓库变量 RC_RUNNER_LABELS
-    # RC_RUNNER_LABELS 需设置 JSON 数组，如 ["self-hosted","<runner-id>"]
-    # 未设则回退到默认自托管 ["self-hosted"]
-    # 定时运行恒用此变量
-    runs-on: ${{ inputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(vars.RC_RUNNER_LABELS || '["self-hosted"]') }}
+    # Runner：默认 GitHub 官方 ubuntu-latest。
+    # 选 runner=self-hosted 时读变量 RC_RUNNER_LABELS（JSON 数组，如 ["self-hosted","<runner-id>"]），未设回退 ["self-hosted"]。
+    runs-on: ${{ inputs.runner == 'self-hosted' && fromJSON(vars.RC_RUNNER_LABELS || '["self-hosted"]') || 'ubuntu-latest' }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
