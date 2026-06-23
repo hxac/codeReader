@@ -482,9 +482,9 @@
         "u2-l3": {
           "status": "failed",
           "action": "new",
-          "retries": 1,
+          "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":539807,\"duration_api_ms\":295891,\"num_turns\":40,\"result\":\"API Error: The operation timed out.\","
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":197717,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u2-l4": {
           "status": "done",
@@ -496,44 +496,58 @@
         "u2-l5": {
           "status": "failed",
           "action": "new",
-          "retries": 0,
+          "retries": 1,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":195862,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":183080,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u2-l6": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":192488,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u3-l1": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":217369,\"duration_api_ms\":26276,\"num_turns\":5,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
         },
         "u3-l2": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":187101,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u3-l3": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":224320,\"duration_api_ms\":21001,\"num_turns\":5,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
         },
         "u3-l4": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":565312,\"duration_api_ms\":376814,\"num_turns\":23,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
         },
         "u3-l5": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":185839,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u3-l6": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":197136,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u4-l1": {
           "status": "pending",
@@ -647,7 +661,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/3FS/3FS-tutorial",
       "last_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
-      "last_run_at": "2026-06-23T05:57:18Z",
+      "last_run_at": "2026-06-23T10:51:47Z",
       "last_error": "near dead zone; will resume next window"
     },
     "microsoft/AI-For-Beginners": {
@@ -713,56 +727,74 @@
           "error": null
         },
         "u3-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n- 写一个循环把「所有」长度 > `min_length` 的事件段都找出来（Notebook 的 `subsequence` 只返回第一段，这里要求你返回全部事件——可参考 cell-26 的逻辑改造）。\\n3. **进阶版**（任选其一）：\\n   - (a) 把每个事件段的中间帧拼成一张缩略图，作为「事件报告」；\\n   - (b) 对事件段内的帧算稠密光流，用 `"
+          "cost": 0.64907,
+          "error": null
         },
         "u3-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.024985,
+          "error": null
         },
         "u3-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9947400000000001,
+          "error": null
         },
         "u3-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.136864,
+          "error": null
         },
         "u3-l5": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":189184,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u3-l6": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":463662,\"duration_api_ms\":275652,\"num_turns\":10,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
         },
         "u3-l7": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":198071,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
         },
         "u4-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.852359,
+          "error": null
         },
         "u4-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9676760000000001,
+          "error": null
         },
         "u4-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2464200000000003,
+          "error": null
         },
         "u4-l4": {
           "status": "pending",
@@ -846,7 +878,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/microsoft/AI-For-Beginners/AI-For-Beginners-tutorial",
       "last_head": "fa78bc6fb0b30eea0678c27a54b915b79ad16fe8",
-      "last_run_at": "2026-06-23T05:57:18Z",
+      "last_run_at": "2026-06-23T10:51:47Z",
       "last_error": "near dead zone; will resume next window"
     },
     "tokio-rs/axum": {
@@ -1068,15 +1100,134 @@
       "mode": "full",
       "tutorial_path": "tutorials/tokio-rs/axum/axum-tutorial",
       "last_head": "485c603dddcee45bb4bc40aab492b47576e2a2f8",
-      "last_run_at": "2026-06-23T05:57:18Z",
+      "last_run_at": "2026-06-23T10:51:47Z",
+      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":231677,\"duration_api_ms\":39053,\"num_turns\":5,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][20260623185541c456374957fd4d7b]. This is a server-side issue, usually temporary — try again in a mo"
+    },
+    "funstory-ai/BabelDOC": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 退出码 1：\nms\":463528,\"duration_api_ms\":270583,\"num_turns\":16,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][2026062319032729f7891bbc914163]. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (open.bigmodel.cn).\",\"stop_reason\"",
+      "last_run_at": "2026-06-23T10:51:47Z"
+    },
+    "alttch/busrt": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195180,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202606231906444e46f7b2e42a4a48]. This is a server-side issue, usually temporary — try again in a moment",
+      "last_run_at": "2026-06-23T10:51:47Z"
+    },
+    "farion1231/cc-switch": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":183155,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][20260623190950bf464e26b58b43f3]. This is a server-side issue, usually temporary — try again in a moment",
+      "last_run_at": "2026-06-23T10:51:47Z"
+    },
+    "mutouyun/cpp-ipc": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":446152,\"duration_api_ms\":254863,\"num_turns\":9,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][20260623191718c32a18b5b9ff4509]. This is a server-side issue, usually temporary — try again in a m",
+      "last_run_at": "2026-06-23T10:51:47Z"
+    },
+    "deepseek-ai/DeepGEMM": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":314145,\"duration_api_ms\":110358,\"num_turns\":11,\"result\":\"API Error: Unable to connect to API (ECONNRESET)\",\"stop_reason\":\"stop_sequence\",\"session_id\":\"8e253c19-3b56-401a-9ea6-322fd430b5d0\",\"tota",
+      "last_run_at": "2026-06-23T10:51:47Z"
+    },
+    "deepseek-ai/DualPipe": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.721805,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.789116,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.611899,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":192141,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u2-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":192740,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u2-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196666,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][2026"
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/deepseek-ai/DualPipe/DualPipe-tutorial",
+      "last_head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
+      "last_run_at": "2026-06-23T10:51:47Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "funstory-ai/BabelDOC": {},
-    "alttch/busrt": {},
-    "farion1231/cc-switch": {},
-    "mutouyun/cpp-ipc": {},
-    "deepseek-ai/DeepGEMM": {},
-    "deepseek-ai/DualPipe": {},
     "longbridge/gpui-component": {},
     "hxac/helloRust": {},
     "unicode-org/icu4x": {},
