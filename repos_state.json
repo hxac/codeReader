@@ -647,8 +647,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/3FS/3FS-tutorial",
       "last_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
-      "last_run_at": "2026-06-22T10:44:51Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-06-23T05:57:18Z",
+      "last_error": "near dead zone; will resume next window"
     },
     "microsoft/AI-For-Beginners": {
       "prompt_hash": "b21aef51792b02df",
@@ -846,8 +846,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/microsoft/AI-For-Beginners/AI-For-Beginners-tutorial",
       "last_head": "fa78bc6fb0b30eea0678c27a54b915b79ad16fe8",
-      "last_run_at": "2026-06-22T10:44:51Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-06-23T05:57:18Z",
+      "last_error": "near dead zone; will resume next window"
     },
     "tokio-rs/axum": {
       "prompt_hash": "b21aef51792b02df",
@@ -1068,7 +1068,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/tokio-rs/axum/axum-tutorial",
       "last_head": "485c603dddcee45bb4bc40aab492b47576e2a2f8",
-      "last_run_at": "2026-06-22T10:44:51Z",
+      "last_run_at": "2026-06-23T05:57:18Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "funstory-ai/BabelDOC": {},
