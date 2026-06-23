@@ -1,0 +1,992 @@
+{
+  "project": "AI-For-Beginners",
+  "head": "fa78bc6fb0b30eea0678c27a54b915b79ad16fe8",
+  "rationale": "本仓库不是传统软件项目，而是微软出品的「AI 初学者」12 周 24 课课程仓库，其「源码」由 Markdown 讲义 + 可执行 Jupyter Notebook + 少量 Python 脚本 + 一个 Vue.js 测验应用构成。因此学习手册按两条线索设计：第一条是「使用与理解」——按课程自身的难度梯度（符号 AI → 神经网络 → 计算机视觉 → NLP → 其他技术/伦理），每个单元对应课程的一个大主题，逐篇结合真实 Notebook 与 README 讲解概念并配代码实践；第二条是「维护与扩展」——把仓库配套工具（测验应用、测验生成流水线、Docsify 站点、多语言翻译、CI）单独放在最后的进阶单元。第一单元从零开始，先讲项目定位、目录结构、环境搭建和最简单的 examples 脚本，让读者建立全局认知后再进入具体 AI 主题；依赖链大体遵循课程先后顺序，专题之间的依赖关系（如多模态 CLIP 同时依赖 CV 与 Transformer）也显式标注。讲义数量按大型课程仓库取 34 篇，覆盖全部 24 课加配套工具，逻辑优先、不为凑数硬拆。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "课程定位与学习地图",
+          "order": 1,
+          "filename": "u1-l1-course-overview.md",
+          "level": "beginner",
+          "topic": "介绍 AI-For-Beginners 是什么、覆盖哪些 AI 主题、12 周 24 课的整体结构，以及如何阅读 README 中的课程表。",
+          "learning_goals": [
+            "理解本仓库的课程定位与技术栈",
+            "看懂 README 中的课程内容表与单元划分",
+            "知道课程涵盖与不涵盖的范围"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "etc/Mindmap.md"
+          ],
+          "minimal_modules": [
+            "课程定位与目标读者",
+            "12 周 24 课内容表",
+            "技术栈与覆盖范围"
+          ],
+          "practice_task": "阅读 README 的内容表，用自己的话写一段 100 字以内的课程简介，并标注你最想学的 3 个单元。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与内容组织",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库的目录约定：lessons 下按编号划分单元、每课含 README/Notebook/lab、以及 examples、etc、translations 等顶层目录的作用。",
+          "learning_goals": [
+            "掌握 lessons 目录的编号与命名规则",
+            "区分 README、Notebook、lab、assignment 等文件类型",
+            "了解 etc、examples、translations 的职责"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "lessons/README.md"
+          ],
+          "minimal_modules": [
+            "lessons 分级目录结构",
+            "单课文件类型约定",
+            "顶层辅助目录"
+          ],
+          "practice_task": "画出 lessons 目录的二层树状图，并为每个编号单元（1-Intro 到 X-Extras）标注其主题。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "开发环境搭建与多种运行方式",
+          "order": 3,
+          "filename": "u1-l3-environment-setup.md",
+          "level": "beginner",
+          "topic": "讲解如何用 conda 创建 ai4beg 环境、运行 Jupyter Notebook，以及本地、Codespaces、Binder、Colab 等多种运行方式的取舍。",
+          "learning_goals": [
+            "用 environment.yml 与 requirements.txt 创建环境",
+            "掌握本地启动 Jupyter 的方法",
+            "比较本地、Codespaces、Binder、Colab 的优劣"
+          ],
+          "source_files": [
+            "environment.yml",
+            "requirements.txt",
+            "lessons/0-course-setup/setup.md",
+            "lessons/0-course-setup/how-to-run.md"
+          ],
+          "minimal_modules": [
+            "conda 环境创建",
+            "Jupyter 启动与内核",
+            "云端运行方式"
+          ],
+          "practice_task": "按 setup.md 创建 ai4beg 环境并启动 Jupyter，打开任一 Notebook 运行第一个 cell 截图，记录遇到的问题到 troubleshoot.md 对照解决。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "从 examples 开始：第一个 AI 程序",
+          "order": 4,
+          "filename": "u1-l4-first-ai-program.md",
+          "level": "beginner",
+          "topic": "通过 examples 目录中无需深度学习框架的纯 Python 脚本，理解「从数据中学习权重」这一 AI 核心思想。",
+          "learning_goals": [
+            "运行 01-hello-ai-world.py 观察线性权重学习过程",
+            "理解预测、误差、权重更新三者的关系",
+            "读懂 02-simple-neural-network.py 的从零实现思路"
+          ],
+          "source_files": [
+            "examples/README.md",
+            "examples/01-hello-ai-world.py",
+            "examples/02-simple-neural-network.py"
+          ],
+          "minimal_modules": [
+            "训练数据与模式",
+            "权重与学习率更新",
+            "训练循环与误差"
+          ],
+          "practice_task": "修改 01-hello-ai-world.py 的训练数据与 learning_rate，让模型学习 y=3x 的规律，并打印最终权重与测试误差。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "符号 AI 与神经网络基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "AI 简史与两种 AI 范式",
+          "order": 1,
+          "filename": "u2-l1-ai-intro-history.md",
+          "level": "beginner",
+          "topic": "通过 1-Intro 课程介绍 AI 的发展历史，以及符号主义（GOFAI）与连接主义（神经网络）两种主要范式。",
+          "learning_goals": [
+            "了解 AI 的关键历史节点",
+            "区分符号 AI 与神经网络的思路差异",
+            "建立后续单元的认知框架"
+          ],
+          "source_files": [
+            "lessons/1-Intro/README.md"
+          ],
+          "minimal_modules": [
+            "AI 历史脉络",
+            "符号 vs 连接范式",
+            "课程地图衔接"
+          ],
+          "practice_task": "完成 1-Intro 的 assignment，用一段文字比较符号 AI 与神经网络各自擅长的任务类型。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "符号 AI：知识表示与专家系统",
+          "order": 2,
+          "filename": "u2-l2-symbolic-ai.md",
+          "level": "beginner",
+          "topic": "讲解知识表示、本体、概念图与专家系统，并通过 Animals/FamilyOntology 等 Notebook 理解规则推理。",
+          "learning_goals": [
+            "理解知识表示与本体概念",
+            "看懂专家系统基于规则的前向推理",
+            "运行 FamilyOntology/Animals Notebook 体验推理过程"
+          ],
+          "source_files": [
+            "lessons/2-Symbolic/README.md",
+            "lessons/2-Symbolic/Animals.ipynb",
+            "lessons/2-Symbolic/FamilyOntology.ipynb"
+          ],
+          "minimal_modules": [
+            "知识与本体",
+            "专家系统规则推理",
+            "概念图"
+          ],
+          "practice_task": "在 FamilyOntology Notebook 基础上新增一条亲属关系规则，并查询出一个原本查不到的亲属关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "感知机：最简单的神经元",
+          "order": 3,
+          "filename": "u2-l3-perceptron.md",
+          "level": "intermediate",
+          "topic": "讲解感知机的数学模型、激活函数与训练算法，并用 Notebook 在二维数据上可视化决策边界。",
+          "learning_goals": [
+            "理解感知机的前向计算与激活函数",
+            "掌握感知机权重更新规则",
+            "用 Notebook 可视化线性可分与决策边界"
+          ],
+          "source_files": [
+            "lessons/3-NeuralNetworks/03-Perceptron/README.md",
+            "lessons/3-NeuralNetworks/03-Perceptron/Perceptron.ipynb",
+            "lessons/3-NeuralNetworks/03-Perceptron/lab/README.md"
+          ],
+          "minimal_modules": [
+            "神经元数学模型",
+            "激活函数",
+            "感知机训练算法"
+          ],
+          "practice_task": "完成 03-Perceptron 的 lab（PerceptronMultiClass），实现多类感知机并对给定数据集分类。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "从零搭建自己的神经网络框架",
+          "order": 4,
+          "filename": "u2-l4-own-framework.md",
+          "level": "intermediate",
+          "topic": "通过 04-OwnFramework 理解计算图、前向/反向传播、损失函数与优化器，亲手用 NumPy 搭建一个迷你深度学习框架。",
+          "learning_goals": [
+            "理解计算图与自动求导思想",
+            "掌握前向传播与反向传播流程",
+            "用自己实现的框架训练一个多层网络"
+          ],
+          "source_files": [
+            "lessons/3-NeuralNetworks/04-OwnFramework/README.md",
+            "lessons/3-NeuralNetworks/04-OwnFramework/OwnFramework.ipynb",
+            "lessons/3-NeuralNetworks/04-OwnFramework/lab/README.md"
+          ],
+          "minimal_modules": [
+            "计算图",
+            "损失函数与优化器",
+            "反向传播"
+          ],
+          "practice_task": "完成 04-OwnFramework 的 lab（MyFW_MNIST），用自己的框架在 MNIST 上训练并报告准确率。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "引入 PyTorch/Keras 框架与过拟合",
+          "order": 5,
+          "filename": "u2-l5-frameworks-overfitting.md",
+          "level": "intermediate",
+          "topic": "对比自研框架与工业级框架（PyTorch/Keras/TensorFlow），理解训练循环、过拟合现象及其应对方法。",
+          "learning_goals": [
+            "用 PyTorch/Keras 写出标准训练循环",
+            "理解过拟合的成因与表现",
+            "掌握 Dropout、数据增强等抗过拟合手段"
+          ],
+          "source_files": [
+            "lessons/3-NeuralNetworks/05-Frameworks/README.md",
+            "lessons/3-NeuralNetworks/05-Frameworks/IntroPyTorch.ipynb",
+            "lessons/3-NeuralNetworks/05-Frameworks/IntroKeras.ipynb"
+          ],
+          "minimal_modules": [
+            "框架训练循环",
+            "过拟合现象",
+            "正则化方法"
+          ],
+          "practice_task": "完成 05-Frameworks 的 lab（LabFrameworks），分别用 PyTorch 与 Keras 训练同一个分类模型并比较结果。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "计算机视觉",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "计算机视觉入门与 OpenCV",
+          "order": 1,
+          "filename": "u3-l1-intro-opencv.md",
+          "level": "intermediate",
+          "topic": "介绍计算机视觉的基本任务，用 OpenCV Notebook 做图像读写、颜色空间、滤波与边缘检测等传统 CV 操作。",
+          "learning_goals": [
+            "了解 CV 的主要任务类型",
+            "用 OpenCV 完成图像加载与基本处理",
+            "理解滤波、边缘检测等经典算子"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/README.md",
+            "lessons/4-ComputerVision/06-IntroCV/README.md",
+            "lessons/4-ComputerVision/06-IntroCV/OpenCV.ipynb"
+          ],
+          "minimal_modules": [
+            "CV 任务分类",
+            "OpenCV 图像处理",
+            "经典滤波算子"
+          ],
+          "practice_task": "完成 06-IntroCV 的 lab（MovementDetection），用帧差法检测视频中的运动区域。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "卷积神经网络 CNN 与经典架构",
+          "order": 2,
+          "filename": "u3-l2-convnets-architectures.md",
+          "level": "intermediate",
+          "topic": "讲解卷积、池化、感受野等 CNN 基本组件，并梳理 LeNet/AlexNet/VGG/ResNet 等经典架构的演进。",
+          "learning_goals": [
+            "理解卷积层与池化层作用",
+            "掌握感受野与参数量概念",
+            "理清经典 CNN 架构演进脉络"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/07-ConvNets/README.md",
+            "lessons/4-ComputerVision/07-ConvNets/CNN_Architectures.md",
+            "lessons/4-ComputerVision/07-ConvNets/ConvNetsPyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "卷积与池化",
+            "感受野与参数量",
+            "经典架构演进"
+          ],
+          "practice_task": "完成 07-ConvNets 的 lab（PetFaces），用预训练 CNN 微调实现宠物面部分类。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "迁移学习与训练技巧",
+          "order": 3,
+          "filename": "u3-l3-transfer-learning.md",
+          "level": "intermediate",
+          "topic": "讲解迁移学习的冻结/微调策略，以及数据增强、学习率调度、Dropout 等实用训练技巧。",
+          "learning_goals": [
+            "掌握特征提取与微调两种迁移方式",
+            "理解数据增强与学习率调度",
+            "看懂 Dropout/对抗样本等训练技巧 Notebook"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/08-TransferLearning/README.md",
+            "lessons/4-ComputerVision/08-TransferLearning/TrainingTricks.md",
+            "lessons/4-ComputerVision/08-TransferLearning/TransferLearningPyTorch.ipynb",
+            "lessons/4-ComputerVision/08-TransferLearning/Dropout.ipynb"
+          ],
+          "minimal_modules": [
+            "迁移学习策略",
+            "数据增强与调度",
+            "Dropout 与对抗样本"
+          ],
+          "practice_task": "完成 08-TransferLearning 的 lab（OxfordPets），用迁移学习在 Oxford-IIIT Pets 上训练并对比冻结与微调的效果。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "自编码器与变分自编码器 VAE",
+          "order": 4,
+          "filename": "u3-l4-autoencoders-vae.md",
+          "level": "intermediate",
+          "topic": "讲解自编码器的编码-解码结构与潜在空间，以及 VAE 的概率生成思想与重参数化技巧。",
+          "learning_goals": [
+            "理解自编码器的重建目标",
+            "掌握 VAE 的重参数化与 KL 损失",
+            "用 Notebook 在潜在空间采样生成图像"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/09-Autoencoders/README.md",
+            "lessons/4-ComputerVision/09-Autoencoders/AutoEncodersPyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "编码-解码结构",
+            "潜在空间",
+            "VAE 重参数化"
+          ],
+          "practice_task": "在 AutoEncoders Notebook 中修改潜在空间维度，观察重建质量与采样多样性的变化。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "生成对抗网络 GAN 与风格迁移",
+          "order": 5,
+          "filename": "u3-l5-gans-style-transfer.md",
+          "level": "advanced",
+          "topic": "讲解 GAN 的生成器-判别器对抗训练机制，以及神经风格迁移把名画风格应用到照片的方法。",
+          "learning_goals": [
+            "理解 GAN 的对抗损失与训练不稳定性",
+            "掌握生成器与判别器的交替训练",
+            "用 StyleTransfer Notebook 完成风格迁移"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/10-GANs/README.md",
+            "lessons/4-ComputerVision/10-GANs/GANPyTorch.ipynb",
+            "lessons/4-ComputerVision/10-GANs/StyleTransfer.ipynb"
+          ],
+          "minimal_modules": [
+            "对抗训练机制",
+            "生成器与判别器",
+            "神经风格迁移"
+          ],
+          "practice_task": "运行 StyleTransfer Notebook，选择一张你自己的照片与一幅风格图，生成风格迁移结果并保存。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "目标检测",
+          "order": 6,
+          "filename": "u3-l6-object-detection.md",
+          "level": "advanced",
+          "topic": "讲解目标检测任务（分类+定位）、anchor/框回归思想，并用 TensorFlow 预训练模型做检测推理。",
+          "learning_goals": [
+            "区分分类、定位与检测任务",
+            "理解边界框回归与锚框思想",
+            "用预训练检测模型输出框与类别"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/11-ObjectDetection/README.md",
+            "lessons/4-ComputerVision/11-ObjectDetection/ObjectDetection.ipynb"
+          ],
+          "minimal_modules": [
+            "检测任务定义",
+            "边界框与锚框",
+            "预训练模型推理"
+          ],
+          "practice_task": "完成 11-ObjectDetection 的 lab，用预训练检测模型对一组图片检测并可视化边界框与置信度。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "语义分割与 U-Net",
+          "order": 7,
+          "filename": "u3-l7-segmentation-unet.md",
+          "level": "advanced",
+          "topic": "讲解语义分割任务与 U-Net 的编码器-解码器跳跃连接结构，实现像素级分类。",
+          "learning_goals": [
+            "区分语义/实例/全景分割",
+            "理解 U-Net 跳跃连接作用",
+            "用 Notebook 训练分割模型并输出掩膜"
+          ],
+          "source_files": [
+            "lessons/4-ComputerVision/12-Segmentation/README.md",
+            "lessons/4-ComputerVision/12-Segmentation/SemanticSegmentationPytorch.ipynb"
+          ],
+          "minimal_modules": [
+            "分割任务定义",
+            "U-Net 结构",
+            "像素级损失与评估"
+          ],
+          "practice_task": "完成 12-Segmentation 的 lab（BodySegmentation），训练 U-Net 对人体做分割并可视化结果。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "自然语言处理",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "文本表示：BoW 与 TF-IDF",
+          "order": 1,
+          "filename": "u4-l1-text-representation.md",
+          "level": "intermediate",
+          "topic": "介绍 NLP 的整体脉络，并用词袋与 TF-IDF 把文本转化为向量。",
+          "learning_goals": [
+            "了解 NLP 课程整体路线",
+            "掌握分词与词袋表示",
+            "理解 TF-IDF 的权重计算"
+          ],
+          "source_files": [
+            "lessons/5-NLP/README.md",
+            "lessons/5-NLP/13-TextRep/README.md",
+            "lessons/5-NLP/13-TextRep/TextRepresentationPyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "NLP 任务总览",
+            "词袋模型",
+            "TF-IDF"
+          ],
+          "practice_task": "在 TextRepresentation Notebook 中用 TF-IDF 对一组短文本向量化，并计算两条文本的余弦相似度。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "词嵌入：Word2Vec 与 GloVe",
+          "order": 2,
+          "filename": "u4-l2-word-embeddings.md",
+          "level": "intermediate",
+          "topic": "讲解分布式词嵌入的思想，对比 Word2Vec（CBOW/Skip-gram）与 GloVe 的训练目标与共现矩阵。",
+          "learning_goals": [
+            "理解词嵌入相比词袋的优势",
+            "掌握 Word2Vec 的两种训练模式",
+            "了解 GloVe 的共现矩阵思想"
+          ],
+          "source_files": [
+            "lessons/5-NLP/14-Embeddings/README.md",
+            "lessons/5-NLP/14-Embeddings/EmbeddingsPyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "分布式表示",
+            "Word2Vec",
+            "GloVe 共现矩阵"
+          ],
+          "practice_task": "在 Embeddings Notebook 中加载预训练词向量，做类比推理（king-man+woman≈queen）并观察结果。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "语言模型与训练自己的嵌入",
+          "order": 3,
+          "filename": "u4-l3-language-modeling.md",
+          "level": "intermediate",
+          "topic": "讲解 n-gram 语言模型与用 CBoW 从零训练自己的词嵌入。",
+          "learning_goals": [
+            "理解语言模型的概率预测目标",
+            "掌握 n-gram 模型的局限",
+            "用 CBoW 从零训练词嵌入"
+          ],
+          "source_files": [
+            "lessons/5-NLP/15-LanguageModeling/README.md",
+            "lessons/5-NLP/15-LanguageModeling/CBoW-PyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "n-gram 语言模型",
+            "CBoW 训练目标",
+            "自训练嵌入评估"
+          ],
+          "practice_task": "完成 15-LanguageModeling 的 lab，在自选语料上用 CBoW 训练词嵌入并用最近邻检验语义。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "循环神经网络 RNN",
+          "order": 4,
+          "filename": "u4-l4-rnn.md",
+          "level": "intermediate",
+          "topic": "讲解 RNN/LSTM/GRU 处理序列的隐状态机制，以及处理变长序列与梯度问题。",
+          "learning_goals": [
+            "理解 RNN 的隐状态与时间展开",
+            "掌握 LSTM/GRU 的门控机制",
+            "用 RNN 完成文本分类"
+          ],
+          "source_files": [
+            "lessons/5-NLP/16-RNN/README.md",
+            "lessons/5-NLP/16-RNN/RNNPyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "RNN 隐状态",
+            "LSTM/GRU 门控",
+            "序列分类"
+          ],
+          "practice_task": "完成 16-RNN 的 assignment，用 LSTM 构建一个二分类器对一组文本做情感判别。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "生成式循环网络",
+          "order": 5,
+          "filename": "u4-l5-generative-rnn.md",
+          "level": "advanced",
+          "topic": "讲解用 RNN 做字符/词级文本生成的自回归采样方法，以及温度等采样控制。",
+          "learning_goals": [
+            "理解自回归文本生成原理",
+            "掌握字符级与词级生成的差异",
+            "用温度调节生成多样性"
+          ],
+          "source_files": [
+            "lessons/5-NLP/17-GenerativeNetworks/README.md",
+            "lessons/5-NLP/17-GenerativeNetworks/GenerativePyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "自回归生成",
+            "采样策略",
+            "生成长文本"
+          ],
+          "practice_task": "完成 17-GenerativeNetworks 的 lab，用 RNN 在一段文本上训练并生成风格仿写的续写文本。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "Transformer 与 BERT",
+          "order": 6,
+          "filename": "u4-l6-transformers-bert.md",
+          "level": "advanced",
+          "topic": "讲解自注意力机制、Transformer 架构，以及 BERT 的预训练-微调范式。",
+          "learning_goals": [
+            "理解自注意力与多头机制",
+            "掌握 Transformer 编解码结构",
+            "了解 BERT 的掩码语言模型预训练"
+          ],
+          "source_files": [
+            "lessons/5-NLP/18-Transformers/README.md",
+            "lessons/5-NLP/18-Transformers/TransformersPyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "自注意力",
+            "Transformer 架构",
+            "BERT 预训练-微调"
+          ],
+          "practice_task": "完成 18-Transformers 的 assignment，用预训练 BERT 微调一个文本分类任务并报告指标。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "命名实体识别 NER",
+          "order": 7,
+          "filename": "u4-l7-ner.md",
+          "level": "advanced",
+          "topic": "讲解序列标注任务与 BIO 标注体系，用 TensorFlow 实现 NER 模型。",
+          "learning_goals": [
+            "理解序列标注与 BIO 标注",
+            "掌握 NER 的评估指标",
+            "用模型识别文本中的人名地名等实体"
+          ],
+          "source_files": [
+            "lessons/5-NLP/19-NER/README.md",
+            "lessons/5-NLP/19-NER/NER-TF.ipynb"
+          ],
+          "minimal_modules": [
+            "序列标注任务",
+            "BIO 标注体系",
+            "NER 评估"
+          ],
+          "practice_task": "完成 19-NER 的 lab，在自选文本上用训练好的 NER 模型抽取实体并人工校验准确率。",
+          "depends_on": [
+            "u4-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l8",
+          "title": "大语言模型与提示编程",
+          "order": 8,
+          "filename": "u4-l8-llm-prompting.md",
+          "level": "advanced",
+          "topic": "讲解 GPT 类自回归大模型、提示编程与少样本任务，理解生成式预训练的现代范式。",
+          "learning_goals": [
+            "理解 GPT 的自回归解码与缩放规律",
+            "掌握提示工程与少样本学习",
+            "了解大模型时代的任务范式"
+          ],
+          "source_files": [
+            "lessons/5-NLP/20-LangModels/README.md",
+            "lessons/5-NLP/20-LangModels/GPT-PyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "自回归大模型",
+            "提示工程",
+            "少样本任务"
+          ],
+          "practice_task": "运行 GPT-PyTorch Notebook 体验小规模 GPT 生成，并设计 3 个少样本提示完成一个简单分类任务。",
+          "depends_on": [
+            "u4-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "其他 AI 技术与伦理",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "遗传算法",
+          "order": 1,
+          "filename": "u5-l1-genetic-algorithms.md",
+          "level": "intermediate",
+          "topic": "讲解遗传算法的种群、选择、交叉、变异等进化算子，并用它求解丢番图方程等优化问题。",
+          "learning_goals": [
+            "理解进化计算的种群思想",
+            "掌握选择/交叉/变异算子",
+            "用遗传算法求解组合优化问题"
+          ],
+          "source_files": [
+            "lessons/6-Other/21-GeneticAlgorithms/README.md",
+            "lessons/6-Other/21-GeneticAlgorithms/Genetic.ipynb"
+          ],
+          "minimal_modules": [
+            "种群与适应度",
+            "交叉与变异",
+            "收敛与参数"
+          ],
+          "practice_task": "运行 Genetic Notebook 求解 Diophantine 问题，并修改种群大小与变异率观察收敛速度变化。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "深度强化学习",
+          "order": 2,
+          "filename": "u5-l2-deep-rl.md",
+          "level": "advanced",
+          "topic": "讲解强化学习的状态/动作/奖励、Q-learning 与 DQN，并用 CartPole 环境训练智能体。",
+          "learning_goals": [
+            "理解马尔可夫决策过程与奖励",
+            "掌握 Q-learning 与 DQN 思想",
+            "用 PyTorch 训练 CartPole 智能体"
+          ],
+          "source_files": [
+            "lessons/6-Other/22-DeepRL/README.md",
+            "lessons/6-Other/22-DeepRL/CartPole-RL-PyTorch.ipynb"
+          ],
+          "minimal_modules": [
+            "MDP 与奖励",
+            "Q-learning/DQN",
+            "Gym 环境"
+          ],
+          "practice_task": "完成 22-DeepRL 的 lab（MountainCar），用 DQN 训练智能体解决 MountainCar 并记录奖励曲线。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "多智能体系统",
+          "order": 3,
+          "filename": "u5-l3-multi-agent.md",
+          "level": "advanced",
+          "topic": "讲解多智能体与基于代理建模（ABM）思想，以 NetLogo 为例理解涌现行为。",
+          "learning_goals": [
+            "理解多智能体与涌现现象",
+            "了解基于代理的建模",
+            "认识 NetLogo 等仿真平台"
+          ],
+          "source_files": [
+            "lessons/6-Other/23-MultiagentSystems/README.md"
+          ],
+          "minimal_modules": [
+            "智能体与环境",
+            "涌现行为",
+            "基于代理建模"
+          ],
+          "practice_task": "完成 23-MultiagentSystems 的 assignment，用 NetLogo 运行一个内置模型并描述其涌现行为。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "多模态网络：CLIP 与 VQGAN",
+          "order": 4,
+          "filename": "u5-l4-multimodal-clip.md",
+          "level": "advanced",
+          "topic": "讲解图像-文本对齐的 CLIP 对比学习与 VQGAN 等多模态生成模型。",
+          "learning_goals": [
+            "理解 CLIP 的图文对比学习目标",
+            "掌握零样本图文检索原理",
+            "了解 VQGAN 等多模态生成方法"
+          ],
+          "source_files": [
+            "lessons/X-Extras/X1-MultiModal/README.md",
+            "lessons/X-Extras/X1-MultiModal/Clip.ipynb"
+          ],
+          "minimal_modules": [
+            "图文对齐",
+            "对比学习",
+            "零样本检索"
+          ],
+          "practice_task": "运行 Clip Notebook，用 CLIP 对一组图片与若干文本描述做零样本匹配，并分析匹配错误的案例。",
+          "depends_on": [
+            "u3-l5",
+            "u4-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "AI 伦理与负责任的 AI",
+          "order": 5,
+          "filename": "u5-l5-ai-ethics.md",
+          "level": "intermediate",
+          "topic": "讲解公平性、透明性、隐私、偏见等 AI 伦理议题，以及微软负责任 AI 的原则。",
+          "learning_goals": [
+            "理解 AI 的主要伦理风险",
+            "掌握负责任 AI 的核心原则",
+            "学会评估模型的偏见与影响"
+          ],
+          "source_files": [
+            "lessons/7-Ethics/README.md"
+          ],
+          "minimal_modules": [
+            "公平与偏见",
+            "透明与隐私",
+            "负责任 AI 原则"
+          ],
+          "practice_task": "结合 7-Ethics 内容，针对一个你接触过的 AI 应用写一份简短的伦理风险评估清单。",
+          "depends_on": [
+            "u4-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "配套工具与维护机制",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "测验应用架构（Vue.js）",
+          "order": 1,
+          "filename": "u6-l1-quiz-app.md",
+          "level": "advanced",
+          "topic": "剖析 etc/quiz-app 这个 Vue 2 应用的入口、路由、组件与国际化结构，理解测验如何渲染与运行。",
+          "learning_goals": [
+            "看懂 quiz-app 的项目结构与依赖",
+            "理解 main.js/App.vue/router 的启动链路",
+            "掌握 Quiz.vue 组件渲染测验的逻辑"
+          ],
+          "source_files": [
+            "etc/quiz-app/README.md",
+            "etc/quiz-app/package.json",
+            "etc/quiz-app/src/main.js",
+            "etc/quiz-app/src/App.vue",
+            "etc/quiz-app/src/router/index.js",
+            "etc/quiz-app/src/components/Quiz.vue"
+          ],
+          "minimal_modules": [
+            "Vue 项目结构",
+            "路由与启动链路",
+            "测验组件与 i18n"
+          ],
+          "practice_task": "在本地 npm install 并 npm run serve 启动 quiz-app，打开某课测验走一遍，记录启动过程的问题。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "测验内容生成流水线",
+          "order": 2,
+          "filename": "u6-l2-quiz-generation.md",
+          "level": "advanced",
+          "topic": "讲解 quiz-src 如何用 questions-en.txt 与 qzmkjson.py 生成各课 JSON 题库，并与前端对接。",
+          "learning_goals": [
+            "理解 questions-en.txt 的题目书写格式",
+            "看懂 qzmkjson.py 的转换逻辑",
+            "了解生成的 JSON 如何被前端加载"
+          ],
+          "source_files": [
+            "etc/quiz-src/questions-en.txt",
+            "etc/quiz-src/qzmkjson.py",
+            "etc/quiz-src/template.json",
+            "etc/quiz-app/src/assets/translations/en/lesson-1.json"
+          ],
+          "minimal_modules": [
+            "题目源格式",
+            "生成脚本逻辑",
+            "JSON 题库与前端对接"
+          ],
+          "practice_task": "在 questions-en.txt 仿照格式新增一道题，运行 qzmkjson.py 重新生成 JSON，并在 quiz-app 中验证显示。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Docsify 文档站点",
+          "order": 3,
+          "filename": "u6-l3-docsify-site.md",
+          "level": "intermediate",
+          "topic": "讲解 index.html 如何用 Docsify 把仓库变成可在线浏览的文档站点，以及相对路径与主题配置。",
+          "learning_goals": [
+            "理解 Docsify 的纯前端渲染原理",
+            "看懂 index.html 中的 docsify 配置",
+            "了解 GitHub Pages 部署方式"
+          ],
+          "source_files": [
+            "index.html",
+            "etc/Mindmap.md"
+          ],
+          "minimal_modules": [
+            "Docsify 工作原理",
+            "index.html 配置",
+            "GitHub Pages 部署"
+          ],
+          "practice_task": "在本地用 python -m http.server 启动静态服务打开 index.html，浏览文档站点并截图首页。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "多语言翻译机制",
+          "order": 4,
+          "filename": "u6-l4-translations-i18n.md",
+          "level": "advanced",
+          "topic": "讲解 translations 目录与 co-op-translator 的自动化翻译机制，以及稀疏克隆跳过翻译的技巧。",
+          "learning_goals": [
+            "理解 translations 目录的组织方式",
+            "了解 co-op-translator 的自动化翻译流程",
+            "掌握稀疏克隆减少下载量的方法"
+          ],
+          "source_files": [
+            "README.md",
+            "etc/TRANSLATIONS.md"
+          ],
+          "minimal_modules": [
+            "translations 目录结构",
+            "co-op-translator 自动化",
+            "稀疏克隆技巧"
+          ],
+          "practice_task": "用 README 提供的 sparse-checkout 命令克隆仓库（排除 translations），对比下载大小并说明适用场景。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "CI 安全与贡献流程",
+          "order": 5,
+          "filename": "u6-l5-ci-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 .github 中的 CodeQL/Scorecard 安全工作流、AGENTS.md 的开发约定与贡献流程。",
+          "learning_goals": [
+            "理解 CodeQL 与 Scorecard 安全扫描作用",
+            "看懂 AGENTS.md 中的环境与构建约定",
+            "掌握面向教育仓库的贡献规范"
+          ],
+          "source_files": [
+            ".github/workflows/codeql.yml",
+            ".github/workflows/scorecard.yml",
+            "AGENTS.md",
+            "etc/CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "安全扫描工作流",
+            "开发约定",
+            "贡献流程"
+          ],
+          "practice_task": "阅读 etc/CONTRIBUTING.md 与 AGENTS.md，写一份「为某课 Notebook 修复一个错误」的 PR 检查清单。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
