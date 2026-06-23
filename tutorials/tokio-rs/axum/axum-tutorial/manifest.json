@@ -1,0 +1,1150 @@
+{
+  "project": "axum",
+  "head": "600e762b30dba5d1b9e253fabd36d0d23333e5d5",
+  "rationale": "axum 是一个由 4 个 crate（axum、axum-core、axum-extra、axum-macros）组成的 HTTP 路由与请求处理库，其核心哲学是『借助 tower 生态而非自造中间件』。学习路线遵循『先会用、再懂原理、最后能扩展』的渐进原则，分为 11 个单元。第 1 单元带读者从零跑起程序并建立整体心智模型；第 2 单元拆解路由系统（Router/路径匹配/方法路由/nest-merge/fallback），这是 axum 的骨架；第 3 单元讲提取器双 trait 机制（FromRequestParts/FromRequest），这是 axum 最具特色的部分，并逐一深入 Path/Query/Form/Json/State 等内置提取器与自定义方法；第 4 单元讲响应系统（IntoResponse/响应头/SSE/流式 Body）；第 5 单元讲中间件模型及其与 tower Service/Layer 的关系；第 6 单元讲 serve 与 Listener 运行时及优雅关闭；第 7 单元讲错误处理与 Rejection 模型。以上 7 个单元为进阶层，覆盖日常开发。第 8-10 单元为专家层，深入 Handler trait 宏展开、PathRouter/Route 内部实现、with_state 类型状态模式，以及 axum-macros/axum-extra 的派生宏与扩展能力。第 11 单元以测试、WebSocket 与综合 REST 实战收尾，把前面的知识串联成完整能力。讲义之间存在明确依赖链，确保读者可按顺序由浅入深地阅读真实源码并完成每篇的代码实践任务。本次增量（485c603d..600e762b）仅改动 axum-extra/src/routing/typed.rs（修复 TypedPath 查询参数序列化时多余的 `?&` 前缀，改用 form_urlencoded::Serializer::for_suffix 并正确处理路径已含 `?` 的情况）与 CONTRIBUTING.md（无关的链接引用修正），因此只有涉及 TypedPath 查询参数序列化的 u10-l3 需要小幅 update，其余讲义源码均未变动，标记为 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 axum：定位、运行与整体架构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "axum 是什么：定位、理念与生态",
+          "order": 1,
+          "filename": "u1-l1-what-is-axum.md",
+          "level": "beginner",
+          "topic": "介绍 axum 作为 HTTP 路由与请求处理库的定位、无宏路由 API、提取器理念，以及它与 tower/hyper 生态的关系。",
+          "learning_goals": [
+            "理解 axum 解决的核心问题与设计理念",
+            "说清 axum 与 tower、hyper、tower-http 的分层关系",
+            "认识 axum 的四大特性：路由、提取器、错误模型、响应生成"
+          ],
+          "source_files": [
+            "README.md",
+            "axum/src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "axum crate 顶层文档",
+            "tower::Service 生态关系"
+          ],
+          "practice_task": "阅读 README 与 lib.rs 顶部文档，用一段话描述 axum 在 hyper 之上提供了什么、为什么选择 tower 而非自造中间件，并列举 3 个由 tower 生态『免费』获得的能力。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "运行第一个 axum 程序",
+          "order": 2,
+          "filename": "u1-l2-first-program.md",
+          "level": "beginner",
+          "topic": "通过 hello-world 示例跑起一个真实的 axum 服务，理解 Router、route、handler 与 axum::serve 的最小闭环。",
+          "learning_goals": [
+            "能用 Router::new().route() 组装一个最小服务",
+            "理解 axum::serve(listener, app) 如何启动服务",
+            "掌握 handler 是一个返回 IntoResponse 的 async 函数"
+          ],
+          "source_files": [
+            "examples/hello-world/src/main.rs",
+            "axum/src/serve/mod.rs",
+            "axum/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Router",
+            "axum::serve",
+            "Html 响应"
+          ],
+          "practice_task": "复制 hello-world 示例到本地并 cargo run，新增一个 /health 路由返回 200，用 curl 验证两个路由都能正确响应。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工作区结构、crate 划分与 feature 配置",
+          "order": 3,
+          "filename": "u1-l3-workspace-and-features.md",
+          "level": "beginner",
+          "topic": "讲解 axum 仓库的 workspace 结构、4 个 crate 的职责分工，以及 Cargo feature flag 如何按需裁剪编译产物。",
+          "learning_goals": [
+            "理解 workspace 下 axum/axum-core/axum-extra/axum-macros 各自职责",
+            "掌握 default features 与 http1/json/form/query 等 feature 的作用",
+            "理解为何库作者应优先依赖 axum-core"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "axum/Cargo.toml",
+            "axum/src/lib.rs",
+            "axum-core/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "workspace 配置",
+            "feature flags",
+            "crate 划分"
+          ],
+          "practice_task": "在本地新建一个依赖 axum 的项目，分别用默认 feature 和 --no-default-features --features http1,tokio 两次编译，对比编译时间和产物差异，并说明关闭 json feature 后 Json 类型为何不可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Handler 与 Router 初体验",
+          "order": 4,
+          "filename": "u1-l4-handler-router-intro.md",
+          "level": "beginner",
+          "topic": "建立 Router 与 Handler 的基本心智模型：路由如何把请求交给 handler，handler 的参数如何由提取器填充。",
+          "learning_goals": [
+            "理解 Router<S> 的泛型 S 含义",
+            "知道 Handler trait 把 async fn 适配为 Service",
+            "能区分 method_router（get/post）与 handler 的关系"
+          ],
+          "source_files": [
+            "axum/src/routing/mod.rs",
+            "axum/src/handler/mod.rs",
+            "axum/src/docs/handlers_intro.md"
+          ],
+          "minimal_modules": [
+            "Router",
+            "Handler",
+            "method_routing::get"
+          ],
+          "practice_task": "编写一个带有 State、Path 和返回 Json 的 handler，对照 handlers_intro.md 文档说明每个参数属于哪一类提取器，并解释为什么 handler 必须是 async。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "路由系统：注册、匹配、嵌套与回退",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Router 与路由注册",
+          "order": 1,
+          "filename": "u2-l1-router-and-routing.md",
+          "level": "beginner",
+          "topic": "深入 Router 的公共 API：route、route_service、以及 RouterInner 的内部结构，理解路由是如何被组织的。",
+          "learning_goals": [
+            "掌握 route() 与 route_service() 的区别与适用场景",
+            "理解 RouterInner 由 path_router 和 catch_all_fallback 组成",
+            "知道 Router 为何用 Arc 共享内部以实现 Clone"
+          ],
+          "source_files": [
+            "axum/src/routing/mod.rs",
+            "axum/src/docs/routing/route.md",
+            "axum/src/docs/routing/route_service.md"
+          ],
+          "minimal_modules": [
+            "Router",
+            "RouterInner",
+            "route / route_service"
+          ],
+          "practice_task": "用 route 注册一个普通 handler，用 route_service 注册一个自定义 tower Service，分别用 curl 触发，并在源码中找到 RouterInner 的定义位置记录行号。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "路径匹配与路径参数",
+          "order": 2,
+          "filename": "u2-l2-path-matching-params.md",
+          "level": "beginner",
+          "topic": "讲解 axum 基于 matchit 的路径匹配机制，包括 {id}、{*path} 捕获组与 UrlParams 的内部存储。",
+          "learning_goals": [
+            "理解 matchit 路由树如何匹配 URL",
+            "掌握 {id}、{*tail}、{{literal}} 三种路径语法",
+            "理解 UrlParams 如何被写入请求 extensions 供 Path 提取器读取"
+          ],
+          "source_files": [
+            "axum/src/routing/path_router.rs",
+            "axum/src/routing/url_params.rs",
+            "axum/src/extract/path/mod.rs"
+          ],
+          "minimal_modules": [
+            "PathRouter",
+            "matchit::Router",
+            "UrlParams"
+          ],
+          "practice_task": "设计 /users/{id} 和 /files/{*path} 两个路由，用 Path 提取器分别取值并打印，再阅读 url_params.rs 找出 NEST_TAIL_PARAM 和 FALLBACK_PARAM 这两个内部常量的作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "方法路由 MethodRouter",
+          "order": 3,
+          "filename": "u2-l3-method-router.md",
+          "level": "beginner",
+          "topic": "讲解 MethodRouter 如何为同一路径注册不同 HTTP 方法，以及 get/post/any/on 的链式组合与 Allow 头生成。",
+          "learning_goals": [
+            "理解 MethodRouter 内部为每个 HTTP 方法保存一个 MethodEndpoint",
+            "掌握 .get().post() 链式调用与 any/on 的用法",
+            "理解未匹配方法时如何生成 405 和 Allow 头"
+          ],
+          "source_files": [
+            "axum/src/routing/method_routing.rs",
+            "axum/src/routing/method_filter.rs"
+          ],
+          "minimal_modules": [
+            "MethodRouter",
+            "MethodEndpoint",
+            "AllowHeader"
+          ],
+          "practice_task": "为同一路径 /items 同时注册 GET 和 POST handler，用错误方法请求观察 405 响应与 Allow 头，并在源码中定位 HEAD 请求回退到 GET 的逻辑。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "嵌套 nest 与合并 merge",
+          "order": 4,
+          "filename": "u2-l4-nest-and-merge.md",
+          "level": "beginner",
+          "topic": "讲解 Router 的 nest/nest_service/merge 以及 layer 与 route_layer 的区别，构建可组合的路由树。",
+          "learning_goals": [
+            "掌握 nest 如何为子路由添加前缀及 StripPrefix 的作用",
+            "理解 merge 合并两个 Router 的规则与 fallback 冲突",
+            "区分 layer（全局生效）与 route_layer（仅已有路由生效）"
+          ],
+          "source_files": [
+            "axum/src/routing/mod.rs",
+            "axum/src/routing/strip_prefix.rs",
+            "axum/src/docs/routing/nest.md",
+            "axum/src/docs/routing/layer.md"
+          ],
+          "minimal_modules": [
+            "Router::nest",
+            "Router::merge",
+            "StripPrefix"
+          ],
+          "practice_task": "把用户相关路由和订单相关路由分别封装成两个子 Router，用 nest 挂到 /api/users 与 /api/orders，再对其中一个子路由用 route_layer 加上日志中间件，验证 layer 与 route_layer 的生效范围差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Fallback 与 404 处理",
+          "order": 5,
+          "filename": "u2-l5-fallback-404.md",
+          "level": "beginner",
+          "topic": "讲解 fallback、fallback_service、method_not_allowed_fallback 与默认 NotFound 的关系，自定义未匹配请求的行为。",
+          "learning_goals": [
+            "理解 catch_all_fallback 与 FALLBACK_PARAM 内部常量的作用",
+            "掌握 fallback、method_not_allowed_fallback 的区别",
+            "知道 reset_fallback 在合并路由时的用途"
+          ],
+          "source_files": [
+            "axum/src/routing/mod.rs",
+            "axum/src/routing/not_found.rs",
+            "axum/src/docs/routing/fallback.md",
+            "axum/src/docs/routing/method_not_allowed_fallback.md"
+          ],
+          "minimal_modules": [
+            "Fallback",
+            "NotFound",
+            "fallback_endpoint"
+          ],
+          "practice_task": "为应用设置一个全局 fallback 返回自定义 JSON 错误，再单独设置 method_not_allowed_fallback 返回不同信息，分别用不存在路径和错误方法请求验证两者区分。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "提取器机制：把请求拆解为类型",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FromRequestParts 与 FromRequest 双 trait 机制",
+          "order": 1,
+          "filename": "u3-l1-fromrequest-traits.md",
+          "level": "intermediate",
+          "topic": "剖析 axum 提取器的两个核心 trait，解释为什么消费请求体的提取器必须是最后一个参数。",
+          "learning_goals": [
+            "理解 FromRequestParts（只读 parts）与 FromRequest（消费 body）的区别",
+            "掌握 handler 元组实现如何依次调用提取器",
+            "理解 Rejection 必须实现 IntoResponse 的设计"
+          ],
+          "source_files": [
+            "axum-core/src/extract/mod.rs",
+            "axum-core/src/extract/tuple.rs",
+            "axum-core/src/extract/request_parts.rs",
+            "axum/src/docs/extract.md"
+          ],
+          "minimal_modules": [
+            "FromRequestParts",
+            "FromRequest",
+            "tuple impl"
+          ],
+          "practice_task": "阅读 tuple.rs 中宏生成的实现，画出 3 个提取器的调用顺序图，并解释为何把 Json 放在 Path 之前会编译失败。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Path 提取器与路径参数反序列化",
+          "order": 2,
+          "filename": "u3-l2-path-extractor.md",
+          "level": "intermediate",
+          "topic": "深入 Path 提取器，理解它如何从 extensions 读取 UrlParams 并用自定义 PathDeserializer 反序列化为任意类型。",
+          "learning_goals": [
+            "理解 Path<T> 如何实现 FromRequestParts",
+            "掌握 PathDeserializer 支持 tuple/struct/HashMap 的反序列化",
+            "理解 PathRejection 的不同变体与对应状态码"
+          ],
+          "source_files": [
+            "axum/src/extract/path/mod.rs",
+            "axum/src/extract/path/de.rs"
+          ],
+          "minimal_modules": [
+            "Path",
+            "PathDeserializer",
+            "PathRejection"
+          ],
+          "practice_task": "定义一个 struct 带 serde rename 的字段，用 Path 提取 /users/{user_id}，分别测试正常值、缺失参数、类型不匹配三种请求，观察不同的 PathRejection 响应。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Query 与 Form 提取器",
+          "order": 3,
+          "filename": "u3-l3-query-form-extractors.md",
+          "level": "intermediate",
+          "topic": "讲解 Query（读 query string）与 Form（GET 读 query、其他方法读 body）两个提取器的实现与差异。",
+          "learning_goals": [
+            "理解 Query 基于 serde_html_form 的反序列化",
+            "掌握 Form 在 GET/HEAD 与其他方法下的双重行为",
+            "理解 RawForm/RawQuery 底层提取器的作用"
+          ],
+          "source_files": [
+            "axum/src/extract/query.rs",
+            "axum/src/form.rs",
+            "axum/src/extract/raw_form.rs"
+          ],
+          "minimal_modules": [
+            "Query",
+            "Form",
+            "serde_html_form"
+          ],
+          "practice_task": "用同一个 struct 同时作为 Query 和 Form 提取器，分别用 GET ?a=1 和 POST body 两种方式请求，对比两者读取来源，并说明为何 Form 在 GET 时不会消费 body。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Json 提取器与请求体处理",
+          "order": 4,
+          "filename": "u3-l4-json-extractor.md",
+          "level": "intermediate",
+          "topic": "深入 Json 提取器：Content-Type 校验、serde_path_to_error 精确定位、body 大小限制。",
+          "learning_goals": [
+            "理解 Json 如何校验 Content-Type 并缓冲 body",
+            "掌握 serde_path_to_error 提供的精确错误路径",
+            "理解默认 body 限制与 default_body_limit 的作用"
+          ],
+          "source_files": [
+            "axum/src/json.rs",
+            "axum-core/src/extract/default_body_limit.rs"
+          ],
+          "minimal_modules": [
+            "Json",
+            "from_bytes",
+            "DefaultBodyLimit"
+          ],
+          "practice_task": "编写接收 Json<T> 的 handler，分别发送缺 Content-Type、语法错误、字段类型错误、超大 body 四种请求，对照源码解释每种 JsonRejection 变体与状态码（415/400/422/413）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "State 提取器与 FromRef 子状态",
+          "order": 5,
+          "filename": "u3-l5-state-fromref.md",
+          "level": "intermediate",
+          "topic": "讲解应用状态共享：State 提取器、with_state 类型变换、FromRef 子状态机制。",
+          "learning_goals": [
+            "理解 Router<S> 到 Router<()> 的状态填充过程",
+            "掌握 State 提取器如何通过 FromRef 取子状态",
+            "理解为何状态建议用 Arc 包裹"
+          ],
+          "source_files": [
+            "axum/src/extract/state.rs",
+            "axum-core/src/extract/from_ref.rs"
+          ],
+          "minimal_modules": [
+            "State",
+            "FromRef",
+            "with_state"
+          ],
+          "practice_task": "定义一个含数据库连接池和配置的 AppState，用 FromRef 为其中的 Config 实现子状态提取，再让两个 handler 分别提取 State<AppState> 和 State<Config>，验证子状态隔离。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "自定义提取器与 Optional 提取",
+          "order": 6,
+          "filename": "u3-l6-custom-extractor.md",
+          "level": "intermediate",
+          "topic": "讲解如何为自定义类型实现 FromRequestParts/FromRequest，以及 OptionalFromRequest 让 Option<T> 优雅处理缺失。",
+          "learning_goals": [
+            "能从零实现一个 FromRequestParts 提取器",
+            "理解 OptionalFromRequestParts 与 Option<T> 的关系",
+            "掌握自定义 Rejection 的写法"
+          ],
+          "source_files": [
+            "axum-core/src/extract/option.rs",
+            "axum-core/src/extract/mod.rs"
+          ],
+          "minimal_modules": [
+            "OptionalFromRequestParts",
+            "Option<T> blanket impl"
+          ],
+          "practice_task": "实现一个 ApiKey 提取器，从 x-api-key 头读取并校验，失败返回自定义 Rejection；再实现 Option<ApiKey> 版本，让缺失头时返回 None 而非报错。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "响应系统：把返回值变成 HTTP 响应",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "IntoResponse 与响应构建",
+          "order": 1,
+          "filename": "u4-l1-into-response.md",
+          "level": "intermediate",
+          "topic": "剖析 IntoResponse trait 及其大量内置实现（StatusCode、&str、String、Bytes、Html、元组、Result 等）。",
+          "learning_goals": [
+            "理解 IntoResponse 是 handler 返回值的统一抽象",
+            "掌握元组响应 (StatusCode, headers..., body) 的组合规则",
+            "理解 Result<T,E> 双分支响应与状态覆盖逻辑"
+          ],
+          "source_files": [
+            "axum-core/src/response/into_response.rs",
+            "axum/src/response/mod.rs"
+          ],
+          "minimal_modules": [
+            "IntoResponse",
+            "Html",
+            "元组实现"
+          ],
+          "practice_task": "编写返回 (StatusCode, [header], &str)、Html、Result<Json,_> 三种 handler，阅读 into_response.rs 找到对应实现，解释 (StatusCode, R) 在什么情况下不会覆盖内部状态码。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "IntoResponseParts 与响应头操作",
+          "order": 2,
+          "filename": "u4-l2-into-response-parts.md",
+          "level": "intermediate",
+          "topic": "讲解 IntoResponseParts 如何在元组响应中增量添加 headers/extensions，以及 AppendHeaders 的便捷用法。",
+          "learning_goals": [
+            "理解 IntoResponseParts 与 ResponseParts 的协作",
+            "掌握 HeaderMap、[(K,V);N]、AppendHeaders 添加头的方式",
+            "理解 Extension 作为 IntoResponseParts 写入响应扩展"
+          ],
+          "source_files": [
+            "axum-core/src/response/into_response_parts.rs",
+            "axum-core/src/response/append_headers.rs"
+          ],
+          "minimal_modules": [
+            "IntoResponseParts",
+            "ResponseParts",
+            "AppendHeaders"
+          ],
+          "practice_task": "用一个元组响应同时设置状态码、两个自定义响应头（用 AppendHeaders）和一个响应 Extension，阅读源码确认这些 part 的应用顺序。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "重定向 Redirect 与 SSE 流式响应",
+          "order": 3,
+          "filename": "u4-l3-redirect-sse.md",
+          "level": "intermediate",
+          "topic": "讲解 Redirect 的几种重定向类型，以及 Sse 响应如何把 Stream<Event> 转为 Server-Sent Events。",
+          "learning_goals": [
+            "理解 Redirect 的 permanent/temporary/see-other 区别",
+            "掌握 Sse 响应的 Event 构建与 KeepAlive 机制",
+            "理解流式响应如何与 IntoResponse 衔接"
+          ],
+          "source_files": [
+            "axum/src/response/redirect.rs",
+            "axum/src/response/sse.rs",
+            "examples/sse/src/main.rs"
+          ],
+          "minimal_modules": [
+            "Redirect",
+            "Sse",
+            "Event"
+          ],
+          "practice_task": "实现一个 /old 重定向到 /new，再实现一个 /events 端点用 Sse 每秒推送一条事件（带 KeepAlive），用 curl 验证 SSE 流持续输出。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Body 类型与流式响应体",
+          "order": 4,
+          "filename": "u4-l4-body-streaming.md",
+          "level": "intermediate",
+          "topic": "讲解 axum 的 Body 类型如何封装 BoxBody，以及如何用 from_stream 返回任意异步流作为响应体。",
+          "learning_goals": [
+            "理解 axum_core::Body 与 BoxBody 的关系",
+            "掌握 Body::new/empty/from_stream 的用途",
+            "理解 http_body::Body trait 在 axum 中的角色"
+          ],
+          "source_files": [
+            "axum-core/src/body.rs",
+            "axum/src/body/mod.rs"
+          ],
+          "minimal_modules": [
+            "Body",
+            "BoxBody",
+            "from_stream"
+          ],
+          "practice_task": "用一个 tokio_stream 构造无限计数流，通过 Body::from_stream 返回为响应体，用 curl 观察分块传输，并解释为何流式 body 的 Content-Length 未知。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "中间件：基于 tower 的请求/响应管线",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "中间件模型与 tower Service/Layer",
+          "order": 1,
+          "filename": "u5-l1-middleware-tower-model.md",
+          "level": "intermediate",
+          "topic": "建立 axum 中间件的心智模型：为何复用 tower Service/Layer，layer 如何包裹 Service 形成管线。",
+          "learning_goals": [
+            "理解 tower Service 和 Layer 的基本概念",
+            "掌握 Router::layer 如何把 Layer 应用到所有路由",
+            "理解 axum 中间件返回 Infallible 错误的设计"
+          ],
+          "source_files": [
+            "axum/src/middleware/mod.rs",
+            "axum/src/docs/middleware.md",
+            "axum/src/routing/mod.rs"
+          ],
+          "minimal_modules": [
+            "tower::Service",
+            "tower_layer::Layer",
+            "Router::layer"
+          ],
+          "practice_task": "用一个现成的 tower-http 中间件（如 TraceLayer 或 TimeoutLayer）通过 .layer() 应用到 Router，阅读文档解释它如何在不写自定义代码的情况下获得超时/追踪能力。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "from_fn 中间件与 Next 控制流",
+          "order": 2,
+          "filename": "u5-l2-from-fn-next.md",
+          "level": "intermediate",
+          "topic": "深入 from_fn/from_fn_with_state：用 async 函数写中间件，用 Next::run 把请求传递给下游。",
+          "learning_goals": [
+            "掌握 from_fn 中间件函数的签名约束（提取器 + Next）",
+            "理解 Next::run 如何调用被包裹的 Service",
+            "能用 from_fn 实现鉴权/日志中间件"
+          ],
+          "source_files": [
+            "axum/src/middleware/from_fn.rs"
+          ],
+          "minimal_modules": [
+            "from_fn",
+            "FromFnLayer",
+            "Next"
+          ],
+          "practice_task": "用 from_fn_with_state 实现一个鉴权中间件：校验 Authorization 头，通过则 next.run(req)，否则返回 401，并把它通过 .layer() 应用到部分路由。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "from_extractor、map_request 与 map_response",
+          "order": 3,
+          "filename": "u5-l3-from-extractor-map.md",
+          "level": "intermediate",
+          "topic": "讲解三种更聚焦的中间件：from_extractor 做校验、map_request 改请求、map_response 改响应。",
+          "learning_goals": [
+            "理解 from_extractor 用提取器做前置校验的用法",
+            "掌握 map_request/map_response 改写请求/响应的场景",
+            "区分四类中间件（from_fn/from_extractor/map_request/map_response）的选型"
+          ],
+          "source_files": [
+            "axum/src/middleware/from_extractor.rs",
+            "axum/src/middleware/map_request.rs",
+            "axum/src/middleware/map_response.rs"
+          ],
+          "minimal_modules": [
+            "from_extractor",
+            "MapRequestLayer",
+            "MapResponseLayer"
+          ],
+          "practice_task": "分别用 map_response 给所有响应统一加一个 x-powered-by 头，用 from_extractor 做一个只校验不取值的鉴权提取器，对比两者与 from_fn 的写法差异。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Extension 共享状态",
+          "order": 4,
+          "filename": "u5-l4-extension-state.md",
+          "level": "intermediate",
+          "topic": "讲解 Extension 既是 Layer 又是 Extractor 又是响应 Part 的三重身份，以及它作为状态共享方式的特点。",
+          "learning_goals": [
+            "理解 Extension 作为 Layer 往请求注入值",
+            "掌握 Extension 作为 Extractor 取值的运行时特性",
+            "理解 Extension 与 State 提取器的优缺点对比"
+          ],
+          "source_files": [
+            "axum/src/extension.rs"
+          ],
+          "minimal_modules": [
+            "Extension",
+            "AddExtension"
+          ],
+          "practice_task": "用 .layer(Extension(value)) 注入一个共享值并在 handler 中用 Extension<T> 提取，再故意提取一个未注入的类型观察 500 错误，对照 State 方式说明各自的取舍。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "运行时：serve 与连接管理",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "serve 函数与 Listener 机制",
+          "order": 1,
+          "filename": "u6-l1-serve-listener.md",
+          "level": "intermediate",
+          "topic": "剖析 axum::serve 如何把 Router 通过 Listener 接入 hyper，理解 IncomingStream 与 TowerToHyperService 的桥接。",
+          "learning_goals": [
+            "理解 serve 的签名与 MakeService 的角色",
+            "掌握 Listener trait 及 TcpListener/UnixListener 实现",
+            "理解 IncomingStream 如何携带连接信息"
+          ],
+          "source_files": [
+            "axum/src/serve/mod.rs",
+            "axum/src/serve/listener.rs"
+          ],
+          "minimal_modules": [
+            "serve",
+            "Listener",
+            "IncomingStream"
+          ],
+          "practice_task": "阅读 serve/mod.rs 中 handle_connection 的流程，画出让一个 TCP 连接最终交给 Router 处理的调用链，并说明 into_make_service 为何会提前调用 with_state(())。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "优雅关闭与连接控制",
+          "order": 2,
+          "filename": "u6-l2-graceful-shutdown.md",
+          "level": "intermediate",
+          "topic": "讲解 with_graceful_shutdown 的实现，以及 ListenerExt 提供的 limit_connections/tap_io 连接控制能力。",
+          "learning_goals": [
+            "理解 with_graceful_shutdown 如何等待在途请求完成",
+            "掌握 ListenerExt::limit_connections 限制并发连接",
+            "理解 tap_io 在连接 IO 上的拦截点"
+          ],
+          "source_files": [
+            "axum/src/serve/mod.rs",
+            "axum/src/serve/listener.rs",
+            "examples/graceful-shutdown/src/main.rs"
+          ],
+          "minimal_modules": [
+            "with_graceful_shutdown",
+            "ListenerExt",
+            "TokioExecutor"
+          ],
+          "practice_task": "基于 graceful-shutdown 示例实现：收到 Ctrl+C 后停止接受新连接，但等待一个慢请求处理完再退出，用日志验证在途请求被允许完成。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "错误处理：Rejection 与错误响应",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Rejection 体系与错误响应模型",
+          "order": 1,
+          "filename": "u7-l1-rejection-error-model.md",
+          "level": "intermediate",
+          "topic": "讲解 axum 的 Rejection 如何用宏生成、如何实现 IntoResponse，以及 Result<T,E> 的统一错误转换。",
+          "learning_goals": [
+            "理解 __define_rejection / __composite_rejection 宏的代码生成",
+            "掌握每个 Rejection 对应的状态码与 body 文本",
+            "理解 IntoResponse for Result<T,E> 的双分支逻辑"
+          ],
+          "source_files": [
+            "axum-core/src/extract/rejection.rs",
+            "axum/src/extract/rejection.rs",
+            "axum-core/src/response/into_response.rs"
+          ],
+          "minimal_modules": [
+            "Rejection 宏",
+            "JsonRejection",
+            "IntoResponse for Result"
+          ],
+          "practice_task": "阅读 rejection 宏定义，手动追踪 JsonRejection 展开后生成了哪些方法，并写一个返回 Result<Json<_>, MyError> 的 handler 让自定义错误自动转成响应。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "HandleError 层与自定义错误响应",
+          "order": 2,
+          "filename": "u7-l2-handle-error-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 HandleErrorLayer 如何把 Service 的错误转成响应，以及参考 error-handling 示例构建自定义错误体系。",
+          "learning_goals": [
+            "理解 HandleError 把 S::Error 转为 Response 的机制",
+            "掌握用 IntoResponse 统一应用错误类型的模式",
+            "理解 tower Service 错误与 axum 错误模型的衔接"
+          ],
+          "source_files": [
+            "axum/src/error_handling/mod.rs",
+            "examples/error-handling/src/main.rs",
+            "axum/src/docs/error_handling.md"
+          ],
+          "minimal_modules": [
+            "HandleErrorLayer",
+            "HandleError",
+            "自定义 IntoResponse 错误"
+          ],
+          "practice_task": "参考 error-handling 示例，定义一个实现了 IntoResponse 的 AppError 枚举，用 HandleErrorLayer 包裹一个会返回 Result::Err 的 Service，验证错误被转换为合适的 HTTP 响应。",
+          "depends_on": [
+            "u5-l1",
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Handler 实现原理（专家层）",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Handler trait 与宏展开",
+          "order": 1,
+          "filename": "u8-l1-handler-trait-macro.md",
+          "level": "advanced",
+          "topic": "深入 Handler trait 的定义、类型参数 T 的 coherence 绕路作用，以及 impl_handler! 宏为 0-16 个参数生成的 blanket 实现。",
+          "learning_goals": [
+            "理解 Handler<T,S> 的 T 参数为何用于 trait coherence",
+            "掌握宏生成的 blanket impl 如何约束最后一个参数消费 body",
+            "理解 Handler::call 如何依次提取参数并调用函数"
+          ],
+          "source_files": [
+            "axum/src/handler/mod.rs",
+            "axum/src/handler/future.rs"
+          ],
+          "minimal_modules": [
+            "Handler trait",
+            "impl_handler! 宏",
+            "HandlerFuture"
+          ],
+          "practice_task": "展开阅读 impl_handler! 宏，手动写出 2 个参数版本 Handler 的完整伪代码，标出 FromRequestParts 与 FromRequest 的调用点，解释 T 元组的标记作用。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "HandlerService 与 Service 适配",
+          "order": 2,
+          "filename": "u8-l2-handler-service.md",
+          "level": "advanced",
+          "topic": "讲解 HandlerService 如何把 Handler 适配为 tower Service，以及 with_state / into_service 的转换与 ServiceExt。",
+          "learning_goals": [
+            "理解 HandlerService 如何实现 Service<Request>",
+            "掌握 Handler::with_state 如何注入状态",
+            "理解 ServiceExt 为 handler 提供的便捷方法"
+          ],
+          "source_files": [
+            "axum/src/handler/service.rs",
+            "axum/src/service_ext.rs"
+          ],
+          "minimal_modules": [
+            "HandlerService",
+            "Handler::with_state",
+            "ServiceExt"
+          ],
+          "practice_task": "用 Handler::into_service 把一个无状态 handler 直接转成 Service 并用 oneshot 调用，阅读 service.rs 确认它如何实现 poll_ready 与 call。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "路由内部实现（专家层）",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "PathRouter 内部结构与 RouteId",
+          "order": 1,
+          "filename": "u9-l1-pathrouter-internals.md",
+          "level": "advanced",
+          "topic": "深入 PathRouter 的 routes/Node/v7_checks 结构，matchit Router 与 RouteId 双向映射，以及 path 校验逻辑。",
+          "learning_goals": [
+            "理解 PathRouter 如何用 matchit::Router<RouteId> 存储路由",
+            "掌握 route_id_to_path / path_to_route_id 双向 HashMap 的作用",
+            "理解 v07 路径校验与 validate_path"
+          ],
+          "source_files": [
+            "axum/src/routing/path_router.rs",
+            "axum/src/boxed.rs"
+          ],
+          "minimal_modules": [
+            "PathRouter",
+            "Node",
+            "RouteId"
+          ],
+          "practice_task": "阅读 path_router.rs 的 call_with_state，画出从请求到匹配到 RouteId 再到 Endpoint 的完整流程，并解释 routes Vec 与 Node 两份数据为何都要保留。",
+          "depends_on": [
+            "u2-l1",
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Route 与 RouteFuture",
+          "order": 2,
+          "filename": "u9-l2-route-route-future.md",
+          "level": "advanced",
+          "topic": "剖析 Route 如何用 BoxCloneSyncService 类型擦除 Service，以及 RouteFuture 对 CONNECT/METHOD_NOT_ALLOWED/HEAD 的特殊处理。",
+          "learning_goals": [
+            "理解 Route 用 BoxCloneSyncService 实现类型擦除与克隆",
+            "掌握 RouteFuture 如何按方法补全 Content-Length/Allow 头",
+            "理解 oneshot_inner 与 oneshot_inner_owned 的区别"
+          ],
+          "source_files": [
+            "axum/src/routing/route.rs",
+            "axum/src/routing/future.rs"
+          ],
+          "minimal_modules": [
+            "Route",
+            "RouteFuture",
+            "BoxCloneSyncService"
+          ],
+          "practice_task": "阅读 route.rs 中 Service::call 与 RouteFuture::poll，找出 HEAD 请求去 body、405 设置 Allow 头、CONNECT 去Content-Length 的三处特殊处理代码行。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "with_state 与类型状态模式",
+          "order": 3,
+          "filename": "u9-l3-with-state-pattern.md",
+          "level": "advanced",
+          "topic": "讲解 Router<S> 经 with_state 变为 Router<()> 的『类型状态模式』，handler/MethodRouter/PathRouter 各层如何同步转换。",
+          "learning_goals": [
+            "理解 Router<S> 表示『缺少 S 类型状态』的设计意图",
+            "掌握 with_state 在三层（Router/PathRouter/MethodRouter）的联动转换",
+            "理解 BoxedIntoRoute 惰性转 Route 的优化"
+          ],
+          "source_files": [
+            "axum/src/routing/mod.rs",
+            "axum/src/routing/path_router.rs",
+            "axum/src/extract/state.rs"
+          ],
+          "minimal_modules": [
+            "Router::with_state",
+            "PathRouter::with_state",
+            "BoxedIntoRoute"
+          ],
+          "practice_task": "追踪一个带状态的 handler 从注册到 with_state 调用后变成 Route 的全过程，解释为什么只有 Router<()> 能传给 serve，并说明惰性转 Route 与 into_make_service 中提前转换的性能考量。",
+          "depends_on": [
+            "u9-l1",
+            "u3-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "宏与扩展能力（专家层）",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "axum-macros：debug_handler 调试利器",
+          "order": 1,
+          "filename": "u10-l1-debug-handler-macro.md",
+          "level": "advanced",
+          "topic": "讲解 #[debug_handler] 宏在编译期对 handler 签名做的检查（async、提取器顺序、body 唯一、Send、返回 IntoResponse）。",
+          "learning_goals": [
+            "理解 debug_handler 如何在编译期生成更友好的类型错误",
+            "掌握它检查的提取器顺序与 body 唯一性约束",
+            "理解该宏在 release 构建中零开销"
+          ],
+          "source_files": [
+            "axum-macros/src/debug_handler.rs",
+            "axum-macros/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "debug_handler",
+            "debug_middleware"
+          ],
+          "practice_task": "在一个故意写错（如把 Json 放在 Path 前、或返回非 IntoResponse 类型）的 handler 上加 #[debug_handler]，对比有宏和无宏时的编译错误信息可读性。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "FromRequest / FromRef / TypedPath 派生宏",
+          "order": 2,
+          "filename": "u10-l2-derive-macros.md",
+          "level": "advanced",
+          "topic": "讲解 #[derive(FromRequest/FromRequestParts/FromRef/TypedPath)] 派生宏如何减少样板代码。",
+          "learning_goals": [
+            "理解 FromRequest 派生按字段提取与 via() 重定向两种模式",
+            "掌握 FromRef 派生为每个字段生成子状态实现",
+            "理解 TypedPath 派生如何实现类型安全路由"
+          ],
+          "source_files": [
+            "axum-macros/src/from_request/mod.rs",
+            "axum-macros/src/from_ref.rs",
+            "axum-macros/src/typed_path.rs"
+          ],
+          "minimal_modules": [
+            "derive(FromRequest)",
+            "derive(FromRef)",
+            "derive(TypedPath)"
+          ],
+          "practice_task": "用 #[derive(FromRequest)] 把多个提取器组合成一个结构体，用 #[derive(FromRef)] 简化上一单元 AppState 的子状态实现，对比手写与派生的代码量。",
+          "depends_on": [
+            "u3-l6",
+            "u9-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "axum-extra：类型化路由与扩展提取器/响应",
+          "order": 3,
+          "filename": "u10-l3-axum-extra.md",
+          "level": "advanced",
+          "topic": "介绍 axum-extra 提供的类型化路由（TypedPath/RouterExt）、Resource 资源路由、Cookie/WithRejection/Cached 提取器与 Protobuf/JsonLines 响应。重点说明 TypedPath 带查询参数序列化（with_query_params / Display）的最新行为：查询串以单个 ? 起始、参数间以 & 连接，不再产生多余的 ?& 前缀；当路径本身已含 ? 时参数会接在其后。",
+          "learning_goals": [
+            "理解 TypedPath + RouterExt 的类型安全路由",
+            "掌握 WithRejection/Cached/CookieJar 等扩展提取器",
+            "了解 Protobuf/JsonLines/Attachment 等扩展响应",
+            "理解 TypedPath 的 with_query_params 如何用 form_urlencoded::Serializer::for_suffix 把查询参数正确拼接到 URI"
+          ],
+          "source_files": [
+            "axum-extra/src/routing/typed.rs",
+            "axum-extra/src/extract/with_rejection.rs",
+            "axum-extra/src/extract/cookie/mod.rs",
+            "axum-extra/src/response/protobuf.rs"
+          ],
+          "minimal_modules": [
+            "TypedPath",
+            "WithRejection",
+            "CookieJar"
+          ],
+          "practice_task": "用 TypedPath 定义两个类型化路由并用 typed_get/typed_post 注册，再用 WithRejection 把一个提取器的 Rejection 转成自定义错误类型，验证类型安全的路径构造；额外定义一个带查询参数（with_query_params）的 TypedPath，确认其 to_uri() 输出形如 /users?page=1&per_page=10 而非 /users?&page=1。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "测试与综合实战",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "测试 axum 应用",
+          "order": 1,
+          "filename": "u11-l1-testing.md",
+          "level": "intermediate",
+          "topic": "讲解两种测试方式：用 Router 直接 oneshot 的轻量测试，与用 TestClient 起真实 HTTP 服务器的集成测试。",
+          "learning_goals": [
+            "掌握 Router::oneshot / into_service 的无网络测试",
+            "掌握 TestClient 起本地服务器的集成测试",
+            "理解 MockConnectInfo 等测试辅助"
+          ],
+          "source_files": [
+            "axum/src/test_helpers/test_client.rs",
+            "examples/testing/src/main.rs"
+          ],
+          "minimal_modules": [
+            "TestClient",
+            "oneshot",
+            "into_service"
+          ],
+          "practice_task": "参考 testing 示例，为之前写的一个带中间件和状态的 handler 编写两类测试：用 oneshot 测纯逻辑，用 TestClient 测真实 HTTP 行为（含响应头）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "WebSocket 与 ConnectInfo",
+          "order": 2,
+          "filename": "u11-l2-websocket-connect-info.md",
+          "level": "advanced",
+          "topic": "讲解 WebSocketUpgrade 提取器实现 WebSocket 升级，以及 ConnectInfo 提取客户端连接地址。",
+          "learning_goals": [
+            "理解 WebSocketUpgrade 如何升级连接并 on_upgrade 回调",
+            "掌握 WebSocket 收发消息的 API",
+            "理解 into_make_service_with_connect_info 与 ConnectInfo 的关系"
+          ],
+          "source_files": [
+            "axum/src/extract/ws.rs",
+            "axum/src/extract/connect_info.rs",
+            "examples/websockets/src/main.rs"
+          ],
+          "minimal_modules": [
+            "WebSocketUpgrade",
+            "WebSocket",
+            "ConnectInfo"
+          ],
+          "practice_task": "参考 websockets 示例实现一个 echo WebSocket 端点，并改用 into_make_service_with_connect_info 让 handler 通过 ConnectInfo 打印客户端真实地址。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "综合实战：构建 REST API",
+          "order": 3,
+          "filename": "u11-l3-rest-api-project.md",
+          "level": "advanced",
+          "topic": "以 todos 示例为蓝本，把路由、提取器、State、中间件、错误处理与测试串联成一个完整 REST API。",
+          "learning_goals": [
+            "能用 Router+nest 组织 RESTful 路由结构",
+            "能组合 State/Path/Query/Json 提取器实现 CRUD",
+            "能为 API 加上鉴权中间件、统一错误处理与测试"
+          ],
+          "source_files": [
+            "examples/todos/src/main.rs",
+            "examples/jwt/src/main.rs"
+          ],
+          "minimal_modules": [
+            "Router 组织",
+            "State 共享",
+            "错误处理与测试"
+          ],
+          "practice_task": "基于 todos 示例实现一个带内存存储的待办事项 API（增删改查 + 分页 Query），叠加一个 JWT 鉴权中间件（参考 jwt 示例），并为每条路由编写 oneshot 测试。",
+          "depends_on": [
+            "u3-l5",
+            "u5-l2",
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
