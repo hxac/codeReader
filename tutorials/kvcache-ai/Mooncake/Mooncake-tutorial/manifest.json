@@ -1,0 +1,1321 @@
+{
+  "project": "Mooncake",
+  "head": "ef0312f80ab524f023878ffcd37cef111726cf26",
+  "rationale": "本次为增量更新（1f7f71a1..ef0312f8），仅有一个提交 #2538「Add torch 2.12.1 to EP PG build matrix」，改动全部落在 .github/workflows/ 下（ci.yml、ci_cu13.yml、pre-release.yaml、release.yaml、release-cuda13.yaml），即在 EP_TORCH_VERSIONS 构建矩阵里追加 torch 2.12.1 版本。这是纯粹的 CI 构建矩阵调整，不触及任何源码、模块、公共接口、核心模型或主流程，因此不影响任何一篇讲义的内容。结合讲义目录现状：自上次 manifest 以来 worker 已生成 43 篇讲义中的 42 篇（此前标记为 new/update 的讲义均已落盘并反映 #2499/#2504/#2480 等改动），唯独 u9-l1-p2p-store.md 仍未生成。由于本轮 diff 不影响任何讲义，42 篇已生成讲义统一标记 keep（无需重写），u9-l1（P2P Store，无 master 对等存储）保持 new 以触发首次生成。不触发任何 update/rebuild，不新增、不删除讲义，依赖链与学习顺序（9 单元 43 篇，先整体后局部、先数据传输后存储、先用户 API 后内部机制）保持不变。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 Mooncake 并跑通第一个示例",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Mooncake 项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Mooncake 是什么、解决什么问题、KVCache 中心化解耦架构（Prefill/Decode 分离、KVCache 池）以及它在 Kimi 生产环境中的价值。",
+          "learning_goals": [
+            "理解 Mooncake 的核心定位：KVCache-centric Disaggregated Architecture",
+            "了解 Prefill/Decode 解耦与 KVCache 池的整体架构图",
+            "了解 Transfer Engine、Store、EP、PG 等核心组件的角色"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/design/architecture.md",
+            "image/architecture.png"
+          ],
+          "minimal_modules": [
+            "README 概述",
+            "架构图",
+            "组件关系"
+          ],
+          "practice_task": "阅读 README 与架构文档，用一段话画出 Mooncake 的组件关系图（Transfer Engine、Store、Master、Client、KVCache 池、Prefill/Decode 节点），并标注数据流与控制流。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与组件地图",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库顶层目录（mooncake-transfer-engine、mooncake-store、mooncake-ep、mooncake-pg、mooncake-p2p-store、mooncake-common、mooncake-rl 等），建立全局组件地图。",
+          "learning_goals": [
+            "记住仓库各顶层目录对应的子系统",
+            "区分 Transfer Engine、Store、EP、PG、P2P Store 各自的职责",
+            "定位每个子系统在仓库中的源码与构建入口"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt",
+            "mooncake-store/src/master.cpp"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "子系统职责",
+            "构建入口 CMakeLists.txt"
+          ],
+          "practice_task": "在本地 clone 仓库后，用树形图列出每个 mooncake-* 子目录，并为一行注解其职责；统计每个子系统的 .cpp/.h 文件数量，判断项目规模。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "从源码构建与安装 Mooncake",
+          "order": 3,
+          "filename": "u1-l3-build-from-source.md",
+          "level": "beginner",
+          "topic": "讲解依赖安装（dependencies.sh）、CMake 构建选项（WITH_TE/WITH_STORE/WITH_EP/USE_ETCD/USE_CUDA 等）以及 make install 流程。",
+          "learning_goals": [
+            "掌握 dependencies.sh 安装系统依赖的流程",
+            "理解 CMakeLists.txt 中关键构建开关及其作用",
+            "能够完成一次默认源码构建"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "dependencies.sh",
+            "docs/source/getting_started/build.md"
+          ],
+          "minimal_modules": [
+            "CMake 构建选项",
+            "依赖脚本",
+            "构建文档"
+          ],
+          "practice_task": "在虚拟环境中执行 dependencies.sh 并用 cmake/make 完成一次默认构建，记录开启和关闭 WITH_STORE、USE_ETCD 时编译产物的差异（生成的 .so 文件列表）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "pip 安装与 Python TransferEngine 速览",
+          "order": 4,
+          "filename": "u1-l4-python-te-quickstart.md",
+          "level": "beginner",
+          "topic": "通过 pip 安装 mooncake-transfer-engine（CUDA/non-CUDA/NPU 变体），并用 Python API 完成一次最简单的内存注册与传输。",
+          "learning_goals": [
+            "了解不同 pip 包变体（cuda / cuda13 / non-cuda / npu）的区别",
+            "理解 TransferEngine 的初始化与基本调用步骤",
+            "能够运行一个最小的 Python 传输示例"
+          ],
+          "source_files": [
+            "README.md",
+            "mooncake-integration/transfer_engine/transfer_engine_py.cpp",
+            "mooncake-transfer-engine/example/batch_register_bench.py"
+          ],
+          "minimal_modules": [
+            "pip 安装变体",
+            "TransferEngine Python 类",
+            "批量注册示例"
+          ],
+          "practice_task": "pip 安装对应版本的 mooncake-transfer-engine，编写一个 Python 脚本：初始化 TransferEngine、注册一段本地内存、在本机内发起一次 read/write 传输并打印状态。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "运行元数据服务器并完成首条跨进程传输",
+          "order": 5,
+          "filename": "u1-l5-first-transfer-metadata.md",
+          "level": "beginner",
+          "topic": "讲解元数据服务（P2P handshake / HTTP / etcd）的作用，启动轻量 HTTP 元数据服务器，让两个进程完成真正的跨进程数据传输。",
+          "learning_goals": [
+            "理解元数据服务在 Transfer Engine 中的作用",
+            "能够启动 Python HTTP 元数据服务器",
+            "完成一次跨进程（双端）的 put/get 式传输"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/example/http-metadata-server-python/bootstrap_server.py",
+            "mooncake-transfer-engine/include/transfer_metadata_plugin.h",
+            "mooncake-transfer-engine/example/kvcache_prefix_bench.py"
+          ],
+          "minimal_modules": [
+            "元数据服务器 bootstrap",
+            "P2P/HTTP/etcd 三种模式",
+            "跨进程传输"
+          ],
+          "practice_task": "在一个终端启动 bootstrap_server.py，在另两个终端分别运行发送端与接收端 Python 脚本，交换一段 buffer 并校验数据一致，观察元数据服务器收到的注册请求。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Transfer Engine 核心架构",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "TransferEngine 架构与核心抽象",
+          "order": 1,
+          "filename": "u2-l1-te-architecture-core.md",
+          "level": "intermediate",
+          "topic": "剖析 TransferEngine 门面类（transfer_engine.h），理解 init、installTransport、submitTransfer、registerLocalMemory、openSegment、allocateBatchID 等核心 API 与底层 TransferEngineImpl 的关系。",
+          "learning_goals": [
+            "掌握 TransferEngine 的主要公开 API 及调用顺序",
+            "理解 SegmentID/SegmentHandle/BatchID/TransferRequest 等核心类型",
+            "理清 TransferEngine、TransferEngineImpl、MultiTransport、TransferMetadata 的层次关系"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/transfer_engine.h",
+            "mooncake-transfer-engine/include/transfer_engine_impl.h",
+            "mooncake-transfer-engine/src/transfer_engine_impl.cpp",
+            "mooncake-transfer-engine/include/transport/transport.h"
+          ],
+          "minimal_modules": [
+            "TransferEngine 门面",
+            "TransferEngineImpl",
+            "核心类型定义"
+          ],
+          "practice_task": "阅读 transfer_engine.h 与 transfer_engine_impl.cpp，绘制一次「初始化 → 注册内存 → 打开段 → 分配 batch → 提交传输 → 查询状态」的完整调用时序图。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "TransferMetadata：段与缓冲区的元数据协调",
+          "order": 2,
+          "filename": "u2-l2-transfer-metadata.md",
+          "level": "intermediate",
+          "topic": "讲解 TransferMetadata 如何在集群中协调 peer 发现、段注册、缓冲区描述（Buffer Desc/Segment Desc/RdmaExchange），以及元数据插件机制。",
+          "learning_goals": [
+            "理解 SegmentDesc/BufferDesc/RdmaExchange 的结构与作用",
+            "掌握元数据的编码/解码与 peer 握手流程",
+            "了解 MetadataStoragePlugin/HandShakePlugin 插件接口"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/transfer_metadata.h",
+            "mooncake-transfer-engine/include/transfer_metadata_plugin.h",
+            "mooncake-transfer-engine/src/transfer_metadata.cpp"
+          ],
+          "minimal_modules": [
+            "TransferMetadata",
+            "SegmentDesc/BufferDesc",
+            "元数据插件"
+          ],
+          "practice_task": "在传输示例运行时，打印或抓取元数据服务器中存储的某个 segment 的 JSON 描述，对照源码解释每个字段（devices、buffers、rdma exchange 等）的含义。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Topology：硬件拓扑发现与设备选择",
+          "order": 3,
+          "filename": "u2-l3-topology-device.md",
+          "level": "intermediate",
+          "topic": "讲解 Topology 如何发现 NUMA、NIC（InfiniBand/RoCE）、GPU、CXL 设备并据此做拓扑感知的设备选择（含 PCI BDF 通过 char_util 安全小写化的细节），以及集群拓扑生成脚本。",
+          "learning_goals": [
+            "理解 Topology 捕获的硬件信息（NUMA 亲和、NIC、GPU）",
+            "掌握 selectDevice 等设备选择逻辑",
+            "了解 generate_cluster_topology.py 的用途与 PCI BDF 安全小写化辅助"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/topology.h",
+            "mooncake-transfer-engine/src/topology.cpp",
+            "mooncake-transfer-engine/include/char_util.h",
+            "scripts/generate_cluster_topology.py"
+          ],
+          "minimal_modules": [
+            "Topology 类",
+            "设备选择",
+            "集群拓扑脚本"
+          ],
+          "practice_task": "运行 generate_cluster_topology.py（或在多 NIC 机器上）获取本机拓扑，对照 topology.cpp 解释系统是如何根据 NUMA 亲和为一段内存选择最优 NIC 的，并说明 PCI BDF 为何要用 char_util::to_lower 而非直接 tolower。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "MultiTransport：多传输协议聚合、选择与故障转移",
+          "order": 4,
+          "filename": "u2-l4-multi-transport.md",
+          "level": "intermediate",
+          "topic": "讲解 MultiTransport 如何安装并聚合多种 transport、根据拓扑做协议选择、在多 NIC 间聚合带宽，以及失败时的自动故障转移。",
+          "learning_goals": [
+            "理解 MultiTransport 的传输选择与安装机制",
+            "掌握多协议模式（如 CXL+RDMA）与多 NIC 带宽聚合",
+            "理解传输失败时的替代路径选择逻辑"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/multi_transport.h",
+            "mooncake-transfer-engine/src/multi_transport.cpp",
+            "mooncake-transfer-engine/include/transfer_engine_impl.h"
+          ],
+          "minimal_modules": [
+            "MultiTransport",
+            "协议选择",
+            "故障转移"
+          ],
+          "practice_task": "在一台同时具备 RDMA 与 loopback 的机器上安装 tcp+rdma 两种 transport，提交一批传输任务，观察 MultiTransport 如何为每条请求选择 transport，并通过构造一次 RDMA 失败来观察故障转移。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "内存注册与段（Segment）生命周期管理",
+          "order": 5,
+          "filename": "u2-l5-memory-segment-mgmt.md",
+          "level": "intermediate",
+          "topic": "讲解本地内存注册（registerLocalMemory/registerLocalMemoryBatch）、段的打开与关闭、批量注册的语义，以及它们与元数据更新的关系。",
+          "learning_goals": [
+            "掌握 registerLocalMemory 的参数（location、remote_accessible、update_metadata）",
+            "理解段（Segment）的打开/关闭/移除生命周期",
+            "了解批量内存注册的应用场景"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/transfer_engine.h",
+            "mooncake-transfer-engine/src/transfer_engine_impl.cpp",
+            "mooncake-transfer-engine/example/batch_register_bench.py"
+          ],
+          "minimal_modules": [
+            "内存注册 API",
+            "段生命周期",
+            "批量注册"
+          ],
+          "practice_task": "编写脚本批量注册若干段内存（参考 batch_register_bench.py），观察元数据服务器的注册条目数量与耗时，并测试 unregister 后该段是否仍可被远端访问。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l6",
+          "title": "Python TransferEngine API 详解",
+          "order": 6,
+          "filename": "u2-l6-python-te-api.md",
+          "level": "intermediate",
+          "topic": "详解 TransferEnginePy 暴露给 Python 的同步/异步、批量、CUDA 端的传输 API（transfer_engine_py.cpp 的 pybind 绑定）。",
+          "learning_goals": [
+            "掌握 transfer_sync_read/write、batch_transfer_async、transfer_*_on_cuda 等 Python API",
+            "理解 managed buffer 的分配与释放",
+            "了解 register_memory、get_notifies、send_probe 等辅助接口"
+          ],
+          "source_files": [
+            "mooncake-integration/transfer_engine/transfer_engine_py.cpp",
+            "mooncake-transfer-engine/example/kvcache_prefix_bench.py",
+            "mooncake-transfer-engine/include/transfer_engine.h"
+          ],
+          "minimal_modules": [
+            "TransferEngine Python 绑定",
+            "同步/异步批量传输",
+            "CUDA 传输"
+          ],
+          "practice_task": "基于 kvcache_prefix_bench.py 的模式，编写一个 Python 程序：分配 managed buffer、发起异步批量写入、轮询 get_batch_transfer_status 直到完成，并对比同步与异步两种方式的吞吐。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "传输层（Transport）实现机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Transport 基类：Slice/Task/Batch 模型",
+          "order": 1,
+          "filename": "u3-l1-transport-base-slice-batch.md",
+          "level": "intermediate",
+          "topic": "深入 Transport 抽象基类，理解 TransferRequest（OpCode READ/WRITE）、Slice、TransferTask、BatchDesc 的细粒度并行与完成追踪模型。",
+          "learning_goals": [
+            "理解 TransferRequest 的字段与 READ/WRITE 语义",
+            "掌握 Slice 如何承载各协议特有元数据并支持跨协议并行",
+            "理解 TransferTask/BatchDesc 的原子完成追踪机制"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/transport/transport.h",
+            "mooncake-transfer-engine/include/multi_transport.h"
+          ],
+          "minimal_modules": [
+            "Transport 基类",
+            "Slice/Task/Batch",
+            "完成追踪"
+          ],
+          "practice_task": "阅读 transport.h，画出一批 TransferRequest 如何被切分为多个 Slice、聚合为 TransferTask、再聚合为 Batch 的对象关系图，并解释 getTransferStatus 如何判断完成。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "RDMA Transport 深入",
+          "order": 2,
+          "filename": "u3-l2-rdma-transport.md",
+          "level": "intermediate",
+          "topic": "深入 RdmaTransport/RdmaContext/RdmaEndPoint，理解 QP、内存注册（lkey/rkey）、worker 池、端点管理与重试机制。",
+          "learning_goals": [
+            "理解 RDMA 传输的 QP/端点/上下文组织",
+            "掌握内存注册与 rkey/lkey 在远端访问中的作用",
+            "了解 worker 池与重试/relaxed ordering 机制"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/src/transport/rdma_transport/rdma_transport.cpp",
+            "mooncake-transfer-engine/include/transport/transport.h",
+            "mooncake-transfer-engine/include/topology.h"
+          ],
+          "minimal_modules": [
+            "RdmaTransport",
+            "RdmaContext/EndPoint",
+            "QP 与内存注册"
+          ],
+          "practice_task": "在 RDMA 环境下运行传输基准，记录不同 message size 下的带宽；对照源码解释一次 WRITE 操作从 submitTransfer 到 RDMA post send 的调用链，并说明失败重试发生在何处。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "TCP Transport：通用回退传输",
+          "order": 3,
+          "filename": "u3-l3-tcp-transport.md",
+          "level": "intermediate",
+          "topic": "讲解 TcpTransport 如何用连接池与协程 I/O 提供通用回退传输，以及在 TCP-only 时本机 memcpy 优化。",
+          "learning_goals": [
+            "理解 TCP 传输的连接池与协程 I/O 模型",
+            "掌握 handshake daemon 与端点管理",
+            "了解 isTcpOnly 时本机 memcpy 回退优化"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/src/transport/tcp_transport/tcp_transport.cpp",
+            "mooncake-transfer-engine/include/transfer_engine.h",
+            "mooncake-transfer-engine/include/multi_transport.h"
+          ],
+          "minimal_modules": [
+            "TcpTransport",
+            "连接池",
+            "TCP-only 优化"
+          ],
+          "practice_task": "在无 RDMA 环境下用 TCP-only 模式运行传输，对照源码说明本机两端传输时为何会走 memcpy 而非 TCP loopback，并测量两种方式延迟差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "异构传输：NVLink / NVMe-oF / EFA / CXL / Ascend / HIP / MUSA",
+          "order": 4,
+          "filename": "u3-l4-heterogeneous-transports.md",
+          "level": "intermediate",
+          "topic": "概览仓库支持的各种异构 transport（NVLink、NVMe-oF、EFA、CXL、Ascend HCCL/Direct、HIP/ROCm、MUSA 等）与 device 子目录；重点讲解 Ascend Direct 在同进程共存的多 TE 下按角色（Store=RoCE / P2P=HCCS）解析 ASCEND_GLOBAL_RESOURCE_CONFIG 的机制，以及 CUDA/MUSA 跨 GPU 内存可见性的 fence 原语差异。",
+          "learning_goals": [
+            "了解仓库支持的全部传输协议及其适用场景",
+            "理解各 transport 共享 Transport 基类接口、各自维护协议元数据",
+            "理解 Ascend Direct 如何用 ascend_store_te_init 标志区分 Store TE 与 P2P TE 并解析各自的链路配置",
+            "了解 CUDA 与 MUSA 在跨 GPU 内存可见性（mc_fence / cooperative grid sync）上的实现差异"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/include/transport/transport.h",
+            "docs/source/getting_started/supported-protocols.md",
+            "mooncake-transfer-engine/src/transport/nvmeof_transport",
+            "mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/ascend_direct_transport.cpp",
+            "mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/utils.cpp",
+            "mooncake-transfer-engine/include/transport/device/musa/musa_ops.cuh",
+            "mooncake-store/src/client_service.cpp"
+          ],
+          "minimal_modules": [
+            "异构 transport 一览",
+            "Transport 统一接口",
+            "Ascend per-role 配置",
+            "MUSA fence 原语"
+          ],
+          "practice_task": "阅读 supported-protocols.md 与 ascend_direct_transport.cpp/utils.cpp，说明同进程内 Store TE 与 P2P TE 如何通过 ascend_store_te_init 与 ASCEND_GLOBAL_RESOURCE_CONFIG 的 store 子键各自解析 RoCE/HCCS 链路配置；再对照 musa_ops.cuh 与 cuda_ops.cuh 解释 MUSA 为何需要显式 __threadfence_system 而 CUDA 的 mc_fence 是空操作。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "TENT：新一代声明式传输引擎",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "TENT 概述与设计动机",
+          "order": 1,
+          "filename": "u4-l1-tent-overview.md",
+          "level": "intermediate",
+          "topic": "介绍 TENT（Declarative Slice Spraying Engine）的设计动机：声明式 API、跨 transport 的切片喷射、策略驱动与内置 QoS，以及它与传统 TransferEngineImpl 的区别。",
+          "learning_goals": [
+            "理解 TENT 的核心概念：声明式传输与切片喷射（slice spraying）",
+            "了解 TENT 相对传统引擎的架构改进",
+            "定位 TENT 在仓库中的源码结构与文档"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/tent/src/transfer_engine.cpp",
+            "docs/source/design/tent/overview.md",
+            "docs/source/design/tent/slice-spraying.md"
+          ],
+          "minimal_modules": [
+            "TENT 门面",
+            "设计概览",
+            "切片喷射"
+          ],
+          "practice_task": "阅读 tent overview 与 slice-spraying 文档，写一段对比说明：同样一次大对象传输，传统 TransferEngineImpl 与 TENT 在「如何把数据分发到多条路径」上的处理差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "TENT 运行时：Segment 管理与注册表",
+          "order": 2,
+          "filename": "u4-l2-tent-segment-runtime.md",
+          "level": "intermediate",
+          "topic": "剖析 TENT 运行时的 SegmentManager、SegmentRegistry、segment_tracker、proxy_manager 与 progress_worker 如何协同管理段与异步进度。",
+          "learning_goals": [
+            "理解 TENT 运行时的组件职责划分",
+            "掌握段注册表与段缓存机制",
+            "了解代理缓冲（proxy/staging）与进度追踪 worker"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/tent/src/runtime/segment_manager.cpp",
+            "mooncake-transfer-engine/tent/src/runtime/transfer_engine_impl.cpp",
+            "mooncake-transfer-engine/tent/src/runtime/segment_registry.cpp"
+          ],
+          "minimal_modules": [
+            "SegmentManager",
+            "SegmentRegistry",
+            "Proxy/Progress worker"
+          ],
+          "practice_task": "对照源码画出 TENT 一次传输的运行时组件交互图：TransferEngineImpl → SegmentManager/Registry → TransportSelector → ProxyManager 暂存 → ProgressWorker 追踪完成。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "TENT TransportSelector：声明式路径选择",
+          "order": 3,
+          "filename": "u4-l3-tent-transport-selector.md",
+          "level": "intermediate",
+          "topic": "讲解 TransportSelector 如何基于策略在多个 transport 间做声明式选择与切片喷射，以及 transport_loader 的动态加载。",
+          "learning_goals": [
+            "理解 TransportSelector 的策略化路径选择",
+            "掌握切片如何被喷射到多条 transport",
+            "了解 transport_loader 的动态加载机制"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/tent/src/runtime/transport_selector.cpp",
+            "mooncake-transfer-engine/tent/src/runtime/transport_loader.cpp",
+            "docs/source/design/tent/transport-selector.md"
+          ],
+          "minimal_modules": [
+            "TransportSelector",
+            "切片喷射",
+            "transport_loader"
+          ],
+          "practice_task": "阅读 transport-selector 文档与源码，描述一次跨多 NIC 的传输中，Selector 是依据哪些信息（拓扑、负载、策略）决定切片分配比例的。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "TENT 准入控制与 QoS（AdmissionQueue）",
+          "order": 4,
+          "filename": "u4-l4-tent-admission-qos.md",
+          "level": "intermediate",
+          "topic": "讲解 AdmissionQueue 与相关 QoS 机制如何做资源管理与流量整形，保证高负载下的公平性与可预测性。",
+          "learning_goals": [
+            "理解 TENT 的准入控制（admission control）模型",
+            "掌握 AdmissionQueue 的队列与资源管理",
+            "了解 QoS 策略对传输顺序与并发的影响"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/tent/src/runtime/admission_queue.cpp",
+            "docs/source/design/tent/qos.md",
+            "mooncake-transfer-engine/tent/src/runtime/transfer_engine_impl.cpp"
+          ],
+          "minimal_modules": [
+            "AdmissionQueue",
+            "QoS 策略",
+            "资源管理"
+          ],
+          "practice_task": "阅读 qos 文档，设计一个高负载压测实验：同时提交大量传输任务，观察 AdmissionQueue 如何限制在途并发，并记录吞吐与延迟随负载变化的曲线。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "TENT 控制面与元数据存储（ControlPlane/MetaStore）",
+          "order": 5,
+          "filename": "u4-l5-tent-control-plane-metastore.md",
+          "level": "intermediate",
+          "topic": "讲解 TENT 的 ControlPlane（基于 RPC 的分布式协调）与 MetaStore（etcd/redis/http 后端抽象）及其故障转移能力。",
+          "learning_goals": [
+            "理解 TENT ControlPlane 的 RPC 协调职责",
+            "掌握 MetaStore 的多后端抽象（etcd/redis/http）",
+            "了解 TENT 的故障转移（failover）机制"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/tent/src/runtime/control_plane.cpp",
+            "mooncake-transfer-engine/tent/src/runtime/metastore.cpp",
+            "docs/source/design/tent/failover.md",
+            "mooncake-transfer-engine/tent/src/python/pybind.cpp"
+          ],
+          "minimal_modules": [
+            "ControlPlane",
+            "MetaStore",
+            "failover"
+          ],
+          "practice_task": "用 TENT 的 Python 绑定（pybind.cpp 暴露的接口）切换不同 MetaStore 后端（http 与 redis/etcd）启动一次传输，并对照 failover 文档说明当某节点失联时 TENT 的处理路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Mooncake Store 架构与客户端",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Mooncake Store 总体架构：控制面与数据面分离",
+          "order": 1,
+          "filename": "u5-l1-store-architecture.md",
+          "level": "intermediate",
+          "topic": "从总体上讲解 Mooncake Store 的架构：Master 管理元数据与调度，Client 负责实际数据传输（基于 TE），数据面与控制面解耦。",
+          "learning_goals": [
+            "理解 Store 控制面（Master）与数据面（Client+TE）的分离设计",
+            "掌握 put/get 的整体流程：先查 Master 元数据再用 TE 直传",
+            "了解 Store 相对纯 TE 的增值（复制、淘汰、多级存储）"
+          ],
+          "source_files": [
+            "docs/source/design/mooncake-store.md",
+            "mooncake-store/include/real_client.h",
+            "mooncake-store/include/master_service.h"
+          ],
+          "minimal_modules": [
+            "Store 架构",
+            "控制面/数据面",
+            "put/get 流程"
+          ],
+          "practice_task": "阅读 mooncake-store 设计文档，画出一笔 put 操作的完整流程图：Client → Master（PutStart 分配 replica）→ TE 传输 → Master（PutEnd），标注控制面与数据面边界。",
+          "depends_on": [
+            "u1-l5",
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "MasterService：Store 的元数据大脑",
+          "order": 2,
+          "filename": "u5-l2-master-service.md",
+          "level": "intermediate",
+          "topic": "深入 MasterService，理解段挂载、对象元数据（ObjectMetadata/Replica）、租约、分片（1024 shards）与多租户等核心机制。",
+          "learning_goals": [
+            "理解 MasterService 的段挂载与对象元数据模型",
+            "掌握 1024 路分片加锁与多租户（tenant）命名空间设计",
+            "了解 PutStart/PutEnd/GetReplicaList/Remove 等核心 RPC 的语义"
+          ],
+          "source_files": [
+            "mooncake-store/include/master_service.h",
+            "mooncake-store/include/master_config.h",
+            "mooncake-store/src/master.cpp"
+          ],
+          "minimal_modules": [
+            "MasterService",
+            "ObjectMetadata/Replica",
+            "分片与多租户"
+          ],
+          "practice_task": "阅读 master_service.h，列出 MountSegment/PutStart/GetReplicaList/Ping 各自的返回语义与可能的 ErrorCode，并解释分片索引（getShardIndex）是如何由 tenant 与 key 共同决定的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "RealClient：客户端架构与数据传输",
+          "order": 3,
+          "filename": "u5-l3-real-client.md",
+          "level": "intermediate",
+          "topic": "深入 RealClient，理解它与 Master 的交互（MasterClient RPC）、如何用 TransferEngine 做实际数据传输、零拷贝与批量接口，以及 DummyClient 的用途。",
+          "learning_goals": [
+            "理解 RealClient 的三层客户端模型（Client/RealClient/DummyClient）",
+            "掌握 put/get 的零拷贝实现与批量接口",
+            "了解 RealClient 如何调用 TE 完成跨节点传输"
+          ],
+          "source_files": [
+            "mooncake-store/include/real_client.h",
+            "mooncake-store/src/real_client.cpp",
+            "mooncake-store/include/client_service.h",
+            "mooncake-store/include/master_client.h"
+          ],
+          "minimal_modules": [
+            "RealClient",
+            "MasterClient",
+            "DummyClient"
+          ],
+          "practice_task": "阅读 real_client.cpp 中一次 get 的实现，追踪从 GetReplicaList 到 TE submitTransfer 再到数据落地的调用链，并说明零拷贝是如何避免额外内存拷贝的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Python Store API：MooncakeDistributedStore",
+          "order": 4,
+          "filename": "u5-l4-python-store-api.md",
+          "level": "intermediate",
+          "topic": "详解 MooncakeDistributedStore 的 Python 绑定（store_py.cpp）：put/get/batch、put_tensor/get_tensor、mount_segment、ReplicateConfig 等。",
+          "learning_goals": [
+            "掌握 MooncakeDistributedStore 的 put/get/put_tensor/get_tensor 用法",
+            "理解 ReplicateConfig（副本数、soft/hard pin、preferred_segments）",
+            "了解 mount_segment 与 register_buffer 的区别与用途"
+          ],
+          "source_files": [
+            "mooncake-integration/store/store_py.cpp",
+            "mooncake-store/include/real_client.h",
+            "mooncake-store/include/rpc_types.h"
+          ],
+          "minimal_modules": [
+            "MooncakeDistributedStore",
+            "put/get/tensor API",
+            "ReplicateConfig"
+          ],
+          "practice_task": "编写 Python 程序：初始化 MooncakeDistributedStore、mount 一段内存、用 ReplicateConfig 指定 2 副本写入一个 tensor，再从另一端读取并校验形状与数值一致。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l5",
+          "title": "Segment 与 Replica 数据模型",
+          "order": 5,
+          "filename": "u5-l5-segment-replica-model.md",
+          "level": "intermediate",
+          "topic": "讲解 Segment/NoFSegment、Replica 及其 Descriptor、ReplicaType（MEMORY/DISK/LOCAL_DISK/NOF_SSD）、ReplicaStatus 等核心数据模型。",
+          "learning_goals": [
+            "理解 Segment 与 NoFSegment 的区别与生命周期状态",
+            "掌握 Replica 类型与状态机（INITIALIZED/PROCESSING/COMPLETE）",
+            "了解 Replica::Descriptor 如何承载可序列化的位置信息"
+          ],
+          "source_files": [
+            "mooncake-store/include/segment.h",
+            "mooncake-store/include/replica.h",
+            "mooncake-store/include/types.h",
+            "mooncake-store/include/rpc_types.h"
+          ],
+          "minimal_modules": [
+            "Segment/NoFSegment",
+            "Replica 类型与状态",
+            "Replica::Descriptor"
+          ],
+          "practice_task": "对照源码绘制 Replica 的状态机图（INITIALIZED→PROCESSING→COMPLETE 及 FAILED/REMOVED），并解释 MEMORY/LOCAL_DISK/NOF_SSD 三类副本分别如何被 Master 调度与淘汰。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Mooncake Store 内部机制",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "缓冲区分配与内存池（Allocator）",
+          "order": 1,
+          "filename": "u6-l1-store-allocator.md",
+          "level": "intermediate",
+          "topic": "讲解 Store 的分配子系统：Buffer Allocator（CacheLib/Offset/Simple）、AllocationStrategy（Random/FreeRatioFirst/CXL）、LocalHotCache 与 PinnedBufferPool。",
+          "learning_goals": [
+            "理解三类 Buffer Allocator 的差异与适用场景",
+            "掌握 AllocationStrategy 如何选择目标段做副本放置",
+            "了解 LocalHotCache 的 LRU + Count-Min Sketch 准入控制"
+          ],
+          "source_files": [
+            "mooncake-store/include/allocator.h",
+            "mooncake-store/include/allocation_strategy.h",
+            "mooncake-store/src/allocator.cpp",
+            "mooncake-store/include/local_hot_cache.h"
+          ],
+          "minimal_modules": [
+            "Buffer Allocator",
+            "AllocationStrategy",
+            "LocalHotCache"
+          ],
+          "practice_task": "阅读 allocation_strategy.h，对比 RandomAllocationStrategy 与 FreeRatioFirstAllocationStrategy 的选段逻辑；设计一个实验说明 FreeRatioFirst 在何种访问分布下更能均衡各段利用率。",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "多级存储：DRAM / SSD / NVMe-oF",
+          "order": 2,
+          "filename": "u6-l2-multi-tier-storage.md",
+          "level": "advanced",
+          "topic": "讲解 Store 的多级存储层次（DRAM/VRAM → 本地 SSD → 分布式文件系统），文件后端（posix/io_uring/spdk/hf3fs）与 StorageBackend 的多种实现。",
+          "learning_goals": [
+            "理解 Store 的 L1/L2/L3 多级缓存层次",
+            "掌握 posix/io_uring/spdk/hf3fs 等文件后端的差异",
+            "了解 StorageBackend 的 Bucket/OffsetAllocator/FilePerKey 实现"
+          ],
+          "source_files": [
+            "mooncake-store/include/storage_backend.h",
+            "mooncake-store/src/file_storage.cpp",
+            "mooncake-store/src/uring_file.cpp",
+            "mooncake-store/src/posix_file.cpp",
+            "mooncake-store/src/storage/distributed/distributed_storage_backend.cpp"
+          ],
+          "minimal_modules": [
+            "多级存储层次",
+            "文件后端",
+            "StorageBackend"
+          ],
+          "practice_task": "阅读 ssd-offload 部署文档与 uring_file.cpp，说明开启本地 SSD offload 后，一个对象的 DISK 副本是如何写入与读取的，并比较 posix 与 io_uring 后端的 I/O 路径差异。",
+          "depends_on": [
+            "u5-l5",
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "淘汰、Pin 与租约（Lease）机制",
+          "order": 3,
+          "filename": "u6-l3-eviction-pin-lease.md",
+          "level": "advanced",
+          "topic": "讲解 Store 的淘汰策略（LRU/FIFO、BatchEvict 两遍扫描）、soft/hard pin、租约（lease TTL）与基于 CountMinSketch 的访问频率追踪。",
+          "learning_goals": [
+            "理解 BatchEvict 的两遍扫描与高/低水位线机制",
+            "掌握 soft pin / hard pin / lease 三种对象保护机制",
+            "了解 CountMinSketch 在访问频率统计与提升准入中的作用"
+          ],
+          "source_files": [
+            "mooncake-store/include/master_service.h",
+            "mooncake-store/include/eviction_strategy.h",
+            "mooncake-store/include/count_min_sketch.h"
+          ],
+          "minimal_modules": [
+            "BatchEvict",
+            "Pin/Lease",
+            "CountMinSketch"
+          ],
+          "practice_task": "阅读 master_service.h 中 ObjectMetadata 的 lease/pin 字段与 BatchEvict 注释，描述一个 soft pin 对象在内存压力下何时被淘汰、何时被保护，以及 lease 过期后如何被清理。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Offload 与 Promotion-on-hit",
+          "order": 4,
+          "filename": "u6-l4-offload-promotion.md",
+          "level": "advanced",
+          "topic": "讲解 Store 的层级迁移机制：高水位触发的 DRAM→SSD offload，以及基于访问频率的 SSD→DRAM promotion-on-hit，均由心跳驱动异步执行。",
+          "learning_goals": [
+            "理解 offload-on-evict 的触发条件与流程",
+            "掌握 promotion-on-hit 的准入门控（频率/水位/去重/上限）",
+            "了解心跳驱动的异步任务下发（Offload/PromotionObjectHeartbeat）"
+          ],
+          "source_files": [
+            "mooncake-store/include/master_service.h",
+            "mooncake-store/include/count_min_sketch.h",
+            "docs/source/deployment/ssd-offload.md"
+          ],
+          "minimal_modules": [
+            "Offload",
+            "Promotion-on-hit",
+            "心跳驱动"
+          ],
+          "practice_task": "对照 master_service.h 中 PromotionTask 结构与相关注释，描述一次 promotion-on-hit 的完整生命周期：Get 观察到只有 LOCAL_DISK 副本 → 频率命中 → 分配 DRAM → RDMA 写入 → 提交 COMPLETE，并解释 holder_id 鉴权为何必要。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "多租户配额（Tenant Quota）",
+          "order": 5,
+          "filename": "u6-l5-tenant-quota.md",
+          "level": "advanced",
+          "topic": "讲解 TenantQuotaTable 的 reserve/commit/abort 模型、有效配额计算与多租户间的容量分配与仲裁。",
+          "learning_goals": [
+            "理解多租户配额的 reserve/commit/abort 三阶段模型",
+            "掌握 effective/used/reserved 配额字段的含义与重算",
+            "了解配额在分配失败时的回滚与仲裁"
+          ],
+          "source_files": [
+            "mooncake-store/include/tenant_quota.h",
+            "mooncake-store/src/tenant_quota.cpp",
+            "mooncake-store/include/master_service.h"
+          ],
+          "minimal_modules": [
+            "TenantQuotaTable",
+            "reserve/commit/abort",
+            "有效配额计算"
+          ],
+          "practice_task": "阅读 tenant_quota.h，设计一个两租户场景：租户 A 预留大量配额但未 commit，观察租户 B 的 effective 配额如何被重算，并说明 abort 路径如何释放预留。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "RPC 服务与异步 Copy/Move/Drain 任务",
+          "order": 6,
+          "filename": "u6-l6-rpc-async-tasks.md",
+          "level": "advanced",
+          "topic": "讲解 Store 基于 ylt/coro_rpc 的 RPC 服务、struct_pack 序列化，以及 Master 下发到 Client 异步执行的 Copy/Move/Drain 任务机制。",
+          "learning_goals": [
+            "理解 coro_rpc + struct_pack 的异步 RPC 框架",
+            "掌握 Copy/Move/Drain 任务的创建、下发与完成回报",
+            "了解 DrainJob 的生命周期与重试/失败统计"
+          ],
+          "source_files": [
+            "mooncake-store/include/rpc_service.h",
+            "mooncake-store/include/task_manager.h",
+            "mooncake-store/include/transfer_task.h",
+            "mooncake-store/src/transfer_task.cpp"
+          ],
+          "minimal_modules": [
+            "coro_rpc 服务",
+            "TaskManager",
+            "Copy/Move/Drain 任务"
+          ],
+          "practice_task": "阅读 master_service.h 中 CreateCopyTask/CreateMoveTask/CreateDrainJob 与 FetchTasks/MarkTaskToComplete，画出 DrainJob 从创建、任务切片下发、客户端执行到 MaybeCompleteDrainJob 的状态流转图。",
+          "depends_on": [
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高可用、运维与部署",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "高可用：Leader 选举与热备（Hot Standby）",
+          "order": 1,
+          "filename": "u7-l1-ha-leader-standby.md",
+          "level": "advanced",
+          "topic": "讲解 Store 的高可用架构：基于 etcd/k8s lease/redis 的 Leader 选举、主备间的 OpLog 复制与热备状态机。",
+          "learning_goals": [
+            "理解多种 Leader 选举后端（etcd/k8s/redis）的实现差异",
+            "掌握主→备的 OpLog 复制与变更通知机制",
+            "了解热备状态机（BOOTSTRAPPING/REPLICATING/PROMOTING/PRIMARY）"
+          ],
+          "source_files": [
+            "mooncake-store/include/hot_standby_service.h",
+            "mooncake-store/include/standby_state_machine.h",
+            "mooncake-store/src/ha",
+            "mooncake-store/include/master_admin_service.h"
+          ],
+          "minimal_modules": [
+            "Leader 选举",
+            "OpLog 复制",
+            "热备状态机"
+          ],
+          "practice_task": "阅读 hot_standby_service.h 与 standby_state_machine.h，绘制热备从 STOPPED 到 PRIMARY 的状态转移图，并解释 OpLog 在主备切换中如何保证元数据不丢。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "快照与恢复（Snapshot & Restore）",
+          "order": 2,
+          "filename": "u7-l2-snapshot-restore.md",
+          "level": "advanced",
+          "topic": "讲解 Master 状态的快照持久化与恢复：快照目录后端（embedded/redis/s3）、对象存储后端（local/s3）、子进程快照与 OpLog 边界。",
+          "learning_goals": [
+            "理解 Master 元数据快照的序列化/反序列化（MetadataSerializer）",
+            "掌握快照目录与对象存储的多后端设计",
+            "了解快照与 OpLog 边界配合实现的一致性恢复"
+          ],
+          "source_files": [
+            "mooncake-store/include/master_service.h",
+            "mooncake-store/src/ha/snapshot",
+            "mooncake-store/include/master_admin_service.h"
+          ],
+          "minimal_modules": [
+            "MetadataSerializer",
+            "快照目录/对象存储",
+            "OpLog 边界"
+          ],
+          "practice_task": "对照 master_service.h 的 PersistState/RestoreState 与 SnapshotThreadFunc，描述一次周期性快照：何时触发、如何确定 OpLog 边界、快照写入哪个后端，以及重启时如何选择有效快照恢复。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "元数据服务器后端：etcd / HTTP / Redis",
+          "order": 3,
+          "filename": "u7-l3-metadata-server-backends.md",
+          "level": "advanced",
+          "topic": "讲解 Store 与 TE 共用的元数据后端选择：P2P handshake、内嵌 HTTP 元数据服务器、etcd（go 包/legacy）、redis，以及各自的部署权衡。",
+          "learning_goals": [
+            "理解四种元数据后端（P2P/HTTP/etcd/redis）的适用场景",
+            "掌握 CMake 开关（USE_ETCD/STORE_USE_ETCD/STORE_USE_REDIS）与构建约束",
+            "了解 etcd_helper / http_metadata_server / k8s_lease_helper 的职责"
+          ],
+          "source_files": [
+            "mooncake-store/include/http_metadata_server.h",
+            "mooncake-store/include/etcd_helper.h",
+            "mooncake-store/include/k8s_lease_helper.h",
+            "mooncake-common/etcd/etcd_wrapper.go"
+          ],
+          "minimal_modules": [
+            "元数据后端",
+            "CMake 开关",
+            "helper 类"
+          ],
+          "practice_task": "对照 CMakeLists.txt 的互斥约束（如 STORE_USE_ETCD 与 STORE_USE_K8S_LEASE 不能同开），说明在单机开发、小集群、生产大规模三种场景下分别推荐哪种元数据后端并给出理由。",
+          "depends_on": [
+            "u2-l2",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "指标与可观测性（Metrics & Observability）",
+          "order": 4,
+          "filename": "u7-l4-metrics-observability.md",
+          "level": "advanced",
+          "topic": "讲解 Store 的客户端/主/HA 指标体系（Counter/Gauge/Histogram/Summary）、混合指标，以及 Prometheus + Grafana 监控栈。",
+          "learning_goals": [
+            "理解客户端/主端/HA 三类指标的覆盖范围",
+            "掌握指标类型（Counter/Gauge/Histogram/Summary）的用法",
+            "了解 monitoring/ 下的 Prometheus 抓取与 Grafana 看板配置"
+          ],
+          "source_files": [
+            "mooncake-store/include/client_metric.h",
+            "mooncake-store/include/master_metric_manager.h",
+            "mooncake-store/include/ha_metric_manager.h",
+            "monitoring/docker-compose.yml",
+            "monitoring/grafana/dashboards/mooncake.json"
+          ],
+          "minimal_modules": [
+            "指标体系",
+            "指标类型",
+            "Prometheus/Grafana"
+          ],
+          "practice_task": "启动 monitoring/docker-compose.yml 的 Prometheus+Grafana 栈，对运行中的 Store Master 抓取指标，在 Grafana 中观察 Put/Get 吞吐与内存利用率，并对照源码说明某条指标是在哪段代码被更新的。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l5",
+          "title": "部署指南：从单机到集群",
+          "order": 5,
+          "filename": "u7-l5-deployment-guide.md",
+          "level": "advanced",
+          "topic": "基于官方部署文档，讲解 Store 的单机部署、SSD offload 部署与 NVMe-oF 部署的配置要点与拓扑。",
+          "learning_goals": [
+            "掌握单机 P2P handshake 部署的最小配置",
+            "理解开启 SSD offload 的容量规划与淘汰配置",
+            "了解 NVMe-oF（NoF）远程 SSD 部署的段与心跳配置"
+          ],
+          "source_files": [
+            "docs/source/deployment/mooncake-store-deployment-guide.md",
+            "docs/source/deployment/ssd-offload.md",
+            "docs/source/deployment/nvmf-ssd-deployment-guide.md",
+            "mooncake-store/tests/e2e/store_client_e2e.py"
+          ],
+          "minimal_modules": [
+            "单机部署",
+            "SSD offload",
+            "NVMe-oF 部署"
+          ],
+          "practice_task": "按照部署指南在单机用 P2P handshake 模式跑通 store_client_e2e.py 端到端示例，记录所需的环境变量与配置文件，并尝试叠加开启本地 SSD offload 观察容量变化。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家并行（EP）与容错进程组（PG）",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Mooncake EP：容错专家并行",
+          "order": 1,
+          "filename": "u8-l1-mooncake-ep.md",
+          "level": "advanced",
+          "topic": "讲解 Mooncake EP 的 dispatch/combine API、active_ranks 感知、与 DeepEP 的兼容性，IBGDA/P2P/Python fallback 三种执行路径；并新增 MUSA（摩尔线程）平台支持：通过 torchada 源到源翻译构建、用 mooncake_ep_device.h 统一 CUDA/MUSA 的 FP8 与 launch 抽象（EP_BF16_SIZE），以及在 MUSA 上以 SEND→phase-ack→RECV 拆分内核替代 CUDA 协作网格同步的异步语义。",
+          "learning_goals": [
+            "理解 EP 的 dispatch/combine 在 MoE 推理中的作用",
+            "掌握 active_ranks 感知带来的容错能力",
+            "了解 IBGDA RDMA、P2P/IPC、Python fallback 三种执行路径",
+            "了解 EP 对 MUSA 平台的支持（torchada 构建、mooncake_ep_device.h 抽象、拆分内核 + phase-ack 异步路径）"
+          ],
+          "source_files": [
+            "mooncake-ep/include/mooncake_ep_buffer.h",
+            "mooncake-ep/include/mooncake_ep_event.h",
+            "mooncake-ep/src/ep_py.cpp",
+            "docs/source/design/mooncake-ep.md",
+            "mooncake-ep/include/mooncake_ep_device.h",
+            "mooncake-ep/setup.py",
+            "mooncake-ep/include/mooncake_ep_api.cuh",
+            "mooncake-ep/src/mooncake_ep_kernel.cu",
+            "mooncake-wheel/mooncake/mooncake_ep_buffer.py"
+          ],
+          "minimal_modules": [
+            "EP Buffer",
+            "dispatch/combine",
+            "active_ranks 容错",
+            "MUSA 平台支持"
+          ],
+          "practice_task": "阅读 ep_py.cpp 暴露的 Python 接口与 mooncake_ep_buffer.h，编写一段伪代码：构造带 active_ranks 的 dispatch，模拟某个 expert rank 失活，说明 combine 如何绕过失效 rank 返回结果；并对照 setup.py 与 mooncake_ep_device.h 说明开启 MOONCAKE_EP_USE_MUSA 后构建与异步语义（拆分内核 + phase-ack）与 CUDA 协作网格路径的区别。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Mooncake PG：torch.distributed 后端与弹性恢复",
+          "order": 2,
+          "filename": "u8-l2-mooncake-pg.md",
+          "level": "advanced",
+          "topic": "讲解 Mooncake PG 作为 torch.distributed 后端提供的集合通信原语、rank 失效检测与不重启整服务的弹性 rank 恢复。",
+          "learning_goals": [
+            "理解 PG 如何注册为 torch.distributed 后端并支持 all_gather 等集合操作",
+            "掌握 rank 失效检测、上报与恢复机制",
+            "了解两阶段弹性恢复协议（peer-state 轮询 + recover_ranks）"
+          ],
+          "source_files": [
+            "mooncake-pg/include/mooncake_backend.h",
+            "mooncake-pg/include/pg_utils.h",
+            "mooncake-pg/include/p2p_proxy.h",
+            "mooncake-pg/include/connection_poller.h",
+            "mooncake-pg/src/pg_py.cpp"
+          ],
+          "minimal_modules": [
+            "MooncakeBackend",
+            "集合通信",
+            "弹性恢复"
+          ],
+          "practice_task": "阅读 pg_py.cpp 与 mooncake_backend.h，描述一个 rank 崩溃后替换进程重新加入的过程：新 rank 调用 join_group、健康 rank 通过 get_peer_state 轮询、再由 recover_ranks 激活，并说明 maxWorldSize 的预留作用。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "生态集成与扩展",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "P2P Store：无 Master 的对等存储",
+          "order": 1,
+          "filename": "u9-l1-p2p-store.md",
+          "level": "advanced",
+          "topic": "讲解 mooncake-p2p-store（Go 实现）的无中心 master、基于 etcd 元数据、类似 BitTorrent 的 Register/GetReplica 模型，及其与 checkpoint-engine 的关系。",
+          "learning_goals": [
+            "理解 P2P Store 无 master 的对等架构与 etcd 元数据用途",
+            "掌握 Register/GetReplica/DeleteReplica/List 的 BitTorrent 式语义",
+            "了解 P2P Store 与 checkpoint-engine 的演进关系"
+          ],
+          "source_files": [
+            "mooncake-p2p-store/src/p2pstore/core.go",
+            "mooncake-p2p-store/src/p2pstore/metadata.go",
+            "mooncake-p2p-store/src/p2pstore/transfer_engine.go",
+            "mooncake-p2p-store/src/example/p2p-store-example.go"
+          ],
+          "minimal_modules": [
+            "P2P Store 核心",
+            "元数据/目录",
+            "示例"
+          ],
+          "practice_task": "阅读 core.go 与 p2p-store-example.go，画出一个文件被 Register 后、多个节点通过 GetReplica 互相拉取（可再被他人拉取）的数据分发流程图，对比与中心化 Store 的差异。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "PyTorch Allocator 集成：零拷贝显存",
+          "order": 2,
+          "filename": "u9-l2-pytorch-allocator.md",
+          "level": "advanced",
+          "topic": "讲解 mooncake-integration 下的 PyTorch 可插拔 allocator（CUDA/NVLink 与 Ascend NPU/UBShmem），如何让 PyTorch 直接从 Mooncake 存储池分配显存。",
+          "learning_goals": [
+            "理解 PyTorch CUDAPluggableAllocator 的接入机制",
+            "掌握 NVLinkAllocator 探测 fabric 内存（cudaMalloc vs MemCreate）的逻辑",
+            "了解 Ascend NPU 的 UBShmem fabric allocator 路径"
+          ],
+          "source_files": [
+            "mooncake-integration/allocator.py",
+            "mooncake-integration/allocator_ascend_npu.py",
+            "mooncake-integration/fabric_allocator_utils.py"
+          ],
+          "minimal_modules": [
+            "PyTorch 可插拔 allocator",
+            "NVLink/CUDA allocator",
+            "Ascend NPU allocator"
+          ],
+          "practice_task": "阅读 allocator.py，说明 NVLinkAllocator 是如何探测 fabric 内存支持并在 cudaMalloc 与 CUDA MemCreate 间回退的；尝试（或伪代码说明）把该 allocator 接入一个简单 PyTorch 模型，观察显存分配来源。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "RL 训练数据流：权重与隐状态传输",
+          "order": 3,
+          "filename": "u9-l3-rl-dataflow.md",
+          "level": "advanced",
+          "topic": "基于 mooncake-rl 示例，讲解分布式 RL 训练中 rollout 与训练 worker 之间通过 Mooncake Store 传递隐状态、分发权重更新与检查点管理的模式。",
+          "learning_goals": [
+            "理解 RL 场景下 rollout↔training 的数据流解耦",
+            "掌握用 MooncakeDistributedStore 分发权重与收集训练样本的模式",
+            "了解检查点在 RL 训练中的存储与复用"
+          ],
+          "source_files": [
+            "mooncake-rl/examples/rl_samples.py",
+            "mooncake-integration/store/store_py.cpp",
+            "mooncake-integration/store/async_store.py"
+          ],
+          "minimal_modules": [
+            "RL 示例",
+            "TrainActor/TrainGroup",
+            "权重/隐状态传输"
+          ],
+          "practice_task": "阅读 rl_samples.py，画出 rollout 引擎产出隐状态 → 训练 worker 取回训练 → 更新后权重分发的完整 Store 数据流，并说明 async_store 在其中的异步优化点。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "多语言绑定与 Wheel 打包",
+          "order": 4,
+          "filename": "u9-l4-multilang-wheel.md",
+          "level": "advanced",
+          "topic": "讲解 Mooncake 的多语言绑定（Rust/Go/C）与 wheel 打包流程（build_wheel.sh、auditwheel 注入 EP/PG、RPATH 设置），以及多种 CUDA/非 CUDA/NPU 变体。",
+          "learning_goals": [
+            "了解 Transfer Engine 与 Store 的 Rust/Go/C 绑定结构",
+            "掌握 build_wheel.sh 的多变体（cuda/cuda13/non-cuda/npu）打包流程",
+            "理解 auditwheel 后注入 EP/PG、保留 CUDA fatbins 与 RPATH 的技巧"
+          ],
+          "source_files": [
+            "scripts/build_wheel.sh",
+            "mooncake-transfer-engine/rust/src",
+            "mooncake-store/rust/src",
+            "mooncake-wheel",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "多语言绑定",
+            "Wheel 打包",
+            "多变体构建"
+          ],
+          "practice_task": "阅读 build_wheel.sh，描述一个 CUDA wheel 从编译到 auditwheel 修复再到注入 EP/PG 扩展的完整步骤，并解释 RPATH=$ORIGIN 为何能让 wheel 自包含运行。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l5",
+          "title": "Transfer Engine 的容错与故障转移测试",
+          "order": 5,
+          "filename": "u9-l5-te-fault-tolerance.md",
+          "level": "advanced",
+          "topic": "基于 tests/fault-tolerant 的测试框架，讲解 Transfer Engine 在服务端崩溃、连接中断、网络分区下的优雅降级与故障转移验证。",
+          "learning_goals": [
+            "理解 fault-tolerant 测试框架的 server/client/fault_test 编排",
+            "掌握 TE 在传输失败时切换替代路径的容错行为",
+            "了解如何用该框架复现与验证网络故障场景"
+          ],
+          "source_files": [
+            "mooncake-transfer-engine/tests/fault-tolerant/fault_test.py",
+            "mooncake-transfer-engine/tests/fault-tolerant/server_test.py",
+            "mooncake-transfer-engine/tests/fault-tolerant/client_test.py",
+            "mooncake-transfer-engine/include/multi_transport.h"
+          ],
+          "minimal_modules": [
+            "容错测试框架",
+            "server/client 编排",
+            "故障转移验证"
+          ],
+          "practice_task": "运行 fault_test.py（或阅读其编排逻辑），在传输过程中 kill 掉 server 端，观察 client 端是否优雅降级而非死锁，并对照 multi_transport.cpp 说明替代路径选择发生在何处。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}

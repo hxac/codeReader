@@ -1,0 +1,7 @@
+# 提示词文件强制 LF，避免 Windows autocrlf 在 checkout 时转 CRLF 导致
+# analyze.signature() 跨平台不一致（配合 signature() 内的 normalize 双保险）。
+prompts/*.md text eol=lf
+*.task.md   text eol=lf
+*.prompt.md text eol=lf
+# Python 脚本也强制 LF（一致性，防 Windows 编辑器 CRLF）
+scripts/*.py text eol=lf

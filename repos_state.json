@@ -1,0 +1,1246 @@
+{
+  "schema_version": 1,
+  "repos": {
+    "kvcache-ai/Mooncake": {
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.028425
+        },
+        "u9-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "ef0312f80ab524f023878ffcd37cef111726cf26",
+      "prev_head": "1f7f71a18a9dc48e9901d8293c5c3625ba166939",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/kvcache-ai/Mooncake/Mooncake-tutorial",
+      "last_head": "ef0312f80ab524f023878ffcd37cef111726cf26",
+      "last_run_at": "2026-06-20T12:39:23Z",
+      "last_error": null,
+      "prompt_hash": "32e8f8fa884d3c5e"
+    },
+    "HazyResearch/Megakernels": {
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.603657
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.889017
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8660279999999999
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7672049999999999
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1006310000000001
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7539309999999999
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.679076
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.929695
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0089029999999999
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.132743
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.873663
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3700139999999998
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.130984
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.045734
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9570700000000001
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.948909
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2547700000000002
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9647280000000003
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.55324
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4048859999999999
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 4.657187
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.990151
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4342190000000001
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 2,
+          "cost": 1.361577
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.334908
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.897074
+        },
+        "u9-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.329768
+        },
+        "u9-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.8568660000000001
+        },
+        "u10-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.067887
+        },
+        "u10-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.341714
+        },
+        "u10-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7424139999999999
+        },
+        "u10-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.434715
+        }
+      },
+      "manifest_head": "7309cec801537b61fea3b50d7dfe454a6cde578e",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/HazyResearch/Megakernels/Megakernels-tutorial",
+      "last_head": "7309cec801537b61fea3b50d7dfe454a6cde578e",
+      "last_run_at": "2026-06-21T01:53:45Z",
+      "last_error": null,
+      "prompt_hash": "32e8f8fa884d3c5e",
+      "abandoned": []
+    },
+    "deepseek-ai/3FS": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.63768
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9363859999999999
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.472783,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.007885,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.960036,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.1452139999999997,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":539807,\"duration_api_ms\":295891,\"num_turns\":40,\"result\":\"API Error: The operation timed out.\","
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.826977,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":195862,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u2-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
+      "prev_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/deepseek-ai/3FS/3FS-tutorial",
+      "last_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
+      "last_run_at": "2026-06-22T10:44:51Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "microsoft/AI-For-Beginners": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6977650000000001
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8769340000000001
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.577552
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.537375
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.913445,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.18015,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.9474150000000003,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.545162,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3043219999999998,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n- 写一个循环把「所有」长度 > `min_length` 的事件段都找出来（Notebook 的 `subsequence` 只返回第一段，这里要求你返回全部事件——可参考 cell-26 的逻辑改造）。\\n3. **进阶版**（任选其一）：\\n   - (a) 把每个事件段的中间帧拼成一张缩略图，作为「事件报告」；\\n   - (b) 对事件段内的帧算稠密光流，用 `"
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l8": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "fa78bc6fb0b30eea0678c27a54b915b79ad16fe8",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/microsoft/AI-For-Beginners/AI-For-Beginners-tutorial",
+      "last_head": "fa78bc6fb0b30eea0678c27a54b915b79ad16fe8",
+      "last_run_at": "2026-06-22T10:44:51Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "tokio-rs/axum": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7309110000000001
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.994929
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.881115
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.231558,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.878803,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9668460000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.990826,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.325176,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1589699999999998,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9423739999999998,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":207128,\"duration_api_ms\":19158,\"num_turns\":3,\"result\":\"API Error: Request rejected (429) · [1308"
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "485c603dddcee45bb4bc40aab492b47576e2a2f8",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/tokio-rs/axum/axum-tutorial",
+      "last_head": "485c603dddcee45bb4bc40aab492b47576e2a2f8",
+      "last_run_at": "2026-06-22T10:44:51Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "funstory-ai/BabelDOC": {},
+    "alttch/busrt": {},
+    "farion1231/cc-switch": {},
+    "mutouyun/cpp-ipc": {},
+    "deepseek-ai/DeepGEMM": {},
+    "deepseek-ai/DualPipe": {},
+    "longbridge/gpui-component": {},
+    "hxac/helloRust": {},
+    "unicode-org/icu4x": {},
+    "kotauskas/interprocess": {},
+    "nginxinc/kubernetes-ingress": {},
+    "lancedb/lancedb": {},
+    "rasbt/LLMs-from-scratch": {},
+    "mihomo-party-org/mihomo-party": {},
+    "ArtifexSoftware/mupdf": {},
+    "nginxinc/nginx-gateway-fabric": {},
+    "nginx/njs": {},
+    "pku-minic/online-doc": {},
+    "nnethercote/perf-book": {},
+    "agerasev/ringbuf": {},
+    "longbridge/rust-i18n": {},
+    "scipy/scipy": {},
+    "latex-lsp/texlab.wiki": {},
+    "Distributed-EPFL/tokio-udt": {},
+    "EttusResearch/uhd": {},
+    "eclipse-zenoh/zenoh": {},
+    "tms4517/2D-Systolic-Array-Multiplier": {},
+    "abdelazeem201/ASIC-Design-Roadmap": {},
+    "abdelazeem201/ASIC-implementation-of-AES": {},
+    "pulp-platform/axi": {},
+    "pConst/basic_verilog": {},
+    "BerkeleyLab/Bedrock": {},
+    "chipsalliance/chisel": {},
+    "google-coral/coralnpu": {},
+    "crossbeam-rs/crossbeam": {},
+    "NVlabs/cuda-oxide": {},
+    "NVIDIA/cuda-tile": {},
+    "nvidia/cutile-python": {},
+    "NVIDIA/cutlass": {},
+    "deepseek-ai/DeepEP": {},
+    "abdelazeem201/Design-and-ASIC-Implementation-of-32-Point-FFT-Processor": {},
+    "antirez/ds4": {},
+    "NVIDIA/FasterTransformer": {},
+    "xlite-dev/ffpa-attn": {},
+    "Dao-AILab/flash-attention": {},
+    "flashinfer-ai/flashinfer": {},
+    "deepseek-ai/FlashMLA": {},
+    "WangXuan95/FPGA-FixedPoint": {},
+    "WangXuan95/FPGA-FOC": {},
+    "dtysky/FPGA-Imaging-Library": {},
+    "laforest/FPGADesignElements": {},
+    "embedeep/FREE-TPU-V3plus-for-FPGA": {},
+    "git/git": {},
+    "hdl-modules/hdl-modules": {},
+    "nvdla/hw": {},
+    "NVlabs/instant-ngp": {},
+    "yqian4/Koala-GPGPU": {},
+    "kvcache-ai/ktransformers": {},
+    "xlite-dev/LeetCUDA": {},
+    "ModelTC/lightllm": {},
+    "karpathy/llm.c": {},
+    "RCoeurjoly/LLM2FPGA": {},
+    "THU-DSP-LAB/llvm-project": {},
+    "LMCache/LMCache": {},
+    "InternLM/lmdeploy": {},
+    "Lumen-Laboratory/Mayoiuta": {},
+    "jingyaogong/minimind": {},
+    "mlc-ai/mlc-llm": {},
+    "modelscope/ms-swift": {},
+    "GeeeekExplorer/nano-vllm": {},
+    "futz12/ncnn_llm": {},
+    "NJU-ProjectN/nemu": {},
+    "nginx/nginx": {},
+    "numpy/numpy": {},
+    "jbush001/NyuziProcessor": {},
+    "open-logic/open-logic": {},
+    "open-logic/en_cl_fix": {},
+    "huggingface/open-r1": {},
+    "lnis-uofu/OpenFPGA": {},
+    "verilog-to-routing/vtr-verilog-to-routing": {},
+    "YosysHQ/yosys": {},
+    "povik/yosys-slang": {},
+    "bentoml/OpenLLM": {},
+    "open-sdr/openwifi-hw": {},
+    "open-sdr/openofdm": {},
+    "ufrisk/pcileech-fpga": {},
+    "YosysHQ/picorv32": {},
+    "NawfalMotii79/PLFM_RADAR": {},
+    "VLSI-EDA/PoC": {},
+    "paulscherrerinstitute/psi_fpga_all": {},
+    "paulscherrerinstitute/PsiFpgaLibDependencies": {},
+    "paulscherrerinstitute/PsiPyUtils": {},
+    "paulscherrerinstitute/TbGenerator": {},
+    "paulscherrerinstitute/PsiSim": {},
+    "paulscherrerinstitute/en_cl_fix": {},
+    "paulscherrerinstitute/psi_common": {},
+    "paulscherrerinstitute/psi_fix": {},
+    "paulscherrerinstitute/psi_multi_stream_daq": {},
+    "paulscherrerinstitute/psi_tb": {},
+    "paulscherrerinstitute/vivadoIP_axi_mm_reader": {},
+    "paulscherrerinstitute/vivadoIP_data_rec": {},
+    "paulscherrerinstitute/vivadoIP_fpga_base": {},
+    "paulscherrerinstitute/vivadoIP_mem_test": {},
+    "paulscherrerinstitute/vivadoIP_psi_ms_daq": {},
+    "paulscherrerinstitute/vivadoIP_spi_simple": {},
+    "pytorch/pytorch": {},
+    "rime/ibus-rime": {},
+    "rime/librime": {},
+    "rime/plum": {},
+    "rime/squirrel": {},
+    "rime/weasel": {},
+    "ic-lab-duth/RISC-V-Vector": {},
+    "hkust-zhiyao/RTL-Coder": {},
+    "alan-turing-institute/sar-vessel-detection-fpga": {},
+    "sgl-project/sglang": {},
+    "slaclab/surf": {},
+    "google-deepmind/synthid-text": {},
+    "abdelazeem201/Systolic-array-implementation-in-RTL-for-TPU": {},
+    "tensorflow/tensorflow": {},
+    "NVIDIA/TensorRT-Edge-LLM": {},
+    "NVIDIA/TensorRT-LLM": {},
+    "lnay/texpresso-lsp": {},
+    "NVIDIA/TileGym": {},
+    "deepseek-ai/TileKernels": {},
+    "tile-ai/tilelang": {},
+    "tile-ai/tilelang-ascend": {},
+    "tile-ai/tilelang-benchmark": {},
+    "tile-ai/tilelang-puzzles": {},
+    "tile-ai/TileOPs": {},
+    "tile-ai/TileRT": {},
+    "tile-ai/tilescale": {},
+    "NVIDIA/tilus": {},
+    "adam-maj/tiny-gpu": {},
+    "Jiayi-Pan/TinyZero": {},
+    "huggingface/transformers": {},
+    "triton-lang/triton": {},
+    "typst/typst": {},
+    "THU-DSP-LAB/ventus-gpgpu": {},
+    "THU-DSP-LAB/ventus-gpgpu-verilog": {},
+    "alexforencich/verilog-ethernet": {},
+    "vllm-project/vllm": {},
+    "vllm-project/vllm-omni": {},
+    "vortexgpgpu/vortex": {},
+    "chili-chips-ba/wireguard-fpga": {},
+    "WireGuard/wireguard-rs": {},
+    "google/xls": {},
+    "ZipCPU/zipcpu": {},
+    "mpskex/chisel-npu": {},
+    "THUDM/slime": {},
+    "z-lab/dflash": {},
+    "THUDM/P-tuning-v2": {},
+    "Dao-AILab/quack": {},
+    "blueberrycongee/codemirror-live-markdown": {},
+    "analogdevicesinc/hdl": {},
+    "elisei.ilies/CIC-filters": {},
+    "ahmedshahein/DSP-RTL-Lib": {},
+    "enclustra/en_cl_fix": {},
+    "benreynwar/fft-dit-fpga": {},
+    "AUDIY/FIR_x2": {},
+    "guanjiess/fpga-fft": {},
+    "automatesolutions/FPGA_FIR-FILTER": {},
+    "damdoy/fpga_image_processing": {},
+    "suisuisi/FPGA_Library": {},
+    "nselvara/HDL-Core-Library": {},
+    "vladniculescu/High-Speed-FPGA-based-Data-Acquisition-System-100MSPS": {},
+    "ika-musume/IKA32010": {},
+    "mhhai/ImageStitchBasedOnFPGA": {},
+    "aolofsson/oh": {},
+    "Ghydra0/pipelined-FIR-filter-fpga": {},
+    "nasa-jpl/versal-sar-backprojection-design": {},
+    "Xilinx/Vitis_Libraries": {}
+  }
+}

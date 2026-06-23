@@ -1,0 +1,221 @@
+name: tutorial
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full | incremental | auto"
+        required: true
+        default: "auto"
+      repo_name:
+        description: "处理一个项目（留空全部）"
+        required: false
+      force_full:
+        description: "全量重建"
+        type: boolean
+        required: false
+        default: false
+      ignore_timing:
+        description: "绕过死区"
+        type: boolean
+        required: false
+        default: false
+      mock:
+        description: "仅验证管线"
+        type: boolean
+        required: false
+        default: false
+      debug:
+        description: "写入到沙箱"
+        type: boolean
+        required: false
+        default: false
+      runner:
+        description: "运行环境"
+        type: choice
+        required: false
+        default: default
+        options:
+          - default
+          - ubuntu-latest
+  # 定时窗口（UTC，北京=UTC+8）：00:01/02:01/10:01/12:01 = 北京 08:01/10:01/18:01/20:01，避开高消耗词元死区 UTC 6–10。
+  # 定时触发已注释禁用 —— 当前只走 workflow_dispatch 手动触发。
+  # 需要恢复定时，去掉下面每行行首的 # 即可。
+  # schedule:
+  #   - cron: "1 0 * * *"
+  #   - cron: "1 2 * * *"
+  #   - cron: "1 10 * * *"
+  #   - cron: "1 12 * * *"
+
+permissions:
+  contents: write
+
+# 全局串行：不能并发跑两个 tutorial，保护单一 repos_state.json。
+concurrency:
+  group: tutorial
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Runner 标签：
+    # 读仓库变量 RC_RUNNER_LABELS
+    # RC_RUNNER_LABELS 需设置 JSON 数组，如 ["self-hosted","<runner-id>"]
+    # 未设则回退到默认自托管 ["self-hosted"]
+    # 定时运行恒用此变量
+    runs-on: ${{ inputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(vars.RC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # 分支合并需要完整历史
+          persist-credentials: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Claude Code (latest)
+        if: ${{ !(env.ACT == 'true' && inputs.mock == 'true') }}
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      # 切到 tutorial-cache 分支，首次从 main 建、之后累积进度并同步 main 的改动
+      - name: Switch to tutorial-cache branch
+        if: ${{ env.ACT != 'true' }} # act 本地调试无 origin，跳过分支切换，直接用当前检出
+        run: |
+          git config user.name  "readcode-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git fetch origin --prune
+          if git ls-remote --heads origin tutorial-cache | grep -q tutorial-cache; then
+            git checkout -B tutorial-cache origin/tutorial-cache
+            # 合并 main 脚手架改动；冲突必须显式失败——原 `|| true` 会吞掉冲突、
+            # 留下冲突标记在工作树，随后 analyze.py 在冲突树上运行会损坏产物。
+            if ! git merge origin/main --no-edit -m "chore: sync scaffold from main"; then
+              echo "::error::合并 origin/main 到 tutorial-cache 冲突，中止合并"
+              git merge --abort
+              exit 1
+            fi
+          else
+            git checkout -B tutorial-cache
+          fi
+          git log -1 --oneline
+
+      # 捕获退出码
+      # 0=完成
+      # 75=未完成待续传
+      # 1=错误，本步恒成功以便后续提交
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          RC_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
+          RC_REPO_NAME: ${{ github.event_name == 'schedule' && '' || inputs.repo_name }}
+          RC_FORCE_FULL: ${{ github.event_name == 'schedule' && 'false' || inputs.force_full }}
+          RC_ALLOW_DEADZONE: ${{ github.event_name == 'schedule' && 'false' || (inputs.debug && 'true' || inputs.ignore_timing) }}
+          RC_MOCK: ${{ github.event_name == 'schedule' && 'false' || inputs.mock }}
+          RC_DEBUG: ${{ github.event_name == 'schedule' && 'false' || inputs.debug }}
+          RC_CONCURRENCY: ${{ vars.RC_CONCURRENCY || '3' }}
+          RC_SUMMARY_MAX_TURNS: ${{ vars.RC_SUMMARY_MAX_TURNS || '8' }}
+          RC_SUMMARY_MAX_BUDGET_USD: ${{ vars.RC_SUMMARY_MAX_BUDGET_USD || '0.50' }}
+          RC_EVENT_NAME: ${{ github.event_name }} # schedule 时 analyze 忽略手动全量开关，确保定时只在提示词变更（或首建）时全量重构
+          RC_MODEL: ${{ secrets.RC_MODEL || vars.RC_MODEL || 'claude-sonnet-4-6' }}
+          RC_MAX_TURNS: ${{ vars.RC_MAX_TURNS || '50' }}
+          RC_MAX_BUDGET_USD: ${{ vars.RC_MAX_BUDGET_USD || '10.00' }}
+          RC_TIMEOUT: ${{ vars.RC_TIMEOUT || '3600' }}
+          RC_PLANNER_MAX_TURNS: ${{ vars.RC_PLANNER_MAX_TURNS || '30' }}
+          RC_PLANNER_MAX_BUDGET_USD: ${{ vars.RC_PLANNER_MAX_BUDGET_USD || '3.00' }}
+          RC_BACKOFF_SEC: ${{ vars.RC_BACKOFF_SEC || '0' }}
+          RC_MAX_RETRIES: ${{ vars.RC_MAX_RETRIES || '5' }}
+          RC_RUN_DEADLINE_MIN: ${{ vars.RC_RUN_DEADLINE_MIN || '330' }} # 软截止：到点干净 exit 75，给 commit/publish 留余量、防硬超时丢进度
+          RC_DEADZONE_UTC_START: ${{ vars.RC_DEADZONE_UTC_START || '6' }}
+          RC_DEADZONE_UTC_END: ${{ vars.RC_DEADZONE_UTC_END || '10' }}
+          RC_DEADZONE_SOFT_MARGIN_MIN: ${{ vars.RC_DEADZONE_SOFT_MARGIN_MIN || '30' }}
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config-${{ github.run_id }} # 隔离 transcript，中断时捞取
+          TZ: UTC
+        run: |
+          set +e
+          python scripts/analyze.py
+          code=$?
+          set -e
+          echo "RC_EXIT=$code" >> "$GITHUB_ENV"
+          exit 0
+
+      # 中断时（exit 75/1）转存 claude 会话 transcript 到临时分支，便于排查
+      - name: Salvage Claude transcripts (on interruption)
+        if: ${{ env.ACT != 'true' && env.RC_EXIT != '0' }}
+        shell: bash
+        run: |
+          TRANSCRIPT_DIR="$CLAUDE_CONFIG_DIR/projects"
+          if [ -d "$TRANSCRIPT_DIR" ] && [ -n "$(find "$TRANSCRIPT_DIR" -name '*.jsonl' -type f 2>/dev/null | head -1)" ]; then
+            STAGE=".transcripts-$GITHUB_RUN_ID"
+            rm -rf "$STAGE"; mkdir -p "$STAGE"
+            cp -r "$TRANSCRIPT_DIR" "$STAGE/" 2>/dev/null || true
+            git checkout -B "transcripts/$GITHUB_RUN_ID" 2>/dev/null || true
+            git add "$STAGE/" 2>/dev/null || true
+            git commit -m "transcripts: exit $RC_EXIT (run $GITHUB_RUN_ID)" || echo "nothing to commit"
+            git push origin "transcripts/$GITHUB_RUN_ID" || echo "push failed (non-blocking)"
+            git checkout tutorial-cache 2>/dev/null || true
+            rm -rf "$STAGE"
+          fi
+
+      # 进度 state + tutorials，含未完成的提交到 tutorial-cache
+      - name: Commit progress to tutorial-cache
+        if: ${{ env.ACT != 'true' }}
+        run: |
+          git add repos_state.json tutorials/ || true
+          git commit -m "tutorial: progress (exit ${{ env.RC_EXIT }})" || echo "nothing to commit"
+          git push origin tutorial-cache
+
+      # 逐仓库发布：每轮把 phase==done 的仓库从 cache 逐个 checkout 到 main，半成品不进 main
+      # exit 1 崩溃时不发布，避免把不一致 state 同步到 main
+      # exit 0/75 发布已完成仓库。
+      - name: Publish completed repos to main
+        if: ${{ env.ACT != 'true' && env.RC_EXIT != '1' }}
+        run: |
+          git fetch origin main
+          # 解析 repos_state.json：列出 phase==done 仓库的 "name<TAB>tutorial_path<TAB>abandoned数"
+          mapfile -t DONE < <(python <<'PY'
+          import json
+          s = json.load(open("repos_state.json"))
+          for name, e in s.get("repos", {}).items():
+              if e.get("phase") == "done" and e.get("tutorial_path"):
+                  print(f"{name}\t{e['tutorial_path']}\t{len(e.get('abandoned') or [])}")
+          PY
+          )
+          git checkout -B main origin/main
+          for line in "${DONE[@]}"; do
+            line="${line%$'\r'}"            # 防御 CRLF（抑制 Windows 下问题）
+            name="${line%%$'\t'*}"; rest="${line#*$'\t'}"
+            path="${rest%%$'\t'*}"; n_aband="${rest#*$'\t'}"   # tutorial_path 与 abandoned 计数
+            # abandoned>0 → 告警：该仓库虽已 done，但有永久失败的讲义（缺篇发布）
+            if [ "$n_aband" != "$path" ] && [ "$n_aband" != "0" ]; then
+              echo "::warning::repo $name 已完成但有 $n_aband 篇 abandoned 讲义（永久失败、缺篇发布）: $path"
+            fi
+            git checkout tutorial-cache -- "$path" || { echo "::warning::skip (missing in cache): $path"; continue; }
+            rm -rf "$path/.transcripts"   # transcripts 不进 main，仅保留在 tutorial-cache
+            git add "$path"
+            git commit -m "tutorial: publish $name" || echo "up to date: $name"
+          done
+          git checkout tutorial-cache -- repos_state.json
+          git add repos_state.json
+          git commit -m "tutorial: sync repos_state.json" || true
+          # 推送：被拒（非快进，常见于 PR 合并碰撞）→ rebase 后重试一次；其它失败明确报错。
+          # 原 `|| echo "...already up to date"` 会把 rejected/权限/网络错误一律误报为成功。
+          if ! git push origin main 2>/tmp/push.err; then
+            if grep -qiE 'non-fast-forward|rejected|fetch first' /tmp/push.err; then
+              echo "::notice::main 被外部更新，rebase 后重试推送"
+              git fetch origin main
+              git rebase origin/main || { echo "::error::rebase 冲突，放弃本轮 main 推送"; git rebase --abort; exit 1; }
+              git push origin main
+            else
+              echo "::error::main 推送失败："; cat /tmp/push.err; exit 1
+            fi
+          fi
+          git checkout tutorial-cache

@@ -1,0 +1,968 @@
+{
+  "project": "Megakernels",
+  "head": "7309cec801537b61fea3b50d7dfe454a6cde578e",
+  "rationale": "Megakernels 的核心创新是把整个 LLM decode 跑在一个常驻 GPU 的\"megakernel 虚拟机\"里，以消除 host-device 往返延迟、追求极低单批延迟，并构建在 ThunderKittens 之上。学习路线遵循「先用起来 → 理解 Python 编排 → 理解 CUDA 内核骨架 → 理解控制器与同步原语 → 会写 op → 会扩展」的顺序：第 1-4 单元让读者从零跑通 demo 并掌握 Python 侧的 BaseGlobals/Instruction、DAG、SM 调度与三种执行模式（torch/pyvm/mk）；第 5-7 单元进入 CUDA 内核的 warp 特化、VM state、控制器取指/分页/信号量构造，以及 page 与动态信号量这两套同步原语；第 8-9 单元以 NoOp 为最小参照，逐层剖析 op 五子结构接口、matvec 多级流水线、flash attention 在线 softmax 与跨 op 的全局 atomicAdd 屏障；第 10 单元收尾于「用 mk_init 造自己的 megakernel」、globals 结构与 TMA 设计、python_vm 参考实现的 diff 测试，以及 latency/throughput 模式与 pybind11 绑定。每篇讲义锁定 1-6 个真实源码文件并配一个可操作实践任务，依赖关系以线性为主、辅以少量跨单元引用，保证前置知识齐备。该项目架构新颖且代码量大，故安排 10 个单元共 32 篇讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 Megakernels",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：什么是 megakernel 虚拟机",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Megakernels 的定位：把整个 LLM 推理塞进一个常驻 GPU 的 megakernel 虚拟机以追求极低延迟，以及它与 ThunderKittens 子模块的关系。",
+          "learning_goals": [
+            "理解 megakernel / 持久化内核 / 片上虚拟机的概念与低延迟动机",
+            "了解项目依赖（ThunderKittens、torch、transformers、pybind11 等）",
+            "看懂 README 的安装与运行步骤"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "README 安装与运行步骤",
+            "pyproject 依赖与包名",
+            "ThunderKittens 子模块"
+          ],
+          "practice_task": "克隆仓库并执行 git submodule update --init --recursive，列出 megakernels 包的全部依赖，回答为什么需要 THUNDERKITTENS_ROOT / GPU / PYTHON_VERSION 等环境变量。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与双视角架构",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-two-halves.md",
+          "level": "beginner",
+          "topic": "仓库由 Python 编排层（megakernels/）和 CUDA 内核层（include/ 与 demos/low-latency-llama/）两部分组成，外加 util/mk_init 脚手架。",
+          "learning_goals": [
+            "画出顶层目录树并区分 Python 调度与 CUDA 执行",
+            "定位关键入口文件（dispatch.py、mk.py、llama.cu、megakernel.cuh）",
+            "理解 mk_init 的脚手架角色"
+          ],
+          "source_files": [
+            "README.md",
+            "megakernels/dispatch.py",
+            "megakernels/mk.py",
+            "demos/low-latency-llama/llama.cu"
+          ],
+          "minimal_modules": [
+            "目录结构总览",
+            "Python 包 megakernels/",
+            "CUDA 目录 include/ 与 demos/"
+          ],
+          "practice_task": "统计每个目录的文件数量，绘制一张 Python→CUDA 的模块依赖草图，标注哪一侧负责「生成指令」、哪一侧负责「执行指令」。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "编译并运行 low-latency-llama demo",
+          "order": 3,
+          "filename": "u1-l3-build-and-run-llama-demo.md",
+          "level": "beginner",
+          "topic": "如何用 Makefile 把 mk_llama 编译成 pybind11 扩展，并用 generate.py / llama_repl.py 跑通低延迟 Llama 生成。",
+          "learning_goals": [
+            "配置 THUNDERKITTENS_ROOT / MEGAKERNELS_ROOT / GPU 并执行 make",
+            "理解 NVCCFLAGS 与 GPU target（H100=sm_90a / B200=sm_100a）的差异",
+            "看懂 llama.cu 的 PYBIND11_MODULE 如何导出 mk_llama"
+          ],
+          "source_files": [
+            "README.md",
+            "demos/low-latency-llama/Makefile",
+            "demos/low-latency-llama/llama.cu"
+          ],
+          "minimal_modules": [
+            "Makefile 与 GPU 宏",
+            "llama.cu 的 PYBIND11_MODULE",
+            "运行命令与 make 产物"
+          ],
+          "practice_task": "阅读 Makefile 写出 H100 与 B200 两条编译命令的具体差异；描述用 mode=mk 跑 generate.py 时的完整命令链（无 GPU 时给出命令并解释预期输出）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "端到端运行流程",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "三种执行模式 torch / pyvm / mk",
+          "order": 1,
+          "filename": "u2-l1-three-execution-modes.md",
+          "level": "beginner",
+          "topic": "torch（PyTorch 参考）、pyvm（Python 参考虚拟机）、mk（真实 megakernel）三种 Generator 如何对应同一份指令流，用于正确性对照与性能基准。",
+          "learning_goals": [
+            "区分 Generator 基类与三个子类的职责",
+            "理解三种模式用于正确性对照的意义",
+            "看懂 generate.py 的 mode 分支与 dispatch 工厂"
+          ],
+          "source_files": [
+            "megakernels/generators.py",
+            "megakernels/scripts/generate.py",
+            "megakernels/dispatch.py"
+          ],
+          "minimal_modules": [
+            "Generator 基类与 generate_with_eos",
+            "PyTorchGenerator / MK_Generator / PyVM_Generator",
+            "generate.py 的 mode 分支"
+          ],
+          "practice_task": "在 generate.py 中切换 mode（torch/pyvm/mk），记录并解释三种模式输出是否一致；说明 pyvm 为什么是 mk 的理想对照基准。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "LlamaForCausalLM 模型定义与权重堆叠",
+          "order": 2,
+          "filename": "u2-l2-llama-model-and-weight-stacking.md",
+          "level": "beginner",
+          "topic": "llama.py 如何用 PyTorch 定义 Llama（RMSNorm/Attention/MLP/LMHead），并把每层权重堆叠（stack）成单张大张量供内核一次性读取，同时设置 KV cache。",
+          "learning_goals": [
+            "理解 LlamaBlock 的 attention+mlp 结构",
+            "理解 stack_params 如何把 q/k/v cat 成 qkv 并跨层 stack",
+            "理解 from_pretrained 的 safetensors 加载与 KV cache 初始化"
+          ],
+          "source_files": [
+            "megakernels/llama.py",
+            "megakernels/model_types.py"
+          ],
+          "minimal_modules": [
+            "模型结构 LlamaBlock / LlamaLMHead",
+            "stack_params 权重堆叠",
+            "setup_caches 与 from_pretrained"
+          ],
+          "practice_task": "追踪 q_proj/k_proj/v_proj 的权重如何被 cat 成单个 qkv 权重；解释跨层堆叠权重为何能减少内核里的分支与循环开销。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "generate.py 与 llama_repl.py 脚本解读",
+          "order": 3,
+          "filename": "u2-l3-generate-and-repl-scripts.md",
+          "level": "beginner",
+          "topic": "基准脚本 generate.py 与交互聊天脚本 llama_repl.py 如何串起模型加载、调度构建、prefill 与 decode 生成及计时。",
+          "learning_goals": [
+            "理解 prefill + decode 两阶段流程",
+            "理解 generate_with_eos 的提前停止",
+            "看懂 cuda Event 计时与 tokens/s 计算"
+          ],
+          "source_files": [
+            "megakernels/scripts/generate.py",
+            "megakernels/scripts/llama_repl.py",
+            "megakernels/generators.py"
+          ],
+          "minimal_modules": [
+            "prefill 阶段",
+            "decode 循环与 eos 检测",
+            "计时与 tokens/秒"
+          ],
+          "practice_task": "修改 generate.py 的 prompt 与 ntok 参数运行，在代码里标注 prefill 与 decode 的分界线，并解释为何 decode 阶段每步只生成一个 token。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Python 侧的指令体系",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "BaseGlobals 与 Instruction 序列化",
+          "order": 1,
+          "filename": "u3-l1-base-globals-and-instruction.md",
+          "level": "intermediate",
+          "topic": "instructions.py 中 BaseGlobals 把所有权重/缓冲/常量收进一个 dataclass，Instruction 基类定义如何把一条指令序列化成 int 列表。",
+          "learning_goals": [
+            "理解 BaseGlobals 各字段（权重、KV cache、常量、barriers）的含义",
+            "掌握 Instruction.serialize() 对 int/tuple/list 的编码规则",
+            "理解 NoOp 与 PrintState 的作用"
+          ],
+          "source_files": [
+            "megakernels/instructions.py"
+          ],
+          "minimal_modules": [
+            "BaseGlobals 字段",
+            "Instruction.serialize 规则",
+            "NoOp / PrintState"
+          ],
+          "practice_task": "为一个假想 op（带 layer_idx 和一个 tuple 字段）写一个 Instruction 子类，手算其 serialize() 输出的 int 列表。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "latency 指令集：7 个 opcode",
+          "order": 2,
+          "filename": "u3-l2-latency-instruction-set.md",
+          "level": "intermediate",
+          "topic": "latency 模式定义的 7 个 opcode（QKV / PartialAttention / AttentionReduction / O_Proj / UpGateSiLU / DownProj / RMS_LM_Head）及其 cost 估算模型。",
+          "learning_goals": [
+            "记住 7 个 opcode 的语义、编号与单层执行顺序",
+            "理解 opcode / prev_opcode 的成对关系",
+            "理解 cost() 如何估算一条指令的工作量"
+          ],
+          "source_files": [
+            "megakernels/demos/latency/instructions.py",
+            "megakernels/instructions.py"
+          ],
+          "minimal_modules": [
+            "7 个指令类",
+            "opcode / prev_opcode",
+            "cost() 估算模型"
+          ],
+          "practice_task": "画出单层 7 种 op 的执行顺序图；解释为何 cost() 用 block 数 × 维度来近似指令耗时。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "DAG、Schedule 与 ScheduleBuilder",
+          "order": 3,
+          "filename": "u3-l3-dag-and-schedule.md",
+          "level": "intermediate",
+          "topic": "scheduler.py 把指令组织成依赖 DAG（DAG_Node 的 dependencies/children），latency scheduler 逐层构建并封装成 Schedule。",
+          "learning_goals": [
+            "理解 DAG_Node 的 dependencies / children / remaining_dependencies",
+            "理解 make_dag_layer 如何为每层连依赖（qkv→partial→oproj→upgate→downproj）",
+            "理解 Schedule 与 ScheduleBuilder 的接口"
+          ],
+          "source_files": [
+            "megakernels/scheduler.py",
+            "megakernels/demos/latency/scheduler.py"
+          ],
+          "minimal_modules": [
+            "DAG_Node / Schedule / ScheduleBuilder",
+            "make_dag_layer 依赖连线",
+            "NoOp end_node 收尾"
+          ],
+          "practice_task": "对单层使用 stop_after_op（qkv/partial/oproj/upgate/downproj）观察每阶段的节点数，画出 qkv→partial→oproj 的依赖边。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "指令调度到 SM",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "SM 分配策略 rr / zz / wave / dag / pool",
+          "order": 1,
+          "filename": "u4-l1-sm-assignment-strategies.md",
+          "level": "intermediate",
+          "topic": "把扁平化指令分配到各 SM 队列的多种策略：round_robin、zig_zag、wave（按 opcode 分组）、dag（列表调度）、pool（按 memory/compute 分池）。",
+          "learning_goals": [
+            "区分 5 种 assign 模式的分配逻辑",
+            "理解 assign_dag_to_sms 用双堆栈做负载均衡的列表调度",
+            "理解 wave_assign 按同 opcode 聚类的动机"
+          ],
+          "source_files": [
+            "megakernels/scheduler.py"
+          ],
+          "minimal_modules": [
+            "round_robin / zig_zag",
+            "wave / pool",
+            "assign_dag_to_sms 堆调度"
+          ],
+          "practice_task": "对同一份 schedule 分别用 mode=rr 与 mode=dag 调度，对比各 SM 队列长度与 cost 均衡度（min/max/mean）。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "tensorize_instructions：序列化为指令张量",
+          "order": 2,
+          "filename": "u4-l2-tensorize-instructions.md",
+          "level": "intermediate",
+          "topic": "tensorize_instructions 把各 SM 队列补齐 NoOp、逐条 serialize_and_pad 成形状 [num_sms, queue_len, 32] 的 int32 张量，并分配 timings 张量。",
+          "learning_goals": [
+            "理解 INTS_PER_INSTRUCTION=32 与 serialize_and_pad 的填充",
+            "理解 NoOp 补齐使所有 SM 队列等长",
+            "理解 instructions / timings 张量的形状与用途"
+          ],
+          "source_files": [
+            "megakernels/scheduler.py"
+          ],
+          "minimal_modules": [
+            "serialize_and_pad",
+            "NoOp 补齐",
+            "instructions / timings 张量形状"
+          ],
+          "practice_task": "给定两条指令手算 flatten 后的 int 列表，验证每条恰好占 32 个 int；解释 timings 张量为何要按 [num_sms, queue_len, 128] 分配。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Generators 执行模型与 MK_Interpreter",
+          "order": 3,
+          "filename": "u4-l3-generators-execution-model.md",
+          "level": "intermediate",
+          "topic": "MK_Generator 如何在 decode 循环里填 hidden_states、调用 interpreter.interpret 跑 megakernel、再 argmax 出 token；MK_Interpreter 如何加载并调用编译好的 mk_llama。",
+          "learning_goals": [
+            "理解 MK_Generator.run 的 embed→mk→argmax 链路",
+            "理解 replace_with_noops / skip_mk / skip_rest 的用途",
+            "理解 MK_Interpreter 与 LatencyMK_Interpreter 的参数对齐"
+          ],
+          "source_files": [
+            "megakernels/generators.py",
+            "megakernels/mk.py",
+            "megakernels/demos/latency/mk.py"
+          ],
+          "minimal_modules": [
+            "MK_Generator.run / replace_with_noops",
+            "MK_Interpreter 加载 mk_llama",
+            "LatencyMK_Interpreter.interpret 参数对齐"
+          ],
+          "practice_task": "解释 replace_with_noops 为何能用来测量纯内核开销；追踪 interpret 传给 mk_func 的参数顺序与 globals 字段的对应关系。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "CUDA megakernel 内核骨架",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "config.cuh：VM 配置与共享内存布局",
+          "order": 1,
+          "filename": "u5-l1-config-and-shared-memory.md",
+          "level": "intermediate",
+          "topic": "default_config 定义 VM 的硬件参数：warp 数量、page 大小、静态/动态共享内存划分、寄存器配额与指令宽度。",
+          "learning_goals": [
+            "理解 NUM_CONSUMER_WARPS / NUM_WARPS / NUM_THREADS 的关系",
+            "理解 PAGE_SIZE / NUM_PAGES 与静态/动态共享内存的划分",
+            "理解 INSTRUCTION_WIDTH / TIMING_WIDTH / DYNAMIC_SEMAPHORES"
+          ],
+          "source_files": [
+            "include/config.cuh"
+          ],
+          "minimal_modules": [
+            "warp / 线程配置",
+            "page 与共享内存划分",
+            "instruction / timing 布局"
+          ],
+          "practice_task": "手算 STATIC_SHARED_MEMORY 与 NUM_PAGES 的值，解释为何有 static_assert(NUM_PAGES == 13)。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "内核入口与 warp 角色特化",
+          "order": 2,
+          "filename": "u5-l2-kernel-entry-and-warp-specialization.md",
+          "level": "intermediate",
+          "topic": "megakernel.cuh 的 mk 内核如何初始化共享内存与信号量，并把不同 warp 派给 consumer / loader / storer / launcher / controller 五种角色。",
+          "learning_goals": [
+            "理解内核启动注解 __launch_bounds__ / __cluster_dims__",
+            "理解按 warpid 的角色分派 switch（consumer 16 个 + 4 个职能 warp）",
+            "理解 megakernel_wrapper 与 NoOp 转发"
+          ],
+          "source_files": [
+            "include/megakernel.cuh",
+            "include/config.cuh"
+          ],
+          "minimal_modules": [
+            "共享内存与信号量初始化",
+            "warp 角色分派 switch",
+            "megakernel_wrapper / NoOp 转发"
+          ],
+          "practice_task": "画出全部 20 个 warp 的角色分配表（16 consumer + loader/storer/launcher/controller），解释 consumer 增加 / 非 consumer 减少寄存器的原因。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "VM 状态 state 与 instruction_state_t",
+          "order": 3,
+          "filename": "u5-l3-vm-state-and-pages.md",
+          "level": "intermediate",
+          "topic": "util.cuh 的 state 结构体持有 VM 运行态：指令环、page 数组、动态信号量、pid_order；以及 instruction_state_t 与 page 的共享内存布局。",
+          "learning_goals": [
+            "理解 instruction_index / instruction_ring 的环形推进",
+            "理解 pid() 把逻辑页映射到物理页",
+            "理解 await_instruction / next_instruction 的节拍"
+          ],
+          "source_files": [
+            "include/util.cuh",
+            "include/config.cuh"
+          ],
+          "minimal_modules": [
+            "instruction_state_t 布局",
+            "state 字段与 pid_order",
+            "await / next_instruction"
+          ],
+          "practice_task": "解释 pid_order_shared_addr 与 await_instruction 的关系；追踪一条指令从 instruction_arrived 到 instruction_finished 的信号量流转。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "MAKE_WORKER 宏与 dispatch_op 派发",
+          "order": 4,
+          "filename": "u5-l4-make-worker-and-dispatch.md",
+          "level": "intermediate",
+          "topic": "MAKE_WORKER 宏为 loader/storer/consumer/launcher 生成统一主循环；dispatch_op 模板按 opcode 把指令派发给对应 op 的子结构。",
+          "learning_goals": [
+            "理解 MAKE_WORKER 展开后的 main_loop 结构",
+            "理解 dispatch_op 的模板递归匹配 opcode",
+            "理解 *_op_dispatcher 如何桥接 worker 与 op 子结构"
+          ],
+          "source_files": [
+            "include/util.cuh",
+            "include/loader.cuh",
+            "include/consumer.cuh",
+            "include/storer.cuh",
+            "include/launcher.cuh"
+          ],
+          "minimal_modules": [
+            "MAKE_WORKER 宏展开",
+            "各 worker 的 main_loop",
+            "dispatch_op 模板派发"
+          ],
+          "practice_task": "手动展开 MAKE_WORKER(loader, ...) 说明 loader 的 main_loop 如何对每条指令依次 await→record→dispatch→next。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "控制器——VM 的大脑",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "controller.cuh 主控制循环",
+          "order": 1,
+          "filename": "u6-l1-controller-main-loop.md",
+          "level": "intermediate",
+          "topic": "controller 是 VM 大脑：逐条取指、建立物理页序、构造信号量、通过 instruction_arrived 通知其他 worker 指令就绪。",
+          "learning_goals": [
+            "理解 controller 的四步流程（取指 / 页分配 / 信号量构造 / 通知）",
+            "理解 instruction_arrived / instruction_finished 的双相节拍",
+            "理解环形 buffer 实现的指令流水"
+          ],
+          "source_files": [
+            "include/controller/controller.cuh",
+            "include/util.cuh"
+          ],
+          "minimal_modules": [
+            "四步控制流程",
+            "instruction_ring 流水",
+            "结尾收尾与 timings 回写循环"
+          ],
+          "practice_task": "画出 controller 处理一条指令的 4 步时序图；解释为什么处理新指令前要先 wait 上一条的 instruction_finished。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "instruction_fetch 与 page_allocator",
+          "order": 2,
+          "filename": "u6-l2-instruction-fetch-and-page-allocator.md",
+          "level": "intermediate",
+          "topic": "instruction_fetch 用 lane-stride 从 gmem 读取 32 个 int 的指令；page_allocator 通过 op 的 release_lid 决定每条指令的物理页顺序。",
+          "learning_goals": [
+            "理解 load_instructions 的向量化读取",
+            "理解逻辑页 lid 与物理页 pid 的映射",
+            "理解 release_lid 如何复用上一条指令的 pid_order"
+          ],
+          "source_files": [
+            "include/controller/instruction_fetch.cuh",
+            "include/controller/page_allocator.cuh"
+          ],
+          "minimal_modules": [
+            "instruction_fetch_loop",
+            "page_allocator_loop",
+            "release_lid 与 pid_order"
+          ],
+          "practice_task": "解释 page_allocator 为何要读取「上一条指令」的 opcode 来决定当前页序；追踪一次 lid→pid 的映射过程。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "semaphore_constructor 与 timings_store",
+          "order": 3,
+          "filename": "u6-l3-semaphore-constructor-and-timings.md",
+          "level": "intermediate",
+          "topic": "semaphore_constructor 调用 op 的 init_semaphores 建立该指令所需的信号量；timings_store 把每条指令的计时数据写回 gmem。",
+          "learning_goals": [
+            "理解每条指令动态分配的信号量集合",
+            "理解 invalidate_semaphore 实现信号量槽位复用",
+            "理解 TEVENT_* 计时事件的记录与回写"
+          ],
+          "source_files": [
+            "include/controller/semaphore_constructor.cuh",
+            "include/controller/timings_store.cuh",
+            "include/util.cuh"
+          ],
+          "minimal_modules": [
+            "semaphore_constructor_loop",
+            "init_semaphores 返回数量",
+            "store_timings_and_reset"
+          ],
+          "practice_task": "解释信号量为何要在指令结束后 invalidate；列出 util.cuh 中主要 TEVENT_* 计时事件的含义与槽位编号约定。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "同步原语：page 与信号量",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "共享内存 page 生命周期",
+          "order": 1,
+          "filename": "u7-l1-shared-memory-page-lifecycle.md",
+          "level": "intermediate",
+          "topic": "动态共享内存被切成 NUM_PAGES 个 page；通过 pid / wait_page_ready / finish_page 管理 page 的生产-消费生命周期。",
+          "learning_goals": [
+            "理解 page / mini_page 的结构",
+            "理解 page_finished 用二进制相位信号量跟踪 page 状态",
+            "理解 wait_page_ready / finish_page / warp_finish_page"
+          ],
+          "source_files": [
+            "include/util.cuh",
+            "include/config.cuh"
+          ],
+          "minimal_modules": [
+            "page 结构",
+            "page_finished 相位信号量",
+            "wait_page_ready / finish_page"
+          ],
+          "practice_task": "解释 page_finished 为何用 INSTRUCTION_PIPELINE_STAGES_BITS（=1）个信号量；推演一次 page 被多个 consumer 读完再释放的过程。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "动态信号量与 phase bit 双缓冲",
+          "order": 2,
+          "filename": "u7-l2-dynamic-semaphores-and-phase-bits.md",
+          "level": "intermediate",
+          "topic": "每个 op 在 DYNAMIC_SEMAPHORES 槽位里动态分配信号量，用相位位（phase bit）实现双缓冲流水线同步，semaphores_ready 协调构造与消费。",
+          "learning_goals": [
+            "理解 kittens::semaphore 的 init / wait / arrive / invalidate",
+            "理解相位位如何让两级流水线复用同一信号量",
+            "理解 semaphores_ready 的节拍作用"
+          ],
+          "source_files": [
+            "include/util.cuh",
+            "include/controller/semaphore_constructor.cuh",
+            "include/controller/controller.cuh"
+          ],
+          "minimal_modules": [
+            "semaphore API",
+            "相位位与 2 级流水",
+            "semaphores_ready 同步"
+          ],
+          "practice_task": "以 NoOp 与一个两阶段 op 为例，画出 arrived / finished 信号量相位位随指令推进的翻转过程。",
+          "depends_on": [
+            "u7-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "编写一个 op",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "op 接口：以 NoOp 为参照",
+          "order": 1,
+          "filename": "u8-l1-op-interface-noop-reference.md",
+          "level": "advanced",
+          "topic": "每个 op 是一个含 controller / loader / launcher / consumer / storer 五个子结构的模板结构体；NoOp 是最小可运行参照，展示各角色职责。",
+          "learning_goals": [
+            "掌握 op 五子结构的职责划分",
+            "理解 controller 的 release_lid / init_semaphores",
+            "理解 NoOp 如何尽早释放所有 page"
+          ],
+          "source_files": [
+            "include/noop.cuh",
+            "include/util.cuh"
+          ],
+          "minimal_modules": [
+            "op 五子结构",
+            "controller 的 release_lid / init_semaphores",
+            "NoOp 各角色实现"
+          ],
+          "practice_task": "以 NoOp 为模板写一个最小 op：loader 打印一条信息、其余角色安全释放 page（参考 mk_init 的 TestOp）。",
+          "depends_on": [
+            "u5-l4",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "matvec_pipeline：load/compute/store 流水线",
+          "order": 2,
+          "filename": "u8-l2-matvec-pipeline.md",
+          "level": "advanced",
+          "topic": "matvec_pipeline 模板把一个 matvec op 拆成多阶段 load / compute / store 流水，用 page 与一组信号量重叠访存与计算。",
+          "learning_goals": [
+            "理解 INPUT / OUTPUT_PIPELINE_STAGES 与 STAGE_PAGES",
+            "理解 weights_arrived/finished、outputs_arrived/finished 命名约定",
+            "理解 release_lid 的页分配 ret_order"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/matvec_pipeline.cuh"
+          ],
+          "minimal_modules": [
+            "pipeline 常量与 page 分配",
+            "loader / consumer / storer_loop",
+            "信号量命名约定"
+          ],
+          "practice_task": "画出 3 级 input + 3 级 output 流水的时序甘特图；解释 release_lid 中不同 remainder 对应的 ret_order 含义。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "rms_matvec_pipeline 与 matvec/rms_norm 设备函数",
+          "order": 3,
+          "filename": "u8-l3-rms-matvec-pipeline-and-kernels.md",
+          "level": "advanced",
+          "topic": "rms_matvec_pipeline 在 matvec_pipeline 基础上加入 RMSNorm 预处理；utils.cuh 提供 matvec / rms_norm / matvec_reduce 设备函数（Hopper 乘加 vs Blackwell mma_ABt）。",
+          "learning_goals": [
+            "理解 rms_scale 的异步加载与归一化",
+            "理解 matvec 用 tensor core 的两种实现（Hopper/Blackwell）",
+            "理解 matvec_reduce 跨 warp 归约"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/matvec_pipeline.cuh",
+            "demos/low-latency-llama/utils.cuh"
+          ],
+          "minimal_modules": [
+            "rms_matvec_pipeline 扩展",
+            "matvec 设备函数",
+            "matvec_reduce 归约"
+          ],
+          "practice_task": "对比 Hopper 与 Blackwell 两个 matvec 分支的实现差异；解释 rms_norm 为何需要两阶段（warp 内 + 跨 warp）归约。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "实战 op：rms_qkv_rope_append",
+          "order": 4,
+          "filename": "u8-l4-op-rms-qkv-rope-append.md",
+          "level": "advanced",
+          "topic": "rms_qkv_rope_append 实战 op：RMSNorm + QKV matvec + 对 Q/K 做 RoPE + 把 K/V 通过 TMA 追加进 KV cache。",
+          "learning_goals": [
+            "理解 parsed_instruction 如何从 32 个 int 解析参数",
+            "理解 pipeline_specifics 的 load_iter / store 回调",
+            "理解 RoPE 计算与 K/V cache 追加的 TMA store"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/rms_matvec_rope_append.cu",
+            "demos/low-latency-llama/matvec_pipeline.cuh"
+          ],
+          "minimal_modules": [
+            "parsed_instruction",
+            "pipeline_specifics (load/store)",
+            "RoPE 与 KV cache 追加"
+          ],
+          "practice_task": "对一个 block_idx 判断它落在 Q/K/V 哪个区间并解释 store 的对应分支；解释 store 末尾 atomicAdd 更新 globals.Bar 的作用。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "注意力与专用 op",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "attention_partial：单 warp flash attention",
+          "order": 1,
+          "filename": "u9-l1-attention-partial-flash.md",
+          "level": "advanced",
+          "topic": "attention_partial 用单 warp 实现分块 flash attention：Q@K.T、在线 softmax（max/exp2 rescale）、A@V，并把部分和与 LSE 写回共享内存/全局。",
+          "learning_goals": [
+            "理解 Q/K/V tile 类型与 NUM_STAGES 双缓冲",
+            "理解在线 softmax 的 max/rescale 数学",
+            "理解 O / L 中间结果的共享内存布局与 store_4_rows"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/attention_partial.cu"
+          ],
+          "minimal_modules": [
+            "Q/K/V tile 类型",
+            "在线 softmax 循环",
+            "store_4_rows 与 LSE 写回"
+          ],
+          "practice_task": "推演在线 softmax 每一步对 O_reg 与 norm_vec 的 rescale；解释 static_assert(GQA_RATIO == 4) 的来源。",
+          "depends_on": [
+            "u8-l4",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "跨 op 全局屏障：Bar + atomicAdd 自旋",
+          "order": 2,
+          "filename": "u9-l2-cross-op-global-barriers.md",
+          "level": "advanced",
+          "topic": "不同 op 之间通过全局内存的 Bar 张量 + atomicAdd + __nanosleep 自旋等待实现跨 SM 同步（如 attention 等待 QKV 写完）。",
+          "learning_goals": [
+            "理解 globals.Bar 的 [layer, opcode-1, head] 索引含义",
+            "理解 EXPECTED_ARRIVAL_COUNT 计数阈值",
+            "理解 gmem_wait 的自旋等待模式"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/attention_partial.cu",
+            "demos/low-latency-llama/rms_matvec_rope_append.cu",
+            "demos/low-latency-llama/llama.cuh"
+          ],
+          "minimal_modules": [
+            "Bar 张量布局",
+            "atomicAdd 信号",
+            "自旋等待 gmem_wait"
+          ],
+          "practice_task": "画出单层内 QKV→PartialAttention 的 Bar 计数流转图；解释索引里 opcode-1 的含义以及为何用 atomicAdd。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "其余 op：MatVecAddOp 与 attention_reduction",
+          "order": 3,
+          "filename": "u9-l3-remaining-ops.md",
+          "level": "advanced",
+          "topic": "MatVecAddOp 模板复用实现 o_proj / down_proj 的残差累加；attention_reduction 用 log-sum-exp 合并多个 partial；upgate / rms_lm_head 遵循同样的流水线模式。",
+          "learning_goals": [
+            "理解 MatVecAddOp 如何用模板参数复用于 o_proj / down_proj",
+            "理解 attention_reduction 的 LSE 合并数学",
+            "理解 store_add_async 实现残差累加"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/matvec_adds.cu",
+            "demos/low-latency-llama/attention_reduction.cu"
+          ],
+          "minimal_modules": [
+            "MatVecAddOp 模板 (o/down)",
+            "attention_reduction LSE 合并",
+            "upgate / rms_lm_head 概述"
+          ],
+          "practice_task": "解释 o_proj 与 down_proj 为何能共用 MatVecAddOp（模板参数差异在哪）；对比 attention_reduction 与 attention_partial 对 LSE 的不同处理。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "扩展与工程化",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "用 mk_init 搭建你自己的 megakernel",
+          "order": 1,
+          "filename": "u10-l1-build-your-own-megakernel.md",
+          "level": "advanced",
+          "topic": "用 util/mk_init 脚手架生成一个新 megakernel 项目，理解模板里的 globals / TestOp / setup.py 如何对接框架内核与构建。",
+          "learning_goals": [
+            "会用 mk_init 的 main.py 交互式生成项目",
+            "理解 scaffolded .cu 里 TestOp 的五子结构",
+            "理解 setup.py 调用 nvcc 的构建流程"
+          ],
+          "source_files": [
+            "util/mk_init/main.py",
+            "util/mk_init/sources/src/{{PROJECT_NAME_LOWER}}.cu",
+            "util/mk_init/sources/setup.py"
+          ],
+          "minimal_modules": [
+            "mk_init 脚本流程",
+            "TestOp 模板",
+            "setup.py / build_ext 构建"
+          ],
+          "practice_task": "运行 mk_init 生成一个项目，阅读 TestOp 并修改其 loader 打印自定义信息，描述编译它所需的全部环境变量。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "globals 结构设计：kittens gl 与 TMA",
+          "order": 2,
+          "filename": "u10-l2-globals-struct-design.md",
+          "level": "advanced",
+          "topic": "llama.cuh 的 globals_t 把所有权重/缓冲声明为 kittens::gl 全局张量（含 TMA descriptor），并暴露 grid / block / dynamic_shared_memory 给内核启动器。",
+          "learning_goals": [
+            "理解 weights_t / norm_weights_t / kv_cache_t 等 gl 类型",
+            "理解 kv_cache_t 内嵌的 TMA descriptor",
+            "理解 grid / block / dynamic_shared_memory 与 llama_1b_globals 特化"
+          ],
+          "source_files": [
+            "demos/low-latency-llama/llama.cuh",
+            "demos/low-latency-llama/llama.cu",
+            "include/config.cuh"
+          ],
+          "minimal_modules": [
+            "globals_t 字段与 gl 类型",
+            "kv_cache_t TMA descriptor",
+            "grid/block/shm 与 llama_1b_globals 特化"
+          ],
+          "practice_task": "解释 weights_t 为何用 st_bf<16,512> 作为子块类型；列出 llama_1b 的关键常量（层数、hidden/intermediate/head_dim、SM 数）。",
+          "depends_on": [
+            "u5-l1",
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "diff 测试与 python_vm 参考实现",
+          "order": 3,
+          "filename": "u10-l3-diff-testing-and-pyvm.md",
+          "level": "advanced",
+          "topic": "python_vm 提供每个 op 的纯 PyTorch 参考实现，diff_test.py 把 pyvm 与 mk 的输出逐张量对比以验证内核正确性。",
+          "learning_goals": [
+            "理解 PyVM_Interpreter 与 INSTRUCTION_TO_SOLVER 映射",
+            "理解 latency solvers（matvec / rms_norm / attention 等）",
+            "理解 diff_test.py 的对照流程与 BaseGlobals.diff 指标"
+          ],
+          "source_files": [
+            "megakernels/python_vm.py",
+            "megakernels/demos/latency/python_vm.py",
+            "megakernels/scripts/diff_test.py"
+          ],
+          "minimal_modules": [
+            "PyVM_Interpreter",
+            "latency solvers (matvec/rms_norm/attention)",
+            "diff_test 对照与 diff()"
+          ],
+          "practice_task": "用 diff_test.py 对照 pyvm 与 mk（或 pyvm 与 torch），解释输出的 max adiff / mean rdiff 两个指标的含义与可接受范围。",
+          "depends_on": [
+            "u4-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "latency vs throughput 与 pybind11 绑定",
+          "order": 4,
+          "filename": "u10-l4-latency-vs-throughput-and-binding.md",
+          "level": "advanced",
+          "topic": "dispatch.py 通过 setting=latency/throughput 切换 ScheduleBuilder 与 Interpreter；llama.cu 用 pybind11 + kittens::py::bind_kernel 把内核及其 globals 字段暴露给 Python。",
+          "learning_goals": [
+            "理解 latency 与 throughput 两套 demo 的差异",
+            "理解 dispatch 的工厂映射（builder/interpreter/solver）",
+            "理解 bind_kernel 的参数绑定顺序与 globals 字段的对应"
+          ],
+          "source_files": [
+            "megakernels/dispatch.py",
+            "megakernels/demos/throughput/mk.py",
+            "demos/low-latency-llama/llama.cu"
+          ],
+          "minimal_modules": [
+            "dispatch 工厂映射",
+            "throughput mk 参数差异",
+            "bind_kernel 与 PYBIND11_MODULE"
+          ],
+          "practice_task": "对比 LatencyMK_Interpreter 与 ThroughputMK_Interpreter 传给 mk_func 的参数差异；解释 llama.cu 中 bind_kernel 的字段顺序如何与 globals_t 一一对应。",
+          "depends_on": [
+            "u2-l1",
+            "u9-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

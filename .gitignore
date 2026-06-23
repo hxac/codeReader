@@ -1,0 +1,28 @@
+# 被分析的仓库工作副本（运行时 clone，不入库）
+/work/
+
+# debug 模式沙箱（RC_DEBUG：state/work/tutorials 写这里，不污染正式产物）
+/.debug/
+.debug/
+
+# act artifact server 本地存储（--artifact-server-path）
+/.act-artifacts/
+.act-artifacts/
+
+# 本地 secrets（.env 不入库；.env.example 是模板入 git）
+/.env
+.env
+/.secrets
+.secrets
+
+# 个人本地 agent 操作手册（CLAUDE.local.md 约定，不入库）
+/CLAUDE.local.md
+CLAUDE.local.md
+
+# 日志
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
