@@ -1,0 +1,433 @@
+{
+  "project": "DualPipe",
+  "head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
+  "rationale": "DualPipe 代码量小但概念密度极高：核心是 DeepSeek-V3 的双向流水线并行调度算法，难点不在单个函数，而在『8 步调度 + 零气泡 + 前反向重叠』的整体编排。因此大纲按四层递进设计：第 1 单元（入门）建立全局认知——项目定位、如何运行示例、包结构与公共导出；第 2 单元（进阶基础）补齐贯穿全项目的公共机制——双向流水线/微批次概念、comm.py 的 P2P 通信、scatter/gather 微批次切分、以及零气泡 WeightGradStore；第 3 单元（进阶核心）逐层解剖 DualPipe 引擎，从 rank 拓扑 → 状态与计算原语 → 前反向重叠 overlapped_forward_backward → 通信原语与组合操作 → 最终汇成 8 步调度 step()；第 4 单元（专家）以 DualPipeV 的 V 型变体做对比、分析双向 vs V 型的设备/显存取舍，并以 examples 的自定义模块与数值校验作为端到端实战收尾。讲义之间通过 depends_on 严格成链，确保读者始终在前置知识完备时进入下一层；专家层专门呼应 README 的对比表与 examples 的 ref_step/cal_diff 校验方法，做到概念与工程闭环。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步与定位",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：DualPipe 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 DualPipe 的定位、它要解决的流水线气泡问题，以及它与 1F1B / ZB1P 在气泡大小和显存占用上的对比。",
+          "learning_goals": [
+            "理解流水线并行中『气泡』产生的原因",
+            "了解 DualPipe 双向流水线 + 计算/通信重叠的核心思想",
+            "读懂 README 中的气泡与显存对比表"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README 项目概述",
+            "气泡与显存对比表"
+          ],
+          "practice_task": "阅读 README，写出 1F1B 与 DualPipe 在相同 PP 阶段数下的气泡大小公式，并用自己的话解释 DualPipe 气泡更小的原因。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "运行示例与环境准备",
+          "order": 2,
+          "filename": "u1-l2-setup-and-run-examples.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 DualPipe、准备多 GPU 分布式环境，并通过 examples 中的脚本运行 DualPipe / DualPipeV 示例。",
+          "learning_goals": [
+            "了解依赖（PyTorch 2.0+）与 setup.py 安装方式",
+            "掌握 examples 入口用 torch.multiprocessing.spawn 启动多进程的流程",
+            "理解 main(rank, pp_size) 的初始化与校验链路"
+          ],
+          "source_files": [
+            "setup.py",
+            "examples/example_dualpipe.py",
+            "examples/example_dualpipev.py"
+          ],
+          "minimal_modules": [
+            "setup.py 打包与版本",
+            "示例 spawn 入口"
+          ],
+          "practice_task": "在可用 GPU 环境运行 python examples/example_dualpipev.py 并记录输出；若无 GPU，则阅读代码梳理 main(rank, pp_size) 从 init_process_group 到 step 校验的完整调用链。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与包导出",
+          "order": 3,
+          "filename": "u1-l3-package-structure-and-exports.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录布局，并解析 dualpipe/__init__.py 导出的五个公共 API 符号及其来源文件。",
+          "learning_goals": [
+            "熟悉项目目录结构（dualpipe/examples/images 等）",
+            "记住 DualPipe / DualPipeV / WeightGradStore / set_p2p_tensor_shapes / set_p2p_tensor_dtype 五个导出",
+            "理解包内文件之间的 import 依赖关系"
+          ],
+          "source_files": [
+            "dualpipe/__init__.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "__init__ 导出符号",
+            "模块依赖关系"
+          ],
+          "practice_task": "绘制 dualpipe 包内 comm.py / utils.py / dualpipe.py / dualpipev.py 之间的 import 依赖图，并标注每个导出符号分别来自哪个文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共基础设施",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "双向流水线与微批次核心概念",
+          "order": 1,
+          "filename": "u2-l1-bidirectional-pipeline-concepts.md",
+          "level": "intermediate",
+          "topic": "讲解流水线并行、微批次（micro-batch/chunk）切分动机，以及双向流水线中每个 rank 持有两个对称模块的设计。",
+          "learning_goals": [
+            "理解微批次切分如何提高设备利用率",
+            "理解 forward / reverse 两个方向（phase）与每个 rank 两个模块的对应关系",
+            "结合 README 调度图看懂双向数据流"
+          ],
+          "source_files": [
+            "README.md",
+            "dualpipe/dualpipe.py",
+            "examples/example_dualpipe.py"
+          ],
+          "minimal_modules": [
+            "微批次 scatter 概念",
+            "双向两模块设计"
+          ],
+          "practice_task": "结合 example_dualpipe.py 中 local_modules = nn.Sequential(stage, stage) 的构造，解释为什么每个进程要持有两个 stage，以及它们分别对应完整模型的哪一部分。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "通信层 comm.py：P2P 收发",
+          "order": 2,
+          "filename": "u2-l2-comm-p2p-layer.md",
+          "level": "intermediate",
+          "topic": "解析 P2P 通信辅助函数：全局张量形状/dtype 设置，以及 append_irecv / append_isend 如何累积 P2POp 并完成全局 rank 映射。",
+          "learning_goals": [
+            "掌握 set_p2p_tensor_shapes / set_p2p_tensor_dtype 的作用",
+            "理解 append_irecv / append_isend 如何向 ops 列表累积 P2POp",
+            "理解 get_global_rank 的组内 rank 到全局 rank 的转换"
+          ],
+          "source_files": [
+            "dualpipe/comm.py"
+          ],
+          "minimal_modules": [
+            "TENSOR_SHAPES / TENSOR_DTYPE",
+            "append_irecv / append_isend",
+            "build_from_tensor_shapes"
+          ],
+          "practice_task": "编写一段代码：先调用 set_p2p_tensor_shapes / set_p2p_tensor_dtype，再用 append_irecv / append_isend 构造一组 P2POp，并说明它们后续如何被 dist.batch_isend_irecv 一次性提交。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "微批次切分与张量拼接 scatter/gather",
+          "order": 3,
+          "filename": "u2-l3-scatter-gather-microbatch.md",
+          "level": "intermediate",
+          "topic": "解析 utils.py 中 chunk_tensor / cat_tensor / scatter / gather 如何把整批输入切成微批次列表，并在最后聚合输出。",
+          "learning_goals": [
+            "理解 scatter 按维度切分并重组为 microbatch 列表的过程",
+            "理解 gather 把多个微批次输出聚合回完整输出",
+            "理解 None 张量与单元素情况的边界处理"
+          ],
+          "source_files": [
+            "dualpipe/utils.py"
+          ],
+          "minimal_modules": [
+            "scatter / gather",
+            "chunk_tensor / cat_tensor"
+          ],
+          "practice_task": "构造一个形状 (24, 8) 的随机张量，用 scatter(x, 4, 0) 切成 4 个微批次，再 gather 回来，验证结果与原张量一致；并测试传入 None 输入时的行为。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "零气泡机制 WeightGradStore",
+          "order": 4,
+          "filename": "u2-l4-weightgradstore-zero-bubble.md",
+          "level": "intermediate",
+          "topic": "解析 WeightGradStore 如何缓存权重梯度计算并在后续填充气泡时重放，以及 run_backward 辅助函数的作用。",
+          "learning_goals": [
+            "理解 put / flush / pop / clear 的两级缓存与队列语义",
+            "理解为什么把权重梯度延后计算能减少流水线气泡",
+            "理解 run_backward 的关键字参数含义"
+          ],
+          "source_files": [
+            "dualpipe/utils.py"
+          ],
+          "minimal_modules": [
+            "WeightGradStore 类",
+            "run_backward"
+          ],
+          "practice_task": "用 WeightGradStore 模拟：put 三个延迟函数后 flush，再连续 pop，观察执行顺序（FIFO），并解释 DualPipe 中 enable_zb 标志控制的作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "DualPipe 引擎剖析",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "DualPipe 初始化与 rank 拓扑",
+          "order": 1,
+          "filename": "u3-l1-dualpipe-init-rank-topology.md",
+          "level": "intermediate",
+          "topic": "解析 DualPipe.__init__ 中的 rank_mapping / rank_inverse_mapping 双向映射，以及 prev/next/first/last/middle/second-half 等拓扑判定。",
+          "learning_goals": [
+            "理解每个进程持有两个模块的设计",
+            "掌握 rank_mapping 与 rank_inverse_mapping 的互逆计算",
+            "理解 is_middle_rank / is_in_second_half 在调度中的意义"
+          ],
+          "source_files": [
+            "dualpipe/dualpipe.py"
+          ],
+          "minimal_modules": [
+            "__init__ 拓扑计算",
+            "rank_mapping / rank_inverse_mapping"
+          ],
+          "practice_task": "假设 num_ranks=8，给定一个 rank_mapping，手算 first / prev / next / last / middle 各 rank 的取值，并标注哪些 rank 落在 second half。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "状态管理与计算原语",
+          "order": 2,
+          "filename": "u3-l2-state-and-compute-primitives.md",
+          "level": "intermediate",
+          "topic": "解析 _reset_states 维护的 chunk 缓冲与计数器，以及 _forward_compute_chunk / _backward_compute_chunk 的执行逻辑。",
+          "learning_goals": [
+            "理解 input/output/input_grad/output_grad 四类两 phase 缓冲的结构",
+            "理解 current_*_chunk_id 计数器的递增与取用方式",
+            "理解 last stage 的 loss.backward 与中间 stage 的 run_backward 差异"
+          ],
+          "source_files": [
+            "dualpipe/dualpipe.py"
+          ],
+          "minimal_modules": [
+            "_reset_states",
+            "_forward_compute_chunk",
+            "_backward_compute_chunk"
+          ],
+          "practice_task": "画出 _reset_states 中各类 chunk 缓冲的二维结构（[phase][chunk_id]），并跟踪一次 _backward_compute_chunk 中 outputs / output_grads 如何被取出并置 None。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "前反向重叠与 overlapped_forward_backward",
+          "order": 3,
+          "filename": "u3-l3-overlapped-forward-backward.md",
+          "level": "intermediate",
+          "topic": "解析 _forward_backward_compute_chunk 如何把一次前向与一次反向重叠，以及用户自定义的 overlapped_forward_backward 钩子与 LinearFunc 自定义 autograd Function。",
+          "learning_goals": [
+            "理解 overlapped_forward_backward 的启用检测条件",
+            "理解钩子的参数约定（module0/inputs0/criterion0/labels0 与 module1/loss1/outputs1/output_grads1）",
+            "理解 LinearFunc.backward 中借助 WeightGradStore.put 实现零气泡的方式"
+          ],
+          "source_files": [
+            "dualpipe/dualpipe.py",
+            "examples/example_dualpipe.py"
+          ],
+          "minimal_modules": [
+            "_forward_backward_compute_chunk",
+            "overlapped_forward_backward 钩子",
+            "LinearFunc 自定义 autograd"
+          ],
+          "practice_task": "参照 example_dualpipe.py，为一个简单的两层线性层实现自定义 autograd Function，在 backward 中根据 WeightGradStore.enabled 决定立即计算权重梯度还是延迟到队列。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "通信原语与组合操作",
+          "order": 4,
+          "filename": "u3-l4-comm-primitives-and-composite-ops.md",
+          "level": "intermediate",
+          "topic": "解析 _recv/_send forward/backward、_commit_and_wait_comm 批量提交、_free_tensors 显存回收，以及 _forward_chunk / _backward_chunk / _forward_backward_chunk / _weight_chunk 组合操作。",
+          "learning_goals": [
+            "理解 phase ^= is_in_second_half 的方向翻转技巧",
+            "理解 first/last stage 的收发短路逻辑",
+            "理解 batch_isend_irecv 批量提交与 to_free 张量回收时机"
+          ],
+          "source_files": [
+            "dualpipe/dualpipe.py",
+            "dualpipe/comm.py"
+          ],
+          "minimal_modules": [
+            "_recv/_send_forward/_backward",
+            "_commit_and_wait_comm / _free_tensors",
+            "_forward_chunk / _backward_chunk / _weight_chunk 组合"
+          ],
+          "practice_task": "跟踪一次 _forward_backward_chunk(0, 1) 的完整调用序列，列出 recv → commit_wait → compute → send 的顺序，并解释 to_free 中的张量何时被释放。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "DualPipe 八步调度引擎 step()",
+          "order": 5,
+          "filename": "u3-l5-dualpipe-eight-step-schedule.md",
+          "level": "intermediate",
+          "topic": "逐段解析 DualPipe.step 的 8 步调度（nF0 / nF0F1 / nB1W1F1 / nF0B1F1B0 / nB1F1B0 / nB1B0 / nWB0 / nW）以及最终 loss / outputs 的聚合与返回规则。",
+          "learning_goals": [
+            "理解每步循环次数公式（num_half_ranks、half_rank、half_num_chunks 的关系）",
+            "理解主步 nF0B1F1B0 的全重叠与 middle rank 特殊处理",
+            "理解零气泡在 step3/6/7 的启用与 step8 的权重梯度刷新"
+          ],
+          "source_files": [
+            "dualpipe/dualpipe.py"
+          ],
+          "minimal_modules": [
+            "step 八步调度",
+            "loss / outputs 聚合"
+          ],
+          "practice_task": "取 num_ranks=8、num_chunks=20，对 middle rank 与某个普通 rank 分别计算 step_1..step_8 的循环次数，并对照 README 调度图说明每步对应图中的哪个区域。",
+          "depends_on": [
+            "u3-l4",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "DualPipeV 变体与实战",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "DualPipeV 的 V 型调度",
+          "order": 1,
+          "filename": "u4-l1-dualpipev-v-schedule.md",
+          "level": "advanced",
+          "topic": "解析 DualPipeV 的 V 型（cut-in-half）调度：只在 first rank 喂数据、在 last rank 处把 phase0 输出 detach 后作为 phase1 输入的转折机制，以及它的 8 步调度差异。",
+          "learning_goals": [
+            "理解 DualPipeV 与 DualPipe 在拓扑和输入喂入方式上的差异",
+            "理解 last rank 处 detach().requires_grad_() 如何形成 V 型转折",
+            "理解 DualPipeV.step 的 8 步及循环公式与 DualPipe 的区别"
+          ],
+          "source_files": [
+            "dualpipe/dualpipev.py"
+          ],
+          "minimal_modules": [
+            "DualPipeV 初始化",
+            "V 型转折 detach 衔接",
+            "DualPipeV.step"
+          ],
+          "practice_task": "对比 DualPipeV 与 DualPipe 的 _forward_compute_chunk / _backward_compute_chunk，标出 last rank 处 phase0↔phase1 衔接的几行差异代码并解释其作用。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "双向 vs V 型：气泡、显存与设备取舍",
+          "order": 2,
+          "filename": "u4-l2-dualpipe-vs-dualpipev-tradeoffs.md",
+          "level": "advanced",
+          "topic": "基于 README 对比表与两套调度代码，分析 DualPipe 与 DualPipeV 在气泡大小、激活显存、所需设备数上的工程取舍。",
+          "learning_goals": [
+            "理解相同 PP 阶段数下 DualPipe 需 PP 个设备而 DualPipeV 需 PP/2 个设备",
+            "理解两者气泡公式相同但设备效率不同",
+            "能够根据训练场景在两种调度间做选型"
+          ],
+          "source_files": [
+            "README.md",
+            "dualpipe/dualpipe.py",
+            "dualpipe/dualpipev.py"
+          ],
+          "minimal_modules": [
+            "README 对比表",
+            "设备数与激活显存差异"
+          ],
+          "practice_task": "撰写一段对比说明：在 8 个 PP 阶段、相同微批次下，DualPipe 与 DualPipeV 分别需要多少设备、激活显存约为多少倍，并给出选型建议。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "实战：自定义流水线模块与正确性验证",
+          "order": 3,
+          "filename": "u4-l3-custom-pipeline-module-lab.md",
+          "level": "advanced",
+          "topic": "以 example_dualpipev.py 为模板，实战实现一个带 overlapped_forward_backward 的自定义 PipelineStage，并用 ref_step 与 cal_diff 做数值正确性验证。",
+          "learning_goals": [
+            "掌握从零搭建可被 DualPipe/DualPipeV 调度的模块的约束",
+            "掌握用 ref_step 对照验证 loss 与梯度的方法",
+            "理解 cal_diff 余弦差异度量与阈值含义"
+          ],
+          "source_files": [
+            "examples/example_dualpipev.py",
+            "examples/example_dualpipe.py",
+            "dualpipe/utils.py"
+          ],
+          "minimal_modules": [
+            "PipelineStage 自定义",
+            "ref_step 校验",
+            "cal_diff 度量"
+          ],
+          "practice_task": "修改 example_dualpipev.py 中的 PipelineStage（如更换激活函数或增减层数），重新运行并确保 cal_diff < 1e-13 的梯度校验仍通过；总结自定义模块需要满足哪些约束。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
