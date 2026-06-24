@@ -1,0 +1,167 @@
+{
+  "project": "cc-switch",
+  "head": "edeee25faef80530e65529c883c90e186fcc2c6c",
+  "rationale": "cc-switch 是一个 Tauri 2 桌面应用（React 18 + TypeScript 前端，Rust 后端），用统一的可视化界面管理 Claude Code、Claude Desktop、Codex、Gemini CLI、OpenCode、OpenClaw、Hermes 七种 AI CLI 工具的配置。其核心设计是 SSOT（SQLite 单一数据源）+ 双层存储 + 双向 Live 文件同步 + 原子写入 + 分层架构（Commands → Services → DAO → Database）。学习路线据此分为三层：入门层（U1）先建立项目定位、技术栈、目录结构与前后端启动流程的整体认知；进阶层（U2–U5）自下而上打通数据存储、Provider 核心机制、多工具配置写入器、前端架构与状态层四条主线，让读者掌握从数据库到 UI 的完整数据链路；专家层（U6–U10）再进入最复杂的子系统——MCP/Prompts/Skills 统一管理、本地代理与故障转移（项目最庞大的模块）、用量与会话统计、平台集成（托盘/Deep Link/云同步/更新/认证），以及测试与二次开发实践。单元内部遵循『先模型后流程、先底层后 UI、先机制后扩展』的顺序，讲义之间通过 depends_on 形成清晰的依赖链，确保读者能从零开始、由浅入深地完整理解并参与这个项目。本次增量（edeee25f）新增了『数据库版本过新』的启动预检与应用内升级恢复界面，该能力被折叠进前/后端启动装配（u1-l4 / u1-l5）与自动更新（u9-l4）三篇讲义，其余讲义内容不受影响。\"",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：CC Switch 解决什么问题",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 cc-switch 是什么、为什么需要它、它统一管理哪七种 AI CLI 工具，以及它的核心功能矩阵。",
+          "learning_goals": [
+            "理解 cc-switch 解决的痛点：手动编辑 JSON/TOML/.env 切换 AI 工具配置",
+            "记住七大支持工具（Claude Code、Claude Desktop、Codex、Gemini CLI、OpenCode、OpenClaw、Hermes）",
+            "了解核心功能：provider 切换、MCP/Skills 管理、本地代理、用量统计、云同步"
+          ],
+          "source_files": [
+            "README.md",
+            "README_ZH.md",
+            "package.json"
+          ],
+          "minimal_modules": [
+            "项目背景与定位",
+            "支持的七种工具",
+            "核心功能矩阵",
+            "数据存储位置说明"
+          ],
+          "practice_task": "克隆仓库并阅读 README，列出七种支持工具各自原来的配置文件路径，并在 docs/user-manual 中找到对应工具的章节。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "技术栈与分层架构总览",
+          "order": 2,
+          "filename": "u1-l2-tech-stack-architecture.md",
+          "level": "beginner",
+          "topic": "从依赖清单和入口文件入手，理解 cc-switch 采用的 Tauri 2 + React + Rust 技术栈，以及前后端分层、SSOT 等核心设计模式。",
+          "learning_goals": [
+            "识别前端技术栈（React/Vite/Tailwind/TanStack Query/shadcn-ui）",
+            "识别后端技术栈（Tauri 2.8/Rust/serde/tokio/rusqlite/axum）",
+            "理解 SSOT、双层存储、双向同步、原子写入、分层架构五大设计原则"
+          ],
+          "source_files": [
+            "README.md",
+            "package.json",
+            "src-tauri/Cargo.toml"
+          ],
+          "minimal_modules": [
+            "前端技术栈解读",
+            "后端技术栈解读",
+            "分层架构图",
+            "核心设计模式"
+          ],
+          "practice_task": "对照 README 的架构图，在 package.json 与 Cargo.toml 中各找出三个对应分层（UI / 业务逻辑 / 数据）的关键依赖，并说明其作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建、运行与目录结构",
+          "order": 3,
+          "filename": "u1-l3-build-and-structure.md",
+          "level": "beginner",
+          "topic": "讲解如何安装依赖、启动开发模式、执行构建与测试，并梳理 src/ 前端与 src-tauri/ 后端的目录组织。",
+          "learning_goals": [
+            "掌握 pnpm dev / pnpm build / pnpm test:unit 等开发命令",
+            "了解 Rust 后端 cargo fmt / clippy / test 命令",
+            "熟悉 src/ 与 src-tauri/src/ 的目录划分"
+          ],
+          "source_files": [
+            "package.json",
+            "README.md",
+            "src-tauri/Cargo.toml",
+            "tsconfig.json"
+          ],
+          "minimal_modules": [
+            "开发命令清单",
+            "前端目录结构",
+            "后端目录结构",
+            "环境要求"
+          ],
+          "practice_task": "运行 pnpm install 后执行 pnpm typecheck 与 pnpm test:unit，记录结果；再画出 src/components 与 src-tauri/src/commands 的二级目录树。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "前端启动流程：从 main.tsx 到 App.tsx",
+          "order": 4,
+          "filename": "u1-l4-frontend-bootstrap.md",
+          "level": "beginner",
+          "topic": "追踪前端入口 main.tsx 的 bootstrap 过程，理解全局 Provider 装配、初始化错误处理、数据库版本过新时的应用内升级恢复界面，以及 App.tsx 的整体布局。",
+          "learning_goals": [
+            "理解 main.tsx 的 bootstrap 与配置加载错误处理",
+            "识别 QueryClientProvider / ThemeProvider / UpdateProvider 的职责",
+            "了解 App.tsx 如何组合各个功能面板",
+            "理解 get_init_error 返回 kind=db_version_too_new 时为何改渲染 DatabaseUpgrade 恢复界面而非进入正常 App"
+          ],
+          "source_files": [
+            "src/main.tsx",
+            "src/App.tsx",
+            "src/lib/query/queryClient.ts",
+            "src/i18n/index.ts",
+            "src/components/DatabaseUpgrade.tsx"
+          ],
+          "minimal_modules": [
+            "bootstrap 启动序列",
+            "全局 Provider 装配",
+            "初始化错误监听与 db_version_too_new 分支",
+            "数据库版本过新恢复界面",
+            "App.tsx 面板组合"
+          ],
+          "practice_task": "在 main.tsx 中找到 configLoadError 的监听逻辑，说明当后端 get_init_error 返回错误时前端会发生什么；并定位 kind === \"db_version_too_new\" 时渲染 DatabaseUpgrade 的提前返回分支，对比它与普通 handleConfigLoadError 路径的差异；在 App.tsx 中列出至少五个被导入的功能面板组件。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u1-l5",
+          "title": "后端启动与 Tauri 应用装配",
+          "order": 5,
+          "filename": "u1-l5-backend-setup.md",
+          "level": "beginner",
+          "topic": "从 main.rs 进入 lib.rs::run()，理解 Tauri Builder 的插件注册、setup 钩子（含数据库版本过新的预检与恢复早退）、AppState 构建与命令处理器注册的整体流程。",
+          "learning_goals": [
+            "理解 main.rs 平台特殊处理与 cc_switch_lib::run 调用",
+            "掌握 Builder 插件链与 setup 钩子的作用",
+            "了解 AppState（db / proxy_service / usage_cache）的组成",
+            "理解 setup 中 stored_user_version_exceeds_supported 预检如何在 DB 版本过新时设置 InitErrorPayload 并强制显示主窗口、跳过 DDL 写入"
+          ],
+          "source_files": [
+            "src-tauri/src/main.rs",
+            "src-tauri/src/lib.rs",
+            "src-tauri/src/store.rs",
+            "src-tauri/src/init_status.rs",
+            "src-tauri/src/database/mod.rs"
+          ],
+          "minimal_modules": [
+            "main.rs 入口",
+            "Builder 与插件注册",
+            "setup 钩子初始化序列",
+            "数据库版本预检与恢复早退",
+            "AppState 全局状态"
+          ],
+          "practice_task": "在 lib.rs::run() 中按顺序列出 setup 钩子里完成的至少六个初始化步骤（如数据库版本预检、数据库初始化、迁移、种子、MCP 导入），并指出 AppState 包含的三个字段；在 init_status.rs 中说明 InitErrorPayload 新增的 kind/db_version/supported_version 字段在 db_version_too_new 场景下的用途。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "update"
+        }
+      ]
+    }
+  ]
+}
