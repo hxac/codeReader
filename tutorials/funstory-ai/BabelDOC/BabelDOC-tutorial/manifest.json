@@ -1,0 +1,961 @@
+{
+  "project": "BabelDOC",
+  "head": "980fd2821d54cbabd270349fe509e8177c35e4c3",
+  "rationale": "BabelDOC 是一个结构清晰的「PDF → 中间表示(IL) → PDF」三段式翻译流水线工程（frontend 解析、midend 处理、backend 渲染），核心抽象是 il_version_1 中间表示和 TranslationConfig 配置中心，主链路全部由 high_level.do_translate 编排。因此学习顺序遵循「先会跑再懂原理、沿主链路由浅入深」：第一单元让读者从零认识项目并成功运行 CLI；第二单元建立三段式架构与流水线全貌；第三单元夯实 IL 数据模型这个贯穿始终的核心；第四单元深入解析前端如何把 PDF 变成 IL；第五单元按真实执行顺序讲解 midend 各阶段（扫描检测→版面→段落→公式样式→表格）；第六单元聚焦翻译机制（翻译器服务、IL 翻译编排与占位符、LLM-only 翻译、自动术语抽取、术语表）；第七单元进入高级的排版重排与 PDF 渲染后端；第八单元覆盖工程化扩展点（离线资源、分片合并、异步 API、executor RPC、异常健壮性）。单元划分与讲义顺序严格对应 high_level.TRANSLATE_STAGES 的真实执行顺序，依赖关系沿调用链自顶向下构建，确保每篇讲义只解决一个独立主题并配套可操作实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 BabelDOC 并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与背景：BabelDOC 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 BabelDOC 作为 PDF 科研论文双语对照翻译库的定位、它要解决的问题（解析与渲染两阶段、保结构翻译），以及与 PDFMathTranslate、mathpix 等同类项目的关系。",
+          "learning_goals": [
+            "理解 BabelDOC 的核心定位：PDF 双语对照翻译与中间表示(IL)思想",
+            "区分 Parsing 与 Rendering 两个阶段，理解为何需要保结构翻译",
+            "了解 BabelDOC 与下游 PDFMathTranslate、上游 DocLayout-YOLO/PyMuPDF 的生态关系"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "docs/README.md"
+          ],
+          "minimal_modules": [
+            "项目定位与目标",
+            "Parsing 与 Rendering 两阶段",
+            "生态关系与同类项目",
+            "版本号规则"
+          ],
+          "practice_task": "阅读 README，用自己的话写一段不超过 100 字的总结，说明 BabelDOC 解决什么问题、它的中间表示思想为何优于「单栏重排」方案。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与运行：从 CLI 翻译第一个 PDF",
+          "order": 2,
+          "filename": "u1-l2-install-and-run-cli.md",
+          "level": "beginner",
+          "topic": "讲解如何用 uv 安装 BabelDOC，使用 babeldoc 命令行配合 OpenAI 兼容服务翻译 PDF，并对照 main.py 理解 CLI 入口结构。",
+          "learning_goals": [
+            "掌握 uv tool install 安装与 babeldoc 基本用法",
+            "理解 main.cli 作为入口点、create_parser 定义命令行参数的结构",
+            "能成功用 OpenAI 兼容 API 翻译一个示例 PDF"
+          ],
+          "source_files": [
+            "babeldoc/main.py",
+            "README.md",
+            "babeldoc/__init__.py"
+          ],
+          "minimal_modules": [
+            "uv 安装方式",
+            "babeldoc 命令与必需参数",
+            "create_parser 参数分组",
+            "main 与 cli 入口"
+          ],
+          "practice_task": "用 uv 安装 BabelDOC，运行 babeldoc --help 浏览所有参数，再用一个 OpenAI 兼容服务翻译仓库自带的 examples/ci/test.pdf，观察生成的 mono 与 dual PDF。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与入口文件",
+          "order": 3,
+          "filename": "u1-l3-directory-and-entrypoints.md",
+          "level": "beginner",
+          "topic": "梳理 babeldoc 包的目录结构，定位 CLI 入口 main.py、翻译编排入口 high_level.py，以及 document_il、new_parser、docvision、translator 等顶层子包的职责。",
+          "learning_goals": [
+            "看懂 babeldoc 顶层目录划分与各子包职责",
+            "定位 CLI 入口 main.cli 与翻译主入口 high_level",
+            "初步认识 document_il / new_parser / docvision / translator 的分工"
+          ],
+          "source_files": [
+            "babeldoc/main.py",
+            "babeldoc/format/pdf/high_level.py",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "顶层目录结构",
+            "main 入口与 high_level 入口",
+            "document_il 与 new_parser 分工",
+            "docvision 与 translator 子包"
+          ],
+          "practice_task": "画出从 main.cli() 到 babeldoc.format.pdf.high_level.async_translate 的调用链路图，并标注每一步所在的源码文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "配置体系：CLI 参数、TOML 与 TranslationConfig",
+          "order": 4,
+          "filename": "u1-l4-config-and-translation-config.md",
+          "level": "beginner",
+          "topic": "讲解 BabelDOC 的配置方式：命令行参数、TOML 配置文件，以及它们如何汇聚到中心配置对象 TranslationConfig，并介绍 const.py 中的全局常量。",
+          "learning_goals": [
+            "理解 CLI 参数、TOML 配置、TranslationConfig 三者的关系",
+            "掌握常用配置项（语言、QPS、watermark、split、页面范围）",
+            "认识 WatermarkOutputMode 等枚举与 CACHE_FOLDER 等常量"
+          ],
+          "source_files": [
+            "babeldoc/main.py",
+            "babeldoc/format/pdf/translation_config.py",
+            "babeldoc/const.py"
+          ],
+          "minimal_modules": [
+            "configargparse 与 TOML 配置",
+            "TranslationConfig 中心配置对象",
+            "WatermarkOutputMode 与常用选项",
+            "const.py 全局常量"
+          ],
+          "practice_task": "参照 README 中的示例，编写一个最小 TOML 配置文件（指定 lang-in/lang-out、openai、output），用 babeldoc --config 运行翻译一次。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "整体架构与翻译主流程",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "三段式架构总览：解析、处理与渲染",
+          "order": 1,
+          "filename": "u2-l1-three-stage-architecture.md",
+          "level": "beginner",
+          "topic": "用一张全景图讲清 BabelDOC 的 frontend(PDF→IL)、midend(IL 上各处理阶段)、backend(IL→PDF) 三段式架构，以及中间表示 IL 在其中承上启下的作用。",
+          "learning_goals": [
+            "建立 frontend/midend/backend 三段式心智模型",
+            "理解 IL 中间表示的承上启下作用",
+            "对应 high_level 中 TRANSLATE_STAGES 列表与三段式的关系"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/high_level.py",
+            "README.md",
+            "docs/ImplementationDetails/README.md"
+          ],
+          "minimal_modules": [
+            "三段式架构",
+            "IL 中间表示定位",
+            "TRANSLATE_STAGES 全景",
+            "frontend/midend/backend 源码分布"
+          ],
+          "practice_task": "用一句话分别描述 frontend、midend、backend 三段的输入输出，并在 high_level.py 中标注每个阶段对应的源码文件。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "翻译主流程编排：do_translate 与 _do_translate_single",
+          "order": 2,
+          "filename": "u2-l2-main-pipeline-orchestration.md",
+          "level": "intermediate",
+          "topic": "逐段精读 high_level.do_translate 与 _do_translate_single，理解从打开 PDF、修正 PDF、创建 IL、依次运行各 midend 阶段到最终 PDFCreater.write 生成结果的主调用链。",
+          "learning_goals": [
+            "理解 do_translate 的分片/单文档分支与结果合并时机",
+            "掌握 _do_translate_single 中各 midend 阶段的调用顺序",
+            "认识 PDF 预处理（fix_null_xref/fix_filter/fix_media_box）与元数据写入"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/high_level.py",
+            "babeldoc/format/pdf/translation_config.py"
+          ],
+          "minimal_modules": [
+            "do_translate 分片逻辑",
+            "_do_translate_single 主链路",
+            "PDF 预处理与修正",
+            "元数据与 TOC 迁移"
+          ],
+          "practice_task": "在 _do_translate_single 中为每个 midend 阶段（DetectScannedFile/LayoutParser/ParagraphFinder/StylesAndFormulas/ILTranslator/Typesetting/PDFCreater）标注对应的源码行号与作用。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "异步翻译与进度事件流",
+          "order": 3,
+          "filename": "u2-l3-async-translate-and-progress.md",
+          "level": "intermediate",
+          "topic": "讲解 high_level.async_translate 如何通过线程池执行同步翻译并把进度转成异步事件流，以及 ProgressMonitor 与 asynchronize.AsyncCallback 的协作机制。",
+          "learning_goals": [
+            "理解 async_translate 的事件协议（progress_start/update/end/finish/error）",
+            "掌握 ProgressMonitor 的多阶段、分片(part)进度跟踪",
+            "认识 asynchronize.AsyncCallback 把回调转异步迭代器的方式"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/high_level.py",
+            "babeldoc/progress_monitor.py",
+            "babeldoc/asynchronize/__init__.py",
+            "babeldoc/main.py"
+          ],
+          "minimal_modules": [
+            "async_translate 事件协议",
+            "ProgressMonitor 阶段与分片",
+            "AsyncCallback 桥接",
+            "create_progress_handler 进度条"
+          ],
+          "practice_task": "写一个最小脚本调用 high_level.async_translate(config)，把收到的事件按 type 分类打印，观察 progress_update 中 overall_progress 的变化。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心数据模型：中间表示 IL",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "IL 数据模型：Document / Page / Paragraph / Character",
+          "order": 1,
+          "filename": "u3-l1-il-data-model.md",
+          "level": "intermediate",
+          "topic": "精读 il_version_1.py（由 schema 自动生成）的核心实体层级，理解 Document→Page→(PdfCharacter/PdfParagraph/PdfFigure/PdfCurve/PdfFont/PageLayout) 的结构与关键属性。",
+          "learning_goals": [
+            "掌握 IL 的核心实体层级与包含关系",
+            "理解 PdfCharacter、PdfParagraph、PdfParagraphComposition 的字段",
+            "认识 Box、PdfStyle、PageLayout 等支撑类型的作用"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/il_version_1.py",
+            "babeldoc/format/pdf/document_il/il_version_1.rnc"
+          ],
+          "minimal_modules": [
+            "Document 与 Page 实体",
+            "PdfCharacter 与 PdfParagraph",
+            "PdfParagraphComposition 富文本",
+            "Box/PdfStyle/PageLayout 支撑类型"
+          ],
+          "practice_task": "写代码加载一个 IL Document，遍历每页统计 pdf_character、pdf_paragraph、pdf_curve 的数量，并打印第一段的 unicode 与 box。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "IL 的序列化：XMLConverter 与 schema",
+          "order": 2,
+          "filename": "u3-l2-il-serialization.md",
+          "level": "intermediate",
+          "topic": "讲解 XMLConverter 如何用 xsdata 把 IL Document 序列化为 XML/JSON（调试输出与持久化），并对照 il_version_1.rnc / .xsd schema 与 examples/*.xml 理解 IL 的结构表达。",
+          "learning_goals": [
+            "掌握 XMLConverter 的 write_json/write_xml/read_xml 用途",
+            "理解 il_version_1.rnc schema 对 IL 结构的约束",
+            "能阅读 examples 中的 dpml/xml 示例并对应到 IL 实体"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/xml_converter.py",
+            "babeldoc/format/pdf/document_il/il_version_1.rnc",
+            "examples/basic.xml",
+            "examples/complex.xml"
+          ],
+          "minimal_modules": [
+            "XMLConverter 序列化",
+            "il_version_1.rnc/.xsd schema",
+            "debug JSON 输出",
+            "examples/*.xml 示例结构"
+          ],
+          "practice_task": "在 --debug 模式下翻译一个 PDF，找到工作目录中的 create_il.debug.json，用 XMLConverter 的思路对照 il_version_1.rnc 指出其中 Page 与 Paragraph 的对应关系。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "PDF 解析前端：new_parser",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "解析入口与整体流程：PDF 如何变成 IL",
+          "order": 1,
+          "filename": "u4-l1-parse-entry-and-flow.md",
+          "level": "intermediate",
+          "topic": "从 native_parse.parse_prepared_pdf_with_new_parser_to_legacy_ir 入手，讲解 new_parser 把 PDF 文件解析为 il_version_1.Document 的整体流程：准备页面、解释内容流、用 ActiveILCreater 构建 IL。",
+          "learning_goals": [
+            "理解 parse_prepared_pdf_with_new_parser_to_legacy_ir 的主要步骤",
+            "认识 prepared page、page interpreter、text run positioner 的角色",
+            "理解 ActiveILCreater 作为 IL 构建 sink 的作用"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/new_parser/native_parse.py",
+            "babeldoc/format/pdf/document_il/frontend/il_creater_active.py"
+          ],
+          "minimal_modules": [
+            "解析入口函数",
+            "prepared page 加载",
+            "page interpreter 与 text positioner",
+            "ActiveILCreater 构建 IL"
+          ],
+          "practice_task": "在 native_parse.py 中跟踪 parse_prepared_pdf_with_new_parser_to_legacy_ir，列出从 PDF 路径到返回 Document 的关键函数调用顺序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "PDF 对象解析：object_parser 与对象模型",
+          "order": 2,
+          "filename": "u4-l2-pdf-object-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 object_parser 如何解析 PDF 内容流中的对象（数组、字典、字符串、数字、间接引用），以及 object_model 中的 PdfObjectDict / PdfIndirectRef / PdfObjectStream 等核心类型。",
+          "learning_goals": [
+            "理解 PDF 对象体系与 object_parser 的解析职责",
+            "掌握 PdfObjectDict、PdfIndirectRef、PdfObjectStream 等对象模型类型",
+            "认识 xref 间接引用的解析方式"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/new_parser/object_parser.py",
+            "babeldoc/format/pdf/new_parser/object_model.py"
+          ],
+          "minimal_modules": [
+            "PDF 对象语法",
+            "object_parser 解析器",
+            "对象模型类型",
+            "间接引用与对象流"
+          ],
+          "practice_task": "结合 docs/intro-to-pdf-object.md，手工写出一个最小 PDF 字典对象，说明 object_parser 会把它解析成哪种对象模型类型。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "内容流解释器：interpreter 与 glyphs",
+          "order": 3,
+          "filename": "u4-l3-content-interpreter.md",
+          "level": "intermediate",
+          "topic": "讲解 interpreter 如何把页面内容流操作符解释成语义事件（TextRunEvent、SetFontEvent、ConcatMatrixEvent 等），以及 glyphs 如何把文本运行展开为带位置的字形事件。",
+          "learning_goals": [
+            "理解 PDF 内容流操作符与解释器事件模型",
+            "掌握 TextRunEvent、SetFontEvent、ConcatMatrixEvent 等事件的含义",
+            "认识 glyphs 把 text run 展开为 PositionedGlyphEvent 的过程"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/new_parser/interpreter.py",
+            "babeldoc/format/pdf/new_parser/glyphs.py",
+            "babeldoc/format/pdf/new_parser/page_api.py"
+          ],
+          "minimal_modules": [
+            "内容流操作符",
+            "解释器事件类型",
+            "字形展开 glyphs",
+            "page_api 解释入口"
+          ],
+          "practice_task": "列出 interpreter 中定义的主要事件类型，并解释一个 Tj/TJ 文本操作符如何最终变成 TextRunEvent 与 GlyphEvent。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "active 运行时与字体后端",
+          "order": 4,
+          "filename": "u4-l4-active-runtime-and-font-backend.md",
+          "level": "advanced",
+          "topic": "讲解 new_parser 的 active_* 投影/惰性访问模式：active_parse_runtime 编排解析会话，active_font_runtime/active_font_backend/active_direct_font_backend 负责从 PDF 字体字典构建运行时字体并缓存字体度量。",
+          "learning_goals": [
+            "理解 active_* 系列文件的投影/惰性访问设计目的",
+            "掌握 ActiveFontResolver/ActiveFontAdapter 如何解析并缓存字体",
+            "认识 active_direct_font_backend 对 Type1/TrueType/CIDFont 的处理"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/new_parser/active_parse_runtime.py",
+            "babeldoc/format/pdf/new_parser/active_font_runtime.py",
+            "babeldoc/format/pdf/new_parser/active_direct_font_backend.py",
+            "babeldoc/format/pdf/new_parser/active_font_resource_runtime.py"
+          ],
+          "minimal_modules": [
+            "active 投影/惰性模式",
+            "解析会话编排",
+            "字体解析与适配",
+            "字体资源缓存"
+          ],
+          "practice_task": "解释 ActiveFontResolver 为什么需要缓存，并指出 active_direct_font_backend 分别处理哪几类 PDF 字体；说明该设计如何兼容 pymupdf 与 pdfminer 两种后端。",
+          "depends_on": [
+            "u4-3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "中端处理流水线（midend）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "扫描文档检测：DetectScannedFile",
+          "order": 1,
+          "filename": "u5-l1-detect-scanned-file.md",
+          "level": "intermediate",
+          "topic": "讲解 DetectScannedFile 阶段如何用 SSIM（结构相似度）比较移除文字前后的页面渲染，判断是否为扫描件，并在重度扫描时触发 OCR workaround。",
+          "learning_goals": [
+            "理解扫描检测基于 SSIM 的原理与 >80% 阈值",
+            "掌握 auto_enable_ocr_workaround 与 skip_scanned_detection 的交互",
+            "认识该阶段对后续翻译策略的影响"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/detect_scanned_file.py"
+          ],
+          "minimal_modules": [
+            "SSIM 相似度比较",
+            "扫描比例阈值",
+            "OCR workaround 触发",
+            "与配置项的交互"
+          ],
+          "practice_task": "对照 README 中关于 --auto-enable-ocr-workaround 的「重要交互说明」，解释 DetectionConfig 初始化与运行期两个阶段如何改写 ocr_workaround 与 skip_scanned_detection。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "版面分析：DocLayout 模型与 LayoutParser",
+          "order": 2,
+          "filename": "u5-l2-layout-analysis.md",
+          "level": "intermediate",
+          "topic": "讲解 docvision.DocLayoutModel（DocLayout-YOLO ONNX 模型）如何识别页面区域（文本/标题/图/表/公式），以及 LayoutParser 如何把检测结果从图像空间映射到 IL 空间并写入 PageLayout。",
+          "learning_goals": [
+            "理解 DocLayout-YOLO ONNX 模型的输入输出（区域 bbox 与类别）",
+            "掌握 LayoutParser 把检测区域映射到 IL 坐标的流程",
+            "认识 RPC 版面服务（rpc_doclayout）与本地 ONNX 的切换"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/layout_parser.py",
+            "babeldoc/docvision/doclayout.py",
+            "babeldoc/docvision/base_doclayout.py"
+          ],
+          "minimal_modules": [
+            "DocLayout-YOLO ONNX 模型",
+            "区域检测与类别",
+            "图像空间到 IL 坐标映射",
+            "RPC 版面服务"
+          ],
+          "practice_task": "加载 DocLayoutModel.load_onnx()，对 examples/ci/test.pdf 某一页推理，打印识别到的区域类别与坐标，观察 fallback_line 的生成条件。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "段落识别：ParagraphFinder",
+          "order": 3,
+          "filename": "u5-l3-paragraph-finder.md",
+          "level": "intermediate",
+          "topic": "讲解 ParagraphFinder 如何基于版面区域把字符聚合成段落，使用「line-threading」纵向扫描切行、处理项目符号与行距，并合并交替行号布局的段落。",
+          "learning_goals": [
+            "理解字符聚合为段落的 line-threading 算法",
+            "掌握短行切分（split-short-lines）与中位线宽阈值",
+            "认识 merge_alternating_line_numbers 后处理"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/paragraph_finder.py",
+            "babeldoc/format/pdf/document_il/utils/paragraph_helper.py"
+          ],
+          "minimal_modules": [
+            "line-threading 切行",
+            "短行切分阈值",
+            "行号段落合并",
+            "段落判定辅助函数"
+          ],
+          "practice_task": "在 --debug 模式下比较 paragraph_finder.json 输出，调整 --short-line-split-factor 观察段落切分结果的变化，并解释 paragraph_helper.is_cid_paragraph 的作用。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "公式与样式处理：StylesAndFormulas",
+          "order": 4,
+          "filename": "u5-l4-styles-and-formulas.md",
+          "level": "intermediate",
+          "topic": "讲解 StylesAndFormulas 如何按字符级别（字体 pattern、Unicode 类别）识别公式、合并重叠公式、用 IoU 把曲线/表单归并到公式、计算公式偏移并处理段落样式。",
+          "learning_goals": [
+            "理解公式字符级识别与字体/字符 pattern",
+            "掌握用 IoU 把曲线/表单归并到公式的空间分析",
+            "认识公式偏移计算与段落样式处理"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/styles_and_formulas.py",
+            "babeldoc/format/pdf/document_il/utils/formular_helper.py",
+            "babeldoc/format/pdf/document_il/utils/spatial_analyzer.py",
+            "babeldoc/format/pdf/document_il/utils/style_helper.py"
+          ],
+          "minimal_modules": [
+            "公式字符识别",
+            "公式合并与 IoU 归并",
+            "公式偏移计算",
+            "段落样式与配色"
+          ],
+          "practice_task": "给定 --formular-font-pattern，标记出一页中被识别为公式的字符集合，并用 spatial_analyzer.is_element_contained_in_formula 解释曲线为何被归入公式。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "表格解析：TableParser 与 OCR",
+          "order": 5,
+          "filename": "u5-l5-table-parser.md",
+          "level": "advanced",
+          "topic": "讲解 TableParser 如何在版面识别为表格的页面里检测单元格与结构，以及它对 RapidOCR 表格模型（--translate-table-text）的依赖。",
+          "learning_goals": [
+            "理解表格区域内的单元格检测流程",
+            "掌握 table_model 与 --translate-table-text 的关系",
+            "认识表格文本翻译的实验性定位"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/table_parser.py",
+            "babeldoc/docvision/table_detection/rapidocr.py"
+          ],
+          "minimal_modules": [
+            "表格区域识别",
+            "单元格结构检测",
+            "RapidOCR 表格模型",
+            "实验性表格文本翻译"
+          ],
+          "practice_task": "启用 --translate-table-text 翻译 examples/table.xml 对应场景的 PDF，观察 TableParser 在 IL 中产生的表格结构（若无可用 PDF 则阅读源码梳理单元格检测逻辑）。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "翻译机制",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "翻译器服务与缓存：OpenAITranslator",
+          "order": 1,
+          "filename": "u6-l1-translator-service-and-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 OpenAITranslator 如何调用 OpenAI 兼容 API、用 peewee+SQLite 做翻译缓存、用 RateLimiter（漏桶）做 QPS 限流，以及 token 统计。",
+          "learning_goals": [
+            "理解 BaseTranslator/OpenAITranslator 的接口与 OpenAI 调用",
+            "掌握 peewee SQLite 翻译缓存（engine+params+text 唯一键、自动清理）",
+            "认识 RateLimiter 漏桶限流与 set_translate_rate_limiter"
+          ],
+          "source_files": [
+            "babeldoc/translator/translator.py",
+            "babeldoc/translator/cache.py"
+          ],
+          "minimal_modules": [
+            "OpenAI 兼容调用",
+            "SQLite 翻译缓存",
+            "漏桶 QPS 限流",
+            "token 统计"
+          ],
+          "practice_task": "实例化 OpenAITranslator 翻译一句话，然后查看 ~/.cache/babeldoc 下的 cache 数据库，确认第二次翻译命中缓存；再调整 --qps 观察限流行为。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "IL 翻译编排：占位符、批处理与线程池",
+          "order": 2,
+          "filename": "u6-l2-il-translator-orchestration.md",
+          "level": "advanced",
+          "topic": "精读 ILTranslator：如何用 {v1} 公式占位符与 {style1} 富文本占位符做 pre/post translate、按 token 数与段落数批处理、用 PriorityThreadPoolExecutor 并发并优先翻译短段。",
+          "learning_goals": [
+            "掌握公式/富文本占位符的构造与还原机制",
+            "理解按 token 与段落数的批处理策略",
+            "认识 PriorityThreadPoolExecutor 的优先级（token 越少越优先）与限流参数"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/il_translator.py",
+            "babeldoc/utils/priority_thread_pool_executor.py"
+          ],
+          "minimal_modules": [
+            "占位符系统",
+            "段落批处理",
+            "优先级线程池",
+            "限流与缓存参数"
+          ],
+          "practice_task": "给定一段含公式与粗体富文本的段落，手工模拟 pre_translate 生成带 {v1}/{style1} 占位符的字符串，再写出 post_translate 还原后的 PdfParagraphComposition 结构。",
+          "depends_on": [
+            "u5-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "LLM-only 翻译与质量校验：ILTranslatorLLMOnly",
+          "order": 3,
+          "filename": "u6-l3-llm-only-translator.md",
+          "level": "advanced",
+          "topic": "讲解 ILTranslatorLLMOnly 如何处理跨页/跨栏段落、跟踪标题上下文，并用 token 比例与 Levenshtein 距离做翻译质量校验，失败时回退到 ILTranslator。",
+          "learning_goals": [
+            "理解 LLM-only 翻译对跨页/跨栏段落的处理",
+            "掌握标题上下文(first/recent title)跟踪机制",
+            "认识 token 比例与 Levenshtein 距离的质量校验与回退"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/il_translator_llm_only.py",
+            "babeldoc/format/pdf/document_il/midend/il_translator.py"
+          ],
+          "minimal_modules": [
+            "跨页跨栏段落处理",
+            "标题上下文跟踪",
+            "翻译质量校验",
+            "回退到 ILTranslator"
+          ],
+          "practice_task": "比较 translator_supports_llm 为 True/False 两种情况下 high_level 选择的翻译器，解释 ILTranslatorLLMOnly 在何种条件下会回退到 ILTranslator。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "自动术语抽取：AutomaticTermExtractor",
+          "order": 4,
+          "filename": "u6-l4-automatic-term-extraction.md",
+          "level": "advanced",
+          "topic": "讲解 AutomaticTermExtractor 如何用 LLM 按批次（约 600 token/12 段）从文档抽取领域术语并翻译，再汇集成自动术语表供翻译阶段使用。",
+          "learning_goals": [
+            "理解术语抽取的批次策略与 tiktoken 计费",
+            "掌握 raw_extracted_terms 汇总为自动术语表（多数投票）的过程",
+            "认识 --no-auto-extract-glossary 与 --save-auto-extracted-glossary 选项"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/automatic_term_extractor.py"
+          ],
+          "minimal_modules": [
+            "术语抽取批次策略",
+            "LLM 抽取与翻译",
+            "术语表汇总（多数投票）",
+            "相关配置项"
+          ],
+          "practice_task": "运行带 --save-auto-extracted-glossary 的翻译，打开导出的 CSV，解释 SharedContextCrossSplitPart.finalize_auto_extracted_glossary 中多数投票如何决定每个术语的最终译文。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "术语表系统：Glossary 与 Hyperscan",
+          "order": 5,
+          "filename": "u6-l5-glossary-system.md",
+          "level": "intermediate",
+          "topic": "讲解 glossary.Glossary 如何从 CSV 加载术语（支持 tgt_lng 过滤），并用 Hyperscan 高性能正则按文本匹配术语、注入翻译提示。",
+          "learning_goals": [
+            "掌握 Glossary.from_csv 的列定义与 tgt_lng 归一化过滤",
+            "理解 Hyperscan 分块（每块 2 万 pattern）的高性能匹配",
+            "认识术语匹配如何影响翻译提示注入"
+          ],
+          "source_files": [
+            "babeldoc/glossary.py",
+            "babeldoc/format/pdf/translation_config.py"
+          ],
+          "minimal_modules": [
+            "CSV 术语加载与过滤",
+            "Hyperscan 正则匹配",
+            "术语注入翻译提示",
+            "术语命名来源"
+          ],
+          "practice_task": "参照 docs/example/demo_glossary.csv 编写一个含 source/target/tgt_lng 三列的术语表，加载后对一段英文文本调用匹配，验证哪些术语被命中。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "排版与 PDF 渲染后端",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "排版重排：Typesetting",
+          "order": 1,
+          "filename": "u7-l1-typesetting.md",
+          "level": "advanced",
+          "topic": "讲解 TypesettingUnit 如何逐字符地把译文重排回原版面：考虑 CJK 换行规则、字体度量、间距与连字符，并用 rtree 空间索引加速版面查询。",
+          "learning_goals": [
+            "理解逐字符排版与 CJK 换行规则（LINE_BREAK_REGEX）",
+            "掌握字体度量缓存与 pymupdf.Font 的使用",
+            "认识 rtree 空间索引在排版查询中的作用"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/midend/typesetting.py",
+            "babeldoc/format/pdf/document_il/utils/matrix_helper.py"
+          ],
+          "minimal_modules": [
+            "逐字符重排",
+            "CJK 换行规则",
+            "字体度量缓存",
+            "rtree 空间索引"
+          ],
+          "practice_task": "用 typesetting 的思路，对一段中文译文在固定宽度内实现一个最小换行函数（参考 LINE_BREAK_REGEX 处理 CJK 字符），并说明 matrix_helper.decompose_ctm 为何重要。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "字体映射：FontMapper",
+          "order": 2,
+          "filename": "u7-l2-font-mapper.md",
+          "level": "advanced",
+          "topic": "讲解 FontMapper 如何把 PDF 原字体映射到目标语言字体，加载字体度量（ascent/descent/encoding）、按 normal/script/fallback/base 分类，并通过 has_char 判断字符可用性。",
+          "learning_goals": [
+            "理解字体映射的目标语言字体选择策略",
+            "掌握 serif/sans-serif/script 字体族分类与 --primary-font-family",
+            "认识 has_char 字符可用性判断与字体度量加载"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/utils/fontmap.py",
+            "babeldoc/format/pdf/document_il/midend/typesetting.py"
+          ],
+          "minimal_modules": [
+            "目标语言字体选择",
+            "字体族分类",
+            "字符可用性判断",
+            "字体度量加载"
+          ],
+          "practice_task": "实例化 FontMapper，判断某个 CJK 字符在 china-ss / china-ts / japan-s / korea-s 中分别是否可渲染，并解释 resfont_map 中语言到字体的映射。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "PDF 生成后端：PDFCreater",
+          "order": 3,
+          "filename": "u7-l3-pdf-creation-backend.md",
+          "level": "advanced",
+          "topic": "讲解 PDFCreater.write 如何把 IL 变成 mono/dual PDF：构造字符/表单/矩形/曲线渲染单元、排序渲染、子进程内做字体子集化与保存，并生成单语/双语（并排或交替）PDF。",
+          "learning_goals": [
+            "理解渲染单元（CharacterRenderUnit 等）的构造与排序",
+            "掌握字体子集化（FreeType 提取字形、子进程超时保护）与 reproduce_cmap",
+            "认识 mono/dual PDF 与 use-alternating-pages-dual 的生成差异"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/document_il/backend/pdf_creater.py",
+            "babeldoc/format/pdf/high_level.py"
+          ],
+          "minimal_modules": [
+            "渲染单元构造与排序",
+            "字体子集化",
+            "save_pdf_with_timeout",
+            "mono/dual PDF 生成"
+          ],
+          "practice_task": "运行 babeldoc --only-parse-generate-pdf 跳过翻译直接生成 PDF，对照源码说明 PDFCreater.write 在该模式下走了哪条捷径，并解释 SUBSET_FONT 与 SAVE_PDF 两个阶段。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "工程化与扩展",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "资源管理：warmup 与离线资源包",
+          "order": 1,
+          "filename": "u8-l1-assets-management.md",
+          "level": "advanced",
+          "topic": "讲解 assets.py 如何下载并校验（SHA3-256）字体、模型、CMap、tiktoken 资源，warmup 预热，以及 generate/restore offline assets 包用于离线/内网部署。",
+          "learning_goals": [
+            "理解资源清单（字体/ONNX/CMap）与 SHA3-256 校验",
+            "掌握 warmup 与 --generate-offline-assets / --restore-offline-assets 流程",
+            "认识多上游（GitHub/HuggingFace）择优下载"
+          ],
+          "source_files": [
+            "babeldoc/assets/assets.py",
+            "babeldoc/assets/embedding_assets_metadata.py",
+            "babeldoc/const.py"
+          ],
+          "minimal_modules": [
+            "资源清单与校验",
+            "warmup 预热",
+            "离线包生成与恢复",
+            "上游择优下载"
+          ],
+          "practice_task": "运行 babeldoc --warmup 并查看 ~/.cache/babeldoc 内容；再执行 --generate-offline-assets 生成一个离线包，解压后列出包含的字体与模型类别。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "分片翻译与结果合并：SplitManager 与 ResultMerger",
+          "order": 2,
+          "filename": "u8-l2-split-and-merge.md",
+          "level": "advanced",
+          "topic": "讲解 --max-pages-per-part 触发的分片翻译：SplitManager 决定切分点、各分片串行翻译（仅首片做扫描检测与水印）、ResultMerger 合并各分片结果。",
+          "learning_goals": [
+            "理解 PageCountStrategy 切分点计算与分片串行处理",
+            "掌握首片独占扫描检测/水印、共享 SharedContextCrossSplitPart 的设计",
+            "认识 ResultMerger 合并多分片 PDF 的流程"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/split_manager.py",
+            "babeldoc/format/pdf/result_merger.py",
+            "babeldoc/format/pdf/high_level.py"
+          ],
+          "minimal_modules": [
+            "切分点策略",
+            "分片串行翻译",
+            "首片独占逻辑",
+            "结果合并"
+          ],
+          "practice_task": "用 --max-pages-per-part 对一份多页 PDF 分片翻译，在日志中确认分片数量与「start merge results」，并解释 shared_context_cross_split_part 为何必须跨分片共享。",
+          "depends_on": [
+            "u2-l2",
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "异步 API 内部实现与回调桥接",
+          "order": 3,
+          "filename": "u8-l3-async-api-internals.md",
+          "level": "advanced",
+          "topic": "深入 high_level.async_translate 与 translate/do_translate 的关系，讲解 ProgressMonitor 通过 asynchronize.AsyncCallback 把同步回调桥接为异步事件流的内部机制。",
+          "learning_goals": [
+            "理解 run_in_executor 执行同步 do_translate 并桥接事件",
+            "掌握 ProgressMonitor 的 cancel_event/finish_event 协作",
+            "认识 report_interval 与进度节流"
+          ],
+          "source_files": [
+            "babeldoc/format/pdf/high_level.py",
+            "babeldoc/asynchronize/__init__.py",
+            "babeldoc/progress_monitor.py"
+          ],
+          "minimal_modules": [
+            "同步转异步桥接",
+            "取消与完成事件",
+            "进度节流",
+            "part monitor"
+          ],
+          "practice_task": "阅读 async_translate 源码，画出「主线程事件循环 ↔ 线程池中的 do_translate ↔ ProgressMonitor 回调」三者交互时序图，并指出取消翻译时 cancel_event 的作用。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "executor RPC 服务",
+          "order": 4,
+          "filename": "u8-l4-executor-rpc-service.md",
+          "level": "advanced",
+          "topic": "讲解 babeldoc/tools/executor 这个独立的 RPC 执行服务：ExecutorServer 暴露 /v1/executions 等端点，MultiprocessExecutionRunner 在 forkserver 进程中跑任务，用 NDJSON 流式回传 WorkerEvent。",
+          "learning_goals": [
+            "理解 executor 作为独立翻译任务 RPC 服务的定位",
+            "掌握 ExecutionStore、提交/中止任务、事件流(NDJSON)协议",
+            "认识 MultiprocessExecutionRunner 的多进程隔离"
+          ],
+          "source_files": [
+            "babeldoc/tools/executor/server.py",
+            "babeldoc/tools/executor/runner.py",
+            "babeldoc/tools/executor/protocol.py"
+          ],
+          "minimal_modules": [
+            "ExecutorServer 端点",
+            "任务提交与中止",
+            "NDJSON 事件流",
+            "多进程执行器"
+          ],
+          "practice_task": "启动 tools/executor 服务，用一个最小请求提交一个翻译任务，观察返回的 NDJSON 事件流，并说明它与 high_level.async_translate 事件协议的异同。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "异常体系与健壮性处理",
+          "order": 5,
+          "filename": "u8-l5-exceptions-and-robustness.md",
+          "level": "advanced",
+          "topic": "梳理 BabelDOC 的异常体系（BabelDOCException 及其子类）、high_level 中的 PDF 修正与容错（fix_null_xref/fix_filter/safe_save/open_pdf_with_save_fallback）以及翻译回退策略。",
+          "learning_goals": [
+            "掌握 BabelDOCException 体系与典型异常（InputFileGeneratedByBabelDOCError、ExtractTextError）",
+            "理解 PDF 修正与保存容错链路",
+            "认识翻译失败时的回退与 disable_same_text_fallback 等策略"
+          ],
+          "source_files": [
+            "babeldoc/babeldoc_exception/BabelDOCException.py",
+            "babeldoc/babeldoc_exception/__init__.py",
+            "babeldoc/format/pdf/high_level.py"
+          ],
+          "minimal_modules": [
+            "异常体系",
+            "PDF 修正与容错",
+            "保存回退策略",
+            "翻译回退策略"
+          ],
+          "practice_task": "用 BabelDOC 翻译一份「已由 BabelDOC 生成」的 PDF，触发 InputFileGeneratedByBabelDOCError，并对照 check_metadata 与 safe_save 解释这套防护与容错的设计意图。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
