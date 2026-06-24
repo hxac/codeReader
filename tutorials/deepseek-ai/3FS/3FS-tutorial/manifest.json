@@ -1,0 +1,1171 @@
+{
+  "project": "3FS",
+  "head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
+  "rationale": "3FS（Fire-Flyer File System）是面向 AI 训练/推理的高性能分布式文件系统，由集群管理（mgmtd）、元数据服务（meta）、存储服务（storage）、客户端（fuse/lib）四大组件构成，技术上横跨 C++20、Rust、Python、RDMA、FoundationDB 与 FlatBuffers。学习路线遵循「先见森林再见树木」的原则：第一单元让读者从零认识项目定位、构建与部署，并纵览端到端请求链路；第二单元先打通所有服务共用的基础设施（应用骨架、RPC/序列化、协程、网络、配置、FDB 事务），因为后续四个组件都建立其上；第三到第五单元按真实请求路径依次深入 mgmtd（成员管理与链表）、meta（文件元数据与布局）、storage（CRAQ 链式复制与读写恢复）；第六单元单独深入 Rust 实现的 chunk engine（物理块分配与 RocksDB 元数据），它是存储性能核心且语言/FFI 独立；第七单元讲解客户端侧（MetaClient/StorageClient、FUSE 守护进程、USRBIO 零拷贝 API、Python 绑定）；第八单元覆盖运维与二次开发（数据放置算法、KVCache、监控、新增服务模板）。难度由 beginner→intermediate→advanced 平滑递进，每篇讲义只解决一个主题、引用真实源码并给出实践任务，讲义间通过 depends_on 形成清晰的依赖图。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 3FS：项目定位、架构与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "3FS 是什么：项目总览与设计理念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 3FS 的定位、要解决的 AI 训练/推理存储痛点、四大组件与 CRAQ/无状态元数据等核心设计思想。",
+          "learning_goals": [
+            "理解 3FS 解决的问题与典型工作负载（数据准备、Dataloader、Checkpoint、KVCache）",
+            "记住四大组件：cluster manager、metadata service、storage service、client",
+            "理解 CRAQ 强一致与无状态元服务的设计取舍"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/design_notes.md"
+          ],
+          "minimal_modules": [
+            "项目背景",
+            "组件划分",
+            "性能指标"
+          ],
+          "practice_task": "阅读 README 与 design_notes，用自己的话画出四大组件关系图，并写一段 200 字说明为什么 3FS 选择文件接口而非对象存储。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与构建系统",
+          "order": 2,
+          "filename": "u1-l2-repo-and-build.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录组织、C++/Rust/Python 混合构建、SHUFFLE_METHOD 与依赖管理。",
+          "learning_goals": [
+            "熟悉 src/ 下各子目录的职责",
+            "掌握 CMake 构建流程与 SHUFFLE_METHOD 的作用",
+            "理解 Cargo workspace 与 Rust chunk engine 的位置"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "Cargo.toml",
+            "src/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "CMake 构建",
+            "Rust crate",
+            "依赖与子模块"
+          ],
+          "practice_task": "在本地或容器中执行 cmake 配置（指定 SHUFFLE_METHOD）并构建出 build/bin 下的主要二进制，记录构建产物清单。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "部署一个测试集群与 admin_cli",
+          "order": 3,
+          "filename": "u1-l3-deploy-and-admin-cli.md",
+          "level": "beginner",
+          "topic": "跟随部署手册搭建六节点测试集群，理解 systemd、配置托管与 admin_cli 的 init-cluster 流程。",
+          "learning_goals": [
+            "掌握 monitor/mgmtd/meta/storage/client 的部署顺序与配置文件",
+            "理解配置由 mgmtd 统一托管、set_config 上传的机制",
+            "会用 admin_cli 初始化集群与 list-nodes 排查"
+          ],
+          "source_files": [
+            "deploy/README.md",
+            "configs/mgmtd_main_launcher.toml",
+            "configs/storage_main.toml",
+            "configs/hf3fs_fuse_main_launcher.toml"
+          ],
+          "minimal_modules": [
+            "部署步骤",
+            "配置托管",
+            "admin_cli"
+          ],
+          "practice_task": "按 deploy/README 走通 init-cluster，并用 admin_cli list-nodes / list-chains / list-chain-tables 验证集群状态。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "四大组件与端到端请求链路总览",
+          "order": 4,
+          "filename": "u1-l4-end-to-end-flow.md",
+          "level": "beginner",
+          "topic": "以一次文件读写为线索，串联 client→meta→storage→mgmtd 的完整调用链，建立全局视图。",
+          "learning_goals": [
+            "理清 open 时从 meta 获取布局、读写时直连 storage 的关键路径",
+            "理解 mgmtd 如何向各方分发路由信息",
+            "建立后续深入各组件的地图"
+          ],
+          "source_files": [
+            "docs/design_notes.md",
+            "src/storage/storage.cpp",
+            "src/meta/meta.cpp",
+            "src/mgmtd/mgmtd.cpp",
+            "src/fuse/hf3fs_fuse.cpp"
+          ],
+          "minimal_modules": [
+            "请求链路",
+            "路由分发",
+            "组件入口"
+          ],
+          "practice_task": "结合各服务的 main 入口，绘制一张端到端时序图，标注 open/read/write 各经过哪些组件与 RPC。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共基础设施：core / common / fdb",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "服务骨架：TwoPhaseApplication 与 ServerLauncher",
+          "order": 1,
+          "filename": "u2-l1-service-skeleton.md",
+          "level": "intermediate",
+          "topic": "讲解所有 3FS 服务共用的两阶段启动框架（launcher + app），以及如何用 simple_example 模板理解启动流程。",
+          "learning_goals": [
+            "理解 TwoPhaseApplication 的 launcher/app 两阶段设计",
+            "掌握 ServerLauncher、ServerEnv、ServerAppConfig 的职责",
+            "能看懂任意服务的 main 入口启动过程"
+          ],
+          "source_files": [
+            "src/core/app/ServerLauncher.h",
+            "src/core/app/ServerEnv.h",
+            "src/core/app/ServerAppConfig.h",
+            "src/simple_example/main.cpp"
+          ],
+          "minimal_modules": [
+            "两阶段启动",
+            "ServerLauncher",
+            "应用配置"
+          ],
+          "practice_task": "对照 simple_example/main.cpp，画出 meta/storage/mgmtd 三个服务 main 的统一启动时序，标注 beforeStart/启动/停止阶段。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "RPC 与序列化框架：serde 与 FlatBuffers",
+          "order": 2,
+          "filename": "u2-l2-rpc-and-serde.md",
+          "level": "intermediate",
+          "topic": "讲解 3FS 的 RPC 服务注册、调用上下文与基于 FlatBuffers 的 schema 代码生成（fbs 层）。",
+          "learning_goals": [
+            "理解 Service/CallContext/ClientContext 的 RPC 抽象",
+            "掌握 fbs 目录如何定义服务接口与数据结构并生成桩代码",
+            "能用 ISyncStub/SyncStub 宏读懂一个服务的客户端与服务端"
+          ],
+          "source_files": [
+            "src/common/serde/Service.h",
+            "src/fbs/lib/Schema.h",
+            "src/fbs/lib/Service.h",
+            "src/fbs/core/service/CoreServiceBase.h",
+            "src/fbs/simple_example/SerdeService.h"
+          ],
+          "minimal_modules": [
+            "RPC 抽象",
+            "FlatBuffers schema",
+            "代码生成"
+          ],
+          "practice_task": "挑选 simple_example 的 SerdeService，追踪从客户端调用到服务端 handler 的完整路径，列出涉及的宏与生成的类。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "协程、线程池与后台任务",
+          "order": 3,
+          "filename": "u2-l3-coroutine-and-pools.md",
+          "level": "intermediate",
+          "topic": "讲解基于 folly 的协程（CoTask/CoTryTask）、各类线程池/协程池与 BackgroundRunner 后台调度。",
+          "learning_goals": [
+            "理解 CoTask/CoTryTask 与 CoroSynchronized 的用法",
+            "掌握 CPUExecutorGroup/DynamicCoroutinesPool/PriorityCoroutinePool 的区别",
+            "会用 BackgroundRunner 理解周期性后台任务"
+          ],
+          "source_files": [
+            "src/common/utils/Coroutine.h",
+            "src/common/utils/CoroSynchronized.h",
+            "src/common/utils/BackgroundRunner.h",
+            "src/common/utils/CPUExecutorGroup.h",
+            "src/common/utils/DynamicCoroutinesPool.h"
+          ],
+          "minimal_modules": [
+            "协程原语",
+            "执行池",
+            "后台任务"
+          ],
+          "practice_task": "在代码库中找出 3 处使用 CoTask 与 BackgroundRunner 的真实代码，说明它们为什么选择协程而非裸线程。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "网络层：TCP 与 RDMA 传输",
+          "order": 4,
+          "filename": "u2-l4-network-rdma.md",
+          "level": "intermediate",
+          "topic": "讲解 net/ 下的 Server、事件循环、IOWorker、Processor 以及 InfiniBand RDMA socket 与缓冲管理。",
+          "learning_goals": [
+            "理解多线程 Server 与 ServiceGroup/IOWorker/Processor 的分层",
+            "掌握 IBSocket 与 RDMABuf 的零拷贝 RDMA 传输机制",
+            "理解 TCP 与 RDMA 两种传输的统一抽象"
+          ],
+          "source_files": [
+            "src/common/net/Server.h",
+            "src/common/net/Transport.h",
+            "src/common/net/EventLoop.h",
+            "src/common/net/IOWorker.h",
+            "src/common/net/ib/IBSocket.h",
+            "src/common/net/ib/RDMABuf.h"
+          ],
+          "minimal_modules": [
+            "服务端模型",
+            "事件循环",
+            "RDMA 传输"
+          ],
+          "practice_task": "绘制从 RPC 请求到达 IBSocket 到被 Processor 协程处理的调用链，标注 RDMA buffer 的注册与回收点。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "配置系统与热更新",
+          "order": 5,
+          "filename": "u2-l5-config-system.md",
+          "level": "intermediate",
+          "topic": "讲解 ConfigBase 配置框架、热更新机制以及配置由 mgmtd 下发的整体思路。",
+          "learning_goals": [
+            "理解 ConfigBase 的声明式配置与热更新回调",
+            "掌握 ConfigManager 与 TOML 配置加载",
+            "理解运行期动态变更配置（如超时、并发度）的影响"
+          ],
+          "source_files": [
+            "src/common/utils/ConfigBase.h",
+            "src/common/app/ConfigManager.h",
+            "src/common/app/ApplicationBase.h",
+            "configs/storage_main_app.toml"
+          ],
+          "minimal_modules": [
+            "配置声明",
+            "热更新",
+            "配置下发"
+          ],
+          "practice_task": "选取一个服务配置项（如某个 timeout 或并发度），通过 set_config 修改并验证其热更新生效，记录回调触发链路。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "FoundationDB 客户端与事务封装",
+          "order": 6,
+          "filename": "u2-l6-fdb-and-transactions.md",
+          "level": "intermediate",
+          "topic": "讲解 fdb/ 封装的 DB/Transaction、IKVEngine/IReadWriteTransaction 抽象与 SSI 事务重试策略。",
+          "learning_goals": [
+            "理解 FDB C API 的封装与 FDBKVEngine 的接口映射",
+            "掌握 IReadOnlyTransaction/IReadWriteTransaction 的读写与冲突范围",
+            "理解事务冲突检测与自动重试机制"
+          ],
+          "source_files": [
+            "src/fdb/FDB.h",
+            "src/fdb/FDBKVEngine.h",
+            "src/fdb/FDBTransaction.h",
+            "src/fdb/FDBRetryStrategy.h",
+            "src/common/kv/ITransaction.h",
+            "src/common/kv/IKVEngine.h"
+          ],
+          "minimal_modules": [
+            "FDB 封装",
+            "事务抽象",
+            "重试策略"
+          ],
+          "practice_task": "写一段说明，解释一个 meta 写事务在 FDB 中如何形成读/写冲突范围，以及发生冲突时如何重试。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "集群管理服务 mgmtd",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "mgmtd 服务总览与 RoutingInfo 数据模型",
+          "order": 1,
+          "filename": "u3-l1-mgmtd-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 mgmtd 的服务结构、MgmtdState 与全局路由信息 RoutingInfo 的组成。",
+          "learning_goals": [
+            "理解 MgmtdServer 启动与服务注册",
+            "掌握 RoutingInfo 中 NodeMap/ChainTableMap/ChainMap/TargetMap 的关系",
+            "理解 CoroSynchronized 对共享状态的并发保护"
+          ],
+          "source_files": [
+            "src/mgmtd/MgmtdServer.h",
+            "src/mgmtd/service/MgmtdState.h",
+            "src/mgmtd/service/RoutingInfo.h",
+            "src/mgmtd/service/MgmtdData.h"
+          ],
+          "minimal_modules": [
+            "服务结构",
+            "路由信息",
+            "并发状态"
+          ],
+          "practice_task": "基于 RoutingInfo 画出 node/chain/chain_table/target 的 ER 关系图，并解释 CoroSynchronized 如何保护它们。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "节点注册、心跳与租约续期",
+          "order": 2,
+          "filename": "u3-l2-registration-heartbeat.md",
+          "level": "intermediate",
+          "topic": "讲解 RegisterNode、Heartbeat 操作与心跳续期/超时检测的租约机制。",
+          "learning_goals": [
+            "理解节点注册流程与集群校验",
+            "掌握心跳即租约续期的模型与 T/T/2 超时规则",
+            "理解心跳中携带的 target 本地状态上报"
+          ],
+          "source_files": [
+            "src/mgmtd/ops/RegisterNodeOperation.h",
+            "src/mgmtd/ops/HeartbeatOperation.h",
+            "src/mgmtd/background/MgmtdHeartbeater.h",
+            "src/mgmtd/background/MgmtdHeartbeatChecker.h"
+          ],
+          "minimal_modules": [
+            "节点注册",
+            "心跳续期",
+            "超时检测"
+          ],
+          "practice_task": "追踪一次 storage 节点心跳从发送到被 MgmtdHeartbeatChecker 处理的全过程，列出超时后会发生什么。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "主选举与故障切换",
+          "order": 3,
+          "filename": "u3-l3-primary-election.md",
+          "level": "intermediate",
+          "topic": "讲解多 mgmtd 实例基于租约的 primary 选举、LeaseExtender 续约与 primary 故障切换。",
+          "learning_goals": [
+            "理解 LeaseInfo 与 primary 选举模型",
+            "掌握 MgmtdLeaseExtender 从 FDB 加载路由信息并续租的过程",
+            "理解 primary 失效后其他实例提升为 primary 的切换"
+          ],
+          "source_files": [
+            "src/mgmtd/background/MgmtdLeaseExtender.h",
+            "src/mgmtd/background/MgmtdBackgroundRunner.h",
+            "src/mgmtd/store/MgmtdStore.h",
+            "src/fbs/mgmtd/MgmtdLeaseInfo.h"
+          ],
+          "minimal_modules": [
+            "租约选举",
+            "路由加载",
+            "故障切换"
+          ],
+          "practice_task": "描述当 primary mgmtd 进程崩溃时，集群如何在不丢失路由信息的前提下选出新 primary，涉及哪些文件与状态。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "ChainTable / Chain / Target 数据模型",
+          "order": 4,
+          "filename": "u3-l4-chain-target-model.md",
+          "level": "intermediate",
+          "topic": "讲解链表、链、存储目标的数据结构与版本号语义，以及多链表隔离不同工作负载。",
+          "learning_goals": [
+            "理解 Chain、ChainTable、Target 的 flat 结构定义",
+            "掌握链版本号随成员变更单调递增的语义",
+            "理解多个 chain table 支持不同数据放置需求"
+          ],
+          "source_files": [
+            "src/fbs/mgmtd/ChainTable.h",
+            "src/fbs/mgmtd/ChainInfo.h",
+            "src/fbs/mgmtd/TargetInfo.h",
+            "src/fbs/mgmtd/ChainTargetInfo.h",
+            "src/fbs/mgmtd/RoutingInfo.h"
+          ],
+          "minimal_modules": [
+            "链表结构",
+            "版本语义",
+            "多表隔离"
+          ],
+          "practice_task": "用 design_notes 中的 6 节点示例手工构造一张 chain table，并标注每个 target 的 public 状态。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Target 状态机与故障检测",
+          "order": 5,
+          "filename": "u3-l5-target-state-machine.md",
+          "level": "advanced",
+          "topic": "深入讲解 updateChain 中的 public/local 状态转换表，以及故障下线、lastsrv、数据恢复触发。",
+          "learning_goals": [
+            "掌握 serving/syncing/waiting/lastsrv/offline 五种 public 状态",
+            "理解 up-to-date/online/offline 本地状态作为触发事件",
+            "能读懂状态转换表并预测某次故障后的迁移结果"
+          ],
+          "source_files": [
+            "src/mgmtd/service/updateChain.cc",
+            "src/fbs/mgmtd/TargetInfo.h",
+            "src/fbs/mgmtd/LocalTargetInfo.h",
+            "src/mgmtd/background/MgmtdChainsUpdater.h"
+          ],
+          "minimal_modules": [
+            "public 状态",
+            "local 状态",
+            "状态转换表"
+          ],
+          "practice_task": "针对「一个 serving target 所在服务崩溃」的场景，依据状态转换表逐步推导各相关 target 的状态变化直至稳定。",
+          "depends_on": [
+            "u3-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "路由信息分发与配置管理",
+          "order": 6,
+          "filename": "u3-l6-routing-and-config.md",
+          "level": "intermediate",
+          "topic": "讲解 GetRoutingInfo 向 client/storage/meta 分发路由、SetConfig 管理配置与版本号推进。",
+          "learning_goals": [
+            "理解 routing info version 推进与客户端拉取机制",
+            "掌握配置托管与 set_config/get_config 流程",
+            "理解节点 tag 与 enable/disable 控制对路由的影响"
+          ],
+          "source_files": [
+            "src/mgmtd/ops/GetRoutingInfoOperation.h",
+            "src/mgmtd/ops/SetConfigOperation.h",
+            "src/mgmtd/background/MgmtdRoutingInfoVersionUpdater.h",
+            "src/fbs/mgmtd/ConfigInfo.h"
+          ],
+          "minimal_modules": [
+            "路由分发",
+            "配置管理",
+            "版本推进"
+          ],
+          "practice_task": "追踪客户端启动后获取 RoutingInfo 的过程，说明当 chain table 更新后客户端如何感知并切换到新版本。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "元数据服务 meta",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "meta 服务总览与无状态架构",
+          "order": 1,
+          "filename": "u4-l1-meta-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 MetaServer、MetaOperator、MetaStore 的分层与无状态元服务设计。",
+          "learning_goals": [
+            "理解 meta 服务为何无状态、元数据全存 FoundationDB",
+            "掌握 MetaOperator 如何分发 RPC 到各 Operation",
+            "理解 MetaStore 作为元数据操作入口的角色"
+          ],
+          "source_files": [
+            "src/meta/meta.cpp",
+            "src/meta/service/MetaServer.h",
+            "src/meta/service/MetaOperator.h",
+            "src/meta/store/MetaStore.h"
+          ],
+          "minimal_modules": [
+            "无状态架构",
+            "操作分发",
+            "存储入口"
+          ],
+          "practice_task": "梳理一次 create file RPC 从 MetaOperator 到具体 Operation 再到 FDB 事务的调用路径，画出分层图。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Inode 与 DirEntry 的 KV 编码",
+          "order": 2,
+          "filename": "u4-l2-inode-direntry-encoding.md",
+          "level": "intermediate",
+          "topic": "讲解 INOD/DENT/INOS 前缀的 key 编码、little-endian 分布与目录项范围查询。",
+          "learning_goals": [
+            "掌握 inode key 的 INOD 前缀 + inode id 编码与字节序选择原因",
+            "理解 directory entry key 的 DENT + parent id + name 编码",
+            "理解如何用范围查询高效列出目录"
+          ],
+          "source_files": [
+            "src/meta/store/Inode.h",
+            "src/meta/store/Inode.cc",
+            "src/meta/store/DirEntry.h",
+            "src/meta/store/DirEntry.cc",
+            "src/fbs/meta/Schema.h"
+          ],
+          "minimal_modules": [
+            "key 前缀",
+            "字节序分布",
+            "范围查询"
+          ],
+          "practice_task": "为 inode 与 dir entry 各写出一个示例 key 的字节布局，并解释为什么 inode id 用 little-endian 能在 FDB 中均匀分布。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "用 FoundationDB 事务实现元数据操作",
+          "order": 3,
+          "filename": "u4-l3-meta-ops-with-fdb.md",
+          "level": "intermediate",
+          "topic": "讲解 create/lookup/rename/unlink 等操作如何在 FDB 读写事务中完成与冲突重试。",
+          "learning_goals": [
+            "理解只读事务（fstat/lookup/listdir）与读写事务（create/link/unlink/rename）的使用",
+            "掌握 rename 的祖先环路检测与原子目录操作",
+            "理解并发冲突下的自动重试"
+          ],
+          "source_files": [
+            "src/meta/store/ops/Open.cc",
+            "src/meta/store/ops/Rename.cc",
+            "src/meta/store/ops/Remove.cc",
+            "src/meta/store/ops/Stat.cc",
+            "src/meta/store/PathResolve.h"
+          ],
+          "minimal_modules": [
+            "读写事务",
+            "原子操作",
+            "冲突重试"
+          ],
+          "practice_task": "分析 rename 操作在事务中读写了哪些 key、设置了哪些冲突范围，并说明何种并发会触发重试。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "文件数据布局与链分配",
+          "order": 4,
+          "filename": "u4-l4-layout-and-chain-alloc.md",
+          "level": "intermediate",
+          "topic": "讲解 Layout 结构、ChainAllocator 的 round-robin 选链、stripe 与 shuffle seed。",
+          "learning_goals": [
+            "理解文件被切成 chunk 并按 stripe 跨多链条带化",
+            "掌握 ChainAllocator 如何从 chain table 轮询选链并用 shuffle seed 打乱",
+            "理解 chunkSize/stripeSize/tableId 等布局字段"
+          ],
+          "source_files": [
+            "src/meta/components/ChainAllocator.h",
+            "src/fbs/meta/Schema.h",
+            "src/meta/components/InodeIdAllocator.h"
+          ],
+          "minimal_modules": [
+            "文件布局",
+            "轮询选链",
+            "shuffle 打乱"
+          ],
+          "practice_task": "给定一个 chain table 与 stripeSize，模拟 ChainAllocator 为一个新文件分配若干 chunk index 对应的链，并解释 shuffle 的作用。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "动态文件长度、FileSession 与 GC",
+          "order": 5,
+          "filename": "u4-l5-length-session-gc.md",
+          "level": "advanced",
+          "topic": "讲解文件长度的最终一致性更新、写打开文件的 FileSession、以及延迟删除与 GC。",
+          "learning_goals": [
+            "理解客户端周期上报最大写位置以更新 inode 长度的机制",
+            "掌握 write 打开文件的 session 跟踪与离线清理",
+            "理解 close/fsync 时精确长度查询与 rendezvous 哈希分担"
+          ],
+          "source_files": [
+            "src/meta/store/FileSession.h",
+            "src/meta/components/SessionManager.h",
+            "src/meta/components/GcManager.h",
+            "src/meta/store/ops/BatchOperation.cc"
+          ],
+          "minimal_modules": [
+            "长度更新",
+            "会话管理",
+            "延迟删除与 GC"
+          ],
+          "practice_task": "描述一个文件被多客户端并发写、随后被删除的完整生命周期中，长度与 session 是如何被维护和清理的。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "存储服务 storage（C++ 层）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "storage 服务总览与启动",
+          "order": 1,
+          "filename": "u5-l1-storage-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 StorageServer、StorageOperator、Components 的分层与各类后台 worker 的职责。",
+          "learning_goals": [
+            "理解 storage 服务如何管理本地 SSD 与多个 storage target",
+            "掌握 StorageOperator 作为核心请求处理器的角色",
+            "了解 aio/update/sync/worker 各模块的分工"
+          ],
+          "source_files": [
+            "src/storage/storage.cpp",
+            "src/storage/service/StorageServer.h",
+            "src/storage/service/StorageOperator.h",
+            "src/storage/service/Components.h",
+            "src/storage/store/StorageTarget.h"
+          ],
+          "minimal_modules": [
+            "服务分层",
+            "请求处理器",
+            "后台 worker"
+          ],
+          "practice_task": "梳理 storage 服务启动后创建的核心对象与后台线程，说明它们如何协作处理一次写请求。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "读路径：批量读与 AIO",
+          "order": 2,
+          "filename": "u5-l2-read-path-aio.md",
+          "level": "intermediate",
+          "topic": "讲解 batchRead 如何解析 target、分配 RDMA buffer、经 AioReadWorker 异步落盘读取并回传。",
+          "learning_goals": [
+            "理解读请求如何按 chain 路由到任意 target",
+            "掌握 BufferPool 的 RDMA buffer 分配与对齐读取",
+            "理解 AioReadWorker/BatchReadJob 的批量异步提交"
+          ],
+          "source_files": [
+            "src/storage/service/StorageOperator.h",
+            "src/storage/service/BufferPool.h",
+            "src/storage/aio/AioReadWorker.h",
+            "src/storage/aio/BatchReadJob.h"
+          ],
+          "minimal_modules": [
+            "读路由",
+            "RDMA buffer",
+            "异步批量读"
+          ],
+          "practice_task": "追踪一个 batchRead 请求从入口到 RDMA 回传的完整流程，标注 buffer 分配与 AIO 提交点。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "写路径与 CRAQ 链式复制",
+          "order": 3,
+          "filename": "u5-l3-write-path-craq.md",
+          "level": "advanced",
+          "topic": "讲解 update 写入、链头加锁、committed/pending 版本、沿链转发与 ACK 回传的 CRAQ 流程。",
+          "learning_goals": [
+            "理解 CRAQ 写全读任何与链头串行化",
+            "掌握 committed/pending 双版本与 u=v+1 版本号",
+            "理解 ReliableForwarding 的可靠转发与 ReliableUpdate 幂等"
+          ],
+          "source_files": [
+            "src/storage/service/StorageOperator.h",
+            "src/storage/service/ReliableForwarding.h",
+            "src/storage/service/ReliableUpdate.h",
+            "src/storage/update/UpdateWorker.h",
+            "src/storage/update/UpdateJob.h"
+          ],
+          "minimal_modules": [
+            "链头加锁",
+            "双版本",
+            "转发与 ACK"
+          ],
+          "practice_task": "用一个三节点链 A→B→C 模拟一次写入，逐步说明每节点的 pending/committed 版本变化与 ACK 传播过程。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "TargetMap 与链路由",
+          "order": 4,
+          "filename": "u5-l4-targetmap-routing.md",
+          "level": "intermediate",
+          "topic": "讲解 TargetMap 如何根据 chain id 解析当前节点在链中的位置与前驱/后继，以及版本校验。",
+          "learning_goals": [
+            "理解 chain 版本校验拒绝过期写请求",
+            "掌握 TargetMap/AtomicallyTargetMap 的原子路由查询",
+            "理解如何确定自身是否为链头/链尾"
+          ],
+          "source_files": [
+            "src/storage/service/TargetMap.h",
+            "src/storage/service/StorageOperator.h",
+            "src/storage/store/StorageTargets.h"
+          ],
+          "minimal_modules": [
+            "链路由",
+            "版本校验",
+            "前驱后继"
+          ],
+          "practice_task": "结合链表更新场景，说明当一个 target 被移到链尾时，TargetMap 如何保证后续写请求路由正确。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "数据恢复与同步：ResyncWorker",
+          "order": 5,
+          "filename": "u5-l5-data-recovery.md",
+          "level": "advanced",
+          "topic": "讲解离线 target 重启后的数据恢复：dump-chunkmeta、full-chunk-replace 全量回放、sync-done 与状态翻转。",
+          "learning_goals": [
+            "理解恢复期写请求一律为 full-chunk-replace 的原因",
+            "掌握 dump-chunkmeta 对比与 chunk 传输判定规则",
+            "理解 sync-done 后 local state 翻转为 up-to-date 的流程"
+          ],
+          "source_files": [
+            "src/storage/sync/ResyncWorker.h",
+            "src/storage/service/StorageOperator.h",
+            "src/storage/service/ReliableForwarding.h"
+          ],
+          "minimal_modules": [
+            "恢复触发",
+            "元数据对比",
+            "全量回放"
+          ],
+          "practice_task": "描述一个 target 从 offline 重启到恢复 up-to-date 的完整过程，列出涉及的关键消息与判定规则。",
+          "depends_on": [
+            "u5-l3",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Chunk Engine（Rust 实现）",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Chunk Engine 总览与 C++/Rust FFI",
+          "order": 1,
+          "filename": "u6-l1-chunk-engine-overview.md",
+          "level": "advanced",
+          "topic": "讲解 Rust chunk engine 的整体结构、engine 编排，以及通过 cxx.rs 与 C++ ChunkEngine 桥接。",
+          "learning_goals": [
+            "理解 chunk engine 的 meta/alloc/file 三层职责",
+            "掌握 cxx.rs 暴露给 C++ 的接口与 ChunkEngine 封装",
+            "理解 get/update/commit 的线程安全访问模型"
+          ],
+          "source_files": [
+            "src/storage/chunk_engine/src/core/engine.rs",
+            "src/storage/chunk_engine/src/cxx.rs",
+            "src/storage/chunk_engine/src/lib.rs",
+            "src/storage/store/ChunkEngine.h"
+          ],
+          "minimal_modules": [
+            "引擎结构",
+            "FFI 桥接",
+            "线程安全接口"
+          ],
+          "practice_task": "绘制从 C++ ChunkEngine::update 到 Rust engine.update_raw_chunk 的调用链，标注跨语言边界的数据结构。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "物理块分配器",
+          "order": 2,
+          "filename": "u6-l2-physical-allocator.md",
+          "level": "advanced",
+          "topic": "讲解 11 种物理块大小、每大小 256 个文件、位图管理、fallocate 扩容与 COW 分配。",
+          "learning_goals": [
+            "理解 Allocators 管理 11 种块大小的资源池",
+            "掌握 ChunkAllocator/GroupAllocator 的分片位图与活跃级别",
+            "理解写时复制分配与 append 就地优化"
+          ],
+          "source_files": [
+            "src/storage/chunk_engine/src/alloc/allocators.rs",
+            "src/storage/chunk_engine/src/alloc/allocator.rs",
+            "src/storage/chunk_engine/src/alloc/chunk_allocator.rs",
+            "src/storage/chunk_engine/src/alloc/group_allocator.rs",
+            "src/storage/chunk_engine/src/file/clusters.rs",
+            "src/storage/chunk_engine/src/file/cluster.rs"
+          ],
+          "minimal_modules": [
+            "块大小分级",
+            "位图分配",
+            "COW 与 append"
+          ],
+          "practice_task": "针对一次 chunk 写入，说明分配器如何选择最匹配的物理块大小、回收后如何优先复用以及不足时如何 fallocate 扩容。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Chunk 元数据与 RocksDB",
+          "order": 3,
+          "filename": "u6-l3-chunk-meta-rocksdb.md",
+          "level": "advanced",
+          "topic": "讲解 chunk 元数据的 key 编码、RocksDB 存储与 merge、内存缓存以及 update/commit 的原子写批。",
+          "learning_goals": [
+            "理解 chunk meta 的 key 编码与 range 查询",
+            "掌握 RocksDB meta_store 的读写与 merge operator",
+            "理解内存缓存与写批原子提交保证一致性"
+          ],
+          "source_files": [
+            "src/storage/chunk_engine/src/meta/meta_store.rs",
+            "src/storage/chunk_engine/src/meta/meta_key.rs",
+            "src/storage/chunk_engine/src/meta/meta_merge.rs",
+            "src/storage/chunk_engine/src/meta/rocksdb.rs",
+            "src/storage/chunk_engine/src/types/chunk_meta.rs"
+          ],
+          "minimal_modules": [
+            "元数据 key",
+            "RocksDB 存储",
+            "原子写批"
+          ],
+          "practice_task": "描述一次 update+commit 中，新 chunk 元数据与新旧物理块状态如何在 RocksDB 写批中原子更新。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "客户端：client / fuse / lib",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "客户端核心：Meta / Storage / Mgmtd Client",
+          "order": 1,
+          "filename": "u7-l1-client-core.md",
+          "level": "intermediate",
+          "topic": "讲解客户端如何分别与 meta、storage、mgmtd 通信，以及存储客户端的 IO 合并与 RDMA buffer 管理。",
+          "learning_goals": [
+            "理解 CoreClient/MetaClient/StorageClient/MgmtdClient 的分工",
+            "掌握 StorageClient 的 IO 合并与 RDMA buffer pool",
+            "理解 target 选择与读流量在链内均衡"
+          ],
+          "source_files": [
+            "src/client/core/CoreClient.h",
+            "src/client/storage/StorageClient.h",
+            "src/client/meta/MetaClient.h",
+            "src/client/mgmtd/MgmtdClientForClient.h",
+            "src/client/storage/TargetSelection.h"
+          ],
+          "minimal_modules": [
+            "三类客户端",
+            "IO 合并",
+            "RDMA buffer"
+          ],
+          "practice_task": "梳理客户端 open 后发起一次 read 的流程，说明它如何用布局信息计算 chunk id 并选择 target。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "FUSE 守护进程与请求分发",
+          "order": 2,
+          "filename": "u7-l2-fuse-daemon.md",
+          "level": "intermediate",
+          "topic": "讲解 FUSE 守护进程如何接收内核请求、经 FuseOps 分发到 MetaClient/StorageClient，以及 /3fs-virt 虚拟目录。",
+          "learning_goals": [
+            "理解 FUSE 请求处理与协程化 FuseOps",
+            "掌握 FuseClients 如何聚合多个客户端",
+            "理解 FUSE 的性能瓶颈与为何引入原生客户端"
+          ],
+          "source_files": [
+            "src/fuse/hf3fs_fuse.cpp",
+            "src/fuse/FuseOps.h",
+            "src/fuse/FuseOps.cc",
+            "src/fuse/FuseClients.h",
+            "src/fuse/FuseMainLoop.h"
+          ],
+          "minimal_modules": [
+            "FUSE 请求处理",
+            "客户端聚合",
+            "性能瓶颈"
+          ],
+          "practice_task": "追踪一次 FUSE read 请求从内核到 StorageClient 的路径，并说明 FUSE 共享队列自旋锁为何限制吞吐。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "异步零拷贝 USRBIO API：Iov / Ior / IoRing",
+          "order": 3,
+          "filename": "u7-l3-usrbio-zero-copy.md",
+          "level": "advanced",
+          "topic": "讲解 USRBIO 的 Iov 共享内存、Ior 环形通信、io_depth 批处理与 PioV 并行执行。",
+          "learning_goals": [
+            "理解 Iov 零拷贝共享内存与 IB 内存注册",
+            "掌握 Ior 类似 io_uring 的提交/完成模型与 io_depth 语义",
+            "理解 IoRing/IovTable/PioV 在 FUSE 侧的实现"
+          ],
+          "source_files": [
+            "src/lib/api/UsrbIo.md",
+            "src/lib/api/hf3fs_usrbio.h",
+            "src/fuse/IoRing.h",
+            "src/fuse/IovTable.h",
+            "src/fuse/PioV.h"
+          ],
+          "minimal_modules": [
+            "Iov 共享内存",
+            "Ior 环形通信",
+            "批处理与并行"
+          ],
+          "practice_task": "写一个最小 USRBIO 程序：注册 fd、创建 Iov/Ior、提交若干读请求并等待完成，说明 io_depth 对批处理的影响。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Python 绑定 hf3fs",
+          "order": 4,
+          "filename": "u7-l4-python-bindings.md",
+          "level": "intermediate",
+          "topic": "讲解 hf3fs/hf3fs_utils Python 包如何通过 pybind11 暴露 USRBIO 能力供数据加载等场景使用。",
+          "learning_goals": [
+            "理解 pybind11 绑定如何包装 USRBIO C API",
+            "掌握 hf3fs 包的模块组织与安装方式",
+            "理解 Python 侧如何使用 Iov/Ior 进行训练数据读取"
+          ],
+          "source_files": [
+            "setup.py",
+            "setup_hf3fs_utils.py",
+            "src/lib/py",
+            "hf3fs",
+            "hf3fs_utils"
+          ],
+          "minimal_modules": [
+            "pybind11 绑定",
+            "包结构",
+            "Python 用法"
+          ],
+          "practice_task": "安装 hf3fs 包并用 Python 实现一个简单的批量读示例，对比其与直接 FUSE 读的差异。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "运维、扩展与二次开发",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "数据放置算法与链表生成",
+          "order": 1,
+          "filename": "u8-l1-data-placement.md",
+          "level": "advanced",
+          "topic": "讲解 deploy/data_placement 如何用平衡不完全区组设计/整数规划生成故障下流量均衡的链表，并导出建链命令。",
+          "learning_goals": [
+            "理解链表设计为何要追求恢复期流量均衡",
+            "掌握 data_placement.py 模型与 gen_chain_table.py 生成流程",
+            "理解 admin_cli 上传 chains 与 chain table 的命令"
+          ],
+          "source_files": [
+            "deploy/data_placement/src/model/data_placement.py",
+            "deploy/data_placement/src/setup/gen_chain_table.py",
+            "deploy/README.md"
+          ],
+          "minimal_modules": [
+            "平衡区组设计",
+            "链表生成",
+            "建链命令"
+          ],
+          "practice_task": "用 data_placement 脚本为一组节点生成链表，并用 admin_cli upload-chains/upload-chain-table 导入集群验证。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "KVCache 子系统",
+          "order": 2,
+          "filename": "u8-l2-kvcache.md",
+          "level": "advanced",
+          "topic": "讲解 src/kv 的 KVStore 抽象与 LevelDB/RocksDB/MemDB 后端，以及推理 KVCache 的读写与 GC。",
+          "learning_goals": [
+            "理解 KVStore 统一接口与多种后端实现",
+            "掌握 KVCache 高吞吐读写的存储设计",
+            "理解 KVCache 的 GC（remove ops）IOPS 特性"
+          ],
+          "source_files": [
+            "src/kv/KVStore.h",
+            "src/kv/RocksDBStore.h",
+            "src/kv/LevelDBStore.h",
+            "src/kv/MemDBStore.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "KVStore 接口",
+            "多后端",
+            "KVCache 读写"
+          ],
+          "practice_task": "对比三种 KV 后端的适用场景，并说明推理 KVCache 为何能用 3FS 替代 DRAM 缓存。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "监控、指标与 analytics",
+          "order": 3,
+          "filename": "u8-l3-monitor-and-analytics.md",
+          "level": "advanced",
+          "topic": "讲解 monitor_collector 上报到 ClickHouse 的指标体系，以及 analytics 的结构化 trace 日志读取。",
+          "learning_goals": [
+            "理解 monitor 指标采集与 ClickHouse 上报",
+            "掌握 admin_cli 与服务监控地址配置",
+            "理解 analytics 的 SerdeObject 读取与结构化 trace"
+          ],
+          "source_files": [
+            "src/monitor_collector/monitor_collector.cpp",
+            "src/analytics/SerdeObjectReader.h",
+            "src/analytics/StructuredTraceLog.h",
+            "deploy/sql/3fs-monitor.sql",
+            "configs/monitor_collector_main.toml"
+          ],
+          "minimal_modules": [
+            "指标采集",
+            "ClickHouse 上报",
+            "结构化 trace"
+          ],
+          "practice_task": "部署 monitor_collector 并在 ClickHouse 中查询一组 3FS 指标，说明其采集链路。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "创建新服务：simple_example 模板与 admin_cli 工具",
+          "order": 4,
+          "filename": "u8-l4-new-service-and-tools.md",
+          "level": "advanced",
+          "topic": "讲解如何以 simple_example 为模板新增一个 3FS 服务，以及 admin_cli/tools 的命令实现与目录布局命令。",
+          "learning_goals": [
+            "掌握复制 simple_example + fbs 模板新增服务的流程",
+            "理解 admin_cli 命令注册与 tools/commands 实现",
+            "理解 CreateWithLayout/SetDirLayout 等目录布局工具"
+          ],
+          "source_files": [
+            "src/simple_example/README.md",
+            "src/simple_example/main.cpp",
+            "src/simple_example/service",
+            "src/tools/admin.cc",
+            "src/tools/commands/Layout.cc",
+            "src/tools/commands/CreateWithLayout.cc"
+          ],
+          "minimal_modules": [
+            "服务模板",
+            "命令注册",
+            "布局工具"
+          ],
+          "practice_task": "参照 README 步骤复制 simple_example 生成一个最小新服务并完成编译，再用 admin_cli 设置一个目录的 layout。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
