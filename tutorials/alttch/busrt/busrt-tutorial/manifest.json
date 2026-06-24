@@ -1,0 +1,812 @@
+{
+  "project": "busrt",
+  "head": "0e6fac83894a7798a8a042a449298e3fb4b9d635",
+  "rationale": "busrt 是一个 Rust/Tokio 实现的进程间通信（IPC）消息总线，可嵌入运行也可作为独立服务，核心机制包括：自定义二进制帧协议、零拷贝载荷（Cow + Arc<FrameData>）、三种通信模式（点对点 send / 广播 broadcast / 发布订阅 pub-sub）、统一异步客户端 trait（AsyncClient）、RPC 层（msgpack + 请求/回复/通知）、AAA 访问控制、实时特性（rt feature + QoS::Realtime + 异步分配器）、游标（cursors）流式传输、以及同步客户端和多种传输通道（unix/tcp/websocket）。\n\n学习顺序遵循\"先会用→再读核心类型与协议→嵌入 Broker→IPC 客户端→RPC 层→深入 Broker 内部生命周期/传输/AAA→高级扩展（实时、游标、工具、同步）→运维工具与生态\"。第一单元从零开始：定位、构建运行、目录与 feature→模块映射。第二单元建立协议与类型基础（lib.rs 常量、Cow、线上帧格式与握手），这是理解所有后续模块的根基。第三、四、五单元逐层向上：嵌入式 Broker 与进程内通信、IPC 客户端、RPC 层。第六单元深入 Broker 连接生命周期、多传输层与 AAA，属于源码最难部分。第七单元讲实时性、游标、阻塞式主题工具与同步客户端等扩展点。第八单元覆盖独立服务端（busrtd）、CLI 工具、fifo 通道与 announce 事件、多语言绑定。每篇讲义只讲一个主题，引用 2-6 个真实源码文件，并配一个可操作的代码实践任务，讲义间用 depends_on 形成清晰依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 BUS/RT：定位、运行与目录结构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "BUS/RT 是什么：项目定位与技术栈",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 BUS/RT 作为 Rust 原生 IPC 消息总线的定位、设计灵感来源（NATS/ZeroMQ/Nanomsg）、支持的通信模式与通道，以及它在 EVA ICS 中的角色。",
+          "learning_goals": [
+            "理解 BUS/RT 解决的 IPC 问题与典型应用场景",
+            "掌握三种通信模式与四种传输通道的区别",
+            "了解 BUS/RT 在 EVA ICS v4 中作为核心总线的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "README.md 项目说明",
+            "Cargo.toml [features] 与依赖"
+          ],
+          "practice_task": "阅读 README 与 Cargo.toml，用一段话说明 BUS/RT 是什么、支持哪些通信模式与通道，并列出 rpc、broker、ipc 三个 feature 各自引入的关键依赖。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从零构建与运行：busrtd 服务端与 busrt CLI",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Cargo 编译、用 justfile/test.sh 启动独立服务端 busrtd 和命令行客户端 busrt，理解 feature 门控与两个二进制的关系。",
+          "learning_goals": [
+            "掌握编译并启动 busrtd 独立服务的方法",
+            "掌握 busrt CLI 客户端的基本用法",
+            "理解 server 与 cli feature 如何分别启用两个二进制"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "justfile",
+            "test.sh",
+            "src/server.rs",
+            "src/cli.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml [[bin]] busrtd/busrt",
+            "justfile test 目标",
+            "test.sh server/cli 分支"
+          ],
+          "practice_task": "参照 test.sh，分别用 server 和 cli 命令启动一个监听 /tmp/busrt.sock 的 busrtd，并用 busrt CLI 执行 broker info 与 broker stats，记录输出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码地图：目录结构与 feature→模块映射",
+          "order": 3,
+          "filename": "u1-l3-source-map.md",
+          "level": "beginner",
+          "topic": "梳理 src 目录结构，重点讲解 lib.rs 中如何用 #[cfg(feature)] 条件编译把 broker/ipc/rpc/sync/cursors 等模块按 feature 暴露，建立整体源码地图。",
+          "learning_goals": [
+            "熟悉 src 下各源码文件的职责",
+            "理解 Cargo feature 与模块的条件编译映射关系",
+            "建立后续阅读源码的整体导航"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs pub mod 条件声明",
+            "lib.rs 协议常量与重导出",
+            "Cargo.toml [features] 定义"
+          ],
+          "practice_task": "画出 src 各文件到 Cargo feature 的对应关系表（如 broker.rs→broker，ipc.rs→ipc），并标注哪些模块需要 full feature 才全部启用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心类型与二进制协议基础",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "核心类型：Error、QoS、FrameOp 与 FrameData",
+          "order": 1,
+          "filename": "u2-l1-core-types.md",
+          "level": "intermediate",
+          "topic": "精读 lib.rs 中的核心数据类型：错误体系（Error/ErrorKind）、服务质量 QoS、帧操作码 FrameOp、帧类型 FrameKind 与帧数据 FrameData/Frame，理解它们如何构成整个库的公共契约。",
+          "learning_goals": [
+            "掌握 Error/ErrorKind 错误模型与 u8 错误码映射",
+            "理解 QoS 四个等级及其 needs_ack/is_realtime 语义",
+            "分清 FrameOp、FrameKind、FrameData 与 Arc Frame 的关系"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs Error/ErrorKind",
+            "lib.rs QoS",
+            "lib.rs FrameOp/FrameKind",
+            "lib.rs FrameData/Frame"
+          ],
+          "practice_task": "写一个小程序引入 busrt crate，构造不同 QoS 值，打印其 needs_ack() 与 is_realtime() 结果，并对照 ErrorKind 的 u8 表示说明错误码与协议常量的对应关系。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "零拷贝载荷模型：borrow::Cow",
+          "order": 2,
+          "filename": "u2-l2-zero-copy-cow.md",
+          "level": "intermediate",
+          "topic": "讲解 borrow.rs 中类 Cow 智能指针（Borrowed/Owned/Referenced）的设计动机与用法，理解它如何在 socket 传输与线程间通信中实现零拷贝。",
+          "learning_goals": [
+            "理解三种 Cow 变体（借用/拥有/引用）的适用场景",
+            "掌握 Cow 与 Vec<u8>/&[u8]/Arc<Vec<u8>> 的转换",
+            "理解零拷贝对高性能 IPC 的意义"
+          ],
+          "source_files": [
+            "src/borrow.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "borrow::Cow 枚举",
+            "Cow 的 From 实现",
+            "Cow 的 as_slice/to_vec/len 方法",
+            "lib.rs empty_payload! 宏"
+          ],
+          "practice_task": "分别用 Vec<u8>、&[u8]、Arc<Vec<u8>> 构造三个 Cow 实例，调用 as_slice() 验证它们都能作为载荷使用，并说明 empty_payload! 宏展开后是哪种变体。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "线上协议与帧格式：握手与帧编解码",
+          "order": 3,
+          "filename": "u2-l3-wire-protocol.md",
+          "level": "intermediate",
+          "topic": "剖析 BUS/RT 的二进制线协议：GREETINGS/PROTOCOL_VERSION 握手、客户端→代理的 9 字节帧头（op_id+flags+len）、代理→客户端的帧头（kind+len+realtime+sender/topic），以及 PING/ACK 机制。",
+          "learning_goals": [
+            "掌握连接握手流程（greetings+版本号+客户端名注册）",
+            "理解客户端发送帧与代理回送帧的字节布局",
+            "理解 flags 字节中 op 与 qos 的位划分"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/ipc.rs",
+            "src/broker.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 协议常量（GREETINGS/PROTOCOL_VERSION/PING_FRAME/OP_*）",
+            "ipc.rs prepare_frame_buf!/send_frame! 宏",
+            "ipc.rs chat() 握手函数",
+            "broker.rs handle_peer 握手响应"
+          ],
+          "practice_task": "对照源码手绘两种帧的字节布局图：客户端发送的订阅帧（op_id+flags+len+topic）与代理回送的消息帧（kind+len+realtime+sender+payload），标注每个字段偏移与含义。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "嵌入式 Broker 与进程内通信",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "创建 Broker 与注册内部客户端",
+          "order": 1,
+          "filename": "u3-l1-broker-and-internal-client.md",
+          "level": "intermediate",
+          "topic": "讲解如何把 BUS/RT 嵌入到自己的 Tokio 应用：用 Broker::new/register_client 创建代理与内部客户端，实现线程间直接通信，并以 inter_thread 示例为蓝本。",
+          "learning_goals": [
+            "掌握 Broker::create/register_client 的用法",
+            "理解内部客户端（BusRtClientKind::Internal）的特点",
+            "能用嵌入方式实现线程间消息传递"
+          ],
+          "source_files": [
+            "src/broker.rs",
+            "examples/inter_thread.rs"
+          ],
+          "minimal_modules": [
+            "broker::Broker::new/create",
+            "broker::Broker::register_client",
+            "broker::Client（内部客户端 AsyncClient 实现）",
+            "inter_thread.rs 示例"
+          ],
+          "practice_task": "参照 inter_thread.rs，写一个嵌入 Broker 的程序：注册两个内部客户端，让一个每秒向另一个 send 一条消息，另一个收到后打印 sender 与 payload。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "BrokerDb：客户端注册表与订阅映射",
+          "order": 2,
+          "filename": "u3-l2-broker-db.md",
+          "level": "intermediate",
+          "topic": "深入 BrokerDb 与 BusRtClient 结构：客户端注册表、广播映射 BroadcastMap、订阅映射 SubMap，以及客户端注册/注销、二级客户端（%%分隔）与统计计数。",
+          "learning_goals": [
+            "理解 BrokerDb 三张核心映射（clients/broadcasts/subscriptions）",
+            "掌握客户端注册、注销与 force_register 冲突处理",
+            "理解主/二级客户端关系与 SECONDARY_SEP 机制"
+          ],
+          "source_files": [
+            "src/broker.rs"
+          ],
+          "minimal_modules": [
+            "BrokerDb 结构与 Default",
+            "BusRtClient 结构与 new",
+            "register_client/insert_client/drop_client",
+            "register_secondary_for"
+          ],
+          "practice_task": "阅读 register_client 与 insert_client，说明当客户端名称冲突时 force_register 如何踢掉旧连接，并解释二级客户端名（如 worker.1%%0）的主名提取逻辑。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "三种通信模式：send、broadcast 与 publish",
+          "order": 3,
+          "filename": "u3-l3-communication-patterns.md",
+          "level": "intermediate",
+          "topic": "讲解点对点 send、广播 send_broadcast、发布订阅 publish 三种模式的分发逻辑，重点解读 broker.rs 中的 send!/send_broadcast!/publish! 宏与排除（exclude）机制。",
+          "learning_goals": [
+            "理解三种通信模式在代理内的分发差异",
+            "掌握主题掩码匹配（+/#）与广播掩码（?/*）",
+            "理解 exclude/unexclude 排除特定主题的机制"
+          ],
+          "source_files": [
+            "src/broker.rs",
+            "examples/inter_thread.rs"
+          ],
+          "minimal_modules": [
+            "send! 宏（点对点）",
+            "send_broadcast! 宏（广播）",
+            "publish! 宏（发布订阅+排除）",
+            "safe_send_frame!/make_confirm_channel! 宏"
+          ],
+          "practice_task": "扩展 inter_thread 示例：让一个客户端 publish 到 news/tech 主题，另一个客户端 subscribe # 后排除 news/tech，验证排除机制生效，观察是否还能收到该主题消息。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "IPC 客户端：连接、帧编解码与缓冲",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "AsyncClient：统一的异步客户端接口",
+          "order": 1,
+          "filename": "u4-l1-async-client-trait.md",
+          "level": "intermediate",
+          "topic": "讲解 client.rs 中 AsyncClient trait 如何抽象统一的异步客户端接口（send/publish/subscribe/ping 等），使内部客户端与 IPC 客户端可互换使用。",
+          "learning_goals": [
+            "掌握 AsyncClient trait 的全部方法语义",
+            "理解 OpConfirm（oneshot 确认通道）的用途",
+            "理解 get_connected_beacon 等连接状态接口"
+          ],
+          "source_files": [
+            "src/client.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "client::AsyncClient trait",
+            "lib.rs OpConfirm/EventChannel 类型别名",
+            "broker::Client 对 AsyncClient 的实现（参照）"
+          ],
+          "practice_task": "对比 broker::Client（内部客户端）与 ipc::Client（外部客户端）对 AsyncClient 的实现，列出它们在 is_connected、get_timeout、ping 上的差异并解释原因。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ipc::Client：连接代理与帧收发",
+          "order": 2,
+          "filename": "u4-l2-ipc-client.md",
+          "level": "intermediate",
+          "topic": "精读 ipc.rs：Config 配置、connect 连接流程、Writer（Unix/Tcp/WebSocket）分发、chat 握手、handle_read 帧解析循环，以及发送帧相关宏。",
+          "learning_goals": [
+            "掌握 Config 各参数（path/name/buf_size/queue_size/timeout/token）",
+            "理解 connect→connect_broker→chat→handle_read 的启动流程",
+            "理解客户端发送帧宏与 ACK 确认的关联"
+          ],
+          "source_files": [
+            "src/ipc.rs",
+            "examples/client_sender.rs",
+            "examples/client_listener.rs"
+          ],
+          "minimal_modules": [
+            "ipc::Config",
+            "ipc::Client::connect/connect_broker",
+            "ipc handle_read 帧解析",
+            "ipc prepare_frame_buf!/send_frame!/send_frame_and_confirm! 宏"
+          ],
+          "practice_task": "参照 client_sender.rs 与 client_listener.rs，写一对程序：sender 向某主题 publish 并向 listener 点对点 send，listener 订阅 # 后打印收到的每一帧的 kind/topic/payload。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "TtlBufWriter：TTL 缓冲与刷新策略",
+          "order": 3,
+          "filename": "u4-l3-ttl-buf-writer.md",
+          "level": "intermediate",
+          "topic": "讲解 comm.rs 中的 TtlBufWriter 与 Flush 枚举（No/Scheduled/Instant），理解它如何在批量吞吐与实时性之间取得平衡，以及 Drop 时保证刷新。",
+          "learning_goals": [
+            "理解 Flush 三种模式与 QoS::Realtime 的对应",
+            "掌握 TtlBufWriter 的 TTL 定时刷新机制",
+            "理解缓冲写入对延迟与吞吐的影响"
+          ],
+          "source_files": [
+            "src/comm.rs",
+            "src/ipc.rs",
+            "src/broker.rs"
+          ],
+          "minimal_modules": [
+            "comm::Flush 枚举",
+            "comm::TtlBufWriter::new/write",
+            "TtlBufWriter 的 flusher future 与 Drop",
+            "ipc/broker 中 flush 参数的传递"
+          ],
+          "practice_task": "追踪一条 QoS::No 与一条 QoS::Realtime 消息在 ipc::Client 中分别走 Flush::Scheduled 与 Flush::Instant 的代码路径，说明为何实时消息能获得更低延迟。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "RPC 层：协议、客户端与处理器",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "RPC 协议与 RpcEvent 解析",
+          "order": 1,
+          "filename": "u5-l1-rpc-protocol.md",
+          "level": "intermediate",
+          "topic": "精读 rpc/mod.rs：RPC 帧类型（通知/请求/回复/错误）、错误码、RpcEvent 如何从 Frame 解析、以及 prepare_call_payload 构造调用载荷。",
+          "learning_goals": [
+            "掌握四种 RPC 帧类型及其字节布局",
+            "理解 RpcEvent 的 id/method/payload/code 解析逻辑",
+            "理解零拷贝下 use_header 与 payload_pos 的处理"
+          ],
+          "source_files": [
+            "src/rpc/mod.rs"
+          ],
+          "minimal_modules": [
+            "rpc RPC_* 常量与 RpcEventKind",
+            "rpc::RpcEvent 与 TryFrom<Frame>",
+            "rpc::RpcError 与错误码",
+            "rpc::prepare_call_payload"
+          ],
+          "practice_task": "对照 TryFrom<Frame> for RpcEvent，画出 RPC 请求帧在 use_header=false 时 method 与 payload 的字节切分位置，并说明 id()==0 时为何不需要回复。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "RpcClient 与 RpcHandlers 处理器",
+          "order": 2,
+          "filename": "u5-l2-rpc-client-handlers.md",
+          "level": "intermediate",
+          "topic": "讲解 rpc/async_client.rs：RpcClient、Rpc trait（notify/call0/call）、RpcHandlers trait（handle_call/handle_notification/handle_frame），以及 processor 事件循环与阻塞/任务池选项。",
+          "learning_goals": [
+            "掌握 RpcClient::new/new0 与 Rpc trait 的调用方法",
+            "理解 handle_call/handle_notification/handle_frame 的分发",
+            "理解阻塞模式与 task_pool 选项的取舍与陷阱"
+          ],
+          "source_files": [
+            "src/rpc/async_client.rs",
+            "examples/client_rpc.rs",
+            "examples/client_rpc_handler.rs"
+          ],
+          "minimal_modules": [
+            "rpc::RpcClient 与 Rpc trait",
+            "rpc::RpcHandlers trait",
+            "rpc::Options（blocking/task_pool）",
+            "rpc processor() 事件循环"
+          ],
+          "practice_task": "参照 client_rpc_handler.rs，实现一个 RPC 服务端：提供 add(value) 累加与 get 返回当前值的两个方法，用 client_rpc.rs 风格的客户端调用验证结果（注意 counter 需用原子类型）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "自定义 Broker RPC 与核心 RPC 接口",
+          "order": 3,
+          "filename": "u5-l3-custom-broker-rpc.md",
+          "level": "intermediate",
+          "topic": "讲解如何在嵌入式 Broker 上挂载自定义 RPC（set_core_rpc_client），以及代理内置的核心 RPC 接口（test/info/stats/client.list）与 BrokerRpcHandlers。",
+          "learning_goals": [
+            "掌握 set_core_rpc_client/init_default_core_rpc 的用法",
+            "理解代理内置 RPC 方法（info/stats/client.list）",
+            "理解 BrokerEvent announce 机制与 .broker 主题"
+          ],
+          "source_files": [
+            "src/broker.rs",
+            "examples/broker_custom_rpc.rs"
+          ],
+          "minimal_modules": [
+            "Broker::init_default_core_rpc/set_core_rpc_client",
+            "BrokerRpcHandlers（test/info/stats/client.list）",
+            "broker::BrokerEvent",
+            "broker_custom_rpc.rs 示例"
+          ],
+          "practice_task": "参照 broker_custom_rpc.rs，创建一个嵌入 Broker，挂载自定义 RPC 处理器响应 ping 方法（返回 msgpack 解出的 message 字段），并用 busrt CLI 或客户端调用验证。",
+          "depends_on": [
+            "u5-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Broker 内部：连接生命周期、多传输与 AAA",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "连接生命周期：handle_peer/reader/writer/pinger",
+          "order": 1,
+          "filename": "u6-l1-connection-lifecycle.md",
+          "level": "advanced",
+          "topic": "深入 broker.rs 的连接处理主链路：handle_peer 编排握手与三个并发任务（reader/writer/pinger），handle_reader 解析入站帧并按 FrameOp 分发，handle_writer 序列化出站帧。",
+          "learning_goals": [
+            "理解一个客户端连接的完整生命周期",
+            "掌握 handle_reader 对各 FrameOp 的处理与 send_ack",
+            "理解 handle_writer 如何把 FrameData 序列化为线上字节"
+          ],
+          "source_files": [
+            "src/broker.rs"
+          ],
+          "minimal_modules": [
+            "Broker::handle_peer",
+            "Broker::handle_reader",
+            "Broker::handle_writer",
+            "Broker::handle_pinger"
+          ],
+          "practice_task": "追踪一条客户端 publish 帧从 handle_reader 解析、经 publish! 宏分发到订阅者、再由订阅者的 handle_writer 序列化输出的完整路径，画出数据流图。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "多传输层：Unix、TCP 与 WebSocket 服务端",
+          "order": 2,
+          "filename": "u6-l2-multi-transport.md",
+          "level": "advanced",
+          "topic": "讲解 broker.rs 如何用统一的 spawn_server!/handle_connection 抽象支持 Unix socket、TCP 与 WebSocket（含 TLS）三种服务端，以及 FIFO 通道的特殊处理。",
+          "learning_goals": [
+            "理解 spawn_server! 宏对不同监听器的抽象",
+            "掌握 spawn_unix_server/spawn_tcp_server/spawn_websocket_server 的差异",
+            "理解 WebSocket/TLS 接入与 handle_connection 的桥接"
+          ],
+          "source_files": [
+            "src/broker.rs",
+            "src/ipc.rs"
+          ],
+          "minimal_modules": [
+            "spawn_server! 宏",
+            "Broker::spawn_unix_server/spawn_tcp_server",
+            "Broker::spawn_websocket_server（含 TLS）",
+            "handle_connection/prepare_*_stream"
+          ],
+          "practice_task": "写一个嵌入 Broker 同时监听 unix socket 与 tcp 端口，分别用一个 unix 客户端和一个 tcp 客户端连接并互发消息，验证两种传输可共存。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "AAA 访问控制：ClientAaa 与权限掩码",
+          "order": 3,
+          "filename": "u6-l3-aaa-access-control.md",
+          "level": "advanced",
+          "topic": "讲解 broker.rs 的 AAA 体系：ClientAaa 按客户端名配置主机白名单与 p2p/publish/subscribe/broadcast 权限掩码，AaaMap 在连接与每条帧上进行鉴权，并以 broker_aaa 示例为蓝本。",
+          "learning_goals": [
+            "理解 ClientAaa 的四类权限与 hosts_allow",
+            "掌握主题/对端掩码语法（+/# 与 ?/*）",
+            "理解 AAA 在 handle_peer 与 handle_reader 中的鉴权点"
+          ],
+          "source_files": [
+            "src/broker.rs",
+            "examples/broker_aaa.rs"
+          ],
+          "minimal_modules": [
+            "broker::ClientAaa 与 builder 方法",
+            "broker::AaaMap/ServerConfig::aaa_map",
+            "ClientAaa::connect_allowed",
+            "handle_reader 中 AAA 鉴权分支"
+          ],
+          "practice_task": "参照 broker_aaa.rs，配置一个 AAA 映射：客户端 A 可任意操作，客户端 B 仅允许向 news/# 发布且禁止订阅，用两个客户端验证 B 的越权操作被拒绝。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高级扩展：实时性、游标、工具与同步客户端",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "实时特性：rt feature、QoS Realtime 与异步分配器",
+          "order": 1,
+          "filename": "u7-l1-realtime.md",
+          "level": "advanced",
+          "topic": "讲解 BUS/RT 的实时安全设计：rt feature 切换无自旋锁的 parking_lot_rt、QoS::Realtime 触发即时刷新、AsyncAllocator 把大块内存分配移出实时运行时。",
+          "learning_goals": [
+            "理解 rt feature 与 RawMutex/Condvar 切换的意义",
+            "掌握 QoS Realtime 对刷新与队列行为的影响",
+            "理解 direct_alloc_limit + AsyncAllocator 的混合实时/高负载策略"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/broker.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs QoS::is_realtime/needs_ack",
+            "lib.rs rt feature 下 RawMutex/Condvar 别名",
+            "broker::Options::with_async_allocator/AsyncAllocator trait",
+            "handle_reader 中 direct_alloc_limit 分支"
+          ],
+          "practice_task": "实现一个简单的 AsyncAllocator（在独立线程分配 Vec），用 Options::with_async_allocator 配置 direct_alloc_limit，说明大消息如何避免阻塞实时客户端的小消息处理。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "游标 cursors：流式数据传输",
+          "order": 2,
+          "filename": "u7-l2-cursors.md",
+          "level": "advanced",
+          "topic": "讲解 cursors.rs 的 Cursor trait、Meta（TTL/完成状态）与 Map（多游标管理+清理任务），并以 server_cursor/client_cursor 示例展示如何把数据库流分块传给客户端。",
+          "learning_goals": [
+            "掌握 Cursor trait 的 next/next_bulk/meta 实现",
+            "理解 cursors::Map 的添加、清理与 next/next_bulk 调度",
+            "能用 RPC + 游标实现服务端到客户端的流式拉取"
+          ],
+          "source_files": [
+            "src/cursors.rs",
+            "examples/server_cursor.rs",
+            "examples/client_cursor.rs"
+          ],
+          "minimal_modules": [
+            "cursors::Cursor trait",
+            "cursors::Meta（finished/expires/touch）",
+            "cursors::Map（add/next/next_bulk/spawn_cleaner）",
+            "cursors::Payload"
+          ],
+          "practice_task": "参照 server_cursor/client_cursor，实现一个非数据库版本：服务端游标从一个内存 Vec 逐条/分块返回数据，客户端分别用 N（逐条）和 NB（分块）两种方式拉取并打印。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "TopicBroker：阻塞式主题分发工具",
+          "order": 3,
+          "filename": "u7-l3-topic-broker.md",
+          "level": "advanced",
+          "topic": "讲解 tools/pubsub.rs 的 TopicBroker 辅助类：按完整主题或前缀把发布帧分发到不同的处理通道，实现阻塞式、按主题隔离的处理。",
+          "learning_goals": [
+            "掌握 register_topic/register_prefix 注册处理通道",
+            "理解 process() 如何按主题/前缀匹配并分发 Publication",
+            "理解 subtopic 与 handler_id 在多处理器场景的用途"
+          ],
+          "source_files": [
+            "src/tools/pubsub.rs",
+            "src/rpc/async_client.rs"
+          ],
+          "minimal_modules": [
+            "pubsub::TopicBroker",
+            "pubsub::Publication",
+            "TopicBroker::register_topic/register_prefix",
+            "TopicBroker::process"
+          ],
+          "practice_task": "在一个 RPC 处理器内使用 TopicBroker：为 a/* 和 b/特殊 两个前缀注册两个处理通道，调用 process 把收到的帧分流到对应通道并分别打印 subtopic。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "同步客户端：sync 模块与阻塞式 RPC",
+          "order": 4,
+          "filename": "u7-l4-sync-client.md",
+          "level": "advanced",
+          "topic": "讲解 sync/ 模块：SyncClient trait、sync::ipc::Client（基于 rtsc 通道与标准线程）、SyncRpc/SyncRpcHandlers 与 Processor，对比异步客户端理解同步 API 的取舍。",
+          "learning_goals": [
+            "掌握 SyncClient 与 SyncRpc 的接口与异步版本的对应",
+            "理解 sync::ipc::Client 基于 rtsc 通道与线程的实现",
+            "理解 Processor::run 阻塞式事件循环与 thread::spawn 处理"
+          ],
+          "source_files": [
+            "src/sync/mod.rs",
+            "src/sync/client.rs",
+            "src/sync/ipc.rs",
+            "src/sync/rpc.rs"
+          ],
+          "minimal_modules": [
+            "sync::client::SyncClient trait",
+            "sync::ipc::Client/Config",
+            "sync::rpc::SyncRpc/SyncRpcHandlers",
+            "sync::rpc::Processor::run"
+          ],
+          "practice_task": "用同步客户端连接代理，实现一个同步 RPC 服务端：在 Processor 循环中处理 test 方法并回复，对比它与异步 client_rpc_handler 在线程模型上的差异。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "运维、工具与生态集成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "busrtd：独立服务端二进制",
+          "order": 1,
+          "filename": "u8-l1-busrtd-server.md",
+          "level": "advanced",
+          "topic": "精读 server.rs：clap 命令行参数、日志（控制台/syslog）、daemonize、信号处理与优雅终止、mimalloc 分配器，以及如何按路径类型自动选择 unix/tcp/fifo 监听。",
+          "learning_goals": [
+            "掌握 busrtd 全部命令行参数与运行模式",
+            "理解信号处理与 announce shutdown 的优雅终止流程",
+            "理解多 -B 绑定按路径类型分发到 unix/tcp/fifo"
+          ],
+          "source_files": [
+            "src/server.rs",
+            "src/broker.rs"
+          ],
+          "minimal_modules": [
+            "server.rs Opts（clap）",
+            "server.rs main/terminate/handle_term_signal",
+            "server.rs 日志与 daemonize",
+            "broker spawn_*_server 调用"
+          ],
+          "practice_task": "用 busrtd 同时绑定一个 unix socket、一个 tcp 端口和一个 fifo，启动后向 fifo 写入命令触发一条消息，再用 busrt CLI 观察客户端列表与统计。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "busrt CLI：调试与基准工具",
+          "order": 2,
+          "filename": "u8-l2-cli-tool.md",
+          "level": "advanced",
+          "topic": "精读 cli.rs：子命令体系（broker info/stats/test/client.list、listen、send、publish、rpc listen/notify/call0/call、benchmark），以及 msgpack/json 载荷解码与基准测试能力。",
+          "learning_goals": [
+            "掌握 busrt CLI 各子命令的用途与参数",
+            "理解 RPC call/notify 与载荷编解码",
+            "理解内置基准测试（bma-benchmark）的使用"
+          ],
+          "source_files": [
+            "src/cli.rs"
+          ],
+          "minimal_modules": [
+            "cli.rs Command/子命令枚举",
+            "cli.rs Opts（name/token/timeout 等）",
+            "cli.rs print_payload/decode_msgpack/decode_json",
+            "cli.rs BenchmarkCommand"
+          ],
+          "practice_task": "启动一个代理后，用 busrt CLI 依次完成：listen 订阅 # 、send 发送点对点消息、publish 发布主题、rpc call 调用一个方法，并跑一次 benchmark 记录吞吐。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "FIFO 通道与 announce 事件",
+          "order": 3,
+          "filename": "u8-l3-fifo-and-announce.md",
+          "level": "advanced",
+          "topic": "讲解 broker.rs 的 spawn_fifo（shell 脚本可用的命名管道入口）及其命令语法，以及 BrokerEvent announce（reg/unreg/shutdown）在 .broker/info、.broker/warn 主题上的发布机制。",
+          "learning_goals": [
+            "掌握 fifo 命令语法（消息/广播/=主题/.通知/:RPC 调用）",
+            "理解 spawn_fifo 依赖核心 RPC 客户端的前置条件",
+            "理解 BrokerEvent announce 的发布与 .broker 主题约定"
+          ],
+          "source_files": [
+            "src/broker.rs",
+            "examples/broker_custom_rpc.rs"
+          ],
+          "minimal_modules": [
+            "Broker::spawn_fifo",
+            "Broker::send_fifo_cmd",
+            "broker::BrokerEvent（reg/unreg/shutdown）",
+            "BrokerDb::announce"
+          ],
+          "practice_task": "配置带核心 RPC 的嵌入 Broker 并 spawn_fifo，通过 echo 不同语法的命令到 fifo 触发点对点消息、主题发布与 RPC 调用，观察各命令效果。",
+          "depends_on": [
+            "u5-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "多语言绑定与集成生态",
+          "order": 4,
+          "filename": "u8-l4-bindings.md",
+          "level": "advanced",
+          "topic": "概览 bindings/ 下的 Python（同步/异步）、JavaScript/TypeScript 绑定，理解它们如何通过同一套二进制协议与 Rust broker 互通，以及跨语言集成的要点。",
+          "learning_goals": [
+            "了解官方 Python/JS 绑定的能力与差异",
+            "理解跨语言客户端复用同一二进制协议的原理",
+            "掌握选择同步/异步绑定的依据"
+          ],
+          "source_files": [
+            "bindings/python/busrt/README.md",
+            "bindings/python/busrt/busrt/client.py",
+            "bindings/js/busrt/src/busrt.ts",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "python busrt 同步绑定 client/rpc",
+            "python busrt_async 异步绑定",
+            "js busrt TypeScript 绑定",
+            "README 多语言绑定说明"
+          ],
+          "practice_task": "启动一个 Rust busrtd，分别用 Python 绑定（任选同步或异步）连接并执行一次 publish 与 rpc call，验证跨语言互通，并对照 Rust 客户端说明协议一致性。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
