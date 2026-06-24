@@ -1,0 +1,1018 @@
+{
+  "project": "cpp-ipc",
+  "head": "2e28547cd32b22c2e1f2c85d22d0882810838503",
+  "rationale": "本手册围绕 libipc「公共 API → 消息数据通路 → 无锁循环队列 → 共享内存 → 同步原语 → 内存管理 → 并发内部与扩展」的认知顺序展开。U1 让读者从零跑通 demo 并建立目录全局观；U2 拆解对外 API（def 策略标签、buffer、句柄生命周期、route/channel 并发模型）；U3 进入 ipc.cpp 主链路，讲清消息分片、大消息外部存储与「先自旋后阻塞」的等待模型；U4 下钻到底层无锁循环数组与单播/广播四类生产-消费者算法；U5/U6 分别讲清共享内存与跨进程同步两大基础设施；U7 讲类型擦除+分层缓存的内存分配子系统；U8 汇总内存序与伪共享、健壮锁崩溃恢复、无锁基础结构、进阶 demo 与测试扩展点。单元之间遵循「先用法后原理、先公共接口后内部实现、由浅入深逐层下钻」的原则，depends_on 严格串联前置依赖，确保读者始终具备必要上下文。该库涵盖无锁算法、双平台共享内存、健壮锁与自研分配器，属中大型项目，故规划 8 单元 32 篇讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 libipc 并跑通第一个程序",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位：什么是 cpp-ipc (libipc)",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 cpp-ipc (libipc) 是什么——基于共享内存的高性能跨平台（Linux/Windows/FreeBSD）进程间通信库，它的核心特性、适用场景与技术栈。",
+          "learning_goals": [
+            "了解项目定位与核心卖点：跨平台、无锁/轻量级自旋、无第三方依赖",
+            "理解共享内存 IPC 与循环数组（circular array）的基本概念",
+            "区分 route（单写多读）与 channel（多写多读）并知道 32 接收者限制",
+            "认识默认广播、超时等待的设计哲学"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "项目定位与核心卖点",
+            "route 与 channel 对比",
+            "无锁与循环数组设计",
+            "性能基准与参考资料"
+          ],
+          "practice_task": "阅读 README，用自己的话写出 libipc 相比管道/套接字 IPC 的三个优势，并说明广播模式下最多 32 个 receiver 的限制来源。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、安装与首次运行",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "如何用 CMake 构建 libipc，启用测试与示例、安装库、通过 vcpkg 安装，并运行第一个 demo。",
+          "learning_goals": [
+            "掌握顶层 CMake 选项（LIBIPC_BUILD_TESTS/DEMOS/SHARED_LIBS 等）",
+            "学会编译静态/动态库与各个 demo 子目录",
+            "理解 src/CMakeLists.txt 的源码收集与库链接（pthread/rt）",
+            "运行 send_recv demo 验证通信"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "src/CMakeLists.txt",
+            "demo/send_recv/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "顶层 CMake 选项",
+            "src 构建目标与链接",
+            "demo 构建子目录",
+            "vcpkg 安装方式"
+          ],
+          "practice_task": "在本机用 CMake 构建 libipc 并启用 LIBIPC_BUILD_DEMOS，编译运行 send_recv 的 send 与 recv 两个进程验证跨进程通信。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块地图",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 include/src/test/demo 目录结构，建立对库分层（公共 API、核心实现、平台层、内存层、同步层）的全局认知。",
+          "learning_goals": [
+            "记住公共 API 头文件位置（include/libipc/*.h）",
+            "理解 src 内部分层：core、circ、platform、mem、sync、utility",
+            "区分平台相关代码（platform/{linux,posix,win}）与平台无关代码",
+            "定位测试（test/*）与示例（demo/*）的用法"
+          ],
+          "source_files": [
+            "README.md",
+            "src/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "include 公共 API",
+            "src 核心与分层",
+            "platform 平台抽象",
+            "test/demo 用法"
+          ],
+          "practice_task": "画一张「目录→模块」的分层结构图，标注每个目录的职责与 1-2 个关键文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "你的第一个 IPC 程序：route/channel 收发",
+          "order": 4,
+          "filename": "u1-l4-first-ipc-program.md",
+          "level": "beginner",
+          "topic": "用 ipc::channel / ipc::route 写出第一个跨进程收发程序，理解 sender/receiver 模式与 connect/send/recv/disconnect 生命周期。",
+          "learning_goals": [
+            "掌握 route/channel 的最小用法",
+            "理解 sender/receiver 模式位与构造方式",
+            "学会发送 string/buffer 并接收 buff_t、判空与读取 data()/size()",
+            "理解超时参数与 disconnect 的优雅退出"
+          ],
+          "source_files": [
+            "include/libipc/ipc.h",
+            "demo/send_recv/main.cpp",
+            "demo/msg_que/main.cpp"
+          ],
+          "minimal_modules": [
+            "channel 构造与模式位",
+            "send/recv 基本调用",
+            "buff_t 接收与判空",
+            "disconnect 与信号处理"
+          ],
+          "practice_task": "参考 send_recv 写一个程序：进程 A 用 route 广播，进程 B 与进程 C 同时接收并打印，验证广播语义。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共 API：类型、buffer 与 channel",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "核心类型与策略标签（def.h）",
+          "order": 1,
+          "filename": "u2-l1-core-types-and-policy-flags.md",
+          "level": "beginner",
+          "topic": "解读 def.h 中的核心类型与策略标签：byte_t、uint_t、relat、trans、wr<> 模板、超时与尺寸常量、prefix 前缀。",
+          "learning_goals": [
+            "理解 relat/trans 枚举表达的生产者-消费者多重性与传输方式",
+            "掌握 wr<Rp,Rc,Ts> 策略标签与 relat_trait 的编译期判定",
+            "认识 default_timeout、data_length、large_msg_* 等常量",
+            "理解 prefix 前缀命名机制"
+          ],
+          "source_files": [
+            "include/libipc/def.h"
+          ],
+          "minimal_modules": [
+            "基本类型与常量",
+            "relat/trans 关系枚举",
+            "wr<> 与 relat_trait",
+            "prefix 标签"
+          ],
+          "practice_task": "列出 relat 与 trans 的全部组合，并用 chan 别名语法写出对应的 channel 类型定义，标注哪些被库实例化。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "buffer：消息容器 buff_t",
+          "order": 2,
+          "filename": "u2-l2-buffer.md",
+          "level": "beginner",
+          "topic": "解读 buffer 类（buff_t）：它如何承载消息数据、自定义析构器回调、move 语义，以及 to_vector/to_tuple 等转换。",
+          "learning_goals": [
+            "理解 buffer 的 PIMPL 设计与析构器 destructor_t 回调",
+            "掌握 get/data/size/empty 用法",
+            "理解大消息零拷贝回收与析构器的绑定关系",
+            "学会把 buffer 转成 vector/string"
+          ],
+          "source_files": [
+            "include/libipc/buffer.h"
+          ],
+          "minimal_modules": [
+            "buffer 构造与析构器",
+            "数据访问接口",
+            "move/swap 语义",
+            "与 string/vector 转换"
+          ],
+          "practice_task": "用 buffer(void*, size, destructor) 构造一个持有自定义 malloc 内存的 buff_t，验证析构器在 buffer 析构时被调用一次。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "chan_wrapper 与 chan_impl：句柄生命周期",
+          "order": 3,
+          "filename": "u2-l3-channel-handle-lifecycle.md",
+          "level": "beginner",
+          "topic": "解读 chan_impl 与 chan_wrapper 的句柄生命周期：init_first/connect/reconnect/disconnect/destroy/send/recv/try_*。",
+          "learning_goals": [
+            "理解 handle_t 不透明句柄与 PIMPL",
+            "掌握 connect/reconnect 的模式切换",
+            "理解 release/clear/clear_storage 三种资源清理的差异",
+            "认识 valid/handle/mode/clone 等访问器"
+          ],
+          "source_files": [
+            "include/libipc/ipc.h"
+          ],
+          "minimal_modules": [
+            "chan_impl 静态接口",
+            "chan_wrapper RAII 句柄",
+            "connect/reconnect 模式切换",
+            "release/clear/clear_storage 资源管理"
+          ],
+          "practice_task": "写代码演示：同一 channel 先以 receiver 连接，再用 reconnect 切换为 sender，观察 recv_count 与 valid 的变化。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "route vs channel：并发模型与 32 接收者限制",
+          "order": 4,
+          "filename": "u2-l4-route-vs-channel.md",
+          "level": "beginner",
+          "topic": "对比 route（单写多读广播）与 channel（多写多读广播），讲解为什么 broadcast 模式最多 32 个接收者。",
+          "learning_goals": [
+            "理解 single/multi 生产者与消费者的差异",
+            "掌握广播语义与 cc_t 连接位图的关系",
+            "理解 32 接收者限制的位运算来源（cc_t = uint32）",
+            "认识 broadcast vs unicast 的区别"
+          ],
+          "source_files": [
+            "include/libipc/ipc.h",
+            "include/libipc/def.h",
+            "src/libipc/circ/elem_def.h"
+          ],
+          "minimal_modules": [
+            "route 与 channel 别名定义",
+            "生产者/消费者多重性",
+            "广播与单播",
+            "32 连接位图限制"
+          ],
+          "practice_task": "设计一个实验：尝试启动 33 个 receiver 验证第 33 个连接失败，并结合 conn_head::connect 的位运算解释原因。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心数据通路：从 send 到 recv",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "ipc.cpp 全景：send/recv 端到端链路",
+          "order": 1,
+          "filename": "u3-l1-send-recv-data-path.md",
+          "level": "intermediate",
+          "topic": "纵览 ipc.cpp 的整体结构：conn_info_head、queue_generator、detail_impl<Policy>，跟踪一条消息从 send 到 recv 的完整调用链。",
+          "learning_goals": [
+            "建立对 ipc.cpp 文件结构的整体认知",
+            "理解 conn_info_head 持有的三类 waiter 与共享内存句柄",
+            "跟踪 send→push→rd_waiter_.broadcast 与 recv→pop 的主链路",
+            "理解 detail_impl 如何桥接 chan_impl 与 queue"
+          ],
+          "source_files": [
+            "src/libipc/ipc.cpp",
+            "src/libipc/policy.h"
+          ],
+          "minimal_modules": [
+            "ipc.cpp 文件结构",
+            "conn_info_head 与 cc_id",
+            "detail_impl 桥接层",
+            "send/recv 主链路"
+          ],
+          "practice_task": "画出 send(data) 从 chan_wrapper::send 到 queue push、再到 rd_waiter_.broadcast 的函数调用时序图。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "消息格式与分片重组",
+          "order": 2,
+          "filename": "u3-l2-message-format-fragmentation.md",
+          "level": "intermediate",
+          "topic": "讲解 msg_t 消息格式、按 data_length 分片发送、大消息回退标志，以及 recv 中基于 msg.id_ 的分片重组与 recv_cache。",
+          "learning_goals": [
+            "理解 msg_t 头部字段（cc_id_/id_/remain_/storage_）",
+            "掌握按 data_length 分片发送的逻辑",
+            "理解 recv 用 thread_local recv_cache 重组分片",
+            "认识 storage_ 标志区分大消息外存"
+          ],
+          "source_files": [
+            "src/libipc/ipc.cpp"
+          ],
+          "minimal_modules": [
+            "msg_t 消息头格式",
+            "按 data_length 分片发送",
+            "recv_cache 分片重组",
+            "storage_ 大消息标志"
+          ],
+          "practice_task": "阅读 send 与 recv，说明一条 200 字节消息（data_length=64）会被切成几片、各片 remain_ 为多少，以及 recv 如何按 id 重组。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "大消息的外部存储（chunk + id_pool + 引用计数）",
+          "order": 3,
+          "filename": "u3-l3-large-message-storage.md",
+          "level": "intermediate",
+          "topic": "讲解超大消息（>large_msg_limit）的外部存储机制：chunk_t/chunk_info_t/id_pool 池、acquire/find/release/recycle_storage 及跨接收者引用计数回收。",
+          "learning_goals": [
+            "理解大消息为何走独立 chunk 存储而非分片",
+            "掌握 id_pool 空闲链表的分配/回收",
+            "理解 calc_chunk_size 与 1KB 对齐",
+            "理解 sub_rc 引用计数与最后一个接收者回收"
+          ],
+          "source_files": [
+            "src/libipc/ipc.cpp",
+            "src/libipc/utility/id_pool.h"
+          ],
+          "minimal_modules": [
+            "chunk/chunk_info 与 chunk_size 对齐",
+            "id_pool 空闲链表",
+            "acquire/find/release 存储",
+            "recycle_storage 引用计数回收"
+          ],
+          "practice_task": "跟踪一条 100KB 消息：说明它的 chunk_size、如何获得 storage id、写入 data，以及各接收者读取后如何通过 recycle_storage 释放。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "等待模型：三类 waiter 与渐进退避",
+          "order": 4,
+          "filename": "u3-l4-wait-model.md",
+          "level": "intermediate",
+          "topic": "讲解 cc_waiter_/wt_waiter_/rd_waiter_ 三类等待器的作用、wait_for 模板，以及「先自旋若干次再用信号量阻塞」的退避设计。",
+          "learning_goals": [
+            "区分三类 waiter（连接确认 / 写满等待 / 读空等待）",
+            "理解 wait_for 如何结合 sleep 与 wait_if",
+            "掌握 yield/sleep 的渐进退避策略",
+            "认识广播唤醒与超时返回"
+          ],
+          "source_files": [
+            "src/libipc/ipc.cpp",
+            "include/libipc/rw_lock.h",
+            "src/libipc/waiter.h"
+          ],
+          "minimal_modules": [
+            "三类 waiter 职责",
+            "wait_for 模板",
+            "sleep/yield 渐进退避",
+            "broadcast 唤醒"
+          ],
+          "practice_task": "解释 send 时 wt_waiter_（队列满）和 recv 时 rd_waiter_（队列空）的等待与唤醒路径，说明前若干次为何忙等而非立即阻塞。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "无锁循环队列与生产-消费者算法",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "queue 抽象：queue_conn / queue_base / queue<T,Policy>",
+          "order": 1,
+          "filename": "u4-l1-queue-abstraction.md",
+          "level": "intermediate",
+          "topic": "解读 queue.h：queue_conn、queue_base、queue<T,Policy> 如何在共享内存上封装元素数组的连接与 push/pop。",
+          "learning_goals": [
+            "理解 queue_conn 的连接位与共享内存句柄",
+            "掌握 queue_base 的 sender/receiver 管理",
+            "理解 push/force_push/pop 委托给 elems 的回调机制",
+            "认识 ready_sending/shut_sending 与 conn_count"
+          ],
+          "source_files": [
+            "src/libipc/queue.h",
+            "src/libipc/policy.h"
+          ],
+          "minimal_modules": [
+            "queue_conn 连接管理",
+            "queue_base 发送/接收标志",
+            "push/force_push/pop 委托",
+            "queue 模板封装"
+          ],
+          "practice_task": "阅读 queue_base::push，说明它如何把消息构造回调转发给 elems->push，以及 prep 回调的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "elem_array 与 conn_head 连接位图",
+          "order": 2,
+          "filename": "u4-l2-elem-array-conn-head.md",
+          "level": "intermediate",
+          "topic": "解读 elem_array（循环数组 + 头部 + 块）与 conn_head 连接位图，理解广播模式下 connect/disconnect 的位运算。",
+          "learning_goals": [
+            "理解 elem_array 的 head_size/elem_max/block_size 内存布局",
+            "掌握 conn_head broadcast 的位运算 connect（找首个 0 位）",
+            "理解 conn_count 的位数统计",
+            "认识 sender_checker/receiver_checker 的特化"
+          ],
+          "source_files": [
+            "src/libipc/circ/elem_array.h",
+            "src/libipc/circ/elem_def.h"
+          ],
+          "minimal_modules": [
+            "elem_array 内存布局",
+            "conn_head_base DCLP 初始化",
+            "broadcast 位运算连接",
+            "sender/receiver checker"
+          ],
+          "practice_task": "手动演算：当前 cc_=0b1010 时 connect() 返回什么连接 id、cc_ 变成什么；再 disconnect(该 id) 后 cc_ 恢复成什么。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "prod_cons 单播变体（最简环形队列到多生产者提交）",
+          "order": 3,
+          "filename": "u4-l3-prod-cons-unicast.md",
+          "level": "intermediate",
+          "topic": "解读 prod_cons_impl 的单播变体：single-single（最简环形队列）、single-multi、multi-multi（带 commit flag）。",
+          "learning_goals": [
+            "理解最简环形队列的 rd_/wt_ 满空判定",
+            "掌握多消费者用 CAS 抢占 rd_ 的 pop",
+            "理解多生产者的 ct_ 提交索引与 f_ct_ 提交标志协议",
+            "认识 force_push 在单播中的语义"
+          ],
+          "source_files": [
+            "src/libipc/prod_cons.h"
+          ],
+          "minimal_modules": [
+            "single-single 环形队列",
+            "single-multi CAS pop",
+            "multi-multi commit flag",
+            "force_push 语义"
+          ],
+          "practice_task": "对比 single-single 与 multi-multi 的 push 实现，说明后者为何需要 ct_ 提交索引与 f_ct_ 标志。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "prod_cons 广播变体（rc_ 读计数与 epoch 协议）",
+          "order": 4,
+          "filename": "u4-l4-prod-cons-broadcast.md",
+          "level": "intermediate",
+          "topic": "解读 prod_cons_impl 的广播变体：single-multi-broadcast 与 multi-multi-broadcast，理解 rc_ 读计数与 epoch 协议如何实现一写多读。",
+          "learning_goals": [
+            "理解广播元素 rc_ 读计数位域（连接掩码 + epoch）",
+            "掌握多读者各自清除自己位以标记读完",
+            "理解 epoch 防止旧读者误判",
+            "认识 force_push 踢掉失效读者"
+          ],
+          "source_files": [
+            "src/libipc/prod_cons.h"
+          ],
+          "minimal_modules": [
+            "rc_ 位域与 epoch",
+            "single-multi-broadcast push/pop",
+            "multi-multi-broadcast ct_/epoch/f_ct_",
+            "force_push 踢失效读者"
+          ],
+          "practice_task": "阅读多对多广播的 push，说明 rc_ 的高位 epoch 与低位读计数如何配合，以及 pop 中「最后一个读者」如何判定。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "共享内存基础",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "shm::handle 公共 API 与跨进程引用计数",
+          "order": 1,
+          "filename": "u5-l1-shm-handle-api.md",
+          "level": "intermediate",
+          "topic": "解读 ipc::shm::handle 的公共 API（acquire/get/release/clear/clear_storage）及跨进程引用计数机制。",
+          "learning_goals": [
+            "理解 handle 的 RAII 与 PIMPL",
+            "掌握 acquire 的 create/open 两种模式",
+            "理解引用计数为何嵌入共享内存末尾",
+            "认识 release vs remove/clear 的语义差异"
+          ],
+          "source_files": [
+            "include/libipc/shm.h",
+            "src/libipc/shm.cpp"
+          ],
+          "minimal_modules": [
+            "handle RAII 接口",
+            "acquire 创建/打开模式",
+            "嵌入引用计数",
+            "release/remove/clear 语义"
+          ],
+          "practice_task": "用 shm::handle 在两个进程间共享一块内存，写一个自增计数器验证引用计数与最后释放时的清理行为。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "平台检测与后端分派",
+          "order": 2,
+          "filename": "u5-l2-platform-detection.md",
+          "level": "intermediate",
+          "topic": "解读 detect_plat.h 的平台检测宏与 platform.cpp/platform.c 的后端分派机制。",
+          "learning_goals": [
+            "认识 LIBIPC_OS_*/CC_*/INSTR_* 检测宏",
+            "理解 platform.cpp 按 OS 包含不同 shm 后端",
+            "认识 platform.c 在 Linux 上引入 a0 辅助库",
+            "理解 detail.h 的 C++ 版本兼容宏"
+          ],
+          "source_files": [
+            "include/libipc/imp/detect_plat.h",
+            "src/libipc/platform/platform.cpp",
+            "src/libipc/platform/platform.c",
+            "src/libipc/platform/detail.h"
+          ],
+          "minimal_modules": [
+            "detect_plat 检测宏",
+            "platform.cpp shm 后端分派",
+            "platform.c 与 a0 辅助库",
+            "detail.h 兼容层"
+          ],
+          "practice_task": "在 detect_plat.h 中找到本机平台对应的宏定义，追踪 platform.cpp 如何据此选择 shm_posix 或 shm_win。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "POSIX 共享内存后端",
+          "order": 3,
+          "filename": "u5-l3-posix-shm.md",
+          "level": "intermediate",
+          "topic": "解读 POSIX 后端 shm_posix.cpp：shm_open/mmap/ftruncate 的使用、fd 管理、引用计数与 shm_unlink。",
+          "learning_goals": [
+            "掌握 shm_open 的 O_CREAT/O_EXCL 用法",
+            "理解 mmap MAP_SHARED 映射与 ftruncate 设置大小",
+            "认识 calc_size 对齐与引用计数放置位置",
+            "理解 release 在计数归零时执行 shm_unlink"
+          ],
+          "source_files": [
+            "src/libipc/platform/posix/shm_posix.cpp"
+          ],
+          "minimal_modules": [
+            "id_info_t 与 fd 管理",
+            "shm_open 创建/打开",
+            "mmap 映射与 ftruncate",
+            "release 与 shm_unlink"
+          ],
+          "practice_task": "对照 shm_posix.cpp 说明 acquire 一块新共享内存的完整步骤（open→ftruncate→mmap→计数），并解释计数为何放在末尾。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Windows 共享内存后端与 Global 前缀",
+          "order": 4,
+          "filename": "u5-l4-windows-shm.md",
+          "level": "intermediate",
+          "topic": "解读 Windows 后端 shm_win.cpp：CreateFileMapping/MapViewOfFile，以及 prefix{\"Global\\\\\"} 跨会话命名的作用。",
+          "learning_goals": [
+            "掌握 CreateFileMapping/OpenFileMapping/MapViewOfFile 用法",
+            "理解 ERROR_ALREADY_EXISTS 判定",
+            "认识 VirtualQuery 探测真实映射大小",
+            "理解 remove 在 Windows 为 no-op 及 Global 前缀跨会话"
+          ],
+          "source_files": [
+            "src/libipc/platform/win/shm_win.cpp",
+            "demo/win_service/service/main.cpp"
+          ],
+          "minimal_modules": [
+            "HANDLE 与 id_info_t",
+            "Create/OpenFileMapping",
+            "MapViewOfFile 与大小探测",
+            "Global 前缀跨会话"
+          ],
+          "practice_task": "对比 shm_posix 与 shm_win，说明为何 Windows 的 remove(name) 是空操作、而 POSIX 需要 shm_unlink。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "同步原语",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "spin_lock、rw_lock 与 yield/sleep 退避",
+          "order": 1,
+          "filename": "u6-l1-spin-rw-lock.md",
+          "level": "intermediate",
+          "topic": "解读 rw_lock.h：spin_lock、rw_lock（读者计数 + 写标志位）以及 yield/sleep 的渐进退避（空转→pause→yield→sleep）。",
+          "learning_goals": [
+            "理解 spin_lock 的 exchange 自旋",
+            "掌握 rw_lock 用一个原子量编码读者数与写标志",
+            "理解写者优先与等待读者完成",
+            "掌握 yield/sleep 的分级退避策略"
+          ],
+          "source_files": [
+            "include/libipc/rw_lock.h"
+          ],
+          "minimal_modules": [
+            "IPC_LOCK_PAUSE_ 指令",
+            "yield 分级退避",
+            "sleep 忙等阈值",
+            "spin_lock 与 rw_lock 实现"
+          ],
+          "practice_task": "分析 yield(k) 的四级退避阈值（4/16/32），说明为何不在第一次冲突就立即 sleep。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "跨进程健壮互斥量",
+          "order": 2,
+          "filename": "u6-l2-robust-mutex.md",
+          "level": "intermediate",
+          "topic": "解读 mutex 的跨进程健壮锁：Linux/POSIX 的 robust mutex（EOWNERDEAD）与 Windows 的 abandoned mutex。",
+          "learning_goals": [
+            "理解命名互斥量放在共享内存中跨进程共享",
+            "掌握 robust mutex 检测持有者死亡（EOWNERDEAD/WAIT_ABANDONED）",
+            "理解 a0_mtx / pthread robust 属性",
+            "认识进程本地句柄缓存与引用计数"
+          ],
+          "source_files": [
+            "include/libipc/mutex.h",
+            "src/libipc/platform/linux/mutex.h",
+            "src/libipc/platform/posix/mutex.h",
+            "src/libipc/platform/win/mutex.h"
+          ],
+          "minimal_modules": [
+            "命名互斥量与共享内存",
+            "robust/abandoned 死亡检测",
+            "a0/pthread 实现",
+            "进程本地缓存"
+          ],
+          "practice_task": "对照 Linux 与 Windows 实现，说明两者检测「持有者进程崩溃」的机制分别是什么、如何恢复一致性。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "condition 与 semaphore",
+          "order": 3,
+          "filename": "u6-l3-condition-semaphore.md",
+          "level": "intermediate",
+          "topic": "解读 condition 与 semaphore 两个同步原语及其跨平台后端（a0/pthread/Win32），重点看 Windows condition 的信号量+计数实现。",
+          "learning_goals": [
+            "理解 condition 需配合 mutex 的 wait/notify/broadcast",
+            "掌握 Windows condition 的 SignalObjectAndWait+计数器算法",
+            "认识 POSIX sem_t 命名信号量",
+            "理解超时等待"
+          ],
+          "source_files": [
+            "include/libipc/condition.h",
+            "include/libipc/semaphore.h",
+            "src/libipc/platform/win/condition.h",
+            "src/libipc/platform/posix/semaphore_impl.h"
+          ],
+          "minimal_modules": [
+            "condition 接口与配对 mutex",
+            "Windows condition 计数器算法",
+            "semaphore 命名与计数",
+            "超时等待"
+          ],
+          "practice_task": "阅读 Windows condition::broadcast，说明它如何用计数器决定 post 多少次信号量以唤醒全部等待者。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "detail::waiter：channel 的等待/通知核心",
+          "order": 4,
+          "filename": "u6-l4-waiter.md",
+          "level": "intermediate",
+          "topic": "解读 detail::waiter（condition+mutex+quit 原子标志），它是 channel 通知的核心，并讲解 waiter::init 的静态初始化。",
+          "learning_goals": [
+            "理解 waiter 封装 condition+mutex+quit_ 的设计",
+            "掌握 wait_if 的谓词循环与超时",
+            "理解 broadcast/quit_waiting 的关闭语义",
+            "认识命名后缀 _WAITER_COND_/_WAITER_LOCK_"
+          ],
+          "source_files": [
+            "src/libipc/waiter.h",
+            "src/libipc/sync/waiter.cpp"
+          ],
+          "minimal_modules": [
+            "waiter 三成员结构",
+            "wait_if 谓词循环",
+            "broadcast/notify",
+            "quit_waiting/clear_storage 与 init 静态初始化"
+          ],
+          "practice_task": "结合 u3-l4，说明一个 channel 在共享内存中创建了多少个 waiter、各自的名字前缀，以及 quit_waiting 如何让对端退出阻塞。",
+          "depends_on": [
+            "u6-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "内存管理子系统",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "分配器架构：类型擦除与对齐分配",
+          "order": 1,
+          "filename": "u7-l1-allocator-architecture.md",
+          "level": "advanced",
+          "topic": "纵览 mem/ 分配器架构：new_delete_resource（平台对齐分配）、bytes_allocator（类型擦除的多态分配器）与 memory_resource 抽象。",
+          "learning_goals": [
+            "理解 new_delete_resource 的跨平台对齐分配（aligned_alloc/_aligned_malloc/posix_memalign）",
+            "掌握 bytes_allocator 用 holder_mr 做类型擦除与小缓冲优化",
+            "认识 memory_resource 的 allocate/deallocate 接口约定",
+            "对比与 std::pmr::memory_resource 的异同"
+          ],
+          "source_files": [
+            "include/libipc/mem/memory_resource.h",
+            "include/libipc/mem/bytes_allocator.h",
+            "src/libipc/mem/new_delete_resource.cpp"
+          ],
+          "minimal_modules": [
+            "new_delete_resource 对齐分配",
+            "bytes_allocator 类型擦除与 SBO",
+            "memory_resource 接口",
+            "平台分支"
+          ],
+          "practice_task": "说明 bytes_allocator 如何在不继承的情况下持有任意 memory_resource，并指出它与 std::pmr::memory_resource 的关键差异。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "monotonic_buffer_resource 与中央 1MB 缓存",
+          "order": 2,
+          "filename": "u7-l2-monotonic-central-cache.md",
+          "level": "advanced",
+          "topic": "解读 monotonic_buffer_resource（bump 指针分配、指数增长）与 central_cache_allocator（线程安全的 1MB 单调缓冲）。",
+          "learning_goals": [
+            "理解单调缓冲的 bump 分配与只整体释放",
+            "掌握指数增长（×3/2）与 upstream 委托",
+            "认识 1MB 静态缓冲与 thread_safe_resource 的互斥保护",
+            "理解 central cache 元数据的用途"
+          ],
+          "source_files": [
+            "include/libipc/mem/memory_resource.h",
+            "src/libipc/mem/monotonic_buffer_resource.cpp",
+            "src/libipc/mem/central_cache_allocator.cpp"
+          ],
+          "minimal_modules": [
+            "monotonic bump 分配",
+            "指数增长与 upstream",
+            "1MB 静态缓冲",
+            "thread_safe 互斥保护"
+          ],
+          "practice_task": "跟踪 central_cache_allocator() 的构造，说明它如何用 1MB 静态数组 + monotonic_buffer_resource 服务 central cache 元数据。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "block_pool 分层空闲链表 + $new/$delete + 容器分配器",
+          "order": 3,
+          "filename": "u7-l3-block-pool-new-containers.md",
+          "level": "advanced",
+          "topic": "解读 block_pool/central_cache_pool 的分层空闲链表、mem::$new/$delete 的类型擦除析构，以及 ipc::map/unordered_map 容器分配器。",
+          "learning_goals": [
+            "理解 thread-local block_pool 固定块空闲链表",
+            "掌握 central_cache_pool 的 chunk 分配与两级缓存",
+            "理解 $new 存储类型擦除析构器、$delete 调用并释放",
+            "认识 container_allocator 与 ipc::map/unordered_map"
+          ],
+          "source_files": [
+            "include/libipc/mem/new.h",
+            "src/libipc/mem/new.cpp",
+            "include/libipc/mem/block_pool.h",
+            "include/libipc/mem/central_cache_pool.h",
+            "src/libipc/mem/resource.h"
+          ],
+          "minimal_modules": [
+            "block_pool 固定块空闲链表",
+            "central_cache_pool chunk 分配",
+            "$new/$delete 析构器存储",
+            "container_allocator 与 ipc 容器"
+          ],
+          "practice_task": "阅读 get_regular_resource 的分级（16B…64KB），画出一次 mem::$new<obj>(4096) 的内存路由路径。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "并发内部、健壮性与扩展实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "内存序、伪共享与缓存行",
+          "order": 1,
+          "filename": "u8-l1-memory-ordering.md",
+          "level": "advanced",
+          "topic": "深入 acquire/release/acq_rel 内存序在 prod_cons 与 conn_head 中的使用，以及 cache_line_size 对齐避免伪共享。",
+          "learning_goals": [
+            "理解原子操作内存序与环形队列可见性的关系",
+            "掌握 alignas(cache_line_size) 防伪共享",
+            "认识 CAS 循环中的 memory_order 选择",
+            "理解 conn_head_base 的 DCLP 双检锁模式"
+          ],
+          "source_files": [
+            "src/libipc/prod_cons.h",
+            "src/libipc/circ/elem_def.h",
+            "src/libipc/utility/utility.h"
+          ],
+          "minimal_modules": [
+            "acquire/release 可见性",
+            "cache_line_size 对齐防伪共享",
+            "CAS 内存序选择",
+            "DCLP 双检锁"
+          ],
+          "practice_task": "在 multi-multi-broadcast 的 push 中找出每一处原子操作的内存序，说明为何 rc_ 用 relaxed 而 f_ct_ 用 release/acquire。",
+          "depends_on": [
+            "u4-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "健壮锁的崩溃恢复",
+          "order": 2,
+          "filename": "u8-l2-robust-locking-recovery.md",
+          "level": "advanced",
+          "topic": "深入健壮锁的崩溃恢复：a0_mtx/pthread robust 属性处理 EOWNERDEAD 并调用 consistent，Windows 处理 WAIT_ABANDONED。",
+          "learning_goals": [
+            "理解跨进程锁为何必须 robust",
+            "掌握 EOWNERDEAD 后 consistent 的恢复步骤",
+            "认识 sync_obj_impl.h 把同步对象放共享内存的模板",
+            "理解首次引用初始化与引用计数"
+          ],
+          "source_files": [
+            "src/libipc/platform/linux/mutex.h",
+            "src/libipc/platform/posix/mutex.h",
+            "src/libipc/platform/linux/sync_obj_impl.h"
+          ],
+          "minimal_modules": [
+            "robust 属性与 EOWNERDEAD",
+            "consistent 恢复一致性",
+            "sync_obj_impl 共享内存模板",
+            "首次引用初始化"
+          ],
+          "practice_task": "追踪一个进程持锁时被 kill 的场景，说明下一个获取锁的进程如何感知并恢复互斥量状态。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "intrusive_stack 与 id_pool 无锁结构",
+          "order": 3,
+          "filename": "u8-l3-intrusive-stack-id-pool.md",
+          "level": "advanced",
+          "topic": "解读 concur::intrusive_stack（无锁 LIFO，CAS 栈）与 id_pool（空闲链表分配器），它们分别是 central cache 与 chunk 存储的基础结构。",
+          "learning_goals": [
+            "理解 intrusive_stack 的 CAS push/pop 无锁栈",
+            "掌握 id_pool 的 next[] 空闲链表 acquire/release",
+            "认识 max_count 与 uint_t<8> 的限制",
+            "理解二者在 central_cache_pool / chunk 存储中的角色"
+          ],
+          "source_files": [
+            "include/libipc/concur/intrusive_stack.h",
+            "src/libipc/utility/id_pool.h"
+          ],
+          "minimal_modules": [
+            "intrusive_stack CAS 栈",
+            "id_pool 空闲链表",
+            "max_count 限制",
+            "在子系统中的角色"
+          ],
+          "practice_task": "手动演算 id_pool 连续 acquire 3 次、release 第 2 个后，cursor_ 与 next[] 的变化。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "进阶 demo：chat 多端聊天与 service/client",
+          "order": 4,
+          "filename": "u8-l4-chat-service-demos.md",
+          "level": "advanced",
+          "topic": "深入 chat（多客户端双向聊天）与 service/client（后台服务请求-响应）两个进阶 demo，理解多 channel、唯一 id、双向通信模式。",
+          "learning_goals": [
+            "理解 chat 用两个 channel 实现双向多端通信",
+            "掌握用共享内存原子计数生成唯一客户端 id",
+            "理解 service/client 用两条命名通道做请求-响应",
+            "认识 Windows service 的 Global 前缀"
+          ],
+          "source_files": [
+            "demo/chat/main.cpp",
+            "demo/linux_service/service/main.cpp",
+            "demo/linux_service/client/main.cpp",
+            "demo/win_service/service/main.cpp"
+          ],
+          "minimal_modules": [
+            "chat 双向多端通信",
+            "共享内存唯一 id",
+            "service/client 请求-响应",
+            "Global 前缀跨会话"
+          ],
+          "practice_task": "参考 chat demo 扩展一个「带用户名」的群聊：客户端用共享内存计数分配名字，发送带名字前缀，接收过滤自己的消息。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "测试体系、扩展点与架构取舍",
+          "order": 5,
+          "filename": "u8-l5-testing-extension-tradeoffs.md",
+          "level": "advanced",
+          "topic": "解读测试体系与扩展点：gtest 测试结构、test_ipc_channel 的用法，以及如何新增 channel 策略/平台，理解架构取舍（32 限制、模板实例化门、无锁 vs 自旋）。",
+          "learning_goals": [
+            "掌握测试目录组织与 test-ipc 构建",
+            "理解 route/channel 的测试模式",
+            "认识 ipc.cpp 末尾的 chan_impl 模板显式实例化门",
+            "理解新增策略/平台的扩展方式与架构取舍"
+          ],
+          "source_files": [
+            "test/CMakeLists.txt",
+            "test/test_ipc_channel.cpp",
+            "src/libipc/ipc.cpp",
+            "include/libipc/def.h"
+          ],
+          "minimal_modules": [
+            "测试目录与构建",
+            "test_ipc_channel 测试模式",
+            "模板实例化门",
+            "扩展与架构取舍"
+          ],
+          "practice_task": "阅读 ipc.cpp 末尾的 template struct chan_impl 显式实例化，说明为何 unicast 的 single-multi/multi-multi 被注释为 TBD，并评估启用它们的工作量。",
+          "depends_on": [
+            "u4-l4",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
