@@ -683,26 +683,29 @@
           "error": null
         },
         "u8-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":250866,\"duration_api_ms\":62406,\"num_turns\":24,\"result\":\"API Error: Request rejected (429) · [130"
+          "cost": 1.5244409999999997,
+          "error": null
         },
         "u8-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2792690000000002,
+          "error": null
         }
       },
       "manifest_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
       "prev_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/3FS/3FS-tutorial",
       "last_head": "22fca04564c7cc230fd8b9523b8b92864e1dad47",
-      "last_run_at": "2026-06-23T23:31:22Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-06-24T12:31:27Z",
+      "last_error": null,
+      "abandoned": []
     },
     "microsoft/AI-For-Beginners": {
       "prompt_hash": "b21aef51792b02df",
@@ -1391,8 +1394,8 @@
     },
     "alttch/busrt": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-06-23T23:31:22Z",
+      "last_error": null,
+      "last_run_at": "2026-06-24T12:31:27Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -1535,13 +1538,285 @@
           "error": null
         },
         "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5501589999999998,
+          "error": null
+        },
+        "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5015229999999997,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.186347,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.026846,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.120441,
+          "error": null
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4962220000000002,
+          "error": null
+        }
+      },
+      "manifest_head": "0e6fac83894a7798a8a042a449298e3fb4b9d635",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/alttch/busrt/busrt-tutorial",
+      "last_head": "0e6fac83894a7798a8a042a449298e3fb4b9d635",
+      "abandoned": []
+    },
+    "farion1231/cc-switch": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": null,
+      "last_run_at": "2026-06-24T12:31:27Z",
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.2888469999999999,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.5589209999999998,
+          "error": null
+        }
+      },
+      "manifest_head": "edeee25faef80530e65529c883c90e186fcc2c6c",
+      "prev_head": "55abd1822c7d9a8b6f42aaf86b7020ab36ce0d9a",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/farion1231/cc-switch/cc-switch-tutorial",
+      "last_head": "edeee25faef80530e65529c883c90e186fcc2c6c",
+      "abandoned": []
+    },
+    "mutouyun/cpp-ipc": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-06-24T12:31:27Z",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6453160000000001,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.76761,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.889181,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6377539999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.914474,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9894470000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8686,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9881869999999998,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.882436,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9867969999999999,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.884732,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.30646,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.209545,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.808784,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1268299999999998,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5222220000000002,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.957526,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.859833,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9989390000000001,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":539850,\"duration_api_ms\":140658,\"num_turns\":14,\"result\":\"API Error: The operation timed out.\","
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9649350000000001,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.261784,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.044681,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0766710000000002,
+          "error": null
+        },
+        "u7-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":380103,\"duration_api_ms\":180543,\"num_turns\":14,\"result\":\"API Error: Request rejected (429) · [13"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":536085,\"duration_api_ms\":338000,\"num_turns\":17,\"result\":\"API Error: Request rejected (429) · [13"
         },
-        "u7-l4": {
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -1565,68 +1840,426 @@
           "status": "pending",
           "action": "new",
           "retries": 0
+        },
+        "u8-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         }
       },
-      "manifest_head": "0e6fac83894a7798a8a042a449298e3fb4b9d635",
+      "manifest_head": "2e28547cd32b22c2e1f2c85d22d0882810838503",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/alttch/busrt/busrt-tutorial",
-      "last_head": "0e6fac83894a7798a8a042a449298e3fb4b9d635"
+      "tutorial_path": "tutorials/mutouyun/cpp-ipc/cpp-ipc-tutorial",
+      "last_head": "2e28547cd32b22c2e1f2c85d22d0882810838503"
     },
-    "farion1231/cc-switch": {
+    "deepseek-ai/DeepGEMM": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-06-23T23:31:22Z",
+      "last_run_at": "2026-06-24T12:31:27Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.802401,
+          "cost": 0.964537,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.7665179999999999,
+          "cost": 0.7522530000000001,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.013565,
+          "cost": 0.831768,
           "error": null
         },
         "u1-l4": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.1657689999999998,
-          "error": null
-        },
-        "u1-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2212480000000001,
+          "cost": 1.1537659999999998,
           "error": null
         },
         "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9223249999999998,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.620185,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.089792,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1285020000000001,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0358530000000001,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.848648,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.005646,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.297643,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.093561,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.064663,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.061827,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.549126,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.160239,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.015908,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8986259999999998,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.226869,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.405069,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2645739999999999,
+          "error": null
+        },
+        "u7-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":409056,\"duration_api_ms\":210887,\"num_turns\":9,\"result\":\"API Error: Request rejected (429) · [130"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":515498,\"duration_api_ms\":328773,\"num_turns\":19,\"result\":\"API Error: Request rejected (429) · [13"
         },
-        "u2-l2": {
+        "u7-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "54e22612409371d6364144b69086735beb54e98b",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/deepseek-ai/DeepGEMM/DeepGEMM-tutorial",
+      "last_head": "54e22612409371d6364144b69086735beb54e98b"
+    },
+    "deepseek-ai/DualPipe": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.721805,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.789116,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.611899,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 1,
+          "cost": 0.844024,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 1,
+          "cost": 0.587469,
+          "error": null
+        },
         "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.979228,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.058734,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.697073,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7519830000000001,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.930153,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.713492,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8944909999999999,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0405540000000002,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.132384,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.871666,
+          "error": null
+        }
+      },
+      "manifest_head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/deepseek-ai/DualPipe/DualPipe-tutorial",
+      "last_head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
+      "last_run_at": "2026-06-24T12:31:27Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "longbridge/gpui-component": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.552759,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9947580000000001,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.02051,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.805489,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.010932,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.805058,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":275941,\"duration_api_ms\":93894,\"num_turns\":26,\"result\":\"API Error: Request rejected (429) · [130"
+        },
+        "u2-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -1661,6 +2294,16 @@
           "action": "new",
           "retries": 0
         },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u5-l1": {
           "status": "pending",
           "action": "new",
@@ -1672,6 +2315,16 @@
           "retries": 0
         },
         "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -1706,17 +2359,17 @@
           "action": "new",
           "retries": 0
         },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
         "u8-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
         "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -1732,11 +2385,6 @@
           "retries": 0
         },
         "u9-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -1757,124 +2405,15 @@
           "retries": 0
         }
       },
-      "manifest_head": "55abd1822c7d9a8b6f42aaf86b7020ab36ce0d9a",
+      "manifest_head": "a0ae3a37b960b732801782dd8c27cb993ff57b59",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/farion1231/cc-switch/cc-switch-tutorial",
-      "last_head": "55abd1822c7d9a8b6f42aaf86b7020ab36ce0d9a"
-    },
-    "mutouyun/cpp-ipc": {
-      "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":446152,\"duration_api_ms\":254863,\"num_turns\":9,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][20260623191718c32a18b5b9ff4509]. This is a server-side issue, usually temporary — try again in a m",
-      "last_run_at": "2026-06-23T10:51:47Z"
-    },
-    "deepseek-ai/DeepGEMM": {
-      "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":314145,\"duration_api_ms\":110358,\"num_turns\":11,\"result\":\"API Error: Unable to connect to API (ECONNRESET)\",\"stop_reason\":\"stop_sequence\",\"session_id\":\"8e253c19-3b56-401a-9ea6-322fd430b5d0\",\"tota",
-      "last_run_at": "2026-06-23T10:51:47Z"
-    },
-    "deepseek-ai/DualPipe": {
-      "prompt_hash": "b21aef51792b02df",
-      "lectures": {
-        "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.721805,
-          "error": null
-        },
-        "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.789116,
-          "error": null
-        },
-        "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.611899,
-          "error": null
-        },
-        "u2-l1": {
-          "status": "failed",
-          "action": "new",
-          "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":192141,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
-        },
-        "u2-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":192740,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
-        },
-        "u2-l3": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196666,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][2026"
-        },
-        "u2-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        }
-      },
-      "manifest_head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
-      "tutorial_path": "tutorials/deepseek-ai/DualPipe/DualPipe-tutorial",
-      "last_head": "030ce4325f4ebeb437da4ebc6d00a70469dd58ae",
-      "last_run_at": "2026-06-23T10:51:47Z",
+      "tutorial_path": "tutorials/longbridge/gpui-component/gpui-component-tutorial",
+      "last_head": "a0ae3a37b960b732801782dd8c27cb993ff57b59",
+      "last_run_at": "2026-06-24T12:31:27Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "longbridge/gpui-component": {},
     "hxac/helloRust": {},
     "unicode-org/icu4x": {},
     "kotauskas/interprocess": {},
