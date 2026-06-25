@@ -35,7 +35,8 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,11 @@ MAX_RETRIES = int(os.environ.get("RC_MAX_RETRIES", "5"))
 # 当场重试也耗光了，才给 retries 加一，而 MAX_RETRIES 限的是窗口数，不是当场重试次数。
 INRUN_RETRIES = max(0, int(os.environ.get("RC_WORKER_INRUN_RETRIES", "1")))
 BACKOFF_SEC = float(os.environ.get("RC_BACKOFF_SEC", "0"))
+# 额度/限速退避：_invoke 里遇到 QuotaExhaustedError 先指数退避重试，耗光才往上抛。
+# 10 次、base 1s、cap 60s，最坏情况 ~1023s（约 17min）。
+QUOTA_RETRY_MAX = int(os.environ.get("RC_QUOTA_RETRIES", "10"))
+QUOTA_RETRY_BASE = 1.0
+QUOTA_RETRY_CAP = 60.0
 MOCK = env_truthy("RC_MOCK")
 MOCK_PLANNER_CALLS = 0   # selftest 用：统计 mock planner 被调次数
 MOCK_WORKER_CALLS = 0    # selftest 用：统计 mock worker 被调次数，用来验超时不当场重试
@@ -380,6 +386,9 @@ def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int,
 
     失败时不直接报错，而是按报错文本分类，抛对应的异常。要是传了 transcript_dir，就为这次
     调用单独建一个临时的 CLAUDE_CONFIG_DIR，等 claude 退出后再把里面的 jsonl 增量拷过去。
+
+    额度/限速类错误（QuotaExhaustedError）会在本函数内做指数退避重试（最多 QUOTA_RETRY_MAX
+    次，base 1s，cap 60s），全部耗尽才往上抛；其他错误立刻抛，不重试。
     """
     # Windows 上有个坑：npm 全局装的 claude 其实是个 .cmd 垫片，CreateProcess 按裸名字
     # "claude" 去找是找不到的。所以这里显式换成 claude.cmd，并且保持 shell=False——这样
@@ -387,44 +396,58 @@ def _invoke(cmd: list[str], repo_dir: Path, prompt_text: str, timeout: int,
     # 才不会被 cmd.exe 拆坏。
     if sys.platform == "win32" and cmd and cmd[0] == "claude":
         cmd = ["claude.cmd", *cmd[1:]]
-    env = None
-    tmpdir = None
-    if transcript_dir is not None:
-        tmpdir = Path(tempfile.mkdtemp(prefix="claude-config-"))
-        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(tmpdir)}
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(repo_dir), input=prompt_text,
-            capture_output=True, text=True, encoding="utf-8",
-            timeout=timeout, env=env,
-        )
-    except FileNotFoundError as e:
-        raise ClaudeRunnerError(
-            "`claude` CLI 未在 PATH 中找到；确认已 npm install -g @anthropic-ai/claude-code"
-        ) from e
-    except subprocess.TimeoutExpired as e:
-        raise ClaudeTimeoutError(f"claude 超时（{timeout}s）") from e
-    finally:
-        if tmpdir is not None:
-            _harvest_transcripts(tmpdir, transcript_dir)
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
-    if proc.returncode != 0:
-        text = (proc.stderr or "") + "\n" + (proc.stdout or "")
-        tail = text[-2000:]
-        err_type = _classify_error(text)
-        if err_type is QuotaExhaustedError:
-            raise QuotaExhaustedError(f"API 额度/限流耗尽：\n{tail}")
-        if err_type is ClaudeRunnerError:
-            raise ClaudeRunnerError(f"claude 非零退出（分类匹配）：\n{tail}")
-        raise ClaudeRunnerError(f"claude 退出码 {proc.returncode}：\n{tail}")
+    last_quota_err: QuotaExhaustedError | None = None
+    for retry in range(QUOTA_RETRY_MAX):
+        env = None
+        tmpdir = None
+        if transcript_dir is not None:
+            tmpdir = Path(tempfile.mkdtemp(prefix="claude-config-"))
+            env = {**os.environ, "CLAUDE_CONFIG_DIR": str(tmpdir)}
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(repo_dir), input=prompt_text,
+                capture_output=True, text=True, encoding="utf-8",
+                timeout=timeout, env=env,
+            )
+        except FileNotFoundError as e:
+            raise ClaudeRunnerError(
+                "`claude` CLI 未在 PATH 中找到；确认已 npm install -g @anthropic-ai/claude-code"
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise ClaudeTimeoutError(f"claude 超时（{timeout}s）") from e
+        finally:
+            if tmpdir is not None:
+                _harvest_transcripts(tmpdir, transcript_dir)
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
-    try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
-        raise ClaudeRunnerError(
-            f"claude 输出不是 JSON：{e}\n--- stdout 末尾 ---\n{proc.stdout[-2000:]}"
-        ) from e
+        if proc.returncode != 0:
+            text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+            tail = text[-2000:]
+            err_type = _classify_error(text)
+            if err_type is QuotaExhaustedError:
+                last_quota_err = QuotaExhaustedError(f"API 额度/限流耗尽：\n{tail}")
+                if retry < QUOTA_RETRY_MAX - 1:
+                    delay = min(QUOTA_RETRY_BASE * (2 ** retry), QUOTA_RETRY_CAP)
+                    log(f"  限速/额度退避 {delay:.0f}s（第 {retry + 1}/{QUOTA_RETRY_MAX} 次）"
+                        f" — {str(last_quota_err)[:120]}")
+                    time.sleep(delay)
+                    continue
+                raise last_quota_err
+            if err_type is ClaudeRunnerError:
+                raise ClaudeRunnerError(f"claude 非零退出（分类匹配）：\n{tail}")
+            raise ClaudeRunnerError(f"claude 退出码 {proc.returncode}：\n{tail}")
+
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError as e:
+            raise ClaudeRunnerError(
+                f"claude 输出不是 JSON：{e}\n--- stdout 末尾 ---\n{proc.stdout[-2000:]}"
+            ) from e
+
+    # 理论上走不到这里（循环最后会 raise），但 pyright 需要它
+    assert last_quota_err is not None
+    raise last_quota_err
 
 
 def run_planner(repo_dir: Path, prompt_text: str, cfg: ClaudeConfig,
@@ -625,8 +648,9 @@ def _deadzone_blocked() -> bool:
 def load_repos() -> list[Repo]:
     """从 repos.yml 读出所有待分析的项目。
 
-    name 是必填的，其余字段缺了就用合理默认：url 按 owner/repo 拼出 GitHub 地址，project
-    取 name 的最后一段。最后如果设了 RC_REPO_NAME，就只留它指的那一个，方便 debug 单仓库。
+    name 是必填的，其余字段缺了就用合理默认。如果 name 以 https:// 开头，视为第三方仓库地址，
+    自动推导 url 和 project；否则按 owner/repo 拼出 GitHub 地址，project 取 name 最后一段。
+    最后如果设了 RC_REPO_NAME，就只留它指的那一个，方便 debug 单仓库。
     """
     if not REPOS_YML.exists():
         log(f"WARN 未找到 {REPOS_YML}")
@@ -637,9 +661,16 @@ def load_repos() -> list[Repo]:
         name = (item.get("name") or "").strip()
         if not name:
             continue
-        # url 和 project 缺省都由 name 推出来。
-        url = (item.get("url") or "").strip() or f"https://github.com/{name}.git"
-        project = (item.get("project") or "").strip() or name.split("/")[-1]
+        if name.startswith("https://"):
+            # 第三方仓库：name 即 URL，自动推导 state key 和 project
+            url = name
+            name = name.removeprefix("https://")
+            project = (item.get("project") or "").strip() or (
+                url.rstrip("/").split("/")[-1].removesuffix(".git"))
+        else:
+            # url 和 project 缺省都由 name 推出来
+            url = (item.get("url") or "").strip() or f"https://github.com/{name}.git"
+            project = (item.get("project") or "").strip() or name.split("/")[-1]
         repos.append(Repo(name=name, url=url,
                           branch=(item.get("branch") or "").strip() or None,
                           project=project, focus=(item.get("focus") or "").strip()))
@@ -1015,8 +1046,7 @@ def run_lectures_sequential(repo: Repo, repo_dir: Path,
                 phase_log(repo.name, "讲义生成", f"({n_done}/{total}) {lid}")
                 break
             except QuotaExhaustedError as e:
-                # 额度满了：存盘，停掉本轮。对照一下超时那种「跨下一篇」的处理
-                GLOBAL_STOP.set()
+                # 退避 10 次已耗尽，暂停当前仓库；不设全局停牌、不连累其他仓库
                 res["quota"] = True
                 with GLOBAL_STATE_LOCK:
                     _write_lecture_status(entry, lid, status=STATUS_FAILED, action=action,
@@ -1271,7 +1301,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
         log(f"  仍有 {len(remaining)} 篇未完成：{remaining[:5]}")
         return "incomplete"
     except QuotaExhaustedError as e:
-        GLOBAL_STOP.set()   # 并行仓库全局停机
+        # 退避已耗尽，仅暂停当前仓库；不设全局停牌
         log(f"  额度耗尽（{repo.name}）：{str(e)[:200]}；保存进度")
         with GLOBAL_STATE_LOCK:
             entry["last_error"] = f"quota: {str(e)[:300]}"
@@ -1293,7 +1323,7 @@ override_mode = "auto"
 
 def _safe_process_repo(repo: Repo, state: dict, generated_at: str,
                        run_start: float, deadline_min: float) -> str:
-    """process_repo 的一层包装：开跑前先看全局停牌和软截止，能早退就早退；额度耗尽则抛上去触发全局停机。"""
+    """process_repo 的一层包装：开跑前先看全局停牌和软截止，能早退就早退；额度耗尽仅暂停当前仓库。"""
     if GLOBAL_STOP.is_set():
         return "incomplete"
     if _deadline_reached(run_start, deadline_min):
@@ -1302,10 +1332,10 @@ def _safe_process_repo(repo: Repo, state: dict, generated_at: str,
     try:
         return process_repo(repo, state, generated_at)
     except QuotaExhaustedError:
-        GLOBAL_STOP.set()
+        # 退避已耗尽，仅暂停当前仓库；不设全局停牌
         entry = get_entry(state, repo.name)
         with GLOBAL_STATE_LOCK:
-            entry["last_error"] = "quota: global stop"
+            entry["last_error"] = "quota: exhausted after retries"
             entry["last_run_at"] = generated_at
             save_state(state)
         return "incomplete"
@@ -1358,30 +1388,60 @@ def main() -> int:
     deadline_min = float(os.environ.get("RC_RUN_DEADLINE_MIN", "0") or "0")
 
     def run_phase(batch: list[Repo], label: str) -> None:
+        """动态拉取调度：成功一个仓库才从队列拉下一个，失败/额度暂停不补位。
+
+        启动首批 min(CONCURRENCY, len(batch)) 个仓库，用 wait(FIRST_COMPLETED) 逐结果收
+        集。成功（done/skipped）→ 从 pending 拉一个补位；失败/额度暂停（incomplete）→ 不补。
+        死区/软截止触发 GLOBAL_STOP 时仍然 break 整批。自然耗尽（pending 空 + 在飞全部结束）
+        时循环退出，剩余仓库留给下个窗口。
+        """
         nonlocal any_incomplete, had_error
         if not batch:
             return
         if GLOBAL_STOP.is_set():
             any_incomplete = True
             return
-        log(f"=== {label}（{len(batch)} 个仓库，并行 {CONCURRENCY}）===")
+        log(f"=== {label}（{len(batch)} 个仓库，并行上限 {CONCURRENCY}）===")
+        pending = deque(batch)
+        futs: dict = {}  # Future → Repo
+
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
-            futs = {ex.submit(_safe_process_repo, r, state, generated_at,
-                              run_start, deadline_min): r for r in batch}
-            for f in as_completed(futs):
-                repo = futs[f]
-                try:
-                    outcome = f.result()
-                except Exception as e:   # 未预期的错误，_safe_process_repo 里的安全网没兜住的那种
-                    had_error = True
-                    log(f"  ERROR [{repo.name}] uncaught: {e}")
-                    continue
-                if outcome == "incomplete":
-                    any_incomplete = True
-                log(f"  [{repo.name}] → {outcome}")
+            # 启动首批
+            for _ in range(min(CONCURRENCY, len(pending))):
+                r = pending.popleft()
+                futs[ex.submit(_safe_process_repo, r, state, generated_at,
+                               run_start, deadline_min)] = r
+
+            while futs:
+                done, _ = wait(futs, return_when=FIRST_COMPLETED)
+                for f in done:
+                    repo = futs.pop(f)
+                    try:
+                        outcome = f.result()
+                    except Exception as e:
+                        # 未预期的错误，_safe_process_repo 安全网没兜住的
+                        had_error = True
+                        log(f"  ERROR [{repo.name}] uncaught: {e}")
+                        # 未预期异常不拉新
+                        continue
+
+                    if outcome == "incomplete":
+                        any_incomplete = True
+                        # 失败/额度暂停 → 不拉新
+                    else:
+                        # 成功（done / skipped）→ 拉下一个
+                        if pending:
+                            next_r = pending.popleft()
+                            futs[ex.submit(_safe_process_repo, next_r, state,
+                                           generated_at, run_start, deadline_min)] = next_r
+
+                    log(f"  [{repo.name}] → {outcome}")
+
+                    if GLOBAL_STOP.is_set():
+                        any_incomplete = True
+                        break
                 if GLOBAL_STOP.is_set():
                     # 仍在飞的 futures 会在 _safe_process_repo 入口早退
-                    any_incomplete = True
                     break
 
     run_phase(phase1, "Phase 1：未完成仓库")
