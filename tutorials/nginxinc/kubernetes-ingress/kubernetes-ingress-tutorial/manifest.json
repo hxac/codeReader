@@ -1,0 +1,1356 @@
+{
+  "project": "kubernetes-ingress",
+  "head": "a4e23f43afdb055a5426712af0a347282fbc770c",
+  "rationale": "本次为增量更新。相比上次 HEAD（b678c44e），本次代码变更仅触及两个文件：Makefile 与 build/Dockerfile，主题是「OSS 镜像构建优化」（commit 链 fix/oss-build-optimisation）。核心变化：Dockerfile 中 OSS 的 Alpine/Debian 阶段不再以官方 nginx: 镜像为基底叠加模块，而是改为从 alpine:3.23 / debian:trixie-slim 基础镜像「从零安装」NGINX OSS 包（nginx + njs/otel + agent），UBI 阶段仅做了安装行的可读性重排；Makefile 将 OSS 镜像目标（alpine-image/debian-image/ubi-image）归入新的「NIC + NGINX OSS Images (built from scratch)」分组，且 alpine-image/debian-image 不再依赖 build 前置目标，注释与 help 文案更新。原有学习路径（概述→资源模型→控制器→配置生成→NGINX 管理→高级特性→扩展实践）保持不变，因为核心架构、控制器主链路、配置生成体系均未改动。受影响最大的是 u1-l5（容器镜像与多变体构建）：其旧内容明确表述「Alpine/Debian 复用官方 NGINX 镜像，UBI 则从零自建」，这一描述现已过时——所有 OSS 变体都改为从零构建，需更新；但多阶段架构、变体矩阵、凭据安全约定等结构性结论依然成立，故为 update 而非 rebuild。u1-l2 虽引用 Makefile，但只讲授 build/test/lint/format 等二进制构建目标，这些目标未变，故 keep。其余讲义引用的源码文件均无改动，全部 keep。整体依赖关系 DAG 不变。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目导览与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "NGINX Ingress Controller 是什么：项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Ingress 与 Ingress Controller 的概念，以及本项目的定位、与社区 ingress-nginx 的区别、核心能力（七层路由、TLS、VirtualServer、TransportServer）。",
+          "learning_goals": [
+            "理解 Ingress 资源与 Ingress Controller 各自的角色",
+            "说清本项目与 kubernetes/ingress-nginx 的区别",
+            "列出本项目支持的核心能力与可用资源类型"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/developer/architecture.md"
+          ],
+          "minimal_modules": [
+            "Ingress 与 Ingress Controller 概念",
+            "本项目定位与区别",
+            "核心能力概览"
+          ],
+          "practice_task": "阅读 README 与 architecture 文档，用自己的话写一段不超过 200 字的本项目职责说明，并指出它支持哪几类路由资源。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行方式：Makefile、go.mod 与常用目标",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 Go 模块依赖、Makefile 提供的 test/build/lint/format 等目标，以及如何本地构建 nginx-ingress 二进制。",
+          "learning_goals": [
+            "看懂 go.mod 中的核心依赖（client-go、nginx-plus-go-client、cert-manager）",
+            "掌握 make build / make test / make lint 的用途",
+            "理解 build tags（aws,helmunit）对测试的影响"
+          ],
+          "source_files": [
+            "go.mod",
+            "Makefile",
+            "tools.go"
+          ],
+          "minimal_modules": [
+            "Go 模块与依赖",
+            "Makefile 目标体系",
+            "构建标签与本地构建"
+          ],
+          "practice_task": "运行 make build（或 build-local）构建出 nginx-ingress 二进制，执行 ./nginx-ingress -v=2 -h 查看 help 输出，并截图记录关键 flag。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "项目目录结构与模块布局",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库根目录与 cmd/、internal/、pkg/、charts/、deployments/、examples/、tests/ 等目录的职责划分，建立空间地图。",
+          "learning_goals": [
+            "区分 internal/（实现）与 pkg/（对外 API 与生成代码）",
+            "定位配置生成、控制器、NGINX 管理三大核心子目录",
+            "理解 charts、deployments、examples、tests 的角色"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/developer/architecture.md"
+          ],
+          "minimal_modules": [
+            "顶层目录速览",
+            "internal 核心子系统",
+            "pkg 与生成代码",
+            "部署与示例目录"
+          ],
+          "practice_task": "用 tree/ls 画出 internal/ 与 pkg/ 的两级目录树，为每个一级目录写一句话职责说明。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "命令行入口与启动 flags",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-flags.md",
+          "level": "beginner",
+          "topic": "从 cmd/nginx-ingress/main.go 出发，讲解程序入口、构建信息注入、parseFlags、日志初始化，以及关键命令行参数。",
+          "learning_goals": [
+            "跟踪 main() 的启动顺序：版本打印→parseFlags→日志→运行",
+            "理解 flags.go 中 validate 函数族的分层校验",
+            "认识与 NGINX、控制器行为相关的核心 flag（如 -nginx-configmaps、-ingress-class、-enable-leader-election）"
+          ],
+          "source_files": [
+            "cmd/nginx-ingress/main.go",
+            "cmd/nginx-ingress/flags.go",
+            "cmd/nginx-ingress/utils.go"
+          ],
+          "minimal_modules": [
+            "入口 main 函数",
+            "flag 定义与解析",
+            "启动校验链",
+            "日志初始化"
+          ],
+          "practice_task": "运行 nginx-ingress -h，挑出 3 个与 NGINX 配置路径和选举相关的 flag，说明它们分别控制什么行为。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "容器镜像与多变体构建（Dockerfile）",
+          "order": 5,
+          "filename": "u1-l5-container-images.md",
+          "level": "beginner",
+          "topic": "讲解 build/Dockerfile 的多阶段构建、OSS 与 NGINX Plus 变体、Alpine/Debian/UBI 基础镜像（注意：本次更新后所有 OSS 变体均改为从基础镜像从零安装 NGINX 包，而非叠加官方 nginx 镜像），以及 Makefile 中各类 image 目标（OSS 目标已归入「built from scratch」分组）。",
+          "learning_goals": [
+            "理解多阶段构建如何编译二进制并组装镜像",
+            "区分 nginx/nginx-ingress 与 Plus、NAP、DoS 等变体",
+            "了解 OSS Alpine/Debian/UBI 三个阶段如何各自从基础镜像从零安装 NGINX OSS 及模块",
+            "了解凭据（Plus license）如何通过 --secret 挂载而非 COPY 进入镜像"
+          ],
+          "source_files": [
+            "build/Dockerfile",
+            "Makefile",
+            "build/README.md"
+          ],
+          "minimal_modules": [
+            "多阶段 Dockerfile",
+            "OSS 从零构建（Alpine/Debian/UBI）",
+            "镜像变体矩阵",
+            "构建脚本与 Makefile 目标",
+            "凭据安全约定"
+          ],
+          "practice_task": "阅读 build/Dockerfile，列出它的各个构建阶段及作用；重点说明 alpine 与 debian 这两个 OSS 阶段分别从哪个基础镜像出发、如何安装 NGINX 包；并指出 Plus 凭据是如何被引入镜像的。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u1-l6",
+          "title": "安装方式：Kubernetes 清单与 Helm Chart",
+          "order": 6,
+          "filename": "u1-l6-install-manifests-and-helm.md",
+          "level": "beginner",
+          "topic": "讲解 deployments/ 下的部署清单（Deployment/DaemonSet/Service/RBAC/ConfigMap）与 charts/nginx-ingress Helm chart 的结构与首个示例的运行流程。",
+          "learning_goals": [
+            "看懂 deployments/deployment/nginx-ingress.yaml 的组成",
+            "理解 Helm chart 的 Chart.yaml/values.yaml/templates 结构",
+            "用一个真实示例（Cafe）跑通 Ingress 与 VirtualServer 两种用法"
+          ],
+          "source_files": [
+            "deployments/deployment/nginx-ingress.yaml",
+            "deployments/common/nginx-config.yaml",
+            "charts/nginx-ingress/Chart.yaml",
+            "charts/nginx-ingress/values.yaml",
+            "examples/ingress-resources/complete-example/cafe-ingress.yaml",
+            "examples/custom-resources/basic-configuration/cafe-virtual-server.yaml"
+          ],
+          "minimal_modules": [
+            "部署清单结构",
+            "Helm chart 结构",
+            "Ingress 示例",
+            "VirtualServer 示例"
+          ],
+          "practice_task": "用 helm template 渲染 chart 并与 deployments/ 清单对照，指出 Deployment、ConfigMap、RBAC、Service 分别由哪个文件提供。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "资源模型与 CRD 定义",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "路由资源全景：Ingress、VirtualServer、VSR、TransportServer",
+          "order": 1,
+          "filename": "u2-l1-routing-resource-concepts.md",
+          "level": "beginner",
+          "topic": "对比标准 Ingress 与 CRD（VirtualServer/VirtualServerRoute/TransportServer）在能力与适用场景上的差异，理解 GlobalConfiguration 与 Policy 的角色。",
+          "learning_goals": [
+            "说清 Ingress 与 VirtualServer 各自能/不能做什么",
+            "理解 VSR 与 VS 的组合关系、TransportServer 的 L4 定位",
+            "认识 Policy 与 GlobalConfiguration 在整体模型中的位置"
+          ],
+          "source_files": [
+            "docs/crd/k8s.nginx.org_virtualservers.md",
+            "docs/crd/k8s.nginx.org_transportservers.md",
+            "docs/crd/k8s.nginx.org_globalconfigurations.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "Ingress vs VirtualServer",
+            "VirtualServerRoute 组合",
+            "TransportServer 与 L4",
+            "Policy 与 GlobalConfiguration"
+          ],
+          "practice_task": "为同一个 cafe 应用分别写一份 Ingress 和一份 VirtualServer，并对比两者实现路径路由的写法差异。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CRD 类型定义源码：types.go",
+          "order": 2,
+          "filename": "u2-l2-crd-type-definitions.md",
+          "level": "intermediate",
+          "topic": "深入 pkg/apis/configuration/v1/types.go，讲解 VirtualServer/VSR/TransportServer/Policy/GlobalConfiguration 的 Go 结构体与 kubebuilder 标注，作为整个项目的数据真相源。",
+          "learning_goals": [
+            "读懂 CRD 的 Go 结构体与字段 json tag",
+            "理解 kubebuilder marker 如何驱动 CRD 生成与校验",
+            "建立从用户 YAML 到 Go 类型再到 NGINX 配置的心智模型"
+          ],
+          "source_files": [
+            "pkg/apis/configuration/v1/types.go",
+            "docs/developer/architecture.md"
+          ],
+          "minimal_modules": [
+            "VirtualServer/Route 结构",
+            "TransportServer 结构",
+            "Policy 结构",
+            "kubebuilder 标注",
+            "GlobalConfiguration"
+          ],
+          "practice_task": "在 types.go 中定位 VirtualServerSpec，列出它的主要字段，并标注哪些字段会影响生成的 upstream 与 location。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "CRD 校验与代码生成链路",
+          "order": 3,
+          "filename": "u2-l3-validation-and-codegen.md",
+          "level": "intermediate",
+          "topic": "讲解 pkg/apis/configuration/validation 的校验逻辑、config/crd 下生成的 CRD YAML，以及 make update-codegen / update-crds 如何串起类型→DeepCopy→CRD 的生成链路。",
+          "learning_goals": [
+            "理解 validation 包如何校验 CRD 字段语义",
+            "知道 config/crd/bases 下的 YAML 从何而来",
+            "掌握改 types.go 后必须执行的代码生成流程"
+          ],
+          "source_files": [
+            "pkg/apis/configuration/validation/virtualserver.go",
+            "pkg/apis/configuration/validation/transportserver.go",
+            "Makefile",
+            "config/crd/bases/k8s.nginx.org_virtualservers.yaml"
+          ],
+          "minimal_modules": [
+            "校验函数组织",
+            "CEL/标记校验",
+            "CRD YAML 生成",
+            "codegen 工作流"
+          ],
+          "practice_task": "找一个 VirtualServer 字段的校验函数，说明它拒绝哪些非法取值，并追踪该约束最终如何体现在 config/crd 的 schema 里。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Policy CRD 与可复用策略模型",
+          "order": 4,
+          "filename": "u2-l4-policy-crd-model.md",
+          "level": "intermediate",
+          "topic": "聚焦 Policy CRD 的统一抽象：一个 Policy 如何被 Ingress/VirtualServer 引用，支持哪些策略类型（AccessControl/RateLimit/JWTAuth/ExternalAuth 等），以及它的 spec 结构。",
+          "learning_goals": [
+            "理解 Policy 的 spec.selector 与引用机制",
+            "列出常见策略类型及其用途",
+            "区分 Policy 在 Ingress(v1) 与 VS(v2) 上的适用范围"
+          ],
+          "source_files": [
+            "pkg/apis/configuration/v1/types.go",
+            "docs/crd/k8s.nginx.org_policies.md",
+            "pkg/apis/configuration/validation/virtualserver.go"
+          ],
+          "minimal_modules": [
+            "Policy spec 结构",
+            "selector 与引用",
+            "策略类型清单",
+            "策略适用范围"
+          ],
+          "practice_task": "编写一个 RateLimit Policy，并在 VirtualServer 中通过 policies 字段引用它，验证引用语法正确。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "控制器核心：list-watch 与调谐循环",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "LoadBalancerController 生命周期与 Run/Stop",
+          "order": 1,
+          "filename": "u3-l1-controller-lifecycle.md",
+          "level": "intermediate",
+          "topic": "从 NewLoadBalancerController 与 Run/Stop 出发，讲解控制器的整体生命周期：缓存同步、任务队列启动、leader 选举、优雅关闭。",
+          "learning_goals": [
+            "掌握 LoadBalancerController 的关键字段与构造过程",
+            "理解 Run() 的启动阶段顺序",
+            "了解 isNginxReady 等启动优化标志的作用"
+          ],
+          "source_files": [
+            "internal/k8s/controller.go"
+          ],
+          "minimal_modules": [
+            "控制器结构体",
+            "NewLoadBalancerController",
+            "Run 启动序列",
+            "Stop 与优雅关闭"
+          ],
+          "practice_task": "在 controller.go 中画出 Run() 的执行步骤时序（缓存同步→队列→选举），并标出每步对应的函数名。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SharedInformerFactory 与命名空间级 Informer",
+          "order": 2,
+          "filename": "u3-l2-shared-informers.md",
+          "level": "intermediate",
+          "topic": "讲解 raw client-go 的 SharedInformerFactory 用法、namespacedInformer 如何按命名空间组织 core/CRD/secret/dynamic 各类 informer，以及 list-watch 模型。",
+          "learning_goals": [
+            "理解 SharedInformerFactory + list-watch 的工作机制",
+            "看懂 namespacedInformer 对多类资源的组织方式",
+            "知道 addXHandler 如何把事件处理器挂到 informer"
+          ],
+          "source_files": [
+            "internal/k8s/controller.go",
+            "internal/k8s/namespace.go"
+          ],
+          "minimal_modules": [
+            "SharedInformerFactory",
+            "namespacedInformer 结构",
+            "按命名空间隔离",
+            "handler 注册"
+          ],
+          "practice_task": "追踪 newNamespacedInformer，列出它对哪些资源注册了 handler，并说明为什么按命名空间隔离。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "任务队列与 workqueue 模式",
+          "order": 3,
+          "filename": "u3-l3-task-queue.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/k8s/task_queue.go：task 与 kind 的设计、基于 client-go workqueue 的入队/出队、worker 循环、失败重入队与指数退避。",
+          "learning_goals": [
+            "理解 taskQueue 如何把事件转化为可处理的 task",
+            "掌握 Enqueue/Requeue/RequeueAfter 的语义",
+            "看清 worker 循环与 sync 函数注入的关系"
+          ],
+          "source_files": [
+            "internal/k8s/task_queue.go",
+            "internal/k8s/controller.go"
+          ],
+          "minimal_modules": [
+            "task 与 kind 设计",
+            "workqueue 接入",
+            "worker 循环",
+            "失败重试与退避"
+          ],
+          "practice_task": "写一段文字解释：一个 Ingress 更新事件从 handler 到最终被 sync 处理，中间经过哪几次入队与出队。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "事件处理器：从资源变更到入队",
+          "order": 4,
+          "filename": "u3-l4-event-handlers.md",
+          "level": "intermediate",
+          "topic": "讲解 handlers.go 及各资源 handler（Ingress/Secret/VirtualServer/TransportServer/Service/Policy）如何实现 AddFunc/DeleteFunc/UpdateFunc、变更检测与 tombstone 处理。",
+          "learning_goals": [
+            "掌握 createXHandlers 的统一模式",
+            "理解 UpdateFunc 中如何做变更检测避免无效重载",
+            "了解 DeletedFinalStateUnknown 的处理"
+          ],
+          "source_files": [
+            "internal/k8s/handlers.go",
+            "internal/k8s/service.go",
+            "internal/k8s/policy.go"
+          ],
+          "minimal_modules": [
+            "handler 统一模式",
+            "变更检测",
+            "删除与 tombstone",
+            "Service/Policy 专用 handler"
+          ],
+          "practice_task": "为某一个资源的 UpdateFunc 写出它会调用 AddSyncQueue 的几种触发条件。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "sync 调度器与各资源 sync 函数",
+          "order": 5,
+          "filename": "u3-l5-sync-dispatcher.md",
+          "level": "intermediate",
+          "topic": "讲解 controller.go 中 sync(task) 如何按 task.Kind 分发到 syncIngress/syncVirtualServer/syncConfigMap 等函数，以及各 sync 函数的共同处理模式。",
+          "learning_goals": [
+            "理解 sync 的 switch 分发机制",
+            "看清 syncX 函数的通用三段式：取资源→更新内存模型→处理变更",
+            "了解批量处理时禁用重载的优化"
+          ],
+          "source_files": [
+            "internal/k8s/controller.go",
+            "internal/k8s/transport_server.go",
+            "internal/k8s/configmap.go"
+          ],
+          "minimal_modules": [
+            "sync 分发",
+            "syncX 通用模式",
+            "批量与重载优化",
+            "ConfigMap sync"
+          ],
+          "practice_task": "选 syncVirtualServer，画出它从拿到 task 到调用 configuration 与 configurator 的调用链。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "内存模型 Configuration 与引用/冲突检查",
+          "order": 6,
+          "filename": "u3-l6-configuration-model.md",
+          "level": "intermediate",
+          "topic": "讲解 configuration.go 的内存模型（按类型/按 host 索引资源）、AddOrUpdate/Delete、ResourceChange/ConfigurationProblem，以及 reference_checkers 如何校验 Service/Secret/Policy 引用并检测主机冲突。",
+          "learning_goals": [
+            "理解 Configuration 如何在内存中建模全部资源",
+            "掌握按 host 索引与冲突检测",
+            "了解引用校验（Service/Secret/Policy）的实现"
+          ],
+          "source_files": [
+            "internal/k8s/configuration.go",
+            "internal/k8s/reference_checkers.go"
+          ],
+          "minimal_modules": [
+            "Configuration 结构",
+            "增删改与变更追踪",
+            "主机索引与冲突",
+            "引用检查"
+          ],
+          "practice_task": "构造两个 VirtualServer 抢占同一 host 的场景，说明 Configuration 如何识别并报告冲突。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l7",
+          "title": "Leader 选举与 Status 回写",
+          "order": 7,
+          "filename": "u3-l7-leader-election-and-status.md",
+          "level": "intermediate",
+          "topic": "讲解 leader.go 基于 LeaseLock 的选举与回调，以及 status.go 如何把 VS/VSR/TS/Policy/Ingress 的状态与外部 LB 地址写回 Kubernetes（含重试与启动期延后刷新）。",
+          "learning_goals": [
+            "理解 LeaseLock 选举与 OnStartedLeading 回调的作用",
+            "掌握 statusUpdater 写回各类资源状态的统一模式",
+            "了解启动期 pendingStatus 与 flushPendingStatusesAsync 优化"
+          ],
+          "source_files": [
+            "internal/k8s/leader.go",
+            "internal/k8s/status.go"
+          ],
+          "minimal_modules": [
+            "LeaseLock 选举",
+            "选举回调与状态同步",
+            "statusUpdater 模式",
+            "启动期延后刷新"
+          ],
+          "practice_task": "解释为什么非 leader 副本不应写回 status，并指出代码中判断 leader 的位置。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "NGINX 配置生成",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Configurator：配置生成的中枢",
+          "order": 1,
+          "filename": "u4-l1-configurator-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/configurator.go 的 Configurator 如何把内存模型里的资源翻译成 NGINX 配置文件并触发重载，以及它对 v1/v2 两个模板执行器的编排。",
+          "learning_goals": [
+            "理解 Configurator 在架构中的位置与职责",
+            "掌握 AddOrUpdateIngress/AddOrUpdateVirtualServer 等入口",
+            "了解 ExtendedResources 与 reload 的关系"
+          ],
+          "source_files": [
+            "internal/configs/configurator.go",
+            "internal/configs/common.go"
+          ],
+          "minimal_modules": [
+            "Configurator 结构",
+            "资源入口方法",
+            "模板执行器编排",
+            "reload 控制"
+          ],
+          "practice_task": "在 configurator.go 中定位 AddOrUpdateVirtualServer，列出它内部依次调用了哪些生成与写文件步骤。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "全局配置：ConfigMap 解析",
+          "order": 2,
+          "filename": "u4-l2-configmap-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/configmaps.go 如何把 ConfigMap 解析成 ConfigParams/MainConfig，以及 config_params.go 中 ConfigParams/StaticConfigParams/MGMTConfigParams 的作用。",
+          "learning_goals": [
+            "理解 ParseConfigMap 到 MainConfig 的转换",
+            "认识 ConfigParams 与 StaticConfigParams 的区别",
+            "了解 zone-sync/OIDC/OTel 等 ConfigMap 子块的解析"
+          ],
+          "source_files": [
+            "internal/configs/configmaps.go",
+            "internal/configs/config_params.go"
+          ],
+          "minimal_modules": [
+            "ConfigParams 结构",
+            "ParseConfigMap 流程",
+            "MainConfig 生成",
+            "子块解析"
+          ],
+          "practice_task": "在 ConfigMap 中加一个全局参数（如 worker_processes），追踪它从 ConfigMap 到生成 nginx.conf 的路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Ingress 注解（annotations）解析",
+          "order": 3,
+          "filename": "u4-l3-annotations-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/annotations.go 如何把 nginx.org/* 注解解析进 ConfigParams，包括类型转换辅助函数、mergeable ingress 的 master/minion 过滤与继承。",
+          "learning_goals": [
+            "掌握 parseAnnotations 的整体流程与辅助函数",
+            "理解注解如何映射到 NGINX 指令",
+            "了解 mergeable ingress 的 master/minion 注解过滤与继承"
+          ],
+          "source_files": [
+            "internal/configs/annotations.go",
+            "internal/configs/parsing_helpers.go"
+          ],
+          "minimal_modules": [
+            "注解常量与解析",
+            "类型转换辅助",
+            "注解到指令映射",
+            "mergeable 过滤与继承"
+          ],
+          "practice_task": "追踪 nginx.org/proxy-connect-timeout 注解从字符串到 ConfigParams 字段再到模板指令的全过程。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Ingress → 配置（version1）",
+          "order": 4,
+          "filename": "u4-l4-ingress-config-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/ingress.go 如何把 IngressEx/MergeableIngresses 转成 IngressNginxConfig：upstream、location、TLS、健康检查、JWT/BasicAuth 的生成。",
+          "learning_goals": [
+            "理解 generateNginxCfg 的 server/upstream/location 生成",
+            "掌握 createUpstream/createLocation/createHealthCheck 的职责",
+            "了解 mergeable ingress 的配置合并"
+          ],
+          "source_files": [
+            "internal/configs/ingress.go",
+            "internal/configs/version1/config.go"
+          ],
+          "minimal_modules": [
+            "IngressEx 模型",
+            "server/upstream/location 生成",
+            "TLS 与健康检查",
+            "mergeable 合并"
+          ],
+          "practice_task": "为一个 Ingress 追踪其 path 如何生成一个 location 和对应 upstream，画出字段对应关系。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "VirtualServer → 配置（version2 http）",
+          "order": 5,
+          "filename": "u4-l5-virtualserver-config-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/virtualserver.go 如何把 VirtualServerEx 转成 VirtualServerConfig，包括路由匹配、流量切分（split client）、upstream 命名与变量命名。",
+          "learning_goals": [
+            "理解 virtualServerConfigurator 的生成流程",
+            "掌握流量切分 split client 与 upstreamNamer 的作用",
+            "了解 VS 与 VSR 的差异处理"
+          ],
+          "source_files": [
+            "internal/configs/virtualserver.go",
+            "internal/configs/version2/http.go"
+          ],
+          "minimal_modules": [
+            "VirtualServerEx 模型",
+            "路由与流量切分",
+            "upstream/变量命名",
+            "VSR 差异"
+          ],
+          "practice_task": "为一个带 trafficSplit 的 route 追踪它如何生成 split_client 与多个 upstream。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l6",
+          "title": "TransportServer → stream 配置",
+          "order": 6,
+          "filename": "u4-l6-transportserver-config-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/transportserver.go 如何把 TransportServerEx 转成 stream 上下文配置（stream upstream/server、TLS、TLS passthrough 的 unix socket）。",
+          "learning_goals": [
+            "理解 TransportServerEx 到 stream 配置的映射",
+            "掌握 generateStreamUpstreams 与 TLS passthrough socket 机制",
+            "了解 stream 上下文与 http 上下文的区别"
+          ],
+          "source_files": [
+            "internal/configs/transportserver.go",
+            "internal/configs/version2/stream.go"
+          ],
+          "minimal_modules": [
+            "TransportServerEx 模型",
+            "stream upstream/server",
+            "TLS 配置",
+            "TLS passthrough socket"
+          ],
+          "practice_task": "为一个 TCP TransportServer 追踪 listener/action 如何映射成 stream server 与 upstream。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l7",
+          "title": "Policy → 配置（策略翻译）",
+          "order": 7,
+          "filename": "u4-l7-policy-config-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/configs/policy.go 如何把各类 Policy 翻译成 NGINX 指令：AccessControl、RateLimit、JWTAuth、ExternalAuth、OIDC、APIKey、CORS 等。",
+          "learning_goals": [
+            "理解 generatePolicies 的分派与策略合并机制",
+            "掌握主要策略（RateLimit/JWT/AccessControl）的翻译方式",
+            "了解 IsPolicySupportedOnIngress 的适用范围判定"
+          ],
+          "source_files": [
+            "internal/configs/policy.go",
+            "internal/configs/commonhelpers/common_template_helpers.go"
+          ],
+          "minimal_modules": [
+            "策略分派与合并",
+            "限流/JWT/访问控制",
+            "OIDC/APIKey/CORS",
+            "适用范围判定"
+          ],
+          "practice_task": "实现思路：为一个 VirtualServer 追踪 RateLimit Policy 如何生成 limit_req_zone 与 limit_req 指令。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l8",
+          "title": "Go 模板渲染体系（.tmpl）",
+          "order": 8,
+          "filename": "u4-l8-template-rendering.md",
+          "level": "intermediate",
+          "topic": "讲解 version1/version2 的 TemplateExecutor 与 .tmpl 文件如何用 text/template 渲染 OSS/Plus 两套配置，以及快照黄金测试如何保证输出稳定。",
+          "learning_goals": [
+            "理解模板执行器的输入结构与 ExecuteXxxTemplate 流程",
+            "区分 OSS 与 Plus、main/ingress/virtualserver/transportserver 模板",
+            "了解快照黄金测试的更新与校验方式"
+          ],
+          "source_files": [
+            "internal/configs/version1/template_executor.go",
+            "internal/configs/version2/template_executor.go",
+            "internal/configs/version2/nginx.virtualserver.tmpl",
+            "internal/configs/version1/nginx.tmpl"
+          ],
+          "minimal_modules": [
+            "模板执行器",
+            "OSS/Plus 模板对照",
+            "自定义模板函数",
+            "快照黄金测试"
+          ],
+          "practice_task": "渲染一个 VirtualServer，对照 nginx.virtualserver.tmpl 找出 upstream/split_client/limit_req 分别由模板哪一段生成。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "NGINX 进程管理与重载",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "nginx.Manager 与进程生命周期",
+          "order": 1,
+          "filename": "u5-l1-nginx-manager-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/nginx/manager.go 的 LocalManager：Start 启动 NGINX、CreateMainConfig/CreateConfig 写配置、Reload 触发重载，以及与 Configurator 的衔接。",
+          "learning_goals": [
+            "理解 LocalManager 的启动与配置写入流程",
+            "掌握 Reload 的版本递增与触发方式",
+            "了解 Manager 接口与 LocalManager 实现的关系"
+          ],
+          "source_files": [
+            "internal/nginx/manager.go",
+            "internal/nginx/version.go"
+          ],
+          "minimal_modules": [
+            "Manager 接口",
+            "Start 与配置写入",
+            "Reload 流程",
+            "版本解析"
+          ],
+          "practice_task": "画图说明 Configurator 调用 CreateConfig + Reload 时，LocalManager 内部做了哪几步。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "配置校验与版本端点验证",
+          "order": 2,
+          "filename": "u5-l2-config-verification.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/nginx/verify.go 如何通过 unix socket 上的 configVersion 端点轮询确认重载成功，保证新 worker 真正生效。",
+          "learning_goals": [
+            "理解重载后为何需要版本验证而非只看 reload 命令返回",
+            "掌握 WaitForCorrectVersion 的轮询机制",
+            "了解 Verify() 的语法校验作用"
+          ],
+          "source_files": [
+            "internal/nginx/verify.go",
+            "internal/nginx/manager.go"
+          ],
+          "minimal_modules": [
+            "版本端点机制",
+            "WaitForCorrectVersion",
+            "Verify 语法校验",
+            "与 Reload 的衔接"
+          ],
+          "practice_task": "解释如果只依赖 nginx -s reload 的返回值而不做版本验证，会出现什么问题。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "回滚保护 ConfigRollbackManager",
+          "order": 3,
+          "filename": "u5-l3-rollback-manager.md",
+          "level": "advanced",
+          "topic": "讲解 internal/nginx/rollback_manager.go 如何在配置写入后校验失败时自动回滚到上一份可用配置，避免坏配置拖垮控制器。",
+          "learning_goals": [
+            "理解 createConfigWithRollback 的 备份→写入→校验→回滚 流程",
+            "掌握回滚保护覆盖的范围（main/default server）",
+            "了解它与普通 LocalManager 的协作"
+          ],
+          "source_files": [
+            "internal/nginx/rollback_manager.go",
+            "internal/nginx/fake_manager.go"
+          ],
+          "minimal_modules": [
+            "回滚触发条件",
+            "备份与回滚流程",
+            "保护范围",
+            "测试 fake manager"
+          ],
+          "practice_task": "构造一个会让 nginx -t 失败的配置，描述 ConfigRollbackManager 如何将其回滚并保持服务可用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "NGINX Plus API 与动态配置",
+          "order": 4,
+          "filename": "u5-l4-plus-api-dynamic-config.md",
+          "level": "advanced",
+          "topic": "讲解 LocalManager 如何借助 nginx-plus-go-client 通过 Plus API 动态更新 upstream 端点与 key-value，实现端点变更免重载。",
+          "learning_goals": [
+            "理解 UpdateServersInPlus/UpdateStreamServersInPlus 的动态更新机制",
+            "掌握端点变更免重载对性能的意义",
+            "了解 key-value（split client）动态更新的用途"
+          ],
+          "source_files": [
+            "internal/nginx/manager.go",
+            "internal/nginx/verify.go"
+          ],
+          "minimal_modules": [
+            "Plus API 客户端",
+            "动态 upstream 更新",
+            "key-value 更新",
+            "重载竞态防护"
+          ],
+          "practice_task": "说明在 Plus 模式下 Service Endpoints 变化时，控制器为何可以不触发 NGINX reload。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "安全、认证与流量策略",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "配置注入安全：危险字符与转义",
+          "order": 1,
+          "filename": "u6-l1-config-injection-security.md",
+          "level": "advanced",
+          "topic": "讲解 NGINX 配置安全不变量：containsDangerousChars / ValidateEscapedString / escapeNginxString 如何防止用户字符串注入 NGINX 配置，以及它们在生成链路的落点。",
+          "learning_goals": [
+            "理解哪些字符对 NGINX 配置是危险的及其原因",
+            "掌握转义与校验函数的使用场景",
+            "了解该不变量在模板/策略生成中的强制点"
+          ],
+          "source_files": [
+            "internal/configs/common.go",
+            "internal/configs/policy.go",
+            "internal/configs/validation_results.go"
+          ],
+          "minimal_modules": [
+            "危险字符清单",
+            "转义函数",
+            "校验函数",
+            "不变量落点"
+          ],
+          "practice_task": "在源码中找出 escapeNginxString 的所有调用点，说明每一处防范的是什么注入风险。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "TLS/SSL 与 Secret 处理",
+          "order": 2,
+          "filename": "u6-l2-tls-and-secrets.md",
+          "level": "advanced",
+          "topic": "讲解 internal/k8s/secrets（store/validation）如何缓存与校验 Secret，以及配置生成中 addSSLConfig 如何把证书/密钥组装进 server 块。",
+          "learning_goals": [
+            "理解 SecretStore 的缓存与类型校验",
+            "掌握 TLS Secret 到 NGINX ssl 配置的组装",
+            "了解各种 Secret 类型（ca/tls/jwk）的用途"
+          ],
+          "source_files": [
+            "internal/k8s/secrets/store.go",
+            "internal/k8s/secrets/validation.go",
+            "internal/configs/ingress.go"
+          ],
+          "minimal_modules": [
+            "SecretStore 缓存",
+            "Secret 类型校验",
+            "TLS 配置组装",
+            "证书文件落盘"
+          ],
+          "practice_task": "追踪一个带 TLS 的 VirtualServer：它的证书 Secret 如何被校验并最终写入 NGINX ssl_certificate 指令。",
+          "depends_on": [
+            "u4-l4",
+            "u4-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "cert-manager 集成与证书自动化",
+          "order": 3,
+          "filename": "u6-l3-cert-manager-integration.md",
+          "level": "advanced",
+          "topic": "讲解 internal/certmanager 如何以独立控制器形式监听 VirtualServer 与 Certificate，自动创建/更新/删除 cert-manager Certificate 并设置 ownerReference。",
+          "learning_goals": [
+            "理解 CmController 与主控制器的并行关系",
+            "掌握 buildCertificates/translateVsSpec 的转换逻辑",
+            "了解 ownerReference 带来的级联删除"
+          ],
+          "source_files": [
+            "internal/certmanager/cm_controller.go",
+            "internal/certmanager/sync.go"
+          ],
+          "minimal_modules": [
+            "CmController 结构",
+            "informer + queue",
+            "证书构建与翻译",
+            "ownerReference"
+          ],
+          "practice_task": "说明当 VirtualServer 的 host 改变时，cert-manager 集成如何相应更新 Certificate 的 DNS 名称。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "认证策略深入：OIDC/JWT/mTLS/ExternalAuth",
+          "order": 4,
+          "filename": "u6-l4-authentication-policies.md",
+          "level": "advanced",
+          "topic": "深入讲解 OIDC/JWTAuth/ExternalAuth/IngressMTLS/EgressMTLS 策略的配置生成，以及 internal/configs/oidc 与 njs 脚本如何协作完成 OIDC 子请求流程。",
+          "learning_goals": [
+            "理解 OIDC 配置生成与 openid_connect.js/njs 的协作",
+            "掌握 JWT/JWKS、ExternalAuth 的翻译方式",
+            "了解 mTLS（ingress/egress）的配置组装"
+          ],
+          "source_files": [
+            "internal/configs/policy.go",
+            "internal/configs/oidc/openid_connect.js",
+            "internal/configs/oidc/oidc_common.conf",
+            "internal/configs/version2/oidc.tmpl"
+          ],
+          "minimal_modules": [
+            "OIDC 子请求流程",
+            "JWT/JWKS 翻译",
+            "ExternalAuth",
+            "mTLS 配置"
+          ],
+          "practice_task": "为一个 VirtualServer 启用 OIDC Policy，追踪 token 校验如何在 NGINX 与 njs 之间流转。",
+          "depends_on": [
+            "u4-l7"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "NGINX App Protect：WAF 与 DoS 集成",
+          "order": 5,
+          "filename": "u6-l5-app-protect-waf-dos.md",
+          "level": "advanced",
+          "topic": "讲解 NGINX App Protect WAF 与 DoS 的集成：internal/k8s/appprotect、appprotectdos 如何处理 WAF/DoS 资源，配置生成如何引用 bundle 与 policy 文件。",
+          "learning_goals": [
+            "理解 App Protect WAF 资源（APPolicy/APLogConf/APUserSig）的处理",
+            "掌握 DoS（DosProtectedResource/APDosPolicy）的处理流程",
+            "了解 bundle 校验与文件落盘"
+          ],
+          "source_files": [
+            "internal/k8s/appprotect/app_protect_configuration.go",
+            "internal/k8s/appprotectdos/app_protect_dos_configuration.go",
+            "internal/k8s/appprotectcommon/app_protect_common_resources.go",
+            "internal/configs/bundle_validator.go"
+          ],
+          "minimal_modules": [
+            "WAF 资源处理",
+            "DoS 资源处理",
+            "bundle 校验",
+            "配置文件引用"
+          ],
+          "practice_task": "追踪一个引用了 WAF Policy 的 VirtualServer，说明 WAF bundle 如何被校验并落到 NGINX 配置中。",
+          "depends_on": [
+            "u4-l7"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "可观测性",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "指标与 Prometheus collectors",
+          "order": 1,
+          "filename": "u7-l1-metrics-and-collectors.md",
+          "level": "advanced",
+          "topic": "讲解 internal/metrics 如何通过 Prometheus 暴露指标：listener、syslog 延迟监听，以及 collectors 下 reload/资源计数/延迟/workqueue 等采集器。",
+          "learning_goals": [
+            "理解指标暴露的两条路径（HTTP /metrics、syslog 延迟）",
+            "掌握各 collector 采集的内容",
+            "了解 NGINX stub_status 经 exporter 的接入"
+          ],
+          "source_files": [
+            "internal/metrics/listener.go",
+            "internal/metrics/syslog_listener.go",
+            "internal/metrics/collectors/manager.go",
+            "internal/metrics/collectors/controller.go",
+            "internal/metrics/collectors/latency.go"
+          ],
+          "minimal_modules": [
+            "指标监听器",
+            "syslog 延迟采集",
+            "reload/资源计数 collector",
+            "stub_status 接入"
+          ],
+          "practice_task": "列出 Reload 相关指标的字段，并说明它们的取值在哪一步被更新。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "健康检查与 Service Insight",
+          "order": 2,
+          "filename": "u7-l2-healthcheck-service-insight.md",
+          "level": "advanced",
+          "topic": "讲解 internal/healthcheck 的深度健康检查 HTTP 服务：如何通过 NGINX Plus API 查询 upstream 健康并以 JSON/状态码暴露给外部探测。",
+          "learning_goals": [
+            "理解 Service Insight 健康检查端点的设计",
+            "掌握 UpstreamStats/StreamStats 的数据来源",
+            "了解状态码（200/418/404）语义"
+          ],
+          "source_files": [
+            "internal/healthcheck/healthcheck.go"
+          ],
+          "minimal_modules": [
+            "健康检查服务器",
+            "Plus API 数据查询",
+            "状态码语义",
+            "TLS 支持"
+          ],
+          "practice_task": "说明当某 host 下所有 upstream peer 都宕机时，/probe 端点会返回什么状态码及原因。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "遥测（OpenTelemetry）、日志与元数据",
+          "order": 3,
+          "filename": "u7-l3-telemetry-logging-metadata.md",
+          "level": "advanced",
+          "topic": "讲解 internal/telemetry 的周期性数据收集与 OTLP 导出、internal/logger 的 slog 日志体系与事件记录，以及 internal/metadata 的集群元数据收集。",
+          "learning_goals": [
+            "理解 telemetry Collector 的周期收集与 OTLP 导出",
+            "掌握日志级别体系与事件记录（EventRecorder）",
+            "了解元数据（集群/版本/平台）的收集用途"
+          ],
+          "source_files": [
+            "internal/telemetry/collector.go",
+            "internal/telemetry/exporter.go",
+            "internal/logger/logger.go",
+            "internal/metadata/metadata.go"
+          ],
+          "minimal_modules": [
+            "遥测收集与导出",
+            "日志级别体系",
+            "事件记录",
+            "元数据收集"
+          ],
+          "practice_task": "说明遥测数据包含哪些 NIC 资源计数，并指出其导出端点由哪个 ConfigMap key 控制。",
+          "depends_on": [
+            "u3-l7"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "扩展开发、测试与发布",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "扩展实践：新增一个 CRD 字段",
+          "order": 1,
+          "filename": "u8-l1-add-new-crd-field.md",
+          "level": "advanced",
+          "topic": "完整演示新增 CRD 字段的端到端工作流：types.go 加字段→kubebuilder 标注→校验→模板结构体→模板渲染→codegen/update-crds→测试。",
+          "learning_goals": [
+            "掌握新增 CRD 字段的完整改动清单",
+            "理解 make update-codegen 与 make update-crds 的强制顺序",
+            "了解 OSS/Plus、v1/v2 模板的同步要求"
+          ],
+          "source_files": [
+            "pkg/apis/configuration/v1/types.go",
+            "pkg/apis/configuration/validation/virtualserver.go",
+            "Makefile",
+            "internal/configs/version2/nginx.virtualserver.tmpl"
+          ],
+          "minimal_modules": [
+            "类型与标注",
+            "校验与生成",
+            "模板结构与渲染",
+            "测试与 codegen"
+          ],
+          "practice_task": "为 VirtualServer 的 route 增加一个布尔字段（如 enable 某指令），列出需要改动的文件清单并执行 codegen。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3",
+            "u4-l8"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "扩展实践：新增一个 Ingress 注解",
+          "order": 2,
+          "filename": "u8-l2-add-new-annotation.md",
+          "level": "advanced",
+          "topic": "演示新增 nginx.org/* 注解的工作流：注解常量→解析与校验→ConfigParams 字段→模板渲染（OSS 与 Plus 同步）→测试。",
+          "learning_goals": [
+            "掌握注解从常量到指令的完整链路改动",
+            "理解 OSS/Plus 模板同步的必要性",
+            "了解注解校验的写法"
+          ],
+          "source_files": [
+            "internal/configs/annotations.go",
+            "internal/configs/parsing_helpers.go",
+            "internal/k8s/validation.go",
+            "internal/configs/version1/nginx.tmpl"
+          ],
+          "minimal_modules": [
+            "注解常量与解析",
+            "校验函数",
+            "ConfigParams 字段",
+            "模板渲染（OSS/Plus）"
+          ],
+          "practice_task": "新增一个控制某 NGINX 指令的注解，并确保 OSS 与 Plus 模板都渲染它。",
+          "depends_on": [
+            "u4-l3",
+            "u4-l8"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "扩展实践：新增一个 Policy 类型",
+          "order": 3,
+          "filename": "u8-l3-add-new-policy.md",
+          "level": "advanced",
+          "topic": "演示新增 Policy CRD 类型的工作流：types.go Policy spec→校验→policy.go 翻译→适用范围判定→CRD 文档→测试。",
+          "learning_goals": [
+            "掌握新增 Policy 类型的端到端改动",
+            "理解 generatePolicies 的分派扩展点",
+            "了解 IsPolicySupportedOnIngress 的维护"
+          ],
+          "source_files": [
+            "pkg/apis/configuration/v1/types.go",
+            "pkg/apis/configuration/validation/virtualserver.go",
+            "internal/configs/policy.go",
+            "docs/crd/k8s.nginx.org_policies.md"
+          ],
+          "minimal_modules": [
+            "Policy spec 扩展",
+            "校验扩展",
+            "翻译分派扩展",
+            "适用范围与文档"
+          ],
+          "practice_task": "设计一个最小新 Policy（如简单的 IP 白名单），列出新增它需要改动的所有文件。",
+          "depends_on": [
+            "u2-l4",
+            "u4-l7"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Go 单元测试与快照测试",
+          "order": 4,
+          "filename": "u8-l4-go-unit-and-snapshot-tests.md",
+          "level": "advanced",
+          "topic": "讲解项目测试体系：table-driven 单元测试、go-snaps 快照黄金测试（version1/version2 __snapshots__）、make test 与 UPDATE_SNAPS 的用法。",
+          "learning_goals": [
+            "掌握 table-driven 测试的组织方式",
+            "理解快照黄金测试的更新与校验流程",
+            "了解 make test 的 build tags 与 shuffle"
+          ],
+          "source_files": [
+            "internal/configs/configurator_test.go",
+            "internal/configs/version2/template_executor_test.go",
+            "internal/k8s/controller_test.go",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "table-driven 测试",
+            "快照黄金测试",
+            "UPDATE_SNAPS 流程",
+            "make test 约定"
+          ],
+          "practice_task": "为一个模板渲染改动运行测试，必要时用 UPDATE_SNAPS=always 更新快照并说明改了哪些断言。",
+          "depends_on": [
+            "u4-l8",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l5",
+          "title": "Helm Chart：values 与 schema",
+          "order": 5,
+          "filename": "u8-l5-helm-values-and-schema.md",
+          "level": "advanced",
+          "topic": "深入 charts/nginx-ingress：values.yaml/values.schema.json 的对应关系、templates 下各类资源模板与 _helpers.tpl 的复用，以及 values 变更对部署的影响。",
+          "learning_goals": [
+            "理解 values 与 schema 的校验对应关系",
+            "掌握 _helpers.tpl 与命名模板的复用",
+            "了解 values 变更如何影响 Deployment/ConfigMap/Service"
+          ],
+          "source_files": [
+            "charts/nginx-ingress/values.yaml",
+            "charts/nginx-ingress/values.schema.json",
+            "charts/nginx-ingress/templates/_helpers.tpl",
+            "charts/nginx-ingress/templates/controller-deployment.yaml",
+            "charts/nginx-ingress/templates/controller-configmap.yaml"
+          ],
+          "minimal_modules": [
+            "values 结构",
+            "schema 校验",
+            "helpers 复用",
+            "资源模板"
+          ],
+          "practice_task": "在 values 中新增一个开关，同步更新 schema，并用 helm lint 验证。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l6",
+          "title": "Python 集成测试（pytest）",
+          "order": 6,
+          "filename": "u8-l6-python-integration-tests.md",
+          "level": "advanced",
+          "topic": "讲解 tests/suite 下的 pytest 集成测试体系：conftest/settings、fixtures、Kubernetes 客户端封装，以及如何针对真实集群验证端到端行为。",
+          "learning_goals": [
+            "理解集成测试与单元测试的分工",
+            "掌握 fixtures 与 settings 的测试组织",
+            "了解如何针对 CRD/注解/策略写端到端用例"
+          ],
+          "source_files": [
+            "tests/conftest.py",
+            "tests/settings.py",
+            "tests/suite/fixtures.py",
+            "tests/suite/test_annotations.py"
+          ],
+          "minimal_modules": [
+            "测试组织与 settings",
+            "fixtures 体系",
+            "K8s 客户端封装",
+            "端到端用例写法"
+          ],
+          "practice_task": "阅读一个现有集成测试（如 test_annotations），描述它从准备资源到断言请求结果的步骤。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l7",
+          "title": "CI/CD 流水线与发布",
+          "order": 7,
+          "filename": "u8-l7-ci-pipelines-and-release.md",
+          "level": "advanced",
+          "topic": "讲解 .github/workflows 下的可复用工作流模式：构建/测试/镜像矩阵、复用 workflow 编排、Azure Key Vault OIDC 凭据与发布流程。",
+          "learning_goals": [
+            "理解可复用 workflow 的组织与矩阵构建",
+            "掌握 CI 如何串联 lint/test/build/image",
+            "了解凭据安全（Azure Key Vault OIDC 而非 GitHub secrets）"
+          ],
+          "source_files": [
+            ".github/workflows/ci.yml",
+            ".github/workflows/build-oss.yml",
+            ".github/workflows/build-plus.yml",
+            ".github/workflows/build-artifacts.yml"
+          ],
+          "minimal_modules": [
+            "可复用工作流",
+            "构建矩阵",
+            "凭据安全",
+            "发布流程"
+          ],
+          "practice_task": "梳理 ci.yml 调用了哪些复用 workflow，画出从 PR 到镜像产出的流水线关系图。",
+          "depends_on": [
+            "u1-l5",
+            "u8-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
