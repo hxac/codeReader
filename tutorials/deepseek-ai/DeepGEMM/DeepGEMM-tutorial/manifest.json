@@ -1,0 +1,1048 @@
+{
+  "project": "DeepGEMM",
+  "head": "54e22612409371d6364144b69086735beb54e98b",
+  "rationale": "DeepGEMM 是一个「宿主 C++ + 运行时 JIT 编译设备内核」的双层架构的高性能张量核 kernel 库，复杂度高、横跨 Python/C++/CUDA PTX 三层。因此学习路线按「自顶向下逐层下钻」设计：入门层(Unit1-2) 先让读者认识项目定位、跑通环境、看懂分层目录与 Python API；进阶层(Unit3-7) 拆解从 JIT 编译、宿主启动链路、启发式配置选择到设备内核内部(MMA/PTX/调度) 与分组 GEMM(MoE) 的完整主链路；专家层(Unit8-10) 进入 Mega MoE 融合内核、MQA 索引器、HyperConnection/Einsum、FP4 与工程实践。单元划分严格对应「Python 入口 → C++ 绑定/派发 → JIT 基础设施 → 启动链路 → 启发式 → 设备内核 → 分组 GEMM → Mega MoE → 其它 kernel 家族 → FP4/工程」，每篇只讲一个相对独立的主题并绑定 1-6 个真实源码文件，依赖关系沿调用链自上而下，确保读者能循序渐进理解从一次 fp8_gemm_nt 调用到 GPU tensor core 计算的完整路径。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 DeepGEMM 与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 DeepGEMM 是什么：一个面向 SM90/SM100 的统一高性能张量核 kernel 库，涵盖 FP8/FP4/BF16 GEMM、MoE、Mega MoE、MQA 评分、HyperConnection 等，并强调其运行时 JIT 编译、不依赖重型模板的设计哲学。",
+          "learning_goals": [
+            "理解 DeepGEMM 的定位、支持的算子类型与目标硬件(SM90/SM100)",
+            "了解项目的核心设计理念：轻量、运行时 JIT、借鉴 CUTLASS/CuTe 概念但不重度依赖",
+            "建立对 News 时间线与版本演进(如 Mega MoE、FP4 Indexer、PDL)的整体印象"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目定位与特性",
+            "硬件与算子矩阵",
+            "版本演进时间线"
+          ],
+          "practice_task": "阅读 README 后，用一段话总结 DeepGEMM 与 cuBLASLt/CUTLASS 的差异，并列出它当前支持的 5 类核心 kernel 家族及其典型应用场景。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境要求与构建安装",
+          "order": 2,
+          "filename": "u1-l2-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解 DeepGEMM 的依赖(SM90/SM100 GPU、CUDA 12.3+/12.9+、PyTorch、CUTLASS、{fmt})、setup.py 的 CUDAExtension 构建逻辑，以及 develop.sh / install.sh 两种构建入口与 CMakeLists.txt 仅用于 IDE 索引的事实。",
+          "learning_goals": [
+            "掌握 DeepGEMM 的运行时与编译期依赖要求",
+            "理解 setup.py 如何构建 _C 扩展、拷贝 include、生成 .pyi 与默认 envs",
+            "区分 develop.sh(链接 includes 并本地构建 .so) 与 install.sh(优先下载预编译 wheel) 的差异"
+          ],
+          "source_files": [
+            "setup.py",
+            "develop.sh",
+            "install.sh",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "依赖与环境要求",
+            "CUDAExtension 构建",
+            "wheel 下载与本地构建",
+            "IDE 索引用 CMake"
+          ],
+          "practice_task": "在本机或容器中执行 develop.sh 完成 DeepGEMM 的本地构建，记录构建产物路径，并验证能在 Python 中成功 import deep_gemm。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与分层架构",
+          "order": 3,
+          "filename": "u1-l3-directory-and-layered-arch.md",
+          "level": "beginner",
+          "topic": "梳理 DeepGEMM 的整体目录结构：deep_gemm/(Python 包)、csrc/(宿主 C++)、deep_gemm/include/deep_gemm/(设备侧 CUDA 头文件)、tests/、scripts/，并建立 Python→C++ 绑定→API 派发→JIT→设备 kernel 的分层心智模型。",
+          "learning_goals": [
+            "看懂仓库目录布局及其职责划分",
+            "理解 csrc/apis、csrc/jit、csrc/jit_kernels、deep_gemm/include 的分层关系",
+            "建立从一次 Python 调用到 GPU kernel 执行的端到端数据流概念"
+          ],
+          "source_files": [
+            "deep_gemm/__init__.py",
+            "csrc/python_api.cpp",
+            "csrc/apis/gemm.hpp"
+          ],
+          "minimal_modules": [
+            "目录职责划分",
+            "宿主/设备分层",
+            "端到端调用数据流"
+          ],
+          "practice_task": "绘制一张 DeepGEMM 分层架构图，标注从 deep_gemm.fp8_gemm_nt 调用开始，依次经过的目录/文件，直到设备 kernel 执行。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Python 接口全貌与第一次调用",
+          "order": 4,
+          "filename": "u1-l4-python-api-and-first-call.md",
+          "level": "beginner",
+          "topic": "通过 deep_gemm/__init__.py 梳理导出的全部 Python 接口(GEMM、Mega MoE、MQA、HyperConnection、layout 工具、testing、legacy)，并以 tests/test_fp8_fp4.py 为例完成第一次真实 GEMM 调用与结果校验。",
+          "learning_goals": [
+            "掌握 deep_gemm 包导出的主要函数分类与命名约定",
+            "能够编写并运行一个最小的 FP8 GEMM 调用并验证数值正确性",
+            "理解 _C.init 在 import 时完成的库根目录与 CUDA home 初始化"
+          ],
+          "source_files": [
+            "deep_gemm/__init__.py",
+            "tests/test_fp8_fp4.py"
+          ],
+          "minimal_modules": [
+            "Python 导出接口分类",
+            "_C 初始化",
+            "最小 GEMM 调用示例"
+          ],
+          "practice_task": "参考 test_fp8_fp4.py 中的 generate_normal，构造一对 FP8 张量与缩放因子，调用 deep_gemm.fp8_fp4_gemm_nt 完成一次 GEMM 并用 calc_diff 校验与参考实现的一致性。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "GEMM 基础与布局/缩放因子",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "GEMM 命名约定与 NT 布局",
+          "order": 1,
+          "filename": "u2-l1-gemm-naming-and-nt-layout.md",
+          "level": "beginner",
+          "topic": "讲解 DeepGEMM 的 D = C + A @ B 约定、NT(row-major A, col-major B) 主布局、SM90 仅支持 NT 而 SM100 支持 NT/TN/NN/TT，以及 fp8_gemm_nt/nn/tn/tt 之间的转置派生关系。",
+          "learning_goals": [
+            "理解 D=C+A@B 与 NT/TN/NN/TT 内存布局的含义",
+            "掌握 SM90 与 SM100 在布局支持上的差异",
+            "看懂 apis/gemm.hpp 中 nn/tn/tt 如何通过转置复用 nt 实现"
+          ],
+          "source_files": [
+            "README.md",
+            "csrc/apis/gemm.hpp"
+          ],
+          "minimal_modules": [
+            "GEMM 命名约定",
+            "NT 主布局与转置派生",
+            "架构布局能力差异"
+          ],
+          "practice_task": "阅读 apis/gemm.hpp 中 fp8_fp4_gemm_nn/tn/tt 的实现，说明它们各自对 A、B 做了怎样的转置，并解释为何 SM90 上仍只走 nt 路径。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "缩放因子 recipe 与 UE8M0 打包",
+          "order": 2,
+          "filename": "u2-l2-scaling-factor-recipe-ue8m0.md",
+          "level": "beginner",
+          "topic": "讲解 FP8/FP4 逐块缩放因子的 recipe(gran_mn, gran_k)、SM90 用 FP32 SF、SM100 用 packed UE8M0(4 个打包进一个 int) 的区别，以及 transform_sf_into_required_layout 如何把用户 SF 变换成 kernel 所需的 TMA 对齐布局。",
+          "learning_goals": [
+            "理解 recipe=(gran_mn, gran_k) 对缩放粒度的描述",
+            "掌握 SM90 FP32 SF 与 SM100 UE8M0 打包 SF 的差异",
+            "看懂 layout.hpp 中不同 (dtype, gran_mn, gran_k, arch) 组合的 SF 变换分支"
+          ],
+          "source_files": [
+            "csrc/apis/layout.hpp",
+            "deep_gemm/utils/layout.py"
+          ],
+          "minimal_modules": [
+            "逐块缩放与 recipe",
+            "FP32 vs UE8M0",
+            "SF 变换分支"
+          ],
+          "practice_task": "针对一个 [M,K] 的 FP8 张量，写出 SM90 与 SM100 两种架构下所需 SF 的形状与 dtype，并用 transform_sf_into_required_layout 验证变换结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "C++ 绑定与 API 派发层",
+          "order": 3,
+          "filename": "u2-l3-cpp-binding-and-dispatch.md",
+          "level": "beginner",
+          "topic": "讲解 python_api.cpp 如何用 pybind11 注册 _C 模块，以及 apis/gemm.hpp 等如何在形状/类型/布局校验后，根据 device_runtime->get_arch_major() 派发到 sm90 或 sm100 的具体实现。",
+          "learning_goals": [
+            "理解 python_api.cpp 的 pybind11 模块注册结构",
+            "掌握 API 层的参数校验与 early_return 逻辑",
+            "理解 arch_major(9 vs 10) 派发到不同 sm90/sm100 impl 的模式"
+          ],
+          "source_files": [
+            "csrc/python_api.cpp",
+            "csrc/apis/gemm.hpp",
+            "csrc/apis/runtime.hpp"
+          ],
+          "minimal_modules": [
+            "pybind11 注册",
+            "参数校验与 early_return",
+            "架构派发"
+          ],
+          "practice_task": "以 fp8_fp4_gemm_nt 为例，跟踪它从 python_api.cpp 注册到根据 arch_major 调用 sm90_fp8_gemm_1d1d 或 sm100_fp8_fp4_gemm_1d1d 的完整派发链路，画出调用图。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "JIT 编译系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "JIT 架构总览：宿主运行时 vs 设备内核",
+          "order": 1,
+          "filename": "u3-l1-jit-arch-overview.md",
+          "level": "intermediate",
+          "topic": "总览 DeepGEMM 的 JIT 设计：设备 kernel 以 .cuh 模板形式存在，宿主运行时在调用时根据形状/配置生成源码、编译为 cubin、缓存并加载，强调安装时无需 CUDA 编译的优势。",
+          "learning_goals": [
+            "理解为何选择运行时 JIT 而非预编译所有形状",
+            "掌握 compiler->build 的整体流程：签名→缓存查找→编译→原子重命名",
+            "理解 KernelRuntime 加载 cubin 并提供 KernelHandle 的角色"
+          ],
+          "source_files": [
+            "csrc/jit/compiler.hpp",
+            "csrc/jit/kernel_runtime.hpp"
+          ],
+          "minimal_modules": [
+            "JIT 设计动机",
+            "build 流程",
+            "KernelRuntime 加载"
+          ],
+          "practice_task": "在 DG_JIT_DEBUG=1 下运行一次 GEMM，观察控制台输出的编译/加载信息，定位 $HOME/.deep_gemm 缓存目录并解释其中 kernel.* 目录的命名由来。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "代码生成与模板实例化",
+          "order": 2,
+          "filename": "u3-l2-codegen-template-instantiation.md",
+          "level": "intermediate",
+          "topic": "讲解 *Runtime 类(如 SM90FP8Gemm1D1DRuntime)如何通过 generate_impl 用 fmt::format 把 BLOCK_M/N/K、num_stages、num_sms、GemmType 等编译期常量填入设备模板，生成一段包含 #include 与 __instantiate_kernel 的 .cu 源码。",
+          "learning_goals": [
+            "理解代码生成如何把运行时形状变成编译期模板参数",
+            "掌握 get_compiled_dim 在形状维度上的特化机制",
+            "看懂 generate / launch_impl 在 LaunchRuntime 基类中的协作"
+          ],
+          "source_files": [
+            "csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp",
+            "csrc/jit_kernels/impls/runtime_utils.hpp"
+          ],
+          "minimal_modules": [
+            "模板实例化代码生成",
+            "compiled_dims 特化",
+            "LaunchRuntime 协作"
+          ],
+          "practice_task": "在 DG_JIT_DEBUG=1 下捕获 sm90_fp8_gemm_1d1d 生成的 .cu 源码，标注每个模板参数对应的 BLOCK_M/N/K 等配置，并解释 compiled_dims=nk 的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "编译缓存与头文件哈希",
+          "order": 3,
+          "filename": "u3-l3-jit-cache-include-hash.md",
+          "level": "intermediate",
+          "topic": "讲解 JIT 缓存机制：基于 (name, signature, flags, code) 计算摘要作为缓存目录名，IncludeParser 递归解析 <deep_gemm/*> 头文件并计算 include hash，使得头文件改动能正确触发重编译，以及在分布式文件系统上的原子目录重命名。",
+          "learning_goals": [
+            "理解缓存键的构成与 get_hex_digest 的作用",
+            "掌握 IncludeParser 如何递归哈希头文件以感知 include 变化",
+            "理解原子目录 rename + fsync 在多进程/分布式文件系统上的并发安全设计"
+          ],
+          "source_files": [
+            "csrc/jit/cache.hpp",
+            "csrc/jit/include_parser.hpp",
+            "csrc/jit/compiler.hpp"
+          ],
+          "minimal_modules": [
+            "缓存键与摘要",
+            "include 哈希递归",
+            "原子重命名与 fsync"
+          ],
+          "practice_task": "修改某个 deep_gemm/include 下的头文件注释后重新运行同一形状，观察缓存是否命中/重编译，并用 IncludeParser 的逻辑解释原因。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "NVCC 与 NVRTC 编译器对比",
+          "order": 4,
+          "filename": "u3-l4-nvcc-vs-nvrtc.md",
+          "level": "intermediate",
+          "topic": "对比 NVCCCompiler(调用外部 nvcc，性能更稳) 与 NVRTCCompiler(进程内编译，更快、支持 PCH) 两条编译后端，讲解 DG_JIT_USE_NVRTC 选择、版本检查(>=12.3)、arch 后缀(100a/100f) 与各类编译开关。",
+          "learning_goals": [
+            "理解 NVCC 与 NVRTC 两种编译后端的实现与取舍",
+            "掌握编译 flag 的组装(--register-usage-level=10、--expt-extended-lambda 等)",
+            "看懂 device_runtime->get_arch 如何根据 NVCC 版本决定是否使用 arch family 后缀"
+          ],
+          "source_files": [
+            "csrc/jit/compiler.hpp",
+            "csrc/jit/device_runtime.hpp"
+          ],
+          "minimal_modules": [
+            "NVCC 后端",
+            "NVRTC 后端与 PCH",
+            "版本与 arch 后缀"
+          ],
+          "practice_task": "分别用 DG_JIT_USE_NVRTC=0 与 1 编译同一个 kernel，对比两次编译耗时与产出，并解释为何 NVRTC 在某些 case 性能可能更差。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "宿主侧内核启动链路",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "DeviceRuntime 与运行时配置",
+          "order": 1,
+          "filename": "u4-l1-device-runtime-config.md",
+          "level": "intermediate",
+          "topic": "讲解 DeviceRuntime 单例如何缓存 cudaDeviceProp、提供 num_sms/tc_util/pdl 的 get/set、自建或复用 cuBLASLt handle 与 workspace，以及 get_arch/get_arch_major 如何驱动整个架构派发。",
+          "learning_goals": [
+            "理解 DeviceRuntime 缓存设备属性与运行时旋钮的角色",
+            "掌握 set_num_sms/set_tc_util/set_pdl 等全局配置的含义",
+            "理解 get_arch_major() 返回 9/10 如何作为全库派发的核心开关"
+          ],
+          "source_files": [
+            "csrc/jit/device_runtime.hpp",
+            "csrc/apis/runtime.hpp"
+          ],
+          "minimal_modules": [
+            "设备属性缓存",
+            "运行时旋钮",
+            "架构判定"
+          ],
+          "practice_task": "调用 deep_gemm.set_num_sms / set_tc_util / set_pdl，分别在两种取值下运行同一 GEMM，用 bench 工具观察性能变化并解释原理。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "TMA 描述符与 swizzle",
+          "order": 2,
+          "filename": "u4-l2-tma-descriptors-swizzle.md",
+          "level": "intermediate",
+          "topic": "讲解 runtime_utils.hpp 如何用 cuTensorMapEncodeTiled 构造 A/B/CD/SF 的 2D/3D TMA 描述符，包括 major(K vs MN) 决定内外维、swizzle mode(32B/64B/128B) 对共享内存布局的影响，以及 FP4 packed 的特殊处理。",
+          "learning_goals": [
+            "理解 TMA 描述符的作用与构造参数(gmem/smem 维度、stride、swizzle)",
+            "掌握 K-major 与 MN-major 如何映射到 inner/outer 维度",
+            "看懂 swizzle mode 选择对避免 bank conflict 与适配 tensor core 的意义"
+          ],
+          "source_files": [
+            "csrc/jit_kernels/impls/runtime_utils.hpp"
+          ],
+          "minimal_modules": [
+            "TMA 描述符构造",
+            "major 与内外维",
+            "swizzle 模式"
+          ],
+          "practice_task": "在 DG_JIT_DEBUG=1 下查看一次 GEMM 打印的 'Making TMA desc' 信息，解释其中 gmem/smem 维度与 swizzle 取值，并推导为何 SFA/SFB 要求 MN-major。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "内核加载与启动句柄",
+          "order": 3,
+          "filename": "u4-l3-kernel-load-and-launch.md",
+          "level": "intermediate",
+          "topic": "讲解 handle.hpp 如何通过 CUDA Driver/Runtime API 加载 cubin、枚举 kernel 符号、构造 LaunchConfig(grid/block/smem/cluster/PDL 属性)，以及 LaunchRuntime::launch 如何统一组装并派发 launch_kernel。",
+          "learning_goals": [
+            "理解 cuLibraryLoadFromFile/cuLibraryEnumerateKernels 的符号定位机制",
+            "掌握 construct_launch_config 中 cluster 与 PDL 属性的设置",
+            "看懂 LaunchRuntime 模板基类如何统一各 kernel 的 generate/launch 流程"
+          ],
+          "source_files": [
+            "csrc/jit/handle.hpp",
+            "csrc/jit/kernel_runtime.hpp"
+          ],
+          "minimal_modules": [
+            "cubin 加载与符号枚举",
+            "LaunchConfig 与 PDL/cluster",
+            "LaunchRuntime 基类"
+          ],
+          "practice_task": "梳理一次内核启动从 KernelRuntime 构造到 cuLaunchKernelEx 的完整步骤，并说明 cluster_dim 与 enable_pdl 两个启动属性分别由谁决定。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "启发式与配置选择",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "GemmDesc 与配置数据结构",
+          "order": 1,
+          "filename": "u5-l1-gemmdesc-config-structs.md",
+          "level": "intermediate",
+          "topic": "讲解 config.hpp 中的核心数据结构：GemmDesc(形状/dtype/major/num_sms/tc_util/compiled_dims/expected_*)、Layout(block_m/n/k, cluster)、StorageConfig、PipelineConfig、LaunchConfig 与 GemmConfig 的组合关系。",
+          "learning_goals": [
+            "理解 GemmDesc 如何完整描述一次 GEMM 问题",
+            "掌握 Layout/StorageConfig/PipelineConfig/LaunchConfig 各自承载的配置维度",
+            "看懂 MmaKind、KernelType(1D1D/1D2D/NoSF) 等枚举的含义"
+          ],
+          "source_files": [
+            "csrc/jit_kernels/heuristics/config.hpp",
+            "deep_gemm/include/deep_gemm/common/types.cuh"
+          ],
+          "minimal_modules": [
+            "GemmDesc",
+            "GemmConfig 组合结构",
+            "枚举类型"
+          ],
+          "practice_task": "给定一个具体的 FP8 GEMM 形状与累加需求，手动构造对应的 GemmDesc 字段，并解释 check_validity 中对各字段的约束。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "布局候选与最优配置选择",
+          "order": 2,
+          "filename": "u5-l2-layout-candidates-best-config.md",
+          "level": "intermediate",
+          "topic": "讲解 get_best_config 如何枚举 ArchSpec::get_layout_candidates 给出的 block_m/n/cluster 候选，用 get_layout_info(num_waves/last_wave_util/num_cycles) 评估并选出最优 Layout，再推断 storage/pipeline/launch 配置。",
+          "learning_goals": [
+            "理解 block_m/block_n/cluster 候选的生成规则与约束(寄存器溢出、bank conflict)",
+            "掌握 LayoutInfo 评估指标如何比较选出最优布局",
+            "看懂 SM90ArchSpec 与 SM100ArchSpec 的差异点(block_k、multicast 等)"
+          ],
+          "source_files": [
+            "csrc/jit_kernels/heuristics/common.hpp",
+            "csrc/jit_kernels/heuristics/sm90.hpp"
+          ],
+          "minimal_modules": [
+            "布局候选枚举",
+            "布局评估与比较",
+            "架构特化 ArchSpec"
+          ],
+          "practice_task": "在 DG_PRINT_CONFIGS=1 下运行若干形状，记录选出的 GemmConfig/LayoutInfo，解释为何小 M 会倾向更小的 block_m，以及 1D1D/FP32 输出时 block_n 从 24 起步的原因。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "compiled_dims 与运行时调优旋钮",
+          "order": 3,
+          "filename": "u5-l3-compiled-dims-tuning-knobs.md",
+          "level": "intermediate",
+          "topic": "讲解 HeuristicsRuntime 提供的调优旋钮：set_ignore_compile_dims(关闭形状特化)、set_block_size_multiple_of(约束 block 对齐)、set_mk_alignment_for_contiguous_layout(分组对齐)，以及 get_theoretical_mk_alignment 的计算逻辑。",
+          "learning_goals": [
+            "理解 compiled_dims 如何决定哪些维度被编译期特化及其编译成本权衡",
+            "掌握 ignore_compile_dims / block_size_multiple_of 的用途",
+            "看懂 SM100 上 get_theoretical_mk_alignment_for_contiguous_layout 的推导"
+          ],
+          "source_files": [
+            "csrc/jit_kernels/heuristics/runtime.hpp",
+            "csrc/jit_kernels/impls/runtime_utils.hpp"
+          ],
+          "minimal_modules": [
+            "形状特化与 ignore_compile_dims",
+            "block 对齐约束",
+            "contiguous 对齐"
+          ],
+          "practice_task": "对比 compiled_dims=nk 与 set_ignore_compile_dims(True) 两种设置下同一形状的编译产物数量与性能，解释特化带来的编译-性能权衡。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "设备内核内部机制",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "内核入口：SM90 FP8 GEMM 1D1D",
+          "order": 1,
+          "filename": "u6-l1-sm90-fp8-gemm-1d1d-entry.md",
+          "level": "intermediate",
+          "topic": "以 sm90_fp8_gemm_1d1d_impl 为例讲解一个完整 GEMM 设备 kernel 的结构：__launch_bounds__、共享内存划分(A/B/SF/D 的 per-stage 大小)、TMA descriptor 预取、TMA 线程与 math 线程的分工、k-loop 流水线。",
+          "learning_goals": [
+            "理解 1D1D kernel 的整体结构与线程划分(TMA/math warps)",
+            "掌握共享内存各 stage 的尺寸计算与对齐约束",
+            "看懂 shape_m/n/k 在编译期特化与运行时传入的覆盖逻辑"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh"
+          ],
+          "minimal_modules": [
+            "kernel 结构与 launch_bounds",
+            "共享内存划分",
+            "TMA/math 线程分工"
+          ],
+          "practice_task": "阅读 sm90_fp8_gemm_1d1d_impl 的前半部分，列出它划分的共享内存区域及其大小公式，并解释 DG_STATIC_ASSERT 对 BLOCK_K==128 的约束来源。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "MMA 抽象：WGMMA(SM90) vs UMMA(SM100)",
+          "order": 2,
+          "filename": "u6-l2-mma-wgmma-vs-umma.md",
+          "level": "intermediate",
+          "topic": "对比 SM90 的 WGMMA(mma/sm90.cuh 中 FP8MMASelector 按 N 选择 MMA_64xNx32 SS_TN 指令) 与 SM100 的 UMMA/tcgen05(mma/sm100.cuh 中 make_smem_desc/make_sf_desc 构造 descriptor) 两种张量核编程模型。",
+          "learning_goals": [
+            "理解 SM90 WGMMA 指令的 M=64/K=32 固定结构与 N 维 selector",
+            "掌握 SM100 UMMA 的 SmemDescriptor(SBO/LBO/layout) 构造",
+            "对比两代架构在 MMA 描述符与缩放因子(SF desc) 上的差异"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/mma/sm90.cuh",
+            "deep_gemm/include/deep_gemm/mma/sm100.cuh"
+          ],
+          "minimal_modules": [
+            "WGMMA(SM90)",
+            "UMMA descriptor(SM100)",
+            "SF descriptor"
+          ],
+          "practice_task": "对比 sm90.cuh 的 FP8MMA::wgmma 与 sm100.cuh 的 make_smem_desc，说明两者如何把共享内存地址与布局编码进 MMA 指令/描述符。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "PTX 内联函数：TMA 加载与栅栏",
+          "order": 3,
+          "filename": "u6-l3-ptx-tma-and-barriers.md",
+          "level": "intermediate",
+          "topic": "讲解 ptx/ 目录下的内联 PTX 抽象：tma.cuh(TMA load/store/multicast)、wgmma.cuh/tcgen05.cuh(MMA 指令封装)、ld_st.cuh(异步/原子加载)、以及 comm/barrier.cuh 的 cluster_sync 与 grid_sync 用于多 SM 协作。",
+          "learning_goals": [
+            "理解 TMA 异步拷贝的 PTX 封装与 mbarrier 同步",
+            "掌握 cluster_sync / grid_sync 在多 SM/多 rank 协作中的作用",
+            "看懂 ld_st.cuh 中 relaxed/acquire 语义的加载与原子操作"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/ptx/tma.cuh",
+            "deep_gemm/include/deep_gemm/comm/barrier.cuh",
+            "deep_gemm/include/deep_gemm/ptx/ld_st.cuh"
+          ],
+          "minimal_modules": [
+            "TMA PTX 封装",
+            "cluster/grid 同步",
+            "加载与原子语义"
+          ],
+          "practice_task": "跟踪一次 GEMM 中 TMA 加载到 mbarrier 等待再到 WGMMA 计算的同步序列，解释 grid_sync 在 Mega MoE 之外是否被普通 GEMM 使用。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "分块调度与 L2 swizzle",
+          "order": 4,
+          "filename": "u6-l4-block-scheduling-swizzle.md",
+          "level": "intermediate",
+          "topic": "讲解 scheduler/gemm.cuh 的 Scheduler 模板：get_next_block 跨 SM 分配 (m_block, n_block)、get_swizzled_block_idx 做 L2 友好的块序重排、SM90 multicast 的对齐修正，以及 Normal/Grouped/Masked/K-Grouped 不同 GemmType 的调度分支。",
+          "learning_goals": [
+            "理解 block 在 SM 间的分配与 wave 概念",
+            "掌握 L2 swizzle 的分组重排策略及其对缓存命中率的提升",
+            "看懂 multicast 在 SM90 上的动态启用/禁用判定"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/scheduler/gemm.cuh"
+          ],
+          "minimal_modules": [
+            "块分配与 wave",
+            "L2 swizzle",
+            "multicast 判定"
+          ],
+          "practice_task": "对一个 Normal GEMM，手算 num_m_blocks/num_n_blocks/num_blocks，并推演 get_swizzled_block_idx 对前若干 block_idx 给出的 (m_block, n_block) 序列。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "分组 GEMM(MoE)",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "连续布局的 M 轴分组 GEMM",
+          "order": 1,
+          "filename": "u7-l1-m-grouped-contiguous.md",
+          "level": "intermediate",
+          "topic": "讲解 m_grouped_*_gemm_*_contiguous：只对 M 轴分组(N/K 固定)，把多个 expert 的 token 拼成连续张量，用 grouped_layout 标记每段归属，以及为何每段需对齐到 get_mk_alignment_for_contiguous_layout。",
+          "learning_goals": [
+            "理解 contiguous 布局如何用单个张量承载变长 expert token",
+            "掌握 grouped_layout 数组与 Scheduler 中 MGroupedContiguous 的索引逻辑",
+            "看懂 m/k 对齐要求的来源与 psum 布局的引入动机"
+          ],
+          "source_files": [
+            "csrc/apis/gemm.hpp",
+            "deep_gemm/include/deep_gemm/scheduler/gemm.cuh"
+          ],
+          "minimal_modules": [
+            "M 轴分组 contiguous",
+            "grouped_layout 索引",
+            "对齐要求"
+          ],
+          "practice_task": "用 tests/generators.py 中的 generate_m_grouped_contiguous 构造一个 3-expert 的 contiguous 输入，调用 m_grouped_fp8_fp4_gemm_nt_contiguous 并校验每个 expert 段的输出。",
+          "depends_on": [
+            "u2-l3",
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "掩码分组 GEMM(解码阶段)",
+          "order": 2,
+          "filename": "u7-l2-m-grouped-masked.md",
+          "level": "intermediate",
+          "topic": "讲解 m_grouped_*_gemm_nt_masked：在 CUDA graph 解码阶段 CPU 不知道每 expert 的 token 数，通过 masked_m 张量标记每 expert 的有效行数，kernel 只计算有效部分，适配 DeepEP 低延迟输出。",
+          "learning_goals": [
+            "理解 masked 布局在解码/CUDA graph 场景下的必要性",
+            "掌握 masked_m 张量与 MGroupedMasked 调度的有效行判定",
+            "看懂 expected_m 参数在编译期特化中的作用"
+          ],
+          "source_files": [
+            "csrc/apis/gemm.hpp",
+            "deep_gemm/include/deep_gemm/scheduler/gemm.cuh"
+          ],
+          "minimal_modules": [
+            "masked 布局动机",
+            "masked_m 有效行",
+            "expected_m 特化"
+          ],
+          "practice_task": "构造一个带 masked_m 的分组输入，对比 masked 与 contiguous 两种 API 在相同有效数据下的数值结果，并解释 masked 为何需要 expected_m。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "K 轴分组 GEMM 与 psum 布局",
+          "order": 3,
+          "filename": "u7-l3-k-grouped-and-psum.md",
+          "level": "intermediate",
+          "topic": "讲解 k_grouped_*_gemm_*_contiguous(M/N 固定、K 轴变长，用于 MoE 权重梯度 wgrad)，涉及 ks_cpu/grouped_layout、sum_k 校验、以及 SM100 的 psum 布局(KGroupedContiguousWithPsumLayout)如何避免 padding 浪费。",
+          "learning_goals": [
+            "理解 K 轴分组在 wgrad 场景的用途与 1D1D/recipe=(1,1,128) 约束",
+            "掌握 ks_cpu 与 grouped_layout 的语义及 sum_k 校验",
+            "看懂 psum 布局如何按对齐的累计偏移组织变长 K 段"
+          ],
+          "source_files": [
+            "csrc/apis/gemm.hpp",
+            "csrc/jit_kernels/heuristics/runtime.hpp"
+          ],
+          "minimal_modules": [
+            "K 轴分组 wgrad",
+            "ks_cpu 校验",
+            "psum 布局"
+          ],
+          "practice_task": "阅读 check_k_grouped_args 与 get_next_psum_k_group，解释 psum 布局下每段的 k_start/k_end 如何由对齐累计偏移推导，并说明其对显存的节省。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Mega MoE 融合内核",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Mega MoE 概念与对称内存",
+          "order": 1,
+          "filename": "u8-l1-mega-moe-symm-memory.md",
+          "level": "advanced",
+          "topic": "讲解 Mega MoE 将 EP dispatch + Linear1(FP8xFP4) + SwiGLU + Linear2(FP8xFP4) + EP combine 融合为单个 mega-kernel，并通过 SymmBuffer 在多进程间分配对称内存以实现 NVLink 通信与计算的overlap。",
+          "learning_goals": [
+            "理解 Mega MoE 的融合目标与各阶段(Linear1/SwiGLU/Linear2)",
+            "掌握 SymmBuffer 借助 torch symmetric memory 分配跨 rank 可寻址缓冲的机制",
+            "看懂 get_symm_buffer_for_mega_moe 中 ring token 与 wave budget 的尺寸推导"
+          ],
+          "source_files": [
+            "deep_gemm/mega/__init__.py",
+            "csrc/apis/mega.hpp"
+          ],
+          "minimal_modules": [
+            "融合 mega-kernel",
+            "对称内存 SymmBuffer",
+            "ring token 预算"
+          ],
+          "practice_task": "阅读 SymmBuffer.__init__，说明 group.size()==1 与 >1 时缓冲分配器(torch vs symm_mem)与 handle 的区别，并解释为何需要 rendezvous。",
+          "depends_on": [
+            "u2-l2",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Mega MoE 的权重变换",
+          "order": 2,
+          "filename": "u8-l2-mega-moe-weight-transform.md",
+          "level": "advanced",
+          "topic": "讲解 transform_weights_for_mega_moe 如何把 L1/L2 权重重排为 mega-kernel 所需布局：gate/up 交错(_interleave_weights)、FP8 情形下对 SF 做 UTCCP 转置(_transpose_sf_for_utccp)，以及 BF16 与 FP8xFP4 两种 mma_type 的差异。",
+          "learning_goals": [
+            "理解 gate/up 交错重排对 SwiGLU 融合的意义",
+            "掌握 UTCCP 所需的 SF 转置布局及其与 num_groups/mn 的关系",
+            "看懂 BF16 与 FP8xFP4 两种路径的权重/SF 处理差异"
+          ],
+          "source_files": [
+            "deep_gemm/mega/__init__.py"
+          ],
+          "minimal_modules": [
+            "gate/up 交错",
+            "UTCCP SF 转置",
+            "BF16 vs FP8xFP4 路径"
+          ],
+          "practice_task": "对一个模拟的 [num_experts, N, K] FP8 权重对(weight, sf)，手动实现 _interleave_weights 与 _transpose_sf_for_utccp 的等价操作并验证形状与数值。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Mega MoE 调度器与 wave 调度",
+          "order": 3,
+          "filename": "u8-l3-mega-moe-wave-scheduler.md",
+          "level": "advanced",
+          "topic": "讲解 scheduler/mega_moe.cuh 的 MegaMoEScheduler：BlockPhase(Linear1/Linear2) 状态机、每 wave 处理 kNumExpertsPerWave 个 expert、2-CTA cluster 对 N block 偶数的约束，以及 per-expert token 计数的缓存策略。",
+          "learning_goals": [
+            "理解 Mega MoE 的 wave/expert 调度状态机",
+            "掌握 2-CTA cluster 对 N block 与 SM 数为偶数的约束原因",
+            "看懂 stored_num_tokens_per_expert 的 lane 级缓存布局"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh",
+            "csrc/apis/mega.hpp"
+          ],
+          "minimal_modules": [
+            "BlockPhase 状态机",
+            "wave/expert 调度",
+            "2-CTA cluster 约束"
+          ],
+          "practice_task": "阅读 MegaMoEScheduler 的模板参数与 STATIC_ASSERT，解释 kNumExpertsPerWave、kNumExpertsPerLane 的含义，并推导为何 N block 计数必须为偶数。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "融合 mega 内核与通信重叠",
+          "order": 4,
+          "filename": "u8-l4-mega-moe-fused-overlap.md",
+          "level": "advanced",
+          "topic": "讲解 sm100_fp8_fp4_mega_moe.cuh 如何在单个 kernel 内重叠 NVLink pull dispatch、两层 GEMM 计算、SwiGLU 与 combine，配合 layout/mega_moe.cuh 的 Workspace 布局与 comm/barrier.cuh 的 grid_sync 实现多 rank 协作。",
+          "learning_goals": [
+            "理解 mega-kernel 内 dispatch/compute/combine 的 overlap 流水线",
+            "掌握 Workspace 对称缓冲的字段布局(x/x_sf/topk/l1/l2 acts 等)",
+            "看懂 grid_sync 在 mega-kernel 内部多阶段同步的作用"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh",
+            "deep_gemm/include/deep_gemm/comm/barrier.cuh",
+            "deep_gemm/include/deep_gemm/layout/mega_moe.cuh"
+          ],
+          "minimal_modules": [
+            "overlap 流水线",
+            "Workspace 布局",
+            "grid_sync 协作"
+          ],
+          "practice_task": "参考 tests/test_mega_moe.py 的多进程启动方式，说明一次 fp8_fp4_mega_moe 调用需要在调用前准备哪些 buffer 字段(x/x_sf/topk_idx/topk_weights)，并解释 grid_sync 为何必备。",
+          "depends_on": [
+            "u8-l3",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "其它内核家族",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "索引器的 MQA 评分内核",
+          "order": 1,
+          "filename": "u9-l1-mqa-scoring-indexer.md",
+          "level": "advanced",
+          "topic": "讲解 fp8_fp4_mqa_logits：为 DeepSeek v3.2 闪电索引器计算 token-to-token 的加权 ReLU MQA logits，覆盖输入(q/kv/weights/cu_seq_len)、输出 logits 形状、FP8 与 FP4 两种路径，以及 clean_logits 收尾。",
+          "learning_goals": [
+            "理解 MQA logits 的数学定义与加权 ReLU 聚合",
+            "掌握 non-paged 版本的输入/输出张量布局约束",
+            "看懂 SM90(FP8) 与 SM100(FP8/FP4) 的派发与 num_heads/head_dim 约束"
+          ],
+          "source_files": [
+            "csrc/apis/attention.hpp",
+            "deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh"
+          ],
+          "minimal_modules": [
+            "MQA logits 数学",
+            "输入/输出布局",
+            "架构与 dtype 派发"
+          ],
+          "practice_task": "阅读 README 中 fp8_mqa_logits 的伪代码与 apis/attention.hpp 的实现，说明 out[i,j] 的计算步骤，并解释 cu_seq_len_k_start/end 的作用。",
+          "depends_on": [
+            "u2-l3",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "分页 MQA logits",
+          "order": 2,
+          "filename": "u9-l2-paged-mqa-logits.md",
+          "level": "advanced",
+          "topic": "讲解 fp8_fp4_paged_mqa_logits：解码阶段基于 paged KV cache(fused_kv_cache + block_table) 的 MQA 评分，包括 get_paged_mqa_logits_metadata 生成的 SM 调度元数据、split-K(split_kv) 与 varlen 变长支持。",
+          "learning_goals": [
+            "理解 paged KV cache 的 block_table 寻址与 fused 布局",
+            "掌握 schedule_metadata 的生成与 SM 调度作用",
+            "看懂 split-K(split_kv/splits_per_chunk) 在长上下文评分中的应用"
+          ],
+          "source_files": [
+            "csrc/apis/attention.hpp",
+            "deep_gemm/include/deep_gemm/scheduler/sm100_paged_mqa_logits.cuh"
+          ],
+          "minimal_modules": [
+            "paged KV 寻址",
+            "调度元数据",
+            "split-K 评分"
+          ],
+          "practice_task": "对比 non-paged 与 paged 两个 MQA API 的输入差异，说明 get_paged_mqa_logits_metadata 返回的 [num_sms+1, 2] 张量如何被 kernel 用于 SM 分配。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "HyperConnection 与 Einsum 内核",
+          "order": 3,
+          "filename": "u9-l3-hyperconnection-einsum.md",
+          "level": "advanced",
+          "topic": "讲解两类辅助内核：tf32_hc_prenorm_gemm(HyperConnection 预归一化 GEMM，含 sqr_sum 与 num_splits 多分裂) 与 einsum/fp8_einsum(硬编码的 bmk,bnk->mn / bhr,hdr->bhd 等 Einstein 求和，内部复用 BMM/GEMM)。",
+          "learning_goals": [
+            "理解 HyperConnection 预归一化 GEMM 的 sqr_sum 输出与 num_splits 多分裂",
+            "掌握 einsum 如何通过 permute 把硬编码表达式归约到 BMM/GEMM",
+            "看懂 bhr,hdr->bhd 等表达式与 (batch,m,n,k) 维度的映射"
+          ],
+          "source_files": [
+            "csrc/apis/hyperconnection.hpp",
+            "csrc/apis/einsum.hpp"
+          ],
+          "minimal_modules": [
+            "HyperConnection 预归一化",
+            "硬编码 einsum",
+            "permute 归约 BMM"
+          ],
+          "practice_task": "阅读 fp8_einsum 中 bhr,hdr->bhd 分支，说明它如何对 A/B/D 做 permute 以满足 fp8_bmm 的 (batch,m,n,k) 顺序，并解释为何仅部分表达式在 SM100 支持。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "FP4、扩展与工程实践",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "FP4 GEMM 与 FP8xFP4 路径",
+          "order": 1,
+          "filename": "u10-l1-fp4-gemm-path.md",
+          "level": "advanced",
+          "topic": "讲解 SM100 上的 FP4(packed e2m1) GEMM：FP8xFP4 混合精度、kPackedFP4 的 TMA 数据类型(16U4_ALIGN8B/ALIGN16B)、UTCCP 加载 UE8M0 缩放因子，以及 1D1D 设备 kernel sm100_fp8_fp4_gemm_1d1d 的结构要点。",
+          "learning_goals": [
+            "理解 FP4 packed 表示与 TMA unpacked/packed smem 的选择",
+            "掌握 FP8xFP4 混合精度下 SF(gran_k=32/128) 的处理",
+            "看懂 SM100 1D1D kernel 相对 SM90 的关键差异(2-CTA、UTCCP)"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh",
+            "csrc/apis/layout.hpp"
+          ],
+          "minimal_modules": [
+            "FP4 packed 表示",
+            "FP8xFP4 混合精度",
+            "UTCCP SF 加载"
+          ],
+          "practice_task": "对比 SM90 fp8 与 SM100 fp8_fp4 两条 GEMM 路径，列出在 dtype、SF 格式、TMA 描述符与 cluster 模型上的关键差异。",
+          "depends_on": [
+            "u2-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Epilogue 与存储变换",
+          "order": 2,
+          "filename": "u10-l2-epilogue-store-transform.md",
+          "level": "advanced",
+          "topic": "讲解 epilogue/ 目录：transform.cuh 的 EpilogueIdentity 与 EpilogueHeadSplits(在 N 维插入 mid 段，用于 fp8_gemm_nt_skip_head_mid)、以及 sm100_store_cd / store_cd_swap_ab 等 epilogue 如何把累加结果写回全局内存。",
+          "learning_goals": [
+            "理解 EpilogueHeadSplits 的 N 维索引重映射原理",
+            "掌握 SM100 上 C/D store 的 swap-ab 与 swizzle 处理",
+            "看懂 epilogue 作为模板策略如何被注入到 GEMM kernel"
+          ],
+          "source_files": [
+            "deep_gemm/include/deep_gemm/epilogue/transform.cuh",
+            "deep_gemm/include/deep_gemm/epilogue/sm100_store_cd.cuh"
+          ],
+          "minimal_modules": [
+            "EpilogueHeadSplits",
+            "C/D store 与 swap-ab",
+            "epilogue 模板注入"
+          ],
+          "practice_task": "结合 apis/attention.hpp 的 fp8_gemm_nt_skip_head_mid，推导 EpilogueHeadSplits<left,mid,right> 的 apply_index_n 如何把连续 n_idx 映射到带 mid 段的真实 N 坐标。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "测试、基准与数值校验",
+          "order": 3,
+          "filename": "u10-l3-testing-benchmark-numeric.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 与 deep_gemm/testing/ 的工程支撑：generators.py 生成各 kernel 的输入与参考、testing/bench.py 的 bench_kineto 性能采样、testing/numeric.py 的 calc_diff 数值误差度量，以及各 test_*.py 的覆盖范围。",
+          "learning_goals": [
+            "理解 generators 如何参数化枚举形状/major/recipe 并生成参考输出",
+            "掌握 bench_kineto 测时与 TFLOPS/GB/s 计算方式",
+            "看懂 calc_diff 的误差度量与 max_diff 阈值判定"
+          ],
+          "source_files": [
+            "tests/generators.py",
+            "tests/test_fp8_fp4.py",
+            "deep_gemm/testing/bench.py"
+          ],
+          "minimal_modules": [
+            "输入生成器",
+            "kineto 基准",
+            "数值误差度量"
+          ],
+          "practice_task": "为一个新的形状组合编写一段测试，复用 generators 与 calc_diff，调用 fp8_fp4_gemm_nt 并打印 TFLOPS 与相对 cuBLASLt 的加速比。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "环境变量、调试与性能剖析",
+          "order": 4,
+          "filename": "u10-l4-env-vars-debug-profiling.md",
+          "level": "advanced",
+          "topic": "系统梳理 DeepGEMM 的环境变量体系：调试(DG_JIT_DEBUG/DG_PRINT_CONFIGS)、编译器(DG_JIT_USE_NVRTC/DG_JIT_NVCC_COMPILER/DG_JIT_CPP_STANDARD)、输出(DG_JIT_DUMP_PTX/SASS/ASM)、缓存(DG_JIT_CACHE_DIR)，以及 test_sanitizer.py 的 compute-sanitizer 集成与 NCU 剖析脚本。",
+          "learning_goals": [
+            "掌握各类 DG_JIT_* / DG_* 环境变量的作用与组合用法",
+            "理解 DG_JIT_DUMP_ASM/PTX/SASS 与 DG_JIT_WITH_LINEINFO 在调优中的用途",
+            "看懂 sanitizer 测试与 scripts/run_ncu_mega_moe.sh 的剖析流程"
+          ],
+          "source_files": [
+            "README.md",
+            "csrc/jit/compiler.hpp",
+            "tests/test_sanitizer.py"
+          ],
+          "minimal_modules": [
+            "环境变量体系",
+            "PTX/SASS dump 与 lineinfo",
+            "sanitizer 与 NCU 剖析"
+          ],
+          "practice_task": "用 DG_JIT_DUMP_SASS=1 与 DG_JIT_WITH_LINEINFO=1 编译一个 kernel，结合 cuobjdump/NCU 定位其寄存器占用与热点指令，并尝试用 set_tc_util/set_num_sms 调优。",
+          "depends_on": [
+            "u3-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
