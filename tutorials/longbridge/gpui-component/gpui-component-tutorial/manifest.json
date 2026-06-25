@@ -1,0 +1,1147 @@
+{
+  "project": "gpui-component",
+  "head": "be4c5d30e0a51d5bfb2df93477a05050a50bf889",
+  "rationale": "gpui-component 是一个基于 GPUI、拥有 60+ 组件的大型 Rust 桌面 UI 库，因此手册按\\\"先认识再上手、再深入内核、最后扩展\\\"的顺序设计为三层。入门层（u1-u2）帮助读者从零建立认知：项目定位、构建运行、仓库结构、入口初始化与 Root，再到主题、样式、图标、事件这四块所有组件都依赖的公共基础。进阶层（u3-u5）按\\\"展示组件 → 表单输入 → 浮层与导航\\\"分组，覆盖日常 80% 使用场景，每篇只讲一个独立主题并配一个真实可跑的实践任务，依赖关系严格单向。专家层（u6-u10）面向复杂机制与二次开发：Dock 布局系统、高性能虚拟化列表/表格/树、Text/Markdown/HTML 渲染管线、代码编辑器+Tree-sitter+LSP、Plot/Chart 图表以及全局状态/Action/贡献规范。讲义依赖以\\\"先基础后高级、先公共后专用\\\"为原则，例如 Dock 依赖导航组件、编辑器依赖 Input 与 Text、LSP 依赖编辑器，确保读者循序渐进。本次增量（a0ae3a37 → be4c5d30）只涉及三个小范围 bug 修复：theme 的 alpha 透明度双重衰减修复（u2-l1）、input 在 set_value 后将光标置尾但视图滚回开头以显示长值开头（u4-l4）、bar_chart 水平条带溢出与 tooltip 十字线颜色打磨（u10-l2），均属局部逻辑调整而非架构/公共接口变更，故对应三篇讲义标记为 update，其余保持不变。\"",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零认识 gpui-component",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与核心特性总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 gpui-component 是什么、解决什么问题，以及它相对于 Iced/egui/Qt 的定位与核心特性。",
+          "learning_goals": [
+            "理解 gpui-component 是基于 GPUI 的跨平台桌面 UI 组件库",
+            "说出 Richness、Native、Theme、Dock、虚拟化 Table/List、Markdown、Editor 等核心特性",
+            "了解它与 Zed/GPUI、shadcn/ui、Lucide 的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "README.zh-CN.md",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "Features",
+            "Compare to others"
+          ],
+          "practice_task": "阅读 README 并用自己的话写一段 100 字的项目定位说明，列出 3 个你认为最有价值的特性并解释原因。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行：Story、Examples 与 Web",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 cargo 运行 Story Gallery、单个 example、以及通过 WASM 在浏览器中运行 Web Gallery。",
+          "learning_goals": [
+            "掌握 cargo run 启动 Story Gallery",
+            "学会运行单独的 example（editor/dock/markdown/html）和独立 crate 示例",
+            "了解 crates/story-web 的 WASM 构建流程"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "crates/story/src/main.rs",
+            "examples/README.md",
+            "examples/hello_world/Cargo.toml"
+          ],
+          "minimal_modules": [
+            "workspace members",
+            "default-members",
+            "examples 列表"
+          ],
+          "practice_task": "克隆仓库后运行 cargo run 启动 Gallery，并截图记录你能找到的任意 3 个组件演示页面。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库结构与 crate 划分",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理 workspace 的 crate 划分（ui/story/story-web/macros/assets/webview）以及 crates/ui/src 下各模块的组织方式。",
+          "learning_goals": [
+            "理解 workspace 的 crate 分工与依赖关系",
+            "认识 crates/ui/src 下 60+ 组件模块的命名与目录约定",
+            "区分核心库 ui、展示库 story 与宏库 macros 的职责"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "crates/ui/src/lib.rs",
+            "crates/story/src/lib.rs",
+            "crates/macros/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "workspace",
+            "pub mod 组件模块",
+            "macros"
+          ],
+          "practice_task": "对照 lib.rs 的 pub mod 列表，绘制一张 crates/ui/src 模块分类图（输入/展示/布局/浮层等），并标注每个模块对应的一个组件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "应用入口、init 初始化与 Root",
+          "order": 4,
+          "filename": "u1-l4-entry-init-and-root.md",
+          "level": "beginner",
+          "topic": "讲解一个 GPUI Component 应用的最小入口：调用 gpui_component::init(cx)、打开窗口、用 Root 包裹第一个视图。",
+          "learning_goals": [
+            "理解 gpui_component::init(cx) 必须最先调用的原因与它初始化了哪些子系统",
+            "掌握 Application → open_window → Root 的标准窗口创建流程",
+            "理解 Root 作为窗口顶层视图管理 Sheet/Dialog/Notification/键盘导航的职责"
+          ],
+          "source_files": [
+            "crates/ui/src/lib.rs",
+            "crates/ui/src/root.rs",
+            "examples/hello_world/src/main.rs",
+            "crates/story/src/main.rs"
+          ],
+          "minimal_modules": [
+            "init",
+            "Root",
+            "lib.rs 中的 init 函数"
+          ],
+          "practice_task": "参考 hello_world，编写一个最小应用：窗口中渲染一个标题文本和一个按钮，按钮点击后在控制台打印一句话。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "组件开发公共基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "主题系统：Theme、ThemeColor 与明暗模式",
+          "order": 1,
+          "filename": "u2-l1-theme-system.md",
+          "level": "beginner",
+          "topic": "讲解全局 Theme 单例、ThemeColor 配色、明暗模式切换以及通过 cx.theme() 访问主题的 ActiveTheme trait，并说明 list_active/table_active/selection 等交互态颜色的 alpha 透明度钳制机制。",
+          "learning_goals": [
+            "理解 Theme 全局单例的结构（colors、tokens、highlight_theme、字体等）",
+            "掌握 ThemeMode（Light/Dark）切换与 Theme::change 的用法",
+            "学会用 cx.theme().color 获取主题色并自定义颜色",
+            "理解 apply_config 中 clamp_alpha 如何保证 list_active/table_active/selection 不会因双重透明度衰减而不可见"
+          ],
+          "source_files": [
+            "crates/ui/src/theme/mod.rs",
+            "crates/ui/src/theme/theme_color.rs",
+            "crates/ui/src/theme/schema.rs",
+            "crates/ui/src/theme/color.rs",
+            "crates/ui/src/theme/registry.rs",
+            "crates/ui/src/theme/default-theme.json"
+          ],
+          "minimal_modules": [
+            "Theme",
+            "ThemeColor",
+            "ActiveTheme",
+            "Theme::change",
+            "apply_config / alpha clamping"
+          ],
+          "practice_task": "创建一个视图，在按钮点击时切换明暗模式，并用 cx.theme().background 为容器上色验证主题生效。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u2-l2",
+          "title": "样式系统：Styled 与尺寸 Sizable",
+          "order": 2,
+          "filename": "u2-l2-styled-and-sizable.md",
+          "level": "beginner",
+          "topic": "讲解类 CSS 的 Styled 样式 API、Sizable trait（xs/sm/md/lg）以及无状态 RenderOnce 组件设计原则。",
+          "learning_goals": [
+            "掌握 div().flex/gap/size 等 Styled 链式样式 API",
+            "理解 Sizable trait 如何让组件统一支持 xs/sm/md/lg 四档尺寸",
+            "理解无状态 RenderOnce 设计与有状态 Render 组件的区别"
+          ],
+          "source_files": [
+            "crates/ui/src/styled.rs",
+            "crates/ui/src/element_ext.rs"
+          ],
+          "minimal_modules": [
+            "Styled",
+            "Sizable",
+            "RenderOnce"
+          ],
+          "practice_task": "实现一个简单的 Card 组件，使用 Styled 设置圆角、阴影、内边距，并通过 Sizable 支持小/中两种尺寸。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "图标系统：Icon 与 IconName",
+          "order": 3,
+          "filename": "u2-l3-icon-system.md",
+          "level": "beginner",
+          "topic": "讲解 Icon 元素的设计，说明它默认不含 SVG，需要按 IconName 命名提供图标资源（如 Lucide）。",
+          "learning_goals": [
+            "理解 Icon 元素不内置 SVG 的设计原因",
+            "学会按 IconName 枚举命名并引入图标资源",
+            "掌握 Icon 的大小、颜色与内置图标集的使用"
+          ],
+          "source_files": [
+            "crates/ui/src/icon.rs"
+          ],
+          "minimal_modules": [
+            "Icon",
+            "IconName",
+            "Icon 集"
+          ],
+          "practice_task": "在你的应用资源中放入一个名为 Lucide 规范的 SVG，渲染一个带颜色的 Icon 并在按钮中使用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "事件、元素扩展与焦点陷阱",
+          "order": 4,
+          "filename": "u2-l4-events-element-ext.md",
+          "level": "beginner",
+          "topic": "讲解事件交互扩展（InteractiveElementExt）、ElementExt 扩展方法以及 FocusTrap 焦点陷阱。",
+          "learning_goals": [
+            "掌握 InteractiveElementExt 提供的交互事件扩展方法",
+            "理解 ElementExt 如何为元素附加通用能力",
+            "学会使用 FocusTrapElement 实现模态焦点循环"
+          ],
+          "source_files": [
+            "crates/ui/src/event.rs",
+            "crates/ui/src/element_ext.rs",
+            "crates/ui/src/focus_trap.rs"
+          ],
+          "minimal_modules": [
+            "InteractiveElementExt",
+            "ElementExt",
+            "FocusTrapElement"
+          ],
+          "practice_task": "为一个容器添加 tooltip 式的悬停交互（用 ElementExt），并包一层 FocusTrap 观察焦点是否被限制在容器内。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "基础展示组件",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "按钮家族：Button / ButtonGroup / DropdownButton / Toggle",
+          "order": 1,
+          "filename": "u3-l1-button-family.md",
+          "level": "intermediate",
+          "topic": "讲解核心 Button 组件的 primary/outline/ghost 等变体，以及 ButtonGroup、DropdownButton、Toggle 的用法。",
+          "learning_goals": [
+            "掌握 Button 的构造、变体（primary/ghost 等）与 on_click 事件",
+            "学会用 ButtonGroup 组织一组按钮",
+            "理解 DropdownButton 与 Toggle 的使用场景"
+          ],
+          "source_files": [
+            "crates/ui/src/button/button.rs",
+            "crates/ui/src/button/button_group.rs",
+            "crates/ui/src/button/dropdown_button.rs",
+            "crates/ui/src/button/toggle.rs"
+          ],
+          "minimal_modules": [
+            "Button",
+            "ButtonGroup",
+            "DropdownButton",
+            "Toggle"
+          ],
+          "practice_task": "实现一组操作按钮：一个 primary 提交按钮 + 一个 ghost 取消按钮放入 ButtonGroup，再做一个 Toggle 切换状态。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "文本展示：Label / Tag / Badge / Separator",
+          "order": 2,
+          "filename": "u3-l2-label-tag-badge.md",
+          "level": "intermediate",
+          "topic": "讲解用于展示文本与状态的轻量组件：Label、Tag、Badge 以及 Separator 分割线。",
+          "learning_goals": [
+            "掌握 Label 的文本展示与样式",
+            "学会用 Tag 和 Badge 标记状态/分类",
+            "理解 Separator 的用法"
+          ],
+          "source_files": [
+            "crates/ui/src/label.rs",
+            "crates/ui/src/tag.rs",
+            "crates/ui/src/badge.rs",
+            "crates/ui/src/separator.rs"
+          ],
+          "minimal_modules": [
+            "Label",
+            "Tag",
+            "Badge",
+            "Separator"
+          ],
+          "practice_task": "制作一个用户信息卡片：用 Label 显示名字、Badge 显示在线状态、Tag 显示角色标签，并用 Separator 分隔。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "头像与进度：Avatar / Progress / Skeleton / Spinner",
+          "order": 3,
+          "filename": "u3-l3-avatar-progress.md",
+          "level": "intermediate",
+          "topic": "讲解头像（Avatar/AvatarGroup）与各类进度反馈组件（Progress、ProgressCircle、Skeleton、Spinner）。",
+          "learning_goals": [
+            "掌握 Avatar 与 AvatarGroup 的头像展示",
+            "学会用 Progress/ProgressCircle 显示任务进度",
+            "理解 Skeleton 骨架屏与 Spinner 加载指示的使用时机"
+          ],
+          "source_files": [
+            "crates/ui/src/avatar/avatar.rs",
+            "crates/ui/src/avatar/avatar_group.rs",
+            "crates/ui/src/progress/progress.rs",
+            "crates/ui/src/progress/progress_circle.rs",
+            "crates/ui/src/skeleton.rs",
+            "crates/ui/src/spinner.rs"
+          ],
+          "minimal_modules": [
+            "Avatar",
+            "Progress",
+            "ProgressCircle",
+            "Skeleton",
+            "Spinner"
+          ],
+          "practice_task": "模拟一个数据加载场景：加载时显示 Skeleton/Spinner，加载完成后用 ProgressCircle 展示完成度并显示头像。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "折叠与分组：Collapsible / Accordion / GroupBox",
+          "order": 4,
+          "filename": "u3-l4-collapsible-accordion.md",
+          "level": "intermediate",
+          "topic": "讲解可折叠内容组件 Collapsible、Accordion 手风琴以及 GroupBox 分组容器。",
+          "learning_goals": [
+            "掌握 Collapsible 的展开/折叠状态控制",
+            "学会用 Accordion 组织多个折叠面板",
+            "理解 GroupBox 的分组容器用法"
+          ],
+          "source_files": [
+            "crates/ui/src/collapsible.rs",
+            "crates/ui/src/accordion.rs",
+            "crates/ui/src/group_box.rs"
+          ],
+          "minimal_modules": [
+            "Collapsible",
+            "Accordion",
+            "GroupBox"
+          ],
+          "practice_task": "实现一个设置面板：用 Accordion 把多个设置项分组，其中至少一个用 Collapsible 实现默认折叠。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "表单与基础输入",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "表单：Form 与 Field 校验",
+          "order": 1,
+          "filename": "u4-l1-form-and-field.md",
+          "level": "intermediate",
+          "topic": "讲解表单容器 Form 与字段 Field 的组织方式及校验错误展示机制。",
+          "learning_goals": [
+            "掌握 Form 表单容器的组织结构",
+            "学会用 Field 包装输入控件并展示标签/错误",
+            "理解表单字段校验反馈的约定"
+          ],
+          "source_files": [
+            "crates/ui/src/form/form.rs",
+            "crates/ui/src/form/field.rs"
+          ],
+          "minimal_modules": [
+            "Form",
+            "Field"
+          ],
+          "practice_task": "用 Form + Field 构建一个登录表单：包含用户名和密码字段，校验失败时在 Field 上显示红色错误提示。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "开关选择：Switch / Checkbox / Radio",
+          "order": 2,
+          "filename": "u4-l2-switch-checkbox-radio.md",
+          "level": "intermediate",
+          "topic": "讲解布尔与单选类控件：Switch 开关、Checkbox 复选框、Radio 单选框的状态与事件。",
+          "learning_goals": [
+            "掌握 Switch 的开关状态与回调",
+            "学会用 Checkbox 实现勾选与多选",
+            "理解 Radio 单选分组的使用"
+          ],
+          "source_files": [
+            "crates/ui/src/switch.rs",
+            "crates/ui/src/checkbox.rs",
+            "crates/ui/src/radio.rs"
+          ],
+          "minimal_modules": [
+            "Switch",
+            "Checkbox",
+            "Radio"
+          ],
+          "practice_task": "实现一个偏好设置面板：用 Switch 控制通知开关，用 Checkbox 选择多个订阅项，用 Radio 选择主题。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "范围与步进：Slider / Stepper / Rating / Pagination",
+          "order": 3,
+          "filename": "u4-l3-slider-stepper-rating.md",
+          "level": "intermediate",
+          "topic": "讲解数值范围与流程类控件：Slider 滑块、Stepper 步骤、Rating 评分、Pagination 分页。",
+          "learning_goals": [
+            "掌握 Slider 的取值范围与拖动事件",
+            "学会用 Stepper 组织多步骤流程",
+            "理解 Rating 评分与 Pagination 分页的用法"
+          ],
+          "source_files": [
+            "crates/ui/src/slider.rs",
+            "crates/ui/src/stepper/stepper.rs",
+            "crates/ui/src/rating.rs",
+            "crates/ui/src/pagination.rs"
+          ],
+          "minimal_modules": [
+            "Slider",
+            "Stepper",
+            "Rating",
+            "Pagination"
+          ],
+          "practice_task": "组合一个商品评价表单：用 Slider 选价格区间、用 Rating 打分、用 Pagination 翻页，最后用 Stepper 展示提交步骤。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "输入框：Input 与 InputState 基础",
+          "order": 4,
+          "filename": "u4-l4-input-and-inputstate.md",
+          "level": "intermediate",
+          "topic": "讲解文本输入框 Input 与其状态管理 InputState，理解输入系统的整体结构与多模式输入入口，并说明 set_value 后单行输入光标置尾但视图滚回开头以显示长值开头的行为。",
+          "learning_goals": [
+            "掌握 Input 组件的创建、占位符、值绑定与事件",
+            "理解 InputState 如何承载输入状态并与 Input 解耦",
+            "了解 input 模块下还有 NumberInput、OtpInput、search 等多种输入形态",
+            "理解 set_value 对单行/多行输入的选区与滚动处理差异"
+          ],
+          "source_files": [
+            "crates/ui/src/input/mod.rs",
+            "crates/ui/src/input/input.rs",
+            "crates/ui/src/input/state.rs",
+            "crates/ui/src/input/element.rs"
+          ],
+          "minimal_modules": [
+            "Input",
+            "InputState",
+            "input mod 概览",
+            "set_value 光标与滚动"
+          ],
+          "practice_task": "实现一个带清空按钮的搜索框，监听输入值变化并实时打印，回车时输出最终内容；再调用 set_value 写入一个超长字符串，验证输入框显示的是值的开头而非结尾。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "浮层与导航组件",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "弹窗：Dialog 与 Alert",
+          "order": 1,
+          "filename": "u5-l1-dialog-and-alert.md",
+          "level": "intermediate",
+          "topic": "讲解模态对话框 Dialog、AlertDialog 的结构（Header/Content/Footer）与由 Root 统一管理的方式。",
+          "learning_goals": [
+            "掌握 Dialog 的构建与 Header/Content/Footer 组合",
+            "学会用 AlertDialog 实现确认型弹窗",
+            "理解 Dialog 由 Root 统一管理的机制"
+          ],
+          "source_files": [
+            "crates/ui/src/dialog/dialog.rs",
+            "crates/ui/src/dialog/alert_dialog.rs",
+            "crates/ui/src/dialog/mod.rs",
+            "crates/ui/src/root.rs"
+          ],
+          "minimal_modules": [
+            "Dialog",
+            "AlertDialog",
+            "Root dialog 管理"
+          ],
+          "practice_task": "实现一个删除确认弹窗：点击删除按钮弹出 AlertDialog，确认后打印删除日志并关闭弹窗。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "悬浮层：Popover / Tooltip / HoverCard",
+          "order": 2,
+          "filename": "u5-l2-popover-tooltip-hovercard.md",
+          "level": "intermediate",
+          "topic": "讲解悬浮触发的轻量层：Popover 弹出层、Tooltip 提示、HoverCard 悬停卡片。",
+          "learning_goals": [
+            "掌握 Popover 的触发与内容定位",
+            "学会用 Tooltip 为元素添加提示",
+            "理解 HoverCard 的悬停展示卡片用法"
+          ],
+          "source_files": [
+            "crates/ui/src/popover.rs",
+            "crates/ui/src/tooltip.rs",
+            "crates/ui/src/hover_card.rs"
+          ],
+          "minimal_modules": [
+            "Popover",
+            "Tooltip",
+            "HoverCard"
+          ],
+          "practice_task": "为一个用户头像添加 HoverCard 展示用户资料卡，并给按钮加 Tooltip 简短提示，再加一个 Popover 承载操作菜单。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "抽屉与通知：Sheet 与 Notification",
+          "order": 3,
+          "filename": "u5-l3-sheet-and-notification.md",
+          "level": "intermediate",
+          "topic": "讲解侧边抽屉 Sheet（由 Root 管理）与全局通知 Notification 的使用。",
+          "learning_goals": [
+            "掌握 Sheet 抽屉的打开/关闭与方向",
+            "学会用 Notification 推送全局消息（成功/错误等）",
+            "理解两者由 Root 统一承载的设计"
+          ],
+          "source_files": [
+            "crates/ui/src/sheet.rs",
+            "crates/ui/src/notification.rs",
+            "crates/ui/src/root.rs"
+          ],
+          "minimal_modules": [
+            "Sheet",
+            "Notification",
+            "Root 承载"
+          ],
+          "practice_task": "实现一个设置入口：点击按钮从右侧滑出 Sheet 抽屉，在抽屉里点保存后弹出一条成功 Notification。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "菜单系统：ContextMenu / DropdownMenu / PopupMenu",
+          "order": 4,
+          "filename": "u5-l4-menu-system.md",
+          "level": "intermediate",
+          "topic": "讲解菜单模块下各类菜单组件：右键菜单、下拉菜单、弹出菜单及其菜单项。",
+          "learning_goals": [
+            "掌握 ContextMenu 的右键触发",
+            "学会用 DropdownMenu 与 DropdownButton 配合",
+            "理解 PopupMenu 的弹出菜单与菜单项结构"
+          ],
+          "source_files": [
+            "crates/ui/src/menu/mod.rs",
+            "crates/ui/src/menu/context_menu.rs",
+            "crates/ui/src/menu/dropdown_menu.rs",
+            "crates/ui/src/menu/popup_menu.rs"
+          ],
+          "minimal_modules": [
+            "ContextMenu",
+            "DropdownMenu",
+            "PopupMenu"
+          ],
+          "practice_task": "为一个列表项添加右键 ContextMenu（复制/删除），并实现一个 DropdownMenu 作为操作下拉。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l5",
+          "title": "导航与下拉：Tab / Sidebar / Breadcrumb / Select / Combobox",
+          "order": 5,
+          "filename": "u5-l5-tab-sidebar-select.md",
+          "level": "intermediate",
+          "topic": "讲解导航类组件 Tab/Sidebar/Breadcrumb，以及带搜索的下拉选择 Select/Combobox。",
+          "learning_goals": [
+            "掌握 Tab/TabBar 的标签页切换",
+            "学会用 Sidebar 组织侧边导航与分组",
+            "理解 Select/Combobox 的下拉选择与搜索过滤"
+          ],
+          "source_files": [
+            "crates/ui/src/tab/mod.rs",
+            "crates/ui/src/tab/tab_bar.rs",
+            "crates/ui/src/sidebar/mod.rs",
+            "crates/ui/src/breadcrumb.rs",
+            "crates/ui/src/select.rs",
+            "crates/ui/src/combobox.rs"
+          ],
+          "minimal_modules": [
+            "Tab",
+            "Sidebar",
+            "Breadcrumb",
+            "Select",
+            "Combobox"
+          ],
+          "practice_task": "搭建一个应用主框架：左侧 Sidebar 导航、顶部 Breadcrumb 面包屑，主区域用 Tab 切换多个面板，其中一个面板放一个 Combobox 做搜索选择。",
+          "depends_on": [
+            "u5-l2",
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Dock 布局系统",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "DockArea 与 DockItem 布局树",
+          "order": 1,
+          "filename": "u6-l1-dockarea-and-dockitem.md",
+          "level": "advanced",
+          "topic": "讲解 DockArea 容器如何管理中心区与左/下/右三个 dock，以及 DockItem 的树形布局结构（Split/Tabs/Panel）。",
+          "learning_goals": [
+            "理解 DockArea 的中心区 + 三向 dock 架构",
+            "掌握 DockItem 的 Split/Tabs/Panel 三种布局节点",
+            "了解 DockEvent 布局变化事件"
+          ],
+          "source_files": [
+            "crates/ui/src/dock/mod.rs",
+            "crates/ui/src/dock/dock.rs",
+            "crates/ui/src/dock/state.rs"
+          ],
+          "minimal_modules": [
+            "DockArea",
+            "DockItem",
+            "DockEvent"
+          ],
+          "practice_task": "创建一个 DockArea，配置左/右两个 dock 并在中心区放置一个 Split 布局，运行后观察面板排布。",
+          "depends_on": [
+            "u5-l5",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Panel / StackPanel / TabPanel 与拖拽、序列化",
+          "order": 2,
+          "filename": "u6-l2-panel-and-registry.md",
+          "level": "advanced",
+          "topic": "讲解 PanelView trait、StackPanel、TabPanel 容器，以及 PanelRegistry 如何实现面板拖拽重排与布局序列化/恢复。",
+          "learning_goals": [
+            "掌握通过 PanelView trait 定义自定义面板",
+            "理解 StackPanel 与 TabPanel 的容器行为",
+            "学会用 PanelRegistry 序列化保存并恢复布局"
+          ],
+          "source_files": [
+            "crates/ui/src/dock/panel.rs",
+            "crates/ui/src/dock/stack_panel.rs",
+            "crates/ui/src/dock/tab_panel.rs",
+            "crates/ui/src/dock/invalid_panel.rs"
+          ],
+          "minimal_modules": [
+            "PanelView",
+            "StackPanel",
+            "TabPanel",
+            "PanelRegistry"
+          ],
+          "practice_task": "实现一个自定义 Panel（实现 PanelView），放入 DockArea 并启用拖拽重排，运行后将布局序列化为 JSON 再恢复。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Tiles：自由拼贴布局",
+          "order": 3,
+          "filename": "u6-l3-tiles-layout.md",
+          "level": "advanced",
+          "topic": "讲解 Tiles 自由拼贴（freeform）布局的边缘吸附与面板尺寸调整机制。",
+          "learning_goals": [
+            "理解 Tiles 自由布局与 Split 布局的区别",
+            "掌握面板边缘吸附邻近面板的调整行为",
+            "了解 tiles 模块的核心结构"
+          ],
+          "source_files": [
+            "crates/ui/src/dock/tiles.rs"
+          ],
+          "minimal_modules": [
+            "Tiles",
+            "panel 边缘吸附"
+          ],
+          "practice_task": "把 DockArea 的中心区切换为 Tiles 布局，添加多个面板并尝试拖动边缘吸附调整大小，记录观察到的吸附行为。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高性能数据展示",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "虚拟化原理：VirtualList 与 List",
+          "order": 1,
+          "filename": "u7-l1-virtual-list-and-list.md",
+          "level": "advanced",
+          "topic": "讲解虚拟滚动原理：通用 VirtualList 元素以及基于代理的 List 列表组件如何高效渲染大数据。",
+          "learning_goals": [
+            "理解虚拟化只渲染可见项的核心思想",
+            "掌握 VirtualList 的用法与滚动 handle",
+            "学会用 List + ListDelegate 渲染大量数据项"
+          ],
+          "source_files": [
+            "crates/ui/src/virtual_list.rs",
+            "crates/ui/src/list/list.rs",
+            "crates/ui/src/list/delegate.rs"
+          ],
+          "minimal_modules": [
+            "VirtualList",
+            "List",
+            "ListDelegate"
+          ],
+          "practice_task": "用 List 渲染 10000 条数据项，对比不使用虚拟化时的性能差异（如滚动帧率或内存）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Table 与 DataTable：大数据虚拟化表格",
+          "order": 2,
+          "filename": "u7-l2-table-and-datatable.md",
+          "level": "advanced",
+          "topic": "讲解高性能 Table 及 DataTable 的虚拟行/列渲染、列定义与列宽调整机制。",
+          "learning_goals": [
+            "理解 Table 的虚拟行与虚拟列渲染机制",
+            "掌握列定义与列宽调整",
+            "学会用 DataTable 配合代理展示结构化大数据"
+          ],
+          "source_files": [
+            "crates/ui/src/table/table.rs",
+            "crates/ui/src/table/data_table.rs",
+            "crates/ui/src/table/column.rs",
+            "crates/ui/src/table/delegate.rs"
+          ],
+          "minimal_modules": [
+            "Table",
+            "DataTable",
+            "Column",
+            "TableDelegate"
+          ],
+          "practice_task": "用 DataTable 渲染一张含 5000 行、若干列的表格，实现列宽拖动调整并验证滚动流畅。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Tree：树形组件",
+          "order": 3,
+          "filename": "u7-l3-tree-component.md",
+          "level": "advanced",
+          "topic": "讲解 Tree 树形组件的层级数据展示与展开/折叠、IndexPath 定位机制。",
+          "learning_goals": [
+            "掌握 Tree 的层级数据组织与展开/折叠",
+            "理解 IndexPath 在树形定位中的作用",
+            "学会处理树的选中与交互事件"
+          ],
+          "source_files": [
+            "crates/ui/src/tree.rs",
+            "crates/ui/src/index_path.rs"
+          ],
+          "minimal_modules": [
+            "Tree",
+            "IndexPath"
+          ],
+          "practice_task": "用 Tree 渲染一个文件目录树（至少 3 层），实现节点展开/折叠并点击节点时打印其 IndexPath。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "文本与富文本渲染",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Text 系统：TextView 与文本选择",
+          "order": 1,
+          "filename": "u8-l1-text-and-textview.md",
+          "level": "advanced",
+          "topic": "讲解 text 模块的文本渲染管线：Text/TextView 组件、文本状态与跨窗口文本选择。",
+          "learning_goals": [
+            "理解 text 模块的文档/节点/内联渲染结构",
+            "掌握 TextView 的文本选择能力",
+            "了解 window_selection 如何支持文本选择"
+          ],
+          "source_files": [
+            "crates/ui/src/text/mod.rs",
+            "crates/ui/src/text/text_view.rs",
+            "crates/ui/src/text/state.rs",
+            "crates/ui/src/text/window_selection.rs"
+          ],
+          "minimal_modules": [
+            "TextView",
+            "Text state",
+            "window_selection"
+          ],
+          "practice_task": "用 TextView 渲染一段长文本，运行后尝试用鼠标选中其中一部分文本并观察选择高亮行为。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Markdown 渲染",
+          "order": 2,
+          "filename": "u8-l2-markdown-rendering.md",
+          "level": "advanced",
+          "topic": "讲解基于 markdown crate 的 Markdown 渲染，以及与 Tree-sitter 高亮主题的配合。",
+          "learning_goals": [
+            "掌握 Markdown 组件的渲染入口与用法",
+            "理解 Markdown 与 HTML 混排的支持",
+            "了解渲染时如何应用 highlight theme"
+          ],
+          "source_files": [
+            "crates/ui/src/text/mod.rs",
+            "crates/ui/src/text/markdown_ext.rs",
+            "crates/ui/src/theme/mod.rs"
+          ],
+          "minimal_modules": [
+            "Markdown",
+            "markdown_ext",
+            "HighlightTheme"
+          ],
+          "practice_task": "渲染一段包含标题、列表、代码块的 Markdown 文本，并验证代码块是否有语法高亮着色。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "HTML 渲染",
+          "order": 3,
+          "filename": "u8-l3-html-rendering.md",
+          "level": "advanced",
+          "topic": "讲解基于 html5ever 的基础 HTML 渲染能力及其限制。",
+          "learning_goals": [
+            "掌握 HTML 组件的基本渲染用法",
+            "理解当前 HTML 支持的基础程度与限制",
+            "了解 HTML 与 Markdown 的配合"
+          ],
+          "source_files": [
+            "crates/ui/src/text/mod.rs"
+          ],
+          "minimal_modules": [
+            "HTML 渲染",
+            "html5ever"
+          ],
+          "practice_task": "渲染一段简单的 HTML 片落（含段落、链接、列表），观察哪些标签被正确渲染、哪些被忽略，并记录结论。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "代码编辑器、高亮与 LSP",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "代码编辑器与 DisplayMap（Rope 文本结构）",
+          "order": 1,
+          "filename": "u9-l1-editor-and-displaymap.md",
+          "level": "advanced",
+          "topic": "讲解高性能代码编辑器如何基于 Rope 与 DisplayMap 管理大文本（最高 20 万行稳定），以及折叠、光标、选区机制。",
+          "learning_goals": [
+            "理解 Rope 文本结构与 rope_ext 扩展",
+            "掌握 DisplayMap 如何映射缓冲区到显示坐标（含折叠）",
+            "了解编辑器的光标、选区、滚动等编辑能力"
+          ],
+          "source_files": [
+            "crates/ui/src/input/mod.rs",
+            "crates/ui/src/input/rope_ext.rs",
+            "crates/ui/src/input/display_map/display_map.rs",
+            "crates/ui/src/input/display_map/fold_map.rs",
+            "crates/ui/src/input/cursor.rs",
+            "crates/ui/src/input/selection.rs"
+          ],
+          "minimal_modules": [
+            "Editor",
+            "Rope/RopeExt",
+            "DisplayMap",
+            "FoldMap"
+          ],
+          "practice_task": "运行 editor 示例，打开一个大文件，尝试折叠一段代码块并用光标移动，观察坐标映射是否正确。",
+          "depends_on": [
+            "u4-l4",
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Tree-sitter 语法高亮：Highlighter",
+          "order": 2,
+          "filename": "u9-l2-highlighter-treesitter.md",
+          "level": "advanced",
+          "topic": "讲解基于 Tree-sitter 的语法高亮系统：Highlighter、语言注册表 registry 与 HighlightTheme 配色。",
+          "learning_goals": [
+            "理解 Highlighter 如何调用 Tree-sitter 生成高亮",
+            "掌握语言注册表 registry 的语言管理",
+            "了解 HighlightTheme 如何决定配色"
+          ],
+          "source_files": [
+            "crates/ui/src/highlighter/mod.rs",
+            "crates/ui/src/highlighter/highlighter.rs",
+            "crates/ui/src/highlighter/registry.rs",
+            "crates/ui/src/highlighter/languages.rs"
+          ],
+          "minimal_modules": [
+            "Highlighter",
+            "registry",
+            "HighlightTheme"
+          ],
+          "practice_task": "在编辑器中切换两种不同语言（如 Rust 与 JSON）的文件，对比语法高亮着色，并尝试定位注册表中语言加载逻辑。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "LSP 集成：诊断、补全、Hover 与跳转",
+          "order": 3,
+          "filename": "u9-l3-lsp-integration.md",
+          "level": "advanced",
+          "topic": "讲解 input/lsp 模块如何基于 lsp-types 集成诊断、补全、悬停提示、定义跳转等 LSP 能力。",
+          "learning_goals": [
+            "理解编辑器如何与 LSP server 通信",
+            "掌握诊断（diagnostics）、补全（completions）、Hover、跳转（definitions）等子模块职责",
+            "了解 semantic_tokens 与 document_colors 的作用"
+          ],
+          "source_files": [
+            "crates/ui/src/input/lsp/mod.rs",
+            "crates/ui/src/input/lsp/diagnostics.rs",
+            "crates/ui/src/input/lsp/completions.rs",
+            "crates/ui/src/input/lsp/hover.rs",
+            "crates/ui/src/input/lsp/definitions.rs"
+          ],
+          "minimal_modules": [
+            "input/lsp",
+            "diagnostics",
+            "completions",
+            "hover",
+            "definitions"
+          ],
+          "practice_task": "运行带 LSP 支持的编辑器示例，触发代码补全与悬停文档，并定位补全弹窗对应的源码模块。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "图表与二次开发扩展",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "Plot 绘图系统与 IntoPlot 派生宏",
+          "order": 1,
+          "filename": "u10-l1-plot-and-into-plot.md",
+          "level": "advanced",
+          "topic": "讲解 plot 绘图系统的坐标轴、比例尺、形状，以及 macros crate 中 IntoPlot 派生宏的用法。",
+          "learning_goals": [
+            "理解 plot 模块的 axis/scale/shape 结构",
+            "掌握如何用 shape 绘制数据图形",
+            "学会用 IntoPlot 派生宏将自定义数据转换为可绘制类型"
+          ],
+          "source_files": [
+            "crates/ui/src/plot/mod.rs",
+            "crates/ui/src/plot/axis.rs",
+            "crates/ui/src/plot/scale.rs",
+            "crates/ui/src/plot/shape.rs",
+            "crates/macros/src/derive_into_plot.rs"
+          ],
+          "minimal_modules": [
+            "plot",
+            "axis",
+            "scale",
+            "shape",
+            "IntoPlot derive"
+          ],
+          "practice_task": "用 plot 的 shape 绘制一组散点或折线数据，并尝试用 IntoPlot 派生宏让自定义结构体直接成为可绘制数据。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Chart 图表组件",
+          "order": 2,
+          "filename": "u10-l2-chart-components.md",
+          "level": "advanced",
+          "topic": "讲解 chart 模块提供的开箱即用图表：折线、柱状、面积、饼图、K 线（candlestick），并说明柱状图水平悬停条带与十字线（crosshair）颜色的绘制细节。",
+          "learning_goals": [
+            "掌握 line/bar/area/pie/candlestick 各类图表的用法",
+            "理解图表如何复用底层 plot 系统",
+            "学会为图表配置坐标轴与 tooltip",
+            "理解水平柱状图悬停条带使用 h_span 避免溢出值轴、十字线颜色如何基于 border/foreground 混合"
+          ],
+          "source_files": [
+            "crates/ui/src/chart/mod.rs",
+            "crates/ui/src/chart/line_chart.rs",
+            "crates/ui/src/chart/bar_chart.rs",
+            "crates/ui/src/chart/pie_chart.rs",
+            "crates/ui/src/chart/candlestick_chart.rs",
+            "crates/ui/src/plot/tooltip.rs"
+          ],
+          "minimal_modules": [
+            "chart",
+            "line_chart",
+            "bar_chart",
+            "pie_chart",
+            "candlestick_chart",
+            "crosshair/tooltip"
+          ],
+          "practice_task": "用 bar_chart 与 line_chart 各渲染一组示例数据，并配置 tooltip，观察鼠标悬停时十字线颜色与水平柱状条带的正确显示效果。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u10-l3",
+          "title": "全局状态、Action/KeyBinding 与贡献规范",
+          "order": 3,
+          "filename": "u10-l3-global-state-actions-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 GlobalState、actions/keybinding 体系、rust-i18n 国际化，以及如何按项目规范新增一个组件并提交 PR。",
+          "learning_goals": [
+            "理解 GlobalState 全局状态机制",
+            "掌握 actions! 宏与键盘快捷键绑定",
+            "了解 i18n 与新增组件/写 story/写文档的贡献规范"
+          ],
+          "source_files": [
+            "crates/ui/src/global_state.rs",
+            "crates/ui/src/actions.rs",
+            "crates/ui/src/lib.rs",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "GlobalState",
+            "actions!",
+            "i18n",
+            "贡献规范"
+          ],
+          "practice_task": "定义一个自定义 action 并绑定快捷键，再按 CONTRIBUTING 规范为一个已有组件补一个最小 story 示例。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
