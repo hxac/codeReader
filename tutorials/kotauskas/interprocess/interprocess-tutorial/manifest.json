@@ -1,0 +1,964 @@
+{
+  "project": "interprocess",
+  "head": "ecb9daf2ee7cf5fd5ea4ea6d99e937232c4f38c7",
+  "rationale": "interprocess 是一个跨平台 IPC 库，其最大特点是「用统一的 trait + enum 派发抽象出平台无关 API，同时保留平台原生能力」。因此学习路线必须先让读者看清这层抽象（项目定位、目录、入口、第一个例子），再理解它赖以实现的派发机制（enum dispatch、impmod、名称系统），这是贯穿全库的钥匙。掌握抽象后，按「同步 local socket → 平台后端实现 → unnamed pipe → Tokio 异步」的顺序逐层深入使用层。最后进入专家层：宏系统、句柄/所有权抽象、错误处理、Windows 高级内部机制（linger_pool、maybe_arc、安全描述符）、unsafe FFI、非阻塞与超时、测试与扩展点。单元之间形成清晰的依赖链：入门单元打底，抽象机制单元解锁后续所有使用与实现单元，进阶单元讲解真实平台差异，专家单元收口于内部机制与二次开发。共 31 篇，对应一个中大型库的合理覆盖深度。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 interprocess 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：interprocess 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 interprocess 作为 Rust IPC 工具包的定位：它提供哪些通信原语（local socket、unnamed pipe、Windows named pipe、Unix FIFO）、支持哪些平台与 feature gate，以及它的设计目标。",
+          "learning_goals": [
+            "理解 IPC 的基本概念和 interprocess 解决的问题",
+            "列出 interprocess 提供的通信原语及其平台分布",
+            "理解 feature gate（tokio、async、doc_cfg）的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "interprocess",
+            "local_socket",
+            "unnamed_pipe",
+            "os::windows::named_pipe",
+            "os::unix::fifo_file"
+          ],
+          "practice_task": "克隆仓库并阅读 README，用自己的话写出：local socket 在 Windows 和 Unix 上分别由什么原语实现，以及 tokio feature 控制了什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-directory-and-module-map.md",
+          "level": "beginner",
+          "topic": "讲解 src 目录的整体组织：顶层公共模块（local_socket、unnamed_pipe、error、bound_util）、os::unix 与 os::windows 平台模块的划分，以及 lib.rs 如何把它们组装成 crate 入口。",
+          "learning_goals": [
+            "画出 src 目录的模块树",
+            "区分公共跨平台 API 与平台私有实现",
+            "理解 os 模块按 cfg(unix)/cfg(windows) 条件编译的组织方式"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/os/unix.rs",
+            "src/os/windows.rs"
+          ],
+          "minimal_modules": [
+            "local_socket",
+            "unnamed_pipe",
+            "os",
+            "os::unix",
+            "os::windows",
+            "error",
+            "bound_util"
+          ],
+          "practice_task": "对照 lib.rs 的 mod 声明，在纸上画出 interprocess 的顶层模块依赖图，并标出哪些模块只在 Unix 或 Windows 编译。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建、Feature Gate 与示例运行",
+          "order": 3,
+          "filename": "u1-l3-build-features-examples.md",
+          "level": "beginner",
+          "topic": "讲解如何用 cargo 构建 interprocess、各 feature（async、tokio、doc_cfg）如何启用，以及 examples 目录里的同步与异步示例如何运行，并解释 dev-dependencies 与 lint 配置。",
+          "learning_goals": [
+            "掌握启用 tokio feature 的构建命令",
+            "理解 Cargo.toml 中 target 特定依赖的作用",
+            "能够独立运行 examples 中的 server/client 示例对"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "examples/local_socket/sync/listener.rs",
+            "examples/local_socket/sync/stream.rs"
+          ],
+          "minimal_modules": [
+            "interprocess::local_socket",
+            "tokio"
+          ],
+          "practice_task": "分别用 `cargo run --example local_socket_sync_server` 和 `local_socket_sync_client` 在两个终端运行回显示例，观察通信过程。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "上手第一例：local socket 回显通信",
+          "order": 4,
+          "filename": "u1-l4-first-local-socket-example.md",
+          "level": "beginner",
+          "topic": "逐行精读 local socket 同步 server/client 示例，理解名称构造（to_ns_name）、ListenerOptions 创建监听器、Stream 连接、BufReader 读写、以及为何服务端要先收后发以避免死锁。",
+          "learning_goals": [
+            "读懂 prelude 的使用方式",
+            "理解 server 用 incoming() 主循环、client 用 Stream::connect",
+            "理解 BufReader 包装下用 get_mut 写回的模式"
+          ],
+          "source_files": [
+            "examples/local_socket/sync/listener.rs",
+            "examples/local_socket/sync/stream.rs"
+          ],
+          "minimal_modules": [
+            "interprocess::local_socket::prelude",
+            "ListenerOptions",
+            "Stream"
+          ],
+          "practice_task": "基于示例改造一个「客户端发送两个数字、服务端返回求和结果」的 local socket 程序，分别实现 server 和 client。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心抽象：跨平台派发机制",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Local Socket 的设计哲学",
+          "order": 1,
+          "filename": "u2-l1-local-socket-philosophy.md",
+          "level": "beginner",
+          "topic": "精读 local_socket 模块文档，理解 local socket 并非 OS 原语，而是 interprocess 在底层原语之上的构造，用 enum 派发风格封装各平台实现，并解释其稳定性与零开销特性。",
+          "learning_goals": [
+            "理解 local socket 是抽象而非 OS 原语",
+            "理解 trait 与 enum 双层设计：trait 定义接口、enum 做派发",
+            "理解 prelude 为什么是推荐用法"
+          ],
+          "source_files": [
+            "src/local_socket.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "interprocess::local_socket",
+            "interprocess::local_socket::traits",
+            "interprocess::local_socket::prelude"
+          ],
+          "practice_task": "写一段说明：为什么 interprocess 选择用 enum 而非 trait object 来做派发，并指出当前每个平台只用一个后端这一事实。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "enum dispatch：mkenum 与 dispatch 宏",
+          "order": 2,
+          "filename": "u2-l2-enum-dispatch-macros.md",
+          "level": "intermediate",
+          "topic": "精读 enumdef.rs 中的 mkenum 与 dispatch 宏，以及 stream/enum.rs 如何用它们生成 Listener/Stream/RecvHalf/SendHalf 枚举，并把方法调用分发到平台后端。",
+          "learning_goals": [
+            "理解 mkenum 如何按 cfg 生成枚举变体",
+            "理解 dispatch! 宏如何在 match 中转发方法调用",
+            "看懂 dispatch_read!/dispatch_write! 如何为枚举实现 Read/Write"
+          ],
+          "source_files": [
+            "src/local_socket/enumdef.rs",
+            "src/local_socket/stream/enum.rs",
+            "src/macros.rs"
+          ],
+          "minimal_modules": [
+            "local_socket::stream::enum",
+            "local_socket::enumdef",
+            "macros"
+          ],
+          "practice_task": "在本地用 dispatch! 宏写一个最小化的双平台派发示例（两个 mock 后端结构体），为一个自定义方法做派发，观察展开效果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "impmod 与平台后端注入",
+          "order": 3,
+          "filename": "u2-l3-impmod-backend-injection.md",
+          "level": "intermediate",
+          "topic": "讲解 impmod! 宏如何根据 cfg(unix)/cfg(windows) 把平台后端的实现类型（Recver/Sender/pipe_impl 等）以统一别名注入到公共模块，让公共层代码保持平台无关。",
+          "learning_goals": [
+            "理解 impmod! 的别名导入机制",
+            "理解公共 Sender/Recver 如何包装平台实现",
+            "理解 multimacro! 如何批量应用转发宏"
+          ],
+          "source_files": [
+            "src/macros.rs",
+            "src/unnamed_pipe.rs",
+            "src/unnamed_pipe/tokio.rs"
+          ],
+          "minimal_modules": [
+            "macros",
+            "unnamed_pipe",
+            "unnamed_pipe::tokio"
+          ],
+          "practice_task": "追踪 unnamed_pipe::pipe() 的调用链，画出从公共 pipe() 到平台 pipe_impl() 的注入路径，标注 impmod! 的作用点。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "名称系统：Name 与 NameType",
+          "order": 4,
+          "filename": "u2-l4-name-system.md",
+          "level": "intermediate",
+          "topic": "讲解 local socket 的命名抽象：Name 结构、NameInner 平台变体、NameType/PathNameType/NamespacedNameType trait，以及 GenericFilePath/GenericNamespaced 标记类型与 ToFsName/ToNsName 的用法。",
+          "learning_goals": [
+            "理解 Name 如何在可移植与平台特性间取得平衡",
+            "区分文件系统名称与命名空间名称",
+            "掌握 GenericNamespaced/GenericFilePath 在不同平台的映射规则"
+          ],
+          "source_files": [
+            "src/local_socket/name.rs",
+            "src/local_socket/name/type.rs",
+            "src/local_socket/name/inner.rs"
+          ],
+          "minimal_modules": [
+            "local_socket::name",
+            "NameType",
+            "GenericFilePath",
+            "GenericNamespaced",
+            "ToFsName",
+            "ToNsName"
+          ],
+          "practice_task": "编写一个小程序，用 GenericNamespaced::is_supported() 判断后分别用命名空间名或文件路径名构造 Name，并打印其 is_namespaced()/is_path() 结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Local Socket 同步 API 实战",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "ListenerOptions 与服务端创建",
+          "order": 1,
+          "filename": "u3-l1-listener-options.md",
+          "level": "intermediate",
+          "topic": "精读 ListenerOptions 构建器及其位标志字段设计，讲解 name、nonblocking、reclaim_name、try_overwrite、max_spin_time 等 setter，以及 create_sync/create_sync_as 如何调用 Listener::from_options。",
+          "learning_goals": [
+            "掌握 ListenerOptions 构建器各选项的含义与默认值",
+            "理解位标志压缩存储的设计",
+            "理解 from_options 派发到具体 Listener 的过程"
+          ],
+          "source_files": [
+            "src/local_socket/listener/options.rs",
+            "src/local_socket/listener/trait.rs"
+          ],
+          "minimal_modules": [
+            "ListenerOptions",
+            "traits::Listener",
+            "ListenerNonblockingMode",
+            "Incoming"
+          ],
+          "practice_task": "用 ListenerOptions 创建一个开启 try_overwrite 的监听器，模拟两次启动同名服务观察 AddrInUse 的处理行为。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "ConnectOptions 与客户端连接",
+          "order": 2,
+          "filename": "u3-l2-connect-options.md",
+          "level": "intermediate",
+          "topic": "精读 ConnectOptions 构建器与 Stream trait 的 connect/connect_sync_as，讲解连接选项与 ConnectWaitMode（Deferred/Timeout/Unbounded）的语义。",
+          "learning_goals": [
+            "掌握 ConnectOptions 的链式用法",
+            "理解 Stream::connect 与 from_options 的关系",
+            "区分三种连接等待模式的语义"
+          ],
+          "source_files": [
+            "src/local_socket/stream/options.rs",
+            "src/local_socket/stream/trait.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ConnectOptions",
+            "traits::Stream",
+            "ConnectWaitMode"
+          ],
+          "practice_task": "编写客户端，分别用 Deferred 和 Timeout 两种模式连接一个尚未启动的服务器，观察返回行为的差异。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Stream 的读写、拆分与重聚",
+          "order": 3,
+          "filename": "u3-l3-stream-read-write-split.md",
+          "level": "intermediate",
+          "topic": "精读 Stream trait 的 set_nonblocking、set_recv_timeout/set_send_timeout、split/reunite，以及 StreamCommon 的 take_error，理解拆分半双工与错误传播机制。",
+          "learning_goals": [
+            "掌握 Stream 的读写与超时设置",
+            "理解 split 为 RecvHalf/SendHalf 的代价与替代方案（Arc）",
+            "理解 reunite 失败时返回 ReuniteError 的所有权归还语义"
+          ],
+          "source_files": [
+            "src/local_socket/stream/trait.rs",
+            "src/local_socket/stream/enum.rs",
+            "src/error.rs"
+          ],
+          "minimal_modules": [
+            "traits::Stream",
+            "StreamCommon",
+            "RecvHalf",
+            "SendHalf",
+            "ReuniteError"
+          ],
+          "practice_task": "把一个 Stream split 成收发两半，分别在不同线程/作用域使用，再用 reunite 合并；故意合并来自不同流的半边，观察 ReuniteError。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "对端凭据 PeerCreds",
+          "order": 4,
+          "filename": "u3-l4-peer-credentials.md",
+          "level": "intermediate",
+          "topic": "讲解 PeerCreds 结构及其 pid/euid/egid/groups 方法在不同平台类别（Windows、ucred 系、xucred 系、NetBSD）上的可用性，以及用于安全决策时的竞态风险。",
+          "learning_goals": [
+            "理解 PeerCreds 的平台分层与可用字段",
+            "理解 stream.peer_creds() 在连接/监听时刻取值的语义",
+            "认识到用 PID 做鉴权的竞态风险"
+          ],
+          "source_files": [
+            "src/local_socket/peer_creds.rs",
+            "src/local_socket/stream/trait.rs"
+          ],
+          "minimal_modules": [
+            "PeerCreds",
+            "StreamCommon::peer_creds"
+          ],
+          "practice_task": "在服务端 accept 后调用 peer_creds()，打印对端的 pid（及 Unix 下的 euid/egid），并讨论用其做访问控制的注意点。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "平台后端实现剖析",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Unix 后端：UDS local socket 实现",
+          "order": 1,
+          "filename": "u4-l1-unix-uds-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 os::unix::uds_local_socket 模块如何基于标准库的 Unix domain socket 实现 local socket 的 Listener/Stream，以及 dispatch_sync/dispatch_tokio 如何完成派发。",
+          "learning_goals": [
+            "理解 Unix 后端基于 std UnixListener/UnixStream 的封装",
+            "理解地址类型 name_type 在 Unix 上的处理（路径/抽象命名空间/伪命名空间）",
+            "看懂 dispatch_sync 如何把 ConnectOptions 路由到具体后端"
+          ],
+          "source_files": [
+            "src/os/unix/uds_local_socket.rs",
+            "src/os/unix/uds_local_socket/listener.rs",
+            "src/os/unix/uds_local_socket/stream.rs",
+            "src/os/unix/local_socket/dispatch_sync.rs"
+          ],
+          "minimal_modules": [
+            "os::unix::uds_local_socket",
+            "os::unix::local_socket::dispatch_sync"
+          ],
+          "practice_task": "阅读 uds_local_socket 的 Listener 实现，写出它对应 local_socket::traits::Listener 的 accept/set_nonblocking 是如何落地的。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Windows 后端：named pipe local socket",
+          "order": 2,
+          "filename": "u4-l2-windows-named-pipe-local-socket.md",
+          "level": "intermediate",
+          "topic": "讲解 os::windows::named_pipe::local_socket 模块如何用 PipeListener 实现 traits::Listener、用 PipeStream 实现 Stream，以及 AtomicEnum 存储非阻塞模式的设计。",
+          "learning_goals": [
+            "理解 Windows 后端用 named pipe 实现本地套接字",
+            "理解 Listener wrapper 如何桥接 PipeListenerOptions 与 ListenerOptions",
+            "理解 accept 后按 nonblocking 模式调整 stream 的逻辑"
+          ],
+          "source_files": [
+            "src/os/windows/named_pipe/local_socket/listener.rs",
+            "src/os/windows/named_pipe/local_socket/stream.rs",
+            "src/os/windows/local_socket/dispatch_sync.rs"
+          ],
+          "minimal_modules": [
+            "os::windows::named_pipe::local_socket",
+            "os::windows::local_socket::dispatch_sync"
+          ],
+          "practice_task": "对比 Unix 后端，写出 Windows 后端 Listener::from_options 如何把 ListenerOptions 字段映射到 PipeListenerOptions。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Windows 原生 named pipe API",
+          "order": 3,
+          "filename": "u4-l3-windows-raw-named-pipe.md",
+          "level": "intermediate",
+          "topic": "深入 os::windows::named_pipe 模块：PipeListener 的实例创建与 accept 循环、PipeStream、PipeMode（字节/消息）、PipeDirection/PipeStreamRole 的语义，以及 Windows 特有的「连接即就绪」行为。",
+          "learning_goals": [
+            "掌握 PipeMode Bytes/Messages 与 PipeDirection 的区别",
+            "理解 named pipe 监听器的实例机制与 accept 循环",
+            "理解为何不及时 accept 会阻塞新连接"
+          ],
+          "source_files": [
+            "src/os/windows/named_pipe.rs",
+            "src/os/windows/named_pipe/listener.rs",
+            "src/os/windows/named_pipe/enums.rs",
+            "examples/named_pipe/sync/listener.rs"
+          ],
+          "minimal_modules": [
+            "os::windows::named_pipe",
+            "PipeListener",
+            "PipeStream",
+            "PipeMode",
+            "PipeDirection",
+            "PipeStreamRole"
+          ],
+          "practice_task": "用原生 named_pipe API 写一个消息模式（Messages）的 server/client，发送两条带边界的数据并验证对端按消息分两次接收。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Unix FIFO 文件",
+          "order": 4,
+          "filename": "u4-l4-unix-fifo-files.md",
+          "level": "intermediate",
+          "topic": "讲解 os::unix::fifo_file 模块：create_fifo() 如何调用 mkfifo、FIFO 与 unnamed pipe 的区别、以及用标准 File 打开读写删除的使用方式。",
+          "learning_goals": [
+            "理解 FIFO 文件与 Windows named pipe 的概念差异",
+            "掌握 create_fifo 的 mode 与 umask 关系",
+            "理解 FIFO 的单向、单发送/单接收语义"
+          ],
+          "source_files": [
+            "src/os/unix/fifo_file.rs",
+            "src/os/unix.rs"
+          ],
+          "minimal_modules": [
+            "os::unix::fifo_file"
+          ],
+          "practice_task": "用 create_fifo 创建一个 FIFO，在一个进程写、另一个进程读，验证其类文件的单向管道行为，结束后用 remove_file 清理。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Unnamed Pipes 与进程间句柄传递",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "匿名管道基础：pipe() 与 Sender/Recver",
+          "order": 1,
+          "filename": "u5-l1-unnamed-pipe-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 unnamed_pipe 模块：pipe() 返回 (Sender, Recver)、通过 Read/Write trait 通信、句柄默认可继承、以及 multimacro! 批量转发 Read/Write/Debug/原始句柄 trait。",
+          "learning_goals": [
+            "掌握 pipe() 创建与读写的基本用法",
+            "理解 Sender/Recver 包装平台实现的方式",
+            "理解句柄可继承性对子进程通信的意义"
+          ],
+          "source_files": [
+            "src/unnamed_pipe.rs",
+            "examples/unnamed_pipe/sync/main.rs",
+            "examples/unnamed_pipe/tokio/main.rs"
+          ],
+          "minimal_modules": [
+            "unnamed_pipe",
+            "unnamed_pipe::pipe",
+            "unnamed_pipe::Sender",
+            "unnamed_pipe::Recver"
+          ],
+          "practice_task": "在单进程内用 pipe() 建立管道，主线程写、另一线程读，完成一次字符串传递。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "句柄/FD 传递与子进程通信",
+          "order": 2,
+          "filename": "u5-l2-handle-passing-child-process.md",
+          "level": "intermediate",
+          "topic": "精读 unnamed pipe 示例的 side_a/side_b，讲解如何把 Sender 的 OwnedHandle/OwnedFd 跨进程传递给子进程，再用 FromRawHandle/FromRawFd 重建 I/O 对象。",
+          "learning_goals": [
+            "掌握句柄/FD 跨进程传递的通用思路",
+            "理解 OwnedHandle/OwnedFd 与 Sender/Recver 的互转",
+            "理解 FromRawHandle/FromRawFd 重建对象的不变式"
+          ],
+          "source_files": [
+            "examples/unnamed_pipe/sync/side_a.rs",
+            "examples/unnamed_pipe/sync/side_b.rs",
+            "examples/unnamed_pipe/sync/main.rs"
+          ],
+          "minimal_modules": [
+            "unnamed_pipe::Sender",
+            "unnamed_pipe::Recver",
+            "std::os::unix::io",
+            "std::os::windows::io"
+          ],
+          "practice_task": "实现一个父进程创建管道并通过命令行参数/环境变量把句柄值传给子进程、子进程重建 Recver 并读取的完整 demo。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Tokio 异步集成",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Tokio 集成与异步 trait 概览",
+          "order": 1,
+          "filename": "u6-l1-tokio-integration-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 interprocess 如何为 local socket/unnamed pipe 提供 Tokio 变体，cfg(feature=\"tokio\") 门控、traits::tokio 模块的 AsyncRead/AsyncWrite trait 定义，以及为何只能在 Tokio 运行时上下文中使用。",
+          "learning_goals": [
+            "理解 tokio feature 启用的异步类型集合",
+            "理解同步与异步 trait 的并行结构",
+            "理解运行时上下文要求与 panic 行为"
+          ],
+          "source_files": [
+            "src/local_socket.rs",
+            "src/local_socket/tokio/stream/trait.rs",
+            "src/unnamed_pipe/tokio.rs"
+          ],
+          "minimal_modules": [
+            "interprocess::local_socket::tokio",
+            "traits::tokio",
+            "unnamed_pipe::tokio"
+          ],
+          "practice_task": "启用 tokio feature，用 #[tokio::main] 写一个最小的异步 local socket client，对比与同步版本的差异。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "异步 Listener 与 Stream",
+          "order": 2,
+          "filename": "u6-l2-async-listener-stream.md",
+          "level": "intermediate",
+          "topic": "精读 Tokio local socket 的 Listener/Stream trait 与枚举，讲解异步 split/connect、RefTokioAsyncRead/RefTokioAsyncWrite 约束，以及 Windows tokio named pipe 后端如何与 tokio::net::windows 协作。",
+          "learning_goals": [
+            "掌握异步 Listener/Stream 的创建与使用",
+            "理解异步流如何通过引用实现共享读写",
+            "理解 Windows 下 Tokio 后端复用 tokio 原生 named pipe 类型"
+          ],
+          "source_files": [
+            "src/local_socket/tokio/stream/trait.rs",
+            "src/local_socket/tokio/listener/trait.rs",
+            "src/os/windows/named_pipe/tokio/stream/impl.rs"
+          ],
+          "minimal_modules": [
+            "traits::tokio::Listener",
+            "traits::tokio::Stream",
+            "os::windows::named_pipe::tokio"
+          ],
+          "practice_task": "用 Tokio 改造第一例的回显服务为异步并发版（每条连接 spawn 一个任务），用 Arc 共享而非 split。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "bound_util 与引用约束",
+          "order": 3,
+          "filename": "u6-l3-bound-util-ref-constraints.md",
+          "level": "intermediate",
+          "topic": "精读 bound_util 模块，讲解 RefRead/RefWrite（及异步版 RefTokioAsyncRead/RefTokioAsyncWrite）如何用 GAT 把「&Self 实现某 trait」编码进类型系统，使 Stream 既可按值又可按引用读写。",
+          "learning_goals": [
+            "理解 bound_util! 宏生成 trait 的原理",
+            "理解为什么需要把 &T: Read 表达为类型系统约束",
+            "理解 GAT（generic associated types）在其中的作用"
+          ],
+          "source_files": [
+            "src/bound_util.rs",
+            "src/local_socket/stream/trait.rs"
+          ],
+          "minimal_modules": [
+            "bound_util",
+            "RefRead",
+            "RefWrite"
+          ],
+          "practice_task": "阅读 bound_util 展开后，自己写一个最小 trait 复刻 RefRead 的模式（用 GAT 表达 &Self: Read），并为一个结构体验证它。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "内部基础设施：宏、句柄与错误",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "宏系统全景：forwarding 与 derive 宏",
+          "order": 1,
+          "filename": "u7-l1-macro-system.md",
+          "level": "advanced",
+          "topic": "系统讲解 src/macros 及其子模块：multimacro!、forward_iorw、forward_handle_and_fd、forward_try_clone、forward_fmt、derive_raw、derive_mut_iorw、derive_trivconv、tag_enum、builder_setters 等宏如何消除大量样板代码。",
+          "learning_goals": [
+            "理解 multimacro! 批量应用宏的机制",
+            "区分 forward_*（转发到内部）与 derive_*（派生 trait）两类宏",
+            "理解 tag_enum 与 builder_setters 在构建器/标记类型中的作用"
+          ],
+          "source_files": [
+            "src/macros.rs",
+            "src/macros/forward_handle_and_fd.rs",
+            "src/macros/derive_raw.rs",
+            "src/macros/forward_iorw.rs"
+          ],
+          "minimal_modules": [
+            "macros",
+            "macros::forward_handle_and_fd",
+            "macros::derive_raw",
+            "macros::forward_iorw"
+          ],
+          "practice_task": "选取 unnamed_pipe::Sender，列出 multimacro! 为它展开应用了哪些宏，并说明每个宏贡献了哪个 trait 实现。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "句柄/FD 抽象与所有权管理",
+          "order": 2,
+          "filename": "u7-l2-handle-fd-ownership.md",
+          "level": "advanced",
+          "topic": "讲解 try_clone 模块与 Windows 的 share_handle/adv_handle，理解 OwnedHandle/OwnedFd/BorrowedHandle 的所有权模型、TryClone 的克隆语义，以及平台间句柄抽象的差异。",
+          "learning_goals": [
+            "理解 try_clone 与平台 dup/DuplicateHandle 的关系",
+            "理解 Windows ShareHandle/AsHandle 体系",
+            "理解句柄所有权在跨平台抽象中的处理"
+          ],
+          "source_files": [
+            "src/try_clone.rs",
+            "src/os/windows/share_handle.rs",
+            "src/os/windows/adv_handle.rs"
+          ],
+          "minimal_modules": [
+            "try_clone",
+            "os::windows::share_handle",
+            "os::windows::adv_handle"
+          ],
+          "practice_task": "为一个 Stream 调用 try_clone() 得到第二个独立句柄，在两个作用域分别读写，验证克隆出的对象指向同一底层连接。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "错误处理体系",
+          "order": 3,
+          "filename": "u7-l3-error-handling.md",
+          "level": "advanced",
+          "topic": "精读 error 模块：ConversionError 的 details/cause/source 三段式设计、为何要归还输入所有权、NoDetails/FromHandleError/FromFdError 别名，以及 ReuniteError/ReuniteResult 的所有权归还与 map_halves。",
+          "learning_goals": [
+            "理解 ConversionError 为何同时承载 details、OS cause 与原始所有权",
+            "掌握 to_io_error/From 转换为 io::Error 的方式",
+            "理解 ReuniteError 归还两半所有权的意义"
+          ],
+          "source_files": [
+            "src/error.rs",
+            "src/local_socket/stream/trait.rs"
+          ],
+          "minimal_modules": [
+            "error",
+            "ConversionError",
+            "ReuniteError",
+            "FromHandleError",
+            "FromFdError"
+          ],
+          "practice_task": "构造一个 ConversionError（带 source 与 cause），调用 map_source 改变其源类型，再把它转成 io::Error，打印最终消息。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Windows 高级内部机制",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "linger_pool：延迟句柄刷新池",
+          "order": 1,
+          "filename": "u8-l1-linger-pool.md",
+          "level": "advanced",
+          "topic": "精读 linger_pool 模块：为何 Windows 管道 drop 后缓冲不立即清空（limbo）、用持久线程+临时线程+高低水位队列在后台 FlushFileBuffers，以及低比特标记指针的低开销队列设计。",
+          "learning_goals": [
+            "理解 Windows 管道的 limbo 问题与延迟刷新动机",
+            "理解高低水位（watermark）线程池调度策略",
+            "理解 QueueEnt 低比特标记指针的实现技巧"
+          ],
+          "source_files": [
+            "src/os/windows/linger_pool.rs",
+            "src/os/windows/needs_flush.rs"
+          ],
+          "minimal_modules": [
+            "os::windows::linger_pool",
+            "os::windows::needs_flush"
+          ],
+          "practice_task": "阅读 linger_pool，画出一条「drop 一个 PipeStream」到「后台线程真正 flush 并关闭句柄」的完整路径，解释水位触发点。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "maybe_arc 与流拆分优化",
+          "order": 2,
+          "filename": "u8-l2-maybe-arc-optimization.md",
+          "level": "advanced",
+          "topic": "精读 maybe_arc 模块的 OptArc/OptArcIRC trait 与 MaybeArc<T>（Inline/Shared），理解它如何让 PipeStream 在未拆分时零开销、拆分后才升级为 Arc，以及 split/reunite 如何配合 refclone/try_make_owned/ptr_eq。",
+          "learning_goals": [
+            "理解 Inline-vs-Arc 内联优化的收益",
+            "理解 split 时 refclone 升级、reunite 时 try_make_owned 降级",
+            "理解 ptr_eq 如何判定两半是否同源"
+          ],
+          "source_files": [
+            "src/os/windows/maybe_arc.rs",
+            "src/os/windows/named_pipe/tokio/stream/impl.rs"
+          ],
+          "minimal_modules": [
+            "os::windows::maybe_arc",
+            "OptArc",
+            "MaybeArc"
+          ],
+          "practice_task": "结合 PipeStream::split/reunite 源码，说明一个从未 split 的流为何不产生堆分配，而 split 后内存布局如何变化。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "安全描述符与权限控制",
+          "order": 3,
+          "filename": "u8-l3-security-descriptors.md",
+          "level": "advanced",
+          "topic": "讲解 os::windows::security_descriptor 模块：owned/borrowed 安全描述符、as_security_descriptor、与 ListenerOptions 的 security_descriptor 字段配合控制 named pipe 访问权限（如 null DACL），以及 c_wrappers 的底层封装。",
+          "learning_goals": [
+            "理解 Windows 安全描述符与 DACL 的基本概念",
+            "掌握通过 ListenerOptions 设置 named pipe 权限的方式",
+            "理解 owned/borrowed 描述符与 try_clone 的所有权管理"
+          ],
+          "source_files": [
+            "src/os/windows/security_descriptor.rs",
+            "src/os/windows/security_descriptor/owned.rs",
+            "src/os/windows/security_descriptor/borrowed.rs",
+            "src/local_socket/listener/options.rs"
+          ],
+          "minimal_modules": [
+            "os::windows::security_descriptor",
+            "SecurityDescriptor",
+            "ListenerOptions::security_descriptor"
+          ],
+          "practice_task": "参考 tests/os/windows/local_socket_security_descriptor，创建一个带自定义安全描述符（或 null DACCL）的监听器，说明它对客户端访问的影响。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "安全、测试与扩展",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "unsafe FFI 封装层",
+          "order": 1,
+          "filename": "u9-l1-ffi-wrappers.md",
+          "level": "advanced",
+          "topic": "讲解 os::unix/c_wrappers 与 os::windows/c_wrappers 如何用 unsafe 封装 libc/windows-sys 系统调用、OrErrno/RawOsErrorExt 等错误转换工具，以及 Cargo.toml 中 unsafe_op_in_unsafe_fn = forbid 等安全策略。",
+          "learning_goals": [
+            "理解 c_wrappers 封装系统调用的错误处理模式",
+            "理解 OrErrno 如何把返回值转成 io::Result",
+            "理解 crate 的 unsafe lint 策略与边界"
+          ],
+          "source_files": [
+            "src/os/unix/c_wrappers.rs",
+            "src/os/windows/named_pipe/c_wrappers.rs",
+            "src/os/windows/named_pipe/listener.rs"
+          ],
+          "minimal_modules": [
+            "os::unix::c_wrappers",
+            "os::windows::named_pipe::c_wrappers",
+            "OrErrno",
+            "RawOsErrorExt"
+          ],
+          "practice_task": "选取 ConnectNamedPipe 或 mkfifo 的封装，逐行说明 unsafe 块的前置条件、错误转换与如何满足 forbid 级别的 lint。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "非阻塞模式、超时与等待模式",
+          "order": 2,
+          "filename": "u9-l2-nonblocking-timeouts.md",
+          "level": "advanced",
+          "topic": "系统讲解非阻塞与超时机制：ListenerNonblockingMode（Neither/Accept/Stream/Both）、Stream 的 set_recv_timeout/set_send_timeout、ConnectWaitMode 三态，以及它们在不同平台后端的实现差异。",
+          "learning_goals": [
+            "掌握 ListenerNonblockingMode 四态的精确语义",
+            "理解收发超时与 WouldBlock 的关系",
+            "理解 ConnectWaitMode::Deferred/Timeout/Unbounded 的实现差异"
+          ],
+          "source_files": [
+            "src/local_socket/listener/trait.rs",
+            "src/local_socket/listener/options.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ListenerNonblockingMode",
+            "Stream::set_nonblocking",
+            "ConnectWaitMode"
+          ],
+          "practice_task": "构建一个非阻塞监听器，用 accept 返回 WouldBlock 时做其它工作（如打印心跳），再切换到超时收发模式验证行为。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "测试体系与测试工具",
+          "order": 3,
+          "filename": "u9-l3-testing-suite.md",
+          "level": "advanced",
+          "topic": "讲解 tests 目录的组织：index.rs 聚合、local_socket/unnamed_pipe/named_pipe 的同步与 tokio 测试、tests/util 工具（namegen、drive、choke、wdt、xorshift、tokio），以及 no_server/no_client/timeout 等边界用例。",
+          "learning_goals": [
+            "理解测试如何跨平台覆盖各原语",
+            "掌握 tests/util 中辅助工具的用途",
+            "理解边界场景（无服务端、无客户端、超时）的测试方法"
+          ],
+          "source_files": [
+            "tests/index.rs",
+            "tests/util/mod.rs",
+            "tests/local_socket.rs",
+            "tests/tokio_local_socket.rs"
+          ],
+          "minimal_modules": [
+            "tests",
+            "tests::util"
+          ],
+          "practice_task": "参考现有测试，为一个新场景（例如 reunite 来自不同流的半边）补充一个跨平台集成测试，并放入合适的 util 抽象。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "平台探测与二次开发扩展点",
+          "order": 4,
+          "filename": "u9-l4-platform-check-extension.md",
+          "level": "advanced",
+          "topic": "讲解 platform_check.rs、inspect-platform 二进制、cfg_doc_templates，以及如何理解 interprocess 的扩展点：新增平台后端、新增 name type、遵循 Sealed trait 与 enum dispatch 约定进行二次开发。",
+          "learning_goals": [
+            "理解 platform_check 与 inspect-platform 的作用",
+            "掌握 Sealed trait 与 cfg 门控形成的扩展边界",
+            "理解新增 local socket 后端需要改动哪些层"
+          ],
+          "source_files": [
+            "src/platform_check.rs",
+            "inspect-platform/main.rs",
+            "src/local_socket.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "platform_check",
+            "inspect-platform",
+            "Sealed",
+            "os"
+          ],
+          "practice_task": "设想为 interprocess 新增一个假想平台后端，列出需要新增/修改的文件与 trait 实现（不必真正编译），说明 enum dispatch 如何接入。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
