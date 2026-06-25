@@ -1,0 +1,1147 @@
+{
+  "project": "icu4x",
+  "head": "1569b93140c14c1261dd47f3e0e7bdc889280ddf",
+  "rationale": "ICU4X 是一个用 Rust 编写的大型、高度模块化的国际化（i18n）库，核心价值在于「可插拔的 locale 数据」与「零拷贝数据结构」。因此学习路线必须先让读者理解全局（定位、运行方式、目录、元 crate 与 compiled_data 体系），再掌握几乎所有组件共同依赖的 Locale 数据模型，然后按「格式化 / 文本处理」两大类逐个吃透用户最常调用的组件。之后专门用一个单元讲透贯穿全局的 DataProvider 数据机制，再用进阶单元拆解支撑 ICU4X 极致性能的零拷贝基础工具（zerovec/yoke/databake/writeable 等）。最后用 FFI（Diplomat 多语言绑定）和架构/工程实践（no_std、错误处理、pattern、算法工具链、实验性组件、测试构建）收尾，覆盖二次开发与性能取舍。八单元由浅入深，依赖链清晰：u1 打基础 → u2 Locale 模型（被 u3/u4 依赖）→ u3/u4 组件 → u5 数据机制（被 u6 依赖）→ u6 零拷贝底层 → u7/u8 进阶与架构。每篇讲义只聚焦一个独立主题，引用 1–6 个真实源码文件并配一个可操作的实践任务。本次增量（67a0b91c6f → 1569b93140）仅引入两处变化：experimental/displaynames 新增专用 LanguageIdentifierDisplayNameOptions 结构体（#8135）以及 CHANGELOG 补丁说明；除覆盖 displaynames 的 u8-l5 需小幅更新（API 选项类型变更、引用的 displaynames/mod.rs 新增 re-export 行）外，其余讲义主题与源码均不受影响，故标记为 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步与项目概览",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "ICU4X 是什么：定位、背景与设计目标",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ICU4X 的定位——一个用 Rust 实现的模块化国际化组件库，源自 ICU4C/J 与 ECMA-402 经验、依赖 CLDR 数据。讲解它的四大设计目标：小而模块化、可插拔 locale 数据、跨语言易用、由 i18n 专家编写。",
+          "learning_goals": [
+            "理解 ICU4X 解决什么问题、与传统 ICU4C/J 的关系",
+            "记住四大核心设计目标及其含义",
+            "了解 ICU4X 的目标平台与语言生态"
+          ],
+          "source_files": [
+            "README.md",
+            "CONTRIBUTING.md",
+            "documents/process/charter.md"
+          ],
+          "minimal_modules": [
+            "项目定位与历史背景",
+            "四大设计目标解读",
+            "目标平台与语言生态概览"
+          ],
+          "practice_task": "阅读 README.md，用自己的话写出一段 3 句话的项目简介，并列举 ICU4X 支持的至少 3 种目标编程语言。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与 Cargo 工作区组织",
+          "order": 2,
+          "filename": "u1-l2-repo-and-workspace.md",
+          "level": "beginner",
+          "topic": "讲解 ICU4X 仓库的顶层目录划分（components / provider / utils / ffi / examples / tools / documents / tutorials），以及 Cargo.toml 工作区如何把这些 crate 组织起来，帮助读者建立全局地图。",
+          "learning_goals": [
+            "掌握 components、provider、utils、ffi 四大目录的职责",
+            "理解 Cargo workspace 的 members 与 workspace.dependencies 机制",
+            "能根据功能定位到对应的 crate"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "components/icu/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "顶层目录职责速览",
+            "Cargo 工作区与共享依赖",
+            "crate 命名约定（icu_* / icu_provider_* / 工具 crate）"
+          ],
+          "practice_task": "在 Cargo.toml 的 members 中找到 calendar、datetime、provider/core、utils/zerovec 各自对应的工作区成员，并在仓库中定位它们的目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "搭建环境与运行第一个 ICU4X 应用",
+          "order": 3,
+          "filename": "u1-l3-first-app-quickstart.md",
+          "level": "beginner",
+          "topic": "跟随官方 quickstart，用 cargo new 创建应用、添加 icu 依赖，运行一段 DateTimeFormatter 格式化日期的示例。让读者亲手跑通第一个 ICU4X 程序并理解 Rust 工具链要求。",
+          "learning_goals": [
+            "会用 cargo 创建并运行依赖 icu 的应用",
+            "理解 rust-toolchain.toml 对工具链版本的要求",
+            "跑通第一个日期格式化示例"
+          ],
+          "source_files": [
+            "tutorials/quickstart.md",
+            "rust-toolchain.toml",
+            "examples/rust.md"
+          ],
+          "minimal_modules": [
+            "环境与工具链要求",
+            "cargo new 与依赖添加",
+            "第一个日期格式化示例解析"
+          ],
+          "practice_task": "新建一个 cargo 二进制项目，添加 icu 依赖，编写程序把 2025-06-24 用 es（西班牙语）locale 格式化并打印，确认输出包含 'junio'。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "icu 元 crate 与 feature / compiled_data 体系",
+          "order": 4,
+          "filename": "u1-l4-metacrate-and-features.md",
+          "level": "beginner",
+          "topic": "讲解 icu 元 crate 只是 re-export 各组件、不引入新功能的定位；详解 compiled_data（默认）、datagen、serde、sync、logging 等 Cargo feature 的作用，以及 compiled data 与显式 DataProvider 两种数据使用方式的区别。",
+          "learning_goals": [
+            "理解 icu 元 crate 的 re-export 机制",
+            "掌握 compiled_data / serde / sync 等关键 feature 的作用",
+            "区分 compiled data 与显式 provider 两种构造方式"
+          ],
+          "source_files": [
+            "components/icu/src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "元 crate 的 re-export 设计",
+            "核心 feature 体系",
+            "compiled data vs 显式 provider"
+          ],
+          "practice_task": "阅读 components/icu/src/lib.rs 顶部的模块文档，列出 icu 重新导出的至少 6 个组件模块名，并说明关闭 compiled_data feature 后构造函数会有什么变化。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Locale 与国际化基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Locale 与 LanguageIdentifier 数据模型",
+          "order": 1,
+          "filename": "u2-l1-locale-model.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_locale_core 中的核心类型 Locale 与 LanguageIdentifier 的结构，以及 locale! 宏的使用。这是几乎所有 ICU4X 组件的输入基础。",
+          "learning_goals": [
+            "理解 Locale 与 LanguageIdentifier 的区别与组成",
+            "会用 locale! 宏与 parse 构造 locale",
+            "了解 Locale 在组件中如何被使用（DataLocale）"
+          ],
+          "source_files": [
+            "components/locale_core/src/locale.rs",
+            "components/locale_core/src/langid.rs",
+            "components/locale_core/src/macros.rs",
+            "components/locale_core/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Locale 与 LanguageIdentifier 数据结构",
+            "locale! 宏与运行时解析",
+            "Locale 在格式化 API 中的角色"
+          ],
+          "practice_task": "用 locale! 宏创建 \"zh-Hant-TW\"，解析字符串 \"es-419\"，分别打印其 language、script、region 字段。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "子标签体系：language / script / region / variant",
+          "order": 2,
+          "filename": "u2-l2-subtags.md",
+          "level": "intermediate",
+          "topic": "深入 locale_core/src/subtags 目录，讲解 Language、Script、Region、Variant 等子标签类型，它们如何用 tinystr 实现并保证小而高效的内存表示。",
+          "learning_goals": [
+            "掌握 BCP-47 子标签的层级结构",
+            "理解各子标签类型及其取值约束",
+            "了解子标签的紧凑存储实现"
+          ],
+          "source_files": [
+            "components/locale_core/src/subtags/language.rs",
+            "components/locale_core/src/subtags/region.rs",
+            "components/locale_core/src/subtags/script.rs",
+            "components/locale_core/src/subtags/variant.rs"
+          ],
+          "minimal_modules": [
+            "language / script / region / variant 类型",
+            "子标签的合法取值与校验",
+            "extensions 扩展简介"
+          ],
+          "practice_task": "编写程序解析 \"ar-EG-u-nu-latn\"，分别取出语言 ar、地区 EG，并尝试读取 unicode 扩展中的 numbering system（nu=latn）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Locale 解析、规范化与 likely subtags",
+          "order": 3,
+          "filename": "u2-l3-canonicalize-and-expand.md",
+          "level": "intermediate",
+          "topic": "讲解 Locale 的解析器（locale_core/src/parser）以及 icu_locale 提供的 LocaleCanonicalizer 与 LocaleExpander，理解如何把 locale 规范化、最大化/最小化 likely subtags。",
+          "learning_goals": [
+            "理解 locale 解析与大小写规范化规则",
+            "掌握 LocaleCanonicalizer 的作用与 TransformResult",
+            "理解 likely subtags 的最大化/最小化"
+          ],
+          "source_files": [
+            "components/locale_core/src/parser/mod.rs",
+            "components/locale/src/canonicalizer.rs",
+            "components/locale/src/expander.rs"
+          ],
+          "minimal_modules": [
+            "locale 解析器与错误处理",
+            "规范化（canonicalize）",
+            "likely subtags 最大化/最小化"
+          ],
+          "practice_task": "用 LocaleCanonicalizer 规范化 \"ES-ar\"，用 LocaleExpander 把 \"zh\" 最大化（应为 zh-Hans-CN 之类），打印结果与 TransformResult。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Locale 回退链与文本方向性",
+          "order": 4,
+          "filename": "u2-l4-fallback-and-direction.md",
+          "level": "intermediate",
+          "topic": "讲解 LocaleFallbacker（决定 de-CH → de → und 的回退顺序）和 LocaleDirectionality（判断 LTR/RTL）。回退是 ICU4X 数据加载的关键机制，方向性影响 UI 布局。",
+          "learning_goals": [
+            "理解 locale 回退链的构造与优先级",
+            "会用 LocaleFallbacker 计算回退迭代",
+            "会用 LocaleDirectionality 判断文本方向"
+          ],
+          "source_files": [
+            "components/locale/src/directionality.rs",
+            "provider/core/src/fallback.rs",
+            "provider/adapters/src/fallback/mod.rs"
+          ],
+          "minimal_modules": [
+            "LocaleFallbacker 与回退优先级",
+            "回退数据如何驱动",
+            "LocaleDirectionality 判断 LTR/RTL"
+          ],
+          "practice_task": "用 LocaleFallbacker 为 \"zh-TW\" 生成回退链并逐项打印；再用 LocaleDirectionality 判断 \"ar\" 和 \"he\" 的方向是否为 RTL。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "文本格式化组件",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "DateTime 格式化旗舰组件",
+          "order": 1,
+          "filename": "u3-l1-datetime-formatting.md",
+          "level": "intermediate",
+          "topic": "深入 icu_datetime，讲解 DateTimeFormatter<F> 如何通过 fieldsets（如 YMD/YMDT）声明要显示的字段，理解 length 选项（short/medium/long/full）与格式化输出流水线。这是 ICU4X 最复杂、最具代表性的组件。",
+          "learning_goals": [
+            "理解 DateTimeFormatter 与 fieldset 抽象",
+            "会用不同 length 与 fieldset 格式化日期时间",
+            "了解格式化流水线（neo 入口 → format 模块）的组织"
+          ],
+          "source_files": [
+            "components/datetime/src/lib.rs",
+            "components/datetime/src/neo.rs",
+            "components/datetime/src/fieldsets.rs",
+            "components/datetime/src/builder.rs",
+            "components/datetime/src/parts.rs"
+          ],
+          "minimal_modules": [
+            "DateTimeFormatter 与 fieldset 体系",
+            "静态 fieldset 与 length 选项",
+            "格式化流水线与 FormattedDateTime 输出"
+          ],
+          "practice_task": "用 YMD::long() 与 locale!(\"ja\") 格式化一个 ISO 日期，再换用 YMD::medium() 对比输出差异；思考 fieldset 如何在编译期帮助减小二进制体积。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "日历系统与日期类型",
+          "order": 2,
+          "filename": "u3-l2-calendar-and-dates.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_calendar 的 Date<C>/DateTime、Calendar trait、具体日历（Gregorian/Iso/Buddhist/Japanese/Hijri 等）以及 AnyCalendar 的运行时多态，理解日期如何在不同日历间转换。",
+          "learning_goals": [
+            "理解 Calendar trait 与 Date<C> 的泛型设计",
+            "掌握常用日历类型及其构造方式",
+            "理解 AnyCalendar 的运行时多态与日历转换"
+          ],
+          "source_files": [
+            "components/calendar/src/lib.rs",
+            "components/calendar/src/calendar.rs",
+            "components/calendar/src/date.rs",
+            "components/calendar/src/any_calendar.rs"
+          ],
+          "minimal_modules": [
+            "Calendar trait 与 Date/DateTime 类型",
+            "具体日历实现（Gregorian/Iso/...）",
+            "AnyCalendar 与日历转换"
+          ],
+          "practice_task": "构造一个 Gregorian 日期，转换为 Buddhist 日历并打印其年份，再尝试用 AnyCalendar 在运行时按字符串名选择日历。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "十进制数字格式化",
+          "order": 3,
+          "filename": "u3-l3-decimal-formatting.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_decimal 的 DecimalFormatter 如何把 FixedDecimal 格式化为带千分位、符号、本地数字系统的字符串，理解 grouper 分组与 numbering system。",
+          "learning_goals": [
+            "理解 DecimalFormatter 与 FixedDecimal 的配合",
+            "掌握分组分隔符与符号的本地化",
+            "了解 numbering system 对数字字形的影响"
+          ],
+          "source_files": [
+            "components/decimal/src/lib.rs",
+            "components/decimal/src/decimal_formatter.rs",
+            "components/decimal/src/grouper.rs",
+            "components/decimal/src/options.rs"
+          ],
+          "minimal_modules": [
+            "DecimalFormatter 入口 API",
+            "分组（grouper）与符号处理",
+            "numbering system 与本地数字"
+          ],
+          "practice_task": "用 DecimalFormatter 在 \"de-DE\" 下格式化 -1234567.89，观察千分位与负号；再在 \"ar-EG\" 下观察阿拉伯-印度数字字形。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "复数规则 PluralRules",
+          "order": 4,
+          "filename": "u3-l4-plural-rules.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_plurals 的 PluralRules、PluralCategory（zero/one/two/few/many/other）与 PluralOperands，理解基数（cardinal）与序数（ordinal）复数的判定逻辑。复数规则是消息格式化的关键。",
+          "learning_goals": [
+            "理解 PluralCategory 的六种类别",
+            "掌握 PluralOperands 如何从数字提取操作数",
+            "区分 cardinal 与 ordinal 复数"
+          ],
+          "source_files": [
+            "components/plurals/src/lib.rs",
+            "components/plurals/src/operands.rs",
+            "components/plurals/src/provider.rs"
+          ],
+          "minimal_modules": [
+            "PluralRules 与 PluralCategory",
+            "PluralOperands 操作数提取",
+            "cardinal vs ordinal"
+          ],
+          "practice_task": "用 PluralRules 在 \"ru\"（俄语）下分别判定数字 1、2、5 的基数复数类别，观察 few/many 等类别。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "列表格式化",
+          "order": 5,
+          "filename": "u3-l5-list-formatting.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_list 的 ListFormatter，如何用 and/or/unit 三种模式把若干字符串拼接成本地化的列表（如 \"a, b and c\"），理解长度（wide/short/narrow）与本地化模式。",
+          "learning_goals": [
+            "理解 and/or/unit 三种列表模式",
+            "会用 ListFormatter 拼接本地化列表",
+            "了解列表模式的数据来源（patterns）"
+          ],
+          "source_files": [
+            "components/list/src/lib.rs",
+            "components/list/src/list_formatter.rs",
+            "components/list/src/patterns.rs",
+            "components/list/src/options.rs"
+          ],
+          "minimal_modules": [
+            "ListFormatter 与三种模式",
+            "长度变体（wide/short/narrow）",
+            "列表 pattern 数据"
+          ],
+          "practice_task": "用 ListFormatter 在 \"es\" 下以 and 模式拼接 [\"manzana\", \"naranja\", \"plátano\"]，观察西班牙语 \"y/e\" 同化现象；再在 \"en\" 下对比。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "文本处理组件",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "文本分段器 Segmenter（UAX#29 / UAX#14）",
+          "order": 1,
+          "filename": "u4-l1-segmenter.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_segmenter 的四种分段器：GraphemeClusterSegmenter / WordSegmenter / SentenceSegmenter / LineSegmenter，它们分别实现 UAX#29 与 UAX#14，以迭代器形式返回边界索引。",
+          "learning_goals": [
+            "理解四种分段器各自实现哪个 Unicode 标准",
+            "会用分段器获取边界索引",
+            "了解 rule_segmenter 的通用分段框架"
+          ],
+          "source_files": [
+            "components/segmenter/src/lib.rs",
+            "components/segmenter/src/grapheme.rs",
+            "components/segmenter/src/word.rs",
+            "components/segmenter/src/rule_segmenter.rs"
+          ],
+          "minimal_modules": [
+            "grapheme / word / sentence 分段（UAX#29）",
+            "line 分段（UAX#14）",
+            "rule_segmenter 通用框架"
+          ],
+          "practice_task": "用 WordSegmenter 对 \"Hello 世界!\" 分词，打印每个词的起止边界索引；再用 GraphemeClusterSegmenter 处理含 emoji 字符的字符串。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "排序器 Collator",
+          "order": 1,
+          "filename": "u4-l2-collator.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_collator 的 Collator 与多级排序（primary=基础字母 / secondary=重音 / tertiary=大小写 / ...），理解 CollatorOptions 与 Strength 如何控制比较行为，实现符合本地习惯的字符串排序。",
+          "learning_goals": [
+            "理解 Unicode 多级排序（collation strength）",
+            "会用 CollatorOptions 配置比较强度",
+            "了解本地化排序规则（如传统西班牙语 ch）"
+          ],
+          "source_files": [
+            "components/collator/src/lib.rs",
+            "components/collator/src/comparison.rs",
+            "components/collator/src/options.rs"
+          ],
+          "minimal_modules": [
+            "Collator 与多级排序元素",
+            "CollatorOptions / Strength 配置",
+            "本地化排序规则"
+          ],
+          "practice_task": "用 Collator 在 primary 强度下比较 \"café\" 与 \"cafe\"，再切换到 tertiary 强度比较大小写不同的字符串，观察排序结果差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Unicode 规范化（NFC / NFD / NFKC / NFKD）",
+          "order": 3,
+          "filename": "u4-l3-normalizer.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_normalizer 的 ComposingNormalizer（NFC/NFKC）与 DecomposingNormalizer（NFD/NFKD），理解 Unicode UAX#15 规范化的意义与实现入口。",
+          "learning_goals": [
+            "理解四种规范化形式的区别与用途",
+            "会用 Composing/DecomposingNormalizer",
+            "了解规范化在文本比较、搜索中的作用"
+          ],
+          "source_files": [
+            "components/normalizer/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "规范化四种形式",
+            "ComposingNormalizer / DecomposingNormalizer",
+            "规范化的实际用途"
+          ],
+          "practice_task": "构造一个含组合字符的字符串（如 \"é\" 用 e + 组合重音），分别用 NFD 与 NFC 规范化并打印其字节长度，观察差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "大小写映射 CaseMap",
+          "order": 4,
+          "filename": "u4-l4-casemap.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_casemap 的 CaseMapper 与 TitlecaseMapper，实现 Unicode 大小写转换并处理本地化特例（如土耳其语 I→ı、希腊语 sigma）。",
+          "learning_goals": [
+            "理解 Unicode 大小写映射与本地化特例",
+            "会用 CaseMapper 做 upper/lower/title 转换",
+            "了解 TitlecaseMapper 的标题化选项"
+          ],
+          "source_files": [
+            "components/casemap/src/lib.rs",
+            "components/casemap/src/casemapper.rs",
+            "components/casemap/src/titlecase.rs"
+          ],
+          "minimal_modules": [
+            "CaseMapper 与 upper/lower/title",
+            "本地化特例（土耳其语/希腊语）",
+            "TitlecaseMapper 标题化"
+          ],
+          "practice_task": "用 CaseMapper 在 \"tr\"（土耳其语）下把 \"NIKE\" 转小写，观察 I→ı；再对一段英文做 title case。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "字符属性与集合数据结构",
+          "order": 5,
+          "filename": "u4-l5-properties-and-collections.md",
+          "level": "intermediate",
+          "topic": "讲解 icu_properties（CodePointSetData / CodePointMapData 查询 GeneralCategory、Script、Emoji 等属性）与 icu_collections（CodePointTrie 紧凑 trie、CodePointInversionList 高效集合表示）。这些是支撑其它组件的底层数据结构。",
+          "learning_goals": [
+            "理解 Unicode 字符属性的查询方式",
+            "掌握 CodePointTrie 的紧凑映射原理",
+            "了解 CodePointInversionList 的集合表示"
+          ],
+          "source_files": [
+            "components/properties/src/lib.rs",
+            "components/properties/src/code_point_set.rs",
+            "components/properties/src/code_point_map.rs",
+            "components/collections/src/codepointtrie/cptrie.rs",
+            "components/collections/src/codepointinvlist/mod.rs"
+          ],
+          "minimal_modules": [
+            "字符属性查询（set/map）",
+            "CodePointTrie 紧凑 trie",
+            "CodePointInversionList 集合"
+          ],
+          "practice_task": "用 CodePointSetData 查询某字符的 GeneralCategory 与 Script；说明 CodePointTrie 相比 HashMap 在内存与查找上的优势。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "数据提供器系统",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "DataProvider 核心抽象",
+          "order": 1,
+          "filename": "u5-l1-dataprovider-core.md",
+          "level": "intermediate",
+          "topic": "讲解 provider/core 的核心抽象：DataProvider<M> / DynamicDataProvider / BufferProvider trait，DataMarker 类型标记，DataPayload / DataResponse / DataRequest / DataError 等类型。这是 ICU4X 可插拽数据机制的基石。",
+          "learning_goals": [
+            "理解 DataProvider<M> 与 DataMarker 的类型驱动设计",
+            "掌握 DataPayload / DataResponse / DataRequest 的流转",
+            "了解 BufferProvider 与 DynamicDataProvider 的角色"
+          ],
+          "source_files": [
+            "provider/core/src/data_provider.rs",
+            "provider/core/src/marker.rs",
+            "provider/core/src/response.rs",
+            "provider/core/src/request.rs",
+            "provider/core/src/error.rs"
+          ],
+          "minimal_modules": [
+            "DataProvider / DataMarker 抽象",
+            "DataPayload / DataRequest / DataResponse",
+            "BufferProvider 与 DynamicDataProvider"
+          ],
+          "practice_task": "阅读 data_provider.rs，写出 DataProvider::load 的签名；解释为什么 marker 用类型而不是字符串标识数据。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "用 HelloWorldProvider 理解数据流",
+          "order": 2,
+          "filename": "u5-l2-hello-world-provider.md",
+          "level": "intermediate",
+          "topic": "通过 provider/core/src/hello_world.rs 提供的内置 HelloWorldProvider，让读者亲手 load 一次数据、观察 DataRequest → DataResponse 的完整往返，建立对 provider 机制的直观理解。",
+          "learning_goals": [
+            "会用 HelloWorldProvider 发起一次数据请求",
+            "理解 DataRequest 中 locale 与 marker 的配合",
+            "观察 DataPayload 取值过程"
+          ],
+          "source_files": [
+            "provider/core/src/hello_world.rs",
+            "provider/core/src/buf.rs"
+          ],
+          "minimal_modules": [
+            "HelloWorldProvider 的数据与 marker",
+            "发起 load 请求",
+            "从 payload 取值"
+          ],
+          "practice_task": "用 HelloWorldProvider 为不同 locale 加载 hello world 字符串并打印；说明它如何不依赖外部文件即可工作。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "数据适配器 adapters",
+          "order": 3,
+          "filename": "u5-l3-adapters.md",
+          "level": "advanced",
+          "topic": "讲解 provider/adapters 如何组合/增强 provider：LocaleFallbackProvider（自动回退）、ForkByMarkerProvider/ForkByErrorProvider（按 marker 或错误分叉）、FilterDataProvider（按谓词过滤请求）。这是构建复杂数据管道的关键。",
+          "learning_goals": [
+            "理解 provider 适配器组合模式",
+            "会用 LocaleFallbackProvider 包裹 provider",
+            "了解 fork / filter 适配器的用途"
+          ],
+          "source_files": [
+            "provider/adapters/src/lib.rs",
+            "provider/adapters/src/fallback/mod.rs",
+            "provider/adapters/src/fork/mod.rs",
+            "provider/adapters/src/filter/mod.rs"
+          ],
+          "minimal_modules": [
+            "LocaleFallbackProvider 自动回退",
+            "Fork 适配器按 marker/错误分叉",
+            "Filter 适配器按谓词过滤"
+          ],
+          "practice_task": "用一个 ForkByMarkerProvider 把两个不同的 provider 组合起来，使不同 marker 的请求被路由到不同 provider。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "存储后端：baked / blob / fs",
+          "order": 4,
+          "filename": "u5-l4-storage-backends.md",
+          "level": "advanced",
+          "topic": "对比三种存储后端：BakedDataProvider（编译期内嵌 Rust 代码，compiled data 默认用它）、BlobDataProvider（postcard 单文件二进制 blob，可运行时更新）、FsDataProvider（JSON/postcard 文件树，适合开发）。理解各自适用场景。",
+          "learning_goals": [
+            "理解三种存储后端的实现与差异",
+            "掌握 baked / blob / fs 的适用场景",
+            "了解 BufferProvider 的反序列化机制"
+          ],
+          "source_files": [
+            "provider/core/src/baked.rs",
+            "provider/blob/src/blob_data_provider.rs",
+            "provider/blob/src/blob_schema.rs",
+            "provider/fs/src/fs_data_provider.rs"
+          ],
+          "minimal_modules": [
+            "BakedDataProvider（编译期内嵌）",
+            "BlobDataProvider（postcard 单文件）",
+            "FsDataProvider（文件树）"
+          ],
+          "practice_task": "用 BlobDataProvider 从一个内存 blob 加载数据，并用它（经 LocaleFallbackProvider）构造一个 DateTimeFormatter，对比与 compiled data 的差异。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l5",
+          "title": "数据生成流水线与 icu4x-datagen",
+          "order": 5,
+          "filename": "u5-l5-datagen-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解端到端数据生成流水线：SourceDataProvider 从 CLDR/ICU/UCD/TZDB 读取原始数据，经 ExportDriver（locale 选择、去重、回退配置）由各 DataExporter 输出为 baked/blob/fs；icu4x-datagen CLI 是面向用户的入口。",
+          "learning_goals": [
+            "理解 SourceDataProvider → ExportDriver → Exporter 的数据流",
+            "会用 icu4x-datagen CLI 生成自定义数据",
+            "掌握 locale 选择语法（如 %en, ^zh-TW）与去重策略"
+          ],
+          "source_files": [
+            "provider/source/src/lib.rs",
+            "provider/export/src/lib.rs",
+            "provider/export/src/export_impl.rs",
+            "provider/icu4x-datagen/src/main.rs"
+          ],
+          "minimal_modules": [
+            "SourceDataProvider 数据来源",
+            "ExportDriver 配置与 locale family",
+            "icu4x-datagen CLI 与输出格式"
+          ],
+          "practice_task": "运行（或阅读文档模拟）icu4x-datagen 为 \"ja\" 单 locale 生成 baked 数据，说明如何用 ICU4X_DATA_DIR 替换默认 compiled data。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "零拷贝基础工具",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "zerovec 零拷贝容器与 ULE",
+          "order": 1,
+          "filename": "u6-l1-zerovec-and-ule.md",
+          "level": "advanced",
+          "topic": "讲解 utils/zerovec 的 ZeroVec / VarZeroVec / ZeroMap 以及 ULE / VarULE trait。这是 ICU4X 零拷贝反序列化的核心：数据可直接从字节切片解释，无需分配内存。",
+          "learning_goals": [
+            "理解 ZeroVec / VarZeroVec 的零拷贝原理",
+            "掌握 ULE / VarULE trait 的作用",
+            "了解 ZeroMap 的零拷贝映射"
+          ],
+          "source_files": [
+            "utils/zerovec/src/lib.rs",
+            "utils/zerovec/src/ule/mod.rs",
+            "utils/zerovec/src/samples.rs"
+          ],
+          "minimal_modules": [
+            "ZeroVec 定宽零拷贝向量",
+            "VarZeroVec 变长零拷贝向量",
+            "ULE / VarULE trait 与 ZeroMap"
+          ],
+          "practice_task": "阅读 samples.rs 中的示例，说明同一份数据从 postcard 反序列化（零拷贝）与从 JSON 反序列化（需分配）的区别。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "yoke 生命周期管理",
+          "order": 2,
+          "filename": "u6-l2-yoke.md",
+          "level": "advanced",
+          "topic": "讲解 utils/yoke 的 Yoke<Y, C> 与 Yokeable trait。Yoke 解决了「把借用数据与其 backing storage 绑在一起、可安全移动」的自引用难题，是 DataPayload 实现零拷贝移动的基础。",
+          "learning_goals": [
+            "理解 Yoke 解决的自引用/借用生命周期问题",
+            "掌握 cart（承载数据）与 yokeable 数据的关系",
+            "了解 Yoke 在 DataPayload 中的应用"
+          ],
+          "source_files": [
+            "utils/yoke/src/lib.rs",
+            "utils/yoke/src/yoke.rs",
+            "utils/yoke/src/yokeable.rs"
+          ],
+          "minimal_modules": [
+            "Yoke<Y, C> 与 cart 概念",
+            "Yokeable trait 与生命周期擦除",
+            "Yoke 在 payload 中的作用"
+          ],
+          "practice_task": "用 Yoke 把一段借用字符串与其拥有的 backing 字节绑定，移动它后再借用出来；解释为什么不能用普通引用实现这一点。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "zerofrom 零拷贝转换",
+          "order": 3,
+          "filename": "u6-3-zerofrom.md",
+          "level": "advanced",
+          "topic": "讲解 utils/zerofrom 的 ZeroFrom trait——类似 From 但保证在兼容类型间零分配转换，常与 zerovec 的 VarULE 类型配合，用于从借用数据零拷贝提取字段。",
+          "learning_goals": [
+            "理解 ZeroFrom 与 From 的区别",
+            "掌握 ZeroFrom 在零拷贝提取中的应用",
+            "了解 zerofrom-derive 派生宏"
+          ],
+          "source_files": [
+            "utils/zerofrom/src/lib.rs",
+            "utils/zerofrom/src/zero_from.rs"
+          ],
+          "minimal_modules": [
+            "ZeroFrom trait",
+            "零分配转换语义",
+            "与 VarULE / Yoke 的配合"
+          ],
+          "practice_task": "为自定义结构体派生 ZeroFrom，从一段借用数据零拷贝提取一个字段，说明它与 clone 的区别。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "databake 编译期数据烘焙",
+          "order": 4,
+          "filename": "u6-l4-databake.md",
+          "level": "advanced",
+          "topic": "讲解 utils/databake 的 Bake trait——把数据「烘焙」成 Rust 源代码表达式，编译进二进制，从而零开销加载。这是 BakedDataProvider 与 compiled data 的实现根基。",
+          "learning_goals": [
+            "理解 Bake trait 把数据序列化为 Rust 代码的原理",
+            "掌握 databake-derive 派生宏",
+            "了解 databake 与 baked data / datagen 的关系"
+          ],
+          "source_files": [
+            "utils/databake/src/lib.rs",
+            "utils/databake/src/primitives.rs",
+            "utils/databake/src/converter.rs"
+          ],
+          "minimal_modules": [
+            "Bake trait 与 Rust 代码生成",
+            "databake-derive 派生宏",
+            "databake 驱动 baked data"
+          ],
+          "practice_task": "为自定义结构体派生 Bake，调用其 bake 方法生成 Rust 表达式并打印，理解它如何被编译进二进制。",
+          "depends_on": [
+            "u5-l4",
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "writeable 高效字符串构建",
+          "order": 5,
+          "filename": "u6-l5-writeable.md",
+          "level": "advanced",
+          "topic": "讲解 utils/writeable 的 Writeable / TryWriteable trait 与 LengthHint——比 Display 更高效，能预先给出长度以精确分配缓冲区。几乎所有格式化器都实现 Writeable 来输出结果。",
+          "learning_goals": [
+            "理解 Writeable 相比 Display 的性能优势",
+            "掌握 LengthHint 的预分配作用",
+            "了解 PartsWrite 与片段标注（用于富文本样式）"
+          ],
+          "source_files": [
+            "utils/writeable/src/lib.rs",
+            "utils/writeable/src/impls.rs",
+            "utils/writeable/src/parts_write_adapter.rs"
+          ],
+          "minimal_modules": [
+            "Writeable / TryWriteable trait",
+            "LengthHint 预分配",
+            "PartsWrite 片段标注"
+          ],
+          "practice_task": "为自定义类型实现 Writeable 并用 LengthHint 精确预分配一个 String 写入；对比用 Display 的方式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "tinystr、litemap 与 fixed_decimal 等小工具",
+          "order": 6,
+          "filename": "u6-l6-tinystr-litemap-fixed-decimal.md",
+          "level": "advanced",
+          "topic": "串讲几个高频小工具：utils/tinystr（TinyAsciiStr<N> 用整数表示短 ASCII 串，支撑子标签）、utils/litemap（基于排序向量的轻量 map）、utils/fixed_decimal（FixedDecimal 以数位+量级表示十进制数，支撑数字格式化与复数）。",
+          "learning_goals": [
+            "理解 TinyAsciiStr 的整数化短字符串表示",
+            "掌握 LiteMap 的排序向量 map 设计",
+            "理解 FixedDecimal 的数位+量级模型"
+          ],
+          "source_files": [
+            "utils/tinystr/src/lib.rs",
+            "utils/tinystr/src/ascii.rs",
+            "utils/litemap/src/lib.rs",
+            "utils/fixed_decimal/src/decimal.rs"
+          ],
+          "minimal_modules": [
+            "TinyAsciiStr 整数化短字符串",
+            "LiteMap 轻量 map",
+            "FixedDecimal 数位+量级模型"
+          ],
+          "practice_task": "用 TinyAsciiStr 存储 \"enUS\" 并做大小写转换；用 FixedDecimal 表示 1234.5 并对其做取整操作，打印结果。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "FFI 与多语言绑定",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Diplomat 与 icu_capi 总览",
+          "order": 1,
+          "filename": "u7-l1-diplomat-and-capi.md",
+          "level": "advanced",
+          "topic": "讲解 Diplomat（外部工具）如何读取 ffi/capi 中用 #[diplomat::bridge] 标注的 Rust 代码，自动生成 C/C++/JS/Dart 等绑定，让 ICU4X 从单一 Rust 源服务多种语言。介绍 icu_capi 的整体组织。",
+          "learning_goals": [
+            "理解 Diplomat 的工作原理与桥接模型",
+            "了解 #[diplomat::bridge] 与 #[diplomat::opaque] 的作用",
+            "认识 icu_capi 如何把各组件包装为 FFI 类型"
+          ],
+          "source_files": [
+            "ffi/capi/src/lib.rs",
+            "ffi/capi/src/errors.rs",
+            "ffi/capi/src/decimal.rs"
+          ],
+          "minimal_modules": [
+            "Diplomat 工具与生成流程",
+            "#[diplomat::bridge] / #[diplomat::opaque]",
+            "icu_capi 模块组织"
+          ],
+          "practice_task": "在 ffi/capi/src 中找出至少 3 个 #[diplomat::bridge] 模块，说明它们分别包装了哪个 ICU4X 组件。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "FFI 桥接模式与数据传递",
+          "order": 2,
+          "filename": "u7-l2-ffi-data-passing.md",
+          "level": "advanced",
+          "topic": "讲解跨 FFI 边界的数据传递机制：DiplomatStr/DiplomatWrite 处理字符串、Box<T> 管理堆对象所有权、Result<T, Error> 转 C 风格返回，以及 provider.rs 如何把 blob/fs provider 暴露给外部语言。",
+          "learning_goals": [
+            "理解 DiplomatStr / DiplomatWrite 的字符串传递",
+            "掌握 Box<T> 所有权与错误返回模式",
+            "了解 FFI 层如何暴露 DataProvider"
+          ],
+          "source_files": [
+            "ffi/capi/src/provider.rs",
+            "ffi/capi/src/errors.rs",
+            "ffi/capi/src/locale_core.rs"
+          ],
+          "minimal_modules": [
+            "字符串与缓冲区传递（DiplomatStr/DiplomatWrite）",
+            "所有权与错误处理",
+            "provider 的 FFI 暴露"
+          ],
+          "practice_task": "阅读 ffi/capi/src/provider.rs，说明外部语言如何构造一个 blob provider 并把它传给某个格式化器。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "ecma402、freertos 与多语言分发",
+          "order": 3,
+          "filename": "u7-l3-ecma402-freertos-distribution.md",
+          "level": "advanced",
+          "topic": "讲解 ffi/ecma402（实现 ECMA-402 / JS Intl 兼容 trait）、ffi/freertos（FreeRTOS 嵌入式运行时与全局分配器/panic 处理），以及 ffi/npm、ffi/dart、ffi/mvn 如何把生成的绑定打包分发给各语言生态。",
+          "learning_goals": [
+            "理解 ecma402 的 trait 实现适配方式",
+            "了解 freertos 的嵌入式运行时特殊性",
+            "认识 npm/dart/mvn 的绑定分发方式"
+          ],
+          "source_files": [
+            "ffi/ecma402/src/lib.rs",
+            "ffi/ecma402/src/pluralrules.rs",
+            "ffi/freertos/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ecma402 trait 适配",
+            "freertos 嵌入式运行时",
+            "npm/dart/mvn 分发"
+          ],
+          "practice_task": "对比 ffi/ecma402 与 ffi/capi 两种 FFI 方式的差异；说明 freertos 版本为何需要自定义 global_allocator 与 panic_handler。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "架构、扩展与工程实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "no_std、sync 与嵌入式设计",
+          "order": 1,
+          "filename": "u8-l1-no-std-and-embedded.md",
+          "level": "advanced",
+          "topic": "讲解 ICU4X 全面 no_std 友好的设计：核心组件用 #![cfg_attr(not(feature=\"std\"), no_std)]、依赖 alloc 而非 std、零拷贝数据减少堆分配；以及 sync feature 如何让对象满足 Send+Sync。这解释了 ICU4X 为何能跑在资源受限的嵌入式/客户端环境。",
+          "learning_goals": [
+            "理解 no_std / alloc 的设计取舍",
+            "掌握零拷贝数据如何减少嵌入式堆分配",
+            "了解 sync feature 的作用与代价"
+          ],
+          "source_files": [
+            "components/icu/src/lib.rs",
+            "provider/core/src/lib.rs",
+            "provider/core/src/baked.rs"
+          ],
+          "minimal_modules": [
+            "no_std / alloc 友好设计",
+            "零拷贝减少堆分配",
+            "sync feature 与并发"
+          ],
+          "practice_task": "分析 components/icu/src/lib.rs 顶部的 cfg_attr，说明关闭哪些 feature 能让 icu 在 no_std 环境编译，并解释零拷贝数据的贡献。",
+          "depends_on": [
+            "u1-l4",
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "错误处理与 DataError 体系",
+          "order": 2,
+          "filename": "u8-l2-errors-and-dataerror.md",
+          "level": "advanced",
+          "topic": "讲解 provider/core/src/error.rs 的 DataError 体系，理解各类错误（数据缺失、marker 不匹配、反序列化失败等）及其携带的上下文，以及它在整个库中一致的错误传播风格。",
+          "learning_goals": [
+            "理解 DataError 的分类与上下文信息",
+            "掌握错误在 provider 链路中的传播",
+            "了解 ICU4X 一致的 Result 风格"
+          ],
+          "source_files": [
+            "provider/core/src/error.rs",
+            "provider/core/src/data_provider.rs",
+            "components/datetime/src/error.rs"
+          ],
+          "minimal_modules": [
+            "DataError 分类与上下文",
+            "provider 链路错误传播",
+            "一致的 Result 风格"
+          ],
+          "practice_task": "故意用一个不含所需 locale 数据的 provider 构造 DateTimeFormatter，捕获并打印 DataError，分析其携带的 marker/locale 上下文。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "pattern 模式串解析组件",
+          "order": 3,
+          "filename": "u8-l3-pattern-component.md",
+          "level": "advanced",
+          "topic": "讲解 components/pattern 的 Pattern<B> 与单/双/多命名占位符模式（SinglePlaceholderPattern / DoublePlaceholderPattern / MultiNamedPlaceholderPattern），理解它如何被 datetime 等组件复用来解析与插值 CLDR 风格的模式串。",
+          "learning_goals": [
+            "理解 pattern 组件的占位符模型",
+            "掌握 single/double/multi-named 模式",
+            "了解 pattern 在 datetime 等组件中的复用"
+          ],
+          "source_files": [
+            "components/pattern/src/lib.rs",
+            "components/pattern/src/single.rs",
+            "components/datetime/src/pattern/mod.rs"
+          ],
+          "minimal_modules": [
+            "Pattern<B> 后端抽象",
+            "单/双/多命名占位符",
+            "在 datetime 中的复用"
+          ],
+          "practice_task": "用 SinglePlaceholderPattern 解析 \"Hello, {0}!\" 并用 \"World\" 插值输出；说明为何把 pattern 抽成独立组件。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "时间与日历算法工具链",
+          "order": 4,
+          "filename": "u8-l4-time-and-calendar-utils.md",
+          "level": "advanced",
+          "topic": "讲解支撑日历与时间的底层工具：utils/calendrical_calculations（Reingold-Dershowitz 算法 + Rata Die）、utils/ixdtf（RFC 9557 IXDTF 解析）、utils/tzif / utils/zoneinfo64（时区数据库与偏移/DST 处理）。",
+          "learning_goals": [
+            "理解 Rata Die 作为日历换算中介的原理",
+            "掌握 ixdtf 解析带时区/日历标注的时间串",
+            "了解 tzif/zoneinfo64 的时区处理"
+          ],
+          "source_files": [
+            "utils/calendrical_calculations/src/rata_die.rs",
+            "utils/calendrical_calculations/src/gregorian.rs",
+            "utils/ixdtf/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "calendrical_calculations 与 Rata Die",
+            "ixdtf 时间串解析",
+            "tzif / zoneinfo64 时区"
+          ],
+          "practice_task": "用 ixdtf 解析 \"2025-06-24T10:00:00[America/New_York][u-ca=gregory]\"，取出时间各分量与时区；说明 Rata Die 如何用于日历转换。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l5",
+          "title": "实验性组件 experimental",
+          "order": 5,
+          "filename": "u8-l5-experimental-components.md",
+          "level": "advanced",
+          "topic": "讲解 components/experimental 这个孵化器 crate：displaynames（语言/地区显示名）、dimension（货币/百分比/单位格式化）、relativetime（相对时间）、duration、personnames、transliterate（文字转写）、units/measure（单位换算）。这些是尚未稳定的进阶能力。需注意 #8135 之后，语言标识显示名 LanguageIdentifierDisplayNameOwned 已改用专用 LanguageIdentifierDisplayNameOptions（仅含 language_display）而非通用 DisplayNamesOptions。",
+          "learning_goals": [
+            "了解 experimental crate 的孵化定位与版本策略",
+            "认识各实验模块（displaynames/dimension/transliterate 等）",
+            "理解实验性 API 的入口结构与选项类型（如 LanguageIdentifierDisplayNameOptions）"
+          ],
+          "source_files": [
+            "components/experimental/src/lib.rs",
+            "components/experimental/src/displaynames/mod.rs",
+            "components/experimental/src/relativetime/mod.rs",
+            "components/experimental/src/transliterate/mod.rs"
+          ],
+          "minimal_modules": [
+            "experimental 孵化定位",
+            "displaynames / relativetime / dimension",
+            "transliterate 文字转写"
+          ],
+          "practice_task": "用 relativetime 在 \"en\" 下格式化 \"5 天前\" 之类的相对时间；用 transliterate 做一次拉丁→西里尔转写（如可用），观察实验性 API 与稳定 API 的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u8-l6",
+          "title": "测试、基准与构建工具",
+          "order": 6,
+          "filename": "u8-l6-tests-benchmarks-build-tools.md",
+          "level": "advanced",
+          "topic": "讲解工程基础设施：各组件的单元/集成测试组织、tools/benchmark（binsize/memory 性能基准）、tools/make（cargo-make 任务：bakeddata/codegen/depcheck/diplomat-gen）、Makefile.toml、CI 配置与 codecov/clippy lint 策略。",
+          "learning_goals": [
+            "了解 ICU4X 的测试组织方式",
+            "掌握 binsize/memory 基准工具的用途",
+            "认识 cargo-make 任务与 CI/lint 体系"
+          ],
+          "source_files": [
+            "Makefile.toml",
+            "components/calendar/src/tests/mod.rs",
+            "tools/benchmark/macros/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "测试组织（单元/集成/快照）",
+            "性能基准（binsize/memory）",
+            "cargo-make 任务与 CI/lint"
+          ],
+          "practice_task": "阅读 Makefile.toml 列出至少 3 个 make 任务（如 bakeddata、codegen、depcheck）；说明 ICU4X 如何在 CI 中保证二进制体积与数据一致性。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
