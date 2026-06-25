@@ -1871,8 +1871,8 @@
     },
     "deepseek-ai/DeepGEMM": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-06-24T19:31:28Z",
+      "last_error": null,
+      "last_run_at": "2026-06-25T00:31:27Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -2106,24 +2106,27 @@
           "error": null
         },
         "u10-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":447389,\"duration_api_ms\":259315,\"num_turns\":19,\"result\":\"API Error: Request rejected (429) · [13"
+          "cost": 1.5164730000000002,
+          "error": null
         },
         "u10-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.9822170000000001,
+          "error": null
         }
       },
       "manifest_head": "54e22612409371d6364144b69086735beb54e98b",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/DeepGEMM/DeepGEMM-tutorial",
-      "last_head": "54e22612409371d6364144b69086735beb54e98b"
+      "last_head": "54e22612409371d6364144b69086735beb54e98b",
+      "abandoned": []
     },
     "deepseek-ai/DualPipe": {
       "prompt_hash": "b21aef51792b02df",
@@ -2388,51 +2391,67 @@
           "error": null
         },
         "u5-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.7661019999999998,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1475549999999997,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6044859999999999,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3193949999999999,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1831159999999998,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.7394630000000006,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.081611,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":208373,\"duration_api_ms\":6664,\"num_turns\":5,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]["
+        },
+        "u8-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":316221,\"duration_api_ms\":118284,\"num_turns\":22,\"result\":\"API Error: Request rejected (429) · [13"
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":320984,\"duration_api_ms\":122926,\"num_turns\":7,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
         },
         "u8-l3": {
           "status": "pending",
@@ -2476,12 +2495,12 @@
       "mode": "full",
       "tutorial_path": "tutorials/longbridge/gpui-component/gpui-component-tutorial",
       "last_head": "a0ae3a37b960b732801782dd8c27cb993ff57b59",
-      "last_run_at": "2026-06-24T19:31:28Z",
+      "last_run_at": "2026-06-25T00:31:27Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "hxac/helloRust": {
       "last_error": "RuntimeError: git clone https://github.com/hxac/helloRust.git /home/runner/work/codeReader/codeReader/work/hxac-helloRust 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/hxac-helloRust'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-06-24T19:31:28Z"
+      "last_run_at": "2026-06-25T00:31:27Z"
     },
     "unicode-org/icu4x": {
       "prompt_hash": "b21aef51792b02df",
@@ -2515,41 +2534,53 @@
           "error": null
         },
         "u2-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":424909,\"duration_api_ms\":237874,\"num_turns\":17,\"result\":\"API Error: Request rejected (429) · [13"
+          "cost": 1.167783,
+          "error": null
         },
         "u2-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9750319999999999,
+          "error": null
         },
         "u2-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.163211,
+          "error": null
         },
         "u2-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.4286629999999998,
+          "error": null
         },
         "u3-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.6937890000000002,
+          "error": null
         },
         "u3-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.501444,
+          "error": null
         },
         "u3-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.943867,
+          "error": null
         },
         "u3-l4": {
           "status": "pending",
@@ -2693,10 +2724,191 @@
       "mode": "full",
       "tutorial_path": "tutorials/unicode-org/icu4x/icu4x-tutorial",
       "last_head": "67a0b91c6f1e23210c9813bfe5ebb86e77f35460",
-      "last_run_at": "2026-06-24T19:31:28Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-06-25T00:31:27Z",
+      "last_error": "near dead zone; will resume next window"
     },
-    "kotauskas/interprocess": {},
+    "kotauskas/interprocess": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.632401,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.628212,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8343379999999999,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.741679,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.76486,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.927453,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":858423,\"duration_api_ms\":665019,\"num_turns\":20,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "ecb9daf2ee7cf5fd5ea4ea6d99e937232c4f38c7",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/kotauskas/interprocess/interprocess-tutorial",
+      "last_head": "ecb9daf2ee7cf5fd5ea4ea6d99e937232c4f38c7",
+      "last_run_at": "2026-06-25T00:31:27Z",
+      "last_error": "near dead zone; will resume next window"
+    },
     "nginxinc/kubernetes-ingress": {},
     "lancedb/lancedb": {},
     "rasbt/LLMs-from-scratch": {},
