@@ -5,6 +5,11 @@
 #   branch  可选，缺省=仓库默认分支
 #   project 可选，教程文件夹名前缀；缺省= name 的最后一段（如 kvcache-ai/Mooncake → Mooncake）
 #   focus   可选，user_focus：希望教程侧重的内容，会进 prompt
+#   folders 可选，子目录拆分：字符串列表，如 [clang, cmake, libc]。配上后该仓库不再整体处理，
+#           而是把每个子目录展开成一个独立的头等项目（共享同一份 clone，但各自独立规划/生成/
+#           续传/发布）。适合 llvm/llvm-project 这种 LLM 不会自动细分的巨型 monorepo。
+#           每个 folder 的 project 自动取 {project}-{folder}，state key 为 name@folder，
+#           claude 直接在该子目录里跑（CWD 落子目录），只看得到该子目录。仅支持一级子目录。
 repos:
   - name: kvcache-ai/Mooncake
   - name: HazyResearch/Megakernels
@@ -18,7 +23,6 @@ repos:
   - name: deepseek-ai/DeepGEMM
   - name: deepseek-ai/DualPipe
   - name: longbridge/gpui-component
-  - name: hxac/helloRust
   - name: unicode-org/icu4x
   - name: kotauskas/interprocess
   - name: nginxinc/kubernetes-ingress
@@ -164,7 +168,6 @@ repos:
   - name: THUDM/P-tuning-v2
   - name: Dao-AILab/quack
   - name: blueberrycongee/codemirror-live-markdown
-  # —— FPGA / HDL 专题批次（2026-06-22 加入）——
   - name: analogdevicesinc/hdl
     project: adi_hdl # 上游仓库名是 hdl，改名 adi_hdl 以便辨识
   - name: elisei.ilies/CIC-filters # 自托管 GitLab（gitlab.upt.ro），需显式 url
@@ -186,3 +189,27 @@ repos:
   - name: Ghydra0/pipelined-FIR-filter-fpga
   - name: nasa-jpl/versal-sar-backprojection-design
   - name: Xilinx/Vitis_Libraries
+  - name: https://gitcode.com/cann/amct
+  - name: https://gitcode.com/cann/asc-devkit
+  - name: https://gitcode.com/cann/asc-tools
+  - name: https://gitcode.com/cann/ascend-transformer-boost
+  - name: https://gitcode.com/cann/atvoss
+  - name: https://gitcode.com/cann/catlass
+  - name: https://gitcode.com/cann/driver
+  - name: https://gitcode.com/cann/ge
+  - name: https://gitcode.com/cann/graph-autofusion
+  - name: https://gitcode.com/cann/hccl
+  - name: https://gitcode.com/cann/hcomm
+  - name: https://gitcode.com/cann/hixl
+  - name: https://gitcode.com/cann/metadef
+  - name: https://gitcode.com/cann/oam-tools
+  - name: https://gitcode.com/cann/ops-cv
+  - name: https://gitcode.com/cann/ops-math
+  - name: https://gitcode.com/cann/ops-nn
+  - name: https://gitcode.com/cann/ops-transformer
+  - name: https://gitcode.com/cann/pto-isa
+  - name: https://gitcode.com/cann/pyasc
+  - name: https://gitcode.com/cann/pypto
+  - name: https://gitcode.com/cann/runtime
+  - name: https://gitcode.com/cann/shmem
+  - name: https://gitcode.com/cann/sip
