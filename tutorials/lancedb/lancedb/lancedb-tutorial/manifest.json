@@ -1,0 +1,939 @@
+{
+  "project": "lancedb",
+  "head": "8a5cd74e489194a698f99868f9fba753c23eb25a",
+  "rationale": "LanceDB 是一个以 Rust 为核心、通过薄绑定暴露给 Python/TypeScript/Java 的检索型向量数据库，学习顺序据此设计为「自底向上、由外围到内核、由使用到扩展」八单元。u1 先建立项目定位、仓库与构建运行的整体认知；u2 进入连接与表这两个最核心的对外抽象（Connection、Table/BaseTable/NativeTable、Scannable、Error），打好后续所有操作的基座；u3 围绕检索主线把查询与搜索（QueryBase/VectorQuery、距离度量、SQL 过滤、全文检索、混合搜索+RRF）连成一条完整链路；u4 专门拆解标量与向量（IVF/HNSW/量化）两套索引体系，这是 LanceDB 性能的关键；u5 覆盖表的生命周期（优化压缩、增删改与模式演化、版本/时间旅行、数据检视与多模态 blob）；u6 下沉到存储后端（对象存储抽象、Database trait 与命名空间、远程 HTTP 后端），让读者理解本地与云端两套后端的统一抽象；u7 讲多语言绑定如何复用核心语义（Python PyO3 同步/异步、Node napi-rs、Java 命名空间客户端）；u8 收尾于扩展能力与工程实践（嵌入函数与注册表、内置嵌入集成、DataLoader、测试与贡献流程）。每个单元内部按依赖关系排序，依赖通过 depends_on 显式标注，确保初学者能从第一个程序逐步推进到内核扩展点。本次增量（HEAD 8a5cd74e）：两 HEAD 之间仅有一个提交「fix: ensure read freshness provider is built into namespace client (#3571)」，属聚焦在 Python 绑定层的 bugfix——使 rest 实现下的命名空间客户端原生构建以安装 read-freshness provider、并将 QueryTable 下推路由到 Rust 表（透出 x-lancedb-min-timestamp 新鲜度头），并在 rust/lancedb/src/table/query.rs 的命名空间查询响应解析中自动识别 Arrow IPC 文件格式与流格式。该改动不引入新模块/新架构，Rust 侧 namespace.rs::connect（已安装 ReadFreshnessContextProvider）与 read_freshness.rs 机制未变，故 u5-l3、u6-l2 保持 keep；唯一被改动源码文件命中的讲义是 u7-l1（python/src/connection.rs、python/python/lancedb/table.py），按局部逻辑变化标记为 update，其余讲义保持 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步入门：认识 LanceDB",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清楚 LanceDB 是什么、解决什么检索问题，以及 Rust 核心 + 多语言绑定 + 本地/远程双后端的整体架构。",
+          "learning_goals": [
+            "理解 LanceDB 作为检索型向量数据库的定位与典型场景",
+            "掌握 Rust 核心、Python/Node/Java 绑定、本地与远程后端的层次关系",
+            "了解 LanceDB 与底层 Lance 列式格式的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "rust/lancedb/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib"
+          ],
+          "practice_task": "阅读 README.md 与 lib.rs 顶部文档，用自己的话写一段话总结 LanceDB 与传统数据库的区别，并画出 Rust 核心 / Python / Node / Java 之间的大致依赖关系图。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构、技术栈与构建运行",
+          "order": 2,
+          "filename": "u1-l2-repo-build-run.md",
+          "level": "beginner",
+          "topic": "讲清 Cargo workspace 的组织方式、关键 feature flags（remote/aws/gcs 等）、以及如何构建和运行测试。",
+          "learning_goals": [
+            "理解 workspace 成员（rust/lancedb、python、nodejs）的组织",
+            "认识 remote、aws、gcs、sentence-transformers 等 feature flags 的作用",
+            "掌握 cargo check / cargo test 的常用命令"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "rust/lancedb/Cargo.toml",
+            "AGENTS.md",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "workspace",
+            "features"
+          ],
+          "practice_task": "在本地执行 cargo check --features remote，记录启用 remote 前后依赖项的差异，并说明为什么远程后端是可选 feature。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一个程序：连接、建表、搜索",
+          "order": 3,
+          "filename": "u1-l3-first-program.md",
+          "level": "beginner",
+          "topic": "以 simple.rs 为例走通 connect → create_table → create_index → query → delete 的完整使用链路。",
+          "learning_goals": [
+            "能够读懂并运行 examples/simple.rs",
+            "理解建表、建索引、查询、删除的基本调用顺序",
+            "建立从用户 API 到核心模块的整体印象"
+          ],
+          "source_files": [
+            "rust/lancedb/examples/simple.rs"
+          ],
+          "minimal_modules": [
+            "connection",
+            "table",
+            "query",
+            "index"
+          ],
+          "practice_task": "复制 simple.rs，在 create_table 后新增一步调用 table.schema() 打印 schema，运行并对照观察输出。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Arrow 数据模型与向量列表示",
+          "order": 4,
+          "filename": "u1-l4-arrow-data-model.md",
+          "level": "beginner",
+          "topic": "讲解 LanceDB 基于 Apache Arrow 的列式数据模型，以及向量列用 FixedSizeList<Float32/Float16> 表示的约定。",
+          "learning_goals": [
+            "理解 LanceDB 为什么基于 Arrow 建模",
+            "掌握向量列的 FixedSizeList 表示方法",
+            "能构造一个包含标量列和向量列的 RecordBatch"
+          ],
+          "source_files": [
+            "rust/lancedb/src/arrow.rs",
+            "rust/lancedb/examples/simple.rs"
+          ],
+          "minimal_modules": [
+            "arrow"
+          ],
+          "practice_task": "构造一个含 id(Int32) 与 vector(FixedSizeList<Float32>) 两列的 RecordBatch，写入一张新表并读取验证。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "连接与表基础",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "连接 Connection 与 ConnectBuilder",
+          "order": 1,
+          "filename": "u2-l1-connection-builder.md",
+          "level": "intermediate",
+          "topic": "讲解 connect() 入口、ConnectBuilder 的 builder 模式、本地与云端 URI 形式以及 storage_options 透传。",
+          "learning_goals": [
+            "掌握 ConnectBuilder 各配置方法（api_key、region、storage_options 等）",
+            "区分本地路径、s3://、db:// 等 URI 形式",
+            "理解 Connection 作为数据库句柄的作用"
+          ],
+          "source_files": [
+            "rust/lancedb/src/connection.rs"
+          ],
+          "minimal_modules": [
+            "connection"
+          ],
+          "practice_task": "用 ConnectBuilder 分别连接本地目录路径与一个带 api_key 的 db:// 云端 URI（可填占位 key），调用 Connection.uri() 与 table_names() 对比两者。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Table 抽象层：Table、BaseTable、NativeTable",
+          "order": 2,
+          "filename": "u2-l2-table-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解对外 Table 句柄、BaseTable trait 抽象本地/远程实现、NativeTable 作为本地实现如何委托到底层 Lance Dataset。",
+          "learning_goals": [
+            "理解 Table、BaseTable、NativeTable 三者的职责分层",
+            "掌握打开表、读取 schema 与行数的常用方法",
+            "看懂 NativeTable 如何连接到 Lance Dataset"
+          ],
+          "source_files": [
+            "rust/lancedb/src/table.rs"
+          ],
+          "minimal_modules": [
+            "table"
+          ],
+          "practice_task": "打开一张已建好的表，调用 schema() 与 count_rows()，在源码中定位 NativeTable 对应方法如何委托给底层 dataset。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "数据写入与 Scannable 抽象",
+          "order": 3,
+          "filename": "u2-l3-writing-scannable.md",
+          "level": "intermediate",
+          "topic": "讲解 create_table / add 如何接收任意 Scannable 输入，Scannable trait 如何统一 RecordBatchReader 等多种数据源。",
+          "learning_goals": [
+            "理解 Scannable trait 在数据写入中的作用",
+            "掌握 create_table 与 add 的写入流程",
+            "能实现一个自定义 Scannable 数据源"
+          ],
+          "source_files": [
+            "rust/lancedb/src/table/add_data.rs",
+            "rust/lancedb/src/data/scannable.rs"
+          ],
+          "minimal_modules": [
+            "table (add)",
+            "data (scannable)"
+          ],
+          "practice_task": "用 add 分两批写入数据，再实现一个自定义 Scannable（返回 RecordBatch 流）写入第三批，统计最终行数。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "错误处理：Error 与 Result",
+          "order": 4,
+          "filename": "u2-l4-error-handling.md",
+          "level": "intermediate",
+          "topic": "讲解 LanceDB 自定义 Error 枚举、Result 类型别名、常见错误变体及错误如何在调用链中传播。",
+          "learning_goals": [
+            "认识自定义 Error 枚举的常见变体",
+            "理解 Result 类型别名的作用",
+            "掌握错误处理与传播的基本模式"
+          ],
+          "source_files": [
+            "rust/lancedb/src/error.rs"
+          ],
+          "minimal_modules": [
+            "error"
+          ],
+          "practice_task": "故意用非法 URI 或重复表名触发一次错误，捕获并打印其 Error 变体类型，思考自定义错误相比 String 的优势。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "查询与搜索",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "查询基础：QueryBase 与 Select",
+          "order": 1,
+          "filename": "u3-l1-query-base-select.md",
+          "level": "intermediate",
+          "topic": "讲解 query() 返回的基础查询、QueryBase trait 提供的 limit/select/where_/only 等方法，以及 Select 枚举如何控制返回列。",
+          "learning_goals": [
+            "掌握 QueryBase 的链式查询构建方法",
+            "理解 Select 枚举对列选择的控制",
+            "能用基础查询完成一次扫描"
+          ],
+          "source_files": [
+            "rust/lancedb/src/query.rs"
+          ],
+          "minimal_modules": [
+            "query"
+          ],
+          "practice_task": "打开一张表，用 select/only/limit 组合做一次扫描，对比三种方式返回列的差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "向量相似度搜索：VectorQuery",
+          "order": 2,
+          "filename": "u3-l2-vector-search.md",
+          "level": "intermediate",
+          "topic": "讲解 nearest_to 如何把基础查询升级为 VectorQuery，ExecutableQuery::execute 如何返回 RecordBatch 流，以及 _distance 列含义。",
+          "learning_goals": [
+            "掌握 nearest_to 构造向量查询的流程",
+            "理解 ExecutableQuery::execute 返回的流式结果",
+            "看懂结果中的 _distance 列"
+          ],
+          "source_files": [
+            "rust/lancedb/src/query.rs",
+            "rust/lancedb/examples/simple.rs"
+          ],
+          "minimal_modules": [
+            "query"
+          ],
+          "practice_task": "对表执行 nearest_to 搜索 top-5，打印每条的 _distance，验证结果按距离升序排列。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "距离度量 DistanceType",
+          "order": 3,
+          "filename": "u3-l3-distance-metrics.md",
+          "level": "intermediate",
+          "topic": "讲解 L2/Cosine/Dot/Hamming 四种距离度量的含义与适用场景，ApproxMode 速度精度权衡，以及与 lance-linalg 的转换。",
+          "learning_goals": [
+            "区分四种距离度量的语义与取值范围",
+            "理解 ApproxMode 的 Fast/Normal/Accurate 权衡",
+            "了解 DistanceType 与底层 lance-linalg 的互转"
+          ],
+          "source_files": [
+            "rust/lancedb/src/lib.rs",
+            "rust/lancedb/src/query.rs"
+          ],
+          "minimal_modules": [
+            "lib (DistanceType)",
+            "query"
+          ],
+          "practice_task": "用同一组向量分别以 L2 和 Cosine 搜索，比较返回顺序差异，并解释为何 Cosine 结果对向量幅度不敏感。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "过滤表达式与 SQL",
+          "order": 4,
+          "filename": "u3-l4-sql-filters.md",
+          "level": "intermediate",
+          "topic": "讲解 where_ 用 SQL 字符串做过滤、SQL 如何解析为 DataFusion 表达式，以及向量搜索前的预过滤。",
+          "learning_goals": [
+            "掌握 where_ 的 SQL 过滤用法",
+            "理解 SQL 与 DataFusion 表达式的关系",
+            "学会在向量搜索中加入标量预过滤"
+          ],
+          "source_files": [
+            "rust/lancedb/src/expr/sql.rs",
+            "rust/lancedb/src/query.rs"
+          ],
+          "minimal_modules": [
+            "expr (sql)",
+            "query"
+          ],
+          "practice_task": "在向量搜索上加一个对标量列的 where_ 过滤条件，观察命中数量与无过滤时的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "全文检索 FTS",
+          "order": 5,
+          "filename": "u3-l5-full-text-search.md",
+          "level": "intermediate",
+          "topic": "讲解基于 BM25 的全文索引 FTS、用 create_index 创建 FTS、以及 full_text_search 查询文本。",
+          "learning_goals": [
+            "理解 FTS 全文索引基于 BM25 的打分机制",
+            "掌握创建 FTS 索引的步骤",
+            "能执行一次关键词全文检索"
+          ],
+          "source_files": [
+            "rust/lancedb/src/index.rs",
+            "rust/lancedb/examples/full_text_search.rs",
+            "rust/lancedb/src/query.rs"
+          ],
+          "minimal_modules": [
+            "index (FTS)",
+            "query"
+          ],
+          "practice_task": "建一张含文本列的表，创建 FTS 索引，执行一次多词全文检索并查看打分排序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "混合搜索与 RRF 重排",
+          "order": 6,
+          "filename": "u3-l6-hybrid-rrf.md",
+          "level": "intermediate",
+          "topic": "讲解同时进行向量搜索与全文搜索、两路结果用 RRF（倒数排名融合）合并排序，以及 normalize_scores 的作用。",
+          "learning_goals": [
+            "理解混合搜索同时融合向量与全文两路结果",
+            "掌握 RRF 重排的基本原理",
+            "了解分数归一化 normalize_scores 的作用"
+          ],
+          "source_files": [
+            "rust/lancedb/src/query/hybrid.rs",
+            "rust/lancedb/src/rerankers/rrf.rs",
+            "rust/lancedb/examples/hybrid_search.rs"
+          ],
+          "minimal_modules": [
+            "query (hybrid)",
+            "rerankers (rrf)"
+          ],
+          "practice_task": "对同一查询分别跑向量搜索与全文搜索，再用 RRF 重排，对比三份结果的排序差异。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "索引体系",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "索引总览与 Index 枚举",
+          "order": 1,
+          "filename": "u4-l1-index-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 Index 枚举（Auto、标量、向量三类）、IndexType、create_index 的 builder 流程，以及 Auto 自动选型逻辑。",
+          "learning_goals": [
+            "掌握 Index 枚举的主要变体与分类",
+            "理解 create_index 的 builder 流程",
+            "了解 Auto 如何根据列类型自动选择索引"
+          ],
+          "source_files": [
+            "rust/lancedb/src/index.rs",
+            "rust/lancedb/src/table/create_index.rs"
+          ],
+          "minimal_modules": [
+            "index",
+            "table (create_index)"
+          ],
+          "practice_task": "对一个向量列用 Index::Auto 建索引，再对一个字符串列显式建索引，列出表中所有索引并记录类型。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "标量索引：BTree/Bitmap/LabelList/Fm",
+          "order": 2,
+          "filename": "u4-l2-scalar-indexes.md",
+          "level": "intermediate",
+          "topic": "讲解四种标量索引的适用场景：BTree 适合高基数、Bitmap 适合低基数、LabelList 适合数组列、Fm 适合子串搜索。",
+          "learning_goals": [
+            "区分 BTree、Bitmap、LabelList、Fm 四种标量索引的适用场景",
+            "理解基数如何影响标量索引选择",
+            "能为不同列选择合适的标量索引"
+          ],
+          "source_files": [
+            "rust/lancedb/src/index/scalar.rs",
+            "rust/lancedb/src/index.rs"
+          ],
+          "minimal_modules": [
+            "index (scalar)"
+          ],
+          "practice_task": "对同一标量列分别建 BTree 和 Bitmap，跑选择性不同的过滤查询，比较命中行数与耗时。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "向量索引 IVF 家族",
+          "order": 3,
+          "filename": "u4-l3-ivf-indexes.md",
+          "level": "advanced",
+          "topic": "讲解 IVF 空间划分思想，IvfFlat/IvfPq/IvfSq/IvfRq 的区别与精度/内存权衡，以及 num_partitions 等关键参数。",
+          "learning_goals": [
+            "理解 IVF 倒排文件空间划分原理",
+            "区分 IvfFlat/IvfPq/IvfSq/IvfRq 的精度与内存权衡",
+            "掌握 num_partitions 等关键参数的作用"
+          ],
+          "source_files": [
+            "rust/lancedb/src/index/vector.rs",
+            "rust/lancedb/src/index.rs",
+            "rust/lancedb/examples/ivf_pq.rs"
+          ],
+          "minimal_modules": [
+            "index (vector)"
+          ],
+          "practice_task": "用 IvfPq 建索引并设置不同 num_partitions，比较召回率（与暴力搜索对比）与查询延迟。",
+          "depends_on": [
+            "u4-l1",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "HNSW 与量化技术",
+          "order": 4,
+          "filename": "u4-l4-hnsw-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 IvfHnswPq/Sq/Flat 等图索引变体，以及 PQ/SQ/RQ 量化原理与近似搜索的关系。",
+          "learning_goals": [
+            "理解 HNSW 图索引相对 IVF 的收益",
+            "掌握 PQ/SQ/RQ 量化的基本原理",
+            "能在精度与速度间做合理取舍"
+          ],
+          "source_files": [
+            "rust/lancedb/src/index/vector.rs",
+            "rust/lancedb/src/index.rs"
+          ],
+          "minimal_modules": [
+            "index (vector)"
+          ],
+          "practice_task": "用 IvfHnswFlat 与 IvfFlat 在同一数据上建索引，对比召回率，理解图索引带来的提升。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "索引统计、配置与等待机制",
+          "order": 5,
+          "filename": "u4-l5-index-stats-waiter.md",
+          "level": "advanced",
+          "topic": "讲解 IndexConfig、IndexStatistics、index_stats 读取统计信息，以及 Waiter 轮询索引就绪的机制。",
+          "learning_goals": [
+            "掌握 IndexConfig 与 IndexStatistics 的含义",
+            "能用 index_stats 读取索引统计信息",
+            "理解 Waiter 等待索引就绪的机制"
+          ],
+          "source_files": [
+            "rust/lancedb/src/index.rs",
+            "rust/lancedb/src/index/waiter.rs"
+          ],
+          "minimal_modules": [
+            "index",
+            "index (waiter)"
+          ],
+          "practice_task": "建一个大索引，用 index_stats 读取其统计信息（如索引行数、属性），并用 waiter 等待索引完全就绪。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "表生命周期与优化",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "优化：压缩与索引重建",
+          "order": 1,
+          "filename": "u5-l1-optimize-compaction.md",
+          "level": "advanced",
+          "topic": "讲解碎片文件压缩 compaction、索引更新优化，以及 OptimizeStats 反映的优化结果。",
+          "learning_goals": [
+            "理解 Lance 写入会产生碎片文件以及 compaction 的作用",
+            "掌握 optimize 触发压缩与索引更新的流程",
+            "看懂 OptimizeStats 各字段含义"
+          ],
+          "source_files": [
+            "rust/lancedb/src/table/optimize.rs"
+          ],
+          "minimal_modules": [
+            "table (optimize)"
+          ],
+          "practice_task": "反复 add 多个小批次数据，调用 optimize 前后对比底层文件数量（或 OptimizeStats），理解压缩收益。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "数据增删改与模式演化",
+          "order": 2,
+          "filename": "u5-l2-crud-schema-evolution.md",
+          "level": "intermediate",
+          "topic": "讲解 update 条件更新、delete 删除、add/drop column 的模式演化，以及 merge_insert 实现的 upsert。",
+          "learning_goals": [
+            "掌握 update/delete 的条件式数据修改",
+            "理解 schema evolution 增删列的流程",
+            "学会用 merge 做 upsert 合并写入"
+          ],
+          "source_files": [
+            "rust/lancedb/src/table/update.rs",
+            "rust/lancedb/src/table/delete.rs",
+            "rust/lancedb/src/table/schema_evolution.rs",
+            "rust/lancedb/src/table/merge.rs"
+          ],
+          "minimal_modules": [
+            "table (update/delete/schema_evolution/merge)"
+          ],
+          "practice_task": "用 update 批量改写某列值，用 schema_evolution 新增一列，再用 merge 对主键做一次 upsert，最后核验结果。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "版本管理与时间旅行",
+          "order": 3,
+          "filename": "u5-l3-versioning-time-travel.md",
+          "level": "advanced",
+          "topic": "讲解 Lance 自动版本管理、checkout 特定 version/tag 读取历史、以及 read_consistency 与 read_freshness 控制读取新鲜度。",
+          "learning_goals": [
+            "理解 Lance 自动版本机制",
+            "掌握 checkout 读取历史版本的用法",
+            "了解 read_consistency / read_freshness 对读取新鲜度的影响"
+          ],
+          "source_files": [
+            "rust/lancedb/src/table.rs",
+            "rust/lancedb/src/database/read_freshness.rs"
+          ],
+          "minimal_modules": [
+            "table",
+            "database (read_freshness)"
+          ],
+          "practice_task": "多次写入数据后，checkout 一个旧 version 读取，对比新旧版本的数据差异，体会时间旅行。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "数据检视与多模态 blob",
+          "order": 4,
+          "filename": "u5-l4-inspect-blob.md",
+          "level": "advanced",
+          "topic": "讲解 inspect 工具如何检视数据与统计，以及 blob 机制如何存储大对象（图像/视频等）实现多模态。",
+          "learning_goals": [
+            "掌握 inspect 模块检视数据与统计的能力",
+            "理解 blob 列存储大对象实现多模态的原理",
+            "能用 blob 宏标记并写入大对象"
+          ],
+          "source_files": [
+            "rust/lancedb/src/data/inspect.rs",
+            "rust/lancedb/src/blob.rs"
+          ],
+          "minimal_modules": [
+            "data (inspect)",
+            "blob"
+          ],
+          "practice_task": "用 blob 宏标记一列大对象（如字节缓冲）并写入若干行，再用 inspect 查看该列的存储信息。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "存储后端与架构",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "对象存储抽象与存储选项",
+          "order": 1,
+          "filename": "u6-l1-object-store.md",
+          "level": "advanced",
+          "topic": "讲解基于 object_store crate 的统一存储抽象（本地/S3/GS/Azure）、storage_options 透传机制，以及 io_tracking 的 IO 追踪。",
+          "learning_goals": [
+            "理解 object_store crate 如何统一多种存储后端",
+            "掌握 storage_options 如何透传凭证与配置",
+            "了解 io_tracking 的 IO 追踪机制"
+          ],
+          "source_files": [
+            "rust/lancedb/src/io.rs",
+            "rust/lancedb/src/io/object_store.rs",
+            "rust/lancedb/src/io/object_store/io_tracking.rs"
+          ],
+          "minimal_modules": [
+            "io",
+            "io (object_store)"
+          ],
+          "practice_task": "通过 storage_options 连接一个本地目录（或本地 S3 模拟），用 ObjectStoreRegistry 观察注册的对象存储类型。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Database trait 与命名空间模型",
+          "order": 2,
+          "filename": "u6-l2-database-namespace.md",
+          "level": "advanced",
+          "topic": "讲解 Database trait 如何抽象表集合、listing 模式（文件系统列举）与 namespace 模式（基于 lance-namespace 的多级命名空间）。",
+          "learning_goals": [
+            "理解 Database trait 对表集合的抽象",
+            "区分 listing 与 namespace 两种实现",
+            "了解 lance-namespace 在多级命名空间中的作用"
+          ],
+          "source_files": [
+            "rust/lancedb/src/database.rs",
+            "rust/lancedb/src/database/listing.rs",
+            "rust/lancedb/src/database/namespace.rs"
+          ],
+          "minimal_modules": [
+            "database",
+            "database (listing/namespace)"
+          ],
+          "practice_task": "分别用 listing 模式与 namespace 模式连接并列出表名，对比两者在表组织上的差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "远程后端：HTTP 客户端与重试",
+          "order": 3,
+          "filename": "u6-l3-remote-backend.md",
+          "level": "advanced",
+          "topic": "讲解 RemoteDatabase / RemoteTable 如何把调用转为 HTTP、ServerVersion 的能力探测、以及 retry 重试策略。",
+          "learning_goals": [
+            "理解 RemoteTable/RemoteDatabase 如何将 API 调用转为 HTTP 请求",
+            "掌握 ServerVersion 的服务器能力探测机制",
+            "了解 retry 模块的重试策略"
+          ],
+          "source_files": [
+            "rust/lancedb/src/remote/client.rs",
+            "rust/lancedb/src/remote/db.rs",
+            "rust/lancedb/src/remote/retry.rs",
+            "rust/lancedb/src/remote/table.rs"
+          ],
+          "minimal_modules": [
+            "remote"
+          ],
+          "practice_task": "参考 remote 测试中的 mock 端点用法，跑通一次远程建表请求，跟踪从 RemoteTable 到 HTTP client 的调用链。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "多语言绑定",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Python 绑定：PyO3 与同步/异步",
+          "order": 1,
+          "filename": "u7-l1-python-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 PyO3 如何把 Rust 核心暴露为 _lancedb 原生模块、Python 层 AsyncTable（异步）与 Table（通过共享 tokio runtime 同步）两套封装；并补充命名空间客户端在 rest 实现下原生构建以安装 read-freshness provider、从而把 QueryTable 下推正确路由到 Rust 表（透出 x-lancedb-min-timestamp 新鲜度头）的最新行为。",
+          "learning_goals": [
+            "理解 PyO3 暴露 Rust 核心为 Python 模块的方式",
+            "掌握 Python 层同步 Table 与异步 AsyncTable 的关系，以及共享 tokio runtime（block_on）如何驱动异步 Rust",
+            "能看懂 src 绑定与 python/lancedb 封装的分层",
+            "理解 connect_namespace_client 在 rest 实现下原生构建命名空间客户端、安装 read-freshness provider 并据此决定 QueryTable 下推路由的原因"
+          ],
+          "source_files": [
+            "python/src/lib.rs",
+            "python/src/connection.rs",
+            "python/src/runtime.rs",
+            "python/src/table.rs",
+            "python/python/lancedb/__init__.py",
+            "python/python/lancedb/table.py",
+            "python/python/lancedb/namespace.py"
+          ],
+          "minimal_modules": [
+            "python (src bindings)",
+            "python/lancedb (py api)"
+          ],
+          "practice_task": "用 Python 写一个连接 + 建表 + 向量搜索的脚本，分别用同步 Table 与异步 AsyncTable 两种写法实现并对比；进阶：用 connect_namespace 以 rest 实现连接，观察 _route_pushdown_to_rust 为 True 时读取如何携带 read-freshness 行为。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Node.js / TypeScript 绑定：napi-rs",
+          "order": 2,
+          "filename": "u7-l2-nodejs-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 napi-rs 如何生成原生 Node 模块、TypeScript 层提供类型与 LocalTable（注意它同时用于远程表）。",
+          "learning_goals": [
+            "理解 napi-rs 生成原生 Node 模块的机制",
+            "掌握 TypeScript 层 API 与类型的组织",
+            "了解 LocalTable 同时覆盖本地与远程表的设计"
+          ],
+          "source_files": [
+            "nodejs/src/lib.rs",
+            "nodejs/src/connection.rs",
+            "nodejs/src/table.rs",
+            "nodejs/lancedb/connection.ts",
+            "nodejs/lancedb/table.ts"
+          ],
+          "minimal_modules": [
+            "nodejs (src bindings)",
+            "nodejs/lancedb (ts api)"
+          ],
+          "practice_task": "用 Node.js 写一个连接 + 建表 + 向量搜索的脚本，运行 npm run build 生成 TypeScript 类型定义并查看输出。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "跨语言绑定架构与 Java 命名空间客户端",
+          "order": 3,
+          "filename": "u7-l3-binding-architecture-java.md",
+          "level": "advanced",
+          "topic": "讲解核心 Rust + 薄绑定的架构取舍、四种绑定如何共享同一套语义，以及 Java 当前仅提供命名空间客户端（LanceDbNamespaceClientBuilder）的现状。",
+          "learning_goals": [
+            "理解核心 Rust + 薄绑定的架构取舍",
+            "掌握四种绑定共享同一套语义的方式",
+            "了解 Java 绑定当前的覆盖范围与命名空间客户端定位"
+          ],
+          "source_files": [
+            "rust/lancedb/src/table.rs",
+            "nodejs/src/table.rs",
+            "java/lancedb-core/src/main/java/com/lancedb/LanceDbNamespaceClientBuilder.java",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "table (BaseTable)",
+            "java (namespace client)"
+          ],
+          "practice_task": "对照 AGENTS.md 的「添加新方法」流程，列出新增一个 Table 方法在 Rust 核心、Python、TypeScript 各层需要修改的文件清单。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2",
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "扩展能力与工程实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "嵌入函数与注册表",
+          "order": 1,
+          "filename": "u8-l1-embedding-registry.md",
+          "level": "advanced",
+          "topic": "讲解 EmbeddingFunction trait、EmbeddingRegistry / MemoryRegistry，以及 WithEmbeddings 在写入时自动计算向量列的机制。",
+          "learning_goals": [
+            "理解 EmbeddingFunction trait 的职责",
+            "掌握 EmbeddingRegistry 注册与查找机制",
+            "看懂 WithEmbeddings 如何在写入时自动生成向量"
+          ],
+          "source_files": [
+            "rust/lancedb/src/embeddings.rs"
+          ],
+          "minimal_modules": [
+            "embeddings"
+          ],
+          "practice_task": "实现一个自定义 EmbeddingFunction（如简单哈希到固定维度），注册后建表写入文本，验证向量列被自动生成。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "嵌入集成：OpenAI / Bedrock / Sentence-Transformers",
+          "order": 2,
+          "filename": "u8-l2-embedding-integrations.md",
+          "level": "advanced",
+          "topic": "讲解三种内置 EmbeddingFunction 实现（openai/bedrock/sentence_transformers）、对应 feature flag，以及远程推理与本地推理的差异。",
+          "learning_goals": [
+            "掌握三种内置嵌入集成的用途与 feature flag",
+            "理解远程嵌入（OpenAI/Bedrock）与本地嵌入（Sentence-Transformers）的差异",
+            "能端到端跑通文本到向量到搜索的流程"
+          ],
+          "source_files": [
+            "rust/lancedb/src/embeddings/openai.rs",
+            "rust/lancedb/src/embeddings/bedrock.rs",
+            "rust/lancedb/src/embeddings/sentence_transformers.rs"
+          ],
+          "minimal_modules": [
+            "embeddings (openai/bedrock/sentence_transformers)"
+          ],
+          "practice_task": "启用 sentence-transformers feature，用内置嵌入做一次端到端：文本 → 自动嵌入 → 向量搜索。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "DataLoader 与排列采样",
+          "order": 3,
+          "filename": "u8-l3-dataloader-permutation.md",
+          "level": "advanced",
+          "topic": "讲解 dataloader 如何流式读取大表用于训练、permutation 如何打乱顺序、以及 batch 生成机制。",
+          "learning_goals": [
+            "理解 dataloader 流式读取大表的用途",
+            "掌握 permutation 打乱顺序的原理",
+            "学会按指定 batch size 生成训练批次"
+          ],
+          "source_files": [
+            "rust/lancedb/src/dataloader.rs",
+            "rust/lancedb/src/dataloader/permutation.rs"
+          ],
+          "minimal_modules": [
+            "dataloader"
+          ],
+          "practice_task": "用 dataloader 流式读取一张较大表，按指定 batch size 输出若干批次，并启用 permutation 观察顺序被打乱。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "测试、示例与贡献流程",
+          "order": 4,
+          "filename": "u8-l4-testing-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 examples 如何展示用法、单元/集成测试约定（remote feature）、以及贡献与 PR（Conventional Commits）流程。",
+          "learning_goals": [
+            "掌握运行 Rust example 与 Python 测试的方法",
+            "理解测试约定（remote feature、不合并无测试代码）",
+            "熟悉 Conventional Commits 的 PR 标题规范"
+          ],
+          "source_files": [
+            "rust/lancedb/examples/simple.rs",
+            "CONTRIBUTING.md",
+            "AGENTS.md",
+            "python/CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "examples",
+            "tests"
+          ],
+          "practice_task": "跑通一个 Rust example 与一组 Python 测试，然后按 Conventional Commits 规范为示例写一个本地改动提交信息。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
