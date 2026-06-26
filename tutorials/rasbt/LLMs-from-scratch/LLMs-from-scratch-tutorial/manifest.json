@@ -1,0 +1,1052 @@
+{
+  "project": "LLMs-from-scratch",
+  "head": "ff0b3d92e3383f52aa732366024c601c45d869a6",
+  "rationale": "本项目是 Sebastian Raschka《Build a Large Language Model (From Scratch)》的官方代码库，天然以章节（ch02–ch07 + 附录 A/D/E）组织，本身就是一条“从零搭建 GPT 并完成预训练与微调”的学习主线，因此讲义单元严格沿章节顺序铺开：先用 u1 帮助读者建立项目定位、环境与阅读地图（含 previous_chapters.py 汇总机制这一关键约定），再依次走通文本数据处理（u2/ch02）→注意力（u3/ch03）→GPT 模型（u4/ch04）→预训练（u5/ch05）→分类微调（u6/ch06）→指令微调（u7/ch07）。这 7 个单元构成 beginner→intermediate 的主干，依赖链严格自底向上（数据→注意力→模型→训练→微调）。之后进入 advanced：u8 夯实 PyTorch 基础并补齐训练工程（warmup/余弦衰减/梯度裁剪/DDP，对应附录 A/D），u9 聚焦推理性能与注意力变体（KV cache、高效多头注意力、GQA/MLA/SWA、MoE），u10 谈架构迁移与现代模型（GPT→Llama 的 RoPE/RMSNorm、Qwen3/Gemma3、工程化优化），u11 收尾于对齐与评估（LoRA、DPO、Ollama 评估）。单元内每篇讲义只讲一个主题、引用 1–6 个真实源码文件并配一个动手实践任务，整体覆盖从入门到二次开发的完整能力梯度。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体结构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍本仓库是什么、要构建什么（类 ChatGPT 的 GPT 模型），以及它的技术栈、依赖和顶层目录组织。",
+          "learning_goals": [
+            "理解项目的教育定位与最终目标",
+            "掌握顶层目录（ch02–ch07、附录、setup、pkg）的组织方式",
+            "了解技术栈与核心依赖（PyTorch、tiktoken、tensorflow 等）"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "requirements.txt"
+          ],
+          "minimal_modules": [
+            "项目定位与书籍关系",
+            "顶层目录与章节结构",
+            "技术栈与依赖清单"
+          ],
+          "practice_task": "克隆仓库后阅读 README 的章节表，写出每个主章节对应的主 notebook 文件路径，并说明各章依赖关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与运行第一个模型",
+          "order": 2,
+          "filename": "u1-l2-environment-setup.md",
+          "level": "beginner",
+          "topic": "讲解如何安装依赖、运行 ch04 的 gpt.py 入口脚本，跑通第一次文本生成并理解设备选择。",
+          "learning_goals": [
+            "完成 Python/PyTorch 与 tiktoken 的安装",
+            "运行 gpt.py 的 main() 完成首次自回归生成",
+            "理解 CPU/GPU 设备选择与 model.eval() 的作用"
+          ],
+          "source_files": [
+            "setup/README.md",
+            "ch04/01_main-chapter-code/gpt.py"
+          ],
+          "minimal_modules": [
+            "依赖安装方式",
+            "运行 gpt.py 入口",
+            "设备选择与推理模式"
+          ],
+          "practice_task": "按 setup 文档安装依赖，运行 ch04/01_main-chapter-code/gpt.py，记录输入 'Hello, I am' 的生成输出，并改写一段起始上下文观察输出变化。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库阅读地图：章节约定与代码汇总机制",
+          "order": 3,
+          "filename": "u1-l3-repo-reading-map.md",
+          "level": "beginner",
+          "topic": "讲解每章 01_main-chapter-code 的目录约定、summary .py 文件、previous_chapters.py 汇总机制，以及 notebook 与 .py 的关系。",
+          "learning_goals": [
+            "理解 01_main-chapter-code 目录与命名约定",
+            "掌握 previous_chapters.py 把前几章代码汇总复用的机制",
+            "分清主 notebook、summary .py、exercise-solutions 与 bonus 目录"
+          ],
+          "source_files": [
+            "README.md",
+            "ch04/01_main-chapter-code/README.md",
+            "ch05/01_main-chapter-code/gpt_train.py"
+          ],
+          "minimal_modules": [
+            "章节目录约定",
+            "previous_chapters.py 汇总机制",
+            "notebook 与 summary 文件关系"
+          ],
+          "practice_task": "对比 ch04/01_main-chapter-code/gpt.py 与 ch05/01_main-chapter-code/gpt_train.py 中的 import，画出 ch05 如何复用前序章节代码的依赖图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "文本数据处理流水线（第 2 章）",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "分词与词表构建",
+          "order": 1,
+          "filename": "u2-l1-tokenization-vocabulary.md",
+          "level": "beginner",
+          "topic": "讲解为什么需要把文本转成数字，如何用简单规则分词、构建词表并生成 token ID，以及特殊上下文 token。",
+          "learning_goals": [
+            "理解文本数字化的必要性",
+            "实现简单的基于正则的词级分词与词表",
+            "掌握添加 <|endoftext|> 等特殊 token 的作用"
+          ],
+          "source_files": [
+            "ch02/01_main-chapter-code/ch02.ipynb"
+          ],
+          "minimal_modules": [
+            "词嵌入动机",
+            "简单分词与词表",
+            "token ID 映射",
+            "特殊上下文 token"
+          ],
+          "practice_task": "用纯 Python 对 the-verdict.txt 做词级分词，构建词表并把一段文本编码为 token ID 再解码回来。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "字节对编码（BPE）与 tiktoken",
+          "order": 2,
+          "filename": "u2-l2-bpe-tokenizer.md",
+          "level": "beginner",
+          "topic": "讲解 BPE 子词分词原理，以及如何用 tiktoken 加载 GPT-2 的 BPE 编码器处理未知词。",
+          "learning_goals": [
+            "理解 BPE 合并子词的原理",
+            "使用 tiktoken.get_encoding('gpt2') 编码/解码",
+            "认识 BPE 相对词级分词的优势"
+          ],
+          "source_files": [
+            "ch02/01_main-chapter-code/ch02.ipynb",
+            "ch02/05_bpe-from-scratch/bpe-from-scratch-simple.ipynb"
+          ],
+          "minimal_modules": [
+            "BPE 原理",
+            "tiktoken gpt2 编码",
+            "子词合并"
+          ],
+          "practice_task": "对比自写的简单 BPE 与 tiktoken 对同一段含生僻词文本的编码结果，统计 token 数量差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "滑动窗口数据采样与 DataLoader",
+          "order": 3,
+          "filename": "u2-l3-sliding-window-dataloader.md",
+          "level": "beginner",
+          "topic": "讲解如何用滑动窗口把长文本切成 input/target 训练样本，实现 GPTDatasetV1 与 create_dataloader_v1。",
+          "learning_goals": [
+            "理解滑动窗口与 stride 的作用",
+            "实现 GPTDatasetV1 生成 input/target 对",
+            "掌握 batch_size/max_length/stride/drop_last 参数"
+          ],
+          "source_files": [
+            "ch02/01_main-chapter-code/ch02.ipynb",
+            "ch02/01_main-chapter-code/dataloader.ipynb",
+            "ch04/01_main-chapter-code/previous_chapters.py"
+          ],
+          "minimal_modules": [
+            "滑动窗口采样",
+            "GPTDatasetV1",
+            "create_dataloader_v1",
+            "batch/stride/max_length"
+          ],
+          "practice_task": "对一段文本调用 create_dataloader_v1，打印前两个 batch 的 input/target 张量，验证 target 是 input 右移一位。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Token 嵌入与位置嵌入",
+          "order": 4,
+          "filename": "u2-l4-token-positional-embeddings.md",
+          "level": "beginner",
+          "topic": "讲解如何把 token ID 转成连续向量（token embedding），并用可学习位置嵌入编码位置信息。",
+          "learning_goals": [
+            "理解 nn.Embedding 作为查表操作",
+            "实现 token embedding 与位置 embedding 并相加",
+            "认识为什么自注意力需要位置信息"
+          ],
+          "source_files": [
+            "ch02/01_main-chapter-code/ch02.ipynb",
+            "ch04/01_main-chapter-code/previous_chapters.py"
+          ],
+          "minimal_modules": [
+            "token embedding 层",
+            "位置 embedding",
+            "embedding 相加"
+          ],
+          "practice_task": "用 nn.Embedding 为一段 token 序列生成 token 与位置嵌入并相加，打印输出形状与数值范围。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "注意力机制（第 3 章）",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "自注意力原理",
+          "order": 1,
+          "filename": "u3-l1-self-attention-intuition.md",
+          "level": "beginner",
+          "topic": "讲解自注意力的动机，从可训练注意力权重过渡到缩放点积注意力。",
+          "learning_goals": [
+            "理解注意力作为上下文加权聚合的思想",
+            "实现可训练权重的简化注意力",
+            "掌握缩放点积注意力公式"
+          ],
+          "source_files": [
+            "ch03/01_main-chapter-code/ch03.ipynb"
+          ],
+          "minimal_modules": [
+            "注意力动机",
+            "可训练注意力权重",
+            "缩放点积注意力"
+          ],
+          "practice_task": "用随机张量手写一遍缩放点积注意力，验证 softmax 后权重矩阵每行和为 1。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "因果注意力与掩码",
+          "order": 2,
+          "filename": "u3-l2-causal-attention-mask.md",
+          "level": "beginner",
+          "topic": "讲解如何用因果掩码防止看到未来 token，以及用 register_buffer 管理掩码。",
+          "learning_goals": [
+            "理解因果掩码避免信息泄露",
+            "用上三角矩阵构造掩码并 masked_fill_",
+            "掌握 register_buffer 的作用与非持久化"
+          ],
+          "source_files": [
+            "ch03/01_main-chapter-code/ch03.ipynb",
+            "ch03/03_understanding-buffers/understanding-buffers.ipynb"
+          ],
+          "minimal_modules": [
+            "因果掩码",
+            "register_buffer",
+            "上三角掩码"
+          ],
+          "practice_task": "实现带因果掩码的单头注意力，打印掩码后的注意力分数矩阵，确认下三角区域被置为 -inf。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "多头注意力实现",
+          "order": 3,
+          "filename": "u3-l3-multihead-attention.md",
+          "level": "intermediate",
+          "topic": "讲解如何把注意力拆成多个头并行计算，实现完整的 MultiHeadAttention 类。",
+          "learning_goals": [
+            "理解多头并行的张量切分与重排",
+            "掌握 view/transpose 在多头拆分中的作用",
+            "读懂 MultiHeadAttention 完整实现与 out_proj"
+          ],
+          "source_files": [
+            "ch03/01_main-chapter-code/multihead-attention.ipynb",
+            "ch04/01_main-chapter-code/previous_chapters.py"
+          ],
+          "minimal_modules": [
+            "多头拆分",
+            "view/transpose 重排",
+            "out_proj 投影",
+            "MultiHeadAttention 类"
+          ],
+          "practice_task": "实例化 MultiHeadAttention 并跑一次前向，打印 queries/keys/values 与最终 context_vec 的形状，验证维度还原。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "从零搭建 GPT 模型（第 4 章）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "核心组件：LayerNorm / GELU / FeedForward",
+          "order": 1,
+          "filename": "u4-l1-gpt-building-blocks.md",
+          "level": "intermediate",
+          "topic": "讲解 Transformer 的基础组件：自定义 LayerNorm、GELU 激活与前馈网络。",
+          "learning_goals": [
+            "理解并实现带可学习 scale/shift 的 LayerNorm",
+            "实现近似 GELU 激活函数",
+            "组装 FeedForward 两层网络"
+          ],
+          "source_files": [
+            "ch04/01_main-chapter-code/gpt.py",
+            "ch04/01_main-chapter-code/ch04.ipynb"
+          ],
+          "minimal_modules": [
+            "LayerNorm",
+            "GELU 激活",
+            "FeedForward"
+          ],
+          "practice_task": "对随机张量分别过 LayerNorm 和 GELU，验证 LayerNorm 输出每行均值≈0、方差≈1。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "TransformerBlock 与残差连接",
+          "order": 2,
+          "filename": "u4-l2-transformer-block.md",
+          "level": "intermediate",
+          "topic": "讲解如何把注意力与前馈网络组装成 TransformerBlock，含 pre-LayerNorm 与残差连接。",
+          "learning_goals": [
+            "理解 pre-LayerNorm 结构",
+            "实现注意力块与前馈块的残差连接",
+            "掌握 dropout shortcut 的位置"
+          ],
+          "source_files": [
+            "ch04/01_main-chapter-code/gpt.py"
+          ],
+          "minimal_modules": [
+            "TransformerBlock",
+            "pre-LayerNorm",
+            "残差连接",
+            "drop_shortcut"
+          ],
+          "practice_task": "实例化一个 TransformerBlock，输入随机张量并验证输入输出形状一致，画出残差连接的数据流图。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "GPT 模型组装与配置",
+          "order": 3,
+          "filename": "u4-l3-gpt-model-assembly.md",
+          "level": "intermediate",
+          "topic": "讲解如何把嵌入层、若干 TransformerBlock、最终归一化与输出头组装成完整 GPTModel，并理解配置字典。",
+          "learning_goals": [
+            "理解 GPTModel 的整体数据流",
+            "掌握 GPT_CONFIG_124M 各超参含义",
+            "认识 out_head 与权重 tying 的关系"
+          ],
+          "source_files": [
+            "ch04/01_main-chapter-code/gpt.py",
+            "ch04/01_main-chapter-code/ch04.ipynb"
+          ],
+          "minimal_modules": [
+            "GPTModel 组装",
+            "GPT_CONFIG_124M",
+            "tok/pos emb 与 trf_blocks",
+            "out_head 输出头"
+          ],
+          "practice_task": "用 GPT_CONFIG_124M 构建模型并打印总参数量，验证与 124M 量级一致，记录参数量主要来源。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "简单自回归文本生成",
+          "order": 4,
+          "filename": "u4-l4-simple-text-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 generate_text_simple 如何基于贪心解码自回归生成新 token。",
+          "learning_goals": [
+            "理解自回归生成的循环结构",
+            "掌握上下文裁剪与取最后一步 logits",
+            "实现 argmax 贪心采样并拼接序列"
+          ],
+          "source_files": [
+            "ch04/01_main-chapter-code/gpt.py"
+          ],
+          "minimal_modules": [
+            "generate_text_simple",
+            "自回归循环",
+            "argmax 采样"
+          ],
+          "practice_task": "用未训练模型运行 generate_text_simple，对比训练前后生成文本的可读性，思考为什么未训练输出像乱码。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "预训练（第 5 章）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "生成损失与模型评估",
+          "order": 1,
+          "filename": "u5-l1-generation-loss-eval.md",
+          "level": "intermediate",
+          "topic": "讲解如何用交叉熵损失评估语言模型，实现 calc_loss_loader 与 evaluate_model。",
+          "learning_goals": [
+            "理解 next-token 交叉熵损失",
+            "实现 calc_loss_batch/loader 的 logits 展平",
+            "理解训练/验证损失与困惑度"
+          ],
+          "source_files": [
+            "ch05/01_main-chapter-code/gpt_train.py",
+            "ch05/01_main-chapter-code/ch05.ipynb"
+          ],
+          "minimal_modules": [
+            "交叉熵损失",
+            "calc_loss_batch/loader",
+            "evaluate_model",
+            "困惑度概念"
+          ],
+          "practice_task": "对未训练模型计算训练/验证损失，并将其换算成困惑度，说明初始困惑度应接近词表大小的含义。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "训练循环 train_model_simple",
+          "order": 2,
+          "filename": "u5-l2-training-loop.md",
+          "level": "intermediate",
+          "topic": "讲解完整的预训练循环：optimizer、zero_grad、backward、step，以及周期性评估与样本生成。",
+          "learning_goals": [
+            "理解标准 PyTorch 训练步骤",
+            "掌握 train_model_simple 的循环结构与评估频率",
+            "绘制并解读训练/验证损失曲线"
+          ],
+          "source_files": [
+            "ch05/01_main-chapter-code/gpt_train.py",
+            "ch05/01_main-chapter-code/ch05.ipynb"
+          ],
+          "minimal_modules": [
+            "train_model_simple",
+            "optimizer/zero_grad/backward/step",
+            "周期评估与采样",
+            "损失曲线绘制"
+          ],
+          "practice_task": "用 the-verdict.txt 数据训练若干 epoch，记录 train/val loss 并用 plot_losses 绘制曲线，观察过拟合迹象。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "解码策略：温度与 top-k 采样",
+          "order": 3,
+          "filename": "u5-l3-decoding-strategies.md",
+          "level": "intermediate",
+          "topic": "讲解如何用温度缩放与 top-k 采样控制生成多样性的 generate 函数。",
+          "learning_goals": [
+            "理解温度对 softmax 分布的影响",
+            "实现 top-k 截断采样与多项式采样",
+            "掌握 eos 提前停止逻辑"
+          ],
+          "source_files": [
+            "ch05/01_main-chapter-code/gpt_generate.py",
+            "ch05/01_main-chapter-code/ch05.ipynb"
+          ],
+          "minimal_modules": [
+            "temperature 缩放",
+            "top-k 采样",
+            "generate 函数",
+            "eos 提前停止"
+          ],
+          "practice_task": "对同一提示分别用 temperature=0.0、0.7、1.0 与不同 top_k 生成文本，对比多样性与连贯性。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "权重保存/加载与加载 OpenAI GPT-2 权重",
+          "order": 4,
+          "filename": "u5-l4-weight-loading.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 state_dict 保存加载模型，以及下载并把 OpenAI GPT-2 权重映射进自建模型。",
+          "learning_goals": [
+            "掌握 torch.save/load state_dict",
+            "理解 gpt_download 下载与 TensorFlow checkpoint 解析",
+            "读懂 load_weights_into_gpt 的逐层权重映射"
+          ],
+          "source_files": [
+            "ch05/01_main-chapter-code/gpt_generate.py",
+            "ch05/01_main-chapter-code/gpt_download.py",
+            "ch05/01_main-chapter-code/ch05.ipynb"
+          ],
+          "minimal_modules": [
+            "state_dict 保存/加载",
+            "下载 OpenAI GPT-2 权重",
+            "load_weights_into_gpt 权重映射"
+          ],
+          "practice_task": "下载 gpt2-small(124M) 权重加载进模型，用 'Every effort moves you' 生成一段连贯文本，验证权重加载正确。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "文本分类微调（第 6 章）",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "垃圾短信数据集与分类头改造",
+          "order": 1,
+          "filename": "u6-l1-classification-data-head.md",
+          "level": "intermediate",
+          "topic": "讲解如何准备 SMS 垃圾短信数据集，并把 GPT 的输出头改造成二分类头、冻结主干。",
+          "learning_goals": [
+            "实现 SpamDataset 的分词与填充",
+            "理解数据平衡与训练/验证/测试划分",
+            "掌握替换 out_head、冻结参数与部分解冻"
+          ],
+          "source_files": [
+            "ch06/01_main-chapter-code/gpt_class_finetune.py",
+            "ch06/01_main-chapter-code/ch06.ipynb"
+          ],
+          "minimal_modules": [
+            "SpamDataset 数据集",
+            "平衡与划分",
+            "out_head 改造",
+            "冻结与解冻"
+          ],
+          "practice_task": "下载并构建 SpamDataset，把预训练模型的 out_head 替换为 2 类输出，统计可训练参数数量。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "分类训练与评估（最后一 token）",
+          "order": 2,
+          "filename": "u6-l2-classification-training-eval.md",
+          "level": "intermediate",
+          "topic": "讲解如何只用最后一个 token 的 logits 做分类，并实现训练与准确率评估循环。",
+          "learning_goals": [
+            "理解为何取最后一个 token 的 logits",
+            "实现 calc_accuracy_loader",
+            "读懂 train_classifier_simple 训练循环"
+          ],
+          "source_files": [
+            "ch06/01_main-chapter-code/gpt_class_finetune.py",
+            "ch06/01_main-chapter-code/ch06.ipynb"
+          ],
+          "minimal_modules": [
+            "最后一 token logits 分类",
+            "calc_accuracy_loader",
+            "train_classifier_simple"
+          ],
+          "practice_task": "微调分类模型若干 epoch，打印训练/验证损失与准确率，并在测试集上评估最终准确率。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "指令微调（第 7 章）",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "指令数据集与自定义 collate 掩码",
+          "order": 1,
+          "filename": "u7-l1-instruction-data-collate.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 Alpaca 风格模板格式化指令数据，并用 custom_collate_fn 做填充与损失掩码。",
+          "learning_goals": [
+            "实现 InstructionDataset 与 format_input 模板",
+            "理解 custom_collate_fn 的输入/target 构造",
+            "掌握用 ignore_index=-100 屏蔽 prompt 与填充"
+          ],
+          "source_files": [
+            "ch07/01_main-chapter-code/gpt_instruction_finetuning.py",
+            "ch07/01_main-chapter-code/ch07.ipynb"
+          ],
+          "minimal_modules": [
+            "InstructionDataset",
+            "format_input 模板",
+            "custom_collate_fn 填充与掩码"
+          ],
+          "practice_task": "加载 instruction-data.json，对一批样本运行 custom_collate_fn，打印 inputs/targets 并验证 prompt 部分被 -100 掩蔽。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "指令微调训练与响应生成",
+          "order": 2,
+          "filename": "u7-l2-instruction-finetuning.md",
+          "level": "intermediate",
+          "topic": "讲解如何在预训练 GPT 上做指令微调，复用训练循环并生成、保存响应。",
+          "learning_goals": [
+            "加载预训练权重并微调为指令模型",
+            "复用 train_model_simple 完成训练",
+            "生成测试集响应并保存模型"
+          ],
+          "source_files": [
+            "ch07/01_main-chapter-code/gpt_instruction_finetuning.py",
+            "ch07/01_main-chapter-code/ch07.ipynb"
+          ],
+          "minimal_modules": [
+            "加载预训练权重微调",
+            "train_model_simple 复用",
+            "响应生成与保存"
+          ],
+          "practice_task": "用 gpt2-medium 微调 2 个 epoch，对若干测试指令生成响应，人工对比微调前后的回答质量。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "PyTorch 基础与训练工程（附录 A/D）",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "PyTorch 核心基础",
+          "order": 1,
+          "filename": "u8-l1-pytorch-essentials.md",
+          "level": "advanced",
+          "topic": "系统复习支撑全书的 PyTorch 基础：张量、自动微分、nn.Module 与训练范式。",
+          "learning_goals": [
+            "掌握张量运算与 autograd 自动求导",
+            "理解 nn.Module 与参数管理",
+            "建立通用的训练循环范式"
+          ],
+          "source_files": [
+            "appendix-A/01_main-chapter-code/code-part1.ipynb",
+            "appendix-A/01_main-chapter-code/code-part2.ipynb"
+          ],
+          "minimal_modules": [
+            "张量与自动微分",
+            "nn.Module",
+            "训练循环范式"
+          ],
+          "practice_task": "用 nn.Module 手写一个线性回归并用 autograd 训练，画出损失下降曲线，复现附录 A 的最小示例。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "训练循环增强：warmup / 余弦衰减 / 梯度裁剪",
+          "order": 2,
+          "filename": "u8-l2-training-loop-bells-whistles.md",
+          "level": "advanced",
+          "topic": "讲解附录 D 中给训练循环加的三件套：学习率线性 warmup、余弦衰减与梯度裁剪。",
+          "learning_goals": [
+            "实现学习率线性 warmup",
+            "实现 warmup 后的余弦退火衰减",
+            "理解并实现梯度裁剪稳定训练"
+          ],
+          "source_files": [
+            "appendix-D/01_main-chapter-code/appendix-D.ipynb",
+            "appendix-D/01_main-chapter-code/previous_chapters.py"
+          ],
+          "minimal_modules": [
+            "学习率 warmup",
+            "余弦衰减",
+            "梯度裁剪"
+          ],
+          "practice_task": "在 train_model_simple 基础上加入 warmup+余弦衰减与梯度裁剪，重新训练并对比损失曲线稳定性。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "多卡分布式训练（DDP）",
+          "order": 3,
+          "filename": "u8-l3-distributed-training-ddp.md",
+          "level": "advanced",
+          "topic": "讲解如何用 PyTorch DistributedDataParallel 在多 GPU 上训练模型。",
+          "learning_goals": [
+            "理解 DDP 的进程组与初始化",
+            "掌握 DistributedSampler 与模型包装",
+            "实现单机多卡训练脚本"
+          ],
+          "source_files": [
+            "appendix-A/01_main-chapter-code/DDP-script.py"
+          ],
+          "minimal_modules": [
+            "DDP 初始化",
+            "进程组与 rank",
+            "分布式数据并行训练"
+          ],
+          "practice_task": "阅读 DDP-script.py，用 torchrun 在 2 个进程上跑通分布式训练（无 GPU 时用 CPU 模拟），记录各 rank 损失一致性。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "高效推理与注意力变体",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "KV Cache 加速推理",
+          "order": 1,
+          "filename": "u9-l1-kv-cache.md",
+          "level": "advanced",
+          "topic": "讲解如何缓存历史的 K/V 避免重复计算，实现增量生成以加速推理。",
+          "learning_goals": [
+            "理解 KV cache 的动机与机制",
+            "读懂 use_cache 前向与 cache_k/cache_v",
+            "掌握位置指针与 reset_kv_cache"
+          ],
+          "source_files": [
+            "ch04/03_kv-cache/gpt_with_kv_cache.py",
+            "ch04/03_kv-cache/README.md"
+          ],
+          "minimal_modules": [
+            "cache_k/cache_v 缓存",
+            "use_cache 前向",
+            "reset_kv_cache",
+            "增量生成"
+          ],
+          "practice_task": "对比 generate_text_simple 与 generate_text_simple_cached 的生成速度（tokens/sec），验证 KV cache 带来的加速。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "高效多头注意力实现对比",
+          "order": 2,
+          "filename": "u9-l2-efficient-multihead-attention.md",
+          "level": "advanced",
+          "topic": "对比多种多头注意力实现（含 torch SDPA、FlashAttention 风格）的内存与速度差异。",
+          "learning_goals": [
+            "理解朴素实现与 SDPA 的内存差异",
+            "掌握 torch.nn.functional.scaled_dot_product_attention",
+            "评估不同实现的正确性与性能"
+          ],
+          "source_files": [
+            "ch03/02_bonus_efficient-multihead-attention/mha-implementations.ipynb"
+          ],
+          "minimal_modules": [
+            "FlashAttention/SDPA 对比",
+            "内存与速度权衡",
+            "scaled_dot_product_attention"
+          ],
+          "practice_task": "在 mha-implementations 中跑通各实现，用 torch.allclose 验证输出一致，并记录显存/耗时对比表。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "注意力变体：GQA / MLA / SWA",
+          "order": 3,
+          "filename": "u9-l3-attention-variants.md",
+          "level": "advanced",
+          "topic": "概览三种现代注意力变体：分组查询注意力、多头潜注意力、滑动窗口注意力及其 KV 内存权衡。",
+          "learning_goals": [
+            "理解 GQA 共享 K/V 降低 KV 缓存",
+            "理解 MLA 用潜空间压缩 KV",
+            "理解 SWA 的局部窗口注意力"
+          ],
+          "source_files": [
+            "ch04/04_gqa/gpt_with_kv_gqa.py",
+            "ch04/05_mla/gpt_with_kv_mla.py",
+            "ch04/06_swa/gpt_with_kv_swa.py"
+          ],
+          "minimal_modules": [
+            "GQA 分组查询",
+            "MLA 多头潜注意力",
+            "SWA 滑动窗口",
+            "KV 内存权衡"
+          ],
+          "practice_task": "用各自的 memory_estimator 估算 MHA/GQA/MLA 在不同上下文长度下的 KV 内存，画出内存随长度增长曲线。",
+          "depends_on": [
+            "u3-l3",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "混合专家（MoE）",
+          "order": 4,
+          "filename": "u9-l4-mixture-of-experts.md",
+          "level": "advanced",
+          "topic": "讲解如何把前馈层替换成混合专家层，用门控路由实现稀疏激活。",
+          "learning_goals": [
+            "理解 MoE 稀疏激活的思想",
+            "读懂 MoEFeedForward 的 gate 路由与 top-k",
+            "掌握按专家分组计算与概率加权聚合"
+          ],
+          "source_files": [
+            "ch04/07_moe/gpt_with_kv_moe.py",
+            "ch04/07_moe/README.md"
+          ],
+          "minimal_modules": [
+            "MoEFeedForward",
+            "gate 路由 top-k",
+            "专家稀疏计算"
+          ],
+          "practice_task": "实例化 MoEFeedForward，跑一次前向并打印被激活的专家数量，对比与稠密 FeedForward 的激活参数量。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "架构迁移与现代 LLM",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "GPT 转 Llama：RoPE 与 RMSNorm",
+          "order": 1,
+          "filename": "u10-l1-gpt-to-llama.md",
+          "level": "advanced",
+          "topic": "讲解如何把 GPT 改造成 Llama 架构：旋转位置编码 RoPE、RMSNorm 与频率缩放。",
+          "learning_goals": [
+            "理解 RoPE 旋转位置编码的原理与实现",
+            "掌握 RMSNorm 与 LayerNorm 的区别",
+            "读懂 Llama3Model 的组装与频率配置"
+          ],
+          "source_files": [
+            "ch05/07_gpt_to_llama/standalone-llama32.ipynb",
+            "ch05/07_gpt_to_llama/previous_chapters.py"
+          ],
+          "minimal_modules": [
+            "RoPE 旋转位置编码",
+            "RMSNorm",
+            "Llama3Model",
+            "频率缩放"
+          ],
+          "practice_task": "实现 compute_rope_params 并对一组查询向量应用 RoPE，验证相对位置旋转性质；与可学习位置嵌入对比。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "现代 LLM 架构概览：Qwen3 / Gemma3",
+          "order": 2,
+          "filename": "u10-l2-modern-llm-architectures.md",
+          "level": "advanced",
+          "topic": "通过 Qwen3 与 Gemma3 的从零实现，概览现代主流 LLM 架构与 GPT 的关键差异。",
+          "learning_goals": [
+            "理解 Qwen3 的架构特点（含 MoE 版）",
+            "理解 Gemma3 的架构特点",
+            "对比现代架构与原始 GPT 的异同"
+          ],
+          "source_files": [
+            "ch05/11_qwen3/standalone-qwen3.ipynb",
+            "ch05/12_gemma3/standalone-gemma3.ipynb"
+          ],
+          "minimal_modules": [
+            "Qwen3 架构",
+            "Gemma3 架构",
+            "架构差异对比"
+          ],
+          "practice_task": "对比 Qwen3 与 Gemma3 的配置字典与关键模块，列出二者在归一化、位置编码、注意力上的 3 处主要差异。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "工程化：高效权重加载 / 扩展 tokenizer / 训练加速",
+          "order": 3,
+          "filename": "u10-l3-production-engineering.md",
+          "level": "advanced",
+          "topic": "讲解三项工程实践：内存高效的 state_dict 加载、为 tiktoken 扩展新 token、LLM 训练加速技巧。",
+          "learning_goals": [
+            "掌握内存高效的权重加载策略",
+            "理解如何向 BPE tokenizer 添加特殊 token",
+            "了解常见的 LLM 训练加速手段"
+          ],
+          "source_files": [
+            "ch05/08_memory_efficient_weight_loading/memory-efficient-state-dict.ipynb",
+            "ch05/09_extending-tokenizers/extend-tiktoken.ipynb",
+            "ch05/10_llm-training-speed/00_orig.py"
+          ],
+          "minimal_modules": [
+            "内存高效权重加载",
+            "扩展 tokenizer 新 token",
+            "训练加速优化"
+          ],
+          "practice_task": "用 memory-efficient 方式加载一个大 state_dict 并测量峰值内存；再给 tiktoken 添加一个自定义特殊 token 并验证编码。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "参数高效微调与对齐",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "LoRA 参数高效微调",
+          "order": 1,
+          "filename": "u11-l1-lora-peft.md",
+          "level": "advanced",
+          "topic": "讲解附录 E 中如何用 LoRA 低秩适配器实现参数高效微调。",
+          "learning_goals": [
+            "理解 LoRA 低秩分解的数学原理",
+            "掌握适配器注入与冻结基础模型",
+            "比较 LoRA 与全量微调的可训练参数量"
+          ],
+          "source_files": [
+            "appendix-E/01_main-chapter-code/appendix-E.ipynb"
+          ],
+          "minimal_modules": [
+            "LoRA 低秩分解",
+            "适配器注入",
+            "冻结基础模型"
+          ],
+          "practice_task": "为 GPT 的线性层注入 LoRA 适配器，统计可训练参数占比，并在分类任务上微调对比全量微调效果。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "DPO 偏好对齐",
+          "order": 2,
+          "filename": "u11-l2-dpo-alignment.md",
+          "level": "advanced",
+          "topic": "讲解如何用直接偏好优化（DPO）从零实现人类偏好对齐，含 policy/reference 模型与 DPO 损失。",
+          "learning_goals": [
+            "理解偏好数据集与 chosen/rejected 构造",
+            "掌握 policy_model 与 reference_model 的角色",
+            "读懂 compute_dpo_loss 与 beta 的作用"
+          ],
+          "source_files": [
+            "ch07/04_preference-tuning-with-dpo/dpo-from-scratch.ipynb",
+            "ch07/04_preference-tuning-with-dpo/previous_chapters.py"
+          ],
+          "minimal_modules": [
+            "偏好数据集",
+            "policy/reference model",
+            "DPO 损失与 beta"
+          ],
+          "practice_task": "用 compute_dpo_loss 在小批偏好数据上计算损失，调整 beta 观察损失与对齐强度变化，记录对比结果。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "模型评估：用 Ollama / OpenAI 评分",
+          "order": 3,
+          "filename": "u11-l3-model-evaluation.md",
+          "level": "advanced",
+          "topic": "讲解如何用 Ollama 或 OpenAI API 作为评判，评估指令微调模型的响应质量并做相关性分析。",
+          "learning_goals": [
+            "理解 LLM-as-a-judge 评估范式",
+            "掌握用 Ollama 本地模型批量打分",
+            "进行评分与参考指标的相关性分析"
+          ],
+          "source_files": [
+            "ch07/03_model-evaluation/llm-instruction-eval-ollama.ipynb",
+            "ch07/01_main-chapter-code/ollama_evaluate.py"
+          ],
+          "minimal_modules": [
+            "指令响应评估",
+            "Ollama/OpenAI 评分",
+            "评分相关性分析"
+          ],
+          "practice_task": "用 Ollama 对 u7 微调模型生成的测试响应打分，并与人工评分做相关性分析，输出相关系数。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
