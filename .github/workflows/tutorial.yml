@@ -118,7 +118,7 @@ jobs:
           RC_ALLOW_DEADZONE: ${{ github.event_name == 'schedule' && 'false' || (inputs.debug && 'true' || inputs.ignore_timing) }}
           RC_MOCK: ${{ github.event_name == 'schedule' && 'false' || inputs.mock }}
           RC_DEBUG: ${{ github.event_name == 'schedule' && 'false' || inputs.debug }}
-          RC_CONCURRENCY: ${{ vars.RC_CONCURRENCY || '3' }}
+          RC_CONCURRENCY: ${{ vars.RC_CONCURRENCY || '4' }}
           RC_SUMMARY_MAX_TURNS: ${{ vars.RC_SUMMARY_MAX_TURNS || '8' }}
           RC_SUMMARY_MAX_BUDGET_USD: ${{ vars.RC_SUMMARY_MAX_BUDGET_USD || '0.50' }}
           RC_EVENT_NAME: ${{ github.event_name }} # schedule 时 analyze 忽略手动全量开关，确保定时只在提示词变更（或首建）时全量重构

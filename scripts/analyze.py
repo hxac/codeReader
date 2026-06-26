@@ -85,7 +85,7 @@ if not (0 <= DEAD_START < 24 and 0 <= DEAD_END < 24):
     raise SystemExit(f"RC_DEADZONE_UTC_START/END 必须在 [0,24)：got {DEAD_START}/{DEAD_END}")
 if not (0 <= SOFT_MARGIN_HOURS < 24):
     raise SystemExit(f"RC_DEADZONE_SOFT_MARGIN_MIN 必须在 [0,1440)：got {SOFT_MARGIN_HOURS*60}")
-CONCURRENCY = max(1, int(os.environ.get("RC_CONCURRENCY", "3")))
+CONCURRENCY = max(1, int(os.environ.get("RC_CONCURRENCY", "4")))
 MAX_RETRIES = int(os.environ.get("RC_MAX_RETRIES", "5"))
 # 同一个时间窗口里，单篇 worker 失败后还能当场重试几次。注意额度耗尽不算在这里面，那种
 # 情况是立刻停掉整批。它跟 RC_BACKOFF_SEC 配着用：失败后按这个秒数退避一下再重试。只有
