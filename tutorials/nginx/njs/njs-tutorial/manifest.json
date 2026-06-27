@@ -1,0 +1,1196 @@
+{
+  "project": "njs",
+  "head": "f078f14372ee789ea1435f35672407c13917b5e7",
+  "rationale": "njs 是一个体量大、层次多的项目（寄存器式 JS 引擎内核 + QuickJS 双引擎 + 一组 external 扩展模块 + NGINX http/stream 集成 + TS 类型 + 多套测试），因此大纲按「由浅入深、由内到外」设计为十个单元。单元一作为零基础入口，先讲清项目定位、目录、构建与 CLI 运行；单元二进入嵌 入式使用的公共 C API 与运行时核心（VM 生命周期、值表示、内存池、Atom 表），这是理解后续一切的基础；单元三~五深入 njs 引擎内核本身，分别覆盖「编译前端（lexer→parser→scope→generator→字节码）」、「字节码执行引擎（解释器循环、作用域寻址、调用帧、异常、异步）」和「对象模型与内建类型」三条主线；单元六~七讲清楚「双引擎」这一架构关键——QuickJS 包装层、njs_*/qjs_* 双实现模式、Buffer，以及 fs/crypto/webcrypto/querystring/xml/zlib 等扩展模块；单元八~九把视角从引擎转向 NGINX 集成，先讲共享绑定层与 http/stream 两个模块，再进阶到 fetch、共享字典、subrequest/表单等高级特性；单元十收尾于工程实践（测试体系、TS 类型、进阶构建与调试）。每篇讲义只聚焦一个主题，引用真实存在的源码文件，依赖关系严格按「先内核后集成、先机制后扩展」排列，确保读者能按序读懂。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 njs：项目定位、目录与第一次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "njs 是什么：NGINX 的 JavaScript 引擎",
+          "order": 1,
+          "filename": "u1-l1-njs-overview.md",
+          "level": "beginner",
+          "topic": "介绍 njs 的定位（NGINX 动态模块 + 独立 CLI）、它解决的访问控制/头部改写/异步内容处理等问题，以及 njs 与 QuickJS 双引擎并存的整体形态。",
+          "learning_goals": [
+            "理解 njs 在 NGINX 生态中的角色与两种交付形态（CLI 与 http/stream 模块）",
+            "区分内置 njs 引擎（ES5.1 子集，1.0.0 起弃用）与推荐的 QuickJS 引擎（ES2023）",
+            "了解 njs 驱动模型：JS 不会自启动，只能由 NGINX 指令在请求阶段触发"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/agent/js-dev.md"
+          ],
+          "minimal_modules": [
+            "项目定位与交付形态",
+            "双引擎选择与语言基线",
+            "指令驱动的运行模型"
+          ],
+          "practice_task": "阅读 README 与 AGENTS.md，用自己的话写出 njs 的三句话定义；列出内置 njs 引擎与 QuickJS 引擎各支持/不支持的一项语言特性。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与构建系统总览",
+          "order": 2,
+          "filename": "u1-l2-directory-and-build-system.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录（src 内核 / external 扩展 / nginx 集成 / ts 类型 / test 测试 / auto 构建）的职责划分，以及基于 shell 的自研构建系统（configure + auto/）如何工作。",
+          "learning_goals": [
+            "建立 src、external、nginx、ts、test、auto 各目录的职责心智地图",
+            "理解 configure 脚本如何依次加载 auto/ 下的检测与生成脚本并产出 build/Makefile",
+            "认识 auto/sources（内核源码清单）、auto/modules、auto/qjs_modules 三类清单的作用"
+          ],
+          "source_files": [
+            "configure",
+            "auto/sources",
+            "auto/modules",
+            "auto/make"
+          ],
+          "minimal_modules": [
+            "目录职责划分",
+            "configure 加载流程",
+            "源码/模块清单机制"
+          ],
+          "practice_task": "对照 auto/sources 列出 njs 内核被编译的源文件数量与大致分组；在 configure 中标注出它依次 source 了哪些 auto/ 脚本。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建并运行第一个 njs 程序",
+          "order": 3,
+          "filename": "u1-l3-build-and-run-cli.md",
+          "level": "beginner",
+          "topic": "动手构建独立 CLI（./configure && make njs → build/njs），运行 console.log，体验交互式 REPL 与一行命令模式，并演示如何启用 QuickJS 后端。",
+          "learning_goals": [
+            "掌握独立 CLI 的构建命令与产物路径 build/njs",
+            "能够用 -c '<code>'、文件、交互式三种方式运行 JS",
+            "了解链接 QuickJS 库所需的 --cc-opt/--ld-opt 配置"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/agent/engine-dev.md",
+            "auto/quickjs"
+          ],
+          "minimal_modules": [
+            "CLI 构建步骤",
+            "三种运行方式",
+            "QuickJS 链接配置"
+          ],
+          "practice_task": "构建 build/njs 并执行 ./build/njs -c 'console.log(2**10)'；再尝试 ./build/njs 进入交互式 REPL 打印 globalThis，观察 njs 与 process 全局对象。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口与命令行选项",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-options.md",
+          "level": "beginner",
+          "topic": "以 external/njs_shell.c 的 main() 为入口，讲解命令行选项解析（-c/-d/-e/-n/-m/-p/-q/-r/-s/-v/-a/-j/-o/-h）与相关环境变量（NJS_ENGINE、NJS_PATH 等），并展示它如何启动 njs 或 QuickJS 引擎。",
+          "learning_goals": [
+            "定位 CLI 的 main() 入口与选项结构 njs_opts_t",
+            "掌握常用选项含义：-n 选引擎、-d 反汇编、-m 模块模式、-o opcode 跟踪",
+            "了解 NJS_ENGINE、NJS_PATH 等环境变量对运行行为的影响"
+          ],
+          "source_files": [
+            "external/njs_shell.c"
+          ],
+          "minimal_modules": [
+            "main 入口与 njs_opts_t",
+            "选项解析 njs_options_parse",
+            "环境变量"
+          ],
+          "practice_task": "用 ./build/njs -d -c 'var a=42; function f(v){return v+1}' 观察反汇编输出；再用 -n QuickJS 与 -n njs 对比 typeof Map 的差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共 C API 与运行时核心",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "njs_vm_t 生命周期：创建、编译、执行、销毁",
+          "order": 1,
+          "filename": "u2-l1-vm-lifecycle-api.md",
+          "level": "intermediate",
+          "topic": "通过公共头 src/njs.h 讲解嵌入式使用 njs 的核心 API：njs_vm_create/njs_vm_compile/njs_vm_start/njs_vm_call/njs_vm_clone/njs_vm_destroy，以及 njs_vm_opt_t 中的 interactive/module/sandbox 等开关。",
+          "learning_goals": [
+            "掌握一个 njs VM 的标准使用流程：创建→编译→启动→（克隆/调用）→销毁",
+            "理解 njs_vm_opt_t 各标志位（module、sandbox、unsafe、disassemble 等）的作用",
+            "看清 njs_vm_clone 实现的多请求隔离能力"
+          ],
+          "source_files": [
+            "src/njs.h",
+            "src/njs_vm.c"
+          ],
+          "minimal_modules": [
+            "VM 创建与选项",
+            "编译与执行 API",
+            "克隆与隔离"
+          ],
+          "practice_task": "阅读 njs_vm_create 与 njs_vm_compile 的实现，画出从「一段源码字符串」到「njs_vm_start 可执行」的状态流转；指出 interactive 模式如何影响克隆行为。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "16 字节值表示：njs_value_t",
+          "order": 2,
+          "filename": "u2-l2-value-representation.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的核心数据表示——16 字节标签联合体 njs_value_t：类型枚举 njs_value_type_t、原子 id（atom_id）与数值的双关编码、对象/函数/外部指针的 payload，以及 njs_value_assign 等宏。",
+          "learning_goals": [
+            "理解 njs_value_t 为何固定 16 字节及其类型标签机制",
+            "区分原始值（null/boolean/number/string/symbol）与对象/函数/外部值的内部布局",
+            "掌握 njs_argument/njs_value_assign/njs_value_number 等常用访问宏"
+          ],
+          "source_files": [
+            "src/njs_value.h",
+            "src/njs_value.c"
+          ],
+          "minimal_modules": [
+            "16 字节标签联合体",
+            "类型枚举与 payload",
+            "值访问宏"
+          ],
+          "practice_task": "在 src/njs_value.h 中定位 NJS_NUMBER、NJS_STRING、NJS_OBJECT 等类型定义，写出 number 与 string 两种值各自的内存字段含义；说明 njs_value_assign 为何用 memcpy。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "内存池 njs_mp 与 flathsh 哈希表",
+          "order": 3,
+          "filename": "u2-l3-memory-pool-and-hash.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的内存管理基础设施：基于池的分配器 njs_mp_t（njs_mp_create/alloc/zalloc/free）以及被广泛用于对象属性、Atom 表、模块表的扁平哈希表 njs_flathsh_t。",
+          "learning_goals": [
+            "理解 njs_mp 内存池的设计动机与基本 API",
+            "掌握 njs_flathsh_t 哈希表的增删查接口与 proto 回调机制",
+            "看清 VM（njs_vm_s.mem_pool）如何统一持有所有运行时分配"
+          ],
+          "source_files": [
+            "src/njs_mp.c",
+            "src/njs_mp.h",
+            "src/njs_flathsh.c",
+            "src/njs_flathsh.h"
+          ],
+          "minimal_modules": [
+            "内存池分配器",
+            "扁平哈希表",
+            "VM 与内存池的归属"
+          ],
+          "practice_task": "统计 njs_vm_s 中由 mem_pool 持有的资源；写出 flathsh 的 proto（hash/alloc/free 回调）在对象属性场景下扮演的角色。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Atom 表：字符串与符号的驻留",
+          "order": 4,
+          "filename": "u2-l4-atom-table.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的「原子化」机制：所有属性名/标识符/已知符号被驻留为 32 位 atom_id，njs_vm_s 中的 atom_hash 与 atom_hash_shared，以及 src/njs_atom_defs.h 中预定义的 NJS_ATOM_STRING_*/NJS_ATOM_SYMBOL_* 常量。",
+          "learning_goals": [
+            "理解为何用 atom_id 代替到处拷贝字符串，以及 number atom 的位编码（0x80000000 标志）",
+            "区分每 VM 的 atom_hash 与跨克隆共享的 atom_hash_shared",
+            "认识预定义原子常量在属性查找中的作用"
+          ],
+          "source_files": [
+            "src/njs_atom.c",
+            "src/njs_atom_defs.h",
+            "src/njs_atom.h"
+          ],
+          "minimal_modules": [
+            "atom 驻留与编码",
+            "共享 vs 私有 atom 哈希",
+            "预定义原子常量"
+          ],
+          "practice_task": "在 njs_atom_defs.h 中找出 'length'、'prototype'、Symbol.iterator 对应的常量；解释 njs_atom_is_number/njs_number_atom 的位运算含义。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "编译前端：从源码到字节码",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "词法分析器 njs_lexer",
+          "order": 1,
+          "filename": "u3-l1-lexer.md",
+          "level": "intermediate",
+          "topic": "讲解 njs_vm_compile 流水线的第一站——词法分析器：njs_lexer_t 状态、token 类型 njs_token_type_t、关键字表 njs_lexer_keyword.c，以及 njs_lexer_token/njs_lexer_peek_token 的预读队列。",
+          "learning_goals": [
+            "理解词法分析器如何把源码切分为 token 流并维护行号",
+            "认识 200+ 种 token 类型与关键字识别机制",
+            "掌握 peek 预读队列对解析器回溯的支持"
+          ],
+          "source_files": [
+            "src/njs_lexer.c",
+            "src/njs_lexer.h",
+            "src/njs_lexer_keyword.c"
+          ],
+          "minimal_modules": [
+            "词法器状态机",
+            "token 类型与关键字",
+            "预读队列"
+          ],
+          "practice_task": "用 utils/lexer_keyword.py（或直接阅读 njs_lexer_keyword.c）梳理关键字如何映射到 token；为 'function'、'=>'、'...' 各找一个对应 token 常量。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "递归下降解析器与 AST",
+          "order": 2,
+          "filename": "u3-l2-parser-ast.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的手写递归下降解析器：njs_parser_t、AST 节点 njs_parser_node_t（token_type、left/right/dest、scope、index），以及如何产出可被生成器消费的语法树。",
+          "learning_goals": [
+            "理解解析器如何以递归下降方式生成 AST 节点",
+            "掌握 njs_parser_node_t 的结构与它在 left/right/dest 上的树形组织",
+            "看清 AST 节点的 index 字段如何与后续字节码索引挂钩"
+          ],
+          "source_files": [
+            "src/njs_parser.c",
+            "src/njs_parser.h"
+          ],
+          "minimal_modules": [
+            "递归下降解析",
+            "AST 节点结构",
+            "节点与索引"
+          ],
+          "practice_task": "选择一条简单表达式（如 a + b * c），画出对应的 AST 节点树（标注 token_type 与 left/right），并指出运算优先级在树形上的体现。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "变量声明与作用域",
+          "order": 3,
+          "filename": "u3-l3-variable-and-scope.md",
+          "level": "intermediate",
+          "topic": "讲解变量与作用域系统：njs_variable_t（atom_id、type、scope、index）、变量类型 VAR/LET/CONST/FUNCTION/CATCH、解析期作用域 njs_parser_scope_t（global/function/block），以及 njs_scope 的临时索引分配。",
+          "learning_goals": [
+            "区分 var/let/const/function/catch 变量在作用域中的语义",
+            "理解 parser_scope 的 global/function/block 三类与变量红黑树",
+            "掌握 index 如何决定运行期值的存储位置"
+          ],
+          "source_files": [
+            "src/njs_variable.c",
+            "src/njs_variable.h",
+            "src/njs_scope.c",
+            "src/njs_scope.h"
+          ],
+          "minimal_modules": [
+            "变量类型与结构",
+            "解析期作用域",
+            "索引分配"
+          ],
+          "practice_task": "阅读 njs_variable.h 中的变量类型枚举，解释 let/const 块级作用域与 var 函数作用域在 parser_scope 上的差异；写出闭包变量如何被记录。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "字节码生成器 njs_generator",
+          "order": 4,
+          "filename": "u3-l4-generator.md",
+          "level": "intermediate",
+          "topic": "讲解 AST → 字节码的生成器：njs_generator_t 状态机（state 函数指针、code_start/code_end 缓冲）、njs_generate_scope 入口，以及如何为表达式/语句/作用域发射指令。",
+          "learning_goals": [
+            "理解生成器以状态机方式遍历 AST 发射字节码",
+            "掌握生成器如何为不同节点类型选择指令并管理临时索引",
+            "看清生成器与作用域/闭包信息的协作"
+          ],
+          "source_files": [
+            "src/njs_generator.c",
+            "src/njs_generator.h"
+          ],
+          "minimal_modules": [
+            "生成器状态机",
+            "指令发射",
+            "索引与闭包协作"
+          ],
+          "practice_task": "用 --debug-generator=YES 构建（参考 docs/agent/engine-dev.md）或阅读源码，跟踪 'return a+b' 的生成过程，列出它发射的几条 vmcode 指令。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "字节码格式与反汇编",
+          "order": 5,
+          "filename": "u3-l5-bytecode-and-disassembler.md",
+          "level": "intermediate",
+          "topic": "讲解字节码指令格式（njs_vmcode_generic_t / 2addr / 3addr / jump / prop_get）、操作码枚举 NJS_VMCODE_*，以及 njs_disassembler.c 中 code_names 表与 njs_disassemble/njs_vm_code_t 的反汇编输出。",
+          "learning_goals": [
+            "理解指令的变长编码与 2/3 地址格式",
+            "认识 NJS_VMCODE_STOP/JUMP/RETURN/MOVE/ADDITION/PROPERTY_GET 等核心操作码",
+            "会用 -d 反汇编并读懂 hex 索引与指令助记符"
+          ],
+          "source_files": [
+            "src/njs_vmcode.h",
+            "src/njs_disassembler.c"
+          ],
+          "minimal_modules": [
+            "指令格式",
+            "操作码枚举",
+            "反汇编表"
+          ],
+          "practice_task": "运行 ./build/njs -d -c 'var a=42; function f(v){return v+1}'，对照 docs/agent/engine-dev.md 的字节码示例，逐条解释 MOVE/STOP/ADD/RETURN 的操作数含义。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "字节码执行引擎",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "解释器主循环 njs_vmcode_interpreter",
+          "order": 1,
+          "filename": "u4-l1-interpreter-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 引擎的执行核心：njs_vmcode_interpreter 的 computed-goto 分发循环、如何从 pc 取指并按操作码执行、临时值与返回值寄存器的使用。",
+          "learning_goals": [
+            "理解寄存器式 VM 的取指-分发-执行循环",
+            "掌握 computed goto 分发相比 switch 的优势",
+            "看清解释器如何通过 levels 数组访问操作数"
+          ],
+          "source_files": [
+            "src/njs_vmcode.c",
+            "src/njs_vmcode.h"
+          ],
+          "minimal_modules": [
+            "分发主循环",
+            "computed goto",
+            "操作数访问"
+          ],
+          "practice_task": "在 njs_vmcode.c 中定位主分发循环与 NJS_VMCODE_ADDITION、NJS_VMCODE_RETURN 的处理分支，描述一条 ADD 指令的完整执行路径。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "levels/scope/index：作用域寻址",
+          "order": 2,
+          "filename": "u4-l2-scope-levels-and-index.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的四级存储与索引编码：NJS_LEVEL_LOCAL/CLOSURE/GLOBAL/STATIC、index 中 level_type(4bit)|var_type(4bit) 的编码，以及 vm->levels[level][index] 的寻址方式和 njs_scope_value 宏。",
+          "learning_goals": [
+            "理解 index 的高位如何编码 level 与变量类型",
+            "区分 local/closure/global/static 四级存储及其用途",
+            "掌握运行期通过 levels 数组定位值的机制"
+          ],
+          "source_files": [
+            "src/njs_vm.h",
+            "src/njs_scope.c",
+            "src/njs_scope.h"
+          ],
+          "minimal_modules": [
+            "四级存储层级",
+            "index 位编码",
+            "levels 寻址"
+          ],
+          "practice_task": "对照 docs/agent/engine-dev.md 的字节码示例，把 'MOVE 0123 0133' 中的 hex 操作数拆解为 level_type 与 var_type，说明源/目的各属于哪一级存储。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "函数调用与调用帧",
+          "order": 3,
+          "filename": "u4-l3-function-call-frames.md",
+          "level": "intermediate",
+          "topic": "讲解函数调用机制：njs_function_t（native vs 字节码 lambda、ctor 标志）、njs_native_frame_t/njs_frame_t 调用帧链、NJS_VMCODE_FUNCTION_CALL/METHOD_FRAME 的处理与 njs_function_frame_invoke。",
+          "learning_goals": [
+            "区分原生 C 函数与字节码 lambda 函数的表示",
+            "理解调用帧链 top_frame/active_frame 如何支撑调用栈",
+            "掌握函数调用指令如何建立新帧并跳转执行"
+          ],
+          "source_files": [
+            "src/njs_function.c",
+            "src/njs_function.h",
+            "src/njs_vmcode.c"
+          ],
+          "minimal_modules": [
+            "函数表示",
+            "调用帧链",
+            "调用指令处理"
+          ],
+          "practice_task": "阅读 njs_function.h 中 njs_function_t 的结构，说明 native 与 lambda 两种函数在 u 联合上的差异；跟踪一次函数调用从 FUNCTION_CALL 到 RETURN 的帧变化。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "异常处理：try/catch/throw 与错误对象",
+          "order": 4,
+          "filename": "u4-l4-exception-handling.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的异常机制：NJS_VMCODE_TRY_START/CATCH/FINALLY/THROW 指令、VM 的 exception 字段与 njs_vm_exception_get、Error 家族（TypeError/RangeError/SyntaxError 等）及 njs_vm_error2 的错误类型编号。",
+          "learning_goals": [
+            "理解 try/catch/finally 在字节码层的实现与跳转",
+            "掌握异常值如何挂在 vm->exception 上并被读取",
+            "认识错误类型编号与 Error 构造器的关系"
+          ],
+          "source_files": [
+            "src/njs_vmcode.c",
+            "src/njs_error.c",
+            "src/njs_error.h",
+            "src/njs.h"
+          ],
+          "minimal_modules": [
+            "异常指令",
+            "exception 存储",
+            "Error 家族"
+          ],
+          "practice_task": "阅读 njs.h 中 njs_vm_error/range_error/type_error 等宏，写出错误类型编号的映射；用 ./build/njs -d 观察 try/catch 代码块生成的字节码跳转结构。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "Promise 与 async/await 的 VM 支持",
+          "order": 5,
+          "filename": "u4-l5-promise-and-async.md",
+          "level": "intermediate",
+          "topic": "讲解异步执行支持：njs_promise_t 状态机（pending/fulfilled/rejected）、vm->jobs 作业队列与 njs_vm_enqueue_job/njs_vm_execute_pending_job、rejection tracker 钩子，以及 njs_async.c 对 async/await 的展开。",
+          "learning_goals": [
+            "理解 Promise 的状态机与 resolve/reject 在 VM 层的实现",
+            "掌握 jobs 队列如何驱动 then 回调与 await 续体",
+            "看清 rejection tracker 与 unhandled rejection 的关系"
+          ],
+          "source_files": [
+            "src/njs_promise.c",
+            "src/njs_promise.h",
+            "src/njs_async.c",
+            "src/njs_vm.c"
+          ],
+          "minimal_modules": [
+            "Promise 状态机",
+            "jobs 作业队列",
+            "async/await 展开"
+          ],
+          "practice_task": "运行 ./build/njs -c 'Promise.resolve(1).then(v=>console.log(v))' 并解释为何需要 njs_vm_execute_pending_job 才能输出；在 njs_vm.h 找到 jobs 队列字段。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "对象模型与内建类型",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "对象模型：共享哈希、本地哈希与原型链",
+          "order": 1,
+          "filename": "u5-l1-object-model-and-properties.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 的对象表示 njs_object_t（hash 本地可变 + shared_hash 共享 + __proto__）、属性查找链 njs_value_property→njs_property_query→njs_object_property_query，以及写时复制 njs_prop_private_copy 的惰性物化策略。",
+          "learning_goals": [
+            "理解共享哈希与本地可变哈希分离的性能/footprint 动机",
+            "掌握属性查找如何沿原型链回溯",
+            "看清首次写操作如何把共享属性提升为本地副本"
+          ],
+          "source_files": [
+            "src/njs_object.c",
+            "src/njs_object.h",
+            "src/njs_object_prop.c",
+            "src/njs_value.h"
+          ],
+          "minimal_modules": [
+            "对象结构与双哈希",
+            "属性查找链",
+            "写时复制提升"
+          ],
+          "practice_task": "在 njs_object_prop.c 中定位 njs_prop_private_copy，描述「给一个继承自原型的属性赋值」时共享→本地复制的完整过程。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "原始内建类型：string / array / number",
+          "order": 2,
+          "filename": "u5-l2-primitive-builtin-types.md",
+          "level": "intermediate",
+          "topic": "讲解几个核心内建类型的实现：字符串 njs_string.c（UTF-8/UTF-16、字符串原子）、数组 njs_array.c（快/慢数组路径）、数字 njs_number.c 与 njs_dtoa.c 的格式化。",
+          "learning_goals": [
+            "理解 njs 字符串的内部表示与编码处理",
+            "区分数组的快键路径与慢路径（属性/getter 场景）",
+            "了解数字到字符串的转换实现"
+          ],
+          "source_files": [
+            "src/njs_string.c",
+            "src/njs_array.c",
+            "src/njs_number.c",
+            "src/njs_dtoa.c"
+          ],
+          "minimal_modules": [
+            "字符串表示",
+            "数组快/慢路径",
+            "数字格式化"
+          ],
+          "practice_task": "结合近期 commit（如 'Fix Array.prototype.slice() of large arrays in the non-fast keys path'）说明快/慢数组路径的差异；用 ./build/njs 验证大数组的 slice 行为。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "内建对象与构造器的注册",
+          "order": 3,
+          "filename": "u5-l3-builtin-registration.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 如何在 VM 启动时物化所有内建对象/构造器/原型：njs_builtin_objects_create、njs_object_init[]/njs_object_type_init[] 初始化表、njs_vm_shared_t 中跨克隆共享的 constructors/prototypes，以及 NJS_OBJ_TYPE_* 类型枚举。",
+          "learning_goals": [
+            "理解内建对象如何在 shared 层惰性共享、按需物化",
+            "掌握 constructors/prototypes 数组与 NJS_OBJ_TYPE_* 的对应",
+            "看清 shared 结构如何被多个 VM 克隆复用"
+          ],
+          "source_files": [
+            "src/njs_builtin.c",
+            "src/njs_vm.h",
+            "src/njs_vm.c"
+          ],
+          "minimal_modules": [
+            "内建对象初始化表",
+            "shared 构造器/原型",
+            "对象类型枚举"
+          ],
+          "practice_task": "在 njs_vm.h 中列出 NJS_OBJ_TYPE_* 涵盖的全部内建类型；说明 njs_vm_shared_t 中哪些哈希表是跨克隆共享的实例哈希。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "外部对象与原生函数：扩展 njs 的 C 接口",
+          "order": 4,
+          "filename": "u5-l4-external-objects-and-native-functions.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 C 扩展 njs：njs_external_t 定义（property/method/object 三类）、njs_vm_external_prototype/njs_vm_external_create 注册外部对象、njs_prop_handler_t 属性 getter/setter/delete 处理器、njs_function_native_t 原生函数与 njs_vm_function_alloc。",
+          "learning_goals": [
+            "理解 njs_external_t 描述符如何声明一个宿主对象的方法/属性",
+            "掌握 njs_vm_external_create 创建外部实例的流程",
+            "看清 prop_handler 三种上下文（GET/SET/DELETE）的约定"
+          ],
+          "source_files": [
+            "src/njs_extern.c",
+            "src/njs_function.c",
+            "src/njs.h"
+          ],
+          "minimal_modules": [
+            "external 描述符",
+            "外部对象创建",
+            "属性处理器与原生函数"
+          ],
+          "practice_task": "对照 njs.h 中 njs_external_t 的注释，设计一个最小 C 扩展：声明一个带一个 method 和一个 property 的外部原型，并说明 prop_handler 在 GET/SET/DELETE 时各自的入参含义。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "QuickJS 集成与双引擎架构",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "QuickJS 引擎包装层 qjs.c",
+          "order": 1,
+          "filename": "u6-l1-quickjs-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 如何包装上游 QuickJS：qjs_new_context 创建上下文、qjs_module_t/qjs_addon_init_pt 模块注册、QJS_CORE_CLASS_ID_* 类 id 枚举，以及 qjs_add_intrinsic_* 系列对 QuickJS 内建的裁剪与补充（btoa/atob、TextEncoder、process 等）。",
+          "learning_goals": [
+            "理解 qjs_new_context 如何基于 JSRuntime/JSContext 初始化 njs 定制上下文",
+            "掌握 qjs_module_t 与 njs_module_t 两套模块注册的差异",
+            "认识 QJS_CORE_CLASS_ID_* 类 id 与各 intrinsic 的补充方式"
+          ],
+          "source_files": [
+            "src/qjs.c",
+            "src/qjs.h",
+            "src/quickjs_compat.h"
+          ],
+          "minimal_modules": [
+            "上下文创建",
+            "模块注册类型",
+            "intrinsic 补充"
+          ],
+          "practice_task": "阅读 qjs.c 中 qjs_new_context，列出它启用了哪些 QuickJS intrinsic 以及 njs 自己补充了哪些（如 btoa/atob、process）；说明 quickjs_compat.h 的作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "双引擎模块模式：njs_* 与 qjs_* 双实现",
+          "order": 2,
+          "filename": "u6-l2-dual-engine-module-pattern.md",
+          "level": "intermediate",
+          "topic": "讲解 external/ 下「一个功能、两份实现」的约定：njs_*_module.c（基于 njs_value_t/njs_module_t）与 qjs_*_module.c（基于 JSValue/qjs_module_t），以 fs 模块为典型案例，并说明 auto/modules 与 auto/qjs_modules 两份清单如何分别收录它们。",
+          "learning_goals": [
+            "理解为何每个扩展模块要同时维护 njs 与 qjs 两份实现",
+            "掌握 njs_module_t{preinit,init} 与 qjs_module_t{init} 注册结构的差异",
+            "看清 auto/modules、auto/qjs_modules 如何被 auto/make 汇总进 njs_modules[]/qjs_modules[]"
+          ],
+          "source_files": [
+            "external/njs_fs_module.c",
+            "external/qjs_fs_module.c",
+            "auto/modules",
+            "auto/qjs_modules",
+            "auto/make"
+          ],
+          "minimal_modules": [
+            "双实现约定",
+            "两种注册结构",
+            "构建清单汇总"
+          ],
+          "practice_task": "对比 external/njs_fs_module.c 的 njs_fs_module 与 external/qjs_fs_module.c 的 qjs_fs_module 两个注册结构；指出改一处 fs 行为时必须同步修改的位置。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Buffer 与 TypedArray 的双引擎实现",
+          "order": 3,
+          "filename": "u6-l3-buffer-and-typed-array.md",
+          "level": "intermediate",
+          "topic": "讲解二进制数据处理：njs 引擎侧的 njs_buffer.c / njs_typed_array.c / njs_array_buffer.c，QuickJS 侧的 qjs_buffer.c，以及近期多个 Buffer 修复（concat/fill/readInt 等）所揭示的边界条件。",
+          "learning_goals": [
+            "理解 Buffer 在 njs 与 qjs 两引擎下的不同实现路径",
+            "掌握 TypedArray/ArrayBuffer 的类型枚举 NJS_OBJ_TYPE_*_ARRAY",
+            "认识二进制操作中常见的越界/零长度/类型混淆边界条件"
+          ],
+          "source_files": [
+            "src/njs_buffer.c",
+            "src/njs_typed_array.c",
+            "src/njs_array_buffer.c",
+            "src/qjs_buffer.c"
+          ],
+          "minimal_modules": [
+            "njs Buffer/TypedArray",
+            "qjs Buffer",
+            "边界条件案例"
+          ],
+          "practice_task": "结合近期 commit（如 'Buffer: fix type confusion in concat()'、'fix out-of-bounds access in readInt/writeInt'）定位对应源码，说明这些 bug 涉及哪种边界条件。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "引擎选择：js_engine 指令与运行时切换",
+          "order": 4,
+          "filename": "u6-l4-engine-selection.md",
+          "level": "intermediate",
+          "topic": "讲解 njs 与 QuickJS 在运行期的选择机制：CLI 的 -n 选项、nginx 的 js_engine 指令、两引擎的语言能力差异矩阵（class/generators/解构/Map/Set/BigInt 等），以及 js_preload_object（仅 njs）与 native modules（仅 qjs）等引擎专属特性。",
+          "learning_goals": [
+            "掌握 CLI 与 nginx 两种切换引擎的方式",
+            "理解两引擎的语言基线差异及对可移植代码的影响",
+            "认识引擎专属绑定（preload_object、native module、njs.dump）"
+          ],
+          "source_files": [
+            "src/qjs.c",
+            "docs/agent/js-dev.md",
+            "docs/agent/js-dev-njs.md"
+          ],
+          "minimal_modules": [
+            "引擎切换方式",
+            "语言能力差异",
+            "引擎专属特性"
+          ],
+          "practice_task": "对照 docs/agent/js-dev.md 的引擎差异表，写一段在两引擎下行为不同的最小 JS（如使用 class 或解构），分别在 -n njs 与 -n QuickJS 下运行并记录差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "外部扩展模块",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "fs：文件系统模块",
+          "order": 1,
+          "filename": "u7-l1-fs-module.md",
+          "level": "intermediate",
+          "topic": "讲解 fs 模块的双实现：readFile/writeFile/readdir/stat/mkdir 等同步与异步 API、文件句柄与 Stats/Dirent 对象（QJS_CORE_CLASS_ID_FS_*），以及 sandbox 模式下的访问限制。",
+          "learning_goals": [
+            "理解 fs 模块在 njs 与 qjs 两份实现中的 API 表面",
+            "掌握 fs.stats/dirent/filehandle 对应的类 id 与表示",
+            "了解 sandbox 模式如何影响文件访问"
+          ],
+          "source_files": [
+            "external/njs_fs_module.c",
+            "external/qjs_fs_module.c",
+            "test/fs/methods.t.mjs"
+          ],
+          "minimal_modules": [
+            "fs API 表面",
+            "Stats/Dirent 对象",
+            "sandbox 限制"
+          ],
+          "practice_task": "构建 CLI 后运行一段使用 fs.readFileSync / fs.writeFileSync 的脚本（参考 test/fs/methods.t.mjs），再在 -s sandbox 模式下重跑，观察被拒绝的行为。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "crypto 与 WebCrypto 模块",
+          "order": 2,
+          "filename": "u7-l2-crypto-and-webcrypto.md",
+          "level": "intermediate",
+          "topic": "讲解两套加密 API：Node 风格的 crypto（createHash/createHmac，依赖 OpenSSL）与 WebCrypto（crypto.subtle，sign/verify/encrypt/decrypt/deriveKeys），以及它们依赖 auto/openssl 检测与 njs_openssl.h 的封装。",
+          "learning_goals": [
+            "理解 crypto 模块的 Hash/HMAC 实现与算法支持",
+            "掌握 WebCrypto SubtleCrypto 的操作类型与 CryptoKey 表示",
+            "看清 OpenSSL 依赖在构建期的可选性（--no-openssl）"
+          ],
+          "source_files": [
+            "external/njs_crypto_module.c",
+            "external/qjs_crypto_module.c",
+            "external/njs_webcrypto_module.c",
+            "external/qjs_webcrypto_module.c",
+            "external/njs_openssl.h"
+          ],
+          "minimal_modules": [
+            "Node crypto",
+            "WebCrypto subtle",
+            "OpenSSL 依赖"
+          ],
+          "practice_task": "运行 test/crypto.t.mjs 或 test/webcrypto/digest.t.mjs 中的一个用例，用 crypto.createHash('sha256') 计算一段文本摘要；说明 WebCrypto 在 crypto.subtle 下的等价调用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "querystring / xml / zlib 模块",
+          "order": 3,
+          "filename": "u7-l3-querystring-xml-zlib.md",
+          "level": "intermediate",
+          "topic": "讲解其余三个扩展模块：querystring 的 parse/stringify、xml 的类 DOM 解析（XmlNode/XmlAttr，QJS_CORE_CLASS_ID_XML_*，依赖 libxml2）、zlib 的压缩/解压（依赖 zlib 库），以及各自的可选依赖检测。",
+          "learning_goals": [
+            "理解 querystring 模块的 API 与 query string 解析",
+            "掌握 xml 模块的对象模型与 libxml2 依赖",
+            "了解 zlib 模块的压缩能力与可选构建"
+          ],
+          "source_files": [
+            "external/njs_query_string_module.c",
+            "external/qjs_query_string_module.c",
+            "external/njs_xml_module.c",
+            "external/njs_zlib_module.c",
+            "auto/libxml2"
+          ],
+          "minimal_modules": [
+            "querystring",
+            "xml DOM 与 libxml2",
+            "zlib 压缩"
+          ],
+          "practice_task": "用 querystring.parse 解析 'a=1&b=2'；再构建一个启用 libxml2 与 zlib 的 CLI，运行 test/xml 或 test/zlib.t.mjs 中的样例验证 xml/zlib 可用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "NGINX 集成基础",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "ngx_js 共享层与引擎抽象",
+          "order": 1,
+          "filename": "u8-l1-ngx-js-shared-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx/ngx_js.c 作为 http/stream 两模块共享的绑定基座：ngx_engine_t 引擎抽象（含 clone/call 回调）、ngx_njs_clone 与 ngx_qjs_clone 的 per-request/session 克隆、js_import/js_engine/js_path 等指令的统一处理，以及 nginx/config 构建胶水。",
+          "learning_goals": [
+            "理解 ngx_engine_t 如何在 njs 与 qjs 两引擎上提供统一接口",
+            "掌握 per-request/session 克隆 VM 的标准流程（init_conf_vm → clone → cleanup）",
+            "看清 js_import/js_engine/js_path 等指令在共享层的解析"
+          ],
+          "source_files": [
+            "nginx/ngx_js.c",
+            "nginx/ngx_js.h",
+            "nginx/config"
+          ],
+          "minimal_modules": [
+            "引擎抽象 ngx_engine_t",
+            "per-request 克隆",
+            "共享指令处理"
+          ],
+          "practice_task": "阅读 ngx_js.h 中 ngx_engine_t 与 ngx_js_ctx_t 的定义，画出「配置期创建模板 VM → 请求期 clone → 请求结束 cleanup」的时序；指出 ngx_njs_clone 与 ngx_qjs_clone 的分工。",
+          "depends_on": [
+            "u2-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "ngx_http_js_module：HTTP 请求处理与 r 对象",
+          "order": 2,
+          "filename": "u8-l2-http-js-module.md",
+          "level": "intermediate",
+          "topic": "讲解 http 模块：注册的指令（js_content/js_access/js_header_filter/js_body_filter/js_set/js_var/js_periodic）、各 phase handler 如何调用 JS、per-request VM 初始化 ngx_http_js_init_vm，以及 r 外部对象原型（headersIn/Out、return/send/finish/subrequest 等）。",
+          "learning_goals": [
+            "理解 js_content/js_access/js_set 等指令分别绑定到哪个请求处理阶段",
+            "掌握 per-request VM 的创建与清理流程",
+            "看清 r 对象暴露的方法/属性及其终止语义（return/finish）"
+          ],
+          "source_files": [
+            "nginx/ngx_http_js_module.c",
+            "nginx/ngx_js.c"
+          ],
+          "minimal_modules": [
+            "指令与 phase 绑定",
+            "per-request VM",
+            "r 对象原型"
+          ],
+          "practice_task": "在 ngx_http_js_module.c 中定位指令表与 ngx_http_js_ext_request[] 外部原型，写一个最小 nginx.conf：js_import 一个 hello 函数并用 js_content 提供 200 响应（参考 README 示例）。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "ngx_stream_js_module：s 对象与 preread/filter",
+          "order": 3,
+          "filename": "u8-l3-stream-js-module.md",
+          "level": "intermediate",
+          "topic": "讲解 stream 模块：js_preread/js_filter/js_access/js_set 指令、s 会话对象原型（allow/deny/done/send/on/off）、upload/download 事件机制，以及与 http 模块在指令集上的差异。",
+          "learning_goals": [
+            "理解 stream 各指令（preread/filter/access）的作用阶段与终止方式",
+            "掌握 s 对象的方法与 on/off 事件订阅模型",
+            "看清 stream 与 http 集成在共享层之上的差异"
+          ],
+          "source_files": [
+            "nginx/ngx_stream_js_module.c",
+            "nginx/ngx_js.c"
+          ],
+          "minimal_modules": [
+            "stream 指令与阶段",
+            "s 对象原型",
+            "事件机制"
+          ],
+          "practice_task": "对比 ngx_http_js_ext_request[] 与 ngx_stream_js_ext_session[] 两个外部原型，列出 r 与 s 各自独有的方法；说明 js_filter 的 upload/download 双向数据流如何通过 s.on 实现。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "NGINX 高级特性",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "ngx.fetch()：异步 HTTP 客户端",
+          "order": 1,
+          "filename": "u9-l1-ngx-fetch-http-client.md",
+          "level": "advanced",
+          "topic": "讲解 fetch 的双实现与底层 HTTP 客户端：Request/Response/Headers 对象（njs 侧 ngx_js_fetch.c、qjs 侧 ngx_qjs_fetch.c）、共享的 ngx_js_http.c 状态机（resolver→connect→SSL→keepalive pool→响应解析）、js_fetch_* 指令与 resolver 要求。",
+          "learning_goals": [
+            "理解 fetch 返回 Promise 并由 nginx 事件循环驱动的机制",
+            "掌握 ngx_js_http_t 的解析状态机（status line/headers/body/chunked）",
+            "看清 js_fetch_* 指令（timeout/buffer/proxy/keepalive/verify）与 resolver 的依赖"
+          ],
+          "source_files": [
+            "nginx/ngx_js_fetch.c",
+            "nginx/ngx_js_http.c",
+            "nginx/ngx_js_http.h",
+            "nginx/ngx_qjs_fetch.c"
+          ],
+          "minimal_modules": [
+            "Request/Response/Headers",
+            "HTTP 状态机",
+            "js_fetch_* 指令"
+          ],
+          "practice_task": "阅读 ngx_js_http.c 的连接/解析状态机，说明 fetch 一次请求经历的 resolver→connect→read 响应全过程；结合近期 fetch 相关 commit（如 'fix Content-Length reservation'）指出一个修复点。",
+          "depends_on": [
+            "u8-l2",
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "ngx.shared：跨 worker 共享字典",
+          "order": 2,
+          "filename": "u9-l2-ngx-shared-dict.md",
+          "level": "advanced",
+          "topic": "讲解 ngx.shared 的共享内存字典实现：js_shared_dict_zone 配置（zone=name:size type=string|number timeout evict）、共享内存布局 ngx_js_dict_sh_t（rbtree + LRU）、get/set/incr/add/delete/expire 等 API，以及为何它是跨 worker 通信的唯一标准方式。",
+          "learning_goals": [
+            "理解 nginx 多 worker 不共享内存、必须用 ngx.shared 的原因",
+            "掌握 zone 配置参数与 string/number 两种类型、LRU evict 语义",
+            "看清共享内存中 rbtree 节点与 TTL/过期机制"
+          ],
+          "source_files": [
+            "nginx/ngx_js_shared_dict.c",
+            "nginx/ngx_js_shared_dict.h"
+          ],
+          "minimal_modules": [
+            "zone 配置",
+            "共享内存与 LRU",
+            "字典 API"
+          ],
+          "practice_task": "设计一段 nginx.conf：声明一个 type=number 的共享 zone 并用 js_periodic 自增计数器，再用 js_content 读取并返回；解释为何不能用模块作用域变量跨请求/worker 计数。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "subrequest、表单解析与请求体读取",
+          "order": 3,
+          "filename": "u9-l3-subrequest-form-requestbody.md",
+          "level": "advanced",
+          "topic": "讲解请求体相关高级能力：r.subrequest() 子请求、readRequestText/readRequestBuffer/readRequestJSON/readRequestForm 异步读取（body_read_state 状态机与缓存）、ngx_js_form.c 对 urlencoded/multipart 的解析及其边界限制。",
+          "learning_goals": [
+            "理解 subrequest 如何发起内部子请求并合并结果",
+            "掌握请求体一次性读取+缓存的异步模型与各 phase 对 async 的支持差异",
+            "看清表单解析（urlencoded/multipart）的边界限制与文件上传处理"
+          ],
+          "source_files": [
+            "nginx/ngx_http_js_module.c",
+            "nginx/ngx_js_form.c",
+            "nginx/ngx_js_form.h"
+          ],
+          "minimal_modules": [
+            "subrequest",
+            "请求体异步读取",
+            "表单解析"
+          ],
+          "practice_task": "阅读 ngx_js_form.c 中的 multipart 解析与边界常量（如 NGX_JS_FORM_MAX_PART_HEADERS），写一个接收 multipart 表单并用 readRequestForm 解析字段的 js_content handler，说明 body_read_state 的状态切换。",
+          "depends_on": [
+            "u8-l2",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "测试、类型定义与工程实践",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "测试体系：unit_test / lib_test / test262 / nginx-t",
+          "order": 1,
+          "filename": "u10-l1-test-suite.md",
+          "level": "advanced",
+          "topic": "讲解 njs 的多层测试体系：src/test/njs_unit_test.c 的 5800+ 语言/API 测试、lib_test 的内部数据结构测试、test/js 的 test262 风格 *.t.js、test/shell_test.exp 的 Expect 交互测试、test/test262 合规套件，以及 nginx/t 的 Perl Test::Nginx 集成测试。",
+          "learning_goals": [
+            "掌握 make unit_test/lib_test/test262 与 prove nginx/t 各自覆盖的范围",
+            "理解 *.t.js 的 test262 frontmatter（includes/flags）格式",
+            "看清双引擎测试：用 TEST_NGINX_GLOBALS_HTTP='js_engine qjs;' 跑 qjs 版本"
+          ],
+          "source_files": [
+            "src/test/njs_unit_test.c",
+            "src/test/njs_benchmark.c",
+            "test/js",
+            "test/shell_test.exp",
+            "nginx/t/js.t"
+          ],
+          "minimal_modules": [
+            "C 单元测试",
+            "test262 风格 JS 测试",
+            "nginx 集成测试"
+          ],
+          "practice_task": "构建后运行 make unit_test 与 make lib_test；挑选 test/js 下一个 async/*.t.js，阅读其 frontmatter 与断言，说明它如何被 test262 harness 执行。",
+          "depends_on": [
+            "u1-l3",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "TypeScript 类型定义 ts/",
+          "order": 2,
+          "filename": "u10-l2-typescript-definitions.md",
+          "level": "advanced",
+          "topic": "讲解 ts/ 下的权威类型定义：index.d.ts 汇总引用、njs_core.d.ts（Buffer/TypedArray/编码）、ngx_http_js_module.d.ts（r/NginxHeadersIn-Out/NginxVariables）、ngx_stream_js_module.d.ts（s）、njs_webapi.d.ts/njs_webcrypto.d.ts、njs_modules/*.d.ts（crypto/fs/xml/querystring/zlib），以及 package.json（njs-types）与 tsconfig.json。",
+          "learning_goals": [
+            "理解 ts/ 是两引擎共用的权威 API 描述",
+            "掌握各 .d.ts 文件覆盖的 API 表面（r/s/ngx/内建模块）",
+            "看清 njs-types npm 包与 tsconfig 的 ES5/ES2015 目标设定"
+          ],
+          "source_files": [
+            "ts/index.d.ts",
+            "ts/njs_core.d.ts",
+            "ts/ngx_http_js_module.d.ts",
+            "ts/package.json",
+            "ts/tsconfig.json"
+          ],
+          "minimal_modules": [
+            "类型文件组织",
+            "r/s API 类型",
+            "njs-types 包"
+          ],
+          "practice_task": "在 ngx_http_js_module.d.ts 中找出 r.subrequest 与 r.readRequestText 的类型签名；用 tsconfig.json 编译 test/ts 下一个 .ts 样例验证类型可用。",
+          "depends_on": [
+            "u8-l2",
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "进阶构建：可选依赖、AddressSanitizer 与配置选项",
+          "order": 3,
+          "filename": "u10-l3-build-advanced-and-sanitizers.md",
+          "level": "advanced",
+          "topic": "讲解进阶构建：configure 的 --cc/--cc-opt/--ld-opt/--debug*/--address-sanitizer/--with-quickjs/--no-openssl/--no-libxml2/--no-zlib 等选项、auto/ 下 openssl/libxml2/zlib/pcre/quickjs 的特性检测，以及 ASan 构建用于排查内存问题（结合近期大量 use-after-free/out-of-bounds 修复）。",
+          "learning_goals": [
+            "掌握 configure 各选项对功能集与调试能力的影响",
+            "理解 auto/ 特性检测脚本如何决定是否编入可选依赖",
+            "学会用 --address-sanitizer + clang 构建排查内存安全 bug"
+          ],
+          "source_files": [
+            "auto/options",
+            "auto/openssl",
+            "auto/libxml2",
+            "auto/zlib",
+            "docs/agent/engine-dev.md"
+          ],
+          "minimal_modules": [
+            "configure 选项",
+            "特性检测",
+            "ASan 构建"
+          ],
+          "practice_task": "用 --address-sanitizer=YES（或等价 --with-cc-opt）构建 CLI（参考 docs/agent/engine-dev.md），运行一个会触发越界的小用例观察 ASan 报告；再分别用 --no-openssl 与 --no-zlib 构建对比编译进的功能差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "调试技巧：反汇编、opcode 跟踪与 NGINX 测试",
+          "order": 4,
+          "filename": "u10-l4-debugging-techniques.md",
+          "level": "advanced",
+          "topic": "汇总调试手段：CLI 的 -d 反汇编 / --debug-opcode=YES 的 -o 逐指令跟踪 / --debug-generator=YES 的生成器跟踪、njs_disassembler 的输出阅读、NGINX 测试的 TEST_NGINX_LEAVE/TEST_NGINX_CATLOG 与 error.log 定位，以及 docs/agent/engine-dev.md 的验证清单。",
+          "learning_goals": [
+            "会用 -d / -o / --debug-generator 定位控制流与字节码问题",
+            "掌握 NGINX 集成测试的产物保留与日志查看技巧",
+            "理解提交前的验证清单（-Werror、unit_test、test262、双引擎 prove）"
+          ],
+          "source_files": [
+            "src/njs_disassembler.c",
+            "external/njs_shell.c",
+            "docs/agent/engine-dev.md",
+            "nginx/t/js.t"
+          ],
+          "minimal_modules": [
+            "CLI 调试开关",
+            "NGINX 测试日志",
+            "验证清单"
+          ],
+          "practice_task": "用 --debug-opcode=YES 构建，对一段含循环与函数调用的脚本运行 ./build/njs -o 观察 ENTER/EXIT 与逐指令输出；再用 TEST_NGINX_LEAVE=1 跑一个 nginx/t/*.t，定位保留的 nginx.conf 与 error.log。",
+          "depends_on": [
+            "u10-l1",
+            "u10-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

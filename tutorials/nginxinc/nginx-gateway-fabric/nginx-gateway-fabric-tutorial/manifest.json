@@ -1,0 +1,1314 @@
+{
+  "project": "nginx-gateway-fabric",
+  "head": "5504d0d7de1706d1bda281281fbb0753a7b32806",
+  "rationale": "nginx-gateway-fabric 是一个基于 controller-runtime 的 Kubernetes Gateway API 实现，控制面（Go）将 Gateway/Route 等资源翻译成 NGINX 配置，再通过 NGINX Agent（gRPC）下发到数据面。代码体量大、子系统多（CLI、Manager、自研 framework、状态/图、配置生成、Agent 通信、策略 CRD、WAF、可观测性、Inference 扩展、Plus 能力），因此采用「由浅入深、按数据流向分层」的学习顺序：先建立项目认知与运行能力（入门层），再沿真实调用链「CLI → Manager 组装 → 自研框架/事件管线 → 状态捕获与图构建 → 数据面配置 → NGINX 配置生成与模板 → Agent 下发 → 状态与策略」逐层深入（进阶层），最后聚焦扩展点、安全、可观测性、Plus、WAF、AI 推理扩展以及测试与二次开发（专家层）。每个单元解决一类问题，讲义之间用 depends_on 串成清晰依赖图，确保读者可从零开始、按真实源码顺序循序渐进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目认知、构建与部署上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：NGINX Gateway Fabric 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 NGINX Gateway Fabric 的定位：它是 Kubernetes Gateway API 的一个实现，以 NGINX 作为数据面，并使用 NGINX Agent 下发配置。",
+          "learning_goals": [
+            "理解 Gateway API 的核心资源（Gateway/GatewayClass/HTTPRoute 等）与 NGF 的角色",
+            "区分控制面与数据面，理解 NGINX Agent 的作用",
+            "了解 NGF 支持的 Gateway API、Kubernetes、NGINX/Plus 版本矩阵"
+          ],
+          "source_files": [
+            "README.md",
+            "go.mod",
+            "docs/developer/design-principles.md"
+          ],
+          "minimal_modules": [
+            "Gateway API 与 NGF 定位",
+            "控制面/数据面分离",
+            "版本与兼容性矩阵"
+          ],
+          "practice_task": "阅读 README 并用自己的话写一段：NGF 相比一个普通 Ingress Controller 多了什么？为什么需要 GatewayClass。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与代码组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录与核心代码树的划分，重点是 cmd、internal/controller、internal/framework、apis。",
+          "learning_goals": [
+            "建立仓库整体地图，知道每个顶层目录负责什么",
+            "区分 internal/controller（产品逻辑）与 internal/framework（可复用框架）",
+            "找到 apis（自定义 CRD 类型）、deploy/charts（部署）、examples（示例）的位置"
+          ],
+          "source_files": [
+            "internal/controller/doc.go",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录职责",
+            "controller 与 framework 的边界",
+            "apis/deploy/charts/examples 概览"
+          ],
+          "practice_task": "画出一张仓库目录树，用三种颜色分别标注：入口、控制面产品逻辑、可复用框架。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建与本地运行方式",
+          "order": 3,
+          "filename": "u1-l3-build-and-run.md",
+          "level": "beginner",
+          "topic": "通过 Makefile 和开发 quickstart 介绍如何编译二进制、构建镜像、在 kind 集群中运行与调试 NGF。",
+          "learning_goals": [
+            "掌握 make build / build-images 等核心目标",
+            "了解 kind 集群创建、镜像加载、CRD 安装流程",
+            "知道如何运行单元测试与 lint"
+          ],
+          "source_files": [
+            "Makefile",
+            "docs/developer/quickstart.md",
+            "cmd/gateway/main.go"
+          ],
+          "minimal_modules": [
+            "Makefile 关键目标",
+            "kind 部署流程",
+            "测试与 lint 入口"
+          ],
+          "practice_task": "运行 make build 产出二进制，并执行 gateway --help 查看可用子命令。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "安装与部署：Helm 与 Manifests",
+          "order": 4,
+          "filename": "u1-l4-install-and-deploy.md",
+          "level": "beginner",
+          "topic": "介绍通过 Helm chart 与 deploy/ 目录的 manifests 安装 NGF 的方式，以及多种部署变体（default/plus/snippets/nodeport/openshift 等）。",
+          "learning_goals": [
+            "理解 Helm chart 结构与 values 的作用",
+            "区分 deploy/ 下的不同部署变体",
+            "知道 CRD 与控制面 Deployment 的安装顺序"
+          ],
+          "source_files": [
+            "charts/nginx-gateway-fabric/values.yaml",
+            "charts/nginx-gateway-fabric/Chart.yaml",
+            "docs/developer/quickstart.md"
+          ],
+          "minimal_modules": [
+            "Helm chart 结构",
+            "部署变体",
+            "CRD 与 Deployment 安装顺序"
+          ],
+          "practice_task": "用 helm install 在 kind 中部署 NGF，并通过 kubectl 查看 GatewayClass 是否就绪。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "运行第一个例子：路由一个应用",
+          "order": 5,
+          "filename": "u1-l5-first-example.md",
+          "level": "beginner",
+          "topic": "以 cafe-example 等示例为抓手，端到端体验：创建 Gateway/HTTPRoute，让 NGF 把流量路由到后端服务。",
+          "learning_goals": [
+            "用一个完整示例串联 Gateway/HTTPRoute/Service",
+            "观察 NGF 如何把路由翻译成 NGINX 行为",
+            "学会用 examples/ 目录查找用法"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/developer/quickstart.md"
+          ],
+          "minimal_modules": [
+            "示例资源结构",
+            "端到端验证方法",
+            "examples 目录导航"
+          ],
+          "practice_task": "部署 examples 中的一个路由示例，用 curl 验证请求被正确转发到后端。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "CLI 入口与控制面启动配置",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "命令行子命令总览",
+          "order": 1,
+          "filename": "u2-l1-cli-subcommands-overview.md",
+          "level": "intermediate",
+          "topic": "解析 cmd/gateway 的 main 与 commands.go，理清 controller/generate-certs/initialize/sleep/endpoint-picker 五个子命令的职责。",
+          "learning_goals": [
+            "理解 cobra 命令的组装方式",
+            "区分控制面主命令与辅助命令（证书、初始化、endpoint-picker）",
+            "掌握命令行入口到业务逻辑的跳转点"
+          ],
+          "source_files": [
+            "cmd/gateway/main.go",
+            "cmd/gateway/commands.go"
+          ],
+          "minimal_modules": [
+            "cobra 根命令组装",
+            "五个子命令职责",
+            "构建期注入的变量（version/telemetry）"
+          ],
+          "practice_task": "在源码中标注每个子命令对应的处理函数入口，并说明哪个命令运行在控制面容器、哪个在 init 容器。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "controller 命令与运行时配置",
+          "order": 2,
+          "filename": "u2-l2-controller-command-and-config.md",
+          "level": "intermediate",
+          "topic": "深入 controller 子命令的启动流程与 config.Config 结构，理解所有运行参数如何汇聚成控制面配置。",
+          "learning_goals": [
+            "掌握 controller 命令的关键 flag（gateway-ctlr-name、gatewayclass、nginx-plus 等）",
+            "理解 internal/controller/config/config.go 中 Config 等结构的作用",
+            "看清 flag 到 Config 再到 StartManager 的数据流"
+          ],
+          "source_files": [
+            "cmd/gateway/commands.go",
+            "internal/controller/config/config.go"
+          ],
+          "minimal_modules": [
+            "controller 命令 flag 集",
+            "Config 结构族",
+            "flag→Config→StartManager 流转"
+          ],
+          "practice_task": "挑选 3 个 flag，追踪它们最终被哪个结构字段消费、影响哪个子系统。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "初始化命令与证书生成",
+          "order": 3,
+          "filename": "u2-l3-initialize-and-generate-certs.md",
+          "level": "intermediate",
+          "topic": "讲解 initialize（init 容器写初始文件）与 generate-certs（自签 CA/服务端/客户端证书）两个命令。",
+          "learning_goals": [
+            "理解 init 容器为何需要 initialize 命令",
+            "掌握控制面↔数据面 mTLS 所需证书（server-tls/agent-tls）的生成",
+            "了解 NGINX Plus 场景下 deployment context 的生成"
+          ],
+          "source_files": [
+            "cmd/gateway/initialize.go",
+            "cmd/gateway/certs.go"
+          ],
+          "minimal_modules": [
+            "initialize 文件拷贝逻辑",
+            "证书生成与 Secret 创建",
+            "Plus deployment context"
+          ],
+          "practice_task": "梳理一张证书用途表：CA、server、client 各自服务端是谁、客户端是谁。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "参数校验与准入式校验机制",
+          "order": 4,
+          "filename": "u2-l4-flag-and-admission-validation.md",
+          "level": "intermediate",
+          "topic": "讲解 validation.go / validating_types.go 中对 flag 的校验机制，以及可复用的校验类型设计。",
+          "learning_goals": [
+            "掌握 controller name、资源名、端口、URL 等校验规则",
+            "理解 stringValidatingValue 等 pflag Value 类型的设计",
+            "了解 ensureNoPortCollisions 等一致性校验"
+          ],
+          "source_files": [
+            "cmd/gateway/validation.go",
+            "cmd/gateway/validating_types.go"
+          ],
+          "minimal_modules": [
+            "校验规则集合",
+            "pflag Value 自定义类型",
+            "端口冲突检测"
+          ],
+          "practice_task": "为一个新的字符串 flag 添加一条校验规则，参考现有 validating value 实现。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Manager 组装与控制器注册",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "StartManager 全景：控制面如何被装配",
+          "order": 1,
+          "filename": "u3-l1-manager-startup-overview.md",
+          "level": "intermediate",
+          "topic": "以 manager.go 的 StartManager 为主线，看清控制面各子系统（处理器、生成器、Agent 服务、provisioner、telemetry、健康检查）如何被组装。",
+          "learning_goals": [
+            "掌握 StartManager 的整体装配顺序",
+            "理解 metrics、agent 服务、provisioner、telemetry、policy manager 的创建时机",
+            "看清依赖注入的组装方式"
+          ],
+          "source_files": [
+            "internal/controller/manager.go"
+          ],
+          "minimal_modules": [
+            "StartManager 装配流程",
+            "各 create* 工厂函数",
+            "依赖注入"
+          ],
+          "practice_task": "画出 StartManager 中各组件的创建与装配顺序图。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "controller-runtime Manager 与缓存",
+          "order": 2,
+          "filename": "u3-l2-controller-runtime-manager-and-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 createManager 与 buildManagerCache：如何创建 controller-runtime manager、配置 cache（含 transform/namespace 过滤）。",
+          "learning_goals": [
+            "理解 controller-runtime manager 的创建与选项",
+            "掌握 cache 的 transform 与 watch namespace 配置",
+            "了解 metrics/health server 的挂载"
+          ],
+          "source_files": [
+            "internal/controller/manager.go",
+            "internal/framework/controller/cache/transform.go"
+          ],
+          "minimal_modules": [
+            "manager 创建选项",
+            "cache transform",
+            "metrics/health 端口"
+          ],
+          "practice_task": "解释 cache transform 如何在不改业务逻辑的情况下降低内存占用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "控制器注册与 CRD 存在性发现",
+          "order": 3,
+          "filename": "u3-l3-controller-registration-and-crd-discovery.md",
+          "level": "intermediate",
+          "topic": "讲解 registerControllers 如何注册各类资源控制器，以及 crd/discovery 如何按 CRD 是否存在来动态启用/禁用控制器。",
+          "learning_goals": [
+            "掌握控制器注册表 ctlrCfg 的结构",
+            "理解按 CRD 存在性过滤控制器的机制",
+            "了解 feature flag 与控制器的关系"
+          ],
+          "source_files": [
+            "internal/controller/manager.go",
+            "internal/controller/crd/discovery.go"
+          ],
+          "minimal_modules": [
+            "控制器注册配置",
+            "CRD 发现",
+            "特性开关驱动注册"
+          ],
+          "practice_task": "追踪一个 Gateway API 资源类型的控制器是如何被注册并被 field index 配置的。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Leader Election 与 Runnables",
+          "order": 4,
+          "filename": "u3-l4-leader-election-and-runnables.md",
+          "level": "intermediate",
+          "topic": "讲解框架中 Leader/LeaderOrNonLeader runnable 包装与 leader election，以及 CronJob 周期任务机制。",
+          "learning_goals": [
+            "理解哪些工作只在 leader 上运行",
+            "掌握 framework/runnables 的 Leader 包装语义",
+            "了解 CronJob 周期任务（如 telemetry）的实现"
+          ],
+          "source_files": [
+            "internal/framework/runnables/runnables.go",
+            "internal/framework/runnables/cronjob.go"
+          ],
+          "minimal_modules": [
+            "Leader 选举语义",
+            "Runnable 包装",
+            "CronJob 周期任务"
+          ],
+          "practice_task": "判断 telemetry/状态更新等任务应使用 Leader 还是 LeaderOrNonLeader，并说明理由。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "事件管线：从控制器到处理器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "自研框架：控制器抽象与过滤机制",
+          "order": 1,
+          "filename": "u4-l1-framework-controller-and-filtering.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/framework/controller 的 Register/Reconciler 抽象，以及 predicate/filter/index/cache 多层过滤。",
+          "learning_goals": [
+            "理解 Reconciler 如何把资源变更转成 Upsert/Delete 事件",
+            "掌握 predicate、namespacedName filter、field index、cache transform 多层过滤",
+            "了解 WithOnlyMetadata 等优化选项"
+          ],
+          "source_files": [
+            "internal/framework/controller/register.go",
+            "internal/framework/controller/reconciler.go",
+            "internal/framework/controller/predicate/gatewayclass.go",
+            "internal/framework/controller/index/index.go"
+          ],
+          "minimal_modules": [
+            "Register/Reconciler 抽象",
+            "事件转换",
+            "多层过滤与索引"
+          ],
+          "practice_task": "为某类资源添加一个 predicate，只在某注解变化时触发事件。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "事件循环与批处理（双缓冲）",
+          "order": 2,
+          "filename": "u4-l2-event-loop-and-batching.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/framework/events 的 EventLoop：如何用双缓冲批处理事件以减少 NGINX reload 次数，以及首批事件如何由 FirstEventBatchPreparer 准备。",
+          "learning_goals": [
+            "理解事件批处理与双缓冲机制",
+            "掌握首批事件（集群初始状态）的准备方式",
+            "了解 EventHandler/EventBatch 的抽象"
+          ],
+          "source_files": [
+            "internal/framework/events/loop.go",
+            "internal/framework/events/first_eventbatch_preparer.go",
+            "internal/framework/events/event.go"
+          ],
+          "minimal_modules": [
+            "EventLoop 双缓冲",
+            "首批事件准备",
+            "Event/EventBatch 类型"
+          ],
+          "practice_task": "解释为什么双缓冲能把多次资源变更合并成一次 NGINX 配置更新。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "EventHandler：事件批次的总编排",
+          "order": 3,
+          "filename": "u4-l3-event-handler-orchestration.md",
+          "level": "intermediate",
+          "topic": "讲解 internal/controller/handler.go 的 eventHandlerImpl：它如何编排 ChangeProcessor、Generator、NginxUpdater、StatusUpdater 完成一轮处理。",
+          "learning_goals": [
+            "掌握 HandleEventBatch 的主流程",
+            "理解捕获变更→构建图→生成配置→下发→更新状态的编排顺序",
+            "了解健康检查就绪与 statusQueue 的协作"
+          ],
+          "source_files": [
+            "internal/controller/handler.go"
+          ],
+          "minimal_modules": [
+            "HandleEventBatch 主流程",
+            "子系统编排顺序",
+            "就绪与状态队列"
+          ],
+          "practice_task": "画出一次事件批次在 handler 中的完整调用时序图。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "ChangeProcessor 与状态存储",
+          "order": 4,
+          "filename": "u4-l4-change-processor-and-store.md",
+          "level": "intermediate",
+          "topic": "讲解 state.ChangeProcessor 如何捕获资源增删改、维护 ClusterState/对象存储，并在 Process 时输出图。",
+          "learning_goals": [
+            "理解 CaptureUpsertChange/CaptureDeleteChange 的捕获机制",
+            "掌握对象存储 store 与 changed predicate",
+            "了解 Process 如何把变更转化为 graph"
+          ],
+          "source_files": [
+            "internal/controller/state/change_processor.go",
+            "internal/controller/state/store.go",
+            "internal/controller/state/changed_predicate.go"
+          ],
+          "minimal_modules": [
+            "变更捕获",
+            "对象存储",
+            "changed predicate"
+          ],
+          "practice_task": "说明 changed_predicate 如何避免无意义的状态重建。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "图构建与数据面配置",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Graph：把 Gateway API 资源变成内部模型",
+          "order": 1,
+          "filename": "u5-l1-graph-building.md",
+          "level": "intermediate",
+          "topic": "讲解 state/graph 如何把原始 Gateway/GatewayClass 等资源构建成内部 Graph，包括校验与条件收集。",
+          "learning_goals": [
+            "理解 Graph 数据结构与构建入口",
+            "掌握 GatewayClass/Gateway 到图的映射",
+            "了解图构建中的校验与 conditions 收集"
+          ],
+          "source_files": [
+            "internal/controller/state/graph/graph.go",
+            "internal/controller/state/graph/gatewayclass.go",
+            "internal/controller/state/graph/gateway.go",
+            "internal/controller/state/graph/validation.go"
+          ],
+          "minimal_modules": [
+            "Graph 结构",
+            "GatewayClass/Gateway 映射",
+            "校验与条件"
+          ],
+          "practice_task": "追踪一个 GatewayClass 被接受/拒绝的过程在图中如何体现。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "路由与监听器：HTTP/gRPC/TCP/TLS/UDP",
+          "order": 2,
+          "filename": "u5-l2-routes-and-listeners.md",
+          "level": "intermediate",
+          "topic": "讲解各类 Route 与 Listener 在图中的处理：HTTPRoute、GRPCRoute、TCPRoute、TLSRoute、UDPRoute 以及 ListenerSet。",
+          "learning_goals": [
+            "掌握不同 Route 类型在图中的统一处理（route_common）",
+            "理解 Listener 端口/协议/主机名匹配",
+            "了解 ListenerSet 扩展监听器的能力"
+          ],
+          "source_files": [
+            "internal/controller/state/graph/route_common.go",
+            "internal/controller/state/graph/httproute.go",
+            "internal/controller/state/graph/gateway_listener.go",
+            "internal/controller/state/graph/listenerset.go"
+          ],
+          "minimal_modules": [
+            "Route 统一处理",
+            "Listener 匹配",
+            "ListenerSet"
+          ],
+          "practice_task": "为一个 HTTPRoute 追踪它在图中被绑定到哪个 Listener、生成哪些 backendRefs。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "后端解析：Service、BackendRef、ReferenceGrant",
+          "order": 3,
+          "filename": "u5-l3-backend-resolution.md",
+          "level": "intermediate",
+          "topic": "讲解后端如何被解析：BackendRef → Service → Endpoints（resolver），以及跨命名空间引用的 ReferenceGrant 校验。",
+          "learning_goals": [
+            "理解 BackendRef 到 Service/Endpoints 的解析",
+            "掌握 ServiceResolver 的工作方式",
+            "了解 ReferenceGrant 跨命名空间授权"
+          ],
+          "source_files": [
+            "internal/controller/state/graph/backend_refs.go",
+            "internal/controller/state/graph/service.go",
+            "internal/controller/state/graph/reference_grant.go",
+            "internal/controller/state/resolver/resolver.go"
+          ],
+          "minimal_modules": [
+            "BackendRef 解析",
+            "ServiceResolver",
+            "ReferenceGrant 授权"
+          ],
+          "practice_task": "构造一个跨命名空间后端引用，验证没有 ReferenceGrant 时图如何标记错误条件。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "dataplane.Configuration：图的最终配置表示",
+          "order": 4,
+          "filename": "u5-l4-dataplane-configuration.md",
+          "level": "intermediate",
+          "topic": "讲解 BuildConfiguration 如何把 Graph 转成 dataplane.Configuration（Servers/Upstreams/SSL/证书等），这是交给配置生成器的输入。",
+          "learning_goals": [
+            "理解 dataplane.Configuration 的结构与构建",
+            "掌握 SSL 证书对、L4/Stream 服务的构建",
+            "了解配置在交给生成器前的最终形态"
+          ],
+          "source_files": [
+            "internal/controller/state/dataplane/configuration.go",
+            "internal/controller/state/dataplane/types.go",
+            "internal/controller/state/dataplane/convert.go"
+          ],
+          "minimal_modules": [
+            "Configuration 构建",
+            "SSL/证书处理",
+            "类型与转换"
+          ],
+          "practice_task": "解释 Graph 与 dataplane.Configuration 的区别：为什么需要这层中间表示。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "NGINX 配置生成与模板",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "配置生成器总览：从 Configuration 到 []File",
+          "order": 1,
+          "filename": "u6-l1-config-generator-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx/config/generator.go 的 Generator 接口与实现：如何把 dataplane.Configuration 渲染成一组 NGINX 配置文件。",
+          "learning_goals": [
+            "掌握 Generator.Generate 的整体流程",
+            "理解 executeConfigTemplates 的多步模板执行链",
+            "了解生成文件如何组织成 conf.d/stream-conf.d 等目录"
+          ],
+          "source_files": [
+            "internal/controller/nginx/config/generator.go",
+            "internal/controller/nginx/config/includes.go"
+          ],
+          "minimal_modules": [
+            "Generator 接口",
+            "模板执行链",
+            "文件目录组织"
+          ],
+          "practice_task": "在 Generate 中找到生成 servers、upstreams、maps 各自对应的执行函数。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "nginx.conf 骨架与模板体系",
+          "order": 2,
+          "filename": "u6-l2-nginx-conf-and-templates.md",
+          "level": "intermediate",
+          "topic": "讲解静态 nginx.conf 骨架与各类模板（main/events/base http）如何配合，以及 Go text/template 的组织方式。",
+          "learning_goals": [
+            "理解静态 nginx.conf 与生成片段的 include 关系",
+            "掌握 main/base http/events 模板的职责",
+            "了解模板常量与执行函数的对应"
+          ],
+          "source_files": [
+            "internal/controller/nginx/conf/nginx.conf",
+            "internal/controller/nginx/config/main_config.go",
+            "internal/controller/nginx/config/base_http_config.go",
+            "internal/controller/nginx/config/main_config_template.go"
+          ],
+          "minimal_modules": [
+            "nginx.conf 骨架",
+            "main/base http 模板",
+            "include 机制"
+          ],
+          "practice_task": "对照 nginx.conf 找出每个 include 分别由哪个模板执行函数生成。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Servers、Upstreams 与 Locations 生成",
+          "order": 3,
+          "filename": "u6-l3-servers-upstreams-locations.md",
+          "level": "intermediate",
+          "topic": "深入 HTTP server/upstream/location 块的生成，包括负载均衡、keepalive、zone 大小等细节。",
+          "learning_goals": [
+            "掌握 servers.go/upstreams.go 的生成逻辑",
+            "理解 upstream zone 大小、keepalive 等 NGINX 指令",
+            "了解 location 路由匹配的生成"
+          ],
+          "source_files": [
+            "internal/controller/nginx/config/servers.go",
+            "internal/controller/nginx/config/upstreams.go",
+            "internal/controller/nginx/config/servers_template.go",
+            "internal/controller/nginx/config/upstreams_template.go"
+          ],
+          "minimal_modules": [
+            "server 块生成",
+            "upstream 与 zone",
+            "location 匹配"
+          ],
+          "practice_task": "修改一处后端配置，观察生成的 upstream 块中 zone 与 keepalive 指令的变化。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Stream 配置：TCP/UDP/TLS Passthrough",
+          "order": 4,
+          "filename": "u6-l4-stream-tcp-udp-config.md",
+          "level": "intermediate",
+          "topic": "讲解 stream 上下文的生成：TCPRoute/UDPRoute/TLSRoute（passthrough）对应的 stream server/upstream/map。",
+          "learning_goals": [
+            "理解 stream 上下文与 http 上下文的区别",
+            "掌握 L4 虚拟服务器与 stream upstream 的生成",
+            "了解 TLS passthrough（SNI）的处理"
+          ],
+          "source_files": [
+            "internal/controller/nginx/config/stream_servers.go",
+            "internal/controller/nginx/config/stream_servers_template.go",
+            "internal/controller/state/dataplane/configuration.go"
+          ],
+          "minimal_modules": [
+            "stream 上下文",
+            "L4 服务器生成",
+            "TLS passthrough"
+          ],
+          "practice_task": "为一个 TCPRoute 追踪它最终生成的 stream server 与 upstream 配置。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "数据面通信：通过 NGINX Agent 下发配置",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "NginxUpdater 与 gRPC Agent 通信",
+          "order": 1,
+          "filename": "u7-l1-nginx-agent-updater-and-grpc.md",
+          "level": "intermediate",
+          "topic": "讲解 NginxUpdater 接口与 agent.go，以及控制面侧 gRPC 服务（grpc/、connections、messenger）如何与数据面 Agent 通信。",
+          "learning_goals": [
+            "理解 NginxUpdater.UpdateConfig 的职责",
+            "掌握控制面 gRPC 服务与连接管理",
+            "了解 messenger 广播与 filewatcher 机制"
+          ],
+          "source_files": [
+            "internal/controller/nginx/agent/agent.go",
+            "internal/controller/nginx/agent/grpc/grpc.go",
+            "internal/controller/nginx/agent/grpc/connections.go"
+          ],
+          "minimal_modules": [
+            "NginxUpdater 接口",
+            "gRPC 服务与连接",
+            "消息广播"
+          ],
+          "practice_task": "梳理一次配置更新从 UpdateConfig 到 Agent 收到的完整 gRPC 调用链。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "配置文件下发与 Deployment 管理",
+          "order": 2,
+          "filename": "u7-l2-config-file-push-and-deployments.md",
+          "level": "intermediate",
+          "topic": "讲解配置文件如何按 Deployment 维度管理并推送到各数据面 Pod，以及命令（reload）服务。",
+          "learning_goals": [
+            "理解 DeploymentStore 如何按数据面 Deployment 组织文件",
+            "掌握文件传输（GetFile）流程",
+            "了解 reload/command 服务"
+          ],
+          "source_files": [
+            "internal/controller/nginx/agent/deployment.go",
+            "internal/controller/nginx/agent/file.go",
+            "internal/controller/nginx/agent/command.go"
+          ],
+          "minimal_modules": [
+            "Deployment 文件管理",
+            "文件传输流程",
+            "reload 命令"
+          ],
+          "practice_task": "解释当存在多个数据面 Pod 时，配置如何保证一致地应用到每个 Pod。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "状态、条件与策略 CRD",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Conditions 体系与状态更新",
+          "order": 1,
+          "filename": "u8-l1-conditions-and-status-updates.md",
+          "level": "intermediate",
+          "topic": "讲解条件（Conditions）的定义与含义，以及 status updater/queue 如何异步地把状态写回 Kubernetes 资源。",
+          "learning_goals": [
+            "掌握 Conditions 的标准集合与含义",
+            "理解 status.Queue 与 GroupUpdater 的异步更新",
+            "了解 leader-aware 的状态写入"
+          ],
+          "source_files": [
+            "internal/controller/state/conditions/conditions.go",
+            "internal/controller/status/updater.go",
+            "internal/controller/status/queue.go",
+            "internal/controller/status/leader_aware_group_updater.go"
+          ],
+          "minimal_modules": [
+            "Conditions 集合",
+            "状态队列与 GroupUpdater",
+            "leader 感知写入"
+          ],
+          "practice_task": "给定一个错误场景，判断应该给 Gateway/HTTPRoute 设置哪些 Conditions。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "自定义 CRD 与策略附着（Policy Attachment）",
+          "order": 2,
+          "filename": "u8-l2-crd-api-and-policy-attachment.md",
+          "level": "intermediate",
+          "topic": "讲解 apis 下的 NGF 自定义资源（NginxProxy、ClientSettingsPolicy 等）及其 Gateway API 策略附着模型，以及图中的策略解析。",
+          "learning_goals": [
+            "掌握 v1alpha1/v1alpha2 中的 CRD 类型与用途",
+            "理解 Direct/Inherited 策略附着模型",
+            "了解 graph/policies.go 如何解析与附着策略"
+          ],
+          "source_files": [
+            "apis/v1alpha1/register.go",
+            "apis/v1alpha2/nginxproxy_types.go",
+            "internal/controller/state/graph/policies.go",
+            "internal/controller/state/graph/nginxproxy.go"
+          ],
+          "minimal_modules": [
+            "CRD 类型概览",
+            "策略附着模型",
+            "图中策略解析"
+          ],
+          "practice_task": "为一个 HTTPRoute 附着一个 ClientSettingsPolicy，并追踪它在图中如何被解析。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "策略到 NGINX 指令的生成",
+          "order": 3,
+          "filename": "u8-l3-policy-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx/config/policies 下的策略生成器（复合生成器、各类 policy 生成器）如何把策略翻译成 NGINX 指令。",
+          "learning_goals": [
+            "掌握复合策略生成器的设计",
+            "理解 clientsettings/proxysettings/ratelimit 等如何生成指令",
+            "了解策略校验 validator 的作用"
+          ],
+          "source_files": [
+            "internal/controller/nginx/config/policies/generator.go",
+            "internal/controller/nginx/config/policies/validator.go",
+            "internal/controller/nginx/config/policies/ratelimit/generator.go",
+            "internal/controller/nginx/config/policies/clientsettings/generator.go"
+          ],
+          "minimal_modules": [
+            "复合策略生成器",
+            "各类策略生成",
+            "策略校验"
+          ],
+          "practice_task": "实现或扩展一个策略生成器，把一个策略字段翻译成对应的 NGINX 指令。",
+          "depends_on": [
+            "u6-l3",
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "Provisioner：按 Gateway 配置数据面",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Provisioner：为每个 Gateway 创建/回收 NGINX 资源",
+          "order": 1,
+          "filename": "u9-l1-provisioner.md",
+          "level": "intermediate",
+          "topic": "讲解 provisioner 如何根据 Gateway 资源动态创建/删除数据面 NGINX Deployment 等资源，及其事件循环与状态存储。",
+          "learning_goals": [
+            "理解 Provisioner 接口与 NginxProvisioner 的职责",
+            "掌握 provisioner eventloop 与 store",
+            "了解数据面资源生命周期与 Gateway 的绑定关系"
+          ],
+          "source_files": [
+            "internal/controller/provisioner/provisioner.go",
+            "internal/controller/provisioner/eventloop.go",
+            "internal/controller/provisioner/store.go"
+          ],
+          "minimal_modules": [
+            "Provisioner 接口",
+            "事件循环",
+            "资源状态存储"
+          ],
+          "practice_task": "说明创建一个新 Gateway 时，provisioner 会触发哪些数据面资源的创建。",
+          "depends_on": [
+            "u7-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "WAF（F5 App Protect）集成",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "WAFPolicy 与 Bundle 模型",
+          "order": 1,
+          "filename": "u10-l1-wafpolicy-and-bundles.md",
+          "level": "advanced",
+          "topic": "讲解 WAFPolicy CRD 的定义、WAF bundle 的来源（HTTP/NIM/N1C/PLM）以及 waf/v1 中 PLM 状态类型。",
+          "learning_goals": [
+            "掌握 WAFPolicy 的字段与 bundle 来源",
+            "理解 PLM 管理的 APPolicy/APLogConf 状态",
+            "了解 bundle 校验（checksum）与失败行为"
+          ],
+          "source_files": [
+            "apis/v1alpha1/wafpolicy_types.go",
+            "apis/waf/v1/types.go"
+          ],
+          "minimal_modules": [
+            "WAFPolicy 结构",
+            "bundle 来源",
+            "PLM 状态类型"
+          ],
+          "practice_task": "为 WAFPolicy 设计一个 bundle 来源选择，并说明每种来源的鉴权方式差异。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Bundle 拉取、轮询与下发",
+          "order": 2,
+          "filename": "u10-l2-waf-bundle-fetch-and-poller.md",
+          "level": "advanced",
+          "topic": "讲解 framework/waf 的 fetch（含 S3）与 poller：如何拉取、校验、周期轮询 bundle 并推送到数据面。",
+          "learning_goals": [
+            "掌握 Fetcher 接口与 HTTP/S3 拉取",
+            "理解 poller Manager 的生命周期与轮询",
+            "了解 bundle 变更如何触发重新配置"
+          ],
+          "source_files": [
+            "internal/framework/waf/fetch/fetch.go",
+            "internal/framework/waf/fetch/s3/s3.go",
+            "internal/framework/waf/poller/manager.go",
+            "internal/framework/waf/poller/poller.go"
+          ],
+          "minimal_modules": [
+            "Fetcher 接口",
+            "S3 拉取",
+            "poller 轮询管理"
+          ],
+          "practice_task": "梳理 bundle checksum 变化时，从 poller 到数据面 Pod 的完整通知链路。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "可观测性：指标、遥测与链路追踪",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "Prometheus 指标",
+          "order": 1,
+          "filename": "u11-l1-metrics-and-prometheus.md",
+          "level": "advanced",
+          "topic": "讲解 controller/metrics 的指标采集与暴露，包括事件批次处理耗时等控制器指标。",
+          "learning_goals": [
+            "掌握指标的注册与暴露方式",
+            "理解 ControllerCollector 采集的内容",
+            "了解 NginxProxy 中 metrics 端口配置"
+          ],
+          "source_files": [
+            "internal/controller/metrics/metrics.go",
+            "internal/controller/metrics/collectors/controller.go"
+          ],
+          "minimal_modules": [
+            "指标注册",
+            "ControllerCollector",
+            "metrics 端口配置"
+          ],
+          "practice_task": "找到事件批次处理耗时指标的定义，并用 PromQL 写一条告警思路。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "产品遥测（Telemetry）",
+          "order": 2,
+          "filename": "u11-l2-product-telemetry.md",
+          "level": "advanced",
+          "topic": "讲解 controller/telemetry 的数据采集、Avro schema（data.avdl）与导出，以及周期上报机制。",
+          "learning_goals": [
+            "理解 DataCollector 采集哪些集群/产品信息",
+            "掌握 data.avdl schema 与 Data 结构",
+            "了解 telemetry 周期上报与可关闭开关"
+          ],
+          "source_files": [
+            "internal/controller/telemetry/collector.go",
+            "internal/controller/telemetry/exporter.go",
+            "internal/controller/telemetry/data.avdl"
+          ],
+          "minimal_modules": [
+            "数据采集",
+            "Avro schema",
+            "周期上报"
+          ],
+          "practice_task": "列出 telemetry 上报的字段，并说明哪些可以通过 flag 关闭。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "OpenTelemetry 链路追踪",
+          "order": 3,
+          "filename": "u11-l3-tracing-and-opentelemetry.md",
+          "level": "advanced",
+          "topic": "讲解 ObservabilityPolicy 与 telemetry 模板如何生成 OpenTelemetry 配置，实现 HTTP/gRPC 路由的分布式追踪。",
+          "learning_goals": [
+            "掌握 ObservabilityPolicy 的 tracing 配置",
+            "理解 otel 模板生成与采样策略",
+            "了解 span 属性与上下文传播"
+          ],
+          "source_files": [
+            "apis/v1alpha2/observabilitypolicy_types.go",
+            "internal/controller/nginx/config/telemetry.go",
+            "internal/controller/nginx/config/telemetry_template.go"
+          ],
+          "minimal_modules": [
+            "ObservabilityPolicy",
+            "otel 模板",
+            "采样与传播"
+          ],
+          "practice_task": "为一个 HTTPRoute 启用追踪，并追踪 tracing 配置如何进入生成的 nginx 配置。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "高级特性：推理扩展、NGINX Plus、TLS 与 Snippets/认证",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "Gateway API 推理扩展（Inference）",
+          "order": 1,
+          "filename": "u12-l1-inference-extension.md",
+          "level": "advanced",
+          "topic": "讲解 endpoint-picker 子命令与 InferencePool 在图中的处理，理解 NGF 如何与 Gateway API Inference Extension 协作。",
+          "learning_goals": [
+            "掌握 endpoint-picker shim 服务器的作用",
+            "理解 InferencePool 在 graph 中的处理",
+            "了解 NGINX 与外部 EPP 的交互（ext proc 头）"
+          ],
+          "source_files": [
+            "cmd/gateway/endpoint_picker.go",
+            "internal/controller/state/graph/inferencepools.go"
+          ],
+          "minimal_modules": [
+            "endpoint-picker shim",
+            "InferencePool 图处理",
+            "EPP 头交互"
+          ],
+          "practice_task": "说明 endpoint-picker 如何把 NGINX 的请求转发给真正的 EndpointPicker 服务。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "NGINX Plus 能力：动态上游、授权与用量上报",
+          "order": 2,
+          "filename": "u12-l2-nginx-plus-features.md",
+          "level": "advanced",
+          "topic": "讲解 NGINX Plus 相对 OSS 的差异：动态 upstream 更新、Plus API/mgmt 配置、licensing 与 usage report。",
+          "learning_goals": [
+            "掌握 UpdateUpstreamServers 动态更新机制",
+            "理解 Plus mgmt/usage report 配置生成",
+            "了解 licensing deployment context 的收集"
+          ],
+          "source_files": [
+            "internal/controller/nginx/agent/agent.go",
+            "internal/controller/nginx/config/plus_api.go",
+            "internal/controller/nginx/config/main_config.go",
+            "internal/controller/licensing/collector.go"
+          ],
+          "minimal_modules": [
+            "动态 upstream",
+            "Plus mgmt/API",
+            "licensing 与用量"
+          ],
+          "practice_task": "对比 OSS 与 Plus 在 upstream 更新路径上的差异，说明 Plus 为何能不 reload。",
+          "depends_on": [
+            "u7-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "TLS 安全：前端证书、后端 TLS 与 Agent mTLS",
+          "order": 3,
+          "filename": "u12-l3-tls-and-certificates.md",
+          "level": "advanced",
+          "topic": "讲解前端 TLS 终止、BackendTLSPolicy（后端 mTLS/CA）、以及控制面↔数据面 Agent 的 mTLS 安全。",
+          "learning_goals": [
+            "掌握前端 TLS 证书对的处理",
+            "理解 BackendTLSPolicy 在图中的解析",
+            "了解 Agent mTLS 证书的生成与使用"
+          ],
+          "source_files": [
+            "internal/controller/state/graph/backend_tls_policy.go",
+            "internal/controller/state/dataplane/configuration.go",
+            "cmd/gateway/certs.go"
+          ],
+          "minimal_modules": [
+            "前端 TLS",
+            "BackendTLSPolicy",
+            "Agent mTLS"
+          ],
+          "practice_task": "为一个 HTTPS 后端配置 BackendTLSPolicy，并追踪 CA bundle 如何进入 NGINX 配置。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "SnippetsFilter 与认证过滤器",
+          "order": 4,
+          "filename": "u12-l4-snippets-and-authentication.md",
+          "level": "advanced",
+          "topic": "讲解 SnippetsFilter/SnippetsPolicy（注入 NGINX 配置片段）与 AuthenticationFilter（Basic/JWT/OIDC）两种扩展机制。",
+          "learning_goals": [
+            "掌握 snippets 的允许上下文与注入方式",
+            "理解认证过滤器的多种认证类型",
+            "了解这些扩展的安全约束与 Plus 依赖"
+          ],
+          "source_files": [
+            "internal/controller/state/graph/snippets_filter.go",
+            "internal/controller/state/graph/authentication_filter.go",
+            "apis/v1alpha1/snippetsfilter_types.go",
+            "apis/v1alpha1/authenticationfilter_types.go"
+          ],
+          "minimal_modules": [
+            "SnippetsFilter 注入",
+            "认证类型",
+            "安全约束"
+          ],
+          "practice_task": "为一个 HTTPRoute 通过 SnippetsFilter 注入一条自定义 NGINX 指令，并验证生效。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "测试、性能与二次开发",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "测试体系：单元、Fake 与集成测试",
+          "order": 1,
+          "filename": "u13-l1-testing-approach.md",
+          "level": "advanced",
+          "topic": "讲解 NGF 的测试方法：counterfeiter 生成的 fake、envtest 集成测试、conformance 测试的组织。",
+          "learning_goals": [
+            "掌握 controllerfakes/statefakes 等 fake 的生成与使用",
+            "理解 controller_suite_test 的 envtest 集成测试",
+            "了解 Gateway API conformance 测试入口"
+          ],
+          "source_files": [
+            "internal/controller/controller_suite_test.go",
+            "docs/developer/testing.md",
+            "tests/README.md"
+          ],
+          "minimal_modules": [
+            "fake 生成",
+            "envtest 集成测试",
+            "conformance 测试"
+          ],
+          "practice_task": "为一个新函数编写单元测试，并使用现有 fake 替换依赖。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "并发、性能与可靠性设计",
+          "order": 2,
+          "filename": "u13-l2-concurrency-and-performance.md",
+          "level": "advanced",
+          "topic": "从架构视角讲解 NGF 的并发与可靠性：事件双缓冲、leader 选举、冲突排序（ngfsort）、健康检查与就绪。",
+          "learning_goals": [
+            "理解事件双缓冲对吞吐与 reload 次数的影响",
+            "掌握 leader 选举对一致性的保障",
+            "了解 ngfsort 在冲突解析中的作用"
+          ],
+          "source_files": [
+            "internal/framework/events/loop.go",
+            "internal/controller/health.go",
+            "internal/controller/ngfsort/sort.go"
+          ],
+          "minimal_modules": [
+            "事件双缓冲",
+            "leader 选举",
+            "冲突排序"
+          ],
+          "practice_task": "分析一次资源高频变更场景下，双缓冲如何降低 NGINX reload 次数。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "二次开发：新增功能与扩展点",
+          "order": 3,
+          "filename": "u13-l3-extending-ngf.md",
+          "level": "advanced",
+          "topic": "结合开发文档，讲解如何为 NGF 新增一个功能（如新策略/新 CRD），贯穿 API→图→配置生成→测试的完整改动。",
+          "learning_goals": [
+            "掌握新增 CRD/策略的完整改动链路",
+            "理解 implementing-a-feature 的开发规范",
+            "了解代码生成（generate-all）与 PR 流程"
+          ],
+          "source_files": [
+            "docs/developer/implementing-a-feature.md",
+            "internal/controller/nginx/config/policies/generator.go",
+            "internal/controller/state/graph/policies.go"
+          ],
+          "minimal_modules": [
+            "功能开发链路",
+            "代码生成",
+            "PR 流程"
+          ],
+          "practice_task": "设计一个新的简单策略 CRD，列出从 API 定义到配置生成需要改动的文件清单。",
+          "depends_on": [
+            "u8-l3",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

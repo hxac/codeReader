@@ -1,0 +1,1030 @@
+{
+  "project": "mupdf",
+  "head": "39101dd8179599d5b9653e7a33f157c08e5614eb",
+  "rationale": "MuPDF 是一个用 C 编写的大型多格式文档处理库（PDF/XPS/EPUB/图片等），核心由 fitz 通用层和 pdf 等格式专用层组成，因此学习路线按「先宏观后微观、先通用后专用」的顺序设计。第一单元从零起步，让读者看懂项目定位、构建方式、目录与入口，并亲手跑通第一个渲染程序（example.c）。第二、三单元夯实 fitz 基础：context/内存/异常 是一切调用的前提，document 抽象与多格式 handler 是理解「同一套 API 处理多种格式」的关键。第四、五单元进入渲染与文本主链路：device 显示设备模型 → 显示列表 → draw device/pixmap → mudraw 实战，再到字体、结构化文本与搜索。第六单元讲导出/转换（document writer 与多格式 output），是从「读」到「写」的跃迁。第七、八、九单元面向专家层，深入 PDF 对象模型与 xref、流与压缩过滤管线、store 缓存与多线程渲染等性能与并发机制。第十单元讲扩展点：表单/标注/JS 交互、自定义 device、新增格式/输出 handler。讲义之间以 depends_on 串成由浅入深的依赖链，单元划分对应 beginner/intermediate/advanced 三层目标。由于现有 manifest 为空（首次生成），所有讲义 action 均为 new。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零认识 MuPDF",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "MuPDF 是什么：项目定位与支持格式",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 MuPDF 的定位、它能处理的文档格式（PDF/XPS/EPUB/图片等）、许可证模式以及它在文档处理生态中的角色。",
+          "learning_goals": [
+            "说出 MuPDF 的核心定位（查看/转换/操作多格式文档的轻量级框架）",
+            "列举 MuPDF 支持的主要输入与输出格式",
+            "理解 AGPL 许可证与商业授权的区别"
+          ],
+          "source_files": [
+            "README",
+            "docs/guide/what-is-mupdf.md",
+            "COPYING"
+          ],
+          "minimal_modules": [
+            "项目简介与定位",
+            "支持格式清单",
+            "许可证与授权"
+          ],
+          "practice_task": "阅读 README 与 what-is-mupdf.md，用自己的话写一段不超过 200 字的项目简介，并整理一张「支持格式 → 对应 reader 模块」的对照表（参考 source/ 下的 pdf/xps/html/cbz 等目录）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统：如何编译 MuPDF",
+          "order": 2,
+          "filename": "u1-l2-build-system.md",
+          "level": "beginner",
+          "topic": "讲解 MuPDF 基于 Make 的构建体系：顶层 Makefile、Makerules、Makelists、Makethird 的分工，以及 thirdparty 子模块（freetype、harfbuzz、mujs 等）如何被纳入编译。",
+          "learning_goals": [
+            "理解 Makefile / Makerules / Makelists / Makethird 各自的职责",
+            "掌握常用的构建目标：libs、apps、tools、examples、install",
+            "理解 thirdparty 子模块的作用与可选依赖的开关"
+          ],
+          "source_files": [
+            "Makefile",
+            "Makerules",
+            "Makelists",
+            "Makethird",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "Makefile 顶层目标",
+            "第三方库集成（Makethird）",
+            "子模块清单"
+          ],
+          "practice_task": "执行 make help 或阅读 Makefile 列出 apps/libs/tools/examples 等目标，然后运行 make 以编译出库与命令行工具，记录最终生成的库文件与可执行文件路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录与模块布局",
+          "order": 3,
+          "filename": "u1-l3-directory-layout.md",
+          "level": "beginner",
+          "topic": "带领读者熟悉顶层目录与源码结构：include/ 公共头文件、source/ 各格式实现、platform/ 平台 viewer、thirdparty/ 依赖、docs/ 文档。",
+          "learning_goals": [
+            "区分 include/mupdf/fitz（通用层）与 include/mupdf/pdf（PDF 专用层）",
+            "理解 source/ 下 fitz/pdf/xps/html/cbz/tools 各子目录的职责",
+            "认识 platform/ 下 gl/x11/win32/wasm/java 等平台 viewer 的存在"
+          ],
+          "source_files": [
+            "README",
+            "include/mupdf/fitz.h",
+            "docs/guide/what-is-mupdf.md"
+          ],
+          "minimal_modules": [
+            "顶层目录概览",
+            "fitz 与 pdf 头文件分层",
+            "平台与第三方目录"
+          ],
+          "practice_task": "绘制一张源码目录树（至少覆盖 include/mupdf、source/fitz、source/pdf、source/tools、platform），并为每个关键目录写一句话说明其用途。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "命令行瑞士军刀 mutool",
+          "order": 4,
+          "filename": "u1-l4-mutool-cli.md",
+          "level": "beginner",
+          "topic": "解析 mutool.c 的子命令分发表，理解 mutool 如何把 draw/convert/show/clean/merge/extract 等子命令路由到各自的 _main 函数。",
+          "learning_goals": [
+            "理解 mutool 的命令分发表 tools[] 结构与名字匹配逻辑",
+            "知道 mutool 提供哪些常用子命令及其用途",
+            "理解 FZ_ENABLE_* 宏如何按需裁剪可用子命令"
+          ],
+          "source_files": [
+            "source/tools/mutool.c"
+          ],
+          "minimal_modules": [
+            "tools[] 分发表",
+            "argv 名字匹配",
+            "条件编译裁剪"
+          ],
+          "practice_task": "运行 ./build/debug/mutool 查看用法清单，再挑选 draw 子命令渲染一个示例文档的第一页为 PNG，验证分发逻辑生效。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "第一个渲染程序：跑通 example.c",
+          "order": 5,
+          "filename": "u1-l5-first-render.md",
+          "level": "beginner",
+          "topic": "通过官方示例 example.c 串起最基础的渲染链路：创建 context、注册 handler、打开文档、计算变换矩阵、渲染为 pixmap 并输出 PPM。",
+          "learning_goals": [
+            "掌握 fz_new_context / fz_register_document_handlers / fz_open_document 的标准三步",
+            "理解 zoom/rotate 如何通过 fz_scale / fz_pre_rotate 组成 ctm",
+            "学会用 fz_new_pixmap_from_page_number 渲染单页并正确释放资源"
+          ],
+          "source_files": [
+            "docs/examples/example.c",
+            "include/mupdf/fitz/document.h"
+          ],
+          "minimal_modules": [
+            "context 创建与 handler 注册",
+            "打开文档与页数",
+            "矩阵与 pixmap 渲染"
+          ],
+          "practice_task": "编译并运行 example.c（make examples），把任意 PDF 第一页渲染成 PPM；然后修改代码，把渲染目标改为第 3 页、缩放 150%、旋转 90 度。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "fitz 核心基石：上下文、内存与异常",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "fz_context：一切调用的入口",
+          "order": 1,
+          "filename": "u2-l1-context.md",
+          "level": "beginner",
+          "topic": "深入 fz_context 的角色：它持有异常栈、各类子上下文（font/color/store 等）与全局缓存，是几乎所有 fitz 函数的第一个参数。",
+          "learning_goals": [
+            "理解 fz_context 承载了哪些子上下文与缓存",
+            "掌握 fz_new_context 的参数（alloc/locks/store 大小）",
+            "理解为什么几乎所有 fitz 调用都需要传入 ctx"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/context.h",
+            "source/fitz/context.c"
+          ],
+          "minimal_modules": [
+            "context 结构与子上下文",
+            "fz_new_context 参数",
+            "context 的生命周期"
+          ],
+          "practice_task": "阅读 context.h 中 fz_context 的前向声明与 fz_new_context 文档，写一个小程序创建一个 store 上限为 256MB 的 context 并打印其指针，最后正确 fz_drop_context。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "内存管理与引用计数",
+          "order": 2,
+          "filename": "u2-l2-memory-refcount.md",
+          "level": "beginner",
+          "topic": "讲解 MuPDF 的内存分配器接口与 keep/drop 引用计数约定，以及 fz_storable 可存储对象的通用引用计数基础设施。",
+          "learning_goals": [
+            "理解 fz_alloc_context 自定义分配器回调",
+            "掌握 fz_keep_*/fz_drop_* 的引用计数配对规则",
+            "认识 fz_storable 与 fz_keep_storable/fz_drop_storable 的通用机制"
+          ],
+          "source_files": [
+            "source/fitz/memory.c",
+            "include/mupdf/fitz/store.h",
+            "include/mupdf/fitz/system.h"
+          ],
+          "minimal_modules": [
+            "分配器回调接口",
+            "keep/drop 引用计数",
+            "可存储对象 storable"
+          ],
+          "practice_task": "实现一个简单的自定义 fz_alloc_context（包装 malloc 并统计分配次数），用它创建 context，渲染一页后释放，打印总分配次数以验证内存被正确归还。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "异常处理：fz_try / fz_catch",
+          "order": 3,
+          "filename": "u2-l3-exceptions.md",
+          "level": "intermediate",
+          "topic": "揭示基于 setjmp/longjmp 的异常宏 fz_try/fz_always/fz_catch 的工作原理，以及 fz_throw、fz_report_error 如何抛出与报告错误。",
+          "learning_goals": [
+            "理解 fz_try/fz_catch 基于 setjmp/longjmp 的实现",
+            "掌握 fz_var 防止局部变量在跳转后丢失的用法",
+            "学会用 fz_report_error 读取并输出异常信息"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/context.h",
+            "source/fitz/error.c"
+          ],
+          "minimal_modules": [
+            "异常宏的实现",
+            "fz_var 的必要性",
+            "抛出与报告错误"
+          ],
+          "practice_task": "在 fz_try 块中故意打开一个不存在的文件触发异常，在 fz_catch 中用 fz_report_error 输出错误并安全清理资源；再尝试省略 fz_var 观察变量值丢失问题。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "文档抽象：打开、识别与浏览",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "fz_document 与 fz_page 抽象",
+          "order": 1,
+          "filename": "u3-l1-document-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解统一文档接口 fz_document/fz_page：如何打开、计数页数、加载单页、获取边界与运行页面内容，使不同格式共用同一套 API。",
+          "learning_goals": [
+            "掌握 fz_open_document / fz_count_pages / fz_load_page 的标准流程",
+            "理解 fz_page 如何承载页面边界与运行入口",
+            "认识文档接口对多种格式的统一抽象"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/document.h",
+            "source/fitz/document.c"
+          ],
+          "minimal_modules": [
+            "fz_document 接口",
+            "fz_page 接口",
+            "统一打开/计数/加载流程"
+          ],
+          "practice_task": "用 fz_open_document 打开一个 PDF 和一个 EPUB，分别调用 fz_count_pages 与 fz_load_page 打印页数与首页边界矩形，体会同一套 API 作用于不同格式。",
+          "depends_on": [
+            "u1-l5",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "文档处理器与格式识别",
+          "order": 2,
+          "filename": "u3-l2-document-handlers.md",
+          "level": "intermediate",
+          "topic": "解析 document-all.c 的处理器注册表，理解每种格式如何通过 fz_document_handler 暴露 open/recognize 回调，以及按 magic 与内容识别的机制。",
+          "learning_goals": [
+            "理解 fz_register_document_handlers 注册了哪些格式处理器",
+            "认识 fz_document_handler 的回调集合（open/recognize/needs_password 等）",
+            "掌握按扩展名(magic)与按内容识别文档的两条路径"
+          ],
+          "source_files": [
+            "source/fitz/document-all.c",
+            "include/mupdf/fitz/document.h"
+          ],
+          "minimal_modules": [
+            "处理器注册表",
+            "handler 回调集合",
+            "magic 与内容识别"
+          ],
+          "practice_task": "在 document-all.c 中追踪 PDF 处理器的注册，编写代码只注册 pdf_document_handler，然后用一个 XPS 文件尝试 fz_open_document，观察识别失败的行为。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "坐标、矩阵与页面几何",
+          "order": 3,
+          "filename": "u3-l3-geometry-matrix.md",
+          "level": "intermediate",
+          "topic": "讲解 fitz 的几何基础：fz_matrix 仿射变换、fz_rect/fz_irect、以及缩放/旋转/平移如何组合成渲染用的 ctm。",
+          "learning_goals": [
+            "理解 fz_matrix 的仿射变换语义与组合顺序",
+            "掌握 fz_scale / fz_pre_rotate / fz_translate 的用法",
+            "区分 fz_rect（浮点）与 fz_irect（整数像素）及它们的用途"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/geometry.h",
+            "docs/examples/example.c"
+          ],
+          "minimal_modules": [
+            "fz_matrix 仿射变换",
+            "缩放/旋转组合",
+            "rect 与 irect"
+          ],
+          "practice_task": "给定一个页面，构造一个「先放大 2 倍再旋转 45 度」的矩阵并渲染，再交换组合顺序渲染，对比两幅图差异，理解矩阵乘法顺序的影响。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "密码、加密与文档元数据",
+          "order": 4,
+          "filename": "u3-l4-password-metadata.md",
+          "level": "intermediate",
+          "topic": "介绍加密文档的处理：fz_needs_password/fz_authenticate_password 的鉴权流程，以及 fz_lookup_metadata 读取标题、作者、格式等信息。",
+          "learning_goals": [
+            "掌握加密文档的 needs_password / authenticate_password 鉴权流程",
+            "学会用 fz_lookup_metadata 读取文档元数据键值",
+            "理解鉴权失败时的返回值与处理方式"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/document.h",
+            "source/fitz/document.c"
+          ],
+          "minimal_modules": [
+            "密码鉴权流程",
+            "元数据读取",
+            "鉴权返回值"
+          ],
+          "practice_task": "打开一个带密码的 PDF，先用 fz_needs_password 判断，再分别用错误密码与正确密码调用 fz_authenticate_password，打印两次返回值并据此决定是否继续渲染。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "设备模型与渲染管线",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "fz_device：显示设备抽象",
+          "order": 1,
+          "filename": "u4-l1-device-model.md",
+          "level": "intermediate",
+          "topic": "深入 device.h 的设备虚表：fill_path/fill_text/clip 等回调如何把页面内容流「翻译」到不同后端，以及 fz_run_page 如何驱动设备。",
+          "learning_goals": [
+            "理解 fz_device 作为绘图指令接收者的抽象与虚表结构",
+            "掌握 fill_path / fill_text / clip_path 等核心回调",
+            "认识 fz_run_page 如何把页面内容驱动到一个设备"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/device.h",
+            "source/fitz/device.c"
+          ],
+          "minimal_modules": [
+            "device 虚表结构",
+            "核心绘图回调",
+            "fz_run_page 驱动"
+          ],
+          "practice_task": "阅读 device.h 中 struct fz_device 的函数指针表，列出至少 6 个绘图回调，并解释每个回调在「画一个红色矩形」时可能被调用的情况。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "显示列表：录制与回放",
+          "order": 2,
+          "filename": "u4-l2-display-list.md",
+          "level": "intermediate",
+          "topic": "讲解显示列表机制：用 fz_new_display_list + fz_new_list_device 录制页面指令，再用 fz_run_display_list 一次或多次回放到任意设备。",
+          "learning_goals": [
+            "理解显示列表「录制一次、多次回放」的价值",
+            "掌握 fz_new_display_list / fz_new_list_device / fz_run_display_list 的三步流程",
+            "认识显示列表在缩放渲染与后台打印中的作用"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/display-list.h",
+            "source/fitz/list-device.c"
+          ],
+          "minimal_modules": [
+            "显示列表创建",
+            "list device 录制",
+            "run_display_list 回放"
+          ],
+          "practice_task": "把一页内容录制进显示列表，然后分别以 100%、200%、400% 三种缩放回放到同一个 draw device，体会一次录制多次渲染的性能优势。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "draw device 与 pixmap 位图渲染",
+          "order": 3,
+          "filename": "u4-l3-draw-device-pixmap.md",
+          "level": "intermediate",
+          "topic": "解析位图渲染后端：fz_new_draw_device 如何把设备指令光栅化进 fz_pixmap，pixmap 的 samples/stride/n 字段含义，以及颜色空间选择。",
+          "learning_goals": [
+            "理解 fz_new_draw_device 将矢量指令光栅化为像素的过程",
+            "掌握 fz_pixmap 的 samples/stride/w/h/n 内存布局",
+            "认识颜色空间（RGB/GRAY/CMYK）对 pixmap 通道数的影响"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/pixmap.h",
+            "source/fitz/draw-device.c"
+          ],
+          "minimal_modules": [
+            "draw device 光栅化",
+            "pixmap 内存布局",
+            "颜色空间与通道"
+          ],
+          "practice_task": "用 fz_new_draw_device 渲染一页到 RGB pixmap，手动遍历 pix->samples 按 stride/n 读取像素，计算并打印图像的平均亮度，验证对 pixmap 内存的理解。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "mudraw：渲染管线的集大成者",
+          "order": 4,
+          "filename": "u4-l4-mudraw-pipeline.md",
+          "level": "intermediate",
+          "topic": "以 mudraw.c 为主线，把 context、document、display-list、draw device、stext 串成完整的「打开→渲染→输出」工程级管线。",
+          "learning_goals": [
+            "理解 mudraw 如何解析选项并组织渲染主循环",
+            "掌握显示列表与 cookie 在渲染进度/中断中的应用",
+            "认识 mudraw 中多分辨率、proof 色空间等进阶选项的接入点"
+          ],
+          "source_files": [
+            "source/tools/mudraw.c",
+            "docs/examples/example.c"
+          ],
+          "minimal_modules": [
+            "选项解析与主循环",
+            "display-list + cookie",
+            "进阶渲染选项"
+          ],
+          "practice_task": "在 mudraw.c 中定位 fz_run_page 与 fz_new_display_list 的调用位置，绘制一张「文件输入 → 显示列表录制 → draw device 回放 → pixmap 输出」的调用流程图。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "字体、文本与搜索",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "字体加载与字形缓存",
+          "order": 1,
+          "filename": "u5-l1-fonts-glyphs.md",
+          "level": "intermediate",
+          "topic": "讲解字体子系统：fz_font 的加载、freetype/harfbuzz 的集成，以及 glyph cache 如何缓存已渲染字形以加速文本绘制。",
+          "learning_goals": [
+            "理解 fz_font 如何封装底层字体（freetype）与整形（harfbuzz）",
+            "认识字形缓存（glyph cache）避免重复光栅化字形的作用",
+            "了解内置字体（如 Noto/URW 基础 14 字体）的提供方式"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/font.h",
+            "source/fitz/font.c",
+            "include/mupdf/fitz/glyph-cache.h"
+          ],
+          "minimal_modules": [
+            "fz_font 封装",
+            "字形缓存",
+            "内置字体提供"
+          ],
+          "practice_task": "用 fz_new_font_from_name 加载一个系统字体，渲染一段含重复字符的文本到一个 draw device，对比开启与禁用字形缓存（通过 store 上限间接影响）下的渲染时间。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "结构化文本与 stext 设备",
+          "order": 2,
+          "filename": "u5-l2-structured-text.md",
+          "level": "intermediate",
+          "topic": "介绍结构化文本（stext）：通过 fz_new_stext_device 把页面文本抽取为带坐标的 fz_stext_page，支持文本导出（text/html/xml/json）。",
+          "learning_goals": [
+            "理解 stext 设备如何把绘制指令还原成带位置的文字块",
+            "掌握 fz_new_stext_page / fz_new_stext_device 的抽取流程",
+            "认识 stext 的多种导出格式（text/html/xml/json）"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/structured-text.h",
+            "source/fitz/stext-device.c"
+          ],
+          "minimal_modules": [
+            "stext 设备抽取",
+            "fz_stext_page 结构",
+            "多格式文本导出"
+          ],
+          "practice_task": "用 stext 设备抽取一页文本，分别用 fz_print_stext_page_as_text 与 fz_print_stext_page_as_html 输出，对比纯文本与带坐标结构的结果。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "全文搜索：mugrep 与 stext 搜索",
+          "order": 3,
+          "filename": "u5-l3-text-search.md",
+          "level": "intermediate",
+          "topic": "讲解基于 stext 的搜索：fz_search_stext_page 如何在结构化文本上定位关键词并返回命中四边形（fz_quad），以及 mugrep 工具的实现。",
+          "learning_goals": [
+            "理解 stext 搜索如何返回带坐标的命中区域 fz_quad",
+            "掌握 fz_search_stext_page 的输入输出与命中标记",
+            "认识 mugrep 工具如何跨页/跨文档组织搜索"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/structured-text.h",
+            "source/tools/mugrep.c"
+          ],
+          "minimal_modules": [
+            "stext 搜索接口",
+            "命中四边形 fz_quad",
+            "mugrep 跨页搜索"
+          ],
+          "practice_task": "对一份多页 PDF 用 fz_search_stext_page 搜索一个关键词，打印每个命中所在的页码与四边形坐标，验证搜索结果的定位准确性。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "导出与格式转换",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "document writer：导出抽象",
+          "order": 1,
+          "filename": "u6-l1-document-writer.md",
+          "level": "intermediate",
+          "topic": "讲解文档写入器抽象：fz_new_document_writer 按格式/路径创建写入器，begin_page/run_page/end_page/close 构成多页写入循环。",
+          "learning_goals": [
+            "理解 document writer 作为「反向 device」的导出抽象",
+            "掌握 fz_new_document_writer + begin/end_page 的多页写入循环",
+            "认识写入器支持的格式派生（pdf/svg/text/docx/ps 等）"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/writer.h",
+            "source/fitz/writer.c"
+          ],
+          "minimal_modules": [
+            "写入器抽象",
+            "begin/end_page 循环",
+            "格式派生"
+          ],
+          "practice_task": "用 fz_new_document_writer 以 svg 格式打开一个输出文件，循环 begin_page/run_page/end_page 把输入 PDF 的前 3 页导出为 SVG。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "muconvert：文档格式转换",
+          "order": 2,
+          "filename": "u6-l2-muconvert.md",
+          "level": "intermediate",
+          "topic": "以 muconvert.c 为例，展示「读入任意格式 → 逐页 run_page → 写入目标格式」的转换范式，它是 reader 与 writer 的组合应用。",
+          "learning_goals": [
+            "理解 muconvert 的转换主循环：加载源页 → 写入器 begin/run/end",
+            "掌握跨格式转换（如 PDF→CBZ、XPS→PDF）的通用模式",
+            "认识转换中选项字符串如何传递给写入器"
+          ],
+          "source_files": [
+            "source/tools/muconvert.c",
+            "source/tools/mudraw.c"
+          ],
+          "minimal_modules": [
+            "转换主循环",
+            "跨格式通用模式",
+            "写入器选项传递"
+          ],
+          "practice_task": "运行 mutool convert 把一个 XPS 或 EPUB 文档转换为 PDF，阅读 muconvert.c 找到调用 fz_new_document_writer 与 run_page 的位置，理解转换链路。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "多格式输出后端",
+          "order": 3,
+          "filename": "u6-l3-output-backends.md",
+          "level": "advanced",
+          "topic": "对比各类输出后端实现差异：矢量输出（SVG）、打印语言（PS）、光栅打包（CBZ/PWG）、富文本（docx），以及 PDF 写入器 pdf-write.c 的角色。",
+          "learning_goals": [
+            "区分矢量/打印/光栅/富文本四类输出后端的实现取向",
+            "理解 output-svg.c / output-ps.c / output-docx.c 的共同结构",
+            "认识 PDF 写入器作为可被其他后端或工具复用的写回能力"
+          ],
+          "source_files": [
+            "source/fitz/output-svg.c",
+            "source/fitz/output-ps.c",
+            "source/fitz/output-docx.c",
+            "source/pdf/pdf-write.c"
+          ],
+          "minimal_modules": [
+            "矢量输出（SVG）",
+            "打印语言（PS）",
+            "PDF 写回"
+          ],
+          "practice_task": "选两个输出后端（如 SVG 与 docx），比较它们 begin_page/end_page 回调的实现差异，总结「矢量型」与「富文本型」后端在记录内容时的不同取舍。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "PDF 对象模型深入",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "pdf_obj：PDF 对象类型系统",
+          "order": 1,
+          "filename": "u7-l1-pdf-object-model.md",
+          "level": "advanced",
+          "topic": "剖析 PDF 的基础对象模型 pdf_obj：null/int/real/string/name/array/dict/indirect 七种类型，以及字典/数组的取值与类型化访问函数。",
+          "learning_goals": [
+            "理解 pdf_obj 的七种基本类型及其判断函数",
+            "掌握 pdf_dict_get/pdf_array_get 及其类型化变体（get_int/get_real/get_text_string 等）",
+            "认识可继承属性 dict_get_inheritable 的语义"
+          ],
+          "source_files": [
+            "include/mupdf/pdf/object.h",
+            "source/pdf/pdf-object.c"
+          ],
+          "minimal_modules": [
+            "七种对象类型",
+            "字典/数组访问",
+            "类型化取值与继承"
+          ],
+          "practice_task": "打开一个 PDF，取其根目录（Catalog）的 Pages 字典，用 pdf_dict_get_inheritable 读取某页的 MediaBox 并解析为 fz_rect，验证对对象模型的掌握。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "xref 交叉引用表与间接对象解析",
+          "order": 2,
+          "filename": "u7-l2-pdf-xref.md",
+          "level": "advanced",
+          "topic": "讲解 PDF 的 xref 表如何定位对象、pdf_resolve_indirect 如何透明解引用间接引用，以及对象缓存与懒加载机制。",
+          "learning_goals": [
+            "理解 xref 交叉引用表如何把对象编号映射到文件偏移",
+            "掌握 pdf_resolve_indirect 对间接引用的透明解引用",
+            "认识对象缓存与按需懒加载的设计"
+          ],
+          "source_files": [
+            "include/mupdf/pdf/xref.h",
+            "source/pdf/pdf-xref.c"
+          ],
+          "minimal_modules": [
+            "xref 表结构",
+            "间接对象解引用",
+            "对象缓存与懒加载"
+          ],
+          "practice_task": "用 pdfshow 或自行调用 pdf_resolve_indirect 追踪一个间接引用（如 Catalog）两次，理解为何重复解引用不会重复读盘，并说明缓存的作用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "词法分析、解析与文件写入",
+          "order": 3,
+          "filename": "u7-l3-pdf-lex-parse-write.md",
+          "level": "advanced",
+          "topic": "串起 PDF 的文本处理链路：pdf-lex.c 的词法分析、pdf-parse.c 的语法解析，以及 pdf-write.c 如何把对象树重新序列化为合法 PDF 文件。",
+          "learning_goals": [
+            "理解 PDF 词法分析器如何切分 token（名字/数字/字符串/分隔符）",
+            "掌握解析器如何把 token 流组装成对象树",
+            "认识 pdf-write.c 在重写文件时的对象去重/压缩/线性化等能力"
+          ],
+          "source_files": [
+            "include/mupdf/pdf/parse.h",
+            "source/pdf/pdf-lex.c",
+            "source/pdf/pdf-parse.c",
+            "source/pdf/pdf-write.c"
+          ],
+          "minimal_modules": [
+            "词法分析",
+            "语法解析",
+            "文件重写"
+          ],
+          "practice_task": "用 mutool clean 处理一个 PDF（内部走 pdf-write.c 重写），对比清理前后文件大小与对象数量，理解写入器对流的压缩与对象整理效果。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "资源、页面与内容流解释",
+          "order": 4,
+          "filename": "u7-l4-resources-content-stream.md",
+          "level": "advanced",
+          "topic": "讲解 PDF 渲染的内部链路：资源字典（字体/图片/颜色空间）、页面对象、以及 pdf-op-run.c 如何解释内容流操作符并调用 device 回调。",
+          "learning_goals": [
+            "理解页面资源字典的组织（Font/XObject/ColorSpace 等）",
+            "掌握 pdf-op-run.c 解释内容流操作符并驱动 device 的过程",
+            "认识内容流操作符（如 m/l/re/Tj）到 device 回调的映射"
+          ],
+          "source_files": [
+            "include/mupdf/pdf/page.h",
+            "source/pdf/pdf-resources.c",
+            "source/pdf/pdf-op-run.c"
+          ],
+          "minimal_modules": [
+            "资源字典",
+            "页面对象",
+            "内容流解释"
+          ],
+          "practice_task": "在 pdf-op-run.c 中定位处理矩形（re）与显示文本（Tj）操作符的函数，写一段说明：一个 PDF 中「画矩形 + 输出文字」的指令是如何被解释为 device 的 fill_path/fill_text 调用的。",
+          "depends_on": [
+            "u4-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "流、过滤与压缩",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "流与过滤管线",
+          "order": 1,
+          "filename": "u8-l1-stream-filter-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 fz_stream 抽象与过滤管线：如何把底层字节流串联多个 filter（解压、解码、预测）得到最终数据，stream-open.c 的打开与读取流程。",
+          "learning_goals": [
+            "理解 fz_stream 作为可串联的输入流抽象",
+            "掌握 filter 管线如何链式处理（解压→解码→预测）",
+            "认识 stream-open.c 中流的打开与按需读取机制"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/stream.h",
+            "include/mupdf/fitz/filter.h",
+            "source/fitz/stream-open.c"
+          ],
+          "minimal_modules": [
+            "fz_stream 抽象",
+            "filter 链式串联",
+            "流打开与读取"
+          ],
+          "practice_task": "追踪一个被 FlateDecode + ASCIIHexDecode 双重编码的 PDF 流，说明 filter 管线如何先做 hex 解码再做 zlib 解压，最终得到原始内容。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "压缩编解码器",
+          "order": 2,
+          "filename": "u8-l2-compression-codecs.md",
+          "level": "advanced",
+          "topic": "对比各类压缩/编码 filter 的实现：Flate(zlib)、DCT(JPEG)、JBIG2、JPX、CCITT/传真等，以及它们在第三方库之上的封装方式。",
+          "learning_goals": [
+            "认识 MuPDF 支持的主要压缩编解码（Flate/DCT/JBIG2/JPX/CCITT）",
+            "理解各 filter 如何封装对应的第三方库（zlib/libjpeg/openjpeg 等）",
+            "掌握按 filter 名称定位编解码实现的思路"
+          ],
+          "source_files": [
+            "source/fitz/filter-flate.c",
+            "source/fitz/filter-dct.c",
+            "source/fitz/filter-basic.c"
+          ],
+          "minimal_modules": [
+            "Flate(zlib)",
+            "DCT(JPEG)",
+            "基础编码（hex/ascii85 等）"
+          ],
+          "practice_task": "选 Flate 与 DCT 两个 filter，阅读其 open/read 实现，总结「封装第三方解码库」时的统一接口模式（如何把库的流式 API 适配成 fz_filter）。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "性能、缓存与并发",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "store：对象缓存与清理",
+          "order": 1,
+          "filename": "u9-l1-store-cache.md",
+          "level": "advanced",
+          "topic": "深入 fz_store 缓存：它如何按 key 缓存可复用对象（字形/图像/字体），store 上限触发 scavenging 回收，以及 keep/drop 与缓存的协作。",
+          "learning_goals": [
+            "理解 fz_store 作为跨文档/跨页面对象缓存的作用",
+            "掌握 fz_store_item 存入与按 key 查找的机制",
+            "认识 store 达到上限时的 scavenging 回收策略"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/store.h",
+            "source/fitz/store.c"
+          ],
+          "minimal_modules": [
+            "store 缓存结构",
+            "store_item 存取",
+            "scavenging 回收"
+          ],
+          "practice_task": "分别用 FZ_STORE_UNLIMITED 与较小上限（如 16MB）创建 context，反复渲染同一页多次，观察并解释渲染耗时差异，体会缓存命中的影响。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "多线程渲染",
+          "order": 2,
+          "filename": "u9-l2-multithreading.md",
+          "level": "advanced",
+          "topic": "讲解 MuPDF 的线程模型：通过 fz_clone_context 为每个工作线程克隆上下文、自定义锁函数，以及 multi-threaded.c 中「主线程读页 + 多线程渲染」的模式。",
+          "learning_goals": [
+            "理解为什么多线程需要 fz_clone_context 与锁函数（locks）",
+            "掌握 multi-threaded.c 中主线程分配页、工作线程渲染的协作模式",
+            "认识 context 共享 store 但各自维护异常栈的设计"
+          ],
+          "source_files": [
+            "docs/examples/multi-threaded.c",
+            "include/mupdf/fitz/context.h"
+          ],
+          "minimal_modules": [
+            "clone_context 与锁",
+            "主/工作线程分工",
+            "共享 store 设计"
+          ],
+          "practice_task": "基于 multi-threaded.c，将渲染线程数改为 4，渲染一个多页 PDF，统计总耗时并与单线程版本对比，验证多线程加速效果与正确性。",
+          "depends_on": [
+            "u9-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "分带渲染与渐进输出",
+          "order": 3,
+          "filename": "u9-l3-banded-rendering.md",
+          "level": "advanced",
+          "topic": "讲解分带（banded）渲染：把大页拆成若干水平条带分别渲染以控制内存峰值，band-writer 如何把条带流式写入打印机/输出格式。",
+          "learning_goals": [
+            "理解分带渲染如何降低大图渲染的内存峰值",
+            "掌握 band-writer 把条带流式写入输出的机制",
+            "认识 mudraw 中按 band 分配 pixmap 并多线程渲染的接入点"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/band-writer.h",
+            "source/tools/mudraw.c"
+          ],
+          "minimal_modules": [
+            "分带渲染策略",
+            "band-writer 流式输出",
+            "mudraw 分带接入"
+          ],
+          "practice_task": "在 mudraw.c 中找到按 band 创建 pixmap 与分配工作线程的代码段，用大分辨率（如 300dpi）渲染整页，对比整页渲染与分带渲染的峰值内存（可用 -m 限制 store 间接观察）。",
+          "depends_on": [
+            "u4-l4",
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "交互、扩展与二次开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "表单、标注与 JavaScript 交互",
+          "order": 1,
+          "filename": "u10-l1-forms-annot-js.md",
+          "level": "advanced",
+          "topic": "讲解 PDF 的交互能力：AcroForm 表单（pdf-form.c）、标注（pdf-annot.c）、以及通过 mujs 集成的 JavaScript（pdf-js.c）与 murun 工具。",
+          "learning_goals": [
+            "理解 AcroForm 表单字段的获取与填充流程",
+            "认识标注（annotation）的创建与外观生成",
+            "了解 PDF JavaScript 经 mujs 解释执行与 murun 的关系"
+          ],
+          "source_files": [
+            "include/mupdf/pdf/form.h",
+            "include/mupdf/pdf/annot.h",
+            "source/pdf/pdf-form.c",
+            "source/pdf/pdf-js.c"
+          ],
+          "minimal_modules": [
+            "表单字段处理",
+            "标注管理",
+            "JavaScript 执行"
+          ],
+          "practice_task": "打开一个含 AcroForm 表单的 PDF，遍历并打印所有字段名与类型，尝试用 pdf_set_form_field_value 之类接口填入一个值（或用 murun 运行一段 JS 脚本读取字段）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "实现自定义 device",
+          "order": 2,
+          "filename": "u10-l2-custom-device.md",
+          "level": "advanced",
+          "topic": "以 trace-device.c 与 list-device.c 为范例，讲解如何实现一个自定义 fz_device：填充虚表回调，拦截 fill_path/fill_text 等指令完成自定义分析或记录。",
+          "learning_goals": [
+            "理解实现自定义 device 需要填充的虚表回调集合",
+            "掌握从 trace-device / list-device 学习最小可运行 device 的结构",
+            "认识自定义 device 在内容分析、导出、调试中的应用"
+          ],
+          "source_files": [
+            "include/mupdf/fitz/device.h",
+            "source/fitz/trace-device.c",
+            "source/fitz/list-device.c"
+          ],
+          "minimal_modules": [
+            "device 虚表填充",
+            "trace/list 范例",
+            "自定义应用场景"
+          ],
+          "practice_task": "参照 trace-device.c 实现一个「统计 device」：在 fill_path 时累计路径数、在 fill_text 时累计字符数，渲染一页后输出该页的路径数与字符数统计。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "扩展：新增格式与输出 handler",
+          "order": 3,
+          "filename": "u10-l3-extending-handlers.md",
+          "level": "advanced",
+          "topic": "总结 MuPDF 的两类主要扩展点：新增输入格式（fz_document_handler 的 open/recognize 回调并在 document-all.c 注册）与新增输出格式（document writer 派生与 writer.c 路由）。",
+          "learning_goals": [
+            "理解新增输入格式需实现并注册 fz_document_handler 的流程",
+            "掌握新增输出格式需派生 document writer 并接入 writer.c 路由的流程",
+            "认识 FZ_ENABLE_* 条件编译在裁剪扩展时的作用"
+          ],
+          "source_files": [
+            "source/fitz/document-all.c",
+            "include/mupdf/fitz/writer.h",
+            "source/fitz/writer.c"
+          ],
+          "minimal_modules": [
+            "输入格式 handler 扩展",
+            "输出格式 writer 扩展",
+            "条件编译裁剪"
+          ],
+          "practice_task": "设计（不必完整实现）一个最简自定义文档 handler 的骨架：列出需要填写的 fz_document_handler 回调字段，并说明在 document-all.c 中如何用 fz_register_document_handler 注册它。",
+          "depends_on": [
+            "u3-l2",
+            "u6-l1",
+            "u10-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
