@@ -91,12 +91,23 @@ jobs:
           git fetch origin --prune
           if git ls-remote --heads origin tutorial-cache | grep -q tutorial-cache; then
             git checkout -B tutorial-cache origin/tutorial-cache
-            # 合并 main 脚手架改动；冲突必须显式失败——原 `|| true` 会吞掉冲突、
-            # 留下冲突标记在工作树，随后 analyze.py 在冲突树上运行会损坏产物。
-            if ! git merge origin/main --no-edit -m "chore: sync scaffold from main"; then
-              echo "::error::合并 origin/main 到 tutorial-cache 冲突，中止合并"
-              git merge --abort
-              exit 1
+            # 合并 main 脚手架改动。
+            # - main 历史被改写（如敏感数据 scrub）→ 与 tutorial-cache 无共同祖先：自愈重建（保留进度产物）。
+            # - 真内容冲突：显式失败——原 `|| true` 会吞掉冲突、留下冲突标记，analyze.py 在冲突树上运行会损坏产物。
+            if ! git merge origin/main --no-edit -m "chore: sync scaffold from main" 2>/tmp/merge.err; then
+              git merge --abort 2>/dev/null || true
+              if grep -qi "unrelated histories" /tmp/merge.err; then
+                # main 历史被改写 → 无共同祖先。自愈：从当前 main 重建，保留已 scrub 的进度产物。
+                echo "::warning::tutorial-cache 与 main 无共同祖先（main 历史被改写），从 main 重建并保留 repos_state.json + tutorials/"
+                git checkout -B tutorial-cache origin/main
+                git checkout origin/tutorial-cache -- repos_state.json tutorials/
+                git add repos_state.json tutorials/
+                git commit -m "chore: rebuild tutorial-cache from main (preserve progress/tutorials)" || echo "rebuild: nothing to commit"
+                git push origin tutorial-cache --force-with-lease
+              else
+                echo "::error::合并 origin/main 到 tutorial-cache 内容冲突（非历史改写），需人工解决"
+                exit 1
+              fi
             fi
           else
             git checkout -B tutorial-cache
