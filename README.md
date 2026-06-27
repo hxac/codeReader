@@ -70,3 +70,7 @@ gh workflow run tutorial -f mode=full
 | `mock` | `false` | 管线测试，不运行 Claude Code |
 | `debug` | `false` | 写进 `.debug/` 沙箱 |
 | `runner` | `ubuntu-latest` | 默认 GitHub 官方；选 `self-hosted` 走 `RC_RUNNER_LABELS`（默认 self-hosted） |
+
+## 注意事项
+
+- **`tutorial-cache` 分支依赖与 `main` 共享提交历史**（用于把 `main` 的脚手架改动合并进进度分支）。若因敏感数据 scrub 等原因**改写了 `main` 历史**，两者会失去共同祖先、`git merge` 被拒。workflow 检测到「unrelated histories」时会**自动从当前 `main` 重建 `tutorial-cache` 并保留 `repos_state.json` + `tutorials/`**（强推覆盖旧分支），下一次运行即自愈，无需手动处理。
