@@ -2,140 +2,102 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应当能够：
+学完本讲后，你应该能够：
 
-- 说清楚 njs 为什么要把「属性名 / 标识符 / 已知符号」驻留（intern）成一个 32 位的 `atom_id`，而不是在引擎里到处拷贝字符串。
-- 解释「数字 atom」的位编码：为什么整数下标 `0..2^31-1` 可以不占任何字符串存储，直接编码进 atom_id 的高位。
-- 区分每个 VM 私有的 `atom_hash` 与跨克隆共享的 `atom_hash_shared`，并理解 `shared_atom_count` 这个「分界线」的作用。
-- 在 `src/njs_atom_defs.h` 中快速定位 `'length'`、`'prototype'`、`Symbol.iterator` 等预定义常量，并理解它们在属性查找与词法分析中的作用。
+- 说清楚为什么 njs 要把每一个属性名、标识符、已知符号「驻留（intern）」成一个 32 位的 `atom_id`，而不是到处拷贝字符串。
+- 解释 number atom 的位编码：最高位 `0x80000000` 当作标志位，把一个非负整数直接「打包」进 `atom_id`，省去一次哈希表查找。
+- 区分模板 VM 的共享 atom 表 `atom_hash_shared` 与每个克隆 VM 的私有 atom 表 `atom_hash`，并说明克隆时 `shared_atom_count` 这条分界线的作用。
+- 在 `src/njs_atom_defs.h` 里快速定位 `length`、`prototype`、`Symbol.iterator` 等常用原子对应的 `NJS_ATOM_*` 常量。
 
-本讲是单元二的收尾，承接 u2-l2（16 字节值表示）与 u2-l3（内存池与 flathsh）。你会发现：u2-l2 讲到的 `atom_id` 字段，正是本讲的主角；而 u2-l3 讲到的 `njs_flathsh_t`，正是 atom 表的底层容器。
+本讲是 u2-l2（16 字节值表示）和 u2-l3（内存池与 flathsh 哈希表）的直接延续：`atom_id` 正是写在 `njs_value_t` 前 4 字节里的那个字段，而所有 atom 又都被装进 u2-l3 讲过的 `njs_flathsh_t` 哈希表里。
 
 ## 2. 前置知识
 
-在进入源码前，先建立三个直觉。
+在进入源码前，先用通俗语言建立两个直觉。
 
-**直觉一：字符串比较很贵，整数比较很便宜。** 在 JavaScript 引擎里，对象属性的读写、变量的查找、`for...in` 遍历几乎每一步都要「按键名匹配」。如果每次都拿字符串做 `memcmp`，开销会非常大。一个经典优化是**字符串驻留（string interning）**：全局只保留每个不同字符串的一份拷贝，给每份分配一个整数编号；此后引擎内部一律用这个整数编号（这里叫 `atom_id`）来代表这个字符串，比较两个键是否相等只需比较两个 32 位整数。
+**第一个直觉：为什么要「原子化」？**
 
-**直觉二：整数下标根本不需要字符串。** 访问 `arr[0]`、`arr[1]` 时，键其实是整数。如果能把这些「很小的整数键」直接编码进 atom_id 本身，就既不用驻留字符串，也不用查哈希表——这正是 njs 的做法，用 atom_id 的最高位来区分「这是一个数字」还是「这是一个字符串编号」。
+JavaScript 程序里到处都是字符串当键：`obj.length`、`arr["prototype"]`、`Symbol.iterator`。如果每一次属性访问都要把键字符串重新分配、重新比较，开销会非常大。常见的优化思路是**驻留（interning）**：把每个出现过的字符串键只存一份，给它发一个唯一的小整数编号。之后引擎内部传递、比较的只是这个编号，而不再是字符串本体。njs 把这个编号叫做 **atom_id**，是一个 32 位无符号整数。
 
-**直觉三：预定义的东西可以先编译进二进制。** 引擎启动时就需要 `'length'`、`'prototype'`、`Symbol.iterator` 这类常量。与其运行时逐个生成，不如把它们在编译期就列成一张表，VM 启动时一次性装填。这张表就是 `src/njs_atom_defs.h`。
+这样一来：
 
-> 术语约定：本讲里 **atom（原子）** 指「被驻留的字符串或符号」，**atom_id** 指它对应的 32 位整数编号，**atom 表** 指存放这些 atom 的哈希表（底层就是 u2-l3 讲的 `njs_flathsh_t`）。
+- 比较「两个键是否相同」从「逐字节比较字符串」退化成「比较一个 32 位整数」。
+- 字节码里存属性名只需存一个 32 位 id，而不是变长字符串。
+- `njs_value_t` 的前 4 字节（u2-l2 讲过的 `atom_id`/`magic32` 双关字段）就可以直接携带这个键。
+
+**第二个直觉：一个 32 位整数怎么既当「名字」又当「数字」？**
+
+属性键不仅可以是字符串/符号，还可以是数字下标，比如 `arr[3]`、`obj[0]`。如果对每一个数字都新建一个哈希表条目，太浪费。njs 的做法是**位编码**：用一个标志位区分两种含义。
+
+- 当最高位 `0x80000000` **置 1** 时，这个 `atom_id` 是一个 **number atom**：剩下的低 31 位就是那个整数本身（比如 `3` 编码成 `0x80000003`）。
+- 当最高位 **为 0** 时，这个 `atom_id` 是一个 **named atom**：整个 32 位是一个索引，指向共享表或私有表里某一条字符串/符号。
+
+这两种编码互不冲突：number atom 永远 ≥ `0x80000000`，named atom 永远 < `0x80000000`。一个位运算就能判别。
+
+> ⚠️ 注意区分两套「最高位」用法。本讲后面会看到 `njs_atom_string_key()` 和 `njs_atom_symbol_key()` 也用了 `0x80000000`，但那是给 **flathsh 的 key_hash**（哈希值）用的，用来把字符串 atom 和符号 atom 分到不同的冲突空间；它和 `atom_id` 上的 number-atom 标志位是**两件不同的事**，只是恰好都借用了最高位。读源码时不要混淆。
 
 ## 3. 本讲源码地图
 
+本讲涉及的关键文件：
+
 | 文件 | 作用 |
 |---|---|
-| `src/njs_atom_defs.h` | 预定义原子清单：用 `NJS_DEF_STRING` / `NJS_DEF_SYMBOL` 宏逐条声明所有编译期常量（关键字、内建属性名、已知符号）。 |
-| `src/njs_atom.h` | 由清单生成的枚举 `NJS_ATOM_STRING_*` / `NJS_ATOM_SYMBOL_*`；以及把 atom_id 反查回值的内联函数 `njs_atom_to_val`。 |
-| `src/njs_atom.c` | atom 表的实现：`njs_atom[]` 静态数组、共享表装填 `njs_atom_hash_init`、查找 `njs_atom_find`、新增 `njs_atom_add` / `njs_atom_symbol_add`、把任意值原子化的 `njs_atom_atomize_key`。 |
-| `src/njs.h` | 三个核心位运算宏 `njs_atom_is_number` / `njs_atom_number` / `njs_number_atom`。 |
-| `src/njs_vm.h` | VM 结构体里的 atom 字段（`atom_hash_shared`、`atom_hash`、`atom_hash_current`、`shared_atom_count`、`atom_id_generator`）。 |
-| `src/njs_vm.c` | `njs_vm_clone` 中如何划分共享 atom 与私有 atom 的分界线。 |
-| `src/njs_lexer.c` | 词法分析器用 atom 表识别关键字与标识符的入口。 |
+| [src/njs_atom_defs.h](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h) | 一张「清单文件」：用 `NJS_DEF_STRING` / `NJS_DEF_SYMBOL` 宏逐条声明所有预定义原子（字符串 + 符号）。它是唯一的数据来源，被多处 `#include` 后展开成不同形态。 |
+| [src/njs_atom.h](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.h) | 把 `njs_atom_defs.h` 展开成枚举 `NJS_ATOM_STRING_*` / `NJS_ATOM_SYMBOL_*`，并提供内联函数 `njs_atom_to_value`（由 atom_id 反查 value）。 |
+| [src/njs_atom.c](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c) | atom 表的实现：静态值数组 `njs_atom[]`、共享表装填 `njs_atom_hash_init`、查找 `njs_atom_find`、新增 `njs_atom_add` / `njs_atom_symbol_add`、把任意键原子化的 `njs_atom_atomize_key`。 |
+| [src/njs.h](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs.h) | 公共头里定义了三个位运算宏 `njs_atom_is_number` / `njs_atom_number` / `njs_number_atom`。 |
+| [src/njs_vm.h](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.h) | `njs_vm_s` 结构里关于 atom 表的字段（`atom_hash_shared` / `atom_hash` / `atom_hash_current` / `shared_atom_count` / `atom_id_generator`）。 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 atom 驻留与编码
+### 4.1 atom 驻留与位编码
 
 #### 4.1.1 概念说明
 
-「原子化（atomize）」是指：拿一个字符串（或符号、整数键）进来，要么在表里找到它已存在的编号，要么给它分配一个新编号，最终返回一个 32 位的 `atom_id`。此后这个值在整个 VM 内部都由这个 `atom_id` 代表。
+「atom」就是「被驻留的字符串/符号」的身份证号。njs 在两个层面用到 atom：
 
-为什么要这样做？三点收益：
+1. **键层面**：访问对象属性 `obj.foo` 时，键 `foo` 是一个 atom。属性查找的最终入口 `njs_property_query` 接收的不是字符串，而是一个 `atom_id`（见 4.1.3）。
+2. **值层面**：u2-l2 讲过，每个 `njs_value_t` 的前 4 字节都带一个 `atom_id` 字段。当一个 value 恰好充当属性键时，这个字段就是它的 atom 身份证。
 
-1. **省内存**：同一个属性名（比如几万个对象都有的 `'length'`）在内存里只存一份字符串，对象上只记一个 32 位 id。
-2. **省比较**：判断两个键是否相等变成一次整数比较，而不是 `memcmp`。
-3. **省分配**：整数下标连字符串都不用存（见 4.1.3 的数字 atom）。
+number atom 是这套机制里最巧妙的一环。它利用了「属性键经常是连续小整数」这一现实：与其为 `arr[0]`、`arr[1]`、…、`arr[n]` 每个都建一条哈希表记录，不如直接把整数编码进 `atom_id`，需要时再用一个位运算还原。这把「数字键查找」从一次哈希操作降级为一次纯算术。
 
 #### 4.1.2 核心流程
 
-把一段源码字符串原子化的大致流程（以词法分析器处理一个标识符为例）：
+把一个键原子化的标准流程（`njs_atom_atomize_key`）：
 
+```text
+输入一个 atom_id == NJS_ATOM_STRING_unknown 的值 value
+├─ 若 value 是 NJS_STRING
+│   ├─ 尝试把它解释成整数下标（njs_key_to_index）
+│   ├─ 若成功且 0 <= n < 0x80000000（且非 -0）
+│   │     value.atom_id = njs_number_atom(n)     ← 直接打包成 number atom
+│   └─ 否则
+│         计算 djb 哈希 → 先 njs_atom_find → 命中则复用
+│                       → 未命中则 njs_atom_add 新建一个 named atom
+├─ 若 value 是 NJS_NUMBER
+│   └─ 同上：能装下就 number atom，否则转成字符串再 atom 化
+└─ 若 value 是 NJS_SYMBOL：atom_id 在创建时已分配，什么都不做
 ```
-源码文本 "length"
-   │  (逐字符累加 djb 哈希)
-   ▼
-njs_atom_find(text, hash)   ──► 先查当前 VM 的私有表，再查共享表
-   │
-   ├── 命中 ──► 直接拿到已有的 atom_id（0x...，高位为 0）
-   │            └─ 若该 atom 的 token_type 是关键字类型，识别为关键字
-   │              否则是普通标识符
-   │
-   └── 未命中 ──► njs_atom_add(text, hash)
-            └─ 分配新 atom_id = atom_id_generator++
-              插入当前 VM 的私有表 atom_hash
-```
 
-数字下标 `arr[3]` 走的是另一条更短的路径，见 4.1.3。
+关键判别只有一个位运算：`atom_id & 0x80000000` 是否非零。
 
-#### 4.1.3 源码精读：数字 atom 的位编码
+#### 4.1.3 源码精读
 
-这是本讲最精妙的设计。先看三个宏，它们全部在 `src/njs.h`：
+三个位运算宏定义在公共头里，是理解整套机制的钥匙：
 
-[njs.h:68-70](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs.h#L68-L70) —— atom_id 的位编码三件套。下面这段说明每个宏在做什么：
+[njs.h:68-70](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs.h#L68-L70) —— 测最高位、还原整数、打包整数：
 
 ```c
-#define njs_atom_is_number(atom_id) ((atom_id) & 0x80000000)   // 测最高位
-#define njs_atom_number(atom_id)    ((atom_id) & 0x7FFFFFFF)   // 屏蔽最高位，还原整数
-#define njs_number_atom(n)          ((n) | 0x80000000)         // 把整数打包成 atom_id
+#define njs_atom_is_number(atom_id) ((atom_id) & 0x80000000)
+#define njs_atom_number(atom_id)    ((atom_id) & 0x7FFFFFFF)
+#define njs_number_atom(n)          ((n) | 0x80000000)
 ```
 
-它们的含义是：atom_id 的**最高位（bit 31）当作类型标志位**。
+- `njs_atom_is_number`：保留最高位、清掉其余，结果非零即「是 number atom」。
+- `njs_atom_number`：屏蔽最高位，把低 31 位还原成原始整数。
+- `njs_number_atom`：反向操作，给整数或上最高位，打包成 `atom_id`。
 
-- 若最高位为 1（`atom_id & 0x80000000` 非零），说明这个 atom_id 不是字符串编号，而是一个**直接编码的整数键**；真正的整数就是低 31 位（`atom_id & 0x7FFFFFFF`）。
-- 若最高位为 0，说明它是一个字符串/符号 atom 的**表内编号**（一个顺序递增的下标）。
-
-用公式写得更清楚（设整数键为 \(n\)）：
-
-\[
-\text{atom\_id} \;=\; n \;\big|\; \text{0x80000000}, \qquad 0 \le n < 2^{31}
-\]
-
-反过来还原：
-
-\[
-n \;=\; \text{atom\_id} \;\&\; \text{0x7FFFFFFF}
-\]
-
-**位运算含义小结**：
-
-- `njs_atom_is_number`：与上 `0x80000000`，结果非零即「是数字 atom」。它只是一个**判别**，不改变值。
-- `njs_number_atom`：或上 `0x80000000`，把一个普通整数「打包」成数字 atom_id，相当于打上「我是数字」的标签。
-- `njs_atom_number`：与上 `0x7FFFFFFF`（即清除最高位），从一个数字 atom_id 「拆」出原始整数。
-
-为什么上限是 \(2^{31}\)？因为低 31 位最多表示 \(0\) 到 \(2^{31}-1\)，正好覆盖了 JS 数组能用的非负整数下标范围。下标 \(\ge 2^{31}\) 的极端情况会回退成普通字符串 atom。
-
-这套编码带来的直接好处：**访问 `arr[0]` 时根本不查 atom 表**。属性查找代码在拿到整数下标后，只要它小于 `0x80000000`，就直接用 `njs_number_atom` 打包，跳过驻留：
-
-[njs_value.h:1026-1027](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L1026-L1027) —— 整数下标的属性读取，直接打包成数字 atom，绕过字符串驻留：
-
-```c
-if (index < 0x80000000) {
-    return njs_value_property(vm, value, njs_number_atom(index), retval);
-}
-```
-
-反方向——给定一个 atom_id 要还原成 JS 值——由 `njs_atom_to_val` 完成，它最先判断的就是「是不是数字 atom」：
-
-[njs_atom.h:39-50](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.h#L39-L50) —— 若是数字 atom，用 `njs_atom_number` 拆出整数，转成字符串值返回（因为 JS 里 `arr[3]` 的键 `'3'` 也是字符串）：
-
-```c
-if (njs_atom_is_number(atom_id)) {
-    num = njs_atom_number(atom_id);
-    size = njs_dtoa(num, (char *) buf);
-    ...
-    dst->atom_id = atom_id;   // 但 atom_id 仍保留高位标志
-    return NJS_OK;
-}
-```
-
-#### 4.1.4 源码精读：原子化入口
-
-当一个值需要被原子化时，统一入口是 `njs_atom_atomize_key`。它分三种类型处理：
-
-[njs_atom.c:235-261](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L235-L261) —— 字符串值原子化：先尝试用 `njs_key_to_index` 把它当整数键处理（命中则走数字 atom 快路径），否则算哈希、查表、必要时新增：
+接下来看 `njs_atom_atomize_key` 是怎么决定用哪种编码的。[njs_atom.c:235-261](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L235-L261) 处理 `NJS_STRING` 分支：
 
 ```c
 case NJS_STRING:
@@ -143,236 +105,250 @@ case NJS_STRING:
     u32 = (uint32_t) num;
 
     if (njs_fast_path(u32 == num && (u32 < 0x80000000)
-                      && !(num == 0 && signbit(num)))) {
-        value->atom_id = njs_number_atom(u32);     // 整数串 → 数字 atom
+                      && !(num == 0 && signbit(num))))
+    {
+        value->atom_id = njs_number_atom(u32);     // ← 数字键走 number atom
     } else {
         hash_id = njs_djb_hash(value->string.data->start,
                                value->string.data->size);
-        entry = njs_atom_find(vm, ...);             // 先查
+        entry = njs_atom_find(vm, value->string.data->start,
+                              value->string.data->size, hash_id);
         if (entry == NULL) {
-            entry = njs_atom_add(vm, value, hash_id); // 查不到再加
+            entry = njs_atom_add(vm, value, hash_id);   // ← 字符串键走 named atom
+            ...
         }
         *value = *entry;
     }
 ```
 
-注意那个 `!(num == 0 && signbit(num))` 条件：它排除 `-0`。因为 `-0` 的整数值是 0，但 `-0` 不应被编码成数字 atom `0`（它会丢失负号语义），所以 `-0` 走普通字符串路径。
+注意那个 `!(num == 0 && signbit(num))` 的判断：它专门排除 `-0`。因为 `-0` 转成 `uint32_t` 也是 `0`，会被错误地编码成 `njs_number_atom(0)`，丢失了负零的信息，所以要挡掉。
 
-新增一个字符串 atom 时，`njs_atom_add` 从 `atom_id_generator` 取下一个递增编号：
+那么，一个 named atom 的 `atom_id` 是怎么发出来的？看 `njs_atom_add`：
 
-[njs_atom.c:117-129](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L117-L129) —— 给新字符串分配 atom_id，并刻意避开数字 atom 的取值域（若新 id 不慎落到 `0x80000000` 以上会报「too many atoms」）：
+[njs_atom.c:117-129](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L117-L129) —— 新原子的 id 由一个单调递增计数器分配：
 
 ```c
-prop->u.value.string.atom_id = vm->atom_id_generator++;
-if (njs_atom_is_number(prop->u.value.string.atom_id)) {
+prop = fhq.value;
+prop->u.value = *value;
+prop->u.value.string.atom_id = vm->atom_id_generator++;   // ← 发号
+if (njs_atom_is_number(prop->u.value.string.atom_id)) {    // ← 用完最高位就报错
     njs_internal_error(vm, "too many atoms");
     return NULL;
 }
 ```
 
-#### 4.1.5 代码实践：观察数字 atom 的边界
+也就是说，运行期动态产生的 named atom，id 从 `atom_id_generator` 的当前值开始往上加；万一加到撞上 `0x80000000`（即 number atom 的领地），就认为「atom 太多了」直接报错——这是 number atom 位编码带来的天然上限。
 
-**实践目标**：亲手验证 `njs_number_atom` / `njs_atom_number` 的位运算含义。
+最后看属性查找最末端如何消费这个 `atom_id`。[njs_value.h:1010-1017](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L1010-L1017) 表明，键被原子化后，`njs_property_query` 拿到的就只是一个 `atom_id`：
+
+```c
+        ret = njs_atom_atomize_key(vm, key);
+        ...
+    }
+
+    return njs_property_query(vm, pq, value, key->atom_id);   // ← 只传 atom_id
+```
+
+这意味着属性查找的内层循环再也不碰字符串，只比较 32 位整数——这正是原子化的全部收益。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手验证 number atom 的位编码，并理解它如何被属性查找直接使用。
 
 **操作步骤**：
 
-1. 打开 `src/njs.h` 第 68–70 行，对照本讲 4.1.3 的解释，确认三个宏的写法。
-2. 用纸笔或计算器手工演算：
-   - `njs_number_atom(3)` 的结果（应当是 `0x80000003`）。
-   - `njs_atom_number(0x80000005)` 的结果（应当是 `5`）。
-   - `njs_atom_is_number(0x00000007)` 的结果（应当是 `0`，即「不是数字 atom」）。
-3. 阅读本讲引用的 `njs_atom.c:240-241` 那个条件，回答：为什么 `u32 < 0x80000000` 是必要条件？如果去掉它会发生什么？
+1. 打开 `src/njs.h` 第 68–70 行，确认三个宏的定义。
+2. 在脑中（或用 `python3 -c`）计算几个例子：
+   - `njs_number_atom(3)` = `3 | 0x80000000` = `0x80000003` = `2147483651`
+   - `njs_atom_is_number(0x80000003)` = `0x80000003`（非零，判定为 number atom ✅）
+   - `njs_atom_number(0x80000003)` = `0x80000003 & 0x7FFFFFFF` = `3`（还原成功 ✅）
+3. 对照 `njs_value_property_i64`（[njs_value.h:1020-1033](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L1020-L1033)）：当 `index < 0x80000000` 时，它直接调 `njs_value_property(vm, value, njs_number_atom(index), ...)`，跳过了所有字符串/哈希处理。
 
-**需要观察的现象**：你会确认最高位就是「数字 vs 字符串编号」的判别位。
+**需要观察的现象**：
 
-**预期结果**：数字 atom 的取值域是 `[0x80000000, 0xFFFFFFFF]`，字符串/符号 atom 的编号取值域是 `[0, 0x7FFFFFFF)`。
+- 小整数下标走的是一条「纯算术」的快路径，没有任何哈希表参与。
+- 当下标 ≥ `0x80000000`（约 21 亿）时，代码退回到 `njs_set_number` + `njs_value_property_val` 的慢路径——因为 31 位已经装不下这个数了。
 
-> 说明：以上是源码阅读 + 手工演算型实践，不需要运行 njs。如果你想运行验证，可构建 CLI（`./configure && make njs`）后用 `./build/njs -d -c 'var a=[1,2,3]; a[1]'` 观察反汇编中出现的 `0x8000xxxx` 形式的操作数，但具体反汇编格式待本地验证。
-
-#### 4.1.6 小练习与答案
-
-**练习 1**：`njs_atom_is_number(0x80000000)` 的结果是什么？它对应哪个整数键？
-
-> **答案**：结果非零（真），表示这是数字 atom。`njs_atom_number(0x80000000) = 0x80000000 & 0x7FFFFFFF = 0`，所以它对应整数键 `0`。
-
-**练习 2**：为什么 `njs_atom_add` 在分配新 atom_id 后要检查 `njs_atom_is_number`？
-
-> **答案**：字符串/符号 atom 的编号必须落在 `[0, 0x7FFFFFFF)` 区间，否则会和数字 atom 的编码域冲突。当 `atom_id_generator` 增长到 `0x80000000` 时，新生成的 id 会被误判为数字 atom，所以此时报「too many atoms」并拒绝继续分配。
-
----
+**预期结果**：能口述出「`arr[3]` 的键最终以 `0x80000003` 这个 `atom_id` 进入 `njs_property_query`」。
 
 ### 4.2 共享 vs 私有 atom 哈希
 
 #### 4.2.1 概念说明
 
-njs 支持把一个「模板 VM」克隆成多个「请求 VM」（详见 u2-l1 的克隆与隔离）。如果每个克隆都各自装填一遍那张庞大的预定义 atom 表（关键字 + 内建属性名，共数百条），既浪费内存又拖慢启动。
+u2-l1 讲过 njs 的克隆模型：先 `njs_vm_create` 建一个**模板 VM**（编译一次字节码），再 `njs_vm_clone` 给每个请求/session 复制一个**实例 VM**（隔离地执行）。这套模型要求**只读资源尽量共享、可变资源必须私有**。
 
-njs 的解法是**两张表 + 一条分界线**：
+atom 表正好是「绝大多数只读」的典型：
 
-- **`atom_hash_shared`（共享表）**：在模板 VM 创建时装填一次，存放所有预定义 atom。克隆时所有 VM 共享同一份（因为它们 `*nvm = *vm` 浅拷贝，指针指向同一块共享结构，详见 u2-l1、u2-l3）。
-- **`atom_hash`（私有表）**：每个克隆自己独有，存放该 VM 在运行期新产生的 atom（比如用户代码里出现的新标识符、`Symbol()` 创建的符号）。
-- **`shared_atom_count`（分界线）**：一个 atom_id 编号。编号 `< shared_atom_count` 的属于共享表，`>= shared_atom_count` 的属于当前 VM 的私有表。
+- 几百个预定义原子（`length`、`prototype`、`Symbol.iterator`、所有关键字……）在所有请求里都一模一样，理应只存一份。
+- 但运行期动态产生的新 atom（比如 `eval` 出来的代码里的标识符）是每个请求私有的，不能污染别的请求。
 
-这样一来，模板 VM 把所有预定义 atom 编号成 `0..N-1`，克隆时把 `shared_atom_count` 设为 `N`，此后克隆自己新增的 atom 从 `N` 开始往后编，互不干扰。
+于是 njs 设计了**两张表 + 一个指针**：
+
+- `atom_hash_shared`：共享表，存放预定义原子，所有克隆只读复用。
+- `atom_hash`：每个克隆私有的表，存放运行期新原子。
+- `atom_hash_current`：一个指针，指向「当前写入/查找的目标表」。模板 VM 里它指向共享表，克隆 VM 里它指向自己的私有表。
+
+`shared_atom_count` 则是一条「分界线」：所有 `< shared_atom_count` 的 atom_id 落在共享表里，其余的落在私有表里。
 
 #### 4.2.2 核心流程
 
+模板 VM 启动时：
+
+```text
+njs_builtin_objects_create (njs_builtin.c:150)
+  └─ vm->atom_id_generator = njs_atom_hash_init(vm)
+       ├─ 遍历静态数组 njs_atom[]，逐条插入 atom_hash_shared
+       └─ atom_hash_current = &atom_hash_shared      ← 模板期：写共享表
+     返回 NJS_ATOM_SIZE（= 预定义原子总数）
+  ⇒ atom_id_generator = NJS_ATOM_SIZE                 ← 后续新 atom 从此编号
 ```
-模板 VM 创建期                          克隆期（per-request）
-─────────────────                      ──────────────────────
-njs_atom_hash_init()                   *nvm = *vm  (浅拷贝共享 atom_hash_shared)
-  装填 atom_hash_shared                 shared_atom_count = 模板的 atom_id_generator
-  从 0 开始编号                         atom_hash_current = &nvm->atom_hash  (切到私有表)
-  返回 NJS_ATOM_SIZE                    atom_hash 初始化为空
-atom_id_generator = NJS_ATOM_SIZE      后续 njs_atom_add 插入私有表
-atom_hash_current = &atom_hash_shared
+
+克隆时（`njs_vm_clone`）：
+
+```text
+nvm = *vm                         ← 浅拷贝：atom_hash_shared 随之被复用（共享！）
+nvm->shared_atom_count = vm->atom_id_generator   ← 记下分界线
+njs_flathsh_init(&nvm->atom_hash)                ← 私有表从空开始
+nvm->atom_hash_current = &nvm->atom_hash         ← 此后写入走私有表
 ```
 
-查找一个 atom 时，先查私有表，再查共享表。
+查找时（`njs_atom_find`）：先查当前表（私有），再查共享表。反向解码（`njs_atom_to_value`）则用 `shared_atom_count` 判断该去哪张表取值。
 
-#### 4.2.3 源码精读：VM 里的 atom 字段
+#### 4.2.3 源码精读
 
-[njs_vm.h:131-135](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.h#L131-L135) —— VM 结构体持有两表、一指针、一分界线、一生成器：
+先看 VM 结构里这几个字段的位置。[njs_vm.h:131-135](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.h#L131-L135)：
 
 ```c
-njs_flathsh_t            atom_hash_shared;   // 跨克隆共享的预定义表
-njs_flathsh_t            atom_hash;          // 当前 VM 私有的运行期表
-njs_flathsh_t            *atom_hash_current; // 指向「当前该往哪查/插」的那张
-uint32_t                 shared_atom_count;  // 共享/私有的 id 分界线
-uint32_t                 atom_id_generator;  // 下一个可用 id
+njs_flathsh_t            atom_hash_shared;   // 共享表（值，随浅拷贝被克隆复用）
+njs_flathsh_t            atom_hash;          // 私有表（每克隆独立）
+njs_flathsh_t            *atom_hash_current; // 指向当前写入/查找目标
+uint32_t                 shared_atom_count;  // 共享/私有的分界线
+uint32_t                 atom_id_generator;  // 下一个新 atom 的 id
 ```
 
-模板 VM 启动时，由内建对象初始化代码调用 `njs_atom_hash_init` 把 `atom_hash_shared` 装满：
-
-[njs_builtin.c:150-151](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_builtin.c#L150-L151) —— 装填共享表，返回值（共多少条预定义 atom）成为 `atom_id_generator` 的起点：
-
-```c
-vm->atom_id_generator = njs_atom_hash_init(vm);
-```
-
-`njs_atom_hash_init` 本体遍历静态数组 `njs_atom[]`（即由 `njs_atom_defs.h` 生成的那张表），把每条字符串/符号插入共享表，最后把 `atom_hash_current` 指向共享表：
-
-[njs_atom.c:180-220](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L180-L220) —— 装填共享表的关键片段（符号走 `unique_insert`，字符串走普通 `insert`）：
+共享表的装填逻辑在 `njs_atom_hash_init`。[njs_atom.c:180-220](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L180-L220)：
 
 ```c
 njs_flathsh_init(&vm->atom_hash_shared);
 ...
 for (n = 0; n < NJS_ATOM_SIZE; n++) {
-    value = &values[n];
+    value = &values[n];                      // values = &njs_atom[0]
     if (value->type == NJS_SYMBOL) {
         fhq.key_hash = njs_atom_symbol_key(value->string.atom_id);
         ret = njs_flathsh_unique_insert(&vm->atom_hash_shared, &fhq);
         ...
     }
     if (value->type == NJS_STRING) {
-        ...
+        start = value->string.data->start;
+        len = value->string.data->length;
         fhq.key_hash = njs_atom_string_key(njs_djb_hash(start, len));
+        ...
         ret = njs_flathsh_insert(&vm->atom_hash_shared, &fhq);
         ...
     }
     *njs_prop_value(fhq.value) = *value;
 }
-vm->atom_hash_current = &vm->atom_hash_shared;
+vm->atom_hash_current = &vm->atom_hash_shared;   // ← 模板期指向共享表
 return NJS_ATOM_SIZE;
 ```
 
-> 旁注：`njs_atom.c:10-11` 定义了两个键哈希宏：`njs_atom_symbol_key(hash) = (hash) | 0x80000000` 与 `njs_atom_string_key(hash) = (hash) & 0x7FFFFFFF`。注意这是 **flathsh 内部用来区分键类型**的哈希位，和 4.1 讲的 atom_id 高位编码是**两个不同语境**下对同一个 `0x80000000` 位的复用——这里用它把符号键与字符串键在哈希桶里隔开。
+这里能看到 u2-l3 讲的 flathsh 的两种插入方式：符号用 `njs_flathsh_unique_insert`（只比 `key_hash`，因为每个符号 id 本就唯一），字符串用 `njs_flathsh_insert`（用 `njs_lexer_hash_test` 做逐字节比较，处理哈希冲突）。注意此刻的 `key_hash` 用了 `njs_atom_string_key` / `njs_atom_symbol_key`（[njs_atom.c:10-11](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L10-L11)）给哈希值打上「字符串/符号」标记——这是 flathsh 内部的区分手段，与 `atom_id` 的 number 标志位无关。
 
-克隆时的分界线设置在 `njs_vm_clone`：
-
-[njs_vm.c:421-424](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L421-L424) —— 把分界线钉在模板当前的 generator 值上，并把活动表切到私有表：
+克隆时，分界线和私有表就这样建立。[njs_vm.c:421-424](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L421-L424)：
 
 ```c
-nvm->shared_atom_count = vm->atom_id_generator;   // 分界线 = 共享表大小
+nvm->shared_atom_count = vm->atom_id_generator;   // 分界线 = 模板当前的 id 总数
 njs_flathsh_init(&nvm->atom_hash);                // 私有表清空
-nvm->atom_hash_current = &nvm->atom_hash;         // 此后查找/插入走私有表
+nvm->atom_hash_current = &nvm->atom_hash;         // 此后写入私有表
 ```
 
-查找逻辑在 `njs_atom_find`：先私有、后共享：
+由于上一行 `*nvm = *vm`（[njs_vm.c:415](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L415)）是浅拷贝，`nvm->atom_hash_shared` 与模板共享同一份底层存储——这正是「只读资源复用」的实现。
 
-[njs_atom.c:82-90](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L82-L90) —— 两级查找，保证私有表里新增的同名 atom 优先于共享表里的预定义 atom：
+查找时先私有后共享。[njs_atom.c:82-91](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L82-L91)：
 
 ```c
-ret = njs_flathsh_find(vm->atom_hash_current, &fhq);
+ret = njs_flathsh_find(vm->atom_hash_current, &fhq);   // 先查当前（私有）表
 if (ret == NJS_OK) {
     return njs_prop_value(fhq.value);
 }
-ret = njs_flathsh_find(&vm->atom_hash_shared, &fhq);
+ret = njs_flathsh_find(&vm->atom_hash_shared, &fhq);   // 再查共享表
 if (ret == NJS_OK) {
     return njs_prop_value(fhq.value);
 }
+return NULL;
 ```
 
-而 `njs_atom_to_val` 在按 atom_id 反查值时，正是用 `shared_atom_count` 决定查哪张表：
-
-[njs_atom.h:52-66](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.h#L52-L66) —— 编号小于分界线查共享表的 slot，否则减去分界线后查当前（私有）表的 slot：
+反向解码 `njs_atom_to_value` 则用 `shared_atom_count` 决定去哪张表取值。[njs_atom.h:52-66](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.h#L52-L66)：
 
 ```c
 if (atom_id < vm->shared_atom_count) {
-    h = vm->atom_hash_shared.slot;
+    h = vm->atom_hash_shared.slot;          // 共享表
+    ...
     *dst = *((njs_value_t *) njs_hash_elts(h)[atom_id].value);
 } else {
-    h = vm->atom_hash_current->slot;
-    atom_id -= vm->shared_atom_count;
+    h = vm->atom_hash_current->slot;        // 私有表（current 已指向私有）
+    atom_id -= vm->shared_atom_count;       // 扣掉分界线得到私有表内偏移
+    ...
     *dst = *((njs_value_t *) njs_hash_elts(h)[atom_id].value);
 }
 ```
 
-> 与 u2-l3 的联系：这里频繁出现的 `slot`、`njs_hash_elts(h)`、`njs_flathsh_find/insert` 全部是 u2-l3 讲过的扁平哈希表接口。atom 表本质上就是「把 `njs_value_t` 当作元素、用 djb 哈希当键」的一组 `njs_flathsh_t`。
+#### 4.2.4 代码实践
 
-#### 4.2.4 代码实践：画出两级查找
-
-**实践目标**：理解「先私有后共享」与「分界线编号」如何配合。
+**实践目标**：在源码层面追踪「同一个 `length` atom 在模板 VM 和克隆 VM 里指向同一份存储」。
 
 **操作步骤**：
 
-1. 阅读本讲引用的 `njs_vm.c:421-424`，写下克隆后 `shared_atom_count`、`atom_hash_current` 各自的值。
-2. 假设模板 VM 装填了 600 条预定义 atom（编号 `0..599`），克隆 A 在运行期新增了 2 个标识符（编号 `600`、`601`），克隆 B 也新增了 2 个（同样是 `600`、`601`）。回答：
-   - 克隆 A 的 `600` 和克隆 B 的 `600` 指向同一个 atom 吗？为什么这不会造成冲突？
-   - 查找编号 `5` 会查哪张表？查找编号 `600` 又会查哪张表？
-3. 对照 `njs_atom.h:52-66`，验证你的答案与代码一致。
+1. 读 `njs_vm_clone`（[njs_vm.c:392-434](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L392-L434)），确认 `*nvm = *vm` 之后没有对 `atom_hash_shared` 做任何重建。
+2. 读 `njs_atom_hash_init` 末尾的 `vm->atom_hash_current = &vm->atom_hash_shared`，再读克隆里的 `nvm->atom_hash_current = &nvm->atom_hash`，对比两个指针的不同指向。
+3. 假设 `length` 的 `atom_id` 是某个值 `L`（且 `L < shared_atom_count`），在两个 VM 里调用 `njs_atom_to_value` 都会走 `atom_hash_shared.slot` 的同一格。
 
-**需要观察的现象**：两个克隆共享同一份预定义 atom，但各自的运行期 atom 完全隔离。
+**需要观察的现象**：
 
-**预期结果**：克隆 A、B 的编号 `600` 互不相干（它们在各自的 `atom_hash` 私有表里，元素数组下标都是 `600 - shared_atom_count = 0`）；编号 `5` 查共享表，编号 `600` 查私有表。
+- 模板 VM 写新 atom 时，写进的是共享表（因为模板期 `current` 指向共享表）——这正是 `njs_builtin_objects_create` 在模板期注册内建对象属性、其键都进共享表的原因。
+- 克隆 VM 写新 atom 时，写进的是私有表，绝不会动到共享表。
 
-#### 4.2.5 小练习与答案
+**预期结果**：能画出「模板 VM：共享表（写） → 克隆 VM：共享表（只读）+ 私有表（写）」的对照图。
 
-**练习 1**：为什么 `atom_hash_current` 要用指针，而不是直接固定指向 `atom_hash`？
-
-> **答案**：在模板 VM 阶段，`atom_hash_current` 指向 `atom_hash_shared`（此时新增的预定义 atom 要进共享表）；克隆后它才指向私有的 `atom_hash`。用指针可以让同一套查找/插入代码（`njs_atom_find`/`njs_atom_add` 都用 `vm->atom_hash_current`）在两种阶段下都正确工作，无需分支。
-
-**练习 2**：如果删除 `njs_atom_find` 里「先查私有表」那一步，只查共享表，会出什么问题？
-
-> **答案**：运行期新产生的 atom（用户代码里的新标识符、`Symbol()` 等）只存在于私有表里，只查共享表会全部漏掉，导致查不到值（返回 NULL），进而触发重复新增或错误。
-
----
+**待本地验证**：若想直接观察，可构建 CLI 后用 `-d` 反汇编一段引用了 `length` 的代码，确认字节码里出现的是 `length` 的 atom_id（一个小整数），而不是字符串。
 
 ### 4.3 预定义原子常量
 
 #### 4.3.1 概念说明
 
-前面两节讲的是「机制」——atom 怎么编码、存哪张表。这一节讲「数据」——具体有哪些 atom 是预定义好的。
+前面的 named atom 都是在运行期「按需新建」的，但有一大批原子是引擎一启动就固定存在的：所有关键字（`function`、`return`、…）、所有内建属性名（`length`、`prototype`、`constructor`、`name`、…）、所有已知符号（`Symbol.iterator`、`Symbol.asyncIterator`、…）。这些**预定义原子**满足三个特点：
 
-预定义 atom 分两类：
+1. 数量固定、内容固定，可以在编译期就列成一张清单。
+2. 每个都有一个**有名字的常量**（`NJS_ATOM_STRING_length`、`NJS_ATOM_SYMBOL_iterator`），方便 C 代码直接引用，避免到处写字符串字面量。
+3. 它们的 `atom_id` 就是清单里的序号（0, 1, 2, …），因此在模板 VM 装填后，它们的 id 都 `< NJS_ATOM_SIZE`，全部落在共享表里。
 
-- **预定义字符串**：关键字（`function`、`return`…）、内建属性名（`length`、`prototype`、`constructor`…）、内建对象名（`Array`、`Promise`…）、错误消息等。它们的编号对应枚举常量 `NJS_ATOM_STRING_<名字>`。
-- **预定义符号**：JS 规定的已知符号（`Symbol.iterator`、`Symbol.toPrimitive`…）。它们的编号对应枚举常量 `NJS_ATOM_SYMBOL_<名字>`。
+这张清单就是 `src/njs_atom_defs.h`。它的精妙之处在于：它本身**只是一堆宏调用**，不含任何真正的 C 定义。不同的地方 `#include` 它并预先 `#define` 不同的宏，就能把同一份清单展开成不同形态——枚举、静态值数组、初始化循环，全靠这一份清单驱动。这是 C 里常见的「X-Macro」技巧。
 
-这些常量的作用：让 C 代码里可以直接用 `NJS_ATOM_STRING_length` 这样的名字引用某个 atom_id，而不必记数字。属性查找、原型链遍历、内建对象初始化都大量使用它们。
+#### 4.3.2 核心流程
 
-#### 4.3.2 核心流程：从宏清单到枚举
+```text
+njs_atom_defs.h（唯一数据源，~485 条 NJS_DEF_STRING/SYMBOL）
+  │
+  ├─ 在 njs_atom.h 里 #include + #define NJS_DEF_STRING(name,...) NJS_ATOM_STRING_##name,
+  │     ⇒ 展开成枚举：NJS_ATOM_STRING_unknown=0, NJS_ATOM_STRING_length, …, NJS_ATOM_SIZE
+  │
+  └─ 在 njs_atom.c 里 #include + #define NJS_DEF_STRING(name,s,typ,tok) (njs_value_t){…预填好的字符串值…},
+        ⇒ 展开成静态数组 njs_atom[]，每条都已填好 atom_id/token_type/字符串数据
+```
 
-预定义 atom 的生成是一个巧妙的「X-Macro」技巧：
+`NJS_ATOM_SIZE` 既充当枚举的「哨兵」（其值 = 预定义原子总数），又是 `njs_atom_hash_init` 的返回值和 `atom_id_generator` 的起始值——一处定义，处处复用。
 
-1. `src/njs_atom_defs.h` 是一张纯数据清单，每行是一个宏调用，如 `NJS_DEF_STRING(length, "length", 0, 0)`、`NJS_DEF_SYMBOL(iterator, "Symbol.iterator")`。它本身不定义 `NJS_DEF_*` 宏。
-2. 别的文件 `#include` 这张清单时，**先**把 `NJS_DEF_*` 定义成自己想要的形状，**再** include，就能让同一份清单在不同语境下生成不同的东西。
-3. `src/njs_atom.h` 把 `NJS_DEF_STRING(name,...)` 定义成 `NJS_ATOM_STRING_ ## name,`、把 `NJS_DEF_SYMBOL(name,...)` 定义成 `NJS_ATOM_SYMBOL_ ## name,`，于是 include 后得到一个枚举，自动生成所有 `NJS_ATOM_STRING_*` / `NJS_ATOM_SYMBOL_*` 编号。
-4. `src/njs_atom.c` 把同样的宏定义成「初始化一个 `njs_value_t` 静态对象」，于是 include 后得到 `njs_atom[]` 数组——枚举里第 n 项的编号，正好对应数组里第 n 项的预定义值。
+#### 4.3.3 源码精读
 
-#### 4.3.3 源码精读：枚举生成
+清单的「第 0 号」是一个特殊原子 `unknown`，它充当「尚未原子化」的哨兵。[njs_atom_defs.h:8](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L8)：
 
-[njs_atom.h:12-19](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.h#L12-L19) —— 用 X-Macro 技巧，从清单生成枚举；末尾的 `NJS_ATOM_SIZE` 是预定义 atom 的总数：
+```c
+NJS_DEF_STRING(unknown, "\xFF\xFF", 0, NJS_TOKEN_ILLEGAL)
+```
+
+它对应枚举 `NJS_ATOM_STRING_unknown = 0`。注意它的字符串内容是两个 `0xFF` 字节——一个不可能出现在合法 JS 里的占位串。4.1 里看到的 `njs_value_atom(key) == 0` 判断（[njs_value.h:1059](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L1059)）正是用 `atom_id == 0 == NJS_ATOM_STRING_unknown` 来表示「这个键还没被原子化」。
+
+枚举由 `njs_atom.h` 用 X-Macro 生成。[njs_atom.h:12-19](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.h#L12-L19)：
 
 ```c
 enum {
@@ -385,37 +361,21 @@ enum {
 };
 ```
 
-清单本身（节选）：
+于是 `length` → `NJS_ATOM_STRING_length`、`iterator` → `NJS_ATOM_SYMBOL_iterator`，C 代码里就能直接用这些有意义的常量名。
 
-[njs_atom_defs.h:8](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L8) —— 第 0 号 atom 是占位用的 `unknown`，表示「尚未原子化」：
+本讲实践任务要找的几个常用原子，都在清单里：
 
-```c
-NJS_DEF_STRING(unknown, "\xFF\xFF", 0, NJS_TOKEN_ILLEGAL)
-```
+| 常量 | 清单位置 | 字符串内容 |
+|---|---|---|
+| `NJS_ATOM_STRING_length` | [njs_atom_defs.h:321](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L321) | `"length"` |
+| `NJS_ATOM_STRING_prototype` | [njs_atom_defs.h:356](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L356) | `"prototype"` |
+| `NJS_ATOM_STRING_constructor` | [njs_atom_defs.h:208](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L208) | `"constructor"` |
+| `NJS_ATOM_STRING_name` | [njs_atom_defs.h:335](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L335) | `"name"` |
+| `NJS_ATOM_SYMBOL_iterator` | [njs_atom_defs.h:13](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L13) | `"Symbol.iterator"` |
 
-[njs_atom_defs.h:13](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L13) —— `Symbol.iterator` 对应的预定义符号：
+注意 `NJS_DEF_SYMBOL` 只有 2 个参数（`name, str`），而 `NJS_DEF_STRING` 有 4 个（`name, str, 关键字类型, token id`）。像 `length`、`prototype` 这类不是关键字的字符串，后两个参数填 `0, 0`；而 `function`、`return` 这类关键字，后两个参数填 `NJS_KWD_RESERVED` 和对应的 `NJS_TOKEN_*`（见清单第 24–60 行的关键字段）。词法器（u3-l1）正是靠 `njs_atom[]` 里预填的 `token_type` / `token_id` 字段，把一个 atom 直接识别成关键字，省去单独的关键字查找表。
 
-```c
-NJS_DEF_SYMBOL(iterator, "Symbol.iterator")
-```
-
-[njs_atom_defs.h:321](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L321) —— `'length'` 字符串，0 表示非关键字、token id 为 0：
-
-```c
-NJS_DEF_STRING(length, "length", 0, 0)
-```
-
-[njs_atom_defs.h:356](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L356) —— `'prototype'` 字符串：
-
-```c
-NJS_DEF_STRING(prototype, "prototype", 0, 0)
-```
-
-于是：`'length'` → `NJS_ATOM_STRING_length`，`'prototype'` → `NJS_ATOM_STRING_prototype`，`Symbol.iterator` → `NJS_ATOM_SYMBOL_iterator`。这三个常量在源码各处被直接引用，例如内建对象初始化时给原型挂 `constructor`、`length` 属性。
-
-对应的静态值数组由 `njs_atom.c` 顶部的宏生成：
-
-[njs_atom.c:16-34](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L16-L34) —— 同一份清单，这里把每条 `NJS_DEF_STRING` 展开成一个预填好的 `njs_value_t`（含 type、atom_id、token_type、指向字符串字面量的 `njs_string_t`），组成 `njs_atom[]` 数组：
+静态值数组 `njs_atom[]` 由 `njs_atom.c` 用同样的 X-Macro 展开，每条都已把 `type`、`atom_id`、`token_type`、字符串数据预填好。[njs_atom.c:16-34](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L16-L34)：
 
 ```c
 const njs_value_t njs_atom[] = {
@@ -424,7 +384,7 @@ const njs_value_t njs_atom[] = {
     .string = {
         .type = NJS_STRING,
         .truth = njs_length(_s) ? 1 : 0,
-        .atom_id = NJS_ATOM_STRING_ ## _id,
+        .atom_id = NJS_ATOM_STRING_ ## _id,   // ← id 即枚举序号
         .token_type = _typ,
         .token_id = _tok,
         .data = & (njs_string_t) { .start = (u_char *) _s, ... },
@@ -434,116 +394,76 @@ const njs_value_t njs_atom[] = {
 };
 ```
 
-符号值的构造略不同，走 `njs_symval` 宏——它把符号的描述串单独放，主值里只记类型与符号编号：
+这张静态数组就是 `njs_atom_hash_init` 装填共享表时的数据来源（[njs_atom.c:178](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L178) 的 `values = &njs_atom[0]`）。整张清单合计 472 条字符串 + 13 条符号（共 485 条，加上哨兵 `NJS_ATOM_SIZE`），全部在编译期固化、模板期一次性装填进共享表。
 
-[njs_value.h:376-383](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L376-L383) —— 预定义符号值的内存布局，符号 id 存在 `magic32`：
+#### 4.3.4 代码实践
 
-```c
-#define njs_symval(_sym_id, _s) {
-    .data = {
-        .type = NJS_SYMBOL,
-        .truth = 1,
-        .magic32 = NJS_ATOM_SYMBOL_ ## _sym_id,
-        .u = { .value = (njs_value_t *) &njs_ascii_strval(_s) }
-    }
-}
-```
-
-#### 4.3.4 预定义 atom 在哪里被用到
-
-**用途一：属性查找。** 对象属性读写最终都落到 `njs_value_property`，它直接取键值的 `atom_id` 去查对象哈希（u2-l3 讲的 `njs_flathsh_t`）：
-
-[njs_value.h:1016](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L1016) —— 属性查找把 `key->atom_id`（可能正是某个 `NJS_ATOM_STRING_*`）直接交给属性查询：
-
-```c
-return njs_property_query(vm, pq, value, key->atom_id);
-```
-
-所以读 `arr.length` 时，`'length'` 早就是 `NJS_ATOM_STRING_length` 这个整数，整条链路全程没有字符串比较。
-
-**用途二：词法分析的关键字识别。** 词法器扫到一个标识符后，用 `njs_atom_find` 查 atom 表；若命中的 atom 的 `token_type` 不是 `NJS_KEYWORD_TYPE_UNDEF`，就说明它是关键字或预定义标识符：
-
-[njs_lexer.c:754-769](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_lexer.c#L754-L769) —— 词法器把标识符文本原子化，再据 `token_type` 区分关键字与普通标识符：
-
-```c
-entry = njs_atom_find(lexer->vm, token->text.start, token->text.length, hash_id);
-if (entry == NULL) {
-    ...
-    entry = njs_atom_add(lexer->vm, &value, hash_id);   // 新标识符 → 新 atom
-}
-if (entry->string.token_type == NJS_KEYWORD_TYPE_UNDEF) {
-    /* 普通标识符 */
-} else {
-    /* 关键字 / 预定义标识符，沿用预定义的 token_type/token_id */
-}
-```
-
-这就解释了 `njs_atom_defs.h` 里关键字那一段的第四个参数（如 `NJS_TOKEN_FUNCTION`）的用途：它被预填进 atom 的 `token_id`，词法器命中后直接拿来用，不必再查关键字表。
-
-#### 4.3.5 代码实践：定位三个常量并解释
-
-**实践目标**：熟练在 `njs_atom_defs.h` 里查找预定义 atom，并理解其展开结果。
+**实践目标**：在清单文件里定位常用原子，理解 `NJS_DEF_STRING` 与 `NJS_DEF_SYMBOL` 两种声明的差异。
 
 **操作步骤**：
 
-1. 打开 `src/njs_atom_defs.h`，分别定位：
-   - `'length'`（约第 321 行）→ 对应枚举 `NJS_ATOM_STRING_length`。
-   - `'prototype'`（约第 356 行）→ 对应枚举 `NJS_ATOM_STRING_prototype`。
-   - `Symbol.iterator`（第 13 行）→ 对应枚举 `NJS_ATOM_SYMBOL_iterator`。
-2. 打开 `src/njs_atom.h` 第 12–19 行，确认这些枚举常量是如何由 `NJS_DEF_STRING` / `NJS_DEF_SYMBOL` 宏经 `##` 拼接生成的。
-3. 在 `src/njs_atom.c` 第 16–34 行，对照 `NJS_DEF_STRING` 的展开，确认 `njs_atom[NJS_ATOM_STRING_length]` 这一格里的 `atom_id`、`token_type`、`data->start` 分别是什么。
+1. 打开 `src/njs_atom_defs.h`，用搜索定位 `length`（第 321 行）、`prototype`（第 356 行）、`Symbol.iterator`（第 13 行）。
+2. 对比这三行的宏形态：
+   - `NJS_DEF_STRING(length, "length", 0, 0)` —— 4 参数，后两个 `0,0` 表示「不是关键字」。
+   - `NJS_DEF_STRING(prototype, "prototype", 0, 0)` —— 同上。
+   - `NJS_DEF_SYMBOL(iterator, "Symbol.iterator")` —— 2 参数，符号没有 token 类型。
+3. 再找一行关键字，例如 `NJS_DEF_STRING(function, "function", NJS_KWD_RESERVED, NJS_TOKEN_FUNCTION)`（[njs_atom_defs.h:51](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L51)），观察它后两个参数非零——这正是词法器能把它认成关键字的依据。
+4. 打开 `src/njs_atom.h` 第 12–19 行，确认 `length` 展开后是 `NJS_ATOM_STRING_length`，`iterator` 展开后是 `NJS_ATOM_SYMBOL_iterator`。
 
-**需要观察的现象**：你会看到同一份 `njs_atom_defs.h` 清单，在 `.h` 里变成了枚举编号、在 `.c` 里变成了静态值数组，两者下标严格对齐。
+**需要观察的现象**：
 
-**预期结果**：`NJS_ATOM_STRING_length` 是某个整数编号 n；`njs_atom[n].string.data->start` 指向字符串字面量 `"length"`；`token_type` 为 0（非关键字）。`NJS_ATOM_SYMBOL_iterator` 经 `njs_symval` 展开后，`magic32` 字段就是它自己的编号。
+- 同一份 `njs_atom_defs.h`，在 `.h` 里展开成枚举、在 `.c` 里展开成值数组——改清单只需改一处，所有展开自动同步。
+- `unknown` 永远是第 0 号，`atom_id == 0` 因此天然适合当「未原子化」哨兵。
 
-#### 4.3.6 小练习与答案
+**预期结果**：能回答「为什么在 C 代码里看到 `NJS_ATOM_STRING_length` 时，不需要去哈希表里查它——它就是一个编译期常量，值就是它在清单里的序号」。
 
-**练习 1**：为什么 `njs_atom_defs.h` 里的宏清单能同时生成「枚举」和「静态值数组」两样东西？
+#### 4.3.5 小练习与答案
 
-> **答案**：因为它用的是 X-Macro 模式——清单本身只写数据（`NJS_DEF_STRING(length, "length", 0, 0)`），不定义宏。包含它的文件先按自己的需要 `#define NJS_DEF_STRING(...)`，再 include 清单。`.h` 把宏定义成枚举项，`.c` 把宏定义成初始化器，于是同一份清单生成两种产物，且两者的第 n 项天然对应同一个 atom。
+**练习 1**：`njs_atom_is_number(0x80000000)` 的返回值是多少？它代表哪个整数的 number atom？
 
-**练习 2**：`'length'` 在 `njs_atom_defs.h` 里的第四个参数是 `0`，而 `'function'` 是 `NJS_TOKEN_FUNCTION`。这个差异有什么后果？
+**参考答案**：返回 `0x80000000`（非零，判定为 number atom）。它代表整数 `0`：`njs_number_atom(0) = 0 | 0x80000000 = 0x80000000`。也就是说 `arr[0]` 的键 atom_id 是 `0x80000000`。
 
-> **答案**：第四个参数被填进 atom 的 `token_id`。词法器扫描到 `function` 时，`njs_atom_find` 命中预定义 atom，读到非 `NJS_KEYWORD_TYPE_UNDEF` 的 token_type/非零 token_id，直接识别为关键字；而扫描到 `length` 时 token_type 为 0（`NJS_KEYWORD_TYPE_UNDEF`），会被当作普通标识符处理。
+**练习 2**：为什么 `njs_atom_add` 在分配新 id 后要检查 `njs_atom_is_number(...)`？
 
----
+**参考答案**：因为 named atom 的 id 由 `atom_id_generator++` 单调递增，且必须始终 `< 0x80000000`（否则会和 number atom 的位编码冲突）。一旦计数器自增到 `0x80000000`，最高位被置位，`njs_atom_is_number` 返回非零，说明 named atom 的 id 空间用尽，无法再安全分配——此时报「too many atoms」并失败。
+
+**练习 3**：克隆 VM 里产生了一个新字符串 atom，它的 `atom_id` 会落在哪个范围？`njs_atom_to_value` 靠什么判断该去哪张表取它的值？
+
+**参考答案**：会落在 `>= shared_atom_count` 的范围（私有表区）。`njs_atom_to_value` 用 `atom_id < vm->shared_atom_count` 这一条比较来分流：成立则去 `atom_hash_shared`，不成立则去 `atom_hash_current`（即私有表）并扣减 `shared_atom_count` 得到表内偏移。
 
 ## 5. 综合实践
 
-把本讲三个最小模块串起来，完成下面这个「跟踪一个属性读的全过程」任务。
+把本讲三个最小模块串起来，完成一次「从 JS 源码到 atom_id」的完整追踪。
 
-**任务**：解释 JS 代码 `var a = {x: 1}; a.x` 在 njs 内部从源码到属性读取，atom 机制分别扮演了什么角色。
+**任务**：解释下面这行 JS 在 njs 引擎里访问属性 `length` 时，键是如何以 atom_id 形式流动的。
 
-**建议步骤**：
+```js
+var n = "hello".length;
+```
 
-1. **编译期（对应 4.3）**：词法器扫描到标识符 `a` 和属性名 `x`。
-   - 假设 `x` 不是预定义 atom，追踪 `njs_lexer.c:754-767`：`njs_atom_find` 未命中 → `njs_atom_add` 给 `x` 分配一个新 atom_id（从 `atom_id_generator` 取）。
-   - 追踪生成的 AST/字节码里，`a.x` 这条属性读指令的操作数存的是 `x` 的 atom_id（一个整数），而不是字符串 `"x"`。
-2. **运行期属性查找（对应 4.1 + 4.2）**：执行到读 `a.x` 时，引擎拿到键的 atom_id。
-   - 在 `njs_value.h:1016` 看到，属性查询直接用 `key->atom_id`。
-   - 若键是整数下标（如 `a[0]`），则走 4.1.3 的数字 atom 快路径，连 atom 表都不查。
-3. **多请求隔离（对应 4.2）**：若这段代码跑在 NGINX 里，每个请求是一个克隆 VM。
-   - 指出 `shared_atom_count` 把 `x` 这种运行期 atom 隔离在每个请求自己的 `atom_hash` 里，而 `'length'`、`'prototype'` 等预定义 atom 则跨请求共享。
+**追踪步骤**：
 
-**产出**：画一张时序图，标出「源码文本 → djb 哈希 → njs_atom_find/njs_atom_add → atom_id → 字节码操作数 → njs_value_property → 对象哈希查表」这条链路上每一步涉及的源码行号（用本讲给出的永久链接）。
+1. **编译期**：解析器看到 `.length`，词法器把 `length` 识别成一个 atom。因为 `length` 是预定义原子，编译器直接使用常量 `NJS_ATOM_STRING_length`（本讲 4.3 已确认它在 [njs_atom_defs.h:321](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom_defs.h#L321)）。字节码 `PROPERTY_GET` 指令的操作数里携带的就是这个 id。
+2. **共享表装填**：模板 VM 启动时，`njs_atom_hash_init`（[njs_atom.c:168](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_atom.c#L168)）已把 `length` 装进 `atom_hash_shared`，其 id `< NJS_ATOM_SIZE`。
+3. **执行期**：克隆 VM 执行这条 `PROPERTY_GET`，内层 `njs_property_query` 拿到的就是 `NJS_ATOM_STRING_length` 这个整数 id（4.1.3 已说明属性查找只传 atom_id）。由于该 id 不是 number atom（最高位为 0），也不是动态新建的私有 atom，它命中共享表，无需任何字符串比较。
+4. **对比数字键**：如果把代码换成 `arr[3]`，4.1 讲过它走的是 number atom 快路径——id 直接是 `njs_number_atom(3) = 0x80000003`，连共享表都不查。
 
-> 如果本地已构建 `build/njs`，可用 `./build/njs -d -c 'var a={x:1}; a.x'` 对照反汇编输出验证操作数，但具体反汇编格式与操作数显示待本地验证。
+**交付物**：画出这条属性访问的「id 流动图」，标出 `length` 走 named atom（共享表命中）与 `3` 走 number atom（纯算术）两条路径的分叉点。
 
 ## 6. 本讲小结
 
-- **atom = 被驻留的字符串/符号**，用一个 32 位 `atom_id` 代表；引擎内部比较键、存属性名都走整数，不再到处拷贝、比较字符串。
-- **数字 atom 用最高位编码**：`njs_number_atom(n) = n | 0x80000000` 把整数下标直接打包进 atom_id，`njs_atom_is_number` 测最高位判别，`njs_atom_number` 屏蔽最高位还原——整数键 thus 完全不占字符串存储、不查表。
-- **两张表 + 一条分界线**：`atom_hash_shared`（预定义，跨克隆共享）与 `atom_hash`（运行期，每 VM 私有），由 `shared_atom_count` 划分编号域，`atom_hash_current` 指针让同一套代码在模板期与克隆期都能工作。
-- **预定义 atom 用 X-Macro 生成**：`njs_atom_defs.h` 是一份纯数据清单，在 `.h` 里展开成 `NJS_ATOM_STRING_*` / `NJS_ATOM_SYMBOL_*` 枚举，在 `.c` 里展开成 `njs_atom[]` 静态值数组，两者下标严格对齐。
-- **预定义 atom 支撑两大热路径**：属性查找（`njs_value_property` 直接用 `key->atom_id`）与词法关键字识别（`njs_atom_find` 命中后读预填的 `token_type`）。
-- **与 u2-l2/u2-l3 的衔接**：atom_id 正是 `njs_value_t` 头部那个字段；atom 表底层就是 `njs_flathsh_t`，其内存由 VM 的 `mem_pool` 统一持有。
+- **atom = 驻留后的 32 位身份证**。njs 把所有属性名/标识符/符号驻留成 `atom_id`，使属性查找退化为整数比较，字节码里也只存 32 位 id 而非字符串。
+- **number atom 用最高位编码**：`0x80000000` 置位表示这是个数字键，低 31 位就是整数本身（`njs_number_atom`/`njs_atom_number`/`njs_atom_is_number`，[njs.h:68-70](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs.h#L68-L70)）。小整数下标因此走纯算术快路径。
+- **两张表 + 一个指针实现共享/私有分离**：模板 VM 用 `atom_hash_shared` 装预定义原子（`atom_hash_current` 指向它），克隆 VM 浅拷贝复用共享表、另起私有 `atom_hash`，并用 `shared_atom_count` 当分界线。
+- **查找先私有后共享，解码按分界线分流**：`njs_atom_find` 先查 current 再查 shared；`njs_atom_to_value` 用 `atom_id < shared_atom_count` 决定取值位置。
+- **预定义原子由一份 X-Macro 清单驱动**：`njs_atom_defs.h` 一份声明，在 `.h` 展开成枚举、在 `.c` 展开成静态值数组；`length`/`prototype`/`Symbol.iterator` 等都有 `NJS_ATOM_*` 常量名，C 代码可直接引用。
+- **`unknown`（id=0）是「未原子化」哨兵**：`atom_id == 0` 表示键尚未原子化，触发 `njs_atom_atomize_key` 按需驻留。
 
 ## 7. 下一步学习建议
 
-本讲把「值如何被命名/按键」讲透了。接下来两步：
+本讲把「值的键」层面讲透了，接下来可以沿两条线深入：
 
-- **进入编译前端（单元三）**：去看词法器 `src/njs_lexer.c` 如何系统性地调用 `njs_atom_find`/`njs_atom_add` 把整段源码切成 token 流并原子化（u3-l1）。本讲 4.3.4 的词法器片段就是那讲的入口。
-- **进入执行引擎（单元四）**：去看 `NJS_VMCODE_PROPERTY_GET` 等指令在解释器主循环里如何用 atom_id 完成对象属性读写（u4-l1、u4-l2）。届时你会看到本讲的 `njs_value_property` 与 u2-l3 的 `njs_flathsh_t` 在字节码层的真正汇合点。
+- **进入编译前端（u3 单元）**：u3-l1（词法器）会展示词法器如何直接复用 `njs_atom[]` 里预填的 `token_type`/`token_id` 把 atom 识别成关键字；u3-l3（变量与作用域）会展示 `njs_variable_t` 如何用 `atom_id` 标识一个变量名。这是 atom 在编译期的消费方。
+- **进入对象模型（u5 单元）**：u5-l1（对象模型与属性）会展示 `njs_object_prop_t` 如何以 `atom_id` 为键存放在对象的属性哈希表里，以及 `njs_property_query` 沿原型链查找的具体过程。这是 atom 在运行期的消费方。
 
-如果想再深入 atom 表本身，可以阅读 `src/njs_atom.c` 里尚未展开的 `njs_atom_symbol_add`（运行期 `Symbol()` 的驻留）与 `njs_atom_atomize_key` 的 `NJS_NUMBER` 分支（数字值转字符串 atom 的边界处理），它们是本讲机制的直接延伸。
+建议先读 `src/njs_atom_defs.h` 通览一遍清单，感受一下「整个引擎认识的全部名字」都在这一份文件里；再回到 `njs_atom.c` 对照本讲梳理的装填/查找/原子化三条路径，巩固理解。
