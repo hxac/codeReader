@@ -1,0 +1,466 @@
+{
+  "project": "online-doc",
+  "head": "d172f8994369fba0f826ac3f1c2f4d6bf63c9ea5",
+  "rationale": "本项目是北京大学编译原理课程实践的在线文档站（基于 Docsify 构建），其“源码”由三部分组成：Docsify 站点配置与前端资源（index.html、toc.md、assets/）、大量 Markdown 教学内容（docs/lv0–lv9+）、以及一套自研的 Python 链接检查工具与 CI（scripts/check_links.py）。因此学习路径设计为三层递进：第一单元入门，让读者认识项目定位、能在本地把站点跑起来、看懂目录结构与 Docsify 入口；第二单元进阶，理解 Docsify 站点机制（配置/主题/代码高亮/插件）；第三单元进阶，理解文档的内容架构（实验分层如何对应 SysY→Koopa IR→RISC-V 编译流水线、Docsify 扩展写作规范、附录/参考体系）；第四单元专家层，以仓库中唯一且最有分量的代码 scripts/check_links.py 为主线，拆解其配置与入口、链接提取、Docsify 路由解析与本地校验、异步远程校验、忽略规则与 CI 集成。这样由“能跑起来”到“懂机制”再到“读得懂核心代码”，符合从零开始、由浅入深、结合源码与代码实践的原则。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目与本地运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：这是什么仓库",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目定位——这是北京大学编译原理课程实践的在线文档站，基于 Docsify 构建，内容是引导学生从零实现一个把 SysY 编译到 Koopa IR 再到 RISC-V 汇编的编译器。",
+          "learning_goals": [
+            "理解项目的目标受众与整体用途",
+            "区分“文档站本身”与“文档所教授的编译器”",
+            "了解 SysY、Koopa IR、RISC-V 三者在流水线中的角色"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/README.md",
+            "docs/preface/lab.md"
+          ],
+          "minimal_modules": [
+            "项目背景与目标",
+            "文档站 vs 编译器本体",
+            "SysY/Koopa IR/RISC-V 流水线概览"
+          ],
+          "practice_task": "阅读 docs/README.md 和 docs/preface/lab.md，用自己的话写一段约 200 字说明：这个仓库交付的是“编译器”还是“教人写编译器的文档”，并按顺序列出 SysY→Koopa IR→RISC-V 三个阶段分别是什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "在本地把文档站跑起来",
+          "order": 2,
+          "filename": "u1-l2-run-locally.md",
+          "level": "beginner",
+          "topic": "讲解如何在本地启动文档站：安装 docsify-cli、运行 docsify serve docs，以及链接检查器所需的 Python 依赖。",
+          "learning_goals": [
+            "掌握 docsify-cli 的安装与启动命令",
+            "理解 docs/ 目录即文档根目录",
+            "了解 requirements.txt 中链接检查器的依赖"
+          ],
+          "source_files": [
+            "README.md",
+            "requirements.txt",
+            "docs/index.html"
+          ],
+          "minimal_modules": [
+            "docsify-cli 安装",
+            "docsify serve 启动",
+            "Python 依赖一览"
+          ],
+          "practice_task": "在本地执行 npm i docsify-cli -g 与 docsify serve docs，浏览器打开本地地址确认能看到首页；再执行 pip install -r requirements.txt 安装链接检查器依赖。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构一览",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构：根目录配置文件、docs/ 下的分层内容、scripts/ 工具脚本、.github/ CI 配置、assets/ 静态资源。",
+          "learning_goals": [
+            "看懂仓库顶层布局",
+            "区分内容目录（docs）与工程目录（scripts/.github）",
+            "能定位每一类文件所在位置"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/toc.md",
+            ".github/workflows/check-links.yml",
+            "scripts/check_links.py"
+          ],
+          "minimal_modules": [
+            "顶层文件与目录",
+            "docs 内容分层",
+            "工程目录(scripts/.github)",
+            "assets 静态资源"
+          ],
+          "practice_task": "画出仓库的目录树（到二级），并标注每个目录的职责；用 git ls-files 统计 docs/ 目录下共有多少个 .md 文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "站点入口与导航机制",
+          "order": 4,
+          "filename": "u1-l4-entry-and-navigation.md",
+          "level": "beginner",
+          "topic": "讲解 Docsify 的入口与导航机制：index.html 是唯一入口、toc.md 充当侧边栏、footer.md 是页脚。",
+          "learning_goals": [
+            "理解 Docsify 单页应用的入口",
+            "认识 loadSidebar 加载的 toc.md 侧边栏",
+            "了解 footer.md 的作用"
+          ],
+          "source_files": [
+            "docs/index.html",
+            "docs/toc.md",
+            "docs/footer.md"
+          ],
+          "minimal_modules": [
+            "index.html 单页入口",
+            "toc.md 侧边栏结构",
+            "footer.md 页脚"
+          ],
+          "practice_task": "在 docs/toc.md 的“写在前面”下新增一个测试条目（链接到一个已有的 .md），启动站点确认侧边栏出现该条目并能正常跳转。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Docsify 站点机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Docsify 配置与主题样式系统",
+          "order": 1,
+          "filename": "u2-l1-docsify-config-and-theme.md",
+          "level": "intermediate",
+          "topic": "解析 docs/index.html 中 window.$docsify 的全部配置项，以及 docsify-themeable / darklight / katex 主题与自定义 main.css 的样式系统。",
+          "learning_goals": [
+            "掌握 $docsify 的关键配置（loadSidebar/subMaxLevel/search/pagination/copyCode）",
+            "理解明暗主题切换机制",
+            "知道自定义 CSS 如何覆盖默认样式"
+          ],
+          "source_files": [
+            "docs/index.html",
+            "docs/assets/css/main.css"
+          ],
+          "minimal_modules": [
+            "$docsify 配置项",
+            "主题与明暗切换",
+            "katex 与字体",
+            "自定义 main.css"
+          ],
+          "practice_task": "修改 $docsify 中 search.placeholder 为自定义文案，或在 main.css 中调整正文字号，刷新站点观察效果变化。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Koopa IR 语法高亮插件",
+          "order": 2,
+          "filename": "u2-l2-koopa-syntax-highlight.md",
+          "level": "intermediate",
+          "topic": "讲解 docs/assets/js/prism-koopa.js 如何为 Koopa IR 定义一套 Prism 语法高亮规则（注释/字符串/标签/关键字/内建/类型/变量/数字），以及 Docsify 如何加载它。",
+          "learning_goals": [
+            "理解 Prism 语法定义的结构（token + 正则 + alias）",
+            "看懂 Koopa IR 各类 token 的正则",
+            "掌握 Docsify 注册并加载自定义高亮语言的方式"
+          ],
+          "source_files": [
+            "docs/assets/js/prism-koopa.js",
+            "docs/index.html"
+          ],
+          "minimal_modules": [
+            "Prism 语法对象结构",
+            "Koopa 各 token 正则解析",
+            "Docsify 脚本加载顺序"
+          ],
+          "practice_task": "在 prism-koopa.js 的 keyword 或 builtin 列表里新增一个 Koopa 指令，写一段 ```koopa 代码块验证高亮是否生效。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "侧边栏同步与评论插件",
+          "order": 3,
+          "filename": "u2-l3-sidebar-and-comments.md",
+          "level": "intermediate",
+          "topic": "讲解两个 Docsify 插件式资源：sidebar.js 实现侧边栏与正文滚动同步，giscus.js 接入 GitHub Discussions 评论；理解 $docsify.plugins 钩子机制与 DOM 操作。",
+          "learning_goals": [
+            "理解 Docsify 插件生命周期钩子（如 doneEach）",
+            "看懂 sidebar.js 的滚动同步逻辑",
+            "了解 giscus 评论的接入方式"
+          ],
+          "source_files": [
+            "docs/assets/js/sidebar.js",
+            "docs/assets/js/giscus.js",
+            "docs/index.html"
+          ],
+          "minimal_modules": [
+            "$docsify.plugins 钩子",
+            "sidebar 滚动同步实现",
+            "giscus 评论接入"
+          ],
+          "practice_task": "阅读 sidebar.js，尝试在 doneEach 钩子中加一行 console.log 输出当前路由，刷新页面切换章节验证钩子被触发。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "文档内容架构与写作规范",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "实验分层与编译流水线映射",
+          "order": 1,
+          "filename": "u3-l1-lab-layering-and-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解文档如何用 Lv0–Lv9+ 的分层把“写一个编译器”拆成增量任务，并对应到 SysY→Koopa IR→RISC-V 的编译流水线与前端/中端/后端划分。",
+          "learning_goals": [
+            "理解实验十个阶段的递进逻辑",
+            "把各 Lab 映射到编译器的前后端",
+            "看懂 Lv1.1 对编译器结构的总体描述"
+          ],
+          "source_files": [
+            "docs/preface/lab.md",
+            "docs/lv1-main/structure.md",
+            "docs/lv9p-reincarnation/README.md"
+          ],
+          "minimal_modules": [
+            "十阶段分层设计",
+            "Lab↔编译流水线映射",
+            "前端/中端/后端",
+            "可选 Lv9+"
+          ],
+          "practice_task": "制作一张表，把 Lv1–Lv9 每个 Lab 对应到它给编译器增加的能力（如 Lv3=表达式、Lv6=if），并标注其属于前端还是后端。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Docsify 扩展 Markdown 写作规范",
+          "order": 2,
+          "filename": "u3-l2-docsify-markdown-conventions.md",
+          "level": "intermediate",
+          "topic": "总结本仓库 Markdown 写作的 Docsify 扩展约定：提示框（!> 警告 / ?> 提示）、代码围栏语言（c/koopa/ebnf/asm）、KaTeX 公式，以及 /lv1-main/ 风格的 Docsify 路由链接。",
+          "learning_goals": [
+            "掌握 Docsify 提示框语法",
+            "正确使用代码围栏语言以触发高亮",
+            "理解 Docsify 路由式内部链接写法"
+          ],
+          "source_files": [
+            "docs/lv1-main/README.md",
+            "docs/lv1-main/structure.md",
+            "docs/preface/lab.md"
+          ],
+          "minimal_modules": [
+            "提示框语法",
+            "代码围栏与高亮",
+            "KaTeX 公式",
+            "Docsify 路由链接"
+          ],
+          "practice_task": "新建一个测试 .md，分别写一个 !> 警告框、一段 ```koopa 代码、一个指向 /lv1-main/ 的内部链接，启动站点确认三者都正确渲染。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "附录与参考资料体系",
+          "order": 3,
+          "filename": "u3-l3-appendix-and-references.md",
+          "level": "intermediate",
+          "topic": "讲解 misc-app-ref 附录/参考体系如何把语言规范、IR 规范、指令速查、运行时库等参考资料集中组织，并在各 Lab 中被交叉引用。",
+          "learning_goals": [
+            "了解附录的整体分类",
+            "定位 SysY 规范、Koopa IR 规范、RISC-V 指令速查等参考资料",
+            "理解附录与正文 Lab 的交叉引用关系"
+          ],
+          "source_files": [
+            "docs/misc-app-ref/README.md",
+            "docs/misc-app-ref/koopa.md",
+            "docs/toc.md"
+          ],
+          "minimal_modules": [
+            "附录分类总览",
+            "语言/IR/指令规范定位",
+            "与正文的交叉引用"
+          ],
+          "practice_task": "在 docs/misc-app-ref/README.md 列出的附录中找到 Koopa IR 规范对应的文件，并用 grep 统计正文各 Lab 中有多少处链接指向 /misc-app-ref/。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "链接检查器架构（核心代码）",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "链接检查器总览、配置与入口",
+          "order": 1,
+          "filename": "u4-l1-linkchecker-config-and-entry.md",
+          "level": "advanced",
+          "topic": "链接检查器总览：scripts/check_links.py 的整体职责、核心数据类（Link/Issue/RemoteResult 等）、TOML 配置加载与 deep_merge 合并、argparse 命令行入口。",
+          "learning_goals": [
+            "理解检查器要解决的问题与整体流程",
+            "看懂核心 dataclass 与默认配置",
+            "掌握配置合并机制与命令行参数"
+          ],
+          "source_files": [
+            "scripts/check_links.py",
+            "check-links.toml",
+            "requirements.txt"
+          ],
+          "minimal_modules": [
+            "工具职责与流程概览",
+            "核心 dataclass",
+            "TOML 配置与 deep_merge",
+            "argparse 入口"
+          ],
+          "practice_task": "运行 python scripts/check_links.py --config check-links.toml --no-http --verbose，记录输出中扫描到的文件数与链接数；再阅读 check-links.toml 说出每个配置段的作用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "链接提取子系统",
+          "order": 2,
+          "filename": "u4-l2-link-extraction.md",
+          "level": "advanced",
+          "topic": "讲解链接提取：用 markdown-it-py 解析 Markdown 抽取链接/图片、用 selectolax 解析 HTML 块抽取 href/src、以及裸 URL 正则兜底，并做去重与行列号定位。",
+          "learning_goals": [
+            "理解 Markdown token 流如何定位链接",
+            "掌握 HTML 链接属性集合与坐标定位",
+            "看懂裸 URL 提取与去重"
+          ],
+          "source_files": [
+            "scripts/check_links.py"
+          ],
+          "minimal_modules": [
+            "Markdown 链接抽取",
+            "HTML 链接抽取",
+            "裸 URL 兜底",
+            "行列号定位与去重"
+          ],
+          "practice_task": "写一段同时包含 Markdown 链接、图片和裸 URL 的测试 .md 放入 docs/，运行检查器（--no-http --verbose），确认三种链接都被识别。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Docsify 路由解析与本地链接校验",
+          "order": 3,
+          "filename": "u4-l3-docsify-routing-and-local-check.md",
+          "level": "advanced",
+          "topic": "讲解本地链接校验核心：docsify_candidates 如何按 Docsify 路由风格（/path/ → README.md、/path → path.md、?id= 锚点）解析候选文件，以及 collect_local_anchors 如何收集并匹配标题锚点。",
+          "learning_goals": [
+            "理解 Docsify 路由到文件的多种候选规则",
+            "看懂锚点归一化（NFC/小写/连字符）",
+            "掌握本地“缺失目标/缺失锚点”两类错误的判定"
+          ],
+          "source_files": [
+            "scripts/check_links.py",
+            "docs/index.html"
+          ],
+          "minimal_modules": [
+            "docsify_candidates 候选规则",
+            "README/index 回退",
+            "锚点归一化与收集",
+            "本地错误判定"
+          ],
+          "practice_task": "在某个 .md 里故意写一个指向不存在页面的内部链接（如 /lv99-none/），运行检查器，观察并解释 local-missing-target 错误信息中“tried”列出的候选路径。",
+          "depends_on": [
+            "u4-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "远程链接的异步校验与片段验证",
+          "order": 4,
+          "filename": "u4-l4-async-remote-check.md",
+          "level": "advanced",
+          "topic": "讲解远程链接异步校验：用 httpx.AsyncClient + 信号量并发、先 HEAD 后 GET 回退、按 content-type 判断是否为 HTML、抓取页面验证远程锚点是否存在。",
+          "learning_goals": [
+            "理解 asyncio 并发与限流",
+            "掌握 HEAD/GET 回退策略",
+            "看懂远程片段（fragment）锚点验证逻辑与可接受状态码判定"
+          ],
+          "source_files": [
+            "scripts/check_links.py"
+          ],
+          "minimal_modules": [
+            "异步并发与信号量",
+            "HEAD/GET 回退",
+            "HTML 内容判定",
+            "远程锚点验证",
+            "状态码接受规则"
+          ],
+          "practice_task": "运行检查器（不带 --no-http）扫描全部远程链接，找出返回非 2xx 的链接；阅读 evaluate_remote_response 解释为何 403 会被判为通过。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "忽略规则、主流程编排与 CI 集成",
+          "order": 5,
+          "filename": "u4-l5-ignore-rules-and-ci.md",
+          "level": "advanced",
+          "topic": "讲解忽略规则系统（IgnoreRule 的合取匹配字段）与 check_links 主流程编排（扫描→提取→过滤→本地/远程校验→统计），以及 GitHub Actions CI 如何在 PR/push 时自动检查链接。",
+          "learning_goals": [
+            "掌握忽略规则的多字段合取匹配",
+            "看懂主流程的编排与统计",
+            "理解 CI 触发路径与失败条件"
+          ],
+          "source_files": [
+            "scripts/check_links.py",
+            "check-links.toml",
+            ".github/workflows/check-links.yml"
+          ],
+          "minimal_modules": [
+            "IgnoreRule 合取匹配",
+            "主流程编排与统计",
+            "链接/问题双层过滤",
+            "CI 触发与判定"
+          ],
+          "practice_task": "在 check-links.toml 新增一条 [[ignore]] 规则忽略某个已知 404 的 URL（参考已有的 kira-cpp 规则），运行检查器确认该链接不再报错；并说明 CI 在什么条件下会因链接检查失败。",
+          "depends_on": [
+            "u4-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
