@@ -255,6 +255,74 @@ check(analyze.MOCK_WORKER_CALLS == 1,
 check(e["phase"] == "workers", "phase 仍 workers（未停本轮、未 done）")
 os.environ.pop("RC_MOCK_TIMEOUT_ON", None)
 
+# ---- Run 4.8：子目录拆分（folders）----
+# 验证 folders 字段把一个仓库展开成多个头等 fleet 条目：共享一份 clone，每个子目录独立
+# 规划/生成，state key 带 @subpath 后缀，worker 写到子目录下（CWD 落子目录），收割到各自目录。
+# 向后兼容靠 subpath="" 保住——前面所有场景都用无 folders 的夹具，完全不受影响。
+print("\n=== Run 4.8: folders 子目录拆分（共享 clone + 各自独立）===")
+CTRL2 = TMP / "ctrl2"; CTRL2.mkdir()
+WORK2 = TMP / "work2"; WORK2.mkdir()
+STATE2 = CTRL2 / "repos_state.json"
+TUTORIALS2 = CTRL2 / "tutorials"
+# 第二个夹具仓：含 a/、b/ 两个子目录，各一个文件，模拟 monorepo 的子项目。
+FIX2 = TMP / "fixture2"; FIX2.mkdir()
+(FIX2 / "a").mkdir(); (FIX2 / "a" / "x.md").write_text("# a\n", encoding="utf-8")
+(FIX2 / "b").mkdir(); (FIX2 / "b" / "y.md").write_text("# b\n", encoding="utf-8")
+git(FIX2, "init", "-q"); git(FIX2, "add", "-A"); git(FIX2, "commit", "-qm", "init")
+(CTRL2 / "repos.yml").write_text(
+    "repos:\n  - name: test/multifix\n"
+    f"    url: file://{FIX2.as_posix()}\n    project: MultiFix\n    focus: split\n"
+    "    folders: [a, b]\n",
+    encoding="utf-8")
+# 这几个路径是 import 时冻结成模块常量的，这里直接改属性切到独立环境（它们都是调用时读全局）。
+_prev_paths = (analyze.REPOS_YML, analyze.STATE_FILE, analyze.WORK_DIR, analyze.TUTORIALS_DIR)
+analyze.REPOS_YML = CTRL2 / "repos.yml"
+analyze.STATE_FILE = STATE2
+analyze.WORK_DIR = WORK2
+analyze.TUTORIALS_DIR = TUTORIALS2
+os.environ["RC_REPO_NAME"] = ""        # 清掉之前固定的 test/fixture 过滤，让 multifix 两个 folder 都跑
+os.environ["RC_MODE"] = "full"; os.environ["RC_FORCE_FULL"] = "true"
+os.environ.pop("RC_EVENT_NAME", None)
+analyze.MOCK_PLANNER_CALLS = 0
+rc48 = analyze.main()
+st2 = json.loads(STATE2.read_text(encoding="utf-8"))["repos"]
+check(rc48 == 0, f"退出码 0（got {rc48}）")
+check(set(st2.keys()) == {"test/multifix@a", "test/multifix@b"},
+      f"展开成两个 @subpath key（got {sorted(st2.keys())}）")
+check(st2["test/multifix@a"]["phase"] == "done", "@a phase=done")
+check(st2["test/multifix@b"]["phase"] == "done", "@b phase=done")
+check(st2["test/multifix@a"]["version"] == 1, "@a version=1")
+check(analyze.MOCK_PLANNER_CALLS == 2,
+      f"每个子目录各调一次 planner（got {analyze.MOCK_PLANNER_CALLS}）")
+TUT_A = TUTORIALS2 / "test" / "multifix" / "MultiFix-a-tutorial"
+TUT_B = TUTORIALS2 / "test" / "multifix" / "MultiFix-b-tutorial"
+check((TUT_A / "manifest.json").exists(), "@a manifest.json 生成")
+check((TUT_A / "u1-l1.md").exists(), "@a u1-l1.md 生成")
+check((TUT_B / "manifest.json").exists(), "@b manifest.json 生成")
+check((TUT_B / "u1-l1.md").exists(), "@b u1-l1.md 生成")
+# 共享 clone：work2 下只有一份 test-multifix，不是每个 folder 各 clone 一份。
+check((WORK2 / "test-multifix").exists(), "共享 clone 存在")
+check(len([p for p in WORK2.iterdir() if p.is_dir()]) == 1,
+      "work2 仅一份 clone（folder 共享 clone，未各 clone）")
+# CWD 落子目录：worker 把讲义写进了 clone 的 a/、b/ 子目录下，而不是 clone 根。
+check((WORK2 / "test-multifix" / "a" / "MultiFix-a-tutorial" / "u1-l1.md").exists(),
+      "@a 讲义写到 clone 的 a/ 子目录下（CWD 落子目录）")
+check((WORK2 / "test-multifix" / "b" / "MultiFix-b-tutorial" / "u1-l1.md").exists(),
+      "@b 讲义写到 clone 的 b/ 子目录下（CWD 落子目录）")
+# RC_REPO_NAME 过滤：父名 → 两个 folder；完整 @key → 单个。直接用 load_repos 验，不跑 main。
+analyze.REPOS_YML = CTRL2 / "repos.yml"
+os.environ["RC_REPO_NAME"] = "test/multifix"
+both = analyze.load_repos()
+check(len(both) == 2, f"RC_REPO_NAME=父名 → 选中两个 folder（got {len(both)}）")
+os.environ["RC_REPO_NAME"] = "test/multifix@a"
+one = analyze.load_repos()
+check(len(one) == 1 and one[0].subpath == "a",
+      f"RC_REPO_NAME=@a → 只选 a（got {[r.subpath for r in one]}）")
+# 复位模块常量与 env，别污染后面的 Run 5（纯单测，本不依赖它们，复位仅为干净）。
+analyze.REPOS_YML, analyze.STATE_FILE, analyze.WORK_DIR, analyze.TUTORIALS_DIR = _prev_paths
+os.environ["RC_REPO_NAME"] = "test/fixture"
+os.environ["RC_MODE"] = "auto"; os.environ["RC_FORCE_FULL"] = "false"
+
 # ---- Run 5：纯函数单测，全是离线的，不烧额度 ----
 print("\n=== Run 5: 单元回归（classify / signature CRLF / deadzone wrap / render 无 None）===")
 

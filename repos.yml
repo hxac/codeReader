@@ -76,7 +76,6 @@ repos:
   - name: ModelTC/lightllm
   - name: karpathy/llm.c
   - name: RCoeurjoly/LLM2FPGA
-  - name: THU-DSP-LAB/llvm-project
   - name: LMCache/LMCache
   - name: InternLM/lmdeploy
   - name: Lumen-Laboratory/Mayoiuta
@@ -130,6 +129,11 @@ repos:
   - name: hkust-zhiyao/RTL-Coder
   - name: alan-turing-institute/sar-vessel-detection-fpga
   - name: sgl-project/sglang
+  - name: sgl-project/mini-sglang
+  - name: sgl-project/sgl-learning-materials
+  - name: sgl-project/SpecForge
+  - name: sgl-project/sglang-omni
+  - name: sgl-project/genai-bench
   - name: slaclab/surf
   - name: google-deepmind/synthid-text
   - name: abdelazeem201/Systolic-array-implementation-in-RTL-for-TPU
@@ -146,6 +150,8 @@ repos:
   - name: tile-ai/TileOPs
   - name: tile-ai/TileRT
   - name: tile-ai/tilescale
+  - name: tile-ai/AttentionEngine
+  - name: tile-ai/tilelang-metax
   - name: NVIDIA/tilus
   - name: adam-maj/tiny-gpu
   - name: Jiayi-Pan/TinyZero
@@ -154,6 +160,7 @@ repos:
   - name: typst/typst
   - name: THU-DSP-LAB/ventus-gpgpu
   - name: THU-DSP-LAB/ventus-gpgpu-verilog
+  - name: THU-DSP-LAB/llvm-project
   - name: alexforencich/verilog-ethernet
   - name: vllm-project/vllm
   - name: vllm-project/vllm-omni
@@ -169,9 +176,8 @@ repos:
   - name: Dao-AILab/quack
   - name: blueberrycongee/codemirror-live-markdown
   - name: analogdevicesinc/hdl
-    project: adi_hdl # 上游仓库名是 hdl，改名 adi_hdl 以便辨识
-  - name: elisei.ilies/CIC-filters # 自托管 GitLab（gitlab.upt.ro），需显式 url
-    url: https://gitlab.upt.ro/elisei.ilies/CIC-filters.git
+    project: adi_hdl
+  - name: https://gitlab.upt.ro/elisei.ilies/CIC-filters.git
   - name: ahmedshahein/DSP-RTL-Lib
   - name: enclustra/en_cl_fix
     project: enclustra_en_cl_fix # 与 open-logic/en_cl_fix 同 IP 核的另一 fork，改名避撞
@@ -213,3 +219,8 @@ repos:
   - name: https://gitcode.com/cann/runtime
   - name: https://gitcode.com/cann/shmem
   - name: https://gitcode.com/cann/sip
+  - name: deepseek-ai/DeepSpec
+  - name: deepseek-ai/DeepSeek-Math-V2
+  - name: deepseek-ai/DreamCraft3D
+  - name: deepseek-ai/EPLB
+  - name: deepseek-ai/profile-data
