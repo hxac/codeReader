@@ -109,6 +109,23 @@ GLOBAL_STOP = threading.Event()
 # 用 RLock 而不是 Lock，是因为 save_state 可能嵌套调用，RLock 允许同一线程重复加锁。
 GLOBAL_STATE_LOCK = threading.RLock()
 
+# 按 clone 目录加锁：子目录拆分后，同一个父仓库的多个 folder 条目共享一份 clone，
+# 它们会在 RC_CONCURRENCY 下并行跑 sync_repo，得让 fetch/checkout/reset 串行，
+# 免得两个线程同时踩同一份 .git 的 index.lock。
+_CLONE_LOCKS: dict[str, threading.Lock] = {}
+_CLONE_LOCKS_GUARD = threading.Lock()
+
+
+def _clone_lock(clone_dir: Path) -> threading.Lock:
+    """取（或建）某个 clone 目录专属的锁。"""
+    key = str(clone_dir)
+    with _CLONE_LOCKS_GUARD:
+        lk = _CLONE_LOCKS.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _CLONE_LOCKS[key] = lk
+        return lk
+
 # 讲义的五种状态串，集中定义在一处，免得字面量散得到处都是、迟早对不上。
 STATUS_DONE, STATUS_KEEP, STATUS_PENDING, STATUS_FAILED, STATUS_ABANDONED = (
     "done", "keep", "pending", "failed", "abandoned")
@@ -176,11 +193,21 @@ MANIFEST_SCHEMA = {
 # 一个待分析项目的全部信息，都是从 repos.yml 里读出来的。
 @dataclass
 class Repo:
-    name: str            # owner/repo 形式的全名
+    name: str            # owner/repo 形式的全名（子目录目标也是父仓库的 owner/repo）
     url: str             # clone 地址，缺省由 name 拼出来
     branch: str | None   # 指定分支；None 表示用默认分支
-    project: str         # 项目短名，用来命名讲义目录
+    project: str         # 项目短名，用来命名讲义目录；子目录目标 = {base}-{folder}
     focus: str           # 用户想让讲义侧重讲什么
+    subpath: str = ""    # ""=整仓；非空=self 子目录目标（如 "clang"），只处理 clone 内该子目录
+
+
+def repo_key(repo: "Repo") -> str:
+    """fleet/state 用的唯一身份：整仓就是 name；子目录目标是 name@subpath。
+
+    子目录目标（subpath 非空）和普通仓库同一等级，但共享父仓库的 clone，所以身份得带个子目录后缀
+    做区分，免得 state key、教程目录、日志撞车。
+    """
+    return f"{repo.name}@{repo.subpath}" if repo.subpath else repo.name
 
 
 def log(msg: str) -> None:
@@ -671,13 +698,29 @@ def load_repos() -> list[Repo]:
             # url 和 project 缺省都由 name 推出来
             url = (item.get("url") or "").strip() or f"https://github.com/{name}.git"
             project = (item.get("project") or "").strip() or name.split("/")[-1]
-        repos.append(Repo(name=name, url=url,
-                          branch=(item.get("branch") or "").strip() or None,
-                          project=project, focus=(item.get("focus") or "").strip()))
+        branch = (item.get("branch") or "").strip() or None
+        focus = (item.get("focus") or "").strip()
+        folders = item.get("folders") or []
+        if folders:
+            # 子目录拆分：每个 folder 展开成一个独立的头等 fleet 条目（self 标记 subpath 非空），
+            # 共享父仓库的 clone，各自只处理 clone 内该子目录。配了 folders 就不再发整仓条目。
+            for f in folders:
+                f = (str(f) or "").strip().strip("/")
+                if not f:
+                    continue
+                if "/" in f:
+                    log(f"WARN 跳过嵌套子目录 {f!r}（{name} 的 folders v1 仅支持一级子目录）")
+                    continue
+                repos.append(Repo(name=name, url=url, branch=branch,
+                                  project=f"{project}-{f}", focus=focus, subpath=f))
+        else:
+            repos.append(Repo(name=name, url=url, branch=branch,
+                              project=project, focus=focus, subpath=""))
     # RC_REPO_NAME 用来只处理某一个仓库，debug 单仓库模式就靠它。
+    # 给父仓库名（owner/repo）→ 选中它的全部 folder；给完整的 name@subpath → 只选那一个。
     filt = (os.environ.get("RC_REPO_NAME") or "").strip()
     if filt:
-        repos = [r for r in repos if r.name == filt]
+        repos = [r for r in repos if repo_key(r) == filt or r.name == filt]
         if not repos:
             log(f"WARN RC_REPO_NAME={filt!r} 无匹配")
     return repos
@@ -738,41 +781,43 @@ def sync_repo(repo: Repo) -> Path:
     """
     safe = repo.name.replace("/", "-")
     repo_dir = WORK_DIR / safe
-    if repo_dir.exists() and (repo_dir / ".git").exists():
-        phase_log(repo.name, "clone", "(fetch)")
-        _git(["fetch", "--all", "--tags"], repo_dir)
-        if repo.branch:
-            # 先看看 origin 上这个分支还在不在。上游可能把它删了或改了名。
-            if not _remote_branch_exists(repo_dir, repo.branch):
-                log(f"  WARN 分支 {repo.branch!r} 在 origin 不存在，"
-                    f"fallback 到默认分支（repos.yml 的 branch 配置可能过期）")
-                # 取 origin/HEAD 指向的默认分支
-                try:
-                    default = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo_dir)
-                    default = default.replace("origin/", "")
-                except RuntimeError:
-                    default = "main"
-                    log(f"  WARN 无法确定默认分支，fallback 到 'main'")
-                _git(["checkout", default], repo_dir)
-                _git(["reset", "--hard", f"origin/{default}"], repo_dir)
+    # 同一父仓库的多个 folder 共享这份 clone：按目录加锁，串行 fetch/clone，避免并发踩 .git/index.lock。
+    with _clone_lock(repo_dir):
+        if repo_dir.exists() and (repo_dir / ".git").exists():
+            phase_log(repo.name, "clone", "(fetch)")
+            _git(["fetch", "--all", "--tags"], repo_dir)
+            if repo.branch:
+                # 先看看 origin 上这个分支还在不在。上游可能把它删了或改了名。
+                if not _remote_branch_exists(repo_dir, repo.branch):
+                    log(f"  WARN 分支 {repo.branch!r} 在 origin 不存在，"
+                        f"fallback 到默认分支（repos.yml 的 branch 配置可能过期）")
+                    # 取 origin/HEAD 指向的默认分支
+                    try:
+                        default = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo_dir)
+                        default = default.replace("origin/", "")
+                    except RuntimeError:
+                        default = "main"
+                        log(f"  WARN 无法确定默认分支，fallback 到 'main'")
+                    _git(["checkout", default], repo_dir)
+                    _git(["reset", "--hard", f"origin/{default}"], repo_dir)
+                else:
+                    _git(["checkout", repo.branch], repo_dir)
+                    _git(["reset", "--hard", f"origin/{repo.branch}"], repo_dir)
             else:
-                _git(["checkout", repo.branch], repo_dir)
-                _git(["reset", "--hard", f"origin/{repo.branch}"], repo_dir)
+                _git(["pull", "--ff-only"], repo_dir)
         else:
-            _git(["pull", "--ff-only"], repo_dir)
-    else:
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir, ignore_errors=True)
-        phase_log(repo.name, "clone")
-        if repo.branch:
-            # 先 clone 默认分支，再检查目标分支是否存在
-            _git(["clone", repo.url, str(repo_dir)], ROOT)
-            if _remote_branch_exists(repo_dir, repo.branch):
-                _git(["checkout", repo.branch], repo_dir)
+            if repo_dir.exists():
+                shutil.rmtree(repo_dir, ignore_errors=True)
+            phase_log(repo.name, "clone")
+            if repo.branch:
+                # 先 clone 默认分支，再检查目标分支是否存在
+                _git(["clone", repo.url, str(repo_dir)], ROOT)
+                if _remote_branch_exists(repo_dir, repo.branch):
+                    _git(["checkout", repo.branch], repo_dir)
+                else:
+                    log(f"  WARN clone 后分支 {repo.branch!r} 在 origin 不存在，留在默认分支")
             else:
-                log(f"  WARN clone 后分支 {repo.branch!r} 在 origin 不存在，留在默认分支")
-        else:
-            _git(["clone", repo.url, str(repo_dir)], ROOT)
+                _git(["clone", repo.url, str(repo_dir)], ROOT)
     return repo_dir
 
 
@@ -1043,7 +1088,7 @@ def run_lectures_sequential(repo: Repo, repo_dir: Path,
                     _write_lecture_status(entry, lid, status=STATUS_DONE, action=action,
                                           retries=st.get("retries", 0), cost=r.cost_usd)
                     save_state(state)
-                phase_log(repo.name, "讲义生成", f"({n_done}/{total}) {lid}")
+                phase_log(repo_key(repo), "讲义生成", f"({n_done}/{total}) {lid}")
                 break
             except QuotaExhaustedError as e:
                 # 退避 10 次已耗尽，暂停当前仓库；不设全局停牌、不连累其他仓库
@@ -1084,15 +1129,25 @@ def run_lectures_sequential(repo: Repo, repo_dir: Path,
 # --------------------------------------------------------------------------- #
 def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
     """处理单个项目从头到尾的全过程，返回 done、incomplete 或 skipped 三种之一。"""
-    entry = get_entry(state, repo.name)
+    entry = get_entry(state, repo_key(repo))
     try:
         repo_dir = sync_repo(repo)
         head = head_of(repo_dir)
+        # 子目录目标（self 标记）：claude 直接在该子目录里跑，把它当项目根，自然只看得到该子目录。
+        # 共享父仓库 clone，所以 cwd、worker 写入、manifest、harvest 全部落到子目录下。
+        work_cwd = repo_dir / repo.subpath if repo.subpath else repo_dir
+        if repo.subpath and not work_cwd.exists():
+            with GLOBAL_STATE_LOCK:
+                entry["last_error"] = f"子目录不存在: {repo.subpath!r}（检查 repos.yml 的 folders）"
+                entry["last_run_at"] = generated_at
+                save_state(state)
+            log(f"  WARN {repo_key(repo)} 子目录 {repo.subpath!r} 不存在，跳过")
+            return "incomplete"
         tutorial_dir = f"{repo.project}-tutorial"
         owner, seg = repo.name.split("/", 1)
-        clone_tutorial = repo_dir / tutorial_dir
+        clone_tutorial = work_cwd / tutorial_dir
         control_tutorial = TUTORIALS_DIR / owner / seg / tutorial_dir
-        permalink_base = f"https://github.com/{repo.name}/blob/{head}/"
+        permalink_base = f"https://github.com/{repo.name}/blob/{head}/" + (f"{repo.subpath}/" if repo.subpath else "")
 
         # 手动逃生口 RC_FORCE_FULL 和 RC_MODE=full 只在非定时运行时才生效。定时运行会结构性地
         # 忽略它们，保证定时只会因为「提示词被改」或「第一次建」才走全量。手动 dispatch、本地
@@ -1153,12 +1208,12 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
 
         if need_planner:
             if _deadzone_blocked():
-                log(f"  临近/处于死区，暂缓规划 {repo.name}（保留进度，下次窗口续传）")
+                log(f"  临近/处于死区，暂缓规划 {repo_key(repo)}（保留进度，下次窗口续传）")
                 with GLOBAL_STATE_LOCK:
                     entry["last_run_at"] = generated_at
                     save_state(state)
                 return "incomplete"
-            phase_log(repo.name, "大纲生成")
+            phase_log(repo_key(repo), "大纲生成")
             existing = None
             if plan_mode == "incremental" and (clone_tutorial / "manifest.json").exists():
                 existing = (clone_tutorial / "manifest.json").read_text(encoding="utf-8")
@@ -1166,7 +1221,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
             (clone_tutorial / ".transcripts").mkdir(parents=True, exist_ok=True)
             planner_cfg.transcript_dir = (clone_tutorial / ".transcripts").resolve()
             manifest = call_planner(
-                repo, head, plan_mode, repo_dir,
+                repo, head, plan_mode, work_cwd,
                 compose_planner_prompt(repo, plan_mode, head, old_head, existing, tutorial_dir, permalink_base),
                 planner_cfg, json.dumps(MANIFEST_SCHEMA),
             )
@@ -1189,7 +1244,7 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
                 entry["mode"] = plan_mode
                 save_state(state)
         else:
-            log(f"  续传 workers（{repo.name}）")
+            log(f"  续传 workers（{repo_key(repo)}）")
             if not (clone_tutorial / "manifest.json").exists():
                 with GLOBAL_STATE_LOCK:
                     entry["phase"] = None
@@ -1232,9 +1287,9 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
             ensure_ascii=False, indent=2)
         todo = [l for l in ordered if _lec_status(entry, l["id"]) in RETRYABLE]
         if todo:
-            phase_log(repo.name, "讲义生成", f"(0/{len(todo)})")
+            phase_log(repo_key(repo), "讲义生成", f"(0/{len(todo)})")
             # worker 算 diff 用的是持久化下来的 prev_head，续传时它仍指向旧的 head，这就是修复 #2
-            res = run_lectures_sequential(repo, repo_dir, ordered, state, entry, head,
+            res = run_lectures_sequential(repo, work_cwd, ordered, state, entry, head,
                                           entry.get("prev_head"), tutorial_dir, permalink_base,
                                           worker_cfg, generated_at,
                                           outline_prompt=outline_prompt,
@@ -1302,14 +1357,14 @@ def process_repo(repo: Repo, state: dict, generated_at: str) -> str:
         return "incomplete"
     except QuotaExhaustedError as e:
         # 退避已耗尽，仅暂停当前仓库；不设全局停牌
-        log(f"  额度耗尽（{repo.name}）：{str(e)[:200]}；保存进度")
+        log(f"  额度耗尽（{repo_key(repo)}）：{str(e)[:200]}；保存进度")
         with GLOBAL_STATE_LOCK:
             entry["last_error"] = f"quota: {str(e)[:300]}"
             entry["last_run_at"] = generated_at
             save_state(state)
         return "incomplete"
     except Exception as e:  # noqa: BLE001
-        log(f"  ERROR {repo.name}: {type(e).__name__}: {e}")
+        log(f"  ERROR {repo_key(repo)}: {type(e).__name__}: {e}")
         with GLOBAL_STATE_LOCK:
             entry["last_error"] = f"{type(e).__name__}: {str(e)[:300]}"
             entry["last_run_at"] = generated_at
@@ -1333,7 +1388,7 @@ def _safe_process_repo(repo: Repo, state: dict, generated_at: str,
         return process_repo(repo, state, generated_at)
     except QuotaExhaustedError:
         # 退避已耗尽，仅暂停当前仓库；不设全局停牌
-        entry = get_entry(state, repo.name)
+        entry = get_entry(state, repo_key(repo))
         with GLOBAL_STATE_LOCK:
             entry["last_error"] = "quota: exhausted after retries"
             entry["last_run_at"] = generated_at
@@ -1380,8 +1435,8 @@ def main() -> int:
     phase1 = list(repos)
     phase2: list[Repo] = []
     if two_pass:
-        phase1 = [r for r in repos if not is_done(r.name)]
-        phase2 = [r for r in repos if is_done(r.name)]
+        phase1 = [r for r in repos if not is_done(repo_key(r))]
+        phase2 = [r for r in repos if is_done(repo_key(r))]
 
     # 软截止，由 RC_RUN_DEADLINE_MIN 控制
     run_start = time.monotonic()
@@ -1421,7 +1476,7 @@ def main() -> int:
                     except Exception as e:
                         # 未预期的错误，_safe_process_repo 安全网没兜住的
                         had_error = True
-                        log(f"  ERROR [{repo.name}] uncaught: {e}")
+                        log(f"  ERROR [{repo_key(repo)}] uncaught: {e}")
                         # 未预期异常不拉新
                         continue
 
@@ -1435,7 +1490,7 @@ def main() -> int:
                             futs[ex.submit(_safe_process_repo, next_r, state,
                                            generated_at, run_start, deadline_min)] = next_r
 
-                    log(f"  [{repo.name}] → {outcome}")
+                    log(f"  [{repo_key(repo)}] → {outcome}")
 
                     if GLOBAL_STOP.is_set():
                         any_incomplete = True
