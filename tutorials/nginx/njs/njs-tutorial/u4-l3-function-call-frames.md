@@ -2,11 +2,11 @@
 
 ## 1. 本讲目标
 
-上一讲（u4-l2）我们搞清楚了「值存在哪、怎么取」：每条指令的操作数是一个 `njs_index_t`，被解码成 `vm->levels[level][slot]` 的一次 O(1) 访问。其中 LOCAL 和 CLOSURE 两级指针会在「函数调用边界」上整体替换。本讲就来回答那个被刻意按下没讲的问题：**一次函数调用，到底是怎么把新函数的 LOCAL/CLOSURE 数组建好、把旧的存起来、跑完再恢复的？**
+上一讲（u4-l2）我们解决了「值存在哪、怎么取」：每条指令的操作数是一个 `njs_index_t`，被解码成 `vm->levels[level][slot]` 的一次 O(1) 访问，其中 LOCAL 和 CLOSURE 两级指针会在「函数调用边界」上整体替换。本讲就来回答那个被刻意按下没讲的问题：**一次函数调用，到底是怎么把新函数的 LOCAL/CLOSURE 数组建好、把旧的存起来、跑完再恢复的？**
 
 读完本讲你应该能够：
 
-- 区分 njs 里两种函数的内部表示：**原生 C 函数（native）**与**字节码 lambda 函数**，看懂它们共用一个 `njs_function_t` 却在 `u` 联合里分叉。
+- 区分 njs 里两种函数的内部表示：**原生 C 函数（native）** 与 **字节码 lambda 函数**，看懂它们共用一个 `njs_function_t` 却在 `u` 联合里分叉。
 - 画出**调用帧链** `vm->top_frame` / `vm->active_frame` 的结构，说清楚每次调用是怎么把一个新帧「压」上去、返回时怎么「弹」下来。
 - 跟踪一条调用从 **`FUNCTION_FRAME` → `PUT_ARG` → `FUNCTION_CALL` → 函数体 → `RETURN`** 的完整字节码路径，并指出 native 调用与 lambda 调用在执行方式上的根本差别。
 
@@ -14,12 +14,12 @@
 
 ## 2. 前置知识
 
-- **寄存器式 VM**：njs 不用操作数栈，中间结果都放在带编号的槽位里（见 u4-l2）。本讲里你会看到，函数的局部变量、参数也住在这样的槽位里，而这些槽位的物理内存就**分配在调用帧上**。
+- **寄存器式 VM**：njs 不用操作数栈，中间结果都放在带编号的槽位里（见 u4-l2）。本讲你会看到，函数的局部变量、参数也住在这样的槽位里，而这些槽位的物理内存就**分配在调用帧上**。
 - **`njs_value_t`**：16 字节的 JS 值（见 u2-l2）。一个函数在 JS 层是一个值，内部用一个 `njs_function_t` 结构体表示。
 - **四级存储 LOCAL/CLOSURE/GLOBAL/STATIC**：见 u4-l2。本讲最关心的是：调用一个函数时，VM 怎么把 `vm->levels[NJS_LEVEL_LOCAL]` 和 `vm->levels[NJS_LEVEL_CLOSURE]` 这两个指针「换」成被调函数自己的数组。
 - **字节码取指循环**：见 u4-l1。解释器主循环 `pc` 推进靠 `ret`（本条指令长度），遇到 `FUNCTION_CALL` 这类指令会递归进入新一轮解释器循环。
 
-> 一句话区分两个容易混的词：**「函数」（`njs_function_t`）**是 JS 语义对象，描述「这是一个可调用的东西」；**「调用帧」（`njs_native_frame_t` / `njs_frame_t`）**是运行期对象，描述「这一次具体调用所占的内存与上下文」。同一个函数可以被调用很多次，每次调用对应一个独立的帧。
+> 一句话区分两个容易混的词：**「函数」（`njs_function_t`）** 是 JS 语义对象，描述「这是一个可调用的东西」；**「调用帧」（`njs_native_frame_t` / `njs_frame_t`）** 是运行期对象，描述「这一次具体调用所占的内存与上下文」。同一个函数可以被调用很多次，每次调用对应一个独立的帧。
 
 ## 3. 本讲源码地图
 
@@ -47,7 +47,7 @@
 
 njs 用**同一个结构体** `njs_function_t` 表示这两种函数，靠一个 `native` 标志位区分，并在一个 `u` 联合里「分叉」存放各自专属的信息。这样上层代码（比如属性查找、`typeof`）只需要一种「函数值」的概念，只有真正要调用时才去关心它是 native 还是 lambda。
 
-此外还有一个关键标志 `ctor`（constructor）：标记这个函数能否用 `new` 调用。内建函数和你写的 `class`/构造函数会置 `ctor=1`，普通箭头函数为 0。
+此外还有一个关键标志 `ctor`（constructor）：标记这个函数能否用 `new` 调用。内建构造器和你写的 `class`/构造函数会置 `ctor=1`，普通箭头函数为 0。
 
 ### 4.1.2 核心流程
 
@@ -76,7 +76,7 @@ njs_function_t
 | 执行方式 | 走解释器，递归进入字节码循环 | 直接 C 函数调用，**不**进解释器 |
 | 字节码来源 | 有自己的 `lambda->start` 代码块 | 无字节码 |
 
-lambda 专属的 `njs_function_lambda_t` 才是「编译产物」的载体——它就是 u3-l4/u3-l5 讲的字节码生成器的产物被挂载的地方。
+lambda 专属的 `njs_function_lambda_t` 才是「编译产物」的载体——它就是 u3-l4 / u3-l5 讲的字节码生成器的产物被挂载的地方。
 
 ### 4.1.3 源码精读
 
@@ -278,7 +278,7 @@ njs_function_frame(njs_vm_t *vm, njs_function_t *function, ...)
 
 这是 4.1 的「分叉」在调用准备阶段的体现：同一个 `njs_function_frame` 入口，按 `native` 位走两条完全不同的分配路径。
 
-**lambda 帧的双区布局** —— [src/njs_function.c:L397-L441](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L397-L441)（`njs_function_lambda_frame`，含官方布局注释，节选）：
+**lambda 帧的双区布局** —— [src/njs_function.c:L383-L467](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L383-L467)（`njs_function_lambda_frame`，含官方布局注释，节选）：
 
 ```c
 /*
@@ -355,13 +355,13 @@ vm->top_frame   = frame;             // ★ 顶上来
 
 > 待本地验证：不同平台/版本的默认 `spare_stack_size` 不同，触发的递归深度也不同，但「抛 RangeError 而非崩溃」这一行为稳定。
 
-**源码阅读型实践（可选）**：在 [src/njs_function.c:L470-L511](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L470-L511) 的 `frame->previous = vm->top_frame; vm->top_frame = frame;` 两行，用自己的话描述「新帧如何挂到链上并成为新的 top_frame」；再在 [src/njs_vm.c:L639-L652](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L639-L652) 的 `njs_vm_scopes_restore` 里找出对应的「弹帧」操作（`vm->top_frame = native->previous;`）。
+**源码阅读型实践（可选）**：在 [src/njs_function.c:L507-L508](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L507-L508) 的 `frame->previous = vm->top_frame; vm->top_frame = frame;` 两行，用自己的话描述「新帧如何挂到链上并成为新的 top_frame」；再在 [src/njs_vm.c:L639-L652](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L639-L652) 的 `njs_vm_scopes_restore` 里找出对应的「弹帧」操作（`vm->top_frame = native->previous;`）。
 
 ### 4.2.5 小练习与答案
 
 **练习 1**：`njs_frame_t` 为什么要把 `njs_native_frame_t` 作为第一个字段嵌进来？
 
-> **参考答案**：为了用 C 的「结构体首字段即首地址」规则实现多态。所有帧链节点都按 `njs_native_frame_t *` 串联（`previous` 字段类型就是它），代码遍历链时只认基础帧类型；只有当确认某帧是 lambda 调用产生时，才把它强制转换成 `njs_frame_t *` 去访问多出来的 `exception`/`previous_active_frame`。这相当于用 C 手写了一个「lambda 帧是 native 帧的子类」的继承关系。
+> **参考答案**：为了用 C 的「结构体首字段即首地址」规则实现多态。所有帧链节点都按 `njs_native_frame_t *` 串联（`previous` 字段类型就是它），代码遍历链时只认基础帧类型；只有当确认某帧是 lambda 调用产生时，才把它强制转换成 `njs_frame_t *` 去访问多出来的 `exception` / `previous_active_frame`。这相当于用 C 手写了一个「lambda 帧是 native 帧的子类」的继承关系。
 
 **练习 2**：为什么 lambda 帧用「指针数组 + 值数组」的双区布局，而不是直接存值？
 
@@ -546,7 +546,7 @@ vm->levels[NJS_LEVEL_CLOSURE] = cur_closures;
 
 这就是 u4-l2 里「调用边界只换 LOCAL/CLOSURE 两个指针」的代码真身。`njs_vmcode_interpreter` 的递归调用意味着：**调用栈深度 = C 函数 `njs_vmcode_interpreter` 的递归深度**——这也解释了为什么栈深度保护（4.2）如此重要，它防止的正是这层 C 递归失控。
 
-**native 调用：直接调 C 函数并自行弹帧** —— [src/njs_function.c:L636-L657](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L636-L657)（`njs_function_native_call` 核心）：
+**native 调用：直接调 C 函数并自行弹帧** —— [src/njs_function.c:L607-L657](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L607-L657)（`njs_function_native_call` 核心）：
 
 ```c
 call = function->u.native;
@@ -670,14 +670,14 @@ f(3)
 
 - njs 用**同一个 `njs_function_t`** 表示两种函数，靠 `native` 位区分：`native=0` 时 `u.lambda` 指向字节码产物 `njs_function_lambda_t`（含 `start` 字节码入口、`nargs`/`nlocal`/`closures`）；`native=1` 时 `u.native` 是一个 C 函数指针 `njs_function_native_t`（[src/njs_value.h:L224-L249](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_value.h#L224-L249)、[src/njs.h:L118-L119](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs.h#L118-L119)）。
 - 调用上下文用**调用帧链**管理：`vm->top_frame` 是当前最顶层帧，`previous` 串成调用栈；`njs_frame_t` 以 `njs_native_frame_t` 为首字段嵌套，实现「lambda 帧是 native 帧的子类」的多态（[src/njs_function.h:L40-L80](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.h#L40-L80)）。
-- lambda 帧采用**「指针数组 + 值数组」双区布局**，正常槽位 `pi→vi`，被闭包捕获的槽位 `pi` 改指向堆副本；`local = new + args_count`，0 号槽是 `this`（[src/njs_function.c:L397-L441](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L397-L441)）。帧分配受 `spare_stack_size` 总预算保护，深递归触发 `RangeError` 而非崩溃（[src/njs_function.c:L470-L511](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L470-L511)）。
+- lambda 帧采用**「指针数组 + 值数组」双区布局**，正常槽位 `pi→vi`，被闭包捕获的槽位 `pi` 改指向堆副本；`local = new + args_count`，0 号槽是 `this`（[src/njs_function.c:L383-L467](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L383-L467)）。帧分配受 `spare_stack_size` 总预算保护，深递归触发 `RangeError` 而非崩溃（[src/njs_function.c:L470-L511](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L470-L511)）。
 - 一次调用是**三件套协作**：`FUNCTION_FRAME`/`METHOD_FRAME` 建帧（后者多带一个 `this`）→ `PUT_ARG` 逐个写实参 → `FUNCTION_CALL` 保存调用者 pc 并触发 `njs_function_frame_invoke`（[src/njs_vmcode.c:L1484-L1539](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vmcode.c#L1484-L1539)）。注意 `FUNCTION` 是「创建函数值」而非调用。
-- **native 调用直接执行 C 函数、自行弹帧，不进解释器；lambda 调用切换 LOCAL/CLOSURE 指针后递归进入 `njs_vmcode_interpreter`**——调用栈深度即 C 递归深度（[src/njs_function.c:L636-L679](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L636-L679)）。
+- **native 调用直接执行 C 函数、自行弹帧，不进解释器；lambda 调用切换 LOCAL/CLOSURE 指针后递归进入 `njs_vmcode_interpreter`**——调用栈深度即 C 递归深度（[src/njs_function.c:L607-L679](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L607-L679)）。
 - `RETURN` 经 `njs_vmcode_return` 完成「构造器返回值修正 → `njs_vm_scopes_restore` 弹帧 → 写返回值 → `njs_function_frame_free` 释放帧」并退出本层解释器（[src/njs_vmcode.c:L2631-L2649](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vmcode.c#L2631-L2649)、[src/njs_vm.c:L639-L652](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_vm.c#L639-L652)）。
 
 ## 7. 下一步学习建议
 
 - **u4-l4 异常处理**：`throw` 抛出的异常如何沿 `top_frame` 链一层层回溯寻找最近的 `try/catch`？`njs_frame_t` 里多出来的 `exception` 链表头和 `njs_exception_t`（[src/njs_function.h:L66-L80](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.h#L66-L80)）正是为此而设。理解了本讲的帧链，u4-l4 的「异常回溯」就是顺水推舟。
 - **u4-l5 Promise 与 async/await**：本讲多次提到 `FUNCTION_CALL` 里保存的 `vm->active_frame->native.pc` 和 `njs_async_function_frame_invoke` 分支——它们是 async 函数「挂起—恢复」的基石。下一讲会讲清一个 async 函数如何在不阻塞 C 栈的情况下跨事件循环续体。
-- **回看 u4-l2 / u4-l1**：现在再读 u4-l2 的 `njs_function_frame_invoke` 指针切换、u4-l1 的「解释器退出仅有两条路」，你会对「值存在哪、函数怎么调、调用栈怎么进出」形成完整闭环。
+- **回看 u4-l2 / u4-l1**：现在再读 u4-l2 的 `njs_function_lambda_call` 指针切换、u4-l1 的「解释器退出仅有两条路」，你会对「值存在哪、函数怎么调、调用栈怎么进出」形成完整闭环。
 - **进阶阅读**：`Function.prototype.call/apply/bind` 的实现在 [src/njs_function.c:L1209-L1418](https://github.com/nginx/njs/blob/f078f14372ee789ea1435f35672407c13917b5e7/src/njs_function.c#L1209-L1418)，它们最终都汇入本讲的 `njs_function_call2` → `njs_function_frame_invoke`，可以作为「公共 API 如何落到调用帧机制上」的练习材料。
