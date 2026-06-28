@@ -1,0 +1,710 @@
+{
+  "project": "perf-book",
+  "head": "a05dd0f15595e98aef45e5a15072c2a71dbe37ba",
+  "rationale": "perf-book 是一个用 mdBook 编写的《Rust 性能手册》技术书籍项目，其『源码』就是 src/ 下的 Markdown 章节以及 book.toml、SUMMARY.md 与 CI 配置。本手册据此设计学习顺序：第一单元从零带读者认识项目定位、学会构建运行并理清目录结构；随后遵循真实工程里『先测量、再优化』的顺序——第二单元（基准测试、性能剖析、构建配置、Clippy）是后续所有代码优化的前提；第三到五单元按『内存/分配 → 数据结构与迭代 → 函数调用与 I/O/底层』由内到外讲解代码级优化；第六单元上升到通用原则、编译耗时与并行；第七单元回到项目本身，讲 mdBook 测试、CI 部署与按本书简洁风格贡献内容。讲义之间依赖清晰：测量类讲义是代码优化讲义的前置，机器码检查依赖边界检查与内联，编译耗时依赖构建配置。每篇讲义均包含一个可操作的代码或构建实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 perf-book 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "perf-book 是什么——项目定位与这本书的价值",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 perf-book 作为一本《Rust 性能手册》的定位、读者对象、覆盖范围与简洁风格。",
+          "learning_goals": [
+            "理解 perf-book 是用 mdBook 编写的技术书籍项目及其『源码即 Markdown』的特点",
+            "掌握本书面向中高级 Rust 用户、偏编译器开发背景的定位",
+            "从 README 与 introduction 提炼出本书的范围（运行速度、内存、二进制体积、编译时间）"
+          ],
+          "source_files": [
+            "README.md",
+            "src/introduction.md",
+            "src/title-page.md"
+          ],
+          "minimal_modules": [
+            "perf-book 的定位与读者对象",
+            "Rust 性能优化的范围与本书风格",
+            "README 与 introduction 提供的线索"
+          ],
+          "practice_task": "阅读 README.md 与 src/introduction.md，用一段话总结本书的目标读者、覆盖的性能维度，以及它『重广度轻深度』的写作取向，并说明它明确不覆盖什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "用 mdBook 构建与运行 perf-book",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 mdBook，使用 build/serve/test 三条命令构建、预览和测试本书，并理解 book.toml 的关键配置。",
+          "learning_goals": [
+            "学会安装 mdBook 并完成本书的构建与本地预览",
+            "掌握 mdbook build / serve / test 三条核心命令及其产物",
+            "理解 book.toml 中书名、作者、src、html 输出等关键字段"
+          ],
+          "source_files": [
+            "README.md",
+            "book.toml",
+            ".github/workflows/ci.yml"
+          ],
+          "minimal_modules": [
+            "安装 mdBook 与依赖",
+            "mdbook build / serve / test 三个命令",
+            "book.toml 的关键配置项",
+            "CI 如何构建与部署"
+          ],
+          "practice_task": "通过 `cargo install mdbook` 安装 mdBook，运行 `mdbook build` 与 `mdbook serve`，在浏览器打开 localhost:3000 预览本书，并对照 book.toml 说明每个字段的作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库结构与章节的组织方式",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解 perf-book 的目录结构、SUMMARY.md 如何决定章节顺序、src/ 下各 Markdown 文件的命名与对应主题。",
+          "learning_goals": [
+            "理解 mdBook 由 SUMMARY.md 决定目录与章节顺序的机制",
+            "熟悉 src/ 下 19 个章节文件及其主题",
+            "掌握标题页与章节文件命名约定，能定位任意主题所在文件"
+          ],
+          "source_files": [
+            "src/SUMMARY.md",
+            "book.toml",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "mdBook 的 SUMMARY.md 目录机制",
+            "src/ 目录的章节组织",
+            "标题页与各章的命名约定"
+          ],
+          "practice_task": "对照 src/SUMMARY.md 列出全部章节及其对应文件名，并尝试在 SUMMARY.md 末尾新增一个指向新 .md 文件的目录条目，观察 mdBook 如何组织内容（注意 book.toml 中 create-missing=false 的影响）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "性能优化工作流：先测量再优化",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Benchmarking——建立可比较的性能基线",
+          "order": 1,
+          "filename": "u2-l1-benchmarking.md",
+          "level": "beginner",
+          "topic": "讲解基准测试的作用、工作负载选择、常用工具与指标取舍，为后续优化提供可靠的『变化前后』对比。",
+          "learning_goals": [
+            "理解为什么优化前必须先建立可重复的基准",
+            "了解 Criterion、Divan、Hyperfine、Bencher、Gungraun 等工具的适用场景",
+            "掌握 wall-time、cycles、instruction counts 等指标的高低方差权衡"
+          ],
+          "source_files": [
+            "src/benchmarking.md"
+          ],
+          "minimal_modules": [
+            "基准测试的作用与工作负载",
+            "常用基准测试工具（Criterion/Divan/Hyperfine 等）",
+            "指标选择：wall-time、cycles、instruction counts"
+          ],
+          "practice_task": "写一个简单的 Rust 程序，分别用 `cargo build --release` 构建两个略有差异的版本，并用 Hyperfine 对比它们的运行时间，体会『平庸的基准测试也胜过没有基准测试』。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Profiling——找出热点代码",
+          "order": 2,
+          "filename": "u2-l2-profiling.md",
+          "level": "intermediate",
+          "topic": "讲解如何用剖析器定位热点函数、为 release 构建开启调试信息与帧指针、处理符号 demangling。",
+          "learning_goals": [
+            "学会用 perf/samply/flamegraph/DHAT 等工具定位热点",
+            "掌握为剖析开启 source line 调试信息与 force-frame-pointers 的配置",
+            "理解 Rust 符号 mangling 及 v0 格式对剖析的影响"
+          ],
+          "source_files": [
+            "src/profiling.md",
+            "src/build-configuration.md"
+          ],
+          "minimal_modules": [
+            "性能剖析找热点",
+            "常用剖析器（perf/samply/flamegraph/DHAT 等）",
+            "为 release 构建开启调试信息与帧指针",
+            "符号 demangling"
+          ],
+          "practice_task": "为一个 release 构建加上 `debug = \"line-tables-only\"` 与 `-C force-frame-pointers=yes`，用 samply 或 perf+flamegraph 剖析一个小程序，定位最热的函数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Build Configuration——不改代码也能提速",
+          "order": 3,
+          "filename": "u2-l3-build-configuration.md",
+          "level": "intermediate",
+          "topic": "系统讲解 Cargo profile 与 rustc 选项：提升运行速度、减小二进制、缩短编译时间，以及替换全局分配器。",
+          "learning_goals": [
+            "理解 dev/release 构建差异及 release 默认配置的权衡",
+            "掌握 codegen-units、LTO、PGO、target-cpu=native 等提速选项",
+            "掌握减小二进制（opt-level=z、panic=abort、strip）与加速编译（lld/mold、关 debuginfo）的取舍"
+          ],
+          "source_files": [
+            "src/build-configuration.md"
+          ],
+          "minimal_modules": [
+            "release 与 dev 构建差异",
+            "提升运行速度：codegen-units、LTO、PGO、target-cpu",
+            "减小二进制：opt-level、panic=abort、strip",
+            "替换全局分配器与加速链接"
+          ],
+          "practice_task": "在一个示例项目的 Cargo.toml 中依次加入 `codegen-units = 1`、`lto = \"fat\"`、`panic = \"abort\"`，用基准测试逐项验证运行速度变化，体会『每次只改一项再测量』的原则。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Linting——用 Clippy 自动发现性能问题",
+          "order": 4,
+          "filename": "u2-l4-linting.md",
+          "level": "beginner",
+          "topic": "讲解 Clippy 的 Perf lint 组、ptr_arg 等 lint 的性能收益，以及用 disallowed_types 防止误用慢类型。",
+          "learning_goals": [
+            "学会运行 cargo clippy 并查阅 Perf lint 组",
+            "理解非 Perf lint（如 ptr_arg）也可能带来性能收益",
+            "掌握用 disallowed_types 统一禁用标准库慢类型的方法"
+          ],
+          "source_files": [
+            "src/linting.md",
+            "src/hashing.md"
+          ],
+          "minimal_modules": [
+            "Clippy 与性能 lint 组",
+            "ptr_arg 等 lint 的性能收益",
+            "disallowed_types 防止误用慢类型"
+          ],
+          "practice_task": "在一个含 `&mut Vec<T>` 参数的小项目上运行 `cargo clippy`，应用 ptr_arg 建议改为切片；再写一个 clippy.toml 用 disallowed-types 禁用 std::collections::HashMap 并验证告警生效。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "堆分配与类型大小",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "堆分配从哪里来——Box/Rc/Arc/Vec/String 与 Cow",
+          "order": 1,
+          "filename": "u3-l1-heap-allocation-types.md",
+          "level": "intermediate",
+          "topic": "讲解堆分配的开销、用 DHAT 定位分配热点，以及各常见类型（Box、Rc/Arc、Vec、String、Hash 表、Cow）的分配特性。",
+          "learning_goals": [
+            "理解堆分配为何昂贵及如何用 DHAT 定位分配热点",
+            "掌握 Box/Rc/Arc/Vec/String/Hash 表各自的分配行为",
+            "学会用 Cow 在借入与拥有数据间避免多余分配"
+          ],
+          "source_files": [
+            "src/heap-allocations.md",
+            "src/type-sizes.md"
+          ],
+          "minimal_modules": [
+            "堆分配的开销与定位（DHAT）",
+            "Box/Rc/Arc 的分配特性",
+            "Vec/String/Hash 表的表示与 clone/to_owned",
+            "Cow 复用借入与拥有数据"
+          ],
+          "practice_task": "写一段混用 String 字面量与 format! 的错误信息收集代码，先用 Vec<String> 实现并用 dhat-rs 统计分配次数，再改写为 Vec<Cow<'static, str>> 比较分配差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Vec 的增长、集合复用与分配回归",
+          "order": 2,
+          "filename": "u3-l2-vec-growth-and-reuse.md",
+          "level": "intermediate",
+          "topic": "讲解 Vec 的容量与准倍增长、预分配、SmallVec/ArrayVec、复用 workhorse 集合，以及用 dhat-rs 防止分配回归。",
+          "learning_goals": [
+            "理解 Vec 长度/容量/指针表示与准倍增长策略",
+            "掌握 with_capacity/reserve 预分配与 SmallVec/ArrayVec 适用场景",
+            "学会复用 workhorse 集合并用 dhat-rs 编写分配量回归测试"
+          ],
+          "source_files": [
+            "src/heap-allocations.md"
+          ],
+          "minimal_modules": [
+            "Vec 的容量与准倍增长策略",
+            "with_capacity/reserve 预分配",
+            "SmallVec/ArrayVec 处理短 Vec",
+            "复用 workhorse 集合与分配回归测试"
+          ],
+          "practice_task": "在一个反复 push 元素的热点循环中，先用 eprintln! 配合 counts 统计 Vec 长度分布，再用 Vec::with_capacity 或循环外复用的 workhorse Vec 改写，比较分配次数。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Type Sizes——缩小频繁实例化的类型",
+          "order": 3,
+          "filename": "u3-l3-type-sizes.md",
+          "level": "intermediate",
+          "topic": "讲解用 -Zprint-type-sizes 测量类型布局、字段重排、装箱大变体、boxed slice/ThinVec，以及用静态断言防止体积回归。",
+          "learning_goals": [
+            "学会用 -Zprint-type-sizes 查看枚举/结构体的精确布局与 padding",
+            "掌握缩小类型的手段（装箱大变体、用更小整数、boxed slice、ThinVec）",
+            "理解为何大于 128 字节的类型会被 memcpy 复制及其影响"
+          ],
+          "source_files": [
+            "src/type-sizes.md",
+            "src/heap-allocations.md"
+          ],
+          "minimal_modules": [
+            "-Zprint-type-sizes 测量布局",
+            "字段重排与编译器自动排序",
+            "装箱大变体与更小整数缩小枚举",
+            "boxed slice 与 ThinVec",
+            "static_assertions 防回归"
+          ],
+          "practice_task": "定义一个含 outsized 变体的枚举，用 `RUSTFLAGS=-Zprint-type-sizes cargo +nightly build` 查看其体积，再把大变体字段 Box 起来，对比前后 size_of 值。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数据结构与迭代",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Hashing——替换默认哈希算法",
+          "order": 1,
+          "filename": "u4-l1-hashing.md",
+          "level": "intermediate",
+          "topic": "讲解默认 SipHash 1-3 的权衡，以及 rustc-hash/fnv/ahash/nohash_hasher 等更快哈希算法的选用与字节级哈希。",
+          "learning_goals": [
+            "理解默认 SipHash 1-3 高质量但较慢的权衡",
+            "掌握 FxHash/Fnv/ahash 作为 HashMap/HashSet 替换的适用场景",
+            "了解 nohash_hasher 与 ByteHash 字节级哈希等进阶技巧"
+          ],
+          "source_files": [
+            "src/hashing.md",
+            "src/linting.md"
+          ],
+          "minimal_modules": [
+            "默认 SipHash 1-3 的权衡",
+            "FxHash/Fnv/ahash 替换 hasher",
+            "nohash_hasher 与字节级哈希"
+          ],
+          "practice_task": "在一个以整数键高频查询的程序中，把 std::collections::HashMap 替换为 rustc-hash 的 FxHashMap，用基准测试对比运行时间，并结合 linting.md 的 disallowed_types 固化选择。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Standard Library Types——挖掘标准库的性能 API",
+          "order": 2,
+          "filename": "u4-l2-standard-library-types.md",
+          "level": "intermediate",
+          "topic": "讲解 Vec/Option/Result/Rc/Arc 中常被忽略的高性能方法，以及 parking_lot 同步原语的取舍。",
+          "learning_goals": [
+            "掌握 vec![0;n]、swap_remove、retain 等 Vec 高效操作",
+            "理解 ok_or_else 等惰性求值替代的收益",
+            "了解 Rc/Arc::make_mut 的写时复制与 parking_lot 的取舍"
+          ],
+          "source_files": [
+            "src/standard-library-types.md"
+          ],
+          "minimal_modules": [
+            "vec![0;n] 与 swap_remove/retain",
+            "ok_or_else 等惰性求值替代",
+            "Rc/Arc::make_mut 写时复制",
+            "parking_lot 同步原件"
+          ],
+          "practice_task": "审查一段使用 ok_or、Vec::remove 的代码，分别改为 ok_or_else 与 swap_remove，并说明每处改动为何更快；再评估一处 Mutex 是否值得切换到 parking_lot。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Iterators——collect、chain 与 chunks 的取舍",
+          "order": 3,
+          "filename": "u4-l3-iterators.md",
+          "level": "intermediate",
+          "topic": "讲解避免不必要 collect、返回 impl Iterator、chain/filter_map 取舍、chunks_exact 与 copied。",
+          "learning_goals": [
+            "理解为何应避免 collect 后又只遍历一次的模式",
+            "掌握返回 impl Iterator 及实现 size_hint 减少 collect 分配",
+            "了解 chain 的开销、filter_map 与 chunks_exact、copied 的优化"
+          ],
+          "source_files": [
+            "src/iterators.md",
+            "src/heap-allocations.md"
+          ],
+          "minimal_modules": [
+            "避免不必要的 collect",
+            "返回 impl Iterator 与 size_hint",
+            "chain/filter_map 的取舍",
+            "chunks_exact 与 copied"
+          ],
+          "practice_task": "把一个『collect 成 Vec 再遍历』的函数重构为直接返回 impl Iterator，并在一处分块处理里把 slice::chunks 换成 chunks_exact，对比生成的代码或分配次数。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Bounds Checks——帮助编译器消除边界检查",
+          "order": 4,
+          "filename": "u4-l4-bounds-checks.md",
+          "level": "intermediate",
+          "topic": "讲解 Rust 默认边界检查，以及用迭代、切片、断言让编译器优化掉检查，最后才考虑 get_unchecked。",
+          "learning_goals": [
+            "理解 Rust 默认对切片/Vec 访问插入边界检查",
+            "掌握用迭代、先取切片、加范围断言消除检查的安全手段",
+            "了解 get_unchecked 作为最后手段及其风险"
+          ],
+          "source_files": [
+            "src/bounds-checks.md",
+            "src/iterators.md",
+            "src/machine-code.md"
+          ],
+          "minimal_modules": [
+            "Rust 默认边界检查",
+            "用迭代/切片/断言帮助优化",
+            "Bounds Check Cookbook",
+            "get_unchecked 作为最后手段"
+          ],
+          "practice_task": "把一个在循环里用索引访问 Vec 的热点片段，改为先切薄片再加索引断言（或改为迭代），用 cargo-show-asm 或 Compiler Explorer 验证边界检查是否被消除。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "函数调用、I/O 与底层",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Inlining——内联与外联（outlining）",
+          "order": 1,
+          "filename": "u5-l1-inlining.md",
+          "level": "intermediate",
+          "topic": "讲解四种 inline 属性、用 Cachegrind 判断是否内联、热/冷调用点拆分，以及 outlining 与 #[cold]。",
+          "learning_goals": [
+            "理解 #[inline]/#[inline(always)]/#[inline(never)] 的语义与不可传递性",
+            "学会用 Cachegrind 输出判断函数是否被内联",
+            "掌握热/冷调用点拆分与 outlining、#[cold] 的用法"
+          ],
+          "source_files": [
+            "src/inlining.md",
+            "src/profiling.md"
+          ],
+          "minimal_modules": [
+            "四种 inline 属性",
+            "用 Cachegrind 判断是否内联",
+            "热/冷调用点的拆分技巧",
+            "outlining 与 #[cold]"
+          ],
+          "practice_task": "取一个有多个调用点但只有一个热点的函数，按 inlining.md 的模式拆分为 inline(always) 与 inline(never) 两个变体，并在热点处使用内联版本。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "I/O——锁与缓冲",
+          "order": 2,
+          "filename": "u5-l2-io.md",
+          "level": "intermediate",
+          "topic": "讲解 print!/println! 的重复锁开销、手动锁定 stdout、BufReader/BufWriter 缓冲、按字节读取原始输入。",
+          "learning_goals": [
+            "理解 print!/println! 每次锁定 stdout 的开销",
+            "掌握手动 lock stdout/stdin 与 BufWriter/BufReader 缓冲",
+            "了解按字节读入（read_until/bstr）避免 UTF-8 校验开销"
+          ],
+          "source_files": [
+            "src/io.md",
+            "src/heap-allocations.md"
+          ],
+          "minimal_modules": [
+            "print!/println! 的重复锁开销",
+            "手动锁定 stdout/stdin",
+            "BufReader/BufWriter 缓冲",
+            "按字节读入原始输入"
+          ],
+          "practice_task": "把一段循环里反复 println! 的代码改写为先 stdout().lock() 再用 writeln! 输出；若写文件则包一层 BufWriter，比较前后性能。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Wrapper Types 与日志/调试的性能代价",
+          "order": 3,
+          "filename": "u5-l3-wrapper-types-and-logging.md",
+          "level": "intermediate",
+          "topic": "讲解 RefCell/Mutex 等包装类型的访问开销与合并、日志/调试代码的隐藏开销，以及 assert! 与 debug_assert!。",
+          "learning_goals": [
+            "理解 RefCell/Mutex 等包装类型每次访问的开销",
+            "掌握把多个包装值合并为一个以减少访问开销",
+            "理解日志/调试代码与 assert!/debug_assert! 的性能影响"
+          ],
+          "source_files": [
+            "src/wrapper-types.md",
+            "src/logging-and-debugging.md",
+            "src/standard-library-types.md"
+          ],
+          "minimal_modules": [
+            "RefCell/Mutex 等包装类型的访问开销",
+            "合并多个包装值",
+            "日志/调试代码的隐藏开销",
+            "assert! 与 debug_assert!"
+          ],
+          "practice_task": "把一个含两个独立 Arc<Mutex<u32>> 字段的结构体合并为 Arc<Mutex<(u32,u32)>>，并审视代码中一处热点的 assert! 是否可降级为 debug_assert!。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Machine Code——检查生成的机器码",
+          "order": 4,
+          "filename": "u5-l4-machine-code.md",
+          "level": "advanced",
+          "topic": "讲解何时该检查机器码、用 Compiler Explorer 与 cargo-show-asm 查看汇编，以及 core::arch 与 SIMD intrinsics。",
+          "learning_goals": [
+            "理解在极热的小段代码上检查机器码的价值",
+            "学会用 Compiler Explorer 与 cargo-show-asm 查看 Rust 生成的汇编",
+            "了解 core::arch 提供的架构相关 intrinsics 与 SIMD"
+          ],
+          "source_files": [
+            "src/machine-code.md",
+            "src/bounds-checks.md"
+          ],
+          "minimal_modules": [
+            "检查机器码的意义",
+            "Compiler Explorer 与 cargo-show-asm",
+            "core::arch 与 SIMD intrinsics"
+          ],
+          "practice_task": "在 Compiler Explorer (godbolt.org) 上粘贴一个含循环的小 Rust 函数，观察 release 构建下是否残留 bounds check 指令，并尝试用 core::arch 的 intrinsics 或迭代改写优化。",
+          "depends_on": [
+            "u4-l4",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "更高层次的性能原则",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "General Tips——通用性能原则",
+          "order": 1,
+          "filename": "u6-l1-general-tips.md",
+          "level": "intermediate",
+          "topic": "讲解只优化热点、算法与数据结构优先、缓存/分支友好、特判常见小规模与按频率处理等通用原则。",
+          "learning_goals": [
+            "理解为何只值得优化热点代码",
+            "掌握算法/数据结构改进优先于低层优化的原则",
+            "学会用特判小规模、按频率排序、加小缓存等通用技巧"
+          ],
+          "source_files": [
+            "src/general-tips.md",
+            "src/build-configuration.md"
+          ],
+          "minimal_modules": [
+            "只优化热点代码",
+            "算法与数据结构优先",
+            "缓存友好与分支预测",
+            "特判常见小规模与按频率处理"
+          ],
+          "practice_task": "在一个处理集合的函数里，先测量元素数量分布，再为最常见的 0/1/2 元素情况加一条快速特判路径，对比前后性能。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Compile Times——缩短编译时间",
+          "order": 2,
+          "filename": "u6-l2-compile-times.md",
+          "level": "advanced",
+          "topic": "讲解用 cargo build --timings 可视化、-Zmacro-stats 定位宏展开、cargo llvm-lines 定位 IR 膨胀，并把非泛型部分拆为内部函数。",
+          "learning_goals": [
+            "学会用 cargo build --timings 诊断 crate 并行度",
+            "掌握用 -Zmacro-stats 与 cargo llvm-lines 找编译耗时来源",
+            "理解把泛型函数的非泛型部分拆成内部函数以减少 IR 实例化"
+          ],
+          "source_files": [
+            "src/compile-times.md",
+            "src/build-configuration.md"
+          ],
+          "minimal_modules": [
+            "cargo build --timings 可视化",
+            "-Zmacro-stats 与宏展开",
+            "cargo llvm-lines 定位 IR 膨胀",
+            "拆分非泛型内部函数"
+          ],
+          "practice_task": "运行 `cargo build --timings` 与 `cargo llvm-lines`，找出最耗编译的泛型函数，按 std::fs::read 的模式把其非泛型逻辑拆到一个内部 fn 中。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Parallelism——并行与 SIMD",
+          "order": 3,
+          "filename": "u6-l3-parallelism.md",
+          "level": "advanced",
+          "topic": "讲解线程并行（rayon/crossbeam）、同步原语与 Rust Atomics 资源，以及 SIMD 数据并行的现状。",
+          "learning_goals": [
+            "了解 Rust 安全并行的支持与 rayon/crossbeam 入口",
+            "理解并行带来的大性能提升取决于程序设计",
+            "了解 2025 年 SIMD 数据并行在 Rust 中的现状"
+          ],
+          "source_files": [
+            "src/parallelism.md",
+            "src/wrapper-types.md"
+          ],
+          "minimal_modules": [
+            "线程并行：rayon 与 crossbeam",
+            "原语与锁资源",
+            "SIMD 数据并行现状"
+          ],
+          "practice_task": "把一个串行的 for 循环用 rayon 的 par_iter 改写为数据并行版本，用基准测试对比加速比，并思考为何『最佳并行方式高度依赖程序设计』。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "维护与贡献",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "mdBook 进阶——测试、CI 部署与扩展",
+          "order": 1,
+          "filename": "u7-l1-mdbook-test-and-ci.md",
+          "level": "intermediate",
+          "topic": "讲解用 mdbook test 测试书中代码、解析 .github/workflows/ci.yml 的 build/test/deploy 流程，以及 mdBook 的可扩展性。",
+          "learning_goals": [
+            "学会用 mdbook test 验证书中嵌入的 Rust 代码",
+            "理解 CI 中 build、test、deploy 步骤与 GitHub Pages 部署条件",
+            "了解 mdBook 的 preprocessor/theme 等扩展机制"
+          ],
+          "source_files": [
+            ".github/workflows/ci.yml",
+            "README.md",
+            "book.toml"
+          ],
+          "minimal_modules": [
+            "mdbook test 测试书中代码",
+            "CI 流水线解析（build/test/deploy）",
+            "GitHub Pages 部署条件",
+            "mdBook 扩展与自定义"
+          ],
+          "practice_task": "在仓库根目录运行 `mdbook test`，观察它如何编译验证书中代码块；再阅读 ci.yml 说明 deploy 步骤只在 push 到 master 且仓库为 nnethercote/perf-book 时触发的原因。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "为 perf-book 贡献内容——风格与协作",
+          "order": 2,
+          "filename": "u7-l2-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 perf-book 的贡献流程（issue 优先）、简洁写作风格，以及如何在书中添加一个新章节。",
+          "learning_goals": [
+            "理解作者偏好 issue 而非 PR 的贡献流程",
+            "掌握本书简洁（terse）、广度优先、附真实 PR 示例的写作风格",
+            "学会按 SUMMARY.md + 新 .md 文件的方式为本书新增一章"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            "README.md",
+            "src/general-tips.md"
+          ],
+          "minimal_modules": [
+            "贡献流程：issue 优先",
+            "本书简洁（terse）的写作风格",
+            "新增章节的完整步骤",
+            "mdBook 扩展与自定义"
+          ],
+          "practice_task": "阅读 CONTRIBUTING.md 与 README.md，按本书风格草拟一个新主题（如『锁的开销与避免』）的一页大纲，并写出在 SUMMARY.md 与 src/ 下落地该章节所需的文件改动清单。",
+          "depends_on": [
+            "u7-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
