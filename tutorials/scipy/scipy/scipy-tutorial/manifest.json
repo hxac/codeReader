@@ -1,0 +1,1279 @@
+{
+  "project": "scipy",
+  "head": "814922d57caa1ad6e3410ba65102eb7b9b080dd3",
+  "rationale": "SciPy 是一个体量巨大的科学计算库，包含 17 个公开子包，代码由 Python、Cython、C/C++、Fortran 多语言混合并通过 meson-python 构建。因此学习路线采用「先总后分、先基础设施后子包、最后回归架构」的三层设计。第 1 单元让零基础读者建立全局认知（定位、构建、目录、开发流程）；第 2 单元是贯穿全书的关键——讲解 _lib 共享基础设施（工具函数、uarray 后端分发、Array API、LowLevelCallable、文档工具），因为后续几乎每个子包都依赖这些机制。第 3–12 单元按「数值计算依赖链」由浅入深地展开各子包：special（特殊函数）→ linalg（线性代数）→ sparse（稀疏）→ optimize（优化）→ integrate（积分/ODE）→ interpolate（插值）→ signal（信号）→ ndimage（图像）→ spatial（空间）→ fft/stats/cluster/io 等。其中依赖关系明确：sparse.linalg 依赖 sparse；optimize 约束法依赖局部优化；ODE 求解器依赖积分；fft 依赖 uarray；stats 检验依赖分布基础。第 13 单元收束到专家层：扩展机制（Cython/Fortran/meson）、测试体系、性能与并发、以及 spmatrix→sparray 迁移与 Array API 标准化等架构演进。全册约 41 篇讲义，每篇只解决一个主题、引用真实源码、并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 SciPy：定位、构建与开发环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "SciPy 项目总览与生态定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 SciPy 是什么、解决什么问题、与 NumPy 的关系，并梳理 17 个公开子包的整体功能地图。",
+          "learning_goals": [
+            "理解 SciPy 在科学计算生态中的定位与核心价值",
+            "识别 SciPy 各子包（cluster、linalg、optimize、stats 等）的用途",
+            "掌握 SciPy 与 NumPy 的依赖与协作关系"
+          ],
+          "source_files": [
+            "README.rst",
+            "scipy/__init__.py",
+            "doc/source/index.rst"
+          ],
+          "minimal_modules": [
+            "README.rst",
+            "scipy/__init__.py 子包列表",
+            "doc/source/index.rst"
+          ],
+          "practice_task": "安装 SciPy，循环 import 全部 17 个子包，打印 scipy.__version__，用一句话描述每个子包的用途并整理成表格。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与从源码编译运行",
+          "order": 2,
+          "filename": "u1-l2-build-system-and-source-build.md",
+          "level": "beginner",
+          "topic": "讲解 SciPy 基于 meson-python 的多语言（C/C++/Cython/Fortran/pythran）混合构建系统，以及如何从源码构建与运行。",
+          "learning_goals": [
+            "理解 meson-python + meson.build 构建流程",
+            "认识 Cython、pybind11、pythran、OpenBLAS 等构建依赖",
+            "学会从源码编译并验证安装"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "meson.build",
+            "meson.options"
+          ],
+          "minimal_modules": [
+            "pyproject.toml",
+            "meson.build",
+            "meson.options"
+          ],
+          "practice_task": "用 spin build 或 pip install -e . --no-build-isolation 从源码构建 SciPy，运行 scipy.show_config() 并解读输出中的 BLAS/LAPACK 来源。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与包入口、延迟导入",
+          "order": 3,
+          "filename": "u1-l3-package-entry-and-lazy-import.md",
+          "level": "beginner",
+          "topic": "讲解 scipy 包的目录组织、顶层 __init__.py 的延迟子模块导入机制（__getattr__）以及版本/配置检查流程。",
+          "learning_goals": [
+            "掌握 scipy 顶层包的目录结构",
+            "理解 __getattr__ 实现的按需延迟导入",
+            "了解导入时的 NumPy 版本校验与扩展模块检查"
+          ],
+          "source_files": [
+            "scipy/__init__.py",
+            "scipy/_lib/_testutils.py",
+            "scipy/version.py"
+          ],
+          "minimal_modules": [
+            "scipy/__init__.py",
+            "__getattr__ 延迟导入",
+            "PytestTester"
+          ],
+          "practice_task": "用 importlib.import_module 手动触发并观察子包延迟加载耗时；调用 scipy.show_config() 与 scipy.test 收集信息。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "开发工作流：spin 命令、测试与文档构建",
+          "order": 4,
+          "filename": "u1-l4-dev-workflow-spin.md",
+          "level": "beginner",
+          "topic": "介绍 spin 开发 CLI（.spin/cmds.py）提供的 build/test/lint/docs 等命令，以及贡献与文档构建流程。",
+          "learning_goals": [
+            "掌握 spin 子命令体系（build/test/check/docs）",
+            "了解 pytest 配置与测试组织",
+            "学会构建本地文档"
+          ],
+          "source_files": [
+            ".spin/cmds.py",
+            "CONTRIBUTING.rst",
+            "pytest.ini",
+            "environment.yml"
+          ],
+          "minimal_modules": [
+            ".spin/cmds.py",
+            "pytest.ini",
+            "CONTRIBUTING.rst"
+          ],
+          "practice_task": "运行 spin test 跑 scipy.constants 子包的测试，并用 spin docs 尝试构建文档（或 spin lint 跑静态检查）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "共享基础设施 _lib",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "_lib._util 核心工具函数集",
+          "order": 1,
+          "filename": "u2-l1-lib-util-helpers.md",
+          "level": "intermediate",
+          "topic": "讲解贯穿整个 SciPy 的 _lib/_util.py 工具函数：_lazyselect、随机数种子处理、签名兼容封装等通用辅助。",
+          "learning_goals": [
+            "识别被多个子包复用的通用工具函数",
+            "理解 _lazyselect 等惰性分支选择机制",
+            "掌握 NumPy/Array API 兼容的输入校验工具"
+          ],
+          "source_files": [
+            "scipy/_lib/_util.py",
+            "scipy/_lib/_sparse.py",
+            "scipy/_lib/_array_api.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/_util.py",
+            "scipy/_lib/_sparse.py"
+          ],
+          "practice_task": "在 _util.py 中找出至少 3 个被 optimize、stats、special 同时引用的工具函数，写脚本调用并说明其用途。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "uarray 多方法与后端分发机制",
+          "order": 2,
+          "filename": "u2-l2-uarray-backend-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 uarray 如何把同一函数分发到不同后端（如 scipy.fft 的 numpy/scipy/cupy 后端），以及 set_backend/register 的原理。",
+          "learning_goals": [
+            "理解 uarray multimethod 与 domain 概念",
+            "掌握后端注册与切换（set_backend/skip_backend）",
+            "看懂 scipy.fft._backend._ScipyBackend 的分发实现"
+          ],
+          "source_files": [
+            "scipy/_lib/uarray.py",
+            "scipy/fft/_backend.py",
+            "scipy/fft/_helper.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/uarray.py",
+            "scipy/fft/_backend.py",
+            "scipy/fft/_helper.py"
+          ],
+          "practice_task": "为 scipy.fft 注册一个打印调用日志的自定义后端，用 with ua.set_backend(...) 切换并验证分发效果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Array API 数组后端覆盖（CuPy/Torch/JAX/Dask）",
+          "order": 3,
+          "filename": "u2-l3-array-api-backend-override.md",
+          "level": "intermediate",
+          "topic": "讲解 SciPy 通过 Python Array API 标准支持非 NumPy 数组（cupy/torch/jax/dask）的机制、SCIPY_ARRAY_API 环境变量与 array_namespace。",
+          "learning_goals": [
+            "理解 Array API 标准在 SciPy 中的应用",
+            "掌握 array_namespace 与 _asarray 的抽象",
+            "学会用 SCIPY_ARRAY_API 开启非 NumPy 后端"
+          ],
+          "source_files": [
+            "scipy/_lib/_array_api.py",
+            "scipy/_lib/_array_api_override.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/_array_api.py",
+            "scipy/_lib/_array_api_override.py"
+          ],
+          "practice_task": "设置 SCIPY_ARRAY_API=1，用 array-api-strict 数组调用一个 scipy.stats 函数，验证输入/输出数组类型保持一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "LowLevelCallable 与 C 回调机制",
+          "order": 4,
+          "filename": "u2-l4-lowlevelcallable-c-callback.md",
+          "level": "intermediate",
+          "topic": "讲解 LowLevelCallable 如何让 Python 回调被 C/Fortran 底层代码（如 quad、cubic spline）高效调用，支持 ctypes/cffi/PyCapsule。",
+          "learning_goals": [
+            "理解 LowLevelCallable 的三种绑定方式",
+            "掌握底层回调的签名约定与性能优势",
+            "学会构造并传递低层回调给数值例程"
+          ],
+          "source_files": [
+            "scipy/_lib/_ccallback.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/_ccallback.py",
+            "LowLevelCallable",
+            "_ccallback_c"
+          ],
+          "practice_task": "用 ctypes 构造一个 LowLevelCallable 形式的被积函数，传给 scipy.integrate.quad，对比普通 Python 回调的性能。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "文档字符串基础设施 doccer 与 _docscrape",
+          "order": 5,
+          "filename": "u2-l5-docstring-infrastructure.md",
+          "level": "intermediate",
+          "topic": "讲解 SciPy 复用的 numpydoc 风格文档抽取与统一 docstring 模板工具（doccer、_docscrape）。",
+          "learning_goals": [
+            "理解 SciPy 文档字符串的统一格式与生成",
+            "掌握 _docscrape 抽取参数/示例的能力",
+            "学会用 doccer 维护可复用文档模板"
+          ],
+          "source_files": [
+            "scipy/_lib/doccer.py",
+            "scipy/_lib/_docscrape.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/doccer.py",
+            "scipy/_lib/_docscrape.py"
+          ],
+          "practice_task": "用 _docscrape.FunctionDoc 抽取一个 scipy.linalg 函数的 Parameters 与 Examples 段落，并用 doccer 拼接出统一模板。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "special 特殊函数与底层后端",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "special 子包结构与 ufunc 化特殊函数",
+          "order": 1,
+          "filename": "u3-l1-special-ufuncs.md",
+          "level": "intermediate",
+          "topic": "讲解 scipy.special 如何把数学特殊函数（贝塞尔、伽马、误差函数等）实现为 NumPy ufunc，支持广播与逐元素运算。",
+          "learning_goals": [
+            "理解 special 函数的 ufunc 化实现",
+            "掌握广播与逐元素向量化的工作方式",
+            "认识正交多项式相关例程"
+          ],
+          "source_files": [
+            "scipy/special/__init__.py",
+            "scipy/special/_basic.py",
+            "scipy/special/_orthogonal.py"
+          ],
+          "minimal_modules": [
+            "scipy/special/__init__.py",
+            "scipy/special/_basic.py",
+            "scipy/special/_orthogonal.py"
+          ],
+          "practice_task": "用 special.jv、special.gamma 对数组做逐元素运算，对比纯 Python 循环的实现，测量并解释速度差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "xsf C++ 后端与特殊函数错误处理",
+          "order": 2,
+          "filename": "u3-l2-xsf-backend-error-handling.md",
+          "level": "advanced",
+          "topic": "讲解 special 底层依赖的 xsf C++ 库（subproject）与 sf_error 错误状态处理机制。",
+          "learning_goals": [
+            "理解 xsf 作为 special 计算 backend 的角色",
+            "掌握 sf_error 的 domain/singular/overflow 等错误状态",
+            "认识 add_newdocs 如何为 ufunc 绑定文档"
+          ],
+          "source_files": [
+            "scipy/special/_support_alternative_backends.py",
+            "scipy/special/_sf_error.py",
+            "scipy/special/_add_newdocs.py",
+            "subprojects/xsf/README.md"
+          ],
+          "minimal_modules": [
+            "scipy/special/_support_alternative_backends.py",
+            "scipy/special/_sf_error.py",
+            "subprojects/xsf"
+          ],
+          "practice_task": "触发 special 函数的 domain/singular 错误（如对负数开方、过大阶乘），用 sf_error 读取并解释错误状态。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "linalg 线性代数",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "矩阵分解体系",
+          "order": 1,
+          "filename": "u4-l1-matrix-decompositions.md",
+          "level": "intermediate",
+          "topic": "讲解 scipy.linalg 的各种矩阵分解（LU、QR、SVD、Cholesky、Schur）的实现组织与底层调用。",
+          "learning_goals": [
+            "掌握 LU/QR/SVD/Cholesky 分解的接口与用法",
+            "理解分解模块（_decomp_*.py）的组织方式",
+            "能够选择合适分解解决实际问题"
+          ],
+          "source_files": [
+            "scipy/linalg/_decomp.py",
+            "scipy/linalg/_decomp_lu.py",
+            "scipy/linalg/_decomp_qr.py",
+            "scipy/linalg/_decomp_svd.py"
+          ],
+          "minimal_modules": [
+            "scipy/linalg/_decomp.py",
+            "scipy/linalg/_decomp_lu.py",
+            "scipy/linalg/_decomp_qr.py",
+            "scipy/linalg/_decomp_svd.py"
+          ],
+          "practice_task": "对随机矩阵分别做 lu/qr/svd 分解，重构矩阵并与原矩阵对比误差；比较不同分解的计算成本。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "BLAS/LAPACK Fortran 包装",
+          "order": 2,
+          "filename": "u4-l2-blas-lapack-wrappers.md",
+          "level": "intermediate",
+          "topic": "讲解 scipy.linalg 如何通过 f2py 包装 BLAS/LAPACK Fortran 例程，并暴露 lapack/blas 低层接口。",
+          "learning_goals": [
+            "理解 f2py 包装 Fortran 例程的机制",
+            "掌握直接调用 scipy.linalg.lapack/blas 的方法",
+            "认识 Fortran 列主序与字符参数约定"
+          ],
+          "source_files": [
+            "scipy/linalg/_basic.py",
+            "scipy/linalg/lapack.py",
+            "scipy/linalg/blas.py"
+          ],
+          "minimal_modules": [
+            "scipy/linalg/_basic.py",
+            "scipy/linalg/lapack.py",
+            "scipy/linalg/blas.py"
+          ],
+          "practice_task": "直接调用 scipy.linalg.lapack.dgesv 求解线性方程组，与 scipy.linalg.solve 结果对照，确认一致性。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "矩阵函数与特殊矩阵",
+          "order": 3,
+          "filename": "u4-l3-matrix-functions-special.md",
+          "level": "intermediate",
+          "topic": "讲解矩阵函数（expm/logm/sqrtm）和特殊矩阵（Hadamard、Toeplitz、Hilbert）的实现。",
+          "learning_goals": [
+            "掌握 expm/logm/sqrtm 等矩阵函数的原理",
+            "理解特殊矩阵的构造方法",
+            "认识矩阵函数的缩放-平方算法"
+          ],
+          "source_files": [
+            "scipy/linalg/_matfuncs.py",
+            "scipy/linalg/_special_matrices.py",
+            "scipy/linalg/_matfuncs_sqrtm.py"
+          ],
+          "minimal_modules": [
+            "scipy/linalg/_matfuncs.py",
+            "scipy/linalg/_special_matrices.py",
+            "scipy/linalg/_matfuncs_sqrtm.py"
+          ],
+          "practice_task": "用 expm/logm 验证 expm(logm(A))≈A；构造 Toeplitz 与 Hilbert 矩阵并分析其性质。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "sparse 稀疏数组",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "稀疏数组类层次与存储格式",
+          "order": 1,
+          "filename": "u5-l1-sparse-class-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 sparse 的类继承体系与七种存储格式（COO/CSR/CSC/BSR/DIA/DOK/LIL）的内部数据结构。",
+          "learning_goals": [
+            "掌握 sparray 基类与各格式子类的继承关系",
+            "理解 CSR/CSC/COO 等格式的内部内存布局",
+            "能够根据场景选择合适稀疏格式"
+          ],
+          "source_files": [
+            "scipy/sparse/_base.py",
+            "scipy/sparse/_compressed.py",
+            "scipy/sparse/_csr.py",
+            "scipy/sparse/_coo.py"
+          ],
+          "minimal_modules": [
+            "scipy/sparse/_base.py",
+            "scipy/sparse/_compressed.py",
+            "scipy/sparse/_csr.py",
+            "scipy/sparse/_coo.py"
+          ],
+          "practice_task": "构造同一矩阵的 CSR/CSC/COO 表示，比较 .data/.indices/.indptr 内存布局并相互转换。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "构造、索引与算术运算",
+          "order": 2,
+          "filename": "u5-l2-construction-indexing-arithmetic.md",
+          "level": "intermediate",
+          "topic": "讲解稀疏数组的构造函数、稀疏索引机制与算术/矩阵运算实现。",
+          "learning_goals": [
+            "掌握 diags_array/eye_array/block_array 等构造函数",
+            "理解稀疏 fancy indexing 的实现",
+            "认识稀疏算术与矩阵乘法的语义"
+          ],
+          "source_files": [
+            "scipy/sparse/_construct.py",
+            "scipy/sparse/_index.py",
+            "scipy/sparse/_sputils.py"
+          ],
+          "minimal_modules": [
+            "scipy/sparse/_construct.py",
+            "scipy/sparse/_index.py",
+            "scipy/sparse/_sputils.py"
+          ],
+          "practice_task": "用 eye_array/diags_array 构造带状矩阵，用 fancy indexing 提取子块，并与密集版本结果对照。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "sparse.csgraph 图算法",
+          "order": 3,
+          "filename": "u5-l3-csgraph-algorithms.md",
+          "level": "intermediate",
+          "topic": "讲解基于稀疏矩阵的图算法（最短路径、连通分量、最小生成树、PageRank）。",
+          "learning_goals": [
+            "理解稀疏矩阵作为图邻接表示的模型",
+            "掌握 shortest_path/connected_components 等接口",
+            "认识 csgraph 的有向/无向处理"
+          ],
+          "source_files": [
+            "scipy/sparse/csgraph/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy/sparse/csgraph",
+            "shortest_path",
+            "connected_components"
+          ],
+          "practice_task": "构造一个随机稀疏带权图，用 csgraph.shortest_path 求所有点对最短路径，并用 connected_components 验证连通性。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "sparse.linalg 求解器与特征值",
+          "order": 4,
+          "filename": "u5-l4-sparse-linalg-solvers-eigen.md",
+          "level": "advanced",
+          "topic": "讲解稀疏线性方程组直接/迭代求解器（splu、spsolve、cg、gmres）与特征值求解（ARPACK eigs、LOBPCG svds）。",
+          "learning_goals": [
+            "掌握稀疏直接求解（SuperLU）与迭代求解",
+            "理解 ARPACK/LOBPCG 特征值算法接口",
+            "能够根据矩阵规模选择合适求解器"
+          ],
+          "source_files": [
+            "scipy/sparse/linalg/_dsolve/__init__.py",
+            "scipy/sparse/linalg/_isolve/__init__.py",
+            "scipy/sparse/linalg/_eigen/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy/sparse/linalg/_dsolve",
+            "scipy/sparse/linalg/_isolve",
+            "scipy/sparse/linalg/_eigen"
+          ],
+          "practice_task": "用 spsolve 与 cg 分别求解同一大型稀疏正定方程组，比较精度、内存与耗时。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "optimize 优化",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "minimize 统一接口与无约束局部优化",
+          "order": 1,
+          "filename": "u6-l1-minimize-unconstrained.md",
+          "level": "intermediate",
+          "topic": "讲解 scipy.optimize.minimize 统一接口如何分发到各方法（BFGS/Nelder-Mead/L-BFGS-B 等），以及 OptimizeResult 设计。",
+          "learning_goals": [
+            "掌握 minimize 统一接口与 methods 分发",
+            "理解线搜索（_linesearch）在梯度法中的作用",
+            "认识 OptimizeResult 的字段约定"
+          ],
+          "source_files": [
+            "scipy/optimize/_optimize.py",
+            "scipy/optimize/_minimize.py",
+            "scipy/optimize/_linesearch.py"
+          ],
+          "minimal_modules": [
+            "scipy/optimize/_optimize.py",
+            "scipy/optimize/_minimize.py",
+            "scipy/optimize/_linesearch.py"
+          ],
+          "practice_task": "用 minimize 配合至少 3 种 method 求解同一多变量函数，比较迭代次数、函数调用次数与精度。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "约束优化与信赖域方法",
+          "order": 2,
+          "filename": "u6-l2-constrained-trust-region.md",
+          "level": "advanced",
+          "topic": "讲解约束（LinearConstraint/NonlinearConstraint）与信赖域类方法（trust-constr、trust-ncg、Krylov）以及 Hessian 更新策略。",
+          "learning_goals": [
+            "掌握约束对象的构造与雅可比/海森提供方式",
+            "理解信赖域子问题与 Krylov 求解",
+            "认识 Hessian 更新策略（BFGS/SR1）"
+          ],
+          "source_files": [
+            "scipy/optimize/_constraints.py",
+            "scipy/optimize/_trustregion.py",
+            "scipy/optimize/_hessian_update_strategy.py"
+          ],
+          "minimal_modules": [
+            "scipy/optimize/_constraints.py",
+            "scipy/optimize/_trustregion.py",
+            "scipy/optimize/_hessian_update_strategy.py",
+            "scipy/optimize/_trustregion_constr"
+          ],
+          "practice_task": "用 minimize(method='trust-constr') 求解一个带等式与不等式约束的问题，分析约束是否被满足。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "全局优化算法",
+          "order": 3,
+          "filename": "u6-l3-global-optimization.md",
+          "level": "intermediate",
+          "topic": "讲解差分进化、双退火、basinhopping、SHGO 等全局优化策略及其适用场景。",
+          "learning_goals": [
+            "掌握四种全局优化器的接口与参数",
+            "理解各自避免局部最优的机制",
+            "能够根据问题特性选择全局方法"
+          ],
+          "source_files": [
+            "scipy/optimize/_differentialevolution.py",
+            "scipy/optimize/_dual_annealing.py",
+            "scipy/optimize/_basinhopping.py",
+            "scipy/optimize/_shgo.py"
+          ],
+          "minimal_modules": [
+            "scipy/optimize/_differentialevolution.py",
+            "scipy/optimize/_dual_annealing.py",
+            "scipy/optimize/_basinhopping.py",
+            "scipy/optimize/_shgo.py"
+          ],
+          "practice_task": "对多峰测试函数（如 Rastrigin/Ackley）用三种全局优化器求解，比较它们找到全局最优的稳定性与耗时。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "线性规划与混合整数规划（HiGHS）",
+          "order": 4,
+          "filename": "u6-l4-linprog-milp-highs.md",
+          "level": "intermediate",
+          "topic": "讲解 linprog 经 HiGHS 求解线性规划，以及 milp 混合整数规划的接口与建模。",
+          "learning_goals": [
+            "掌握 linprog 的标准型与 HiGHS 求解",
+            "理解 milp 的变量/约束/积分性建模",
+            "认识 HiGHS 后端集成方式"
+          ],
+          "source_files": [
+            "scipy/optimize/_linprog.py",
+            "scipy/optimize/_linprog_highs.py",
+            "scipy/optimize/_milp.py"
+          ],
+          "minimal_modules": [
+            "scipy/optimize/_linprog.py",
+            "scipy/optimize/_linprog_highs.py",
+            "scipy/optimize/_milp.py",
+            "scipy/optimize/_highspy"
+          ],
+          "practice_task": "用 linprog(method='highs') 求解一个资源分配 LP；用 milp 求解一个 0/1 背包问题，验证最优解。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "最小二乘、曲线拟合与求根",
+          "order": 5,
+          "filename": "u6-l5-leastsquares-curvefit-roots.md",
+          "level": "intermediate",
+          "topic": "讲解 least_squares（TRF/dogbox）、curve_fit 以及根求解（root/root_scalar/brentq）。",
+          "learning_goals": [
+            "掌握非线性最小二乘的 TRF/dogbox 算法",
+            "理解 curve_fit 基于最小二乘的参数估计",
+            "认识一维/多维求根接口与适用方法"
+          ],
+          "source_files": [
+            "scipy/optimize/_lsq/least_squares.py",
+            "scipy/optimize/_minpack_py.py",
+            "scipy/optimize/_root.py",
+            "scipy/optimize/_zeros_py.py"
+          ],
+          "minimal_modules": [
+            "scipy/optimize/_lsq/least_squares.py",
+            "scipy/optimize/_minpack_py.py",
+            "scipy/optimize/_root.py",
+            "scipy/optimize/_zeros_py.py"
+          ],
+          "practice_task": "用 curve_fit 拟合带噪声的指数衰减数据并给出参数置信区间；用 root_scalar 求一个超越方程的零点。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "integrate 积分与 ODE",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "数值积分方法",
+          "order": 1,
+          "filename": "u7-l1-numerical-integration.md",
+          "level": "intermediate",
+          "topic": "讲解 quad（QUADPACK）、quad_vec、tanhsinh、cubature（_rules）等积分方法的实现与适用场景。",
+          "learning_goals": [
+            "掌握 quad/quad_vec 的接口与误差控制",
+            "理解 tanhsinh 双指数积分与端点奇异性",
+            "认识 cubature 的多维求积规则"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadpack_py.py",
+            "scipy/integrate/_quad_vec.py",
+            "scipy/integrate/_tanhsinh.py",
+            "scipy/integrate/_cubature.py"
+          ],
+          "minimal_modules": [
+            "scipy/integrate/_quadpack_py.py",
+            "scipy/integrate/_quad_vec.py",
+            "scipy/integrate/_tanhsinh.py",
+            "scipy/integrate/_cubature.py"
+          ],
+          "practice_task": "用 quad 与 tanhsinh 分别计算一个振荡或端点奇异积分，比较收敛精度与估计误差。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "ODE 求解框架与 OdeSolver 抽象",
+          "order": 2,
+          "filename": "u7-l2-ode-framework-odesolver.md",
+          "level": "intermediate",
+          "topic": "讲解 solve_ivp 的统一接口与 _ivp/base.py 的 OdeSolver 抽象基类、步进与密集输出机制。",
+          "learning_goals": [
+            "掌握 solve_ivp 接口与事件/终止条件",
+            "理解 OdeSolver 基类的 step/dense_output 抽象",
+            "认识 DenseOutput/OdeSolution 的插值设计"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/ivp.py",
+            "scipy/integrate/_ivp/base.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "scipy/integrate/_ivp/ivp.py",
+            "scipy/integrate/_ivp/base.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "practice_task": "用 solve_ivp 求解 Lotka-Volterra 方程组，用 dense_output 在任意时刻取值并绘制相图。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "具体求解器与步长控制",
+          "order": 3,
+          "filename": "u7-l3-solvers-step-control.md",
+          "level": "advanced",
+          "topic": "讲解 RK23/45、DOP853、Radau（隐式）、BDF、LSODA 的实现差异与自适应步长/误差控制。",
+          "learning_goals": [
+            "理解显式 RK 与隐式 RK 的差异",
+            "掌握刚性方程与隐式/变阶方法的适用",
+            "认识自适应步长的误差控制逻辑"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/rk.py",
+            "scipy/integrate/_ivp/radau.py",
+            "scipy/integrate/_ivp/bdf.py",
+            "scipy/integrate/_ivp/lsoda.py"
+          ],
+          "minimal_modules": [
+            "scipy/integrate/_ivp/rk.py",
+            "scipy/integrate/_ivp/radau.py",
+            "scipy/integrate/_ivp/bdf.py",
+            "scipy/integrate/_ivp/lsoda.py"
+          ],
+          "practice_task": "对一组刚性 ODE 比较 RK45 与 Radau/BDF 的步数、稳定性与耗时，解释为何显式方法表现不佳。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "interpolate 插值",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "多项式与 B-spline 插值",
+          "order": 1,
+          "filename": "u8-l1-poly-bspline-fitpack.md",
+          "level": "intermediate",
+          "topic": "讲解一维多项式插值（_polyint）、B-spline（_bsplines）与 FITPACK（_fitpack_impl）的实现。",
+          "learning_goals": [
+            "掌握多项式插值类（CubicSpline 等）的接口",
+            "理解 B-spline 基与节点向量",
+            "认识 FITPACK 样条拟合的工作方式"
+          ],
+          "source_files": [
+            "scipy/interpolate/_polyint.py",
+            "scipy/interpolate/_bsplines.py",
+            "scipy/interpolate/_fitpack_impl.py"
+          ],
+          "minimal_modules": [
+            "scipy/interpolate/_polyint.py",
+            "scipy/interpolate/_bsplines.py",
+            "scipy/interpolate/_fitpack_impl.py"
+          ],
+          "practice_task": "用 CubicSpline 与 BSpline 对同一组数据做插值，比较在数据点之外的预测行为与光滑度。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "RBF 与多维插值",
+          "order": 2,
+          "filename": "u8-l2-rbf-nd-interpolation.md",
+          "level": "intermediate",
+          "topic": "讲解径向基函数插值（_rbfinterp）与散点/网格多维插值（_rgi、ndgriddata、_ndbspline）。",
+          "learning_goals": [
+            "掌握 RBFInterpolator 的核函数与平滑参数",
+            "理解 RegularGridInterpolator 的网格假设",
+            "认识散点插值（LinearND/CloughTocher2D）"
+          ],
+          "source_files": [
+            "scipy/interpolate/_rbfinterp.py",
+            "scipy/interpolate/_rgi.py",
+            "scipy/interpolate/_ndgriddata.py",
+            "scipy/interpolate/_ndbspline.py"
+          ],
+          "minimal_modules": [
+            "scipy/interpolate/_rbfinterp.py",
+            "scipy/interpolate/_rgi.py",
+            "scipy/interpolate/_ndgriddata.py"
+          ],
+          "practice_task": "用 RBFInterpolator 与 RegularGridInterpolator 处理一组二维散点数据，比较插值误差与外推表现。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "signal 信号处理",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "滤波器设计",
+          "order": 1,
+          "filename": "u9-l1-filter-design.md",
+          "level": "intermediate",
+          "topic": "讲解 IIR/FIR 滤波器设计（_filter_design、_fir_filter_design）与窗函数。",
+          "learning_goals": [
+            "掌握 IIR（butter/cheby/ellip）与 FIR（firwin）设计接口",
+            "理解滤波器阶数、截止频率与频率响应",
+            "认识窗函数对 FIR 设计的影响"
+          ],
+          "source_files": [
+            "scipy/signal/_filter_design.py",
+            "scipy/signal/_fir_filter_design.py",
+            "scipy/signal/windows/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy/signal/_filter_design.py",
+            "scipy/signal/_fir_filter_design.py",
+            "scipy/signal/windows"
+          ],
+          "practice_task": "设计一个 Butterworth 低通与一个 firwin FIR 低通，用 freqz 绘制并比较频率响应与过渡带。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "卷积、滤波与频谱分析",
+          "order": 2,
+          "filename": "u9-l2-convolution-spectral.md",
+          "level": "intermediate",
+          "topic": "讲解卷积/滤波（_signaltools）、谱分析（_spectral_py）与短时傅里叶（_short_time_fft）。",
+          "learning_goals": [
+            "掌握 convolve/filtfilt/lfilter 的差异与用法",
+            "理解 welch/spectrogram 的功率谱估计",
+            "认识 ShortTimeFFT 的滑窗频谱分析"
+          ],
+          "source_files": [
+            "scipy/signal/_signaltools.py",
+            "scipy/signal/_spectral_py.py",
+            "scipy/signal/_short_time_fft.py"
+          ],
+          "minimal_modules": [
+            "scipy/signal/_signaltools.py",
+            "scipy/signal/_spectral_py.py",
+            "scipy/signal/_short_time_fft.py"
+          ],
+          "practice_task": "对一段含噪信号做 filtfilt 零相位滤波，再用 welch 估计功率谱，并用 ShortTimeFFT 观察时频变化。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "ndimage 图像处理",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "ndimage 滤波、插值、形态学与测量",
+          "order": 1,
+          "filename": "u10-l1-ndimage-filters-morphology.md",
+          "level": "intermediate",
+          "topic": "讲解 ndimage 的滤波、几何插值、形态学操作与区域测量的统一实现（_ni_support 调度）。",
+          "learning_goals": [
+            "掌握滤波（卷积/高斯/中值）与几何变换接口",
+            "理解二值/灰度形态学操作",
+            "认识 label 与 regionprops 式测量"
+          ],
+          "source_files": [
+            "scipy/ndimage/_filters.py",
+            "scipy/ndimage/_interpolation.py",
+            "scipy/ndimage/_morphology.py",
+            "scipy/ndimage/_measurements.py"
+          ],
+          "minimal_modules": [
+            "scipy/ndimage/_filters.py",
+            "scipy/ndimage/_interpolation.py",
+            "scipy/ndimage/_morphology.py",
+            "scipy/ndimage/_measurements.py"
+          ],
+          "practice_task": "用 datasets.ascent() 加载示例图，依次做高斯滤波、旋转，并用 label+ndimage.sum 对连通区域进行测量统计。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "spatial 空间结构",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "KD-Tree 与 Qhull 凸包/Delaunay",
+          "order": 1,
+          "filename": "u11-l1-kdtree-qhull.md",
+          "level": "intermediate",
+          "topic": "讲解 KD-Tree（_kdtree、ckdtree Cython）与 Qhull（qhull.py，凸包/Delaunay/Voronoi）的实现。",
+          "learning_goals": [
+            "掌握 KDTree/cKDTree 的近邻查询接口",
+            "理解 Delaunay 三角化与凸包构造",
+            "认识 Voronoi 图的计算"
+          ],
+          "source_files": [
+            "scipy/spatial/_kdtree.py",
+            "scipy/spatial/ckdtree.py",
+            "scipy/spatial/qhull.py"
+          ],
+          "minimal_modules": [
+            "scipy/spatial/_kdtree.py",
+            "scipy/spatial/ckdtree.py",
+            "scipy/spatial/qhull.py"
+          ],
+          "practice_task": "生成随机点集，用 cKDTree 做 k 近邻查询，并用 Delaunay 三角化与 ConvexHull 可视化结果。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "距离度量与空间变换",
+          "order": 2,
+          "filename": "u11-l2-distance-transforms.md",
+          "level": "intermediate",
+          "topic": "讲解距离矩阵（distance.py，含 cdist/pdist）与旋转载示（transform）及球面 Voronoi。",
+          "learning_goals": [
+            "掌握 cdist/pdist 的多种距离度量",
+            "理解 Rotation 的四元数/欧拉角/矩阵表示",
+            "认识 SphericalVoronoi 的应用"
+          ],
+          "source_files": [
+            "scipy/spatial/distance.py",
+            "scipy/spatial/transform/__init__.py",
+            "scipy/spatial/_spherical_voronoi.py"
+          ],
+          "minimal_modules": [
+            "scipy/spatial/distance.py",
+            "scipy/spatial/transform",
+            "scipy/spatial/_spherical_voronoi.py"
+          ],
+          "practice_task": "用 cdist 计算点集的多种距离；用 Rotation 在欧拉角与四元数之间转换，并验证合成旋转的一致性。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "fft、stats 与其他子包",
+      "level": "intermediate",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "fft 傅里叶变换与后端分发",
+          "order": 1,
+          "filename": "u12-l1-fft-backend.md",
+          "level": "intermediate",
+          "topic": "讲解现代 scipy.fft（替代 fftpack）、实变换与 FFTLog，以及与 uarray 后端的关系。",
+          "learning_goals": [
+            "掌握 fft/fftn/rfft 的接口与归一化模式",
+            "理解实变换与 fht（FFTLog）的用途",
+            "认识 fft 的后端分发机制"
+          ],
+          "source_files": [
+            "scipy/fft/__init__.py",
+            "scipy/fft/_basic.py",
+            "scipy/fft/_realtransforms.py",
+            "scipy/fft/_fftlog.py"
+          ],
+          "minimal_modules": [
+            "scipy/fft/__init__.py",
+            "scipy/fft/_basic.py",
+            "scipy/fft/_realtransforms.py",
+            "scipy/fft/_fftlog.py"
+          ],
+          "practice_task": "用 fft 与 rfft 分析一段合成信号的频谱，并用 fht 做一次 Hankel 变换；尝试切换 fft 后端。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "stats 分布基础设施与连续/离散分布",
+          "order": 2,
+          "filename": "u12-l2-stats-distributions.md",
+          "level": "advanced",
+          "topic": "讲解 stats 的分布类体系（_distn_infrastructure 的 rv_continuous/rv_discrete）与具体分布实现。",
+          "learning_goals": [
+            "理解 rv_continuous/rv_discrete 的抽象与 pdf/cdf/ppf",
+            "掌握分布拟合与统计量计算",
+            "认识连续/离散分布的组织方式"
+          ],
+          "source_files": [
+            "scipy/stats/_distn_infrastructure.py",
+            "scipy/stats/_continuous_distns.py",
+            "scipy/stats/_discrete_distns.py"
+          ],
+          "minimal_modules": [
+            "scipy/stats/_distn_infrastructure.py",
+            "scipy/stats/_continuous_distns.py",
+            "scipy/stats/_discrete_distns.py"
+          ],
+          "practice_task": "用 rv_continuous 子类化一个自定义分布（实现 _pdf），对其采样并用 fit 拟合回参数。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "统计检验、重采样与 QMC",
+          "order": 3,
+          "filename": "u12-l3-tests-resampling-qmc.md",
+          "level": "intermediate",
+          "topic": "讲解假设检验（_hypotests）、重采样（_resampling 的 permutation/bootstrap）、核密度估计（_kde）与准蒙特卡洛（_qmc）。",
+          "learning_goals": [
+            "掌握常用假设检验（t 检验等）的接口",
+            "理解 permutation_test/bootstrap 重采样原理",
+            "认识 gaussian_kde 与 QMC（Sobol/Halton）"
+          ],
+          "source_files": [
+            "scipy/stats/_hypotests.py",
+            "scipy/stats/_resampling.py",
+            "scipy/stats/_kde.py",
+            "scipy/stats/_qmc.py"
+          ],
+          "minimal_modules": [
+            "scipy/stats/_hypotests.py",
+            "scipy/stats/_resampling.py",
+            "scipy/stats/_kde.py",
+            "scipy/stats/_qmc.py"
+          ],
+          "practice_task": "用 permutation_test 比较两组样本；用 qmc.Sobol 生成低差异数列并与纯随机做积分收敛对比。",
+          "depends_on": [
+            "u12-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "cluster、io、constants、datasets 杂项子包",
+          "order": 4,
+          "filename": "u12-l4-cluster-io-constants-datasets.md",
+          "level": "beginner",
+          "topic": "讲解聚类（cluster.vq/hierarchy）、数据 IO（io：MAT/MMIO/wav/netcdf）、物理常数与数据集获取。",
+          "learning_goals": [
+            "掌握 kmeans 与层次聚类 linkage 的用法",
+            "理解 Matrix Market/wav 等读写接口",
+            "认识 constants 与 datasets 的便捷用途"
+          ],
+          "source_files": [
+            "scipy/cluster/vq/_vq_impl.py",
+            "scipy/cluster/hierarchy/_hierarchy_impl.py",
+            "scipy/io/_mmio.py",
+            "scipy/datasets/_fetchers.py"
+          ],
+          "minimal_modules": [
+            "scipy/cluster/vq/_vq_impl.py",
+            "scipy/cluster/hierarchy/_hierarchy_impl.py",
+            "scipy/io/_mmio.py",
+            "scipy/datasets/_fetchers.py"
+          ],
+          "practice_task": "用 vq.kmeans 对随机点聚类并绘制 dendrogram；将矩阵写为 Matrix Market 文件再读回；用 datasets.face() 加载示例图。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "扩展、质量与架构演进",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "扩展机制：用 Cython/Fortran 添加底层函数",
+          "order": 1,
+          "filename": "u13-l1-adding-compiled-extensions.md",
+          "level": "advanced",
+          "topic": "讲解如何向 SciPy 添加新的编译扩展（Cython .pyx、f2py Fortran 包装、pythran），并在 meson.build 中注册。",
+          "learning_goals": [
+            "理解 meson.build 注册 extension_module 的方式",
+            "掌握 Cython/pythran 在 SciPy 中的生成流程",
+            "认识 _generate_pyx/_build_utils 的代码生成"
+          ],
+          "source_files": [
+            "scipy/meson.build",
+            "scipy/special/_generate_pyx.py",
+            "scipy/linalg/_generate_pyx.py",
+            "scipy/_build_utils/system_info.py"
+          ],
+          "minimal_modules": [
+            "scipy/meson.build",
+            "scipy/special/_generate_pyx.py",
+            "scipy/_build_utils/system_info.py"
+          ],
+          "practice_task": "在隔离沙盒中编写一个最小 Cython 扩展（含一个函数），写一个最小 meson.build 并用 meson-python 成功构建导入。",
+          "depends_on": [
+            "u1-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "测试体系：pytest、_testutils 与 hypothesis",
+          "order": 2,
+          "filename": "u13-l2-testing-framework.md",
+          "level": "advanced",
+          "topic": "讲解 SciPy 的测试组织、PytestTester、共享 _testutils、参数化与基于 hypothesis 的属性测试。",
+          "learning_goals": [
+            "掌握 SciPy 子包测试目录与 pytest 约定",
+            "理解 PytestTester 与共享测试工具",
+            "学会用 hypothesis 编写属性测试"
+          ],
+          "source_files": [
+            "scipy/_lib/_testutils.py",
+            "pytest.ini",
+            "scipy/special/_testutils.py",
+            "scipy/_lib/tests/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/_testutils.py",
+            "pytest.ini",
+            "scipy/special/_testutils.py"
+          ],
+          "practice_task": "为一个 scipy 函数编写参数化测试 + 一个 hypothesis 属性测试，并用 spin 或 pytest 运行通过。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "性能、并发与 BLAS 线程控制",
+          "order": 3,
+          "filename": "u13-l3-performance-concurrency.md",
+          "level": "advanced",
+          "topic": "讲解 SciPy 的性能考量：底层 BLAS/LAPACK 多线程、threadpoolctl 控制线程、内存布局与向量化。",
+          "learning_goals": [
+            "理解 BLAS/LAPACK 多线程对性能的影响",
+            "掌握 threadpoolctl 控制线程池",
+            "认识连续内存布局与向量化的重要性"
+          ],
+          "source_files": [
+            "scipy/_lib/_util.py",
+            "benchmarks/benchmarks/linalg.py",
+            "benchmarks/benchmarks/common.py"
+          ],
+          "minimal_modules": [
+            "scipy/_lib/_util.py",
+            "benchmarks/benchmarks/linalg.py",
+            "benchmarks/benchmarks/common.py"
+          ],
+          "practice_task": "用 threadpoolctl 限制 BLAS 线程数为 1 与多线程，对比大规模矩阵乘法/分解的耗时，分析并行收益。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l4",
+          "title": "架构演进与取舍：sparray 迁移与 Array API 标准化",
+          "order": 4,
+          "filename": "u13-l4-architecture-evolution.md",
+          "level": "advanced",
+          "topic": "讲解 SciPy 的重大架构演进：sparse matrix→array 迁移、Array API 统一、延迟导入与公共 API 治理（_public_api、overrides、deprecation）。",
+          "learning_goals": [
+            "理解 spmatrix→sparray 迁移的动机与影响",
+            "掌握 Array API 标准化的整体方向",
+            "认识公共 API 治理与弃用周期机制"
+          ],
+          "source_files": [
+            "scipy/sparse/_base.py",
+            "scipy/_lib/_public_api.py",
+            "scipy/_lib/deprecation.py",
+            "doc/source/overrides.json"
+          ],
+          "minimal_modules": [
+            "scipy/sparse/_base.py",
+            "scipy/_lib/_public_api.py",
+            "scipy/_lib/deprecation.py",
+            "doc/source/overrides.json"
+          ],
+          "practice_task": "运行 _public_api 相关命名空间校验（如有脚本），并将一段使用 spmatrix 的旧代码改写为 sparray 等价实现。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

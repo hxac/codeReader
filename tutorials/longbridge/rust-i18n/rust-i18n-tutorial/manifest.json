@@ -1,0 +1,852 @@
+{
+  "project": "rust-i18n",
+  "head": "97cf091c24e4bc09a0acb397a8d9d7da8b6abc56",
+  "rationale": "整体思路是「先会用 → 看懂编译期主链路 → 理解运行时翻译 → 深入机制与工程化」。第一单元让读者从零理解 rust-i18n 的定位、四个 crate 的工作区结构、最小可运行示例和 v1/v2 本地化文件格式；第二单元按真实执行顺序剖析编译期代码生成主链路（i18n! 宏参数解析 → glob 加载与解析文件 → 多文件合并与键扁平化 → generate_code 生成的运行时代码）；第三单元讲解运行时翻译机制（t! 完整调用链 → _tr! 宏展开 → 变量插值与格式化 → 回退策略）；第四单元聚焦后端抽象 Backend trait、CombinedBackend 组合优先级与自定义后端实战；第五单元讲配置与构建（Cargo.toml [package.metadata.i18n]、build.rs rerun-if-changed、feature flags）；第六单元深入 minify_key 短键的 SipHash+base62 算法及其在 t!、tkv!、提取器中的协作；第七单元剖析 cargo i18n CLI 提取器（入口 → 源码遍历提取 → 生成 TODO.yml）；第八单元覆盖线程安全（AtomicStr/arc-swap）、性能基准与内存优化、workspace 多 crate 共享翻译模式以及测试体系。每篇讲义只解决一个主题、引用 1~6 个已确认存在的源码文件、配一个可操作的代码实践任务，depends_on 形成无环依赖，保证读者按顺序学习时不出现前置知识缺口。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "rust-i18n 是什么：定位与核心特性",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 rust-i18n 要解决的问题：在编译期把 YAML/JSON/TOML 翻译文件代码生成进二进制，再用全局 t! 宏取本地化文本，以及它的核心特性与设计灵感来源。",
+          "learning_goals": [
+            "理解 rust-i18n 解决的国际化问题与「编译期代码生成」这一核心思想",
+            "列出它的核心特性：全局 t! 宏、多格式文件、fallback、minify_key 等",
+            "了解其 API 灵感来源（ruby-i18n / Rails I18n）"
+          ],
+          "source_files": [
+            "README.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "README 功能列表",
+            "t! / available_locales! 宏导出"
+          ],
+          "practice_task": "阅读 README，归纳出 rust-i18n 相比「手写 match 做翻译」的 3 个优势；并在本地新建一个 Cargo 项目，把 rust-i18n 加入依赖。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "工作区结构：四个 crate 如何协作",
+          "order": 2,
+          "filename": "u1-l2-workspace-structure.md",
+          "level": "beginner",
+          "topic": "讲解根 crate rust-i18n 与 support、macro、extract、cli 四个子 crate 的职责分工，以及根 crate 如何 re-export 子 crate 的符号。",
+          "learning_goals": [
+            "看懂根 Cargo.toml 的 workspace members 与各 crate 依赖关系",
+            "区分 rust-i18n（门面）、rust-i18n-support（运行时类型）、rust-i18n-macro（过程宏）、rust-i18n-extract/cli（提取器）的职责",
+            "理解 src/lib.rs 如何通过 pub use 把 support/macro 的符号对外暴露"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "crates/support/src/lib.rs",
+            "crates/macro/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "workspace members",
+            "根 crate re-export"
+          ],
+          "practice_task": "画出四个 crate 的依赖关系图（谁依赖谁），并说明 macro crate 为什么必须在 Cargo.toml 中设置 proc-macro = true。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速上手：跑通最小示例",
+          "order": 3,
+          "filename": "u1-l3-quick-start-example.md",
+          "level": "beginner",
+          "topic": "通过 examples/app 演示 i18n! 初始化、set_locale 切换语言、t! 取值和带变量插值的最小可运行流程。",
+          "learning_goals": [
+            "掌握 i18n!(\"locales\") 初始化翻译的写法",
+            "学会用 set_locale / locale 切换和读取全局语言",
+            "会用 t!(\"key\", name = \"...\") 和 t!(\"key\", locale = \"...\") 两种调用"
+          ],
+          "source_files": [
+            "examples/app/main.rs",
+            "examples/app/locales/en.yml",
+            "examples/app/locales/fr.yml"
+          ],
+          "minimal_modules": [
+            "i18n!() 初始化",
+            "set_locale",
+            "t! 取值"
+          ],
+          "practice_task": "复制 examples/app，新增一个 \"goodbye\" 翻译键并给出 en 和 fr 的值，运行 cargo test 验证 t!(\"goodbye\") 在两种 locale 下返回正确文本。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "本地化文件格式：v1 与 v2 两种风格",
+          "order": 4,
+          "filename": "u1-l4-locale-file-formats.md",
+          "level": "beginner",
+          "topic": "讲解 _version: 1（每种语言拆成独立文件）与 _version: 2（所有语言放进同一个文件）两种 YAML/JSON/TOML 风格的结构差异与选择依据。",
+          "learning_goals": [
+            "区分 _version: 1 按语言拆分文件与 _version: 2 多语言合并一文件两种风格",
+            "理解文件名（file_stem）如何决定 locale，以及 yml/yaml/json/toml 四种扩展名都受支持",
+            "能根据团队协作方式（拆分翻译 vs AI 辅助翻译）选择合适版本"
+          ],
+          "source_files": [
+            "README.md",
+            "examples/app-minify-key/locales/v2.yml",
+            "examples/app/locales/en.yml"
+          ],
+          "minimal_modules": [
+            "_version 字段",
+            "嵌套 locale 结构"
+          ],
+          "practice_task": "分别用 v1 和 v2 格式各写一个含 \"greeting\" 键的 en/zh-CN 翻译文件，对比两者写法并说明各自适用场景。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "编译期代码生成主链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "i18n! 宏入口与参数解析",
+          "order": 1,
+          "filename": "u2-l1-i18n-macro-arg-parsing.md",
+          "level": "intermediate",
+          "topic": "剖析 i18n! 过程宏如何用 syn 解析 locales 路径、fallback、backend、minify_key 系列参数，以及 Cargo.toml metadata 作为低优先级默认值的加载顺序。",
+          "learning_goals": [
+            "看懂 Args 结构与 syn::parse::Parse 实现如何解析宏参数",
+            "理解 load_metadata 先读 Cargo.toml、再用显式参数覆盖的优先级规则",
+            "掌握 fallback 既支持单个字符串也支持字符串数组的解析分支"
+          ],
+          "source_files": [
+            "crates/macro/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Args 结构",
+            "Parse impl",
+            "load_metadata",
+            "consume_options 递归"
+          ],
+          "practice_task": "在参数解析代码中定位 fallback 支持字符串与数组两种形式的分支，并写一段说明 consume_options 如何靠逗号递归解析任意数量的命名参数。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "编译期加载与解析本地化文件",
+          "order": 2,
+          "filename": "u2-l2-load-and-parse-locales.md",
+          "level": "intermediate",
+          "topic": "讲解 load_locales / try_load_locales 如何用 globwalk 扫描 **/*.{yml,yaml,json,toml}、按扩展名分发到 serde 解析，并根据 _version 走 v1 或 v2 解析路径。",
+          "learning_goals": [
+            "理解 glob 模式与 ignore_if 回调如何筛选要加载的文件",
+            "掌握 file_stem + split('.') 如何从文件名推导出 locale",
+            "区分 parse_file_v1（整文件归属单一 locale）与 parse_file_v2（按 locale 键重组）的解析逻辑"
+          ],
+          "source_files": [
+            "crates/support/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "try_load_locales",
+            "parse_file",
+            "parse_file_v1",
+            "parse_file_v2",
+            "get_version"
+          ],
+          "practice_task": "跟踪一个 en.yml 文件从 glob 匹配到 parse_file 的完整调用路径，说明 file_stem 如何决定 locale 名、_version 如何决定走哪条解析分支。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "多文件合并与键扁平化",
+          "order": 3,
+          "filename": "u2-l3-merge-and-flatten-keys.md",
+          "level": "intermediate",
+          "topic": "讲解 merge_value 递归合并嵌套 JSON 对象、flatten_keys 把嵌套结构拍平成 \"a.b.c\" 点号键、format_keys 拼接多级键前缀的过程。",
+          "learning_goals": [
+            "理解 merge_value 如何按 key 深度合并两个翻译对象",
+            "掌握 flatten_keys 如何把嵌套 map 递归成点号分隔的扁平 key",
+            "弄清多个文件先 merge 再 flatten 的整体数据流转"
+          ],
+          "source_files": [
+            "crates/support/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "merge_value",
+            "flatten_keys",
+            "format_keys"
+          ],
+          "practice_task": "给定两个 YAML 文件内容（含同名键和嵌套键），手算 merge_value + flatten_keys 之后 en locale 的扁平键值 map，并写测试验证。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "generate_code 生成的运行时代码",
+          "order": 4,
+          "filename": "u2-l4-generate-code.md",
+          "level": "intermediate",
+          "topic": "剖析 i18n! 最终用 quote! 生成的代码：_RUST_I18N_BACKEND 静态后端、_rust_i18n_translate / _rust_i18n_try_translate 查找函数、_rust_i18n_available_locales 以及内部 __rust_i18n_t 宏。",
+          "learning_goals": [
+            "看懂 generate_code 如何用 quote 把翻译数据编译成 SimpleBackend 静态变量",
+            "理解生成的 _RUST_I18N_BACKEND 用 LazyLock 延迟初始化",
+            "掌握 _rust_i18n_try_translate 调用 backend.translate 的入口"
+          ],
+          "source_files": [
+            "crates/macro/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "generate_code",
+            "SimpleBackend::add_translations",
+            "_rust_i18n_translate",
+            "_rust_i18n_try_translate"
+          ],
+          "practice_task": "用 RUST_I18N_DEBUG=1 编译一个使用 i18n! 的项目，把打印出的生成代码贴出，标注其中哪些是静态后端、哪些是回退查找函数、哪些是内部宏。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "运行时翻译机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "t! 宏的完整调用链",
+          "order": 1,
+          "filename": "u3-l1-t-macro-call-chain.md",
+          "level": "intermediate",
+          "topic": "从 src/lib.rs 的 macro_rules! t! 出发，跟踪到 crate::_rust_i18n_t! 再到 rust_i18n::_tr! 的展开，理清一次 t! 调用到拿到翻译文本的完整路径。",
+          "learning_goals": [
+            "理解 t! 宏转发到 crate 内部 _rust_i18n_t! 的设计原因（每个 crate 独立 backend）",
+            "掌握 __rust_i18n_t! 如何把 minify_key 配置透传给 _tr!",
+            "理清 _tr! 展开后调用 _rust_i18n_try_translate 的流程"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "crates/macro/src/lib.rs",
+            "crates/macro/src/tr.rs"
+          ],
+          "minimal_modules": [
+            "macro_rules! t",
+            "__rust_i18n_t",
+            "_rust_i18n_try_translate"
+          ],
+          "practice_task": "对 t!(\"hello\") 和 t!(\"messages.hello\", name=\"x\") 两种调用，分别写出展开后的伪代码骨架，标出 backend 查找发生在哪一步。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "_tr! 宏的解析与代码生成",
+          "order": 2,
+          "filename": "u3-l2-tr-macro-codegen.md",
+          "level": "intermediate",
+          "topic": "剖析 tr.rs 中 Tr / Argument / Value 的 syn 解析，以及 into_token_stream 如何区分「无参数」「有参数」生成不同的查找与替换代码。",
+          "learning_goals": [
+            "看懂 Argument 如何解析 key=value / key=>value / key=value:{:spec} 三种形式",
+            "理解 filter_arguments 如何把 locale/_minify_key_* 等特殊参数从普通参数中剥离",
+            "掌握有无参数时 into_token_stream 生成的两条不同代码路径"
+          ],
+          "source_files": [
+            "crates/macro/src/tr.rs"
+          ],
+          "minimal_modules": [
+            "Tr",
+            "Argument",
+            "Value",
+            "into_token_stream",
+            "filter_arguments"
+          ],
+          "practice_task": "说明 _tr! 如何识别并处理 \"locale\" 这个特殊参数、如何通过 filter_arguments 把它从后续 replace_patterns 的参数列表里移除。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "变量插值与格式化说明符",
+          "order": 3,
+          "filename": "u3-l3-interpolation-and-format.md",
+          "level": "intermediate",
+          "topic": "讲解 %{name} 占位符替换机制、replace_patterns 的字节级状态机扫描实现，以及 arg : {:08} 这类格式说明符如何拼进 format! 字符串。",
+          "learning_goals": [
+            "理解 replace_patterns 如何用 stage 状态机扫描 %{...} 占位符",
+            "掌握 Argument.specifiers 如何与值拼成 format!(\"{:08}\", v) 形式",
+            "弄清键值对如何按 keys/values 两个数组对齐传给 replace_patterns"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "crates/macro/src/tr.rs"
+          ],
+          "minimal_modules": [
+            "replace_patterns",
+            "Argument.specifiers",
+            "format! 拼接"
+          ],
+          "practice_task": "写一个 t! 调用，用 count = 7 : {:05} 让翻译结果出现零填充数字，并解释 specifiers 在 _tr! 里如何被包成 \"{:05}\" 字符串交给 format!。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "翻译回退机制",
+          "order": 4,
+          "filename": "u3-l4-fallback-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解显式 fallback 列表与自动 territory 回退（如 zh-Hant-CN → zh-Hant → zh），剖析 _rust_i18n_lookup_fallback 与 _rust_i18n_try_translate 的回退链。",
+          "learning_goals": [
+            "理解 _rust_i18n_lookup_fallback 如何按 RFC 4647 思路逐级去掉子标签",
+            "掌握显式 fallback 列表的优先级与 territory 回退的先后关系",
+            "能根据 integration_tests 里的用例预测回退结果"
+          ],
+          "source_files": [
+            "crates/macro/src/lib.rs",
+            "tests/integration_tests.rs"
+          ],
+          "minimal_modules": [
+            "_rust_i18n_lookup_fallback",
+            "_rust_i18n_try_translate",
+            "_RUST_I18N_FALLBACK_LOCALE"
+          ],
+          "practice_task": "给定 fallback=[\"zh\",\"en\"]，跟踪 t!(\"missing\", locale=\"zh-Hant-CN\") 的查找顺序，按顺序列出每一步尝试的 locale，直到命中或耗尽。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "后端抽象与扩展",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Backend trait 与 SimpleBackend",
+          "order": 1,
+          "filename": "u4-l1-backend-trait-simplebackend.md",
+          "level": "intermediate",
+          "topic": "讲解 Backend trait 的三个方法（available_locales / translate / messages_for_locale），以及 SimpleBackend 如何用嵌套 HashMap 存储 locale→(key→value) 并实现查找。",
+          "learning_goals": [
+            "理解 Backend trait 作为翻译存储抽象的三个核心方法",
+            "掌握 SimpleBackend 的 translations 数据结构与 add_translations 写入逻辑",
+            "看清 i18n! 生成的静态后端其实就是 SimpleBackend"
+          ],
+          "source_files": [
+            "crates/support/src/backend.rs"
+          ],
+          "minimal_modules": [
+            "Backend trait",
+            "SimpleBackend",
+            "add_translations"
+          ],
+          "practice_task": "不借助 i18n! 宏，直接用 SimpleBackend::new() + add_translations 构造一个含 en/zh-CN 的后端，调用 translate 写一个断言测试。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "BackendExt 与 CombinedBackend 组合",
+          "order": 2,
+          "filename": "u4-l2-backendext-combinedbackend.md",
+          "level": "intermediate",
+          "topic": "讲解 extend() 如何把两个后端组合成 CombinedBackend，以及 translate 与 messages_for_locale 在组合后端的优先级合并逻辑。",
+          "learning_goals": [
+            "理解 BackendExt::extend 把两个 Backend 包装成 CombinedBackend 的泛型组合",
+            "掌握 CombinedBackend::translate 中 self.1 优先于 self.0 的查找顺序",
+            "弄清 available_locales 与 messages_for_locale 如何去重合并"
+          ],
+          "source_files": [
+            "crates/support/src/backend.rs"
+          ],
+          "minimal_modules": [
+            "BackendExt::extend",
+            "CombinedBackend",
+            "translate 优先级合并"
+          ],
+          "practice_task": "用两个 SimpleBackend 调用 extend 组合，验证后加入（self.1）的后端 translate 结果优先，并解释 available_locales 是如何避免重复 locale 的。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "自定义后端实战",
+          "order": 3,
+          "filename": "u4-l3-custom-backend.md",
+          "level": "intermediate",
+          "topic": "通过 examples/share-in-workspace 的 I18nBackend 和 tests 的 TestBackend，演示如何实现自定义 Backend 并用 i18n!(\"locales\", backend = ...) 接入，使自定义值优先于本地文件。",
+          "learning_goals": [
+            "学会为一个自定义数据源（内存 HashMap / 远程 API）实现 Backend trait",
+            "理解 i18n!(backend = ...) 如何把自定义后端通过 extend 接到本地文件后端之前",
+            "掌握自定义后端 translate 优先于本地翻译的原因"
+          ],
+          "source_files": [
+            "examples/share-in-workspace/crates/i18n/src/lib.rs",
+            "tests/integration_tests.rs",
+            "crates/support/src/backend.rs"
+          ],
+          "minimal_modules": [
+            "impl Backend",
+            "i18n!(backend=...)",
+            "extend 优先级"
+          ],
+          "practice_task": "实现一个从内存 HashMap 读取翻译的自定义 Backend，用 i18n!(\"locales\", backend = MyBackend::new()) 接入，验证自定义键的值优先于本地文件中的同名键。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "配置、构建与 Feature",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Cargo.toml 中的 i18n 配置",
+          "order": 1,
+          "filename": "u5-l1-cargo-toml-config.md",
+          "level": "intermediate",
+          "topic": "讲解 [package.metadata.i18n] 各配置项、I18nConfig 如何用 serde + toml 解析，以及把 [package.metadata.i18n] / [workspace.metadata.i18n] 重写为 [i18n] 节再反序列化的技巧。",
+          "learning_goals": [
+            "看懂 I18nConfig 各字段（default-locale / available-locales / load-path / fallback / minify-key-*）及默认值",
+            "理解 parse 如何把 package.metadata.i18n 段字符串替换成 i18n 段再交给 toml 反序列化",
+            "掌握 available_locales 会自动把 default_locale 插入并去重"
+          ],
+          "source_files": [
+            "crates/support/src/config.rs",
+            "examples/foo/Cargo.toml",
+            "crates/macro/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "I18nConfig",
+            "parse",
+            "load",
+            "kebab-case serde"
+          ],
+          "practice_task": "参照 examples/foo/Cargo.toml，为自己的项目写一段 [package.metadata.i18n]（含 fallback 和 minify-key），通过测试确认 I18nConfig::parse 得到期望字段。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "构建脚本与增量重编译",
+          "order": 2,
+          "filename": "u5-l2-build-script.md",
+          "level": "intermediate",
+          "topic": "讲解 build.rs 如何扫描 locales 目录并对每个文件发出 cargo:rerun-if-changed，以及 workdir 如何优先用 CARGO_MANIFEST_DIR、回退到从 OUT_DIR 反推工程根目录。",
+          "learning_goals": [
+            "理解 build.rs 发出 cargo:rerun-if-changed 让 locale 文件改动触发重编译",
+            "掌握 workdir() 定位工程根目录的两种策略（CARGO_MANIFEST_DIR 与 OUT_DIR 正则切分）",
+            "学会用 RUST_I18N_DEBUG=1 查看加载/错误调试信息"
+          ],
+          "source_files": [
+            "build.rs",
+            "crates/support/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "build.rs",
+            "cargo:rerun-if-changed",
+            "CARGO_MANIFEST_DIR",
+            "is_debug"
+          ],
+          "practice_task": "修改一个 locale yml 文件后重新 cargo build，观察是否触发 i18n! 重编译；再用 RUST_I18N_DEBUG=1 编译，截图/记录输出的调试行。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Feature flags 与可选依赖",
+          "order": 3,
+          "filename": "u5-l3-feature-flags.md",
+          "level": "intermediate",
+          "topic": "讲解 codegen / load-path / log-miss-tr 三个 feature 的作用，以及 support crate 如何用 optional 依赖把 serde_yaml/serde_json/toml/globwalk 等做成编译期独占、默认不进运行时二进制。",
+          "learning_goals": [
+            "理解根 crate 的 load-path 与 log-miss-tr feature 如何向下游子 crate 传递",
+            "掌握 support 的 codegen feature 用 optional dep 控制 YAML/JSON/TOML 解析器是否编入",
+            "学会在运行时用 try_load_locales 加载 locale 文件（load-path feature）"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "crates/support/Cargo.toml",
+            "crates/macro/Cargo.toml",
+            "examples/app-load-path/src/main.rs"
+          ],
+          "minimal_modules": [
+            "features",
+            "codegen optional deps",
+            "log-miss-tr",
+            "load-path/try_load_locales"
+          ],
+          "practice_task": "为项目启用 load-path feature，用 try_load_locales 在运行时加载一个 locale 文件并打印结果，对比默认编译期加载在二进制体积/依赖上的区别。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "minify_key 短键机制",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "minify_key 短键算法原理",
+          "order": 1,
+          "filename": "u6-l1-minify-key-algorithm.md",
+          "level": "intermediate",
+          "topic": "讲解为什么需要短键、SipHasher13 计算 128 位哈希、base62 编码生成短键，以及 len / prefix / threshold 四个参数与默认常量的含义。",
+          "learning_goals": [
+            "理解 minify_key 用 SipHash13 + base62 把长文案压缩成短键以节省内存与加速查找",
+            "掌握 threshold 决定是否启用短键、len/prefix 控制短键长度与前缀",
+            "看懂 DEFAULT_MINIFY_KEY_* 四个默认常量的取值"
+          ],
+          "source_files": [
+            "crates/support/src/minify_key.rs"
+          ],
+          "minimal_modules": [
+            "minify_key 函数",
+            "hash128",
+            "base62",
+            "默认常量"
+          ],
+          "practice_task": "给定字符串 \"Hello, world!\" 与 threshold=0，验证生成的短键值，并解释为什么 threshold=128 时会原样返回字符串本身。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "_minify_key! 与 tkv! 宏",
+          "order": 2,
+          "filename": "u6-l2-minify-key-macros.md",
+          "level": "advanced",
+          "topic": "讲解 _minify_key! 过程宏如何解析四个参数并在编译期算出常量 key，以及 tkv! / __rust_i18n_tkv 如何生成 (key, msg) 元组。",
+          "learning_goals": [
+            "看懂 _minify_key! 在编译期调用 minify_key 把字面量直接变成常量 token",
+            "掌握 tkv! 宏返回 (key, msg) 元组用于「长文案只写一次」的场景",
+            "理解 __rust_i18n_tkv 内部宏如何把 i18n! 的 minify 配置透传给 _minify_key!"
+          ],
+          "source_files": [
+            "crates/macro/src/minify_key.rs",
+            "src/lib.rs",
+            "crates/macro/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "MinifyKey parse",
+            "tkv! macro_rules",
+            "__rust_i18n_tkv"
+          ],
+          "practice_task": "用 tkv!(\"一句足够长的文案\") 生成并打印 (key, msg)，说明为什么 key 能在编译期就确定、msg 仍是原文。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "短键在 t! 与提取器中的协作",
+          "order": 3,
+          "filename": "u6-l3-minify-key-integration.md",
+          "level": "advanced",
+          "topic": "讲解 _tr! 中对字面量字符串 / 元组 / 动态值三种 minify 分支的处理，以及 extractor 用同一套算法生成 key 以保证代码与提取结果一致。",
+          "learning_goals": [
+            "掌握 into_token_stream 中三条 minify 分支（lit_str / tuple / 其他）的差异",
+            "理解为什么动态值只能在运行时调用 MinifyKey::minify_key（更耗 CPU）",
+            "看清 extractor 与 t! 使用相同 minify_key 参数保证键一致"
+          ],
+          "source_files": [
+            "crates/macro/src/tr.rs",
+            "crates/extract/src/extractor.rs",
+            "examples/app-minify-key/src/main.rs"
+          ],
+          "minimal_modules": [
+            "into_token_stream minify 分支",
+            "extractor minify_key",
+            "app-minify-key 配置"
+          ],
+          "practice_task": "用 app-minify-key 示例的 minify_key_thresh=4 配置，分别对短字符串和长字符串说明处理方式，并验证 extractor 提取出的 key 与 t! 实际查找的 key 一致。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "cargo i18n CLI 提取器",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "cargo i18n 命令行入口",
+          "order": 1,
+          "filename": "u7-l1-cli-entry.md",
+          "level": "advanced",
+          "topic": "讲解 crates/cli 如何用 clap 把自身包装成 cargo 子命令、--translate 的 \"key => value\" 解析、以及 main 如何串起 iter → extract → generate 主流程。",
+          "learning_goals": [
+            "看懂 CargoCli/I18nArgs 如何用 clap derive 定义 cargo i18n 子命令",
+            "掌握 translate_value_parser 对 \"key => value\" 与纯文本两种输入的解析",
+            "理解 main 中加载 I18nConfig、遍历提取、手动添加翻译、生成输出的顺序"
+          ],
+          "source_files": [
+            "crates/cli/src/main.rs",
+            "crates/cli/Cargo.toml"
+          ],
+          "minimal_modules": [
+            "CargoCli/I18nArgs",
+            "translate_value_parser",
+            "add_translations",
+            "main"
+          ],
+          "practice_task": "运行 cargo i18n -h 阅读帮助，写一段说明 source 默认值是什么、--translate 的 \"key => value\" 语法适合什么场景（非字面量 t!）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "源码遍历与 t! 提取",
+          "order": 2,
+          "filename": "u7-l2-source-iter-extract.md",
+          "level": "advanced",
+          "topic": "讲解 iter.rs 用 ignore 库遍历 .rs 源文件、extractor.rs 如何基于 proc_macro2 token 流识别 t!/tr! 宏调用并提取首个字面量参数与所在行号。",
+          "learning_goals": [
+            "理解 iter_crate 用 ignore::WalkBuilder 遍历源码并尊重 .gitignore",
+            "掌握 Extractor::invoke 递归扫描 token、用 METHOD_NAMES + '!' 识别宏调用",
+            "看清 take_message 如何取出宏首参字面量并记录 Location(行号)"
+          ],
+          "source_files": [
+            "crates/extract/src/iter.rs",
+            "crates/extract/src/extractor.rs",
+            "crates/extract/src/example.test.rs"
+          ],
+          "minimal_modules": [
+            "iter_crate (ignore walker)",
+            "Extractor::invoke",
+            "take_message",
+            "METHOD_NAMES"
+          ],
+          "practice_task": "写一个只含 t!(\"hello\") 和 t!(\"views.title\") 的 .rs 文件，调用 extract 流程，检查 results 中收集到的 Message.key 与 Location.line 是否正确。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "生成 TODO.yml 与合并去重",
+          "order": 3,
+          "filename": "u7-l3-generator-todo-yml.md",
+          "level": "advanced",
+          "topic": "讲解 generator.rs 如何对比已有翻译做去重、把新文案以 _version:2 多语言格式写入 TODO.yml，以及为何全部完成返回 Ok、有遗漏时返回 Err 让 CI 失败。",
+          "learning_goals": [
+            "理解 generate_result 用 ignore_file 跳过自身生成的 TODO.yml 避免循环",
+            "掌握 convert_text 如何把结果序列化成 _version:2 的 YAML/JSON/TOML",
+            "看清有未翻译文案时返回 io::Error 让 CI 失败的设计意图"
+          ],
+          "source_files": [
+            "crates/extract/src/generator.rs"
+          ],
+          "minimal_modules": [
+            "generate",
+            "generate_result",
+            "convert_text",
+            "write_file"
+          ],
+          "practice_task": "对一个含未翻译文案的项目运行 cargo i18n，检查生成的 TODO.yml 格式（_version:2），并说明 generate_result 如何判断某个 key 已经翻译过而跳过。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "并发、性能与工程实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "全局 locale 与 AtomicStr 线程安全",
+          "order": 1,
+          "filename": "u8-l1-atomicstr-thread-safety.md",
+          "level": "advanced",
+          "topic": "讲解 src/lib.rs 的 CURRENT_LOCALE 用 LazyLock<AtomicStr> 实现全局 locale，以及 atomic_str.rs 如何用 arc-swap 的 ArcSwapAny 提供无锁并发读写。",
+          "learning_goals": [
+            "理解 CURRENT_LOCALE 用 LazyLock 延迟初始化为 \"en\"",
+            "掌握 AtomicStr 内部用 ArcSwapAny<Arc<String>> 实现无锁 store/load",
+            "看清 locale() 返回 impl Deref<Target=str>（GuardedStr）以避免返回悬挂引用"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "crates/support/src/atomic_str.rs",
+            "tests/multi_threading.rs"
+          ],
+          "minimal_modules": [
+            "CURRENT_LOCALE",
+            "AtomicStr/ArcSwapAny",
+            "GuardedStr",
+            "set_locale/locale"
+          ],
+          "practice_task": "阅读 multi_threading.rs，解释为什么一个线程高频 set_locale、另一线程高频 t! 并发不会读到半截字符串，并说明 locale() 返回 Guard 守卫的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "性能基准与内存优化",
+          "order": 2,
+          "filename": "u8-l2-benchmark-and-optimization.md",
+          "level": "advanced",
+          "topic": "讲解 benches 基准用例、Cow 减少字符串拷贝、SmallVec 在 replace_patterns 中的栈分配优化，以及 CowStr 对各类字符串类型的统一转换。",
+          "learning_goals": [
+            "理解 criterion 基准中 t / t_with_args / t_with_threads 等场景的差异",
+            "掌握 replace_patterns 用 SmallVec<[usize;64]> 在栈上收集占位符位置避免堆分配",
+            "看清 Cow 与 CowStr 如何在命中翻译时零拷贝返回 Borrowed"
+          ],
+          "source_files": [
+            "benches/bench.rs",
+            "src/lib.rs",
+            "crates/support/src/cow_str.rs"
+          ],
+          "minimal_modules": [
+            "criterion bench",
+            "SmallVec",
+            "Cow/CowStr",
+            "reduce allocations"
+          ],
+          "practice_task": "运行 cargo bench，对比 t / t_with_args / t_with_threads 三项耗时，分析「参数越多越慢」与「线程数不影响单次查找」的原因。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Workspace 多 crate 共享翻译模式",
+          "order": 3,
+          "filename": "u8-l3-workspace-shared-i18n.md",
+          "level": "advanced",
+          "topic": "讲解 examples/share-in-workspace 与 examples/foo 如何在 workspace 中让多个 crate 共享同一份翻译与 i18n! 初始化，以及自定义 Backend 在共享层的用法。",
+          "learning_goals": [
+            "理解用一个独立 i18n crate 集中调用 i18n! 并 re-export t!/set_locale 的模式",
+            "掌握业务 crate 通过依赖该 i18n crate 复用 _RUST_I18N_BACKEND 的方式",
+            "看清 share-in-workspace 里 I18nBackend 包裹 _RUST_I18N_BACKEND 并加 en 兜底的写法"
+          ],
+          "source_files": [
+            "examples/share-in-workspace/crates/i18n/src/lib.rs",
+            "examples/share-in-workspace/README.md",
+            "examples/foo/src/lib.rs",
+            "examples/foo/Cargo.toml"
+          ],
+          "minimal_modules": [
+            "共享 i18n crate",
+            "re-export t!/set_locale",
+            "init! 宏"
+          ],
+          "practice_task": "参照 share-in-workspace，设计一个 workspace：一个 i18n crate 负责初始化和 re-export，两个业务 crate 依赖它复用 t!，写出各自的 Cargo.toml 依赖与最小调用代码。",
+          "depends_on": [
+            "u4-l3",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "测试体系与质量保障",
+          "order": 4,
+          "filename": "u8-l4-test-suite.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 下集成测试覆盖的回退、插值、多格式、自定义后端、多线程场景，以及 support/extract 内联 #[cfg(test)] 单元测试的组织方式与单线程约束。",
+          "learning_goals": [
+            "理解 integration_tests 如何用多个子模块各自调用 i18n! 测试不同 fallback 配置",
+            "掌握 multi_threading 验证 set_locale/t! 并发安全的设计",
+            "看清为何集成测试要求 RUST_TEST_THREADS=1（全局 locale 是共享状态）"
+          ],
+          "source_files": [
+            "tests/integration_tests.rs",
+            "tests/multi_threading.rs",
+            "tests/i18n_minify_key.rs",
+            "crates/extract/src/extractor.rs"
+          ],
+          "minimal_modules": [
+            "integration tests",
+            "single-thread assumption",
+            "extractor 内联测试",
+            "#[cfg(test)]"
+          ],
+          "practice_task": "为 t! 的某种用法（如带格式说明符或多级 fallback）补一个集成测试用例，并说明为什么这些测试必须在单线程环境（RUST_TEST_THREADS=1）下运行。",
+          "depends_on": [
+            "u3-l4",
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
