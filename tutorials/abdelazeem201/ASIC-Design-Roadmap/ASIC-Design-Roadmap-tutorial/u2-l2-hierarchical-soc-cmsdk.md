@@ -2,13 +2,13 @@
 
 ## 1. 本讲目标
 
-在上一讲（u2-l1）里，我们读懂了一个只有几十行的小设计 `MY_DESIGN`——它有顶层模块、两个子模块、几个 5 位宽的端口。本讲要迈出一大步：**从「教科书式的小模块」走到「真实芯片里的片上系统（SoC）」**。
+在上一讲（u2-l1）里，我们读懂了一个只有几十行的教学小设计 `MY_DESIGN`——它有一个顶层模块、两个子模块、几个 5 位宽的端口。本讲要迈出一大步：**从「教科书式的小模块」走到「真实芯片里的片上系统（SoC）」**。
 
-我们选用的真实样本是 ARM 的 **Cortex-M0 DesignStart（CMSDK）** 示例系统，它的核心 RTL 就放在仓库的 `cmsdk/` 目录里。读完本讲，你应当能够：
+我们选用的真实样本是 ARM 的 **Cortex-M0 DesignStart（CMSDK）** 示例系统，核心 RTL 放在仓库的 `cmsdk/` 目录里。读完本讲，你应当能够：
 
-1. 理解**参数化 Verilog 模块**（`parameter`）的作用，并区分它与 `define` 宏、`` `ifdef `` 条件编译这三种「可配置」手段。
+1. 理解**参数化 Verilog 模块**（`parameter`）的作用，并能区分它与 `` `define `` 宏、`` `ifdef `` 条件编译这三种「可配置」手段。
 2. 看懂一个真实 **SoC 顶层**是如何由「CPU 内核 + 总线 + 一堆外设」层层例化拼装出来的。
-3. 认识 **AHB-LITE 总线接口**的标准信号（`HADDR`/`HWDATA`/`HREADY`/`HSEL` …），知道 master 和 slave 各自提供什么。
+3. 认识 **AHB-LITE 总线接口**的标准信号（`HADDR`/`HWDATA`/`HREADY`/`HSEL` …），知道 master（主）和 slave（从）各自提供什么。
 4. 量化体会「简单设计 → 真实 SoC」的**复杂度跃迁**——端口数、子模块数、时钟域数都上了数量级。
 
 > 本讲只读 RTL、讲结构，不涉及综合与时序约束（那是后续 u2-l3 与 U3/U4 的事）。
@@ -17,417 +17,439 @@
 
 ## 2. 前置知识
 
-本讲建立在上一讲 `MY_DESIGN` 的概念之上，假设你已经熟悉：
+本讲假定你已经掌握 u2-l1 的内容：模块（`module`）、端口（`input`/`output`）、`reg` 与 `wire` 的区别、`always` 时序块与组合块、以及用 `.端口(信号)` 的命名端口连接做层次化例化。在此基础上，我们先补三个本讲会用到的术语：
 
-- **模块（module）与端口（port）声明**、**`reg` 与 `wire`** 的区别。
-- **层次化例化**：用 `子模块名 实例名 ( .端口(信号) );` 把一个模块嵌进另一个模块。
-- **时序 `always @(posedge clk)`** 与组合 `always @(...)` 的差别。
+- **SoC（System on Chip，片上系统）**：把一整台「小电脑」——CPU 内核、存储控制器、总线、UART/GPIO/定时器等外设——全部塞进一颗芯片的顶层模块里。`MY_DESIGN` 只是一段「算术逻辑」，而 `cmsdk_mcu_system` 是一台「最小单片机」。
+- **总线（Bus）**：芯片内部多个部件之间公用的数据通路。ARM 体系里常见的是 **AHB（Advanced High-performance Bus）**，本讲遇到的是简化版 **AHB-LITE**（单主、单从在同一时刻通信）。
+- **参数化（Parameterization）**：在模块声明里用 `parameter` 给某些数值（位宽、地址、中断数）起个「名字 + 默认值」，让同一份 RTL 在例化时被「调成」不同配置，而不必复制多份代码。
 
-本讲会新引入几个真实工程里才常见的概念，先做通俗预热：
-
-| 概念 | 一句话解释 |
-| --- | --- |
-| **SoC（System-on-Chip，片上系统）** | 把 CPU、存储、总线、各种外设（GPIO/UART/定时器…）全部做到同一颗芯片上。 |
-| **IP 核（Intellectual Property core）** | 可复用的、预先设计好的电路模块，比如一颗 CPU 内核。通常由厂商以加密/黑盒形式提供，你只看接口、看不到内部 RTL。 |
-| **总线（Bus）** | SoC 内部各模块之间传数据的「高速公路」，有一套约定的信号协议。本讲遇到的是 ARM 的 **AHB-LITE**。 |
-| **总线 master / slave** | master 是发起读写的一方（如 CPU），slave 是被动响应的一方（如一片内存、一个 GPIO）。 |
-| **参数化（parameter）** | 在模块上开「旋钮」，例化时给不同取值，就能得到面积/功能不同的硬件。 |
-| **时钟域 / 复位域** | 由不同时钟或不同复位信号驱动的电路区域。真实 SoC 往往有多个时钟和多个复位。 |
-| **DFT（Design for Test）** | 为了方便芯片出厂后做测试而预留的端口/逻辑。 |
+> 名词小贴士：本讲文件名里的 `_zed` 指目标板卡 **ZedBoard**（一颗 Xilinx Zynq FPGA 开发板）。这个 CMSDK 例子的 RTL 既能用于真实 ASIC 流程，也能直接烧进 FPGA 跑起来，所以仓库里同时给了 RTL（`cmsdk_mcu_system_zed.v`）和对应的 testbench（`tb_cmsdk_mcu_zed.v`）。
 
 ---
 
 ## 3. 本讲源码地图
 
-本讲围绕 `cmsdk/` 目录展开，对照 `MY-Design/` 做对比。涉及的关键文件：
+本讲围绕三个真实源码文件展开：
 
-| 文件 | 作用 | 本讲用途 |
+| 文件 | 作用 | 本讲中的角色 |
 | --- | --- | --- |
-| [cmsdk/cmsdk_mcu_system_zed.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v) | **真实 SoC 的系统顶层**，定义模块 `cmsdk_mcu_system`，例化 CPU、总线译码器、外设。 | 主角：参数化、顶层结构、AHB 接口都在这里。 |
-| [cmsdk/cmsdk_mcu_defs.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_defs.v) | 用 `` `define `` 宏定义的**全局编译期选项**（调试协议、存储器等待周期）。 | 与 `parameter` 对比，讲「另一种可配置手段」。 |
-| [MY-Design/MY_DESIGN.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v) | 上一讲的小设计，**无参数、端口少、只有算术/逻辑**。 | 复杂度跃迁的「低复杂度」参照物。 |
+| [cmsdk/cmsdk_mcu_system_zed.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v) | ARM Cortex-M0 DesignStart 示例系统的**顶层 RTL**（约 860 行） | 真实 SoC 样本：参数、端口、9 个子模块例化、AHB 总线全在这里 |
+| [cmsdk/cmsdk_mcu_defs.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_defs.v) | 系统级**配置宏**定义文件 | 用来对比 `` `define `` 宏与 `parameter` 的差异 |
+| [MY-Design/MY_DESIGN.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v) | 上一讲的教学小设计 | 作为「简单端」的对照组，量化复杂度跃迁 |
 
-此外会点到几个佐证用的周边文件：测试台 [cmsdk/tb_cmsdk_mcu_zed.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/tb_cmsdk_mcu_zed.v)、引脚复用 [cmsdk/cmsdk_mcu_pin_mux.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_pin_mux.v)、LED 闪烁 [cmsdk/led_1second.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/led_1second.v)。
-
-> ⚠️ **先记一个真实工程的「坑」**：文件名 `cmsdk_mcu_system_zed.v` 里定义的模块叫 `cmsdk_mcu_system`，而测试台 `tb_cmsdk_mcu_zed.v` 例化的是另一个名字 `cmsdk_mcu_zed`（见 [tb_cmsdk_mcu_zed.v:77-102](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/tb_cmsdk_mcu_zed.v#L77-L102)）。**文件名 ≠ 模块名**，而且 `cmsdk_mcu_zed` 这个顶层包装模块并不在本仓库里——它是更外层的 FPGA/封装 wrapper。真实 SoC 就是这么一层套一层：`testbench → 顶层 wrapper → 系统核心(cmsdk_mcu_system) → CPU+外设`。读代码时永远以 `module` 关键字后的名字为准。
+> 这三个文件互相独立、各自可读；本讲的每一处结论都会给出对应行号的永久链接，你可以点开逐行核对。
 
 ---
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成 4 个最小模块：**4.1 参数化模块**、**4.2 SoC 顶层结构**、**4.3 AHB 总线接口信号**、**4.4 复杂度跃迁对比**。
+本讲按四个最小模块展开：**参数化模块 → SoC 顶层结构 → AHB 总线接口 → 复杂度跃迁对比**。前三个模块各自解决 SoC RTL 的一个侧面，第四个把它们和 `MY_DESIGN` 放在一起做量化对比。
 
-### 4.1 参数化模块：从「硬编码」到「可配置」
+### 4.1 参数化模块（parameter）
 
 #### 4.1.1 概念说明
 
-`MY_DESIGN` 的一切都是写死的：端口宽度固定 `[4:0]`、功能固定（加减与逻辑运算）。这种「一个模块只能做一件事」的写法在教学里没问题，但在真实工程里会带来浪费——你想做一个 8 位版本，就得复制粘贴改一遍。
+在 `MY_DESIGN` 里，所有位宽都是写死的 `[4:0]`，端口名也是固定的一串。如果想让「同一个算术单元」有时做成 5 位、有时做成 8 位，你只能复制一份代码再改——这在真实项目里是不可维护的。
 
-**参数化（parameterization）** 的思路是：把「会变的量」抽成模块的**参数**，例化时再填具体数值。同一个模块源码，配上不同参数，就能综合出不同大小/功能的电路。这在 SoC 里极其常见：CPU 要不要调试单元、支持几个中断、用几个断点比较器——都用参数开关。
+**参数化**就是为了解决这个问题：把那些「可能变化的数值」从代码里抽出来，赋予一个名字和默认值，这就是 `parameter`。它的三个关键性质是：
 
-Verilog 里有**三种**「可配置」手段，初学者很容易混淆，先记清：
+1. **编译期常量**：`parameter` 的值在综合/仿真前就固定了，不是运行时变量。
+2. **每个实例可不同**：同一个模块被例化两次，可以各自传不同的参数值，得到两份「配置不同」的硬件。
+3. **向下传递**：顶层模块可以用自己的参数，去覆盖它所例化的子模块的参数。
 
-| 手段 | 关键字 | 作用范围 | 改变时机 | 能否每个实例不同 |
-| --- | --- | --- | --- | --- |
-| **参数** | `parameter` | 单个模块实例 | 例化时（`#(.X(值))`） | ✅ 可以，每个实例独立 |
-| **宏定义** | `` `define `` | 整个编译单元（全局） | 编译前 | ❌ 全局统一 |
-| **条件编译** | `` `ifdef … `endif `` | 整个编译单元（全局） | 编译前 | ❌ 有/无整段代码 |
+Verilog-2001 推荐的「ANSI 风格」写法是：
 
-关键差别：**`parameter` 是「每实例一个值」的旋钮；`` `define ``/`` `ifdef `` 是「全局一刀切」的开关**。下面分别看真实代码。
+```verilog
+module 模块名 #(
+  parameter 参数A = 默认值A,
+  parameter 参数B = 默认值B
+) (
+  input  wire ...,
+  output wire ...
+);
+```
+
+例化时用 `#(.参数名(值))` 来覆盖默认值。
 
 #### 4.1.2 核心流程
 
-参数化模块的典型使用链路：
+一条参数从「声明」流到「生效」的路径如下：
 
-1. **定义**：在模块名后用 `#( parameter X = 默认值, … )` 列出所有参数。
-2. **内部使用**：在模块体内，把参数当普通常数用（例如决定位宽 `reg [WIDTH-1:0]`、决定循环次数、决定某个子模块开/关）。
-3. **例化覆盖**：上层用 `模块名 #(.X(新值)) 实例名 (…);` 改写默认值；不写则用默认值。
-4. **综合**：综合器把每个实例的参数代入，展开成具体的硬件。
+```
+模块声明里 parameter X = 默认值
+        │
+        ├──（若不覆盖）→ 综合时 X 取默认值
+        │
+        └──（若例化时写 #(.X(新值))）→ 综合时 X 取新值
+                                        │
+                                        └── X 还可以作为「实参」传给下一层子模块
+                                            例如 .CHILD_PARAM(X)
+```
 
-而 `` `define ``/`` `ifdef `` 的链路是：在某个 `.v` 里 `` `define X `` 或在命令行加 `+define+X` → 凡是 `` `include `` 了定义文件、或编译进同一单元的代码，都看到这个宏 → `` `ifdef X `` 包起来的代码段被编译进去（或被剔除）。
+换句话说：参数像函数参数一样，从顶层「往下」逐层传递，每一层可以选择沿用默认、改写、或转发给更下层。
 
 #### 4.1.3 源码精读
 
-**(a) `MY_DESIGN` 完全没有参数**——对比的基准。看它的模块头与端口全是写死的字面量：
+`cmsdk_mcu_system` 的模块头就是一个教科书级的参数化声明。注意它用了 `module ... #(parameter ...) (...)` 的 Verilog-2001 ANSI 风格：
 
-[MY-Design/MY_DESIGN.v:2-6](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v#L2-L6) —— 模块头没有任何 `#(parameter …)`，端口位宽直接写 `[4:0]`。想换个位宽就得改源码。
+[cmsdk/cmsdk_mcu_system_zed.v:39-55](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L39-L55) —— 这是模块声明与参数列表。每个 `parameter` 都带注释说明含义，例如 `BE`（大/小端）、`BKPT`（断点比较器个数）、`NUMIRQ`（中断数）、`SMUL`（乘法器配置）等。这些就是「同一份 Cortex-M0 内核，可以配出不同规格」的旋钮。
 
-**(b) `cmsdk_mcu_system` 是典型的参数化模块**——模块名后紧跟一大串 `parameter`：
+参数真正被「用起来」的地方，是在子模块例化时被当作覆盖值或转发值。看地址译码器的例化：
 
-[cmsdk/cmsdk_mcu_system_zed.v:39-55](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L39-L55) —— 定义了 `BE`（大小端）、`BKPT`（断点比较器数量）、`DBG`（调试配置）、`NUMIRQ`（中断数，默认 32）、`SMUL`（乘法器配置）、`SYST`（SysTick 定时器）、`WIC`（唤醒中断控制器）、`WPT`（数据观察点比较器）等 CPU 特性参数，还有 `BASEADDR_GPIO0/GPIO1/SYSROMTABLE` 等地址基址参数。每个都带默认值，例如 `parameter BE = 0`。
+[cmsdk/cmsdk_mcu_system_zed.v:427-432](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L427-L432) —— 此处 `cmsdk_mcu_addr_decode` 例化时，用顶层的参数 `BASEADDR_GPIO0`、`BASEADDR_GPIO1`、`BASEADDR_SYSROMTABLE` 去覆盖子模块的同名参数，而 `BOOT_LOADER_PRESENT` 则被直接写死成 `1'b0`。这正是「顶层参数向下传递」的实例。
 
-这正是「同一份 RTL，配出不同档次的 CPU」的实现方式。注意这些参数会层层向下传递——例如地址基址 `BASEADDR_GPIO0` 后来原样传给了地址译码器（见 4.3 节）。
+> 完整的端口连接可见：
+> [cmsdk/cmsdk_mcu_system_zed.v:427-452](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L427-L452) —— `cmsdk_mcu_addr_decode` 的参数覆盖与命名端口连接。
 
-**(c) `define` 宏：另一种全局开关**。`cmsdk_mcu_defs.v` 用宏定义编译期选项：
+GPIO 外设的例化也是同理，而且展示了「同一模块例化两次、参数不同」：
 
-[cmsdk/cmsdk_mcu_defs.v:38-59](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_defs.v#L38-L59) —— 注释里的 `` `define ARM_CMSDK_INCLUDE_JTAG ``（默认被注释掉，即默认用 SWD 而非 JTAG 调试），以及 `ARM_CMSDK_BOOT_MEM_WS_N`、`ARM_CMSDK_RAM_MEM_WS_S` 等存储器「等待周期（wait state）」宏。
+[cmsdk/cmsdk_mcu_system_zed.v:604-608](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L604-L608) —— `cmsdk_ahb_gpio` 第一次例化（`u_ahb_gpio_0`）时 `ALTERNATE_FUNC_MASK = 16'h0000`（无引脚复用）；
 
-为什么要用宏而不是参数？因为注释明说：「These options … cannot be controlled purely by parameters due to impact on I/O ports」——**这些选项会改变模块的对外端口数量**（比如开了 JTAG 会多出几个调试端口），而 `parameter` 无法改变端口列表的形状，所以只能用全局宏 + 条件编译。
+[cmsdk/cmsdk_mcu_system_zed.v:638-642](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L638-L642) —— 同一个 `cmsdk_ahb_gpio` 第二次例化（`u_ahb_gpio_1`）时 `ALTERNATE_FUNC_MASK = 16'h002A`（带引脚复用）。**一份 RTL、两份不同配置的硬件**，这就是参数化的威力。
 
-**(d) `ifdef` 条件编译：按需裁剪外设**。回到 SoC 顶层，多处用 `` `ifdef ARM_DESIGNSTART_FPGA `` 把「只在 FPGA 版本里才有的外设」包起来：
+**对比：`` `define `` 宏是另一回事。** 看 `cmsdk_mcu_defs.v`：
 
-[cmsdk/cmsdk_mcu_system_zed.v:69-71](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L69-L71) —— 仅当定义了 `ARM_DESIGNSTART_FPGA` 时，才会出现 `zbt_boot_ctrl`（从 ZBT SRAM 启动）这个端口。ASIC 版本编译时这一段被整段剔除，端口就不存在。
+[cmsdk/cmsdk_mcu_defs.v:48-59](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_defs.v#L48-L59) —— 这里用 `` `define ARM_CMSDK_BOOT_MEM_WS_N 0 `` 之类的宏定义了各类存储器的等待周期（wait state）。宏是**全局文本替换**，一旦 `` `include `` 进来，全工程都生效，而且**同一模块例化两次也无法取不同值**。这与 `parameter`「每实例可不同」截然不同。文件头部还提到：
+
+[cmsdk/cmsdk_mcu_defs.v:33-38](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_defs.v#L33-L38) —— 注释解释调试协议可选 SWD 或 JTAG，并指出「这些选项无法纯靠 parameter 控制，因为会影响 I/O 端口」，于是用注释掉的 `` `define ARM_CMSDK_INCLUDE_JTAG `` 来开关。这是一个**很好的现实案例：什么时候必须用宏、什么时候用参数更合适**。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手感受「参数 → 改变硬件」。
+**实践目标**：亲手追踪一个参数从「默认值」到「被覆盖」的完整路径。
 
-**操作步骤**（源码阅读 + 局部改写，不修改原文件）：
+**操作步骤**：
 
-1. 打开 [cmsdk/cmsdk_mcu_system_zed.v:39-55](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L39-L55)，把所有 `parameter` 抄成一张表，标注：名字、默认值、你认为它控制的硬件特性。
-2. 在你自己的草稿文件里，仿照这个写法，定义一个参数化的小模块，例如一个位宽可配的寄存器堆：
+1. 打开 [cmsdk/cmsdk_mcu_system_zed.v:39-55](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L39-L55)，记下 `NUMIRQ` 的默认值（应为 `32`）。
+2. 假设有别人在更顶层用这样的方式例化了本系统（**示例代码，非仓库原有**）：
 
-```verilog
-// 示例代码（非项目原有，仅供练习）
-module my_regfile #(parameter WIDTH=8, parameter DEPTH=16) (
-    input  wire             clk,
-    input  wire [$clog2(DEPTH)-1:0] addr,
-    input  wire [WIDTH-1:0] din,
-    input  wire             we,
-    output wire [WIDTH-1:0] dout
-);
-    reg [WIDTH-1:0] mem [0:DEPTH-1];
-    always @(posedge clk) if (we) mem[addr] <= din;
-    assign dout = mem[addr];
-endmodule
-```
+   ```verilog
+   cmsdk_mcu_system #(.NUMIRQ(16), .BE(1)) u_my_mcu (...);
+   ```
 
-3. 再分别用 `#(.WIDTH(32), .DEPTH(64))` 和不填参数两种方式例化它，体会「同一份源码、两份不同硬件」。
+3. 回答：在这个实例里，`NUMIRQ` 和 `BE` 分别会取什么值？别处再例化一个不带 `#(...)` 的 `cmsdk_mcu_system`，它的 `NUMIRQ` 又是多少？
 
-**需要观察的现象**：参数出现在端口位宽表达式 `[WIDTH-1:0]` 和数组规模 `[0:DEPTH-1]` 里；改变例化参数，位宽与深度随之改变。
+**需要观察的现象**：参数值「就近生效」——谁例化时覆盖了，谁就用新值；不覆盖的实例仍取模块头里的默认值。
 
-**预期结果**：你能说出「把 `WIDTH` 从 8 改成 32，综合后的寄存器位数变成 4 倍」。
+**预期结果**：该实例 `NUMIRQ=16`、`BE=1`（大端）；另一个不覆盖的实例 `NUMIRQ=32`（默认值）。
 
-> 待本地验证：若你手头有仿真器（如 iverilog），可对练习模块跑一个写—读测试，确认参数生效。
+**若想真正跑起来（待本地验证）**：用 Icarus Verilog 之类工具编译 `cmsdk_mcu_system_zed.v` + `tb_cmsdk_mcu_zed.v`，把 `NUMIRQ` 改成不同值后重新仿真，观察是否仍能通过编译（注意：本仓库的 CMSDK 依赖若干未随仓库提供的 IP 内核如 `CORTEXM0INTEGRATION`，纯开源仿真器可能因缺核而无法链接，**结果待本地验证**）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`MY_DESIGN` 想支持可配位宽，最少要改哪几处？
-**答案**：在模块头加 `#(parameter WIDTH=5)`，把所有 `[4:0]` 改成 `[WIDTH-1:0]`，并把子模块 `ARITH`/`COMBO` 也同步参数化（或顶层用 `#(.WIDTH(WIDTH))` 传下去）。
+**练习 1**：为什么 `NUMIRQ` 用 `parameter` 而不用 `` `define NUMIRQ 32 ``？
 
-**练习 2**：为什么 `cmsdk_mcu_defs.v` 里「是否包含 JTAG」用 `` `define `` 而不用 `parameter`？
-**答案**：因为该选项会**增删 I/O 端口**，而 `parameter` 只能改数值、不能改变端口列表的形状，所以必须用全局宏配合 `` `ifdef ``。
+> **参考答案**：因为同一颗 SoC 可能被例化成「32 中断版」和「16 中断版」两份不同硬件；`parameter` 允许每个实例取不同值，而 `` `define `` 是全局替换，全工程只能有一个值，无法区分实例。
 
-**练习 3**：`` `define `` 与 `parameter` 哪个能让「同一个顶层里两个实例取不同值」？
-**答案**：只有 `parameter`。`` `define `` 是全局的，整个编译单元只有一个值。
+**练习 2**：参数 `` `define ARM_CMSDK_INCLUDE_JTAG``（见 cmsdk_mcu_defs.v:38）被注释掉了。如果取消注释，代码会怎样变化？
+
+> **参考答案**：它会触发系统里 `` `ifdef ARM_CMSDK_INCLUDE_JTAG `` 包裹的 JTAG 相关端口与逻辑（条件编译），使调试接口从默认的 SWD 切换为 JTAG。这正说明：**当配置会改变端口拓扑时，往往只能用宏 + 条件编译，而不是参数**。
 
 ---
 
-### 4.2 SoC 顶层结构：CPU + 总线 + 外设的层次化集成
+### 4.2 SoC 顶层结构
 
 #### 4.2.1 概念说明
 
-`MY_DESIGN` 的层次只有两层：顶层 `MY_DESIGN` 例化 `ARITH`/`COMBO`，`COMBO` 又例化了一个 `ARITH`。真实 SoC 的层次要丰富得多，但**拼装套路是相通的**——都是「顶层把一堆子模块用线连起来」。
+一个 SoC 顶层模块本质上是一个**「接线板」**：它自己几乎不写「计算逻辑」，而是声明一堆内部连线（`wire`），然后把 CPU 内核、总线译码器、存储接口、各种外设**例化**进来，用命名端口连接把它们接到一起。
 
-一个典型微控制器 SoC 的顶层，通常包含这几类东西：
+`cmsdk_mcu_system` 这个顶层里，你能看到一条典型的「单主总线」结构：
 
-- **CPU 内核**：执行指令的大脑（这里是 Cortex-M0，以 IP 核 `CORTEXM0INTEGRATION` 形式提供）。
-- **总线互连**：把 CPU（master）的数据通路接到各个存储/外设（slave），包括**地址译码器**（根据地址选中某个 slave）和**slave 多路选择器**（把被选中 slave 的读数据回送给 CPU）。
-- **存储器接口**：Flash、SRAM、Boot ROM 的选中与数据线。
-- **外设（peripheral）**：GPIO、UART、定时器、系统控制器……
-- **胶水逻辑（glue logic）**：中断汇总、时钟分频、状态输出等 `assign` 连线。
+- **1 个 master**：Cortex-M0 CPU 内核（`CORTEXM0INTEGRATION`），它是唯一发起读写的人。
+- **1 个地址译码器**（`cmsdk_mcu_addr_decode`）：根据 CPU 给出的地址，决定「这次访问」要选中哪个外设/存储。
+- **1 个从设备多路选择器**（`cmsdk_ahb_slave_mux`）：多个从设备都能返回读数据，需要用多路选择器把「被选中那一个」的数据送回 CPU。
+- **若干 slave**：Flash、SRAM、Boot ROM、系统控制器、2 个 GPIO、APB 子系统（UART/定时器）、ROM Table、默认从设备（default slave，处理非法地址）。
 
-> 关键认知：本仓库**只放出了顶层集成 RTL**（`cmsdk_mcu_system_zed.v`）。CPU 内核 `CORTEXM0INTEGRATION` 以及 `cmsdk_mcu_addr_decode`、`cmsdk_ahb_slave_mux`、`cmsdk_ahb_gpio`、`cmsdk_apb_subsystem` 等子模块**在本目录里都只有「例化」、没有「定义」**——它们来自 ARM CMSDK 的 IP 库，是黑盒。这在真实项目里是常态：你拿到的是「集成层」，IP 内部你看不到。
+这种「主—译码—多路选—从」的结构是 AMBA 总线的经典骨架，理解了它，你就能套用到绝大多数 ARM-based SoC。
 
 #### 4.2.2 核心流程
 
-CPU 发起一次访存的典型数据流（自顶向下看 `cmsdk_mcu_system` 内部）：
+一次「CPU 读外设寄存器」在顶层结构里的信号流转（先不看协议细节，只看「经过哪些块」）：
 
-1. **CPU 输出请求**：`CORTEXM0INTEGRATION` 给出 `cm0_haddr`（地址）、`cm0_htrans`、`cm0_hwrite`、`cm0_hwdata` 等总线信号。
-2. **直连到系统总线**：因为没有 DMA，顶层用一串 `assign` 把 `cm0_*` 直接接到 `cm_*`、再接到 `sys_*`（系统总线）。
-3. **地址译码**：`cmsdk_mcu_addr_decode` 根据 `sys_haddr` 产出各 slave 的片选 `xxx_hsel`（flash / sram / boot / apbsys / gpio0 / gpio1 / sysctrl / sysrom / defslv）。
-4. **slave 响应**：被选中的外设回送 `xxx_hreadyout`、`xxx_hrdata`、`xxx_hresp`。
-5. **多路选择回送**：`cmsdk_ahb_slave_mux` 把被选中 slave 的读数据/响应汇总成 `sys_hrdata`/`sys_hreadyout`/`sys_hresp`，再经 `assign` 回送到 CPU 的 `cm0_hrdata`。
-6. **中断/状态汇总**：各外设的中断经 `assign` 拼成 `intisr_cm0`，回送给 CPU。
+```
+                ┌─────────────────────────────────────────┐
+  CPU(主) ──地址/控制──►  系统总线 sys_h*（一组 wire）
+                │                    │
+                │                    ▼
+                │          ┌────────────────────┐
+                │          │ addr_decode 译码器  │ ──► 各 slave 的 hsel（片选）
+                │          └────────────────────┘
+                │                    │
+                │          ┌────────────────────┐
+                │          │ 被选中的 slave      │ ──► hrdata/hreadyout/hresp
+                │          │ (GPIO/SRAM/UART…)   │
+                │          └────────────────────┘
+                │                    │
+                │                    ▼
+                │          ┌────────────────────┐
+                ◄──读数据── │ ahb_slave_mux 多路选│ ◄── 选出被选中 slave 的返回值
+                           └────────────────────┘
+```
+
+顶层模块要做的，就是把上面每一个方块的端口，用 `wire` 和命名连接 `.端口(信号)` 接到正确的连线上。CPU 与总线之间还插了一层「bit-band / 直连」assign（本例实际是直连），用来套用同一套 `cm_*` 命名规范。
 
 #### 4.2.3 源码精读
 
-**(a) 端口规模先看一眼**：`cmsdk_mcu_system` 的端口列表极长，覆盖时钟/复位、AHB、调试、UART、GPIO、定时器等。
+**CPU 内核例化**是整个顶层的「心脏」：
 
-[cmsdk/cmsdk_mcu_system_zed.v:57-67](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L67) —— 仅时钟与复位就有 `FCLK/HCLK/DCLK/SCLK/PCLK/PCLKG` 六个时钟和 `HRESETn/PORESETn/DBGRESETn/PRESETn` 四个复位。这和 `MY_DESIGN` 只有一个 `clk` 形成鲜明对比（见 4.4 节）。
+[cmsdk/cmsdk_mcu_system_zed.v:299-373](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L299-L373) —— 例化 `CORTEXM0INTEGRATION`（实例名 `u_cortexm0integration`）。注意它的 AHB 主端口信号连到了 `cm0_*` 这组 wire（如 `.HADDR(cm0_haddr)`），时钟/复位连到了 `FCLK/HCLK/SCLK/DCLK/PORESETn/HRESETn` 等，调试口连到了 `SWDITMS/SWCLKTCK/TDO` 等。很多输入被直接接到常量（如 `.IRQ(32'h00000000)`、`.NMI(1'b0)`），表示这个示例系统暂不接外部中断。
 
-**(b) CPU 内核例化**——整个 SoC 的核心：
+CPU 出来的 `cm0_*` 总线先经过一组 `assign` 改名成 `cm_*`/`sys_*`：
 
-[cmsdk/cmsdk_mcu_system_zed.v:300-373](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L300-L373) —— 例化 `CORTEXM0INTEGRATION u_cortexm0integration`，把时钟复位、AHB master 端口、调试端口（SWD/JTAG）、电源管理信号逐一连上。注意若干端口被**常量驱动**：`.NMI(1'b0)`、`.IRQ(32'h00000000)`（中断实际在下面用 `assign intisr_cm0` 汇总，这里先示意性接 0，真实中断连接见 (e)）、`.SE(1'b1)`（扫描使能，DFT 用）。这就是「IP 核只露接口，你按手册连线」。
+[cmsdk/cmsdk_mcu_system_zed.v:395-423](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L395-L423) —— 注释说明「无 DMA，无需主多路选择器，CPU 直连系统总线」。这一段没有逻辑运算，纯粹是连线重命名，是 SoC 顶层最典型的「接线」代码。
 
-**(c) 总线互连：地址译码 + slave 多路选择 + 默认 slave**：
+**地址译码器**：
 
-[cmsdk/cmsdk_mcu_system_zed.v:427-452](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L427-L452) —— `cmsdk_mcu_addr_decode u_addr_decode`：输入 `sys_haddr`，输出一组片选 `boot_hsel/flash_hsel/sram_hsel/apbsys_hsel/gpio0_hsel/gpio1_hsel/sysctrl_hsel/sysrom_hsel/defslv_hsel`。地址基址参数 `BASEADDR_GPIO0/GPIO1/SYSROMTABLE` 在这里被传递使用。
+[cmsdk/cmsdk_mcu_system_zed.v:427-452](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L427-L452) —— `cmsdk_mcu_addr_decode`（`u_addr_decode`）。输入是系统地址 `sys_haddr`，输出是一堆片选：`flash_hsel/sram_hsel/boot_hsel/apbsys_hsel/gpio0_hsel/gpio1_hsel/sysctrl_hsel/sysrom_hsel/defslv_hsel`。**一个地址，只会有一个 `*_hsel` 为真**——这就是译码。
 
-[cmsdk/cmsdk_mcu_system_zed.v:456-517](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L456-L517) —— `cmsdk_ahb_slave_mux u_ahb_slave_mux_sys_bus`：10 个 slave 端口（`PORT0..PORT9`，其中 2/9 被禁用），每个端口的 `HSELx/HREADYOUTx/HRESPx/HRDATAx` 汇总成总的 `sys_hreadyout/sys_hresp/sys_hrdata`。这是 SoC 里典型的「多 slave 读数据选通」结构。
+**从设备多路选择器**：
 
-[cmsdk/cmsdk_mcu_system_zed.v:520-530](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L520-L530) —— `cmsdk_ahb_default_slave u_ahb_default_slave_1`：当地址不匹配任何外设时，由「默认 slave」应答，保证总线不会悬空（`defslv_hrdata = 32'h00000000`）。
+[cmsdk/cmsdk_mcu_system_zed.v:456-517](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L456-L517) —— `cmsdk_ahb_slave_mux`（`u_ahb_slave_mux_sys_bus`）。它的每个「PORTx」对应一个 slave：把那个 slave 的 `HREADYOUTx/HRESPx/HRDATAx` 接进来，最终输出唯一的 `sys_hreadyout/sys_hresp/sys_hrdata` 送回 CPU。注意 `PORT2_ENABLE(0)`、`PORT9_ENABLE(0)` 表示这两个端口被参数关掉了（boot 与 MTB 在此配置未用）。
 
-**(d) 外设例化**：GPIO 与 APB 子系统（UART/定时器等）。
+**外设例化**：系统控制器、两个 GPIO、APB 子系统（内含 UART/定时器）依次例化：
 
-[cmsdk/cmsdk_mcu_system_zed.v:604-635](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L604-L635) —— `cmsdk_ahb_gpio u_ahb_gpio_0`：挂 AHB 的 GPIO，参数 `ALTERNATE_FUNC_MASK` 控制引脚复用，对外的 `p0_in/p0_out/p0_outen/p0_altfunc` 连到芯片物理引脚。
+- [cmsdk/cmsdk_mcu_system_zed.v:571-600](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L571-L600) —— `cmsdk_mcu_sysctrl`（系统控制器，产生复位/电源管理信号）。
+- [cmsdk/cmsdk_mcu_system_zed.v:675-690](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L675-L690) —— `cmsdk_apb_subsystem`（APB 子系统），其参数 `INCLUDE_APB_UART0(1)` 而 `INCLUDE_APB_UART1/2/TIMER0/1/...` 多为 `0`，说明本配置只启用了一个 UART。**又是参数化在裁剪外设**。
 
-[cmsdk/cmsdk_mcu_system_zed.v:675-769](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L675-L769) —— `cmsdk_apb_subsystem u_apb_subsystem`：用一串 `INCLUDE_APB_*` 参数开关决定要不要包含 UART0/1/2、定时器、看门狗等。这正是 4.1 节「参数化裁剪外设」的实战场景。注意它跨的是 **APB 总线**（通过 AHB→APB 桥接入），与 GPIO 所在的 AHB 不同——这就是 SoC 的「多总线层次」。
-
-**(e) 胶水逻辑：中断汇总**：
-
-[cmsdk/cmsdk_mcu_system_zed.v:785-795](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L785-L795) —— 用 `assign` 把 `apbsubsys_interrupt`、`gpio0_combintr`、`spi_interrupt` 等按位拼进 CPU 的 32 位中断向量 `intisr_cm0`，看门狗中断则接到 NMI（`intnmi_cm0`）。这种「散落各处的中断 → 拼成一张向量表」是 SoC 顶层最典型的 glue logic。
+> 小结：顶层一共例化了 **9 个子模块**（CPU 内核 + addr_decode + slave_mux + default_slave + ROM Table + sysctrl + 2×GPIO + apb_subsystem），它的工作几乎全是「声明 wire + 例化 + 连线」，几乎没有 `always` 逻辑——这与 `MY_DESIGN` 充满 `always` 的风格形成鲜明对比。
 
 #### 4.2.4 代码实践
 
-**实践目标**：把 `cmsdk_mcu_system` 的例化清单整理成一张「SoC 结构表」，建立全局画面。
+**实践目标**：把顶层 RTL 抽象成一张「实例清单 + 连线图」。
 
 **操作步骤**：
 
-1. 在 [cmsdk/cmsdk_mcu_system_zed.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v) 里检索所有形如 `模块名 实例名 (` 的例化点（用编辑器搜 `u_` 前缀的实例名很高效）。
-2. 列一张表，每行写：**子模块名 / 实例名 / 它属于哪一类（CPU / 总线互连 / 存储 / 外设 / glue）**。预期至少能列出 8~10 个：`CORTEXM0INTEGRATION`、`cmsdk_mcu_addr_decode`、`cmsdk_ahb_slave_mux`、`cmsdk_ahb_default_slave`、`cmsdk_ahb_cs_rom_table`、`cmsdk_mcu_sysctrl`、`cmsdk_ahb_gpio`(×2)、`cmsdk_apb_subsystem`、`cmsdk_mcu_stclkctrl`。
-3. 画一张方框图：CPU 在中间偏左，地址译码器+多路选择器在它右侧，右侧再分出各外设分支。
+1. 在 `cmsdk_mcu_system_zed.v` 中用编辑器搜索形如「模块名 实例名 (」的例化语句，列出全部「模块名 → 实例名」对照表（提示：本节已给出 9 个，逐一核对行号）。
+2. 把 `CORTEXM0INTEGRATION`（主）画在最左，`cmsdk_ahb_slave_mux`（多路选）画在最右，中间把译码器、各 slave 排成一列，用箭头标出 `sys_haddr`、各 `*_hsel`、`sys_hrdata` 的走向。
+3. 特别标注：哪些 slave 的返回数据会汇入 `slave_mux`，哪些信号是顶层直接对外输出（如 `HADDR`、`uart0_txd`、`p0_out`）。
 
-**需要观察的现象**：CPU 端口名是 `cm0_*`，系统总线端口名是 `sys_*`，二者之间靠一长串 `assign` 直连（见 [L395-L424](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L395-L424)）。
+**需要观察的现象**：顶层像一个「漏斗」——CPU 一侧只有一组总线，对外一侧却分叉出 Flash/SRAM/UART/GPIO 等多套接口。
 
-**预期结果**：你能指着方框图说清「CPU 发地址 → 译码器选中外设 → 外设回数据 → 多路选择器回送 CPU」这条主路径。
+**预期结果**：得到一张「1 主 → 译码 → N 从 → 多路选回主」的对称结构图，且对外端口大致按「时钟/复位/AHB/调试/UART/GPIO」分簇排列。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：本仓库里能看到 `CORTEXM0INTEGRATION` 的内部 RTL 吗？为什么？
-**答案**：看不到。它是 ARM 提供的 IP 核，本目录只有例化、没有定义，属于黑盒；真实 SoC 常以这种形式集成第三方 CPU。
+**练习 1**：为什么需要 `cmsdk_ahb_default_slave`（默认从设备）？
 
-**练习 2**：`cmsdk_ahb_default_slave` 的作用是什么？
-**答案**：当地址没命中任何外设时由它应答，给出 `HREADYOUT`/`HRESP` 并把读数据置 0，避免总线悬空导致死锁或 X 态传播。
+> **参考答案**：当 CPU 访问一个**没有任何外设对应的非法地址**时，`defslv_hsel` 会被译码器选中，默认从设备给出一个合规的错误响应（`HRESP` 表示错误），避免总线「悬空」无响应而死锁。它是总线的「兜底」。
 
-**练习 3**：`cmsdk_apb_subsystem` 用什么机制决定包含哪些 UART/定时器？
-**答案**：用一组 `INCLUDE_APB_*` **参数**开关（见 [L682-L689](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L682-L689)），值为 1 则包含、为 0 则裁掉，综合出面积不同的外设子系统。
+**练习 2**：顶层模块里有大量 `assign cm_haddr = cm0_haddr;` 这种「改名」语句，为什么不直接用一组名字？
+
+> **参考答案**：因为 Cortex-M0 内核的端口名（`cm0_*`）和系统总线规范名（`sys_*`）来自两套命名约定。中间留一组 `cm_*`/`sys_*` 连线并改名，是为了在「插不插 bit-band 包装、有没有 DMA 主多路选」等不同配置下都能灵活接线，是工程上常见的「解耦命名层」做法。
 
 ---
 
-### 4.3 AHB 总线接口信号：master / slave 与地址译码
+### 4.3 AHB 总线接口信号
 
 #### 4.3.1 概念说明
 
-**AHB-LITE** 是 ARM 定义的一种片上总线协议（Lite 表示「单 master」简化版）。它的核心思想：用一组**标准命名的信号**，让任何 master 和任何 slave 都能即插即用。你只要认得这套信号名，就能读懂绝大多数 ARM SoC 的总线连接。
+**AHB-LITE** 是 ARM AMBA 总线家族里最常用的一种「高性能单主总线」。它规定了一组以 `H` 开头的标准信号，让任何遵从协议的 master 和 slave 都能即插即用。你只要记住下面这几类信号，就能读懂绝大多数 AHB 接口：
 
-AHB-LITE 最常见的信号（H 开头 = AHB）：
-
-| 信号 | 方向（master 视角） | 含义 |
+| 信号 | 方向（相对 master） | 含义 |
 | --- | --- | --- |
-| `HADDR[31:0]` | master → slave | 32 位地址 |
-| `HTRANS[1:0]` | master → slave | 传输类型（IDLE/BUSY/NONSEQ/SEQ） |
-| `HSIZE[2:0]` | master → slave | 传输字节宽（8/16/32…） |
-| `HBURST[2:0]` | master → slave | 突发类型（单次/4 拍/8 拍…） |
-| `HPROT[3:0]` | master → slave | 保护控制（缓存性/特权/数据或指令） |
-| `HWRITE` | master → slave | 1=写，0=读 |
-| `HWDATA[31:0]` | master → slave | 写数据 |
-| `HSEL` | 译码器 → slave | 该 slave 被选中 |
-| `HRDATA[31:0]` | slave → master | 读数据 |
-| `HREADYOUT` / `HREADY` | slave → master | 传输完成（高有效） |
-| `HRESP` | slave → master | 响应（OKAY/ERROR/RETRY/SPLIT） |
+| `HCLK` / `HRESETn` | 总线公共 | 总线时钟 / 低有效复位 |
+| `HADDR[31:0]` | master→slave | 地址 |
+| `HTRANS[1:0]` | master→slave | 传输类型（IDLE/BUSY/NONSEQ/SEQ） |
+| `HSIZE[2:0]` | master→slave | 传输位宽（8/16/32…） |
+| `HWRITE` | master→slave | 1=写，0=读 |
+| `HWDATA[31:0]` | master→slave | 写数据 |
+| `HRDATA[31:0]` | slave→master | 读数据 |
+| `HREADY` | 双向 | 总线就绪（高有效） |
+| `HRESP` | slave→master | 从设备响应（OKAY/ERROR…） |
+| `HSEL` | 译码器→slave | 片选：「这次访问是不是给你」 |
+| `HREADYOUT` | slave→多路选 | 本从设备自身就绪（参与多路选） |
 
-> **直觉**：master 把「地址 + 类型 + 写数据」摆上台面 → 译码器根据地址拉高某个 `HSEL` → 被选中的 slave 在下一拍给出「读数据 + 完成 + 响应」→ 多路选择器把它的回答汇总回 master。
+**直觉记忆法**：master 永远是「发号施令」的一方（给地址、给写数据、说读还是写）；slave 是「应答」的一方（回读数据、说有没有准备好、有没有出错）；中间的**译码器**根据地址决定 `HSEL`，**多路选择器**根据 `HSEL` 把对应 slave 的应答挑出来送回 master。
 
 #### 4.3.2 核心流程
 
-地址译码的原理本质上是**地址范围匹配**。每个 slave 分到一段地址区间，用「基址 + 长度」描述。译码器把 `HADDR` 落在哪个区间，就拉高对应的 `HSEL`。若 slave 的窗口大小是 \(S\) 字节、基址为 \(B\)，则被选中的条件可写成：
+一次 AHB 读传输的信号时序骨架（简化版，省略流水细节）：
 
-\[
-B \le \text{HADDR} < B + S
-\]
+```
+周期1：master 驱动 HADDR=addr, HTRANS=NONSEQ, HWRITE=0(读)
+         │
+         ▼
+       译码器：依 addr 置某 slave 的 HSEL=1
+         │
+         ▼
+周期2：被选中 slave 驱动 HRDATA=data, HREADYOUT=1, HRESP=OKAY
+         │
+         ▼
+       多路选择器：把该 slave 的 HRDATA/HREADYOUT 选到 sys_hrdata/sys_hreadyout
+         │
+         ▼
+       master 在 HREADY=1 时采样 sys_hrdata，读到 data
+```
 
-工程上常以基址的高位做比较（因为窗口都是 2 的幂次对齐）。例如 GPIO0 基址参数 `BASEADDR_GPIO0 = 32'h4001_0000`，意味着 16 位以下为片内偏移、高位是基地址标签。注意 [cmsdk/cmsdk_mcu_system_zed.v:584](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L584) 里 GPIO 的 `HADDR` 只接了低 12 位 `sys_haddr[11:0]`——说明每个外设只关心自己窗口内的低位偏移地址。
+关键点：`HREADY` 是「全局节拍」——任何一个 slave 没准备好，都可以把它拉低，让整个总线「等它一拍」，这就是所谓**等待状态（wait state）**，也正是 `cmsdk_mcu_defs.v` 里那些 `*_WS_N/*_WS_S` 宏在描述的东西。
 
 #### 4.3.3 源码精读
 
-**(a) 顶层对外的 AHB 存储端口**——CPU 经总线去访问外部存储块：
+**顶层对外的 AHB 接口**（连到外部存储器）：
 
-[cmsdk/cmsdk_mcu_system_zed.v:72-93](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L72-L93) —— `HADDR/HTRANS/HSIZE/HWRITE/HWDATA/HREADY`（输出到存储块）以及每个存储设备的 `xxx_hsel`（选中）、`xxx_hreadyout`/`xxx_hrdata`/`xxx_hresp`（从存储块返回）。这就是完整的 AHB master↔slave 信号组。
+[cmsdk/cmsdk_mcu_system_zed.v:72-77](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L72-L77) —— `HADDR/HTRANS/HSIZE/HWRITE/HWDATA/HREADY` 这一组，正是 AHB 标准信号；注释写明「AHB to memory blocks」，即这是把总线「引到片外/块外存储」的一组输出。
 
-**(b) CPU 侧的 AHB master 信号（内部）**：
+**片选是怎么产生的**（回到译码器）：
 
-[cmsdk/cmsdk_mcu_system_zed.v:150-163](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L150-L163) —— 内部连线 `cm0_haddr/cm0_htrans/cm0_hsize/cm0_hburst/cm0_hprot/cm0_hwrite/cm0_hwdata/cm0_hrdata/cm0_hready/cm0_hresp`，正是上一节表格里那套信号，只不过加了 `cm0_` 前缀表示「来自 Cortex-M0」。
+[cmsdk/cmsdk_mcu_system_zed.v:440-451](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L440-L451) —— 译码器输出端那一串 `.flash_hsel/.sram_hsel/.apbsys_hsel/.gpio0_hsel/...`。**每个 `*_hsel` 都是一条「这条地址归我管」的声明**。
 
-**(c) CPU 与系统总线之间的 assign 直连**——因为只有一个 master，无需多 master 仲裁：
+**多路选择器把读数据收回来**：
 
-[cmsdk/cmsdk_mcu_system_zed.v:411-424](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L411-L424) —— 代码注释写得很直白：「No DMA controller - no need to have master multiplexer / direct connection from cpu to system bus」。`cm_*` 信号直接赋给 `sys_*`，反向的读数据/响应也直接回连。理解了这段，你就理解了「单 master AHB-LITE 的互连其实可以简单到全是 assign」。
+[cmsdk/cmsdk_mcu_system_zed.v:514-516](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L514-L516) —— `slave_mux` 的输出 `.HREADYOUT(sys_hreadyout)/.HRESP(sys_hresp)/.HRDATA(sys_hrdata)`，这就是「所有 slave 里被选中那一个」的应答，统一送回 CPU 侧。
 
-**(d) 地址译码器与多路选择器**（已在 4.2 节引用）正是 AHB 协议落地的两件套：译码器发 `HSEL`、多路选择器收 `HRDATA/HREADYOUT/HRESP`。
+**作为对比，看 CPU 主端口**怎么连这些信号：
+
+[cmsdk/cmsdk_mcu_system_zed.v:314-325](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L314-L325) —— `CORTEXM0INTEGRATION` 的「AHB-LITE MASTER PORT」一组端口，连到 `cm0_haddr/cm0_hwdata/cm0_hrdata/...`。和上面的对外接口、多路选输出对一对名字，你会发现它们是**同一套协议、不同实例**。
+
+> 阅读技巧：在 SoC RTL 里看到 `H` 开头 + `sel/ready/resp/rdata/trans/size/write` 这几个词的组合，几乎可以立刻判定是 AHB 接口；看到 `P` 开头（如 `PCLK/PSEL/PENABLE`）则是 APB（慢速外设总线），看到 `M` 开头多为 AXI。本仓库后续 `cmsdk_apb_subsystem` 走的就是 APB。
 
 #### 4.3.4 代码实践
 
-**实践目标**：在源码里追一次完整的「CPU 写一个 GPIO 寄存器」的信号路径。
+**实践目标**：跟踪一个 AHB 信号「从 CPU 发出到回到 CPU」的完整通路。
 
 **操作步骤**：
 
-1. 找到 CPU 输出 `cm0_haddr/cm0_hwrite/cm0_hwdata` 的位置（[L315-L322](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L315-L322)）。
-2. 顺着 [L411-L419](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L411-L419) 的 `assign`，确认它们变成 `sys_haddr/sys_hwrite/sys_hwdata`。
-3. 进入译码器 [L427-L452](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L427-L452)，确认当 `sys_haddr` 落在 `BASEADDR_GPIO0` 区间时会拉高 `gpio0_hsel`。
-4. 进入 GPIO 实例 [L604-L635](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L604-L635)，确认 `gpio0_hsel/HWRITE/HWDATA` 被它接收，并回送 `gpio0_hreadyout/gpio0_hrdata`。
-5. 最后看多路选择器 [L493-L496](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L493-L496)，确认 GPIO 的应答汇入 `sys_hrdata/sys_hreadyout`，再回 CPU。
+1. 从 [cmsdk_mcu_system_zed.v:315](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L315) 出发，CPU 的 `.HADDR(cm0_haddr)` 把地址给到 `cm0_haddr`。
+2. 顺着 [L395](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L395) 的 `assign cm_haddr = cm0_haddr` → [L411](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L411) 的 `assign sys_haddr = cm_haddr`，地址最终叫 `sys_haddr`。
+3. `sys_haddr` 进入译码器 [L435](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L435)，产生某个 `*_hsel`。
+4. 该 slave 返回读数据，经 `slave_mux` 汇成 `sys_hrdata` [L516](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L516)。
+5. `sys_hrdata` 经 [L421](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L421)/[L405](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L405) 回流成 `cm0_hrdata`，最终回到 CPU 的 `.HRDATA(cm0_hrdata)`。
 
-**需要观察的现象**：整条路径上信号只是被改名、选通，没有任何「指令执行」逻辑——总线只负责把数据搬到正确的端口。
+**需要观察的现象**：一个信号名会经历 `cm0_* → cm_* → sys_* → (slave) → sys_* → cm_* → cm0_*` 的「改名接力」，但物理上始终是同一根线。
 
-**预期结果**：你能画出 `cm0_* → sys_* → 译码 → gpio0 → 多路选 → 回 sys_* → cm0_*` 的闭环。
+**预期结果**：你能用一句话讲清「CPU 给地址 → 译码选 slave → slave 回数据 → 多路选回流 → CPU 收数据」这条闭环，并指出每一跳对应的行号。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 GPIO 实例的 `HADDR` 只接 `sys_haddr[11:0]`？
-**答案**：因为高位已经由地址译码器用来选中这个外设（命中 `gpio0_hsel`），外设内部只需关心自己窗口内的低位偏移（4KB 空间）。
+**练习 1**：`HREADY` 和 `HREADYOUT` 有什么区别？
 
-**练习 2**：`HREADY` 与 `HREADYOUT` 有何区别？
-**答案**：`HREADYOUT` 是单个 slave 自己给出的「我完成了」；`HREADY` 是经多路选择器汇总后、整条总线的「当前传输完成」信号，送给 master 和所有 slave。
+> **参考答案**：`HREADYOUT` 是**单个 slave 自己**的「我准备好没有」信号；`HREADY` 是**整条总线**的最终就绪信号，由多路选择器综合所有 slave（及默认从设备）的 `HREADYOUT` 得到。master 只看 `HREADY`，slave 各自上报 `HREADYOUT`。
 
-**练习 3**：为什么本设计里 master 到系统总线全是 `assign` 直连，没有仲裁器？
-**答案**：因为这是 AHB-**LITE**（单 master），且没有 DMA 等第二 master，无需仲裁；多 master 的完整 AHB 才需要仲裁器和 master 多路选择器。
+**练习 2**：`HTRANS` 取值 `NONSEQ`（非顺序）和 `SEQ`（顺序）分别表示什么？为什么要有这个区分？
+
+> **参考答案**：`NONSEQ` 表示一次全新传输的开始（地址与上次无关）；`SEQ` 表示本次地址是上次的「顺序递增」（如突发读连续地址）。区分它们让 slave（尤其是存储器）能预判下一次地址、用更少周期完成突发传输，从而提升带宽。
 
 ---
 
-### 4.4 复杂度跃迁对比：MY_DESIGN vs cmsdk_mcu_system
+### 4.4 复杂度跃迁对比
 
 #### 4.4.1 概念说明
 
-读懂结构之后，我们退一步，用数字量化「简单设计」与「真实 SoC」之间的鸿沟。这不是为了吓退你，而是让你建立一个**合理的预期**：真实工程的代码量、端口数、子模块数都是教学例子的几十到几百倍，读它的策略也要随之调整——不能再逐行读，而要「先抓顶层例化、再按模块分块」。
+学到这里，我们已经把 `MY_DESIGN`（u2-l1）和 `cmsdk_mcu_system`（本讲）都过了一遍。把它们摆到一起，你会对「真实 SoC 比教学例子复杂多少」有直观感受。这是从「会写逻辑」到「能读系统」的关键一跃。
+
+复杂度的差别体现在至少五个维度：**端口数、子模块数、参数化程度、总线/协议、时钟与复位域**。注意，复杂度上升并不只是「代码更长」，而是**设计关注点完全变了**——教学例子关心「这道算术对不对」，SoC 顶层关心「这一堆部件怎么协同、谁能中断谁、地址怎么分、总线会不会死锁」。
 
 #### 4.4.2 核心流程
 
-复杂度可以从几个维度量化。设一个模块的端口数为 \(P\)、子模块例化数为 \(I\)、源码行数为 \(L\)，则从 `MY_DESIGN` 到 `cmsdk_mcu_system` 的跃迁可粗略表示为各维度的比值：
+我们用一张对比表把两个设计量化摊开：
+
+| 维度 | `MY_DESIGN`（u2-l1） | `cmsdk_mcu_system`（本讲） |
+| --- | --- | --- |
+| 顶层模块端口数 | **10** 个（`Cin1/Cin2/Cout/data1/data2/sel/clk/out1/out2/out3`） | **约 65** 个（基础配置，不含 FPGA 专用信号） |
+| 子模块例化数 | **2** 个（`ARITH`、`COMBO`） | **9** 个（CPU + 译码 + 多路选 + 默认从 + ROM表 + sysctrl + 2×GPIO + APB子系统） |
+| `parameter` 数 | **0**（位宽 `4:0` 全写死） | **12** 个（`BE/BKPT/DBG/NUMIRQ/SMUL/SYST/WIC/...`） |
+| 总线协议 | 无（模块间直接 `wire` 连） | **AHB-LITE**（标准 `H*` 信号）+ APB |
+| 时钟域 | **1** 个（`clk`） | **多** 个（`FCLK/HCLK/DCLK/SCLK/PCLK/PCLKG`） |
+| 复位 | 无显式复位端口 | **4** 类（`HRESETn/PORESETn/DBGRESETn/PRESETn`） |
+| 端口声明风格 | Verilog-1995 非 ANSI（端口名在头，类型在体） | Verilog-2001 ANSI（`input wire [31:0] X` 行内声明） |
+| 条件编译 | 无 | 有（`` `ifdef ARM_DESIGNSTART_FPGA ``） |
+
+端口规模的比值约为：
 
 \[
-R_P = \frac{P_{\text{cmsdk}}}{P_{\text{MYD}}}, \quad
-R_I = \frac{I_{\text{cmsdk}}}{I_{\text{MYD}}}, \quad
-R_L = \frac{L_{\text{cmsdk}}}{L_{\text{MYD}}}
+\frac{\text{SoC 端口数}}{\text{MY\_DESIGN 端口数}} \approx \frac{65}{10} = 6.5
 \]
 
-不必精确，量级感即可。下面用真实数字填。
+\[
+\text{子模块数比值} = \frac{9}{2} = 4.5
+\]
+
+也就是说，仅仅在「看得见的接线规模」上，SoC 顶层就大了半个数量级；而它真正难的地方——总线协议、地址映射、多时钟/复位域——是 `MY_DESIGN` 根本没有的维度。
 
 #### 4.4.3 源码精读
 
-**(a) 端口数对比**：
+先看「简单端」`MY_DESIGN` 的端口，体会它有多朴素：
 
-- [MY-Design/MY_DESIGN.v:2-6](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v#L2-L6) —— `MY_DESIGN` 顶层共 **10 个端口**（`Cin1/Cin2/Cout/data1/data2/sel/clk/out1/out2/out3`），且位宽统一是 5 位。
-- [cmsdk/cmsdk_mcu_system_zed.v:57-143](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L143) —— `cmsdk_mcu_system` 顶层有**几十个端口声明**（仅时钟/复位就 10 个，加上 AHB、调试、3 路 UART、2 组 16 位 GPIO、定时器、各类状态输出，单文件内 `input/output` 声明即达数十处）。
+[MY-Design/MY_DESIGN.v:2-7](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v#L2-L7) —— 一行列出 10 个端口名，下面再用 `input/output/reg` 分别声明类型。没有 `parameter`，没有 `wire [31:0]` 的总线，也没有时钟域/复位域的概念（只有一个 `clk`，连复位都没有）。
 
-> 把端口按功能归类，至少能分出**三类以上接口**，这正是本讲的综合实践任务。
+再看它的例化有多简单：
 
-**(b) 子模块例化数对比**：
+[MY-Design/MY_DESIGN.v:9-10](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v#L9-L10) —— 两行例化 `ARITH` 和 `COMBO`，端口一一对应，没有任何总线、译码、多路选。
 
-- `MY_DESIGN` 顶层只例化 **2 个**子模块（`ARITH`、`COMBO`），`COMBO` 再例化 1 个 `ARITH`，总共 3 处例化、2 种模块。
-- `cmsdk_mcu_system` 顶层例化了 **8~10 个**不同子模块（见 4.2 节清单），且其中 CPU `CORTEXM0INTEGRATION` 本身就是一颗含数万门的处理器。
+「复杂端」`cmsdk_mcu_system` 的端口则是另一番景象：
 
-**(c) 时钟域与复位域对比**：
+[cmsdk/cmsdk_mcu_system_zed.v:57-67](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L67) —— 仅「时钟 + 复位」相关的端口就列了 11 个（`FCLK/HCLK/DCLK/SCLK/HRESETn/PORESETn/DBGRESETn/PCLK/PCLKG/PRESETn/PCLKEN`）。在 `MY_DESIGN` 里，这部分只有 1 个 `clk`。
 
-- `MY_DESIGN`：**1 个时钟 `clk`**、**无显式复位**。
-- `cmsdk_mcu_system`：**6 个时钟**（`FCLK/HCLK/DCLK/SCLK/PCLK/PCLKG`）+ **4 个复位**（`HRESETn/PORESETn/DBGRESETn/PRESETn`），见 [L57-L67](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L67)。多时钟域意味着后续要做**跨时钟域同步**与多组时序约束——这是 U2-l3（SDC）要解决的真问题。
+[cmsdk/cmsdk_mcu_system_zed.v:69-71](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L69-L71) —— 这里还出现了 `` `ifdef ARM_DESIGNSTART_FPGA `` 条件编译：只有定义了这个宏，才会多出 `zbt_boot_ctrl` 等 FPGA 专用端口。这种「同一份 RTL 服务多个目标」的手段，`MY_DESIGN` 里完全没有。
 
-**(d) 配置手段对比**：
+把两端并列，结论很清楚：**`MY_DESIGN` 教你「逻辑怎么写」，`cmsdk_mcu_system` 教你「系统怎么拼」**。后者多出来的所有复杂度，本质上都来自「把许多独立部件通过标准总线组织成一台可工作的计算机」这件事本身。
 
-- `MY_DESIGN`：**零参数、零宏**，完全硬编码。
-- `cmsdk_mcu_system`：**12 个 `parameter`**（[L39-L54](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L39-L54)）+ `` `ifdef ARM_DESIGNSTART_FPGA `` 条件编译 + `cmsdk_mcu_defs.v` 里的 `` `define `` 宏，三套可配置机制并用。
+#### 4.4.4 代码实践（本讲主任务）
 
-把上面四项整理成一张总表：
-
-| 维度 | `MY_DESIGN` | `cmsdk_mcu_system` | 跃迁倍数（量级） |
-| --- | --- | --- | --- |
-| 顶层端口数 | ~10 | 数十个 | 数倍 |
-| 子模块例化数 | 2 | 8~10 | ~4–5× |
-| 时钟域 / 复位域 | 1 / 0 | 6 / 4 | 数倍 |
-| 配置手段 | 无 | parameter + define + ifdef | 质变 |
-| 是否含第三方 IP 黑盒 | 否 | 是（CPU 内核） | 质变 |
-| 对外总线协议 | 无 | AHB-LITE + APB | 质变 |
-
-#### 4.4.4 代码实践
-
-**实践目标**：亲手算出复杂度跃迁的量级，建立「读真实 SoC 要换策略」的直觉。
+**实践目标**：量化对比两个设计的端口规模，并给 SoC 的对外接口做分类。
 
 **操作步骤**：
 
-1. 用编辑器统计行数：`wc -l MY-Design/MY_DESIGN.v cmsdk/cmsdk_mcu_system_zed.v`，计算行数比 \(R_L\)。
-2. 数端口：在两个文件里分别数 `input`/`output`（顶层端口）的个数。
-3. 数例化：分别数形如 `模块名 实例名 (` 的例化点数量。
-4. 把三类接口归类：在 `cmsdk_mcu_system` 的端口里，至少挑出**时钟类、复位类、AHB 总线类**各一组信号（可参考 [L57-L67](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L67) 与 [L72-L93](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L72-L93)）。
+1. 数 `MY_DESIGN` 的端口：打开 [MY-Design/MY_DESIGN.v:2-7](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v#L2-L7)，确认是 10 个端口名。
+2. 数 `cmsdk_mcu_system` 的端口：打开 [cmsdk/cmsdk_mcu_system_zed.v:57-143](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L143)，逐行统计 `input`/`output` 关键字，记下总数（基础配置约 65 个；若计入 `` `ifdef ARM_DESIGNSTART_FPGA `` 包裹的信号会更多）。
+3. 把 SoC 的端口**按接口类型分组**，列出至少三类（建议分到六类以上）。参考分组：
 
-**需要观察的现象**：`MY_DESIGN.v` 一屏就能看完；`cmsdk_mcu_system_zed.v` 需要折叠/跳转才能驾驭。
+   | 接口类型 | 代表信号 |
+   | --- | --- |
+   | 时钟 | `FCLK/HCLK/DCLK/SCLK/PCLK/PCLKG` |
+   | 复位 | `HRESETn/PORESETn/DBGRESETn/PRESETn` |
+   | AHB 总线 | `HADDR/HTRANS/HSIZE/HWRITE/HWDATA/HREADY` 及 `*_hsel/*_hrdata` |
+   | 调试 (SWD/JTAG) | `nTRST/SWDITMS/SWCLKTCK/TDI/TDO/SWDO` |
+   | UART | `uart0_rxd/uart0_txd/uart0_txen` … |
+   | GPIO | `p0_in/p0_out/p0_outen/p0_altfunc`、`p1_*` |
+   | 定时器 | `timer0_extin/timer1_extin` |
+   | 状态/控制 | `SLEEPING/SLEEPDEEP/SYSRESETREQ/LOCKUP/PMUENABLE` |
 
-**预期结果**：你会得到一张类似上表的量化对比，并得出结论——读真实 SoC 必须「**先读顶层例化与端口、再按子模块分块深入**」，而不是逐行通读。
+**需要观察的现象**：`MY_DESIGN` 的端口几乎「无法分类」（全是数据 + 一个时钟），而 SoC 的端口天然按功能成簇。
 
-> 待本地验证：行数与端口数以你本机 `wc -l` 与实际计数为准；上表数字供量级参考。
+**预期结果**：产出一张「端口数对比 + 接口分类表」，能清晰说出 SoC 至少包含「时钟、复位、AHB 总线」三类（以及调试、UART、GPIO 等更多类）接口；并量化得出端口数比值约 6.5。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：举出两个「质变」维度（不是简单变多，而是 `MY_DESIGN` 根本没有的东西）。
-**答案**：① 引入了标准总线协议（AHB-LITE/APB）；② 集成了第三方 IP 黑盒（CPU 内核 `CORTEXM0INTEGRATION`）。
+**练习 1**：`MY_DESIGN` 没有复位端口，但 `cmsdk_mcu_system` 有 4 个复位。为什么真实 SoC 需要这么多复位？
 
-**练习 2**：为什么真实 SoC 需要多个时钟域？
-**答案**：不同模块跑在不同速度（CPU 高速总线 HCLK、慢速外设 APB 用 PCLK、调试用 DCLK…），用多个时钟可在不影响性能的前提下给慢速部分省功耗；代价是需要处理跨时钟域与多组时序约束。
+> **参考答案**：因为 SoC 里有「内核/总线/调试/外设」等多个独立可复位的子域。例如 `PORESETn`（上电复位）复位整片，`HRESETn` 只复位 AHB 总线域，`DBGRESETn` 单独复位调试逻辑，`PRESETn` 复位外设域。分开复位是为了支持「调试时只复位内核而不动外设」等场景，是系统级电源/复位管理的需要。
 
-**练习 3**：面对行数几十倍的真实 SoC RTL，第一步该读什么？
-**答案**：先读 `module` 头（端口 + 参数）建立外部视图，再读顶层所有例化点画出结构图，最后才按需深入某个子模块——而不是从第 1 行逐行读到末尾。
+**练习 2**：从「可综合性」角度，`MY_DESIGN` 和 `cmsdk_mcu_system` 哪个更适合直接拿来做教学综合练习？为什么？
+
+> **参考答案**：`MY_DESIGN` 更适合。它规模小、无外部 IP 依赖、端口少，可以用任意开源综合器（如后续 u10-l1 的 yosys）轻松跑通 RTL→网表，便于观察综合结果。而 `cmsdk_mcu_system` 依赖 `CORTEXM0INTEGRATION` 等 ARM 授权 IP（仓库未随附核的 RTL），且端口/总线复杂，主要用于「读结构、学总线」，不适合作为综合入门练习对象。
+
+**练习 3**：如果让你给 `MY_DESIGN` 也加上一个 `parameter WIDTH = 5`，需要改动哪几处？
+
+> **参考答案**：把 `[4:0]` 全部换成 `[WIDTH-1:0]`（端口 `Cin1/Cin2/data1/data2/Cout/out1/out2/out3`、内部 `reg/wire`、子模块 `ARITH/COMBO` 的位宽），并在子模块也声明同名 `parameter`，例化时用 `#(.WIDTH(WIDTH))` 向下传递。这样就能从「5 位写死」升级为「任意位宽可配」，迈出参数化的第一步。
 
 ---
 
 ## 5. 综合实践
 
-**任务**：对比 `MY_DESIGN` 与 `cmsdk_mcu_system` 的端口规模，并给真实 SoC 的接口分类。
+把本讲四个模块串起来，完成下面这个**接口盘点**小任务（纯源码阅读型，无需工具）：
 
-请完成下面这份「SoC 接口清单」小报告（纯阅读 + 整理，不改源码）：
+1. **建表**：为 `cmsdk_mcu_system` 制作一张完整的「外部接口清单表」，列四列——`接口类型 | 信号名 | 方向(input/output) | 位宽`。至少覆盖 **时钟、复位、AHB 总线、调试、UART、GPIO、定时器、状态/控制** 八类，每类列出全部相关信号（依据 [cmsdk_mcu_system_zed.v:57-143](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L143)）。
+2. **画图**：依据 4.2 节，画一张顶层结构图，标出 `CORTEXM0INTEGRATION(主)` → `addr_decode(译码)` → 各 `slave` → `ahb_slave_mux(多路选)` 的数据流向，并标注 `sys_haddr / *_hsel / sys_hrdata` 三组关键连线。
+3. **追参数**：任选一个 `parameter`（如 `NUMIRQ`），写出它「声明于 L45 → 是否在某子模块被覆盖或转发」的完整路径（提示：可结合 [L427-452](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L427-L452) 的译码器例化观察地址类参数如何向下传）。
+4. **写总结**：用 100~150 字回答——「相比 `MY_DESIGN`，SoC 顶层多出了哪些**系统级**关注点？」（提示词：总线协议、地址映射、多时钟/复位域、参数化裁剪、调试与中断、电源管理。）
 
-1. **端口计数**：分别列出 `MY_DESIGN`（[MY-Design/MY_DESIGN.v:2-6](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/MY-Design/MY_DESIGN.v#L2-L6)）与 `cmsdk_mcu_system`（[cmsdk/cmsdk_mcu_system_zed.v:57-143](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_system_zed.v#L57-L143)）的顶层端口数量。
-2. **三类接口归类**（至少完成以下三类，可再加）：
-   - **时钟接口**：列出 `cmsdk_mcu_system` 的所有时钟端口（`FCLK/HCLK/DCLK/SCLK/PCLK/PCLKG`），各写一句推测用途。
-   - **复位接口**：列出 `HRESETn/PORESETn/DBGRESETn/PRESETn`，指出哪些是「上电复位」、哪些是「子系统复位」。
-   - **总线接口**：列出 AHB master 侧的 `HADDR/HTRANS/HSIZE/HWRITE/HWDATA/HREADY` 与各 slave 的 `xxx_hsel/xxx_hreadyout/xxx_hrdata/xxx_hresp`，说明 master/slave 各自的方向。
-3. **结构图**：基于 4.2 节的例化清单，画一张 `cmsdk_mcu_system` 的方框图（CPU → 译码器/多路选择器 → 各外设），标注 AHB 与 APB 两条总线。
-4. **一句话结论**：用复杂度跃迁的量级，说明读真实 SoC 时为什么要换策略。
-
-**预期产出**：一份不到一页的 Markdown/手写笔记，包含两张表（端口计数、三类接口）和一张方框图。完成后，你应该能在不看源码的情况下，复述「CPU 发起访存 → 译码选中外设 → 数据回送」的完整路径，并能解释 `parameter`/`` `define ``/`` `ifdef `` 三者的差别。
+**验收标准**：清单表信号无遗漏且方向/位宽正确；结构图能体现「主—译码—从—多路选」闭环；参数路径能说清「默认值 → 覆盖/转发」；总结里至少点到「总线 / 地址映射 / 多时钟域」三个系统级关键词。
 
 ---
 
 ## 6. 本讲小结
 
-- **参数化**是真实工程的基础：`cmsdk_mcu_system` 用 12 个 `parameter` 把 CPU 配成不同档次；而 `` `define ``/`` `ifdef `` 用于「会改变端口形状」的全局开关——二者不能互相替代。
-- 一个真实 **SoC 顶层** = CPU 内核（黑盒 IP）+ 总线互连（地址译码 + slave 多路选择 + 默认 slave）+ 一堆外设（GPIO/UART/定时器…）+ 中断/时钟等 glue logic，全靠例化与 `assign` 拼装。
-- **AHB-LITE** 用一套 `H` 前缀的标准信号（`HADDR/HWDATA/HREADY/HSEL/HRDATA/HRESP`…）让 master 与 slave 即插即用；单 master 时互连可简化为纯 `assign` 直连。
-- 从 `MY_DESIGN` 到 `cmsdk_mcu_system`，端口数、例化数、时钟域数都上了量级，并出现「总线协议」和「第三方 IP 黑盒」两个**质变**——读真实 SoC 要改用「先抓顶层例化、再分块深入」的策略。
-- 本仓库只提供 CMSDK 的**集成层** RTL；`CORTEXM0INTEGRATION` 与各 `cmsdk_*` 子模块是 ARM 提供的黑盒，看不到内部——这是真实项目的常态。
-- **文件名 ≠ 模块名**：`cmsdk_mcu_system_zed.v` 定义的是 `cmsdk_mcu_system`，而测试台例化的 `cmsdk_mcu_zed` 是另一层 wrapper，不在本仓库内。
+- **参数化**用 `parameter` 让一份 RTL 配出多种规格；它「每实例可不同」，区别于全局的 `` `define `` 宏；当配置会改变端口拓扑时（如 JTAG/SWD 切换），只能用宏 + `` `ifdef `` 条件编译。
+- **SoC 顶层**是一块「接线板」：声明 `wire`、例化子模块、用命名端口连接把它们接到一起，自身几乎不含 `always` 计算逻辑。`cmsdk_mcu_system` 例化了 **9 个子模块**。
+- 经典单主总线骨架是「**主 → 地址译码器 → 多个从 → 从设备多路选择器 → 主**」；译码器产 `HSEL`，多路选汇 `HRDATA/HREADYOUT/HRESP`。
+- **AHB-LITE** 以 `H` 开头的标准信号通信：master 给 `HADDR/HTRANS/HWRITE/HWDATA`，slave 回 `HRDATA/HREADYOUT/HRESP`，`HREADY` 是全局就绪节拍。
+- 复杂度跃迁是数量级的：端口 10→约 65（比值约 6.5），子模块 2→9，并新增了总线协议、地址映射、多时钟域、多复位域、参数化裁剪等 `MY_DESIGN` 完全没有的维度。
+- 阅读技巧：看到 `H*` 想到 AHB、`P*` 想到 APB、`M*` 多为 AXI；信号改名接力（`cm0_*→cm_*→sys_*`）是 SoC 顶层解耦命名的常见手法。
 
 ---
 
 ## 7. 下一步学习建议
 
-- **横向加深 RTL 阅读力**：可以把 `cmsdk/` 里看得见内部 RTL 的小模块当练手对象，例如引脚复用 [cmsdk/cmsdk_mcu_pin_mux.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/cmsdk_mcu_pin_mux.v)（三态 IO 与功能复用）、LED 闪烁 [cmsdk/led_1second.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/led_1second.v)（异步复位 + 多级计数分频），巩固 `always`/`assign`/三态缓冲。
-- **进入时序约束**：本讲的 SoC 有 6 个时钟、4 个复位，正是下一讲 **u2-l3（SDC 时序约束）**要解决的问题——学会用 `create_clock`、`set_input_delay` 等约束把多时钟域行为告诉综合与 STA 工具。
-- **往物理设计走**：等读完 u2-l3，U3 会讲标准单元库与物理数据（NDM/LEF），U4 会进入 ICC2 物理设计主流程，届时你会看到本讲的 RTL/网表是如何被「摆到芯片上」的。
+- **紧接着学 u2-l3（时序约束 SDC）**：本讲你见过了 SoC 的多时钟域（`HCLK/DCLK/SCLK...`），下一讲会用 `My_Design.cons` 讲 `create_clock`、时钟不确定性、`set_input_delay/set_output_delay` 等，正好回答「这些时钟在综合/STA 里怎么被描述和约束」。
+- **后续 U3/U4 再回头**：本讲的 AHB 总线、地址映射、参数化，会在 ICC2 物理设计主流程里再次出现——届时你会看到这些 RTL 结构如何变成版图上的标准单元和宏单元。
+- **延伸阅读（仓库内）**：想更细看外设，可读 `cmsdk/cmsdk_mcu_pin_mux.v`（引脚复用）和 `cmsdk/cmsdk_apb_subsystem` 相关逻辑；想验证理解，可对照 testbench [cmsdk/tb_cmsdk_mcu_zed.v](https://github.com/abdelazeem201/ASIC-Design-Roadmap/blob/795d32ab6b5ba111e6eab968850671d824569692/cmsdk/tb_cmsdk_mcu_zed.v) 看它如何驱动 `cmsdk_mcu_system` 的时钟、复位与 GPIO 端口。

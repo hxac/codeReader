@@ -1,0 +1,1523 @@
+{
+  "project": "axi",
+  "head": "e55ae2a7ee606ee3cfd4257f63982a971b704407",
+  "rationale": "本项目是 pulp-platform 维护的大型 SystemVerilog AXI4/AXI4-Lite IP 库（88 个源文件，Bender 依赖分为 Level 0–6），因此学习路线直接对齐其天然的依赖层级：先打基础再向上组合。整体分为三层共 16 个单元约 50 篇讲义。入门层（U1–U3）从项目定位、构建系统（Bender/Makefile/scripts）、AXI4 协议回顾出发，再讲三大基础设施——axi_pkg 类型常量、axi_intf 接口与 typedef/assign/port 宏，最后是 axi_test 验证工具与测试台写法，让读者能「看懂、能跑」。进阶层（U4–U14）按模块类别逐族展开：总线连接原语（join/cut/delayer）、多路复用核心（demux/mux）、全连接交叉开关 xbar、流控缓冲（fifo/isolate/throttle）、时钟域跨越（cdc）、突发与序列化、ID 宽度管理、数据宽度转换、AXI-Lite 子系统、协议转换桥、存储端点适配器。每一族都从最底层模块讲到其组合体，遵循「先零件后整机」。专家层（U15–U16）聚焦原子操作 ATOPs、交叉点 xp/interleaved_xbar、异构网络设计取舍、定时与流水线策略、验证方法学和 CI/EDA 兼容等架构级议题。讲义之间通过 depends_on 显式约束先后，避免读者跳读缺失前置知识。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与整体认知",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与设计哲学",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 pulp-platform/axi 是什么：一套用于构建片上通信网络的 SystemVerilog AXI4/AXI4-Lite IP 库，以及它的四大设计目标（拓扑无关、模块化组合、适配异构网络、完全协议合规）。",
+          "learning_goals": [
+            "理解本库解决什么问题、与手写 AXI 互联的区别",
+            "掌握拓扑无关、组合优于配置的 Unix 哲学在硬件中的应用",
+            "认识 AXI4+ATOPs 的含义及库内模块的整体分类"
+          ],
+          "source_files": [
+            "README.md",
+            "src/axi_xbar.sv"
+          ],
+          "minimal_modules": [
+            "README",
+            "axi_xbar"
+          ],
+          "practice_task": "阅读 README 的模块列表，按「互连」「转换」「端点」「验证」四类给其中 10 个模块归类，并写一段话说明你会用哪些模块拼出一个两主一从的小型互联。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与构建系统",
+          "order": 2,
+          "filename": "u1-l2-repo-and-build.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录组织（src/include/test/doc/scripts）以及 Bender 包管理器如何用依赖层级（Level 0–6）定义编译顺序，并介绍 src_files.yml、axi.core、ips_list.yml 等清单文件的作用。",
+          "learning_goals": [
+            "看懂 Bender.yml 中 sources 的层级化组织及其含义",
+            "理解 include/ 下三类 .svh 宏文件如何被导出",
+            "掌握 src/、test/、scripts/ 各自承担的职责"
+          ],
+          "source_files": [
+            "Bender.yml",
+            "src_files.yml",
+            "axi.core",
+            "ips_list.yml"
+          ],
+          "minimal_modules": [
+            "Bender.yml",
+            "src_files.yml"
+          ],
+          "practice_task": "用 Bender.yml 的层级说明 axi_xbar（Level 5）依赖哪些更低层级的文件，并解释为什么 axi_pkg 必须是 Level 0。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "AXI4 协议快速回顾",
+          "order": 3,
+          "filename": "u1-l3-axi-protocol-primer.md",
+          "level": "beginner",
+          "topic": "用本库源码视角回顾 AXI4：五个通道（AW/W/B/AR/R）、valid/ready 握手、突发类型与响应码，以及「in flight / pending」等术语，为后续阅读模块打协议基础。",
+          "learning_goals": [
+            "说出五个 AXI 通道及其数据流方向",
+            "理解 valid/ready 握手与 in flight、pending 的精确定义",
+            "区分 BURST_FIXED/INCR/WRAP 与 RESP_OKAY/EXOKAY/SLVERR/DECERR"
+          ],
+          "source_files": [
+            "README.md",
+            "src/axi_pkg.sv",
+            "doc/README.md"
+          ],
+          "minimal_modules": [
+            "axi_pkg",
+            "doc/README"
+          ],
+          "practice_task": "在 axi_pkg.sv 中找到 BURST_* 与 RESP_* 的 localparam 定义，画出一次 4 拍 INCR 写事务在五个通道上的时序草图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "如何编译、仿真与综合",
+          "order": 4,
+          "filename": "u1-l4-compile-sim-synth.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Makefile 与 scripts/ 下的脚本完成编译（compile_vsim.sh）、仿真（run_vsim.sh）、Verilator lint（run_verilator.sh）与综合（synth.sh），以及 test/ 目录的 testbench 命名约定。",
+          "learning_goals": [
+            "用 make compile.log / sim-<tb>.log / elab.log 跑通流程",
+            "理解 Bender target（rtl/test/simulation/synthesis/synth_test）的作用",
+            "知道 test/ 下 tb_*.sv 与对应 DUT 的对应关系"
+          ],
+          "source_files": [
+            "Makefile",
+            "scripts/compile_vsim.sh",
+            "scripts/run_vsim.sh",
+            "scripts/synth.sh",
+            "scripts/run_verilator.sh"
+          ],
+          "minimal_modules": [
+            "Makefile",
+            "scripts"
+          ],
+          "practice_task": "执行 make help 查看可用目标，然后选择一个 testbench（如 tb_axi_lite_regs）跑一次仿真并解释日志中「Errors: 0」的含义。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基础设施 — 类型、接口与宏",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "axi_pkg：类型与常量",
+          "order": 1,
+          "filename": "u2-l1-axi-pkg-types.md",
+          "level": "beginner",
+          "topic": "精读 axi_pkg.sv 的参数化宽度常量（BurstWidth、RespWidth 等）、typedef（burst_t、resp_t、atop_t 等）以及 BURST/RESP/CACHE 等 localparam，这是全库共享的类型根基。",
+          "learning_goals": [
+            "掌握 axi_pkg 中所有公共 typedef 与 localparam 的来源",
+            "理解为什么把这些类型集中在一个 package 里",
+            "能引用 axi_pkg:: 下的类型来声明自己的信号"
+          ],
+          "source_files": [
+            "src/axi_pkg.sv"
+          ],
+          "minimal_modules": [
+            "axi_pkg"
+          ],
+          "practice_task": "列出 axi_pkg 中每个 typedef 对应的位宽常量，并写一小段 SystemVerilog 用 axi_pkg::resp_t 和 RESP_DECERR 声明并赋值一个信号。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "axi_pkg：辅助函数与配置结构体",
+          "order": 2,
+          "filename": "u2-l2-axi-pkg-funcs-cfg.md",
+          "level": "beginner",
+          "topic": "讲解 axi_pkg 中的辅助函数（如 num_bytes、地址对齐计算）以及 xbar_cfg_t、xbar_rule_64_t/32_t、xbar_latency_e 等配置结构体，它们是参数化模块（尤其 xbar）的配置入口。",
+          "learning_goals": [
+            "使用 axi_pkg 的函数完成字节/拍数计算",
+            "看懂 xbar_cfg_t 各字段含义并能构造一个配置",
+            "理解 xbar_latency_e 枚举（CUT_ALL_AX、NO_LATENCY 等）的用途"
+          ],
+          "source_files": [
+            "src/axi_pkg.sv",
+            "doc/axi_xbar.md"
+          ],
+          "minimal_modules": [
+            "axi_pkg",
+            "doc/axi_xbar"
+          ],
+          "practice_task": "对照 doc/axi_xbar.md 的字段表，为「2 个 slave 端口、3 个 master 端口」写出一个 xbar_cfg_t 实例，并选择合适的 LatencyMode。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "axi_intf：SystemVerilog 接口",
+          "order": 3,
+          "filename": "u2-l3-axi-intf.md",
+          "level": "beginner",
+          "topic": "精读 axi_intf.sv 中定义的 AXI_BUS、AXI_BUS_DV（带时钟的验证用接口）、AXI_LITE 等接口及其 Master/Slave/Monitor modport，理解接口如何封装五通道信号。",
+          "learning_goals": [
+            "理解 AXI_BUS 接口的 modport 如何区分主从监听",
+            "掌握 AXI_BUS_DV 引入 clk_i 的用途",
+            "能在一个模块端口上正确使用 AXI_BUS.Slave"
+          ],
+          "source_files": [
+            "src/axi_intf.sv"
+          ],
+          "minimal_modules": [
+            "axi_intf"
+          ],
+          "practice_task": "基于 AXI_BUS_DV 写一个最小的 monitor 模块，用 Monitor modport 端口把 AW 通道的 id/addr 打印出来。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "typedef / assign / port 宏体系",
+          "order": 4,
+          "filename": "u2-l4-typedef-assign-port-macros.md",
+          "level": "beginner",
+          "topic": "讲解 include/axi/ 下三大宏文件：typedef.svh（声明通道/请求/响应 struct）、assign.svh（在接口与 struct 间互连）、port.svh（生成扁平 AXI 端口），它们是减少重复样板代码的关键。",
+          "learning_goals": [
+            "用 AXI_TYPEDEF_* 宏声明一组通道与 req/resp struct",
+            "用 AXI_ASSIGN_* 宏在 AXI_BUS 接口与 struct 之间搬数据",
+            "理解 port.svh 宏在顶层扁平化端口时的作用"
+          ],
+          "source_files": [
+            "include/axi/typedef.svh",
+            "include/axi/assign.svh",
+            "include/axi/port.svh",
+            "src/axi_xbar.sv"
+          ],
+          "minimal_modules": [
+            "typedef.svh",
+            "assign.svh",
+            "port.svh"
+          ],
+          "practice_task": "仿照 axi_xbar_intf 中的写法，用 AXI_TYPEDEF_* 与 AXI_ASSIGN_* 宏为一个自定义模块声明 req/resp 类型并把它们连到 AXI_BUS 接口。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "仿真与验证基础设施",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "axi_test：底层驱动",
+          "order": 1,
+          "filename": "u3-l1-axi-test-drivers.md",
+          "level": "beginner",
+          "topic": "讲解 axi_test.sv 中的 axi_lite_driver 与 axi_driver 类：如何用 send_aw/send_w recv_b 等任务在通道上逐拍驱动，以及 TA/TT 时序参数的含义。",
+          "learning_goals": [
+            "用 driver 类发送单拍握手并理解 application/test time",
+            "掌握 reset_master/reset_slave 的初始化套路",
+            "理解 driver 与 AXI_BUS_DV 虚接口的绑定方式"
+          ],
+          "source_files": [
+            "src/axi_test.sv"
+          ],
+          "minimal_modules": [
+            "axi_test"
+          ],
+          "practice_task": "用 axi_lite_driver 写一段过程：发起一次 32 位写、再发起一次读并检查返回数据，标注 TA/TT 的作用。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "随机主从、scoreboard 与 sim_mem",
+          "order": 2,
+          "filename": "u3-l2-rand-master-slave-scoreboard.md",
+          "level": "beginner",
+          "topic": "讲解 axi_test 中的 axi_rand_master/axi_rand_slave/axi_lite_rand_*、axi_scoreboard 以及 axi_sim_mem，它们是构建随机激励与自检测试台的核心组件。",
+          "learning_goals": [
+            "配置 rand_master 的地址范围、最大并发与事务数约束",
+            "用 axi_scoreboard 建模内存并自动比对响应",
+            "理解 axi_sim_mem 作为无限 AXI 从端的用途"
+          ],
+          "source_files": [
+            "src/axi_test.sv",
+            "src/axi_sim_mem.sv"
+          ],
+          "minimal_modules": [
+            "axi_test",
+            "axi_sim_mem"
+          ],
+          "practice_task": "搭建一个 rand_master → DUT → axi_sim_mem 的最小拓扑，并用 scoreboard 验证若干随机读写后内存内容正确。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "编写并运行一个测试台",
+          "order": 3,
+          "filename": "u3-l3-write-a-testbench.md",
+          "level": "beginner",
+          "topic": "以 test/tb_axi_lite_regs.sv 为走读对象，串起接口声明、DV 接口、宏互连、随机主从例化、时钟复位与 end_of_sim，展示一个完整 directed-random 测试台的结构。",
+          "learning_goals": [
+            "看懂一个真实 testbench 的骨架与时序参数（CyclTime/ApplTime/TestTime）",
+            "掌握 AXI_LITE / AXI_LITE_DV + AXI_LITE_ASSIGN 的标准接线",
+            "理解如何用参数化 TB 控制事务数量与配置"
+          ],
+          "source_files": [
+            "test/tb_axi_lite_regs.sv",
+            "src/axi_lite_regs.sv"
+          ],
+          "minimal_modules": [
+            "tb_axi_lite_regs",
+            "axi_lite_regs",
+            "axi_test"
+          ],
+          "practice_task": "复制 tb_axi_lite_regs 的结构，为 axi_lite_join 写一个最小测试台：一端接 rand_lite_master，另一端接 rand_lite_slave，跑通后报告仿真是否无错。",
+          "depends_on": [
+            "u3-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "总线连接与组合原语",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "axi_join / axi_cut / axi_multicut",
+          "order": 1,
+          "filename": "u4-l1-join-cut-multicut.md",
+          "level": "intermediate",
+          "topic": "讲解三个最简单的组合原语：axi_join 直接连通两个接口、axi_cut 用 spill 寄存器打断所有组合路径、axi_multicut 串联多级寄存器以缓解长总线时序压力。",
+          "learning_goals": [
+            "区分 join（纯连线）、cut（一级寄存器）、multicut（多级寄存器）",
+            "理解 cut 寄存器如何改善关键路径但增加延迟",
+            "能在设计中正确选择三者来平衡时序与面积"
+          ],
+          "source_files": [
+            "src/axi_join.sv",
+            "src/axi_cut.sv",
+            "src/axi_multicut.sv"
+          ],
+          "minimal_modules": [
+            "axi_join",
+            "axi_cut",
+            "axi_multicut"
+          ],
+          "practice_task": "在一个 master 与 slave 之间依次插入 axi_cut，画出插入前后组合路径的变化，并说明何时应改用 axi_multicut。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "axi_modify_address 与 axi_id_prepend",
+          "order": 2,
+          "filename": "u4-l2-modify-addr-id-prepend.md",
+          "level": "intermediate",
+          "topic": "讲解两个改写型连接器：axi_modify_address 在转发时改写 AW/AR 地址，axi_id_prepend 在 ID 高位前置/剥离若干比特（用于跨层级保留来源信息）。",
+          "learning_goals": [
+            "用 axi_modify_address 实现地址翻译/重映射",
+            "理解 id_prepend 在层级化互联中保留源端口索引的原理",
+            "掌握这两个模块的请求/响应拆分端口结构"
+          ],
+          "source_files": [
+            "src/axi_modify_address.sv",
+            "src/axi_id_prepend.sv"
+          ],
+          "minimal_modules": [
+            "axi_modify_address",
+            "axi_id_prepend"
+          ],
+          "practice_task": "用 axi_modify_address 构造一个把所有访问地址偏移 +0x1000 的连接器，并用一个最小测试台验证地址被正确改写。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "axi_delayer：随机延迟通道",
+          "order": 3,
+          "filename": "u4-l3-axi-delayer.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_delayer 如何对每个 AXI 通道施加（可随机）延迟，常用于在验证中制造握手时序抖动以暴露死锁/协议违例。",
+          "learning_goals": [
+            "理解 delayer 对 valid/ready 施加延迟却不破坏协议的机制",
+            "掌握其在随机验证中放大时序 bug 的用途",
+            "能配置延迟范围并解释对吞吐的影响"
+          ],
+          "source_files": [
+            "src/axi_delayer.sv",
+            "test/tb_axi_delayer.sv"
+          ],
+          "minimal_modules": [
+            "axi_delayer",
+            "tb_axi_delayer"
+          ],
+          "practice_task": "在 rand_master 与 sim_mem 之间插入 axi_delayer，对比有/无延迟时 scoreboard 是否仍能通过，并解释其价值。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "多路复用与路由核心",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "axi_demux_simple 与 axi_demux",
+          "order": 1,
+          "filename": "u5-l1-demux-simple-and-demux.md",
+          "level": "intermediate",
+          "topic": "讲解如何把一个 slave 端口拆到多个 master 端口：axi_demux_simple 是无 spill 的精简版，axi_demux 通过 AW/AR 的 select 信号路由，并按 AW 顺序转发 W 拍、用轮询仲裁回收 B/R。",
+          "learning_goals": [
+            "理解 demux 如何根据 select 路由请求、按序转发 W",
+            "掌握 B/R 通道轮询仲裁回收的原理",
+            "区分 demux_simple 与 demux 的适用场景"
+          ],
+          "source_files": [
+            "src/axi_demux_simple.sv",
+            "src/axi_demux.sv",
+            "doc/axi_demux.md"
+          ],
+          "minimal_modules": [
+            "axi_demux_simple",
+            "axi_demux",
+            "doc/axi_demux"
+          ],
+          "practice_task": "用 axi_demux 搭一个 1→2 拆分器，select 由地址最高位驱动，验证两个下游分别收到对应地址区间的请求。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "axi_demux_id_counters：outstanding 跟踪",
+          "order": 2,
+          "filename": "u5-l2-demux-id-counters.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_demux 内部用于跟踪每 ID 在途事务数的 axi_demux_id_counters：它保证同 ID 事务按序路由、防止 W 拍错配，并支持 AxiLookBits/UniqueIds 等优化。",
+          "learning_goals": [
+            "理解为什么 demux 必须跟踪在途事务与 ID 唯一性",
+            "掌握 AxiLookBits、MaxTrans、UniqueIds 参数的取舍",
+            "看懂 id_counters 与 demux 主体的协作"
+          ],
+          "source_files": [
+            "src/axi_demux_id_counters.sv",
+            "src/axi_demux.sv"
+          ],
+          "minimal_modules": [
+            "axi_demux_id_counters",
+            "axi_demux"
+          ],
+          "practice_task": "对照源码说明：当 UniqueIds=1 时 demux 可以省掉哪些逻辑，并解释在什么前提下可以安全地置位 UniqueIds。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "axi_mux：多路汇聚与 ID 扩展",
+          "order": 3,
+          "filename": "u5-l3-axi-mux.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_mux 如何把多个 slave 端口汇聚到一个 master 端口：AW/AR 通道用轮询仲裁选源并把 slave 端口索引扩展进 ID 高位，以便 B/R 响应能按 ID 路由回正确源。",
+          "learning_goals": [
+            "理解 mux 用 ID 高位携带源端口索引的路由策略",
+            "掌握 AW 仲裁与 W 顺序保持的关系",
+            "看懂 mux 与 demux 在 xbar 中的对称角色"
+          ],
+          "source_files": [
+            "src/axi_mux.sv",
+            "doc/axi_mux.md"
+          ],
+          "minimal_modules": [
+            "axi_mux",
+            "doc/axi_mux"
+          ],
+          "practice_task": "用 axi_mux 搭一个 2→1 汇聚器，验证两个上游的响应能按扩展后的 ID 正确回到各自端口。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "全连接交叉开关 axi_xbar",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "xbar 架构与配置",
+          "order": 1,
+          "filename": "u6-l1-xbar-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_xbar 的整体架构：axi_xbar_unmuxed（每 slave 一个 demux）+ 每 master 一个 axi_mux 的组合，以及 xbar_cfg_t、ATOPs、Connectivity 矩阵等参数。",
+          "learning_goals": [
+            "画出 xbar = unmuxed(demux 阵列) + mux 阵列 的结构",
+            "理解 master 端口 ID 宽度 = slave ID 宽度 + clog2(NoSlvPorts)",
+            "掌握 Cfg 各字段与 ATOPs/Connectivity 的作用"
+          ],
+          "source_files": [
+            "src/axi_xbar.sv",
+            "src/axi_xbar_unmuxed.sv",
+            "doc/axi_xbar.md"
+          ],
+          "minimal_modules": [
+            "axi_xbar",
+            "axi_xbar_unmuxed",
+            "doc/axi_xbar"
+          ],
+          "practice_task": "阅读 axi_xbar 顶层，写出它实例化了哪两类子模块、各多少个，并解释 master 端口 ID 为什么要更宽。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "地址映射、译码错误与默认端口",
+          "order": 2,
+          "filename": "u6-l2-xbar-addr-map-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 xbar 的全局地址映射（rule_t 规则集、区间前闭后开、重叠时高位规则优先）、译码错误从端（返回 DECERR 与 0xBADCAB1E）以及每 slave 的默认 master 端口机制。",
+          "learning_goals": [
+            "用 rule_t 数组定义一张地址映射并理解匹配规则",
+            "掌握译码错误从端的响应行为",
+            "理解默认 master 端口与地址映射的运行期切换限制"
+          ],
+          "source_files": [
+            "src/axi_xbar_unmuxed.sv",
+            "src/axi_err_slv.sv",
+            "doc/axi_xbar.md"
+          ],
+          "minimal_modules": [
+            "axi_xbar_unmuxed",
+            "axi_err_slv",
+            "doc/axi_xbar"
+          ],
+          "practice_task": "为 3 个 master 端口写一张覆盖 0x0–0x10000 的地址映射规则数组，并说明访问一个未映射地址时的返回值。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "排序、停顿与无死锁设计",
+          "order": 3,
+          "filename": "u6-l3-xbar-ordering-deadlock.md",
+          "level": "intermediate",
+          "topic": "深入 doc/axi_xbar.md 的 Ordering/Stalls 与 Design Rationale：同 ID 同方向必须保序导致跨端口的停顿、无 reorder buffer 的取舍，以及为何 demux 与 mux 之间不能插 spill 寄存器（W 通道四条死锁条件）。",
+          "learning_goals": [
+            "理解同 ID 同方向保序为何会触发 slave 端口停顿",
+            "掌握 AxiIdUsedSlvPorts 对面积/误冲突的折中",
+            "能复述 W 通道死锁四条件及不插内部寄存器的原因"
+          ],
+          "source_files": [
+            "doc/axi_xbar.md",
+            "src/axi_demux.sv",
+            "src/axi_mux.sv"
+          ],
+          "minimal_modules": [
+            "doc/axi_xbar",
+            "axi_demux",
+            "axi_mux"
+          ],
+          "practice_task": "用一段话向同事解释：为什么在 demux 输出与 mux 输入之间加 FIFO 会导致 W 通道死锁，并举出一个两输入仲裁的例子。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "流控与缓冲",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "axi_fifo 与 spill_register 缓冲",
+          "order": 1,
+          "filename": "u7-l1-axi-fifo-spill.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_fifo 为每个 AXI 通道提供独立 FIFO 缓冲，以及它依赖的 spill_register（common_cells）如何切断组合路径，这是 cut/mux/demux 时序可调的基础。",
+          "learning_goals": [
+            "理解 axi_fifo 按通道独立缓冲的设计",
+            "掌握 spill_register 切路径 + 增延迟的双重作用",
+            "看懂 SpillAw/W/B/Ar/R 参数在 mux/demux 中的配置"
+          ],
+          "source_files": [
+            "src/axi_fifo.sv",
+            "src/axi_mux.sv"
+          ],
+          "minimal_modules": [
+            "axi_fifo",
+            "axi_mux"
+          ],
+          "practice_task": "在一对 master/slave 之间插入 axi_fifo，测量背压下的最大在途事务数，并解释与 FIFO 深度的关系。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "axi_isolate：总线隔离",
+          "order": 2,
+          "filename": "u7-l2-axi-isolate.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_isolate：通过 isolate_i 优雅排空在途事务后置 isolated_o，期间静默 master 输出；TerminateTransaction 决定是返回错误响应还是无限阻塞，常用于电源/复位门控前的安全隔离。",
+          "learning_goals": [
+            "理解 isolate 排空在途事务并计数的过程",
+            "掌握 TerminateTransaction 两种模式的行为差异",
+            "知道 isolate 在上/下电与复位流程中的用途"
+          ],
+          "source_files": [
+            "src/axi_isolate.sv",
+            "test/tb_axi_isolate.sv"
+          ],
+          "minimal_modules": [
+            "axi_isolate",
+            "tb_axi_isolate"
+          ],
+          "practice_task": "构造一个场景：隔离期间仍有新读请求到达，分别用 TerminateTransaction=0/1 观察行为，记录 isolated_o 何时拉高。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "axi_throttle：限流",
+          "order": 3,
+          "filename": "u7-l3-axi-throttle.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_throttle 如何限制发往下游的在途事务最大数，用于保护容量有限的下游（如窄 FIFO 或外部存储控制器）免受过载。",
+          "learning_goals": [
+            "理解 throttle 通过计数在途事务实施反压的机制",
+            "掌握其与 isolate、fifo 在流控职责上的区别",
+            "能根据下游容量配置最大在途数"
+          ],
+          "source_files": [
+            "src/axi_throttle.sv"
+          ],
+          "minimal_modules": [
+            "axi_throttle"
+          ],
+          "practice_task": "在 rand_master 与下游之间插入 axi_throttle 设限为 4，用 scoreboard 观察任一时刻在途事务是否被约束在阈值内。",
+          "depends_on": [
+            "u7-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "时钟域跨越",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "axi_cdc：基于 Gray FIFO 的跨时钟域",
+          "order": 1,
+          "filename": "u8-l1-axi-cdc.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_cdc 为五个通道各实例化一个 Gray 编码 CDC FIFO，push/pop 分处不同时钟域；强调每条通道必须正确约束三条路径（见 cdc_fifo_gray 说明）以及 LogDepth/SyncStages 参数。",
+          "learning_goals": [
+            "理解 Gray FIFO 实现异步安全的原理",
+            "掌握 axi_cdc 双侧时钟/复位与 req/resp 端口布局",
+            "知道为何必须对三条路径做时序约束"
+          ],
+          "source_files": [
+            "src/axi_cdc.sv"
+          ],
+          "minimal_modules": [
+            "axi_cdc"
+          ],
+          "practice_task": "用两个不同周期时钟分别驱动 axi_cdc 的 src/dst 侧，验证跨域读写数据正确，并写出需要约束的三条路径。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "axi_cdc_src / axi_cdc_dst 拆分",
+          "order": 2,
+          "filename": "u8-l2-cdc-src-dst.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_cdc_src 与 axi_cdc_dst 如何把一个完整 CDC 拆成位于两侧时钟域的两个子模块，通过异步数据/指针数组互联，便于在层级化设计中把两侧分别约束、分别综合。",
+          "learning_goals": [
+            "理解把 CDC 一分为二的工程动机",
+            "掌握 src/dst 之间异步指针与数据阵列的连接",
+            "能在设计中分别例化 src 与 dst 并正确接线"
+          ],
+          "source_files": [
+            "src/axi_cdc_src.sv",
+            "src/axi_cdc_dst.sv",
+            "src/axi_cdc.sv"
+          ],
+          "minimal_modules": [
+            "axi_cdc_src",
+            "axi_cdc_dst",
+            "axi_cdc"
+          ],
+          "practice_task": "对照 axi_cdc 顶层，列出它把哪些信号以异步阵列形式连到 src/dst，并解释这样拆分对时序约束的好处。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "突发处理与序列化",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "axi_burst_splitter 与粒度切分",
+          "order": 1,
+          "filename": "u9-l1-burst-splitter.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_burst_splitter 把多拍突发拆成单拍事务、axi_burst_splitter_gran 拆成运行期可配置粒度的事务，用于让不支持长突发的下游（如 Lite 桥或窄外设）仍能服务。",
+          "learning_goals": [
+            "理解把长突发拆为单拍/定粒度事务的地址与响应重组",
+            "掌握 splitter 如何把多个 B 响应合并为一个",
+            "区分固定粒度与运行期可配置粒度"
+          ],
+          "source_files": [
+            "src/axi_burst_splitter.sv",
+            "src/axi_burst_splitter_gran.sv"
+          ],
+          "minimal_modules": [
+            "axi_burst_splitter",
+            "axi_burst_splitter_gran"
+          ],
+          "practice_task": "用 burst_splitter 把一个 8 拍 INCR 读拆成 8 个单拍事务，验证下游看到的 len 均为 0 且最终数据顺序不变。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "axi_burst_unwrap：回卷突发展开",
+          "order": 2,
+          "filename": "u9-l2-burst-unwrap.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_burst_unwrap 把一个 WRAP 回卷突发转换成最多两个 INCR 递增突发，使不支持回卷的下游也能处理 cache 行填充类访问。",
+          "learning_goals": [
+            "理解 WRAP 突发的地址回卷规则",
+            "掌握把 WRAP 拆为 1–2 个 INCR 的地址计算",
+            "知道 unwrap 在 cache 子系统中的典型用途"
+          ],
+          "source_files": [
+            "src/axi_burst_unwrap.sv"
+          ],
+          "minimal_modules": [
+            "axi_burst_unwrap"
+          ],
+          "practice_task": "构造一个长度 8、size=3 的 WRAP 读，用 unwrap 转换后画出下游收到的 INCR 地址序列，并与原 WRAP 行为对比。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "axi_serializer：事务序列化",
+          "order": 3,
+          "filename": "u9-l3-axi-serializer.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_serializer 把不同 ID 的事务串行化为同一 ID，使只能处理单一在途 ID 的下游（如某些协议桥）能够安全服务，并说明其与 burst_splitter 的协作。",
+          "learning_goals": [
+            "理解序列化如何用单一 ID 排队事务",
+            "掌握 serializer 对吞吐的影响与适用场景",
+            "看懂它与 splitter 组合处理长突发的链路"
+          ],
+          "source_files": [
+            "src/axi_serializer.sv",
+            "test/tb_axi_serializer.sv"
+          ],
+          "minimal_modules": [
+            "axi_serializer",
+            "tb_axi_serializer"
+          ],
+          "practice_task": "在多 ID 并发 master 与单 ID 下游之间插入 serializer，观察上游 ID 被改写为同一值且事务不再交错。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "ID 宽度管理",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "axi_id_remap：ID 重映射",
+          "order": 1,
+          "filename": "u10-l1-axi-id-remap.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_id_remap 把 slave 端宽 ID 重映射为 master 端窄 ID，内部维护一张 ID 映射表跟踪在途事务，使下游无需支持上游的全部 ID 宽度。",
+          "learning_goals": [
+            "理解 ID 重映射表的分配、查找与回收机制",
+            "掌握窄 ID 端口容量（MaxUniqueIds）对并发的限制",
+            "看懂 remap 如何保持响应按 ID 正确返回"
+          ],
+          "source_files": [
+            "src/axi_id_remap.sv"
+          ],
+          "minimal_modules": [
+            "axi_id_remap"
+          ],
+          "practice_task": "配置一个 8→2 位 ID 的 remap，发送多于窄 ID 容量的并发事务，观察何时发生反压并解释原因。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "axi_id_serialize：序列化降 ID",
+          "order": 2,
+          "filename": "u10-l2-axi-id-serialize.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_id_serialize 通过在必要时序列化事务来减少所需的 ID 数，是介于完整 remap 与简单 serializer 之间的折中方案。",
+          "learning_goals": [
+            "理解 serialize 在 ID 资源紧张时串行化事务的策略",
+            "掌握其与 id_remap、serializer 的差异与取舍",
+            "知道何时选择 serialize 而非 remap"
+          ],
+          "source_files": [
+            "src/axi_id_serialize.sv"
+          ],
+          "minimal_modules": [
+            "axi_id_serialize"
+          ],
+          "practice_task": "比较 id_serialize 与 id_remap 在相同窄 ID 宽度下的最大并发，写出各自的吞吐-面积权衡结论。",
+          "depends_on": [
+            "u10-l1",
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "axi_iw_converter：ID 宽度转换",
+          "order": 3,
+          "filename": "u10-l3-axi-iw-converter.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_iw_converter 作为任意两端 ID 宽度转换的统一入口，内部根据宽度关系自动组合 id_remap 与 id_serialize（必要时还配合 serializer），是异构网络的胶水模块。",
+          "learning_goals": [
+            "理解 iw_converter 如何自动选择 remap/serialize 策略",
+            "掌握其在 xbar 之外连接不同 ID 子网的用途",
+            "看懂其依赖层级（Level 4）所反映的组合关系"
+          ],
+          "source_files": [
+            "src/axi_iw_converter.sv",
+            "test/tb_axi_iw_converter.sv"
+          ],
+          "minimal_modules": [
+            "axi_iw_converter",
+            "tb_axi_iw_converter"
+          ],
+          "practice_task": "用 iw_converter 连接一个宽 ID 主域与窄 ID 从域，追踪内部实例化了哪些子模块，并验证响应正确回送。",
+          "depends_on": [
+            "u10-l1",
+            "u10-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "数据宽度转换",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "axi_dw_downsizer：宽到窄",
+          "order": 1,
+          "filename": "u11-l1-dw-downsizer.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_dw_downsizer 把宽数据 master 拆成多拍适配窄 slave，处理 size/burst/strobe 的重算与响应拍数扩展，是连接宽总线到窄外设的关键。",
+          "learning_goals": [
+            "理解宽→窄时一拍拆多拍的地址与 strobe 重算",
+            "掌握 downsize 对 len 与响应拍数的影响",
+            "看懂其在测试台 tb_axi_dw_downsizer 中的验证方式"
+          ],
+          "source_files": [
+            "src/axi_dw_downsizer.sv",
+            "test/tb_axi_dw_downsizer.sv"
+          ],
+          "minimal_modules": [
+            "axi_dw_downsizer",
+            "tb_axi_dw_downsizer"
+          ],
+          "practice_task": "用 downsize 把 64 位写事务转成 32 位下游事务，验证每拍数据与 strobe 的对应关系正确。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "axi_dw_upsizer：窄到宽",
+          "order": 2,
+          "filename": "u11-l2-dw-upsizer.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_dw_upsizer 把窄数据 master 合并成宽 slave 的少拍事务，处理数据拼装、strobe 扩展与可能的响应拍数压缩。",
+          "learning_goals": [
+            "理解窄→宽时多拍合一的拼装与对齐",
+            "掌握 upsize 对 len 与响应拍数的压缩",
+            "区分 up/down size 在边界（非整除）情况的处理"
+          ],
+          "source_files": [
+            "src/axi_dw_upsizer.sv",
+            "test/tb_axi_dw_upsizer.sv"
+          ],
+          "minimal_modules": [
+            "axi_dw_upsizer",
+            "tb_axi_dw_upsizer"
+          ],
+          "practice_task": "用 upsize 把连续 32 位读合并为 64 位下游事务，验证数据顺序与拍数减少符合预期。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "axi_dw_converter：自动选择",
+          "order": 3,
+          "filename": "u11-l3-dw-converter.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_dw_converter 根据两端数据宽度自动选用 up/down sizer（宽度相同则直通），是连接异构数据宽度子网的统一入口。",
+          "learning_goals": [
+            "理解 converter 如何按宽度关系分发到 up/down sizer",
+            "掌握等宽情况下的零开销直通",
+            "能在异构网络中用它做数据宽度适配"
+          ],
+          "source_files": [
+            "src/axi_dw_converter.sv",
+            "src/axi_dw_downsizer.sv",
+            "src/axi_dw_upsizer.sv"
+          ],
+          "minimal_modules": [
+            "axi_dw_converter",
+            "axi_dw_downsizer",
+            "axi_dw_upsizer"
+          ],
+          "practice_task": "用 dw_converter 连接 64 位主域与 32 位从域，确认内部例化了 downsize 分支，并验证功能等价于直接用 downsize。",
+          "depends_on": [
+            "u11-l1",
+            "u11-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "AXI-Lite 子系统",
+      "level": "intermediate",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "AXI-Lite 接口与 lite 连接器",
+          "order": 1,
+          "filename": "u12-l1-lite-intf-and-join.md",
+          "level": "intermediate",
+          "topic": "回顾 AXI4-Lite 的简化通道（无 burst/id/atop），讲解 axi_intf 中的 AXI_LITE/AXI_LITE_DV、axi_lite_join 直连器，以及 axi_lite_dw_converter 的轻量数据宽度转换。",
+          "learning_goals": [
+            "区分 AXI-Lite 与完整 AXI4 的信号集合",
+            "用 AXI_LITE_ASSIGN 等宏完成 Lite 接线",
+            "理解 lite_dw_converter 的简化转换逻辑"
+          ],
+          "source_files": [
+            "src/axi_intf.sv",
+            "src/axi_lite_join.sv",
+            "src/axi_lite_dw_converter.sv"
+          ],
+          "minimal_modules": [
+            "axi_intf",
+            "axi_lite_join",
+            "axi_lite_dw_converter"
+          ],
+          "practice_task": "用 lite_join 把一个 AXI_LITE master 直连到 slave，并在中间插入 lite_dw_converter 做 32↔64 适配验证。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "axi_lite_mux / demux / xbar",
+          "order": 2,
+          "filename": "u12-l2-lite-mux-demux-xbar.md",
+          "level": "intermediate",
+          "topic": "讲解 AXI-Lite 版本的多路复用族：axi_lite_mux、axi_lite_demux 与全连接 axi_lite_xbar，对比完整 AXI4 版本去掉了 ID/outstanding 跟踪后的简化。",
+          "learning_goals": [
+            "理解 Lite 互联无需 ID 跟踪的原因",
+            "掌握 lite_xbar 的地址映射与译码错误处理",
+            "能选用 Lite 或完整 AXI4 互联的依据"
+          ],
+          "source_files": [
+            "src/axi_lite_mux.sv",
+            "src/axi_lite_demux.sv",
+            "src/axi_lite_xbar.sv",
+            "doc/axi_lite_xbar.md"
+          ],
+          "minimal_modules": [
+            "axi_lite_mux",
+            "axi_lite_demux",
+            "axi_lite_xbar"
+          ],
+          "practice_task": "用 axi_lite_xbar 搭一个 2×2 Lite 互联，配置地址映射并验证两个 master 能各自访问对应 slave。",
+          "depends_on": [
+            "u12-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "axi_lite_regs：寄存器映射",
+          "order": 3,
+          "filename": "u12-l3-lite-regs.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_lite_regs 把一片字节寄存器暴露成 AXI-Lite 从端，支持只读位、PrivProtOnly/SecuProtOnly 保护与可配置复位值，是外设寄存器接口的标准做法。",
+          "learning_goals": [
+            "用 axi_lite_regs 把内部寄存器组映射到 AXI-Lite",
+            "掌握只读、特权/安全保护位的配置",
+            "理解 wr_active/rd_active/reg_load 等输出的用途"
+          ],
+          "source_files": [
+            "src/axi_lite_regs.sv",
+            "test/tb_axi_lite_regs.sv"
+          ],
+          "minimal_modules": [
+            "axi_lite_regs",
+            "tb_axi_lite_regs"
+          ],
+          "practice_task": "用 axi_lite_regs 实现 8 个 32 位寄存器，其中第 0 个只读，写一段验证：写只读位无效、写可读位后读回正确。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "axi_lite_mailbox：邮箱与中断",
+          "order": 4,
+          "filename": "u12-l4-lite-mailbox.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_lite_mailbox 提供双 slave 端口邮箱，支持向对端投递消息并通过 usage 触发 IRQ，用于核间通信/通知。",
+          "learning_goals": [
+            "理解双端口邮箱的写入/读取与 FIFO 容量",
+            "掌握 IRQ 触发条件与清中断方式",
+            "知道 mailbox 在多核通信中的典型用法"
+          ],
+          "source_files": [
+            "src/axi_lite_mailbox.sv",
+            "test/tb_axi_lite_mailbox.sv"
+          ],
+          "minimal_modules": [
+            "axi_lite_mailbox",
+            "tb_axi_lite_mailbox"
+          ],
+          "practice_task": "搭建两个 master 各连 mailbox 一个端口，一端写消息、另一端读出，并验证中断在邮箱非空时拉高。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "协议转换桥",
+      "level": "intermediate",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "axi_to_axi_lite 与 axi_lite_to_axi",
+          "order": 1,
+          "filename": "u13-l1-axi-to-lite.md",
+          "level": "intermediate",
+          "topic": "讲解两个方向的 AXI4↔AXI-Lite 桥：axi_to_axi_lite 把突发拆成单拍适配 Lite 从端，axi_lite_to_axi 把 Lite 请求包装成 AXI4 单拍事务。",
+          "learning_goals": [
+            "理解 to_axi_lite 如何拆解突发与缓冲 W/B",
+            "掌握 lite_to_axi 如何补全 AXI4 信号字段",
+            "看懂两个桥的吞吐特性与限制"
+          ],
+          "source_files": [
+            "src/axi_to_axi_lite.sv",
+            "src/axi_lite_to_axi.sv",
+            "test/tb_axi_to_axi_lite.sv",
+            "test/tb_axi_lite_to_axi.sv"
+          ],
+          "minimal_modules": [
+            "axi_to_axi_lite",
+            "axi_lite_to_axi"
+          ],
+          "practice_task": "用 axi_to_axi_lite 把一个 4 拍 AXI4 写桥接到 Lite 从端，验证被拆成 4 次单拍写且响应正确合并。",
+          "depends_on": [
+            "u9-l1",
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "axi_lite_to_apb",
+          "order": 2,
+          "filename": "u13-l2-lite-to-apb.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_lite_to_apb 把 AXI-Lite 转为 APB4 协议（psel/penable/pwrite/prdata/pready/pslverr），用于连接 APB 外设子系统。",
+          "learning_goals": [
+            "理解 APB4 的两拍访问时序与握手",
+            "掌握 Lite→APB 的字段映射与错误码转换",
+            "能在一个测试台中验证 APB 侧时序"
+          ],
+          "source_files": [
+            "src/axi_lite_to_apb.sv",
+            "test/tb_axi_lite_to_apb.sv"
+          ],
+          "minimal_modules": [
+            "axi_lite_to_apb",
+            "tb_axi_lite_to_apb"
+          ],
+          "practice_task": "用 lite_to_apb 连接一个简易 APB 从端模型，验证一次 Lite 写触发 APB 的 setup/access 两相并返回正确 pslverr。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "存储端点与适配器",
+      "level": "intermediate",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "axi_to_mem 及其变体",
+          "order": 1,
+          "filename": "u14-l1-axi-to-mem.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_to_mem 把 AXI4 转为简单存储协议（req/gnt/rvalid），及其 banked/interleaved/split/detailed 变体如何面向不同 SRAM 拓扑优化带宽与面积。",
+          "learning_goals": [
+            "理解基础 req/gnt/rvalid 存储接口时序",
+            "掌握 banked（分体）、interleaved（交错）、split（读写分离）变体的差异",
+            "知道如何按 SRAM 数量与端口选择变体"
+          ],
+          "source_files": [
+            "src/axi_to_mem.sv",
+            "src/axi_to_mem_banked.sv",
+            "src/axi_to_mem_interleaved.sv",
+            "src/axi_to_mem_split.sv",
+            "src/axi_to_detailed_mem.sv",
+            "test/tb_axi_to_mem_banked.sv"
+          ],
+          "minimal_modules": [
+            "axi_to_mem",
+            "axi_to_mem_banked",
+            "axi_to_mem_interleaved",
+            "axi_to_mem_split",
+            "axi_to_detailed_mem"
+          ],
+          "practice_task": "用 axi_to_mem_banked 连接两个 SRAM 模型，发起跨 bank 的连续读，验证地址被正确分发到两个 bank。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "axi_from_mem / lite_from_mem",
+          "order": 2,
+          "filename": "u14-l2-from-mem.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_from_mem 与 axi_lite_from_mem 反向适配：让一个 SRAM-like 接口作为发起方，向下游产生 AXI4/AXI-Lite 请求，常用于 DMA 风格的搬移前端。",
+          "learning_goals": [
+            "理解 from_mem 作为 AXI master 发起端的角色",
+            "掌握其与 to_mem 的对称关系",
+            "知道在 DMA/搬移场景如何配合使用"
+          ],
+          "source_files": [
+            "src/axi_from_mem.sv",
+            "src/axi_lite_from_mem.sv"
+          ],
+          "minimal_modules": [
+            "axi_from_mem",
+            "axi_lite_from_mem"
+          ],
+          "practice_task": "用 axi_from_mem 把一段本地存储内容搬到下游 axi_sim_mem，验证数据完整到达且顺序正确。",
+          "depends_on": [
+            "u14-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "简单端点：zero_mem / lfsr / err_slv",
+          "order": 3,
+          "filename": "u14-3-zero-mem-lfsr-err-slv.md",
+          "level": "intermediate",
+          "topic": "讲解三个实用小端点：axi_zero_mem（读返回 0、写吸收的 /dev/zero）、axi_lfsr（读返回伪随机、写压缩为校验）、axi_err_slv（恒返回 DECERR/SLVERR），它们是构建系统与测试拓扑的常备积木。",
+          "learning_goals": [
+            "用 err_slv 兜底未映射地址或模拟错误从端",
+            "理解 zero_mem/lfsr 作为占位或激励源端口的用途",
+            "掌握这些端点在最小系统中的接线"
+          ],
+          "source_files": [
+            "src/axi_zero_mem.sv",
+            "src/axi_lfsr.sv",
+            "src/axi_err_slv.sv"
+          ],
+          "minimal_modules": [
+            "axi_zero_mem",
+            "axi_lfsr",
+            "axi_err_slv"
+          ],
+          "practice_task": "在一个 xbar 的未映射区域用 axi_err_slv 兜底，并对某端口接 axi_lfsr，验证错误返回与伪随机读数据。",
+          "depends_on": [
+            "u14-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "高级架构与原子操作",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "ATOPs 原子操作与 axi_atop_filter",
+          "order": 1,
+          "filename": "u15-l1-atops-and-atop-filter.md",
+          "level": "advanced",
+          "topic": "深入 AXI5 原子操作（ATOPs）：aw_atop 编码、ATOP_R_RESP 同时产生 B 与 R 响应的规则、ID 唯一性约束，以及 axi_atop_filter 如何过滤掉不支持 ATOP 的下游会出错的原子写。",
+          "learning_goals": [
+            "解读 atop_t 各比特与 ATOP_R_RESP 的语义",
+            "理解为何不支持 ATOP 的下游必须前置 atop_filter",
+            "掌握 atop_filter 的过滤与响应替换逻辑"
+          ],
+          "source_files": [
+            "src/axi_atop_filter.sv",
+            "src/axi_pkg.sv",
+            "README.md",
+            "test/tb_axi_atop_filter.sv"
+          ],
+          "minimal_modules": [
+            "axi_atop_filter",
+            "axi_pkg"
+          ],
+          "practice_task": "构造一个带 ATOP_R_RESP 的原子读改写，先不接 filter 观察下游行为，再前置 atop_filter 验证其被正确过滤。",
+          "depends_on": [
+            "u6-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "axi_inval_filter：缓存无效化",
+          "order": 2,
+          "filename": "u15-l2-inval-filter.md",
+          "level": "advanced",
+          "topic": "讲解 axi_inval_filter 监听 AW 通道并对外发出单 cacheline 无效化请求，用于在 AXI 写旁路/自修改等场景维护缓存一致性。",
+          "learning_goals": [
+            "理解 inval_filter 监听写地址触发无效化的机制",
+            "掌握其与 atop_filter 同属「监听+副作用」类模块的共性",
+            "知道在带 cache 系统中的典型部署位置"
+          ],
+          "source_files": [
+            "src/axi_inval_filter.sv"
+          ],
+          "minimal_modules": [
+            "axi_inval_filter"
+          ],
+          "practice_task": "写一段说明：在包含 cache 的系统中，inval_filter 应部署在哪一侧，以及它如何与正常写事务协作。",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l3",
+          "title": "axi_xp 交叉点与 interleaved_xbar",
+          "order": 3,
+          "filename": "u15-l3-xp-and-interleaved-xbar.md",
+          "level": "advanced",
+          "topic": "讲解两个高级互连：axi_xp（同构 slave/master 端口的交叉点，Level 6 顶层）与 axi_interleaved_xbar（实验性交错版 crossbar），对比与标准 axi_xbar 的拓扑与时序取舍。",
+          "learning_goals": [
+            "理解 crosspoint 同构端口的设计意图",
+            "掌握 interleaved_xbar 的交错策略与实验性风险",
+            "能在 xp/xbar/interleaved 间做选型判断"
+          ],
+          "source_files": [
+            "src/axi_xp.sv",
+            "src/axi_interleaved_xbar.sv",
+            "src/axi_xbar.sv"
+          ],
+          "minimal_modules": [
+            "axi_xp",
+            "axi_interleaved_xbar",
+            "axi_xbar"
+          ],
+          "practice_task": "比较 axi_xp 与 axi_xbar 的端口参数与内部结构，列出各自适合的拓扑场景，并指出 interleaved_xbar 的实验性提示来自何处。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l4",
+          "title": "异构网络设计实战",
+          "order": 4,
+          "filename": "u15-l4-heterogeneous-network.md",
+          "level": "advanced",
+          "topic": "综合运用 xbar + cdc + dw_converter + iw_converter + isolate 构建一个真实异构片上网络：多时钟域、不同数据/ID宽度的子网通过转换器互连，并讨论时序与死锁边界。",
+          "learning_goals": [
+            "设计跨时钟域、跨宽度、跨 ID 的完整互联拓扑",
+            "合理布置 cdc/dw/iw 转换器与 isolate 的位置",
+            "识别异构网络中的时序回路与死锁风险"
+          ],
+          "source_files": [
+            "src/axi_xbar.sv",
+            "src/axi_cdc.sv",
+            "src/axi_dw_converter.sv",
+            "src/axi_iw_converter.sv",
+            "src/axi_isolate.sv"
+          ],
+          "minimal_modules": [
+            "axi_xbar",
+            "axi_cdc",
+            "axi_dw_converter",
+            "axi_iw_converter",
+            "axi_isolate"
+          ],
+          "practice_task": "画出一个含两个时钟域、64↔32 数据宽度、宽窄 ID 的两子网互联框图，标注每个转换器与 cdc 的位置，并说明 isolate 的部署点。",
+          "depends_on": [
+            "u6-l1",
+            "u8-l1",
+            "u11-l3",
+            "u10-l3",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u16",
+      "title": "验证方法学与工程实践",
+      "level": "advanced",
+      "order": 16,
+      "lectures": [
+        {
+          "id": "u16-l1",
+          "title": "定向随机验证方法学",
+          "order": 1,
+          "filename": "u16-l1-directed-random-verification.md",
+          "level": "advanced",
+          "topic": "以 test/tb_axi_xbar.sv 为范本讲解本库采用的 directed random verification 方法：参数化事务量、随机约束、scoreboard 自检与多随机种子回归。",
+          "learning_goals": [
+            "理解 directed random 相比纯定向用例的覆盖优势",
+            "掌握用 -gTB_N_TXNS 等参数与随机种子做回归",
+            "看懂 scoreboard + sim_mem 的自检闭环"
+          ],
+          "source_files": [
+            "test/tb_axi_xbar.sv",
+            "test/tb_axi_xbar_pkg.sv",
+            "src/axi_test.sv"
+          ],
+          "minimal_modules": [
+            "tb_axi_xbar",
+            "axi_test"
+          ],
+          "practice_task": "用 run_vsim.sh 的随机种子对 tb_axi_xbar 跑 3 次回归，记录每次事务量与是否通过，说明随机种子的作用。",
+          "depends_on": [
+            "u3-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l2",
+          "title": "总线比较与回归工具",
+          "order": 2,
+          "filename": "u16-2-bus-compare-and-dumper.md",
+          "level": "advanced",
+          "topic": "讲解可综合/仿真用的比较与调试模块：axi_bus_compare、axi_slave_compare、axi_chan_compare 在同域两路间比对并报告失配事件，axi_dumper 配合 axi_dumper_interpret.py 做事务日志分析。",
+          "learning_goals": [
+            "用 bus/slave/chan_compare 做 AB 比对验证",
+            "掌握 dumper + interpret 脚本的调试流程",
+            "理解这些模块在等价性检查与排错中的角色"
+          ],
+          "source_files": [
+            "src/axi_bus_compare.sv",
+            "src/axi_slave_compare.sv",
+            "src/axi_chan_compare.sv",
+            "src/axi_dumper.sv",
+            "scripts/axi_dumper_interpret.py"
+          ],
+          "minimal_modules": [
+            "axi_bus_compare",
+            "axi_slave_compare",
+            "axi_chan_compare",
+            "axi_dumper"
+          ],
+          "practice_task": "把同一激励同时驱动两个待比较的从端，用 axi_slave_compare 检测差异；再用 axi_dumper 记录一次事务并用 interpret 脚本解析。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l3",
+          "title": "时序、流水线策略与 EDA 兼容",
+          "order": 3,
+          "filename": "u16-3-timing-pipeline-eda.md",
+          "level": "advanced",
+          "topic": "系统讨论本库的时序/流水线设计哲学：spill_register 与 LatencyMode 的取舍、xbar 中 CUT_ALL_AX 推荐配置、为何内部不插寄存器，以及保持对多种 EDA 工具兼容的编码约束。",
+          "learning_goals": [
+            "根据频率目标选择 LatencyMode 与 FallThrough",
+            "理解 xbar 不插内部寄存器的死锁边界",
+            "掌握为兼容多 EDA 工具而保持简单 SV 子集的原则"
+          ],
+          "source_files": [
+            "doc/axi_xbar.md",
+            "README.md",
+            "scripts/synth.sh"
+          ],
+          "minimal_modules": [
+            "doc/axi_xbar",
+            "README",
+            "scripts"
+          ],
+          "practice_task": "为一个目标频率较高的设计选择 xbar 的 LatencyMode 与 FallThrough，并写出该选择对 W 通道组合路径的影响。",
+          "depends_on": [
+            "u6-l3",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l4",
+          "title": "贡献流程与 CI",
+          "order": 4,
+          "filename": "u16-4-contributing-and-ci.md",
+          "level": "advanced",
+          "topic": "讲解如何向本库贡献：CONTRIBUTING.md 的约定、CHANGELOG/版本管理、以及 .gitlab-ci.yml 与 .github/workflows（vsim/verilator/yosys-slang lint、综合、文档生成）等 CI 流程。",
+          "learning_goals": [
+            "遵循贡献规范与 changelog/版本约定",
+            "理解 CI 中各 target（rtl/test/synthesis/synth_test）的检查项",
+            "知道 lint（verilator/yosys-slang）与综合 elaborate 的作用"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            "CHANGELOG.md",
+            ".gitlab-ci.yml",
+            ".github/workflows/gitlab-ci.yml",
+            ".github/workflows/lint.yml"
+          ],
+          "minimal_modules": [
+            "CONTRIBUTING",
+            "CI"
+          ],
+          "practice_task": "阅读 CI 配置，列出一次 PR 必须通过的检查（编译、lint、仿真、综合），并说明每个检查使用的工具与 target。",
+          "depends_on": [
+            "u1-l4",
+            "u16-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
