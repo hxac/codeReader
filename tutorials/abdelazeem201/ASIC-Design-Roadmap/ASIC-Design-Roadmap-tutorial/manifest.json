@@ -1,0 +1,860 @@
+{
+  "project": "ASIC-Design-Roadmap",
+  "head": "795d32ab6b5ba111e6eab968850671d824569692",
+  "rationale": "本仓库本质上是一份\"ASIC 设计学习路线图\"，它把概念性资源(README 的课程/资料索引)与真实可读的 EDA 脚本(Synopsys ICC2/ICC、Mentor Nitro、PrimeTime)、RTL 设计样例(MY-Design、ARM Cortex-M0 CMSDK SoC)、库准备工具(NDM、LEF2FRAM)、以及低功耗(UPF)、自动化(Perl/Tcl/SKILL)脚本揉在一起。因此学习顺序按\"先认识项目与流程 → 再读 RTL 与约束 → 再准备库数据 → 进入 ICC2 物理设计主流程 → 对比其它工具流程 → 静态时序签核 → 最后做低功耗、自动化、收尾与综合实战\"由浅入深展开。\\n\\n单元划分逻辑：U1 让初学者建立全景印象；U2 用最小可运行的 Verilog 与 SDC 建立前端基础；U3 讲清标准单元库/物理数据与 NDM/LEF2FRAM 等准备环节，这是后续 PnR 的前提；U4 是仓库的核心——把 536 行的 ICC2 PnR.tcl 按官方注释拆成 7 个阶段(setup→floorplan→power→placement→CTS→routing→finishing/output)，每篇只讲一个阶段，避免一次塞太多；U5 提供工具横向对比(ICC 传统流程 + Mentor Nitro 参考流程)，加深对流程本质的理解；U6 进入签核侧的 PrimeTime STA；U7–U10 为专家层，覆盖多电压 UPF、NDR 与 Tcl 自动化、芯片收尾(天线/填充/金属填充)、Cadence SKILL 版图脚本，以及开源综合器 yosys 与一次端到端 RTL→GDSII 综合实战(capstone)。每篇均引用真实源码文件并配一个动手任务，依赖关系严格遵循设计阶段的天然先后顺序。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目与 ASIC 设计全景",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：ASIC-Design-Roadmap 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍本仓库的定位、目标读者、许可证与整体构成，让读者建立第一印象。",
+          "learning_goals": [
+            "理解 ASIC 与 FPGA 的区别以及 ASIC 设计的基本价值主张",
+            "识别本仓库面向的三类目标读者(学生/应届生/FPGA 或嵌入式转型工程师)",
+            "了解开源许可证与贡献方式"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE"
+          ],
+          "minimal_modules": [
+            "项目定位与 PPA 价值",
+            "README 的目录式结构",
+            "LICENSE 与开源贡献"
+          ],
+          "practice_task": "阅读 README，列出本仓库针对的目标读者群体，并写一段话描述你认为本仓库最有价值的部分。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "ASIC 设计流程全景：从 RTL 到 GDSII",
+          "order": 2,
+          "filename": "u1-l2-asic-flow-panorama.md",
+          "level": "beginner",
+          "topic": "用一条主线串联数字 IC 从 RTL 到 GDSII 的全流程，并指出本仓库脚本分别对应哪些阶段。",
+          "learning_goals": [
+            "描述前端 RTL 设计与逻辑综合到网表的环节",
+            "描述后端物理设计布图规划→布局→CTS→布线的各阶段",
+            "把仓库中的脚本文件与设计流程阶段对应起来"
+          ],
+          "source_files": [
+            "README.md",
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "前端设计(RTL/综合)",
+            "后端物理设计流程",
+            "签核与 GDSII 输出",
+            "脚本与流程阶段的对应关系"
+          ],
+          "practice_task": "在 PnR.tcl 中找出 setup/floorplan/placement/CTS/routing/finishing 等阶段的分隔注释，画一张流程图标注各阶段顺序。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与学习资源地图",
+          "order": 3,
+          "filename": "u1-l3-repo-structure-map.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录(脚本、Verilog、PDF、图)的组织方式，帮助读者快速定位学习材料。",
+          "learning_goals": [
+            "理解顶层各目录的职责(IC Compiler II / IC Compiler / PrimeTime / mentor_scripts / cmsdk 等)",
+            "识别文档与 PDF 参考资料的位置",
+            "了解图、示例与 CI 配置的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "Figures/Fig. Complex ASIC Design.jpeg"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "文档与 PDF 资源",
+            "图与 RTL 示例",
+            "CI 配置"
+          ],
+          "practice_task": "制作一张仓库目录树注释表，为每个关键目录写一句话说明其作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "RTL 设计与时序约束入门",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "读懂一个简单 Verilog 设计",
+          "order": 1,
+          "filename": "u2-l1-verilog-basic-design.md",
+          "level": "beginner",
+          "topic": "通过 MY_DESIGN.v 这个小型设计讲解模块、端口、组合逻辑与时序逻辑、模块例化等基本概念。",
+          "learning_goals": [
+            "理解 Verilog 模块与端口声明",
+            "区分时序 always 块(posedge clk)与组合 always 块",
+            "理解模块层次化例化(ARITH/COMBO 子模块)"
+          ],
+          "source_files": [
+            "MY-Design/MY_DESIGN.v"
+          ],
+          "minimal_modules": [
+            "模块与端口声明",
+            "寄存器与线网",
+            "always 时序块与组合块",
+            "层次化例化"
+          ],
+          "practice_task": "为 MY_DESIGN 中的 ARITH 模块写一个最小 testbench，给定 a、b、sel 观察输出。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "层次化设计与真实 SoC 示例",
+          "order": 2,
+          "filename": "u2-l2-hierarchical-soc-cmsdk.md",
+          "level": "beginner",
+          "topic": "从单模块扩展到真实 SoC——ARM Cortex-M0 DesignStart(CMSDK)，理解参数化、AHB 接口与系统级集成。",
+          "learning_goals": [
+            "理解参数化 Verilog 模块(parameter)",
+            "认识 SoC 顶层结构与 AHB 总线接口信号",
+            "体会从简单设计到真实 SoC 的复杂度跃迁"
+          ],
+          "source_files": [
+            "cmsdk/cmsdk_mcu_system_zed.v",
+            "cmsdk/cmsdk_mcu_defs.v",
+            "MY-Design/MY_DESIGN.v"
+          ],
+          "minimal_modules": [
+            "参数化模块",
+            "SoC 顶层结构",
+            "AHB 总线接口信号",
+            "复杂度跃迁对比"
+          ],
+          "practice_task": "对比 MY_DESIGN 与 cmsdk_mcu_system 的端口规模，列出 SoC 中至少三类接口(时钟/复位/总线)。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "时序约束入门：SDC 与环境约束",
+          "order": 3,
+          "filename": "u2-l3-sdc-timing-constraints.md",
+          "level": "beginner",
+          "topic": "用 My_Design.cons 讲解 create_clock、时钟不确定性、输入/输出延迟、驱动单元与负载等核心 SDC 概念。",
+          "learning_goals": [
+            "掌握 create_clock 及时钟延迟/不确定性约束",
+            "理解 set_input_delay / set_output_delay 的含义与计算",
+            "理解 set_driving_cell / set_load 等环境约束"
+          ],
+          "source_files": [
+            "MY-Design/My_Design.cons",
+            "MY-Design/MY_DESIGN.v"
+          ],
+          "minimal_modules": [
+            "时钟定义(create_clock)",
+            "时钟延迟与不确定性",
+            "输入/输出延迟",
+            "驱动单元与负载"
+          ],
+          "practice_task": "为 MY_DESIGN 重新计算并改写一个 200MHz 时钟下的 input/output delay 约束。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "库数据与物理数据准备",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "标准单元库与物理数据基础",
+          "order": 1,
+          "filename": "u3-l1-standard-cell-libraries.md",
+          "level": "intermediate",
+          "topic": "讲解 Liberty(.db/.lib)、LEF、技术文件(.tf)、TLU+ 等库与物理数据的含义，结合 common_setup.tcl 看变量如何引用它们。",
+          "learning_goals": [
+            "理解时序库(Liberty)与物理库(LEF)的分工",
+            "理解技术文件(.tf)与金属层/布线方向",
+            "理解 TLU+ 寄生参数与电源/地网络变量的作用"
+          ],
+          "source_files": [
+            "IC Compiler II/Scripts/01_common_setup.tcl",
+            "IC Compiler II/Scripts/03_PnR_setup.tcl"
+          ],
+          "minimal_modules": [
+            "时序库与物理库",
+            "技术文件与金属层",
+            "TLU+ 寄生参数",
+            "电源/地与布线层范围变量"
+          ],
+          "practice_task": "在 common_setup.tcl 中列出所有库/技术文件相关变量，并解释每个变量在流程中的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "创建 NDM 参考库",
+          "order": 2,
+          "filename": "u3-l2-ndm-library-creation.md",
+          "level": "intermediate",
+          "topic": "通过 NDM_Creation.tcl 与 Memory_NDM_Generation.tcl 讲解如何为标准单元和 SRAM 宏单元生成 ICC2 使用的 NDM 参考库。",
+          "learning_goals": [
+            "理解 NDM 工作区与 reference library 概念",
+            "掌握读入 LEF 与多 PVT .db 的流程",
+            "理解 site/布线方向设置与二极管/电源管脚标记"
+          ],
+          "source_files": [
+            "IC Compiler II/NDM_Creation.tcl",
+            "IC Compiler II/Memory_NDM_Generation.tcl"
+          ],
+          "minimal_modules": [
+            "NDM workspace 与 reference library",
+            "读入 LEF 与多 PVT .db",
+            "site 与布线方向",
+            "check/commit workspace"
+          ],
+          "practice_task": "模仿 NDM_Creation.tcl，为一个新的虚拟库名改写配置变量，并说明需要准备哪些输入文件。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "LEF 到 Milkyway/FRAM 的层映射",
+          "order": 3,
+          "filename": "u3-l3-lef-to-fram-mapping.md",
+          "level": "intermediate",
+          "topic": "讲解 lef_layer_tf_number_mapper.pl 如何解析 .tf 与 LEF，生成层号映射文件，完成 LEF→FRAM 转换的准备。",
+          "learning_goals": [
+            "理解 .tf 的 maskName / layerNumber 字段",
+            "理解 LEF 的 LAYER / TYPE 解析",
+            "掌握派生掩模名(metal/via/poly)的推导规则"
+          ],
+          "source_files": [
+            "LEF2FRAM/lef_layer_tf_number_mapper.pl",
+            "LEF2FRAM/Readme.md",
+            "LEF2FRAM/lef_layer_tf_number_mapper.tcl"
+          ],
+          "minimal_modules": [
+            ".tf 的 maskName/layerNumber",
+            "LEF 的 LAYER/TYPE 解析",
+            "派生掩模名规则",
+            "映射文件与日志输出"
+          ],
+          "practice_task": "阅读脚本，描述当 LEF 层 TYPE 为 ROUTING 时如何推导出 metalN 掩模名。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "ICC2 物理设计主流程(RTL→GDSII)",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "ICC2 设计初始化与 MCMM 设置",
+          "order": 1,
+          "filename": "u4-l1-icc2-setup-mcmm.md",
+          "level": "intermediate",
+          "topic": "讲解 PnR.tcl 的 setup 阶段——创建设计库、读入网表、RC 寄生、site/层方向，以及 MCMM 多角多模设置。",
+          "learning_goals": [
+            "理解 create_lib / read_verilog / link_block 的初始化链路",
+            "理解读入 TLU+ 与设置 site/布线方向",
+            "理解 MCMM 的 corner/mode/scenario 概念"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl",
+            "IC Compiler II/Scripts/01_common_setup.tcl",
+            "IC Compiler II/Scripts/02_mcmm_setup.tcl"
+          ],
+          "minimal_modules": [
+            "create_lib/read_verilog/link_block",
+            "TLU+ 与 site/层方向",
+            "MCMM 的 corner/mode/scenario",
+            "save_block 版本管理"
+          ],
+          "practice_task": "解释 02_mcmm_setup.tcl 中 slow/fast 角与 func 模式如何组合成 scenario，并说明为何需要 MCMM。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "布局规划 Floorplan",
+          "order": 2,
+          "filename": "u4-l2-floorplan.md",
+          "level": "intermediate",
+          "topic": "讲解 floorplan 阶段——初始化布图、利用率、引脚放置、虚拟布局与拥塞/时序评估。",
+          "learning_goals": [
+            "掌握 initialize_floorplan 与利用率参数",
+            "理解 place_pins 与虚拟布局 create_placement",
+            "学会用拥塞图与零互连时序评估布图质量"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "initialize_floorplan 与利用率",
+            "place_pins",
+            "虚拟布局与合法化",
+            "拥塞/时序评估",
+            "save_block"
+          ],
+          "practice_task": "在 PnR.tcl 中找到拥塞与时序评估相关命令，说明你会如何据此调整布图面积。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "电源网络设计",
+          "order": 3,
+          "filename": "u4-l3-power-network.md",
+          "level": "intermediate",
+          "topic": "讲解电源网络——core ring、mesh、标准单元 rail 的策略与编译，以及 IR drop 评估。",
+          "learning_goals": [
+            "掌握 PG ring/mesh/rail 的 pattern 与 strategy",
+            "理解 compile_pg 的编译流程",
+            "学会用虚拟 pad 与 analyze_power_plan 做 IR drop 分析"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl",
+            "IC Compiler II/Vpad.tcl"
+          ],
+          "minimal_modules": [
+            "PG ring/mesh/rail 模式与策略",
+            "compile_pg 编译",
+            "虚拟 pad 放置",
+            "IR drop 分析"
+          ],
+          "practice_task": "读懂 Vpad.tcl 的双 for 循环如何沿 die 四边均匀放置虚拟电源 pad，并估算 pad 间距。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "布局 Placement",
+          "order": 4,
+          "filename": "u4-l4-placement.md",
+          "level": "intermediate",
+          "topic": "讲解 place_opt 布局优化、合法性检查与关键报告(QoR、利用率)。",
+          "learning_goals": [
+            "理解 place_opt 的优化流程",
+            "掌握 legalize_placement / check_legality",
+            "学会解读 report_qor / report_utilization"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "place_opt 流程",
+            "合法化检查",
+            "timing app options",
+            "QoR/利用率报告",
+            "save_block 版本演进"
+          ],
+          "practice_task": "列出 placement 阶段前后调用的 set_app_options，并解释它们对时序/恢复-移除检查的影响。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "时钟树综合 CTS",
+          "order": 5,
+          "filename": "u4-l5-cts.md",
+          "level": "intermediate",
+          "topic": "讲解 CTS——时钟树目标、CTS 单元选择、NDR 规则、时钟不确定性、clock_opt。",
+          "learning_goals": [
+            "掌握 set_clock_tree_options 的 skew/latency 目标",
+            "理解 CTS 缓冲单元选择流程",
+            "理解 NDR 路由规则与 setup/hold clock uncertainty 的区别"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "时钟树目标",
+            "CTS 单元选择",
+            "NDR 路由规则与层范围",
+            "clock uncertainty",
+            "clock_opt 与 CRPR"
+          ],
+          "practice_task": "解释 CTS 阶段为何要为 setup 与 hold 设置不同的 clock uncertainty 值。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "布线 Routing",
+          "order": 6,
+          "filename": "u4-l6-routing.md",
+          "level": "intermediate",
+          "topic": "讲解布线——pre-route 检查、global/track/detail 路由选项、route_auto 与 route_opt、DRC 检查。",
+          "learning_goals": [
+            "理解 pre-route check_design 与 PG 连接",
+            "掌握 global/track/detail 路由选项",
+            "理解 route_auto / route_opt 与 check_routes"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "pre_route 检查",
+            "PG 连接",
+            "global/track/detail 路由选项",
+            "route_auto/route_opt",
+            "忽略层与 DRC 检查"
+          ],
+          "practice_task": "对比 route.global / route.track / route.detail 三类 timing/crosstalk 选项的作用差异。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "收尾与输出",
+          "order": 7,
+          "filename": "u4-l7-finishing-output.md",
+          "level": "intermediate",
+          "topic": "讲解 finishing——填充单元、PG 连接、LVS，以及输出 Verilog/SDC/SPEF/DEF/GDS。",
+          "learning_goals": [
+            "掌握 create_stdcell_fillers 与 connect_pg_net",
+            "理解 check_lvs 的作用",
+            "掌握 write_verilog(SDC/SPEF/DEF/GDS) 等交付物输出"
+          ],
+          "source_files": [
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "填充单元",
+            "PG 自动连接",
+            "check_lvs",
+            "多种 Verilog 视图输出",
+            "SDC/SPEF/DEF/GDS 输出"
+          ],
+          "practice_task": "说明为 PrimeTime 准备的 netlist 与 SPEF 由哪些 write 命令产生，为何需要 PG 与非 PG 两种 Verilog。",
+          "depends_on": [
+            "u4-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "其它 PnR 工具流程对比",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Synopsys ICC 传统流程",
+          "order": 1,
+          "filename": "u5-l1-icc-legacy-flow.md",
+          "level": "intermediate",
+          "topic": "通过 IC Compiler(ICC) 的 design_planning 与 preroute 脚本，对比 ICC2，理解传统 Milkyway 流程与 IO pad 约束。",
+          "learning_goals": [
+            "理解 ICC 的 create_floorplan 与 core 利用率",
+            "理解 IO pad 物理约束(io.tdf)与 pad filler",
+            "对比 ICC 与 ICC2 的命令差异"
+          ],
+          "source_files": [
+            "IC Compiler/01_design_planning.tcl",
+            "IC Compiler/02_preroute.tcl",
+            "IC Compiler/create_phy_cell.tcl",
+            "IC Compiler/io.tdf"
+          ],
+          "minimal_modules": [
+            "create_floorplan 与利用率",
+            "IO pad 约束与 pad filler",
+            "电源环 strap 综合与 IR",
+            "preroute rail 与 well tap",
+            "ICC 与 ICC2 命令差异"
+          ],
+          "practice_task": "列出 01_design_planning.tcl 与 ICC2 PnR.tcl 中至少三个命令名差异，体会工具演进。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Mentor Nitro 参考流程",
+          "order": 2,
+          "filename": "u5-l2-mentor-nitro-flow.md",
+          "level": "intermediate",
+          "topic": "通过 mentor_scripts 的 import→place→clock→route→export 五阶段脚本，理解 Mentor/Siemens 的 Nitro 参考流程结构与 MCMM/UPF 集成。",
+          "learning_goals": [
+            "理解 Nitro 五阶段之间的 db 依赖",
+            "理解 import 阶段库/网表/约束读取与库 db 生成",
+            "理解 export 阶段的天线/填充/金属填充/GDS"
+          ],
+          "source_files": [
+            "mentor_scripts/0_import.tcl",
+            "mentor_scripts/1_place.tcl",
+            "mentor_scripts/2_clock.tcl",
+            "mentor_scripts/3_route.tcl",
+            "mentor_scripts/4_export.tcl"
+          ],
+          "minimal_modules": [
+            "import 库/网表/约束与库 db",
+            "place 阶段 NDR 与 path group",
+            "clock 阶段 CTS 与 CRPR",
+            "route 阶段 interleave 优化",
+            "export 天线/填充/金属填充/GDS"
+          ],
+          "practice_task": "画出 Nitro 五阶段之间的 db 依赖关系(import.db→place.db→clock.db→route.db→export.db)。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "静态时序分析 PrimeTime",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "PrimeTime STA 基本流程",
+          "order": 1,
+          "filename": "u6-l1-primetime-sta-flow.md",
+          "level": "intermediate",
+          "topic": "通过 RUN.tcl/pt.tcl/pt_setup.tcl/common_setup.tcl 讲解 PrimeTime 静态时序分析的读网表、反标寄生、施加约束、报告时序。",
+          "learning_goals": [
+            "理解 common/pt_setup 的变量与库设置",
+            "掌握 read_verilog/link_design/read_parasitics 链路",
+            "理解读约束、update_timing、report_timing、save_session"
+          ],
+          "source_files": [
+            "PrimeTime/RUN.tcl",
+            "PrimeTime/pt.tcl",
+            "PrimeTime/pt_setup.tcl",
+            "PrimeTime/common_setup.tcl"
+          ],
+          "minimal_modules": [
+            "common/pt_setup 变量与库",
+            "read_verilog/link_design",
+            "read_parasitics 反标 SPEF",
+            "读约束与 report_timing",
+            "save_session"
+          ],
+          "practice_task": "追踪 pt.tcl 的执行顺序，说明链接库(link_path)、网表、寄生、约束四类输入分别在何处设置。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "PrimeTime 实用脚本：case analysis 追踪",
+          "order": 2,
+          "filename": "u6-l2-primetime-case-propagation.md",
+          "level": "intermediate",
+          "topic": "深入 report_case_propagation.tcl，讲解如何用 Tcl proc 追踪 case 值的来源，理解 STA 中的 case analysis 与时序弧。",
+          "learning_goals": [
+            "理解 get_timing_arcs 与 from_pin/to_pin",
+            "理解 case_value / user_case_value 属性",
+            "掌握深度优先回溯(BFS 队列)算法与 proc 定义"
+          ],
+          "source_files": [
+            "PrimeTime/UsefulScripts/report_case_propagation.tcl"
+          ],
+          "minimal_modules": [
+            "timing arcs 与 pin 属性",
+            "深度优先回溯算法",
+            "proc 与 define_proc_attributes",
+            "collection 操作"
+          ],
+          "practice_task": "描述脚本中 visited_pairs 数组如何避免重复访问同一时序弧，从而终止回溯。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "低功耗设计与电源意图",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "多电压域与 UPF 电源意图",
+          "order": 1,
+          "filename": "u7-l1-upf-low-power.md",
+          "level": "advanced",
+          "topic": "通过 low_power.upf 讲解 UPF(统一功率格式)——电源域、供电网络、端口状态、电平转换器。",
+          "learning_goals": [
+            "理解 create_power_domain / create_supply_net / set_domain_supply_net",
+            "理解 add_port_state 状态表与电源域 scope",
+            "理解 set_level_shifter 电平转换器的作用"
+          ],
+          "source_files": [
+            "low_power.upf"
+          ],
+          "minimal_modules": [
+            "电源域与供电网络",
+            "端口状态表",
+            "层次电源域(scope)",
+            "电平转换器"
+          ],
+          "practice_task": "画出 low_power.upf 中 TOP/PD1/PD2 三个电源域的供电关系(VDDH/VDDL/VSS)并标注电压。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "自动化与脚本进阶",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "NDR 路由规则自动化",
+          "order": 1,
+          "filename": "u8-l1-ndr-rule-automation.md",
+          "level": "advanced",
+          "topic": "深入 NDR_rule.pl，讲解如何解析 .tf 提取 defaultWidth/minSpacing 并按倍率自动生成 ICC2 的 NDR 宽度/间距。",
+          "learning_goals": [
+            "理解正则解析 .tf 的 Layer/defaultWidth/minSpacing",
+            "理解宽度/间距倍率缩放逻辑",
+            "掌握在 ICC2 中 eval Tcl 变量并 create_routing_rule"
+          ],
+          "source_files": [
+            "IC Compiler II/NDR_rule.pl",
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            ".tf 正则解析",
+            "倍率缩放",
+            "输出 Tcl 变量 WIDTH/SPACE",
+            "ICC2 中 create_routing_rule",
+            "NDR 与时钟网络"
+          ],
+          "practice_task": "跟踪 NDR_rule.pl 中 found 计数器如何判定一行已收集到 width 与 space 两个值。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Tcl 流程自动化模式",
+          "order": 2,
+          "filename": "u8-l2-tcl-automation-patterns.md",
+          "level": "advanced",
+          "topic": "汇总仓库中的 Tcl 自动化技巧——几何坐标循环、路径分组、库数据脚本化，提升二次开发能力。",
+          "learning_goals": [
+            "掌握用 for 循环按 die 边界生成虚拟 pad",
+            "掌握按输入/寄存器划分 path group",
+            "理解库生成脚本化与 collection/expr 的 Tcl 用法"
+          ],
+          "source_files": [
+            "IC Compiler II/Vpad.tcl",
+            "mentor_scripts/createpathgroup.tcl",
+            "LEF2FRAM/lef_layer_tf_number_mapper.tcl"
+          ],
+          "minimal_modules": [
+            "几何坐标循环生成 pad",
+            "路径分组(f2f/i2f/f2o/i2o)",
+            "库数据脚本化",
+            "collection 与 expr 用法"
+          ],
+          "practice_task": "仿照 createpathgroup.tcl，写一段 Tcl 划分 in2reg 与 reg2out 两个路径组。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "收尾、验证与版图定制",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "芯片收尾：天线、填充与金属填充",
+          "order": 1,
+          "filename": "u9-l1-chip-finishing-antenna.md",
+          "level": "advanced",
+          "topic": "通过 mentor 4_export.tcl 与 ICC2 finishing，深入讲解天线修复、filler cell、金属填充、DRC 清理与最终交付。",
+          "learning_goals": [
+            "理解 check_antenna/fix_antenna(jumper/diode)",
+            "理解 filler cell 插入与百分比算法",
+            "理解 insert_metal_fill 与 DRC 清理流程"
+          ],
+          "source_files": [
+            "mentor_scripts/4_export.tcl",
+            "IC Compiler II/PnR.tcl"
+          ],
+          "minimal_modules": [
+            "天线检查与修复",
+            "filler cell 插入",
+            "金属填充",
+            "DRC 清理",
+            "交付物输出"
+          ],
+          "practice_task": "解释为何在 filler 插入后要再次 check_drc 并可能运行 route repair。",
+          "depends_on": [
+            "u4-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Cadence SKILL 版图脚本入门",
+          "order": 2,
+          "filename": "u9-l2-skill-layout-scripting.md",
+          "level": "advanced",
+          "topic": "通过 Logo.pl(SKILL 语言)讲解如何把单色 BMP 图像转成版图层上的矩形阵列，理解 SKILL 与版图数据库交互。",
+          "learning_goals": [
+            "理解 SKILL 语言基础(let/procedure/for)",
+            "理解 BMP 文件头解析(偏移/宽高)",
+            "掌握按位读取像素并用 dbCreateRect 画矩形"
+          ],
+          "source_files": [
+            "Logo.pl"
+          ],
+          "minimal_modules": [
+            "SKILL 语言基础",
+            "BMP 文件头解析",
+            "按位读取像素",
+            "dbCreateRect 画矩形",
+            "版图定制用途"
+          ],
+          "practice_task": "描述 Logo.pl 如何根据 BMP 的宽高与 Grid 计算每个像素矩形在版图中的 (x,y) 坐标。",
+          "depends_on": [
+            "u4-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "综合、开源工具与端到端实战",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "逻辑综合与开源工具 yosys",
+          "order": 1,
+          "filename": "u10-l1-synthesis-yosys.md",
+          "level": "advanced",
+          "topic": "介绍逻辑综合概念与开源综合器 yosys，结合 HDL 编码规范文档理解可综合 RTL。",
+          "learning_goals": [
+            "理解综合的目标(RTL→门级网表)",
+            "理解可综合 RTL 编码风格",
+            "了解 yosys 综合流程概述(细节待确认)"
+          ],
+          "source_files": [
+            "yosys_manual.pdf",
+            "Guide to HDL Coding Styles for Synthesis/ReadMe"
+          ],
+          "minimal_modules": [
+            "综合目标",
+            "可综合 RTL 编码风格",
+            "yosys 综合流程概述(待确认)",
+            "综合与时序库的关系"
+          ],
+          "practice_task": "阅读 yosys 手册目录，列出综合基本步骤(read→synth→write_verilog)，并说明综合输出如何喂给本仓库的 PnR 流程。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "全流程实战：RTL 到 GDSII 综合演练",
+          "order": 2,
+          "filename": "u10-l2-rtl-to-gdsii-capstone.md",
+          "level": "advanced",
+          "topic": "综合运用前面所有单元，规划一次完整的 RTL→综合→库准备→PnR→STA→交付 的小项目流程。",
+          "learning_goals": [
+            "串联前端 RTL+SDC 与库/物理数据准备",
+            "串联 ICC2 PnR 全阶段与 PrimeTime 签核",
+            "理清交付物清单与流程衔接排错思路"
+          ],
+          "source_files": [
+            "MY-Design/MY_DESIGN.v",
+            "MY-Design/My_Design.cons",
+            "IC Compiler II/PnR.tcl",
+            "PrimeTime/pt.tcl",
+            "low_power.upf"
+          ],
+          "minimal_modules": [
+            "前端(RTL+SDC)",
+            "库与物理数据准备",
+            "ICC2 PnR 全阶段",
+            "PrimeTime 签核",
+            "交付物清单与排错"
+          ],
+          "practice_task": "用 MY_DESIGN 写一份从 RTL 到 GDSII 的分步执行计划，标注每步使用本仓库的哪个脚本/文件。",
+          "depends_on": [
+            "u4-l7",
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

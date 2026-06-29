@@ -1,0 +1,505 @@
+{
+  "project": "ASIC-implementation-of-AES",
+  "head": "585f265f91338bea074cebb8c31a3eb602e7cdae",
+  "rationale": "本项目是用 Verilog 实现的 AES 分组密码硬件核，代码规模中等但层次分明，因此手册采用三层递进结构。入门层（单元一）先讲 AES 算法背景、仓库目录、本工程统一的 Verilog 编码风格（reg/_new/_we 寄存器模式与异步低有效复位）、顶层总线接口与地址映射，最后落地到\"如何跑仿真\"，让零基础读者也能把工程运行起来并看懂波形。进阶层（单元二）按真实硬件控制/数据流自顶向下剖析：先看 aes_core 的总控 FSM 与 encdec/sbox 两个多路选择，再逐个讲 S-box ROM、密钥扩展 key_mem、加密四变换函数与加密 FSM、解密逆变换函数与解密 FSM，使读者掌握每一条数据通路。专家层（单元三）把模块贯通成一次端到端加解密、讲解基于 NIST 已知应答的自检式验证与分层测试策略，进而讨论面向 ASIC 的\"资源共享换面积/功耗\"取舍与吞吐/关键路径，最后给出二次开发与扩展实践。讲义依赖关系严格对应硬件数据与控制流向（主机接口→core→key_mem/encipher/decipher），保证读者能由浅入深、结合真实源码完成学习。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门篇：走进 AES 硬件实现",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与 AES 算法背景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍项目目标（低功耗、高吞吐的 AES 硬件实现），并回顾 AES 对称分组加密、128/256 位密钥、ECB 工作模式等基本概念。",
+          "learning_goals": [
+            "说出 AES 是什么、ECB 单块模式如何工作",
+            "理解本仓库要解决的硬件实现问题",
+            "区分 AES-128 与 AES-256 在轮数与密钥长度上的差异"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README 项目说明",
+            "AES 算法背景",
+            "ECB 工作模式"
+          ],
+          "practice_task": "阅读 README，用文字画出 AES 在硬件中“输入明文+密钥→输出密文”的黑盒示意，并标注 128/256 位两种密钥规格。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与文件清单",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 rtl/、Pre-Synthesis Simulation/、Project Pics/ 三个目录的作用，列出每个 Verilog 文件的职责（设计源码 vs 测试平台）。",
+          "learning_goals": [
+            "看懂仓库目录组织",
+            "区分 RTL 设计文件与 testbench",
+            "理解 rtl/ 与 Pre-Synthesis Simulation/ 的关系"
+          ],
+          "source_files": [
+            "rtl/aes.v",
+            "rtl/aes_core.v",
+            "rtl/tb_aes.v"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "设计文件清单",
+            "测试文件清单"
+          ],
+          "practice_task": "用表格列出 rtl/ 下全部 13 个 .v 文件，标注每个是“设计模块”还是“测试平台”，并写出一句话职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Verilog 代码风格与寄存器模式",
+          "order": 3,
+          "filename": "u1-l3-verilog-style-and-register-pattern.md",
+          "level": "beginner",
+          "topic": "讲解本项目通用的 Verilog 编码约定：模块/端口、reg/wire、异步低有效复位 reset_n，以及贯穿全工程的“reg/_new/_we 三件套”寄存器写使能模式。",
+          "learning_goals": [
+            "读懂 always @(posedge clk or negedge reset_n) 时序逻辑",
+            "理解每个寄存器配套 _new/_we 信号的用途",
+            "识别组合逻辑 always @* 块与寄存器更新块的区别"
+          ],
+          "source_files": [
+            "rtl/aes.v",
+            "rtl/aes_core.v"
+          ],
+          "minimal_modules": [
+            "时序逻辑与异步复位",
+            "reg/_new/_we 寄存器模式",
+            "组合逻辑 always @*"
+          ],
+          "practice_task": "在 aes.v 中找出 block_reg 与 block_new/block_we，画出“时钟上升沿、写使能有效时把 _new 写入 _reg”的数据流小图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "顶层接口与寄存器地址映射",
+          "order": 4,
+          "filename": "u1-l4-top-interface-and-address-map.md",
+          "level": "beginner",
+          "topic": "解析 aes.v 顶层模块端口（clk/reset_n/cs/we/address/write_data/read_data）与 0x00~0x33 的寄存器地址映射（名称/版本、CTRL、STATUS、CONFIG、KEY、BLOCK、RESULT）。",
+          "learning_goals": [
+            "理解总线式主机接口如何访问 AES 核",
+            "记住地址映射各分区的作用",
+            "知道 CTRL 的 init/next 触发位与 STATUS 的 ready/valid 含义"
+          ],
+          "source_files": [
+            "rtl/aes.v"
+          ],
+          "minimal_modules": [
+            "端口定义",
+            "地址映射 localparam",
+            "api 命令译码 always 块"
+          ],
+          "practice_task": "写出主机对 AES 做一次加密所需的“写密钥→写配置→写 CTRL.init→写明文→写 CTRL.next→读 RESULT”地址访问序列。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "运行仿真与阅读波形",
+          "order": 5,
+          "filename": "u1-l5-run-simulation-and-waveforms.md",
+          "level": "beginner",
+          "topic": "说明如何用 ModelSim 工程文件（.mpf）或 Icarus Verilog 编译运行 tb_aes，时钟与复位如何产生，以及从 $display 与波形中观察一次加密过程。",
+          "learning_goals": [
+            "能编译并仿真整个工程",
+            "理解 clk_gen 时钟与 sys_monitor 周期计数",
+            "会看 ready/valid 与 RESULT 寄存器"
+          ],
+          "source_files": [
+            "rtl/tb_aes.v",
+            "Pre-Synthesis Simulation/simulation.mpf"
+          ],
+          "minimal_modules": [
+            "时钟与复位产生",
+            "init_sim/reset_dut 任务",
+            "仿真工程文件"
+          ],
+          "practice_task": "用 iverilog 或 ModelSim 编译 rtl/*.v 并运行 tb_aes，记录最终 “All XX test cases completed successfully” 的输出。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶篇：核心数据通路与控制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "aes_core 顶层控制与状态机",
+          "order": 1,
+          "filename": "u2-l1-aes-core-control-fsm.md",
+          "level": "intermediate",
+          "topic": "解析 aes_core.v 的 IDLE/INIT/NEXT 三状态 FSM，以及 encdec_mux（选加密还是解密通路）和 sbox_mux（把共享 S-box 分给 encipher 还是 key_mem）两个多路选择。",
+          "learning_goals": [
+            "理解核心控制 FSM 的状态转移",
+            "看懂 encipher/decipher 两条数据通路如何共享 round_key 与结果",
+            "理解 S-box 资源共享思想"
+          ],
+          "source_files": [
+            "rtl/aes_core.v"
+          ],
+          "minimal_modules": [
+            "aes_core_ctrl FSM",
+            "encdec_mux",
+            "sbox_mux"
+          ],
+          "practice_task": "画出 aes_core 在 init（密钥扩展）与 next（加/解密）两种情况下各子模块信号走向的连接示意图。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "S-box 与逆 S-box 的 ROM 实现",
+          "order": 2,
+          "filename": "u2-l2-sbox-and-inverse-sbox-rom.md",
+          "level": "intermediate",
+          "topic": "讲解 aes_sbox.v / aes_inv_sbox.v 如何用 256 字节常量数组实现查表、4 路并行处理 32 位字，以及 SubBytes 在 GF(2^8) 上的数学含义。",
+          "learning_goals": [
+            "理解 S-box 是 256 项 ROM 查表",
+            "看懂 4 路并行 assign 实现 32 位查表",
+            "知道正向与逆向 S-box 的关系"
+          ],
+          "source_files": [
+            "rtl/aes_sbox.v",
+            "rtl/aes_inv_sbox.v"
+          ],
+          "minimal_modules": [
+            "sbox 数组与查表",
+            "4 路并行 32 位处理",
+            "正向/逆向 S-box"
+          ],
+          "practice_task": "在 aes_sbox.v 中查表验证 sbox[0x00]=0x63、sbox[0x01]=0x7c，并说明为什么 encipher 用共享 sbox_inst 而 decipher 用自己的 inv_sbox_inst。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "密钥扩展与轮密钥存储",
+          "order": 3,
+          "filename": "u2-l3-key-expansion-and-round-key-mem.md",
+          "level": "intermediate",
+          "topic": "解析 aes_key_mem.v 的 IDLE/INIT/GENERATE/DONE FSM、key_mem[0:14] 轮密钥数组、rcon 轮常数逻辑，以及 AES-128 与 AES-256 两种密钥扩展的差异。",
+          "learning_goals": [
+            "理解密钥扩展如何在 init 阶段一次性生成所有轮密钥并存入数组",
+            "看懂 rcon 的 GF(2^8) 倍乘递推",
+            "区分 128/256 位密钥的轮数与字组合逻辑"
+          ],
+          "source_files": [
+            "rtl/aes_key_mem.v"
+          ],
+          "minimal_modules": [
+            "key_mem_ctrl FSM",
+            "round_key_gen 轮密钥生成",
+            "rcon_logic 轮常数",
+            "AES-128/256 分支"
+          ],
+          "practice_task": "对照源码说明 AES-256 在 round_ctr==0/1 及奇偶轮时 key_mem_new 的不同计算分支，解释 prev_key0/prev_key1 的作用。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "加密数据通路四个变换函数",
+          "order": 4,
+          "filename": "u2-l4-encipher-datapath-functions.md",
+          "level": "intermediate",
+          "topic": "讲解 aes_encipher_block.v 中的纯组合函数：SubBytes（经共享 S-box）、ShiftRows、MixColumns（gm2/gm3 与 mixw）、AddRoundKey，及其在 GF(2^8) 上的运算。",
+          "learning_goals": [
+            "理解 AES 一轮的四个变换",
+            "看懂 mixcolumns 矩阵乘法如何用 gm2/gm3 实现",
+            "理解 shiftrows 的字节重排"
+          ],
+          "source_files": [
+            "rtl/aes_encipher_block.v"
+          ],
+          "minimal_modules": [
+            "shiftrows",
+            "mixcolumns/mixw 与 gm2/gm3",
+            "addroundkey"
+          ],
+          "practice_task": "对一个示例 32 位字 w，手算 mixw(w) 的 4 个输出字节，对照 mixw 函数确认 gm2/gm3 的异或组合正确。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "加密轮控制状态机",
+          "order": 5,
+          "filename": "u2-l5-encipher-round-fsm.md",
+          "level": "intermediate",
+          "topic": "解析 aes_encipher_block.v 的 encipher_ctrl（IDLE/INIT/SBOX/MAIN/FINAL）状态机：初始轮 AddRoundKey、每轮 SubBytes（4 个 32 位字逐字经共享 S-box）、ShiftRows+MixColumns+AddRoundKey、最终轮。",
+          "learning_goals": [
+            "理解加密从初始化到最终轮的完整时钟级流程",
+            "看懂 sword_ctr 为什么把 SubBytes 拆成 4 拍",
+            "理解轮计数与轮密钥的配合"
+          ],
+          "source_files": [
+            "rtl/aes_encipher_block.v"
+          ],
+          "minimal_modules": [
+            "encipher_ctrl FSM",
+            "sword_ctr 逐字 SubBytes",
+            "round_ctr 轮计数",
+            "round_logic 各 update_type"
+          ],
+          "practice_task": "画出 AES-128 加密时 enc_ctrl_reg 与 round_ctr/sword_ctr 随时钟变化的轨迹，标注共需多少个时钟周期。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "解密数据通路逆变换函数",
+          "order": 6,
+          "filename": "u2-l6-decipher-datapath-inverse-functions.md",
+          "level": "intermediate",
+          "topic": "讲解 aes_decipher_block.v 的逆向组合函数：InvSubBytes、InvShiftRows、InvMixColumns（gm09/gm11/gm13/gm14 与 inv_mixw）、AddRoundKey，以及 GF(2^8) 高次乘法如何由 gm2/gm4/gm8 复合得到。",
+          "learning_goals": [
+            "理解解密是加密的逆过程",
+            "看懂 inv_mixcolumns 的固定矩阵与 0x09/0x0b/0x0d/0x0e 乘法",
+            "理解 gm09/11/13/14 的构造方式"
+          ],
+          "source_files": [
+            "rtl/aes_decipher_block.v"
+          ],
+          "minimal_modules": [
+            "inv_shiftrows",
+            "inv_mixcolumns/inv_mixw 与 gm09/11/13/14",
+            "addroundkey"
+          ],
+          "practice_task": "推导 gm14(op)=gm8^gm4^gm2 的展开，验证它等价于在 GF(2^8) 上 op×0x0e。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "解密轮控制状态机",
+          "order": 7,
+          "filename": "u2-l7-decipher-round-fsm.md",
+          "level": "intermediate",
+          "topic": "解析 aes_decipher_block.v 的 decipher_ctrl 状态机与“递减”轮计数器（set 到 num_rounds 后逐轮减 1），以及它与加密 FSM 的对称差异。",
+          "learning_goals": [
+            "理解解密从最后一轮倒推的流程",
+            "看懂 round_ctr_set/round_ctr_dec",
+            "对比加密与解密 FSM 的异同"
+          ],
+          "source_files": [
+            "rtl/aes_decipher_block.v"
+          ],
+          "minimal_modules": [
+            "decipher_ctrl FSM",
+            "递减 round_ctr",
+            "round_logic 逆 update_type"
+          ],
+          "practice_task": "对比 encipher_ctrl 与 decipher_ctrl 的状态与计数方向，写一份“加密递增、解密递减”的对比表并解释原因。",
+          "depends_on": [
+            "u2-l6",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家篇：整体贯通、验证、架构取舍与扩展",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "一次完整加解密的端到端追踪",
+          "order": 1,
+          "filename": "u3-l1-end-to-end-encryption-trace.md",
+          "level": "advanced",
+          "topic": "以 tb_aes 的 ecb_mode_single_block_test 为线索，把 init_key→key_mem 扩展→encipher/decipher 各轮→result 串成一条端到端数据流，理解模块间的时序配合。",
+          "learning_goals": [
+            "能把所有模块串起来解释一次完整加/解密",
+            "理解 init 与 next 两阶段的时序关系",
+            "看懂 result 如何回写到顶层 RESULT 寄存器"
+          ],
+          "source_files": [
+            "rtl/aes.v",
+            "rtl/aes_core.v",
+            "rtl/aes_key_mem.v",
+            "rtl/aes_encipher_block.v"
+          ],
+          "minimal_modules": [
+            "主机接口到 core",
+            "init 阶段密钥扩展",
+            "next 阶段加解密",
+            "结果回写"
+          ],
+          "practice_task": "用时序图或多列对照表追踪一个 NIST 明文块从写入 BLOCK 到读出 RESULT 的全过程，标注每一步发生在哪个模块。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "仿真验证与 NIST 测试向量",
+          "order": 2,
+          "filename": "u3-l2-verification-and-nist-vectors.md",
+          "level": "advanced",
+          "topic": "讲解 tb_aes.v 的自检式测试方法：write_word/write_block/init_key/ecb_mode_single_block_test/aes_test 任务，NIST ECB 已知应答（AES-128 与 AES-256），以及 error_ctr 自检与结果报告。",
+          "learning_goals": [
+            "理解自检 testbench 的任务拆分",
+            "看懂 NIST 测试向量的比对方式",
+            "掌握 ready/valid 握手驱动的测试时序"
+          ],
+          "source_files": [
+            "rtl/tb_aes.v"
+          ],
+          "minimal_modules": [
+            "总线访问任务 write_word/read_word",
+            "init_key 密钥初始化",
+            "ecb_mode_single_block_test 用例",
+            "aes_test NIST 向量集"
+          ],
+          "practice_task": "在 aes_test 中找到 AES-256 ECB 的 4 组明文与期望密文，说明每组如何调用 ecb_mode_single_block_test 完成比对。",
+          "depends_on": [
+            "u1-l5",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "分层测试策略",
+          "order": 3,
+          "filename": "u3-l3-hierarchical-test-strategy.md",
+          "level": "advanced",
+          "topic": "说明工程为每个模块都配了独立 testbench（tb_aes_core/tb_aes_encipher_block/tb_aes_decipher_block/tb_aes_key_mem），讲解自底向上、逐层隔离验证的策略与各自 dump 调试方法。",
+          "learning_goals": [
+            "理解分层验证的好处",
+            "看懂每个子模块 testbench 如何独立驱动与检查",
+            "掌握 dump_dut_state 调试手段"
+          ],
+          "source_files": [
+            "rtl/tb_aes_core.v",
+            "rtl/tb_aes_encipher_block.v",
+            "rtl/tb_aes_decipher_block.v",
+            "rtl/tb_aes_key_mem.v"
+          ],
+          "minimal_modules": [
+            "core 测试",
+            "encipher/decipher 测试",
+            "key_mem 测试",
+            "dump_dut_state 调试"
+          ],
+          "practice_task": "选 tb_aes_key_mem 或 tb_aes_encipher_block 运行，说明它如何在不依赖顶层的情况下单独验证该模块。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "面向 ASIC 的设计取舍",
+          "order": 4,
+          "filename": "u3-l4-asic-design-tradeoffs.md",
+          "level": "advanced",
+          "topic": "从源码角度分析低功耗/小面积的设计取舍：共享单个 S-box、SubBytes 逐字 4 拍处理、统一写使能寄存器、异步复位与同步风格，以及对吞吐（0.06 Gbps）和关键路径的影响。",
+          "learning_goals": [
+            "理解“资源共享换面积/功耗”的取舍",
+            "看懂逐字 SubBytes 的面积代价与时序代价",
+            "评估对吞吐与关键路径的影响"
+          ],
+          "source_files": [
+            "rtl/aes_core.v",
+            "rtl/aes_encipher_block.v",
+            "rtl/aes_key_mem.v",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "S-box 资源共享",
+            "逐字 SubBytes 的面积/时序权衡",
+            "寄存器写使能与时钟风格",
+            "吞吐与关键路径"
+          ],
+          "practice_task": "列出本设计中至少 3 处“用时间换面积”的取舍点，并讨论若要提升吞吐（如流水线化）需要改动哪些模块。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "二次开发与扩展实践",
+          "order": 5,
+          "filename": "u3-l5-customization-and-extensions.md",
+          "level": "advanced",
+          "topic": "讲解如何在现有架构上做扩展：新增/替换一组 NIST 测试向量、调整地址映射、尝试流水线提升吞吐，或把核接到其他总线，并强调改动的依赖与回归测试。",
+          "learning_goals": [
+            "学会向 aes_test 增加自检用例",
+            "理解改动地址映射/接口的连锁影响",
+            "掌握用现有 testbench 做回归验证"
+          ],
+          "source_files": [
+            "rtl/aes.v",
+            "rtl/tb_aes.v",
+            "rtl/aes_core.v"
+          ],
+          "minimal_modules": [
+            "增加 NIST 测试用例",
+            "地址映射/接口改动",
+            "流水线化思路",
+            "回归测试"
+          ],
+          "practice_task": "在 aes_test 中新增一个 ECB 解密用例（用现有密钥/密文反推明文），跑通后确认 error_ctr 仍为 0。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
