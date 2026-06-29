@@ -1,0 +1,944 @@
+{
+  "project": "uhd",
+  "head": "2af4ddb96219a99d2300804830e0971f79557b23",
+  "rationale": "UHD 是 Ettus Research USRP SDR 平台的官方驱动，代码量极大、横跨 C++ 主机驱动、Python 绑定、嵌入式 MPM、固件与 FPGA 四大组件。学习顺序遵循「先会跑、再读懂、后能改」的递进逻辑。第一单元(beginner)让读者从零认识项目定位、仓库结构、CMake 构建与公共 API 头文件布局，并通过命令行工具和 rx_samples_to_file 示例建立直观感受。第二单元(intermediate)切入核心驱动主线：设备发现/工厂机制 → device_addr → multi_usrp 高层 API → property_tree → 流式 API → 收发实践 → 多设备同步与 GPSDO。第三单元(intermediate)专门讲 RFNoC 现代架构：rfnoc_graph 会话、block 控制器与注册表、流图连接/commit、mb_controller、experts 属性传播以及常用块。第四单元(advanced)深入底层机制：样本格式 convert、传输层、VRT 包协议、MPMD 设备实现、dboard 子板与前端抽象。第五单元(advanced)面向二次开发与工程化：C API、Python 绑定、MPM 嵌入式、校准子系统、测试体系与扩展开发。各讲义严格依赖前序讲义形成的概念链，避免知识跳跃，且只引用真实存在并被确认的源码文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 UHD 与运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "UHD 项目总览：USRP 与 UHD 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 USRP SDR 硬件平台与 UHD 驱动的关系，说明 UHD 的定位、用途、许可证与版本现状。",
+          "learning_goals": [
+            "理解 USRP 硬件与 UHD 软件的分层关系",
+            "了解 UHD 的开源许可证与支持平台",
+            "知道 UHD 版本与 CHANGELOG 的意义"
+          ],
+          "source_files": [
+            "README.md",
+            "CHANGELOG",
+            "LICENSE.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "版本与许可证"
+          ],
+          "practice_task": "阅读 README 与 CHANGELOG 顶部，用自己的话写一段 200 字的 UHD 项目简介，并记录当前主版本号。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与四大组件",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解 host / mpm / firmware / fpga / images / tools 六大目录各自的职责与代码组织。",
+          "learning_goals": [
+            "区分 host 主机驱动、mpm 嵌入式管理、firmware 固件、fpga 镜像",
+            "理解各组件如何协作构成完整 USRP 系统",
+            "建立对仓库顶层布局的全局认知"
+          ],
+          "source_files": [
+            "README.md",
+            "host/README.md",
+            "host/CMakeLists.txt",
+            "mpm/CMakeLists.txt",
+            "tools/README.md"
+          ],
+          "minimal_modules": [
+            "host",
+            "mpm",
+            "firmware",
+            "fpga",
+            "images",
+            "tools"
+          ],
+          "practice_task": "绘制一张 UHD 仓库目录树，标注每个顶层目录的职责，并指出哪些代码运行在主机、哪些运行在设备端。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统：CMake 构建流程与依赖",
+          "order": 3,
+          "filename": "u1-l3-build-system-cmake.md",
+          "level": "beginner",
+          "topic": "讲解 host/ 的 CMake 构建系统：构建类型、版本变量、依赖与编译产物（libuhd / uhdlib）。",
+          "learning_goals": [
+            "掌握 host/CMakeLists.txt 的整体结构",
+            "理解 UHD 版本变量与 Release 构建默认行为",
+            "知道 libuhd 与 uhdlib 的区别"
+          ],
+          "source_files": [
+            "host/CMakeLists.txt",
+            "host/cmake",
+            "host/lib/CMakeLists.txt",
+            "host/include/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "CMake 构建配置",
+            "版本管理",
+            "依赖检测"
+          ],
+          "practice_task": "在构建目录运行 cmake 配置并查看输出，列出本次构建启用的组件（对照 uhd_config_info --enabled-components）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "公共 API 头文件全景",
+          "order": 4,
+          "filename": "u1-l4-public-api-overview.md",
+          "level": "beginner",
+          "topic": "导览 host/include/uhd/ 下的公共头文件布局：config、version、device、stream、convert、types、usrp、rfnoc 等模块入口。",
+          "learning_goals": [
+            "认识 UHD 公共 API 的命名空间与头文件组织",
+            "区分 config.hpp / config.h 与 version.hpp.in 的作用",
+            "建立 C++ 与 C 两套 API 的映射概念"
+          ],
+          "source_files": [
+            "host/include/uhd.h",
+            "host/include/uhd/config.hpp",
+            "host/include/uhd/version.hpp.in",
+            "host/include/uhd/build_info.hpp",
+            "host/include/uhd/device.hpp"
+          ],
+          "minimal_modules": [
+            "include/uhd",
+            "config",
+            "version",
+            "build_info"
+          ],
+          "practice_task": "在 host/include/uhd/ 下找出 5 个最核心的头文件，说明它们分别属于哪个子模块（types/usrp/rfnoc/transport）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "命令行工具导览：find / probe / config_info",
+          "order": 5,
+          "filename": "u1-l5-cli-tools.md",
+          "level": "beginner",
+          "topic": "讲解 uhd_config_info、uhd_find_devices、uhd_usrp_probe 三个实用工具的入口与作用。",
+          "learning_goals": [
+            "掌握 uhd_config_info 输出的构建与路径信息",
+            "理解 uhd_find_devices 如何发现设备",
+            "学会用 uhd_usrp_probe 查看设备子板与能力"
+          ],
+          "source_files": [
+            "host/utils/uhd_config_info.cpp",
+            "host/utils/uhd_find_devices.cpp",
+            "host/utils/uhd_usrp_probe.cpp"
+          ],
+          "minimal_modules": [
+            "uhd_config_info",
+            "uhd_find_devices",
+            "uhd_usrp_probe"
+          ],
+          "practice_task": "运行 uhd_config_info --print-all 并解释每一项输出的含义；若无硬件，阅读源码列出它支持的全部命令行选项。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l6",
+          "title": "第一个示例：rx_samples_to_file",
+          "order": 6,
+          "filename": "u1-l6-first-example-rx-to-file.md",
+          "level": "beginner",
+          "topic": "以 rx_samples_to_file 为例，串讲一个完整 UHD 接收程序的主流程：参数解析、构造设备、配置、接收、写文件。",
+          "learning_goals": [
+            "看懂 UHD 示例程序的骨架结构",
+            "理解 safe_main、信号处理与停止标志",
+            "建立从示例到源码的阅读路径"
+          ],
+          "source_files": [
+            "host/examples/rx_samples_to_file.cpp"
+          ],
+          "minimal_modules": [
+            "示例主流程",
+            "boost::program_options",
+            "safe_main"
+          ],
+          "practice_task": "对照源码画出 rx_samples_to_file 的调用流程图，标出设备构造、采样率设置、接收循环三个阶段。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心驱动与流式传输",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "设备发现与工厂模式",
+          "order": 1,
+          "filename": "u2-l1-device-factory.md",
+          "level": "intermediate",
+          "topic": "讲解 uhd::device 的 register_device / find / make 三件套，理解设备自注册与发现-制造链路。",
+          "learning_goals": [
+            "掌握 device::register_device 的 find/make/filter 三元组机制",
+            "理解 find 与 make 如何过滤并选择设备",
+            "认识设备自注册（静态块）的实现方式"
+          ],
+          "source_files": [
+            "host/include/uhd/device.hpp",
+            "host/lib/device.cpp"
+          ],
+          "minimal_modules": [
+            "device.hpp",
+            "device.cpp",
+            "register_device"
+          ],
+          "practice_task": "在源码中找到所有调用 register_device 的设备实现文件，列出它们各自对应的设备类型。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "设备地址 device_addr_t 与传输类型",
+          "order": 2,
+          "filename": "u2-l2-device-addr.md",
+          "level": "intermediate",
+          "topic": "讲解 device_addr_t 键值对地址结构、设备过滤类型（ANY/USRP/CLOCK）以及设备哈希与去重逻辑。",
+          "learning_goals": [
+            "理解 device_addr_t 作为查找/制造提示的作用",
+            "掌握 device_filter_t 三种过滤模式",
+            "了解设备哈希在去重中的作用"
+          ],
+          "source_files": [
+            "host/include/uhd/types/device_addr.hpp",
+            "host/lib/types/device_addr.cpp",
+            "host/include/uhd/device.hpp",
+            "host/lib/device.cpp"
+          ],
+          "minimal_modules": [
+            "device_addr_t",
+            "device_filter_t",
+            "device hash"
+          ],
+          "practice_task": "编写一段构造 device_addr_t 的伪代码，添加 type/addr 等键，并解释这些键如何影响 find 结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "multi_usrp 高层 API",
+          "order": 3,
+          "filename": "u2-l3-multi-usrp-api.md",
+          "level": "intermediate",
+          "topic": "讲解 multi_usrp 作为易用封装层的设计：make、子设备规格、收发配置、多板多通道映射规则。",
+          "learning_goals": [
+            "理解 multi_usrp 封装 device 与 property_tree 的目的",
+            "掌握 set_rx/tx_subdev_spec 与通道映射规则",
+            "了解多板同步对采样率与时间的要求"
+          ],
+          "source_files": [
+            "host/include/uhd/usrp/multi_usrp.hpp",
+            "host/lib/usrp/multi_usrp.cpp"
+          ],
+          "minimal_modules": [
+            "multi_usrp.hpp",
+            "multi_usrp.cpp",
+            "subdev_spec"
+          ],
+          "practice_task": "阅读 multi_usrp.hpp 文档注释，写出使用两块板子做 2 通道接收的最小配置伪代码（对照示例注释）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "属性树 property_tree 机制",
+          "order": 4,
+          "filename": "u2-l4-property-tree.md",
+          "level": "intermediate",
+          "topic": "讲解 property_tree 作为设备配置中枢的层级存储模型，以及 multi_usrp 如何映射到树节点。",
+          "learning_goals": [
+            "理解 property_tree 的树状键值存储结构",
+            "掌握 get_tree() 访问底层配置的方式",
+            "认识属性树与 multi_usrp API 的对应关系"
+          ],
+          "source_files": [
+            "host/include/uhd/property_tree.hpp",
+            "host/lib/property_tree.cpp",
+            "host/include/uhd/usrp/multi_usrp.hpp"
+          ],
+          "minimal_modules": [
+            "property_tree",
+            "property_tree.cpp"
+          ],
+          "practice_task": "通过 get_tree() 列出一个 USRP 的若干关键路径（如 mboards/0/rx_frontends），并解释其层级含义。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "流式 API：stream_args_t 与收发流器",
+          "order": 5,
+          "filename": "u2-l5-stream-api.md",
+          "level": "intermediate",
+          "topic": "讲解 stream.hpp 的 stream_args_t（cpu/otw 格式、通道）、rx_streamer / tx_streamer 接口与 get_rx/tx_stream。",
+          "learning_goals": [
+            "理解 cpu_format 与 otw_format 的含义与命名约定",
+            "掌握 stream_args_t.channels 的多通道映射",
+            "了解 rx_streamer/tx_streamer 的核心方法"
+          ],
+          "source_files": [
+            "host/include/uhd/stream.hpp",
+            "host/lib/stream.cpp",
+            "host/include/uhd/device.hpp"
+          ],
+          "minimal_modules": [
+            "stream.hpp",
+            "stream_args_t",
+            "rx_streamer",
+            "tx_streamer"
+          ],
+          "practice_task": "编写一个 stream_args_t，设置 fc32/sc16 与通道 {0,1}，并说明它将产生几个接收缓冲。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "接收流与元数据",
+          "order": 6,
+          "filename": "u2-l6-rx-stream-metadata.md",
+          "level": "intermediate",
+          "topic": "结合 rx_samples_to_file 深入 recv 循环、rx_metadata_t（时间戳、溢出、错误标志）与停止处理。",
+          "learning_goals": [
+            "掌握 rx_streamer::recv 的缓冲与超时用法",
+            "理解 rx_metadata_t 的各项标志含义",
+            "学会处理溢出与信号中断"
+          ],
+          "source_files": [
+            "host/examples/rx_samples_to_file.cpp",
+            "host/include/uhd/types/metadata.hpp",
+            "host/include/uhd/stream.hpp"
+          ],
+          "minimal_modules": [
+            "rx_streamer::recv",
+            "rx_metadata_t",
+            "接收循环"
+          ],
+          "practice_task": "改造接收循环：当出现溢出标志时打印告警并继续，记录累计溢出次数。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "发送流与波形生成",
+          "order": 7,
+          "filename": "u2-l7-tx-stream-waveforms.md",
+          "level": "intermediate",
+          "topic": "以 tx_waveforms 讲解发送侧：wavetable 波形表、tx_metadata_t、send 循环与欠流处理。",
+          "learning_goals": [
+            "掌握 tx_streamer::send 与 tx_metadata_t 的用法",
+            "理解发送侧的 has_time_spec 与时间戳",
+            "认识 underflow（欠流）异步消息"
+          ],
+          "source_files": [
+            "host/examples/tx_waveforms.cpp",
+            "host/examples/tx_bursts.cpp",
+            "host/include/uhd/stream.hpp"
+          ],
+          "minimal_modules": [
+            "tx_streamer::send",
+            "tx_metadata_t",
+            "wavetable"
+          ],
+          "practice_task": "基于 tx_waveforms 修改波形类型与幅度，观察发送行为；若无硬件，绘制发送主循环的状态流转图。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "多设备同步与时钟/PPS",
+          "order": 8,
+          "filename": "u2-l8-sync-pps-gpsdo.md",
+          "level": "intermediate",
+          "topic": "讲解多设备时间同步：set_time_unknown_pps、PPS 输入、GPSDO 传感器与同步示例。",
+          "learning_goals": [
+            "掌握 set_time_next_pps / set_time_unknown_pps 的同步原理",
+            "理解 PPS 与 10 MHz 参考时钟的作用",
+            "了解 GPSDO 传感器的读取方式"
+          ],
+          "source_files": [
+            "host/examples/sync_to_gps.cpp",
+            "host/examples/test_clock_synch.cpp",
+            "host/examples/test_pps_input.cpp"
+          ],
+          "minimal_modules": [
+            "时间同步",
+            "PPS",
+            "GPSDO 传感器"
+          ],
+          "practice_task": "对照 sync_to_gps.cpp 写出多板时间对齐的关键步骤序列，标注每一步对应的 API 调用。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "RFNoC 现代架构",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "RFNoC 架构与 rfnoc_graph 会话",
+          "order": 1,
+          "filename": "u3-l1-rfnoc-graph-session.md",
+          "level": "intermediate",
+          "topic": "讲解 RFNoC（RF Network on Chip）理念与 rfnoc_graph 作为 device 超集的会话入口。",
+          "learning_goals": [
+            "理解 RFNoC 的数据流图与块网络模型",
+            "掌握 rfnoc_graph::make 创建会话的方式",
+            "认识 rfnoc_graph 相对于 device 的扩展能力"
+          ],
+          "source_files": [
+            "host/include/uhd/rfnoc_graph.hpp",
+            "host/lib/rfnoc/rfnoc_graph.cpp"
+          ],
+          "minimal_modules": [
+            "rfnoc_graph.hpp",
+            "rfnoc_graph::make"
+          ],
+          "practice_task": "对比 device::make 与 rfnoc_graph::make，列出 rfnoc_graph 独有的方法（connect/get_block/commit 等）。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Block 控制器与注册表",
+          "order": 2,
+          "filename": "u3-l2-block-controller-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 noc_block_base 基类、block_id 标识、blockdef 描述与 registry 工厂机制。",
+          "learning_goals": [
+            "理解 noc_block_base 作为块控制器基类的作用",
+            "掌握 block_id_t 的命名与寻址规则",
+            "了解 blockdef YAML 与 registry 工厂如何驱动块的实例化"
+          ],
+          "source_files": [
+            "host/include/uhd/rfnoc/noc_block_base.hpp",
+            "host/include/uhd/rfnoc/block_id.hpp",
+            "host/include/uhd/rfnoc/blockdef.hpp",
+            "host/include/uhd/rfnoc/registry.hpp"
+          ],
+          "minimal_modules": [
+            "noc_block_base",
+            "block_id",
+            "blockdef",
+            "registry"
+          ],
+          "practice_task": "在 host/include/uhd/rfnoc/blocks/ 下找出几个块定义 YAML，解释 block_id 与 blockdef 的对应关系。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "流图连接与 commit",
+          "order": 3,
+          "filename": "u3-l3-graph-connect-commit.md",
+          "level": "intermediate",
+          "topic": "讲解 rfnoc_graph 的 connect（块-块、块-流器）、属性传播与 commit 提交流图。",
+          "learning_goals": [
+            "掌握 connect 的多种重载（块到块、块到流器）",
+            "理解 commit 触发属性传播与资源分配",
+            "认识 release 与重新配置的关系"
+          ],
+          "source_files": [
+            "host/lib/rfnoc/graph.cpp",
+            "host/lib/rfnoc/block_container.cpp",
+            "host/include/uhd/rfnoc_graph.hpp"
+          ],
+          "minimal_modules": [
+            "graph::connect",
+            "graph::commit",
+            "block_container"
+          ],
+          "practice_task": "编写一个 RFNoC 流图伪代码：Radio → DDC → rx_streamer，最后调用 commit 并解释提交前后的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "mb_controller 主板控制器",
+          "order": 4,
+          "filename": "u3-l4-mb-controller.md",
+          "level": "intermediate",
+          "topic": "讲解 mb_controller 对主板时间、参考、时钟与 radio 的统一管理接口。",
+          "learning_goals": [
+            "理解 mb_controller 对多主板管理的抽象",
+            "掌握时间/PPS 与 radio 控制接口",
+            "认识 get_mb_controller 与 synchronize 的关系"
+          ],
+          "source_files": [
+            "host/include/uhd/rfnoc/mb_controller.hpp",
+            "host/lib/rfnoc/mb_controller.cpp",
+            "host/include/uhd/rfnoc_graph.hpp"
+          ],
+          "minimal_modules": [
+            "mb_controller.hpp",
+            "mb_controller.cpp"
+          ],
+          "practice_task": "通过 mb_controller 写出获取/设置主板时间并触发同步的最小调用序列。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "属性传播与 experts 框架",
+          "order": 5,
+          "filename": "u3-l5-experts-property-propagation.md",
+          "level": "intermediate",
+          "topic": "讲解 experts 框架如何驱动 RFNoC 节点间的属性依赖与自动传播。",
+          "learning_goals": [
+            "理解 expert_container 与 expert_factory 的依赖图模型",
+            "掌握节点属性变更触发传播的机制",
+            "认识 experts 与 property_tree 的协作"
+          ],
+          "source_files": [
+            "host/include/uhd/experts/expert_container.hpp",
+            "host/include/uhd/experts/expert_factory.hpp",
+            "host/include/uhd/experts/expert_nodes.hpp",
+            "host/lib/experts/expert_container.cpp"
+          ],
+          "minimal_modules": [
+            "expert_container",
+            "expert_factory",
+            "expert_nodes"
+          ],
+          "practice_task": "梳理一个属性依赖（如采样率 → DSP 缩放）的传播链路，画出 experts 节点依赖图。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "常用 RFNoC 块：Radio / DDC / DUC / FFT / Replay",
+          "order": 6,
+          "filename": "u3-l6-common-rfnoc-blocks.md",
+          "level": "intermediate",
+          "topic": "导览几个核心 RFNoC 块控制器：radio、DDC、DUC、FFT、replay 的接口与用途。",
+          "learning_goals": [
+            "理解 radio_control 的射频控制能力",
+            "掌握 DDC/DUC 数字上下变频块的作用",
+            "了解 FFT 与 replay 块的使用场景"
+          ],
+          "source_files": [
+            "host/lib/rfnoc/radio_control_impl.cpp",
+            "host/lib/rfnoc/ddc_block_control.cpp",
+            "host/lib/rfnoc/duc_block_control.cpp",
+            "host/lib/rfnoc/fft_block_control.cpp",
+            "host/lib/rfnoc/replay_block_control.cpp"
+          ],
+          "minimal_modules": [
+            "radio_control",
+            "ddc",
+            "duc",
+            "fft",
+            "replay"
+          ],
+          "practice_task": "挑选一个块控制器（如 DDC），列出它的关键公共方法，并说明如何在流图中配置它。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "底层机制深入",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "样本格式转换 convert 子系统",
+          "order": 1,
+          "filename": "u4-l1-convert-subsystem.md",
+          "level": "advanced",
+          "topic": "讲解 convert 的 id_type 转换标识、优先级、get_converter 工厂与 SSE2/AVX2/NEON 优化实现。",
+          "learning_goals": [
+            "理解 cpu_format 与 otw_format 之间的转换注册机制",
+            "掌握 converter::id_type 与优先级的作用",
+            "认识 SSE2/AVX2/NEON 向量化优化的组织方式"
+          ],
+          "source_files": [
+            "host/include/uhd/convert.hpp",
+            "host/lib/convert/convert_impl.cpp",
+            "host/lib/convert/convert_common.hpp",
+            "host/lib/convert/convert_item32.cpp"
+          ],
+          "minimal_modules": [
+            "convert.hpp",
+            "convert_impl",
+            "id_type",
+            "向量优化"
+          ],
+          "practice_task": "在 host/lib/convert/ 下统计为 fc32↔sc16 提供了多少种优先级实现（通用/SSE2/AVX2），并说明选择逻辑。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "传输层：UDP zero-copy / USB / DPDK",
+          "order": 2,
+          "filename": "u4-l2-transport-layer.md",
+          "level": "advanced",
+          "topic": "讲解 transport 层的多种传输实现：UDP zero-copy、USB(libusb)、DPDK、NIRIO 的选型与抽象。",
+          "learning_goals": [
+            "理解 zero_copy 抽象与帧缓冲模型",
+            "掌握 UDP/USB/DPDK 三类传输的特点",
+            "了解传输适配器如何被设备层选择"
+          ],
+          "source_files": [
+            "host/include/uhd/transport/udp_zero_copy.hpp",
+            "host/lib/transport/udp_zero_copy.cpp",
+            "host/lib/transport/udp_simple.cpp",
+            "host/include/uhd/transport/usb_zero_copy.hpp",
+            "host/include/uhd/transport/zero_copy.hpp"
+          ],
+          "minimal_modules": [
+            "udp_zero_copy",
+            "usb_zero_copy",
+            "zero_copy"
+          ],
+          "practice_task": "对比 udp_zero_copy 与 udp_simple 的差异，说明 zero-copy 在高吞吐场景下的优势。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "VRT 包协议与 super packet handler",
+          "order": 3,
+          "filename": "u4-l3-vrt-packets.md",
+          "level": "advanced",
+          "topic": "讲解 VRT（VITA Radio Transport）包格式、if_packet 解析与 super_recv/send 批量包处理器。",
+          "learning_goals": [
+            "理解 vrt_if_packet 的包格式与解析接口",
+            "掌握 super_recv_packet_handler 的批量接收逻辑",
+            "认识控制包与数据包的区别"
+          ],
+          "source_files": [
+            "host/include/uhd/transport/vrt_if_packet.hpp",
+            "host/lib/transport/super_recv_packet_handler.hpp",
+            "host/lib/transport/super_send_packet_handler.hpp",
+            "host/lib/transport/gen_vrt_if_packet.py"
+          ],
+          "minimal_modules": [
+            "vrt_if_packet",
+            "super_recv_packet_handler",
+            "super_send_packet_handler"
+          ],
+          "practice_task": "阅读 gen_vrt_if_packet.py 与 vrt_if_packet.hpp，描述 VRT 包头部包含的关键字段。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "MPMD 设备实现",
+          "order": 4,
+          "filename": "u4-l4-mpmd-device.md",
+          "level": "advanced",
+          "topic": "讲解 MPMD（Module Peripheral Manager Device）作为现代设备（N/X 系列）的实现：发现、链接、属性树构建。",
+          "learning_goals": [
+            "理解 mpmd_impl 作为现代设备驱动的角色",
+            "掌握 mpmd_find 的设备发现流程",
+            "了解 mpmd_link_if_mgr 与属性树构建"
+          ],
+          "source_files": [
+            "host/lib/usrp/mpmd/mpmd_impl.cpp",
+            "host/lib/usrp/mpmd/mpmd_impl.hpp",
+            "host/lib/usrp/mpmd/mpmd_find.cpp",
+            "host/lib/usrp/mpmd/mpmd_link_if_mgr.cpp"
+          ],
+          "minimal_modules": [
+            "mpmd_impl",
+            "mpmd_find",
+            "mpmd_link_if_mgr"
+          ],
+          "practice_task": "梳理 MPMD 设备从 find 到 make 的完整链路，标注与 MPM 服务通信的关键环节。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "dboard 子板与前端抽象",
+          "order": 5,
+          "filename": "u4-l5-dboard-frontend.md",
+          "level": "advanced",
+          "topic": "讲解 daughterboard（子板）抽象、dboard_manager、fe_connection 前端连接与 cores DSP 核。",
+          "learning_goals": [
+            "理解 dboard_manager 对子板的生命周期管理",
+            "掌握 fe_connection 描述射频前端连接的方式",
+            "认识 cores/ 下 DSP 核（rx/tx dsp、gpio）的作用"
+          ],
+          "source_files": [
+            "host/include/uhd/usrp/dboard_manager.hpp",
+            "host/lib/usrp/dboard_manager.cpp",
+            "host/lib/usrp/fe_connection.cpp",
+            "host/lib/usrp/cores/rx_dsp_core_3000.cpp",
+            "host/lib/usrp/dboard/db_basic_and_lf.cpp"
+          ],
+          "minimal_modules": [
+            "dboard_manager",
+            "fe_connection",
+            "cores"
+          ],
+          "practice_task": "挑选一个具体子板实现（如 db_basic_and_lf），说明它如何注册增益/频率范围并对接 dboard_manager。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "扩展、绑定与工程化",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "C API 绑定与错误处理",
+          "order": 1,
+          "filename": "u5-l1-c-api-binding.md",
+          "level": "advanced",
+          "topic": "讲解 UHD 的 C 语言 API：usrp.h、error.h 以及 usrp_c.cpp 封装层与异常到错误码的转换。",
+          "learning_goals": [
+            "理解 C API 如何包装 C++ multi_usrp",
+            "掌握 error.h 的错误码与最后错误信息机制",
+            "认识 usrp_c.cpp 中句柄与生命周期管理"
+          ],
+          "source_files": [
+            "host/include/uhd/usrp/usrp.h",
+            "host/include/uhd/error.h",
+            "host/lib/usrp/usrp_c.cpp",
+            "host/lib/error_c.cpp"
+          ],
+          "minimal_modules": [
+            "usrp.h",
+            "error.h",
+            "usrp_c.cpp"
+          ],
+          "practice_task": "用 C API 编写一段最小程序：uhd_usrp_find → 打印设备地址 → 释放，并说明错误码如何被读取。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Python 绑定 pyuhd 与 pybind11",
+          "order": 2,
+          "filename": "u5-l2-python-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 host/python 下基于 pybind11 的 Python 绑定结构、模块组织与 uhd 包的导出方式。",
+          "learning_goals": [
+            "理解 pyuhd.cpp 如何聚合各子模块绑定",
+            "掌握 pybind11 包装 multi_usrp/rfnoc 的方式",
+            "认识纯 Python 模块（chdr.py, rfnoc.py）与绑定模块的分工"
+          ],
+          "source_files": [
+            "host/python/pyuhd.cpp",
+            "host/python/uhd/__init__.py.in",
+            "host/python/uhd/usrp",
+            "host/lib/usrp/multi_usrp_python.cpp",
+            "host/lib/rfnoc/radio_control_python.hpp"
+          ],
+          "minimal_modules": [
+            "pyuhd.cpp",
+            "python/uhd",
+            "pybind11 绑定"
+          ],
+          "practice_task": "梳理 Python uhd 包的模块树，区分哪些来自 C++ 绑定、哪些是纯 Python 实现，并说明导出入口。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "MPM 嵌入式外设管理",
+          "order": 3,
+          "filename": "u5-l3-mpm-embedded.md",
+          "level": "advanced",
+          "topic": "讲解 mpm/ 组件：运行在设备端的 Module Peripheral Manager，管理外设、与主机 MPMD 协作。",
+          "learning_goals": [
+            "理解 MPM 在设备端的角色与进程模型",
+            "掌握 usrp_mpm / usrp_hwd 的组织方式",
+            "认识 MPM 与主机 MPMD 的通信边界"
+          ],
+          "source_files": [
+            "mpm/CMakeLists.txt",
+            "mpm/python/usrp_hwd.py",
+            "mpm/python/usrp_mpm",
+            "mpm/tests"
+          ],
+          "minimal_modules": [
+            "mpm 顶层",
+            "usrp_mpm",
+            "usrp_hwd"
+          ],
+          "practice_task": "梳理 MPM 的目录结构，标注它管理的外设类别（射频/时钟/网络），并说明它与主机 MPMD 的接口分界。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "校准子系统与校准工具",
+          "order": 4,
+          "filename": "u5-l4-calibration.md",
+          "level": "advanced",
+          "topic": "讲解 host/lib/cal 与 include/uhd/cal 的校准数据模型（flatbuffers）、数据库与 uhd_cal_* 校准工具。",
+          "learning_goals": [
+            "理解 cal database 与 container 的校准数据存储",
+            "掌握 DSA/IQ/IQ-DC/功率校准的数据类型",
+            "认识 uhd_cal_tx_iq_balance 等工具的用途"
+          ],
+          "source_files": [
+            "host/include/uhd/cal/database.hpp",
+            "host/lib/cal/database.cpp",
+            "host/include/uhd/cal/iq_cal.hpp",
+            "host/utils/uhd_cal_tx_iq_balance.cpp",
+            "host/utils/usrp_cal_utils.hpp"
+          ],
+          "minimal_modules": [
+            "cal database",
+            "iq_cal",
+            "uhd_cal 工具"
+          ],
+          "practice_task": "说明四类校准数据（DSA/IQ/IQ-DC/功率）分别修正何种失真，并指出其 flatbuffers 源文件。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "测试体系与质量保障",
+          "order": 5,
+          "filename": "u5-l5-testing.md",
+          "level": "advanced",
+          "topic": "讲解 host/tests 的单元测试组织、常用测试框架用法与典型测试用例。",
+          "learning_goals": [
+            "理解 host/tests 的测试组织与构建方式",
+            "掌握 block_id_test / buffer_test 等典型用例的测试目标",
+            "认识测试如何覆盖转换、RFNoC、校准等子系统"
+          ],
+          "source_files": [
+            "host/tests/CMakeLists.txt",
+            "host/tests/block_id_test.cpp",
+            "host/tests/buffer_test.cpp",
+            "host/tests/cal_database_test.cpp",
+            "host/tests/client_zero_test.cpp"
+          ],
+          "minimal_modules": [
+            "tests 构建",
+            "单元测试用例"
+          ],
+          "practice_task": "挑选一个测试（如 buffer_test），说明它验证的目标、断言方式与被测模块的对应关系。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "扩展开发与二次开发指南",
+          "order": 6,
+          "filename": "u5-l6-extension-development.md",
+          "level": "advanced",
+          "topic": "讲解 extension 机制、extension_example 示例与项目编码/贡献规范，指导二次开发。",
+          "learning_goals": [
+            "理解 extension 扩展点的注册与加载方式",
+            "掌握 extension_example 的结构与构建",
+            "认识 CODING.md / CONTRIBUTING.md 的开发规范"
+          ],
+          "source_files": [
+            "host/lib/extension/extension.cpp",
+            "host/examples/extension_example/CMakeLists.txt",
+            "CODING.md",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "extension",
+            "extension_example",
+            "编码规范"
+          ],
+          "practice_task": "基于 extension_example 写出新增一个扩展的最小步骤清单，并指出需要在 CMake 中登记的位置。",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
