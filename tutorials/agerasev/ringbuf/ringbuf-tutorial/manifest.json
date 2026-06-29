@@ -1,0 +1,927 @@
+{
+  "project": "ringbuf",
+  "head": "7e15db42ba533ecbe205e9aa4c8f04024009f411",
+  "rationale": "ringbuf 是一个「无锁 SPSC FIFO 环形缓冲区」库，技术栈横跨 no_std 内存管理、无锁并发原子、unsafe 抽象、trait 委托组合、async/await 和阻塞同步，且工作区包含核心 crate 及 async/blocking 两个派生 crate，因此学习路线按「先认识再深入、先原理再并发、先核心再派生、最后扩展」的顺序组织。第一单元让读者从零认识项目定位、快速跑通 push/pop、看清三大 crate 的关系与构建方式；第二单元进入最关键的底层原理——双索引 2*capacity 模运算、Storage 抽象、LocalRb/SharedRb 与拆分机制，这是理解一切后续行为的基石；第三单元系统讲解 Observer/Producer/Consumer/RingBuffer 四大核心 trait 及 Delegate 委托组合机制；第四单元讲清三种同步策略包装器 Direct/Frozen/Caching 及其背后的 Wrap/RbRef 通用抽象；第五单元进入专家级难点——无锁原子顺序、hold flags 的 SPSC 保证、MaybeUninit 的 unsafe 内存安全；第六、七单元分别把能力扩展到 async-ringbuf（AtomicWaker 唤醒 + Future 取消安全 + Stream/Sink）和 ringbuf-blocking（Semaphore 抽象 + 超时阻塞 + io 集成）；第八单元面向二次开发，覆盖 feature flags/no_std、自定义 Storage、宏系统、std::io 消息传递与 Miri 测试。讲义之间存在清晰的依赖链：原理依赖上手、trait 依赖原理、包装器依赖 trait、并发安全依赖包装器、派生 crate 依赖核心与并发基础、扩展依赖 Storage 与宏。共 30 篇，每篇只讲一个独立主题、2~5 个最小模块、1 个可操作实践任务，引用真实源码文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 ringbuf 与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位：什么是无锁 SPSC 环形缓冲区",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ringbuf 的定位、解决的核心问题（单生产者单消费者 FIFO 队列）、关键特性（无锁、任意类型、no_std/no-alloc、async/blocking 派生）。",
+          "learning_goals": [
+            "理解 SPSC FIFO 环形缓冲区的含义与典型应用场景",
+            "说出 ringbuf 的核心特性（无锁、直接内存访问、overwrite、多存储后端）",
+            "区分核心 crate 与 async/blocking 两个派生 crate"
+          ],
+          "source_files": [
+            "README.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf",
+            "README"
+          ],
+          "practice_task": "阅读 README，用一句话写出 ringbuf 解决什么问题，并至少列出 4 个它宣称的特性；在本地用 cargo doc 打开文档浏览顶层导出类型。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "快速上手：HeapRb 的创建、拆分与 push/pop",
+          "order": 2,
+          "filename": "u1-l2-quickstart-heaprb.md",
+          "level": "beginner",
+          "topic": "用最常见的 HeapRb 跑通一条完整链路：创建缓冲区、split 成 Producer/Consumer、try_push 写入、try_pop 读取，理解满则拒绝、空则返回 None 的行为。",
+          "learning_goals": [
+            "学会用 HeapRb::new(capacity) 创建堆缓冲区",
+            "学会 split() 得到 Producer 与 Consumer",
+            "理解 try_push 在满时返回 Err、try_pop 在空时返回 None 的语义"
+          ],
+          "source_files": [
+            "examples/simple.rs",
+            "README.md",
+            "src/alias.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::HeapRb",
+            "ringbuf::traits",
+            "ringbuf::HeapProd",
+            "ringbuf::HeapCons"
+          ],
+          "practice_task": "照 examples/simple.rs 写一个程序：创建容量为 3 的 HeapRb<i32>，split 后连续 try_push 0..4，打印每次返回值并解释为什么第 4 次失败；再 try_pop 验证 FIFO 顺序。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工作区结构：核心 crate 与 async/blocking 三足鼎立",
+          "order": 3,
+          "filename": "u1-l3-workspace-structure.md",
+          "level": "beginner",
+          "topic": "讲解 Cargo workspace 的组织：根 crate ringbuf 提供无锁核心，async 与 blocking 两个 member crate 在其之上分别加 async 同步和阻塞同步，并复用 workspace.dependencies 指向同一个 ringbuf。",
+          "learning_goals": [
+            "看懂根 Cargo.toml 的 workspace 与 members 配置",
+            "理解 async-ringbuf、ringbuf-blocking 如何依赖核心 ringbuf",
+            "建立「核心 + 派生」的三 crate 心智模型"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "async/Cargo.toml",
+            "blocking/Cargo.toml",
+            "async/src/lib.rs",
+            "blocking/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf",
+            "async_ringbuf",
+            "ringbuf_blocking"
+          ],
+          "practice_task": "画出三个 crate 的依赖关系图（谁依赖谁、各自 crate 名与版本），并说明为什么派生 crate 的 default-features 都不直接开启核心的 std。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建、运行与测试：cargo、features 与示例脚本",
+          "order": 4,
+          "filename": "u1-l4-build-run-test.md",
+          "level": "beginner",
+          "topic": "讲清如何构建与运行 ringbuf：feature flags（std/alloc/portable-atomic/bench/test_local）、examples 的 required-features、scripts 下的 test/miri/bench 脚本与 CI 配置。",
+          "learning_goals": [
+            "掌握用不同 feature 组合构建（如 --no-default-features）",
+            "学会运行各个 example 及单元测试",
+            "了解 miri 用于校验 unsafe、bench 用于性能测试"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "scripts/test.sh",
+            "scripts/miri.sh",
+            "scripts/bench.sh",
+            ".github/workflows/test.yml"
+          ],
+          "minimal_modules": [
+            "cargo features",
+            "examples",
+            "scripts"
+          ],
+          "practice_task": "运行 cargo run --example simple 和 cargo run --example overwrite；再执行 scripts/test.sh，记录输出；尝试用 --no-default-features 构建，观察哪些 example 因 required-features 被跳过。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门：环形缓冲区原理与存储后端",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "核心原理：双索引与 2*capacity 模运算",
+          "order": 1,
+          "filename": "u2-l1-indices-modular-arithmetic.md",
+          "level": "beginner",
+          "topic": "讲清 ringbuf 最核心的设计：read/write 两个索引在 0..2*capacity 区间取值，用模运算区分空（read==write）与满（(write-read)%(2*c)==capacity）而不浪费槽位，以及 ranges() 如何把一段索引切成最多两段连续切片。",
+          "learning_goals": [
+            "理解 read%capacity 与 write%capacity 分别指向最旧元素与下一个空槽",
+            "理解为何用 2*capacity 而非 capacity 作为模数来区分空满",
+            "看懂 ranges() 把环形区间映射到线性两段切片的逻辑"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/rb/utils.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::rb::utils::ranges",
+            "Observer 索引语义"
+          ],
+          "practice_task": "给定 capacity=4，手推下列操作后 read/write 的取值：push 4 个、pop 2 个、再 push 2 个；用纸笔画出哪些槽被占用、ranges() 此时返回的两段范围分别是什么。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Storage 抽象：Array / Heap / Ref / Owning 四种存储后端",
+          "order": 2,
+          "filename": "u2-l2-storage-abstraction.md",
+          "level": "beginner",
+          "topic": "讲解 unsafe trait Storage 如何把「连续存放 MaybeUninit 的内存区」抽象出来，以及 Array（静态数组）、Heap（堆）、Ref（借用切片）、Owning（拥有）四种实现，它们决定了缓冲区能否用于 no_std/no-alloc。",
+          "learning_goals": [
+            "理解 Storage trait 的 as_mut_ptr/len/slice/slice_mut 约定",
+            "区分 Array<T,N>、Heap<T>、Ref<T>、Owning<T> 的内存归属与适用场景",
+            "明白为何用 MaybeUninit 而非 Option 来存放元素"
+          ],
+          "source_files": [
+            "src/storage.rs",
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::storage::Storage",
+            "ringbuf::storage::Array",
+            "ringbuf::storage::Heap",
+            "ringbuf::storage::Ref"
+          ],
+          "practice_task": "用 StaticRb（底层 Array storage）写一个 #![no_std] 风格的小程序：split_ref 后 push/pop，验证它不依赖堆分配；再说明 Heap storage 为何需要 alloc feature。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "LocalRb vs SharedRb 与 HeapRb/StaticRb 别名",
+          "order": 3,
+          "filename": "u2-l3-local-shared-and-aliases.md",
+          "level": "intermediate",
+          "topic": "对比单线程 LocalRb（用 Cell，无原子、无缓存同步）与多线程 SharedRb（用 CachePadded<AtomicUsize>，无锁）两种核心实现，并讲清 alias.rs 如何用类型别名给出常用组合 HeapRb/StaticRb 及其 Prod/Cons。",
+          "learning_goals": [
+            "区分 LocalRb 与 SharedRb 在存储索引方式上的差异",
+            "理解 SharedRb 为何更快/更慢的权衡（缓存同步开销）",
+            "看懂 alias.rs 中 StaticRb/HeapRb 及 StaticProd/HeapCons 的类型定义"
+          ],
+          "source_files": [
+            "src/rb/local.rs",
+            "src/rb/shared.rs",
+            "src/alias.rs",
+            "examples/static.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::LocalRb",
+            "ringbuf::SharedRb",
+            "ringbuf::StaticRb",
+            "ringbuf::HeapRb"
+          ],
+          "practice_task": "分别用 LocalRb 和 SharedRb 各写一段 push/pop 代码；用 SharedRb::split 在两个线程间传递数据（参考 shared.rs doc 示例），体会两者在多线程下的可用性差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Split 与 SplitRef：把缓冲区拆成生产/消费两端",
+          "order": 4,
+          "filename": "u2-l4-split-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 Split（消耗所有权，返回基于 Rc/Arc 的两端）与 SplitRef（借用 &mut self，返回引用两端）两种拆分方式，以及它们各自对应的 Prod/Cons 类型别名。",
+          "learning_goals": [
+            "理解 split() 与 split_ref() 的所有权与生命周期区别",
+            "知道 LocalRb.split 用 Rc、SharedRb.split 用 Arc 的原因",
+            "学会根据是否拥有所有权选择合适的拆分方式"
+          ],
+          "source_files": [
+            "src/traits/split.rs",
+            "src/rb/local.rs",
+            "src/rb/shared.rs",
+            "examples/global_static.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::Split",
+            "ringbuf::traits::SplitRef"
+          ],
+          "practice_task": "对同一个 SharedRb 分别演示 split()（得到 Arc 两端，可跨线程）和 split_ref()（得到引用两端，不跨线程）两种用法；说明 global_static.rs 为何只能用 split_ref。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：核心 trait 体系",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Observer trait：观察缓冲区状态而不触碰数据",
+          "order": 1,
+          "filename": "u3-l1-observer-trait.md",
+          "level": "intermediate",
+          "topic": "讲解 Observer trait 提供的只读能力：capacity、read_index/write_index、unsafe_slices、occupied_len/vacant_len、is_empty/is_full、hold 标志查询，以及这些值在并发下可能不精确的提示。",
+          "learning_goals": [
+            "掌握 Observer 提供的状态查询方法",
+            "理解 occupied_len/vacant_len 用模运算推导占用与空闲数",
+            "意识到并发下这些观测值可能瞬时失效"
+          ],
+          "source_files": [
+            "src/traits/observer.rs",
+            "src/traits/utils.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::Observer",
+            "ringbuf::traits::Based"
+          ],
+          "practice_task": "对一个 SharedRb 的 Producer/Consumer 调用 capacity/occupied_len/vacant_len/is_empty/is_full，在 push/pop 前后打印这些值，验证它们与手动计数一致。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Producer trait：写入单个与批量数据",
+          "order": 2,
+          "filename": "u3-l2-producer-trait.md",
+          "level": "intermediate",
+          "topic": "讲解 Producer trait：set_write_index/advance_write_index、vacant_slices(_mut) 直接访问空闲内存、try_push 单个、push_iter 迭代器批量、push_slice 切片批量（Copy），以及一次提交多次写入以减少同步的设计。",
+          "learning_goals": [
+            "掌握 try_push、push_iter、push_slice 的用法与返回值",
+            "理解 vacant_slices_mut + advance_write_index 的直接写入范式及其安全约定",
+            "明白批量方法如何减少跨核同步开销"
+          ],
+          "source_files": [
+            "src/traits/producer.rs",
+            "src/utils.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::Producer"
+          ],
+          "practice_task": "先用 try_push 逐个写入；再用 push_slice 写入一个 &[i32]；再用 push_iter 写入一个迭代器，比较三者返回的写入数量；解释为什么 push_iter 是「最后一次性提交」。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Consumer trait：读取、窥视、迭代与清理",
+          "order": 3,
+          "filename": "u3-l3-consumer-trait.md",
+          "level": "intermediate",
+          "topic": "讲解 Consumer trait：try_pop/try_peek、as_slices/occupied_slices、pop_slice/peek_slice、pop_iter（带 commit 的惰性移除迭代器）、iter/iter_mut、skip、clear，以及 drop 时的清理。",
+          "learning_goals": [
+            "掌握 try_pop、try_peek、pop_slice、pop_iter 的区别",
+            "理解 PopIter 在 drop/commit 时才真正推进 read 索引的机制",
+            "学会用 skip/clear 安全丢弃并 drop 元素"
+          ],
+          "source_files": [
+            "src/traits/consumer.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::Consumer",
+            "ringbuf::traits::consumer::PopIter",
+            "ringbuf::traits::consumer::IntoIter"
+          ],
+          "practice_task": "向缓冲区写入若干元素后，分别用 try_pop 逐个取、用 pop_iter 迭代取、用 iter 只读遍历；再用 skip 丢弃若干元素并验证剩余数量；体会 pop_iter 的 commit 时机。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "RingBuffer trait 与 overwrite 覆盖写入模式",
+          "order": 4,
+          "filename": "u3-l4-ringbuffer-overwrite.md",
+          "level": "intermediate",
+          "topic": "讲解 RingBuffer trait（Observer+Consumer+Producer 的拥有者超集）：hold_read/hold_write 标志、push_overwrite（满时丢弃最旧元素再写）、push_iter_overwrite、push_slice_overwrite，以及 overwrite 需要独占访问的原因。",
+          "learning_goals": [
+            "理解 RingBuffer 作为拥有者 trait 的定位与 hold 标志语义",
+            "掌握 push_overwrite 的返回值（被覆盖的旧元素）",
+            "明白 overwrite 为何不能在 split 后并发使用"
+          ],
+          "source_files": [
+            "src/traits/ring_buffer.rs",
+            "examples/overwrite.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::RingBuffer"
+          ],
+          "practice_task": "照 examples/overwrite.rs：对未 split 的 HeapRb 连续 push_overwrite 0,1,2，验证返回 Some(0)；再 try_pop 验证缓冲区里只剩最新两个；思考若已 split 还能否调用 push_overwrite。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "委托机制：Delegate traits 与 Based 的组合魔法",
+          "order": 5,
+          "filename": "u3-l5-delegation-based.md",
+          "level": "intermediate",
+          "topic": "讲解 ringbuf 的核心组合机制：Based trait 提供 base()/base_mut() 指向内部实现，DelegateObserver/DelegateProducer/DelegateConsumer/DelegateRingBuffer 通过 blanket impl 自动把方法委托给 base，使包装器无需重复实现所有方法。",
+          "learning_goals": [
+            "理解 Based trait 与 base/base_mut 的作用",
+            "看懂 Delegate* 系列 blanket impl 如何自动转发方法",
+            "明白这一机制如何让 Direct/Frozen/Caching/Async/Blocking 包装器复用核心逻辑"
+          ],
+          "source_files": [
+            "src/traits/utils.rs",
+            "src/traits/observer.rs",
+            "src/traits/producer.rs",
+            "src/traits/consumer.rs",
+            "src/traits/ring_buffer.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::Based",
+            "ringbuf::traits::DelegateObserver",
+            "ringbuf::traits::DelegateProducer",
+            "ringbuf::traits::DelegateConsumer"
+          ],
+          "practice_task": "在源码中追踪：BlockingProd 只实现了 DelegateObserver+DelegateProducer 两个空 trait，却拥有 try_push/push_slice 等方法，画出这些方法是如何通过 blanket impl 委托到内部 Caching 再到 SharedRb 的调用链。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：包装器与同步策略",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Wrap 与 RbRef：统一的环形缓冲区引用抽象",
+          "order": 1,
+          "filename": "u4-l1-wrap-rbref-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 Wrap trait（持有对缓冲区的引用并提供 rb/rb_ref/into_rb_ref）与 unsafe trait RbRef（抽象指向拥有缓冲区的指针，如 &B、Rc<B>、Arc<B>），它们是所有包装器共享的通用抽象基座。",
+          "learning_goals": [
+            "理解 Wrap trait 在包装器层次中的角色",
+            "理解 RbRef 如何抽象「指向缓冲区的智能指针」",
+            "明白为何 RbRef 是 unsafe trait（公平性约定）"
+          ],
+          "source_files": [
+            "src/wrap/traits.rs",
+            "src/rb/traits.rs",
+            "src/wrap/mod.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::wrap::Wrap",
+            "ringbuf::rb::RbRef"
+          ],
+          "practice_task": "在源码中找出为 &B、Rc<B>、Arc<B> 实现 RbRef 的位置；说明 Wrap::into_rb_ref 在销毁包装器时为何要释放 hold（close）。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Direct 包装器：Prod / Cons / Obs 与即时同步",
+          "order": 2,
+          "filename": "u4-l2-direct-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 Direct<R,P,C> 用 const generic 控制 P(写权)/C(读权)，每次操作都立即读写底层原子索引；其别名 Obs/Prod/Cons；new() 时通过 hold 标志断言不重复拆分；LocalRb.split 默认产出这种直接包装。",
+          "learning_goals": [
+            "理解 const generic P/C 如何编码读写权限",
+            "掌握 Direct::new 用 hold 标志保证至多一个 Prod/Cons 的机制",
+            "明白 Direct 与底层原子索引的即时同步行为"
+          ],
+          "source_files": [
+            "src/wrap/direct.rs",
+            "src/rb/local.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::wrap::Direct",
+            "ringbuf::wrap::Prod",
+            "ringbuf::wrap::Cons",
+            "ringbuf::Obs"
+          ],
+          "practice_task": "阅读 Direct::new 与 close，解释为何对同一个缓冲区第二次 split 会 panic；用 LocalRb.split 得到的 Prod/Cons 验证：一次 try_push 后 cons 立即可见（即时同步）。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Frozen 包装器：手动 freeze/commit/fetch/sync 控制同步时机",
+          "order": 3,
+          "filename": "u4-l3-frozen-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 Frozen 包装器把 read/write 索引缓存在本地 Cell 中，显式 commit（写回）、fetch（拉取）、sync（双向）才与底层同步，从而允许用户批量操作后手动同步以减少跨核通信；FrozenProd 还有 discard 丢弃未提交写入。",
+          "learning_goals": [
+            "理解 Frozen 本地缓存索引、延迟同步的工作方式",
+            "掌握 commit/fetch/sync/discard 的语义与时机",
+            "明白 freeze 后如何手动管理线程间可见性"
+          ],
+          "source_files": [
+            "src/wrap/frozen.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::wrap::Frozen",
+            "ringbuf::wrap::FrozenProd",
+            "ringbuf::wrap::FrozenCons"
+          ],
+          "practice_task": "对 SharedRb 先 freeze 出 FrozenProd，连续 try_push 多个元素但观察对端 Cons 暂时看不到（未 commit）；调用 commit 后对端可见；再演示 discard 丢弃未提交写入。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Caching 包装器：按需自动同步的默认策略",
+          "order": 4,
+          "filename": "u4-l4-caching-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 Caching 包装器在 Frozen 之上实现「按需同步」：写端在 is_full 时才 fetch、读端在 is_empty 时才 fetch，成功操作后立即 commit；SharedRb.split 默认就产出 CachingProd/CachingCons，兼顾正确性与性能。",
+          "learning_goals": [
+            "理解 Caching 如何在 Frozen 基础上自动化同步",
+            "掌握 CachingProd/CachingCons 的 try_push/try_pop 同步时机",
+            "明白为何 SharedRb 默认用 Caching 而非 Direct"
+          ],
+          "source_files": [
+            "src/wrap/caching.rs",
+            "src/rb/shared.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::wrap::Caching",
+            "ringbuf::wrap::CachingProd",
+            "ringbuf::wrap::CachingCons"
+          ],
+          "practice_task": "对比 Direct 与 Caching：对 SharedRb 分别用 split（Caching）和手动构造 Direct 包装，在密集 push/pop 场景下分析两者触发原子 load/store 的频率差异（可加日志或阅读源码推理）。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：无锁并发与 unsafe 内存安全",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "无锁并发：原子操作、CachePadded 与内存顺序",
+          "order": 1,
+          "filename": "u5-l1-lockfree-atomics-ordering.md",
+          "level": "advanced",
+          "topic": "讲解 SharedRb 的无锁实现：用 crossbeam 的 CachePadded 避免伪共享、AtomicUsize 存索引、读用 Acquire/写用 Release 建立跨线程 happens-before；并以 test_ordering 示例说明弱内存序架构下顺序正确性的检验。",
+          "learning_goals": [
+            "理解 CachePadded 防止伪共享的作用",
+            "掌握 Acquire load / Release store 如何建立跨线程可见性顺序",
+            "理解为何 ringbuf 是真正的 lock-free（操作立即成功或失败，不阻塞）"
+          ],
+          "source_files": [
+            "src/rb/shared.rs",
+            "examples/test_ordering.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::SharedRb",
+            "core::sync::atomic::Ordering",
+            "crossbeam_utils::CachePadded"
+          ],
+          "practice_task": "运行 cargo run --release --example test_ordering；结合 shared.rs 中 set_write_index/set_read_index 的 Release store 与 read_index/write_index 的 Acquire load，解释生产者写入的元素为何能被消费者正确可见。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Hold flags：保证单生产者单消费者的不变量",
+          "order": 2,
+          "filename": "u5-l2-hold-flags-spsc-invariant.md",
+          "level": "advanced",
+          "topic": "讲解 read_held/write_held 两个原子 bool 如何在运行时强制「至多一个 producer、至多一个 consumer」的 SPSC 不变量：包装器 new 时置位、drop/close 时复位、重复拆分会 panic；以及并发 push_overwrite 为何不安全。",
+          "learning_goals": [
+            "理解 hold 标志如何编码 SPSC 唯一性不变量",
+            "掌握 new/clone/drop 路径上 hold 标志的置位与复位",
+            "明白为何 SharedRb 不要求 T: Send 却仍能安全跨线程使用"
+          ],
+          "source_files": [
+            "src/rb/shared.rs",
+            "src/wrap/direct.rs",
+            "src/wrap/frozen.rs",
+            "src/traits/ring_buffer.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::SharedRb",
+            "ringbuf::traits::RingBuffer::hold_read",
+            "ringbuf::traits::RingBuffer::hold_write"
+          ],
+          "practice_task": "克隆一个已 split 缓冲区的 Prod 引用并尝试再次 hold_write，复现 panic；解释 push_overwrite 需要独占访问（mutex 保护）的原因。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "MaybeUninit 与 unsafe 内存管理：直接访问内部内存",
+          "order": 3,
+          "filename": "u5-l3-maybeuninit-unsafe-memory.md",
+          "level": "advanced",
+          "topic": "讲解 ringbuf 如何用 MaybeUninit 表达「部分槽已初始化」，以及 utils.rs 中一组 unsafe 辅助（slice_assume_init_ref/mut、write_slice、move_uninit_slice、array_to_uninit 等）和 Observer::unsafe_slices 的安全约定，它们是性能与安全的平衡点。",
+          "learning_goals": [
+            "理解为何用 MaybeUninit 而非 Option 存储元素",
+            "掌握 unsafe_slices/unsafe_slices_mut 的重叠与并发安全约定",
+            "看懂 advance_read_index/advance_write_index 背后的初始化状态推进"
+          ],
+          "source_files": [
+            "src/utils.rs",
+            "src/storage.rs",
+            "src/traits/observer.rs",
+            "src/traits/consumer.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::utils",
+            "ringbuf::traits::Observer::unsafe_slices",
+            "ringbuf::storage::Storage::slice_mut"
+          ],
+          "practice_task": "阅读 utils.rs 中 slice_assume_init_mut 的实现，解释它为何是 unsafe；用 vacant_slices_mut + advance_write_index 手动写入一个元素，列出调用者必须满足的全部安全前提。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：派生 crate async-ringbuf",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "AsyncRb 与 AtomicWaker：在无锁核心上加 async 唤醒",
+          "order": 1,
+          "filename": "u6-l1-asyncrb-atomicwaker.md",
+          "level": "intermediate",
+          "topic": "讲解 AsyncRb 如何把 SharedRb 包一层并附加两个 AtomicWaker（read/write），在 set_write_index/set_read_index/hold 时唤醒对端等待者；它不绑定任何运行时（tokio/async-std），并提供 AsyncHeapRb/AsyncStaticRb 别名。",
+          "learning_goals": [
+            "理解 AsyncRb = SharedRb + 两个 AtomicWaker 的结构",
+            "掌握写入/读取/hold 时如何唤醒对端",
+            "明白 async-ringbuf 运行时无关的设计"
+          ],
+          "source_files": [
+            "async/src/rb.rs",
+            "async/src/alias.rs",
+            "async/examples/simple.rs",
+            "async/README.md"
+          ],
+          "minimal_modules": [
+            "async_ringbuf::AsyncRb",
+            "async_ringbuf::AsyncHeapRb",
+            "futures_util::task::AtomicWaker"
+          ],
+          "practice_task": "照 async/examples/simple.rs 用 AsyncHeapRb::new(10) 跑通：join! 一个 push 循环和一个 pop 循环，验证 push 在满时会 await 直到消费者取走。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "AsyncProducer/AsyncConsumer：Future、等待与取消安全",
+          "order": 2,
+          "filename": "u6-l2-async-producer-consumer-futures.md",
+          "level": "intermediate",
+          "topic": "讲解 AsyncProducer/AsyncConsumer trait 的 async 方法（push/pop、wait_vacant/wait_occupied、push_exact/pop_exact、push_iter_all/pop_until_end、close/is_closed），其返回的 Future 类型（PushFuture/PopFuture 等）实现 FusedFuture，并强调每种 Future 的取消安全（cancel safety）保证。",
+          "learning_goals": [
+            "掌握 push/pop/wait_vacant/wait_occupied 等 async 方法的返回与语义",
+            "理解 is_closed（对端 drop）如何让 Future 收尾",
+            "看懂各 Future 的取消安全约定（取消时是否丢数据）"
+          ],
+          "source_files": [
+            "async/src/traits/producer.rs",
+            "async/src/traits/consumer.rs",
+            "async/src/wrap/mod.rs"
+          ],
+          "minimal_modules": [
+            "async_ringbuf::traits::AsyncProducer",
+            "async_ringbuf::traits::AsyncConsumer",
+            "async_ringbuf::AsyncProd",
+            "async_ringbuf::AsyncCons"
+          ],
+          "practice_task": "写一个 async 程序：生产者用 push().await 写入、消费者用 pop().await 读取；中途 drop 生产者，验证消费者 pop 最终返回 None（is_closed 触发）；并阅读 PushFuture 的 poll 说明为何取消时不会多 push 一个元素。",
+          "depends_on": [
+            "u6-l1",
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Stream / Sink / AsyncRead / AsyncWrite 集成",
+          "order": 3,
+          "filename": "u6-l3-stream-sink-async-io.md",
+          "level": "intermediate",
+          "topic": "讲解 async-ringbuf 如何与生态对接：AsyncCons 实现 futures::Stream、AsyncProd 实现 futures::Sink；在 std feature 下分别实现 AsyncRead/AsyncWrite，使其可作为异步字节流管道。",
+          "learning_goals": [
+            "理解 AsyncCons 作为 Stream 产出元素、AsyncProd 作为 Sink 接收元素",
+            "掌握 std feature 下的 AsyncRead/AsyncWrite 字节流集成",
+            "学会用 poll_next/poll_ready 等手动 poll 接口"
+          ],
+          "source_files": [
+            "async/src/wrap/cons.rs",
+            "async/src/wrap/prod.rs",
+            "async/src/traits/consumer.rs"
+          ],
+          "minimal_modules": [
+            "async_ringbuf::AsyncCons (Stream)",
+            "async_ringbuf::AsyncProd (Sink)",
+            "futures_util::io::AsyncRead",
+            "futures_util::io::AsyncWrite"
+          ],
+          "practice_task": "把 AsyncCons 接入一个消费 Stream 的循环（如 while let Some(x) = cons.next().await）；把 AsyncProd 当作 Sink 用 send 推送若干元素；说明 close()/poll_close 如何关闭写端。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "进阶：派生 crate ringbuf-blocking",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "BlockingRb 与 Semaphore 抽象：可插拔的阻塞同步原语",
+          "order": 1,
+          "filename": "u7-l1-blockingrb-semaphore.md",
+          "level": "intermediate",
+          "topic": "讲解 BlockingRb = SharedRb + 两个 Semaphore（read/write），在写入/读取/hold 时 give 信号量；Semaphore trait 抽象二值信号量（give/try_take/take），默认 StdSemaphore 用 Condvar+Mutex 实现，可在 no_std 下替换为自定义实现。",
+          "learning_goals": [
+            "理解 BlockingRb 在 SharedRb 之上加信号量的结构",
+            "掌握 Semaphore trait 的 give/try_take/take 语义",
+            "看懂 StdSemaphore 用 Condvar+Mutex 的实现与 TimeoutIter/TakeIter"
+          ],
+          "source_files": [
+            "blocking/src/rb.rs",
+            "blocking/src/sync.rs",
+            "blocking/src/alias.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf_blocking::BlockingRb",
+            "ringbuf_blocking::sync::Semaphore",
+            "ringbuf_blocking::sync::StdSemaphore"
+          ],
+          "practice_task": "阅读 sync.rs 中 StdSemaphore::take 与 TimeoutIter，解释它如何在超时与永久等待两种模式下工作；思考若要用于 no_std 嵌入式，应如何实现自己的 Semaphore。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "阻塞式 API：超时、关闭与 io::Read/io::Write 集成",
+          "order": 2,
+          "filename": "u7-l2-blocking-api-timeout-io.md",
+          "level": "intermediate",
+          "topic": "讲解 BlockingProd/BlockingCons（基于 Caching 包装 + timeout 字段）的阻塞方法：wait_vacant/wait_occupied、push/pop、push_exact/pop_exact、push_all_iter/pop_all_iter、pop_until_end，返回 WaitError（TimedOut/Closed）；并在 std 下实现 io::Read/io::Write。",
+          "learning_goals": [
+            "掌握 push/pop/wait_vacant/wait_occupied 的阻塞与超时行为",
+            "理解 WaitError::TimedOut 与 WaitError::Closed 两种失败",
+            "学会用 set_timeout 配置全局超时及与 io::Read/Write 的桥接"
+          ],
+          "source_files": [
+            "blocking/src/wrap/prod.rs",
+            "blocking/src/wrap/cons.rs",
+            "blocking/src/wrap/mod.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf_blocking::BlockingProd",
+            "ringbuf_blocking::BlockingCons",
+            "ringbuf_blocking::WaitError"
+          ],
+          "practice_task": "用 BlockingHeapRb 在两个线程间传递数据：生产者用 push（带超时），消费者用 pop；演示缓冲区满时 push 会阻塞、超时后返回 WaitError::TimedOut；再用 io::Write/io::Read 接口把它当字节管道。",
+          "depends_on": [
+            "u7-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：扩展、二次开发与测试",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "feature flags、portable-atomic 与 no_std/no-alloc 支持",
+          "order": 1,
+          "filename": "u8-l1-features-portable-atomic-no-std.md",
+          "level": "advanced",
+          "topic": "讲解 ringbuf 的 feature 体系：std→alloc、alloc、portable-atomic（在无 CAS 的小型系统上用 portable-atomic 替代 std 原子）、bench、test_local；以及如何用 cfg 在 no_std 甚至无 alloc（纯静态内存）下使用，Arc 在 portable-atomic 下切换为 portable_atomic_util::Arc。",
+          "learning_goals": [
+            "掌握 std/alloc/portable-atomic 等 feature 的依赖关系",
+            "理解 portable-atomic 如何让 ringbuf 跑在没有 64 位原子的目标上",
+            "学会在 no_std/no-alloc 环境下只用 StaticRb"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/alias.rs",
+            "src/rb/shared.rs",
+            "examples/static.rs",
+            "examples/global_static.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf (features: std/alloc/portable-atomic)",
+            "ringbuf::StaticRb",
+            "portable_atomic_util::Arc"
+          ],
+          "practice_task": "用 cargo build --no-default-features（配合 alloc 或纯静态）编译一个 #![no_std] 程序，仅用 StaticRb + split_ref 完成 push/pop；说明为何去掉了 alloc 后 HeapRb 不可用。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "自定义 Storage 与 from_raw_parts：实现自己的存储后端",
+          "order": 1,
+          "filename": "u8-l2-custom-storage-from-raw-parts.md",
+          "level": "advanced",
+          "topic": "讲解如何通过实现 unsafe trait Storage 接入自定义内存（如内存映射文件、外部静态区、DMA 缓冲），并用 LocalRb/SharedRb 的 unsafe from_raw_parts/into_raw_parts 从存储与初始 read/write 索引构造缓冲区，实现二次开发。",
+          "learning_goals": [
+            "掌握 Storage trait 的安全约定（不别名、as_mut_ptr、len 恒定）",
+            "学会用 from_raw_parts 从已有存储构造 RB 并设定初始索引",
+            "理解 into_raw_parts 的析构与初始化状态责任"
+          ],
+          "source_files": [
+            "src/storage.rs",
+            "src/rb/local.rs",
+            "src/rb/shared.rs",
+            "src/rb/macros.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::storage::Storage",
+            "ringbuf::SharedRb::from_raw_parts",
+            "ringbuf::SharedRb::into_raw_parts"
+          ],
+          "practice_task": "为一个固定大小外部缓冲区（如 &'static mut [MaybeUninit<u8>; N] 包装）实现 Storage，再用 SharedRb::from_raw_parts 构造环形缓冲区并 split 使用；列出你实现的 Storage 必须满足的全部 unsafe 前提。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "宏系统：构造器与 io/fmt trait 的批量实现",
+          "order": 2,
+          "filename": "u8-l3-macros-constructors-batch-traits.md",
+          "level": "advanced",
+          "topic": "讲解 rb_impl_init! 宏如何为 LocalRb/SharedRb 统一生成 Default/From<[T;N]>/new/try_new/From<Vec>/From<Box<[T]>> 构造器，以及 impl_producer_traits!/impl_consumer_traits! 如何批量实现 core::fmt::Write、std::io::Write/Read、IntoIterator，避免为每种 RB 重复编写。",
+          "learning_goals": [
+            "理解 rb_impl_init! 为何用宏统一两类 RB 的构造器",
+            "看懂 impl_producer_traits!/impl_consumer_traits! 批量实现 io/fmt/IntoIterator 的机制",
+            "学会为新 RB 类型复用这些宏"
+          ],
+          "source_files": [
+            "src/rb/macros.rs",
+            "src/traits/producer.rs",
+            "src/traits/consumer.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::rb::macros::rb_impl_init",
+            "ringbuf::traits::producer::impl_producer_traits",
+            "ringbuf::traits::consumer::impl_consumer_traits"
+          ],
+          "practice_task": "在源码中展开 rb_impl_init!(SharedRb) 的逻辑，列出它为 SharedRb<Array<T,N>> 与 SharedRb<Heap<T>> 分别生成了哪些构造器；解释 impl_producer_traits! 如何让 Item=u8 的 Producer 自动获得 std::io::Write。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "std::io 集成与跨线程消息传递模式",
+          "order": 3,
+          "filename": "u8-l4-std-io-message-passing.md",
+          "level": "advanced",
+          "topic": "讲解 Producer::read_from 与 Consumer::write_into 如何把任意 Read/Write 源接入环形缓冲区、transfer/async_transfer 如何在缓冲区间搬运数据，并以 message.rs 示例展示生产者线程读字节、消费者线程收字节并重组消息的完整模式。",
+          "learning_goals": [
+            "掌握 read_from/write_into 的返回值与 WouldBlock 语义",
+            "理解 transfer 在同/异缓冲区间移动元素的实现",
+            "学会用环形缓冲区构建线程间字节流/消息管道"
+          ],
+          "source_files": [
+            "examples/message.rs",
+            "src/transfer.rs",
+            "async/src/transfer.rs",
+            "src/traits/producer.rs",
+            "src/traits/consumer.rs"
+          ],
+          "minimal_modules": [
+            "ringbuf::traits::Producer::read_from",
+            "ringbuf::traits::Consumer::write_into",
+            "ringbuf::transfer"
+          ],
+          "practice_task": "参照 examples/message.rs：用 HeapRb<u8> 让生产者线程从字符串字节 read_from、消费者线程 write_into 到 Vec 并重组，验证收到的字符串与原文一致；再调用 transfer 把一个缓冲区的元素搬到另一个缓冲区。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "测试体系与 Miri：守护 unsafe 正确性",
+          "order": 4,
+          "filename": "u8-l5-tests-miri.md",
+          "level": "advanced",
+          "topic": "讲解 src/tests/ 下按主题拆分的测试（basic/access/drop/frozen/hold/init/iter/overwrite/read_write/shared/skip/slice/unsized_/zero_sized）、test_local feature 用于切换测 LocalRb 还是 SharedRb，以及 scripts/test.sh、scripts/miri.sh（用 Miri 校验所有 unsafe 的未定义行为）。",
+          "learning_goals": [
+            "理解测试按行为主题划分的结构",
+            "掌握 test_local feature 切换被测 RB 类型的技巧",
+            "学会用 Miri 验证 MaybeUninit/原子/指针操作的内存安全"
+          ],
+          "source_files": [
+            "src/tests/mod.rs",
+            "scripts/test.sh",
+            "scripts/miri.sh",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "ringbuf::tests",
+            "ringbuf (feature: test_local)",
+            "scripts/miri.sh"
+          ],
+          "practice_task": "运行 cargo test --features test_local 与默认（SharedRb）两套测试，对比覆盖；执行 scripts/miri.sh 跑 Miri，记录它如何帮助发现 unsafe 中的潜在未定义行为。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
