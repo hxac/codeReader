@@ -1,0 +1,809 @@
+{
+  "project": "tokio-udt",
+  "head": "450cfcc04d7975c59eec8c0a3f130e0cb57b3285",
+  "rationale": "tokio-udt 是一个用 Tokio 原语实现的 UDT（基于 UDP 的高性能可靠传输协议）库，核心难点在于：它既要实现完整的协议线上格式，又要实现可靠传输（ACK/NAK/重传）与拥塞控制（慢启动/AIMD），还要把这些同步逻辑嫁接到 Tokio 的 AsyncRead/AsyncWrite 上。因此学习路线按“先用起来→理解整体架构→逐层拆解数据通路→吃透可靠性与拥塞→攻破连接生命周期与平台优化”来组织。\n\n具体顺序设计：第 1、2 单元（入门）让读者先跑通 sender/receiver 示例，掌握公共 API（UdtListener/UdtConnection/UdtConfiguration），建立直觉；第 3 单元切入全局单例 Udt、核心 UdtSocket 状态机与共享 UDP 的多路复用器，搭起架构骨架；第 4 单元专门讲 UDT 包的线上格式（数据包/控制包/序列号循环算术），这是后续一切机制的基础；第 5 单元顺着“发送队列+发送缓冲”“接收队列+接收缓冲”讲清两条数据通路；第 6 单元把可靠性（重传调度、ACK 生成、丢包 NAK、ACK2 与 RTT 测量）串起来；第 7 单元（专家）深入 UdtFlow 带宽估计、RateControl 拥塞算法与 EXP 定时器；第 8 单元（专家）收尾连接生命周期——握手与 SYN cookie、关闭/linger/垃圾回收、AsyncRead/AsyncWrite 桥接，以及 Linux 下 sendmmsg/recvmmsg 与 timerfd 的平台快路径。\n\n依赖关系上，每个单元都以前序单元为前置（例如发送主流程依赖发送队列与数据包格式；RateControl 依赖 UdtFlow；握手依赖全局 Udt 与控制包），形成一条从“能跑”到“懂协议”再到“懂并发与性能取舍”的单向加深链路。讲义数量约 27 篇，对应这个约 4400 行、26 个源码文件的中大型协议实现，逻辑优先于凑数。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 tokio-udt",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：UDT 协议与 tokio-udt 定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 UDT 是什么、为什么存在、tokio-udt 在 Rust/Tokio 生态中的定位，以及它对外提供哪些能力。",
+          "learning_goals": [
+            "理解 UDT 协议的目标（高带宽广域网下的可靠传输，替代 TCP 的效率与公平性问题）",
+            "了解 tokio-udt 的技术栈（Rust 2021 + Tokio + socket2/nix/bytes/sha2）与版本、license",
+            "从 README 示例初步认识 UdtListener / UdtConnection 两个入口"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Udt 协议背景",
+            "Cargo.toml 依赖与元信息",
+            "lib.rs 顶层文档"
+          ],
+          "practice_task": "阅读 README 与 Cargo.toml，回答：tokio-udt 解决什么问题、依赖了哪些关键 crate、当前版本与 license；并在本地执行 `cargo doc --open` 浏览库文档，对照 README 的两个示例。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建运行与示例：跑通 sender / receiver",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何编译运行仓库自带的 udt_sender / udt_receiver 两个 binary，并观察吞吐与拥塞控制指标的实时变化。",
+          "learning_goals": [
+            "学会用 cargo run 同时跑通一对收发端",
+            "看懂 sender 中对 rate_control 指标（发送周期、拥塞窗口）的打印",
+            "初步体会 UDT 在高速传输下动态调节发送速率的行为"
+          ],
+          "source_files": [
+            "src/bin/udt_sender.rs",
+            "src/bin/udt_receiver.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "bin/udt_sender",
+            "bin/udt_receiver",
+            "RateControl 只读指标"
+          ],
+          "practice_task": "在本地分别执行 `cargo run --bin udt_receiver` 与 `cargo run --bin udt_sender`，记录 receiver 打印的 MB/s 吞吐，以及 sender 打印的 get_pkt_send_period / get_congestion_window_size 随时间的变化曲线。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块地图",
+          "order": 3,
+          "filename": "u1-l3-module-map.md",
+          "level": "beginner",
+          "topic": "以 src/lib.rs 的模块声明为线索，绘制整个 crate 的模块树，并标注每个源码文件的一句话职责。",
+          "learning_goals": [
+            "掌握 lib.rs 中所有 mod 声明及其对应的源文件",
+            "理解 queue/ 与 state/ 两个子模块的组织方式",
+            "建立“全局引擎 / Socket / 多路复用器 / 包 / 可靠性 / 拥塞控制”的模块分类地图"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/queue/mod.rs",
+            "src/state/mod.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块树",
+            "queue 子模块",
+            "state 子模块"
+          ],
+          "practice_task": "依据 src/lib.rs 的 mod 声明，画出完整模块树（含 queue/、state/ 子模块），并为每个 .rs 文件写一句话职责说明，标注它属于“入口 / 协议格式 / 数据通路 / 可靠性 / 拥塞控制”哪一类。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "公共 API 全貌与配置",
+          "order": 4,
+          "filename": "u1-l4-public-api.md",
+          "level": "beginner",
+          "topic": "梳理 lib.rs 通过 pub use 暴露的全部公共类型（UdtConfiguration/UdtConnection/UdtListener/RateControl/SeqNumber），并介绍 UdtConfiguration 的关键字段。",
+          "learning_goals": [
+            "知道 crate 对外导出了哪些类型、各自扮演什么角色",
+            "理解 UdtConfiguration 中 mss / 各类 buf_size / reuse_mux / linger_timeout 等关键参数",
+            "能够区分“公共 API”与 crate 内部 pub(crate) 实现的边界"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/configuration.rs"
+          ],
+          "minimal_modules": [
+            "pub use 导出",
+            "UdtConfiguration",
+            "公共 vs 内部边界"
+          ],
+          "practice_task": "列出 lib.rs 中所有 pub use 的类型并说明用途；再挑出 UdtConfiguration 的 5 个关键字段，用一句话解释每个字段会影响什么（提示：在仓库中搜索 reuse_mux、accept_queue_size、linger_timeout 的使用处）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门：建立连接与收发数据",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "客户端连接：UdtConnection::connect 与 AsyncWrite",
+          "order": 1,
+          "filename": "u2-l1-connection-client.md",
+          "level": "beginner",
+          "topic": "讲解 UdtConnection 如何建立连接、如何通过 AsyncRead/AsyncWrite 收发数据，以及 connect/bind_and_connect 的差异。",
+          "learning_goals": [
+            "掌握 UdtConnection::connect 的基本用法与地址解析（lookup_host）",
+            "理解 UdtConnection 如何包装底层 UdtSocket 并实现 AsyncRead/AsyncWrite",
+            "了解连接建立需要轮询 wait_for_connection 直到状态离开 Connecting"
+          ],
+          "source_files": [
+            "src/connection.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "UdtConnection::connect",
+            "AsyncRead/AsyncWrite 实现",
+            "wait_for_connection"
+          ],
+          "practice_task": "基于 README 客户端示例，写一个连接本地 listener 并用 write_all 发送一段数据的客户端；额外尝试用 AsyncReadExt::read 把对端回显的数据读回来（配合下一讲的回显服务端）。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "服务端监听：UdtListener::bind 与 accept",
+          "order": 2,
+          "filename": "u2-l2-listener-server.md",
+          "level": "beginner",
+          "topic": "讲解 UdtListener 如何绑定端口、进入 Listening 状态、并通过 accept_notify 异步等待新连接。",
+          "learning_goals": [
+            "掌握 UdtListener::bind 的流程：new_socket → bind → 注册为 listener",
+            "理解 accept 如何从 queued_sockets 取出已握手完成的连接",
+            "了解 rendezvous 模式下 listen/accept 为何不支持"
+          ],
+          "source_files": [
+            "src/listener.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "UdtListener::bind",
+            "accept 与 queued_sockets",
+            "accept_notify"
+          ],
+          "practice_task": "基于 README 服务端示例实现一个回显（echo）listener：accept 得到 connection 后，把读到的数据用 write_all 原样写回，然后用上一讲的客户端验证回显。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "配置项与调优：UdtConfiguration",
+          "order": 3,
+          "filename": "u2-l3-configuration-tuning.md",
+          "level": "beginner",
+          "topic": "逐字段解读 UdtConfiguration，说明默认值与各字段如何影响缓冲、多路复用与关闭行为。",
+          "learning_goals": [
+            "理解 mss、flight_flag_size、snd/rcv_buf_size 的默认值与含义",
+            "掌握 udp_reuse_port / reuse_mux 对多路复用与多客户端吞吐的影响",
+            "理解 accept_queue_size 与 linger_timeout 的作用"
+          ],
+          "source_files": [
+            "src/configuration.rs"
+          ],
+          "minimal_modules": [
+            "UdtConfiguration 字段",
+            "Default 实现",
+            "缓冲/复用/关闭相关参数"
+          ],
+          "practice_task": "写一个显式设置 udp_reuse_port、reuse_mux、accept_queue_size、linger_timeout 的 UdtConfiguration，并分别说明每个字段会影响哪段代码路径（在仓库中搜索这些字段名的使用处并记录文件:行号）。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：运行时引擎与整体架构",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "全局单例 Udt 与 socket/mux 注册表",
+          "order": 1,
+          "filename": "u3-l1-global-udt-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 Udt::get() 返回的进程级单例，它如何持有所有 socket 和 multiplexer，以及后台垃圾回收 worker。",
+          "learning_goals": [
+            "理解 UDT_INSTANCE（OnceCell<RwLock<Udt>>）单例模式",
+            "掌握 sockets / multiplexers / peers 三个注册表的作用",
+            "理解 cleanup_worker 每秒做 garbage_collect_sockets 的意义"
+          ],
+          "source_files": [
+            "src/udt.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Udt 单例",
+            "sockets/multiplexers/peers 注册表",
+            "garbage_collect_sockets"
+          ],
+          "practice_task": "在 Udt::get、new_socket、update_mux、garbage_collect_sockets 处加日志或断点，复述一次 bind→accept→connect 过程中全局 Udt 的 sockets/multiplexers/peers 三张表的变化。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "UdtSocket 核心结构与状态机",
+          "order": 2,
+          "filename": "u3-l2-udt-socket-state.md",
+          "level": "intermediate",
+          "topic": "剖析 UdtSocket 的所有字段（缓冲、flow、rate_control、state、Notify 等）与 UdtStatus 状态机的合法迁移。",
+          "learning_goals": [
+            "掌握 UdtSocket 各字段的用途与同步原语（Mutex/RwLock/Notify）选择",
+            "理解 UdtStatus 七种状态及其迁移（Init→Opened→Listening/Connecting→Connected→Closing→Closed，及 Broken）",
+            "了解 SocketState 作为收发簿记容器的角色"
+          ],
+          "source_files": [
+            "src/socket.rs",
+            "src/state/socket_state.rs",
+            "src/state/mod.rs"
+          ],
+          "minimal_modules": [
+            "UdtSocket 结构体",
+            "UdtStatus 状态机",
+            "SocketState 簿记字段"
+          ],
+          "practice_task": "列出 UdtSocket 的全部字段并写明用途；画出 UdtStatus 的合法迁移图（标注 is_alive 涵盖哪些状态），并说明 connect_notify/rcv_notify/ack_notify 三个 Notify 各自唤醒谁。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "多路复用器 UdtMultiplexer：共享 UDP 与 worker",
+          "order": 3,
+          "filename": "u3-l3-multiplexer.md",
+          "level": "intermediate",
+          "topic": "讲解 UdtMultiplexer 如何用单个 UDP socket 服务多个 UdtSocket，并启动发送/接收两个队列 worker。",
+          "learning_goals": [
+            "理解为什么多个 UdtSocket 可以共享一个 UDP socket（reuse_mux 复用端口）",
+            "掌握 UdtMultiplexer::run 启动了 rcv_queue.worker 与 snd_queue.worker 两个任务",
+            "了解 new_udp_socket 中如何用 socket2 设置缓冲区与 SO_REUSEPORT"
+          ],
+          "source_files": [
+            "src/multiplexer.rs"
+          ],
+          "minimal_modules": [
+            "UdtMultiplexer 结构",
+            "new/bind UDP socket",
+            "run 启动 worker"
+          ],
+          "practice_task": "解释 reuse_mux=true 时多个 socket 复用同一 multiplexer 的条件（端口相同、mss 相同、reusable），并说明 UdtMultiplexer::run 启动的两个 worker 分别负责什么；回答“一个 multiplexer 对应几个 UDP socket、几个 worker 任务”。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：UDT 包的线上格式",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "UdtPacket：数据/控制包统一入口",
+          "order": 1,
+          "filename": "u4-l1-udt-packet-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 UdtPacket 枚举如何用首比特区分数据包与控制包，并统一提供 serialize/deserialize/get_dest_socket_id/handshake。",
+          "learning_goals": [
+            "理解 UdtPacket::Control / Data 的区分依据（raw[0] >> 7）",
+            "掌握 serialize/deserialize 的分发逻辑",
+            "理解 get_dest_socket_id 与 handshake 在接收分发时的作用"
+          ],
+          "source_files": [
+            "src/packet.rs"
+          ],
+          "minimal_modules": [
+            "UdtPacket 枚举",
+            "首比特 dispatch",
+            "序列化/反序列化分发"
+          ],
+          "practice_task": "解释 packet.rs 如何用首比特区分数据/控制包；手工构造两段字节（首比特为 0 和为 1）验证 UdtPacket::deserialize 走到不同分支，并说明 get_dest_socket_id 在 rcv_queue 分发中的用途。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "数据包格式：包头、消息分片与位置标记",
+          "order": 2,
+          "filename": "u4-l2-data-packet.md",
+          "level": "intermediate",
+          "topic": "逐位讲解 UdtDataPacketHeader 的 16 字节布局：序列号、位置标记、in_order、消息号、时间戳、目标 socket id。",
+          "learning_goals": [
+            "掌握数据包头各字段的位域布局与掩码",
+            "理解 PacketPosition（First/Last/Only/Middle）如何标记消息分片",
+            "了解 serialize/deserialize 中大端字节序与位运算的实现"
+          ],
+          "source_files": [
+            "src/data_packet.rs",
+            "src/common.rs"
+          ],
+          "minimal_modules": [
+            "UdtDataPacketHeader 位域",
+            "PacketPosition",
+            "serialize/deserialize"
+          ],
+          "practice_task": "根据包头注释手工推算一个“Only 位置、msg=3、seq=10、dest_socket_id=0x01020304”的数据包头前 16 字节，再对照 serialize() 的输出验证；说明 ip_to_bytes 在数据包中并未直接用到，它服务的是哪一类包。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "控制包格式：握手、ACK、NAK 等类型",
+          "order": 3,
+          "filename": "u4-l3-control-packet.md",
+          "level": "intermediate",
+          "topic": "讲解 UdtControlPacket 的固定头与 ControlPacketType（Handshake/KeepAlive/Ack/Nak/Shutdown/Ack2/MsgDropRequest）及其 control_info_field。",
+          "learning_goals": [
+            "掌握控制包 16 字节固定头与 type_as_u15 编码表",
+            "理解 HandshakeInfo（含 IPv4/IPv6 处理）、AckInfo/NakInfo/DropRequestInfo 的字段",
+            "了解各 new_* 构造函数与 ack_seq_number/msg_seq_number 的提取逻辑"
+          ],
+          "source_files": [
+            "src/control_packet.rs",
+            "src/common.rs"
+          ],
+          "minimal_modules": [
+            "UdtControlPacket 固定头",
+            "ControlPacketType 编码",
+            "Handshake/Ack/Nak/Drop info"
+          ],
+          "practice_task": "列出全部 ControlPacketType 及其 u15 编码与 control_info_field 结构；解释 HandshakeInfo::deserialize 如何通过 raw[36..48] 是否全零区分 IPv4/IPv6，以及 connection_type（1/-1/1002）的含义。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "序列号与循环算术：GenericSeqNumber",
+          "order": 4,
+          "filename": "u4-l4-seq-number.md",
+          "level": "intermediate",
+          "topic": "讲解用 PhantomData + trait const 实现的 GenericSeqNumber，以及它在 31 位循环空间上的加减法语义。",
+          "learning_goals": [
+            "理解 SeqConstants trait 与 phantom 类型参数如何复用同一份循环算术",
+            "掌握 Sub 返回 i32、Add/Sub 基于 rem_euclid 的循环设计",
+            "区分 SeqNumber / AckSeqNumber / MsgNumber 三种序列号空间"
+          ],
+          "source_files": [
+            "src/seq_number.rs"
+          ],
+          "minimal_modules": [
+            "GenericSeqNumber",
+            "SeqConstants",
+            "循环 Sub/Add"
+          ],
+          "practice_task": "为 SeqNumber 补几个单元测试验证循环加减（例如 max 附近回绕、threshold 判定方向），并解释为什么 Sub 返回 i32 而不是 Self——这种设计在 rcv_loss_list / snd_loss_list 比较中带来什么便利。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：发送与接收数据通路",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "发送侧：调度队列 UdtSndQueue 与发送缓冲 SndBuffer",
+          "order": 1,
+          "filename": "u5-l1-send-queue-and-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解基于 BinaryHeap 的定时调度队列 UdtSndQueue，以及 SndBuffer 如何把消息按 payload 切片成可发送/可重传的块。",
+          "learning_goals": [
+            "理解 SendQueueNode 按 timestamp 升序弹出（Ord 反转）的调度原理",
+            "掌握 worker 如何在“到点发送”与“notify 唤醒”之间 select",
+            "理解 SndBuffer 的 add_message 切片、position 标记、read_data 重传读取与 TTL 过期"
+          ],
+          "source_files": [
+            "src/queue/snd_queue.rs",
+            "src/queue/snd_buffer.rs",
+            "src/queue/mod.rs"
+          ],
+          "minimal_modules": [
+            "UdtSndQueue BinaryHeap 调度",
+            "worker 主循环",
+            "SndBuffer 切片/重传/TTL"
+          ],
+          "practice_task": "跟踪一次发送：socket.send → SndBuffer::add_message → update_snd_queue → snd_queue.worker → next_data_packets → send_data_packets，画成时序图；解释 SndBuffer 为何区分 current_position（已发）与 ack_data（已确认）两个游标。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "接收侧：收包队列 UdtRcvQueue 与接收缓冲 RcvBuffer",
+          "order": 2,
+          "filename": "u5-l2-recv-queue-and-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解 UdtRcvQueue 如何批量收包、按 dest_socket_id 分发，以及 RcvBuffer 如何用 next_to_read/next_to_ack 做乱序重组与读取。",
+          "learning_goals": [
+            "理解 rcv_queue.worker 的收包→反序列化→分发→定时器检查主循环",
+            "掌握 dest_socket_id==0 时握手包路由到 listener 的逻辑",
+            "理解 RcvBuffer 的乱序插入（BTreeMap）与按序读取/确认游标"
+          ],
+          "source_files": [
+            "src/queue/rcv_queue.rs",
+            "src/queue/rcv_buffer.rs",
+            "src/queue/mod.rs"
+          ],
+          "minimal_modules": [
+            "UdtRcvQueue 收包分发",
+            "握手路由",
+            "RcvBuffer 乱序重组/读取"
+          ],
+          "practice_task": "跟踪一次收包：receive_packets → UdtPacket::deserialize → get_dest_socket_id → process_packet → check_timers；解释 RcvBuffer::read_buffer 如何在 next_to_read 跨越 max 回绕时拼接两段 range，以及 ack_data 与 has_data_to_read 的协作。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：可靠性与发送主流程",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "socket 发送主流程：next_data_packets 与拥塞窗口",
+          "order": 1,
+          "filename": "u6-l1-send-main-flow.md",
+          "level": "intermediate",
+          "topic": "剖析 UdtSocket::next_data_packets：重传优先、拥塞窗口/flow window 限流、probe 包不延迟三条规则。",
+          "learning_goals": [
+            "理解 snd_loss_list.pop_after 让重传优先于新数据",
+            "掌握拥塞窗口与 flow window 取最小值决定能否发新数据",
+            "理解 probe 包（每 16 个）不应用 interpacket 延迟的设计"
+          ],
+          "source_files": [
+            "src/socket.rs",
+            "src/queue/snd_buffer.rs"
+          ],
+          "minimal_modules": [
+            "next_data_packets",
+            "重传优先",
+            "拥塞窗口限流/probe"
+          ],
+          "practice_task": "阅读 next_data_packets，分别标注代码中体现“重传优先”“窗口限流返回 None”“probe 包直接返回 now”三段逻辑的行；解释 interpacket_time_diff 如何累积延迟并在后续发送中补偿。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "接收数据与 ACK 生成",
+          "order": 2,
+          "filename": "u6-l2-recv-and-ack.md",
+          "level": "intermediate",
+          "topic": "剖析 process_data（丢包检测、立即 NAK）与 send_ack（light/full ACK、ACK seq、ack_window 记录）。",
+          "learning_goals": [
+            "理解 process_data 中何时插入 rcv_loss_list 并立即发 NAK",
+            "掌握 full ACK 携带 RTT/bandwidth/buf 可用量等可选信息",
+            "理解 send_ack 中 ACK seq 递增与 ack_window.store 的配合"
+          ],
+          "source_files": [
+            "src/socket.rs",
+            "src/queue/rcv_buffer.rs"
+          ],
+          "minimal_modules": [
+            "process_data",
+            "send_ack light/full",
+            "ack_window 记录"
+          ],
+          "practice_task": "跟踪 process_data：标出“offset<0 丢弃”“插入 loss_list 并发 NAK”“更新 curr_rcv_seq_number”三段；再说明 send_ack 中何时发 light ACK、何时发带 AckOptionalInfo 的 full ACK，以及为何要 ack_window.store。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "丢包检测与 NAK：LossList",
+          "order": 3,
+          "filename": "u6-l3-loss-list-nak.md",
+          "level": "advanced",
+          "topic": "讲解 LossList 用 BTreeMap 存储丢失区间、支持合并/拆分/回绕，以及 NAK loss_info 的区间编码与 process_ctrl 的 NAK 分支。",
+          "learning_goals": [
+            "掌握 LossList::insert/remove/remove_all/peek_after 的区间合并与拆分逻辑",
+            "理解 NAK loss_info 用 0x80000000 最高位标记“区间起点+终点”的编码",
+            "了解收到 NAK 后如何写入 snd_loss_list 并触发立即重传调度"
+          ],
+          "source_files": [
+            "src/loss_list.rs",
+            "src/socket.rs"
+          ],
+          "minimal_modules": [
+            "LossList 区间操作",
+            "NAK loss_info 编码",
+            "process_ctrl Nak 分支"
+          ],
+          "practice_task": "为 LossList 补充边界用例（跨 max 回绕 insert、重叠区间合并、remove 区间内部点导致拆分），对照仓库已有单测；解释 process_ctrl 中解析 NAK loss_info 时如何区分单点与区间，以及 broken 判定条件。",
+          "depends_on": [
+            "u6-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "ACK2、AckWindow 与 RTT 测量",
+          "order": 4,
+          "filename": "u6-l4-ack2-rtt.md",
+          "level": "advanced",
+          "topic": "讲解 AckWindow 把 ACK seq 映射到发送时刻、收到 ACK2 后计算 RTT/rtt_var，以及 process_ctrl 的 Ack2 分支。",
+          "learning_goals": [
+            "理解 AckWindow.store/get 如何在固定容量下 LRU 淘汰并返回 elapsed",
+            "掌握收到 Ack2 后用 (当前时刻 - 存储时刻) 得到 RTT 的原理",
+            "了解 RTT/rtt_var 同时通过 ACK 可选信息与 ACK2 两条路径更新"
+          ],
+          "source_files": [
+            "src/ack_window.rs",
+            "src/flow.rs",
+            "src/socket.rs"
+          ],
+          "minimal_modules": [
+            "AckWindow store/get",
+            "Ack2→RTT 计算",
+            "flow.update_rtt/update_rtt_var"
+          ],
+          "practice_task": "解释 AckWindow 为何用 BTreeMap+VecDeque 实现固定容量淘汰；跟踪 process_ctrl 的 Ack2 分支，说明 RTT 与 rtt_var（用 RTT 绝对差）如何被更新，并与 ACK 可选信息路径（extra.rtt）对比哪条更精确。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：拥塞控制算法与定时器",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "流量与带宽估计 UdtFlow",
+          "order": 1,
+          "filename": "u7-l1-flow-estimation.md",
+          "level": "advanced",
+          "topic": "讲解 UdtFlow 如何用 arrival_window/probe_window 估计包到达速率与链路带宽，并用 EWMA 平滑 RTT。",
+          "learning_goals": [
+            "理解 arrival_window（相邻包间隔）与 probe_window（probe1/probe2 对间隔）的区别",
+            "掌握 get_pkt_rcv_speed/get_bandwidth 用中位数过滤离群值的做法",
+            "理解 update_rtt/update_bandwidth 等的 EWMA 系数（7/8、3/4）"
+          ],
+          "source_files": [
+            "src/flow.rs"
+          ],
+          "minimal_modules": [
+            "arrival/probe window",
+            "中位数过滤估速",
+            "EWMA 平滑"
+          ],
+          "practice_task": "解释 UdtFlow 为何用“中位数 ±8 倍”过滤后再求速率，以及 probe 包（seq % 16 == 0/1）如何成对测量一对包间隔；复述 RTT/bandwidth/packet_recv_rate 如何被打包进 ACK 的 AckOptionalInfo 上报给发送方。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "速率控制 RateControl：慢启动与 AIMD",
+          "order": 2,
+          "filename": "u7-l2-rate-control.md",
+          "level": "advanced",
+          "topic": "剖析 RateControl 的慢启动（每 ACK 加窗）、AIMD（on_loss 乘性 1.125 回退）、超时处理与 dec_random 随机性。",
+          "learning_goals": [
+            "理解慢启动阶段 congestion_window 线性增长直到超过 max_window_size",
+            "掌握 on_ack 在非慢启动阶段按对数增量调节 pkt_send_period",
+            "理解 on_loss 的乘性回退、avg_nak_num 滑动平均与 dec_random 的随机化作用"
+          ],
+          "source_files": [
+            "src/rate_control.rs"
+          ],
+          "minimal_modules": [
+            "慢启动",
+            "on_ack 增窗",
+            "on_loss AIMD 回退"
+          ],
+          "practice_task": "复述 RateControl 三个阶段：慢启动→转 AIMD→丢包回退；解释 on_ack 中 b 与 increase 的对数增量公式含义，以及 on_loss 里 dec_random（基于 avg_nak_num 的随机数）如何避免多连接同步回退。用 udt_sender 实际观察 window/period 在丢包时的变化。",
+          "depends_on": [
+            "u7-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "定时器：EXP、keep-alive 与超时重传",
+          "order": 3,
+          "filename": "u7-l3-timers.md",
+          "level": "advanced",
+          "topic": "剖析 check_timers：ACK 定时、light ACK、EXP 指数退避、超时重传、keep-alive 与 Broken 判定。",
+          "learning_goals": [
+            "理解 ACK 定时器与 light ACK（每 64 包）的触发条件",
+            "掌握 EXP 定时器用 exp_count 指数退避判定对端无响应",
+            "理解超时时如何把未确认区间塞入 snd_loss_list 并调用 on_timeout，以及 5 秒/16 倍判定 Broken"
+          ],
+          "source_files": [
+            "src/socket.rs"
+          ],
+          "minimal_modules": [
+            "check_timers",
+            "ACK/light ACK",
+            "EXP 退避/超时/Broken"
+          ],
+          "practice_task": "阅读 check_timers，分别列出 ACK 定时、light ACK、EXP 定时三段的触发条件；解释 exp_count 如何指数增长、何时发 keep-alive、何时把 (last_ack_received, curr_snd_seq_number) 塞入 snd_loss_list 触发超时重传，以及什么条件下置 Broken。",
+          "depends_on": [
+            "u7-l2",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：连接生命周期与平台优化",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "连接建立与握手：SYN cookie",
+          "order": 1,
+          "filename": "u8-l1-handshake-syn-cookie.md",
+          "level": "advanced",
+          "topic": "完整复述 UDT 握手：client connect 发 connection_type=1、listener listen_on_handshake 回 SYN cookie、client 回 -1、connect_on_handshake 完成协商。",
+          "learning_goals": [
+            "掌握 connect→listen_on_handshake→connect_on_handshake 三阶段的握手流程",
+            "理解 compute_cookie 用 SHA256(salt:ip:port:分钟级时间戳) 防伪造与每分钟轮换",
+            "了解 MSS 协商取较小值、版本/socket_type 不匹配返回 1002 的拒绝逻辑"
+          ],
+          "source_files": [
+            "src/socket.rs",
+            "src/control_packet.rs",
+            "src/udt.rs"
+          ],
+          "minimal_modules": [
+            "connect / listen_on_handshake / connect_on_handshake",
+            "compute_cookie SYN cookie",
+            "MSS 协商与 1002 拒绝"
+          ],
+          "practice_task": "画出完整握手时序（含 connection_type 1→-1 的来回与 SYN cookie 校验容错 -1）；解释 compute_cookie 为何按分钟级时间戳轮换、为何校验时同时接受 offset=0 和 offset=-1，以及 Udt::new_connection 如何把新 socket 加入 peers 注册表并 notify accept。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "关闭、linger 与垃圾回收",
+          "order": 2,
+          "filename": "u8-l2-close-linger-gc.md",
+          "level": "advanced",
+          "topic": "剖析 UdtSocket::close 的 linger 等待、shutdown 包发送、状态迁移，以及 Udt::garbage_collect_sockets 的最终清理。",
+          "learning_goals": [
+            "理解 close 在 linger_timeout 内等待发送缓冲排空",
+            "掌握发送 Shutdown 包、从 snd_queue 移除、置 Closing 并 notify_all",
+            "了解 garbage_collect_sockets 对 Broken 调 close、对 Closing 置 Closed 的两阶段回收"
+          ],
+          "source_files": [
+            "src/socket.rs",
+            "src/udt.rs"
+          ],
+          "minimal_modules": [
+            "close + linger",
+            "Shutdown 包/状态迁移",
+            "garbage_collect_sockets"
+          ],
+          "practice_task": "阅读 close()，说明 linger 期间做什么、什么条件下发 Shutdown、为何要 mux.snd_queue.remove 并清空 listener 引用；再解释 garbage_collect_sockets 为何分 Broken（spawn close）与 Closing（置 Closed）两步，以及 cleanup_worker 的 1 秒节奏。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "异步桥接：AsyncRead/AsyncWrite 与 Notify",
+          "order": 3,
+          "filename": "u8-l3-async-bridge.md",
+          "level": "advanced",
+          "topic": "剖析 UdtConnection 的 poll_read/poll_write/poll_flush/poll_shutdown 为何在 Pending 时 spawn 等待 task 再 wake。",
+          "learning_goals": [
+            "理解 poll_write 在 OutOfMemory 时如何推迟到缓冲可写",
+            "掌握 poll_read 在无数据时 spawn wait_for_data_to_read 再 wake 的模式",
+            "理解这种“借用 Notify 异步等待 + spawn 唤醒”相比传统注册 waker 的取舍"
+          ],
+          "source_files": [
+            "src/connection.rs"
+          ],
+          "minimal_modules": [
+            "poll_read/poll_write",
+            "spawn + Notify 唤醒",
+            "poll_flush/poll_shutdown"
+          ],
+          "practice_task": "解释 UdtConnection::poll_write 为何在遇到 OutOfMemory（发送缓冲满）时返回 Pending 并 spawn 一个 wait_for_next_ack_or_empty_snd_buffer 任务；对比 poll_read 的同类模式，讨论这种实现相对“把 waker 注册进 socket”的优点与潜在开销。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "平台快路径：sendmmsg / recvmmsg / timerfd",
+          "order": 4,
+          "filename": "u8-l4-platform-fast-paths.md",
+          "level": "advanced",
+          "topic": "讲解 Linux 专用快路径：multiplexer 的 sendmmsg、rcv_queue 的 recvmmsg，以及用 tokio_timerfd 做高精度 sleep_until，对比非 Linux 回退实现。",
+          "learning_goals": [
+            "理解 sendmmsg/recvmmsg 一次系统调用收发多包带来的性能收益",
+            "掌握 cfg(target_os=\"linux\") 下用 nix 直接操作 raw fd 的实现",
+            "理解为何 Linux 用 timerfd（tokio_timerfd）而非 tokio::time::sleep 做发送调度"
+          ],
+          "source_files": [
+            "src/multiplexer.rs",
+            "src/queue/rcv_queue.rs"
+          ],
+          "minimal_modules": [
+            "sendmmsg / recvmmsg",
+            "nix raw fd 操作",
+            "timerfd sleep_until"
+          ],
+          "practice_task": "比较 Linux 与非 Linux 两条 send_mmsg_to / receive_packets / sleep_until 实现的差异；解释 recvmmsg 一次性接收最多 100 个包（buf = mss*100）的设计，以及为何 Linux 专用 timerfd 能比通用 tokio::time::sleep 更适合高频发送调度。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
