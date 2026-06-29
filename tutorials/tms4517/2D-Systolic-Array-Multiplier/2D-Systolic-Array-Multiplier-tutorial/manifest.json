@@ -1,0 +1,336 @@
+{
+  "project": "2D-Systolic-Array-Multiplier",
+  "head": "59378e8caacdc23086ac09e1c04bc19500d70cfb",
+  "rationale": "本项目是一个用 SystemVerilog 实现的二维脉动阵列矩阵乘法器，规模小但层次清晰（PE→阵列互联→顶层→C++ 测试台→Quartus FPGA 工程），因此学习路线按“由外到内、由原理到实现、由仿真到综合”的顺序展开。入门层先用 README 与构建脚本让读者跑通仿真并建立对顶层接口的整体认知；进阶层自底向上拆解 PE 乘加、阵列 generate 互联、行/列矩阵变换与控制时序四个核心源码模块；专家层覆盖 Verilator 验证方法学、参数化与 SystemVerilog 编码风格、Quartus FPGA 综合资源利用以及二次开发实践。各讲义以真实源码文件为单位拆分，依赖关系遵循“先整体后局部、先模块后系统”，确保读者每一步都能对照源码与波形动手实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目与跑通仿真",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与脉动阵列原理",
+          "order": 1,
+          "filename": "u1-l1-project-overview-and-systolic-basics.md",
+          "level": "beginner",
+          "topic": "介绍本项目要解决什么问题——用脉动阵列（systolic array）硬件加速两个方阵的乘法，以及脉动架构“数据流动 + 局部通信”的基本思想。",
+          "learning_goals": [
+            "理解矩阵乘法在硬件上的计算瓶颈与并行加速思路",
+            "了解脉动阵列的数据流动与 PE 局部通信思想",
+            "知道本项目与 Google TPU 等真实实现的关联，以及 8 位输入/32 位输出的位宽取舍"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目定位与 TL;DR（可配置乘 2<N<17 方阵）",
+            "脉动架构背景与数据流思想",
+            "输入/输出位宽选择与神经网络精度取舍"
+          ],
+          "practice_task": "阅读 README 的 Design Outline，画出 4x4 输入矩阵经过行/列变换后被送入阵列的示意图，并用自己的话解释为什么脉动阵列适合做矩阵乘法。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与仿真运行",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-and-simulation.md",
+          "level": "beginner",
+          "topic": "介绍仓库的目录结构、依赖工具（Verilator + GNU Make），以及如何用 `cd tb && make all` 跑通 verilate→build→sim→waves 完整流程。",
+          "learning_goals": [
+            "了解 rtl/tb/FPGA/images 各目录的职责",
+            "掌握用 Verilator + Make 编译并仿真 SystemVerilog RTL 的完整流程",
+            "理解 Makefile 中 verilate/build/sim/waves/clean/lint 各阶段的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "tb/Makefile",
+            ".gitignore"
+          ],
+          "minimal_modules": [
+            "目录结构与运行依赖（Verilator/GNU Make）",
+            "Makefile 的 verilate→build→sim→waves 流水线",
+            "clean/lint 目标与生成文件管理"
+          ],
+          "practice_task": "在本地安装 Verilator 后执行 `cd tb && make all`，观察控制台输出与生成的 waveform.vcd，记录每个 make 目标实际触发的命令。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层接口与数据流总览",
+          "order": 3,
+          "filename": "u1-l3-top-interface-and-dataflow.md",
+          "level": "beginner",
+          "topic": "从 topSystolicArray.sv 的端口表出发，讲清楚从 i_validInput 到 o_validResult 的整体数据通路与控制握手。",
+          "learning_goals": [
+            "读懂 topSystolicArray 的端口（i_a/i_b/i_validInput/o_c/o_validResult）与时钟/异步复位约定",
+            "理解 validInput→矩阵变换→阵列→validResult 的整体流程",
+            "对照 README 波形图理解顶层接口时序"
+          ],
+          "source_files": [
+            "rtl/topSystolicArray.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "顶层端口与时钟/复位约定",
+            "validInput→变换→阵列→validResult 整体通路",
+            "接口时序波形对照"
+          ],
+          "practice_task": "阅读 README 的 Design Outline 与 topSystolicArray 端口，画出从输入到输出的模块级数据通路框图，标注关键控制信号与时钟/复位。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心 RTL 模块",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "处理单元 PE 的乘加运算",
+          "order": 1,
+          "filename": "u2-l1-processing-element-mac.md",
+          "level": "intermediate",
+          "topic": "逐行讲解 pe.sv 如何用 8 位乘法与 32 位累加器实现 MAC，以及输入寄存器如何向相邻 PE 传递数据。",
+          "learning_goals": [
+            "理解 PE 的 MAC（乘加）数据通路（mult / mac_q / o_y）",
+            "掌握 i_doProcess 如何控制累加与寄存器更新",
+            "理解 o_a/o_b 寄存器输出在阵列中的流水传递作用"
+          ],
+          "source_files": [
+            "rtl/pe.sv",
+            "rtl/systolicArray.sv"
+          ],
+          "minimal_modules": [
+            "MAC 通路（mult、mac_q/mac_d、o_y）",
+            "输入寄存与 o_a/o_b 透传",
+            "i_doProcess 门控与异步复位"
+          ],
+          "practice_task": "在纸上跟踪一个 PE 在 i_doProcess 拉高 3 个周期内 mac_q 的累加值，并解释当 i_doProcess 为低时 mac_d 与寄存器会发生什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "阵列互联与 generate 生成",
+          "order": 2,
+          "filename": "u2-l2-array-interconnect-generate.md",
+          "level": "intermediate",
+          "topic": "讲解 systolicArray.sv 如何用嵌套 generate 把 N×N 个 PE 连成二维阵列，以及水平/垂直互连网的数据流向。",
+          "learning_goals": [
+            "理解二维阵列的水平(row)与垂直(col)互连结构",
+            "掌握 SystemVerilog generate/genvar 批量实例化的写法",
+            "理解 dummy interconnect 如何把行/列矩阵接入首行首列 PE"
+          ],
+          "source_files": [
+            "rtl/systolicArray.sv",
+            "rtl/pe.sv"
+          ],
+          "minimal_modules": [
+            "rowInterConnect / colInterConnect 互连网结构",
+            "PerDummyRowColInterconnect 首行首列接入",
+            "PerRow/PerCol 嵌套 generate 实例化 PE"
+          ],
+          "practice_task": "参考 systolicArray.sv 的注释，为 4x4 阵列手画 rowInterConnect 与 colInterConnect 的连接关系，标出每个 PE 的 i_a/i_b/o_a/o_b 连接。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "行/列矩阵变换",
+          "order": 3,
+          "filename": "u2-l3-row-column-matrix-transform.md",
+          "level": "intermediate",
+          "topic": "讲解 topSystolicArray.sv 的 set-up 段如何对输入矩阵做元素反转、补零、按行移位，构造出驱动阵列的行/列矩阵。",
+          "learning_goals": [
+            "理解为什么要把输入矩阵变换为带偏移的行/列矩阵",
+            "掌握 invertedRowElements/invertedColElements 的反转逻辑",
+            "理解补零(APPEND_ZERO)与按 i*8 左移对齐、每周期右移 8 位的实现"
+          ],
+          "source_files": [
+            "rtl/topSystolicArray.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "行/列矩阵变换的整体目标",
+            "元素反转 (invertedRow/ColElements)",
+            "补零与按 i*8 左移 / 每周期右移 8 位"
+          ],
+          "practice_task": "取一个具体的 4x4 输入矩阵，按 row_d/col_d 的逻辑手动算出第一周期送入阵列首列的元素值，并与 README 的 matrixTransformation 示意图对照。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "控制计数器与时钟门控",
+          "order": 4,
+          "filename": "u2-l4-control-counter-clock-gating.md",
+          "level": "intermediate",
+          "topic": "讲解 topSystolicArray.sv 的控制段：用计数器决定 3N-2 个周期的乘法时长，并生成 doProcess 门控与 validResult。",
+          "learning_goals": [
+            "理解 MULT_CYCLES = 3N-2 的由来与计数器实现",
+            "掌握 doProcess 时钟门控的置位/保持/清零逻辑",
+            "理解 o_validResult 的判定时序"
+          ],
+          "source_files": [
+            "rtl/topSystolicArray.sv"
+          ],
+          "minimal_modules": [
+            "参数检查 N_VALID",
+            "控制计数器 counter_q 与 MULT_CYCLES",
+            "doProcess 门控与 validResult 生成"
+          ],
+          "practice_task": "对于 N=4，计算 MULT_CYCLES 与计数器位宽 MULT_CYCLES_W，画出 doProcess_d/counter_q/validResult_q 在一次乘法过程中的时序图。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：验证、参数化、FPGA 与扩展",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Verilator C++ 测试平台",
+          "order": 1,
+          "filename": "u3-l1-verilator-cpp-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 tb_topSystolicArray.cpp 如何产生随机矩阵、驱动 DUT 端口、计算期望结果并比对校验，以及波形 dump 的设置。",
+          "learning_goals": [
+            "理解 Verilator C++ 测试平台的主循环与时钟生成",
+            "掌握把矩阵打包成 Verilator 32 位数组端口的方法",
+            "理解期望结果计算与错误比对、VCD 波形 dump 流程"
+          ],
+          "source_files": [
+            "tb/tb_topSystolicArray.cpp",
+            "tb/Makefile"
+          ],
+          "minimal_modules": [
+            "主循环、复位与 validInput 时序",
+            "随机矩阵生成与端口打包驱动 (driveInputMatrices)",
+            "期望结果计算与校验 (verifyOutputMatrix) + 波形 dump"
+          ],
+          "practice_task": "修改测试平台，把随机输入改为固定的一对 3x3 矩阵（同时把 N 宏改为 3、RTL 参数 N 改为 3），运行仿真并确认 o_c 与手算期望一致。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "参数化设计与 SystemVerilog 编码风格",
+          "order": 2,
+          "filename": "u3-l2-parameterization-and-sv-style.md",
+          "level": "advanced",
+          "topic": "总结整个设计用到的参数化与 SystemVerilog 编码风格：参数 N、packed 多维数组、generate、编译期参数检查、default_nettype/`resetall 等。",
+          "learning_goals": [
+            "掌握用参数 N 驱动整个阵列规模的参数化设计",
+            "理解 packed 多维数组在端口与互连中的用法",
+            "了解 default_nettype none / `resetall / $error 等编码约定与编译期参数检查"
+          ],
+          "source_files": [
+            "rtl/topSystolicArray.sv",
+            "rtl/systolicArray.sv",
+            "rtl/pe.sv"
+          ],
+          "minimal_modules": [
+            "参数 N 与编译期检查 (N_VALID / $error)",
+            "packed 多维数组端口",
+            "default_nettype none / `resetall 编码约定"
+          ],
+          "practice_task": "把 RTL 参数 N 与 TB 宏 N 同时从 4 改为 6，重新跑通仿真，观察接口位宽与 MULT_CYCLES 的变化，并记录需要同步修改的所有位置。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Quartus FPGA 综合与资源利用",
+          "order": 3,
+          "filename": "u3-l3-quartus-fpga-synthesis.md",
+          "level": "advanced",
+          "topic": "讲解 FPGA/ 目录下的 Quartus 工程（.qpf/.qsf）如何把设计综合到 Cyclone V（5CSEMA5F31C6），以及资源利用、DSP 映射与 SV2005 兼容性 caveat。",
+          "learning_goals": [
+            "理解 Quartus 工程文件 .qpf/.qsf 的关键赋值（FAMILY/DEVICE/TOP_LEVEL_ENTITY/源文件）",
+            "了解综合到 Cyclone V 后 ALM/DSP/寄存器等资源利用情况",
+            "理解 SV2005 对 for 循环语法兼容性的影响，以及 Yosys 开源流程遇到 packed 数据类型的问题"
+          ],
+          "source_files": [
+            "FPGA/2D-Systolic-Array-Multiplier.qsf",
+            "FPGA/2D-Systolic-Array-Multiplier.qpf",
+            "README.md"
+          ],
+          "minimal_modules": [
+            ".qsf 工程赋值（FAMILY/DEVICE/TOP_LEVEL_ENTITY/SYSTEMVERILOG_FILE）",
+            "Cyclone V 综合与资源利用 / DSP 映射",
+            "SV2005 for 循环语法 caveat 与 Yosys 限制"
+          ],
+          "practice_task": "阅读 .qsf 与 README 的 Further Work，解释为什么 PE 数量与 DSP 利用数一一对应，并说明若改用 Yosys 开源流程会遇到 packed 数据类型的什么问题。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "进阶实践：修改与扩展设计",
+          "order": 4,
+          "filename": "u3-l4-modify-and-extend-design.md",
+          "level": "advanced",
+          "topic": "综合所学，提出若干二次开发实践方向：安全修改阵列规模、把无符号 MAC 改为有符号乘法、以及对接 SIMD 处理器接口的进一步工作。",
+          "learning_goals": [
+            "能够在现有参数化框架上安全地修改阵列规模并同步更新测试",
+            "理解把无符号 MAC 改为有符号运算需要改动的地方（符号扩展、位宽）",
+            "了解向 SIMD 处理器接口扩展的设计思路"
+          ],
+          "source_files": [
+            "rtl/pe.sv",
+            "rtl/topSystolicArray.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "修改阵列规模 N 的完整改动点",
+            "有符号乘法改造（位宽/符号扩展）",
+            "对接 SIMD 处理器接口的进一步工作"
+          ],
+          "practice_task": "将 pe.sv 的乘加改为支持有符号 8 位输入（注意符号扩展与位宽），并修改测试平台生成含负数的输入，跑通仿真验证有符号矩阵乘法结果正确。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
