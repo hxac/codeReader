@@ -1,0 +1,419 @@
+{
+  "project": "texlab.wiki",
+  "head": "bc7c636b3535c80821f6e50463375cea2a2790bd",
+  "rationale": "本仓库是 texlab（LaTeX/BibTeX 语言服务器）的官方 wiki，共 7 个页面，本身就是文档而非源码，因此讲义的“源码”即这 7 篇 wiki，实践任务以“写配置/搭集成/调用命令/验证行为”为主。学习顺序按“先建立全局认知，再深入配置与集成，最后理解协议扩展与可扩展点”设计：单元 1 用 Home 与 Project-Detection 让读者先搞清 texlab 是什么、如何识别一个 LaTeX 工程（这是几乎所有功能的前置）；单元 2 引入配置模型（命名空间、类型、占位符）这一后续所有讲义的公共语言，并聚焦最常用的构建配置；单元 3 围绕“编译→预览”主链路展开，涵盖编译流程、SyncTeX 双向搜索与各阅读器集成、以及 tectonic 替代引擎；单元 4 进入 LSP 协议层，讲清 texlab 的自定义请求、workspace 命令与结构→符号种类映射；单元 5 面向高级配置与二次开发，把 Configuration.md 中较零散的诊断/符号/补全/格式化/inlay hints/experimental 扩展点按主题聚合。讲义依赖遵循“先懂配置模型才能读具体项”“先懂项目识别才能讲依赖图与标签前缀”“先懂编译流程才能讲自定义 build 请求”等关系，避免读者跳读时缺失前置概念。Configuration.md 内容庞大（约 40 项设置横跨构建/诊断/符号/格式化等多个子系统），故按子系统拆成多篇，而非一篇过载。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 texlab：定位与项目模型",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "texlab 是什么：项目定位与 wiki 导览",
+          "order": 1,
+          "filename": "u1-l1-texlab-overview.md",
+          "level": "beginner",
+          "topic": "介绍 texlab 是一个为编辑器提供 LaTeX/BibTeX 智能能力的语言服务器，采用 LSP 客户端-服务器架构；并导览本 wiki 的 7 个页面分别讲什么，帮助读者建立全局认知。",
+          "learning_goals": [
+            "理解 texlab 的定位：基于 LSP 的 LaTeX/BibTeX 语言服务器",
+            "掌握 LSP 客户端-服务器架构，以及 texlab、TeX 引擎、PDF 阅读器各自的角色",
+            "能说出 Home/Configuration/LSP-Internals/Previewing/Project-Detection/Tectonic/Workspace-commands 各页面的主题与建议阅读顺序"
+          ],
+          "source_files": [
+            "Home.md",
+            "Configuration.md",
+            "LSP-Internals.md",
+            "Project-Detection.md"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "LSP 客户端-服务器架构",
+            "Wiki 导览"
+          ],
+          "practice_task": "通读本 wiki 全部 7 个页面，画一张关系图描述「编辑器(LSP 客户端) ↔ texlab(LSP 服务器) ↔ TeX 引擎 ↔ PDF 阅读器」四者如何交互，并用一句话标注每个 wiki 页面对应 texlab 的哪一项能力。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "项目识别与根目录检测",
+          "order": 2,
+          "filename": "u1-l2-project-detection.md",
+          "level": "beginner",
+          "topic": "讲解 texlab 如何从单个 .tex 文件发现整个「项目」（编译进同一文档的所有文件）——通过向上遍历目录树、解析 \\input/\\import 构建依赖树；以及通过 .texlabroot / Tectonic.toml / .latexmkrc / 根源文件四步优先级确定根目录。",
+          "learning_goals": [
+            "理解「项目」概念与依赖树（\\input/\\import）的迭代构建过程",
+            "掌握根目录检测的四步优先级算法及其各自的影响（输出目录、src/build 目录、latexmkrc 推断等）",
+            "理解为何必须确定根目录：TeX 引擎的 \\input 等命令基于工作目录而非源文件目录"
+          ],
+          "source_files": [
+            "Project-Detection.md"
+          ],
+          "minimal_modules": [
+            "Discovery 算法",
+            "依赖树解析",
+            "根目录检测四步法"
+          ],
+          "practice_task": "创建一个含 main.tex（带 \\documentclass 与 document 环境）并用 \\input 引入 chapter1.tex 的多文件工程；分别在父目录放置 .texlabroot、Tectonic.toml、.latexmkrc，预测并验证 texlab 会选中哪个目录作为根目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "配置基础：理解 texlab.* 配置模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "配置总览：命名空间、类型与占位符",
+          "order": 1,
+          "filename": "u2-l1-config-overview.md",
+          "level": "beginner",
+          "topic": "讲解 texlab 的配置模型：配置由 LSP 客户端持有、服务器通过查询获取；配置项统一在 texlab.* 命名空间下，每项有 Type 与 Default value，部分项支持 %f/%p/%l 占位符。",
+          "learning_goals": [
+            "理解配置由 LSP 客户端持有、服务器查询的机制",
+            "学会阅读每个配置项的 Type / Default value / Placeholders 三要素",
+            "掌握 %f（TeX 文件路径）、%p（PDF 路径）、%l（行号）三个占位符的含义与出现位置"
+          ],
+          "source_files": [
+            "Configuration.md"
+          ],
+          "minimal_modules": [
+            "配置查询机制",
+            "texlab.* 命名空间",
+            "占位符 %f/%p/%l"
+          ],
+          "practice_task": "为你的编辑器写一份最小 texlab 配置 JSON，至少包含 build.executable、build.args（带 %f）、forwardSearch.args（带 %f/%p/%l），并为每个字段注释其类型与默认值。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "构建配置 texlab.build.*",
+          "order": 2,
+          "filename": "u2-l2-build-config.md",
+          "level": "intermediate",
+          "topic": "逐项讲解 texlab.build.* 配置：executable、args、onSave、forwardSearchAfter、useFileList、auxDirectory/logDirectory/pdfDirectory、filename，以及已弃用的 texlab.auxDirectory 与 latexmkrc 自动推断的关系。",
+          "learning_goals": [
+            "掌握切换构建工具（latexmk / 其他）的方法与 args 中 flag 与参数需拆分为数组元素的约定",
+            "理解 onSave、forwardSearchAfter、useFileList 各自的作用与性能权衡",
+            "学会配置 auxDirectory/logDirectory/pdfDirectory 输出目录，并理解使用 latexmkrc 时 texlab 会自动推断"
+          ],
+          "source_files": [
+            "Configuration.md"
+          ],
+          "minimal_modules": [
+            "build.executable / build.args",
+            "构建触发（onSave / forwardSearchAfter）",
+            "输出目录配置与 latexmkrc 推断"
+          ],
+          "practice_task": "编写一份配置让 texlab 用 latexmk 把 PDF 输出到 ./build 目录、保存时自动编译；再说明若改用非 latexmk 工具，需要额外显式设置哪些目录项及为何。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "编译、预览与 SyncTeX 集成",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "编译与预览的整体流程",
+          "order": 1,
+          "filename": "u3-l1-build-and-preview-workflow.md",
+          "level": "intermediate",
+          "topic": "讲解 texlab 编译文档的两种触发方式（textDocument/build 自定义请求与 onSave 自动构建）、forwardSearchAfter 如何衔接正向搜索，以及 SyncTeX 的角色；说明为何推荐 onSave 而非 latexmk 的 -pvc。",
+          "learning_goals": [
+            "理解编译的两种触发路径（自定义请求 vs onSave）及其区别",
+            "掌握 forwardSearchAfter 串起的「编译→正向搜索」工作流",
+            "理解 SyncTeX 在编辑器与 PDF 阅读器之间双向跳转中的作用，以及为何不用 latexmk -pvc"
+          ],
+          "source_files": [
+            "Configuration.md",
+            "Previewing.md"
+          ],
+          "minimal_modules": [
+            "编译触发方式",
+            "forwardSearchAfter 工作流",
+            "SyncTeX 概念"
+          ],
+          "practice_task": "配置 texlab.build.onSave=true 与 forwardSearchAfter=true，在编辑器中修改并保存一个 LaTeX 文件，观察「保存→编译→跳转到 PDF」完整链路，并记录每一步由哪个配置项驱动。",
+          "depends_on": [
+            "u2-l2",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SyncTeX 双向搜索与 PDF 阅读器集成",
+          "order": 2,
+          "filename": "u3-l2-synctex-viewers.md",
+          "level": "intermediate",
+          "topic": "讲解 texlab.forwardSearch.* 配置，并给出 SumatraPDF/Evince/Okular/Zathura/qpdfview/Skim/Sioyek 等阅读器的正向搜索与逆向搜索配置；介绍 texlab inverse-search 子命令及其与 window/showDocument 的关系。",
+          "learning_goals": [
+            "掌握 forwardSearch.executable / forwardSearch.args 与 %f/%p/%l 占位符的用法",
+            "能为自己平台上的 PDF 阅读器配置正向搜索（编辑器→PDF）",
+            "理解逆向搜索（PDF→编辑器）如何通过 texlab inverse-search 子命令回跳"
+          ],
+          "source_files": [
+            "Previewing.md",
+            "Configuration.md"
+          ],
+          "minimal_modules": [
+            "forwardSearch 配置",
+            "各阅读器正向搜索配方",
+            "逆向搜索 / inverse-search 子命令"
+          ],
+          "practice_task": "选择你平台上的一个 PDF 阅读器（Windows 用 SumatraPDF、Linux 用 Zathura、macOS 用 Skim），完成正向与逆向搜索的完整配置，并验证从编辑器跳到 PDF、再从 PDF 跳回编辑器的双向流程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "使用 Tectonic 作为替代 TeX 引擎",
+          "order": 3,
+          "filename": "u3-l3-tectonic-engine.md",
+          "level": "intermediate",
+          "topic": "讲解如何把构建工具切换为 tectonic（V2 与 V1 两种 CLI 写法），为何建议加 --keep-intermediates / --keep-logs，以及如何让 pdfDirectory/auxDirectory 与 --outdir 对齐；并联系 Project-Detection 中 Tectonic.toml 的根目录检测。",
+          "learning_goals": [
+            "掌握 tectonic V2（-X compile）与 V1 CLI 的 texlab.build.args 写法",
+            "理解 --keep-intermediates（补全章节编号）与 --keep-logs（上报编译告警）各自的作用",
+            "学会把 pdfDirectory/auxDirectory 与 tectonic --outdir 对齐，并理解 Tectonic.toml 对项目识别的影响"
+          ],
+          "source_files": [
+            "Tectonic.md",
+            "Configuration.md",
+            "Project-Detection.md"
+          ],
+          "minimal_modules": [
+            "tectonic V2 / V1 CLI",
+            "keep-intermediates / keep-logs",
+            "输出目录对齐与 Tectonic.toml"
+          ],
+          "practice_task": "把一份现有 latexmk 配置改写为 tectonic（任选 V1 或 V2），保证 pdfDirectory/auxDirectory 指向同一输出目录；编译后验证 texlab 仍能显示章节编号与编译告警。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "LSP 协议扩展：自定义消息与工作区命令",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "自定义 LSP 消息：build 与 forwardSearch",
+          "order": 1,
+          "filename": "u4-l1-custom-lsp-messages.md",
+          "level": "advanced",
+          "topic": "讲解 texlab 对 LSP 的两处自定义扩展：textDocument/build（编译请求，返回 BuildStatus）与 textDocument/forwardSearch（正向搜索请求，返回 ForwardSearchStatus），以及用 experimental capability 声明这些可选请求的机制。",
+          "learning_goals": [
+            "理解 LSP 自定义请求/响应的扩展方式与 experimental capability 声明机制",
+            "掌握 BuildTextDocumentParams / BuildResult / BuildStatus 的结构与四种状态",
+            "掌握 ForwardSearchResult / ForwardSearchStatus 的结构与四种状态（含 Unconfigured）"
+          ],
+          "source_files": [
+            "LSP-Internals.md"
+          ],
+          "minimal_modules": [
+            "textDocument/build 请求",
+            "textDocument/forwardSearch 请求",
+            "BuildStatus / ForwardSearchStatus 枚举"
+          ],
+          "practice_task": "假设你要为一个新编辑器实现 texlab 客户端，写出调用 textDocument/build 与 textDocument/forwardSearch 的请求/响应 JSON 示例，并枚举四种 BuildStatus 与四种 ForwardSearchStatus 分别在什么场景下出现。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "workspace/executeCommand 工作区命令",
+          "order": 2,
+          "filename": "u4-l2-workspace-commands.md",
+          "level": "advanced",
+          "topic": "讲解 texlab 通过 workspace/executeCommand 暴露的六条命令：cleanAuxiliary、cleanArtifacts、changeEnvironment、findEnvironments、showDependencyGraph、cancelBuild，以及「所有命令至多接收一个参数」的约定。",
+          "learning_goals": [
+            "掌握六条 workspace 命令的用途、参数类型与返回类型",
+            "理解 findEnvironments / changeEnvironment 与 EnvironmentLocation（name + fullRange）结构",
+            "学会用 showDependencyGraph 产出 DOT 依赖图、用 cancelBuild 取消 onSave 触发的构建来排错"
+          ],
+          "source_files": [
+            "Workspace-commands.md"
+          ],
+          "minimal_modules": [
+            "cleanAuxiliary / cleanArtifacts",
+            "findEnvironments / changeEnvironment",
+            "showDependencyGraph / cancelBuild"
+          ],
+          "practice_task": "在一个多文件 LaTeX 工程里依次调用 texlab.findEnvironments 与 texlab.showDependencyGraph，把返回的 DOT 依赖图渲染成图片；再调用 texlab.cleanAuxiliary 清理辅助文件，对比清理前后的目录内容。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "枚举映射：LaTeX/BibTeX 结构与 LSP 符号种类",
+          "order": 3,
+          "filename": "u4-l3-enum-mapping.md",
+          "level": "advanced",
+          "topic": "讲解 texlab 把 LaTeX/BibTeX 结构（命令、环境、节、定理、方程、标签、BibTeX 条目等）映射到 LSP CompletionItemKind 与 SymbolKind 的规则表，及其在补全列表与符号面板中的呈现意义。",
+          "learning_goals": [
+            "理解 LSP 的 CompletionItemKind 与 SymbolKind 两个枚举的作用",
+            "能查表说明某类 LaTeX/BibTeX 结构在编辑器中以哪种图标/种类呈现",
+            "理解不同 BibTeX 条目类型（Article/Book/Thesis 等）被映射到不同枚举值的设计意图"
+          ],
+          "source_files": [
+            "LSP-Internals.md"
+          ],
+          "minimal_modules": [
+            "CompletionItemKind 枚举",
+            "SymbolKind 枚举",
+            "结构→种类映射表"
+          ],
+          "practice_task": "取一段含 \\section、\\begin{equation}、\\label、\\cite 与一个 BibTeX 条目的 LaTeX 文档，在支持 texlab 的编辑器中打开符号面板与补全列表，对照映射表确认每项的 CompletionItemKind / SymbolKind 并截图标注。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "高级配置与可扩展性",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "诊断、chktex 集成与诊断过滤",
+          "order": 1,
+          "filename": "u5-l1-diagnostics-chktex.md",
+          "level": "advanced",
+          "topic": "讲解诊断相关配置：chktex.*（onOpenAndSave / onEdit / additionalArgs，且不要重定义 -I/-f）、diagnosticsDelay、diagnostics.allowedPatterns / ignoredPatterns，以及白名单先于黑名单叠加的过滤顺序。",
+          "learning_goals": [
+            "掌握启用 chktex 静态检查的三种时机与 additionalArgs 的注意事项（勿重定义 -I/-f）",
+            "理解 diagnosticsDelay 对诊断上报延迟与编辑体验的影响",
+            "学会用 allowedPatterns / ignoredPatterns 正则过滤诊断，以及二者叠加时的执行顺序"
+          ],
+          "source_files": [
+            "Configuration.md"
+          ],
+          "minimal_modules": [
+            "chktex 集成",
+            "diagnosticsDelay",
+            "诊断白/黑名单过滤"
+          ],
+          "practice_task": "启用 chktex.onEdit 并配置 additionalArgs，再用 ignoredPatterns 正则屏蔽一类常见告警；验证保存后这类诊断不再上报、其余诊断仍正常显示。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "符号、补全、悬停与 Inlay Hints",
+          "order": 2,
+          "filename": "u5-l2-symbols-completion-hover.md",
+          "level": "advanced",
+          "topic": "讲解与「编辑器内呈现」相关的配置：symbols.allowedPatterns / ignoredPatterns / customEnvironments、completion.matcher（fuzzy / prefix 及其大小写变体）、hover.symbols（none/glyph/image）、inlayHints.*（labelDefinitions / labelReferences / maxLength）。",
+          "learning_goals": [
+            "掌握符号过滤与用 customEnvironments 把自定义环境加入文档符号（含递归过滤）",
+            "理解 completion.matcher 四种取值（fuzzy / fuzzy-ignore-case / prefix / prefix-ignore-case）的差异",
+            "学会配置 hover 符号展示方式（none/glyph/image）与 \\label / \\ref 的 inlay hint 及截断长度"
+          ],
+          "source_files": [
+            "Configuration.md",
+            "LSP-Internals.md"
+          ],
+          "minimal_modules": [
+            "symbols 过滤与 customEnvironments",
+            "completion.matcher",
+            "hover.symbols 与 inlayHints"
+          ],
+          "practice_task": "用 customEnvironments 把一个自定义环境（如 mybox）加入文档符号；切换 completion.matcher 的四种取值观察补全结果差异；并开启 \\label 的 inlay hint 验证显示效果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "代码格式化：BibTeX 与 LaTeX",
+          "order": 3,
+          "filename": "u5-l3-formatting.md",
+          "level": "advanced",
+          "topic": "讲解格式化配置：bibtexFormatter（texlab / latexindent / none）、latexFormatter（latexindent / tex-fmt / none，注意 texlab 尚未实现）、formatterLineLength，以及 latexindent.local / modifyLineBreaks / replacement 与 latexindent 各 flag 的对应关系。",
+          "learning_goals": [
+            "掌握 BibTeX 与 LaTeX 各自可选的格式化器及其取值",
+            "理解 latexindent 的 --local / --modifylinebreaks / -r|-rv|-rr 三个 flag 与配置项的一一映射",
+            "学会设置 BibTeX 格式化的最大行宽（formatterLineLength，0 表示禁用）"
+          ],
+          "source_files": [
+            "Configuration.md"
+          ],
+          "minimal_modules": [
+            "bibtexFormatter",
+            "latexFormatter",
+            "latexindent 选项"
+          ],
+          "practice_task": "分别为 .bib 与 .tex 配置格式化器（如 BibTeX 用 texlab、LaTeX 用 latexindent 并开启 modifyLineBreaks），格式化一份排版混乱的文档，对比前后效果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "experimental 扩展点：自定义命令与环境",
+          "order": 4,
+          "filename": "u5-l4-experimental-extensions.md",
+          "level": "advanced",
+          "topic": "讲解 texlab.experimental.* 扩展点：mathEnvironments / enumEnvironments / verbatimEnvironments、citationCommands、labelDefinitionCommands / labelReferenceCommands / labelReferenceRangeCommands、labelDefinitionPrefixes / labelReferencePrefixes、glossaryReferenceCommands、followPackageLinks，以及「命令不带前导 \\」等约定。",
+          "learning_goals": [
+            "掌握用 experimental 扩展自定义环境类型（数学/枚举/verbatim，后者可抑制诊断）",
+            "理解自定义引用/标签/术语命令的扩展方式与「无前导 \\」约定",
+            "学会用 labelDefinitionPrefixes / labelReferencePrefixes 让自定义命令（如 \\thm）产生的带前缀标签被正确识别"
+          ],
+          "source_files": [
+            "Configuration.md"
+          ],
+          "minimal_modules": [
+            "自定义环境扩展",
+            "自定义命令扩展",
+            "前缀关联（Prefixes）"
+          ],
+          "practice_task": "定义 \\newcommand{\\thm}[1]{\\label{thm:#1}}，通过 labelDefinitionCommands + labelDefinitionPrefixes 让 texlab 识别 thm:foo 标签，并用补全或引用验证该标签可被引用。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
