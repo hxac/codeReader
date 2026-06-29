@@ -5164,18 +5164,18 @@
           "error": null
         },
         "u8-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":194814,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.080915,
+          "error": null
         },
         "u8-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":349318,\"duration_api_ms\":154010,\"num_turns\":8,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "cost": 1.006691,
+          "error": null
         },
         "u8-l4": {
           "status": "done",
@@ -5185,21 +5185,21 @@
           "error": null
         },
         "u8-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":552878,\"duration_api_ms\":364913,\"num_turns\":12,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
+          "cost": 1.062934,
+          "error": null
         }
       },
       "manifest_head": "7e15db42ba533ecbe205e9aa4c8f04024009f411",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/agerasev/ringbuf/ringbuf-tutorial",
       "last_head": "7e15db42ba533ecbe205e9aa4c8f04024009f411",
-      "last_run_at": "2026-06-29T00:31:31Z",
-      "last_error": "3 篇未完成: ['u8-l2', 'u8-l3', 'u8-l5']",
+      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_error": null,
       "abandoned": []
     },
     "longbridge/rust-i18n": {
@@ -5346,70 +5346,70 @@
           "error": null
         },
         "u6-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\nput_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"glm-5.2[1m]\":{\"inputTokens\":41950,\"outputTokens\":8049,\"cacheReadInputTo"
+          "cost": 1.434468,
+          "error": null
         },
         "u7-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":579243,\"duration_api_ms\":382708,\"num_turns\":14,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
+          "cost": 0.944976,
+          "error": null
         },
         "u7-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":188578,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.834721,
+          "error": null
         },
         "u7-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":197785,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.0419470000000002,
+          "error": null
         },
         "u8-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195438,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.1095890000000002,
+          "error": null
         },
         "u8-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":199598,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.089508,
+          "error": null
         },
         "u8-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":193974,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.0363419999999999,
+          "error": null
         },
         "u8-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195671,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.9318110000000002,
+          "error": null
         }
       },
       "manifest_head": "97cf091c24e4bc09a0acb397a8d9d7da8b6abc56",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/longbridge/rust-i18n/rust-i18n-tutorial",
       "last_head": "97cf091c24e4bc09a0acb397a8d9d7da8b6abc56",
-      "last_run_at": "2026-06-29T00:31:31Z",
-      "last_error": "8 篇未完成: ['u6-l3', 'u7-l1', 'u7-l2', 'u7-l3', 'u8-l1']",
+      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_error": null,
       "abandoned": []
     },
     "scipy/scipy": {
@@ -5803,11 +5803,11 @@
           "error": null
         },
         "u3-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":252748,\"duration_api_ms\":58847,\"num_turns\":4,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 0.927191,
+          "error": null
         },
         "u3-l3": {
           "status": "done",
@@ -5817,116 +5817,116 @@
           "error": null
         },
         "u4-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":190139,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.819801,
+          "error": null
         },
         "u4-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195021,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.818381,
+          "error": null
         },
         "u4-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":190501,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.0393910000000002,
+          "error": null
         },
         "u4-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":199495,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.221525,
+          "error": null
         },
         "u5-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":197538,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.925691,
+          "error": null
         },
         "u5-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":198579,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.225654,
+          "error": null
         },
         "u6-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196815,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.949779,
+          "error": null
         },
         "u6-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":200630,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.5458,
+          "error": null
         },
         "u6-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196485,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.244143,
+          "error": null
         },
         "u6-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":198983,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.729633,
+          "error": null
         },
         "u7-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":185609,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.110099,
+          "error": null
         },
         "u7-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":187050,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.998158,
+          "error": null
         },
         "u7-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195950,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.208544,
+          "error": null
         },
         "u8-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":191562,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.203724,
+          "error": null
         },
         "u8-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196958,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.0165359999999999,
+          "error": null
         },
         "u8-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":199489,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.222224,
+          "error": null
         },
         "u8-l4": {
           "status": "done",
@@ -5938,13 +5938,13 @@
       },
       "manifest_head": "450cfcc04d7975c59eec8c0a3f130e0cb57b3285",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/Distributed-EPFL/tokio-udt/tokio-udt-tutorial",
       "last_head": "450cfcc04d7975c59eec8c0a3f130e0cb57b3285",
-      "last_run_at": "2026-06-29T00:31:31Z",
+      "last_run_at": "2026-06-29T12:31:27Z",
       "abandoned": [],
-      "last_error": "17 篇未完成: ['u3-l2', 'u4-l1', 'u4-l2', 'u4-l3', 'u4-l4']"
+      "last_error": null
     },
     "EttusResearch/uhd": {
       "prompt_hash": "b21aef51792b02df",
@@ -5992,137 +5992,137 @@
           "error": null
         },
         "u2-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":318564,\"duration_api_ms\":125113,\"num_turns\":8,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "cost": 0.7992440000000001,
+          "error": null
         },
         "u2-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":255223,\"duration_api_ms\":63799,\"num_turns\":9,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 0.771124,
+          "error": null
         },
         "u2-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":203387,\"duration_api_ms\":7061,\"num_turns\":2,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]["
+          "cost": 1.357423,
+          "error": null
         },
         "u2-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":315237,\"duration_api_ms\":130281,\"num_turns\":3,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "cost": 1.0169659999999998,
+          "error": null
         },
         "u2-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195827,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.7830600000000001,
+          "error": null
         },
         "u2-l6": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":201741,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.863163,
+          "error": null
         },
         "u2-l7": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196614,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.8957510000000001,
+          "error": null
         },
         "u2-l8": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":194595,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.869855,
+          "error": null
         },
         "u3-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":197076,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.338771,
+          "error": null
         },
         "u3-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":187822,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.30711,
+          "error": null
         },
         "u3-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":199254,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.2958560000000001,
+          "error": null
         },
         "u3-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195469,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.915979,
+          "error": null
         },
         "u3-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":193820,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.382731,
+          "error": null
         },
         "u3-l6": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196701,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 2.1590939999999996,
+          "error": null
         },
         "u4-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":199246,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.1544700000000003,
+          "error": null
         },
         "u4-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196156,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.3462200000000002,
+          "error": null
         },
         "u4-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":195052,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.104847,
+          "error": null
         },
         "u4-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":193980,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.33717,
+          "error": null
         },
         "u4-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":187120,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.275535,
+          "error": null
         },
         "u5-l1": {
           "status": "done",
@@ -6169,19 +6169,640 @@
       },
       "manifest_head": "2af4ddb96219a99d2300804830e0971f79557b23",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/EttusResearch/uhd/uhd-tutorial",
       "last_head": "2af4ddb96219a99d2300804830e0971f79557b23",
-      "last_run_at": "2026-06-29T00:31:31Z",
+      "last_run_at": "2026-06-29T12:31:27Z",
       "abandoned": [],
-      "last_error": "19 篇未完成: ['u2-l1', 'u2-l2', 'u2-l3', 'u2-l4', 'u2-l5']"
+      "last_error": null
     },
-    "eclipse-zenoh/zenoh": {},
-    "tms4517/2D-Systolic-Array-Multiplier": {},
-    "abdelazeem201/ASIC-Design-Roadmap": {},
-    "abdelazeem201/ASIC-implementation-of-AES": {},
-    "pulp-platform/axi": {},
+    "eclipse-zenoh/zenoh": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.674767,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.683214,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.974289,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.952951,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.860748,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1721570000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1255810000000002,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.934007,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3904170000000002,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3631929999999999,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1501980000000003,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3169170000000001,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.959671,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.292727,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.012362,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.939751,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9941279999999999,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0236429999999999,
+          "error": null
+        },
+        "u6-4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2187109999999999,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":200731,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "55263c9da5841cc620ba8d9e41f8a8965a35978a",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/eclipse-zenoh/zenoh/zenoh-tutorial",
+      "last_head": "55263c9da5841cc620ba8d9e41f8a8965a35978a",
+      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "tms4517/2D-Systolic-Array-Multiplier": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.44158800000000004,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.519759,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.014526,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.691165,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.869543,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.459915,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.046643,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6892079999999999,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.107632,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9233100000000001,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.240151,
+          "error": null
+        }
+      },
+      "manifest_head": "59378e8caacdc23086ac09e1c04bc19500d70cfb",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/tms4517/2D-Systolic-Array-Multiplier/2D-Systolic-Array-Multiplier-tutorial",
+      "last_head": "59378e8caacdc23086ac09e1c04bc19500d70cfb",
+      "last_run_at": "2026-06-29T12:31:27Z",
+      "abandoned": [],
+      "version": 1,
+      "last_error": null
+    },
+    "abdelazeem201/ASIC-Design-Roadmap": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.532628,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6722750000000001,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7515609999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.593368,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194020,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "795d32ab6b5ba111e6eab968850671d824569692",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/abdelazeem201/ASIC-Design-Roadmap/ASIC-Design-Roadmap-tutorial",
+      "last_head": "795d32ab6b5ba111e6eab968850671d824569692",
+      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "abdelazeem201/ASIC-implementation-of-AES": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.5089899999999999,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7408689999999999,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.726344,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.775591,
+          "error": null
+        },
+        "u1-l5": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194719,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "585f265f91338bea074cebb8c31a3eb602e7cdae",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/abdelazeem201/ASIC-implementation-of-AES/ASIC-implementation-of-AES-tutorial",
+      "last_head": "585f265f91338bea074cebb8c31a3eb602e7cdae",
+      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "pulp-platform/axi": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":185492,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-06-30 03:30:14 重置。][202606300040074175e53c52ef44b2]\",\"stop_reason\":\"stop_seq",
+      "last_run_at": "2026-06-29T12:31:27Z"
+    },
     "pConst/basic_verilog": {},
     "BerkeleyLab/Bedrock": {},
     "chipsalliance/chisel": {},
