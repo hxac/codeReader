@@ -6318,7 +6318,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":200731,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":190639,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u7-l2": {
           "status": "pending",
@@ -6437,7 +6437,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/eclipse-zenoh/zenoh/zenoh-tutorial",
       "last_head": "55263c9da5841cc620ba8d9e41f8a8965a35978a",
-      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_run_at": "2026-06-29T16:43:11Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "tms4517/2D-Systolic-Array-Multiplier": {
@@ -6568,7 +6568,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194020,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186440,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u2-l3": {
           "status": "pending",
@@ -6687,7 +6687,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/abdelazeem201/ASIC-Design-Roadmap/ASIC-Design-Roadmap-tutorial",
       "last_head": "795d32ab6b5ba111e6eab968850671d824569692",
-      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_run_at": "2026-06-29T16:43:11Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "abdelazeem201/ASIC-implementation-of-AES": {
@@ -6726,7 +6726,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194719,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194894,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u2-l1": {
           "status": "pending",
@@ -6795,13 +6795,13 @@
       "mode": "full",
       "tutorial_path": "tutorials/abdelazeem201/ASIC-implementation-of-AES/ASIC-implementation-of-AES-tutorial",
       "last_head": "585f265f91338bea074cebb8c31a3eb602e7cdae",
-      "last_run_at": "2026-06-29T12:31:27Z",
+      "last_run_at": "2026-06-29T16:43:11Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "pulp-platform/axi": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":185492,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-06-30 03:30:14 重置。][202606300040074175e53c52ef44b2]\",\"stop_reason\":\"stop_seq",
-      "last_run_at": "2026-06-29T12:31:27Z"
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194036,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-06-30 03:30:14 重置。][2026063001192385f52c1cf1734532]\",\"stop_reason\":\"stop_seq",
+      "last_run_at": "2026-06-29T16:43:11Z"
     },
     "pConst/basic_verilog": {},
     "BerkeleyLab/Bedrock": {},
