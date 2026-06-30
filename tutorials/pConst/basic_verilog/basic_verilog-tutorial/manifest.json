@@ -1,0 +1,820 @@
+{
+  "project": "basic_verilog",
+  "head": "2654273b2c4e556a98e806f3a19b52c9b3c74614",
+  "rationale": "basic_verilog 是 Konstantin Pavlov 维护的「必备可综合 Verilog/SystemVerilog 模块库」，核心价值不在某条单一主链路，而在于一批高度复用、风格统一的 RTL 积木，以及围绕它们的多 IDE 工程模板、脚本和基准。因此学习路径从「认识项目 + 会跑仿真 + 会建工程」入门，再按功能簇由浅入深推进：先用 clk_divider/edge_detect/delay/clogb2 这类最小组合与时序原语建立 SystemVerilog 风格直觉；接着进入 FPGA 设计真正的难点——时钟域跨越（cdc_data/cdc_strobe）与复位/SR 触发器策略；随后是存储与 FIFO（RAM 模板到单时钟 FIFO 再到 FWFT/read-ahead/combiner 等进阶变体）；再到通信协议 IP（UART/SPI/8b10b/AXI）；然后是数据处理与算术（编码反转、优先级与轮询仲裁、加法树/滤波、脉冲与事件）；最后用测试方法学、时序约束、多 IDE 基准与一次「积木组装」综合实战收尾。每个单元只解决一类问题、引用 1~6 个真实源文件，依赖关系严格按「先时序原语→再 CDC→再存储→再协议→再算术→再工程化」递进，确保读者始终能在前面讲义的基础上理解下一篇。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 basic_verilog 并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：basic_verilog 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 basic_verilog 的定位（必备可综合 Verilog/SystemVerilog 模块库）、目录组织、CC BY-SA 4.0 许可与绿圈/红圈难度标签。",
+          "learning_goals": [
+            "理解项目是可复用 RTL 模块库而非单一应用",
+            "掌握顶层目录与子目录（example_projects/benchmark_projects/scripts 等）的职责",
+            "学会用 README 的难度标签（绿圈/红圈）选择阅读顺序"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README 与目录结构",
+            "难度标签约定"
+          ],
+          "practice_task": "克隆仓库后，按 README 表格列出根目录下所有标记为绿圈（:green_circle:）的模块文件名，并说明它们各自的一句话用途。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "一个模块长什么样：统一的文件结构",
+          "order": 2,
+          "filename": "u1-l2-module-anatomy.md",
+          "level": "beginner",
+          "topic": "以 clk_divider.sv 为例，讲解仓库里几乎每个模块文件统一的四段式结构：头注释 / INFO 说明 / 例化模板 / module 实现。",
+          "learning_goals": [
+            "识别模块文件的头部注释、INFO、INSTANTIATION TEMPLATE、module 四段结构",
+            "理解参数化端口（#(parameter ...)）与 always_ff 时序块的写法",
+            "学会复制例化模板快速使用模块"
+          ],
+          "source_files": [
+            "clk_divider.sv",
+            "edge_detect.sv"
+          ],
+          "minimal_modules": [
+            "模块文件四段式约定",
+            "parameter 化端口",
+            "always_ff 时序逻辑"
+          ],
+          "practice_task": "参照 clk_divider.sv 的写法，新建一个 my_toggle.sv，实现一个 1 位输出每 CLK_HZ/2 个时钟翻转一次的模块，并补全 INFO 与例化模板注释。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "用仿真器跑起来：testbench 模板与编译",
+          "order": 3,
+          "filename": "u1-l3-simulation-setup.md",
+          "level": "beginner",
+          "topic": "讲解如何用 main_tb.sv 与 sim_clk_gen.sv 搭建仿真，并用 iverilog/ModelSim 脚本编译运行。",
+          "learning_goals": [
+            "理解 testbench 中时钟/复位的 initial 产生方式与 timescale",
+            "学会用 sim_clk_gen 生成带相位/占空比/抖动的仿真时钟",
+            "用 scripts 下的 iverilog/modelsim 脚本完成一次编译仿真"
+          ],
+          "source_files": [
+            "main_tb.sv",
+            "sim_clk_gen.sv",
+            "scripts/iverilog_compile.bat",
+            "scripts/modelsim_compile.tcl"
+          ],
+          "minimal_modules": [
+            "initial 时钟与复位",
+            "timescale",
+            "仿真时钟生成器",
+            "编译脚本"
+          ],
+          "practice_task": "复制 main_tb.sv 改写一个最小 testbench，例化 clk_divider 并在波形里观察 out[] 的逐位翻转，用 iverilog 或 ModelSim 跑通并截图波形。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "建一个真实 FPGA 工程：example_projects 模板",
+          "order": 4,
+          "filename": "u1-l4-fpga-project-template.md",
+          "level": "beginner",
+          "topic": "以 quartus_test_prj_template_v4 与 vivado_test_prj_template_v3 为例，讲解一个可上板工程的顶层 main.sv、引脚/物理约束（.qsf/.xdc）与时序约束（.sdc/.xdc）如何组织。",
+          "learning_goals": [
+            "理解 example_projects 模板里 main.sv 顶层与 IP（PLL）、约束、脚本的协作",
+            "看懂 .qsf/.xdc 引脚约束与 .sdc 时钟约束的作用",
+            "掌握输入/输出寄存化以改善时序的写法"
+          ],
+          "source_files": [
+            "example_projects/quartus_test_prj_template_v4/src/main.sv",
+            "example_projects/vivado_test_prj_template_v3/src/main.sv",
+            "example_projects/quartus_test_prj_template_v4/src/main.sdc",
+            "example_projects/vivado_test_prj_template_v3/src/timing.xdc"
+          ],
+          "minimal_modules": [
+            "顶层模块",
+            "PLL/时钟 IP 例化",
+            "引脚约束",
+            "时序约束"
+          ],
+          "practice_task": "在 quartus_test_prj_template_v4 的 main.sv 里，把 out_data 的逻辑从异或改为加法（in_data_reg + div_clk500），重新综合并确认无语法错误。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基础组合与时序原语",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "时钟分频：clk_divider",
+          "order": 1,
+          "filename": "u2-l1-clk-divider.md",
+          "level": "beginner",
+          "topic": "讲解如何用一个自由运行的二进制计数器得到 2 的幂次分频时钟，以及在 main_tb/main.sv 中的实际用法。",
+          "learning_goals": [
+            "理解 out[N] 即 clk/(2^(N+1)) 的派生时钟关系",
+            "学会用 clk_divider 同时得到多个同步慢时钟",
+            "理解自由计数器作为「时钟树」的用途与局限"
+          ],
+          "source_files": [
+            "clk_divider.sv",
+            "main_tb.sv",
+            "example_projects/quartus_test_prj_template_v4/src/main.sv"
+          ],
+          "minimal_modules": [
+            "自由二进制计数器",
+            "派生同步时钟"
+          ],
+          "practice_task": "例化 WIDTH=8 的 clk_divider，在 testbench 里分别观察 out[0]~out[7]，写出每个位的分频比并验证。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "边沿检测：edge_detect",
+          "order": 2,
+          "filename": "u2-l2-edge-detect.md",
+          "level": "beginner",
+          "topic": "讲解 rising/falling/both 三种边沿脉冲的产生，以及用 generate 在组合输出与寄存输出之间切换的实现。",
+          "learning_goals": [
+            "理解用一级延迟寄存器比较得到边沿脉冲的原理",
+            "掌握 WIDTH 参数化实现多位并行边沿检测",
+            "理解 REGISTER_OUTPUTS 参数在组合/寄存实现间的取舍"
+          ],
+          "source_files": [
+            "edge_detect.sv",
+            "edge_detect_tb.sv",
+            "debounce_v2.sv"
+          ],
+          "minimal_modules": [
+            "延迟比较",
+            "generate 选择实现",
+            "参数化位宽"
+          ],
+          "practice_task": "用 edge_detect 对 clk_divider 的输出做上升沿检测，把得到的 one-cycle 脉冲接到 LED，观察脉冲频率与原时钟的关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "静态延迟与同步链：delay",
+          "order": 3,
+          "filename": "u2-l3-delay-synchronizer.md",
+          "level": "intermediate",
+          "topic": "讲解 delay.sv 如何用 generate 提供多种实现（寄存器单元 / Altera block RAM / altshift_taps），以及 SRL 推断与 false_path 注意事项。",
+          "learning_goals": [
+            "理解 LENGTH/WIDTH/TYPE/REGISTER_OUTPUTS 参数如何切换不同实现",
+            "理解 Xilinx SRL16E/SRL32E 与 Altera altshift_taps 的推断条件",
+            "掌握跨时钟域同步时手动加 false_path 的原因"
+          ],
+          "source_files": [
+            "delay.sv",
+            "delay_tb.sv"
+          ],
+          "minimal_modules": [
+            "移位寄存器延迟链",
+            "generate 多实现",
+            "SRL/block RAM 推断",
+            "false_path"
+          ],
+          "practice_task": "例化 LENGTH=5、WIDTH=4 的 delay，写 testbench 输入一个脉冲，验证输出恰好滞后 5 个时钟周期，并尝试把 TYPE 改为不同值对比资源。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "位宽计算：clogb2 与 $clog2",
+          "order": 4,
+          "filename": "u2-l4-clogb2-width.md",
+          "level": "intermediate",
+          "topic": "讲解 clogb2.svh 函数的来源、与系统函数 $clog2 的差异表，以及何时该用 $clog2(DEPTH) 何时该用 $clog2(DEPTH+1)。",
+          "learning_goals": [
+            "理解地址指针宽度与计数器宽度的区别",
+            "能看懂 clogb2 与 $clog2 在边界值上的差异表",
+            "学会在新设计中正确使用 $clog2"
+          ],
+          "source_files": [
+            "clogb2.svh",
+            "fifo_single_clock_ram.sv",
+            "true_single_port_write_first_ram.sv"
+          ],
+          "minimal_modules": [
+            "clogb2 函数",
+            "$clog2 系统函数",
+            "地址/计数位宽"
+          ],
+          "practice_task": "对 DEPTH=1..16 手算 $clog2(DEPTH) 与 $clog2(DEPTH+1)，并在 testbench 中用 $display 打印 clogb2() 的对应值做对照。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "时钟域跨越与复位策略",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "两级数据同步器：cdc_data",
+          "order": 1,
+          "filename": "u3-l1-cdc-data.md",
+          "level": "intermediate",
+          "topic": "讲解 cdc_data 如何封装 delay.sv 做两级同步，以及用 _SYNC_ATTR 后缀配合一条 false_path 约束统一处理所有同步器。",
+          "learning_goals": [
+            "理解亚稳态与两级同步器降低 MTBF 的原理",
+            "学会用 _SYNC_ATTR 命名约定统一施加 false_path",
+            "理解 cdc_data 只是 delay 的封装这一设计思想"
+          ],
+          "source_files": [
+            "cdc_data.sv",
+            "delay.sv",
+            "cdc_strobe.sv"
+          ],
+          "minimal_modules": [
+            "两级同步器",
+            "亚稳态",
+            "_SYNC_ATTR 约束约定"
+          ],
+          "practice_task": "用 cdc_data 数组同步一个 32 位异步输入，写出对应的 Quartus/Vivado false_path 约束并说明为什么数据路径要被排除分析。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "跨时钟域单周期脉冲：cdc_strobe",
+          "order": 2,
+          "filename": "u3-l2-cdc-strobe.md",
+          "level": "advanced",
+          "topic": "讲解用 2 位格雷计数器把一个时钟域的脉冲可靠地搬到另一个时钟域，及其速率限制与 _FP_ATTR false_path 约定。",
+          "learning_goals": [
+            "理解为何单周期脉冲不能直接用同步器搬移",
+            "掌握格雷码计数器跨域比较检测变化的方法",
+            "理解最大输入脉冲速率（每隔一拍）与 2 拍传播延迟"
+          ],
+          "source_files": [
+            "cdc_strobe.sv",
+            "cdc_strobe_tb.sv"
+          ],
+          "minimal_modules": [
+            "格雷计数器",
+            "跨域变化检测",
+            "速率限制",
+            "_FP_ATTR"
+          ],
+          "practice_task": "在 testbench 里用两个不同频率时钟（clk1 快、clk2 慢）驱动 cdc_strobe，验证当输入脉冲过密时输出会丢失，并确定安全最大速率。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "复位与 SR 触发器：set_reset 家族",
+          "order": 3,
+          "filename": "u3-l3-reset-and-sr.md",
+          "level": "intermediate",
+          "topic": "讲解无亚稳态的 SR 触发器变体（set dominates / reset dominates）及其组合输出版本，以及软锁存 soft_latch。",
+          "learning_goals": [
+            "理解 set_reset 与 reset_set 谁优先的差别及为何无亚稳态",
+            "区分同步 SR 与带组合输出的 _comb 变体",
+            "理解 soft_latch 作为组合数据保持电路的用途"
+          ],
+          "source_files": [
+            "set_reset.sv",
+            "reset_set.sv",
+            "reset_set_comb.sv",
+            "set_reset_comb.sv",
+            "soft_latch.sv"
+          ],
+          "minimal_modules": [
+            "SR 触发器",
+            "置位/复位优先",
+            "组合输出",
+            "软锁存"
+          ],
+          "practice_task": "用 set_reset 与 reset_set 各搭一个标志位电路，输入同时 set 与 reset，观察输出分别由谁主导，记录波形差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "存储器与 FIFO",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "RAM/ROM 模板：单口与真双口",
+          "order": 1,
+          "filename": "u4-l1-ram-templates.md",
+          "level": "intermediate",
+          "topic": "讲解 true_single_port_write_first_ram 与 true_dual_port_write_first_2_clock_ram 如何用 ramstyle/RAM_STYLE 属性推断 block RAM，并用 $readmemh 初始化。",
+          "learning_goals": [
+            "理解 write-first 读写同址的语义",
+            "掌握用 (* ramstyle *) / ram_style 属性引导 block RAM 推断",
+            "学会用 INIT_FILE + $readmemh 初始化存储内容"
+          ],
+          "source_files": [
+            "true_single_port_write_first_ram.sv",
+            "true_dual_port_write_first_2_clock_ram.sv",
+            "clogb2.svh"
+          ],
+          "minimal_modules": [
+            "单口/双口 RAM",
+            "write-first",
+            "ramstyle 属性",
+            "$readmemh 初始化"
+          ],
+          "practice_task": "例化 true_single_port_write_first_ram 做一个 16x8 的 ROM，用 .mem 文件初始化为正弦表，在 testbench 中扫描地址打印读出值。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "单时钟 FIFO：fifo_single_clock_ram",
+          "order": 2,
+          "filename": "u4-l2-single-clock-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解基于双口 RAM 的环形 FIFO：读写指针、cnt 计数、满空标志、同时读写冲突处理与溢出/下溢保护。",
+          "learning_goals": [
+            "理解环形指针与 inc_ptr 函数的回绕逻辑",
+            "掌握用 cnt 的多一位编码「满」与「空」的技巧",
+            "理解同时读写且满/空时只读或只写的仲裁规则"
+          ],
+          "source_files": [
+            "fifo_single_clock_ram.sv",
+            "fifo_single_clock_ram_tb.sv",
+            "true_dual_port_write_first_2_clock_ram.sv"
+          ],
+          "minimal_modules": [
+            "环形指针",
+            "满空判断",
+            "同时读写仲裁",
+            "overflow/underflow"
+          ],
+          "practice_task": "写 testbench 连续向 DEPTH=8 的 FIFO 写入 12 个数据再全部读出，观察 full/fail 何时置位以及读出顺序是否先进先出。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "FIFO 进阶：FWFT、预读与组合",
+          "order": 3,
+          "filename": "u4-l3-fifo-advanced.md",
+          "level": "advanced",
+          "topic": "讲解寄存实现 FIFO、preview_fifo（一次预读 0/1/2 字）、read_ahead_buf 以及 fifo_combiner/fifo_operator 的进阶变体。",
+          "learning_goals": [
+            "理解 first-word-fall-through 与 normal 模式的时序差异",
+            "理解 preview/read-ahead 如何在同一拍完成读与指针更新",
+            "理解多 FIFO 聚合到单输出 FIFO 的 combiner/operator 思路"
+          ],
+          "source_files": [
+            "fifo_single_clock_reg_v2.sv",
+            "preview_fifo.sv",
+            "read_ahead_buf.sv",
+            "fifo_combiner.sv",
+            "fifo_operator.sv"
+          ],
+          "minimal_modules": [
+            "FWFT 模式",
+            "预读缓冲",
+            "多 FIFO 聚合"
+          ],
+          "practice_task": "把 fifo_single_clock_ram 与 read_ahead_buf 串联，实现一个「读请求当拍即出数据」的 FWFT 风格 FIFO，并用 testbench 验证时序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "通信协议 IP",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "UART 收发：uart_tx / uart_rx",
+          "order": 1,
+          "filename": "u5-l1-uart.md",
+          "level": "intermediate",
+          "topic": "讲解 UART 发送器的波特分频、移位帧组装（起始+数据+停止）、busy 提前置位/复位，以及接收器的采样原理。",
+          "learning_goals": [
+            "理解 BAUD_DIVISOR 分频与 tx_do_sample 采样节拍",
+            "掌握用 10 位移位寄存器组装起止位的帧格式",
+            "理解 busy 信号提前动作以争取准备时间的技巧"
+          ],
+          "source_files": [
+            "uart_tx.sv",
+            "uart_rx.sv",
+            "uart_tx.v"
+          ],
+          "minimal_modules": [
+            "波特分频",
+            "移位帧",
+            "起始/停止位",
+            "busy 握手"
+          ],
+          "practice_task": "在 CLK_HZ=50MHz、BAUD=115200 下例化 uart_tx，连续发送字符 'A'(0x41)，用 testbench 抓 txd 波形并验证帧格式与位时序。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "SPI 主机：spi_master",
+          "order": 2,
+          "filename": "u5-l2-spi-master.md",
+          "level": "intermediate",
+          "topic": "讲解通用 SPI 主机的时序发生、移位与片选/忙状态管理，以及如何驱动真实从设备。",
+          "learning_goals": [
+            "理解 SPI 主机产生 SCLK/MOSI/CS 的时序状态机",
+            "掌握发送/接收移位寄存器的对齐方式",
+            "学会用 spi_master 与外部 ADC/Flash 模型交互"
+          ],
+          "source_files": [
+            "spi_master.sv",
+            "spi_master_tb.sv",
+            "encoder.v"
+          ],
+          "minimal_modules": [
+            "SPI 时序状态机",
+            "移位收发",
+            "片选与忙状态"
+          ],
+          "practice_task": "写一个简单的 SPI 从机模型（8 位移位），用 spi_master 发送 0xA5 并回收从机回送的数据，在波形中验证 SCLK 边沿采样。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "8b10b 编解码：encdec_8b10b",
+          "order": 3,
+          "filename": "u5-l3-8b10b.md",
+          "level": "advanced",
+          "topic": "讲解 8b10b 编码的直流平衡与游程、控制/数据码字，以及编码器/解码器的接口。",
+          "learning_goals": [
+            "理解 8b10b 为何需要直流平衡与运行不一致性（RD）",
+            "区分控制字符与数据字符的编码",
+            "看懂 encdec_8b10b 的编码/解码端口与数据流"
+          ],
+          "source_files": [
+            "encdec_8b10b.v"
+          ],
+          "minimal_modules": [
+            "8b10b 编码原理",
+            "游程/直流平衡",
+            "控制 vs 数据码字"
+          ],
+          "practice_task": "用 encdec_8b10b 把连续的 8 位数据编码再解码，验证还原一致；并观察编码输出的 0/1 数量是否趋于平衡。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "AXI/总线接口与 logger",
+          "order": 4,
+          "filename": "u5-l4-axi-interfaces.md",
+          "level": "advanced",
+          "topic": "讲解 SystemVerilog interface + modport 的用法（axi4/axis/wb），以及 axi4l_logger 如何嗅探并记录 AXI-Lite 事务。",
+          "learning_goals": [
+            "理解 interface 参数化与 modport 区分主从方向",
+            "看懂 AXI4-Stream（axis_if）与 AXI4-Lite 信号组",
+            "理解 axi4l_logger 把地址/数据写入 FIFO 的调试用途"
+          ],
+          "source_files": [
+            "interfaces/axis_if.sv",
+            "interfaces/axi4_if.sv",
+            "interfaces/wb_if.sv",
+            "axi4l_logger.sv"
+          ],
+          "minimal_modules": [
+            "interface/modport",
+            "AXI4-Stream",
+            "AXI4-Lite",
+            "Wishbone",
+            "事务嗅探"
+          ],
+          "practice_task": "用 axis_if 连接一个简单的数据源与一个打包容器，演示 tvalid/tready 握手下的数据流动，并用 modport 约束主从端口方向。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "数据处理、编码与算术",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "编码转换与位反转工具箱",
+          "order": 1,
+          "filename": "u6-l1-encoding-utils.md",
+          "level": "intermediate",
+          "topic": "讲解一批组合工具：gray<->bin、bin<->pos(one-hot)、leave_one_hot、reverse_vector/reverse_bytes/reverse_dimensions。",
+          "learning_goals": [
+            "理解格雷码与二进制互转的位运算实现",
+            "掌握 one-hot 与二进制的 pos2bin/bin2pos 转换",
+            "理解 reverse 系列在总线字节序/维度处理中的用途"
+          ],
+          "source_files": [
+            "bin2gray.sv",
+            "gray2bin.sv",
+            "bin2pos.sv",
+            "pos2bin.sv",
+            "leave_one_hot.sv",
+            "reverse_vector.sv"
+          ],
+          "minimal_modules": [
+            "格雷码转换",
+            "one-hot 转换",
+            "位/字节/维度反转"
+          ],
+          "practice_task": "写 testbench 让一个 8 位二进制数经过 bin2gray 再 gray2bin 还原，并验证 leave_one_hot 只保留最低置位。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "优先级与轮询仲裁",
+          "order": 2,
+          "filename": "u6-l2-arbiters.md",
+          "level": "advanced",
+          "topic": "讲解 priority_enc（固定优先级）与 round_robin_enc/round_robin_performance_enc（轮询）的实现差异与性能取舍。",
+          "learning_goals": [
+            "理解固定优先级编码器如何复用 leave_one_hot/pos2bin",
+            "理解轮询仲裁如何在上次授权后轮转优先级",
+            "对比 performance 版本在时序/面积上的改进"
+          ],
+          "source_files": [
+            "priority_enc.sv",
+            "round_robin_enc.sv",
+            "round_robin_performance_enc.sv",
+            "round_robin_performance_enc_tb.sv"
+          ],
+          "minimal_modules": [
+            "固定优先级编码",
+            "轮询仲裁",
+            "性能优化版"
+          ],
+          "practice_task": "对 8 路请求分别用 priority_enc 和 round_robin_enc，连续多拍授权同一组并发请求，观察两者授权分布的差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "算术与调制：加法树、滤波、PWM/PDM",
+          "order": 3,
+          "filename": "u6-l3-arith-modulation.md",
+          "level": "intermediate",
+          "topic": "讲解 adder_tree 并行求和、moving_average 滑动平均、以及 pwm_modulator/pdm_modulator 两种调制发生器。",
+          "learning_goals": [
+            "理解加法树的分层并行求和结构",
+            "掌握滑动平均的窗口更新与减法剔除实现",
+            "理解 PWM（占空比）与 PDM（脉冲密度）调制的差别"
+          ],
+          "source_files": [
+            "adder_tree.sv",
+            "moving_average.sv",
+            "pwm_modulator.sv",
+            "pdm_modulator.sv"
+          ],
+          "minimal_modules": [
+            "加法树",
+            "滑动平均",
+            "PWM 调制",
+            "PDM 调制"
+          ],
+          "practice_task": "用 moving_average 对一个含噪声的计数序列做窗口=8 的平均，再用 pwm_modulator 把平均值转成 PWM 输出，观察占空比随输入变化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "脉冲与事件发生：pulse/delayed_event/dynamic_delay",
+          "order": 4,
+          "filename": "u6-l4-pulse-events.md",
+          "level": "intermediate",
+          "topic": "讲解 pulse_gen、pulse_stretch、delayed_event、dynamic_delay 这一组时序脉冲整形模块。",
+          "learning_goals": [
+            "理解 pulse_gen 按给定宽度/延迟产生脉冲",
+            "掌握 pulse_stretch 把窄脉冲拉宽的方法",
+            "理解 delayed_event 与 dynamic_delay 对任意信号的延迟处理"
+          ],
+          "source_files": [
+            "pulse_gen.sv",
+            "pulse_stretch.sv",
+            "delayed_event.sv",
+            "dynamic_delay.sv",
+            "delayed_event_tb.sv"
+          ],
+          "minimal_modules": [
+            "脉冲发生",
+            "脉冲拉伸",
+            "延迟事件",
+            "动态延迟"
+          ],
+          "practice_task": "用一个按键脉冲（模拟毛刺）驱动 pulse_stretch 拉宽到 100 拍，再用 delayed_event 在拉宽后第 10 拍产生一个单拍事件。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "工程化：测试、约束、基准与综合实战",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "测试方法学：随机激励与自检 testbench",
+          "order": 1,
+          "filename": "u7-l1-testbench-methodology.md",
+          "level": "advanced",
+          "topic": "以 main_tb.sv 与各 _tb.sv 为例，讲解随机化激励、异步时钟注入、自校验与波形断言的写法。",
+          "learning_goals": [
+            "理解 testbench 里随机复位/异步时钟抖动的注入手法",
+            "掌握用 $urandom/$urandom_range 构造随机激励",
+            "学会在 testbench 中加入自校验逻辑判断 DUT 行为"
+          ],
+          "source_files": [
+            "main_tb.sv",
+            "fifo_single_clock_ram_tb.sv",
+            "cdc_strobe_tb.sv",
+            "delayed_event_tb.sv"
+          ],
+          "minimal_modules": [
+            "随机激励",
+            "异步时钟注入",
+            "自校验"
+          ],
+          "practice_task": "为 edge_detect 写一个自校验 testbench：随机产生输入跳变，自动比对 rising/falling/both 是否与黄金模型一致，错误即 $error。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "时序约束与收敛：SDC/XDC 与 false_path",
+          "order": 2,
+          "filename": "u7-l2-timing-constraints.md",
+          "level": "advanced",
+          "topic": "讲解时序约束文件（.sdc/.xdc）、false_path/asense 约定、以及用 get_fmax 脚本读取 Fmax 的流程。",
+          "learning_goals": [
+            "理解 create_clock/set_false_path 等约束的作用",
+            "掌握 _SYNC_ATTR/_FP_ATTR 后缀与 false_path 的对应",
+            "学会用 scripts/get_fmax_vivado.tcl 等脚本自动提取 Fmax"
+          ],
+          "source_files": [
+            "example_projects/quartus_test_prj_template_v4/src/main.sdc",
+            "example_projects/vivado_test_prj_template_v3/src/timing.xdc",
+            "scripts/get_fmax_vivado.tcl",
+            "scripts/post_flow_vivado.tcl",
+            "scripts/post_flow_quartus.tcl"
+          ],
+          "minimal_modules": [
+            "create_clock",
+            "set_false_path",
+            "_ATTR 命名约定",
+            "Fmax 提取脚本"
+          ],
+          "practice_task": "为一个含 cdc_data 同步器的小工程补全 Vivado false_path 约束，综合后用 get_fmax 脚本读出 Fmax 并与不约束时对比。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "多 IDE 基准：同一份 Verilog 跨工具对比",
+          "order": 3,
+          "filename": "u7-l3-multi-ide-benchmark.md",
+          "level": "advanced",
+          "topic": "以 benchmark_projects 为例，讲解同一份 main.sv/dynamic_delay.sv 在 Quartus/Vivado/Gowin/ISE 下如何组织工程并对比 Fmax。",
+          "learning_goals": [
+            "理解 benchmark_projects 的对比方法论与 benchmark_results.txt 含义",
+            "掌握各 IDE 工程文件（.qpf/.xpr/.gprj/.xise）与脚本的对应",
+            "理解 clean_* 脚本如何复用清理中间产物"
+          ],
+          "source_files": [
+            "benchmark_projects/README.md",
+            "benchmark_projects/vivado_benchmark/vivado_benchmark.srcs/sources_1/main.sv",
+            "benchmark_projects/quartus_benchmark/main.sv",
+            "benchmark_projects/gowin_benchmark/src/main.sv",
+            "benchmark_projects/benchmark_results.txt"
+          ],
+          "minimal_modules": [
+            "跨 IDE 基准方法",
+            "工程文件类型",
+            "清理脚本"
+          ],
+          "practice_task": "阅读 benchmark_results.txt，选一个器件，说明同一份 RTL 在不同 IDE 下 Fmax 差异的可能原因，并尝试在本地某一 IDE 上复现其中一个结果。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "综合实战：用积木组装一个完整小系统",
+          "order": 4,
+          "filename": "u7-l4-capstone-system.md",
+          "level": "advanced",
+          "topic": "综合前述模块，组装「分频→按键去抖→边沿检测→FIFO 缓存→UART 上报」的数据通路，并写 testbench 端到端验证。",
+          "learning_goals": [
+            "学会把多个独立模块按数据流串接成系统",
+            "掌握时钟域跨越在系统级的应用（按键异步域→系统域）",
+            "能够编写端到端自检 testbench 验证整条通路"
+          ],
+          "source_files": [
+            "clk_divider.sv",
+            "debounce_v2.sv",
+            "edge_detect.sv",
+            "fifo_single_clock_ram.sv",
+            "uart_tx.sv",
+            "main_tb.sv"
+          ],
+          "minimal_modules": [
+            "模块串接",
+            "CDC 系统级应用",
+            "端到端验证"
+          ],
+          "practice_task": "搭建系统：50MHz 主时钟经 clk_divider 得慢时钟采样按键，debounce_v2 去抖后 edge_detect 取上升沿作为写请求，把计数器值写入 FIFO，再由 uart_tx 持续把 FIFO 内容发到串口；写 testbench 模拟按键并校验串口输出字节。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1",
+            "u6-l4",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
