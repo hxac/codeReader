@@ -1,0 +1,965 @@
+{
+  "project": "crossbeam",
+  "head": "6195355ef1862f2c6172365d00645cb6f77417dc",
+  "rationale": "crossbeam 是一个 Rust 并发编程工具集 workspace，包含 6 个子 crate（channel/deque/epoch/queue/utils/skiplist），主 crate 仅做重导出。本大纲按「先会用、再懂原理、最后攻核心」的顺序设计 7 个单元、33 篇讲义。第 1 单元让读者从零认识项目定位、工作区结构与构建方式，并以最易上手的「作用域线程 scope」作为第一个动手实践；第 2 单元拆解 crossbeam-utils 的并发原语基石（Backoff/CachePadded/AtomicCell/Parker/WaitGroup/ShardedLock 等），它们是其它数据结构的公共依赖；第 3 单元进入最具规模的 crossbeam-channel，从基本使用到 flavors 架构、阻塞唤醒机制，再到 select 动态算法与 select! 宏；第 4 单元讲并发队列 ArrayQueue/SegQueue 的防 ABA 设计；第 5 单元攻克难度最高的 crossbeam-epoch（基于 epoch 的内存回收），它是 deque 与 skiplist 的安全基石，因此放在两者之前；第 6 单元基于 epoch 理解工作窃取双端队列（Chase-Lev）；第 7 单元以无锁跳表作为 epoch 综合应用，并以 loom/miri/tsan 测试与基准总结并发正确性与工程实践。依赖关系确保每个主题在所需前置知识（如 epoch 在 deque/skiplist 之前、SelectHandle 在各 flavor 之前、AtomicCell 在 queue 之前）之后展开。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 crossbeam：定位、工作区与第一个并发程序",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "crossbeam 项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 crossbeam 是什么、解决哪些并发编程问题、包含哪些子 crate，以及它对 no_std/alloc/std 的分级支持。",
+          "learning_goals": [
+            "理解 crossbeam 作为并发工具集的定位与适用场景",
+            "认识 6 个子 crate（channel/deque/epoch/queue/utils/skiplist）的职责划分",
+            "了解 no_std、alloc、std 三级特性支持"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "CHANGELOG.md"
+          ],
+          "minimal_modules": [
+            "项目定位与并发工具分类（原子/数据结构/内存管理/同步/工具）",
+            "子 crate 划分与各自职责",
+            "MSRV、许可证与版本约定"
+          ],
+          "practice_task": "阅读 README，用一句话向同事说明 crossbeam 与 std::sync::mpsc 的差异，并列出主 crate 重导出的 5 个工具。在本地执行 cargo doc --open 浏览 crossbeam 的模块树。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "工作区、构建与特性系统",
+          "order": 2,
+          "filename": "u1-l2-workspace-build-features.md",
+          "level": "beginner",
+          "topic": "讲解 Cargo workspace 的组织、std/alloc/no_std 特性门控的层层传递、CI 流水线与本地构建测试方式。",
+          "learning_goals": [
+            "理解 workspace 成员与各 crate 之间的 path 依赖关系",
+            "掌握 std/alloc 特性如何在子 crate 间层层传递",
+            "学会本地构建、测试与运行示例"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            ".github/workflows/ci.yml",
+            "ci/test.sh",
+            "ci/check-features.sh"
+          ],
+          "minimal_modules": [
+            "workspace members 与 path 依赖",
+            "特性门控：default=std、std 依赖 alloc、可选子 crate",
+            "CI 任务与本地构建/测试命令"
+          ],
+          "practice_task": "克隆仓库后执行 cargo build --workspace 与 cargo test -p crossbeam-utils。再尝试 cargo build -p crossbeam --no-default-features --features alloc，观察哪些 API 仍然可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "主 crate 重导出门面与目录结构",
+          "order": 3,
+          "filename": "u1-l3-reexport-facade.md",
+          "level": "beginner",
+          "topic": "剖析 src/lib.rs 如何把多个子 crate 重导出为统一的 crossbeam 命名空间，并支持 no_std。",
+          "learning_goals": [
+            "理解主 crate 作为门面（facade）的重导出模式",
+            "掌握 #[cfg(feature)] 条件编译在 lib.rs 中的运用",
+            "看清 utils/atomic/channel/epoch/queue/sync 的对外路径"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "tests/subcrates.rs",
+            "no_atomic.rs"
+          ],
+          "minimal_modules": [
+            "#![no_std] 与 extern crate std",
+            "pub use 重导出与 #[doc(inline)]",
+            "跨 crate 公开类型检查（tests/subcrates.rs）"
+          ],
+          "practice_task": "对照 src/lib.rs 画出 crossbeam 的模块树，标注每个公开项来自哪个子 crate。写一个最小 crate 依赖 crossbeam，分别通过 crossbeam::channel 与 crossbeam_channel 两种路径调用 unbounded。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "作用域线程 scope 快速上手",
+          "order": 4,
+          "filename": "u1-l4-scoped-threads-intro.md",
+          "level": "beginner",
+          "topic": "以最易上手的 crossbeam_utils::thread::scope 为入口，让读者第一次动手写并发代码，理解作用域线程借用栈上变量的能力。",
+          "learning_goals": [
+            "掌握 scope/spawn/ScopedJoinHandle 的基本用法",
+            "理解作用域线程如何安全地借用栈上 &T",
+            "学会处理 spawn 线程的 panic 与返回值"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/thread.rs"
+          ],
+          "minimal_modules": [
+            "scope 的签名与生命周期 'env",
+            "spawn 与 ScopedJoinHandle::join",
+            "作用域结束时自动等待所有线程"
+          ],
+          "practice_task": "用 scope 启动 4 个线程并发对一段 &mut [i32] 切片求和（每个线程处理一段并写入局部累加变量），在作用域内收集结果，体现相比 std::thread::spawn 能借用栈上数据的优势。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "crossbeam-utils：并发原语基石",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Backoff 自旋退避",
+          "order": 1,
+          "filename": "u2-l1-backoff.md",
+          "level": "beginner",
+          "topic": "讲解 Backoff 在自旋锁/CAS 循环中的指数退避策略：spin 与 snooze 两个阶段，以及何时应转为阻塞。",
+          "learning_goals": [
+            "理解 spin/snooze 两阶段退避原理",
+            "掌握 is_completed 判断何时停止自旋",
+            "学会在 CAS 循环中正确使用 Backoff"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/backoff.rs"
+          ],
+          "minimal_modules": [
+            "SPIN_LIMIT/YIELD_LIMIT 常量与指数增长",
+            "spin() 纯自旋 vs snooze() 自旋后 yield_now",
+            "is_completed() 与阻塞决策"
+          ],
+          "practice_task": "实现一个简单自旋锁 SpinLock<T>，在 CAS 失败时用 Backoff::spin 退避；再实现一个用 snooze 的变体，写微基准比较两者在 4 线程高争用下的吞吐。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CachePadded 与伪共享",
+          "order": 2,
+          "filename": "u2-l2-cache-padded.md",
+          "level": "beginner",
+          "topic": "讲解 CachePadded 如何通过按缓存行对齐消除伪共享（false sharing），以及不同架构的对齐策略。",
+          "learning_goals": [
+            "理解伪共享的成因与危害",
+            "掌握 CachePadded 的使用方式与对齐值",
+            "学会判断哪些并发字段需要 padding"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/cache_padded.rs"
+          ],
+          "minimal_modules": [
+            "伪共享问题与缓存行概念",
+            "repr(C) 与架构相关 align（64/128/256/32）",
+            "Deref 实现与性能取舍"
+          ],
+          "practice_task": "构造两个被多线程频繁原子更新的相邻 AtomicUsize，对比包装与不包装 CachePadded 的性能差异，用基准展示伪共享导致的性能下降。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "AtomicCell 任意类型原子单元",
+          "order": 3,
+          "filename": "u2-l3-atomic-cell.md",
+          "level": "intermediate",
+          "topic": "剖析 AtomicCell<T> 如何对任意类型提供原子 load/store/swap/CAS：对可转原子类型直接原子操作，否则用全局序列锁数组兜底。",
+          "learning_goals": [
+            "理解 AtomicCell 的两条实现路径（直接原子 vs 序列锁）",
+            "掌握序列锁的乐观读/写协议",
+            "认识 MaybeUninit 与 unsafe 边界"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/atomic/atomic_cell.rs",
+            "crossbeam-utils/src/atomic/seq_lock.rs"
+          ],
+          "minimal_modules": [
+            "repr(transparent)+UnsafeCell+MaybeUninit 布局",
+            "can_transmute 判定与 atomic! 宏分发",
+            "全局 67 把 cache-padded 锁的 lock() 与乐观读校验"
+          ],
+          "practice_task": "用 AtomicCell<u64> 与 AtomicCell<(u64,u64)> 分别做并发交换测试。阅读 atomic! 宏与 lock()，画出一组大尺寸 T 写操作时选择哪把锁。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "AtomicConsume 与序列锁",
+          "order": 4,
+          "filename": "u2-l4-atomic-consume.md",
+          "level": "intermediate",
+          "topic": "讲解 AtomicConsume trait 提供的 consume 内存序及其在 ARM/AArch64 上的优化实现，以及窄指针宽度下的 wide 序列锁。",
+          "learning_goals": [
+            "理解 consume 内存序相对 acquire 的优势",
+            "掌握 AtomicConsume 在不同架构的实现差异",
+            "认识 seq_lock_wide 防止计数回绕的设计"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/atomic/consume.rs",
+            "crossbeam-utils/src/atomic/seq_lock.rs",
+            "crossbeam-utils/src/atomic/seq_lock_wide.rs"
+          ],
+          "minimal_modules": [
+            "AtomicConsume trait 与 load_consume",
+            "ARM/AArch64 的 Relaxed + compiler_fence(Acquire) 优化",
+            "宽计数器 seq_lock_wide 的回绕防护"
+          ],
+          "practice_task": "为一个自定义 AtomicPtr 包装实现 load_consume 读取，对比 Acquire 与 Consume 在依赖链上的语义差异。阅读 seq_lock_wide.rs 说明为何指针宽度≤32 需要 wide 版本。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Parker 线程停放原语",
+          "order": 5,
+          "filename": "u2-l5-parker.md",
+          "level": "intermediate",
+          "topic": "剖析 Parker/Unparker 的状态机（EMPTY/PARKED/NOTIFIED）与 park/unpark 的 condvar 实现，以及避免丢失唤醒的设计。",
+          "learning_goals": [
+            "理解 Parker 三态状态机与令牌语义",
+            "掌握 park/park_timeout 的阻塞逻辑",
+            "认识 unpark 的先发通知如何防止丢失唤醒"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/sync/parker.rs"
+          ],
+          "minimal_modules": [
+            "Inner 三态与 Mutex+Condvar 组合",
+            "park()：检查通知→置 PARKED→等待→处理伪唤醒",
+            "unpark()：CAS 置 NOTIFIED 并 notify_one"
+          ],
+          "practice_task": "用 Parker 实现一个简单事件等待器（线程 A park，线程 B 在条件成立后 unpark）。构造一个「先 unpark 后 park」的场景，验证不会永久阻塞。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "WaitGroup 与 ShardedLock",
+          "order": 6,
+          "filename": "u2-l6-waitgroup-shardedlock.md",
+          "level": "intermediate",
+          "topic": "讲解 WaitGroup（同步一组任务完成）与 ShardedLock（分片读写锁，读路径只锁一个分片）的设计与实现。",
+          "learning_goals": [
+            "掌握 WaitGroup 的引用计数 + condvar 等待机制",
+            "理解 ShardedLock 分片降低读争用的原理",
+            "认识线程局部注册表带来的稳定分片索引"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/sync/wait_group.rs",
+            "crossbeam-utils/src/sync/sharded_lock.rs",
+            "crossbeam-utils/src/sync/once_lock.rs"
+          ],
+          "minimal_modules": [
+            "WaitGroup clone/drop/wait 的计数语义",
+            "ShardedLock 8 分片与 RwLock，写路径全锁",
+            "线程局部 REGISTRATION 的稳定分片索引"
+          ],
+          "practice_task": "用 WaitGroup 协调 N 个工作线程全部完成后再汇总。再写一个读多写少场景，对比 std::sync::RwLock 与 ShardedLock 在 8 线程读吞吐上的差异。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "作用域线程实现内幕",
+          "order": 7,
+          "filename": "u2-l7-scoped-threads-internals.md",
+          "level": "intermediate",
+          "topic": "深入 thread.rs，理解 scope 如何用 WaitGroup 协调、SharedVec 管理句柄，以及把 'env 闭包转 'static 的 unsafe 技巧与 panic 捕获。",
+          "learning_goals": [
+            "理解 Scope 内部 handle 列表与 WaitGroup 的协作",
+            "掌握闭包 'env→'static 的生命周期转换与安全保证",
+            "认识作用域结束时的 join 与 panic 收集"
+          ],
+          "source_files": [
+            "crossbeam-utils/src/thread.rs",
+            "crossbeam-utils/src/sync/wait_group.rs"
+          ],
+          "minimal_modules": [
+            "Scope 结构与 SharedVec<JoinHandle>",
+            "spawn 的 Box<dyn FnOnce+'env> 转换与 AbortOnPanic",
+            "scope 结束：wait 嵌套作用域→join 全部线程→收集 panic"
+          ],
+          "practice_task": "阅读 scope 实现，解释为何在 scope 返回前所有 spawn 的线程一定已结束（从而借用安全）。构造一个线程 panic 的场景，验证 scope 返回 Err 且不影响其它线程。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "crossbeam-channel：消息传递",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "channel 总览与基本使用",
+          "order": 1,
+          "filename": "u3-l1-channel-overview.md",
+          "level": "intermediate",
+          "topic": "介绍 crossbeam-channel 的三种基本通道（有界 bounded、无界 unbounded、零容量 rendezvous），以及 send/recv/迭代等基础用法。",
+          "learning_goals": [
+            "掌握 bounded/unbounded/bounded(0) 三类通道的语义",
+            "理解 send/recv 的阻塞与 TryRecv/Send 错误",
+            "学会用 Receiver 作为迭代器消费消息"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/lib.rs",
+            "crossbeam-channel/src/channel.rs",
+            "crossbeam-channel/examples/fibonacci.rs"
+          ],
+          "minimal_modules": [
+            "unbounded()/bounded()/bounded(0) 的区别",
+            "Sender/Receiver 公共方法与错误类型概览",
+            "示例：fibonacci 生成器用 bounded(0) 会合"
+          ],
+          "practice_task": "实现一个生产者-消费者：一个线程用 unbounded 发送 1..100，主线程用 for 循环消费并求和。再改用 bounded(8) 观察背压，思考何时应选 bounded。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "counter 引用计数与 err 错误类型",
+          "order": 2,
+          "filename": "u3-l2-counter-and-errors.md",
+          "level": "intermediate",
+          "topic": "剖析 counter.rs 如何用 AtomicUsize 计数管理多 Sender/Receiver 并在最后引用释放时销毁通道，以及 err.rs 的错误类型体系。",
+          "learning_goals": [
+            "理解 Sender/Receiver 共享 Counter 的引用计数模型",
+            "掌握 acquire/release 与 destroy 标志的销毁协议",
+            "认识 send/recv/select 各类错误枚举"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/counter.rs",
+            "crossbeam-channel/src/err.rs"
+          ],
+          "minimal_modules": [
+            "Counter：senders/receivers/destroy/chan 字段",
+            "acquire/release/deallocate 协议与唯一销毁",
+            "err.rs：TrySend/Send/Recv/Timeout/Select 错误家族"
+          ],
+          "practice_task": "克隆多个 Sender 与 Receiver，在不同线程中 drop，追踪 senders/receivers 何时归零并触发销毁。编写一个表格总结 6 类错误分别在什么条件下产生。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "flavors 架构与 SelectHandle trait",
+          "order": 3,
+          "filename": "u3-l3-flavors-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 channel 的 flavor 派发架构：SenderFlavor/ReceiverFlavor 枚举如何把操作路由到具体 flavor，以及统一的 SelectHandle trait。",
+          "learning_goals": [
+            "理解 SenderFlavor/ReceiverFlavor 枚举派发模式",
+            "掌握 SelectHandle trait 的统一接口（try_select/register/accept 等）",
+            "认识 Token 作为各 flavor 操作状态的载体"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/channel.rs",
+            "crossbeam-channel/src/flavors/mod.rs",
+            "crossbeam-channel/src/select.rs"
+          ],
+          "minimal_modules": [
+            "SenderFlavor/ReceiverFlavor 枚举与 match 派发",
+            "SelectHandle trait 的核心方法语义",
+            "Token 联合体与 Operation/Selected"
+          ],
+          "practice_task": "画一张表，列出 array/list/zero/at/tick/never 六种 flavor 各自实现 SelectHandle 的哪些关键行为。在 channel.rs 中找到 send/recv 的 match 分支并标注每条分支对应的 flavor 文件。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "array flavor：有界环形缓冲",
+          "order": 4,
+          "filename": "u3-l4-flavor-array.md",
+          "level": "intermediate",
+          "topic": "剖析 flavors/array.rs 的有界 MPMC 环形缓冲实现（Vyukov 算法）：槽位 stamp、start_send/write、start_recv/read 与阻塞协作。",
+          "learning_goals": [
+            "理解 stamp 标记的可写/可读槽位协议",
+            "掌握 send/recv 的 start→commit 两阶段与 Token 保存",
+            "认识有界缓冲与 Waker 的阻塞配合"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/flavors/array.rs",
+            "crossbeam-channel/src/waker.rs"
+          ],
+          "minimal_modules": [
+            "ArrayToken{slot,stamp} 与环形槽布局",
+            "start_send/start_recv 占位 + write/read 提交",
+            "与 Waker 协作实现阻塞 send/recv"
+          ],
+          "practice_task": "对照 array.rs 画出一次成功 send+recv 的槽位 stamp 变化时序。构造容量为 2 的通道，2 个发送者各发 5 条、1 个接收者消费，用日志验证 stamp 状态机。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "list flavor：无界链表",
+          "order": 5,
+          "filename": "u3-l5-flavor-list.md",
+          "level": "intermediate",
+          "topic": "剖析 flavors/list.rs 的无界链表实现：每块 31 条消息的分块链表、按需扩容，以及最后一个 receiver drop 时丢弃全部消息。",
+          "learning_goals": [
+            "理解分块链表（每块 31 消息）的存储结构",
+            "掌握 ListToken{block,offset} 的定位与扩容",
+            "认识 list 作为 unbounded 通道默认实现及销毁语义"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/flavors/list.rs",
+            "crossbeam-channel/src/flavors/mod.rs"
+          ],
+          "minimal_modules": [
+            "Block 分块与尾指针扩容",
+            "start_send/write 按 offset 写入与 ListToken",
+            "discard_all_messages 在最后 receiver 离开时清理"
+          ],
+          "practice_task": "用 unbounded 通道连续发送 1000 条消息但不接收，阅读 list.rs 估算分配了多少个 block（每块 31 条）。说明为何 list 不需要像 array 那样处理容量上限。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "zero flavor：零容量会合通道",
+          "order": 6,
+          "filename": "u3-l6-flavor-zero.md",
+          "level": "intermediate",
+          "topic": "剖析 flavors/zero.rs 的 rendezvous（零容量）通道：send 与 recv 必须同时在场配对，通过 Packet 直接交接所有权。",
+          "learning_goals": [
+            "理解零容量通道的会合（rendezvous）语义",
+            "掌握 Packet 作为交接缓冲与 ZeroToken",
+            "认识 start_send/start_recv 配对与唤醒协议"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/flavors/zero.rs",
+            "crossbeam-channel/src/waker.rs"
+          ],
+          "minimal_modules": [
+            "零容量=无缓冲，send/recv 必须配对",
+            "Packet 交接与 ZeroToken 指针",
+            "配对成功后的相互唤醒"
+          ],
+          "practice_task": "用 bounded(0) 实现一个严格同步的握手：线程 A 发送后必须等 B 接收才能继续。阅读 zero.rs 解释为何发送者不能先把消息放进缓冲。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "Context 与 Waker：阻塞与唤醒机制",
+          "order": 7,
+          "filename": "u3-l7-context-and-waker.md",
+          "level": "intermediate",
+          "topic": "剖析 context.rs（线程局部阻塞上下文 + try_select/wait_until/unpark）与 waker.rs（管理被阻塞线程的 selectors/observers 队列）。",
+          "learning_goals": [
+            "理解 Context 的线程局部缓存与 Inner 的 CAS 选择",
+            "掌握 Waker/SyncWaker 的注册/选择/通知/断开",
+            "认识 select 算法与阻塞唤醒的衔接"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/context.rs",
+            "crossbeam-channel/src/waker.rs"
+          ],
+          "minimal_modules": [
+            "Context/Inner：select 状态 + packet + 线程句柄",
+            "try_select CAS + wait_until 阻塞 + unpark",
+            "Waker selectors/observers 与 SyncWaker 互斥"
+          ],
+          "practice_task": "用一个有界(1) 通道制造阻塞 recv：发送者延迟 1 秒发送，接收者阻塞。阅读 context.rs/wait_until 与 waker.rs，画出从「接收者 park」到「发送者唤醒接收者」的完整调用链。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l8",
+          "title": "tick/at/never：时间与特殊 flavor",
+          "order": 8,
+          "filename": "u3-l8-flavor-tick-at-never.md",
+          "level": "intermediate",
+          "topic": "讲解 at（在指定时刻投递一次）、tick（周期性投递）、never（永不投递）三种特殊 Receiver 的实现，以及它们在 select 中的作用。",
+          "learning_goals": [
+            "理解 at/tick 作为只读 Receiver 的定时语义",
+            "掌握 never 作为选择失败兜底的用途",
+            "认识这些 flavor 如何与 select 组合实现超时/周期任务"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/flavors/at.rs",
+            "crossbeam-channel/src/flavors/tick.rs",
+            "crossbeam-channel/src/flavors/never.rs",
+            "crossbeam-channel/src/channel.rs"
+          ],
+          "minimal_modules": [
+            "at：单次定时投递 Instant",
+            "tick：周期定时与 AtomicCell 时间戳",
+            "never：始终 Empty 的兜底通道"
+          ],
+          "practice_task": "用 tick(Duration::from_secs(1)) 实现每秒打印一次的定时器；用 after(Duration::from_secs(5)) 配合 select 给一个长任务加超时。说明 never 在 select 中何时有用。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "select 动态选择算法",
+          "order": 9,
+          "filename": "u3-l9-select-algorithm.md",
+          "level": "advanced",
+          "topic": "剖析 select.rs 的 Select 动态多路选择：start（try_select 全部）→register（注册阻塞）→decide（等待唤醒）→unregister→accept（完成）的五阶段算法。",
+          "learning_goals": [
+            "理解 Select 构建操作列表并动态多路选择",
+            "掌握五阶段选择算法与公平性保证",
+            "认识 select（必须完成）与 ready（仅返回就绪索引）两种模式"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/select.rs",
+            "crossbeam-channel/examples/matching.rs",
+            "crossbeam-channel/examples/stopwatch.rs"
+          ],
+          "minimal_modules": [
+            "Select 构建 &dyn SelectHandle 列表",
+            "run_select：try_select→register→wait_until→unregister→accept",
+            "select vs ready，Selected 状态机"
+          ],
+          "practice_task": "用 Select 在两个 unbounded 通道间做动态选择，打印先到的消息。再实现一个超时版本：加入一个 after(...) 通道作为第三路。对照 select.rs 说明每个操作如何被 register 与 accept。",
+          "depends_on": [
+            "u3-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "select! 宏",
+          "order": 10,
+          "filename": "u3-l10-select-macro.md",
+          "level": "advanced",
+          "topic": "剖析 select_macro.rs 的 select! 宏：解析阶段（@list/@case）与代码生成阶段（@init/@count/@add/@complete），以及编译期优化与容量限制。",
+          "learning_goals": [
+            "理解声明式宏的分阶段解析与代码生成",
+            "掌握 select! 展开后的运行时逻辑与 select.rs 的关系",
+            "认识 default 分支与 case 数量上限"
+          ],
+          "source_files": [
+            "crossbeam-channel/src/select_macro.rs",
+            "crossbeam-channel/src/select.rs"
+          ],
+          "minimal_modules": [
+            "解析阶段：@list/@list_error/@case 与语法诊断",
+            "代码生成：@init 优化/@count/@add/@complete",
+            "select! 与底层 Select 的对应"
+          ],
+          "practice_task": "写一段 select! 同时 recv 两个通道并带 default 超时分支，用 cargo expand（或手动推理）查看展开结果，标注展开代码对应 select.rs 的哪几个阶段。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "crossbeam-queue：并发队列",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "ArrayQueue：有界 MPMC 队列",
+          "order": 1,
+          "filename": "u4-l1-array-queue.md",
+          "level": "intermediate",
+          "topic": "剖析 array_queue.rs 的有界 MPMC 环形队列：用 lap（幂次）+ index 编码与 slot stamp 防止 ABA，head/tail 的 CAS 推进。",
+          "learning_goals": [
+            "理解 lap/index 编码与 one_lap 防 ABA 机制",
+            "掌握 Slot 的 stamp 状态机（可写/可读）",
+            "认识 CachePadded 的 head/tail 避免伪共享"
+          ],
+          "source_files": [
+            "crossbeam-queue/src/array_queue.rs",
+            "crossbeam-queue/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Slot{stamp,value} 与 lap 编码",
+            "push：CAS tail + 写值 + 更新 stamp",
+            "pop：CAS head + 读值 + 重置 stamp 为下一圈"
+          ],
+          "practice_task": "用 ArrayQueue 在 4 生产者 4 消费者下传递消息并验证无丢失。阅读 array_queue.rs 解释：若不用 lap（代次）会出现什么 ABA 问题。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "SegQueue：无界分段队列",
+          "order": 2,
+          "filename": "u4-l2-seg-queue.md",
+          "level": "intermediate",
+          "topic": "剖析 seg_queue.rs 的无界分段队列：链表式 Block（每块 31 槽）、index 编码带 HAS_NEXT 位、按需分配新块与块回收。",
+          "learning_goals": [
+            "理解 Block 链表与 BLOCK_CAP=31 的设计",
+            "掌握 index 编码（SHIFT/HAS_NEXT/LAP）与 slot 的 WRITE/READ/DESTROY 位",
+            "认识段的分配、推进与回收协议"
+          ],
+          "source_files": [
+            "crossbeam-queue/src/seg_queue.rs",
+            "crossbeam-queue/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Block/Slot 布局与状态位",
+            "push：预分配下一段 + CAS tail + 写值置 WRITE",
+            "pop：CAS head + 等待 WRITE + 读值置 READ + 段回收"
+          ],
+          "practice_task": "用 SegQueue 做无界传递并持续发送 1e6 条消息。阅读 seg_queue.rs 估算段分配次数，并解释最后一个读取某槽的线程负责释放段的协议。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "crossbeam-epoch：基于 epoch 的内存回收",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "epoch 内存回收：问题背景与 API",
+          "order": 1,
+          "filename": "u5-l1-epoch-overview.md",
+          "level": "advanced",
+          "topic": "引入并发数据结构的内存回收难题，讲解基于 epoch 的回收思想，并概览 crossbeam-epoch 的公共 API（pin/Guard/Collector/Atomic/Shared/Owned）。",
+          "learning_goals": [
+            "理解无锁数据结构删除节点的安全回收难题",
+            "掌握 epoch 回收的基本思想（延迟两个 epoch）",
+            "认识 crossbeam-epoch 的核心类型与 pin 入口"
+          ],
+          "source_files": [
+            "crossbeam-epoch/src/lib.rs",
+            "crossbeam-epoch/src/default.rs"
+          ],
+          "minimal_modules": [
+            "问题背景：删除与并发读取的竞争",
+            "epoch 回收原理：标记→延迟→销毁",
+            "公共 API：pin/default_collector/is_pinned 与重导出"
+          ],
+          "practice_task": "阅读 lib.rs 文档注释，用一段话说明「为什么 GC 语言里无锁结构更简单」。在本地执行 cargo doc -p crossbeam-epoch 浏览 pin/Guard/Atomic 的文档。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Atomic/Shared/Owned 原子指针与标签",
+          "order": 2,
+          "filename": "u5-l2-epoch-atomic-pointers.md",
+          "level": "advanced",
+          "topic": "剖析 atomic.rs：Atomic<T> 原子指针、低地址位标签打包、Owned（独占）与 Shared<'g,T>（借用）的区别，以及 load/store/swap/compare_exchange。",
+          "learning_goals": [
+            "理解 AtomicPtr + 低地址位标签打包",
+            "掌握 Owned vs Shared 的所有权语义与 Pointer trait",
+            "认识 compare_exchange 同时比较指针与标签"
+          ],
+          "source_files": [
+            "crossbeam-epoch/src/atomic.rs"
+          ],
+          "minimal_modules": [
+            "Atomic<T> 与 low_bits/compose_tag/decompose_tag",
+            "Owned/Shared/Pointer 的关系与转换",
+            "load/load_consume/store/swap/compare_exchange"
+          ],
+          "practice_task": "用 Atomic<T> 存一个带 2 位标签的指针，写一段代码用 compare_exchange 原子地更新指针并修改标签。说明 Shared 的生命周期 'g 为何与 Guard 绑定。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Guard 与 pin 机制",
+          "order": 3,
+          "filename": "u5-l3-epoch-guard.md",
+          "level": "advanced",
+          "topic": "剖析 guard.rs 的 RAII Guard：pin 增加保护计数、defer/defer_destroy/defer_unchecked 延迟销毁，以及 deferred.rs 的类型擦除闭包与 default.rs 的全局收集器。",
+          "learning_goals": [
+            "理解 Guard 的 RAII 与可重入 guard_count",
+            "掌握 defer 系列方法的延迟执行语义",
+            "认识 Deferred 类型擦除闭包与全局 pin 入口"
+          ],
+          "source_files": [
+            "crossbeam-epoch/src/guard.rs",
+            "crossbeam-epoch/src/deferred.rs",
+            "crossbeam-epoch/src/default.rs"
+          ],
+          "minimal_modules": [
+            "Guard RAII + guard_count 可重入 pin",
+            "defer/defer_destroy/defer_unchecked",
+            "Deferred 内联/装箱闭包与全局 pin()"
+          ],
+          "practice_task": "用 pin() 获得 Guard，defer_destroy 一段共享数据，观察它在后续 pin 周期后才真正释放（用计数/日志验证）。说明 defer_unchecked 为何是 unsafe。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Collector 与参与者注册",
+          "order": 4,
+          "filename": "u5-l4-epoch-collector.md",
+          "level": "advanced",
+          "topic": "剖析 collector.rs 的 Collector（Arc<Global>）与 LocalHandle：参与者注册到全局链表、LocalHandle::pin 的可重入保护与周期性回收。",
+          "learning_goals": [
+            "理解 Collector 与 LocalHandle 的关系",
+            "掌握参与者注册到全局链表的协议",
+            "认识 pin 时记录局部 epoch 与 SeqCst fence 的作用"
+          ],
+          "source_files": [
+            "crossbeam-epoch/src/collector.rs",
+            "crossbeam-epoch/src/internal.rs"
+          ],
+          "minimal_modules": [
+            "Collector{Arc<Global>} 与 LocalHandle",
+            "register：插入全局参与者链表",
+            "LocalHandle::pin：guard_count++/记录 epoch/fence/周期 collect"
+          ],
+          "practice_task": "创建一个自定义 Collector，register 两个参与者并各自 pin，用日志观察 LocalHandle 的 guard_count 变化。说明为什么需要 fence 保证回收安全。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "internal：全局状态、epoch 推进与垃圾回收",
+          "order": 5,
+          "filename": "u5-l5-epoch-internals.md",
+          "level": "advanced",
+          "topic": "剖析 internal.rs 的 Global（参与者链表+全局垃圾队列+epoch）与 Local（线程局部 garbage bag），以及 try_advance 推进 epoch、collect 销毁过期垃圾的完整协议。",
+          "learning_goals": [
+            "理解 Global/Local 的字段布局与协作",
+            "掌握 try_advance 的「所有参与者已离开旧 epoch」判定",
+            "认识 Bag/SealedBag 的两 epoch 延迟销毁原理"
+          ],
+          "source_files": [
+            "crossbeam-epoch/src/internal.rs",
+            "crossbeam-epoch/src/epoch.rs"
+          ],
+          "minimal_modules": [
+            "Global：locals 链表 + queue 垃圾队列 + epoch",
+            "try_advance：fence + 检查所有参与者 + 推进",
+            "Bag/SealedBag 与 epoch 差≥2 才销毁"
+          ],
+          "practice_task": "画一张 epoch 推进时序图：参与者 A 在 epoch=0 pin→defer 垃圾→B 推进 epoch→何时该垃圾被销毁。解释为何要等 2 个 epoch 而非 1 个。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "crossbeam-deque：工作窃取队列",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "工作窃取模型与公共 API",
+          "order": 1,
+          "filename": "u6-l1-deque-overview.md",
+          "level": "advanced",
+          "topic": "讲解工作窃取调度模型：Injector（全局 FIFO）、Worker（FIFO/LIFO 本地队列）、Stealer（可共享窃取句柄）与 Steal 枚举的 API 与使用范式。",
+          "learning_goals": [
+            "理解 Injector/Worker/Stealer/Steal 的角色与典型调度结构",
+            "掌握 push/pop/steal/steal_batch_and_pop 的用法",
+            "认识 Steal::Retry 需要重试的语义"
+          ],
+          "source_files": [
+            "crossbeam-deque/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Worker::new_fifo/new_lifo、stealer()、Injector",
+            "steal/steal_batch/steal_batch_and_pop",
+            "Steal{Empty,Success,Retry} 与重试模式"
+          ],
+          "practice_task": "搭建一个迷你工作窃取调度器：1 个 Injector + N 个 Worker，主线程往 Injector 注入任务，工作线程先取本地、再偷同伴、再取 Injector。验证任务全部被执行。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Chase-Lev 双端队列实现",
+          "order": 2,
+          "filename": "u6-l2-deque-internals.md",
+          "level": "advanced",
+          "topic": "深入 deque.rs 的 Chase-Lev 实现：front/back 原子索引、幂次环形 Buffer、FIFO/LIFO 的 push/pop 方向差异、steal 协议与 buffer 扩缩容及 epoch 回收。",
+          "learning_goals": [
+            "理解 Chase-Lev 的 front/back 索引与环形缓冲",
+            "掌握 FIFO vs LIFO 的 pop 方向差异与 steal 协议",
+            "认识 buffer resize 与用 epoch 安全回收旧缓冲"
+          ],
+          "source_files": [
+            "crossbeam-deque/src/deque.rs",
+            "crossbeam-epoch/src/guard.rs"
+          ],
+          "minimal_modules": [
+            "Inner{front,back,buffer} + Buffer 环形与 CachePadded",
+            "push（写 back）/pop（FIFO 增 front / LIFO 减 back）/steal（CAS front）",
+            "resize 扩缩容与 epoch 延迟回收旧 buffer"
+          ],
+          "practice_task": "阅读 deque.rs 的 steal()，解释为何 steal 返回 Retry 时应重试而非当作空。构造一个竞争场景：多个 Stealer 同时偷同一个 Worker，观察 Retry/Success/Empty 的分布。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "crossbeam-skiplist 与综合：测试与正确性",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "无锁跳表结构",
+          "order": 1,
+          "filename": "u7-l1-skiplist-base.md",
+          "level": "advanced",
+          "topic": "剖析 base.rs 的无锁跳表节点结构：refs_and_height 打包引用计数与高度、Tower 多层指针、xorshift 高度生成与 mark_tower 删除标记。",
+          "learning_goals": [
+            "理解 Node 的 refs_and_height 打包与 Tower 布局",
+            "掌握高度生成与 max_height 提示",
+            "认识 mark_tower 自顶向下的逻辑删除标记"
+          ],
+          "source_files": [
+            "crossbeam-skiplist/src/base.rs",
+            "crossbeam-skiplist/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Node{value,key,refs_and_height,tower} 布局",
+            "xorshift 高度生成与 max_height 提示",
+            "引用计数 try_increment/decrement/finalize 与 mark_tower"
+          ],
+          "practice_task": "画出一个 3 层、4 个节点的跳表示意图，标注每个节点的 tower 指针。阅读 base.rs 说明 mark_tower 为何要从最高层向第 0 层逐层标记。",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "跳表操作与 epoch 集成",
+          "order": 2,
+          "filename": "u7-l2-skiplist-ops.md",
+          "level": "advanced",
+          "topic": "讲解跳表的并发插入/查找/删除（search_bound、协助摘除已删除节点），以及如何用 crossbeam-epoch 的 Guard 延迟释放节点；并介绍 SkipMap/SkipSet 包装。",
+          "learning_goals": [
+            "理解 search_bound 的逐层下降与协助清理",
+            "掌握并发 insert/get/remove 的无锁协调",
+            "认识 epoch Guard 在节点释放中的关键作用与 SkipMap/SkipSet 接口"
+          ],
+          "source_files": [
+            "crossbeam-skiplist/src/base.rs",
+            "crossbeam-skiplist/src/map.rs",
+            "crossbeam-skiplist/src/set.rs"
+          ],
+          "minimal_modules": [
+            "search_bound 逐层下降 + 协助 unlink",
+            "并发 insert/remove 与引用计数收尾",
+            "epoch guard.defer_unchecked 释放节点 + Map/Set 包装"
+          ],
+          "practice_task": "用 SkipMap 在多线程并发 insert/get/remove，验证最终状态一致。阅读 base.rs 找到所有 defer_unchecked 调用点，说明每处释放的对象与触发时机。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "测试、loom 与并发正确性",
+          "order": 3,
+          "filename": "u7-l3-testing-concurrency-correctness.md",
+          "level": "advanced",
+          "topic": "总结 crossbeam 如何保证并发正确性：cargo test、miri（UB 检测）、tsan/san（数据竞争与 sanitizer）、loom（模型检查）与 CI 流水线及基准对比。",
+          "learning_goals": [
+            "理解 loom 状态空间模型检查的原理",
+            "掌握 miri/tsan/san 在并发代码中的作用",
+            "认识 CI 流水线与 benchmarks 的工程意义"
+          ],
+          "source_files": [
+            ".github/workflows/ci.yml",
+            "ci/miri.sh",
+            "ci/tsan",
+            "ci/crossbeam-epoch-loom.sh",
+            "crossbeam-channel/benchmarks/Cargo.toml"
+          ],
+          "minimal_modules": [
+            "loom：crossbeam_loom cfg 与内部 primitive 抽象",
+            "miri/san/tsan：UB 与数据竞争检测",
+            "CI 流水线与 benchmarks 性能对比"
+          ],
+          "practice_task": "在 crossbeam-epoch 上运行 ci/crossbeam-epoch-loom.sh（或 cargo +nightly miri test -p crossbeam-utils）观察输出。阅读 benchmarks 的 run.sh，说明 crossbeam 与其它通道实现的对比维度。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

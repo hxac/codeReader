@@ -2,442 +2,399 @@
 
 ## 1. 本讲目标
 
-读完本讲，你应当能够：
+本讲只解决一个看似极小、却最容易在 FIFO/RAM 设计里踩坑的问题：**给定一个存储深度 DEPTH，地址指针和元素计数器分别需要多少位？**
 
-- 说清楚仓库自带的 `clogb2()` 函数到底在算什么，并能手动追踪它的执行过程。
-- 看懂 `clogb2.svh` 里那张 `clogb2` 与系统函数 `$clog2` 的对照表，并理解两者在 2 的幂次边界上差 1 的原因。
-- 牢记一条核心等式：`clogb2(n) == $clog2(n+1)`。
-- 在新设计里正确回答两个最常被搞混的问题——「寻址 DEPTH 个表项要几 bit」与「装下 0..DEPTH 的计数器要几 bit」，也就是何时用 `$clog2(DEPTH)`、何时用 `$clog2(DEPTH+1)`。
+学完后你应该能够：
 
-本讲是 u2 单元里最「数学」的一篇，但只用到对数和位运算的直觉，不涉及任何时序逻辑。
+- 说清楚「地址指针位宽」与「计数器位宽」差在哪里、为什么差一位。
+- 看懂仓库里 `clogb2()` 函数的算法，并能手算 `clogb2(N)`。
+- 看懂 `clogb2` 与系统函数 `$clog2` 在边界值（尤其是 2 的幂）上的差异表。
+- 在新设计里正确写出 `$clog2(DEPTH)`（地址）与 `$clog2(DEPTH+1)`（计数），并理解仓库里旧写法 `clogb2(DEPTH-1)` / `clogb2(DEPTH)+1` 与之的等价（或差异）关系。
 
 ## 2. 前置知识
 
-在进入正题前，先建立两个直觉。
+本讲依赖 u1-l2 里建立的两个概念：
 
-**直觉一：表示一个数需要几 bit？**
-一个无符号整数 \(N\)（\(N \ge 1\)）至少需要多少 bit 来表示？答案是 \(\lfloor \log_2 N \rfloor + 1\)。例如 \(8 = 1000_2\) 需要 4 bit，\(7 = 111_2\) 需要 3 bit。
+- **参数化端口** `#(parameter ...)`：仓库里几乎所有位宽都不是写死的常数，而是由参数算出来的。本讲的「位宽」本身就是一种「在编译期由参数算出来的常数」。
+- **模块内部的 function**：Verilog 的 `function` 可以在模块内部定义、在编译期被求值，用来给端口/局部变量算位宽。`clogb2` 就是一个这样的函数。
 
-**直觉二：在 N 个表项里选一个，需要几 bit 地址？**
-要在 \(N\) 个表项（编号 \(0 \sim N-1\)）里任选一个，需要 \(\lceil \log_2 N \rceil\) bit。例如 8 个表项需要 3 bit 地址（\(000 \sim 111\)），7 个表项同样需要 3 bit（因为 \(2^2=4 < 7 \le 8=2^3\)）。
+你还需要两个最基础的数学直觉：
 
-注意这两个问题「差一个 +1」：表示数值 \(N\) 本身，与在 \(N\) 个表项里选址，bit 数并不总相同。本讲的全部分歧都来自这里。
+- 一个 \(w\) 位的无符号数能表示 \(0 \sim 2^{w}-1\) 共 \(2^{w}\) 个不同的值；反过来，要表示 \(M\) 个不同的值，需要 \(w = \lceil \log_2 M \rceil\) 位。这就是「向上取整的对数」，记作 ceil(log2)。
+- 在硬件里，「能表示多少个值」直接决定要分配几位寄存器。多一位是浪费，少一位是溢出 bug。
 
-> 阅读提示：本讲出现的 `$clog2` 是 SystemVerilog 的**系统函数**（system function），始终用反引号包起来写；而 `clogb2` 是仓库自定义的**普通函数**（function）。不要把 `$` 当成数学符号。
+> 名词速查：**位宽（width）** = 一个信号有多少 bit；**深度（depth）** = 一个 RAM/FIFO 能存多少个元素；**指针（pointer）** = 用来索引 RAM 里第几个元素的地址计数器。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| [clogb2.svh](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh) | 一个 Verilog-2001 风格的 `function integer clogb2`，以及它的使用说明、与 `$clog2` 的对照表。用 `\`include "clogb2.svh"` 引入。 |
-| [true_single_port_write_first_ram.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv) | 单口 RAM 模板。它的地址端口宽度用 `clogb2(RAM_DEPTH-1)` 计算——「地址位宽」用法的活样本。 |
-| [fifo_single_clock_ram.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv) | 单时钟 FIFO。它的计数器/指针宽度写作 `clogb2(DEPTH)+1`，是一段「能用但不精确」的历史写法，正好用来说明为什么作者劝你别再用 `clogb2`。 |
-| [lifo.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/lifo.sv) / [preview_fifo.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/preview_fifo.sv) | 两个「现代写法」对照样本：分别用 `$clog2(DEPTH+1)` 算计数器宽度、`$clog2(DEPTH)` 算已用量宽度。 |
+|------|------|
+| [clogb2.svh](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh) | 一个用 Verilog-2001 语法手写的「ceil(log2)」函数，以及它与 `$clog2` 的差异表和使用建议。注意扩展名是 `.svh`，习惯上表示「被 include 的头文件」。 |
+| [true_single_port_write_first_ram.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv) | 单口 RAM 模板。它的地址端口 `addra` 用 `clogb2(RAM_DEPTH-1)` 算位宽 —— 这是「地址位宽」的典型例子。 |
+| [fifo_single_clock_ram.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv) | 单时钟 FIFO。它的计数器位宽 `DEPTH_W = clogb2(DEPTH)+1` —— 这是「计数器位宽」的典型例子。 |
 
----
+这三个文件正好串起本讲的全部内容：一个函数 + 它的两种用法。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成三个最小模块：先搞懂 `clogb2` 函数本身（4.1），再认识现代标准 `$clog2` 并对比两者（4.2），最后落到工程师最常踩坑的「地址位宽 vs 计数位宽」的 +1 分界（4.3）。
-
-### 4.1 clogb2 函数：它到底在算什么
+### 4.1 clogb2 函数：手写的 ceil(log2)
 
 #### 4.1.1 概念说明
 
-`clogb2` 是仓库自带的工具函数，诞生于 Verilog-2001 年代——那时系统函数 `$clog2` 还没有被广泛支持、或实现得有 bug，于是大家手写一个等价函数凑合用。它的用途写在了文件头：
+很多场合需要在编译期算「几位够用」：
 
-> Calculates counter width based on specified vector/RAM depth（根据给定的向量/RAM 深度计算计数器宽度）。
+- 一个 1024 深的 RAM，地址线要几根？\( \lceil \log_2 1024 \rceil = 10 \) 根。
+- 一个最多计到 8 的计数器，要几位？能表示 \(0 \sim 8\) 共 9 个值，\( \lceil \log_2 9 \rceil = 4 \) 位。
 
-通俗讲：**输入一个「深度」`depth`，返回一个整数，代表需要的 bit 数。** 但它具体返回的是「表示 `depth` 这个数值本身所需的 bit 数」，这一点很关键，正是 4.3 节 +1 困惑的根源。
+在 Verilog-2001 年代，语言里**还没有**内置的 ceil(log2) 系统函数，或者某些工具的实现是错的。于是工程师们手写了一个等价函数，起名 `clogb2`（ceiling LOG Base 2）。仓库把它单独放在 `clogb2.svh`，哪个模块要用就在模块内部 `\`include` 进来。
+
+`clogb2` 解决的问题就是：**给我一个正整数 N，告诉我表示 \(0 \sim N\) 需要几位。**
 
 #### 4.1.2 核心流程
 
-函数体只有一个 `for` 循环：不断把 `depth` 右移一位，每移一次计数器 `clogb2` 加 1，直到 `depth` 被移成 0。伪代码如下：
+`clogb2` 的算法非常朴素：**不断把输入右移 1 位，数一共移了几次才变成 0**。移的次数就是答案。
 
-```
-function clogb2(depth):
-    result = 0
-    while depth > 0:
-        depth = depth >> 1     # 右移一位
-        result = result + 1
-    return result
-```
-
-追踪 `depth = 8` 的执行过程：
-
-| 迭代 | 进入时 depth | 右移后 depth | result |
-| --- | --- | --- | --- |
-| 1 | 8 (1000) | 4 (100) | 1 |
-| 2 | 4 (100) | 2 (10) | 2 |
-| 3 | 2 (10) | 1 (1) | 3 |
-| 4 | 1 (1) | 0 | 4 |
-
-循环结束时 `result = 4`，正好是「把 8 这个数右移到 0 需要的次数」，也正好是 8 的二进制 `1000` 的位数。
-
-写成数学式，对 \(n \ge 1\)：
+为什么这对？把 N 写成二进制，它有 \(k = \lfloor \log_2 N \rfloor + 1\) 位。每右移一位就丢掉最低位、整体缩小一半，正好要移 \(k\) 次才归零。所以：
 
 \[
-\text{clogb2}(n) \;=\; \lfloor \log_2 n \rfloor + 1
+\text{clogb2}(N) = \begin{cases} 0 & N = 0 \\ \lfloor \log_2 N \rfloor + 1 & N \geq 1 \end{cases} = \lceil \log_2(N+1) \rceil
 \]
 
-而 \(n = 0\) 时循环一次都不执行，返回 0。
+注意末尾那个等式：`clogb2(N)` 恰好等于「表示 \(0 \sim N\)（共 \(N+1\) 个值）所需的位数」\( \lceil \log_2(N+1) \rceil \)。这个等价关系是后面区分「地址位宽」和「计数器位宽」的关键，请先记住。
+
+手算两个例子：
+
+- `clogb2(7)`：7 → 3 → 1 → 0，移了 3 次，结果是 3。（表示 0~7，3 位够。）
+- `clogb2(8)`：8 → 4 → 2 → 1 → 0，移了 4 次，结果是 4。（表示 0~8，需要 4 位 —— 注意不是 3！）
 
 #### 4.1.3 源码精读
 
-函数本体只有 8 行：
+函数本体只有 4 行，先把循环展开看清楚：
 
-[clogb2.sv:L52-L59](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L52-L59) —— `clogb2` 函数定义。`function integer clogb2` 声明返回类型为 `integer`；`input [31:0] depth` 是它的形参（注意这是 Verilog-2001 的非 ANSI 写法，端口在函数体内声明）；`for` 循环把 `clogb2` 这个**与函数同名的变量**当作累加器，从 0 开始，每次右移 `depth` 并自增。
+[clogb2.svh:L52-L59](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L52-L59) — 这就是 `clogb2` 的全部实现：用函数自身的返回值 `clogb2` 当计数器，只要 `depth>0` 就右移一位、计数器加一。
 
 ```verilog
 function integer clogb2;
   input [31:0] depth;
-
   for( clogb2=0; depth>0; clogb2=clogb2+1 ) begin
     depth = depth >> 1;
   end
-
 endfunction
 ```
 
-> 细节：Verilog 规定函数体内可以有一个与函数同名的变量，对它赋值就是「设置返回值」。所以 `for( clogb2=0; ...; clogb2=clogb2+1 )` 既初始化了返回值，又在循环里累加它。
+几个值得注意的写法：
 
-它通过 `\`include "clogb2.svh"` 被塞进使用方模块的末尾，例如 [true_single_port_write_first_ram.sv:L93](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv#L93) 和 [fifo_single_clock_ram.sv:L183](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L183)。
+- `function integer clogb2;` 是 Verilog-2001 的老式函数声明（ANSI 风格会用 `function automatic integer clogb2(input [31:0] depth);`）。返回值类型是 `integer`，函数名同时是承载返回值的隐式变量。
+- `input [31:0] depth;` 把入参单独声明在函数体里，也是老语法。
+- `for` 循环里 `clogb2=clogb2+1` 直接累加函数名变量 —— 循环结束时它的值就是返回值。
+- 当 `depth==0` 时循环体一次都不执行，`clogb2` 保持初值 0，所以 `clogb2(0)=0`。
 
-#### 4.1.4 代码实践（手算追踪）
+文件头部的 INFO 注释明确给出了这个函数的历史定位和「别用于新设计」的警告：
 
-**实践目标**：不用仿真器，先用纸笔验证 `clogb2` 的行为，建立「它返回的是表示数值本身的位数」的直觉。
+[clogb2.svh:L11-L23](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L11-L23) — 作者直接写明：`clogb2()` 是 Verilog-2001 时代的过时技术，新设计应改用 `$clog2(DEPTH)` 做地址指针、`$clog2(DEPTH+1)` 做计数器。这正是本讲要把你推向的结论。
 
-**操作步骤**：
+#### 4.1.4 代码实践
 
-1. 对下表的每个 `depth`，写出二进制，数其位数。
-2. 再按 4.1.2 的循环逻辑，手算 `clogb2(depth)`。
-3. 比较两列是否相等。
+实践目标：亲手验证 `clogb2` 的「移位计数」算法，确认它真的等于 \(\lceil \log_2(N+1) \rceil\)。
 
-| depth | 二进制 | 位数 | 手算 clogb2(depth) |
-| --- | --- | --- | --- |
-| 1 | 1 | 1 | ? |
-| 4 | 100 | 3 | ? |
-| 7 | 111 | 3 | ? |
-| 8 | 1000 | 4 | ? |
-| 16 | 10000 | 5 | ? |
+操作步骤（纯手算，无需工具）：
 
-**预期结果**：两列完全一致，分别是 1、3、3、4、5。
+1. 对 \(N = 1, 4, 7, 8, 16\)，按「右移到 0 数次数」的方法算 `clogb2(N)`。
+2. 再用公式 \(\lceil \log_2(N+1) \rceil\) 算一遍，对照是否一致。
 
-**需要观察的现象**：注意 `depth=7` 和 `depth=8`——前者是 3 位，后者是 4 位，`clogb2` 在这里跳变了。这个「在 2 的幂次边界跳变」的行为，正是 4.2 节对照表里 `clogb2` 与 `$clog2` 错位的来源。
+需要观察的现象 / 预期结果：
+
+| N | 移位轨迹 | 移位次数 = clogb2(N) | \(\lceil \log_2(N+1) \rceil\) |
+|---|----------|----------------------|-------------------------------|
+| 1 | 1→0 | 1 | \(\lceil\log_2 2\rceil=1\) |
+| 4 | 4→2→1→0 | 3 | \(\lceil\log_2 5\rceil=3\) |
+| 7 | 7→3→1→0 | 3 | \(\lceil\log_2 8\rceil=3\) |
+| 8 | 8→4→2→1→0 | 4 | \(\lceil\log_2 9\rceil=4\) |
+| 16| 16→8→4→2→1→0 | 5 | \(\lceil\log_2 17\rceil=5\) |
+
+两列应当完全相同。重点体会：**N=8 时结果是 4 而不是 3**，因为要表示 0~8（9 个值），3 位（最多到 7）不够。
+
+> 说明：上表是按算法规则推导的预期值，未在本地实跑；你可以在第 5 节的综合实践里用仿真器打印 `clogb2()` 做最终确认。
 
 #### 4.1.5 小练习与答案
 
 **练习 1**：`clogb2(0)` 等于多少？为什么？
 
-> **答案**：等于 0。因为循环条件是 `depth>0`，输入 0 时循环体一次都不执行，`clogb2` 保持初值 0。
+**答案**：等于 0。因为 `depth>0` 一开始就为假，循环不执行，函数名变量保持初值 0。
 
-**练习 2**：不参考对照表，推算 `clogb2(13)`。
+**练习 2**：要表示 \(0 \sim 255\) 的计数值，用 `clogb2` 该怎么写？结果是几？
 
-> **答案**：\(13 = 1101_2\)，是 4 位数；按循环：13→6→3→1→0 共右移 4 次，结果 4。两种方式都得 4。
+**答案**：写 `clogb2(255)`，结果是 8（255→127→63→…→1→0 共 8 次移位）。它等价于 \(\lceil\log_2 256\rceil = 8\)。
 
 ---
 
-### 4.2 $clog2 系统函数：现代标准做法
+### 4.2 $clog2 系统函数：语言内置的 ceil(log2)
 
 #### 4.2.1 概念说明
 
-`$clog2` 是 IEEE 1364-2005 起标准化、SystemVerilog（IEEE 1800）内建的**系统函数**。它无需 `\`include`，所有主流综合器（Quartus、Vivado、 Gowin）和仿真器（iverilog `-g2012`、ModelSim、Xcelium）都支持。
-
-它的定义是「log₂ n 向上取整」，对 \(n \ge 1\)：
+从 Verilog-2005 / SystemVerilog 开始，语言内置了系统函数 `$clog2(N)`，语义是严格的：
 
 \[
-\text{\$clog2}(n) \;=\; \lceil \log_2 n \rceil
+\$clog2(N) = \lceil \log_2 N \rceil
 \]
 
-并规定 `$clog2(0) = 0`。语义上，它回答的是「**在 n 个表项里任选一个，需要几 bit 地址**」：8 个表项要 3 bit，1 个表项要 0 bit（只有一个候选，不需要地址）。
+它回答的问题是：**要区分 \(N\) 个不同的值，需要几位。** 注意它和 `clogb2` 的入参含义微妙不同：
 
-正因为 `$clog2` 语义清晰、无需 include，[clogb2.sv:L16-L17](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L16-L17) 明确写道：**别再用 `clogb2` 做新设计**（"don't use clogb2() for new designs!"）。
+- `$clog2(N)` = 表示 \(N\) 个值（即 \(0 \sim N-1\)）的位数 = \(\lceil\log_2 N\rceil\)。
+- `clogb2(N)` = 表示 \(0 \sim N\)（共 \(N+1\) 个值）的位数 = \(\lceil\log_2(N+1)\rceil\)。
 
-#### 4.2.2 核心流程（对照表）
+所以同样传入 8，`$clog2(8)=3`（区分 8 个值 0~7），而 `clogb2(8)=4`（表示 0~8）。这是两者最直观的差别，也是初学者最容易被绊倒的地方。
 
-文件里给出了一张 `clogb2` 与 `$clog2` 的逐值对照表。读懂它，是本讲的核心。
+#### 4.2.2 核心流程
 
-| depth | `$clog2(depth)` | `clogb2(depth)` |
- | ---: | ---: | ---: |
- | 0 | 0 | 0 |
- | 1 | 0 | 1 |
- | 2 | 1 | 2 |
- | 3 | 2 | 2 |
- | 4 | 2 | 3 |
- | 5 | 3 | 3 |
- | 6 | 3 | 3 |
- | 7 | 3 | 3 |
- | 8 | 3 | 4 |
- | 9 | 4 | 4 |
- | … | … | … |
- | 15 | 4 | 4 |
- | 16 | 4 | 5 |
-
-这张表透露三个事实：
-
-1. **`clogb2(depth) \ge $clog2(depth)` 恒成立**，且 `clogb2` 总是「更大或相等」。
-2. **在 2 的幂次处两者差 1**：`depth=1,2,4,8,16` 时 `clogb2` 比 `$clog2` 多 1。
-3. **把 `$clog2` 的输入加 1，就和 `clogb2` 完全相同**：例如 `$clog2(8+1) = $clog2(9) = 4 = clogb2(8)`。
-
-由此得到贯穿本讲的核心等式：
+`$clog2` 不需要 include 任何文件，是编译器自带的，可直接出现在端口声明、`localparam`、`initial` 等任何需要常量表达式的地方。常用对照：
 
 \[
-\boxed{\;\text{clogb2}(n) \;=\; \text{\$clog2}(n+1)\;}
+\$clog2(1)=0,\quad \$clog2(2)=1,\quad \$clog2(3)=2,\quad \$clog2(4)=2,\quad \$clog2(8)=3,\quad \$clog2(9)=4,\quad \$clog2(16)=4
 \]
 
-这条等式对所有 \(n \ge 0\) 成立。**记住它，就能在两套写法之间随时换算。**
+规律：当 \(N\) 是 2 的幂时，`$clog2(N) = \log_2 N`；否则向上取整到下一个整数。
 
 #### 4.2.3 源码精读
 
-对照表与使用建议都在文件头注释里：
+`clogb2.svh` 里专门用一张表把两者逐值对照，这是本讲最重要的一张表：
 
-[clogb2.sv:L25-L43](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L25-L43) —— `clogb2` 与 `$clog2` 的逐值对照表（即上表的来源）。
+[clogb2.svh:L25-L43](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L25-L43) — `$clog2` 与 `clogb2` 在 0~16 上的逐值对照表。请重点看每一行「2 的幂」的位置：`$clog2(2)=1 / clogb2(2)=2`、`$clog2(4)=2 / clogb2(4)=3`、`$clog2(8)=3 / clogb2(8)=4`、`$clog2(16)=4 / clogb2(16)=5` —— 在这些点上两者正好差 1。
 
-[clogb2.sv:L18-L22](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L18-L22) —— 作者给新设计的两条规则：地址指针用 `$clog2(DEPTH)`，计数器用 `$clog2(DEPTH+1)`（4.3 节详解）。
+把这张表横过来看，能读出两条本讲的核心等价式（对 \(DEPTH \geq 1\) 成立）：
 
-仓库里较新的模块已经普遍改用 `$clog2`，例如：
+\[
+\$clog2(DEPTH) = \text{clogb2}(DEPTH-1) \qquad\text{（地址位宽）}
+\]
 
-[lifo.sv:L75](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/lifo.sv#L75) —— `localparam DEPTH_W = $clog2(DEPTH+1);`，用现代写法声明 LIFO 的元素计数器宽度，干净利落。
+\[
+\$clog2(DEPTH+1) = \text{clogb2}(DEPTH) \qquad\text{（计数器位宽）}
+\]
 
-[preview_fifo.sv:L49](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/preview_fifo.sv#L49) —— `USED_W = $clog2(DEPTH)`，用 `$clog2(DEPTH)`（注意没有 +1）声明一个用于寻址/已用量指示的宽度。
+> 自行核验：取 DEPTH=8。地址位宽：`$clog2(8)=3`，`clogb2(7)=3`，相等。计数器位宽：`$clog2(9)=4`，`clogb2(8)=4`，相等。两条都对。
 
-#### 4.2.4 代码实践（testbench 打印对照表）
+仓库里也有直接用 `$clog2` 的真实例子，不在 `.svh` 而在 testbench 里：[fifo_single_clock_ram_tb.sv:L207](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram_tb.sv#L207)，给 Altera SCFIFO 的 `LPM_WIDTHU`（已用字数计数器宽度）传 `.LPM_WIDTHU( $clog2(8) )`，行尾注释也写明 `/// CEIL(LOG2(LPM_NUMWORDS))`，正好印证了 `$clog2` = ceil(log2) 的语义。
 
-**实践目标**：用仿真器同时调用 `$clog2` 和 `clogb2`，把 `DEPTH=1..16` 三列数值（`$clog2(DEPTH)`、`$clog2(DEPTH+1)`、`clogb2(DEPTH)`）打印出来，亲眼验证 4.2.2 的核心等式。这正是本讲规格里要求的实践任务。
+#### 4.2.4 代码实践
 
-**操作步骤**：
+实践目标：在仿真器里直接打印 `$clog2`，体会它和 `clogb2` 在 2 的幂处差 1。
 
-1. 在仓库根目录新建下面的 testbench（**示例代码**，非项目原有文件）。注意为了让 testbench 能调用 `clogb2`，必须在 module 内 `\`include "clogb2.svh"`，和 [fifo_single_clock_ram.sv:L183](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L183) 的做法一致。
+操作步骤：
+
+1. 新建一个最小 testbench（示例代码，非仓库原有文件），在 `initial` 里用 `$display` 打印 `$clog2(d)`：
 
 ```verilog
-// 示例代码：clogb2_width_tb.sv（需放在仓库根目录，便于 include 找到 clogb2.svh）
 `timescale 1ns / 1ps
-
-module clogb2_width_tb;
-
+module clog2_only_tb();           // 示例代码
   integer d;
-  integer c2_d, c2_dp1, cb2;
-
   initial begin
-    $display(" d | $clog2(d) | $clog2(d+1) | clogb2(d) | clogb2(d)==$clog2(d+1)?");
-    for (d = 1; d <= 16; d = d + 1) begin
-      c2_d   = $clog2(d);
-      c2_dp1 = $clog2(d + 1);
-      cb2    = clogb2(d);
-      $display("%2d |   %2d      |   %2d        |   %2d      | %s",
-               d, c2_d, c2_dp1, cb2, (cb2 == c2_dp1) ? "YES" : "no");
-    end
+    for (d=1; d<=16; d=d+1)
+      $display("d=%0d  $clog2(d)=%0d", d, $clog2(d));
     $finish;
   end
-
-  `include "clogb2.svh"   // 引入 clogb2 函数
-
 endmodule
 ```
 
-2. 用 iverilog 编译并运行（参考 [scripts/iverilog_compile.bat](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/scripts/iverilog_compile.bat) 的 `-g2012` 选项）：
+2. 用 iverilog 编译运行（`$clog2` 需 `-g2012`）：
 
 ```bash
-iverilog -g2012 -o clogb2_tb.vvp clogb2_width_tb.sv
-vvp clogb2_tb.vvp
+iverilog -g2012 clog2_only_tb.sv -o clog2_only_tb.vvp
+vvp clog2_only_tb.vvp
 ```
 
-**预期结果**：终端打印 16 行，最后一列恒为 `YES`，证明 `clogb2(d) == $clog2(d+1)`。前三列应与 4.2.2 的对照表完全吻合（例如 `d=8` 行为 `3 | 4 | 4 | YES`）。
+需要观察的现象 / 预期结果：重点看 `d=8` 时 `$clog2(8)=3`，而上一节 `clogb2(8)=4` —— 同样是「8」，两个函数给出不同答案，因为它们问的问题不同。
 
-**需要观察的现象**：
-
-- 最后一列全为 `YES`——核心等式成立。
-- 第二列 `$clog2(d)` 在 `d=8` 时仍是 3，第三列 `$clog2(d+1)` 在 `d=8` 时已是 4——这正是「地址位宽」与「计数位宽」的分界，下一节详述。
-
-> 待本地验证：不同仿真器对 `$clog2(0)` 的返回与 `$display` 中 `%s` 配合三元运算符的格式化细节可能略有差异；若 `%s` 报错，可把三元结果换成 `$display` 的条件分支打印。
+> 说明：以上为预期输出，未在本地实跑，请自行运行确认。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：用核心等式，把 `clogb2(100)` 换算成 `$clog2(?)`。
+**练习 1**：为什么 `$clog2(8)=3` 而 `clogb2(8)=4`？
 
-> **答案**：`clogb2(100) = $clog2(101)`。验证：\(64 < 101 \le 128\)，所以 \(\lceil \log_2 101 \rceil = 7\)；而 \(100 = 1100100_2\) 是 7 位数，`clogb2(100)` 也是 7，一致。
+**答案**：`$clog2(8)` 问「区分 8 个值（0~7）要几位」，3 位够（0~7）。`clogb2(8)` 问「表示 0~8（9 个值）要几位」，3 位只到 7 不够，需要 4 位。
 
-**练习 2**：为什么 `$clog2(1)` 等于 0 而不是 1？
+**练习 2**：用 `$clog2` 写出「表示 0~100 要几位」的表达式并算出结果。
 
-> **答案**：`$clog2` 回答「在 n 个表项里选址需要几 bit」。只有 1 个表项时无需任何地址位（它就是唯一的那一个），所以返回 0。
+**答案**：`$clog2(101)`，结果为 7（\(2^6=64 < 101 \le 128=2^7\)）。
 
 ---
 
-### 4.3 地址位宽 vs 计数位宽：那个 +1 的分界
+### 4.3 地址位宽 vs 计数器位宽：差一位的根源
 
 #### 4.3.1 概念说明
 
-这是工程里最容易写错的地方。同样是「深度 DEPTH」，两种用途需要的 bit 数不同：
+这是本讲的落点，也是 FIFO/RAM 设计里最高频的 off-by-one 错误源。同样是「一个深度为 DEPTH 的存储」，有两种位宽需求，它们差一位：
 
-- **地址指针**（如 RAM 的 `addr`、FIFO 的读写指针）：取值范围是 \(0 \sim \text{DEPTH}-1\)，所以位宽 = `$clog2(DEPTH)`。
-- **计数器**（如 FIFO/LIFO 的元素个数 `cnt`）：取值范围是 \(0 \sim \text{DEPTH}\)（**含两端**，满时正好等于 DEPTH），所以位宽 = `$clog2(DEPTH+1)`。
+| 角色 | 取值范围 | 不同值的个数 | 所需位宽（现代写法） | 旧写法（仓库） |
+|------|----------|--------------|----------------------|----------------|
+| **地址指针** `wr_addr`/`rd_addr` | \(0 \sim DEPTH-1\) | DEPTH | `$clog2(DEPTH)` | `clogb2(DEPTH-1)` |
+| **元素计数器** `cnt` | \(0 \sim DEPTH\) | DEPTH+1 | `$clog2(DEPTH+1)` | `clogb2(DEPTH)` |
 
-地址最大只到 DEPTH−1，计数器却要能装下 DEPTH 本身——这就是「+1」的来历。
+为什么计数器要多一个值、多可能一位？因为计数器不仅要能表示「空（0）」和「存了一些」，还要能表示**「满（= DEPTH）」**。地址指针永远在 \(0 \sim DEPTH-1\) 之间转，碰不到 DEPTH；而计数器必须能取到 DEPTH 这个值，否则「满」判断无法成立。
 
-换算到 `clogb2`（套用核心等式）：
-
-| 用途 | 取值范围 | 正确位宽 | 用 clogb2 表达 |
-| --- | --- | --- | --- |
-| 地址指针 | 0 .. DEPTH−1 | `$clog2(DEPTH)` | `clogb2(DEPTH-1)` |
-| 计数器 | 0 .. DEPTH | `$clog2(DEPTH+1)` | `clogb2(DEPTH)` |
-
-> 一句话防错：**`clogb2(DEPTH)` 不是地址位宽，而是计数位宽。** 想用 `clogb2` 写地址位宽，得写 `clogb2(DEPTH-1)`。
+直觉记法：**地址管「下标」，最大到 DEPTH−1；计数管「个数」，最大到 DEPTH。所以计数器永远比地址多一个要表示的值，公式里就多一个 +1。**
 
 #### 4.3.2 核心流程
 
-给定一个深度 DEPTH，按下面决策树选位宽：
+把上面的逻辑套到两条等价式上，就得到从旧写法到新写法的迁移规则：
 
-```
-我要这个宽度做什么？
-├─ 索引存储器表项（地址/指针）   →  位宽 = $clog2(DEPTH)      [= clogb2(DEPTH-1)]
-└─ 记录已用元素个数（计数器）     →  位宽 = $clog2(DEPTH+1)    [= clogb2(DEPTH)]
-```
+1. 看到旧代码 `clogb2(DEPTH-1)` 用于端口位宽 → 这是**地址**，改成 `$clog2(DEPTH)`。
+2. 看到旧代码 `clogb2(DEPTH)+1` 或 `clogb2(DEPTH)` 用于计数 → 这是**计数器**，改成 `$clog2(DEPTH+1)`。
+3. 特别注意：仓库 FIFO 里写的是 `clogb2(DEPTH)+1`，由于 `clogb2(DEPTH) = $clog2(DEPTH+1)`，所以它等于 `$clog2(DEPTH+1) + 1`，比严格所需的 `$clog2(DEPTH+1)` 还**多了一位** —— 多余但安全（不会溢出，只是浪费一两根寄存器）。这是旧写法「偏保守」的体现，也是作者在 `clogb2.svh` 里建议大家改用 `$clog2` 的现实原因之一。
 
-举例 DEPTH = 8：
+以 DEPTH=8 为例把三种位宽并排放，差别一目了然：
 
-- 地址需要 `$clog2(8) = 3` bit（`000~111`，索引 8 个表项）。
-- 计数器需要 `$clog2(9) = 4` bit（要能表示 0..8，而 8 = `1000` 需要 4 bit）。
+\[
+\underbrace{\$clog2(8)=3}_{\text{地址，严格}}
+\quad
+\underbrace{\$clog2(9)=4}_{\text{计数器，严格}}
+\quad
+\underbrace{\text{clogb2}(8)+1=5}_{\text{仓库 FIFO 实际，多一位}}
+\]
 
 #### 4.3.3 源码精读
 
-仓库里同时存在「老写法」和「新写法」两个活样本，对照阅读最有收获。
+先看**地址位宽**的例子 —— 单口 RAM 的地址端口：
 
-**地址位宽（老写法，但结果正确）**：
+[true_single_port_write_first_ram.sv:L41](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv#L41) — `input [clogb2(RAM_DEPTH-1)-1:0] addra`，地址位宽 = `clogb2(RAM_DEPTH-1)`。RAM_DEPTH=8 时，`clogb2(7)=3`，地址是 `[2:0]`，正好索引 0~7。按本讲等价式，它就是 `$clog2(RAM_DEPTH)`。
 
-[true_single_port_write_first_ram.sv:L41](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv#L41) —— 单口 RAM 的地址端口声明为 `input [clogb2(RAM_DEPTH-1)-1:0] addra`。这里故意传 `RAM_DEPTH-1`：因为 `clogb2(DEPTH-1) = $clog2(DEPTH)`，正好得到正确的地址位宽。双口 RAM [true_dual_port_write_first_2_clock_ram.sv:L48](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_dual_port_write_first_2_clock_ram.sv#L48) 的 `addra`/`addrb` 也是同一写法。
+再看**计数器位宽**的例子 —— 单时钟 FIFO：
 
-**计数位宽（老写法，结果略宽）**：
-
-[fifo_single_clock_ram.sv:L58](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L58) —— FIFO 把计数器和指针统一声明为 `DEPTH_W = clogb2(DEPTH)+1`。以 DEPTH=8 为例：`clogb2(8)+1 = 4+1 = 5` bit。但「装 0..8 的计数器」严格只需 `$clog2(9) = 4` bit，「索引 8 个表项的地址」只需 3 bit——所以 5 bit **比实际需要多出了 1 位**。代码能正常工作，是因为 `cnt` 通过显式比较 `==DEPTH`（满）和 `=='0`（空）来判断状态、指针通过 `inc_ptr` 里显式判断 `==DEPTH-1` 来回绕（见 [fifo_single_clock_ram.sv:L165-L181](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L165-L181)），多出来的高位不参与运算。这正是一个绝佳的反面教材：用 `clogb2` 推算位宽很容易「差一」，虽然此处因冗余而无害，但作者仍把它标注为不推荐。
-
-**计数位宽（新写法，推荐）**：
-
-[lifo.sv:L75](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/lifo.sv#L75) —— `localparam DEPTH_W = $clog2(DEPTH+1);`。直接、精确地表达了「计数器要装 0..DEPTH」的需求，没有任何冗余，意图一目了然。这就是 [clogb2.sv:L21-L22](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L21-L22) 推荐的写法。
-
-#### 4.3.4 代码实践（选对位宽）
-
-**实践目标**：自己设计一个参数化 ROM，分别用「地址位宽」和「计数位宽」两类端口，练一下 +1 的取舍。
-
-**操作步骤**：
-
-1. 新建一个 `my_rom.sv`（**示例代码**），声明一个 `DEPTH` 表项的 ROM，端口按本节规则命名：
+[fifo_single_clock_ram.sv:L57-L59](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L57-L59) — `DEPTH_W = clogb2(DEPTH)+1`，注释写明这是「elements counter width, extra bit to store fifo full state」（元素计数器位宽，多一位用来存「满」状态）。这就是计数器位宽的旧写法。
 
 ```verilog
-// 示例代码：my_rom.sv
-module my_rom #( parameter
-  DEPTH   = 10,                       // 10 个表项（非 2 的幂，更能考验位宽）
-  DATA_W  = 8
-)(
-  input  [$clog2(DEPTH)-1:0]    addr, // 地址：0..DEPTH-1，用 $clog2(DEPTH)
-  output [DATA_W-1:0]           q
-);
-  logic [DATA_W-1:0] mem [0:DEPTH-1];
-  assign q = mem[addr];
-endmodule
+DEPTH = 8,                 // max elements count == DEPTH, DEPTH MUST be power of 2
+DEPTH_W = clogb2(DEPTH)+1, // elements counter width, extra bit to store
+                           // "fifo full" state, see cnt[] variable comments
 ```
 
-2. 在心里回答：若 DEPTH=10，`addr` 几 bit？若再要一个「已编程表项数」计数器（0..DEPTH），几 bit？
+随后 `DEPTH_W` 被同时用作计数器和读/写指针的位宽：
 
-**预期结果**：
+[fifo_single_clock_ram.sv:L82](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L82) — `output logic [DEPTH_W-1:0] cnt`，元素计数器 `cnt` 用 `DEPTH_W` 位，需要能取到 `DEPTH` 来表示「满」。对应的满判断在 [fifo_single_clock_ram.sv:L165-L167](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L165-L167)：`full = ( cnt == DEPTH )`。正因为 `cnt` 要能等于 DEPTH，它的位宽必须按「计数器」而非「地址」来算。
 
-- `addr` 宽度 = `$clog2(10) = 4` bit（\(2^3=8 < 10 \le 16=2^4\)，需 4 bit 索引 0..9）。
-- 计数器宽度 = `$clog2(11) = 4` bit（0..10，10=`1010` 需 4 bit；恰好这里与地址同为 4 bit，但语义不同）。
+最后注意 include 的位置 —— 两个模块都把 `\`include "clogb2.svh"` 放在**模块内部、`endmodule` 之前**，因为函数必须定义在某个模块里：
 
-**需要观察的现象**：把 `DEPTH` 改成 8 试试——`addr` 变成 `$clog2(8)=3` bit，而计数器仍是 `$clog2(9)=4` bit，此时两者差 1，能清楚看到「+1」的效果。
+[fifo_single_clock_ram.sv:L183](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L183) 与 [true_single_port_write_first_ram.sv:L93](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv#L93) —— 两者都是在 `endmodule` 前一行 include。`.svh` 头注释里也写明「Function should be instantiated inside a module」。这也是为什么 `clogb2` 不像 `$clog2` 那样能随用随写：它得先被某个模块「收留」。
+
+> 关于 FIFO 指针/计数/满空判断的完整工作机制（环形回绕、同时读写仲裁等）本讲不展开，那是 u4-l2「单时钟 FIFO」的主题。本讲只聚焦「位宽怎么算」。
+
+#### 4.3.4 代码实践
+
+实践目标：拿真实源码做一次「位宽审计」，把旧写法翻译成现代 `$clog2` 写法。
+
+操作步骤：
+
+1. 打开 [true_single_port_write_first_ram.sv:L41](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/true_single_port_write_first_ram.sv#L41)，对 `RAM_DEPTH = 8/16/1024` 三个值，分别手算 `clogb2(RAM_DEPTH-1)` 和等价的 `$clog2(RAM_DEPTH)`，确认两者一致。
+2. 打开 [fifo_single_clock_ram.sv:L57-L59](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv#L57-L59)，对 `DEPTH = 8/16`，手算仓库实际位宽 `clogb2(DEPTH)+1` 与严格位宽 `$clog2(DEPTH+1)`，确认前者比后者大 1。
+
+需要观察的现象 / 预期结果：
+
+| 模块 | 参数 | 旧写法计算 | 结果 | 现代等价 | 是否严格 |
+|------|------|-----------|------|---------|----------|
+| RAM 地址 | RAM_DEPTH=8 | clogb2(7) | 3 | `$clog2(8)=3` | 严格相等 |
+| RAM 地址 | RAM_DEPTH=1024 | clogb2(1023) | 10 | `$clog2(1024)=10` | 严格相等 |
+| FIFO 计数 | DEPTH=8 | clogb2(8)+1 | 5 | `$clog2(9)=4` | 多 1 位 |
+| FIFO 计数 | DEPTH=16 | clogb2(16)+1 | 6 | `$clog2(17)=5` | 多 1 位 |
+
+结论：RAM 的地址位宽旧写法与现代写法**完全相等**；FIFO 的计数器位宽旧写法**多一位**（安全但浪费）。这就是为什么新设计应该直接用 `$clog2`。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：DEPTH=8 的 FIFO，用 `clogb2(DEPTH)+1`（仓库老写法）得到的 `DEPTH_W` 是多少？严格的计数器最小位宽是多少？多出几位？
+**练习 1**：一个 DEPTH=8 的 FIFO，`cnt` 严格需要几位？仓库实际给了几位？
 
-> **答案**：`clogb2(8)+1 = 5` bit；严格计数器位宽 = `$clog2(9) = 4` bit；多出 1 位。
+**答案**：严格需要 `$clog2(8+1)=$clog2(9)=4` 位（表示 0~8）。仓库用 `clogb2(8)+1=5` 位，多了 1 位。
 
-**练习 2**：为什么 RAM 模板写 `clogb2(RAM_DEPTH-1)` 而不是 `clogb2(RAM_DEPTH)` 作为地址位宽？
+**练习 2**：如果错把地址位宽写成 `$clog2(DEPTH+1)`（多算了 1 位），地址还能正确索引 0~DEPTH-1 吗？有什么副作用？
 
-> **答案**：地址只需索引 0..RAM_DEPTH−1，位宽 = `$clog2(RAM_DEPTH)` = `clogb2(RAM_DEPTH-1)`。若误写成 `clogb2(RAM_DEPTH)`，会得到 `$clog2(RAM_DEPTH+1)`，多出 1 位（在 RAM_DEPTH 为 2 的幂时尤为明显）。
-
-**练习 3**：一个计数器要能装下 0..100，最小位宽是多少？分别用 `$clog2` 和 `clogb2` 写出来。
-
-> **答案**：`$clog2(101) = 7` bit；等价的 `clogb2` 写法是 `clogb2(100) = 7`。
-
----
+**答案**：能正确索引。地址值仍由指针产生、被约束在 0~DEPTH-1，多出的高位只是恒为 0，功能正确但浪费了地址线/寄存器，综合时可能多出不必要的逻辑或引起位宽对接警告。反向错误（少算一位，把计数器写成 `$clog2(DEPTH)`）才是致命的：`cnt` 无法表示 DEPTH，「满」永远判不出来。
 
 ## 5. 综合实践
 
-把本讲三个模块串起来：写一个**自校验** testbench，既打印对照表、又用断言验证核心等式，还能对任意 DEPTH 给出「地址位宽」和「计数位宽」的建议。
+把本讲三节串起来：**手算 + 仿真对照，做出一张 DEPTH=1~16 的位宽总表**，一次性看清 `clogb2`、`$clog2(DEPTH)`、`$clog2(DEPTH+1)` 三者的关系。
 
-**实践目标**：用一条 testbench 一次性确认 (a) `clogb2(d) == $clog2(d+1)` 对所有 d 成立；(b) 对每个 DEPTH，地址位宽 = `$clog2(DEPTH)`、计数位宽 = `$clog2(DEPTH+1)`。
+### 5.1 任务描述
 
-**操作步骤**：
+1. 先**纯手算**填写下表的「手算」三列（不要先看程序输出）。
+2. 再写一个 testbench，用 `$display` 把 `clogb2(DEPTH)`、`$clog2(DEPTH)`、`$clog2(DEPTH+1)` 打印出来，填入「仿真」三列。
+3. 对照手算与仿真是否一致，并验证两条核心等价式：`$clog2(DEPTH) == clogb2(DEPTH-1)`、`$clog2(DEPTH+1) == clogb2(DEPTH)`。
 
-1. 在仓库根目录新建 `clogb2_selfcheck_tb.sv`（**示例代码**），内容如下：
+### 5.2 参考答案表（预期值）
+
+| DEPTH | 手算/仿真: clogb2(DEPTH) | $clog2(DEPTH)【地址】 | $clog2(DEPTH+1)【计数器】 | clogb2(DEPTH−1)【=地址】 |
+|------:|:---:|:---:|:---:|:---:|
+| 1  | 1 | 0 | 1 | 0 |
+| 2  | 2 | 1 | 2 | 1 |
+| 3  | 2 | 2 | 2 | 2 |
+| 4  | 3 | 2 | 3 | 2 |
+| 5  | 3 | 3 | 3 | 3 |
+| 6  | 3 | 3 | 3 | 3 |
+| 7  | 3 | 3 | 3 | 3 |
+| 8  | 4 | 3 | 4 | 3 |
+| 9  | 4 | 4 | 4 | 4 |
+| 10 | 4 | 4 | 4 | 4 |
+| 11 | 4 | 4 | 4 | 4 |
+| 12 | 4 | 4 | 4 | 4 |
+| 13 | 4 | 4 | 4 | 4 |
+| 14 | 4 | 4 | 4 | 4 |
+| 15 | 4 | 4 | 4 | 4 |
+| 16 | 5 | 4 | 5 | 4 |
+
+读这张表的两个要点：
+
+- 第 2 列 `clogb2(DEPTH)` 与第 4 列 `$clog2(DEPTH+1)` **逐行相同** —— 这就是「计数器位宽」的两种等价写法。
+- 第 3 列 `$clog2(DEPTH)` 与第 5 列 `clogb2(DEPTH−1)` **逐行相同** —— 这就是「地址位宽」的两种等价写法。
+- 在 DEPTH=2/4/8/16 这些 2 的幂行，`clogb2(DEPTH)` 比 `$clog2(DEPTH)` 正好大 1。
+
+### 5.3 可直接运行的 testbench（示例代码）
 
 ```verilog
-// 示例代码：clogb2_selfcheck_tb.sv
 `timescale 1ns / 1ps
-
-module clogb2_selfcheck_tb;
+//
+// clogb2_width_tb.sv   (示例代码，非仓库原有文件)
+// 对照打印 clogb2() 与 $clog2()，验证位宽计算的等价关系
+//
+module clogb2_width_tb();
 
   integer d;
-  integer errors = 0;
 
   initial begin
-    $display(" d | addr_w=$clog2(d) | cnt_w=$clog2(d+1) | clogb2(d) | self-check");
+    $display("DEPTH | clogb2(DEPTH) | $clog2(DEPTH) [addr] | $clog2(DEPTH+1) [cnt] | clogb2(DEPTH-1)");
     for (d = 1; d <= 16; d = d + 1) begin
-      // (a) 核心等式校验
-      if (clogb2(d) != $clog2(d + 1)) begin
-        $display("  MISMATCH at d=%0d: clogb2=%0d  $clog2(d+1)=%0d",
-                 d, clogb2(d), $clog2(d+1));
-        errors = errors + 1;
-      end
-      // (b) 打印地址位宽与计数位宽
-      $display("%2d |      %2d          |      %2d           |   %2d      | %s",
-               d, $clog2(d), $clog2(d+1), clogb2(d),
-               (clogb2(d) == $clog2(d+1)) ? "ok" : "FAIL");
+      $display("%4d  |    %0d           |       %0d              |       %0d            |       %0d",
+               d, clogb2(d), $clog2(d), $clog2(d+1), clogb2(d-1));
     end
-
-    if (errors == 0)
-      $display("ALL CHECKS PASSED");
-    else
-      $display("FAILED with %0d errors", errors);
-
     $finish;
   end
 
+  // 仓库约定：clogb2 必须被 include 在某个模块内部
   `include "clogb2.svh"
 
 endmodule
 ```
 
-2. 编译运行（iverilog）：
+编译运行（需把仓库根目录加入 include 搜索路径，以便找到 `clogb2.svh`）：
 
 ```bash
-iverilog -g2012 -o sc.vvp clogb2_selfcheck_tb.sv
-vvp sc.vvp
+iverilog -g2012 -I . clogb2_width_tb.sv -o clogb2_width_tb.vvp
+vvp clogb2_width_tb.vvp
 ```
 
-3. 阅读输出，确认最后一行是 `ALL CHECKS PASSED`。
+需要观察的现象 / 预期结果：终端打印的 16 行数值应与 5.2 表格完全一致。重点确认 `$clog2(DEPTH+1)` 列 == `clogb2(DEPTH)` 列、`$clog2(DEPTH)` 列 == `clogb2(DEPTH-1)` 列。
 
-**需要观察的现象**：
-
-- `addr_w` 列在 d=1 时为 0（只有 1 个表项，不需要地址），在 d=2 时跳到 1，d=4 时跳到 2，d=8 时跳到 3——即每跨过一个 2 的幂才 +1。
-- `cnt_w` 列始终比 `addr_w` 「领先一档」，因为它要装下 DEPTH 本身。
-- 任何一行都不应出现 `FAIL`。
-
-**预期结果**：终端打印 `ALL CHECKS PASSED`，且 `addr_w`/`cnt_w`/`clogb2(d)` 三列符合本讲对照表。
-
-> 待本地验证：`iverilog` 对 `$clog2` 的支持需 `-g2012`；若用更老的工具链，可能需要退回 `clogb2` 函数——这也正是仓库保留 `clogb2.svh` 的历史原因。
+> 说明：上述表格与命令均为预期/推导结果，未在本地实跑。若你的 iverilog 版本对 `$clog2` 支持有差异，可改用 ModelSim/Vivado 仿真器，或把 `$clog2(d)` 临时替换成手算常数来隔离问题。
 
 ## 6. 本讲小结
 
-- `clogb2(n)` 数的是「把 n 右移到 0 需要几次」，等于「表示数值 n 本身的位数」\(\lfloor \log_2 n \rfloor + 1\)。
-- `$clog2(n)` 是系统函数，等于 \(\lceil \log_2 n \rceil\)，回答「n 个表项需要几 bit 地址」，无需 include，是新设计的首选。
-- **核心等式**：`clogb2(n) == $clog2(n+1)`，记住它就能在两套写法间自由换算。
-- **地址位宽**（索引 0..DEPTH−1）= `$clog2(DEPTH)` = `clogb2(DEPTH-1)`；**计数位宽**（装 0..DEPTH）= `$clog2(DEPTH+1)` = `clogb2(DEPTH)`。
-- 仓库 RAM 模板用 `clogb2(RAM_DEPTH-1)` 写地址位宽（结果正确）；FIFO 老写法 `clogb2(DEPTH)+1` 比严格需要多 1 位（因冗余而无害）；`lifo.sv` 用 `$clog2(DEPTH+1)` 是推荐的现代写法。
-- 作者明确建议：新设计别再用 `clogb2`，改用语义清晰的 `$clog2`，并据用途选 `DEPTH` 还是 `DEPTH+1`。
+- **位宽问题的本质是 ceil(log2)**：要表示 \(M\) 个不同的值，需要 \(\lceil\log_2 M\rceil\) 位。`clogb2` 和 `$clog2` 都是算这个的，只是入参含义差一位。
+- **`clogb2(N) = \(\lceil\log_2(N+1)\rceil\)**：手写的「移位计数」函数，表示 \(0 \sim N\) 需要几位；属于 Verilog-2001 时代的过时技术，仓库自己也不推荐用于新设计。
+- **`$clog2(N) = \(\lceil\log_2 N\rceil\)**：语言内置系统函数，表示区分 \(N\) 个值（\(0 \sim N-1\)）需要几位；是新设计的首选。
+- **地址位宽 vs 计数器位宽差一位**：地址指针只到 DEPTH−1，用 `$clog2(DEPTH)`；计数器要到 DEPTH（表示「满」），用 `$clog2(DEPTH+1)`。这一位之差是 FIFO 最常见的 bug 源。
+- **两条等价式**：`$clog2(DEPTH) == clogb2(DEPTH-1)`（地址），`$clog2(DEPTH+1) == clogb2(DEPTH)`（计数器）。仓库 FIFO 写成 `clogb2(DEPTH)+1`，比严格所需的 `$clog2(DEPTH+1)` 还多一位，安全但略浪费。
+- **include 位置**：`clogb2.svh` 必须被 include 在某个模块内部（仓库统一放在 `endmodule` 前），这是 function 与系统函数 `$clog2` 在使用上的根本差别。
 
 ## 7. 下一步学习建议
 
-- 顺着存储器主线进入 **u4-l1（RAM/ROM 模板）**：本讲提到的 `true_single_port_write_first_ram.sv`、`true_dual_port_write_first_2_clock_ram.sv` 的 `ramstyle` 属性、`$readmemh` 初始化与 write-first 语义将在那里完整展开。
-- 进入 **u4-l2（单时钟 FIFO）**：看 `fifo_single_clock_ram.sv` 如何用 `DEPTH_W` 位的 `w_ptr/r_ptr/cnt` 配合 `inc_ptr` 实现环形缓冲与满空判断，本讲的位宽知识是读懂那段指针逻辑的前提。
-- 想深入了解 `clogb2` 注释里引用的 Verilog-2001 位宽计算原始资料，可阅读 [clogb2.sv:L9](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/clogb2.svh#L9) 提到的 Cummings HDLCON2001 文章（sunburst-design.com）。
+本讲的位宽计算是存储类模块的「地基」，接下来顺理成章进入存储与 FIFO 单元：
+
+- **u4-l1 RAM/ROM 模板**：直接承接本讲的「地址位宽」，看 `true_single_port_write_first_ram.sv` 如何用 `clogb2(RAM_DEPTH-1)` 定地址、用 `(* ramstyle *)` 推断 block RAM、用 `$readmemh` 初始化内容。
+- **u4-l2 单时钟 FIFO**：直接承接本讲的「计数器位宽」，深入 [fifo_single_clock_ram.sv](https://github.com/pConst/basic_verilog/blob/2654273b2c4e556a98e806f3a19b52c9b3c74614/fifo_single_clock_ram.sv) 的环形指针、`cnt` 满/空判断、同时读写仲裁，看 `DEPTH_W` 那一位「满状态」到底怎么用。
+- 想了解更多 `clogb2` 的历史背景，可阅读 `clogb2.svh` 注释里给出的 Cliff Cummings 经典论文链接（HDLCON 2001），它详细解释了 Verilog-2001 时代为什么需要手写这个函数。

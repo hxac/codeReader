@@ -1,7 +1,7 @@
 {
-  "head": "55263c9da5841cc620ba8d9e41f8a8965a35978a",
   "project": "zenoh",
-  "rationale": "Zenoh 是一个体量很大的「pub/sub + 存储/查询 + 计算」一体化协议的 Rust 参考实现，跨越公开 API、内部网络层、路由（HAT 拓扑）、传输与链路、协议编解码、路由器与插件等众多子系统。因此学习路线设计为「先外围后内核、先用法后原理」：第 1–3 单元让读者从零运行起来并掌握 Session、Key Expression 与最基础的 Pub/Sub；第 4–6 单元把另一条主链路 Query/Reply、数据表示（ZBytes/序列化）以及 Scouting/Liveliness/Matching/Timestamp 等支撑特性补齐，至此读者已能独立写出 Zenoh 应用。第 7 单元作为「用法→原理」的过渡，把公开 Session 下钻到内部 runtime 与 primitives(Mux/DeMux)。第 8–10 单元进入专家层内核：路由（Gateway/Face/Tables 与 HAT 四种拓扑）、传输与链路（unicast/multicast、批处理/分片）、协议消息模型与 Zenoh080 线编码、ZBuf 缓冲与异步 runtime 基础。第 11–12 单元覆盖面向运维与二次开发的扩展点：zenohd 路由器、插件系统、存储后端、REST 插件、共享内存、高级 pub/sub、adminspace/stats 与测试基准。每篇讲义引用 1–6 个真实源码文件并配一个可操作的实践任务，依赖关系严格指向前置讲义，使读者可按拓扑顺序逐步深入。",
+  "head": "5dd1a2f764b28a70ce6f12801e1d4dca2321bbc2",
+  "rationale": "Zenoh 是一个体量很大的「pub/sub + 存储/查询 + 计算」一体化协议的 Rust 参考实现，跨越公开 API、内部网络层、路由（HAT 拓扑）、传输与链路、协议编解码、路由器与插件等众多子系统。因此学习路线设计为「先外围后内核、先用法后原理」：第 1–3 单元让读者从零运行起来并掌握 Session、Key Expression 与最基础的 Pub/Sub；第 4–6 单元把另一条主链路 Query/Reply、数据表示（ZBytes/序列化）以及 Scouting/Liveliness/Matching/Timestamp 等支撑特性补齐，至此读者已能独立写出 Zenoh 应用。第 7 单元作为「用法→原理」的过渡，把公开 Session 下钻到内部 runtime 与 primitives(Mux/DeMux)。第 8–10 单元进入专家层内核：路由（Gateway/Face/Tables 与 HAT 四种拓扑）、传输与链路（unicast/multicast、批处理/分片，以及本次新增的 io_uring 接收路径）、协议消息模型与 Zenoh080 线编码、ZBuf 缓冲与异步 runtime 基础。第 11–12 单元覆盖面向运维与二次开发的扩展点：zenohd 路由器、插件系统、存储后端、REST 插件、共享内存、高级 pub/sub、adminspace/stats 与测试基准。本次增量聚焦「Support io_uring」这一新机制：它新增了 zenoh-uring 内部 crate、在传输层加入 uring 接收路径与 get_fd 链路能力、并把 RBatch 泛型化以兼容 uring 缓冲，因此将受影响的 u1-l3/u9-l1/u9-l2/u9-l4/u10-l3 标记为 update，并新增 u9-l5「io_uring 接收路径」讲义，其余讲义 keep。每篇讲义引用 1–6 个真实源码文件并配一个可操作的实践任务，依赖关系严格指向前置讲义，使读者可按拓扑顺序逐步深入。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 与 lib.rs 的 Components and concepts 小节，写一段不少于 5 行的中文总结，列出 Zenoh 的三大组件（Session / Pub-Sub / Query-Reply）并各举一个应用场景。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -63,7 +63,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -71,11 +71,12 @@
           "order": 3,
           "filename": "u1-l3-repo-crate-layout.md",
           "level": "beginner",
-          "topic": "从根 Cargo.toml 的 workspace members 出发，画出 commons / io / plugins / zenoh / zenoh-ext / zenohd 之间的依赖与分层关系。",
+          "topic": "从根 Cargo.toml 的 workspace members 出发，画出 commons / io / plugins / zenoh / zenoh-ext / zenohd 之间的依赖与分层关系，并介绍新增的内部 crate zenoh-uring 与贯穿各层的 uring 编译特性。",
           "learning_goals": [
             "看懂 workspace members 列表与各 crate 的职责",
             "理解 io（link/transport）→ zenoh（api/net）→ zenohd/plugins 的依赖方向",
-            "区分传输协议特性（transport_tcp 等 feature）如何按需启用"
+            "区分传输协议特性（transport_tcp 等 feature）如何按需启用",
+            "知道 uring 特性如何贯穿 zenoh-link/zenoh-transport 并启用 Linux io_uring 接收路径"
           ],
           "source_files": [
             "Cargo.toml",
@@ -87,11 +88,11 @@
             "workspace 依赖",
             "feature 开关"
           ],
-          "practice_task": "画一张 crate 依赖草图（文字即可）：标出 zenoh-codec、zenoh-protocol、zenoh-keyexpr、zenoh-config、zenoh-link、zenoh-transport、zenohd 之间的依赖箭头，并说明哪些是 commons 内部 crate、哪些对外稳定。",
+          "practice_task": "画一张 crate 依赖草图（文字即可）：标出 zenoh-codec、zenoh-protocol、zenoh-keyexpr、zenoh-config、zenoh-link、zenoh-transport、zenohd、zenoh-uring 之间的依赖箭头，并说明哪些是 commons 内部 crate、哪些对外稳定；同时指出 uring 特性在 zenoh-link 与 zenoh-transport 中分别聚合了哪些子特性。",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u1-l4",
@@ -119,7 +120,7 @@
             "u1-l1",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -156,7 +157,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -184,7 +185,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -213,7 +214,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -252,7 +253,7 @@
             "u2-l1",
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -281,7 +282,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -310,7 +311,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -346,7 +347,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -375,7 +376,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -403,7 +404,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -439,7 +440,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -467,7 +468,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -505,7 +506,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -534,7 +535,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -562,7 +563,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-4",
@@ -591,7 +592,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -628,7 +629,7 @@
             "u1-l4",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -656,7 +657,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -684,7 +685,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -721,7 +722,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -751,7 +752,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-3",
@@ -781,7 +782,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -811,7 +812,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -827,11 +828,12 @@
           "order": 1,
           "filename": "u9-l1-link-layer.md",
           "level": "advanced",
-          "topic": "讲解 Link 抽象、LinkManager（unicast/multicast）、LocatorInspector，以及 tcp/udp/tls/quic/ws 等具体链路实现。",
+          "topic": "讲解 Link 抽象、LinkManager（unicast/multicast）、LocatorInspector，以及 tcp/udp/tls/quic/ws 等具体链路实现；并介绍为支持 io_uring 而新增的 LinkUnicastTrait::get_fd 能力及各链路的回退语义。",
           "learning_goals": [
             "理解 Link 与 LinkManagerUnicast/Multicast 的抽象",
             "掌握 LocatorInspector 判断可靠性/多播能力",
-            "知道每种链路（tcp/udp/quic/ws...）的可靠性与 MTU 差异"
+            "知道每种链路（tcp/udp/quic/ws...）的可靠性与 MTU 差异",
+            "理解 LinkUnicastTrait::get_fd 的作用以及为何部分链路（如未连接 UDP）不提供 fd 而回退到 tokio"
           ],
           "source_files": [
             "io/zenoh-link/src/lib.rs",
@@ -844,13 +846,14 @@
           "minimal_modules": [
             "Link/LinkManager",
             "LocatorInspector",
-            "链路实现"
+            "链路实现",
+            "get_fd（uring）"
           ],
-          "practice_task": "阅读 link-tcp 与 link-udp 的实现，整理一张对比表：每种链路是否可靠、是否支持多播、默认 MTU；并说明 locator 协议串（tcp/、udp/）如何映射到对应 LinkManagerBuilder。",
+          "practice_task": "阅读 link-tcp 与 link-udp 的实现，整理一张对比表：每种链路是否可靠、是否支持多播、默认 MTU、是否实现 get_fd；并说明 locator 协议串（tcp/、udp/）如何映射到对应 LinkManagerBuilder。",
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u9-l2",
@@ -858,11 +861,12 @@
           "order": 2,
           "filename": "u9-l2-transport-unicast-multicast.md",
           "level": "advanced",
-          "topic": "讲解 TransportManager（统一 builder）、TransportUnicast 与 TransportMulticast 的职责、配置与状态管理。",
+          "topic": "讲解 TransportManager（统一 builder）、TransportUnicast 与 TransportMulticast 的职责、配置与状态管理；并讲解 TransportManagerState 中新增的 uring 状态及其初始化失败时回退到 tokio RX 的策略。",
           "learning_goals": [
             "理解 TransportManager 统一管理 unicast/multicast 传输",
             "掌握 TransportManagerConfigUnicast/Multicast 的关键参数（lease/keep_alive/超时）",
-            "知道 TransportUnicast::schedule 与 multicast 的差异"
+            "知道 TransportUnicast::schedule 与 multicast 的差异",
+            "知道 uring feature 下 TransportManager 如何初始化 io_uring reactor 并在失败时回退"
           ],
           "source_files": [
             "io/zenoh-transport/src/lib.rs",
@@ -875,13 +879,14 @@
           "minimal_modules": [
             "TransportManager",
             "TransportUnicast",
-            "TransportMulticast"
+            "TransportMulticast",
+            "uring 状态与回退"
           ],
-          "practice_task": "梳理 TransportManager 的 builder 配置项（lease、keep_alive、session limits 等），写一段说明这些参数如何影响连接保活与超时断开行为。",
+          "practice_task": "梳理 TransportManager 的 builder 配置项（lease、keep_alive、session limits 等），写一段说明这些参数如何影响连接保活与超时断开行为；并说明 uring 状态如何由 batch_size/link_rx_buffer_size 计算并在初始化失败时优雅回退。",
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u9-l3",
@@ -911,7 +916,7 @@
           "depends_on": [
             "u9-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -919,11 +924,12 @@
           "order": 4,
           "filename": "u9-l4-batching-framing.md",
           "level": "advanced",
-          "topic": "讲解 common 模块下的 batch（批处理帧）、pipeline（发送管道）、seq_num（序列号）、priority（优先级队列）、defragmentation（分片重组）。",
+          "topic": "讲解 common 模块下的 batch（批处理帧）、pipeline（发送管道）、seq_num（序列号）、priority（优先级队列）、defragmentation（分片重组），以及为支持 io_uring 引入的泛型 RBatch<TBuffer> 与 initialize_uring/DecompressUring 机制。",
           "learning_goals": [
             "理解 BatchConfig 如何把多条消息打包成一帧",
             "掌握 priority 管道如何按 QoS 分流发送",
-            "知道大消息如何分片发送并在对端 defragmentation 重组"
+            "知道大消息如何分片发送并在对端 defragmentation 重组",
+            "理解 RBatch 为何泛型化为 RBatch<TBuffer> 以及 initialize_uring 如何处理压缩/分片批次"
           ],
           "source_files": [
             "io/zenoh-transport/src/common/batch.rs",
@@ -935,11 +941,47 @@
           "minimal_modules": [
             "BatchConfig",
             "priority 管道",
-            "defragmentation"
+            "defragmentation",
+            "泛型 RBatch/initialize_uring"
           ],
-          "practice_task": "阅读 batch.rs 与 defragmentation.rs，写一段说明：发布一个远大于单帧 MTU 的负载时，发送端如何分片、接收端 DefragBuffer 如何按序列号重组；标注关键函数。",
+          "practice_task": "阅读 batch.rs 与 defragmentation.rs，写一段说明：发布一个远大于单帧 MTU 的负载时，发送端如何分片、接收端 DefragBuffer 如何按序列号重组；并指出 RBatch<TBuffer> 与 initialize_uring 如何让同一套解码逻辑同时服务于 tokio 路径与 uring 路径。",
           "depends_on": [
             "u9-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u9-l5",
+          "title": "io_uring 接收路径：零拷贝异步读",
+          "order": 5,
+          "filename": "u9-l5-io-uring-rx-path.md",
+          "level": "advanced",
+          "topic": "讲解 Linux io_uring 在 Zenoh 传输层的接入：新增 zenoh-uring 内部 crate（Reader/batch_arena/page_arena/window、FragmentedBatch/RxBuffer）、TransportManager 中的 uring 状态与回退策略、rx_task 在 uring 与 tokio 路径间的分派、链路 get_fd 能力，以及泛型 RBatch<TBuffer> 与 initialize_uring 如何支持分片/压缩批次的读取。",
+          "learning_goals": [
+            "理解 zenoh-uring crate 的 Reader/arena/window 设计与 io_uring 异步读模型",
+            "掌握 TransportManagerState.uring 的初始化及其在初始化失败时回退到 tokio RX 的策略",
+            "理解 rx_task 如何根据 uring 可用性与 get_fd 结果在 rx_task_uring 与 rx_task_non_uring 之间分派",
+            "知道 streamed 与非 streamed 链路分别走 setup_fragmented_read / setup_read，以及为何未连接 UDP 会回退"
+          ],
+          "source_files": [
+            "commons/zenoh-uring/src/lib.rs",
+            "commons/zenoh-uring/src/linux/api/reader/mod.rs",
+            "io/zenoh-transport/src/uring.rs",
+            "io/zenoh-transport/src/manager.rs",
+            "io/zenoh-transport/src/unicast/universal/link.rs",
+            "io/zenoh-link-commons/src/unicast.rs"
+          ],
+          "minimal_modules": [
+            "zenoh-uring Reader/arena",
+            "Uring 状态与回退",
+            "rx_task 分派",
+            "get_fd 与 setup_read/fragmented_read"
+          ],
+          "practice_task": "开启 uring feature（zenoh/uring）编译运行，用 tracing 日志观察某条 unicast 链路是走了 rx_task_uring 还是回退到 rx_task_non_uring；阅读 universal/link.rs 说明 rx_task_uring 在 streamed 与非 streamed 链路下分别用 setup_fragmented_read / setup_read，并解释为何未连接 UDP 会回退到 tokio。",
+          "depends_on": [
+            "u9-l1",
+            "u9-l2",
+            "u9-l4"
           ],
           "action": "new"
         }
@@ -980,7 +1022,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1011,7 +1053,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1019,11 +1061,12 @@
           "order": 3,
           "filename": "u10-l3-buffers-zbuf-zslice.md",
           "level": "advanced",
-          "topic": "讲解 zenoh-buffers 的 ZBuf（多片缓冲）、ZSlice（单片，可承载共享内存）、Reader/Writer 抽象与零拷贝设计。",
+          "topic": "讲解 zenoh-buffers 的 ZBuf（多片缓冲）、ZSlice（单片，可承载共享内存）、Reader/Writer 抽象与零拷贝设计；含 ZBufReader 实现 Buffer 以及 is_empty 优化，使其可作为泛型批次缓冲（服务于 io_uring 接收路径）。",
           "learning_goals": [
             "理解 ZBuf 为何用多片 ZSlice 而非连续内存",
             "掌握 Reader/Writer trait 的回溯读写能力",
-            "知道 ZSlice 如何与共享内存协作实现零拷贝"
+            "知道 ZSlice 如何与共享内存协作实现零拷贝",
+            "知道 ZBufReader 现已实现 Buffer，可作为 RBatch 的缓冲类型"
           ],
           "source_files": [
             "commons/zenoh-buffers/src/lib.rs",
@@ -1033,13 +1076,14 @@
           "minimal_modules": [
             "ZBuf",
             "ZSlice",
-            "Reader/Writer"
+            "Reader/Writer",
+            "ZBufReader: Buffer"
           ],
-          "practice_task": "构造一个 ZBuf，向其中追加两段来自不同 Vec 的 ZSlice，用 Reader 顺序读出全部字节并验证与原文一致；说明这种设计如何避免大数据拷贝。",
+          "practice_task": "构造一个 ZBuf，向其中追加两段来自不同 Vec 的 ZSlice，用 Reader 顺序读出全部字节并验证与原文一致；说明这种设计如何避免大数据拷贝，并解释 ZBufReader 实现 Buffer 后为何能直接作为 io_uring 路径上的批次读取缓冲。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l4",
@@ -1069,7 +1113,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1104,7 +1148,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1135,7 +1179,7 @@
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1165,7 +1209,7 @@
           "depends_on": [
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l4",
@@ -1192,7 +1236,7 @@
           "depends_on": [
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1232,7 +1276,7 @@
             "u5-l1",
             "u9-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1262,7 +1306,7 @@
             "u3-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -1291,7 +1335,7 @@
             "u7-l3",
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l4",
@@ -1322,7 +1366,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

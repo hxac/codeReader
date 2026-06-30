@@ -1,0 +1,1336 @@
+{
+  "project": "coralnpu",
+  "head": "77bc1ffe06dbf3b7bafc7eab167ead2b42668df9",
+  "rationale": "CoralNPU 是一个大型硬件项目（约 995 个文件），采用「Chisel 设计标量核/SoC/总线 + SystemVerilog 实现 RVV 向量/矩阵后端 + C++/Python 软件工具链与仿真」的混合架构。学习路线遵循「先宏观后微观、先能用再读懂、标量在前向量在后」的原则：单元 1-2 帮助初学者从零认识项目并跑通第一个程序（建立正反馈）；单元 3 把读者带到 SoC 顶层与 AXI/TileLink 总线集成这一宏观骨架；单元 4-6 自顶向下拆解标量核的前端（取指/译码/派发/退休）、执行单元（ALU/BRU/MLU/DVU/CSR/FPU）与存储子系统（LSU/TCM/Cache），这是理解任何处理器的基础；单元 7 单独深入 SystemVerilog 实现的 RVV 向量后端与 MAC 外积引擎，这是 CoralNPU 作为「ML 加速器」的核心差异化所在，因此放在标量核之后；单元 8-9 覆盖外设/DMA/调试/总线完整性等使能模块；单元 10-11 把视角拉回到软件与验证——RVV intrinsics 编程、litert-micro 算子、MobileNet 端到端仿真，以及 Verilator/VCS/UVM/cocotb/FPGA 全流程。每篇讲义之间用 depends_on 构成清晰的有向依赖，第一单元为零基础起点，后续逐层解锁，保证读者始终能找到前置知识。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 CoralNPU：定位、结构与构建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "CoralNPU 是什么：三核一体的 ML 加速器",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 CoralNPU 的项目定位、基于 RV32IMF 的 RISC-V 架构，以及标量/向量(SIMD)/矩阵三种处理器协同的整体设计理念。",
+          "learning_goals": [
+            "理解 CoralNPU 作为开源 NPU IP 的目标场景与定位",
+            "掌握标量核、向量核、矩阵(MAC)三者的分工与协作关系",
+            "了解 RV32IMF_Zve32x 指令集与四发射、乱序退休的整体特性"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/overview.md",
+            "doc/microarch/microarch.md"
+          ],
+          "minimal_modules": [
+            "README.md",
+            "doc/overview.md",
+            "doc/microarch/microarch.md"
+          ],
+          "practice_task": "阅读 README 与 overview.md，画出 CoralNPU 的三大处理器组件（scalar/vector/matrix）及其与 ITCM/DTCM、AXI 总线的关系图，并用一句话写出 CoralNPU 与普通 RISC-V CPU 的关键区别。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构总览",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 hdl(chisel+verilog)、sw、tests、examples、fpga、toolchain、doc、coralnpu_test_utils 等顶层目录的职责，建立代码地图。",
+          "learning_goals": [
+            "分清 hdl/chisel 与 hdl/verilog/rvv 两套硬件实现的分工",
+            "定位 sw(软件)、tests(验证)、examples(示例)、toolchain(工具链) 的作用",
+            "学会用 git ls-files 与目录树快速建立项目全景认知"
+          ],
+          "source_files": [
+            "README.md",
+            "BUILD.bazel",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "README.md",
+            "BUILD.bazel"
+          ],
+          "practice_task": "在仓库根目录列出每个顶层目录的一行职责说明，并标注：哪些目录是 Chisel 源码、哪些是 SystemVerilog 源码、哪些属于软件/验证。把结果整理成一张「目录-职责」对照表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Bazel 构建系统与快速上手",
+          "order": 3,
+          "filename": "u1-l3-bazel-build-quickstart.md",
+          "level": "beginner",
+          "topic": "讲解 Bazel 7.4.1 的工程组织（WORKSPACE/.bazelrc/BUILD.bazel），并用 README 的 Quick Start 跑通构建一个二进制与仿真器。",
+          "learning_goals": [
+            "理解 WORKSPACE、.bazelrc、BUILD.bazel 在项目中的作用",
+            "掌握 bazel build/run 的基本命令与 quick start 三步流程",
+            "了解 rules/ 目录下自定义 Bazel 规则的存在"
+          ],
+          "source_files": [
+            "README.md",
+            "WORKSPACE",
+            ".bazelrc",
+            "BUILD.bazel"
+          ],
+          "minimal_modules": [
+            "README.md",
+            "WORKSPACE",
+            ".bazelrc",
+            "rules/coralnpu_v2.bzl"
+          ],
+          "practice_task": "按照 README Quick Start，依次执行 bazel run //tests/cocotb:core_mini_axi_sim_cocotb、bazel build //examples:coralnpu_v2_hello_world_add_floats、bazel build //tests/verilator_sim:core_mini_axi_sim，记录每条命令的产物路径与耗时，并在 .bazelrc 中找到与之相关的 config 配置项。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "从零运行第一个 CoralNPU 程序",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "RISC-V 工具链、CRT 与 TCM 链接脚本",
+          "order": 1,
+          "filename": "u2-l1-toolchain-linker-tcm.md",
+          "level": "intermediate",
+          "topic": "讲解 CoralNPU 专用的 RISC-V 工具链、C 运行时(coralnpu_start.S/crt.S)与把代码/数据映射到 ITCM/DTCM 的链接脚本模板。",
+          "learning_goals": [
+            "理解 CoralNPU 二进制的内存布局：代码进 ITCM、数据进 DTCM",
+            "掌握 coralnpu_tcm.ld.tpl 链接脚本如何划分 section",
+            "了解 CRT(coralnpu_start.S/crt.S) 如何初始化并进入 main"
+          ],
+          "source_files": [
+            "toolchain/coralnpu_tcm.ld.tpl",
+            "toolchain/crt/coralnpu_start.S",
+            "toolchain/crt/crt.S",
+            "toolchain/crt/coralnpu_gloss.cc"
+          ],
+          "minimal_modules": [
+            "toolchain/coralnpu_tcm.ld.tpl",
+            "toolchain/crt/coralnpu_start.S",
+            "toolchain/crt/crt.S"
+          ],
+          "practice_task": "阅读 coralnpu_tcm.ld.tpl，标注 .text/.data/.bss 分别落在哪个 TCM 地址区间，并对照 integration_guide.md 的内存映射表验证；再用 coralnpu_start.S 解释从复位到调用 main 的完整初始化序列。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "编写并编译一个 CoralNPU C++ 程序",
+          "order": 2,
+          "filename": "u2-l2-write-compile-program.md",
+          "level": "intermediate",
+          "topic": "以 hello_world_add_floats.cc 与 writing_coralnpu_programs 教程为例，讲解输入/输出缓冲区、__attribute__((section(\".data\"))) 与 coralnpu_v2_binary 规则。",
+          "learning_goals": [
+            "掌握 CoralNPU 程序的典型结构：输入缓冲、输出缓冲、计算主体",
+            "理解 __attribute__((section(\".data\"))) 如何把变量放进 DTCM",
+            "学会用 coralnpu_v2_binary 规则编译出 .elf"
+          ],
+          "source_files": [
+            "examples/hello_world_add_floats.cc",
+            "examples/BUILD.bazel",
+            "doc/tutorials/writing_coralnpu_programs.md",
+            "rules/coralnpu_v2.bzl"
+          ],
+          "minimal_modules": [
+            "examples/hello_world_add_floats.cc",
+            "examples/BUILD.bazel",
+            "doc/tutorials/writing_coralnpu_programs.md"
+          ],
+          "practice_task": "参照 writing_coralnpu_programs.md 与 hello_world_add_floats.cc，编写一个对 8 个 int32 做逐元素相乘并写回 output 的程序，用 bazel build 编译，并用 readelf/objdump 查看 .data 段是否落在 DTCM 地址区间。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "在 Verilator 仿真器上运行程序",
+          "order": 3,
+          "filename": "u2-l3-run-on-verilator.md",
+          "level": "intermediate",
+          "topic": "讲解 Verilator 仿真器(core_mini_axi_sim)与 hw_sim 的 C++ 仿真封装如何加载 .elf 并跑通程序。",
+          "learning_goals": [
+            "理解 core_mini_axi_sim 仿真器的入口与 --binary 加载机制",
+            "掌握 hw_sim 中 simulator/wrapper 的分层封装关系",
+            "学会用 Verilator 跑通一个二进制并观察结果"
+          ],
+          "source_files": [
+            "tests/verilator_sim/BUILD",
+            "hw_sim/core_mini_axi_simulator.cc",
+            "hw_sim/coralnpu_simulator.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "tests/verilator_sim/BUILD",
+            "hw_sim/core_mini_axi_simulator.cc",
+            "hw_sim/coralnpu_simulator.h"
+          ],
+          "practice_task": "构建 core_mini_axi_sim，将上一讲编译出的 .elf 用 --binary 参数加载运行，观察 main 返回后内核 halt 的行为；在 hw_primitives.cc/mailbox.h 中找到仿真器观测内核状态的相关接口并记录其用法。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "cocotb 测试框架入门",
+          "order": 4,
+          "filename": "u2-l4-cocotb-testbench-intro.md",
+          "level": "intermediate",
+          "topic": "以 tutorial 目录与 CoreMiniAxiInterface 为例，讲解 cocotb 测试台如何 reset、load_elf、写 DTCM、execute_from、wait_for_halted、read 结果。",
+          "learning_goals": [
+            "掌握 cocotb 测试台的标准生命周期：init/reset/load_elf/run/halt",
+            "理解 CoreMiniAxiInterface 提供的 load_elf/lookup_symbol/write/read/execute_from 接口",
+            "学会用 axi_slave 模拟外部主机向 CoralNPU 注入数据并读取结果"
+          ],
+          "source_files": [
+            "doc/tutorials/writing_coralnpu_programs.md",
+            "coralnpu_test_utils/core_mini_axi_interface.py",
+            "coralnpu_test_utils/axi_slave.py"
+          ],
+          "minimal_modules": [
+            "doc/tutorials/writing_coralnpu_programs.md",
+            "coralnpu_test_utils/core_mini_axi_interface.py",
+            "coralnpu_test_utils/axi_slave.py"
+          ],
+          "practice_task": "对照 tutorial 示例，编写一个 cocotb 测试：load_elf 加载程序、向 input 缓冲写入两组数据、execute_from 启动、wait_for_halted 后 read 输出并打印，验证结果正确。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "SoC 顶层与总线集成",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SoC 顶层子系统装配",
+          "order": 1,
+          "filename": "u3-l1-soc-subsystem.md",
+          "level": "intermediate",
+          "topic": "讲解 CoralNPUChiselSubsystem 如何把 Core、总线、外设装配成完整 SoC，以及 SoCChiselConfig/SoCRecords 的参数化与可观测端口机制。",
+          "learning_goals": [
+            "理解 CoralNPUChiselSubsystem 的顶层装配关系",
+            "掌握 CoreTlulParameters 等参数如何驱动 SoC 配置(enableRvv/enableFloat 等)",
+            "了解 ExternalPort 如何把非总线端口(如 spi.csb)暴露到顶层"
+          ],
+          "source_files": [
+            "hdl/chisel/src/soc/CoralNPUChiselSubsystem.scala",
+            "hdl/chisel/src/soc/SoCChiselConfig.scala",
+            "hdl/chisel/src/soc/SoCRecords.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/soc/CoralNPUChiselSubsystem.scala",
+            "hdl/chisel/src/soc/SoCChiselConfig.scala"
+          ],
+          "practice_task": "阅读 CoralNPUChiselSubsystem.scala，列出顶层实例化了哪些子模块（Core、Xbar、外设等），并在 SoCChiselConfig 中找出 enableRvv/enableFloat 等开关如何影响装配结果，画出 SoC 顶层的实例化关系图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "AXI 接口与外部系统集成",
+          "order": 2,
+          "filename": "u3-l2-axi-integration.md",
+          "level": "intermediate",
+          "topic": "结合 integration_guide 讲解 CoralNPU 作为 AXI 外设的 s_axi/m_axi 信号、CoreAxi 顶层、以及 IBus2Axi/DBus2Axi 总线适配。",
+          "learning_goals": [
+            "理解 CoralNPU 的 AXI4 slave/master 接口语义与约束",
+            "掌握 CoreAxi 顶层如何包装内核对外暴露 AXI",
+            "了解 IBus2Axi/DBus2Axi 如何把内部取指/访存请求转成 AXI 事务"
+          ],
+          "source_files": [
+            "doc/integration_guide.md",
+            "hdl/chisel/src/coralnpu/CoreAxi.scala",
+            "hdl/chisel/src/coralnpu/AxiSlave.scala",
+            "hdl/chisel/src/coralnpu/IBus2Axi.scala",
+            "hdl/chisel/src/coralnpu/DBus2Axi.scala"
+          ],
+          "minimal_modules": [
+            "doc/integration_guide.md",
+            "hdl/chisel/src/coralnpu/CoreAxi.scala",
+            "hdl/chisel/src/coralnpu/IBus2Axi.scala"
+          ],
+          "practice_task": "对照 integration_guide 的 AXI 信号表，在 CoreAxi.scala 中定位 s_axi/m_axi 的定义，并解释 IBus2Axi 与 DBus2Axi 分别把哪类内核请求(取指/数据)转换成 AXI 突发事务；列出 master 端 id/prot/cache 等字段的固定取值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "TileLink-UL 与 AXI 桥接",
+          "order": 3,
+          "filename": "u3-l3-tlul-axi-bridge.md",
+          "level": "intermediate",
+          "topic": "讲解 TileLink-UL 总线定义，以及 Axi2TLUL/TLUL2Axi 两个方向桥接器的实现，理解 SoC 内部 TL-UL 与对外 AXI 的转换。",
+          "learning_goals": [
+            "理解 TileLink-UL 通道(Get/PutFullData)与握手语义",
+            "掌握 Axi2TLUL/TLUL2Axi 桥接器的转换原理",
+            "了解为何 SoC 内部用 TL-UL、对外用 AXI 的设计取舍"
+          ],
+          "source_files": [
+            "hdl/chisel/src/bus/TileLinkUL.scala",
+            "hdl/chisel/src/bus/Axi2TLUL.scala",
+            "hdl/chisel/src/bus/TLUL2Axi.scala",
+            "hdl/chisel/src/bus/Axi.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/bus/TileLinkUL.scala",
+            "hdl/chisel/src/bus/Axi2TLUL.scala",
+            "hdl/chisel/src/bus/TLUL2Axi.scala"
+          ],
+          "practice_task": "阅读 TileLinkUL.scala 提炼 A/B/D 通道与字段，再对照 Axi2TLUL 与 TLUL2Axi，分别画出「一次 AXI 读如何在 TL-UL 侧拆成 Get/D」、「一次 TL-UL Put 如何变成 AXI 写」的字段映射表。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "总线互联 Crossbar 与 Socket",
+          "order": 4,
+          "filename": "u3-l4-crossbar-fabric.md",
+          "level": "intermediate",
+          "topic": "讲解 CoralNPUXbar 跨bar 与 TlulSocketM1/TlulSocket1N 如何完成多主机对多从机的路由与仲裁。",
+          "learning_goals": [
+            "理解 CoralNPUXbar/CrossbarConfig 如何描述互联拓扑",
+            "掌握 Socket1N(一主多从)与 SocketM1(多主一从)的路由仲裁",
+            "了解 TlulToSram/TlulWidthBridge 等适配器在互联中的位置"
+          ],
+          "source_files": [
+            "hdl/chisel/src/soc/CoralNPUXbar.scala",
+            "hdl/chisel/src/soc/CrossbarConfig.scala",
+            "hdl/chisel/src/bus/TlulSocketM1.scala",
+            "hdl/chisel/src/bus/TlulSocket1N.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/soc/CoralNPUXbar.scala",
+            "hdl/chisel/src/soc/CrossbarConfig.scala",
+            "hdl/chisel/src/bus/TlulSocket1N.scala"
+          ],
+          "practice_task": "在 CoralNPUXbar 与 CrossbarConfig 中找出一组主机→从机的地址路由规则，并解释当多个主机同时访问同一 SRAM 从机时，TlulSocketM1 如何仲裁；画出一条从 CPU 到 DTCM 的完整总线路径。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "CSR 接口、内存映射与启动控制",
+          "order": 5,
+          "filename": "u3-l5-csr-boot-control.md",
+          "level": "intermediate",
+          "topic": "讲解 CoreAxiCSR 提供给外部主机的 RESET_CONTROL/PC_START/STATUS 寄存器、内存映射，以及启动 CoralNPU 的标准流程。",
+          "learning_goals": [
+            "掌握 CoralNPU 外部可见 CSR 的寄存器映射与位域含义",
+            "理解释放时钟门控→写 PC→释放复位→轮询 STATUS 的启动序列",
+            "了解 CoreAxiCSRTest 如何验证这些 CSR 的行为"
+          ],
+          "source_files": [
+            "doc/integration_guide.md",
+            "hdl/chisel/src/coralnpu/CoreAxiCSR.scala",
+            "hdl/chisel/src/coralnpu/CoreAxiCSRTest.scala"
+          ],
+          "minimal_modules": [
+            "doc/integration_guide.md",
+            "hdl/chisel/src/coralnpu/CoreAxiCSR.scala"
+          ],
+          "practice_task": "对照 integration_guide 的 CSR 表，在 CoreAxiCSR.scala 中实现/定位 RESET_CONTROL/PC_START/STATUS 三个寄存器，写出一段 C 伪代码完成「释放时钟→写 PC→释放复位→轮询 halted/fault」的完整启动序列。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "标量核前端与流水线",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "参数系统与内存区划",
+          "order": 1,
+          "filename": "u4-l1-parameters-config.md",
+          "level": "intermediate",
+          "topic": "讲解 Parameters/MemorySize/MemoryRegion 如何集中描述内核的宽通道、内存区与可配置开关，为后续模块阅读提供配置基础。",
+          "learning_goals": [
+            "理解 Parameters 如何承载内核全局配置(宽通道、ITCM/DTCM 区段)",
+            "掌握 MemoryRegion/MemorySize 如何描述地址区段与对齐",
+            "了解 SoCChiselConfig 如何把这些参数注入 Core"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/Parameters.scala",
+            "hdl/chisel/src/coralnpu/MemorySize.scala",
+            "hdl/chisel/src/soc/SoCChiselConfig.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/Parameters.scala",
+            "hdl/chisel/src/coralnpu/MemorySize.scala"
+          ],
+          "practice_task": "在 Parameters.scala 中找出 ITCM/DTCM 的默认大小与地址范围定义，对照 integration_guide 的内存映射核对一致；列出 Parameters 里所有 enable* 开关并说明各自开启哪个功能模块。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "取指、指令缓冲与重排序",
+          "order": 2,
+          "filename": "u4-l2-fetch-instruction-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解 Fetch/FetchControl/FetchReorderBuffer/InstructionBuffer 如何实现多发射取指、分支预测策略与指令缓冲。",
+          "learning_goals": [
+            "理解四发射取指的宽通道与 InstructionBuffer 缓冲机制",
+            "掌握向后跳 taken、向前跳 not-taken 的分支预测策略及惩罚",
+            "了解 FetchReorderBuffer 在取指乱序时的重排序作用"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/scalar/Fetch.scala",
+            "hdl/chisel/src/coralnpu/scalar/FetchControlSpec.scala",
+            "hdl/chisel/src/coralnpu/scalar/FetchReorderBufferSpec.scala",
+            "hdl/chisel/src/common/InstructionBuffer.scala",
+            "hdl/chisel/src/coralnpu/scalar/UncachedFetch.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/scalar/Fetch.scala",
+            "hdl/chisel/src/coralnpu/scalar/FetchControlSpec.scala",
+            "hdl/chisel/src/common/InstructionBuffer.scala"
+          ],
+          "practice_task": "阅读 Fetch.scala 与 InstructionBuffer，画出每周期最多取多少条指令、缓冲深度多少；再用 FetchControlSpec 解释一条向后分支在预测正确/错误时各自的控制流变化。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "指令译码",
+          "order": 3,
+          "filename": "u4-l3-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 scalar/Decode.scala 如何把 RV32 指令译码成内部微操作，识别指令类型与操作数来源。",
+          "learning_goals": [
+            "理解 Decode 如何从 32 位指令提取 opcode/funct/寄存器号",
+            "掌握指令类型(ALU/BRU/MLU/DVU/LSU/CSR)的识别",
+            "了解译码输出如何驱动后续派发与执行单元选择"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/scalar/Decode.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/scalar/Decode.scala"
+          ],
+          "practice_task": "在 Decode.scala 中追踪一条 addi 与一条 lw 指令的译码路径，分别列出它们被识别成什么类型、产生哪些控制信号、操作数来自哪里；总结译码结果的数据结构。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "派发规则、记分板与退休",
+          "order": 4,
+          "filename": "u4-l4-dispatch-scoreboard-retire.md",
+          "level": "intermediate",
+          "topic": "结合 dispatch.md 讲解 inorder 派发、记分板解决 RAW/WAW 冒险、执行单元约束、控制流屏障，以及 RetirementBuffer 的乱序退休。",
+          "learning_goals": [
+            "掌握 CoralNPU inorder 派发的核心规则与跳转指令屏障",
+            "理解记分板如何避免 RAW/WAW 冒险、为何没有 WAR",
+            "了解 RetirementBuffer 如何支持乱序退休(in-order dispatch, out-of-order retire)"
+          ],
+          "source_files": [
+            "doc/microarch/dispatch.md",
+            "hdl/chisel/src/coralnpu/RetirementBuffer.scala",
+            "hdl/chisel/src/coralnpu/scalar/FaultManager.scala"
+          ],
+          "minimal_modules": [
+            "doc/microarch/dispatch.md",
+            "hdl/chisel/src/coralnpu/RetirementBuffer.scala"
+          ],
+          "practice_task": "对照 dispatch.md 列出「同一周期最多派发几条 MLU/DVU/LSU 指令」及原因；再读 RetirementBuffer，解释一条 MLU(2 周期)与一条 ALU(1 周期)同周期派发后，它们的退休顺序与 inorder 提交保证。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "标量执行单元与寄存器堆",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "ALU 与 BRU 执行单元",
+          "order": 1,
+          "filename": "u5-l1-alu-bru.md",
+          "level": "intermediate",
+          "topic": "讲解 Alu.scala(算术逻辑)与 Bru.scala(分支/跳转)的实现、ready-valid 握手与单周期延迟。",
+          "learning_goals": [
+            "理解 ALU 如何实现 add/sub/xor 等运算并 1 周期写回",
+            "掌握 BRU 如何处理 bge/jal/jalr/ebreak 等控制流",
+            "了解执行单元与派发、寄存器堆之间的握手时序"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/scalar/Alu.scala",
+            "hdl/chisel/src/coralnpu/scalar/Bru.scala",
+            "hdl/chisel/src/coralnpu/scalar/AluTest.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/scalar/Alu.scala",
+            "hdl/chisel/src/coralnpu/scalar/Bru.scala"
+          ],
+          "practice_task": "阅读 Alu.scala 列出其支持的全部运算，再读 Bru.scala 解释 jal/jalr 的目标地址计算与对派发屏障的影响；用 AluTest 的用例补充验证你对运算结果的理解。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "乘法 MLU 与除法 DVU 单元",
+          "order": 2,
+          "filename": "u5-l2-mlu-dvu.md",
+          "level": "intermediate",
+          "topic": "结合 mlu.md 讲解 Mlu 的 3 级乘法流水、全核唯一实例的派发约束，以及 Dvu 的可变延迟除法与 IDiv。",
+          "learning_goals": [
+            "理解 Mlu 三级流水(派发/计算/写回)与全核唯一实例的串行约束",
+            "掌握 MUL/MULH/MULHSU/MULHU 的区别",
+            "了解 Dvu 可变延迟除法如何产生反压及 IDiv 迭代算法"
+          ],
+          "source_files": [
+            "doc/microarch/mlu.md",
+            "hdl/chisel/src/coralnpu/scalar/Mlu.scala",
+            "hdl/chisel/src/coralnpu/scalar/Dvu.scala",
+            "hdl/chisel/src/coralnpu/scalar/MluTest.scala",
+            "hdl/chisel/src/common/IDiv.scala"
+          ],
+          "minimal_modules": [
+            "doc/microarch/mlu.md",
+            "hdl/chisel/src/coralnpu/scalar/Mlu.scala",
+            "hdl/chisel/src/coralnpu/scalar/Dvu.scala"
+          ],
+          "practice_task": "对照 mlu.md 的波形描述，画出一条 mul 指令在 Mlu 三级流水中的数据流动；再读 Dvu/IDiv 解释除法为何是可变延迟、它如何向派发单元施加反压。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "整数/浮点寄存器堆与 CSR",
+          "order": 3,
+          "filename": "u5-l3-regfile-csr.md",
+          "level": "intermediate",
+          "topic": "讲解 Regfile(整数 31 个通用寄存器)、FRegfile(浮点)与 Csr(Zicsr)的读写端口、写回仲裁与 CSR 指令处理。",
+          "learning_goals": [
+            "理解整数/浮点寄存器堆的多端口读写与写回仲裁",
+            "掌握 CSR 文件如何响应 csrrw/csrrs/csrrc 并限定在首槽执行",
+            "了解寄存器堆如何配合记分板提供操作数"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/scalar/Regfile.scala",
+            "hdl/chisel/src/coralnpu/scalar/FRegfile.scala",
+            "hdl/chisel/src/coralnpu/scalar/Csr.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/scalar/Regfile.scala",
+            "hdl/chisel/src/coralnpu/scalar/FRegfile.scala",
+            "hdl/chisel/src/coralnpu/scalar/Csr.scala"
+          ],
+          "practice_task": "在 Regfile.scala 中数出读端口与写端口数量，解释它们如何支撑 4 发射派发；再读 Csr.scala 说明为何 csrrw/csrrs 等被限定为「仅首槽、当作控制流」处理。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "浮点运算单元 FPU",
+          "order": 4,
+          "filename": "u5-l4-fpu-floatcore.md",
+          "level": "intermediate",
+          "topic": "讲解 Fpu/FloatCore/Fma/Fp 如何实现 RV32F 浮点运算与 FMA，以及与浮点寄存器堆、CSR(FRM)的协作。",
+          "learning_goals": [
+            "理解 CoralNPU 浮点通路(Fpu→FloatCore)的整体结构",
+            "掌握 FMA(乘加)与基础浮点运算的实现",
+            "了解浮点舍入模式(FRM)与浮点 CSR 的交互"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/scalar/Fpu.scala",
+            "hdl/chisel/src/coralnpu/float/FloatCore.scala",
+            "hdl/chisel/src/common/Fma.scala",
+            "hdl/chisel/src/common/Fp.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/scalar/Fpu.scala",
+            "hdl/chisel/src/coralnpu/float/FloatCore.scala",
+            "hdl/chisel/src/common/Fma.scala"
+          ],
+          "practice_task": "阅读 Fpu/FloatCore，梳理一条 fadd.s 与一条 fmadd.s 的执行路径，标注各自用到哪些子模块；再用 Fma.scala 解释乘加的舍入与累加实现，结合 Csr 中的 FRM 字段说明舍入模式如何传入。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "存储子系统：LSU、TCM 与 Cache",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "LSU 加载存储单元",
+          "order": 1,
+          "filename": "u6-l1-lsu-slots.md",
+          "level": "advanced",
+          "topic": "结合 lsu.md 讲解 LSU 的 slot 机制、ibus/dbus/ebus 三类总线选择、scatter/gather 与向量访存交互。",
+          "learning_goals": [
+            "理解 slot 表如何跟踪一次访存操作的逐字节完成状态",
+            "掌握 ibus(取指旁路)/dbus(数据)/ebus(外部 AXI) 的选择逻辑",
+            "了解向量访存如何经 rvv2lsu/lsu2rvv 与 RVV 后端交互"
+          ],
+          "source_files": [
+            "doc/microarch/lsu.md",
+            "hdl/chisel/src/coralnpu/scalar/Lsu.scala"
+          ],
+          "minimal_modules": [
+            "doc/microarch/lsu.md",
+            "hdl/chisel/src/coralnpu/scalar/Lsu.scala"
+          ],
+          "practice_task": "对照 lsu.md 的 slot 表例子，画出一次 4 字节 word-store 在 slot 中的 Active/Data 表演化过程；再读 Lsu.scala 标注 ibus/dbus/ebus 三个端口分别服务于哪类地址区段（ITCM/DTCM/外部）。",
+          "depends_on": [
+            "u4-l4",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "TCM 紧耦合存储与 SRAM",
+          "order": 2,
+          "filename": "u6-l2-tcm-sram.md",
+          "level": "intermediate",
+          "topic": "讲解 TCM(ITCM 8KB/DTCM 32KB)的 Chisel 包装与底层 SRAM 行为 behavioral/verilog 模型，以及 SramNx128 的宽通道组织。",
+          "learning_goals": [
+            "理解 ITCM/DTCM 作为单周期 SRAM 相对 cache 的优势",
+            "掌握 TCM.scala 如何包装 SRAM 并提供宽通道访问",
+            "了解 SramNx128 与 hdl/verilog/Sram.v 行为模型的对应关系"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/TCM.scala",
+            "hdl/chisel/src/coralnpu/Sram.scala",
+            "hdl/chisel/src/coralnpu/SramNx128.scala",
+            "hdl/chisel/src/coralnpu/SRAM.scala",
+            "hdl/verilog/Sram.v"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/TCM.scala",
+            "hdl/chisel/src/coralnpu/SramNx128.scala",
+            "hdl/verilog/Sram.v"
+          ],
+          "practice_task": "在 TCM.scala 中确认 ITCM/DTCM 的大小与端口宽度，解释 SramNx128 如何把 256 位宽的 SRAM 组织成内核可访问的 128 位通道；对照 hdl/verilog/Sram.v 说明仿真用的 SRAM 行为模型接口。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "L1 指令/数据 Cache",
+          "order": 3,
+          "filename": "u6-l3-l1-cache.md",
+          "level": "advanced",
+          "topic": "结合 microarch.md 讲解 L1ICache(8KB/4 路)与 L1DCache(16KB 双 bank)的结构、预取与刷写语义。",
+          "learning_goals": [
+            "理解 L1I 8KB/256b 块/4 路组相联的组织",
+            "掌握 L1D 双 bank(各 8KB)架构与下一行预取的意义",
+            "了解 cache 行/全表刷写时内核 stall 的契约"
+          ],
+          "source_files": [
+            "doc/microarch/microarch.md",
+            "hdl/chisel/src/coralnpu/L1ICache.scala",
+            "hdl/chisel/src/coralnpu/L1DCache.scala"
+          ],
+          "minimal_modules": [
+            "doc/microarch/microarch.md",
+            "hdl/chisel/src/coralnpu/L1ICache.scala",
+            "hdl/chisel/src/coralnpu/L1DCache.scala"
+          ],
+          "practice_task": "阅读 microarch.md 的 Cache 章节与 L1ICache/L1DCache，标注两块 cache 的容量/相联度/bank 划分；解释 L1D 双 bank 如何为 ML 外积引擎提供一半内存带宽，以及 fence.i 触发的刷写如何与内核 stall 配合。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "RVV 向量/矩阵后端（SystemVerilog）",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "RVV 后端总览与 Chisel 桥接",
+          "order": 1,
+          "filename": "u7-l1-rvv-backend-overview.md",
+          "level": "advanced",
+          "topic": "讲解 RVV 后端(向量/SIMD/矩阵)的整体结构：Chisel 侧 RvvCore/RvvDecode 作为前端桥接，SystemVerilog rvv_backend/RvvFrontEnd 作为执行后端。",
+          "learning_goals": [
+            "理解 RVV 后端在 CoralNPU 中的角色与数据流",
+            "掌握 Chisel 侧 RvvCore/RvvInterface/RvvDecode 与 SV 侧 RvvFrontEnd/rvv_backend 的衔接",
+            "了解 256 位向量寄存器、8x8 累加器的资源模型"
+          ],
+          "source_files": [
+            "doc/overview.md",
+            "hdl/chisel/src/coralnpu/rvv/RvvCore.scala",
+            "hdl/chisel/src/coralnpu/rvv/RvvInterface.scala",
+            "hdl/chisel/src/coralnpu/rvv/RvvDecode.scala",
+            "hdl/verilog/rvv/design/RvvCore.sv",
+            "hdl/verilog/rvv/design/RvvFrontEnd.sv",
+            "hdl/verilog/rvv/design/rvv_backend.sv"
+          ],
+          "minimal_modules": [
+            "doc/overview.md",
+            "hdl/chisel/src/coralnpu/rvv/RvvCore.scala",
+            "hdl/verilog/rvv/design/rvv_backend.sv"
+          ],
+          "practice_task": "梳理一条向量指令从 Chisel RvvCore 译码、经 RvvInterface 传递、到 SystemVerilog rvv_backend 执行的完整数据流；画出 Chisel 前端与 SV 后端的模块边界与握手接口。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "RVV 译码与派发",
+          "order": 2,
+          "filename": "u7-l2-rvv-decode-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 SystemVerilog rvv_backend_decode/rvv_backend_dispatch 与 define/opcode 头文件，理解向量微操作的产生、结构冒险与旁路。",
+          "learning_goals": [
+            "理解 rvv_backend_decode 如何把向量指令拆成微操作",
+            "掌握 rvv_backend_dispatch 的结构冒险检测、操作数准备与旁路",
+            "了解 rvv_backend_define.svh/rvv_backend_opcode.svh 的编码定义"
+          ],
+          "source_files": [
+            "hdl/verilog/rvv/design/rvv_backend_decode.sv",
+            "hdl/verilog/rvv/design/rvv_backend_dispatch.sv",
+            "hdl/verilog/rvv/inc/rvv_backend_define.svh",
+            "hdl/verilog/rvv/inc/rvv_backend_opcode.svh"
+          ],
+          "minimal_modules": [
+            "hdl/verilog/rvv/design/rvv_backend_decode.sv",
+            "hdl/verilog/rvv/design/rvv_backend_dispatch.sv",
+            "hdl/verilog/rvv/inc/rvv_backend_opcode.svh"
+          ],
+          "practice_task": "在 rvv_backend_opcode.svh 中找出几条典型向量指令(如 vadd/vdot)的操作码定义，追踪其在 rvv_backend_decode 中如何拆分成微操作，再到 rvv_backend_dispatch 中如何检测结构冒险与决定何时发射。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "向量寄存器堆、ROB 与退休",
+          "order": 3,
+          "filename": "u7-l3-vrf-rob-retire.md",
+          "level": "advanced",
+          "topic": "讲解 rvv_backend_vrf(64 个 256 位向量寄存器)、rvv_backend_rob(重排序缓冲)与 rvv_backend_retire 的乱序执行与提交。",
+          "learning_goals": [
+            "理解 64×256 位向量寄存器堆的读写端口与累加器组织",
+            "掌握 ROB 如何支持向量指令的乱序执行与 WAW 退休",
+            "了解 retire 阶段如何按序提交并向 LSU 反馈"
+          ],
+          "source_files": [
+            "hdl/verilog/rvv/design/rvv_backend_vrf.sv",
+            "hdl/verilog/rvv/design/rvv_backend_rob.sv",
+            "hdl/verilog/rvv/design/rvv_backend_retire.sv"
+          ],
+          "minimal_modules": [
+            "hdl/verilog/rvv/design/rvv_backend_vrf.sv",
+            "hdl/verilog/rvv/design/rvv_backend_rob.sv",
+            "hdl/verilog/rvv/design/rvv_backend_retire.sv"
+          ],
+          "practice_task": "阅读 rvv_backend_vrf 标注向量寄存器堆的容量与端口数；再读 rob/retire 解释一条依赖前一条结果的向量指令如何等待、何时可以乱序执行并最终 inorder 提交。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "MAC 外积乘累加引擎",
+          "order": 4,
+          "filename": "u7-l4-mac-outer-product.md",
+          "level": "advanced",
+          "topic": "结合 overview.md 讲解 MAC 量化外积乘累加引擎：wide/narrow 双轴广播、VDOT、每周期 256 MACs。",
+          "learning_goals": [
+            "理解外积(wide×narrow)广播结构如何最大化算力/访存比",
+            "掌握 VDOT(4×8bit 乘→32bit 累加)与每周期 256 MACs 的来源",
+            "了解 MAC 与向量寄存器堆、累加器(acc<8><8>)的关系"
+          ],
+          "source_files": [
+            "doc/overview.md",
+            "hdl/verilog/rvv/design/rvv_backend_mac_unit.sv",
+            "hdl/verilog/rvv/design/rvv_backend_mulmac.sv",
+            "hdl/verilog/rvv/design/rvv_backend_mul_unit.sv"
+          ],
+          "minimal_modules": [
+            "doc/overview.md",
+            "hdl/verilog/rvv/design/rvv_backend_mac_unit.sv",
+            "hdl/verilog/rvv/design/rvv_backend_mulmac.sv"
+          ],
+          "practice_task": "对照 overview.md 的 MAC/外积说明，在 rvv_backend_mulmac 中推演一次「wide 权重广播 × narrow 输入」如何产生 256 MACs/周期；标注 8x8 累加器(acc)如何被更新并写回向量寄存器堆。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "RVV ALU、浮点与除法算术单元",
+          "order": 5,
+          "filename": "u7-l5-rvv-alu-falu-div.md",
+          "level": "advanced",
+          "topic": "讲解向量 ALU(rv_backend_alu)、向量浮点(falu/fdiv)与向量除法(div)等算术执行单元，以及 Chisel 侧 RvvAlu 的对应关系。",
+          "learning_goals": [
+            "理解向量 ALU 的 addsub/shift/mask 等子单元划分",
+            "掌握向量浮点(falu/fdiv)与除法(div/divider)的可变延迟",
+            "了解 Chisel RvvAlu 与 SV 算术单元的边界划分"
+          ],
+          "source_files": [
+            "hdl/verilog/rvv/design/rvv_backend_alu.sv",
+            "hdl/verilog/rvv/design/rvv_backend_falu.sv",
+            "hdl/verilog/rvv/design/rvv_backend_div.sv",
+            "hdl/chisel/src/coralnpu/rvv/RvvAlu.scala"
+          ],
+          "minimal_modules": [
+            "hdl/verilog/rvv/design/rvv_backend_alu.sv",
+            "hdl/verilog/rvv/design/rvv_backend_div.sv",
+            "hdl/chisel/src/coralnpu/rvv/RvvAlu.scala"
+          ],
+          "practice_task": "在 rvv_backend_alu 中区分 addsub/shift/mask 等算术子单元的职责；再对比 Chisel RvvAlu 与 SV rvv_backend_alu，判断哪些向量算术由 Chisel 实现、哪些由 SV 后端实现，并说明这样划分的可能原因。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l6",
+          "title": "Stripmining 与 SIMD 指令编码",
+          "order": 6,
+          "filename": "u7-l6-stripmining-encoding.md",
+          "level": "advanced",
+          "topic": "结合 microarch.md 讲解 stripmining 如何把一次前端派发展开成 4 次序列化发射，以及 C 扩展编码空间复用与类型编码。",
+          "learning_goals": [
+            "理解 stripmining 如何折叠数组并行到硬件并行(1 派发→4 发射)",
+            "掌握 C 扩展编码空间被复用为 6b 向量寄存器索引的机制",
+            "了解 rvv_backend_define.svh 中的关键宏与类型编码"
+          ],
+          "source_files": [
+            "doc/microarch/microarch.md",
+            "doc/overview.md",
+            "hdl/verilog/rvv/inc/rvv_backend_define.svh"
+          ],
+          "minimal_modules": [
+            "doc/microarch/microarch.md",
+            "doc/overview.md",
+            "hdl/verilog/rvv/inc/rvv_backend_define.svh"
+          ],
+          "practice_task": "用 overview.md 中「vadd v0 → vadd v0..v3」的 stripmining 例子，在 rvv_backend_define.svh 中找到支撑该展开的编码字段；解释为何复用 C 扩展空间能为 64 个向量寄存器提供 6b 索引。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "外设与 DMA",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "DMA 引擎硬件",
+          "order": 1,
+          "filename": "u8-l1-dma-engine-hw.md",
+          "level": "intermediate",
+          "topic": "结合 dma.md 讲解单通道链表描述符 DMA 的主机/设备双端口、Mem/Periph 传输模式与轮询流控。",
+          "learning_goals": [
+            "理解 DMA 的 128 位 host 端口与 32 位 device(CSR)端口",
+            "掌握描述符链(src/dst/len_flags/next_desc)与三类传输模式",
+            "了解 poll_addr/mask/value 实现的硬件流控机制"
+          ],
+          "source_files": [
+            "doc/peripherals/dma.md",
+            "hdl/chisel/src/bus/DmaEngine.scala",
+            "hdl/chisel/src/bus/DmaEngineTest.scala"
+          ],
+          "minimal_modules": [
+            "doc/peripherals/dma.md",
+            "hdl/chisel/src/bus/DmaEngine.scala"
+          ],
+          "practice_task": "对照 dma.md 的寄存器表，在 DmaEngine.scala 中定位 CTRL/STATUS/DESC_ADDR 等寄存器与描述符取指状态机；画出一次 Mem→Mem 链表传输在硬件中的状态流转。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "DMA 软件编程指南",
+          "order": 2,
+          "filename": "u8-l2-dma-software.md",
+          "level": "intermediate",
+          "topic": "结合 sw/dma.md 讲解如何用 C 构造描述符、编程 DMA、轮询完成与 abort/错误处理。",
+          "learning_goals": [
+            "掌握 dma_descriptor 结构与 make_len_flags 的位域组装",
+            "理解 enable+start→poll done 的标准编程序列",
+            "了解 abort 后 STATUS 的 done/error/error_code 语义"
+          ],
+          "source_files": [
+            "doc/sw/dma.md",
+            "doc/peripherals/dma.md"
+          ],
+          "minimal_modules": [
+            "doc/sw/dma.md",
+            "doc/peripherals/dma.md"
+          ],
+          "practice_task": "参照 sw/dma.md，编写 C 代码：构造一个 Mem→Mem 描述符(4 字节 beat)、写入 DESC_ADDR、置 CTRL=0x3 启动、轮询 STATUS.done，并在出错时读取 error_code；再写一个 Mem→Periph(dst_fixed)的描述符示例。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "SPI 主机与 TL-UL 桥接",
+          "order": 3,
+          "filename": "u8-l3-spi-master-bridge.md",
+          "level": "intermediate",
+          "topic": "讲解 SpiMaster/Spi2TLUL/Spi2TLULV2 如何把 SPI 主机挂到 TL-UL 总线，以及与 DMA/外设数据流的配合。",
+          "learning_goals": [
+            "理解 SpiMaster 的主机时序与 FIFO 接口",
+            "掌握 Spi2TLUL(V2) 如何把 SPI 寄存器映射成 TL-UL 从机",
+            "了解 SPI 与 DMA(Mem→Periph)协作的数据通路"
+          ],
+          "source_files": [
+            "hdl/chisel/src/bus/SpiMaster.scala",
+            "hdl/chisel/src/bus/Spi2TLUL.scala",
+            "hdl/chisel/src/bus/Spi2TLULV2.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/bus/SpiMaster.scala",
+            "hdl/chisel/src/bus/Spi2TLULV2.scala"
+          ],
+          "practice_task": "阅读 SpiMaster.scala 提炼 SPI 主机的关键时序参数与 TX/RX FIFO 接口；再读 Spi2TLULV2 说明 SPI 的 TXDATA/RXDATA/STATUS 寄存器如何映射成 TL-UL 地址，并描述 DMA 用 dst_fixed 把数据灌进 SPI TX FIFO 的完整路径。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "CLINT 与 PLIC 中断",
+          "order": 4,
+          "filename": "u8-l4-clint-plic.md",
+          "level": "intermediate",
+          "topic": "讲解 CLINT(定时器)与 PLIC(外部中断)如何挂到总线并向内核提供中断/定时器支持。",
+          "learning_goals": [
+            "理解 CLINT 的 mtime/mtimecmp 定时器中断机制",
+            "掌握 PLIC 的中断源/优先级/使能/claim 流程",
+            "了解 CoralNPU 标量核 run-to-completion 模型下中断的角色"
+          ],
+          "source_files": [
+            "hdl/chisel/src/bus/Clint.scala",
+            "hdl/chisel/src/bus/Plic.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/bus/Clint.scala",
+            "hdl/chisel/src/bus/Plic.scala"
+          ],
+          "practice_task": "在 Clint.scala 中定位 mtime/mtimecmp 寄存器并解释定时器中断如何产生；再读 Plic.scala 描述一个外部中断源从触发、优先级仲裁、claim 到内核响应的完整流程。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "外设接口抽象与 GPIO",
+          "order": 5,
+          "filename": "u8-l5-peripheral-if-gpio.md",
+          "level": "intermediate",
+          "topic": "讲解 PeripheralInterface 如何统一抽象外设端口，以及 GPIO/IP2TLUL 等简单外设的实现模式。",
+          "learning_goals": [
+            "理解 PeripheralInterface 对外设端口的统一抽象",
+            "掌握 GPIO 作为 TL-UL 从机的寄存器映射模式",
+            "了解新增外设时如何复用 PeripheralInterface 与 TL-UL socket"
+          ],
+          "source_files": [
+            "hdl/chisel/src/peripherals/PeripheralInterface.scala",
+            "hdl/chisel/src/peripherals/PeripheralInterfaceTest.scala",
+            "hdl/chisel/src/bus/GPIO.scala"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/peripherals/PeripheralInterface.scala",
+            "hdl/chisel/src/bus/GPIO.scala"
+          ],
+          "practice_task": "阅读 PeripheralInterface 与 GPIO，总结「挂一个新 TL-UL 外设」需要的步骤(寄存器映射、端口声明、接入 socket)；用 GPIO 为例写出一个最小外设的接入清单。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "调试、可观测性与总线完整性",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "RISC-V Debug 模块",
+          "order": 1,
+          "filename": "u9-l1-debug-module.md",
+          "level": "advanced",
+          "topic": "结合 debug.md 讲解 Debug 模块如何实现 halt/resume/single-step、抽象命令读写 GPR/FPR/CSR，以及 AXI CSR 通信协议。",
+          "learning_goals": [
+            "理解 Debug 模块的 halt/resume/single-step 控制接口",
+            "掌握抽象命令(Access Register)读写 GPR/FPR/CSR 的流程",
+            "了解外部调试器经 AXI CSR(req_addr/op/status) 与 Debug 模块通信的协议"
+          ],
+          "source_files": [
+            "doc/microarch/debug.md",
+            "hdl/chisel/src/coralnpu/scalar/Debug.scala"
+          ],
+          "minimal_modules": [
+            "doc/microarch/debug.md",
+            "hdl/chisel/src/coralnpu/scalar/Debug.scala"
+          ],
+          "practice_task": "对照 debug.md 的「读 GPR a0」示例，在 Debug.scala 中追踪抽象命令从 AXI CSR 写入到最终读出 data0 的完整状态机；列出 dmcontrol/dmstatus/abstractcs/command 等内部寄存器的关键位域。",
+          "depends_on": [
+            "u5-l3",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "RVVI 指令追踪与仿真观测",
+          "order": 2,
+          "filename": "u9-l2-rvvi-trace.md",
+          "level": "advanced",
+          "topic": "讲解 RvviTrace 如何对外暴露每条指令的执行信息，用于仿真比对与协同验证。",
+          "learning_goals": [
+            "理解 RVVI(RISC-V Instruction Trace)接口的字段语义",
+            "掌握 RvviTrace 如何在仿真中暴露 PC/指令/寄存器写信息",
+            "了解指令追踪在协同验证(ISA 模型 vs RTL)中的用途"
+          ],
+          "source_files": [
+            "hdl/chisel/src/coralnpu/RvviTrace.scala",
+            "doc/microarch/microarch.md"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/coralnpu/RvviTrace.scala"
+          ],
+          "practice_task": "阅读 RvviTrace.scala 列出它对外暴露的追踪字段(PC/inst/寄存器写等)；说明如何利用这些信号在仿真中对比一条指令的 RTL 行为与参考模型，并设计一个最小的一致性检查点。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "总线完整性与 SECDED",
+          "order": 3,
+          "filename": "u9-l3-secded-integrity.md",
+          "level": "advanced",
+          "topic": "讲解 TlulIntegrity/SecdedEncoder 如何为总线数据附加 ECC(SECDED)，以及 secded_golden 如何提供黄金参考。",
+          "learning_goals": [
+            "理解 SECDED(单纠错双检错)编码在总线保护中的作用",
+            "掌握 TlulIntegrity 如何为 TL-UL 数据生成并校验 ECC",
+            "了解 secded_golden.py 作为编码/解码黄金参考的用法"
+          ],
+          "source_files": [
+            "hdl/chisel/src/bus/TlulIntegrity.scala",
+            "hdl/chisel/src/bus/SecdedEncoderTestbench.scala",
+            "coralnpu_test_utils/secded_golden.py"
+          ],
+          "minimal_modules": [
+            "hdl/chisel/src/bus/TlulIntegrity.scala",
+            "coralnpu_test_utils/secded_golden.py"
+          ],
+          "practice_task": "阅读 TlulIntegrity 提炼其使用的 SECDED 编码参数(数据位/校验位)；用 secded_golden.py 生成一组编码/解码黄金值，对照 SecdedEncoderTestbench 验证注入单比特错误可被纠正、双比特错误可被检出。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "ML 工作负载与端到端运行",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "RVV intrinsics 向量编程",
+          "order": 1,
+          "filename": "u10-l1-rvv-intrinsics.md",
+          "level": "advanced",
+          "topic": "以 rvv_add_intrinsic.cc 为例讲解 RISC-V 向量 intrinsics(riscv_vector.h)、rvv_opt.h 头与 rvv_type_util 辅助工具。",
+          "learning_goals": [
+            "掌握 <riscv_vector.h> 向量 intrinsics 的基本用法(vsetvli/循环 stripmine)",
+            "理解 rvv_opt.h 提供的优化宏/内联",
+            "了解 rvv_type_util/rvv_cpp_util_header_generator 如何辅助生成向量类型"
+          ],
+          "source_files": [
+            "examples/rvv_add_intrinsic.cc",
+            "sw/opt/rvv_opt.h",
+            "coralnpu_test_utils/rvv_type_util.py",
+            "coralnpu_test_utils/rvv_cpp_util_header_generator.py"
+          ],
+          "minimal_modules": [
+            "examples/rvv_add_intrinsic.cc",
+            "sw/opt/rvv_opt.h",
+            "coralnpu_test_utils/rvv_type_util.py"
+          ],
+          "practice_task": "阅读 rvv_add_intrinsic.cc 理解其用 vsetvli 控制每次处理的元素数；参照它编写一个对两个 int16 数组做逐元素相加的向量程序，用 rvv_type_util 确认所用向量类型，并用 bazel 编译。",
+          "depends_on": [
+            "u2-l2",
+            "u7-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "litert-micro 算子内核",
+          "order": 2,
+          "filename": "u10-l2-litert-micro-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 sw/opt/litert-micro 下的卷积/深度卷积/全连接/池化算子如何针对 CoralNPU 向量后端实现。",
+          "learning_goals": [
+            "理解 conv/depthwise_conv 如何映射到 MAC 外积引擎",
+            "掌握 fully_connected 与 pooling 的向量化实现",
+            "了解 accumulator_util 等累加器工具与算子测试方法"
+          ],
+          "source_files": [
+            "sw/opt/litert-micro/conv.cc",
+            "sw/opt/litert-micro/depthwise_conv.cc",
+            "sw/opt/litert-micro/fully_connected.cc",
+            "sw/opt/litert-micro/pooling.cc",
+            "sw/opt/litert-micro/accumulator_util.h"
+          ],
+          "minimal_modules": [
+            "sw/opt/litert-micro/conv.cc",
+            "sw/opt/litert-micro/fully_connected.cc",
+            "sw/opt/litert-micro/accumulator_util.h"
+          ],
+          "practice_task": "阅读 conv.cc 与 fully_connected.cc，标注它们如何把权重/激活组织成 MAC 引擎的 wide/narrow 输入；用 accumulator_util.h 解释累加器的量化缩放流程，并对照 test/conv_test.cc 说明算子如何被验证。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "npusim 与 MobileNet 端到端",
+          "order": 3,
+          "filename": "u10-l3-npusim-mobilenet.md",
+          "level": "advanced",
+          "topic": "结合 npusim_mobilenet_tutorial 讲解如何用 npusim/coralnpu_v2_sim 在 CoralNPU 上端到端跑通 MobileNet 推理。",
+          "learning_goals": [
+            "理解 coralnpu_v2_sim Python/C++ 仿真封装的作用",
+            "掌握 npusim 加载 MobileNet 模型并执行推理的流程",
+            "了解端到端推理中权重加载、算子调度、结果比对的环节"
+          ],
+          "source_files": [
+            "doc/tutorials/npusim_mobilenet_tutorial.md",
+            "sw/coralnpu_sim/coralnpu_v2_sim_utils.py",
+            "tests/npusim_examples/run_full_mobilenet_v1.cc",
+            "tests/npusim_examples/npusim_run_mobilenet.py"
+          ],
+          "minimal_modules": [
+            "doc/tutorials/npusim_mobilenet_tutorial.md",
+            "sw/coralnpu_sim/coralnpu_v2_sim_utils.py",
+            "tests/npusim_examples/npusim_run_mobilenet.py"
+          ],
+          "practice_task": "对照 npusim_mobilenet_tutorial，梳理 MobileNet 推理在 coralnpu_v2_sim 中的完整步骤(模型加载→权重入 TCM→逐层算子→结果导出)；在 coralnpu_v2_sim_utils.py 中定位驱动仿真的关键接口并记录其参数。",
+          "depends_on": [
+            "u10-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "验证流程与 FPGA 构建",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "Verilator 仿真流程深入",
+          "order": 1,
+          "filename": "u11-l1-verilator-flow.md",
+          "level": "advanced",
+          "topic": "结合 simulation.md 与 tests/verilator_sim、hw_sim、rules/verilog.bzl 讲解 Verilator 仿真的构建规则、wrapper 与 DPI 封装。",
+          "learning_goals": [
+            "理解 tests/verilator_sim 与 hw_sim 如何协作搭建 Verilator 仿真",
+            "掌握 rules/verilog.bzl/default.vlt.tpl 定义仿真目标的方式",
+            "了解 DPI(backdoor/mailbox) 在仿真中的作用"
+          ],
+          "source_files": [
+            "doc/simulation.md",
+            "tests/verilator_sim/BUILD",
+            "hw_sim/core_mini_axi_wrapper.h",
+            "rules/verilog.bzl",
+            "rules/default.vlt.tpl"
+          ],
+          "minimal_modules": [
+            "doc/simulation.md",
+            "tests/verilator_sim/BUILD",
+            "rules/verilog.bzl"
+          ],
+          "practice_task": "阅读 tests/verilator_sim/BUILD 与 rules/verilog.bzl，说明一个 Verilator 仿真目标如何被定义与构建；在 hw_sim 中找出 backdoor SRAM 访问与 mailbox 等仿真支撑机制并解释其用途。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "VCS 与 UVM 验证",
+          "order": 2,
+          "filename": "u11-l2-vcs-uvm.md",
+          "level": "advanced",
+          "topic": "结合 simulation.md(VCS)与 tests/uvm、hdl/verilog/rvv/sve/rvv_backend_tb 讲解 VCS/UVM 验证平台与覆盖率回归。",
+          "learning_goals": [
+            "理解 VCS 启用方式(--config=vcs)与环境变量配置",
+            "掌握 UVM 验证平台(tests/uvm)的组织与 vcs_testbench_test 规则",
+            "了解 rvv_backend_tb 的 agent/scoreboard/coverage 结构"
+          ],
+          "source_files": [
+            "doc/simulation.md",
+            "rules/vcs.bzl",
+            "tests/uvm/tb",
+            "hdl/verilog/rvv/sve/rvv_backend_tb/Makefile"
+          ],
+          "minimal_modules": [
+            "doc/simulation.md",
+            "rules/vcs.bzl",
+            "hdl/verilog/rvv/sve/rvv_backend_tb/Makefile"
+          ],
+          "practice_task": "对照 simulation.md 配置 VCS 环境并解释 --config=vcs 的作用；在 tests/uvm 与 rvv_backend_tb 中梳理 UVM 平台的 agent/scoreboard/coverage 三件套，说明它们如何对 RVV 后端做定向+随机回归。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "cocotb 回归测试体系",
+          "order": 3,
+          "filename": "u11-l3-cocotb-regression.md",
+          "level": "advanced",
+          "topic": "讲解 tests/cocotb 的回归体系、coralnpu_test_utils 辅助库与 coco_tb.bzl 规则如何组织大量 Python/C++ 测试。",
+          "learning_goals": [
+            "理解 tests/cocotb 下 ISA/异常/CSR/RVV/TL-UL 等多类回归的组织",
+            "掌握 coco_tb.bzl 如何定义 cocotb 测试目标",
+            "了解 sim_test_fixture/run_binary 等辅助库的作用"
+          ],
+          "source_files": [
+            "tests/cocotb/BUILD",
+            "rules/coco_tb.bzl",
+            "coralnpu_test_utils/sim_test_fixture.py",
+            "coralnpu_test_utils/run_binary.py"
+          ],
+          "minimal_modules": [
+            "tests/cocotb/BUILD",
+            "rules/coco_tb.bzl",
+            "coralnpu_test_utils/sim_test_fixture.py"
+          ],
+          "practice_task": "在 tests/cocotb 下分类统计 ISA/CSR/异常/RVV/TL-UL 等测试集；用 coco_tb.bzl 说明一个 cocotb 测试目标的定义要素，并解释 sim_test_fixture 如何复用复位/时钟/ELF 加载等样板代码。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "FPGA 构建与比特流生成",
+          "order": 4,
+          "filename": "u11-l4-fpga-bitstream.md",
+          "level": "advanced",
+          "topic": "讲解 fpga/ 目录如何用 fusesoc/core 文件把 CoralNPU SoC 综合、引脚分配并生成比特流。",
+          "learning_goals": [
+            "理解 coralnpu_soc.core/chip_verilator.core 等 fusesoc core 文件的作用",
+            "掌握 get_bitstream.sh 脚本的 FPGA 构建流程",
+            "了解 coralnpu_tlul/ddr4_stub 等 FPGA 专用 IP 的角色"
+          ],
+          "source_files": [
+            "fpga/get_bitstream.sh",
+            "fpga/coralnpu_soc.core",
+            "fpga/chip_verilator.core",
+            "fpga/coralnpu_soc_pkg.core"
+          ],
+          "minimal_modules": [
+            "fpga/get_bitstream.sh",
+            "fpga/coralnpu_soc.core",
+            "fpga/chip_verilator.core"
+          ],
+          "practice_task": "阅读 get_bitstream.sh 梳理 FPGA 构建的综合/实现/生成比特流步骤；在 coralnpu_soc.core 中标注 CoralNPU SoC 用到哪些外部 IP(如 ddr4_stub/coralnpu_tlul)，并解释为何 FPGA 流程需要这些 stub。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
