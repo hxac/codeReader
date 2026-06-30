@@ -1,0 +1,414 @@
+# axi_demux_simple 与 axi_demux
+
+## 1. 本讲目标
+
+本讲是「多路复用与路由核心」单元的第一讲。我们要回答一个具体问题：**当一条 AXI 总线（一个 slave 端口）上的事务，需要按地址分发到下游多个不同的 slave（多个 master 端口）时，该用什么模块、它内部怎么做到不破坏 AXI 协议？**
+
+读完本讲，你应该能够：
+
+- 说清楚 `axi_demux` 如何用一对 `select` 信号把 AW/AR 请求路由到 `NoMstPorts` 个 master 端口中的某一个。
+- 解释 **W 通道为什么不能简单地跟着 AW 当拍走**——为什么 demux 必须记住「当前正在发的 W 突发属于哪个 AW、要去哪个端口」，并据此保序转发。
+- 读懂 B、R 两个响应通道用 **轮询仲裁树（round-robin）** 把多个 master 端口的响应回收成一个 slave 端口响应的过程。
+- 区分 `axi_demux_simple`（无 spill 寄存器的纯组合内核）与 `axi_demux`（在内核外再包一层可选 spill 寄存器）各自的定位与适用场景。
+- 理解文档 `doc/axi_demux.md` 中 *Ordering and Stalls* 一节：同 ID、同方向、不同端口的事务为什么必须停顿（stall），以及 `AxiLookBits` / `UniqueIds` 两个参数如何在这件事上做面积与误冲突的折中。
+
+本讲不修改任何 RTL，重点是「读懂一个 1 拆 N 的路由器」。
+
+## 2. 前置知识
+
+阅读本讲前，建议你已经建立以下认知（来自前置讲义）：
+
+- **五通道与 valid/ready 握手**（u1-l3）：AW/W/B/AR/R，写事务用 AW/W/B、读事务用 AR/R；每拍只有 `valid` 与 `ready` 同高才算一次握手；`in flight`（在途，地址已握而响应未握）、`pending`（挂起，valid 高 ready 低）两个术语会反复出现。
+- **AXI 的 W 突发保序规则**（u1-l3）：W 通道的数据拍**必须和 AW 的顺序一致**，不同写突发的 W 拍**不允许交错（interleave）**。这是本讲 W 通道路由能成立的协议前提。
+- **typedef / assign 宏体系**（u2-l4）：`req_t` / `resp_t` 结构体内核 + `AXI_BUS` 接口外壳的「双视图」范式，以及 `AXI_TYPEDEF_*`、`AXI_ASSIGN_*` 宏。
+- **组合路径与 spill 寄存器**（u4-l1）：`spill_register`（来自外部依赖 `common_cells 1.39.0`）切断一条通道的组合路径，代价是增加一拍延迟；`axi_cut` 就是给五通道各插一级 spill。
+
+本讲还会用到三个本库内部的基础积木（它们不是 demux 自己写的，而是被 demux 例化），先在这里点名：
+
+- **`rr_arb_tree`**（来自 `common_cells`）：一个轮询（round-robin）仲裁器，多个请求者里挑一个授权。
+- **`counter`**（来自 `common_cells`）：一个可加减的计数器。
+- **`axi_demux_id_counters`**（本库 `src/axi_demux_id_counters.sv`，编译层级 Level 1）：一组「按 AXI ID 索引」的在途事务计数器，是 demux 实现「同 ID 保序」的关键，本讲的 4.4 节会用到它，细节留到 u5-l2 专门讲。
+
+## 3. 本讲源码地图
+
+本讲涉及的核心源码文件如下：
+
+| 文件 | 编译层级 | 角色 |
+| --- | --- | --- |
+| `src/axi_demux_simple.sv` | Level 2 | **纯组合内核**：根据 select 把请求路由到 N 个 master 端口，按序转发 W，轮询回收 B/R。无 spill 寄存器。 |
+| `src/axi_demux.sv` | Level 3 | **spill 外壳**：在 `axi_demux_simple` 之外，给每个通道（可选地）再插一级 `spill_register`，并提供接口版 `axi_demux_intf`。 |
+| `src/axi_demux_id_counters.sv` | Level 1 | 被 `axi_demux_simple` 例化的 ID 在途计数器，负责同 ID 保序判断。 |
+| `doc/axi_demux.md` | — | demux 的官方文档：配置参数表、Ordering and Stalls、原子事务实现说明。 |
+| `src/axi_xbar_unmuxed.sv` | Level 4 | demux 的「最典型用法」：每 slave 端口配一个 `addr_decode` 产生 select，再驱动一个 `axi_demux`。本讲综合实践以此为蓝本。 |
+
+层级关系一眼可见：`axi_demux`（L3）= `axi_demux_simple`（L2）+ 若干 `spill_register`；`axi_demux_simple`（L2）又依赖 `axi_demux_id_counters`（L1）以及 `common_cells` 里的 `rr_arb_tree` / `counter`。**「层级数字 = 它站在多少层积木之上」**，这条规律在本讲体现得尤其清楚。
+
+> **关于文档与代码的一处差异（重要，别踩坑）**：`doc/axi_demux.md` 的配置表里列了一个 `FallThrough` 参数（[doc/axi_demux.md:30](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L30)），描述为「AW 的路由决策直通到 W 通道」。但在当前 HEAD 的 `axi_demux` 源码里，**并没有这个参数**，只有五个 `SpillXX`（[src/axi_demux.sv:56-60](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L56-L60)）。这是文档领先/滞后于代码的一处 drift。本讲一律以**源码为准**，提到 `FallThrough` 时会标注「文档列出、当前源码未暴露，待确认」。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 demux 全景：select 路由、按序转发 W、轮询回收 B/R
+
+#### 4.1.1 概念说明
+
+一个 demux（解复用器）做的是 **1 拆 N**：上游（demux 的 slave 端口）有一条 AXI 总线，下游有 N 个 AXI slave，demux 要把每个事务送到正确的下游。
+
+关键在于：AXI 事务的「目的地」信息**不在某个单独的信号上**，而是藏在 AW/AR 通道的 `addr` 字段里。所以 demux 自己**不译码地址**，它只提供一个 `select` 输入（一个宽度为 `⌈log2 N⌉` 的索引），由外部（通常是地址译码器）告诉它「这一拍该送去第几号 master 端口」。AW 和 AR 各有一个独立的 select，因为一次写和一次读的目的地完全可能不同。
+
+于是 demux 的职责被干净地切成三块：
+
+1. **请求方向（AW、AR、W）**：把上游的请求，按 select 路由到指定的那一个 master 端口。其中 AW/AR 直接看 select；W 没有自己的 select，要「跟随它的 AW」。
+2. **响应方向（B、R）**：N 个 master 端口随时可能各自返回 B/R，demux 要把它们**合并（多选一）**回单个 slave 端口，这天然是个仲裁问题。
+3. **协议合规**：保证不违反 valid/ready 握手规则、不交错 W、对同 ID 事务保序。
+
+> 这种「译码在外、路由在内」的分工，正是 u1-l1 讲的「组合优于配置」哲学的又一次体现：demux 不把地址规则写死，而是和 `addr_decode` 背靠背组合，从而能适配任意地址映射。
+
+#### 4.1.2 核心流程
+
+```
+                ┌────────────────────── axi_demux ───────────────────────┐
+  上游 slave ──>│  AW ──按 slv_aw_select──>  mst[select].aw              │──> 下游 N 个
+  端口(1 个)    │  AR ──按 slv_ar_select──>  mst[select].ar              │    master
+                │  W  ──跟随其 AW 的选择──>  mst[w_select].w   (保序队列) │    端口
+                │                                                        │
+                │  B  <── rr_arb_tree(轮询) ── mst[*].b   ── 回收成 1 路  │
+                │  R  <── rr_arb_tree(轮询) ── mst[*].r   ── 回收成 1 路  │
+                └────────────────────────────────────────────────────────┘
+```
+
+把三块职责对应到通道上：
+
+- **AW/AR**：组合 `select == i` 决定第 `i` 号 master 端口的 `aw_valid`/`ar_valid` 拉高；载荷原样复制到所有端口（只有 valid 不同）。
+- **W**：用一个**「正在进行的 W 突发队列」**记录每个尚未发完的写突发该去哪个端口（`w_select`），W 拍按队列头部的端口转发；只有当队列空、或新 AW 与队头同端口时，才允许新 AW 通过，从而**杜绝跨端口交错**。
+- **B/R**：两个独立的 `rr_arb_tree` 在 N 路响应里轮询挑一路，回送给 slave 端口；被选中的那一路 `b_idx`/`r_idx` 的载荷被搬到 slave 响应上。
+
+#### 4.1.3 源码精读：demux 在交叉开关里的真实接法
+
+理解 demux 最好的办法是看它被怎么用。`axi_xbar_unmuxed` 给出了教科书式的接线：每个 slave 端口配一个 `addr_decode`（来自 `common_cells`），把 AW/AR 的地址译成 master 端口索引，译码失败则指向「译码错误从端」（索引 = `NoMstPorts`）：
+
+[src/axi_xbar_unmuxed.sv:101-114](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_xbar_unmuxed.sv#L101-L114) —— `addr_decode` 读 `slv_ports_req_i[i].aw.addr` 和全局 `addr_map_i`，输出 `dec_aw`（端口索引）与 `dec_aw_error`（是否命中未映射区域）。
+
+[src/axi_xbar_unmuxed.sv:131-134](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_xbar_unmuxed.sv#L131-L134) —— 把译码结果汇成 demux 的 select：命中则 `select = dec_aw`，未命中则 `select = NoMstPorts`（指向错误从端）。
+
+[src/axi_xbar_unmuxed.sv:164-193](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_xbar_unmuxed.sv#L164-L193) —— `axi_demux` 例化：注意 `NoMstPorts` 被设成 `Cfg.NoMstPorts + 1`，多出来的那一个端口正是用来挂译码错误从端；`slv_aw_select_i`/`slv_ar_select_i` 接上面算出的 `slv_aw_select`/`slv_ar_select`。
+
+这条调用链印证了 4.1.1 的分工：**译码在外（`addr_decode`），路由在内（`axi_demux`）**。本讲综合实践会模仿这个结构，只是用一个最朴素的「地址最高位」当译码器。
+
+> 为什么 `select` 必须在握手 pending 期间保持稳定？因为 AXI 规定 valid 期间载荷不能变，而 demux 把 select 当成「这一拍的 AW 去哪儿」的载荷看待。源码用断言强制这一点：[src/axi_demux_simple.sv:489-491](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L489-L491)（`slv_aw_select_stable`）。如果你自己驱动 select，务必在 `aw_ready` 拉高前不要动它。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+**实践目标**：用「追踪 select 信号」的方式，亲手把 4.1.2 的数据流图在源码里走一遍。
+
+1. 打开 [src/axi_demux_simple.sv:417-453](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L417-L453)，这是 demux 主体最关键的一个 `always_comb`，它驱动所有 master 端口的请求。
+2. 在这段代码里定位三处：
+   - AW 路由（约 424-429 行）：找出 `if (aw_valid && (slv_aw_select_i == i))` 这一句，确认只有被选中的端口 `aw_valid` 才置 1。
+   - W 路由（约 434-438 行）：找出 `if (w_select_valid && (w_select == i))`，注意 W 用的是 `w_select` 而不是 `slv_aw_select_i`。
+   - AR 路由（约 444-448 行）：与 AW 对称。
+3. **需要观察的现象**：载荷 `mst_reqs_o[i].aw = slv_req_i.aw` 是**无条件复制给所有端口**的，只有 valid 是按 select 选择性拉高。理解这一点后你就明白：demux 的请求方向本质是「全广播载荷 + 选择性拉 valid」。
+4. **预期结果**：能在源码上指出「哪一行把 AW 送往 select 指定的端口、哪一行把 W 送往 w_select 指定的端口」。
+5. 若想进一步确认，可对照 [doc/axi_demux.md:12-16](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L12-L16) 的设计概览文字，与代码完全一致。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 demux 给 AW 和 AR 各准备一个 select，而不是共用一个？
+**答案**：因为同一时刻可能既有写事务（AW）又有读事务（AR）在途，它们的目的地彼此独立。共用一个 select 会让「同时的一读一写去不同 slave」这种合法场景变得不可能。
+
+**练习 2**：如果把一个 `NoMstPorts == 1` 的 demux 放进设计，它会消耗多少逻辑？
+**答案**：几乎为零。源码在第 73-75 行有专门优化（[src/axi_demux_simple.sv:73-75](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L73-L75)）：`NoMstPorts == 1` 时直接用 `AXI_ASSIGN_REQ_STRUCT` / `AXI_ASSIGN_RESP_STRUCT` 纯直通，退化成一根连线，不例化任何仲裁器或计数器。
+
+---
+
+### 4.2 axi_demux_simple：无 spill 的组合内核
+
+#### 4.2.1 概念说明
+
+`axi_demux_simple` 是整个 demux 的「大脑」——一个**不包含任何 spill 寄存器的纯组合路由器**（确切说，它内部的寄存器只有 lock valid 的触发器、W 选择寄存器和 ID 计数器，**没有**用来切断五通道组合路径的 spill）。所有「选端口、转发 W、回收 B/R」的真活都在这里。
+
+它的端口很有讲究，值得先看一眼：
+
+[src/axi_demux_simple.sv:43-67](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L43-L67) —— 模块声明。注意几点：① 用 `req_t`/`resp_t` 结构体视图（不是接口），说明它是「内核」；② master 端口是数组 `mst_reqs_o[NoMstPorts-1:0]`；③ 派生参数 `SelectWidth = (NoMstPorts > 1) ? $clog2(NoMstPorts) : 1`，保证即使只有 1 个端口 select 也有 1 位宽度（避免 0 宽信号）。
+
+它把工作分成五段，源码用注释把每段隔开：AW 通道、W 通道、B 通道、AR 通道、R 通道。下面按「请求方向（AW/AR/W）」和「响应方向（B/R）」两组来讲。
+
+#### 4.2.2 核心流程
+
+**请求方向（AW、W、AR）——「按 select 选端口，W 跟着 AW 走」**
+
+- AW：拿到 `slv_aw_select_i`，做一次 ID 占用检查（见 4.4 节），通过后把 `aw_valid` 拉到第 `slv_aw_select_i` 号端口，并把这次的 select「压入 W 选择队列」。
+- W：看 W 选择队列的队头 `w_select`，把 W 拍送到那个端口；当一个突发的最后一拍（`w.last`）握手，队列出队。**只有当队列为空、或新 AW 与队头同端口时**才放行新 AW——这就是「不交错」的物理实现。
+- AR：和 AW 同构，但不需要 W 队列（读没有数据拍要跟随）。
+
+**响应方向（B、R）——「N 路合并成 1 路」**
+
+- B：N 个端口的 `b_valid` 进 `rr_arb_tree`，轮询选出一路 `b_idx`，把那一路的 B 载荷搬到 slave 响应。
+- R：完全对称，独立一棵 `rr_arb_tree`。
+
+#### 4.2.3 源码精读
+
+**(a) AW 通道控制与 W 选择队列**
+
+[src/axi_demux_simple.sv:138-194](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L138-L194) —— AW 握手控制。关键是放行新 AW 的条件（168-177 行）：
+
+```
+if (!aw_id_cnt_full && (w_open != '1) &&            // ID 计数器没满、W 突发数没溢出
+    (!(ar_id_cnt_full && atop[ATOP_R_RESP]) ||      // 原子读还不让 AR 计数器满
+     !AtopSupport) &&
+    slv_req_i.aw_valid &&
+      ((w_open == '0) || (w_select == slv_aw_select_i)) &&   // ★ 不交错 W 的核心
+      (!aw_select_occupied || (slv_aw_select_i == lookup_aw_select))) begin // ★ 同 ID 保序
+  aw_valid = 1'b1;
+  w_cnt_up = 1'b1;        // 把这次 select 压入 W 队列
+  ...
+end
+```
+
+打 ★ 的两条是本模块的灵魂：
+
+- `(w_open == '0) || (w_select == slv_aw_select_i)`：要么当前没有未发完的 W 突发，要么新 AW 去的端口和正在发的 W 突发同端口——否则就得等，**绝不让两个不同端口的 W 突发并发**。
+- `!aw_select_occupied || (slv_aw_select_i == lookup_aw_select)`：同 ID（见 4.4）若已占用且去往别的端口，则停顿。
+
+`w_open` 是「当前有几个 AW 的 W 突发尚未发完」的计数器，`w_select` 是队头端口：
+
+[src/axi_demux_simple.sv:237-254](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L237-L254) —— `i_counter_open_w` 是一个 `counter` 实例，`w_cnt_up`（AW 放行时 +1）和 `w_cnt_down`（W 最后一拍握手时 -1，见 437 行）驱动它；`w_select_q` 寄存器锁存队头端口，`w_select = (|w_open) ? w_select_q : slv_aw_select_i`。
+
+> 这套 `w_open` + `w_select_q` 就是文档里说的「存放 select 的 FIFO 队列」的精简实现（[doc/axi_demux.md:76](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L76)）：在 AW 上握手时入队，在 W 最后一拍握手时出队。因为 AXI 保证 W 与 AW 同序，所以一个计数器 + 一个 select 寄存器就够表达「队头」，无需真 FIFO。
+
+**(b) W 通道的实际路由**
+
+[src/axi_demux_simple.sv:431-438](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L431-L438) —— 在驱动 master 端口的大 `always_comb` 里，W 段：被 `w_select` 选中的端口拿到 `w_valid` 和 `w_ready` 回授；只有当 `w_valid & w_ready & w.last` 同时成立，`w_cnt_down` 才置 1（一个突发出队一次）。
+
+**(c) B、R 通道的轮询仲裁回收**
+
+[src/axi_demux_simple.sv:263-291](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L263-L291) —— B 通道：`rr_arb_tree` 把 `mst_b_valids`（N 路）仲裁成一路 `slv_resp_o.b_valid`，并输出胜者索引 `b_idx`；随后 `AXI_SET_B_STRUCT` 把第 `b_idx` 路的 B 载荷搬到 slave 响应。注意 `LockIn(1'b1)`：一旦仲裁器锁定某一路，会持续到该路事务完成，避免半个 B 响应中途换路。
+
+[src/axi_demux_simple.sv:382-410](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L382-L410) —— R 通道完全对称，独立一棵 `rr_arb_tree` 输出 `r_idx`，搬 R 载荷。B 和 R 用两棵独立的树，因为它们是两类不同的响应、节奏独立。
+
+**(d) 端口选择如何回授 ready**
+
+[src/axi_demux_simple.sv:412-413](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L412-L413) —— `aw_ready = aw_valid & mst_resps_i[slv_aw_select_i].aw_ready`：只有被 select 选中的那个端口的 `aw_ready` 才会被回授给上游。这是「载荷广播、ready 回授只走选中路」的另一半。
+
+#### 4.2.4 代码实践（源码阅读 + 局部改参数观察）
+
+**实践目标**：亲手数一数 demux 内部例化了多少棵仲裁器、多少个计数器，建立面积直觉。
+
+1. 打开 `src/axi_demux_simple.sv`，用搜索定位 `rr_arb_tree`，你应该找到 **2 处**（B 和 R），对应 [263-291](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L263-L291) 与 [382-410](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L382-L410) 行。
+2. 搜索 `axi_demux_id_counters`，应找到 **2 处**（AW 用一个、AR 用一个），对应 [209-231](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L209-L231) 与 [355-376](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L355-L376) 行。
+3. **需要观察的现象**：当 `NoMstPorts` 增大时，`rr_arb_tree` 的输入路数（`NumIn`）线性增长，而 `id_counters` 的数量取决于 `AxiLookBits`（呈 \(2^{\text{AxiLookBits}}\)）。所以 demux 的面积同时受这两个参数驱动。
+4. **预期结果**：能口头复述「demux 内部有 2 棵仲裁树（B/R）+ 2 组 ID 计数器（AW/AR）+ 1 个 W 开放计数器」。
+5. **待本地验证**：若你手头能跑综合，可分别对 `NoMstPorts=2` 与 `NoMstPorts=8` 跑一次 `scripts/synth.sh` 的 elaborate，对比面积变化，验证「仲裁树随端口数增长」的直觉。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：B 和 R 为什么用**两棵独立的** `rr_arb_tree`，而不是合并成一棵？
+**答案**：因为 B（写响应，每事务 1 拍）和 R（读响应，每事务多拍、带 `last`）是两类完全不同的响应，节奏和握手都独立；合并会引入不必要的相互阻塞。各自一棵树，互不干扰。
+
+**练习 2**：`rr_arb_tree` 的 `LockIn(1'b1)` 参数如果改成 `1'b0`，对 R 通道可能造成什么后果？
+**答案**：`LockIn=1` 保证仲裁器一旦选中某路 R 突发，就会一直选它直到该突发结束（拍到 `last`），从而把一个完整 R 突发的所有拍完整送出。若改成 0，理论上一个多拍 R 突发可能被中途打断、和另一路的 R 拍交错，破坏 AXI「同一 R 突发拍连续」的要求。所以这里必须锁。
+
+---
+
+### 4.3 axi_demux：spill 寄存器外壳与配置
+
+#### 4.3.1 概念说明
+
+`axi_demux_simple` 是纯组合内核，意味着**从 slave 端口到任意 master 端口存在一条贯穿的组合路径**（载荷广播那一半尤其长）。在频率较高的设计里，这条长组合路径会成为关键路径。`axi_demux` 的全部存在意义就是：在内核之外，给每个通道**可选地**插一级 `spill_register`，让你按需切断组合路径、换取时序裕量。回顾 u4-l1：spill 寄存器「切路径 + 加一拍延迟，不损吞吐」。
+
+所以 `axi_demux` ≡ 「五通道（外加 AW/AR 的 select）各一个可选 spill 寄存器」+ 「一个 `axi_demux_simple` 内核」。它不重复实现任何路由逻辑。
+
+#### 4.3.2 核心流程
+
+```
+slv_req_i  ──[spill(AW)?]──[spill(AW select)?]──┐
+           ──[spill(W)?]──────────────────────── ┤
+           ──[spill(AR)?]──[spill(AR select)?]── ┼──> axi_demux_simple ──> mst_reqs_o
+                                                ┤
+mst_resps_i <──[spill(B)?]────────────────────── ┤<── axi_demux_simple <── mst_resps_i
+           <──[spill(R)?]─────────────────────── ┘
+```
+
+每个 `SpillXX` 参数控制对应通道的 spill 是否启用（`Bypass = ~SpillXX`）。默认配置是 AW、AR 两个通道开 spill，其余关——因为这两个地址通道的 valid/ready 组合路径最长、最值得切。
+
+#### 4.3.3 源码精读
+
+[src/axi_demux.sv:42-76](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L42-L76) —— 模块参数。和 `axi_demux_simple` 相比，多了五个 spill 开关，注意默认值：
+
+```
+parameter bit SpillAw = 1'b1,   // AW 默认插 spill
+parameter bit SpillW  = 1'b0,
+parameter bit SpillB  = 1'b0,
+parameter bit SpillAr = 1'b1,   // AR 默认插 spill
+parameter bit SpillR  = 1'b0,
+```
+
+[src/axi_demux.sv:89-114](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L89-L114) —— AW 通道插了**两个** spill：一个给 AW 载荷（`i_aw_spill_reg`），一个给 AW 的 select（`i_aw_select_spill_reg`）。select 必须和 AW 载荷同步被寄存，否则「载荷晚一拍、select 当拍」会选错端口。两路 spill 的 `ready_i` 都接 `slv_resp_cut.aw_ready`，并用 `&` 合并出对外的 `aw_ready`（[116-117 行](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L116-L117)）——意思是两个 spill 都能吞下时才算上游 ready。
+
+[src/axi_demux.sv:119-187](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L119-L187) —— W、AR（含 AR select）、B、R 通道的 spill，套路与 AW 一致。AR 同样给 select 单独配了一个 spill（`i_ar_sel_spill_reg`，[145-157 行](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L145-L157)）。
+
+[src/axi_demux.sv:189-209](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L189-L209) —— 把经过 spill 之后的 `slv_req_cut` / `slv_resp_cut` 喂给 `axi_demux_simple`。注意这里实例化的就是上一节讲的内核，参数原样透传。
+
+[src/axi_demux.sv:216-302](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L216-L302) —— 接口版外壳 `axi_demux_intf`：用 `AXI_TYPEDEF_*` 生成通道类型，用 `AXI_ASSIGN_*` 在 `AXI_BUS` 接口和结构体之间互连，最后例化 `axi_demux`。这正是 u2-l4 讲的「接口外壳 + 结构体内核」标准范式。综合实践会直接用这个接口版。
+
+> 文档对这套机制有简明总结：spill 寄存器「切断一条通道全部组合路径（含载荷与握手），每通道加一拍延迟但不损吞吐；若所有 `SpillXX` 都关、且 `FallThrough` 关，则整条 demux 是零延迟纯组合的」（[doc/axi_demux.md:36-39](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L36-L39)）。注意其中 `FallThrough` 是文档提及但当前源码未暴露的参数（见 4.1 的差异说明），「所有 SpillXX 关 = 纯组合」这一点对 `axi_demux_simple` 永远成立，对 `axi_demux` 则要求你显式把五个 `SpillXX` 全置 0。
+
+#### 4.3.4 代码实践（源码阅读型）
+
+**实践目标**：搞清「为什么默认 AW/AR 开 spill、而 W/B/R 关」，理解作者的时序取舍。
+
+1. 打开 [src/axi_demux.sv:56-60](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L56-L60)，确认默认值 `SpillAw=1, SpillW=0, SpillB=0, SpillAr=1, SpillR=0`。
+2. 对照 [src/axi_demux_simple.sv:168-177](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L168-L177) 的 AW 放行条件：它同时依赖 `aw_id_cnt_full`、`w_open`、`aw_select_occupied`、`lookup_aw_select` 等一堆来自 ID 计数器和 W 计数器的信号——这是 demux 里最深的组合逻辑坑，所以作者默认给 AW 插 spill 切断它。AR 同理。
+3. **需要观察的现象**：W/B/R 默认不插 spill，是因为它们的组合路径相对浅（W 只看 `w_select`；B/R 只经过 `rr_arb_tree` 一级）。
+4. **预期结果**：能解释「默认配置在 AW/AR 上各加一拍延迟，换取 slave 端口到 master 端口的组合路径被切断」。
+5. **若要零延迟**：把五个 `SpillXX` 全置 0，`axi_demux` 在功能上就退化成 `axi_demux_simple`（多出来的 spill 寄存器因 `Bypass=1` 被旁路）。这一点可在源码 `Bypass = ~SpillXX` 上确认（如 [src/axi_demux.sv:91](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux.sv#L91)）。待本地验证：可对比全开 vs 全关时的最大频率。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：什么场景下你会**直接用** `axi_demux_simple` 而不是 `axi_demux`？
+**答案**：当你的设计频率不高、组合路径深度不是瓶颈，或者你打算在 demux 之外**自己**用 `axi_cut`/`axi_fifo` 按需切路径时，可以直接用更轻的 `axi_demux_simple`。`axi_xbar_unmuxed` 就是用参数化的 `SpillXX` 控制 `axi_demux`，而不是直接用 simple 版，以便随 `LatencyMode` 灵活调时序。
+
+**练习 2**：为什么 AW 通道需要给 select 单独配一个 spill 寄存器，而不能只寄存 AW 载荷？
+**答案**：因为 select 在内核里和 AW 载荷**成对使用**（`aw_valid && (slv_aw_select_i == i)`）。如果只把载荷寄存一拍、select 不寄存，那么「晚一拍的载荷」会配上「当拍的 select」，送到内核时就会选错端口。两者必须同步寄存、同步释放。
+
+---
+
+### 4.4 同 ID 保序、停顿与 id_counters
+
+#### 4.4.1 概念说明
+
+`axi_demux` 的请求路由看似只要按 select 转发就够了，但 AXI 协议有一条硬约束：**同一 ID、同一方向（都读或都写）的事务，到达任一 slave 的观察顺序，必须和它们被发出的顺序一致**。
+
+这件事在「1 拆 N」里会出问题：设想两次写事务 W1、W2 用同一个 ID，但 W1 去 master 端口 A、W2 去 master 端口 B。如果 demux 不加干预地把它们并发送出去，那么下游 A 和 B 各自独立返回 B 响应，谁先回完全不确定——于是上游看到的 B1、B2 顺序可能颠倒，**违反保序**。
+
+demux 的解法是：**用 ID 计数器追踪「每个 ID 当前在途的事务去往哪个端口」；如果同一个 ID 已经有事务在途去了别的端口，就停顿（stall）新的同 ID 事务，直到前者完成。** 这就是文档 *Ordering and Stalls* 的全部内容。
+
+#### 4.4.2 核心流程
+
+```
+新 AW/AR 到来
+   │
+   ├─ 取该事务 AXI ID 的低 AxiLookBits 位作为索引
+   │
+   ├─ 查 id_counters[idx]：
+   │     ├─ 若未占用（occupied=0）            → 放行，记录端口 select，计数 +1
+   │     ├─ 若已占用且端口 == 本事务 select   → 放行（同端口，不破坏保序），计数 +1
+   │     └─ 若已占用且端口 != 本事务 select   → ★ 停顿 AW/AR（拉低 aw_ready/ar_ready）
+   │
+   └─ 事务完成（B 握手 / R 最后一拍握手）→ 对应计数 -1；减到 0 则释放占用
+```
+
+关键参数：
+
+- `AxiLookBits`：参与比对的 ID 低位位数。计数器数量为 \(2^{\text{AxiLookBits}}\)。设得小 → 面积小，但**误冲突**多（高位不同的 ID 也被判为「同 ID」而停顿）；设得等于 `AxiIdWidth` → 零误冲突，面积最大。
+- `UniqueIds`：若你能保证「同一方向上，每个在途事务的 ID 都唯一」，那么根本不会有同 ID 冲突，计数器可以整个省掉。
+
+#### 4.4.3 源码精读
+
+[src/axi_demux_simple.sv:209-231](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L209-L231) —— AW 方向的 ID 计数器实例 `i_aw_id_counter`：用 `slv_req_i.aw.id[0+:AxiLookBits]` 做 lookup/push/pop 的索引（只取低位！），把 `slv_aw_select_i` 作为 push 的端口标签，在 B 握手时 pop（`slv_resp_o.b_valid & slv_req_i.b_ready`，226-227 行）。
+
+[src/axi_demux_simple.sv:168-177](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L168-L177) —— 放行条件里的 `!aw_select_occupied || (slv_aw_select_i == lookup_aw_select)` 正是 4.4.2 流程图里的三分支判断：`aw_select_occupied`（该 ID 已占用）为假则放行；为真则要求本事务端口 == 计数器里记的端口。
+
+[src/axi_demux_simple.sv:200-208](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L200-L208) —— `UniqueIds` 优化分支：置 1 时直接把 `lookup_aw_select = slv_aw_select_i`、`aw_select_occupied = 0`、`aw_id_cnt_full = 0`，于是 168-177 的放行条件永远不再因 ID 占用而停顿，计数器实例整个不例化（走 `gen_unique_ids_aw` 分支而非 `gen_aw_id_counter`）。
+
+[src/axi_demux_id_counters.sv:45-69](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_id_counters.sv#L45-L69) —— 计数器内部：`NoCounters = 2**AxiIdBits`，每个计数器配一个 `mst_select_q` 寄存器记端口标签；`full_o = |cnt_full` 任一计数器满则上报；lookup 用 ID 索引读出占用状态和端口。（计数器加减的细节由 pop/push/inject 组合驱动，u5-l2 会专门精读。）
+
+> 文档把面积影响说得很直接：开 `UniqueIds` 把复杂度从 \(O(2^I)\) 降到 \(O(I)\)（[doc/axi_demux.md:68](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L68)）；并明确列出开 `UniqueIds` 的三个前提条件（[doc/axi_demux.md:61-64](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L61-L64)）。不满足前提就置 1 会导致**未定义行为**。
+
+> **原子事务（ATOP）的小尾巴**：原子读改写（`atop[ATOP_R_RESP]=1`）会同时产生 B 和 R 响应，相当于在 AR 通道凭空多出一组「没有对应 AR 的 R 拍」。若不处理，AR 的 ID 计数器会在这些 R 拍上**下溢**。demux 的做法是让 AW 通道在握手时把该原子事务的 ID「注射（inject）」进 AR 的计数器（[src/axi_demux_simple.sv:162](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L162) 的 `atop_inject`，经 [355-376 行](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L355-L376) 的 `inject_i` 端口喂给 AR 计数器）。这是 u1-l1 提到的「不支持 ATOP 的下游要加 `axi_atop_filter`」的反面——demux 自己是**支持** ATOP 的，靠的就是这套 inject 机制。详见 [doc/axi_demux.md:79-87](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L79-L87)。
+
+#### 4.4.4 代码实践（源码阅读 + 参数推演）
+
+**实践目标**：通过对比 `UniqueIds` 的两个生成分支，理解「省掉计数器」换来的是什么、风险是什么。
+
+1. 打开 [src/axi_demux_simple.sv:200-231](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L200-L231)，对照 `gen_unique_ids_aw`（200-208）与 `gen_aw_id_counter`（209-231）两段。
+2. **需要观察的现象**：`UniqueIds=1` 时，`axi_demux_id_counters` 根本不被例化，三个占用/满信号被常量替代；`UniqueIds=0` 时才真正例化计数器并做 lookup。
+3. 读 [doc/axi_demux.md:60-68](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_demux.md#L60-L68)，抄下开 `UniqueIds` 的三个前提条件。
+4. **预期结果**：能说出「`UniqueIds` 省的是 \(2^{\text{AxiLookBits}}\) 个计数器及其查找逻辑，代价是要求上游保证同方向同 ID 在途唯一，否则行为未定义」。
+5. **待本地验证**：构造一个上游**故意**让两个同 ID 写并发去往不同端口（即违反 UniqueIds 前提），观察 `UniqueIds=1` 时是否出现响应乱序——这应当能复现「未定义行为」。注意：这只是为了理解风险，不要把这种配置放进真实设计。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`AxiLookBits` 设成 1、设成 `AxiIdWidth`，分别意味着什么？
+**答案**：设成 1 → 只有 2 个计数器，面积最小，但只要两个事务 ID 的最低位相同就被判为「同 ID」，极易**误冲突停顿**、损失并发度。设成 `AxiIdWidth` → 每个 ID 一个计数器，零误冲突，但面积随 ID 宽度指数增长。工程上常折中取一个能覆盖典型并发 ID 数的较小值。
+
+**练习 2**：为什么 AR 方向的 ID 计数器多了一个 `inject_i` 端口，而 AW 方向没有？
+**答案**：因为原子读改写（ATOP_R_RESP）发起在 AW 通道，却会在 R 通道产生响应拍。AR 计数器必须预先知道「这个 ID 即将产生 R 拍」，否则 R 拍到来时 pop 会导致下溢。所以由 AW 通道把原子事务的 ID inject 进 AR 计数器。AW 方向没有「别的通道会凭空产生 B 拍」的情况，所以不需要 inject。
+
+---
+
+## 5. 综合实践
+
+**任务**：用 `axi_demux_intf` 搭一个 **1 拆 2** 的拆分器，select 由地址最高位驱动，验证两个下游分别只收到属于自己地址区间的请求。
+
+**设计思路**（模仿 `axi_xbar_unmuxed` 的「外部译码 + demux 路由」结构，但把译码器简化到极致——一根地址线）：
+
+- 选 `NO_MST_PORTS = 2`，于是 `select` 宽度为 1 位。
+- 「地址最高位」当译码器：`select = addr[AXI_ADDR_WIDTH-1]`，即地址 `[0, 2^(W-1))` 去端口 0，`[2^(W-1), 2^W)` 去端口 1。
+- 上游用一个 `axi_rand_master`（u3-l2）发随机读写；下游两个端口各接一个 `axi_sim_mem`（u3-l2）当忠实存储；用 `axi_scoreboard` 自检。
+
+**示例代码**（这是讲义为说明结构而写的示意 testbench 片段，**不是仓库已有文件**，标注为「示例代码」）：
+
+```systemverilog
+// ===== 示例代码：tb_demux_1to2.sv（片段，仅示意结构）=====
+  // 时序三参数（沿用 u3-l3 的约定：0 < TA < TT < T_clk）
+  localparam time CyclTime = 10ns;
+  localparam time ApplTime = 2ns;
+  localparam time TestTime = 8ns;
+
+  // 选 1 拆 2，地址最高位当译码器
+  localparam int unsigned NO_MST_PORTS = 2;
+  localparam int unsigned AXI_ADDR_WIDTH = 32;
+  // ... AXI_ID/DATA/USER 宽度省略 ...
+
+  AXI_BUS   #(...) slv();
+  AXI_BUS   #(...) mst[1:0]();
+
+  // ★ 最朴素的「地址译码器」：最高位即端口索引
+  assign slv_aw_select = slv.aw_addr[AXI_ADDR_WIDTH-1];
+  assign slv_ar_select = slv.ar_addr[AXI_ADDR_WIDTH-1];
+
+  axi_demux_intf #(
+    .NO_MST_PORTS  ( NO_MST_PORTS     ),
+    .AXI_ADDR_WIDTH( AXI_ADDR_WIDTH   )
+    // ... 其余宽度参数 ...
+  ) i_demux (
+    .clk_i, .rst_ni, .test_i,
+    .slv_aw_select_i ( slv_aw_select ),
+    .slv_ar_select_i ( slv_ar_select ),
+    .slv             ( slv           ),
+    .mst             ( mst           )
+  );
+
+  // 上游：随机主端；下游：两个 sim_mem；scoreboard 自检（接线略，参见 u3-l2）
+```
+
+**操作步骤**：
+
+1. 按上面的结构补全宽度参数、`AXI_BUS` 接口、`axi_rand_master`、两个 `axi_sim_mem` 和 `axi_scoreboard` 的例化与接线（可直接参考 `test/tb_axi_xbar.sv` 的写法，那里用同样的组件验证了一个完整 xbar）。
+2. 让 rand_master 在整个地址空间 `[0, 2^32)` 内发若干随机读写。
+3. 仿真运行若干事务后检查。
+
+**需要观察的现象 / 预期结果**：
+
+- 所有地址最高位为 0 的事务，其 W/AR 只应出现在 `mst[0]` 一侧；最高位为 1 的只出现在 `mst[1]` 一侧。
+- `axi_sim_mem[0]` 只会被「低半地址」写入，`axi_sim_mem[1]` 只会被「高半地址」写入。
+- `axi_scoreboard` 全程无 mismatch，日志出现 `Errors: 0,`（u1-l4 讲过的判据）。
+- 因 `axi_demux_intf` 默认 `SPILL_AW=1/SPILL_AR=1`，AW/AR 各有一拍延迟；如想观察纯组合行为，可把 `SPILL_AW/SPILL_AR` 显式置 0 再跑一次对比。
+
+**待本地验证**：本讲无法替你跑仿真，实际「两个下游分别只收到对应地址区间请求」的现象需你在本地用 `scripts/run_vsim.sh` 跑 `tb_demux_1to2` 验证。若暂时没有仿真器，也可降级为**源码阅读型验证**：把上面 `assign slv_aw_select = slv.aw_addr[AXI_ADDR_WIDTH-1]` 与 [src/axi_demux_simple.sv:427-429](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_demux_simple.sv#L427-L429) 的 `if (aw_valid && (slv_aw_select_i == i))` 对照，手工论证「地址最高位为 0 时只有 `mst_reqs_o[0].aw_valid` 会拉高」。
+
+## 6. 本讲小结
+
+- `axi_demux` 做 **1 拆 N**：用外部喂入的 `slv_aw_select_i` / `slv_ar_select_i` 把 AW/AR 路由到指定 master 端口；译码在外（如 `addr_decode`）、路由在内，是「组合优于配置」的又一例。
+- **W 通道没有自己的 select**，靠 `w_open` 计数器 + `w_select_q` 寄存器组成的「W 突发队列」跟随其 AW；用 `(w_open==0) || (w_select==新select)` 这个放行条件**杜绝跨端口 W 交错**。
+- **B/R 响应**用两棵独立的 `rr_arb_tree`（`LockIn=1`）把 N 路响应轮询合并成 1 路回收。
+- `axi_demux_simple`（Level 2）是**纯组合内核**；`axi_demux`（Level 3）= 内核 + 五个可选 `spill_register`（默认 AW/AR 开），用于切断组合路径换时序。需要零延迟时把五个 `SpillXX` 全置 0 即可退化回 simple 行为。
+- 为满足 AXI **同 ID 同方向保序**，demux 用 `axi_demux_id_counters` 跟踪每个（低位）ID 在途事务去的端口；同 ID 去往不同端口时**停顿**。`AxiLookBits` 调面积与误冲突，`UniqueIds` 在保证唯一时可省掉整组计数器（面积 \(O(2^I) \to O(I)\)）。
+- demux **支持 ATOP**：原子读改写在 AW 上发起、却产生 R 拍，故 AW 通道会把原子 ID **inject** 进 AR 计数器，避免 R 通道下溢。
+- 注意文档 `FallThrough` 参数与当前源码不一致（文档有、源码无），以源码为准。
+
+## 7. 下一步学习建议
+
+- **u5-l2** 会下钻到 `axi_demux_id_counters` 的内部实现（push/pop/inject 的加减计数、`MaxTrans`/`UniqueIds` 的取舍），是本讲 4.4 的自然延伸。
+- **u5-l3** 讲 `axi_mux`（多路汇聚），它是 demux 的「对偶」——把 N 个 slave 端口汇成 1 个 master 端口，并把 slave 端口号编码进 ID 高位用于响应路由。读完 mux，你就能拼出完整 xbar。
+- **u6-l1** 把 demux + mux 组合成 `axi_xbar` 全连接交叉开关，届时你会再次看到本讲的 `axi_xbar_unmuxed` 调用链。
+- 想加深对 W 保序的理解，可回头读 [doc/axi_xbar.md](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/doc/axi_xbar.md) 的 *Ordering and Stalls*（demux 文档明确指向它），那是本讲 4.4 的上游理论依据。

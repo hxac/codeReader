@@ -1,0 +1,502 @@
+# axi_burst_splitter 与粒度切分
+
+## 1. 本讲目标
+
+学完本讲后，你应该能够：
+
+- 说清「为什么要拆突发」：哪些下游（AXI-Lite 桥、窄外设、单拍存储接口）吃不下多拍突发，必须把一根长突发拆成若干段短突发喂下去。
+- 解释「粒度（granularity）」的含义：`len_limit_i` 是一个 AXI `len` 值，决定每段子突发的最大拍数；`len_limit_i = 0` 就是「拆成全单拍」。
+- 看懂 `axi_burst_splitter` 其实只是 `axi_burst_splitter_gran` 的一层「固定单拍」薄外壳，真正的拆分引擎在 `_gran` 里。
+- 追踪一笔长突发在五个通道上分别发生了什么：AW/AR 被拆成多段、W 的 `last` 被重新插入、B 的多个响应被合并成一个、R 的 `last` 被抑制到只剩最后一次。
+- 区分「固定粒度（单拍）」与「运行期可配置粒度」两种用法，并能根据下游能力选择。
+
+## 2. 前置知识
+
+本讲默认你已经掌握前置讲义 u4-l1（`axi_join`/`axi_cut`/`axi_multicut` 组合原语）、u1-l3（AXI4 五通道与突发），以及 u3 建立的验证组件心智模型。下面几条是本讲反复用到的关键概念，先用一句话复习：
+
+- **五通道**：写事务走 AW（写地址）→ W（写数据）→ B（写响应）；读事务走 AR（读地址）→ R（读数据）。`len` 字段 = 拍数 − 1，所以 `len=7` 表示一次 8 拍突发。
+- **`last` 位**：W 通道和 R 通道每一拍都带一个 `last`，只在一次突发的**最后一拍**拉高，用来标记边界。
+- **突发类型**：`BURST_FIXED`（地址不变）、`BURST_INCR`（地址每拍递增 \(2^{\text{size}}\) 字节）、`BURST_WRAP`（回卷）。本讲会反复用到 [`axi_pkg::BURST_INCR`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_pkg.sv#L81) 与 [`axi_pkg::BURST_WRAP`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_pkg.sv#L87)。
+- **valid/ready 握手与保序**：同 ID 同方向的事务必须按序返回响应——这一点决定了 splitter 必须把多个 B 合并、把 R 的 `last` 重建。
+- **接口外壳 + 结构体内核范式**：模块对外用 `axi_req_t`/`axi_resp_t` 结构体端口（u2-l4），内部用 `AXI_TYPEDEF_*` 宏声明通道类型。
+- **「组合优于配置」**：本库倾向把职责单一的小模块背靠背串联，而不是堆参数。splitter 就是一个典型——它内部继续复用 `axi_demux_simple`、`axi_err_slv`、`axi_multicut` 这些已有积木。
+
+一句话定位：`axi_burst_splitter_gran` 是一台「地址方向拆、响应方向合」的非对称改写器，它**不改数据**，只改 AW/AR 的 `len`/`addr`、W 的 `last`、B 的合并、R 的 `last`。
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件：
+
+| 文件 | 作用 | 本讲角色 |
+|------|------|----------|
+| `src/axi_burst_splitter.sv` | 单拍粒度的薄外壳，把 `len_limit_i` 钉死为 `8'h00` 后例化 `_gran` | 入口、最简用法 |
+| `src/axi_burst_splitter_gran.sv` | 真正的拆分引擎，含三个模块（顶层 + `ax_chan` + `counters`） | 本讲核心，逐段精读 |
+| `src/axi_pkg.sv` | 提供 `len_t`、`BURST_*`、`aligned_addr`、`modifiable` 等 | 被复用的类型与算术 |
+
+`axi_burst_splitter_gran` 在 `Bender.yml` 中位于编译层级 **Level 2**，而 `axi_burst_splitter` 位于 **Level 3**——后者更高，正是因为它例化了前者（[Bender.yml:L42](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/Bender.yml#L42)、[Bender.yml:L78](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/Bender.yml#L78)）。注意 `_gran` 内部还例化了 Level 3 的 `axi_err_slv`——这并不违规，因为 SystemVerilog 的模块例化在**逻辑综合（elaboration）阶段**才解析，不像 `package` import 那样要求被引用者先编译，所以模块之间的跨层级引用是允许的。
+
+外部依赖（来自 `common_cells 1.39.0`，不必深读）：`id_queue`（按 AXI ID 关联数据的队列）、`delta_counter`（可按任意步长增减的计数器）、`lzc`（leading-zero 计算，用于找空闲计数器槽）、`spill_register`、`axi_multicut`/`axi_demux_simple`/`axi_err_slv`（本库自有，u4-l1、u5-l1、u6-l2 已讲）。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 拆突发的动机与「粒度」概念
+
+#### 4.1.1 概念说明
+
+很多下游「吃不下」长突发：
+
+- **AXI-Lite 从端**根本没有 `len`/`size`/`burst` 字段，每次访问只能是单拍（u12、u13 的桥会用到 splitter）。
+- **窄 FIFO 或外部存储控制器**只允许有限的在途数据，长突发会把它撑爆。
+- **某些协议桥**只能服务固定长度的短突发。
+
+解决思路很直接：在上游（能发长突发的 master）和下游（只能收短突发的 slave）之间，插一个「拆分器」。它对外（slave 侧）正常接收长突发，对内（master 侧）把它们改写成若干段合法的短突发发出去；下游的响应再被「合并」回原本的一次响应。整个过程**对数据本身透明**，只动控制信号。
+
+「粒度」就是每段子突发的最大拍数。本模块用一个 AXI `len` 值 `len_limit_i` 来表达：
+
+- `len_limit_i = 0` → 每段最多 1 拍 → 等价于「全拆成单拍」。
+- `len_limit_i = 3` → 每段最多 4 拍。
+- `len_limit_i >= 上游最大 len` → 实际上不拆，退化成透传。
+
+注意 `len_limit_i` 是 **AXI 的 `len`（拍数−1）**，不是拍数本身。模块内部把「最大拍数」记作：
+
+\[
+\text{max\_beats} = \text{len\_limit} + 1
+\]
+
+这一点贯穿全文，记住它后面所有公式都好理解。
+
+#### 4.1.2 核心流程
+
+一根长突发（设拍数 \(N\)，即 `len = N-1`）被拆成若干段，段数为：
+
+\[
+\text{段数} = \left\lceil \frac{N}{\text{max\_beats}} \right\rceil
+\]
+
+每一段（除可能的尾段外）都是 `len = len_limit` 的子突发；最后一段是剩下的余数。地址方向（AW/AR）每发完一段，对 `BURST_INCR` 突发把地址向前推进：
+
+\[
+\text{addr} \leftarrow \text{aligned\_addr}(\text{addr}, \text{size}) + 2^{\text{size}} \times \text{max\_beats}
+\]
+
+对 `BURST_FIXED` 则地址不变（每一段都访问同一地址，天然正确）。`BURST_WRAP` **不支持**拆分。
+
+#### 4.1.3 源码精读
+
+先看最外层那层薄外壳 [`axi_burst_splitter`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter.sv#L27-L93)。它几乎不写任何逻辑，只做两件事：用 `AXI_TYPEDEF_*` 宏声明通道类型，然后例化 `_gran` 并把 `len_limit_i` 钉死为 `8'h00`：
+
+```systemverilog
+axi_burst_splitter_gran #(
+  .MaxReadTxns ( MaxReadTxns ), .MaxWriteTxns ( MaxWriteTxns ),
+  ...
+) i_axi_burst_splitter_gran (
+  .clk_i, .rst_ni,
+  .len_limit_i ( 8'h00 ),   // 单拍粒度：每段最多 1 拍
+  .slv_req_i, .slv_resp_o, .mst_req_o, .mst_resp_i
+);
+```
+
+[src/axi_burst_splitter.sv:66-91](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter.sv#L66-L91) —— 这就是「单拍 splitter = gran 的 `len_limit=0` 特例」的全部秘密。
+
+模块头部的注释也写明了它的两条限制（[src/axi_burst_splitter.sv:20-26](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter.sv#L20-L26)）：不支持 `BURST_WRAP`、不支持 ATOPs，遇到时返回 slave error；若上游可能发 ATOP，应在前面加 `axi_atop_filter`。
+
+再看 `max_beats` 是怎么在引擎里算出来的（位于内部 `ax_chan` 模块）：
+
+```systemverilog
+// limit = 0 means one beat each AX
+assign max_beats = {1'b0, len_limit_i} + 9'h001;
+```
+
+[src/axi_burst_splitter_gran.sv:490-492](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L490-L492) —— 正是 \(\text{max\_beats} = \text{len\_limit} + 1\)。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+1. **目标**：确认「单拍 splitter 就是 `len_limit=0` 的 gran」，并会算段数。
+2. **步骤**：
+   - 打开 [src/axi_burst_splitter.sv:66-91](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter.sv#L66-L91)，确认 `len_limit_i ( 8'h00 )`。
+   - 在 [src/axi_burst_splitter_gran.sv:490-492](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L490-L492) 确认 `max_beats = len_limit + 1`。
+3. **手算**：一笔 8 拍 INCR 读（`len=7`）：
+   - `len_limit=0` → `max_beats=1` → 段数 = \(\lceil 8/1 \rceil = 8\)，每段 `len=0`。
+   - `len_limit=3` → `max_beats=4` → 段数 = \(\lceil 8/4 \rceil = 2\)，每段 `len=3`。
+4. **预期结果**：你能不看后续章节，口算出两种粒度下的段数与每段 `len`。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果 `len_limit_i = 7`，一笔 `len=7` 的突发会被拆成几段？  
+**答案**：`max_beats = 8`，\(N=8\)，段数 = \(\lceil 8/8 \rceil = 1\)，即**不拆**（`len <= len_limit` 直接透传）。
+
+**练习 2**：为什么 `len_limit_i` 用「AXI len」而不是「拍数」来表达？  
+**答案**：因为 AXI 协议里 `len = 拍数 − 1`，模块把拆分边界直接对齐到协议字段，比较 `ax_i.len <= len_limit_i` 就能判断「是否需要拆」，省去到处 ±1 的转换。
+
+---
+
+### 4.2 总体数据流：支持/不支持分流 + 五通道编排
+
+#### 4.2.1 概念说明
+
+`axi_burst_splitter_gran` 不是一坨 if-else，而是按本库一贯的「组合优于配置」风格，**先分流、再按通道分别处理**。它把进入的事务先分成两类：
+
+- **支持类（act）**：可以被正确拆分/透传的事务，进入主拆分通路。
+- **不支持类（unsupported）**：协议上不允许拆、或本模块不实现的事务（WRAP、ATOP、某些非 modifiable 短突发），转给一个 `axi_err_slv` 直接回 `RESP_SLVERR`。
+
+分流用的是一个 1:2 的 `axi_demux_simple`（u5-l1 讲过：译码在外、路由在内），选择信号由一个纯组合函数 `txn_supported` 算出。整条流水线由五段组成，对应 AXI 五个通道，每段职责不同：
+
+| 通道 | splitter 要做的事 | 本质 |
+|------|-------------------|------|
+| AW / AR | 把一根长突发拆成多段短突发，推进地址 | **拆** |
+| W | 在每段子突发的边界**插入** `last` | 改写 |
+| B | 把多段写响应**合并**成一个 | **合** |
+| R | 把每段子突发的 `last` **抑制**，只在最后一段保留 | 改写 |
+
+注意这张表的非对称性：地址方向是「一拆多」，响应方向是「多合一」。W 和 R 是镜像问题——W 要插入本不存在的 `last`，R 要抹掉多余的 `last`。
+
+#### 4.2.2 核心流程
+
+顶层 [`axi_burst_splitter_gran`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L22-L59) 的数据流（用伪代码画）：
+
+```
+slv_req_i --> axi_multicut(CutPath?) --> slv_req
+                                            |
+                       +--------------------+--------------------+
+                       |   axi_demux_simple (1:2, select=unsupported?)
+                       v                                         v
+                  act_req (支持)                        unsupported_req (不支持)
+                       |                                         |
+            +----------+----------+                          axi_err_slv
+            |                     |                       (回 RESP_SLVERR)
+        AW/AR 拆分机          W 插 last / B 合一 / R 改 last
+        (ax_chan)            (顶层 always_comb 状态机)
+            |                     |
+            +----------+----------+
+                       v
+                  mst_req_o / mst_resp_i
+```
+
+入口处那个 [`axi_multicut`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L65-L81) 是可选的切路径开关（`CutPath=1` 时插一级寄存器换时序，u4-l1），`CutPath=0` 时退化为直连。
+
+#### 4.2.3 源码精读
+
+**分流器**——一个最朴素的 1:2 demux，两个输出端口分别是「支持」和「不支持」：
+
+```systemverilog
+axi_demux_simple #(
+  .NoMstPorts ( 2 ), .MaxTrans ( MaxTxns ), .AxiLookBits ( IdWidth ), ...
+) i_demux_supported_vs_unsupported (
+  .slv_req_i       ( slv_req ),
+  .slv_aw_select_i ( sel_aw_unsupported ),
+  .slv_ar_select_i ( sel_ar_unsupported ),
+  .mst_reqs_o      ( {unsupported_req,  act_req}   ),  // [1]=不支持, [0]=支持
+  .mst_resps_i     ( {unsupported_resp, act_resp}  )
+);
+```
+
+[src/axi_burst_splitter_gran.sv:85-102](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L85-L102) —— 注意 `mst_reqs_o` 用拼接 `{unsupported_req, act_req}`，下标 0 是支持通路，下标 1 是不支持通路，与 `select=1` 路由到下标 1 的约定一致（u5-l1）。
+
+**判定函数** `txn_supported` 决定一笔事务走哪条路：
+
+```systemverilog
+function bit txn_supported(atop_t atop, burst_t burst, cache_t cache,
+                           len_t len, len_t len_limit);
+  if (len >= len_limit)   return 1'b1;          // 长突发：交给拆分机处理
+  // 短突发（不会被拆）才细查协议规则：
+  if (burst == BURST_WRAP)              return 1'b0;   // 回卷不支持
+  if (atop != '0 & len > 0)             return 1'b0;   // ATOP 不支持
+  if (!modifiable(cache))                                // 非 modifiable（见 AXI A3.4.1）
+    return (burst == BURST_INCR) & (len > 16);           // 只有长 INCR 才允许拆
+  return 1'b1;
+endfunction
+```
+
+[src/axi_burst_splitter_gran.sv:105-130](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L105-L130)。这里调用的 [`axi_pkg::modifiable`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_pkg.sv#L224-L226) 检查的是 [`CACHE_MODIFIABLE`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_pkg.sv#L107) 位。一个细节：`len >= len_limit` 这个短路分支意味着——**在单拍模式 `len_limit=0` 下，`len>=0` 恒真，函数恒返回 1**，所有事务都进拆分通路、不走 err_slv；err_slv 分支主要在「粒度模式 `len_limit>0` 且来了短的不支持突发」时才真正起作用。
+
+选择信号与错误从端的接线：
+
+```systemverilog
+assign sel_aw_unsupported = DisableChecks ? 1'b0
+                           : ~txn_supported(slv_req.aw.atop, ..., len_limit_i);
+
+axi_err_slv #( .Resp(RESP_SLVERR), .ATOPs(1'b0), .MaxTrans(1) ) i_err_slv (
+  .slv_req_i(unsupported_req), .slv_resp_o(unsupported_resp) );
+```
+
+[src/axi_burst_splitter_gran.sv:133-154](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L133-L154) —— 不支持事务被 `axi_err_slv`（u6-l2、u14-l3）吸收并回 `RESP_SLVERR`。`MaxTrans(1)` 注释写明「拆突发本身面向低性能总线」，故错误从端也按低性能配置。
+
+#### 4.2.4 代码实践（源码阅读型）
+
+1. **目标**：搞清一笔 WRAP 短突发在粒度模式下的去向。
+2. **步骤**：假设 `len_limit_i = 8'd3`，上游发来一笔 `burst=BURST_WRAP`、`len=3`（4 拍回卷）、`cache` 可 modifiable 的读。
+3. **追踪**：在 [txn_supported](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L105-L130) 里，`len(3) >= len_limit(3)` 为真 → 直接返回 1（支持）→ 走 act 通路 → 进 AR 拆分机后 `len(3) <= len_limit(3)` → **不拆，透传**。
+4. **改一改**：把 `len_limit_i` 改成 `8'd7`，输入改成 `len=3` 的 WRAP：此时 `len(3) >= 7` 为假 → 进入细查 → `burst==BURST_WRAP` → 返回 0 → 走 err_slv → 上游收到 `RESP_SLVERR`。
+5. **预期结果**：你能说清「同样的 WRAP 突发，在不同的 `len_limit_i` 下可能透传、也可能被拒」，并指出判定发生在哪一行。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`DisableChecks=1` 时模块行为如何变化？  
+**答案**：[src/axi_burst_splitter_gran.sv:133-138](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L133-L138) 中 `sel_*_unsupported` 被强制为 `1'b0`，所有事务都进支持通路（当作 bypass），不再用 err_slv 报错——相当于「我相信上游不会发不支持的事务」。
+
+**练习 2**：为什么 err_slv 的 `ATOPs` 参数设成 `1'b0`？  
+**答案**：因为 splitter 本身不支持 ATOP（注释见 [L19-21](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter.sv#L19-L21)），错误从端只需回普通 `RESP_SLVERR`，不需要处理原子读响应，故关闭 ATOP 以省逻辑。
+
+---
+
+### 4.3 Ax 通道切分机：Idle/Busy 状态机与地址步进
+
+#### 4.3.1 概念说明
+
+「拆」的核心发生在内部模块 [`axi_burst_splitter_gran_ax_chan`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L427-L455)（以下简称 `ax_chan`），它对 AW 和 AR 各例化一份（[L161-184](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L161-L184) 与 [L292-315](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L292-L315)）。
+
+它要解决两个交织的问题：
+
+1. **怎么把一根长 AX 拆成多段发出去**——用一个两态状态机 `Idle`/`Busy`：`Idle` 收新事务，需要拆就转 `Busy` 逐段发，发完回 `Idle`。
+2. **响应可能乱序回来，怎么把每段响应对应回正确的事务**——用一组计数器（每段事务占一个槽，存「剩余拍数」），并通过一个 `id_queue` 把 AXI ID 映射到计数器槽，从而允许响应相对请求乱序。
+
+模块自己的注释一句话点题：「Store burst lengths in counters, which are associated to AXI IDs through ID queues (to allow reordering of responses w.r.t. requests).」（[src/axi_burst_splitter_gran.sv:422-426](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L422-L426)）
+
+一个重要的吞吐特性：`ax_chan` 的 `Idle`/`Busy` **一次只处理一根入站 AX**——在 `Busy` 期间 `ax_ready_o` 为 0，不接受新的 AW/AR。但响应方向的在途并发由计数器阵列（容量 `MaxTxns`）支撑，所以「拆得慢」不等于「在途少」。
+
+#### 4.3.2 核心流程
+
+`ax_chan` 的 `Idle`/`Busy` 状态机（[L494-572](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L494-L572)）：
+
+```
+Idle:
+  if (ax_valid_i && 有空闲计数器):
+    if (len <= len_limit):        # 不用拆
+        直通发出原 AX; 下游 ready 时分配计数器、应答上游
+    else:                         # 要拆
+        把 AX 存进 ax_q; 分配计数器; 应答上游
+        发第一段: ax_o.len = len_limit
+        num_beats = len + 1       # 总拍数
+        -> Busy
+Busy:
+  发下一段: 若 num_beats <= max_beats 则是尾段(len=num_beats-1)，否则 len=len_limit
+  下游 ready 时:
+    num_beats -= max_beats        # INCR 还要把地址推进 max_beats 拍
+    若是尾段 -> Idle
+```
+
+地址推进（仅 `BURST_INCR`）的关键两行，第一段在 Idle 分支：
+
+```systemverilog
+ax_d.addr = axi_pkg::aligned_addr(axi_pkg::largest_addr_t'(ax_d.addr), ax_d.size);
+ax_d.addr += (1 << ax_d.size) * max_beats;
+```
+
+[src/axi_burst_splitter_gran.sv:534-539](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L534-L539)（Idle 段）与 [L563-566](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L563-L566)（Busy 段）。先调用 [`axi_pkg::aligned_addr`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_pkg.sv#L126-L128)（清掉低 `size` 位）再做加法，保证地址按 `size` 对齐推进。`BURST_FIXED` 没有 `if (burst == BURST_INCR)` 保护内的推进，所以地址保持不变——这正好是 FIXED 突发该有的行为，每一段都访问同一地址。
+
+**计数器 + ID 队列**（[`axi_burst_splitter_gran_counters`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L584-L608)）协作模型：
+
+- **分配（alloc）**：一笔 AX 被接收时，[`lzc`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L668-L675) 在 `cnt_free` 位掩码里找到第一个空闲计数器槽 `cnt_free_idx`，把 `len+1`（总拍数）装进该 [`delta_counter`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L649-L665)，同时把 `(id, cnt_free_idx)` 压进 [`id_queue`](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L679-L704)。
+- **查找（lookup）**：每收到一个 B/R 响应，用响应里的 `id` 去 `id_queue` 弹出对应的计数器槽 `cnt_r_idx`，读出剩余拍数 `cnt_len_o`，并按 `cnt_delta_i = max_beats` 递减（[L705-720](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L705-L720)）。
+- **`FullBW`**：传给 `id_queue` 的带宽模式参数（[L28](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L28)），影响 ID 队列能否同一周期同时进出一个表项。
+
+#### 4.3.3 源码精读
+
+`Idle` 分支里「要拆」的处理（[src/axi_burst_splitter_gran.sv:518-541](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L518-L541)）：
+
+```systemverilog
+end else begin  // Splitting required.
+  ax_d          = ax_i;            // 缓存整笔 AX
+  cnt_alloc_req = 1'b1;            // 申请一个计数器
+  ax_ready_o    = 1'b1;            // 应答上游（整笔 AX 已收下）
+  state_d       = Busy;
+  num_beats_d   = ({1'b0, ax_i.len} + 9'h001);  // 总拍数 N = len+1
+  ax_o          = ax_d;
+  ax_o.len      = len_limit_i;     // 第一段固定为最大粒度
+  ax_valid_o    = 1'b1;
+  if (ax_ready_i) begin            // 第一段也被下游收走
+    num_beats_d = (len+1) - max_beats;
+    if (ax_d.burst == BURST_INCR) begin
+      ax_d.addr = aligned_addr(...);  ax_d.addr += (1<<size)*max_beats;
+    end
+  end
+end
+```
+
+`Busy` 分支（[src/axi_burst_splitter_gran.sv:544-569](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L544-L569)）按 `num_beats_q <= max_beats` 判断是否尾段，是则 `len = num_beats_q - 1`、状态回 `Idle`，否则 `len = len_limit_i` 并继续推进地址。
+
+整笔 AX 的缓存寄存器 `ax_q`、状态 `state_q`、剩余拍数 `num_beats_q` 用 `FFARN`（异步复位）打一拍（[L575-577](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L575-L577)）。
+
+#### 4.3.4 代码实践（源码追踪型 —— 对应本讲指定的实践任务）
+
+1. **目标**：把一笔 8 拍 INCR 读拆成 8 个单拍事务，验证下游看到的 `len` 全为 0。
+2. **设定**：`len_limit_i = 8'h00`（即用 `axi_burst_splitter`），上游 AR：`burst=BURST_INCR`、`size=2`（每拍 4 字节）、`len=7`、`addr=0x100`、`id=5`。
+3. **追踪 `ax_chan` 的 AR 实例**（[L292-315](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L292-L315)）：
+   - `max_beats = 0 + 1 = 1`。
+   - Idle：`len(7) > len_limit(0)` → 进「要拆」分支，`num_beats=8`，发第 1 段 `len=0`、`addr=0x100`，转 Busy。
+   - Busy 第 2~8 段：每段 `num_beats_q > 1` → `len=0`；每被下游收走一段，INCR 地址推进 \(2^2 \times 1 = 4\) 字节：`0x104, 0x108, 0x10C, 0x110, 0x114, 0x118, 0x11C`。
+   - 第 8 段时 `num_beats_q=1 <= 1` → 尾段，`len=0`，回 Idle。
+4. **下游（master 侧）看到的现象**：连续 8 个 AR，每个 `len=0`、`id=5`，地址依次 `0x100,0x104,…,0x11C`，`burst` 仍为 `BURST_INCR`。
+5. **预期结果**：8 段全部 `len=0`，地址单调递增、步长 4 字节，数据顺序天然不变（因为每段都是单拍、按地址顺序发出）。
+6. **待本地验证**：上述追踪完全由源码逻辑推出；若要眼见为实，可在仿真里挂一个 monitor 打印每个出站 AR 的 `len`/`addr`（见第 5 节综合实践）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：同样的 8 拍 INCR 读，改用 `len_limit_i = 8'd1`（每段最多 2 拍），会发出几段？每段 `len` 是多少？  
+**答案**：`max_beats=2`，段数 = \(\lceil 8/2 \rceil = 4\)，每段 `len=1`（2 拍）；地址步长变为 \(2^2 \times 2 = 8\) 字节：`0x100,0x108,0x110,0x118`。
+
+**练习 2**：为什么 `BURST_FIXED` 长突发可以被安全拆分，而 `BURST_WRAP` 不行？  
+**答案**：FIXED 每拍地址相同，拆成多段后每段仍访问同一地址，行为不变；WRAP 的地址会回卷，拆分后无法用简单的「对齐 + 线性推进」重建正确的回卷地址序列，故被 `txn_supported` 直接拒绝（[L116](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L116)）。
+
+**练习 3**：`ax_chan` 在 `Busy` 期间不接受新的 AX，这是否意味着整个 splitter 一次只能有一个在途事务？  
+**答案**：不是。`Busy` 只限制了**地址方向的发射**一次拆一根突发；但每根突发一旦发完所有段，就释放 `ax_chan` 回 `Idle`，而它们的响应由独立的计数器阵列（`MaxTxns` 个槽）跟踪，所以响应方向可以同时有最多 `MaxReadTxns`/`MaxWriteTxns` 个在途事务。
+
+---
+
+### 4.4 响应重组：W 插 last、B 合一、R 改 last
+
+#### 4.4.1 概念说明
+
+地址拆完后，三个数据/响应通道必须「配套改写」，否则上下游的 `last` 语义会对不上：
+
+- **W（写数据）**：上游按原始长突发发 W，只在**真正的最后一拍**拉 `last`；但下游每段子突发都需要自己的 `last`。所以 splitter 要**在每段边界插入 `last`**。
+- **B（写响应）**：下游每段子突发各回一个 B；但上游只期望**一个** B。所以 splitter 要**把 N 个 B 合并成 1 个**，并且只要任一段出错，合并后的 B 就报错。
+- **R（读数据）**：下游每段都回 R 且在段尾拉 `last`；但上游只期望**最后一次** `last`。所以 splitter 要**抑制中间段的 `last`**，只在最后一段保留。
+
+W 与 R 是一对镜像问题：W 凭空「造」`last`，R 把多余的 `last` 「抹」掉。B 则是「多进一出」的合并。三者都用顶层 `always_comb` 写的小状态机实现，且都借助 4.3 节那套计数器（通过 `cnt_id_i = 响应.id` 查表得到「剩余拍数」）来判断「现在是不是最后一段」。
+
+#### 4.4.2 核心流程
+
+三个通道的判定都依赖同一个量：用响应的 ID 查计数器得到 `cnt_len_o`（剩余拍数 − 1 的语义），当 `cnt_len_o < len_limit + 1` 时表示「这是最后一段」。于是：
+
+```
+W 通道: downstream_last = (子突发内计数到 0) OR upstream_last
+B 通道: 收到 B 时
+        if 是最后一段: 转发给上游(若有累积错误则改写为 SLVERR); 释放计数器
+        else:          应答下游并丢弃(不转发); 递减计数器
+R 通道: 收到 R 时
+        downstream.last=1 且 是最后一段 -> upstream.last = 1
+        否则                               -> upstream.last = 0   # 中间段或非尾拍
+```
+
+#### 4.4.3 源码精读
+
+**W 通道**——一段组合 `always_comb` 加一个 sub-burst 计数器 `w_len_q`，在 `len_limit > 0` 时按粒度周期性拉 `last`（[src/axi_burst_splitter_gran.sv:195-226](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L195-L226)）：
+
+```systemverilog
+if (len_limit_i != 8'h00) begin
+  // 子突发计数到 0 时拉 last，或上游原始 last 也拉（最后一段）
+  mst_req_o.w.last = (w_len_vld_q & (w_len_q == 8'h00)) | act_req.w.last;
+  ...
+end else begin
+  mst_req_o.w.last = 1'b1;   // 单拍模式：每个 W 都是 last
+end
+```
+
+注意 `len_limit=0` 的 else 分支直接把每个 W 的 `last` 钉死为 1——与 4.1 节「单拍 = 每段一拍」完全自洽。
+
+**B 通道**——`BReady`/`BWait` 两态机，靠 `w_cnt_len`（写计数器查表结果）区分「中间段 / 最后一段」（[src/axi_burst_splitter_gran.sv:237-284](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L237-L284)）：
+
+```systemverilog
+BReady:
+  if (mst_resp_i.b_valid) begin
+    w_cnt_req = 1;                 // 用 b.id 查写计数器
+    if (w_cnt_gnt) begin
+      if (w_cnt_len < len_limit+1) begin   // 最后一段：转发给上游
+        act_resp.b = mst_resp_i.b;
+        if (w_cnt_err) act_resp.b.resp = RESP_SLVERR;  // 累积错误改写
+        act_resp.b_valid = 1;
+        w_cnt_dec = 1;
+        ...
+      end else begin                // 中间段：应答下游、丢弃、不转发
+        mst_req_o.b_ready = 1;  w_cnt_dec = 1;
+      end
+    end
+  end
+```
+
+其中 `w_cnt_err` 来自 [L179](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L179) 的 `cnt_set_err_i = mst_resp_i.b.resp[1]`——任意一段 B 返回 SLVERR/DECERR（resp 高位为 1），就在计数器槽里置错误位，最后合并出的那个 B 改写成 `RESP_SLVERR`。这是「多 B 合一且保错误语义」的关键。
+
+**R 通道**——`RFeedthrough`/`RWait` 两态机，重写 `last`（[src/axi_burst_splitter_gran.sv:323-382](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L323-L382)）：
+
+```systemverilog
+if (mst_resp_i.r.last) begin        // 下游某段的最后一拍
+  r_cnt_req = 1;
+  if (r_cnt_gnt) begin
+    r_last_d = (r_cnt_len < len_limit+1);   // 是不是整笔突发的最后一段？
+    act_resp.r.last = r_last_d;             // 只在最后一段才向上游拉 last
+    r_cnt_dec = 1;
+    ...转发...
+  end
+end else begin                       // 段内中间拍：照转，last=0
+  r_last_d = 0;  act_resp.r.last = 0; ...转发...
+end
+```
+
+于是上游 master 看到的是一根连续的、只在真正末拍拉 `last` 的完整读突发——完全感觉不到下游被拆过。
+
+#### 4.4.4 代码实践（源码追踪型）
+
+承接 4.3.4 的 8 拍 INCR 读（`len_limit=0`）：
+
+1. **目标**：验证 R 通道的 `last` 被正确重建。
+2. **追踪**：下游每段都是单拍读，故每个 R 都带 `last=1`。对前 7 个 R：进 `else` 分支（非尾拍）→ `act_resp.r.last = 0` 转发；对第 8 个 R：`mst_resp_i.r.last=1` 且此时 `r_cnt_len < 0+1`（最后一段）→ `act_resp.r.last = 1`。
+3. **上游看到的现象**：8 个连续 R 拍，前 7 拍 `last=0`，第 8 拍 `last=1`——一根完整的 8 拍读突发。
+4. **对照 W（如果是写）**：单拍模式下 [L224](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L224) 把每个出站 W 的 `last` 都设为 1，所以下游每段（单拍）都收到 `last=1`；上游原本只在第 8 个 W 拉 `last`，被 splitter 「放大」成 8 个。
+5. **预期结果**：读通路 R 的 `last`「8 个输入 last → 1 个输出 last」；写通路 W 的 `last`「1 个输入 last → 8 个输出 last」。两者精确互补。
+6. **待本地验证**：可在仿真里同时监控 master 侧和 slave 侧的 W/R `last` 序列对照。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：B 通道为什么需要一个 `BWait` 状态？  
+**答案**：当最后一段的 B 已经被 splitter 取下、准备转发给上游（`act_resp.b_valid=1`），但上游这一拍还没 ready（`act_req.b_ready=0`）时，必须把响应和可能的错误位 `b_err_q` 暂存，等上游 ready 再完成握手，否则会丢响应或违反 valid 不可撤铁律（[L271-281](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L271-L281)）。
+
+**练习 2**：如果 8 段写里有 1 段下游回了 `RESP_DECERR`，上游最终收到的 B 是什么？  
+**答案**：该段 B 的 `resp[1]=1` 会在计数器槽里置 `w_cnt_err`；合并后上游收到的那个 B 被改写成 `RESP_SLVERR`（[L253-254](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_burst_splitter_gran.sv#L253-L254)）。注意是 SLVERR 而非原样透传 DECERR。
+
+---
+
+## 5. 综合实践
+
+**任务**：用本库的验证组件（u3 讲过）搭一个最小自检拓扑，实测「8 拍 INCR 读被拆成 8 个单拍、数据顺序不变」，并观察下游每个出站 AR 的 `len`。
+
+> 说明：本仓库**没有**现成的 `tb_axi_burst_splitter.sv`（可在 `test/` 下用 `tb_*burst*` 搜索确认），所以这是一个「按 u3 范式自建最小 TB」的实践。下面的骨架是**示例代码**（不是仓库已有文件），且未在本环境实际运行，结果标注为「待本地验证」。
+
+**拓扑**：
+
+```
+axi_rand_master  -->  axi_burst_splitter  -->  axi_sim_mem
+      |                                          ^
+      +---------------- axi_scoreboard ----------+（旁路监听 master 侧）
+```
+
+**操作步骤**：
+
+1. 在 `test/` 下新建一个 TB（例如 `tb_axi_burst_splitter.sv`），套用 u3-l3 的「双接口三明治」骨架：时钟复位发生器 + `CyclTime/ApplTime/TestTime` 三参数 + `AXI_BUS_DV` 驱动侧 ↔ `AXI_BUS` DUT 侧，用 `AXI_ASSIGN` 互连。
+2. 例化 DUT（用结构体端口版）：
+   ```systemverilog
+   axi_burst_splitter #(
+     .MaxReadTxns(8), .MaxWriteTxns(8),
+     .AddrWidth(32), .DataWidth(32), .IdWidth(6), .UserWidth(0),
+     .axi_req_t(req_t), .axi_resp_t(resp_t)
+   ) i_dut (.clk_i, .rst_ni, .slv_req_i(...), .slv_resp_o(...),
+            .mst_req_o(...), .mst_resp_i(...));
+   ```
+   （示例代码）`len_limit_i` 已被外壳钉死为 `8'h00`，无需额外接线。
+3. 激励：用 `axi_rand_master` 发若干随机读写，其中插一笔定向的 8 拍 INCR 读（`len=7`、`size=2`、`burst=BURST_INCR`）。
+4. 自检：`axi_sim_mem` 提供忠实存储，`axi_scoreboard` 旁路比对读写数据。
+5. 观察：在 master 侧（DUT 的 `mst_req_o.ar`）挂 monitor，打印每个出站 AR 的 `len` 与 `addr`。
+
+**需要观察的现象**：
+
+- 上游发的那笔 `len=7` 的 AR，在下游被展开成 8 个 `len=0` 的 AR，地址 `0x100,0x104,…,0x11C`。
+- 上游最终收到的 R 是 8 拍连续数据，`last` 只在第 8 拍拉高，数据内容与 `axi_sim_mem` 一致。
+- scoreboard 全程不报不匹配；仿真日志出现 `Errors: 0,`（u1-l4 讲过的判据）。
+
+**预期结果（待本地验证）**：拆分后数据顺序与内容完全正确，`Errors: 0`。若你把 DUT 换成 `axi_burst_splitter_gran` 并把 `len_limit_i` 设为 `8'd3`，应观察到 8 拍读被拆成 2 个 `len=3` 的 AR——这是验证「粒度可配置」的延伸实验。
+
+## 6. 本讲小结
+
+- `axi_burst_splitter` 是 `axi_burst_splitter_gran` 的单拍薄外壳，`len_limit_i = 8'h00` 即「全拆单拍」；真正的引擎是 `_gran`（Level 2）。
+- 拆分粒度由 AXI `len` 值 `len_limit_i` 表达，最大每段拍数为 \(\text{len\_limit}+1\)；段数为 \(\lceil N/(\text{len\_limit}+1)\rceil\)。
+- 顶层先用 1:2 `axi_demux_simple` 把「支持」与「不支持」分流，不支持者（WRAP、ATOP、某些非 modifiable 短突发）交给 `axi_err_slv` 回 `RESP_SLVERR`。
+- AW/AR 的拆分由 `ax_chan` 的 `Idle`/`Busy` 状态机完成：每段固定发 `len_limit` 拍（尾段发余数），仅 `BURST_INCR` 推进地址，`BURST_FIXED` 地址不变；并发在途由 `delta_counter` 阵列 + `id_queue` 跟踪。
+- 三个响应/数据通道配套改写：W 在段边界**插入** `last`，B 把 N 个响应**合并**为 1 个（并累积错误改写成 SLVERR），R 把中间段的 `last` **抑制**、只保留最后一次。
+- 单拍模式（`len_limit=0`）下三处都走最简分支：AW/AR 每段 `len=0`、每个 W `last=1`、每个中间 R `last=0`。
+
+## 7. 下一步学习建议
+
+- **u9-l2 `axi_burst_unwrap`**：把 `BURST_WRAP` 回卷突发展开成 1~2 个 `BURST_INCR`——正好补上本讲「不支持 WRAP」的那块拼图，两者常配合使用。
+- **u9-l3 `axi_serializer`**：把不同 ID 的事务串行化成同一 ID，常与 burst_splitter 一起用在「只能服务单一在途 ID 的下游」之前。
+- **u13-l1 `axi_to_axi_lite`**：这是 burst_splitter 最典型的真实调用方（[src/axi_to_axi_lite.sv:62-76](https://github.com/pulp-platform/axi/blob/e55ae2a7ee606ee3cfd4257f63982a971b704407/src/axi_to_axi_lite.sv#L62-L76)），先拆突发再过 id_reflect 桥接到 AXI-Lite，读完本讲再去看它会有「原来如此」的快感。
+- **源码延伸**：想加深对「计数器 + ID 队列」这套乱序跟踪机制的理解，可去 `common_cells` 读 `id_queue.sv` 与 `delta_counter.sv`，它是本库很多模块（demux、id_remap、本讲 splitter）共用的基础设施。
