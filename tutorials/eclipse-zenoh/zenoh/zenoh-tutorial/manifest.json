@@ -1,0 +1,1374 @@
+{
+  "project": "zenoh",
+  "head": "5dd1a2f764b28a70ce6f12801e1d4dca2321bbc2",
+  "rationale": "Zenoh 是一个体量很大的「pub/sub + 存储/查询 + 计算」一体化协议的 Rust 参考实现，跨越公开 API、内部网络层、路由（HAT 拓扑）、传输与链路、协议编解码、路由器与插件等众多子系统。因此学习路线设计为「先外围后内核、先用法后原理」：第 1–3 单元让读者从零运行起来并掌握 Session、Key Expression 与最基础的 Pub/Sub；第 4–6 单元把另一条主链路 Query/Reply、数据表示（ZBytes/序列化）以及 Scouting/Liveliness/Matching/Timestamp 等支撑特性补齐，至此读者已能独立写出 Zenoh 应用。第 7 单元作为「用法→原理」的过渡，把公开 Session 下钻到内部 runtime 与 primitives(Mux/DeMux)。第 8–10 单元进入专家层内核：路由（Gateway/Face/Tables 与 HAT 四种拓扑）、传输与链路（unicast/multicast、批处理/分片，以及本次新增的 io_uring 接收路径）、协议消息模型与 Zenoh080 线编码、ZBuf 缓冲与异步 runtime 基础。第 11–12 单元覆盖面向运维与二次开发的扩展点：zenohd 路由器、插件系统、存储后端、REST 插件、共享内存、高级 pub/sub、adminspace/stats 与测试基准。本次增量聚焦「Support io_uring」这一新机制：它新增了 zenoh-uring 内部 crate、在传输层加入 uring 接收路径与 get_fd 链路能力、并把 RBatch 泛型化以兼容 uring 缓冲，因此将受影响的 u1-l3/u9-l1/u9-l2/u9-l4/u10-l3 标记为 update，并新增 u9-l5「io_uring 接收路径」讲义，其余讲义 keep。每篇讲义引用 1–6 个真实源码文件并配一个可操作的实践任务，依赖关系严格指向前置讲义，使读者可按拓扑顺序逐步深入。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目导览与起步",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Zenoh 是什么：项目定位与仓库结构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Eclipse Zenoh 的定位（统一 data in motion / at rest / compute），以及本仓库包含的 zenoh、zenoh-ext、zenohd、plugins、commons、io 等组成部分。",
+          "learning_goals": [
+            "理解 Zenoh 解决的核心问题与 pub/sub + 查询/应答两大通信范式",
+            "记住仓库的顶层目录划分及其各自职责",
+            "区分稳定 API（zenoh/zenoh-ext）与内部 commons 的边界"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "zenoh/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "项目说明",
+            "workspace 成员",
+            "顶层模块文档"
+          ],
+          "practice_task": "阅读 README 与 lib.rs 的 Components and concepts 小节，写一段不少于 5 行的中文总结，列出 Zenoh 的三大组件（Session / Pub-Sub / Query-Reply）并各举一个应用场景。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、运行与第一个示例",
+          "order": 2,
+          "filename": "u1-l2-build-run-examples.md",
+          "level": "beginner",
+          "topic": "讲解如何用 cargo 构建 Zenoh、运行官方示例（z_pub/z_sub），并理解 examples crate 的组织方式。",
+          "learning_goals": [
+            "掌握 cargo build --release 与运行 example 的命令",
+            "读懂 z_pub / z_sub 示例的主流程",
+            "理解 examples crate 与 zenoh-examples 依赖的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "examples/README.md",
+            "examples/Cargo.toml",
+            "examples/examples/z_pub.rs",
+            "examples/examples/z_sub.rs"
+          ],
+          "minimal_modules": [
+            "构建说明",
+            "examples README",
+            "示例源码"
+          ],
+          "practice_task": "在本地执行 cargo run --example z_sub 与 cargo run --example z_pub（两个终端），观察订阅端输出；然后把 z_pub 发布的 key expression 改成 demo/hello 并让两端匹配成功。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Workspace 与 crate 布局总览",
+          "order": 3,
+          "filename": "u1-l3-repo-crate-layout.md",
+          "level": "beginner",
+          "topic": "从根 Cargo.toml 的 workspace members 出发，画出 commons / io / plugins / zenoh / zenoh-ext / zenohd 之间的依赖与分层关系，并介绍新增的内部 crate zenoh-uring 与贯穿各层的 uring 编译特性。",
+          "learning_goals": [
+            "看懂 workspace members 列表与各 crate 的职责",
+            "理解 io（link/transport）→ zenoh（api/net）→ zenohd/plugins 的依赖方向",
+            "区分传输协议特性（transport_tcp 等 feature）如何按需启用",
+            "知道 uring 特性如何贯穿 zenoh-link/zenoh-transport 并启用 Linux io_uring 接收路径"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "README.md",
+            "zenohd/README.md"
+          ],
+          "minimal_modules": [
+            "workspace 配置",
+            "workspace 依赖",
+            "feature 开关"
+          ],
+          "practice_task": "画一张 crate 依赖草图（文字即可）：标出 zenoh-codec、zenoh-protocol、zenoh-keyexpr、zenoh-config、zenoh-link、zenoh-transport、zenohd、zenoh-uring 之间的依赖箭头，并说明哪些是 commons 内部 crate、哪些对外稳定；同时指出 uring 特性在 zenoh-link 与 zenoh-transport 中分别聚合了哪些子特性。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u1-l4",
+          "title": "公开 API 地图：lib.rs 模块导览",
+          "order": 4,
+          "filename": "u1-l4-public-api-map.md",
+          "level": "beginner",
+          "topic": "通读 zenoh/src/lib.rs 的模块级文档与 pub mod 声明，建立 session/key_expr/pubsub/query/bytes/handlers/qos/scouting/liveliness 等模块的整体认知。",
+          "learning_goals": [
+            "建立公开 API 的模块全景图",
+            "理解 builder 模式与 Resolvable/Resolve/Wait 三大基础 trait",
+            "知道 unstable/internal feature 门控了哪些 API"
+          ],
+          "source_files": [
+            "zenoh/src/lib.rs",
+            "zenoh/src/api/mod.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块文档",
+            "Resolvable/Resolve/Wait",
+            "feature 门控"
+          ],
+          "practice_task": "在 lib.rs 中找出 session、pubsub、query、bytes、handlers 五个模块各自 re-export 的 2 个核心类型，整理成一张「模块→类型」对照表。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心概念：Session 与 Key Expression",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "打开一个 Session",
+          "order": 1,
+          "filename": "u2-l1-session-open.md",
+          "level": "beginner",
+          "topic": "讲解 zenoh::open(config) 如何创建 Session、Session 是可克隆的 Arc 句柄、以及 z_info 示例如何读取会话信息。",
+          "learning_goals": [
+            "理解 open 函数与 Config 的关系",
+            "掌握 Session 的克隆语义与生命周期（close）",
+            "会读取 Session 的 zid / whatami / peers 信息"
+          ],
+          "source_files": [
+            "zenoh/src/api/session.rs",
+            "zenoh/src/api/config.rs",
+            "commons/zenoh-config/src/lib.rs",
+            "examples/examples/z_info.rs"
+          ],
+          "minimal_modules": [
+            "open/Session",
+            "Config",
+            "会话信息查询"
+          ],
+          "practice_task": "编写一个小程序：用 Config::default() 打开 Session，打印自己的 ZenohId，睡眠 3 秒后 close。然后改用 insert_json5 把 mode 设为 client 再运行一次，对比 zid 之外的 whatami 输出。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Key Expression：Zenoh 的地址空间",
+          "order": 2,
+          "filename": "u2-l2-key-expressions.md",
+          "level": "beginner",
+          "topic": "讲解 key expression 的斜杠路径语法、通配符（* / **）、KeyExpr/keyexpr/OwnedKeyExpr 三种存储形式及 includes/intersects 语义。",
+          "learning_goals": [
+            "会书写合法的 key expression 并理解通配符语义",
+            "区分 keyexpr、OwnedKeyExpr、KeyExpr 的所有权模型",
+            "掌握 includes / intersects 的集合关系判断"
+          ],
+          "source_files": [
+            "zenoh/src/api/key_expr.rs",
+            "commons/zenoh-keyexpr/src/lib.rs",
+            "zenoh/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "KeyExpr/keyexpr",
+            "canonicalization",
+            "includes/intersects"
+          ],
+          "practice_task": "用 KeyExpr::new 构造 robot/sensor/* 与 robot/sensor/temp，调用 includes 与 intersects 验证二者关系；再构造 robot/** 验证它能 includes 前者，把结果打印出来。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "配置系统与 WhatAmI 三种角色",
+          "order": 3,
+          "filename": "u2-l3-config-whatami.md",
+          "level": "beginner",
+          "topic": "讲解 Config 的结构、JSON5/YAML 加载方式、WhatAmI（Router/Peer/Client）三种角色，以及 DEFAULT_CONFIG.json5 的作用。",
+          "learning_goals": [
+            "理解 Config 的 insert_json5 / from_file / get_json 用法",
+            "区分 Router / Peer / Client 三种拓扑角色",
+            "知道默认配置文件 DEFAULT_CONFIG.json5 的结构与覆盖方式"
+          ],
+          "source_files": [
+            "commons/zenoh-config/src/lib.rs",
+            "commons/zenoh-config/src/defaults.rs",
+            "DEFAULT_CONFIG.json5",
+            "commons/zenoh-protocol/src/core/whatami.rs"
+          ],
+          "minimal_modules": [
+            "Config 结构",
+            "WhatAmI",
+            "默认配置"
+          ],
+          "practice_task": "加载 DEFAULT_CONFIG.json5，用 insert_json5 关闭 scouting/multicast/enabled 并把 listen 端点改成 tcp/127.0.0.1:77477，然后用 get_json 打印修改后的值，确认配置生效。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "发布/订阅（Pub/Sub）",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Pub/Sub 基础：put / Publisher / Subscriber / Sample",
+          "order": 1,
+          "filename": "u3-l1-pubsub-basics.md",
+          "level": "beginner",
+          "topic": "讲解发布侧（declare_publisher、put、delete）与订阅侧（declare_subscriber）以及 Sample 结构，结合 z_pub/z_sub 示例。",
+          "learning_goals": [
+            "掌握 Publisher 与 Session::put/delete 的用法",
+            "掌握 Subscriber 的声明与 recv_async 循环",
+            "理解 Sample 的 kind（Put/Delete）、payload、key_expr 字段"
+          ],
+          "source_files": [
+            "zenoh/src/api/publisher.rs",
+            "zenoh/src/api/subscriber.rs",
+            "zenoh/src/api/sample.rs",
+            "examples/examples/z_pub.rs",
+            "examples/examples/z_sub.rs"
+          ],
+          "minimal_modules": [
+            "Publisher/put",
+            "Subscriber",
+            "Sample"
+          ],
+          "practice_task": "实现一个温度上报小程序：声明 publisher 在 sensor/temp 发布随机温度，同时声明 subscriber 监听 sensor/*，把收到的 Sample 的 key_expr 与 payload 打印，并区分 Put 与 Delete。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "回调与通道：Handlers / Channels",
+          "order": 2,
+          "filename": "u3-l2-handlers-channels.md",
+          "level": "beginner",
+          "topic": "讲解两种取数方式（callback 与 channel）、IntoHandler trait，以及默认 FifoChannel 与 RingChannel 的差异。",
+          "learning_goals": [
+            "理解 callback 与 channel 两种数据获取方式",
+            "掌握 IntoHandler trait 与 with / callback 构造器方法",
+            "知道 FifoChannel 与 RingChannel 的取舍（背压 vs 丢帧）"
+          ],
+          "source_files": [
+            "zenoh/src/api/handlers/mod.rs",
+            "zenoh/src/api/handlers/fifo.rs",
+            "zenoh/src/api/handlers/ring.rs",
+            "zenoh/src/api/handlers/callback.rs"
+          ],
+          "minimal_modules": [
+            "IntoHandler",
+            "FifoChannel",
+            "RingChannel"
+          ],
+          "practice_task": "把默认的 subscriber 改成 .with(zenoh::handlers::RingChannel::new(10))，再快速发布 50 条消息，观察 RingChannel 如何丢弃旧消息；然后换回 FifoChannel 对比行为。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "服务质量（QoS）：可靠性、拥塞控制与优先级",
+          "order": 3,
+          "filename": "u3-l3-qos.md",
+          "level": "intermediate",
+          "topic": "讲解 Reliability（BestEffort/Reliable）、CongestionControl（Drop/Block）与 Priority 的配置方式及其对网络行为的影响。",
+          "learning_goals": [
+            "理解可靠性与拥塞控制的语义差异",
+            "掌握在 PublisherBuilder 上设置 reliability/congestion_control/priority",
+            "知道不同优先级如何在传输层分流"
+          ],
+          "source_files": [
+            "zenoh/src/api/publisher.rs",
+            "commons/zenoh-protocol/src/core/mod.rs",
+            "commons/zenoh-config/src/qos.rs",
+            "io/zenoh-transport/src/common/priority.rs"
+          ],
+          "minimal_modules": [
+            "Reliability/CongestionControl",
+            "Priority",
+            "QoS 配置"
+          ],
+          "practice_task": "声明两个 publisher 发布同一 key：一个用 Reliable+Block，一个用 BestEffort+Drop，分别高频发布，订阅端统计 1 秒内收到的条数，对比两种 QoS 在高负载下的表现。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "查询/应答（Query/Reply）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Queryable 与 Query：提供数据",
+          "order": 1,
+          "filename": "u4-l1-queryable-query.md",
+          "level": "intermediate",
+          "topic": "讲解 declare_queryable 声明可查询端、Query 的 reply/reply_err/reply_del 方法，结合 z_queryable 示例。",
+          "learning_goals": [
+            "掌握 Queryable 的声明与 Query 接收循环",
+            "理解 reply（Put）、reply_del（Delete）、reply_err 的区别",
+            "知道 Queryable 如何与订阅/存储配合提供历史数据"
+          ],
+          "source_files": [
+            "zenoh/src/api/queryable.rs",
+            "zenoh/src/api/query.rs",
+            "examples/examples/z_queryable.rs"
+          ],
+          "minimal_modules": [
+            "Queryable",
+            "Query/reply",
+            "ReplyError"
+          ],
+          "practice_task": "实现一个 Queryable：内部用 HashMap 存若干 key->value，收到 Query 时若 key 存在则 reply，否则 reply_err 返回错误信息；用 z_get 或自己写的 get 客户端测试。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Get 与 Querier：请求数据",
+          "order": 1,
+          "filename": "u4-l2-get-querier.md",
+          "level": "intermediate",
+          "topic": "讲解 Session::get 一次性查询与 Querier 长生命周期的查询器、Reply 的处理，结合 z_get/z_querier 示例。",
+          "learning_goals": [
+            "掌握 Session::get 的用法与 Reply 的 result() 处理",
+            "理解 Querier 与 get 的差异（声明复用 vs 临时查询）",
+            "会处理多个 Queryable 返回的多个 Reply"
+          ],
+          "source_files": [
+            "zenoh/src/api/querier.rs",
+            "zenoh/src/api/session.rs",
+            "examples/examples/z_get.rs",
+            "examples/examples/z_querier.rs"
+          ],
+          "minimal_modules": [
+            "Session::get",
+            "Querier",
+            "Reply"
+          ],
+          "practice_task": "启动两个 Queryable 服务同一 key expression（返回不同值），用一个 get 客户端查询并打印所有 Reply，验证 consolidation（结果合并）行为；再改用 Querier 周期查询。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Selector 与查询参数",
+          "order": 2,
+          "filename": "u4-l3-selectors.md",
+          "level": "intermediate",
+          "topic": "讲解 Selector 的 URL 式语法（key expression ? name=value;...）、Parameters 的读取、以及查询目标/时间范围等参数。",
+          "learning_goals": [
+            "会构造与解析 Selector 字符串",
+            "掌握 Parameters 的 get 迭代",
+            "理解查询参数如何被 Queryable 端使用"
+          ],
+          "source_files": [
+            "zenoh/src/api/selector.rs",
+            "commons/zenoh-protocol/src/core/parameters.rs",
+            "examples/examples/z_get.rs"
+          ],
+          "minimal_modules": [
+            "Selector",
+            "Parameters",
+            "查询参数"
+          ],
+          "practice_task": "写一个 get 请求带 day=2024-01-01;limit=10 参数，Queryable 端解析 parameters 并据此返回过滤后的数据，把解析到的参数全部打印。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "数据表示与序列化",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "ZBytes 与 Encoding：原始字节与编码",
+          "order": 1,
+          "filename": "u5-l1-zbytes-encoding.md",
+          "level": "intermediate",
+          "topic": "讲解 ZBytes 作为零拷贝字节容器（From<Vec<u8>>、reader/writer、slices）以及 Encoding 枚举表示的负载编码类型。",
+          "learning_goals": [
+            "掌握 ZBytes 的构造与零拷贝读取（reader/writer、slices）",
+            "理解 Encoding 的作用与常用编码常量",
+            "知道 ZBytes 与 String / Vec<u8> 的互转"
+          ],
+          "source_files": [
+            "zenoh/src/api/bytes.rs",
+            "zenoh/src/api/encoding.rs",
+            "examples/examples/z_bytes.rs"
+          ],
+          "minimal_modules": [
+            "ZBytes",
+            "ZBytesReader/Writer",
+            "Encoding"
+          ],
+          "practice_task": "用 ZBytes::from 构造一个字符串负载并发布，订阅端用 try_to_string 还原；再尝试用 writer 写入多段字节、用 reader 顺序读出，验证零拷贝拼装。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "zenoh-ext 序列化：跨语言通用序列化",
+          "order": 2,
+          "filename": "u5-l2-serialization-zenoh-ext.md",
+          "level": "intermediate",
+          "topic": "讲解 zenoh-ext 提供的 z_serialize / z_deserialize、Serialize/Deserialize trait 与 VarInt(LEB128) 编码，及其与各语言 binding 的互操作意义。",
+          "learning_goals": [
+            "掌握 z_serialize/z_deserialize 对基本类型与结构体的用法",
+            "理解 Serialize/Deserialize trait 的实现机制",
+            "知道这种序列化为何对跨语言 binding 友好"
+          ],
+          "source_files": [
+            "zenoh-ext/src/serialization.rs",
+            "zenoh-ext/src/lib.rs",
+            "examples/examples/z_formats.rs"
+          ],
+          "minimal_modules": [
+            "z_serialize/deserialize",
+            "Serialize/Deserialize",
+            "VarInt"
+          ],
+          "practice_task": "定义一个 #[derive(Serialize, Deserialize)] 的 struct（含 String/u32/Vec<f64>），用 z_serialize 发布、订阅端 z_deserialize 还原并打印，验证结构体能正确往返。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "支撑特性：发现、存活、匹配与时间",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Scouting：节点发现",
+          "order": 1,
+          "filename": "u6-l1-scouting.md",
+          "level": "intermediate",
+          "topic": "讲解 scouting 机制（发现网络中的 Zenoh 节点）、scout 函数与 Hello、以及其与 scouting 协议消息的关系。",
+          "learning_goals": [
+            "理解 scouting 的用途与是否必需",
+            "掌握 zenoh::scout 与 Scout/Hello 的使用",
+            "知道 scouting 协议消息（Scout/Hello）在网络层的角色"
+          ],
+          "source_files": [
+            "zenoh/src/api/scouting.rs",
+            "commons/zenoh-protocol/src/scouting/mod.rs",
+            "commons/zenoh-protocol/src/scouting/scout.rs",
+            "commons/zenoh-protocol/src/scouting/hello.rs",
+            "examples/examples/z_scout.rs"
+          ],
+          "minimal_modules": [
+            "scout",
+            "Hello",
+            "scouting 协议"
+          ],
+          "practice_task": "运行 z_scout 发现本机已有的 zenohd 或 z_pub/z_sub 节点；然后用 zenoh::scout(WhatAmI::Peer | WhatAmI::Router, config) 写一个 5 秒的发现器，打印每个 Hello 的 zid 与 whatami。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Liveliness：存活检测",
+          "order": 2,
+          "filename": "u6-l2-liveliness.md",
+          "level": "intermediate",
+          "topic": "讲解 liveliness API：声明 LivelinessToken、订阅/查询 token、节点上下线通知，结合 z_liveliness 系列示例。",
+          "learning_goals": [
+            "掌握 declare_token 声明存活令牌",
+            "理解 liveliness().declare_subscriber 收到 Put/Delete 表示上线/下线",
+            "知道 liveliness().get 查询当前存活 token"
+          ],
+          "source_files": [
+            "zenoh/src/api/liveliness.rs",
+            "examples/examples/z_liveliness.rs",
+            "examples/examples/z_sub_liveliness.rs",
+            "examples/examples/z_get_liveliness.rs"
+          ],
+          "minimal_modules": [
+            "LivelinessToken",
+            "存活订阅",
+            "存活查询"
+          ],
+          "practice_task": "写一个进程声明 token app/instance-1，另一个进程订阅 app/**；令第一个进程退出，观察订阅端收到 Delete（下线）事件，并用 get 查询当前仍存活的 token。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Matching：对端匹配感知",
+          "order": 3,
+          "filename": "u6-l3-matching.md",
+          "level": "intermediate",
+          "topic": "讲解 MatchingListener API，让 publisher/querier 知道是否存在匹配的 subscriber/queryable，以便按需发送以节省带宽。",
+          "learning_goals": [
+            "理解 matching API 的节流意义",
+            "掌握 Publisher::matching_listener 的用法",
+            "会根据 MatchingStatus.matching() 决定是否发布"
+          ],
+          "source_files": [
+            "zenoh/src/api/matching.rs",
+            "zenoh/src/api/publisher.rs",
+            "zenoh/src/api/querier.rs"
+          ],
+          "minimal_modules": [
+            "MatchingListener",
+            "MatchingStatus",
+            "节流发布"
+          ],
+          "practice_task": "写一个 publisher 在匹配到至少一个 subscriber 后才开始周期发布、无匹配时休眠；用一个 subscriber 进程的启停来观察 publisher 的匹配状态变化日志。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-4",
+          "title": "Timestamp：时间戳与 HLC",
+          "order": 4,
+          "filename": "u6-l4-timestamps.md",
+          "level": "intermediate",
+          "topic": "讲解 Sample 可选的 Timestamp（基于 uhlc 混合逻辑时钟）、session.new_timestamp 的生成，以及时间戳在乱序合并中的作用。",
+          "learning_goals": [
+            "理解 Timestamp = 时间值 + 时钟标识的结构",
+            "掌握 new_timestamp 与 put 时附带 timestamp",
+            "知道时间戳在存储/查询合并去重中的作用"
+          ],
+          "source_files": [
+            "commons/zenoh-protocol/src/core/mod.rs",
+            "zenoh/src/api/sample.rs",
+            "zenoh/src/api/publisher.rs",
+            "zenoh/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Timestamp",
+            "new_timestamp",
+            "HLC(uhlc)"
+          ],
+          "practice_task": "发布若干带 timestamp 的样本，订阅端打印每个 sample.timestamp() 并按时间戳排序输出；对比不设 timestamp 时 timestamp() 是否为 None。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "内部架构（一）：从 Session 到 net 层",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Session 内部与 Runtime",
+          "order": 1,
+          "filename": "u7-l1-session-internals.md",
+          "level": "intermediate",
+          "topic": "把公开 Session 下钻：SessionState、net 模块入口，以及 Runtime 是如何承载连接状态的。",
+          "learning_goals": [
+            "理解公开 Session 如何委托到内部 net 层",
+            "掌握 Runtime 作为会话运行时核心的角色",
+            "理清 api/session.rs 与 net/runtime/mod.rs 的边界"
+          ],
+          "source_files": [
+            "zenoh/src/api/session.rs",
+            "zenoh/src/net/mod.rs",
+            "zenoh/src/net/runtime/mod.rs"
+          ],
+          "minimal_modules": [
+            "Session/SessionState",
+            "Runtime/RuntimeState",
+            "net 模块入口"
+          ],
+          "practice_task": "在 session.rs 中追踪一次 declare_subscriber 调用链：找出它最终如何向 net 层/ primitives 注册兴趣，写一段文字描述从公开 API 到 Runtime 的调用路径。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Primitives 与 Mux/DeMux",
+          "order": 2,
+          "filename": "u7-l2-primitives-mux-demux.md",
+          "level": "intermediate",
+          "topic": "讲解 Primitives/EPrimitives 接口，以及 Mux（出站多路复用）与 DeMux（入站分用）如何衔接路由 face 与传输。",
+          "learning_goals": [
+            "理解 Primitives 作为 API 与网络层之间抽象接口的作用",
+            "掌握 DeMux 处理入站消息、Mux 处理出站消息的分工",
+            "理清 网络→DeMux→Face→HAT 与 API→Primitives→Mux→Transport 的双向链路"
+          ],
+          "source_files": [
+            "zenoh/src/net/primitives/mod.rs",
+            "zenoh/src/net/primitives/demux.rs",
+            "zenoh/src/net/primitives/mux.rs"
+          ],
+          "minimal_modules": [
+            "Primitives/EPrimitives",
+            "DeMux",
+            "Mux"
+          ],
+          "practice_task": "画出一条 Put 消息从 API 到网络、再从网络到对端 API 的完整流转图，标注每一步经过的 Primitives/Mux/DeMux/Face 组件。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Runtime 编排器：scouting 与建连",
+          "order": 3,
+          "filename": "u7-l3-runtime-orchestrator.md",
+          "level": "intermediate",
+          "topic": "讲解 orchestrator 如何完成 scouting、连接 peers、响应发现，以及 AutoConnect 策略。",
+          "learning_goals": [
+            "理解 Runtime::start 的启动与建连流程",
+            "掌握 scouting 周期与 PeerConnector 的连接管理",
+            "知道 AutoConnect 策略如何决定自动连接"
+          ],
+          "source_files": [
+            "zenoh/src/net/runtime/mod.rs",
+            "zenoh/src/net/runtime/orchestrator.rs",
+            "zenoh/src/net/common.rs"
+          ],
+          "minimal_modules": [
+            "Runtime::start",
+            "scout/responder",
+            "AutoConnect"
+          ],
+          "practice_task": "配置一个 peer 节点连接到指定端点，用 tracing 日志观察 orchestrator 的建连过程；然后启用 gossip scouting 对比 multicast scouting 的不同，记录关键日志行。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "内部架构（二）：路由（HAT 拓扑）",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "路由骨架：Gateway / Face / Tables",
+          "order": 1,
+          "filename": "u8-l1-routing-gateway-face-tables.md",
+          "level": "advanced",
+          "topic": "讲解 Gateway 作为路由核心、Face（会话面）、Tables（路由表与资源表）三者的关系与职责。",
+          "learning_goals": [
+            "理解 Gateway 如何管理 Face 与路由表",
+            "掌握 Face 作为消息路由单元的角色",
+            "知道 Tables/TablesData 如何维护资源与 face 映射"
+          ],
+          "source_files": [
+            "zenoh/src/net/routing/gateway.rs",
+            "zenoh/src/net/routing/dispatcher/tables.rs",
+            "zenoh/src/net/routing/dispatcher/face.rs",
+            "zenoh/src/net/routing/mod.rs"
+          ],
+          "minimal_modules": [
+            "Gateway",
+            "Face/FaceState",
+            "Tables"
+          ],
+          "practice_task": "阅读 gateway.rs 与 tables.rs，写一段说明：当一个新 subscriber 通过 Face 声明时，Tables 中发生了哪些注册动作；标注涉及的 key 数据结构名。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "HAT：四种拓扑的路由策略",
+          "order": 2,
+          "filename": "u8-l2-hat-topologies.md",
+          "level": "advanced",
+          "topic": "讲解 Hierarchical Adaptive Topology：broker / router / peer / client 四种 HAT 实现如何各自决定 pub/sub/query/interest 的转发行为。",
+          "learning_goals": [
+            "理解 HAT 抽象与 HatTrait 的作用",
+            "区分 router（树计算链路状态）与 peer（点对点）路由的差异",
+            "知道 client 与 broker HAT 的最小转发语义"
+          ],
+          "source_files": [
+            "zenoh/src/net/routing/hat/mod.rs",
+            "zenoh/src/net/routing/hat/router/mod.rs",
+            "zenoh/src/net/routing/hat/peer/mod.rs",
+            "zenoh/src/net/routing/hat/broker/mod.rs",
+            "zenoh/src/net/routing/hat/client/mod.rs"
+          ],
+          "minimal_modules": [
+            "HatTrait",
+            "router HAT（树计算）",
+            "peer/client/broker HAT"
+          ],
+          "practice_task": "对比 router HAT 与 peer HAT 在发布一条消息时的转发路径差异，写一段中文说明各自如何选择下游 face，并指出 router HAT 中的 TreesComputationWorker 作用。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-3",
+          "title": "Dispatcher：资源、pubsub、查询与 interest",
+          "order": 3,
+          "filename": "u8-l3-dispatcher-pubsub-queries-interests.md",
+          "level": "advanced",
+          "topic": "深入 dispatcher 子模块：resource（key 匹配）、pubsub/queries（数据路由）、interests（声明式兴趣）、token。",
+          "learning_goals": [
+            "理解 Resource 如何维护订阅者/可查询者并做匹配",
+            "掌握 pubsub 与 queries 路由的差异",
+            "知道 interests（声明式订阅）如何驱动按需路由"
+          ],
+          "source_files": [
+            "zenoh/src/net/routing/dispatcher/resource.rs",
+            "zenoh/src/net/routing/dispatcher/pubsub.rs",
+            "zenoh/src/net/routing/dispatcher/queries.rs",
+            "zenoh/src/net/routing/dispatcher/interests.rs",
+            "zenoh/src/net/routing/dispatcher/token.rs"
+          ],
+          "minimal_modules": [
+            "Resource",
+            "pubsub/queries 路由",
+            "interests"
+          ],
+          "practice_task": "追踪一条 declare_interest 消息：说明 interests.rs 如何记录远端兴趣、resource.rs 如何据此在后续发布时只转发给有相关兴趣的 face，画出兴趣驱动的剪枝逻辑。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "路由协议：链路状态、网络与 gossip",
+          "order": 4,
+          "filename": "u8-l4-routing-protocol-linkstate.md",
+          "level": "advanced",
+          "topic": "讲解 router 间用于拓扑同步的链路状态/网络协议、gossip 发现，以及对应的 codec。",
+          "learning_goals": [
+            "理解 linkstate 协议如何传播路由器拓扑",
+            "掌握 gossip 在节点发现中的作用",
+            "知道 Zenoh080Routing codec 如何编码链路状态"
+          ],
+          "source_files": [
+            "zenoh/src/net/protocol/mod.rs",
+            "zenoh/src/net/protocol/linkstate.rs",
+            "zenoh/src/net/protocol/network.rs",
+            "zenoh/src/net/protocol/gossip.rs",
+            "zenoh/src/net/codec/linkstate.rs"
+          ],
+          "minimal_modules": [
+            "linkstate 协议",
+            "network 扩展",
+            "gossip"
+          ],
+          "practice_task": "部署 3 个 router 互联，用日志观察 linkstate 消息的传播；阅读 linkstate.rs 说明 LinkInfo 如何被编码并在节点间交换以构建全网拓扑视图。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "内部架构（三）：传输与链路层",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Link 层抽象与各链路实现",
+          "order": 1,
+          "filename": "u9-l1-link-layer.md",
+          "level": "advanced",
+          "topic": "讲解 Link 抽象、LinkManager（unicast/multicast）、LocatorInspector，以及 tcp/udp/tls/quic/ws 等具体链路实现；并介绍为支持 io_uring 而新增的 LinkUnicastTrait::get_fd 能力及各链路的回退语义。",
+          "learning_goals": [
+            "理解 Link 与 LinkManagerUnicast/Multicast 的抽象",
+            "掌握 LocatorInspector 判断可靠性/多播能力",
+            "知道每种链路（tcp/udp/quic/ws...）的可靠性与 MTU 差异",
+            "理解 LinkUnicastTrait::get_fd 的作用以及为何部分链路（如未连接 UDP）不提供 fd 而回退到 tokio"
+          ],
+          "source_files": [
+            "io/zenoh-link/src/lib.rs",
+            "io/zenoh-link-commons/src/lib.rs",
+            "io/zenoh-link-commons/src/unicast.rs",
+            "io/zenoh-link-commons/src/multicast.rs",
+            "io/zenoh-links/zenoh-link-tcp/src/lib.rs",
+            "io/zenoh-links/zenoh-link-udp/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Link/LinkManager",
+            "LocatorInspector",
+            "链路实现",
+            "get_fd（uring）"
+          ],
+          "practice_task": "阅读 link-tcp 与 link-udp 的实现，整理一张对比表：每种链路是否可靠、是否支持多播、默认 MTU、是否实现 get_fd；并说明 locator 协议串（tcp/、udp/）如何映射到对应 LinkManagerBuilder。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Transport 层：unicast 与 multicast 管理",
+          "order": 2,
+          "filename": "u9-l2-transport-unicast-multicast.md",
+          "level": "advanced",
+          "topic": "讲解 TransportManager（统一 builder）、TransportUnicast 与 TransportMulticast 的职责、配置与状态管理；并讲解 TransportManagerState 中新增的 uring 状态及其初始化失败时回退到 tokio RX 的策略。",
+          "learning_goals": [
+            "理解 TransportManager 统一管理 unicast/multicast 传输",
+            "掌握 TransportManagerConfigUnicast/Multicast 的关键参数（lease/keep_alive/超时）",
+            "知道 TransportUnicast::schedule 与 multicast 的差异",
+            "知道 uring feature 下 TransportManager 如何初始化 io_uring reactor 并在失败时回退"
+          ],
+          "source_files": [
+            "io/zenoh-transport/src/lib.rs",
+            "io/zenoh-transport/src/manager.rs",
+            "io/zenoh-transport/src/unicast/mod.rs",
+            "io/zenoh-transport/src/unicast/manager.rs",
+            "io/zenoh-transport/src/multicast/mod.rs",
+            "io/zenoh-transport/src/multicast/manager.rs"
+          ],
+          "minimal_modules": [
+            "TransportManager",
+            "TransportUnicast",
+            "TransportMulticast",
+            "uring 状态与回退"
+          ],
+          "practice_task": "梳理 TransportManager 的 builder 配置项（lease、keep_alive、session limits 等），写一段说明这些参数如何影响连接保活与超时断开行为；并说明 uring 状态如何由 batch_size/link_rx_buffer_size 计算并在初始化失败时优雅回退。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u9-l3",
+          "title": "传输建连、认证与内部状态机",
+          "order": 3,
+          "filename": "u9-l3-transport-establishment-auth.md",
+          "level": "advanced",
+          "topic": "讲解 unicast 传输的 establishment（Open/Close 握手）、authentication（用户名密码/公钥认证）与 transport_unicast_inner 状态机，以及 multicast transport 的收发。",
+          "learning_goals": [
+            "理解 unicast 传输的建连握手流程",
+            "掌握认证机制（auth_usrpwd / auth_pubkey）的接入点",
+            "知道 transport_unicast_inner 如何维护链路与优先级管道"
+          ],
+          "source_files": [
+            "io/zenoh-transport/src/unicast/establishment.rs",
+            "io/zenoh-transport/src/unicast/authentication.rs",
+            "io/zenoh-transport/src/unicast/transport_unicast_inner.rs",
+            "io/zenoh-transport/src/unicast/link.rs",
+            "io/zenoh-transport/src/multicast/transport.rs"
+          ],
+          "minimal_modules": [
+            "establishment 握手",
+            "authentication",
+            "transport inner 状态机"
+          ],
+          "practice_task": "追踪 unicast 建连：说明 establishment.rs 中 Open 消息如何交换 zid/whatami/lease，authentication.rs 如何校验凭证；用配置启用 auth_usrpwd 观察握手变化（待确认具体配置键名）。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "批处理、分片与优先级管道",
+          "order": 4,
+          "filename": "u9-l4-batching-framing.md",
+          "level": "advanced",
+          "topic": "讲解 common 模块下的 batch（批处理帧）、pipeline（发送管道）、seq_num（序列号）、priority（优先级队列）、defragmentation（分片重组），以及为支持 io_uring 引入的泛型 RBatch<TBuffer> 与 initialize_uring/DecompressUring 机制。",
+          "learning_goals": [
+            "理解 BatchConfig 如何把多条消息打包成一帧",
+            "掌握 priority 管道如何按 QoS 分流发送",
+            "知道大消息如何分片发送并在对端 defragmentation 重组",
+            "理解 RBatch 为何泛型化为 RBatch<TBuffer> 以及 initialize_uring 如何处理压缩/分片批次"
+          ],
+          "source_files": [
+            "io/zenoh-transport/src/common/batch.rs",
+            "io/zenoh-transport/src/common/pipeline.rs",
+            "io/zenoh-transport/src/common/seq_num.rs",
+            "io/zenoh-transport/src/common/priority.rs",
+            "io/zenoh-transport/src/common/defragmentation.rs"
+          ],
+          "minimal_modules": [
+            "BatchConfig",
+            "priority 管道",
+            "defragmentation",
+            "泛型 RBatch/initialize_uring"
+          ],
+          "practice_task": "阅读 batch.rs 与 defragmentation.rs，写一段说明：发布一个远大于单帧 MTU 的负载时，发送端如何分片、接收端 DefragBuffer 如何按序列号重组；并指出 RBatch<TBuffer> 与 initialize_uring 如何让同一套解码逻辑同时服务于 tokio 路径与 uring 路径。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u9-l5",
+          "title": "io_uring 接收路径：零拷贝异步读",
+          "order": 5,
+          "filename": "u9-l5-io-uring-rx-path.md",
+          "level": "advanced",
+          "topic": "讲解 Linux io_uring 在 Zenoh 传输层的接入：新增 zenoh-uring 内部 crate（Reader/batch_arena/page_arena/window、FragmentedBatch/RxBuffer）、TransportManager 中的 uring 状态与回退策略、rx_task 在 uring 与 tokio 路径间的分派、链路 get_fd 能力，以及泛型 RBatch<TBuffer> 与 initialize_uring 如何支持分片/压缩批次的读取。",
+          "learning_goals": [
+            "理解 zenoh-uring crate 的 Reader/arena/window 设计与 io_uring 异步读模型",
+            "掌握 TransportManagerState.uring 的初始化及其在初始化失败时回退到 tokio RX 的策略",
+            "理解 rx_task 如何根据 uring 可用性与 get_fd 结果在 rx_task_uring 与 rx_task_non_uring 之间分派",
+            "知道 streamed 与非 streamed 链路分别走 setup_fragmented_read / setup_read，以及为何未连接 UDP 会回退"
+          ],
+          "source_files": [
+            "commons/zenoh-uring/src/lib.rs",
+            "commons/zenoh-uring/src/linux/api/reader/mod.rs",
+            "io/zenoh-transport/src/uring.rs",
+            "io/zenoh-transport/src/manager.rs",
+            "io/zenoh-transport/src/unicast/universal/link.rs",
+            "io/zenoh-link-commons/src/unicast.rs"
+          ],
+          "minimal_modules": [
+            "zenoh-uring Reader/arena",
+            "Uring 状态与回退",
+            "rx_task 分派",
+            "get_fd 与 setup_read/fragmented_read"
+          ],
+          "practice_task": "开启 uring feature（zenoh/uring）编译运行，用 tracing 日志观察某条 unicast 链路是走了 rx_task_uring 还是回退到 rx_task_non_uring；阅读 universal/link.rs 说明 rx_task_uring 在 streamed 与非 streamed 链路下分别用 setup_fragmented_read / setup_read，并解释为何未连接 UDP 会回退到 tokio。",
+          "depends_on": [
+            "u9-l1",
+            "u9-l2",
+            "u9-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "内部架构（四）：协议模型与基础 crate",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "协议消息模型（network/transport/scouting/zenoh）",
+          "order": 1,
+          "filename": "u10-l1-protocol-messages.md",
+          "level": "advanced",
+          "topic": "通览 zenoh-protocol 的消息分层：core 基础类型、network（Declare/Push/Request/Response/Interest）、transport（Open/Close/Frame/KeepAlive）、scouting、zenoh（Put/Del/Query/Reply）。",
+          "learning_goals": [
+            "理解协议消息的三层分层（zenoh/network/transport）",
+            "掌握 core 类型：ZenohId/Timestamp/Parameters/WireExpr/WhatAmI/Encoding",
+            "知道 Declare/Interest 如何驱动声明式路由"
+          ],
+          "source_files": [
+            "commons/zenoh-protocol/src/lib.rs",
+            "commons/zenoh-protocol/src/core/mod.rs",
+            "commons/zenoh-protocol/src/network/mod.rs",
+            "commons/zenoh-protocol/src/transport/mod.rs",
+            "commons/zenoh-protocol/src/zenoh/mod.rs",
+            "commons/zenoh-protocol/src/scouting/mod.rs"
+          ],
+          "minimal_modules": [
+            "core 类型",
+            "network 消息",
+            "transport/scouting/zenoh 消息"
+          ],
+          "practice_task": "整理一份协议消息对照表：列出 Declare、Push、Request、Response、Interest、Frame、Put、Query、Reply 各自所属的层与一句话用途，并指出哪些消息携带 WireExpr。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Zenoh080 线编码与 codec",
+          "order": 2,
+          "filename": "u10-l2-wire-codec-zenoh080.md",
+          "level": "advanced",
+          "topic": "讲解 zenoh-codec 的 WCodec/RCodec/LCodec trait、Zenoh080 编码标记、zint 变长整数（LEB128）以及 batch/frame 编码。",
+          "learning_goals": [
+            "理解 WCodec/RCodec/LCodec 三类 codec trait",
+            "掌握 Zenoh080 编码标记与 header 字节机制",
+            "知道 zint 变长整数如何压缩整数编码"
+          ],
+          "source_files": [
+            "commons/zenoh-codec/src/lib.rs",
+            "commons/zenoh-codec/src/core/mod.rs",
+            "commons/zenoh-codec/src/core/zint.rs",
+            "commons/zenoh-codec/src/network/mod.rs",
+            "commons/zenoh-codec/src/transport/batch.rs",
+            "commons/zenoh-codec/src/transport/frame.rs"
+          ],
+          "minimal_modules": [
+            "WCodec/RCodec",
+            "Zenoh080",
+            "zint(LEB128)"
+          ],
+          "practice_task": "阅读 zint.rs 与一个 network 消息的 codec（如 push），写一段说明一条 Declare 消息如何被 Zenoh080 序列化为字节（header + zint 长度 + body），并指出 codec 如何分派到具体消息类型。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "Buffers：ZBuf / ZSlice 零拷贝缓冲",
+          "order": 3,
+          "filename": "u10-l3-buffers-zbuf-zslice.md",
+          "level": "advanced",
+          "topic": "讲解 zenoh-buffers 的 ZBuf（多片缓冲）、ZSlice（单片，可承载共享内存）、Reader/Writer 抽象与零拷贝设计；含 ZBufReader 实现 Buffer 以及 is_empty 优化，使其可作为泛型批次缓冲（服务于 io_uring 接收路径）。",
+          "learning_goals": [
+            "理解 ZBuf 为何用多片 ZSlice 而非连续内存",
+            "掌握 Reader/Writer trait 的回溯读写能力",
+            "知道 ZSlice 如何与共享内存协作实现零拷贝",
+            "知道 ZBufReader 现已实现 Buffer，可作为 RBatch 的缓冲类型"
+          ],
+          "source_files": [
+            "commons/zenoh-buffers/src/lib.rs",
+            "commons/zenoh-buffers/src/zbuf.rs",
+            "commons/zenoh-buffers/src/zslice.rs"
+          ],
+          "minimal_modules": [
+            "ZBuf",
+            "ZSlice",
+            "Reader/Writer",
+            "ZBufReader: Buffer"
+          ],
+          "practice_task": "构造一个 ZBuf，向其中追加两段来自不同 Vec 的 ZSlice，用 Reader 顺序读出全部字节并验证与原文一致；说明这种设计如何避免大数据拷贝，并解释 ZBufReader 实现 Buffer 后为何能直接作为 io_uring 路径上的批次读取缓冲。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u10-l4",
+          "title": "异步基础：runtime / task / sync / result",
+          "order": 4,
+          "filename": "u10-l4-async-runtime-task-sync.md",
+          "level": "advanced",
+          "topic": "讲解支撑异步运行的 commons 基础设施：zenoh-runtime（命名 executor）、zenoh-task（TaskController/TerminatableTask）、zenoh-sync（Condition 等）、zenoh-result（ZResult/Error）。",
+          "learning_goals": [
+            "理解 ZRuntime 多个命名执行器（App/Acc/TX/RX/Net）的分工",
+            "掌握 TaskController 的可取消任务管理",
+            "知道 Condition 异步条件变量与 ZResult 错误模型"
+          ],
+          "source_files": [
+            "commons/zenoh-runtime/src/lib.rs",
+            "commons/zenoh-task/src/lib.rs",
+            "commons/zenoh-sync/src/lib.rs",
+            "commons/zenoh-sync/src/condition.rs",
+            "commons/zenoh-result/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ZRuntime",
+            "TaskController",
+            "Condition/ZResult"
+          ],
+          "practice_task": "用 ZRuntime spawn 两个任务并用 TaskController 实现优雅终止（terminate_all 带超时），观察两个任务被取消的过程；写一段说明为何 Zenoh 要区分多个命名执行器。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "路由器与插件系统",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "zenohd 路由器：启动与配置",
+          "order": 1,
+          "filename": "u11-l1-zenohd-router.md",
+          "level": "advanced",
+          "topic": "讲解 zenohd 二进制的启动流程：clap 参数解析、config 合并、runtime 初始化、插件加载与主循环。",
+          "learning_goals": [
+            "理解 zenohd main.rs 的启动与配置加载流程",
+            "掌握 --config / --listen / --connect / --cfg 等命令行参数",
+            "知道 zenohd 如何加载内置与外部插件"
+          ],
+          "source_files": [
+            "zenohd/src/main.rs",
+            "zenohd/README.md"
+          ],
+          "minimal_modules": [
+            "Args/CLI 解析",
+            "config 合并",
+            "runtime+插件启动"
+          ],
+          "practice_task": "用 cargo run -p zenohd -- --config DEFAULT_CONFIG.json5 启动路由器，再分别用 --listen 与 --cfg scouting/multicast/enabled=false 覆盖配置，观察行为变化并记录命令。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "插件系统：Plugin trait 与 PluginsManager",
+          "order": 2,
+          "filename": "u11-l2-plugin-system.md",
+          "level": "advanced",
+          "topic": "讲解插件基础设施：Plugin trait、PluginStatus、PluginsManager 的声明/加载/启动生命周期，静态与动态插件，以及 zenohd 的 loader。",
+          "learning_goals": [
+            "理解 Plugin trait（StartArgs/Instance/版本常量）的设计",
+            "掌握 PluginsManager 的 declare/load/start 生命周期",
+            "知道动态插件加载（LibLoader、ABI 兼容性）与 zenohd loader 的关系"
+          ],
+          "source_files": [
+            "plugins/zenoh-plugin-trait/src/lib.rs",
+            "plugins/zenoh-plugin-trait/src/plugin.rs",
+            "plugins/zenoh-plugin-trait/src/manager.rs",
+            "zenoh/src/api/plugins.rs",
+            "zenoh/src/api/loader.rs",
+            "plugins/zenoh-plugin-example/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Plugin trait",
+            "PluginsManager",
+            "loader/ZenohPlugin"
+          ],
+          "practice_task": "阅读 zenoh-plugin-example，写一段说明一个插件如何实现 Plugin+ZenohPlugin、如何接收 DynamicRuntime、如何注册 config_checker；并指出动态插件需要满足的版本/ABI 约束。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "存储与后端：storage-manager 与 backend traits",
+          "order": 3,
+          "filename": "u11-l3-storage-backends.md",
+          "level": "advanced",
+          "topic": "讲解 storage-manager 插件如何加载后端（Volume）并创建 Storage 实例、Volume/Storage trait 的接口与 Capability，结合 backend-example 与 z_storage。",
+          "learning_goals": [
+            "理解 Volume（后端）与 Storage（实例）的关系",
+            "掌握 Volume/Storage trait 的 put/delete/get/get_all_entries 接口",
+            "知道 Capability（persistence/history）与 storage 的 key 前缀裁剪"
+          ],
+          "source_files": [
+            "plugins/zenoh-plugin-storage-manager/src/lib.rs",
+            "plugins/zenoh-backend-traits/src/lib.rs",
+            "plugins/zenoh-backend-traits/src/config.rs",
+            "plugins/zenoh-backend-example/src/lib.rs",
+            "examples/examples/z_storage.rs"
+          ],
+          "minimal_modules": [
+            "storage-manager",
+            "Volume/Storage trait",
+            "Capability"
+          ],
+          "practice_task": "参考 backend-example 写一份设计草图：实现一个把数据落盘到文件的 Volume（只需描述 create_storage/put/get 的实现思路），并说明 storage-manager 如何通过配置实例化它（待确认具体配置键名）。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l4",
+          "title": "REST 插件：HTTP 接口",
+          "order": 4,
+          "filename": "u11-l4-rest-plugin.md",
+          "level": "advanced",
+          "topic": "讲解 zenoh-plugin-rest 如何用 axum 暴露 HTTP 端点，把 GET/PUT/DELETE 映射到 Zenoh 的 query/publish/delete，并支持 SSE 订阅。",
+          "learning_goals": [
+            "理解 REST 插件把 HTTP 方法映射到 Zenoh 操作",
+            "掌握 GET（query/SSE）/PUT（publish）/DELETE 的端点语义",
+            "知道插件如何复用 runtime 的 Session 与全局 tokio runtime"
+          ],
+          "source_files": [
+            "plugins/zenoh-plugin-rest/src/lib.rs",
+            "plugins/zenoh-plugin-rest/src/config.rs"
+          ],
+          "minimal_modules": [
+            "axum 路由",
+            "query/publish/delete",
+            "SSE 订阅"
+          ],
+          "practice_task": "启动带 rest 插件的 zenohd（--rest-http-port 8000），用 curl PUT 发布一个值、GET 查询它，并用 curl 开启 text/event-stream 订阅验证 SSE；记录每条命令与返回。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "扩展实践：共享内存、高级 pub/sub 与运维",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "共享内存（SHM）零拷贝传输",
+          "order": 1,
+          "filename": "u12-l1-shared-memory.md",
+          "level": "advanced",
+          "topic": "讲解 zenoh-shm 的 provider/client 模型、POSIX 后端、SHM buffer（zshm/zshmmut），以及传输层 shm.rs 的接入与启用方式。",
+          "learning_goals": [
+            "理解 SHM provider/client 的零拷贝协作模型",
+            "掌握 posix SHM provider 的声明与 zshm buffer 的使用",
+            "知道如何在 zenoh 中启用 shared-memory feature 并运行 z_pub_shm/z_sub_shm"
+          ],
+          "source_files": [
+            "commons/zenoh-shm/src/lib.rs",
+            "io/zenoh-transport/src/shm.rs",
+            "examples/examples/z_pub_shm.rs",
+            "examples/examples/z_sub_shm.rs",
+            "examples/examples/z_posix_shm_provider.rs",
+            "examples/examples/z_alloc_shm.rs"
+          ],
+          "minimal_modules": [
+            "ShmProvider/PosixShmClient",
+            "zshm/zshmmut",
+            "传输层 SHM 接入"
+          ],
+          "practice_task": "启用 shared-memory feature，运行 z_posix_shm_provider 配合 z_pub_shm 与 z_sub_shm，观察零拷贝传输；写一段说明 SHM segment 如何在发布端与订阅端共享、避免数据拷贝。",
+          "depends_on": [
+            "u5-l1",
+            "u9-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l2",
+          "title": "高级 pub/sub（zenoh-ext）：缓存、丢包检测与历史恢复",
+          "order": 2,
+          "filename": "u12-l2-advanced-pubsub-ext.md",
+          "level": "advanced",
+          "topic": "讲解 AdvancedPublisher/AdvancedSubscriber 的序列号、心跳丢包检测、PublicationCache 历史缓存与 recovery 机制。",
+          "learning_goals": [
+            "理解 AdvancedPublisher 的缓存与心跳丢包检测",
+            "掌握 AdvancedSubscriber 的历史恢复与 SampleMissListener",
+            "知道 PublicationCache 如何提供历史数据查询"
+          ],
+          "source_files": [
+            "zenoh-ext/src/advanced_publisher.rs",
+            "zenoh-ext/src/advanced_subscriber.rs",
+            "zenoh-ext/src/publication_cache.rs",
+            "zenoh-ext/src/session_ext.rs"
+          ],
+          "minimal_modules": [
+            "AdvancedPublisher",
+            "AdvancedSubscriber/RecoveryConfig",
+            "PublicationCache"
+          ],
+          "practice_task": "用 AdvancedPublisher（带缓存+心跳）发布带序列号的样本，让 AdvancedSubscriber 通过 SampleMissListener 检测人为丢包并触发恢复；记录检测到 Miss 的事件。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l3",
+          "title": "Admin Space 与统计（stats）",
+          "order": 3,
+          "filename": "u12-l3-adminspace-stats.md",
+          "level": "advanced",
+          "topic": "讲解通过 Zenoh key expression 暴露的管理面（adminspace，如 @/<zid>/router/...）与 stats 特性采集的运行指标。",
+          "learning_goals": [
+            "理解 adminspace 如何用 key expression 暴露管理/配置",
+            "掌握 stats 特性暴露的 metrics key 与采集维度",
+            "知道 adminspace 如何与插件状态查询集成"
+          ],
+          "source_files": [
+            "zenoh/src/net/runtime/adminspace.rs",
+            "commons/zenoh-stats/src/lib.rs",
+            "commons/zenoh-stats/src/stats.rs"
+          ],
+          "minimal_modules": [
+            "AdminSpace",
+            "stats/registry",
+            "metrics key"
+          ],
+          "practice_task": "启动带 stats 特性的 zenohd，用 get 查询 @/<zid>/router/metrics 读取传输/路由统计；阅读 stats.rs 列出可采集的指标维度并说明其含义。",
+          "depends_on": [
+            "u7-l3",
+            "u11-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l4",
+          "title": "测试、基准与连接重试",
+          "order": 4,
+          "filename": "u12-l4-testing-benchmarking.md",
+          "level": "advanced",
+          "topic": "讲解项目的测试组织（zenoh/src/tests、zenoh-test）、吞吐/往返基准示例（z_pub_thr/z_ping/z_pong）以及连接重试配置。",
+          "learning_goals": [
+            "掌握用 z_pub_thr/z_sub_thr 测吞吐、z_ping/z_pong 测往返延迟",
+            "理解 zenoh-test 测试辅助 crate 的作用",
+            "知道 connection_retry 配置如何控制断线重连"
+          ],
+          "source_files": [
+            "examples/examples/z_pub_thr.rs",
+            "examples/examples/z_sub_thr.rs",
+            "examples/examples/z_ping.rs",
+            "examples/examples/z_pong.rs",
+            "commons/zenoh-test/src/lib.rs",
+            "commons/zenoh-config/src/connection_retry.rs"
+          ],
+          "minimal_modules": [
+            "吞吐/往返基准",
+            "zenoh-test",
+            "connection_retry"
+          ],
+          "practice_task": "运行 z_pub_thr + z_sub_thr 测一组吞吐（不同 payload 大小），用 z_ping + z_pong 测往返延迟，记录结果；再调整 connection_retry 的重连策略观察断线恢复行为。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
