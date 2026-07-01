@@ -7415,8 +7415,8 @@
     },
     "BerkeleyLab/Bedrock": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "6 篇未完成: ['u4-l4', 'u5-l1', 'u5-l2', 'u5-l3', 'u6-l2']",
-      "last_run_at": "2026-07-01T11:01:27Z",
+      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-07-01T14:30:43Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -7521,7 +7521,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":242804,\"duration_api_ms\":48607,\"num_turns\":7,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196547,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u5-l1": {
           "status": "failed",
@@ -7785,7 +7785,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":539729,\"duration_api_ms\":277566,\"num_turns\":19,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188871,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u6-l1": {
           "status": "failed",
@@ -7913,8 +7913,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/chipsalliance/chisel/chisel-tutorial",
       "last_head": "b2a0e030da9a3e90b8221436b5317afb370f3347",
-      "last_run_at": "2026-07-01T11:01:27Z",
-      "last_error": "6 篇未完成: ['u5-l4', 'u6-l1', 'u6-l2', 'u6-l3', 'u6-l4']",
+      "last_run_at": "2026-07-01T14:30:43Z",
+      "last_error": "quota exhausted; will resume next window",
       "abandoned": []
     },
     "google-coral/coralnpu": {
@@ -8057,7 +8057,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":261338,\"duration_api_ms\":58456,\"num_turns\":10,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189609,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u6-l2": {
           "status": "done",
@@ -8223,7 +8223,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/google-coral/coralnpu/coralnpu-tutorial",
       "last_head": "a8281b0d5701d8939cf9ea424b1cd34e18c43230",
-      "last_run_at": "2026-07-01T11:01:27Z",
+      "last_run_at": "2026-07-01T14:30:43Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "crossbeam-rs/crossbeam": {
@@ -8325,7 +8325,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":211889,\"duration_api_ms\":6676,\"num_turns\":3,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]["
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":195181,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u3-l4": {
           "status": "failed",
@@ -8467,8 +8467,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/crossbeam-rs/crossbeam/crossbeam-tutorial",
       "last_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
-      "last_run_at": "2026-07-01T11:01:27Z",
-      "last_error": "6 篇未完成: ['u3-l3', 'u3-l4', 'u3-l5', 'u3-l7', 'u3-l9']",
+      "last_run_at": "2026-07-01T14:30:43Z",
+      "last_error": "quota exhausted; will resume next window",
       "abandoned": []
     },
     "NVlabs/cuda-oxide": {},
