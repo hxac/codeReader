@@ -1,0 +1,486 @@
+{
+  "project": "cuda-oxide",
+  "head": "52e7078d255e1b085566095c39f5c8a697b5125f",
+  "rationale": "cuda-oxide 是一个把纯 Rust 单源编译到 CUDA PTX 的自定义 rustc 后端，横跨\"编译器、宿主运行时、设备端 intrinsics\"三大领域，因此学习顺序按\"先会跑、再会写、再懂原理、最后能扩展\"四段递进设计。U1（入门）让读者建立项目定位与端到端流水线直觉，并能用 cargo oxide 跑通 vecadd。U2/U3（进阶）进入设备端编程与宿主运行时两条主线，覆盖 #[kernel] 宏、类型安全的线程索引、共享内存/同步、设备内存搬运、同步与异步启动。U4（进阶）给出编译流水线的整体地图（Rust MIR→dialect-mir→LLVM dialect→LLVM IR→PTX），作为连接\"使用者\"与\"实现者\"的桥梁。U5（专家）聚焦 Hopper/Blackwell 高级设备能力：warp 级编程、作用域原子、异步屏障与异步拷贝、集群与分布式共享内存、TMA、WGMMA/tcgen05 矩阵乘加速器。U6（专家）深潜编译器各阶段并给出\"端到端新增一个 intrinsic\"的扩展模板。U7（专家）收束于测试、调试与工程化：compile_fail 安全契约、cuda-gdb 调试、符号命名/制品嵌入契约、差分模糊测试。讲义间通过 depends_on 形成清晰依赖链——设备端进阶都依赖 U2 的内核与索引安全；编译器深潜都依赖 U4 的流水线地图；扩展类讲义依赖对应的实现层讲义。大型项目拆成 7 单元 35 篇，逻辑优先于数量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 cuda-oxide",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与编译流水线总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 cuda-oxide 是什么：一个把纯 Rust 的 #[kernel] 函数编译成 CUDA PTX 的自定义 rustc 后端，实现单源（host/device 同文件）编译，并给出 Rust→MIR→Pliron IR→LLVM IR→PTX 的端到端流水线鸟瞰。",
+          "learning_goals": [
+            "理解项目定位、alpha 状态与适用场景",
+            "画出从 Rust 源码到 GPU 上运行 PTX 的端到端流水线",
+            "区分 host 路径（标准 LLVM 后端）与 device 路径（cuda-oxide 流水线）"
+          ],
+          "source_files": [
+            "README.md",
+            "crates/rustc-codegen-cuda/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "README 项目概述与状态",
+            "rustc-codegen-cuda/lib.rs 的代码生成后端架构图",
+            "host 与 device 分流",
+            "端到端编译流水线"
+          ],
+          "practice_task": "阅读 README 与 rustc-codegen-cuda/src/lib.rs 顶部的 ASCII 架构图，用自己的话写出一段 Rust 代码从源码到 GPU PTX 经过的阶段，并标注哪些属于 host、哪些属于 device。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "Workspace 与 crate 地图",
+          "order": 2,
+          "filename": "u1-l2-workspace-and-crate-map.md",
+          "level": "beginner",
+          "topic": "解析 workspace 成员与三层 crate 划分：用户层（cuda-device/cuda-core/cuda-async/cuda-host/cuda-macros）、编译器层（dialect-mir/mir-importer/mir-lower 等）、工具层（cargo-oxide），并说明为何 rustc-codegen-cuda 不在 workspace 内。",
+          "learning_goals": [
+            "说出每个 workspace 成员 crate 的职责",
+            "区分用户层、编译器层、工具层三类 crate",
+            "理解 rustc-codegen-cuda 为何需要特殊构建"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "workspace members 列表",
+            "用户面 crate 概览表",
+            "编译器 crate 概览表",
+            "rustc-codegen-cuda 的特殊构建说明"
+          ],
+          "practice_task": "对照 Cargo.toml 的 members 列表与 README 的 crate 概览表，绘制一张分层依赖草图，标注每个 crate 属于设备端/宿主端/编译器/工具哪一层。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链与 cargo-oxide 驱动",
+          "order": 3,
+          "filename": "u1-l3-toolchain-and-cargo-oxide.md",
+          "level": "beginner",
+          "topic": "讲解固定的 nightly 工具链与 CUDA/LLVM/clang 依赖，以及 cargo-oxide 子命令（run/build/pipeline/doctor/new/setup）如何驱动整个构建流程，并介绍 codegen 后端的发现顺序与 CUDA_OXIDE_* 环境变量。",
+          "learning_goals": [
+            "了解工具链与外部依赖要求",
+            "掌握 cargo-oxide 各子命令的用途",
+            "理解 backend 发现顺序与环境变量配置"
+          ],
+          "source_files": [
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "crates/cargo-oxide/src/main.rs",
+            "crates/cargo-oxide/README.md"
+          ],
+          "minimal_modules": [
+            "rust-toolchain.toml 工具链",
+            "cargo-oxide CLI 与子命令",
+            "doctor/setup 环境校验",
+            "backend 发现与 CUDA_OXIDE_* 变量"
+          ],
+          "practice_task": "运行 `cargo oxide doctor`（或阅读其逻辑）列出本机缺失的前置依赖；再用 `cargo oxide new hello && cargo oxide run` 走通最小示例。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Hello GPU：vecadd 端到端",
+          "order": 4,
+          "filename": "u1-l4-hello-gpu-vecadd.md",
+          "level": "beginner",
+          "topic": "以 vecadd 为最小编译单元，串起写 #[kernel]→cuda-oxide 编译→宿主加载→启动→回收结果的完整闭环，建立对单源编译模型的直观感受。",
+          "learning_goals": [
+            "读懂一个最小的 #[cuda_module] 内核与宿主 main",
+            "跑通 vecadd 并核对 GPU 计算结果",
+            "建立单源 host/device 编译的体感"
+          ],
+          "source_files": [
+            "crates/rustc-codegen-cuda/examples/vecadd/src/main.rs",
+            "crates/rustc-codegen-cuda/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "#[cuda_module] mod 块",
+            "#[kernel] fn vecadd",
+            "宿主 main 与 DeviceBuffer",
+            "to_host_vec 结果回收"
+          ],
+          "practice_task": "在 vecadd 基础上把核函数改成向量减法或数乘，重新 `cargo oxide run vecadd` 并核对输出正确。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "示例导览：cuda-oxide 能做什么",
+          "order": 5,
+          "filename": "u1-l5-examples-tour.md",
+          "level": "beginner",
+          "topic": "用 examples/ 目录里 60+ 示例勾勒能力边界——泛型/闭包、原子、集群、异步、Blackwell 张量核、GEMM SoL、设备 FFI 等，帮读者选定后续学习方向。",
+          "learning_goals": [
+            "了解 examples 目录的组织与硬件要求",
+            "建立项目能力矩阵的总体印象",
+            "为后续学习选定切入点"
+          ],
+          "source_files": [
+            "README.md",
+            "crates/rustc-codegen-cuda/examples/async_vecadd/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/atomics/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/cluster/src/main.rs"
+          ],
+          "minimal_modules": [
+            "examples 目录与 README 示例表",
+            "能力矩阵概览",
+            "硬件要求（sm_xx）",
+            "选型指引"
+          ],
+          "practice_task": "挑选 3 个示例，分别用 `cargo oxide build`（无需 GPU）确认能编译，并为每个示例写一句话总结其演示的能力。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：编写 GPU 内核",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "#[kernel] 与 #[cuda_module] 宏",
+          "order": 1,
+          "filename": "u2-l1-kernel-and-cuda-module-macros.md",
+          "level": "intermediate",
+          "topic": "解析 #[cuda_module] 如何扫描模块里的 #[kernel] 函数、生成带类型的 launch 方法与 load() 加载器，以及保留符号命名约定如何把宏与 codegen 后端绑定。",
+          "learning_goals": [
+            "理解 #[kernel] 与 #[cuda_module] 的展开结果",
+            "说明 load() 如何加载并暴露带类型的启动方法",
+            "认识宏与后端之间的保留符号契约"
+          ],
+          "source_files": [
+            "crates/cuda-macros/src/lib.rs",
+            "crates/rustc-codegen-cuda/examples/vecadd/src/main.rs",
+            "crates/reserved-oxide-symbols/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "#[kernel] 展开",
+            "#[cuda_module] 生成 LoadedModule",
+            "保留符号前缀",
+            "load() 加载器"
+          ],
+          "practice_task": "给一个已有 #[kernel] 模块新增第二个核函数，观察宏自动生成了 module.<新核>(...) 方法，并解释它如何对应到 PTX 入口符号。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "线程索引与类型安全",
+          "order": 2,
+          "filename": "u2-l2-thread-indexing-and-safety.md",
+          "level": "intermediate",
+          "topic": "讲解 thread::index_1d/2d 返回的 ThreadIndex 见证类型如何用生命周期与 !Copy/!Send/!Sync 在编译期防止线程索引被串用，以及 DisjointSlice::get_mut(idx) 的越界检查如何消除并行写入的数据竞争。",
+          "learning_goals": [
+            "理解 ThreadIndex 见证类型与 Index1D/Index2D 索引空间",
+            "说明类型系统如何在编译期阻止索引洗钱(laundering)与跨 scope 逃逸",
+            "掌握 DisjointSlice 的越界安全访问模式"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/thread.rs",
+            "crates/cuda-device/src/disjoint.rs",
+            "crates/cuda-device/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "ThreadIndex 见证类型",
+            "Index1D/Index2D 索引空间",
+            "DisjointSlice 类型安全访问",
+            "越界与 laundering 防护"
+          ],
+          "practice_task": "故意写一段把 ThreadIndex 存进结构体跨 scope 使用的代码，观察编译失败信息；再用 DisjointSlice::get_mut 重写一个越界安全的写入。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "共享内存与同步",
+          "order": 3,
+          "filename": "u2-l3-shared-memory-and-sync.md",
+          "level": "intermediate",
+          "topic": "介绍 SharedArray<T,N> 静态共享内存与 DynamicSharedArray 动态共享内存的声明与使用，以及 sync_threads、threadfence 系列内存栅栏如何配合共享内存做线程块内协作。",
+          "learning_goals": [
+            "声明并使用静态/动态共享内存",
+            "理解 sync_threads 块级屏障的语义",
+            "掌握 threadfence 系列栅栏的作用域差异"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/shared.rs",
+            "crates/cuda-device/src/fence.rs",
+            "crates/rustc-codegen-cuda/examples/addressof_sharedarray/src/main.rs"
+          ],
+          "minimal_modules": [
+            "SharedArray 声明",
+            "DynamicSharedArray",
+            "sync_threads",
+            "threadfence 系列"
+          ],
+          "practice_task": "写一个核函数：每个线程把自己的线程号写入共享内存，sync_threads 后让线程 0 求和并写回全局内存。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "从宿主启动内核",
+          "order": 4,
+          "filename": "u2-l4-launching-kernels.md",
+          "level": "intermediate",
+          "topic": "讲解 LaunchConfig（grid/block/shared）、LaunchConfig::for_num_elems 的便捷构造，以及 cuda-core/cuda-host 如何把参数压栈并调用 cuLaunchKernel。",
+          "learning_goals": [
+            "理解 LaunchConfig 的字段与 grid/block 含义",
+            "掌握 for_num_elems 的自动配置推导",
+            "了解参数 marshalling 与 cuLaunchKernel 调用"
+          ],
+          "source_files": [
+            "crates/cuda-core/src/launch.rs",
+            "crates/cuda-host/src/launch.rs",
+            "crates/cuda-core/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "LaunchConfig 结构",
+            "for_num_elems 推导",
+            "参数 marshalling",
+            "cuLaunchKernel 调用"
+          ],
+          "practice_task": "手动构造一个 LaunchConfig（grid/block）启动 vecadd，再对比 for_num_elems 自动算出的配置，理解 grid/block 映射关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "设备内存与数据搬运",
+          "order": 5,
+          "filename": "u2-l5-device-memory-and-data-movement.md",
+          "level": "intermediate",
+          "topic": "介绍 DeviceBuffer<T> 的 RAII 管理、from_host/to_host_vec/zeroed 等搬运 API、DeviceCopy trait，以及 PinnedHostBuffer 锁页内存对传输带宽的意义。",
+          "learning_goals": [
+            "使用 DeviceBuffer 进行设备内存分配与搬运",
+            "理解 DeviceCopy trait 的约束",
+            "认识锁页内存对传输性能的作用"
+          ],
+          "source_files": [
+            "crates/cuda-core/src/device_buffer.rs",
+            "crates/cuda-core/src/memory.rs",
+            "crates/cuda-core/src/pinned_host_buffer.rs"
+          ],
+          "minimal_modules": [
+            "DeviceBuffer RAII",
+            "from_host/to_host_vec/zeroed",
+            "DeviceCopy trait",
+            "PinnedHostBuffer"
+          ],
+          "practice_task": "用 PinnedHostBuffer 作为中转，写一个 host→device→host 的搬运核函数，对比普通 DeviceBuffer 路径体会带宽差异。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "闭包与泛型上 GPU",
+          "order": 6,
+          "filename": "u2-l6-closures-and-generics.md",
+          "level": "intermediate",
+          "topic": "讲解泛型核函数的单态化（每个具体类型生成独立 PTX 入口）、闭包捕获如何被标量化成 kernel 参数，以及 type_id_u128 如何为泛型核生成稳定的 PTX 名。",
+          "learning_goals": [
+            "理解泛型核的单态化与多入口生成",
+            "说明闭包捕获如何被标量化传入 kernel",
+            "了解 type_id_u128 在泛型 kernel 命名中的作用"
+          ],
+          "source_files": [
+            "crates/rustc-codegen-cuda/examples/host_closure/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/generic/src/main.rs",
+            "crates/cuda-host/src/type_id.rs",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "泛型单态化",
+            "闭包捕获标量化",
+            "type_id_u128",
+            "host_closure/generic 示例"
+          ],
+          "practice_task": "基于 host_closure 示例，写一个泛型 map<T,F> 核函数，分别用 f32 和 i32 启动，确认生成了两个不同 PTX 入口。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：宿主运行时",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "cuda-core 安全封装",
+          "order": 1,
+          "filename": "u3-l1-cuda-core-safe-wrappers.md",
+          "level": "intermediate",
+          "topic": "解析 CudaContext/CudaStream/CudaModule/CudaEvent 等 RAII 类型如何安全包裹 CUDA Driver API，包括上下文绑定、流的 fork/join 与事件同步。",
+          "learning_goals": [
+            "掌握 CudaContext/CudaStream 的 RAII 生命周期",
+            "使用 CudaEvent 做流间同步与计时",
+            "理解安全封装背后的 Driver API 映射"
+          ],
+          "source_files": [
+            "crates/cuda-core/src/context.rs",
+            "crates/cuda-core/src/stream.rs",
+            "crates/cuda-core/src/module.rs",
+            "crates/cuda-core/src/event.rs"
+          ],
+          "minimal_modules": [
+            "CudaContext",
+            "CudaStream fork/join",
+            "CudaModule",
+            "CudaEvent"
+          ],
+          "practice_task": "创建两个 stream，分别启动核函数，用 CudaEvent 测量并对比它们的执行时间。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "模块加载与内嵌制品",
+          "order": 2,
+          "filename": "u3-l2-module-loading-and-embedded-artifacts.md",
+          "level": "intermediate",
+          "topic": "讲解编译期把 PTX 打包成 .oxart 制品段、链接锚符号防止被 dead-strip、运行时 cuda-host 从当前可执行文件中发现并加载内嵌 bundle 的全过程。",
+          "learning_goals": [
+            "理解 .oxart 制品 wire 格式与 entry 记录",
+            "说明锚符号如何防止 lib crate 的 bundle 被裁剪",
+            "追踪运行时 bundle 发现与加载流程"
+          ],
+          "source_files": [
+            "crates/cuda-host/src/embedded.rs",
+            "crates/cuda-core/src/embedded.rs",
+            "crates/oxide-artifacts/src/lib.rs",
+            "crates/rustc-codegen-cuda/src/lib.rs"
+          ],
+          "minimal_modules": [
+            ".oxart bundle 格式",
+            "artifact 锚符号",
+            "运行时 bundle 发现",
+            "load_embedded_module"
+          ],
+          "practice_task": "用 `cargo oxide pipeline vecadd` 找到生成的 .oxart/.ll，对照 oxide-artifacts 的 bundle 格式说明，指出 PTX payload 与 entry 记录分别在哪里。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "异步执行模型",
+          "order": 3,
+          "filename": "u3-l3-async-execution-model.md",
+          "level": "intermediate",
+          "topic": "介绍 cuda-async 的惰性 DeviceOperation：描述计算但不绑定流，.sync()/.await 时才调度执行；讲解 DeviceFuture 的三态机与 cuLaunchHostFunc 回调唤醒。",
+          "learning_goals": [
+            "理解 DeviceOperation 的惰性求值模型",
+            "说明 DeviceFuture 的三态机与回调唤醒机制",
+            "掌握 *_async 启动方法的使用"
+          ],
+          "source_files": [
+            "crates/cuda-async/src/device_operation.rs",
+            "crates/cuda-async/src/device_future.rs",
+            "crates/cuda-async/src/lib.rs",
+            "crates/rustc-codegen-cuda/examples/async_vecadd/src/main.rs"
+          ],
+          "minimal_modules": [
+            "DeviceOperation trait",
+            "DeviceFuture 三态机",
+            "回调唤醒",
+            "*_async 启动"
+          ],
+          "practice_task": "把 vecadd 改写为 async 版本（参考 async_vecadd），用 .sync() 提交并解释它何时真正在 GPU 上执行。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "调度策略与组合子",
+          "order": 4,
+          "filename": "u3-l4-scheduling-and-combinators.md",
+          "level": "intermediate",
+          "topic": "讲解 SchedulingPolicy（StreamPoolRoundRobin/SingleStream）如何为 DeviceOperation 选流，以及 and_then/zip! 如何在不接触 GPU 的情况下构建依赖图，配合 reclaim 处理取消后的延迟回收。",
+          "learning_goals": [
+            "理解调度策略如何为操作分配 stream",
+            "使用 and_then/zip! 组合操作依赖图",
+            "了解取消操作时 reclaim 的延迟回收"
+          ],
+          "source_files": [
+            "crates/cuda-async/src/scheduling_policies.rs",
+            "crates/cuda-async/src/device_operation.rs",
+            "crates/cuda-async/src/reclaim.rs",
+            "crates/rustc-codegen-cuda/examples/async_mlp/src/main.rs"
+          ],
+          "minimal_modules": [
+            "SchedulingPolicy",
+            "and_then/zip 组合",
+            "reclaim 延迟回收",
+            "async_mlp 流水线"
+          ],
+          "practice_task": "用 and_then 串联两个核函数（如 scale→relu），再用 zip! 并行两个独立启动，画出依赖图。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：编译流水线总览",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "后端入口与 host/device 分流",
+          "order": 1,
+          "filename": "u4-l1-backend-entry-and-split.md",
+          "level": "intermediate",
+          "topic": "解析 __rustc_codegen_backend 入口、CudaCodegenBackend 如何包装 rustc_codegen_llvm，以及 codegen_crate 如何按"
+        }
+      ]
+    }
+  ]
+}

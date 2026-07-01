@@ -1,7 +1,7 @@
 {
   "project": "coralnpu",
-  "head": "a8281b0d5701d8939cf9ea424b1cd34e18c43230",
-  "rationale": "CoralNPU 是一个大型硬件项目（约 995 个文件），采用「Chisel 设计标量核/SoC/总线 + SystemVerilog 实现 RVV 向量/矩阵后端 + C++/Python 软件工具链与仿真」的混合架构。学习路线遵循「先宏观后微观、先能用再读懂、标量在前向量在后」的原则：单元 1-2 帮助初学者从零认识项目并跑通第一个程序（建立正反馈）；单元 3 把读者带到 SoC 顶层与 AXI/TileLink 总线集成这一宏观骨架；单元 4-6 自顶向下拆解标量核的前端（取指/译码/派发/退休）、执行单元（ALU/BRU/MLU/DVU/CSR/FPU）与存储子系统（LSU/TCM/Cache），这是理解任何处理器的基础；单元 7 单独深入 SystemVerilog 实现的 RVV 向量后端与 MAC 外积引擎，这是 CoralNPU 作为「ML 加速器」的核心差异化所在，因此放在标量核之后；单元 8-9 覆盖外设/DMA/调试/总线完整性等使能模块；单元 10-11 把视角拉回到软件与验证——RVV intrinsics 编程、litert-micro 算子、MobileNet 端到端仿真，以及 Verilator/VCS/UVM/cocotb/FPGA 全流程。每篇讲义之间用 depends_on 构成清晰的有向依赖，第一单元为零基础起点，后续逐层解锁，保证读者始终能找到前置知识。本次为 incremental 更新：自上次 HEAD 以来只有一次提交「toolchain: Upgrade and switch to multilib」，影响面集中在 toolchain/（构建脚本切换到 multilib、cc_toolchain_config.bzl 增加 is_rv64/toolchain_prefix 等可配置项、wrappers 自动识别 riscv64/riscv32 前缀）、WORKSPACE（预编译工具链归档由 toolchain_kelvin_v2 更名为 toolchain_coralnpu_v2 并改用 .tar.xz）以及少量 cocotb 测试（i++ 改写为 i=i+1 以适配新工具链代码生成）。其中已生成的 u1-l3（引用了 WORKSPACE）与 u2-l1（引用了 cc_toolchain_config.bzl / coralnpu_gloss.cc）需要小幅 update 以刷新链接行号并补充 multilib 说明；u1-l1/u1-l2/u2-l2/u2-l3 引用的源码未变故 keep；其余尚未生成的讲义保持 new 由 worker 继续生成。该工具链改动属于对既有工具链机制的升级而非新增模块，故不新增讲义。",
+  "head": "1406dc5a856fe5edb2193ce35640b6afe4d8be73",
+  "rationale": "本次为 incremental 更新。自上次 HEAD（a8281b0d）以来仅有一次提交「Add shfmt, cmake, build-ninja to docker container」，只修改了 utils/coralnpu.dockerfile，为其 apt 安装列表新增 cmake、ninja-build、shfmt 三个开发容器工具包（+3 行，无文件增删）。这是一次纯粹的开发环境/容器镜像打包调整，不触及任何讲义所讲解的硬件源码（hdl/chisel、hdl/verilog）、软件（sw/）、工具链配置、Bazel 规则、文档或测试。核对所有 44 篇讲义的 source_files，没有任何一篇引用 utils/coralnpu.dockerfile；唯一沾边的是 u1-l2（目录结构）在描述 utils/ 时泛泛提到「dockerfile」，该描述至今仍准确（dockerfile 仍在 utils/，且该目录文件数仍为 15，未增未减），故亦无需 update。上一轮因 multilib 工具链变更而标记为 update 的 u1-l3 与 u2-l1，其更新内容已在上一轮生成时落地（讲义文件已存在），本轮新 diff 不再触及它们，因此降级为 keep。综上：已生成的 37 篇讲义全部 keep，尚未生成的 7 篇（u6-l1、u6-l3、u7-l1、u7-l2、u11-l2、u11-l3、u11-l4）继续标记为 new 等待 worker 生成。整体学习路线（单元 1-2 从零上手、单元 3 SoC/总线宏观骨架、单元 4-6 标量核前端/执行/存储、单元 7 RVV 向量矩阵后端、单元 8-9 外设/DMA/调试/总线完整性、单元 10-11 ML 工作负载与验证/FPGA）保持不变。",
   "units": [
     {
       "id": "u1",
@@ -90,7 +90,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "update"
+          "action": "keep"
         }
       ]
     },
@@ -129,7 +129,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -215,7 +215,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -250,7 +250,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -280,7 +280,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -309,7 +309,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -338,7 +338,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -365,7 +365,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -400,7 +400,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -430,7 +430,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -454,7 +454,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -481,7 +481,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -516,7 +516,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -546,7 +546,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -574,7 +574,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -603,7 +603,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -668,7 +668,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -793,7 +793,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -822,7 +822,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -851,7 +851,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l6",
@@ -879,7 +879,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -914,7 +914,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -940,7 +940,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -967,7 +967,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -993,7 +993,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l5",
@@ -1020,7 +1020,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1055,7 +1055,7 @@
             "u5-l3",
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1080,7 +1080,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1107,7 +1107,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1145,7 +1145,7 @@
             "u2-l2",
             "u7-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1175,7 +1175,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1205,7 +1205,7 @@
             "u10-l2",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1243,7 +1243,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
