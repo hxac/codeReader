@@ -2,368 +2,295 @@
 
 ## 1. 本讲目标
 
-本讲紧接 u3-l1（channel 总览与基本使用）。在上一讲里，我们只看了 `channel.rs` 的公共方法外壳——`unbounded()` / `bounded()` 造出通道，`send` / `recv` 走 `match flavor` 派发。但我们刻意回避了两个底层问题：
+本讲承接 u3-l1（channel 总览与基本使用），从「公共接口层」往下钻一层，只读两个文件：
 
-1. **多个 `Sender` / `Receiver` 共享同一个通道，谁来释放它？** 你可以 `s.clone()` 出任意多个发送端，分别 `move` 到不同线程；当它们一个个 `drop` 时，通道这块堆内存到底在哪一刻、由谁来回收？
-2. **当通道“断了”，`send` / `recv` / `try_send` / `recv_timeout` 各自返回什么错误？** 为什么有的错误带回原消息、有的不带？
+- `crossbeam-channel/src/counter.rs`：管理多份 `Sender`/`Receiver` 句柄生命周期的引用计数内核。
+- `crossbeam-channel/src/err.rs`：定义 `send`/`recv`/`select` 全家桶的错误类型。
 
-学完本讲，你应当能够：
+学完后你应当能够：
 
-- 理解 `Sender` / `Receiver` 共享的 `Counter` 结构，看清 crossbeam-channel 是如何**手动**实现引用计数（而非用 `Arc`）的；
-- 掌握 `acquire` / `release` 的增减计数逻辑，以及 `destroy` 标志如何保证「整条通道恰好被销毁一次」；
-- 认识 `err.rs` 中发送侧、接收侧、select 侧三大类错误枚举，能说出每种错误分别在什么条件下产生、为什么发送错误要带回原消息。
+1. 画出「多个 `Sender` 与多个 `Receiver` 共享同一份堆上 `Counter`」的内存模型，说出 `senders`/`receivers`/`destroy`/`chan` 四个字段各管什么。
+2. 复述 `acquire`（克隆）/`release`（丢弃）的引用计数协议，并解释「为什么通道不会被重复释放、也不会泄漏」——关键是 `destroy` 标志的「你先走、我收尾」握手。
+3. 看懂 `err.rs` 里 10 个错误类型各自的触发条件，并知道阻塞版 `send`/`recv` 的错误如何通过 `From` 转换融入 `try_*`/`*_timeout` 的更丰富错误类型。
 
----
+本讲**不**涉及具体 flavor（array/list/zero）的缓冲算法，也不涉及阻塞唤醒机制——前者是 u3-l3 起的内容，后者是 u3-l7 的主题。本讲的视角是：当你在多个线程里 `clone()`、再 `drop()` 这些句柄时，通道的「计数」与「错误」是如何被精确记账的。
 
 ## 2. 前置知识
 
-在进入源码前，先厘清几个本讲会用到的概念。
+在进入源码前，先建立三个直觉。本讲假设你已读过 u3-l1，知道 `unbounded()`/`bounded(cap)` 会产出一对 `(Sender, Receiver)`，且二者都能 `clone()`（crossbeam-channel 是 MPMC）。
 
-- **引用计数（reference counting, RC）**：一块内存被多个所有者共享时，用一个整数记录“当前有几个所有者”；每多一个所有者计数 `+1`（clone），每离开一个计数 `-1`（drop），计数归零时释放内存。Rust 标准库的 `Arc` 就是线程安全的引用计数。
-- **RAII 与 `Drop`**：Rust 通过 `Drop` trait 在值离开作用域时自动执行清理。crossbeam-channel 正是靠给 `Sender` / `Receiver` 实现 `Clone`（计数 `+1`）和 `Drop`（计数 `-1`）来管理通道生命周期的。
-- **`AtomicUsize` 与 `Ordering`**：在多线程下增减计数必须用原子操作。本讲会遇到三种内存序：`Relaxed`（只保证自身原子，不与其它读写排序）、`AcqRel`（既 Acquire 又 Release）、`SeqCst`（全局顺序一致）。我们会在用到处解释为什么这样选。
-- **`Box::leak` / `Box::from_raw` / `NonNull`**：标准 `Box` 在 drop 时会自动释放堆内存；`Box::leak` 故意“泄漏”它、交出一个 `&mut T`，使这块内存**不再自动释放**，必须由人手动 `Box::from_raw` 回收。`NonNull<T>` 是「保证非空」的裸指针包装。这三者组合起来，就是 crossbeam-channel 手写引用计数的物理基础。
-- **MPMC 通道（承接 u3-l1）**：crossbeam-channel 是多生产者多消费者模型，`Sender` 和 `Receiver` 都可以 `clone()`，因此一条通道的两端各自都可能被多线程共享。
+### 2.1 为什么需要引用计数
 
----
+`Sender` 和 `Receiver` 都是**可克隆的句柄（handle）**：你克隆出来的一堆 `Sender`，背后指向的是**同一个**通道内部状态（缓冲区、阻塞线程队列等）。这份共享状态只能分配**一次**、也必须释放**一次**。于是需要一个独立的「账本」记录：当前有几个发送端、几个接收端还活着。这个账本就是 `Counter`。
+
+这与 `Arc` 的思想一致，但这里有一个 `Arc` 没有的特殊点：**发送端和接收端是两本独立的账**，它们要协作决定「谁负责拔管子（disconnect）」「谁负责埋（deallocate）」。
+
+### 2.2 两个易混词：disconnect 与 deallocate
+
+- **disconnect（断开）**：通知通道的 flavor「这一侧已经没人了」。例如最后一个 `Sender` 被丢弃时，要唤醒所有正阻塞在 `recv` 上的线程——因为它们再等也等不到消息了。这是一个**逻辑事件**。
+- **deallocate（释放内存）**：把堆上的 `Counter`（连同它持有的 flavor）真正 `drop` 掉、归还内存。这是一个**物理事件**。
+
+关键洞察：**disconnect 发生两次（发送端一次、接收端各一次），但 deallocate 只能发生一次。** 本讲的核心就是看清楚这「两次断开、一次释放」是如何被 `destroy` 标志安全协调的。
+
+### 2.3 错误类型为什么要分这么多
+
+同样是「发送失败」，`send`（阻塞）只会因为「通道断开」失败；而 `try_send`（非阻塞）还可能因为「通道满」失败；`send_timeout` 还多一种「超时」。每种调用方式的失败原因集合不同，所以 Rust 用**不同的错误类型**精确表达「这次调用可能以哪些方式失败」，让调用者被迫在编译期就把每种情况都处理掉（典型的 `Result` + 枚举模式）。
 
 ## 3. 本讲源码地图
 
-本讲主要精读两个文件，并借助第三个文件看清它们如何被接线：
+| 文件 | 作用 | 本讲关注点 |
+|------|------|-----------|
+| [crossbeam-channel/src/counter.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs) | 引用计数内核（`pub(crate)`，内部类型） | `Counter` 结构、`new`、`Sender`/`Receiver` 的 `acquire`/`release`、`destroy` 握手 |
+| [crossbeam-channel/src/err.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs) | 错误类型家族 | 10 个错误类型、触发条件、`From` 转换、`into_inner`/`is_*` 辅助方法 |
+| [crossbeam-channel/src/channel.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs)（部分） | 公共 `Sender<T>`/`Receiver<T>` 把 counter 接入 | `Clone::clone` 调 `acquire`、`Drop::drop` 调 `release`、`send` 的错误收窄、`unsafe impl Send/Sync` |
 
-| 文件 | 作用 |
-| --- | --- |
-| [`crossbeam-channel/src/counter.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs) | 通道的**引用计数内核**：`Counter<C>` 结构、`new` 构造、`Sender<C>` / `Receiver<C>` 句柄及其 `acquire` / `release`。 |
-| [`crossbeam-channel/src/err.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs) | 全部**错误类型**的定义：发送侧 / 接收侧 / select 侧共 10 个错误类型，及其 `Debug` / `Display` / `Error` / `From` 实现。 |
-| [`crossbeam-channel/src/channel.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs) | 公共 API 外壳，本讲只看其中 `counter::new` 的调用点，以及 `Sender` / `Receiver` 的 `Clone` / `Drop` 如何把 `acquire` / `release` 接到 `counter.rs` 上。 |
-
-> 提示：`counter.rs` 里的 `Counter` / `Sender` / `Receiver` 都是 `pub(crate)` 的内部类型，**不要**把它们和 `channel.rs` 里对外公开的 `Sender<T>` / `Receiver<T>` 搞混。后者（公开的）把前者（内部的计数句柄）包了一层 `flavor` 枚举。本讲的 `Sender` / `Receiver` 若无特别说明，指 `counter.rs` 的内部句柄。
+> 层次提示：`counter.rs` 里的 `Sender<C>`/`Receiver<C>` 是**内部类型**（`pub(crate)`），泛型 `C` 是具体 flavor 的内部通道（如 `flavors::list::Channel<T>`）；你在应用代码里用的 `crossbeam_channel::Sender<T>` 是 `channel.rs` 里的公共类型，它用一个 `SenderFlavor<T>` 枚举把 `counter::Sender<各 flavor>` 包起来再 `match` 派发（详见 u3-l3）。本讲聚焦最底层的 `Counter` 这一层，除非特别说明，文中 `Sender`/`Receiver` 指 `counter.rs` 的内部句柄。
 
 ---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 Counter：通道的共享核心与手动引用计数
+### 4.1 Counter：引用计数的共享骨架
 
 #### 4.1.1 概念说明
 
-一条通道在堆上只有**一份**真实状态（缓冲区、阻塞队列、断开标志等），但它的发送端和接收端都可能被 `clone` 出很多份，散落在不同线程。于是天然存在「共享所有权」问题：这块内存归谁管？什么时候释放？
+`Counter<C>` 是一块**堆上的共享账本**，被同一通道的所有 `Sender` 克隆和所有 `Receiver` 克隆共同指向。它持有四个字段：
 
-一个自然的想法是用 `Arc`。但 crossbeam-channel **没有**用 `Arc`，而是手写了一套引用计数，原因有二：
+- `senders: AtomicUsize` —— 当前存活的发送端句柄数量。
+- `receivers: AtomicUsize` —— 当前存活的接收端句柄数量。
+- `destroy: AtomicBool` —— 「谁负责收尾」的握手标志（详见 4.2）。
+- `chan: C` —— 真正的通道实现（某个 flavor），内联在 `Counter` 里。
 
-1. **通道的销毁语义比普通 `Arc` 复杂**：它必须做到「整条通道恰好被销毁一次」，而且回收动作由「最后一个发送端」或「最后一个接收端」中**后离开的那一方**完成（见 4.2）。手写计数可以把这个两阶段销毁协议和断开通知（disconnect）紧耦合在一起。
-2. **性能与布局**：手写计数把 `senders` / `receivers` 两个计数和通道状态 `chan` 放进**同一个**分配里，避免 `Arc` 套 `Arc` 的多层间接。
+为什么用堆 + 指针，而不是把状态直接放进 `Sender`？因为 `Sender` 要被克隆成多份、分散到不同线程，每份都只是「一个瘦指针」。共享状态必须有一个稳定地址——所以 `counter::new` 用 `Box::leak` 把 `Counter` 钉在堆上，永不移动，再把它的地址以 `NonNull` 的形式塞进每个句柄。
 
-这套机制的“主角”就是 `Counter<C>`：`C` 是具体 flavor 的通道类型（如 `flavors::list::Channel<T>`）。所有 clone 出来的发送端、接收端，手里拿的都只是**指向同一份 `Counter` 的裸指针**。
+这与标准库 `Arc` 形似但**不**用 `Arc`：通道需要两本独立的账与一个跨两侧的销毁握手，`Arc` 的单一计数表达不了；而且把两个计数与 flavor 状态放进**同一块**分配，也避免了 `Arc` 套 `Arc` 的多层间接。
 
 #### 4.1.2 核心流程
 
-一条通道从创建到销毁的引用计数流程大致是：
+通道从创建到销毁的生命周期可以画成：
 
-1. **构造**：`counter::new(chan)` 在堆上分配一个 `Counter`，`senders = 1`、`receivers = 1`，返回一对 `Sender` / `Receiver`，两者持有**同一个** `Counter` 指针。
-2. **克隆**（`acquire`）：`Sender::clone()` → 计数 `senders += 1`，产出一个新句柄指向同一份 `Counter`；接收端同理。
-3. **释放**（`release`）：某个句柄 `drop` → 对应计数 `-= 1`；若它恰好是**最后一个**（计数从 1 变 0），则触发该侧的 `disconnect` 通知（唤醒对端），并参与“销毁通道”的裁决。
-4. **销毁**：发送侧、接收侧各有一次“最后一次 drop”。`destroy` 标志确保两次中**恰好一次**真正 `Box::from_raw` 回收堆内存。
+```text
+counter::new(chan)
+  ├── Box::leak: 在堆上分配 Counter{senders:1, receivers:1, destroy:false, chan}
+  └── 返回 (Sender{counter}, Receiver{counter})   // 两份句柄共享同一指针
 
-其状态演进可用下面这张简表概括（以发送端为例，接收端对称）：
+clone() ──→ acquire():  senders 或 receivers  fetch_add(1, Relaxed)
+drop()  ──→ release():  senders 或 receivers  fetch_sub(1, AcqRel)
+                       ├── 若减到 0：调用 flavor 的 disconnect（唤醒对端）
+                       └── 再用 destroy 标志决定是否真正 free 这块堆内存
+```
 
-| 事件 | `senders` 变化 | 是否最后一个 | 动作 |
-| --- | --- | --- | --- |
+要点：
+
+1. **计数器初始都是 1**：`counter::new` 返回的「原始那一对」各占一个名额。
+2. **clone = 计数 +1，drop = 计数 -1**，对应字段自增/自减。
+3. **谁先把自己的计数减到 0，谁就去 disconnect**；**真正的内存释放**则由 `destroy` 标志在两侧之间协调，保证恰好一次。
+
+| 事件 | 计数变化 | 是否最后一个 | 动作 |
+|------|---------|------------|------|
 | `new` | 设为 1 | — | 堆分配 `Counter` |
-| `clone` (acquire) | `+1` | 否 | 复制句柄 |
-| `drop` (release) | `-1` | 旧值 > 1：否 | 仅减计数 |
-| `drop` (release) | `-1` | 旧值 == 1：是 | `disconnect` + 参与 `destroy` 裁决 |
+| `clone`（acquire） | `+1` | 否 | 复制句柄（同指针） |
+| `drop`（release） | `-1`（旧值 > 1） | 否 | 仅减计数 |
+| `drop`（release） | `-1`（旧值 == 1） | 是 | `disconnect` + 参与 `destroy` 裁决 |
 
 #### 4.1.3 源码精读
 
-先看 `Counter` 的四个字段：
+先看 `Counter` 结构与 `new` 构造：
 
-```rust
-struct Counter<C> {
-    senders: AtomicUsize,   // 当前发送端引用数
-    receivers: AtomicUsize, // 当前接收端引用数
-    destroy: AtomicBool,    // 销毁裁决标志
-    chan: C,                // 具体 flavor 的通道状态
-}
-```
+[crossbeam-channel/src/counter.rs:12-24](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L12-L24) —— 定义 `Counter<C>` 的四个字段（senders/receivers/destroy/chan）。
 
-参见 [counter.rs:12-24](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L12-L24)：这段定义了引用计数的全部状态——`senders` / `receivers` 分别是两端的计数，`destroy` 是销毁仲裁位（4.2 详解），`chan` 内联存放真正的通道（按 flavor 不同而不同）。
+[crossbeam-channel/src/counter.rs:27-37](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L27-L37) —— `new` 用 `Box::leak(Box::new(Counter{...}))` 把账本钉在堆上，得到 `NonNull<Counter<C>>`，再装进 `Sender`/`Receiver` 返回。这里有三个设计要点：① `Box::leak` 故意「泄漏」`Box`，使其**不会**自动释放，把回收责任交给 `release` 里的 `Box::from_raw`；② `NonNull::from` 让发送端与接收端拿到**同一个**指针——这就是「共享」的物理体现；③ `senders`、`receivers` 都初始化为 `1`，对应这一对原始句柄。
 
-再看构造函数 `new`：
+再看 `Sender` 的形状与它如何「透明」访问底层 flavor：
 
-```rust
-pub(crate) fn new<C>(chan: C) -> (Sender<C>, Receiver<C>) {
-    let counter = NonNull::from(Box::leak(Box::new(Counter {
-        senders: AtomicUsize::new(1),
-        receivers: AtomicUsize::new(1),
-        destroy: AtomicBool::new(false),
-        chan,
-    })));
-    let s = Sender { counter };
-    let r = Receiver { counter };
-    (s, r)
-}
-```
+[crossbeam-channel/src/counter.rs:40-48](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L40-L48) —— `Sender<C>` 只持有一个 `NonNull<Counter<C>>`（瘦指针，指针大小）。`counter()` 用 `unsafe { self.counter.as_ref() }` 把它变回 `&Counter<C>`。
 
-参见 [counter.rs:27-37](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L27-L37)：这里有三个关键设计——
+[crossbeam-channel/src/counter.rs:84-90](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L84-L90) —— `impl Deref for Sender<C>`，`Target = C`。这意味着 `*sender` 直接就是底层 flavor 通道，公共层调用 `chan.send(...)` 时，`chan` 其实经由 `Deref` 透传到 `counter.chan`。`Receiver` 的 `Deref` 完全对称（[counter.rs:143-149](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L143-L149)）。
 
-- **`Box::leak`**：故意“泄漏” `Box`，使其**不会**在离开作用域时自动释放。这是手写引用计数的核心套路：内存的回收责任从编译器手里转移到了 `release` 里的 `Box::from_raw`。
-- **`NonNull::from`**：把泄漏得到的引用转成一个保证非空的裸指针；发送端和接收端拿到的是**同一个** `counter`，这就是“共享”的物理体现。
-- 两个计数都初始化为 `1`，对应这一对原始的 `Sender` / `Receiver`。
+句柄相等性由「指针相等」定义：
 
-`Sender` / `Receiver` 本身非常薄，只持有一个 `NonNull<Counter<C>>`：
+[crossbeam-channel/src/counter.rs:92-96](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L92-L96) —— `PartialEq` 直接比较 `NonNull`（即两个句柄是否指向同一个 `Counter`）。这是公开 API `same_channel` 判断「两个端是否属于同一通道」的底层依据。`addr()`（[counter.rs:79-81](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L79-L81)）把指针转成 `usize`，供 `select` 判断「两个操作是否作用在同一通道」。
 
-```rust
-pub(crate) struct Sender<C> {
-    counter: NonNull<Counter<C>>,
-}
-```
+跨线程安全性由公共层强制：
 
-参见 [counter.rs:39-42](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L39-L42)（`Receiver` 结构对称，见 [counter.rs:99-101](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L99-L101)）。句柄不持有任何额外数据，clone / drop 只是增减共享 `Counter` 里的整数。
+[crossbeam-channel/src/channel.rs:382-383](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L382-L383) —— `unsafe impl<T: Send> Send for Sender<T> {}` 与 `Sync`。`NonNull` 本身既非 `Send` 也非 `Sync`，但这两条 `unsafe impl`（接收端在 [channel.rs:749-750](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L749-L750)）以「显式 unsafe impl 优先于自动推导」的规则，在 `T: Send` 时把句柄强制设为可跨线程共享——这正是 MPMC 多线程 `clone`/`drop` 的前提。
 
-为了让句柄用起来像「直接是通道本身」，二者都实现了 `Deref`，把方法调用转交给内层的 `chan`：
+最后看一眼内部计数句柄如何被公共 API 造出来（以 `unbounded` 为例）：
 
-```rust
-impl<C> ops::Deref for Sender<C> {
-    type Target = C;
-    fn deref(&self) -> &C {
-        &self.counter().chan
-    }
-}
-```
-
-参见 [counter.rs:84-90](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L84-L90)：因此 `channel.rs` 里的 flavor 代码可以拿到 `&C`，直接调用具体通道（如 `list::Channel`）的方法，而无需关心计数。此外 `PartialEq`（[counter.rs:92-96](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L92-L96)）按指针比较，这就是公开 API `same_channel` 判断“两个端是否属于同一通道”的依据。
-
-最后看一眼这层内部类型是如何被公开 API 造出来的——以 `unbounded` 为例：
-
-```rust
-pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
-    let (s, r) = counter::new(flavors::list::Channel::new());
-    let s = Sender { flavor: SenderFlavor::List(s) };
-    let r = Receiver { flavor: ReceiverFlavor::List(r) };
-    (s, r)
-}
-```
-
-参见 [channel.rs:50-59](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L50-L59)：`counter::new` 拿到的是 `counter::Sender<flavors::list::Channel<T>>`，随后被包进 `SenderFlavor::List(..)` 成为对外的 `Sender<T>`。`bounded` 的两条分支同理（[channel.rs:113-133](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L113-L133)），只是 `chan` 换成了 `array` 或 `zero` flavor。
+[crossbeam-channel/src/channel.rs:50-59](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L50-L59) —— `counter::new(flavors::list::Channel::new())` 拿到 `counter::Sender<flavors::list::Channel<T>>`，随后被包进 `SenderFlavor::List(..)` 成为对外的 `Sender<T>`。`bounded` 的两条分支同理（[channel.rs:113-133](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L113-L133)），只是 `chan` 换成 `array` 或 `zero` flavor。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手验证“clone 出来的多个端共享同一份通道”，并理解为什么 `Box::leak` 不会造成真正的泄漏。
+这是一个**源码阅读型实践**（计数器是 `pub(crate)`，无法从外部直接打印其值）。
 
-**操作步骤**：
-
-1. 阅读上面的 `new` 实现，确认 `Sender` 与 `Receiver` 持有同一个 `NonNull<Counter<C>>`。
-2. 在仓库的 `crossbeam-channel/` 下新建一个临时示例（**示例代码，非项目原有文件**，可放在 `examples/` 或独立的小 crate）：
-
-```rust
-// 示例代码：验证多个端共享同一通道
-use crossbeam_channel::unbounded;
-
-fn main() {
-    let (s, r) = unbounded::<i32>();
-    let s2 = s.clone();
-    let r2 = r.clone();
-
-    // clone 出来的端与原始端属于同一条通道
-    assert!(s.same_channel(&s2));
-    assert!(r.same_channel(&r2));
-    // 发送端与接收端虽然职责不同，但底层是同一通道
-    assert!(s.same_channel(/* 跨端比较语义上同通道；same_channel 只在同侧比较指针 */ &s2));
-
-    // 通过其中任一端发送，所有接收端都能收到
-    s2.send(42).unwrap();
-    assert_eq!(r2.recv(), Ok(42));
-}
-```
-
-3. 运行（待本地验证）：`cargo run --example <名字>`。
-
-**需要观察的现象**：`same_channel` 在 clone 之间返回 `true`；通过 `s2` 发送的消息能被 `r2` 收到——这说明所有端背后是同一份 `Counter` / `chan`。
-
-**预期结果**：断言全部通过。`same_channel` 之所以能这样判断，正是因为它最终比的是 `counter` 裸指针（见 4.1.3 的 `PartialEq`）。
-
-> 关于 `Box::leak` 是否泄漏：只要你在程序结束时把所有 `Sender` / `Receiver` 都 `drop` 掉，最后一个 drop 会在 `release` 里调用 `Box::from_raw` 回收内存。只有当你用 `mem::forget` 故意丢弃句柄时才会真正泄漏——而 `acquire` 里的溢出保护（见 4.2）正是为这种病态场景兜底。
+1. **实践目标**：建立「多个句柄共享一份堆 `Counter`」的清晰心智模型，并理解 `Box::leak` 为何不会真泄漏。
+2. **操作步骤**：
+   - 打开 [counter.rs:12-37](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L12-L37)，在纸上画出 `counter::new` 执行后的内存图：左侧是堆上的 `Counter`（四个字段），右侧是栈上的 `(Sender, Receiver)`，两者各画一根箭头指向堆块。
+   - 模拟以下序列，逐行更新 `senders`/`receivers` 的值：
+     ```text
+     初始:                        senders=1, receivers=1
+     let s2 = s.clone();          senders=2
+     let r2 = r.clone();          receivers=2
+     let s3 = s.clone();          senders=3
+     drop(s2);                    senders=2
+     drop(s3);                    senders=1   ← 还没到 0，不 disconnect
+     drop(s);                     senders=0   ← 到 0，触发 disconnect_senders
+     ```
+3. **需要观察的现象**：每一步只有「计数归零」的那一步才会进入 `release` 的 disconnect 分支；其余 drop 只是默默减一。
+4. **预期结果**：你应当得出「最后一个发送端 drop 时才断开」的结论，并能解释为什么在它之前的任意 drop 都不会唤醒阻塞的接收者。
+5. **关于 `Box::leak` 是否泄漏**：只要你在程序结束前把所有 `Sender`/`Receiver` 都正常 `drop`，最后一个 drop 就会在 `release` 里 `Box::from_raw` 回收内存；只有用 `mem::forget` 故意丢弃句柄才会真泄漏，而 4.2 的溢出保护正是为此兜底。
+6. 待本地验证：计数器具体数值无法用公共 API 打印，以上为依据源码的推理结论。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `Sender` / `Receiver` 用 `NonNull<Counter<C>>` 而不是直接存 `Box<Counter<C>>` 或 `Arc<Counter<C>>`？
+**练习 1**：为什么 `Counter` 用 `Box::leak` + `NonNull` 而不是直接用 `Arc`？
 
-> **参考答案**：用 `Box` 会在每个句柄 drop 时尝试释放，导致多次释放；用 `Arc` 可以自动管理，但通道需要更精细的“两端各自计数 + 恰好一次销毁”语义，且希望把两个计数和通道状态放进同一块内存。`NonNull` 裸指针让所有句柄共享同一份堆内存，由手写的 `acquire` / `release` 统一管理计数与回收。
+**参考答案**：通道需要**两本独立的账**（senders / receivers）和一个**跨两侧的销毁握手**（destroy），标准 `Arc` 只有单一引用计数，无法表达「发送端归零」与「接收端归零」这两个独立事件及其协调。此外 `Counter` 内联了 `chan: C`，把两个计数与 flavor 状态放进同一块分配，自己掌控释放时机更直接，也避免 `Arc` 套 `Arc` 的多层间接。
 
-**练习 2**：`new` 里把 `senders` 和 `receivers` 都初始化为 `1`，这个 `1` 对应谁？
+**练习 2**：`Sender<C>` 实现了 `Deref<Target = C>`，这意味着什么？
 
-> **参考答案**：对应 `new` 返回的那一对**原始** `Sender` 和 `Receiver`。之后每次 `clone` 才会 `+1`。
+**参考答案**：意味着可以对 `Sender` 直接调用底层 flavor 的方法（如 `chan.send(...)`），编译器自动插入 `*` 解引用。公共层的 `send`/`try_send` 正是经由这个 `Deref` 透传到 `counter.chan` 上的 flavor 方法，计数逻辑与 flavor 算法因此解耦。
 
 ---
 
-### 4.2 acquire / release：增减计数与 destroy 唯一销毁协议
+### 4.2 acquire/release 与唯一销毁协议
 
 #### 4.2.1 概念说明
 
-`Counter` 只是状态，真正的计数管理发生在两个方法上：`acquire`（克隆时增计数）和 `release`（销毁时减计数）。它们分别被公开 `Sender` / `Receiver` 的 `Clone` 和 `Drop` 实现调用。
+引用计数有两个经典难题，本节看 crossbeam 如何一并解决：
 
-这里有两个精妙之处需要看懂：
+1. **竞态下的精确归零判定**：多线程同时 `drop`，如何可靠地知道「我是把计数减到 0 的那一个」？答案是用 `fetch_sub` 的**返回值**（返回的是旧值）。若旧值为 1，则这次减法后变成 0，我就是「最后一个」。
+2. **恰好一次释放**：发送端归零、接收端归零是**两次独立事件**，但堆内存只能释放一次。crossbeam 用一个 `destroy: AtomicBool` 做「你先走、我收尾」的握手。
 
-1. **`acquire` 用 `Relaxed`，`release` 用 `AcqRel`，为何不对称？**
-   - `acquire` 只是给计数 `+1`，不“守门”任何清理动作，`Relaxed` 足矣；
-   - `release` 负责检测“我是不是最后一个”并触发清理，必须用 `AcqRel`，确保“最后一个”的判定与 `disconnect`、销毁之间不会乱序。这正是标准库 `Arc::clone`（`Relaxed`）与 `Arc::drop`（`Acquire`）的同款取舍。
-
-2. **`destroy` 标志如何保证「恰好销毁一次」？**
-   - 一条通道有「最后一个发送端 drop」和「最后一个接收端 drop」两个时刻。这两个时刻可能由两个不同线程、以任意先后发生。
-   - 谁都不许漏销毁（内存泄漏），也都不许重复销毁（double free）。
-   - 解法：第一个到达销毁裁决的线程把 `destroy` 从 `false` 置 `true`，它**不**回收；第二个到达的线程读到 `true`，由它执行 `Box::from_raw`。于是「后到达者负责回收」，恰好一次。
-
-此外，`release` 还承担一项副作用：当某侧最后一个引用消失，调用 flavor 的 `disconnect` 回调，把通道标记为断开并唤醒对端阻塞的操作——这正是 4.3 里各种 `Disconnected` 错误的物理来源。
+还有一个工程细节：**计数溢出防护**。若有人恶意 `clone` 后 `mem::forget` 丢弃的克隆，计数会无限上涨。crossbeam 在计数逼近 `isize::MAX` 时直接 `process::abort()`——比起在退化场景下冒险（回绕→误判归零→double free），宁可整个进程中止。这与标准库 `Arc` 的防御策略一致。
 
 #### 4.2.2 核心流程
 
-以「发送端最后一个 drop」为例（接收端对称），`release` 的执行流程：
+**acquire（克隆，对应 `Clone::clone`）**：
 
-```
-fetch_sub(1, AcqRel) 拿到旧值 old
-├─ old != 1（还有别的发送端）→ 仅减计数，结束
-└─ old == 1（我是最后一个发送端）
-   ├─ 调用 disconnect 回调（如 disconnect_senders）
-   │    └─ flavor 把通道标记为“发送侧已断开”，唤醒阻塞的接收端
-   └─ destroy.swap(true, AcqRel) 得到 prev
-       ├─ prev == false（我是两侧中第一个到裁决点的）→ 不回收，结束
-       └─ prev == true（对端已经先到过裁决点）→ Box::from_raw 回收整条通道
+```text
+count = senders.fetch_add(1, Relaxed)     // 或 receivers
+if count > isize::MAX as usize { abort() } // 防溢出
+return 新的 Sender{counter}                // 复制同一个指针
 ```
 
-需要特别留意：`disconnect` 回调虽然在签名上返回 `bool`（表示“是否本次新发生断开”），但 `release` **并不使用**这个返回值——它只是触发断开副作用。`bool` 返回值是 flavor 内部判断“要不要唤醒对端”用的，与计数销毁无关。
+**release（丢弃，对应 `Drop::drop`）**：
+
+```text
+old = senders.fetch_sub(1, AcqRel)        // 或 receivers
+if old == 1 {                             // 我是把它减到 0 的那个
+    disconnect(&chan);                     // 通知 flavor：这一侧没人了（唤醒对端）
+    already = destroy.swap(true, AcqRel); // 抢「收尾权」
+    if already {                          // 对方已经先来过（destroy 已是 true）
+        Box::from_raw + drop              // 由我执行真正的内存释放
+    }
+    // 否则（already == false）：我把 destroy 置 true，但我不释放，等对方来释放
+}
+```
+
+「恰好一次释放」的关键就在 `destroy.swap(true, ...)`：
+
+- 它返回**旧值**并把 `destroy` 置为 `true`。
+- **第一个**到达 release 归零的侧（假设是发送端）：`destroy` 还是 `false`，swap 返回 `false` → 不释放，只把标志置真。
+- **第二个**到达 release 归零的侧（接收端）：`destroy` 已是 `true`，swap 返回 `true` → 执行 `Box::from_raw` 真正释放。
+
+于是释放权被「让」给了后到的一方，保证全局恰好一次。两次 disconnect 都会执行（各自唤醒对端），但 deallocate 只发生一次。
+
+> 用一点离散数学表示：设两次 release 归零事件为 \(E_s\)（发送端）与 \(E_r\)（接收端），释放操作 \(D\) 定义为
+> \[ D \iff \texttt{destroy.swap(true)} \text{ 返回 } \textit{true} \]
+> 由于 `destroy` 初值为 `false` 且只会被这两次 swap 写入，两次 swap 中**恰有一次**看到旧值 `false`、另一次看到 `true`，故 \(D\) 恰发生一次。
 
 #### 4.2.3 源码精读
 
-先看 `acquire`：
+**acquire**——注意用 `Relaxed`，以及溢出保护：
 
-```rust
-pub(crate) fn acquire(&self) -> Self {
-    let count = self.counter().senders.fetch_add(1, Ordering::Relaxed);
+[crossbeam-channel/src/counter.rs:51-64](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L51-L64) —— `Sender::acquire`：`fetch_add(1, Ordering::Relaxed)`。`Relaxed` 足够，因为克隆时你**已经合法持有一份句柄**（计数 ≥ 1），自增不需要和别的线程的读写建立 happens-before；它只是把「我多了一份」这个事实记进账本——这正是 `Arc::clone` 也用 `Relaxed` 的同款取舍。随后若发现 `count > isize::MAX` 就 `process::abort()`。`Receiver::acquire` 完全对称（[counter.rs:110-123](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L110-L123)）。
 
-    // 克隆后 mem::forget 可能导致计数溢出，难以优雅恢复，故超界直接 abort。
-    if count > isize::MAX as usize {
-        process::abort();
-    }
+**release**——本讲最核心的一段：
 
-    Self { counter: self.counter }
-}
-```
+[crossbeam-channel/src/counter.rs:69-77](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L69-L77) —— `Sender::release`：
 
-参见 [counter.rs:51-64](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L51-L64)（接收端 `acquire` 对称，见 [counter.rs:110-123](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L110-L123)）。要点：
+1. `senders.fetch_sub(1, Ordering::AcqRel)` 返回旧值；若旧值为 `1`，说明这次把它减到了 `0`，进入收尾分支。
+2. 调用传入的 `disconnect` 闭包（`disconnect(&self.counter().chan)`），让 flavor 执行断开逻辑（置断开标志、唤醒对端阻塞线程）。
+3. `destroy.swap(true, Ordering::AcqRel)`：抢「收尾权」。返回 `true`（说明对侧已经先来过）才真正 `Box::from_raw` 释放堆内存。
 
-- `fetch_add(1, Relaxed)` 返回**旧值** `count`；新计数是 `count + 1`。
-- **溢出保护**：若旧值已超过 `isize::MAX`，说明有人恶意 `clone` + `mem::forget` 灌水，直接 `process::abort()`，宁可崩溃也不冒“计数回绕 → 误判归零 → double free”的风险。这与标准库 `Arc` 的防御策略一致。
+`Receiver::release` 结构完全一致，只是操作 `receivers` 字段（[counter.rs:128-136](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L128-L136)）。
 
-再看 `release`：
+**为什么 `fetch_sub` 和 `destroy.swap` 都用 `AcqRel`？**
 
-```rust
-pub(crate) unsafe fn release<F: FnOnce(&C) -> bool>(&self, disconnect: F) {
-    if self.counter().senders.fetch_sub(1, Ordering::AcqRel) == 1 {
-        disconnect(&self.counter().chan);   // 触发断开；返回的 bool 在此被丢弃
+- `fetch_sub` 的 **Release**：保证本线程此前对通道数据的所有写入，在计数归零前已完成并对外可见；**Acquire**：保证「减到 0 的那个线程」能看到此前其他线程丢弃克隆时执行的所有 Release，从而看到一致状态。
+- `destroy.swap` 的 **AcqRel** 是**跨侧握手的关键**：先到的一侧用 Release 把 `destroy` 写为 `true` 并发布自己对通道的全部写入；后到的一侧用 Acquire 读到 `true`，于是它能安全地看到先到侧的所有写入，再执行 `Box::from_raw` 释放——不会读到半释放的状态。
 
-        if self.counter().destroy.swap(true, Ordering::AcqRel) {
-            drop(unsafe { Box::from_raw(self.counter.as_ptr()) }); // 后到达者回收
-        }
-    }
-}
-```
+**`release` 是 `unsafe fn`，且 `disconnect` 闭包的 `bool` 返回值被丢弃**：
 
-参见 [counter.rs:69-77](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L69-L77)（接收端 `release` 对称，见 [counter.rs:128-136](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L128-L136)）。逐行拆解：
+[crossbeam-channel/src/counter.rs:69](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/counter.rs#L69) —— 签名 `unsafe fn release<F: FnOnce(&C) -> bool>(&self, disconnect: F)`。`unsafe` 是因为调用者必须保证「此刻确实持有一份合法引用」（即调用一次 `release` 对应一次之前的 `acquire`/`new`），否则会减成负数、错误释放。注意闭包返回 `bool`（flavor 的 `disconnect_*` 返回「是不是本线程首次把通道标记为断开」），但 `release` 内部 `disconnect(&self.counter().chan);` 这条**语句形式丢弃了返回值**——真正的释放决策完全由 `destroy` 标志决定，与闭包返回值无关。这是一个阅读时容易绊倒的细节。
 
-- `fetch_sub(1, AcqRel) == 1`：旧值为 1，说明本次减完就归零——我是该侧最后一个引用。`AcqRel` 保证“最后一个”看到此前所有通过该通道发生的操作。
-- `disconnect(&self.counter().chan)`：调用传入的断开回调；注意它返回 `bool` 但被直接丢弃（`;`）。
-- `destroy.swap(true, AcqRel)`：原子地把 `destroy` 置 `true` 并返回**旧值**。旧值为 `true` 表示对端一侧已经先到过这里，于是由**本线程**执行 `Box::from_raw` 回收整条通道。
+**disconnect 闭包里到底做了什么？** 以 list flavor（unbounded 的默认实现）为例：
 
-> 关于 `release` 为何标 `unsafe`：它涉及 `Box::from_raw` 这种手动内存回收，且依赖“每个句柄在其生命周期内恰好 release 一次、计数始终正确”这一不变量。这些保证由调用方（公开 `Sender` / `Receiver` 的 `Drop`）在类型系统层面承担，故契约以 `unsafe` 标注、限定在 `pub(crate)` 范围内。
+[crossbeam-channel/src/flavors/list.rs:561-570](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/list.rs#L561-L570) —— `disconnect_senders` 用 `fetch_or(MARK_BIT)` 在索引上打「发送端已断开」的标记位（且只让第一个这么做的人返回 `true`），并调用 `self.receivers.disconnect()` 唤醒所有阻塞的接收者。返回的 `bool` 如前所述在 `counter::release` 中并未被使用。
 
-那么 `disconnect` 回调具体做了什么？看公开 `Sender` 的 `Drop` 如何接线：
+[crossbeam-channel/src/flavors/list.rs:575-586](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/list.rs#L575-L586) —— `disconnect_receivers` 同样打标记位，并额外 `discard_all_messages()` **急切释放**尚未消费的消息（因为接收端都走了，留着也没人读）。array flavor 的同名方法逻辑类似（[flavors/array.rs:487-516](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L487-L516)）。
 
-```rust
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.flavor {
-                SenderFlavor::Array(chan) => chan.release(|c| c.disconnect_senders()),
-                SenderFlavor::List(chan)  => chan.release(|c| c.disconnect_senders()),
-                SenderFlavor::Zero(chan)  => chan.release(|c| c.disconnect()),
-            }
-        }
-    }
-}
-```
+**公共层如何把 `Clone`/`Drop` 接到 `acquire`/`release`**：
 
-参见 [channel.rs:674-684](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L674-L684)。这里把闭包 `|c| c.disconnect_senders()` 作为 `disconnect` 回调传给 `release`；当 `release` 判定“我是最后一个发送端”时，才会调用它。`Receiver` 的 `Drop` 对称（[channel.rs:1184-1197](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L1184-L1197)），传的是 `disconnect_receivers`。而 `Clone` 则调用 `acquire`（[channel.rs:686-696](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L686-L696)）。
+[crossbeam-channel/src/channel.rs:686-696](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L686-L696) —— `Clone for Sender<T>`：按 flavor 调 `chan.acquire()`。`Drop for Sender<T>`（[channel.rs:674-684](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L674-L684)）：按 flavor 调 `chan.release(|c| c.disconnect_senders())`（zero flavor 调 `c.disconnect()`）。接收端对称（[channel.rs:1199-1209](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L1199-L1209) 与 [channel.rs:1184-1197](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L1184-L1197)）。注意 `at`/`tick`/`never` 这三种特殊 flavor 没有 `release` 路径——它们不参与引用计数销毁。
 
-`disconnect_senders` / `disconnect_receivers` 在 flavor 里做的事，以 `list` 为例：
-
-```rust
-pub(crate) fn disconnect_senders(&self) -> bool {
-    let tail = self.tail.index.fetch_or(MARK_BIT, Ordering::SeqCst);
-    if tail & MARK_BIT == 0 {
-        self.receivers.disconnect();   // 唤醒所有阻塞的接收端
-        true
-    } else {
-        false
-    }
-}
-```
-
-参见 [flavors/list.rs:561-570](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/list.rs#L561-L570)：它用 `fetch_or(MARK_BIT)` 原子地把“断开位”打上标记（且只让第一个这么做的人返回 `true`），并调用 `receivers.disconnect()` 唤醒所有正阻塞在 `recv` 上的线程——这些线程被唤醒后会看到通道已断开，从而返回 `RecvError` / `Disconnected`。`disconnect_receivers`（[flavors/list.rs:575-586](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/list.rs#L575-L586)）还会额外 `discard_all_messages()` 急切释放尚未消费的消息。array/zero flavor 的同名方法逻辑类似（array 见 [flavors/array.rs:487-516](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L487-L516)，zero 见 [flavors/zero.rs:353-364](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/zero.rs#L353-L364)）。
-
-把 4.1 和 4.2 串起来，整条销毁链路是：**公开 `Sender::drop` → `counter::Sender::release` → `fetch_sub` 命中 1 → `disconnect_senders`（唤醒对端）→ `destroy` 裁决 → 必要时 `Box::from_raw` 回收**。
+把 4.1 与 4.2 串起来，整条销毁链路是：**公开 `Sender::drop` → `counter::Sender::release` → `fetch_sub` 命中 1 → `disconnect_senders`（唤醒对端）→ `destroy` 裁决 → 必要时 `Box::from_raw` 回收**。
 
 #### 4.2.4 代码实践
 
-**实践目标**：跨线程 clone 与 drop 多个发送端，观察“只有**最后一个**引用离开，通道才会断开”，从而间接验证 `senders` 计数何时归零。
+这是本讲的主实践任务（结合行为观察与源码追踪）。
 
-**操作步骤**：编写如下示例（**示例代码，非项目原有文件**）：
+1. **实践目标**：跨线程克隆与丢弃多个句柄，间接验证「只有最后一个引用离开才触发断开」，并追踪 `senders` 何时归零。
 
-```rust
-// 示例代码：追踪 senders 计数归零 → 触发断开
-use std::thread;
-use crossbeam_channel::{unbounded, TryRecvError};
+2. **操作步骤**：下面这段**示例代码**（非仓库原有，使用公共 API）演示多线程克隆与丢弃：
 
-let (s, r) = unbounded::<i32>();
+   ```rust
+   // 示例代码：追踪 senders 计数归零 → 触发断开
+   use std::thread;
+   use crossbeam_channel::{unbounded, TryRecvError};
 
-// clone 出第二份发送端，分别交给主线程和子线程
-let s2 = s.clone();
-let h = thread::spawn(move || {
-    // 子线程 drop 掉 s2：此时主线程的 s 还在，senders 还有 1，通道未断开
-    drop(s2);
-});
+   fn main() {
+       let (s, r) = unbounded::<i32>();
 
-drop(s);          // 主线程也 drop：现在 senders 归零，触发 disconnect_senders
-h.join().unwrap();
+       // clone 出第二份发送端交给子线程
+       let s2 = s.clone();                 // senders: 1 -> 2
+       let h = thread::spawn(move || {
+           // 子线程结束 drop(s2)：主线程的 s 还在，senders 还有 1，通道未断开
+           drop(s2);
+       });
 
-// 观察：接收端现在能看到“断开”
-assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
-```
+       // 此时只 drop 了子线程那份，通道还没断 → try_recv 是 Empty
+       h.join().unwrap();
+       assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
 
-运行（待本地验证）：`cargo run --example <名字>`。
+       drop(s);                            // 主线程的原始发送端：senders 减到 0 → disconnect_senders
+       assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
+   }
+   ```
 
-**需要观察的现象**：
+   运行（待本地验证）：`cargo run --example <名字>` 或在依赖 `crossbeam-channel` 的小 crate 里运行。
 
-1. 若只 drop 其中一个发送端（另一个仍存活），`r.try_recv()` 返回 `Empty` 而非 `Disconnected`——通道还没断。
-2. 当**两个**发送端都被 drop（`senders` 归零），`r.try_recv()` 才返回 `Disconnected`。
-
-**预期结果**：断言通过。这正是 `release` 中 `fetch_sub(..) == 1` 守门的结果——只有把计数从 1 减到 0 的那一次 drop 才会调用 `disconnect_senders`，把断开信号传给接收端。
-
-> 进阶观察：若想确认销毁确实发生且只发生一次，可以给消息类型换成带 `Drop` 实现的类型（在 `Drop` 里打印日志），观察通道销毁时缓冲中的消息是否被释放、是否每条只释放一次。注意 `disconnect_receivers` 在 list/array 上会主动 `discard_all_messages`，所以“接收端先全部离开”时消息会更早被释放。
+3. **需要观察的现象**：
+   - 只 drop 子线程那份发送端（另一份仍存活）时，`r.try_recv()` 返回 `Empty`——通道还没断。
+   - 当**两个**发送端都被 drop（`senders` 归零），`r.try_recv()` 才返回 `Disconnected`。
+4. **预期结果**：断言通过。这正是 `release` 中 `fetch_sub(..) == 1` 守门的结果——只有把计数从 1 减到 0 的那一次 drop 才会调用 `disconnect_senders`，把断开信号传给接收端。
+5. **进阶观察**：想确认销毁确实只发生一次，可把消息类型换成带 `Drop` 实现的类型（在 `Drop` 里打印日志），观察通道销毁时缓冲中的消息是否被释放、是否每条只释放一次。注意 `disconnect_receivers` 会主动 `discard_all_messages`，所以「接收端先全部离开」时消息会更早被释放。
+6. 待本地验证：计数器是内部类型，无法直接打印其值；上述「何时归零」的结论是基于源码协议的推理。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：假设线程 A drop 最后一个发送端、线程 B drop 最后一个接收端，两者几乎同时到达 `destroy.swap(true, ..)`。谁负责 `Box::from_raw`？会不会 double free？
 
-> **参考答案**：`swap` 是原子的，两线程中必有一个先拿到 `prev == false`（不回收）、另一个拿到 `prev == true`（执行回收）。因此**后到达者**负责回收，且因 `swap` 互斥，不会 double free，也不会漏销毁。
+**参考答案**：`swap` 是原子的，两线程中必有一个先拿到 `prev == false`（不回收）、另一个拿到 `prev == true`（执行回收）。因此**后到达者**负责回收，且因 `swap` 互斥，不会 double free，也不会漏销毁。
 
-**练习 2**：为什么 `acquire` 用 `Relaxed`、`release` 用 `AcqRel`？
+**练习 2**：`acquire` 用 `Relaxed`、`release` 用 `AcqRel`，为什么不对称？
 
-> **参考答案**：`acquire` 只是计数 `+1`，不充当任何清理的“闸门”，`Relaxed` 足够且最便宜；`release` 要判断“计数是否归零”并据此触发 `disconnect` 与销毁，必须用 `AcqRel` 保证归零判定、断开副作用与回收之间的可见性与顺序。这与 `Arc::clone` / `Arc::drop` 的取舍一致。
+**参考答案**：克隆时调用方已经持有一份合法引用，自增只是记账，不需要建立跨线程的 happens-before，`Relaxed` 足够且最快；丢弃时，减到 0 的那个线程要负责 disconnect 与可能的释放，必须用 Acquire 看到此前所有丢弃线程的 Release、并用 Release 发布自己的写入，因此用 `AcqRel`。这与 `Arc::clone` / `Arc::drop` 的取舍一致。
 
-**练习 3**：`disconnect` 回调明明返回 `bool`，`release` 却没有用它。这个 `bool` 是给谁用的？
+**练习 3**：`disconnect` 闭包返回 `bool`，但 `release` 没用它。这会是个 bug 吗？
 
-> **参考答案**：是 flavor 内部用的——它表示“本次是否**新发生**断开”（用 `MARK_BIT` 的 `fetch_or` 保证只有一次返回 `true`），flavor 据此决定是否要唤醒对端的阻塞操作。`release` 只关心“触发断开”这个副作用，不关心返回值，故直接丢弃。
+**参考答案**：不是 bug，而是有意的设计分层。flavor 的 `disconnect_*` 返回「是否本线程首次打上断开标记」（用 `MARK_BIT` 的 `fetch_or` 保证只有一次返回 `true`），可供别处复用；但 `counter::release` 的释放决策完全由「计数归零 + `destroy` 标志」决定，与该返回值无关，因此丢弃它是正确的。阅读源码时要注意别被签名里的 `-> bool` 误导。
 
 ---
 
@@ -371,210 +298,230 @@ assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
 
 #### 4.3.1 概念说明
 
-通道操作会失败，失败的方式和**调用风格**强相关。crossbeam-channel 把失败模式拆成了三个维度：
+`err.rs` 把「发送/接收/选择」的各种失败方式建模成一族类型。设计原则是**精确性**：每种公共方法返回一个**只包含它可能发生的失败原因**的错误类型，逼调用者用 `match` 把每种情况都处理掉。
 
-1. **调用风格**：阻塞版（`send` / `recv`）、非阻塞版（`try_send` / `try_recv`）、限时版（`send_timeout` / `recv_timeout`）。
-2. **失败原因**：满了（`Full`）、空了（`Empty`）、超时（`Timeout`）、断开（`Disconnected`）。
-3. **是否携带数据**：发送失败必须**带回原消息**（否则消息凭空丢失）；接收失败没有“原消息”可带回。
+可以把这 10 个类型分成三族：
 
-由此推导出一个非常规整的“错误矩阵”：
+| 族 | 类型 | 来源方法 | 携带数据 |
+|----|------|---------|---------|
+| **发送族** | `SendError<T>` | `send` | 消息 `T`（可 `into_inner` 取回） |
+| | `TrySendError<T>` | `try_send` | `Full(T)` / `Disconnected(T)` |
+| | `SendTimeoutError<T>` | `send_timeout` | `Timeout(T)` / `Disconnected(T)` |
+| **接收族** | `RecvError` | `recv` | 无（单元结构） |
+| | `TryRecvError` | `try_recv` | `Empty` / `Disconnected` |
+| | `RecvTimeoutError` | `recv_timeout` | `Timeout` / `Disconnected` |
+| **选择族** | `TrySelectError` | `try_select` | 无 |
+| | `SelectTimeoutError` | `select_timeout` | 无 |
+| | `TryReadyError` | `try_ready` | 无 |
+| | `ReadyTimeoutError` | `ready_timeout` | 无 |
 
-- 阻塞的 `send` 永远不会因为“满”而失败（它会等），所以它的唯一失败原因是 `Disconnected`；同理阻塞的 `recv` 唯一失败也是 `Disconnected`。
-- `try_*` 版本额外多出 `Full` / `Empty`（“此刻不能立即完成”）。
-- `*_timeout` 版本额外多出 `Timeout`。
-- 发送侧的每个错误都内嵌消息 `T`，并提供 `into_inner()` 取回；接收侧错误是无数据的单元 / 枚举。
-- select 侧（u3-l9 详讲）有自己的四件套：`TrySelectError` / `SelectTimeoutError` / `TryReadyError` / `ReadyTimeoutError`。
+两个值得记住的规律：
 
-#### 4.3.2 核心流程：错误一览表
+1. **发送族错误都把消息 `T` 带回来**（`into_inner()`），因为发送失败时消息没被消费，必须还给调用者；接收族与选择族不携带数据。
+2. **阻塞版只可能因「断开」失败**：`send` 会一直等到发出或断开，所以 `SendError` 只有断开一种；`try_*`/`*_timeout` 多出「满/空/超时」。
 
-| 公开方法（所在） | 返回的错误类型 | 失败变体 / 条件 |
-| --- | --- | --- |
-| `Sender::send` | `SendError<T>` | 仅 `Disconnected(T)`：所有接收端已断开 |
-| `Sender::try_send` | `TrySendError<T>` | `Full(T)`：有界通道满（或零容量当下无接收端）；`Disconnected(T)` |
-| `Sender::send_timeout` / `send_deadline` | `SendTimeoutError<T>` | `Timeout(T)`：超时未发出；`Disconnected(T)` |
-| `Receiver::recv` | `RecvError` | 仅 `Disconnected`：通道为空且所有发送端已断开 |
-| `Receiver::try_recv` | `TryRecvError` | `Empty`：通道为空（零容量则当下无发送端）；`Disconnected` |
-| `Receiver::recv_timeout` / `recv_deadline` | `RecvTimeoutError` | `Timeout`：超时未收到；`Disconnected` |
-| `Select::try_select` | `TrySelectError` | 所有操作此刻都会阻塞（无一就绪） |
-| `Select::select_timeout` / `select_deadline` | `SelectTimeoutError` | 截止前无一操作就绪 |
-| `Select::try_ready` | `TryReadyError` | 无一操作就绪 |
-| `Select::ready_timeout` / `ready_deadline` | `ReadyTimeoutError` | 截止前无一操作就绪 |
+#### 4.3.2 核心流程
 
-记一条总规律：**“断开（Disconnected）”是所有数据通道操作的终极失败信号**，它由 4.2 的 `disconnect` 机制点亮——只要某一侧最后一个引用被 drop，对端的所有阻塞/非阻塞操作就能看到断开。
+每种方法的失败判定可以这样总结（结合 u3-l1 的 flavor 与断开概念）：
+
+```text
+send(msg)          阻塞直到发出 或 通道断开
+                   → 成功 Ok(())     失败 Err(SendError(msg))           # 仅断开
+
+try_send(msg)      不阻塞，立即尝试
+                   → 满/零容量无接收端: Err(TrySendError::Full(msg))
+                   → 断开:            Err(TrySendError::Disconnected(msg))
+
+send_timeout(msg)  阻塞，但带截止时间
+                   → 超时:           Err(SendTimeoutError::Timeout(msg))
+                   → 断开:           Err(SendTimeoutError::Disconnected(msg))
+
+recv()             阻塞直到收到 或 空+断开
+                   → 成功 Ok(msg)    失败 Err(RecvError)                  # 空+断开
+
+try_recv()         不阻塞，立即尝试
+                   → 空/零容量无发送端: Err(TryRecvError::Empty)
+                   → 空+断开:          Err(TryRecvError::Disconnected)
+
+recv_timeout()     阻塞，但带截止时间
+                   → 超时:   Err(RecvTimeoutError::Timeout)
+                   → 空+断开: Err(RecvTimeoutError::Disconnected)
+```
+
+为方便错误在调用链中流转，`err.rs` 还提供了一组 `From` 转换，把「更窄」的阻塞错误**提升**成「更宽」的 `try_*`/`*_timeout` 错误：
+
+```text
+SendError<T>     →  TrySendError::Disconnected(T)
+SendError<T>     →  SendTimeoutError::Disconnected(T)
+RecvError        →  TryRecvError::Disconnected
+RecvError        →  RecvTimeoutError::Disconnected
+```
+
+这样，一个内部用 `send`（返回 `SendError`）、对外暴露 `try_send` 语义（返回 `TrySendError`）的函数，可以用 `?` 直接把内部错误转成外部错误，无需手写 `match`。
+
+记一条总规律：**「断开（Disconnected）」是所有数据通道操作的终极失败信号**，它由 4.2 的 `disconnect` 机制点亮——只要某一侧最后一个引用被 drop，对端的所有阻塞/非阻塞操作就能看到断开。
 
 #### 4.3.3 源码精读
 
-**发送侧三类错误**都内嵌消息 `T`。最基础的 `SendError` 是个元组结构体：
+**发送族——以 `TrySendError` 为例（最具代表性，含两个变体）**：
 
-```rust
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub struct SendError<T>(pub T);
-```
+[crossbeam-channel/src/err.rs:19-29](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L19-L29) —— `TrySendError<T>`：`Full(T)`（通道满；对零容量通道则表示「此刻没有接收端」）与 `Disconnected(T)`。注意每个变体都**携带消息 `T`**。
 
-参见 [err.rs:11-12](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L11-L12)。它的 `into_inner()`（[err.rs:147-149](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L147-L149)）取回这条没法发出的消息。注意它**没有** `derive(Debug)`，而是手写 `Debug` 打印 `"SendError(..)"`——因为 `T` 未必是 `Debug`：
+[crossbeam-channel/src/err.rs:11-12](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L11-L12) —— `SendError<T>(pub T)`：元组结构体，只有「断开」一种情况，直接把消息 `T` 装在里面（`pub` 字段，可 `err.0` 取出）。`SendTimeoutError<T>` 同构（[err.rs:36-46](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L36-L46)）。
 
-```rust
-impl<T> fmt::Debug for SendError<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        "SendError(..)".fmt(f)
-    }
-}
-```
+**辅助方法与 `From` 转换**：
 
-参见 [err.rs:118-122](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L118-L122)。这是所有“携带 `T`”错误的共同手法（`TrySendError` / `SendTimeoutError` 同理，见 [err.rs:152-159](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L152-L159) 与 [err.rs:212-216](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L212-L216)）。
+[crossbeam-channel/src/err.rs:180-210](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L180-L210) —— `TrySendError<T>` 的 `into_inner()`（取回消息）、`is_full()`、`is_disconnected()` 三个判断方法，用 `matches!` 宏实现。
 
-`TrySendError` 是双变体枚举，覆盖“满”与“断开”：
+[crossbeam-channel/src/err.rs:172-178](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L172-L178) —— `From<SendError<T>> for TrySendError<T>`：把 `SendError(t)` 映射为 `Disconnected(t)`。`SendTimeoutError` 也有等价转换（[err.rs:229-235](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L229-L235)）。
 
-```rust
-pub enum TrySendError<T> {
-    Full(T),
-    Disconnected(T),
-}
-```
+**接收族**：
 
-参见 [err.rs:19-29](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L19-L29)（注意 `Full` 的文档特别说明：对零容量通道，`Full` 表示“此刻没有接收端在场”）。它提供 `into_inner()`、`is_full()`、`is_disconnected()` 三个查询（[err.rs:180-209](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L180-L209)）。`SendTimeoutError` 结构对称，只是把 `Full` 换成 `Timeout`（[err.rs:36-46](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L36-L46)）。
+[crossbeam-channel/src/err.rs:53-54](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L53-L54) —— `RecvError`：单元结构体（`struct RecvError;`），不携带任何数据，因为接收失败时本就一无所有。它甚至直接 `#[derive(Debug)]`。
 
-**接收侧三类错误**不带数据，因此可以直接 `derive(Debug)`。`RecvError` 是单元结构体：
+[crossbeam-channel/src/err.rs:59-69](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L59-L69) —— `TryRecvError`：`Empty`（通道空；零容量则表示「此刻无发送端」）与 `Disconnected`（空且断开）。`RecvTimeoutError` 同构（[err.rs:74-84](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L74-L84)）。
 
-```rust
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct RecvError;
-```
+[crossbeam-channel/src/err.rs:289-307](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L289-L307) —— `From<RecvError> for TryRecvError`（映射为 `Disconnected`）与 `TryRecvError` 的 `is_empty()`/`is_disconnected()`。`RecvTimeoutError` 的对应物在 [err.rs:320-338](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L320-L338)。
 
-参见 [err.rs:53-54](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L53-L54)。`TryRecvError` / `RecvTimeoutError` 分别是 `Empty | Disconnected` 与 `Timeout | Disconnected`（[err.rs:59-69](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L59-L69)、[err.rs:74-84](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L74-L84)）。
+**选择族**：
 
-**`From` 转换：把“阻塞错误”嵌入“更宽的错误”**。这是错误体系里很关键的设计——底层 flavor 的 `send` 返回的是最宽的 `SendTimeoutError`，公开 `Sender::send` 把它收窄成 `SendError`：
+[crossbeam-channel/src/err.rs:86-116](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L86-L116) —— `TrySelectError`、`SelectTimeoutError`、`TryReadyError`、`ReadyTimeoutError` 四个单元结构体，分别对应 `try_select`（无操作就绪）、`select_timeout`（超时）、`try_ready`、`ready_timeout`。它们都不携带数据，产生点在 `select.rs`（详见 u3-l9）。
 
-```rust
-impl<T> From<SendError<T>> for TrySendError<T> {
-    fn from(err: SendError<T>) -> Self {
-        match err {
-            SendError(t) => Self::Disconnected(t),
-        }
-    }
-}
-```
+**trait 实现：`Debug`/`Display`/`Error` 的不对称**：
 
-参见 [err.rs:172-178](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L172-L178)（`SendError → SendTimeoutError` 见 [err.rs:229-235](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L229-L235)，`RecvError → TryRecvError` / `→ RecvTimeoutError` 见 [err.rs:289-295](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L289-L295) 与 [err.rs:320-326](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L320-L326)）。公开 `Sender::send` 正是用这条收窄链把 `SendTimeoutError::Disconnected` 映射为 `SendError`、并把不可能出现的 `Timeout` 标记为 `unreachable!`：
+[crossbeam-channel/src/err.rs:118-130](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L118-L130) —— `SendError<T>` **手写** `Debug`（打印 `"SendError(..)"`）而非 derive，因为 `T` 不一定实现 `Debug`；`Display` 给出可读文案；`impl<T: Send> error::Error` 在 `T: Send` 时成立。这是发送族三个类型的统一模式（`TrySendError` 的手写 Debug 见 [err.rs:152-159](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L152-L159)）。接收族与选择族因不携带 `T`，直接 `#[derive(Debug)]`。
 
-```rust
-pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-    match &self.flavor { /* …调用 flavor.send(msg, None)… */ }
-        .map_err(|err| match err {
-            SendTimeoutError::Disconnected(msg) => SendError(msg),
-            SendTimeoutError::Timeout(_) => unreachable!(),
-        })
-}
-```
+**公共 `send` 如何把 flavor 的「最宽错误」收窄成 `SendError`**：
 
-参见 [channel.rs:446-456](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L446-L456)：因为 `send` 传了 `None`（无截止时间），flavor 永远不可能返回 `Timeout`，所以 `unreachable!()` 是安全的。接收端的 `recv` 同样把 `RecvTimeoutError` 收窄成 `RecvError`（[channel.rs:831-857](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L831-L857)）。
+[crossbeam-channel/src/channel.rs:446-456](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L446-L456) —— `pub fn send(&self, msg: T) -> Result<(), SendError<T>>`：内部调用 `chan.send(msg, None)`（注意第二个参数是 `None`，即**无截止时间**），flavor 返回 `Result<(), SendTimeoutError<T>>`，再用 `map_err` 把 `Disconnected(msg)` 收窄为 `SendError(msg)`，把 `Timeout(_)` 标为 `unreachable!()`。因为传了 `None`，flavor 永远不可能因超时而中止，所以 `Timeout` 分支不可达、`unreachable!()` 是安全的。接收端的 `recv` 同样把 `RecvTimeoutError` 收窄成 `RecvError`（参见 [channel.rs:831-857](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L831-L857) 一带的 `recv` 实现）。
 
-**select 侧四件套**都是无数据的单元结构体，定义在 [err.rs:86-116](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L86-L116)。它们的产生点在 `select.rs`，例如 `try_select` 在无一操作就绪时返回 `TrySelectError`：
+**对外重导出**：
 
-```rust
-pub fn try_select<'a>(
-    handles: &mut [(&'a dyn SelectHandle, usize, usize)],
-    is_biased: bool,
-) -> Result<SelectedOperation<'a>, TrySelectError> {
-    match run_select(handles, Timeout::Now, is_biased) {
-        None => Err(TrySelectError),
-        Some((token, index, addr)) => Ok(SelectedOperation { /* … */ }),
-    }
-}
-```
-
-参见 [select.rs:456-469](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/select.rs#L456-L469)（`try_ready → TryReadyError` 见 [select.rs:1009-1011](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/select.rs#L1009-L1011)，`select_timeout/select_deadline → SelectTimeoutError`、`ready_deadline → ReadyTimeoutError` 见 [select.rs:498-513](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/select.rs#L498-L513) 与 [select.rs:1167-1169](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/select.rs#L1167-L1169)）。select 算法本身留到 u3-l9 详讲，本讲只需知道这四个错误是「多路选择没选到」的几种姿态。
-
-最后，所有这些错误类型都实现了 `Display` 与 `std::error::Error`（发送侧要求 `T: Send`，例如 [err.rs:124-130](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L124-L130)），并在 `lib.rs` 里统一重导出（[lib.rs:382-385](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/lib.rs#L382-L385)），所以用户可以直接 `use crossbeam_channel::{SendError, TryRecvError, …}`。
+[crossbeam-channel/src/lib.rs:382-385](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/lib.rs#L382-L385) —— `lib.rs` 把 `err.rs` 的全部错误类型统一 `pub use` 出来，所以用户可以直接 `use crossbeam_channel::{SendError, TryRecvError, …}`。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用一个最小程序亲手触发并区分发送侧 / 接收侧的主要错误，并把它们整理成表。
+这是本讲实践任务的第二部分：用一个可运行示例触发主要错误类型，并整理成表。
 
-**操作步骤**：编写如下示例（**示例代码，非项目原有文件**）：
+1. **实践目标**：亲手触发并区分发送/接收族的错误，建立「错误类型 ↔ 触发条件」的对应表。
 
-```rust
-// 示例代码：触发并观察 channel 的各类错误
-use std::thread;
-use std::time::Duration;
-use crossbeam_channel::{
-    bounded, unbounded, RecvError, RecvTimeoutError,
-    SendTimeoutError, TryRecvError, TrySendError,
-};
+2. **操作步骤**：在依赖 `crossbeam-channel` 的 crate 里运行下面这段**示例代码**：
 
-fn main() {
-    // 1) TrySendError::Full —— 有界通道已满
-    let (s, r) = bounded(1);
-    s.try_send(1).unwrap();
-    assert_eq!(s.try_send(2), Err(TrySendError::Full(2)));
+   ```rust
+   // 示例代码：触发并观察 channel 的各类错误
+   use std::time::Duration;
+   use crossbeam_channel::{
+       bounded, unbounded, RecvError, RecvTimeoutError,
+       SendTimeoutError, TryRecvError, TrySendError,
+   };
 
-    // 2) TrySendError::Disconnected —— 所有接收端被 drop
-    drop(r);
-    assert_eq!(s.try_send(3), Err(TrySendError::Disconnected(3)));
-    // 发送错误带回原消息，可取回：
-    assert_eq!(s.try_send(4).unwrap_err().into_inner(), 4);
+   fn main() {
+       // 1) SendError：丢弃所有接收端后 send（带回原消息）
+       let (s, r) = unbounded::<i32>();
+       drop(r);
+       assert_eq!(s.send(1), Err(crossbeam_channel::SendError(1)));
 
-    // 3) TryRecvError::Empty / Disconnected
-    let (s, r) = unbounded::<i32>();
-    assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
-    drop(s);
-    assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
+       // 2) TrySendError::Full：有界(1) 装 1 条后再 try_send
+       let (s, r) = bounded(1);
+       s.try_send(10).unwrap();
+       assert_eq!(s.try_send(11), Err(TrySendError::Full(11)));
 
-    // 4) 超时：send_timeout / recv_timeout
-    let (s, r) = bounded::<i32>(0); // 零容量：无人接收即“满”
-    assert_eq!(
-        s.send_timeout(1, Duration::from_millis(50)),
-        Err(SendTimeoutError::Timeout(1)),
-    );
-    let (_s, r) = unbounded::<i32>();
-    assert_eq!(
-        r.recv_timeout(Duration::from_millis(50)),
-        Err(RecvTimeoutError::Timeout),
-    );
+       // 3) TrySendError::Disconnected
+       let (s, r) = bounded::<i32>(1);
+       drop(r);
+       assert_eq!(s.try_send(1), Err(TrySendError::Disconnected(1)));
+       // 发送错误带回原消息，可取回：
+       assert_eq!(s.try_send(2).unwrap_err().into_inner(), 2);
 
-    // 5) 阻塞版只有一种失败：Disconnected
-    let (s, r) = unbounded::<i32>();
-    drop(s);
-    assert_eq!(r.recv(), Err(RecvError));
-}
-```
+       // 4) SendTimeoutError::Timeout：满通道 + 极短超时
+       let (s, _r) = bounded::<i32>(1);
+       let _ = s.try_send(0);
+       assert!(s.send_timeout(1, Duration::from_millis(50))
+                   .unwrap_err().is_timeout());
 
-运行（待本地验证）：`cargo run --example <名字>`。
+       // 5) RecvError：丢弃所有发送端后 recv（通道为空）
+       let (s, r) = unbounded::<i32>();
+       drop(s);
+       assert_eq!(r.recv(), Err(RecvError));
 
-**需要观察的现象**：每个 `assert_eq!` 都对应一种错误变体；注意发送错误（`Full(2)`、`Disconnected(3)`）都内嵌了原消息，而接收错误（`Empty`、`Disconnected`、`Timeout`）不带数据。
+       // 6) TryRecvError::Empty / Disconnected
+       let (_s, r) = unbounded::<i32>();
+       assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
+       let (s, r) = unbounded::<i32>();
+       drop(s);
+       assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
 
-**预期结果**：全部断言通过。其中 `send_timeout` 在零容量通道上、`recv_timeout` 在空通道上各等待约 50ms 后返回 `Timeout`——这也间接说明限时版是在「阻塞等待」与「立即返回」之间的中间态。
+       // 7) RecvTimeoutError::Timeout
+       let (_s, r) = unbounded::<i32>();
+       assert!(r.recv_timeout(Duration::from_millis(50))
+                   .unwrap_err().is_timeout());
+   }
+   ```
 
-**整理任务**：把 4.3.2 的“错误一览表”复制到你的笔记里，对照上面的程序，在每种错误旁边补一句“用什么通道配置 + 什么操作触发”。例如：`TrySendError::Full` ← `bounded(1)` 已满时 `try_send`；`Disconnected` ← drop 掉对应侧所有引用后任一操作。
+   运行（待本地验证）：`cargo run --example <名字>`。
+
+3. **需要观察的现象**：每个 `assert_eq!`/`assert!` 对应一种错误变体；注意发送错误（`Full(11)`、`Disconnected(1)`）都内嵌了原消息，而接收错误（`Empty`、`Disconnected`、`Timeout`）不带数据。
+
+4. **预期结果**：得到如下「错误触发条件」表（选择族单列）：
+
+   | # | 错误类型 | 触发条件 |
+   |---|---------|---------|
+   | 1 | `SendError<T>` | `send` 时通道已断开（无接收端） |
+   | 2 | `TrySendError::Full` | `try_send` 时通道已满（零容量则表示此刻无接收端） |
+   | 3 | `TrySendError::Disconnected` | `try_send` 时通道已断开 |
+   | 4 | `SendTimeoutError::Timeout` | `send_timeout` 超时未发出（满或零容量无接收端） |
+   | 5 | `RecvError` | `recv` 时通道为空且已断开（无发送端） |
+   | 6 | `TryRecvError::Empty` | `try_recv` 时通道为空（零容量则表示此刻无发送端） |
+   | — | `TryRecvError::Disconnected` | `try_recv` 时通道为空且已断开 |
+   | — | `RecvTimeoutError::Timeout` | `recv_timeout` 超时未收到 |
+   | — | `SelectTimeoutError` / `TrySelectError` 等 | `select_timeout` 超时 / `try_select` 无操作就绪 |
+
+5. 待本地验证：`send_timeout`/`recv_timeout` 是否触发取决于线程调度与时长；`Duration::from_millis(50)` 在繁忙机器上一般足够稳定，必要时可调大时长。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `SendError` / `TrySendError` / `SendTimeoutError` 不直接 `derive(Debug)`，而 `RecvError` / `TryRecvError` 却可以？
+**练习 1**：为什么 `SendError`、`TrySendError`、`SendTimeoutError` 都携带 `T`，而 `RecvError` 不携带任何数据？
 
-> **参考答案**：前三个内嵌消息 `T`，而 `T` 不一定实现 `Debug`；`derive(Debug)` 会给 `T` 加 `Debug` 约束，从而缩小可用范围。所以它们手写 `Debug` 只打印 `"SendError(..)"` 这类占位串。接收侧错误不带数据，没有这个顾虑，可以直接 `derive(Debug)`。
+**参考答案**：发送失败时，消息 `T` 没有被通道消费，必须原样还给调用者（否则就丢了），所以发送族错误都把 `T` 装回来并提供 `into_inner()`。接收失败时本就没有产出任何值，无物可还，故 `RecvError` 是单元结构体。
 
-**练习 2**：公开 `Sender::send` 内部出现 `SendTimeoutError::Timeout(_) => unreachable!()`。为什么这里可以安全地断言“不可达”？
+**练习 2**：公开 `Sender::send` 内部出现 `SendTimeoutError::Timeout(_) => unreachable!()`。为什么这里可以安全地断言「不可达」？
 
-> **参考答案**：`send` 调用 flavor 时传的是 `None`（无截止时间），flavor 的 `send` 永远不会因超时而中止，只会成功或返回 `Disconnected`。因此 `Timeout` 分支在 `send` 这条路径上不可能出现，`unreachable!()` 是对这一事实的断言。
+**参考答案**：`send` 调用 flavor 时传的是 `None`（无截止时间），flavor 的 `send` 永远不会因超时而中止，只会成功或返回 `Disconnected`。因此 `Timeout` 分支在 `send` 这条路径上不可能出现，`unreachable!()` 是对这一事实的断言。
 
-**练习 3**：`From<SendError<T>> for TrySendError<T>` 这个转换的存在意义是什么？
+**练习 3**：写一个函数 `fn try_or_block(s: &Sender<i32>) -> Result<(), TrySendError<i32>>`，内部用阻塞 `send`，对外返回 `TrySendError`，用 `?` 简化。
 
-> **参考答案**：它把“最窄”的阻塞错误 `SendError`（只有 `Disconnected`）无损嵌入“更宽”的 `TrySendError`（多了 `Full`），方便在不同调用风格之间用 `?` 传播错误：一个返回 `Result<_, TrySendError<T>>` 的函数可以同时容纳 `try_send` 的直接错误和 `send` 经转换后的错误。
+**参考答案**：
+
+```rust
+// 示例代码
+use crossbeam_channel::{Sender, TrySendError};
+fn try_or_block(s: &Sender<i32>) -> Result<(), TrySendError<i32>> {
+    // send 返回 Err(SendError)，经 From 提升为 TrySendError::Disconnected
+    s.send(1).map_err(TrySendError::from)?;
+    Ok(())
+}
+```
+
+`SendError` 经 `From` 提升为 `TrySendError::Disconnected`（[err.rs:172-178](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L172-L178)），所以 `?` 直接生效。
+
+**练习 4**：`SendError<T>` 为什么手写 `Debug` 而不是 `#[derive(Debug)]`？
+
+**参考答案**：derive `Debug` 会要求 `T: Debug`，从而把无关约束强加给所有使用者；而通道传递的 `T` 完全可能不实现 `Debug`。手写 `Debug` 打印固定的 `"SendError(..)"`，使 `SendError<T>: Debug` 对任意 `T` 成立，降低使用门槛。
 
 ---
 
 ## 5. 综合实践
 
-把本讲三个模块串起来，完成下面这个“通道生命周期观察器”小任务。
+把本讲的「计数协议」和「错误类型」串起来，完成下面这个「通道生命周期观察器」小任务。
 
-**任务描述**：编写一个程序（**示例代码，非项目原有文件**），用 `bounded(2)` 通道演示从“正常收发”到“断开回收”的完整过程，并印证本讲的三个核心结论：① 多端共享同一 `Counter`；② 只有最后一个引用 drop 才触发断开；③ 断开后各类操作返回对应错误。
+**任务**：用 `bounded(2)` 通道演示从「正常收发」到「断开回收」的完整过程，印证本讲的三个核心结论：① 多端共享同一 `Counter`；② 只有最后一个引用 drop 才触发断开；③ 断开后各类操作返回对应错误。
 
 ```rust
 // 示例代码：通道生命周期观察器
 use std::thread;
 use std::time::Duration;
 use crossbeam_channel::{
-    bounded, Receiver, RecvError, Sender, TryRecvError, TrySendError,
+    bounded, Receiver, RecvError, Sender, TryRecvError,
 };
 
 struct DropLog(&'static str);
@@ -586,27 +533,23 @@ fn main() {
     let (s, r): (Sender<DropLog>, Receiver<DropLog>) = bounded(2);
 
     // ① 多端共享同一通道：clone 出第二发送端交给子线程
-    let s2 = s.clone();
+    let s2 = s.clone();                          // senders: 1 -> 2
     let worker = thread::spawn(move || {
-        s2.send(DropLog("from-worker")).ok();
-        // 子线程在此返回，s2 被 drop：但主线程的 s 仍在，通道未断
+        let _ = s2.send(DropLog("from-worker"));
+        // 子线程返回时 drop(s2)：主线程的 s 还在，通道未断
     });
 
     thread::sleep(Duration::from_millis(100));
 
-    // ② 此时主线程仍持有 s，接收端能看到 worker 发来的消息
+    // ② 主线程仍持有 s，接收端能看到 worker 发来的消息
     assert!(matches!(r.try_recv(), Ok(_)));
 
     // ③ 主线程 drop 最后一个发送端 → senders 归零 → disconnect_senders
     drop(s);
     worker.join().unwrap();
 
-    // ④ 断开后：发送返回 Disconnected（带回消息），接收返回 Disconnected
-    //    （注意这里 s 已 drop，故用一个新引用演示发送错误需要重新构造；
-    //     为保持示例自洽，下面仅演示接收侧断开。）
+    // ④ 断开后：接收返回 Disconnected；阻塞 recv 不会卡死，立即返回 RecvError
     assert_eq!(r.try_recv(), Err(TryRecvError::Disconnected));
-
-    // ⑤ 阻塞 recv 在“空且断开”时立刻返回 RecvError（不会永远阻塞）
     assert_eq!(r.recv(), Err(RecvError));
 
     println!("通道已被最后一个 drop 的引用回收（参见 4.2 的 destroy 裁决）");
@@ -617,34 +560,30 @@ fn main() {
 
 1. 把上述代码放入 `crossbeam-channel/examples/lifecycle.rs`（或独立小 crate）。
 2. 运行（待本地验证）：`cargo run -p crossbeam-channel --example lifecycle`。
-3. 对照 4.2.3 的销毁链路，在脑中（或纸面上）标注每一步对应 `counter.rs` 的哪一行：`acquire`（clone）、`fetch_sub==1`（最后一个 drop）、`disconnect_senders`（唤醒）、`destroy.swap`（裁决回收）。
+3. 对照 4.2.3 的销毁链路，在纸面上标注每一步对应 `counter.rs` 的哪一行：`acquire`（clone）、`fetch_sub==1`（最后一个 drop）、`disconnect_senders`（唤醒）、`destroy.swap`（裁决回收）。
 
 **需要观察的现象**：
 
-- `DropLog` 的 `drop` 日志会按消息被消费 / 被丢弃的时机打印，帮你定位“消息何时释放”。
+- `DropLog` 的 drop 日志会按消息被消费/丢弃的时机打印，帮你定位「消息何时释放」。
 - worker 线程 drop `s2` 后通道**没有**断开（因为主线程 `s` 还在）；只有主线程也 drop `s` 后，`r.try_recv()` 才返回 `Disconnected`。
 - 最后 `r.recv()` 立即返回 `Err(RecvError)`，证明断开后阻塞接收不会卡死——这正是 4.2 里 `disconnect` 唤醒机制的价值。
 
 **预期结果**：程序正常退出，所有断言通过，无内存泄漏（若把 `DropLog` 的 drop 日志累加，应与发送条数一致）。
 
----
-
 ## 6. 本讲小结
 
-- `Counter<C>` 是通道的**共享内核**：`senders` / `receivers` 两个 `AtomicUsize` 计数、一个 `destroy` 仲裁位、内联的 flavor 通道 `chan`。所有 clone 出来的端都只持有一份 `NonNull<Counter<C>>` 裸指针。
-- crossbeam-channel **手写**引用计数而非用 `Arc`：用 `Box::leak` 构造（不自动释放），用 `release` 里的 `Box::from_raw` 回收，从而把“两端各自计数 + 恰好一次销毁”的复杂语义握在自己手里。
-- `acquire`（`clone`）用 `Relaxed` 增计数并带溢出 `abort` 保护；`release`（`drop`）用 `AcqRel` 减计数，当旧值为 1 时触发该侧 `disconnect` 回调唤醒对端，再通过 `destroy.swap` 裁决由“后到达者”回收整条通道——保证恰好销毁一次。
-- `disconnect_senders` / `disconnect_receivers` 用 `MARK_BIT` 的 `fetch_or` 把“断开”只点亮一次，并唤醒对端阻塞操作——这是所有 `Disconnected` 错误的物理来源。
-- `err.rs` 是一张规整的错误矩阵：发送侧（`SendError` / `TrySendError` / `SendTimeoutError`）**内嵌并带回原消息**，故手写 `Debug`；接收侧（`RecvError` / `TryRecvError` / `RecvTimeoutError`）无数据；select 侧四件套（`TrySelectError` / `SelectTimeoutError` / `TryReadyError` / `ReadyTimeoutError`）。
-- 阻塞版错误只有 `Disconnected` 一种；`try_*` 多 `Full` / `Empty`；`*_timeout` 多 `Timeout`。`From` 转换把窄错误嵌入宽错误，公开 `send` / `recv` 据此把 flavor 返回的 `SendTimeoutError` / `RecvTimeoutError` 收窄，并用 `unreachable!()` 标记不可能出现的 `Timeout` 分支。
-
----
+- `Counter<C>` 是通道的**共享内核**：`senders`/`receivers` 两个 `AtomicUsize` 计数、一个 `destroy` 仲裁位、内联的 flavor 通道 `chan`。所有 clone 出来的端都只持有一份 `NonNull<Counter<C>>` 裸指针。
+- crossbeam-channel **手写**引用计数而非用 `Arc`：用 `Box::leak` 构造（不自动释放），用 `release` 里的 `Box::from_raw` 回收，从而把「两端各自计数 + 恰好一次销毁」的复杂语义握在自己手里。
+- `acquire`（`clone`）用 `Relaxed` 增计数并带溢出 `abort` 保护；`release`（`drop`）用 `AcqRel` 减计数，当旧值为 1 时触发该侧 `disconnect` 回调唤醒对端，再通过 `destroy.swap` 裁决由「后到达者」回收整条通道——保证恰好销毁一次。
+- `disconnect_senders`/`disconnect_receivers` 用 `MARK_BIT` 的 `fetch_or` 把「断开」只点亮一次并唤醒对端阻塞操作——这是所有 `Disconnected` 错误的物理来源；接收端断开还会 `discard_all_messages` 急切释放消息。
+- `release` 是 `unsafe fn`（调用者必须保证对应一次合法 acquire）；`disconnect` 闭包虽返回 `bool`，但 `release` 丢弃该返回值，释放决策只看 `destroy` 标志。
+- `err.rs` 是一张规整的错误矩阵：发送族（`SendError`/`TrySendError`/`SendTimeoutError`）**内嵌并带回原消息**、故手写 `Debug`；接收族（`RecvError`/`TryRecvError`/`RecvTimeoutError`）无数据；选择族四件套（`TrySelectError`/`SelectTimeoutError`/`TryReadyError`/`ReadyTimeoutError`）。阻塞版只有 `Disconnected`；`try_*` 多 `Full`/`Empty`；`*_timeout` 多 `Timeout`。`From` 转换把窄错误嵌入宽错误，公共 `send`/`recv` 据此把 flavor 返回的超时错误收窄，并用 `unreachable!()` 标记不可能出现的 `Timeout` 分支。
 
 ## 7. 下一步学习建议
 
-本讲搞清楚了“通道的引用计数与销毁”以及“操作失败时返回什么错误”，但**故意没碰**两个问题：
+本讲搞清楚了「通道的引用计数与销毁」以及「操作失败时返回什么错误」，但**故意没碰**两个问题：
 
-1. **flavor 内部到底怎么存放消息、怎么做并发收发？** 例如 `disconnect` 用到的 `MARK_BIT`、`tail` 究竟编码了什么。这是下一讲 **u3-l3「flavors 架构与 SelectHandle trait」**的入口——你会看到 `SenderFlavor` / `ReceiverFlavor` 枚举如何把操作路由到 array / list / zero 等具体实现，以及统一的 `SelectHandle` trait。
-2. **阻塞的 `send` / `recv` 是怎么“睡着”和“被叫醒”的？** 本讲只提到 `disconnect` 会“唤醒对端”，但唤醒的细节（线程局部阻塞上下文、被阻塞线程的队列）要等到 **u3-l7「Context 与 Waker：阻塞与唤醒机制」**才展开。
+1. **flavor 内部到底怎么存放消息、怎么做并发收发？** 例如 `disconnect` 用到的 `MARK_BIT`、`tail` 究竟编码了什么。这是下一讲 **u3-l3「flavors 架构与 SelectHandle trait」**的入口——你会看到 `SenderFlavor`/`ReceiverFlavor` 枚举如何把操作路由到 array/list/zero 等具体实现，以及统一的 `SelectHandle` trait。
+2. **阻塞的 `send`/`recv` 是怎么「睡着」和「被叫醒」的？** 本讲只提到 `disconnect` 会「唤醒对端」，但唤醒的细节（线程局部阻塞上下文、被阻塞线程的队列）要等到 **u3-l7「Context 与 Waker：阻塞与唤醒机制」**才展开。
 
-建议的阅读顺序：先 u3-l3（flavor 架构总览）→ u3-l4/u3-l5/u3-l6（array/list/zero 三种 flavor 的存储与算法）→ u3-l7（阻塞唤醒）。读 flavor 时，可以回头对照本讲的 `disconnect_senders` / `disconnect_receivers`，体会“计数销毁”与“flavor 内部状态机”是如何在 `release` 这一处汇合的。
+建议的阅读顺序：先 u3-l3（flavor 架构总览）→ u3-l4/u3-l5/u3-l6（array/list/zero 三种 flavor 的存储与算法）→ u3-l7（阻塞唤醒）。读 flavor 时，可以回头对照本讲的 `disconnect_senders`/`disconnect_receivers`，体会「计数销毁」与「flavor 内部状态机」是如何在 `release` 这一处汇合的。

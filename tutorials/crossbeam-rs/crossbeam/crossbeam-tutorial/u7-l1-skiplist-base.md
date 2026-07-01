@@ -2,466 +2,413 @@
 
 ## 1. 本讲目标
 
-本讲精读 `crossbeam-skiplist/src/base.rs` 中无锁跳表的**节点结构层**，也就是 `SkipMap` / `SkipSet` 能够做到「无锁、并发安全」的地基。
+本讲深入 `crossbeam-skiplist` 的实现内核 `base.rs`，剖析**无锁跳表（lock-free skip list）**最底层的「积木」——节点（`Node`）。读完本讲，你应当能够：
 
-读完本讲，你应当能够：
+1. 画出 `Node` 在内存中的字段布局，并说清为什么 `tower` 必须是「变长尾数组」。
+2. 解释 `refs_and_height` 这一个机器字如何同时打包「引用计数」与「塔高度」，以及它带来的算术技巧。
+3. 理解 xorshift 随机高度生成的几何分布原理，以及 `max_height` 提示为何只增不减。
+4. 掌握引用计数 `try_increment` / `decrement` / `finalize` 三件套如何与 epoch 延迟回收协作。
+5. 说清楚 `mark_tower` 为什么必须**从最高层向第 0 层**逐层标记删除。
 
-- 画出 `Node` 的四字段内存布局，并解释为何 `tower` 必须放在最后；
-- 说清 `refs_and_height` 如何用**一个机器字同时存储「塔高」与「引用计数」**，以及这样做省了什么；
-- 理解 xorshift 随机数如何生成符合跳表概率分布的塔高，以及 `max_height` 提示如何加速查找；
-- 跟着 `try_increment` / `decrement` / `finalize` 走一遍引用计数回收链路，并指出它与 `crossbeam-epoch` 的衔接点；
-- 解释 `mark_tower` 为何要从**最高层向第 0 层逐层打删除标记**。
-
-本讲只看**结构与节点级机制**，不展开 `insert` / `get` / `remove` 的完整并发协调（那是下一讲 u7-l2 的内容）。
+本讲只看「结构定义」与「节点级原语」，**不**展开并发 `insert` / `get` / `remove` 的完整搜索流程（那是下一讲 u7-l2 的内容）。后者建立在本讲打下的地基之上。
 
 ## 2. 前置知识
 
-本讲依赖 u5（crossbeam-epoch）已建立的认知，尤其是下面三点：
+本讲是专家层内容，需要你已具备以下认知（前序讲义已建立）：
 
-1. **epoch 延迟回收**：无锁结构里，删除方想 `free` 一个节点时，读取方可能还攥着它的指针，立即释放会导致 use-after-free。解法是把释放动作 `defer` 掉，等全局 epoch 推进两代之后再真正执行（详见 u5-l5 的「过期判据 \( \text{global\_epoch} - \text{bag\_epoch} \geq 2 \)」）。
-2. **带标签的原子指针 `Atomic<T>`**：crossbeam-epoch 的 `Atomic<T>` 利用对齐指针低位恒为 0 的特性，把若干**标签位（tag）**塞进指针的同一个机器字里，从而能用一条 CAS 同时改指针与标签（详见 u5-l2）。本讲的删除标记就藏在 tag 的最低位。
-3. **`Guard` 与 `'g` 生命周期**：`pin()` 返回 RAII 凭证 `Guard`；从 `Atomic` 读出的 `Shared<'g, T>` 活不过这次 pin，从而在类型层保证读出的引用不会被回收（详见 u5-l3）。
+- **跳表是什么**：一种有序的、概率性的数据结构，用多层链表实现 \(O(\log n)\) 的查找。最底层是一条完整的有序链表，每往上一层都跳着保留一部分节点，形似「快车道」。查找时从最高层起步，沿「快车道」快速逼近目标后再逐层下降。详见维基百科 [skip list](https://en.wikipedia.org/wiki/Skip_list)。
+- **epoch 内存回收（u5-l1 ~ u5-l5）**：无锁结构里删除一个节点时，可能有别的线程正持着它的指针在读，不能立刻释放。crossbeam 用 epoch 机制把释放动作「延迟两个代次」后才真正执行。本讲里 `finalize` 的调用全部经 `guard.defer_unchecked(...)` 走这条延迟通道。
+- **Atomic 指针与低位标签（u5-l2）**：`crossbeam_epoch::Atomic<T>` 是一个 `AtomicPtr`，因为指针按对齐，**低若干位恒为 0**，可塞一个「标签（tag）」。`Shared::tag()` 读标签，`fetch_or(1, ...)` 把最低位置 1。本讲里「删除标记」就存在每个塔指针的 tag 位里。
+- **CachePadded 与伪共享（u2-l2）**：热点字段单独占一条缓存行，避免多核乒乓。本讲里 `SkipList` 的 `HotData` 就用 `CachePadded` 包裹。
 
-另外，本讲大量使用 `AtomicUsize` 的 `fetch_sub` / `compare_exchange`，这和标准库 `Arc` 的引用计数回收是同一套模式（Release 减计数 → 最后一个回收者做 Acquire fence）。
-
-补充一个数据结构常识：**跳表（skip list）** 用多层链表模拟平衡树。最底层（level 0）是完整链表，每个节点以一定概率 \( p \) 向上「长」一层。查找时从最高层往右走、走不动就下降一层，期望查找代价 \( O(\log n) \)。本讲的 `tower` 就是节点的多层指针集合。
+一句话回顾上承结论（u5-l5）：被删节点的 `finalize` 不是在引用计数归零时立刻执行，而是塞进 epoch 垃圾袋，等到「全局代次 − 入袋代次 ≥ 2」才由 `collect` 真正销毁。本讲会把这条结论落到跳表节点上。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
-| --- | --- |
-| `crossbeam-skiplist/src/base.rs` | 无锁跳表的核心实现：节点 `Node`、塔 `Tower`/`Head`、引用计数、高度生成、`mark_tower`、以及 `insert`/`remove`/`search` 等所有算法。本讲只读它的**节点结构层**部分。 |
-| `crossbeam-skiplist/src/lib.rs` | crate 文档与门面，说明跳表是 lock-free、用 epoch 做 GC，并把 `base::SkipList` 重导出。 |
+本讲涉及两个文件，主战场是 `base.rs`：
 
-要点：`base.rs` 是一个近 2400 行的大文件，但**节点结构层**集中在文件前 400 行（`Node`、`Tower`、`Head`、`HotData`、引用计数、`mark_tower`），后面才是 `SkipList` 的各类操作。
+| 文件 | 作用 | 本讲用到 |
+|------|------|----------|
+| [base.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs) | 无锁跳表的**全部实现内核**：节点定义、引用计数、塔操作、搜索、插入、删除、迭代器都在这里。 | `Node`/`Tower`/`Head` 结构、`refs_and_height` 打包、`random_height`、`try_increment`/`decrement`/`finalize`、`mark_tower` |
+| [lib.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/lib.rs) | crate 文档与模块声明。把 `base::SkipList` 重导出，并在 `std` 特性下提供 `SkipMap`/`SkipSet` 包装。 | 文档级背景：跳表的并发语义、epoch GC、与 BTreeMap 的取舍 |
+
+> 提示：`base.rs` 有 2300+ 行，但本讲只读它最前面的 ~400 行（结构定义与节点原语）和 `random_height` 一段。后续 `search_bound`/`insert_internal`/`remove` 留给 u7-l2。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 Node 节点布局与 Tower 多层指针
+### 4.1 Node 节点与 refs_and_height 打包布局
 
 #### 4.1.1 概念说明
 
-跳表的每个元素是一个节点 `Node<K, V>`。一个节点要同时承载四样东西：
+跳表里每一个键值对住在一个 `Node` 里。无锁并发对 `Node` 的设计提出两个苛刻要求：
 
-1. **键 `key`** 与 **值 `value`**（用户数据）；
-2. **引用计数**：记录「有多少个 `Entry` 句柄 + 它被装进了多少层」指向自己，决定它何时能被释放；
-3. **塔高**：这个节点有多少层指针；
-4. **塔 `tower`**：一个长度等于塔高的原子指针数组，`tower[i]` 指向同层右邻居。
+1. **变长塔**：不同节点的高度（也就是塔的层数）不同，由概率生成。我们不希望为每个节点都按最大高度分配 32 个指针槽（浪费内存），而希望「高度几，塔就恰好有几层」。这等价于 C 里的「柔性数组成员（flexible array member）」。
+2. **单字打包计数与高度**：每个节点的「当前被多少处引用」和「塔有多高」都是高频读写的元信息。把它们塞进**同一个 `AtomicUsize`**，既能用一条原子指令同时操作，又能让遍历时这俩信息与塔指针落在同一条缓存行上——这是 `#[repr(C)]` 字段顺序的精心安排。
 
-关键设计是：**塔是变长的**。不同节点的塔高不同（1 到 32 层），如果给每个节点都开满 32 层指针会浪费大量内存。所以 `tower` 被设计成「紧跟在节点固定字段之后的、长度可变的数组」，整个 `Node` 一次性按需分配。
+#### 4.1.2 核心流程：内存布局
 
-#### 4.1.2 核心流程
+先看三个布局常量，它们定义了「高度」占多少位：
 
-节点在内存中按 `#[repr(C)]` 的字段顺序紧凑排列：
+[base.rs:24-30](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L24-L30) —— 定义 `HEIGHT_BITS=5`，因此 `MAX_HEIGHT=32`，塔最高 32 层；低 5 位存高度，高位存引用计数。
 
-```text
-+--------+-----+------------------+-----------------+
-| value  | key | refs_and_height  | tower[0..height]|
-+--------+-----+------------------+-----------------+
-         固定字段                     变长尾随数组
+再看 `Node` 本体（注意 `#[repr(C)]` 固定字段顺序）：
+
+[base.rs:123-145](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L123-L145) —— `Node` 字段顺序为 `value`、`key`、`refs_and_height`、`tower`。注释明确说明 `tower` 必须是最后一个字段（因为它是变长的），而 `key`/计数/高度紧贴 `tower` 以提升遍历时的缓存命中率。
+
+它的内存形象如下（以高度 3 的节点为例）：
+
+```
+Node<K,V> 分配（高度 = 3）:
+┌────────────────────┐  ← 固定头部（Layout::new::<Self>()）
+│ value: V           │
+│ key:   K           │
+│ refs_and_height    │  ← 一个机器字，同时编码 [引用计数 | 高度]
+├────────────────────┤  ← 紧随其后的变长尾数组
+│ tower[0] (level 0) │  Atomic<Node>
+│ tower[1] (level 1) │  Atomic<Node>
+│ tower[2] (level 2) │  Atomic<Node>
+└────────────────────┘  （没有 tower[3]，因为高度只到 2）
 ```
 
-- `#[repr(C)]` 强制字段顺序，保证 `tower` 永远是**最后一个字段**，这样它后面的变长数组才能用指针算术访问。
-- 注释明确说：把 key、引用计数、高度放在离 tower 近的地方，是为了**遍历时的缓存局部性**——跳表查找最频繁的操作就是顺着 tower 读指针。
-- `Tower` 本身是个零大小类型（ZST）占位 `pointers: [Atomic<Node<K,V>>; 0]`，真正的大小由分配时的 `height` 决定。
+#### 4.1.3 源码精读：refs_and_height 的编码与解码
 
-#### 4.1.3 源码精读
+打包规则：低 `HEIGHT_BITS=5` 位存 `(height - 1)`，其余高位存 `ref_count`。也就是
 
-节点结构定义在 [base.rs:129-145](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L129-L145)：注意 `tower: Tower<K, V>` 是最后一个字段，注释解释了为何要紧挨着放。
+\[
+\text{refs\_and\_height} = (\text{ref\_count} \ll 5) \;|\; (\text{height} - 1)
+\]
 
-`Tower` 占位类型在 [base.rs:36-39](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L36-L39)：`[Atomic<Node<K,V>>; 0]` 是个长度为 0 的数组，编译期不占空间，运行期靠 `get_layout` 接上变长部分。
+解码高度（`height()`）：
 
-跳表还有一个特殊的「头节点」`Head`，它**固定满高**（`MAX_HEIGHT` 层），位于 `SkipList` 结构体内，充当所有层的起点，见 [base.rs:90-93](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L90-L93)。
+[base.rs:208-212](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L208-L212) —— 用 `& HEIGHT_MASK` 取出低 5 位，再 `+1` 还原成真实高度（1..=32）。
 
-变长布局的关键在 `get_layout`，它把「固定字段」与「height 个原子指针的数组」拼成一个 `Layout`，见 [base.rs:198-206](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L198-L206)：
+分配时直接写好这个字：
 
-```rust
-fn get_layout(height: usize) -> Layout {
-    assert!((1..=MAX_HEIGHT).contains(&height));
-    Layout::new::<Self>()
-        .extend(Layout::array::<Atomic<Self>>(height).unwrap())
-        .unwrap().0
-        .pad_to_align()
-}
-```
+[base.rs:169-184](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L169-L184) —— `Node::alloc(height, ref_count)`：按 `get_layout(height)` 申请一块内存，把 `refs_and_height` 写成 `(height - 1) | (ref_count << HEIGHT_BITS)`，并把塔指针区 `write_bytes(0, height)` 清零（即全部初始化为 null）。key/value 此时**故意不写**，故函数标 `unsafe`。
 
-`Layout::new::<Self>().extend(array)` 正是「固定头部 + 变长尾部」的标准写法。
+对应的布局计算（变长的关键）：
 
-`alloc` 在分配后立刻把 `refs_and_height` 初始化为 `(height - 1) | (ref_count << HEIGHT_BITS)`，并把 tower 区清零（全 null 指针），见 [base.rs:169-184](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L169-L184)。
+[base.rs:197-206](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L197-L206) —— `get_layout` 用 `Layout::new::<Self>().extend(Layout::array::<Atomic<Self>>(height))` 把「固定头部」和「height 个原子指针数组」拼成一块连续、按对齐填充的内存。这就是 Rust 版的「柔性数组」实现。
+
+> **算术小结**：因为高度占低 5 位，给引用计数加 1 就是给整个字加 \(1 \ll 5 = 32\)；要单独读引用计数，就把整个字逻辑右移 5 位（`>> HEIGHT_BITS`）。这套「加 32 / 减 32 / 右移 5」的算术贯穿后面所有引用计数操作。
 
 #### 4.1.4 代码实践
 
-**实践目标**：理解变长分配，亲眼看到一个节点占多少字节。
+这是一个**源码阅读型实践**，目的是把「打包/拆包」内化成肌肉记忆：
 
-**操作步骤**：
-
-1. 打开 [base.rs:198-206](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L198-L206) 的 `get_layout`。
-2. 在本地写一段示例代码（非项目原代码，仅作演示）：
-
-   ```rust
-   // 示例代码：手算一个 Node<&str, u64> 在 height=3 时的布局
-   use core::alloc::Layout;
-   // 假设固定头部大小为 H、对齐为 A（用 std::mem::size_of / align_of 实测）
-   // tower 部分是 3 个 Atomic<Self>，即 3 个原子指针（通常 8 字节）
-   ```
-
-3. 用 `core::mem::{size_of, align_of}` 在真实类型上测量 `Node` 固定字段部分大小，再套用 `get_layout` 的算法推算 `height=1` 与 `height=32` 时整个分配的字节数差。
-
-**需要观察的现象**：塔高从 1 涨到 32 时，单个节点多用了大约 \( 31 \times 8 = 248 \) 字节（64 位下一个 `Atomic` 指针 8 字节）。
-
-**预期结果**：能说清「为什么不能给所有节点都开满 32 层」——内存浪费会随节点数线性放大。
-
-**待本地验证**：具体字节数取决于 `K`/`V` 的大小与对齐，请在本机实测。
+1. **目标**：手算一个具体节点的 `refs_and_height` 值。
+2. **步骤**：
+   - 假设某节点高度 `height = 3`，初始引用计数 `ref_count = 2`（这正是 `insert_internal` 里 `Node::alloc(height, 2)` 的初值，下一节会解释为何是 2）。
+   - 套用公式 \((\text{ref\_count} \ll 5) \;|\; (\text{height}-1)\) 算出这个字的十进制值。
+3. **预期**：\((2 \ll 5) \;|\; 2 = 64 \;|\; 2 = 66\)。
+4. **反向验证**：用 `66 & 0b11111 = 2`，`+1 = 3` 得到高度；`66 >> 5 = 2` 得到引用计数。把你的手算结果与 `height()` [base.rs:208-212](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L208-L212) 的逻辑对一遍。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `tower` 必须是 `#[repr(C)]` 结构体的最后一个字段？
+**练习 1**：为什么把高度存成 `height - 1` 而不是 `height`？
+> **答案**：高度取值范围是 1..=32（共 32 个值），而 5 位二进制能表示 0..=31。存 `height - 1` 正好把 1..=32 映射到 0..=31，5 位刚好够用、不浪费。
 
-> **答**：因为 tower 是变长的。只有把它放在末尾，紧随其后的变长数组才能用「节点基地址 + 固定头偏移 + 索引 × 元素大小」的指针算术安全访问；若它不在末尾，其后的字段地址会随 tower 长度漂移，无法确定布局。
+**练习 2**：若把 `HEIGHT_BITS` 从 5 调成 4，会出现什么后果？
+> **答案**：`MAX_HEIGHT` 降到 16，跳表最高 16 层；同时引用计数占的高位变多、单节点最大引用计数变大。这是「高度精度」与「引用计数容量」之间的位预算权衡。
 
-**练习 2**：`Head` 和普通 `Node` 的 tower 有什么本质区别？
-
-> **答**：`Head` 的 tower 固定是 `MAX_HEIGHT`（32）层，作为整个跳表所有层的统一起点；普通 `Node` 的 tower 长度等于各自的随机塔高（1 到 32），按需分配。
-
----
-
-### 4.2 refs_and_height 位打包：高度与引用计数共用一个机器字
+### 4.2 Tower 多层指针与变长塔
 
 #### 4.2.1 概念说明
 
-每个节点既要存「塔高」又要存「引用计数」，并且两者都要被**并发原子地修改**。最朴素的写法是两个 `AtomicUsize` 字段。但跳表对缓存极其敏感（查找时每个节点都要碰这两个字段），多一个字段就意味着一次额外的缓存行加载。
+`Tower` 是节点里那组「指向下一节点的多层原子指针」。难点在于：Rust 的结构体字段大小必须在编译期确定，而我们要的是「每个节点的塔长度不同」。crossbeam 的解法分两步：
 
-crossbeam 的做法是**位打包（bit packing）**：把高度和引用计数塞进**同一个 `AtomicUsize`**，用一条原子指令同时操作两者。
+1. 把 `Tower` 定义成一个**零大小类型（ZST）占位符** `[Atomic<Node>; 0]`，仅作「尾部锚点」；
+2. 真正的指针数组在 `Node::alloc` 时按 `height` 动态追加在节点尾部（见 4.1.3 的 `get_layout`）。
 
-布局约定（低位放高度，高位放引用计数）：
+此外，跳表还有一个特殊的「头节点（Head）」：它不是真实键值对，只是各层链表的公共起点，因此它内嵌一个**固定满高**（`MAX_HEIGHT` 个槽）的塔。
 
-- 最低 5 位（`HEIGHT_MASK`）存 `height - 1`，取值范围 \( 0 \ldots 31 \)，对应塔高 \( 1 \ldots 32 \)；
-- 其余高位存引用计数 `ref_count`。
+#### 4.2.2 核心流程：三种「塔视角」
 
-这样既省了一个字段、又让「检查/修改引用计数」与「读取高度」共用同一次原子加载，缓存更友好。
+```
+Head (内嵌于 SkipList)            普通节点 Node
+┌────────────────────┐            ┌────────────────────┐
+│ pointers[0..32]    │ ——满高 32  │ value/key/refs_and_│
+│ (静态数组)         │            │ height             │
+└────────────────────┘            │ tower[0..height)   │ ← 变长尾数组
+                                  └────────────────────┘
+        ↓ as_tower() 把 Head 也当作 Tower 看待，统一访问接口
+```
 
-#### 4.2.2 核心流程
-
-三个常量定调，见 [base.rs:23-30](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L23-L30)：
-
-\[
-\text{HEIGHT\_BITS} = 5,\quad \text{MAX\_HEIGHT} = 2^5 = 32,\quad \text{HEIGHT\_MASK} = 2^5 - 1 = 31
-\]
-
-打包公式（`alloc` 中写入）：
-
-\[
-\text{refs\_and\_height} = (\text{height} - 1)\ \|\ (\text{ref\_count} \ll \text{HEIGHT\_BITS})
-\]
-
-拆包公式：
-
-\[
-\text{height} = (\text{word}\ \&\ \text{HEIGHT\_MASK}) + 1
-\]
-
-\[
-\text{ref\_count} = \text{word} \gg \text{HEIGHT\_BITS}
-\]
-
-引用计数的含义（节点结构注释里写明）：它等于「指向本节点的 `Entry` 句柄数」加上「本节点被装入跳表的层数」。所以新插入一个塔高为 \( h \)、且要返回一个 `Entry` 的节点时，初始引用计数通常是 \( h + 1 \) 的相关计数（`insert` 里实际用初值 2，见 4.4）。
+`TowerRef` / `NodeRef` 是带 provenance（指针来源）的「瘦引用」——因为 `&Tower` 这种普通引用对一个 ZST 没有访问尾数组的权限（stacked borrows 下会失效），必须自己持 `NonNull` 并 `unsafe` 地按下标取槽。
 
 #### 4.2.3 源码精读
 
-字段声明与含义注释在 [base.rs:137-141](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L137-L141)，明确说引用计数 = Entry 数 + 被装入的层数。
+`Tower` 与 `Head` 的定义：
 
-打包写入在 `alloc` 里，见 [base.rs:177-178](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L177-L178)：
+[base.rs:32-39](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L32-L39) —— `Tower` 是 `#[repr(C)]` 的 ZST，仅含 `[Atomic<Node<K, V>>; 0]` 占位。
 
-```rust
-ptr::addr_of_mut!((*ptr).refs_and_height)
-    .write(AtomicUsize::new((height - 1) | (ref_count << HEIGHT_BITS)));
-```
+[base.rs:86-93](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L86-L93) —— `Head` 持一个静态的满高数组 `[Atomic<Node<K, V>>; MAX_HEIGHT]`。
 
-读取塔高 `height()` 用掩码取低 5 位再加 1，见 [base.rs:209-212](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L209-L212)：
+`TowerRef::get_level` —— 按下标取某一层的原子指针，靠裸指针 `add(index)` 跨过 `index` 个 `Atomic<Node>` 步长：
 
-```rust
-fn height(&self) -> usize {
-    (self.refs_and_height.load(Ordering::Relaxed) & HEIGHT_MASK) + 1
-}
-```
+[base.rs:74-84](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L74-L84) —— `get_level(index)` 把塔基址当 `*const Atomic<Node>` 做 `add(index)`，取第 `index` 层。这就是「变长数组按下标寻址」的本质。
+
+`Head::as_tower` —— 把 `&Head` 指针 cast 成 `&Tower`，从而 Head 与普通节点能共用同一套 `get_level` 接口：
+
+[base.rs:105-109](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L105-L109) —— `as_tower` 用 `NonNull::from(self).cast::<Tower<K,V>>()` 把 Head「伪装」成 Tower。因为 `Head.pointers` 与 `Tower.pointers` 同为 `#[repr(C)]` 的首字段，二者指针数值相等，cast 合法。
 
 #### 4.2.4 代码实践
 
-**实践目标**：亲手演算打包与拆包。
-
-**操作步骤**：
-
-1. 假设塔高 `height = 4`、引用计数 `ref_count = 3`。
-2. 套公式算 `refs_and_height`：\( (4-1)\ |\ (3 \ll 5) = 3\ |\ 96 = 99 \)。
-3. 反向拆包：\( 99\ \&\ 31 = 3 \)，加 1 得塔高 4；\( 99 \gg 5 = 3 \)，得引用计数 3。
-
-**需要观察的现象**：低位和高位互不干扰，加减引用计数（`fetch_sub(1 << HEIGHT_BITS)`）不会污染高度位。
-
-**预期结果**：能解释「为什么引用计数要 `fetch_sub(1 << HEIGHT_BITS)` 而不是 `fetch_sub(1)`」——因为每份引用计数占 5 位之上的一个步进，必须按 `1 << HEIGHT_BITS` 加减。
+1. **目标**：验证「Head 与 Tower 的指针数值相等」这一 cast 安全性前提。
+2. **步骤**：在 [base.rs:105-109](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L105-L109) 的 `as_tower` 处阅读，确认 `Head` 与 `Tower` 都是 `#[repr(C)]` 且**首字段都是 `pointers`**（一个是满高数组、一个是零长数组）。这是「指针数值相等」的物理保证。
+3. **观察**：在 `Head::get_level` [base.rs:116-120](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L116-L120) 与 `TowerRef::get_level` [base.rs:79-83](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L79-L83) 之间，注意二者取槽方式不同（前者用 `pointers.get_unchecked`，后者用裸指针 `add`），但都依赖「首字段即塔基址」。
+4. **预期**：理解为什么 crossbeam 不直接给 `Tower` 一个泛型高度参数——因为 Rust 泛型不能表达「每实例不同长度」，只能用 ZST + 尾数组布局绕开。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：把高度放在低位、引用计数放在高位，反过来行不行？
+**练习 1**：为什么 `Tower` 要做成 ZST 而不是直接把 `[Atomic<Node>; MAX_HEIGHT]` 放进 `Node`？
+> **答案**：那样每个节点无论实际多高都会背上 32 个指针槽（32 × 8 = 256 字节），海量节点时浪费惊人。ZST 占位 + 变长尾数组让节点只占「真实需要」的空间。
 
-> **答**：理论上可以，但当前设计让「读取高度」只需一次掩码 `& HEIGHT_MASK`（不用移位），而高度是查找时几乎每节点都要读的热数据，省一次移位有意义。引用计数用 `>> HEIGHT_BITS` 读，调用频率低得多。
-
-**练习 2**：塔高上限为什么是 32？
-
-> **答**：因为只留了 5 位存高度（`HEIGHT_BITS = 5`，\( 2^5 = 32 \)）。5 位足够覆盖任何现实规模的跳表（32 层对应期望 \( 2^{32} \) 量级节点），又把剩下的高位都留给了引用计数。
-
----
+**练习 2**：`TowerRef` / `NodeRef` 为什么要 `unsafe fn new`，而不直接用普通引用？
+> **答案**：普通 `&Tower` 对 ZST 没有访问其尾部字节的权限（stacked borrows 模型下读取变长数组会 UB）。`TowerRef` 自己持 `NonNull` 并在文档里要求调用者保证「该指针对其真实塔大小可访问」，把安全责任上移到调用点。
 
 ### 4.3 xorshift 高度生成与 max_height 提示
 
 #### 4.3.1 概念说明
 
-跳表要保证期望 \( O(\log n) \) 的查找，关键在于**塔高服从几何分布**：节点高度为 \( k \) 的概率约为 \( p^{k-1}(1-p) \)。crossbeam 取 \( p = \tfrac12 \)，即每往上一层概率减半。
+跳表的性能完全依赖一个概率假设：**节点高度服从几何分布**。若每个节点向上「再长一层」的概率都是 \(p\)，则高度恰为 \(h\) 的概率
 
-为此需要一个**快、可并发、无锁**的伪随机源。标准库的 `rand` 不 `no_std`、且非并发友好，于是 base.rs 自己实现了一个极简的 **xorshift** 生成器，并把种子放在跳表共享的 `HotData` 里。
+\[
+P(\text{height} = h) = (1-p)\, p^{\,h-1},
+\]
 
-此外，查找要从「当前实际最高层」开始往下走才有意义。但「实际最高层」会随插入变化，且精确维护它需要额外同步。crossbeam 的折中是维护一个**只增不减的 `max_height` 提示**：它可能偏大，但配合一个「跳过空层」的快速循环就能修正，避免了「维护精确最高层」的同步开销。
+期望最大高度约为 \(\log_{1/p}(n)\)，查找代价期望 \(O(\log n)\)。crossbeam 取 \(p = 1/2\)。
 
-#### 4.3.2 核心流程
+为此需要一个**快**而**足够随机**的随机数发生器。crossbeam 没用标准库的 `rand`（重、且非 `no_std` 友好），而是用一个轻量到极致的 **xorshift** 算法，再用「尾零个数（trailing zeros）」一行把随机数映射成几何分布的高度。
 
-`random_height` 三步走（见 [base.rs:707-751](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L707-L751)）：
+#### 4.3.2 核心流程：random_height 的三步
 
-1. **xorshift 推进种子**：读取共享 `seed`，做三次异或移位（`<<13`、`>>17`、`<<5`），写回。这是 Marsaglia 的 32 位 xorshift。
-2. **把随机数映射成高度**：取 `trailing_zeros(num) + 1`。一个均匀随机数的末尾连续 0 位数服从几何分布——恰好给出「每层概率减半」的塔高分布，再 `min` 上限 `MAX_HEIGHT`。
+[base.rs:707-751](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L707-L751) —— `random_height` 全函数。
 
-   \[
-   \Pr(\text{trailing\_zeros} \geq k) = 2^{-k} \;\Rightarrow\; \Pr(\text{height} \geq k+1) \approx 2^{-k}
-   \]
+它做三件事：
 
-3. **收缩过高的塔**：如果算出的高度远超当前跳表里已有的最高塔（通过检查 head 在各层的指针是否为空判断），就把它往下调，避免出现「孤零零的超高塔」。
-4. **更新 `max_height` 提示**：用 CAS 把提示抬到新高度（只增不减）。
+1. **xorshift 推进种子**（713-717 行）：从 `hot_data.seed` 读旧种子，做 `^= num << 13; ^= num >> 17; ^= num << 5;` 三步（Marsaglia 的 32 位 xorshift 常数），写回。种子是跳表共享的一个 `AtomicUsize`，多线程并发推进——这里用 `Relaxed`，因为高度的「绝对随机性」不重要、「够分散」即可，偶发种子相同只是生成同样的高度，不影响正确性。
+2. **映射成几何分布高度**（719 行）：`height = min(MAX_HEIGHT, num.trailing_zeros() + 1)`。一个均匀随机数的最低连续 0 位数 \(k\) 满足 \(P(k \ge t) = 2^{-t}\)，因此 \(P(\text{height} \ge h) = 2^{-(h-1)}\)，正好是 \(p=1/2\) 的几何分布。
+3. **就地裁剪 + 更新提示**（720-749 行）：见下一小节。
 
-查找时（`search_bound` / `search_position`）从 `max_height` 开始，先用一个快速循环跳过 head 为空的层，再正式逐层下降，见 [base.rs:846-857](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L846-L857)。
+#### 4.3.3 源码精读：裁剪与 max_height 提示
 
-#### 4.3.3 源码精读
+裁剪（避免无谓的超高节点）：
 
-xorshift 主体在 [base.rs:713-719](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L713-L719)：
+[base.rs:720-735](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L720-L735) —— 当 `height >= 4` 且 Head 的第 `height-2` 层指针为 `null` 时，把 `height` 减 1。语义是「如果当前最高塔都还没到这个高度，就别造一个鹤立鸡群的超高节点」。这能把节点高度钳制在「现实存在的最高塔 +1」附近，省内存、也减少空层遍历。
 
-```rust
-let mut num = self.hot_data.seed.load(Ordering::Relaxed);
-num ^= num << 13;
-num ^= num >> 17;
-num ^= num << 5;
-self.hot_data.seed.store(num, Ordering::Relaxed);
-let mut height = cmp::min(MAX_HEIGHT, num.trailing_zeros() as usize + 1);
-```
+更新 `max_height` 提示（查找起点）：
 
-> 注意：这里对 `seed` 用 `load` 后 `store`，**不是原子的 RMW**。两个线程并发调用时可能读到同一个 `num`、各自算出相同高度。这不影响正确性——跳表不要求高度唯一或完美服从分布，只要「大体上是几何分布」即可；用 `Relaxed` 是因为这里没有任何同步语义依赖。
+[base.rs:737-749](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L737-L749) —— 用 CAS 把 `hot_data.max_height` 单调推到 `height`（只增不减）。
 
-收缩过高度的逻辑在 [base.rs:726-735](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L726-L735)：当 `height >= 4` 且 head 在 `height-2` 层的指针为空时，就把高度减一，循环往复。
+而 `max_height` 的定义在 `HotData`：
 
-`max_height` 提示的 CAS 抬升在 [base.rs:738-749](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L738-L749)（只增不减），字段本身定义在 `HotData`，见 [base.rs:450-452](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L450-L452)，注释明说「never decreases」。
+[base.rs:442-453](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L442-L453) —— `HotData` 把「种子」「元素数 `len`」「`max_height`」三个高频读写字段打包，整体再用 `CachePadded`（见 u2-l2）单独占一条缓存行，避免与跳表其它字段的写互相伪共享。注释点明 `max_height` 是「查找起点提示，且永不减小」。
+
+> **为什么 max_height 只增不减？** 减小需要遍历确认「确实没有更高的塔了」，这在并发下既贵又无意义——把它当乐观提示即可，查多了空层至多多花几次 `Relaxed` 的指针读。`SkipList` 初始 `max_height = 1`（[base.rs:494-505](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L494-L505)）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：验证 xorshift + `trailing_zeros` 确实产生几何分布的塔高。
-
-**操作步骤**：
-
-1. 把 [base.rs:713-719](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L713-L719) 的四行 xorshift 抄进一个示例程序（示例代码），从 `seed = 1` 开始迭代 10000 次。
-2. 对每次产生的 `num`，统计 `min(32, trailing_zeros(num)+1)` 的分布（高度 1、2、3…各出现多少次）。
-
-**需要观察的现象**：高度 1 的约占一半，高度 2 约占四分之一，高度 3 约占八分之一……大致符合 \( \Pr(\text{height}=k) \approx 2^{-k} \)。
-
-**预期结果**：用一张表或柱状图展示「高度 vs 出现次数」，确认是几何衰减。**待本地验证**具体数值。
+1. **目标**：亲手验证 `trailing_zeros` 的几何分布。
+2. **步骤**：写一个独立的小程序（这是**示例代码**，不在仓库中），对 xorshift 三步生成的若干个 `u32` 统计 `trailing_zeros`：
+   ```rust
+   // 示例代码：统计 trailing_zeros 分布
+   let mut num: u32 = 1;
+   let mut hist = [0usize; 33];
+   for _ in 0..1_000_000 {
+       num ^= num << 13; num ^= num >> 17; num ^= num << 5;
+       hist[(num.trailing_zeros() as usize).min(32)] += 1;
+   }
+   println!("{:?}", hist);
+   ```
+3. **观察**：`hist[0]`（即 height=1）约占 50%，`hist[1]`（height=2）约占 25%，`hist[k]` 约占 \(1/2^{k+1}\)。
+4. **预期**：分布近似 \(P(k)=2^{-(k+1)}\)，验证了 \(p=1/2\) 的几何高度假设。若运行环境受限，标注「待本地验证」即可，分布结论可由数学直接推出。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`max_height` 为什么设计成「只增不减」？
+**练习 1**：xorshift 的种子是所有线程共享的 `AtomicUsize`，会不会有线程安全/正确性问题？
+> **答案**：不会有**正确性**问题。`load`/`store` 用 `Relaxed`，并发推进可能让两个线程拿到同一个旧种子、生成同一个高度，但跳表只要求高度「统计上」服从几何分布即可，偶发重复无害。这体现了「能 Relaxed 就不 Acquire」的无锁性能纪律。
 
-> **答**：精确维护「当前实际最高层」需要在删除最后一个高层节点时原子地回退计数，引入额外争用与复杂的状态机。只增不减虽可能让提示偏大，但查找开头那个「跳过空层」的快速循环只需几次空指针检查就能修正，代价远低于精确同步。
-
-**练习 2**：两个线程并发 `random_height` 时读到相同 `num`，会出问题吗？
-
-> **答**：不会。两个节点塔高相同完全合法，跳表算法不依赖高度互异或精确分布，只需高度「大致服从几何分布」即可保证期望复杂度。
-
----
+**练习 2**：`max_height` 永不减小，会不会让查找越来越慢？
+> **答案**：不会显著变慢。即使提示偏大，多出的也只是几次 `Relaxed` 的 null 指针读（很快下降到真实高度）。换来的好处是更新 `max_height` 无需昂贵的全局扫描，是无锁可维护的。
 
 ### 4.4 引用计数 try_increment / decrement / finalize
 
 #### 4.4.1 概念说明
 
-无锁跳表里，一个节点可能同时被「跳表结构本身（若干层）」「若干个用户持有的 `Entry` 句柄」「正在遍历的线程（经 `Guard` 保护）」共同引用。何时释放节点，必须靠**引用计数**精确裁决：计数归零，才真正销毁。
+跳表节点没有「所有者」——它被多个结构同时引用：塔的每一层链接算一份、每个对外暴露的 `Entry`/`RefEntry` 句柄算一份。所以节点用**引用计数**管理生命周期，而且这个计数就藏在 4.1 讲的 `refs_and_height` 高位里。
 
-这套机制和标准库 `Arc` 同源，但有两个关键不同：
+引用计数的语义是：
 
-1. **计数与 epoch 联动**：`decrement` 发现计数归零后，不是立刻 `free`，而是把 `finalize` 闭包 `defer_unchecked` 到 epoch 宽限期之后——因为此刻可能还有别的线程持着裸指针正在读它（详见 u5-l5）。
-2. **「计数为 0 即已入队回收」的不变量**：一旦计数掉到 0，节点就已被排进回收队列，**绝不能再被加回去**，否则会 double-free。所以 `try_increment` 必须先检查计数非 0。
+\[
+\text{ref\_count} = (\text{节点被安装在塔中的层数}) + (\text{指向它的 Entry 句柄数})
+\]
 
-#### 4.4.2 核心流程
+当计数归零，意味着「它在表里彻底断链、也没人持有句柄」，可以销毁 key/value 并释放内存。但——**不能立刻 free**，因为可能有别的线程正持着从 `Shared` 读出的指针在比较 key（见 u5-l5）。所以「归零」触发的 `finalize` 要走 epoch 延迟回收。
 
-引用计数的三条路径：
+#### 4.4.2 核心流程：三条原语
 
-- **`try_increment`（加引用）**：CAS 循环。先读 `refs_and_height`；若高位（引用计数部分）为 0，说明节点已入队待删，返回 `false` 拒绝；否则尝试 `checked_add(1 << HEIGHT_BITS)` 并 CAS，成功返回 `true`，溢出则 panic。
-- **`decrement`（减引用）**：`fetch_sub(1 << HEIGHT_BITS, Release)`。若旧值的引用计数部分为 1（即这次减完归零），做一次 `fence(Acquire)`，再 `guard.defer_unchecked(finalize)`。
-- **`finalize`（真正销毁）**：`drop_in_place` 掉 key 和 value（运行析构），再 `dealloc` 释放内存。
+- **`try_increment`**：尝试给引用计数 +1（实际 `+ 1<<5`）。**只在计数非零时成功**：若已是 0，说明节点已在销毁队列里，再 +1 会复活一个即将被 free 的对象 → 双重释放。返回 `true`/`false`。
+- **`decrement`**：给引用计数 −1（实际 `- 1<<5`）。若旧值的高位 == 1（即这次减完恰好归零），插一道 `Acquire` 栅栏，然后用 `guard.defer_unchecked(|| Node::finalize(...))` 把销毁动作交给 epoch。
+- **`finalize`**：drop key、drop value、dealloc 内存。`#[cold]` 标注因为它只在节点寿终时调用一次。
 
-这是教科书式的「Release 计数 + 最后一个回收者 Acquire fence」模式：Release 让本线程对节点数据的写入对其他线程可见；最后一个减到 0 的线程做 Acquire fence，确保它看到所有先前持有者对节点数据的全部写入，之后才安全销毁。
+```
+            ref_count 变化（高度3节点，初值=2：1层link + 1个Entry）
+insert:     alloc(ref_count=2)  ──► 安装 level0 成功
+            每装上一层 +1      ──► 2 → 3 → 4 ...
+get/remove: try_increment +1    ──► 拿到 Entry
+drop Entry: decrement -1
+unlink 每层: decrement -1       ──► 归零时 defer finalize → epoch 两代后真正 free
+```
 
 #### 4.4.3 源码精读
 
-`try_increment` 的「计数为 0 即拒绝」逻辑在 [base.rs:222-249](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L222-L249)，核心两步：
+`try_increment`（CAS 自增，零值拒绝）：
 
-```rust
-// 计数为 0 → 已入队待删，拒绝（避免 double-free）
-if refs_and_height & !HEIGHT_MASK == 0 {
-    return false;
-}
-// 溢出保护 + CAS 加 1<<HEIGHT_BITS
-let new_refs_and_height = refs_and_height
-    .checked_add(1 << HEIGHT_BITS)
-    .expect("SkipList reference count overflow");
-```
+[base.rs:214-249](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L214-L249) —— 先 `load`，若 `refs_and_height & !HEIGHT_MASK == 0`（引用计数位为零）直接返回 `false`；否则 `checked_add(1 << HEIGHT_BITS)` 防溢出（溢出直接 panic），用 `compare_exchange_weak` 重试自增。
 
-`decrement` 在 [base.rs:293-304](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L293-L304)：
+`decrement`（减到 0 则延迟 finalize）：
 
-```rust
-unsafe fn decrement(self, guard: &Guard) {
-    if self.refs_and_height
-        .fetch_sub(1 << HEIGHT_BITS, Ordering::Release)
-        >> HEIGHT_BITS  // 取旧值的引用计数部分
-        == 1            // 旧值是 1 → 减完归零
-    {
-        fence(Ordering::Acquire);
-        unsafe { guard.defer_unchecked(move || Node::finalize(self.ptr.as_ptr())) }
-    }
-}
-```
+[base.rs:292-304](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L292-L304) —— `fetch_sub(1 << HEIGHT_BITS, Release)` 返回**旧值**；把旧值 `>> HEIGHT_BITS` 取出旧引用计数，若它 == 1（减完即 0），先 `fence(Acquire)` 建立 Happens-before，再 `guard.defer_unchecked(move || Node::finalize(...))`。这一处就是与 u5-l5 衔接的关键调用点。
 
-`finalize` 在 [base.rs:252-262](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L252-L262)：先 `drop_in_place` key/value，再 `dealloc`。
+`finalize`：
 
-`insert` 在创建新节点时把初始引用计数设为 **2**（一个给将返回的 `Entry`，一个给 level 0 的链入），见 [base.rs:1051-1065](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1051-L1065)，注释解释了「2」的来源。后续每往更高层链入一次，会再 `increment`。
+[base.rs:251-262](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L251-L262) —— `drop_in_place` 分别析构 key、value，再 `Node::dealloc` 释放内存。
+
+> **为什么 `decrement` 用 Release、归零处用 Acquire？** 这是经典的「引用计数 + 延迟释放」内存序模式：每次 `fetch_sub(Release)` 保证「此前对该节点数据的写」对最终的销毁者可见；归零时的 `fence(Acquire)` 与之配对，确保销毁线程能看到该节点**全部**历史写，避免在仍有未同步写时 `drop` 掉数据。这是 u5 系列里 epoch/内存序讨论在跳表上的具体落地。
 
 #### 4.4.4 代码实践
 
-**实践目标**：跟踪一次 `remove` 的引用计数变化，看清回收链路。
-
-**操作步骤**：
-
-1. 阅读 `remove` 在 [base.rs:1283-1322](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1283-L1322)：它先 `RefEntry::try_acquire`（`try_increment` +1）拿走节点作为返回的 `Entry`，再 `mark_tower` 逻辑删除，然后逐层 `compare_exchange` 物理摘除，每摘掉一层 `n.decrement`（−1）。
-2. 假设某节点塔高 2、且此刻没有外部 `Entry`：被摘除前引用计数 = 2（两层链入）。`remove` 先 `try_acquire` 变 3，再 `mark_tower`，然后逐层摘除各 `decrement`（3→2→1），最后用户 drop 掉返回的 `Entry` 时再 `decrement`（1→0）触发 `defer finalize`。
-
-**需要观察的现象**：引用计数在「摘除各层」与「Entry 释放」两个维度上独立递减，谁先谁后都安全，只有归零那一次才安排销毁。
-
-**预期结果**：能说清「为什么 `decrement` 不能直接 `free`，而要 `defer_unchecked`」——因为 epoch 宽限期内别的线程可能还攥着这个节点的裸指针在读。
+1. **目标**：跟踪一次 `insert` 里引用计数的完整生命周期。
+2. **步骤**：阅读 `insert_internal` [base.rs:1013-1234](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1013-L1234)，重点在三处：
+   - [base.rs:1050-1055](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1050-L1055)：`Node::alloc(height, 2)`，注释解释初值 2 = 「一个给返回的 RefEntry，一个给 level-0 链接」。
+   - [base.rs:1192-1193](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1192-L1193)：每成功装上一层更高层，`fetch_add(1 << HEIGHT_BITS)`。
+   - [base.rs:1207-1208](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1207-L1208)：装某层失败回退时，`fetch_sub(1 << HEIGHT_BITS)` 抵消。
+3. **观察**：把 4.4.2 里的「计数 = 层数 + Entry 数」公式逐行对上：level-0 link（+1，含在初值 2 里）、每个 RefEntry（+1，含在初值 2 里）、每个更高层 link（+1）。
+4. **预期**：能口述「一个高度 3、成功装满 3 层、返回 1 个 RefEntry 的节点，最终 ref_count = 3(层) + 1(Entry) = 4」。当该 Entry 被 drop 且节点被从 3 层全部 unlink，ref_count 依次 4→3→2→1→0，最后一次 `decrement` 触发 `defer finalize`。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `try_increment` 在计数为 0 时必须返回 `false`，而不是把它从 0 加回 1？
+**练习 1**：`try_increment` 为什么不能对引用计数为 0 的节点成功？
+> **答案**：引用计数为 0 意味着节点已被某次 `decrement` 判定寿终、`finalize` 已塞进 epoch 垃圾袋（虽尚未真正 free）。此时若再 +1 让它「复活」，等 epoch 两代后 `finalize` 照常执行 drop+dealloc，就会释放仍在被使用的内存 → use-after-free / 双重释放。
 
-> **答**：计数掉到 0 的那一刻，节点已被排进 epoch 回收队列（`defer finalize` 已发出）。若再加回 1，等 epoch 推进两代后 `finalize` 照常执行 free，而新引用者却还持着指针，就会 use-after-free / double-free。所以「0 即终态」是不可逆的。
-
-**练习 2**：`decrement` 里 `fetch_sub(..., Release)` 之后为何还要 `fence(Acquire)`？
-
-> **答**：Release 只保证「本线程之前的写」在减计数前对其他线程可见；但「最后一个回收者」必须看见**所有**先前持有者写过的数据才能安全析构。Acquire fence 让这最后一个线程与之前所有 Release 形成 happens-before，确保看到完整数据。这与 `Arc::drop` 完全同构。
-
----
+**练习 2**：为什么 `finalize` 不直接在 `decrement` 里同步调用，而要 `defer_unchecked` 交给 epoch？
+> **答案**：因为 `decrement` 把 ref_count 减到 0 只代表「没有任何结构再持有它」，但**可能有并发搜索线程**在 pin 窗口内仍持着 `Shared` 指针在读它的 key。立刻 free 会撞上这些读者。交给 epoch 延迟两个代次，可保证所有在途读者都已 unpin，此时 free 才安全（详见 u5-l5 的「宽限期」）。
 
 ### 4.5 mark_tower 自顶向下的逻辑删除标记
 
 #### 4.5.1 概念说明
 
-无锁结构里「删除一个节点」分两步：先**逻辑删除**（标记「它已经不在了」），再**物理删除**（真正把它的指针从链表里摘掉）。为什么不能一步到位？因为可能有多个线程同时在操作相邻节点，直接物理改指针会和它们冲突；而打一个「标记位」可以用单条原子指令完成，且让所有后续读者一致地看到「这个节点已删」。
+删除一个节点分两步（Harris-Michael 经典思路）：
 
-crossbeam 把删除标记藏在**塔指针的 tag 最低位**（这正是 u5-l2 讲的 epoch 带标签指针）：某个节点的 level-0 指针 tag=1，就表示该节点已被逻辑删除。
+1. **逻辑删除（标记）**：把节点每一层的「出向指针」打上删除标记（存在 tag 位里），宣布「这个节点已退出服务」。这是删除操作的**线性化点**——标记一旦打上，该节点对所有线程都视为已删。
+2. **物理摘除（unlink）**：真正把前驱的指针绕过它、接到后继，并 `decrement` 引用计数。这一步可由删除者自己做，也可由任何撞见它的搜索线程「顺便帮忙（helping）」。
 
-`mark_tower` 的任务是把这个节点**每一层**指针都打上标记。关键是顺序——**从最高层向第 0 层（自顶向下）逐层标记**。
+关键难点：**标记必须按从最高层到第 0 层的顺序打**。本节就讲清为什么。
 
-#### 4.5.2 核心流程
+#### 4.5.2 核心流程：mark_tower 的遍历顺序与胜负判定
 
-`mark_tower` 的循环（见 [base.rs:327-348](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L327-L348)）：
+`mark_tower` 从 `level = height-1` 一路降到 `level = 0`，每层用 `fetch_or(1, SeqCst)` 把该层出向指针的 tag 最低位置 1：
 
-```text
-对 level 从 height-1 递减到 0：
-    tag = tower[level].fetch_or(1, SeqCst) 的旧 tag
-    如果 level == 0 且 旧 tag == 1：说明别人已经标记过第 0 层 → return false
-返回 true（我成功标记了第 0 层，即我完成了删除）
+```
+mark_tower (height=3):
+  level 2:  fetch_or(1)  →  打标记（最高层先打）
+  level 1:  fetch_or(1)  →  打标记
+  level 0:  fetch_or(1)  →  打标记  ← 线性化点
+            若返回的旧 tag 已经是 1 ⇒ 有人抢先删了 ⇒ 返回 false（我输了）
 ```
 
-两个要点：
-
-1. **用 `fetch_or(1)` 打标**：把 tag 最低位置 1，同时拿回旧 tag。旧 tag=1 表示已被别人标记过。
-2. **以 level 0 为仲裁点**：谁成功把 level 0 从 0 翻成 1，谁就是「执行删除的那一个」，返回 `true`；若发现 level 0 已是 1，说明别人先删了，自己返回 `false`。
-
-为什么自顶向下？核心是**让并发读者能安全地协助清理**。读者在任意一层看到一个已标记的指针，就知道这个节点「正在被删」，可以绕过它或帮忙摘除（`help_unlink`）。自顶向下保证了：当 level 0 被标记时，上面所有层都已标记完毕——此时节点已从所有层的「有效链接」中退出，读者绝不会把一个「半标记」节点误当成有效节点继续往下走。若反过来自底向上，会出现「level 0 已标但上层未标」的窗口，上层读者可能把该节点当成有效前置节点记录下来，破坏查找的正确性。
-
-配合查找时的 `help_unlink`：读者在 [base.rs:882-893](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L882-L893) 发现 `succ.tag() == 1` 时，会尝试 CAS 把已删节点从当前层摘掉（见 [base.rs:758-781](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L758-L781)），实现「删除是协作式的」。
+只有 **level 0 的标记**是裁决胜负的依据：谁把 level-0 从 0 翻成 1，谁就是「唯一赢家」，返回 `true`；若 `fetch_or` 在 level 0 发现已经是 1，说明别人已赢了，返回 `false`。
 
 #### 4.5.3 源码精读
 
-`mark_tower` 全文在 [base.rs:327-348](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L327-L348)。注意它对 tag 的读取用了 `epoch::unprotected()`（假守卫），因为这里只关心 tag 位、不解引用指针，所以不需要 pin 保护，注释 [base.rs:331-336](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L331-L336) 解释了这一点。
+[base.rs:326-348](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L326-L348) —— `mark_tower`：`for level in (0..height).rev()` 即从高到低；每层 `fetch_or(1, SeqCst, ...)`，`if level == 0 && tag == 1 { return false; }` 判负。
 
-判定节点是否已删的 `is_removed` 只看 level 0 的 tag，见 [base.rs:351-361](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L351-L361)——再次印证「level 0 是删除与否的唯一权威判据」。
+判定「是否已删」的快查 `is_removed`：
 
-调用点：`insert` 替换旧节点时在 [base.rs:1089](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1089) 调 `r.mark_tower()`；`remove` 在 [base.rs:1297](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1297) 调；`RefEntry::remove` 在 [base.rs:1698](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1698) 调。
+[base.rs:350-361](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L350-L361) —— 只看 level 0 的 tag 是否为 1。因为按「自顶向下」约定，level 0 被标记 ⇒ 所有更高层必然已被标记 ⇒ 节点彻底封死。
 
-#### 4.5.4 代码实践
+调用点（删除主路径）：`remove` 先 `try_increment` 抢到 Entry，再 `mark_tower`：
 
-**实践目标**：把本讲的两个核心机制（tower 多层指针 + mark_tower 顺序）画成图，建立直觉。
+[base.rs:1296-1334](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1296-L1334) —— `if n.mark_tower() { ... }`：赢了就 `len` 减 1，逐层 CAS 把前驱绕过本节点，每成功一层 `n.decrement(guard)`；输了（已被别人删）则 `n.decrement(guard)` 退回刚才 `try_increment` 借的那一引用，返回 `None`。
 
-**操作步骤**：
+#### 4.5.4 为什么必须自顶向下？（本讲核心论证）
 
-1. 画一个 **3 层（MAX_HEIGHT 之外、实际最高层 level 2）、4 个节点**的跳表示意图，键值依次为 `10, 20, 30, 40`。标注：
-   - 节点 10：塔高 3，`tower[0]→20, tower[1]→20, tower[2]→20`
-   - 节点 20：塔高 1，`tower[0]→30`
-   - 节点 30：塔高 2，`tower[0]→40, tower[1]→40`
-   - 节点 40：塔高 1，`tower[0]→null`
-   - `Head` 满高 3 层，分别指向节点 10。
-2. 假设要删除节点 30。在图上模拟 `mark_tower`：从 level 1（最高）开始 `fetch_or(1)` 给 `tower[1]` 打标，再到 level 0 给 `tower[0]` 打标。
-3. 对照 [base.rs:327-348](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L327-L348) 回答：如果改成自底向上（先标 level 0 再标 level 1），在「标完 level 0、还没标 level 1」的瞬间，一个正在 level 1 遍历的读者会看到什么？
+这是本节最重要的理解点。假设反过来，**自底向上**打标记（先 level 0，后高层），会出什么问题？
 
-**需要观察的现象**：自底向上时，level 1 的读者仍会把节点 30 当成有效节点（因为它的 level 1 指针未标记），可能把它记录为前驱，随后下降到 level 0 才发现它已删——这会破坏 `Position` 里 `left`/`right` 的一致性，需要重启搜索。
+考虑删除者 D 正在删节点 N，与一个并发插入者 I 竞争：
 
-**预期结果**：用自己的话总结「自顶向下保证了 level 0 被标记时，整塔都已退出有效链接，读者不会把半标记节点当成有效前驱」。
+- 若 D 先把 **level 0** 打了标记（N 已逻辑删除），但 **level 1 还没打**；
+- 此时 I 在 level 1 上做插入，读到 N 的 level-1 出向指针（**未标记**），于是它 CAS 把一个新节点 X 接到「N 之后、N 的 level-1 后继之前」；
+- 这步 CAS 会**成功**——因为 level 1 没打标记，I 看不到 N 正在被删；
+- 结果：N 已经在 level 0 逻辑删除，却在 level 1 上新挂了一个后继 X。X 在 level 1 可达，但它的「level-0 前驱链」从一开始就是断的，成为一个**悬挂、难以正确 unlink** 的节点，破坏跳表不变量。
 
-#### 4.5.5 小练习与答案
+**自顶向下**正好堵死这个窗口：等 D 把标记打到 level 0（线性化点）时，**所有更高层早就打满了标记**。任何插入者 I 无论在哪个层触及 N，都会先看到一个**已标记**的出向指针，于是不会（也不允许）往 N 后面挂新节点（`insert_internal` 在 [base.rs:1149](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1149) 正是靠 `next.tag() == 1` 判定并中止建塔）。因此：
 
-**练习 1**：`mark_tower` 为什么以「level 0 是否被我翻成 1」作为「我是否完成了删除」的判据，而不是看最高层？
+> **不变量**：一旦 level 0 被标记，N 在**所有层**都已封死，不可能再被新插入挂接。删除因此是可线性化的。
 
-> **答**：因为 level 0 是唯一包含所有节点的完整链表，也是删除的「最终落点」。多个线程可能并发 `mark_tower` 同一个节点，高层可能被不同线程各自 `fetch_or` 一次（幂等），但 level 0 的 0→1 翻转只能被一个线程「亲眼见证旧值为 0」——用旧 tag 是否为 1 仲裁出唯一的删除者，避免重复扣 `len`、重复回收。
+换一种说法：标记的「传播方向」与查找的「下降方向」一致——查找自顶向下，那么「先封住高层、最后封住 level 0」就能保证任何并发的查找/插入要么完全在删除前看到 N（合法），要么在某层看到已标记指针而绕开/协助清理，**不会**看到「上层未标记、下层已标记」这种半删的撕裂视图。
 
-**练习 2**：`mark_tower` 里读 tag 为何能用 `epoch::unprotected()` 而不需要 `Guard`？
+#### 4.5.5 代码实践
 
-> **答**：因为它只 `fetch_or` 指针的 tag 位、读回旧 tag，**不解引用**指针指向的对象。不解引用就不会触发 use-after-free，所以不需要 pin 保护。这是 epoch API 里常见的「只碰 tag」优化。
+1. **目标**：在源码里确认「插入者会因标记指针而中止」，闭环验证 4.5.4 的论证。
+2. **步骤**：
+   - 在 `insert_internal` 建塔循环里读 [base.rs:1146-1151](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1146-L1151)：`if next.tag() == 1 { break 'build; }`——发现自己刚插的节点正被别人删，就停止建高层。
+   - 再看 `mark_tower` [base.rs:330-344](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L330-L344) 的 `(0..height).rev()` 顺序。
+3. **观察**：把两处对上——删除者从高到低打标记，插入者从低到高建塔并在每层检查标记。两者交错时，插入者最多把新节点接上 level 0，但只要删除者的标记波浪（自顶向下）追上，插入者就会在更高层撞见标记而 `break 'build`。
+4. **预期**：能复述「自顶向下标记 + 插入者每层查标记」二者共同保证了删除的线性化与无悬挂节点。
 
----
+#### 4.5.6 小练习与答案
+
+**练习 1**：`mark_tower` 为什么用 `fetch_or` 而不是 `compare_exchange` 来打标记？
+> **答案**：打标记是「无条件把 tag 最低位置 1」，不关心指针原本指向谁；`fetch_or(1)` 一条指令即可，且返回**旧值**供我们读取旧 tag 判胜负。`compare_exchange` 会要求「预期指针 == 某值」，但后继指针随时可能被别人改（比如被 unlink 改向），用 CAS 反而要处理更多失败重试。`fetch_or` 对「只动 tag、不动指针」最贴合。
+
+**练习 2**：如果两个线程同时对同一节点调用 `mark_tower`，会发生什么？
+> **答案**：每层 `fetch_or` 幂等，两线程都安全执行；但只有**先把 level 0 从 0 翻成 1** 的那个线程拿到 `tag==0`（返回 `true`，赢家，负责 `len -= 1` 与 unlink）；另一线程在 level 0 看到的是 `tag==1`，返回 `false`（输家），仅 `decrement` 退回自己 `try_increment` 借的引用。胜负由 level 0 唯一裁决，绝无重复删除。
 
 ## 5. 综合实践
 
-把本讲的四个机制串起来，做一个**源码阅读 + 图示**的综合任务。
+把本讲四个最小模块（`Node` 布局、`Tower`、引用计数、`mark_tower`）串起来，完成下面这个「画图 + 推演」任务。
 
-**任务**：以「插入一个塔高为 3 的新节点」为主线，把结构层知识串成一条因果链。
+**任务背景**：构造一个极小的跳表，仅含 4 个键值对，键依次为 `10, 20, 30, 40`，假设随机生成的高度分别是 `height(10)=1`、`height(20)=2`、`height(30)=1`、`height(40)=3`，外加 Head（满高 32，图里画到第 3 层即可）。
 
-**步骤**：
+**步骤 1：画示意图**。在纸上画出 3 层（level 2/1/0）的跳表，Head 在最左，按上述高度排布 4 个节点；用箭头标出每个节点的 `tower[level]` 指针，并补出每个节点的 `(ref_count, height)`（提示：按「层数 + Entry 数」算 ref_count）。
 
-1. **算高度**：阅读 [base.rs:707-751](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L707-L751) 的 `random_height`，假设本次 xorshift 算出 `height = 3`。
-2. **分配节点**：阅读 [base.rs:169-184](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L169-L184) 的 `alloc`，写出新节点的 `refs_and_height`：初始 `ref_count = 2`（见 [base.rs:1051-1065](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1051-L1065)），塔高 3，故 `refs_and_height = (3-1) | (2 << 5) = 66`。tower 区被清成 3 个 null 指针。
-3. **画出此时的节点**：标注四字段 `value/key/refs_and_height=66/tower[0..3]`，并画出 `tower` 的三个指针格子。
-4. **链入与计数**：跟踪 `insert_internal` 在 level 0 链入成功后（[base.rs:1076-1093](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1076-L1093)），再往 level 1、level 2 链入（[base.rs:1136](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1136) 起）。理解「初始 ref_count=2 = 1 个 Entry + level 0 的 1 次链入；更高层链入会另行 increment」。
-5. **删除它**：假设随后 `remove` 该节点，对照 [base.rs:1297-1322](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L1297-L1322) 画出 `mark_tower` 自顶向下打标（level 2 → level 1 → level 0），再逐层 `compare_exchange` 物理摘除并 `decrement`。
+参考答案（tower 指针连接关系，假设所有插入返回的 RefEntry 都已 drop，故 Entry 数 = 0）：
 
-**交付物**：两张图（插入后的跳表片段、删除过程中 level 0 被标记的瞬间）+ 一段文字，说清「`refs_and_height` 的位打包如何让高度与引用计数共用一次原子操作」「`mark_tower` 自顶向下如何避免读者把半标记节点当有效前驱」「`decrement` 归零后为何要走 epoch `defer` 而非直接 free」。
+```
+level 2: Head ─────────────────────────────► 40 ──► null
+level 1: Head ─────────► 20 ────────────────► 40 ──► null
+level 0: Head ─► 10 ───► 20 ─► 30 ──────────► 40 ──► null
+            (1,1)      (2,2) (1,1)           (3,3)
+```
 
-**待本地验证**：若想看到真实运行行为，可在 `try_increment` / `decrement` / `mark_tower` 各加一行 `eprintln!`（仅作学习，勿提交），用 `crossbeam_utils::thread::scope` 起多线程并发 `insert`/`remove` 同一批键，观察引用计数与标记的时序。注意加日志会改变时序，结论以源码逻辑为准。
+各节点 `(ref_count, height)`：`ref_count = 层数 + Entry 数`。Entry 已 drop 时 Entry 数 = 0，故 `10→(1,1)`、`20→(2,2)`、`30→(1,1)`、`40→(3,3)`。若你假设某些 RefEntry 仍被持有，请把对应 ref_count 加上持有的句柄数并写明。
+
+**步骤 2：推演删除 `20`**。模拟 `remove(&20)`：
+1. 搜索定位到 20，`try_increment` 把 ref_count 从 2 加到 3（借一份给返回的 RefEntry）。
+2. `mark_tower` 自顶向下：level 1 `fetch_or`（翻 0→1，胜），level 0 `fetch_or`（翻 0→1，胜）→ 返回 `true`。
+3. 逐层 unlink：level 1 把 Head→20 改成 Head→40（CAS 成功，`decrement`，ref_count 3→2）；level 0 把 10→20 改成 10→30（CAS 成功，`decrement`，ref_count 2→1）。
+4. 返回 RefEntry（ref_count 仍为 1）。当调用者 drop 这个 RefEntry 时，最后一次 `decrement` 让 ref_count 1→0，触发 `guard.defer_unchecked(Node::finalize)`，经 epoch 两代后真正析构 key/value 并 dealloc。
+
+**步骤 3：回答核心问题**（本讲的点睛之笔）：假如 `mark_tower` 改成自底向上（先 level 0 后 level 1），在上面的场景里，删除 `20` 与「并发插入一个 height=2 的新键 25」交错时会出现什么危险？请用 4.5.4 的论证写一段话（提示：插入 25 可能在 level 1 成功接到 20 之后，而 20 的 level 0 已标记 → 25 悬挂）。
+
+> 若你无法直接运行跳表（`base.rs` 是底层内核，没有独立可执行入口），上面的实践属于**源码阅读 + 纸上推演型**，符合「无法确定运行结果时标注」的要求。可选用的高层验证方式见下一讲 u7-l2（用 `SkipMap` 多线程并发操作来观察最终一致性）。
 
 ## 6. 本讲小结
 
-- `Node<K,V>` 用 `#[repr(C)]` 把 `value/key/refs_and_height` 固定字段放前面、变长 `tower` 放最后，靠 `Layout::extend` 一次性按塔高分配，兼顾缓存局部性与零浪费。
-- **位打包**：`refs_and_height` 一个机器字里，低 5 位存 `height-1`、高位存引用计数，加减引用计数用 `1 << HEIGHT_BITS` 步进，读写高度和计数共用一次原子操作。
-- **xorshift + `trailing_zeros`** 生成符合几何分布的塔高（每层概率减半），配合「收缩过高塔」与「只增不减的 `max_height` 提示 + 跳过空层」让查找从合适的层起步。
-- **引用计数**采用 `Arc` 式「Release 减 + 最后回收者 Acquire fence」模式，但归零后不直接 free，而是 `defer_unchecked(finalize)` 交 epoch 宽限期后再销毁；`try_increment` 在计数为 0 时拒绝，守住「0 即终态」防 double-free。
-- **`mark_tower`** 把删除标记藏在塔指针 tag 最低位，**自顶向下**逐层 `fetch_or(1)`，以 level 0 的 0→1 翻转仲裁唯一删除者，保证半标记节点不会被读者误当有效前驱。
+- **`Node` 用 `#[repr(C)]` + 变长尾数组**实现「高度几、塔就几层」：固定头部是 `value/key/refs_and_height`，尾部是 `height` 个 `Atomic<Node>` 指针（[base.rs:129-145](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L129-L145)）。
+- **`refs_and_height` 单字打包**：低 5 位存 `(height-1)`，高位存引用计数；自增引用即 `+1<<5`，读引用即 `>>5`（[base.rs:24-30](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L24-L30)）。
+- **xorshift + trailing_zeros** 生成 \(p=1/2\) 的几何分布高度；`max_height` 是「只增不减」的查找起点提示，三者与 `len`/`seed` 同住一个 `CachePadded<HotData>` 缓存行（[base.rs:707-751](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L707-L751)、[base.rs:442-453](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L442-L453)）。
+- **引用计数 = 层数 + Entry 数**：`try_increment` 拒绝零计数节点（防复活），`decrement` 归零时经 `Release/Acquire` 配对后 `defer_unchecked(finalize)`，把销毁交给 epoch 延迟两代回收（[base.rs:214-262](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L214-L262)、[base.rs:292-304](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L292-L304)）。
+- **`mark_tower` 自顶向下**：每层 `fetch_or(1)`，以 level 0 的胜负裁决唯一赢家；这个顺序保证 level 0 标记时所有高层已封死，杜绝并发插入挂接到「半删」节点上，实现删除的线性化（[base.rs:326-348](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-skiplist/src/base.rs#L326-L348)）。
 
 ## 7. 下一步学习建议
 
-本讲只搭好了**节点结构层**的地基。下一讲 **u7-l2 跳表操作与 epoch 集成** 将在这套结构上展开完整的并发算法：
+本讲只搭好了「节点积木」与「节点级原语」。下一讲 **u7-l2 跳表操作与 epoch 集成** 将把这些积木拼成完整的并发操作：
 
-- `search_bound` 如何逐层下降并**协助摘除**（`help_unlink`）已标记节点；
-- `insert` / `get` / `remove` 如何在多个线程并发修改下用 CAS 协调、处理失败重试；
-- 节点释放如何全面依赖 crossbeam-epoch 的 `Guard`/`defer_unchecked`，以及 `SkipMap`/`SkipSet` 如何把 `base::SkipList` 包装成 `BTreeMap` 式的易用接口。
+- 精读 `search_bound` 的逐层下降与撞见已删节点时的 `help_unlink` 协作；
+- 完整走通并发 `insert` / `get` / `remove` 的无锁协调，并把本讲的引用计数与 `mark_tower` 放回它们的真实调用上下文；
+- 看 `map.rs` / `set.rs` 如何把裸 `SkipList` 包装成对用户友好的 `SkipMap` / `SkipSet`。
 
-建议带着本讲的两张图（节点布局、mark_tower 时序）进入下一讲，并随时回看 `refs_and_height` 的位打包与引用计数不变量——它们是理解所有并发操作的钥匙。如果想验证整体正确性，可在读完 u7-l2 后进入 **u7-l3 测试、loom 与并发正确性**，用 miri/loom 实跑这些无锁代码。
+建议在进入 u7-l2 前，回头确认两件事：一是 u5-l5 的「epoch 两代延迟回收」结论（本讲 `decrement` 末尾的 `defer_unchecked` 就靠它兜底）；二是 u5-l2 的「Atomic 指针低位 tag」机制（本讲 `mark_tower` 的 `fetch_or(1)` 与 `tag()` 全在用它）。随后用 **u7-l3** 的 loom/miri/tsan 工具链来验证这些无锁不变量在所有交错下都成立，为整个 crossbeam-skiplist 单元收尾。
