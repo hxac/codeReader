@@ -1,7 +1,7 @@
 {
   "project": "coralnpu",
-  "head": "77bc1ffe06dbf3b7bafc7eab167ead2b42668df9",
-  "rationale": "CoralNPU 是一个大型硬件项目（约 995 个文件），采用「Chisel 设计标量核/SoC/总线 + SystemVerilog 实现 RVV 向量/矩阵后端 + C++/Python 软件工具链与仿真」的混合架构。学习路线遵循「先宏观后微观、先能用再读懂、标量在前向量在后」的原则：单元 1-2 帮助初学者从零认识项目并跑通第一个程序（建立正反馈）；单元 3 把读者带到 SoC 顶层与 AXI/TileLink 总线集成这一宏观骨架；单元 4-6 自顶向下拆解标量核的前端（取指/译码/派发/退休）、执行单元（ALU/BRU/MLU/DVU/CSR/FPU）与存储子系统（LSU/TCM/Cache），这是理解任何处理器的基础；单元 7 单独深入 SystemVerilog 实现的 RVV 向量后端与 MAC 外积引擎，这是 CoralNPU 作为「ML 加速器」的核心差异化所在，因此放在标量核之后；单元 8-9 覆盖外设/DMA/调试/总线完整性等使能模块；单元 10-11 把视角拉回到软件与验证——RVV intrinsics 编程、litert-micro 算子、MobileNet 端到端仿真，以及 Verilator/VCS/UVM/cocotb/FPGA 全流程。每篇讲义之间用 depends_on 构成清晰的有向依赖，第一单元为零基础起点，后续逐层解锁，保证读者始终能找到前置知识。",
+  "head": "a8281b0d5701d8939cf9ea424b1cd34e18c43230",
+  "rationale": "CoralNPU 是一个大型硬件项目（约 995 个文件），采用「Chisel 设计标量核/SoC/总线 + SystemVerilog 实现 RVV 向量/矩阵后端 + C++/Python 软件工具链与仿真」的混合架构。学习路线遵循「先宏观后微观、先能用再读懂、标量在前向量在后」的原则：单元 1-2 帮助初学者从零认识项目并跑通第一个程序（建立正反馈）；单元 3 把读者带到 SoC 顶层与 AXI/TileLink 总线集成这一宏观骨架；单元 4-6 自顶向下拆解标量核的前端（取指/译码/派发/退休）、执行单元（ALU/BRU/MLU/DVU/CSR/FPU）与存储子系统（LSU/TCM/Cache），这是理解任何处理器的基础；单元 7 单独深入 SystemVerilog 实现的 RVV 向量后端与 MAC 外积引擎，这是 CoralNPU 作为「ML 加速器」的核心差异化所在，因此放在标量核之后；单元 8-9 覆盖外设/DMA/调试/总线完整性等使能模块；单元 10-11 把视角拉回到软件与验证——RVV intrinsics 编程、litert-micro 算子、MobileNet 端到端仿真，以及 Verilator/VCS/UVM/cocotb/FPGA 全流程。每篇讲义之间用 depends_on 构成清晰的有向依赖，第一单元为零基础起点，后续逐层解锁，保证读者始终能找到前置知识。本次为 incremental 更新：自上次 HEAD 以来只有一次提交「toolchain: Upgrade and switch to multilib」，影响面集中在 toolchain/（构建脚本切换到 multilib、cc_toolchain_config.bzl 增加 is_rv64/toolchain_prefix 等可配置项、wrappers 自动识别 riscv64/riscv32 前缀）、WORKSPACE（预编译工具链归档由 toolchain_kelvin_v2 更名为 toolchain_coralnpu_v2 并改用 .tar.xz）以及少量 cocotb 测试（i++ 改写为 i=i+1 以适配新工具链代码生成）。其中已生成的 u1-l3（引用了 WORKSPACE）与 u2-l1（引用了 cc_toolchain_config.bzl / coralnpu_gloss.cc）需要小幅 update 以刷新链接行号并补充 multilib 说明；u1-l1/u1-l2/u2-l2/u2-l3 引用的源码未变故 keep；其余尚未生成的讲义保持 new 由 worker 继续生成。该工具链改动属于对既有工具链机制的升级而非新增模块，故不新增讲义。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 与 overview.md，画出 CoralNPU 的三大处理器组件（scalar/vector/matrix）及其与 ITCM/DTCM、AXI 总线的关系图，并用一句话写出 CoralNPU 与普通 RISC-V CPU 的关键区别。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -90,7 +90,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -106,13 +106,15 @@
           "order": 1,
           "filename": "u2-l1-toolchain-linker-tcm.md",
           "level": "intermediate",
-          "topic": "讲解 CoralNPU 专用的 RISC-V 工具链、C 运行时(coralnpu_start.S/crt.S)与把代码/数据映射到 ITCM/DTCM 的链接脚本模板。",
+          "topic": "讲解 CoralNPU 专用的 RISC-V 工具链（已升级为 multilib，同时支持 rv32/rv64，默认产出 rv32imf 代码）、C 运行时(coralnpu_start.S/crt.S)与把代码/数据映射到 ITCM/DTCM 的链接脚本模板。",
           "learning_goals": [
             "理解 CoralNPU 二进制的内存布局：代码进 ITCM、数据进 DTCM",
             "掌握 coralnpu_tcm.ld.tpl 链接脚本如何划分 section",
-            "了解 CRT(coralnpu_start.S/crt.S) 如何初始化并进入 main"
+            "了解 CRT(coralnpu_start.S/crt.S) 如何初始化并进入 main",
+            "了解 cc_toolchain_config.bzl 如何通过 -march/-mabi 与 is_rv64/toolchain_prefix 等可配置项驱动 multilib 工具链"
           ],
           "source_files": [
+            "toolchain/cc_toolchain_config.bzl",
             "toolchain/coralnpu_tcm.ld.tpl",
             "toolchain/crt/coralnpu_start.S",
             "toolchain/crt/crt.S",
@@ -123,11 +125,11 @@
             "toolchain/crt/coralnpu_start.S",
             "toolchain/crt/crt.S"
           ],
-          "practice_task": "阅读 coralnpu_tcm.ld.tpl，标注 .text/.data/.bss 分别落在哪个 TCM 地址区间，并对照 integration_guide.md 的内存映射表验证；再用 coralnpu_start.S 解释从复位到调用 main 的完整初始化序列。",
+          "practice_task": "阅读 coralnpu_tcm.ld.tpl，标注 .text/.data/.bss 分别落在哪个 TCM 地址区间，并对照 integration_guide.md 的内存映射表验证；再用 coralnpu_start.S 解释从复位到调用 main 的完整初始化序列；最后在 cc_toolchain_config.bzl 中确认默认 -march/-mabi 取值以及 is_rv64 开关的作用。",
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u2-l2",
@@ -156,7 +158,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -185,7 +187,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",

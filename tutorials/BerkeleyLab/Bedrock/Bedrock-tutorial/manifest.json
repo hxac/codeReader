@@ -1,0 +1,841 @@
+{
+  "project": "Bedrock",
+  "head": "235f3e3b5602790927caf62a405fce81213bb3de",
+  "rationale": "Bedrock 是 LBNL 多年积累的 Verilog HDL 库，体量大、子系统多（dsp/cordic/badger/localbus/rtsim/cmoc/soc/serial_io/projects 等），但有一条清晰的主线：以 localbus 为片上互联、以 Make+iverilog 为统一仿真测试方法、以 newad.py 自动生成寄存器地址映射，在其上构建 DSP/RF/以太网/串行链路/SoC 等子系统。因此学习顺序遵循「先定位与运行项目 → 掌握通用方法学（Make 测试、localbus、寄存器映射）→ 由浅入深学 DSP 基础模块 → 进入时钟域与片上互联/以太网 → 高速串行链路 → 验证与 RF 系统级设计 → 最后 SoC 与平台集成」。单元 1-2 为入门层，帮助读者从零认识项目并跑通第一个测试；单元 3-5 为进阶层，覆盖构成大多数 Bedrock 设计的核心可复用模块；单元 6-7 为专家层，进入形式化验证、RF 系统仿真与控制、软核 SoC 及多板卡工程集成。每篇讲义只讲一个主题、绑定 1~6 个真实源码文件，并给出一个可动手的代码实践任务，讲义之间通过 depends_on 形成由浅入深的依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 Bedrock：项目定位、运行方式与编码规范",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：Bedrock 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Bedrock 的定位：LBNL 多年积累的、平台无关的 Verilog HDL 库，用于 DSP/RF 控制与 FPGA 实现，以及它由哪些子系统组合而成。",
+          "learning_goals": [
+            "理解 Bedrock 的定位、来源（LBNL）与应用场景（LLRF/光通信/DSP）",
+            "记住顶层划分的主要子目录及其职责（dsp/cordic/badger/localbus/rtsim/cmoc/soc/projects 等）",
+            "了解 Bedrock 的图形模式与批处理（命令行 make/grep/python）并存的设计哲学"
+          ],
+          "source_files": [
+            "README.md",
+            "dir_list.mk",
+            "LICENSE.md"
+          ],
+          "minimal_modules": [
+            "README 顶层说明",
+            "dir_list.mk 目录常量定义"
+          ],
+          "practice_task": "阅读 README.md，整理出一张表格：列出 dsp、cordic、badger、localbus、rtsim、cmoc、soc、projects 各自负责什么，并用一句话写出你最感兴趣的子系统及原因。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行：工具链与 selftest",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解运行 Bedrock 所需的依赖（make/iverilog/python3、可选 verilator/yosys/gtkwave），以及如何用 selftest.sh 一键跑通本地测试子集。",
+          "learning_goals": [
+            "列出 Bedrock 的必需与推荐依赖",
+            "理解 selftest.sh 的作用：覆盖 GitLab CI 的测试阶段并本地复现",
+            "学会查看各子系统的 make 测试入口"
+          ],
+          "source_files": [
+            "selftest.sh",
+            "dependencies.txt",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "selftest.sh 测试编排",
+            "dependencies.txt 依赖清单"
+          ],
+          "practice_task": "安装 make/iverilog/python3-numpy 后，运行 `sh selftest.sh`（或至少 `make -C cordic clean all`），记录哪些子测试 PASS、哪些因缺少工具被跳过，并解释跳过原因。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与代码导航",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "带读者走读 Bedrock 的目录布局：源码（.v）、测试台（_tb.v）、波形配置（.gtkw）、Python 脚本与 Makefile 的命名约定，以及如何快速定位某个模块。",
+          "learning_goals": [
+            "掌握 *_tb.v、*.gtkw、rules.mk、top_rules.mk 等文件的命名与作用约定",
+            "理解 dir_list.mk 如何用绝对路径变量串联各子目录",
+            "学会用 grep/glob 在大型 Verilog 库中定位模块定义与实例"
+          ],
+          "source_files": [
+            "dir_list.mk",
+            "cordic/Makefile",
+            "dsp/Makefile"
+          ],
+          "minimal_modules": [
+            "dir_list.mk 目录变量",
+            "子目录 Makefile"
+          ],
+          "practice_task": "在 dsp/ 下找到 `mixer` 模块的定义文件、它的测试台文件和波形配置文件各是哪一个，并说明你用什么方式（文件名约定或搜索）定位到的。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "RTL 编码规范",
+          "order": 4,
+          "filename": "u1-l4-rtl-guidelines.md",
+          "level": "beginner",
+          "topic": "讲解 Bedrock 的 RTL 编码指南（guidelines/rtl_guidelines.md）：接口与信号命名、寄存/延时信号后缀、模块声明与参数、实例化约定等，使代码风格统一可读。",
+          "learning_goals": [
+            "掌握接口信号同前缀、snake_case、_n/_r/_d/_l 等命名后缀约定",
+            "理解参数命名（全大写 snake_case）与默认值、按名连接端口、i_ 前缀实例名等规则",
+            "明白这些约定如何降低跨模块理解成本、促进复用"
+          ],
+          "source_files": [
+            "guidelines/rtl_guidelines.md",
+            "dsp/mixer.v",
+            "cordic/cordic_wrap.v"
+          ],
+          "minimal_modules": [
+            "rtl_guidelines.md 全部条目",
+            "mixer.v 作为命名示例"
+          ],
+          "practice_task": "任选 dsp/ 下一个模块，按规范检查它的接口前缀、参数命名与默认值是否合规，写一份 5 条以内的符合/不符合清单；若发现不符，给出建议改名。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心方法学：Make 测试、localbus 与寄存器映射",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "基于 Make 的 HDL 仿真测试方法",
+          "order": 1,
+          "filename": "u2-l1-make-hdl-testing.md",
+          "level": "intermediate",
+          "topic": "深入 Bedrock 的 Make 构建系统：top_rules.mk 中的模式规则（%_tb/%_check/%_view/%.vcd）、iverilog 编译与 vvp 仿真、VFLAGS 按目标定制，以及依赖推导。",
+          "learning_goals": [
+            "理解 %_tb、%_check、%_view、%.vcd、%_lint 等模式规则如何驱动 iverilog 仿真",
+            "学会用 VFLAGS_$@ / CFLAGS_$@ 等机制为单个目标定制参数",
+            "掌握用 iverilog -y/-M 做依赖推导，并理解 top_rules.mk 如何被各目录 include 复用"
+          ],
+          "source_files": [
+            "build-tools/top_rules.mk",
+            "build-tools/makefile.md",
+            "build-tools/Makefile",
+            "dsp/rules.mk"
+          ],
+          "minimal_modules": [
+            "top_rules.mk 模式规则",
+            "makefile.md 教程",
+            "dsp/rules.mk 子目录规则"
+          ],
+          "practice_task": "在 dsp/ 目录运行 `make mixer_tb`、`make mixer_check`、`make mixer.vcd`，观察三个 target 分别调用了什么命令；再用 `make VFLAGS_mixer_tb=-DXXX mixer_tb` 验证按目标定制参数是否生效。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "片上 localbus 总线",
+          "order": 2,
+          "filename": "u2-l2-localbus.md",
+          "level": "intermediate",
+          "topic": "讲解 Bedrock 贯穿全局的轻量 localbus：24 位地址/32 位读写数据、strobe 与读否信号、无握手无等待状态的设计取舍，以及 localbus.vh 仿真任务。",
+          "learning_goals": [
+            "理解 localbus 的信号集（lb_clk/lb_addr/lb_wdata/lb_rdata/lb_strobe/lb_rnw）与无等待状态的取舍",
+            "学会用 localbus.vh 的 lb_write_task/lb_read_task 编写周期精确的总线测试",
+            "明白为何 Bedrock 拒绝 AXI/Wishbone 的握手机制"
+          ],
+          "source_files": [
+            "localbus/README.md",
+            "localbus/localbus.vh",
+            "localbus/tgen.v",
+            "localbus/gen_regmap.py"
+          ],
+          "minimal_modules": [
+            "localbus.vh 仿真任务",
+            "README 总线说明",
+            "tgen 写序列器"
+          ],
+          "practice_task": "阅读 localbus.vh，编写一个最小测试台片段，用 lb_write_task 向某地址写 0x1234，再用 lb_read_task 读回并断言一致（可基于 tgen_tb.v 改写）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "寄存器地址映射自动生成 newad.py",
+          "order": 3,
+          "filename": "u2-l3-register-map-newad.md",
+          "level": "intermediate",
+          "topic": "讲解 build-tools/newad.py：通过 Verilog 中的 magic 注释标记 external 端口，自动生成地址映射、总线解码器与 JSON 寄存器表，大幅减少样板代码。",
+          "learning_goals": [
+            "理解 newad.py 的输入（顶层 Verilog + 目录列表）与输出（地址头文件、解码器、JSON regmap）",
+            "学会识别 external/external register 等 magic 注释及其含义",
+            "掌握 newad.py 的主要 CLI 参数（-i/-o/-d/-r/-w/-b）与典型 Makefile 调用"
+          ],
+          "source_files": [
+            "build-tools/newad.md",
+            "build-tools/newad.py",
+            "build-tools/parser.py",
+            "projects/ctrace/wctrace_top_regmap.json"
+          ],
+          "minimal_modules": [
+            "newad.md 工作流说明",
+            "newad.py 解析器",
+            "parser.py Verilog 解析"
+          ],
+          "practice_task": "阅读 newad.md 的 magic 注释示例，在一个最小 Verilog 顶层里给两个端口加上 external 注释，运行 newad.py（参考其 -h）生成地址映射 JSON 并解读其中的地址分配。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "DSP 基础模块",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CORDIC 核：Python 生成的全展开流水线",
+          "order": 1,
+          "filename": "u3-l1-cordic.md",
+          "level": "intermediate",
+          "topic": "讲解 cordic 子系统：由 cordicgx.py 按数据位宽生成全展开的 cordicg_bN.v，支持极坐标↔直角坐标与 follow 模式，参数化 width/nstg/def_op。",
+          "learning_goals": [
+            "理解 CORDIC 原理与 Bedrock 的全展开流水线实现（每级一个 cstageg）",
+            "掌握 cordicgx.py 如何按 DPW 生成 cordicg_bN.v 及对应 Makefile 规则",
+            "理解 op 端口的四种模式（旋转/向量/follow）与精度/资源权衡"
+          ],
+          "source_files": [
+            "cordic/README",
+            "cordic/Makefile",
+            "cordic/cordicgx.py",
+            "cordic/cstageg.v",
+            "cordic/addsubg.v",
+            "cordic/cordic_wrap.v"
+          ],
+          "minimal_modules": [
+            "cordicgx.py 生成器",
+            "cstageg.v 单级",
+            "cordicg_tb 测试",
+            "cordic_check.py 校验"
+          ],
+          "practice_task": "运行 `make -C cordic clean all`，观察 cordicgx.py 生成的 cordicg_b22.v，再用 `make -C cordic cordicg_b22.v DPW=18` 改变位宽重新生成，对比模块名与端口宽度变化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "混频器、DDS 与复数乘法",
+          "order": 2,
+          "filename": "u3-l2-mixer-dds-complex-mul.md",
+          "level": "intermediate",
+          "topic": "讲解 DSP 最基本的运算模块：ph_acc/rot_dds 相位累加与 DDS、mixer 实数混频、complex_mul/complex_mul_flat 复数乘法，以及定点定标。",
+          "learning_goals": [
+            "理解相位累加器 ph_acc 与 rot_dds 如何产生本振（常配合 CORDIC）",
+            "掌握 mixer.v 的流水线、定点位宽（dwi/dwlo/davr）与 NORMALIZE 分支",
+            "理解 complex_mul 的 IQ 复数乘法实现与 flat 变体"
+          ],
+          "source_files": [
+            "dsp/ph_acc.v",
+            "dsp/rot_dds.v",
+            "dsp/mixer.v",
+            "dsp/complex_mul.v",
+            "dsp/complex_mul_flat.v"
+          ],
+          "minimal_modules": [
+            "ph_acc 相位累加",
+            "rot_dds DDS",
+            "mixer 混频",
+            "complex_mul 复乘"
+          ],
+          "practice_task": "运行 `make -C dsp mixer_check` 与 `make -C dsp complex_mul_check`，然后阅读 mixer_tb.v，说明 NUM_DROP_BITS 与 davr 参数如何影响输出位宽，并尝试改一个参数看仿真是否仍 PASS。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "数字下变频与上变频",
+          "order": 3,
+          "filename": "u3-l3-downconvert-upconvert.md",
+          "level": "intermediate",
+          "topic": "讲解 dsp/README.md 描述的下变频/上变频链路：fdownconvert（DDS 混频+抽取）、fiq_interp（IQ 插值）、flevel_set、ssb_out（上变频）、afterburner（割线插值）。",
+          "learning_goals": [
+            "理解 fdownconvert 为何输出半速率 IQ（隐式抽取低通）",
+            "掌握 ssb_out 上变频链路：插值→LO 乘→level_set→afterburner",
+            "理解 IQ 交织数据流的处理与 fiq_interp 的作用"
+          ],
+          "source_files": [
+            "dsp/README.md",
+            "dsp/fdownconvert.v",
+            "dsp/fiq_interp.v",
+            "dsp/flevel_set.v",
+            "dsp/ssb_out.v",
+            "dsp/afterburner.v"
+          ],
+          "minimal_modules": [
+            "fdownconvert 下变频",
+            "ssb_out 上变频",
+            "fiq_interp IQ 插值",
+            "afterburner 割线插值"
+          ],
+          "practice_task": "对照 dsp/README.md 画出下变频→处理→上变频的完整 IQ 数据通路框图，标注每级的数据速率变化，并运行 ssb_out/upconv 相关 testbench 验证端口连接。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "CIC、FIR/IIR 滤波器与抽取插值",
+          "order": 4,
+          "filename": "u3-l4-filters.md",
+          "level": "intermediate",
+          "topic": "讲解 dsp 中的滤波与速率变换模块：CIC（cic_multichannel/cic_simple_us/cic_simple_s/cic_interp）、半带滤波 half_filt、biquad、iirFilter、lpass1、fifo/circle_buf 等基础存储。",
+          "learning_goals": [
+            "理解 CIC 抽取/插值滤波器的多通道实现与简单版本差异",
+            "掌握 biquad 二阶节与 iirFilter 的 IIR 实现及 half_filt 半带抽取",
+            "理解 fifo/circle_buf/dpram 在 DSP 流水中的缓冲作用"
+          ],
+          "source_files": [
+            "dsp/cic_multichannel.v",
+            "dsp/cic_simple_us.v",
+            "dsp/cic_simple_s.v",
+            "dsp/biquad.v",
+            "dsp/half_filt.v",
+            "dsp/iirFilter.v"
+          ],
+          "minimal_modules": [
+            "cic_multichannel CIC",
+            "biquad 二阶节",
+            "half_filt 半带",
+            "iirFilter IIR"
+          ],
+          "practice_task": "运行 `make -C dsp cic_multichannel_check` 与 `make -C dsp biquad_check`；阅读 cic_simple_s_tb.py（cocotb）或对应 _tb.v，说明 CIC 的差分延迟寄存器数量由哪个参数决定。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "时钟域跨越、片上互联与以太网",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "时钟域跨越（CDC）基础",
+          "order": 1,
+          "filename": "u4-l1-cdc-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 dsp 中的基础 CDC 模块：data_xdomain（带门控的数据跨域拷贝，常用于把 localbus 写侧搬到另一时钟域）、flag_xdomain（单比特标志跨域）、reg_tech_cdc 与 async_to_sync_reset_shift。",
+          "learning_goals": [
+            "理解 data_xdomain 如何用 gate_in 把多位数据安全搬到另一时钟域",
+            "掌握 flag_xdomain 单比特跨域的用途与 reg_tech_cdc 的工艺相关 CDC",
+            "结合 localbus README 理解把 localbus 写侧整体跨域的典型用法"
+          ],
+          "source_files": [
+            "dsp/data_xdomain.v",
+            "dsp/flag_xdomain.v",
+            "dsp/reg_tech_cdc.v",
+            "dsp/async_to_sync_reset_shift.v",
+            "localbus/README.md"
+          ],
+          "minimal_modules": [
+            "data_xdomain 数据跨域",
+            "flag_xdomain 标志跨域",
+            "reg_tech_cdc 工艺 CDC"
+          ],
+          "practice_task": "运行 `make -C dsp data_xdomain_check`；参考 localbus/README.md 中 lb_to_1x 的例子，画出把一组 localbus 写信号从 lb_clk 搬到 clk1x 的连接图，并说明为何写侧跨域简单而读侧难。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "存储网关与地址空间序列化",
+          "order": 2,
+          "filename": "u4-l2-memory-gateway.md",
+          "level": "intermediate",
+          "topic": "讲解 badger 中的 mem_gateway.v 与 mem_gate.md：将固定延迟的 localbus 读接口桥接到 UDP/网络，实现轻量地址空间序列化（LAS）。",
+          "learning_goals": [
+            "理解 mem_gateway 如何在综合时确定的固定时钟周期延迟下完成 localbus 读",
+            "掌握 mem_gate.md 描述的地址空间序列化协议与读时序",
+            "明白固定延迟读为何能与无握手 localbus 配合"
+          ],
+          "source_files": [
+            "badger/mem_gate.md",
+            "badger/mem_gateway.v",
+            "badger/lb_gateway.v",
+            "badger/xformer.v"
+          ],
+          "minimal_modules": [
+            "mem_gateway 总线控制器",
+            "mem_gate.md 协议",
+            "xformer 数据变换"
+          ],
+          "practice_task": "阅读 mem_gate.md，列出一次 localbus 读请求从发出到数据返回所需的固定周期数，并说明这个延迟在综合时如何被确定（结合 LB_READ_DELAY 等概念）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "jit_rad：跨域即时读回",
+          "order": 3,
+          "filename": "u4-l3-jit-rad.md",
+          "level": "intermediate",
+          "topic": "讲解 localbus/jit_rad：利用 UDP 包到来前的几百纳秒预警，把另一时钟域的 16 个字搬入 dpram 供 localbus 安全读回，正确处理 CDC。",
+          "learning_goals": [
+            "理解 jit_rad 解决的问题：跨域读回而不破坏 CDC",
+            "掌握 jit_rad_gateway 的两组接口（localbus 侧 + xfer/app_clk 侧）与 passthrough 参数",
+            "明白 lb_prefill/xfer_snap/lb_error 等信号与原子快照用法"
+          ],
+          "source_files": [
+            "localbus/jit_rad.md",
+            "localbus/jit_rad_gateway.v",
+            "localbus/jit_rad_gateway_demo.v",
+            "dsp/dpram.v"
+          ],
+          "minimal_modules": [
+            "jit_rad_gateway 主模块",
+            "jit_rad.md 文档",
+            "jit_rad_gateway_demo 演示"
+          ],
+          "practice_task": "阅读 jit_rad.md，把 passthrough 设为 1 后预期 CDC 检查会失败，说明原因；然后阅读 jit_rad_gateway_demo.v，画出 localbus、jit_rad_gateway、xfer 多路选择器三者之间的连接关系。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Packet Badger：以太网/IP/UDP 响应核",
+          "order": 4,
+          "filename": "u4-l4-packet-badger.md",
+          "level": "intermediate",
+          "topic": "讲解 badger 子系统：纯硬件解析以太网帧，提供 ARP/ICMP/UDP echo，并支持最多 8 个 UDP 端口插件（如 localbus 网关、SPI Flash），线速千兆、不主动发起流量。",
+          "learning_goals": [
+            "理解 Packet Badger 的整体架构（scanner→construct/rtefi_center→client 插件）",
+            "掌握输入包的校验规则（ARP/ICMP/UDP）与最多 8 个 client 的端口机制",
+            "理解它如何与 mem_gateway/spi_flash 等插件配合实现网络可访问寄存器/Flash"
+          ],
+          "source_files": [
+            "badger/README.md",
+            "badger/scanner.v",
+            "badger/construct.v",
+            "badger/rtefi_center.v",
+            "badger/udp_port_cam.v",
+            "badger/spi_flash.v"
+          ],
+          "minimal_modules": [
+            "scanner 包扫描",
+            "construct/rtefi_center 数据通路",
+            "udp_port_cam 端口匹配",
+            "client 插件接口"
+          ],
+          "practice_task": "阅读 badger/README.md 的“Functionality”一节，列出 ARP/ICMP/UDP 各自被检查的字段；然后说明一个新 UDP 服务（如自定义端口）应实现哪个 client 接口信号约定。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "高速串行链路与 MGT 配置",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "serial_io：8b/10b、GMII 与链路层",
+          "order": 1,
+          "filename": "u5-l1-serial-io-basics.md",
+          "level": "advanced",
+          "topic": "讲解 serial_io 子系统：8b/10b 编解码（enc_8b10b/dec_8b10b）、GMII 链路（gmii_link）、simpleuart，以及 gmii_to_rgmii 等适配。",
+          "learning_goals": [
+            "理解 8b/10b 编解码在串行链路中的作用与 comma 字符",
+            "掌握 gmii_link 链路层与 GMII/RGMII/SGMII 适配关系",
+            "理解 simpleuart 等低速串口在 Bedrock 中的位置"
+          ],
+          "source_files": [
+            "serial_io/enc_8b10b.v",
+            "serial_io/dec_8b10b.v",
+            "serial_io/gmii_link.v",
+            "serial_io/simpleuart.v",
+            "serial_io/gmii_to_rgmii.v"
+          ],
+          "minimal_modules": [
+            "enc/dec_8b10b 编解码",
+            "gmii_link 链路",
+            "gmii_to_rgmii 适配"
+          ],
+          "practice_task": "运行 `make -C serial_io all checks`；阅读 enc_8b10b/dec_8b10b 的测试台，构造一个逗号字符（comma）收发，说明 8b/10b 如何保持直流平衡。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "ChitChat 串行协议",
+          "order": 2,
+          "filename": "u5-l2-chitchat.md",
+          "level": "advanced",
+          "topic": "讲解 serial_io/chitchat：Bedrock 自定义的轻量串行协议，TX/RX 端点（chitchat_tx/chitchat_rx）、wrapper（chitchat_txrx_wrap）及其多时钟域跨越。",
+          "learning_goals": [
+            "理解 ChitChat 协议的帧结构与 TX/RX 端点实现",
+            "掌握 chitchat_txrx_wrap 如何处理 tx_clk/rx_clk/lb_clk/gtx 时钟域",
+            "理解 chitchat_pack.vh 中的协议参数定义"
+          ],
+          "source_files": [
+            "serial_io/chitchat/chitchat_txrx_wrap.md",
+            "serial_io/chitchat/chitchat_tx.v",
+            "serial_io/chitchat/chitchat_rx.v",
+            "serial_io/chitchat/chitchat_txrx_wrap.v",
+            "serial_io/chitchat/chitchat_pack.vh"
+          ],
+          "minimal_modules": [
+            "chitchat_tx/rx 端点",
+            "chitchat_txrx_wrap 包装",
+            "chitchat_pack.vh 参数"
+          ],
+          "practice_task": "运行 `make -C serial_io/chitchat all checks`；阅读 chitchat_txrx_wrap.md，列出 wrapper 涉及的全部时钟域，并说明 TX 数据从 sys_clk 到 TX 速率之间做了哪种速率变换。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "TCL 驱动的 MGT（多千兆收发器）配置流程",
+          "order": 3,
+          "filename": "u5-l3-mgt-tcl-flow.md",
+          "level": "advanced",
+          "topic": "以 comms_top 为例讲解基于 TCL 的 Quad MGT 配置流程：mgt_gen.tcl 的 add_gt_protocol、qgt_wrap.v 的宏生成，以及如何在同一 Quad 内配置多个协议。",
+          "learning_goals": [
+            "理解 TCL 驱动 MGT 配置的设计动机与 mgt_gen.tcl 两个过程（add_aux_ip/add_gt_protocol）",
+            "掌握 qgt_wrap.v 如何用宏与 stub/pack 头文件按配置生成代码",
+            "理解 comms_top 如何同时承载以太网-over-fiber 与 ChitChat 两条链路"
+          ],
+          "source_files": [
+            "projects/comms_top/README.md",
+            "projects/comms_top/comms_top.v",
+            "projects/comms_top/comms_top_regbank.v",
+            "projects/comms_top/gtx_comms_top.tcl"
+          ],
+          "minimal_modules": [
+            "comms_top.v 顶层",
+            "comms_top_regbank 寄存器解码",
+            "gtx_comms_top.tcl MGT 配置",
+            "mgt_gen.tcl 流程（待确认具体路径）"
+          ],
+          "practice_task": "阅读 comms_top/README.md 的 TCL-based MGT configuration 一节，说明 add_gt_protocol 的参数含义；在 fpga_family 下尝试 `make qgt_template`（若可用）生成 qgt_wrap.v 的展开版用于阅读。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "形式化验证与 RF 系统级设计",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "cdc_snitch：形式化跨域验证",
+          "order": 1,
+          "filename": "u6-l1-cdc-snitch-verification.md",
+          "level": "advanced",
+          "topic": "讲解 build-tools/cdc_snitch：用 yosys 把设计读入并标注 magic_cdc 属性，自动检测违反 CDC 规则的跨域路径，CI 中用于保证 jit_rad 等设计的正确性。",
+          "learning_goals": [
+            "理解 cdc_snitch 用 yosys JSON 输出做静态 CDC 分析的原理",
+            "掌握 magic_cdc 属性、cdc_snitch_proc.ys 流程脚本的作用",
+            "明白为何 passthrough=1 会被 cdc_snitch 判为违规（与 jit_rad 对照）"
+          ],
+          "source_files": [
+            "build-tools/cdc_snitch.md",
+            "build-tools/cdc_snitch.py",
+            "build-tools/cdc_snitch_proc.ys",
+            "build-tools/top_rules.mk"
+          ],
+          "minimal_modules": [
+            "cdc_snitch.py 分析器",
+            "cdc_snitch_proc.ys yosys 流程",
+            "%_cdc.txt 模式规则"
+          ],
+          "practice_task": "阅读 cdc_snitch.md，运行 localbus 目录的 CDC 检查（`make -C localbus` 中相关 _cdc.txt 目标，若可用），解读输出中 OK/违规路径的含义；指出 cdc_BAD.svg 与 cdc_OK1.svg 的区别。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "rtsim：腔体与 RF 系统实时仿真",
+          "order": 2,
+          "filename": "u6-l2-rtsim.md",
+          "level": "advanced",
+          "topic": "讲解 rtsim 子系统：用 Verilog 全速仿真 RF 系统（谐振腔电磁/机械模式、ADC 仿真、电缆、压电），为 LLRF 控制提供可复现的被控对象。",
+          "learning_goals": [
+            "理解 rtsim 的模块层级（vmod1→resonator/cav_elec/cav_mode/adc_em 等）",
+            "掌握 cav_mode/cav_elec 如何用状态空间与 IQ 耦合模拟腔体模式",
+            "理解 rtsim 如何复用 dsp 中的 cordicg/complex_mul/dpram/reg_delay"
+          ],
+          "source_files": [
+            "rtsim/README.md",
+            "rtsim/rtsim.v",
+            "rtsim/cav_mode.v",
+            "rtsim/cav_elec.v",
+            "rtsim/resonator.v"
+          ],
+          "minimal_modules": [
+            "rtsim.v 顶层",
+            "cav_mode/cav_elec 腔体模式",
+            "resonator 机械谐振",
+            "adc_em ADC 仿真"
+          ],
+          "practice_task": "运行 `make -C rtsim clean all checks rtsim.dat`；对照 README 的模块层级，画出 cav_elec→cav_mode 的内部实例树，并说明 mechanical resonator 为何被设计为可被多个 cav_elec 共享。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "cmoc：低电平 RF 控制器（LLRF）",
+          "order": 3,
+          "filename": "u6-l3-cmoc-llrf.md",
+          "level": "advanced",
+          "topic": "讲解 cmoc 子系统：连接真实 ADC 或 rtsim 仿真部件的 RF 控制器，包含 rf_controller、cryomodule、piezo_control、slow_bridge，演示 DSP+控制+网络的综合。",
+          "learning_goals": [
+            "理解 cmoc 如何把 DSP 下变频/反馈链路与 RF 腔体控制结合",
+            "掌握 cryomodule.v 如何用 data_xdomain 把 localbus 跨到 clk1x 域",
+            "理解 rf_controller 的反馈控制结构与 piezo/slow 桥接"
+          ],
+          "source_files": [
+            "cmoc/rf_controller.v",
+            "cmoc/cryomodule.v",
+            "cmoc/piezo_control.v",
+            "cmoc/slow_bridge.v",
+            "cmoc/Makefile"
+          ],
+          "minimal_modules": [
+            "rf_controller 控制核心",
+            "cryomodule 腔体集成",
+            "piezo_control 压电控制",
+            "slow_bridge 慢通道"
+          ],
+          "practice_task": "运行 `make -C cmoc all checks`；在 cryomodule.v 中找到把 localbus 写侧搬到 clk1x 域的 data_xdomain 实例，说明其参数 .size() 与搬移的信号对应关系。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l4",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "digaree：大型 DSP 应用工程",
+          "order": 4,
+          "filename": "u6-l4-digaree.md",
+          "level": "advanced",
+          "topic": "讲解 dsp/digaree：一个较大的、含 Python 代码生成（cgen_*.py）与定点数学（pfloat.py）的 DSP 应用，演示 Bedrock 复杂工程的代码生成与自测范式。",
+          "learning_goals": [
+            "理解 digaree 如何用 Python 脚本（cgen_*/initgen_*）生成 Verilog 与系数",
+            "掌握 pfloat.py 定点浮点表示与 inverse/fit 校验流程",
+            "理解 sf_main/sf_user_wrap 的工程结构与自测组织"
+          ],
+          "source_files": [
+            "dsp/digaree/README",
+            "dsp/digaree/cgen_srf.py",
+            "dsp/digaref/sf_main.v",
+            "dsp/digaree/sf_user.v",
+            "dsp/digaree/pfloat.py"
+          ],
+          "minimal_modules": [
+            "cgen_*.py 代码生成",
+            "pfloat.py 定点",
+            "sf_main/sf_user 顶层"
+          ],
+          "practice_task": "运行 `make -C dsp/digaree`；阅读 README，列出该工程用到的 Python 生成脚本，并说明 cgen_srf.py 生成的 Verilog 片段被哪个 .v 文件 include/实例化。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "SoC 软核、外设驱动与平台工程集成",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "picorv32 RISC-V 软核 SoC",
+          "order": 1,
+          "filename": "u7-l1-picorv32-soc.md",
+          "level": "advanced",
+          "topic": "讲解 soc/picorv32：基于 PicoRV32 软核的 SoC，包含 RISC-V 固件交叉编译流程（rules.mk）、gateware 外设包（uart/spi/gpio/memory/badger）、lb_bridge 让 CPU 与 UDP localbus 共享总线。",
+          "learning_goals": [
+            "理解 PicoRV32 SoC 的 gateware/firmware/project/test 目录划分",
+            "掌握 rules.mk 中的 RISC-V 交叉编译链（gcc/objcopy/hex8tohex32/boot_load）",
+            "理解 lb_bridge/lb_merge 如何让 CPU 与网络 localbus 两个 master 共存（localbus 优先）"
+          ],
+          "source_files": [
+            "soc/picorv32/README.md",
+            "soc/picorv32/rules.mk",
+            "soc/picorv32/gateware/picorv32.v",
+            "soc/picorv32/gateware/lb_bridge.v",
+            "soc/picorv32/gateware/spimemio.v"
+          ],
+          "minimal_modules": [
+            "picorv32 软核",
+            "lb_bridge 总线桥",
+            "rules.mk 固件构建",
+            "spimemio 存储接口"
+          ],
+          "practice_task": "阅读 README 与 rules.mk，说明一个 .elf 固件如何变成 FPGA 可加载的 %32.hex/%32.dat，以及 `make system_load` 的串口 boot_load 流程；并在 test/ 跑 `make clean all`。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "外设驱动：ADC/DAC/SPI/I2C",
+          "order": 2,
+          "filename": "u7-l2-peripheral-drivers.md",
+          "level": "advanced",
+          "topic": "讲解 peripheral_drivers：SPI 主机、I2C 桥、各类 ADC（ad9653）/DAC（ad9781/ad5662）、时钟芯片（lmk01801）、ds1822 温度与 idelay_scanner 等板级外设驱动。",
+          "learning_goals": [
+            "理解 spi_master/spi_mon 通用 SPI 主机与监控",
+            "掌握 i2cbridge 的分层（i2c_bit→i2c_chunk→i2c_prog）与 Python 装配",
+            "理解 ADC/DAC 驱动（ad9653/ad9781）与 _sim 仿真模型的配合"
+          ],
+          "source_files": [
+            "peripheral_drivers/spi_master.v",
+            "peripheral_drivers/ad9653.v",
+            "peripheral_drivers/i2cbridge/i2c_bit.v",
+            "peripheral_drivers/i2cbridge/i2c_chunk.v",
+            "peripheral_drivers/i2cbridge/README.md"
+          ],
+          "minimal_modules": [
+            "spi_master SPI 主机",
+            "ad9653 ADC 驱动",
+            "i2cbridge 分层 I2C"
+          ],
+          "practice_task": "运行 `make -C peripheral_drivers/i2cbridge` 与 spi_master 测试；阅读 i2cbridge/README.md，说明 i2c_bit→i2c_chunk→i2c_prog 的分层职责，并指出哪一层负责把多字节命令序列装配成时序。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "板级支持与 FPGA 厂家抽象",
+          "order": 3,
+          "filename": "u7-l3-board-fpga-abstraction.md",
+          "level": "advanced",
+          "topic": "讲解 board_support（各类板卡 Marble/BMB7/KC705/VC707/QF2pre 等的引脚映射与 XDC/UCF）与 fpga_family（Xilinx/Spartan6 原语包装、PLL、MGT、ISERDES、DDR 单元）如何隔离厂家差异。",
+          "learning_goals": [
+            "理解 board_support 下每块板的 pin_map.csv/XDC/rules.mk 作用",
+            "掌握 fpga_family/xilinx 中 UNISIM 原语包装（BUFG/IBUF/MMCM 等）与顶层 top_rules.mk 的 XDC_MAP/FMC_MAP",
+            "理解 Bedrock 把厂家生成物放进 _xilinx 目录的设计"
+          ],
+          "source_files": [
+            "board_support/marble/Marble.xdc",
+            "board_support/marble/pin_map.csv",
+            "fpga_family/xilinx/BUFG.v",
+            "fpga_family/pll.v",
+            "build-tools/top_rules.mk"
+          ],
+          "minimal_modules": [
+            "board_support 引脚映射",
+            "fpga_family 原语包装",
+            "top_rules.mk 中的 XDC_MAP/FMC_MAP"
+          ],
+          "practice_task": "阅读 board_support/marble 下的 Marble.xdc 与 pin_map.csv；结合 top_rules.mk 的 XDC_MAP/FMC_MAP awk 规则，说明一份 fmc.map 是如何被转换成具体引脚约束 XDC 的。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "工程集成实战：Marble/oscope/trigger_capture",
+          "order": 4,
+          "filename": "u7-l4-projects-integration.md",
+          "level": "advanced",
+          "topic": "以 projects 下的真实工程为例，综合演示如何把 localbus、Packet Badger、外设、板级支持组装成一个可综合可上板的完整设计（test_marble_family/oscope/trigger_capture/comms_top）。",
+          "learning_goals": [
+            "理解 projects/ 下一个完整 Bedrock 工程的目录与 Makefile 组织",
+            "掌握 marble_top.v 如何集成 localbus、badger、外设与板级 shell",
+            "理解 ctrace（代码追踪/触发捕获）与 trigger_capture 的软硬件协作"
+          ],
+          "source_files": [
+            "projects/test_marble_family/README.md",
+            "projects/test_marble_family/marble_top.v",
+            "projects/ctrace/README.md",
+            "projects/ctrace/wctrace_top.v",
+            "projects/common/README.md"
+          ],
+          "minimal_modules": [
+            "marble_top 顶层集成",
+            "ctrace 触发追踪",
+            "projects/common 公共脚本"
+          ],
+          "practice_task": "运行 `make -C projects/ctrace`；对照 marble_top.v 列出它实例化了哪些子系统（localbus/badger/外设等），并画出从以太网 UDP 包到某个 localbus 寄存器的完整读写数据通路。",
+          "depends_on": [
+            "u4-l4",
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
