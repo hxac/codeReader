@@ -7415,8 +7415,8 @@
     },
     "BerkeleyLab/Bedrock": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-01T14:30:43Z",
+      "last_error": null,
+      "last_run_at": "2026-07-01T18:01:33Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -7517,32 +7517,32 @@
           "error": null
         },
         "u4-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196547,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.0805220000000002,
+          "error": null
         },
         "u5-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":459134,\"duration_api_ms\":255871,\"num_turns\":8,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "cost": 1.371211,
+          "error": null
         },
         "u5-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":197944,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.224551,
+          "error": null
         },
         "u5-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":769242,\"duration_api_ms\":312556,\"num_turns\":29,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
+          "cost": 1.545631,
+          "error": null
         },
         "u6-l1": {
           "status": "done",
@@ -7552,11 +7552,11 @@
           "error": null
         },
         "u6-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196296,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 1.2866849999999999,
+          "error": null
         },
         "u6-l3": {
           "status": "done",
@@ -7594,16 +7594,16 @@
           "error": null
         },
         "u7-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":479634,\"duration_api_ms\":184037,\"num_turns\":23,\"result\":\"API Error: The operation timed out.\","
+          "cost": 1.399195,
+          "error": null
         }
       },
       "manifest_head": "235f3e3b5602790927caf62a405fce81213bb3de",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/BerkeleyLab/Bedrock/Bedrock-tutorial",
       "last_head": "235f3e3b5602790927caf62a405fce81213bb3de",
@@ -7781,39 +7781,39 @@
           "error": null
         },
         "u5-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188871,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.3145740000000001,
+          "error": null
         },
         "u6-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":230772,\"duration_api_ms\":36390,\"num_turns\":5,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 0.8866320000000001,
+          "error": null
         },
         "u6-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":395880,\"duration_api_ms\":198035,\"num_turns\":7,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "cost": 0.9571050000000001,
+          "error": null
         },
         "u6-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":230409,\"duration_api_ms\":37213,\"num_turns\":7,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 0.978901,
+          "error": null
         },
         "u6-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":229159,\"duration_api_ms\":27629,\"num_turns\":6,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 1.078867,
+          "error": null
         },
         "u6-l5": {
           "status": "done",
@@ -7823,11 +7823,11 @@
           "error": null
         },
         "u7-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":616797,\"duration_api_ms\":126186,\"num_turns\":21,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
+          "cost": 1.365495,
+          "error": null
         },
         "u7-l2": {
           "status": "done",
@@ -7909,12 +7909,12 @@
       },
       "manifest_head": "b2a0e030da9a3e90b8221436b5317afb370f3347",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/chipsalliance/chisel/chisel-tutorial",
       "last_head": "b2a0e030da9a3e90b8221436b5317afb370f3347",
-      "last_run_at": "2026-07-01T14:30:43Z",
-      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-07-01T18:01:33Z",
+      "last_error": null,
       "abandoned": []
     },
     "google-coral/coralnpu": {
@@ -7931,18 +7931,14 @@
           "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 0.685463,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 1.4133550000000004,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
           "status": "keep",
@@ -7955,276 +7951,219 @@
           "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.480485,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.116117,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.003578,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.187562,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.173821,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1180459999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9210320000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.52791,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.517933,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.367997,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.211484,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.3518570000000003,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.7175719999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.1852530000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
-          "retries": 2,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189609,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "retries": 0,
+          "cost": 1.3681640000000002,
+          "error": null
         },
         "u6-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.262941,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
-          "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":204639,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "retries": 0,
+          "cost": 2.3629810000000004,
+          "error": null
         },
         "u7-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
-          "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":299580,\"duration_api_ms\":99706,\"num_turns\":6,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "retries": 0,
+          "cost": 2.1831530000000003,
+          "error": null
         },
         "u7-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
-          "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":196537,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "retries": 0,
+          "cost": 2.1930210000000003,
+          "error": null
         },
         "u7-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.5142090000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.568994,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.6255229999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.541399,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u8-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 1,
-          "cost": 1.1482979999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u8-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 1,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193737,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u8-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0182769999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u8-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1135039999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u8-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2739969999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u9-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.536771,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u9-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.563821,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u9-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.273765,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u10-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.191254,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u10-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6029989999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u10-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.216211,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u11-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.931153,
+          "cost": 2.18674,
           "error": null
         },
-        "u11-l2": {
-          "status": "failed",
+        "u11-l3": {
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186583,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u11-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "cost": 1.549194,
+          "error": null
         },
         "u11-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.5533220000000003,
+          "error": null
         }
       },
-      "manifest_head": "a8281b0d5701d8939cf9ea424b1cd34e18c43230",
-      "prev_head": "77bc1ffe06dbf3b7bafc7eab167ead2b42668df9",
-      "phase": "workers",
+      "manifest_head": "1406dc5a856fe5edb2193ce35640b6afe4d8be73",
+      "prev_head": "a8281b0d5701d8939cf9ea424b1cd34e18c43230",
+      "phase": "done",
       "mode": "incremental",
       "tutorial_path": "tutorials/google-coral/coralnpu/coralnpu-tutorial",
-      "last_head": "a8281b0d5701d8939cf9ea424b1cd34e18c43230",
-      "last_run_at": "2026-07-01T14:30:43Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "1406dc5a856fe5edb2193ce35640b6afe4d8be73",
+      "last_run_at": "2026-07-01T18:01:33Z",
+      "last_error": null,
+      "abandoned": []
     },
     "crossbeam-rs/crossbeam": {
       "prompt_hash": "b21aef51792b02df",
@@ -8321,25 +8260,25 @@
           "error": null
         },
         "u3-l3": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":195181,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.4906579999999998,
+          "error": null
         },
         "u3-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":209721,\"duration_api_ms\":20458,\"num_turns\":3,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 0.831319,
+          "error": null
         },
         "u3-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":203791,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+          "cost": 0.8869119999999999,
+          "error": null
         },
         "u3-l6": {
           "status": "done",
@@ -8349,11 +8288,11 @@
           "error": null
         },
         "u3-l7": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":233421,\"duration_api_ms\":29205,\"num_turns\":5,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"
+          "cost": 0.8347789999999999,
+          "error": null
         },
         "u3-l8": {
           "status": "done",
@@ -8363,18 +8302,18 @@
           "error": null
         },
         "u3-l9": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":401568,\"duration_api_ms\":203502,\"num_turns\":9,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试"
+          "cost": 1.4064229999999998,
+          "error": null
         },
         "u3-l10": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 2,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":571586,\"duration_api_ms\":371981,\"num_turns\":15,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再"
+          "cost": 1.2717200000000002,
+          "error": null
         },
         "u4-l1": {
           "status": "done",
@@ -8463,18 +8402,524 @@
       },
       "manifest_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/crossbeam-rs/crossbeam/crossbeam-tutorial",
       "last_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
-      "last_run_at": "2026-07-01T14:30:43Z",
-      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-07-01T18:01:33Z",
+      "last_error": null,
       "abandoned": []
     },
-    "NVlabs/cuda-oxide": {},
-    "NVIDIA/cuda-tile": {},
-    "nvidia/cutile-python": {},
-    "NVIDIA/cutlass": {},
+    "NVlabs/cuda-oxide": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.596713,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6491669999999999,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.33525,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193742,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u1-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "52e7078d255e1b085566095c39f5c8a697b5125f",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/NVlabs/cuda-oxide/cuda-oxide-tutorial",
+      "last_head": "52e7078d255e1b085566095c39f5c8a697b5125f",
+      "last_run_at": "2026-07-01T18:01:33Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "NVIDIA/cuda-tile": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.637105,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.653437,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9552629999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7146440000000001,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8696039999999998,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194598,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "e01244d89cd38e81dde50d60fbfee07ac6d7be22",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/NVIDIA/cuda-tile/cuda-tile-tutorial",
+      "last_head": "e01244d89cd38e81dde50d60fbfee07ac6d7be22",
+      "last_run_at": "2026-07-01T18:01:33Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "nvidia/cutile-python": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.569198,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.752422,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":195071,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u1-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u2-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "dc83f62035193b0b7b0475a9706f80456015d5f8",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/nvidia/cutile-python/cutile-python-tutorial",
+      "last_head": "dc83f62035193b0b7b0475a9706f80456015d5f8",
+      "last_run_at": "2026-07-01T18:01:33Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "NVIDIA/cutlass": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194850,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-07-02 07:00:12 重置。][20260702033622221233653eb842a1]\",\"stop_reason\":\"stop_seq",
+      "last_run_at": "2026-07-01T18:01:33Z"
+    },
     "deepseek-ai/DeepEP": {},
     "abdelazeem201/Design-and-ASIC-Implementation-of-32-Point-FFT-Processor": {},
     "antirez/ds4": {},
