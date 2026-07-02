@@ -1,0 +1,347 @@
+{
+  "project": "scipy-scipy-datasets",
+  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+  "rationale": "本手册面向 scipy.datasets 这个体量较小的子模块（5 个 Python 源文件 + 测试 + meson 构建），因此采用 3 单元 11 讲的精简结构。第一单元（入门）让读者从零开始：先讲清项目定位与对外 API，再拆解目录结构与各文件职责（含入口 __init__.py 与 meson.build），最后动手运行三个数据集函数并观察缓存，建立直观感受。第二单元（进阶）按真实调用链逐层拆解核心机制：数据获取（data_fetcher / fetch_data / HTTPDownloader / User-Agent）→ 注册表三件套与 SHA256 校验 → 三种数据集各自的文件格式加载与转换（pickle / bz2 / npz+ADC）→ 缓存清理（clear_cache / _clear_cache / platformdirs）。第三单元（专家）覆盖可选依赖降级模式、download_all 批量下载与 __spec__.parent 双导入 CLI 技巧、测试设计剖析，最后以「新增一个数据集」综合实战收尾，串联注册表、fetcher、方法-文件映射、缓存清理、测试与 meson/xp_capabilities 生态集成点。讲义依赖关系严格按调用链与知识先后排布，保证读者由浅入深、结合真实源码完成学习。所有讲义均只引用实际确认存在的源码文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 scipy.datasets",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与对外 API",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.datasets 子模块的定位、它解决什么问题（为演示与测试提供示例数据集），以及对外暴露的公开 API 与数据集获取/存储的整体工作方式。",
+          "learning_goals": [
+            "理解 scipy.datasets 在 SciPy 中的作用与定位",
+            "记住五个公开函数及其分类（数据集方法 ascent/face/electrocardiogram 与工具方法 download_all/clear_cache）",
+            "了解数据集文件存储在独立 dataset-<name> 仓库、由 pooch 获取与校验的整体机制"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "__all__ 公开 API 声明",
+            "模块文档字符串中的工作原理说明",
+            "from ._fetchers / ._download_all / ._utils 的导入组织"
+          ],
+          "practice_task": "安装可选依赖 pooch 后，执行 import scipy.datasets; arr = scipy.datasets.face()，打印其 shape 与 dtype，并对照 __all__ 体会公开 API 的分类。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与各文件职责",
+          "order": 2,
+          "filename": "u1-l2-module-structure.md",
+          "level": "beginner",
+          "topic": "拆解 scipy/datasets 目录结构，说明 5 个 Python 源文件、tests 目录与 meson.build 各自承担的职责，以及带下划线的私有模块与公开 __init__ 的关系。",
+          "learning_goals": [
+            "能说出每个源文件（_fetchers/_registry/_utils/_download_all/__init__）的职责分工",
+            "理解下划线前缀私有模块为什么通过 __init__.py 重新导出为公开 API",
+            "看懂 meson.build 如何声明需要安装的 Python 源文件并递归到 tests 子目录"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_fetchers.py",
+            "_registry.py",
+            "_utils.py",
+            "_download_all.py",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "__init__ 公开层与导出",
+            "_fetchers 获取层",
+            "_registry 注册表层",
+            "_utils 缓存清理工具",
+            "_download_all 批量下载",
+            "meson.build 与 tests/meson.build 构建声明"
+          ],
+          "practice_task": "画一张目录结构图，标注每个文件的职责；并用自己的话解释：为什么公开函数都定义在带下划线的私有模块里，却在 __init__ 中被导出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一次运行与缓存初探",
+          "order": 3,
+          "filename": "u1-l3-first-run-and-cache.md",
+          "level": "beginner",
+          "topic": "动手运行三个数据集函数，安装可选依赖 pooch，观察首次下载、SHA256 校验与之后的本地缓存命中行为，并学会在不同平台定位 scipy-data 缓存目录。",
+          "learning_goals": [
+            "学会安装 pooch 并成功运行 ascent/face/electrocardiogram",
+            "理解首次联网下载、哈希校验、之后从本地缓存命中不再重复下载的流程",
+            "能在 macOS/Linux/Windows 上找到对应的 scipy-data 缓存目录"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_fetchers.py"
+          ],
+          "minimal_modules": [
+            "三个数据集函数的调用方式",
+            "pooch.os_cache('scipy-data') 缓存路径",
+            "pooch 可选依赖缺失时的表现"
+          ],
+          "practice_task": "运行 scipy.datasets.ascent() 两次：第二次先确认缓存目录已生成 ascent.dat，再断网运行验证它不再联网下载；记录本机缓存目录的绝对路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "数据获取核心：data_fetcher 与 fetch_data",
+          "order": 1,
+          "filename": "u2-l1-fetcher-mechanism.md",
+          "level": "intermediate",
+          "topic": "深入 data_fetcher 的创建与 fetch_data 助手，理解 pooch.create 的 path/base_url/registry/urls 参数、HTTPDownloader 与自定义 User-Agent 请求头的来龙去脉。",
+          "learning_goals": [
+            "理解 pooch.create 如何配置缓存路径、base_url、registry 与 urls",
+            "掌握 fetch_data 如何带 User-Agent 头下载并返回下载文件的本地路径",
+            "了解 GitHub issue #21879 促使添加 SciPy 版本号 User-Agent 的背景"
+          ],
+          "source_files": [
+            "_fetchers.py",
+            "_registry.py"
+          ],
+          "minimal_modules": [
+            "模块级 data_fetcher 单例的创建",
+            "fetch_data(dataset_name) 助手",
+            "pooch.HTTPDownloader 与 User-Agent 头"
+          ],
+          "practice_task": "阅读 fetch_data 后，自己用 pooch.HTTPDownloader(headers={...}) 下载一个小文件并打印返回路径，验证自定义 User-Agent 确实生效（可对比默认请求头）。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "注册表三件套与 SHA256 校验",
+          "order": 2,
+          "filename": "u2-l2-registry.md",
+          "level": "intermediate",
+          "topic": "解析 _registry.py 中的三张映射表 registry / registry_urls / method_files_map，理解 SHA256 完整性校验以及方法名到数据文件的映射。",
+          "learning_goals": [
+            "区分 registry（哈希）、registry_urls（远程地址）、method_files_map（方法-文件）三者用途",
+            "理解 SHA256 哈希如何被 pooch 用于下载完整性校验",
+            "掌握 method_files_map 如何把一个方法名映射到一个或多个数据文件"
+          ],
+          "source_files": [
+            "_registry.py",
+            "_fetchers.py"
+          ],
+          "minimal_modules": [
+            "registry 文件名-SHA256 哈希表",
+            "registry_urls 文件名-远程地址表",
+            "method_files_map 方法名-文件列表映射"
+          ],
+          "practice_task": "用 openssl sha256 <file>（或 hashlib）计算本地一个文件的哈希，仿照 registry 的格式写一条记录，并说明 pooch 会如何用它做校验。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "三种数据集的加载与转换",
+          "order": 3,
+          "filename": "u2-l3-dataset-loaders.md",
+          "level": "intermediate",
+          "topic": "对比 ascent（pickle）、face（bz2 解压 + reshape + 可选灰度）、electrocardiogram（npz 读取 + ADC 换算）三种数据集各自的文件格式、本地加载方式与后处理。",
+          "learning_goals": [
+            "理解三个数据集函数在 fetch_data 之后如何各自解封装原始文件",
+            "掌握 pickle.load、bz2.decompress、np.load 三种本地加载手段",
+            "看懂 ecg 把 ADC 原始 uint16 换算成 mV 的公式 (ecg - 1024) / 200.0"
+          ],
+          "source_files": [
+            "_fetchers.py",
+            "_registry.py"
+          ],
+          "minimal_modules": [
+            "ascent 的 pickle 加载",
+            "face 的 bz2 解压、frombuffer reshape 与灰度转换",
+            "electrocardiogram 的 np.load 与 ADC 换算"
+          ],
+          "practice_task": "写一个脚本调用 electrocardiogram()，验证其均值/标准差与文档示例（约 -0.16510875 / 0.5992473991177294）一致，并注释解释 ADC 换算公式的含义。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "缓存清理机制",
+          "order": 4,
+          "filename": "u2-l4-cache-management.md",
+          "level": "intermediate",
+          "topic": "讲解 clear_cache 与内部 _clear_cache 的实现，理解 platformdirs 解析缓存路径、按单个/多个/全部数据集清理缓存文件的逻辑分支。",
+          "learning_goals": [
+            "掌握 clear_cache 的公开用法（传入单个 callable、列表/元组、或 None 清全部）",
+            "理解 _clear_cache 如何用 method_map 把方法名定位到一个或多个缓存文件",
+            "了解 platformdirs.user_cache_dir 在 pooch 缺失时如何兜底解析缓存目录"
+          ],
+          "source_files": [
+            "_utils.py",
+            "_registry.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "clear_cache 公开入口",
+            "_clear_cache 内部分支逻辑",
+            "platformdirs 缓存路径解析"
+          ],
+          "practice_task": "先调用 datasets.ascent() 生成缓存，再用 datasets.clear_cache([datasets.ascent]) 清理单个数据集，最后用 datasets.clear_cache() 清理全部，对比每步打印的提示信息。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：内部细节、测试与扩展",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "可选依赖的降级处理模式",
+          "order": 1,
+          "filename": "u3-l1-optional-dependencies.md",
+          "level": "advanced",
+          "topic": "分析 scipy.datasets 对 pooch、platformdirs 两个可选依赖统一采用的降级模式：try/except ImportError 置为 None，在真正用到时才抛出友好的 ImportError。",
+          "learning_goals": [
+            "掌握 try-import-or-None 的可选依赖降级惯用法",
+            "理解为何选择「用到才报错」而非「导入即失败」",
+            "对比 _fetchers、_utils、_download_all 三处降级实现的异同"
+          ],
+          "source_files": [
+            "_fetchers.py",
+            "_utils.py",
+            "_download_all.py"
+          ],
+          "minimal_modules": [
+            "_fetchers 中 pooch 的降级与 data_fetcher=None",
+            "_utils 中 platformdirs 的降级",
+            "_download_all 中 pooch 的降级"
+          ],
+          "practice_task": "在未安装 pooch 的虚拟环境中调用 scipy.datasets.face()，捕获并阅读抛出的 ImportError 文案；再仿照该模式给一段示例代码加上对某个可选库的降级保护。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "download_all 与命令行脚本",
+          "order": 2,
+          "filename": "u3-l2-download-all-and-cli.md",
+          "level": "advanced",
+          "topic": "剖析 _download_all.py：download_all 的批量下载实现、__spec__.parent 区分脚本/模块两种导入方式的小技巧，以及 main() 的 argparse 命令行入口。",
+          "learning_goals": [
+            "理解 download_all 如何遍历 registry 用 pooch.retrieve 批量下载到指定目录",
+            "掌握 __spec__.parent 双导入技巧的原理与用途",
+            "学会把 _download_all.py 当作独立脚本运行下载全部数据文件"
+          ],
+          "source_files": [
+            "_download_all.py",
+            "_registry.py"
+          ],
+          "minimal_modules": [
+            "download_all(path) 批量下载",
+            "__spec__.parent 双导入分支",
+            "main() 与 argparse CLI"
+          ],
+          "practice_task": "把 _download_all.py 作为脚本运行（如 python _download_all.py <dir>）或调用 datasets.download_all('.')，把三个数据文件下载到指定目录，并对比它与单个数据集函数下载方式的异同。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "测试设计剖析",
+          "order": 3,
+          "filename": "u3-l3-testing-strategy.md",
+          "level": "advanced",
+          "topic": "解读 tests/test_data.py 的测试设计：module 级 autouse fixture 触发 download_all、对各数据集 shape/dtype/统计量与文件哈希的断言，以及 test_clear_cache 用 dummy method_map 做离线隔离测试。",
+          "learning_goals": [
+            "理解 autouse module fixture 如何复用 download_all 作为测试前置",
+            "掌握用 pooch.file_hash 做下载完整性校验的 _has_hash 辅助",
+            "学习用 tmp_path + 自定义 dummy method_map 离线测试 _clear_cache 的思路"
+          ],
+          "source_files": [
+            "tests/test_data.py",
+            "_registry.py",
+            "_utils.py",
+            "_download_all.py"
+          ],
+          "minimal_modules": [
+            "TestDatasets 与 autouse fixture",
+            "_has_hash 文件哈希校验",
+            "test_clear_cache 的 dummy_cache_dir 隔离测试"
+          ],
+          "practice_task": "仿照 test_clear_cache，写一个用 tmp_path + dummy method_map 验证「清理一个不存在的方法时应抛 ValueError」的测试用例。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "扩展实战：新增一个数据集",
+          "order": 4,
+          "filename": "u3-l4-extending-datasets.md",
+          "level": "advanced",
+          "topic": "综合实战——从零为 scipy.datasets 新增一个数据集，串联注册表、fetcher、方法-文件映射、缓存清理与测试，并介绍 @xp_capabilities(out_of_scope=True) 装饰器与 meson 安装声明的生态集成点。",
+          "learning_goals": [
+            "掌握新增一个数据集需要同步改动的几处（registry / registry_urls / method_files_map / 新 fetcher 函数）",
+            "理解 @xp_capabilities(out_of_scope=True) 装饰器为何标记这些数据集函数不在数组 API 适配范围内",
+            "能把新增源文件/测试纳入 meson.build 的安装与构建声明"
+          ],
+          "source_files": [
+            "_fetchers.py",
+            "_registry.py",
+            "_utils.py",
+            "meson.build",
+            "tests/test_data.py"
+          ],
+          "minimal_modules": [
+            "新增数据集的改动清单",
+            "xp_capabilities 装饰器与数组 API 范围标记",
+            "meson 源文件与测试安装声明"
+          ],
+          "practice_task": "在本地模拟新增一个 dummy 数据集：在 _registry.py 增加 registry/registry_urls/method_files_map 条目，在 _fetchers.py 写一个带 @xp_capabilities(out_of_scope=True) 的加载函数（可用本地 mock 文件代替真实下载），并在 test_data.py 补一个 shape 断言用例。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
