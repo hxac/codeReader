@@ -1,0 +1,458 @@
+{
+  "project": "scipy-scipy-differentiate",
+  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+  "rationale": "scipy.differentiate 是一个体量小但数学内涵丰富的子包：核心是一个基于「嵌套有限差分模板」的逐元素自适应迭代求导算法 derivative，jacobian 与 hessian 均在其之上分层组合构建（hessian = jacobian of jacobian），并复用 scipy._lib._elementwise_iterative_method 提供的通用逐元素迭代框架。因此学习路线先从「认识子包—快速上手—读懂返回对象」入门，让读者先会黑盒使用；再逐层白盒剖析 derivative 的实现细节（输入校验、差分权重的 Taylor/Vandermonde 推导、模板求值点生成、估值与误差估计、终止条件）及其依赖的通用 _loop 框架；随后进入 jacobian/hessian 的组合实现；最后用专家层覆盖向量化与 preserve_shape、边界步长方向、数值精度与调参、跨后端 Array API 支持，以及测试体系与边界情况。整体遵循「先会用、再读懂、最后扩展与工程化」的由浅入深逻辑，单元之间通过 depends_on 形成清晰依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 scipy.differentiate 子包",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "子包概览与运行方式",
+          "order": 1,
+          "filename": "u1-l1-overview-and-setup.md",
+          "level": "beginner",
+          "topic": "介绍 finite difference 数值微分子包的定位、公开 API（derivative/jacobian/hessian）、目录结构、__init__.py 的导出与 meson 构建方式，以及如何导入和运行。",
+          "learning_goals": [
+            "了解子包提供的三个公开函数及其用途",
+            "理解子包的目录结构与 __init__.py / meson.build 的作用",
+            "能够在本地导入并调用 scipy.differentiate"
+          ],
+          "source_files": [
+            "scipy/differentiate/__init__.py",
+            "scipy/differentiate/meson.build",
+            "doc/source/reference/differentiate.rst"
+          ],
+          "minimal_modules": [
+            "子包定位与公开 API",
+            "目录与构建入口",
+            "导入与运行方式"
+          ],
+          "practice_task": "在本地安装 SciPy 后编写脚本：导入 scipy.differentiate，打印 __all__ 的内容，并用 derivative 计算 np.sin 在 x=0 处的导数，与解析值 1.0 对照。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "derivative 快速上手与关键参数",
+          "order": 2,
+          "filename": "u1-l2-derivative-quickstart.md",
+          "level": "beginner",
+          "topic": "通过 np.exp 等示例上手 derivative，讲解 order、initial_step、step_factor、maxiter、tolerances 等核心参数的直观含义与默认值。",
+          "learning_goals": [
+            "掌握 derivative 的基本调用方式",
+            "理解 order / initial_step / step_factor / maxiter 的作用",
+            "学会读取返回结果中的 df 与 error"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "derivative 签名与默认值",
+            "关键参数含义",
+            "第一个示例与结果读取"
+          ],
+          "practice_task": "用 derivative 计算 f(x)=x**3 在 x=2 处的导数，分别使用 order=2 与 order=8，比较 res.df 与解析值 12 的误差，并打印 res.error。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "结果对象 _RichResult 与状态码",
+          "order": 3,
+          "filename": "u1-l3-result-object-and-status.md",
+          "level": "beginner",
+          "topic": "讲解 derivative 返回的 _RichResult 各属性（success/status/df/error/nit/nfev/x）以及 status 状态码（0/-1/-2/-3/-4）的含义与判断收敛的方法。",
+          "learning_goals": [
+            "理解返回对象的所有属性",
+            "掌握各种 status 状态码的含义",
+            "能够判断一次求导是否成功收敛"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "返回对象属性",
+            "status 状态码含义",
+            "成功与失败判断"
+          ],
+          "practice_task": "构造会触发不同状态的例子：分别对收敛良好的 np.exp、会触达 maxiter 的 order=2 情况、以及返回 NaN 的函数调用 derivative，打印各自的 res.status 与 res.success。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：derivative 的核心实现",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "输入校验 _derivative_iv",
+          "order": 1,
+          "filename": "u2-l1-input-validation.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 _derivative_iv 如何校验 f、args、tolerances、maxiter、order、step_direction、initial_step、preserve_shape、callback，并完成 x/hdir/h0 的广播。",
+          "learning_goals": [
+            "理解 derivative 的输入校验逻辑",
+            "掌握 atol/rtol 默认值与非法输入的报错",
+            "理解 x 与 step_direction / initial_step 的广播"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "callable 与 args 校验",
+            "tolerances 与步长参数校验",
+            "x / hdir / h0 广播"
+          ],
+          "practice_task": "阅读 _derivative_iv 后，向 derivative 传入 step_factor=-1、maxiter=0、order=1.5、preserve_shape='x' 等非法输入，观察抛出的 ValueError 信息是否与源码分支一一对应。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "有限差分权重 _derivative_weights",
+          "order": 2,
+          "filename": "u2-l2-finite-difference-weights.md",
+          "level": "intermediate",
+          "topic": "讲解有限差分公式的数学推导（Taylor 展开、Vandermonde 线性方程组），中心差分与单侧差分的 stencil（模板）设计，以及基于 diff_state 的权重缓存机制。",
+          "learning_goals": [
+            "理解从 Taylor 展开推导差分权重的方法",
+            "掌握中心与单侧 stencil 的几何结构",
+            "理解 diff_state 的权重缓存与 fac 变化时的重算"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "Taylor 展开与 Vandermonde 方程组",
+            "中心差分 stencil",
+            "单侧差分 stencil 与权重缓存"
+          ],
+          "practice_task": "用 NumPy 复现 _derivative_weights 中中心差分权重的求解：构造 h = s/fac**p、Vandermonde 矩阵 A、右端 b[1]=1，求解 weights，并验证代码中强加的对称性（weights[-i-1] = -weights[i]）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "迭代求值点生成 pre_func_eval",
+          "order": 3,
+          "filename": "u2-l3-pre-func-eval-stencil.md",
+          "level": "intermediate",
+          "topic": "讲解每次迭代如何根据嵌套 stencil 生成新的求值横坐标 x_eval，首轮（order 个新点）与后续轮次（2 个新点）的差异，以及中心/单侧方向的分支处理。",
+          "learning_goals": [
+            "理解首轮与后续轮次求值点数量的不同",
+            "掌握步长按 step_factor 缩减的机制",
+            "理解 il/ic/ir 索引如何区分求值方向"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "嵌套 stencil 与新求值点数",
+            "步长缩减 hc / hr",
+            "x_eval 的方向分支"
+          ],
+          "practice_task": "用包装的方式记录 f 每次被调用时收到的输入数组，对 np.exp 在 x=1 调用 derivative（maxiter=3），观察首轮与第二轮新增求值点的数量和位置关系。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "估值更新与误差估计 post_func_eval",
+          "order": 4,
+          "filename": "u2-l4-post-func-eval-estimate.md",
+          "level": "intermediate",
+          "topic": "讲解 post_func_eval 如何拼接历史函数值 work_fc / work_fo、复用上次迭代的函数值、应用差分权重得到 df、翻转单侧符号，并用相邻两次估计之差作为 error。",
+          "learning_goals": [
+            "理解函数值的复用与拼接逻辑",
+            "掌握 df 的加权计算与单侧符号处理",
+            "理解 error 估计为何取相邻两次估计之差"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "函数值拼接 work_fc / work_fo",
+            "加权求 df",
+            "误差估计 error"
+          ],
+          "practice_task": "对 f(x)=np.exp(x) 在 x=1 调用 derivative 并设 tolerances=dict(atol=0, rtol=0) 强制跑满 maxiter，用 callback 收集每轮的 res.df 与 res.error，绘制 error 随迭代下降的曲线。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "收敛判断与终止 check_termination",
+          "order": 5,
+          "filename": "u2-l5-check-termination.md",
+          "level": "intermediate",
+          "topic": "讲解 check_termination 的三类终止条件：误差收敛（atol + rtol*|df|）、非有限值检测、误差回升启发式，以及对应的状态码设置。",
+          "learning_goals": [
+            "理解 atol + rtol*|df| 收敛判据",
+            "掌握非有限值与误差回升的终止逻辑",
+            "理解各终止条件对应的状态码"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "收敛判据",
+            "非有限值终止",
+            "误差回升启发式"
+          ],
+          "practice_task": "复现 test_flags 的思路：用一个函数对不同元素返回「正常收敛」「误差回升」「触达 maxiter」「NaN」四种行为，验证一次 derivative 调用同时产生 0 / -1 / -2 / -3 四种 status。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "逐元素迭代框架 eim._loop 与 _initialize",
+          "order": 6,
+          "filename": "u2-l6-elementwise-loop-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 scipy._lib._elementwise_iterative_method 提供的通用逐元素迭代框架：_initialize 的广播与 dtype 处理、_loop 的主循环与回调钩子、已收敛元素的压缩、callback 与结果组装。",
+          "learning_goals": [
+            "理解 derivative 如何复用通用迭代框架",
+            "掌握 _loop 的回调钩子（pre/post_func_eval、check_termination）",
+            "理解 work 压缩对性能的意义"
+          ],
+          "source_files": [
+            "scipy/_lib/_elementwise_iterative_method.py",
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "_initialize 广播与 dtype",
+            "_loop 主循环与钩子",
+            "work 压缩与结果组装"
+          ],
+          "practice_task": "对照 _loop 的 res_work_pairs 参数，说明 derivative 把哪些 work 属性映射到结果属性；再阅读 _update_active，解释「已收敛元素被压缩后为何不影响最终返回结果」。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：Jacobian 与 Hessian 的组合实现",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "jacobian 的实现",
+          "order": 1,
+          "filename": "u3-l1-jacobian-implementation.md",
+          "level": "intermediate",
+          "topic": "讲解 jacobian 如何通过内部的 wrapped 函数沿每个坐标轴注入扰动、构造 (m,m,...) 扰动矩阵，并以 preserve_shape=True 委托给 derivative，得到 (n,m) 形状的雅可比矩阵。",
+          "learning_goals": [
+            "理解 jacobian 对 f 的向量化签名与维度约定",
+            "掌握 wrapped 函数如何注入坐标扰动",
+            "理解 preserve_shape=True 在此的作用与结果形状"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "f 的向量化签名与维度约定",
+            "wrapped 扰动注入",
+            "委托 derivative 与结果形状"
+          ],
+          "practice_task": "用 jacobian 计算 scipy.optimize.rosen 在 [0.5,0.5,0.5] 的雅可比（梯度），与 rosen_der 对照；再写一个 R^2->R^2 的函数，验证 res.df 的形状为 (2,2)。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "hessian 的实现",
+          "order": 2,
+          "filename": "u3-l2-hessian-implementation.md",
+          "level": "intermediate",
+          "topic": "讲解 hessian 通过嵌套两次 jacobian（雅可比的雅可比）实现二阶导数，内部收紧 rtol、累计 nfev，并将 df 重命名为 ddf。",
+          "learning_goals": [
+            "理解「jacobian of jacobian」求二阶导的思路",
+            "掌握内层 rtol 收紧与告警机制",
+            "理解 nfev 累计与 res.ddf 的来源"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "嵌套 jacobian 求二阶导",
+            "内层 rtol 收紧与告警",
+            "nfev 累计与属性重命名"
+          ],
+          "practice_task": "用 hessian 计算 rosen 在随机点的 Hessian，与 rosen_hess 对照；再调用 hessian 时设 rtol=1e-15，观察并解释触发的 RuntimeWarning。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：高级主题与工程实践",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "向量化与 preserve_shape 模式",
+          "order": 1,
+          "filename": "u4-l1-vectorization-preserve-shape.md",
+          "level": "advanced",
+          "topic": "深入讲解 derivative 对 x/args/step_direction 的逐元素广播，以及 preserve_shape=False/True 两种模式下 f 被调用的形状契约与各自适用场景。",
+          "learning_goals": [
+            "掌握 derivative 的多维广播向量化",
+            "理解 preserve_shape 两种模式的形状契约",
+            "能够为向量值函数选择合适的模式"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "x / args / step_direction 广播",
+            "preserve_shape=False 的形状契约",
+            "preserve_shape=True 与向量值函数"
+          ],
+          "practice_task": "复现文档示例：定义返回 [x, sin(3x), x+sin(10x), sin(20x)(x-1)^2] 的向量值函数，分别用默认模式与 preserve_shape=True 调用 derivative，记录并解释两种模式下 f 收到的不同形状序列。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "步长方向与边界处理 step_direction",
+          "order": 2,
+          "filename": "u4-l2-step-direction-boundary.md",
+          "level": "advanced",
+          "topic": "讲解 step_direction 的语义（0 中心差分、负数取非正步、正数取非负步），以及如何用它处理函数定义域边界附近的求导。",
+          "learning_goals": [
+            "理解 step_direction 三个方向的差分含义",
+            "掌握单侧差分在受限定义域上的应用",
+            "能够为边界域附近的函数正确配置步长方向"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "step_direction 语义与 hdir 符号化",
+            "中心 vs 单侧差分",
+            "边界域求导实践"
+          ],
+          "practice_task": "复现 test_step_direction：定义一个在 x<0 或 x>2 返回 NaN 的截断指数函数，用分段 step_direction（左段取 1、右段取 -1、中间取 0）调用 derivative，验证全程得到有限且正确的 exp(x) 导数。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "数值精度、消去误差与调参",
+          "order": 3,
+          "filename": "u4-l3-numerical-precision-tuning.md",
+          "level": "advanced",
+          "topic": "讲解有限差分中截断误差与浮点消去误差的权衡、步长选择对大 |x| 的影响、atol/rtol 调参，以及真导数恰为零（鞍点）时的收敛陷阱。",
+          "learning_goals": [
+            "理解截断误差与消去误差的此消彼长",
+            "掌握大 |x| 下增大 initial_step 的必要性",
+            "学会针对零导数点设置 atol 改善收敛"
+          ],
+          "source_files": [
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "截断误差与消去误差权衡",
+            "步长选择与大 |x|",
+            "atol / rtol 调参与零导数陷阱"
+          ],
+          "practice_task": "对 x=1e20 处的 np.exp 分别用默认 initial_step 与更大的 initial_step 求导，比较结果差异；再对 (x-1)**3 在 x=1 处用 atol=1e-16 验证能正确收敛到 0。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Array API 后端支持与跨后端实现",
+          "order": 4,
+          "filename": "u4-l4-array-api-backends.md",
+          "level": "advanced",
+          "topic": "讲解 differentiate 如何通过 array_namespace / xp_promote / xp_copy 与 array_api_extra（xpx.at）实现跨 NumPy/Torch/JAX 等后端，以及 @xp_capabilities 装饰器如何声明后端支持与跳过原因。",
+          "learning_goals": [
+            "理解 array_namespace 抽象与 xp_promote / xp_copy 的作用",
+            "掌握 xpx.at 在不可变后端上完成索引赋值的技巧",
+            "理解 xp_capabilities 如何声明后端能力与跳过原因"
+          ],
+          "source_files": [
+            "scipy/_lib/_array_api.py",
+            "scipy/differentiate/_differentiate.py"
+          ],
+          "minimal_modules": [
+            "array_namespace 与 xp_promote / xp_copy",
+            "xpx.at 索引赋值",
+            "xp_capabilities 后端声明"
+          ],
+          "practice_task": "在 _differentiate.py 中检索所有 xpx.at 的用法，归纳它替代了 NumPy 的哪些原地索引操作；阅读装饰 derivative 的 @xp_capabilities 的 skip_backends 参数，说明为何 array_api_strict 与 dask.array 被跳过。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "测试体系与边界情况",
+          "order": 5,
+          "filename": "u4-l5-testing-edge-cases.md",
+          "level": "advanced",
+          "topic": "讲解 test_differentiate.py 的测试组织（make_xp_test_case 跨后端、参数化）、状态标志测试、向量化和精度测试，以及特殊边界情况（整数不传入 f、标量 args、鞍点 gh-18811）。",
+          "learning_goals": [
+            "理解 differentiate 的测试结构与跨后端测试机制",
+            "掌握关键测试覆盖的能力（状态 / 精度 / 向量化）",
+            "学会从测试反推函数的边界行为"
+          ],
+          "source_files": [
+            "scipy/differentiate/tests/test_differentiate.py"
+          ],
+          "minimal_modules": [
+            "测试结构与跨后端",
+            "状态标志与精度测试",
+            "特殊边界与鞍点用例"
+          ],
+          "practice_task": "阅读 test_flags 与 test_special_cases，挑选其中 2 个断言改写为新的函数场景并运行 pytest 验证你的理解；并解释 test_saddle_gh18811 为何需要显式 atol 才能收敛。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

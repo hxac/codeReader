@@ -1,0 +1,361 @@
+{
+  "project": "scipy-scipy-constants",
+  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+  "rationale": "scipy.constants 是一个体量较小但机制清晰的子包，由三块能力构成：常用数学/物理常数与单位换算因子（_constants.py）、CODATA 物理常数数据库及查找 API（_codata.py）、以及两个已弃用的命名空间垫片（codata.py / constants.py）。学习路径按\"由浅入深\"分三层：入门层先让读者跑起来、看懂目录与构建、用上前缀和单位换算；进阶层聚焦 _codata.py 的核心机制——固定列宽文本解析、用 SI 基本定义常数推导精确派生值、多版本 CODATA 合并/别名/废弃常量；专家层深入非线性温度转换、Array API 集成（xp_capabilities）、弃用垫片机制与测试体系。讲义之间通过 depends_on 形成依赖链：先会用常数（u1），再读 CODATA 数据库与解析（u2），最后深入实现与扩展（u3）。共 12 篇，符合小型项目 8–15 篇的规模，逻辑优先于数量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 scipy.constants 子包",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.constants 子包是什么、提供哪三大能力（数学常数、物理常数与单位换算、CODATA 常数数据库），并对照 __init__.py 的模块 docstring 理解整体公开 API 表面。",
+          "learning_goals": [
+            "理解 scipy.constants 子包在 SciPy 中的定位与职责",
+            "认识三大能力：常用常数、单位换算、CODATA 数据库",
+            "学会通过模块 docstring 与 __all__ 查阅全部公开符号"
+          ],
+          "source_files": [
+            "scipy/constants/__init__.py"
+          ],
+          "minimal_modules": [
+            "模块 docstring 中的 autosummary 与常量表格",
+            "physical_constants 数据对象",
+            "__all__ 自动生成",
+            "参考文献 CODATA2022"
+          ],
+          "practice_task": "在 Python 中 import scipy.constants，打印 pi、c、speed_of_light 以及 physical_constants 中的三个常量；再写代码统计 __all__ 中共有多少个公开符号并归类。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、构建与包导出",
+          "order": 2,
+          "filename": "u1-l2-structure-and-build.md",
+          "level": "beginner",
+          "topic": "通过 meson.build 与 __init__.py 的 import 顺序，理解 constants 子包由哪些文件组成、如何被构建安装，以及 __all__ 与 __doc__ 如何动态生成。",
+          "learning_goals": [
+            "理解子包内各文件的分工（_codata/_constants/codata/constants）",
+            "看懂 meson.build 如何注册并安装 Python 源码",
+            "理解 __all__ 的动态生成与 __doc__ 的模板替换"
+          ],
+          "source_files": [
+            "scipy/constants/meson.build",
+            "scipy/constants/__init__.py"
+          ],
+          "minimal_modules": [
+            "meson.build 的 python_sources 与 py3.install_sources",
+            "__init__.py 中 from ._codata import * 与 from ._constants import *",
+            "_constant_names/__doc__ % 格式化",
+            "deprecated 命名空间 codata/constants 的导入"
+          ],
+          "practice_task": "阅读 meson.build 与 __init__.py，列表说明每个源码文件的作用；写一段代码遍历 scipy.constants.__all__ 并按首字母分组统计，验证与 docstring 表格的对应关系。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "数学常数与 SI / 二进制前缀",
+          "order": 3,
+          "filename": "u1-l3-math-and-prefixes.md",
+          "level": "beginner",
+          "topic": "讲解 _constants.py 开头定义的数学常数（pi、golden）和 SI 前缀（kilo、milli…）与二进制前缀（kibi、mebi…），说明这些值都是纯 Python 字面量而非来自 CODATA。",
+          "learning_goals": [
+            "区分哪些常数是 Python 字面量计算、哪些来自 CODATA",
+            "掌握 SI 前缀（quetta…quecto）的命名规律与量级",
+            "掌握二进制前缀（kibi…yobi）与 SI 前缀的区别和用途"
+          ],
+          "source_files": [
+            "scipy/constants/_constants.py"
+          ],
+          "minimal_modules": [
+            "pi / golden / golden_ratio",
+            "quetta 到 quecto 的 SI 前缀",
+            "kibi 到 yobi 的二进制前缀",
+            "import math as _math"
+          ],
+          "practice_task": "用 SI 前缀把 5*kilo + 3*milli 表示成基本单位并打印；用二进制前缀换算 1*mebi 等于多少字节，并与 2**20 对照验证。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "单位与线性换算因子",
+          "order": 4,
+          "filename": "u1-l4-units-and-factors.md",
+          "level": "beginner",
+          "topic": "讲解 _constants.py 中按物理量类别（质量/角度/时间/长度/压力/面积/体积/速度/温度/能量/功率/力）定义的常用单位换算因子，演示线性换算用法，并指出部分因子由 CODATA 值派生（如 psi、light_year）。",
+          "learning_goals": [
+            "理解所有换算因子最终都换算到 SI 基本单位",
+            "会用常量做日常单位换算（长度、速度、能量、力等）",
+            "区分温度的差值类常量 zero_Celsius / degree_Fahrenheit 的含义"
+          ],
+          "source_files": [
+            "scipy/constants/_constants.py"
+          ],
+          "minimal_modules": [
+            "mass / length / time / pressure / volume / energy / power / force 各类常量",
+            "用 _cd(...) 引入的派生常量（atm、psi、light_year）",
+            "zero_Celsius 与 degree_Fahrenheit（仅用于差值）",
+            "from ._codata import value as _cd"
+          ],
+          "practice_task": "计算 10*mile/minute 等于多少 m/s 以及多少 knot；把 1*Btu_th 转成焦耳，并验证它与 pound*degree_Fahrenheit*calorie_th/gram 在数值上一致。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：CODATA 数据库与核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "physical_constants 数据库与查找 API",
+          "order": 1,
+          "filename": "u2-l1-physical-constants-api.md",
+          "level": "intermediate",
+          "topic": "讲解 _codata.py 中的 physical_constants 字典（值三元组 value/unit/uncertainty）以及 value / unit / precision / find 四个访问函数，并介绍访问废弃常量时的 ConstantWarning 机制。",
+          "learning_goals": [
+            "掌握 physical_constants[name] = (value, unit, uncertainty) 的三元组结构",
+            "会用 value() / unit() / precision() / find() 查询任意常量",
+            "理解 _check_obsolete 如何对非当前数据集的常量发出 ConstantWarning"
+          ],
+          "source_files": [
+            "scipy/constants/_codata.py"
+          ],
+          "minimal_modules": [
+            "physical_constants 字典",
+            "value() / unit() / precision() / find()",
+            "_check_obsolete 与 ConstantWarning",
+            "precision = uncertainty / value 的定义"
+          ],
+          "practice_task": "用 find('Boltzmann') 列出所有相关键，再分别取 'Boltzmann constant' 的值、单位与相对精度；手算 precision(key) 与 physical_constants[key] 中 uncertainty/value 的关系。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CODATA 文本数据的固定列宽解析",
+          "order": 2,
+          "filename": "u2-l2-codata-text-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 _codata.py 如何把定宽文本 txt2002…txt2022 解析成常量字典，重点拆解两个 parse 函数的列切片逻辑与 (exact)/… 截断标记的处理。",
+          "learning_goals": [
+            "理解固定列宽解析：line[:55]/[55:77]/[77:99] 与 2018+ 版本的列宽变化",
+            "理解 is_truncated 与 is_exact 两种标记的处理分支",
+            "理解 replace_exact 如何用计算值替换被截断的精确常量"
+          ],
+          "source_files": [
+            "scipy/constants/_codata.py"
+          ],
+          "minimal_modules": [
+            "txt2002…txt2022 原始文本块",
+            "parse_constants_2002to2014",
+            "parse_constants_2018toXXXX",
+            "replace_exact"
+          ],
+          "practice_task": "从 txt2022 中选两行，手工按列切片出 name/value/uncert/unit，与 value() 结果对照；解释 2018+ 版本为何把列宽从 55 调整为 60。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "精确值与派生常数的计算",
+          "order": 3,
+          "filename": "u2-l3-exact-and-derived.md",
+          "level": "intermediate",
+          "topic": "讲解 exact2018 / exact2002 等函数如何用 SI 基本定义常数（c、h、e、k、N_A）推导出本应精确、但因文本截断而失真的派生常数，并通过 replace_exact 回填并校验。",
+          "learning_goals": [
+            "理解 SI 2019 重新定义后哪些常数是精确定义的",
+            "理解 exact_func 在解析流程中的角色与返回的 replace 字典",
+            "理解 replace_exact 中断言如何保证回填值的正确性"
+          ],
+          "source_files": [
+            "scipy/constants/_codata.py"
+          ],
+          "minimal_modules": [
+            "exact2018 与 SI 基本常数 c/h/e/k/N_A",
+            "派生公式（k/e、h*c、2*e**2/h 等）",
+            "replace_exact 的相对误差断言（<=1e-9）",
+            "exact2002/exact2006 等历史版本函数"
+          ],
+          "practice_task": "用 exact2018 中的思路手工计算 'Boltzmann constant in eV/K' = k/e，与 physical_constants 中的值比较；解释 test_gh14467 修复了什么问题（常量本应精确却被截断到十位有效数字）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "多版本 CODATA 合并、别名与废弃常量",
+          "order": 4,
+          "filename": "u2-l4-versions-aliases-obsolete.md",
+          "level": "intermediate",
+          "topic": "讲解 _codata.py 末尾如何把 2002~2022 六个版本合并进 physical_constants、如何生成别名（magn.→mag.、momentum→mom.um、electric constant→vacuum electric permittivity）、如何标记 obsolete 并以 CODATA 2022 作为当前数据集。",
+          "learning_goals": [
+            "理解版本合并策略（后更新覆盖）与 _current_constants 的作用",
+            "理解 _aliases 别名机制如何保持历史命名兼容",
+            "理解 _obsolete_constants 的检测与 ConstantWarning 的触发条件"
+          ],
+          "source_files": [
+            "scipy/constants/_codata.py"
+          ],
+          "minimal_modules": [
+            "_physical_constants_20XX 的 update 合并",
+            "_current_constants / _current_codata",
+            "_aliases 生成与 _extra_alias_keys",
+            "_obsolete_constants 与 ConstantWarning"
+          ],
+          "practice_task": "找到一个被标记为 obsolete 的常量名，调用 value() 捕获 ConstantWarning；再说明为何 'mag. constant' 仍可用（别名指向 'vacuum mag. permeability'），并用代码验证二者值相等。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：内部实现与扩展实践",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "非线性温度转换 convert_temperature",
+          "order": 1,
+          "filename": "u3-l1-convert-temperature.md",
+          "level": "advanced",
+          "topic": "深入 _constants.py 中的 convert_temperature，讲解先统一到 Kelvin 再转到目标温标的策略、C/K/F/R 四温标公式，以及为何温度是 constants 中唯一内置的非线性换算函数。",
+          "learning_goals": [
+            "理解非线性换算为何需要专门函数而非简单乘因子",
+            "掌握 old_scale→Kelvin→new_scale 的中转设计",
+            "理解对不支持温标抛 NotImplementedError 的错误处理"
+          ],
+          "source_files": [
+            "scipy/constants/_constants.py"
+          ],
+          "minimal_modules": [
+            "convert_temperature 函数签名与 @xp_capabilities",
+            "old_scale 分支（celsius/kelvin/fahrenheit/rankine）",
+            "Kelvin 中转与 new_scale 分支",
+            "复用 zero_Celsius / degree_Fahrenheit 与 NotImplementedError"
+          ],
+          "practice_task": "构造一个 Rankine↔Fahrenheit 的对照表并验证公式；扩展练习：说明若要新增一个温标需要修改哪两处分支，以及为何 old_scale 与 new_scale 都要做判断。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Array API 集成与 xp_capabilities",
+          "order": 2,
+          "filename": "u3-l2-array-api-integration.md",
+          "level": "advanced",
+          "topic": "讲解 _constants.py / _codata.py 如何用 array_namespace、_asarray 与 @xp_capabilities 装饰器让 convert_temperature / lambda2nu / nu2lambda 适配 NumPy 以外的数组库，以及 value 等纯标量函数为何标记 out_of_scope=True。",
+          "learning_goals": [
+            "理解 SciPy Array API 标准的目标与意义",
+            "理解 @xp_capabilities 装饰器的元数据作用与 out_of_scope 标记",
+            "区分参与 / 不参与数组 API 的函数及其实现差异"
+          ],
+          "source_files": [
+            "scipy/constants/_constants.py",
+            "scipy/constants/_codata.py"
+          ],
+          "minimal_modules": [
+            "array_namespace(val) 与 _asarray(..., subok=True)",
+            "@xp_capabilities 装饰器",
+            "value/unit/precision/find 上的 out_of_scope=True",
+            "scipy._lib._array_api（外部模块，具体实现待确认）"
+          ],
+          "practice_task": "用 numpy.asarray 调用 lambda2nu 和 convert_temperature，观察返回类型随输入变化；说明 value('speed of light in vacuum') 为何不参与 Array API（返回纯 float）。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "弃用模块垫片与版本演进策略",
+          "order": 3,
+          "filename": "u3-l3-deprecation-shims.md",
+          "level": "advanced",
+          "topic": "讲解 codata.py 与 constants.py 这两个私有但存在的垫片模块如何通过 _sub_module_deprecation 把旧的 scipy.constants.codata / scipy.constants.constants 访问惰性重定向到私有模块 _codata / _constants，并规划在 v2.0.0 移除。",
+          "learning_goals": [
+            "理解 SciPy 私有模块垫片（shim）模式的目的",
+            "理解 __getattr__ 的惰性弃用重定向机制",
+            "理解版本移除路线与 # noqa: F822 的含义"
+          ],
+          "source_files": [
+            "scipy/constants/codata.py",
+            "scipy/constants/constants.py",
+            "scipy/constants/__init__.py"
+          ],
+          "minimal_modules": [
+            "_sub_module_deprecation 调用",
+            "__getattr__ / __dir__ 惰性分发",
+            "__all__（F822 占位）与 v2.0.0 移除注释",
+            "scipy._lib.deprecation（外部模块，具体实现待确认）"
+          ],
+          "practice_task": "触发 scipy.constants.codata.value 的弃用路径并捕获相应警告，阅读警告文本说明应改用哪个命名空间；解释 __init__.py 末尾 from . import codata, constants 为何仍保留。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "测试体系与回归保护",
+          "order": 4,
+          "filename": "u3-l4-testing.md",
+          "level": "advanced",
+          "topic": "讲解 tests/test_codata.py 与 tests/test_constants.py 如何覆盖查找、解析、精确值、别名兼容（gh-11341 / gh-14467）以及温度/光学函数的数组 API 测试（make_xp_test_case）。",
+          "learning_goals": [
+            "理解常量测试的组织方式与覆盖范围",
+            "理解回归测试（gh 编号）如何锁定历史 bug",
+            "理解 make_xp_test_case 如何把测试参数化到不同数组库"
+          ],
+          "source_files": [
+            "scipy/constants/tests/test_codata.py",
+            "scipy/constants/tests/test_constants.py",
+            "scipy/constants/tests/meson.build"
+          ],
+          "minimal_modules": [
+            "test_find / test_basic_table_parse / test_find_all",
+            "test_exact_values / test_gh11341 / test_gh14467",
+            "TestConvertTemperature / TestLambdaToNu / TestNuToLambda",
+            "make_xp_test_case 与 xp_assert_equal / xp_assert_close"
+          ],
+          "practice_task": "运行 python -m pytest scipy/constants/tests 观察结果；新增一个测试，断言 'Stefan-Boltzmann constant' 的 precision() 等于其 uncertainty/value，并说明 make_xp_test_case 如何让同一测试在多个数组库上运行。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

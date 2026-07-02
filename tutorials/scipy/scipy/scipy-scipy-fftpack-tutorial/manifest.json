@@ -1,0 +1,188 @@
+{
+  "project": "scipy-scipy-fftpack",
+  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+  "rationale": "本手册围绕 scipy.fftpack 这一\"遗留\"傅里叶变换模块展开。学习顺序的设计逻辑是：先让读者认识该模块的遗留定位与目录结构（单元1），再依次深入核心变换族——复数/实数 FFT、DCT、DST 以及频率移位辅助函数（单元2），然后剖析支撑伪微分算子的本地卷积后端 convolve.pyx 及其核构造机制（单元3），最后从工程视角讲解线程局部缓存、遗弃命名空间 shim、DUCC 后端委托架构和测试体系（单元4）。单元划分遵循\"按变换族与代码文件聚合\"的原则，使得每篇讲义对应一组真实源码文件和一条清晰的调用链；讲义之间通过依赖关系保证读者在进入卷积后端和伪微分算子之前已掌握基础 FFT，在进入测试体系之前已理解被测对象。模块规模为中型（核心源码约 5 个文件 + Cython 后端 + 测试套件），故设计为 4 单元 17 篇讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 scipy.fftpack（遗留傅里叶变换模块）",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与遗留模块身份",
+          "order": 1,
+          "filename": "u1-l1-legacy-positioning.md",
+          "topic": "介绍 scipy.fftpack 是什么、它的遗留（legacy）定位，以及它与新版 scipy.fft 的关系。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 scipy.fftpack 的历史定位和 legacy 遗留标签的含义",
+            "知道新代码应优先使用 scipy.fft 而非 fftpack",
+            "了解 fftpack 仍被保留的原因与适用场景"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的模块文档字符串",
+            "legacy 指令"
+          ],
+          "practice_task": "阅读 __init__.py 的 docstring，编写一段对比 scipy.fftpack 与 scipy.fft 差异的说明；用 from scipy.fftpack import fft 运行一个最小示例，并记录是否出现 DeprecationWarning。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与构建配置",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "topic": "梳理 scipy/fftpack 目录下的文件布局，区分核心模块、shim 模块、Cython 扩展与测试，理解 meson 构建如何组织这些文件。",
+          "level": "beginner",
+          "learning_goals": [
+            "识别 _basic/_realtransforms/_pseudo_diffs/_helper 四个核心模块",
+            "理解 basic.py 等 shim 模块的作用",
+            "看懂 meson.build 如何编译 convolve.pyx 并安装 Python 源文件"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build",
+            "MANIFEST.in"
+          ],
+          "minimal_modules": [
+            "meson.build",
+            "MANIFEST.in",
+            "目录布局"
+          ],
+          "practice_task": "画出 fftpack 目录的文件依赖关系图，标注哪些文件会被 meson 编译为扩展模块（convolve）、哪些作为纯 Python 安装；并解释 tests/meson.build 如何把 .npz 测试数据一并安装。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "模块导出与公共 API 体系",
+          "order": 3,
+          "filename": "u1-l3-public-api.md",
+          "topic": "通过 __init__.py 的 __all__ 与 import 语句，理解 fftpack 的公共 API 如何按 FFT/实变换/伪微分/辅助函数/卷积分组导出。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 __all__ 列表与模块导出机制",
+            "掌握 fftpack API 的五大功能分组",
+            "知道 fftshift/fftfreq 实际来自 numpy 的再导出"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "__all__ 列表",
+            "from ._basic import * 等聚合导入"
+          ],
+          "practice_task": "编写脚本枚举 scipy.fftpack 的全部公共名称并按五个分组分类输出；用 __module__ 属性验证 fftshift、fftfreq 实际定义在 numpy.fft 中。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "快速上手：一维复数 FFT",
+          "order": 4,
+          "filename": "u1-l4-basic-fft-usage.md",
+          "topic": "从 _basic.py 的 fft/ifft 函数入手，理解 DFT 的输入参数（n、axis、overwrite_x）与输出打包（standard packing）约定。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握 fft/ifft 的参数含义与默认轴",
+            "理解结果的标准打包顺序（0 频在前、正频、负频）",
+            "了解幂次长度最高效、素数长度最低效的性能规律"
+          ],
+          "source_files": [
+            "_basic.py"
+          ],
+          "minimal_modules": [
+            "fft",
+            "ifft"
+          ],
+          "practice_task": "对一段含噪声的正弦信号调用 fft，再用 ifft 还原并验证 np.allclose；接着用 fftpack.fftfreq 标注频率轴，找出信号的主频率。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心变换族深入",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "多维复数 FFT 与形状校验",
+          "order": 1,
+          "filename": "u2-l1-multidim-fft.md",
+          "topic": "讲解 fftn/ifftn/fft2/ifft2 如何处理多维输入，重点剖析 _helper._good_shape 对 shape/axes 的校验逻辑，以及它们如何委托给 _duccfft。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 fftn 与 fft2 的关系（fft2 是 fftn 的特例）",
+            "掌握 shape 与 axes 参数的语义和 -1 通配",
+            "理解 _good_shape 为何要求 axes 与 shape 长度一致"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_helper.py"
+          ],
+          "minimal_modules": [
+            "fftn",
+            "ifftn",
+            "fft2",
+            "ifft2",
+            "_good_shape"
+          ],
+          "practice_task": "构造一个 2D 图像数组，分别用 fft2 与 fftn(axes=(-2,-1)) 验证结果一致；再故意传入 shape 长度不等于 ndim 的参数，触发 _good_shape 的 ValueError 并捕获。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "实数序列 FFT：rfft/irfft 与实数打包格式",
+          "order": 2,
+          "filename": "u2-l2-rfft-packed.md",
+          "topic": "讲解 rfft/irfft 为何返回实数数组，理解其特殊的"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "title": "实数交错打包格式，以及它委托的 _duccfft.rfft_fftpack 后端。",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l2-phantom",
+          "title": "占位",
+          "order": 0,
+          "filename": "u2-l2-phantom.md",
+          "topic": "占位",
+          "level": "intermediate",
+          "learning_goals": [
+            "占位"
+          ],
+          "source_files": [
+            "_basic.py"
+          ],
+          "minimal_modules": [
+            "占位"
+          ],
+          "practice_task": "占位",
+          "depends_on": [],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

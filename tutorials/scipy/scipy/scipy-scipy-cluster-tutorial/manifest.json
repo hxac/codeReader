@@ -1,0 +1,731 @@
+{
+  "project": "scipy-scipy-cluster",
+  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+  "rationale": "scipy.cluster 由两个相对独立的子模块 vq（向量量化/k-means）和 hierarchy（层次/凝聚式聚类）构成，整体属于中型模块，因此采用「先全局后局部、先易后难、先数据结构后算法」的顺序设计 7 个单元、共 24 篇讲义。第 1 单元让读者从零认识项目定位、目录与构建（Python+Cython 双层结构）并跑通端到端小例子；第 2 单元深入较简单的 vq 子模块（whiten→vq→kmeans→kmeans2），由浅入深讲清预处理、编码、迭代收敛与初始化；第 3 单元进入 hierarchy 的核心——linkage matrix 数据结构、linkage() 总入口与七种方法分发，并衔接 Python 与 Cython 的桥接（lazy_cython、array_api）以及 Lance-Williams 距离更新公式；第 4 单元进入专家层，剖析三种 Cython 聚类算法（MST 单链接、最近邻链、fast_linkage）及其底层堆与并查集数据结构；第 5 单元讲如何把层次树切平为 flat clusters 并计算统计量（fcluster、inconsistent、cophenet）；第 6 单元讲树的表示、dendrogram 可视化与最优叶序；第 7 单元收尾于校验、DisjointSet/leaders/isomorphism、array API 兼容与测试体系等工程化主题。依赖关系上，第 1 单元是所有讲义的基础，vq 与 hierarchy 两条主线在第 1 单元后并行展开，Cython 算法单元依赖于第 3 单元的 linkage matrix 与 Lance-Williams 知识，可视化与校验单元则依赖于树的表示，整体形成一条可自顶向下阅读、也可分支深入的学习路径。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 scipy.cluster：项目定位与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：scipy.cluster 是什么、解决什么问题",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.cluster 的定位：提供向量量化(k-means)与层次/凝聚式聚类两类算法，及其在信息论、压缩、目标检测等领域的应用背景。",
+          "learning_goals": [
+            "理解 scipy.cluster 的两大子模块 vq 与 hierarchy 的职责划分",
+            "掌握聚类、向量量化、码本(code book)、畸变(distortion)等核心术语",
+            "了解 k-means 与层次聚类各自适用的场景"
+          ],
+          "source_files": [
+            "__init__.py",
+            "vq/__init__.py",
+            "hierarchy/__init__.py"
+          ],
+          "minimal_modules": [
+            "cluster.__init__",
+            "vq 模块导出的 kmeans/vq/whiten",
+            "hierarchy 模块导出的 linkage/fcluster/dendrogram"
+          ],
+          "practice_task": "阅读 __init__.py 与两个子模块的 __init__.py，用一句话分别概括 vq 和 hierarchy 各自提供的核心能力，并写一段注释说明为什么向量量化是 k-means 的天然应用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、构建方式与 Python+Cython 双层架构",
+          "order": 2,
+          "filename": "u1-l2-structure-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 cluster/ 目录组织、Meson 构建配置，以及每子模块的『Python 实现层 _*_impl.py + Cython 编译层 _*.pyx』双层结构如何协同。",
+          "learning_goals": [
+            "看懂 cluster 及子模块的目录结构与 meson.build 如何编译 Cython 扩展",
+            "理解 _*_impl.py(纯 Python/封装层) 与 _*.pyx(Cython 性能层) 的分工",
+            "明白 import _vq、import _hierarchy 这类编译后端模块如何被调用"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build",
+            "vq/meson.build",
+            "vq/__init__.py",
+            "hierarchy/__init__.py"
+          ],
+          "minimal_modules": [
+            "meson.build (subdir 编译)",
+            "vq/__init__.py 从 _vq_impl 导入",
+            "hierarchy/__init__.py 从 _hierarchy_impl 导入"
+          ],
+          "practice_task": "对照 meson.build 追踪一次 `from scipy.cluster.vq import kmeans` 的导入路径：定位它最终来自哪个 _*_impl 模块，并指出其中哪一步调用了 Cython 编译的 _vq 模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速上手：从原始数据到聚类结果端到端示例",
+          "order": 3,
+          "filename": "u1-l3-quickstart-end-to-end.md",
+          "level": "beginner",
+          "topic": "用一个最小可运行示例串起 whiten→vq/kmeans 与 linkage→fcluster 的完整流程，让读者先有整体手感再深入源码。",
+          "learning_goals": [
+            "能用 whiten + kmeans 跑通一个 k-means 聚类小例子",
+            "能用 pdist + linkage + fcluster 跑通一个层次聚类小例子",
+            "理解 obs(M×N)、码本(k×N)、linkage matrix Z 的输入输出约定"
+          ],
+          "source_files": [
+            "vq/__init__.py",
+            "hierarchy/__init__.py",
+            "vq/_vq_impl.py"
+          ],
+          "minimal_modules": [
+            "whiten",
+            "kmeans",
+            "linkage",
+            "fcluster"
+          ],
+          "practice_task": "构造一个 8×2 的小数据集，先用 scipy.cluster.vq.whiten+kmeans 得到 2 个簇心，再用 scipy.cluster.hierarchy.linkage+fcluster 得到层次聚类标签，对比两种方法的结果。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "向量量化与 k-means（vq 模块）",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "whiten：按特征白化与零方差处理",
+          "order": 1,
+          "filename": "u2-l1-whiten-preprocessing.md",
+          "level": "intermediate",
+          "topic": "精读 whiten 的实现：按列除以标准差得到单位方差，以及零方差列置 1 并告警的边界处理，并理解 array_api(xp) 抽象。",
+          "learning_goals": [
+            "理解为什么 k-means 前要白化（各特征单位方差）",
+            "掌握 whiten 内部用 xp.std + 除法 + 零方差掩码的实现细节",
+            "认识 array_namespace / xpx.at 等 array API 抽象的用法"
+          ],
+          "source_files": [
+            "vq/_vq_impl.py"
+          ],
+          "minimal_modules": [
+            "whiten",
+            "array_namespace",
+            "xpx.at(...).set(...)"
+          ],
+          "practice_task": "手写一个与 whiten 等价的纯 numpy 函数，复现其对『某列标准差为 0』时『该列不变并发出 RuntimeWarning』的行为，并与官方 whiten 输出逐元素比对。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "vq 编码函数与 Cython 后端 _vq.vq",
+          "order": 2,
+          "filename": "u2-l2-vq-and-cython-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 vq() 如何把每个观测分配到最近码字、返回 code 与 dist，以及它如何在浮点时调用编译后端 _vq.vq，非浮点时回退到 _py_vq。",
+          "learning_goals": [
+            "理解 vq 的输入输出：code(最近码字索引)与 dist(畸变)",
+            "看清 vq() 中浮点走 Cython _vq.vq、否则回退 _py_vq 的分发逻辑",
+            "了解 _vq.pyx 中基于 BLAS cal_M 的距离计算思路"
+          ],
+          "source_files": [
+            "vq/_vq_impl.py",
+            "vq/_vq.pyx"
+          ],
+          "minimal_modules": [
+            "vq",
+            "_py_vq",
+            "_vq.vq (Cython)",
+            "_vq._vq / cal_M"
+          ],
+          "practice_task": "给定一个码本和若干观测，分别调用 scipy.cluster.vq.vq 和自己用 numpy(cdist 或广播)实现的最近码字分配，验证返回的 code 与 dist 完全一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "kmeans 主流程：迭代、畸变收敛与簇心更新",
+          "order": 3,
+          "filename": "u2-l3-kmeans-iteration.md",
+          "level": "intermediate",
+          "topic": "精读 kmeans 与内部 _kmeans：反复执行『vq 分配→update_cluster_means 更新簇心→比较平均畸变变化』直到收敛，并多次重启取最低畸变。",
+          "learning_goals": [
+            "理解 k-means 的『分配-更新』迭代本质与畸变收敛阈值 thresh",
+            "看清 _kmeans 用 deque(maxlen=2) 比较前后平均畸变来判断收敛",
+            "明白 kmeans 多次(iter)重启并丢弃空簇(has_members)的策略"
+          ],
+          "source_files": [
+            "vq/_vq_impl.py",
+            "vq/_vq.pyx"
+          ],
+          "minimal_modules": [
+            "kmeans",
+            "_kmeans",
+            "vq",
+            "_vq.update_cluster_means"
+          ],
+          "practice_task": "参照 _kmeans 用纯 numpy 实现『单次 k-means 迭代循环』：在循环里调用 vq 分配、用按簇求均值更新簇心，当平均畸变变化小于 1e-5 时停止，并与 scipy.cluster.vq.kmeans 的簇心对比。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "kmeans2：多种初始化与空簇处理",
+          "order": 4,
+          "filename": "u2-l4-kmeans2-init-and-empty.md",
+          "level": "intermediate",
+          "topic": "精读 kmeans2 及其初始化方法 _kpoints/_krandinit/_kpp（k-means++）、minit 分发与 missing(空簇 warn/raise)处理。",
+          "learning_goals": [
+            "掌握 kmeans2 的四种 minit：random/points/++/matrix 的区别",
+            "理解 k-means++（_kpp）按 D² 概率逐步挑选种子的原理",
+            "看清空簇出现时 _missing_warn/_missing_raise 与 code_book 回退逻辑"
+          ],
+          "source_files": [
+            "vq/_vq_impl.py"
+          ],
+          "minimal_modules": [
+            "kmeans2",
+            "_kpoints",
+            "_krandinit",
+            "_kpp",
+            "_missing_warn",
+            "_missing_raise",
+            "_valid_init_meth"
+          ],
+          "practice_task": "对同一数据集分别用 minit='random'、'points'、'++' 调用 kmeans2 多次，统计最终畸变的稳定性差异，并解释为什么 k-means++（_kpp）通常更稳定；再构造一个会触发空簇警告的小数据集。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "层次聚类基础：linkage matrix 与 linkage 函数",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "凝聚式聚类与 linkage matrix 数据结构",
+          "order": 1,
+          "filename": "u3-l1-linkage-matrix.md",
+          "level": "intermediate",
+          "topic": "讲解凝聚式聚类(从每点一簇逐步合并)的过程，以及 (n-1)×4 的 linkage matrix Z 四列（簇i、簇j、距离、合并后簇大小）与簇编号 n+i 的约定。",
+          "learning_goals": [
+            "理解凝聚式聚类『森林中逐步合并两簇』的过程",
+            "看懂 Z[i,0]/Z[i,1]/Z[i,2]/Z[i,3] 四列含义与 n+i 编号约定",
+            "区分压缩距离矩阵(pdist 形式)与观测矩阵两种输入"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "linkage 的 docstring 与 Z 矩阵定义",
+            "distance.num_obs_y / distance.is_valid_y"
+          ],
+          "practice_task": "手工追踪 linkage([[2],[8],[0],[4]], method='single') 的每一步合并，画出对应的 4×4 linkage matrix Z，并验证 Z[:,3]（簇大小）列与你的手工推算一致。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "linkage() 总入口与七种方法分发",
+          "order": 2,
+          "filename": "u3-l2-linkage-dispatch.md",
+          "level": "intermediate",
+          "topic": "精读 linkage() 主函数：输入校验、_LINKAGE_METHODS 字典、对 1D/2D 输入(pdist)的处理、以及对 single/complete/average/centroid/median/ward/weighted 七种方法分发的 if 链。",
+          "learning_goals": [
+            "掌握 _LINKAGE_METHODS 与 _EUCLIDEAN_METHODS 的方法编码",
+            "理解 linkage 如何按方法分派到 mst_single_linkage/nn_chain/fast_linkage",
+            "明白 centroid/median/ward 为何要求欧氏度量且对 2D 输入会校验"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "linkage",
+            "_LINKAGE_METHODS",
+            "_EUCLIDEAN_METHODS",
+            "single/complete/average/ward/centroid/median/weighted 包装函数"
+          ],
+          "practice_task": "对同一 pdist 距离矩阵分别用 7 种 method 调用 linkage，记录每种得到的 Z[:,2]（距离）序列，并解释为何 single/complete 给出的距离范围不同、ward 的距离为何偏大。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Python 与 Cython 的桥接：lazy_cython 与 array_api",
+          "order": 3,
+          "filename": "u3-l3-python-cython-bridge.md",
+          "level": "intermediate",
+          "topic": "讲解 lazy_cython 装饰器、xpx.lazy_apply 如何让 Cython 后端能处理 dask 等惰性数组，以及 cy_linkage 内部闭包如何最终落到 _hierarchy 编译函数。",
+          "learning_goals": [
+            "理解 lazy_cython(xp_capabilities) 装饰器的作用与 cpu_only/警告约束",
+            "看清 xpx.lazy_apply(cy_linkage, y, ...) 如何把惰性数组喂给 Cython 函数",
+            "掌握 cy_linkage 闭包中 single/nn_chain/fast_linkage 的三路分发"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "lazy_cython = xp_capabilities(...)",
+            "linkage 内的 cy_linkage 闭包",
+            "xpx.lazy_apply",
+            "_hierarchy.mst_single_linkage/nn_chain/fast_linkage"
+          ],
+          "practice_task": "在 linkage() 中定位 cy_linkage 闭包与 xpx.lazy_apply 调用，画一张『linkage → lazy_apply → cy_linkage → _hierarchy.*』的调用链图，并说明当输入是普通 numpy 数组时这条链如何短路直接计算。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Lance-Williams 距离更新公式",
+          "order": 4,
+          "filename": "u3-l4-lance-williams-update.md",
+          "level": "advanced",
+          "topic": "精读 _hierarchy_distance_update.pxi：用统一的 Lance-Williams 递推式 d(x,y∪i) 表达 single/complete/average/centroid/median/ward/weighted 七种方法的距离更新。",
+          "learning_goals": [
+            "理解合并两簇后用 Lance-Williams 公式更新到其余簇距离的统一框架",
+            "看清 _single/_complete/_average/_weighted 等七个 C 函数各自的代数形式",
+            "理解 ward 公式中 size_i/size_x/size_y 的加权与开方来源"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_distance_update.pxi",
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "linkage_distance_update 函数指针 typedef",
+            "_single/_complete/_average/_centroid/_median/_ward/_weighted",
+            "linkage_methods 函数指针表"
+          ],
+          "practice_task": "对照 docstring 中 linkage 的七种方法数学定义，在 _hierarchy_distance_update.pxi 中为每个 _xxx 函数标注它对应的方法名与公式，并验证 _average = (size_x*d_xi + size_y*d_yi)/(size_x+size_y) 与 UPGMA 定义一致。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "层次聚类核心算法（Cython 后端）",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "压缩距离矩阵编码与二叉堆数据结构",
+          "order": 1,
+          "filename": "u4-l1-condensed-matrix-and-heap.md",
+          "level": "advanced",
+          "topic": "讲解 _hierarchy.pyx 中 condensed_index 如何把 (i,j) 映射到压缩距离矩阵下标，以及 _structures.pxi 中 Heap（支持改值的最小堆）和 LinkageUnionFind 并查集的实现。",
+          "learning_goals": [
+            "理解压缩距离矩阵 n*i - i*(i+1)/2 + (j-i-1) 的下标编码",
+            "掌握 Heap 用 index_by_key/key_by_index 双向映射实现 O(log n) 改值",
+            "理解 LinkageUnionFind 的 parent/size/merge/find 如何支撑快速簇标号"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy.pyx",
+            "hierarchy/_structures.pxi"
+          ],
+          "minimal_modules": [
+            "condensed_index",
+            "Heap(sift_up/sift_down/change_value)",
+            "LinkageUnionFind(merge/find)"
+          ],
+          "practice_task": "用纯 Python 实现一个支持 change_value 的最小堆（参考 _structures.pxi 的双向索引思路），对一个含重复改值操作的序列验证 get_min 始终返回当前最小值，并与 heapq 行为对比说明为何需要自定义堆。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "single linkage 的最小生成树算法",
+          "order": 2,
+          "filename": "u4-l2-mst-single-linkage.md",
+          "level": "advanced",
+          "topic": "精读 mst_single_linkage：基于 Prim 风格的最小生成树实现 O(n²) 的单链接聚类，用 D 数组维护每个未合并点到当前树的最近距离。",
+          "learning_goals": [
+            "理解单链接聚类等价于距离矩阵的最小生成树",
+            "看清 mst_single_linkage 用 D(到当前树最近距离) 数组 + merged 标记的 Prim 实现",
+            "理解 LinkageUnionFind 如何为无序合并结果生成正确的簇标号"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "mst_single_linkage",
+            "LinkageUnionFind",
+            "condensed_index"
+          ],
+          "practice_task": "参照 mst_single_linkage 用纯 Python 实现 Prim 版单链接聚类：维护每个点到当前树的最小距离，逐步并入最近点并写出一行 linkage 记录，对 6 个点的小数据集验证与 scipy single 完全一致。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "nearest-neighbor chain 与 fast_linkage",
+          "order": 3,
+          "filename": "u4-l3-nn-chain-and-fast-linkage.md",
+          "level": "advanced",
+          "topic": "精读 nn_chain（complete/average/weighted/ward 的最近邻链算法，O(n²)）与 fast_linkage（centroid/median 的朴素算法，O(n³)），以及它们如何调用 Lance-Williams 更新与 Heap。",
+          "learning_goals": [
+            "理解最近邻链(nn_chain)算法为何对可逆方法能在 O(n²) 完成",
+            "看清 fast_linkage 用 Heap 选最小对 + 距离更新表 D 的朴素流程",
+            "理解两种算法都通过 linkage_methods 函数指针表复用 Lance-Williams 公式"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "nn_chain",
+            "fast_linkage",
+            "find_min_dist",
+            "linkage 方法分发"
+          ],
+          "practice_task": "对照 linkage 文档中各方法的时间复杂度（single/nn_chain 为 O(n²)，fast_linkage 为 O(n³)），在源码中定位这三条算法分支，并解释为什么 centroid/median 必须用 fast_linkage 而不能用 nn_chain（提示：方法的可逆性）。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "把树切平：flat clustering 与统计量",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "fcluster：多种 criterion 切分层次树",
+          "order": 1,
+          "filename": "u5-l1-fcluster-criteria.md",
+          "level": "intermediate",
+          "topic": "精读 fcluster 的多种切分准则：inconsistent/distance/maxclust/monocrit/maxclust_monocrit，以及它们如何落到 Cython 的 cluster_dist/cluster_in/cluster_maxclust_dist/cluster_monocrit。",
+          "learning_goals": [
+            "掌握 fcluster 各 criterion 的含义与适用场景",
+            "理解 inconsistent(默认)与 distance(按合并距离阈值)的区别",
+            "看清 maxclust『给定簇数反推阈值』的语义"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py",
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "fcluster",
+            "cluster_dist",
+            "cluster_in",
+            "cluster_maxclust_dist",
+            "cluster_monocrit"
+          ],
+          "practice_task": "对同一个 Z 分别用 criterion='distance'、'maxclust'、'inconsistent' 调用 fcluster，得到 3 个簇，对比三者切分边界的不同，并解释 maxclust=3 时系统是如何反推距离阈值的。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "fclusterdata：一站式聚类流水线",
+          "order": 2,
+          "filename": "u5-l2-fclusterdata-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 fclusterdata 如何把『pdist → linkage → fcluster』三步打包成一个面向原始观测矩阵的便捷入口。",
+          "learning_goals": [
+            "理解 fclusterdata 是 linkage+fcluster 的便捷封装",
+            "看清它接受原始 X 而非距离矩阵的输入约定",
+            "掌握何时该用 fclusterdata 而非手动三步"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "fclusterdata",
+            "内部调用 pdist/linkage/fcluster"
+          ],
+          "practice_task": "用 fclusterdata 直接对一组二维点得到指定簇数的标签，再手动用 pdist+linkage+fcluster 复现完全相同的结果，验证 fclusterdata 确实只是这三步的封装。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "inconsistent 不一致矩阵与 max 系列统计",
+          "order": 3,
+          "filename": "u5-l3-inconsistent-and-maxstats.md",
+          "level": "intermediate",
+          "topic": "精读 inconsistent（计算每个非叶簇在 depth 内的不一致统计）与 maxdists/maxinconsts/maxRstat（沿树向上取每簇的最大值），以及它们如何支撑 monocrit 切分。",
+          "learning_goals": [
+            "理解 inconsistent matrix R 四列（均值/标准差/计数/不一致系数）的含义",
+            "掌握 depth 参数如何限定不一致性的计算范围",
+            "看清 maxRstat/maxinconsts/maxdists 如何沿树聚合为 monotonic 的 monocrit 向量"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py",
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "inconsistent",
+            "maxdists",
+            "maxinconsts",
+            "maxRstat",
+            "get_max_Rfield_for_each_cluster",
+            "get_max_dist_for_each_cluster"
+          ],
+          "practice_task": "对一个 Z 计算 R=inconsistent(Z, d=2)，再用 MR=maxRstat(Z,R,3) 作为 monocrit 调用 fcluster(Z, t=0.8, criterion='monocrit', monocrit=MR)，解释这条流水线为什么能把『最大平均距离低于阈值』的子树切成一个簇。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "cophenetic 距离与 cophenetic 相关系数",
+          "order": 4,
+          "filename": "u5-l4-cophenet.md",
+          "level": "intermediate",
+          "topic": "精读 cophenet：计算每对原始观测在层次树上的合并高度（cophenetic 距离），并与原始距离矩阵比较得到 cophenetic 相关系数以评估聚类保真度。",
+          "learning_goals": [
+            "理解 cophenetic 距离（两观测首次合并时的高度）的定义",
+            "掌握 cophenetic 相关系数 c 衡量层次树对原始距离的保真度",
+            "看清 Cython cophenetic_distances 如何按位填充压缩距离向量"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py",
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "cophenet",
+            "cophenetic_distances (Cython)"
+          ],
+          "practice_task": "对同一数据集用 single 和 ward 两种方法分别计算 cophenet 相关系数，比较哪个方法对原始距离的保真度更高，并用 leaves_list 结合 dendrogram 直观解释差异来源。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "树的表示、可视化与最优叶序",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ClusterNode、to_tree、cut_tree 与 leaves_list",
+          "order": 1,
+          "filename": "u6-l1-clusternode-and-tree.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 to_tree 把 Z 转成 ClusterNode 树对象，以及 leaves_list、cut_tree（按簇数或高度切树）等基于树表示的操作。",
+          "learning_goals": [
+            "理解 ClusterNode 的 id/left/right/dist/count 属性与递归结构",
+            "掌握 to_tree(Z) 与 to_tree(Z, rd=True) 返回值的区别",
+            "看清 cut_tree 用 _order_cluster_tree + 按列回放的切树实现"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "ClusterNode",
+            "to_tree",
+            "cut_tree",
+            "leaves_list",
+            "_order_cluster_tree"
+          ],
+          "practice_task": "用 to_tree 把一个 8 点的 Z 转成 ClusterNode，手写一个递归函数遍历并打印每个叶子的 id，验证其顺序与 leaves_list(Z) 一致；再用 cut_tree(Z, n_clusters=[2,3]) 查看不同切点下的归属。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "dendrogram 可视化与配色",
+          "order": 2,
+          "filename": "u6-l2-dendrogram.md",
+          "level": "intermediate",
+          "topic": "精读 dendrogram：截断模式(truncate_mode)、color_threshold 自动配色、_dendrogram_calculate_info 计算坐标，以及 set_link_color_palette 自定义调色板。",
+          "learning_goals": [
+            "理解 dendrogram 返回的 icoords/dcoords/ivl 等绘图数据结构",
+            "掌握 color_threshold 如何自动给低于阈值的子树着不同颜色",
+            "看清 truncate_mode='lastp'/'level' 对大树进行裁剪显示的逻辑"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "dendrogram",
+            "_dendrogram_calculate_info",
+            "_plot_dendrogram",
+            "set_link_color_palette",
+            "_get_leaves_color_list"
+          ],
+          "practice_task": "对一个 50 点的 ward 聚类结果调用 dendrogram，分别设置 color_threshold 与 truncate_mode='lastp', p=10，用返回字典里的 dcoords 解释每个 U 形链接的高度，并用 set_link_color_palette 换一套自定义颜色。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "optimal_leaf_ordering 最优叶序",
+          "order": 3,
+          "filename": "u6-l3-optimal-leaf-ordering.md",
+          "level": "advanced",
+          "topic": "讲解 optimal_leaf_ordering（及 linkage 的 optimal_ordering 参数）如何在不改变聚类结构的前提下重排叶子，使相邻叶子的距离之和最小，依赖 Cython _optimal_leaf_ordering 后端。",
+          "learning_goals": [
+            "理解最优叶序问题：固定树结构下最小化相邻叶子距离",
+            "掌握 optimal_leaf_ordering(Z, y) 的输入输出与代价(计算较慢)",
+            "看清 linkage(optimal_ordering=True) 内部如何调用 optimal_leaf_ordering"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py",
+            "hierarchy/_optimal_leaf_ordering.pyx"
+          ],
+          "minimal_modules": [
+            "optimal_leaf_ordering",
+            "linkage(optimal_ordering=...)",
+            "_optimal_leaf_ordering (Cython)"
+          ],
+          "practice_task": "对一个 10 点数据集，比较 leaves_list(Z) 与 leaves_list(optimal_leaf_ordering(Z, X))，计算两种叶序下相邻叶子的 pdist 距离之和，验证最优叶序确实更小。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "校验、数据结构与工程化",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "linkage/不一致矩阵的校验：is_valid_* 与辅助判断",
+          "order": 1,
+          "filename": "u7-l1-validation.md",
+          "level": "advanced",
+          "topic": "精读 is_valid_linkage/is_valid_im/is_monotonic/correspond/num_obs_linkage 等校验函数，以及它们如何用 throw/warning 控制报错与告警行为。",
+          "learning_goals": [
+            "掌握 is_valid_linkage 对 Z 形状、单调性、簇编号合法性的检查",
+            "理解 is_valid_im 对不一致矩阵 R 的校验规则",
+            "看清 throw/warning 参数如何在校验失败时选择抛异常或仅告警"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py"
+          ],
+          "minimal_modules": [
+            "is_valid_linkage",
+            "_is_valid_linkage",
+            "is_valid_im",
+            "_is_valid_im",
+            "is_monotonic",
+            "correspond",
+            "num_obs_linkage",
+            "_lazy_valid_checks"
+          ],
+          "practice_task": "构造几个『故意错误』的 linkage matrix（如负距离、非单调、错误的簇编号），分别用 is_valid_linkage(throw=False, warning=True) 观察告警，并对照源码定位每条校验规则对应的具体检查语句。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "DisjointSet、leaders 与同构判断",
+          "order": 2,
+          "filename": "u7-l2-disjointset-leaders-isomorphism.md",
+          "level": "advanced",
+          "topic": "讲解 DisjointSet 并查集数据结构、leaders(找出每簇的代表节点)以及 is_isomorphic(判断两个 flat 聚类是否同构) 的实现与关系。",
+          "learning_goals": [
+            "掌握 scipy._lib._disjoint_set.DisjointSet 的 union/find/路径压缩能力",
+            "理解 leaders(Z,T) 如何返回每簇的根节点与对应簇号",
+            "看清 is_isomorphic 如何判断两个 flat 聚类标签的同构性"
+          ],
+          "source_files": [
+            "hierarchy/_hierarchy_impl.py",
+            "hierarchy/_hierarchy.pyx"
+          ],
+          "minimal_modules": [
+            "DisjointSet",
+            "leaders (Cython)",
+            "is_isomorphic"
+          ],
+          "practice_task": "用 DisjointSet 模拟一次并查过程（参考 leaders 内部逻辑），实现一个判断两组聚类标签是否同构的小函数，并与 scipy.cluster.hierarchy.is_isomorphic 的结果对比验证。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "array API 兼容、惰性数组与测试体系",
+          "order": 3,
+          "filename": "u7-l3-arrayapi-and-tests.md",
+          "level": "advanced",
+          "topic": "总结全模块的 array_api(xp) 抽象、dask 惰性数组(lazy_apply)支持与 cpu_only 约束，并讲解 vq/hierarchy 的 pytest 测试组织与可复现性(rng)。",
+          "learning_goals": [
+            "理解 xp_capabilities 装饰器如何声明 cpu_only/jax_jit/allow_dask_compute 等能力约束",
+            "掌握 lazy_apply 模式如何让 Cython 后端处理 dask.array 惰性输入",
+            "看懂 test_vq.py / test_hierarchy.py 的 TestXxx 分组与 hierarchy_test_data.py 的固定数据"
+          ],
+          "source_files": [
+            "vq/_vq_impl.py",
+            "hierarchy/_hierarchy_impl.py",
+            "vq/tests/test_vq.py",
+            "hierarchy/tests/test_hierarchy.py",
+            "hierarchy/tests/hierarchy_test_data.py"
+          ],
+          "minimal_modules": [
+            "xp_capabilities / lazy_cython",
+            "xpx.lazy_apply",
+            "check_random_state / _transition_to_rng",
+            "PytestTester",
+            "hierarchy_test_data 固定数据集"
+          ],
+          "practice_task": "阅读 test_hierarchy.py 中 TestLinkage 与 TestCopheneticDistance 的几个测试，定位它们用到的 hierarchy_test_data.py 固定数据，并写一个用固定 rng(np.random.default_rng(seed)) 保证可复现的 kmeans2 小测试，加入 _transition_to_rng 后验证多次运行结果一致。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
