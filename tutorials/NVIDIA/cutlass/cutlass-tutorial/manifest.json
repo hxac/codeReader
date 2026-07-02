@@ -1,0 +1,801 @@
+{
+  "head": "e8ecfad75b44d1ad56264f5001d877e9e47fe080",
+  "project": "cutlass",
+  "rationale": "CUTLASS 是 NVIDIA 的高性能 CUDA 矩阵乘法（GEMM）模板库，规模庞大且包含三代 API：2.x（device::Gemm）、3.x（基于 CuTe 的 GemmUniversal/CollectiveBuilder）与 4.x（Python CuTe DSL）。学习路线因此按“先认识项目与经典 2.x API → 再掌握 CuTe 核心抽象与 3.x 通用模型 → 最后进入高级架构与 DSL”三层推进。入门层先让读者建立项目定位、构建运行、目录入口与数值/布局等基本概念，并用最简单的 00_basic_gemm 跑通第一个 GEMM。进阶层聚焦 CUTLASS 3.x 的灵魂——CuTe 的 Layout/Tensor/Atom 抽象，以及 GEMM 的 kernel/collective/epilogue 三段式通用模型与 CollectiveBuilder，配合 Hopper 的 warp-specialized 内核落地。专家层覆盖异步流水线、TMA、Stream-K 调度、Grouped/卷积/低精度/Blackwell 等高级机制，以及 profiler 实例库和 Python CuTe DSL 两条产出路径。讲义之间通过 depends_on 形成清晰依赖链，确保读者始终能由浅入深、结合真实源码与可操作实践逐步深入。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：从零认识 CUTLASS",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "CUTLASS 项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 CUTLASS 是什么、解决什么问题、它在 CUDA 生态中的定位，以及三代 API（2.x/3.x/4.x DSL）的演进。",
+          "learning_goals": [
+            "理解 CUTLASS 作为 header-only CUDA 模板库的定位与价值",
+            "了解 GEMM 层次化分解的核心思想",
+            "区分 CUTLASS 2.x、3.x（CuTe）与 4.x（CuTe DSL）三代 API"
+          ],
+          "source_files": [
+            "README.md",
+            "CHANGELOG.md",
+            "include/cutlass/cutlass.h"
+          ],
+          "minimal_modules": [
+            "CUTLASS 是什么与适用场景",
+            "GEMM 层次化分解概览",
+            "三代 API 演进时间线",
+            "支持的架构与数据类型"
+          ],
+          "practice_task": "阅读 README.md，列出 CUTLASS 支持的 GPU 架构（compute capability）与至少 4 种数据类型，并用自己的话写一段说明 CUTLASS 与 cuBLAS 的关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行 CUTLASS",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 CMake 构建 CUTLASS，设置 CUTLASS_NVCC_ARCHS 目标架构，编译并运行单元测试与示例。",
+          "learning_goals": [
+            "掌握 CUTLASS 的 CMake 构建流程与关键变量",
+            "理解 CUTLASS_NVCC_ARCHS 与架构加速特性（如 90a/100a）",
+            "学会编译运行单元测试 test_unit 与单个示例"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "README.md",
+            "examples/00_basic_gemm/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "header-only 库的包含方式",
+            "CMake 与 CUTLASS_NVCC_ARCHS",
+            "CUDA Toolkit 版本要求",
+            "构建并运行 test_unit"
+          ],
+          "practice_task": "创建 build 目录，用 cmake 指定 CUTLASS_NVCC_ARCHS=80 构建项目，编译并运行 examples/00_basic_gemm，记录输出结果。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码组织",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 CUTLASS 仓库的目录结构：include（cutlass 与 cute 两套核心）、tools、examples、test 的职责划分。",
+          "learning_goals": [
+            "掌握 include/cutlass 各子目录（gemm/conv/epilogue/layout/arch）的职责",
+            "区分 cutlass 与 cute 两套核心库",
+            "了解 tools（library/profiler/util）与 examples/test 的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "include/cutlass/gemm/gemm.h",
+            "include/cute/config.hpp"
+          ],
+          "minimal_modules": [
+            "顶层目录布局",
+            "include/cutlass 子模块职责",
+            "include/cute 核心抽象",
+            "tools 与 examples 概览"
+          ],
+          "practice_task": "在仓库中分别定位 GEMM、卷积、epilogue、layout 对应的头文件目录，画一张目录职责思维导图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "数值类型与基础容器",
+          "order": 4,
+          "filename": "u1-l4-numeric-types.md",
+          "level": "beginner",
+          "topic": "讲解 CUTLASS 如何用 C++ 类型表达半精度、bf16、fp8、tf32 等数据类型，以及 Array 容器与数值转换。",
+          "learning_goals": [
+            "认识 cutlass::half_t、bfloat16_t、float8_e4m3_t 等类型",
+            "理解 cutlass::Array 容器及其对齐特性",
+            "了解 numeric_conversion 的作用"
+          ],
+          "source_files": [
+            "include/cutlass/numeric_types.h",
+            "include/cutlass/array.h",
+            "include/cutlass/half.h",
+            "include/cutlass/numeric_conversion.h"
+          ],
+          "minimal_modules": [
+            "半精度与 bf16 类型",
+            "fp8/tf32 等窄精度类型",
+            "Array 容器与对齐",
+            "数值类型转换"
+          ],
+          "practice_task": "编写一个小程序，定义一个 cutlass::Array<half_t, 4>，用 numeric_conversion 将 float 数组转换成 half_t 并打印。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "矩阵布局基础",
+          "order": 5,
+          "filename": "u1-l5-matrix-layouts.md",
+          "level": "beginner",
+          "topic": "讲解 CUTLASS 2.x 的 layout 抽象：RowMajor/ColumnMajor、TensorRef/TensorView 以及 pitch-linear 概念。",
+          "learning_goals": [
+            "理解 RowMajor/ColumnMajor 等 layout tag 的作用",
+            "掌握 TensorRef/TensorView 的用法",
+            "了解 pitch-linear 与 leading dimension 的概念"
+          ],
+          "source_files": [
+            "include/cutlass/layout/matrix.h",
+            "include/cutlass/layout/tensor.h",
+            "include/cutlass/tensor_ref.h",
+            "include/cutlass/tensor_view.h"
+          ],
+          "minimal_modules": [
+            "layout tag 概念",
+            "TensorRef 与 TensorView",
+            "leading dimension 与 stride",
+            "pitch_linear 坐标"
+          ],
+          "practice_task": "用 cutlass::layout::ColumnMajor 构造一个 TensorRef 指向一个 4x4 列主序矩阵，并用 TensorView 访问并打印元素。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l6",
+          "title": "第一个 GEMM：2.x device API",
+          "order": 6,
+          "filename": "u1-l6-first-gemm.md",
+          "level": "beginner",
+          "topic": "通过 examples/00_basic_gemm 讲解如何用 cutlass::gemm::device::Gemm 模板实例化并启动一个 SGEMM 内核。",
+          "learning_goals": [
+            "掌握 cutlass::gemm::device::Gemm 模板参数的含义",
+            "理解 Gemm args 对象与 argument 传递模式",
+            "学会调用 gemm_operator 并验证结果"
+          ],
+          "source_files": [
+            "examples/00_basic_gemm/basic_gemm.cu",
+            "include/cutlass/gemm/device/gemm.h",
+            "include/cutlass/gemm/device/default_gemm_configuration.h"
+          ],
+          "minimal_modules": [
+            "device::Gemm 模板参数",
+            "Gemm args 与 argument 对象",
+            "线程块 tile 选择",
+            "启动与验证"
+          ],
+          "practice_task": "修改 examples/00_basic_gemm，将矩阵改为行主序（RowMajor），重新编译运行并与参考实现对比结果。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：CuTe 核心抽象与 CUTLASS 3.x GEMM 模型",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CuTe Layout 与布局代数",
+          "order": 1,
+          "filename": "u2-l1-cute-layout-algebra.md",
+          "level": "intermediate",
+          "topic": "讲解 CuTe 的 Layout 抽象：Shape、Stride、层级化多维布局，以及布局的函数式组合与分块（tiling）。",
+          "learning_goals": [
+            "理解 Layout = (Shape, Stride) 的本质",
+            "掌握层级化 int_tuple 表示",
+            "学会用 composition/tiling 操作布局"
+          ],
+          "source_files": [
+            "include/cute/layout.hpp",
+            "include/cute/int_tuple.hpp",
+            "include/cute/stride.hpp"
+          ],
+          "minimal_modules": [
+            "Shape 与 Stride",
+            "层级化 int_tuple",
+            "Layout 的代数运算",
+            "分块（tile）与分区（partition）"
+          ],
+          "practice_task": "构造一个 (4,4):(1,4) 的 Layout，用 cute::local_tile 对其做 2x2 分块，打印每个 tile 的坐标到索引的映射。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CuTe Tensor 与引擎",
+          "order": 2,
+          "filename": "u2-l2-cute-tensor.md",
+          "level": "intermediate",
+          "topic": "讲解 CuTe Tensor = (Engine, Layout)，如何把数据数组与 Layout 组合成张量，并在不同内存空间表达数据。",
+          "learning_goals": [
+            "理解 Tensor 的 Engine+Layout 组成",
+            "掌握 make_tensor 创建张量的方式",
+            "了解 smem/rmem/gmem 不同内存空间张量"
+          ],
+          "source_files": [
+            "include/cute/tensor.hpp",
+            "include/cute/tensor_impl.hpp",
+            "include/cute/pointer.hpp"
+          ],
+          "minimal_modules": [
+            "Tensor 的 Engine 与 Layout",
+            "make_tensor 构造",
+            "内存空间与指针类型",
+            "张量的索引与切片"
+          ],
+          "practice_task": "用 make_tensor 把一个共享内存数组包装成 Tensor，应用一个 swizzled Layout，并打印元素访问顺序。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "CuTe 算法：copy 与 gemm",
+          "order": 3,
+          "filename": "u2-l3-cute-algorithms.md",
+          "level": "intermediate",
+          "topic": "讲解 cute::copy、cute::gemm 等核心算法，它们如何作用于 CuTe Tensor 完成数据搬运与乘加。",
+          "learning_goals": [
+            "掌握 cute::copy 的多种重载（copy_if 等）",
+            "理解 cute::gemm 的三元组参数模型",
+            "了解 copy/gemm 与 Tensor/Layout 的解耦"
+          ],
+          "source_files": [
+            "include/cute/algorithm/copy.hpp",
+            "include/cute/algorithm/gemm.hpp",
+            "include/cute/algorithm/clear.hpp"
+          ],
+          "minimal_modules": [
+            "cute::copy 与谓词拷贝",
+            "cute::gemm 乘加模型",
+            "fill/clear 等辅助算法",
+            "算法与张量解耦的好处"
+          ],
+          "practice_task": "用 cute::copy 把一个 gmem Tensor 拷贝到一个 smem Tensor，再用 cute::gemm 完成一个小型 8x8 乘法（CPU 模拟也可）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "CuTe Atoms：MMA 与 Copy 原子",
+          "order": 4,
+          "filename": "u2-l4-cute-atoms.md",
+          "level": "intermediate",
+          "topic": "讲解 MMA_Atom/Copy_Atom 与 TiledMma/TiledCopy，如何把硬件指令封装成可复用的计算/拷贝单元。",
+          "learning_goals": [
+            "理解 MMA_Atom/Copy_Atom 的封装思想",
+            "掌握 TiledMma/TiledCopy 的线程划分",
+            "了解 atom 与 arch 指令的对应关系"
+          ],
+          "source_files": [
+            "include/cute/atom/mma_atom.hpp",
+            "include/cute/atom/copy_atom.hpp",
+            "include/cute/atom/partitioner.hpp"
+          ],
+          "minimal_modules": [
+            "MMA_Atom 与 Copy_Atom",
+            "TiledMma/TiledCopy 线程划分",
+            "atom trait 与 arch 关联",
+            "partition 对张量切分"
+          ],
+          "practice_task": "用 make_tiled_mma 包装一个 SM80 mma atom，打印其线程布局（thread layout），并用 partition_A/B/C 切分张量。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "CUTLASS arch：指令级 MMA",
+          "order": 5,
+          "filename": "u2-l5-arch-mma.md",
+          "level": "intermediate",
+          "topic": "讲解 cutlass/arch 与 cute/arch 中的 MMA 指令封装，从 Volta 到 Hopper/Blackwell 的 mma 指令演进。",
+          "learning_goals": [
+            "了解各代架构 MMA 指令（mma/wgmma/umma）的封装",
+            "理解 cute/arch 与 cutlass/arch 的分工",
+            "认识 mma_traits 与硬件指令的映射"
+          ],
+          "source_files": [
+            "include/cutlass/arch/mma.h",
+            "include/cutlass/arch/mma_sm80.h",
+            "include/cute/arch/mma.hpp",
+            "include/cute/atom/mma_traits.hpp"
+          ],
+          "minimal_modules": [
+            "arch 层职责",
+            "各代 MMA 指令封装",
+            "mma_traits 元信息",
+            "arch 与 atom 的衔接"
+          ],
+          "practice_task": "在源码中定位 SM80 的 m16n8k16 指令封装，写一段说明该指令处理的 A/B/C 分块形状与数据类型。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "CUTLASS 2.x GEMM 分层结构",
+          "order": 6,
+          "filename": "u2-l6-gemm-2x-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 CUTLASS 2.x 经典 GEMM 层次：thread→warp→threadblock→device，以及 default_mma_core 的组装逻辑。",
+          "learning_goals": [
+            "理解 2.x GEMM 的四层分解",
+            "掌握 threadblock/warp MMA 的组装方式",
+            "了解 default_mma_core 的配置机制"
+          ],
+          "source_files": [
+            "include/cutlass/gemm/device/gemm.h",
+            "include/cutlass/gemm/threadblock/default_mma.h",
+            "include/cutlass/gemm/threadblock/default_mma_core.h",
+            "include/cutlass/gemm/thread/mma.h"
+          ],
+          "minimal_modules": [
+            "device/kernel/threadblock/warp/thread 四层",
+            "threadblock MMA 组装",
+            "default_mma_core 配置",
+            "2.x 与 3.x 的差异"
+          ],
+          "practice_task": "追踪 cutlass::gemm::device::Gemm 的模板展开，画出 threadblock→warp→thread 的类组合关系图。",
+          "depends_on": [
+            "u1-l6",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "CUTLASS 3.x GEMM 通用模型",
+          "order": 7,
+          "filename": "u2-l7-gemm-3x-universal-model.md",
+          "level": "intermediate",
+          "topic": "讲解 3.x 的 GemmUniversal 模型：kernel（GemmUniversal）+ collective MMA（mainloop）+ epilogue + dispatch_policy 三段式架构。",
+          "learning_goals": [
+            "理解 3.x kernel/collective/epilogue 三段式",
+            "掌握 dispatch_policy 的策略选择机制",
+            "了解 GemmUniversalAdapter 的适配方式"
+          ],
+          "source_files": [
+            "include/cutlass/gemm/kernel/gemm_universal.hpp",
+            "include/cutlass/gemm/dispatch_policy.hpp",
+            "include/cutlass/gemm/device/gemm_universal_adapter.h",
+            "include/cutlass/gemm/kernel/gemm_universal.h"
+          ],
+          "minimal_modules": [
+            "三段式架构总览",
+            "dispatch_policy 策略",
+            "GemmUniversalAdapter",
+            "与 2.x 的本质区别"
+          ],
+          "practice_task": "阅读 dispatch_policy.hpp，列出至少 3 个 MMA 策略 tag（如 KernelTmaWarpSpecialized），并说明它们如何选择 collective 实现。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "CollectiveBuilder 与主循环",
+          "order": 8,
+          "filename": "u2-l8-collective-builder.md",
+          "level": "intermediate",
+          "topic": "讲解 CollectiveBuilder 如何根据数据类型/架构/策略自动组装 collective MMA（主循环），以及 collective_mma 的内部结构。",
+          "learning_goals": [
+            "掌握 CollectiveBuilder 的自动组装机制",
+            "理解 collective MMA 主循环（producer/consumer）",
+            "了解 mainloop 中的 copy 与 gemm 调用"
+          ],
+          "source_files": [
+            "include/cutlass/gemm/collective/collective_builder.hpp",
+            "include/cutlass/gemm/collective/collective_mma.hpp",
+            "include/cutlass/gemm/collective/sm90_mma_tma_warpspecialized.hpp"
+          ],
+          "minimal_modules": [
+            "CollectiveBuilder 参数与推断",
+            "collective_mma 主循环",
+            "producer/consumer 模型",
+            "A/B 分片与拷贝"
+          ],
+          "practice_task": "用 CollectiveBuilder 配置一个 Hopper FP16 GEMM 的 collective MMA，写出其关键模板参数与选择的 collective 文件名。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l9",
+          "title": "Hopper Warp-Specialized GEMM 实战",
+          "order": 9,
+          "filename": "u2-l9-hopper-warp-specialized-gemm.md",
+          "level": "intermediate",
+          "topic": "通过 example 49 讲解如何用 CollectiveBuilder + GemmUniversal 组装并启动一个完整的 Hopper warp-specialized GEMM。",
+          "learning_goals": [
+            "掌握用 CollectiveBuilder 构建完整 Hopper GEMM 的步骤",
+            "理解 warp specialization 在 Hopper 的体现",
+            "了解 epilogue 与 launch 的衔接"
+          ],
+          "source_files": [
+            "examples/49_hopper_gemm_with_collective_builder/49_collective_builder.cu",
+            "include/cutlass/gemm/collective/sm90_mma_tma_warpspecialized.hpp",
+            "include/cutlass/gemm/kernel/gemm_universal.hpp"
+          ],
+          "minimal_modules": [
+            "example 49 的组装流程",
+            "warp specialized 调度",
+            "epilogue builder",
+            "kernel 启动与参数"
+          ],
+          "practice_task": "基于 example 49，将其改为 BF16 输入、FP32 累加的 Hopper GEMM，编译并对照参考实现验证。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l10",
+          "title": "Epilogue 与 EVT 访客树",
+          "order": 10,
+          "filename": "u2-l10-epilogue-evt.md",
+          "level": "intermediate",
+          "topic": "讲解 CUTLASS 的 epilogue 机制，重点介绍 EVT（Epilogue Visitor Tree）如何灵活组合激活、偏置、缩放等后处理。",
+          "learning_goals": [
+            "理解 epilogue collective 的结构",
+            "掌握 EVT 访客树的组合模型",
+            "了解 fusion 目录下 visitor/callback 的作用"
+          ],
+          "source_files": [
+            "include/cutlass/epilogue/collective/sm90_epilogue_tma_warpspecialized.hpp",
+            "include/cutlass/epilogue/fusion/sm90_visitor_tma_warpspecialized.hpp",
+            "include/cutlass/epilogue/fusion/operations.hpp"
+          ],
+          "minimal_modules": [
+            "epilogue collective 概览",
+            "EVT 访客树模型",
+            "fusion visitor 与 callback",
+            "常用 epilogue 融合模式"
+          ],
+          "practice_task": "在 EVT 文档/源码中找到一个 LinearCombination + ReLU 的组合，画出对应的访客树结构并说明数据流向。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：高级架构机制与 CuTe DSL",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Async Pipeline 与 Warp Specialization",
+          "order": 1,
+          "filename": "u3-l1-async-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 Hopper 的异步流水线（cutlass/pipeline）与 warp specialization，如何用 producer/consumer 重叠拷贝与计算。",
+          "learning_goals": [
+            "理解异步流水线的 stage 与缓冲管理",
+            "掌握 warp specialization 的 producer/consumer 分工",
+            "了解 sm90_pipeline 的同步原语"
+          ],
+          "source_files": [
+            "include/cutlass/pipeline/pipeline.hpp",
+            "include/cutlass/pipeline/sm90_pipeline.hpp",
+            "include/cutlass/gemm/collective/sm90_mma_tma_warpspecialized.hpp"
+          ],
+          "minimal_modules": [
+            "异步流水线概念",
+            "多级缓冲与 stage",
+            "producer/consumer 同步",
+            "与 mainloop 的结合"
+          ],
+          "practice_task": "分析 sm90_mma_tma_warpspecialized 的主循环，标注出 producer warp 与 consumer warp 各自执行的 stage 数与等待点。",
+          "depends_on": [
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "TMA 异步张量拷贝",
+          "order": 2,
+          "filename": "u3-l2-tma-copy.md",
+          "level": "advanced",
+          "topic": "讲解 Hopper/Blackwell 的 TMA（Tensor Memory Accelerator）拷贝机制，描述符构造与 TiledCopy。",
+          "learning_goals": [
+            "理解 TMA 描述符（descriptor）的构造",
+            "掌握 cute/arch 中 TMA 拷贝的封装",
+            "了解 TMA 与 swizzled smem 的配合"
+          ],
+          "source_files": [
+            "include/cute/arch/copy_sm90_tma.hpp",
+            "include/cute/atom/copy_traits_sm90_tma.hpp",
+            "include/cute/arch/copy_sm90_desc.hpp"
+          ],
+          "minimal_modules": [
+            "TMA 机制与优势",
+            "TMA 描述符构造",
+            "copy_traits 的 TMA 封装",
+            "TMA + swizzle 共享内存"
+          ],
+          "practice_task": "找到 TMA 描述符的构造代码，写一段说明其如何表达一个多维张量盒（box）与步长，并指出对齐要求。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Tile Scheduling 与 Stream-K",
+          "order": 3,
+          "filename": "u3-l3-tile-scheduling-streamk.md",
+          "level": "advanced",
+          "topic": "讲解 tile scheduler 如何把 GEMM 的输出 tile 分配给 CTA/cluster，以及 Stream-K 模式如何提升尾部利用率。",
+          "learning_goals": [
+            "理解 tile scheduler 的调度策略",
+            "掌握 Stream-K 的分块与跨 CTA 协作",
+            "了解持久化（persistent）内核与 scheduler 的关系"
+          ],
+          "source_files": [
+            "include/cutlass/gemm/kernel/sm90_tile_scheduler.hpp",
+            "include/cutlass/gemm/kernel/sm90_tile_scheduler_stream_k.hpp",
+            "include/cutlass/gemm/kernel/gemm_universal.hpp"
+          ],
+          "minimal_modules": [
+            "tile scheduler 角色",
+            "持久化内核调度",
+            "Stream-K 分块策略",
+            "跨 CTA 归约"
+          ],
+          "practice_task": "对比普通 scheduler 与 Stream-K scheduler 的参数，说明 Stream-K 在哪些问题形状下收益最大。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Grouped 与 Batched GEMM",
+          "order": 4,
+          "filename": "u3-l4-grouped-batched-gemm.md",
+          "level": "advanced",
+          "topic": "讲解一次性处理多个不同形状矩阵乘的 Grouped GEMM 与相同形状的 Batched GEMM 机制与示例。",
+          "learning_goals": [
+            "理解 Grouped GEMM 的 problem shape 数组模型",
+            "掌握 Batched GEMM 的 batch 维处理",
+            "了解 grouped GEMM 的调度与内存布局"
+          ],
+          "source_files": [
+            "examples/24_gemm_grouped/gemm_grouped.cu",
+            "include/cutlass/gemm/device/gemm_grouped.h",
+            "include/cutlass/gemm/kernel/gemm_universal.hpp"
+          ],
+          "minimal_modules": [
+            "Grouped vs Batched 区别",
+            "problem shape 数组",
+            "grouped 调度",
+            "barrier 同步与归约"
+          ],
+          "practice_task": "阅读 example 24，列出 Grouped GEMM 的 arguments 需要提供哪些数组（ptr_A/stride 等），并解释其调度方式。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "隐式 GEMM 卷积",
+          "order": 5,
+          "filename": "u3-l5-implicit-gemm-conv.md",
+          "level": "advanced",
+          "topic": "讲解 CUTLASS 如何把卷积转化为隐式 GEMM，包括 NHWC 布局、problem shape 与 collective conv。",
+          "learning_goals": [
+            "理解隐式 GEMM 的 im2col 思想",
+            "掌握 conv 的 problem shape（N,H,W,C,K 等）",
+            "了解 conv collective 与 GEMM collective 的复用关系"
+          ],
+          "source_files": [
+            "include/cutlass/conv/convolution.h",
+            "include/cutlass/conv/conv2d_problem_size.h",
+            "include/cutlass/conv/collective/sm90_conv_impl.hpp",
+            "include/cutlass/conv/dispatch_policy.hpp"
+          ],
+          "minimal_modules": [
+            "隐式 GEMM 概念",
+            "NHWC 布局与 problem shape",
+            "im2col 拷贝",
+            "conv collective 复用"
+          ],
+          "practice_task": "给定一个 conv2d 的 N/H/W/C/K/R/S，计算其等价 GEMM 的 (M,N,K)，并说明哪些维度来自 im2col。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "低精度与 Block-Scaled 类型",
+          "order": 6,
+          "filename": "u3-l6-low-precision-blockscale.md",
+          "level": "advanced",
+          "topic": "讲解 FP8、NVFP4/MXFP 等 block-scaled 数据类型及其在 GEMM 中的缩放因子处理。",
+          "learning_goals": [
+            "理解 FP8/NVFP4 等窄精度类型的表示",
+            "掌握 block scaling（逐块缩放因子）机制",
+            "了解 narrow precision GEMM 的 collective 选择"
+          ],
+          "source_files": [
+            "examples/72_blackwell_narrow_precision_gemm/narrow_precision_gemm.cu",
+            "include/cutlass/gemm/collective/sm100_blockscaled_mma_warpspecialized.hpp",
+            "include/cutlass/float8.h",
+            "include/cutlass/numeric_conversion.h"
+          ],
+          "minimal_modules": [
+            "FP8/FP4 表示",
+            "block scaling 因子",
+            "narrow precision collective",
+            "缩放因子加载与反量化"
+          ],
+          "practice_task": "阅读 example 72，说明 NVFP4 输入时缩放因子（scale tensor）的形状如何与 GEMM 分块对齐。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "Blackwell SM100 集体 GEMM",
+          "order": 7,
+          "filename": "u3-l7-blackwell-sm100-gemm.md",
+          "level": "advanced",
+          "topic": "讲解 Blackwell SM100 的 GEMM 集体实现，包括 UMMA 指令、TMEM、cluster 与分布式共享内存。",
+          "learning_goals": [
+            "理解 SM100 UMMA 指令与 tensor memory（TMEM）",
+            "掌握 Blackwell collective MMA 的结构",
+            "了解 cluster 与分布式 GEMM 的扩展"
+          ],
+          "source_files": [
+            "examples/70_blackwell_gemm/blackwell_gemm.cu",
+            "include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp",
+            "include/cute/arch/mma_sm100_umma.hpp",
+            "include/cute/arch/tmem_allocator_sm100.hpp"
+          ],
+          "minimal_modules": [
+            "UMMA 与 TMEM",
+            "Blackwell collective 结构",
+            "cluster 调度",
+            "分布式 GEMM 扩展点"
+          ],
+          "practice_task": "对比 SM90 与 SM100 collective 的 producer/consumer 结构，指出 TMEM 在 SM100 中取代了哪个角色。",
+          "depends_on": [
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l8",
+          "title": "CUTLASS Profiler 与实例库",
+          "order": 8,
+          "filename": "u3-l8-profiler-instance-library.md",
+          "level": "advanced",
+          "topic": "讲解 cutlass_profiler 命令行工具与 tools/library 实例库如何自动生成与调优大量内核。",
+          "learning_goals": [
+            "掌握 cutlass_profiler 的使用与过滤选项",
+            "理解 CUTLASS_LIBRARY_KERNELS 的作用",
+            "了解实例库的代码生成机制"
+          ],
+          "source_files": [
+            "README.md",
+            "tools/library/CMakeLists.txt",
+            "python/cutlass_library/gemm_math.py",
+            "tools/profiler/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "profiler 用法",
+            "kernel 过滤与命名规则",
+            "实例库生成",
+            "选择性编译以减少耗时"
+          ],
+          "practice_task": "用 CUTLASS_LIBRARY_KERNELS 过滤只编译一类 FP16 GEMM 内核，并用 cutlass_profiler 测量其 GFLOP/s。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "CuTe DSL（Python）：布局与张量",
+          "order": 9,
+          "filename": "u3-l9-cute-dsl-layout.md",
+          "level": "advanced",
+          "topic": "讲解 Python 版 CuTe DSL 的 Layout/Tensor 抽象，以及如何用 Python 表达与 C++ CuTe 一致的概念。",
+          "learning_goals": [
+            "理解 CuTe DSL 的 Python Layout/Tensor API",
+            "掌握 DSL 与 C++ CuTe 概念的一致性",
+            "了解 DSL 的编译与运行模型"
+          ],
+          "source_files": [
+            "python/CuTeDSL/cutlass/cute/layout.py",
+            "python/CuTeDSL/cutlass/cute/tensor.py",
+            "examples/python/CuTeDSL/cute/notebooks/cute_layout_algebra.ipynb",
+            "examples/python/CuTeDSL/cute/notebooks/hello_world.ipynb"
+          ],
+          "minimal_modules": [
+            "DSL 概述与运行模型",
+            "Python Layout",
+            "Python Tensor",
+            "与 C++ CuTe 对照"
+          ],
+          "practice_task": "运行 hello_world.ipynb，并用 Python DSL 构造一个 (4,4):(1,4) 的 Layout，验证其索引映射与 C++ 一致。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "CuTe DSL（Python）：GEMM 实践",
+          "order": 10,
+          "filename": "u3-l10-cute-dsl-gemm.md",
+          "level": "advanced",
+          "topic": "讲解如何用 Python CuTe DSL 编写一个完整的 GEMM 内核，结合 atom、TiledCopy 与 launch。",
+          "learning_goals": [
+            "掌握用 DSL 组装 GEMM 主循环的步骤",
+            "理解 DSL 中的 atom 与 TiledMma 用法",
+            "了解 DSL 内核的编译、launch 与 autotune"
+          ],
+          "source_files": [
+            "examples/python/CuTeDSL/cute/hopper/kernel/dense_gemm/dense_gemm.py",
+            "examples/python/CuTeDSL/cute/ampere/tutorial/elementwise_add_autotune.py",
+            "python/CuTeDSL/cutlass/cute/atom.py",
+            "python/CuTeDSL/cutlass/cute/algorithm.py"
+          ],
+          "minimal_modules": [
+            "DSL GEMM 主循环",
+            "atom 与 TiledMma/TiledCopy",
+            "launch 与 shared memory",
+            "autotune 调优"
+          ],
+          "practice_task": "阅读 dense_gemm.py，标注其 mainloop 中的拷贝与乘加步骤，并尝试修改 tile shape 重新运行对比性能。",
+          "depends_on": [
+            "u3-l9",
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
