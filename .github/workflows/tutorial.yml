@@ -60,7 +60,7 @@ jobs:
     # Runner：默认 GitHub 官方 ubuntu-latest。
     # 选 runner=self-hosted 时读变量 RC_RUNNER_LABELS（JSON 数组，如 ["self-hosted","<runner-id>"]），未设回退 ["self-hosted"]。
     runs-on: ${{ inputs.runner == 'self-hosted' && fromJSON(vars.RC_RUNNER_LABELS || '["self-hosted"]') || 'ubuntu-latest' }}
-    timeout-minutes: 360
+    timeout-minutes: 288
     steps:
       - uses: actions/checkout@v6
         with:
@@ -141,7 +141,7 @@ jobs:
           RC_PLANNER_MAX_BUDGET_USD: ${{ vars.RC_PLANNER_MAX_BUDGET_USD || '3.00' }}
           RC_BACKOFF_SEC: ${{ vars.RC_BACKOFF_SEC || '0' }}
           RC_MAX_RETRIES: ${{ vars.RC_MAX_RETRIES || '5' }}
-          RC_RUN_DEADLINE_MIN: ${{ vars.RC_RUN_DEADLINE_MIN || '330' }} # 软截止：到点干净 exit 75，给 commit/publish 留余量、防硬超时丢进度
+          RC_RUN_DEADLINE_MIN: ${{ vars.RC_RUN_DEADLINE_MIN || '270' }} # 软截止：到点干净 exit 75，给 commit/publish 留余量、防硬超时丢进度
           RC_DEADZONE_UTC_START: ${{ vars.RC_DEADZONE_UTC_START || '6' }}
           RC_DEADZONE_UTC_END: ${{ vars.RC_DEADZONE_UTC_END || '10' }}
           RC_DEADZONE_SOFT_MARGIN_MIN: ${{ vars.RC_DEADZONE_SOFT_MARGIN_MIN || '30' }}

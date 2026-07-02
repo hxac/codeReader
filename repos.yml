@@ -8,8 +8,10 @@
 #   folders 可选，子目录拆分：字符串列表，如 [clang, cmake, libc]。配上后该仓库不再整体处理，
 #           而是把每个子目录展开成一个独立的头等项目（共享同一份 clone，但各自独立规划/生成/
 #           续传/发布）。适合 llvm/llvm-project 这种 LLM 不会自动细分的巨型 monorepo。
-#           每个 folder 的 project 自动取 {project}-{folder}，state key 为 name@folder，
-#           claude 直接在该子目录里跑（CWD 落子目录），只看得到该子目录。仅支持一级子目录。
+#           ⦿ "self" = 整仓条目（project 取 base 名，无后缀），让你在拆分的同时保留一份整体讲义。
+#           ⦿ 其他值 = 子目录路径，支持多级（如 scipy/cluster）。project 自动取 {project}-{folder}，
+#             state key 为 name@folder，CWD 落到该子目录。多级路径中的 / 在 project 名里净化成 -。
+#           ⦿ 只有被列出的子目录才会生成讲义；没列出的、不想逐个拆的，配 "self" 即可按整仓对待。
 repos:
   - name: kvcache-ai/Mooncake
   - name: HazyResearch/Megakernels
@@ -36,6 +38,28 @@ repos:
   - name: agerasev/ringbuf
   - name: longbridge/rust-i18n
   - name: scipy/scipy
+    folders:
+      [
+        "self",
+        "scipy/cluster",
+        "scipy/constants",
+        "scipy/datasets",
+        "scipy/differentiate",
+        "scipy/fft",
+        "scipy/fftpack",
+        "scipy/integrate",
+        "scipy/interpolate",
+        "scipy/io",
+        "scipy/linalg",
+        "scipy/misc",
+        "scipy/ndimage",
+        "scipy/optimize",
+        "scipy/signal",
+        "scipy/sparse",
+        "scipy/spatial",
+        "scipy/special",
+        "scipy/stats",
+      ]
   - name: latex-lsp/texlab.wiki
   - name: Distributed-EPFL/tokio-udt
   - name: EttusResearch/uhd
@@ -49,10 +73,21 @@ repos:
   - name: chipsalliance/chisel
   - name: google-coral/coralnpu
   - name: crossbeam-rs/crossbeam
+    folders:
+      [
+        "self",
+        "crossbeam-channel",
+        "crossbeam-deque",
+        "crossbeam-epoch",
+        "crossbeam-queue",
+        "crossbeam-skiplist",
+        "crossbeam-utils",
+      ]
   - name: NVlabs/cuda-oxide
   - name: NVIDIA/cuda-tile
   - name: nvidia/cutile-python
   - name: NVIDIA/cutlass
+  - name: NVIDIA/cuda-quantum
   - name: deepseek-ai/DeepEP
   - name: abdelazeem201/Design-and-ASIC-Implementation-of-32-Point-FFT-Processor
   - name: antirez/ds4
@@ -87,6 +122,22 @@ repos:
   - name: NJU-ProjectN/nemu
   - name: nginx/nginx
   - name: numpy/numpy
+    folders:
+      [
+        "self",
+        "numpy/char",
+        "numpy/core",
+        "numpy/ctypeslib",
+        "numpy/fft",
+        "numpy/lib",
+        "numpy/ma",
+        "numpy/matrixlib",
+        "numpy/polynomial",
+        "numpy/random",
+        "numpy/rec",
+        "numpy/strings",
+        "numpy/typing",
+      ]
   - name: jbush001/NyuziProcessor
   - name: open-logic/open-logic
   - name: open-logic/en_cl_fix
@@ -108,7 +159,6 @@ repos:
   - name: paulscherrerinstitute/TbGenerator
   - name: paulscherrerinstitute/PsiSim
   - name: paulscherrerinstitute/en_cl_fix
-    project: en_cl_fix-psi # 与 open-logic/en_cl_fix 同名仓，改名避免 <Project>-tutorial 目录冲突
   - name: paulscherrerinstitute/psi_common
   - name: paulscherrerinstitute/psi_fix
   - name: paulscherrerinstitute/psi_multi_stream_daq
@@ -129,6 +179,15 @@ repos:
   - name: hkust-zhiyao/RTL-Coder
   - name: alan-turing-institute/sar-vessel-detection-fpga
   - name: sgl-project/sglang
+    folders:
+      [
+        "self",
+        "sgl-kernel",
+        "sgl-model-gateway",
+        "rust/sglang-grpc",
+        "python/sglang",
+        "benchmark",
+      ]
   - name: sgl-project/mini-sglang
   - name: sgl-project/sgl-learning-materials
   - name: sgl-project/SpecForge
@@ -157,13 +216,35 @@ repos:
   - name: Jiayi-Pan/TinyZero
   - name: huggingface/transformers
   - name: triton-lang/triton
+  - name: triton-lang/triton-ascend
+  - name: triton-lang/Triton-to-tile-IR
   - name: typst/typst
   - name: THU-DSP-LAB/ventus-gpgpu
   - name: THU-DSP-LAB/ventus-gpgpu-verilog
-  - name: THU-DSP-LAB/llvm-project
+  - name: llvm/llvm-project
+    folders:
+      [
+        "self",
+        "clang",
+        "libc",
+        "llvm",
+        "mlir",
+        "lldb",
+        "lld",
+        "compiler-rt",
+        "libunwind",
+        "polly",
+        "bolt",
+        "offload",
+        "orc-rt",
+      ]
   - name: alexforencich/verilog-ethernet
   - name: vllm-project/vllm
   - name: vllm-project/vllm-omni
+  - name: vllm-project/aibrix
+  - name: vllm-project/semantic-router
+  - name: vllm-project/llm-compressor
+  - name: vllm-project/vllm-ascend
   - name: vortexgpgpu/vortex
   - name: chili-chips-ba/wireguard-fpga
   - name: WireGuard/wireguard-rs
@@ -176,11 +257,9 @@ repos:
   - name: Dao-AILab/quack
   - name: blueberrycongee/codemirror-live-markdown
   - name: analogdevicesinc/hdl
-    project: adi_hdl
   - name: https://gitlab.upt.ro/elisei.ilies/CIC-filters.git
   - name: ahmedshahein/DSP-RTL-Lib
   - name: enclustra/en_cl_fix
-    project: enclustra_en_cl_fix # 与 open-logic/en_cl_fix 同 IP 核的另一 fork，改名避撞
   - name: benreynwar/fft-dit-fpga
   - name: AUDIY/FIR_x2
   - name: guanjiess/fpga-fft
@@ -224,3 +303,45 @@ repos:
   - name: deepseek-ai/DreamCraft3D
   - name: deepseek-ai/EPLB
   - name: deepseek-ai/profile-data
+  - name: https://code.haverbeke.berlin/codemirror/dev.git
+  - name: zed-industries/zed
+    folders:
+      [
+        "self",
+        "crates/zed",
+        "crates/editor ",
+        "crates/rope",
+        "crates/multi_buffer",
+        "crates/text",
+        "crates/buffer_diff",
+        "crates/streaming_diff",
+        "crates/sum_tree",
+        "crates/gpui",
+        "crates/component",
+        "crates/lsp",
+        "crates/ui",
+        "crates/gpui_wgpu",
+        "crates/gpui_platform",
+        "crates/gpui_web",
+        "crates/gpui_shared_string",
+        "crates/gpui_util",
+        "crates/gpui_tokio",
+        "crates/gpui_macros",
+        "crates/ui_input",
+        "crates/markdown_preview",
+        "crates/ui_macros",
+        "crates/sidebar",
+        "crates/picker",
+        "crates/editor",
+        "crates/rope",
+      ]
+  - name: https://gitcode.com/ascend-tribe/openPangu-2.0-Op
+    folders: ["inference", "training"]
+  - name: https://gitcode.com/ascend-tribe/openPangu-2.0-Infer
+  - name: mlc-ai/modern-gpu-programming-for-mlsys
+  - name: mlc-ai/web-llm
+  - name: OpenBitSys/BitDecoding
+  - name: hw-native-sys/pto-isa
+  - name: hw-native-sys/pypto
+  - name: oomol-lab/pdf-craft
+  - name: ai-dynamo/dynamo
