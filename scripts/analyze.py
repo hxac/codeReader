@@ -702,17 +702,20 @@ def load_repos() -> list[Repo]:
         focus = (item.get("focus") or "").strip()
         folders = item.get("folders") or []
         if folders:
-            # 子目录拆分：每个 folder 展开成一个独立的头等 fleet 条目（self 标记 subpath 非空），
-            # 共享父仓库的 clone，各自只处理 clone 内该子目录。配了 folders 就不再发整仓条目。
+            # 子目录拆分：每个 folder 展开成一个独立的头等 fleet 条目。
+            # self → 整仓条目（subpath=""，project 取 base 名，不拼 "-self" 后缀）。
+            # 其他值作为子目录路径（支持多级如 scipy/cluster），project 中 / 净化成 -。
             for f in folders:
                 f = (str(f) or "").strip().strip("/")
                 if not f:
                     continue
-                if "/" in f:
-                    log(f"WARN 跳过嵌套子目录 {f!r}（{name} 的 folders v1 仅支持一级子目录）")
-                    continue
-                repos.append(Repo(name=name, url=url, branch=branch,
-                                  project=f"{project}-{f}", focus=focus, subpath=f))
+                if f == "self":
+                    repos.append(Repo(name=name, url=url, branch=branch,
+                                      project=project, focus=focus, subpath=""))
+                else:
+                    subproj = f.replace("/", "-")
+                    repos.append(Repo(name=name, url=url, branch=branch,
+                                      project=f"{project}-{subproj}", focus=focus, subpath=f))
         else:
             repos.append(Repo(name=name, url=url, branch=branch,
                               project=project, focus=focus, subpath=""))
