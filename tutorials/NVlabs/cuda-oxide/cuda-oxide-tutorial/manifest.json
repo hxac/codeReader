@@ -1,7 +1,7 @@
 {
   "project": "cuda-oxide",
-  "head": "52e7078d255e1b085566095c39f5c8a697b5125f",
-  "rationale": "cuda-oxide 是一个把纯 Rust 单源编译到 CUDA PTX 的自定义 rustc 后端，横跨\"编译器、宿主运行时、设备端 intrinsics\"三大领域，因此学习顺序按\"先会跑、再会写、再懂原理、最后能扩展\"四段递进设计。U1（入门）让读者建立项目定位与端到端流水线直觉，并能用 cargo oxide 跑通 vecadd。U2/U3（进阶）进入设备端编程与宿主运行时两条主线，覆盖 #[kernel] 宏、类型安全的线程索引、共享内存/同步、设备内存搬运、同步与异步启动。U4（进阶）给出编译流水线的整体地图（Rust MIR→dialect-mir→LLVM dialect→LLVM IR→PTX），作为连接\"使用者\"与\"实现者\"的桥梁。U5（专家）聚焦 Hopper/Blackwell 高级设备能力：warp 级编程、作用域原子、异步屏障与异步拷贝、集群与分布式共享内存、TMA、WGMMA/tcgen05 矩阵乘加速器。U6（专家）深潜编译器各阶段并给出\"端到端新增一个 intrinsic\"的扩展模板。U7（专家）收束于测试、调试与工程化：compile_fail 安全契约、cuda-gdb 调试、符号命名/制品嵌入契约、差分模糊测试。讲义间通过 depends_on 形成清晰依赖链——设备端进阶都依赖 U2 的内核与索引安全；编译器深潜都依赖 U4 的流水线地图；扩展类讲义依赖对应的实现层讲义。大型项目拆成 7 单元 35 篇，逻辑优先于数量。",
+  "head": "2b713541cb572517b4932a50b4f4087ffb66203d",
+  "rationale": "本次增量更新覆盖 5 个 commit（#321–#326）：新增 cargo oxide sanitize 子命令（NVIDIA Compute Sanitizer）、打包原子加法 f16x2/bf16x2、bf16 m16n8k16 与 f64 m8n8k4 张量核 mma.sync intrinsic，并在设备 codegen 全链路贯通 --no-fmad（CUDA_OXIDE_NO_FMA），同时把 .oxart 制品升级到 v2 并新增 compile-options/FMA-contraction 策略。据此对已有讲义定级：U1 入门层仅 u1-l3（新增 sanitize 子命令）与 u1-l5（新增 packed_atomic_add 示例与 bf16/f64 mma intrinsic）需 update，u1-l1/u1-l2/u1-l4 keep；U2 设备编程 6 篇均未受影响 keep；U3 中 u3-l1 keep，u3-l2 因 .oxart 制品 v2 + compile-options 核心模型变化而 update。u3-l3、u3-l4 及 U4–U7 共 20 篇在上一版 manifest（于 u4-l1 处截断）中从未生成，本次补全为 new：U4 给出编译流水线地图（入口分流、MIR 导入、MLIR 方言层、lowering、NVVM→cubin/LTOIR 与 FMA 契约）；U5 聚焦 Hopper/Blackwell 高级设备能力并纳入本轮新增的打包原子与 bf16/f64 mma intrinsic；U6 深潜各编译阶段（含 #326 FMA 收缩）并以\\\"端到端新增 intrinsic\\\"模板收束（以 #321/#322/#323 为范本）；U7 收束于 compile_fail 安全契约、cuda-gdb、新增的 Compute Sanitizer 子命令与差分模糊测试。讲义间依赖：U5/U6 深潜均依赖 U4 地图，扩展类依赖对应实现层，调试类依赖 U1-L3 工具链；整体维持 7 单元 35 篇结构不变，逻辑优先于数量。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 与 rustc-codegen-cuda/src/lib.rs 顶部的 ASCII 架构图，用自己的话写出一段 Rust 代码从源码到 GPU PTX 经过的阶段，并标注哪些属于 host、哪些属于 device。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -41,7 +41,7 @@
           "order": 2,
           "filename": "u1-l2-workspace-and-crate-map.md",
           "level": "beginner",
-          "topic": "解析 workspace 成员与三层 crate 划分：用户层（cuda-device/cuda-core/cuda-async/cuda-host/cuda-macros）、编译器层（dialect-mir/mir-importer/mir-lower 等）、工具层（cargo-oxide），并说明为何 rustc-codegen-cuda 不在 workspace 内。",
+          "topic": "解析 workspace 成员与三层 crate 划分：用户层（cuda-device/cuda-core/cuda-async/cuda-host/cuda-macros）、编译器层（dialect-mir/dialect-nvvm/mir-importer/mir-lower/mir-transforms/nvvm-transforms 等）、工具层（cargo-oxide），并说明为何 rustc-codegen-cuda 不在 workspace 内。",
           "learning_goals": [
             "说出每个 workspace 成员 crate 的职责",
             "区分用户层、编译器层、工具层三类 crate",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -69,10 +69,10 @@
           "order": 3,
           "filename": "u1-l3-toolchain-and-cargo-oxide.md",
           "level": "beginner",
-          "topic": "讲解固定的 nightly 工具链与 CUDA/LLVM/clang 依赖，以及 cargo-oxide 子命令（run/build/pipeline/doctor/new/setup）如何驱动整个构建流程，并介绍 codegen 后端的发现顺序与 CUDA_OXIDE_* 环境变量。",
+          "topic": "讲解固定的 nightly 工具链与 CUDA/LLVM/clang 依赖，以及 cargo-oxide 子命令（run/build/pipeline/doctor/new/setup/debug/sanitize）如何驱动整个构建流程，并介绍 codegen 后端的发现顺序与 CUDA_OXIDE_* 环境变量；本轮新增 sanitize 子命令（SanitizerTool：memcheck/racecheck/initcheck/synccheck）。",
           "learning_goals": [
             "了解工具链与外部依赖要求",
-            "掌握 cargo-oxide 各子命令的用途",
+            "掌握 cargo-oxide 各子命令（含 debug 与 sanitize）的用途",
             "理解 backend 发现顺序与环境变量配置"
           ],
           "source_files": [
@@ -85,13 +85,14 @@
             "rust-toolchain.toml 工具链",
             "cargo-oxide CLI 与子命令",
             "doctor/setup 环境校验",
-            "backend 发现与 CUDA_OXIDE_* 变量"
+            "backend 发现与 CUDA_OXIDE_* 变量",
+            "sanitize 子命令与 SanitizerTool"
           ],
-          "practice_task": "运行 `cargo oxide doctor`（或阅读其逻辑）列出本机缺失的前置依赖；再用 `cargo oxide new hello && cargo oxide run` 走通最小示例。",
+          "practice_task": "运行 `cargo oxide doctor`（或阅读其逻辑）列出本机缺失的前置依赖；再用 `cargo oxide new hello && cargo oxide run` 走通最小示例，并尝试 `cargo oxide sanitize hello --tool memcheck`。",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u1-l4",
@@ -120,7 +121,7 @@
             "u1-l2",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -128,7 +129,7 @@
           "order": 5,
           "filename": "u1-l5-examples-tour.md",
           "level": "beginner",
-          "topic": "用 examples/ 目录里 60+ 示例勾勒能力边界——泛型/闭包、原子、集群、异步、Blackwell 张量核、GEMM SoL、设备 FFI 等，帮读者选定后续学习方向。",
+          "topic": "用 examples/ 目录里 60+ 示例勾勒能力边界——泛型/闭包、原子、集群、异步、张量核（含本轮新增的 bf16 m16n8k16、f64 m8n8k4 mma.sync）、GEMM SoL、设备 FFI、打包原子加法（packed_atomic_add）等，帮读者选定后续学习方向。",
           "learning_goals": [
             "了解 examples 目录的组织与硬件要求",
             "建立项目能力矩阵的总体印象",
@@ -138,19 +139,21 @@
             "README.md",
             "crates/rustc-codegen-cuda/examples/async_vecadd/src/main.rs",
             "crates/rustc-codegen-cuda/examples/atomics/src/main.rs",
-            "crates/rustc-codegen-cuda/examples/cluster/src/main.rs"
+            "crates/rustc-codegen-cuda/examples/cluster/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/packed_atomic_add/src/main.rs"
           ],
           "minimal_modules": [
             "examples 目录与 README 示例表",
             "能力矩阵概览",
             "硬件要求（sm_xx）",
-            "选型指引"
+            "选型指引",
+            "packed_atomic_add 等新增示例"
           ],
-          "practice_task": "挑选 3 个示例，分别用 `cargo oxide build`（无需 GPU）确认能编译，并为每个示例写一句话总结其演示的能力。",
+          "practice_task": "挑选 3 个示例（建议含 packed_atomic_add），分别用 `cargo oxide build`（无需 GPU）确认能编译，并为每个示例写一句话总结其演示的能力。",
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -187,7 +190,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -216,7 +219,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -245,7 +248,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -274,7 +277,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -303,7 +306,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l6",
@@ -333,7 +336,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -371,7 +374,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -379,11 +382,12 @@
           "order": 2,
           "filename": "u3-l2-module-loading-and-embedded-artifacts.md",
           "level": "intermediate",
-          "topic": "讲解编译期把 PTX 打包成 .oxart 制品段、链接锚符号防止被 dead-strip、运行时 cuda-host 从当前可执行文件中发现并加载内嵌 bundle 的全过程。",
+          "topic": "讲解编译期把 PTX 打包成 .oxart 制品段、链接锚符号防止被 dead-strip、运行时 cuda-host 从当前可执行文件中发现并加载内嵌 bundle 的全过程；本轮 .oxart 升级到 v2，新增 ArtifactCompileOptions（FMA 收缩策略）与 .options/.target 边车文件，并保持对 v1 的向后兼容。",
           "learning_goals": [
             "理解 .oxart 制品 wire 格式与 entry 记录",
             "说明锚符号如何防止 lib crate 的 bundle 被裁剪",
-            "追踪运行时 bundle 发现与加载流程"
+            "追踪运行时 bundle 发现与加载流程",
+            "理解 v2 制品的 compile-options/FMA-contraction 策略"
           ],
           "source_files": [
             "crates/cuda-host/src/embedded.rs",
@@ -392,17 +396,18 @@
             "crates/rustc-codegen-cuda/src/lib.rs"
           ],
           "minimal_modules": [
-            ".oxart bundle 格式",
+            ".oxart bundle 格式（v1/v2）",
             "artifact 锚符号",
             "运行时 bundle 发现",
-            "load_embedded_module"
+            "load_embedded_module",
+            "ArtifactCompileOptions 与 FMA 边车"
           ],
-          "practice_task": "用 `cargo oxide pipeline vecadd` 找到生成的 .oxart/.ll，对照 oxide-artifacts 的 bundle 格式说明，指出 PTX payload 与 entry 记录分别在哪里。",
+          "practice_task": "用 `cargo oxide pipeline vecadd` 找到生成的 .oxart/.ll/.options，对照 oxide-artifacts 的 bundle 格式说明，指出 PTX payload、entry 记录与 compile-options 字段分别在哪里，并解释 v2 为何在默认策略下仍写 v1。",
           "depends_on": [
             "u2-l1",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l3",
@@ -478,7 +483,632 @@
           "order": 1,
           "filename": "u4-l1-backend-entry-and-split.md",
           "level": "intermediate",
-          "topic": "解析 __rustc_codegen_backend 入口、CudaCodegenBackend 如何包装 rustc_codegen_llvm，以及 codegen_crate 如何按"
+          "topic": "解析 __rustc_codegen_backend 入口、CudaCodegenBackend 如何包装 rustc_codegen_llvm，以及 codegen_crate 如何按 host/device 分流：宿主代码走标准 LLVM 后端，device 代码（带 #[device]/#[kernel] 标记）交给 cuda-oxide 流水线。",
+          "learning_goals": [
+            "理解 __rustc_codegen_backend 入口的发现与加载",
+            "说明 CudaCodegenBackend 如何委托给 rustc_codegen_llvm",
+            "追踪 codegen_crate 的 host/device 分流决策"
+          ],
+          "source_files": [
+            "crates/rustc-codegen-cuda/src/lib.rs",
+            "crates/rustc-codegen-cuda/src/device_codegen.rs"
+          ],
+          "minimal_modules": [
+            "__rustc_codegen_backend 入口",
+            "CudaCodegenBackend 包装",
+            "codegen_crate 分流",
+            "device_codegen 设备路径入口"
+          ],
+          "practice_task": "在 rustc-codegen-cuda/src/lib.rs 中定位 host 与 device 分流的位置，画出一颗 crate 中普通函数与 #[kernel] 函数分别进入哪条代码生成路径。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "MIR 导入器鸟瞰：rustc MIR → Pliron IR",
+          "order": 2,
+          "filename": "u4-l2-mir-importer-overview.md",
+          "level": "intermediate",
+          "topic": "鸟瞰 mir-importer 如何把 rustc 的 MIR（基本块、语句、终止符）翻译成基于 Pliron 的 dialect-mir IR，介绍 pipeline.rs 的整体阶段与 translator 的 values/rvalue/terminator 分工。",
+          "learning_goals": [
+            "理解 MIR → Pliron(dialect-mir) 的总体翻译流程",
+            "认识 translator 对 values/rvalue/terminator 的分层处理",
+            "了解 mir-importer 如何衔接 rustc 内部数据结构与编译器中间层"
+          ],
+          "source_files": [
+            "crates/mir-importer/src/lib.rs",
+            "crates/mir-importer/src/pipeline.rs",
+            "crates/mir-importer/src/translator/mod.rs"
+          ],
+          "minimal_modules": [
+            "mir-importer pipeline 阶段",
+            "translator 分层",
+            "MIR 基本块映射",
+            "Pliron IR 载体"
+          ],
+          "practice_task": "用 `cargo oxide pipeline vecadd` 找到 mir-importer 产出的 dialect-mir 中间文件，对照 pipeline.rs 说明它经过了哪几个翻译阶段。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "MLIR 方言层：dialect-mir 与 dialect-nvvm",
+          "order": 3,
+          "filename": "u4-l3-mlir-dialect-layer.md",
+          "level": "intermediate",
+          "topic": "介绍 cuda-oxide 的两层 MLIR 风格方言：dialect-mir（高层、贴近 Rust 语义的算术/聚合/控制流/函数等 op）与 dialect-nvvm（贴近 PTX/NVVM 的原子、warp、tma、wgmma、tcgen05 等 op），以及它们如何承载从 Rust 语义到 GPU 指令的过渡。",
+          "learning_goals": [
+            "区分 dialect-mir 与 dialect-nvvm 两层方言的定位",
+            "认识各层典型 op（arithmetic/memory/control_flow vs atomic/warp/tma）",
+            "理解方言切换在整个流水线中的位置"
+          ],
+          "source_files": [
+            "crates/dialect-mir/src/lib.rs",
+            "crates/dialect-mir/src/ops/mod.rs",
+            "crates/dialect-nvvm/src/lib.rs",
+            "crates/dialect-nvvm/src/ops/mod.rs"
+          ],
+          "minimal_modules": [
+            "dialect-mir ops 概览",
+            "dialect-nvvm ops 概览",
+            "两层方言的职责分工",
+            "方言切换时机"
+          ],
+          "practice_task": "在 dialect-mir/ops 与 dialect-nvvm/ops 各挑 3 个 op，说明哪些是 Rust 语义级、哪些直接对应 PTX 指令，并解释为何要分两层。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "MIR Lowering 鸟瞰：dialect → LLVM IR → PTX/NVVM",
+          "order": 4,
+          "filename": "u4-l4-mir-lowering-overview.md",
+          "level": "intermediate",
+          "topic": "鸟瞰 mir-lower 如何把 dialect IR lowering 成 LLVM IR（或 NVVM IR），介绍 context/lowering/convert 的分层、ops 与 intrinsics 两类转换入口，以及产出 .ptx 或 .ll 的分叉。",
+          "learning_goals": [
+            "理解 mir-lower 的整体 lowering 流程",
+            "区分 ops 转换（arithmetic/memory/control_flow）与 intrinsics 转换",
+            "认识 .ptx 与 NVVM .ll 两种产物的分叉条件"
+          ],
+          "source_files": [
+            "crates/mir-lower/src/lib.rs",
+            "crates/mir-lower/src/lowering.rs",
+            "crates/mir-lower/src/context.rs",
+            "crates/mir-lower/src/convert/mod.rs"
+          ],
+          "minimal_modules": [
+            "mir-lower 流程",
+            "context 与 lowering",
+            "ops/intrinsics 两类转换",
+            "PTX vs NVVM IR 分叉"
+          ],
+          "practice_task": "对照 mir-lower/src/lib.rs 的入口，写出一行 Rust 加法从 dialect op 到 LLVM IR 指令经过的 convert 调用路径。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "从 NVVM IR 到 cubin：libNVVM + nvJitLink + libdevice（含 FMA 契约）",
+          "order": 5,
+          "filename": "u4-l5-nvvm-to-cubin-ltoir.md",
+          "level": "intermediate",
+          "topic": "讲解当内核用到浮点数学 intrinsic（sin/cos/exp 等）时，cuda-oxide 如何 lowering 成 __nv_* libdevice 调用、产出 NVVM IR(.ll) 而非 .ptx，并跳过 llc；随后由 cuda-host 经 libNVVM 编译为 LTOIR、由 nvJitLink 链接成 cubin；并讲解贯穿全链路的 FMA 收缩策略（--no-fmad / CUDA_OXIDE_NO_FMA）与制品 compile-options 边车如何保证最终机器码遵守期望的浮点契约。",
+          "learning_goals": [
+            "理解 NVVM IR/LTOIR/cubin 链路与 libdevice 的角色",
+            "掌握 libNVVM + nvJitLink 的两阶段链接",
+            "理解 FMA 收缩策略如何从 codegen 传递到制品并约束最终 codegen"
+          ],
+          "source_files": [
+            "crates/cuda-host/src/ltoir.rs",
+            "crates/rustc-codegen-cuda/src/lib.rs",
+            "crates/oxide-artifacts/src/lib.rs",
+            "crates/rustc-codegen-cuda/examples/device_ffi_test/src/main.rs"
+          ],
+          "minimal_modules": [
+            "NVVM IR 与 libdevice",
+            "libNVVM→LTOIR",
+            "nvJitLink→cubin",
+            "FMA 收缩策略与 compile-options 边车"
+          ],
+          "practice_task": "选一个使用 libdevice 数学函数的示例（如 libm_math 或 mathdx_ffi_test），用 `cargo oxide pipeline` 找到产出 .ll 而非 .ptx 的证据，并说明 FMA 策略如何随制品传递到最终 cubin。",
+          "depends_on": [
+            "u4-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：高级设备能力",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Warp 级编程：shuffle、lanemask、投票与归约",
+          "order": 1,
+          "filename": "u5-l1-warp-level-programming.md",
+          "level": "advanced",
+          "topic": "深入 warp 级原语：跨 lane 的 shuffle 数据交换、lanemask 与 warp 投票（ballot/any/all）、以及基于 shuffle 的 warp 内归约/扫描，结合 warp.rs 与 shuffle_64/warp_reduce/lanemask_scan 示例。",
+          "learning_goals": [
+            "使用 warp shuffle 在 lane 间交换寄存器值",
+            "理解 lanemask 与 warp 投票原语",
+            "用 shuffle 实现 warp 级归约与扫描"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/warp.rs",
+            "crates/rustc-codegen-cuda/examples/shuffle_64/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/warp_reduce/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/lanemask_scan/src/main.rs"
+          ],
+          "minimal_modules": [
+            "warp shuffle",
+            "lanemask 与投票",
+            "warp 归约",
+            "warp 扫描"
+          ],
+          "practice_task": "基于 warp_reduce 示例，用 shuffle 实现一个 warp 内的 max 归约，并说明为何不需要共享内存。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "作用域原子与打包原子（f16x2 / bf16x2）",
+          "order": 2,
+          "filename": "u5-l2-scoped-and-packed-atomics.md",
+          "level": "advanced",
+          "topic": "讲解 cuda-oxide 的原子操作模型：作用域（gpu/cta/system）与内存序、整型/浮点原子，以及本轮新增的打包原子加法 atom_add_f16x2 / bf16x2（lane 级独立原子、.noftz、sm_70+），结合 atomic.rs 与 atomics/atomic_f16/packed_atomic_add 示例。",
+          "learning_goals": [
+            "理解原子操作的作用域与内存序语义",
+            "使用整型/浮点原子构建无锁数据结构",
+            "掌握 f16x2/bf16x2 打包原子加法的 lane 布局与安全约束"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/atomic.rs",
+            "crates/rustc-codegen-cuda/examples/atomics/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/atomic_f16/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/packed_atomic_add/src/main.rs"
+          ],
+          "minimal_modules": [
+            "原子作用域与内存序",
+            "整型/浮点原子",
+            "打包 f16x2/bf16x2 原子加法",
+            "lane 级原子性与 UB 约束"
+          ],
+          "practice_task": "运行 packed_atomic_add 示例，解释两个 16-bit lane 如何在一条 32-bit 字内独立原子累加，并列出与整字 u32 原子混用为何是 UB。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "异步屏障与异步拷贝",
+          "order": 3,
+          "filename": "u5-l3-async-barriers-and-copy.md",
+          "level": "advanced",
+          "topic": "深入 Hopper 级异步机制：mbarrier 异步屏障、cp.async 从全局到共享的异步拷贝与 zfill、arrive/wait 语义，以及它们如何与 sync_threads 配合构建重叠数据搬运与计算的流水线，结合 barrier.rs/async_copy.rs 与 cp_async 示例。",
+          "learning_goals": [
+            "声明并使用 mbarrier 异步屏障",
+            "使用 cp.async 异步拷贝及 zfill 语义",
+            "用 arrive/wait 与 sync_threads 组建计算-搬运重叠流水线"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/barrier.rs",
+            "crates/cuda-device/src/async_copy.rs",
+            "crates/rustc-codegen-cuda/examples/cp_async_small/src/main.rs"
+          ],
+          "minimal_modules": [
+            "mbarrier 异步屏障",
+            "cp.async 异步拷贝与 zfill",
+            "arrive/wait 语义",
+            "计算-搬运重叠"
+          ],
+          "practice_task": "参考 cp_async_small，写一个核函数：用 cp.async 把一块全局内存搬到共享内存，mbarrier 等待完成后再计算，体会与同步拷贝的差异。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "集群与分布式共享内存",
+          "order": 4,
+          "filename": "u5-l4-cluster-and-distributed-smem.md",
+          "level": "advanced",
+          "topic": "讲解 thread block cluster：跨多 SM 的 block 集群、分布式共享内存（远程读邻居 block 的共享内存）、集群级屏障与多播，结合 cluster.rs 与 cluster/mcast 示例。",
+          "learning_goals": [
+            "理解 cluster 的 grid/block 之上的层级",
+            "使用分布式共享内存跨 block 访问",
+            "掌握集群级屏障与多播原语"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/cluster.rs",
+            "crates/rustc-codegen-cuda/examples/cluster/src/main.rs"
+          ],
+          "minimal_modules": [
+            "thread block cluster",
+            "分布式共享内存",
+            "集群级屏障",
+            "多播"
+          ],
+          "practice_task": "运行 cluster 示例，说明一个 block 如何读到同集群内另一个 block 的共享内存，并指出这需要哪个 sm 架构。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "张量内存加速器 TMA",
+          "order": 5,
+          "filename": "u5-l5-tensor-memory-accelerator.md",
+          "level": "advanced",
+          "topic": "深入 TMA（Tensor Memory Accelerator）：基于张量描述符的批量异步拷贝、多播到多个 CTA、与 mbarrier 的完成同步，结合 tma.rs 与 tma_copy/tma_multicast 示例。",
+          "learning_goals": [
+            "理解 TMA 张量描述符的语义",
+            "使用 TMA 进行批量异步拷贝与多播",
+            "掌握 TMA 完成同步模式"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/tma.rs",
+            "crates/rustc-codegen-cuda/examples/tma_copy/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/tma_multicast/src/main.rs"
+          ],
+          "minimal_modules": [
+            "TMA 张量描述符",
+            "TMA 异步拷贝",
+            "TMA 多播",
+            "完成同步"
+          ],
+          "practice_task": "运行 tma_copy 与 tma_multicast，对比 TMA 拷贝与 cp.async 的差异，并说明多播如何减少带宽占用。",
+          "depends_on": [
+            "u5-l4",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "矩阵乘加速器：mma.sync / WGMMA / tcgen05",
+          "order": 6,
+          "filename": "u5-l6-matrix-multiply-accelerators.md",
+          "level": "advanced",
+          "topic": "横向对比三代矩阵乘加速器：warp 级 mma.sync（含本轮新增的 bf16 m16n8k16 与 f64 m8n8k4、ldmatrix 片段布局）、Hopper 的 wgmma（异步 warp-group MMA）、Blackwell 的 tcgen05，结合 wmma.rs/wgmma.rs/tcgen05.rs 与 gemm/gemm_sol/tcgen05 示例。",
+          "learning_goals": [
+            "理解 mma.sync 的 warp 分布式片段（fragment）布局",
+            "区分 mma.sync、wgmma、tcgen05 三代加速器",
+            "使用 ldmatrix 加载与 mma 计算的组合"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/wmma.rs",
+            "crates/cuda-device/src/wgmma.rs",
+            "crates/cuda-device/src/tcgen05.rs",
+            "crates/rustc-codegen-cuda/examples/gemm/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/tcgen05/src/main.rs"
+          ],
+          "minimal_modules": [
+            "mma.sync 与 ldmatrix 片段布局",
+            "bf16 m16n8k16 / f64 m8n8k4",
+            "wgmma 异步 warp-group MMA",
+            "tcgen05 (Blackwell)"
+          ],
+          "practice_task": "对照 wmma.rs 中 mma_m16n8k16_f32_bf16 的 lane→element 映射注释，手算一个 16×8 fragment 在 32 个 lane 上的分布，并说明 sm_80+ 的要求。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：编译器深潜与扩展",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Device codegen 深潜：#[device] 属性与设备端 MIR 生成",
+          "order": 1,
+          "filename": "u6-l1-device-codegen-deep-dive.md",
+          "level": "advanced",
+          "topic": "深潜 device_codegen：如何识别 #[device]/#[kernel] 标记的设备函数、剥离宿主部分、为设备端生成独立 MIR，并把 allow_fma_contraction 等编译策略向下传递（本轮 #326 贯通）。",
+          "learning_goals": [
+            "理解 device_codegen 如何提取设备函数集",
+            "说明设备端 MIR 的生成与隔离",
+            "追踪 allow_fma_contraction 等策略的注入点"
+          ],
+          "source_files": [
+            "crates/rustc-codegen-cuda/src/device_codegen.rs",
+            "crates/rustc-codegen-cuda/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "设备函数识别",
+            "设备端 MIR 生成",
+            "宿主/设备隔离",
+            "编译策略注入"
+          ],
+          "practice_task": "在 device_codegen.rs 中找到设置 allow_fma_contraction 的位置，解释 CUDA_OXIDE_NO_FMA 如何一路影响设备端代码生成。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "mir-importer 深潜：terminator/intrinsics 翻译机",
+          "order": 2,
+          "filename": "u6-l2-mir-importer-intrinsics-deep-dive.md",
+          "level": "advanced",
+          "topic": "深潜 mir-importer 的终止符翻译：Call/intrinsic 如何按类别（atomic/wmma/warp/tma/cp_async/cluster/...）分派到独立翻译模块，本轮新增的 packed atomic 与 bf16/f64 mma intrinsic 各自如何在 intrinsics/atomic.rs、intrinsics/wmma.rs 中落地。",
+          "learning_goals": [
+            "理解 terminator/mod.rs 的 intrinsic 分派机制",
+            "掌握一个 intrinsic 从 MIR 调用到 dialect op 的翻译路径",
+            "对照本轮 atomic/wmma 翻译改动理解扩展模式"
+          ],
+          "source_files": [
+            "crates/mir-importer/src/translator/terminator/mod.rs",
+            "crates/mir-importer/src/translator/terminator/intrinsics/atomic.rs",
+            "crates/mir-importer/src/translator/terminator/intrinsics/wmma.rs",
+            "crates/mir-importer/src/translator/terminator/intrinsics/mod.rs"
+          ],
+          "minimal_modules": [
+            "terminator 翻译分派",
+            "intrinsics 分模块",
+            "atomic intrinsic 翻译",
+            "wmma intrinsic 翻译"
+          ],
+          "practice_task": "追踪一个 atom_add_f16x2 调用从 terminator/mod.rs 进入 intrinsics/atomic.rs 后生成哪个 dialect-nvvm op，画出调用链。",
+          "depends_on": [
+            "u4-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "mir-lower 深潜：ops 转换与算术（含 FMA 收缩）",
+          "order": 3,
+          "filename": "u6-l3-mir-lower-ops-deep-dive.md",
+          "level": "advanced",
+          "topic": "深潜 mir-lower 的 ops 转换：算术/内存/控制流 op 如何 lowering 成 LLVM IR，以及本轮 #326 如何在 arithmetic.rs 中根据 allow_fma_contraction 决定浮点乘加是否收缩为 fused 指令，并经 call.rs 处理 intrinsic 调用 lowering。",
+          "learning_goals": [
+            "理解 ops/arithmetic 等模块的 lowering 细节",
+            "掌握 FMA 收缩策略在 lowering 层的实现",
+            "理解 ops/call 如何对接 intrinsics lowering"
+          ],
+          "source_files": [
+            "crates/mir-lower/src/convert/ops/arithmetic.rs",
+            "crates/mir-lower/src/convert/ops/call.rs",
+            "crates/mir-lower/src/convert/intrinsics/atomic.rs",
+            "crates/mir-lower/src/convert/intrinsics/wmma.rs"
+          ],
+          "minimal_modules": [
+            "算术 op lowering",
+            "FMA 收缩实现",
+            "call → intrinsics 对接",
+            "atomic/wmma intrinsic lowering"
+          ],
+          "practice_task": "在 arithmetic.rs 中找到 FMA 收缩的判断逻辑，写一段核函数使其在默认（FMA on）与 CUDA_OXIDE_NO_FMA=1 下产出不同的 LLVM IR，并用 `cargo oxide pipeline` 对比。",
+          "depends_on": [
+            "u4-l4",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "端到端新增一个 intrinsic（以 packed atomic / mma 为模板）",
+          "order": 4,
+          "filename": "u6-l4-adding-new-intrinsic-template.md",
+          "level": "advanced",
+          "topic": "给出\"新增一个设备 intrinsic\"的全栈模板，以本轮 #321/#322/#323 为范例：从 cuda-device 暴露 unsafe fn → 在 dialect-nvvm 增 op → 在 mir-importer 增翻译 → 在 mir-lower 增 lowering，五处改动缺一不可，并参考 cuda-oxide-book/compiler/adding-new-intrinsics.md。",
+          "learning_goals": [
+            "掌握新增 intrinsic 的五层改动清单",
+            "理解设备 API、dialect op、importer、lowerer 的协同",
+            "能照模板独立落地一个新的 PTX intrinsic"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/wmma.rs",
+            "crates/dialect-nvvm/src/ops/wmma.rs",
+            "crates/mir-importer/src/translator/terminator/intrinsics/wmma.rs",
+            "crates/mir-lower/src/convert/intrinsics/wmma.rs",
+            "cuda-oxide-book/compiler/adding-new-intrinsics.md"
+          ],
+          "minimal_modules": [
+            "设备层 API",
+            "dialect op 层",
+            "importer 翻译层",
+            "lowerer 转换层",
+            "五层协同模板"
+          ],
+          "practice_task": "仿照 bf16 m16n8k16 的五层落地，为一个已有 PTX 指令（如某 reduce op）规划五处改动清单，标注每处对应的源文件与函数。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "编译优化与 mir/nvvm transforms",
+          "order": 5,
+          "filename": "u6-l5-compiler-optimizations-transforms.md",
+          "level": "advanced",
+          "topic": "介绍 cuda-oxide 自带的 IR 变换：mir-transforms 的 mem2reg、规范化、循环分析与展开（unroll），以及 nvvm-transforms 的 legalize，说明它们在流水线中的位置与对生成代码质量的影响。",
+          "learning_goals": [
+            "理解 mem2reg/规范化/循环展开等 mir 变换",
+            "掌握 nvvm legalize 的作用",
+            "认识变换在整体流水线中的顺序"
+          ],
+          "source_files": [
+            "crates/mir-transforms/src/lib.rs",
+            "crates/mir-transforms/src/unroll.rs",
+            "crates/mir-transforms/src/canonicalize.rs",
+            "crates/nvvm-transforms/src/legalize.rs"
+          ],
+          "minimal_modules": [
+            "mem2reg 与规范化",
+            "循环分析与展开",
+            "nvvm legalize",
+            "变换在流水线中的顺序"
+          ],
+          "practice_task": "对照 unroll_smoke 示例，用 `cargo oxide pipeline` 观察循环在 mir-transforms 前后的 IR 差异，说明展开如何影响下游 lowering。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：测试、调试与工程化",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "compile_fail 与设备安全契约",
+          "order": 1,
+          "filename": "u7-l1-compile-fail-safety-contract.md",
+          "level": "advanced",
+          "topic": "讲解 cuda-oxide 如何用 error_* 系列 compile_fail 示例（如 error_missing_device_attr、cuda_module_contract、error_wgmma_mma_unimplemented）固化设备端安全契约，以及这些负向测试如何防止不安全/不支持的模式静默通过。",
+          "learning_goals": [
+            "理解 error_* 示例的 compile_fail 测试机制",
+            "认识 cuda_module_contract 等核心安全契约",
+            "学会为新约束补充 compile_fail 用例"
+          ],
+          "source_files": [
+            "crates/rustc-codegen-cuda/examples/cuda_module_contract/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/error_missing_device_attr/src/main.rs",
+            "crates/rustc-codegen-cuda/examples/error_wgmma_mma_unimplemented/src/main.rs",
+            "cuda-oxide-book/gpu-safety/the-safety-model.md"
+          ],
+          "minimal_modules": [
+            "compile_fail 示例机制",
+            "cuda_module_contract 契约",
+            "负向测试覆盖",
+            "安全模型概览"
+          ],
+          "practice_task": "阅读 cuda_module_contract 与一个 error_* 示例，写一段故意违反契约的核函数，确认它在编译期被拒绝，并解释被哪条契约拦截。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "cuda-gdb 调试与设备端 debug intrinsics",
+          "order": 2,
+          "filename": "u7-l2-cuda-gdb-and-debug-intrinsics.md",
+          "level": "advanced",
+          "topic": "讲解 cargo oxide debug 如何启动 cuda-gdb，以及设备端 debug intrinsics（clock64/globaltimer/trap/gpu_assert!/breakpoint/prof_trigger 与 #[launch_bounds]）如何在 debug.rs 中暴露并结合 debug 示例使用。",
+          "learning_goals": [
+            "使用 cargo oxide debug 驱动 cuda-gdb 调试内核",
+            "掌握设备端 debug intrinsics 的用途",
+            "理解 #[launch_bounds] 对编译器的影响"
+          ],
+          "source_files": [
+            "crates/cuda-device/src/debug.rs",
+            "crates/rustc-codegen-cuda/examples/debug/src/main.rs",
+            "crates/cargo-oxide/src/main.rs"
+          ],
+          "minimal_modules": [
+            "cargo oxide debug → cuda-gdb",
+            "clock64/globaltimer/trap",
+            "gpu_assert!/breakpoint/prof_trigger",
+            "#[launch_bounds]"
+          ],
+          "practice_task": "运行 debug 示例（或阅读其逻辑），用 gpu_assert! 在内核中加一个运行时断言，并说明 trap() 与 breakpoint() 在 cuda-gdb 下的不同表现。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "NVIDIA Compute Sanitizer 正确性检查（cargo oxide sanitize）",
+          "order": 3,
+          "filename": "u7-l3-compute-sanitizer.md",
+          "level": "advanced",
+          "topic": "讲解本轮新增的 cargo oxide sanitize 子命令：如何驱动 NVIDIA Compute Sanitizer，四种工具（memcheck/racecheck/initcheck/synccheck）各自的检查目标，sanitizer 参数与程序参数的分隔约定，以及它在 CI/本地排查内存错误、数据竞争、未初始化读、同步错误中的用法。",
+          "learning_goals": [
+            "使用 cargo oxide sanitize 运行 Compute Sanitizer",
+            "区分 memcheck/racecheck/initcheck/synccheck 的检查目标",
+            "掌握 sanitizer 参数与应用参数的传递约定"
+          ],
+          "source_files": [
+            "crates/cargo-oxide/src/main.rs",
+            "crates/cargo-oxide/src/commands.rs",
+            "crates/cargo-oxide/README.md",
+            "cuda-oxide-book/gpu-programming/error-handling-and-debugging.md"
+          ],
+          "minimal_modules": [
+            "sanitize 子命令与 SanitizerTool",
+            "memcheck/racecheck/initcheck/synccheck",
+            "参数分隔约定",
+            "常见错误排查"
+          ],
+          "practice_task": "对一个故意越界或含数据竞争的内核分别用 --tool memcheck 与 --tool racecheck 跑 `cargo oxide sanitize`，定位并修复报告的错误。",
+          "depends_on": [
+            "u1-l3",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "符号命名契约、制品嵌入与差分模糊测试",
+          "order": 4,
+          "filename": "u7-l4-symbol-contract-artifacts-fuzzing.md",
+          "level": "advanced",
+          "topic": "收束三项工程化主题：reserved-oxide-symbols 维系宏与 codegen 后端的保留符号命名契约、oxide-artifacts 的 .oxart 制品嵌入与锚符号防裁剪、以及 fuzzer crate 驱动的 rustlantis 风格差分模糊测试如何发现 codegen 正确性回归。",
+          "learning_goals": [
+            "理解保留符号命名契约与防冲突机制",
+            "掌握制品嵌入与锚符号防 dead-strip 的工程意义",
+            "认识差分模糊测试如何保障 codegen 正确性"
+          ],
+          "source_files": [
+            "crates/reserved-oxide-symbols/src/lib.rs",
+            "crates/oxide-artifacts/src/lib.rs",
+            "crates/fuzzer/src/lib.rs",
+            "crates/rustc-codegen-cuda/examples/rustlantis-smoke/src/main.rs"
+          ],
+          "minimal_modules": [
+            "保留符号命名契约",
+            ".oxart 嵌入与锚符号",
+            "fuzzer 差分测试支撑",
+            "rustlantis 风格生成器"
+          ],
+          "practice_task": "阅读 reserved-oxide-symbols 与 fuzzer 的文档注释，写一段说明：命名契约被破坏会引发什么连锁问题，以及差分模糊测试如何捕获一个 lowering 回归。",
+          "depends_on": [
+            "u3-l2",
+            "u6-l4"
+          ],
+          "action": "new"
         }
       ]
     }

@@ -1,7 +1,7 @@
 {
   "project": "cutile-python",
-  "head": "dc83f62035193b0b7b0475a9706f80456015d5f8",
-  "rationale": "cuTile Python 是一个面向 NVIDIA GPU 的 tile 编程 DSL 编译器，核心价值链是「Python 内核 → AST → HIR → Tile IR → 优化 Pass → TileIR 字节码 → tileiras 生成 cubin → GPU 启动」。学习路线因此严格按「先会写、再懂原理、最后能扩展」三层递进设计：U1-U2 为入门层，先建立项目定位、运行方式、执行模型与数据模型（数组 vs tile）的直觉；U3 是过渡层，用真实内核把用户 API（load/store、算术、控制流、归约、常量、matmul）讲透，让读者能独立写出 GEMM 类内核；U4 进入进阶数据访问（tiled view、gather/scatter、内存模型与原子操作）。在读者掌握「写什么」之后，U5 逆向拆解编译前端（kernel 装饰器、compile_tile 总流程、ast2hir、hir2ir、IR 核心、类型系统、stub→impl 注册），U6 逐个剖析优化 Pass（DCE、数据流分析、整除传播、token 内存序、代码外提/循环分裂/模式重写），U7 讲后端（ir2bytecode、字节码格式与版本、tileiras 调用、JIT 磁盘缓存）。U8 为专家层，覆盖运行时调度与 C++ 桥接、AOT 导出与签名/名称修饰、自动调优、JAX/XLA 互操作、调试与性能。讲义依赖构成 DAG：所有源码机制讲义都依赖 U5 的 IR 基础，后端依赖前端，扩展依赖运行时。每篇引用 1-6 个真实源码文件，确保「结合源码」并可操作。",
+  "head": "0c46a6222c61217a3fa740f01a1b14c9fef0ecec",
+  "rationale": "cuTile Python 是一个面向 NVIDIA GPU 的 tile 编程 DSL 编译器，核心价值链是「Python 内核 → AST → HIR → Tile IR → 优化 Pass → TileIR 字节码 → tileiras 生成 cubin → GPU 启动」。学习路线因此严格按「先会写、再懂原理、最后能扩展」三层递进设计：U1-U2 为入门层，先建立项目定位、运行方式、执行模型与数据模型（数组 vs tile）的直觉；U3 是过渡层，用真实内核把用户 API（load/store、算术、控制流、归约、常量、matmul）讲透，让读者能独立写出 GEMM 类内核；U4 进入进阶数据访问（tiled view、gather/scatter、内存模型与原子操作）。在读者掌握「写什么」之后，U5 逆向拆解编译前端（kernel 装饰器、compile_tile 总流程、ast2hir、hir2ir、IR 核心、类型系统、stub→impl 注册），U6 逐个剖析优化 Pass（DCE、数据流分析、整除传播、token 内存序、代码外提/循环分裂/模式重写），U7 讲后端（ir2bytecode、字节码格式与版本、tileiras 调用、JIT 磁盘缓存）。U8 为专家层，覆盖运行时调度与 C++ 桥接、AOT 导出与签名/名称修饰、自动调优、JAX/XLA 互操作、调试与性能。本次增量（dc83f62..0c46a62）主要变化集中在自动调优子系统：exhaustive_search 的执行主流程被重写为「三阶段收敛 + 动态启动超时 + 子进程 benchmark worker（经 IPC 隔离内核死锁）+ 慢配置剪枝」，并新增 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS 环境变量；cext 侧新增 _export_ipc_benchmark_payload/_benchmark_with_ipc_payload 与 ipc_util 作为子进程 IPC 桥接，但通用 launch/调用约定链路不变。因此只有 u8-l3（自动调优）的内容字段需要按新主流程更新并重生成；launch/dispatch（u8-l1）、后端（U7）等讲义的源码机制未受影响，保持不变。由于讲义目录目前只生成了 u1-l1..u3-l4，已存在且源码未变的讲义标记 keep，尚未生成的讲义（含内容更新后的 u8-l3）标记 new。讲义依赖构成 DAG：所有源码机制讲义都依赖 U5 的 IR 基础，后端依赖前端，扩展依赖运行时。每篇引用 1-6 个真实源码文件，确保「结合源码」并可操作。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 中的 vector_add 示例，用一段话解释 @ct.kernel 装饰的函数被 cuLaunchKernel 之前经历了哪些编译阶段，并把对应阶段名称标注在代码旁。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -98,7 +98,7 @@
           "level": "beginner",
           "topic": "通览 src/cuda/tile/__init__.py 暴露的全部公共 API，分类理解 kernel/function/launch、stub 操作、DType、内存模型等。",
           "learning_goals": [
-            "掌握 cuda.tile 顶层导出的 API 分组：装饰器、launch、数据类型、stub 操作、内存模型、异常",
+            "掌握 cuda.tile 顶层导出的 API 分组：装饰器、启动、数据类型、stub 操作、内存模型、异常",
             "理解 kernel、function、stub 三类装饰器的语义差异",
             "能根据需求在 __all__ 中定位正确的入口"
           ],
@@ -115,7 +115,7 @@
             "u1-l1",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -150,7 +150,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -177,7 +177,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -204,7 +204,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -232,7 +232,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -269,7 +269,7 @@
             "u1-l2",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -297,7 +297,7 @@
             "u3-l1",
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -324,7 +324,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -351,7 +351,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -1036,28 +1036,37 @@
         },
         {
           "id": "u8-l3",
-          "title": "自动调优 tune（exhaustive_search）",
+          "title": "自动调优 tune：exhaustive_search 与子进程 benchmark 安全",
           "order": 3,
           "filename": "u8-l3-autotuning.md",
           "level": "advanced",
-          "topic": "讲解 cuda.tile.tune 的 exhaustive_search 搜索空间遍历与计时、TuningResult/Measurement，以及实验性 autotune_launch 的缓存。",
+          "topic": "讲解 cuda.tile.tune 的 exhaustive_search 执行主流程：三阶段收敛（warmup + 动态超时过滤、Top-K 收敛、按 cutoff 剪枝慢配置）、benchmark 在子进程 worker 中经 IPC 执行以隔离内核死锁（_tune_utils 的 _TimedBenchmarkRunner/benchmark_with_timeout 与 cext 的 _export_ipc_benchmark_payload/_benchmark_with_ipc_payload）、TileLaunchTimeoutError 与 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS，以及实验性 autotune_launch 的两级缓存。",
           "learning_goals": [
-            "掌握 exhaustive_search 如何遍历搜索空间并计时选最优",
-            "理解 TuningResult/Measurement 的统计字段",
+            "掌握 exhaustive_search 的三阶段搜索与收敛流程：warmup + 超时过滤、Top-K 收敛、剩余按 cutoff 剪枝慢配置",
+            "理解 benchmark 为何在子进程 worker 中经 IPC 执行以隔离内核死锁/超时，以及 benchmark_with_timeout 的动态启动超时调整",
+            "理解 _export_ipc_benchmark_payload / _benchmark_with_ipc_payload 如何把启动 payload 序列化到子进程并回传计时",
+            "理解 TuningResult/Measurement 的统计字段（Welford 均值/方差、95% 置信区间）、TileLaunchTimeoutError 与 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS",
             "理解实验性 autotune_launch 的两级缓存与 reservoir 采样"
           ],
           "source_files": [
             "src/cuda/tile/tune/_tune.py",
+            "src/cuda/tile/tune/_tune_utils.py",
+            "src/cuda/tile/tune/_benchmark_worker.py",
             "src/cuda/tile/tune/__init__.py",
+            "src/cuda/tile/_cext.pyi",
             "experimental/tile_experimental/src/cuda/tile_experimental/_autotuner.py"
           ],
           "minimal_modules": [
             "exhaustive_search",
-            "TuningResult",
-            "Measurement",
+            "_TimingCandidate",
+            "benchmark_with_timeout",
+            "_TimedBenchmarkRunner",
+            "_benchmark_worker",
+            "CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS",
+            "TuningResult/Measurement",
             "autotune_launch"
           ],
-          "practice_task": "对一个 GEMM 内核，用 exhaustive_search 在若干 (tm,tn,tk) 组合中搜索，打印 top_k 配置及其计时。",
+          "practice_task": "对一个 GEMM 内核，用 exhaustive_search 在若干 (tm,tn,tk) 组合中搜索，打印 top_k 配置及计时；再人为构造一个会超时/死锁的配置，观察子进程 worker 如何用 TileLaunchTimeoutError 过滤掉它，并用 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS=1 对比行为。",
           "depends_on": [
             "u3-l6",
             "u8-l1"
