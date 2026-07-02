@@ -122,6 +122,22 @@ repos:
   - name: NJU-ProjectN/nemu
   - name: nginx/nginx
   - name: numpy/numpy
+    folders:
+      [
+        "self",
+        "numpy/char",
+        "numpy/core",
+        "numpy/ctypeslib",
+        "numpy/fft",
+        "numpy/lib",
+        "numpy/ma",
+        "numpy/matrixlib",
+        "numpy/polynomial",
+        "numpy/random",
+        "numpy/rec",
+        "numpy/strings",
+        "numpy/typing",
+      ]
   - name: jbush001/NyuziProcessor
   - name: open-logic/open-logic
   - name: open-logic/en_cl_fix
@@ -289,7 +305,36 @@ repos:
   - name: deepseek-ai/profile-data
   - name: https://code.haverbeke.berlin/codemirror/dev.git
   - name: zed-industries/zed
-    folders: ["self"]
+    folders:
+      [
+        "self",
+        "crates/zed",
+        "crates/editor ",
+        "crates/rope",
+        "crates/multi_buffer",
+        "crates/text",
+        "crates/buffer_diff",
+        "crates/streaming_diff",
+        "crates/sum_tree",
+        "crates/gpui",
+        "crates/component",
+        "crates/lsp",
+        "crates/ui",
+        "crates/gpui_wgpu",
+        "crates/gpui_platform",
+        "crates/gpui_web",
+        "crates/gpui_shared_string",
+        "crates/gpui_util",
+        "crates/gpui_tokio",
+        "crates/gpui_macros",
+        "crates/ui_input",
+        "crates/markdown_preview",
+        "crates/ui_macros",
+        "crates/sidebar",
+        "crates/picker",
+        "crates/editor",
+        "crates/rope",
+      ]
   - name: https://gitcode.com/ascend-tribe/openPangu-2.0-Op
     folders: ["inference", "training"]
   - name: https://gitcode.com/ascend-tribe/openPangu-2.0-Infer
