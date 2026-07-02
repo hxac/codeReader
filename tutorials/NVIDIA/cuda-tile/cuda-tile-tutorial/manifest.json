@@ -1,0 +1,1079 @@
+{
+  "project": "cuda-tile",
+  "head": "e01244d89cd38e81dde50d60fbfee07ac6d7be22",
+  "rationale": "CUDA Tile IR 是一个基于 MLIR 的、面向 NVIDIA GPU 张量核优化的中间表示与编译基础设施（对齐 CUDA Toolkit 13.1），代码量大、模块边界清晰。学习手册按「先理解全貌、再钻核心机制、最后掌握扩展与工程化」的顺序设计为 10 个单元、35 篇讲义。第 1-2 单元（入门）从项目定位、仓库结构、构建系统、端到端示例、MLIR/LLVM 依赖、方言定义与 TableGen 代码生成入手，让读者先跑通工具链并建立 MLIR 心智模型；第 3-6 单元（进阶）围绕方言的「类型系统→计算类操作→内存与控制流操作→属性与语义」逐层展开，覆盖 Tile/指针/视图类型、整数/浮点/数学/MMA 算术、Token 顺序内存、原子操作、视图访存、归约扫描、assume 假设与调试信息属性，这是 CUDA Tile 语义的主体；第 7-10 单元（专家）聚焦工程核心：字节码二进制格式与版本兼容、cuda-tile-tblgen 代码与规范生成、优化器与变换 Pass（FuseFMA/LoopSplit/SynthesizeDebugInfoScopes）、以及 C API 集成、Python nanobind 绑定和 lit/FileCheck 测试体系。每篇讲义只讲一个主题、引用 1-6 个真实源码文件、配一个可操作实践任务，并通过 depends_on 形成从工具链到内核机制再到工程化的清晰依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目概览与运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "CUDA Tile IR 是什么：定位、组成与生态",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 CUDA Tile IR 的目标（基于 MLIR 的 CUDA 内核分块优化 IR）、核心组成（方言、Python 绑定、字节码、一致性测试）与它在 CUDA 工具链中的位置。",
+          "learning_goals": [
+            "理解 CUDA Tile IR 解决的核心问题：张量核上的分块计算与内存层次抽象",
+            "识别项目四大组成：CudaTile 方言、Python 绑定、字节码格式、一致性测试套件",
+            "了解其与 CUDA Toolkit 13.1 / MLIR / LLVM 的版本对齐关系"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE.txt"
+          ],
+          "minimal_modules": [
+            "README 项目定位",
+            "Core Components 章节",
+            "版本与 LLVM 兼容性章节"
+          ],
+          "practice_task": "阅读 README 并用自己的话写一段不超过 200 字的项目摘要，回答：CUDA Tile IR 的输入和输出分别是什么、它和 CUTLASS/Triton 这类库的区别在哪里；列出 README 中提到的四个核心组件。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与 CMake 构建系统",
+          "order": 2,
+          "filename": "u1-l2-repo-and-build.md",
+          "level": "beginner",
+          "topic": "讲解顶层目录布局（include/lib/tools/python/test/cmake）以及 CMake 构建选项与子目录组织方式。",
+          "learning_goals": [
+            "掌握 include/lib/tools/python/test 各目录的职责分工",
+            "理解关键 CMake 选项：CUDA_TILE_ENABLE_BINDINGS_PYTHON、CUDA_TILE_ENABLE_TESTING、CUDA_TILE_ENABLE_CAPI、CUDA_TILE_ENABLE_TOOLS",
+            "了解 cuda-tile-tblgen 为何必须最先构建以及 add_subdirectory 的顺序"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "顶层 CMakeLists.txt",
+            "LLVM/MLIR 配置块",
+            "子目录注册块"
+          ],
+          "practice_task": "执行 README 的 Quick Start 命令配置并构建一个带 Python 绑定和测试的 Release 版本：cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DCUDA_TILE_ENABLE_BINDINGS_PYTHON=ON -DCUDA_TILE_ENABLE_TESTING=ON；构建成功后运行 cmake --build build --target check-cuda-tile，记录测试通过数量。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链与端到端示例：从 MLIR 到 cubin",
+          "order": 3,
+          "filename": "u1-l3-toolchain-end-to-end.md",
+          "level": "beginner",
+          "topic": "通过 README 的 print 示例串联 cuda-tile-translate、tileiras、CUDA Driver 的完整流程，让读者亲手把一段 Tile IR 跑起来。",
+          "learning_goals": [
+            "掌握 cuda-tile-translate 将文本 MLIR 编译为字节码的命令与参数（--mlir-to-cudatilebc、--bytecode-version）",
+            "理解 AoT（tileiras 生成 cubin）与 JIT（驱动直接加载 tilebc）两种路径",
+            "学会编写最小 C++ Host 程序用 cuLaunchKernel 启动 Tile IR 内核"
+          ],
+          "source_files": [
+            "README.md",
+            "tools/cuda-tile-translate/cuda-tile-translate.cpp"
+          ],
+          "minimal_modules": [
+            "README 示例章节",
+            "cuda-tile-translate 入口 main",
+            "Translation 注册调用"
+          ],
+          "practice_task": "按 README 步骤创建 example.mlir 与 example_host.cpp，用 cuda-tile-translate 生成 example.tilebc，再用 tileiras 编译为 cubin，编译并运行 host 程序，验证终端输出 128 个浮点数据；尝试跳过 cubin 步骤直接 JIT 加载 .tilebc 并对比结果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入门：MLIR 基础与方言定义",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "MLIR/LLVM 依赖与构建配置",
+          "order": 1,
+          "filename": "u2-l1-llvm-dependency.md",
+          "level": "beginner",
+          "topic": "讲解项目如何获取并链接特定 commit 的 MLIR/LLVM：自动下载、本地源码、预编译库三种方式及其 CMake 开关。",
+          "learning_goals": [
+            "理解 CUDA Tile 对 MLIR/LLVM 特定 commit 的强依赖及其兼容区间机制",
+            "掌握三种 LLVM 获取方式对应的 CMake 变量：CUDA_TILE_USE_LLVM_INSTALL_DIR / CUDA_TILE_USE_LLVM_SOURCE_DIR / 自动下载",
+            "了解 ccache、跨编译、Python 绑定与 LLVM 的联动配置"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "cmake/IncludeLLVM.cmake 的版本指定行",
+            "顶层 CMakeLists 的 LLVM 配置块",
+            "README 的 Build Configuration 章节"
+          ],
+          "practice_task": "用 scripts/get-cuda-tile-version-for-llvm-hash.sh 脚本查询一个给定 LLVM commit 对应的 CUDA Tile IR 版本；在 cmake/IncludeLLVM.cmake 中找到锁定的 LLVM commit hash 并记录，解释为何项目要锁定到具体 commit。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CudaTile 方言定义：命名空间与默认方言",
+          "order": 2,
+          "filename": "u2-l2-dialect-definition.md",
+          "level": "intermediate",
+          "topic": "精读 Dialect.td，理解 cuda_tile 方言的命名空间、自包含性、操作分组基类、默认方言前缀省略机制与版本元数据。",
+          "learning_goals": [
+            "理解 Dialect 名称为 cuda_tile、cppNamespace 为 ::mlir::cuda_tile 的自包含方言设计",
+            "掌握 CudaTileOpDef 基类如何用 group/subGroup/sinceVersion 元数据组织操作",
+            "理解 CudaTile_DefaultDialect 如何让块内操作省略 cuda_tile. 前缀"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Dialect.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Dialect.h"
+          ],
+          "minimal_modules": [
+            "CudaTile_Dialect 定义",
+            "CudaTileOpDef 及各分组 OpDef 基类",
+            "CudaTile_DefaultDialect"
+          ],
+          "practice_task": "在 Dialect.td 中列出全部 11 个操作分组基类（Bitwise/Integer/Floating Point/Atomics/Conversions/Core/Control Flow/Memory/Views/Miscellaneous/Testing）并各举一个对应操作；解释 extraClassDeclaration 中 warnUnsupportedHints_/errorOnHints_ 两个标志的作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "TableGen 与代码生成：从 .td 到 .inc",
+          "order": 3,
+          "filename": "u2-l3-tablegen-codegen.md",
+          "level": "intermediate",
+          "topic": "讲解 cuda-tile-tblgen 工具如何把 Ops.td/Types.td/AttrDefs.td 生成 C++ 胶水代码（Ops.h.inc、Types.h.inc、AttrDefs.h.inc）与规范文档。",
+          "learning_goals": [
+            "理解 MLIR TableGen 的 def/GET_OP_CLASSES/GET_TYPEDEF_CLASSES 代码生成机制",
+            "掌握 cuda-tile-tblgen 作为宿主工具优先构建的原因与流程",
+            "了解 SpecGen/Emitter 如何从方言定义自动生成 CUDA Tile IR 规范文档"
+          ],
+          "source_files": [
+            "tools/cuda-tile-tblgen/cuda-tile-tblgen.cpp",
+            "tools/cuda-tile-tblgen/SpecGen.cpp",
+            "tools/cuda-tile-tblgen/Emitter.cpp"
+          ],
+          "minimal_modules": [
+            "cuda-tile-tblgen main 与 GenRegistration",
+            "gen-op-spec 注册",
+            "SpecGen/Emitter"
+          ],
+          "practice_task": "配置一次完整构建后，在 build 目录中找到生成的 Ops.h.inc、Types.h.inc、AttrDefs.h.inc 文件，挑选一个操作（如 AddFOp）查看其生成的 C++ 类骨架；尝试运行 cuda-tile-tblgen --gen-op-spec 生成一份规范片段并阅读其结构。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：类型系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Tile 类型与元素类型",
+          "order": 1,
+          "filename": "u3-l1-tile-and-element-types.md",
+          "level": "intermediate",
+          "topic": "讲解核心 TileType（tile<shapexelem>）、支持的整数/浮点/低精度元素类型、形状约束与最大元素数限制。",
+          "learning_goals": [
+            "掌握 TileType 的静态形状语法 tile<4x8xf32> 及元素类型集合（i1/i4/i8..i64, f16/bf16/f32/f64/tf32/fp8/f4）",
+            "理解 maxTileNumElements 上限的硬件动机（寄存器压力）",
+            "了解类型约束类（NumberType、TileElementType、IntTileType、FloatTileType）的用途"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Types.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Types.h",
+            "lib/Dialect/CudaTile/IR/Types.cpp"
+          ],
+          "minimal_modules": [
+            "TileType 定义",
+            "元素类型约束",
+            "maxTileNumElements 常量与解析/打印工具"
+          ],
+          "practice_task": "用 cuda-tile-opt 加载一段包含多种 tile 类型的 MLIR（如 tile<4x8xf32>、tile<128xi32>、tile<2x3xptr<i8>>）验证其合法；尝试构造一个超过 maxTileNumElements 的 tile 类型，观察验证报错信息。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "指针类型与 Token 类型",
+          "order": 2,
+          "filename": "u3-l2-pointer-and-token-types.md",
+          "level": "intermediate",
+          "topic": "讲解 PointerType（ptr<elem>，指向全局显存）与 TokenType（用于显式操作排序的非运行时值）两类特殊类型。",
+          "learning_goals": [
+            "理解 PointerType 作为有类型全局显存指针及其在 tile 中的使用方式",
+            "掌握 TokenType 用于显式表达内存操作先后顺序（而非数据依赖）的设计",
+            "了解 isPointerLike、getI1SameShape 等类型工具函数"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Types.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Types.h"
+          ],
+          "minimal_modules": [
+            "PointerType 定义",
+            "TokenType 定义",
+            "类型工具函数"
+          ],
+          "practice_task": "编写一段 MLIR 声明 tile<ptr<f32>> 与 token 类型的值，理解为何 Token 没有运行时数据载荷；在 Python 绑定中用 PointerType.get 与 TokenType 构造对应类型并打印。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "视图类型族：全局显存的分块访问",
+          "order": 3,
+          "filename": "u3-l3-view-types.md",
+          "level": "intermediate",
+          "topic": "讲解 TensorView、PartitionView、StridedView、GatherScatterView 四类视图如何描述全局张量的不同分块/步进/稀疏访问模式与越界填充。",
+          "learning_goals": [
+            "掌握 TensorView（base 指针+shape+strides）作为全局张量视图的基础",
+            "理解 PartitionView（网格对齐无重叠分块）、StridedView（可重叠/带间隔的步进分块）、GatherScatterView（稀疏维度）的差异",
+            "了解 dim_map、traversal_strides、sparse_dim、padding_value 等参数与 TileView 接口"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Types.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Interfaces.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Interfaces.h"
+          ],
+          "minimal_modules": [
+            "四类 View 类型定义",
+            "TileView 接口（getViewIndexRank/getViewTileType/verifyIndices）",
+            "padding_value 取值"
+          ],
+          "practice_task": "分别为 PartitionView、StridedView、GatherScatterView 各写一个合法的 MLIR 类型声明，标注其 tile_shape、dim_map 与（若适用）traversal_strides/sparse_dim；解释三者各自适合的访存场景。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：计算类操作",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "核心数据操作：构造与形状变换",
+          "order": 1,
+          "filename": "u4-l1-core-data-ops.md",
+          "level": "intermediate",
+          "topic": "讲解 constant、broadcast、reshape、iota、select、cat、permute、extract、offset 等核心 Core 组操作。",
+          "learning_goals": [
+            "掌握 constant（从标量或 dense 属性构造）、iota（生成序列）、broadcast/reshape（形状变换）的语义",
+            "理解 select（按掩码三元选择）、cat（沿维度拼接）、permute（维度重排）、extract（切片）",
+            "了解 offset 对指针 tile 元素的整数偏移"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.h",
+            "test/Dialect/CudaTile/ops.mlir"
+          ],
+          "minimal_modules": [
+            "Core 组操作定义",
+            "iota/broadcast/reshape/select/cat/permute/extract/constant",
+            "ops.mlir 测试用例"
+          ],
+          "practice_task": "编写一段 entry 内核：用 iota 生成 0..127 索引，用 constant 构造一个 4x4 f32 tile，用 broadcast、reshape、permute 演示形状变换，并用 cuda-tile-opt 验证合法性；参考 test/Dialect/CudaTile/ops.mlir 的写法。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "整数算术与比较操作",
+          "order": 2,
+          "filename": "u4-l2-integer-arith.md",
+          "level": "intermediate",
+          "topic": "讲解 addi/subi/muli/divi/remi/maxi/mini/shli/shri/absi/negi/cmpi 等 Integer 组操作及其有符号性与溢出提示。",
+          "learning_goals": [
+            "掌握整数算术操作的有符号/无符号语义（Signedness）",
+            "理解 NSW/NUW/NW 溢出提示属性的作用",
+            "了解 divi 的舍入模式与 cmpi 的谓词（equal/less_than/...）"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td",
+            "test/Dialect/CudaTile/arith.mlir"
+          ],
+          "minimal_modules": [
+            "Integer 组操作",
+            "Signedness/IntegerOverflow 属性",
+            "arith.mlir 测试"
+          ],
+          "practice_task": "写一段整数运算：a+b、a*b 带 NSW 提示、有符号除法 divi、cmpi 比较，分别用合法与非法（如对无符号操作施加 NSW）写法跑 cuda-tile-opt 观察验证差异；参考 arith_invalid.mlir。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "浮点算术与 FMA",
+          "order": 3,
+          "filename": "u4-l3-float-arith.md",
+          "level": "intermediate",
+          "topic": "讲解 addf/subf/mulf/divf/remf/maxf/minf/fma 等 Floating Point 组操作及其舍入模式与 flush_to_zero。",
+          "learning_goals": [
+            "掌握浮点算术的舍入模式属性（NEAREST_EVEN/ZERO/NEGATIVE_INF/POSITIVE_INF/APPROX/FULL）",
+            "理解 flush_to_zero（FTZ）修饰符的作用",
+            "了解 fma（a*b+c 融合乘加）相对分离 mul+add 在精度上的差异"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td",
+            "test/Dialect/CudaTile/math_invalid.mlir"
+          ],
+          "minimal_modules": [
+            "Floating Point 组操作",
+            "RoundingModeAttr",
+            "fma 操作"
+          ],
+          "practice_task": "分别用「mulf + addf」与单个「fma」实现 a*b+c，对比舍入模式取 NEAREST_EVEN 与 APPROX 时的写法；尝试给 addf 传入非法舍入模式（如 divf 专用值）触发验证错误。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "超越函数与类型转换操作",
+          "order": 4,
+          "filename": "u4-l4-math-and-conversions.md",
+          "level": "intermediate",
+          "topic": "讲解 sin/cos/exp/log/sqrt/rsqrt/pow/atan2 等数学函数，以及 Conversions 组的 bitcast/ftoi/itof/ftof/exti/trunci/int_to_ptr/ptr_to_int/ptr_to_ptr。",
+          "learning_goals": [
+            "掌握一组超越/初等函数操作的可用集合与精度注意事项（半精度在 f32 下模拟）",
+            "理解 bitcast（同位宽位重解释）与 ftoi/itof/ftof 数值转换的差异",
+            "了解指针与整数间的 int_to_ptr/ptr_to_int/ptr_to_ptr 转换"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "test/Dialect/CudaTile/conversion.mlir"
+          ],
+          "minimal_modules": [
+            "数学函数操作",
+            "Conversions 组操作",
+            "conversion.mlir 测试"
+          ],
+          "practice_task": "编写一个内核：对 f32 tile 做 exp 然后 sqrt，再用 ftoi 转为 i32，再用 bitcast 把 i32 重解释回 f32；验证位宽一致约束，尝试跨位宽 bitcast 观察报错。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "张量核 MMA 操作",
+          "order": 5,
+          "filename": "u4-l5-mma-ops.md",
+          "level": "intermediate",
+          "topic": "讲解面向 NVIDIA 张量核的 mmaf（浮点 MMA）、mmai（整数 MMA）、mmaf_scaled（带块缩放的低精度 MMA）三类矩阵乘累加操作。",
+          "learning_goals": [
+            "理解 mmaf 支持的 dtype 组合（f16/bf16/tf32/f32/f64/fp8）及其 2D/3D（批量）形状约束",
+            "掌握 mmai（i8×i8→i32）与 mmaf_scaled（MXFP8/MXFP4/NVFP4 带 e8m0/e4m3 缩放）的场景",
+            "了解 Python 端 MMAConfig/MMAScaledConfig 配置注册表如何匹配类型组合"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "python/cuda_tile/dialects/cuda_tile_ops.py"
+          ],
+          "minimal_modules": [
+            "mmaf/mmai/mmaf_scaled 操作定义",
+            "Python MMAConfig / MMAScaledConfig 体系",
+            "find_mma_config 匹配逻辑"
+          ],
+          "practice_task": "在 Python 中用 make_tile_type 构造 lhs/rhs/acc 三个 tile（如 f16×f16→f32），调用 mma 完成一次 2D 矩阵乘累加；尝试一组不支持的类型组合（如未注册的低精度配对），观察 find_mma_config 返回 None 后的错误提示。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "归约、扫描与低精度打包",
+          "order": 6,
+          "filename": "u4-l6-reduce-scan-pack.md",
+          "level": "intermediate",
+          "topic": "讲解 reduce（沿维度归约）、scan（inclusive/exclusive 前缀扫描）以及 pack/unpack（低精度 i4 值打包到 i8）操作。",
+          "learning_goals": [
+            "掌握 reduce 的归约算子（sum/min/max 等）与扫描维度语义",
+            "理解 scan 的 inclusive/exclusive 模式与前缀运算（前缀和/积/最值）",
+            "了解 pack/unpack 在低精度类型（i4）紧凑存储与硬件对齐中的作用"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "test/Dialect/CudaTile/reduce_and_scan_invalid.mlir"
+          ],
+          "minimal_modules": [
+            "reduce/scan 操作定义",
+            "pack/unpack 操作",
+            "reduce_and_scan_invalid 测试"
+          ],
+          "practice_task": "写一段对 4x8 tile 沿某一维做 reduce(sum) 与 inclusive scan(sum) 的 MLIR；再用 pack 把两个 i4 tile 打包进一个 i8 tile 并 unpack 还原，验证 round-trip；参考 reduce_and_scan_invalid.mlir 排查错误写法。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：内存与控制流操作",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "内存模型与 Token 顺序",
+          "order": 1,
+          "filename": "u5-l1-memory-model-tokens.md",
+          "level": "intermediate",
+          "topic": "讲解 load_ptr_tko/store_ptr_tko 基于指针的 token 顺序访存、alloca 栈分配、make_token/join_tokens 的显式排序机制。",
+          "learning_goals": [
+            "理解 Token 如何在不引入虚假数据依赖的前提下表达访存先后顺序",
+            "掌握 load_ptr_tko/store_ptr_tko 的指针 tile 输入与可选 mask、weak 语义",
+            "了解 alloca 的对齐要求与块内生命周期、make_token/join_tokens 的组合"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Traits.h",
+            "test/Dialect/CudaTile/memory_consistency_ops.mlir"
+          ],
+          "minimal_modules": [
+            "Memory 组操作（load_ptr_tko/store_ptr_tko/alloca/make_token/join_tokens）",
+            "verifyLoadStoreType/Mask/Padding 校验",
+            "memory_consistency_ops.mlir 测试"
+          ],
+          "practice_task": "复现 README 示例：用 reshape+broadcast+offset 构造指针 tile，用 load_ptr_tko weak 读取并 print_tko 输出；再设计两次访存并用 make_token/join_tokens 强制先后顺序，用 cuda-tile-opt 验证。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "视图加载与存储：掩码与越界填充",
+          "order": 2,
+          "filename": "u5-l2-view-load-store.md",
+          "level": "intermediate",
+          "topic": "讲解基于 PartitionView/StridedView/GatherScatterView 的 load_view_tko/store_view_tko 操作及其 index、mask、padding 行为。",
+          "learning_goals": [
+            "掌握 load_view_tko/store_view_tko 如何用 view + index 定位全局显存中的 tile",
+            "理解可选 mask（tile<i1>）屏蔽与 padding_value（zero/nan/pos_inf 等）越界填充",
+            "了解 get_index_space_shape/get_tensor_shape 等视图查询操作"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Interfaces.td",
+            "test/Dialect/CudaTile/memory_consistency_ops.mlir"
+          ],
+          "minimal_modules": [
+            "Views 组操作（load_view_tko/store_view_tko/make_*_view/get_*_shape）",
+            "TileView 接口",
+            "PaddingValueAttr"
+          ],
+          "practice_task": "构造一个 tensor_view 与 partition_view，对其执行一次带 mask 与 padding_value=zero 的 load_view_tko，再用 store_view_tko 写回；用 get_tensor_shape 查询视图形状并用 cuda-tile-opt 验证索引与 tile 类型匹配。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "原子操作与内存序/作用域",
+          "order": 3,
+          "filename": "u5-l3-atomics.md",
+          "level": "intermediate",
+          "topic": "讲解 atomic_rmw_tko、atomic_cas_tko、atomic_red_view_tko 三类原子操作及其内存序语义与作用域。",
+          "learning_goals": [
+            "掌握 AtomicRMWMode（add/and/or/xor/max/min/umax/umin/xchg/addf）与 CAS 的语义",
+            "理解 MemoryOrderingSemantics（weak/relaxed/acquire/release/acq_rel）与 MemoryScope（tl_blk/device/sys）",
+            "了解 atomic_red_view_tko 用于分布式梯度累加（不返回旧值）的设计"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td"
+          ],
+          "minimal_modules": [
+            "Atomics 组操作",
+            "AtomicRMWModeAttr/MemoryOrderingSemanticsAttr/MemoryScopeAttr",
+            "verifyMemoryModelLoad/Store 校验"
+          ],
+          "practice_task": "用 atomic_rmw_tko 实现一次 relaxed/device 作用域的 add 原子加；再写一个 atomic_cas_tko 比较交换；尝试在 atomic_red_view_tko 上使用不支持的 memory_scope=SYS 或 XCHG 模式，观察 Python/验证层报错。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "控制流：循环与条件分支",
+          "order": 4,
+          "filename": "u5-l4-control-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 for/loop/if/break/continue/yield/return/assert 等控制流操作及其 region 与隐式终止符设计。",
+          "learning_goals": [
+            "掌握 for（带归纳变量与 iter_values）与 loop（通用循环）的 region 结构",
+            "理解 if 的 then/else region 与 yield 传值、break/continue/return 终止符",
+            "了解 ControlFlowImplicitTerminatorOpType 如何支持多种隐式终止符"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.h",
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "test/Bytecode/operationsTest.mlir"
+          ],
+          "minimal_modules": [
+            "Control Flow 组操作",
+            "ControlFlowImplicitTerminatorOpType 工具",
+            "operationsTest.mlir 的 for/if 示例"
+          ],
+          "practice_task": "编写一个带 iter_values 的 for 循环，在循环体内用 if 分支与 yield 返回不同值，用 continue 推进；参考 operationsTest.mlir 的 for_op 示例，用 cuda-tile-opt 验证 region 与终止符合法性。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：属性与语义标注",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "属性系统与优化提示",
+          "order": 1,
+          "filename": "u6-l1-attributes-and-opt-hints.md",
+          "level": "intermediate",
+          "topic": "讲解 AttrDefs.td 中的属性体系，重点是 OptimizationHintsAttr（按 SM 架构的逐操作调优提示）及其告警/错误控制。",
+          "learning_goals": [
+            "掌握属性定义机制（CudaTileAttrDef）与各枚举属性（舍入/溢出/有符号/比较/原子/内存序）",
+            "理解 OptimizationHintsAttr 按 sm_80..sm_121 架构给出 num_cta_in_cga、num_worker_warps_per_cta、allow_tma、latency 等提示",
+            "了解方言的 setWarnUnsupportedHints/setErrorOnHints 与 -Wunsupported-hints/-Werr-hints 选项"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Dialect.td",
+            "test/Dialect/CudaTile/opt_hints.mlir",
+            "test/Dialect/CudaTile/entry_opt_hints_error.mlir"
+          ],
+          "minimal_modules": [
+            "OptimizationHintsAttr 定义",
+            "Dialect.td 的 hint 标志 extraClassDeclaration",
+            "opt_hints / entry_opt_hints 测试"
+          ],
+          "practice_task": "给一个 entry 内核附加针对 sm_100 的 OptimizationHints（如 num_cta_in_cga、num_worker_warps_per_cta），分别用 cuda-tile-opt 默认、加 -Wunsupported-hints、加 -Werr-hints 三种方式运行，对比提示与报错行为；参考 entry_opt_hints 系列 mlir。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "assume 操作与静态假设谓词",
+          "order": 2,
+          "filename": "u6-l2-assume-predicates.md",
+          "level": "intermediate",
+          "topic": "讲解 assume 操作及其谓词属性 div_by、same_elements、bounded，如何向编译器提供静态信息以辅助优化。",
+          "learning_goals": [
+            "理解 assume 如何在不产生运行时计算的前提下附加静态假设",
+            "掌握三种谓词：div_by（整除性，含 every/along 分组）、same_elements（同元素模式）、bounded（值域上下界）",
+            "了解 AssumePredicateAttrInterface 接口与谓词校验"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Interfaces.td"
+          ],
+          "minimal_modules": [
+            "assume 操作",
+            "div_by/same_elements/bounded 谓词属性",
+            "AssumePredicateAttrInterface"
+          ],
+          "practice_task": "对一段整数指针 tile 使用 assume_div_by 声明其按 16 字节对齐、用 assume_bounded 给定上下界，再用 cuda-tile-opt 观察附加前后下游（如访存）行为；在 Python 中用 assume_div_by/assume_bounded 复现并阅读其文本属性拼接实现。",
+          "depends_on": [
+            "u5-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "调试信息属性与位置",
+          "order": 3,
+          "filename": "u6-l3-debug-info-attrs.md",
+          "level": "intermediate",
+          "topic": "讲解 DICompileUnit/DIFile/DISubprogram/DILexicalBlock/DILoc 等调试信息属性层级、Location 用途与函数级调试信息校验。",
+          "learning_goals": [
+            "掌握 DINodeAttr/DIScopeAttr/DILocalScopeAttr 类层级与各 DI 属性的语义",
+            "理解调试信息在字节码 Debug 段中的角色与函数体调试信息一致性校验",
+            "了解 verifyFuncDebugInfo/verifyFuncBodyDebugInfo 的校验逻辑"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/IR/Attributes.h",
+            "include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td",
+            "include/cuda_tile/Dialect/CudaTile/IR/Ops.h",
+            "test/Dialect/CudaTile/debuginfo_attr.mlir"
+          ],
+          "minimal_modules": [
+            "DI 属性类层级",
+            "debuginfo_attr.mlir 测试",
+            "函数调试信息校验"
+          ],
+          "practice_task": "为一个 entry 内核附加 DIFile/DISubprogram/DILoc 调试信息属性并用 cuda-tile-opt 验证；参考 debuginfo_attr_invalid.mlir 构造一处不一致的调试信息，观察 verifyFuncDebugInfo 报错。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：字节码二进制格式",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "字节码翻译管线与工具入口",
+          "order": 1,
+          "filename": "u7-l1-bytecode-translation.md",
+          "level": "advanced",
+          "topic": "讲解 mlir-to-cudatilebc / cudatilebc-to-mlir 两个翻译注册、cuda-tile-translate 入口与相关命令行选项。",
+          "learning_goals": [
+            "掌握 BytecodeTranslation.cpp 注册的两个 Translation 与 cuda-tile-translate 的调用流程",
+            "理解 --bytecode-version、--list-versions、--Wunsupported-hints 等命令行选项的作用",
+            "了解翻译注册与 RoundTripTestRegistration 测试翻译的关系"
+          ],
+          "source_files": [
+            "lib/Bytecode/Translation/BytecodeTranslation.cpp",
+            "include/cuda_tile/Bytecode/Translation/BytecodeTranslation.h",
+            "tools/cuda-tile-translate/cuda-tile-translate.cpp",
+            "include/cuda_tile/Bytecode/Common/CommandLineOptions.h"
+          ],
+          "minimal_modules": [
+            "registerTileIRTranslations",
+            "cuda-tile-translate main",
+            "命令行选项注册"
+          ],
+          "practice_task": "用 cuda-tile-translate 把一段 MLIR 编译为 13.1 字节码，再反向翻译回 MLIR 验证 round-trip；运行 --list-versions 列出全部支持的字节码版本，并尝试指定一个不存在的版本观察报错。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "字节码写入器与二进制格式",
+          "order": 2,
+          "filename": "u7-l2-bytecode-writer.md",
+          "level": "advanced",
+          "topic": "讲解 BytecodeWriter 如何把 ModuleOp 序列化为 magic+section 结构：String/Type/Constant/Func/Debug/Global/Producer 各段与编码细节。",
+          "learning_goals": [
+            "掌握字节码 magic number 与 header+section 的整体布局",
+            "理解 StringManager/TypeManager/ConstantManager/DebugInfoWriter/FunctionTableWriter 各管理器的职责",
+            "了解 EncodingWriter 的变长整数（varint/zigzag）与对齐编码"
+          ],
+          "source_files": [
+            "lib/Bytecode/Writer/BytecodeWriter.cpp",
+            "include/cuda_tile/Bytecode/Writer/BytecodeWriter.h"
+          ],
+          "minimal_modules": [
+            "writeBytecode 入口",
+            "Section 枚举与各段写入顺序",
+            "EncodingWriter 与各 Manager 类"
+          ],
+          "practice_task": "用十六进制工具查看自己生成的 .tilebc 文件头部，定位 magic number（0x7F,'T','i','l','e','I','R',0x00）与版本字节；对照源码标注各 Section（String/Type/Constant/Func/Debug/Global/Producer）在文件中的位置。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "字节码读取器与反序列化",
+          "order": 1,
+          "filename": "u7-l3-bytecode-reader.md",
+          "level": "advanced",
+          "topic": "讲解 BytecodeReader 如何解析 header/section、惰性构建类型表、重建 ModuleOp/Global/Function 与逐指令解析操作。",
+          "learning_goals": [
+            "掌握 readBytecode 入口与 parseHeader/parseXxxSection 的解析流程",
+            "理解 LazyTypeTable/DebugInfoReader/InstructionParser/DenseElementsAttrCache 的惰性与缓存设计",
+            "了解 EncodingReader 的 varint 解码与对齐处理"
+          ],
+          "source_files": [
+            "lib/Bytecode/Reader/BytecodeReader.cpp",
+            "include/cuda_tile/Bytecode/Reader/BytecodeReader.h"
+          ],
+          "minimal_modules": [
+            "readBytecode 入口",
+            "各 Section 解析与 createFunction/createGlobal",
+            "InstructionParser::parseOperation"
+          ],
+          "practice_task": "阅读 BytecodeReader 中 parseHeader 与 magic 校验逻辑，定位非法 magic/版本/section 的报错路径；用 test/Bytecode/invalid 下的几个非法字节码文件（如 invalid_magic_number.tileirbc、unsupported_version.tileirbc）触发读取器并核对错误信息。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "字节码版本与兼容性",
+          "order": 2,
+          "filename": "u7-l4-bytecode-versioning.md",
+          "level": "advanced",
+          "topic": "讲解 BytecodeVersion（major.minor.tag）模型、当前/兼容/最低版本、13.1→13.3 的演进与前后向兼容策略。",
+          "learning_goals": [
+            "掌握 kCurrentCompatibilityVersion(13.1)/kCurrentVersion(13.3)/kMinSupportedVersion 与版本比较运算",
+            "理解各版本新增内容（13.2 加 f8E8M0FNU、13.3 加 f4E2M1FN/新视图类型/统一 bitfield/Producer 段/全局可见性）",
+            "了解 sinceVersion 标注如何驱动读写器的版本兼容判断"
+          ],
+          "source_files": [
+            "include/cuda_tile/Bytecode/Common/Version.h",
+            "lib/Bytecode/Common/Version.cpp",
+            "include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td",
+            "test/Bytecode/versioning/test_version_errors.mlir"
+          ],
+          "minimal_modules": [
+            "BytecodeVersion 类与各常量版本",
+            "getSupportedVersions",
+            "versioning 测试目录"
+          ],
+          "practice_task": "把同一段使用了 13.3 新类型（如 f4E2M1FN）的 MLIR 分别以 --bytecode-version=13.1 与 13.3 写出，观察 13.1 目标的报错或降级行为；阅读 test/Bytecode/versioning 下的前向/后向兼容用例并解释其断言。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：TableGen 代码生成与规范",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "cuda-tile-tblgen 字节码代码生成",
+          "order": 1,
+          "filename": "u8-l1-tblgen-bytecode-codegen.md",
+          "level": "advanced",
+          "topic": "讲解 cuda-tile-tblgen 的字节码后端：BytecodeGen/BytecodeReaderGen/BytecodeTypeCodeGen/BytecodeAttrCodeGen 如何从 .td 生成读写胶水代码与 opcode 枚举。",
+          "learning_goals": [
+            "理解 BytecodeOpcodes/BytecodeTypeOpcodes/BytecodeAttrOpcodes 三组 .td 如何定义操作/类型/属性的 opcode 映射",
+            "掌握 BytecodeGen 与 BytecodeReaderGen 生成写入/读取代码的对应关系",
+            "了解生成的 Bytecode.inc/StaticOpcodes.inc/TypeBytecode.inc/AttrBytecode.inc 在读写器中的使用"
+          ],
+          "source_files": [
+            "tools/cuda-tile-tblgen/BytecodeGen.cpp",
+            "tools/cuda-tile-tblgen/BytecodeReaderGen.cpp",
+            "tools/cuda-tile-tblgen/BytecodeTypeCodeGen.cpp",
+            "tools/cuda-tile-tblgen/BytecodeAttrCodeGen.cpp",
+            "include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td"
+          ],
+          "minimal_modules": [
+            "PublicOpcode/TypeTag/AttrTag 定义",
+            "BytecodeGen 与 BytecodeReaderGen",
+            "Type/Attr CodeGen"
+          ],
+          "practice_task": "在 Ops.td 中为一个假想的新操作加上 PublicOpcode 定义（或在脑中模拟），追踪它在 BytecodeGen.cpp→Bytecode.inc→BytecodeWriter.cpp 以及 BytecodeReaderGen.cpp→BytecodeReader.cpp 两条链路上的代码生成与使用点；列出新增一个操作到字节码所需的全部改动位置。",
+          "depends_on": [
+            "u2-l3",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "CUDA Tile IR 规范自动生成",
+          "order": 2,
+          "filename": "u8-l2-spec-generation.md",
+          "level": "advanced",
+          "topic": "讲解 cuda-tile-tblgen 的 gen-op-spec 后端（SpecGen/Emitter/CudaTileOp/CudaTileType/CudaTileAttr）如何从带 mlirExamples/descriptionTables 的 .td 生成人类可读规范。",
+          "learning_goals": [
+            "理解 CudaTileOpMetadata/ArgMetadata 与 mlirExamples/descriptionTables 如何驱动规范输出",
+            "掌握 SpecGen.generateSpec 与 Emitter 的渲染流程",
+            "了解 --examples-directory 选项如何把示例与规范分离输出"
+          ],
+          "source_files": [
+            "tools/cuda-tile-tblgen/SpecGen.cpp",
+            "tools/cuda-tile-tblgen/Emitter.cpp",
+            "tools/cuda-tile-tblgen/CudaTileOp.cpp"
+          ],
+          "minimal_modules": [
+            "gen-op-spec 注册",
+            "SpecGen.generateSpec",
+            "Emitter 渲染"
+          ],
+          "practice_task": "运行 cuda-tile-tblgen --gen-op-spec 对 Ops.td 生成规范片段，挑选一个操作查看其分组、sinceVersion、示例与表格是如何从 .td 元数据渲染出来的；为一个操作补充一条 mlirExamples，重新生成并对比差异。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "专家：优化器与变换 Pass",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Pass 框架与 FuseFMA 融合",
+          "order": 1,
+          "filename": "u9-l1-passes-and-fusefma.md",
+          "level": "advanced",
+          "topic": "讲解 Passes.td/Passes.h 的 Pass 注册框架，重点剖析 FuseFMA Pass 的 MulAddPattern/MulSubPattern 重写规则与非保精度含义。",
+          "learning_goals": [
+            "掌握 MLIR Pass/InterfacePass 注册机制与 registerCudaTilePasses",
+            "理解 FuseFMA 如何把 (a*b)+c / (a*b)-c 重写为 FMA 并保持舍入/FTZ 一致、要求 mul 单一使用",
+            "了解该 Pass 是「非数值保持」的（双轮舍入→单轮舍入）及其影响"
+          ],
+          "source_files": [
+            "include/cuda_tile/Dialect/CudaTile/Transforms/Passes.td",
+            "include/cuda_tile/Dialect/CudaTile/Transforms/Passes.h",
+            "lib/Dialect/CudaTile/Transforms/FuseFMA.cpp",
+            "test/Transforms/fuse-fma.mlir"
+          ],
+          "minimal_modules": [
+            "Passes.td 的 FuseFMAPass",
+            "MulAddPattern/MulSubPattern",
+            "fuse-fma.mlir 测试"
+          ],
+          "practice_task": "编写一段 a*b+c 的 MLIR，用 cuda-tile-opt --fuse-fma 跑出 FMA 形态并核对舍入模式一致性约束；构造一个 mul 有多处使用的反例，确认不会被融合。参考 test/Transforms/fuse-fma.mlir。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "LoopSplit 循环分裂",
+          "order": 2,
+          "filename": "u9-l2-loop-split.md",
+          "level": "advanced",
+          "topic": "讲解 LoopSplit Pass 如何识别「if 条件比较归纳变量与循环不变量」的模式，把循环按谓词分裂成两段以提升性能。",
+          "learning_goals": [
+            "掌握 normalizeForOpCmp 如何把比较规范化为 iv<op>value 并校验符号一致性",
+            "理解 isSplitProfitable 的阈值启发式（默认 1，按重操作判定）",
+            "了解 split-threshold 选项与 cuda_tile.loop_split 属性的交互"
+          ],
+          "source_files": [
+            "lib/Dialect/CudaTile/Transforms/LoopSplit.cpp",
+            "include/cuda_tile/Dialect/CudaTile/Transforms/Passes.td",
+            "test/Transforms/loop_split.mlir"
+          ],
+          "minimal_modules": [
+            "normalizeForOpCmp/isSplitProfitable",
+            "LoopSplitPass 选项",
+            "loop_split.mlir 前后对照"
+          ],
+          "practice_task": "用 Passes.td 中给出的 LoopSplit 示例循环跑 cuda-tile-opt --loop-split，对比分裂前后的 MLIR；调整 --split-threshold 观察分裂是否发生，并解释重操作判定如何影响收益。",
+          "depends_on": [
+            "u9-l1",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "cuda-tile-optimize 工具与优化器管线",
+          "order": 3,
+          "filename": "u9-l3-cuda-tile-optimize.md",
+          "level": "advanced",
+          "topic": "讲解独立的字节码→字节码优化器：TileIROptimizerConfig 配置、optimizeTileIR 流程与 cuda-tile-optimize 命令行接口。",
+          "learning_goals": [
+            "掌握 cuda-tile-optimize 的输入/输出模式（BytecodeFile/MlirFile/Stdout）与 -O/--fuse-fma/--before/--after 选项",
+            "理解 optimizeTileIR 如何读字节码、跑默认管线（canonicalize/CSE/loop_split）再写出",
+            "了解 TileIROptimizerOptions 中 optLevel/loopSplitThreshold/pipelinePreText/pipelinePostText 的组合"
+          ],
+          "source_files": [
+            "tools/cuda-tile-optimize/cuda-tile-optimize.cpp",
+            "include/cuda_tile/Dialect/CudaTile/Optimizer/CudaTileOptimizer.h",
+            "lib/Dialect/CudaTile/Optimizer/CudaTileOptimizer.cpp"
+          ],
+          "minimal_modules": [
+            "cuda-tile-optimize main 与 Options",
+            "TileIROptimizerConfig/Input/Output",
+            "optimizeTileIR/optimizeTileIRModule"
+          ],
+          "practice_task": "把一段 .tilebc 用 cuda-tile-optimize --emit-bytecode -O3 --fuse-fma 优化后重新输出字节码，再用 cuda-tile-translate 反翻译为 MLIR 查看变化；尝试用 --before/--after 在默认管线前后插入额外 pass。",
+          "depends_on": [
+            "u7-l1",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "调试信息合成与规范化",
+          "order": 4,
+          "filename": "u9-l4-debuginfo-synth-and-canonicalize.md",
+          "level": "advanced",
+          "topic": "讲解 SynthesizeDebugInfoScopes Pass 如何为缺乏调试信息的前端合成作用域以生成行号表，以及 canonicalize/CSE/inline 在 cuda-tile-opt 中的注册。",
+          "learning_goals": [
+            "理解 SynthesizeDebugInfoScopesPass 的用途（为前端兜底合成 DIScope 以产生行号信息）",
+            "掌握 cuda-tile-opt 中 registerCanonicalizerPass/registerCSEPass/registerInlinerPass 的注册",
+            "了解 OpsCanonicalization.td 驱动的逐操作规范化模式"
+          ],
+          "source_files": [
+            "lib/Dialect/CudaTile/Transforms/SynthesizeDebugInfoScopes.cpp",
+            "include/cuda_tile/Dialect/CudaTile/Transforms/Passes.td",
+            "tools/cuda-tile-opt/cuda-tile-opt.cpp",
+            "lib/Dialect/CudaTile/IR/OpsCanonicalization.td"
+          ],
+          "minimal_modules": [
+            "SynthesizeDebugInfoScopesPass",
+            "cuda-tile-opt 的 Pass 注册",
+            "OpsCanonicalization.td"
+          ],
+          "practice_task": "对一段没有任何 DISubprogram 的模块跑 cuda-tile-opt --synthesize-debug-info-scopes，观察合成出的作用域；再叠加 --canonicalize 与 --cse 跑同一模块，对比 IR 简化效果。",
+          "depends_on": [
+            "u6-l3",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "专家：集成、Python 绑定与测试",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "C API 集成接口",
+          "order": 1,
+          "filename": "u10-l1-capi-integration.md",
+          "level": "advanced",
+          "topic": "讲解 cuda_tile-c 头文件与 lib/CAPI 实现：如何用 C API 注册方言/Pass、调用优化器并把 CUDA Tile 嵌入第三方项目。",
+          "learning_goals": [
+            "掌握 mlirCudaTileRegisterAllDialects/mlirCudaTileRegisterAllPasses 与 Registration.cpp 的角色",
+            "理解 CudaTileDialect.cpp/CudaTileOptimizer.cpp 暴露的 C API 与 mlirCudaTileOptConfig",
+            "了解通过 CMake 链接 CudaTileDialect 等库集成到外部项目的两种方式"
+          ],
+          "source_files": [
+            "include/cuda_tile-c/Registration.h",
+            "include/cuda_tile-c/Dialect/CudaTileDialect.h",
+            "include/cuda_tile-c/Dialect/CudaTileOptimizer.h",
+            "lib/CAPI/Registration.cpp",
+            "test/CAPI/register.c"
+          ],
+          "minimal_modules": [
+            "Registration.cpp",
+            "CudaTileDialect/Optimizer CAPI 头",
+            "register.c 测试"
+          ],
+          "practice_task": "参考 README 的「Integrating CUDA Tile Into Your Project」与 test/CAPI/register.c，写一个最小 C 程序调用 mlirCudaTileRegisterAllDialects 注册方言并打印成功；说明 CMake 中需要链接哪些库。",
+          "depends_on": [
+            "u2-l2",
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Python 绑定架构",
+          "order": 2,
+          "filename": "u10-l2-python-bindings.md",
+          "level": "advanced",
+          "topic": "讲解基于 nanobind 的 Python 绑定：SiteInitializer 的注册钩子、DialectCudaTile.cpp 的类型/Pass 绑定与 cuda_tile_ops.py 的高层 API。",
+          "learning_goals": [
+            "掌握 SiteInitializer.cpp 的 register_dialects/register_passes 钩子与 _cuda_tile 模块",
+            "理解 DialectCudaTile.cpp 如何暴露 PointerType/TileType/View 类型与 applyTileIROptimizations",
+            "了解 cuda_tile_ops.py 中 Tile/Pointer/TileView 包装类、运算符重载与 cuda_tile_op 装饰器"
+          ],
+          "source_files": [
+            "python/SiteInitializer.cpp",
+            "python/Dialect/DialectCudaTile.cpp",
+            "python/cuda_tile/dialects/cuda_tile_ops.py",
+            "test/python/cuda_tile_public_bindings.py"
+          ],
+          "minimal_modules": [
+            "SiteInitializer 钩子",
+            "DialectCudaTile 绑定",
+            "cuda_tile_ops.py 高层 API"
+          ],
+          "practice_task": "在启用 Python 绑定的构建中，用 Python 创建 Context、register_dialect，用 make_tile_type 构造一个 tile<4x4xf32> 并用 constant+add 构建一段 IR，再 dump 出 MLIR 文本；参考 test/python/cuda_tile_public_bindings.py。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "测试基础设施：lit 与 FileCheck",
+          "order": 3,
+          "filename": "u10-l3-testing-infrastructure.md",
+          "level": "advanced",
+          "topic": "讲解基于 LLVM lit/FileCheck 的测试体系：目录组织、lit.cfg 配置、round-trip 测试脚本与 check-cuda-tile 目标。",
+          "learning_goals": [
+            "掌握 test/ 下 Dialect/Bytecode/Transforms/CAPI/python 各子目录的测试组织与 RUN 行约定",
+            "理解 lit.cfg.py/lit.site.cfg.py.in 如何定位工具与库、%round_trip_test/%PYTHON 替换",
+            "了解 test/lib/TestPasses.cpp 注册测试 Pass 与 round_trip_test.py 的 round-trip 机制"
+          ],
+          "source_files": [
+            "test/CMakeLists.txt",
+            "test/lit.cfg.py",
+            "test/lib/TestPasses.cpp",
+            "test/Bytecode/operationsTest.mlir",
+            "test/round_trip_test.py"
+          ],
+          "minimal_modules": [
+            "test/CMakeLists.txt 与 check-cuda-tile 目标",
+            "lit.cfg.py / lit.site.cfg.py.in",
+            "round-trip 测试机制"
+          ],
+          "practice_task": "参照 test/Bytecode/operationsTest.mlir 的 RUN 行写一个新的 .mlir 用例（%round_trip_test %s %t），在其中测试两个你学过的操作；运行 cmake --build build --target check-cuda-tile 确认它被纳入并通过。",
+          "depends_on": [
+            "u7-l1",
+            "u10-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
