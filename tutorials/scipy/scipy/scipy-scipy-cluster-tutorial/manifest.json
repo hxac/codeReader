@@ -1,7 +1,7 @@
 {
   "project": "scipy-scipy-cluster",
-  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-  "rationale": "scipy.cluster 由两个相对独立的子模块 vq（向量量化/k-means）和 hierarchy（层次/凝聚式聚类）构成，整体属于中型模块，因此采用「先全局后局部、先易后难、先数据结构后算法」的顺序设计 7 个单元、共 24 篇讲义。第 1 单元让读者从零认识项目定位、目录与构建（Python+Cython 双层结构）并跑通端到端小例子；第 2 单元深入较简单的 vq 子模块（whiten→vq→kmeans→kmeans2），由浅入深讲清预处理、编码、迭代收敛与初始化；第 3 单元进入 hierarchy 的核心——linkage matrix 数据结构、linkage() 总入口与七种方法分发，并衔接 Python 与 Cython 的桥接（lazy_cython、array_api）以及 Lance-Williams 距离更新公式；第 4 单元进入专家层，剖析三种 Cython 聚类算法（MST 单链接、最近邻链、fast_linkage）及其底层堆与并查集数据结构；第 5 单元讲如何把层次树切平为 flat clusters 并计算统计量（fcluster、inconsistent、cophenet）；第 6 单元讲树的表示、dendrogram 可视化与最优叶序；第 7 单元收尾于校验、DisjointSet/leaders/isomorphism、array API 兼容与测试体系等工程化主题。依赖关系上，第 1 单元是所有讲义的基础，vq 与 hierarchy 两条主线在第 1 单元后并行展开，Cython 算法单元依赖于第 3 单元的 linkage matrix 与 Lance-Williams 知识，可视化与校验单元则依赖于树的表示，整体形成一条可自顶向下阅读、也可分支深入的学习路径。",
+  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+  "rationale": "本次为增量更新：上一 HEAD(5f09bd71) 与当前 HEAD(de190e7fd) 之间全仓仅有 1 个提交『DOC: special: remove outdated cdflib reference (#25460)』，改动落在 scipy/special 的文档，与 scipy/cluster 完全无关，因此 cluster 目录零变化，全部 24 篇讲义 action=keep，学习路线与单元划分维持原样不变。原设计理由仍然成立：scipy.cluster 由两个相对独立的子模块 vq（向量量化/k-means）和 hierarchy（层次/凝聚式聚类）构成，整体属于中型模块，因此采用「先全局后局部、先易后难、先数据结构后算法」的顺序设计 7 个单元、共 24 篇讲义。第 1 单元让读者从零认识项目定位、目录与构建（Python+Cython 双层结构）并跑通端到端小例子；第 2 单元深入较简单的 vq 子模块（whiten→vq→kmeans→kmeans2），由浅入深讲清预处理、编码、迭代收敛与初始化；第 3 单元进入 hierarchy 的核心——linkage matrix 数据结构、linkage() 总入口与七种方法分发，并衔接 Python 与 Cython 的桥接（lazy_cython、array_api）以及 Lance-Williams 距离更新公式；第 4 单元进入专家层，剖析三种 Cython 聚类算法（MST 单链接、最近邻链、fast_linkage）及其底层堆与并查集数据结构；第 5 单元讲如何把层次树切平为 flat clusters 并计算统计量（fcluster、inconsistent、cophenet）；第 6 单元讲树的表示、dendrogram 可视化与最优叶序；第 7 单元收尾于校验、DisjointSet/leaders/isomorphism、array API 兼容与测试体系等工程化主题。依赖关系上，第 1 单元是所有讲义的基础，vq 与 hierarchy 两条主线在第 1 单元后并行展开，Cython 算法单元依赖于第 3 单元的 linkage matrix 与 Lance-Williams 知识，可视化与校验单元则依赖于树的表示，整体形成一条可自顶向下阅读、也可分支深入的学习路径。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 __init__.py 与两个子模块的 __init__.py，用一句话分别概括 vq 和 hierarchy 各自提供的核心能力，并写一段注释说明为什么向量量化是 k-means 的天然应用。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -63,7 +63,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -92,7 +92,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -126,7 +126,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -154,7 +154,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -182,7 +182,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -212,7 +212,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -245,7 +245,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -272,7 +272,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -299,7 +299,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -326,7 +326,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -361,7 +361,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -388,7 +388,7 @@
             "u4-l1",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -416,7 +416,7 @@
             "u4-l1",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -453,7 +453,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -478,7 +478,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -508,7 +508,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -534,7 +534,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -570,7 +570,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -598,7 +598,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -625,7 +625,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -664,7 +664,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -691,7 +691,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -723,7 +723,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

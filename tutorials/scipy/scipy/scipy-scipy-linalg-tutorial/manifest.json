@@ -1,0 +1,1046 @@
+{
+  "project": "scipy-scipy-linalg",
+  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+  "rationale": "scipy.linalg 是 SciPy 中体量最大的子模块之一，既包含纯 Python 实现的高层 API，又依赖 f2py 包装的 LAPACK/BLAS、Cython 扩展和较新的 C++ 批量后端。学习路线因此按「先会用、再读分解/特征值/矩阵函数等核心算法、最后钻入底层绑定与高性能后端」的顺序设计：第 1-2 单元（入门层）解决「是什么、怎么跑、怎么调用基础函数」；第 3-6 单元（进阶层）覆盖矩阵分解、特征值问题、矩阵函数、矩阵方程/特殊矩阵/随机投影四大主题族，每个主题对应一个相对独立的源码文件，便于读者顺着真实实现阅读；第 7-9 单元（专家层）聚焦底层机制——BLAS/LAPACK 分发与 f2py/Cython 代码生成、C++ 批量后端与矩阵函数 C 后端，最后是插值分解、ILP64 精度、性能取舍与测试体系。这样划分既保证每篇讲义只讲一个独立主题、引用 1-6 个真实源码文件，又通过 depends_on 形成从概览到二次开发的清晰依赖链，适合从零开始的学习者逐步深入。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门与项目概览",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.linalg 项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.linalg 子模块是什么、与 numpy.linalg 的区别与互补关系、它提供哪几大类功能，以及如何在本地安装并 import 使用。",
+          "learning_goals": [
+            "理解 scipy.linalg 在 SciPy 与整个科学计算生态中的定位",
+            "区分 scipy.linalg 与 numpy.linalg 的功能边界与差异",
+            "学会安装 SciPy 并验证 scipy.linalg 可正常导入与调用"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy.linalg 顶层导出与文档字符串",
+            "numpy.linalg 对比说明"
+          ],
+          "practice_task": "安装 SciPy，编写一段脚本调用 scipy.linalg 中的任意两个函数（如 norm 与 det），打印结果并对比同名的 numpy.linalg 函数行为差异。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "模块组织、目录结构与 __init__.py 导出",
+          "order": 2,
+          "filename": "u1-l2-directory-and-exports.md",
+          "level": "beginner",
+          "topic": "讲解 scipy/linalg/ 目录的文件布局，以及 __init__.py 如何按 Basics/特征值/分解/矩阵函数等分类从各子模块汇聚导出公共 API。",
+          "learning_goals": [
+            "掌握 scipy/linalg/ 目录下源码文件的组织方式",
+            "理解 __init__.py 中星号导入与 __all__ 生成机制",
+            "能根据功能类别定位到对应的实现文件"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_misc.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的分类与导入顺序",
+            "各 _decomp_* 与 _matfuncs 模块"
+          ],
+          "practice_task": "打开 __init__.py，找出 solve、svd、expm、toeplitz 分别来自哪个子模块，并用代码验证 from scipy.linalg import ... 能否导入。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统：Meson、f2py、Cython 与 C++ 扩展",
+          "order": 3,
+          "filename": "u1-l3-build-system.md",
+          "level": "beginner",
+          "topic": "通过 meson.build 讲解 scipy.linalg 如何用 f2py 包装 Fortran LAPACK/BLAS、用 Cython 生成部分扩展、用 C++ 编译批量后端，让读者理解可执行产物的来源。",
+          "learning_goals": [
+            "理解 SciPy 基于 Meson 的构建流程",
+            "区分 f2py、Cython、C++ 三种扩展的产物与用途",
+            "知道如何从源码构建 scipy.linalg"
+          ],
+          "source_files": [
+            "meson.build",
+            "fblas.pyf.src",
+            "flapack.pyf.src"
+          ],
+          "minimal_modules": [
+            "meson.build 扩展模块定义",
+            "f2py/Cython/custom_target 构建规则"
+          ],
+          "practice_task": "阅读 meson.build，列出 _flapack、_batched_linalg、_decomp_update 三个扩展分别由哪种工具（f2py / C++ / Cython）产生，并写出依据的行。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "快速上手：第一个线性代数程序",
+          "order": 4,
+          "filename": "u1-l4-first-program.md",
+          "level": "beginner",
+          "topic": "用一个端到端的小例子（求解线性方程组 + 计算范数）串联 inv/solve/det/norm 的用法，并解释 check_finite、overwrite 等公共参数的通用含义。",
+          "learning_goals": [
+            "能用 scipy.linalg 完成一个完整的求解与检验流程",
+            "理解 check_finite、overwrite_a 等公共参数的作用与权衡",
+            "知道如何用 LinAlgError 捕获奇异矩阵等错误"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_misc.py"
+          ],
+          "minimal_modules": [
+            "solve、inv、det",
+            "norm、LinAlgError"
+          ],
+          "practice_task": "构造一个 4×4 系数矩阵 A 与右端 b，用 solve 求 x，再计算残差 ||A@x - b|| 验证正确性，并故意构造一个奇异矩阵触发 LinAlgError。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基础线性代数运算",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "范数、带宽与结构检测",
+          "order": 1,
+          "filename": "u2-l1-norm-and-structure.md",
+          "level": "beginner",
+          "topic": "讲解 norm 支持的多种矩阵/向量范数，bandwidth 返回上下带宽，以及 issymmetric/ishermitian 如何由 Cython 后端高效判定矩阵结构。",
+          "learning_goals": [
+            "掌握 norm 的 ord 取值与含义",
+            "理解 bandwidth 的返回值与带状矩阵概念",
+            "了解 issymmetric/ishermitian 的判定逻辑与 atol/rtol 容差"
+          ],
+          "source_files": [
+            "_misc.py",
+            "_cythonized_array_utils.pyx",
+            "_cythonized_array_utils.pxd"
+          ],
+          "minimal_modules": [
+            "norm、bandwidth",
+            "issymmetric、ishermitian 的 Cython 实现"
+          ],
+          "practice_task": "构造一个对称带状矩阵，计算其 Frobenius 范数与上下带宽，并用 issymmetric/ishermitian 验证其结构。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "线性方程组求解 solve 与 assume_a 调度",
+          "order": 2,
+          "filename": "u2-l2-solve-and-dispatch.md",
+          "level": "beginner",
+          "topic": "深入 solve 的实现：如何通过 assume_a 在通用/对称/Hermitian/正定/三角/带状/三对角等求解器间自动或手动分派，以及面向批量后端的错误聚合。",
+          "learning_goals": [
+            "理解 solve 的 assume_a 参数及其分派逻辑",
+            "掌握 lower、transposed、check_finite 等参数的作用",
+            "了解 _format_emit_errors_warnings 如何聚合批量求解的错误与告警"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_misc.py"
+          ],
+          "minimal_modules": [
+            "solve",
+            "_format_emit_errors_warnings",
+            "_datacopied"
+          ],
+          "practice_task": "对同一个正定矩阵分别用 assume_a='gen' 与 'pos' 求解，比较结果；再尝试 'sym'/'her' 并观察 lower 参数对结果的影响。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "矩阵求逆、行列式与最小二乘",
+          "order": 3,
+          "filename": "u2-l3-inv-det-lstsq.md",
+          "level": "beginner",
+          "topic": "讲解 inv、det、lstsq、pinv、pinvh 的实现与适用场景，区分精确求逆与基于最小二乘的伪逆（Moore-Penrose）。",
+          "learning_goals": [
+            "理解 inv/det 如何复用 LAPACK 分解",
+            "掌握 lstsq 的最小二乘解与残差/秩返回",
+            "区分 pinv（一般矩阵）与 pinvh（Hermitian）伪逆"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_decomp_svd.py"
+          ],
+          "minimal_modules": [
+            "inv、det、lstsq、pinv、pinvh",
+            "get_lapack_funcs 调用"
+          ],
+          "practice_task": "构造一个超定方程组（行多于列），用 lstsq 求最小二乘解，再用 pinv 求伪逆解，验证两者一致；并计算 det 与 inv。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "带状、三角、Toeplitz 与 Circulant 结构化求解器",
+          "order": 4,
+          "filename": "u2-l4-structured-solvers.md",
+          "level": "beginner",
+          "topic": "讲解面向特殊矩阵结构的高效求解器：solve_banded、solveh_banded、solve_triangular、solve_toeplitz、solve_circulant、matmul_toeplitz，以及 Levinson 算法的 Cython 实现。",
+          "learning_goals": [
+            "掌握带状矩阵的存储格式与 solve_banded/solveh_banded 用法",
+            "理解 solve_triangular 的 lower/unit_diagonal 选项",
+            "了解 Toeplitz/Circulant 系统的专用求解路径与 _solve_toeplitz.pyx 的 Levinson 算法"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_solve_toeplitz.pyx",
+            "_matfuncs_inv_ssq.py"
+          ],
+          "minimal_modules": [
+            "solve_banded、solveh_banded、solve_triangular、solve_circulant",
+            "levinson（Toeplitz 求解）"
+          ],
+          "practice_task": "构造一个对称正定带状矩阵与一个 Toeplitz 矩阵，分别用 solveh_banded 与 solve_toeplitz 求解，并与通用 solve 的结果对比验证。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "矩阵分解",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "LU 分解与 lu_solve",
+          "order": 1,
+          "filename": "u3-l1-lu-decomposition.md",
+          "level": "intermediate",
+          "topic": "讲解 lu、lu_factor、lu_solve 的实现：如何调用 LAPACK getrf，返回置换向量与三角因子，以及 lu_factor + lu_solve 的复用模式。",
+          "learning_goals": [
+            "理解 LU 分解的输出结构（L、U、piv）",
+            "掌握 lu_factor/lu_solve 的两步求解模式",
+            "了解 permute_l、overwrite_a、check_finite 参数的作用"
+          ],
+          "source_files": [
+            "_decomp_lu.py",
+            "_basic.py"
+          ],
+          "minimal_modules": [
+            "lu、lu_factor、lu_solve",
+            "_linalg_lu_det.hh 批量后端"
+          ],
+          "practice_task": "对随机矩阵做 lu_factor，再用 lu_solve 求解多个右端 b，比较与直接 solve 的效率与结果一致性。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Cholesky 分解与带状 Cholesky",
+          "order": 2,
+          "filename": "u3-l2-cholesky.md",
+          "level": "intermediate",
+          "topic": "讲解 cholesky、cho_factor、cho_solve、cholesky_banded、cho_solve_banded 的实现，强调对称正定矩阵的高效分解与求解复用。",
+          "learning_goals": [
+            "理解 Cholesky 分解的前提（对称正定）与 lower 选项",
+            "掌握 cho_factor + cho_solve 的两步求解模式",
+            "了解带状 Cholesky 的存储格式与求解"
+          ],
+          "source_files": [
+            "_decomp_cholesky.py"
+          ],
+          "minimal_modules": [
+            "cholesky、cho_factor、cho_solve、cholesky_banded、cho_solve_banded"
+          ],
+          "practice_task": "构造对称正定矩阵，分别用 cho_factor/cho_solve 与带状版 cholesky_banded/cho_solve_banded 求解，验证结果并对一个非正定矩阵观察报错。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "QR 分解、qr_multiply 与 RQ",
+          "order": 3,
+          "filename": "u3-l3-qr-decomposition.md",
+          "level": "intermediate",
+          "topic": "讲解 qr 的 mode（full/reduced/r/raw）与 pivoting 选项、qr_multiply 同时求 Q 并乘矩阵、以及 rq 分解的实现细节。",
+          "learning_goals": [
+            "理解 QR 分解的多种 mode 与返回结构",
+            "掌握 pivoting 列主元 QR 的用途",
+            "了解 qr_multiply 与 rq 的实现路径与 safecall 包装"
+          ],
+          "source_files": [
+            "_decomp_qr.py"
+          ],
+          "minimal_modules": [
+            "qr、qr_multiply、rq",
+            "safecall、_NoValue/lwork 处理"
+          ],
+          "practice_task": "对一个瘦长矩阵分别用 full 与 reduced 模式做 qr，再用 qr_multiply 计算 Q.T @ c，并与直接分解后手动相乘的结果对比。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "SVD 奇异值分解及正交/零空间",
+          "order": 4,
+          "filename": "u3-l4-svd.md",
+          "level": "intermediate",
+          "topic": "讲解 svd、svdvals、diagsvd、orth、null_space、subspace_angles 的实现，涵盖 full_matrices、compute_uv、lapack_driver 选择与 rcond 截断。",
+          "learning_goals": [
+            "理解 SVD 的 U/Σ/V 返回结构与 full_matrices 的影响",
+            "掌握 orth 与 null_space 基于 rcond 的秩截断",
+            "了解 subspace_angles 的计算原理"
+          ],
+          "source_files": [
+            "_decomp_svd.py"
+          ],
+          "minimal_modules": [
+            "svd、svdvals、diagsvd、orth、null_space、subspace_angles"
+          ],
+          "practice_task": "构造秩亏损矩阵，用 svd 求奇异值，再用 orth 与 null_space 提取其列空间与零空间，并用 diagsvd 重构矩阵。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Schur 分解、rsf2csf 与 QZ 分解",
+          "order": 5,
+          "filename": "u3-l5-schur-and-qz.md",
+          "level": "intermediate",
+          "topic": "讲解 schur（含 sort 排序）、rsf2csf（实 Schur 转复 Schur）、qz 与 ordqz（广义特征值排序）的实现，以及 _select_function 系列区域选择器。",
+          "learning_goals": [
+            "理解 Schur 分解 A=QTQ^H 与 output='real'/'complex' 的差异",
+            "掌握 rsf2csf 的实→复转换",
+            "了解 qz/ordqz 用于矩阵对广义特征值及 lhp/rhp/iuc/ouc 排序"
+          ],
+          "source_files": [
+            "_decomp_schur.py",
+            "_decomp_qz.py"
+          ],
+          "minimal_modules": [
+            "schur、rsf2csf",
+            "qz、ordqz、_select_function"
+          ],
+          "practice_task": "对一般矩阵做 schur 分解并验证 A≈Z@T@Z^H，再用 rsf2csf 转换；对矩阵对 (A,B) 做 qz 并用 ordqz 按左半平面排序广义特征值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "LDL、Polar 与 Cossin 分解",
+          "order": 6,
+          "filename": "u3-l6-ldl-polar-cossin.md",
+          "level": "intermediate",
+          "topic": "讲解 ldl（对称/Hermitian 的 LDL^T/LDL^H 分解与枢轴整理）、polar（极分解）、cossin（酉/正交矩阵的余弦-正弦分解）的实现。",
+          "learning_goals": [
+            "理解 LDL 分解的输出与 _ldl_sanitize_ipiv/_ldl_construct_tri_factor 枢轴整理",
+            "掌握 polar 的 side 参数与极分解含义",
+            "了解 cossin 对酉矩阵分块的意义与 separate/swap_sign 选项"
+          ],
+          "source_files": [
+            "_decomp_ldl.py",
+            "_decomp_polar.py",
+            "_decomp_cossin.py"
+          ],
+          "minimal_modules": [
+            "ldl",
+            "polar",
+            "cossin、_cossin"
+          ],
+          "practice_task": "对一个对称矩阵做 ldl 并重构验证；对一个方阵做 polar 得到酉因子与正定因子；对一个随机正交矩阵做 cossin 分解。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "QR 增量更新（Cython _decomp_update）",
+          "order": 7,
+          "filename": "u3-l7-qr-update.md",
+          "level": "intermediate",
+          "topic": "讲解 _decomp_update.pyx.in（Tempita 模板生成的 Cython）实现的 qr_update、qr_insert、qr_delete，如何在不重新分解的情况下对已分解的 QR 做秩更新/行列增删。",
+          "learning_goals": [
+            "理解 QR 增量更新的应用场景与算法",
+            "掌握 qr_update、qr_insert、qr_delete 的输入输出约定",
+            "了解 Tempita 模板 + Cython 生成多类型代码的机制"
+          ],
+          "source_files": [
+            "_decomp_update.pyx.in",
+            "_decomp_qr.py"
+          ],
+          "minimal_modules": [
+            "qr_update、qr_insert、qr_delete",
+            "内联 BLAS 工具（rot、larfg、ormqr 等）"
+          ],
+          "practice_task": "对矩阵 A 做 QR 得到 (Q,R)，再追加一行后用 qr_insert 更新 Q、R，并与重新 qr 分解的结果对比误差。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "特征值问题",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "一般特征值问题 eig / eigvals",
+          "order": 1,
+          "filename": "u4-l1-eig-general.md",
+          "level": "intermediate",
+          "topic": "讲解 eig 与 eigvals 的实现：标准与广义特征值问题、left/right 特征向量、homogeneous_eigvals、driver 选择与收敛信息处理。",
+          "learning_goals": [
+            "理解 eig 求解 A x = λ x 与广义 A x = λ B x",
+            "掌握 left、right、homogeneous_eigvals 参数",
+            "了解 _check_format_errors_warnings 与 LAPACK info 的错误处理"
+          ],
+          "source_files": [
+            "_decomp.py"
+          ],
+          "minimal_modules": [
+            "eig、eigvals",
+            "_make_eigvals、_check_format_errors_warnings"
+          ],
+          "practice_task": "对一般矩阵求特征值与右特征向量，验证 A @ V ≈ V @ diag(λ)；再对广义问题 A x=λ B x 求解。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "对称/Hermitian 特征值 eigh / eigvalsh",
+          "order": 2,
+          "filename": "u4-l2-eigh-hermitian.md",
+          "level": "intermediate",
+          "topic": "讲解 eigh 与 eigvalsh：利用对称/Hermitian 结构调用更高效的 LAPACK 驱动，eigvals_only、subset_by_index/range/value 的部分特征值选择。",
+          "learning_goals": [
+            "理解 eigh 相比 eig 在对称/Hermitian 情况下的优势",
+            "掌握 subset_by_index/value 等部分特征值选择",
+            "了解 _check_select 对选择参数的校验"
+          ],
+          "source_files": [
+            "_decomp.py"
+          ],
+          "minimal_modules": [
+            "eigh、eigvalsh",
+            "_check_select"
+          ],
+          "practice_task": "构造对称矩阵，用 eigh 只求最大 3 个特征值与特征向量（subset_by_index），并与全量结果对比。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "带状与三对角特征值问题",
+          "order": 3,
+          "filename": "u4-l3-banded-tridiagonal-eig.md",
+          "level": "intermediate",
+          "topic": "讲解 eig_banded、eigvals_banded、eigh_tridiagonal、eigvalsh_tridiagonal：面向带状与三对角矩阵的专用高效特征值驱动。",
+          "learning_goals": [
+            "理解带状矩阵的存储格式与 eig_banded 的输入约定",
+            "掌握三对角特征值问题 eigh_tridiagonal 的 d,e 输入与 select 选项",
+            "了解 eigvals_only 与部分选择在这些驱动中的表现"
+          ],
+          "source_files": [
+            "_decomp.py"
+          ],
+          "minimal_modules": [
+            "eig_banded、eigvals_banded、eigh_tridiagonal、eigvalsh_tridiagonal"
+          ],
+          "practice_task": "构造一个对称三对角矩阵，用 eigh_tridiagonal 求解，并与把同一矩阵写成密集形式后用 eigh 的结果对比。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "矩阵函数",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "矩阵指数 expm 与 Padé 近似 C 后端",
+          "order": 1,
+          "filename": "u5-l1-expm.md",
+          "level": "intermediate",
+          "topic": "讲解 expm 的实现：缩放-平方 + Padé 近似策略，C 后端 _matfuncs_expm.c 的角色，以及 _onenorm(est) 估计与 balancing 的配合。",
+          "learning_goals": [
+            "理解矩阵指数的缩放-平方 + Padé 算法",
+            "了解 _matfuncs_expm.c 作为底层 Padé 求值的作用",
+            "掌握 expm 与 scipy.linalg 误差控制的关系"
+          ],
+          "source_files": [
+            "_matfuncs.py",
+            "src/_matfuncs_expm.c",
+            "_matfuncsmodule.c"
+          ],
+          "minimal_modules": [
+            "expm",
+            "_matfuncs_expm.c 的 Padé 求值",
+            "_onenormest / balancing"
+          ],
+          "practice_task": "对一个小矩阵计算 expm(A)，并与用泰勒级数手算的前几项近似对比；验证 expm(零矩阵) 为单位阵。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "矩阵对数 logm、funm 与分数幂",
+          "order": 2,
+          "filename": "u5-l2-logm-funm-power.md",
+          "level": "intermediate",
+          "topic": "讲解 logm（含逆平方法 _matfuncs_inv_ssq.py 的辅助）、funm（对任意函数作用）、fractional_matrix_power 与 signm 的实现。",
+          "learning_goals": [
+            "理解 logm 基于 Schur 分解与逆平方的处理",
+            "掌握 funm 将标量函数推广到矩阵的原理",
+            "了解 fractional_matrix_power 与 signm 的实现"
+          ],
+          "source_files": [
+            "_matfuncs.py",
+            "_matfuncs_inv_ssq.py"
+          ],
+          "minimal_modules": [
+            "logm、funm、fractional_matrix_power、signm",
+            "_fractional_power_pade、_inverse_squaring_helper"
+          ],
+          "practice_task": "对正定矩阵 A，验证 expm(logm(A)) ≈ A；用 funm 对矩阵作用 numpy.sin 并与 sinm 对比。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "矩阵平方根 sqrtm 与 Schur 分块算法",
+          "order": 3,
+          "filename": "u5-l3-sqrtm.md",
+          "level": "intermediate",
+          "topic": "讲解 sqrtm 的实现：先做 Schur 分解，再用 _sqrtm_triu 对三角因子做分块平方根，其中 within_block_loop 由 Cython 加速、块间用 LAPACK trsyl。",
+          "learning_goals": [
+            "理解 sqrtm 的 Schur 分解 + 三角平方根流程",
+            "掌握 _matfuncs_sqrtm.py 的分块算法与 blocksize",
+            "了解 _matfuncs_sqrtm_triu.pyx 的 within_block_loop 与 trsyl 块间求解"
+          ],
+          "source_files": [
+            "_matfuncs_sqrtm.py",
+            "_matfuncs_sqrtm_triu.pyx",
+            "src/_matfuncs_sqrtm.c"
+          ],
+          "minimal_modules": [
+            "sqrtm",
+            "_sqrtm_triu、within_block_loop",
+            "trsyl（LAPACK）"
+          ],
+          "practice_task": "对一个矩阵计算 sqrtm(A)，并验证 R @ R ≈ A；观察对负特征值矩阵结果为复数。",
+          "depends_on": [
+            "u3-l5",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "三角/双曲矩阵函数与 expm 的 Fréchet 导数",
+          "order": 4,
+          "filename": "u5-l4-trig-frechet.md",
+          "level": "intermediate",
+          "topic": "讲解 cosm/sinm/tanm/coshm/sinhm/tanhm 等三角/双曲矩阵函数的实现，以及 expm_frechet（Fréchet 导数）与 expm_cond（条件数）。",
+          "learning_goals": [
+            "理解三角/双曲矩阵函数基于 funm 的实现",
+            "掌握 expm_frechet 计算 expm 对扰动的敏感性",
+            "了解 expm_cond 给出 expm 的相对条件数"
+          ],
+          "source_files": [
+            "_matfuncs.py",
+            "_expm_frechet.py"
+          ],
+          "minimal_modules": [
+            "cosm、sinm、tanm、coshm、sinhm、tanhm",
+            "expm_frechet、expm_cond"
+          ],
+          "practice_task": "计算矩阵的 cosm 与 sinm，验证 expm(1j*A) ≈ cosm(A) + 1j*sinm(A) 的恒等关系；并用 expm_frechet 估计 expm 对扰动的导数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "矩阵方程、特殊矩阵与随机投影",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "矩阵方程求解器（Sylvester/Lyapunov/Riccati ARE）",
+          "order": 1,
+          "filename": "u6-l1-matrix-equations.md",
+          "level": "intermediate",
+          "topic": "讲解 _solvers.py 中的 solve_sylvester、solve_continuous_lyapunov、solve_discrete_lyapunov，以及连续/离散代数 Riccati 方程 solve_continuous_are/solve_discrete_are 的实现。",
+          "learning_goals": [
+            "理解 Sylvester 与 Lyapunov 方程的求解（含 Schur 分解）",
+            "掌握 ARE 的参数校验与平衡（balanced）",
+            "了解 _are_validate_args 与 care/dare 内部实现"
+          ],
+          "source_files": [
+            "_solvers.py"
+          ],
+          "minimal_modules": [
+            "solve_sylvester、solve_continuous_lyapunov、solve_discrete_lyapunov",
+            "solve_continuous_are、solve_discrete_are、_are_validate_args"
+          ],
+          "practice_task": "构造小规模 Sylvester 方程 AX + XB = Q 求解并验证残差；再构造一个简单 CARE 并用 solve_continuous_are 求解。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "特殊矩阵构造",
+          "order": 2,
+          "filename": "u6-l2-special-matrices.md",
+          "level": "intermediate",
+          "topic": "讲解 _special_matrices.py 中各类著名矩阵的构造：toeplitz、circulant、hankel、hadamard、leslie、block_diag、companion、helmert、hilbert/invhilbert、pascal/invpascal、dft、fiedler、convolution_matrix 等。",
+          "learning_goals": [
+            "掌握常见特殊矩阵的数学定义与构造参数",
+            "理解 invhilbert/invpascal 的精确（exact）整数计算选项",
+            "了解 convolution_matrix 与卷积的关系"
+          ],
+          "source_files": [
+            "_special_matrices.py"
+          ],
+          "minimal_modules": [
+            "toeplitz、circulant、hankel、hadamard",
+            "hilbert、invhilbert、pascal、invpascal、dft、convolution_matrix"
+          ],
+          "practice_task": "构造 Hilbert 矩阵并用 invhilbert 得到其精确逆，验证两者乘积接近单位阵；再生成一个 Pascal 矩阵与其逆。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "随机投影与 Procrustes 问题",
+          "order": 3,
+          "filename": "u6-l3-sketches-procrustes.md",
+          "level": "intermediate",
+          "topic": "讲解 _sketches.py 的 clarkson_woodruff_transform（CountMin 草图，含 cwt_matrix 生成）与 _procrustes.py 的 orthogonal_procrustes 正交普氏分析。",
+          "learning_goals": [
+            "理解 Clarkson-Woodruff 随机投影的降维原理与误差保证",
+            "掌握 cwt_matrix 稀疏随机矩阵的构造",
+            "了解 orthogonal_procrustes 的最小化目标与返回"
+          ],
+          "source_files": [
+            "_sketches.py",
+            "_procrustes.py"
+          ],
+          "minimal_modules": [
+            "clarkson_woodruff_transform、cwt_matrix、_batch_dot",
+            "orthogonal_procrustes"
+          ],
+          "practice_task": "对一个稀疏高矩阵做 clarkson_woodruff_transform 降维，验证近似乘积的范数保持；再用 orthogonal_procrustes 对齐两组点。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "底层 BLAS/LAPACK 接口",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "get_blas_funcs / get_lapack_funcs 与类型分发",
+          "order": 1,
+          "filename": "u7-l1-blas-lapack-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 blas.py/lapack.py 的核心分发：find_best_blas_type 依据 dtype 与内存布局选择 s/d/c/z 前缀，get_blas_funcs/get_lapack_funcs 返回带前缀的底层例程，以及 _compute_lwork 与 dtype 规范化。",
+          "learning_goals": [
+            "理解 BLAS/LAPACK 的 s/d/c/z 类型前缀机制",
+            "掌握 find_best_blas_type 的打分与 Fortran-order 偏好",
+            "了解 get_lapack_funcs 的 ilp64 选项与 _normalize_lapack_dtype"
+          ],
+          "source_files": [
+            "blas.py",
+            "lapack.py"
+          ],
+          "minimal_modules": [
+            "get_blas_funcs、find_best_blas_type、_get_funcs",
+            "get_lapack_funcs、_compute_lwork、_normalize_lapack_dtype"
+          ],
+          "practice_task": "用 find_best_blas_type 观察不同 dtype/内存布局返回的前缀，再用 get_lapack_funcs 取 'getrf' 对随机矩阵手动做 LU，与 lu 函数结果对比。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "f2py 包装与 pyf.src 签名文件",
+          "order": 2,
+          "filename": "u7-l2-f2py-pyf.md",
+          "level": "advanced",
+          "topic": "讲解如何用 f2py 通过 fblas.pyf.src、flapack*.pyf.src 签名文件生成 _fblas/_flapack（及 ILP64 的 _64 变体）C 扩展模块，以及 meson.build 中对应的构建规则。",
+          "learning_goals": [
+            "理解 .pyf.src 签名文件如何描述 Fortran 例程接口",
+            "掌握 fblas_l1/l2/l3、flapack_gen/sym_herm 等分文件组织",
+            "了解 LP64 与 ILP64 两套 _fblas/_flapack 与 _fblas_64/_flapack_64 的构建"
+          ],
+          "source_files": [
+            "meson.build",
+            "fblas.pyf.src",
+            "flapack.pyf.src",
+            "flapack_gen.pyf.src",
+            "fblas_l1.pyf.src"
+          ],
+          "minimal_modules": [
+            "f2py 自定义目标 _fblas/_flapack",
+            "pyf.src 签名与 include 机制"
+          ],
+          "practice_task": "在 flapack_gen.pyf.src 中找到一个 LAPACK 例程（如 dgetrf）的签名，描述其参数含义，并说明它如何被 meson 构建进 _flapack。",
+          "depends_on": [
+            "u7-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "cython_blas / cython_lapack 与代码生成",
+          "order": 3,
+          "filename": "u7-l3-cython-blas-lapack.md",
+          "level": "advanced",
+          "topic": "讲解 _generate_pyx.py 如何从 cython_blas_signatures.txt / cython_lapack_signatures.txt 生成 cython_blas.pyx / cython_lapack.pyx，以及 _cython_signature_generator.py 维护签名文本的流程，供 Cython 用户在 nogil 下直接调用 BLAS/LAPACK。",
+          "learning_goals": [
+            "理解 cython_blas/cython_lapack 面向 Cython 用户的定位",
+            "掌握 _generate_pyx.py 的模板生成与 ILP64 处理",
+            "了解签名文本文件的来源与维护"
+          ],
+          "source_files": [
+            "_generate_pyx.py",
+            "_cython_signature_generator.py",
+            "cython_blas_signatures.txt",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "cython_linalg custom_target",
+            "_generate_pyx.py",
+            "_cython_signature_generator.py"
+          ],
+          "practice_task": "阅读 _generate_pyx.py，说明 cython_blas.pyx 是如何从签名文件生成的；并描述一个 Cython 用户应如何 import scipy.linalg.cython_blas 调用 dgemm。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Cython 扩展模块实践",
+          "order": 4,
+          "filename": "u7-l4-cython-extensions.md",
+          "level": "advanced",
+          "topic": "以 _solve_toeplitz.pyx（Levinson）、_cythonized_array_utils.pyx（issymmetric/ishermitian）、_matfuncs_sqrtm_triu.pyx（within_block_loop）为例，讲解如何在 scipy.linalg 中编写与构建 Cython 扩展（含 pxd、memoryview、nogil）。",
+          "learning_goals": [
+            "理解 Cython memoryview 与 nogil 在数值内核中的用法",
+            "掌握 _cythonized_array_utils 的连续/非连续分支处理",
+            "了解 _decomp_update.pyx.in 经 Tempita 生成多类型代码的模式"
+          ],
+          "source_files": [
+            "_solve_toeplitz.pyx",
+            "_cythonized_array_utils.pyx",
+            "_cythonized_array_utils.pxd",
+            "_matfuncs_sqrtm_triu.pyx"
+          ],
+          "minimal_modules": [
+            "levinson、within_block_loop",
+            "issymmetric/ishermitian 的 is_sym_her_* 内核"
+          ],
+          "practice_task": "阅读 _cythonized_array_utils.pyx，对比连续（C layout）与非连续两个分支的实现差异，并说明它们如何被 Python 层 issymmetric/ishermitian 调度。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "批量线性代数与高性能后端",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "批量（batch）线性代数：Python 接口与批处理维度",
+          "order": 1,
+          "filename": "u8-l1-batched-python-api.md",
+          "level": "advanced",
+          "topic": "讲解 inv/solve/det/svd/eig 等函数支持「批处理维度」的前导形状，以及 _basic.py/_decomp.py 如何通过 _batched_linalg 后端与 _apply_over_batch 处理一叠矩阵。",
+          "learning_goals": [
+            "理解批处理维度的概念与广播规则",
+            "掌握批量后端在 inv/solve/det 中的调用路径",
+            "了解 _format_emit_errors_warnings 如何聚合每片（slice）的奇异/病态信息"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_decomp_svd.py",
+            "_decomp.py"
+          ],
+          "minimal_modules": [
+            "solve/inv/det 的批量分支",
+            "_apply_over_batch",
+            "_format_emit_errors_warnings"
+          ],
+          "practice_task": "构造一个形状 (5, 4, 4) 的矩阵堆栈，用 scipy.linalg.inv 一次性求逆并验证；再用 solve 求解一叠线性系统。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "C++ 批量后端实现",
+          "order": 2,
+          "filename": "u8-l2-batched-cpp-backend.md",
+          "level": "advanced",
+          "topic": "讲解 src/_batched_linalg_module.cc 与 _linalg_*.hh 头文件（inv、solve、lu_det、svd、eig、cholesky、qr、lstsq）如何用 C++ 实现批处理内核、错误聚合与 LAPACK 调用，以及 _common_array_utils.hh 的公共工具。",
+          "learning_goals": [
+            "理解 C++ 批量后端对每片矩阵循环调用 LAPACK 的结构",
+            "掌握错误/告警信息如何回传到 Python 层",
+            "了解 _common_array_utils.hh 提供的通用数组工具"
+          ],
+          "source_files": [
+            "src/_batched_linalg_module.cc",
+            "src/_linalg_inv.hh",
+            "src/_linalg_solve.hh",
+            "src/_linalg_lu_det.hh",
+            "src/_common_array_utils.hh"
+          ],
+          "minimal_modules": [
+            "module_methods 与 doc_*",
+            "_linalg_inv/_linalg_solve/_linalg_lu_det 内核",
+            "_common_array_utils.hh"
+          ],
+          "practice_task": "阅读 _batched_linalg_module.cc，列出模块导出的方法（如 det、inv、solve、svd、eig），并指出其中 doc_inv/doc_solve/doc_svd 分别对应哪个头文件实现。",
+          "depends_on": [
+            "u8-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "矩阵函数 C 后端",
+          "order": 3,
+          "filename": "u8-l3-matfuncs-c-backend.md",
+          "level": "advanced",
+          "topic": "讲解 src/_matfuncs_expm.c（Padé 指数）、src/_matfuncs_sqrtm.c（平方根辅助）与 _matfuncsmodule.c 如何构成 _internal_matfuncs 扩展，被 _matfuncs.py 调用。",
+          "learning_goals": [
+            "理解 _matfuncs_expm.c 中 Padé 近似的具体求值",
+            "掌握 _matfuncs_sqrtm.c 在 sqrtm 链路中的角色",
+            "了解 _matfuncsmodule.c 的模块注册与构建"
+          ],
+          "source_files": [
+            "src/_matfuncs_expm.c",
+            "src/_matfuncs_sqrtm.c",
+            "_matfuncsmodule.c",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "_internal_matfuncs 扩展",
+            "expm Padé 内核",
+            "sqrtm 辅助内核"
+          ],
+          "practice_task": "在 _matfuncs_expm.c 中定位 Padé 近似的核心循环，描述其输入输出，并说明它如何被 _matfuncs.py 的 expm 调用。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "扩展、精度与工程实践",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "插值矩阵分解（interpolative.py 与 _decomp_interpolative.pyx）",
+          "order": 1,
+          "filename": "u9-l1-interpolative-decomp.md",
+          "level": "advanced",
+          "topic": "讲解 interpolative.py 提供的高层接口（interp_decomp、reconstruct_*、id_to_svd、svd、estimate_rank、estimate_spectral_norm 等）及其底层 _decomp_interpolative.pyx 的实现。",
+          "learning_goals": [
+            "理解插值分解（ID）的列选骨+系数表示",
+            "掌握 ID 与 SVD 的互相转换（id_to_svd、svd）",
+            "了解估计谱范数与秩的随机化方法"
+          ],
+          "source_files": [
+            "interpolative.py",
+            "_decomp_interpolative.pyx"
+          ],
+          "minimal_modules": [
+            "interp_decomp、reconstruct_matrix_from_id、id_to_svd",
+            "svd、estimate_rank、estimate_spectral_norm"
+          ],
+          "practice_task": "对一个低秩近似矩阵做 interp_decomp 得到骨架与系数，用 reconstruct_matrix_from_id 重构，并与 estimate_rank 估计的秩对比。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "ILP64、多精度与 dtype 处理",
+          "order": 2,
+          "filename": "u9-l2-ilp64-dtypes.md",
+          "level": "advanced",
+          "topic": "讲解 LP64 与 ILP64 两套整数模型在 scipy.linalg 中的实现：f2py 的 64 变体、cython_blas_lapack 的 ilp64 标志、_ensure_dtype_cdsz/_ensure_aligned_and_native 与 _compute_lwork 的整数溢出防护。",
+          "learning_goals": [
+            "理解 BLAS/LAPACK 中 32 位 vs 64 位整数的影响",
+            "掌握 ilp64='preferred'/'disable' 在 get_*_funcs 中的行为",
+            "了解大矩阵场景下的整数工作数组长度检查"
+          ],
+          "source_files": [
+            "lapack.py",
+            "blas.py",
+            "_generate_pyx.py",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "get_lapack_funcs 的 ilp64",
+            "_compute_lwork、_check_work_float",
+            "_ensure_dtype_cdsz、_ensure_aligned_and_native"
+          ],
+          "practice_task": "阅读 meson.build 与 _generate_pyx.py，说明 LP64/ILP64 两套扩展如何被条件构建；并解释 cython_blas_ilp64 标志的作用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "性能、内存布局与错误处理取舍",
+          "order": 3,
+          "filename": "u9-l3-performance-layout.md",
+          "level": "advanced",
+          "topic": "讲解 scipy.linalg 中的通用工程取舍：check_finite 的安全性与性能权衡、overwrite_a/overwrite_b 的原地写入、Fortran vs C 内存布局对底层例程的影响、_datacopied 的拷贝检测。",
+          "learning_goals": [
+            "理解 check_finite 关闭后的性能收益与风险",
+            "掌握 overwrite_* 的语义与 _datacopied 的作用",
+            "了解内存布局如何影响 BLAS/LAPACK 路径选择"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_misc.py",
+            "blas.py",
+            "lapack.py"
+          ],
+          "minimal_modules": [
+            "check_finite、overwrite_a/overwrite_b",
+            "_datacopied",
+            "find_best_blas_type 的 FORTRAN 偏好"
+          ],
+          "practice_task": "对同一矩阵分别以 C 序与 Fortran 序存储，比较 solve/getrf 在 overwrite 开关下的行为差异；并用 _datacopied 概念解释拷贝何时发生。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "测试体系与二次开发实践",
+          "order": 4,
+          "filename": "u9-l4-tests-and-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 目录的测试组织（test_basic、test_decomp、test_matfuncs、test_blas/test_lapack、test_batch 等），以及如何运行测试、为 scipy.linalg 新增函数或扩展并保证质量。",
+          "learning_goals": [
+            "掌握 scipy.linalg 的测试文件组织与命名约定",
+            "理解如何用 PytestTester / pytest 运行子模块测试",
+            "了解新增功能时应配套的测试与文档实践"
+          ],
+          "source_files": [
+            "tests/test_basic.py",
+            "tests/test_decomp.py",
+            "tests/test_matfuncs.py",
+            "tests/test_batch.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "test 命令（PytestTester）",
+            "各 test_*.py 的覆盖范围",
+            "批量测试 test_batch.py"
+          ],
+          "practice_task": "运行 scipy.linalg.test() 或对 tests/test_basic.py 执行 pytest，挑选一个函数（如 solve）找到其测试用例，并尝试新增一个边界用例。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

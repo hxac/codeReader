@@ -1,7 +1,7 @@
 {
   "project": "scipy-scipy-integrate",
-  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-  "rationale": "scipy.integrate 是一个体量大、职责清晰的大型子包，可归纳为四大主题：数值积分（固定样本 + 自适应函数积分 + 高维 cubature）、常微分方程初值问题求解（新 API solve_ivp 与旧 API ode/odeint）、边值问题 solve_bvp，以及底层 C/Fortran 扩展与构建系统。因此学习路线按「先整体后局部、先易后难、先用法后源码」设计：第 1 单元先建立全景与运行环境；第 2 单元从最直观的固定样本积分（梯形/辛普森/龙贝格）入手；第 3–5 单元逐步进入自适应函数积分（QUADPACK 的 quad 系列、向量值 quad_vec、元素级 tanhsinh/nsum、球面 lebedev_rule、以及基于规则系统的高维 cubature）；第 6–9 单元系统讲解 ODE 初值问题——先从 solve_ivp 用法切入，再深入 OdeSolver 基类、显式 Runge-Kutta（RK23/45/DOP853）、隐式刚性求解器（Radau/BDF）、LSODA 与事件检测及主循环；第 10 单元专讲边值问题 solve_bvp；第 11 单元覆盖旧 API（ode/complex_ode/odeint）以理解历史与封装关系；最后第 12–13 单元进入专家层，剖析 meson 构建、C/Fortran 扩展、ccallback/LowLevelCallable 机制，以及测试组织、二次开发（自定义求解器与积分规则）和架构取舍。讲义之间通过 depends_on 形成清晰 DAG，每篇只解决一个独立主题并配套真实源码与可操作实践任务，整体 36 篇适配该大型子包的复杂度。",
+  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+  "rationale": "scipy.integrate 是一个体量大、职责清晰的大型子包，可归纳为四大主题：数值积分（固定样本 + 自适应函数积分 + 高维 cubature）、常微分方程初值问题求解（新 API solve_ivp 与旧 API ode/odeint）、边值问题 solve_bvp，以及底层 C/Fortran 扩展与构建系统。因此学习路线按「先整体后局部、先易后难、先用法后源码」设计：第 1 单元先建立全景与运行环境；第 2 单元从最直观的固定样本积分（梯形/辛普森/龙贝格）入手；第 3–5 单元逐步进入自适应函数积分（QUADPACK 的 quad 系列、向量值 quad_vec、元素级 tanhsinh/nsum、球面 lebedev_rule、以及基于规则系统的高维 cubature）；第 6–9 单元系统讲解 ODE 初值问题——先从 solve_ivp 用法切入，再深入 OdeSolver 基类、显式 Runge-Kutta（RK23/45/DOP853）、隐式刚性求解器（Radau/BDF）、LSODA 与事件检测及主循环；第 10 单元专讲边值问题 solve_bvp；第 11 单元覆盖旧 API（ode/complex_ode/odeint）以理解历史与封装关系；最后第 12–13 单元进入专家层，剖析 meson 构建、C/Fortran 扩展、ccallback/LowLevelCallable 机制，以及测试组织、二次开发（自定义求解器与积分规则）和架构取舍。讲义之间通过 depends_on 形成清晰 DAG，每篇只解决一个独立主题并配套真实源码与可操作实践任务，整体 36 篇适配该大型子包的复杂度。本次增量（HEAD 5f09bd719c → de190e7fde）：该区间内仅有一个提交 de190e7fde，内容为 scipy/special 文档修订（移除过时的 cdflib 引用，#25460），未触及 scipy/integrate 的任何源码、构建配置或测试文件；经核对当前工作树，manifest 引用的全部源码文件（_ivp/*.py、_rules/*.py、_cubature.py、_quadpack_py.py、_tanhsinh.py、src/*.c 及各加载桩模块等）均仍存在且目录结构一致，未出现需要新增讲义的新模块。故全部 36 篇讲义 action 设为 keep，仅更新 head 字段。",
   "units": [
     {
       "id": "u1",
@@ -29,7 +29,7 @@
           ],
           "practice_task": "阅读 __init__.py 的 autosummary 注释，按「函数积分 / 固定样本 / ODE 初值 / ODE 边值 / 旧 API」五个类别，整理出每个类别包含哪些公开函数，并写一份 API 分类表。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -58,7 +58,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -87,7 +87,7 @@
             "u1-l1",
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -120,7 +120,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -145,7 +145,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -172,7 +172,7 @@
             "u2-l1",
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -207,7 +207,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -233,7 +233,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -259,7 +259,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -293,7 +293,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -319,7 +319,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -344,7 +344,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -382,7 +382,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -410,7 +410,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -438,7 +438,7 @@
             "u5-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -472,7 +472,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -499,7 +499,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -515,7 +515,7 @@
           "order": 1,
           "filename": "u7-l1-odesolver-base.md",
           "level": "intermediate",
-          "topic": "深入 _ivp/base.py：OdeSolver 基类如何管理状态（t/y/status/nfev/njev/nlu）、step()/dense_output() 公共流程、以及子类需实现的 _step_impl/_dense_output_impl 契约。",
+          "topic": "深入 _ivp/base.py：OdeSolver 基类如何管理状态（t/y/status/nfev/njev/nlu）、step()/dense_output() 公共流程、以及子类需实现的 _stepimpl/_dense_output_impl 契约。",
           "learning_goals": [
             "理解 OdeSolver 的状态机：running/finished/failed",
             "掌握 step() 如何调用 _step_impl 并更新 t_old/step_size",
@@ -533,7 +533,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -561,7 +561,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -590,7 +590,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -626,7 +626,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -654,7 +654,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -683,7 +683,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -720,7 +720,7 @@
             "u7-l1",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -748,7 +748,7 @@
             "u6-l1",
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -778,7 +778,7 @@
             "u7-l1",
             "u9-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -811,7 +811,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -838,7 +838,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -872,7 +872,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -899,7 +899,7 @@
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -936,7 +936,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -964,7 +964,7 @@
             "u3-l3",
             "u12-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -998,7 +998,7 @@
             "u12-l1",
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1037,7 +1037,7 @@
             "u6-l1",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l2",
@@ -1068,7 +1068,7 @@
             "u7-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l3",
@@ -1101,7 +1101,7 @@
             "u5-l3",
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
