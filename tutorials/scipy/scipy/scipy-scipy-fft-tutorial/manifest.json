@@ -1,0 +1,691 @@
+{
+  "project": "scipy-scipy-fft",
+  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+  "rationale": "本次为增量更新。对比上次 HEAD（5f09bd719c）与当前 HEAD（de190e7fde），两者之间仅有唯一一个提交 de190e7fde「DOC: special: remove outdated cdflib reference」，且该提交只修改了 scipy/special/_add_newdocs.py，对 scipy/fft 子包零改动（git diff 在 scipy/fft 下为空）。因此原有学习路径与四层架构（公共 API → uarray 分派 → 后端 → ducc 核心）完全成立，全部 23 篇讲义的内容、源码引用、行号均不受影响，统一标记为 keep。学习顺序维持不变：入门层 u1-u2 让读者跑通 fft/ifft、熟悉目录与公共 API；进阶层 u3-u5 依次深入 DCT/DST 实变换、uarray 后端分派机制、ducc 计算核心与并行 workers；专家层 u6-u8 覆盖数组标准跨后端执行、FFTLog 快速 Hankel 变换，以及测试体系与自定义后端开发实战。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 scipy.fft：定位、目录与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.fft 是什么：定位与公共 API 全景",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.fft 子包的定位、它与 numpy.fft 的关系，以及它提供的全部公共函数（FFT / 实变换 / Hankel / 辅助函数 / 后端控制）。",
+          "learning_goals": [
+            "理解 scipy.fft 在 SciPy 中的定位与设计目标",
+            "掌握公共 API 的分类与各自用途",
+            "区分 scipy.fft 与 scipy.fftpack、numpy.fft 的关系"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy.fft 公共 API",
+            "模块文档字符串"
+          ],
+          "practice_task": "编写脚本 import scipy.fft，打印 scipy.fft.__all__ 的内容并按 FFT / DCT-DST / Hankel / helper / backend 五类分组输出，对照 __init__.py 的模块文档字符串。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与四层架构：从 __init__ 到 ducc 核心",
+          "order": 2,
+          "filename": "u1-l2-directory-layout.md",
+          "level": "beginner",
+          "topic": "讲解 scipy/fft 目录下的文件分工与四层架构：公共 API 层（_basic/_realtransforms/_fftlog）、分派层（uarray）、后端层（_backend/_basic_backend 等）、计算核心（_duccfft）。",
+          "learning_goals": [
+            "看懂 scipy/fft 目录的文件组织与 meson.build 安装清单",
+            "建立「公共 API → uarray 分派 → 后端 → ducc 核心」的四层心智模型",
+            "理解 _xxx.py 与 _xxx_backend.py、_duccfft/ 的对应关系"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build",
+            "_duccfft/__init__.py"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "meson 构建",
+            "分层架构"
+          ],
+          "practice_task": "画一张模块依赖图：__init__.py 导入了哪些子模块，每个公共函数最终落到哪个 _xxx_backend / _duccfft 文件，用注释标注四层边界。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "导入、运行与第一次调用",
+          "order": 3,
+          "filename": "u1-l1-install-and-first-run.md",
+          "level": "beginner",
+          "topic": "演示如何安装/导入 scipy.fft，完成第一次 fft 调用，并用 PytestTester 跑子包测试。",
+          "learning_goals": [
+            "学会导入 scipy.fft 并完成第一次变换",
+            "了解如何运行 scipy.fft 自带测试 (scipy.fft.test())",
+            "验证 fft/ifft 的可逆性"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_basic.py"
+          ],
+          "minimal_modules": [
+            "scipy.fft 入口",
+            "PytestTester"
+          ],
+          "practice_task": "对一个 8 点复指数信号 x = exp(2j*pi*arange(8)/8) 调用 scipy.fft.fft 并验证结果峰值；再验证 ifft(fft(x)) 约等于 x。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共 API 基本使用",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "复数一维 FFT：fft / ifft 与 norm、n、axis",
+          "order": 1,
+          "filename": "u2-l1-complex-fft.md",
+          "level": "beginner",
+          "topic": "讲解 1-D 复数离散傅里叶变换 fft/ifft 的参数含义：n（截断/补零）、axis、norm（backward/ortho/forward）、overwrite_x、workers、plan。",
+          "learning_goals": [
+            "掌握 fft/ifft 的核心参数与三种归一化模式",
+            "理解 n 的截断与补零行为",
+            "了解 Bluestein 算法保证 O(n log n) 的设计"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_basic_backend.py"
+          ],
+          "minimal_modules": [
+            "fft/ifft 公共签名",
+            "norm 归一化"
+          ],
+          "practice_task": "构造长度 10 的信号，分别用 n=8（截断）和 n=16（补零）调用 fft，对比输出长度；再用三种 norm 值验证 fft→ifft 的缩放关系。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "实数与 Hermitian 变换：rfft/irfft 与 hfft/ihfft",
+          "order": 2,
+          "filename": "u2-l2-real-and-hermitian-fft.md",
+          "level": "beginner",
+          "topic": "讲解实输入的 rfft/irfft（只输出半谱）以及 Hermitian 谱的 hfft/ihfft，重点剖析 _swap_direction 如何在 hfftn/ihfftn 中翻转归一化方向。",
+          "learning_goals": [
+            "理解 rfft 为何只输出半谱及 irfft 如何还原",
+            "掌握 hfft/ihfft 与 Hermitian 对称性的关系",
+            "看懂 _swap_direction 在方向翻转中的作用"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_basic_backend.py"
+          ],
+          "minimal_modules": [
+            "rfft/irfft",
+            "hfft/ihfft",
+            "_swap_direction"
+          ],
+          "practice_task": "对实信号用 rfft 得到半谱，再用 irfft 还原并 allclose 验证；再对一个 Hermitian 谱用 hfft 得到实输出，对照 fft 的结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "多维变换：fftn/fft2 与 s、axes 控制",
+          "order": 3,
+          "filename": "u2-l3-multidimensional-fft.md",
+          "level": "beginner",
+          "topic": "讲解 N-D 变换 fftn/ifftn 以及 fft2/ifft2（默认末两轴）、rfftn/irfftn，重点理解 s 与 axes 的多轴控制。",
+          "learning_goals": [
+            "掌握 fftn 的 s（各轴输出长度）与 axes 的配合",
+            "理解 fft2 是 fftn 在末两轴的便捷封装",
+            "了解 rfftn/irfftn 的多维实变换"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_basic_backend.py"
+          ],
+          "minimal_modules": [
+            "fftn/fft2",
+            "rfftn/irfftn",
+            "s/axes"
+          ],
+          "practice_task": "构造 (8, 16, 32) 的三维数组，用 fftn 只在第 0、2 轴上变换（指定 axes），再对比 fft2 在二维矩阵上的行为。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "辅助函数：fftfreq / fftshift / next_fast_len",
+          "order": 4,
+          "filename": "u2-l4-helpers-freq-shift-fastlen.md",
+          "level": "beginner",
+          "topic": "讲解 _helper.py 中的频率与shift辅助函数：fftfreq/rfftfreq 生成频率刻度、fftshift/ifftshift 居中零频、next_fast_len/prev_fast_len 寻找最优零补长度。",
+          "learning_goals": [
+            "会用 fftfreq/rfftfreq 生成正确的频率轴",
+            "理解 fftshift/ifftshift 在奇偶长度下的差异",
+            "掌握 next_fast_len 对 FFT 加速的意义及 lru_cache 包装技巧"
+          ],
+          "source_files": [
+            "_helper.py"
+          ],
+          "minimal_modules": [
+            "fftfreq/rfftfreq",
+            "fftshift/ifftshift",
+            "next_fast_len/prev_fast_len"
+          ],
+          "practice_task": "对一个素数长度(如 93059)信号，比较直接 fft 与补零到 next_fast_len 后的耗时；并用 fftfreq+fftshift 绘制居中频谱。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "实变换：DCT 与 DST",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "离散余弦变换 dct/dctn：type、norm 与 orthogonalize",
+          "order": 1,
+          "filename": "u3-l1-dct.md",
+          "level": "intermediate",
+          "topic": "讲解 DCT 的四种 type（1/2/3/4）、归一化模式、以及 orthogonalize 正交化选项，结合 dct/dctn 的公共签名。",
+          "learning_goals": [
+            "理解 DCT 四种类型的数学含义与默认 type=2",
+            "掌握 norm 三模式与 orthogonalize 的默认行为",
+            "了解 dct 是 dctn 在单轴上的封装关系"
+          ],
+          "source_files": [
+            "_realtransforms.py",
+            "_realtransforms_backend.py"
+          ],
+          "minimal_modules": [
+            "dct/dctn/idct/idctn",
+            "type/norm/orthogonalize"
+          ],
+          "practice_task": "对二维数组分别用 type=1/2/3/4 计算 dctn，验证 idctn 还原；再对比 norm='ortho' 时 orthogonalize 默认开启的效果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "离散正弦变换 dst/dstn",
+          "order": 2,
+          "filename": "u3-l2-dst.md",
+          "level": "intermediate",
+          "topic": "讲解 DST 的四种 type、归一化与 orthogonalize，并与 DCT 对比其适用场景。",
+          "learning_goals": [
+            "掌握 dst/dstn/idst/idstn 的用法",
+            "理解 DST 与 DCT 在边界假设上的差异",
+            "会用 dst 做信号压缩/去相关的简单实践"
+          ],
+          "source_files": [
+            "_realtransforms.py",
+            "_realtransforms_backend.py"
+          ],
+          "minimal_modules": [
+            "dst/dstn/idst/idstn"
+          ],
+          "practice_task": "构造一个满足正弦边界条件的信号，用 dstn 变换后保留前 k 个系数再做 idstn 重建，观察能量保留比例。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "实变换后端：_realtransforms_backend._execute",
+          "order": 3,
+          "filename": "u3-l3-realtransforms-backend.md",
+          "level": "intermediate",
+          "topic": "剖析 _realtransforms_backend.py 中 _execute 如何把数组转换到 numpy、调用 _duccfft 内核再转回原数组命名空间。",
+          "learning_goals": [
+            "理解 _execute 的统一封装模式",
+            "看懂 array_namespace 在实变换中的桥接作用",
+            "对比实变换后端与 _basic_backend 的异同"
+          ],
+          "source_files": [
+            "_realtransforms_backend.py",
+            "_duccfft/__init__.py"
+          ],
+          "minimal_modules": [
+            "_execute 封装",
+            "array_namespace"
+          ],
+          "practice_task": "阅读 _execute，编写一个小函数模拟其流程：接收任意 array-like，转 np.asarray 调用 _duccfft.dctn，再 xp.asarray 转回，并验证输出类型一致。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "uarray 分派机制与后端架构",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "uarray 多方法与 _dispatch：函数即协议",
+          "order": 1,
+          "filename": "u4-l1-uarray-dispatch.md",
+          "level": "intermediate",
+          "topic": "剖析 _basic.py 中 _dispatch / _x_replacer 如何用 generate_multimethod 把普通函数变成基于 domain 'numpy.scipy.fft' 的可分派多方法，Dispatchable 标记可替换参数。",
+          "learning_goals": [
+            "理解 uarray 的 domain、 multimethod、Dispatchable 三要素",
+            "看懂 _x_replacer 如何在分派时替换输入数组 x",
+            "明白公共函数体为何只 return (Dispatchable(x, np.ndarray),)"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_realtransforms.py",
+            "_fftlog.py"
+          ],
+          "minimal_modules": [
+            "_dispatch",
+            "_x_replacer",
+            "generate_multimethod",
+            "Dispatchable"
+          ],
+          "practice_task": "在 REPL 中查看 scipy.fft.fft.__wrapped__ 或其 uarray 属性，确认它是一个 multimethod；调用 fft([1,2,3,4]) 并说明分派如何找到默认 scipy 后端。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "后端管理：set_backend / set_global_backend / register_backend / skip_backend",
+          "order": 2,
+          "filename": "u4-l2-backend-management.md",
+          "level": "intermediate",
+          "topic": "讲解 _backend.py 中四种后端控制 API 的优先级语义（局部 > 全局 > 注册、try_last、only、coerce），以及 _backend_from_arg 的校验与 _named_backends 映射。",
+          "learning_goals": [
+            "掌握四种后端控制函数的作用域与优先级",
+            "理解 only/coerce/try_last 标志的含义",
+            "看懂 import 时 set_global_backend('scipy', try_last=True) 的默认设置"
+          ],
+          "source_files": [
+            "_backend.py"
+          ],
+          "minimal_modules": [
+            "set_backend/skip_backend",
+            "set_global_backend/register_backend",
+            "_backend_from_arg"
+          ],
+          "practice_task": "用 with set_backend('scipy', only=True) 包裹一次 fft 调用，再演示 skip_backend('scipy') 会抛 BackendNotImplementedError；记录优先级行为。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "默认后端 _ScipyBackend 与调试后端",
+          "order": 3,
+          "filename": "u4-l3-default-and-debug-backends.md",
+          "level": "intermediate",
+          "topic": "剖析 _ScipyBackend.__ua_function__ 如何在 _basic_backend/_realtransforms_backend/_fftlog_backend 中按方法名查找实现，以及 _debug_backends.py 的 NumPyBackend/EchoBackend 用途。",
+          "learning_goals": [
+            "理解 _ScipyBackend 的 __ua_domain__ 与 __ua_function__ 协议",
+            "看清方法名如何在三个 backend 模块间查找",
+            "学会用 EchoBackend/NumPyBackend 调试分派"
+          ],
+          "source_files": [
+            "_backend.py",
+            "_debug_backends.py"
+          ],
+          "minimal_modules": [
+            "_ScipyBackend",
+            "NumPyBackend",
+            "EchoBackend"
+          ],
+          "practice_task": "用 set_backend(EchoBackend()) 调用一次 fft，观察打印出的 method/args/kwargs；再用 NumPyBackend 验证结果与 numpy.fft 一致。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "计算核心 _duccfft 与并行 workers",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "ducc 内核：c2c / r2c / c2r 与 functools.partial",
+          "order": 1,
+          "filename": "u5-l1-ducc-basic-kernels.md",
+          "level": "intermediate",
+          "topic": "剖析 _duccfft/basic.py 如何用 c2c/r2c/c2r 三个核心函数配合 functools.partial 派生出 fft/ifft/rfft/irfft 等，并最终调用 C 扩展 pyduccfft。",
+          "learning_goals": [
+            "理解 c2c/r2c/c2r 三类内核的 forward 参数复用",
+            "看懂 partial 如何派生 fft/ifft 并设置 __name__",
+            "了解最终计算落到 pyduccfft C 扩展"
+          ],
+          "source_files": [
+            "_duccfft/basic.py",
+            "_duccfft/__init__.py"
+          ],
+          "minimal_modules": [
+            "c2c/r2c/c2r",
+            "functools.partial",
+            "pyduccfft"
+          ],
+          "practice_task": "阅读 basic.py，列出 fft/ifft/rfft/irfft/ihfft 各自由哪个内核 + forward 值派生而来；写一个表格说明。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "输入预处理：_asfarray / _fix_shape / _normalization / _init_nd_shape_and_axes",
+          "order": 2,
+          "filename": "u5-l2-input-preprocessing.md",
+          "level": "intermediate",
+          "topic": "讲解 _duccfft/helper.py 中进入 C 内核前的统一预处理：浮点化(_asfarray)、形状修正(_fix_shape/_fix_shape_1d 实现截断/补零)、归一化映射(_normalization + _NORM_MAP)、N-D 形状/轴标准化。",
+          "learning_goals": [
+            "掌握 _asfarray 的 dtype 升级与字节序/对齐处理",
+            "理解 _fix_shape 如何用切片实现截断与零填充",
+            "看清 norm 字符串到 pyduccfft 整数模式的映射"
+          ],
+          "source_files": [
+            "_duccfft/helper.py",
+            "_duccfft/basic.py"
+          ],
+          "minimal_modules": [
+            "_asfarray",
+            "_fix_shape",
+            "_normalization",
+            "_init_nd_shape_and_axes"
+          ],
+          "practice_task": "手动实现一个简化版 _fix_shape：给定数组、目标 shape、axes，返回截断或零填充后的数组与是否拷贝的标志，与源码行为对照。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "并行 workers：set_workers / get_workers / threading.local",
+          "order": 3,
+          "filename": "u5-l3-workers-multithreading.md",
+          "level": "intermediate",
+          "topic": "讲解 workers 参数与 _duccfft/helper.py 中的 set_workers/get_workers 上下文管理器、_workers 的取值校验，以及基于 threading.local 的线程级默认 worker 数。",
+          "learning_goals": [
+            "理解 workers 如何切分独立 1-D FFT 做并行",
+            "掌握 set_workers/get_workers 的上下文语义与线程隔离",
+            "看清 _workers 对负数/零值的校验与回绕"
+          ],
+          "source_files": [
+            "_duccfft/helper.py",
+            "tests/test_multithreading.py"
+          ],
+          "minimal_modules": [
+            "set_workers/get_workers",
+            "_workers",
+            "threading.local"
+          ],
+          "practice_task": "用 with set_workers(4) 对一个 (2048, 256) 的数组做 fftn，对比默认 workers=1 的耗时；并测试 workers=-1 的回绕行为。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "数组标准(array API)与跨后端执行",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "_execute_1D / _execute_nD：numpy 与 xp.fft 的分流",
+          "order": 1,
+          "filename": "u6-l1-execute-numpy-xp-dispatch.md",
+          "level": "advanced",
+          "topic": "深入剖析 _basic_backend.py 的 _execute_1D/_execute_nD：当输入是 numpy 时直接走 duccfft；否则优先尝试 xp.fft，失败则回退到转 np 再转回的策略；以及 complex_funcs 集合的作用。",
+          "learning_goals": [
+            "理解 is_numpy 分支与 duccfft 直连路径",
+            "看清 xp.fft 分支与 convert-to-numpy 回退策略",
+            "掌握 complex_funcs 对复数输入处理的特殊逻辑"
+          ],
+          "source_files": [
+            "_basic_backend.py"
+          ],
+          "minimal_modules": [
+            "_execute_1D/_execute_nD",
+            "array_namespace/is_numpy",
+            "complex_funcs"
+          ],
+          "practice_task": "梳理 _execute_1D 的三条执行路径（numpy/有 xp.fft/无 xp.fft）并画出流程图；说明 _validate_fft_args 为何对非 numpy 后端禁用 workers/plan。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "xp_capabilities 装饰器与 SCIPY_ARRAY_API",
+          "order": 2,
+          "filename": "u6-l2-xp-capabilities-array-api.md",
+          "level": "advanced",
+          "topic": "讲解 @xp_capabilities 装饰器在公共函数上的标注（cpu_only/allow_dask_compute/out_of_scope）如何声明数组标准能力，以及 SCIPY_ARRAY_API 环境变量对后端选择的控制。",
+          "learning_goals": [
+            "理解 xp_capabilities 标注的语义与作用",
+            "看清 cpu_only/out_of_scope/allow_dask_compute 的差异",
+            "掌握 SCIPY_ARRAY_API 开关对 CuPy/PyTorch 等后端的影响"
+          ],
+          "source_files": [
+            "_basic.py",
+            "_realtransforms.py",
+            "_helper.py",
+            "_backend.py"
+          ],
+          "minimal_modules": [
+            "xp_capabilities",
+            "cpu_only/out_of_scope",
+            "SCIPY_ARRAY_API"
+          ],
+          "practice_task": "对比 fft（无 cpu_only）与 dct（cpu_only=True）的装饰器差异，解释为何实变换被标记为 cpu_only；列出哪些公共函数带 allow_dask_compute。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "helper 的 array-api 兼容实现与 C 函数包装",
+          "order": 3,
+          "filename": "u6-l3-helpers-array-api-compat.md",
+          "level": "advanced",
+          "topic": "剖析 _helper.py 中 fftfreq/rfftfreq/fftshift/ifftshift 的 xp/device 兼容分支，以及 next_fast_len/prev_fast_len 用 update_wrapper+lru_cache 把 Python docstring 嫁接到 C 函数 good_size/prev_good_size 的技巧。",
+          "learning_goals": [
+            "理解 helper 函数的 xp.fft 分支与 numpy 回退",
+            "掌握 device 参数仅在非 numpy 命名空间下生效的原因",
+            "看懂 update_wrapper+lru_cache 包装 C 函数的元编程手法"
+          ],
+          "source_files": [
+            "_helper.py",
+            "_duccfft/helper.py"
+          ],
+          "minimal_modules": [
+            "fftfreq/fftshift 的 xp 分支",
+            "next_fast_len 包装",
+            "good_size/prev_good_size"
+          ],
+          "practice_task": "用 update_wrapper + lru_cache 包装一个自定义纯函数，使其借用另一个函数的 docstring 与签名，复刻 next_fast_len 的包装方式并验证缓存命中。",
+          "depends_on": [
+            "u2-l4",
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Fast Hankel Transform（FFTLog）",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "fht / ifht 公共接口与数学背景",
+          "order": 1,
+          "filename": "u7-l1-fht-ifht-interface.md",
+          "level": "advanced",
+          "topic": "讲解 _fftlog.py 中 fht/ifht 的对数均匀采样、Hankel 变换阶数 mu、offset 与 bias 参数的数学含义，以及与 Bessel 函数的关系。",
+          "learning_goals": [
+            "理解 FFTLog 算法在对数空间的离散 Hankel 变换",
+            "掌握 dln/mu/offset/bias 参数的物理意义",
+            "了解 fht 与 ifht 的可逆关系"
+          ],
+          "source_files": [
+            "_fftlog.py"
+          ],
+          "minimal_modules": [
+            "fht/ifht",
+            "dln/mu/offset/bias",
+            "FFTLog 算法"
+          ],
+          "practice_task": "构造一个对数均匀采样的测试函数（如高斯），调用 fht 再 ifht 验证还原；尝试不同 offset 观察振铃效应。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "FFTLog 后端：fhtcoeff / fhtoffset / _fhtq",
+          "order": 2,
+          "filename": "u7-l2-fftlog-backend.md",
+          "level": "advanced",
+          "topic": "剖析 _fftlog_backend.py 的实现：fhtcoeff 生成 Bessel 变换核、fhtoffset 计算最优 offset 减小振铃、_fhtq 的 FFTLog 四分之一移相，整体遵循 Hamilton(2000) 的 Fortran 实现。",
+          "learning_goals": [
+            "理解 fhtcoeff 如何构造对数空间卷积核",
+            "掌握 fhtoffset 选择最优 offset 的原理",
+            "看清 _fhtq 在快速 Hankel 变换中的角色"
+          ],
+          "source_files": [
+            "_fftlog_backend.py",
+            "_fftlog.py",
+            "tests/test_fftlog.py"
+          ],
+          "minimal_modules": [
+            "fhtcoeff",
+            "fhtoffset",
+            "_fhtq"
+          ],
+          "practice_task": "阅读 fhtoffset 源码，用它为一个给定 dln/mu 的变换计算最优 offset，对比默认 offset=0 时 fht 结果的振铃程度。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "测试、调试与扩展实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "后端测试体系：test_backend 与 mock_backend",
+          "order": 1,
+          "filename": "u8-l1-backend-testing-mock.md",
+          "level": "advanced",
+          "topic": "讲解 tests/mock_backend.py 如何用 _MockFunction 模拟全部变换，以及 tests/test_backend.py 如何参数化对比 scipy.fft / numpy.fft / mock 三方结果，验证分派与 plan 传递。",
+          "learning_goals": [
+            "理解 mock_backend 的 __ua_domain__/__ua_function__ 协议实现",
+            "看懂 test_backend_call/test_backend_plan 的参数化对照策略",
+            "学会用 mock 验证后端是否被正确调用"
+          ],
+          "source_files": [
+            "tests/mock_backend.py",
+            "tests/test_backend.py"
+          ],
+          "minimal_modules": [
+            "_MockFunction",
+            "mock_backend",
+            "参数化测试"
+          ],
+          "practice_task": "扩展 mock_backend 的 _MockFunction，记录每次调用的全部参数历史（而非仅最后一次），并写一个测试断言 fft 被调用时传入了正确的 norm。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "实战：编写并注册自定义第三方后端",
+          "order": 2,
+          "filename": "u8-l2-custom-backend.md",
+          "level": "advanced",
+          "topic": "综合运用后端协议，从零实现一个自定义 FFT 后端（实现 __ua_domain__='numpy.scipy.fft' 与 __ua_function__），用 set_backend/register_backend 挂载，并处理 NotImplemented 回退。",
+          "learning_goals": [
+            "掌握实现一个合格 scipy.fft 后端的最小协议",
+            "理解 set_backend 与 register_backend 挂载自定义后端的区别",
+            "学会利用 NotImplemented 让分派优雅回退到 scipy"
+          ],
+          "source_files": [
+            "_backend.py",
+            "_debug_backends.py",
+            "tests/mock_backend.py"
+          ],
+          "minimal_modules": [
+            "自定义后端协议",
+            "set_backend/register_backend",
+            "NotImplemented 回退"
+          ],
+          "practice_task": "实现一个基于 numpy.fft 的 MyBackend 类，用 set_global_backend 设为全局后端并验证 fft 结果正确；再让它对 fft 返回 NotImplemented，观察如何回退到 scipy 后端。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
