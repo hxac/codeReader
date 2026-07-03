@@ -1,0 +1,820 @@
+{
+  "project": "scipy-scipy-ndimage",
+  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+  "rationale": "scipy.ndimage 是一个层级分明的多维图像处理子包：底层 C/Cython 扩展（_nd_image、_ni_label、_rank_filter_1d）承担数值内核，中层 Python 包装（_filters/_fourier/_interpolation/_measurements/_morphology）负责参数校验、边界模式编码与输出数组管理，再上是数组 API 后端委托层（_support_alternative_backends/_delegators），顶层为公开命名空间（__init__）。因此学习顺序按「先认识整体架构与共享机制，再逐域深入滤波/插值/测量/形态学四大功能，最后下探 C 内核与后端委托/测试」组织：单元 1 让读者从零建立全局视图（定位、目录、四层架构、共享工具）；单元 2-5 分别覆盖滤波与傅里叶、插值与几何变换、测量与连通区域、形态学四大功能域，每个域内由最基础的一维算子逐步推到高阶组合与距离变换；单元 6 下沉到 C 扩展，讲清迭代器、行缓冲、边界扩展、方法分发表、样条/滤波内核以及 Cython 标记与 C++ 秩滤波等支撑整个包性能的内核机制；单元 7 收束于数组 API/CuPy/JAX 后端委托与测试体系。讲义之间用 depends_on 形成由浅入深的依赖链，每篇都绑定真实源码并配一个可操作的实践任务，符合「一篇一主题、2-5 个最小模块、1-6 个源码文件」的拆分规则。本次增量（ce1f6477 相对 de190e7f）仅为测试改动：新增 tests/test_array_likes.py 对全公开 API 做 array_like（list）输入冒烟回归，并登记到 tests/meson.build，未触及任何 _*.py 或 src/ 源码，故除 u7-l2（测试体系）需 update 引入该新测试文件外，其余讲义一律 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 scipy.ndimage",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与能力总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.ndimage 是什么、解决什么问题，以及它在 SciPy 生态中的定位和四大功能域（滤波 / 傅里叶滤波 / 插值 / 测量 / 形态学）。",
+          "learning_goals": [
+            "理解 scipy.ndimage 作为多维图像处理子包的定位",
+            "识别 Filters / Fourier / Interpolation / Measurements / Morphology 五大功能域及其代表函数",
+            "通过 __init__.py 的 autosummary 分组读懂公开 API 全貌"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "Filters 函数组",
+            "Interpolation 函数组",
+            "Measurements 函数组",
+            "Morphology 函数组",
+            "Fourier filters 函数组"
+          ],
+          "practice_task": "导入 scipy.ndimage，构造一个 5x5 的 2D 随机数组，分别调用一个滤波函数（如 gaussian_filter）、一个测量函数（如 label）、一个形态学函数（如 binary_dilation），打印三次结果，体会各功能域的输入输出形态。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、文件职责与构建系统",
+          "order": 2,
+          "filename": "u1-l2-package-layout.md",
+          "level": "beginner",
+          "topic": "讲清目录结构：Python 包装层（_*.py）、C/Cython 扩展源码（src/）、构建脚本（meson.build）、测试（tests/）与工具（utils/）如何组织。",
+          "learning_goals": [
+            "区分 _*.py 包装文件与 src/ 下的 C/C++/Cython 源码",
+            "理解 meson.build 如何构建 _nd_image、_ni_label、_rank_filter_1d 三个扩展模块",
+            "定位每个功能域对应的 Python 包装文件与 C 内核文件"
+          ],
+          "source_files": [
+            "meson.build",
+            "__init__.py",
+            "src/nd_image.c"
+          ],
+          "minimal_modules": [
+            "python_sources 列表",
+            "三个 py3.extension_module 定义",
+            "src/ 目录的 C 头文件与实现文件对应关系"
+          ],
+          "practice_task": "对照 meson.build，列出 _nd_image 扩展由哪些 src/*.c 编译而来，并在本地构建后的 scipy 安装目录里找到 _nd_image.*.so、_ni_label.*.so、_rank_filter_1d.*.so 三个扩展文件，说明各自源码来源。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "四层架构与公开 API 装配链",
+          "order": 3,
+          "filename": "u1-l3-architecture-layers.md",
+          "level": "beginner",
+          "topic": "讲清自底向上的四层架构：C 核心 → Python 包装（_*.py）→ 后端委托（_support_alternative_backends/_delegators）→ 公开命名空间（__init__）。",
+          "learning_goals": [
+            "理解 _ndimage_api.py 如何聚合裸 API（from ._filters import * 等）",
+            "理解 _support_alternative_backends.py 如何用 delegate_xp 装饰每个函数并导出 __all__",
+            "理解 __init__.py 如何从 _support_alternative_backends 导出公共 API"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_ndimage_api.py",
+            "_support_alternative_backends.py"
+          ],
+          "minimal_modules": [
+            "_ndimage_api 聚合裸 API",
+            "delegate_xp 装饰循环",
+            "__all__ 导出与弃用子模块"
+          ],
+          "practice_task": "用一段调用 ndimage.gaussian_filter(...) 为例，画出从 __init__ → _support_alternative_backends → _filters.gaussian_filter → _nd_image 内核的完整调用链（标注每层文件），并指出 SCIPY_ARRAY_API 关闭时跳过了哪一层。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "共享支撑工具：边界模式、输出、axes、文档",
+          "order": 4,
+          "filename": "u1-l4-shared-support-helpers.md",
+          "level": "beginner",
+          "topic": "讲清几乎所有函数共享的支撑工具：_extend_mode_to_code 的边界模式编码、_get_output 的输出数组获取、_normalize_sequence 与 _check_axes，以及共享文档字符串 docfiller。",
+          "learning_goals": [
+            "理解 _extend_mode_to_code 把 7 种 mode 字符串映射为整数码（含 is_filter 分支）",
+            "理解 _get_output 对 None/dtype/array 三种 output 的多态处理",
+            "理解 _normalize_sequence 与 _check_axes 如何把标量扩展为各维序列"
+          ],
+          "source_files": [
+            "_ni_support.py",
+            "_ni_docstrings.py"
+          ],
+          "minimal_modules": [
+            "_extend_mode_to_code",
+            "_get_output",
+            "_normalize_sequence / _check_axes",
+            "docfiller 共享文档"
+          ],
+          "practice_task": "写一个脚本，直接调用 _ni_support._get_output 处理 output=None、output=np.float32、output=已有数组三种情况并观察返回；再遍历调用 _extend_mode_to_code 打印每种 mode 字符串对应的整数码，体会 is_filter 的差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：滤波与傅里叶",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "一维相关与卷积基础",
+          "order": 1,
+          "filename": "u2-l1-correlation-convolution-1d.md",
+          "level": "intermediate",
+          "topic": "以 correlate1d / convolve1d 为例，讲清一维相关与卷积的数学差异、weights/origin/mode/cval 参数，以及复数输入如何走 _complex_via_real_components，最终调用 C 内核 _nd_image.correlate1d。",
+          "learning_goals": [
+            "区分相关与卷积（卷积=翻转 weights + origin 取反 + 偶数长度修正）",
+            "理解参数校验顺序：dtype、weights 维度、axis、origin 合法性、mode 编码",
+            "理解复数输入为何拆成实部虚部分别处理"
+          ],
+          "source_files": [
+            "_filters.py"
+          ],
+          "minimal_modules": [
+            "correlate1d",
+            "convolve1d",
+            "_complex_via_real_components",
+            "_invalid_origin"
+          ],
+          "practice_task": "用数组 [2,8,0,4,1,9,9,0] 与 weights=[1,3] 分别计算 correlate1d 与 convolve1d，手算验证两者差异，并尝试 weights=[1,2,3]（奇偶长度）观察 origin 的自动调整。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "多维相关卷积、footprint 与 axes 展开",
+          "order": 2,
+          "filename": "u2-l2-correlation-convolve-nd.md",
+          "level": "intermediate",
+          "topic": "讲清多维 correlate / convolve 如何通过 _correlate_or_convolve 用 footprint/size/structure/axes 定义邻域，并通过 _expand_footprint / _expand_origin / _expand_mode 处理 axes 子集。",
+          "learning_goals": [
+            "理解 footprint（布尔掩码）与 size 的等价关系及 size 自动广播到各维",
+            "理解 _expand_footprint / _expand_origin / _expand_mode 在 axes 子集下的展开逻辑",
+            "理解卷积在 N-D 下如何翻转 weights"
+          ],
+          "source_files": [
+            "_filters.py"
+          ],
+          "minimal_modules": [
+            "correlate / convolve",
+            "_correlate_or_convolve",
+            "_expand_footprint / _expand_origin / _expand_mode"
+          ],
+          "practice_task": "用一个 4x4 数组和自定义十字形 footprint 调用 correlate；再用 size=(3,3) 复现相同邻域结果，并验证只用 axes=(0,) 时 footprint 如何被展开到全维。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "高斯与均匀平滑滤波",
+          "order": 3,
+          "filename": "u2-l3-smoothing-filters.md",
+          "level": "intermediate",
+          "topic": "讲清高斯与均匀平滑滤波：_gaussian_kernel1d 如何生成归一化核与高阶导数核，gaussian_filter1d / gaussian_filter 如何沿各维应用，以及 uniform_filter / uniform_filter1d 的 box filter。",
+          "learning_goals": [
+            "理解 _gaussian_kernel1d 用矩阵算子 D+P 生成任意 order 的导数核",
+            "理解 gaussian_filter 的 order、各维 sigma、各维 axes 语义",
+            "理解 uniform_filter 为何可由 uniform_filter1d 沿各维分离实现"
+          ],
+          "source_files": [
+            "_filters.py"
+          ],
+          "minimal_modules": [
+            "gaussian_filter1d / gaussian_filter",
+            "_gaussian_kernel1d",
+            "uniform_filter1d / uniform_filter"
+          ],
+          "practice_task": "调用 _gaussian_kernel1d 画出 order=0,1,2 的核形状；再用 gaussian_filter(order=1) 与手动 convolve1d(_gaussian_kernel1d(order=1)) 对比结果一致性。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "微分与边缘滤波",
+          "order": 4,
+          "filename": "u2-l4-derivative-edge-filters.md",
+          "level": "intermediate",
+          "topic": "讲清微分与边缘滤波：prewitt、sobel、laplace、generic_laplace、gaussian_laplace、generic_gradient_magnitude、gaussian_gradient_magnitude 之间的组合关系。",
+          "learning_goals": [
+            "理解 sobel / prewitt 由一阶导数核与平滑核组合而成",
+            "理解 laplace 为各轴二阶导数和，generic_laplace 可自定义二阶导函数",
+            "理解 gaussian_laplace = 先高斯平滑再 laplace、gaussian_gradient_magnitude = 各轴梯度模长的组合方式"
+          ],
+          "source_files": [
+            "_filters.py"
+          ],
+          "minimal_modules": [
+            "sobel / prewitt",
+            "laplace / generic_laplace",
+            "gaussian_laplace / gaussian_gradient_magnitude / generic_gradient_magnitude"
+          ],
+          "practice_task": "构造一个含阶跃边缘的 2D 数组，分别计算 sobel（梯度）与 laplace（二阶）响应，观察零交叉位置；再用 gaussian_laplace 改变 sigma 看平滑对边缘定位的影响。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "秩 / 选择 / 通用 / 向量化滤波",
+          "order": 5,
+          "filename": "u2-l5-rank-select-generic-filters.md",
+          "level": "intermediate",
+          "topic": "讲清秩/选择/通用/向量化滤波：rank_filter / median_filter / percentile_filter、minimum_filter / maximum_filter、generic_filter / generic_filter1d（回调机制），以及 vectorized_filter 处理 NaN 的能力与底层 _rank_filter_1d.cpp。",
+          "learning_goals": [
+            "理解 _rank_filter 与 _min_or_max_filter 的共用实现路径",
+            "理解 generic_filter 把局部邻域交给 Python / LowLevelCallable 回调的机制",
+            "理解 vectorized_filter 为何能在 NaN 存在时给出可控结果"
+          ],
+          "source_files": [
+            "_filters.py",
+            "src/_rank_filter_1d.cpp"
+          ],
+          "minimal_modules": [
+            "rank_filter / percentile_filter / median_filter",
+            "minimum_filter / maximum_filter（_min_or_max_filter）",
+            "generic_filter / generic_filter1d",
+            "vectorized_filter"
+          ],
+          "practice_task": "用 generic_filter 配合 lambda 局部邻域计算一个 3x3 局部方差图；再用 percentile_filter(50) 与 median_filter 对同一含 NaN 数组比较，并改用 vectorized_filter 观察 NaN 行为差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l6",
+          "title": "频域（傅里叶）滤波",
+          "order": 6,
+          "filename": "u2-l6-fourier-filters.md",
+          "level": "intermediate",
+          "topic": "讲清频域滤波 fourier_gaussian / fourier_uniform / fourier_ellipsoid / fourier_shift：如何在频域构造乘法核并对（已 FFT 的）数组做逐元素乘法，以及 n/axis 的语义。",
+          "learning_goals": [
+            "理解输入假定已为 FFT 结果、函数做的是频域乘法核",
+            "理解 n/axis 决定沿哪一轴 / 前 n 轴操作",
+            "理解 fourier_shift 用相位因子实现亚像素平移"
+          ],
+          "source_files": [
+            "_fourier.py"
+          ],
+          "minimal_modules": [
+            "fourier_gaussian / fourier_uniform / fourier_ellipsoid",
+            "fourier_shift",
+            "_get_output_fourier_complex"
+          ],
+          "practice_task": "对一个含周期信号的 1D 数组先 np.fft.fft，再 fourier_gaussian，最后 np.fft.ifft 回空域；与直接 gaussian_filter1d 结果对比，体会频域高斯与空域高斯的边界行为差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：插值与几何变换",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "样条预滤波",
+          "order": 1,
+          "filename": "u3-l1-spline-prefilter.md",
+          "level": "intermediate",
+          "topic": "讲清样条插值的预滤波：spline_filter1d / spline_filter 如何为 order>1 的插值准备样条系数，_prepad_for_spline_filter 的边界处理，以及 prefilter 默认开启的意义。",
+          "learning_goals": [
+            "理解 order 0-5 与样条系数的关系，为何 order>1 需要预滤波",
+            "理解 _prepad_for_spline_filter 对 nearest/grid-constant 模式做 12 点填充的原因",
+            "理解 interpolate 类函数 prefilter=True 内部会调用 spline_filter"
+          ],
+          "source_files": [
+            "_interpolation.py"
+          ],
+          "minimal_modules": [
+            "spline_filter1d",
+            "spline_filter",
+            "_prepad_for_spline_filter"
+          ],
+          "practice_task": "对一个阶跃数组，分别用 prefilter=True / False 调用 map_coordinates(order=3) 做平移，比较振铃（过冲）差异；再手动 spline_filter 后 prefilter=False 复现 True 的结果。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "坐标映射插值 map_coordinates",
+          "order": 2,
+          "filename": "u3-l2-map-coordinates.md",
+          "level": "intermediate",
+          "topic": "讲清 map_coordinates：如何用形状为 (ndim, *target_shape) 的坐标数组在任意位置做样条插值，包括 mode/cval/order 语义与 prefilter 调用。",
+          "learning_goals": [
+            "理解 coordinates 第 0 维是各轴坐标、其余维是目标输出形状",
+            "理解 mode 在插值中的细微差别（constant vs grid-constant、wrap vs grid-wrap）",
+            "理解 prefilter 与 _get_output 在该函数里的协作"
+          ],
+          "source_files": [
+            "_interpolation.py"
+          ],
+          "minimal_modules": [
+            "map_coordinates",
+            "prefilter 调用",
+            "_get_output（带 output_shape）"
+          ],
+          "practice_task": "对一个 4x4 数组用 map_coordinates 在亚像素网格上采样放大到 8x8，验证与 zoom(factor=2, order=3) 结果是否一致，并尝试不同 mode 观察边界。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "仿射变换 affine_transform",
+          "order": 3,
+          "filename": "u3-l3-affine-transform.md",
+          "level": "intermediate",
+          "topic": "讲清 affine_transform：matrix 的四种形状（对角 / 方阵 / 齐次 / 增广）、offset、output_shape，以及 pull（反向）重采样模型。",
+          "learning_goals": [
+            "理解 pull 重采样：output 坐标 o 经 matrix·o + offset 映射回 input 坐标",
+            "理解 matrix 四种形状分支（(ndim,) / (ndim,ndim) / (ndim+1,ndim+1) / (ndim,ndim+1)）",
+            "理解 output_shape 如何改变输出画布大小"
+          ],
+          "source_files": [
+            "_interpolation.py"
+          ],
+          "minimal_modules": [
+            "affine_transform",
+            "matrix 形状分支",
+            "_nd_image.zoom_shift（对角快速路径）"
+          ],
+          "practice_task": "用 affine_transform 实现绕图像中心的 30° 旋转：构造旋转 matrix 与对应 offset，并用 output_shape 扩展画布避免裁剪；对比 scipy.datasets.face 旋转前后。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "任意映射 geometric_transform 与 shift/zoom/rotate",
+          "order": 4,
+          "filename": "u3-l4-geometric-shift-zoom-rotate.md",
+          "level": "intermediate",
+          "topic": "讲清 geometric_transform 的任意映射回调（含 LowLevelCallable C 签名），以及 shift / zoom / rotate 如何作为 affine / geometric 的便捷封装。",
+          "learning_goals": [
+            "理解 mapping 回调把 output_coords 映射为 input_coords 的契约",
+            "理解 LowLevelCallable 的 C 回调签名与 extra_arguments/extra_keywords",
+            "理解 shift/zoom/rotate 内部如何构造 matrix/offset 并复用 affine_transform"
+          ],
+          "source_files": [
+            "_interpolation.py"
+          ],
+          "minimal_modules": [
+            "geometric_transform",
+            "shift",
+            "zoom",
+            "rotate"
+          ],
+          "practice_task": "用 geometric_transform + Python 回调实现极坐标到直角坐标的变换；再用 zoom 与 rotate 对同一图像操作，确认它们是 affine_transform 的特例。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：测量与连通区域",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "连通区域标记 label",
+          "order": 1,
+          "filename": "u4-l1-label-connected-components.md",
+          "level": "intermediate",
+          "topic": "讲清连通区域标记 label 的 structure / centrosymmetric 要求与两种返回形式，以及底层 _ni_label.pyx 的逐行扫描算法。",
+          "learning_goals": [
+            "理解 structure 定义邻域连接、默认十字结构元、centrosymmetric 约束",
+            "理解 output 为数组时原地写入并只返回 num_features、为 None 时返回 (labeled, num)",
+            "理解 _ni_label.pyx 用 fused type 与逐行扫描做等价类合并"
+          ],
+          "source_files": [
+            "_measurements.py",
+            "src/_ni_label.pyx"
+          ],
+          "minimal_modules": [
+            "label",
+            "structure 默认值与 centrosymmetric",
+            "_ni_label 逐行算法"
+          ],
+          "practice_task": "构造一张含对角相触像素的二值图，分别用默认结构元（连通=1）与 generate_binary_structure(2,2)（连通=2）做 label，对比 num_features 与连通结果。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "切片定位 find_objects 与值索引 value_indices",
+          "order": 2,
+          "filename": "u4-l2-find-objects-value-indices.md",
+          "level": "intermediate",
+          "topic": "讲清 find_objects 的 bounding-box 切片定位与 value_indices 的按值索引聚合两种区域定位工具。",
+          "learning_goals": [
+            "理解 find_objects 返回每个标签对应的 slices 列表与 max_label 的作用",
+            "理解 value_indices 返回 {value: (per_axis_index_arrays)} 的结构",
+            "理解二者与 label 结果的配合用法"
+          ],
+          "source_files": [
+            "_measurements.py"
+          ],
+          "minimal_modules": [
+            "find_objects",
+            "max_label",
+            "value_indices"
+          ],
+          "practice_task": "对 label 后的数组用 find_objects 提取每个目标的 bounding box 并逐个裁剪原图；再对一个含多个离散值的小数组调用 value_indices，按值分组打印索引。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "标签统计 sum/mean/var/min/max 与共享内核",
+          "order": 3,
+          "filename": "u4-l3-labeled-statistics.md",
+          "level": "intermediate",
+          "topic": "讲清标签统计函数 sum / mean / variance / standard_deviation / median / minimum / maximum 的 labels + index 选择机制，以及它们共享的 _stats 与 _select 内核。",
+          "learning_goals": [
+            "理解 labels + index 如何只对指定区域统计、index 可为标量或序列",
+            "理解 _stats 的 centered 参数如何复用于 mean/var/std",
+            "理解 _select 一次性计算 min/max/position/median 以减少多次遍历"
+          ],
+          "source_files": [
+            "_measurements.py"
+          ],
+          "minimal_modules": [
+            "sum / mean / variance / standard_deviation",
+            "minimum / maximum / median",
+            "_stats / _select"
+          ],
+          "practice_task": "对一张含多个标签区域的强度图，分别用 mean 与 standard_deviation 计算各区域统计；再用 index=[1,3] 只取部分区域，验证返回顺序与 index 一致。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "通用聚合、极值与分水岭",
+          "order": 4,
+          "filename": "u4-l4-comprehension-extrema-watershed.md",
+          "level": "intermediate",
+          "topic": "讲清 labeled_comprehension 的任意聚合、extrema / center_of_mass / histogram，以及 watershed_ift 用 marker 驱动的分水岭分割。",
+          "learning_goals": [
+            "理解 labeled_comprehension 的 func / default / out_dtype 通用聚合模型",
+            "理解 extrema 一次返回最小/最大值及其位置、center_of_mass 的加权质心",
+            "理解 watershed_ift 用 markers 在结构元邻域内传播标签的 IFT 算法"
+          ],
+          "source_files": [
+            "_measurements.py"
+          ],
+          "minimal_modules": [
+            "labeled_comprehension",
+            "extrema / center_of_mass / histogram",
+            "watershed_ift"
+          ],
+          "practice_task": "用 labeled_comprehension 对每个标签区域计算 90 分位数，并对照 extrema 输出的极值；再用 watershed_ift 对一张含两个峰值的梯度图做分割。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：形态学",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "结构元 generate_binary_structure 与 iterate_structure",
+          "order": 1,
+          "filename": "u5-l1-structuring-elements.md",
+          "level": "intermediate",
+          "topic": "讲清结构元的构造：generate_binary_structure 的 rank / connectivity 公式与 iterate_structure 的迭代扩张，以及 _center_is_true 辅助。",
+          "learning_goals": [
+            "理解 connectivity 决定是否包含对角邻域、范围 1..rank",
+            "理解 generate_binary_structure 用 np.add.reduce(np.fabs(np.indices([3]*rank)-1)) <= connectivity 生成结构元",
+            "理解 iterate_structure 如何通过迭代把结构元扩张到更大邻域"
+          ],
+          "source_files": [
+            "_morphology.py"
+          ],
+          "minimal_modules": [
+            "generate_binary_structure",
+            "iterate_structure",
+            "_center_is_true"
+          ],
+          "practice_task": "生成 rank=3、connectivity=1 与 connectivity=2 的两种结构元并打印；再用 iterate_structure(struct, 2) 观察扩张后的形状与 True 元素分布。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "二值形态学：侵蚀、膨胀与开闭运算",
+          "order": 2,
+          "filename": "u5-l2-binary-morphology.md",
+          "level": "intermediate",
+          "topic": "讲清二值形态学：binary_erosion / binary_dilation 的 _binary_erosion 内核（iterations / mask / border_value / brute_force），以及 opening / closing / hit_or_miss / propagation / fill_holes 的组合关系。",
+          "learning_goals": [
+            "理解侵蚀与膨胀的对偶关系、iterations 多次迭代、mask 限制作用区域",
+            "理解 binary_opening = erosion→dilation、binary_closing = dilation→erosion",
+            "理解 binary_fill_holes 用补集膨胀填孔、hit_or_miss 用两组结构元做模式匹配"
+          ],
+          "source_files": [
+            "_morphology.py"
+          ],
+          "minimal_modules": [
+            "_binary_erosion",
+            "binary_erosion / binary_dilation",
+            "binary_opening / binary_closing / binary_hit_or_miss / binary_fill_holes"
+          ],
+          "practice_task": "对一张含孔洞的二值图用 binary_fill_holes 填孔；再手动用 binary_erosion + binary_dilation 复现 binary_opening，并与库函数结果逐元素比对。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "灰度形态学、梯度与 top-hat",
+          "order": 3,
+          "filename": "u5-l3-grey-morphology-tophat.md",
+          "level": "intermediate",
+          "topic": "讲清灰度形态学：grey_erosion / grey_dilation 的 size / footprint / structure，opening / closing 组合，morphological_gradient / morphological_laplace，以及 white_tophat / black_tophat。",
+          "learning_goals": [
+            "理解灰度侵蚀=局部最小、膨胀=局部最大，structure 提供加性偏置",
+            "理解 morphological_gradient = dilation - erosion、morphological_laplace 的定义",
+            "理解 top-hat（原图 - 开运算）提取比结构元小的亮/暗特征"
+          ],
+          "source_files": [
+            "_morphology.py"
+          ],
+          "minimal_modules": [
+            "grey_erosion / grey_dilation",
+            "grey_opening / grey_closing",
+            "morphological_gradient / morphological_laplace",
+            "white_tophat / black_tophat"
+          ],
+          "practice_task": "对一张含亮斑的灰度图用 white_tophat 提取比结构元小的亮斑，并对照 morphological_gradient 的边缘响应；改变 footprint 大小观察提取尺度变化。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "距离变换 bf / cdt / edt",
+          "order": 4,
+          "filename": "u5-l4-distance-transforms.md",
+          "level": "intermediate",
+          "topic": "讲清三种距离变换：distance_transform_bf（brute force 暴力）、distance_transform_cdt（chamfer 离散近似）、distance_transform_edt（精确欧式 Felzenszwalb），以及 sampling / return_distances / return_indices / 原地输出。",
+          "learning_goals": [
+            "理解三种算法的精度与速度权衡（bf 慢而通用、cdt 近似、edt 精确）",
+            "理解 sampling 各向异性间距对距离的影响",
+            "理解 distances / indices 原地输出参数与 _distance_transform_arg_check 校验"
+          ],
+          "source_files": [
+            "_morphology.py"
+          ],
+          "minimal_modules": [
+            "distance_transform_edt",
+            "distance_transform_cdt",
+            "distance_transform_bf",
+            "_distance_transform_arg_check"
+          ],
+          "practice_task": "对同一张二值图分别调用三种距离变换，比较中心点距离值的精度差异；再用 return_indices=True 得到每个前景点的最近背景点坐标，并用 sampling=[2,1] 观察各向异性。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：C 扩展与内核机制",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "_nd_image 扩展模块与方法分发表",
+          "order": 1,
+          "filename": "u6-l1-nd-image-c-extension.md",
+          "level": "advanced",
+          "topic": "讲清 _nd_image 扩展模块的 C 端结构：methods[] 分发表把 Python 调用映射到 Py_ 包装函数，每个包装函数用 PyArg_ParseTuple 解析参数并调用 ni_*.c 的算法函数。",
+          "learning_goals": [
+            "理解 methods[] 表如何把 Python 名（如 correlate1d）映射到 C 函数（Py_Correlate1D）",
+            "理解 PyArg_ParseTuple 解析数组与标量、NA_NewArray 等辅助函数",
+            "理解错误返回 NULL 与引用计数管理的基本模式"
+          ],
+          "source_files": [
+            "src/nd_image.c",
+            "src/nd_image.h"
+          ],
+          "minimal_modules": [
+            "methods[] 分发表",
+            "Py_Correlate1D / Py_RankFilter 等包装函数",
+            "NA_NewArray 辅助"
+          ],
+          "practice_task": "阅读 Py_RankFilter 的参数解析，画出从 Python rank_filter 到该 C 包装函数的参数传递；并在 methods[] 中找出每个公开 C 方法的映射条目，对照 Python 端的调用。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "C 端迭代器、行缓冲与边界扩展",
+          "order": 2,
+          "filename": "u6-l2-c-iterators-line-buffers.md",
+          "level": "advanced",
+          "topic": "讲清 ni_support 的核心抽象：NI_Iterator（点 / 线 / 子空间迭代宏）、NI_LineBuffer（把任意轴的行拷出并做边界扩展 NI_ExtendLine）、NI_ExtendMode 枚举与 Python mode 的对应。",
+          "learning_goals": [
+            "理解 NI_ITERATOR_NEXT / NEXT2 宏带回溯的多维遍历机制",
+            "理解 NI_LineBuffer 如何把多维数组按指定轴切成行、NI_ExtendLine 实现 7 种边界模式",
+            "理解 NI_ExtendMode 枚举与 _ni_support._extend_mode_to_code 的对应"
+          ],
+          "source_files": [
+            "src/ni_support.h",
+            "src/ni_support.c"
+          ],
+          "minimal_modules": [
+            "NI_Iterator 及迭代宏",
+            "NI_LineBuffer / NI_ExtendLine",
+            "NI_ExtendMode 枚举"
+          ],
+          "practice_task": "跟踪 correlate1d 的 C 路径：NI_AllocateLineBuffer → NI_InitLineBuffer → NI_ArrayToLineBuffer(扩展) → 卷积 → NI_LineBufferToArray，用文字或图描述每一步的数据流与边界扩展发生位置。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "滤波 / 插值 / 样条 C 内核",
+          "order": 3,
+          "filename": "u6-l3-c-filter-interpolation-kernels.md",
+          "level": "advanced",
+          "topic": "讲清 ni_filters.c、ni_interpolation.c、ni_splines.c 三个内核如何使用 FilterIterator 与 LineBuffer：N-D 相关的内层循环、几何重采样、样条系数的因果/反因果滤波。",
+          "learning_goals": [
+            "理解 NI_FilterIterator / NI_InitFilterOffsets 如何计算多维邻域偏移并区分边界/内部区域",
+            "理解插值内核如何用样条权重在 C 端对任意坐标采样",
+            "理解 ni_splines 的因果与反因果递归滤波生成样条系数"
+          ],
+          "source_files": [
+            "src/ni_filters.c",
+            "src/ni_interpolation.c",
+            "src/ni_splines.c"
+          ],
+          "minimal_modules": [
+            "NI_Correlate1D 等 N-D 滤波内核",
+            "几何重采样内核",
+            "样条系数函数"
+          ],
+          "practice_task": "在 ni_filters.c 中定位 N-D 相关的内层循环，说明它如何用 NI_FilterIterator 遍历邻域并累积加权和；在 ni_splines.c 中找出因果/反因果滤波的两个循环方向。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Cython 标记 _ni_label 与 C++ 秩滤波 _rank_filter_1d",
+          "order": 4,
+          "filename": "u6-l4-cython-label-rank-filter.md",
+          "level": "advanced",
+          "topic": "讲清两个非 _nd_image 的扩展：_ni_label.pyx 的逐行连通标记（fused type 多 dtype 特化 + 链表等价类合并 + NeedMoreBits 异常）与 _rank_filter_1d.cpp 的滑动窗口秩滤波。",
+          "learning_goals": [
+            "理解 Cython fused data_t 如何为 10 种整数/浮点 dtype 生成特化代码",
+            "理解逐行扫描 + 等价类（union-find 风格）合并的连通标记算法",
+            "理解 _rank_filter_1d.cpp 的滑动窗口数据结构与秩计算"
+          ],
+          "source_files": [
+            "src/_ni_label.pyx",
+            "src/_rank_filter_1d.cpp"
+          ],
+          "minimal_modules": [
+            "fused data_t 类型",
+            "逐行标记与等价类合并",
+            "_rank_filter_1d 滑动窗口"
+          ],
+          "practice_task": "阅读 _ni_label.pyx 的等价类合并逻辑，解释为何需要 NeedMoreBits 异常（标签数超出 dtype 范围）；并用一个含已知秩的小数组验证 _rank_filter_1d 与 Python 包装结果一致。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：后端委托与测试",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "数组 API / CuPy / JAX 后端委托",
+          "order": 1,
+          "filename": "u7-l1-backend-delegation.md",
+          "level": "advanced",
+          "topic": "讲清数组 API 后端委托：delegate_xp 装饰器如何用 delegator signature 判定输入数组命名空间并委托给 cupyx / jax，capabilities_dict 声明每函数能力，CUPY_BLOCKLIST 排除不兼容函数。",
+          "learning_goals": [
+            "理解 SCIPY_ARRAY_API 环境变量作为委托层的总开关",
+            "理解 delegator signature 通过 array_namespace 判定哪些参数是数组、_skip_if_dtype 排除 dtype 参数",
+            "理解 capabilities_dict 的 cpu_only / exceptions / out_of_scope 能力声明与回退 numpy 的路径"
+          ],
+          "source_files": [
+            "_support_alternative_backends.py",
+            "_delegators.py"
+          ],
+          "minimal_modules": [
+            "delegate_xp 装饰器",
+            "delegator signature 与 array_namespace",
+            "capabilities_dict / CUPY_BLOCKLIST"
+          ],
+          "practice_task": "阅读 gaussian_filter_signature 与 delegate_xp，描述当一个 cupy 数组传入时调用如何被重定向到 cupyx.scipy.ndimage.gaussian_filter；并列出 CUPY_BLOCKLIST 中的函数，说明它们为何不被委托。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "测试组织、数据类型矩阵与 C API 测试",
+          "order": 2,
+          "filename": "u7-l2-testing-strategy.md",
+          "level": "advanced",
+          "topic": "讲清测试体系：按功能域分文件（test_filters / test_interpolation / ...）、test_datatypes 的 dtype 覆盖矩阵、test_array_likes 对全公开 API 的 array_like（Python list）输入冒烟回归、test_c_api 对扩展模块的低层测试、test_ni_support / test_splines，以及 utils/generate_label_testvectors.py 与 data/ 测试向量。",
+          "learning_goals": [
+            "理解每个 test_*.py 对应一个功能域、测试规模分布",
+            "理解 test_datatypes 如何对多 dtype 做矩阵化覆盖",
+            "理解 test_array_likes 如何用 _assert_same_result 把 list 输入结果与显式 ndarray 输入结果逐项比对，做跨全 API 的输入类型回归",
+            "理解 test_c_api 对扩展模块的低层测试与 data/ 测试向量的作用"
+          ],
+          "source_files": [
+            "tests/test_filters.py",
+            "tests/test_c_api.py",
+            "tests/test_datatypes.py",
+            "tests/test_array_likes.py",
+            "utils/generate_label_testvectors.py"
+          ],
+          "minimal_modules": [
+            "按功能域分文件测试",
+            "dtype 覆盖矩阵",
+            "array_like 输入冒烟回归（test_array_likes）",
+            "C API 低层测试",
+            "标记测试向量生成"
+          ],
+          "practice_task": "在 test_filters.py 中找到一个 correlate1d 的边界用例并运行通过；再阅读 test_array_likes.py，解释它如何对每个公开函数用 list 输入复现 ndarray 输入的结果（并说明 weights、markers 等非数组参数的处理）；最后阅读 utils/generate_label_testvectors.py，说明它如何把 label_inputs.txt / label_strels.txt 与 label_results.txt 串成回归测试数据。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "update"
+        }
+      ]
+    }
+  ]
+}
