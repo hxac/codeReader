@@ -1,0 +1,1109 @@
+{
+  "project": "scipy-scipy-integrate",
+  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+  "rationale": "scipy.integrate 是一个体量大、职责清晰的大型子包，可归纳为四大主题：数值积分（固定样本 + 自适应函数积分 + 高维 cubature）、常微分方程初值问题求解（新 API solve_ivp 与旧 API ode/odeint）、边值问题 solve_bvp，以及底层 C/Fortran 扩展与构建系统。因此学习路线按「先整体后局部、先易后难、先用法后源码」设计：第 1 单元先建立全景与运行环境；第 2 单元从最直观的固定样本积分（梯形/辛普森/龙贝格）入手；第 3–5 单元逐步进入自适应函数积分（QUADPACK 的 quad 系列、向量值 quad_vec、元素级 tanhsinh/nsum、球面 lebedev_rule、以及基于规则系统的高维 cubature）；第 6–9 单元系统讲解 ODE 初值问题——先从 solve_ivp 用法切入，再深入 OdeSolver 基类、显式 Runge-Kutta（RK23/45/DOP853）、隐式刚性求解器（Radau/BDF）、LSODA 与事件检测及主循环；第 10 单元专讲边值问题 solve_bvp；第 11 单元覆盖旧 API（ode/complex_ode/odeint）以理解历史与封装关系；最后第 12–13 单元进入专家层，剖析 meson 构建、C/Fortran 扩展、ccallback/LowLevelCallable 机制，以及测试组织、二次开发（自定义求解器与积分规则）和架构取舍。讲义之间通过 depends_on 形成清晰 DAG，每篇只解决一个独立主题并配套真实源码与可操作实践任务，整体 36 篇适配该大型子包的复杂度。本次增量（HEAD 5f09bd719c → de190e7fde）：该区间内仅有一个提交 de190e7fde，内容为 scipy/special 文档修订（移除过时的 cdflib 引用，#25460），未触及 scipy/integrate 的任何源码、构建配置或测试文件；经核对当前工作树，manifest 引用的全部源码文件（_ivp/*.py、_rules/*.py、_cubature.py、_quadpack_py.py、_tanhsinh.py、src/*.c 及各加载桩模块等）均仍存在且目录结构一致，未出现需要新增讲义的新模块。故全部 36 篇讲义 action 设为 keep，仅更新 head 字段。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "概览与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 scipy.integrate 全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.integrate 子包的定位：它解决函数积分、固定样本积分、ODE 初值/边值问题求解等数值计算任务，并梳理公开 API 的分类。",
+          "learning_goals": [
+            "理解 scipy.integrate 在 SciPy 中的定位与核心能力",
+            "区分函数积分、固定样本积分、ODE 初值/边值四大类 API",
+            "看懂 __init__.py 的导出结构（from ._quadrature import * 等）"
+          ],
+          "source_files": [
+            "scipy/integrate/__init__.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 模块导出"
+          ],
+          "practice_task": "阅读 __init__.py 的 autosummary 注释，按「函数积分 / 固定样本 / ODE 初值 / ODE 边值 / 旧 API」五个类别，整理出每个类别包含哪些公开函数，并写一份 API 分类表。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、子包组织与构建方式",
+          "order": 2,
+          "filename": "u1-l2-directory-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 integrate 目录的物理结构：纯 Python 模块、_ivp 子包、_rules 子包、src 下的 C 源，以及 meson.build 如何把它们编译成扩展模块。",
+          "learning_goals": [
+            "掌握 integrate 目录的分层与各文件职责",
+            "理解 _ivp、_rules 子包与 src/ C 源的关系",
+            "看懂 meson.build 中 py3.extension_module 与 install_sources 的作用"
+          ],
+          "source_files": [
+            "scipy/integrate/meson.build",
+            "scipy/integrate/_ivp/meson.build",
+            "scipy/integrate/_rules/meson.build"
+          ],
+          "minimal_modules": [
+            "meson.build 构建配置",
+            "_ivp 子包",
+            "_rules 子包",
+            "src C 源目录"
+          ],
+          "practice_task": "在 meson.build 中找出 _quadpack、_odepack、_vode、_dop 四个扩展模块分别由哪些 .c 源文件编译而来，并画出「扩展模块 → 源文件」对照表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "上手运行：导入、调用与第一个示例",
+          "order": 3,
+          "filename": "u1-l3-getting-started.md",
+          "level": "beginner",
+          "topic": "从用户视角演示如何导入并调用 integrate 的典型函数（如 quad、solve_ivp、trapezoid），建立对返回结果与工作流的直观认识。",
+          "learning_goals": [
+            "学会 from scipy import integrate 并调用典型函数",
+            "理解 quad、solve_ivp、trapezoid 的基本调用签名与返回值",
+            "能够运行一个完整的积分与 ODE 求解示例"
+          ],
+          "source_files": [
+            "scipy/integrate/__init__.py",
+            "scipy/integrate/_quadpack_py.py",
+            "scipy/integrate/_ivp/ivp.py"
+          ],
+          "minimal_modules": [
+            "quad",
+            "solve_ivp",
+            "trapezoid"
+          ],
+          "practice_task": "写一段脚本：用 quad 计算 sin(x) 在 [0, pi] 的积分，再用 solve_ivp 求解 dy/dt=-y, y(0)=1 到 t=5，最后用 trapezoid 对一组样本做积分，打印三个结果并与解析解对比。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "固定样本数值积分",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "梯形法 trapezoid 与 cumulative_trapezoid",
+          "order": 1,
+          "filename": "u2-l1-trapezoid.md",
+          "level": "beginner",
+          "topic": "讲解 _quadrature.py 中基于已采样数据的梯形积分：trapezoid 的定积分与 cumulative_trapezoid 的累计积分实现。",
+          "learning_goals": [
+            "理解复合梯形公式及其在 x/dx/axis 参数下的行为",
+            "掌握 cumulative_trapezoid 如何逐点累计积分",
+            "理解数组 API 装饰器 @xp_capabilities 的存在意义"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadrature.py"
+          ],
+          "minimal_modules": [
+            "trapezoid",
+            "cumulative_trapezoid"
+          ],
+          "practice_task": "用 trapezoid 对 y=sin(x) 在等距与非等距 x 上的样本分别积分，再用 cumulative_trapezoid 得到累计积分曲线，并与解析解 -cos(x) 对比绘图。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "辛普森法 simpson 与 cumulative_simpson",
+          "order": 2,
+          "filename": "u2-l2-simpson.md",
+          "level": "beginner",
+          "topic": "讲解辛普森（抛物线）积分：simpson 的自适应分段与 cumulative_simpson 的累计实现，及其相对梯形法的精度优势。",
+          "learning_goals": [
+            "理解复合辛普森公式与偶/奇段处理",
+            "掌握 cumulative_simpson 的累计积分逻辑",
+            "能够比较梯形法与辛普森法在相同样本下的误差"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadrature.py"
+          ],
+          "minimal_modules": [
+            "simpson",
+            "cumulative_simpson"
+          ],
+          "practice_task": "对同一组高曲率样本（如 y=x*sin(x)）分别用 trapezoid 与 simpson 积分，比较二者与解析积分的差异，观察辛普森法的精度提升。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "龙贝格 romb、newton_cotes 与 fixed_quad",
+          "order": 3,
+          "filename": "u2-l3-romb-newton-cotes-fixed-quad.md",
+          "level": "beginner",
+          "topic": "讲解 romb（Romberg 外推，基于 2**k+1 等距样本）、newton_cotes（牛顿-柯特斯权重与误差系数）与 fixed_quad（定阶高斯-勒让德积分）三种方法。",
+          "learning_goals": [
+            "理解 Romberg 外推如何用逐次加密样本提升精度",
+            "掌握 newton_cotes 返回的权重与误差系数含义",
+            "理解 fixed_quad 基于高斯-勒让德节点的定阶积分"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadrature.py"
+          ],
+          "minimal_modules": [
+            "romb",
+            "newton_cotes",
+            "fixed_quad"
+          ],
+          "practice_task": "用 romb 对一组 (2**k+1) 等距样本积分；用 newton_cotes 计算若干阶权重；用 fixed_quad 以不同阶数对同一光滑函数积分，比较三者精度与所需样本量。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "自适应一维函数积分（QUADPACK）",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "quad 自适应积分与 _quadpack 桥接",
+          "order": 1,
+          "filename": "u3-l1-quad-adaptive.md",
+          "level": "intermediate",
+          "topic": "讲解 quad 如何将 Python 可调用对象包装后交给 Fortran QUADPACK（_quadpack 扩展）做自适应积分，并解析 epsabs/epsrel/limit 等容差与子区间控制参数。",
+          "learning_goals": [
+            "理解 quad 的自适应 Gauss-Kronrod（QAGS/QAGI）策略",
+            "掌握 Python 包装层与 _quadpack C 扩展的分工",
+            "理解 epsabs、epsrel、limit 参数如何影响精度与开销"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadpack_py.py",
+            "scipy/integrate/__quadpack.c"
+          ],
+          "minimal_modules": [
+            "quad",
+            "IntegrationWarning",
+            "_quadpack 扩展"
+          ],
+          "practice_task": "用 quad 积分一个带可调奇异性的函数（如 1/sqrt(x) 在 [0,1]），分别调整 epsabs 与 limit，观察返回的 abserr 与 infodict 中子区间数的变化。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "dblquad / tplquad / nquad 多重积分",
+          "order": 2,
+          "filename": "u3-l2-multi-quad.md",
+          "level": "intermediate",
+          "topic": "讲解 dblquad、tplquad、nquad 如何通过嵌套调用 quad 实现二重、三重与 N 重积分，以及积分限作为函数（变量依赖）的处理。",
+          "learning_goals": [
+            "理解嵌套积分的执行顺序与内层积分限依赖外层变量",
+            "掌握 nquad 的通用 N 重积分接口与 opts 参数",
+            "能够为带函数型边界的区域构造多重积分"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadpack_py.py"
+          ],
+          "minimal_modules": [
+            "dblquad",
+            "tplquad",
+            "nquad"
+          ],
+          "practice_task": "用 dblquad 计算单位圆面积（积分限为函数），再用 nquad 计算一个三重积分（如球体上的被积函数），并与解析结果对比。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "quad 进阶：权重函数、奇异点与 LowLevelCallable",
+          "order": 3,
+          "filename": "u3-l3-quad-weights-lowlevel.md",
+          "level": "intermediate",
+          "topic": "讲解 quad 的高级能力：weight/wvar 权重积分（代数/对数/三角权重与振荡积分）、points 奇异点提示，以及通过 LowLevelCallable 提速的底层调用签名。",
+          "learning_goals": [
+            "理解 weight（如 'cos'/'sin'/'alg'）与 wvar、wopts 的用法",
+            "掌握 points 参数对内部奇异点/间断点的处理",
+            "了解 LowLevelCallable 的 C 签名与性能意义"
+          ],
+          "source_files": [
+            "scipy/integrate/_quadpack_py.py",
+            "scipy/integrate/__quadpack.c"
+          ],
+          "minimal_modules": [
+            "quad 的 weight/points 参数",
+            "LowLevelCallable 签名"
+          ],
+          "practice_task": "用 weight='cos' 计算一个振荡积分 ∫f(x)cos(ωx)dx；再用 points 标注一个内部间断点积分同一函数；对比不标注 points 时的误差，体会奇异点提示的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "向量值、元素级与球面积分",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "quad_vec 向量值函数积分",
+          "order": 1,
+          "filename": "u4-l1-quad-vec.md",
+          "level": "intermediate",
+          "topic": "讲解 quad_vec 如何对返回向/数组的函数在一次自适应流程中同时积分多个分量，及其缓存（LRUDict）、半无穷区间变换（SemiInfiniteFunc）等内部机制。",
+          "learning_goals": [
+            "理解 quad_vec 与多次调用 quad 的区别与优势",
+            "掌握 args、tol/epsabs/epsrel、quadrature method 选项",
+            "了解 LRUDict 函数值缓存与 SemiInfiniteFunc 区间变换"
+          ],
+          "source_files": [
+            "scipy/integrate/_quad_vec.py"
+          ],
+          "minimal_modules": [
+            "quad_vec",
+            "LRUDict",
+            "SemiInfiniteFunc"
+          ],
+          "practice_task": "用 quad_vec 同时积分一个返回长度 5 向量的函数（如各阶贝塞尔相关分量）在 [0,10] 上，打印每个分量的积分值与误差，并对比逐个 quad 调用的耗时。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "tanhsinh 与 nsum 元素级积分与求和",
+          "order": 2,
+          "filename": "u4-l2-tanhsinh-nsum.md",
+          "level": "intermediate",
+          "topic": "讲解 tanhsinh 的双曲正弦（tanh-sinh）求积及其二次收敛特性，以及 nsum 如何基于它对级数/序列求和，二者都基于 _elementwise_iterative_method 逐元素迭代框架。",
+          "learning_goals": [
+            "理解 tanh-sinh 变换如何处理端点奇异性与无穷区间",
+            "掌握 tanhsinh 的 maxlevel/minlevel、log、preserve_shape 参数",
+            "理解 nsum 将求和转化为积分的思想与适用场景"
+          ],
+          "source_files": [
+            "scipy/integrate/_tanhsinh.py"
+          ],
+          "minimal_modules": [
+            "tanhsinh",
+            "nsum",
+            "_elementwise_iterative_method"
+          ],
+          "practice_task": "用 tanhsinh 积分一个端点奇异函数（如 ∫0^1 log(x) dx），再分别用 tanhsinh 和解析方式验证；用 nsum 求一个收敛级数的和并与已知结果对比。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "lebedev_rule 球面 Lebedev 积分",
+          "order": 3,
+          "filename": "u4-l3-lebedev-rule.md",
+          "level": "intermediate",
+          "topic": "讲解 _lebedev.py 中 lebedev_rule（get_lebedev_sphere）如何在单位球面上生成 Lebedev 求积节点与权重，用于球面积分，以及其表格化生成代码的组织方式。",
+          "learning_goals": [
+            "理解 Lebedev 求积适用于球面上的数值积分",
+            "掌握 lebedev_rule(degree) 返回的 points/weights 结构",
+            "了解该模块由生成代码「直译」而来的特点与维护含义"
+          ],
+          "source_files": [
+            "scipy/integrate/_lebedev.py"
+          ],
+          "minimal_modules": [
+            "lebedev_rule",
+            "get_lebedev_sphere"
+          ],
+          "practice_task": "用 lebedev_rule 取若干 degree，在单位球面上对 1 与球谐函数 Y_lm 积分，验证归一化（∫1 dΩ=4π）与正交性（∫Y_lm dΩ=0 for l>0）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "高维 cubature 与规则系统",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "cubature 入门与 Rule / FixedRule 基类",
+          "order": 1,
+          "filename": "u5-l1-cubature-rule-base.md",
+          "level": "intermediate",
+          "topic": "讲解 cubature 的高维自适应积分思想，以及 _rules/_base.py 中 Rule（estimate/estimate_error 抽象）与 FixedRule、NestedFixedRule、ProductNestedFixed 基类的设计。",
+          "learning_goals": [
+            "理解 cubature 对多维矩形区域积分的整体思路",
+            "掌握 Rule 的 estimate 与 estimate_error 抽象接口",
+            "理解 ProductNestedFixed 如何把一维规则张量成多维规则"
+          ],
+          "source_files": [
+            "scipy/integrate/_cubature.py",
+            "scipy/integrate/_rules/_base.py",
+            "scipy/integrate/_rules/__init__.py"
+          ],
+          "minimal_modules": [
+            "cubature",
+            "Rule",
+            "FixedRule",
+            "NestedFixedRule",
+            "ProductNestedFixed"
+          ],
+          "practice_task": "用 cubature 在三维单位立方体上对一个光滑函数积分（默认规则），再阅读 _base.py 默认 estimate_error 的「整体 vs 二分子区域差」逻辑，简述其误差估计原理。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "内置规则：Gauss-Kronrod / Gauss-Legendre / Genz-Malik",
+          "order": 2,
+          "filename": "u5-l2-built-in-rules.md",
+          "level": "intermediate",
+          "topic": "讲解三种内置积分规则：一维 GaussKronrodQuadrature（含嵌套低阶 Gauss-Legendre 做误差）、GaussLegendreQuadrature，以及多维 GenzMalikCubature 的实现与适用维度。",
+          "learning_goals": [
+            "理解 Gauss-Kronrod 用高低阶差作为误差估计的机制",
+            "掌握 Genz-Malik 规则用于多维积分的适用范围",
+            "能够通过 ProductNestedFixed 把一维规则组合成多维规则"
+          ],
+          "source_files": [
+            "scipy/integrate/_rules/_gauss_kronrod.py",
+            "scipy/integrate/_rules/_gauss_legendre.py",
+            "scipy/integrate/_rules/_genz_malik.py"
+          ],
+          "minimal_modules": [
+            "GaussKronrodQuadrature",
+            "GaussLegendreQuadrature",
+            "GenzMalikCubature"
+          ],
+          "practice_task": "用 ProductNestedFixed 把三条 GaussKronrodQuadrature 组成三维规则，调用 cubature(rule=...) 积分一个多维函数；再用 GenzMalikCubature(ndim=3) 做同样积分，比较二者结果与误差。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "cubature 自适应区域细分（堆与 _split_subregion）",
+          "order": 3,
+          "filename": "u5-l3-cubature-adaptive-subdivision.md",
+          "level": "intermediate",
+          "topic": "讲解 _cubature.py 中 cubature 的自适应驱动：CubatureRegion/CubatureResult 数据类、按误差用最大堆优先细分误差最大区域，以及 _split_subregion 的二分策略。",
+          "learning_goals": [
+            "理解自适应区域细分与最大堆驱动的优先级策略",
+            "掌握 CubatureRegion 的 __lt__（误差大者优先）与 CubatureResult 结构",
+            "理解 rtol/atol 与 subdivisions 上限如何控制终止"
+          ],
+          "source_files": [
+            "scipy/integrate/_cubature.py",
+            "scipy/integrate/_rules/_base.py"
+          ],
+          "minimal_modules": [
+            "CubatureRegion",
+            "CubatureResult",
+            "_split_subregion"
+          ],
+          "practice_task": "对一个在局部有高梯度的多维被积函数调用 cubature，收紧 rtol 观察返回 result 中的 subdivisions 增长，并打印 result.regions 检查细分集中在哪些子区域。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "ODE 初值问题入门",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "solve_ivp 入门：求解 dy/dt=f(t,y)",
+          "order": 1,
+          "filename": "u6-l1-solve-ivp-intro.md",
+          "level": "intermediate",
+          "topic": "从用法层面讲解 solve_ivp 的标准初值问题模型、t_span/y0/method 选择、rtol/atol/max_step 等控制参数，以及非刚性/刚性方法的选用建议。",
+          "learning_goals": [
+            "理解 IVP 模型 dy/dt=f(t,y), y(t0)=y0 的标准接口",
+            "掌握 RK23/RK45/DOP853/Radau/BDF/LSODA 的适用场景",
+            "理解 rtol/atol、first_step、max_step 等参数的作用"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/ivp.py",
+            "scipy/integrate/_ivp/__init__.py"
+          ],
+          "minimal_modules": [
+            "solve_ivp",
+            "METHODS 字典"
+          ],
+          "practice_task": "分别用 RK45、Radau、BDF 求解一个刚性 Van der Pol 方程（大 μ）与非刚性谐振子，记录各自 nfev 与运行情况，体会方法选择的影响。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "结果对象 OdeResult、t_eval 与 dense_output",
+          "order": 2,
+          "filename": "u6-l2-ode-result-dense-output.md",
+          "level": "intermediate",
+          "topic": "讲解 solve_ivp 返回的 OdeResult（继承 OptimizeResult）字段、t_eval 指定存储时刻、dense_output=True 得到 OdeSolution 连续解及其调用方式。",
+          "learning_goals": [
+            "掌握 OdeResult 的 t/y/sol/nfev/status 等字段",
+            "理解 t_eval 如何在不影响步进的情况下记录特定时刻解",
+            "理解 OdeSolution 作为分段密集输出插值器的调用方式"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/ivp.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "OdeResult",
+            "OdeSolution",
+            "dense_output"
+          ],
+          "practice_task": "用 dense_output=True 求解一个 ODE，得到 sol 后在任意 t 处调用 sol(t) 取值；再用 t_eval 指定一组时刻，对比两种取值方式的差异与精度。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "OdeSolver 框架与显式 Runge-Kutta",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "OdeSolver 基类设计",
+          "order": 1,
+          "filename": "u7-l1-odesolver-base.md",
+          "level": "intermediate",
+          "topic": "深入 _ivp/base.py：OdeSolver 基类如何管理状态（t/y/status/nfev/njev/nlu）、step()/dense_output() 公共流程、以及子类需实现的 _stepimpl/_dense_output_impl 契约。",
+          "learning_goals": [
+            "理解 OdeSolver 的状态机：running/finished/failed",
+            "掌握 step() 如何调用 _step_impl 并更新 t_old/step_size",
+            "理解 fun/fun_single/fun_vectorized 的设计与 nfev 自动计数"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/base.py"
+          ],
+          "minimal_modules": [
+            "OdeSolver",
+            "check_arguments",
+            "DenseOutput"
+          ],
+          "practice_task": "阅读 base.py 的 step() 与 __init__，写一份说明：为什么 nfev 能自动统计、vectorized=True 时 fun_single 与 fun_vectorized 如何互转，并指出子类必须实现哪两个方法。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "rk_step、Butcher 表与自适应步长",
+          "order": 2,
+          "filename": "u7-l2-rk-step-adaptive.md",
+          "level": "intermediate",
+          "topic": "讲解 _ivp/rk.py 中通用 rk_step 函数（按 Butcher 表 A/B/C 组合阶段）与 RungeKutta._step_impl 的自适应步长接受/拒绝循环（SAFETY/MIN_FACTOR/MAX_FACTOR 与 error_exponent）。",
+          "learning_goals": [
+            "理解 Butcher 表 A/B/C/E 的含义与 rk_step 的阶段组合",
+            "掌握嵌入式误差估计 error_norm 与步长因子计算",
+            "理解步长接受/拒绝循环与 min_step 保护"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/rk.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "rk_step",
+            "RungeKutta._step_impl",
+            "_estimate_error_norm",
+            "select_initial_step"
+          ],
+          "practice_task": "在 rk_step 与 _step_impl 上做行级注释，说明一次步进中：阶段值如何算、误差如何估计、步长因子如何由 error_exponent 得出；并解释为何被拒绝的步会限制 factor≤1。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "RK23/RK45/DOP853 与嵌入式误差、密集输出",
+          "order": 3,
+          "filename": "u7-l3-rk-methods-dense-output.md",
+          "level": "intermediate",
+          "topic": "讲解具体显式方法：RK23（Bogacki-Shampine）、RK45（Dormand-Prince）的系数与阶、DOP853 的高阶实现与 dop853_coefficients，以及 RkDenseOutput 多项式插值。",
+          "learning_goals": [
+            "理解各类方法 order/error_estimator_order 与系数矩阵的来源",
+            "掌握 DOP853 的特殊两段误差估计与系数文件结构",
+            "理解 _dense_output_impl 中 Q=K.T·P 构造插值多项式"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/rk.py",
+            "scipy/integrate/_ivp/dop853_coefficients.py"
+          ],
+          "minimal_modules": [
+            "RK23",
+            "RK45",
+            "DOP853",
+            "RkDenseOutput",
+            "dop853_coefficients"
+          ],
+          "practice_task": "对同一 ODE 用 RK23、RK45、DOP853 在相同 rtol/atol 下求解，比较 nfev 与解的精度；再打开 dop85ev_coefficients.py 浏览，说明高阶方法为何系数表更大。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "隐式求解器与刚性问题",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "刚性概念、隐式动机与 common.py 工具",
+          "order": 1,
+          "filename": "u8-l1-stiffness-common-utils.md",
+          "level": "intermediate",
+          "topic": "讲解刚性 ODE 为何需要隐式方法，并梳理 _ivp/common.py 提供的公共工具：validate_tol/validate_max_step/validate_first_step、select_initial_step、norm、warn_extraneous 与数值雅可比 num_jac。",
+          "learning_goals": [
+            "理解刚性与显式方法步长受限的根本原因",
+            "掌握 common.py 中各类 validate 与 select_initial_step 的作用",
+            "理解 num_jac 数值雅可比与 group_columns 列分组的意义"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/common.py",
+            "scipy/integrate/_ivp/base.py"
+          ],
+          "minimal_modules": [
+            "validate_tol",
+            "select_initial_step",
+            "num_jac",
+            "norm"
+          ],
+          "practice_task": "构造一个刚性测试方程 dy/dt=-1000y，分别用 RK45 与 Radau 求解，观察 RK45 的 nfev 爆炸；再阅读 num_jac 的签名，说明它如何为隐式求解器提供雅可比。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Radau 隐式 Runge-Kutta 配置法",
+          "order": 2,
+          "filename": "u8-l2-radau-implicit-rk.md",
+          "level": "intermediate",
+          "topic": "深入 _ivp/radau.py：Radau IIA 5 阶隐式方法，其 Butcher 表的实数/复数特征分解（T/TI/MU_REAL/MU_COMPLEX）、配置多项式密集输出，以及 Newton 迭代与 LU 求解。",
+          "learning_goals": [
+            "理解 Radau IIA 配置法与隐式方程的 Newton 迭代",
+            "掌握 A 的特征分解为何能高效求解隐式阶段方程",
+            "理解三次配置多项式作为 dense output"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/radau.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "Radau",
+            "T/TI/MU_REAL/MU_COMPLEX",
+            "lu_factor/lu_solve",
+            "splu"
+          ],
+          "practice_task": "阅读 radau.py 顶部常量（C、E、T、TI），写一段说明：隐式阶段方程如何借助特征分解化为实/复线性求解；并用 Radau 求解一个刚性方程验证其稳健性。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "BDF 变阶多步法",
+          "order": 3,
+          "filename": "u8-l3-bdf-variable-order.md",
+          "level": "intermediate",
+          "topic": "深入 _ivp/bdf.py：基于 NDF 修正的变阶（1–5）BDF 方法，compute_R/change_D 处理变步长差分、solve_bdf_system 的 Newton 迭代与 LU 复用、以及稀疏雅可比与 group_columns。",
+          "learning_goals": [
+            "理解多步 BDF/NDF 方法与变阶变步长策略",
+            "掌握 compute_R/change_D 如何在步长变化时更新差分数组",
+            "理解 solve_bdf_system 的 Newton 迭代与 LU 分解复用"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/bdf.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "BDF",
+            "compute_R",
+            "change_D",
+            "solve_bdf_system",
+            "MAX_ORDER"
+          ],
+          "practice_task": "用 BDF 求解一个大稀疏刚性系统（提供 jac_sparsity），对比不提供稀疏结构时的 nfev/njev/nlu；再注释 compute_R/change_D，说明变步长时差分数组如何变换。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "LSODA、事件检测与主循环",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "LSODA Fortran 包装与刚度自动切换",
+          "order": 1,
+          "filename": "u9-l1-lsoda-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 _ivp/lsoda.py 中 LSODA 如何包装 Fortran ODEPACK（复用旧的 ode 积分器），在非刚性 Adams 与刚性 BDF 之间自动检测并切换，及其 first_step/min_step/max_step 处理。",
+          "learning_goals": [
+            "理解 LSODA 的 Adams/BDF 自动刚度切换机制",
+            "掌握 LSODA 作为 OdeSolver 子类对 _step_impl/_dense_output_impl 的实现",
+            "理解它与旧 ode/ODEPACK 的复用关系"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/lsoda.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "LSODA",
+            "ode（复用）",
+            "validate_tol",
+            "validate_first_step"
+          ],
+          "practice_task": "用 LSODA 求解一个在过程中由非刚性转为刚性的系统，观察其自动切换；阅读 lsoda.py 找出它如何把每步推进委托给底层 ODEPACK，写出调用链说明。",
+          "depends_on": [
+            "u7-l1",
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "solve_ivp 事件检测机制",
+          "order": 2,
+          "filename": "u9-l2-event-detection.md",
+          "level": "intermediate",
+          "topic": "讲解 _ivp/ivp.py 中事件机制：prepare_events 标准化事件函数、find_active_events 通过符号变化定位、handle_events 排序与终止判定、solve_event_equation 用 brentq 精确求根。",
+          "learning_goals": [
+            "理解 event(t,y) 的 terminal/direction 属性语义",
+            "掌握 find_active_events 的符号变化判据与方向过滤",
+            "理解用 brentq 在 dense output 上精确求事件时刻"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/ivp.py"
+          ],
+          "minimal_modules": [
+            "prepare_events",
+            "find_active_events",
+            "handle_events",
+            "solve_event_equation"
+          ],
+          "practice_task": "为弹跳球模型（dy/dt=v, dv/dt=-g）定义一个 event：球触地（y=0）且 terminal 为某整数，用 solve_ivp 的 events 参数捕捉前 N 次触地时刻并终止。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "solve_ivp 主循环与方法调度",
+          "order": 3,
+          "filename": "u9-l3-solve-ivp-main-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 solve_ivp 函数主体：method 字符串/类到 METHODS 的解析、t_eval 时刻对齐、逐步推进主循环、dense output 拼接为 OdeSolution、以及 MESSAGES 状态与终止逻辑。",
+          "learning_goals": [
+            "理解 solve_ivp 如何把 method 解析为具体 OdeSolver 子类",
+            "掌握主循环如何步进、对齐 t_eval、收集 dense output",
+            "理解返回 OdeResult 的字段拼装与状态消息"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/ivp.py",
+            "scipy/integrate/_ivp/common.py"
+          ],
+          "minimal_modules": [
+            "solve_ivp 主体",
+            "METHODS",
+            "OdeSolution 拼接",
+            "MESSAGES"
+          ],
+          "practice_task": "在 solve_ivp 函数主体（参数校验之后的实现部分）做结构梳理：方法解析、t_eval 处理、步进循环、事件处理、结果拼装各在哪几行，写出主流程伪代码。",
+          "depends_on": [
+            "u6-l2",
+            "u7-l1",
+            "u9-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "边值问题 solve_bvp",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "solve_bvp 建模与整体流程",
+          "order": 1,
+          "filename": "u10-l1-solve-bvp-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 _bvp.py 中 solve_bvp 解决的两点边值问题模型 y'=f(x,y,p) 与边界条件 bc(ya,yb,p)，及其基于连续配点与拟牛顿迭代的整体流程和 OptimizeResult 返回。",
+          "learning_goals": [
+            "理解 BVP 与 IVP 的区别及 bc 边界条件的接口",
+            "掌握 solve_bvp 的网格、配点、迭代校正整体流程",
+            "理解未知参数 p 与 tol/max_nodes 等控制参数"
+          ],
+          "source_files": [
+            "scipy/integrate/_bvp.py"
+          ],
+          "minimal_modules": [
+            "solve_bvp",
+            "OptimizeResult"
+          ],
+          "practice_task": "用 solve_bvp 求解一个经典两点边值问题（如 y''+sin(y)=0 配合两端边界条件），打印返回的 sol 与 status；再用 sol.plot 或在网格上调用 sol(x) 复现解曲线。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "solve_bvp 雅可比估计与边界条件处理",
+          "order": 2,
+          "filename": "u10-l2-solve-bvp-jacobian-bc.md",
+          "level": "intermediate",
+          "topic": "讲解 _bvp.py 中 estimate_fun_jac/estimate_bc_jac 用前向差分估计函数与边界条件的雅可比，稀疏组装（csc_array/splu）求解线性修正方程，以及网格自适应加密。",
+          "learning_goals": [
+            "理解前向差分估计 df_dy/df_dp 与 dbc_dya/dbc_dyb 的实现",
+            "掌握稀疏雅可比组装与 splu 直接求解修正方程",
+            "理解网格加密（max_nodes）如何提升精度"
+          ],
+          "source_files": [
+            "scipy/integrate/_bvp.py"
+          ],
+          "minimal_modules": [
+            "estimate_fun_jac",
+            "estimate_bc_jac",
+            "csc_array",
+            "splu"
+          ],
+          "practice_task": "阅读 estimate_fun_jac，推导其前向差分步长 h=EPS**0.5*(1+|y|) 的选择；再为同一 BVP 提供解析 jac 与 bc_jac 调用 solve_bvp，对比差分与解析雅可比下的迭代次数。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "旧 API：ode 与 odeint",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "ode / complex_ode 面向对象积分器接口",
+          "order": 1,
+          "filename": "u11-l1-ode-complex-ode.md",
+          "level": "intermediate",
+          "topic": "讲解 _ode.py 中旧版面向对象接口 ode：set_integrator/set_initial_value/set_f_params/integrate 的状态式用法，以及 complex_ode 如何把复值系统转为实值系统求解。",
+          "learning_goals": [
+            "理解 ode 的状态式（set_* / integrate）调用模型",
+            "掌握可插拔 integrator（vode/zvode/lsoda/dop853 等）的注册",
+            "理解 complex_ode 将复值问题转为实值方程的技巧"
+          ],
+          "source_files": [
+            "scipy/integrate/_ode.py"
+          ],
+          "minimal_modules": [
+            "ode",
+            "complex_ode",
+            "Integrator 基类"
+          ],
+          "practice_task": "用 ode 依次 set_integrator('lsoda')、set_initial_value 求解一个 ODE 并逐步推进到多个时刻；再用 complex_ode 求解一个复值 ODE，验证其与拆分实虚部的等价性。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "odeint 与 ODEPACK 包装",
+          "order": 2,
+          "filename": "u11-l2-odeint-odepack.md",
+          "level": "intermediate",
+          "topic": "讲解 _odepack_py.py 中 odeint 如何包装 Fortran ODEPACK（lsode），其 tfirst/Dfun/ml/mu 等参数、状态码 _msgs 映射，以及与 solve_ivp 的新旧对比。",
+          "learning_goals": [
+            "理解 odeint 包装 ODEPACK 的参数映射",
+            "掌握 Dfun 提供雅可比、ml/mu 带状雅可比的用法",
+            "理解 ODEintWarning 与 istate 状态码含义及迁移建议"
+          ],
+          "source_files": [
+            "scipy/integrate/_odepack_py.py"
+          ],
+          "minimal_modules": [
+            "odeint",
+            "ODEintWarning",
+            "_msgs",
+            "_odepack 扩展"
+          ],
+          "practice_task": "用 odeint（tfirst=True）求解一个 ODE，提供 Dfun 雅可比，打印返回信息；再用 solve_ivp 解同一问题，对比两者接口、返回结构与官方推荐的迁移点。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "C/Fortran 扩展与构建机制",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "meson.build 构建与扩展注册",
+          "order": 1,
+          "filename": "u12-l1-meson-build.md",
+          "level": "advanced",
+          "topic": "讲解 scipy/integrate/meson.build 如何用 py3.extension_module 把 C 源编译为 _quadpack/_odepack/_vode/_dop 扩展，用 py3.install_sources 安装纯 Python 文件，并用 subdir 递归构建子包。",
+          "learning_goals": [
+            "理解 meson 中 extension_module 与 install_sources 的区别",
+            "掌握扩展模块的依赖（np_dep、lapack_dep、ccallback_dep）",
+            "理解 subdir 递归构建 _ivp/_rules/tests"
+          ],
+          "source_files": [
+            "scipy/integrate/meson.build",
+            "scipy/integrate/_ivp/meson.build",
+            "scipy/integrate/_rules/meson.build"
+          ],
+          "minimal_modules": [
+            "py3.extension_module",
+            "py3.install_sources",
+            "subdir",
+            "ccallback_dep"
+          ],
+          "practice_task": "对照 meson.build 列表，写出每个扩展模块依赖的 dep（如 lapack/ccallback/np），并解释为何 _vode 同时链接 vode.c 与 zvode.c 而 _quadpack 不需要 lapack。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l2",
+          "title": "__quadpack.c 与 ccallback / LowLevelCallable 机制",
+          "order": 2,
+          "filename": "u12-l2-quadpack-ccallback.md",
+          "level": "advanced",
+          "topic": "深入 __quadpack.c：它如何通过 ccallback 机制让 quad 同时支持 Python 函数、ctypes 回调与 LowLevelCallable，以及 Python 回调与底层回调的性能差异。",
+          "learning_goals": [
+            "理解 ccallback 如何统一多种回调签名",
+            "掌握 LowLevelCallable 的 C 签名约定与零开销调用",
+            "理解 __quadpack.h 中 QUADPACK Fortran 例程的封装"
+          ],
+          "source_files": [
+            "scipy/integrate/__quadpack.c",
+            "scipy/integrate/__quadpack.h"
+          ],
+          "minimal_modules": [
+            "ccallback",
+            "LowLevelCallable",
+            "QUADPACK 例程封装"
+          ],
+          "practice_task": "在 __quadpack.c 中定位处理 quad_function 回调的代码路径，写一份说明：Python callable 如何被 ccallback 包装成 C 回调供 Fortran QAGS 调用，并指出 LowLevelCallable 路径省去了哪些开销。",
+          "depends_on": [
+            "u3-l3",
+            "u12-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l3",
+          "title": "vode/zvode/dop/odepack 模块与 Fortran 源",
+          "order": 3,
+          "filename": "u12-l3-c-fortran-sources.md",
+          "level": "advanced",
+          "topic": "讲解 _dzvodemodule.c/_dopmodule.c/_odepackmodule.c 三个扩展模块如何包装 src/ 下的 Fortran 翻译源（vode.c/zvode.c/dop.c/lsoda.c），以及对应 Python 加载桩（vode.py/dop.py/lsoda.py/odepack.py/quadpack.py）。",
+          "learning_goals": [
+            "理解各 C 扩展模块与 src/*.c 源的对应关系",
+            "掌握加载桩模块（dop.py 等）在向后兼容中的作用",
+            "理解 blaslapack_declarations.h 与 LAPACK 的链接"
+          ],
+          "source_files": [
+            "scipy/integrate/_dzvodemodule.c",
+            "scipy/integrate/_dopmodule.c",
+            "scipy/integrate/_odepackmodule.c",
+            "scipy/integrate/src/vode.c",
+            "scipy/integrate/src/lsoda.c",
+            "scipy/integrate/src/dop.c"
+          ],
+          "minimal_modules": [
+            "_dzvodemodule",
+            "_dopmodule",
+            "_odepackmodule",
+            "src Fortran 源",
+            "加载桩 vode.py/dop.py/lsoda.py"
+          ],
+          "practice_task": "建立「Python 公开函数 → C 扩展 → src/*.c」的调用链表（如 ode→_vode→vode.c，odeint→_odepack→lsoda.c，DOP853 旧入口→_dop→dop.c），并说明各加载桩模块被标记为废弃命名空间的原因。",
+          "depends_on": [
+            "u12-l1",
+            "u11-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "测试、二次开发与架构取舍",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "测试组织与典型测试模式",
+          "order": 1,
+          "filename": "u13-l1-tests-patterns.md",
+          "level": "advanced",
+          "topic": "讲解 integrate 的测试布局（tests/ 与 _ivp/tests/）及典型模式：与解析解对照、精度/收敛断言、求解器间一致性、边角情况与 _test_multivariate.c 的多变量积分测试扩展。",
+          "learning_goals": [
+            "掌握 integrate 测试的目录与分工",
+            "理解参数化与已知解对照的测试范式",
+            "了解 _test_multivariate.c 作为测试用 C 扩展的用途"
+          ],
+          "source_files": [
+            "scipy/integrate/tests/test_quadrature.py",
+            "scipy/integrate/tests/test_quadpack.py",
+            "scipy/integrate/_ivp/tests/test_ivp.py",
+            "scipy/integrate/tests/_test_multivariate.c"
+          ],
+          "minimal_modules": [
+            "test_quadrature",
+            "test_quadpack",
+            "test_ivp",
+            "_test_multivariate"
+          ],
+          "practice_task": "挑选 test_ivp.py 中一个参数化求解器测试，复述其断言逻辑（与解析解的容差比较），并为一个简单积分写一个对照解析解的最小 pytest 用例。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u13-l2",
+          "title": "扩展实践：自定义 OdeSolver 与自定义 Rule",
+          "order": 2,
+          "filename": "u13-l2-custom-solver-and-rule.md",
+          "level": "advanced",
+          "topic": "讲解两个扩展点：继承 OdeSolver 实现 _step_impl/_dense_output_impl 以接入 solve_ivp；继承 Rule 实现 estimate/estimate_error 以接入 cubature，并结合 base.py 与 _rules/_base.py 的契约。",
+          "learning_goals": [
+            "掌握实现自定义 OdeSolver 所需满足的契约",
+            "掌握实现自定义积分 Rule 并用于 cubature 的方式",
+            "理解 fun/fun_single 计数与 dense output 的要求"
+          ],
+          "source_files": [
+            "scipy/integrate/_ivp/base.py",
+            "scipy/integrate/_rules/_base.py",
+            "scipy/integrate/_cubature.py",
+            "scipy/integrate/_ivp/ivp.py"
+          ],
+          "minimal_modules": [
+            "OdeSolver 契约",
+            "Rule 契约",
+            "solve_ivp 自定义方法",
+            "cubature 自定义规则"
+          ],
+          "practice_task": "实现一个最简单的自定义显式 Euler OdeSolver（实现 _step_impl 与 _dense_output_impl），用 method=YourSolver 传入 solve_ivp 求解一个 ODE；再写一个自定义 Rule 估算+误差，用 cubature(rule=...) 积分一维函数并与 quad 对照。",
+          "depends_on": [
+            "u7-l1",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u13-l3",
+          "title": "架构取舍与最佳实践",
+          "order": 3,
+          "filename": "u13-l3-architecture-tradeoffs.md",
+          "level": "advanced",
+          "topic": "总结 integrate 的架构取舍：新 API（solve_ivp）vs 旧 API（ode/odeint）的取舍、刚性/非刚性方法选择、固定样本 vs 自适应 vs cubature 的适用边界，以及 @xp_capabilities/array-api 的可移植性策略。",
+          "learning_goals": [
+            "理解新旧 ODE API 的设计动机与迁移建议",
+            "掌握按问题特性（刚性、维数、样本/函数）选择方法的决策框架",
+            "理解 xp_capabilities 装饰器在 NumPy/数组 API 后端可移植中的作用"
+          ],
+          "source_files": [
+            "scipy/integrate/__init__.py",
+            "scipy/integrate/_ivp/ivp.py",
+            "scipy/integrate/_quadrature.py",
+            "scipy/integrate/_cubature.py"
+          ],
+          "minimal_modules": [
+            "xp_capabilities",
+            "solve_ivp",
+            "odeint",
+            "cubature"
+          ],
+          "practice_task": "为「刚性大系统」「高维光滑积分」「仅有离散样本」「端点奇异一维积分」四类场景，分别给出推荐的 integrate 函数/方法并说明理由；再列举两处使用 @xp_capabilities 的函数，解释其标注含义。",
+          "depends_on": [
+            "u8-l1",
+            "u9-l3",
+            "u5-l3",
+            "u11-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
