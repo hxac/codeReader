@@ -1,0 +1,906 @@
+{
+  "project": "scipy-scipy-spatial",
+  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+  "rationale": "scipy.spatial 是一个中等偏大的子包，能力域清晰可分四块：最近邻（KDTree/cKDTree）、距离度量（distance.py + C++/pybind 后端）、Qhull 几何计算（Delaunay/ConvexHull/Voronoi/HalfspaceIntersection）和空间变换（Rotation/RigidTransform）。学习顺序按「先用后剖」设计：入门层（u1–u3）让读者先跑通 KDTree、Delaunay/Voronoi 等高频用法并读懂目录与构建；进阶层（u4–u7）覆盖距离函数族、球面与杂项算法、三维旋转与刚体变换，强调 API 语义与数学表示；专家层（u8–u11）再下沉到 cKDTree 的 Cython/C++ 内核、距离度量的 MetricInfo 注册与 pybind 后端、_qhull.pyx 对 Qhull C 库的封装，最后落到多后端（Array API/Cython）与测试体系。单元划分严格按主题聚簇，讲义之间用 depends_on 形成从用法到实现、从平面到球面、从旋转到刚体的递进依赖，保证每篇只讲一个独立主题且都绑定真实源码与可操作实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 scipy.spatial",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.spatial 项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.spatial 子包的定位、它解决什么问题，以及最近邻、距离、几何剖分、空间变换四大能力域，通过 __init__.py 看公共 API。",
+          "learning_goals": [
+            "理解 scipy.spatial 在 SciPy 生态中的定位与解决的问题",
+            "列举 KDTree/距离/Qhull 几何/transform 四大能力域",
+            "通过 __init__.py 找到对外导出的公共对象"
+          ],
+          "source_files": [
+            "__init__.py",
+            "doc/source/tutorial/spatial.rst"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 import 与 __all__ 导出结构",
+            "四大能力域与子包关系",
+            "公共对象导出顺序"
+          ],
+          "practice_task": "导入 scipy.spatial，打印其 dir() 与 __all__，对照 __init__.py 的 import 把对象分成「最近邻 / 距离 / 几何 / 变换」四类并写成清单。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与公共 API 导出",
+          "order": 2,
+          "filename": "u1-l2-directory-and-api-exports.md",
+          "level": "beginner",
+          "topic": "讲清 spatial/ 目录每个文件的职责，私有实现模块（下划线前缀）与 v2.0 将移除的弃用命名空间模块（kdtree.py/qhull.py/ckdtree.py）的区别。",
+          "learning_goals": [
+            "读懂 spatial 目录布局与文件职责",
+            "区分私有实现模块与公共入口",
+            "理解弃用子模块的 __getattr__ 转发机制"
+          ],
+          "source_files": [
+            "__init__.py",
+            "kdtree.py",
+            "qhull.py",
+            "ckdtree.py"
+          ],
+          "minimal_modules": [
+            "文件职责映射（_kdtree/_ckdtree/_qhull/distance/transform）",
+            "私有模块（_*）与公共命名空间",
+            "弃用转发 _sub_module_deprecation"
+          ],
+          "practice_task": "分别访问 scipy.spatial.kdtree.KDTree、scipy.spatial.qhull.Delaunay、scipy.spatial.ckdtree.cKDTree，捕获并解释它们触发的 DeprecationWarning，说明 __getattr__ 如何转发到私有模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与运行测试",
+          "order": 3,
+          "filename": "u1-l3-build-and-run-tests.md",
+          "level": "beginner",
+          "topic": "通过 meson.build 讲清 spatial 如何编译 Cython/C/C++ 扩展（_qhull/_ckdtree/_distance_wrap/_distance_pybind/_voronoi/_hausdorff），以及如何用 PytestTester 跑测试。",
+          "learning_goals": [
+            "看懂 meson.build 里六个扩展模块的构建规则",
+            "理解 Cython .pyx → .c/.cxx 生成流程",
+            "学会运行 spatial 测试套件"
+          ],
+          "source_files": [
+            "meson.build",
+            "__init__.py",
+            "tests/__init__.py"
+          ],
+          "minimal_modules": [
+            "meson.build 中的 extension_module 定义",
+            "Cython 生成器与依赖（_cython_tree/_lib_pxd）",
+            "PytestTester 入口与 tests 目录"
+          ],
+          "practice_task": "在 meson.build 中定位 _ckdtree 扩展，列出它编译的全部源文件与依赖；再用 python -c 'import scipy.spatial; scipy.spatial.test()' 跑一个测试子集并记录耗时。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "KDTree 最近邻查询",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "KDTree 与 cKDTree 使用入门",
+          "order": 1,
+          "filename": "u2-l1-kdtree-ckdtree-intro.md",
+          "level": "beginner",
+          "topic": "KDTree/cKDTree 的用途与基本用法，以及 _kdtree.py 的 KDTree 继承自 Cython 实现的 cKDTree 这一关键关系。",
+          "learning_goals": [
+            "理解 kd-tree 数据结构思想与 leafsize 含义",
+            "会用 KDTree 建树并做最近邻查询",
+            "理解 KDTree(cKDTree) 继承关系与 boxsize/copy_data 差异"
+          ],
+          "source_files": [
+            "_kdtree.py",
+            "_ckdtree.pyx",
+            "tests/test_kdtree.py"
+          ],
+          "minimal_modules": [
+            "KDTree 类定义与构造参数",
+            "cKDTree 继承关系",
+            "leafsize/compact_nodes/boxsize"
+          ],
+          "practice_task": "用随机二维点集构造一棵 KDTree，对若干查询点找 k=3 近邻；再设置 boxsize 做周期边界查询，对比无 boxsize 时的结果差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Rectangle 几何基元与 minkowski 距离",
+          "order": 2,
+          "filename": "u2-l2-rectangle-and-minkowski.md",
+          "level": "intermediate",
+          "topic": "讲清 _kdtree.py 中的 minkowski_distance / minkowski_distance_p 与 Rectangle 类（轴对齐超矩形），它们是 kd-tree 剪枝查询的几何基础。",
+          "learning_goals": [
+            "理解 minkowski 距离与 p 范数的关系",
+            "掌握 Rectangle 的 volume/split/min_distance_* 计算",
+            "明白超矩形距离如何支撑查询剪枝"
+          ],
+          "source_files": [
+            "_kdtree.py"
+          ],
+          "minimal_modules": [
+            "minkowski_distance_p / minkowski_distance",
+            "Rectangle 类（min/max_distance_point/rectangle）",
+            "剪枝几何含义"
+          ],
+          "practice_task": "实现一个朴素函数：用 minkowski_distance_p 计算查询点到 Rectangle 的最近距离，验证它不超过查询点到矩形内任意真实点的距离。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "KDTree 查询方法全景",
+          "order": 3,
+          "filename": "u2-l3-kdtree-query-methods.md",
+          "level": "intermediate",
+          "topic": "系统讲解 KDTree 的查询 API：query、query_ball_point、query_ball_tree、query_pairs、count_neighbors、sparse_distance_matrix、distance_matrix。",
+          "learning_goals": [
+            "区分不同查询语义（k近邻/球形邻域/成对/计数）",
+            "理解 weights、cumulative、output_type 等参数",
+            "针对实际问题选择合适查询方法"
+          ],
+          "source_files": [
+            "_kdtree.py",
+            "_ckdtree.pyx"
+          ],
+          "minimal_modules": [
+            "query / query_ball_point",
+            "query_ball_tree / query_pairs",
+            "count_neighbors / sparse_distance_matrix / distance_matrix"
+          ],
+          "practice_task": "给定两组点云 A、B，分别用 count_neighbors 与 sparse_distance_matrix 统计距离小于 r 的配对数，比较两者的性能与输出形态。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Qhull 几何计算（三角剖分、凸包、Voronoi）",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Delaunay 三角剖分",
+          "order": 1,
+          "filename": "u3-l1-delaunay-triangulation.md",
+          "level": "beginner",
+          "topic": "用 Delaunay 类做三角剖分，讲清 simplices、neighbors、coplanar、find_simplex、transform（重心坐标）等结构以及 qhull_options。",
+          "learning_goals": [
+            "理解 Delaunay 三角剖分的几何含义",
+            "读懂 simplices/neighbors/coplanar 编码方案",
+            "会用 find_simplex 定位点并计算重心坐标"
+          ],
+          "source_files": [
+            "_qhull.pyx",
+            "doc/source/tutorial/spatial.rst",
+            "tests/test_qhull.py"
+          ],
+          "minimal_modules": [
+            "Delaunay 类与属性",
+            "simplices/neighbors/coplanar",
+            "find_simplex / plane_distance / transform / tsearch"
+          ],
+          "practice_task": "对一组平面点构造 Delaunay，找出包含某查询点的单纯形，并手算验证该查询点的重心坐标之和为 1。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "ConvexHull 凸包",
+          "order": 2,
+          "filename": "u3-l2-convex-hull.md",
+          "level": "beginner",
+          "topic": "ConvexHull 类，vertices、simplices、equations（超平面方程）以及 volume/area 属性的含义。",
+          "learning_goals": [
+            "理解凸包几何与 N-D 表示",
+            "用 equations 验证点相对包内/边界的位置",
+            "理解 volume/area 属性"
+          ],
+          "source_files": [
+            "_qhull.pyx",
+            "_plotutils.py"
+          ],
+          "minimal_modules": [
+            "ConvexHull 类",
+            "vertices/simplices/equations",
+            "volume/area"
+          ],
+          "practice_task": "构造一个二维点集的 ConvexHull，用 equations 判断若干测试点是否落在凸包内侧，并与朴素符号判定结果对照。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Voronoi 图",
+          "order": 3,
+          "filename": "u3-l3-voronoi-diagram.md",
+          "level": "beginner",
+          "topic": "Voronoi 类，vertices、regions、ridge_vertices、ridge_points 的编码方式，以及 -1 表示无穷远点的约定。",
+          "learning_goals": [
+            "理解 Voronoi 图与 Delaunay 的对偶关系",
+            "读懂 regions/ridge 的负索引约定",
+            "能重建有限与无限脊"
+          ],
+          "source_files": [
+            "_qhull.pyx",
+            "doc/source/tutorial/spatial.rst"
+          ],
+          "minimal_modules": [
+            "Voronoi 类",
+            "vertices/regions/ridge_vertices/ridge_points",
+            "无穷远点（-1）约定"
+          ],
+          "practice_task": "复现官方教程里的无穷远脊绘制逻辑：对 ridge_vertices 中含 -1 的脊，沿法向延伸画出虚线。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "HalfspaceIntersection 与绘图助手",
+          "order": 4,
+          "filename": "u3-l4-halfspace-and-plotutils.md",
+          "level": "intermediate",
+          "topic": "HalfspaceIntersection 半空间求交（含 interior_point 与 dual_vertices），以及 _plotutils.py 的三个 2D 绘图函数。",
+          "learning_goals": [
+            "理解半空间表示与 interior_point 的作用",
+            "会用 delaunay_plot_2d/convex_hull_plot_2d/voronoi_plot_2d 可视化",
+            "读懂 _get_axes/_adjust_bounds 辅助"
+          ],
+          "source_files": [
+            "_qhull.pyx",
+            "_plotutils.py",
+            "tests/test__plotutils.py"
+          ],
+          "minimal_modules": [
+            "HalfspaceIntersection 类与 dual_vertices",
+            "_plotutils 三个绘图函数",
+            "_get_axes / _adjust_bounds"
+          ],
+          "practice_task": "用若干半空间（如 x≥0、y≥0、x+y≤1）构造 HalfspaceIntersection；再调用 delaunay_plot_2d 可视化一个 Delaunay 结果并调整坐标范围。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "距离度量基础",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "向量距离函数族",
+          "order": 1,
+          "filename": "u4-l1-vector-distance-functions.md",
+          "level": "intermediate",
+          "topic": "讲 distance.py 中的标量向量距离函数 euclidean、minkowski、sqeuclidean、chebyshev、cityblock、cosine、correlation、seuclidean、mahalanobis、canberra、braycurtis、jensenshannon。",
+          "learning_goals": [
+            "掌握各类度量定义与适用场景",
+            "理解 w 权重、V、VI 等参数",
+            "明白 _validate_vector/_validate_weights 的输入校验"
+          ],
+          "source_files": [
+            "distance.py",
+            "distance.pyi"
+          ],
+          "minimal_modules": [
+            "euclidean/sqeuclidean/minkowski/chebyshev/cityblock",
+            "cosine/correlation",
+            "seuclidean/mahalanobis/canberra/jensenshannon",
+            "_validate_vector/_validate_weights"
+          ],
+          "practice_task": "对同一对向量分别计算 euclidean、cityblock、chebyshev、cosine，写成对比表，说明各度量对尺度异常的敏感性差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "布尔与集合型距离及加权",
+          "order": 2,
+          "filename": "u4-l2-boolean-set-distance.md",
+          "level": "intermediate",
+          "topic": "讲 hamming、jaccard、dice、yule、rogerstanimoto、russellrao、sokalsneath 等布尔/集合度量，以及 _nbool_correspond_* 辅助与加权。",
+          "learning_goals": [
+            "区分布尔型与数值型度量",
+            "理解 _validate_hamming_kwargs 等校验",
+            "掌握加权对 hamming/jaccard 的影响"
+          ],
+          "source_files": [
+            "distance.py"
+          ],
+          "minimal_modules": [
+            "hamming/jaccard/dice",
+            "yule/rogerstanimoto/russellrao/sokalsneath",
+            "_nbool_correspond_all/_nbool_correspond_ft_tf"
+          ],
+          "practice_task": "构造两个布尔向量，分别用 hamming/jaccard/dice/russellrao 计算；再引入权重 w 重算 hamming，观察加权如何改变结果。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "pdist、cdist 与 squareform",
+          "order": 3,
+          "filename": "u4-l3-pdist-cdist-squareform.md",
+          "level": "intermediate",
+          "topic": "讲 pdist（压缩距离向量）、cdist（两组之间）、squareform（压缩↔方阵）、is_valid_dm/is_valid_y/num_obs_*。",
+          "learning_goals": [
+            "理解压缩存储 y 的布局与方阵 D 的转换",
+            "用 metric 名串或 callable 调用 cdist/pdist",
+            "用校验函数与 num_obs_* 排错"
+          ],
+          "source_files": [
+            "distance.py"
+          ],
+          "minimal_modules": [
+            "pdist / cdist 调用路径",
+            "squareform 双向转换",
+            "is_valid_dm/is_valid_y/num_obs_dm/num_obs_y",
+            "_prepare_out_argument"
+          ],
+          "practice_task": "用 pdist 生成压缩距离向量，squareform 转方阵，再用 num_obs_y/num_obs_dm 反推观测数，验证三者一致。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "球面与杂项空间算法",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "SphericalVoronoi 球面 Voronoi",
+          "order": 1,
+          "filename": "u5-l1-spherical-voronoi.md",
+          "level": "intermediate",
+          "topic": "_spherical_voronoi.py 的 SphericalVoronoi 类，球面 Voronoi 区域、顶点排序、面积计算，以及 _voronoi.pyx 的 sort_vertices_of_regions。",
+          "learning_goals": [
+            "理解球面 Voronoi 与平面 Voronoi 的区别",
+            "读懂 vertices/regions 结构",
+            "掌握 sort_vertices_of_regions 与 calculate_areas"
+          ],
+          "source_files": [
+            "_spherical_voronoi.py",
+            "_voronoi.pyx",
+            "tests/test_spherical_voronoi.py"
+          ],
+          "minimal_modules": [
+            "SphericalVoronoi 构造与 _calc_vertices_regions",
+            "sort_vertices_of_regions（_voronoi.pyx）",
+            "calculate_areas / calculate_solid_angles"
+          ],
+          "practice_task": "在单位球面随机撒点构造 SphericalVoronoi，计算各区域面积，验证总面积接近 4π。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "geometric_slerp 与 procrustes",
+          "order": 2,
+          "filename": "u5-l2-slerp-procrustes.md",
+          "level": "intermediate",
+          "topic": "_geometric_slerp.py 的球面线性插值与 _procrustes.py 的 Procrustes 形状对齐。",
+          "learning_goals": [
+            "理解 slerp 在单位球面上的几何含义与反平行退化",
+            "掌握 procrustes 的平移/缩放/旋转对齐",
+            "理解 disparity 度量"
+          ],
+          "source_files": [
+            "_geometric_slerp.py",
+            "_procrustes.py",
+            "tests/test_slerp.py",
+            "tests/test__procrustes.py"
+          ],
+          "minimal_modules": [
+            "geometric_slerp / _geometric_slerp",
+            "procrustes 三步对齐与 disparity"
+          ],
+          "practice_task": "对两个手写形状矩阵做 procrustes 对齐并打印 disparity；再用 geometric_slerp 在两个单位向量间插值并绘制大圆弧。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "directed_hausdorff 豪斯多夫距离",
+          "order": 3,
+          "filename": "u5-l3-directed-hausdorff.md",
+          "level": "intermediate",
+          "topic": "_hausdorff.pyx 的 directed_hausdorff Cython 实现，以及 distance.py 中的同名 Python 封装与 rng/seed。",
+          "learning_goals": [
+            "理解有向与对称 Hausdorff 距离",
+            "读懂 early-stop 剪枝策略",
+            "理解 seed/rng 可复现性"
+          ],
+          "source_files": [
+            "_hausdorff.pyx",
+            "distance.py",
+            "tests/test_hausdorff.py"
+          ],
+          "minimal_modules": [
+            "directed_hausdorff 算法与剪枝",
+            "rng/seed 参数",
+            "distance.py 中的封装与结果类型"
+          ],
+          "practice_task": "构造两个点集，比较 directed_hausdorff 两个方向的结果并取 max 得到对称距离；再用不同 seed 验证可复现性。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "三维旋转变换 Rotation",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Rotation 类与多种旋转表示",
+          "order": 1,
+          "filename": "u6-l1-rotation-representations.md",
+          "level": "intermediate",
+          "topic": "Rotation 类，四元数、旋转矩阵、旋转向量、欧拉角、Davenport、MRP 等表示的 from_*/as_* 互转，以及 select_backend/_promote 抽象。",
+          "learning_goals": [
+            "理解旋转的多种数学表示及其互转",
+            "掌握 from_quat 归一化与 scalar_first",
+            "明白 single/shape/批量概念"
+          ],
+          "source_files": [
+            "transform/_rotation.py",
+            "transform/_rotation_xp.py",
+            "transform/__init__.py"
+          ],
+          "minimal_modules": [
+            "from_quat/from_matrix/from_rotvec/from_euler/from_davenport/from_mrp",
+            "as_quat/as_matrix/as_rotvec/as_euler/as_davenport/as_mrp",
+            "select_backend / _promote 批量提升"
+          ],
+          "practice_task": "用四元数、矩阵、旋转向量、欧拉角分别构造同一个 Rotation，互相转换并检查 round-trip 误差。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Rotation 运算与应用",
+          "order": 2,
+          "filename": "u6-l2-rotation-operations.md",
+          "level": "intermediate",
+          "topic": "Rotation 的 apply、__mul__、__pow__、inv、magnitude、mean、align_vectors、concatenate、reduce。",
+          "learning_goals": [
+            "理解旋转复合与乘幂的群运算",
+            "用 apply 旋转向量",
+            "用 align_vectors 做最小二乘姿态对齐"
+          ],
+          "source_files": [
+            "transform/_rotation.py"
+          ],
+          "minimal_modules": [
+            "apply / __mul__ / __pow__",
+            "inv / magnitude / mean",
+            "align_vectors 最小二乘 / concatenate / reduce"
+          ],
+          "practice_task": "用 align_vectors 从两组对应向量估计旋转，再用 apply 验证残差，并与 inv 复合检查可逆性。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Slerp 与 RotationSpline 插值",
+          "order": 3,
+          "filename": "u6-l3-rotation-spline-slerp.md",
+          "level": "intermediate",
+          "topic": "_rotation.py 的 Slerp 球面线性插值与 _rotation_spline.py 的 RotationSpline（连续可微旋转样条）。",
+          "learning_goals": [
+            "理解 Slerp 在旋转空间的插值",
+            "读懂 RotationSpline 的角速度/角加速度推导",
+            "区分插值与样条平滑"
+          ],
+          "source_files": [
+            "transform/_rotation.py",
+            "transform/_rotation_spline.py"
+          ],
+          "minimal_modules": [
+            "Slerp 类与 __call__",
+            "RotationSpline 与角运动学辅助函数",
+            "__call__ 在时间点求值"
+          ],
+          "practice_task": "给定若干时刻的旋转，分别用 Slerp 与 RotationSpline 插值，绘制某固定向量端点轨迹对比平滑度。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "旋转群 create_group",
+          "order": 4,
+          "filename": "u6-l4-rotation-groups.md",
+          "level": "intermediate",
+          "topic": "_rotation_groups.py 的 create_group 及 icosahedral/octahedral/tetrahedral/dicyclic/cyclic 离散旋转群生成。",
+          "learning_goals": [
+            "理解点群与离散旋转群的构造",
+            "读懂各生成元与轴约定",
+            "能用 create_group 生成对称群"
+          ],
+          "source_files": [
+            "transform/_rotation_groups.py",
+            "transform/_rotation.py"
+          ],
+          "minimal_modules": [
+            "create_group 调度",
+            "icosahedral/octahedral/tetrahedral/dicyclic/cyclic",
+            "生成元与轴约定"
+          ],
+          "practice_task": "用 create_group('I') 生成二十面体群，验证其元素数量并检查封闭性（任两元素乘积仍在群内）。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "刚体变换 RigidTransform",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "RigidTransform 刚体变换",
+          "order": 1,
+          "filename": "u7-l1-rigid-transform.md",
+          "level": "intermediate",
+          "topic": "_rigid_transform.py 的 RigidTransform 类，刚体变换的矩阵/分量/指数坐标/对偶四元数表示，及其运算与 apply。",
+          "learning_goals": [
+            "理解 SE(3) 刚体变换",
+            "掌握 from_matrix/from_components/from_exp_coords/from_dual_quat 互转",
+            "理解与 Rotation 的组合关系"
+          ],
+          "source_files": [
+            "transform/_rigid_transform.py",
+            "transform/_rigid_transform_xp.py",
+            "transform/__init__.py"
+          ],
+          "minimal_modules": [
+            "表示族（from_*/as_*）",
+            "__mul__/__pow__/inv/apply",
+            "与 Rotation 组合（as_components）/对偶四元数归一化"
+          ],
+          "practice_task": "用旋转+平移分量构造 RigidTransform，再用 from_exp_coords 重建同一变换，对比两种表示的 as_matrix 输出。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "cKDTree 的 Cython/C++ 实现",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "_ckdtree.pyx Cython 层与多线程",
+          "order": 1,
+          "filename": "u8-l1-ckdtree-cython-layer.md",
+          "level": "advanced",
+          "topic": "_ckdtree.pyx 的 cKDTree、cKDTreeNode、coo_entries、ordered_pairs，以及 get_num_workers、_run_threads 多线程并行查询。",
+          "learning_goals": [
+            "理解 Cython 层如何桥接 Python 到 C++ 内核",
+            "读懂 coo_entries/ordered_pairs 稀疏结果收集",
+            "掌握 workers 并行机制"
+          ],
+          "source_files": [
+            "_ckdtree.pyx",
+            "setlist.pxd"
+          ],
+          "minimal_modules": [
+            "cKDTree / cKDTreeNode cdef 类",
+            "coo_entries / ordered_pairs 结果容器",
+            "get_num_workers / _run_threads 并行"
+          ],
+          "practice_task": "用不同 workers 值（1、4、-1）跑同一批 query，计时并解释多线程为何能加速大批量查询。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "C++ 内核 ckdtree/src",
+          "order": 2,
+          "filename": "u8-l2-ckdtree-cpp-kernel.md",
+          "level": "advanced",
+          "topic": "ckdtree/src 的 C++ 实现：ckdtree_decl.h 的 ckdtree/ckdtreenode 结构、build.cxx 建树、query.cxx 查询、rectangle.h/distance.h 剪枝。",
+          "learning_goals": [
+            "读懂 C++ 节点结构与扁平化数组存储",
+            "理解建树的递归划分与 leafsize",
+            "理解查询的优先队列与剪枝算法"
+          ],
+          "source_files": [
+            "ckdtree/src/ckdtree_decl.h",
+            "ckdtree/src/build.cxx",
+            "ckdtree/src/query.cxx",
+            "ckdtree/src/rectangle.h",
+            "ckdtree/src/distance.h"
+          ],
+          "minimal_modules": [
+            "ckdtreenode/ckdtree 结构与扁平存储",
+            "build_ckdtree 递归划分",
+            "query/count_neighbors 算法",
+            "rectangle.h / distance.h 剪枝"
+          ],
+          "practice_task": "阅读 query.cxx 的最近邻搜索循环，画出一次查询时节点访问与剪枝的决策流程图。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "距离度量注册机制与 C++ 后端",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "MetricInfo 注册表与调度",
+          "order": 1,
+          "filename": "u9-l1-metricinfo-registry-dispatch.md",
+          "level": "advanced",
+          "topic": "distance.py 的 MetricInfo dataclass、_METRIC_INFOS 注册表、别名与类型分派，以及 cdist/pdist 如何据此选择后端与校验。",
+          "learning_goals": [
+            "理解度量注册表设计",
+            "读懂别名与类型分派",
+            "追踪 cdist 从字符串 metric 到具体 cdist_func 的调度路径"
+          ],
+          "source_files": [
+            "distance.py"
+          ],
+          "minimal_modules": [
+            "MetricInfo 字段与 _METRIC_INFOS",
+            "别名与类型分派（validator/types）",
+            "cdist/pdist 调度（_cdist_callable / _distance_pybind）"
+          ],
+          "practice_task": "仿照 MetricInfo，用 cdist(metric=<callable>) 注册一个自定义距离，与字符串方式对比，确认它走 _cdist_callable 回退路径。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "C++/pybind 距离后端",
+          "order": 2,
+          "filename": "u9-l2-distance-cpp-pybind-backend.md",
+          "level": "advanced",
+          "topic": "src/distance_pybind.cpp（pybind11 绑定）、src/distance_metrics.h（模板化度量）、src/distance_impl.h、src/distance_wrap.c 实现层。",
+          "learning_goals": [
+            "理解 pybind11 如何暴露 cdist_*/pdist_*",
+            "读懂模板化度量内核与 distance_impl 复用",
+            "明白 _distance_wrap 与 _distance_pybind 两条后端差异"
+          ],
+          "source_files": [
+            "src/distance_pybind.cpp",
+            "src/distance_metrics.h",
+            "src/distance_impl.h",
+            "src/distance_wrap.c"
+          ],
+          "minimal_modules": [
+            "distance_pybind.cpp 绑定",
+            "distance_metrics.h 模板度量",
+            "distance_impl.h 公共实现",
+            "distance_wrap.c 旧后端"
+          ],
+          "practice_task": "在 distance_metrics.h 中定位 euclidean 模板实现，说明同一份模板如何同时服务 cdist 与 pdist。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "Qhull Cython 封装机制",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "_Qhull 底层封装与资源管理",
+          "order": 1,
+          "filename": "u10-l1-qhull-lowlevel-wrapper.md",
+          "level": "advanced",
+          "topic": "_qhull.pyx 的 cdef class _Qhull，QhullError、check_active、__dealloc__/close、add_points、get_paraboloid_shift_scale，以及 _qhull.pxd/qhull_misc.c 对 Qhull C 库的声明。",
+          "learning_goals": [
+            "理解 Cython 对外部 C 库的封装与生命周期",
+            "读懂增量模式 add_points 与 close 资源释放",
+            "理解 QhullError 与 qhull_options 传递"
+          ],
+          "source_files": [
+            "_qhull.pyx",
+            "_qhull.pxd",
+            "qhull_misc.c",
+            "qhull_misc.h"
+          ],
+          "minimal_modules": [
+            "_Qhull cdef 类与 QhullError",
+            "生命周期（check_active/dealloc/close）",
+            "add_points / get_paraboloid_shift_scale",
+            "_qhull.pxd / qhull_misc.c 外部声明"
+          ],
+          "practice_task": "解释 _Qhull 的 __dealloc__ 与 close 为何需要双重保护；并用 incremental Delaunay 传入坏点触发一次 QhullError 并捕获。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "_QhullUser 与几何数据提取",
+          "order": 2,
+          "filename": "u10-l2-qhulluser-data-extraction.md",
+          "level": "advanced",
+          "topic": "_QhullUser 基类与 _update 流程，get_simplex_facet_array、get_voronoi_diagram、_get_barycentric_transforms，以及 Delaunay/ConvexHull/Voronoi/HalfspaceIntersection 如何复用。",
+          "learning_goals": [
+            "理解 _QhullUser 的增量更新框架",
+            "读懂 simplex/facet/ridge 数组提取逻辑",
+            "掌握重心坐标变换与 find_simplex 实现"
+          ],
+          "source_files": [
+            "_qhull.pyx"
+          ],
+          "minimal_modules": [
+            "_QhullUser / _update 增量框架",
+            "get_simplex_facet_array / get_voronoi_diagram",
+            "_get_barycentric_transforms",
+            "四个高层类的 _update 复用"
+          ],
+          "practice_task": "追踪 Delaunay._update 如何调用 get_simplex_facet_array 与 _get_barycentric_transforms，写出 simplices 与 transform 属性的来源链。",
+          "depends_on": [
+            "u10-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "多后端架构、测试与扩展",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "Array API 多后端架构",
+          "order": 1,
+          "filename": "u11-l1-array-api-backends.md",
+          "level": "advanced",
+          "topic": "_rotation_xp.py / _rigid_transform_xp.py 的 array API（GPU/非 NumPy）后端，select_backend 与 cython_compatible 选择，及 Cython 后端 _rotation_cy.pyx 的协作。",
+          "learning_goals": [
+            "理解 Rotation/RigidTransform 的多后端设计",
+            "读懂 select_backend 在 NumPy/Cython/ArrayAPI 间切换",
+            "明白 xp 模块如何用任意数组库"
+          ],
+          "source_files": [
+            "transform/_rotation_xp.py",
+            "transform/_rigid_transform_xp.py",
+            "transform/_rotation.py",
+            "transform/_rotation_cy.pyx"
+          ],
+          "minimal_modules": [
+            "select_backend 与 cython_compatible",
+            "_rotation_xp / _rigid_transform_xp 实现",
+            "_rotation_cy 加速后端",
+            "xp 数组协议"
+          ],
+          "practice_task": "用一个支持的 array API 后端（如 numpy.array_api 或 cupy）构造一个 Rotation，对比它与默认 NumPy 后端的 as_matrix 输出类型。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "测试体系与实践",
+          "order": 2,
+          "filename": "u11-l2-testing-practice.md",
+          "level": "advanced",
+          "topic": "spatial 的测试组织：tests/ 与 transform/tests/ 的 test_* 文件、tests/data 数据基准、PytestTester 集成，以及如何为新功能写测试。",
+          "learning_goals": [
+            "理解测试目录与数据驱动基准（pdist/cdist 的 .txt）",
+            "学会定位与运行相关测试",
+            "能为新增度量/几何写回归测试"
+          ],
+          "source_files": [
+            "tests/test_distance.py",
+            "tests/test_kdtree.py",
+            "tests/test_qhull.py",
+            "transform/tests/test_rotation.py"
+          ],
+          "minimal_modules": [
+            "tests 目录组织与 tests/data 基准",
+            "PytestTester 入口",
+            "transform/tests 结构",
+            "参考现有 test 写新用例"
+          ],
+          "practice_task": "阅读 test_distance.py 中一个度量的测试，模仿其结构为一个已有度量补写一个边界条件用例并使其通过。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

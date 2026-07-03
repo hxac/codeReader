@@ -10557,386 +10557,314 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6671889999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.122055,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.596688,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9453769999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6942989999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.776688,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.322729,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.043534,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.385854,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l7": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.818484,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8312729999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1835369999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 5.112879000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.478838,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l5": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189825,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l6": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l7": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "prev_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+      "phase": "done",
+      "mode": "incremental",
       "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-io-tutorial",
-      "last_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "last_run_at": "2026-07-03T15:02:51Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": null,
+      "abandoned": []
     },
     "scipy/scipy@scipy/linalg": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.5826370000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7112780000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0617779999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.046956,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.810337,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.194398,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2107020000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0952030000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.018295,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9223,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.7980149999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.921636,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.981723,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.929191,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l7": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.8072899999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1991819999999997,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.5151769999999996,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.867385,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.9801690000000005,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.515168,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.537827,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l4": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":183890,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "prev_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+      "phase": "done",
+      "mode": "incremental",
       "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-linalg-tutorial",
-      "last_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "last_run_at": "2026-07-03T15:02:51Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": null,
+      "abandoned": []
     },
     "scipy/scipy@scipy/misc": {
       "prompt_hash": "b21aef51792b02df",
@@ -11020,253 +10948,418 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6470000000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.6670210000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1275620000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.72263,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.069521,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1614360000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.742563,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.223481,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.615914,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.84725,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.135036,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9732959999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.03558,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0040179999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0378429999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.916561,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.286893,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.8977280000000003,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0542139999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189654,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.1330849999999997,
+          "error": null
+        }
+      },
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "prev_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-ndimage-tutorial",
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "scipy/scipy@scipy/optimize": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l5": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
-      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-ndimage-tutorial",
-      "last_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "last_run_at": "2026-07-03T15:02:51Z",
-      "last_error": "quota exhausted; will resume next window"
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "prev_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-optimize-tutorial",
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": null,
+      "abandoned": []
     },
-    "scipy/scipy@scipy/optimize": {
+    "scipy/scipy@scipy/signal": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.932682,
+          "cost": 0.670427,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.802676,
+          "cost": 0.9450839999999999,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.433396,
+          "cost": 1.269638,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.166762,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.4890139999999998,
+          "cost": 0.924627,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.849668,
+          "cost": 0.758834,
           "error": null
         },
         "u2-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.6891769999999997,
+          "cost": 0.907731,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2804119999999999,
           "error": null
         },
         "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5221029999999998,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.436292,
+          "error": null
+        },
+        "u3-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189909,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188100,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
+        "u3-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -11287,6 +11380,21 @@
           "retries": 0
         },
         "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l7": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -11336,6 +11444,11 @@
           "action": "new",
           "retries": 0
         },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u7-l1": {
           "status": "pending",
           "action": "new",
@@ -11351,12 +11464,32 @@
           "action": "new",
           "retries": 0
         },
+        "u7-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u8-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
         "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -11390,21 +11523,577 @@
           "status": "pending",
           "action": "new",
           "retries": 0
+        },
+        "u10-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         }
       },
-      "manifest_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-optimize-tutorial",
-      "last_head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-      "last_run_at": "2026-07-03T15:02:51Z",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-signal-tutorial",
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "scipy/scipy@scipy/signal": {},
-    "scipy/scipy@scipy/sparse": {},
-    "scipy/scipy@scipy/spatial": {},
-    "scipy/scipy@scipy/special": {},
+    "scipy/scipy@scipy/sparse": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.046848,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.744501,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9454889999999999,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.148139,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.891085,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9937699999999999,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.150912,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9879290000000001,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.944682,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.945767,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0052780000000001,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186878,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l7": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-sparse-tutorial",
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "scipy/scipy@scipy/spatial": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.728223,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.915954,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1119370000000002,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.004363,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8116690000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0711420000000003,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.032263,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8733790000000001,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.954397,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1766009999999998,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.242609,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192127,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-spatial-tutorial",
+      "last_head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "scipy/scipy@scipy/special": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.812775,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.691671,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3464289999999999,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2970220000000001,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.416692,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.28576,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.061732,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.600968,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194995,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "278c037d07b7dc5f397965b3dbd7125a97270463",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-special-tutorial",
+      "last_head": "278c037d07b7dc5f397965b3dbd7125a97270463",
+      "last_run_at": "2026-07-03T18:01:35Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
     "scipy/scipy@scipy/stats": {},
     "crossbeam-rs/crossbeam@crossbeam-channel": {},
     "crossbeam-rs/crossbeam@crossbeam-deque": {},

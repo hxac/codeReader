@@ -1,0 +1,1427 @@
+{
+  "project": "scipy-scipy-signal",
+  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+  "rationale": "scipy.signal 是 SciPy 中体量最大的子包之一，功能横跨信号生成、卷积/相关、滤波、滤波器设计、LTI 系统、频谱分析、峰值检测、Chirp-Z、样条与窗函数等多个相对独立的领域，因此手册按\"由浅入深、按领域分单元\"组织。第一单元让读者从零理解项目定位、目录结构、构建方式与命名空间导出链路（这是该子包最容易被忽略但最关键的入口机制：私有实现模块 _* 经 _signal_api/_support_alternative_backends 聚合，弃用 stub 模块向后兼容）。随后按\"易上手→核心机制→设计→系统→分析→检测→高等→工程化\"的顺序推进：波形/窗（最直观）→卷积相关（数学基石）→数字滤波（最高频使用）→滤波器设计（IIR/FIR）→LTI 系统→频谱分析→峰值检测→高等变换与样条→架构/后端/扩展/测试。每个单元内部讲义按\"接口语义→算法实现→底层扩展\"递进，并通过 depends_on 形成清晰依赖链，确保读者能在任一切入点向上回溯。大型子包拆为 10 单元约 44 篇，逻辑优先于数量，每篇聚焦一个主题并配可操作实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零开始：项目定位、目录结构与命名空间入口",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.signal 是什么：定位与能力全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.signal 子包的定位、它能解决哪些数字信号处理问题，以及它对外暴露的主要功能分组（卷积、滤波、滤波器设计、LTI、频谱、峰值、窗等）。",
+          "learning_goals": [
+            "理解 scipy.signal 在 SciPy 生态中的角色与适用场景",
+            "认识其覆盖的主要功能领域分组",
+            "了解该子包的历史来源与设计目标"
+          ],
+          "source_files": [
+            "__init__.py",
+            "docs/signaltools.README"
+          ],
+          "minimal_modules": [
+            "__init__.py 的模块文档字符串",
+            "docs/signaltools.README"
+          ],
+          "practice_task": "阅读 __init__.py 顶部的功能分组清单，写出 scipy.signal 提供的 8 个功能类别各举一个代表性函数名，并用一句话说明其用途。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录结构与模块组织",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解 signal/ 目录的文件布局：私有实现模块（_* 前缀）、弃用的向后兼容 stub 模块、windows 子包、C/C++/Cython 扩展源码与测试目录的组织关系。",
+          "learning_goals": [
+            "区分私有实现模块与公开 stub 模块",
+            "识别 C/C++/Cython 扩展源文件及其作用",
+            "理解 windows 子包的独立性"
+          ],
+          "source_files": [
+            "_signal_api.py",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "_signal_api.py",
+            "meson.build 中的 py3.install_sources 列表"
+          ],
+          "practice_task": "列出 signal/ 目录下所有以 _ 开头的 Python 实现模块，并对照 meson.build 的 install_sources，标注哪些模块是纯 Python、哪些有对应的 C/Cython 扩展。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建方式：Meson 与编译扩展入门",
+          "order": 3,
+          "filename": "u1-l3-build-and-extensions.md",
+          "level": "beginner",
+          "topic": "说明 signal 子包如何通过 meson.build 构建编译扩展（_sigtools、_spline、_sosfilt、_upfirdn_apply、_peak_finding_utils、_max_len_seq_inner），以及 Pythran/Cython 双路径编译机制。",
+          "learning_goals": [
+            "理解 meson.build 中 extension_module 的定义方式",
+            "认识哪些扩展用 C、哪些用 Cython、哪些用 Pythran",
+            "了解 use_pythran 分支的意义"
+          ],
+          "source_files": [
+            "meson.build",
+            "windows/meson.build"
+          ],
+          "minimal_modules": [
+            "meson.build 顶层",
+            "meson.build 中的 pyx_files 循环"
+          ],
+          "practice_task": "在 meson.build 中找出 _max_len_seq_inner 的两种构建路径，说明 Pythran 与 Cython 各自的输入文件与依赖差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "公共命名空间与 API 导出链路",
+          "order": 4,
+          "filename": "u1-l4-namespace-export-chain.md",
+          "level": "beginner",
+          "topic": "追踪 scipy.signal 的导出链路：实现模块 → _signal_api 聚合 → _support_alternative_backends 装饰 → __init__ 对外暴露，并解释弃用 stub 模块的 _sub_module_deprecation 机制。",
+          "learning_goals": [
+            "掌握 _signal_api 作为'裸 API'聚合层的作用",
+            "理解 _support_alternative_backends 的装饰再导出",
+            "认识弃用 stub 模块如何重定向到私有模块"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_signal_api.py",
+            "_support_alternative_backends.py",
+            "filter_design.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的尾部 import",
+            "_signal_api.py 的 import 序列",
+            "filter_design.py 的 __getattr__"
+          ],
+          "practice_task": "选择一个公开函数（如 butter），画出它从 _filter_design 定义、经 _signal_api 聚合、_support_alternative_backends 装饰、最终在 __init__ 暴露的完整链路，并说明为何旧路径 scipy.signal.filter_design.butter 仍可用但会触发弃用警告。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "信号生成与窗函数（最易上手的入口）",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "常用波形生成：sawtooth/square/chirp/unit_impulse",
+          "order": 1,
+          "filename": "u2-l1-waveforms.md",
+          "level": "beginner",
+          "topic": "讲解 _waveforms.py 中各类测试与合成信号的发生器，包括周期波形、扫频 chirp 及其多种方法、高斯调制脉冲与单位冲激。",
+          "learning_goals": [
+            "掌握 sawtooth/square 的占空比参数语义",
+            "理解 chirp 的线性/二次/对数/双曲扫频方法",
+            "学会用 unit_impulse 构造离散冲激信号"
+          ],
+          "source_files": [
+            "_waveforms.py"
+          ],
+          "minimal_modules": [
+            "sawtooth",
+            "square",
+            "chirp",
+            "_chirp_phase",
+            "unit_impulse"
+          ],
+          "practice_task": "用 chirp 生成一段 1 秒、从 100Hz 扫到 1000Hz 的线性调频信号，叠加一个 sawtooth，并绘制波形；再说明 _chirp_phase 与 chirp 的关系。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "最大长度序列 max_len_seq",
+          "order": 2,
+          "filename": "u2-l2-max-len-seq.md",
+          "level": "beginner",
+          "topic": "讲解伪随机最大长度序列（MLS）的生成接口及其底层 _max_len_seq_inner 加速实现（Pythran/Cython 双路径）。",
+          "learning_goals": [
+            "理解 MLS 的 taps/state/length 参数",
+            "认识 _max_len_seq_inner 在加速中的角色",
+            "了解 LFSR（线性反馈移位寄存器）的基本原理"
+          ],
+          "source_files": [
+            "_max_len_seq.py",
+            "_max_len_seq_inner.pyx"
+          ],
+          "minimal_modules": [
+            "max_len_seq",
+            "_max_len_seq_inner.pyx"
+          ],
+          "practice_task": "用 max_len_seq 生成 nbits=6 的序列，验证其自相关在零 lag 处为峰值、其余接近 0，并说明为何该性质使其常用于系统辨识。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "窗函数子包与 get_window 调度",
+          "order": 3,
+          "filename": "u2-l3-windows-subpackage.md",
+          "level": "beginner",
+          "topic": "讲解 windows 子包的组织：_windows 存放实现、windows.py 作为弃用 stub、__init__ 暴露函数列表，以及 signal.get_window 如何按名字统一分发各类窗。",
+          "learning_goals": [
+            "理解 windows 子包的三层文件分工",
+            "掌握 get_window 接受字符串/元组的统一接口",
+            "认识 sym（对称）参数对窗的影响"
+          ],
+          "source_files": [
+            "windows/__init__.py",
+            "windows/_windows.py",
+            "windows/windows.py",
+            "_signal_api.py"
+          ],
+          "minimal_modules": [
+            "windows/__init__.py",
+            "windows/_windows.py 的 get_window",
+            "windows/windows.py 的 __getattr__"
+          ],
+          "practice_task": "通过 get_window 分别以字符串名和元组参数（如 ('kaiser', 8.0)）获取窗，并说明 windows.windows.hamming 与 scipy.signal.windows.hamming 调用路径的区别与弃用关系。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "经典窗函数的实现细节",
+          "order": 4,
+          "filename": "u2-l4-window-implementations.md",
+          "level": "beginner",
+          "topic": "深入 _windows.py 中几类典型窗的实现：基于 general_cosine 的广义余弦窗族（hamming/hann/blackman）、kaiser、dpss（离散长球序列）与对称性处理工具。",
+          "learning_goals": [
+            "理解 general_cosine 作为 Hann/Hamming/Blackman 公共基底",
+            "掌握 kaiser 的 beta 参数与主瓣/旁瓣权衡",
+            "了解 _len_guards/_extend/_truncate 等对称性辅助函数"
+          ],
+          "source_files": [
+            "windows/_windows.py"
+          ],
+          "minimal_modules": [
+            "general_cosine",
+            "kaiser",
+            "dpss",
+            "_extend",
+            "_truncate"
+          ],
+          "practice_task": "实现并对比 hann、hamming、blackman、kaiser(beta=8) 四个窗的频域主瓣宽度与最高旁瓣电平（用 numpy.fft），解释 sym=True/False 的差别。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "卷积与相关（DSP 数学基石）",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "卷积/相关接口与 mode/boundary 语义",
+          "order": 1,
+          "filename": "u3-l1-convolve-correlate-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 convolve/correlate/convolve2d/correlate2d 的接口、'full/same/valid' 模式与 2D 的 'fill/wrap/extend' 边界处理，以及内部 _valfrommode/_bvalfromboundary/_inputs_swap_needed 的映射逻辑。",
+          "learning_goals": [
+            "区分卷积与相关在翻转上的差异",
+            "掌握三种输出模式与边界填充语义",
+            "理解 _inputs_swap_needed 如何统一相关与卷积的内核调用"
+          ],
+          "source_files": [
+            "_signaltools.py"
+          ],
+          "minimal_modules": [
+            "correlate",
+            "convolve",
+            "convolve2d",
+            "correlate2d",
+            "_valfrommode",
+            "_bvalfromboundary",
+            "_inputs_swap_needed"
+          ],
+          "practice_task": "用同一个一维核分别做 convolve 与 correlate，观察翻转差异；再用 convolve2d 对比 boundary='fill' 与 'wrap' 在图像边缘的结果差异，并对照 _valfrommode 说明 mode 字符串如何映射为内部整数编码。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "FFT 卷积 fftconvolve 与重叠相加 oaconvolve",
+          "order": 2,
+          "filename": "u3-l2-fftconvolve-oaconvolve.md",
+          "level": "intermediate",
+          "topic": "讲解频域卷积 fftconvolve 的实现（_init_freq_conv_axes/_freq_domain_conv/_apply_conv_mode），以及针对长信号分块的重叠相加法 oaconvolve（_calc_oa_lens/_split）。",
+          "learning_goals": [
+            "理解频域卷积相比直接法的复杂度优势",
+            "掌握 _freq_domain_conv 中 FFT 长度选择策略",
+            "理解 oaconvolve 的分块与重叠相加原理"
+          ],
+          "source_files": [
+            "_signaltools.py"
+          ],
+          "minimal_modules": [
+            "fftconvolve",
+            "_init_freq_conv_axes",
+            "_freq_domain_conv",
+            "_apply_conv_mode",
+            "oaconvolve",
+            "_calc_oa_lens"
+          ],
+          "practice_task": "对两个长随机序列，比较 convolve(method='direct')、fftconvolve、oaconvolve 的输出一致性与运行时间，并说明 oaconvolve 在何种输入规模下优于 fftconvolve。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "choose_conv_method：直接法与 FFT 法的自动选择",
+          "order": 3,
+          "filename": "u3-l3-choose-conv-method.md",
+          "level": "intermediate",
+          "topic": "讲解 method='auto' 的决策机制：_conv_ops 估算算术运算量、_fftconv_faster 比较阈值，以及 _timeit_fast 在 measure 模式下的实测逻辑。",
+          "learning_goals": [
+            "理解基于运算量估算的自动方法选择",
+            "掌握 _fftconv_faster 的判别公式与常数",
+            "认识 measure=True 的实测回退路径"
+          ],
+          "source_files": [
+            "_signaltools.py"
+          ],
+          "minimal_modules": [
+            "choose_conv_method",
+            "_conv_ops",
+            "_fftconv_faster",
+            "_timeit_fast"
+          ],
+          "practice_task": "在一系列递增的输入长度下调用 choose_conv_method，记录其 direct/fft 选择分界点，并与 _conv_ops 的估算预测对照，验证理论阈值。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "底层 C 实现：_sigtools 与 N-D 相关",
+          "order": 4,
+          "filename": "u3-l4-sigtools-c-impl.md",
+          "level": "intermediate",
+          "topic": "讲解 _sigtools 扩展模块承担的底层运算：_correlate_nd.cc 的 N-D 相关/卷积内核、_sigtoolsmodule.cc 的模块注册与 _sigtools.hh 的共享头，以及 zero-padding 边界处理。",
+          "learning_goals": [
+            "理解 C 内核如何承担 N-D 相关的高性能计算",
+            "认识模块注册与 Python C-API 的绑定方式",
+            "了解零填充边界在 C 层的实现"
+          ],
+          "source_files": [
+            "_correlate_nd.cc",
+            "_sigtoolsmodule.cc",
+            "_sigtools.hh"
+          ],
+          "minimal_modules": [
+            "_correlate_nd.cc",
+            "_sigtoolsmodule.cc 的模块方法表"
+          ],
+          "practice_task": "在 _sigtoolsmodule.cc 中定位 N-D 相关函数的注册项，说明其输入数组、mode 参数与输出 shape 的处理方式；并解释为何相关内核不做 180 度翻转。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数字滤波（最高频使用的核心能力）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "lfilter 与直接型 II 转置结构及初始状态",
+          "order": 1,
+          "filename": "u4-l1-lfilter-df2t.md",
+          "level": "intermediate",
+          "topic": "讲解 lfilter 的差分方程实现、Direct Form II Transposed 结构、zi 初始状态（lfiltic/lfilter_zi）的作用，以及底层 C 加速 _lfilter.cc/_firfilter.cc。",
+          "learning_goals": [
+            "掌握 IIR/FIR 差分方程与 b/a 系数含义",
+            "理解 zi 状态向量在分段滤波与暂态抑制中的作用",
+            "认识 DF2T 结构为何数值更稳定"
+          ],
+          "source_files": [
+            "_signaltools.py",
+            "_lfilter.cc",
+            "_firfilter.cc"
+          ],
+          "minimal_modules": [
+            "lfilter",
+            "lfiltic",
+            "lfilter_zi",
+            "_lfilter.cc",
+            "_firfilter.cc"
+          ],
+          "practice_task": "设计一个低通 butter 滤波器，分两段对同一信号滤波：第一段不带 zi，第二段用 lfilter_zi 传入稳态初值，对比两段拼接处在边界上的暂态跳变差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "filtfilt 零相位滤波与边界延拓",
+          "order": 2,
+          "filename": "u4-l2-filtfilt-padding.md",
+          "level": "intermediate",
+          "topic": "讲解 filtfilt 的正向-反向滤波实现零相位、padtype 奇/偶/常数延拓（_validate_pad）、可选的 Gustafsson 法（_filtfilt_gust），以及 _arraytools 的 ext 延拓函数族。",
+          "learning_goals": [
+            "理解正反向滤波如何消除非线性相位",
+            "掌握 odd/even/const/zero 延拓对边界的影响",
+            "了解 Gustafsson 反射法的优势"
+          ],
+          "source_files": [
+            "_signaltools.py",
+            "_arraytools.py"
+          ],
+          "minimal_modules": [
+            "filtfilt",
+            "_filtfilt_gust",
+            "_validate_pad",
+            "odd_ext",
+            "even_ext",
+            "const_ext",
+            "zero_ext"
+          ],
+          "practice_task": "用同一个 IIR 滤波器分别调用 lfilter 与 filtfilt，绘制输出与原信号的相位关系；再切换 padtype='odd'/'even'/'constant' 观察边界振铃差异，并对照 odd_ext 的实现解释奇延拓为何适合低通。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "SOS 二阶级联滤波",
+          "order": 3,
+          "filename": "u4-l3-sosfilt.md",
+          "level": "intermediate",
+          "topic": "讲解二阶级联（Second-Order Sections）表示对高阶 IIR 数值稳定性的意义，sosfilt/sosfilt_zi/sosfiltfilt 的实现，以及 _sosfilt.pyx 加速内核。",
+          "learning_goals": [
+            "理解 SOS 相比 b/a 的数值优势",
+            "掌握 sosfiltfilt 的零相位级联流程",
+            "认识 _sosfilt.pyx 的逐节状态传递"
+          ],
+          "source_files": [
+            "_signaltools.py",
+            "_sosfilt.pyx"
+          ],
+          "minimal_modules": [
+            "sosfilt",
+            "sosfilt_zi",
+            "sosfiltfilt",
+            "_sosfilt.pyx"
+          ],
+          "practice_task": "设计一个 12 阶 highpass butter 滤波器，分别以 output='ba' 和 output='sos' 应用到含低频漂移的信号，比较高阶 b/a 形式是否出现数值不稳定，并对照 _sosfilt.pyx 说明每节如何传递状态。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "upfirdn 原语与重采样 resample/resample_poly/decimate",
+          "order": 4,
+          "filename": "u4-l4-upfirdn-resampling.md",
+          "level": "intermediate",
+          "topic": "讲解 upfirdn（上采样-滤波-下采样）这一多速率处理原语（_upfirdn.py + _upfirdn_apply.pyx），以及在其上构建的 resample_poly、decimate 与基于 FFT 的 resample。",
+          "learning_goals": [
+            "理解 upfirdn 的 up/down/mode 参数与 _output_len 计算",
+            "掌握 resample_poly 的多相分解思想",
+            "认识 decimate 的 IIR/FIR 两种下采样路径"
+          ],
+          "source_files": [
+            "_upfirdn.py",
+            "_upfirdn_apply.pyx",
+            "_signaltools.py"
+          ],
+          "minimal_modules": [
+            "_UpFIRDn",
+            "upfirdn",
+            "_output_len",
+            "resample_poly",
+            "decimate",
+            "resample",
+            "_upfirdn_apply.pyx"
+          ],
+          "practice_task": "用 resample_poly 把一段 44.1kHz 音频重采样到 16kHz，再用 decimate 做 4 倍下采样，比较两者输出长度与抗混叠处理；并对照 _output_len 解释 upfirdn 的输出样本数公式。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "Savitzky-Golay 多项式滤波",
+          "order": 5,
+          "filename": "u4-l5-savgol.md",
+          "level": "intermediate",
+          "topic": "讲解 Savitzky-Golay 滤波的原理：savgol_coeffs 通过局部多项式最小二乘导出卷积系数，savgol_filter 的边界多项式拟合（_fit_edge/_fit_edges_polyfit）与导数求解。",
+          "learning_goals": [
+            "理解 SG 滤波兼顾平滑与保形（及导数估计）的原理",
+            "掌握 savgol_coeffs 的 window_length/polyorder/deriv 参数",
+            "认识边界处 _fit_edge 的多项式外推策略"
+          ],
+          "source_files": [
+            "_savitzky_golay.py"
+          ],
+          "minimal_modules": [
+            "savgol_coeffs",
+            "_polyder",
+            "_fit_edge",
+            "_fit_edges_polyfit",
+            "savgol_filter"
+          ],
+          "practice_task": "对含噪正弦信号分别用 savgol_filter（deriv=0）与 butter 低通滤波，比较平滑后峰值的保真度；再用 deriv=1 估计信号导数并与解析导数对照，说明 _fit_edge 如何处理端点。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "Hilbert 解析信号与 envelope 包络",
+          "order": 6,
+          "filename": "u4-l6-hilbert-envelope.md",
+          "level": "intermediate",
+          "topic": "讲解 hilbert/hilbert2 如何通过 FFT 构造解析信号（压制负频率），envelope 如何从解析信号提取瞬时幅度，以及与频谱单边化的关系。",
+          "learning_goals": [
+            "理解解析信号的频域构造与实信号重建",
+            "掌握 hilbert 的 N 参数对频谱分辨率的影响",
+            "学会用 envelope 提取包络与设定带通参数"
+          ],
+          "source_files": [
+            "_signaltools.py"
+          ],
+          "minimal_modules": [
+            "hilbert",
+            "hilbert2",
+            "envelope"
+          ],
+          "practice_task": "对一个调幅信号（载波+包络）应用 hilbert 得到解析信号，再取模得到包络，绘制并与真实包络对照；说明为何必须保证载波频率远高于包络频率。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "排序/统计滤波：medfilt/order_filter/wiener",
+          "order": 7,
+          "filename": "u4-l7-order-stat-filters.md",
+          "level": "intermediate",
+          "topic": "讲解 order_filter/medfilt/medfilt2d 的排序滤波原理、medfilt2d 借助 _medianfilter.cc 的 2D 加速、以及 wiener 自适应滤波的实现。",
+          "learning_goals": [
+            "理解 order_filter 的 domain 核与 rank 语义",
+            "掌握 medfilt 对脉冲噪声的鲁棒性",
+            "认识 wiener 基于局部方差的自适应增益"
+          ],
+          "source_files": [
+            "_signaltools.py",
+            "_medianfilter.cc"
+          ],
+          "minimal_modules": [
+            "order_filter",
+            "medfilt",
+            "medfilt2d",
+            "wiener",
+            "_medianfilter.cc"
+          ],
+          "practice_task": "对一幅含椒盐噪声的图像分别用 medfilt2d 与 wiener 去噪，比较 PSNR；并对照 _medianfilter.cc 说明 medfilt2d 为何比通用 medfilt 在 2D 上更快。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "滤波器设计（IIR 与 FIR）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "IIR 设计总流程：iirfilter 从原型到数字滤波器",
+          "order": 1,
+          "filename": "u5-l1-iirfilter-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 iirfilter 作为所有经典 IIR 设计的公共后端：选模拟原型（buttap/cheb1ap/ellipap/besselap）、频率变换（lp2*_zpk）、双线性变换（bilinear_zpk）、输出 ba/zpk/sos 的归一化路径。",
+          "learning_goals": [
+            "掌握 IIR 设计的'原型→变换→离散化'三段式流程",
+            "理解 btype 低通/高通/带通/带阻的统一处理",
+            "认识 _relative_degree 在变换中的作用"
+          ],
+          "source_files": [
+            "_filter_design.py"
+          ],
+          "minimal_modules": [
+            "iirfilter",
+            "buttap",
+            "cheb1ap",
+            "ellipap",
+            "besselap",
+            "lp2lp_zpk",
+            "bilinear_zpk",
+            "_relative_degree"
+          ],
+          "practice_task": "追踪一次 butter(N=4, Wn=0.2, btype='lowpass') 在 iirfilter 内部的完整调用路径，写出依次调用了哪几个原型与变换函数，最终得到 ba 系数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "经典 IIR 家族与阶数选择",
+          "order": 2,
+          "filename": "u5-l2-classic-iir-families.md",
+          "level": "intermediate",
+          "topic": "讲解 butter/cheby1/cheby2/ellip/bessel 五大族的特性差异，buttord/cheb1ord/cheb2ord/ellipord 如何由通带阻带指标反推最小阶数，以及 besselap 的 Bessel 多项式零点（_bessel_zeros/_campos_zeros/_aberth）。",
+          "learning_goals": [
+            "比较各 IIR 族在通带/阻带/相位上的权衡",
+            "掌握阶数选择函数的指标到阶数映射",
+            "了解 Bessel 零点的数值求解过程"
+          ],
+          "source_files": [
+            "_filter_design.py"
+          ],
+          "minimal_modules": [
+            "butter",
+            "cheby1",
+            "cheby2",
+            "ellip",
+            "bessel",
+            "buttord",
+            "ellipord",
+            "besselap",
+            "_bessel_zeros",
+            "_aberth"
+          ],
+          "practice_task": "给定相同的通带/阻带纹波与衰减指标，用 buttord 与 ellipord 分别求最小阶数，绘制两者幅频响应，解释椭圆滤波器阶数更低的原因；并对照 _aberth 说明 Bessel 零点如何被迭代求出。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "频率响应：freqz/freqs/group_delay 与 SOS 频响",
+          "order": 3,
+          "filename": "u5-l3-frequency-response.md",
+          "level": "intermediate",
+          "topic": "讲解数字频响 freqz（与 zpk 版 freqz_zpk）、模拟频响 freqs、群延迟 group_delay、SOS 频响 freqz_sos/sosfreqz 的实现，以及 worN 的多种取值形式。",
+          "learning_goals": [
+            "掌握 freqz 的 worN 标量/数组/None 语义",
+            "理解群延迟与相位的关系",
+            "认识 freqz_sos 与 sosfreqz 的命名迁移"
+          ],
+          "source_files": [
+            "_filter_design.py"
+          ],
+          "minimal_modules": [
+            "freqz",
+            "freqz_zpk",
+            "freqs",
+            "freqz_sos",
+            "sosfreqz",
+            "group_delay",
+            "findfreqs"
+          ],
+          "practice_task": "对一个 SOS 滤波器同时绘制 freqz_sos 的幅频响应与 group_delay 的群延迟，标注通带群延迟波动；并说明 sosfreqz 为何是 freqz_sos 的兼容别名。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "表示转换 tf/zpk/sos 与归一化",
+          "order": 4,
+          "filename": "u5-l4-representation-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解传递函数、零极点增益、二阶级联三种表示间的互转（tf2zpk/zpk2tf/tf2sos/zpk2sos/sos2tf/sos2zpk），归一化 normalize，复数配对 _cplxpair/_cplxreal，以及 residue/residuez 部分分式展开。",
+          "learning_goals": [
+            "掌握三种表示相互转换的数值要点",
+            "理解 zpk2sos 的极点配对与排序策略",
+            "认识部分分式展开在滤波器分解中的作用"
+          ],
+          "source_files": [
+            "_filter_design.py",
+            "_lti_conversion.py"
+          ],
+          "minimal_modules": [
+            "tf2zpk",
+            "zpk2tf",
+            "tf2sos",
+            "zpk2sos",
+            "sos2tf",
+            "sos2zpk",
+            "normalize",
+            "_cplxpair",
+            "_cplxreal",
+            "residue",
+            "residuez"
+          ],
+          "practice_task": "对一个高阶 IIR 滤波器做 tf→zpk→sos 的往返转换，验证频响是否一致；并对照 _cplxpair 说明复数极点配对的容差与排序逻辑如何影响 SOS 数值稳定性。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "FIR 滤波器设计：firwin/firwin2/firls/remez",
+          "order": 5,
+          "filename": "u5-l5-fir-design.md",
+          "level": "intermediate",
+          "topic": "讲解 FIR 设计的多种方法：窗函数法 firwin（与任意响应 firwin2）、最小二乘 firls、最优等纹波 remez（Parks-McClellan），以及 Kaiser 辅助函数 kaiser_beta/kaiser_atten/kaiserord 与 minimum_phase 转换。",
+          "learning_goals": [
+            "掌握 firwin 的 pass_zero/pass_dc 与多带设计",
+            "理解 firls 的加权最小二乘目标",
+            "认识 remez 等纹波设计与 Kaiser 阶数估计"
+          ],
+          "source_files": [
+            "_fir_filter_design.py"
+          ],
+          "minimal_modules": [
+            "firwin",
+            "firwin2",
+            "firls",
+            "remez",
+            "kaiser_beta",
+            "kaiser_atten",
+            "kaiserord",
+            "minimum_phase",
+            "firwin_2d"
+          ],
+          "practice_task": "用 kaiserord 由纹波与过渡带指标估出 numtaps，再用 firwin 设计低通；另用 firls 与 remez 设计同指标滤波器，比较三者的过渡带与阻带衰减；最后用 minimum_phase 把线性相位 FIR 转为最小相位形式。",
+          "depends_on": [
+            "u2-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "二阶特殊滤波器与 gammatone 听觉滤波",
+          "order": 6,
+          "filename": "u5-l6-special-filters.md",
+          "level": "intermediate",
+          "topic": "讲解专用二阶 IIR：陷波 iirnotch、谐振峰 iirpeak、梳状 iircomb 的共同后端 _design_notch_peak_filter，以及模拟听觉系统的 gammatone 滤波器设计。",
+          "learning_goals": [
+            "掌握陷波/峰化/梳状滤波器的参数与频率响应",
+            "理解 _design_notch_peak_filter 的统一双二阶结构",
+            "了解 gammatone 的 FIR/IIR 两种实现选择"
+          ],
+          "source_files": [
+            "_filter_design.py"
+          ],
+          "minimal_modules": [
+            "iirnotch",
+            "iirpeak",
+            "iircomb",
+            "_design_notch_peak_filter",
+            "gammatone",
+            "_hz_to_erb"
+          ],
+          "practice_task": "设计一个 50Hz 工频陷波器（iirnotch）并验证其在 50Hz 的衰减深度；再用 gammatone 生成一组听觉滤波器组，绘制中心频率随 ERB（_hz_to_erb）的分布。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "LTI 线性时不变系统建模",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "LTI 类继承体系",
+          "order": 1,
+          "filename": "u6-l1-lti-class-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 _ltisys.py 的类体系：抽象基类 LinearTimeInvariant、连续 lti/离散 dlti 工厂基类、以及 TransferFunction/ZerosPolesGain/StateSpace 三种表示及其连续/离散子类，包括 to_ss/to_zpk/to_tf 的互转。",
+          "learning_goals": [
+            "理解 lti/dlti 作为系统表示工厂的角色",
+            "掌握三种表示类各自的内部数据与互转方法",
+            "认识 _as_ss/_as_zpk/_as_tf 的无拷贝优化"
+          ],
+          "source_files": [
+            "_ltisys.py"
+          ],
+          "minimal_modules": [
+            "LinearTimeInvariant",
+            "lti",
+            "dlti",
+            "TransferFunction",
+            "ZerosPolesGain",
+            "StateSpace"
+          ],
+          "practice_task": "用三种不同输入形式（(b,a) 系数、zpk、状态空间矩阵）分别构造 lti 对象，调用 to_tf/to_zpk/to_ss 验证三者等价，并对照 _as_tf 说明何时会避免拷贝。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "连续/离散系统仿真",
+          "order": 2,
+          "filename": "u6-l2-system-simulation.md",
+          "level": "intermediate",
+          "topic": "讲解连续系统仿真 lsim（含插值 interp）、冲激响应 impulse、阶跃响应 step，以及离散对应 dlsim/dimpulse/dstep，含 _default_response_times 的默认时间轴生成。",
+          "learning_goals": [
+            "掌握 lsim 对状态空间系统的数值积分思路",
+            "理解 impulse/step 的默认时间轴选择",
+            "认识连续与离散仿真接口的对应关系"
+          ],
+          "source_files": [
+            "_ltisys.py"
+          ],
+          "minimal_modules": [
+            "lsim",
+            "impulse",
+            "step",
+            "_default_response_times",
+            "dlsim",
+            "dimpulse",
+            "dstep"
+          ],
+          "practice_task": "构造一个二阶连续系统，用 step 求阶跃响应、用 impulse 求冲激响应并绘制；再将其离散化后用 dstep 求离散阶跃响应，比较两者形态。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "频率响应与 Bode 图",
+          "order": 3,
+          "filename": "u6-l3-bode-freqresp.md",
+          "level": "intermediate",
+          "topic": "讲解连续系统频响 freqresp、幅相 Bode 数据 bode，以及离散对应 dfreqresp/dbode，说明 w 频率点的生成与系统表示的内部转换。",
+          "learning_goals": [
+            "掌握 freqresp 返回的复频响与 bode 的幅度/相位分解",
+            "理解连续与离散频率轴的范围差异",
+            "认识系统内部自动 to_ss/to_zpk 的转换开销"
+          ],
+          "source_files": [
+            "_ltisys.py"
+          ],
+          "minimal_modules": [
+            "freqresp",
+            "bode",
+            "dfreqresp",
+            "dbode"
+          ],
+          "practice_task": "对一个连续传递函数用 bode 绘制幅频/相频图，标注增益裕度对应的穿越频率；再用 cont2discrete 离散后用 dbode 绘制并比较相位缠绕差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "状态空间转换、cont2discrete 与极点配置 place_poles",
+          "order": 4,
+          "filename": "u6-l4-conversions-pole-placement.md",
+          "level": "intermediate",
+          "topic": "讲解 _lti_conversion.py 的 tf2ss/ss2tf/zpk2ss/ss2zpk/abcd_normalize 与连续到离散 cont2discrete（zoh/impulse/tustin/foh 等方法），以及 _ltisys.py 的极点配置 place_poles（KNV0 与 YT 算法）。",
+          "learning_goals": [
+            "掌握四种系统表示间的状态空间转换",
+            "理解 cont2discrete 各离散化方法的适用场景",
+            "认识 place_poles 的 KNV0/YT 两种算法选择"
+          ],
+          "source_files": [
+            "_lti_conversion.py",
+            "_ltisys.py"
+          ],
+          "minimal_modules": [
+            "tf2ss",
+            "ss2tf",
+            "abcd_normalize",
+            "cont2discrete",
+            "place_poles",
+            "_KNV0",
+            "_YT_loop"
+          ],
+          "practice_task": "给定状态空间模型用 cont2discrete 以 zoh 与 tustin 两种方法离散化，比较极点位置；再用 place_poles 将期望极点配置到稳定区域，对比 method='YT' 与 'KNV0' 的结果差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "频谱分析",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "periodogram 与 welch 功率谱估计",
+          "order": 1,
+          "filename": "u7-l1-periodogram-welch.md",
+          "level": "intermediate",
+          "topic": "讲解周期图 periodogram 与平均周期图 welch 的实现，核心 _spectral_helper 的分窗/重叠/去趋势/FFT 流水线（_fft_helper、_triage_segments），以及 _median_bias 偏差校正。",
+          "learning_goals": [
+            "掌握 periodogram 与 welch 的方差/分辨率权衡",
+            "理解 _spectral_helper 作为频谱统一内核的作用",
+            "认识窗、nperseg、noverlap 对谱估计的影响"
+          ],
+          "source_files": [
+            "_spectral_py.py"
+          ],
+          "minimal_modules": [
+            "periodogram",
+            "welch",
+            "_spectral_helper",
+            "_fft_helper",
+            "_triage_segments",
+            "_median_bias"
+          ],
+          "practice_task": "对同一段含噪信号分别用 periodogram 与 welch 估计功率谱，比较谱估计的方差与分辨率；并对照 _spectral_helper 说明分窗与重叠如何降低 welch 的方差。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "csd 相互谱密度与 coherence 相干性",
+          "order": 2,
+          "filename": "u7-l2-csd-coherence.md",
+          "level": "intermediate",
+          "topic": "讲解基于 _spectral_helper 的交叉谱密度 csd 与幅度平方相干 coherence，说明它们对两路信号的处理与归一化方式。",
+          "learning_goals": [
+            "掌握 csd 的交叉功率谱估计",
+            "理解 coherence 的归一化与取值范围含义",
+            "认识 csd/coherence 与 welch 共享分窗流水线"
+          ],
+          "source_files": [
+            "_spectral_py.py"
+          ],
+          "minimal_modules": [
+            "csd",
+            "coherence",
+            "_spectral_helper"
+          ],
+          "practice_task": "构造两路含公共成分与独立噪声的信号，用 csd 估计相互谱、用 coherence 计算相干性，标注相干接近 1 的频段并解释其物理含义。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "STFT/spectrogram/istft 与 COLA/NOLA 约束",
+          "order": 3,
+          "filename": "u7-l3-stft-legacy-cola-nola.md",
+          "level": "intermediate",
+          "topic": "讲解传统短时傅里叶变换 stft/谱图 spectrogram/逆变换 istft，以及完美重构所需的 COLA 与 NOLA 约束（check_COLA/check_NOLA）的判定逻辑。",
+          "learning_goals": [
+            "理解 STFT 的分窗与边界处理",
+            "掌握 COLA/NOLA 对逆重构的约束区别",
+            "认识 spectrogram 是 STFT 模平方的便捷封装"
+          ],
+          "source_files": [
+            "_spectral_py.py"
+          ],
+          "minimal_modules": [
+            "stft",
+            "spectrogram",
+            "istft",
+            "check_COLA",
+            "check_NOLA",
+            "_spectral_helper"
+          ],
+          "practice_task": "选择窗长与重叠使 check_NOLA 通过而 check_COLA 失败，用 istft 重构信号并计算重构误差，说明为何 NOLA 是更弱但更实用的约束。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "现代 ShortTimeFFT 类",
+          "order": 4,
+          "filename": "u7-l4-shorttimefft.md",
+          "level": "intermediate",
+          "topic": "讲解取代传统 STFT 的 ShortTimeFFT 类：构造（from_window/from_dual/from_win_equals_dual）、对偶窗（dual_win/closest_STFT_dual_window）、可逆性（invertible/istft）、缩放（scaling/scale_to）与切片/边界属性。",
+          "learning_goals": [
+            "掌握 ShortTimeFFT 的窗-跳跃-采样率三要素",
+            "理解对偶窗与完美重构（NOLA）的关系",
+            "认识 scaling='magnitude'/'psd'/'unitary' 的标定含义"
+          ],
+          "source_files": [
+            "_short_time_fft.py"
+          ],
+          "minimal_modules": [
+            "ShortTimeFFT",
+            "closest_STFT_dual_window",
+            "_calc_dual_canonical_window",
+            "from_window",
+            "stft",
+            "istft",
+            "dual_win",
+            "invertible"
+          ],
+          "practice_task": "用 from_window 构造一个 ShortTimeFFT，计算其谱图并用 istft 重构，验证 invertible 为真且重构误差极小；再对比传统 stft/istft 的接口复杂度，说明 ShortTimeFFT 的改进。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "Lomb-Scargle 周期图与 vectorstrength",
+          "order": 5,
+          "filename": "u7-l5-lombscargle-vectorstrength.md",
+          "level": "intermediate",
+          "topic": "讲解适用于非均匀采样的 Lomb-Scargle 周期图 lombscargle（含 normalize/floating_mean/weights）与衡量事件相位集中度的 vectorstrength。",
+          "learning_goals": [
+            "理解 Lomb-Scargle 对不规则采样的适用性",
+            "掌握 normalize 与 floating_mean 的统计含义",
+            "认识 vectorstrength 在节律检测中的作用"
+          ],
+          "source_files": [
+            "_spectral_py.py"
+          ],
+          "minimal_modules": [
+            "lombscargle",
+            "vectorstrength"
+          ],
+          "practice_task": "生成一组随机非均匀采样时刻上的正弦信号，用 lombscargle 找出主导频率并与真实频率对照；再用 vectorstrength 检验一组事件在某周期上的相位锁定强度。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "峰值检测",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "argrelmin/argrelmax/argrelextrema 与极值判定",
+          "order": 1,
+          "filename": "u8-l1-argrelextrema.md",
+          "level": "intermediate",
+          "topic": "讲解基于比较器的相对极值检测 argrelmin/argrelmax/argrelextrema，核心 _boolrelextrema 的邻域比较与 order/axis/mode 参数语义。",
+          "learning_goals": [
+            "掌握相对极值的邻域比较定义",
+            "理解 order 控制的邻域宽度与 mode='clip'/'wrap' 的边界处理",
+            "认识 argrelextrema 通过自定义 comparator 统一三者"
+          ],
+          "source_files": [
+            "_peak_finding.py"
+          ],
+          "minimal_modules": [
+            "argrelmin",
+            "argrelmax",
+            "argrelextrema",
+            "_boolrelextrema"
+          ],
+          "practice_task": "对一段含噪声的信号先用低通平滑，再用 argrelmax 提取局部极大点，比较不同 order 值下检测到的峰数量与鲁棒性，并对照 _boolrelextrema 解释 order 的作用。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "find_peaks 的多维条件筛选",
+          "order": 2,
+          "filename": "u8-l2-find-peaks.md",
+          "level": "intermediate",
+          "topic": "讲解功能更丰富的 find_peaks：height/threshold/distance/prominence/width/plateau_size 等条件，_unpack_conditionargs/_select_by_property/_select_by_peak_threshold 的条件解析与筛选，以及 _peak_finding_utils.pyx 的本地极大值内核。",
+          "learning_goals": [
+            "掌握 find_peaks 各筛选条件的语义与组合",
+            "理解 distance 最小间距的去重逻辑",
+            "认识 Cython 内核在扫描极大值中的加速作用"
+          ],
+          "source_files": [
+            "_peak_finding.py",
+            "_peak_finding_utils.pyx"
+          ],
+          "minimal_modules": [
+            "find_peaks",
+            "_unpack_condition_args",
+            "_select_by_property",
+            "_select_by_peak_threshold",
+            "_peak_finding_utils.pyx"
+          ],
+          "practice_task": "用心电类信号调用 find_peaks，组合 height 与 distance 条件，返回峰索引与各属性字典；并对照 _peak_finding_utils.pyx 说明本地极大值如何被快速定位。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "peak_prominences 与 peak_widths 属性计算",
+          "order": 3,
+          "filename": "u8-l3-prominence-width.md",
+          "level": "intermediate",
+          "topic": "讲解峰的拓扑属性：peak_prominences 计算突出度（含 wlen 窗口限制），peak_widths 计算给定相对高度的峰宽，以及它们与 find_peaks 的协作。",
+          "learning_goals": [
+            "理解突出度的基线与包围峰定义",
+            "掌握 peak_widths 的 rel_height 与半高宽关系",
+            "认识 wlen 对大数组 prominence 计算的加速"
+          ],
+          "source_files": [
+            "_peak_finding.py"
+          ],
+          "minimal_modules": [
+            "peak_prominences",
+            "peak_widths",
+            "_peak_finding_utils.pyx"
+          ],
+          "practice_task": "对一组峰调用 peak_prominences 与 peak_widths，绘制每个峰的突出度基线与半高宽水平线；再说明如何在 find_peaks 中直接以 prominence/width 条件筛选。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "find_peaks_cwt 连续小波峰值检测",
+          "order": 4,
+          "filename": "u8-l4-find-peaks-cwt.md",
+          "level": "intermediate",
+          "topic": "讲解基于连续小波变换的 find_peaks_cwt：用 Ricker 小波在多尺度卷积，_identify_ridge_lines 跟踪脊线、_filter_ridge_lines 过滤，以及 _wavelets.py 中 _ricker/_cwt 的辅助实现。",
+          "learning_goals": [
+            "理解小波多尺度分析对宽窄不同峰的适应性",
+            "掌握脊线连接与过滤的参数 gap_thresh/min_length",
+            "认识 _cwt 内部对 convolve 的复用"
+          ],
+          "source_files": [
+            "_peak_finding.py",
+            "_wavelets.py"
+          ],
+          "minimal_modules": [
+            "find_peaks_cwt",
+            "_identify_ridge_lines",
+            "_filter_ridge_lines",
+            "_ricker",
+            "_cwt"
+          ],
+          "practice_task": "对一段含窄峰与宽峰混合的信号，先用 find_peaks 再用 find_peaks_cwt，比较两者对宽峰的检出能力；并对照 _identify_ridge_lines 解释脊线如何跨尺度连接。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "高等变换与样条",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Chirp Z-变换与 ZoomFFT",
+          "order": 1,
+          "filename": "u9-l1-czt-zoomfft.md",
+          "level": "advanced",
+          "topic": "讲解 _czt.py 的 Chirp Z-变换：czt_points 给出采样螺旋、CZT/ZoomFFT 类预计算可复用变换（Bluestein 算法 via fft/ifft/next_fast_len），以及函数式 czt/zoom_fft 的便捷接口。",
+          "learning_goals": [
+            "理解 CZT 在 z 平面任意螺旋上采样的能力",
+            "掌握 ZoomFFT 作为 CZT 特例聚焦频段的用法",
+            "认识 Bluestein 算法用 FFT 加速的实现细节"
+          ],
+          "source_files": [
+            "_czt.py"
+          ],
+          "minimal_modules": [
+            "czt",
+            "zoom_fft",
+            "CZT",
+            "ZoomFFT",
+            "czt_points",
+            "_validate_sizes"
+          ],
+          "practice_task": "对一个窄带信号先用普通 FFT 看粗谱，再用 ZoomFFT 在感兴趣的窄频段高分辨率细化，对比频率分辨率提升；并说明 CZT 类预计算 wk 相对 czt 函数的性能优势。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "B-样条滤波与对称 IIR",
+          "order": 2,
+          "filename": "u9-l2-bspline-sym-iir.md",
+          "level": "advanced",
+          "topic": "讲解 _spline_filters.py 的样条系数求解（cspline1d/qspline1d/cspline2d/qspline2d、spline_filter、gauss_spline）、求值（cspline1d_eval/qspline1d_eval），以及边界用对称因果 IIR symiirorder1/symiirorder2，底层 _spline C 扩展。",
+          "learning_goals": [
+            "理解 B-样条滤波求系数与求值的分离",
+            "掌握 symiirorder1/2 对称边界 IIR 的级联结构",
+            "认识 _spline C 内核与 sepfir2d 的关系"
+          ],
+          "source_files": [
+            "_spline_filters.py",
+            "_splinemodule.cc",
+            "_splinemodule.h"
+          ],
+          "minimal_modules": [
+            "spline_filter",
+            "gauss_spline",
+            "cspline1d",
+            "qspline1d",
+            "cspline2d",
+            "cspline1d_eval",
+            "symiirorder1",
+            "symiirorder2",
+            "_spline"
+          ],
+          "practice_task": "用 cspline1d 求一维样条系数，再用 cspline1d_eval 在亚像素位置求值重构信号；对照 symiirorder2 说明如何处理对称边界以避免边界失真。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Whittaker-Henderson 平滑",
+          "order": 3,
+          "filename": "u9-l3-whittaker-henderson.md",
+          "level": "advanced",
+          "topic": "讲解 _whittaker.py 的 Whittaker-Henderson 平滑/毕业：whittaker_henderson 的惩罚最小二乘（差分矩阵 _logdet_difference_matrix、带状求解 _solve_WH_banded/_solveh_banded），以及 lambda 的 REML 自动选择 _reml/_polynomial_fit。",
+          "learning_goals": [
+            "理解 W-H 平滑的保真度-光滑度惩罚目标",
+            "掌握带状求解器对三对角化差分矩阵的利用",
+            "认识 REML 对平滑参数 lambda 的数据驱动估计"
+          ],
+          "source_files": [
+            "_whittaker.py"
+          ],
+          "minimal_modules": [
+            "whittaker_henderson",
+            "_solveh_banded",
+            "_solve_WH_banded",
+            "_logdet_difference_matrix",
+            "_reml",
+            "_polynomial_fit"
+          ],
+          "practice_task": "对一组含噪声的不等权观测用 whittaker_henderson（lamb='reml'）平滑，绘制平滑曲线与置信权重；并对照 _solve_WH_banded 说明如何把惩罚问题组织成带状线性方程组。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "架构、多后端与工程化",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "Array-API 多后端委托机制（CuPy/JAX）",
+          "order": 1,
+          "filename": "u10-l1-backend-delegation.md",
+          "level": "advanced",
+          "topic": "讲解 _support_alternative_backends.py 与 _delegators.py 的委托架构：delegate_xp 装饰器、按函数签名判定数组命名空间、对 cupyx/jax.scipy 的同名函数分发，以及黑名单/重命名（CUPY_BLACKLIST/CUPY_RENAMES/JAX_SIGNAL_FUNCS）。",
+          "learning_goals": [
+            "理解 SCIPY_ARRAY_API 开关下函数如何被装饰",
+            "掌握 delegator 签名如何识别哪些参数是数组",
+            "认识黑名单/重命名为何对部分函数必要"
+          ],
+          "source_files": [
+            "_support_alternative_backends.py",
+            "_delegators.py"
+          ],
+          "minimal_modules": [
+            "delegate_xp",
+            "CUPY_BLACKLIST",
+            "CUPY_RENAMES",
+            "JAX_SIGNAL_FUNCS",
+            "array_namespace",
+            "各 *_signature 函数"
+          ],
+          "practice_task": "追踪 fftconvolve 在 CuPy 后端的调用路径：说明 convolve_signature 如何返回命名空间、delegate_xp 如何把调用转发到 cupyx.scipy.signal.fftconvolve；并举一个被 CUPY_BLACKLIST 排除的函数及原因。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "能力声明 xp_capabilities 与后端覆盖矩阵",
+          "order": 2,
+          "filename": "u10-l2-capabilities-decorators.md",
+          "level": "advanced",
+          "topic": "讲解 _support_alternative_backends.py 的能力标注体系：xp_capabilities 的 cpu_only/jax_jit/exceptions/xfail_backends/skip_backends/out_of_scope 字段，capabilities_overrides 字典与 get_default_capabilities/untested 的回退逻辑。",
+          "learning_goals": [
+            "掌握各能力字段的语义与对测试生成的影响",
+            "理解 capabilities_overrides 为何逐函数覆盖默认值",
+            "认识 untested 集合为何默认标记为 np_only"
+          ],
+          "source_files": [
+            "_support_alternative_backends.py"
+          ],
+          "minimal_modules": [
+            "xp_capabilities",
+            "capabilities_overrides",
+            "get_default_capabilities",
+            "untested",
+            "vars()[obj_name] = f 装饰循环"
+          ],
+          "practice_task": "挑选 butter、lfilter、convolve 三个函数，从 capabilities_overrides 读出它们各自在 CuPy/JAX 上的 cpu_only、exceptions、jax_jit 状态，整理成一张后端覆盖对照表并解释背后的实现原因（如 ellip 依赖 scipy.special.ellipk）。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "共享工具：_arraytools 与 _polyutils",
+          "order": 3,
+          "filename": "u10-l3-shared-utilities.md",
+          "level": "advanced",
+          "topic": "讲解跨模块复用的底层工具：_arraytools 的轴切片与边界延拓（axis_slice/axis_reverse/odd_ext/even_ext/const_ext/zero_ext/_validate_fs），以及 _polyutils 对 numpy.poly 系列的 array-api 兼容封装（polyroots/poly/polyval/polyfit/_lstsq/_trim_zeros）。",
+          "learning_goals": [
+            "掌握各类边界延拓函数的数学定义与用途",
+            "理解 _polyutils 为何要重封装 numpy 多项式接口",
+            "认识这些工具在滤波/设计模块中的复用点"
+          ],
+          "source_files": [
+            "_arraytools.py",
+            "_polyutils.py"
+          ],
+          "minimal_modules": [
+            "odd_ext",
+            "even_ext",
+            "const_ext",
+            "zero_ext",
+            "axis_slice",
+            "polyroots",
+            "poly",
+            "polyval",
+            "_lstsq",
+            "_trim_zeros"
+          ],
+          "practice_task": "在 filtfilt 与 _filter_design 中分别检索对 odd_ext 和 _polyutils.poly 的调用点，绘制它们的复用关系图；并实现一个自定义延拓函数说明 _arraytools 的设计便于扩展。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "编译扩展全景与弃用 stub 机制",
+          "order": 4,
+          "filename": "u10-l4-extensions-deprecation-stubs.md",
+          "level": "advanced",
+          "topic": "汇总 signal 子包的全部编译扩展（_sigtools 多源 C、_spline、Cython 的 _sosfilt/_upfirdn_apply/_peak_finding_utils、Pythran/Cython 的 _max_len_seq_inner），并讲解顶层弃用 stub（filter_design/ltisys/signaltools 等）经 _sub_module_deprecation 重定向到私有模块的统一模式。",
+          "learning_goals": [
+            "建立 signal 子包扩展模块的全景地图",
+            "理解弃用 stub 的 __getattr__ 延迟重定向原理",
+            "认识 v2.0.0 移除 stub 的迁移方向"
+          ],
+          "source_files": [
+            "meson.build",
+            "filter_design.py",
+            "signaltools.py",
+            "bsplines.py",
+            "_splinemodule.cc",
+            "_sigtoolsmodule.cc"
+          ],
+          "minimal_modules": [
+            "meson.build 的 extension_module 块",
+            "filter_design.py 的 _sub_module_deprecation",
+            "_sub_module_deprecation 调用"
+          ],
+          "practice_task": "列出 signal 子包每个编译扩展对应的源文件、语言与依赖的私有 Python 模块；并解释为什么 from scipy.signal.filter_design import butter 仍可用却触发 DeprecationWarning，其重定向目标模块是哪个。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l5",
+          "title": "测试组织与多精度/后端测试基建",
+          "order": 5,
+          "filename": "u10-l5-test-infrastructure.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 的组织：按模块拆分的 test_* 文件、多精度对照工具 mpsig（mpmath 参考实现）、_scipy_spectral_test_shim 的谱分析测试垫片、test_result_type 的 dtype 行为测试，以及 tests/meson.build 的集成方式。",
+          "learning_goals": [
+            "理解测试文件与实现模块的对应关系",
+            "掌握 mpsig 用高精度参考验证数值正确性的思路",
+            "认识 _scipy_spectral_test_shim 在 legacy/新 STFT 接口测试中的作用"
+          ],
+          "source_files": [
+            "tests/test_signaltools.py",
+            "tests/mpsig.py",
+            "tests/_scipy_spectral_test_shim.py",
+            "tests/test_result_type.py",
+            "tests/meson.build"
+          ],
+          "minimal_modules": [
+            "tests/test_signaltools.py 的测试类结构",
+            "tests/mpsig.py",
+            "tests/_scipy_spectral_test_shim.py",
+            "tests/test_result_type.py"
+          ],
+          "practice_task": "选择一个核心函数（如 lfilter 或 welch），找到其对应测试文件中的关键测试用例，说明 mpsig 如何提供高精度参考值；并为该函数补充一个针对新 dtype 或边界条件的测试用例草案。",
+          "depends_on": [
+            "u10-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

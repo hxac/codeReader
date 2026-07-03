@@ -1,7 +1,7 @@
 {
   "project": "scipy-scipy-io",
-  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-  "rationale": "scipy.io 是一个以\"多种文件格式读写器\"为核心的科学数据 I/O 子包，格式之间相互独立、各有自己的解析逻辑，唯独 MATLAB .mat 是一个完整的多版本子系统（v4/v5 + Cython 底层），因此学习路线被设计成四层渐进结构。第一单元（入门）先让读者建立全局观：项目定位、目录与构建、公共 API 与最小示例，避免一上来就陷入单一格式细节。第二单元（进阶）按\"从简单到复杂\"的顺序逐个攻破六大独立格式——先从结构最简单的 WAV（RIFF chunk）入手，再到 Fortran record 文件、Matrix Market（纯 Python）、ARFF（文本属性）、NetCDF3（dimensions/variables 模型）、Harwell-Boeing（稀疏 + Fortran format 解析）、IDL save（record + 指针堆），每个格式都是独立闭环，可作为单独讲义。第三单元（进阶）专门拆解最复杂的 MATLAB 子系统：先讲总览与版本判定，再讲基类与字节序，然后是 loadmat/savemat 主流程，接着分别深入 v4、v5 读、v5 写与变量类型，最后落到 Cython 底层流与矩阵工具，这一单元内部有强依赖关系，必须按顺序学。第四单元（专家）覆盖横切关注点：C++ 高性能后端与多线程、SciPy 2.0 的公共/私有模块弃用约定、测试体系与多版本测试数据、以及健壮性/错误处理/安全性取舍。这种\"先全局、再叶子格式、再核心子系统、最后横切主题\"的顺序，既符合从零起步的认知规律，也忠实反映了代码库的真实分层。",
+  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+  "rationale": "scipy.io 是一个以\"多种文件格式读写器\"为核心的科学数据 I/O 子包，格式之间相互独立、各有自己的解析逻辑，唯独 MATLAB .mat 是一个完整的多版本子系统（v4/v5 + Cython 底层），因此学习路线被设计成四层渐进结构。第一单元（入门）先让读者建立全局观：项目定位、目录与构建、公共 API 与最小示例，避免一上来就陷入单一格式细节。第二单元（进阶）按\"从简单到复杂\"的顺序逐个攻破六大独立格式——先从结构最简单的 WAV（RIFF chunk）入手，再到 Fortran record 文件、Matrix Market（纯 Python）、ARFF（文本属性）、NetCDF3（dimensions/variables 模型）、Harwell-Boeing（稀疏 + Fortran format 解析）、IDL save（record + 指针堆），每个格式都是独立闭环，可作为单独讲义。第三单元（进阶）专门拆解最复杂的 MATLAB 子系统：先讲总览与版本判定，再讲基类与字节序，然后是 loadmat/savemat 主流程，接着分别深入 v4、v5 读、v5 写与变量类型，最后落到 Cython 底层流与矩阵工具，这一单元内部有强依赖关系，必须按顺序学。第四单元（专家）覆盖横切关注点：C++ 高性能后端与多线程、SciPy 2.0 的公共/私有模块弃用约定、测试体系与多版本测试数据、以及健壮性/错误处理/安全性取舍。这种\"先全局、再叶子格式、再核心子系统、最后横切主题\"的顺序，既符合从零起步的认知规律，也忠实反映了代码库的真实分层。本轮增量分析：de190e7..ce1f647 之间仅有 1 个提交，且只改动了 scipy/ndimage 的测试文件，scipy/io 目录无任何代码变化，工作树也干净，因此全部讲义标记为 keep，无需新增、更新或重建，仅推进 head。",
   "units": [
     {
       "id": "u1",
@@ -29,7 +29,7 @@
           ],
           "practice_task": "import scipy.io as sio，打印 sio.__all__，为列表中的每个公共名字写一行注释，说明它读写哪种格式（MATLAB / NetCDF / Fortran / Matrix Market / IDL / Harwell-Boeing）。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -57,7 +57,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -83,7 +83,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -118,7 +118,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -144,7 +144,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -171,7 +171,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -198,7 +198,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -224,7 +224,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l6",
@@ -253,7 +253,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l7",
@@ -280,7 +280,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -316,7 +316,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -345,7 +345,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -372,7 +372,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -401,7 +401,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -431,7 +431,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l6",
@@ -463,7 +463,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l7",
@@ -493,7 +493,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -532,13 +532,13 @@
             "u2-l3",
             "u3-l7"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
           "title": "弃用命名空间与公共/私有模块约定",
           "order": 2,
-          "filename": "u4-l2-deprecated-namespaces.md",
+          "filename": "u4-l2-deprecated-namespace.md",
           "level": "advanced",
           "topic": "讲解 SciPy 2.0 的公共/私有模块约定：为什么把实现放进 _ 前缀模块、为什么旧的无前缀模块（mmio/idl/netcdf/harwell_boeing/arff/wavfile）变成弃用包装，以及 _sub_module_deprecation 的完整工作原理。",
           "learning_goals": [
@@ -562,7 +562,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -591,7 +591,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -622,7 +622,7 @@
             "u2-l5",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

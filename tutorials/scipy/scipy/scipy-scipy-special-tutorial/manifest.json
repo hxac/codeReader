@@ -1,0 +1,939 @@
+{
+  "project": "scipy-scipy-special",
+  "head": "278c037d07b7dc5f397965b3dbd7125a97270463",
+  "rationale": "scipy.special 是一个体量庞大的「特殊函数」子模块（250+ 函数），其学习难点不在数学本身，而在于它「Python 包装 → Cython → C/C++ 内核」的多层架构和「声明式 JSON → 代码生成 → 编译」的工程管线。因此大纲按「先认知、再机制、后内核」的顺序展开。第一层（U1–U2）让读者从零认识模块定位、目录结构、入口构建，并理解贯穿全模块的 NumPy ufunc 与错误处理两大通用机制；第二层（U3–U5）进入核心工程：代码生成管线（U3，本模块的工程心脏）、纯 Python 包装层（U4）与正交多项式/高斯求积（U5）；第三层（U6–U8）深入专家级内核：cython_special 类型化 API（U6）、sf_error 的 C→Python 错误贯通（U7）、xsf/Boost/Cephes/cdflib 等 C++ 后端（U8）；最后 U9 讲数值验证测试方法论，U10 讲 Array API 多后端（PyTorch/JAX/CuPy/Dask）支持。讲义之间通过 depends_on 形成清晰依赖链，每篇聚焦单一主题并配一个可操作的代码实践任务，确保读者既能「用」也能「读懂源码」甚至「二次开发」。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门与项目认知",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.special 是什么:特殊函数与 NumPy ufunc 定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.special 的定位:它集中提供 Airy、Bessel、椭圆、Gamma/Beta、误差函数、超几何、正交多项式、统计分布等 250+ 数学特殊函数,且绝大多数以 NumPy 通用函数(ufunc)形式实现,遵循广播与自动逐元素规则。",
+          "learning_goals": [
+            "理解 special 模块解决什么问题、覆盖哪些函数大类",
+            "理解「几乎所有函数都是 ufunc」这一核心设计及其广播/逐元素含义",
+            "知道哪些函数不是 ufunc(零点、序列函数)及其标记方式"
+          ],
+          "source_files": [
+            "scipy/special/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy.special 公共接口",
+            "NumPy ufunc 基本概念",
+            "特殊函数分类总览"
+          ],
+          "practice_task": "导入 scipy.special,挑选 airy、jv、gamma 三个 ufunc,对一维数组和标量分别调用,验证它们遵循广播规则并返回同形状数组;再用 isinstance(special.jv, np.ufunc) 确认其 ufunc 身份。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与源码分层地图",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "带读者走遍 special 目录,厘清「Python 包装层 → Cython 层(_ufuncs/cython_special) → C/C++ 内核层(xsf/Boost/Cephes/cdflib/specfun)」的分层结构,以及 tests/、_precompute/、utils/ 等辅助目录的职责。",
+          "learning_goals": [
+            "能说出 special 目录下每类文件(.py 包装、.pyx/.pxd Cython、.cpp/.h C++ 内核、functions.json 声明)的角色",
+            "理解调用链从 Python 公共 API 一路下钻到 C/C++ 内核的分层关系",
+            "识别 tests/、_precompute/、utils/ 各自承担的工程职责"
+          ],
+          "source_files": [
+            "scipy/special/__init__.py",
+            "scipy/special/meson.build"
+          ],
+          "minimal_modules": [
+            "源码分层架构",
+            "Python/Cython/C++ 文件命名约定",
+            "辅助目录职责"
+          ],
+          "practice_task": "用 ls 与 grep 在 special 目录中分别找出:(1) 纯 Python 包装文件;(2) Cython 源文件(.pyx/.pxd);(3) C/C++ 内核文件(.cpp/.h/.cxx);画出一张「Python→Cython→C/C++」的分层调用关系简图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建、导入与测试:如何把 special 跑起来",
+          "order": 3,
+          "filename": "u1-l3-build-and-test.md",
+          "level": "beginner",
+          "topic": "讲解 special 依赖 Meson 构建系统编译 Cython/C++ 扩展(_ufuncs、cython_special、_special_ufuncs 等),如何导入使用,以及如何用 pytest 运行 tests/ 中的测试,建立从源码到可运行环境的心智模型。",
+          "learning_goals": [
+            "理解 special 是编译型子模块,扩展模块由 meson.build 定义并生成",
+            "掌握导入 special、调用函数、运行单元测试的基本操作",
+            "认识 PytestTester 测试入口与 tests/ 目录的组织方式"
+          ],
+          "source_files": [
+            "scipy/special/meson.build",
+            "scipy/special/__init__.py"
+          ],
+          "minimal_modules": [
+            "Meson 构建流程",
+            "扩展模块加载",
+            "pytest 测试入口"
+          ],
+          "practice_task": "在已安装 SciPy 的环境中,运行 python -c 'import scipy.special as sc; print(sc.jv(0, 1.0))';再通过 special.test() 或 pytest scipy/special/tests/test_basic.py 跑一小批测试,记录哪些扩展模块被加载(可用 special.__path__ 与模块名观察)。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "__init__.py 与公共 API 的组装",
+          "order": 4,
+          "filename": "u1-l4-init-and-public-api.md",
+          "level": "beginner",
+          "topic": "逐段拆解 __init__.py:模块文档字符串如何充当函数目录、from ._ufuncs import * 等导入语句如何把分散在各子模块的函数汇聚成统一的 special 命名空间,以及 __all__ 如何拼装。",
+          "learning_goals": [
+            "理解 special 命名空间由 _ufuncs、_basic、_orthogonal、_multiufuncs 等多个子模块拼接而成",
+            "掌握 __init__.py 中各 import 与 __all__ 的组装逻辑",
+            "识别被标记为「已弃用」的旧命名空间(add_newdocs/basic/orthogonal 等)"
+          ],
+          "source_files": [
+            "scipy/special/__init__.py",
+            "scipy/special/_ufuncs.pyi"
+          ],
+          "minimal_modules": [
+            "__init__.py 导入与导出",
+            "__all__ 组装",
+            "命名空间拼接"
+          ],
+          "practice_task": "阅读 __init__.py 末尾的 __all__ 赋值,指出 logsumexp、spherical_jn、lambertw、ellip_harm 分别来自哪个子模块,并写一段代码用 dir(special) 与 special.__all__ 对比验证公共 API 数量。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "通用机制:ufunc 与错误处理",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "NumPy ufunc 基石:类型签名、广播与 out 参数",
+          "order": 1,
+          "filename": "u2-l1-ufunc-fundamentals.md",
+          "level": "beginner",
+          "topic": "讲解 special 中绝大多数函数为何是 ufunc:ufunc 的类型码、多类型分发(float/double/complex)、广播、out=、where= 等机制,以及 _ufuncs.pyi 类型桩如何描述这些 ufunc。",
+          "learning_goals": [
+            "理解 ufunc 的输入/输出类型签名(如 d->d、DDD->D)与自动类型提升",
+            "掌握广播、out= 写入、necessarily 逐元素求值的行为",
+            "学会从 _ufuncs.pyi 读取某 ufunc 的签名与参数"
+          ],
+          "source_files": [
+            "scipy/special/_ufuncs.pyi",
+            "scipy/special/__init__.py"
+          ],
+          "minimal_modules": [
+            "ufunc 类型系统",
+            "广播规则",
+            "类型桩(.pyi)"
+          ],
+          "practice_task": "选 erf 与 hyp2f1 两个 ufunc,从 _ufuncs.pyi 读取其签名;用 .types 属性打印它们支持的所有 (输入->输出) 类型组合,并演示对复数输入的类型自动选择。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "函数分类总览:从 _ufuncs.pyi 与文档读懂 250+ 函数",
+          "order": 2,
+          "filename": "u2-l2-function-taxonomy.md",
+          "level": "beginner",
+          "topic": "以 __init__.py 文档字符串的章节(Airy/椭圆/Bessel/统计/Gamma/误差函数/正交多项式/超几何等)为主线,结合 _ufuncs.pyi 的 __all__,建立 special 函数家族的分类地图。",
+          "learning_goals": [
+            "掌握 special 函数的各大类别及其代表性函数",
+            "理解「原始统计函数」与 scipy.stats 友好版本的关系",
+            "能根据需求快速定位所需的函数与文档章节"
+          ],
+          "source_files": [
+            "scipy/special/__init__.py",
+            "scipy/special/_ufuncs.pyi"
+          ],
+          "minimal_modules": [
+            "函数家族分类",
+            "统计函数与 scipy.stats",
+            "文档章节导航"
+          ],
+          "practice_task": "从文档中挑选三类函数(如 Bessel、Gamma 相关、误差函数),分别列出每类的 3 个代表性函数,并写一个小脚本用 scipy.special 计算 erf(1.0)、gamma(0.5)、jv(0, 2.0) 验证可用。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "错误处理:seterr/geterr/errstate 与特殊函数告警",
+          "order": 3,
+          "filename": "u2-l3-error-handling.md",
+          "level": "beginner",
+          "topic": "讲解 special 的错误处理哲学(默认返回 NaN/合适值,仅内存错误抛异常),以及 seterr/geterr/errstate 三件套如何控制 singular/underflow/overflow/loss/domain 等错误是 ignore/warn/raise。",
+          "learning_goals": [
+            "理解 special 错误默认行为与可配置的错误类型集合",
+            "掌握 seterr/geterr/errstate 的使用与作用域",
+            "认识 SpecialFunctionWarning 与 SpecialFunctionError 两个类"
+          ],
+          "source_files": [
+            "scipy/special/_ufuncs.pyi",
+            "scipy/special/_sf_error.py"
+          ],
+          "minimal_modules": [
+            "错误处理三件套",
+            "错误类型分类",
+            "警告/异常类"
+          ],
+          "practice_task": "默认状态下计算 special.spence(-1)(产生 domain error)观察返回 NaN;再用 with special.errstate(all='raise'): 包裹同一调用,捕获 SpecialFunctionError;最后用 special.geterr() 对比前后状态。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "代码生成管线(模块的工程心脏)",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "functions.json:声明式 ufunc 签名与类型码",
+          "order": 1,
+          "filename": "u3-l1-functions-json.md",
+          "level": "intermediate",
+          "topic": "深入 functions.json 的结构:每个函数名映射到「头文件→{C/C++ 内核名: 类型签名}」,讲解类型码(f/d/g/F/D/G/i/l/p)、输入*输出->返回 的语法,以及 ++ 后缀表示 C++ 头文件、pxd 表示 Cython 头等约定。",
+          "learning_goals": [
+            "读懂 functions.json 中任意一条函数声明的三层结构",
+            "掌握单字符类型码与 input*output->retval 的签名语法",
+            "理解多内核(如 float+double 双版本)与自动类型转换的生成意图"
+          ],
+          "source_files": [
+            "scipy/special/functions.json",
+            "scipy/special/_generate_pyx.py"
+          ],
+          "minimal_modules": [
+            "JSON 声明结构",
+            "类型码语法",
+            "多内核分发"
+          ],
+          "practice_task": "在 functions.json 中找出 bdtr(含 _legacy.pxd 与 xsf_wrappers.h 两个来源)、betainc(Boost C++)、eval_chebyc(Cython 融合类型)三个条目,分别用中文解释每条「函数名→头文件→内核→签名」的含义,并指出哪条用到了 C++。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "_generate_pyx.py:从 JSON 生成 Cython ufunc 代码",
+          "order": 2,
+          "filename": "u3-l2-generate-pyx.md",
+          "level": "intermediate",
+          "topic": "拆解代码生成器 _generate_pyx.py:它读取 functions.json,用 Ufunc 类解析签名,generate_loop/generate_ufuncs 生成 PyUFunc_FromFuncAndData 调用与内层循环,产出 _ufuncs.pyx 与 _ufuncs_cxx.pyx 等源文件。",
+          "learning_goals": [
+            "理解声明式 JSON 如何驱动生成 Cython ufunc 注册代码",
+            "掌握 Ufunc 类、generate_loop、generate_ufuncs 等关键组件的职责",
+            "认识 _ufuncs(纯 C/Cephes/xsf)与 _ufuncs_cxx(Boost)分离生成的原因"
+          ],
+          "source_files": [
+            "scipy/special/_generate_pyx.py",
+            "scipy/special/functions.json"
+          ],
+          "minimal_modules": [
+            "代码生成器主流程",
+            "Ufunc 签名解析",
+            "内层循环生成"
+          ],
+          "practice_task": "定位 main() 函数,梳理「读 functions.json → 过滤 special_ufuncs → 构造 Ufunc 列表 → generate_ufuncs」的流程;然后手动在 functions.json 风格下为假想函数 myfun(double)->double 写一条声明,推断生成器会产出什么样的 PyUFunc 注册调用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "meson.build:扩展模块的编译目标体系",
+          "order": 3,
+          "filename": "u3-l3-meson-build.md",
+          "level": "intermediate",
+          "topic": "逐个解析 meson.build 定义的扩展模块目标:_special_ufuncs、_gufuncs、_specfun、_ufuncs、_ufuncs_cxx、cython_special、_ellip_harm_2,以及 custom_target 把 _generate_pyx.py 接入构建、cython generator 把 .pyx 编成 .c/.cpp 的流程。",
+          "learning_goals": [
+            "理解 special 由多个独立扩展模块组成及其各自的源码来源",
+            "掌握 custom_target(代码生成)+ generator(.pyx→.c)的构建编排",
+            "认识各目标链接的依赖(xsf_dep、boost_math_dep、cdflib_lib、np_dep)"
+          ],
+          "source_files": [
+            "scipy/special/meson.build",
+            "scipy/special/_generate_pyx.py"
+          ],
+          "minimal_modules": [
+            "Meson 扩展模块目标",
+            "代码生成 custom_target",
+            "Cython generator"
+          ],
+          "practice_task": "在 meson.build 中分别找出 _ufuncs、_ufuncs_cxx、cython_special 三个目标的源码列表与依赖,解释为什么 _ufuncs 需要链接 cdflib_lib 而 _ufuncs_cxx 需要 boost_math_dep,画出三者源码来源对照表。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "C/C++ 后端版图:xsf、Boost、Cephes、cdflib、specfun",
+          "order": 4,
+          "filename": "u3-l4-cpp-backend-landscape.md",
+          "level": "intermediate",
+          "topic": "梳理 special 背后的多套 C/C++ 数学库:现代化的 xsf(extended special functions)、Boost.Math、经典 Cephes、概率分布 cdflib、Zhang & Jin 的 specfun,以及它们各自承担哪些函数、如何被 functions.json 的头文件字段调度。",
+          "learning_goals": [
+            "识别 special 依赖的各套 C/C++ 后端及其历史定位",
+            "理解 functions.json 的「头文件」字段如何选择后端实现",
+            "认识 xsf 作为新一代统一 C++ 库的趋势"
+          ],
+          "source_files": [
+            "scipy/special/functions.json",
+            "scipy/special/xsf_wrappers.h",
+            "scipy/special/boost_special_functions.h"
+          ],
+          "minimal_modules": [
+            "xsf 库",
+            "Boost.Math",
+            "Cephes/cdflib/specfun 遗留库",
+            "后端调度"
+          ],
+          "practice_task": "在 functions.json 中统计:有多少函数的头文件指向 xsf_wrappers.h、多少指向 boost_special_functions.h++;各举 2 个例子,并说明某函数(如 betainc)为何选择 Boost 而非 Cephes。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "纯 Python 包装层",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "_basic.py(一):组合与阶乘类函数",
+          "order": 1,
+          "filename": "u4-l1-basic-combinatorics.md",
+          "level": "intermediate",
+          "topic": "聚焦 _basic.py 中的组合数学与便利函数:comb、perm、factorial、factorial2、factorialk、stirling2、bernoulli、euler、diric、sinc、softplus 等,讲解它们为何用纯 Python 实现而非 ufunc,以及整数溢出保护(_FACTORIALK_LIMITS_*)等工程细节。",
+          "learning_goals": [
+            "掌握组合/阶乘类函数的纯 Python 实现策略与整数边界处理",
+            "理解 exact 参数与精确/浮点模式的选择",
+            "认识这些函数与对应 ufunc(如 binom)的分工"
+          ],
+          "source_files": [
+            "scipy/special/_basic.py"
+          ],
+          "minimal_modules": [
+            "组合数学函数",
+            "整数溢出保护",
+            "exact 模式"
+          ],
+          "practice_task": "阅读 factorialk 的实现与 _FACTORIALK_LIMITS_64BITS 表,解释该表如何防止 int64 溢出;写代码用 factorialk 计算 33!! 并验证其刚好不溢出,再测试 exact=True 与 False 的差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "_basic.py(二):贝塞尔/开尔文函数的零点与导数",
+          "order": 2,
+          "filename": "u4-l2-basic-zeros-and-derivatives.md",
+          "level": "intermediate",
+          "topic": "讲解 _basic.py 中基于 _specfun 的序列型函数:Bessel 函数零点(jn_zeros/yn_zeros/jnyn_zeros 等)、Kelvin 函数零点、各阶导数(jvp/yvp/ivp/kvp/h1vp/h2vp)、以及 riccati_jn/yn、lmbda 等,它们为何不是 ufunc。",
+          "learning_goals": [
+            "理解零点计算与导数函数为何以纯 Python 序列函数形式提供",
+            "掌握 jvp/yvp 等导数如何复用底层 ufunc 与递推关系",
+            "认识 _specfun(Zhang & Jin)在这些函数中的支撑作用"
+          ],
+          "source_files": [
+            "scipy/special/_basic.py"
+          ],
+          "minimal_modules": [
+            "Bessel 零点序列",
+            "导数函数",
+            "_specfun 内核"
+          ],
+          "practice_task": "实现思路分析:阅读 jvp 的实现,说明它如何对 n>0 用递推/直接调用底层 ufunc 计算第 n 阶导数;然后用 jvp 与有限差分 np.diff 在小区间上验证 jvp(0, x, 1) ≈ 数值导数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "_logsumexp.py:数值稳定的 logsumexp / softmax",
+          "order": 3,
+          "filename": "u4-l3-logsumexp-softmax.md",
+          "level": "intermediate",
+          "topic": "深入 logsumexp、softmax、log_softmax 的纯 Python 实现:为何要先减去最大值再做指数(防止溢出)、return_sign 与权重 b 的处理、复数输入的相位包裹(_wrap_radians),以及如何用 array_namespace 实现 Array API 兼容。",
+          "learning_goals": [
+            "掌握 logsumexp 数值稳定的 max-shift 技巧与符号分离",
+            "理解 softmax 作为 logsumexp 梯度的关系及稳定实现",
+            "认识 Array API(array_namespace/xp_promote)如何让函数跨后端工作"
+          ],
+          "source_files": [
+            "scipy/special/_logsumexp.py"
+          ],
+          "minimal_modules": [
+            "数值稳定性(max-shift)",
+            "符号与复数处理",
+            "Array API 兼容"
+          ],
+          "practice_task": "对比 special.logsumexp([1000., 1001.]) 与朴素 np.log(np.sum(np.exp(...))) 的结果,解释后者为何溢出;再用 return_sign=True 与负权重 b 验证符号返回逻辑。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "薄包装与装饰器:lambertw 与 spherical_bessel",
+          "order": 4,
+          "filename": "u4-l4-thin-wrappers.md",
+          "level": "intermediate",
+          "topic": "分析 _lambertw.py 与 _spherical_bessel.py 这类「薄包装」:它们如何在底层 ufunc(_lambertw、_spherical_jn 等)之上做轻量参数预处理(如 k 的 dtype 强制、derivative 分支),以及 spherical_bessel 中 use_reflection 装饰器如何按 DLMF 10.47(v) 处理负实轴反射。",
+          "learning_goals": [
+            "理解薄包装函数对底层 ufunc 的参数预处理模式",
+            "掌握 use_reflection 装饰器的负实轴反射逻辑与符号规则",
+            "认识 derivative 分支如何选择 _xxx 与 _xxx_d 两个 ufunc"
+          ],
+          "source_files": [
+            "scipy/special/_lambertw.py",
+            "scipy/special/_spherical_bessel.py"
+          ],
+          "minimal_modules": [
+            "薄包装模式",
+            "反射装饰器",
+            "derivative 分支"
+          ],
+          "practice_task": "阅读 use_reflection 装饰器,解释 spherical_jn(对 n 偶为 +1)与 spherical_yn(为 -1)的符号差异来源;写代码验证 spherical_jn(3, -x) 与反射公式的一致性,并说明 spherical_kn 为何改用复数反射(spherical_kn_reflection)。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "正交多项式与高斯求积",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "_orthogonal.py 概览:orthopoly1d 与 Golub-Welsch 算法",
+          "order": 1,
+          "filename": "u5-l1-orthogonal-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 _orthogonal.py 的整体设计:用三项递推系数构造对称三对角矩阵,通过求其特征值/特征向量得到高斯求积节点与权重(Golub-Welsch),以及 orthopoly1d 对象如何封装多项式系数与权重。",
+          "learning_goals": [
+            "理解正交多项式三项递推与三对角矩阵特征值求节点/权重的原理",
+            "掌握 _orthogonal.py 中 roots_* 与 polyfuns 的组织方式",
+            "认识 orthopoly1d 与 numpy.poly1d 的关系及其数值稳定性警告"
+          ],
+          "source_files": [
+            "scipy/special/_orthogonal.py"
+          ],
+          "minimal_modules": [
+            "三项递推关系",
+            "Golub-Welsch 算法",
+            "orthopoly1d"
+          ],
+          "practice_task": "阅读 _orthogonal.py 顶部的数学注释与通用 roots 求解逻辑,说明 A_n/B_n 系数如何由递推系数导出;用 roots_legendre(5) 得到节点与权重,验证 ∑ w_i f(x_i) 对 f(x)=1 等于 2(区间 [-1,1])。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "roots_* 与 eval_*:求积节点 vs 多项式求值",
+          "order": 2,
+          "filename": "u5-l2-roots-and-eval-polys.md",
+          "level": "intermediate",
+          "topic": "对比两类正交多项式接口:roots_*(返回高斯求积节点与权重)与 eval_*(逐元素求值某阶多项式,实为 ufunc),以及为何文档警告高阶(order>20)用系数法不稳定、应改用 eval_*。",
+          "learning_goals": [
+            "区分 roots_* 与 eval_* 两套接口的用途与实现来源",
+            "理解高阶多项式系数法的数值不稳定性及 eval_* 的优势",
+            "认识 eval_* 来自 _ufuncs 而 roots_* 来自 _orthogonal.py"
+          ],
+          "source_files": [
+            "scipy/special/_orthogonal.py",
+            "scipy/special/_ufuncs.pyi"
+          ],
+          "minimal_modules": [
+            "roots_* 求积接口",
+            "eval_* 求值 ufunc",
+            "数值稳定性权衡"
+          ],
+          "practice_task": "对比 eval_legendre(25, 0.3) 与用 legendre(25) 系数多项式求值的结果,观察高阶下系数法的精度损失;再用 roots_hermite(10) 得到节点权重并验证其能精确积分多项式。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "_multiufuncs.py:MultiUFunc 与多输出函数",
+          "order": 3,
+          "filename": "u5-l3-multiufuncs.md",
+          "level": "intermediate",
+          "topic": "讲解 MultiUFunc 类如何把多个 ufunc(或按 dtype/输入选择不同 ufunc)包装成单一可调用对象,用于 legendre_p_all、sph_harm_y_all 等需要一次性返回多阶/多输出结果的函数,以及 _gufuncs(广义 ufunc)的支撑。",
+          "learning_goals": [
+            "理解 MultiUFunc 如何聚合多 ufunc 并按参数解析到具体内核",
+            "掌握 legendre_p_all / sph_harm_y_all 的多输出语义",
+            "认识 _special_ufuncs 与 _gufuncs 两套 C++ 扩展的分工"
+          ],
+          "source_files": [
+            "scipy/special/_multiufuncs.py",
+            "scipy/special/_ufuncs.pyi"
+          ],
+          "minimal_modules": [
+            "MultiUFunc 聚合",
+            "多输出语义",
+            "gufunc 支撑"
+          ],
+          "practice_task": "阅读 MultiUFunc.__init__ 与 _resolve_ufunc,说明它如何校验所有内部 ufunc 输入类型一致;调用 sph_harm_y_all(2, 0, theta, phi) 观察其一次返回所有 (l,m) 组合的输出形状。",
+          "depends_on": [
+            "u5-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "cython_special:类型化的 Cython API",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "cython_special.pxd/.pyx:融合类型、nogil 与指针输出",
+          "order": 1,
+          "filename": "u6-l1-cython-special.md",
+          "level": "advanced",
+          "topic": "深入 cython_special 的类型化设计:它提供与 ufunc 同名但带 C 标量签名的版本(如 void airy(double, double*, ...)),使用 fused types(number_t/df_number_t)实现编译期多态,并标记 noexcept nogil 以便在释放 GIL 的热循环中调用。",
+          "learning_goals": [
+            "理解 cython_special 与 ufunc 版本在签名上的本质差异(标量+指针 vs 数组)",
+            "掌握 fused types 与 noexcept nogil 的作用",
+            "认识 .pxd 声明与 .pyx 实现的对应关系"
+          ],
+          "source_files": [
+            "scipy/special/cython_special.pxd",
+            "scipy/special/cython_special.pyx",
+            "scipy/special/cython_special.pyi"
+          ],
+          "minimal_modules": [
+            "类型化标量签名",
+            "fused types",
+            "nogil 安全"
+          ],
+          "practice_task": "在 cython_special.pxd 中找出 airy、betainc、voigt_profile 的声明,对比它们与 ufunc 版本(airy/betainc)的签名差异;说明为何多返回值函数(airy)用指针输出参数而非返回元组。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "在自己的 Cython 代码中使用 cython_special",
+          "order": 2,
+          "filename": "u6-l2-using-cython-special.md",
+          "level": "advanced",
+          "topic": "实战如何在用户自己的 .pyx 中 cimport scipy.special.cython_special,在 nogil 块里逐标量调用特殊函数以加速热循环,并与 ufunc 的批量调用在性能与适用场景上做对比。",
+          "learning_goals": [
+            "掌握 cimport cython_special 并在 nogil 块中调用的写法",
+            "理解标量 nogil 调用 vs ufunc 批量调用的性能权衡",
+            "认识融合类型在 cimport 时需指定具体类型或保持泛型"
+          ],
+          "source_files": [
+            "scipy/special/cython_special.pyx",
+            "scipy/special/cython_special.pyi",
+            "scipy/special/__init__.py"
+          ],
+          "minimal_modules": [
+            "cimport 用法",
+            "nogil 热循环",
+            "性能权衡"
+          ],
+          "practice_task": "编写一个最小 Cython .pyx,from scipy.special.cython_special cimport gamma,在 cdef nogil 循环中对一万个 double 求 gamma;编译运行并与 special.gamma(numpy 数组)的 ufunc 批量版本比较耗时,记录结论。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "错误处理:C 层 sf_error 的贯通",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "sf_error.h/.cc/.pxd:错误码、TLS 动作与 C→Python 桥",
+          "order": 1,
+          "filename": "u7-l1-sf-error-c-layer.md",
+          "level": "advanced",
+          "topic": "剖析 C 层错误机制:sf_error_t 错误类型枚举(OK/SINGULAR/UNDERFLOW/OVERFLOW/LOSS/DOMAIN/MEMORY 等)、sf_action_t 动作枚举(IGNORE/WARN/RAISE)、线程局部(TLS)的默认动作数组(仅 MEMORY 默认 RAISE),以及 sf_error_v 如何获取 GIL、导入 scipy.special、按动作发出 SpecialFunctionWarning 或抛 SpecialFunctionError。",
+          "learning_goals": [
+            "理解错误类型与动作两套枚举及 TLS 默认动作表",
+            "掌握 C 内核检测到错误后如何跨越 GIL 边界触发 Python 告警/异常",
+            "认识 sf_error_check_fpe 对浮点异常的捕获作用"
+          ],
+          "source_files": [
+            "scipy/special/sf_error.h",
+            "scipy/special/sf_error.cc",
+            "scipy/special/sf_error.pxd",
+            "scipy/special/sf_error.py"
+          ],
+          "minimal_modules": [
+            "错误类型/动作枚举",
+            "TLS 默认动作",
+            "GIL 桥接告警"
+          ],
+          "practice_task": "在 sf_error.cc 中定位 sf_error_actions 默认数组与 sf_error_messages 字符串表,说明为何只有 SF_ERROR_MEMORY 默认 RAISE;再追踪 sf_error_v 如何用 PyGILState_Ensure + PyObject_GetAttrString 拿到 SpecialFunctionWarning/Error。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "_ufuncs_extra_code.pxi:seterr/geterr/errstate 与 FPE 检测",
+          "order": 2,
+          "filename": "u7-l2-extra-code-pxi.md",
+          "level": "advanced",
+          "topic": "讲解注入到生成代码 _ufuncs.pyx 的额外片段:_ufuncs_extra_code_common.pxi 中的 wrap_PyUFunc_getfperr/_set_action(把 ufunc 内层的浮点异常转成 sf_error),以及 _ufuncs_extra_code.pxi 中 seterr/geterr/errstate 如何在字符串名与 sf_action_t 之间映射并保存/恢复状态。",
+          "learning_goals": [
+            "理解 ufunc 内层循环如何把硬件浮点异常转换为 sf_error 信号",
+            "掌握 seterr/geterr/errstate 的字符串↔枚举映射与上下文保存/恢复",
+            "认识 .pxi 片段被代码生成器拼接到 _ufuncs.pyx 的机制"
+          ],
+          "source_files": [
+            "scipy/special/_ufuncs_extra_code.pxi",
+            "scipy/special/_ufuncs_extra_code_common.pxi",
+            "scipy/special/_generate_pyx.py"
+          ],
+          "minimal_modules": [
+            "FPE 检测转换",
+            "seterr/geterr/errstate 实现",
+            ".pxi 代码注入"
+          ],
+          "practice_task": "在 _ufuncs_extra_code.pxi 中阅读 seterr 与 errstate.__enter__/__exit__,说明 errstate 如何用「进入时 seterr 返回旧状态、退出时恢复」实现上下文管理;再用 errstate(singular='warn') 包裹一个会产生奇点的调用验证状态隔离。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "C/C++ 后端深入",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "xsf 与 xsf_wrappers:现代 C++ 特殊函数库",
+          "order": 1,
+          "filename": "u8-l1-xsf-wrappers.md",
+          "level": "advanced",
+          "topic": "深入 xsf(extended special functions)C++ 库及其 C 包装层 xsf_wrappers.cpp/.h:它如何用 to_complex/to_ccomplex 在 NumPy 复数(npy_cdouble)与 std::complex 之间转换,如何把 special_airy/special_agm/chyp1f1_wrap 等暴露给 Cython/ufunc 层。",
+          "learning_goals": [
+            "理解 xsf 作为 SciPy 自研的现代化 C++ 特殊函数库的定位",
+            "掌握 xsf_wrappers 在 std::complex 与 npy_cdouble 之间的桥接技巧",
+            "认识 wrapper 命名约定(special_*/xsf_*/chyp*_wrap)"
+          ],
+          "source_files": [
+            "scipy/special/xsf_wrappers.cpp",
+            "scipy/special/xsf_wrappers.h"
+          ],
+          "minimal_modules": [
+            "xsf C++ 库",
+            "复数类型桥接",
+            "wrapper 命名约定"
+          ],
+          "practice_task": "在 xsf_wrappers.cpp 中找出 special_agm 与 chyp1f1_wrap 的实现,说明前者为何直接 xsf::agm 转发、后者为何需要 to_complex/to_ccomplex 转换;再对应 functions.json 中用到 xsf_wrappers.h 的条目确认调用路径。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "boost_special_functions.h:Boost.Math 集成与策略化错误映射",
+          "order": 2,
+          "filename": "u8-l2-boost-integration.md",
+          "level": "advanced",
+          "topic": "分析 Boost.Math 的接入:SpecialPolicy 策略(promote_float/double 关闭)及其 user_evaluation_error/user_overflow_error 等自定义策略如何把 Boost 的 C++ 异常转成 Python 的 SpecialFunctionWarning/OverflowError,以及 float/double 双内核(bdtrik_float/bdtrik_double)的设计。",
+          "learning_goals": [
+            "理解 Boost.Math policy 机制与禁用类型提升的原因",
+            "掌握自定义错误策略如何把 Boost 异常桥接到 Python 告警/异常",
+            "认识为何 Boost 函数常提供 float+double 双内核"
+          ],
+          "source_files": [
+            "scipy/special/boost_special_functions.h",
+            "scipy/special/functions.json"
+          ],
+          "minimal_modules": [
+            "Boost.Math policy",
+            "错误策略桥接",
+            "双内核设计"
+          ],
+          "practice_task": "在 boost_special_functions.h 中定位 SpecialPolicy typedef 与 user_evaluation_error/user_overflow_error,说明它们如何用 PyGILState_Ensure + PyErr_WarnEx/PyErr_SetString 把 Boost 错误转成 Python 信号;再对照 functions.json 的 betainc 条目理解双内核选择。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "_special_ufuncs.cpp / _gufuncs.cpp:新的 ufunc 注册路径",
+          "order": 3,
+          "filename": "u8-l3-special-ufuncs-registration.md",
+          "level": "advanced",
+          "topic": "讲解有别于「functions.json→生成 .pyx」的 newer 路径:_special_ufuncs.cpp 与 _gufuncs.cpp 直接用 xsf::numpy::ufunc 在 C++ 中注册 ufunc(文档字符串单独放 _*_docs.cpp),并解释它与生成式路径的分工及迁移趋势。",
+          "learning_goals": [
+            "理解 xsf::numpy::ufunc 这一纯 C++ 注册 ufunc 的机制",
+            "掌握 _special_ufuncs(_ufunc)与 _gufuncs(generalized ufunc)的区别",
+            "认识文档串外置(_*_docs.cpp)与 functions.json 仍需登记的双轨现状"
+          ],
+          "source_files": [
+            "scipy/special/_special_ufuncs.cpp",
+            "scipy/special/_special_ufuncs_docs.cpp",
+            "scipy/special/_gufuncs.cpp",
+            "scipy/special/meson.build"
+          ],
+          "minimal_modules": [
+            "xsf::numpy::ufunc 注册",
+            "ufunc vs gufunc",
+            "文档外置"
+          ],
+          "practice_task": "在 _special_ufuncs.cpp 中找一个 xsf::numpy::ufunc<...> \"name\" 注册语句,对照 _special_ufuncs_docs.cpp 中同名文档串,说明「内核注册」与「文档提供」分离的设计;再在 functions.json 中确认该函数是否同时登记(理解双轨)。",
+          "depends_on": [
+            "u8-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Carlson 椭圆积分与 cdflib:专项内核",
+          "order": 4,
+          "filename": "u8-l4-carlson-and-cdflib.md",
+          "level": "advanced",
+          "topic": "聚焦两套专项 C/C++ 内核:ellip_carlson_cpp_lite(Carlson 对称椭圆积分 RF/RD/RG/RJ 的轻量 C++ 实现,支撑 elliprc/rd/rf/rg/rj)与 cdflib(概率分布 CDF/分位数,如 ncfdtr/nctdtr 等),讲解它们的封装与构建(ellint_dep、cdflib_lib 静态库)。",
+          "learning_goals": [
+            "理解 Carlson 椭圆积分在 ellipr* 函数族中的核心地位",
+            "掌握 cdflib 对非中心分布(ncf/nct/chi-square)CDF 的支撑",
+            "认识专项内核在 meson.build 中的依赖组织(ellint_dep/cdflib_lib)"
+          ],
+          "source_files": [
+            "scipy/special/ellint_carlson_wrap.cxx",
+            "scipy/special/ellint_carlson_wrap.hh",
+            "scipy/special/cdflib.h",
+            "scipy/special/meson.build"
+          ],
+          "minimal_modules": [
+            "Carlson 椭圆积分",
+            "cdflib 概率分布",
+            "专项内核构建依赖"
+          ],
+          "practice_task": "在 meson.build 中找出 ellint_files/ellint_dep 与 cdflib_lib 的定义,说明 Carlson 头文件如何作为 source 依赖、cdflib 如何编译成静态库并 link 给 _ufuncs;再用 special.elliprf(1,2,0) 验证可用。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "测试与数值验证方法论",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "_testutils.py:FuncData、assert_func_equal 与数据驱动测试",
+          "order": 1,
+          "filename": "u9-l1-testutils-funcdata.md",
+          "level": "advanced",
+          "topic": "讲解 special 的测试基础设施:_testutils.py 提供 with_special_errors(在 errstate(all='raise') 下跑测试)、assert_func_equal(在参数网格上比较函数值)、FuncData(用预存数据文件校验函数),以及 tests/data/ 下的 boost/gsl/local 数据集。",
+          "learning_goals": [
+            "掌握 FuncData 如何驱动数据文件校验函数实现",
+            "理解 assert_func_equal 的参数网格与容差比较逻辑",
+            "认识 with_special_errors 在测试中强制暴露错误的作用"
+          ],
+          "source_files": [
+            "scipy/special/_testutils.py",
+            "scipy/special/tests/test_data.py",
+            "scipy/special/meson.build"
+          ],
+          "minimal_modules": [
+            "FuncData 数据校验",
+            "assert_func_equal",
+            "数据集组织"
+          ],
+          "practice_task": "阅读 FuncData 与 assert_func_equal 的实现,说明 FuncData 如何把数据文件的列拆为参数列与结果列;再在 meson.build 中找到 boost.npz/gsl.npz/local.npz 的生成规则,理解 tests/data/ 文本如何被打包为 npz。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "_mptestutils.py:基于 mpmath 的高精度参考验证",
+          "order": 2,
+          "filename": "u9-l2-mptestutils.md",
+          "level": "advanced",
+          "topic": "讲解用 mpmath 任意精度库作为「黄金参考」的测试方法:Arg 类在实轴上按数量级生成测试点(对数+线性采样)、Hyp 类处理超几何参数域,以及如何把 mpmath 高精度结果与 special 的双精度输出在 rtol/atol 下比对(test_mpmath.py)。",
+          "learning_goals": [
+            "理解用 mpmath 作为高精度参考值验证 special 数值正确性的思路",
+            "掌握 Arg/Hyp 类生成覆盖各数量级测试点的策略",
+            "认识 test_mpmath.py 如何参数化大规模数值比对"
+          ],
+          "source_files": [
+            "scipy/special/_mptestutils.py",
+            "scipy/special/tests/test_mpmath.py"
+          ],
+          "minimal_modules": [
+            "mpmath 高精度参考",
+            "Arg/Hyp 采样",
+            "rtol/atol 比对"
+          ],
+          "practice_task": "阅读 Arg 类与 _positive_values/相关采样函数,说明它如何同时覆盖极小、中等、极大数值;写一段独立代码用 mpmath 计算 erf(1.5) 到 50 位精度,再与 special.erf(1.5) 比较相对误差。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "_precompute/:参考数据与系数的生成脚本",
+          "order": 3,
+          "filename": "u9-l3-precompute.md",
+          "level": "advanced",
+          "topic": "讲解 _precompute/ 目录的用途:这些脚本离线用 mpmath 高精度预计算特殊函数的渐近系数/参考数据(如 gammainc_asy、expn_asy、loggamma、lambertw、zetac、wrightomega),固化后供运行时或测试使用,体现「数值库需要可信参考数据」的工程实践。",
+          "learning_goals": [
+            "理解 _precompute 脚本离线生成高精度参考数据/系数的用途",
+            "掌握 utils.py 等公共工具与具体预计算脚本的协作",
+            "认识预计算产物如何被运行时代码或测试消费"
+          ],
+          "source_files": [
+            "scipy/special/_precompute/utils.py",
+            "scipy/special/_precompute/gammainc_asy.py",
+            "scipy/special/_precompute/lambertw.py",
+            "scipy/special/_precompute/meson.build"
+          ],
+          "minimal_modules": [
+            "离线预计算",
+            "高精度系数生成",
+            "参考数据固化"
+          ],
+          "practice_task": "浏览 _precompute/ 下脚本列表,选 gammainc_asy.py 或 expn_asy.py 阅读其头部注释,说明它预计算的是什么渐近系数、为何需要高精度;并在 meson.build 中确认这些脚本的构建/测试入口(test_precompute_*)。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "Array API 与多后端支持",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "_support_alternative_backends.py:_FuncInfo 与后端分发",
+          "order": 1,
+          "filename": "u10-l1-support-alternative-backends.md",
+          "level": "advanced",
+          "topic": "讲解 special 如何支持 Array API 兼容后端(NumPy/PyTorch/JAX/CuPy/Dask):_FuncInfo 数据类描述每个函数的元信息(参数数、是否 ufunc、int_only、positive_only、generic_impl 回退、alt_names_map 等),wrapper 在 SCIPY_ARRAY_API 开启时按 array_namespace 分发到各后端原生实现或回退。",
+          "learning_goals": [
+            "理解 _FuncInfo 如何用元数据驱动多后端分发与回退",
+            "掌握 SCIPY_ARRAY_API 开关与 array_namespace 的运行时分发机制",
+            "认识 alt_names_map/int_only/positive_only 等字段对后端差异的处理"
+          ],
+          "source_files": [
+            "scipy/special/_support_alternative_backends.py",
+            "scipy/special/__init__.py"
+          ],
+          "minimal_modules": [
+            "_FuncInfo 元数据",
+            "array_namespace 分发",
+            "generic_impl 回退"
+          ],
+          "practice_task": "阅读 _FuncInfo 各字段与 wrapper 属性,说明「SCIPY_ARRAY_API 关闭时直接返回原 ufunc、开启时按 namespace 分发」的逻辑;再从 __init__.py 中找到该模块如何覆盖 _ufuncs/_basic 的函数定义。",
+          "depends_on": [
+            "u1-l4",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "@xp_capabilities:能力标注与文档化后端支持矩阵",
+          "order": 2,
+          "filename": "u10-l2-xp-capabilities.md",
+          "level": "advanced",
+          "topic": "讲解 @xp_capabilities 装饰器(定义在 scipy._lib._array_api.py)如何为每个函数标注各后端(CPU/GPU)的支持程度(full/partial/none),自动在文档串生成支持矩阵表格,并在测试中转成 SKIP/XFAIL 标记,实现「文档、测试、运行时分发」三位一体。",
+          "learning_goals": [
+            "理解 @xp_capabilities 如何同时驱动文档矩阵与测试标记",
+            "掌握 capabilities_table 与 skip/xfail_backends 等参数的作用",
+            "认识该装饰器与 _FuncInfo 分发层的配合关系"
+          ],
+          "source_files": [
+            "scipy/special/_logsumexp.py",
+            "scipy/special/_support_alternative_backends.py",
+            "scipy/special/tests/test_support_alternative_backends.py"
+          ],
+          "minimal_modules": [
+            "@xp_capabilities 装饰器",
+            "能力矩阵文档化",
+            "SKIP/XFAIL 测试标记"
+          ],
+          "practice_task": "在 _logsumexp.py 中观察 logsumexp/softmax 上的 @xp_capabilities 装饰,说明它如何影响函数文档串(自动追加支持矩阵);再浏览 test_support_alternative_backends.py 了解多后端测试如何被参数化与跳过。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

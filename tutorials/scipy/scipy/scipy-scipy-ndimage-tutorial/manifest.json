@@ -1,7 +1,7 @@
 {
   "project": "scipy-scipy-ndimage",
-  "head": "de190e7fde9d3d34400dbfe1eeacc9fc6d29cede",
-  "rationale": "scipy.ndimage 是一个层级分明的多维图像处理子包：底层 C/Cython 扩展（_nd_image、_ni_label、_rank_filter_1d）承担数值内核，中层 Python 包装（_filters/_fourier/_interpolation/_measurements/_morphology）负责参数校验、边界模式编码与输出数组管理，再上是数组 API 后端委托层（_support_alternative_backends/_delegators），顶层为公开命名空间（__init__）。因此学习顺序按「先认识整体架构与共享机制，再逐域深入滤波/插值/测量/形态学四大功能，最后下探 C 内核与后端委托/测试」组织：单元 1 让读者从零建立全局视图（定位、目录、四层架构、共享工具）；单元 2-5 分别覆盖滤波与傅里叶、插值与几何变换、测量与连通区域、形态学四大功能域，每个域内由最基础的一维算子逐步推到高阶组合与距离变换；单元 6 下沉到 C 扩展，讲清迭代器、行缓冲、边界扩展、方法分发表、样条/滤波内核以及 Cython 标记与 C++ 秩滤波等支撑整个包性能的内核机制；单元 7 收束于数组 API/CuPy/JAX 后端委托与测试体系。讲义之间用 depends_on 形成由浅入深的依赖链，每篇都绑定真实源码并配一个可操作的实践任务，符合「一篇一主题、2-5 个最小模块、1-6 个源码文件」的拆分规则。",
+  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+  "rationale": "scipy.ndimage 是一个层级分明的多维图像处理子包：底层 C/Cython 扩展（_nd_image、_ni_label、_rank_filter_1d）承担数值内核，中层 Python 包装（_filters/_fourier/_interpolation/_measurements/_morphology）负责参数校验、边界模式编码与输出数组管理，再上是数组 API 后端委托层（_support_alternative_backends/_delegators），顶层为公开命名空间（__init__）。因此学习顺序按「先认识整体架构与共享机制，再逐域深入滤波/插值/测量/形态学四大功能，最后下探 C 内核与后端委托/测试」组织：单元 1 让读者从零建立全局视图（定位、目录、四层架构、共享工具）；单元 2-5 分别覆盖滤波与傅里叶、插值与几何变换、测量与连通区域、形态学四大功能域，每个域内由最基础的一维算子逐步推到高阶组合与距离变换；单元 6 下沉到 C 扩展，讲清迭代器、行缓冲、边界扩展、方法分发表、样条/滤波内核以及 Cython 标记与 C++ 秩滤波等支撑整个包性能的内核机制；单元 7 收束于数组 API/CuPy/JAX 后端委托与测试体系。讲义之间用 depends_on 形成由浅入深的依赖链，每篇都绑定真实源码并配一个可操作的实践任务，符合「一篇一主题、2-5 个最小模块、1-6 个源码文件」的拆分规则。本次增量（ce1f6477 相对 de190e7f）仅为测试改动：新增 tests/test_array_likes.py 对全公开 API 做 array_like（list）输入冒烟回归，并登记到 tests/meson.build，未触及任何 _*.py 或 src/ 源码，故除 u7-l2（测试体系）需 update 引入该新测试文件外，其余讲义一律 keep。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "导入 scipy.ndimage，构造一个 5x5 的 2D 随机数组，分别调用一个滤波函数（如 gaussian_filter）、一个测量函数（如 label）、一个形态学函数（如 binary_dilation），打印三次结果，体会各功能域的输入输出形态。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -90,7 +90,7 @@
             "u1-l1",
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -118,7 +118,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -153,7 +153,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -179,7 +179,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -205,7 +205,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -231,7 +231,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -259,7 +259,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l6",
@@ -285,7 +285,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -319,7 +319,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -345,7 +345,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -371,7 +371,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -398,7 +398,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -433,7 +433,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -459,7 +459,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -485,7 +485,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -511,7 +511,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -545,7 +545,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -571,7 +571,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -598,7 +598,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -625,7 +625,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -661,7 +661,7 @@
             "u1-l3",
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -688,7 +688,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -716,7 +716,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -744,7 +744,7 @@
             "u6-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -779,7 +779,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -787,29 +787,32 @@
           "order": 2,
           "filename": "u7-l2-testing-strategy.md",
           "level": "advanced",
-          "topic": "讲清测试体系：按功能域分文件（test_filters / test_interpolation / ...）、test_datatypes 的 dtype 覆盖矩阵、test_c_api 对扩展的测试、test_ni_support / test_splines，以及 utils/generate_label_testvectors.py 与 data/ 测试向量。",
+          "topic": "讲清测试体系：按功能域分文件（test_filters / test_interpolation / ...）、test_datatypes 的 dtype 覆盖矩阵、test_array_likes 对全公开 API 的 array_like（Python list）输入冒烟回归、test_c_api 对扩展模块的低层测试、test_ni_support / test_splines，以及 utils/generate_label_testvectors.py 与 data/ 测试向量。",
           "learning_goals": [
             "理解每个 test_*.py 对应一个功能域、测试规模分布",
             "理解 test_datatypes 如何对多 dtype 做矩阵化覆盖",
+            "理解 test_array_likes 如何用 _assert_same_result 把 list 输入结果与显式 ndarray 输入结果逐项比对，做跨全 API 的输入类型回归",
             "理解 test_c_api 对扩展模块的低层测试与 data/ 测试向量的作用"
           ],
           "source_files": [
             "tests/test_filters.py",
             "tests/test_c_api.py",
             "tests/test_datatypes.py",
+            "tests/test_array_likes.py",
             "utils/generate_label_testvectors.py"
           ],
           "minimal_modules": [
             "按功能域分文件测试",
             "dtype 覆盖矩阵",
+            "array_like 输入冒烟回归（test_array_likes）",
             "C API 低层测试",
             "标记测试向量生成"
           ],
-          "practice_task": "在 test_filters.py 中找到一个 correlate1d 的边界用例并运行通过；再阅读 utils/generate_label_testvectors.py，说明它如何把 label_inputs.txt / label_strels.txt 与 label_results.txt 串成回归测试数据。",
+          "practice_task": "在 test_filters.py 中找到一个 correlate1d 的边界用例并运行通过；再阅读 test_array_likes.py，解释它如何对每个公开函数用 list 输入复现 ndarray 输入的结果（并说明 weights、markers 等非数组参数的处理）；最后阅读 utils/generate_label_testvectors.py，说明它如何把 label_inputs.txt / label_strels.txt 与 label_results.txt 串成回归测试数据。",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     }
