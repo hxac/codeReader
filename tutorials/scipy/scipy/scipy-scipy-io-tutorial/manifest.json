@@ -1,0 +1,630 @@
+{
+  "project": "scipy-scipy-io",
+  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
+  "rationale": "scipy.io 是一个以\"多种文件格式读写器\"为核心的科学数据 I/O 子包，格式之间相互独立、各有自己的解析逻辑，唯独 MATLAB .mat 是一个完整的多版本子系统（v4/v5 + Cython 底层），因此学习路线被设计成四层渐进结构。第一单元（入门）先让读者建立全局观：项目定位、目录与构建、公共 API 与最小示例，避免一上来就陷入单一格式细节。第二单元（进阶）按\"从简单到复杂\"的顺序逐个攻破六大独立格式——先从结构最简单的 WAV（RIFF chunk）入手，再到 Fortran record 文件、Matrix Market（纯 Python）、ARFF（文本属性）、NetCDF3（dimensions/variables 模型）、Harwell-Boeing（稀疏 + Fortran format 解析）、IDL save（record + 指针堆），每个格式都是独立闭环，可作为单独讲义。第三单元（进阶）专门拆解最复杂的 MATLAB 子系统：先讲总览与版本判定，再讲基类与字节序，然后是 loadmat/savemat 主流程，接着分别深入 v4、v5 读、v5 写与变量类型，最后落到 Cython 底层流与矩阵工具，这一单元内部有强依赖关系，必须按顺序学。第四单元（专家）覆盖横切关注点：C++ 高性能后端与多线程、SciPy 2.0 的公共/私有模块弃用约定、测试体系与多版本测试数据、以及健壮性/错误处理/安全性取舍。这种\"先全局、再叶子格式、再核心子系统、最后横切主题\"的顺序，既符合从零起步的认知规律，也忠实反映了代码库的真实分层。本轮增量分析：de190e7..ce1f647 之间仅有 1 个提交，且只改动了 scipy/ndimage 的测试文件，scipy/io 目录无任何代码变化，工作树也干净，因此全部讲义标记为 keep，无需新增、更新或重建，仅推进 head。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 scipy.io",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.io 项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-scipy-io-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.io 是什么、支持哪些科学数据文件格式、它在整个 SciPy 生态中的定位，以及它和 NumPy IO 的关系。",
+          "learning_goals": [
+            "说出 scipy.io 支持的七大类文件格式及对应的读写函数",
+            "理解 scipy.io 作为多种格式读写器集合的定位",
+            "区分 scipy.io 与 NumPy 内置 IO 例程的分工"
+          ],
+          "source_files": [
+            "scipy/io/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy.io.__init__ 的公共导出 (__all__)"
+          ],
+          "practice_task": "import scipy.io as sio，打印 sio.__all__，为列表中的每个公共名字写一行注释，说明它读写哪种格式（MATLAB / NetCDF / Fortran / Matrix Market / IDL / Harwell-Boeing）。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、构建方式与公共 API 约定",
+          "order": 2,
+          "filename": "u1-l2-directory-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 scipy/io 的目录组织、Meson 构建（meson.build）、公共模块与私有模块（_ 前缀）的约定，以及向 SciPy 2.0 迁移的弃用命名空间模块机制。",
+          "learning_goals": [
+            "读懂 scipy/io/meson.build 如何组织各子目录的构建",
+            "区分公共命名空间模块（如 mmio.py）与私有实现模块（如 _mmio.py）",
+            "理解 _sub_module_deprecation 弃用转发机制"
+          ],
+          "source_files": [
+            "scipy/io/meson.build",
+            "scipy/io/__init__.py",
+            "scipy/io/mmio.py"
+          ],
+          "minimal_modules": [
+            "scipy.io.meson.build",
+            "scipy.io.mmio (弃用包装)",
+            "scipy.io.idl / netcdf / harwell_boeing 弃用包装"
+          ],
+          "practice_task": "追踪 scipy.io.mmio.read（实际是 mmread）是如何通过 __getattr__ 转发到私有模块 _mmio 的；手写一段等价的转发伪代码并解释为什么 SciPy 要这样做。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速上手：导入与各格式最小读写示例",
+          "order": 3,
+          "filename": "u1-l3-quick-start-examples.md",
+          "level": "beginner",
+          "topic": "用一个最小可运行示例串起 scipy.io 的核心用法，让读者先跑通一个 WAV 文件读写循环，建立对'输入-处理-输出'的整体感觉。",
+          "learning_goals": [
+            "正确导入 scipy.io 及其子模块",
+            "完成一个最小的 WAV 读写 round-trip",
+            "学会用 SciPy 自带的测试数据文件做练习"
+          ],
+          "source_files": [
+            "scipy/io/__init__.py",
+            "scipy/io/wavfile.py"
+          ],
+          "minimal_modules": [
+            "scipy.io.wavfile.read / write",
+            "scipy.io 的测试数据目录定位"
+          ],
+          "practice_task": "用 numpy 生成一段 1 秒、440Hz 的正弦波，用 scipy.io.wavfile.write 写入 test.wav，再用 read 读回，打印采样率与声道数，验证数据一致。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：独立文件格式读取器",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "WAV 音频文件读写（wavfile.py）",
+          "order": 1,
+          "filename": "u2-l1-wavfile-read-write.md",
+          "level": "intermediate",
+          "topic": "解析 WAV 文件的 RIFF chunk 结构，讲解 read/write 如何解析 fmt/data chunk，以及 SeekEmulatingReader 如何在不支持随机定位的流上模拟 seek。",
+          "learning_goals": [
+            "理解 WAV 文件的 RIFF/chunk 二进制结构",
+            "读懂 _read_fmt_chunk / _read_data_chunk 的解析逻辑",
+            "理解 WAVE_FORMAT 枚举与不同采样格式的处理"
+          ],
+          "source_files": [
+            "scipy/io/wavfile.py"
+          ],
+          "minimal_modules": [
+            "scipy.io.wavfile.read",
+            "scipy.io.wavfile.write",
+            "scipy.io.wavfile.WAVE_FORMAT",
+            "SeekEmulatingReader"
+          ],
+          "practice_task": "读取一个立体声 WAV，交换左右声道后写出新文件；再用 struct 手动解析前 44 字节 RIFF 头，与 read 返回的采样率对照。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Fortran 无格式顺序文件（FortranFile）",
+          "order": 2,
+          "filename": "u2-l2-fortranfile-unformatted.md",
+          "level": "intermediate",
+          "topic": "讲解 Fortran 无格式顺序文件的 record 结构（每条记录前后各有一个长度标记），以及 FortranFile 如何读写记录、相关异常类的设计。",
+          "learning_goals": [
+            "理解 Fortran unformatted sequential 文件的 record 结构",
+            "掌握 FortranFile 的 write_record / read_ints / read_reals 用法",
+            "区分 FortranEOFError 与 FortranFormattingError 的含义"
+          ],
+          "source_files": [
+            "scipy/io/_fortran.py"
+          ],
+          "minimal_modules": [
+            "scipy.io._fortran.FortranFile",
+            "FortranEOFError",
+            "FortranFormattingError"
+          ],
+          "practice_task": "用 FortranFile 写入一条 int32 数组记录和一条二维 float64 记录，关闭后重新打开按 Fortran 列序读回并 reshape，验证数值正确；故意截断文件末尾触发 FortranFormattingError。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Matrix Market 格式：纯 Python 实现（_mmio.py）",
+          "order": 3,
+          "filename": "u2-l3-matrix-market-mmio.md",
+          "level": "intermediate",
+          "topic": "讲解 Matrix Market 文本格式（coordinate / array，以及 real/complex/pattern/integer 字段与对称性），以及纯 Python 的 MMFile 类如何实现 mminfo/mmread/mmwrite 和对称性探测。",
+          "learning_goals": [
+            "读懂 Matrix Market 文件头与正文格式",
+            "理解 MMFile 类的 info / read / write 与对称性处理",
+            "区分 array（稠密）与 coordinate（稀疏 COO）两种格式"
+          ],
+          "source_files": [
+            "scipy/io/_mmio.py"
+          ],
+          "minimal_modules": [
+            "scipy.io._mmio.MMFile",
+            "scipy.io._mmio.mminfo",
+            "scipy.io._mmio.mmread",
+            "scipy.io._mmio.mmwrite"
+          ],
+          "practice_task": "构造一个 5x5 的对称矩阵，用 mmwrite 写入 .mtx（观察 symmetry 字段），再 mmread 读回，与原矩阵比较；手动编写一段 coordinate 格式文本并用 mminfo 解析其元信息。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "ARFF 格式与属性类型（arff）",
+          "order": 4,
+          "filename": "u2-l4-arff-attributes.md",
+          "level": "intermediate",
+          "topic": "讲解 ARFF（WEKA 数据集）文本格式：@relation/@attribute/@data 段、各种属性类型，以及 loadarff 与 MetaData 如何把文件解析为结构化数组。",
+          "learning_goals": [
+            "理解 ARFF 文件的三段式结构与稀疏数据表示",
+            "区分 NumericAttribute / NominalAttribute / StringAttribute / DateAttribute / RelationalAttribute",
+            "掌握 loadarff 的返回结构与 MetaData 的用途"
+          ],
+          "source_files": [
+            "scipy/io/arff/_arffread.py"
+          ],
+          "minimal_modules": [
+            "scipy.io.arff.loadarff",
+            "scipy.io.arff.MetaData",
+            "Attribute 及其子类",
+            "read_header / tokenize_attribute"
+          ],
+          "practice_task": "用 arff/tests/data 下的某个 .arff 文件调用 loadarff，打印 MetaData 中的属性名与类型，并统计 @data 段有多少行；再手写一个含 nominal 与 missing 值的小 ARFF 文件加载它。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "NetCDF3 文件模型与读写（_netcdf.py）",
+          "order": 5,
+          "filename": "u2-l5-netcdf3-model.md",
+          "level": "intermediate",
+          "topic": "讲解 NetCDF3 的 dimensions / variables / attributes 数据模型、二进制头与记录区布局，以及 netcdf_file / netcdf_variable 的实现，包括 mmap 与无记录维度等机制。",
+          "learning_goals": [
+            "理解 NetCDF3 文件的 header + data 区布局与魔数/类型码",
+            "掌握 netcdf_file 的 createDimension / createVariable 与读写流程",
+            "理解 mmap 读取模式及其与文件生命周期的关系"
+          ],
+          "source_files": [
+            "scipy/io/_netcdf.py"
+          ],
+          "minimal_modules": [
+            "scipy.io._netcdf.netcdf_file",
+            "scipy.io._netcdf.netcdf_variable",
+            "TYPEMAP / FILLMAP / REVERSE 常量"
+          ],
+          "practice_task": "用 netcdf_file(mode='w') 创建一个含 'latitude' 维度和温度变量的文件，写出后用 mmap=True 读回并打印变量数据；再读取一个已有 NetCDF3 文件并列出其 dimensions 与 variables。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l6",
+          "title": "Harwell-Boeing 稀疏矩阵格式（_harwell_boeing）",
+          "order": 6,
+          "filename": "u2-l6-harwell-boeing.md",
+          "level": "intermediate",
+          "topic": "讲解 Harwell-Boeing 稀疏矩阵存储格式：HBInfo 头解析、HBFile / HBMatrixType，以及配套的 Fortran format 字符串解析器如何驱动数据读取。",
+          "learning_goals": [
+            "理解 H-B 文件的 header 行结构（行数/列数/指针/索引/值）",
+            "读懂 HBInfo 解析与 hb_read / hb_write 的数据组装",
+            "理解 _fortran_format_parser 中 FortranFormatParser 解析如 (8F10.0) 的作用"
+          ],
+          "source_files": [
+            "scipy/io/_harwell_boeing/hb.py",
+            "scipy/io/_harwell_boeing/_fortran_format_parser.py"
+          ],
+          "minimal_modules": [
+            "hb_read",
+            "hb_write",
+            "HBInfo",
+            "HBFile",
+            "FortranFormatParser"
+          ],
+          "practice_task": "构造一个小的稀疏 CSC 矩阵，用 hb_write 写出，用 hb_read 读回比对；用 FortranFormatParser 解析一个如 (3E14.5) 的格式串，说明它如何决定每行读取几个浮点数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l7",
+          "title": "IDL save 文件读取（_idl.py）",
+          "order": 7,
+          "filename": "u2-l7-idl-sav.md",
+          "level": "intermediate",
+          "topic": "讲解 IDL .sav 文件的二进制 record 结构、指针/堆机制、类型描述符（typedesc/arraydesc/structdesc），以及 readsav 如何重建变量并放进 AttrDict。",
+          "learning_goals": [
+            "理解 IDL .sav 的 record-by-record 解析流程与 SR 签名校验",
+            "读懂 _read_record / _read_array / _read_structure 与堆指针替换",
+            "区分 python_dict=False 时 AttrDict 的大小写不敏感访问"
+          ],
+          "source_files": [
+            "scipy/io/_idl.py"
+          ],
+          "minimal_modules": [
+            "readsav",
+            "AttrDict",
+            "_read_record / _read_data / _read_structure",
+            "Pointer / ObjectPointer"
+          ],
+          "practice_task": "用 scipy/io/tests/data 下的某个 .sav 文件调用 readsav（分别用 python_dict=True 和 False），列出变量并访问其中一个数组；说明结构体变量是如何被 _read_structure 重建为嵌套 dict 的。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：MATLAB .mat 文件子系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "MATLAB 子包总览与版本判定",
+          "order": 1,
+          "filename": "u3-l1-matlab-overview-version.md",
+          "level": "intermediate",
+          "topic": "讲解 scipy.io.matlab 子包的整体结构、公共导出，以及如何通过文件头判定 .mat 版本（v4 / v5 / v7.3）并经 mat_reader_factory 选择对应 reader。",
+          "learning_goals": [
+            "理解 matlab 子包的模块划分与导出清单",
+            "掌握 _get_matfile_version 如何区分 v4/v5/v7.3",
+            "理解 mat_reader_factory 的工厂分发逻辑"
+          ],
+          "source_files": [
+            "scipy/io/matlab/__init__.py",
+            "scipy/io/matlab/_mio.py",
+            "scipy/io/matlab/_miobase.py"
+          ],
+          "minimal_modules": [
+            "mat_reader_factory",
+            "_get_matfile_version",
+            "_open_file / _open_file_context"
+          ],
+          "practice_task": "对 matlab/tests/data 下分别属于 v4、v5 的 .mat 文件调用 whosmat，并写代码用 _get_matfile_version 直接读出主次版本号，验证 factory 会分发到 MatFile4Reader 或 MatFile5Reader。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "MatFileReader 基类与字节序处理",
+          "order": 2,
+          "filename": "u3-l2-matfile-reader-baseclass.md",
+          "level": "intermediate",
+          "topic": "讲解 _miobase.py 中的抽象基类 MatFileReader / MatVarReader、各种读写异常与警告类、docfiller 文档复用机制，以及 _byteordercodes 字节序处理。",
+          "learning_goals": [
+            "理解 MatFileReader 基类定义的通用读取接口与可配置项",
+            "掌握 guess_byte_order / byte_order 的处理与 numpy 字节码转换",
+            "理解 docfiller 如何复用 doc_dict 中的参数文档"
+          ],
+          "source_files": [
+            "scipy/io/matlab/_miobase.py",
+            "scipy/io/matlab/_byteordercodes.py"
+          ],
+          "minimal_modules": [
+            "MatFileReader",
+            "MatVarReader",
+            "MatReadError / MatWriteError / MatReadWarning / MatWriteWarning",
+            "docfiller",
+            "byteordercodes"
+          ],
+          "practice_task": "阅读 MatFileReader.__init__，画一张表说明 squeeze_me / chars_as_strings / mat_dtype / struct_as_record / matlab_compatible / simplify_cells 各开关的作用；并用 to_numpy_code 把 'native'/'BIG' 等字符串转成 numpy 字节码。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "loadmat / savemat / whosmat 主流程",
+          "order": 3,
+          "filename": "u3-l3-loadmat-savemat-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 _mio.py 中三个公共函数的入口逻辑：文件打开上下文、reader 创建、get_variables，以及各种关键字参数（squeeze_me、struct_as_record、simplify_cells、spmatrix 弃用等）如何影响返回结果。",
+          "learning_goals": [
+            "掌握 loadmat / savemat / whosmat 的完整调用链",
+            "理解 struct_as_record=True/False 与 simplify_cells 对结构体返回形式的影响",
+            "理解 spmatrix→sparray 的弃用迁移逻辑"
+          ],
+          "source_files": [
+            "scipy/io/matlab/_mio.py"
+          ],
+          "minimal_modules": [
+            "loadmat",
+            "savemat",
+            "whosmat",
+            "_open_file_context"
+          ],
+          "practice_task": "对同一个含 struct 的 .mat 文件分别用 struct_as_record=True/False 和 simplify_cells=True 调用 loadmat，打印结果的类型与结构差异；再用 savemat 把一个嵌套 dict 写成 v5 文件并 whosmat 查看。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "MAT v4 读写（_mio4.py）",
+          "order": 4,
+          "filename": "u3-l4-mat-v4-reader-writer.md",
+          "level": "intermediate",
+          "topic": "讲解 MATLAB v4 二进制格式：VarHeader4 头、VarReader4 按类型读矩阵、MatFile4Reader，以及对应的写入器 VarWriter4 / MatFile4Writer / arr_to_2d。",
+          "learning_goals": [
+            "理解 MAT v4 的变量头字段与类型/字节序编码",
+            "掌握 VarReader4 如何按数值类型重建 numpy 数组",
+            "理解 MatFile4Writer 的 put_variables 与 oned_as 行/列处理"
+          ],
+          "source_files": [
+            "scipy/io/matlab/_mio4.py"
+          ],
+          "minimal_modules": [
+            "VarHeader4",
+            "VarReader4",
+            "MatFile4Reader",
+            "VarWriter4",
+            "MatFile4Writer",
+            "arr_to_2d"
+          ],
+          "practice_task": "用 savemat(..., format='4') 写入一个二维数组和一个 1-D 数组（分别 oned_as='row' 和 'column'），再 loadmat 读回比对；手动解析 v4 文件的前若干字节头说明字段含义。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "MAT v5 读取（_mio5.py reader）",
+          "order": 5,
+          "filename": "u3-l5-mat-v5-reader.md",
+          "level": "intermediate",
+          "topic": "讲解 MATLAB v5 的 data element（tag+data）结构、压缩元素、cell/struct/object 的递归读取，以及 MatFile5Reader 的 matrix_getter_factory、varmats_from_mat 与 simplify_cells 辅助函数。",
+          "learning_goals": [
+            "理解 v5 的 miMATRIX / 压缩 data element 结构与小元素 SDE 优化",
+            "掌握 MatFile5Reader 如何读取 cell、struct、sparse 等复合类型",
+            "理解 varmats_from_mat 与 _simplify_cells 的用途"
+          ],
+          "source_files": [
+            "scipy/io/matlab/_mio5.py"
+          ],
+          "minimal_modules": [
+            "MatFile5Reader",
+            "varmats_from_mat",
+            "_inspect_cell_array",
+            "_matstruct_to_dict",
+            "_simplify_cells",
+            "to_writeable",
+            "EmptyStructMarker"
+          ],
+          "practice_task": "loadmat 一个含 cell 和 struct 的 v5 文件（含压缩），打印各变量类型；用 varmats_from_mat 把某个变量单独抽出再读取，观察简化后的字典结构。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "MAT v5 写入与变量类型（_mio5 writer + _mio5_params）",
+          "order": 6,
+          "filename": "u3-l6-mat-v5-writer-types.md",
+          "level": "intermediate",
+          "topic": "讲解 MatFile5Writer / VarWriter5 的写入流程（do_compression、unicode_strings、long_field_names、oned_as），以及 _mio5_params 中的 MATLAB 类型映射和 mat_struct / MatlabObject / MatlabOpaque / MatlabFunction 等 ndarray 子类。",
+          "learning_goals": [
+            "理解 MatFile5Writer.put_variables 与 VarWriter5 的元素写入",
+            "掌握 NP_TO_MTYPES / NP_TO_MXTYPES 如何把 numpy dtype 映射到 MATLAB 类型",
+            "理解 MatlabObject / MatlabOpaque / MatlabFunction / mat_struct 的语义"
+          ],
+          "source_files": [
+            "scipy/io/matlab/_mio5.py",
+            "scipy/io/matlab/_mio5_params.py"
+          ],
+          "minimal_modules": [
+            "MatFile5Writer",
+            "VarWriter5",
+            "to_writeable",
+            "NP_TO_MTYPES / NP_TO_MXTYPES",
+            "mat_struct",
+            "MatlabObject",
+            "MatlabOpaque",
+            "MatlabFunction"
+          ],
+          "practice_task": "构造一个含 double、complex、struct、字符串的 dict 用 savemat 写出（分别开/关 do_compression），再 loadmat 读回验证；查表说明 numpy int32 / float64 / complex128 各映射到哪个 MATLAB mx class。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l7",
+          "title": "底层 Cython：流与矩阵工具（streams / mio_utils / mio5_utils）",
+          "order": 7,
+          "filename": "u3-l7-cython-streams-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 MATLAB 子包中用 Cython 实现的底层层：_streams 提供带字节序/压缩的流读取原语，_mio_utils 与 _mio5_utils 提供高效的矩阵元素读写与字符串处理，以及 meson.build 如何编译这些 .pyx。",
+          "learning_goals": [
+            "理解 _streams.pyx 提供的流抽象与字节序/解压职责",
+            "掌握 _mio5_utils.pyx 在 v5 矩阵读写中的加速作用",
+            "理解 .pyx 扩展模块在 meson.build 中的构建方式"
+          ],
+          "source_files": [
+            "scipy/io/matlab/_streams.pyx",
+            "scipy/io/matlab/_mio5_utils.pyx",
+            "scipy/io/matlab/_mio_utils.pyx",
+            "scipy/io/matlab/meson.build"
+          ],
+          "minimal_modules": [
+            "_streams (GenericStream / ZlibOutputStream 等)",
+            "_mio5_utils",
+            "_mio_utils",
+            "meson.build 的 extension_module 定义"
+          ],
+          "practice_task": "梳理 MatFile5Reader 读取一个压缩 miMATRIX 元素时，从 _streams 到 _mio5_utils 的调用层次（画调用链）；说明为什么这部分要用 Cython 而不是纯 Python。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：高级主题与架构取舍",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Fast Matrix Market：C++ 后端与多线程",
+          "order": 1,
+          "filename": "u4-l1-fast-matrix-market-cpp.md",
+          "level": "advanced",
+          "topic": "讲解自 1.12 起 Matrix Market 改用的 C++ fast_matrix_market 后端：_fmm_core 绑定、cursor/header 模型、对称性展开、多线程（PARALLELISM 与 threadpoolctl 注册），以及与纯 Python _mmio 的关系。",
+          "learning_goals": [
+            "理解 _get_read_cursor / _get_write_cursor 与 _fmm_core cursor 的协作",
+            "掌握 mmread/mmwrite 如何分发到 read_body_array/read_body_coo 并处理对称性",
+            "理解 threadpoolctl controller 注册与并行度控制"
+          ],
+          "source_files": [
+            "scipy/io/_fast_matrix_market/__init__.py",
+            "scipy/io/_fast_matrix_market/src/_fmm_core.cpp",
+            "scipy/io/_mmio.py"
+          ],
+          "minimal_modules": [
+            "_fast_matrix_market.mmread / mmwrite / mminfo",
+            "_get_read_cursor / _get_write_cursor",
+            "_read_body_coo 对称性展开",
+            "_FMMThreadPoolCtlController",
+            "_fmm_core 绑定"
+          ],
+          "practice_task": "用 threadpoolctl.threadpool_limits 限定 1/2/4 线程分别 mmread 同一个较大 .mtx，比较耗时；说明 _read_body_coo 在 symmetry='hermitian' 时如何补全上三角元素。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l7"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "弃用命名空间与公共/私有模块约定",
+          "order": 2,
+          "filename": "u4-l2-deprecated-namespace.md",
+          "level": "advanced",
+          "topic": "讲解 SciPy 2.0 的公共/私有模块约定：为什么把实现放进 _ 前缀模块、为什么旧的无前缀模块（mmio/idl/netcdf/harwell_boeing/arff/wavfile）变成弃用包装，以及 _sub_module_deprecation 的完整工作原理。",
+          "learning_goals": [
+            "理解 SciPy 用 _ 前缀区分私有实现与公共 API 的演进动机",
+            "掌握 __getattr__ + _sub_module_deprecation 的懒转发机制",
+            "理解迁移到统一 scipy.io 命名空间的最佳实践"
+          ],
+          "source_files": [
+            "scipy/io/mmio.py",
+            "scipy/io/idl.py",
+            "scipy/io/netcdf.py",
+            "scipy/io/harwell_boeing.py",
+            "scipy/io/__init__.py"
+          ],
+          "minimal_modules": [
+            "scipy._lib.deprecation._sub_module_deprecation",
+            "各弃用包装模块的 __getattr__",
+            "__all__ / __dir__"
+          ],
+          "practice_task": "复现从 scipy.io.idl.readsav 到 scipy.io._idl.readsav 的完整解析链路（含 DeprecationWarning 的来源），并写一段说明告诉用户应如何改写 import 以避免 2.0 移除风险。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "测试体系与多版本测试数据",
+          "order": 3,
+          "filename": "u4-l3-tests-and-test-data.md",
+          "level": "advanced",
+          "topic": "讲解 scipy.io 的测试组织：顶层 tests（每种格式一个 test 文件）、matlab/tests（按 v4/v5/版本矩阵组织）、arff/_harwell_boeing 子测试，以及测试数据文件的命名约定与 test_paths / test_pathological 这类边界与鲁棒性测试。",
+          "learning_goals": [
+            "理解 scipy.io 测试目录结构与各 test 模块的职责",
+            "掌握 MATLAB 测试数据按编译器/版本命名的约定及其意义",
+            "理解 test_pathological / test_paths 如何覆盖异常与边界路径"
+          ],
+          "source_files": [
+            "scipy/io/tests/test_mmio.py",
+            "scipy/io/matlab/tests/test_pathological.py",
+            "scipy/io/tests/test_paths.py"
+          ],
+          "minimal_modules": [
+            "tests/test_mmio.py",
+            "matlab/tests/test_pathological.py",
+            "matlab/tests/test_mio.py",
+            "tests/test_paths.py"
+          ],
+          "practice_task": "用 pytest 只运行 matlab/tests 下名字含 'sparse' 或 'complex' 的用例子集；分析 testdouble_7.4_GLNX86.mat 这类测试数据文件名如何编码 MATLAB 版本与生成平台，并说明为什么需要这么多版本矩阵。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "健壮性、错误处理与安全性取舍",
+          "order": 4,
+          "filename": "u4-l4-robustness-errors-security.md",
+          "level": "advanced",
+          "topic": "横切讲解 scipy.io 各模块的异常体系、损坏/截断文件处理、mmap 内存陷阱、verify_compressed_data_integrity，以及 loadmat 针对不可信输入的安全警告与架构取舍。",
+          "learning_goals": [
+            "掌握各格式的异常/警告类与典型错误场景",
+            "理解 mmap 读取模式带来的数据生命周期与内存隐患",
+            "理解 loadmat 非对抗性安全边界的设计取舍"
+          ],
+          "source_files": [
+            "scipy/io/wavfile.py",
+            "scipy/io/_fortran.py",
+            "scipy/io/_netcdf.py",
+            "scipy/io/matlab/_miobase.py"
+          ],
+          "minimal_modules": [
+            "wavfile.WavFileWarning / _raise_bad_format",
+            "_fortran.FortranEOFError / FortranFormattingError",
+            "_netcdf 的 mmap 与 version/mismatch 校验",
+            "matlab._miobase 的异常类与 verify_compressed_data_integrity"
+          ],
+          "practice_task": "构造三类异常输入——截断的 WAV、record 长度不匹配的 Fortran 文件、以及 zlib 校验和损坏的 .mat（用 matlab/tests/data 中现成的损坏样本）——分别调用对应 reader，记录触发的异常/警告类型；并写一段说明 netcdf mmap=True 时为何不能在数据仍被引用时关闭文件。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
