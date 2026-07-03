@@ -9535,66 +9535,88 @@
           "error": null
         },
         "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6946,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.248042,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.416231,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9124670000000001,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.327358,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.963439,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.814572,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.156496,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.939769,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.309392,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.240493,
+          "error": null
+        },
+        "u7-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192792,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":201135,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         }
       },
       "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
@@ -9603,7 +9625,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-cluster-tutorial",
       "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-      "last_run_at": "2026-07-02T18:01:30Z",
+      "last_run_at": "2026-07-02T23:01:32Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "scipy/scipy@scipy/constants": {
@@ -9871,46 +9893,57 @@
           "error": null
         },
         "u3-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194373,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 2.4125729999999996,
+          "error": null
         },
         "u4-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.037778,
+          "error": null
         },
         "u4-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.7715139999999999,
+          "error": null
         },
         "u4-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.29494,
+          "error": null
         },
         "u4-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3363659999999997,
+          "error": null
         },
         "u4-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.032433,
+          "error": null
         }
       },
       "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-differentiate-tutorial",
       "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-      "last_run_at": "2026-07-02T18:01:30Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-02T23:01:32Z",
+      "last_error": null,
+      "abandoned": []
     },
     "scipy/scipy@scipy/fft": {
       "prompt_hash": "b21aef51792b02df",
@@ -9937,11 +9970,440 @@
           "error": null
         },
         "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.350139,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8650380000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.197859,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8271769999999999,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0505550000000001,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.675136,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.02861,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4957790000000002,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.978246,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.887298,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7933149999999999,
+          "error": null
+        },
+        "u5-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":185024,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":191954,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-fft-tutorial",
+      "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+      "last_run_at": "2026-07-02T23:01:32Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "scipy/scipy@scipy/fftpack": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7203320000000001,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7183430000000001,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6492310000000001,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.192422,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4363930000000003,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.728125,
+          "error": null
+        },
+        "u2-l2-phantom": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.602433,
+          "error": null
+        }
+      },
+      "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-fftpack-tutorial",
+      "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+      "last_run_at": "2026-07-02T23:01:32Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "scipy/scipy@scipy/integrate": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8484820000000001,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.651401,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8301980000000001,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.269799,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193319,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u2-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u13-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u13-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u13-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-integrate-tutorial",
+      "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+      "last_run_at": "2026-07-02T23:01:32Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
+    "scipy/scipy@scipy/interpolate": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.555942,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.751615,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.125569,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":184037,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u2-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u2-l2": {
           "status": "pending",
@@ -9949,11 +10411,6 @@
           "retries": 0
         },
         "u2-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l4": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -10018,12 +10475,22 @@
           "action": "new",
           "retries": 0
         },
+        "u6-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
         "u7-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
         "u7-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u7-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -10037,69 +10504,147 @@
           "status": "pending",
           "action": "new",
           "retries": 0
+        },
+        "u8-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u9-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u10-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u11-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u12-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u13-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u13-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u13-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u14-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u14-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u14-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u15-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u15-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u16-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u16-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u16-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u16-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u17-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u17-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         }
       },
       "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-fft-tutorial",
+      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-interpolate-tutorial",
       "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-      "last_run_at": "2026-07-02T18:01:30Z",
+      "last_run_at": "2026-07-02T23:01:32Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "scipy/scipy@scipy/fftpack": {
-      "prompt_hash": "b21aef51792b02df",
-      "lectures": {
-        "u1-l1": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":191773,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u1-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u1-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u1-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l2-phantom": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        }
-      },
-      "manifest_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-      "prev_head": null,
-      "phase": "workers",
-      "mode": "full",
-      "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-fftpack-tutorial",
-      "last_head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
-      "last_run_at": "2026-07-02T18:01:30Z",
-      "last_error": "quota exhausted; will resume next window"
-    },
-    "scipy/scipy@scipy/integrate": {},
-    "scipy/scipy@scipy/interpolate": {},
     "scipy/scipy@scipy/io": {},
     "scipy/scipy@scipy/linalg": {},
     "scipy/scipy@scipy/misc": {},

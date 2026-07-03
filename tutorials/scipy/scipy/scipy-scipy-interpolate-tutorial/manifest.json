@@ -1,0 +1,1509 @@
+{
+  "project": "scipy-scipy-interpolate",
+  "head": "5f09bd719ca35a5c4de9644a097d379e5b3b4165",
+  "rationale": "scipy.interpolate 是一个体量很大的子包，覆盖一维/多维规则网格/散点三大类插值，底层既有纯 Python、Cython，又有两套 FITPACK 原生后端。因此学习路线设计为「先用起来→理解数据结构→理解构造算法→理解原生后端与高级专题」四段递进。第 1 单元先让读者从零看懂定位、目录、导入链与运行方式；第 2-4 单元从用户最常用的一维插值（CubicSpline/PCHIP/Akima）切入，再下钻到它们共同依赖的 PPoly/BPoly 分段多项式表示与经典多项式/重心插值；第 5-6 单元进入 B 样条核心（BSpline 数据结构、节点、make_interp_spline/make_lsq_spline/make_smoothing_spline），这是整个子包的骨架；第 7-9 单元讲清 FITPACK 的函数式接口、面向对象接口与新的可复现样条（generate_knots/make_splrep），并对照新旧两套实现；第 10-11 单元覆盖规则网格（RegularGridInterpolator/interpn）与散点（griddata/Delaunay 三角剖分）多维插值；第 12-15 单元为专家层，讲 N 维张量积样条、RBF（含 pythran/array-api 后端）、有理插值与 AAA、以及二维平滑重网格化；第 16-17 单元收束到原生扩展架构（__fitpack.cc 与 dfitpack 两套后端、_ppoly/_rgi_cython/_interpnd）与横切的 array-api 后端、弃用治理。每篇讲义只解决一个主题，引用真实存在的源码文件，并配一个可操作的代码实践，依赖关系严格指向已学讲义。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目导览与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.interpolate 是什么：定位与全景",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "介绍插值的基本概念，scipy.interpolate 子包在 SciPy 中的定位，以及它解决的一维、规则网格多维、散点三大类问题与公共 API 的总体分类。",
+          "learning_goals": [
+            "理解插值与拟合的区别",
+            "列举 scipy.interpolate 的三大应用场景",
+            "看懂 __init__.py 中公共 API 的分类结构"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 模块分类",
+            "公共 API 总览"
+          ],
+          "practice_task": "导入 scipy.interpolate，对一组一维 (x,y) 数据用 make_interp_spline 做三次样条插值并用 matplotlib 画出原数据点与插值曲线。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-directory-and-build.md",
+          "level": "beginner",
+          "topic": "讲清目录里的三类文件——公共 Python 模块（_xxx.py）、已弃用的命名空间垫片（fitpack.py/interpolate.py 等）、原生扩展（src/ 与 .pyx），以及 meson.build 如何把这些扩展编译安装。",
+          "learning_goals": [
+            "区分公共 Python 模块与垫片文件",
+            "认识原生扩展（C/C++/Cython）的存在与位置",
+            "看懂 meson.build 中的扩展构建目标"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build",
+            "fitpack.py",
+            "interpolate.py"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "meson.build 构建"
+          ],
+          "practice_task": "对照 __init__.py 的 import 顺序，列出每个公共 API 名称来自哪个 _xxx.py 模块，整理成一张「公共名→私有模块」对照表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "入口与导入链路",
+          "order": 3,
+          "filename": "u1-l3-imports-and-shims.md",
+          "level": "beginner",
+          "topic": "讲解 __init__.py 的 import * 链路如何拼装出公共命名空间，以及为何旧式 from scipy.interpolate.interpolate import interp1d 会触发 DeprecationWarning（垫片的 __getattr__ 延迟弃用机制）。",
+          "learning_goals": [
+            "描述 __init__.py 的导入顺序与 __all__ 的生成",
+            "解释垫片模块的延迟弃用机制",
+            "理解 SciPy v2.0 移除旧命名空间的计划"
+          ],
+          "source_files": [
+            "__init__.py",
+            "interpolate.py",
+            "fitpack.py",
+            "dfitpack.py"
+          ],
+          "minimal_modules": [
+            "__init__ 导入链",
+            "垫片弃用机制"
+          ],
+          "practice_task": "写一段使用旧命名空间（如 scipy.interpolate.interpolate.interp1d）的导入代码，用 warnings 捕获并打印 DeprecationWarning，解释其触发原因。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建、运行与测试",
+          "order": 4,
+          "filename": "u1-l4-run-and-test.md",
+          "level": "beginner",
+          "topic": "说明如何用 meson 构建/安装该子包、如何运行测试（PytestTester.test() 或 pytest scipy/interpolate/tests），以及 tests 目录的组织方式。",
+          "learning_goals": [
+            "知道如何构建与运行 scipy.interpolate",
+            "理解 __init__.py 中 test = PytestTester(__name__) 的入口",
+            "了解 tests 目录按模块拆分的组织"
+          ],
+          "source_files": [
+            "__init__.py",
+            "tests/__init__.py"
+          ],
+          "minimal_modules": [
+            "构建与运行",
+            "测试组织",
+            "PytestTester"
+          ],
+          "practice_task": "运行 scipy.interpolate.test() 或对 tests/test_bsplines.py 跑一个子集，记录通过/跳过的用例数量与耗时。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "一维插值快速上手",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "一维插值总览与快速上手",
+          "order": 1,
+          "filename": "u2-l1-univariate-quickstart.md",
+          "level": "beginner",
+          "topic": "给定 (x,y)，用 CubicSpline、PchipInterpolator、make_interp_spline 做一维插值；理解 C1/C2 连续性差异、过冲现象与保形（shape-preserving）思想。",
+          "learning_goals": [
+            "用 CubicSpline/PchipInterpolator/make_interp_spline 做一维插值",
+            "区分 C1 与 C2 连续性",
+            "理解保形插值为何能避免过冲"
+          ],
+          "source_files": [
+            "_cubic.py",
+            "_bsplines.py"
+          ],
+          "minimal_modules": [
+            "CubicSpline",
+            "PchipInterpolator",
+            "make_interp_spline 用法"
+          ],
+          "practice_task": "对一组含尖峰的单调递增数据，分别用 CubicSpline 与 PchipInterpolator 插值，画出曲线并比较 PCHIP 是否抑制了过冲。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CubicSpline 的边界条件",
+          "order": 2,
+          "filename": "u2-l2-cubicspline-boundary-conditions.md",
+          "level": "beginner",
+          "topic": "讲解 not-a-knot / periodic / natural / clamped 四种边界条件的数学含义与实现，以及求解二阶导数时构造的三对角方程组（scipy.linalg.solve_banded）。",
+          "learning_goals": [
+            "解释四种边界条件的数学含义",
+            "为给定问题选择合适的边界条件",
+            "理解 C2 三次样条的三对角求解过程"
+          ],
+          "source_files": [
+            "_cubic.py"
+          ],
+          "minimal_modules": [
+            "CubicSpline._validate_bc",
+            "solve_banded 三对角求解",
+            "边界条件别名"
+          ],
+          "practice_task": "对一组周期性数据（如 sin 在一个周期上的采样）分别用 not-a-knot 与 periodic 边界条件插值，比较端点处的一阶/二阶导连续性。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "CubicHermiteSpline 与 Akima/Makima",
+          "order": 3,
+          "filename": "u2-l3-hermite-akima-pchip.md",
+          "level": "beginner",
+          "topic": "讲解同时给定值与一阶导数的 CubicHermiteSpline（C1，Hermite 基），以及 PchipInterpolator 与 Akima1DInterpolator 如何各自估计节点导数（加权调和平均 vs 局部斜率加权，含 Makima 改进）。",
+          "learning_goals": [
+            "用 CubicHermiteSpline 拟合值+导数",
+            "理解 Hermite 基系数公式",
+            "对比 PCHIP、Akima、Makima 的导数估计策略"
+          ],
+          "source_files": [
+            "_cubic.py"
+          ],
+          "minimal_modules": [
+            "CubicHermiteSpline",
+            "PchipInterpolator._find_derivatives",
+            "Akima1DInterpolator 权重"
+          ],
+          "practice_task": "给定一组节点和手算的节点导数，构造 CubicHermiteSpline 并验证它在节点处的一阶导数；再对含离群点的数据比较 Akima 与 Makima 的差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "分段多项式数据结构 PPoly/BPoly/NdPPoly",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "PPoly：幂基分段多项式",
+          "order": 1,
+          "filename": "u3-l1-ppoly-power-basis.md",
+          "level": "beginner",
+          "topic": "讲解 PPoly 的 (c, x) 表示——每个区间用局部幂基系数存储，以及 __call__/derivative/antiderivative/integrate/roots 的实现，底层求值落在 _ppoly.pyx 的 evaluate。",
+          "learning_goals": [
+            "理解 PPoly 的 c、x 存储结构",
+            "对 PPoly 执行求值、求导、积分、求根",
+            "知道求值/求根由 _ppoly.pyx 加速"
+          ],
+          "source_files": [
+            "_interpolate.py",
+            "_ppoly.pyx"
+          ],
+          "minimal_modules": [
+            "PPoly",
+            "_PPoly 后端",
+            "_ppoly.evaluate"
+          ],
+          "practice_task": "手工构造一个两区间的 PPoly（每段一个二次多项式），验证其 derivative 与 integrate 的结果与解析值一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "BPoly：Bernstein 基分段多项式",
+          "order": 2,
+          "filename": "u3-l2-bpoly-bernstein-basis.md",
+          "level": "beginner",
+          "topic": "讲解 BPoly 的 Bernstein 基表示，from_derivatives 如何用值与导数构造 Hermite 样条，以及 from_power_basis 与 PPoly 之间的相互转换。",
+          "learning_goals": [
+            "理解 Bernstein 基表示",
+            "用 from_derivatives 构造通过给定值与导数的样条",
+            "在 PPoly 与 BPoly 之间互相转换"
+          ],
+          "source_files": [
+            "_interpolate.py"
+          ],
+          "minimal_modules": [
+            "BPoly",
+            "from_derivatives",
+            "from_power_basis"
+          ],
+          "practice_task": "用 BPoly.from_derivatives 构造一个在节点处指定值与一阶导的 C1 样条，并用 from_power_basis 把它转成 PPoly 验证求值一致。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "NdPPoly：N 维张量积分段多项式",
+          "order": 3,
+          "filename": "u3-l3-ndppoly-tensor.md",
+          "level": "intermediate",
+          "topic": "讲解 NdPPoly 的多维区间与张量积分段多项式结构，__call__ 的偏导参数 nu，以及 integrate / integrate_1d 的用法。",
+          "learning_goals": [
+            "理解 NdPPoly 的多维区间结构",
+            "对 NdPPoly 求偏导与积分",
+            "知道 integrate_1d 的逐维积分用途"
+          ],
+          "source_files": [
+            "_interpolate.py"
+          ],
+          "minimal_modules": [
+            "NdPPoly",
+            "integrate_1d",
+            "张量积结构"
+          ],
+          "practice_task": "构造一个 2D 的 NdPPoly（两个维度各两区间的一次多项式），在矩形区域上用 integrate 计算体积分，并与逐段手算对比。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "经典多项式与重心插值",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "lagrange 与一维插值器基类",
+          "order": 1,
+          "filename": "u4-l1-lagrange-and-base.md",
+          "level": "intermediate",
+          "topic": "讲解经典 Lagrange 多项式插值及其高次不稳定（Runge 现象）、lagrange 的弃用现状，以及 _Interpolator1D 基类如何统一处理 axis、dtype 与 y 的形状管理。",
+          "learning_goals": [
+            "用 lagrange 做多项式插值",
+            "认识 Runge 现象与高次不稳定性",
+            "理解 _Interpolator1D 的 axis/dtype/形状处理"
+          ],
+          "source_files": [
+            "_interpolate.py",
+            "_polyint.py"
+          ],
+          "minimal_modules": [
+            "lagrange",
+            "_Interpolator1D",
+            "Runge 现象"
+          ],
+          "practice_task": "对 Runge 函数在等距节点与 Chebyshev 节点上分别用 lagrange 插值，画出曲线观察等距节点的振荡。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "BarycentricInterpolator：重心形式",
+          "order": 2,
+          "filename": "u4-l2-barycentric-interpolator.md",
+          "level": "intermediate",
+          "topic": "讲解重心插值公式 p(x)=Σ wi·yi/(x-xi) / Σ wi/(x-xi)，重心权重的数值稳定计算（容量缩放、随机置换），以及增量加节点 add_xi / 更新值 set_yi。",
+          "learning_goals": [
+            "解释重心插值公式",
+            "描述重心权重的稳定计算与显式公式",
+            "用 add_xi/set_yi 增量更新插值器"
+          ],
+          "source_files": [
+            "_polyint.py"
+          ],
+          "minimal_modules": [
+            "BarycentricInterpolator",
+            "重心权重",
+            "add_xi/set_yi"
+          ],
+          "practice_task": "实现等距节点的重心权重显式公式 wi=(-1)^i·C(n,i)，与 BarycentricInterpolator 内部计算的权重对比验证一致。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "KroghInterpolator 与导数约束",
+          "order": 3,
+          "filename": "u4-l3-krogh-derivatives.md",
+          "level": "intermediate",
+          "topic": "讲解 KroghInterpolator 如何用重复 x 节点表达导数约束（Hermite 插值）、差商算法的构造，以及 krogh_interpolate 便捷函数。",
+          "learning_goals": [
+            "用重复节点施加导数约束",
+            "理解差商算法处理重复节点",
+            "用 krogh_interpolate 一次性求值"
+          ],
+          "source_files": [
+            "_polyint.py"
+          ],
+          "minimal_modules": [
+            "KroghInterpolator",
+            "差商算法",
+            "krogh_interpolate"
+          ],
+          "practice_task": "给定某点的函数值与一阶、二阶导数，用 KroghInterpolator（重复节点）构造带导数约束的插值多项式并验证导数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "B 样条基础",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "BSpline 数据结构与求值",
+          "order": 1,
+          "filename": "u5-l1-bspline-structure-eval.md",
+          "level": "intermediate",
+          "topic": "讲解 BSpline 的 (t, c, k, extrapolate) 表示、递归定义的 B 样条基，__call__ 经 _dierckx.evaluate_spline 求值，以及 design_matrix 类方法生成稀疏 CSR 配置矩阵。",
+          "learning_goals": [
+            "描述 t、c、k 的含义与节点向量结构",
+            "对 BSpline 求值并构造设计矩阵",
+            "知道求值由 _dierckx C 扩展完成"
+          ],
+          "source_files": [
+            "_bsplines.py"
+          ],
+          "minimal_modules": [
+            "BSpline",
+            "_BSpline 后端",
+            "evaluate_spline/design_matrix"
+          ],
+          "practice_task": "用 BSpline.basis_element 画出给定节点向量上的若干 B 样条基函数，验证它们的局部支撑性与单位分解。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "求导、积分与基变换",
+          "order": 2,
+          "filename": "u5-l2-bspline-deriv-integrate-convert.md",
+          "level": "intermediate",
+          "topic": "讲解 BSpline 的 derivative/antiderivative/integrate（经 _fitpack_impl.splder/splantider），以及 from_power_basis 在幂基（如 CubicSpline）与 B 样条基之间转换（Marsden 恒等式）。",
+          "learning_goals": [
+            "对 BSpline 求导、求原函数、定积分",
+            "在幂基与 B 样条基之间转换",
+            "理解 Marsden 恒等式在转换中的作用"
+          ],
+          "source_files": [
+            "_bsplines.py",
+            "_fitpack_impl.py"
+          ],
+          "minimal_modules": [
+            "derivative/antiderivative/integrate",
+            "from_power_basis",
+            "splder/splantider"
+          ],
+          "practice_task": "把一个 CubicSpline 通过 from_power_basis 转成 BSpline，验证两者在多个点的求值与一阶导完全一致。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "节点向量与节点插入",
+          "order": 3,
+          "filename": "u5-l3-knots-and-insertion.md",
+          "level": "intermediate",
+          "topic": "讲解常见节点向量的构造（_not_a_knot、_augknt、_periodic_knots），以及 Boehm 节点插入算法 insert_knot（移植自 Dierckx 的 _insert）。",
+          "learning_goals": [
+            "构造 not-a-knot 与周期节点向量",
+            "执行节点插入并理解表示不变性",
+            "理解 _augknt 的端点重复"
+          ],
+          "source_files": [
+            "_bsplines.py"
+          ],
+          "minimal_modules": [
+            "_not_a_knot/_augknt",
+            "insert_knot/Boehm",
+            "_periodic_knots"
+          ],
+          "practice_task": "对一个 BSpline 用 insert_knot 插入一个新节点，画出插入前后基函数的变化，并验证样条曲线本身不变。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "构造与拟合样条",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "make_interp_spline 插值构造",
+          "order": 1,
+          "filename": "u6-l1-make-interp-spline.md",
+          "level": "intermediate",
+          "topic": "讲解 make_interp_spline 如何由数据构造插值样条：配置矩阵（_coloc）+ 边界条件行 + LAPACK 带状求解 gbsv，以及边界条件字符串别名的解析。",
+          "learning_goals": [
+            "解释配置矩阵与带状线性求解",
+            "为 make_interp_spline 选择不同边界条件",
+            "理解 BC 别名到导数规格的转换"
+          ],
+          "source_files": [
+            "_bsplines.py"
+          ],
+          "minimal_modules": [
+            "make_interp_spline",
+            "_coloc 配置矩阵",
+            "gbsv 带状求解"
+          ],
+          "practice_task": "用 make_interp_spline 的 natural 与 clamped 边界条件分别构造样条，与手算或 CubicSpline 的对应结果对比验证。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "周期样条与 Woodbury 算法",
+          "order": 2,
+          "filename": "u6-l2-periodic-spline-woodbury.md",
+          "level": "intermediate",
+          "topic": "讲解周期样条带来的循环带状线性系统，_make_periodic_spline 如何用 Woodbury 公式处理角块，以及 _make_interp_per_full_matr 的稠密分支。",
+          "learning_goals": [
+            "解释周期样条的循环带状结构",
+            "理解 Woodbury 公式在角块求解中的作用",
+            "构造周期样条并验证端点连续"
+          ],
+          "source_files": [
+            "_bsplines.py"
+          ],
+          "minimal_modules": [
+            "_make_periodic_spline",
+            "_woodbury_algorithm",
+            "_periodic_knots"
+          ],
+          "practice_task": "对一组满足 y[0]==y[-1] 的周期数据用 make_interp_spline(bc_type='periodic') 构造样条，验证端点处的一阶/二阶导连续。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "make_lsq_spline 最小二乘拟合",
+          "order": 3,
+          "filename": "u6-l3-make-lsq-spline.md",
+          "level": "intermediate",
+          "topic": "讲解超定数据下用固定节点做最小二乘 B 样条拟合：norm-eq（正规方程）与 qr（QR 分解，_dierckx.qr_reduce/fpback）两种方法、权重，以及 Schoenberg-Whitney 有效节点校验 fpcheck。",
+          "learning_goals": [
+            "用 LSQ 拟合带噪数据",
+            "对比正规方程法与 QR 法",
+            "用 fpcheck 校验节点是否满足 Schoenberg-Whitney"
+          ],
+          "source_files": [
+            "_bsplines.py",
+            "src/__fitpack.h"
+          ],
+          "minimal_modules": [
+            "make_lsq_spline",
+            "qr_reduce/fpback",
+            "fpcheck/Schoenberg-Whitney"
+          ],
+          "practice_task": "对一组带噪声的数据，用不同数量的固定节点做 make_lsq_spline 拟合，记录残差并观察过/欠拟合。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "make_smoothing_spline 与 GCV",
+          "order": 4,
+          "filename": "u6-l4-make-smoothing-spline-gcv.md",
+          "level": "intermediate",
+          "topic": "讲解三次平滑样条的目标函数（数据拟合 + λ·光滑惩罚），惩罚矩阵（k 阶导数跳变，_coeff_of_divided_diff），以及用广义交叉验证 GCV 自动选择正则参数 λ。",
+          "learning_goals": [
+            "解释平滑样条的目标函数与惩罚项",
+            "理解 GCV 准则如何选 λ",
+            "对比平滑样条与 LSQ 拟合"
+          ],
+          "source_files": [
+            "_bsplines.py"
+          ],
+          "minimal_modules": [
+            "make_smoothing_spline",
+            "_compute_optimal_gcv_parameter",
+            "GCV 准则"
+          ],
+          "practice_task": "对同一组噪声数据用 make_smoothing_spline 拟合，并与手动尝试不同 λ 的结果对比，观察 GCV 自动选择的平滑程度。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "FITPACK 函数式接口",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "splrep/splev 与 tck 表示",
+          "order": 1,
+          "filename": "u7-l1-splrep-splev-tck.md",
+          "level": "intermediate",
+          "topic": "讲解函数式 FITPACK 工作流 splrep→(t,c,k)→splev，_fitpack_impl 如何调用 _fitpack C 扩展（curfit），缓存与工作区管理，以及平滑参数 s 的作用。",
+          "learning_goals": [
+            "用 splrep/splev 做样条拟合与求值",
+            "理解 tck 三元组与平滑参数 s",
+            "知道 _fitpack_impl 与 _fitpack C 扩展的分层"
+          ],
+          "source_files": [
+            "_fitpack_py.py",
+            "_fitpack_impl.py"
+          ],
+          "minimal_modules": [
+            "splrep/splev",
+            "_fitpack_impl 缓存",
+            "tck 表示"
+          ],
+          "practice_task": "用 splrep 对噪声数据取不同 s 值拟合，打印每次返回的节点数 t，观察 s 如何控制光滑与节点数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "积分、求根与全导数",
+          "order": 2,
+          "filename": "u7-l2-splint-sproot-spalde.md",
+          "level": "intermediate",
+          "topic": "讲解对 tck 的进一步操作：splint（定积分）、sproot（仅三次求根）、spalde（某点全部导数）、splder/splantider（导数与原函数的样条表示）。",
+          "learning_goals": [
+            "对 tck 做定积分、求根、求全部导数",
+            "用 splder/splantider 得到导数/原函数样条",
+            "理解 sproot 仅适用于三次样条"
+          ],
+          "source_files": [
+            "_fitpack_py.py",
+            "_fitpack_impl.py"
+          ],
+          "minimal_modules": [
+            "splint",
+            "sproot/spalde",
+            "splder/splantider"
+          ],
+          "practice_task": "对已知解析函数的采样做 splrep，用 splint 计算区间积分、用 sproot 求零点，与解析值对比误差。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "参数曲线 splprep 与双变量 bisplrep",
+          "order": 3,
+          "filename": "u7-l3-splprep-bisplrep.md",
+          "level": "intermediate",
+          "topic": "讲解 insert 插入节点、splprep/splev 拟合 N 维参数化曲线（底层 parcur，返回 (tck,u)），以及散点二维曲面拟合 bisplrep/bisplev（底层 surfit）。",
+          "learning_goals": [
+            "用 insert 修改节点",
+            "用 splprep 拟合并重采样参数曲线",
+            "用 bisplrep/bisplev 拟合散点曲面"
+          ],
+          "source_files": [
+            "_fitpack_py.py",
+            "_fitpack_impl.py"
+          ],
+          "minimal_modules": [
+            "insert",
+            "splprep/parcur",
+            "bisplrep/bisplev/surfit"
+          ],
+          "practice_task": "用 splprep 拟合一条 2D 闭合曲线（如圆周采样），再用 splev 沿参数 u 均匀重采样并画出。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "FITPACK 面向对象接口",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "UnivariateSpline 家族",
+          "order": 1,
+          "filename": "u8-l1-univariate-spline-family.md",
+          "level": "intermediate",
+          "topic": "讲解 UnivariateSpline（平滑）、InterpolatedUnivariateSpline（s=0）、LSQUnivariateSpline（指定节点）三个一维 OOP 样条类的区别、继承关系，以及 get_knots/get_residual/derivative 等方法。",
+          "learning_goals": [
+            "区分三个一维 OOP 样条类的用途",
+            "读取节点、系数与残差",
+            "理解它们与函数式 splrep 的对应关系"
+          ],
+          "source_files": [
+            "_fitpack2.py"
+          ],
+          "minimal_modules": [
+            "UnivariateSpline",
+            "InterpolatedUnivariateSpline",
+            "LSQUnivariateSpline"
+          ],
+          "practice_task": "对同一份数据分别用三个一维 OOP 类拟合，打印各自的节点数与残差，解释差异来源。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "双变量样条类",
+          "order": 2,
+          "filename": "u8-l2-bivariate-splines.md",
+          "level": "intermediate",
+          "topic": "讲解 BivariateSpline 基类与 SmoothBivariateSpline（散点平滑）、LSQBivariateSpline（散点定节点）、RectBivariateSpline（网格），以及 ev 求值与 partial_derivative。",
+          "learning_goals": [
+            "区分散点与网格双变量样条",
+            "用 ev 在任意点求值",
+            "理解 BivariateSpline 的继承结构"
+          ],
+          "source_files": [
+            "_fitpack2.py"
+          ],
+          "minimal_modules": [
+            "BivariateSpline",
+            "SmoothBivariateSpline/LSQBivariateSpline",
+            "RectBivariateSpline"
+          ],
+          "practice_task": "用 RectBivariateSpline 拟合一个已知二元函数的网格采样，并用 ev 在散点处求值、用 partial_derivative 求偏导。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "球面样条类",
+          "order": 3,
+          "filename": "u8-l3-sphere-splines.md",
+          "level": "intermediate",
+          "topic": "讲解 SphereBivariateSpline 系列（theta 余纬、phi 经度坐标）：RectSphereBivariateSpline（球面网格）、SmoothSphereBivariateSpline（散点平滑）、LSQSphereBivariateSpline（定节点）。",
+          "learning_goals": [
+            "理解球面坐标 (theta, phi) 下的样条",
+            "区分三个球面样条类",
+            "在球面网格上拟合标量场"
+          ],
+          "source_files": [
+            "_fitpack2.py"
+          ],
+          "minimal_modules": [
+            "SphereBivariateSpline",
+            "RectSphereBivariateSpline",
+            "Smooth/LSQSphereBivariateSpline"
+          ],
+          "practice_task": "在球面经纬度网格上对一个标量场（如温度分布）用 RectSphereBivariateSpline 拟合，并在若干点求值。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "可复现样条",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "为何需要可复现：generate_knots",
+          "order": 1,
+          "filename": "u9-l1-generate-knots.md",
+          "level": "intermediate",
+          "topic": "讲解旧 FITPACK 节点选择不可复现的问题，generate_knots 作为生成器如何按 FITPACK 策略逐步增加节点直到满足 LSQ 准则，以及 add_knot 与 _dierckx.fpknot 的关系。",
+          "learning_goals": [
+            "解释 FITPACK 节点选择的不可复现性",
+            "用 generate_knots 观察节点向量逐步增长",
+            "理解 fpknot 的节点增长策略"
+          ],
+          "source_files": [
+            "_fitpack_repro.py",
+            "src/__fitpack.h"
+          ],
+          "minimal_modules": [
+            "generate_knots",
+            "_generate_knots_impl",
+            "fpknot/add_knot"
+          ],
+          "practice_task": "对一组数据运行 generate_knots（逐次 next），打印每一步产出的节点向量，直到迭代停止。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "make_splrep 与平滑参数搜索",
+          "order": 2,
+          "filename": "u9-l2-make-splrep-smoothing.md",
+          "level": "intermediate",
+          "topic": "讲解 make_splrep 如何构造可复现的平滑 B 样条（返回 BSpline）：目标函数 F（含不连续矩阵 disc 度量 k 阶导跳变），以及用 root_rati/fprati 有理逼近求平滑参数 p 使残差=s。",
+          "learning_goals": [
+            "解释平滑参数 p 的含义（1/p 为光滑权重）",
+            "理解有理根搜索 fprati 求 p",
+            "用 make_splrep 拟合并与 make_smoothing_spline 对比"
+          ],
+          "source_files": [
+            "_fitpack_repro.py"
+          ],
+          "minimal_modules": [
+            "make_splrep",
+            "F/disc 不连续矩阵",
+            "root_rati/fprati"
+          ],
+          "practice_task": "对同一噪声数据分别用 make_splrep 与 make_smoothing_spline 拟合，比较二者曲线与可复现性。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "参数化曲线 make_splprep",
+          "order": 3,
+          "filename": "u9-l3-make-splprep-parametric.md",
+          "level": "intermediate",
+          "topic": "讲解 make_splprep 拟合 N 维参数化曲线并返回 (BSpline, u)，以及周期情形下 Fperiodic 用增广矩阵 G1/G2/H1/H2 处理周期约束。",
+          "learning_goals": [
+            "用 make_splprep 拟合参数曲线并得到参数 u",
+            "理解周期约束的增广矩阵处理",
+            "对比 make_splprep 与旧 splprep"
+          ],
+          "source_files": [
+            "_fitpack_repro.py"
+          ],
+          "minimal_modules": [
+            "make_splprep",
+            "Fperiodic",
+            "增广矩阵"
+          ],
+          "practice_task": "用 make_splprep 拟合一条 3D 螺旋曲线的采样点，沿返回的参数 u 均匀重采样并画出 3D 曲线。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "规则网格插值",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "RegularGridInterpolator 基础",
+          "order": 1,
+          "filename": "u10-l1-regular-grid-interpolator.md",
+          "level": "intermediate",
+          "topic": "讲解在张量积规则网格上的插值：RegularGridInterpolator 的构造与求值，linear/nearest 方法，_evaluate_linear 的超立方体公式，以及底层 find_indices/evaluate_linear_2d 的 Cython 加速。",
+          "learning_goals": [
+            "在规则网格数据上构造并求值 RGI",
+            "理解 linear 方法的超立方体加权公式",
+            "知道底层 find_indices 的区间查找"
+          ],
+          "source_files": [
+            "_rgi.py",
+            "_rgi_cython.pyx"
+          ],
+          "minimal_modules": [
+            "RegularGridInterpolator",
+            "_evaluate_linear",
+            "find_indices"
+          ],
+          "practice_task": "对一个 3D 网格采样的标量场构造 RegularGridInterpolator(method='linear')，在一组随机点处求值并检查越界填充。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "RGI 的样条方法与 NdBSpline",
+          "order": 2,
+          "filename": "u10-l2-rgi-spline-methods.md",
+          "level": "intermediate",
+          "topic": "讲解 RGI 的 slinear/cubic/quintic 样条方法如何经 NdBSpline（make_ndbspl 稀疏求解）实现，pchip/slinear_legacy 的递归一维路径，以及 method 在调用时可覆盖。",
+          "learning_goals": [
+            "区分新样条方法（NdBSpline）与 legacy 递归方法",
+            "理解 make_ndbspl 用稀疏求解构造 NdBSpline",
+            "在调用时覆盖 method 并求偏导 nu"
+          ],
+          "source_files": [
+            "_rgi.py",
+            "_ndbspline.py"
+          ],
+          "minimal_modules": [
+            "_evaluate_spline(legacy)",
+            "make_ndbspl",
+            "方法映射 _SPLINE_DEGREE_MAP"
+          ],
+          "practice_task": "对同一网格数据分别用 method='cubic'（NdBSpline）与 'cubic_legacy'（递归）求值，比较结果差异与耗时。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "interpn 便捷函数与坐标处理",
+          "order": 3,
+          "filename": "u10-l3-interpn.md",
+          "level": "intermediate",
+          "topic": "讲解一次性求值接口 interpn，_ndim_coords_from_arrays 如何把多种输入形状统一成 (n, ndim)，bounds_error/fill_value 选项，以及仅 2D 的 splinef2d（RectBivariateSpline）方法。",
+          "learning_goals": [
+            "用 interpn 做一次性网格插值",
+            "处理多维坐标输入的不同形状",
+            "理解 splinef2d 仅适用 2D"
+          ],
+          "source_files": [
+            "_rgi.py"
+          ],
+          "minimal_modules": [
+            "interpn",
+            "_ndim_coords_from_arrays",
+            "splinef2d"
+          ],
+          "practice_task": "用 interpn 对一个 2D 网格在一组散点 (xi) 处求值，分别尝试 linear 与 cubic 方法并比较。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "散点（非结构化）数据插值",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "griddata 分发与 NearestNDInterpolator",
+          "order": 1,
+          "filename": "u11-l1-griddata-nearest-nd.md",
+          "level": "intermediate",
+          "topic": "讲解 griddata 如何按 method 与维度分发到 NearestND/LinearND/CloughTocher（以及 1D 退化为 interp1d），rescale 与 simplex_tolerance 选项，以及 NearestNDInterpolator 基于 scipy.spatial.KDTree 的最近邻查询。",
+          "learning_goals": [
+            "理解 griddata 的方法分发逻辑",
+            "用 NearestNDInterpolator 做最近邻插值",
+            "认识 KDTree 加速与 distance_upper_bound"
+          ],
+          "source_files": [
+            "_ndgriddata.py"
+          ],
+          "minimal_modules": [
+            "griddata",
+            "NearestNDInterpolator",
+            "KDTree 查询"
+          ],
+          "practice_task": "对一组 2D 散点，用 griddata 的 nearest/linear/cubic 三种方法重采样到同一网格，画出三张结果图对比。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "LinearNDInterpolator 与 Delaunay 三角剖分",
+          "order": 2,
+          "filename": "u11-l2-linear-nd-delaunay.md",
+          "level": "intermediate",
+          "topic": "讲解基于 Delaunay 三角剖分的分片线性插值，_interpnd.pyx 中的 NDInterpolatorBase 基类，以及 _ndim_coords_from_arrays 的坐标归一化。",
+          "learning_goals": [
+            "解释 Delaunay 三角剖分上的线性插值原理",
+            "阅读 NDInterpolatorBase 的公共流程",
+            "理解散点插值依赖 scipy.spatial.Delaunay"
+          ],
+          "source_files": [
+            "_interpnd.pyx",
+            "_ndgriddata.py"
+          ],
+          "minimal_modules": [
+            "LinearNDInterpolator",
+            "NDInterpolatorBase",
+            "Delaunay 三角剖分"
+          ],
+          "practice_task": "对一组 2D 散点用 LinearNDInterpolator 插值，并借助 scipy.spatial.Delaunay 画出三角网与插值结果叠加图。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "CloughTocher2DInterpolator 二维 C1",
+          "order": 3,
+          "filename": "u11-l3-clough-tocher.md",
+          "level": "intermediate",
+          "topic": "讲解二维 CloughTocher 二次精修（macro-element）上的 C1 光滑插值，与分片线性的对比，以及导数估计涉及的 _estimate_gradients_2d_global（sympy 预计算，见 _interpnd_info.py）。",
+          "learning_goals": [
+            "理解 CloughTocher C1 构造与精修元",
+            "在 linear 与 cubic(CT) 间做选择",
+            "认识 _interpnd_info.py 的符号预计算角色"
+          ],
+          "source_files": [
+            "_interpnd.pyx",
+            "_interpnd_info.py"
+          ],
+          "minimal_modules": [
+            "CloughTocher2DInterpolator",
+            "_estimate_gradients_2d_global",
+            "C1 精修元"
+          ],
+          "practice_task": "对一组 2D 散点分别用 LinearNDInterpolator 与 CloughTocher2DInterpolator 插值，放大局部观察 C1 的光滑程度差异。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "N 维张量积样条",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "NdBSpline 数据结构与求值",
+          "order": 1,
+          "filename": "u12-l1-ndbspline-structure.md",
+          "level": "advanced",
+          "topic": "讲解 NdBSpline 的多维节点向量与系数张量表示，张量积求值 c[i1,…,iN]·B(x1)·…·B(xN) 如何由 _dierckx._evaluate_ndbspline 完成，以及偏导参数 nu。",
+          "learning_goals": [
+            "理解 NdBSpline 的张量积表示与系数排布",
+            "描述张量积求值过程",
+            "用 nu 求各维偏导"
+          ],
+          "source_files": [
+            "_ndbspline.py",
+            "src/__fitpack.h"
+          ],
+          "minimal_modules": [
+            "NdBSpline",
+            "_evaluate_ndbspline",
+            "张量积求值"
+          ],
+          "practice_task": "构造一个 2D NdBSpline（手给 t、c、k），验证它在原始网格点上的求值与给定系数一致。",
+          "depends_on": [
+            "u5-l1",
+            "u10-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "make_ndbspl 与稀疏求解",
+          "order": 2,
+          "filename": "u12-l2-make-ndbspl.md",
+          "level": "advanced",
+          "topic": "讲解由规则网格数据构造插值 NdBSpline 的 make_ndbspl：用 _not_a_knot 初始化节点，design_matrix 生成 CSR 配置矩阵，再用稀疏求解器（默认 scipy.sparse.linalg.gcrotmk）解大型系统。",
+          "learning_goals": [
+            "用 make_ndbspl 在规则网格上拟合 NdBSpline",
+            "理解 CSR 配置矩阵的构造",
+            "知道默认稀疏求解器与 solver 参数"
+          ],
+          "source_files": [
+            "_ndbspline.py"
+          ],
+          "minimal_modules": [
+            "make_ndbspl",
+            "design_matrix(CSR)",
+            "稀疏求解 gcrotmk"
+          ],
+          "practice_task": "用 make_ndbspl 对一个 3D 网格拟合，并与 RegularGridInterpolator(method='cubic') 的结果比较，验证二者一致性。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "径向基函数（RBF）插值",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "RBFInterpolator 现代接口",
+          "order": 1,
+          "filename": "u13-l1-rbf-interpolator.md",
+          "level": "advanced",
+          "topic": "讲解 RBF 插值模型 f(x)=K(x,y)a+P(x)b（含多项式项），RBFInterpolator 的构造参数（kernel/epsilon/degree/smoothing/neighbors），全局求解与 neighbors 局部插值（KDTree）两条路径。",
+          "learning_goals": [
+            "用 RBFInterpolator 拟合散点数据",
+            "选择核函数、shape 参数 epsilon 与多项式 degree",
+            "理解 neighbors 局部插值机制"
+          ],
+          "source_files": [
+            "_rbfinterp.py"
+          ],
+          "minimal_modules": [
+            "RBFInterpolator",
+            "核/degree/smoothing",
+            "neighbors 局部求解"
+          ],
+          "practice_task": "对一组 2D 散点用不同核（如 thin_plate_spline 与 gaussian）的 RBFInterpolator 插值，画出并比较光滑度与边界行为。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "RBF 后端策略",
+          "order": 2,
+          "filename": "u13-l2-rbf-backends.md",
+          "level": "advanced",
+          "topic": "讲解 RBF 的三后端策略：numpy 后端（_rbfinterp_np，经 pythran 加速的 _rbfinterp_pythran）、通用 array-api 后端（_rbfinterp_xp，面向 torch/jax/cupy），_build_and_solve_system 用 LAPACK dsysv，以及 shift/scale 数值稳定与 _monomial_powers_impl。",
+          "learning_goals": [
+            "理解 RBF 的后端分发（numpy/pythran vs array-api）",
+            "知道核矩阵与多项式矩阵如何组装并求解",
+            "理解 shift/scale 的数值稳定作用"
+          ],
+          "source_files": [
+            "_rbfinterp_np.py",
+            "_rbfinterp_pythran.py",
+            "_rbfinterp_xp.py",
+            "_rbfinterp_common.py"
+          ],
+          "minimal_modules": [
+            "_rbfinterp_np/pythran",
+            "_rbfinterp_xp",
+            "dsysv 求解"
+          ],
+          "practice_task": "阅读 _rbfinterp_pythran.py，用伪代码描述 _build_system 如何组装含多项式约束的线性系统并做 shift/scale。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "旧式 Rbf 类",
+          "order": 3,
+          "filename": "u13-l3-legacy-rbf.md",
+          "level": "advanced",
+          "topic": "讲解旧式 Rbf 类的函数式用法、默认 epsilon（节点平均距离）、_h_* 核方法（multiquadric/gaussian/thin_plate 等），以及它为何被 RBFInterpolator 取代。",
+          "learning_goals": [
+            "用旧 Rbf 类做散点插值",
+            "理解默认 epsilon 与核方法",
+            "对比旧 Rbf 与新 RBFInterpolator 的局限"
+          ],
+          "source_files": [
+            "_rbf.py"
+          ],
+          "minimal_modules": [
+            "Rbf",
+            "_h_ 核函数",
+            "squareform/pdist/cdist"
+          ],
+          "practice_task": "对同一组散点分别用 Rbf 与 RBFInterpolator 插值，比较结果差异，并说明 Rbf 被取代的原因。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "有理插值与 AAA",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "重心有理形式与基类",
+          "order": 1,
+          "filename": "u14-l1-barycentric-rational.md",
+          "level": "advanced",
+          "topic": "讲解有理函数的重心形式 r(z)=Σ wj·fj/(z-zj) / Σ wj/(z-zj)，用 Cauchy 矩阵求值，以及 BarycentricRational 基类。",
+          "learning_goals": [
+            "理解重心有理形式与多项式重心形式的关系",
+            "描述 Cauchy 矩阵求值过程",
+            "区分有理插值与多项式插值"
+          ],
+          "source_files": [
+            "_bary_rational.py"
+          ],
+          "minimal_modules": [
+            "BarycentricRational",
+            "重心有理形式",
+            "Cauchy 矩阵"
+          ],
+          "practice_task": "手算一个小型（3 个支撑点）重心有理插值在某点的值，与 BarycentricRational 的代码结果对比。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "FloaterHormannInterpolator",
+          "order": 2,
+          "filename": "u14-l2-floater-hormann.md",
+          "level": "advanced",
+          "topic": "讲解 Floater–Hormann 族：混合 d 次多项式得到实轴无极点、C∞ 光滑的有理插值，权重为交替倒数乘积，具备抗 Runge 性质。",
+          "learning_goals": [
+            "解释 Floater-Hormann 抗 Runge、实轴无极点的原理",
+            "选择混合度 d 并理解其影响",
+            "与 lagrange 高次插值对比"
+          ],
+          "source_files": [
+            "_bary_rational.py"
+          ],
+          "minimal_modules": [
+            "FloaterHormannInterpolator",
+            "混合权重",
+            "抗 Runge"
+          ],
+          "practice_task": "对 Runge 函数在等距节点上分别用 FloaterHormannInterpolator（不同 d）与 lagrange 插值，画出并比较误差。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "AAA 自适应有理逼近",
+          "order": 3,
+          "filename": "u14-l3-aaa.md",
+          "level": "advanced",
+          "topic": "讲解 AAA（Adaptive Antoulas-Anderson）算法：贪心选择残差最大的支撑点，对 Loewner 矩阵做 SVD 求权重，clean_up 去除 Froissart 双重t（pole-zero 对），适用于复域逼近。",
+          "learning_goals": [
+            "解释 AAA 的贪心支撑点选择",
+            "理解 Loewner 矩阵 SVD 求权",
+            "识别并清理 Froissart 双重t"
+          ],
+          "source_files": [
+            "_bary_rational.py"
+          ],
+          "minimal_modules": [
+            "AAA",
+            "Loewner 矩阵/SVD",
+            "Froissart 双重t/clean_up"
+          ],
+          "practice_task": "用 AAA 逼近一个函数（或离散复数据），检查返回的支撑点数与极点分布，验证逼近精度。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "二维平滑与 Pade 逼近",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "_regrid 二维平滑 B 样条",
+          "order": 1,
+          "filename": "u15-l1-regrid-2d-smoothing.md",
+          "level": "advanced",
+          "topic": "讲解 _regrid 用可分离的 1D FITPACK 核做二维平滑曲面拟合：自适应节点增长（_regrid_fitpack/_add_knots）、平滑参数 p 的搜索（_p_search_hit_s，F）、p=-1 哨兵表示插值极限，最终返回 NdBSpline。",
+          "learning_goals": [
+            "理解可分离两遍 QR 求解的二维拟合",
+            "解释平滑参数 p 的搜索与 p=-1 哨兵",
+            "知道结果以 NdBSpline 表示"
+          ],
+          "source_files": [
+            "_regrid.py",
+            "src/__fitpack.h"
+          ],
+          "minimal_modules": [
+            "_regrid",
+            "_regrid_fitpack/_add_knots",
+            "_p_search_hit_s"
+          ],
+          "practice_task": "阅读 _regrid_fitpack，用伪代码描述两遍（先 x 后 y）可分离带状 QR 求解流程与节点增长循环。",
+          "depends_on": [
+            "u9-l2",
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "Pade 逼近与 _pade",
+          "order": 2,
+          "filename": "u15-l2-pade.md",
+          "level": "advanced",
+          "topic": "讲解用 Taylor 系数构造 Pade 有理逼近 p(x)/q(x)：构造 C 矩阵求解系数，以及 pade 已弃用、官方建议改用 mpmath.pade 的现状。",
+          "learning_goals": [
+            "用 pade 对 Taylor 级数做有理逼近",
+            "理解 C 矩阵线性求解的构造",
+            "知道 pade 的弃用状态与替代方案"
+          ],
+          "source_files": [
+            "_pade.py"
+          ],
+          "minimal_modules": [
+            "pade",
+            "C 矩阵求解",
+            "弃用迁移"
+          ],
+          "practice_task": "用 pade 对 e^x 的前若干项 Taylor 系数做逼近，比较 p(x)/q(x) 与真实 e^x 在若干点的误差。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u16",
+      "title": "原生扩展架构",
+      "level": "advanced",
+      "order": 16,
+      "lectures": [
+        {
+          "id": "u16-l1",
+          "title": "两套 FITPACK 后端：_dierckx 与 _fitpack",
+          "order": 1,
+          "filename": "u16-l1-fitpack-backends.md",
+          "level": "advanced",
+          "topic": "讲解子包内两套 FITPACK 原生后端的区别：_dierckx（基于 C++ __fitpack.cc，现代可复现路径，供 BSpline/make_* 使用）与 _fitpack（基于 f2c 的 netlib FITPACK + dfitpack.c，供 splrep/UnivariateSpline 使用），以及为何并存。",
+          "learning_goals": [
+            "区分 _dierckx 与 _fitpack 两套后端",
+            "追踪 BSpline 与 splrep 各自落到哪个 C 扩展",
+            "理解两套后端并存的历史与原因"
+          ],
+          "source_files": [
+            "src/_dierckxmodule.cc",
+            "src/_fitpackmodule.c",
+            "src/dfitpack.c",
+            "src/dfitpack.h"
+          ],
+          "minimal_modules": [
+            "_dierckx/__fitpack.cc",
+            "_fitpack/dfitpack.c",
+            "后端选择"
+          ],
+          "practice_task": "在源码中追踪 BSpline.__call__ 与 splrep 的调用链，画出各自最终调用的 C 扩展函数。",
+          "depends_on": [
+            "u7-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l2",
+          "title": "__fitpack.cc 的核心算法",
+          "order": 2,
+          "filename": "u16-l2-fitpack-cc-algorithms.md",
+          "level": "advanced",
+          "topic": "讲解现代 C++ FITPACK 实现 __fitpack.cc 的关键例程：_deBoor_D 求值、_find_interval 区间查找、data_matrix 配置、qr_reduce（Givens 旋转 QR 最小二乘）、fpback 回代、fpknot 节点增长、norm_eq_lsq 与 _evaluate_ndbspline。",
+          "learning_goals": [
+            "理解 de Boor 算法与区间查找",
+            "解释 QR 最小二乘（qr_reduce/fpback）流程",
+            "描述 fpknot 的节点增长策略"
+          ],
+          "source_files": [
+            "src/__fitpack.h",
+            "src/__fitpack.cc"
+          ],
+          "minimal_modules": [
+            "_deBoor_D/_find_interval",
+            "qr_reduce/fpback",
+            "fpknot/norm_eq_lsq"
+          ],
+          "practice_task": "阅读 fpknot 与 _split，用伪代码描述 FITPACK 如何按残差最大的区间选择新节点位置。",
+          "depends_on": [
+            "u16-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l3",
+          "title": "_ppoly.pyx 与 _rgi_cython.pyx",
+          "order": 3,
+          "filename": "u16-l3-ppoly-rgi-cython.md",
+          "level": "advanced",
+          "topic": "讲解分段多项式的 Cython 求值/求根（_ppoly.pyx，求根用 LAPACK dgeev）、RegularGridInterpolator 的 2D 线性快速路径 evaluate_linear_2d 与 find_indices，以及 _poly_common.pxi 中共享的 find_interval_ascending 二分查找。",
+          "learning_goals": [
+            "理解 PPoly/RGI 的 Cython 后端",
+            "定位求根所用的 LAPACK 例程",
+            "理解带局部性的二分区间查找"
+          ],
+          "source_files": [
+            "_ppoly.pyx",
+            "_rgi_cython.pyx",
+            "_poly_common.pxi"
+          ],
+          "minimal_modules": [
+            "_ppoly evaluate/roots(dgeev)",
+            "evaluate_linear_2d/find_indices",
+            "find_interval_ascending"
+          ],
+          "practice_task": "在 _ppoly.pyx 中定位 roots 实现所调用的 LAPACK 例程，解释它如何求分段多项式的全部根。",
+          "depends_on": [
+            "u3-l1",
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l4",
+          "title": "_interpnd.pyx 与 qhull",
+          "order": 4,
+          "filename": "u16-l4-interpnd-qhull.md",
+          "level": "advanced",
+          "topic": "讲解基于 scipy.spatial._qhull 的 Delaunay 三角剖分插值：_interpnd.pyx 中的 NDInterpolatorBase 与 LinearND/CloughTocher 的 Cython 实现，每个单纯形内的求值，以及 Mako 模板与 generate_qhull.py 的代码生成。",
+          "learning_goals": [
+            "理解 _interpnd.pyx 的整体结构",
+            "说明 LinearND 如何在每个单纯形内做重心坐标插值",
+            "认识 qhull 依赖与代码生成"
+          ],
+          "source_files": [
+            "_interpnd.pyx"
+          ],
+          "minimal_modules": [
+            "NDInterpolatorBase",
+            "LinearND/CloughTocher 实现",
+            "qhull 依赖/Mako"
+          ],
+          "practice_task": "阅读 _interpnd.pyx，描述 LinearNDInterpolator 如何在 Delaunay 单纯形内用重心坐标做线性插值。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u17",
+      "title": "Array API 后端与弃用治理",
+      "level": "advanced",
+      "order": 17,
+      "lectures": [
+        {
+          "id": "u17-l1",
+          "title": "array_api 后端与 xp_capabilities",
+          "order": 1,
+          "filename": "u17-l1-array-api-backends.md",
+          "level": "advanced",
+          "topic": "讲解多个公共类（BSpline/PPoly/BPoly/RegularGridInterpolator/NdBSpline）如何通过 array_namespace 支持 numpy/cupy/torch/jax，xp_capabilities 装饰器如何声明能力范围，以及 _get_xp_bspline_cls 等后端分发模式。",
+          "learning_goals": [
+            "理解 array API 后端分发机制",
+            "看懂 xp_capabilities 装饰器的能力声明",
+            "对比不同类的后端分发实现"
+          ],
+          "source_files": [
+            "_interpolate.py",
+            "_bsplines.py",
+            "_rgi.py",
+            "_ndbspline.py"
+          ],
+          "minimal_modules": [
+            "array_namespace",
+            "xp_capabilities",
+            "_get_xp_bspline_cls"
+          ],
+          "practice_task": "用 cupy 或 torch 数组喂给一个插值器（如 BSpline 或 RegularGridInterpolator），观察后端分发并验证返回数组类型。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u17-l2",
+          "title": "弃用治理与命名空间演进",
+          "order": 2,
+          "filename": "u17-l2-deprecation-governance.md",
+          "level": "advanced",
+          "topic": "讲解 SciPy v2.0 移除旧命名空间垫片的计划，interp2d 已移除、lagrange/pade/approximate_taylor_polynomial 的弃用时间线，_sub_module_deprecation 机制，以及如何把旧代码迁移到新 API。",
+          "learning_goals": [
+            "理解弃用时间线与垫片移除计划",
+            "掌握 _sub_module_deprecation 的触发机制",
+            "把旧式插值代码迁移到推荐 API"
+          ],
+          "source_files": [
+            "__init__.py",
+            "interpolate.py",
+            "fitpack.py",
+            "_pade.py",
+            "_interpolate.py"
+          ],
+          "minimal_modules": [
+            "_sub_module_deprecation",
+            "弃用时间线",
+            "迁移路径"
+          ],
+          "practice_task": "把一段使用 interp1d 与 splrep 的旧代码改写为基于 make_interp_spline/BSpline 的新实现，验证结果一致。",
+          "depends_on": [
+            "u1-l3",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
