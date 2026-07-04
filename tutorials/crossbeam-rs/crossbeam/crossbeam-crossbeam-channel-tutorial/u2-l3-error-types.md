@@ -1,0 +1,711 @@
+# 错误类型体系 err.rs
+
+## 1. 本讲目标
+
+学完本讲后，你应该能够：
+
+- 说出 `src/err.rs` 里全部 10 个错误类型，并按「方向（发送/接收/select）× 模式（非阻塞/阻塞/超时）」给它们分类。
+- 区分 `Full` / `Disconnected` / `Timeout` / `Empty` 这四种核心失败语义分别出现在哪些错误类型里。
+- 画出错误类型之间的 `From` 转换图，解释「为什么只有最窄的错误能转成更宽的错误，反之不行」。
+- 使用 `into_inner` / `is_full` / `is_disconnected` / `is_timeout` / `is_empty` 这些辅助方法，并理解发送侧错误的 `Debug`/`Display`/`Error` trait 为什么那样实现。
+- 在 `src/channel.rs` 里读懂 `send` / `recv` 如何把底层统一的 `SendTimeoutError` / `RecvTimeoutError` 归一化成对外的 `SendError` / `RecvError`，以及 `send_timeout` / `recv_timeout` 在溢出时如何复用 `From` 兜底。
+
+本讲是对 [u1-l3](u1-l3-sender-receiver-api.md) 的「向上收敛」：u1-l3 教你怎么**用**这些方法、怎么在源码里找到它们的 `match flavor` 转发结构；本讲则把镜头推到这些方法返回的**错误类型本身**，把它们作为一个完整体系讲透。
+
+> 本讲承接 u1-l3。你已经知道收发方法分三种模式、每种模式返回一个专门的错误类型；也知道 `send` 的源码里有一个看起来奇怪的 `unreachable!()`、`recv` 的源码里有一个 `.map_err(|_| RecvError)`。本讲就回答：这些错误类型长什么样、彼此怎么换算、`channel.rs` 为什么这样归一化。
+
+---
+
+## 2. 前置知识
+
+在开始前，先建立三个直觉。
+
+### 2.1 失败只有四种「原因」
+
+不管通道是哪种 flavor（array/list/zero），一次收发操作失败的原因，归根到底只有四种：
+
+| 原因 | 含义 | 出现在哪一侧 |
+| --- | --- | --- |
+| **Full** | 通道满了，投不进去（零容量通道时表示「当前没有接收方」） | 仅发送侧 |
+| **Empty** | 通道是空的，取不出来（零容量通道时表示「当前没有发送方」） | 仅接收侧 |
+| **Timeout** | 等到了超时还没成功 | 既可发送也可接收（只有带超时的方法） |
+| **Disconnected** | 对端全员 drop，通道断了，永远不可能成功 | 既可发送也可接收 |
+
+记住这四种「原因」，错误类型的结构就一目了然了：**每个错误类型不过是「这四种原因的一个子集」的枚举**。
+
+### 2.2 错误类型 = 方向 × 模式
+
+把「方向」和「模式」组合起来，就能推算出该用什么错误类型。这是 `err.rs` 全部设计的「公式」：
+
+| 方向＼模式 | 非阻塞 | 阻塞 | 超时/截止 |
+| --- | --- | --- | --- |
+| **发送** | `TrySendError<T>` { Full, Disconnected } | `SendError<T>` { Disconnected } | `SendTimeoutError<T>` { Timeout, Disconnected } |
+| **接收** | `TryRecvError` { Empty, Disconnected } | `RecvError` { Disconnected } | `RecvTimeoutError` { Timeout, Disconnected } |
+| **select** | `TrySelectError` | — | `SelectTimeoutError`（另有 `try_ready`/`ready_timeout` 用的 `TryReadyError`/`ReadyTimeoutError`） |
+
+两个规律：
+
+1. **越「愿意等」的方法，失败原因越少**。非阻塞方法（`try_*`）会立刻暴露 `Full`/`Empty`；阻塞方法（`send`/`recv`）愿意无限等，所以没有 `Timeout`、也没有 `Full`/`Empty`（满/空时它就等着，不报错），失败只剩 `Disconnected`。
+2. **发送侧的错误携带消息 `T`，接收侧不携带**。因为发送失败时消息没进通道、需要被「拿回来」；接收失败时本来就没拿到东西。
+
+### 2.3 错误类型不只是给用户用，库自己也用
+
+`err.rs` 里的 `From` 转换（比如 `From<SendError<T>> for SendTimeoutError<T>`）不只是方便用户写 `?`——`channel.rs` 自己的 `send_timeout` / `recv_timeout` 在 `Duration` 溢出时，就是靠这些 `From` 把「退化为无限等待」的结果搬进正确的错误类型。这一点我们在 4.5 节会从源码里看到。
+
+---
+
+## 3. 本讲源码地图
+
+本讲深入一个文件，并参考它的使用方：
+
+| 文件 | 作用 |
+| --- | --- |
+| [`src/err.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs) | 全部 10 个错误类型的定义，以及它们的 `Debug`/`Display`/`Error`/`From` 实现和辅助方法。本讲的主战场。 |
+| [`src/channel.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs) | `Sender`/`Receiver` 外壳。本讲关注它如何把底层返回的统一错误类型「归一化」成对外错误类型。 |
+
+辅助参考（实践环节会用到的真实测试）：
+
+| 文件 | 作用 |
+| --- | --- |
+| [`tests/zero.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/zero.rs) | 零容量通道的测试，覆盖了 `TrySendError::Full`、`TryRecvError::Empty`、`RecvTimeoutError::Timeout/Disconnected`、`SendTimeoutError::Timeout/Disconnected` 等几乎所有失败分支。 |
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 错误类型全景：一张表看懂 err.rs
+
+#### 4.1.1 概念说明
+
+`err.rs` 是一个「纯数据 + trait 实现」的文件：它不包含任何通道逻辑，只定义「操作失败时返回什么」。理解它的关键是上一节那张「方向 × 模式」表。本节我们先从高空把 10 个类型扫一遍，给每个类型贴上「它表达哪几种失败原因」的标签。
+
+10 个错误类型分三组：
+
+- **发送侧 3 个**：`SendError<T>`、`TrySendError<T>`、`SendTimeoutError<T>`（都带泛型 `T`，即原始消息）。
+- **接收侧 3 个**：`RecvError`、`TryRecvError`、`RecvTimeoutError`（都不带泛型）。
+- **select 相关 4 个**：`TrySelectError`、`SelectTimeoutError`、`TryReadyError`、`ReadyTimeoutError`（都不带泛型，对应动态选择 API 的失败）。
+
+#### 4.1.2 核心流程
+
+「一个错误类型能表达哪些失败」由它的变体（或字段）决定。我们用一张「变体矩阵」把 9 个收发错误类型一次说清（select 错误放 4.4 讲）：
+
+| 错误类型 | 能表达 Disconnected？ | 能表达 Full/Empty？ | 能表达 Timeout？ |
+| --- | --- | --- | --- |
+| `SendError<T>` | ✅（唯一） | ❌ | ❌ |
+| `TrySendError<T>` | ✅ | ✅ Full | ❌ |
+| `SendTimeoutError<T>` | ✅ | ❌ | ✅ |
+| `RecvError` | ✅（唯一） | ❌ | ❌ |
+| `TryRecvError` | ✅ | ✅ Empty | ❌ |
+| `RecvTimeoutError` | ✅ | ❌ | ✅ |
+
+观察这张表，能得出一个重要结论：**「Disconnected」是所有错误类型的公共失败原因**。这并不偶然——无论你用哪种模式，通道断开都会让操作失败；而 `Full`/`Empty`/`Timeout` 则是特定模式才有的「暂时性」失败。这个公共点正是 `From` 转换能成立的根基（见 4.2.2）。
+
+#### 4.1.3 源码精读
+
+先看发送侧三个类型的定义。最「窄」的 `SendError`，它只是一个带消息的元组结构体：
+
+[src/err.rs:11-12](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L11-L12) — `SendError<T>(pub T)`：发送失败的唯一原因是断开；消息 `T` 作为公开字段保留，方便调用方取回。
+
+```rust
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct SendError<T>(pub T);
+```
+
+非阻塞发送的 `TrySendError`，多出 `Full` 变体：
+
+[src/err.rs:19-29](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L19-L29) — `TrySendError` 两个变体都保留消息 `T`：`Full(T)`（满了/没接收方）、`Disconnected(T)`（断开）。
+
+```rust
+pub enum TrySendError<T> {
+    Full(T),
+    Disconnected(T),
+}
+```
+
+带超时的 `SendTimeoutError`，把 `Full` 换成了 `Timeout`（因为愿意等，所以满不再是终态，等过头才是）：
+
+[src/err.rs:36-46](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L36-L46) — `SendTimeoutError`：`Timeout(T)`（等到超时）、`Disconnected(T)`（断开）。
+
+接收侧三个类型完全对称，只是不携带 `T`。最窄的 `RecvError` 是个单元结构体：
+
+[src/err.rs:53-54](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L53-L54) — `RecvError`：接收失败的唯一原因是「空且断开」，没有任何附加信息，所以是空的单元结构体。
+
+```rust
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct RecvError;
+```
+
+[src/err.rs:59-69](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L59-L69) — `TryRecvError`：`Empty`（空/没发送方）、`Disconnected`（空且断开）。
+
+[src/err.rs:74-84](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L74-L84) — `RecvTimeoutError`：`Timeout`（等到超时）、`Disconnected`（空且断开）。
+
+> 注意一个细节：发送侧三个类型（`SendError`/`TrySendError`/`SendTimeoutError`）的 `derive` 里**没有** `Debug`，而是后面手写了 `impl fmt::Debug`；接收侧三个类型则**直接 derive 了** `Debug`。原因在 4.2.3 讲——这和「错误携带 `T` 时，能否要求 `T: Debug`」有关。
+
+#### 4.1.4 代码实践
+
+**实践目标**：用一张「失败原因」核对表，反推每种方法在给定场景下应返回哪个错误变体。
+
+**操作步骤**（这是「源码阅读型实践」，不写新代码）：
+
+1. 打开 [src/err.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs)，对照上面三段定义，确认每个类型的变体。
+2. 对下面 6 个场景，写下「调用哪个方法 → 返回哪个错误类型 → 命中哪个变体」：
+   - 在 `bounded(1)` 已满时调 `try_send(2)`；
+   - 在 `bounded(0)`、无接收方时调 `send_timeout(x, 10ms)`；
+   - drop 掉接收者后调 `send(x)`；
+   - 在空 `unbounded` 上调 `try_recv()`；
+   - 在空 `unbounded` 上调 `recv_timeout(10ms)`；
+   - drop 掉发送者、排空后调 `recv()`。
+
+**需要观察的现象 / 预期结果**：你的答案应分别是 `TrySendError::Full(2)`、`SendTimeoutError::Timeout(x)`、`SendError(x)`、`TryRecvError::Empty`、`RecvTimeoutError::Timeout`、`RecvError`。若与预期不符，回到 4.1.2 的矩阵核对。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `SendError` 只有一个变体，而 `TrySendError` 有两个？
+
+**参考答案**：`send` 是阻塞方法，愿意无限等待——通道满时它会等，而不是报错；所以「满」对它不是一种失败。唯一能让 `send` 失败的是「通道断开、永远投递不进去」，于是 `SendError` 只表达这一种情况。而 `try_send` 不等，满就立刻失败，于是多出一个 `Full` 变体。
+
+**练习 2**：`RecvError` 为什么是空的单元结构体，连 `Disconnected` 字段都不需要？
+
+**参考答案**：因为 `recv` 失败的原因只有一种（空且断开），不需要再用字段区分。结构体本身就是「失败」这个信号，里面没有任何需要携带的信息（接收侧本就没有消息可保留），所以是空的 `struct RecvError;`。
+
+---
+
+### 4.2 发送侧三件套：SendError / TrySendError / SendTimeoutError
+
+#### 4.2.1 概念说明
+
+这三个类型承担了**所有发送失败**的表达。它们共享同一个设计：
+
+- 都带泛型 `T`，把「投不出去的那条消息」原样保存在错误里。
+- 都实现 `into_inner()` 把消息取回。
+- 都有 `is_disconnected()`；`TrySendError` 多一个 `is_full()`，`SendTimeoutError` 多一个 `is_timeout()`。
+- 都实现了 `Display`（可读的错误描述）和 `std::error::Error`（可被 `?` 传播、装进 `Box<dyn Error>`）。
+
+#### 4.2.2 核心流程：From 转换图
+
+三个类型之间有**两条单向**的 `From` 转换，都从最窄的 `SendError` 出发：
+
+```text
+                 From<SendError<T>>
+   SendError<T> ─────────────────────► TrySendError<T>::Disconnected(T)
+       │
+       │  From<SendError<T>>
+       └─────────────────────────────► SendTimeoutError<T>::Disconnected(T)
+```
+
+关键洞察：**只有「最窄」的 `SendError` 能转成另外两个，反之都不行**。原因看 4.1.2 的矩阵就明白——`SendError` 的失败集合 \{Disconnected\} 是 `TrySendError` \{Full, Disconnected\} 和 `SendTimeoutError` \{Timeout, Disconnected\} 的**真子集**，所以「把 `SendError` 升格」是无损的（它只能是 Disconnected，映射到对方的 Disconnected 变体即可）。而反过来，`TrySendError::Full` 无法映射成 `SendError`（`SendError` 没有 Full 概念），`TrySendError` 与 `SendTimeoutError` 之间也无法互转（Full 与 Timeout 语义不兼容）。所以库**只提供安全、无损的转换**，避免引入需要「猜」的转换。
+
+这两条 `From` 既是给用户的便利，也被 `channel.rs` 内部复用（4.5 节）。
+
+#### 4.2.3 源码精读
+
+先看两条 `From` 的实现，验证上面那张图：
+
+[src/err.rs:172-178](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L172-L178) — `From<SendError<T>> for TrySendError<T>`：把 `SendError(t)` 映射成 `Disconnected(t)`。
+
+```rust
+impl<T> From<SendError<T>> for TrySendError<T> {
+    fn from(err: SendError<T>) -> Self {
+        match err {
+            SendError(t) => Self::Disconnected(t),
+        }
+    }
+}
+```
+
+[src/err.rs:229-235](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L229-L235) — `From<SendError<T>> for SendTimeoutError<T>`：同样映射成 `Disconnected(t)`。
+
+再看辅助方法。`TrySendError` 提供了取回消息和判断变体的三个方法：
+
+[src/err.rs:194-209](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L194-L209) — `into_inner` 从两个变体里统一取出 `T`；`is_full` / `is_disconnected` 用 `matches!` 判断变体。
+
+```rust
+pub fn into_inner(self) -> T {
+    match self {
+        Self::Full(v) => v,
+        Self::Disconnected(v) => v,
+    }
+}
+pub fn is_full(&self) -> bool { matches!(self, Self::Full(_)) }
+pub fn is_disconnected(&self) -> bool { matches!(self, Self::Disconnected(_)) }
+```
+
+`SendTimeoutError` 的方法对称（`is_timeout` 替代 `is_full`）：
+
+[src/err.rs:252-267](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L252-L267) — `SendTimeoutError::into_inner` / `is_timeout` / `is_disconnected`。
+
+`SendError` 只需要一个 `into_inner`：
+
+[src/err.rs:147-149](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L147-L149) — `SendError::into_inner` 直接返回内部 `T`。
+
+现在解释 4.1.3 留下的那个「为什么发送侧错误不 derive `Debug`」的疑问。以 `SendError` 为例：
+
+[src/err.rs:118-128](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L118-L128) — 手写的 `Debug` 打印固定字符串 `"SendError(..)"`，不接触内部 `T`；`Display` 同理打印 `"sending on a disconnected channel"`。
+
+```rust
+impl<T> fmt::Debug for SendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        "SendError(..)".fmt(f)
+    }
+}
+```
+
+> 为什么不 `#[derive(Debug)]`？因为 derive 会给生成的 impl 加上 `T: Debug` 约束——那样你就**只有在 `T: Debug` 时才能打印错误**。手写 `Debug`（打印占位符 `..`）让 `SendError<T>` 对**任意 `T`** 都能 `Debug`，即使 `T` 不是 `Debug`。代价是打印看不到具体消息，但你可以用 `into_inner()` 自己取出来打印。`TrySendError`（`"Full(..)"` / `"Disconnected(..)"`，[L152-159](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L152-L159)）和 `SendTimeoutError`（`"SendTimeoutError(..)"`，[L212-216](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L212-L216)）同理。接收侧错误不携带 `T`，没有这个顾虑，所以直接 derive `Debug`。
+
+最后是 `std::error::Error` 的实现，注意它带 `T: Send` 约束：
+
+[src/err.rs:130](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L130) — `impl<T: Send> error::Error for SendError<T> {}`（`TrySendError` 在 [L170](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L170)、`SendTimeoutError` 在 [L227](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L227) 同样如此）。
+
+> `error::Error` 的超 trait 只是 `Debug + Display`，理论上不要求 `Send`。这里额外加 `T: Send`，是为了让「装着 `T` 的错误」在作为 `Box<dyn Error + Send>` 跨线程传递时仍然满足 `Send`——这是错误处理中很常见的用法。所以库做了一个**取舍**：`Debug`/`Display`/`into_inner` 对任意 `T` 可用（保证通用性），但「成为标准错误对象」只在 `T: Send` 时才成立（保证可跨线程）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：亲手把 `SendError` 通过 `From` 转成 `TrySendError` 和 `SendTimeoutError`，并验证转换是无损的。
+
+**操作步骤**（这是「示例代码」，可放进 `src/bin/` 运行）：
+
+```rust
+// 示例代码：src/bin/send_err_from.rs，然后 cargo run --bin send_err_from
+use crossbeam_channel::{bounded, TrySendError, SendTimeoutError};
+
+fn main() {
+    let (s, r) = bounded::<i32>(1);
+    drop(r); // 断开 → send 会失败，得到 SendError
+
+    // 1) 先拿到一个 SendError
+    let se = s.send(42).unwrap_err();            // → SendError(42)
+    assert_eq!(se.into_inner(), 42);             // 这里 se 被消费
+
+    // 2) 再拿一个，演示 From 转成 TrySendError
+    let se2 = s.send(7).unwrap_err();            // → SendError(7)
+    let tse: TrySendError<i32> = se2.into();     // From<SendError> → Disconnected(7)
+    assert!(tse.is_disconnected());
+    assert!(!tse.is_full());
+    assert_eq!(tse.into_inner(), 7);
+
+    // 3) 再拿一个，演示 From 转成 SendTimeoutError
+    let se3 = s.send(9).unwrap_err();            // → SendError(9)
+    let ste: SendTimeoutError<i32> = se3.into(); // From<SendError> → Disconnected(9)
+    assert!(ste.is_disconnected());
+    assert!(!ste.is_timeout());
+    assert_eq!(ste.into_inner(), 9);
+}
+```
+
+**需要观察的现象**：每次 `.into()` 后用 `is_disconnected()` 都返回 `true`，对应的 `is_full()`/`is_timeout()` 返回 `false`，且 `into_inner()` 取回的消息值不变（无损）。
+
+**预期结果**：所有断言通过，程序正常退出。
+
+> 是否能本地运行：「待本地验证」——取决于你把文件放进 `src/bin/` 并配置好依赖。逻辑与库文档示例一致。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么没有 `From<TrySendError<T>> for SendError<T>`？
+
+**参考答案**：因为 `TrySendError` 可能是 `Full`，而 `SendError` 没有「满」这个概念。如果提供这个转换，遇到 `Full(t)` 时要么 panic、要么丢失语义，无法做到无损映射。库因此只提供「失败集合是真子集」方向的 `From`（即从最窄的 `SendError` 出发），避免引入有歧义的转换。
+
+**练习 2**：`s.send(x).unwrap_err()` 拿到的 `SendError`，能不能在不消费它的情况下知道里面是什么消息？
+
+**参考答案**：不能直接「借用查看」。`SendError::into_inner` 是 `self` 方法（消费错误）。而且它的 `Debug` 只打印 `"SendError(..)"`、不打印消息。要看消息只能 `into_inner()` 取出（消费），或者用模式匹配 `match err { SendError(m) => ... }`（因为 `T` 是 `pub` 字段）。这是「保证任意 `T` 都能 Debug」这一设计带来的副作用。
+
+---
+
+### 4.3 接收侧三件套：RecvError / TryRecvError / RecvTimeoutError
+
+#### 4.3.1 概念说明
+
+接收侧三个类型和发送侧**完全对称**，只是不携带消息 `T`：
+
+- 都不带泛型。
+- 失败原因换成 `Empty` / `Timeout`（替代发送侧的 `Full` / `Timeout`）。
+- 没有 `into_inner`（没什么可取回的），只有 `is_empty` / `is_disconnected` / `is_timeout` 这样的判断方法。
+
+#### 4.3.2 核心流程：From 转换图
+
+`From` 转换和发送侧同构——同样只有从最窄的 `RecvError` 出发的两条单向边：
+
+```text
+                 From<RecvError>
+   RecvError ─────────────────────► TryRecvError::Disconnected
+       │
+       │  From<RecvError>
+       └──────────────────────────► RecvTimeoutError::Disconnected
+```
+
+道理一样：`RecvError` 的失败集合 \{Disconnected\} 是另两个的真子集。
+
+#### 4.3.3 源码精读
+
+两条 `From`：
+
+[src/err.rs:289-295](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L289-L295) — `From<RecvError> for TryRecvError`：映射成 `Disconnected`。
+
+[src/err.rs:320-326](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L320-L326) — `From<RecvError> for RecvTimeoutError`：同样映射成 `Disconnected`。
+
+辅助方法。`TryRecvError` 的两个判断方法：
+
+[src/err.rs:299-307](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L299-L307) — `TryRecvError::is_empty` / `is_disconnected`。
+
+`RecvTimeoutError` 对称（`is_timeout` 替代 `is_empty`）：
+
+[src/err.rs:330-337](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L330-L337) — `RecvTimeoutError::is_timeout` / `is_disconnected`。
+
+`Display` 实现把每种失败翻译成人话，可作为「日志里直接打印错误」的依据：
+
+[src/err.rs:270-285](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L270-L285) — `RecvError` 显示 `"receiving on an empty and disconnected channel"`；`TryRecvError` 的 `Empty` 显示 `"receiving on an empty channel"`、`Disconnected` 显示 `"receiving on an empty and disconnected channel"`。
+
+[src/err.rs:309-318](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L309-L318) — `RecvTimeoutError` 的 `Display` 与 `error::Error` 实现：`Timeout` → `"timed out waiting on receive operation"`，`Disconnected` → `"channel is empty and disconnected"`。
+
+> 注意：接收侧三个类型的 `Display`/`Error` 实现**没有额外约束**（不像发送侧要 `T: Send`），因为它们不携带泛型数据。这也是它们能直接 `#[derive(Debug)]` 的原因（[L53](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L53)、[L59](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L59)、[L74](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L74)）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用 `recv_timeout` 分别触发 `Timeout` 与 `Disconnected`，并把 `RecvError` 通过 `From` 转成 `RecvTimeoutError`。
+
+**操作步骤**（「示例代码」）：
+
+```rust
+// 示例代码：src/bin/recv_err.rs，然后 cargo run --bin recv_err
+use std::time::Duration;
+use crossbeam_channel::{unbounded, RecvTimeoutError, TryRecvError};
+
+fn main() {
+    let (s, r) = unbounded::<i32>();
+
+    // ① Timeout：空通道上 recv_timeout 等不到消息
+    let err = r.recv_timeout(Duration::from_millis(20)).unwrap_err();
+    //  recv_timeout → checked_add → recv_deadline → List::recv(Some) → Timeout
+    assert_eq!(err, RecvTimeoutError::Timeout);
+    assert!(err.is_timeout());
+    assert!(!err.is_disconnected());
+
+    // ② Disconnected：drop 发送端，排空后再 recv_timeout
+    drop(s);
+    let err = r.recv_timeout(Duration::from_millis(20)).unwrap_err();
+    assert_eq!(err, RecvTimeoutError::Disconnected);
+    assert!(err.is_disconnected());
+
+    // ③ From<RecvError> for RecvTimeoutError：recv 拿到 RecvError，转成 RecvTimeoutError
+    let (s2, r2) = unbounded::<i32>();
+    drop(s2);
+    let re = r2.recv().unwrap_err();                 // → RecvError
+    let rte: RecvTimeoutError = re.into();           // → Disconnected
+    assert!(rte.is_disconnected());
+
+    // ④ From<RecvError> for TryRecvError 同理
+    let (s3, r3) = unbounded::<i32>();
+    drop(s3);
+    let tre: TryRecvError = r3.recv().unwrap_err().into(); // RecvError → Disconnected
+    assert!(tre.is_disconnected());
+}
+```
+
+**需要观察的现象**：步骤 ① 约 20ms 后才返回（说明真的等了）；步骤 ② 也是约 20ms——因为 `recv_timeout` 在「空且断开」时其实是**立即返回 Disconnected**，不会真等满超时（通道已断，等也无益）。你可以把步骤 ② 的耗时和步骤 ① 对比来验证这一点。
+
+**预期结果**：所有断言通过；步骤 ② 耗时远小于 20ms。
+
+> 是否能本地运行：「待本地验证」。
+> 关于「断开时是否立即返回」：这是底层 flavor 的行为，本讲只从错误类型角度观察现象；底层细节见 u2-l5/u2-l6。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`RecvError` 没有 `into_inner`，也没有任何字段。那么 `match` 一个 `RecvError` 时，模式应该怎么写？
+
+**参考答案**：写成 `match err { RecvError => ... }`（单元变体，不带括号或参数）。因为 `RecvError` 是 `struct RecvError;`，它没有字段也没有变体，匹配它不需要绑定任何东西——它本身的存在就代表「接收失败」。
+
+**练习 2**：接收侧的 `From` 转换图和发送侧的几乎一模一样。这反映了什么设计思想？
+
+**参考答案**：发送侧和接收侧是**对偶**的两套错误体系，遵循完全相同的结构原则——「按方向×模式组织」「最窄类型（只含 Disconnected）单向无损地转成更宽的类型」「携带数据的类型对 trait 实现做谨慎约束」。这种对偶让两套 API 的学习成本互相折半：理解了发送侧，接收侧就是「镜像」。
+
+---
+
+### 4.4 select 相关错误：TrySelectError / SelectTimeoutError / TryReadyError / ReadyTimeoutError
+
+#### 4.4.1 概念说明
+
+除了收发，`Select` 动态选择 API（详见 [u2-l10](u2-l10-select-dynamic-api.md)）也有自己的错误类型。它们表达「一组操作里没有一个就绪」：
+
+| 错误类型 | 来源方法 | 含义 |
+| --- | --- | --- |
+| `TrySelectError` | `Select::try_select` | 当前没有任何操作就绪，全部会阻塞 |
+| `SelectTimeoutError` | `Select::select_timeout` | 超时前没有任何操作变成就绪 |
+| `TryReadyError` | `Select::try_ready` | 当前没有任何操作就绪（ready 系列的「try」版） |
+| `ReadyTimeoutError` | `Select::ready_timeout` | 超时前没有操作变成就绪 |
+
+它们都是不带泛型、不含数据的单元结构体——因为「没一个就绪」这件事本身没有额外信息可携带。
+
+#### 4.4.2 核心流程
+
+这四个类型的结构最简单：失败原因只有一种（「没人就绪」或「等到超时还没人就绪」），所以都是单元结构体，靠「类型本身」区分语义，靠方法名区分场景。它们和收发错误**没有 `From` 转换关系**——select 的失败和单条收发的失败是不同维度的事，不能互转。
+
+#### 4.4.3 源码精读
+
+四个类型两两成对，定义在 `err.rs` 后半段：
+
+[src/err.rs:91-100](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L91-L100) — `TrySelectError`（`try_select` 失败）与 `SelectTimeoutError`（`select_timeout` 超时），都是 `#[derive(PartialEq, Eq, Clone, Copy, Debug)]` 的单元结构体。
+
+[src/err.rs:102-116](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L102-L116) — `TryReadyError`（`try_ready` 失败）与 `ReadyTimeoutError`（`ready_timeout` 超时）。
+
+它们的 `Display` 与 `error::Error` 实现：
+
+[src/err.rs:340-354](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs#L340-L354) — `TrySelectError` 显示 `"all operations in select would block"`；`SelectTimeoutError` 显示 `"timed out waiting on select"`；两者都实现了 `error::Error`。
+
+> 一个值得注意的**事实**（不是缺陷，只是边界）：在 `err.rs` 里，`TrySelectError` 和 `SelectTimeoutError` 有手写的 `Display` 与 `error::Error` 实现；而 `TryReadyError` 和 `ReadyTimeoutError` **只 derive 了 `Debug`**，本文件没有给它们写 `Display`、也没有实现 `std::error::Error`。也就是说，这两者目前主要靠 `PartialEq` 比较（`assert_eq!`）来用，还不能直接装进 `Box<dyn Error>`。阅读时如果发现这点，说明你看源码看得很细——它和 `ready_*` 系列 API 的定位有关，到 u2-l10/u3-l1 讲 `Select` 时会再遇到。
+
+#### 4.4.4 代码实践
+
+**实践目标**：在没有任何操作就绪时，触发 `TrySelectError`，并观察它的 `Display` 输出。
+
+**操作步骤**（「示例代码」，用到 `Select` API，只需照抄运行；`Select` 的细节到 u2-l10 才讲，这里先当黑盒用）：
+
+```rust
+// 示例代码：src/bin/select_err.rs，然后 cargo run --bin select_err
+use crossbeam_channel::{unbounded, Select, TrySelectError};
+
+fn main() {
+    let (_s, r) = unbounded::<i32>(); // 空通道，recv 不就绪
+    let mut sel = Select::new();
+    let _i = sel.recv(&r);            // 注册一个接收操作
+
+    // 没有任何操作就绪 → try_select 立即失败
+    let err = sel.try_select().unwrap_err();
+    assert_eq!(err, TrySelectError);
+    println!("{}", err);              // 打印 "all operations in select would block"
+}
+```
+
+**需要观察的现象**：`try_select()` 立即返回错误（不等）；`println!` 打印出固定的描述串。
+
+**预期结果**：断言通过，打印 `"all operations in select would block"`。
+
+> 是否能本地运行：「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 select 相关错误都是单元结构体，而 `TrySendError` 是枚举？
+
+**参考答案**：因为 select 失败的原因只有一种——「没有操作就绪（或等到超时还没就绪）」，不需要用变体区分多种失败。而 `try_send` 可能因「满」或「断开」两种不同原因失败，必须用枚举变体区分，调用方才能据此决定「重试」还是「放弃」。
+
+**练习 2**：`TrySelectError` 和 `TryRecvError::Empty` 都表示「现在没东西可拿」。它们能互相 `From` 转换吗？
+
+**参考答案**：不能，库也没有提供这种转换。它们属于不同维度：`TryRecvError` 描述「单条接收操作」的失败，`TrySelectError` 描述「在一组操作里选一个」的失败。把一个 select 失败「转成」某条接收的失败是没有意义的（select 可能同时盯着发送和接收、盯着多条通道），所以两者各自独立。
+
+---
+
+### 4.5 channel.rs 的错误映射：从底层统一错误到对外错误
+
+#### 4.5.1 概念说明
+
+本节把镜头从 `err.rs`（定义错误）转回 `channel.rs`（产生错误）。关键问题是：**底层 flavor 的发送/接收方法只返回「带截止时间」这一种最通用的错误**（发送侧是 `SendTimeoutError`、接收侧是 `RecvTimeoutError`），但对外要暴露 `SendError` / `TrySendError` 等不同类型。这中间的「翻译」就发生在 `channel.rs` 的几个方法里——也就是 u1-l3 提到的「错误归一化」母题。本节把它和 `err.rs` 的 `From` 实现正式对接起来。
+
+#### 4.5.2 核心流程
+
+把发送侧四个方法的错误流向画出来：
+
+```text
+try_send      ──► (底层) TrySendError            ──► 直接返回 TrySendError
+send          ──► (底层) SendTimeoutError         ──► map_err: Disconnected→SendError, Timeout→unreachable!
+send_deadline ──► (底层) SendTimeoutError         ──► 直接返回 SendTimeoutError
+send_timeout  ──► checked_add(Duration)
+                   ├─ Some(deadline) → send_deadline（返回 SendTimeoutError）
+                   └─ None（溢出）    → send().map_err(SendTimeoutError::from)   ← 复用 From 兜底
+```
+
+接收侧四个方法完全对称（`TryRecvError` / `RecvError` / `RecvTimeoutError`）。三个要点：
+
+1. **`try_send` / `send_deadline` / `try_recv` / `recv_deadline` 直接透传**底层错误，不做转换。
+2. **`send` / `recv` 做收窄**：把通用错误里「不可能发生」的变体用 `unreachable!()`（发送侧）或 `.map_err(|_| ...)`（接收侧）切掉。
+3. **`send_timeout` / `recv_timeout` 借助 `err.rs` 的 `From`**：在 `Duration` 溢出、退化为无限等待时，用 `From` 把 `SendError`/`RecvError` 升格回正确的错误类型。
+
+#### 4.5.3 源码精读
+
+先看 `channel.rs` 顶部导入了哪些错误类型：
+
+[src/channel.rs:13-19](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L13-L19) — `use crate::err::{RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError}`：恰好导入收发相关的 6 个（select 错误归 `select.rs` 用，不在 `channel.rs`）。
+
+`send` 的归一化——这是 `unreachable!()` 的正式出处：
+
+[src/channel.rs:446-456](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L446-L456) — `send` 转发到底层 `chan.send(msg, None)`（`None` = 无限等待），再用 `map_err` 把 `SendTimeoutError::Disconnected(msg)` 映射成 `SendError(msg)`；`Timeout` 分支因为不可能发生（永不超时），用 `unreachable!()` 兜底。
+
+```rust
+pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
+    match &self.flavor { /* … chan.send(msg, None) … */ }
+        .map_err(|err| match err {
+            SendTimeoutError::Disconnected(msg) => SendError(msg),
+            SendTimeoutError::Timeout(_) => unreachable!(),
+        })
+}
+```
+
+> 这个 `unreachable!()` 正是 4.1 节「越愿意等，失败原因越少」的代码体现：因为传了 `None`，底层绝不可能返回 `Timeout`，所以 `SendTimeoutError` 的 `Timeout` 变体在 `send` 的语境下是「类型上存在、运行时不可能」的死分支，用 `unreachable!()` 显式排除，既满足穷尽匹配，又能在逻辑出错时立刻 panic。
+
+`recv` 的归一化则用「一刀切」的 `.map_err(|_| RecvError)`：
+
+[src/channel.rs:831-857](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L831-L857) — `recv` 转发到底层 `chan.recv(None)`，末尾 `.map_err(|_| RecvError)` 把任何失败都映射成单个 `RecvError`。
+
+> 为什么 `recv` 用 `.map_err(|_| RecvError)` 而 `send` 用带 `unreachable!()` 的 `match`？因为接收侧的 `RecvTimeoutError` 在 `recv`（传 `None`）语境下同样不可能返回 `Timeout`，但接收侧的对外错误 `RecvError` 是个**单元结构体、不带数据**——无论底层返回 `Disconnected` 还是（不可能的）`Timeout`，映射结果都是同一个 `RecvError`，所以干脆用闭包「丢掉」底层错误细节，比写 `match` 更简洁。两种写法表达的是同一件事：把「不可能的 `Timeout`」消除掉。
+
+真正体现「库自己复用 `From`」的地方是 `send_timeout`：
+
+[src/channel.rs:495-500](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L495-L500) — `send_timeout` 用 `checked_add` 把 `Duration` 换算成 `Instant`：算得出就交给 `send_deadline`；算不出（溢出）就退化为 `send`，并用 `SendTimeoutError::from`（即 `err.rs` 的 `From<SendError>`）把 `SendError` 升格成 `SendTimeoutError::Disconnected`。
+
+```rust
+pub fn send_timeout(&self, msg: T, timeout: Duration) -> Result<(), SendTimeoutError<T>> {
+    match Instant::now().checked_add(timeout) {
+        Some(deadline) => self.send_deadline(msg, deadline),
+        None => self.send(msg).map_err(SendTimeoutError::from),
+    }
+}
+```
+
+接收侧 `recv_timeout` 的结构一模一样，复用的是 `From<RecvError> for RecvTimeoutError`：
+
+[src/channel.rs:896-901](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L896-L901) — `recv_timeout` 的 `None` 分支用 `recv().map_err(RecvTimeoutError::from)` 兜底，靠 `err.rs` 的 `From<RecvError>` 完成 `RecvError → RecvTimeoutError::Disconnected` 的升格。
+
+> 这一节把 `err.rs` 和 `channel.rs` 缝合起来了：`err.rs` 里那几条 `From` 看似只是「用户便利」，其实是 `send_timeout` / `recv_timeout` 溢出兜底路径的**必要零件**。没有它们，`channel.rs` 就得手写一遍同样的 `match`。这就是为什么错误类型要专门设计「最窄 → 更宽」的单向 `From`。
+
+#### 4.5.4 代码实践
+
+**实践目标**：通过阅读真实测试，确认「底层错误 → 对外错误」的映射在各种 flavor 上都成立。
+
+**操作步骤**（「源码阅读型实践」）：
+
+1. 打开 [tests/zero.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/zero.rs)（零容量通道测试）。
+2. 找到并阅读这几个测试：
+   - `smoke`（[tests/zero.rs:20-25](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/zero.rs#L20-L25)）：验证 `try_send` 在无接收方时返回 `Err(TrySendError::Full(7))`、`try_recv` 返回 `Err(TryRecvError::Empty)`。
+   - `recv_timeout`（[tests/zero.rs:102-121](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/zero.rs#L102-L121)）：验证 `recv_timeout` 先返回 `Timeout`、收到 `7` 后再返回 `Disconnected`。
+   - `try_send`（[tests/zero.rs:124-135](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/zero.rs#L124-L135) 起）：验证 `Full` → 成功 → `Disconnected` 的完整生命周期。
+3. 对每条 `assert_eq!`，标注它最终命中了 4.5.2 流程图里的哪一条边（透传 / 收窄 / From 兜底）。
+
+**需要观察的现象 / 预期结果**：`smoke` 里的 `Full`/`Empty` 来自 `try_send`/`try_recv` 的**直接透传**；`recv_timeout` 里的 `Timeout` 来自 `recv_deadline` 的**直接透传**、`Disconnected` 同样透传；这些测试**没有**走到 `From` 兜底分支（那需要构造溢出的 `Duration`）。这说明日常使用里，`From` 兜底是冷路径。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`send` 用 `unreachable!()` 处理 `Timeout`，`recv` 用 `.map_err(|_| RecvError)` 处理一切。如果把 `recv` 也改成带 `unreachable!()` 的 `match`，会怎样？
+
+**参考答案**：也能编译通过、行为等价，但更啰嗦——要写成 `match err { RecvTimeoutError::Timeout(_) => unreachable!(), RecvTimeoutError::Disconnected => RecvError }`。因为 `RecvError` 不带数据，两种失败映射到的是同一个值，所以作者用 `.map_err(|_| RecvError)` 一刀切，更简洁。这是「错误是否携带数据」影响归一化写法的典型例子。
+
+**练习 2**：如果你给 `send_timeout` 传一个会让 `Instant::now() + timeout` 溢出的巨大 `Duration`，最终返回的错误类型是什么？变体是什么？
+
+**参考答案**：仍是 `SendTimeoutError<T>`，但变体**几乎一定是 `Disconnected`**（如果通道断了）或**一直阻塞**（如果没断）。因为溢出走 `None => self.send(msg).map_err(SendTimeoutError::from)` 分支：等价于无限等待的 `send`，它要么永远阻塞、要么在断开时返回 `SendError`，再被 `From` 升格成 `SendTimeoutError::Disconnected`。**绝不会返回 `Timeout`**——因为这条路径根本不会超时。
+
+---
+
+## 5. 综合实践
+
+把本讲的「错误类型分类 + From 转换 + channel.rs 归一化」串起来，完成下面这个贯穿任务（即本讲规格里要求的代码实践）。
+
+**任务**：编写一组单元测试（可放进仓库的 `tests/` 或独立 crate），覆盖以下场景，并把 `SendError` 通过 `From` 同时转成 `TrySendError` 和 `SendTimeoutError`。
+
+1. **`try_send` 的 `Full` 与 `Disconnected`**：
+   - `bounded(1)`：第一条 `try_send` 成功，第二条返回 `Err(TrySendError::Full(_))`，用 `into_inner` 取回消息。
+   - `drop(r)` 后再 `try_send`，返回 `Err(TrySendError::Disconnected(_))`。
+2. **`recv_timeout` 的 `Timeout` 与 `Disconnected`**：
+   - 空 `unbounded` 上 `recv_timeout(短暂)` 返回 `Err(RecvTimeoutError::Timeout)`。
+   - `drop(s)` 排空后再 `recv_timeout`，返回 `Err(RecvTimeoutError::Disconnected)`。
+3. **`SendError` 的双向 `From`**：
+   - 在断开的通道上 `send` 拿到 `SendError`。
+   - 用 `.into()` 分别转成 `TrySendError` 和 `SendTimeoutError`，断言两者都是 `Disconnected` 变体、且 `into_inner` 取回的消息值不变。
+
+**参考实现**（「示例代码」，组织成 `#[test]` 函数；可放进 `tests/u2_l3_practice.rs` 用 `cargo test --test u2_l3_practice` 运行）：
+
+```rust
+// 示例代码：tests/u2_l3_practice.rs
+use std::time::Duration;
+use crossbeam_channel::{
+    bounded, unbounded, TrySendError, TryRecvError,
+    RecvTimeoutError, SendError, SendTimeoutError,
+};
+
+#[test]
+fn try_send_full_and_disconnected() {
+    let (s, r) = bounded(1);
+    assert_eq!(s.try_send(1), Ok(()));
+    // 第二条：满 → Full，且能取回消息
+    let err = s.try_send(2).unwrap_err();
+    assert_eq!(err, TrySendError::Full(2));
+    assert_eq!(err.into_inner(), 2);
+
+    drop(r);
+    // 断开 → Disconnected
+    let err = s.try_send(3).unwrap_err();
+    assert_eq!(err, TrySendError::Disconnected(3));
+    assert!(err.is_disconnected());
+}
+
+#[test]
+fn recv_timeout_and_disconnected() {
+    let (s, r) = unbounded::<i32>();
+    // 空 → Timeout
+    assert_eq!(
+        r.recv_timeout(Duration::from_millis(20)),
+        Err(RecvTimeoutError::Timeout)
+    );
+
+    s.send(7).unwrap();
+    assert_eq!(r.recv_timeout(Duration::from_secs(1)), Ok(7)); // 取走
+
+    drop(s);
+    // 空且断开 → Disconnected（注意：通常立即返回，不等满超时）
+    assert_eq!(
+        r.recv_timeout(Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+}
+
+#[test]
+fn send_error_converts_both_ways() {
+    let (s, r) = bounded::<i32>(1);
+    drop(r);
+
+    // 拿到 SendError
+    let se = s.send(100).unwrap_err();
+    assert_eq!(se.into_inner(), 100); // 先消费一个验证 into_inner
+
+    // 再拿两个，分别转成 TrySendError 和 SendTimeoutError
+    let into_try: TrySendError<i32> = s.send(100).unwrap_err().into();
+    assert!(into_try.is_disconnected());
+    assert!(!into_try.is_full());
+    assert_eq!(into_try.into_inner(), 100);
+
+    let into_timeout: SendTimeoutError<i32> = s.send(100).unwrap_err().into();
+    assert!(into_timeout.is_disconnected());
+    assert!(!into_timeout.is_timeout());
+    assert_eq!(into_timeout.into_inner(), 100);
+
+    // 顺手验证接收侧的 From：RecvError -> TryRecvError
+    let (s2, r2) = unbounded::<i32>();
+    drop(s2);
+    let into_try_recv: TryRecvError = r2.recv().unwrap_err().into();
+    assert!(into_try_recv.is_disconnected());
+}
+```
+
+**完成标准**：
+
+- `cargo test` 三个测试全部通过。
+- 你能口述：`try_send` 的 `Full` 为什么能 `into_inner` 取回消息？`SendError` 为什么能无损转成 `TrySendError` 和 `SendTimeoutError`，反过来却不行？
+- 你能在 `src/channel.rs` 里指出 `send`（[L446-L456](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L446-L456)）和 `recv`（[L831-L857](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L831-L857)）各用了哪种归一化写法（`unreachable!()` vs `.map_err(|_| RecvError)`），以及为什么不同。
+- 你能解释 `recv_timeout` 测试里「断开后通常立即返回 `Disconnected`」这一现象（提示：底层 flavor 发现断开后会立刻唤醒并返回，不会傻等满超时；细节在 u2-l5/u2-l6）。
+
+---
+
+## 6. 本讲小结
+
+- `err.rs` 定义了 10 个错误类型，可按「方向（发送/接收/select）× 模式（非阻塞/阻塞/超时）」分类；失败归根到底只有四种原因：`Full` / `Empty` / `Timeout` / `Disconnected`，每个错误类型是这四种的一个子集。
+- 发送侧三件套（`SendError` / `TrySendError` / `SendTimeoutError`）携带消息 `T`，提供 `into_inner` 和 `is_full`/`is_disconnected`/`is_timeout`；接收侧三件套（`RecvError` / `TryRecvError` / `RecvTimeoutError`）不带数据，提供 `is_empty`/`is_disconnected`/`is_timeout`。两者结构对偶。
+- `From` 转换是**单向**的：只有最窄的 `SendError`/`RecvError`（失败集合只含 Disconnected）能无损升格成更宽的 `TrySendError`/`SendTimeoutError` 或 `TryRecvError`/`RecvTimeoutError`；反之因失败集合不是子集而不提供，避免有歧义的转换。
+- 发送侧三个错误**手写 `Debug`**（打印占位符 `..`，不要求 `T: Debug`）、`Error` impl 额外要求 `T: Send`；接收侧错误直接 `derive(Debug)`、`Error` 无额外约束——这反映了「错误是否携带数据」对 trait 实现的影响。
+- select 相关 4 个错误（`TrySelectError`/`SelectTimeoutError`/`TryReadyError`/`ReadyTimeoutError`）都是单元结构体，与收发错误无 `From` 关系；其中前两者有 `Display`+`Error`，后两者目前只 `derive(Debug)`。
+- `channel.rs` 的错误归一化把底层统一的 `SendTimeoutError`/`RecvTimeoutError` 翻译成对外类型：`send` 用带 `unreachable!()` 的 `match` 消除不可能的 `Timeout`，`recv` 用 `.map_err(|_| RecvError)` 一刀切；`send_timeout`/`recv_timeout` 在 `Duration` 溢出时复用 `err.rs` 的 `From` 兜底，把退化的 `SendError`/`RecvError` 升格回正确类型。
+
+---
+
+## 7. 下一步学习建议
+
+- **回到阻塞与唤醒**：本讲只讲了「失败时返回什么」。如果你想知道 `recv_timeout` 为什么在「断开」时往往立即返回、在「空但未断开」时才真的等满超时——这背后是底层 flavor 的 `disconnect` 回调如何唤醒阻塞者。下一步读 [u2-l4 阻塞与唤醒机制](u2-l4-blocking-and-waking.md)，看 `Context` / `SyncWaker` 如何把「通道断了」变成「立刻唤醒所有等待者」。
+- **推荐阅读的源码**：
+  - 把 [`src/err.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/err.rs) 从头扫一遍，对照本讲的「方向×模式」表，确认每个类型的变体、`Display` 字符串和 `From` 实现。
+  - 在 [`src/channel.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs) 里对照阅读 `send`（[L446](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L446)）、`send_timeout`（[L495](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L495)）、`recv`（[L831](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L831)）、`recv_timeout`（[L896](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/channel.rs#L896)），体会「底层一种通用错误 → 对外多种错误」的归一化。
+  - 读 [`tests/zero.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/zero.rs) 和 [`tests/array.rs`](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/tests/array.rs)，看测试如何断言每一种错误变体。
+- **与 select 体系汇合**：本讲的 select 相关错误只是「错误侧」的预告。要完整理解它们从哪来，等到 [u2-l10 使用 Select 动态 API](u2-l10-select-dynamic-api.md) 和 [u3-l1 select 核心算法](u3-l1-select-algorithm.md)，你会看到 `try_select` / `select_timeout` / `try_ready` / `ready_timeout` 如何产生本讲这四个错误。
