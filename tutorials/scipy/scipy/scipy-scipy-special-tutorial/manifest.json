@@ -1,7 +1,7 @@
 {
   "project": "scipy-scipy-special",
-  "head": "c3a772bd1344d4b95beb76fd8340a0c067be92e7",
-  "rationale": "scipy.special 是一个体量庞大的「特殊函数」子模块（250+ 函数），其学习难点不在数学本身，而在于它「Python 包装 → Cython → C/C++ 内核」的多层架构和「声明式 JSON → 代码生成 → 编译」的工程管线。因此大纲按「先认知、再机制、后内核」的顺序展开。第一层（U1–U2）让读者从零认识模块定位、目录结构、入口构建，并理解贯穿全模块的 NumPy ufunc 与错误处理两大通用机制；第二层（U3–U5）进入核心工程：代码生成管线（U3，本模块的工程心脏）、纯 Python 包装层（U4）与正交多项式/高斯求积（U5）；第三层（U6–U8）深入专家级内核：cython_special 类型化 API（U6）、sf_error 的 C→Python 错误贯通（U7）、xsf/Boost/Cephes/cdflib 等 C++ 后端（U8）；最后 U9 讲数值验证测试方法论，U10 讲 Array API 多后端（PyTorch/JAX/CuPy/Dask）支持。讲义之间通过 depends_on 形成清晰依赖链，每篇聚焦单一主题并配一个可操作的代码实践任务，确保读者既能「用」也能「读懂源码」甚至「二次开发」。\n\n本次增量（278c037d07 → c3a772bd13）对 special 目录的唯一改动是 meson.build 删除了 6 行：原本仅针对 GCC 的 -Wno-psabi 告警屏蔽块（含注释）被移除并集中到顶层 meson.build，而真正有意义的 ufuncs_cpp_args = ['-DSP_SPECFUN_ERROR'] 予以保留。经核查，已生成的 8 篇讲义（u1-l1～u3-l1）正文均未引用 psabi/ufuncs_cpp_args，且各讲义的学习目标、主题与实践任务（涉及扩展模块目标、依赖、custom_target/generator、npz 生成等）均不受影响，故标记为 keep；其余尚未生成的讲义仍标记为 new，待按当前源码生成。",
+  "head": "8e93e0478ca5b6e0b51652a1395f54160be2a672",
+  "rationale": "scipy.special 是一个体量庞大的「特殊函数」子模块（250+ 函数），其学习难点不在数学本身，而在于它「Python 包装 → Cython → C/C++ 内核」的多层架构和「声明式 JSON → 代码生成 → 编译」的工程管线。因此大纲按「先认知、再机制、后内核」的顺序展开。第一层（U1–U2）让读者从零认识模块定位、目录结构、入口构建，并理解贯穿全模块的 NumPy ufunc 与错误处理两大通用机制；第二层（U3–U5）进入核心工程：代码生成管线（U3，本模块的工程心脏）、纯 Python 包装层（U4）与正交多项式/高斯求积（U5）；第三层（U6–U8）深入专家级内核：cython_special 类型化 API（U6）、sf_error 的 C→Python 错误贯通（U7）、xsf/Boost/Cephes/cdflib 等 C++ 后端（U8）；最后 U9 讲数值验证测试方法论，U10 讲 Array API 多后端（PyTorch/JAX/CuPy/Dask）支持。讲义之间通过 depends_on 形成清晰依赖链，每篇聚焦单一主题并配一个可操作的代码实践任务，确保读者既能「用」也能「读懂源码」甚至「二次开发」。\\n\\n本次增量（c3a772bd13 → 8e93e0478c）仅新增一个提交 8e93e0478c「BUG: Copy non-writable array when all bounds are equal」，该提交只修改了 scipy/optimize/_minimize.py 与其测试，对 scipy/special 目录零改动（git diff 在 special 下为空）。因此 special 的源码、构建与接口均无变化，已生成的 8 篇讲义（u1-l1～u3-l1）继续标记为 keep，其余尚未生成的讲义继续标记为 new，等待按当前源码生成。整体学习顺序与单元划分保持不变。",
   "units": [
     {
       "id": "u1",

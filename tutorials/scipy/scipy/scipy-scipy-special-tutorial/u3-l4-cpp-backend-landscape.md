@@ -1,452 +1,451 @@
-# C/C++ 后端版图：xsf、Boost、Cephes、cdflib、specfun
+# C/C++ 后端版图:xsf、Boost、Cephes、cdflib、specfun
 
 ## 1. 本讲目标
 
-学完本讲，你应当能够：
+本讲是「代码生成管线」单元(U3)的第四讲,也是收官讲。前三讲我们沿着**同一条主链**往下走:
 
-- 说出 `scipy.special` 背后到底有几套 C/C++ 数学后端，它们各自的历史定位是什么；
-- 读懂 `functions.json` 中「头文件」字段的命名约定（`.h` / `.h++` / `.pxd`），并据此判断任意一个 ufunc 走的是哪条后端链路；
-- 理解为什么同一个数学问题（比如不完全 Beta 函数）会被路由到 Boost 而不是 Cephes；
-- 认识 `xsf` 作为 SciPy 自研的新一代统一 C++ 库，是如何逐步吸收 Cephes、specfun 等遗留库的，以及「双轨注册」（生成式 `.pyx` vs 直接 C++ 注册）的现状。
+- u3-l1 讲清了 `functions.json` 的**声明语法**(函数名 → 头文件 → 内核 → 类型签名);
+- u3-l2 讲清了 `_generate_pyx.py` 如何把声明**翻译**成 `_ufuncs.pyx`;
+- u3-l3 讲清了 `meson.build` 如何把 `.pyx` **编译链接**成可加载的 `.so`。
 
-本讲是 U3 代码生成管线的收口讲：u3-l1 讲了「声明长什么样」，u3-l2 讲了「声明怎么变成代码」，u3-l3 讲了「代码怎么编成扩展模块」。本讲回答最后一个问题——**这些扩展模块里调用的 C/C++ 数学内核，到底来自哪里、如何被选择**。
+但在这一切之下,始终有一个我们**故意绕开**的核心问题:**那些「内核函数」到底从哪里来?** 当 `functions.json` 写下 `"xsf_wrappers.h"` 或 `"boost_special_functions.h++"` 时,它指向的是谁?这些 C/C++ 函数又是谁写的、什么时候写的、为什么会有这么多套?
+
+本讲就来回答这个问题。`scipy.special` 的数值内核**不是一个统一的库**,而是由**五套来源、年代、风格各异的 C/C++ 数学库**拼装而成:现代化的自研库 **xsf**、第三方的 **Boost.Math**、经典的 **Cephes**、概率分布专用的 **cdflib**、以及 Zhang & Jin 的 **specfun**。学完本讲,你应当能够:
+
+1. 识别这五套后端各自的**历史定位**与职责边界,知道哪类函数归谁管。
+2. 读懂 `functions.json` 的「头文件」字段如何**调度**到具体后端实现,并能判断某条声明用的是 C 还是 C++、新库还是遗留库。
+3. 理解一个正在发生的**迁移趋势**:几乎所有内核都在向统一的 **xsf** C++ 库收敛,而注册方式也在从「JSON 生成」向「纯 C++ 直注册」迁移。
+
+一句话定位:前三讲讲的是**怎么把声明变成可调用的 ufunc**,本讲讲的是**声明背后真正干活的那些 C/C++ 内核是谁**。
 
 ## 2. 前置知识
 
-阅读本讲前，你需要掌握以下概念（前几讲已建立）：
+阅读本讲前,最好了解以下概念(不熟悉也不要紧,下面会顺带解释):
 
-- **ufunc 与类型签名**：`scipy.special` 几乎都是 NumPy ufunc，用单字符类型码（`f`/`d`/`g` 实数、`F`/`D`/`G` 复数、`i`/`l`/`p` 整数）描述 `输入->返回` 的签名（见 u2-l1、u3-l1）。
-- **`functions.json` 三层结构**：`函数名 → 头文件 → {内核函数名: 类型签名}`（见 u3-l1）。本讲重点关注中间那一层「头文件」。
-- **生成式 vs 直注册两条路径**：`functions.json` 里登记的函数由 `_generate_pyx.py` 生成 `_ufuncs.pyx` / `_ufuncs_cxx.pyx`；而 `special_ufuncs` 名单内的函数改走 `_special_ufuncs.cpp` 直接用 C++ 注册 ufunc（见 u3-l2、u3-l3）。
-- **Meson 扩展模块**：special 由 `_ufuncs`、`_ufuncs_cxx`、`_special_ufuncs`、`_gufuncs`、`_specfun`、`_ellip_harm_2`、`cython_special` 七个扩展模块 + 一个 `cdflib` 静态库组成（见 u3-l3）。
+- **特殊函数(special function)**:在物理、统计、工程中反复出现的「有名有姓」的数学函数,如 Bessel 函数、Gamma 函数、误差函数 erf、椭圆积分、超几何函数等。它们大多没有初等闭式解,需要数值算法(级数、连分式、递推、渐近展开)来计算。
+- **C 与 C++ 的互操作(`extern "C"`)**:C++ 会「改名(name mangling)」函数符号,而 C 不会。要让 C++ 编译的函数能被 C(或 Cython 的 C 后端)调用,需要用 `extern "C"` 关闭改名。本讲会看到 `xsf_wrappers.h` 正是这么做的。
+- **复数的两种表示**:NumPy 用自己的 `npy_cdouble`(一个 `{double real, imag;}` 结构),C++ 标准库用 `std::complex<double>`。两者内存布局兼容但不能直接互传,需要桥接函数。
+- **Boost.Math policy**:Boost.Math 库提供的一种「策略」机制,可以全局关闭类型提升(`promote_float`/`promote_double`)、并把错误处理函数替换成用户自定义的实现。本讲会看到 SciPy 用它把 Boost 的 C++ 异常翻译成 Python 的告警/异常。
 
-本讲不要求你懂 C++ 模板或 Boost 的细节——遇到时会就地解释。
+如果你读过 u3-l1(`functions.json` 语法)、u3-l2(代码生成器)和 u3-l3(编译目标),本讲会非常自然;否则建议先扫一眼那三讲的结论。本讲与 u3-l3 的分工是:u3-l3 关心**「这些源码被编译进了哪个扩展模块」**,本讲关心**「这些源码本身是什么库、谁写的、为什么选它」**。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件：
+本讲聚焦的文件:
 
 | 文件 | 角色 |
-|------|------|
-| [`functions.json`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/functions.json) | 声明表。中间层「头文件」字段就是本讲的**调度总开关**。 |
-| [`xsf_wrappers.h`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.h) / [`xsf_wrappers.cpp`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.cpp) | xsf 库的 C 可调用包装层（`extern "C"`），是 `_ufuncs.pyx` 调用 C++ 内核的桥。 |
-| [`boost_special_functions.h`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h) | Boost.Math 集成层：定义策略 + 把 Boost 异常桥接成 Python 告警/异常。 |
-| [`_legacy.pxd`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_legacy.pxd) | Cephes 内核的 Cython 包装，处理「历史遗留的浮点→整数静默截断」。 |
-| [`_cdflib_wrappers.pxd`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_cdflib_wrappers.pxd) | cdflib（概率分布 CDF/分位数）的 Cython 包装。 |
-| [`ellint_carlson_wrap.hh`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/ellint_carlson_wrap.hh) | Carlson 对称椭圆积分的轻量 C++ 包装。 |
-| [`_specfun.pyx`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_specfun.pyx) | Zhang & Jin specfun 库（现已迁入 xsf 命名空间）的序列型函数入口。 |
-| [`meson.build`](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/meson.build) | 把上述后端链接进各扩展模块的构建编排。 |
+| --- | --- |
+| [functions.json](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/functions.json) | **后端调度总开关**。每条 ufunc 声明的「头文件」字段决定它用哪个后端、用 C 还是 C++。本讲反复回到这里做统计与判别。 |
+| [xsf_wrappers.h](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.h) / [xsf_wrappers.cpp](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.cpp) | **xsf 后端的 C 包装层**。把 xsf C++ 库(以及折叠进 xsf 的 Cephes)的函数包成 `extern "C"`、`npy_cdouble` 友好的接口,供 Cython/ufunc 层调用。 |
+| [boost_special_functions.h](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h) | **Boost.Math 后端的接入层**。定义 `SpecialPolicy` 策略、自定义错误处理函数,并把 Boost 的 `ibeta`/`hypergeometric_1F1` 等包成 `*_float`/`*_double` 双内核。 |
+| [_legacy.pxd](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_legacy.pxd) | **Cephes 遗留路径**。为那些「历史上静默把 double 截断成 int」的函数提供带告警的 `_unsafe` 包装,底层转发到 `cephes_*_wrap`。 |
+| [cdflib.h](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/cdflib.h) | **cdflib 后端**。一套从 Fortran 重写为 C 的概率分布 CDF/分位数库(F、非中心 F、t 等),编译为静态库 `cdflib_lib` 供 `_ufuncs` 链接。 |
+| [_generate_pyx.py](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_generate_pyx.py) | 提供 `special_ufuncs` 名单(约 189 个)与生成闸门,是理解「两条注册路径」分工的关键。 |
+| [meson.build](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/meson.build) | 把上述各后端**按语言/来源拆分**到不同扩展模块,并各自挂上正确依赖(`xsf_dep`、`boost_math_dep`、`cdflib_lib`、`ellint_dep`)。 |
 
-> 提示：xsf 库的**实现**（`xsf/*.h`、`xsf/cephes/*.h`）不在 `special/` 目录内，而是位于 `scipy/_lib/xsf/`，通过 Meson 的 `xsf_dep` 依赖引入。本讲通过 `xsf_wrappers.cpp` 的 `#include <xsf/...>` 来观察它。
+> 提示:`xsf` 库本身的头文件(如 `<xsf/airy.h>`、`<xsf/cephes/igam.h>`)在本检出里**看不到**——它以 Meson 子项目(subproject)形式在构建期拉取,`xsf_dep` 来自[根 meson.build](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/meson.build) 的 `xsf = subproject('xsf')`(参见 u3-l3)。本讲能直接读到的,是它在本目录的**包装层** `xsf_wrappers.*`。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 后端调度：functions.json 的「头文件」字段如何选择内核
+### 4.1 后端调度:`functions.json` 的头文件字段与两条注册路径
 
 #### 4.1.1 概念说明
 
-当你在 Python 里写 `special.betainc(2, 3, 0.5)` 时，最终一定落在某个 C/C++ 函数上。问题是：**到底落在哪个库的哪个函数上？** 这不是运行时决定的，而是**构建时**由 `functions.json` 的「头文件」字段一次性钉死的。
+「后端(backend)」在这里指的是:**一个 ufunc 真正用来算数的 C/C++ 函数体从哪个库来**。同样是算 `betainc`,底层既可以用 Boost.Math 的 `ibeta`,也可以(历史上)用 Cephes 的 `incbet`。选择哪一个,就是「后端调度」。
 
-回顾 u3-l1：`functions.json` 是三层嵌套——
+在 `scipy.special` 里,这个调度**不是用 if/else 写在代码里**,而是**声明式**地写在 `functions.json` 的**头文件字段**里。回顾 u3-l1 讲过的三层嵌套:
 
 ```
-函数名(顶层)  →  头文件(中层)  →  {内核函数名: 类型签名}(内层)
+函数名(ufunc 的 Python 名)
+  └── 头文件(决定后端 + 语言)
+        └── 内核函数名: 类型签名
 ```
 
-中层的「头文件」名同时编码了两条信息：
+中间这一层「头文件」就是后端开关。它的取值有明确约定:
 
-1. **语言**：以 `.h` 结尾是 C 头，以 `.h++`（或 `.hh++`）结尾是 C++ 头，以 `.pxd` 结尾是 Cython 头。
-2. **后端库**：文件名本身（`xsf_wrappers.h`、`boost_special_functions.h++`、`_legacy.pxd`、`_cdflib_wrappers.pxd`、`ellint_carlson_wrap.hh++`、`orthogonal_eval.pxd`）直接对应一套数学后端。
+| 头文件字段 | 后端 | 语言 | 判别特征 |
+| --- | --- | --- | --- |
+| `xsf_wrappers.h` | **xsf**(含折叠进来的 Cephes) | C 接口(`extern "C"`) | 文件名 `.h` |
+| `boost_special_functions.h++` | **Boost.Math** | C++ | 文件名以 `++` 结尾 |
+| `_legacy.pxd` | **Cephes 遗留**(带 `_unsafe` 截断告警) | Cython 头 | `.pxd` |
+| `_cdflib_wrappers.pxd` | **cdflib** | Cython 头 | `.pxd` |
+| `_ellip_harm.pxd` / `_cosine.h` / `sf_error.pxd` | 专项小内核 | Cython/C | 各自专项 |
 
-生成器 `_generate_pyx.py` 读到这个头文件名后，会据此决定把内核函数 `cimport` 进哪个 `.pyx`、链接哪个依赖（见 u3-l2 的 C/C++ 分离）。所以「头文件」字段就是后端调度的总开关。
+> **关键判别法则(来自 u3-l1)**:看头文件名是否以 `++` 结尾 —— 是则是 C++ 内核(进 `_ufuncs_cxx`),否则是 C 内核(进 `_ufuncs`)。`.pxd` 表示该内核由 Cython 头声明、实现在别处。
 
-#### 4.1.2 核心流程
+#### 4.1.2 核心流程:两条注册路径
 
-一条 ufunc 从声明到后端的调度链路：
+但「头文件字段」只描述了**一条**路径。事实上 `scipy.special` 现在有**两条**把 C/C++ 内核注册成 ufunc 的路径,这正是理解后端版图的全局骨架:
 
-```text
-functions.json 条目
-   │  中层 key = 头文件名
-   ├─ 若以 "++" 结尾（C++） → 内核进 _ufuncs_cxx.pyx → 编进 _ufuncs_cxx 扩展
-   │     ├─ boost_special_functions.h++   → Boost.Math（链接 boost_math_dep）
-   │     └─ ellint_carlson_wrap.hh++      → Carlson 轻量 C++（依赖 ellint_dep）
-   └─ 否则（C 或 Cython）→ 内核进 _ufuncs.pyx → 编进 _ufuncs 扩展
-         ├─ xsf_wrappers.h               → xsf 库（依赖 xsf_dep，且 link cdflib_lib）
-         ├─ _legacy.pxd                  → Cephes（经遗留截断包装）
-         ├─ _cdflib_wrappers.pxd         → cdflib（link cdflib_lib）
-         └─ orthogonal_eval.pxd          → Cython 自实现的正交多项式求值
+1. **JSON 生成路径**(u3-l1~u3-l3 讲的那条):`functions.json` → `_generate_pyx.py` → `_ufuncs.pyx`(C 内核)/ `_ufuncs_cxx.pyx`(Boost 等 C++ 内核)→ 编译。当前 `functions.json` 里有约 **128 条**这样的声明。
+2. **C++ 直注册路径**:在 `_special_ufuncs.cpp` / `_gufuncs.cpp` 里,用 xsf 提供的 `xsf::numpy::ufunc` 模板**直接**在 C++ 里注册 ufunc,完全不经过 `functions.json` 与代码生成。这条路径上的函数名列在 `_generate_pyx.py` 的 `special_ufuncs` 名单里,共 **189 个**(如 `airy`、`erf`、`jv`、`gamma`)。
+
+两条路径的「分工闸门」就在 `_generate_pyx.py` 的主循环里:遍历 `functions.json` 时,**凡是名字出现在 `special_ufuncs` 名单里的,就跳过、不生成**——因为它们已经由 C++ 直注册路径接管了。
+
+```python
+for f, sig in functions.items():
+    if (f not in special_ufuncs):      # 闸门:已被 C++ 直注册接管的,跳过
+        ufuncs.append(Ufunc(f, sig))
 ```
 
-关键判据只有一句：**看头文件名是否以 `++` 结尾，就知道这个内核是 C 还是 C++**（这是 u3-l1 已建立的规则，本讲把它落到具体后端库上）。
+这就解释了一个容易让初学者困惑的现象:你会在 `functions.json` 里**找不到** `erf`、`airy`、`gammainc` 这些「明星函数」——它们的声明已被移出 JSON,改由 `_special_ufuncs.cpp` 全权注册。这正是「迁移趋势」的直接证据。
 
 #### 4.1.3 源码精读
 
-看几个真实的「一个函数、多个后端」的条目，理解头文件如何同时调度多个内核。
+先看 JSON 生成路径里三种典型后端声明并排出现的样子。`bdtr`(二项分布 CDF)同时挂了**两个**后端——遗留的 `_legacy.pxd` 和现代的 `xsf_wrappers.h`,由类型分发(见 u3-l1 的 `iter_variants`)决定实际用哪个:
 
-`bdtr`（二项分布 CDF）同时声明了两个来源——`_legacy.pxd`（遗留安全包装）和 `xsf_wrappers.h`（xsf/Cephes 内核）：
+[functions.json:25-32](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/functions.json#L25-L32) —— `bdtr` 声明:`bdtr_unsafe`(遗留,`ddd->d`)与 `cephes_bdtr_wrap`(xsf/Cephes,`dpd->d`,注意中间参数是 `p`=指针宽度整数)两个内核并存。
 
-- [functions.json:25-32](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/functions.json#L25-L32) —— `bdtr` 把 `bdtr_unsafe`（遗留）和 `cephes_bdtr_wrap`（Cephes 经 xsf 暴露）并列。生成器会按类型签名 `ddd->d` / `dpd->d` 生成多个 loop，运行时按输入 dtype 选择。
+再看纯 Boost 后端的 `betainc`(不完全 Beta 函数),它只有 Boost 一个来源,且提供了 float/double 双内核:
 
-`hyp1f1`（合流超几何函数）则把 Boost（实数双精度）和 xsf（复数）两条后端拼在一起：
+[functions.json:67-72](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/functions.json#L67-L72) —— `betainc` 声明:头文件 `boost_special_functions.h++`(末尾 `++` ⇒ C++),内核 `ibeta_float`/`ibeta_double`。
 
-- [functions.json:296-302](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/functions.json#L296-L302) —— `hyp1f1` 同时挂 `boost_special_functions.h++` 的 `hyp1f1_double`（`ddd->d`）和 `xsf_wrappers.h` 的 `chyp1f1_wrap`（`ddD->D`）。**实数走 Boost，复数走 xsf**——这就是「同一函数、按 dtype 分发到不同后端」的典型例子。
+最有趣的混合案例是 `hyp1f1`(合流超几何函数):**实数走 Boost,复数走 xsf**。同一个 ufunc、两种后端,按输入是实数(`d`)还是复数(`D`)分发:
 
-`elliprf`（Carlson 椭圆积分）走的是 C++ 但非 Boost 的专项后端：
+[functions.json:296-303](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/functions.json#L296-L303) —— `hyp1f1`:`hyp1f1_double`(`ddd->d`,Boost)负责实数,`chyp1f1_wrap`(`ddD->D`,xsf)负责复数。
 
-- [functions.json:141-146](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/functions.json#L141-L146) —— 头文件 `ellint_carlson_wrap.hh++`，内核 `fellint_RF`（实 `ddd->d`）与 `cellint_RF`（复 `DDD->D`）。
+最后看 cdflib 后端,负责非中心 F 分布的「按自由度求逆」这类操作:
 
-> 小结：**头文件名 = 后端路由表**。记住这张「名→库」对照，你就掌握了 special 的整个后端版图。
+[functions.json:402-406](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/functions.json#L402-L406) —— `ncfdtridfd`:头文件 `_cdflib_wrappers.pxd`,内核同名 `ncfdtridfd`(`dddd->d`)。
+
+而两条路径的闸门,在生成器主循环里:
+
+[_generate_pyx.py:960-964](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_generate_pyx.py#L960-L964) —— 读 JSON 后逐条判断:`f not in special_ufuncs` 才进入 `Ufunc` 构造与生成。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手验证「头文件名决定后端」这条规则。
+**实践目标**:亲手在 `functions.json` 里做一次后端普查,验证「头文件字段 = 后端开关」。
 
-**操作步骤**：
+**操作步骤**:
 
-1. 打开 `functions.json`，定位 `betainc`、`erfinv`、`sici` 三个条目，记下它们各自的中层头文件名。
-2. 对照本讲 4.1.2 的路由表，判断这三个函数分别走哪条后端链路、进哪个扩展模块。
-3. 用下面这条命令统计每个后端头文件在 `functions.json` 中被引用的次数：
+1. 进入 `scipy/special` 目录。
+2. 用下面的命令分别统计四种头文件字段出现的次数(每出现一次 = 有一个函数声明指向该后端):
 
 ```bash
 cd scipy/special
-for h in boost_special_functions.h++ xsf_wrappers.h _legacy.pxd \
-         _cdflib_wrappers.pxd ellint_carlson_wrap.hh++ orthogonal_eval.pxd; do
-    printf '%-32s %s\n' "$h" "$(grep -c "\"$h\"" functions.json)"
-done
+echo "xsf:    $(grep -c '"xsf_wrappers.h":'  functions.json)"
+echo "boost:  $(grep -c '"boost_special_functions.h++":' functions.json)"
+echo "legacy: $(grep -c '"_legacy.pxd":'     functions.json)"
+echo "cdflib: $(grep -c '"_cdflib_wrappers.pxd":' functions.json)"
 ```
 
-**预期结果**（参考统计，作为待本地验证的核对值）：
+3. 再确认「明星函数已迁出 JSON」:
 
-| 头文件 | 后端 | 出现次数 |
-|--------|------|----------|
-| `boost_special_functions.h++` | Boost.Math | 约 84 |
-| `xsf_wrappers.h` | xsf / Cephes | 约 18 |
-| `orthogonal_eval.pxd` | Cython 正交多项式 | 约 15 |
-| `_legacy.pxd` | Cephes 遗留截断包装 | 约 16 |
-| `ellint_carlson_wrap.hh++` | Carlson C++ | 约 5 |
-| `_cdflib_wrappers.pxd` | cdflib | 约 4 |
+```bash
+grep -E '"(erf|airy|gammainc|jv)":' functions.json || echo "已迁出(走 _special_ufuncs.cpp 直注册)"
+```
 
-> 注意：这个统计**只覆盖 `functions.json`（生成式路径）**。大量 xsf 函数其实通过 `_special_ufuncs.cpp` 直接 C++ 注册，根本不在 `functions.json` 里（见 4.2.4）。所以「约 18 个 xsf」绝不代表 xsf 在 special 中的真实占比。
+**需要观察的现象**:xsf 的计数应远高于其它三者(约 80+),boost 与 legacy 各十几条,cdflib 仅个位数;`erf`/`airy` 等在 JSON 里查无此名。
+
+**预期结果**:大致为 xsf ≈ 84、boost ≈ 18、legacy ≈ 16、cdflib = 4。xsf 一家独大,印证「内核向 xsf 收敛」的趋势;`erf` 等已不在 JSON。
+
+> 待本地验证:精确数字会随版本微调,以上是基于当前 HEAD `8e93e0478c` 的统计。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`functions.json` 里 `fdtridfd` 的头文件是 `_cdflib_wrappers.pxd`，而 `fdtri` 的头文件是 `boost_special_functions.h++`。这两个都是 F 分布相关函数，为什么分别走不同后端？
+**练习 1**:不看上面的表,只看 `functions.json` 里某条声明的头文件名,如何一秒判断它会被编译进 `_ufuncs`(C)还是 `_ufuncs_cxx`(C++)?
 
-**参考答案**：`fdtri` 是求 F 分布的 CDF 反函数（ppf），Boost.Math 有高质量实现且能干净映射错误；而 `fdtridfd` 是「给定概率反求自由度 dfd」，这是 cdflib 擅长的「反解某个参数」类问题（cdflib 的 `which` 机制专门干这个），所以交给 cdflib。后端选择遵循「用最合适的工具」而非「统一用一个库」。
+**答案**:看头文件名是否以 `++` 结尾。`boost_special_functions.h++` 结尾有 `++` ⇒ C++ ⇒ 进 `_ufuncs_cxx`;`xsf_wrappers.h`、`_legacy.pxd` 等无 `++` ⇒ C ⇒ 进 `_ufuncs`。这是 u3-l1 已确立、本讲反复使用的判别法则。
 
-**练习 2**：仅凭头文件后缀，如何判断一个内核会被编进 `_ufuncs` 还是 `_ufuncs_cxx`？
+**练习 2**:`hyp1f1` 这个 ufunc 留在了 JSON 里(未被 C++ 直注册路径接管),却又声明了 Boost 与 xsf 两个后端。请解释:为什么它没有走 `special_ufuncs` 那条纯 C++ 直注册路径?
 
-**参考答案**：看头文件名是否以 `++` 结尾——是则 C++ 内核（Boost、Carlson），进 `_ufuncs_cxx`；否则 C/Cython 内核（xsf、Cephes、cdflib、正交多项式），进 `_ufuncs`。原因见 u3-l2：把 Boost 这类重型 C++ 隔离编译。
+**答案**:因为它需要**复数版本**(`chyp1f1_wrap`,`ddD->D`),而当前的纯 C++ 直注册路径(`_special_ufuncs.cpp`)尚未为它提供完整的复数实现,于是它仍留在 JSON 生成路径里,用「Boost 出实数 + xsf 出复数」的多后端分发来凑齐所有类型环。
 
 ---
 
-### 4.2 xsf 库：现代统一 C++ 特殊函数库
+### 4.2 xsf:现代化的统一 C++ 特殊函数库
 
 #### 4.2.1 概念说明
 
-**xsf**（extended special functions）是 SciPy 自研的现代化 C++ 特殊函数库，其实现位于 `scipy/_lib/xsf/`，所有函数位于 `xsf::` 命名空间下。它是 special 后端版图里**最年轻、最核心**的一套库，承担两重角色：
+**xsf** 是 **extended special functions** 的缩写,是 SciPy 社区**自研的现代 C++ 特殊函数库**,以独立 Git 仓库维护、作为 Meson 子项目引入。它的定位有三层:
 
-1. **新函数的首选实现**：新加入 special 的特殊函数，优先用 xsf 的 C++ 实现。
-2. **遗留库的统一收容所**：Cephes（经典 C 库）已被整体迁入 xsf 作为 `xsf/cephes/` 子目录；Zhang & Jin 的 specfun 也以 `xsf::specfun` 形式被收编。也就是说，xsf 正在把历史上散落的几套库「统一口径」。
+1. **统一现代化重写**:把历史上散落在 Cephes(C)、specfun(Fortran)、各处手写代码里的算法,用现代 C++(`std::complex`、模板、命名空间)统一重写,放在 `xsf::` 命名空间下。
+2. **吸收遗留库**:连 Cephes 和 specfun 也被「折叠」进来——你会在 `xsf_wrappers.cpp` 里看到 `<xsf/cephes/igam.h>`、`<xsf/specfun/specfun.h>` 这样的包含路径,说明它们已成为 xsf 树下的子目录。
+3. **同时服务两条注册路径**:既被 `xsf_wrappers.*` 包装后喂给 JSON 生成路径,又被 `_special_ufuncs.cpp` 直接 `include` 用于 C++ 直注册路径。
 
-但 xsf 是 C++ 库，而 ufunc 的内层循环需要 **C 链接**（`extern "C"`）的可调用符号。`xsf_wrappers.cpp` / `xsf_wrappers.h` 就是这层桥——它把 `xsf::` 的 C++ 函数包成带 C 链接的包装函数，再由 `_ufuncs.pyx` 调用。
+换言之,xsf 是整个 special 后端版图的**收敛终点**。
 
 #### 4.2.2 核心流程
 
-xsf 内核从 C++ 到 ufunc 的桥接链路：
+xsf 后端从「C++ 算法」到「ufunc 可调用内核」要经过 `xsf_wrappers.*` 这一包装层,它解决三个问题:
 
-```text
-xsf::agm(a,b)  [C++ 实现, scipy/_lib/xsf/agm.h]
-        │  被 xsf_wrappers.cpp 调用
-        ▼
-special_agm(double,double)  [extern "C" 包装, 暴露在 xsf_wrappers.h]
-        │  被 functions.json 的 "xsf_wrappers.h" 条目引用
-        ▼
-_generate_pyx.py 生成 _ufuncs.pyx 的内层循环
-        ▼
-编进 _ufuncs 扩展模块 (依赖 xsf_dep)
-```
+1. **命名 / 链接**:`xsf::airy` 是 C++ 符号(带 mangling),ufunc 的 C 循环要的是 `extern "C"` 符号。包装层把每个 xsf 函数包成 `extern "C"` 的、扁平命名的(如 `special_airy`、`xsf_erf`)C 可调用函数。
+2. **复数类型桥接**:xsf 内部用 `std::complex<double>`,而 NumPy/Cython 层用 `npy_cdouble`。两者内存兼容但类型不同,包装层用 `to_complex` / `to_ccomplex` 在边界上来回转换。
+3. **多返回值**:像 Airy 函数一次要返回 4 个值(Ai, Ai', Bi, Bi'),C 不能返回多个值,于是用**指针输出参数**(`void special_airy(double x, double *ai, double *aip, double *bi, double *bip)`),这与 ufunc 的多输出机制(见 u2-l1 的 `out=`)对接。
 
-复数类型有个额外动作：xsf 用 `std::complex<double>`，而 NumPy 用 `npy_cdouble`，两者内存布局一致但类型不同，wrapper 里要做一次 `to_complex`/`to_ccomplex` 转换（详见 u8-l1）。
+包装层的产物(一堆 `extern "C"` 函数)声明在 `xsf_wrappers.h`,实现在 `xsf_wrappers.cpp`,前者被 `functions.json` 的头文件字段引用、后者被 `cython_special` 等扩展模块编译链接(见 u3-l3)。
 
 #### 4.2.3 源码精读
 
-先看 `xsf_wrappers.h` 的整体面貌——它是一个纯声明头，全部包在 `extern "C"` 里，函数名带前缀区分来源：
+先看 `xsf_wrappers.h` 顶部的**来源说明**与 `extern "C"` 包裹——这段注释坦白交代了它的血统:源自 Zhang & Jin 的 Fortran specfun 库,由 Travis Oliphant 做接口,「与 cephes 一起编译」:
 
-- [xsf_wrappers.h:1-8](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.h#L1-L8) —— 文件头注释点明历史：原本是 Zhang & Jin 的 Fortran 库包装，后来演化为统一的 xsf 桥。
-- [xsf_wrappers.h:18-20](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.h#L18-L20) —— `#ifdef __cplusplus extern "C"` 块开始，保证这些符号以 C 链接暴露，可被 Cython `cimport`。
-- [xsf_wrappers.h:97](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.h#L97) —— `special_agm` 声明：`double special_agm(double a, double b)`，算术-几何平均，典型 xsf 新函数。
-- [xsf_wrappers.h:22](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.h#L22) —— `chyp1f1_wrap` 声明：复数合流超几何，参数用 `npy_cdouble`（NumPy 复数），返回 `npy_cdouble`。
-- [xsf_wrappers.h:165](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.h#L165) —— `xsf_sici` 声明：正弦/余弦积分，返回 `int` 状态码（多输出经指针参数）。
+[xsf_wrappers.h:1-9](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.h#L1-L9) —— 包装层的身世注释:本是 Shanjie Zhang & Jianming Jin 的 Fortran 特殊函数库,经 Oliphant 接口化,与 cephes 一同编译。
 
-函数名前缀反映了三股来源的融合：`xsf_*` 是 xsf 原生 C++ 实现（如 `xsf_sici`），`cephes_*` 是迁入 xsf 的 Cephes 经典实现（如 `cephes_bdtr_wrap`），`special_*` 是统一样式的包装命名（如 `special_agm`、`special_cyl_bessel_j`）。
+[xsf_wrappers.h:18-20](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.h#L18-L20) —— `#ifdef __cplusplus extern "C"`:无论被 C 还是 C++ 编译单元包含,都导出**未改名**的 C 符号,确保 Cython/ufunc 层能按名链接。
 
-再看 `xsf_wrappers.cpp` 的 `#include` 区，能直观看到 xsf 库的覆盖面，以及它对 Cephes 的收编：
+再看实现侧的两件核心事。其一是**复数桥接**:
 
-- [xsf_wrappers.cpp:4-44](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.cpp#L4-L44) —— 一长串 `#include <xsf/*.h>`（agm、airy、bessel、gamma、erf、hyp2f1……），说明 xsf 已覆盖绝大部分函数族。
-- [xsf_wrappers.cpp:46-60](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/xsf_wrappers.cpp#L46-L60) —— `#include <xsf/cephes/*.h>`：**Cephes 已被整体搬进 xsf 命名空间下**（`xsf/cephes/cbrt.h`、`xsf/cephes/expn.h`、`xsf/cephes/igam.h` 等）。这正是「xsf 作为统一收容所」的实证。
+[xsf_wrappers.cpp:67-69](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.cpp#L67-L69) —— `to_complex` / `to_ccomplex`:在 `npy_cdouble` 与 `std::complex<double>` 之间无拷贝地往返转换。
 
-最后看构建侧如何把 xsf 接入：
+其二是**复数超几何函数的转发**——它把 `npy_cdouble` 输入转成 `std::complex`,调用 `xsf::hyp1f1`,再把结果转回 `npy_cdouble`,正好对应 4.1.3 里 `hyp1f1` 的复数类型环 `ddD->D`:
 
-- [meson.build:14-19](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/meson.build#L14-L19) —— `ufuncs_sources` 含 `xsf_wrappers.cpp`，即 xsf 包装层是 `_ufuncs` 扩展的源码之一。
-- [meson.build:100-102](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/meson.build#L100-L102) —— `_ufuncs` 的 `dependencies` 含 `xsf_dep`，即链接外部 xsf C++ 库。
+[xsf_wrappers.cpp:73](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.cpp#L73) —— `chyp1f1_wrap`:`to_ccomplex(xsf::hyp1f1(a, b, to_complex(z)))`,一行完成「转入 → 调 xsf → 转出」。
+
+而对比一个**纯实数**的包装就简单得多,无需复数桥接,直接转发:
+
+[xsf_wrappers.cpp:97](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.cpp#L97) —— `special_entr(double x)` 直接 `return xsf::entr(x);`,因为 entr(信息熵)只处理实数。
+
+最后,`xsf_wrappers.cpp` 的 include 区一览无余地展示了 xsf 的「大一统」胃口——既有 xsf 自研模块,也吞下了整个 cephes 子树:
+
+[xsf_wrappers.cpp:4-44](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.cpp#L4-L44) —— 包含几十个 `<xsf/*.h>` 自研模块(airy、bessel、gamma、erf、struve……)。
+
+[xsf_wrappers.cpp:46-61](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/xsf_wrappers.cpp#L46-L61) —— 紧接着包含 `<xsf/cephes/*.h>`:Cephes 已成为 xsf 下的子目录,这就是「Cephes 折叠进 xsf」的物证。
 
 #### 4.2.4 代码实践
 
-**实践目标**：体会 xsf 的「双轨」存在——既在 `functions.json` 里被引用，又在 `_special_ufuncs.cpp` 里被直接 C++ 注册。
+**实践目标**:体会「实数内核 vs 复数内核」在包装层的差异,并验证一个 xsf 后端 ufunc 的复数能力。
 
-**操作步骤**：
+**操作步骤**:
 
-1. 在 `functions.json` 中确认 `sici`、`hyp1f1` 走 `xsf_wrappers.h`（生成式路径）。
-2. 打开 `_special_ufuncs.cpp`，搜索 `xsf::numpy::ufunc`，看 xsf 函数如何不经 `functions.json` 直接注册为 ufunc。
+1. 在 `xsf_wrappers.cpp` 中定位 `chyp1f1_wrap`(第 73 行)与 `hyp1f1_wrap`(第 79 行),对比前者(复数)用了 `to_complex/to_ccomplex`、后者(实数)没有。
+2. 在 Python 中验证 `hyp1f1` 的复数类型环确实来自 xsf:
 
-**源码阅读型实践**——观察直接注册语法：
+```python
+import scipy.special as sc
+print(sc.hyp1f1.types)            # 应能看到实数与复数两类环
+print(sc.hyp1f1(1, 2, 1+1j))      # 复数输入,走 xsf 的 chyp1f1_wrap
+```
 
-- [_special_ufuncs.cpp:285](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_special_ufuncs.cpp#L285) —— `xsf::numpy::ufunc({static_cast<xsf::numpy::f_f>(xsf::cospi), ...}, ...)` 直接把 `xsf::cospi` 注册成一个 ufunc，**整条路径不经过 `functions.json`、不经过 `_generate_pyx.py`**。
+**需要观察的现象**:`.types` 里同时列出实数(`ddd->d`)与复数(`DDD->D` 等)两类环;复数输入能正常返回复数结果而不报错。
 
-**需要观察的现象**：`functions.json` 里找不到 `cospi`（它已被改造成直接注册），但 `hyp1f1` 仍在 `functions.json` 里。这说明 xsf 函数正处在「从生成式路径迁移到直接 C++ 注册路径」的过程中——这是学习目标里「xsf 作为新一代统一库的趋势」的具体表现。迁移趋势的完整机制留待 u8-l3 详解。
+**预期结果**:`hyp1f1(1, 2, 1+1j)` 返回一个形如 `(a+bj)` 的复数,证明 xsf 复数后端在工作。
 
-**预期结果**：你能指出 `sici` 属于生成式路径（在 `functions.json`），而 `cospi` 属于直接注册路径（在 `_special_ufuncs.cpp`）。
+> 待本地验证:不同 SciPy 版本下 `.types` 字符串集合可能略有差异,但应同时含实数与复数环。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 xsf 的 C++ 函数不能被 `_ufuncs.pyx` 直接 `cimport`，而要先过 `xsf_wrappers.h` 这一层？
+**练习 1**:为什么 `xsf_wrappers.h` 要用 `extern "C"` 包裹,而 `boost_special_functions.h` 不用?
 
-**参考答案**：ufunc 内层循环要求符号是 **C 链接**（`extern "C"`）且名字不经过 C++ name mangling；xsf 函数是 C++ 的、在 `xsf::` 命名空间里，符号名会被 mangle。`xsf_wrappers.h` 用 `extern "C"` 暴露一组稳定的 C 符号，屏蔽 mangling 与 `std::complex`/`npy_cdouble` 类型差异，使 Cython 层能稳定调用。
+**答案**:因为两者服务的注册路径不同。`xsf_wrappers.h` 的函数要被 **C 编译单元**(ufunc 的 C 内层循环、Cython 的 C 后端)按名链接,C 不认识 C++ 的 name mangling,所以必须 `extern "C"`。而 `boost_special_functions.h++` 走的是 **C++ 路径**(`_ufuncs_cxx.pyx` → C++),整个编译链都是 C++,无需去名。
 
-**练习 2**：Cephes 现在算 xsf 的一部分吗？依据是什么？
+**练习 2**:`xsf_wrappers.cpp` 里同时 `#include <xsf/airy.h>` 和 `#include <xsf/cephes/igam.h>`。这说明 Cephes 与 xsf 是什么关系?
 
-**参考答案**：算。依据是 `xsf_wrappers.cpp` 里 `#include <xsf/cephes/*.h>`——Cephes 的源码已被搬进 xsf 目录树下作为子模块。所以 `functions.json` 里指向 `xsf_wrappers.h` 的 `cephes_*_wrap` 函数，本质是「xsf 里的 Cephes 子库」经包装后暴露。
+**答案**:Cephes 已被**折叠**进 xsf,作为 `xsf/cephes/` 子目录存在。xsf 既是自研新实现,也是遗留 Cephes 算法的宿主——这就是「xsf 作为收敛终点」的含义。
 
 ---
 
-### 4.3 Boost.Math：策略、错误映射与 float/double 双内核
+### 4.3 Boost.Math:策略化的重型 C++ 后端
 
 #### 4.3.1 概念说明
 
-**Boost.Math** 是 Boost C++ 库家族里的数学组件，以**高精度、强健壮性**著称，尤其擅长概率分布的分位数（ppf/反 CDF）和不完全 Beta/Gamma 积分。special 把一批「对精度和边界条件要求高」的函数交给 Boost。
+**Boost.Math** 是著名的 Boost C++ 库家族中的数学子库,以**精度高、覆盖广、跨平台一致**著称,常被当作「黄金参考」。SciPy 把它引入 special,专门负责那些**对精度和数值稳定性要求极高、且 Cephes/xsf 一时难以覆盖好**的函数族——典型是不完全 Beta 函数(`betainc` 系列)、合流超几何函数实数版(`hyp1f1`)、各种概率分布的分位数(`*_ppf`)。
 
-接入 Boost 有两个工程难点，`boost_special_functions.h` 就是来解决它们的：
+但 Boost.Math 开箱即用并不完全合 SciPy 的意,有两点必须改造:
 
-1. **类型提升策略**：Boost 默认会把 `float` 提升成 `double` 再算，这与 special「float 输入应返回 float」的 ufunc 契约冲突。需要用 policy 关掉提升。
-2. **错误映射**：Boost 检测到错误时抛 C++ 异常，而 special 需要的是 Python 告警/异常（`SpecialFunctionWarning`/`OverflowError`）。需要把 Boost 的错误策略改写成「调 Python C API」。
+1. **类型提升**:Boost 默认会把 `float` 提升成 `double` 再算。但 SciPy 的 ufunc 要保留 float32 类型环(见 u2-l1),所以必须**关闭提升**。
+2. **错误处理**:Boost 默认抛 C++ 异常。SciPy 要的是统一的 `sf_error` 机制(返回 NaN/inf + 可配置告警,见 u2-l3),所以必须把 Boost 的错误**桥接**成 Python 告警/异常。
 
-此外，Boost 函数普遍提供 **float + double 双内核**（如 `ibeta_float` / `ibeta_double`），这样 ufunc 才能同时挂 `f` 和 `d` 两个 loop。
+这两点改造都通过 Boost 的 **policy(策略)** 机制集中完成,这就是 `boost_special_functions.h` 的核心。
 
 #### 4.3.2 核心流程
 
-Boost 内核从 C++ 到 Python 错误信号的链路：
+Boost 后端的接入流程:
 
-```text
-special.betainc(a,b,x)  [Python]
-   ▼ ufunc 内层循环调
-ibeta_double(a,b,x)  [boost_special_functions.h]
-   ▼
-ibeta_wrap<Real>(a,b,x)  [模板: 边界检查 + try/catch]
-   ▼ 调
-boost::math::ibeta(a,b,x, SpecialPolicy())  [Boost 真正实现]
-   │  若 Boost 内部检测到上溢/下溢/求值困难
-   ▼ 触发 user_*_error 策略
-user_overflow_error / user_evaluation_error
-   ▼ PyGILState_Ensure + PyErr_SetString/PyErr_WarnEx
-Python 层收到 OverflowError 或 RuntimeWarning
-```
-
-`SpecialPolicy` 关掉了类型提升（`promote_float<false>`、`promote_double<false>`），保证 float 留 float、double 留 double。
+1. 定义一个 `SpecialPolicy`(策略类型),在其中关闭 `promote_float`/`promote_double`、设置 `max_root_iterations`、并指定 `user_evaluation_error`/`user_overflow_error` 等自定义错误处理。
+2. 自定义错误处理函数体内,**获取 GIL**(`PyGILState_Ensure`)后调用 `PyErr_WarnEx`(发 RuntimeWarning)或 `PyErr_SetString`(抛 OverflowError),把 Boost 的 C++ 错误翻译成 Python 信号。
+3. 为每个函数写一个 `*_wrap` 模板,先做 NaN/定义域预检查并调 `sf_error`,再用 `try/catch` 包裹 `boost::math::xxx(..., SpecialPolicy())`,把 `domain_error`/`overflow_error`/`underflow_error` 等异常映射成对应的 `SF_ERROR_*`。
+4. 提供 float/double **双内核**(如 `ibeta_float`/`ibeta_double`),让生成器按类型分发(见 u3-l1),保证 float32 输入得到 float32 输出。
 
 #### 4.3.3 源码精读
 
-先看策略定义：
+先看策略定义与 Boost 头文件包含:
 
-- [boost_special_functions.h:18-22](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h#L18-L22) —— `SpecialPolicy` typedef：`promote_float<false>` + `promote_double<false>` 关掉类型提升；`max_root_iterations<400>` 给反函数求根上限；`discrete_quantile<real>` 控制离散分位数行为。
+[boost_special_functions.h:8-16](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h#L8-L16) —— 包含 Boost.Math 的 beta/erf/gamma/hypergeometric 等头文件。
 
-再看错误桥接的两个 `user_*` 模板：
+[boost_special_functions.h:18-22](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h#L18-L22) —— `SpecialPolicy`:关闭 `promote_float`/`promote_double`(保住 float32)、限制 `max_root_iterations<400>`、`discrete_quantile` 取 `real`。这是所有 Boost 调用的统一策略。
 
-- [boost_special_functions.h:36-50](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h#L36-L50) —— `user_evaluation_error`：求值困难时，**获取 GIL**（`PyGILState_Ensure`）后发 `PyErr_WarnEx(RuntimeWarning, ...)`，并返回当前最优猜测值（不中断）。
-- [boost_special_functions.h:53-69](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h#L53-L69) —— `user_overflow_error`：上溢时获取 GIL 后 `PyErr_SetString(PyExc_OverflowError, ...)`，把 Boost 的上溢变成 Python 的 `OverflowError`（中断）。注意「获取 GIL」是必须的——因为 ufunc 内层循环可能在 `nogil` 状态下运行。
+再看两个**自定义错误处理**函数——它们是把 Boost 异常翻译成 Python 信号的桥梁:
 
-接着看 `betainc` 的实际包装——它是「为何选 Boost」的最佳样本：
+[boost_special_functions.h:36-50](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h#L36-L50) —— `user_evaluation_error`:拼好错误消息后,`PyGILState_Ensure()` + `PyErr_WarnEx(PyExc_RuntimeWarning, ...)` 发告警,然后**返回原值**(best guess),不中断计算。
 
-- [boost_special_functions.h:71-133](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h#L71-L133) —— `ibeta_wrap<Real>` 模板：先做 NaN/定义域检查，再**手工处理一系列极限情形**（`(a,b)->(0,0)`、`a->0`、`b->inf` 等，见注释 86-115 行），最后 `try` 块里调 `boost::math::ibeta(a, b, x, SpecialPolicy())`，并用 `catch` 把 `domain_error`/`overflow_error`/`underflow_error` 分别翻译成 `sf_error` 的 DOMAIN/OVERFLOW/UNDERFLOW。这种精细的边界处理与统一的错误翻译，正是 Cephes 老实现难以提供的。
-- [boost_special_functions.h:135-145](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h#L135-L145) —— `ibeta_float` / `ibeta_double` 两个具现化函数，分别对应 ufunc 的 `fff->f` 和 `ddd->d` 两个 loop。
+[boost_special_functions.h:53-69](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h#L53-L69) —— `user_overflow_error`:同样获取 GIL,但调 `PyErr_SetString(PyExc_OverflowError, ...)` 抛异常。注意这里隔着 GIL——Boost 内核可能跑在 nogil 区,要发 Python 信号必须先拿回 GIL(与 u7 将讲的 `sf_error_v` 同理)。
 
-最后在 `functions.json` 里确认双内核声明：
+接着看一个完整的 wrap 函数 `ibeta_wrap`——它体现了「预检查 + try/catch + sf_error」的标准模式:
 
-- [functions.json:67-72](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/functions.json#L67-L72) —— `betainc` 挂 `boost_special_functions.h++`，含 `ibeta_float`（`fff->f`）与 `ibeta_double`（`ddd->d`）。
+[boost_special_functions.h:71-133](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h#L71-L133) —— `ibeta_wrap`:先 NaN/定义域检查并 `sf_error("betainc", SF_ERROR_DOMAIN, ...)`,再处理 `(a,b)→(0,0)` 等极限情形(返回 NaN),最后 `try { y = boost::math::ibeta(a, b, x, SpecialPolicy()); }` 并把 domain/overflow/underflow/其它异常分别映射成 `SF_ERROR_*`。
 
-构建侧：
+最后是 float/double **双内核**的入口,正是 `functions.json` 里 `ibeta_float`/`ibeta_double` 指向的目标:
 
-- [meson.build:127-144](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/meson.build#L127-L144) —— `_ufuncs_cxx` 的 `cpp_args` 含 `-DBOOST_MATH_STANDALONE=1`（用独立版 Boost.Math），`dependencies` 含 `boost_math_dep`、`xsf_dep`、`ellint_dep`。
+[boost_special_functions.h:135-145](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/boost_special_functions.h#L135-L145) —— `ibeta_float`/`ibeta_double` 只是模板 `ibeta_wrap<Real>` 的两个具体实例化,分别对应 `fff->f` 与 `ddd->d` 两个类型环。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解「为何 betainc 选 Boost 而非 Cephes」。
+**实践目标**:验证 Boost 后端的 float32 类型环确实被保留(即 `promote_float<false>` 生效),并触发一次它的定义域错误处理。
 
-**操作步骤**：
-
-1. 阅读 [boost_special_functions.h:71-133](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/boost_special_functions.h#L71-L133) 的 `ibeta_wrap`，数一数它手工处理了多少种极限/边界情形。
-2. 在 Python 端验证 betainc 在边界上的健壮行为：
+**操作步骤**:
 
 ```python
 import scipy.special as sc
-# 极限情形：a=0 时 Beta 分布退化为 x=0 处的点分布
-print(sc.betainc(0, 3, 0.5))   # 走 Boost 的边界分支，应稳定返回而非崩溃
-print(sc.betainc(2, 3, 1.0))   # 正常情形
-print(sc.betainc(2, 3, -0.1))  # 定义域外，应返回 NaN（DOMAIN error 静默）
+import numpy as np
+
+# 1. 验证 betainc 保留了 float32 类型环(Boost 双内核在工作)
+x = np.float32(0.3)
+r = sc.betainc(np.float32(2), np.float32(3), x)
+print("betainc types:", sc.betainc.types)   # 应含 'fff->f' 与 'ddd->d'
+print("result dtype:", r.dtype)             # 期望 float32,而非被提升成 float64
+
+# 2. 触发定义域错误(走 ibeta_wrap 里的 sf_error("betainc", SF_ERROR_DOMAIN))
+print("betainc(-1, 2, 0.5):", sc.betainc(-1, 2, 0.5))   # a<0 ⇒ NaN
 ```
 
-**需要观察的现象**：
+**需要观察的现象**:第 1 步结果 dtype 为 `float32`;`.types` 同时列出 `fff->f` 与 `ddd->d`。第 2 步返回 `nan`。
 
-- `betainc(0, 3, 0.5)` 不报错、不崩溃，返回一个稳定值——这正是 Boost 包装里 86-115 行边界分支的功劳。
-- `betainc(2, 3, -0.1)` 返回 `nan`——对应 `ibeta_wrap` 里 `sf_error("betainc", SF_ERROR_DOMAIN, NULL)` 后返回 NAN（见 81-84 行）。
+**预期结果**:`r.dtype == dtype('float32')`;`betainc(-1, 2, 0.5)` 返回 `nan` 且默认不抛异常(因为 domain 默认 ignore,见 u2-l3)。
 
-**预期结果**：你能用一句话解释「betainc 选 Boost 的原因」——Boost 的 `ibeta` 精度高、边界情形处理完整（代码里有专门的极限分支），且能通过 `user_*_error` 策略干净地把错误映射成 Python 信号；相比之下 Cephes 的老实现边界覆盖与错误报告都更粗糙。
-
-> 关于具体数值输出，标注「待本地验证」——不同 SciPy 版本对个别极限分支的约定可能微调。
+> 待本地验证:不同 SciPy 版本下 `.types` 字符串集合可能略有差异,但 `fff->f` 与 `ddd->d` 应都在。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`user_overflow_error` 里为什么要先 `PyGILState_Ensure()` 再 `PyErr_SetString`？
+**练习 1**:`SpecialPolicy` 里为什么必须设 `promote_float<false>`?不设会怎样?
 
-**参考答案**：ufunc 的内层循环可能在 `nogil` 块中执行（释放了 GIL）。任何 Python C API 调用（包括设置异常）都必须持有 GIL。`PyGILState_Ensure()` 重新获取 GIL，`PyGILState_Release()` 释放，保证线程安全。
+**答案**:Boost.Math 默认会把 `float` 参数提升成 `double` 计算,返回 `double`。若不关闭,则 `ibeta_float(float, float, float)` 实际返回 `double`,无法喂给 ufunc 的 `fff->f`(float32)类型环——结果要么编译期类型不符,要么运行时 float32 输入被悄悄提升成 float64,破坏了 ufunc 的类型保真。关闭后,float 输入全程以 float 计算、返回 float。
 
-**练习 2**：为什么 Boost 函数普遍提供 `*_float` 和 `*_double` 两个内核，而 xsf 函数常常只有一个 `double` 版？
+**练习 2**:`user_overflow_error` 用 `PyErr_SetString` 抛 `OverflowError`,而 `user_evaluation_error` 用 `PyErr_WarnEx` 只发告警并返回 best guess。为什么两者处理力度不同?
 
-**参考答案**：Boost 通过 `SpecialPolicy` 关掉了类型提升，所以必须显式提供 float 和 double 两个具现化版本，才能让 ufunc 同时挂 `f->f` 和 `d->d` 两个 loop（float 输入直接得到 float 输出，避免无谓提升）。这与 Boost「按精度分发」的设计哲学一致。xsf 则视函数而定，部分函数只提供 double。
+**答案**:溢出(overflow)意味着结果已无意义(值超出可表示范围),应中断让上层处理;而求值错误(evaluation error)往往只是某分支算法不稳,Boost 仍能给出一个「最佳估计」。SciPy 选择前者直接抛、后者告警后继续,兼顾了安全性与可用性。
 
 ---
 
-### 4.4 遗留数学库：Cephes、cdflib、specfun（Zhang & Jin）
+### 4.4 Cephes、cdflib、specfun:三套遗留库的归宿
 
 #### 4.4.1 概念说明
 
-除了 xsf 和 Boost，special 还依赖三套**历史更久**的数学库，它们通过各自的 Cython/C++ 包装层接入：
+除了 xsf 与 Boost,后端版图里还有三套「遗留(legacy)」库,它们各有来历:
 
-- **Cephes**：Stephen L. Moshier 编写的经典 C 数学库（1980s 起），覆盖 Gamma、Bessel、椭圆、误差函数等。在 special 中已**整体迁入 xsf**（`xsf/cephes/`），对外通过 `xsf_wrappers.h` 的 `cephes_*_wrap` 系列暴露；另有 `_legacy.pxd` 一层「遗留截断包装」处理历史 API。
-- **cdflib**：Brown & Lovato 的概率分布 CDF/分位数库，专长是「非中心分布」（如非中心 F、非中心 t）和「反解分布参数」。它被编成静态库 `cdflib_lib`，经 `_cdflib_wrappers.pxd` 调用。
-- **specfun（Zhang & Jin）**：Shanjie Zhang 与 Jianming Jin 的《Computation of Special Functions》配套库，擅长 Mathieu 函数、Kelvin 函数、各种特殊函数的零点与序列。它已迁入 xsf 命名空间为 `xsf::specfun`，由 `_specfun.pyx` 调用（用于序列型/零点函数）。
+- **Cephes**:Stephen L. Moshier 编写的经典 C 数学函数库(可追溯到 1980 年代),曾是 SciPy 特殊函数的主力。它**只提供 double 精度**、C 接口、且历史上有些函数会**静默把 double 参数截断成 int**。
+- **cdflib**:一套**概率分布 CDF/分位数**专用库,从 Netlib 上的 Fortran 代码重写为 C,覆盖 F、非中心 F、t、非中心 t、卡方等分布的累积分布与反函数,用 Bus-Dekker 求零算法。
+- **specfun**:Shanjie Zhang & Jianming Jin 编写的特殊函数 Fortran 库(常被称为「Zhang & Jin」),负责一些零点计算、Mathieu 函数、球面波函数等。**它的 C++ 移植版已被折叠进 xsf**(`xsf::specfun` 命名空间)。
 
-这三套库的共同点是「**老但准**」：经过数十年验证，数值可靠；但接口风格各异，所以每套都需要自己的包装层来适配 ufunc 体系。
+这三者的共同命运是:**正在被 xsf 吸收或替代**。Cephes 的算法进了 `xsf/cephes/`;specfun 进了 `xsf/specfun/`;cdflib 则仍以独立静态库形式存在,服务于少数非中心分布的反函数。
 
 #### 4.4.2 核心流程
 
-三套遗留库各自的接入路径（互不相同）：
+三套库的接入方式各不同:
 
-```text
-Cephes:
-  xsf/cephes/*.h  →  cephes_*_wrap (xsf_wrappers.h)  →  _ufuncs.pyx
-  （历史 API 还有一层 _legacy.pxd 的 *_unsafe 截断包装）
-
-cdflib:
-  cdflib.c  →  static_library('cdflib')  →  cdff*/cdft* (cdflib.h)
-           →  _cdflib_wrappers.pxd  →  _ufuncs.pyx   (link_with: cdflib_lib)
-
-specfun (Zhang & Jin):
-  xsf/specfun/specfun.h (namespace xsf::specfun)  →  _specfun.pyx  →  _specfun 扩展
-```
-
-Cephes 的 `_legacy.pxd` 之所以存在，是因为**历史兼容**：早期 SciPy 会静默地把浮点参数截断成整数（如 `bdtr(k, n, p)` 的 `n` 传成 `5.7` 会截成 `5`）。如今这种行为不被允许，但为保兼容，`_legacy.pxd` 提供带 `_unsafe` 后缀的包装：先检查、必要时发 `DeprecationWarning`，再截断调用底层。
+1. **Cephes(经 `_legacy.pxd`)**:为那些「历史上静默截断 double 成 int」的函数(如 `bdtr`、`kn`、`yn`、`smirnov`、`expn`)提供 `_unsafe` 包装。包装在截断前先检查「截断是否丢失信息」,若丢失则发 `RuntimeWarning`,再转发到 `cephes_*_wrap`(这些 wrap 又来自 xsf 的 `xsf/cephes/*`)。同时,这些函数通常还**并存**一条 xsf 新路径(如 `bdtr` 的 `cephes_bdtr_wrap`),由类型分发二选一。
+2. **cdflib(经 `_cdflib_wrappers.pxd`)**:`cdflib.c` 编译成静态库 `cdflib_lib`,函数声明在 `cdflib.h`,Cython 头 `_cdflib_wrappers.pxd` 把它们暴露给 `_ufuncs` 链接调用。仅 `fdtridfd`、`ncfdtridfd`、`ncfdtridfn`、`stdtridf` 这 4 个函数用到。
+3. **specfun(经 `_specfun.pyx` 直连 xsf)**:`_specfun.pyx` 直接 `cimport` xsf 里的 `xsf::specfun::` 函数(以及 `xsf::airyzo`、`xsf::fcszo` 等),供 `_basic.py` 的序列型函数(零点、Mathieu 等,见 u4-l2)调用。**它不经过 `functions.json`**。
 
 #### 4.4.3 源码精读
 
-**Cephes 经 `_legacy.pxd`**：
+先看 **Cephes 遗留路径**。`_legacy.pxd` 的文档字符串直白说明了它的存在理由——为「历史上静默截断」提供带告警的包装:
 
-- [_legacy.pxd:2-8](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_legacy.pxd#L2-L8) —— 模块文档串说明用途：为「原本静默把 double 截成 int」的旧函数定义安全包装。
-- [_legacy.pxd:15-29](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_legacy.pxd#L15-L29) —— `cdef extern from "xsf_wrappers.h"` 引入一批 `cephes_*_wrap`（Cephes 经 xsf 暴露的 C 符号）。
-- [_legacy.pxd:38-43](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_legacy.pxd#L38-L43) —— `_legacy_cast_check`：若 `<int>x != x`（说明 x 本身不是整数，截断会丢精度），获取 GIL 发 `RuntimeWarning`。
-- [_legacy.pxd:59-64](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_legacy.pxd#L59-L64) —— `bdtr_unsafe`：发 `DeprecationWarning`（提示非整数 `n` 已弃用），处理 NaN/Inf，最后调 `cephes_bdtr_wrap(k, <int>n, p)`。
+[_legacy.pxd:1-8](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_legacy.pxd#L1-L8) —— `_legacy.pxd` 用途:许多 SciPy 特殊函数原本会静默把 double 截成 int,这里手动定义这些 `_unsafe` 包装。
 
-**cdflib 经 `_cdflib_wrappers.pxd`**：
+`_legacy.pxd` 先 `cimport` 了来自 `xsf_wrappers.h` 的 Cephes 包装函数——这再次证明「Cephes 已在 xsf 伞下」:
 
-- [_cdflib_wrappers.pxd:5-25](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_cdflib_wrappers.pxd#L5-L25) —— `cdef extern from "cdflib.h"` 引入 `cdff_which4` / `cdffnc_which3/4` / `cdft_which3`，并用 `TupleDID` 结构体承接 cdflib 的「(结果, 状态, 边界)」三元组返回。
-- [_cdflib_wrappers.pxd:28-61](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_cdflib_wrappers.pxd#L28-L61) —— `get_result`：把 cdflib 的整数 `status` 翻译成 `sf_error.ARG` / `OTHER` 等错误并返回 NaN 或 bound。这是「把 C 库的整数状态码翻译成 special 统一错误」的典型适配。
-- [_cdflib_wrappers.pxd:64-82](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_cdflib_wrappers.pxd#L64-L82) —— `fdtridfd`：F 分布反求自由度，调 `cdff_which4(p, q, f, dfn)` 拿 `TupleDID`，再用 `get_result` 归约。
+[_legacy.pxd:15-29](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_legacy.pxd#L15-L29) —— `cdef extern from "xsf_wrappers.h"` 声明 `cephes_bdtr_wrap`、`cephes_smirnov_wrap` 等:遗留路径的底层 Cephes 函数,正是由 xsf 包装层提供。
 
-**specfun（Zhang & Jin）经 `_specfun.pyx`**：
+典型的 `_unsafe` 包装 `bdtr_unsafe`:先发弃用/截断告警,做 NaN/inf 检查,再把 `n` 强制 `<int>` 截断后转发到 `cephes_bdtr_wrap`:
 
-- [_specfun.pyx:6-44](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_specfun.pyx#L6-L44) —— 一批 `cdef extern from "xsf/...h"`，把原 specfun 函数以 `xsf::` 命名空间形式引入（如 `xsf::airyzo`、`xsf::fcszo`、`xsf::klvnzo`），并在 [第 19-39 行](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_specfun.pyx#L19-L39) 引入 `xsf::specfun::` 子命名空间（Mathieu 系数、零点等）。这印证了 Zhang & Jin 的库已被收编进 xsf。
+[_legacy.pxd:59-65](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_legacy.pxd#L59-L65) —— `bdtr_unsafe`:发 `_legacy_deprecation` 告警,检查 `n` 是否 NaN/inf,否则 `cephes_bdtr_wrap(k, <int>n, p)`(注意 `<int>n` 是有损截断)。
 
-**构建侧——cdflib 静态库**：
+再看 **cdflib**。`cdflib.h` 顶部注释交代了它的血统与覆盖范围:
 
-- [meson.build:26-30](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/meson.build#L26-L30) —— `static_library('cdflib', 'cdflib.c', ...)`：把 `cdflib.c` 编成静态库 `cdflib_lib`。
-- [meson.build:105](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/meson.build#L105) —— `_ufuncs` 扩展 `link_with: cdflib_lib`：所以凡调用 cdflib 的 ufunc（经 `_cdflib_wrappers.pxd`）都编进 `_ufuncs` 并链接这个静态库。
+[cdflib.h:1-28](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/cdflib.h#L1-L28) —— cdflib 是 Netlib 上 Fortran 代码的 C 重写,提供 Beta/Binomial/卡方/非中心卡方/F/非中心 F/Gamma/负二项/正态/Poisson/Student's t 的 CDF 与反函数,用 TOMS 算法与 Bus-Dekker 求零。
+
+它在构建侧被编成静态库并链接给 `_ufuncs`:
+
+[meson.build:26-30](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/meson.build#L26-L30) —— `cdflib_lib = static_library('cdflib', 'cdflib.c', ...)`:cdflib 编译为静态库。
+
+[meson.build:100-108](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/meson.build#L100-L108) —— `_ufuncs` 扩展模块的依赖含 `xsf_dep`、`np_dep`,并 `link_with: cdflib_lib`:所以 4 个 cdflib 函数随 `_ufuncs` 提供。
+
+对比之下,`_ufuncs_cxx`(Boost 路径)依赖的是 `boost_math_dep`:
+
+[meson.build:134-144](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/meson.build#L134-L144) —— `_ufuncs_cxx`:`dependencies: [boost_math_dep, xsf_dep, np_dep, ellint_dep]`,且 `cpp_args` 含 `-DBOOST_MATH_STANDALONE=1`(用独立的 Boost.Math,不拉整个 Boost)。C 与 C++ 后端就这样被拆进两个扩展模块,隔离各自的重编译成本(见 u3-l3)。
+
+最后看 **specfun** 的归宿——它的 C++ 移植已在 xsf 里,`_specfun.pyx` 直接从 xsf 头取用,不再是一个独立「库」:
+
+[_specfun.pyx:1-21](https://github.com/scipy/scipy/blob/8e93e0478ca5b6e0b51652a1395f54160be2a672/scipy/special/_specfun.pyx#L1-L21) —— `_specfun.pyx` 从 `<xsf/airy.h>`、`<xsf/fresnel.h>`、`<xsf/specfun/specfun.h>` 等 xsf 头 `cimport` `xsf::airyzo`、`xsf::specfun::...`:specfun 已是 xsf 的子命名空间,本文件只是它的 Cython 出口。
 
 #### 4.4.4 代码实践
 
-**实践目标**：追踪一个 cdflib 函数的完整链路，体会「整数状态码 → sf_error」的适配。
+**实践目标**:追踪一条 Cephes 遗留路径的完整调用链,并验证 cdflib 后端函数可用。
 
-**操作步骤**：
+**操作步骤**:
 
-1. 读 `_cdflib_wrappers.pxd` 的 `get_result`（[28-61 行](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_cdflib_wrappers.pxd#L28-L61)），记下 `status` 各取值对应的处理。
-2. 在 Python 端触发一个 cdflib 路径的函数，观察边界行为：
+1. 在 `functions.json` 中找 `bdtr`(第 25 行)与 `kn`(第 304 行),确认它们都同时声明了 `_legacy.pxd` 与 `xsf_wrappers.h` 两个来源。
+2. 打开 `_legacy.pxd` 第 59-65 行(`bdtr_unsafe`)与第 110-114 行(`kn_unsafe`),看清「告警 → NaN 检查 → `<int>` 截断 → 转发 `cephes_*_wrap` / `special_cyl_bessel_k_int`」的四步模式。
+3. 在 Python 验证 cdflib 后端的 `stdtridf`(非中心 t 分布按 df 求逆,头文件 `_cdflib_wrappers.pxd`)可调用:
 
 ```python
 import scipy.special as sc
-# stdtridf 走 cdflib (cdft_which3)：给定概率反求 t 分布自由度
-print(sc.stdtridf(0.5, 0.0))   # 正常
-# fdtridfd 走 cdflib (cdff_which4)：给定概率反求 F 分布 dfd
-print(sc.fdtridfd(1.0, 0.5, 2.0))
+print(sc.stdtridf(0.4, 0.7, 5))   # 一个有限实数即可
 ```
 
-**需要观察的现象**：这些函数返回有限数值；若传入越界参数（如 `stdtridf` 给非法概率），会因 `get_result` 里的 `sf_error(... ARG ...)` 触发 domain 错误并返回 NaN。
+**需要观察的现象**:`bdtr`/`kn` 的 JSON 声明里 `_legacy.pxd` 与 `xsf_wrappers.h` 并存;`stdtridf` 返回一个实数。
 
-**预期结果**：你能画出 `Python 调用 → _ufuncs.pyx 内层循环 → _cdflib_wrappers.pxd 的 fdtridfd/stdtridf → cdflib.h 的 cdft_which4/cdff_which4 → get_result 翻译 status → sf_error` 这条链。
-
-> 具体返回值标注「待本地验证」。
+**预期结果**:`bdtr` 的两来源并存印证「新旧后端共存、按类型分发」;`stdtridf` 正常返回浮点数(具体值待本地验证)。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：Cephes 既已迁入 xsf，为什么还需要 `_legacy.pxd` 这一层？
+**练习 1**:`bdtr` 的 JSON 声明里既有 `_legacy.pxd`(`bdtr_unsafe`,`ddd->d`)又有 `xsf_wrappers.h`(`cephes_bdtr_wrap`,`dpd->d`)。它们分别处理什么输入?为什么要并存?
 
-**参考答案**：`_legacy.pxd` 不是为了「调用 Cephes」，而是为了「**兼容历史 API 语义**」——早期 SciPy 允许把浮点参数静默截断成整数，新版本要废弃这一行为但仍需平滑过渡。`_legacy.pxd` 的 `*_unsafe` 包装负责发弃用告警、做截断检查，再调底层 Cephes 内核。这是 API 兼容层，不是数学实现层。
+**答案**:`ddd->d` 里的三个 `d` 表示「三个参数都按 double 接收」,中间的 `n`(试验次数)会被 `<int>` 截断——这保留了 SciPy 早期「允许传 double 当 int」的旧行为(`bdtr_unsafe`);`dpd->d` 里的 `p` 表示中间参数按指针宽度整数接收,无需截断,是更安全的新路径。两者并存,是为了既兼容历史调用(发告警),又对正确类型的输入走高效安全路径——这正是 u3-l1 讲的「多内核分发」。
 
-**练习 2**：cdflib 为什么被编成 `static_library` 再 `link_with`，而不像 xsf 那样做成 `dependency`？
+**练习 2**:specfun 在本目录里既没有独立的 `.c`/`.cpp` 源文件,也不出现在 `functions.json` 里。那它的算法代码到底在哪、被谁调用?
 
-**参考答案**：cdflib 是单一 `.c` 文件编译的传统 C 库，编成静态库 `cdflib_lib` 后可被 `_ufuncs` 等扩展模块链接复用，是 C 构建的自然做法。xsf 是 header-heavy 的 C++ 模板库（大量 `.h`），更适合以 `declare_dependency`（头文件包含路径）形式作为 `xsf_dep` 依赖引入。两者形态不同，接入方式也不同。
+**答案**:specfun 的 C++ 移植版已被折叠进 xsf,放在 `xsf/specfun/` 子目录、归于 `xsf::specfun` 命名空间(由 Meson 子项目提供,本检出不可见)。它被 `_specfun.pyx` 直接 `cimport`(从 `<xsf/specfun/specfun.h>` 等),再供 `_basic.py` 的序列型函数(零点、Mathieu 等)调用。它**不经过 `functions.json`**,因为它是序列函数而非逐元素 ufunc。
 
 ---
 
 ## 5. 综合实践
 
-**任务**：为 `scipy.special` 画一张完整的「函数 → 后端」溯源图，并写一份后端分布统计报告。
+**综合任务:绘制 `scipy.special` 的后端版图并解释 `betainc` 的后端选择。**
 
-**步骤**：
+把本讲四个模块串起来,完成下面三件事:
 
-1. **统计后端分布**：运行 4.1.4 的脚本，得到 `functions.json` 中各头文件的引用次数，制成表格。
-2. **抽样溯源**：从下表任选 5 个函数，逐个追踪其完整链路（Python 名 → `functions.json` 头文件 → 包装层文件 → 底层库 → 所属扩展模块）：
+1. **普查后端分布**:在 `scipy/special` 目录运行 4.1.4 的统计命令,得到 xsf / Boost / legacy / cdflib 四类头文件字段各自的计数。画一张简单的占比表,体会「xsf 一家独大、Boost 次之、legacy/cdflib 是长尾」的格局。
 
-   | 函数 | 提示（先自己查，再核对） |
-   |------|--------------------------|
-   | `betainc` | Boost，`ibeta_double` |
-   | `erfinv` | Boost，`erfinv_double` |
-   | `sici` | xsf，`xsf_sici` |
-   | `bdtr` | Cephes 经 `_legacy.pxd` + `xsf_wrappers.h` |
-   | `fdtridfd` | cdflib |
-   | `elliprf` | Carlson C++ |
-   | `eval_chebyc` | Cython（`orthogonal_eval.pxd`） |
+2. **追一个函数的全链路**:以 `betainc` 为例,从 Python 一路追到 C++ 内核,填写下表(参考答案见后):
 
-3. **回答三个判断题**（写在报告里）：
-   - `hyp1f1` 为什么同时挂 Boost 和 xsf 两个头文件？（提示：实数 vs 复数）
-   - 为什么 `_ufuncs` 要 `link_with: cdflib_lib` 而 `_ufuncs_cxx` 不用？
-   - `cospi` 在 `functions.json` 里找不到，却能在 `special.cospi` 调用——它走的是哪条路径？（提示：`_special_ufuncs.cpp`）
+   | 层 | 位置 | 内容 |
+   | --- | --- | --- |
+   | Python 调用 | `sc.betainc(a,b,x)` | 命名空间里的 ufunc |
+   | JSON 声明 | `functions.json` 第 67-72 行 | 头文件 `boost_special_functions.h++`,内核 `ibeta_float`/`ibeta_double` |
+   | 内核实现 | `boost_special_functions.h` 第 71-145 行 | `ibeta_wrap` 模板 + float/double 实例化 |
+   | 策略 | `boost_special_functions.h` 第 18-22 行 | `SpecialPolicy` 关闭类型提升 |
+   | 错误桥接 | `boost_special_functions.h` 第 36-69 行 | `user_*_error` 获取 GIL 发 Python 信号 |
+   | 编译归宿 | `meson.build` 第 134-144 行 | `_ufuncs_cxx` 扩展模块,依赖 `boost_math_dep` |
 
-4. **延伸观察**：浏览 `xsf_wrappers.cpp` 的 `#include` 区，统计 `xsf/*.h`（原生）与 `xsf/cephes/*.h`（迁入的 Cephes）各覆盖哪些函数族，体会 xsf「统一收容」的版图。
+3. **回答关键问题:为什么 `betainc` 选 Boost 而非 Cephes?** 结合源码给出基于证据的说明,要点应包括:
 
-**验收标准**：你能不查资料，对着一张空表把「函数名 → 后端库 → 扩展模块」三列填出来，且能解释每条选择背后的理由（精度需求 / 边界处理 / 历史兼容 / 反解参数）。
+   - **证据 A(双精度内核)**:Boost 版提供了 `ibeta_float`(`fff->f`)与 `ibeta_double`(`ddd->d`)双内核(见 4.3.3),能保住 float32 类型环;而本代码库里 Cephes 的强项是不完全 Gamma(见 `xsf_wrappers.cpp` 第 46-61 行包含的 `<xsf/cephes/igam.h>` 等),**未提供**同等的不完全 Beta 双内核。
+   - **证据 B(策略化错误/极限语义)**:Boost 的 `SpecialPolicy` 能把 domain/overflow/underflow 精细映射成 `SF_ERROR_*`(见 `ibeta_wrap` 的 try/catch),并支持 SciPy 想要的「极限情形返回特定值」语义(`ibeta_wrap` 里对 `(a,b)→(0,0)` 等返回 NaN/0/1 的处理);Cephes 的老接口难以表达这些分布极限语义。
+   - **证据 C(精度)**:Boost.Math 以高精度和跨平台一致性著称,不完全 Beta 这类对数值稳定性敏感的函数,Boost 实现更可靠。
+   - **结论**:`betainc` 选 Boost,是为了同时拿到「float32 支持 + 精细错误/极限语义 + 高精度」,这是 Cephes 旧实现给不了的。这个选择不是孤例——所有 `beta*` 系列(`betaincc`/`betaincinv`/`betainccinv`)、以及多数 `*_ppf` 分位数函数都走了 Boost(可自行在 `functions.json` 里验证)。
+
+> 把上述三步整理成一页笔记,你就掌握了「从一条 ufunc 声明反查它用了哪个后端、为什么用这个后端」的方法论——这正是阅读 `scipy.special` 源码时最常需要的技能。
 
 ## 6. 本讲小结
 
-- `functions.json` 中层的「头文件」字段是**后端调度的总开关**：文件名指明后端库，后缀（`.h` / `.h++` / `.pxd`）指明语言，从而决定内核进哪个扩展模块。
-- **xsf** 是 SciPy 自研的现代 C++ 库，是新函数的首选，且已把 Cephes（`xsf/cephes/`）和 specfun（`xsf::specfun`）收编为子模块；它通过 `xsf_wrappers.h`（`extern "C"`）桥接给 ufunc。
-- **Boost.Math** 承担高精度/强健壮性需求（如 `betainc`、各分布 ppf），靠 `SpecialPolicy` 关掉类型提升、靠 `user_*_error` 策略把 C++ 异常桥接成 Python 告警/异常，并提供 float+double 双内核。
-- **遗留三库**各走各的包装：Cephes 经 `xsf_wrappers.h` 暴露、另有 `_legacy.pxd` 处理历史截断兼容；cdflib 编成静态库 `cdflib_lib` 经 `_cdflib_wrappers.pxd` 调用；specfun 经 `_specfun.pyx` 暴露序列/零点函数。
-- 同一函数可挂多个后端（如 `hyp1f1` 实数走 Boost、复数走 xsf），运行时按 dtype 分发到不同内核。
-- 后端版图正处在「从生成式 `.pyx` 路径向 `_special_ufuncs.cpp` 直接 C++ 注册路径迁移」的过程中，这是 xsf 作为新一代统一库趋势的具体体现。
+- `scipy.special` 的数值内核由**五套 C/C++ 库**拼装:**xsf**(自研现代 C++,收敛终点)、**Boost.Math**(高精度重型库)、**Cephes**(经典 C 遗留)、**cdflib**(概率分布 CDF/分位数)、**specfun**(Zhang & Jin,已并入 xsf)。
+- **后端调度是声明式的**:由 `functions.json` 的「头文件」字段决定,看头文件名末尾是否有 `++` 即可判 C/C++(`.h++` ⇒ Boost C++ ⇒ `_ufuncs_cxx`;`.h`/`.pxd` ⇒ C ⇒ `_ufuncs`)。
+- 当前有**两条注册路径**:JSON 生成路径(`functions.json`,约 128 条)与 C++ 直注册路径(`_special_ufuncs.cpp`,约 189 个 `special_ufuncs`)。`_generate_pyx.py` 用 `if f not in special_ufuncs` 闸门避免重复生成;`erf`/`airy` 等明星函数已迁出 JSON。
+- **xsf 是收敛终点**:它既自研新实现,又把 Cephes(`xsf/cephes/`)、specfun(`xsf/specfun/`)折叠进来;`xsf_wrappers.*` 用 `extern "C"` + `to_complex/to_ccomplex` 把它桥接给 C/ufunc 层。
+- **Boost 后端靠 policy 改造**:`SpecialPolicy` 关闭类型提升(保 float32)、用 `user_*_error` 在 GIL 内把 C++ 异常翻译成 Python 告警/异常,并提供 float/double 双内核。
+- **遗留库各有归宿**:Cephes 经 `_legacy.pxd` 的 `_unsafe` 包装(带截断告警)并存于 xsf 新路径;cdflib 编成静态库 `cdflib_lib` 仅服务 4 个非中心分布反函数;specfun 直连 xsf 供序列函数使用,不进 JSON。
 
 ## 7. 下一步学习建议
 
-- **深入 xsf 包装层**：本讲只看了 `xsf_wrappers.h` 的声明。想理解复数类型桥接（`to_complex`/`to_ccomplex`）与具体 wrapper 实现，请读 u8-l1（xsf 与 xsf_wrappers）。
-- **Boost 错误映射深挖**：本讲概览了 `SpecialPolicy` 与 `user_*_error`。完整的 policy 机制与错误策略桥接在 u8-l2 详解。
-- **直接 C++ 注册路径**：本讲提到的 `_special_ufuncs.cpp` / `xsf::numpy::ufunc` 这条「不经 functions.json」的新路径，在 u8-l3 系统讲解。
-- **Carlson 椭圆积分与 cdflib 专项**：u8-l4 专讲 `ellint_carlson_cpp_lite` 与 cdflib 的封装细节与构建依赖。
-- **错误贯通**：本讲多次出现 `sf_error`、`PyGILState_Ensure` 等。C 层错误如何贯通到 Python 告警/异常，在 U7（sf_error 的 C→Python 桥）完整拆解。
+本讲把「后端版图」讲完了,接下来可以按兴趣选三个方向深挖:
+
+1. **沿「C++ 后端实现」继续下钻**:本讲的 `xsf_wrappers.*` 只是包装层,真正的算法在 xsf 库(构建期拉取的子项目)里。如果你对某个具体函数的数值算法感兴趣(比如 Bessel 函数的 Amos 算法、Airy 函数的渐近展开),可以去看 xsf 仓库的 `<xsf/amos.h>`、`<xsf/airy.h>` 等头文件。对应的讲义是 **u8-l1(xsf 与 xsf_wrappers)** 和 **u8-l2(Boost.Math 集成)**,它们从「实现细节」角度补全本讲从「版图」角度给出的概览。
+
+2. **沿「错误处理」深入**:本讲多次提到 `sf_error`、`PyGILState_Ensure`、`SpecialFunctionWarning`,但都浅尝辄止。C 内核检测到数值错误后**如何隔着 GIL 触发 Python 告警**,是 special 工程的精华之一,详见 **u7-l1(sf_error 的 C→Python 桥)** 和 **u7-l2(_ufuncs_extra_code.pxi 的 seterr/errstate)**。
+
+3. **沿「纯 Python 包装层」横向展开**:本讲关注 C/C++ 内核;但这些内核之上还有一层纯 Python 函数(`_basic.py` 的组合数学、零点序列,`_logsumexp.py` 等),它们有的复用本讲的内核,有的纯 Python 实现。详见 **u4-l1 ~ u4-l4**。
+
+建议的阅读顺序:先 u4(看清 Python 层如何调用本讲的内核),再 u8(下钻到 C++ 实现细节),最后 u7(把错误处理闭环)。这样就从「版图」走到「实现」,再走到「健壮性」,形成对 special 的完整理解。
