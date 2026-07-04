@@ -1,0 +1,644 @@
+{
+  "project": "crossbeam-crossbeam-channel",
+  "head": "6195355ef1862f2c6172365d00645cb6f77417dc",
+  "rationale": "本手册围绕 crossbeam-channel「公共类型壳（Sender/Receiver）+ 六种 flavor 实现 + select 选择机制」的核心架构来组织学习路径。入门层（u1）从项目定位、构建与测试运行、基本 send/recv、克隆共享与断开迭代入手，目标是让读者『先会用』；进阶层（u2）先讲架构总览、引用计数 counter、错误体系 err、阻塞唤醒 context/waker 等公共机制，再依次剖析 array（环形缓冲）/list（链表分块）/zero（会合）三种核心 flavor 与 after/at/tick/never 特殊通道，最后以 select! 宏和 Select 动态 API 的使用收尾，目标是让读者『理解实现』；专家层（u3）深入 select 的 run_select 核心算法、SelectHandle trait 与 flavor 对接、宏展开机制、内存序与 unsafe 正确性、utils/alloc_helper 工具模块、no_std 与模块组织、性能基准与测试体系，并以综合实践串讲架构取舍与二次开发。依赖关系遵循『先会用 → 懂公共机制 → 读 flavor 实现 → 钻 select 内核 → 究正确性与生态』的递进，所有源码引用均来自真实文件，每篇配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门层：认识项目与基本使用",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与运行方式",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 crossbeam-channel 是什么、与 std::sync::mpsc 的关系、整体目录结构与 src 模块组织、构建与测试运行方式、库入口 lib.rs 与公共导出。",
+          "learning_goals": [
+            "了解 crate 的定位、核心能力与版本演进",
+            "熟悉仓库目录结构与 src 下各模块职责",
+            "掌握 cargo build / test / bench 的运行方式",
+            "找到库入口 src/lib.rs 和所有 pub 导出的类型与函数"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "src/lib.rs",
+            "CHANGELOG.md"
+          ],
+          "minimal_modules": [
+            "README.md",
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "practice_task": "克隆仓库并运行 cargo build 与 cargo test，用一句话描述 src 下每个子模块（channel/context/counter/err/flavors/select/utils/waker）的职责，并在 src/lib.rs 中列出所有 pub use 导出的类型、函数与宏。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "第一个通道：unbounded 与 bounded",
+          "order": 2,
+          "filename": "u1-l2-unbounded-and-bounded.md",
+          "level": "beginner",
+          "topic": "通过 unbounded() 和 bounded() 创建通道，理解发送 send / 接收 recv 的基本用法、容量限制与零容量会合语义。",
+          "learning_goals": [
+            "学会创建 unbounded 与 bounded 通道",
+            "理解 send/recv 的基本用法与阻塞行为",
+            "区分有界（含零容量会合）与无界两种通道"
+          ],
+          "source_files": [
+            "src/channel.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "src/channel.rs 的 unbounded/bounded 函数",
+            "src/lib.rs 的文档示例"
+          ],
+          "practice_task": "编写程序：用 unbounded 发送 1000 个数字并打印；再用 bounded(0) 在两个线程间传递一条消息，体会发送与接收必须同时出现（会合）的阻塞行为。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Sender/Receiver API 与三种阻塞模式",
+          "order": 3,
+          "filename": "u1-l3-sender-receiver-api.md",
+          "level": "beginner",
+          "topic": "讲解 Sender/Receiver 的完整方法：try_send/send/send_timeout/send_deadline、try_recv/recv/recv_timeout/recv_deadline，以及 len/capacity/is_empty/is_full/same_channel，并看懂 channel.rs 中 match flavor 的分发模式。",
+          "learning_goals": [
+            "掌握发送/接收的三种阻塞模式（非阻塞、阻塞、超时/截止）",
+            "理解 len/capacity/is_empty/is_full 等状态查询方法",
+            "读懂 channel.rs 中按 flavor 分发到具体实现的结构"
+          ],
+          "source_files": [
+            "src/channel.rs"
+          ],
+          "minimal_modules": [
+            "Sender impl 方法",
+            "Receiver impl 方法"
+          ],
+          "practice_task": "用 try_send 演示 TrySendError::Full 与 Disconnected，用 send_timeout 演示超时，用 try_recv 演示 TryRecvError::Empty，并在代码中标注 channel.rs 里每个方法如何 match 到 flavor。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "克隆、共享、断开与迭代",
+          "order": 4,
+          "filename": "u1-l4-clone-sharing-disconnect.md",
+          "level": "beginner",
+          "topic": "讲解 Sender/Receiver 的 Clone/Drop、克隆共享同一通道而非复制消息流、断开（disconnected）语义，以及 iter/try_iter/into_iter 迭代器消费。",
+          "learning_goals": [
+            "理解克隆是共享同一通道而非复制消息流",
+            "掌握断开后剩余消息仍可接收、操作不再阻塞",
+            "学会用 iter/try_iter/into_iter 消费通道"
+          ],
+          "source_files": [
+            "src/channel.rs",
+            "src/counter.rs"
+          ],
+          "minimal_modules": [
+            "Sender/Receiver 的 Clone 与 Drop",
+            "Iter/TryIter/IntoIter"
+          ],
+          "practice_task": "启动多个线程持有克隆的 Sender 并发发送，主线程用单个 Receiver 接收；随后 drop 所有 Sender，用 r.iter().collect() 收集并断言剩余消息顺序正确。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶层：核心架构与机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "通道架构与 flavors 模型总览",
+          "order": 1,
+          "filename": "u2-l1-architecture-and-flavors.md",
+          "level": "intermediate",
+          "topic": "纵览六种 flavor（array/list/zero/at/tick/never），讲解 channel.rs 中 SenderFlavor/ReceiverFlavor 如何把公共 API 分发到具体 flavor，以及 lib.rs 的模块声明与 pub use 组织。",
+          "learning_goals": [
+            "理解 flavor 抽象与按 flavor 分发的设计",
+            "建立『公共类型壳 + 多 flavor 实现』的架构认知",
+            "看懂 lib.rs 的模块声明、internal 隐藏模块与 re-export"
+          ],
+          "source_files": [
+            "src/channel.rs",
+            "src/flavors/mod.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "SenderFlavor/ReceiverFlavor 枚举",
+            "flavors/mod.rs 模块声明"
+          ],
+          "practice_task": "画一张 flavor 与构造函数（unbounded/bounded/after/at/tick/never）的对应表，并说明 Sender/Receiver 的任意一个公共方法是如何 match flavor 转发到底层实现的。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "引用计数与生命周期 counter.rs",
+          "order": 2,
+          "filename": "u2-l2-reference-counter.md",
+          "level": "intermediate",
+          "topic": "讲解 counter.rs 如何用堆上 Counter（senders/receivers 计数 + destroy 标志）管理多 Sender/Receiver 共享同一通道，以及 acquire/release、disconnect 回调与销毁时机。",
+          "learning_goals": [
+            "理解通道共享的引用计数机制（NonNull + 原子计数）",
+            "掌握 release 时调用 disconnect 与销毁堆内存的逻辑",
+            "理解计数溢出时 abort 的防护"
+          ],
+          "source_files": [
+            "src/counter.rs",
+            "src/channel.rs"
+          ],
+          "minimal_modules": [
+            "Counter/Sender/Receiver (counter.rs)",
+            "channel.rs 的 Drop/Clone"
+          ],
+          "practice_task": "跟踪一个 bounded 通道从创建、多次 clone 到全部 drop 的 senders/receivers 计数变化，解释 destroy 标志为何用 swap 而非直接判断，以及最后一个引用如何触发 disconnect 与堆释放。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "错误类型体系 err.rs",
+          "order": 3,
+          "filename": "u2-l3-error-types.md",
+          "level": "intermediate",
+          "topic": "系统讲解 err.rs 中的全部错误类型（SendError/TrySendError/SendTimeoutError/RecvError/TryRecvError/RecvTimeoutError 及 select 相关错误），它们的 From 转换、Display 与辅助方法。",
+          "learning_goals": [
+            "区分发送/接收各类错误及 Full/Disconnected/Timeout/Empty 语义",
+            "理解错误之间的 From 转换关系",
+            "掌握 into_inner/is_full/is_disconnected 等辅助方法"
+          ],
+          "source_files": [
+            "src/err.rs",
+            "src/channel.rs"
+          ],
+          "minimal_modules": [
+            "err.rs 全部错误类型",
+            "channel.rs 中 send/recv 的错误映射"
+          ],
+          "practice_task": "编写测试覆盖 try_send 的 Full 与 Disconnected、recv_timeout 的 Timeout 与 Disconnected，并练习把 SendError 通过 From 转成 TrySendError 与 SendTimeoutError。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "阻塞与唤醒机制 context.rs + waker.rs",
+          "order": 4,
+          "filename": "u2-l4-blocking-and-waking.md",
+          "level": "intermediate",
+          "topic": "讲解线程阻塞与唤醒的底层机制：Context（线程本地、select 状态、park/unpark、wait_until/wait_packet），Waker/SyncWaker（selectors/observers 队列、register/notify/disconnect）。",
+          "learning_goals": [
+            "理解 select 状态机 Selected（Waiting/Aborted/Disconnected/Operation）",
+            "掌握线程如何注册阻塞操作并被打醒",
+            "理解 SyncWaker 的 is_empty 快速路径与锁协作"
+          ],
+          "source_files": [
+            "src/context.rs",
+            "src/waker.rs"
+          ],
+          "minimal_modules": [
+            "Context (context.rs)",
+            "Waker/SyncWaker (waker.rs)"
+          ],
+          "practice_task": "阅读一个阻塞 send 的流程，按顺序标出 Context 与 SyncWaker 的调用，并解释 Waker::try_select 为什么只选『别的线程』的 entry 以及 disconnect 如何唤醒所有阻塞者。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "有界环形缓冲区：array flavor",
+          "order": 5,
+          "filename": "u2-l5-array-flavor.md",
+          "level": "intermediate",
+          "topic": "深入 flavors/array.rs：Slot 与 stamp 版本号、head/tail 与 lap/mark_bit 编码、start_send/start_recv 的 CAS 预留槽位、write/read、disconnect_senders/disconnect_receivers 与丢弃消息。",
+          "learning_goals": [
+            "理解环形缓冲区 + 版本号实现无锁有界队列",
+            "掌握 stamp 编码与 mark_bit 断开标志",
+            "看懂 CAS 循环、CachePadded 防伪共享与 Backoff"
+          ],
+          "source_files": [
+            "src/flavors/array.rs",
+            "src/waker.rs"
+          ],
+          "minimal_modules": [
+            "Slot/Channel/ArrayToken (array.rs)",
+            "start_send/start_recv/write/read"
+          ],
+          "practice_task": "跟踪一次满队列 send 如何阻塞、被 recv 唤醒后如何完成，并解释 write 写 stamp 用 Release、read 读 stamp 用 Acquire 是如何保证消息可见性的。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "无界链表：list flavor",
+          "order": 6,
+          "filename": "u2-l6-list-flavor.md",
+          "level": "intermediate",
+          "topic": "深入 flavors/list.rs：Block/Slot 与 state 位（WRITE/READ/DESTROY）、BLOCK_CAP、head/tail Position、分块链表增长、Block::destroy 惰性回收，以及 senders 永不阻塞。",
+          "learning_goals": [
+            "理解链式分块无界队列结构",
+            "掌握 state 位标记如何协调生产与消费",
+            "理解 Block::destroy 惰性回收机制"
+          ],
+          "source_files": [
+            "src/flavors/list.rs",
+            "src/waker.rs"
+          ],
+          "minimal_modules": [
+            "Block/Slot/Position/Channel (list.rs)",
+            "start_send/start_recv/write/read/Block::destroy"
+          ],
+          "practice_task": "跟踪连续 send 时新 Block 如何分配与链接、tail.index 如何用 CAS 推进，并解释 DESTROY 位如何把已读空的块的释放责任交给 reader。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "零容量会合：zero flavor",
+          "order": 7,
+          "filename": "u2-l7-zero-flavor.md",
+          "level": "intermediate",
+          "topic": "深入 flavors/zero.rs：Packet（on_stack/ready/msg）、Inner（senders/receivers Waker + is_disconnected）、Mutex 保护、会合配对 try_select、栈/堆 packet 与 wait_ready 自旋。",
+          "learning_goals": [
+            "理解零容量通道的会合（rendezvous）配对机制",
+            "掌握 Packet 在栈与堆两种分配路径",
+            "理解 send/recv 互相唤醒与 ready 标志同步"
+          ],
+          "source_files": [
+            "src/flavors/zero.rs",
+            "src/waker.rs"
+          ],
+          "minimal_modules": [
+            "Packet/Inner/Channel (zero.rs)",
+            "Waker 配对逻辑"
+          ],
+          "practice_task": "画出 send 阻塞注册 packet、recv 配对读取、packet.wait_ready 的时序图，并解释为什么普通 send/recv 用栈 packet 而 select 路径用堆 packet。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "特殊通道：after/at/tick/never",
+          "order": 8,
+          "filename": "u2-l8-special-channels.md",
+          "level": "intermediate",
+          "topic": "讲解三种只读特殊通道：at（一次性定时）、tick（周期性，CAS 推进 delivery_time）、never（永不投递），以及它们如何在 recv 时惰性生成消息。",
+          "learning_goals": [
+            "理解特殊通道惰性投递消息的设计",
+            "掌握 tick 的 CAS 推进下一个投递时间",
+            "理解 never 的零大小类型与 select 中的占位作用"
+          ],
+          "source_files": [
+            "src/flavors/at.rs",
+            "src/flavors/tick.rs",
+            "src/flavors/never.rs",
+            "src/channel.rs"
+          ],
+          "minimal_modules": [
+            "at/tick/never flavor",
+            "channel.rs 的 after/at/tick/never 构造函数"
+          ],
+          "practice_task": "用 after 实现一次超时接收、用 tick 实现周期打印，并解释 at 用 AtomicBool 保证一次性投递、tick 用 AtomicCell CAS 推进投递时间的差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l9",
+          "title": "使用 select! 宏",
+          "order": 9,
+          "filename": "u2-l9-select-macro-usage.md",
+          "level": "intermediate",
+          "topic": "从用户视角讲解 select! 宏：在多个 recv/send 中随机选一个就绪操作、default 立即分支、default(timeout) 超时分支，以及 select_biased! 的优先级语义。",
+          "learning_goals": [
+            "学会用 select! 组合多个通道操作",
+            "掌握 default 与 default(timeout) 分支",
+            "理解就绪随机性与 select_biased! 的区别"
+          ],
+          "source_files": [
+            "src/select_macro.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "select! / select_biased! 宏入口 (select_macro.rs)",
+            "lib.rs 的 select 示例"
+          ],
+          "practice_task": "用 select! 同时等待两个 Receiver 并加 1 秒超时；再对比 select! 与 select_biased! 在多个操作同时就绪时的行为差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l10",
+          "title": "使用 Select 动态 API",
+          "order": 10,
+          "filename": "u2-l10-select-dynamic-api.md",
+          "level": "intermediate",
+          "topic": "讲解 Select 动态选择 API：new/new_biased、send/recv 注册返回 index、try_select/select/select_timeout/select_deadline，以及 SelectedOperation 的 index/recv/send 完成操作。",
+          "learning_goals": [
+            "学会在运行时动态构建操作列表并 select",
+            "掌握 SelectedOperation 必须完成（drop 会 panic）",
+            "理解 select! 宏只是 Select API 的便捷封装"
+          ],
+          "source_files": [
+            "src/select.rs"
+          ],
+          "minimal_modules": [
+            "Select/SelectedOperation (select.rs)",
+            "send/recv 注册与 try_select/select/完成"
+          ],
+          "practice_task": "用 Select 在循环中从动态数量的 Receiver 中接收，根据 op.index() 判断是哪个通道并调用 op.recv() 完成操作，注意必须完成 SelectedOperation。",
+          "depends_on": [
+            "u2-l9"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家层：select 内核、正确性与生态",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "select 核心算法 run_select / run_ready",
+          "order": 1,
+          "filename": "u3-l1-select-algorithm.md",
+          "level": "advanced",
+          "topic": "深入 select.rs 的核心：Token/Operation/Selected/SelectHandle trait、Timeout，以及 run_select 的全流程（shuffle 公平、fast path try_select、register、wait_until、unregister、accept、超时）与 run_ready 的对应实现。",
+          "learning_goals": [
+            "理解 select 的完整状态机与多步流程",
+            "掌握 fast path 检测、注册、阻塞、唤醒后 accept 的协作",
+            "理解 shuffle 实现公平、biased 跳过 shuffle"
+          ],
+          "source_files": [
+            "src/select.rs",
+            "src/context.rs"
+          ],
+          "minimal_modules": [
+            "Token/Operation/Selected/SelectHandle trait",
+            "run_select/run_ready"
+          ],
+          "practice_task": "跟踪一次所有操作都阻塞的 select，列出 shuffle→try_select→register→wait_until→unregister→accept 每一步的作用，并解释 Aborted 分支在何时出现。",
+          "depends_on": [
+            "u2-l9",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SelectHandle trait 与 flavor 对接",
+          "order": 2,
+          "filename": "u3-l2-selecthandle-and-flavors.md",
+          "level": "advanced",
+          "topic": "讲解 SelectHandle trait 如何被每种 flavor 实现，以及 channel.rs 中 Sender/Receiver 的 SelectHandle 实现如何分发；讲解 internal 隐藏模块、write/read 与 receiver_addr/sender_addr。",
+          "learning_goals": [
+            "理解每个 flavor 的 try_select/register/accept/is_ready/watch 如何对接 select 算法",
+            "看懂 channel.rs 的 SelectHandle 分发与 unsafe write/read",
+            "理解 internal 模块对外隐藏的设计"
+          ],
+          "source_files": [
+            "src/channel.rs",
+            "src/select.rs",
+            "src/flavors/zero.rs"
+          ],
+          "minimal_modules": [
+            "Sender/Receiver 的 SelectHandle impl (channel.rs)",
+            "SelectHandle trait (select.rs)"
+          ],
+          "practice_task": "对照 array 与 zero 的 register/accept，解释它们如何为 select 准备 Token；并说明 internal 模块中的 select/try_select/select_timeout/receiver_addr/sender_addr 为何需要 #[doc(hidden)] 暴露给宏使用。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "select! 宏展开机制 select_macro.rs",
+          "order": 3,
+          "filename": "u3-l3-macro-expansion.md",
+          "level": "advanced",
+          "topic": "深入 select_macro.rs 的内部宏 crossbeam_channel_internal!：解析阶段（@list/@case）与代码生成阶段（@init/@count/@add/@complete），单分支优化（退化为 recv/try_recv/recv_timeout），以及 select! 与 select_biased! 的入口差异。",
+          "learning_goals": [
+            "理解宏如何把 select! 语法编译成对 internal::select/try_select/select_timeout 的调用",
+            "掌握单分支优化与生成的 handle 数组、按 index 分发",
+            "理解 select! 与 select_biased! 在 _IS_BIASED 上的差异"
+          ],
+          "source_files": [
+            "src/select_macro.rs",
+            "src/select.rs"
+          ],
+          "minimal_modules": [
+            "crossbeam_channel_internal! 内部宏",
+            "select! / select_biased! 入口"
+          ],
+          "practice_task": "用 cargo expand（或人工推导）展开一个含 recv(recv)、send(send,v) 与 default(timeout) 的 select!，对照生成代码与 Select/internal API，标出 handle 数组、index 分发与完成调用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "内存序与 unsafe 的正确性",
+          "order": 4,
+          "filename": "u3-l4-memory-ordering-and-unsafe.md",
+          "level": "advanced",
+          "topic": "聚焦并发正确性：array/list 的 head/tail CAS 与 stamp 的 Acquire/Release/SeqCst 选择、MaybeUninit 与 UnsafeCell、zero 的 ready 标志同步、CachePadded 防伪共享、Backoff 退避。",
+          "learning_goals": [
+            "理解每种 flavor 关键内存序选择的理由",
+            "掌握 MaybeUninit/UnsafeCell 配合原子操作实现安全接口的范式",
+            "识别 unsafe 边界与不变量维护"
+          ],
+          "source_files": [
+            "src/flavors/array.rs",
+            "src/flavors/list.rs",
+            "src/flavors/zero.rs"
+          ],
+          "minimal_modules": [
+            "array/list 的原子与 stamp",
+            "zero 的 ready/UnsafeCell"
+          ],
+          "practice_task": "为 array 的 write 选 Release、read 选 Acquire 写出可见性理由；找出 list.rs 中所有 unsafe 块并按『指针解引用 / MaybeUninit / Box::from_raw』分类说明其必要性。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "工具模块 utils.rs 与 alloc_helper.rs",
+          "order": 5,
+          "filename": "u3-l5-utils-and-alloc.md",
+          "level": "advanced",
+          "topic": "讲解 utils.rs 的非毒 Mutex 包装、Xorshift RNG 与 Fisher-Yates shuffle、sleep_until；以及 alloc_helper.rs 的 Global 分配器与 ZST、无 provenance 指针处理。",
+          "learning_goals": [
+            "理解为何用非毒 Mutex（避免 panic 传播）",
+            "掌握 select 公平性依赖的 shuffle 实现",
+            "理解 alloc_helper 在 no_std/不稳定 Global 下的作用"
+          ],
+          "source_files": [
+            "src/utils.rs",
+            "src/alloc_helper.rs"
+          ],
+          "minimal_modules": [
+            "Mutex/shuffle/sleep_until (utils.rs)",
+            "Global (alloc_helper.rs)"
+          ],
+          "practice_task": "阅读 shuffle 实现，解释 Xorshift 与 Lemire 取模如何为 select 提供随机顺序；说明 alloc_helper 为何需要 without_provenance_mut 以及如何处理零大小分配。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "no_std、feature 与模块组织",
+          "order": 6,
+          "filename": "u3-l6-no-std-and-module-organization.md",
+          "level": "advanced",
+          "topic": "讲解 lib.rs 的 #![no_std]、std feature 门控（所有模块 cfg(feature=\"std\")）、extern crate alloc/std、internal 隐藏模块，以及 crate 的整体编译策略与依赖（crossbeam-utils）。",
+          "learning_goals": [
+            "理解 crate 的 no_std 友好组织与 std 依赖边界",
+            "看懂 feature 门控与 re-export 组织",
+            "理解 internal 模块供 select! 宏使用的导出策略"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "src/lib.rs 头部属性与模块声明",
+            "Cargo.toml 的 features 与 dependencies"
+          ],
+          "practice_task": "列出哪些模块受 std feature 控制，解释为什么『禁用 std 尚不支持』，并说明 internal 模块的 pub use 如何在隐藏于文档的同时供宏调用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "性能与基准测试",
+          "order": 7,
+          "filename": "u3-l7-performance-and-benchmarks.md",
+          "level": "advanced",
+          "topic": "讲解 benchmarks 目录组织、run.sh 如何运行多实现对比、六种场景（seq/spsc/mpsc/mpmc/select_rx/select_both），以及 benches/crossbeam.rs 的 criterion 基准，少锁与 CachePadded 如何帮助性能。",
+          "learning_goals": [
+            "理解通道性能评估的典型场景",
+            "掌握 crossbeam-channel 与 Go/flume/futures-channel/std mpsc 的对比方法",
+            "能读懂 bench 结果并关联到少锁/无锁设计"
+          ],
+          "source_files": [
+            "benchmarks/README.md",
+            "benchmarks/run.sh",
+            "benches/crossbeam.rs",
+            "benchmarks/crossbeam-channel.rs"
+          ],
+          "minimal_modules": [
+            "benchmarks/run.sh",
+            "benches/crossbeam.rs"
+          ],
+          "practice_task": "运行 run.sh（或其中一个 bench）并解读 crossbeam-channel 在 spsc 与 mpmc 场景下的表现，解释 CachePadded 防伪共享与 array/list 的少锁设计如何转化为性能优势。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l8",
+          "title": "测试体系",
+          "order": 8,
+          "filename": "u3-l8-testing.md",
+          "level": "advanced",
+          "topic": "讲解 tests 目录组织：各 flavor 测试（array/list/zero/tick/after/never）、从 Go 与 std::sync::mpsc 移植的 golang.rs/mpsc.rs、select.rs/select_macro.rs/ready.rs、thread_locals.rs，以及并发测试如何用随机与多线程验证正确性。",
+          "learning_goals": [
+            "理解测试如何覆盖 flavor 与边界场景",
+            "掌握移植测试（Go/mpsc）作为语义兼容性参照",
+            "了解线程本地与并发健壮性测试"
+          ],
+          "source_files": [
+            "tests/select_macro.rs",
+            "tests/golang.rs",
+            "tests/mpsc.rs",
+            "tests/array.rs"
+          ],
+          "minimal_modules": [
+            "tests/select_macro.rs",
+            "tests/golang.rs",
+            "tests/mpsc.rs"
+          ],
+          "practice_task": "挑选 tests/array.rs 中的一个测试，解释它如何触发 array flavor 的特定路径（满/空/断开）；并说明 golang.rs 与 mpsc.rs 移植测试保证了哪些语义兼容性。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "综合实践与架构取舍",
+          "order": 9,
+          "filename": "u3-l9-comprehensive-practice.md",
+          "level": "advanced",
+          "topic": "综合串讲：通过 examples（fibonacci 流水线、matching 会合、stopwatch 定时+信号）融会所学，讨论 flavor 选择、select 公平性、无锁 vs 锁、no_std 等架构取舍与二次开发建议。",
+          "learning_goals": [
+            "能根据场景选择合适 flavor 与 select 方式",
+            "理解无锁/少锁与锁保护的取舍",
+            "获得二次开发与扩展的思路"
+          ],
+          "source_files": [
+            "examples/fibonacci.rs",
+            "examples/matching.rs",
+            "examples/stopwatch.rs",
+            "src/channel.rs"
+          ],
+          "minimal_modules": [
+            "fibonacci/matching/stopwatch 示例"
+          ],
+          "practice_task": "基于三个 example 改写一个『多 worker 任务分发 + 超时 + 周期心跳』的小程序：选择合适 flavor（如 bounded 任务队列 + tick 心跳 + after 超时），并用 select! 编排主循环。",
+          "depends_on": [
+            "u2-l10",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1521 @@
+{
+  "project": "scipy-scipy-stats",
+  "head": "c3a772bd1344d4b95beb76fd8340a0c067be92e7",
+  "rationale": "scipy.stats 是 SciPy 中体量最大、子领域最多的模块，涵盖概率分布、描述统计、假设检验、重采样、多元分布、QMC、KDE、列联表、生存分析、拟合与灵敏度分析等。学习路线设计为三层：入门层先让读者建立「模块定位—目录组织—如何运行」的全局认识，再掌握描述性统计与概率分布的使用方法，确保能上手调用；进阶层深入核心机制——rv_continuous/rv_discrete 基类与 frozen 机制、_axis_nan_policy 装饰器（几乎所有统计函数共享的基础设施）、假设检验体系、相关性与关联分析、bootstrap/permutation/monte_carlo 重采样、多元分布与 KDE、boxcox/yeojohnson 数据变换；专家层聚焦较新的 make_distribution 新一代分布基础设施（_Domain/_Parameter 体系与变换分布）、拟合与拟合优度、删失数据与生存分析、准蒙特卡洛 QMC、sobol_indices 灵敏度与 UNURAN 抽样、Cython 扩展与数值工具、levy_stable 特殊分布以及测试体系。单元按「先用后懂再到内部实现」的顺序排列，依赖关系严格指向前置讲义，确保读者每一步都有支撑。源码文件全部经过实际确认。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "scipy.stats 是什么：模块定位与功能地图",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 scipy.stats 模块的整体定位、它在 SciPy 与科学计算生态中的角色，以及它覆盖的主要功能领域（分布、统计、检验、重采样、QMC 等）。",
+          "learning_goals": [
+            "理解 scipy.stats 在 SciPy 项目中的地位与边界",
+            "列举模块覆盖的核心功能领域",
+            "区分 scipy.stats 与 statsmodels/pandas/scikit-learn 的职责"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 模块文档字符串"
+          ],
+          "practice_task": "阅读 __init__.py 顶部的模块文档，写出 scipy.stats 覆盖的 5 个功能大类，并各举一个对应函数名。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块组织",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解 scipy/stats 目录下的文件分层：公共入口、各子领域实现文件（_stats_py.py、_distn_infrastructure.py 等）、Cython/C 扩展、子包（_levy_stable、_unuran、_rcont）以及 tests 目录。",
+          "learning_goals": [
+            "识别 stats 目录的文件命名规律与职责划分",
+            "区分纯 Python 实现与 Cython/C 加速扩展",
+            "定位各子领域对应的源码文件"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build",
+            "_result_classes.py"
+          ],
+          "minimal_modules": [
+            "meson.build 构建配置",
+            "__init__.py 导入结构"
+          ],
+          "practice_task": "依据 meson.build 列出 stats 模块编译出的 Cython 扩展模块，并说明哪些文件是纯 Python、哪些是编译扩展。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "如何导入与运行：从安装到调用第一个统计函数",
+          "order": 3,
+          "filename": "u1-l3-import-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何导入 scipy.stats、理解 __all__ 的聚合方式、调用一个简单的描述性统计与分布函数，并说明如何运行模块自带的测试套件。",
+          "learning_goals": [
+            "掌握 scipy.stats 的导入与命名空间聚合机制",
+            "成功调用描述性统计与分布方法",
+            "知道如何运行 stats 模块的测试"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_common.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 __all__ 聚合",
+            "PytestTester 测试入口"
+          ],
+          "practice_task": "写一段脚本：导入 scipy.stats，对一组数据调用 describe，再调用 norm.pdf，打印结果；并尝试运行 stats.test() 的子集。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "描述性统计与频率统计",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "描述性统计：describe 与各种平均",
+          "order": 1,
+          "filename": "u2-l1-descriptive-stats.md",
+          "level": "beginner",
+          "topic": "讲解 describe、gmean、hmean、pmean 等描述性统计函数的实现与使用，理解 axis 与权重参数。",
+          "learning_goals": [
+            "使用 describe 一次性获得数据摘要",
+            "区分算术/几何/调和/幂平均的适用场景",
+            "理解 axis 参数对统计计算的影响"
+          ],
+          "source_files": [
+            "_stats_py.py",
+            "_common.py"
+          ],
+          "minimal_modules": [
+            "describe",
+            "gmean",
+            "hmean",
+            "pmean"
+          ],
+          "practice_task": "对同一组正数数据分别计算 gmean、hmean、pmean(p=2)，比较差异并解释结果为何不同。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "矩、偏度、峰度与众数",
+          "order": 2,
+          "filename": "u2-l2-moments-skew-kurtosis.md",
+          "level": "beginner",
+          "topic": "讲解 moment、skew、kurtosis、mode、variation 等函数，理解中心矩与偏度/峰度的计算逻辑。",
+          "learning_goals": [
+            "理解中心矩的定义与计算",
+            "区分 Fisher 与 Pearson 峰度",
+            "使用 variation 计算变异系数"
+          ],
+          "source_files": [
+            "_stats_py.py",
+            "_variation.py"
+          ],
+          "minimal_modules": [
+            "moment",
+            "skew",
+            "kurtosis",
+            "mode",
+            "variation"
+          ],
+          "practice_task": "生成正态分布样本，计算其 skew 与 kurtosis（Fisher 模式），验证结果接近 0；再改用 bias=False 比较。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "分位数与频率统计",
+          "order": 3,
+          "filename": "u2-l3-quantile-and-binned.md",
+          "level": "beginner",
+          "topic": "讲解 quantile、estimated_cdf、binned_statistic 等频率统计工具，理解多种分位数插值方法与分箱统计。",
+          "learning_goals": [
+            "掌握 quantile 的不同 method 插值策略",
+            "使用 estimated_cdf 估计经验累积分布",
+            "用 binned_statistic 做多维分箱聚合"
+          ],
+          "source_files": [
+            "_quantile.py",
+            "_binned_statistic.py"
+          ],
+          "minimal_modules": [
+            "quantile",
+            "estimated_cdf",
+            "binned_statistic"
+          ],
+          "practice_task": "对一组数据用至少 3 种 method 调用 quantile，比较结果差异；再用 binned_statistic 计算每箱的均值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "概率分布入门",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "scipy.stats 分布体系与 rv_continuous/rv_discrete 基类",
+          "order": 1,
+          "filename": "u3-l1-distribution-system.md",
+          "level": "beginner",
+          "topic": "概览 scipy.stats 的概率分布体系，介绍 rv_continuous、rv_discrete、rv_histogram 三个基类的角色与公共方法（pdf/cdf/ppf/rvs/fit）。",
+          "learning_goals": [
+            "理解 scipy 分布的类层级与实例化模型",
+            "掌握 pdf/cdf/ppf/rvs 等公共方法的含义",
+            "区分连续与离散分布基类"
+          ],
+          "source_files": [
+            "_distn_infrastructure.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "rv_continuous",
+            "rv_discrete",
+            "rv_histogram"
+          ],
+          "practice_task": "用 norm 与 binom 分别演示 pdf/cdf/ppf/rvs 四类方法的调用，并解释每个方法返回值的统计含义。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "使用连续分布：norm、gamma 等",
+          "order": 2,
+          "filename": "u3-l2-continuous-distributions.md",
+          "level": "beginner",
+          "topic": "讲解如何使用 _continuous_distns.py 中的具体连续分布，理解形状参数、loc、scale 的平移缩放语义。",
+          "learning_goals": [
+            "掌握形状参数与 loc/scale 的区别",
+            "使用 frozen 分布对象复用参数",
+            "理解分布的 support 边界"
+          ],
+          "source_files": [
+            "_continuous_distns.py",
+            "_distr_params.py"
+          ],
+          "minimal_modules": [
+            "norm_gen",
+            "gamma_gen",
+            "loc/scale 平移缩放"
+          ],
+          "practice_task": "实例化 gamma 分布（指定形状参数），分别用普通调用与 frozen 对象计算 cdf，验证两者一致。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "使用离散分布：binom、poisson 等",
+          "order": 3,
+          "filename": "u3-l3-discrete-distributions.md",
+          "level": "beginner",
+          "topic": "讲解 _discrete_distns.py 中的离散分布（binom、poisson、geom、hypergeom 等）及其 pmf/cdf/ppf 方法。",
+          "learning_goals": [
+            "使用 pmf 代替 pdf 处理离散分布",
+            "理解离散分布的整数支撑与 ppf 行为",
+            "区分 bernoulli、binom、poisson 的适用场景"
+          ],
+          "source_files": [
+            "_discrete_distns.py"
+          ],
+          "minimal_modules": [
+            "binom_gen",
+            "poisson_gen",
+            "geom_gen"
+          ],
+          "practice_task": "对 binom(n=10, p=0.3) 画出 pmf，并用 ppf 找到 95% 分位点对应的整数取值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "分布基础设施深入",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "rv_generic 与 frozen 分布机制",
+          "order": 1,
+          "filename": "u4-l1-generic-and-frozen.md",
+          "level": "intermediate",
+          "topic": "深入 rv_generic 基类与 rv_frozen/rv_continuous_frozen/rv_discrete_frozen 的实现，理解 frozen 对象如何缓存参数。",
+          "learning_goals": [
+            "理解 rv_generic 作为公共基类的设计",
+            "掌握 frozen 分布的参数绑定与缓存机制",
+            "区分 gen 类与 frozen 实例"
+          ],
+          "source_files": [
+            "_distn_infrastructure.py"
+          ],
+          "minimal_modules": [
+            "rv_generic",
+            "rv_frozen",
+            "rv_continuous_frozen"
+          ],
+          "practice_task": "阅读 rv_frozen 的 __call__ 与参数缓存逻辑，写注释说明 frozen 对象如何在多次方法调用间复用 shape/loc/scale。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "分布方法的内部实现：pdf/cdf/ppf/rvs/fit",
+          "order": 2,
+          "filename": "u4-l2-method-internals.md",
+          "level": "intermediate",
+          "topic": "讲解 rv_continuous 如何基于子类提供的 _pdf/_cdf 自动派生 logpdf、sf、ppf 等方法，以及 rvs 与 fit 的通用实现。",
+          "learning_goals": [
+            "理解 pdf/cdf/logpdf/sf 之间的派生关系",
+            "掌握 ppf（分位数函数）的反演算法",
+            "理解 fit 的最大似然估计流程"
+          ],
+          "source_files": [
+            "_distn_infrastructure.py",
+            "_continuous_distns.py"
+          ],
+          "minimal_modules": [
+            "rv_continuous 的方法派生",
+            "_pdf/_cdf 钩子",
+            "fit 通用实现"
+          ],
+          "practice_task": "阅读 rv_continuous.pdf 与 cdf 的源码，画出从 _pdf/_cdf 到 logpdf、sf、ppf 的派生调用关系图。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "矩估计、形状参数与 _ShapeInfo",
+          "order": 3,
+          "filename": "u4-l3-shapeinfo-and-moments.md",
+          "level": "intermediate",
+          "topic": "讲解 _ShapeInfo、_moment、_moment_from_stats 等机制，理解分布如何声明形状参数类型与计算统计矩。",
+          "learning_goals": [
+            "理解 _ShapeInfo 对形状参数的元信息描述",
+            "掌握通用矩计算 _moment 的逻辑",
+            "了解 fit 如何利用形状信息约束参数"
+          ],
+          "source_files": [
+            "_distn_infrastructure.py",
+            "_distr_params.py"
+          ],
+          "minimal_modules": [
+            "_ShapeInfo",
+            "_moment",
+            "_fit_determine_optimizer"
+          ],
+          "practice_task": "为一个简单分布（如自定义指数分布子类）定义 _pdf 并实例化 rv_continuous，调用 moments('mvsk') 验证矩计算。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "axis 与 nan_policy 通用策略",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "_axis_nan_policy 装饰器工厂",
+          "order": 1,
+          "filename": "u5-l1-axis-nan-decorator.md",
+          "level": "intermediate",
+          "topic": "讲解 _axis_nan_policy_factory 装饰器的设计，它如何为大量统计函数统一注入 axis/nan_policy/keepdims 参数。",
+          "learning_goals": [
+            "理解装饰器工厂统一处理 axis/nan_policy 的动机",
+            "掌握装饰器如何改写函数签名与文档",
+            "了解 tuple_to_result 结果对象转换"
+          ],
+          "source_files": [
+            "_axis_nan_policy.py"
+          ],
+          "minimal_modules": [
+            "_axis_nan_policy_factory",
+            "axis_nan_policy_decorator"
+          ],
+          "practice_task": "阅读 _axis_nan_policy_factory 源码，写一段说明它如何把一个普通统计函数包装成支持 axis/nan_policy 的版本。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "nan_policy 的三种策略与广播处理",
+          "order": 2,
+          "filename": "u5-l2-nan-policy-strategies.md",
+          "level": "intermediate",
+          "topic": "深入 nan_policy 的 propagate/omit/raise 三种行为，以及 _broadcast_concatenate、_remove_nans 等辅助函数。",
+          "learning_goals": [
+            "区分 propagate/omit/raise 的语义与输出差异",
+            "理解多样本广播与配对样本处理",
+            "掌握 _contains_nan 与 _remove_nans 的协作"
+          ],
+          "source_files": [
+            "_axis_nan_policy.py"
+          ],
+          "minimal_modules": [
+            "nan_policy 处理",
+            "_broadcast_concatenate",
+            "_remove_nans"
+          ],
+          "practice_task": "构造含 NaN 的两组数据，对同一统计函数分别用 propagate/omit/raise 三种 nan_policy 调用，记录并解释输出差异。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "假设检验体系",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "假设检验框架与结果对象",
+          "order": 1,
+          "filename": "u6-l1-hypotest-framework.md",
+          "level": "intermediate",
+          "topic": "概览 scipy.stats 假设检验的整体设计：返回统计量与 p 值、可选置信区间、统一的结果类（如 TtestResult、PearsonRResult）。",
+          "learning_goals": [
+            "理解假设检验函数的统一返回结构",
+            "掌握 alternative 备择假设参数的语义",
+            "了解结果类的命名与 _result_classes 的角色"
+          ],
+          "source_files": [
+            "_result_classes.py",
+            "_stats_py.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "检验函数返回结构",
+            "alternative 参数",
+            "结果类聚合"
+          ],
+          "practice_task": "挑选一个检验函数（如 ttest_1samp），分析其返回对象的属性（statistic、pvalue、confidence_interval），写文档说明各字段含义。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "正态性与拟合优度检验",
+          "order": 2,
+          "filename": "u6-l2-normality-tests.md",
+          "level": "intermediate",
+          "topic": "讲解 shapiro、anderson、normaltest、jarque_bera、cramervonmises 等正态性/拟合优度检验。",
+          "learning_goals": [
+            "区分多种正态性检验的假设与适用场景",
+            "理解 anderson 的临界值表与 p 值方法",
+            "使用 cramervonmises 做分布拟合检验"
+          ],
+          "source_files": [
+            "_morestats.py",
+            "_hypotests.py",
+            "_ansari_swilk_statistics.pyx"
+          ],
+          "minimal_modules": [
+            "shapiro",
+            "anderson",
+            "normaltest",
+            "cramervonmises"
+          ],
+          "practice_task": "对同一组数据分别用 shapiro、normaltest、anderson 检验正态性，比较三者结论并解释差异来源。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "t 检验：单样本、配对与两样本",
+          "order": 3,
+          "filename": "u6-l3-ttests.md",
+          "level": "intermediate",
+          "topic": "讲解 ttest_1samp、ttest_rel、ttest_ind、ttest_ind_from_stats 的实现，理解均值比较的统计逻辑。",
+          "learning_goals": [
+            "区分单样本、配对、独立样本 t 检验",
+            "理解 equal_var 与 Welch 校正",
+            "使用 ttest_ind_from_stats 从汇总统计量做检验"
+          ],
+          "source_files": [
+            "_stats_py.py"
+          ],
+          "minimal_modules": [
+            "ttest_1samp",
+            "ttest_rel",
+            "ttest_ind",
+            "TtestResult"
+          ],
+          "practice_task": "生成两组不等方差数据，分别用 ttest_ind(equal_var=True/False) 检验，比较 p 值并说明 Welch t 检验的差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "非参数检验：秩和、Mann-Whitney、Wilcoxon、方差分析",
+          "order": 4,
+          "filename": "u6-l4-nonparametric-tests.md",
+          "level": "intermediate",
+          "topic": "讲解 mannwhitneyu、wilcoxon、ranksums、f_oneway、kruskal、friedmanchisquare 等非参数与多样本检验。",
+          "learning_goals": [
+            "使用秩检验替代参数检验",
+            "区分 Mann-Whitney U 与 Wilcoxon 符号秩的适用场景",
+            "理解 f_oneway 与 kruskal 的关系"
+          ],
+          "source_files": [
+            "_mannwhitneyu.py",
+            "_wilcoxon.py",
+            "_hypotests.py",
+            "_morestats.py"
+          ],
+          "minimal_modules": [
+            "mannwhitneyu",
+            "wilcoxon",
+            "f_oneway",
+            "kruskal"
+          ],
+          "practice_task": "对两组非正态数据，分别用 mannwhitneyu 与 ttest_ind 检验，比较结论；再用 f_oneway 做三组比较。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "列联表与精确检验",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "chi2_contingency 卡方列联表检验",
+          "order": 1,
+          "filename": "u7-l1-chi2-contingency.md",
+          "level": "intermediate",
+          "topic": "讲解 contingency.py 中 chi2_contingency 的实现，包括期望频数、校正与多种 p 值方法（渐近/精确/Monte Carlo）。",
+          "learning_goals": [
+            "理解列联表期望频数的计算",
+            "掌握 Yates 校正与 lambda_ 参数",
+            "区分 chi2_contingency 的多种 method"
+          ],
+          "source_files": [
+            "contingency.py"
+          ],
+          "minimal_modules": [
+            "chi2_contingency",
+            "expected_freq",
+            "margins"
+          ],
+          "practice_task": "构造一个 2x3 列联表，用 chi2_contingency 分别以渐近与 Monte Carlo 方法计算 p 值，比较结果。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Fisher 精确检验、Barnard、Boschloo 与优势比",
+          "order": 2,
+          "filename": "u7-l2-exact-tests.md",
+          "level": "intermediate",
+          "topic": "讲解 fisher_exact、barnard_exact、boschloo_exact 精确检验，以及 odds_ratio 条件优势比估计。",
+          "learning_goals": [
+            "理解 Fisher 精确检验的超几何分布原理",
+            "区分 Barnard 与 Boschloo 精确检验",
+            "使用 odds_ratio 估计优势比与置信区间"
+          ],
+          "source_files": [
+            "contingency.py",
+            "_hypotests.py",
+            "_odds_ratio.py"
+          ],
+          "minimal_modules": [
+            "fisher_exact",
+            "barnard_exact",
+            "boschloo_exact",
+            "odds_ratio"
+          ],
+          "practice_task": "对同一 2x2 表分别用 fisher_exact 与 barnard_exact 计算 p 值，再用 odds_ratio 估计条件优势比及其置信区间。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "相关性与关联分析",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Pearson、Spearman、Kendall 相关",
+          "order": 1,
+          "filename": "u8-l1-correlation-coefficients.md",
+          "level": "intermediate",
+          "topic": "讲解 pearsonr、spearmanr、kendalltau、pointbiserialr、weightedtau 的实现与统计含义。",
+          "learning_goals": [
+            "区分线性相关与秩相关的适用场景",
+            "理解相关系数的 p 值与置信区间",
+            "掌握 weightedtau 的加权机制"
+          ],
+          "source_files": [
+            "_stats_py.py",
+            "_correlation.py"
+          ],
+          "minimal_modules": [
+            "pearsonr",
+            "spearmanr",
+            "kendalltau",
+            "PearsonRResult"
+          ],
+          "practice_task": "对一组含异常点的数据分别计算 pearsonr 与 spearmanr，比较两者对异常点的鲁棒性差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Chatterjee xi 与稳健回归斜率",
+          "order": 2,
+          "filename": "u8-l2-xi-and-robust-slopes.md",
+          "level": "intermediate",
+          "topic": "讲解 chatterjeexi 非线性关联度量，以及 theilslopes、siegelslopes 稳健回归斜率估计。",
+          "learning_goals": [
+            "理解 Chatterjee xi 度量非线性依赖的能力",
+            "使用 Theil-Sen 与 Siegel 稳健斜率",
+            "区分稳健斜率与最小二乘的差异"
+          ],
+          "source_files": [
+            "_correlation.py"
+          ],
+          "minimal_modules": [
+            "chatterjeexi",
+            "theilslopes",
+            "siegelslopes"
+          ],
+          "practice_task": "构造非线性相关数据，计算 chatterjeexi 并与 pearsonr 对比；再用 theilslopes 拟合并与最小二乘比较。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "MGC 多尺度图相关性检验",
+          "order": 3,
+          "filename": "u8-l3-mgc-test.md",
+          "level": "intermediate",
+          "topic": "讲解 multiscale_graphcorr（MGC）检验的实现，包括距离矩阵、置换检验与多尺度最优尺度选择。",
+          "learning_goals": [
+            "理解 MGC 检验对非线性依赖的检测能力",
+            "掌握置换检验计算 p 值的流程",
+            "了解多尺度地图与阈值选择"
+          ],
+          "source_files": [
+            "_mgc.py"
+          ],
+          "minimal_modules": [
+            "multiscale_graphcorr",
+            "_mgc_stat",
+            "_perm_test"
+          ],
+          "practice_task": "对一组非线性相关数据调用 multiscale_graphcorr，记录 statistic 与 pvalue，并与 pearsonr 对比。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "重采样与蒙特卡洛方法",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "bootstrap 自助法置信区间",
+          "order": 1,
+          "filename": "u9-l1-bootstrap.md",
+          "level": "intermediate",
+          "topic": "讲解 bootstrap 重采样与 BCa 置信区间的实现，理解 statistic 向量化与批次处理。",
+          "learning_goals": [
+            "掌握 bootstrap 的重采样原理与参数",
+            "理解 percentile 与 BCa 置信区间差异",
+            "使用 vectorized statistic 加速"
+          ],
+          "source_files": [
+            "_resampling.py"
+          ],
+          "minimal_modules": [
+            "bootstrap",
+            "_bootstrap_resample",
+            "_bca_interval",
+            "BootstrapResult"
+          ],
+          "practice_task": "用 bootstrap 估计一组数据中位数的 95% 置信区间，分别用 percentile 与 BCa 方法比较。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "permutation_test 排列检验",
+          "order": 2,
+          "filename": "u9-l2-permutation-test.md",
+          "level": "intermediate",
+          "topic": "讲解 permutation_test 的实现，区分 independent/pairings 样本类型与精确/随机置换。",
+          "learning_goals": [
+            "掌握排列检验的零分布构造",
+            "区分 paired 与 independent 排列类型",
+            "理解精确枚举与随机采样的权衡"
+          ],
+          "source_files": [
+            "_resampling.py"
+          ],
+          "minimal_modules": [
+            "permutation_test",
+            "_calculate_null_both",
+            "_calculate_null_pairings"
+          ],
+          "practice_task": "对两组样本用 permutation_test（independent 与精确枚举）计算 p 值，并与 mannwhitneyu 结果对比。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "monte_carlo_test、power 与 ResamplingMethod 配置",
+          "order": 3,
+          "filename": "u9-l3-montecarlo-and-method.md",
+          "level": "intermediate",
+          "topic": "讲解 monte_carlo_test、power 功效分析，以及 MonteCarloMethod/PermutationMethod/BootstrapMethod 如何作为通用 method 参数注入检验。",
+          "learning_goals": [
+            "使用 monte_carlo_test 构造任意统计量的零分布",
+            "理解 power 功效曲线的计算",
+            "掌握 ResamplingMethod 注入传统检验的方式"
+          ],
+          "source_files": [
+            "_resampling.py"
+          ],
+          "minimal_modules": [
+            "monte_carlo_test",
+            "power",
+            "ResamplingMethod",
+            "BootstrapMethod"
+          ],
+          "practice_task": "用 MonteCarloMethod 注入一个传统检验（如 mannwhitneyu）做蒙特卡洛版本；再用 power 绘制不同样本量下的功效曲线。",
+          "depends_on": [
+            "u9-l1",
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "多元概率分布",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "multi_rv_generic 基类与 multivariate_normal",
+          "order": 1,
+          "filename": "u10-l1-multivariate-normal.md",
+          "level": "intermediate",
+          "topic": "讲解多元分布基类 multi_rv_generic/multi_rv_frozen 与 multivariate_normal 的实现，理解协方差矩阵处理。",
+          "learning_goals": [
+            "理解多元分布的类层级与 frozen 机制",
+            "掌握 multivariate_normal 的 pdf/rvs 方法",
+            "了解 _PSD 协方差正定分解"
+          ],
+          "source_files": [
+            "_multivariate.py",
+            "_covariance.py"
+          ],
+          "minimal_modules": [
+            "multi_rv_generic",
+            "multivariate_normal_gen",
+            "_PSD"
+          ],
+          "practice_task": "实例化 multivariate_normal，指定均值与协方差，采样并验证样本协方差接近设定值；再用 Covariance 类表示协方差。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Dirichlet、Wishart、Multinomial 等多元分布",
+          "order": 2,
+          "filename": "u10-l2-other-multivariate.md",
+          "level": "intermediate",
+          "topic": "讲解 dirichlet、wishart、invwishart、multinomial、multivariate_t 等多元分布的实现与采样。",
+          "learning_goals": [
+            "使用 Dirichlet 与 Multinomial 处理成分数据",
+            "理解 Wishart 分布与协方差矩阵采样",
+            "掌握 multivariate_t 的重尾特性"
+          ],
+          "source_files": [
+            "_multivariate.py"
+          ],
+          "minimal_modules": [
+            "dirichlet_gen",
+            "wishart_gen",
+            "multinomial_gen",
+            "multivariate_t_gen"
+          ],
+          "practice_task": "用 dirichlet 生成一组概率向量，再用 multinomial 采样计数，验证其与 Dirichlet 参数的一致性。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "矩阵分布、随机矩阵与方向分布",
+          "order": 3,
+          "filename": "u10-3-matrix-and-direction.md",
+          "level": "intermediate",
+          "topic": "讲解 matrix_normal、matrix_t、special_ortho_group、ortho_group、unitary_group、random_correlation、random_table、vonmises_fisher 等特殊多元分布。",
+          "learning_goals": [
+            "使用矩阵正态分布建模矩阵数据",
+            "理解随机正交/酉矩阵的生成",
+            "掌握 random_correlation 生成指定特征值的协方差矩阵"
+          ],
+          "source_files": [
+            "_multivariate.py"
+          ],
+          "minimal_modules": [
+            "matrix_normal_gen",
+            "special_ortho_group_gen",
+            "random_correlation_gen"
+          ],
+          "practice_task": "用 random_correlation 生成具有指定特征值的随机协方差矩阵，并用 ortho_group 生成一个随机正交矩阵验证正交性。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "核密度估计与数据变换",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "gaussian_kde 核密度估计",
+          "order": 1,
+          "filename": "u11-l1-gaussian-kde.md",
+          "level": "intermediate",
+          "topic": "讲解 gaussian_kde 的实现，包括带宽选择（Scott/Silverman）、协方差因子与加权样本。",
+          "learning_goals": [
+            "理解 KDE 的非参数密度估计原理",
+            "掌握带宽方法 bw_method 的选择",
+            "使用加权样本与多元 KDE"
+          ],
+          "source_files": [
+            "_kde.py"
+          ],
+          "minimal_modules": [
+            "gaussian_kde",
+            "协方差因子",
+            "bw_method"
+          ],
+          "practice_task": "对双峰数据用 gaussian_kde 拟合并画出密度曲线，分别用 Scott 与自定义带宽比较平滑效果。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "Box-Cox 变换与正态化",
+          "order": 2,
+          "filename": "u11-l2-boxcox.md",
+          "level": "intermediate",
+          "topic": "讲解 boxcox、boxcox_normmax、boxcox_llf 的实现，理解 Box-Cox 幂变换与对数似然最优 lambda 选择。",
+          "learning_goals": [
+            "理解 Box-Cox 幂变换的数学形式",
+            "使用 boxcox_normmax 自动选择 lambda",
+            "掌握 boxcox_llf 对数似然的计算"
+          ],
+          "source_files": [
+            "_morestats.py"
+          ],
+          "minimal_modules": [
+            "boxcox",
+            "boxcox_normmax",
+            "boxcox_llf"
+          ],
+          "practice_task": "对右偏数据用 boxcox 变换，比较变换前后 shapiro 正态性检验的 p 值。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "Yeo-Johnson 变换与正态概率图",
+          "order": 3,
+          "filename": "u11-l3-yeojohnson-probplot.md",
+          "level": "intermediate",
+          "topic": "讲解 yeojohnson 变换（支持非正数据）、yeojohnson_normmax，以及 probplot、boxcox_normplot 等正态概率图工具。",
+          "learning_goals": [
+            "理解 Yeo-Johnson 相对 Box-Cox 的优势",
+            "使用 probplot 做正态概率图诊断",
+            "掌握 normplot 系列的可视化"
+          ],
+          "source_files": [
+            "_morestats.py"
+          ],
+          "minimal_modules": [
+            "yeojohnson",
+            "yeojohnson_normmax",
+            "probplot",
+            "boxcox_normplot"
+          ],
+          "practice_task": "对含负值的数据用 yeojohnson 变换，并用 probplot 绘制变换前后的正态概率图比较。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "新一代分布基础设施",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "make_distribution 与 ContinuousDistribution 新架构",
+          "order": 1,
+          "filename": "u12-l1-make-distribution.md",
+          "level": "advanced",
+          "topic": "讲解新一代分布基础设施：make_distribution 入口、_ProbabilityDistribution 抽象基类、ContinuousDistribution/DiscreteDistribution 的设计动机与统一 API。",
+          "learning_goals": [
+            "理解新架构相对 rv_continuous 的改进",
+            "掌握 make_distribution 从数据或公式构造分布",
+            "使用 ContinuousDistribution 的统一方法"
+          ],
+          "source_files": [
+            "_distribution_infrastructure.py",
+            "_probability_distribution.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "make_distribution",
+            "ContinuousDistribution",
+            "DiscreteDistribution",
+            "_ProbabilityDistribution"
+          ],
+          "practice_task": "用 make_distribution 从一个 rv_continuous（如 norm）构造新式 ContinuousDistribution，调用其 plot/pdf/percentile 方法并与旧 API 对比。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "_Domain、_Parameter 与 _Parameterization 元模型",
+          "order": 2,
+          "filename": "u12-l2-domain-parameter.md",
+          "level": "advanced",
+          "topic": "深入 _Domain/_Interval/_RealInterval/_IntegerInterval 与 _Parameter/_RealParameter/_Parameterization 的设计，理解新架构如何用元模型描述分布的支撑与参数。",
+          "learning_goals": [
+            "理解 _Domain 层次如何描述分布支撑",
+            "掌握 _Parameter 与 _Parameterization 的参数元信息",
+            "了解元模型驱动文档与示例生成"
+          ],
+          "source_files": [
+            "_distribution_infrastructure.py"
+          ],
+          "minimal_modules": [
+            "_Domain",
+            "_RealInterval",
+            "_Parameter",
+            "_Parameterization"
+          ],
+          "practice_task": "阅读 _Parameterization 与 _RealParameter 源码，写说明新架构如何用参数化对象取代旧式的 shapes 字符串。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "变换分布：truncate、shift/scale、abs、exp、log",
+          "order": 3,
+          "filename": "u12-l3-transformed-distributions.md",
+          "level": "advanced",
+          "topic": "讲解 TransformedDistribution 体系：truncate、ShiftedScaledDistribution、FoldedDistribution、MonotonicTransformedDistribution 及 abs/exp/log 工厂。",
+          "learning_goals": [
+            "理解变换分布的惰性求值设计",
+            "使用 truncate 构造截断分布",
+            "掌握 abs/exp/log 的单调变换"
+          ],
+          "source_files": [
+            "_distribution_infrastructure.py"
+          ],
+          "minimal_modules": [
+            "TransformedDistribution",
+            "TruncatedDistribution",
+            "truncate",
+            "ShiftedScaledDistribution"
+          ],
+          "practice_task": "用 truncate 与 abs 对一个 Normal 分布做变换，分别得到截断与折叠分布，并画出密度曲线验证。",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "Mixture 混合分布、order_statistic 与新内置分布",
+          "order": 4,
+          "filename": "u12-l4-mixture-and-builtin.md",
+          "level": "advanced",
+          "topic": "讲解 Mixture 混合分布、order_statistic 顺序统计量分布，以及 _new_distributions.py 中的 Normal/Logistic/Uniform/Binomial 新内置分布。",
+          "learning_goals": [
+            "使用 Mixture 构造混合分布",
+            "理解 order_statistic 的顺序统计量分布",
+            "掌握新内置分布的参数化方式"
+          ],
+          "source_files": [
+            "_distribution_infrastructure.py",
+            "_new_distributions.py"
+          ],
+          "minimal_modules": [
+            "Mixture",
+            "order_statistic",
+            "Normal",
+            "Binomial"
+          ],
+          "practice_task": "用 Mixture 组合两个 Normal 构造双峰分布，再用 order_statistic 构造最大值分布并验证期望。",
+          "depends_on": [
+            "u12-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "分布拟合与拟合优度",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "fit 通用分布拟合",
+          "order": 1,
+          "filename": "u13-l1-fit.md",
+          "level": "advanced",
+          "topic": "讲解 _fit.py 中 fit 函数的实现：基于数值优化的最大似然/矩估计，支持 bounds、guess、参数固定与 FitResult 结果对象。",
+          "learning_goals": [
+            "理解 fit 相对分布自带 fit 方法的增强",
+            "掌握 bounds/guess/nan_policy 参数",
+            "使用 FitResult 的 plot 与置信区间"
+          ],
+          "source_files": [
+            "_fit.py"
+          ],
+          "minimal_modules": [
+            "fit",
+            "FitResult",
+            "_combine_bounds"
+          ],
+          "practice_task": "用 stats.fit 把 gamma 分布拟合到一组数据，指定形状参数 bounds，并用 FitResult.plot 可视化拟合质量。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "goodness_of_fit 拟合优度检验",
+          "order": 2,
+          "filename": "u13-l2-goodness-of-fit.md",
+          "level": "advanced",
+          "topic": "讲解 goodness_of_fit 的实现：基于重抽样的拟合优度检验，支持多种统计量（AD、CVM、KS）与已知/拟合参数。",
+          "learning_goals": [
+            "理解 goodness_of_fit 的蒙特卡洛零分布",
+            "区分 known_params 与 fit_params",
+            "掌握不同 statistic（AD/CVM/KS）的选择"
+          ],
+          "source_files": [
+            "_fit.py"
+          ],
+          "minimal_modules": [
+            "goodness_of_fit",
+            "_anderson_darling",
+            "_kolmogorov_smirnov",
+            "_cramer_von_mises"
+          ],
+          "practice_task": "用 goodness_of_fit 检验数据是否来自正态分布，分别用 AD 与 CVM 统计量，比较 p 值。",
+          "depends_on": [
+            "u13-l1",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "删失数据与生存分析",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "CensoredData 删失数据表示",
+          "order": 1,
+          "filename": "u14-l1-censored-data.md",
+          "level": "advanced",
+          "topic": "讲解 CensoredData 类的设计，支持左/右/区间删失数据，以及它如何被分布 fit 方法接受。",
+          "learning_goals": [
+            "理解删失数据的类型（左/右/区间）",
+            "使用 CensoredData 封装删失观测",
+            "将 CensoredData 传入分布 fit 做删失拟合"
+          ],
+          "source_files": [
+            "_censored_data.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "CensoredData",
+            "_validate_x_censored"
+          ],
+          "practice_task": "构造一组含右删失的生存数据，用 CensoredData 封装后传入 norm.fit，比较与忽略删失的拟合结果。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "ecdf 经验分布与 logrank 检验",
+          "order": 2,
+          "filename": "u14-l2-ecdf-logrank.md",
+          "level": "advanced",
+          "topic": "讲解 ecdf 经验累积分布函数、ECDFResult/EmpiricalDistributionFunction，以及 logrank 生存曲线差异检验。",
+          "learning_goals": [
+            "使用 ecdf 估计经验分布与置信区间",
+            "理解 EmpiricalDistributionFunction 的方法",
+            "使用 logrank 比较两组生存曲线"
+          ],
+          "source_files": [
+            "_survival.py",
+            "_censored_data.py"
+          ],
+          "minimal_modules": [
+            "ecdf",
+            "EmpiricalDistributionFunction",
+            "ECDFResult",
+            "logrank"
+          ],
+          "practice_task": "对两组删失生存数据用 ecdf 估计生存函数，并用 logrank 检验两组差异是否显著。",
+          "depends_on": [
+            "u14-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "准蒙特卡洛（QMC）方法",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "QMCEngine 基类与采样器设计",
+          "order": 1,
+          "filename": "u15-l1-qmc-engine.md",
+          "level": "advanced",
+          "topic": "讲解 _qmc.py 中 QMCEngine 抽象基类的设计：fast-forward、reset、重新播种、与 NumPy 兼容的随机数协议。",
+          "learning_goals": [
+            "理解 QMCEngine 的统一接口与状态管理",
+            "掌握 QMC 与伪随机数的差异",
+            "使用 scale 将样本映射到任意分布域"
+          ],
+          "source_files": [
+            "_qmc.py"
+          ],
+          "minimal_modules": [
+            "QMCEngine",
+            "check_random_state",
+            "scale"
+          ],
+          "practice_task": "实现一个继承 QMCEngine 的简单采样器（或使用 Halton），演示 reset/fast-forward/重新播种行为。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "Sobol、Halton、LatinHypercube、PoissonDisk 序列",
+          "order": 2,
+          "filename": "u15-l2-low-discrepancy-sequences.md",
+          "level": "advanced",
+          "topic": "讲解 Halton、Sobol、LatinHypercube、PoissonDisk 四种低差异序列的实现与适用场景，以及 _sobol.pyx 的方向数。",
+          "learning_goals": [
+            "区分四种低差异序列的特性",
+            "理解 Sobol 的方向数与 scrambling",
+            "掌握 LatinHypercube 的 strength 参数"
+          ],
+          "source_files": [
+            "_qmc.py",
+            "_sobol.pyx",
+            "_sobol.pyi"
+          ],
+          "minimal_modules": [
+            "Sobol",
+            "Halton",
+            "LatinHypercube",
+            "PoissonDisk"
+          ],
+          "practice_task": "用 Sobol 与 Halton 各生成 256 个二维点，计算并比较两者的 discrepancy（差异性）。",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l3",
+          "title": "差异性度量与 MultivariateNormalQMC/MultinomialQMC",
+          "order": 3,
+          "filename": "u15-l3-discrepancy-qmc-distributions.md",
+          "level": "advanced",
+          "topic": "讲解 discrepancy/geometric_discrepancy 度量，以及 MultivariateNormalQMC、MultinomialQMC 如何基于 QMC 生成分布样本。",
+          "learning_goals": [
+            "理解差异性度量评估低差异性质",
+            "使用 MultivariateNormalQMC 做高维正态采样",
+            "掌握 update_discrepancy 的增量更新"
+          ],
+          "source_files": [
+            "_qmc.py",
+            "_qmc_cy.pyx"
+          ],
+          "minimal_modules": [
+            "discrepancy",
+            "MultivariateNormalQMC",
+            "MultinomialQMC",
+            "update_discrepancy"
+          ],
+          "practice_task": "用 MultivariateNormalQMC 采样并估计一个高维积分，与普通伪随机采样比较收敛速度。",
+          "depends_on": [
+            "u15-l2",
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u16",
+      "title": "灵敏度分析与高级抽样",
+      "level": "advanced",
+      "order": 16,
+      "lectures": [
+        {
+          "id": "u16-l1",
+          "title": "sobol_indices 全局灵敏度分析",
+          "order": 1,
+          "filename": "u16-l1-sobol-indices.md",
+          "level": "advanced",
+          "topic": "讲解 _sensitivity_analysis.py 中 sobol_indices 的实现：Saltelli 采样、A/B/AB 矩阵、一阶与总阶 Sobol 指数估计。",
+          "learning_goals": [
+            "理解 Sobol 灵敏度指数的全局方差分解",
+            "掌握 Saltelli 采样策略",
+            "使用 SobolResult 评估与可视化"
+          ],
+          "source_files": [
+            "_sensitivity_analysis.py"
+          ],
+          "minimal_modules": [
+            "sobol_indices",
+            "saltelli_2010",
+            "sample_A_B",
+            "SobolResult"
+          ],
+          "practice_task": "对 Ishigami 函数调用 sobol_indices，提取一阶与总阶指数，并用 Bootstrap 估计置信区间。",
+          "depends_on": [
+            "u15-l2",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l2",
+          "title": "UNURAN 通用随机数生成（_sampling）",
+          "order": 2,
+          "filename": "u16-2-unuran-sampling.md",
+          "level": "advanced",
+          "topic": "讲解 _sampling.py 与 _unuran/ 子包提供的通用随机数生成：NumericalInversePolynomial、TransformedDensityRejection、SimpleRatioUniforms 等方法。",
+          "learning_goals": [
+            "理解 UNURAN 的分布反演与拒绝采样方法",
+            "区分 PINV、TDR、SROU 等方法",
+            "使用 FastGeneratorInversion 加速分布反演"
+          ],
+          "source_files": [
+            "_sampling.py",
+            "_unuran/unuran_wrapper.pyi",
+            "_unuran/__init__.py"
+          ],
+          "minimal_modules": [
+            "NumericalInversePolynomial",
+            "TransformedDensityRejection",
+            "SimpleRatioUniforms",
+            "FastGeneratorInversion"
+          ],
+          "practice_task": "用 NumericalInversePolynomial 为一个自定义 pdf 构造快速反演采样器，并验证生成样本与目标分布一致。",
+          "depends_on": [
+            "u3-l1",
+            "u15-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u17",
+      "title": "性能扩展与数值工具",
+      "level": "advanced",
+      "order": 17,
+      "lectures": [
+        {
+          "id": "u17-l1",
+          "title": "Cython 加速扩展：_stats.pyx、_sobol.pyx、_biasedurn",
+          "order": 1,
+          "filename": "u17-l1-cython-extensions.md",
+          "level": "advanced",
+          "topic": "讲解 stats 中的 Cython/C 扩展：_stats.pyx（秩统计等）、_sobol.pyx（Sobol 方向数）、_biasedurn.pyx（非中心超几何采样）、_qmc_cy.pyx 的角色与 meson 构建。",
+          "learning_goals": [
+            "理解 stats 为何引入 Cython/C 扩展",
+            "识别各扩展模块加速的关键算法",
+            "了解 meson.build 中扩展的构建配置"
+          ],
+          "source_files": [
+            "_stats.pyx",
+            "_sobol.pyx",
+            "_biasedurn.pyx",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "_stats.pyx",
+            "_sobol.pyx",
+            "_biasedurn",
+            "meson 构建"
+          ],
+          "practice_task": "阅读 meson.build 中各扩展的构建声明，列出每个 Cython 模块对应的 Python 公共 API 调用点。",
+          "depends_on": [
+            "u1-l2",
+            "u15-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u17-l2",
+          "title": "数值工具：continued_fraction、constants 与 finite_differences",
+          "order": 2,
+          "filename": "u17-l2-numerical-tools.md",
+          "level": "advanced",
+          "topic": "讲解 _continued_fraction.py、_constants.py、_finite_differences.py 等数值支撑工具，理解它们如何服务于分布与检验的高精度计算。",
+          "learning_goals": [
+            "掌握连分数工具在特殊函数中的应用",
+            "理解 _constants 中的数值常量用途",
+            "了解有限差分工具的作用"
+          ],
+          "source_files": [
+            "_continued_fraction.py",
+            "_constants.py",
+            "_finite_differences.py"
+          ],
+          "minimal_modules": [
+            "_continued_fraction",
+            "_constants",
+            "_finite_differences"
+          ],
+          "practice_task": "阅读 _continued_fraction.py，写说明连分数求值如何用于某个分布的 cdf/ppf 高精度计算（结合实际调用点）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u17-3",
+          "title": "熵估计与 masked statistics",
+          "order": 3,
+          "filename": "u17-3-entropy-and-mstats.md",
+          "level": "advanced",
+          "topic": "讲解 _entropy.py（Shannon 熵与多种微分熵估计：Vasicek/Van Es/Ebrahimi/Correa）以及 _mstats_basic.py 掩码数组统计的并行实现。",
+          "learning_goals": [
+            "使用 entropy 计算离散分布熵",
+            "掌握 differential_entropy 的多种估计方法",
+            "理解 mstats 对 masked array 的适配"
+          ],
+          "source_files": [
+            "_entropy.py",
+            "_mstats_basic.py",
+            "_stats_mstats_common.py"
+          ],
+          "minimal_modules": [
+            "entropy",
+            "differential_entropy",
+            "mstats 接口"
+          ],
+          "practice_task": "对连续样本用 differential_entropy 的 4 种方法估计微分熵，比较差异；再用 mstats 版本处理含掩码的数据。",
+          "depends_on": [
+            "u2-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u18",
+      "title": "特殊分布与测试体系",
+      "level": "advanced",
+      "order": 18,
+      "lectures": [
+        {
+          "id": "u18-l1",
+          "title": "levy_stable 特殊分布的实现",
+          "order": 1,
+          "filename": "u18-l1-levy-stable.md",
+          "level": "advanced",
+          "topic": "讲解 _levy_stable/ 子包的实现：基于特征函数的积分、 Nolan Z0/Z1 参数化、分段数值方法与 C 扩展（levyst.c）。",
+          "learning_goals": [
+            "理解 levy_stable 的特征函数积分方法",
+            "掌握 Nolan 的 Z0/Z1 参数化与边界处理",
+            "了解分段数值方法与 C 加速"
+          ],
+          "source_files": [
+            "_levy_stable/__init__.py",
+            "_levy_stable/levyst.pyx",
+            "_levy_stable/c_src/levyst.c"
+          ],
+          "minimal_modules": [
+            "levy_stable",
+            "特征函数积分",
+            "Nolan 参数化"
+          ],
+          "practice_task": "用 levy_stable 拟合一组重尾数据，比较不同 alpha/beta 下的密度形状，并阅读 _pdf_single_value_cf_integrate 说明积分路径。",
+          "depends_on": [
+            "u4-l2",
+            "u17-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u18-l2",
+          "title": "测试体系、参考实现与基准",
+          "order": 2,
+          "filename": "u18-l2-tests-and-references.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 目录的组织、common_tests 共享测试、test_generation 中的参考分布与 R/mpmath 参考实现，理解 scipy.stats 如何保证数值正确性。",
+          "learning_goals": [
+            "理解 stats 测试的分层与共享 fixture",
+            "掌握 test_generation 参考分布的作用",
+            "了解与 R/mpmath 的交叉验证机制"
+          ],
+          "source_files": [
+            "tests/__init__.py",
+            "tests/common_tests.py",
+            "tests/test_generation/reference_distributions.py"
+          ],
+          "minimal_modules": [
+            "tests 共享测试",
+            "test_generation 参考分布",
+            "R/mpmath 交叉验证"
+          ],
+          "practice_task": "阅读 test_generation/reference_distributions.py，写说明它如何为新一代分布提供数值参考，并定位一个对应的 mpmath/R 参考脚本。",
+          "depends_on": [
+            "u12-l1",
+            "u17-3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "project": "scipy-scipy-sparse",
-  "head": "ce1f64777ed7d36fd54f0f7c3d30bd88731b9c10",
-  "rationale": "scipy.sparse 是一个成熟的大型子包，核心由七种稀疏格式的类体系（_base/_coo/_compressed/_csr/_csc/_bsr/_lil/_dok/_dia）+ Python 工具层（_construct/_index/_data/_sputils/_extract/_matrix_io）+ C++/Cython 后端（sparsetools/_csparsetools/_generate_sparsetools）+ 两大子模块（linalg 线性代数、csgraph 图算法）构成。学习顺序遵循「先认知后机制、先格式后算法、先使用后扩展」：U1 带读者从零认识项目定位、目录、构建与上手；U2 逐一拆解七种格式与类继承体系；U3 深入构造、索引、基类、工具与 C++ 后端等核心源码机制；U4-U5 进入稀疏线性代数与图算法两大应用子模块；U6 用专家视角收束于格式转换、大规模索引、1-D/Array API、测试体系与二次开发。单元划分对应「认知→格式→机制→算法→扩展」的递进，讲义依赖关系确保读者按顺序建立心智模型，每篇只解决一个问题并配套代码实践。",
+  "head": "c3a772bd1344d4b95beb76fd8340a0c067be92e7",
+  "rationale": "scipy.sparse 是一个成熟的大型子包，核心由七种稀疏格式的类体系（_base/_coo/_compressed/_csr/_csc/_bsr/_lil/_dok/_dia）+ Python 工具层（_construct/_index/_data/_sputils/_extract/_matrix_io）+ C++/Cython 后端（sparsetools/_csparsetools/_generate_sparsetools）+ 两大子模块（linalg 线性代数、csgraph 图算法）构成。学习顺序遵循「先认知后机制、先格式后算法、先使用后扩展」：U1 带读者从零认识项目定位、目录、构建与上手；U2 逐一拆解七种格式与类继承体系；U3 深入构造、索引、基类、工具与 C++ 后端等核心源码机制；U4-U5 进入稀疏线性代数与图算法两大应用子模块；U6 用专家视角收束于格式转换、大规模索引、1-D/Array API、测试体系与二次开发。单元划分对应「认知→格式→机制→算法→扩展」的递进，讲义依赖关系确保读者按顺序建立心智模型，每篇只解决一个问题并配套代码实践。本次增量（ce1f64777 → c3a772bd13）经 git diff 核验：两个 HEAD 之间 scipy/sparse/ 目录下零文件变更（差异仅涉及 optimize/special/stats/ndimage 及 aarch64 构建覆盖等其它子包），不影响任何讲义的源码范围与行号，故全部讲义保持 keep，无需重写或新增。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "构造一个 1000×1000、非零元素占比约 1% 的稠密 ndarray，记录其内存占用；再用 csr_array 构造等价稀疏数组，对比两者大小并各做一次矩阵-向量乘法，打印耗时差。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -58,7 +58,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -86,7 +86,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -114,7 +114,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -150,7 +150,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -177,7 +177,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -205,7 +205,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -232,7 +232,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -260,7 +260,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -295,7 +295,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -323,7 +323,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -350,7 +350,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -378,7 +378,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -405,7 +405,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l6",
@@ -434,7 +434,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l7",
@@ -462,7 +462,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -497,7 +497,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -525,7 +525,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -553,7 +553,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -581,7 +581,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l5",
@@ -610,7 +610,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -646,7 +646,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -675,7 +675,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -704,7 +704,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -741,7 +741,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -769,7 +769,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -786,7 +786,7 @@
           "source_files": [
             "_coo.py",
             "_construct.py",
-            "tests/test_arithmetic1d.py",
+            "tests/test_arithmetic1s.py",
             "tests/test_array_api.py"
           ],
           "minimal_modules": [
@@ -798,7 +798,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -827,7 +827,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -856,7 +856,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

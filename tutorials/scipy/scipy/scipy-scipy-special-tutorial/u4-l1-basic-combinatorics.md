@@ -1,0 +1,415 @@
+# _basic.py（一）：组合与阶乘类函数
+
+## 1. 本讲目标
+
+学完本讲后，你应当能够：
+
+- 说清楚为什么 `comb`、`perm`、`factorial`、`factorial2`、`factorialk`、`stirling2` 这些函数要用**纯 Python** 实现，而不是像 `gamma`、`erf` 那样做成 NumPy ufunc。
+- 掌握 `exact` 参数背后的「精确整数 vs 浮点近似」双模式设计，并能预测两种模式的返回类型。
+- 读懂 `_FACTORIALK_LIMITS_64BITS` / `_FACTORIALK_LIMITS_32BITS` 两张表如何防止 int64/int32 溢出，定位到选择输出 dtype 的源码。
+- 认识这些「纯 Python 包装函数」与底层 ufunc（`binom`、`poch`、`gamma`、`_stirling2_inexact`）的分工关系。
+
+## 2. 前置知识
+
+本讲承接 **u1-l4**（`__init__.py` 如何把 `_basic` 等子模块的 `__all__` 聚合成 `scipy.special` 命名空间），并用到 **u2-l1** 建立的 ufunc 概念。开始前请确认理解以下几点：
+
+- **ufunc 的约束**：ufunc 对输入数组的每个元素独立、同构地求值，且输出 dtype 在注册时就固定下来（见 u2-l1 讲的类型环 `.types`）。
+- **Python 任意精度整数 vs NumPy 定长整数**：Python 的 `int` 没有位数上限，`2**1000` 也是合法整数；而 NumPy 的 `int64` / `int32` 有固定上限（`int64` 上限为 \(2^{63}-1 = 9223372036854775807\)），超出即溢出（wrap-around 或升 dtype）。
+- **Gamma 函数**：\(\Gamma(n+1)=n!\)，它把阶乘从整数延拓到实数与复数，是浮点近似阶乘的数学基础。
+
+**关键直觉**：为什么有些数学函数注定做不成 ufunc？因为 ufunc 必须返回**固定 dtype**、且**逐元素同构**。但「精确组合数/阶乘」的结果位数随输入无界增长，只能用 Python 任意精度整数（object 数组）承载；「序列函数」（如零点序列）的输出长度又依赖参数。这两类需求都与 ufunc 模型冲突，因此被放在 `_basic.py` 这一**纯 Python 包装层**。这正是本单元（U4）要展开的主题，而本讲聚焦其中的组合与阶乘家族。
+
+## 3. 本讲源码地图
+
+本讲全部内容都落在 [_basic.py](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py) 一个文件里。按出现顺序，关键锚点如下：
+
+| 位置 | 作用 |
+| --- | --- |
+| 顶部导入 L10-20 | 从 numpy 转手 `sinc`；从 `_ufuncs` 引入 `binom`/`poch`/`gamma`/`_stirling2_inexact` 等底层 ufunc；从 `_specfun` 引入 Zhang & Jin 内核 |
+| `__all__` L23-81 | 决定哪些名字会被 `__init__.py` 聚合进 `scipy.special` 命名空间 |
+| `_FACTORIALK_LIMITS_64BITS` / `_FACTORIALK_LIMITS_32BITS` L84-89 | 溢出边界表（本讲重点） |
+| `diric` L92 | Dirichlet 核（周期 sinc） |
+| `bernoulli` L1806、`euler` L1857 | 伯努利数 / 欧拉数序列 |
+| `comb` L2601、`perm` L2688 | 组合数 / 排列数 |
+| `_range_prod` L2757 | 分治连乘（精确阶乘的核心） |
+| `_factorialx_array_exact` L2786 | 数组精确计算 + dtype 选择 |
+| `_factorialx_approx_core` L2881 | 浮点近似核心 |
+| `_factorialx_wrapper` L2964 | 三个 factorial 函数的共享分发器 |
+| `factorial` L3062、`factorial2` L3119、`factorialk` L3176 | 阶乘家族 |
+| `stirling2` L3261 | 第二类 Stirling 数 |
+| `softplus` L3477 | 数值稳定的 softplus |
+
+测试侧，[tests/test_basic.py](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/tests/test_basic.py) 会直接 import 上述私有表（L42）并验证 dtype 行为（L2367），是本讲实践的佐证来源。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 exact 模式：为什么这些函数不走 ufunc 路线
+
+#### 4.1.1 概念说明
+
+`factorial`、`comb`、`stirling2` 等函数都有一个布尔参数 `exact`，它把函数切成两个互不相通的世界：
+
+- **精确整数世界（`exact=True`）**：用 Python 任意精度整数算出「数学上正确的整数」。例如 `factorial(25, exact=True)` 得到一个 26 位的精确整数。代价是速度慢，且只能处理整数输入。
+- **浮点近似世界（`exact=False`，默认）**：委托给底层 ufunc（`gamma`、`binom`、`poch` 等）快速近似，返回 `float64`。代价是有舍入误差，且极大值会变成 `inf`。
+
+之所以要双模式，是因为「精确」与「定长 dtype」天然冲突：精确阶乘结果位数随 \(n\) 无界增长，塞不进任何固定宽度的整数 dtype；而 ufunc 的输出 dtype 在注册时就必须固定。于是精确路径只能留在 Python 层（用 `object` 数组承载任意精度整数），近似路径才能下沉到 ufunc。这是贯穿整个 `_basic.py` 的设计动机。
+
+#### 4.1.2 核心流程
+
+`factorial` / `factorial2` / `factorialk` 三个公共函数本质上是同一个算法的三个实例（分别对应 \(k=1,2,\dots\)），它们共享同一个分发器 `_factorialx_wrapper`。标量输入时的简化流程：
+
+```
+_factorialx_wrapper(fname, n, k, exact, extend):
+  1. 校验 extend ∈ {"zero", "complex"}，且 exact 与 extend 不冲突
+  2. 校验 n / k 的数据类型（整数/浮点/复数）是否与 extend 匹配
+  3. 若是标量：
+       - extend="zero" 且 n < 0      → 返回 0
+       - n ∈ {0, 1}                   → 返回 1
+       - exact 且 n 为整数            → _range_prod(1, n, k)   # 精确整数
+       - 否则                         → _factorialx_approx_core  # 浮点近似
+  4. 若是数组：
+       - exact → _factorialx_array_exact   # 按需升 dtype
+       - 否则  → _factorialx_array_approx
+```
+
+注意 `extend` 参数：默认 `"zero"` 表示负数返回 0；选 `"complex"` 则切换到 Gamma 函数的复数延拓（本讲不深入，留待读者按需探索）。
+
+#### 4.1.3 源码精读
+
+三个公共函数体都只有一行——把自身「退化」为对共享分发器的调用，区别仅在 `k`：
+
+- [_basic.py:3116](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3116)：`factorial` 传 `k=1`。
+- [_basic.py:3173](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3173)：`factorial2` 传 `k=2`。
+- [_basic.py:3258](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3258)：`factorialk` 把用户传入的 `k` 透传。
+
+分发器里，标量精确路径与近似路径的分岔只有几行：
+
+```python
+# _basic.py:3032-3034  ——  精确整数分支
+elif exact and _is_subdtype(type(n), "i"):
+    # calculate with integers; cast away other int types (like unsigned)
+    return _range_prod(1, int(n), k=k)
+...
+# _basic.py:3039  ——  浮点近似分支
+return _factorialx_approx_core(n, k=k, extend=extend)
+```
+
+参见 [_basic.py:3032-3039](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3032-L3039)。`_range_prod` 返回 Python 任意精度整数，而 `_factorialx_approx_core` 返回 `float64`/`complex`——同一个函数名，靠 `exact` 在两种返回类型间切换，这就是「不走 ufunc」的代价换来的灵活性。
+
+#### 4.1.4 代码实践
+
+**实践目标**：直观感受 `exact` 两种模式在返回类型与精度上的差异。
+
+**操作步骤**：
+
+```python
+from scipy.special import factorial
+a = factorial(30, exact=True)     # Python 任意精度整数
+b = factorial(30, exact=False)    # float64 近似
+type(a), type(b), a, b
+b - a                             # 观察末位误差
+factorial(200, exact=True)        # 仍然精确（数百位整数）
+factorial(200, exact=False)       # inf（float64 溢出）
+```
+
+**需要观察的现象**：`a` 是 `int`，`b` 是 `np.float64`；`b - a` 是一个非零的小数（浮点舍入造成）；`factorial(200, exact=False)` 因为远超 float64 上限而变成 `inf`，而 `exact=True` 仍给出精确大整数。
+
+**预期结果**：`factorial(30, exact=True) = 265252859812191058636308480000000`；`factorial(30, exact=False)` 约为 \(2.6525\times 10^{32}\)，与精确整数的差为浮点末位量级。该浮点值的具体末位「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `factorial` 不能做成单个 ufunc 同时支持精确与近似两种模式？
+
+> **参考答案**：ufunc 要求固定输出 dtype 的逐元素 C 循环；而精确阶乘结果位数随 \(n\) 无界增长，必须用任意精度 Python 整数（即 `object` 数组）承载。两者矛盾，所以拆成 `exact` 双模式，精确路径留在纯 Python 层。
+
+**练习 2**：`factorial(-3)`（不传 `exact`、不传 `extend`）默认返回什么？为什么？
+
+> **参考答案**：返回 `0`。这是 `extend="zero"` 的默认约定（见 [_basic.py:3028-3029](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3028-L3029)）：负整数阶乘在经典定义下无意义，模块选择返回 0 而非抛错或给 `inf`，便于在数组运算中静默传播。
+
+---
+
+### 4.2 组合数学函数：comb、perm、stirling2
+
+#### 4.2.1 概念说明
+
+三个「计数」函数：
+
+- `comb(N, k)`：组合数 \(\binom{N}{k}\)，即「N 选 k」。
+- `perm(N, k)`：排列数 \(P(N,k)=N!/(N-k)!\)，即「N 取 k 排列」。
+- `stirling2(N, K)`：第二类 Stirling 数 \(\left\{ {N \atop K} \right\}\)，把 \(N\) 个元素的集合划分为 \(K\) 个非空子集的划分数。
+
+它们的结果都是可能很大的整数，因此同样需要 `exact` 双模式。这里的关键洞见是**分工**：近似路径复用 `_ufuncs` 里已有的底层 ufunc，精确路径才用纯 Python 整数：
+
+| 函数 | `exact=False`（近似） | `exact=True`（精确） |
+| --- | --- | --- |
+| `comb` | ufunc `binom` | `math.comb`（Python 内置） |
+| `perm` | ufunc `poch` | `for` 循环连乘 |
+| `stirling2` | ufunc `_stirling2_inexact` | 动态规划（DP） |
+
+`binom` 与 `poch` 在 [_basic.py:14-16](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L14-L16) 从 `_ufuncs` 导入，`_stirling2_inexact` 同处导入。
+
+#### 4.2.2 核心流程
+
+`comb` 的简化流程（`repetition=False` 时）：
+
+```
+if exact:
+    标量整数 → math.comb(N, k)              # Python 内置，任意精度
+else:
+    vals = binom(N, k)                       # ufunc，支持数组
+    把 k>N 或 N<0 或 k<0 的位置置 0            # 用 cond 掩码
+```
+
+`stirling2`（`exact=True`）则是一段标准的动态规划：递推关系为
+
+\[
+\left\{ {n \atop k} \right\} = k\left\{ {n-1 \atop k} \right\} + \left\{ {n-1 \atop k-1} \right\}
+\]
+
+实现里用「最小堆 + 单行滚动数组」管理所有 \((N,K)\) 对，按 \(n\) 从小到大推进，避免对每个 \((N,K)\) 重复从头算；对数组输入也只算到最大 \(n\) 一次，其余结果在过程中顺带得到。
+
+#### 4.2.3 源码精读
+
+- `comb` 精确路径走 Python 内置 [_basic.py:2666-2673](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2666-L2673)（`return math.comb(N, k)`）。
+- `comb` 近似路径用 `binom` ufunc 并做掩码，见 [_basic.py:2677-2685](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2677-L2685)。
+- `perm` 精确路径是朴素的 `for` 循环连乘 [_basic.py:2741-2744](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2741-L2744)；近似路径用 `poch(N - k + 1, k)`，见 [_basic.py:2748](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2748)。
+- `stirling2` 的 DP 滚动行核心 `n_row[j] = n_row[j]*j + n_row[j-1]` 在 [_basic.py:3358-3377](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3358-L3377)。
+
+#### 4.2.4 代码实践
+
+**实践目标**：对比三个计数函数的精确与近似输出，并验证 `stirling2` 的 DP 与近似分支。
+
+**操作步骤**：
+
+```python
+from scipy.special import comb, perm, stirling2
+comb(10, 3, exact=True)                   # 120（int）
+comb(10, 3, exact=False)                  # 120.0（float64，走 binom）
+comb(10, 3, exact=True, repetition=True)  # 220（允许重复的组合数）
+perm(10, 3, exact=True)                   # 720（int）
+stirling2(10, 3, exact=True)              # 9330（Python int，DP）
+stirling2(10, 3, exact=False)             # 9330.0（ufunc 近似）
+```
+
+**需要观察的现象**：`exact=True` 返回 Python 整数，`exact=False` 返回 `float64`；小数值下两者数值一致仅类型不同。
+
+**预期结果**：上述注释中的数值即为预期。注意文档指出 `stirling2` 在 \(n>50\) 且 `exact=False` 时改用 Temme 渐近近似，相对误差约 \(5\times 10^{-5}\)；而 `exact=True` 始终精确但更慢。具体大 \(n\) 下的误差量级「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `comb` 的 `exact=False` 能接受数组输入，而 `exact=True` 只支持标量？
+
+> **参考答案**：`exact=False` 走 `binom` ufunc，天然支持数组广播；`exact=True` 调用 `math.comb`，它是标量函数（见 [_basic.py:2666-2673](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2666-L2673) 的 `int(N)`/`int(k)`），且文档明确写「Array arguments accepted only for exact=False case」。
+
+**练习 2**：`perm` 的近似路径用 `poch(N - k + 1, k)` 推导排列数，数学依据是什么？
+
+> **参考答案**：`poch(a, b) = \Gamma(a+b)/\Gamma(a) = a(a+1)\cdots(a+b-1)`。取 \(a=N-k+1\)、\(b=k\)，得 \((N-k+1)(N-k+2)\cdots N = N!/(N-k)! = P(N,k)\)，正是排列数。
+
+---
+
+### 4.3 factorial 家族与整数溢出保护（`_FACTORIALK_LIMITS_*`）
+
+#### 4.3.1 概念说明
+
+`factorialk(n, k)` 是「跳 \(k\) 计数」的多重阶乘 \(n!(k)\)：
+
+\[
+n!(k) = n \cdot (n-k) \cdot (n-2k) \cdots \quad (\text{直到为正})
+\]
+
+特例：\(k=1\) 即普通阶乘 `factorial`，\(k=2\) 即双阶乘 `factorial2`（如 \(7!!=7\cdot 5\cdot 3\cdot 1\)）。
+
+当输入是**整数数组**且要求**精确**时，结果要存进 NumPy 定长整数数组。但 \(n!!(k)\) 增长很快，会溢出 `int64`/`int32`。为了既快又安全，`_basic.py` 预先用 mpmath 算好两张表：对每个 \(k\)，记录「\(n\) 不超过多少时，\(n!(k)\) 仍能塞进 `int64`/`int32`」。数组精确计算时据此自动选择 `long` / `int64` / `object` 三档 dtype。
+
+#### 4.3.2 核心流程
+
+dtype 选择逻辑（在 `_factorialx_array_exact` 内）：
+
+```
+un = 数组中最大的 n
+if k ∈ {1..9}:
+    if   un > LIMITS_64BITS[k]:   dt = object   # 溢出 int64，用任意精度
+    elif un > LIMITS_32BITS[k]:   dt = int64
+    else:                         dt = long     # 平台相关整数类型
+else:  # k >= 10
+    dt = object                                 # 一律用任意精度
+```
+
+选好 dtype 后，再按 \(n \bmod k\) 把输入分到 \(k\) 条「车道」，每条车道内用 `_range_prod` 做**分治连乘**并增量复用中间积——即只对最大 \(n\) 完整算一次，更小的 \(n\) 的结果在连乘过程中顺带得到。
+
+#### 4.3.3 源码精读
+
+两张边界表位于 [_basic.py:84-89](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L84-L89)：
+
+```python
+# mapping k to last n such that factorialk(n, k) < np.iinfo(np.int64).max
+_FACTORIALK_LIMITS_64BITS = {1: 20, 2: 33, 3: 44, 4: 54, 5: 65,
+                             6: 74, 7: 84, 8: 93, 9: 101}
+# mapping k to last n such that factorialk(n, k) < np.iinfo(np.int32).max
+_FACTORIALK_LIMITS_32BITS = {1: 12, 2: 19, 3: 25, 4: 31, 5: 37,
+                             6: 43, 7: 47, 8: 51, 9: 56}
+```
+
+注意 \(k=2\) 时 64 位边界是 33——这正是后续实践的「33!! 刚好不溢出」的来源。
+
+dtype 三档选择在 [_basic.py:2802-2813](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2802-L2813)。分治连乘 `_range_prod` 在 [_basic.py:2757-2783](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2757-L2783)，其中 `lo==1 and k==1` 时直接复用 `math.factorial`（ [_basic.py:2771-2772](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2771-L2772)），否则二分区间递归相乘以加速大数连乘。测试侧 [tests/test_basic.py:42](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/tests/test_basic.py#L42) 直接 import 这两张表，[tests/test_basic.py:2367](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/tests/test_basic.py#L2367) 用 `factorialk(25, 3, exact=True)` 等做参照值，说明这套升 dtype 逻辑是被显式测试覆盖的。
+
+#### 4.3.4 代码实践
+
+**实践目标**：亲手验证 `_FACTORIALK_LIMITS_64BITS` 表如何防止 int64 溢出，并体会 `exact=True` 与 `exact=False` 的差异。
+
+**操作步骤**：
+
+```python
+import numpy as np
+from scipy.special import factorialk
+
+# (1) 标量精确：返回 Python 任意精度整数，本身不存在「溢出」概念
+factorialk(33, 2, exact=True)             # 6333667685362850625
+type(factorialk(33, 2, exact=True))       # int
+
+# (2) 数组精确：观察 dtype 在 33 / 34 边界的跳变（关键！）
+factorialk([33], 2, exact=True).dtype     # dtype('int64')  ← 33!! 刚好不溢出
+factorialk([34], 2, exact=True).dtype     # dtype('O')  (object) ← 34!! 溢出，自动升级
+
+# (3) exact=True vs exact=False 的差异
+factorialk(33, 2, exact=True)             # 6333667685362850625（精确整数）
+factorialk(33, 2, exact=False)            # ≈ 6.33e18（float64 近似，末位有舍入）
+
+# (4) 用 int64 上限复核「刚好不溢出」
+int64_max = np.iinfo(np.int64).max        # 9223372036854775807
+val33 = 6333667685362850625               # 33!!
+val33 < int64_max                         # True
+val33 * 34 < int64_max                    # False → 34!! 溢出，与表中 k=2 → 33 完全一致
+```
+
+**需要观察的现象**：标量 `exact=True` 永远返回 Python `int`（无溢出）；数组 `exact=True` 在 \(n=33\) 处 dtype 是 `int64`，在 \(n=34\) 处自动升为 `object`（即数组元素变成 Python 大整数）；`exact=False` 给出的是 `float64` 近似，与精确整数相比末尾若干位不同。
+
+**预期结果**：
+
+- \(33!! = 6333667685362850625 < 9223372036854775807 = \text{int64\_max}\)，所以 `factorialk([33], 2, exact=True)` 用 `int64` 即可承载。
+- \(34!! = 33!! \times 34 = 215344701302336921250 > \text{int64\_max}\)，故 `factorialk([34], 2, exact=True)` 升级为 `object` dtype。
+- `factorialk(33, 2, exact=False)` 约为 \(6.33\times 10^{18}\)，末位浮点值「待本地验证」。
+
+这一现象与 [_basic.py:84-86](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L84-L86) 表中 `2: 33` 完全吻合：表值就是「仍能塞进 int64 的最后一个 \(n\)」。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 \(k \geq 10\) 时直接用 `object`，而不再查表？
+
+> **参考答案**：两张表只覆盖 \(k=1..9\)（见 [_basic.py:2802-2813](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L2802-L2813) 的 `else` 分支）。\(k\geq 10\) 虽然增长更慢，但维护更多条目的收益有限，模块选择保守地一律用任意精度 `object`，避免维护超大表。
+
+**练习 2**：`factorialk(100, 2, exact=True)`（标量）会溢出吗？
+
+> **参考答案**：不会。标量精确路径走 [_basic.py:3032-3034](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3032-L3034) 的 `_range_prod`，返回 Python 任意精度整数，没有定长上限。`_FACTORIALK_LIMITS_*` 的溢出保护**只针对 NumPy 定长整数数组**的 dtype 选择，不约束标量。
+
+---
+
+### 4.4 便利与数值函数：diric、sinc、softplus、bernoulli、euler
+
+#### 4.4.1 概念说明
+
+`_basic.py` 还有一批「便利函数」，它们要么是对 NumPy 已有函数的**命名转手**，要么是对 `_specfun` 序列函数的**薄包装**：
+
+- `sinc`：直接转手 `numpy.sinc`（规范化 sinc，\(\sin(\pi x)/(\pi x)\)）。
+- `softplus(x)`：\(\log(1+\exp(x))\)，ReLU 的光滑近似，一行转手 `np.logaddexp`。
+- `diric(x, n)`：Dirichlet 核（周期 sinc）\(\sin(nx/2)/(n\sin(x/2))\)。
+- `bernoulli(n)`：返回伯努利数序列 \(B_0..B_n\)。
+- `euler(n)`：返回欧拉数序列 \(E_0..E_n\)。
+
+它们的共同点是：要么本身就不需要 ufunc（已委托给 numpy/`_specfun`），要么是跨元素或序列语义。
+
+#### 4.4.2 核心流程
+
+- `softplus` 的实现是 `np.logaddexp(0, x)`。`logaddexp` 内部做了数值稳定的 max-shift：\(\log(e^0 + e^x) = \max(0,x) + \log(1+e^{-|x|})\)，等价于 \(\log(1+e^x)\) 但对大 \(x\) 不溢出。
+- `bernoulli` / `euler`：校验 \(n\) 是非负标量 → 调 `_specfun.bernob` / `_specfun.eulerb` 取序列 → 切片到 `[:n+1]`。
+- `diric`：对分母 \(\sin(x/2)\) 接近 0 的点做特殊处理（用极限值 \(\pm 1\) 替代），避免除零。
+
+#### 4.4.3 源码精读
+
+- `sinc` 是纯转手：[_basic.py:11](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L11) 从 numpy 导入，并列入 [_basic.py:71](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L71) 的 `__all__`，文件内没有 `def sinc`。
+- `softplus` 整个函数体见 [_basic.py:3507](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L3507)：`return np.logaddexp(0, x, **kwargs)`，`**kwargs` 透传 ufunc 通用参数（如 `out=`）。
+- `bernoulli` 见 [_basic.py:1847-1854](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L1847-L1854)，`euler` 见 [_basic.py:1899-1906](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L1899-L1906)，结构几乎对称。
+- `diric` 的分母保护逻辑在 [_basic.py:176-191](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L176-L191)（`mask2` 处用 \((-1)^{\lfloor x/\pi\rfloor(n-1)}\) 兜底）。
+
+#### 4.4.4 代码实践
+
+**实践目标**：体会便利函数的「转手」本质，以及 `softplus` 的数值稳定性。
+
+**操作步骤**：
+
+```python
+import numpy as np
+from scipy import special
+special.softplus(0)              # 0.693147... = ln 2
+special.softplus(1000)           # 1000.0（不溢出）
+np.log(1 + np.exp(1000))         # inf（朴素写法溢出）
+special.sinc is np.sinc          # True（同一对象，纯转手）
+special.bernoulli(4)             # [1, -0.5, 0.1667, 0, -0.0333]
+special.euler(6)                 # [1, 0, -1, 0, 5, 0, -61]
+```
+
+**需要观察的现象**：`softplus(1000)` 返回有限值 `1000.0`，而朴素 `np.log(1+np.exp(1000))` 溢出为 `inf`——这是 `logaddexp` 内部 max-shift 的功劳；`special.sinc is np.sinc` 为 `True`，证明它就是 numpy 的同名函数。
+
+**预期结果**：上述注释中的值即为预期。`bernoulli(4)` 与 `euler(6)` 的数值与 [_basic.py:1831](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L1831) 及 [_basic.py:1889](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L1889) 文档示例一致。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`special.sinc` 和 `numpy.sinc` 是什么关系？为什么 `_basic.py` 要这么做？
+
+> **参考答案**：完全相同——[_basic.py:11](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L11) 直接 `from numpy import ... sinc` 并放入 `__all__`，文件内没有重新定义。这样做的目的是让 `scipy.special` 命名空间也提供 `sinc`，方便用户在一个地方取用所有「特殊函数」，即便它实际来自 numpy。
+
+**练习 2**：文档说 `euler(n)` 第一个不精确的值出现在 \(E(22)\)，为什么？
+
+> **参考答案**：`euler` 返回 `float64`，只有约 15–16 位有效十进制数字；而欧拉数的绝对值随 \(n\) 极快增长（见 [_basic.py:1895-1896](https://github.com/scipy/scipy/blob/c3a772bd1344d4b95beb76fd8340a0c067be92e7/scipy/special/_basic.py#L1895-L1896) 的示例 \(E(22)=-69348874393137901\)，共 17 位），超出 float64 精度后必然舍入，所以从 \(E(22)\) 起不再精确。
+
+---
+
+## 5. 综合实践
+
+把本讲三大要点（exact 双模式、组合计数、整数溢出保护）串起来：用阶乘与组合数交叉验证「50 选 5」的组合数，并延伸到多重阶乘的 dtype 升级。
+
+**任务**：
+
+1. 用 `comb(50, 5, exact=True)` 得到精确组合数（Python 整数）。
+2. 用 `comb(50, 5, exact=False)` 得到 float64 近似（走 `binom` ufunc），计算两者的相对误差。
+3. 用阶乘分解恒等式 \(\binom{50}{5} = 50!/(5!\cdot 45!)\) 复核：分别用 `factorial(..., exact=True)` 与 `factorial(..., exact=False)` 计算，比较结果。
+4. 用 `factorialk([33, 34], k=2, exact=True)` 观察数组 dtype 在溢出边界处的跳变，呼应 4.3 节。
+
+**参考代码**：
+
+```python
+import numpy as np
+from scipy.special import comb, factorial, factorialk
+
+# 1-2. 组合数精确 vs 近似
+c_exact = comb(50, 5, exact=True)       # 2118760
+c_approx = comb(50, 5, exact=False)     # 2118760.0
+rel_err = abs(c_approx - c_exact) / c_exact
+
+# 3. 阶乘分解复核
+num = factorial(50, exact=True)
+den = factorial(5, exact=True) * factorial(45, exact=True)
+num / den == c_exact                     # True（整数精确）
+factorial(50, exact=False) / (factorial(5, exact=False) * factorial(45, exact=False))
+
+# 4. 多重阶乘 dtype 边界
+factorialk([33, 34], k=2, exact=True).dtype   # 观察是否升为 object
+```
+
+**预期**：`c_exact = 2118760`，相对误差为机器精度量级（约 \(10^{-16}\) 或 0）；阶乘精确分解与 `comb` 精确值完全相等；`factorialk([33, 34], 2, exact=True)` 因为含 \(34!!\)（溢出 int64）而整体 dtype 升为 `object`。相对误差的具体量级「待本地验证」。
+
+## 6. 本讲小结
+
+- `_basic.py` 的组合/阶乘类函数多为**纯 Python**，因为精确模式需要任意精度整数，与 ufunc「定长 dtype、逐元素同构」的模型冲突。
+- **exact 双模式**：`exact=True` 走 Python 整数（`math.comb` / `_range_prod` / 动态规划），`exact=False` 委托底层 ufunc（`binom` / `poch` / `gamma` / `_stirling2_inexact`）。
+- `_FACTORIALK_LIMITS_64BITS` / `_FACTORIALK_LIMITS_32BITS` 预存每个 \(k\) 的 int64/int32 溢出边界，数组精确计算时据此在 `long` / `int64` / `object` 三档间自动选 dtype（例如 \(k=2\) 时 \(33!!\) 刚好不溢出 int64）。
+- `factorial` / `factorial2` / `factorialk` 共享 `_factorialx_wrapper`，仅 `k` 不同；标量精确路径走 `_range_prod` 返回 Python 任意精度整数，永不溢出。
+- 便利函数中 `sinc`/`softplus` 是对 numpy 的薄转手（`softplus` 借 `logaddexp` 获得数值稳定性），`bernoulli`/`euler` 委托 `_specfun` 取序列。
+
+## 7. 下一步学习建议
+
+- **u4-l2**：继续 `_basic.py` 的另一半——Bessel/Kelvin 函数的**零点序列**与**各阶导数**函数（`jn_zeros`、`jvp` 等），它们同样不是 ufunc，而是基于 `_specfun` 与底层 ufunc 的纯 Python 序列函数。
+- **u4-l3**：`_logsumexp.py` 的数值稳定实现（max-shift 技巧），与本讲 `softplus` 的稳定性思路一脉相承。
+- 想理解 `binom` / `gamma` / `poch` 这些底层 ufunc 是如何从声明生成出来的，回顾 **u3-l1**（`functions.json`）与 **u3-l2**（`_generate_pyx.py`）。
+- 想理解 `bernoulli`/`euler` 背后的 `_specfun`（Zhang & Jin）内核，可在学完 U4 后阅读 `_specfun` 模块及其参考文献。

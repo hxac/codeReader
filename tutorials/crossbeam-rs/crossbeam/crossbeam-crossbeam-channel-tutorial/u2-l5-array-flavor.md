@@ -1,0 +1,512 @@
+# 有界环形缓冲区：array flavor
+
+## 1. 本讲目标
+
+本讲深入 `src/flavors/array.rs`，这是 `bounded(cap)`（`cap > 0`）通道的底层实现。读完本讲，你应当能够：
+
+- 说清楚一个「环形缓冲区 + 版本号（stamp）」是如何在无锁条件下实现有界 MPMC 队列的；
+- 读懂 `stamp` 把「圈数（lap）、断开标志（mark_bit）、槽位下标（index）」打包进一个 `usize` 的编码方式；
+- 跟踪一次「队列已满 → 发送方阻塞 → 被接收方唤醒 → 完成 write」的完整流程；
+- 解释 `write` 用 `Release` 写 stamp、`read`/`start_recv` 用 `Acquire` 读 stamp 是如何保证「消息可见性」与「不踩踏正在读的槽」的；
+- 看懂断开时 `disconnect_senders` / `disconnect_receivers` 的区别，以及为什么只有接收侧断开时才调用 `discard_all_messages` 丢弃剩余消息。
+
+本讲只聚焦 array flavor 的内部实现，承接 u2-l4 讲过的 `Context` / `SyncWaker` 阻塞唤醒机制；array flavor 与外部 `Sender` / `Receiver` 壳的对接（`SenderFlavor::Array`）在 u2-l1 已建立，此处不再重复。
+
+## 2. 前置知识
+
+在进入源码前，先用通俗语言把几个关键直觉建立起来。
+
+### 2.1 为什么需要「版本号」
+
+最朴素的环形队列只用 `head`（消费游标）和 `tail`（生产游标）两个下标在定长数组里转圈。这种结构在**单生产者单消费者**时还好，但在 **MPMC（多生产者多消费者）** 下有一个致命问题：当 `tail` 转了一整圈回到起点时，生产者无法仅凭下标判断「这个槽位是空的、可以写」还是「上一圈写的数据还没被消费掉」——下标相同，但状态不同。
+
+Vyukov 的解法是给**每个槽位**配一个 `stamp`（版本号/邮戳）：每次写入或读出都更新这个版本号，让游标与槽位版本号「对上暗号」才能操作。这样即使下标转圈重复，版本号也能区分「这是第几圈」。array flavor 的注释明确指出它基于 Vyukov 的 bounded MPMC queue：
+
+> 基于 Dmitry Vyukov 的 bounded MPMC 队列实现。
+
+### 2.2 三个关键术语
+
+- **stamp（版本号）**：一个 `usize`，把「圈数 lap + 断开标志 mark + 槽位下标 index」打包在一起，是整个算法的核心数据。
+- **lap（圈数）**：游标绕缓冲区转了多少圈，存在 stamp 的高位，用来消歧「同一个下标在不同圈」。
+- **mark_bit（断开位）**：stamp 里专门保留的一个比特，只用在 `tail` 上；一旦置位，表示通道已断开（disconnected）。
+
+### 2.3 CAS 与 Backoff
+
+array flavor 是**无锁（lock-free）**的：多个线程同时推进 `head` / `tail` 时，用 `compare_exchange_weak`（CAS）抢「推进游标」的权利，失败的线程自旋重试（`Backoff`）。CAS 失败不会阻塞，只会退避后重读游标再试。
+
+### 2.4 Acquire / Release 配对
+
+这是本讲的硬核部分，先用一句话概括：**生产者把消息写进槽位后，用 `Release` 顺序写 stamp；消费者用 `Acquire` 顺序读 stamp**。这对「Release 写 + Acquire 读」建立了一条 happens-before 关系，保证消费者读到 stamp 为「就绪」时，一定能看到生产者刚才写入的消息本体。详见 4.2.3。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|------|------|
+| `src/flavors/array.rs` | array flavor 的全部实现：`Slot` / `Channel` / `ArrayToken`，以及 `start_send` / `write` / `start_recv` / `read` / 阻塞版 `send` / `recv` / 断开逻辑。 |
+| `src/waker.rs` | `SyncWaker`——阻塞者队列。array flavor 在 `write` / `read` 末尾调 `self.receivers.notify()` / `self.senders.notify()` 形成「生产唤醒消费、消费唤醒生产」的闭环。 |
+| `src/select.rs` | 定义 `Token` 结构体，其中 `token.array` 字段就是 array flavor 用来在「预留阶段」和「写入/读出阶段」之间传递槽位信息的 `ArrayToken`。 |
+| `src/channel.rs` | `bounded(cap>0)` 在这里把 `flavors::array::Channel::with_capacity(cap)` 包进引用计数，成为 `SenderFlavor::Array` / `ReceiverFlavor::Array`。 |
+
+## 4. 核心概念与源码讲解
+
+本讲拆成四个最小模块：
+
+- **4.1** 数据结构与 stamp 编码（`Slot` / `Channel` / `ArrayToken` + `with_capacity`）
+- **4.2** 生产与消费核心（`start_send` / `start_recv` / `write` / `read`，含内存序）
+- **4.3** 阻塞与唤醒闭环（`send` / `recv` + `SyncWaker`）
+- **4.4** 断开与丢弃消息（`disconnect_senders` / `disconnect_receivers` / `discard_all_messages`）
+
+---
+
+### 4.1 数据结构与 stamp 编码
+
+#### 4.1.1 概念说明
+
+array flavor 用一个**预分配的定长数组** `buffer: Box<[Slot<T>]>` 当缓冲区，外加两个原子游标 `head`（消费端）和 `tail`（生产端）。关键设计是：**游标本身和槽位的 stamp 都是「lap + mark + index」打包的 `usize`**，三者用同一套位编码，可以直接比较。
+
+`ArrayToken` 是一个临时载体：在「预留槽位」阶段把「哪个槽 + 写完后该把 stamp 改成什么」记下来，传给随后的 `write` / `read` 阶段使用。这样把一次收发拆成「抢占游标（CAS）」和「搬运数据」两步，是为了配合 `select` 机制——`select` 可能先预留再决定是否完成。
+
+#### 4.1.2 核心流程：stamp 的位编码
+
+设容量为 `cap`，算法预计算两个常量：
+
+\[
+\textit{mark\_bit} = 2^{\lceil \log_2(\textit{cap}+1) \rceil} \quad(\text{即 } (\textit{cap}+1)\text{ 向上取整到的下一个 2 的幂})
+\]
+
+\[
+\textit{one\_lap} = 2 \times \textit{mark\_bit}
+\]
+
+于是任意一个 stamp（或游标值）\(s\) 被切成三段：
+
+\[
+\textit{index} = s \,\&\, (\textit{mark\_bit} - 1) \qquad \text{(低位：槽位下标)}
+\]
+
+\[
+\text{mark} = s \,\&\, \textit{mark\_bit} \qquad \text{(中间一个比特：仅 tail 用，表示断开)}
+\]
+
+\[
+\textit{lap} = s \,\&\, \neg(\textit{one\_lap} - 1) \qquad \text{(高位：圈数，步长为 one\_lap)}
+\]
+
+三个字段互不重叠：`mark_bit` 选成「严格大于 cap 的最小 2 的幂」，保证 index 字段足以表示所有合法下标 `0..cap-1`，且 mark 位永远落在比 index 更高的比特上；`one_lap = 2 * mark_bit` 则保证 lap 永远在 mark 之上。
+
+用一个 `cap = 3` 的小例子把布局画清楚（此时 `mark_bit = 4`、`one_lap = 8`）：
+
+| 比特位置 | bit 1..0 | bit 2 | bit 3 及以上 |
+|----------|----------|-------|--------------|
+| 含义     | index（0..3，合法 0..2） | mark_bit（断开） | lap（每 +8 进一圈） |
+
+初始化时每个槽 `Slot[i]` 的 stamp 被设为 `i`，即 `{ lap:0, mark:0, index:i }`；`head = tail = 0`，即 `{ lap:0, mark:0, index:0 }`。所以一开始「槽 0 的 stamp 等于 tail」，意味着槽 0 处于「可写」状态。
+
+#### 4.1.3 源码精读
+
+先看槽与缓冲区的定义——每个槽持一个原子 stamp 和一个未初始化的消息单元：
+
+[src/flavors/array.rs:30-37](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L30-L37) — 定义 `Slot<T>`：`stamp` 是原子版本号，`msg` 是 `UnsafeCell<MaybeUninit<T>>`（内部可变性 + 延迟初始化，是无锁写入消息本体的基础）。
+
+[src/flavors/array.rs:60-93](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L60-L93) — 定义 `Channel<T>`。注意四个要点：
+
+1. `head` 和 `tail` 都被 `CachePadded<AtomicUsize>` 包裹——填充到缓存行大小，防止生产端和消费端这两个高频热点变量落在**同一缓存行**上引发伪共享（false sharing）。
+2. `head` 的 mark 位**永远是 0**；`tail` 的 mark 位才是断开标志。
+3. `senders` / `receivers` 是两个 `SyncWaker` 阻塞者队列。
+4. `one_lap` 和 `mark_bit` 是预计算的位解码常量。
+
+再看 stamp 编码常量的计算：
+
+[src/flavors/array.rs:97-130](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L97-L130) — `with_capacity`：断言 `cap > 0`（零容量走的是 `zero` flavor，不是这里），算出 `mark_bit = (cap+1).next_power_of_two()`、`one_lap = mark_bit * 2`，并为每个槽写入初始 stamp `i`。
+
+最后看 `ArrayToken`：
+
+[src/flavors/array.rs:40-57](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L40-L57) — `ArrayToken { slot: *const u8, stamp: usize }`：`slot` 是预留到的槽位裸指针，`stamp` 是「完成 write/read 后应写入该槽的 stamp」。它作为 `Token.array` 字段存在：
+
+[src/select.rs:23-32](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/select.rs#L23-L32) — `Token` 把所有 flavor 的临时数据并排放在一个结构体里，`array` 字段就是上面这个 `ArrayToken`，默认值是空指针 + stamp 0。
+
+#### 4.1.4 代码实践：源码阅读型——手算 stamp 编码
+
+1. **实践目标**：用具体容量验证你对 stamp 位编码的理解。
+2. **操作步骤**：
+   - 取 `cap = 5`，按公式算出 `mark_bit` 和 `one_lap`。
+   - 写出 stamp `= 0b10110`（即十进制 22）解码后的 `{ lap, mark, index }`。
+3. **需要观察的现象**：你能用「掩码」把三段切出来。
+4. **预期结果**：`cap=5` → `mark_bit = (5+1)` 的下一个 2 的幂 = `8`，`one_lap = 16`。对 `s = 22 = 0b10110`：`index = 22 & 7 = 6`、`mark = 22 & 8 = 0`、`lap = 22 & !15 = 16`，即 `{ lap:16, mark:0, index:6 }`。
+5. 注意 index=6 对 cap=5 是「越界」的合法 stamp 值——它只作为「满/读出」语义的版本号出现，不会真的去索引 `buffer[6]`（真正用作下标前一定先经过 CAS 推进游标并 `debug_assert!(index < buffer.len())`）。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `mark_bit` 要取 `(cap+1).next_power_of_two()`，而不是直接取 `cap.next_power_of_two()`？
+
+> **答**：必须保证 `mark_bit > cap - 1`，即 mark 位要比任何合法 index 的最高位还高，否则某个合法 index 会「撞上」mark 位，造成歧义。取 `cap` 自身的下一个 2 的幂时，当 `cap` 恰好是 2 的幂（如 cap=8），`next_power_of_two(8)=8`，此时 index 字段最多用到 7（`0b111`）正好不撞 mark，看似没问题；但 cap=8 时 `8.next_power_of_two()=8` 会让 index 字段（`mark_bit-1=7`，3 位）刚好够用却没有余量。用 `cap+1` 统一处理「cap 恰为 2 的幂」的边界，确保 mark 位始终严格高于 index 字段，编码无歧义。
+
+**练习 2**：`head` 的 mark 位为什么永远是 0？
+
+> **答**：断开标志只编码在 `tail` 上（生产端）。消费端 `head` 不需要也不允许携带断开位——断开是全局状态，由 `tail` 单点表达即可；若 `head` 也有 mark 位，消费游标的解码和比较逻辑会复杂化且无收益。
+
+---
+
+### 4.2 生产与消费核心：start_send / start_recv / write / read
+
+#### 4.2.1 概念说明
+
+一次完整的「发送」被拆成两步：
+
+1. **`start_send`（预留）**：用 CAS 把 `tail` 向前推一格，**抢占**到一个槽位的写入权，并把「槽位指针 + 完成后该写的 stamp」记进 `token.array`。这一步**不碰消息本体**。
+2. **`write`（落盘）**：把消息写进预留到的槽位，并用 `Release` 顺序更新 stamp，宣布「数据就绪」。
+
+接收对称：`start_recv` 用 CAS 推进 `head` 抢占读出权，`read` 把消息读出来并用 `Release` 更新 stamp，宣布「槽位空闲，可进入下一圈」。
+
+这种「两步走」让抢占（CAS）和数据搬运解耦，使得 `select` 机制能「先抢占、再决定是否完成」（见 u3-l1/l2）。`try_send` / `try_recv` 是「抢占 + 立即完成」的直通组合；阻塞版 `send` / `recv` 在抢占失败时才进入睡眠逻辑（见 4.3）。
+
+#### 4.2.2 核心流程
+
+**`start_send`（生产端抢占）伪代码：**
+
+```
+loop:
+    tail = load(tail, Relaxed)
+    if tail & mark_bit != 0:           # 已断开
+        token.slot = null; return true   # write 会据此返回 Err(Disconnected)
+    index, lap = 解码(tail)
+    stamp = slot[index].stamp.load(Acquire)
+    if tail == stamp:                  # 槽位「可写」：版本号对上当前游标
+        new_tail = 下一个游标(同圈+1 或 进位下一圈)
+        if CAS(tail, new_tail, SeqCst):  # 抢到写入权
+            token.slot = &slot[index]
+            token.stamp = tail + 1       # 写完后 stamp = tail+1（「数据就绪」形式）
+            return true
+        else: tail = 失败新值; backoff.spin()
+    else if stamp + one_lap == tail + 1: # 槽位是「本圈已写满未读」形式
+        fence(SeqCst); head = load(head, Relaxed)
+        if head + one_lap == tail:       # head 落后 tail 一整圈 → 队列满
+            return false                  # 调用方据此阻塞或返回 Full
+        backoff.spin(); tail = reload
+    else:                                # stamp 处于中间态（他线程正在搬运）
+        backoff.snooze(); tail = reload
+```
+
+**`write`（生产端落盘）**：若 `token.slot` 为空说明已断开，返回 `Err(msg)`；否则把消息写进槽位，用 `Release` 存 `token.stamp`，然后 `self.receivers.notify()` 唤醒一个等待的接收者。
+
+**`start_recv`（消费端抢占）伪代码：**
+
+```
+loop:
+    head = load(head, Relaxed)
+    index, lap = 解码(head)
+    stamp = slot[index].stamp.load(Acquire)
+    if head + 1 == stamp:              # 槽位「可读」：版本号 == head+1（数据就绪形式）
+        new = 下一个游标(同圈+1 或 进位下一圈)
+        if CAS(head, new, SeqCst):
+            token.slot = &slot[index]
+            token.stamp = head + one_lap  # 读完后 stamp = head+one_lap（「下一圈可写」形式）
+            return true
+        else: head = 失败新值; backoff.spin()
+    else if stamp == head:             # 槽位「空」：版本号 == 当前 head
+        fence(SeqCst); tail = load(tail, Relaxed)
+        if (tail & !mark_bit) == head:   # tail == head → 队列空
+            if tail & mark_bit != 0:     # 且已断开
+                token.slot = null; return true   # read 返回 Err(Disconnected)
+            else:
+                return false             # 调用方据此阻塞或返回 Empty
+        backoff.spin(); head = reload
+    else:
+        backoff.snooze(); head = reload
+```
+
+**`read`（消费端取走）**：若 `token.slot` 为空返回 `Err(())`；否则读出消息，用 `Release` 存 `token.stamp`（即 `head + one_lap`），然后 `self.senders.notify()` 唤醒一个等待的发送者。
+
+**两条不变量（理解算法的钥匙）：**
+
+- **「数据就绪」形式**：生产者 `write` 后，`slot[i].stamp == { lap:L, index: i+1 }`（即写前的 `tail+1`）。消费者在 `head == { lap:L, index:i }` 时检查 `head+1 == stamp`，正好命中。
+- **「下一圈可写」形式**：消费者 `read` 后，`slot[i].stamp == { lap:L+1, index:i }`（即 `head+one_lap`）。生产者下一圈在 `tail == { lap:L+1, index:i }` 时检查 `tail == stamp`，正好命中。
+
+于是每个槽的 stamp 在这两种形式间来回切换，配合 lap 区分圈数，构成了无歧义的环形复用。
+
+#### 4.2.3 源码精读
+
+[src/flavors/array.rs:143-212](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L143-L212) — `start_send`：先 `tail & mark_bit` 判断断开（L149）；解码 tail、用 `Acquire` 读 slot 的 stamp（L162）；`tail == stamp` 时用 `compare_exchange_weak(.., SeqCst, Relaxed)` 推进 tail（L177-L182），成功则记下 `token.array.slot` 与 `token.array.stamp = tail + 1`（L185-L186）。
+
+[src/flavors/array.rs:215-230](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L215-L230) — `write`：写消息后 `slot.stamp.store(token.array.stamp, Release)`（L225）——**这是可见性的关键**，随后 `self.receivers.notify()` 唤醒接收者（L228）。
+
+[src/flavors/array.rs:233-303](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L233-L303) — `start_recv`：`head + 1 == stamp` 时 CAS 推进 head（L248-L265），记下 `token.array.stamp = head.wrapping_add(one_lap)`（L269）；`stamp == head` 且 `tail == head` 时判空（L277-L293），断开则把 slot 置空。
+
+[src/flavors/array.rs:305-321](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L305-L321) — `read`：读出消息后 `slot.stamp.store(token.array.stamp, Release)`（L316），然后 `self.senders.notify()`（L319）。
+
+**内存序的可见性证明**（本讲重点，对应实践任务）：
+
+1. **消费者能看到消息本体**：`write` 先写 `slot.msg`（普通 store），再 `slot.stamp.store(.., Release)`。`Release` 保证「stamp 的写入」之前的所有写操作（即消息本体）对「读到这个 stamp 的线程」可见。`start_recv` 用 `Acquire` 读 stamp（L245），与该 `Release` 配对，于是消费者看到「数据就绪」的 stamp 时，happens-before 关系保证它一定能看到生产者写入的消息。这就是「`write` 用 Release、`read` 端用 Acquire 保证消息可见性」的含义。
+
+2. **生产者不会踩踏正在被读的槽**：`read` 先读 `slot.msg`，再 `slot.stamp.store(.., Release)`（L316）。`start_send` 用 `Acquire` 读 stamp（L162）与该 `Release` 配对，于是生产者看到「下一圈可写」的 stamp 时，保证消费者的 `read` 已经读完——生产者随后 `write` 才不会和消费者的读操作并发写同一个 `UnsafeCell`，避免数据竞争。
+
+简言之：**stamp 既是状态机标记，也是同步原语**——用 Release/Acquire 配对把「搬运消息」夹在中间，确保读写不会重叠。这也是 `msg` 能安全地用 `UnsafeCell<MaybeUninit<T>>` 的根本理由。
+
+#### 4.2.4 代码实践：手写一个无锁单槽对照（源码阅读 + 动手）
+
+1. **实践目标**：用一个最小化的「cap=1」场景，验证 `tail == stamp` / `head+1 == stamp` 的来回切换。
+2. **操作步骤**：
+   - 在 `src/flavors/array.rs` 的 `with_capacity` 里 `cap=1` 时的常量：`mark_bit = (1+1).next_power_of_two() = 2`，`one_lap = 4`。初始 `slot[0].stamp = 0`，`head=tail=0`。
+   - 在纸上模拟：① `start_send`：`tail=0`，`stamp=0`，`tail==stamp` 命中 → CAS tail→1（`index+1=1` 不 `< cap=1`，故走 wrap 分支 `lap+one_lap = 0+4 = 4`？注意：`index+1 < cap` 即 `1 < 1` 为假，所以 new_tail 走 wrap = 4）。但 `token.stamp = tail+1 = 1`。② `write`：`slot[0].stamp := 1`（Release）。③ `start_recv`：`head=0`，`stamp=1`，`head+1==stamp` 命中 → CAS head→4（wrap），`token.stamp = head+one_lap = 0+4 = 4`。④ `read`：`slot[0].stamp := 4`（Release）。⑤ 下一轮 `start_send`：`tail=4`，`slot[0].stamp=4`，`tail==stamp` 命中 → 可再写。
+3. **需要观察的现象**：单槽在 stamp `0 → 1 → 4 → 5 → 8 → ...` 之间切换，「写后 stamp = tail+1」「读后 stamp = head+one_lap」始终成立。
+4. **预期结果**：你能解释清楚为什么 cap=1 时 `tail+1`（写后）和 `head+one_lap`（读后）恰好把同一个槽在两圈之间正确交接。
+5. 这是「源码阅读型实践」，无需运行；若要验证可参考 4.3.4 的可运行实践。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`start_send` 里 CAS 成功后为什么把 `token.array.stamp` 设成 `tail + 1`，而不是 `new_tail`（尤其 wrap 时两者不同）？
+
+> **答**：`write` 写入的 stamp 必须让消费者在 `head` 处用 `head + 1 == stamp` 命中。写前 `tail = { lap:L, index:i }`，消费者会在 `head == { lap:L, index:i }` 时检查，因此 stamp 应为 `head+1 = { lap:L, index:i+1 }`（wrap 时为 `{ lap:L, index:cap }` 这种哨兵值）= `tail + 1`。而 `new_tail` 是「推进后的游标」，wrap 时是 `lap + one_lap`（index 归零），与消费者期待的 `head+1` 不等，所以不能用作 stamp。
+
+**练习 2**：`start_recv` 判空时为什么用 `(tail & !mark_bit) == head` 而不是 `tail == head`？
+
+> **答**：`tail` 可能带着断开的 mark_bit。判空只关心「生产游标是否追上消费游标」，需要先把 mark 位抹掉再比较，否则断开状态下 `tail` 多了一个 mark_bit，永远不等于 `head`，会被误判为「非空」。
+
+**练习 3**：为什么 `start_send` / `start_recv` 里读 slot 的 stamp 用 `Acquire`，而 `head` / `tail` 自身的 load 大多用 `Relaxed`？
+
+> **答**：`head` / `tail` 的 load 只是为了「下一步 CAS 的预期值」，CAS 本身（`SeqCst`）会保证推进的线性一致性与同步； stamp 的 `Acquire` 才是用来与对端 `write` / `read` 的 `Release` 配对、建立消息本体的 happens-before。把游标 load 设成 `Relaxed` 是性能优化——避免在每次自旋重试都付出强序的开销。
+
+---
+
+### 4.3 阻塞与唤醒闭环：send / recv + SyncWaker
+
+#### 4.3.1 概念说明
+
+`try_send` 在队列满时立即返回 `Full`，`try_recv` 在队列空时立即返回 `Empty`。但阻塞版 `send` / `recv` 需要等到「有空位 / 有消息」或「断开 / 超时」才返回。
+
+array flavor 的阻塞策略是经典的「**先自旋、再登记、再 park、被唤醒后重试**」：
+
+1. **自旋阶段**：反复调用 `start_send`，配合 `Backoff::snooze()` 退避。若短时间内队列腾出位置，直接完成，无需进入操作系统级睡眠。
+2. **登记阶段**：自旋耗尽仍无进展，就在 `self.senders`（或 `receivers`）这个 `SyncWaker` 里登记自己，准备 park。
+3. **防丢失唤醒**：登记之后立刻复查「是否已经不满了 / 是否已断开」，若是则把自己标成 `Aborted`，让 `wait_until` 立即返回重试——堵住「登记与复查之间对端恰好 notify」的窗口。
+4. **park**：`Context::wait_until(deadline)` 真正阻塞当前线程，容忍虚假唤醒。
+5. **被唤醒后**：无论被 `notify`（Operation）还是被 `disconnect`（Disconnected）唤醒，都回到外层循环**重新尝试** `start_send`——唤醒只是「可能就绪」的提示，真正推进仍靠 CAS。
+
+这套机制完全复用 u2-l4 讲过的 `Context` / `SyncWaker`；array flavor 只是在 `write` / `read` 末尾各加一句 `notify()`，把「生产 → 唤醒消费」「消费 → 唤醒生产」接成闭环。
+
+#### 4.3.2 核心流程
+
+`send` 的阻塞循环（`recv` 完全对称）：
+
+```
+loop:                                       # 外层：被唤醒后重试
+    backoff = Backoff::new()
+    loop:                                   # 内层：自旋抢占
+        if start_send(token): write + return
+        if backoff.is_completed(): break
+        else: backoff.snooze()
+    if 截止时间到: return Err(Timeout(msg))
+    Context::with(|cx|:
+        oper = Operation::hook(token)
+        self.senders.register(oper, cx)         # 登记进阻塞者队列
+        if !is_full() || is_disconnected():     # 防丢失唤醒
+            cx.try_select(Selected::Aborted)
+        sel = cx.wait_until(deadline)            # park
+        match sel:
+            Waiting => unreachable!()
+            Aborted | Disconnected => senders.unregister(oper)  # 退队列后重试
+            Operation(_) => {}                    # 被notify选中，直接重试
+    # 回到外层 loop 重新 start_send
+```
+
+唤醒来源（对端）：`read` 末尾 `self.senders.notify()` → `SyncWaker::notify` → 若有等待的发送者，`Waker::try_select` 把它的状态 CAS 成 `Selected::Operation(oper)` 并 `unpark`。
+
+#### 4.3.3 源码精读
+
+[src/flavors/array.rs:334-384](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L334-L384) — `send`：内层自旋（L343-L354）；超时检查（L356-L360）；登记 + 防丢失唤醒 + park（L362-L382）。注意 L368-L370 的「登记后复查」：若 `!self.is_full() || self.is_disconnected()` 就 `cx.try_select(Selected::Aborted)`，使 `wait_until` 不致无谓长睡。
+
+[src/flavors/array.rs:398-446](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L398-L446) — `recv`：与 `send` 同构，登记进 `self.receivers`，复查 `!self.is_empty() || self.is_disconnected()`。
+
+[src/flavors/array.rs:324-331](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L324-L331) 与 [src/flavors/array.rs:387-395](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L387-L395) — `try_send` / `try_recv`：`start_send`/`start_recv` 成功就立即 `write`/`read`，失败直接返回 `Full` / `Empty`，不阻塞。
+
+[src/waker.rs:225-237](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/waker.rs#L225-L237) — `SyncWaker::notify`：先查 `is_empty` 快速路径（L226），无阻塞者时一次原子 load 即返回；有阻塞者才加锁，调 `inner.try_select()`（唤醒一个其它线程的发送/接收操作）再 `inner.notify()`（通知 observers）。这就是 array flavor 在 `read`/`write` 末尾触发唤醒的落点。
+
+[src/flavors/array.rs:595-604](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L595-L604) — `is_full`：`head.wrapping_add(one_lap) == tail & !mark_bit`，即「head 落后 tail 整整一圈」，正是 `start_send` 判满的同款条件。
+
+[src/flavors/array.rs:583-592](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L583-L592) — `is_empty`：`(tail & !mark_bit) == head`。
+
+#### 4.3.4 代码实践：观察「满队列阻塞 → recv 唤醒 → send 完成」
+
+这是一个可运行实践（项目自带 `cargo`，可建临时示例文件后 `cargo run`，**注意不要放在本仓库内污染源码**，请在你自己的实验目录运行）。
+
+1. **实践目标**：亲眼看到一次满队列 `send` 阻塞、被 `recv` 唤醒后完成，并对照源码理解唤醒路径。
+2. **操作步骤**：
+
+   ```rust
+   // 示例代码（请在 crossbeam-channel 之外的自建项目中运行）
+   use crossbeam_channel::bounded;
+   use std::thread;
+   use std::time::Duration;
+
+   fn main() {
+       let (s, r) = bounded::<i32>(1); // cap=1，写一条即满
+       s.send(1).unwrap();             // 现在队列满
+       let h = thread::spawn(move || {
+           println!("发送方准备 send(2)，将阻塞...");
+           s.send(2).unwrap();          // 满了，进入自旋→register→park
+           println!("发送方被唤醒并完成 send(2)");
+       });
+       thread::sleep(Duration::from_millis(200));
+       println!("主线程 recv 到 {}", r.recv().unwrap()); // read 末尾 notify 发送方
+       h.join().unwrap();
+   }
+   ```
+
+3. **需要观察的现象**：`send(2)` 先打印「将阻塞」但不返回；约 200ms 后主线程 `recv` 取走 `1`，紧接着发送方打印「被唤醒并完成」。
+4. **预期结果**：日志顺序为「将阻塞 → 主线程 recv 到 1 → 被唤醒并完成 send(2)」。这对应源码路径：发送方在 `send` 的 `wait_until` 中 park；主线程 `r.recv()` 内部 `read` 末尾 `self.senders.notify()` → `SyncWaker::notify` → `Waker::try_select` 把发送方状态置为 `Operation` 并 `unpark`；发送方被唤醒后回到外层 `loop`，`start_send` 成功，`write` 完成。
+5. 若无法本地运行，标注「待本地验证」。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`send` 在 `wait_until` 返回 `Selected::Operation(_)` 后为什么什么都不做（`{}`），直接回到外层循环？
+
+> **答**：`notify` 只是一个「可能就绪」的提示，并不保证当前线程真的抢到了槽位（可能多个发送者同时被唤醒、或消费者又取走又被别的发送者抢占）。所以必须重新走 `start_send` 的 CAS 才能确定性地拿到写入权，不能假定唤醒即成功。
+
+**练习 2**：`send` 在 `register` 之后为什么还要 `if !self.is_full() || self.is_disconnected() { cx.try_select(Aborted) }`？
+
+> **答**：堵住丢失唤醒窗口。在「自旋失败」和「register 完成」之间，消费者可能恰好 `read` 腾出了空位；若消费者在发送方 register **之前** `notify`，发送方还没登记、收不到这次唤醒，之后便会无限期 park。register 后复查一次：若已不满或已断开，就把自己标成 `Aborted`，让 `wait_until` 立即返回重新尝试。
+
+**练习 3**：`SyncWaker::notify` 为什么要先用 `is_empty.load` 判一次、加锁后再判一次（double-checked）？
+
+> **答**：这是 u2-l4 讲过的快速路径——绝大多数 `write`/`read` 发生时根本没有阻塞者。用一次原子 `is_empty.load(SeqCst)` 就能免掉加锁开销；只有「可能有人等待」时才加锁，并在锁内再确认一次（防止 load 与 lock 之间状态变化），避免漏唤醒。
+
+---
+
+### 4.4 断开与丢弃消息：disconnect / discard_all_messages
+
+#### 4.4.1 概念说明
+
+断开（disconnected）由引用计数层（`counter.rs`，见 u2-l2）触发：当最后一个发送者或最后一个接收者 drop 时，调用 array flavor 的 `disconnect_senders` 或 `disconnect_receivers`。两者都靠同一个 mark_bit 表达「已断开」。
+
+两条对称但**不对称**的语义（与 u1-l4 讲过的外壳语义一致）：
+
+- **发送侧断开**（所有发送者 drop）：已缓冲的消息**保留**，接收者可以继续 `recv` 把它们排空；排空后 `recv` 返回 `Disconnected`。
+- **接收侧断开**（最后一个接收者 drop）：再没有人会读消息，于是**立即丢弃**所有还在缓冲区里的消息（`discard_all_messages`），并唤醒所有被阻塞的发送者（它们会拿到 `SendError(msg)`）。
+
+注意 `discard_all_messages` 只在 `disconnect_receivers` 里调用——因为只有接收侧断开才需要丢弃；发送侧断开时消息还要留给接收者排空。
+
+#### 4.4.2 核心流程
+
+**断开如何编码**：两个 disconnect 函数都用 `tail.fetch_or(mark_bit, SeqCst)` 把 mark_bit 写进 `tail`。因为两边写的是**同一个 bit**，所以「谁先调用谁真正断开」，后调用者看到 mark 已置、返回 `false`。
+
+**`disconnect_senders`**：mark 新置 → `receivers.disconnect()` 唤醒所有等待的接收者 → 返回 `true`。
+
+**`disconnect_receivers`**：mark 新置 → `senders.disconnect()` 唤醒所有等待的发送者；然后**无论是否首次断开**都调 `discard_all_messages(tail)` 丢弃残留消息 → 返回是否首次断开。
+
+**`discard_all_messages`**：从 `head` 起沿缓冲区扫描，对每个「数据就绪」形式（`head+1 == stamp`）的槽调用 `assume_init_drop()` 释放消息，推进 head；遇到 `tail == head`（已排空）即停止；遇到中间态（有发送者正在 `write`）则 `backoff.snooze()` 等它写完再丢。它依赖一个关键前提：**只有最后一个接收者会调用此函数**，此后 `head` 不会再变、也不会有新消息写入。
+
+#### 4.4.3 源码精读
+
+[src/flavors/array.rs:487-496](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L487-L496) — `disconnect_senders`：`tail.fetch_or(mark_bit, SeqCst)`（L488），若 mark 此前为 0（首次断开），`receivers.disconnect()` 唤醒所有接收者（L491），返回 `true`。注意**不丢弃消息**——留给接收者排空。
+
+[src/flavors/array.rs:506-517](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L506-L517) — `disconnect_receivers`（`unsafe`）：同样 `fetch_or`（L507），首次断开则 `senders.disconnect()`（L509）；随后**无条件**调用 `unsafe { self.discard_all_messages(tail) }`（L515）。其 `# Safety` 注释要求：必须是 drop 最后一个接收者时调用，且此前其它接收者的析构已被 acquire 或更强序观察到（保证 head 不会被并发改动）。
+
+[src/flavors/array.rs:531-575](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L531-L575) — `discard_all_messages`（`unsafe`）：循环扫描，`head+1 == stamp` 则 `(*slot.msg.get()).assume_init_drop()` 丢消息并推进 head（L552-L565）；`tail == head` 则返回（L567-L568）；否则 `backoff.snooze()` 等正在 `write` 的发送者更新 stamp（L571-L572）。注释说明：若析构函数 panic，剩余消息会被泄漏（与无界通道行为一致，避免 abort）。
+
+[src/waker.rs:155-168](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/waker.rs#L155-L168) — `Waker::disconnect`：遍历所有 selectors，把能 CAS 成功的置为 `Selected::Disconnected` 并 `unpark`；**不摘除 entry**（注释 L160-L164 说明：被唤醒者要自行 unregister、并可能回收 packet）。最后 `self.notify()` 通知 observers。
+
+[src/flavors/array.rs:578-580](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-channel/src/flavors/array.rs#L578-L580) — `is_disconnected`：`tail.load(SeqCst) & mark_bit != 0`，单一真相源。
+
+#### 4.4.4 代码实践：对比「发送侧断开」与「接收侧断开」
+
+1. **实践目标**：用两个小程序对照两种断开的消息处理差异。
+2. **操作步骤**（示例代码，请在自建项目中运行）：
+
+   ```rust
+   // 场景 A：发送侧断开，剩余消息应可排空
+   let (s, r) = crossbeam_channel::bounded(2);
+   s.send(1).unwrap(); s.send(2).unwrap();
+   drop(s);                       // 触发 disconnect_senders，消息保留
+   assert_eq!(r.recv(), Ok(1));
+   assert_eq!(r.recv(), Ok(2));
+   assert!(r.recv().is_err());    // 排空后 Disconnected
+
+   // 场景 B：接收侧断开，剩余消息应被丢弃
+   let (s, r) = crossbeam_channel::bounded(2);
+   s.send(1).unwrap(); s.send(2).unwrap();
+   drop(r);                       // 触发 disconnect_receivers + discard_all_messages
+   assert!(s.send(3).is_err());   // 发送者拿到 SendError(3)
+   ```
+
+3. **需要观察的现象**：场景 A 排空成功；场景 B 中消息 1、2 在 `drop(r)` 时被 `discard_all_messages` 丢弃（你可以为消息类型实现 `Drop` 打印日志来观察丢弃时机）。
+4. **预期结果**：与上述断言一致。把消息类型换成带 `Drop` 日志的包装结构，能看到场景 B 中「1、2 被丢弃」的日志，而场景 A 不会。
+5. 若无法本地运行，标注「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 `disconnect_senders` 和 `disconnect_receivers` 都 `fetch_or` 同一个 mark_bit，而不是各自用一个 bit？
+
+> **答**：断开是一个**全局二元状态**——通道要么没断、要么断了，不需要区分「发送侧断」还是「接收侧断」。生产端（`start_send` 判 `tail & mark_bit`）和消费端（`start_recv` 判 `tail & mark_bit`、`is_disconnected`）都只需要一个统一标志。复用同一个 bit 还能保证「先断开的一侧负责唤醒对端」的对称语义：后到的一侧看到 mark 已置，直接返回 `false`，不会重复唤醒。
+
+**练习 2**：`discard_all_messages` 里为什么对「中间态」槽（既不是 `head+1==stamp`，也不是 `tail==head`）要用 `backoff.snooze()` 等待，而不是直接跳过？
+
+> **答**：中间态意味着某个发送者已经 CAS 推进了 `tail`、抢到了槽位写入权，但还没执行完 `write`（stamp 尚未更新成「数据就绪」形式）。这条消息客观存在、即将就绪，丢弃逻辑必须等它落盘后正确 `assume_init_drop`，否则会泄漏。`snooze` 自旋等待 stamp 更新即可，且因已断开不会再有新的发送者抢占，循环必然终结。
+
+**练习 3**：`disconnect_receivers` 为什么是 `unsafe fn`，而 `disconnect_senders` 不是？
+
+> **答**：`discard_all_messages` 直接对 `MaybeUninit` 调用 `assume_init_drop`，这要求调用时不会有其它线程并发改动 `head` 或并发写入消息——即必须是「drop 最后一个接收者」且此前其它接收者的析构已被 acquire+ 序观察到。这个不变量无法在函数内部保证，只能由调用方（`counter.rs` 在 release 最后一个 receiver 时）承诺，故标 `unsafe`。`disconnect_senders` 不丢弃消息、只做原子 `fetch_or` + 唤醒，无需此类外部不变量，因此是安全的。
+
+---
+
+## 5. 综合实践
+
+把本讲四个最小模块串起来，做一个「带背压的有界管道 + 断开清理」的小任务（示例代码，请在自建项目中运行）：
+
+```rust
+use crossbeam_channel::{bounded, SendError};
+use std::thread;
+
+// 自带 Drop 日志的消息类型，便于观察丢弃时机
+struct Msg(u32);
+impl Drop for Msg {
+    fn drop(&mut self) { println!("drop Msg({})", self.0); }
+}
+
+fn main() {
+    let (s, r) = bounded::<Msg>(2);          // 4.1: cap=2 的环形缓冲
+    let s2 = s.clone();
+
+    // 4.3: 多个生产者并发 send，触发「满队列阻塞 → recv 唤醒」
+    let p1 = thread::spawn(move || {
+        for i in 0..3 { let _ = s.send(Msg(100 + i)); }
+    });
+    let p2 = thread::spawn(move || {
+        for i in 0..3 { let _ = s2.send(Msg(200 + i)); }
+    });
+
+    // 消费一部分后提前断开接收端
+    for _ in 0..2 {
+        let _ = r.recv();
+    }
+    drop(r);                                  // 4.4: 触发 disconnect_receivers + discard_all_messages
+
+    let _ = p1.join(); let _ = p2.join();
+    // 观察：剩余缓冲里的 Msg 会被 discard_all_messages 丢弃打印，
+    //       生产者后续的 send 会拿到 SendError(Msg(..)) 并在 drop 时打印。
+}
+```
+
+**结合源码理解**：
+
+1. **4.1**：cap=2 时 `mark_bit=(2+1)` 的下一个 2 的幂=4、`one_lap=8`；两个槽的 stamp 在 `tail`/`head` 与「就绪/下一圈可写」形式间切换。
+2. **4.2**：每个 `send` 是 `start_send`(CAS 推进 tail) + `write`(Release 写 stamp + notify receivers)；每个 `recv` 是 `start_recv`(CAS 推进 head) + `read`(Acquire 读 stamp 拿消息、Release 写 stamp + notify senders)。
+3. **4.3**：当两个生产者把缓冲填满，第三个 `send` 会自旋失败、登记进 `self.senders`、park；直到主线程 `recv` 在 `read` 末尾 `self.senders.notify()` 把它唤醒。
+4. **4.4**：`drop(r)` 是最后一个接收者析构 → `counter.rs` 调 `disconnect_receivers` → `fetch_or(mark_bit)` 置断开、`senders.disconnect()` 唤醒所有阻塞生产者（它们收到 `SendError`）、`discard_all_messages` 把还在缓冲里的 Msg 逐个 `assume_init_drop`。
+
+阅读时建议打开 `src/flavors/array.rs` 与 `src/waker.rs` 对照，沿「send → start_send → write → receivers.notify → recv → start_recv → read → senders.notify」这条闭环走一遍。
+
+## 6. 本讲小结
+
+- array flavor 是 `bounded(cap>0)` 的底层实现，基于 **Vyukov 的无锁有界 MPMC 队列**，核心是用**每个槽的 stamp（lap + mark_bit + index 打包进一个 usize）**消歧环形复用。
+- 收发被拆成「**抢占游标**（`start_send`/`start_recv`，CAS 推进 tail/head）」和「**搬运数据**（`write`/`read`）」两步，中间用 `ArrayToken` 传递槽位指针与目标 stamp。
+- **内存序是正确性基石**：`write` 用 `Release` 写 stamp、对端用 `Acquire` 读 stamp，建立 happens-before，既保证消息可见，又防止生产者踩踏正在被读的槽——这是 `UnsafeCell<MaybeUninit<T>>` 安全的依据。
+- 阻塞版 `send`/`recv` 走「**自旋 → register → 防丢失唤醒复查 → park → 唤醒后重试**」，唤醒靠对端在 `write`/`read` 末尾调用 `SyncWaker::notify`，形成生产/消费闭环。
+- 断开用 `tail` 上的单一 `mark_bit` 表达：发送侧断开**保留消息**供接收者排空；接收侧断开**立即丢弃**残留消息（`discard_all_messages`）并唤醒所有阻塞发送者。
+- `head`/`tail` 用 `CachePadded` 防伪共享、`Backoff` 做自旋退避，是把无锁算法转化为实际性能优势的工程细节（性能对比见 u3-l7）。
+
+## 7. 下一步学习建议
+
+- **u2-l6（list flavor）**：对照学习「无界链表」如何用 `Block`/`Slot` 的 state 位（WRITE/READ/DESTROY）和分块链表实现永不阻塞的发送，与 array 的 stamp 思路形成对比。
+- **u2-l7（zero flavor）**：看零容量会合通道如何完全不存消息、靠 `Packet` 配对完成，理解 `bounded(0)` 为何不走 array。
+- **u3-l1（select 核心算法）**：本讲的 `start_send`/`start_recv` + `ArrayToken` 正是 `SelectHandle::try_select`/`accept` 的底层，学完 select 算法后你会更清楚「两步走」拆分的原因。
+- **u3-l4（内存序与 unsafe 正确性）**：如果你对本讲的 Acquire/Release 推理还意犹未尽，那一讲会系统对比 array/list/zero 三种 flavor 的内存序选择与 unsafe 边界。
