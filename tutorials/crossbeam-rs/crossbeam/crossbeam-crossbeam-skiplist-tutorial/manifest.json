@@ -1,0 +1,554 @@
+{
+  "project": "crossbeam-crossbeam-skiplist",
+  "head": "6195355ef1862f2c6172365d00645cb6f77417dc",
+  "rationale": "crossbeam-skiplist 是一个「基于跳表的并发有序 map/set」库，核心难点集中在 base.rs 的无锁并发算法与 crossbeam-epoch 内存回收，而 map.rs/set.rs 只是高层封装。因此学习路线采用「先会用、再读数据结构、再读并发算法、最后读封装与工程实践」的四段式。第一单元（入门）只解决\"是什么、怎么跑、目录与 feature 怎么分层\"，让读者建立全局观。第二单元聚焦 base.rs 的核心数据结构抽象（Node/Tower 内存布局、epoch 回收+引用计数、Comparator/Equivalent 键比较），这是理解后续算法的前置。第三单元按\"读路径→删除标记→插入→删除/清理\"的顺序精读核心算法链路，对应读者最关心的 search/insert/remove 三大主链路。第四单元上升到句柄（Entry/RefEntry 的双生命周期）、五种迭代器、以及 map/set 的高层封装。第五单元覆盖内存序、no_std、并发语义、测试与基准等专家级工程实践。整体 19 篇讲义、依赖关系构成清晰 DAG，每篇只讲一个主题且都绑定真实源码与可操作实践任务，适合从零到能二次开发的完整学习路径。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：什么是并发跳表 SkipMap/SkipSet",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 crossbeam-skiplist 是什么：基于跳表的并发有序 map/set，提供 SkipMap 和 SkipSet，接口对标 BTreeMap/BTreeSet 但支持多线程安全并发访问。",
+          "learning_goals": [
+            "理解跳表作为概率性有序数据结构的定位",
+            "理解 SkipMap/SkipSet 与 BTreeMap/BTreeSet 的异同与适用场景",
+            "理解「方法接收 &self 而非 &mut self」「单操作原子、多操作非原子」的并发模型"
+          ],
+          "source_files": [
+            "README.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 顶层模块文档（并发访问、可变访问、垃圾回收、与 B 树对比、Alternatives 章节）"
+          ],
+          "practice_task": "阅读 README 与 lib.rs 顶层文档，写一段约 200 字的中文总结，说明在什么场景下应选择 SkipMap 而不是 RwLock<BTreeMap>，并举出你自己工作中的一个并发有序集合使用场景。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "快速上手：SkipMap 与 SkipSet 基本用法",
+          "order": 2,
+          "filename": "u1-l2-quick-start-usage.md",
+          "level": "beginner",
+          "topic": "通过 lib.rs 中的 doctest 示例快速掌握 SkipMap/SkipSet 的 insert/get/contains/remove/iter/front/back 基本用法，并理解返回 Entry 句柄的设计。",
+          "learning_goals": [
+            "掌握 SkipMap 的 insert/get/remove/contains_key/iter 基本调用",
+            "掌握 SkipSet 的 insert/contains/remove/iter 基本调用",
+            "理解操作返回 Entry 且 key()/value() 借用句柄而非拷贝"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "examples/simple.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 中 SkipMap 与 SkipSet 的两个 doctest 示例块",
+            "examples/simple.rs"
+          ],
+          "practice_task": "把 examples/simple.rs 中被注释的代码恢复为一个可运行示例：插入 100 万条 (u64,u64) 数据并测量 insert 与 iterate 耗时；再仿照 lib.rs 的 scope 示例写一个两线程并发插入的小程序，确认结果可被读取。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与 feature 门控：base→map→set 分层",
+          "order": 3,
+          "filename": "u1-l3-module-structure-and-features.md",
+          "level": "beginner",
+          "topic": "解析 lib.rs 的模块组织（base/map/set/comparator/equivalent/alloc_helper）、std/alloc/no_std 三档 feature 门控，以及底层 base::SkipList 被 map 包装、map 再被 set 包装的分层关系。",
+          "learning_goals": [
+            "理清 src 下各模块的职责与依赖方向",
+            "理解 default=std、std、alloc 三档 feature 与 target_has_atomic 门控",
+            "理解 SkipList(base) → SkipMap → SkipSet 的包装层次"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs 中的 mod 声明、cfg 门控、pub use 重导出",
+            "Cargo.toml 的 [features] 段"
+          ],
+          "practice_task": "画出一张模块依赖关系图（base 被 map 引用、map 被 set 引用、comparator/equivalent 被 base 使用）；运行 cargo doc --no-deps 生成文档，确认 SkipList/SkipMap/SkipSet 的可见性与各自依赖的 feature。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建、测试与基准对比",
+          "order": 4,
+          "filename": "u1-l4-build-test-bench.md",
+          "level": "beginner",
+          "topic": "说明如何构建、运行测试、运行基准测试：benches/ 下 skiplist、skipmap、btree、hash 四组对比基准，介绍 MSRV 1.74、dev-dependency fastrand 与 nightly test(bench) 的用法。",
+          "learning_goals": [
+            "掌握 cargo build/test 的基本流程与 MSRV 约束",
+            "理解 benches 目录四组基准的设计意图（SkipMap/SkipList vs BTreeMap vs HashMap）",
+            "学会用基准结果判断何时该用跳表"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "benches/skiplist.rs",
+            "benches/skipmap.rs",
+            "benches/btree.rs",
+            "benches/hash.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml 的 dev-dependencies 与 benches 隐式 harness",
+            "benches/skiplist.rs 的 insert/lookup/iter/insert_remove 基准"
+          ],
+          "practice_task": "运行 cargo test 与（需 nightly 的）cargo bench，把 skipmap、btree、hash 的 insert/lookup/iter 基准结果记录成表格，分析在什么数据规模与读写比下 SkipMap 占优、何时 BTreeMap/HashMap 更快。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心数据结构抽象",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l5",
+          "title": "Node 与 Tower 的内存布局",
+          "order": 1,
+          "filename": "u2-l5-node-and-tower-layout.md",
+          "level": "intermediate",
+          "topic": "深入 base.rs 中 Node 的内存布局：repr(C) 字段顺序、refs_and_height 把引用计数与高度压进一个 AtomicUsize、Tower 是 ZST 占位配合动态长度数组，以及 NodeRef/TowerRef 用 NonNull 保留对动态尾部数组的访问 provenance。",
+          "learning_goals": [
+            "理解 HEIGHT_BITS/MAX_HEIGHT/HEIGHT_MASK 常量与高度编码",
+            "理解 Node::alloc/get_layout/dealloc 如何为变长塔分配内存",
+            "理解 TowerRef/NodeRef 为何要用 NonNull 而非普通引用"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "Node 结构体与 alloc/get_layout/height/finalize",
+            "Tower/TowerRef/Head 与 NodeRef 的 new/get_level/as_tower"
+          ],
+          "practice_task": "计算 MAX_HEIGHT=32、HEIGHT_BITS=5 时 refs_and_height 中高度与引用计数各占多少位、最大引用计数是多少；为 height=3 的 Node 画一张包含 value/key/refs_and_height/tower(3 个 Atomic 指针) 的内存布局示意图。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "epoch 内存回收与引用计数",
+          "order": 2,
+          "filename": "u2-l6-epoch-gc-and-refcount.md",
+          "level": "intermediate",
+          "topic": "讲解与 crossbeam-epoch 的集成：Atomic/Shared/Guard/Collector 的作用，decrement→fetch_sub(Release)→Acquire fence→defer_unchecked(finalize) 的回收链路，try_increment 防止 double-free，以及为何 insert/remove 需要 K:'static+V:'static。",
+          "learning_goals": [
+            "理解 epoch-based reclamation 为何能避免 use-after-free",
+            "理解引用计数与 epoch 回收如何协作（try_increment/decrement/finalize）",
+            "理解全局 collector 导致 'static 约束的原因"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "Node::finalize/try_increment",
+            "NodeRef::decrement/decrement_with_pin",
+            "SkipList::check_guard 与 collector 字段"
+          ],
+          "practice_task": "阅读 lib.rs「Garbage collection」章节，写一个示例：线程 A 用 get 持有 Entry，线程 B 同时 remove 同一 key，观察节点不会在 A 释放句柄前被回收；用文字解释 Guard 生命周期与引用计数各负责保证什么。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "Comparator 与 Equivalent：灵活的键比较",
+          "order": 3,
+          "filename": "u2-l7-comparator-and-equivalent.md",
+          "level": "intermediate",
+          "topic": "讲解 comparator.rs 的 Comparator/Equivalator/BasicComparator 与 equivalent.rs 的 Equivalent/Comparable，说明如何用 Borrow 机制实现「用 &str 查 String 键」，以及如何自定义排序（如大小写不敏感）。",
+          "learning_goals": [
+            "理解 Comparator/Equivalator trait 与 BasicComparator 的回退实现",
+            "理解 Equivalent/Comparable 的 blanket impl 如何基于 Borrow+Ord 工作",
+            "学会实现自定义 Comparator 改变键的排序与相等判定"
+          ],
+          "source_files": [
+            "src/comparator.rs",
+            "src/equivalent.rs"
+          ],
+          "minimal_modules": [
+            "Comparator/Equivalator/BasicComparator",
+            "Equivalent/Comparable 及其 blanket 实现"
+          ],
+          "practice_task": "实现一个大小写不敏感的 Comparator<&str>（参考 comparator.rs 文档中的 Equivalator 示例），用 SkipMap::with_comparator 构造 map，验证插入 \"Abc\" 后用 \"abc\" 能查到同一键，且迭代顺序由自定义比较决定。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：核心算法主链路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l8",
+          "title": "搜索算法：search_bound / search_position / next_node",
+          "order": 1,
+          "filename": "u3-l8-search-algorithms.md",
+          "level": "intermediate",
+          "topic": "精读三大搜索函数：从 max_height 起逐层下降、遇到被标记节点 continue 'search 重启、help_unlink 协助清理、upper_bound/lower_bound 的边界判定（above_lower_bound/below_upper_bound）。",
+          "learning_goals": [
+            "理解 search_position 如何收集每层的 left/right 邻接节点",
+            "理解 search_bound 如何同时服务 lower/upper bound 与 prev/back 查询",
+            "理解 next_node 与 help_unlink 的清理协助逻辑"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "search_bound / search_position / next_node",
+            "help_unlink / Position 结构",
+            "above_lower_bound / below_upper_bound 辅助函数"
+          ],
+          "practice_task": "在 search_position 源码上标注出所有触发 continue 'search 重启的条件；写一个串行测试：先批量 insert 再批量 remove 一半 key，然后 insert 新 key，验证搜索在存在逻辑删除节点时仍能正确定位与协助清理。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "标记指针与逻辑删除",
+          "order": 2,
+          "filename": "u3-l9-marked-pointers-deletion.md",
+          "level": "intermediate",
+          "topic": "讲解逻辑删除机制：mark_tower 从高层到 level0 用 fetch_or 设置 tag 位、level0 标记成功者赢得删除权，is_removed 仅查 level0 tag，这是 Harris/Michael 风格的无锁删除。",
+          "learning_goals": [
+            "理解指针 tag 位如何表示逻辑删除",
+            "理解 mark_tower 为何自顶向下且以 level0 标记决定胜负",
+            "理解 is_removed 与 help_unlink 如何配合完成最终物理摘除"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "NodeRef::mark_tower / is_removed",
+            "search 系列中对 tag==1 的处理"
+          ],
+          "practice_task": "用文字解释「为何先标高层、最后标 level0，且只有 level0 tag 决定删除胜负」对正确性的意义；编写一个并发测试，多线程同时对同一 key 调用 entry.remove()/remove()，断言恰好有一个操作赢得删除权（返回 true）。",
+          "depends_on": [
+            "u3-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "插入路径：insert_internal 与 random_height",
+          "order": 3,
+          "filename": "u3-l10-insert-path.md",
+          "level": "intermediate",
+          "topic": "逐段解析 insert_internal：先 search_position 查重、random_height（xorshift + 截断到当前 max_height）、乐观 fetch_add(len)、level0 CAS 安装、失败重试、向上 1..height 构建塔、并发删除回退；并讲解 insert/compare_insert/get_or_insert_with 的差异。",
+          "learning_goals": [
+            "理解随机高度如何决定节点塔高与跳表期望复杂度",
+            "理解 level0 CAS 安装 + 高层塔构建的两阶段插入与重试逻辑",
+            "理解 compare_insert 与 get_or_insert_with 的替换/只插入语义"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "insert_internal / random_height",
+            "insert / compare_insert / get_or_insert / get_or_insert_with"
+          ],
+          "practice_task": "分析 random_height 的概率分布（基于 trailing_zeros+1 与 p=0.5 几何分布），解释为何它使跳表期望查找复杂度为 O(log n)；写一个多线程并发 insert 独立 key 的测试，验证最终 len 等于 key 总数。",
+          "depends_on": [
+            "u3-l8",
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l11",
+          "title": "删除与清理：remove / pop_front,back / clear",
+          "order": 4,
+          "filename": "u3-l11-remove-and-clear.md",
+          "level": "intermediate",
+          "topic": "解析 remove：search_position 后 try_acquire 抢引用计数、mark_tower 抢删除权、逐层 CAS 物理摘除（失败则 search_bound 兜底）；pop_front/pop_back 循环；clear 以 BATCH_SIZE=100 分批 + guard.repin() 防止单一 epoch 长时间 pinned。",
+          "learning_goals": [
+            "理解 remove 中引用计数抢占与删除权抢占的两步协议",
+            "理解 clear 的分批删除与 repin 设计动机",
+            "理解物理摘除失败时为何用 search_bound 兜底"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "remove / pop_front / pop_back / clear",
+            "Drop for SkipList / IntoIter 的 unprotected 清理"
+          ],
+          "practice_task": "阅读 clear 中的 BATCH_SIZE 与 guard.repin()，解释为何要分批且要重新 pin（提示：epoch 推进与长时间 pin 的代价）；写一个向跳表插入 10 万条后 clear 的测试，并用引用计数观察（如包装值类型于 Arc）验证最终被回收。",
+          "depends_on": [
+            "u3-l9",
+            "u3-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "高级：句柄、迭代器与高层封装",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l12",
+          "title": "Entry 与 RefEntry：双生命周期句柄",
+          "order": 1,
+          "filename": "u4-l12-entry-refentry-lifetimes.md",
+          "level": "advanced",
+          "topic": "对比 base::Entry（生命周期绑定 Guard 'g）与 RefEntry（绑定 SkipList、引用计数），讲清 pin/try_acquire/release 的关系；精读 insert_internal/remove 中 let guard = &*(guard as *const _) 的生命周期重绑 hack 与 try_pin_loop。",
+          "learning_goals": [
+            "理解 Entry 与 RefEntry 在生命周期与所有权上的本质区别",
+            "理解 pin/try_acquire/release 如何在两种句柄间转换",
+            "理解 insert_internal/remove 中重绑 guard 生命周期的 unsafe hack 含义"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "Entry / RefEntry 结构与方法（key/value/pin/release/remove/next/prev）",
+            "RefEntry::try_acquire / try_pin_loop"
+          ],
+          "practice_task": "写代码演示：用 get 拿到 Entry 后调用 pin() 得到 RefEntry，证明 drop 掉原始 Guard 后 RefEntry 仍可安全访问 key/value；用文字说明两套句柄分别解决「短生命周期高效访问」与「跨 Guard 长期持有」什么问题。",
+          "depends_on": [
+            "u2-l6",
+            "u3-l10"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l13",
+          "title": "五种迭代器：Iter/RefIter/Range/RefRange/IntoIter",
+          "order": 2,
+          "filename": "u4-l13-iterators.md",
+          "level": "advanced",
+          "topic": "系统讲解 base.rs 的五种迭代器：Iter（guard-bound）、RefIter（refcount）、Range/RefRange（区间，DoubleEndedIterator 双向）、IntoIter（owning），以及 head/tail 双游标如何实现双向遍历与提前终止。",
+          "learning_goals": [
+            "区分 guard-bound 与 refcount 两类迭代器的实现与代价",
+            "理解 Range/RefRange 双向迭代与区间边界裁剪逻辑",
+            "理解 IntoIter 如何在独占访问下用 unprotected 安全释放节点"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "Iter / RefIter 及其 next/next_back/drop_impl",
+            "Range / RefRange / IntoIter / try_pin_loop"
+          ],
+          "practice_task": "对比 Iter::next 与 next_back 的实现差异，写一个使用 range(start..end).rev() 反向遍历的测试；解释 head/tail 比较时为何用 comparator.compare().is_ge() 来判定游标越过对端。",
+          "depends_on": [
+            "u4-l12"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l14",
+          "title": "SkipMap 高层封装：每次 pin 与 ManuallyDrop 释放",
+          "order": 3,
+          "filename": "u4-l14-skipmap-wrapper.md",
+          "level": "advanced",
+          "topic": "讲 map.rs 如何把 base::SkipList 包装成易用的 SkipMap：每个方法内部 epoch::pin() 拿临时 Guard、try_pin_loop 把 RefEntry 转 Entry、Entry 用 ManuallyDrop + release_with_pin(epoch::pin) 在 Drop 时延迟释放，并使用 default_collector。",
+          "learning_goals": [
+            "理解 map 层如何隐藏 Guard 与引用计数细节",
+            "理解 Entry(ManuallyDrop<RefEntry>) 的 Drop 为何调用 release_with_pin",
+            "理解 try_pin_loop 在 front/get/upper_bound 等「读」操作中的作用"
+          ],
+          "source_files": [
+            "src/map.rs"
+          ],
+          "minimal_modules": [
+            "SkipMap::new/with_comparator（default_collector）",
+            "SkipMap::insert/get/remove/iter 与 Entry 的 Drop/release_with_pin"
+          ],
+          "practice_task": "跟踪一次 map.insert 的完整调用栈（map.rs → inner.insert → base insert_internal），写一段说明：解释「为何 map 层每次调用都要 pin 一次 Guard」以及「Entry 在 drop 时如何在没有显式 Guard 的情况下安全释放引用」。",
+          "depends_on": [
+            "u1-l2",
+            "u3-l10"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l15",
+          "title": "SkipSet 与自定义比较器封装",
+          "order": 4,
+          "filename": "u4-l15-skipset-and-custom-comparator.md",
+          "level": "advanced",
+          "topic": "讲 set.rs 的 SkipSet<T,()> 包装（复用 SkipMap<T,()>）、Entry 的 Deref<Target=T>、FromIterator 收集；结合 comparator 实现自定义排序的有序集合。",
+          "learning_goals": [
+            "理解 SkipSet 如何用 SkipMap<T,()> 复用全部 map 逻辑",
+            "理解 set::Entry 的 Deref 与 value() 如何映射到 map 的 key",
+            "能用自定义 Comparator 构造有序集合"
+          ],
+          "source_files": [
+            "src/set.rs",
+            "src/comparator.rs"
+          ],
+          "minimal_modules": [
+            "SkipSet<T,()> 包装与 insert/get/remove/iter",
+            "set::Entry 的 Deref<Target=T>、FromIterator"
+          ],
+          "practice_task": "实现一个按「字符串长度升序、长度相同按字典序」的 Comparator<&str>，构造 SkipSet::with_comparator 插入若干字符串，验证迭代顺序完全符合自定义规则，且 contains/get 能正确命中。",
+          "depends_on": [
+            "u4-l14",
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "高级：内存序、并发语义与工程实践",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l16",
+          "title": "no_std 与 alloc 支持",
+          "order": 1,
+          "filename": "u5-l16-no-std-alloc.md",
+          "level": "advanced",
+          "topic": "讲 no_std 支持：lib.rs 的 #![no_std] 与 extern crate alloc/std、#[cfg(feature=...)] 与 target_has_atomic='ptr' 门控、alloc_helper.rs 中自实现的 Global（替代不稳定的 alloc::alloc::Global）。",
+          "learning_goals": [
+            "理解三档 feature（std/alloc/none）如何门控模块可见性",
+            "理解为何 base 可在 no_std+alloc 下用而 map/set 需要 std",
+            "理解 alloc_helper::Global 的 allocate/deallocate 实现要点"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/alloc_helper.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs 的 cfg 门控与 extern crate",
+            "alloc_helper::Global 的 alloc_impl/allocate/deallocate/without_provenance_mut"
+          ],
+          "practice_task": "在 Cargo.toml 中关闭 default features（仅开 alloc）后尝试编译，确认 base::SkipList 可用而 SkipMap/SkipSet 不可用；阅读 alloc_helper.rs 说明它为何要自行实现 Global 而不直接用 alloc::alloc::Global。",
+          "depends_on": [
+            "u2-l5",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l17",
+          "title": "内存序分析：Relaxed/Release/Acquire/SeqCst",
+          "order": 2,
+          "filename": "u5-l17-memory-ordering.md",
+          "level": "advanced",
+          "topic": "系统梳理 base.rs 中的内存序选择：len/seed/max_height 用 Relaxed（近似值）、refcount decrement 用 Release+Acquire fence（安全回收）、关键 CAS 用 SeqCst、unprotected() 加载的安全性条件，以及源码中 TODO「能否放宽到 Release」的权衡。",
+          "learning_goals": [
+            "能分类 base.rs 中各原子操作的 Ordering 选择及其原因",
+            "理解引用计数 Release+Acquire fence 保证回收安全的原理",
+            "理解 epoch::unprotected() 在何种条件下可安全使用"
+          ],
+          "source_files": [
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "hot_data 的 Relaxed 载入",
+            "NodeRef::decrement 的 fetch_sub(Release)+fence(Acquire)",
+            "mark_tower / 各处 CAS 的 SeqCst 与 unprotected 用法"
+          ],
+          "practice_task": "列出 base.rs 中所有 Ordering::SeqCst 的使用点并归类；针对 mark_tower 的 SeqCst fetch_or 写一段分析：若改成 Acquire/Release 可能产生哪些可观测的行为差异，为什么作者目前保守地用 SeqCst。",
+          "depends_on": [
+            "u3-l8",
+            "u3-l10",
+            "u3-l11"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l18",
+          "title": "并发语义与 Drop/IntoIter 的安全性",
+          "order": 3,
+          "filename": "u5-l18-concurrency-semantics.md",
+          "level": "advanced",
+          "topic": "结合 lib.rs 文档讲清「单操作原子、多操作非原子」的语义：insert/get/remove 各自原子，但 insert 后 contains 可能失败（竞态）；is_removed 反映逻辑删除；Drop/IntoIter 的 unprotected 加载依据独占访问。",
+          "learning_goals": [
+            "能区分数据竞争（内存不安全）与竞态（逻辑错误）",
+            "理解 is_removed 与「单操作原子」的保证边界",
+            "理解 Drop/IntoIter 为何能用 epoch::unprotected 安全遍历"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/base.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs「Concurrent access」竞态示例与说明",
+            "base.rs 的 Drop for SkipList 与 IntoIter 的 unprotected 加载",
+            "is_removed"
+          ],
+          "practice_task": "复现 lib.rs 中 SkipSet 的 insert/contains 竞态 doctest（可用多线程放大），再改造为一个更稳妥的方案（例如用 Entry 句柄或 lower_bound/upper_bound 缩小竞态窗口），用文字说明该方案在正确性与性能上的取舍。",
+          "depends_on": [
+            "u3-l9",
+            "u4-l12",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l19",
+          "title": "测试体系与基准实践",
+          "order": 4,
+          "filename": "u5-l19-testing-and-benchmarks.md",
+          "level": "advanced",
+          "topic": "总结测试与基准体系：tests/{base,map,set}.rs 的串行/并发测试与 memory_leak 测试、compare_insert 与边界用例、用 Miri 验证 unsafe；benches 对比 SkipMap/SkipList vs BTreeMap vs HashMap 的取舍。",
+          "learning_goals": [
+            "理解跨平台并发测试与内存泄漏测试的编写模式",
+            "学会用 Miri 验证 base.rs 中 unsafe 的正确性",
+            "理解基准对比在选型中的作用"
+          ],
+          "source_files": [
+            "tests/map.rs",
+            "tests/base.rs",
+            "tests/set.rs",
+            "benches/skiplist.rs",
+            "benches/btree.rs",
+            "benches/hash.rs"
+          ],
+          "minimal_modules": [
+            "tests/map.rs 的 concurrent_insert/compare_insert/memory_leak 用例",
+            "tests/base.rs 中 RefEntry 包装与 release_with_pin 的测试惯用法",
+            "benches 四组 insert/lookup/iter/insert_remove 基准"
+          ],
+          "practice_task": "仿照 tests/map.rs 的 concurrent_insert 写一个 concurrent_compare_insert 测试（多线程用 compare_insert 抢占式更新同一 key 并断言最终值）；用 cargo +nightly miri test 跑 tests/base.rs 的一个单线程用例，确认无未定义行为。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

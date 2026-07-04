@@ -1,0 +1,472 @@
+{
+  "project": "crossbeam-crossbeam-queue",
+  "head": "6195355ef1862f2c6172365d00645cb6f77417dc",
+  "rationale": "crossbeam-queue 是一个小而深的并发队列 crate，仅有三个实质源文件（lib.rs / array_queue.rs / seg_queue.rs），但内部承载了无锁 MPMC 队列、原子内存序、MaybeUninit 安全性、伪共享优化、no_std/alloc 支持等大量硬核内容，因此按“逻辑优先、深度优先”设计为 4 个单元 16 篇讲义。第一单元（入门层）先让读者从零认识项目定位、crate 入口与 feature 开关，并能跑通第一个测试；第二、三单元（进阶层）分别剖析两条核心数据结构——有界的 ArrayQueue（Vyukov bounded MPMC：stamp/lap 编码、slot 模型、push/pop/force_push 主链路、独占引用变体）与无界的 SegQueue（分块链表、WRITE/READ/DESTROY 状态位、块的分配/销毁协调、len/Drop/迭代器），两者各自独立成单元便于对照学习；第四单元（专家层）抽取横切主题：原子序与 fence、CachePadded/Backoff 性能原语、unsafe 与 MaybeUninit 的安全性论证、并发测试与可线性化验证、以及 no_std/alloc 与自定义全局分配器。讲义顺序遵循“先整体后局部、先用法后原理、先单一结构后横切主题”的依赖链，每篇只解决一个主题并配套可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 crossbeam-queue",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位：crossbeam-queue 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 crossbeam-queue 的定位：提供可在多线程间共享的并发队列，包含有界 ArrayQueue 与无界 SegQueue 两种 MPMC 队列。",
+          "learning_goals": [
+            "理解 crossbeam-queue 解决的并发队列问题及其典型使用场景",
+            "区分 ArrayQueue（有界、预分配）与 SegQueue（无界、按需分配）的定位差异"
+          ],
+          "source_files": [
+            "README.md",
+            "CHANGELOG.md",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "ArrayQueue 的有界 MPMC 定位",
+            "SegQueue 的无界分段 MPMC 定位",
+            "MPMC 并发队列概念与版本演进"
+          ],
+          "practice_task": "阅读 README 与 CHANGELOG，用自己的话写一段说明：在什么场景下应选 ArrayQueue、什么场景下应选 SegQueue，并给出一个真实业务例子（如任务池、日志缓冲）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与 crate 入口：lib.rs、feature 与条件编译",
+          "order": 2,
+          "filename": "u1-l2-crate-root-and-features.md",
+          "level": "beginner",
+          "topic": "讲解项目目录结构、lib.rs 作为 crate 根的 no_std 声明、std/alloc feature 开关以及 target_has_atomic 守卫如何控制模块编译。",
+          "learning_goals": [
+            "掌握 crate 的目录布局与 src 下三个模块的职责",
+            "理解 no_std、std/alloc feature 与 target_has_atomic = \"ptr\" 条件编译的作用"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs crate 根与文档注释",
+            "no_std 声明与 extern crate alloc/std",
+            "std/alloc feature 开关",
+            "target_has_atomic 守卫与 pub use 导出"
+          ],
+          "practice_task": "在本机用 cargo 构建该 crate 的 default、--no-default-features --features alloc、以及 --no-default-features 三种配置，记录哪些配置能编译、哪些报错，并解释原因。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速上手：添加依赖、运行测试与第一个队列程序",
+          "order": 3,
+          "filename": "u1-l3-quick-start.md",
+          "level": "beginner",
+          "topic": "演示如何把 crossbeam-queue 加入依赖、运行 cargo test，并通过阅读 smoke 测试写出第一个 push/pop 程序。",
+          "learning_goals": [
+            "学会添加依赖并运行现有测试套件",
+            "能独立写出使用 ArrayQueue 与 SegQueue 的最小可用程序"
+          ],
+          "source_files": [
+            "README.md",
+            "tests/array_queue.rs",
+            "tests/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "Cargo 依赖与版本号",
+            "cargo build / cargo test 运行",
+            "smoke 测试阅读与复现"
+          ],
+          "practice_task": "新建一个临时 binary，用 ArrayQueue 在两个线程间传递 0..1000 的整数并校验顺序，再用 SegQueue 做同样的事，运行通过后观察两者 API 的异同。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：ArrayQueue 有界队列核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ArrayQueue 的数据结构：stamp、lap 与 Slot 模型",
+          "order": 1,
+          "filename": "u2-l1-arrayqueue-data-structure.md",
+          "level": "intermediate",
+          "topic": "剖析 ArrayQueue<T> 的字段、head/tail 的 stamp 编码、one_lap 的含义，以及 Slot<T>（stamp + MaybeUninit 值）和 CachePadded 的作用。",
+          "learning_goals": [
+            "理解 head/tail 如何用单个 usize 同时编码 index 与 lap",
+            "掌握 Slot 模型与 CachePadded 包装的意义"
+          ],
+          "source_files": [
+            "src/array_queue.rs"
+          ],
+          "minimal_modules": [
+            "ArrayQueue<T> 字段与 new 初始化",
+            "head/tail 的 stamp 编码",
+            "one_lap 与 next_power_of_two",
+            "Slot<T> 的 stamp 与 MaybeUninit",
+            "CachePadded 包装"
+          ],
+          "practice_task": "手算 capacity=5 时 one_lap 的值，并画出一个 cap=3 的队列在 new 之后每个 slot 的 stamp 值以及 head/tail 初值，标注 index 与 lap 各占哪些比特。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "push 与 pop 的无锁主链路：CAS 循环与 stamp 推进",
+          "order": 2,
+          "filename": "u2-l2-arrayqueue-push-pop.md",
+          "level": "intermediate",
+          "topic": "逐行走读 push_or_else 的 CAS 循环（tail/stamp 匹配、compare_exchange_weak、写入值并更新 stamp）以及 pop 的对称逻辑，并解释满/空如何被判定。",
+          "learning_goals": [
+            "掌握 push_or_else 中 stamp 匹配与 CAS 推进 tail 的完整流程",
+            "理解 pop 如何通过 head+1==stamp 判定可弹出以及空队列的判定"
+          ],
+          "source_files": [
+            "src/array_queue.rs"
+          ],
+          "minimal_modules": [
+            "push_or_else 通用 CAS 循环",
+            "stamp 匹配与 new_tail 计算",
+            "compare_exchange_weak 与 backoff",
+            "pop 的 stamp 检查与空队列返回 None"
+          ],
+          "practice_task": "为一个 cap=2 的队列画出连续 push('a')、push('b')、push('c 失败)、pop() 四步中 head、tail、各 slot stamp 的变化时序图，标注每次 CAS 是否成功。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "force_push 环形缓冲与容量查询：capacity / len / is_empty / is_full",
+          "order": 3,
+          "filename": "u2-l3-arrayqueue-force-push-capacity.md",
+          "level": "intermediate",
+          "topic": "讲解 force_push 如何在队列满时挤掉最旧元素实现环形缓冲，以及 capacity、is_empty、is_full、len（含一致性快照循环）的实现。",
+          "learning_goals": [
+            "理解 force_push 通过同时推进 head 与 tail 实现覆盖最旧元素",
+            "掌握 len() 为何需要重读 tail 做一致性快照"
+          ],
+          "source_files": [
+            "src/array_queue.rs"
+          ],
+          "minimal_modules": [
+            "force_push 的 head/tail 同时推进与值替换",
+            "capacity / is_empty / is_full",
+            "len 的一致性快照循环",
+            "环形缓冲语义"
+          ],
+          "practice_task": "对 cap=2 的队列连续 force_push(10/20/30) 并断言返回值依次为 None/None/Some(10)，再实现一个测试验证 force_push 在多生产者下不会丢数（参考 tests 中的 ring_buffer 测试思路）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "独占引用变体：push_mut 与 pop_mut",
+          "order": 4,
+          "filename": "u2-l4-arrayqueue-exclusive-mut.md",
+          "level": "intermediate",
+          "topic": "讲解当持有 &mut ArrayQueue 时，push_mut / pop_mut 如何通过 get_mut 完全跳过原子操作与 CAS，得到更快的单线程路径。",
+          "learning_goals": [
+            "理解 push_mut/pop_mut 跳过原子操作的前提与收益",
+            "掌握 get_mut 直接访问 AtomicUsize 与 UnsafeCell 的写法"
+          ],
+          "source_files": [
+            "src/array_queue.rs",
+            "tests/array_queue.rs"
+          ],
+          "minimal_modules": [
+            "push_mut 的非原子写入",
+            "pop_mut 的非原子读取",
+            "get_mut 访问原子与槽",
+            "与并发 push/pop 的对照"
+          ],
+          "practice_task": "复现 tests/array_queue.rs 的 exclusive_reference 测试：用 push_mut/pop_mut 填满再清空一个 cap=2 的队列，并断言中途 is_full/is_empty 与 len 的状态切换正确。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：SegQueue 无界分段队列核心机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SegQueue 的分块链表结构：Block、Slot 状态位与 Position",
+          "order": 1,
+          "filename": "u3-l1-segqueue-block-structure.md",
+          "level": "intermediate",
+          "topic": "剖析 SegQueue 用链表组织的 Block<T>、每个 Slot 的 WRITE/READ/DESTROY 状态位、LAP/BLOCK_CAP/SHIFT/HAS_NEXT 常量，以及 Position<T> 与 SegQueue<T> 字段。",
+          "learning_goals": [
+            "理解 SegQueue 用块链表实现无界队列的整体结构",
+            "掌握 Slot 状态位与关键常量的位运算含义"
+          ],
+          "source_files": [
+            "src/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "Block<T> 链表节点与 slots 数组",
+            "Slot 状态位 WRITE/READ/DESTROY",
+            "LAP/BLOCK_CAP/SHIFT/HAS_NEXT 常量",
+            "Position<T> 与 SegQueue<T> 字段"
+          ],
+          "practice_task": "推算 BLOCK_CAP 为何等于 LAP-1（即 31），并解释 index 中哪些比特表示“块内偏移”、哪些比特被 SHIFT 保留、HAS_NEXT 占哪一位。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SegQueue 的 push 与 pop 主链路：块分配、安装与空判定",
+          "order": 2,
+          "filename": "u3-l2-segqueue-push-pop.md",
+          "level": "intermediate",
+          "topic": "逐行走读 push（首个块分配、CAS 推进 tail.index、块末尾安装 next 块、写入值并置 WRITE）与 pop（offset 计算、HAS_NEXT 与空判定、读取值并置 READ）。",
+          "learning_goals": [
+            "掌握 push 如何按需分配并安装下一个 Block",
+            "理解 pop 如何通过 HAS_NEXT 与 tail 比较判定空队列"
+          ],
+          "source_files": [
+            "src/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "push 的 CAS 与首个块分配",
+            "块末尾 next 块安装",
+            "offset 计算与 WRITE 置位",
+            "pop 的 HAS_NEXT 与空队列判定"
+          ],
+          "practice_task": "画出连续 push 31 个元素的过程中 tail.index、tail.block、当前 block 的 next 指针的变化，标出第 31 个 push 触发新块安装的时刻。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Block 的内存回收：destroy、DESTROY 位与零初始化分配",
+          "order": 3,
+          "filename": "u3-l3-segqueue-block-destroy.md",
+          "level": "intermediate",
+          "topic": "讲解 Block::destroy 如何用 DESTROY 位与仍在使用槽的线程协调安全释放块、wait_next/wait_write 的自旋等待，以及 Block::new 通过 allocate_zeroed 做零初始化堆分配。",
+          "learning_goals": [
+            "理解 DESTROY 位如何避免释放仍在被读的块",
+            "掌握零初始化分配为何对所有字段都安全"
+          ],
+          "source_files": [
+            "src/seg_queue.rs",
+            "src/alloc_helper.rs"
+          ],
+          "minimal_modules": [
+            "Block::destroy 与 DESTROY 位协调",
+            "wait_next / wait_write 自旋等待",
+            "Block::new 的 allocate_zeroed",
+            "destroy_mut 独占释放"
+          ],
+          "practice_task": "解释 destroy 函数中“为什么最后一个槽不需要设置 DESTROY 位”，并用一段文字推演一个块在多消费者并发读取末尾槽时由谁负责真正释放内存。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "SegQueue 的 len、Drop 与迭代器",
+          "order": 4,
+          "filename": "u3-l4-segqueue-len-drop-iter.md",
+          "level": "intermediate",
+          "topic": "讲解 len() 跨块的索引算术（含块末尾修正与按块扣除）、Drop 如何遍历回收所有值与块、以及 IntoIter 如何逐个读出并释放块。",
+          "learning_goals": [
+            "理解 len() 如何在块链表上计算正确元素数",
+            "掌握 Drop 与 IntoIter 安全回收块链表的逻辑"
+          ],
+          "source_files": [
+            "src/seg_queue.rs",
+            "tests/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "len 的跨块索引算术与块末尾修正",
+            "Drop 遍历 drop 值并释放块",
+            "IntoIter 逐个读取并释放块",
+            "stack_overflow 测试与 0.3.12 修复"
+          ],
+          "practice_task": "参考 tests/seg_queue.rs 的 stack_overflow 测试，解释为什么把 Block 直接分配在堆上能避免大元素导致的栈溢出，并写一个最小测试验证 SegQueue 能正确 push/pop 一个含 32KB 数组的元素。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：并发原理、内存模型与工程实践",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "原子内存序与 fence 的运用",
+          "order": 1,
+          "filename": "u4-l1-atomic-orderings-fence.md",
+          "level": "advanced",
+          "topic": "系统梳理两个队列中 Relaxed/Acquire/Release/SeqCst 的使用位置与配对关系，以及 atomic::fence(SeqCst) 在满/空二次确认中的作用。",
+          "learning_goals": [
+            "能解释每处原子操作选用该 Ordering 的原因",
+            "理解 fence 在 stamp 二次加载判定中的作用"
+          ],
+          "source_files": [
+            "src/array_queue.rs",
+            "src/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "Acquire/Release 的发布-订阅配对",
+            "SeqCst 与 Relaxed 的取舍",
+            "compare_exchange 成功/失败序",
+            "atomic::fence 的二次确认用途"
+          ],
+          "practice_task": "在 array_queue.rs 中找出所有 SeqCst 与 Acquire/Release 的位置，逐处写出“为什么不能用更弱的序”的论证，并尝试预测把某处改成 Relaxed 后会出现的竞态。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "CachePadded 与 Backoff：伪共享与自旋退避优化",
+          "order": 2,
+          "filename": "u4-l2-cachepadded-backoff.md",
+          "level": "advanced",
+          "topic": "讲解 CachePadded 如何避免 head/tail 落在同一缓存行造成伪共享，以及 Backoff 的 spin（忙等）与 snooze（让出）策略如何减少竞争开销。",
+          "learning_goals": [
+            "理解伪共享对并发队列吞吐的影响及 CachePadded 的解法",
+            "掌握 Backoff 在 CAS 失败与等待 stamp 两种场景下的不同退避策略"
+          ],
+          "source_files": [
+            "src/array_queue.rs",
+            "src/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "CachePadded 避免伪共享",
+            "Backoff::spin 忙等退避",
+            "Backoff::snooze 让出退避",
+            "何时 spin 何时 snooze"
+          ],
+          "practice_task": "写一个 benchmark（可用 std::time 粗测）对比“多线程高并发 push/pop”在 CachePadded 存在时与假设去掉后的吞吐差异，并解释 Backoff 在 CAS 失败路径上的作用。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "unsafe 的安全性论证与 MaybeUninit",
+          "order": 3,
+          "filename": "u4-l3-unsafe-maybeuninit-safety.md",
+          "level": "advanced",
+          "topic": "剖析 unsafe impl Send/Sync 的依据、MaybeUninit 的 write/read/assume_init/assume_init_drop 用法、Drop 中 needs_drop 守卫与按槽回收的安全性，以及 UnwindSafe 实现。",
+          "learning_goals": [
+            "能为 Send/Sync 的 unsafe impl 给出正确性论证",
+            "理解 MaybeUninit 配合 stamp/state 位如何保证不重复读/写未初始化内存"
+          ],
+          "source_files": [
+            "src/array_queue.rs",
+            "src/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "unsafe impl Send/Sync 的依据",
+            "MaybeUninit write/read/assume_init",
+            "assume_init_drop 与 needs_drop 守卫",
+            "UnwindSafe/RefUnwindSafe"
+          ],
+          "practice_task": "为 ArrayQueue 的 pop 中 slot.value.get().read().assume_init() 写一段 SAFETY 注释，论证为何此处读取的一定是已初始化且未被并发重复读取的值，并指出 stamp 的 Release store 如何配合。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "并发测试方法与可线性化验证",
+          "order": 4,
+          "filename": "u4-l4-concurrency-testing.md",
+          "level": "advanced",
+          "topic": "讲解 tests 目录下 spsc/mpmc/ring_buffer/drops/linearizable 测试的设计思路，crossbeam-utils::thread::scope 的用法，以及 cfg!(miri) 缩小规模的实践。",
+          "learning_goals": [
+            "掌握并发队列正确性测试的几种典型范式",
+            "学会用析构计数与可线性化测试验证队列语义"
+          ],
+          "source_files": [
+            "tests/array_queue.rs",
+            "tests/seg_queue.rs"
+          ],
+          "minimal_modules": [
+            "spsc/mpmc 计数校验测试",
+            "drops 析构计数测试",
+            "linearizable 可线性化测试",
+            "crossbeam-utils scope 与 cfg!(miri)"
+          ],
+          "practice_task": "参照 mpmc 测试，写一个新的测试：用 4 个生产者各推 1000 个唯一 id、4 个消费者用 AtomicUsize 计数，最后断言每个 id 恰好被消费一次，并加上 cfg!(miri) 的规模缩放。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "no_std / alloc 支持与自定义全局分配器",
+          "order": 5,
+          "filename": "u4-l5-no-std-alloc.md",
+          "level": "advanced",
+          "topic": "讲解 crate 如何在 no_std + alloc 下工作、target_has_atomic=\"ptr\" 守卫的意义，以及 alloc_helper 中 Global 分配器（allocate/allocate_zeroed、零大小布局处理、handle_alloc_error）如何支撑 SegQueue 的堆分配。",
+          "learning_goals": [
+            "理解 no_std + alloc 的编译模式与原子可用性守卫",
+            "掌握 alloc_helper Global 提供的分配原语及其安全约束"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/alloc_helper.rs",
+            "../crossbeam-utils/src/alloc_helper.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "no_std + alloc 编译模式",
+            "target_has_atomic 守卫",
+            "alloc_helper Global 分配原语",
+            "allocate_zeroed 与零大小布局"
+          ],
+          "practice_task": "在一个 no_std + alloc 的目标（如裸 metal 测试或 cargo 配置 --no-default-features --features alloc）下编译并运行 SegQueue::new().push(1) 的最小示例，解释 Block::new 为何能安全地用 allocate_zeroed 一次性初始化整个块。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
