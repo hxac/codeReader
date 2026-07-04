@@ -1,0 +1,864 @@
+{
+  "project": "scipy-scipy-sparse",
+  "head": "c3a772bd1344d4b95beb76fd8340a0c067be92e7",
+  "rationale": "scipy.sparse 是一个成熟的大型子包，核心由七种稀疏格式的类体系（_base/_coo/_compressed/_csr/_csc/_bsr/_lil/_dok/_dia）+ Python 工具层（_construct/_index/_data/_sputils/_extract/_matrix_io）+ C++/Cython 后端（sparsetools/_csparsetools/_generate_sparsetools）+ 两大子模块（linalg 线性代数、csgraph 图算法）构成。学习顺序遵循「先认知后机制、先格式后算法、先使用后扩展」：U1 带读者从零认识项目定位、目录、构建与上手；U2 逐一拆解七种格式与类继承体系；U3 深入构造、索引、基类、工具与 C++ 后端等核心源码机制；U4-U5 进入稀疏线性代数与图算法两大应用子模块；U6 用专家视角收束于格式转换、大规模索引、1-D/Array API、测试体系与二次开发。单元划分对应「认知→格式→机制→算法→扩展」的递进，讲义依赖关系确保读者按顺序建立心智模型，每篇只解决一个问题并配套代码实践。本次增量（ce1f64777 → c3a772bd13）经 git diff 核验：两个 HEAD 之间 scipy/sparse/ 目录下零文件变更（差异仅涉及 optimize/special/stats/ndimage 及 aarch64 构建覆盖等其它子包），不影响任何讲义的源码范围与行号，故全部讲义保持 keep，无需重写或新增。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 scipy.sparse",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与稀疏存储思想",
+          "order": 1,
+          "filename": "u1-l1-sparse-overview.md",
+          "level": "beginner",
+          "topic": "讲清楚 scipy.sparse 是什么、为什么要用稀疏存储、稠密与稀疏的取舍，以及它面向 2-D（及 1-D）数值数据的基本定位。",
+          "learning_goals": [
+            "理解稀疏矩阵/数组的概念与典型应用场景",
+            "区分稠密 ndarray 与稀疏存储在内存与计算上的差异",
+            "认识 scipy.sparse 在 SciPy 生态中的定位与历史（Oliphant 等）"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_base.py"
+          ],
+          "minimal_modules": [
+            "scipy.sparse 包文档与 __init__ 顶部说明",
+            "_formats 字典中各格式的命名"
+          ],
+          "practice_task": "构造一个 1000×1000、非零元素占比约 1% 的稠密 ndarray，记录其内存占用；再用 csr_array 构造等价稀疏数组，对比两者大小并各做一次矩阵-向量乘法，打印耗时差。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、入口与依赖关系",
+          "order": 2,
+          "filename": "u1-l2-directory-and-entry.md",
+          "level": "beginner",
+          "topic": "梳理 scipy/sparse 目录的整体结构，找到包入口 __init__.py，理清它如何导入各类与子模块，以及 deprecated 旧命名空间的存在。",
+          "learning_goals": [
+            "读懂 sparse 目录里 Python 源码、C++ 后端、子模块、测试的分层",
+            "理解 __init__.py 中 from ._xxx import * 的聚合导出方式",
+            "认识 deprecated 单字母前缀模块（base.py/coo.py 等）是 v2.0 待移除的兼容层"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 import 聚合",
+            "deprecated namespaces 列表",
+            "_submodules=['csgraph','linalg']"
+          ],
+          "practice_task": "在 Python 中 import scipy.sparse 后，打印 sparse.csr_array、sparse.coo_array、sparse.linalg、sparse.csgraph 的来源；再用一条命令列出 sparse 包中所有以 _ 开头的核心模块，画出依赖关系草图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统：meson、cython 与 sparsetools",
+          "order": 3,
+          "filename": "u1-l3-build-system-meson-cython.md",
+          "level": "beginner",
+          "topic": "解释项目如何被构建：meson.build 如何安装 Python 源、如何用 tempita+cython 把 _csparsetools.pyx.in 编译成扩展模块，以及 sparsetools C++ 后端的角色。",
+          "learning_goals": [
+            "理解 meson.build 中 python_sources 的安装逻辑",
+            "认识 _csparsetools.pyx.in 经 tempita 模板生成再 cython 编译的流程",
+            "了解 sparsetools/*.h/*.cxx 是 C++ 计算内核"
+          ],
+          "source_files": [
+            "meson.build",
+            "_csparsetools.pyx.in",
+            "sparsetools/sparsetools.h"
+          ],
+          "minimal_modules": [
+            "meson.build 顶层与 subdir('sparsetools') 等",
+            "custom_target _csparsetools_pyx",
+            "py3.extension_module"
+          ],
+          "practice_task": "阅读 meson.build，列出哪些 .py 会被安装、哪个扩展模块会被编译；再打开 _csparsetools.pyx.in 顶部的 IDX_TYPES/VALUE_TYPES，说明 tempita 模板为 int32/int64 与多种数据类型生成多份分派函数的意义。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "动手：第一个稀疏数组与基本操作",
+          "order": 4,
+          "filename": "u1-l4-first-sparse-array.md",
+          "level": "beginner",
+          "topic": "用 coo_array 和 csr_array 做第一次实操：从稠密数组、坐标三元组、形状三种方式构造，执行 toarray、@、nnz、transpose 等基本操作。",
+          "learning_goals": [
+            "掌握三种常见构造方式（dense / (data,(I,J)) / shape）",
+            "理解 nnz、data、coords/indices 等核心属性",
+            "会用 @ 做矩阵-向量乘并解释为何避免直接用 NumPy 函数"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_coo.py",
+            "_csr.py"
+          ],
+          "minimal_modules": [
+            "coo_array/csr_array 构造器",
+            "_coo_base.__init__ 的分支",
+            "@ 与 toarray"
+          ],
+          "practice_task": "用坐标数组 I,J,V 构造一个 4×4 coo_array，再 tocsr() 观察重复 (i,j) 被求和；与文档 Example 2 对照，写出每一步的 nnz 变化。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "七种稀疏格式与类继承体系",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "类继承体系：_spbase / sparray / spmatrix",
+          "order": 1,
+          "filename": "u2-l1-class-hierarchy.md",
+          "level": "beginner",
+          "topic": "讲清楚所有稀疏类的共同基类 _spbase（_base.py），以及 sparray 与 spmatrix 两个命名空间基类的区别和从 spmatrix 到 sparray 的迁移。",
+          "learning_goals": [
+            "理解 _spbase 作为 SparseABC 子类提供的公共能力",
+            "区分 sparray（新）与 spmatrix（待弃用）两套接口",
+            "知道 _allow_nd、_format、_shape 等类属性的作用"
+          ],
+          "source_files": [
+            "_base.py",
+            "_matrix.py",
+            "_data.py"
+          ],
+          "minimal_modules": [
+            "class _spbase",
+            "class sparray",
+            "class spmatrix"
+          ],
+          "practice_task": "用 type 内省打印 csr_array、csr_matrix 的 MRO，找出 _spbase/sparray/spmatrix 在继承链中的位置；再写一段代码同时用 array 与 matrix 构造相同矩阵，对比 * 运算符行为差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "COO 坐标（三元组）格式",
+          "order": 2,
+          "filename": "u2-l2-coo-format.md",
+          "level": "intermediate",
+          "topic": "深入 _coo.py：COO 用 coords（行/列坐标数组）+ data 存储非零元，是构造和组装的主力格式，支持 N 维（_allow_nd=1..64）。",
+          "learning_goals": [
+            "掌握 COO 的数据布局 coords/data/has_canonical_format",
+            "理解 __init__ 对 dense/sparse/tuple/shape 四类输入的分发",
+            "明白为何 COO 适合有限元刚度/质量矩阵的组装"
+          ],
+          "source_files": [
+            "_coo.py",
+            "_data.py"
+          ],
+          "minimal_modules": [
+            "_coo_base.__init__",
+            "row/col/coords 属性",
+            "has_canonical_format"
+          ],
+          "practice_task": "构造一个含重复坐标的 coo_array，调用 sum_duplicates() 前后分别打印 data；再实现一个用 COO 组装小型 3×3 有限元刚度矩阵的函数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "CSR 与 CSC 压缩格式",
+          "order": 3,
+          "filename": "u2-l3-csr-csc-format.md",
+          "level": "intermediate",
+          "topic": "深入 _compressed.py 的 _cs_matrix 公共基类与 _csr.py/_csc.py 两个子类：indptr/indices/data 三数组布局、行优先与列优先的差别。",
+          "learning_goals": [
+            "掌握 CSR/CSC 的 indptr/indices/data 紧凑布局",
+            "理解 _cs_matrix.__init__ 对 (data,ij) 与 (data,indices,indptr) 两种输入的处理",
+            "知道 CSR 适合行切片与 SpMV、CSC 是 CSR 的转置"
+          ],
+          "source_files": [
+            "_compressed.py",
+            "_csr.py",
+            "_csc.py"
+          ],
+          "minimal_modules": [
+            "_cs_matrix.__init__",
+            "_swap 机制",
+            "csr/csc transpose 互转"
+          ],
+          "practice_task": "手写一个 4×4 矩阵，先填出它的 indptr/indices/data，用 csr_array((data,indices,indptr),shape) 验证；再用 .T 观察它变成 csc_array。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "BSR 块稀疏行格式",
+          "order": 4,
+          "filename": "u2-l4-bsr-format.md",
+          "level": "intermediate",
+          "topic": "深入 _bsr.py：BSR 在 CSR 基础上引入 blocksize，把等大小稠密小块当作存储单元，适合有块结构的矩阵。",
+          "learning_goals": [
+            "理解 BSR 的 indptr/indices/data 如何按块组织",
+            "掌握 blocksize=(r,c) 对存储与效率的影响",
+            "知道 _bsr_base 复用 _cs_matrix 并扩展块操作"
+          ],
+          "source_files": [
+            "_bsr.py",
+            "_compressed.py",
+            "_spfuncs.py"
+          ],
+          "minimal_modules": [
+            "_bsr_base.__init__ 的 blocksize 分支",
+            "estimate_blocksize/count_blocks"
+          ],
+          "practice_task": "构造一个由 2×2 稠密块组成的 BSR 矩阵，对比其 nnz 与对应 csr_array 的 nnz；用 estimate_blocksize 猜测一个手造分块矩阵的块大小。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "LIL、DOK、DIA 三种构造/增量格式",
+          "order": 5,
+          "filename": "u2-l5-lil-dok-dia-format.md",
+          "level": "intermediate",
+          "topic": "对比 _lil.py（按行的列表）、_dok.py（键为坐标的字典，且继承 dict）、_dia.py（按对角线 offsets 存储）三种便于增量构造或特殊结构的格式。",
+          "learning_goals": [
+            "理解 LIL 的 rows/data 列表结构适合逐元素写入",
+            "理解 DOK 用 _dict 存 (row,col)->val 且继承 dict 的设计",
+            "理解 DIA 用 offsets + data 矩阵按对角线存储的特点"
+          ],
+          "source_files": [
+            "_lil.py",
+            "_dok.py",
+            "_dia.py"
+          ],
+          "minimal_modules": [
+            "_lil_base 的 rows/data",
+            "_dok_base 继承 dict 与 _dict",
+            "_dia_base 的 offsets/data"
+          ],
+          "practice_task": "分别用 lil_array、dok_array 逐元素写入一个稀疏矩阵并计时；再用 dia_array 从一组 offsets 构造一个三对角矩阵，最后统一 tocsr() 比较结果一致性。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心机制源码",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "构造函数：_construct.py",
+          "order": 1,
+          "filename": "u3-l1-construct-functions.md",
+          "level": "intermediate",
+          "topic": "讲解 _construct.py 提供的工厂与组合函数：eye_array/diags_array/random_array/block_array，以及 kron/hstack/vstack/block_diag 等组合操作。",
+          "learning_goals": [
+            "掌握新式 _array 工厂函数（eye_array、diags_array、random_array、block_array）",
+            "理解 kron、hstack、vstack、block_diag 的组合语义",
+            "认识 spdiags/eye/bmat 等旧式函数与新式函数的关系"
+          ],
+          "source_files": [
+            "_construct.py",
+            "_bsr.py",
+            "_coo.py"
+          ],
+          "minimal_modules": [
+            "eye_array/diags_array/random_array/block_array",
+            "kron/hstack/vstack/block_diag"
+          ],
+          "practice_task": "用 diags_array 构造一个带状矩阵，再用 block_array 把四个小块拼成 2×2 分块矩阵；额外用 kron 计算两个小矩阵的 Kronecker 积并打印形状。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "索引机制：_index.py 的 IndexMixin",
+          "order": 2,
+          "filename": "u3-l2-indexing-mixin.md",
+          "level": "intermediate",
+          "topic": "讲解 _index.py 中 IndexMixin 如何统一 CSR/CSC/LIL/DOK 的索引分发：_validate_indices 把 key 归一为 int/slice/array 三类并交给 _get_int/_get_slice/_get_array。",
+          "learning_goals": [
+            "理解 __getitem__ 经 _validate_indices 校验后的三类分发",
+            "知道 1-D 与 2-D 索引、new_shape 处理 np.newaxis 的逻辑",
+            "认识为何 >2D 索引会建议转 COO"
+          ],
+          "source_files": [
+            "_index.py",
+            "_compressed.py",
+            "_lil.py"
+          ],
+          "minimal_modules": [
+            "IndexMixin.__getitem__",
+            "_validate_indices",
+            "_get_int/_get_slice/_get_array"
+          ],
+          "practice_task": "对一个 csr_array 分别用整数、切片、花式数组索引取行/列，再用断言验证结果形状；尝试构造一个会触发 >2D 报错的索引并解释错误信息。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "基类公共操作：_base.py",
+          "order": 3,
+          "filename": "u3-l3-base-common-ops.md",
+          "level": "intermediate",
+          "topic": "讲解 _spbase 提供的跨格式公共能力：asformat、multiply、dot、sum、mean、diagonal、setdiag、toarray/todense 等方法。",
+          "learning_goals": [
+            "掌握 asformat 在格式间转换的统一入口",
+            "理解 dot/multiply 的区别与 matmul 分发",
+            "知道 sum/mean/diagonal 如何处理隐式零值"
+          ],
+          "source_files": [
+            "_base.py",
+            "_data.py"
+          ],
+          "minimal_modules": [
+            "asformat",
+            "multiply/dot",
+            "sum/mean/diagonal/setdiag"
+          ],
+          "practice_task": "构造一个 csr_array，依次调用 asformat('coo')、multiply、dot、sum(axis=0)、diagonal()，逐个打印结果；并写一个函数用 setdiag 在主对角线上填值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "逐元素运算与 _data_matrix",
+          "order": 4,
+          "filename": "u3-l4-data-matrix-ufunc.md",
+          "level": "intermediate",
+          "topic": "讲解 _data.py 的 _data_matrix 与 _minmax_mixin：以 .data 为核心实现 __abs__/__round__/ufunc、最大最小值，以及 _with_data 复制模式。",
+          "learning_goals": [
+            "理解 _data_matrix 要求子类实现 _with_data 的契约",
+            "认识 _ufuncs_with_fixed_point_at_zero 列表只对保零 ufunc 直接作用",
+            "掌握 _deduped_data 在运算前去重的作用"
+          ],
+          "source_files": [
+            "_data.py",
+            "_base.py",
+            "_coo.py"
+          ],
+          "minimal_modules": [
+            "_data_matrix._with_data",
+            "_deduped_data",
+            "_minmax_mixin"
+          ],
+          "practice_task": "对一个有重复坐标的 coo_array 调用 abs()，对比 _deduped_data 去重前后的结果；再用 np.sin 作用于该数组，观察为何某些 ufunc 会触发警告或需要先 toarray。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "工具函数：_sputils.py",
+          "order": 5,
+          "filename": "u3-l5-sputils-helpers.md",
+          "level": "intermediate",
+          "topic": "讲解 _sputils.py 的公共工具：dtype 推断（getdtype/upcast）、形状校验（isshape/check_shape/broadcast_shapes）、索引 dtype 选择（get_index_dtype/safely_cast_index_arrays）。",
+          "learning_goals": [
+            "掌握 isshape/check_shape 对形状的校验与多维支持",
+            "理解 get_index_dtype 如何根据 maxval 选 int32/int64",
+            "认识 isscalarlike/isintlike/isdense 等类型判断工具"
+          ],
+          "source_files": [
+            "_sputils.py",
+            "_compressed.py"
+          ],
+          "minimal_modules": [
+            "getdtype/get_index_dtype",
+            "isshape/check_shape",
+            "safely_cast_index_arrays"
+          ],
+          "practice_task": "写一个小函数接收任意形状输入，用 isshape 校验后用 check_shape 归一化；再用 get_index_dtype 对比 maxval=10 与 maxval=5e9 时返回的 dtype。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "C++ 后端与 sparsetools 代码生成",
+          "order": 6,
+          "filename": "u3-l6-sparsetools-cpp-codegen.md",
+          "level": "advanced",
+          "topic": "讲解 _generate_sparsetools.py 如何按类型码（i/I/T/B/...）为 C++ 模板生成手工封装，以及 sparsetools/*.h 的 csr/coo/bsr/dia 计算内核如何被 Cython 暴露。",
+          "learning_goals": [
+            "理解 _generate_sparsetools.py 中 BSR_ROUTINES 等类型码签名表",
+            "认识 sparsetools C++ 模板与 csr.h/coo.h/bsr.h 的职责",
+            "知道 Python 层如何通过 _sparsetools 调用底层（如 coo_tocsr）"
+          ],
+          "source_files": [
+            "_generate_sparsetools.py",
+            "sparsetools/sparsetools.h",
+            "sparsetools/csr.h",
+            "sparsetools/coo.h"
+          ],
+          "minimal_modules": [
+            "类型码定义",
+            "BSR_ROUTINES/CSR_ROUTINES",
+            "sparsetools 模板分发"
+          ],
+          "practice_task": "在 _generate_sparsetools.py 中找到 bsr_tocsr 的签名 'v iiiiIIT*I*I*T'，逐字符解释每个类型码含义；再在 sparsetools/csr.h 中定位 coo_tocsr 对应的函数声明，画出 Python→Cython→C++ 的调用链。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l7",
+          "title": "持久化与提取：save_npz / find / tril",
+          "order": 7,
+          "filename": "u3-l7-io-and-extract.md",
+          "level": "intermediate",
+          "topic": "讲解 _matrix_io.py 用 .npz（allow_pickle=False）安全保存/加载稀疏对象，以及 _extract.py 的 find/tril/triu 提取操作。",
+          "learning_goals": [
+            "掌握 save_npz/load_npz 支持的格式与安全策略",
+            "理解 find 返回 (I,J,V) 三元组的工作方式",
+            "认识 tril/triu 基于坐标比较提取三角部分"
+          ],
+          "source_files": [
+            "_matrix_io.py",
+            "_extract.py",
+            "_coo.py"
+          ],
+          "minimal_modules": [
+            "save_npz/load_npz 与 PICKLE_KWARGS",
+            "find",
+            "tril/triu"
+          ],
+          "practice_task": "构造一个 csr_array，用 save_npz 保存后用 load_npz 读回并校验相等；再用 find 取出非零坐标，用 tril/triu 提取上下三角并打印 nnz。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "稀疏线性代数 linalg",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "linalg 概览与 LinearOperator",
+          "order": 1,
+          "filename": "u4-l1-linalg-overview-linearoperator.md",
+          "level": "intermediate",
+          "topic": "总览 linalg 子模块的功能分层（求解/特征/范数/矩阵函数），并深入 _interface.py 的 LinearOperator 抽象线性算子与 aslinearoperator。",
+          "learning_goals": [
+            "理解 linalg 子模块的整体功能划分",
+            "掌握 LinearOperator 通过 _matvec/_rmatvec 惰性表示大矩阵",
+            "知道 aslinearoperator 如何统一稀疏数组、稠密数组与算子"
+          ],
+          "source_files": [
+            "linalg/__init__.py",
+            "linalg/_interface.py"
+          ],
+          "minimal_modules": [
+            "LinearOperator",
+            "aslinearoperator",
+            "_matvec/_matmat"
+          ],
+          "practice_task": "实现一个继承 LinearOperator 的 Ones 类（_matvec 返回列和的重复），再用 aslinearoperator 把一个 csr_array 与之相加，验证与稠密结果一致。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "直接求解器 _dsolve",
+          "order": 2,
+          "filename": "u4-l2-dsolve-direct-solvers.md",
+          "level": "intermediate",
+          "topic": "讲解 linalg/_dsolve 基于 SuperLU 的直接求解：spsolve、spsolve_triangular、splu/spilu 因子分解、factorized、use_solver。",
+          "learning_goals": [
+            "掌握 spsolve 解 Ax=b 与 spsolve_triangular 的三角形求解",
+            "理解 splu 完整 LU 与 spilu 不完全 LU 的区别",
+            "知道 factorized 预因子化与 use_solver 选择后端"
+          ],
+          "source_files": [
+            "linalg/__init__.py",
+            "linalg/_dsolve/linsolve.py",
+            "linalg/_dsolve/_superluobject.h"
+          ],
+          "minimal_modules": [
+            "spsolve/spsolve_triangular",
+            "splu/spilu",
+            "factorized/use_solver"
+          ],
+          "practice_task": "构造一个中等规模稀疏正定矩阵，用 spsolve 解 Ax=b 并与稠密 numpy.linalg.solve 对比误差；再用 splu 做一次因子分解后多次求解不同 b。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "迭代求解器 _isolve",
+          "order": 3,
+          "filename": "u4-l3-isolve-iterative-solvers.md",
+          "level": "intermediate",
+          "topic": "讲解 linalg/_isolve 的克雷洛夫子空间迭代法：cg/gmres/bicgstab 等线性方程组求解，以及 lsqr/lsmr 最小二乘。",
+          "learning_goals": [
+            "掌握 cg、gmres、bicgstab 等迭代法的适用场景与回调",
+            "理解 lsqr/lsmr 求解稀疏最小二乘",
+            "认识迭代法接受 LinearOperator 与收敛判据"
+          ],
+          "source_files": [
+            "linalg/__init__.py",
+            "linalg/_isolve/iterative.py",
+            "linalg/_isolve/lsqr.py"
+          ],
+          "minimal_modules": [
+            "cg/gmres/bicgstab",
+            "lsqr/lsmr",
+            "回调 callback 与 tol"
+          ],
+          "practice_task": "对一个大稀疏对称正定矩阵，用 cg 求解并打印每步残差；再对一个非方稀疏系统用 lsqr 求最小二乘解，与稠密 lstsq 对比。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "特征值与奇异值 _eigen",
+          "order": 4,
+          "filename": "u4-l4-eigen-svd.md",
+          "level": "advanced",
+          "topic": "讲解 linalg/_eigen 的部分特征/奇异值求解：eigs/eigsh（ARPACK）、lobpcg、svds（arpack/lobpcg/propack 三后端）。",
+          "learning_goals": [
+            "掌握 eigs/eigsh 求 k 个特征对的用法",
+            "理解 lobpcg 块雅可比-戴维森式方法",
+            "知道 svds 的三种 solver 选择与各自权衡"
+          ],
+          "source_files": [
+            "linalg/__init__.py",
+            "linalg/_eigen/_svds.py",
+            "linalg/_eigen/lobpcg"
+          ],
+          "minimal_modules": [
+            "eigs/eigsh",
+            "lobpcg",
+            "svds(solver=...)"
+          ],
+          "practice_task": "构造一个稀疏对称矩阵，用 eigsh 求 3 个最大特征值；再用 svds 对一个稀疏矩阵求前 3 个奇异值，对比 arpack 与 propack 两个后端结果。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "矩阵函数、范数与矩阵指数",
+          "order": 5,
+          "filename": "u4-l5-matrix-funcs-norms.md",
+          "level": "advanced",
+          "topic": "讲解 linalg 的矩阵函数与度量：_matfuncs.py 的 expm/matrix_power/inv，_norm.py 的 norm，_onenormest 估 1-范数，_expm_multiply 计算 expm(A)b。",
+          "learning_goals": [
+            "掌握 expm 计算稀疏矩阵指数与 inv 求逆",
+            "理解 norm/onenormest 的稀疏友好范数估计",
+            "认识 expm_multiply 用 Krylov 避免显式 expm 的高效性"
+          ],
+          "source_files": [
+            "linalg/__init__.py",
+            "linalg/_matfuncs.py",
+            "linalg/_norm.py",
+            "linalg/_expm_multiply.py"
+          ],
+          "minimal_modules": [
+            "expm/inv/matrix_power",
+            "norm/onenormest",
+            "expm_multiply"
+          ],
+          "practice_task": "对一个小稀疏矩阵计算 expm 并与 scipy.linalg.expm 稠密结果对比；再用 expm_multiply 计算 expm(A)@b 并验证与 expm 后相乘一致。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "图算法 csgraph",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "csgraph 图表示与连通分量",
+          "order": 1,
+          "filename": "u5-l1-csgraph-representation.md",
+          "level": "intermediate",
+          "topic": "讲解 csgraph 如何用稀疏邻接矩阵表示图（含 csgraph_from_dense/csgraph_masked_from_dense 等转换），以及 connected_components、laplacian。",
+          "learning_goals": [
+            "理解邻接矩阵表示有向/无向图与零值含义",
+            "掌握 connected_components 求连通分量",
+            "认识 _laplacian.py 计算图拉普拉斯"
+          ],
+          "source_files": [
+            "csgraph/__init__.py",
+            "csgraph/_laplacian.py",
+            "csgraph/_tools.pyx"
+          ],
+          "minimal_modules": [
+            "csgraph_from_dense/csgraph_to_dense",
+            "connected_components",
+            "laplacian"
+          ],
+          "practice_task": "构造一个小图的邻接矩阵，用 connected_components 输出节点归属与分量数；再计算其拉普拉斯矩阵并打印。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "最短路径与最小生成树",
+          "order": 2,
+          "filename": "u5-l2-shortest-path-mst.md",
+          "level": "intermediate",
+          "topic": "讲解 csgraph 的最短路径族（shortest_path/dijkstra/floyd_warshall/bellman_ford/johnson）与 minimum_spanning_tree、遍历序（breadth/depth_first_order）。",
+          "learning_goals": [
+            "掌握 shortest_path 统一接口与各算法适用场景",
+            "理解 minimum_spanning_tree 的最小生成树",
+            "认识广度/深度优先序与树的构造"
+          ],
+          "source_files": [
+            "csgraph/__init__.py",
+            "csgraph/_shortest_path.pyx",
+            "csgraph/_min_spanning_tree.pyx",
+            "csgraph/_traversal.pyx"
+          ],
+          "minimal_modules": [
+            "shortest_path/dijkstra",
+            "minimum_spanning_tree",
+            "breadth_first_order"
+          ],
+          "practice_task": "构造一个带权图，用 dijkstra 求单源最短路径，再用 johnson 求全对最短路径对比；最后求最小生成树并打印边集。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "匹配、最大流与排序",
+          "order": 3,
+          "filename": "u5-l3-matching-flow-reorder.md",
+          "level": "advanced",
+          "topic": "讲解 csgraph 的组合算法：maximum_bipartite_matching/min_weight_full_bipartite_matching、maximum_flow，以及 reverse_cuthill_mckee 重排序。",
+          "learning_goals": [
+            "掌握二部图最大/最小权匹配",
+            "理解 maximum_flow 求最大流与 NegativeCycleError 场景",
+            "认识 reverse_cuthill_mckee 减小带宽的重排序"
+          ],
+          "source_files": [
+            "csgraph/__init__.py",
+            "csgraph/_matching.pyx",
+            "csgraph/_flow.pyx",
+            "csgraph/_reordering.pyx"
+          ],
+          "minimal_modules": [
+            "maximum_bipartite_matching",
+            "maximum_flow",
+            "reverse_cuthill_mckee"
+          ],
+          "practice_task": "构造一个二部图邻接矩阵，用 maximum_bipartite_matching 求匹配；再对一个小流网络用 maximum_flow 求最大流，并打印源到汇的流量。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家层：性能、扩展与测试",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "格式转换、去重与 canonical format",
+          "order": 1,
+          "filename": "u6-l1-format-conversion-dedup.md",
+          "level": "advanced",
+          "topic": "深入格式互转的实现与代价：CSR/CSC/COO 间线性时间转换、sum_duplicates/eliminate_zeros、has_canonical_format 与 sorted_indices 的维护。",
+          "learning_goals": [
+            "理解 tocsr/tocsc/tocoo/tobsr 之间的转换复杂度",
+            "掌握 sum_duplicates 合并重复坐标与 eliminate_zeros 去显式零",
+            "认识 has_canonical_format/sort_indices 的不变量维护"
+          ],
+          "source_files": [
+            "_compressed.py",
+            "_coo.py",
+            "_csr.py",
+            "sparsetools/csr.h"
+          ],
+          "minimal_modules": [
+            "sum_duplicates/eliminate_zeros",
+            "has_canonical_format",
+            "sort_indices/sorted_indices"
+          ],
+          "practice_task": "构造含重复坐标与显式零的 coo_array，转 csr 后依次调用 sum_duplicates、eliminate_zeros、sort_indices，每步打印 data/indices 与 has_canonical_format 的变化。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "大规模索引：64 位与 index dtype",
+          "order": 2,
+          "filename": "u6-l2-large-scale-64bit-index.md",
+          "level": "advanced",
+          "topic": "讲解当矩阵维度超过 int32 范围时如何安全处理索引：get_index_dtype 选型、safely_cast_index_arrays 强制转换与 test_64bit.py 覆盖的大规模场景。",
+          "learning_goals": [
+            "理解索引数组 int32/int64 的自动选择与内存权衡",
+            "掌握 safely_cast_index_arrays 在形状过大时的报错策略",
+            "认识 64 位测试如何验证超大规模矩阵的正确性"
+          ],
+          "source_files": [
+            "_sputils.py",
+            "_compressed.py",
+            "tests/test_64bit.py"
+          ],
+          "minimal_modules": [
+            "get_index_dtype",
+            "safely_cast_index_arrays",
+            "test_64bit"
+          ],
+          "practice_task": "用 get_index_dtype 对比不同 maxval 下的 dtype 选择；再用 safely_cast_index_arrays 尝试把一个需 int64 的索引数组强转 int32，观察并解释抛出的错误信息。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "1-D 稀疏数组与 Array API",
+          "order": 3,
+          "filename": "u6-l3-1d-array-api.md",
+          "level": "advanced",
+          "topic": "讲解 sparray 对 1-D 的支持（_allow_nd、coords 通用化）以及 matrix_transpose/swapaxes/expand_dims/permute_dims 等 Array API 风格操作，结合 1-D 专项测试。",
+          "learning_goals": [
+            "理解 _allow_nd 控制各格式可接受的维度",
+            "掌握 1-D 稀疏数组的算术与索引差异",
+            "认识 swapaxes/expand_dims/permute_dims/matrix_transpose 的语义"
+          ],
+          "source_files": [
+            "_coo.py",
+            "_construct.py",
+            "tests/test_arithmetic1s.py",
+            "tests/test_array_api.py"
+          ],
+          "minimal_modules": [
+            "_allow_nd",
+            "1-D 算术分发",
+            "swapaxes/expand_dims/permute_dims"
+          ],
+          "practice_task": "构造两个 1-D coo_array 做逐元素加法与标量乘；再用 expand_dims 把 1-D 升为 2-D 行向量，验证形状与 data 一致性。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "测试体系：tests/ 目录的组织",
+          "order": 4,
+          "filename": "u6-l4-testing-suite.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 的组织方式：test_base.py 用「通用基类+具体子类」参数化测试全部格式，以及 test_coo/test_csr/test_csc/test_construct/test_sputils 等专项测试。",
+          "learning_goals": [
+            "理解 test_base.py 中通用测试类被各格式子类复用的设计",
+            "认识按格式与按功能切分的测试文件职责",
+            "学会运行与扩展稀疏数组测试"
+          ],
+          "source_files": [
+            "tests/test_base.py",
+            "tests/test_coo.py",
+            "tests/test_construct.py",
+            "tests/test_sputils.py"
+          ],
+          "minimal_modules": [
+            "通用测试基类",
+            "具体格式测试子类",
+            "pytest 参数化"
+          ],
+          "practice_task": "阅读 test_base.py 找到通用测试类如何被 csr/coo 等子类继承；为本教程新增的一个自定义小操作写一个 parametrize 测试，覆盖至少两种格式。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "二次开发：扩展点与最佳实践",
+          "order": 5,
+          "filename": "u6-l5-extension-and-best-practices.md",
+          "level": "advanced",
+          "topic": "总结架构取舍与扩展方式：如何选择/组合格式、何时转 CSR/CSC 做运算、避免直接套用 NumPy 函数、以及 SparseEfficiencyWarning 背后的低效模式。",
+          "learning_goals": [
+            "掌握按访问模式选格式的决策框架",
+            "理解 SparseEfficiencyWarning 提示的低效操作（如对 CSR 改动元素）",
+            "认识 spmatrix→sparray 迁移与 issparse/isspmatrix 的使用建议"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_base.py",
+            "_matrix.py",
+            "_compressed.py"
+          ],
+          "minimal_modules": [
+            "SparseEfficiencyWarning",
+            "asformat 选型",
+            "issparse/isspmatrix"
+          ],
+          "practice_task": "编写一份「稀疏格式选型速查表」：针对逐元素写入、行切片、SpMV、求逆、组装有限元矩阵等场景给出推荐格式并简述理由；用一个会触发 SparseEfficiencyWarning 的例子说明低效模式。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
