@@ -2,391 +2,427 @@
 
 ## 1. 本讲目标
 
-本讲聚焦 CUDA-Q 编程模型里「量子门（gate）」与「修饰符（modifier）」这一层。学完后你应该能够：
+本讲在「量子类型系统」（u2-l1）之后，正式进入「门」的世界。读完本讲，你应该能够：
 
-- 正确调用 CUDA-Q 提供的全部内建门（`h/x/y/z/s/t`、旋转门 `rx/ry/rz/r1`、通用门 `u3`、`swap`）。
-- 理解 `cudaq::ctrl`、`cudaq::adj` 修饰符把一个单比特门「升级」为受控门、共轭转置门的机制，以及负控（negative control）的真实实现方式。
-- 区分两种「施加控制语义」的途径：单门级的模板修饰符 `op<cudaq::ctrl>(...)`，与内核级的 `cudaq::control(...)` / `cudaq::adjoint(...)`。
-- 动手实现一个 Toffoli（双控非）门，并用采样验证它的真值表。
+1. 用 `h / x / y / z / s / t`、旋转门 `rx / ry / rz / r1`、`u3`、`swap` 写出量子内核，并知道它们在源码里是如何被「批量生成」的。
+2. 理解 CUDA-Q 的**修饰符**机制：用 `<cudaq::ctrl>`、`<cudaq::adj>` 把一个单比特门提升为受控门 / 伴随门；同时搞清楚一个常见误解——**并不存在 `<cudaq::neg>` 修饰符**，负控（control on |0⟩）是写在量子比特上的 `!` 操作符。
+3. 掌握「把一整个子内核当作受控 / 伴随来施加」的另一套写法：`cudaq::control`、`cudaq::adjoint`、`cudaq::compute_action`，并理解它与 `<ctrl>` 修饰符的等价关系。
 
-> 承接前置讲义：u2-l1 讲清了量子值的类型层次（`qudit`/`qubit`/`qvector`/`qview`）与「不可拷贝」约束。本讲只讲「对这些量子值施加什么操作、怎么施加」，不再重复类型本身。
+本讲的实践任务是用**两种写法**实现同一个 Toffoli（双控非）门，并采样验证真值表。
 
 ## 2. 前置知识
 
-- **酉矩阵（unitary matrix）**：量子门（除测量外）对应一个酉矩阵 \(U\)，满足 \(U^{\dagger}U = I\)。作用在 \(n\) 个比特上就是 \(2^n \times 2^n\) 的酉阵。
-- **受控门（controlled gate）**：给定一个门 \(U\) 和一个控制比特 \(c\)，受控门 \(C(U)\) 的语义是「仅当 \(c=|1\rangle\) 时才对目标施加 \(U\)」。矩阵上是 \(|0\rangle\langle 0|\otimes I + |1\rangle\langle 1|\otimes U\)。
-- **共轭转置（adjoint）**：门的逆操作 \(U^{\dagger}\)。例如 \(S^{\dagger} = S^{-1}\)，记作 `sdg`；\(T^{\dagger}\) 记作 `tdg`。
-- **负控（negative control）**：与受控门相反，「仅当 \(c=|0\rangle\) 时才施加 \(U\)」。它等价于在控制比特上做 \(X\cdot C(U)\cdot X\)。
-- **修饰符（modifier）**：CUDA-Q 用一组空标记类型（`base`、`ctrl`、`adj`）作为模板参数，告诉门函数「这次调用按普通/受控/共轭来解释」。
+- **u2-l1** 引入的量子类型：`qubit = qudit<2>`、`qvector`、`qview`。门操作的参数都是 `qubit&`（或一组比特的视图），本讲不再重复类型细节。
+- **u1-l4** 引入的执行模型：门函数（如 `x(q)`）并不真正「执行」量子操作，而是把「门名 + 参数 + 控制比特 + 目标比特」记录到全局单例 **ExecutionManager**，最终交由后端解释。本讲的全部门函数都遵循这一约定。
+- 受控门（controlled-`U`）的数学定义：
+
+  \[
+  C(U) = |0\rangle\langle 0| \otimes I + |1\rangle\langle 1| \otimes U
+  \]
+
+  即「控制比特为 |1⟩ 时才对目标施加 `U`」。负控（control on |0⟩）则是：
+
+  \[
+  C_{\neg}(U) = |1\rangle\langle 1| \otimes I + |0\rangle\langle 0| \otimes U = (X \otimes I)\, C(U)\, (X \otimes I)
+  \]
+
+  这个等式直接解释了源码里「负控 = 前后各包一层 X」的实现。
+
+- 旋转门的定义（本讲会用到）：
+
+  \[
+  R_x(\theta) = e^{-i\theta X/2},\quad R_y(\theta) = e^{-i\theta Y/2},\quad R_z(\theta) = e^{-i\theta Z/2}
+  \]
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| `runtime/cudaq/qis/modifiers.h` | 定义三个修饰符标记类型 `base`/`ctrl`/`adj`，是整讲的「枚举常量」。 |
-| `runtime/cudaq/qis/qudit.h` | 量子比特本身。负控的状态（`isNegativeControl`）、`negate()`、`operator!()` 都在这里。 |
-| `runtime/cudaq/qis/qubit_qis.h` | **本讲的主战场**。所有内建门、修饰符分派逻辑、`control()`/`adjoint()`/`compute_action()`、自定义门注册宏都在此文件。 |
-| `runtime/cudaq/qis/execution_manager.h` | 声明 `apply(...)`，是所有门最终汇入的「单点收口」。 |
-| `runtime/cudaq/qis/qkernel.h` | `qkernel` 包装器，是 `control()`/`adjoint()` 控制整个子内核时所需的「内核可调用对象」类型支撑。 |
-| `docs/sphinx/examples/cpp/other/compute_actions.cpp` | 真实示例，展示了 `x<cudaq::ctrl>(...)` 与 `cudaq::compute_action(...)` 两种写法。 |
+|---|---|
+| `runtime/cudaq/qis/modifiers.h` | 全部修饰符的**类型标签**声明：`base`、`ctrl`、`adj`。整个文件只有前向声明，是修饰符机制的「目录」。 |
+| `runtime/cudaq/qis/qubit_qis.h` | 默认量子指令集（QIS）的主体。门的宏定义、`oneQubitApply` 修饰符分派逻辑、`cnot/cx/ccx` 等语法糖、`control/adjoint/compute_action` 组合算子、`CUDAQ_REGISTER_OPERATION` 自定义门宏，全在这里。 |
+| `runtime/cudaq/qis/qudit.h` | 量子比特本身。负控的状态 `isNegativeControl`、`negate()`、`operator!()` 都在这里。 |
+| `runtime/cudaq/qis/qkernel.h` | `qkernel` 包装器。当你把一个内核**作为值**传递（而不是直接调用）时——比如交给 `cudaq::control`——就需要它。 |
 
 ## 4. 核心概念与源码讲解
-
-本讲拆为三个最小模块：**① 基本门与旋转门**、**② `ctrl`/`adj` 修饰符与负控**、**③ apply 算子与控制语义**。
 
 ### 4.1 基本门与旋转门
 
 #### 4.1.1 概念说明
 
-CUDA-Q 的内建门就是一组「按名字识别」的量子指令。在内核里写下 `h(q)`、`ry(0.5, q)`，编译器并不会真的去「执行 C++ 函数体」，而是把这条调用翻译成一条 Quake MLIR 指令（如 `quake.h`、`quake.ry`）。这一点 u1-l4 已经讲过：门函数体只是把「门名 + 比特 + 参数」记录到单例 `ExecutionManager`。
+CUDA-Q 的「默认逻辑门集」分成三档：
 
-内建门按是否带旋转参数分两类：
+- **无参数单比特门**：`h, x, y, z, s, t`。
+- **带一个角度参数的单比特门**：`rx, ry, rz, r1`。
+- **通用单比特门**：`u3(theta, phi, lambda)`；以及两比特的 `swap`。
 
-- **无参门**：`h`、`x`、`y`、`z`、`s`、`t`（单比特），`swap`（双比特）。
-- **带参旋转门**：`rx`、`ry`、`rz`、`r1`（单比特单参数），`u3`（单比特三参数，可表达任意单比特酉）。
+这些门在源码里**不是一个个手写的**，而是用两个预处理宏 `CUDAQ_QIS_ONE_TARGET_QUBIT_` 和 `CUDAQ_QIS_PARAM_ONE_TARGET_` 批量「印」出来的。每个门在源码里只是一个很薄的模板函数，真正干活的是共用的 `oneQubitApply` / `oneQubitSingleParameterApply`。
 
-它们的矩阵形式（旋转角记作 \(\theta\)）：
-
-\[
-H=\frac{1}{\sqrt2}\begin{bmatrix}1&1\\1&-1\end{bmatrix},\quad
-X=\begin{bmatrix}0&1\\1&0\end{bmatrix},\quad
-R_y(\theta)=\begin{bmatrix}\cos\frac\theta2&-\sin\frac\theta2\\\sin\frac\theta2&\cos\frac\theta2\end{bmatrix},\quad
-R_z(\theta)=\begin{bmatrix}e^{-i\theta/2}&0\\0&e^{i\theta/2}\end{bmatrix}
-\]
+理解这一点很重要：门的「名字」只是一个字符串（如 `"x"`、`"ry"`），函数体把它连同比特 id 一起交给 ExecutionManager。这与 u1-l4 讲过的「门函数只记录指令」完全一致。
 
 #### 4.1.2 核心流程
 
-所有无参单比特门都由同一个宏批量生成；所有单参数旋转门由另一个宏批量生成。流程是：
+以 `x(q)` 为例，调用链是：
 
-1. 用 `ConcreteQubitOp(NAME)` 宏为每个门生成一个带 `name()` 方法的标记类型（`h`→`hOp` 等）。
-2. 用 `CUDAQ_QIS_ONE_TARGET_QUBIT_(NAME)` 宏生成用户可调用的 `NAME(...)` 函数（含若干重载）。
-3. 函数体把工作转交给模板 `oneQubitApply<QuantumOp, mod>(args...)`，后者最终调用 `getExecutionManager()->apply(...)`。
+1. `x<base>(q)` 命中宏生成的模板 `void x(QubitArgs&... args)`。
+2. 转发到 `oneQubitApply<qubit_op::xOp, base>(q)`。
+3. `oneQubitApply` 把每个比特映射成 `QuditInfo{id, levels}`，按修饰符分派。
+4. 对 `base` 修饰符：对传入的**每一个**比特都单独施加该门（广播，broadcast）。
+5. 最终调用 `getExecutionManager()->apply(gateName, /*params*/{}, /*controls*/{}, {qubit})`。
+
+带角度的门（如 `ry(theta, q)`）多一步：把 `theta` 转成 `double` 放进 `parameters` 向量。
 
 #### 4.1.3 源码精读
 
-门名的标记类型在这里集中声明——一共 11 个：
+门的「名字标签」由 `ConcreteQubitOp` 宏生成，每个标签把 C++ 类型映射成一个字符串：
 
-[runtime/cudaq/qis/qubit_qis.h:40-51](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L40-L51) —— 用 `ConcreteQubitOp` 宏生成 `h/x/y/z/s/t/rx/ry/rz/r1/u3` 的标记结构体，每个都有一个静态 `name()` 返回字符串名。这段说明：门在 C++ 层只是一个「带名字的空壳类型」，真正的语义在后端模拟器里。
+[runtime/cudaq/qis/qubit_qis.h:L40-L51](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L40-L51) —— 定义 `h/x/y/z/s/t/rx/ry/rz/r1/u3` 的 `Op` 结构体，每个都带一个 `name()` 返回门名字符串。
 
-无参单比特门的批量生成宏：
+`oneQubitApply` 是整个门体系的「分派中心」：
 
-[runtime/cudaq/qis/qubit_qis.h:138-166](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L138-L166) —— `CUDAQ_QIS_ONE_TARGET_QUBIT_(NAME)` 一次生成 4 个重载：单/多比特模板版、用范围作控制比特的版、对整个寄存器逐比特施加的广播版。这段说明：「同一个门名」通过重载覆盖了「单比特、多控制、寄存器广播」三种用法。
+[runtime/cudaq/qis/qubit_qis.h:L63-L85](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L63-L85) —— 模板参数 `mod` 默认是 `base`；`base` 分支对每个比特分别 `apply`，这就是「`h(qvector)` 会对整条寄存器逐个施加 H」的实现。
 
-宏的实例化点（这就是 `h/x/y/z/t/s` 真正诞生的地方）：
+批量生成无参数门的宏：
 
-[runtime/cudaq/qis/qubit_qis.h:169-174](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L169-L174) —— 实例化 `h/x/y/z/t/s` 六个无参门。
+[runtime/cudaq/qis/qubit_qis.h:L138-L174](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L138-L174) —— `CUDAQ_QIS_ONE_TARGET_QUBIT_(h)` 等调用为 `h/x/y/z/t/s` 各自展开出三个重载（单/多比特门 + 寄存器广播），随后第 169–174 行实例化。
 
-旋转门的对应宏与实例化：
+带角度的门与旋转门：
 
-[runtime/cudaq/qis/qubit_qis.h:226-249](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L226-L249) —— `CUDAQ_QIS_PARAM_ONE_TARGET_` 生成带角度参数的门函数，并实例化 `rx/ry/rz/r1`。注意它比无参版多一个 `ScalarAngle angle` 前置参数。
+[runtime/cudaq/qis/qubit_qis.h:L226-L249](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L226-L249) —— `CUDAQ_QIS_PARAM_ONE_TARGET_` 宏为 `rx/ry/rz/r1` 展开「角度 + 比特」的签名。
 
-通用单比特门 `u3` 与双比特 `swap` 是手写的（不走上面两个宏）：
+此外，源码还提供了一批**语义糖**——它们只是把 `<cudaq::ctrl>` 写法包了一层更常见的名字：
 
-[runtime/cudaq/qis/qubit_qis.h:300-336](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L300-L336) —— `swap` 的定义。`swap(q,r)` 是普通交换门；传入超过 2 个比特时要求修饰符必须是 `ctrl`，前 \(N-2\) 个当控制、最后 2 个当目标，从而支持受控交换。
-
-最后，所有门函数都把工作交给 `oneQubitApply`（无参）或 `oneQubitSingleParameterApply`（带参），它们才是真正「解释修饰符」的地方——见 4.2 节。
+[runtime/cudaq/qis/qubit_qis.h:L339-L368](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L339-L368) —— `cnot/cx/cy/cz/ch/cs/ct`（单控两比特门）、`ccx`（双控非，即 Toffoli）、`crx/cry/crz/cr1`（带角度的受控旋转）、`sdg/tdg`（`s/t` 的伴随）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手调用一遍各类内建门，确认它们能编译并产生采样结果。
+**实践目标**：直观感受「门 = 名字字符串 + 比特 id」的执行模型，以及寄存器广播。
 
 **操作步骤**：
 
-1. 新建 `gates_tour.cpp`，写入下面的内核（示例代码）：
+1. 新建 `broadcast.cpp`，写入下面的内核（示例代码）：
 
    ```cpp
    #include <cudaq.h>
-   #include <cmath>
 
-   struct gates_tour {
-     void operator()(double theta) __qpu__ {
-       cudaq::qvector q(3);
-       h(q[0]);
-       ry(theta, q[1]);          // 旋转门，带参数
-       x(q[2]);
-       swap(q[0], q[1]);         // 双比特门
-       mz(q);
-     }
-   };
+   __qpu__ void three_h() {
+     cudaq::qvector q(3);
+     h(q);          // 广播：等价于 h(q[0]); h(q[1]); h(q[2]);
+     mz(q);
+   }
 
    int main() {
-     auto counts = cudaq::sample(gates_tour{}, 0.5);
+     auto counts = cudaq::sample(three_h);
      counts.dump();
-     return 0;
    }
    ```
 
-2. 用 u1-l3 学到的工具链编译运行：`nvq++ gates_tour.cpp -o gates_tour.x && ./gates_tour.x`。
+2. 编译运行：`nvq++ broadcast.cpp -o broadcast.x && ./broadcast.x`。
 
-**需要观察的现象**：终端打印出 3 比特的采样分布（一组 `{比特串 → 次数}`）。
+**需要观察的现象**：采样分布应近似均匀地出现在 `000/001/.../111` 这 8 个比特串上（每个约 12.5%）。
 
-**预期结果**：能成功编译并打印出非空的采样计数（默认 1000 shots）。具体分布「待本地验证」，因为它依赖 `theta=0.5` 下的真实概率。
+**预期结果**：3 个比特都被置于均匀叠加态 \(|+\rangle^{\otimes 3}\)，所以 8 个基态等概率出现。这验证了 `h(qvector)` 的「逐比特广播」语义。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：把上面的 `ry(theta, q[1])` 改成 `ry(theta, q[1], q[2])`（一次给两个比特），会发生什么？
+**练习 1**：`ry(M_PI, q)` 等价于哪个简单门？为什么？
 
-**参考答案**：当修饰符是默认的 `base` 且传入多个比特时，旋转门会把同一个角度「广播」到每个比特上——即对 `q[1]` 和 `q[2]` 各施加一次 `ry(theta)`，而不是生成一个两比特门。依据见 [runtime/cudaq/qis/qubit_qis.h:189-197](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L189-L197) 的 `if constexpr (nArgs > 1 && std::is_same_v<mod, base>)` 分支。
+**参考答案**：等价于 `x(q)`。因为 \(R_y(\pi) = e^{-i\pi Y/2} = \cos(\pi/2)I - i\sin(\pi/2)Y = -iY\)，而 \(-iY = X\)（相差一个全局相位）。所以二者在采样分布上完全一致。
 
-**练习 2**：`u3` 需要几个参数？它能表达哪些门？
+**练习 2**：为什么源码要用宏 `CUDAQ_QIS_ONE_TARGET_QUBIT_` 批量生成 `h/x/y/z/t/s`，而不是手写 6 份？
 
-**参考答案**：三个参数 \((\theta,\phi,\lambda)\)。任意单比特酉门都可以写成 `u3` 的形式（再带上一个全局相位），所以 `h/x/y/z/rx/ry/rz` 都可以被 `u3` 等价表达。定义见 [runtime/cudaq/qis/qubit_qis.h:257-284](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L257-L284)。
+**参考答案**：因为这 6 个门的「形状」完全一致（都是「无参数、可广播、可受控」），只有名字字符串不同。宏把「名字」作为参数，避免 6 份几乎一模一样的样板代码，同时保证 6 个门的修饰符行为完全统一（修一处即修六处）。
 
-### 4.2 ctrl/adj 修饰符与负控（! 操作符）
+---
+
+### 4.2 修饰符 ctrl / adj 与负控（`!`）
 
 #### 4.2.1 概念说明
 
-> **重要澄清**：本讲标题与课程大纲里提到「neg 修饰符」，但需要先纠正一个常见误解——**CUDA-Q 的 C++ 源码里并没有一个叫 `cudaq::neg` 的修饰符类型**。修饰符只有三个：`base`、`ctrl`、`adj`。「负控」不是一个新的修饰符，而是通过在量子比特上调用 `negate()`（或写 `!q`）来**给比特打一个「我是负控制」的临时标记**，由门函数在读到这个标记后自动用 `X` 门夹住实现。这一点务必记住，避免去找一个不存在的 `cudaq::neg`。
+CUDA-Q 的修饰符是一组**空类型标签**，作为模板参数传给门函数，用来改变门的施加方式：
 
-修饰符的真实定义极其朴素，就是三个空结构体：
+[runtime/cudaq/qis/modifiers.h:L11-L22](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/modifiers.h#L11-L22) —— 只声明了三个标签：`base`（默认，广播施加）、`ctrl`（受控）、`adj`（伴随 / 逆）。
 
-[runtime/cudaq/qis/modifiers.h:13-21](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/modifiers.h#L13-L21) —— `base`（默认，普通施加）、`ctrl`（受控）、`adj`（共轭转置）。它们不带任何数据，只用作模板参数「标签」。
+> ⚠️ **重要澄清（本讲最易踩坑点）**：很多文档会把负控叫成「`neg` 修饰符」，但 `modifiers.h` 里**根本没有 `neg` 这个类型**。负控不是修饰符，而是**写在量子比特上**的 `!` 操作符（即 `qudit::operator!()`）。修饰符只有 `base/ctrl/adj` 三种，「neg」通过 `!q` 实现。本讲标题里的「neg」指的就是这个负控语法。
 
-负控状态存在量子比特自身里：
+用法对照：
 
-[runtime/cudaq/qis/qudit.h:26-28](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qudit.h#L26-L28) —— 每个量子比特内部有一个 `isNegativeControl` 布尔成员，记录它「当前是否被标记为负控」。
+| 写法 | 含义 |
+|---|---|
+| `x(q)` | 默认 `base`，施加 X |
+| `x<cudaq::ctrl>(c, t)` | `ctrl`，c 为 |1⟩ 时翻转 t（CNOT） |
+| `x<cudaq::ctrl>(c1, c2, t)` | 多控制：c1=c2=1 时翻转 t（Toffoli） |
+| `x<cudaq::ctrl>(!c, t)` | 负控：c 为 |0⟩ 时翻转 t |
+| `s<cudaq::adj>(q)` | 伴随：施加 `s` 的逆（即 `sdg`） |
 
 #### 4.2.2 核心流程
 
-`op<cudaq::ctrl>(controls..., target)` 的执行流程（以 `oneQubitApply` 为例）：
+`oneQubitApply` 的修饰符分派逻辑（这是本模块的核心）：
 
-1. 取出门名 `gateName = QuantumOp::name()`。
-2. `static_assert` 校验所有参数都是 2 能级 `qubit`。
-3. 把参数打包成 `quditInfos`（比特 id 列表）和 `qubitIsNegated`（每个比特是否被标记为负控）。
-4. 若修饰符是 `base`：对每个比特独立施加该门（广播），返回。
-5. 否则（`ctrl` 或 `adj`）：**前 \(N-1\) 个比特当控制、最后一个当目标**。
-6. 对每个被标记为负控的控制比特，先施加一个 `X`（把「\(c=|0\rangle\) 时触发」翻成「\(c=|1\rangle\) 时触发」）。
-7. 调用 `apply(gateName, params, controls, {target}, isAdjoint)`，其中 `isAdjoint = (mod==adj)`。
-8. 对刚才夹过的负控比特再施加一次 `X` 还原，并清除其 `isNegativeControl` 标记。
+- 若 `mod == base`：对每个比特施加该门（广播），返回。
+- 否则（`ctrl` 或 `adj`）：把**前 N−1 个比特当控制**，**最后一个比特当目标**。
+- 对每个控制比特，检查它是否被 `!` 标成负控：
+  - 若是，先施加一个 `x`（把 |0⟩↔|1⟩ 翻转，使「负控」化为「正控」）；
+  - 施加真正的受控门；
+  - 再施加一个 `x` 复位控制比特；
+  - 最后把比特上的负控标记清掉（自动复位）。
+- `adj` 与 `ctrl` 的区别仅在于给 `apply` 传一个 `isAdjoint=true` 标志。
 
-负控的数学等价：在控制比特 \(c\) 上「负控 \(U\)」等价于 \(X_c \cdot C(U) \cdot X_c\)，因为 \(X|0\rangle=|1\rangle\) 把「为 0」翻成「为 1」，作用完再翻回去。
+数学上，「前后包 X」正是 4.2 前置知识里 \(C_{\neg}(U) = (X\otimes I)\,C(U)\,(X\otimes I)\) 的逐字实现。
 
 #### 4.2.3 源码精读
 
-修饰符分派的核心函数 `oneQubitApply`：
+`ctrl`/`adj` 分支：抽取控制比特与目标比特、施加门：
 
-[runtime/cudaq/qis/qubit_qis.h:63-85](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L63-L85) —— 函数签名与 `base` 广播分支。这段说明：模板参数 `mod` 默认是 `base`；当 `mod==base` 时，门被逐个施加到每一个传入的比特上（广播），不分控制/目标。
+[runtime/cudaq/qis/qubit_qis.h:L87-L101](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L87-L101) —— 前 N−1 个为控制、最后一个为目标；对负控比特先施加 `x`；调用 `apply(gateName, {}, controls, {target}, isAdjoint)`。`isAdjoint` 由 `std::is_same_v<mod, adj>` 编译期决定。
 
-受控与负控的处理：
+负控的「包 X + 复位标记」：
 
-[runtime/cudaq/qis/qubit_qis.h:87-118](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L87-L118) —— `ctrl`/`adj` 分支。这段说明三件事：①前 \(N-1\) 个比特是控制、最后一个是目标；②对每个负控比特用 `X` 门「夹住」（先 `X`、施加门、再 `X`）；③作用完毕后调用 `args.negate()` 把比特的负控标记清掉，使 `!q` 这类写法「用一次即失效」，不影响后续使用。
+[runtime/cudaq/qis/qubit_qis.h:L94-L117](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L94-L117) —— 第 94–97 行对负控比特施加 X；第 104–117 行在门施加后再施加一次 X 复位，并通过 fold 表达式调用 `args.negate()` 把负控标记翻回 `false`。这是一种 RAII 式的「用完即复位」。
 
 负控标记的来源——`operator!` 与 `negate()`：
 
-[runtime/cudaq/qis/qudit.h:54-67](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qudit.h#L54-L67) —— `negate()` 翻转 `isNegativeControl` 标记；`operator!()` 是它的语法糖。这段说明：写 `x<cudaq::ctrl>(!q, r)` 时，`!q` 在构造参数时就把 `q` 标成负控，门函数读到该标记后实现「\(q=|0\rangle\) 时翻转 \(r\)」的语义，并在事后自动复位。
+[runtime/cudaq/qis/qudit.h:L54-L67](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qudit.h#L54-L67) —— `negate()` 翻转 `isNegativeControl` 标记；`operator!()` 是它的语法糖。这说明写 `x<cudaq::ctrl>(!q, r)` 时，`!q` 在构造参数时就把 `q` 标成负控，门函数读到该标记后实现「\(q=|0\rangle\) 时翻转 \(r\)」的语义，并在事后自动复位。
 
-> 因此，受控门有三种等价入口：
-> - 模板修饰符：`x<cudaq::ctrl>(c, t)`（最通用，支持任意多控制比特）。
-> - 语义糖别名：`cnot(c,t)` / `cx(c,t)` / `cy` / `cz` / `ch` / `cs` / `ct`，以及双控的 `ccx(c1,c2,t)`。
-> - 受控旋转：`crx/cry/crz/cr1(angle, c, t)`。
->
-> 见 [runtime/cudaq/qis/qubit_qis.h:339-364](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L339-L364)。共轭转置的别名 `sdg`/`tdg` 见 [runtime/cudaq/qis/qubit_qis.h:367-368](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L367-L368)，它们内部就是 `s<cudaq::adj>(q)` / `t<cudaq::adj>(q)`。
+官方文档对负控语法的明确说明：
+
+[docs/sphinx/api/default_ops.rst:L478-L498](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/docs/sphinx/api/default_ops.rst#L478-L498) —— 默认控制极性为 |1⟩ 触发；用 `!` 前置翻转极性为 |0⟩ 触发；并强调 `!` 只在受控操作里、且只能用于控制比特（不能用于 `swap` 的目标比特）。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用负控实现一个「或非」型受控门——只有当控制比特为 \(|0\rangle\) 时才翻转目标，并用采样验证。
+**实践目标**：对比「正控 CNOT」与「负控 CNOT」的真值表，亲眼看到 `!` 的效果。
 
 **操作步骤**：
 
-1. 写下面的内核（示例代码），分别用正控和负控对照：
+1. 写内核（示例代码）：
 
    ```cpp
    #include <cudaq.h>
 
-   struct neg_ctrl_demo {
-     void operator()(int use_negative) __qpu__ {
-       cudaq::qvector q(2);
-       x(q[0]);                    // 让控制比特处于 |1>
-       if (use_negative)
-         x<cudaq::ctrl>(!q[0], q[1]);   // 负控：控制为 |0> 时才翻转
-       else
-         x<cudaq::ctrl>(q[0], q[1]);    // 正控：控制为 |1> 时才翻转
-       mz(q);
-     }
-   };
+   // prepare=0..3 编码 c,t 的初值（bit0=c, bit1=t）
+   __qpu__ void cnot_pos_neg(int prepare, bool use_neg) {
+     cudaq::qubit c, t;
+     if (prepare & 1) x(c);
+     if (prepare & 2) x(t);
+     if (use_neg) x<cudaq::ctrl>(!c, t);   // 负控：c=|0> 时翻转 t
+     else         x<cudaq::ctrl>(c, t);    // 正控：c=|1> 时翻转 t
+     mz(c); mz(t);
+   }
 
    int main() {
-     auto pos = cudaq::sample(neg_ctrl_demo{}, 0);
-     auto neg = cudaq::sample(neg_ctrl_demo{}, 1);
-     printf("positive ctrl: "); pos.dump();
-     printf("negative ctrl: "); neg.dump();
-     return 0;
+     for (int p = 0; p < 4; p++) {
+       auto cp = cudaq::sample(1000, cnot_pos_neg, p, false);
+       auto cn = cudaq::sample(1000, cnot_pos_neg, p, true);
+       printf("init=%d  pos=", p); cp.dump();
+       printf("        neg=");     cn.dump();
+     }
    }
    ```
 
-2. 编译运行：`nvq++ neg_ctrl_demo.cpp -o neg_ctrl.x && ./neg_ctrl.x`。
+2. 编译运行：`nvq++ cnot_pos_neg.cpp -o cnpn.x && ./cnpn.x`。
 
-**需要观察的现象**：两次采样的最可能比特串应该不同。
+**需要观察的现象**：正控只在 `c=1` 时翻转 `t`；负控只在 `c=0` 时翻转 `t`。二者真值表恰好「镜像」。
 
-**预期结果**：初始态 \(|10\rangle\)（控制为 1、目标为 0）。正控版会翻转目标得到 \(|11\rangle\)；负控版因控制为 1（不满足「为 0」），目标不翻，得到 \(|10\rangle\)。具体计数「待本地验证」。
+**预期结果**（按 `c,t` 顺序，目标比特 `t` 的翻转条件）：
+
+| 初值 (c,t) | 正控后 t 翻转? | 负控后 t 翻转? |
+|---|---|---|
+| 00 | 否 | **是** |
+| 01 | 否 | **是**（t: 1→0）|
+| 10 | **是** | 否 |
+| 11 | **是**（t: 1→0）| 否 |
+
+> 注：`sample` 返回的比特串字节序与 `mz` 的调用顺序/寄存器命名有关，请以 `dump()` 实际打印为准；若对顺序有疑问，可单独 `mz` 并指定寄存器名（见 u2-l3）。若暂无 nvq++ 环境，本表为「待本地验证」的理论值。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：为什么 `x<cudaq::ctrl>(!q, r)` 用过之后，`q` 不会一直保持「负控」状态？
 
-**参考答案**：因为 `oneQubitApply` 在施加完门之后，会遍历参数调用 `args.negate()`，把 `isNegativeControl` 翻回 `false`。见 [runtime/cudaq/qis/qubit_qis.h:104-117](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L104-L117)。这是一种 RAII 式的「自动复位」。
+**参考答案**：因为 `oneQubitApply` 在施加完门之后，会遍历参数调用 `args.negate()`，把 `isNegativeControl` 翻回 `false`。见 [runtime/cudaq/qis/qubit_qis.h:L104-L117](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L104-L117)。这是一种 RAII 式的「自动复位」，保证下一次再用 `q` 做控制时是干净的。
 
-**练习 2**：`x<cudaq::ctrl>(c1, c2, t)` 表示什么门？
+**练习 2**：把 `s<cudaq::adj>(q)` 和 `sdg(q)` 放进同一个内核分别作用在两个比特上，采样结果会有差别吗？
 
-**参考答案**：Toffoli（双控非，CCX）。前两个比特是控制、最后一个是目标，仅当 \(c1=c2=|1\rangle\) 时翻转 \(t\)。它也有内置别名 `ccx`，见 [runtime/cudaq/qis/qubit_qis.h:346](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L346)。
+**参考答案**：不会。`sdg` 在源码里就是 `s<cudaq::adj>` 的语法糖（见 [qubit_qis.h:L367-L368](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L367-L368)），二者生成完全相同的指令（门名 `"s"` + `isAdjoint=true`）。
 
-### 4.3 apply 算子与控制语义
+---
+
+### 4.3 控制语义的另一面：control / adjoint / compute_action
 
 #### 4.3.1 概念说明
 
-> **再次澄清**：CUDA-Q 的 C++ 用户 API 里**没有一个叫 `cudaq::apply` 的函数**。「apply」在本讲指的是两件实事：
-> 1. **底层的 `apply`**——`ExecutionManager::apply(gateName, params, controls, targets, isAdjoint)`，是所有门（无论来自哪种写法）最终汇入的「单点收口」。
-> 2. **内核级的控制语义**——`cudaq::control(kernel, ctrl_qubit, args...)` 和 `cudaq::adjoint(kernel, args...)`，它们把**一整个子内核**整体施加控制或取共轭，区别于 4.2 节「单门级」的修饰符。
+`<cudaq::ctrl>` 修饰符只能把**单个内建门**提升为受控。但很多时候我们想把**一整个子内核**（里面可能有几十个门）整体受控或求逆——比如做 Trotter 步进的伴随、或把一个 ansatz 块当作受控模块。CUDA-Q 提供了三个「施加算子」来支撑这种组合：
 
-为什么要区分这两种？因为：
+- `cudaq::control(kernel, ctrl_qubits, args...)` —— 在给定控制比特下施加整个 `kernel`。
+- `cudaq::adjoint(kernel, args...)` —— 施加 `kernel` 的伴随。
+- `cudaq::compute_action(C, A)` —— 施加 \(C\,A\,C^{\dagger}\)；`compute_dag_action(C, A)` 施加 \(C^{\dagger} A\,C\)。这是量子算法里极常见的「计算-作用-逆计算」模式。
 
-- **单门级修饰符** `op<cudaq::ctrl>(...)` 只控制**一个门**。
-- **内核级 `control()`** 控制**一整段子线路**——它对子内核里的每一条门指令都附加上同一个控制比特。这是构造大型受控块（如量子算法里的 `compute_action` 模式）的关键。
+> 说明：CUDA-Q 的 C++ QIS 里**没有一个叫 `apply` 的符号**。本讲的「自定义作用 / apply 算子」指的就是上面这一族把内核「整体施加 / 受控 / 求逆」的函数。它们与 `<ctrl>`/`<adj>` 修饰符是**同一套执行机制的两个入口**：修饰符作用于单个门，`control`/`adjoint` 作用于整个内核。
+
+要把内核「当作值」传给这些函数，离不开 `qkernel` 包装器：
+
+[runtime/cudaq/qis/qkernel.h:L98-L108](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qkernel.h#L98-L108) —— `qkernel` 用来包装被引用（而非直接调用）的 `__qpu__` 内核，编译器会特殊处理它，让运行时能把这些内核「缝合」进宿主内核执行。
 
 #### 4.3.2 核心流程
 
-内核级控制的流程（见 `control()` 实现）：
+`cudaq::control` 的实现思路（这是理解它与修饰符等价性的关键）：
 
-1. 把控制比特的 id 收集到 `ctrls` 列表。
-2. 调用 `getExecutionManager()->startCtrlRegion(ctrls)`，进入「控制区」。
-3. 执行子内核 `kernel(args...)`——期间它发出的每条门都会被自动加上这些控制比特。
-4. 调用 `endCtrlRegion(ctrls.size())`，退出控制区。
+1. 收集控制比特的 id，调用 `getExecutionManager()->startCtrlRegion(ctrls)`，告诉 ExecutionManager「接下来所有门都带这些控制比特」。
+2. 执行 `kernel(args...)`——此时 kernel 内部的每一个门都被自动「染上」这些控制比特。
+3. 调用 `endCtrlRegion(...)` 关闭受控区域。
 
-`adjoint()` 同理，用 `startAdjointRegion()` / `endAdjointRegion()` 把区内的每条门取共轭、顺序倒置。
+这等价于在 kernel 的每个门上都加上 `<cudaq::ctrl>(ctrls..., target)`，只是由 ExecutionManager 在区域层面统一处理。`adjoint` 同理，用 `startAdjointRegion()/endAdjointRegion()` 把区域内的所有门整体求逆。
 
 #### 4.3.3 源码精读
 
-底层收口 `apply`：
+`control` 的重载（最常用：一个内核 + 一组控制比特 + 目标参数）：
 
-[runtime/cudaq/qis/execution_manager.h:159-168](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/execution_manager.h#L159-L168) —— `apply` 的纯虚声明。这段说明：无论门是怎么写出来的（修饰符、别名、自定义门、控制区内的门），最终都要变成「门名 + 参数 + 控制比特 + 目标比特 + 是否共轭」这一组数据，交给具体后端模拟器去解释。
+[runtime/cudaq/qis/qubit_qis.h:L665-L687](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L665-L687) —— 注意概念约束 `isCallableVoidKernel<QuantumKernel, Args...>`：被控制的内核必须返回 `void`。控制比特可以是单个 `qubit`、一个 `qvector`/`qview`，或 `std::vector<std::reference_wrapper<qubit>>`。
 
-单控制比特的 `control()`：
+`adjoint` 与 `compute_action`：
 
-[runtime/cudaq/qis/qubit_qis.h:664-672](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L664-L672) —— 用 `startCtrlRegion`/`endCtrlRegion` 包住子内核调用。这段说明：内核级控制不是「复制粘贴一份带 ctrl 的门」，而是设置一个**区域**，让区域内所有门都带上控制比特。
+[runtime/cudaq/qis/qubit_qis.h:L706-L737](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L706-L737) —— `adjoint` 用 `startAdjointRegion/endAdjointRegion` 包住 kernel；`compute_action(c, a)` 展开为 `c(); a(); adjoint(c);`，即 \(C\,A\,C^{\dagger}\)。
 
-寄存器（多个控制比特）版与引用列表版：
+官方示例里有一段非常清楚的「等价性」对照——同一个双控非，先用 `cudaq::control` 写，再用 `<ctrl>` 写：
 
-[runtime/cudaq/qis/qubit_qis.h:674-703](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L674-L703) —— 支持用一个 `qvector`/范围或一个 `std::vector<std::reference_wrapper<qubit>>` 作为多个控制比特。这段说明：`control()` 自然支持多控制，无需嵌套调用。
+[docs/sphinx/examples/cpp/building_kernels.cpp:L87-L109](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/docs/sphinx/examples/cpp/building_kernels.cpp#L87-L109) —— `kernel6` 用 `cudaq::control(x_kernel, control_vector, target)`（`x_kernel` 内部是单比特 `x`，`control_vector` 是 2 比特寄存器），等价于 `kernel7` 里的 `x<cudaq::ctrl>(qvector[0], qvector[1])` 配合目标比特。这正是本讲综合实践要复刻的「两种写法」。
 
-`adjoint()` 与 `compute_action()`：
+`compute_action` 的真实用例（H2 基态 ansatz）：
 
-[runtime/cudaq/qis/qubit_qis.h:706-737](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L706-L737) —— `adjoint(k,args...)` 把子内核整体取共轭；`compute_action(c,a)` 实现 \(C\,A\,C^{\dagger}\)，`compute_dag_action(c,a)` 实现 \(C^{\dagger}A\,C\)。这段说明：这是化学/组合优化算法里频繁出现的「计算-作用-撤销计算」模式的一等公民支持。
-
-真实示例——`compute_actions.cpp` 用 `x<cudaq::ctrl>` 链构造梯形线路，再展示等价的 `compute_action` 写法：
-
-[docs/sphinx/examples/cpp/other/compute_actions.cpp:32-65](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/docs/sphinx/examples/cpp/other/compute_actions.cpp#L32-L65) —— 左边 `ansatz_handcoded` 用一串 `x<cudaq::ctrl>(q[i], q[i+1])`；右边 `ansatz_compute_action` 用 `cudaq::compute_action(计算块, 作用块)` 表达同一逻辑。这段说明：两种写法等价，后者把「计算块」的撤销交给了框架自动取 adjoint。
+[docs/sphinx/examples/cpp/other/compute_actions.cpp:L48-L65](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/docs/sphinx/examples/cpp/other/compute_actions.cpp#L48-L65) —— 用 `cudaq::compute_action(compute_lambda, action_lambda)` 替代手写的 `C ... C†` 阶梯，代码更短且不易写错逆序。
 
 #### 4.3.4 代码实践
 
-**实践目标**：体会「单门修饰符」与「内核级 `control()`」的差异——同一个 Toffoli，用两种方式各写一遍。
+**实践目标**：用 `cudaq::control` 把一个「单比特 X」子内核提升为受控，验证它和 `x<cudaq::ctrl>` 产出相同分布。
 
-**操作步骤**：见本讲 **第 5 节「综合实践」**，那里给出了完整可编译的对照程序。本节先做一个最小验证：
+**操作步骤**：
 
-1. 写一个 CNOT 子内核，再用 `cudaq::control` 把它包成 Toffoli（示例代码）：
+1. 写内核（示例代码，对照 building_kernels.cpp 的 kernel6/kernel7）：
 
    ```cpp
    #include <cudaq.h>
 
-   struct cnot_k {
-     void operator()(cudaq::qubit &c, cudaq::qubit &t) __qpu__ {
-       x<cudaq::ctrl>(c, t);      // 一个普通 CNOT
-     }
-   };
+   __qpu__ void x_kernel(cudaq::qubit &t) { x(t); }
 
-   struct toffoli_via_control {
-     void operator()(cudaq::qubit &c1, cudaq::qubit &c2,
-                     cudaq::qubit &t) __qpu__ {
-       cudaq::control(cnot_k{}, c2, c1, t);  // 把 CNOT 整体控制到 c2 上
-     }
-   };
+   __qpu__ void via_control() {
+     cudaq::qubit c, t;
+     h(c);                             // 让 c 处于叠加态
+     cudaq::control(x_kernel, c, t);   // 等价于 x<cudaq::ctrl>(c, t)
+     mz(c); mz(t);
+   }
+
+   __qpu__ void via_modifier() {
+     cudaq::qubit c, t;
+     h(c);
+     x<cudaq::ctrl>(c, t);
+     mz(c); mz(t);
+   }
+
+   int main() {
+     auto r1 = cudaq::sample(via_control);
+     auto r2 = cudaq::sample(via_modifier);
+     r1.dump(); r2.dump();
+   }
    ```
 
-2. 阅读上面的代码：`control(cnot_k{}, c2, c1, t)` 把 `c2` 当控制，对子内核 `cnot_k`（其内部又是 `c1` 控制 `t`）整体施加控制，等价于 `ccx(c1, c2, t)`。
+2. 编译运行：`nvq++ two_ways.cpp -o two_ways.x && ./two_ways.x`。
 
-**需要观察的现象**：编译能通过；语义上它就是一个 Toffoli。
+**需要观察的现象**：两个内核的采样分布应当完全一致。`c` 初始 |0⟩，H(c) 后 (|0⟩+|1⟩)/√2，受控 X 后 `c,t` 纠缠为 (|00⟩+|11⟩)/√2。
 
-**预期结果**：编译通过即说明内核级 `control()` 能正确嵌套在「已经带控制」的子内核上。完整真值表验证放第 5 节，「待本地验证」。
+**预期结果**：`r1` 与 `r2` 都只在 `00` 和 `11` 两个比特串上各约 50%（忽略采样涨落）。这就证明了 `cudaq::control` 与 `<cudaq::ctrl>` 在语义上等价。若分布不一致，先检查 `mz` 顺序与字节序（见 u2-l3）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`cudaq::control(k, c, args...)` 与 `op<cudaq::ctrl>(c, target)` 的最大区别是什么？
+**练习 1**：`cudaq::control(x_kernel, c, t)` 和 `x<cudaq::ctrl>(c, t)` 在源码层面走的是同一条「施加」路径吗？
 
-**参考答案**：前者控制**整个子内核**（区域内所有门），后者只控制**单个门**。前者通过 `startCtrlRegion`/`endCtrlRegion` 实现，后者通过把控制比特塞进 `apply` 的 `controls` 参数实现。依据见 [runtime/cudaq/qis/qubit_qis.h:664-672](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L664-L672) 与 [runtime/cudaq/qis/qubit_qis.h:87-101](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L87-L101)。
+**参考答案**：最终都汇聚到 `getExecutionManager()->apply(...)` 并带上控制比特。差别在「如何带上控制」：修饰符版本在 `oneQubitApply` 里直接把控制比特写进 `apply` 的 `controls` 参数；`cudaq::control` 版本则用 `startCtrlRegion/endCtrlRegion` 在区域层面「染色」，由 ExecutionManager 把区域内的门自动加上控制。对单门而言二者等价；`cudaq::control` 的优势是能一次性控制一整个多门内核。
 
-**练习 2**：`compute_action(C, A)` 展开后是什么？
+**练习 2**：为什么 `cudaq::control` 的内核参数概念约束要求内核返回 `void`？
 
-**参考答案**：\(C\,A\,C^{\dagger}\)——先跑计算块 \(C\)，再跑作用块 \(A\)，最后自动跑 \(C\) 的共轭 \(C^{\dagger}\) 把 borrowed 比特还原。见 [runtime/cudaq/qis/qubit_qis.h:718-725](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L718-L725)。
+**参考答案**：见 [runtime/cudaq/qis/qubit_qis.h:L650-L653](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L650-L653) 的 `isCallableVoidKernel`。受控施加是把内核的「门序列」整体染上控制比特，它语义上是一段「过程」而非「函数返回值」；量子内核的返回值（测量结果）由 `mz`/`sample` 通路单独处理，不走内核返回值。因此约束返回 `void` 以避免歧义。
 
-## 5. 综合实践
+---
 
-**任务**：实现一个 Toffoli 门，分别用「`ctrl` 修饰符」与「`cudaq::control` 内核级控制」两种写法，然后遍历 8 种输入基底态，采样验证真值表 \(t_{\text{out}} = t \oplus (c_1 \cdot c_2)\)。
+## 5. 综合实践：用两种写法实现 Toffoli 并验证真值表
 
-下面是完整对照程序（示例代码）：
+**任务**：Toffoli 门（CCNOT）是真控的双控非：\(t \mapsto t \oplus (c_1 \cdot c_2)\)。请用本讲学到的两种方式各实现一遍，遍历 8 个基态输入，采样验证两者真值表完全一致。
+
+**写法 A——多控制 `<cudaq::ctrl>` 修饰符**（或直接用语法糖 `cudaq::ccx`）：
 
 ```cpp
+// 示例代码
 #include <cudaq.h>
-#include <cstdio>
 
-// 方式 A：ctrl 修饰符（变长控制，前 N-1 个是控制、最后一个是目标）
-struct toffoli_modifier {
-  void operator()(cudaq::qubit &c1, cudaq::qubit &c2,
-                  cudaq::qubit &t) __qpu__ {
-    x<cudaq::ctrl>(c1, c2, t);   // 等价于 ccx(c1, c2, t)
-  }
-};
-
-// 方式 B：内核级 control()，控制一整个 CNOT 子内核
-struct cnot_k {
-  void operator()(cudaq::qubit &c, cudaq::qubit &t) __qpu__ {
-    x<cudaq::ctrl>(c, t);
-  }
-};
-struct toffoli_control_func {
-  void operator()(cudaq::qubit &c1, cudaq::qubit &c2,
-                  cudaq::qubit &t) __qpu__ {
-    cudaq::control(cnot_k{}, c2, c1, t);  // 在 c2 控制下跑 cnot_k(c1, t)
-  }
-};
-
-// 遍历 8 种输入，先按位制备基底态，再施加 Toffoli，再测量
-struct run_truth_table {
-  template <typename Kernel>
-  void operator()(Kernel &&toffoli, int bits) __qpu__ {
-    cudaq::qvector q(3);                    // q[0]=c1, q[1]=c2, q[2]=t
-    if (bits & 1) x(q[0]);                  // 设 c1
-    if (bits & 2) x(q[1]);                  // 设 c2
-    if (bits & 4) x(q[2]);                  // 设 t
-    toffoli(q[0], q[1], q[2]);
-    mz(q);
-  }
-};
+// bits 的 bit0=c1, bit1=c2, bit2=t
+__qpu__ void toffoli_modifier(int bits) {
+  cudaq::qvector q(3);
+  if (bits & 1) x(q[0]);   // 准备 c1
+  if (bits & 2) x(q[1]);   // 准备 c2
+  if (bits & 4) x(q[2]);   // 准备 t
+  x<cudaq::ctrl>(q[0], q[1], q[2]);   // 双控非；也可写 cudaq::ccx(q[0],q[1],q[2])
+  mz(q);
+}
 ```
 
-> 说明：`run_truth_table` 用模板参数接收任意一种 Toffoli 实现，体现两种写法**可互换**。如果你的工具链版本对内核模板参数支持有限，可把它拆成两个独立的 `__qpu__` 内核，分别调用 `toffoli_modifier` 与 `toffoli_control_func`。
+**写法 B——`cudaq::control` 把单比特 X 内核提升为双控**（仿照 building_kernels.cpp 的 kernel6）：
 
-**操作步骤**：
+```cpp
+// 示例代码
+__qpu__ void x_kernel(cudaq::qubit &t) { x(t); }
 
-1. 把上面的代码存为 `toffoli.cpp`（按需把 `run_truth_table` 拆开）。
-2. `nvq++ toffoli.cpp -o toffoli.x && ./toffoli.x`。
-3. 对 `bits = 0..7` 循环采样，打印每次的最高概率比特串。
+__qpu__ void toffoli_apply(int bits) {
+  cudaq::qvector q(3);
+  if (bits & 1) x(q[0]);
+  if (bits & 2) x(q[1]);
+  if (bits & 4) x(q[2]);
+  // 用 q[0],q[1] 作为控制寄存器，对 q[2] 施加 x_kernel
+  cudaq::control(x_kernel, q.front(2), q[2]);
+  mz(q);
+}
 
-**需要观察的现象**：对每个输入 \((c_1,c_2,t)\)，输出应满足 \(t_{\text{out}} = t \oplus (c_1 \wedge c_2)\)。例如输入 `011`（\(c_1=1,c_2=1,t=1\)）应输出 `010`（目标被翻转）；输入 `110`（\(c_1=1,c_2=1,t=0\)）应输出 `111`。
+int main() {
+  for (int b = 0; b < 8; b++) {
+    auto ra = cudaq::sample(100, toffoli_modifier, b);
+    auto rb = cudaq::sample(100, toffoli_apply, b);
+    printf("init=%d  modifier=", b); ra.dump();
+    printf("        control =");      rb.dump();
+  }
+}
+```
 
-**预期结果**：两种实现（方式 A 与方式 B）的真值表应当**完全一致**，且都匹配 \(t_{\text{out}} = t \oplus (c_1 \cdot c_2)\)。具体采样计数「待本地验证」。
+**验证步骤**：
 
-**延伸思考**：把方式 A 里的 `x<cudaq::ctrl>(c1, c2, t)` 换成「带一个负控」的版本 `x<cudaq::ctrl>(!c1, c2, t)`，真值表会怎样变化？先在纸上按 \(X\cdot C(U)\cdot X\) 推一遍，再上机对照。
+1. 编译：`nvq++ toffoli.cpp -o toffoli.x`。
+2. 运行：`./toffoli.x`。
+3. 对照真值表：仅当 `c1=c2=1`（`bits` 为 3 或 7）时，目标比特 `t` 翻转；其余情况 `t` 不变。两种写法在每个输入下的输出比特串必须一致。
+
+**预期真值表**（`c1 c2 t` 顺序）：
+
+| 输入 (c1 c2 t) | 输出 (c1 c2 t) | t 翻转? |
+|---|---|---|
+| 000 | 000 | 否 |
+| 001 | 001 | 否 |
+| 010 | 010 | 否 |
+| 011 | 011 | 否 |
+| 100 | 100 | 否 |
+| 101 | 101 | 否 |
+| 110 | 111 | **是** |
+| 111 | 110 | **是** |
+
+> 若你还没有跑通 nvq++（参见 u1-l3），上面的表格是「待本地验证」的理论值；先在纸上按 \(t \oplus (c_1 c_2)\) 推一遍，再上机对照 `dump()` 输出（注意字节序，必要时给 `mz` 指定寄存器名）。
+
+**延伸思考**：把写法 A 里的 `x<cudaq::ctrl>(c1, c2, t)` 换成带一个负控的版本 `x<cudaq::ctrl>(!c1, c2, t)`，真值表会怎样变化？先按 \(X\cdot C(U)\cdot X\) 推一遍，再上机对照。（提示：翻转条件变成「c1=0 且 c2=1 时翻转 t」。）
 
 ## 6. 本讲小结
 
-- CUDA-Q 的内建门分两类：无参门（`h/x/y/z/s/t`、`swap`）由 `CUDAQ_QIS_ONE_TARGET_QUBIT_` 宏批量生成；旋转门（`rx/ry/rz/r1`）由 `CUDAQ_QIS_PARAM_ONE_TARGET_` 生成；`u3` 与 `swap` 手写。
-- 修饰符只有三个标记类型 `base`/`ctrl`/`adj`，定义在 `modifiers.h`。门函数用模板参数 `mod` 选择解释方式，全部由 `oneQubitApply` / `oneQubitSingleParameterApply` 集中分派。
-- **不存在 `cudaq::neg` 修饰符**。负控通过 `operator!` / `qubit.negate()` 给比特打临时标记，门函数读到后用 \(X\cdot C(U)\cdot X\) 实现，并在事后自动复位标记。
-- 受控门有三种入口：模板修饰符 `op<cudaq::ctrl>(...)`、内置别名 `cnot/cx/cy/cz/ch/cs/ct/ccx`、受控旋转 `crx/cry/crz/cr1`。共轭别名 `sdg/tdg` 走 `adj`。
-- **不存在用户级 `cudaq::apply`**。「apply」指底层 `ExecutionManager::apply`（所有门的单点收口）与内核级 `cudaq::control()` / `cudaq::adjoint()`（控制/共轭一整个子内核，靠 `startCtrlRegion`/`endCtrlRegion` 实现）。
-- `compute_action(C,A)` 表达 \(C\,A\,C^{\dagger}\)，是算法里「计算-作用-撤销」模式的一等公民。
+- CUDA-Q 的默认门集（`h/x/y/z/s/t`、`rx/ry/rz/r1`、`u3`、`swap`）由两个宏批量生成，每个门在源码里只是「名字字符串 + 比特 id」的薄封装，统一汇入 `oneQubitApply`。
+- **修饰符只有三种**：`base`（默认广播）、`ctrl`（受控）、`adj`（伴随），声明在 `modifiers.h`。**不存在 `neg` 修饰符**。
+- 负控（control on |0⟩）通过写在量子比特上的 `!` 操作符（`qudit::operator!`）实现，源码用「前后各包一层 X」来兑现，并在事后自动复位标记——对应数学等式 \(C_{\neg}(U) = (X\otimes I) C(U) (X\otimes I)\)。
+- `cnot/cx/ccx/sdg/...` 只是 `<cudaq::ctrl>`/`<cudaq::adj>` 的语法糖；`ccx` 即 Toffoli。
+- `cudaq::control`、`cudaq::adjoint`、`cudaq::compute_action` 是「把整个子内核受控 / 求逆 / 套计算-作用-逆计算」的组合算子，与修饰符共享同一套 ExecutionManager 区域机制。
+- 选型建议：单门受控用 `<ctrl>` 修饰符最直接；整块内核受控或求逆用 `control`/`adjoint`/`compute_action`。
 
 ## 7. 下一步学习建议
 
-- 下一讲 **u2-l3（测量与采样）** 将讲 `mz/mx/my`、shots 与 `SampleResult` 的读取，与本讲的「门」一起构成「构造线路 → 测量 → 读结果」的完整闭环。
-- 想提前理解「门调用如何变成 Quake 指令」的读者，可跳读 [runtime/cudaq/qis/qubit_qis.h:876-941](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L876-L941) 的 `applyQuantumOperation`（自定义门的通用分派器，同样支持负控），这与第 4 单元的 Quake 方言、第 7 单元的自定义门扩展直接相关。
-- 想了解自定义门的读者，可先扫一眼注册宏 [runtime/cudaq/qis/qubit_qis.h:958-987](https://github.com/NVIDIA/cuda-quantum/blob/61face2b9a41d1ef9b6ea6e7941bc22441c75ab9/runtime/cudaq/qis/qubit_qis.h#L958-L987)，它会在 u7-l4「自定义门与自定义算符」中详细讲解。
+- **u2-l3（测量与采样）**：本讲的实践大量依赖 `mz` 与 `sample`，下一讲会正式讲清测量基、寄存器命名、`SampleResult` 的读取接口，帮你解决本讲里反复出现的「字节序 / 比特串顺序」疑问。
+- **u2-l4（内核组合与参数传递）**：本讲的 `cudaq::control` 已经把「子内核」推到了台前，下一讲系统讲解内核嵌套调用、参数合成（`ArgumentSynthesis`）。
+- **想深入修饰符如何被编译器识别**：可先跳到 **u4-l4（AST Bridge）** 看 `x<cudaq::ctrl>(...)` 是如何从 C++ AST 被翻译成 Quake 受控操作的。
+- **想自定义一个全新门**：本讲只提了 `CUDAQ_REGISTER_OPERATION` 宏的入口，完整流程在 **u7-l4（自定义门与自定义算符）**。
