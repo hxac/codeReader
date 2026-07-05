@@ -1,0 +1,1218 @@
+{
+  "project": "cuda-quantum",
+  "head": "61face2b9a41d1ef9b6ea6e7941bc22441c75ab9",
+  "rationale": "CUDA-Q 是一个体量巨大的混合量子-经典计算平台，由「MLIR 编译器（nvq++/Quake/CC）」「C++ 运行时（qis/算法/算符/平台/nvqir 模拟器）」「Python 前端」「Realtime 实时子系统」四大部分组成，因此学习路线必须先建立全局认知，再分栈深入。整体设计为 8 个单元、40 篇讲义、三层难度递进：单元 1 让读者从零跑通第一个 C++/Python 内核并理解仓库布局；单元 2 聚焦量子类型、门、测量、内核组合这套核心编程模型；单元 3 进入执行模型与 sample/observe/优化/算符等算法原语；单元 4 拆解从 C++ 源码到 QIR 的编译流水线（Quake 方言、AST Bridge、nvq++、优化 Pass、CodeGen）；单元 5 单独讲解 Python 前端的 kernel 装饰器与 AST 桥；单元 6 进入后端与模拟器（CircuitSimulator API、CPU/GPU 后端、噪声、目标配置、远程 QPU、多 QPU）；单元 7 覆盖动力学、Realtime、扩展新后端/自定义门；单元 8 收束于测试、调试与架构取舍。讲义之间通过 depends_on 形成清晰依赖链：编译器与后端类讲义依赖编程模型与执行模型，扩展类讲义依赖对应的核心机制讲义，确保读者循序渐进、每篇都能结合真实源码并完成一个动手任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 CUDA-Q 并跑通第一个程序",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "CUDA-Q 是什么：项目定位与架构总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 CUDA-Q 的定位——面向 CPU/GPU/QPU 协同的混合量子-经典编程平台，以及编译器、运行时、Python 前端、Realtime 四大子系统的鸟瞰图。",
+          "learning_goals": [
+            "理解 CUDA-Q 解决的问题与混合编程模型的核心理念",
+            "掌握仓库四大子系统（编译器、C++ 运行时、Python 前端、Realtime）的职责划分",
+            "了解 Quake/CC 方言、QIR、nvq++ 等关键名词的含义"
+          ],
+          "source_files": [
+            "README.md",
+            "Overview.md",
+            "llms.txt"
+          ],
+          "minimal_modules": [
+            "项目定位与混合量子-经典模型",
+            "仓库四大子系统鸟瞰",
+            "关键名词：Quake、CC、QIR、nvq++"
+          ],
+          "practice_task": "阅读 Overview.md，画出从 C++ 源码到可执行程序的编译/运行数据流图，标注每个阶段发生在哪个子系统。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构地图",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "逐目录讲解 cudaq/（编译器）、runtime/（C++ 运行时与 nvqir 模拟器）、python/（Python 前端）、realtime/、docs/sphinx/examples、unittests、targettests 的组织方式。",
+          "learning_goals": [
+            "建立仓库目录与功能模块的对应关系",
+            "区分 include/lib/tools/test 四类代码的查找位置",
+            "知道在哪里找示例、找测试、找后端实现"
+          ],
+          "source_files": [
+            "Overview.md",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "cudaq/ 编译器目录树",
+            "runtime/ 运行时与 nvqir 目录树",
+            "python/、realtime/、docs/、测试目录"
+          ],
+          "practice_task": "在仓库根目录用 find/ls 列出 cudaq/lib/Optimizer/Transforms 下所有 Pass，统计数量并按功能猜测分类，写成一份目录速查表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "从源码构建与运行 CUDA-Q",
+          "order": 3,
+          "filename": "u1-l3-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解构建脚本 build_cudaq.sh、对 LLVM/MLIR 22.1.4 的依赖、dev container、nvq++ 命令行工作流以及 ctest/pytest 测试入口。",
+          "learning_goals": [
+            "掌握 build_cudaq.sh 及 -p、-j 等参数的用法",
+            "理解 CUDA-Q 对 LLVM 子模块与 GPU 工具链的依赖关系",
+            "学会用 nvq++ 编译并运行一个示例、用 ctest/pytest 跑测试"
+          ],
+          "source_files": [
+            "Building.md",
+            "Dev_Setup.md",
+            "scripts/build_cudaq.sh",
+            "scripts/build_llvm.sh"
+          ],
+          "minimal_modules": [
+            "构建脚本与环境变量",
+            "LLVM/MLIR 与 GPU 依赖",
+            "nvq++ 工作流与测试入口"
+          ],
+          "practice_task": "在开发容器中运行 build_cudaq.sh 完成一次构建，然后用 nvq++ 编译并运行 docs/sphinx/applications/cpp/grover.cpp，记录关键日志输出。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一个 C++ 量子内核",
+          "order": 4,
+          "filename": "u1-l4-first-cpp-kernel.md",
+          "level": "beginner",
+          "topic": "用 expectation_values.cpp 等示例讲解 __qpu__ 标注、cudaq::qvector、x/h/ry/mz 等内建门以及 cudaq::sample 的最小用法。",
+          "learning_goals": [
+            "学会用 __qpu__ 定义一个 CUDA-Q C++ 内核",
+            "掌握 qubit/qvector 的分配与基本门操作",
+            "理解如何用 cudaq::sample 执行内核并读取结果"
+          ],
+          "source_files": [
+            "docs/sphinx/examples/cpp/basics/expectation_values.cpp",
+            "docs/sphinx/examples/cpp/basics/static_kernel.cpp",
+            "runtime/cudaq.h"
+          ],
+          "minimal_modules": [
+            "__qpu__ 与内核结构体",
+            "qubit/qvector 分配与门",
+            "cudaq::sample 执行"
+          ],
+          "practice_task": "仿照示例写一个 Bell 态内核（H + CNOT + 测量），用 nvq++ 编译运行，打印采样分布。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "第一个 Python 量子内核",
+          "order": 5,
+          "filename": "u1-l5-first-python-kernel.md",
+          "level": "beginner",
+          "topic": "用 intro.py 讲解 @cudaq.kernel 装饰器、cudaq.qubit()、内建门函数以及 cudaq.sample 的 Python 用法。",
+          "learning_goals": [
+            "学会用 @cudaq.kernel 定义 Python 量子内核",
+            "理解 Python 内核与 C++ 内核在 API 上的对应关系",
+            "掌握 cudaq.sample 在 Python 端的调用与结果读取"
+          ],
+          "source_files": [
+            "docs/sphinx/examples/python/intro.py",
+            "docs/sphinx/examples/python/building_kernels.py",
+            "python/cudaq/__init__.py"
+          ],
+          "minimal_modules": [
+            "@cudaq.kernel 装饰器",
+            "qubit/qvector 与门函数",
+            "cudaq.sample 调用"
+          ],
+          "practice_task": "用 Python 重写单元 u1-l4 的 Bell 态内核，调用 cudaq.sample 并打印结果，对比与 C++ 版本的输出。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "编程模型：量子类型、门与测量",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "量子类型系统：qudit、qubit、qreg、qvector、qspan",
+          "order": 1,
+          "filename": "u2-l1-quantum-types.md",
+          "level": "intermediate",
+          "topic": "讲解 CUDA-Q 的量子值类型层次：qudit 模板、qubit、qreg/qvector 容器以及 qspan/qview 视图，以及「量子比特不可拷贝」的编译期约束。",
+          "learning_goals": [
+            "理解 qudit/qubit/qreg/qvector/qspan/qarray 各自的角色与关系",
+            "掌握量子值类型的内存语义与不可拷贝约束",
+            "学会在内核里正确分配、索引、切片量子比特"
+          ],
+          "source_files": [
+            "runtime/cudaq/qis/qubit_qis.h",
+            "runtime/cudaq/qis/qudit.h",
+            "runtime/cudaq/qis/qvector.h",
+            "runtime/cudaq/qis/qreg.h",
+            "runtime/cudaq/qis/qspan.h"
+          ],
+          "minimal_modules": [
+            "qudit 模板与 qubit",
+            "qreg/qvector 容器",
+            "qspan/qview 视图与不可拷贝约束"
+          ],
+          "practice_task": "写一个内核，分配 qvector，分别用整体索引、子区间（qspan）操作不同的比特，观察编译器对「拷贝量子比特」的报错信息。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "量子门与修饰符：ctrl、neg 与自定义作用",
+          "order": 2,
+          "filename": "u2-l2-gates-and-modifiers.md",
+          "level": "intermediate",
+          "topic": "讲解 h/x/y/z/旋转门以及 cudaq::ctrl、cudaq::neg 等修饰符如何把单比特门升级为受控门、负控门，以及 apply 算子。",
+          "learning_goals": [
+            "掌握单比特/双比特门与旋转门的调用方式",
+            "理解 ctrl/neg 修饰符把门升级为受控门的机制",
+            "学会用 apply 灵活组合控制比特与目标比特"
+          ],
+          "source_files": [
+            "runtime/cudaq/qis/qubit_qis.h",
+            "runtime/cudaq/qis/modifiers.h",
+            "runtime/cudaq/qis/qkernel.h"
+          ],
+          "minimal_modules": [
+            "基本门与旋转门",
+            "ctrl/neg 修饰符",
+            "apply 算子与控制语义"
+          ],
+          "practice_task": "实现一个 Toffoli（双控非）门内核，分别用嵌套 ctrl 修饰符与 apply 两种写法实现并采样验证真值表。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "测量与采样：mz/mx/my 与 SampleResult",
+          "order": 3,
+          "filename": "u2-l3-measurement-and-sampling.md",
+          "level": "intermediate",
+          "topic": "讲解 mz/mx/my 测量原语、采样次数（shots）、测量寄存器命名，以及 SampleResult/MeasureCounts 的数据结构与读取接口。",
+          "learning_goals": [
+            "掌握 mz/mx/my 测量与寄存器命名",
+            "理解 shots 与采样分布的对应关系",
+            "学会遍历 SampleResult 提取计数与概率"
+          ],
+          "source_files": [
+            "runtime/common/SampleResult.h",
+            "runtime/cudaq/qis/qubit_qis.h",
+            "docs/sphinx/examples/cpp/basics/mid_circuit_measurement.cpp"
+          ],
+          "minimal_modules": [
+            "测量原语与寄存器",
+            "shots 与采样分布",
+            "SampleResult/MeasureCounts 读取"
+          ],
+          "practice_task": "写一个内核对两个寄存器分别命名测量，采样后用 SampleResult 接口分别读取两个寄存器的边缘分布并打印。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "内核组合与参数传递",
+          "order": 4,
+          "filename": "u2-l4-kernel-composition.md",
+          "level": "intermediate",
+          "topic": "讲解如何在一个 __qpu__ 内核里调用另一个内核、如何向内核传递 double/int/list 等参数，以及内核签名与参数合成（ArgumentSynthesis）的关系。",
+          "learning_goals": [
+            "掌握内核嵌套调用的写法与限制",
+            "理解内核参数的类型与传递方式",
+            "了解参数合成在编译期的作用"
+          ],
+          "source_files": [
+            "docs/sphinx/examples/cpp/building_kernels.cpp",
+            "docs/sphinx/examples/python/building_kernels.py",
+            "cudaq/lib/Optimizer/Transforms/ArgumentSynthesis.cpp"
+          ],
+          "minimal_modules": [
+            "内核嵌套调用",
+            "参数类型与传递",
+            "ArgumentSynthesis 概念"
+          ],
+          "practice_task": "写一个参数化子内核（旋转角）并在主内核中循环调用它，传入不同角度，采样观察输出变化。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "线路中途测量与条件执行",
+          "order": 5,
+          "filename": "u2-l5-mid-circuit-measurement.md",
+          "level": "intermediate",
+          "topic": "讲解 mid-circuit measurement 的语义：测量结果作为经典值参与后续条件分支，以及它对模拟器后端的要求。",
+          "learning_goals": [
+            "理解 mid-circuit measurement 的执行语义",
+            "掌握用测量结果驱动条件分支的写法",
+            "了解不同后端对中途测量的支持差异"
+          ],
+          "source_files": [
+            "docs/sphinx/examples/cpp/basics/mid_circuit_measurement.cpp",
+            "runtime/cudaq/qis/qubit_qis.h"
+          ],
+          "minimal_modules": [
+            "中途测量语义",
+            "测量结果驱动的条件分支",
+            "后端支持差异"
+          ],
+          "practice_task": "实现一个简单的「如果测量到 1 则翻转辅助比特」的内核，对比 qpp 后端与 stim 后端的采样结果。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "执行模型、算法原语与算符",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "执行模型：quantum_platform 与 QPU",
+          "order": 1,
+          "filename": "u3-l1-execution-model.md",
+          "level": "intermediate",
+          "topic": "讲解 quantum_platform 抽象、QPU 概念、ExecutionContext 的作用，以及一次内核调用如何被分发到具体后端。",
+          "learning_goals": [
+            "理解 quantum_platform 与 QPU 的抽象层次",
+            "掌握 ExecutionContext 如何承载采样/观测等执行意图",
+            "了解内核调用到后端执行的分发链路"
+          ],
+          "source_files": [
+            "runtime/cudaq/platform.h",
+            "runtime/cudaq/qis/execution_manager.h",
+            "runtime/common/ExecutionContext.h"
+          ],
+          "minimal_modules": [
+            "quantum_platform 与 QPU 抽象",
+            "ExecutionContext 执行意图",
+            "内核调用分发链路"
+          ],
+          "practice_task": "设置 CUDAQ_LOG_LEVEL=trace 运行一个 sample 内核，从日志里追踪 ExecutionContext 的创建与平台分发过程。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "cudaq::sample 与异步执行深入",
+          "order": 2,
+          "filename": "u3-l2-sample-and-async.md",
+          "level": "intermediate",
+          "topic": "深入 sample/sample_async 的实现：采样策略、shots 配置、异步结果对象与并发执行。",
+          "learning_goals": [
+            "掌握 sample 的参数与采样策略选项",
+            "理解 sample_async 的异步模型与结果回收",
+            "了解采样在多 QPU 场景下的并发执行"
+          ],
+          "source_files": [
+            "runtime/cudaq/algorithm.h",
+            "runtime/cudaq/algorithms/sample/options.h",
+            "runtime/cudaq/algorithms/sample/policy.h",
+            "python/cudaq/runtime/sample.py"
+          ],
+          "minimal_modules": [
+            "sample 参数与策略",
+            "sample_async 异步模型",
+            "并发采样"
+          ],
+          "practice_task": "用 sample_async 同时提交多个内核执行，收集异步结果并统计总耗时，对比顺序 sample 的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "cudaq::observe 与 spin_op 期望值",
+          "order": 3,
+          "filename": "u3-l3-observe-and-spinop.md",
+          "level": "intermediate",
+          "topic": "讲解 spin_op 的代数构造、observe 如何计算哈密顿量期望值，以及术语表合成与测量基变换。",
+          "learning_goals": [
+            "掌握 spin_op 的代数构造与化简",
+            "理解 observe 计算期望值的流程",
+            "了解测量基变换与术语合成对性能的影响"
+          ],
+          "source_files": [
+            "docs/sphinx/examples/cpp/basics/expectation_values.cpp",
+            "runtime/cudaq/algorithms/observe.h",
+            "runtime/cudaq/spin_op.h",
+            "runtime/common/ObserveResult.h"
+          ],
+          "minimal_modules": [
+            "spin_op 代数构造",
+            "observe 期望值流程",
+            "测量基变换与术语合成"
+          ],
+          "practice_task": "构造一个 H2 分子的简化 spin_op，用 observe 计算基态能量，并对比不同 terms_reordering 策略下的门数量。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "优化器与梯度",
+          "order": 4,
+          "filename": "u3-l4-optimizers-and-gradients.md",
+          "level": "intermediate",
+          "topic": "讲解 cudaq 优化器（如 NLopt 包装）与梯度策略（parameter-shift、central difference）的接口与用法。",
+          "learning_goals": [
+            "掌握 optimizer 的初始化、目标函数与收敛配置",
+            "理解不同梯度策略的原理与适用场景",
+            "学会组合 observe + gradient 实现参数寻优"
+          ],
+          "source_files": [
+            "runtime/cudaq/optimizers.h",
+            "runtime/cudaq/gradients.h",
+            "docs/sphinx/examples/cpp/other/gradients.cpp"
+          ],
+          "minimal_modules": [
+            "优化器接口与配置",
+            "梯度策略",
+            "observe + gradient 寻优"
+          ],
+          "practice_task": "用优化器 + 梯度对一个参数化 ansatz 做最小化，记录每步能量，对比两种梯度策略的收敛曲线。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "算符代数：spin/fermion/boson/matrix",
+          "order": 5,
+          "filename": "u3-l5-operator-algebra.md",
+          "level": "intermediate",
+          "topic": "讲解 CUDA-Q 统一的算符体系：spin_op、fermion_op、boson_op、matrix_op 的构造、运算与序列化。",
+          "learning_goals": [
+            "理解各类算符的构造与代数运算",
+            "掌握算符的化简、求值与序列化",
+            "了解算符在化学/动力学等领域的用途"
+          ],
+          "source_files": [
+            "runtime/cudaq/operators.h",
+            "runtime/cudaq/operators/spin_op.cpp",
+            "runtime/cudaq/operators/fermion_op.cpp",
+            "runtime/cudaq/operators/matrix_op.cpp",
+            "python/cudaq/operators/__init__.py"
+          ],
+          "minimal_modules": [
+            "算符类型体系",
+            "代数运算与化简",
+            "求值与序列化"
+          ],
+          "practice_task": "用 fermion_op 构造一个简单哈密顿量，将其映射为 spin_op（如 Jordan-Wigner），打印化简后的项数。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "get_state、酉矩阵与状态获取",
+          "order": 6,
+          "filename": "u3-l6-state-and-unitary.md",
+          "level": "intermediate",
+          "topic": "讲解 get_state/get_unitary 如何从内核提取量子态向量与酉矩阵，以及与采样执行的区别。",
+          "learning_goals": [
+            "理解状态获取与采样执行的差异",
+            "掌握 get_state/get_unitary 的用法与返回类型",
+            "了解状态提取对后端能力的要求"
+          ],
+          "source_files": [
+            "runtime/cudaq/algorithms/get_state.h",
+            "runtime/cudaq/algorithms/unitary.h",
+            "runtime/cudaq/qis/state.h",
+            "python/cudaq/runtime/state.py"
+          ],
+          "minimal_modules": [
+            "状态获取与采样差异",
+            "get_state/get_unitary 用法",
+            "后端能力要求"
+          ],
+          "practice_task": "对一个 Bell 态内核调用 get_state 打印态向量幅值，再调用 get_unitary 打印其酉矩阵表示。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "编译器：MLIR、Quake 与代码生成",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "MLIR 基础与 CUDA-Q 编译总览",
+          "order": 1,
+          "filename": "u4-l1-mlir-overview.md",
+          "level": "intermediate",
+          "topic": "回顾 MLIR 的方言/Pass/Pipeline 概念，并对照 CUDA-Q 从 C++ AST 到 Quake、再到 QIR/LLVM 的整体编译流水线。",
+          "learning_goals": [
+            "理解 MLIR 方言、操作、Pass、Pipeline 的基本概念",
+            "掌握 CUDA-Q 编译各阶段产物的对应关系",
+            "学会用 cudaq-quake/cudaq-opt/cudaq-translate 观察中间产物"
+          ],
+          "source_files": [
+            "Overview.md",
+            "docs/sphinx/specification/quake-dialect.md",
+            "cudaq/lib/Optimizer/CodeGen/Pipelines.cpp"
+          ],
+          "minimal_modules": [
+            "MLIR 方言/Pass/Pipeline",
+            "CUDA-Q 编译流水线",
+            "中间产物观察工具"
+          ],
+          "practice_task": "用 cudaq-quake 把一个简单内核转成 Quake MLIR，再用 cudaq-opt --canonicalize 观察 Pass 前后的 IR 变化。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Quake 方言：操作与语义",
+          "order": 2,
+          "filename": "u4-l2-quake-dialect.md",
+          "level": "advanced",
+          "topic": "深入 Quake 方言：alloca/dealloc、门操作、apply、测量，以及内存语义（wire）与值语义（veq）两种建模方式。",
+          "learning_goals": [
+            "掌握 Quake 核心操作（alloca、门、apply、测量）的定义",
+            "理解 Quake 的内存语义与值语义两种模型",
+            "学会阅读 QuakeOps.td 并对照生成的 IR"
+          ],
+          "source_files": [
+            "cudaq/include/cudaq/Optimizer/Dialect/Quake/QuakeOps.td",
+            "cudaq/include/cudaq/Optimizer/Dialect/Quake/QuakeTypes.td",
+            "cudaq/include/cudaq/Optimizer/Dialect/Quake/QuakeDialect.td",
+            "docs/sphinx/specification/quake-dialect.md"
+          ],
+          "minimal_modules": [
+            "Quake 核心操作",
+            "内存语义 vs 值语义",
+            "TableGen 定义阅读"
+          ],
+          "practice_task": "挑选 3 个 Quake 操作，从 QuakeOps.td 中摘录其定义，并写一段最小 C++ 内核使其生成包含这些操作的 IR。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "CC 方言：经典计算抽象",
+          "order": 3,
+          "filename": "u4-l3-cc-dialect.md",
+          "level": "advanced",
+          "topic": "讲解 CC（Classical Compute）方言如何建模 C++ 的类型与运算（循环、数组、结构体等），以支撑 Quake 函数的经典部分。",
+          "learning_goals": [
+            "理解 CC 方言存在的意义与职责",
+            "掌握 CC 对循环、数组、调用等 C++ 结构的建模",
+            "了解 CC 与 Quake、LLVM 之间的衔接"
+          ],
+          "source_files": [
+            "cudaq/include/cudaq/Optimizer/Dialect/CC/CCOps.td",
+            "cudaq/include/cudaq/Optimizer/Dialect/CC/CCTypes.td",
+            "cudaq/include/cudaq/Optimizer/Dialect/CC/CCDialect.td"
+          ],
+          "minimal_modules": [
+            "CC 方言职责",
+            "经典结构建模",
+            "CC 与 Quake/LLVM 衔接"
+          ],
+          "practice_task": "写一个带 for 循环和数组的内核，用 cudaq-quake 查看 IR，标注其中 CC 操作与 Quake 操作的边界。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "AST Bridge：从 C++ 到 Quake",
+          "order": 4,
+          "filename": "u4-l4-ast-bridge.md",
+          "level": "advanced",
+          "topic": "讲解 ASTBridge 如何用 Clang RecursiveASTVisitor 把 C++ AST 翻译成 Quake/CC MLIR，按 Expr/Stmt/Decl/Type 分文件实现。",
+          "learning_goals": [
+            "理解 RecursiveASTVisitor 遍历 Clang AST 的机制",
+            "掌握 ASTBridge 对内核、门调用、参数的翻译策略",
+            "了解 ASTBridge 的扩展点与常见陷阱"
+          ],
+          "source_files": [
+            "cudaq/include/cudaq/Frontend/nvqpp/ASTBridge.h",
+            "cudaq/lib/Frontend/nvqpp/ASTBridge.cpp",
+            "cudaq/lib/Frontend/nvqpp/ConvertExpr.cpp",
+            "cudaq/lib/Frontend/nvqpp/ConvertStmt.cpp",
+            "cudaq/lib/Frontend/nvqpp/ConvertDecl.cpp"
+          ],
+          "minimal_modules": [
+            "RecursiveASTVisitor 机制",
+            "内核/门/参数翻译",
+            "扩展点与陷阱"
+          ],
+          "practice_task": "在 ConvertExpr.cpp 中定位处理门调用的代码路径，追踪一个 x(q) 调用最终生成哪个 Quake 操作。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "nvq++ 驱动脚本：编译流程编排",
+          "order": 5,
+          "filename": "u4-l5-nvqpp-driver.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 nvq++ bash 脚本如何编排 cudaq-quake、runtime 注册、内核启动改写、QIR lowering 与链接。",
+          "learning_goals": [
+            "理解 nvq++ 作为编排脚本的整体流程",
+            "掌握 -f* 标志（如 -frealtime-lowering）的处理逻辑",
+            "了解内核入口改写与运行时注册的衔接"
+          ],
+          "source_files": [
+            "cudaq/tools/nvqpp/nvq++.in",
+            "cudaq/tools/cudaq-quake/CMakeLists.txt",
+            "Overview.md"
+          ],
+          "minimal_modules": [
+            "nvq++ 编排流程",
+            "标志处理逻辑",
+            "内核入口改写与运行时注册"
+          ],
+          "practice_task": "用 nvq++ -v（或等价 echo 模式）编译一个内核，记录脚本依次调用的子命令与中间文件，画出流程图。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "优化 Pass 流水线：变换与化简",
+          "order": 6,
+          "filename": "u4-l6-optimizer-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解关键优化 Pass：LambdaLifting、ArgumentSynthesis、GenKernelExecution、AggressiveInlining、Decomposition 等的作用与调度。",
+          "learning_goals": [
+            "理解各核心 Pass 的功能与触发时机",
+            "掌握 Pass 之间的依赖与调度顺序",
+            "学会用 cudaq-opt 单独运行 Pass 调试"
+          ],
+          "source_files": [
+            "cudaq/lib/Optimizer/Transforms/LambdaLifting.cpp",
+            "cudaq/lib/Optimizer/Transforms/ArgumentSynthesis.cpp",
+            "cudaq/lib/Optimizer/Transforms/GenKernelExecution.cpp",
+            "cudaq/lib/Optimizer/Transforms/AggressiveInlining.cpp",
+            "cudaq/lib/Optimizer/Transforms/Decomposition.cpp"
+          ],
+          "minimal_modules": [
+            "核心 Pass 功能",
+            "Pass 依赖与调度",
+            "用 cudaq-opt 调试"
+          ],
+          "practice_task": "对一个含参数化子内核的程序，依次手动运行 lambda-lifting 与 aggressive-inlining，对比每步 IR 变化。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "CodeGen：从 Quake 到 QIR/LLVM",
+          "order": 7,
+          "filename": "u4-l7-codegen-qir.md",
+          "level": "advanced",
+          "topic": "讲解 CodeGen 阶段如何把 Quake/CC 降低为 QIR 与 LLVM IR，包括 QuakeToLLVM、ConvertToQIR 以及到执行管理器的桥接。",
+          "learning_goals": [
+            "理解 QIR 规范与 CUDA-Q 的 Lowering 目标",
+            "掌握 QuakeToLLVM/ConvertToQIR 的职责划分",
+            "了解设备代码生成与宿主执行管理器的衔接"
+          ],
+          "source_files": [
+            "cudaq/lib/Optimizer/CodeGen/QuakeToLLVM.cpp",
+            "cudaq/lib/Optimizer/CodeGen/ConvertToQIR.cpp",
+            "cudaq/lib/Optimizer/CodeGen/QuakeToExecMgr.cpp",
+            "cudaq/lib/Optimizer/CodeGen/Pipelines.cpp"
+          ],
+          "minimal_modules": [
+            "QIR 规范与 Lowering 目标",
+            "QuakeToLLVM/ConvertToQIR 职责",
+            "设备代码与执行管理器衔接"
+          ],
+          "practice_task": "用 cudaq-quake | cudaq-opt | quake-translate --convert-to=qir 流水线生成 QIR，对照 ConvertToQIR.cpp 理解关键函数的降低过程。",
+          "depends_on": [
+            "u4-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Python 前端",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "@cudaq.kernel 装饰器与 kernel_builder",
+          "order": 1,
+          "filename": "u5-l1-kernel-decorator.md",
+          "level": "intermediate",
+          "topic": "讲解 Python 端 kernel 装饰器如何捕获函数、kernel_builder 如何表示内核，以及与 C++ 前端的异同。",
+          "learning_goals": [
+            "理解 @cudaq.kernel 的捕获与重写机制",
+            "掌握 kernel_builder 对内核的内部表示",
+            "了解 Python 前端与 C++ 前端共享的运行时"
+          ],
+          "source_files": [
+            "python/cudaq/kernel/kernel_decorator.py",
+            "python/cudaq/kernel/kernel_builder.py",
+            "python/cudaq/__init__.py"
+          ],
+          "minimal_modules": [
+            "装饰器捕获与重写",
+            "kernel_builder 内部表示",
+            "与 C++ 前端共享运行时"
+          ],
+          "practice_task": "在一个被装饰的内核里打印其编译后的 Quake MLIR（通过 kernel 可用的调试方法），对比源码与 IR。",
+          "depends_on": [
+            "u1-l5",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Python AST Bridge：从 Python 到 Quake",
+          "order": 2,
+          "filename": "u5-l2-python-ast-bridge.md",
+          "level": "advanced",
+          "topic": "深入 ast_bridge.py：如何遍历 Python AST、把控制流与门调用翻译成 Quake MLIR，以及与 C++ ASTBridge 的对照。",
+          "learning_goals": [
+            "理解 Python AST 到 Quake 的翻译流程",
+            "掌握控制流、循环、条件在 Python 前端的处理",
+            "了解 Python ASTBridge 与 C++ ASTBridge 的设计差异"
+          ],
+          "source_files": [
+            "python/cudaq/kernel/ast_bridge.py",
+            "python/cudaq/kernel/analysis.py",
+            "python/cudaq/kernel/utils.py"
+          ],
+          "minimal_modules": [
+            "Python AST 遍历与翻译",
+            "控制流与门调用处理",
+            "与 C++ ASTBridge 对照"
+          ],
+          "practice_task": "在 ast_bridge.py 中定位处理 for 循环的访问器，追踪一个 range 循环如何生成 Quake/CC 循环结构。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "QuakeValue 与动态内核构造",
+          "order": 3,
+          "filename": "u5-l3-quake-value-make-kernel.md",
+          "level": "advanced",
+          "topic": "讲解 QuakeValue 抽象与 make_kernel 动态内核构造 API，以及 register_operation 注册自定义门的方法。",
+          "learning_goals": [
+            "理解 QuakeValue 作为内核参数/值的抽象",
+            "掌握 make_kernel 动态构造内核的编程模型",
+            "学会用 register_operation 注册自定义门"
+          ],
+          "source_files": [
+            "python/cudaq/kernel/quake_value.py",
+            "python/cudaq/kernel/kernel_builder.py",
+            "python/cudaq/kernel/register_op.py"
+          ],
+          "minimal_modules": [
+            "QuakeValue 抽象",
+            "make_kernel 动态构造",
+            "register_operation 自定义门"
+          ],
+          "practice_task": "用 make_kernel 动态构造一个 N 比特 GHZ 内核（不使用 @cudaq.kernel），编译并采样验证。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "后端、模拟器与平台",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "nvqir 与 CircuitSimulator API",
+          "order": 1,
+          "filename": "u6-l1-circuit-simulator-api.md",
+          "level": "advanced",
+          "topic": "讲解 libnvqir 的角色、QIR QIS 的实现，以及 CircuitSimulator 基类如何定义可扩展的模拟器接口与注册宏。",
+          "learning_goals": [
+            "理解 libnvqir 与 QIR QIS 的关系",
+            "掌握 CircuitSimulator 基类的抽象与职责",
+            "了解 NVQIR_REGISTER_SIMULATOR 注册机制"
+          ],
+          "source_files": [
+            "runtime/nvqir/CircuitSimulator.h",
+            "runtime/nvqir/NVQIR.cpp",
+            "runtime/nvqir/Gates.h"
+          ],
+          "minimal_modules": [
+            "libnvqir 与 QIR QIS",
+            "CircuitSimulator 抽象",
+            "注册机制"
+          ],
+          "practice_task": "阅读 CircuitSimulator.h 列出子类必须实现的纯虚方法，并对照一个具体后端实现确认其覆盖关系。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "CPU 与 GPU 模拟器：qpp、custatevec、cutensornet",
+          "order": 2,
+          "filename": "u6-l2-cpu-gpu-simulators.md",
+          "level": "advanced",
+          "topic": "对比 CPU 状态向量后端（qpp）、GPU 状态向量后端（custatevec）与张量网络/MPS 后端（cutensornet）的实现差异与适用场景。",
+          "learning_goals": [
+            "理解不同模拟器后端的状态表示与算法",
+            "掌握各后端的适用规模与精度权衡",
+            "了解后端选择是链接期任务的事实"
+          ],
+          "source_files": [
+            "runtime/nvqir/qpp/QppCircuitSimulator.cpp",
+            "runtime/nvqir/custatevec/CuStateVecCircuitSimulator.cpp",
+            "runtime/nvqir/custatevec/CuStateVecCircuitSimulator.h",
+            "runtime/nvqir/cutensornet/tensornet_utils.cpp"
+          ],
+          "minimal_modules": [
+            "qpp CPU 状态向量",
+            "custatevec GPU 状态向量",
+            "cutensornet 张量网络/MPS"
+          ],
+          "practice_task": "用同一个内核分别指定 qpp 与 custatevec 后端运行，对比运行时间与内存占用，记录适用规模。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "噪声建模与密度矩阵模拟",
+          "order": 3,
+          "filename": "u6-l3-noise-and-density-matrix.md",
+          "level": "advanced",
+          "topic": "讲解 NoiseModel 的构造、噪声信道（bit flip、amplitude damping、depolarization），以及密度矩阵后端（dem）与采样后端（stim）。",
+          "learning_goals": [
+            "掌握 NoiseModel 的构造与应用方式",
+            "理解密度矩阵模拟与状态向量模拟的区别",
+            "了解 stim 采样后端的原理与局限"
+          ],
+          "source_files": [
+            "runtime/common/NoiseModel.h",
+            "runtime/nvqir/dem/DemScope.cpp",
+            "runtime/nvqir/stim/StimCircuitSimulator.cpp",
+            "docs/sphinx/examples/cpp/basics/noise_amplitude_damping.cpp"
+          ],
+          "minimal_modules": [
+            "NoiseModel 构造",
+            "密度矩阵后端 dem",
+            "stim 采样后端"
+          ],
+          "practice_task": "为一个简单内核叠加 bit-flip 与 amplitude-damping 噪声，分别用 dem 与 stim 后端采样，对比无噪声基线。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "平台与目标配置（YAML targets）",
+          "order": 4,
+          "filename": "u6-l4-platform-target-config.md",
+          "level": "advanced",
+          "topic": "讲解 quantum_platform 的具体实现（DefaultQPU）、YAML 目标配置文件如何描述后端能力，以及 target_control 的作用。",
+          "learning_goals": [
+            "理解 DefaultQPU 与本地模拟平台的实现",
+            "掌握 YAML 目标配置的结构与字段含义",
+            "了解 target_control 如何选择与控制目标"
+          ],
+          "source_files": [
+            "runtime/cudaq/platform/default/DefaultQPU.cpp",
+            "runtime/cudaq/platform/default/DefaultQuantumPlatform.cpp",
+            "runtime/cudaq/platform/default/nvidia.yml",
+            "cudaq/lib/Target/TargetConfig.cpp"
+          ],
+          "minimal_modules": [
+            "DefaultQPU 实现",
+            "YAML 目标配置",
+            "target_control"
+          ],
+          "practice_task": "阅读 nvidia.yml 并对照 TargetConfig.cpp，解释每个配置字段如何影响后端能力与门集合。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "远程 QPU、互操作与 OpenQASM 导出",
+          "order": 5,
+          "filename": "u6-l5-remote-qpu-interop.md",
+          "level": "advanced",
+          "topic": "讲解远程 REST 平台（如 Braket/IonQ/IQM）的执行器与 ServerHelper 抽象，以及 Quake 到 OpenQASM/IQM JSON 的导出。",
+          "learning_goals": [
+            "理解远程 QPU 平台的 Executor/ServerHelper 抽象",
+            "掌握 BaseRemoteRESTQPU 的复用模式",
+            "了解 OpenQASM/IQM JSON 导出的实现路径"
+          ],
+          "source_files": [
+            "runtime/common/BaseRemoteRESTQPU.h",
+            "runtime/common/BraketServerHelper.h",
+            "cudaq/lib/Optimizer/CodeGen/TranslateToOpenQASM.cpp",
+            "cudaq/lib/Optimizer/CodeGen/TranslateToIQMJson.cpp"
+          ],
+          "minimal_modules": [
+            "Executor/ServerHelper 抽象",
+            "BaseRemoteRESTQPU 复用",
+            "OpenQASM/IQM JSON 导出"
+          ],
+          "practice_task": "把一个内核通过 OpenQASM 导出生成 .qasm 文件，再对照 TranslateToOpenQASM.cpp 解释门到 QASM 的映射规则。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "多 QPU（mqpu）与分布式执行",
+          "order": 6,
+          "filename": "u6-l6-mqpu-distributed.md",
+          "level": "advanced",
+          "topic": "讲解 MultiQPUPlatform 如何暴露多个模拟 QPU、MPI 插件与分布式 backend 的协同，以及异步并行执行模式。",
+          "learning_goals": [
+            "理解 mqpu 平台的多 QPU 抽象",
+            "掌握 MPI 插件在分布式执行中的角色",
+            "了解并行执行参数化任务的编程模式"
+          ],
+          "source_files": [
+            "runtime/cudaq/platform/mqpu/MultiQPUPlatform.cpp",
+            "runtime/cudaq/distributed/mpi_plugin.cpp",
+            "runtime/cudaq/distributed/distributed_capi.h"
+          ],
+          "minimal_modules": [
+            "mqpu 多 QPU 抽象",
+            "MPI 插件角色",
+            "并行参数化执行"
+          ],
+          "practice_task": "在 mqpu 平台上并行评估一组参数化内核，记录每个 QPU 上的执行分布，对比单 QPU 串行的吞吐。",
+          "depends_on": [
+            "u3-l2",
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "动力学、Realtime 与扩展开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "量子动力学与时间演化",
+          "order": 1,
+          "filename": "u7-l1-dynamics-evolution.md",
+          "level": "advanced",
+          "topic": "讲解 cudaq::evolve 算法、积分器（Runge-Kutta、Crank-Nicolson、Magnus）以及 cudensitymat 后端的动力学模拟。",
+          "learning_goals": [
+            "理解 evolve 算法的时间演化流程",
+            "掌握不同积分器策略的原理与适用场景",
+            "了解 cudensitymat 后端的密度矩阵演化"
+          ],
+          "source_files": [
+            "runtime/cudaq/algorithms/evolve.h",
+            "runtime/cudaq/dynamics_integrators.h",
+            "runtime/nvqir/cudensitymat/CuDensityMatSim.cpp",
+            "runtime/nvqir/cudensitymat/CuDensityMatEvolution.cpp"
+          ],
+          "minimal_modules": [
+            "evolve 时间演化",
+            "积分器策略",
+            "cudensitymat 后端"
+          ],
+          "practice_task": "用 evolve 模拟一个简单自旋系统在含时哈密顿量下的演化，画出可观测量随时间的变化曲线。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "CUDA-Q Realtime：FPGA 与 GPU 紧耦合",
+          "order": 2,
+          "filename": "u7-l2-realtime-subsystem.md",
+          "level": "advanced",
+          "topic": "讲解 Realtime 子系统的职责：FPGA 与 CPU-GPU 的实时协处理、NVQLink 低延迟网络栈，以及消息协议与 host API。",
+          "learning_goals": [
+            "理解 Realtime 子系统在量子控制中的定位",
+            "掌握 NVQLink 网络栈的低延迟设计目标",
+            "了解消息协议与 host API 的关系"
+          ],
+          "source_files": [
+            "realtime/README.md",
+            "realtime/docs/user_guide.md",
+            "realtime/docs/cudaq_realtime_host_api.md",
+            "realtime/docs/cudaq_realtime_message_protocol.md"
+          ],
+          "minimal_modules": [
+            "Realtime 定位与职责",
+            "NVQLink 网络栈",
+            "消息协议与 host API"
+          ],
+          "practice_task": "阅读 message protocol 文档，画出 FPGA↔GPU 一次数据往返的消息时序图，标注延迟关键路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "扩展：实现一个新的模拟器后端",
+          "order": 3,
+          "filename": "u7-l3-new-simulator-backend.md",
+          "level": "advanced",
+          "topic": "以 qpp 后端为模板，讲解如何继承 CircuitSimulator、实现必要接口、用 NVQIR_REGISTER_SIMULATOR 注册并通过 YAML 暴露。",
+          "learning_goals": [
+            "掌握实现自定义 CircuitSimulator 的步骤",
+            "理解注册宏与链接期选择后端的机制",
+            "学会为新后端编写 YAML 目标配置"
+          ],
+          "source_files": [
+            "runtime/nvqir/CircuitSimulator.h",
+            "runtime/nvqir/qpp/QppCircuitSimulator.cpp",
+            "runtime/nvqir/NVQIR.cpp",
+            "runtime/cudaq/platform/default/qpp-cpu.yml"
+          ],
+          "minimal_modules": [
+            "继承 CircuitSimulator",
+            "注册宏与链接期选择",
+            "YAML 目标配置"
+          ],
+          "practice_task": "克隆 QppCircuitSimulator 实现一个「计数门数量」的最小后端，注册后用自定义 YAML 运行一个内核并打印门数。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "扩展：自定义门与自定义算符",
+          "order": 4,
+          "filename": "u7-l4-custom-ops.md",
+          "level": "advanced",
+          "topic": "讲解如何用 register_operation 注册自定义门（含矩阵定义）、CustomOp 在运行时的表示，以及自定义算符的扩展点。",
+          "learning_goals": [
+            "掌握在 Python 与 C++ 注册自定义门的方法",
+            "理解 CustomOp 的运行时表示与后端兼容性",
+            "了解自定义算符扩展的切入点"
+          ],
+          "source_files": [
+            "python/cudaq/kernel/register_op.py",
+            "runtime/common/CustomOp.h",
+            "runtime/common/CustomOp.cpp"
+          ],
+          "minimal_modules": [
+            "register_operation 自定义门",
+            "CustomOp 运行时表示",
+            "自定义算符扩展"
+          ],
+          "practice_task": "注册一个自定义单比特门（给定 2x2 酉矩阵），在一个内核中使用它，确认 qpp 后端能正确采样。",
+          "depends_on": [
+            "u5-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "动态内核构造：C++ kernel_builder API",
+          "order": 5,
+          "filename": "u7-l5-cpp-kernel-builder.md",
+          "level": "advanced",
+          "topic": "讲解 C++ 端 kernel_builder API：如何在运行时动态拼装量子内核，以及它与 Python make_kernel 的对应关系。",
+          "learning_goals": [
+            "掌握 C++ kernel_builder 的编程模型",
+            "理解动态内核构造与静态 __qpu__ 内核的区别",
+            "了解 builder 与 Quake IR 的直接交互"
+          ],
+          "source_files": [
+            "runtime/cudaq/builder.h",
+            "runtime/cudaq/builder/kernel_builder.h",
+            "docs/sphinx/examples/cpp/other/builder/"
+          ],
+          "minimal_modules": [
+            "kernel_builder 编程模型",
+            "动态 vs 静态内核",
+            "builder 与 Quake 交互"
+          ],
+          "practice_task": "用 C++ kernel_builder 动态构造一个参数化_ansatz，交给 cudaq::observe 计算期望值，对比静态内核写法。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "测试、调试与架构总结",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "测试体系：FileCheck、unittests 与 targettests",
+          "order": 1,
+          "filename": "u8-l1-testing-strategy.md",
+          "level": "advanced",
+          "topic": "讲解 CUDA-Q 的三类测试：编译器的 FileCheck 测试（cudaq/test）、运行时的单元测试（unittests）、跨目标的 targettests，以及如何运行它们。",
+          "learning_goals": [
+            "理解三类测试的分工与定位",
+            "掌握 ctest 与 pytest 运行特定测试的方法",
+            "学会为新功能选择合适的测试位置"
+          ],
+          "source_files": [
+            "Developing.md",
+            "unittests/CMakeLists.txt",
+            "targettests/lit.cfg.py",
+            "cudaq/test/"
+          ],
+          "minimal_modules": [
+            "FileCheck 编译器测试",
+            "运行时单元测试",
+            "targettests 跨目标测试"
+          ],
+          "practice_task": "在 build 目录运行 ctest -R 选一个编译器测试和一个运行时测试，阅读其源文件理解断言方式。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "调试与日志：日志级别与中间 IR 检查",
+          "order": 2,
+          "filename": "u8-l2-debugging-and-logging.md",
+          "level": "advanced",
+          "topic": "讲解 CUDAQ_LOG_LEVEL/CUDAQ_LOG_FILE 日志机制、用 cudaq-quake/cudaq-opt/cudaq-translate 检查中间 IR 的调试技巧，以及常见报错的定位方法。",
+          "learning_goals": [
+            "掌握日志环境变量与日志文件的用法",
+            "学会用编译工具链逐步检查中间 IR 定位问题",
+            "了解常见编译/运行报错的排查路径"
+          ],
+          "source_files": [
+            "Developing.md",
+            "runtime/logger/",
+            "cudaq/tools/cudaq-translate/cudaq-translate.cpp"
+          ],
+          "minimal_modules": [
+            "日志机制",
+            "中间 IR 检查技巧",
+            "常见报错排查"
+          ],
+          "practice_task": "对一个故意写错类型签名的内核，用日志与 IR 检查工具定位报错根源，记录排查步骤。",
+          "depends_on": [
+            "u8-l1",
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "架构取舍与学习路径总结",
+          "order": 3,
+          "filename": "u8-l3-architecture-tradeoffs.md",
+          "level": "advanced",
+          "topic": "回顾 CUDA-Q 的关键架构决策（MLIR 中间表示、链接期后端选择、宿主/设备代码分离、C++/Python 双前端共享运行时），并给出继续深入的学习路径。",
+          "learning_goals": [
+            "理解 CUDA-Q 关键架构决策的取舍依据",
+            "掌握各子系统之间的耦合点与边界",
+            "形成继续深入二开的学习路线图"
+          ],
+          "source_files": [
+            "Overview.md",
+            "Contributing.md",
+            "CppAPICodingStyle.md"
+          ],
+          "minimal_modules": [
+            "关键架构决策取舍",
+            "子系统耦合与边界",
+            "继续深入路线图"
+          ],
+          "practice_task": "结合全篇所学，写一份「如果我要为 CUDA-Q 增加一个新硬件目标」的实施计划，标出涉及的子系统与讲义。",
+          "depends_on": [
+            "u8-l2",
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

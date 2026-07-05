@@ -2,207 +2,153 @@
 
 ## 1. 本讲目标
 
-本讲是专家层（advanced）的收官篇，目标从「读懂某个原语的实现」转向「**怎么证明这些并发原语是对的、是快的**」。并发代码有一个恼人的特性：它在你机器上「跑通了」几乎不说明任何问题——可能只是这次恰好没踩到那个会出错的线程交错。所以 crossbeam-utils 围绕「证明」搭了一套相当完整的脚手架，本讲就把这套脚手架拆给你看。
+本讲是「深入机制与工程实践」单元（u5）的最后一篇，专门回答一个工程问题：
 
-学完后你应该能够：
+> `crossbeam-utils` 这样一个充满 `unsafe`、靠精细内存序和原子指令保证正确性的并发库，**怎么验证它没有数据竞争、怎么度量它快不快**？
 
-1. 说出 `tests/` 目录是按什么维度组织的（一个类型一个集成测试文件），并识别出 crossbeam-utils 反复使用的几种**断言风格**：drop 计数、语义相等、并发不变量、回归用例。
-2. 解释 `loom`、`Miri`、`TSan` 三种并发验证工具各通过哪条 `cfg` 切换被测代码、各自抓什么类型的 bug、为什么三者**互补而不可互相替代**。
-3. 读懂 `benches/atomic_cell.rs` 里基准的**维度切分**（按类型、按操作、按竞争度），并能把 `test::Bencher` + `Barrier` 的写法迁移到自己的基准上。
+学完本讲，你应当能够：
 
-本讲大量承接前几讲的结论，尤其是 [u1-l3](u1-l3-features-build-and-tests.md) 讲过的「feature → build.rs 发 cfg → src 裁剪 → tests 用 `cfg!` 消费」闭环、[u5-l3](u5-l3-cfg-loom-wideseqlock.md) 讲过的 `primitive` 抽象层与 `crossbeam_atomic_cell_force_fallback`。
+- 看懂 `tests/` 目录的组织方式，知道「一个并发原语该写哪些断言、用什么手段验证」。
+- 说清 loom、Miri、ThreadSanitizer 三种工具各自抓什么 bug、为什么互补，以及它们在源码里通过哪些 `cfg` 被门控。
+- 读懂 `benches/atomic_cell.rs`，知道并发基准要测哪些维度（单线程单操作成本、多线程竞争下的吞吐），以及 Barrier + `black_box` 的标准写法。
+- 为自己写的并发原语补一个多线程压力测试，并能在 loom 或 Miri 下跑通。
+
+本讲依赖 u1-l3（features / build.rs / cfg 闭环）。你已经在前置讲义里见过 `crossbeam_no_atomic`、`crossbeam_loom`、`crossbeam_atomic_cell_force_fallback` 这些 `cfg` 是谁发的；本讲专讲**测试和基准如何消费它们**。
 
 ## 2. 前置知识
 
-- **集成测试（integration test）**：放在 `tests/` 目录下、每个 `.rs` 文件都是一个独立 crate 的测试。它把被测 crate 当作「外部依赖」来用，只能访问 `pub` API——这正是验证「对外契约」的合适层级。
-- **`#[test]` 与 `#[bench]`**：Rust 内置的测试与基准函数标注。`#[bench]` 依赖不稳定的 `#![feature(test)]`，只能在 **nightly** 下编译运行。
-- **数据竞争（data race）**：至少两个线程并发访问同一内存，至少一个是写，且没有同步保证顺序。Rust 的内存安全只挡住了「借用检查期」能看出的竞争，挡不住跨线程的，要靠原子/锁。
-- **Miri**：Rust 官方的** UB 检测器**，运行在 nightly 上（`cargo miri`），按真实内存模型解释每一次内存访问，能抓出未定义行为（如越界、无效对齐、非法别名）。代价是慢、且只解释「这一次执行」。
-- **loom**：Tokio 的并发**模型检查器**，用自带的原子类型替换标准库原子，记录每次访问后**穷举**线程交错，能抓「某种你测不到的交错下的竞争」。代价是只能跑极小模型。
-- **sanitizer（ASan/MSan/TSan）**：编译器附带的运行期检查工具。本讲重点关心 **TSan**（ThreadSanitizer，数据竞争检测）。启用方式是通过专门的 `--target x86_64-unknown-linux-gnutsan`，rustc 据此设置 `CARGO_CFG_SANITIZE=thread`。
-- **`cfg!()` 与 `#[cfg(...)]`**：前者把条件编译求值成运行期 `bool`，后者直接在编译期裁剪代码。本讲两者都会大量出现。
-- **不变量（invariant）**：并发场景下「无论线程怎么交错，这条性质始终成立」的断言，例如「读到者看到的值永不为负」。
+### 2.1 并发 bug 为什么难测
+
+并发程序的错误有一类很特殊：**绝大多数运行都正确，只在特定线程交错下才暴露**。比如「读写锁的读者读到写者写了一半的值（torn read）」，可能一百万次只出现一次。普通单元测试（`cargo test`）本质是「跑几次，看断言过不过」，对这类 bug 几乎无能为力。
+
+因此并发库需要三件**专门**的工具：
+
+| 工具 | 它抓什么 | 怎么抓 |
+|---|---|---|
+| **loom** | 线程交错导致的逻辑错误（漏唤醒、死锁、撕裂读） | 用模型检查器**穷举**所有可能的线程交错 |
+| **Miri** | 单次执行里的**未定义行为**（UB），如非法内存访问、数据竞争 | 解释执行 Rust MIR，对每次访存做语义检查 |
+| **ThreadSanitizer (TSan)** | 真实运行时的数据竞争（两条无 happens-before 关系的并发访问） | 给每次内存访问插桩，记录并校验 happens-before 图 |
+
+三者**互补**：loom 穷举交错但跑的是模型不是真机器；Miri 查得细（连 UB 都报）但慢、且只跑一条交错；TSan 跑得快、在真实机器上，但只报「这条跑出来的」竞争。三者结合才能给 `unsafe` 并发代码足够的信心。
+
+### 2.2 `cfg` 与 `cfg!` 的区别
+
+- `#[cfg(foo)]` 是**编译期属性**：`foo` 不成立时整段代码被删掉，不参与编译。
+- `cfg!(foo)` 是**编译期宏**：在条件编译的基础上返回 `bool`，可以参与 `if`、`const` 计算，但两个分支都必须能编译。
+
+测试里大量用 `cfg!(miri)` 来「缩放迭代次数」，就是因为两个分支都得编译通过。下面会反复出现。
+
+### 2.3 测试代码 vs 文档测试
+
+`crossbeam-utils` 把**正确性测试**全部放在 crate 根的 `tests/` 目录（integration test，每个 `.rs` 文件编译成一个独立测试 binary），而 `src/` 里**几乎没有** `#[cfg(test)] mod tests`。`src/` 里出现的 `cfg!(miri)` / `#[cfg_attr(miri, ...)]` 几乎都在**文档示例**（doc-test）里，用来给 doctest 打补丁。这是本讲的一个关键观察：**这个 crate 的测试主体在 `tests/`，不在 `src/`**。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| [tests/atomic_cell.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L1-L404) | `AtomicCell` 的集成测试。展示 `always_use_fallback()` 辅助函数、drop 计数、语义相等、算术宏的测试镜像、`issue_833` 并发回归用例。 |
-| [tests/parker.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/parker.rs#L1-L50) | `Parker` 集成测试，重点验证 `park_timeout` 的三种返回理由（`Unparked`/`Timeout`）。 |
-| [tests/wait_group.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/wait_group.rs#L1-L65) | `WaitGroup` 集成测试，用 channel 观察线程是否真的阻塞/被唤醒。 |
-| [tests/sharded_lock.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/sharded_lock.rs#L1-L252) | `ShardedLock` 集成测试，含 `frob` 随机读写压力、`arc` 并发不变量、poison 语义。 |
-| [tests/thread.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/thread.rs#L1-L217) | `thread::scope` 集成测试，含 panic 汇总、嵌套 spawn。 |
-| [tests/cache_padded.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/cache_padded.rs#L1-L112) | `CachePadded` 集成测试，含 `distance` 对齐断言、drop/clone 行为。 |
-| [benches/atomic_cell.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L1-L159) | `AtomicCell` 基准：按类型（u8/usize）× 操作（load/store/fetch_add/CAS）× 竞争度（单线程/2 线程并发）切分维度。 |
-| [src/lib.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L27-L100) | 顶层：`#![doc(test(...))]` 控制文档测试；`primitive` 抽象层在 loom 与标准库间二选一；feature/cfg 门控模块可见性。 |
-| [build.rs](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/build.rs#L43-L49) | 在 `CARGO_CFG_SANITIZE` 存在时发射 `crossbeam_sanitize_thread` 与 `crossbeam_atomic_cell_force_fallback` 两条 cfg。 |
-| [Cargo.toml](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/Cargo.toml#L41-L50) | loom 是 `cfg(crossbeam_loom)` 下的可选依赖；`fastrand`/`rustversion` 为 dev-dependencies。 |
-
-辅助理解用的 CI 脚本（仓库根 `ci/`，本讲只读不改）：
-
-| 文件 | 作用 |
-| --- | --- |
-| [ci/miri.sh](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/miri.sh#L29-L35) | 用 `cargo miri test --all-features -p crossbeam-utils` 跑 Miri。 |
-| [ci/san.sh](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/san.sh#L10-L35) | 用 ASan/MSan/TSan 三个目标跑 `cargo test`，注入 `--cfg crossbeam_sanitize`。 |
-| [ci/crossbeam-epoch-loom.sh](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/crossbeam-epoch-loom.sh#L6-L11) | 注入 `--cfg crossbeam_loom` 与 `LOOM_MAX_PREEMPTIONS=2` 跑 loom。 |
-| [ci/test.sh](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/test.sh#L16-L22) | 常规 `cargo test`，单线程、nightly 下额外 `cargo check --all-targets` 覆盖 bench。 |
-
----
+|---|---|
+| `tests/atomic_cell.rs` | `AtomicCell` 的集成测试：`is_lock_free`、Drop 计数、语义相等、padding、回归测试、宏生成的算术测试 |
+| `tests/parker.rs` | `Parker` 的超时与跨线程唤醒测试 |
+| `tests/wait_group.rs` | `WaitGroup` 的「先阻塞后放行」语义测试 |
+| `tests/sharded_lock.rs` | `ShardedLock` 的并发读写、poison、`try_*`、`into_inner` 测试 |
+| `tests/thread.rs` | `thread::scope` 的 join / 计数 / panic 汇总 / 嵌套 spawn 测试 |
+| `tests/cache_padded.rs` | `CachePadded` 的对齐、距离、Drop、Clone 测试 |
+| `benches/atomic_cell.rs` | `AtomicCell` 的基准：单线程单操作成本 + 多线程竞争读 |
+| `src/lib.rs` | `primitive` 抽象层（loom 与 std 二选一），模块的 `cfg` 门控 |
+| `build.rs` | 发射 `crossbeam_no_atomic` / `crossbeam_sanitize_thread` / `crossbeam_atomic_cell_force_fallback` 三条 `cfg` |
+| `Cargo.toml` | `dev-dependencies`（fastrand、rustversion）、loom 的可选依赖 |
+| `.github/workflows/ci.yml` | 把 test / miri / san / loom / features 串成 CI 流水线 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 tests/ 目录的组织与断言风格
+### 4.1 tests 目录的组织与断言
 
 #### 4.1.1 概念说明
 
-crossbeam-utils 的 `tests/` 目录组织极其朴素：**一个对外类型，一个集成测试文件**。这种「一文件一类型」的组织有两个好处：
+`tests/` 目录的组织原则极简：**一个公开类型一个文件，文件名就是类型名**。这让「我要找某类型的测试」变成一次文件查找：
 
-- 集成测试把 crate 当外部依赖用，只能访问 `pub` API，恰好验证**对外契约**而非内部实现细节——重构内部时只要契约不变，测试就不该挂。
-- 不同原语的测试互不干扰，新增类型只需新增文件，CI 失败时一眼就能定位是哪个原语出了问题。
+```
+tests/
+├── atomic_cell.rs    # AtomicCell
+├── cache_padded.rs   # CachePadded
+├── parker.rs         # Parker / Unparker
+├── sharded_lock.rs   # ShardedLock
+├── thread.rs         # thread::scope
+└── wait_group.rs     # WaitGroup
+```
 
-文件清单对应 README 的三大类：
-
-| 类别 | 测试文件 | 覆盖类型 |
-| --- | --- | --- |
-| Atomics | `tests/atomic_cell.rs` | `AtomicCell` |
-| Thread synchronization | `tests/parker.rs` / `tests/wait_group.rs` / `tests/sharded_lock.rs` | `Parker`/`Unparker`、`WaitGroup`、`ShardedLock` |
-| Utilities | `tests/thread.rs` / `tests/cache_padded.rs` | `thread::scope`、`CachePadded` |
-
-> 注意 `AtomicConsume` 和 `Backoff` 没有专属集成测试文件：`AtomicConsume` 的行为退化路径在前几讲已说明，`Backoff` 是「退避策略」、其效果更适合用基准衡量而非断言。
-
-更重要的是测试**写法**。crossbeam-utils 反复用几种固定的断言套路来覆盖那些「普通断言难以表达」的性质——尤其是内存安全相关的不变量。下面三小节逐一拆解。
+但「有测试」不等于「测得对」。并发原语的测试难点在于：很多正确性性质（如「不会撕裂读」「不会 double-drop」「唤醒不丢失」）**不能直接断言**，必须用**间接证据**——比如用一个全局计数器追踪 Drop 次数、用一个不变量（`>= 0`）排除撕裂读、用 channel 编排时序。
 
 #### 4.1.2 核心流程
 
-阅读整套测试后，可以把断言风格归纳为五类，它们各自盯住一类容易在并发/`unsafe` 场景下出错的性质：
+`tests/atomic_cell.rs` 里能提炼出五类典型断言套路，几乎覆盖了整个 crate 的测试风格：
 
-```text
-1. 单线程契约      ──▶ 直接断言 load/store/swap 的返回值与语义
-2. drop 计数       ──▶ 用 static AtomicUsize 数 Drop 次数，验证「不多 drop、不漏 drop」
-3. 语义相等        ──▶ 自定义 PartialEq，验证 CAS 在「字节不等但语义等」时的重试
-4. 并发不变量      ──▶ 多线程交错下断言「永不变式」（如读到值恒 >= 0）
-5. 回归用例        ──▶ 复现 GitHub issue 的最小程序，防再次破坏
-```
-
-这五类不是互斥的——一个测试文件常常混合使用。比如 `tests/sharded_lock.rs` 同时用了「并发不变量」（`arc`）和「单线程契约」（`smoke`）。
+1. **能力探测型**：`is_lock_free` —— 断言某类型是否走无锁路径，但断言值要随当前 `cfg` 调整。
+2. **Drop 计数型**：`drops_unit/u8/usize` —— 用 `static CNT: AtomicUsize` 数 new/drop 次数，验证不泄漏、不 double-drop。
+3. **语义相等型**：`modular_u8/modular_usize` —— `PartialEq` 按 `% 5` 定义，验证 `compare_exchange` 用的是 `T::eq` 而非字节比较。
+4. **不变量型**：`issue_833`、`sharded_lock::arc` —— 让读者反复读，断言读到的值永远「合法」（非零、`>= 0`），以此排除撕裂读。
+5. **回归型**：`issue_748`、`issue_833`、`garbage_padding` —— 文件名/注释直接挂 GitHub issue 号，复现历史上踩过的坑。
 
 #### 4.1.3 源码精读
 
-**(1) drop 计数：盯死「非 Copy 类型的析构」**
+**(1) Drop 计数：用全局原子计数器追踪生命周期**
 
-`AtomicCell<T>` 在 `T` 非 `Copy` 时要自己负责回收旧值（见 [u5-l1](u5-l1-atomiccell-unsafe-safety.md)）。这类「手写 Drop」最怕 double-drop 或泄漏，而普通 `assert_eq!` 根本看不出析构次数对不对。crossbeam-utils 的套路是定义一个带计数的类型：
+`drops_u8` 定义了一个带 `Drop` 的 `Foo(u8)`，`new` 时 `CNT += 1`、`drop` 时 `CNT -= 1`。任何 `AtomicCell` 操作之后，`CNT` 应当恒为 1（cell 里始终恰好存着一个活的 `Foo`），最后 `drop(a)` 后归零：
 
-[tests/atomic_cell.rs:L76-L116](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L76-L116) —— `drops_unit` 用一个 `static CNT: AtomicUsize`，`Foo::new` 时 `CNT += 1`、`Drop` 时 `CNT -= 1`：
+[tests/atomic_cell.rs:118-162](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L118-L162) —— 关键不变量是每次 `swap`/`store` 之后 `CNT.load(SeqCst) == 1`。这正是 u2-l1 / u5-l1 讲的「store 经 swap 回收旧值、Drop 用 `needs_drop` 分流」机制的正确性证据：如果实现漏掉了某次回收，`CNT` 会 > 1（泄漏）；如果 double-drop，`CNT` 会下溢成 `usize::MAX`。这种测试**不直接 assert 源码逻辑，而是 assert 可观察的资源计数**，是测 `unsafe` 析构代码的标准手段。
 
-```rust
-static CNT: AtomicUsize = AtomicUsize::new(0);
-// ...
-impl Drop for Foo {
-    fn drop(&mut self) {
-        CNT.fetch_sub(1, SeqCst);
-    }
-}
-```
+**(2) 语义相等：验证 `compare_exchange` 走的是 `T::eq`**
 
-关键断言是：经过一连串 `swap`/`store` 之后 `CNT.load(SeqCst)` 始终为 `1`（恰好存活一个实例），最后 `drop(a)` 后归零。这同时挡住了「double-drop（CNT 变负）」和「泄漏（CNT 不归零）」两种 bug。`drops_u8`、`drops_usize` 是同一套路的变体，只是换了字段类型。
+`modular_u8` 把 `PartialEq` 定义成「按 5 取模相等」，于是 `Foo(1)`、`Foo(11)`、`Foo(52)` 两两「相等」：
 
-> 为什么计数器用 `SeqCst` 而非 `Relaxed`？因为这里要在线程间可靠地**读取最终计数**做断言，需要最强的同步语义保证「所有析构都已对计数器可见」。`tests/cache_padded.rs` 里同样的 drop 计数用的是单线程 `Cell<usize>`，因为没有跨线程需求——**断言的强弱点要匹配被测性质**。
+[tests/atomic_cell.rs:210-232](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L210-L232) —— `a.swap(Foo(2))` 返回 `Foo(11)` 而非 `Foo(1)`，因为 cell 里存的字面值是 `11`，但断言用 `==`（mod 5）所以 `Foo(11)` 也通过。这条测试专门锁定 u5-l1 讲的「语义相等但字节不等时 `compare_exchange` 需重试」语义：`compare_exchange(Foo(0), Foo(5))` 在 cell 字面值是 `100`（`100 % 5 == 0`）时返回 `Ok(Foo(100))`。
 
-**(2) 语义相等：盯死 compare_exchange 的「假失败」**
+**(3) 不变量型：`issue_833` 排除 NonZeroU128 的非法读**
 
-`compare_exchange` 要求 `T: Eq`（见 [u2-l1](u2-l1-atomiccell-api.md)），原因藏在 [u5-l1](u5-l1-atomiccell-unsafe-safety.md)：当 `T` 的字节表示里有「padding 垃圾」时，可能出现「语义相等但字节不等」，CAS 要据此重试。`modular_u8` 就是专门构造这种场景：
+这是 crate 里最重要的并发压力测试之一。一个写线程反复 `store` 两个不同的 `NonZeroU128`，主线程反复 match 那个枚举：
 
-[tests/atomic_cell.rs:L210-L232](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L210-L232) —— 自定义 `PartialEq` 让 `Foo(1)` 与 `Foo(11)`、`Foo(52)` 都「相等」（都模 5 同余）：
+[tests/atomic_cell.rs:361-404](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L361-L404) —— 它针对的真实 bug 是：`NonZeroU128` 的合法值**不能是全零字节**，如果乐观读路径（u2-l3 / u5-l1 的 `ptr::read_volatile` + `validate_read`）返回了「写者写了一半」的比特，可能凑出非法值导致 UB。测试通过让主线程做 `N` 次 match（`N` 在普通运行时是 100 万、Miri 下缩到 1 万），只要不 `unreachable!` 就算通过。`const N` 的 `cfg!(miri)` 缩放是下一节的话题。
 
-```rust
-impl PartialEq for Foo {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 % 5 == other.0 % 5
-    }
-}
-```
+注意结尾 `handle.join().unwrap()` 带注释 `// join thread to avoid https://github.com/rust-lang/miri/issues/1371` —— Miri 要求测试结束时没有游离线程，所以必须 join。
 
-于是 `a.compare_exchange(Foo(0), Foo(5))` 即使内部读到的旧值是 `Foo(100)`（与 `Foo(0)` 语义等），也能成功并返回 `Ok(Foo(100))`。这个测试直接锁定了「CAS 用 `T::eq` 而非字节比较」这一行为契约。
+**(4) 通道编排时序：`wait_group::wait`**
 
-**(3) 宏驱动的算术测试：镜像源码的批量生成**
+`WaitGroup` 的语义是「计数未归零时 `wait()` 必须阻塞」。测试用 `mpsc` 通道 + `try_recv` 来**证明线程确实被卡住**：
 
-[u5-l2](u5-l2-atomiccell-arithmetic-macros.md) 讲过源码用 `impl_arithmetic!` 宏为 12 种整数批量生成 `fetch_*` 方法。测试侧用了一个**结构完全对称**的 `test_arithmetic!` 宏，对每种类型跑同一组断言：
+[tests/wait_group.rs:7-34](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/wait_group.rs#L7-L34) —— 关键两步：spawn 完后 `sleep(100ms)` 再 `rx.try_recv()` 断言**收不到**（证明 10 个线程都卡在 `wg.wait()`），然后主线程 `wg.wait()` 触发归零放行，再 `recv` 收到全部 10 条。这种「先证明被阻塞、再证明被放行」的双段断言，是测同步原语时序的标准范式，parker.rs 的 `park_timeout_unpark_called_other_thread` 也是同款写法。
 
-[tests/atomic_cell.rs:L296-L338](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L296-L338) —— 宏定义一次，然后逐个类型展开：
+**(5) 宏生成测试，对应宏生成实现**
 
-```rust
-macro_rules! test_arithmetic {
-    ($test_name:ident, $ty:ident) => {
-        #[test]
-        fn $test_name() {
-            let a: AtomicCell<$ty> = AtomicCell::new(7);
-            assert_eq!(a.fetch_add(3), 7);
-            // ... fetch_sub / fetch_and / fetch_or / fetch_xor / fetch_max / fetch_min / fetch_nand
-        }
-    };
-}
-test_arithmetic!(arithmetic_u8, u8);
-test_arithmetic!(arithmetic_i8, i8);
-// ... 共 10 个整数类型
-```
+u5-l2 讲过 `impl_arithmetic!` 用一份模板给 12 种整数生成 8 个 `fetch_*` 方法。测试侧用对偶的 `test_arithmetic!` 宏，一份模板生成 10 个测试函数：
 
-这是「源码用宏消除重复 → 测试也用宏消除重复」的典型范式：新增一个整数类型只需在源码和测试各加一行。注意它把 `fetch_nand` 也一并测了，这是 `impl_arithmetic!` 里最容易写错位运算的逻辑。
-
-**(4) 并发不变量：盯死「无论怎么交错都不该发生的事」**
-
-`tests/sharded_lock.rs::arc` 是一个经典的多读者 + 单写者场景，写者会临时把值写成 `-1` 再写回，读者断言**永远看不到负数**：
-
-[tests/sharded_lock.rs:L102-L138](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/sharded_lock.rs#L102-L138) —— 写者线程内：
-
-```rust
-let tmp = *lock;
-*lock = -1;
-thread::yield_now();   // 故意让出，诱使读者插进来读
-*lock = tmp + 1;
-```
-
-5 个读者线程各持读锁后断言 `assert!(*lock >= 0)`。如果 `ShardedLock` 的读写互斥有任何破绽，读者就可能读到那个中间态 `-1`，断言立刻失败。这种「**主动让出 CPU 制造交错**」的手法是并发压力测试的常用招——比裸跑更可能踩到竞争。
-
-更猛的随机压力是 `frob`：每个线程随机决定读还是写（写概率 1/N），跑 `M` 轮：
-
-[tests/sharded_lock.rs:L24-L49](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/sharded_lock.rs#L24-L49) —— 用 `fastrand`（dev-dependency，见 Cargo.toml L48-L50）生成随机数驱动选择。注意它的循环次数 `M` 是按 `cfg!(miri)` 缩放的（`if cfg!(miri) { 50 } else { 1000 }`），这是下一节「cfg 门控」的话题。
-
-**(5) 回归用例：把 issue 钉死在测试里**
-
-文件里带 GitHub 链接注释的测试都是真实历史 bug 的最小复现。最值得读的是 `issue_833`，它是一个**真·多线程并发**回归测试：
-
-[tests/atomic_cell.rs:L360-L404](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L360-L404) —— 一个线程狂 `store` 两个不同的 `NonZeroU128`，主线程在循环里反复 `match &STATIC`。它复现的是「`AtomicCell<u128>` 在某些布局下读到无效枚举判别字」的问题。关键设计：
-
-```rust
-const N: usize = if cfg!(miri) { 10_000 } else { 1_000_000 };
-```
-
-百万次迭代在真实 CPU 上才可能踩到竞争窗口，但 Miri 太慢，必须缩到一万次。注释里还特意说明 `handle.join().unwrap()` 是「为了避免 miri 的 detached-thread 泄漏告警」。这正说明：**为并发 bug 写回归测试，要同时为多种执行器调好参数**。
+[tests/atomic_cell.rs:296-338](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L296-L338) —— 「实现用宏批量生成，测试也用宏批量生成」是消除重复的双向对称设计。改一个运算的语义，只需改一处宏定义，实现和测试一起更新。
 
 #### 4.1.4 代码实践
 
-> **实践目标**：亲手用 drop 计数法为 `AtomicCell` 的析构正确性补一个测试。
->
-> **操作步骤**（源码阅读 + 自己写）：
-> 1. 重新读 [tests/atomic_cell.rs:L118-L162](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L118-L162) 的 `drops_u8`，理解计数器涨跌节奏。
-> 2. 在你自己的一个测试 crate 里，仿写一个 `struct Pair(u16, u16)`（带 `Drop` 计数），把它放进 `AtomicCell<Pair>`。
-> 3. 交替调用 `store`、`swap`、`take`（注意 `take` 要 `Default`），每次操作后断言 `CNT` 恰好为 `1`，最后 `drop(cell)` 断言为 `0`。
->
-> **需要观察的现象**：任意把 `store` 写成「忘记回收旧值」的错误版本（例如手动 `mem::forget` 旧值），计数会偏离 1，断言失败。
->
-> **预期结果**：正确实现下计数全程稳定在 1、退出归零；故意制造泄漏时 `CNT` 持续上涨、制造 double-drop 时 `CNT` 跌到 0 以下（usize 下溢 panic）。
->
-> 待本地验证：本实践需要你自己在测试 crate 中运行，仓库本身未提供该练习的可执行入口。
+**实践目标**：用「Drop 计数型」套路为 `CachePadded` 写一个并发 Drop 测试，体会间接断言。
+
+**操作步骤**：
+
+1. 阅读 `tests/cache_padded.rs:65-85`（已有的单线程 `drops` 测试）作为模板。
+
+[tests/cache_padded.rs:65-85](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/cache_padded.rs#L65-L85)
+
+2. 仿照它，写一个**多线程**版本：用 `Arc<AtomicUsize>` 作计数器，在 `thread::scope` 里 spawn 几个线程，每个线程构造并 drop 若干 `CachePadded<Foo>`，最后断言计数器等于「构造总数」。
+
+**需要观察的现象**：测试结束后计数器恰好等于所有线程构造的 `Foo` 总数。
+
+**预期结果**：`cargo test drops` 通过。若数字不符，说明存在 double-drop 或漏 drop —— 但 `CachePadded` 透明转发 `T` 的 Drop，正常不会出错。
+
+> 待本地验证：具体计数值取决于你写的循环次数，本讲不假设已运行。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`tests/atomic_cell.rs` 里 `drops_*` 系列为什么计数器是 `static AtomicUsize` 而不是局部 `Cell<usize>`？
+**练习 1**：`modular_u8` 里，为什么 `a.swap(Foo(2))` 期望返回 `Foo(11)` 而不是 `Foo(1)`？
 
-**参考答案**：因为 `AtomicCell` 的 `Drop` 与测试主体可能涉及跨线程语义（且未来若把测试改成多线程压测，`Drop` 可能发生在别的线程），`AtomicUsize` 的原子读写能保证计数在线程间正确可见；`Cell` 是 `!Sync` 的，无法跨线程共享。即便当前测试是单线程，用 `SeqCst` 原子计数也是「为并发场景预留正确性」的稳健写法。
+**答案**：因为前一步 `a.swap(Foo(11))` 把字面值 `11` 写进了 cell（`swap` 返回的是**旧值** `Foo(1)`，但 cell 现在是 `11`）。`Foo(11)` 与 `Foo(1)` 在 `==`（mod 5）意义下相等，所以读者无法从 `==` 区分，但字面值确实是 `11`。这个测试同时验证了「swap 返回旧值」和「相等判断走 `T::eq`」两件事。
 
-**练习 2**：`modular_u8` 把 `PartialEq` 定义成「模 5 同余」。如果 `compare_exchange` 内部改用「字节相等」而非 `T::eq`，这个测试会在哪一步失败？
+**练习 2**：`issue_833` 为什么要 join 写线程，而不像普通测试那样直接结束？
 
-**参考答案**：会在 `a.compare_exchange(Foo(0), Foo(5))` 处失败。因为 `a` 此刻存的是 `Foo(0)`（字节是 `0`），`current` 传 `Foo(0)` 字节也相等，这一步反而能过；真正暴露问题的是 `compare_exchange(Foo(10), Foo(15))`——此刻 `a` 存 `Foo(5)`，`current` 传 `Foo(10)`，二者语义等（都模 5 余 0）但字节不等。用字节比较会判「不等」直接返回 `Err`，而测试期望 `Ok(Foo(100))`。所以语义相等测试正是为了钉死「CAS 必须用 `T::eq`」这一契约。
+**答案**：因为 Miri 在测试结束时若仍有游离线程会报错（miri/issues/1371）。join 是为了让写线程的 `while` 循环正常退出（`FINISHED.store(true)`），保证没有线程还在访问 `STATIC`。
 
 ---
 
@@ -210,322 +156,232 @@ const N: usize = if cfg!(miri) { 10_000 } else { 1_000_000 };
 
 #### 4.2.1 概念说明
 
-4.1 节的测试在普通 `cargo test` 下跑——这只能证明「**这次**没出错」。并发原语最危险的是「某种罕见交错下的出错」，普通测试几乎抓不到。crossbeam-utils 用三个互补工具来补这个缺口：
+第 2.1 节的三种工具，**每种都需要让源码或测试用不同的方式编译**：
 
-| 工具 | 抓什么 | 怎么切换被测代码 | 代价 |
-| --- | --- | --- | --- |
-| **Miri** | 单次执行里的未定义行为（UB） | 编译器自动设 `cfg(miri)`，测试用 `cfg!(miri)` 读取 | 慢，需缩迭代次数 |
-| **loom** | 穷举线程交错下的数据竞争 | 手动 `--cfg crossbeam_loom`，切 `primitive` 抽象层 | 只能跑极小模型 |
-| **TSan** | 运行期真实数据竞争 | `--target ...gnutsan` → build.rs 发 `crossbeam_sanitize_thread` | 需真实多核、有假阳性 |
+- **loom** 要求把 `std::sync::atomic` 换成 `loom::sync::atomic`，否则模型检查器看不到访存事件。
+- **Miri** 比真机慢 10–100 倍，测试必须**砍掉迭代次数**，否则跑不完。
+- **TSan / ASan / MSan** 会让 `AtomicCell` 的乐观读路径（u2-l3）误报数据竞争，所以 sanitizer 下应**强制走全局锁回退**。
 
-关键洞察是：**这三者运行的是「同一份测试代码」，但被测的「实现代码」会被不同的 cfg 切到不同的分支**。比如 Miri 和 TSan 下，`AtomicCell` 的无锁路径（含内联汇编）会被强制删掉、改走全局锁回退——否则 Miri 看不懂汇编、TSan 会误报竞争。这就把「验证工具」和「被验证实现」用 cfg 解耦了。
+这些切换都靠 `cfg` 完成。本节回答：每个 `cfg` 是**谁设的**、**在哪消费**、**测试侧要写什么代码配合**。
 
 #### 4.2.2 核心流程
 
-三条 cfg 的「谁发射 / 谁消费」链路：
+整个 cfg 闭环可以画成一条链（承接 u1-l3）：
 
-```text
-Miri:
-  rustc 自动           ──▶ cfg(miri)            ──▶ atomic! 宏删无锁候选 + 测试用 cfg!(miri) 缩迭代
-
-TSan (及任意 sanitizer):
-  --target ...gnutsan  ──▶ CARGO_CFG_SANITIZE   ──▶ build.rs 发 crossbeam_atomic_cell_force_fallback
-                                                    + crossbeam_sanitize_thread
-                                                    ──▶ atomic! 宏删无锁候选，AtomicConsume 退化
-
-loom:
-  --cfg crossbeam_loom ──▶ lib.rs 切 primitive 抽象层为 loom 实现
-                        ──▶ 同时关闭 AtomicCell/ShardedLock/thread::scope（loom 建模不了）
+```
+               ┌─ rustc 自动 ──▶ cfg(miri)               （编译器内建）
+工具/环境 ──────┤
+               ├─ CI 设 RUSTFLAGS=--cfg crossbeam_loom ─▶ cfg(crossbeam_loom)
+               │
+               └─ CARGO_CFG_SANITIZE=thread ─▶ build.rs ─▶ cfg(crossbeam_sanitize_thread)
+                                                   └─────▶ cfg(crossbeam_atomic_cell_force_fallback)
+                          │
+                          ▼
+            build.rs 读 no_atomic.rs 黑名单 ─▶ cfg(crossbeam_no_atomic)
+                          │
+                          ▼
+        atomic! 宏在编译期裁剪无锁/回退候选段
+                          │
+                          ▼
+        测试用 cfg!(miri) 缩迭代、用 always_use_fallback() 调整断言
 ```
 
-注意三者的「触发点」不同：`miri` 是 rustc 内置 cfg，无需 build.rs 介入；`crossbeam_loom` 是用户手动加的 `--cfg`；只有 sanitizer 相关的 `crossbeam_sanitize_thread` / `crossbeam_atomic_cell_force_fallback` 是 build.rs 在编译期读 `CARGO_CFG_SANITIZE` 后**主动发射**的。
+三条「crossbeam_*」cfg 全部由 `build.rs` 发射，声明在 check-cfg 里：
+
+[build.rs:20-22](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/build.rs#L20-L22) —— `cargo:rustc-check-cfg=cfg(...)` 告诉编译器「这些 cfg 是合法的」，避免 `unexpected_cfgs` 警告。
+
+发射逻辑分两段：
+
+[build.rs:39-49](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/build.rs#L39-L49) —— 目标命中 `no_atomic.rs` 黑名单则发 `crossbeam_no_atomic`；`CARGO_CFG_SANITIZE` 含 `thread` 则发 `crossbeam_sanitize_thread`；**任意** sanitizer 都额外发 `crossbeam_atomic_cell_force_fallback`（注意是 `if let Ok` 内无条件 `println`，即只要有 sanitizer 就强制回退）。
 
 #### 4.2.3 源码精读
 
-**(1) build.rs：sanitizer → force_fallback**
+**(1) loom：primitive 抽象层的整体切换**
 
-这是整条链路的源头。build.rs 读 `CARGO_CFG_SANITIZE`（rustc 在启用 sanitizer 时设置的环境变量），据此发射两条 cfg：
+`src/lib.rs` 顶部用 `cfg(crossbeam_loom)` 在两套 `primitive` 模块间二选一：
 
-[build.rs:L43-L49](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/build.rs#L43-L49)：
+[src/lib.rs:47-83](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L47-L83) —— loom 分支把 `AtomicUsize`/`Arc`/`Mutex`/`Condvar` 全部重导出为 loom 版本；非 loom 分支用标准库。值得注意的是注释里坦白：「loom 暂不支持 `compiler_fence`，用更强的 `fence` 顶替，可能漏报一些 race」—— 这是 u5-l3 提到的 loom 覆盖盲区之一。
 
-```rust
-if let Ok(sanitize) = env::var("CARGO_CFG_SANITIZE") {
-    if sanitize.contains("thread") {
-        println!("cargo:rustc-cfg=crossbeam_sanitize_thread");
-    }
-    println!("cargo:rustc-cfg=crossbeam_atomic_cell_force_fallback");
-}
-```
+但 loom 有**结构性盲区**：`AtomicCell`、`ShardedLock`、`thread::scope` 在 loom 下**整个模块被关掉**：
 
-要点：**只要有任意 sanitizer（不只 TSan），就强制 `AtomicCell` 走全局锁回退**。原因是 `AtomicCell` 的无锁路径用 `AtomicMaybeUninit` 直接读写可能含 padding 的字节，TSan 会把这当成数据竞争误报；改走 SeqLock 全局锁后，访问被锁显式同步，TSan 就安静了。`crossbeam_sanitize_thread`（仅 TSan）则被 `AtomicConsume` 消费——TSan 下 consume 路径退化为 Acquire（见 [u2-l4](u2-l4-atomic-consume.md)）。
+[src/lib.rs:95-100](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L95-L100) —— `thread` 模块带 `cfg(not(crossbeam_loom))`，`AtomicCell` 与 `ShardedLock` 内部同理（见 u5-l3）。原因是这些类型用 `repr(transparent)` 直接重解释内存，而 loom 的原子类型有独立的内部表示，两者布局不兼容。**所以 loom 实际只能测 `Parker`、`WaitGroup`、`AtomicConsume` 这些不依赖 `AtomicCell` 的原语**——这是阅读 loom CI 时必须知道的前提。
 
-**(2) 测试侧：用一个辅助函数汇总三条 cfg**
+loom 的可选依赖写在 Cargo.toml 的 target 段：
 
-`tests/atomic_cell.rs` 一开头就定义了一个工具函数，把「是否该期望走全局锁回退」这件事集中算出来：
+[Cargo.toml:41-46](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/Cargo.toml#L41-L46) —— 注意它**不是 feature**，而是 `cfg(crossbeam_loom)` 门控的可选依赖，并声明「不受 semver 保证」。CI 里通过 `RUSTFLAGS="--cfg crossbeam_loom"` + `--features loom` 启用（见 `.github/workflows/ci.yml` 的 `loom` job，调用 `ci/crossbeam-epoch-loom.sh`）。
 
-[tests/atomic_cell.rs:L8-L18](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L8-L18)：
+**(2) Miri：`cfg!(miri)` 缩放迭代次数**
 
-```rust
-fn always_use_fallback() -> bool {
-    atomic_maybe_uninit::cfg_has_atomic_cas! {
-        cfg!(any(
-            miri,
-            crossbeam_loom,
-            crossbeam_atomic_cell_force_fallback,
-        ))
-    }
-    atomic_maybe_uninit::cfg_no_atomic_cas! { true }
-}
-```
+Miri 是 rustc 自动设的 `cfg`，测试侧最直接的用法是缩放循环次数：
 
-读法很关键：
+[tests/atomic_cell.rs:369](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L369) —— `const N: usize = if cfg!(miri) { 10_000 } else { 1_000_000 };`
 
-- 外层两个宏 `cfg_has_atomic_cas!` / `cfg_no_atomic_cas!` 是**编译期互斥**的——目标平台有原子 CAS 时编译上一分支，没有时编译 `{ true }`（因为没 CAS 就一定走全局锁）。
-- 上一分支里是 `cfg!(any(miri, crossbeam_loom, crossbeam_atomic_cell_force_fallback))`，是**运行期**求值：只要 Miri/loom/sanitizer 任一在跑，就期望 `is_lock_free()` 返回 `false`。
+[tests/sharded_lock.rs:27](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/sharded_lock.rs#L27) —— `const M: usize = if cfg!(miri) { 50 } else { 1000 };`
 
-这个函数是 4.1 节 `is_lock_free` 测试的基石：
+两次都砍两个数量级。CI 的 miri job 还会跑两种变体：默认与 `-Zmiri-tree-borrows`（用 Tree Borrows 而非 Stacked Borrows 模型复查 `unsafe`，见 `.github/workflows/ci.yml:200-224`）。
 
-[tests/atomic_cell.rs:L30-L35](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L30-L35)：
+**(3) sanitizer / loom / miri：`always_use_fallback()` 统一探测**
 
-```rust
-assert_eq!(AtomicCell::<usize>::is_lock_free(), !always_use_fallback);
-```
+`is_lock_free` 测试最棘手：它断言「某类型是否无锁」，但**答案取决于当前是否被强制回退**。测试用一个辅助函数把三种「强制回退」情形合并探测：
 
-也就是说，**同一个断言在不同执行器下期望不同的值**——在普通 `cargo test` 下 `usize` 是无锁的（期望 `true`），但在 Miri/loom/TSan 下期望 `false`。一份测试代码、靠 `cfg!` 自适应多个执行器，这是 crossbeam-utils 测试体系的核心技巧。
+[tests/atomic_cell.rs:8-18](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L8-L18) —— `always_use_fallback()` 借助 `atomic-maybe-uninit` 提供的 `cfg_has_atomic_cas!` / `cfg_no_atomic_cas!` 宏（这两个宏只在**平台支持原子 CAS** 时才编译第一分支），在第一分支里检查 `cfg!(any(miri, crossbeam_loom, crossbeam_atomic_cell_force_fallback))`。于是断言写成：
 
-**(3) 缩放迭代次数：`cfg!(miri)` 的直接用法**
-
-`issue_833` 与 `frob` 都用 `cfg!(miri)` 把循环次数砍两个数量级：
-
-[tests/atomic_cell.rs:L369](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L369)：`const N: usize = if cfg!(miri) { 10_000 } else { 1_000_000 };`
-[tests/sharded_lock.rs:L27](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/sharded_lock.rs#L27)：`const M: usize = if cfg!(miri) { 50 } else { 1000 };`
-
-这是因为 Miri 逐条解释指令、比原生慢几十倍，不缩放会跑几十分钟。`loom` 也类似——模型爆炸增长，故用 `LOOM_MAX_PREEMPTIONS=2` 限制（见 [ci/crossbeam-epoch-loom.sh:L11](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/crossbeam-epoch-loom.sh#L11)）。
-
-**(4) loom 切的是 `primitive` 抽象层，且会关闭部分模块**
-
-[u5-l3](u5-l3-cfg-loom-wideseqlock.md) 已详述 `lib.rs` 里 `primitive` 模块在 `crossbeam_loom` 下重导出 `loom::sync::*`。这里补充两点测试视角的影响：
-
-- [src/lib.rs:L60-L65](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L60-L65) 有个 FIXME：loom 不支持 `compiler_fence`，只能用更强的 `fence` 顶替——**这会让 loom 漏掉某些竞争**（注释原话 "this may miss some races since fence is stronger than compiler_fence"）。这说明 loom 也不是万能的。
-- [src/lib.rs:L98-L100](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L98-L100) 表明 `thread::scope` 整个模块在 loom 下关闭。所以 loom 覆盖的是 `AtomicConsume`/`Parker`/`WaitGroup` 这些「用 `primitive` 抽象层、且不依赖 `repr(transparent)`」的原语，**这正好补上 Miri 在穷举交错上的短板**。
-
-**(5) CI 实际怎么跑**
-
-三个工具在 CI 里是三条独立 job：
-
-- [ci/miri.sh:L33](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/miri.sh#L33)：`cargo miri test --all-features -p crossbeam-utils`，外加 `-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check`（严格指针来源与对齐检查，对 `AtomicCell` 这种玩 `ptr::read_volatile` 的代码尤其重要）。
-- [ci/san.sh:L10](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/san.sh#L10) 注入 `--cfg crossbeam_sanitize`，[L17-L18](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/san.sh#L17-L18) 用 ASan、[L33-L35](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/san.sh#L33-L35) 用 TSan 跑，统一 `--test-threads=1`（ sanitizer 报告依赖稳定输出）。
-- [ci/crossbeam-epoch-loom.sh:L6](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/crossbeam-epoch-loom.sh#L6) 注入 `--cfg crossbeam_loom`。注意 CI 的 loom job 名字带 `epoch`，但 `crossbeam-utils` 的源码本身完全支持 `crossbeam_loom`——读者可以照搬这条命令到 utils 上本地跑。
+[tests/atomic_cell.rs:30-35](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/tests/atomic_cell.rs#L30-L35) —— `AtomicCell::<usize>::is_lock_free() == !always_use_fallback`。在普通 x86-64 上 `always_use_fallback` 是 `false`，断言 `is_lock_free() == true`；在 TSan 下 `force_fallback` 生效，断言翻转为 `false`。**同一段测试代码在所有 sanitizer/loom/miri 配置下都自洽**——这是「build.rs 发 cfg → 测试消费 cfg」最完整的闭环示例，也是 u1-l3 留的伏笔的落地。
 
 #### 4.2.4 代码实践
 
-> **实践目标**：把 4.1 节你自己写的 drop 计数测试，分别送进 Miri 与（若条件允许）loom 跑一遍，体会「同一份测试、不同执行器」。
->
-> **操作步骤**（源码阅读 + 本地运行）：
-> 1. 阅读 [ci/miri.sh:L12-L14](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/miri.sh#L12-L14)，记下 Miri 推荐的 `MIRIFLAGS`。
-> 2. 在你的测试 crate 上运行 `cargo +nightly miri test`（先 `rustup toolchain install nightly` 并 `rustup component add miri`）。
-> 3. 若想试 loom：在你的 crate 加 `loom = { version = "0.7", optional = true }` 依赖，写一个 `#[cfg(crossbeam_loom)]` 的小模型测试（线程数 ≤ 2、循环 ≤ 3），用 `RUSTFLAGS="--cfg crossbeam_loom" LOOM_MAX_PREEMPTIONS=2 cargo test --features loom` 运行。
->
-> **需要观察的现象**：Miri 下若你的 `unsafe`（如有）写出格，会立刻报 UB 并指出具体行；loom 下若两线程有未同步的访问，会打印交错路径并 panic。
->
-> **预期结果**：纯用 `AtomicCell` 公开 API（无手写 `unsafe`）的测试，在 Miri 与 loom 下都应通过——这正是「公开 API 是 sound 的」的证据。
->
-> 待本地验证：Miri/loom 需 nightly 工具链与网络安装组件，本环境不保证可运行；若无法安装，至少完成步骤 1 的源码阅读。
+**实践目标**：亲手让同一段 AtomicCell 测试在「正常」和「force_fallback」两种 cfg 下走不同路径，观察 `is_lock_free` 翻转。
+
+**操作步骤**：
+
+1. 在 `crossbeam-utils` 目录运行正常测试（确认基线）：
+   ```
+   cargo test --features atomic is_lock_free
+   ```
+   预期 `AtomicCell::<usize>::is_lock_free()` 为 `true`。
+
+2. 用环境变量强制回退（模拟 sanitizer 行为）：
+   ```
+   RUSTFLAGS="--cfg crossbeam_atomic_cell_force_fallback" cargo test --features atomic is_lock_free
+   ```
+   但注意：这条 cfg 由 `build.rs` 通过 check-cfg 声明，直接在 RUSTFLAGS 里设可能触发 `unexpected_cfgs`。更可靠的做法是用真正的 sanitizer：
+   ```
+   RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test --features atomic is_lock_free
+   ```
+   （需 nightly + TSan target）
+
+**需要观察的现象**：第 1 步断言成立是因为无锁路径；第 2 步断言仍成立，但 `is_lock_free()` 返回 `false`（因为 `always_use_fallback` 变 `true`，`!true == false`）。
+
+**预期结果**：两次测试都**通过**，但 `is_lock_free` 的运行时返回值不同——这正是 cfg 门控让「同一断言跨配置自洽」的体现。
+
+> 待本地验证：TSan 需要 nightly 工具链与 `x86_64-unknown-linux-gnu` 的 tsan runtime；若环境不具备，仅跑第 1 步即可。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `crossbeam_atomic_cell_force_fallback` 在**任意** sanitizer 下都发射，而不是只在 TSan 下？
+**练习 1**：为什么 loom job 能测 `Parker` 却不能测 `AtomicCell`？
 
-**参考答案**：因为 `AtomicCell` 无锁路径直接对「可能含 padding 的原始字节」做原子读写，任何 sanitizer（不只 TSan）都可能把这当成异常访问而误报。强制改走 SeqLock 全局锁后，所有访问都被锁的 acquire/release 显式同步，全部 sanitizer 都能正确理解。`crossbeam_sanitize_thread` 才是「只 TSan」专用，被 `AtomicConsume` 的 consume→Acquire 退化单独消费。
+**答案**：`AtomicCell` 用 `repr(transparent)` 把 `T` 直接重解释为原子类型，依赖原生内存布局；loom 的原子类型有独立的内部表示（用于追踪访存事件），两者布局不兼容，所以 `atomic` 模块在 `cfg(not(crossbeam_loom))` 下才编译。`Parker` 内部只用 `AtomicUsize` + `Mutex` + `Condvar`（都经 `primitive` 抽象层换成了 loom 版本），不依赖 `repr(transparent)` 重解释，故可测。
 
-**练习 2**：`always_use_fallback()` 里为什么外层要套 `cfg_has_atomic_cas!` / `cfg_no_atomic_cas!` 两个互斥宏，而不是直接 `return cfg!(any(...))`？
+**练习 2**：`build.rs` 为什么用 `crossbeam_no_atomic`（否定式）而不是 `crossbeam_has_atomic`？
 
-**参考答案**：因为有些极简目标平台**根本没有原子 CAS 指令**（被 `atomic_maybe_uninit` 的宏在编译期判定）。在那种平台上，`AtomicCell` 的 `fetch_update` CAS 回退也用不了，只能走全局锁——`is_lock_free()` 必然返回 `false`，与 Miri/loom 无关。所以 `cfg_no_atomic_cas!` 分支直接编译成 `true`，表示「无 CAS 平台恒走回退」。外层宏是**编译期**裁剪，内层 `cfg!()` 是**运行期**求值，两者配合才能覆盖「平台能力」与「执行器」两个正交维度。
+**答案**：否定式让「build script 没跑」（非 cargo 构建系统）时**乐观默认为支持原子**——因为现代主流目标都支持原子，默认支持是更合理的退化方向。若用肯定式 `has_atomic`，build script 缺席时会误判为「无原子」，错误地关掉所有无锁路径。
 
 ---
 
-### 4.3 benches/atomic_cell.rs 的基准维度与写法
+### 4.3 benches 基准写法
 
 #### 4.3.1 概念说明
 
-测试回答「对不对」，基准（benchmark）回答「快不快」。并发原语的性能不能用一个数字概括，因为它**高度依赖三个正交维度**：
+`benches/atomic_cell.rs` 是 crate 唯一的基准文件，回答两个性能问题：
 
-1. **类型宽度**：`u8` 与 `usize` 走的原子指令不同，无锁路径的代价不同。
-2. **操作种类**：`load`（只读）、`store`（只写）、`fetch_add`（读-改-写 RMW）、`compare_exchange`（CAS）的代价天差地别——RMW 通常比纯 load 贵数倍。
-3. **竞争度**：单线程无竞争 vs 多线程高竞争。无锁路径在无竞争下几乎免费，高竞争下却可能因 cache line 弹来弹去而比加锁还慢。
+1. **单操作成本**：`load` / `store` / `fetch_add` / `compare_exchange` 各自一次调用要多少纳秒？这个成本随类型宽度（`u8` vs `usize`）怎么变？
+2. **竞争下的吞吐**：多个线程**同时** `load` 同一个 `AtomicCell` 时，单次 `load` 成本会被 cache line 争用放大多少？
 
-crossbeam-utils 的 `benches/atomic_cell.rs` 就是按这三个维度的**笛卡尔积**来组织基准的。它用 Rust 内置的不稳定基准框架（`test::Bencher`），所以只在 nightly 下能跑——这也解释了 [u1-l3](u1-l3-features-build-and-tests.md) 里「bench 需要 nightly」的结论。
+这两个维度对应「无锁路径 vs 锁回退」的核心取舍（u2-l2 / u2-l3）：无锁路径的优势在低竞争下单操作便宜；而 `CachePadded` 全局锁池的优势在高竞争下减少 false sharing。基准要把这两个维度**分别测出来**，否则优化方向会判错。
 
 #### 4.3.2 核心流程
 
-基准的组织可以画成一张二维表（竞争度 × 操作），每个类型各一张：
-
-```text
-                  load        store       fetch_add   compare_exchange
-单线程 u8          ✓           ✓           ✓           ✓
-单线程 usize       ✓           ✓           ✓           ✓
-2 线程并发 u8      concurrent_load_u8 ──────────────── (只测 load)
-2 线程并发 usize   concurrent_load_usize ──────────── (只测 load)
-```
-
-并发基准的骨架是「**用 `Barrier` 对齐起跑、固定步数循环、主线程在 `b.iter` 里只测『等待两端跑完一轮』的耗时**」：
-
-```text
-worker × 2:   start.wait() ──▶ 跑 STEPS 次 load ──▶ end.wait()  (循环)
-主线程  :   b.iter(|| { start.wait(); end.wait(); })   ← 只测这一格的时间
-```
-
-这样 `b.iter` 测的就是「2 个线程各跑 100 万次 load 的总耗时」，把线程创建等一次性开销挡在 `b.iter` 之外。
-
-#### 4.3.3 源码精读
-
-**(1) nightly 的入口：`#![feature(test)]`**
-
-[benches/atomic_cell.rs:L1-L7](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L1-L7)：
-
-```rust
-#![feature(test)]
-extern crate test;
-use std::sync::Barrier;
-use crossbeam_utils::{atomic::AtomicCell, thread};
-```
-
-`#![feature(test)]` 是 nightly 专属，启用了内置的 `test::Bencher` 与 `#[bench]`。注意 Cargo.toml 里**没有** `[[bench]]` 段——cargo 会自动发现 `benches/` 下的文件作为基准目标（crate 名即文件名）。CI 里 bench 不实际跑分，只在 nightly 下 `cargo check --all-targets` 确保它能编译（见 [ci/test.sh:L21](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/test.sh#L21)）——因为基准结果因机器而异，不适合作为 CI 门禁。
-
-**(2) 单线程基准：四操作 × 两类型**
-
-最简单的是 `load_u8`：
-
-[benches/atomic_cell.rs:L9-L15](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L9-L15)：
+Rust 的 unstable test harness（`#[bench]`）要求 nightly 与 `#![feature(test)]`。每个 bench 函数签名固定：
 
 ```rust
 #[bench]
-fn load_u8(b: &mut test::Bencher) {
-    let a = AtomicCell::new(0u8);
-    let mut sum = 0;
-    b.iter(|| sum += a.load());
-    test::black_box(sum);
+fn name(b: &mut test::Bencher) {
+    b.iter(|| { /* 被测代码 */ });
 }
 ```
 
-两个细节值得学：
+`b.iter` 会把闭包跑很多轮、测总耗时再除以轮数。两个**必须**的工程细节：
 
-- `b.iter(|| ...)` 接受一个闭包，框架会反复调用它来测平均耗时。
-- `test::black_box(sum)` 是「黑洞」——告诉编译器 `sum` 之后还会被用，**防止优化器把整个 `load` 循环消除掉**。没有它，编译器可能发现 `sum` 从没被读取，直接删掉整段循环，基准就失真了。
+- **`test::black_box(x)`**：把值喂给编译器的「黑盒」，阻止优化器把整个循环优化掉（否则 `let sum = 0; sum += a.load();` 会被发现「sum 没被用」而整段删除）。
+- **`Barrier` 编排并发**：多线程 bench 不能简单 `for thread in threads { spawn }`，因为 `b.iter` 是**单线程**循环——必须让工作线程在每轮 iter 的边界上同步，否则测的是「线程启动开销」而非「load 吞吐」。
 
-对照看 RMW 与 CAS 的写法，注意它们故意制造了「递增」以避免每次操作等价：
+#### 4.3.3 源码精读
 
-[benches/atomic_cell.rs:L29-L37](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L29-L37) 的 `compare_exchange_u8` 每轮 `i = i.wrapping_add(1)`，让期望值不断变化，模拟真实 CAS 用法。`fetch_add_u8`（[L23-L27](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L23-L27)）则是纯 RMW。把 `load`/`store`/`fetch_add`/`CAS` 四者放一起看，就能横向比较「只读」「只写」「RMW」「CAS」在同一类型上的相对代价。
+**(1) harness 声明与单线程单操作基准**
 
-**(3) 并发基准：`Barrier` 对齐 + `thread::scope`**
+[benches/atomic_cell.rs:1-7](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L1-L7) —— `#![feature(test)]` + `extern crate test` 是 nightly bench 的固定开场。
 
-`concurrent_load_u8` 是整篇最值得读的部分：
+[benches/atomic_cell.rs:9-15](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L9-L15) —— `load_u8`：累加 `sum` 并在循环外 `black_box(sum)`，迫使编译器保留每次 `load`。文件对 `u8` 和 `usize` 各测了 `load/store/fetch_add/compare_exchange` 四种操作，组成一张「操作 × 宽度」的 2×4 矩阵（benches/atomic_cell.rs:9-113），让你能横向比操作、纵向比宽度。
 
-[benches/atomic_cell.rs:L39-L83](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L39-L83)。它用 `crossbeam_utils::thread::scope`（呼应 [u4-l1](u4-l1-thread-scope.md)）起 2 个工作线程，关键常量：
+**(2) 并发基准：Barrier + thread::scope**
 
-```rust
-const THREADS: usize = 2;
-const STEPS: usize = 1_000_000;
-let start = Barrier::new(THREADS + 1);   // 2 worker + 主线程
-let end = Barrier::new(THREADS + 1);
-let exit = AtomicCell::new(false);
-```
+`concurrent_load_u8` 是全文件的精华，展示如何用两个 Barrier 把 `b.iter` 的轮次边界对齐到工作线程：
 
-每个工作线程的循环体：
+[benches/atomic_cell.rs:39-83](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L39-L83) —— 设计要点拆解：
 
-```rust
-loop {
-    start.wait();                        // 三方对齐起跑
-    let mut sum = 0;
-    for _ in 0..STEPS { sum += a.load(); }
-    test::black_box(sum);
-    end.wait();                          // 三方对齐收尾
-    if exit.load() { break; }            // 主线程通知退出
-}
-```
+- **三把同步量**：`start`（开跑栅栏）、`end`（结束栅栏）、`exit`（退出标志，用 `AtomicCell<bool>`）。`start`/`end` 各 `THREADS + 1`，多出的 1 是主线程自己。
+- **工作线程循环**：每轮 `start.wait()` → 跑 `STEPS`（100 万）次 `load` → `end.wait()` → 查 `exit` 决定是否退出。
+- **被测的就是 `start.wait(); end.wait();` 本身**：
 
-主线程的被测部分：
+[benches/atomic_cell.rs:73-76](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L73-L76) —— `b.iter` 里只有两次 Barrier 等待。每轮 iter 期间，两个工作线程各跑 100 万次 `load`，iter 结束时主线程在 `end.wait()` 等它们完成。Bencher 测的是「一轮 iter 的墙钟时间」——除以 `THREADS * STEPS` 就是「高竞争下单次 load 的成本」。这个数字会比单线程 `load_u8` 大得多，差额就是 cache line 争用的代价。
+- **干净退出**：`exit.store(true)` 后再过一次 `end.wait()` 确保工作线程读到 `exit` 后退出，scope 才能正常返回（呼应 4.1 节「Miri 要求无游离线程」）。
 
-```rust
-b.iter(|| {
-    start.wait();
-    end.wait();
-});
-```
+对比 `concurrent_load_usize`（benches/atomic_cell.rs:115-159）与 `concurrent_load_u8`，可以看出竞争成本还随类型宽度变化——`usize` 占满缓存行，争用更激烈。
 
-这个设计精妙在：`b.iter` 内部只是两次 `Barrier::wait`，**实际负载（200 万次 load）发生在两次 wait 之间的工作线程里**。框架测的耗时恰好是「等两个 worker 各跑完 100 万次 load」的墙钟时间。起跑前还有一次「预热」的 `start.wait(); end.wait();`（[L70-L71](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L70-L71)）让 worker 先进入循环；测完后 `exit.store(true)` 通知退出。`concurrent_load_usize`（[L115-L159](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L115-L159)）结构完全相同，只是类型换成 `usize`，用来对比「不同宽度的原子 load 在并发下的 cache 争用」。
-
-**(4) 顶层 doc-test 配置**
-
-最后补一处容易被忽略的细节：[src/lib.rs:L28-L31](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L28-L31) 的 `#![doc(test(...))]`：
-
-```rust
-#![doc(test(
-    no_crate_inject,
-    attr(allow(dead_code, unused_assignments, unused_variables))
-))]
-```
-
-`no_crate_inject` 表示文档里的代码示例不会自动 `use crossbeam_utils`，必须显式写全路径；`attr(allow(...))` 让 doc-test 里允许「看起来没用」的变量——因为文档示例常展示片段而非完整程序。这是「测试/示例」侧的工程化收尾，和基准一样属于「非功能但影响质量基础设施」的部分。
+> 运行方式：`cargo +nightly bench`（需 nightly，因 `#![feature(test)]`）。stable 上 `#[bench]` 不可用，所以 bench 不在普通 `cargo test` 流程里。
 
 #### 4.3.4 代码实践
 
-> **实践目标**：用 `test::Bencher` + `Barrier` 模式，测量「单线程 vs 2 线程」下 `fetch_add` 的吞吐差异。
->
-> **操作步骤**（自己写 + 本地运行）：
-> 1. 仿照 [benches/atomic_cell.rs:L39-L83](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/benches/atomic_cell.rs#L39-L83)，把工作线程里的 `sum += a.load()` 换成 `a.fetch_add(1)`。
-> 2. 同时保留一个单线程版本 `fetch_add_contention`，结构类似 `fetch_add_u8`。
-> 3. 用 `cargo +nightly bench` 跑两个基准，记录它们的 `ns/iter`。
->
-> **需要观察的现象**：2 线程版每次 `fetch_add` 的均摊耗时通常显著高于单线程版——这是 RMW 在 cache line 争用下的典型代价（cache line 在两核间反复 invalidate/transfer）。
->
-> **预期结果**：单线程 `fetch_add` 接近一条 `LOCK XADD` 指令的延迟（数 ns）；2 线程版每次操作延迟可能高出一个数量级。把两个数字相除，就能量化「竞争开销倍数」。
->
-> 待本地验证：基准需 nightly 工具链且结果因机器而异，本环境不保证可运行；若无法跑，请完成步骤 1–2 的代码编写与逻辑推演。
+**实践目标**：用本节的 Barrier 模式，写一个 `concurrent_fetch_add` bench，比较高竞争下 `AtomicCell::fetch_add` 与「裸自旋 CAS」的吞吐差异。
+
+**操作步骤**：
+
+1. 复制 `concurrent_load_u8` 的骨架。
+2. 把工作线程里的 `sum += a.load()` 换成 `a.fetch_add(1)`，把 `STEPS` 调小到例如 100_000（`fetch_add` 比 `load` 贵）。
+3. 跑 `cargo +nightly bench concurrent_fetch_add`。
+
+**需要观察的现象**：记录单次 `fetch_add` 的平均纳秒数。
+
+**预期结果**：高竞争下 `fetch_add` 单次成本显著高于单线程 `fetch_add_u8` bench（benches/atomic_cell.rs:23-27），因为 CAS 失败重试和 cache line 弹跳。具体数值**待本地验证**——本讲不假设已运行。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`concurrent_load_u8` 里为什么 `b.iter` 只放两个 `Barrier::wait`，而不把 `for _ in 0..STEPS { a.load() }` 直接放进 `b.iter`？
+**练习 1**：`b.iter` 里如果去掉 `test::black_box(sum)`，会发生什么？
 
-**参考答案**：因为要把「2 个线程**并行**跑 load」的耗时测准。如果把循环放进主线程的 `b.iter`，就成了单线程顺序 load，测不到并发争用。把循环放在 2 个 worker 线程里、用 `Barrier` 让它们同时起跑同时结束，主线程的 `b.iter` 只测「等两端各跑 100 万次」的墙钟时间——这才真实反映「2 核并发读同一 `AtomicCell`」的吞吐。
+**答案**：编译器会发现 `sum` 算出来后从未被读取，于是把整个 `for _ in 0..STEPS { sum += a.load() }` 循环整体删除，bench 测到的将是「空循环 + 两次 Barrier」的时间，`load` 成本被完全漏掉。`black_box` 强制编译器认为 `sum` 被「外部消费」，从而保留每次 `load`。
 
-**练习 2**：去掉 `test::black_box(sum)` 会怎样？
+**练习 2**：为什么并发 bench 用 `THREADS + 1` 把主线程也算进 Barrier？
 
-**参考答案**：编译器很可能发现 `sum` 计算完从未被读取（worker 线程里 `sum` 是局部变量，循环结束就丢弃），把整个 `for _ in 0..STEPS { sum += a.load() }` 当死代码消除。于是 `b.iter` 实际测到的几乎是「两次 `Barrier::wait` 的开销」，而非 100 万次 load——基准数字会漂亮得失真。`black_box` 强制编译器认为 `sum` 有外部可观察的副作用，从而保住负载循环。这是写任何微基准都必须警惕的「优化器消除」陷阱。
-
----
+**答案**：`b.iter` 在主线程里循环。每轮 iter 主线程要在 `start.wait()` 放工作线程跑、在 `end.wait()` 等它们跑完——主线程本身是同步的一方，所以 Barrier 容量必须包含主线程（`THREADS + 1`），否则 Barrier 永远凑不齐人数而死锁。
 
 ## 5. 综合实践
 
-把本讲三节串起来，做一个**端到端**的「原语 + 测试 + 基准」小项目：
+把本讲三块内容串起来：为你**自己**写一个最小的并发原语，并配上「能被 loom / Miri 验证」的测试。
 
-1. **实现**：用 `AtomicCell<u64>` 实现一个线程安全的「最新值快照」结构（多写者 `store`、一读者 `load`），这正是 [u2-l1](u2-l1-atomiccell-api.md) 综合实践要求的东西。
-2. **正确性测试**（用 4.1 的套路）：
-   - 单线程契约：`store` 后 `load` 立即读到新值。
-   - 并发不变量：起 4 个写者各 `store` 自己的固定值、1 个读者循环 `load` 一万次，断言「读到的值**必定是某个写者写入的完整值**」——绝不会是撕裂的中间态。这正是 SeqLock 乐观读承诺的性质（见 [u2-l3](u2-l3-atomiccell-global-lock-seqlock.md)）。
-3. **多执行器验证**（用 4.2 的链路）：
-   - `cargo test` 通过。
-   - `cfg!(miri)` 缩放迭代后，`cargo +nightly miri test` 通过。
-   - 若装了 loom，写一个 2 写者 + 1 读者的 loom 模型测试，`RUSTFLAGS="--cfg crossbeam_loom" cargo test` 通过。
-4. **基准**（用 4.3 的写法）：仿 `concurrent_load_usize`，测「2 写者并发 store + 1 读者 load」的吞吐，对比「读写比 1:1」与「读写比 1000:1」两种负载。
+**任务**：实现一个 `Snapshot<T: Copy>` 类型——内部一个 `AtomicCell<T>`，提供 `set(&self, t: T)` 和 `get(&self) -> T`，多写一读。这是 u2-l1 综合实践里「最新值快照」的简化版。
 
-完成后再回头看 `tests/atomic_cell.rs` 与 `benches/atomic_cell.rs`，你会发现自己写的版本与仓库里的几乎是同构的——这说明你已经掌握了 crossbeam-utils 验证并发原语的**标准范式**。
+**步骤**：
 
-> 待本地验证：综合实践涉及多工具链，本环境不保证全部可运行；建议至少完成步骤 1–2（实现 + 正确性测试），它们在普通 `cargo test` 下即可闭环。
+1. **实现**：用 `crossbeam_utils::atomic::AtomicCell`，`set` 调 `store`，`get` 调 `load`。约 15 行。
+
+2. **写不变量压力测试**（套用 4.1 的「不变量型」）：
+   - 一个写线程不断 `set(0)` / `set(usize::MAX)` 交替。
+   - 一个读线程不断 `get()`，断言读到的值**要么是 0 要么是 usize::MAX**，绝不可能是「写了一半」的中间值。
+   - 循环次数用 `const N: usize = if cfg!(miri) { 10_000 } else { 1_000_000 };`（照搬 issue_833 的写法）。
+
+3. **分别在三套工具下验证**：
+   - 正确性基线：`cargo test --features atomic`。
+   - Miri（查 UB / 撕裂读）：`cargo +nightly miri test --features atomic`。若 `Snapshot` 内部依赖 `AtomicCell` 的乐观读，理论上 force_fallback 下 Miri 应通过；若直接 `load`，Miri 会校验无数据竞争。
+   - loom：注意 `AtomicCell` 在 loom 下**不可用**（4.2.3 的盲区），所以这个 `Snapshot` 没法直接上 loom。**改用 `AtomicUsize` 重写一版** `SnapshotUsize`，再设 `RUSTFLAGS="--cfg crossbeam_loom" cargo test --features atomic,loom`，让 loom 穷举线程交错。
+
+4. **记录**：哪个工具抓到了什么（理想情况下三者都通过），并解释为什么 `Snapshot` 版本上不了 loom 而 `SnapshotUsize` 可以。
+
+**预期结果**：你应当体会到——**正确性测试（`cargo test`）只能证明「没在这一次跑出错」，而 Miri/loom/TSan 才是给 `unsafe` 并发代码真正兜底的三件套**；并且 loom 的覆盖盲区逼着你在「可测性」与「实现自由度（`repr(transparent)`）」之间做权衡。
+
+> 待本地验证：Miri 与 loom 均需 nightly 工具链；具体能否跑通取决于本地环境，本讲不假设已运行。
 
 ## 6. 本讲小结
 
-- **测试组织**：`tests/` 一个类型一个集成测试文件，验证对外 `pub` 契约而非内部实现；文件清单对应 README 的 Atomics / Thread synchronization / Utilities 三大类。
-- **断言风格**：crossbeam-utils 反复用五类套路覆盖普通断言难表达的性质——单线程契约、**drop 计数**（盯死析构）、**语义相等**（盯死 CAS 假失败重试）、**并发不变量**（盯死「无论怎么交错都不该发生」）、**回归用例**（钉死历史 issue）。
-- **三工具互补**：Miri 抓单次执行里的 UB（`cfg(miri)` 自动）、loom 穷举线程交错抓竞争（`--cfg crossbeam_loom` 切 `primitive` 抽象层）、TSan 抓运行期真实竞争（`--target ...gnutsan` 经 build.rs 发 `crossbeam_atomic_cell_force_fallback`）。三者不可互相替代，且各有盲区。
-- **一份测试、多执行器**：`always_use_fallback()` 用编译期宏（平台有无 CAS）套运行期 `cfg!(any(miri, crossbeam_loom, ...))`，让同一个 `is_lock_free` 断言在不同执行器下期望不同值——这是整个测试体系的核心技巧。
-- **基准维度**：`benches/atomic_cell.rs` 按类型（u8/usize）× 操作（load/store/fetch_add/CAS）× 竞争度（单线程/2 线程）的笛卡尔积切分；并发基准用 `Barrier` 对齐起跑、`b.iter` 只测「等待两端跑完」的耗时，并用 `black_box` 防优化器消除。
-- **CI 分工**：常规 `cargo test`（stable，单线程）管正确性、Miri/sanitizer/loom 三条 nightly job 管「证明无竞争」、bench 只在 nightly `cargo check --all-targets` 确保可编译（不作为门禁，因结果因机器而异）。
+- `tests/` 采用「一类型一文件」组织；并发正确性多用**间接断言**——Drop 计数（`static AtomicUsize`）、不变量（`>= 0` / 非法值检测）、通道编排时序（`try_recv` 证明阻塞）。
+- `cfg` 闭环：rustc 自动设 `miri`，CI 设 `crossbeam_loom`，build.rs 据 TARGET/sanitizer 设 `crossbeam_no_atomic` / `crossbeam_sanitize_thread` / `crossbeam_atomic_cell_force_fallback`；测试用 `cfg!(miri)` 缩迭代、用 `always_use_fallback()` 让断言跨配置自洽。
+- loom / Miri / TSan **互补**：loom 穷举交错（但测不了 `AtomicCell`/`ShardedLock`/`thread::scope`）、Miri 查 UB（慢，需缩迭代）、TSan 查真实数据竞争（故 force_fallback）。
+- `benches/atomic_cell.rs` 测两个维度：单线程「操作 × 宽度」矩阵、多线程竞争读；并发 bench 的关键是 **Barrier 编排 `b.iter` 边界** + **`black_box` 防优化**。
+- `#[bench]` 需 nightly（`#![feature(test)]`），故 bench 独立于 `cargo test` 流程，靠 `cargo +nightly bench` 运行。
+- 测试侧用宏生成（`test_arithmetic!`）对偶实现侧的宏生成（`impl_arithmetic!`），实现与测试对称演进。
 
 ## 7. 下一步学习建议
 
-本讲是 crossbeam-utils 学习手册的最后一篇，原语、机制、测试三条线已全部收口。接下来可以：
-
-1. **横向扩展到姊妹 crate**：把本讲学到的「drop 计数 / 并发不变量 / loom + Miri + TSan 三件套 / `Barrier` 并发基准」范式，套用到 `crossbeam-epoch`、`crossbeam-channel`、`crossbeam-queue`、`crossbeam-skiplist` 上。它们的 `tests/` 与 `ci/` 脚本结构高度相似，但各自有更复杂的并发场景（如 epoch 的 GC、channel 的 select）。可以先读 [ci/miri.sh:L17-L28](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/ci/miri.sh#L17-L28) 看 channel 在 Miri 下需要哪些特殊 flag（如 `-Zmiri-ignore-leaks`）。
-2. **深入 loom 本身**：本讲只把 loom 当工具用，建议读 loom 文档，理解「执行图」「preemption boundary」「`LOOM_MAX_PREEMPTIONS` 如何影响模型规模与覆盖率」的折中，体会 [src/lib.rs:L60-L65](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-utils/src/lib.rs#L60-L65) 那个 `compiler_fence` FIXME 为何会「漏掉某些竞争」。
-3. **回归源码做二次开发**：挑一个你认为可以优化的点（例如给 `AtomicCell` 加一个 `fetch_update` 的变体，或给 `Backoff` 接入 `Parker` 的混合等待），按本讲的范式为它同时补上：单元/集成测试、Miri/loom 验证、`#[bench]` 对比——这正是「专业地修改并发库」的完整闭环。
+- **横向对比同族 crate 的测试**：阅读 `crossbeam-epoch` / `crossbeam-channel` 的 `tests/` 与 loom 配置，体会「不同并发模型需要不同的测试策略」；`crossbeam-channel` 的 loom 覆盖比 `crossbeam-utils` 更完整，可作为 loom 实战的进阶范例。
+- **深入 loom**：照着本讲的 `SnapshotUsize` 实践，系统学习 loom 的 `model.rs`（`loom::model::Builder`）如何控制交错枚举上界，以及 `lazy_static!` / `loom::sync::Arc` 的写法差异。
+- **回归源码**：把 u5-l1（AtomicCell unsafe 安全论证）与本讲的 `issue_833` / `garbage_padding` 对读——每条 SAFETY 论证都对应一个回归测试，理解「为什么这样测」。
+- **学完本讲，u5 单元全部完成**：建议以综合实践里的 `Snapshot` 为题，写一篇自己的「测试 + 基准」小报告，作为整本手册的收官练习。

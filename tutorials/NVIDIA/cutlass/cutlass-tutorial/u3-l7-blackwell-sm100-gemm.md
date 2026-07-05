@@ -2,356 +2,394 @@
 
 ## 1. 本讲目标
 
-本讲承接 u2-l9（Hopper warp-specialized GEMM 实战），把视角从 Hopper（SM90）推进到 Blackwell（SM100）。学完后你应当能够：
+本讲承接 u2-l9（Hopper warp-specialized GEMM 实战）与 u3-l1（异步流水线），把目光从 Hopper（SM90）移到 **Blackwell（SM100）**。读完本讲，你应当能够：
 
-- 说清 Blackwell 的两条新硬件主线——**UMMA 指令（`tcgen05.mma`）**与**张量内存（Tensor Memory, TMEM）**——以及它们如何改变内核的角色划分。
-- 读懂 `CollectiveMma<MainloopSm100TmaUmmaWarpSpecialized<...>>` 这条集体主循环的内部结构：两条流水线、TMEM 累加器、producer/consumer 拆分。
-- 解释 SM100 内核为什么从 SM90 的「2 个 warp group」演变成「5 类 warp」，以及 **CLC（Cluster Launch Control）动态调度器**如何取代静态 raster 调度。
-- 理解 cluster（线程块簇）如何让两个 SM 通过 **2SM UMMA（`cta_group::2`）** 与分布式共享内存协作算一个更大的 tile，并知道「分布式 GEMM」在 CUTLASS 中的扩展点在哪里。
+- 说清楚 Blackwell 引入的 **UMMA 指令**（`tcgen05.mma`）与 Hopper 的 `wgmma` 在「累加器存放位置」上有何本质区别；
+- 理解什么是 **TMEM（Tensor Memory，张量内存）**，以及它为什么能把 MMA 与 epilogue 解耦到不同 warp；
+- 看懂 SM100 collective MMA（`sm100_mma_warpspecialized.hpp`）的 producer/consumer 主循环，并指出它和 SM90 collective 的结构性差异；
+- 了解 **cluster（簇）** 与 **CLC（Cluster Launch Control）动态调度器** 如何协作，以及「跨 2 个 SM 的分布式 MMA（2x1SM）」这一扩展点。
 
-本讲只讲 dense（稠密）FP16 GEMM 这条主线；块缩放（NVFP4/MXFP）留到 u3-l6，Stream-K/Grouped 留到 u3-l3/u3-l4。
+本讲是「专家层」内容，重在源码阅读与概念串接；除明确标注外，多数运行类实践需要真实的 Blackwell（compute capability 100a）硬件。
 
 ## 2. 前置知识
 
-在进入 SM100 之前，先回顾几个 u2-l9 / u3-l1 已建立的关键认知（本讲不再重复推导细节）：
+在进入本讲前，请确保你已经掌握（这些在前序讲义中讲过，本讲不再重复）：
 
-- **三段式通用模型**：CUTLASS 3.x 把一次 GEMM 拆成 `kernel::GemmUniversal` 外壳 + `CollectiveMainloop`（搬 A/B + MMA）+ `CollectiveEpilogue`（加载 C、α/β、写回 D）+ `TileScheduler`（分配 tile）。SM100 仍是这套外壳，变的只是各部件的「内馅」。
-- **Hopper warp specialization**：SM90 把线程分成 **producer warp group**（DMA warp 发 TMA 搬数据）与 **consumer warp group**（发 `wgmma` 做乘加，兼跑 epilogue），靠 `PipelineTmaAsync` 多级缓冲同步。consumer warp group 同时拥有**寄存器里的累加器**，所以它必须亲自跑 epilogue 把累加器卸到显存。
-- **TMA**：Hopper 引入的异步张量搬运单元，靠 128B 描述符寻址，自管越界，配合 mbarrier 实现「搬算重叠」。Blackwell 沿用 TMA，并新增跨 2SM 的 `SM100_TMA_2SM_LOAD`。
+- **CUTLASS 3.x 三段式模型**：`kernel::GemmUniversal` 外壳 + `CollectiveMainloop`（搬 A/B + MMA）+ `CollectiveEpilogue`（后处理 + 写回）+ `TileScheduler`（u2-l7）。
+- **CollectiveBuilder 的自动组装**：吃高层参数（架构、类型、TileShape、Cluster、Schedule），推断出 TiledMma、TMA copy atom、共享内存布局与流水线级数（u2-l8）。
+- **Hopper warp specialization**：producer warp group 发 TMA、consumer warp group 发 `wgmma`，靠 `PipelineTmaAsync` 多级缓冲同步（u2-l9、u3-l1）。
+- **CuTe 的 Layout/Tensor/Atom** 抽象，以及 `cute::copy` / `cute::gemm` 如何作用于不同内存空间的张量（u2-l1 ~ u2-l4）。
 
-一句话总结 SM90 现状：**累加器在 consumer warp 的寄存器文件里**。这正是 Blackwell 要动刀的地方。
+一个关键的事实预先点明（后面会反复用到）：在 **SM90 上，累加器（accumulator）住在 consumer warp group 的寄存器（RMEM）里**，consumer 既做 `wgmma`、又做 epilogue；而 **SM100 把累加器搬到了 TMEM**，从而让 MMA 和 epilogue 可以由不同 warp 并发执行。本讲的核心就是围绕这一改变展开。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| [examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu) | 官方 Blackwell FP16 GEMM 示例，用 `CollectiveBuilder` 组装并启动内核，是本讲的入口与综合实践对象（任务规格里的 `blackwell_gemm.cu` 实际文件名为此）。 |
-| [include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp) | SM100 dense 集体主循环 `CollectiveMma<MainloopSm100TmaUmmaWarpSpecialized<...>>`，本讲核心。 |
-| [include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp) | SM100 内核外壳，定义 5 类 warp 角色、TMEM 分配/释放、CLC 调度衔接（讲清「谁干什么」）。 |
-| [include/cute/arch/mma_sm100_umma.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp) | UMMA 指令（`tcgen05.mma`）的裸 PTX 封装，按数据类型/1SM·2SM/是否稀疏各一个 struct。 |
-| [include/cute/arch/tmem_allocator_sm100.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/tmem_allocator_sm100.hpp) | TMEM 分配器 `Allocator1Sm` / `Allocator2Sm`，把 `tcgen05.alloc/dealloc` 包成 C++。 |
-| [include/cutlass/detail/sm100_tmem_helper.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/detail/sm100_tmem_helper.hpp) | `make_sm100_accumulator`：把累加器建成落 TMEM 的张量。 |
-| [include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp) | SM90 内核外壳，仅作对照（2 个 warp group、寄存器累加器）。 |
-
-> 说明：任务规格列出的 `sm90_mma_tma_warpspecialized.hpp` 在本仓库中的真实文件名为 `sm90_mma_tma_gmma_ss_warpspecialized.hpp`（FP16 默认走 SS 特化）。本讲的 SM90 对照以内核文件为准。
+| `examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu` | 官方最小 Blackwell FP16 GEMM 示例，展示了从 Hopper 迁移到 Blackwell 所需的最少改动 |
+| `include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp` | SM100 collective MMA（主循环）：producer 用 TMA 搬 A/B，consumer 用 UMMA 把结果累加进 TMEM |
+| `include/cute/arch/mma_sm100_umma.hpp` | UMMA 指令的 PTX 封装（`SM100_MMA_*_SS` / `_TS` / `_2x1SM_*` 等结构体） |
+| `include/cute/arch/tmem_allocator_sm100.hpp` | TMEM 的分配/释放器（`Allocator1Sm` / `Allocator2Sm`），封装 `tcgen05.alloc` / `dealloc` PTX |
+| `include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp` | SM100 设备端内核：把 warp 划分成 MMA/Sched/MainloopLoad/EpilogueLoad/Epilogue 五类角色并接线 |
+| `include/cutlass/gemm/dispatch_policy.hpp` | `MainloopSm100TmaUmmaWarpSpecialized` 策略结构体，串起 mainloop 与 Schedule 标签 |
+| `include/cute/arch/mma_sm100_desc.hpp` | `UMMA` 命名空间：`Major`、`ScaleIn`、`ScaleOut` 等枚举与描述符构造工具 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 UMMA 指令与 TMEM（张量内存）
+### 4.1 UMMA 与 TMEM
 
 #### 4.1.1 概念说明
 
-Blackwell Tensor Core 引入了两件互相配套的新东西：
+Blackwell（SM100）启用了第五代 Tensor Core，其矩阵乘加指令族在 PTX 里叫 `tcgen05.mma`，CUTLASS 内部统称 **UMMA（Unified MMA，统一 MMA）**。示例文件头注释把 Blackwell 相对 Hopper 的关键变化总结成了四条，其中前三条直接对应本模块：
 
-- **UMMA（Unified Matrix Multiply-Accumulate）指令 `tcgen05.mma`**：继 `mma.sync`（Volta–Ampere，warp 级、操作数在寄存器）与 `wgmma.mma_async`（Hopper，warp group 级、A/B 可来自共享内存描述符）之后的第三代 Tensor Core 指令。官方示例注释直接点明它的价值：相比 Hopper 的 WGMMA，**吞吐翻倍**。注意 WGMMA 在 Blackwell 上**不再兼容**。
-- **TMEM（Tensor Memory）**：每颗 SM 专有的一块高速内存（容量 128 行 × 512 列 × 32 位）。UMMA 指令的**累加结果直接写进 TMEM，而不是寄存器文件**。
+[examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:L38-L53](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L38-L53) —— 官方对 Blackwell 四大特性的概述（下面逐条对照）。
 
-为什么必须配套？因为如果累加器还落在寄存器里，那条 warp 就得一直「抱」着一大堆寄存器，难以把 MMA 与 epilogue 分给不同 warp。把累加器搬进 TMEM 这块「公共蓄水池」后，**MMA warp 只管往 TMEM 写，epilogue warp 只管从 TMEM 读**，两者就能真正并发——这是 SM100 内核角色重排的物理基础。
+要点有三：
 
-示例文件开头的注释把这两点列得很清楚：
+1. **吞吐翻倍**：`tcgen05` 相对 Hopper 的 `wgmma` 有约 2× 的 Tensor Core 吞吐，且 Hopper 的 `wgmma` 指令在 Blackwell 上不可用。
+2. **TMEM 取代寄存器存累加器**：Blackwell 引入了每 SM 专属的新存储 **Tensor Memory（TMEM）**。UMMA 指令把累加结果写进 TMEM，而**不是**寄存器堆（Register File）。
+3. **解耦 MMA 与 epilogue**：正因为累加器落 TMEM（一种「共享可见」的片上存储），MMA 与 epilogue 可以被拆给不同的 warp 并发执行——这是 SM100「warp specialization 的扩展风味」的物质基础。
 
-[examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:38-53](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L38-L53) —— 说明了 (1) `tcgen05` 吞吐翻倍且 WGMMA 不再兼容、(2) 累加结果落 TMEM、(3) 借 TMEM 把 MMA 与 epilogue 解耦到不同 warp、(4) 基于 cluster launch control 的动态调度器。
+TMEM 的容量在源码里写得很直白：
+
+\[ \text{TMEM 容量} = 128\,\text{行} \times 512\,\text{列} \times 32\,\text{位} = 256\,\text{KB / SM} \]
+
+它用「128 个 data-path（DP）× 512 列」的二维结构组织，每列 32 位，地址按 `uint32_t` 字编址。下面会看到它如何被显式分配。
 
 #### 4.1.2 核心流程
 
-一条 UMMA 指令的逻辑形态是：
+一条 UMMA 指令在 CUTLASS 里的执行流程（以最常用的 SS 风味为例）：
 
-\[
-D_{\text{TMEM}} \;=\; A_{\text{smem\_desc}} \times B_{\text{smem\_desc}} \;+\; (\text{scaleC} \;?\; C_{\text{TMEM}} \;:\; 0)
-\]
+1. **取操作数地址**：A、B 都来自共享内存，但要先被打包成 64 位的 **shared memory descriptor**（`desc_a` / `desc_b`）。descriptor 把「smem 基址 + swizzle 模式 + leading dim + 主要维」编码进一个 `uint64_t`。
+2. **取累加器地址**：累加器 C 是一个 TMEM 地址 `tmem_c`（`uint32_t`），指向此前由 `tcgen05.alloc` 分配出的 TMEM 列。
+3. **由单线程发射**：UMMA 是 warp-group 级异步指令，只需 `elect_one_sync()` 选出的一个线程发射 PTX；硬件按 descriptor 自行取数、做乘加。
+4. **首拍清零 / 后续累加**：第一次 MMA 用 `ScaleOut::Zero`（结果 = A·B，丢弃旧 C），后续用 `ScaleOut::One`（结果 = A·B + C）。这个开关在 collective 主循环里用 `tiled_mma.accumulate_` 字段动态切换（见 4.2.3）。
 
-要点：
+UMMA 有三种典型变体，命名遵循「**操作数 A 来源 + 操作数 B 来源**」：
 
-- 操作数 A、B 用 **64 位共享内存描述符**（`desc_a` / `desc_b`，`uint64_t`）寻址——硬件拿着描述符自己去共享内存取数，软件不碰具体地址。
-- 累加器 C/D 用 **32 位 TMEM 地址**（`tmem_c`，`uint32_t`）寻址。
-- `scaleC` 是一个谓词：`0` 表示本次「清零再累加」（K 维第一块），`1` 表示「累加到原值」（K 维后续块）。对应枚举 `UMMA::ScaleOut::{Zero, One}`。
-- 还有一个 **指令描述符 `idescE`**（高 32 位）编码数据类型/swizzle 等；以及一组可选 mask（用于稀疏或更复杂场景）。
-- `cta_group::1`（单 SM）/ `cta_group::2`（cluster 内 2 个 SM 协同）选择是 1SM 还是 2SM 形态。
+- **SS**（Shared-Shared）：A、B 都来自共享内存 descriptor；
+- **TS**（TMEM-Shared）：A 来自 TMEM（用 `[%1]` 寻址），B 来自共享内存 descriptor；
+- **2x1SM**：上面任一种的「跨 2 个 SM」版本，一条 MMA 横跨 cluster 里 2 个 CTA（详见 4.4）。
+
+三种变体的**累加器一律落在 TMEM**（PTX 里写 `[%0]`）。
 
 #### 4.1.3 源码精读
 
-先看寄存器别名，确认 A/B 是描述符、C 是 TMEM 地址：
+先看一条最朴素的 SS 风味 UMMA 封装。`SM100_MMA_F16BF16_SS` 把 PTX `tcgen05.mma.cta_group::1.kind::f16` 包成一个 `fma` 静态方法：
 
-[include/cute/arch/mma_sm100_umma.hpp:52-55](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L52-L55) —— `ARegisters = uint64_t[1]`、`BRegisters = uint64_t[1]`（两个 64 位描述符），`CRegisters = uint32_t[1]`（一个 TMEM 地址）。`DRegisters = void` 因为 D 就写回 C 指向的 TMEM，没有单独的 D 寄存器。
+[include/cute/arch/mma_sm100_umma.hpp:L86-L119](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L86-L119) —— FP16/BF16 的 1-CTA SS 风味 UMMA。注意 `[%0]` 是 TMEM 累加器地址 `tmem_c`，`%1`/`%2` 是 A/B 的共享内存 descriptor，`p` 是由 `scaleC`（`ScaleOut`）派生的谓词——它决定本拍是「清零再写」还是「累加」。
 
-再看 FP16 的 1SM `fma`，注意它由 **单条 elect_one 线程发射**（UMMA 是 warp-group 级异步指令，整组共享一条指令的语义）：
+`CRegisters = uint32_t[1]` 这一行尤为关键：在 Hopper（`wgmma`）里 C 是一组寄存器别名（每个线程持有一段寄存器片段）；而这里 C **只是一个 32 位的 TMEM 地址**，因为真正的数据在 TMEM 而非寄存器堆里。
 
-[include/cute/arch/mma_sm100_umma.hpp:104-120](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L104-L120) —— 内联 PTX `tcgen05.mma.cta_group::1.kind::f16 [tmem_c], desc_a, desc_b, idescE, ..., p;`，其中 `p` 是由 `scaleC` 经 `setp.ne` 生成的谓词，决定是否累加。
+再看 TS 风味，A 改从 TMEM 取（PTX 里写 `[%1]`，对应 `tmem_a`）：
 
-2SM 形态（cluster MMA）只是把 `cta_group::1` 换成 `cta_group::2`、M 维放大到 128/256、mask 数量翻倍：
+[include/cute/arch/mma_sm100_umma.hpp:L171-L200](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L171-L200) —— FP16/BF16 的 TS 风味 UMMA：A 来自 TMEM，B 仍是共享内存 descriptor。这正是「把 A 常驻 TMEM、跨多条 UMMA 复用」的基础。
 
-[include/cute/arch/mma_sm100_umma.hpp:549-586](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L549-L586) —— `SM100_MMA_F16BF16_2x1SM_SS`（命名「2x1SM」= M 方向 2 个 CTA、每 CTA 1 SM），断言 `M == 128 || M == 256`，发射 `tcgen05.mma.cta_group::2.kind::f16 ...`。
+控制这些行为的枚举定义在 `UMMA` 命名空间里，便于阅读 PTX 包装时对照：
 
-指令描述符里用到的几个枚举（K 主序/MN 主序、是否累加、swizzle 类型）定义在：
+[include/cute/arch/mma_sm100_desc.hpp:L59-L72](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_desc.hpp#L59-L72) —— `Major`（K 主序 / MN 主序，决定 descriptor 的步长方向）、`ScaleIn`（操作数符号）、`ScaleOut`（首拍清零还是累加）。
 
-[include/cute/arch/mma_sm100_desc.hpp:59-85](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_desc.hpp#L59-L85) —— `UMMA::Major{K, MN}`、`UMMA::ScaleOut{Zero, One}`、`LayoutType{SWIZZLE_NONE, ...}` 等。
+接着看 TMEM 本身如何分配。SM100 没有「全局可见的 TMEM 池」，而是由内核在启动时用专用 PTX 显式申请、结束时显式归还。分配器分两种：1-SM 簇用 `Allocator1Sm`，2-SM 簇用 `Allocator2Sm`：
 
-TMEM 的分配/释放由专用分配器封装，本质是 `tcgen05.alloc` / `tcgen05.dealloc` PTX：
+[include/cute/arch/tmem_allocator_sm100.hpp:L60-L111](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/tmem_allocator_sm100.hpp#L60-L111) —— `Allocator1Sm`。`allocate(num_columns, dst_ptr)` 发出 `tcgen05.alloc.cta_group::1.sync.aligned`，把分配到的 TMEM 起始地址写进一块共享内存（`dst_ptr`），供其它 warp 读取；`free` 发出 `tcgen05.dealloc`；`release_allocation_lock` 在重复分配场景下释放锁。约束：`num_columns` 必须是 32 的幂且在 [32, 512] 内，且只能由单个满员 warp 发射。
 
-[include/cute/arch/tmem_allocator_sm100.hpp:60-111](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/tmem_allocator_sm100.hpp#L60-L111) —— `Allocator1Sm::allocate(num_columns, dst_ptr)` 发射 `tcgen05.alloc.cta_group::1...`，把分配到的 TMEM 基址写进**共享内存**（`dst_ptr` 指向 smem）；`free` 与 `release_allocation_lock` 成对释放。容量常量见 [tmem_allocator_sm100.hpp:45-46](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/tmem_allocator_sm100.hpp#L45-L46)（`128*512*32` 位）。注意注释强调：**整组分配/释放只能由一个 warp 一致地发出**。
+注意容量常量 `MAX_CAPACITY_BITS = 128*512*32`（[include/cute/arch/tmem_allocator_sm100.hpp:L46-L46](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/tmem_allocator_sm100.hpp#L46-L46)），与上面 256KB/SM 的算法一致。
 
 #### 4.1.4 代码实践（源码阅读型）
 
-1. **目标**：把 UMMA 指令的三类操作数（A、B、C）的物理位置与类型对上号。
-2. **步骤**：打开 `mma_sm100_umma.hpp`，比较 `SM100_MMA_F16BF16_SS`（[L86-L121](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L86-L121)）与 `SM100_MMA_F16BF16_TS`（[L171-L215](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L171-L215)）。注意 SS 版 A、B **都**是 `uint64_t` 共享内存描述符；TS 版 A 变成了 `uint32_t tmem_a`（A 也落 TMEM），只有 B 还是描述符。
-3. **观察**：无论哪种，C 永远是 `uint32_t tmem_c`——累加器**必落 TMEM**，这是 SM100 的硬约束。
-4. **预期结果**：你能用一句话概括「SS = A/B 来自 smem 描述符，TS = A 来自 TMEM、B 来自 smem 描述符，C 始终在 TMEM」。
+**目标**：对比 SM90 与 SM100 的 producer/consumer 结构，指出 TMEM 在 SM100 中「取代」了哪个角色——这正是本讲规格里的核心实践任务。
+
+**操作步骤**：
+
+1. 打开 `include/cutlass/gemm/collective/sm90_mma_tma_warpspecialized.hpp`（u2-l9/u3-l1 学过），定位 consumer warp group 的主循环：它在同一个 warp group 里**既**发 `wgmma`、**又**调用 epilogue 的 callback（加载 C、计算 α·acc+β·C、TMA 写回 D）。注意累加器 `accum` 是寄存器张量。
+2. 打开本讲的 `include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp`，看 `mma()` 方法（4.2.3 会精读）顶部的断言：
+   ```cpp
+   static_assert(is_tmem<FrgEngine>::value, "Accumulator must be tmem resident.");
+   ```
+3. 再打开 `include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp` 的 `WarpCategory` 枚举（4.2.3），确认 SM100 内核里有**独立的 `MMA` warp 和独立的 `Epilogue` warp**。
+
+**需要观察的现象 / 结论**：
+
+- 在 SM90：累加器住在 **consumer warp group 的寄存器**里；该 warp group 「身兼两职」——先 MMA 把结果累加到寄存器，再用同一份寄存器跑 epilogue。MMA 和 epilogue 是**串行**在同一组 warp 上的。
+- 在 SM100：累加器搬到 **TMEM**；`MMA` warp 把结果写进 TMEM，`Epilogue` warp **从 TMEM 读**那份累加器再做后处理。
+
+**答案**：TMEM 在 SM100 中取代的，是 SM90 里「**consumer warp group 寄存器中的那份累加器**」这一角色。它从一个 warp 私有的寄存器片段，变成了一块**可被多个 warp 共享访问**的片上存储，于是 MMA warp（写 TMEM）和 Epilogue warp（读 TMEM）得以解耦并发——这就是示例头注释里说的「decouple the execution of MMA and epilogue into separate warps」。
+
+**预期结果**：你应当在笔记里画出如下对照表（答案供参考）：
+
+| 维度 | SM90（Hopper） | SM100（Blackwell） |
+| --- | --- | --- |
+| MMA 指令 | `wgmma.mma_async` | `tcgen05.mma`（UMMA） |
+| 累加器位置 | consumer warp 的寄存器（RMEM） | TMEM（每 SM 专属 256KB） |
+| 谁做 epilogue | 同一个 consumer warp group | **独立的 Epilogue warp** |
+| MMA 与 epilogue 关系 | 串行（同组 warp） | 解耦并发（经 TMEM + accumulator 流水线） |
 
 #### 4.1.5 小练习与答案
 
-- **练习 1**：为什么 UMMA 的 `fma` 只在 `elect_one_sync()` 内发 PTX，而不是 32 个线程各发一次？
-  - **答案**：UMMA 是 **warp-group 级异步指令**，一条指令的语义作用于整个 warp group（128 线程），由硬件广播执行；多线程重复发射不仅浪费还会出错。`elect_one_sync` 选出代表线程发一次即可。
-- **练习 2**：`scaleC`（`UMMA::ScaleOut`）在 K 维循环里如何被使用？
-  - **答案**：K 维第一个分块用 `Zero`（清零累加，等价 `D = A·B`），之后所有分块用 `One`（累加，等价 `D += A·B`）。
+**练习 1**：UMMA 的 SS 与 TS 风味，区别在哪？累加器位置是否不同？
 
----
+> **答**：SS 表示 A、B 都来自共享内存 descriptor；TS 表示 A 来自 TMEM、B 来自共享内存 descriptor。**累加器位置相同**——三种风味都把累加器放 TMEM（PTX `[%0]`）。
 
-### 4.2 Blackwell collective（集体主循环）结构
+**练习 2**：`ScaleOut::Zero` 和 `ScaleOut::One` 分别在主循环的什么时刻使用？
+
+> **答**：处理一个输出 tile 的**第一拍 K** 用 `ScaleOut::Zero`（结果 = A·B，丢弃 TMEM 旧值）；之后的每一拍用 `ScaleOut::One`（结果 = A·B + C，沿 K 维累加）。在 collective 代码里就是 `accumulate_ = UMMA::ScaleOut::Zero` 初值，循环内首拍后改成 `One`。
+
+### 4.2 Blackwell collective 结构
 
 #### 4.2.1 概念说明
 
-SM100 的 dense 集体主循环类型是 `CollectiveMma<MainloopSm100TmaUmmaWarpSpecialized<...>>`（见 [dispatch_policy.hpp:1029-1035](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/dispatch_policy.hpp#L1029-L1035)），它和 SM90 主循环长得「像但不同」：
+SM100 的 collective MMA（主循环）和 SM90 一样是「无状态 collective + warp specialization」的范式，但有两处结构性升级：
 
-- **像**：都是无状态结构；都靠 TMA 把 A/B 从 gmem 搬到 smem；都用 warp specialization 把「搬」和「算」分流。
-- **不同（关键三处）**：
-  1. **算的指令**从 `wgmma` 换成 UMMA（`tcgen05.mma`）。
-  2. **累加器落点**从寄存器换成 TMEM。
-  3. **多出第二条流水线 `AccumulatorPipeline`**：因为累加器在 TMEM 这个公共区，MMA 写完一档后要通知 epilogue「这档可读了」，epilogue 读完要通知 MMA「这档可覆盖了」——这就是累加器流水线，本质是把 SM90 里「consumer 一手包办 mma+epilogue」的串行关系，拆成 MMA（producer）↔ Epilogue（consumer）的并发关系。
+- **两条流水线**：除了搬运 A/B 的 `MainloopPipeline`（`PipelineTmaUmmaAsync`），还多了一条 `AccumulatorPipeline`——它把 TMEM 里的累加器**双缓冲（ACC_PIPE=2）**，让 MMA warp 写一缓冲、epilogue warp 同时读另一缓冲。
+- **五个 warp 角色**：内核层把一个 CTA 内的 warp 划成 MMA、Sched、MainloopLoad、EpilogueLoad、Epilogue 五类，分别承担计算、调度、搬 A/B、搬 C、写回 D。
 
-主循环对外暴露四个动作，分别由不同 warp 调用：`load`（producer 搬 A/B）、`load_tail`、`mma`（consumer 发 UMMA，写 TMEM）、以及配套的 `init_tmem_tensors` / `set_tmem_offsets` / `slice_accumulator`。
+策略 tag 是 `MainloopSm100TmaUmmaWarpSpecialized`，它内嵌一个 `Schedule = KernelTmaWarpSpecializedSm100<...>`，遵循 u2-l7 讲过的「一个标签一个内核」分派方式。
 
 #### 4.2.2 核心流程
 
-主循环内部两条流水线的协作（producer/consumer 视角）：
+SM100 collective 主循环的 producer/consumer 流程（与 `PipelineTmaUmmaAsync` 配合）：
 
 ```
-DMA warp (producer, load):
+Producer（MainloopLoad warp，elect_one 线程发 TMA）:
   for k in K_tiles:
-    producer_acquire(mainloop_pipe)        # 等空缓冲
-    bar = producer_get_barrier(mainloop_pipe)
-    TMA.copy(A[k], B[k])  via *bar          # TMA 翻满门
-    ++mainloop_pipe
+    producer_acquire(stage)              # 等「空」缓冲
+    barrier = producer_get_barrier(stage)
+    TMA copy A[k] -> smem_A[stage]        # 带 multicast mask
+    TMA copy B[k] -> smem_B[stage]        # 硬件 complete_transaction 翻满门
+    ++stage
+  producer_tail()                         # 防止簇内 CTA 提前退出
 
-MMA warp (consumer, mma):
-  accumulator_pipeline.producer_acquire(acc_pipe)   # 等 TMEM 这档可写
+Consumer（MMA warp，elect_one 线程发 UMMA）:
+  accumulate_ = ScaleOut::Zero
+  accumulator_pipeline.producer_acquire() # 等 TMEM 累加器缓冲「空」
   for k in K_tiles:
-    mainloop_pipe.consumer_wait(...)        # 等 A/B 这档就绪
-    cute::gemm(tiled_mma, tCrA[k], tCrB[k], accumulators_in_TMEM)  # 发 UMMA
-    mainloop_pipe.consumer_release(...)     # 释放 A/B 这档
-  # accumulators 此刻在 TMEM，由 accumulator_pipeline 通知 epilogue warp
+    consumer_wait(stage)                  # 等 smem 缓冲「满」
+    for k_block in unrolled_K:
+      gemm(tiled_mma, tCrA[..], tCrB[..], accumulators_in_TMEM)  # 发 tcgen05.mma
+      accumulate_ = ScaleOut::One
+    consumer_release(stage)               # 把 smem 缓冲还给 producer
 ```
 
-注意：`accumulators` 是一个**落 TMEM 的张量**（`is_tmem<FrgEngine>` 强约束），并且多出一个 `ACC_PIPE` 维做双缓冲，让「本档在算/下档在写回」可以并行。
+关键变化：**累加器 `accumulators` 是 TMEM 张量**（`is_tmem<FrgEngine>` 为真），且它被 accumulator 流水线双缓冲——MMA warp 与 epilogue warp 通过它解耦。这与 SM90「consumer 一手做 wgmma 一手做 epilogue、累加器在同组寄存器」形成鲜明对比。
 
 #### 4.2.3 源码精读
 
-**主循环流水线类型**——注意是 `PipelineTmaUmmaAsync`（SM100 专用，比 SM90 的 `PipelineTmaAsync` 多管理 UMMA 的并发语义）：
+先看策略结构体本身（u2-l7 的 policy 标签分派机制的又一个实例）：
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:156-160](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L156-L160) —— `MainloopPipeline = cutlass::PipelineTmaUmmaAsync<Stages, ClusterShape, AtomThrShapeMNK>`。
+[include/cutlass/gemm/dispatch_policy.hpp:L1029-L1035](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/dispatch_policy.hpp#L1029-L1035) —— `MainloopSm100TmaUmmaWarpSpecialized<Stages, SchedPipeStages, AccumPipeStages, ClusterShape, ArchTag>`。它把 mainloop 流水线级数 `Stages`、调度流水线级数、累加器流水线级数与簇形状打包，并内嵌 `Schedule` 标签交给内核偏特化挑选。
 
-**A/B 必须来自共享内存描述符**（这是 UMMA SS 形态的硬要求）：
+接着看 collective 类的两条流水线声明：
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:192-194](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L192-L194) —— `static_assert` 要求 `TiledMma::FrgTypeA/B` 都派生自 `cute::UMMA::DescriptorIterator`，且 `SmemCopyAtom` 必须为 `void`（"SM100 UMMA cannot have a non-void copy atom for smem sourced instructions"）。
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L156-L160](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L156-L160) —— `MainloopPipeline = PipelineTmaUmmaAsync<Stages, ClusterShape, AtomThrShapeMNK>`。它和 SM90 的 `PipelineTmaAsync` 同源思想（满门/空门双屏障，u3-l1），但对接的是 UMMA 指令的等待模型。
 
-**共享内存只存 A/B**——累加器不再占 smem，它有自己的 TMEM 存储：
+两条强约束直接道出 SM100 的设计前提：
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:223-246](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L223-L246) —— `SharedStorage::TensorStorage` 只有 `smem_A`、`smem_B`；累加器被单独包进 `TmemStorage<AccTensor>`，是个模板结构（与 smem 物理分离）。
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L192-L194](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L192-L194) —— 断言要求 MMA atom 的 A/B 都必须是 `UMMA::DescriptorIterator`，即 A、B 由共享内存 descriptor 喂给 UMMA（这就是 SS 风味）。
 
-**TMEM 累加器的构造**——把累加器建成落 TMEM 的张量，并加一档 `ACC_PIPE` 双缓冲：
+TMEM 累加器的构造在这里：
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:461-480](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L461-L480) —— `init_tmem_tensors` 调 `make_sm100_accumulator<AccumulatorPipelineStageCount, ...>` 产出 `((MMA_TILE_M,MMA_TILE_N),MMA_M,MMA_N,ACC_PIPE)` 形状的累加器。其实现见 [sm100_tmem_helper.hpp:58-74](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/detail/sm100_tmem_helper.hpp#L58-L74)：底层是 `TiledMma::make_fragment_C(...)`，返回的 `data()` 指针即 TMEM 地址。
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L468-L487](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L468-L487) —— `init_tmem_tensors`。注释点明累加器布局 `((MMA_TILE_M,MMA_TILE_N),MMA_M,MMA_N,ACC_PIPE)`，其中 `ACC_PIPE=2` 用于「主循环与 epilogue 各持一份」的双缓冲；`make_sm100_accumulator` 产出的张量引擎是 TMEM。
 
-**producer 端 `load`**：标准 acquire → 拿 barrier → 单线程发 TMA：
+Producer 端（搬数据），由 `elect_one_sync()` 选出的单线程发 TMA：
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:604-626](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L604-L626) —— `producer_acquire` 等空门；`elect_one_sync()` 内 `copy(observed_tma_load_a_->with(*tma_barrier, mcast_mask_a), tAgA, tAsA)` 发 TMA，TMA 完成时硬件自翻满门。
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L604-L626](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L604-L626) —— `load()` 主循环核心：`producer_acquire` → `producer_get_barrier` → `copy(tma.with(barrier, mcast_mask), gA, sA)` / `copy(..., gB, sB)`。和 SM90 一样，TMA 拷贝与 mbarrier 绑定，硬件完成搬运后自动翻转满门。
 
-**consumer 端 `mma`**：两条流水线齐管，UMMA 把结果写进 TMEM 累加器：
+Consumer 端（做 MMA），`cute::gemm` 触发 UMMA：
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:661-712](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L661-L712) —— 关键几行：
-- L661 `static_assert(is_tmem<FrgEngine>::value, "Accumulator must be tmem resident.")`——编译期强约束累加器在 TMEM。
-- L676 `tiled_mma.accumulate_ = UMMA::ScaleOut::Zero;`——K 维首块清零；循环内 L706 `tiled_mma.accumulate_ = UMMA::ScaleOut::One;`——后续累加（对应 4.1 讲的 `scaleC`）。
-- L678 `accumulator_pipeline.producer_acquire(...)`——等 TMEM 这档可写；L702-705 `cute::gemm(tiled_mma, tCrA, tCrB, accumulators)` 发 UMMA；L684/L708 `consumer_wait`/`consumer_release` 管 A/B 主流水线。
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L661-L709](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L661-L709) —— `mma()` 主循环核心。第 661 行 `static_assert(is_tmem<FrgEngine>::value, "Accumulator must be tmem resident.")` 一锤定音：SM100 的累加器必须在 TMEM。第 676 行 `accumulate_ = UMMA::ScaleOut::Zero` 初值，第 706 行首拍后改 `One`；第 702 行的 `cute::gemm(tiled_mma, tCrA, tCrB, accumulators)` 就是 UMMA 指令的统一入口（u2-l3 讲过 `cute::gemm` 会按张量内存空间自动分发，这里分到 `tcgen05.mma`）。
 
-> 这里的 `cute::gemm` 不是软件实现，而是经 u2-l3/u2-l4 讲过的 `TiledMMA` 分发到 UMMA atom——`tCrA`/`tCrB` 是共享内存描述符张量，`accumulators` 是 TMEM 张量，CuTe 在编译期据内存空间自动选到 `tcgen05.mma`。
+最后看内核如何把 warp 分成五类角色——这是 SM100 区别于 SM90 的「结构性」证据：
 
-#### 4.2.4 代码实践（源码阅读 + 对照）
+[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:L234-L240](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L234-L240) —— `WarpCategory` 枚举：`MMA`、`Sched`、`MainloopLoad`、`EpilogueLoad`、`Epilogue`。每个 warp 按自己的 `warp_idx` 落入一类（[L417-L421](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L417-L421)），各自只走自己的分支。**注意 `MMA` 与 `Epilogue` 是两类独立的 warp**——这正是 4.1 实践题里「TMEM 解耦」的内核侧证据。
 
-1. **目标**：确认 SM100 主循环比 SM90 多了「累加器流水线」这一层。
-2. **步骤**：在 [sm100_mma_warpspecialized.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp) 的 `mma`（[L643-L712](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L643-L712)）里数它操作了几条流水线。再打开 SM90 的 `mma` 函数对比（文件 `include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized.hpp`，搜 `CUTLASS_DEVICE auto mma`）。
-3. **观察**：SM100 的 `mma` 签名同时吃 `(MainloopPipeline, AccumulatorPipeline)` 两条管线（[L652-L660](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L652-L660)）；SM90 的 `mma` 只有 `MainloopPipeline` 一条。
-4. **预期结果**：你能解释「多出来的那条 `AccumulatorPipeline` 就是为了把 TMEM 累加器在 MMA 与 epilogue 之间流水化」。
-5. 待本地验证：若在 Blackwell 卡上编译运行，可用 nsys 观察到 MMA warp 与 epilogue warp 在时间轴上重叠（SM90 是同 warp group 串行）。
+TMEM 分配器的选择也在这层（按是否跨 2 SM 选 1Sm/2Sm）：
+
+[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:L178-L179](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L178-L179) —— `TmemAllocator` 在 `Allocator1Sm` 与 `Allocator2Sm` 间二选一，依据是 TiledMma 的线程布局第一维是否为 1（即 MMA 是否跨 2 SM）。
+
+#### 4.2.4 代码实践（源码阅读型）
+
+**目标**：在内核里追踪 TMEM 的「申请—使用—归还」完整生命周期，验证它确实是 MMA 与 epilogue 之间的解耦缓冲。
+
+**操作步骤**：
+
+1. 在 `sm100_gemm_tma_warpspecialized.hpp` 中搜索 `tmem_allocator.allocate`（约 L727）、`tmem_allocator.free`（约 L803）、`release_allocation_lock`（约 L783）。
+2. 注意 `allocate` 把分配到的 TMEM 基址写进 `shared_storage.tmem_base_ptr`，随后由 4.1.3 里看到的 `set_tmem_offsets` 把它装进累加器张量。
+3. 确认：MMA warp（`WarpCategory::MMA`）向 TMEM 写累加器；Epilogue warp（`WarpCategory::Epilogue`）从同一份 TMEM 读累加器——读写经过 `AccumulatorPipeline`（ACC_PIPE=2）双缓冲同步。
+
+**预期结果**：你能复述出 TMEM 在一次 kernel 调用里的时间线——`alloc`（启动期，1 个 warp 发 PTX）→ MMA warp 写 / Epilogue warp 读（主循环期，双缓冲并发）→ `free`（收尾期）。这条链路就是 4.1 实践题答案的源码侧落点。本步骤为纯阅读；在真实 SM100 硬件上用 nsight compute 观察 TMEM 写入/读取活动以 corroborate，属**待本地验证**。
 
 #### 4.2.5 小练习与答案
 
-- **练习 1**：为什么 SM100 主循环的 `SharedStorage` 里**没有**累加器，而 SM90 有（寄存器形式）？
-  - **答案**：SM100 累加器落 TMEM（专用内存），用 `TmemStorage` 表达；SM90 累加器在 consumer warp 的寄存器里，由 `partition_fragment_C` 直接分配成 `Tensor`，不占共享内存也不占 TMEM。
-- **练习 2**：`IsRuntimeDataType`（[L135-L143](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L135-L143)）解决什么问题？
-  - **答案**：FP8/FP6/FP4 这些「窄精度」类型在 Blackwell 上可用**同一条** `f8f6f4` UMMA 指令处理，具体精度放到运行时由 `idesc_.a_format_`/`b_format_` 指定（见 [mma_init L569-L574](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L569-L574)），避免为每种精度各编译一份内核。
+**练习 1**：SM100 collective 为什么需要**两条**流水线（MainloopPipeline + AccumulatorPipeline），而 SM90 主循环只有一条？
 
----
+> **答**：SM90 的累加器在 consumer 寄存器里，MMA 与 epilogue 串行在同一组 warp，一条 mainloop 流水线足够。SM100 的累加器在 TMEM 且要被**两个不同 warp**（MMA 写、Epilogue 读）访问，必须再用一条 AccumulatorPipeline 把 TMEM 缓冲双缓冲起来，才能让两者并发而不竞争。
 
-### 4.3 Cluster 调度：5 类 warp、CLC 与 2SM MMA
+**练习 2**：`WarpCategory` 里的 `Sched` 角色对应什么新机制？
+
+> **答**：对应 Blackwell 的 **CLC（Cluster Launch Control）动态调度器**（见 4.3）。`Sched` warp 负责从 CLC 硬件队列领取下一份 tile 工作，再把响应分发给本簇内的计算 warp。这是 SM90（靠软件游标 `+= grid_size` 领活）所没有的硬件辅助调度路径。
+
+### 4.3 cluster 调度
 
 #### 4.3.1 概念说明
 
-把视角从「集体主循环」拉到「内核外壳」`sm100_gemm_tma_warpspecialized.hpp`，这里定义了**谁在哪个 warp 上跑哪段代码**。SM100 的最大变化是 warp 角色从 SM90 的 2 类裂成 **5 类**：
+**Cluster（簇）** 是 Hopper 引入、Blackwell 强化的概念：把多个 CTA（threadblock）编成一组，让它们共享一块「分布式共享内存（Distributed Shared Memory, DSM）」，并能用 TMA multicast 一次把数据广播给簇内所有 CTA。`ClusterShape` 就是这个组的形状。
 
-| WarpCategory | 线程数 | 职责 | SM90 对应 |
-| --- | --- | --- | --- |
-| `MMA` (0) | 1 warp | 发 UMMA，**分配/释放 TMEM**，写累加器到 TMEM | consumer warp group 的一部分 |
-| `Sched` (1) | 1 warp | 查询 **CLC**（Cluster Launch Control）动态领活 | 无（SM90 用静态 raster） |
-| `MainloopLoad` (2) | 1 warp | 发 TMA 搬 A/B | producer warp group（DMA warp） |
-| `EpilogueLoad` (3) | 1 warp | 发 TMA 搬 C | producer warp group 的 epilogue 部分 |
-| `Epilogue` (4+) | 多 warp | 从 TMEM 读累加器，跑 epilogue，写回 D | consumer warp group 的 epilogue 部分 |
+Blackwell 在此基础上新增了 **CLC（Cluster Launch Control）**——一个由硬件 + 软件协同的**动态调度器**。示例头注释把它列为第四大特性：
 
-核心洞察：**正是因为累加器在 TMEM，MMA 和 Epilogue 才能拆给不同 warp**——`MMA` 写 TMEM，`Epilogue` 读 TMEM，两者经 `AccumulatorPipeline` 握手。在 SM90 里，累加器攥在 consumer warp 的寄存器里，consumer 只能「先 mma、再 epilogue」串行做完。
+[examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:L52-L52](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L52-L52) —— 「A new SW controlled dynamic scheduler based on cluster launch control」。
 
-第二条新东西是 **CLC 调度**。SM90 的持久化内核靠静态 raster 顺序领活（u3-l3）；SM100 改用硬件辅助的 **Cluster Launch Control**：`Sched` warp 通过 `PipelineCLCFetchAsync` 向硬件查询「下一个该算的 tile」，硬件动态分配，能更好地均衡负载、减轻尾波浪费。这也是示例注释里说的「SW controlled dynamic scheduler based on cluster launch control」。
-
-第三条是 **2SM MMA（cluster MMA）**。当 cluster 在 M 方向有 2 个 CTA（`AtomThrShapeMNK` size==2）时，两个 SM 可用 `cta_group::2` 的 UMMA **合算一个 M=128 或 256 的大 tile**，相当于把单 SM 的算力再叠加。对应的 TMA 搬运换成跨 2SM 的 `SM100_TMA_2SM_LOAD`，TMEM 分配器换成 `Allocator2Sm`。两个 SM 之间通过 cluster 的**分布式共享内存（DSM）**同步。
+回顾 u3-l3：SM90 用「持久化内核 + 软件游标」领活，CTA 数 ≈ SM 数。SM100 的 CLC 把「领下一份 tile」从软件循环升级为硬件队列响应，进一步降低调度开销、提升尾波利用率。本讲的示例 `GemmKernel` 第 4 个模板参数填 `void`，就表示「使用默认的 CLC 调度器」。
 
 #### 4.3.2 核心流程
 
-内核入口 `operator()` 的角色分派（简化）：
+簇与调度的协作流程：
 
-```
-warp_idx = canonical_warp_idx()
-warp_category = warp_idx < 4 ? WarpCategory(warp_idx) : Epilogue
+1. 主机端按 `ClusterShape`（如 `<2,2,1>`）发射内核，硬件把每 4 个 CTA 编为一个簇；
+2. 簇内 `Sched` warp 通过 CLC 队列领到「下一个输出 tile」的坐标响应（`TileScheduler::CLCResponse`）；
+3. `MainloopLoad` warp 用 **TMA multicast** 把 A/B 广播给需要的 CTA（簇内同行/同列），减少重复搬运；
+4. 计算完成后，`Epilogue` warp 把 D 写回显存，`Sched` warp 再领下一份。
 
-if (main_load)      do { TMA 搬 A/B; CLC 领下一活 } while(valid)
-else if (sched)     do { 查 CLC; 广播下一活给全 cluster } while(valid)
-else if (mma)       allocate TMEM; do { 发 UMMA 写 TMEM; 累加器流水 commit } while(valid); free TMEM
-else if (epi_load)  do { TMA 搬 C } while(valid)
-else if (epilogue)  wait TMEM 分配完成; do { 从 TMEM 读累加器; 跑 epilogue 写 D } while(valid)
-```
-
-5 类 warp 通过多条流水线（mainloop、epi_load、accumulator、clc、clc_throttle）和命名屏障 `tmem_allocation_result_barrier` 协同。
+簇的 M 维若为偶数（`ClusterShape % 2 == 0`），还能启用 **2x1SM UMMA**（4.4）——一条 MMA 横跨 2 个 SM。
 
 #### 4.3.3 源码精读
 
-**线程数与角色枚举**：
+示例对簇形状的选择与注释：
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:137-147](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L137-L147) —— `NumSchedThreads = NumMMAThreads = NumMainloopLoadThreads = NumEpilogueLoadThreads = NumThreadsPerWarp`（各 1 warp），`MaxThreadsPerBlock` 为五者之和。
+[examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:L113-L117](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L113-L117) —— `MmaTileShape_MNK = <256,128,64>`，`ClusterShape_MNK = <2,2,1>`。注释提示：当簇形状为偶数时，tcgen05 MMA 可以跨 2 个 SM 执行。
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:234-248](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L234-L248) —— `WarpCategory` 枚举与 `IsParticipant` 标志位。
+`ClusterShape` 一路传到 collective（影响 TMA multicast 掩码与 TMEM 分配器选择），并在内核里决定 CLC 流水线的 `consumer_arv_count`（参与到达计数的 CTA 数）：
 
-**TMEM 分配/释放串起的 MMA 与 epilogue**：
+[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:L510-L513](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L510-L513) —— CLC 流水线的 `consumer_arv_count` 把簇大小 `cluster_size` 纳入计数，体现「簇是调度的基本单位」。
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:178-179](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L178-L179) —— `TmemAllocator` 按 `ThrLayoutVMNK` 选 `Allocator1Sm` 或 `Allocator2Sm`。
+multicast 掩码在 collective 的 `load_init` 里按簇布局算出：
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:725-735](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L725-L735) —— MMA warp 分配整块 TMEM（`Sm100TmemCapacityColumns=512` 列），把基址写进共享内存 `tmem_base_ptr`，`arrive` 命名屏障通知 epilogue，再 `set_tmem_offsets` 设好累加器偏移：
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L539-L541](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L539-L541) —— `create_tma_multicast_mask` 沿簇的 N/M 方向生成掩码，TMA 据此一次广播给同行/同列 CTA。
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:868-873](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L868-L873) —— epilogue warp `tmem_allocation_result_barrier.arrive_and_wait()` 等 MMA 分配完，读到同一个 `tmem_base_ptr`，再 `set_tmem_offsets`——两个 warp 共享同一块 TMEM。
+示例主机端把簇形状参与计算 max swizzle（簇栅格化方向，影响 L2 局部性，对应 `--swizzle` 选项）：
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:802-803](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L802-L803) —— MMA warp 在所有活算完后 `tmem_allocator.free(...)` 释放 TMEM（持久化内核里 TMEM 跨波复用，必须显式释放）。
+[examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:L335-L340](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L335-L340) —— `arguments.scheduler.max_swizzle_size = options.swizzle`，把命令行 swizzle 参数喂给 CLC 调度器。
 
-**累加器流水线把 MMA(producer) 与 Epilogue(consumer) 解耦**：
+#### 4.3.4 代码实践（源码阅读 + 命令行型）
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:169-176](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L169-L176) —— `AccumulatorPipeline = PipelineUmmaAsync<AccumulatorPipelineStageCount, ...>`；`CLCPipeline = PipelineCLCFetchAsync<SchedulerPipelineStageCount, ClusterShape>`。
+**目标**：感受 cluster 形状与 swizzle 对调度的影响。
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:519-535](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L519-L535) —— `AccumulatorPipeline` 的角色：MMA 当 Producer、Epilogue 当 Consumer（`producer_arv_count = 1`，因为只有一条 elect_one 线程 commit）。
+**操作步骤**：
 
-**CLC 动态调度**（`Sched` warp）：
+1. 阅读 `examples/70_blackwell_gemm/CMakeLists.txt`，确认示例只在 `CUTLASS_NVCC_ARCHS` 匹配 `100a|100f|101a|101f|103a|103f` 时编译，并带 4 组 swizzle 测试参数（`--swizzle=1/2/5` 及一组非对齐规模 `--swizzle=5 --m=4096 --n=16384`）。
+2. 在有 Blackwell 硬件的环境里（**待本地验证**）构建并运行：
+   ```bash
+   cmake -B build -DCUTLASS_NVCC_ARCHS=100a
+   cmake --build build -j --target 70_blackwell_fp16_gemm
+   ./build/examples/70_blackwell_gemm/70_blackwell_fp16_gemm --m=8192 --n=8192 --k=8192 --swizzle=1
+   ```
 
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:680-723](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L680-L723) —— `Sched` warp 经 `clc_throttle_pipeline` 限流后，`scheduler.advance_to_next_work(clc_pipeline, ...)` 向硬件查询下一个 clcID，再 `fetch_next_work` 广播给 cluster 内所有消费 warp。
+**需要观察的现象**：成功时输出 `Disposition: Passed`、`Avg runtime: ... ms`、`GFLOPS: ...`。换不同 `--swizzle` 值，GFLOPS 可能有几个百分点的差异——这反映 L2 局部性受簇栅格化方向影响。
 
-**2SM MMA 的判定**：
-
-[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:426-429](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L426-L429) —— `is_mma_leader_cta`（`cta_coord_v == 0`）与 `has_mma_peer_cta`（`AtomThrShapeMNK size==2`）；2SM 形态下 leader CTA 发 UMMA，peer CTA（`cta_rank ^ 1`）配合，释放靠 cluster 屏障 `tmem_dealloc`。
-
-#### 4.3.4 代码实践（SM90 vs SM100 结构对照，本讲核心实践）
-
-1. **目标**：对比 SM90 与 SM100 内核的 producer/consumer 结构，**指出 TMEM 在 SM100 中取代了哪个角色**。
-2. **步骤 a（SM90 基线）**：读 [sm90_gemm_tma_warpspecialized.hpp:140-142](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp#L140-L142)——只有 `NumLoadWarpGroups=1`（producer）+ `NumMmaWarpGroups=1`（consumer），共 256 线程；再看 [L302-L303](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp#L302-L303)（`warp_group_role ∈ {Producer, Consumer}`）与 [L468-L469](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp#L468-L469)（consumer 分支里 `Tensor accumulators = partition_fragment_C(...)`——**寄存器**累加器，且这个 consumer 接着就跑 epilogue）。
-3. **步骤 b（SM100）**：读 [sm100_gemm_tma_warpspecialized.hpp:234-248](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L234-L248) 的 5 类 warp，以及 4.3.3 里 MMA/Epilogue 经 `AccumulatorPipeline` 解耦的代码。
-4. **观察与结论（参考答案）**：
-   - SM90：2 个 warp group。**累加器住在 consumer warp group 的寄存器文件里**，所以 consumer 必须自己既发 `wgmma` 又跑 epilogue（先算后写，串行）。producer 只是搬数据。
-   - SM100：5 类 warp。**TMEM 取代了「consumer 寄存器文件」作为累加器的住所**。因为累加器不再属于任何 warp 的私有寄存器，而是一块所有相关 warp 都能寻址的公共内存，所以 `MMA` warp 只管写 TMEM、`Epilogue` warp 只管读 TMEM，两者经 `AccumulatorPipeline` 并发——把 SM90 consumer「一人分饰 MMA+epilogue 两角」拆成了两个独立角色。
-   - 一句话：**TMEM 取代了 SM90 中「consumer warp group 持有的寄存器累加器」这一角色，从而让 MMA 与 epilogue 能够 warp 级解耦并发**；副产品是腾出的寄存器可重新分配给 epilogue，提升整体 occupancy。
-5. **预期结果**：你能画出两张时序图——SM90 单 consumer warp group 内「wgmma → epilogue」串行；SM100 的 MMA warp 与 Epilogue warp 在 `AccumulatorPipeline` 双缓冲下时间轴重叠。
+**预期结果**：若硬件/工具链不满足（非 SM100、CUDA < 12.8），程序会打印提示并 `return 0` 提前退出（见 [L446-L461](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L446-L461)），不会崩溃。
 
 #### 4.3.5 小练习与答案
 
-- **练习 1**：SM90 的 consumer warp group 有 128 个线程，为什么 SM100 的 `MMA` 类只有 1 个 warp（32 线程）？
-  - **答案**：UMMA 是 warp-group 级异步指令，但**发射**只需一条 elect_one 线程；真正干活的累加器在 TMEM（不占寄存器），所以不需要像 wgmma 那样用一整个 warp group（128 线程）去持有寄存器片段。省下的线程预算分给了独立的 `Sched`/`EpilogueLoad`/`Epilogue` warp。
-- **练习 2**：`Sched` warp 的 `clc_throttle_pipeline`（[L537-L551](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L537-L551)）起什么作用？
-  - **答案**：限流 CLC 查询，避免调度 warp 跑得太快、与算力 warp 严重错配（skew）导致负载不均——让调度「跟着」搬运 warp 的节奏走。
+**练习 1**：为什么 `ClusterShape` 的 M 维取偶数（如 `<2,2,1>` 而非 `<1,2,1>`）对 Blackwell 有特殊意义？
 
----
+> **答**：M 维偶数时，MMA 可以跨簇内 2 个 CTA（即 2 个 SM）执行 2x1SM UMMA，把 M 维分布式地摊到 2 个 SM 上，单条指令吞吐翻倍。详见 4.4。
+
+**练习 2**：CLC 调度器相对 SM90 的「软件游标领活」带来什么好处？
+
+> **答**：把「领下一份 tile」从软件循环（`tile_idx += gridDim.x`）升级为硬件队列响应，降低调度开销、改善尾波利用率，并天然支持动态持久化与更灵活的负载均衡。
 
 ### 4.4 分布式 GEMM 扩展点
 
 #### 4.4.1 概念说明
 
-「分布式」在 Blackwell 语境下有两层含义，本讲点到为止、指出扩展点：
+「分布式 GEMM」在 SM100 语境下指：把一次 MMA 的工作量**跨多个 SM 协作完成**，而非局限在单 SM 内。它的物理基础有二：
 
-1. **节点内（cluster 级）分布式**：上面讲的 2SM MMA + TMA multicast + DSM 已经是「cluster 内多 SM 协作算一个 tile」的分布式计算。cluster 把最多 16 个 CTA 绑在一起，CTA 间可经分布式共享内存（DSM）互访、经 `ClusterBarrier` 同步。SM100 在此基础上加了 CLC 让软件动态调度这些 CTA。这是 C++ 侧 Dense GEMM 直接用到的「分布式」。
-2. **节点间（多 GPU）分布式 GEMM**：典型场景是 TP/SP 训练里的 `AllReduce + GEMM`、`ReduceScatter + GEMM` 等。CUTLASS 把这一层主要放在 **Python CuTe DSL** 与 **cute_ext** 里实现，C++ 库只提供底层原语（cluster、multimem、TMA）。这些示例利用 Blackwell 的网络/镜像内存（multimem）原语把多个 GPU 的 GEMM 与集合通信融合。
+- **Distributed Shared Memory（DSM）**：簇内 CTA 共享一片逻辑共享内存，可以互相访问对方的 smem；
+- **2x1SM UMMA**：一条 `tcgen05.mma.cta_group::2` 指令横跨 2 个 SM 的 Tensor Core，把 M 维分布式地切成两半、两 SM 并行算同一拍。
 
-本模块重点是让你知道「往哪儿扩展」，而不是手写一遍。
+这是 SM100 在「单 SM 集体」之上的扩展维度。CUTLASS 还在此底座上派生出 blockscaled、sparse、mixed-input、array（grouped）等变体（见 `include/cutlass/gemm/collective/sm100_*_mma_*.hpp` 一族），它们都复用同一套「UMMA + TMEM + 簇 + CLC」骨架。
 
 #### 4.4.2 核心流程
 
-C++ dense GEMM 走的是第 1 层：cluster → 2SM MMA（可选）→ DSM 同步 → CLC 调度。第 2 层（多 GPU）的典型融合模式：
+启用 2x1SM 分布式 MMA 的前提条件与流程：
 
-```
-# 单 GPU：本讲的 70_blackwell_fp16_gemm
-GEMM(A, B) → D
+1. **簇形状偶数**：`ClusterShape` 的 M 维（或对应维）能配对出 2 个 CTA；
+2. **选 2-SM MMA atom**：TiledMma 的 `AtomThrShapeMNK` 第一维为 2，对应的 UMMA 结构体是 `_2x1SM_*` 系列（PTX `cta_group::2`）；
+3. **选 2-SM TMEM 分配器**：`Allocator2Sm`（PTX `tcgen05.alloc.cta_group::2`），两个 CTA 必须提供相同的 `dst_ptr`、相同的逻辑 warp ID；
+4. **选 2-SM TMA**：`SM100_TMA_2SM_LOAD`（或其 multicast 版），让 TMA 跨 2 SM 共享同一份加载；
+5. 计算时，配对的两个 CTA 协同发同一条 `cta_group::2` UMMA，结果累加进**共享的** TMEM 区域。
 
-# 多 GPU AllReduce-GEMM（DSL 示例）
-各 GPU 本地 GEMM → 用 multimem/网络原语做 all-reduce → 融合，省一次 round-trip
-```
+#### 4.4.3 源码精读
 
-#### 4.4.3 源码精读（扩展点指引）
+2x1SM 版的 UMMA 封装，PTX 后缀变成 `cta_group::2`、掩码参数也从 4 个扩到 8 个（因为 M 维翻倍）：
 
-**C++ 侧 cluster 配置入口**——示例里 cluster 形状是个普通模板参数：
+[include/cute/arch/mma_sm100_umma.hpp:L552-L590](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/mma_sm100_umma.hpp#L552-L590) —— `SM100_MMA_F16BF16_2x1SM_SS`，PTX `tcgen05.mma.cta_group::2.kind::f16`。累加器仍在 TMEM（`[%0]`），但本拍由 2 个 SM 协同完成。
 
-[examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:113-117](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L113-L117) —— `MmaTileShape_MNK = <_256,_128,_64>`、`ClusterShape_MNK = <_2,_2,_1>`。注释点明「tile 可能横跨 2 个 SM（当 Cluster 形状 %2==0）」。
+2-SM TMEM 分配器，关键约束写在注释里——「两个参与 CTA 必须提供完全相同的 `dst_ptr`、相同的逻辑 warp ID」：
 
-**2SM 形态下的 TMA 搬运与 static_assert**：
+[include/cute/arch/tmem_allocator_sm100.hpp:L117-L145](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cute/arch/tmem_allocator_sm100.hpp#L117-L145) —— `Allocator2Sm::allocate`，PTX `tcgen05.alloc.cta_group::2.sync.aligned`。这是「分布式」落到 PTX 层的体现：分配动作本身就要两个 CTA 对齐协同。
 
-[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:195-206](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L195-L206) —— `AtomThrShapeMNK size==1` 配 `SM90_TMA_LOAD(_MULTICAST)`，`size==2` 配 `SM100_TMA_2SM_LOAD(_MULTICAST)`——这正是 cluster 分布式搬运的开关。
+collective 里对 2-SM TMA 的硬约束：
 
-**多 GPU 分布式扩展点（Python DSL，仅指引）**：仓库在 `examples/python/CuTeDSL/cute/blackwell/kernel/distributed/` 下提供了 `distributed_gemm_all_reduce_blackwell.py`、`distributed_all_gather_gemm_blackwell.py`、`distributed_gemm_reduce_scatter_blackwell.py`、`all_reduce_two_shot_multimem.py`、`all_reduce_one_shot_lamport.py` 等，把 GEMM 与集合通信在 kernel 内融合。这些不在本讲的 C++ 源码范围内，但它们复用的正是本讲讲的 UMMA/TMEM/cluster 这套底层抽象。
+[include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:L195-L200](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp#L195-L200) —— 当 `AtomThrShapeMNK` 大小为 1 时必须用 `SM90_TMA_LOAD(_MULTICAST)`；大小为 2 时必须用 `SM100_TMA_2SM_LOAD(_MULTICAST)`。编译期强约束，配错直接报错。
 
-#### 4.4.4 代码实践（阅读型 + 配置型）
+由 `AtomThrShapeMNK` 自动挑选 1Sm/2Sm 分配器（即 4.2.3 已引用的 `TmemAllocator` 条件类型）：
 
-1. **目标**：感受 cluster 形状如何影响 tile 跨 SM 分布。
-2. **步骤**：阅读 [70_blackwell_fp16_gemm.cu:113-148](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L113-L148)。在本地（Blackwell 卡）把 `ClusterShape_MNK` 改成 `<_1,_1,_1>` 重新编译运行，再用 nsys 对比 cluster=2x2x1 与 cluster=1x1x1 两种配置下的 UMMA 指令形态与吞吐。
-3. **观察**：cluster=1x1x1 时走 `SM90_TMA_LOAD` + `cta_group::1`；cluster 含 2 个 M 方向 CTA 时走 `SM100_TMA_2SM_LOAD` + `cta_group::2`，单 tile 翻倍算力。
-4. **预期结果**：理解 cluster 形状是「单 SM 算 vs 2 SM 合算」的开关。待本地验证（需要 SM100 设备与 `CUTLASS_NVCC_ARCHS=100a`）。
+[include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp:L178-L179](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L178-L179) —— `TmemAllocator = conditional_t<size<0>(ThrLayoutVMNK)==1, Allocator1Sm, Allocator2Sm>`。
+
+#### 4.4.4 代码实践（源码阅读型）
+
+**目标**：理解「单 SM 集体」与「2-SM 分布式集体」在源码层是如何被同一份模板差异化支持的。
+
+**操作步骤**：
+
+1. 在 `include/cute/arch/mma_sm100_umma.hpp` 里数一下 `_2x1SM_` 系列有多少种数据类型/风味（f16/bf16、tf32、i8……各成对出现）。
+2. 在 `include/cutlass/gemm/collective/` 下对比 `sm100_mma_warpspecialized.hpp`（本讲主角，单 SM 簇基底）与 `sm100_mma_array_warpspecialized.hpp`（一次启动算一组问题的 array/grouped 版）。注意后者复用了前者的 `load`/`mma` 主体，只是在外层包了「按 problem_idx 循环领活」的调度。
+3. 阅读 `examples/70_blackwell_gemm/70_blackwell_fp8_gemm.cu`，对比 FP16 与 FP8 两个示例在「CollectiveBuilder 配置」上的差异——你会看到只是换了 `ElementA/ElementB` 和 Schedule，骨架完全一致，这印证了 4.4.1 说的「同一套骨架派生多种变体」。
+
+**预期结果**：你应能归纳出 SM100 collective 的「扩展点矩阵」——按 `{数据类型} × {单SM/2SM} × {dense/sparse/blockscaled/mixed/grouped}` 正交组合，而它们共享 UMMA + TMEM + 簇 + CLC 的同一底座。运行性能对比需真实 SM100 硬件，**待本地验证**。
 
 #### 4.4.5 小练习与答案
 
-- **练习 1**：为什么多 GPU 分布式 GEMM 的实现主要落在 Python DSL 而不是 C++ 库？
-  - **答案**：C++ 库提供 UMMA/TMEM/cluster/multimem 等底层原语；而「GEMM + AllReduce/ReduceScatter 融合」这类拓扑多变、快速迭代的场景，用 Python DSL 表达更灵活、更易调优与 autotune，故官方实现集中在 DSL/cute_ext。
-- **练习 2**：`SM100_TMA_2SM_LOAD_MULTICAST` 里的 multicast 与 2SM 是同一回事吗？
-  - **答案**：不是。2SM 指 2 个 SM **合算同一个 tile**（共享一份 A/B，对应 `cta_group::2` 的 UMMA）；multicast 指 TMA 把**同一份数据广播**给 cluster 内多个 CTA（避免重复搬运）。二者常配合使用但语义不同。
+**练习 1**：为什么 `Allocator2Sm` 要求「两个 CTA 提供完全相同的 `dst_ptr`、相同的逻辑 warp ID」？
 
----
+> **答**：`cta_group::2` 的 TMEM 分配是两个 CTA 协同的硬件操作，必须由两个 CTA 上「对齐」的同一逻辑 warp 同时发出相同的请求，硬件才能正确合并、分配出一块两个 SM 都能寻址的共享 TMEM 区域。
+
+**练习 2**：SM100 collective 一族（blockscaled/sparse/mixed/array…）为何能复用本讲的 mainloop 骨架？
+
+> **答**：它们都建立在「UMMA 指令（结果落 TMEM）+ 簇（DSM + multicast）+ CLC 调度 + 两条流水线」的同一底座上，差别只在于「额外搬了什么（如缩放因子 SFA/SFB）」「用了哪种 UMMA 风味（如 blockscaled 的 `tcgen05.mma.blockscaled`）」「在外层套了哪种领活循环（如 grouped 的 problem_idx 循环）」。底座不变，所以 mainloop 的 producer/consumer 主体可被复用。
 
 ## 5. 综合实践
 
-把本讲四个模块串起来，完成一次「从 Hopper 到 Blackwell 的最小迁移」：
+把本讲的四块知识串起来，完成下面这个「源码阅读 +（可选）真机运行」的复合任务。
 
-1. **阅读迁移说明**：先读示例开头注释 [70_blackwell_fp16_gemm.cu:32-56](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L32-L56)，它明确说了「minimal set of changes needed to transition from a Hopper 3.x GEMM kernel to a Blackwell 3.x GEMM kernel」。
-2. **对比组装代码**：把本示例的 builder 组装段 [L119-L148](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L119-L148) 与 u2-l9 的 example 49（Hopper）并排看。你会发现**用户代码几乎一样**：都是 `CollectiveBuilder`（epilogue → mainloop）→ `kernel::GemmUniversal` → `device::GemmUniversalAdapter`，都用 `KernelScheduleAuto` / `EpilogueScheduleAuto`。差别只有三处：`ArchTag = Sm100`、`ClusterShape` 可含 2 个 M、`TileSchedulerTag = void`（默认走 CLC）。
-3. **底层解释**：用本讲所学解释「为什么用户代码几乎没变、行为却大变」——`CollectiveBuilder` 据 `ArchTag=Sm100` 自动把 mainloop 选成 [sm100_mma_warpspecialized.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp)，把内核选成 [sm100_gemm_tma_warpspecialized.hpp](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp)，于是累加器 silently 从寄存器挪到了 TMEM、warp 角色从 2 类裂成 5 类、调度从静态 raster 换成 CLC。这就是 CUTLASS 3.x「策略分派 + 统一外壳」设计在跨代迁移上的回报。
-4. **运行验证（待本地验证）**：在 Blackwell 卡上 `cmake .. -DCUTLASS_NVCC_ARCHS=100a && make 70_blackwell_fp16_gemm -j`，运行 `./70_blackwell_fp16_gemm --m=8192 --n=8192 --k=8192`，应输出 `Disposition: Passed` 与 GFLOPS（需 CUDA ≥ 12.8，见 [L446-L461](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L446-L461) 的版本/架构门禁）。
+**任务**：以 `examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu` 为对象，复现「从 Hopper 迁移到 Blackwell」的最小改动，并解释每处改动对应本讲的哪个概念。
+
+**步骤**：
+
+1. **定位组装链路**（对应 u2-l9 讲过的四步 typedef）：阅读 [examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu:L120-L148](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L120-L148)。依次是：epilogue `CollectiveBuilder` → mainloop `CollectiveBuilder`（`StageCountAutoCarveout` 用 epilogue 的 `SharedStorage` 大小算级数）→ `kernel::GemmUniversal`（第 4 参数 `void` = 默认 CLC 调度器）→ `device::GemmUniversalAdapter`。
+2. **找出相对 Hopper 的关键差异**（对应 4.1~4.3）：
+   - `ArchTag = cutlass::arch::Sm100`（[L110](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L110)）——换成 Blackwell 架构 tag，于是 builder 自动选 `MainloopSm100TmaUmmaWarpSpecialized` 与对应 UMMA atom；
+   - `MmaTileShape_MNK = <256,128,64>`、`ClusterShape_MNK = <2,2,1>`（[L115-L117](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L115-L117)）——更大的 tile 与簇，配合 tcgen05 的 2× 吞吐与 2x1SM 分布式 MMA；
+   - `KernelScheduleAuto` / `EpilogueScheduleAuto`——两个 builder 必须同时用 `Auto`（u2-l9 讲过的约束），让框架替你选 SM100 的 schedule。
+3. **解释「最少改动」的本质**：从 Hopper 到 Blackwell，用户侧只改了 `ArchTag` 和 tile/cluster 形状；TMEM 分配、五类 warp 分流、UMMA 指令选择、CLC 调度接线全部由 `CollectiveBuilder` + 内核偏特化自动完成。这就是 CUTLASS 3.x「policy 标签 + 统一外壳」设计的回报。
+4. **（可选，需 SM100 真机）改一处观察行为**：把 `ClusterShape_MNK` 从 `<2,2,1>` 改成 `<1,1,1>`，重新编译运行，对比 GFLOPS。预期单 CTA 簇因无法启用 multicast 与 2x1SM MMA 而性能下降。**待本地验证**。
+5. **核对正确性**：示例自带朴素参考 GEMM 做位级比对（[L343-L373](https://github.com/NVIDIA/cutlass/blob/e8ecfad75b44d1ad56264f5001d877e9e47fe080/examples/70_blackwell_gemm/70_blackwell_fp16_gemm.cu#L343-L373)），成功打印 `Disposition: Passed`。
+
+**交付物**：一份说明，把上面每处改动对应到 4.1（UMMA/TMEM）、4.2（collective 结构/五类 warp）、4.3（cluster/CLC）、4.4（2x1SM 分布式）中的具体概念。
 
 ## 6. 本讲小结
 
-- Blackwell Tensor Core 的两条新主线是 **UMMA 指令 `tcgen05.mma`**（吞吐较 WGMMA 翻倍）与 **TMEM**（每 SM 专用累加器内存，容量 128×512×32 位）。
-- UMMA 的 A/B 用 64 位共享内存**描述符**寻址、C/D 用 32 位 **TMEM 地址**寻址；`scaleC`（`UMMA::ScaleOut`）控制清零还是累加；`cta_group::1/2` 区分单 SM 与 cluster 内 2SM 协同。
-- SM100 集体主循环比 SM90 多一条 **`AccumulatorPipeline`**，把累加器（落 TMEM）在 MMA（producer）与 epilogue（consumer）之间流水化。
-- SM100 内核把 warp 裂成 **5 类**（MMA / Sched / MainloopLoad / EpilogueLoad / Epilogue），并用 **CLC（Cluster Launch Control）** 做动态调度，取代 SM90 的静态 raster。
-- **TMEM 取代了 SM90 中「consumer warp group 的寄存器累加器」这一角色**，从而让 MMA 与 epilogue 解耦到不同 warp 并发，腾出的寄存器可再分配给 epilogue。
-- cluster 让两个 SM 经 **2SM UMMA + `SM100_TMA_2SM_LOAD` + DSM** 合算大 tile；多 GPU 分布式 GEMM 的扩展点主要在 Python CuTe DSL（GEMM 与集合通信融合）。
+- Blackwell（SM100）启用第五代 Tensor Core 指令 **UMMA（`tcgen05.mma`）**，相对 Hopper `wgmma` 约 2× 吞吐；Hopper 的 `wgmma` 在 Blackwell 上不可用。
+- UMMA 的累加器不再住寄存器，而是住新引入的每 SM 专属存储 **TMEM（128×512×32 位 = 256KB）**；TMEM 由 `tcgen05.alloc/dealloc` PTX 显式申请/释放，分 `Allocator1Sm`/`Allocator2Sm` 两版。
+- SM100 collective（`sm100_mma_warpspecialized.hpp`）用**两条流水线**：`MainloopPipeline`（搬 A/B）+ `AccumulatorPipeline`（TMEM 累加器双缓冲，ACC_PIPE=2），从而把 **MMA warp 与 Epilogue warp 解耦并发**——这是 SM90（同组 warp 串行做 wgmma + epilogue、累加器在寄存器）所没有的结构。
+- 内核把 warp 划成 **MMA / Sched / MainloopLoad / EpilogueLoad / Epilogue** 五类角色（`WarpCategory`），其中 `Sched` 对应 Blackwell 新的 **CLC（Cluster Launch Control）动态调度器**。
+- **cluster（簇）** 提供分布式共享内存（DSM）与 TMA multicast；当簇形状偶数时，可启用 **2x1SM UMMA**（`cta_group::2`）让一条 MMA 横跨 2 个 SM，配合 `Allocator2Sm` 与 `SM100_TMA_2SM_LOAD` 形成分布式 GEMM 扩展点。
+- blockscaled / sparse / mixed / array 等变体都建立在「UMMA + TMEM + 簇 + CLC」同一底座上，mainloop 骨架可复用。
 
 ## 7. 下一步学习建议
 
-- **想看更接近底层的 Blackwell MMA 用法**：读 `examples/cute/tutorial/blackwell/01_mma_sm100.cu`、`02_mma_tma_sm100.cu`、`04_mma_tma_2sm_sm100.cu`，它们绕开 CollectiveBuilder、直接用 CuTe atom 手写 UMMA + TMA，是理解本讲「黑盒内部」的最佳下一站。
-- **想深入调度**：进 u3-l3（Tile Scheduling 与 Stream-K），对照 SM100 的 CLC 调度器 `include/cutlass/gemm/kernel/sm100_tile_scheduler.hpp` 看 Blackwell 版 Stream-K 如何与 CLC 配合（见 example `74_blackwell_gemm_streamk`）。
-- **想看 Python DSL 版 Blackwell GEMM**：读 `examples/python/CuTeDSL/cute/blackwell/kernel/dense_gemm/dense_gemm_persistent.py`，对照本讲的 C++ 实现，理解同一套 UMMA/TMEM 抽象在 DSL 里的表达（衔接 u3-l9/u3-l10）。
-- **想看块缩放与多精度**：u3-l6 的 NVFP4/MXFP block-scaled GEMM 正是建立在 `sm100_blockscaled_mma_warpspecialized.hpp` 之上，本讲的 TMEM/UMMA 是它的直接前置。
+- **低精度与块缩放**：进入 u3-l6（低精度与 Block-Scaled 类型），看 `sm100_blockscaled_mma_warpspecialized.hpp` 如何在本讲骨架上多搬 SFA/SFB 并发 `tcgen05.mma.blockscaled`。
+- **TMA 深化**：若想彻底搞懂 `desc_a`/`desc_b` 的构造，回到 u3-l2（TMA 异步张量拷贝）与 `include/cute/arch/mma_sm100_desc.hpp`，理解 UMMA descriptor 如何编码 swizzle 与 leading dim。
+- **调度深化**：进入 u3-l3（Tile Scheduling 与 Stream-K），把 SM90 的软件调度与 SM100 的 CLC 调度对照阅读 `sm100_tile_scheduler.hpp` 与 `sm100_tile_scheduler_stream_k.hpp`。
+- **Python DSL 路径**：若你对 Python 侧感兴趣，可进入 u3-l9/u3-l10（CuTe DSL），看同一套 Blackwell 概念如何在 Python 里表达与发射。
+- **建议精读源码**：`include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp` 的 `operator()`（warp 分流主入口），把本讲的五类角色在源码里一一对应。
