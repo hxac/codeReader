@@ -219,6 +219,27 @@ repos:
   - name: triton-lang/triton-ascend
   - name: triton-lang/Triton-to-tile-IR
   - name: typst/typst
+    folders:
+      [
+        ”self“,
+        "crates/typst-bundle",
+        "crates/typst-cli",
+        "crates/typst-eval",
+        "crates/typst-html",
+        "crates/typst-ide",
+        "crates/typst-kit",
+        "crates/typst-layout",
+        "crates/typst-library",
+        "crates/typst-macros",
+        "crates/typst-pdf",
+        "crates/typst-realize",
+        "crates/typst-render",
+        "crates/typst-svg",
+        "crates/typst-syntax",
+        "crates/typst-timing",
+        "crates/typst-utils",
+        "crates/typst",
+      ]
   - name: THU-DSP-LAB/ventus-gpgpu
   - name: THU-DSP-LAB/ventus-gpgpu-verilog
   - name: llvm/llvm-project
@@ -345,3 +366,5 @@ repos:
   - name: hw-native-sys/pypto
   - name: oomol-lab/pdf-craft
   - name: ai-dynamo/dynamo
+  - name: SFU-HiAccel/uBench
+  - name: passlab/CUDAMicroBench
