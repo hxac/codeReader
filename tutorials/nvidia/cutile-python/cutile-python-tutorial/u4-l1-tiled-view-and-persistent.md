@@ -2,363 +2,400 @@
 
 ## 1. 本讲目标
 
-本讲进入「高级数据访问」单元的第一讲。到此为止你已经能写出 `load–compute–store` 的内核（u3-l1），但每一块 `block` 都只处理**一个**输出 tile、`grid` 里的 block 数量等于输出 tile 总数。本讲要打破这个「一个 block 一个 tile」的限制，教你两件事：
+本讲承接 [u3-l1（load/store 与 load-compute-store 范式）](u3-l1-load-store-pattern.md)。在 u3-l1 里，我们用 `ct.load(array, index, shape)` 直接以「瓦片索引」定位一块数据——`index=(bidx, bidy)`、`shape=(tm, tn)`。这种写法把「数组被切成瓦片网格」这件事隐式地藏在每一次 `load`/`store` 调用里。
 
-- 用 **`TiledView`** 把「全局数组如何被切成 tile」显式地建模成一个对象，从而能在 tile space（瓦片空间）里**按索引遍历**多个 tile，而不是只能用 `ct.bid` 间接定位。
-- 用 **`num_blocks` + `range`** 写出 **persistent（常驻）内核**：让启动的 block 数量等于 SM 数（而非输出 tile 数），每个 block 在一个循环里串行处理多个输出 tile，从而减少调度开销。
+本讲要把这层隐含结构**显式化**为一个对象——`TiledView`，并围绕它解决四个问题：
 
-读完本讲，你应该能够：
+1. **TiledView 是什么**：它如何把「一个数组 + 一种瓦片形状」凝固成一个可复用的「瓦片空间」视图，让我们用 `tv.load(i)` / `tv.store(i, tile)` 反复读写。
+2. **num_tiles**：如何在内核**内部**查询「这个数组在某个轴上一共有多少块瓦片」，从而写出不依赖 host 传入循环上界的循环。
+3. **traversal_steps**：如何让相邻瓦片**重叠**（滑动窗口 / 卷积）或**留间隔**（跨步采样）。
+4. **num_blocks 与 persistent 内核循环**：当瓦片数远多于 GPU 的 SM 数时，如何用 `num_blocks` + `range` 让**每个 block 串行处理多块瓦片**，减少调度开销。
 
-- 理解 **tile space（瓦片空间）** 与 element space（元素空间）的对应关系，以及 `num_tiles` 如何把两者联系起来。
-- 用 `Array.tiled_view(...)` 创建 `TiledView`，并用 `tv.load(index)` / `tv.store(index, tile)` 按瓦片索引读写多个 tile。
-- 用 `traversal_steps` 产生**重叠（overlap）**或**带间隔（gap）**的 tile，从而实现滑动窗口（如卷积、stencil）。
-- 用 `ct.num_blocks(0)` 配合 `range(bid, total, num_blocks)` 写出 persistent 内核，并理解它为什么能减少 kernel 启动 / block 调度的开销。
+学完后你应当能够：
 
-本讲覆盖四个最小模块：**`TiledView`、`num_tiles`、`num_blocks`、persistent loop**。
+- 用 `Array.tiled_view(...)` 创建视图，并理解它与裸 `ct.load`/`ct.store` 的等价关系。
+- 区分**元素空间（element space）**、**瓦片空间（tile space）**与**块空间（block space）**三个层面。
+- 写出在内核内用 `num_tiles` / `num_blocks` 自洽推导循环范围的内核，而不是把范围从 host 硬塞进来。
+- 把一个「一个 block 处理一块瓦片」的内核，改写成「少量 block 各处理多块瓦片」的 **persistent 内核**。
 
 ## 2. 前置知识
 
-在进入本讲前，请确认你已经理解下面这些来自前面讲义的概念（本讲会直接使用，不再重复解释）：
+本讲默认你已经掌握以下内容（来自前置讲义）：
 
-- **执行空间与 block 级并行**：kernel 由 `grid` 中的 block 并行执行，cuTile 只表达 block 级并行、不暴露单个线程；`ct.bid(axis)` 给出当前 block 在 grid 第 `axis` 轴的坐标（见 u2-l1）。
-- **Array 与 Tile**：`Array` 是 host 分配、全局显存、可读写、运行时 shape 的数组；`Tile` 是内核内部不可变、编译期 shape（每维为 2 的幂）的数据块；`ct.load` 把 `Array` 的一块搬成 `Tile`，`ct.store` 是逆操作（见 u2-l2、u2-l3、u3-l1）。
-- **tile space 与 element space**：瓦片索引 `(i, j)` 配合 tile shape `S` 取出 `array[i*S0 + x, j*S1 + y]` 那一块元素（见 u2-l3）。
-- **`index` 是 tile space 索引**：`ct.load(array, index, shape)` 里的 `index` 不是元素下标，而是瓦片下标（见 u3-l1）。
-- **`for ... in range(...)` 与携带值**：cuTile 的 `for` 编成定数计数循环；循环体内被重新赋值的变量会成为「携带值（carried values）」，本质是 SSA fold（见 u3-l3）。本讲的 persistent 循环就是携带值的典型应用。
-- **`@ct.kernel` 与 `ct.launch`**：kernel 不在定义时执行，由 host 端 `ct.launch(stream, grid, kernel, args)` 启动；`grid` 决定 block 数量（见 u1-l2、u2-l1）。
-- **`Constant[int]`**：编译期常量参数，会嵌入 cubin；tile shape 通常用 `Constant` 传入（见 u3-l5）。
+- **grid / block / 执行空间**（u2-l1）：一次 `ct.launch` 会启动组织成 1D/2D/3D 的 grid；`ct.bid(axis)` 是当前 block 在第 `axis` 轴的坐标；cuTile 只表达 block 级并行，不暴露单个线程。
+- **全局数组 Array 与 strided 布局**（u2-l2）：数组放在全局显存，由 host 分配，`shape`/`strides` 是运行时 `int32`。
+- **Tile 是不可变、编译期 shape、每维为 2 的幂**的多维集合（u2-l3）。
+- **load-compute-store 范式**（u3-l1）：`ct.load(array, index, shape)` 的 `index` 是**瓦片索引**而非元素下标。
+- **控制流子集**（u3-l3）：tile code 支持 `if/for/while`，`for` 目前只接受 `range`，且 `range` 的 step 必须 > 0。
 
-一句话回顾：到目前为止，你的内核都是「`bid` 定位 → `load` 一块 → 计算 → `store` 一块」，**block 数 == 输出 tile 数**。本讲要让你能「一个 block 遍历多个 tile」，并把 block 数和 tile 数解耦。
+补一个本讲会用到的术语直觉：
+
+| 概念 | 是什么 | 在哪一层 |
+| --- | --- | --- |
+| element space | 数组元素本身构成的多维空间 | 数据 |
+| tile space | 「用某种瓦片形状去切数组」得到瓦片网格 | 数据视图 |
+| block space | `ct.launch` 时实际启动的 block 网格 | 执行 |
+
+本讲的全部内容，本质上就是在讲这三层空间如何对应、以及当它们**不再一一对应**时（瓦片数 > block 数）该怎么编程。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件：
-
 | 文件 | 作用 |
-|------|------|
-| [src/cuda/tile/_stub.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L236-L294) | `Array.tiled_view`、`TiledView` 类（`num_tiles`/`traversal_steps`/`load`/`store`）、模块级 `num_tiles`、`num_blocks`、`bid` 的**权威签名与文档**。stub 只有签名，真正的实现在后端 IR 注册系统（见 u5-l7）。 |
-| [docs/source/data.rst](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/docs/source/data.rst#L130-L185) | 官方文档对 element/tile space 与 Tiled Views 的概念定义，是本讲直觉的来源。 |
-| [test/test_tiled_view.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_tiled_view.py#L38-L52) | `TiledView` 的完整测试套件：1D/2D 拷贝、`num_tiles`、`traversal_steps`（重叠/间隔/滑动窗口/2D 卷积）、原子操作。是理解语义最干净的范本。 |
-| [samples/MatMul.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L104-L176) | 官方 GEMM 示例，同时给出**非 persistent**（`matmul_kernel`）和 **persistent**（`persistent_matmul_kernel`）两个版本，是 persistent 循环的权威范本。 |
+| --- | --- |
+| [src/cuda/tile/_stub.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py) | 用户 API 的「签名侧」。定义了 `Array.tiled_view`、`TiledView` 类（`dtype`/`tile_shape`/`num_tiles`/`traversalsteps`/`load`/`store`）、自由函数 `num_tiles`、`num_blocks`、`bid`。这些都是 `@stub`，真正的 IR 实现由后端注册系统提供。 |
+| [docs/source/data.rst](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/docs/source/data.rst) | 官方数据模型文档。其中的 *Element & Tile Space* 与 *Tiled Views* 两节是本讲概念的权威定义来源。 |
+| [test/test_tiled_view.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py) | `TiledView` 的行为测试。包含普通拷贝、`num_tiles` 校验、`traversal_steps` 滑动窗口、版本门控等大量可读用例，是本讲实践的依据。 |
+| [samples/MatMul.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py) | 同时给出 GEMM 的**非 persistent** 版本（`matmul_kernel`）与 **persistent** 版本（`persistent_matmul_kernel`），是讲解 persistent 循环的最佳真实样本。 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 TiledView 抽象
+### 4.1 元素空间、瓦片空间与 TiledView
 
 #### 4.1.1 概念说明
 
-回顾 u3-l1：你用 `ct.load(array, index, shape)` 访问数组时，每一次调用都要**重新**告诉编译器「我要按 `shape` 切这个数组、取 `index` 那一块」。`shape` 是编译期常量，但 `index`、`array` 都是运行时值。
+在 u3-l1 中，`ct.load(A, index=(bidx, k), shape=(tm, tk))` 这一次调用其实同时携带了三件事：
 
-**TiledView（瓦片视图）** 把「这个数组被某种 `tile_shape` 切分」这件事**固化成一个对象**：
+- 「从数组 `A` 里取」——操作哪个数组；
+- 「`shape=(tm, tk)`」——按多大的瓦片去切；
+- 「`index=(bidx, k)`」——取第几块瓦片。
+
+当我们只 load 一次时这样写很紧凑；但当同一个数组要在循环里被**反复** load 不同瓦片（例如 GEMM 沿 K 维循环累加），每次都要重复写 `shape=(tm, tk)`、重复算 `num_tiles`，既啰嗦又容易写错。
+
+`TiledView` 就是把这「数组 + 瓦片形状 + 填充模式 + 步长」**凝固成一个对象**的抽象。文档里这样定义它：
 
 > A *tiled view* represents the tile space of a global array.
+> —— [docs/source/data.rst:159-185](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/docs/source/data.rst#L159-L185)
 
-换句话说，`TiledView` 是「一个全局数组 + 一种固定的 tile 切分方式」的打包。创建好之后，你就可以反复用 `tv.load(tile_index)` / `tv.store(tile_index, tile)` 在**瓦片空间**里按索引读写，而不必每次都重复传 `shape`。
-
-为什么需要它？三个动机：
-
-1. **表达力**：把「切分方式」提升为一等对象后，你可以在 tile space 里**循环遍历**多个 tile（`for i in range(tv.num_tiles(0)): tv.load(i)`），这是写 persistent / 多 tile 内核的基础。
-2. **语义清晰**：`traversal_steps`、`padding_mode` 等切分参数挂在视图上，比每次 `load` 都传一遍更不容易出错。
-3. **可优化**：视图把访问模式显式化，后端可以据此选择 TMA（Tensor Memory Accelerator）等高效访存机制（`allow_tma` 参数）。
-
-注意一个所有权约束（承接 u2-l2）：`tiled_view` **不拷贝、不分配新存储**，它只是对已有 `Array` 创建一个「观察视角」，底层显存与原数组共享。
+理解 TiledView 的关键，是先理解它所「代表」的那个**瓦片空间（tile space）**。
 
 #### 4.1.2 核心流程
 
-创建并使用一个 `TiledView` 的流程：
+先把「元素空间」与「瓦片空间」这两个层面区分清楚（见 [docs/source/data.rst:130-155](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/docs/source/data.rst#L130-L155)）：
 
-```text
-Array（全局数组，运行时 shape）
-   │
-   │  arr.tiled_view(tile_shape, padding_mode=..., traversal_steps=...)
-   ▼
-TiledView（固化了 tile_shape / padding_mode / traversal_steps）
-   │
-   ├── tv.dtype         → 元素类型（编译期常量）
-   ├── tv.tile_shape    → 每个瓦片的形状（编译期常量）
-   ├── tv.num_tiles(axis) → 沿某轴的瓦片数（运行时 int32）
-   ├── tv.traversal_steps → 相邻瓦片原点的步距（编译期常量）
-   │
-   ├── tv.load(tile_index)  → 取出 tile_shape 大小的 Tile
-   ├── tv.store(tile_index, tile) → 把 Tile 写回（形状须可广播到 tile_shape）
-   └── tv.atomic_store_*(tile_index, update) → 原子写回
+- **元素空间（element space）**：数组元素本身构成的多维空间。例如一个 `(12, 16)` 的数组，元素空间就是 12 行 × 16 列的真实数据。
+- **瓦片空间（tile space）**：用某种瓦片形状去切这个数组后，得到的「瓦片网格」。例如用 `(2, 4)` 的瓦片去切 `(12, 16)`，瓦片空间就是 `6 × 4 = 24` 块瓦片。
+
+瓦片索引 `(i, j)` 与元素下标的默认映射（无 `traversal_steps`、行优先）：
+
+\[ \text{元素范围}_i = \big[\, i \cdot \text{tile\_shape}_i,\ (i+1) \cdot \text{tile\_shape}_i \,\big) \]
+
+即第 `i` 块瓦片覆盖元素 `[i*ts : (i+1)*ts]`。以 `(12,16)` 数组 + `(2,4)` 瓦片为例：
+
+```
+元素空间 (12 x 16):
+  瓦片(0,0) 瓦片(0,1) 瓦片(0,2) 瓦片(0,3)     <- 每块 2 行 4 列
+  瓦片(1,0) 瓦片(1,1) 瓦片(1,2) 瓦片(1,3)
+  ...
+  瓦片(5,0) 瓦片(5,1) 瓦片(5,2) 瓦片(5,3)     <- 共 6 x 4 块
+
+瓦片空间: shape (6, 4)，共 24 块瓦片
 ```
 
-`tile_index` 是**瓦片空间**里的坐标（不是元素下标），维度等于数组的秩。每个 `tile_index` 对应元素空间里原点为 `tile_index * traversal_steps`、大小为 `tile_shape` 的那块。
+`TiledView` 的使用流程是「**先建视图，再反复按瓦片索引读写**」：
+
+```text
+1. host: 把数组 x 传进内核
+2. tile code: tv = x.tiled_view(tile_shape)          # 建立瓦片空间视图
+3. tile code: tile = tv.load((i, j))                 # 按瓦片索引取一块
+4. tile code: ... 对 tile 做计算 ...
+5. tile code: tv_out.store((i, j), result)           # 按瓦片索引写回
+```
+
+它与 u3-l1 的裸 `ct.load`/`ct.store` **完全等价**，只是把 `shape` 从每次调用里提了出来、绑在视图上。
 
 #### 4.1.3 源码精读
 
-`tiled_view` 是 `Array` 的方法，签名如下（注意 `tile_shape` 必须是 `Constant[Shape]`，即编译期已知的形状）：
+**① 建立视图的工厂方法** `Array.tiled_view`：
 
-[Array.tiled_view 签名 — src/cuda/tile/_stub.py:236-239](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L236-L239)：把数组按固定的 `tile_shape` 切成瓦片网格；`padding_mode` 决定越界填充，`traversal_steps` 决定相邻瓦片的步距（详见 4.3）。
+[src/cuda/tile/_stub.py:236-294](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L236-L294) —— 这是 `Array` 上的一个 `@stub` 方法，签名是：
 
-返回的 `TiledView` 类暴露了一组属性与方法（这里只看核心四个，原子操作见 u4-l3）：
+```python
+def tiled_view(self, tile_shape: Constant[Shape], *,
+               padding_mode: PaddingMode = PaddingMode.UNDETERMINED,
+               traversal_steps: Optional[Constant[Shape]] = None) -> "TiledView":
+```
 
-[TiledView 类骨架 — src/cuda/tile/_stub.py:762-805](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L762-L805)：`dtype`、`tile_shape` 是编译期常量属性；`num_tiles(axis)` 返回运行时 int32；`traversal_steps` 默认等于 `tile_shape`。
+读签名要注意三件事：
 
-其中 `load` / `store` 的语义和 `ct.load`/`ct.store` 完全一致，只是「形状」已经固化在视图里、`index` 是瓦片索引：
+- `tile_shape` 是 `Constant[Shape]`，即**编译期常量**——这与 u2-l3「tile 每维必须是编译期已知的 2 的幂」一致。
+- `tile_shape` 的秩（维数）必须等于数组的秩，否则报 `TileTypeError`（见 4.1.4 的测试）。
+- `traversal_steps` 默认 `None`，此时等价于「相邻瓦片严丝合缝」；4.3 节会专门讲它。
 
-[TiledView.load — src/cuda/tile/_stub.py:807-847](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L807-L847)：返回的 tile 形状恒为 `tile_shape`；部分越界按视图的 `padding_mode` 填充，整体越界未定义。
+**② `TiledView` 类本身**：
 
-[TiledView.store — src/cuda/tile/_stub.py:849-889](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L849-L889)：待写入 tile 的形状须**可广播**到 `tile_shape`；dtype 不同会做隐式 cast；部分越界写入被忽略。
+[src/cuda/tile/_stub.py:762-805](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L762-L805) —— 暴露了三个编译期只读属性：
 
-官方文档对 Tiled Views 的概念定义（含图示）在这里：
+| 成员 | 类型 | 含义 |
+| --- | --- | --- |
+| `dtype` | `DType`（常量） | 视图里元素的类型，等于数组的 dtype |
+| `tile_shape` | `tuple[const int, ...]` | 每次读写产出的 tile 形状 |
+| `traversalsteps` | `tuple[const int, ...]` | 相邻瓦片原点之间相隔的元素数（默认 = `tile_shape`） |
 
-[Tiled Views 概念 — docs/source/data.rst:157-185](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/docs/source/data.rst#L157-L185)：默认相邻瓦片无重叠无间隔（原点每步前进 `tile_shape[i]`）；`traversal_steps` 改变这个步距。
+**③ 按瓦片索引读写的 `load` / `store`**：
 
-下面是测试里最干净的 1D 拷贝内核范本——一个 block 把整个数组按瓦片遍历一遍并拷到目标数组：
+[src/cuda/tile/_stub.py:807-889](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L807-L889) ——
 
-[test_tiled_view_copy_1d — test/test_tiled_view.py:38-52](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_tiled_view.py#L38-L52)：`tv_x = x.tiled_view(TILE)` 创建视图，`tv_x.load(bid)` 按瓦片索引读、`tv_y.store(bid, ...)` 按瓦片索引写。注意这里 `grid = (cdiv(shape, tile_size),)`，**一个 block 仍只处理一个瓦片**（bid 即瓦片索引），下一节的 persistent 模式才会让一个 block 处理多个瓦片。
+- `tv.load(index)`：`index` 是**瓦片空间**里的索引，返回的 tile 形状恒为 `tile_shape`；部分越界按视图的 `padding_mode` 填充，**整体**越界未定义。
+- `tv.store(index, tile)`：`tile` 的形状须能广播到 `tile_shape`；部分越界写入被忽略，整体越界未定义。
 
-> 对比要点：用 `tiled_view` 之后，`load/store` 不再需要传 `shape`（它固化在视图里），代码更接近「在瓦片空间里按下标读写」的直觉。
+注意：这两个方法的 `index` 是**瓦片索引**，不是元素下标——这正是「瓦片空间」与「元素空间」分层的体现。
 
 #### 4.1.4 代码实践
 
-**实践目标**：用 `TiledView` 重写一个 1D `scale` 内核（`y = a * alpha`），并对照 u3-l1 用 `ct.load`/`ct.store` 的写法，体会「视图固化 shape」的差别。
+**实践目标**：用 `TiledView` 写一个 2D 拷贝内核，并验证它与 `ct.load`/`ct.store` 等价。
 
-**操作步骤**：
+**操作步骤**（参考 [test/test_tiled_view.py:59-86](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L59-L86) 的 `test_tiled_view_copy_2d`）：
 
-1. 在已安装 cuTile 的环境里新建 `scale_tv.py`，键入下面的内核（示例代码）：
+1. 准备一个 `(192, 134)` 的 `float32` torch 张量 `x`（非 tile 整数倍，故意制造部分越界）。
+2. 写内核：对每个 block，用 `x.tiled_view((TILE_M, TILE_N))` 建视图，`tv_y.store((bidm, bidn), tv_x.load((bidm, bidn)))`。
+3. host 端 grid 用 `ct.cdiv` 算：`grid = (cdiv(192, TILE_M), cdiv(134, TILE_N))`。
 
-   ```python
-   # 示例代码
-   import torch, cuda.tile as ct
+**需要观察的现象**：
 
-   @ct.kernel
-   def scale_tv(x, y, ALPHA, TILE: ct.Constant[int]):
-       bid = ct.bid(0)
-       tv_x = x.tiled_view(TILE)          # 视图固化 tile_shape=(TILE,)
-       tv_y = y.tiled_view(TILE)
-       tile = tv_x.load(bid)              # 瓦片索引 bid，形状自动是 (TILE,)
-       tv_y.store(bid, tile * ALPHA)      # 不用再传 shape
+- 内核内 `tv_x.tile_shape` 应等于 `(TILE_M, TILE_N)`，`tv_x.dtype` 应等于 `x.dtype`（参考 `check_tiled_view_properties`，[test/test_tiled_view.py:28-31](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L28-L31)）。
+- 把 `tile_shape` 写错秩（如对 1D 数组传 `(1,2)`）会抛 `TileTypeError: Expected shape length to be 1, got 2`（参考 [test/test_tiled_view.py:122-130](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L122-L130) 的 `test_tiled_view_rank_mismatch`）。
 
-   x = torch.arange(1024, dtype=torch.float32, device='cuda')
-   y = torch.zeros_like(x)
-   TILE = 64
-   grid = (ct.cdiv(x.numel(), TILE),)
-   ct.launch(torch.cuda.current_stream(), grid, scale_tv, (x, y, 3.0, TILE))
-   ```
-
-2. 把它和 u3-l1 里 `ct.load(x, bid, (TILE,))` 的写法并排放，对比参数数量。
-
-**需要观察的现象**：结果 `y` 应等于 `x * 3.0`；`tv_x.load(bid)` 不带 `shape` 参数，形状由视图决定。
-
-**预期结果**：`torch.allclose(y, x * 3.0)` 为 `True`。
-
-**若无法本地运行**：待本地验证（需 GPU 与已安装的 `cuda-tile`）。
+**预期结果**：输出 `y` 与输入 `x` 逐元素相等。**待本地验证**（本讲不在沙箱里执行 GPU 内核）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果两个数组的形状不同，能否共用同一个 `TiledView` 对象？
+**练习 1**：一个 `(100,)` 的 1D 数组用 `tiled_view(30)` 建视图，瓦片空间有几块瓦片？最后一块瓦片覆盖哪些元素？
 
-> **答案**：不能。`TiledView` 绑定了**一个具体的 `Array`**，不同数组要各自调用 `.tiled_view(...)`。但它们的 `tile_shape` 可以相同（如测试里 `tv_x`、`tv_y` 用同一个 `TILE`），这样瓦片索引可以互通。
+**答案**：`cdiv(100, 30) = 4` 块。前三块各覆盖 `[0:30)`、`[30:60)`、`[60:90)`；第 4 块（索引 3）覆盖 `[90:120)`，其中 `[100:120)` 越界、按 `padding_mode` 填充。
 
-**练习 2**：`tv.load(i)` 返回的 tile 形状由什么决定？是 `i` 还是视图？
+**练习 2**：为什么 `tile_shape` 必须是 `Constant`，而数组的 `shape` 是运行时 `int32`？
 
-> **答案**：由视图的 `tile_shape` 决定，与索引 `i` 无关。所以无论取第几个瓦片，tile 形状恒为 `tile_shape`（见 `_stub.py:813`）。
+**答案**：`tile_shape` 决定**编译期生成的 tile 类型**（tile 每维须为 2 的幂、编译期已知，见 u2-l3），故必须是常量；而数组 `shape` 是 host 传入的运行时值，cuTile 用 `int32` 存以提升性能（见 u2-l2），二者处在不同层面。
 
 ---
 
-### 4.2 num_tiles 与 tile space
+### 4.2 num_tiles：在内核内查询瓦片数
 
 #### 4.2.1 概念说明
 
-要在瓦片空间里**循环遍历**，你必须先知道「沿某条轴一共有多少个瓦片」。这就是 `num_tiles`。
+u3-l1 的 vector_add 里，循环上界 `num_tiles_k` 这种值是 host 算好、作为 `Constant` 传进来的。但很多时候我们希望**内核自己知道「沿某个轴一共有多少块瓦片」**，从而：
 
-cuTile 提供了**两个**不同层次的 `num_tiles`，不要混淆：
+- 不必把循环上界从 host 硬塞进来（减少 `Constant` 参数、减少 JIT 特化）；
+- 让内核对不同的数组 shape 自洽。
 
-| 形式 | 调用方式 | 作用域 |
-|------|----------|--------|
-| 模块级函数 | `ct.num_tiles(array, axis, shape=...)` | 任意数组 + 任意 tile shape，**不必先建视图** |
-| TiledView 方法 | `tv.num_tiles(axis)` | 针对已建好的视图（继承它的 `tile_shape`/`traversal_steps`） |
+cuTile 提供了两种查询瓦片空间尺寸的入口，都叫 `num_tiles`：
 
-两者都返回**运行时 `int32`**（不是编译期常量），因为数组 shape 本身是运行时值（见 u2-l2）。
-
-直觉上，沿轴 `i` 的瓦片数就是把该轴的元素数**向上取整除以**瓦片步距：
-
-\[
-\text{num\_tiles}[i] = \left\lceil \frac{\text{dim}[i]}{\text{step}[i]} \right\rceil
-\]
-
-默认 `step[i] = tile_shape[i]`；若给了 `traversal_steps`，则 `step[i] = traversal_steps[i]`（见 4.3）。
-
-**element space 与 tile space 的对应**：数组在元素空间是 `dim[0] × dim[1] × ...`；切成瓦片后在瓦片空间是 `num_tiles[0] × num_tiles[1] × ...`。瓦片索引 `(t_0, t_1)` 对应元素空间原点 `(t_0·step[0], t_1·step[1])`、大小 `tile_shape` 的那块。
+1. **自由函数** `ct.num_tiles(array, axis, shape)`：在不建 `TiledView` 的情况下，临时问一句「如果用 `shape` 去切 `array`，沿 `axis` 有几块？」。
+2. **方法** `tv.num_tiles(axis)`：在已经建好的 `TiledView` 上查询它某个轴的瓦片数。
 
 #### 4.2.2 核心流程
 
+无论哪种入口，`num_tiles` 的语义都是向上取整除法：
+
+\[ \text{num\_tiles}(\text{axis}) = \left\lceil \frac{\text{shape}[\text{axis}]}{\text{traversal\_steps}[\text{axis}]} \right\rceil \]
+
+默认 `traversal_steps == tile_shape`，所以最常见的形式退化为：
+
+\[ \text{num\_tiles}(\text{axis}) = \left\lceil \frac{\text{shape}[\text{axis}]}{\text{tile\_shape}[\text{axis}]} \right\rceil = \text{ct.cdiv}(\text{shape}[\text{axis}],\ \text{tile\_shape}[\text{axis}]) \]
+
+**注意**：`num_tiles` 计入那些**部分越界**的瓦片（它们会被 `padding_mode` 填充）。例如 `(100,)` 数组 + `tile_shape=30`：`num_tiles = cdiv(100,30) = 4`，第 4 块部分越界但仍算一块。
+
+典型用法流程：
+
 ```text
-给定 array 与 tile_shape（每维 2 的幂）：
+方式 A（自由函数，临时查询）:
+  num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))   # 沿 K 轴的瓦片数
 
-  for axis i in 0..ndim:
-      dim[i]      = array.shape[i]            # 运行时 int32
-      step[i]     = traversal_steps[i]  (默认 tile_shape[i])
-      num_tiles[i] = ceil(dim[i] / step[i])    # 运行时 int32
-
-瓦片索引 t ∈ [0, num_tiles[i])
-  → 元素原点 origin = t * step[i]
-  → 覆盖元素 [origin, origin + tile_shape[i])
+方式 B（方法，已有视图）:
+  tv = x.tiled_view((tm, tn))
+  for i in range(tv.num_tiles(0)):                        # 用方法做循环上界
+      ...
 ```
-
-注意：当 `tile_shape[i]` 不整除 `dim[i]` 时，**最后一个瓦片会部分越界**，越界部分按 `padding_mode`（load）填充或被忽略（store）——这正是 GEMM 里 K 维循环用 `padding_mode=ZERO` 的原因（见 4.4）。
 
 #### 4.2.3 源码精读
 
-模块级 `num_tiles` 把数组沿某轴的瓦片数算出来，**不需要先建视图**：
+**① 自由函数 `ct.num_tiles`**：
 
-[ct.num_tiles 模块函数 — src/cuda/tile/_stub.py:1151-1185](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1151-L1185)：`num_tiles(array, axis, shape=tile_shape)` 返回沿 `axis` 的瓦片数（`int32`）；文档示例里 `42×64` 的数组按 `(4,8)` 切，得到 `11` 行 `8` 列瓦片（`ceil(42/4)=11`）。
+[src/cuda/tile/_stub.py:1177-1211](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1177-L1211) —— 签名：
 
-`TiledView` 上的同名方法则复用视图自带的 `tile_shape`/`traversal_steps`：
+```python
+def num_tiles(array: Array, /, axis: int,
+              shape: Constant[Shape],
+              order: Constant[Order] = "C") -> int:
+```
 
-[TiledView.num_tiles — src/cuda/tile/_stub.py:783-793](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L783-L793)：返回沿某轴的瓦片数（`int32`）。
+文档字符串里给了一个直观例子：对 `(42, 64)` 的数组用 `shape=(4, 8)` 切，`num_tiles(x, 0, ...)` 返回 `cdiv(42,4)=11`，`num_tiles(x, 1, ...)` 返回 `cdiv(64,8)=8`，即「11 行 × 8 列瓦片」。`order` 参数控制轴映射顺序（与 `load` 的 `order` 一致）。
 
-官方文档对 element/tile space 的定义（含图示）：
+**② 方法 `TiledView.num_tiles`**：
 
-[Element & Tile Space — docs/source/data.rst:130-155](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/docs/source/data.rst#L130-L155)：瓦片索引 `(i,j,...)` 配合 shape `S` 取出第 `(i+1),(j+1),...` 块瓦片。
+[src/cuda/tile/_stub.py:783-793](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L783-L793) —— 在已建好的视图上，只需给 `axis`（因为 `tile_shape` 已绑在视图上），返回 `int32`。
 
-下面这个测试同时验证了两种用法：用 `num_tiles` 方法读出瓦片数，并存到一个标量数组里与 host 端 `cdiv` 的结果对比：
+**③ 真实用法：GEMM 的 K 维循环上界**：
 
-[test_tiled_view_copy_2d 用 num_tiles — test/test_tiled_view.py:59-86](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_tiled_view.py#L59-L86)：`nt1, nt2 = tv_x.num_tiles(0), tv_x.num_tiles(1)` 读出瓦片数；host 端 `ref_n = [cdiv(shape[0], tile[0]), cdiv(shape[1], tile[1])]` 是参照，二者必须相等。
+[samples/MatMul.py:66](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L66) —— `matmul_kernel` 里这样算 K 维瓦片数：
 
-而模块级 `num_tiles` 在 GEMM 里用于算 K 维要循环多少次：
+```python
+num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))
+```
 
-[MatMul 计算 num_tiles_k — samples/MatMul.py:66](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L66)：`num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))` 即「把 A 看成 `(tm, tk)` 切分、取轴 1（K 维）的瓦片数」，等价于 `ceil(K, tk)`。注意它**没有先建视图**，因为这里只需要计数。
+随后 `for k in range(num_tiles_k):` 沿 K 维循环累加（[samples/MatMul.py:80](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L80)）。这里用自由函数而不是方法，是因为 A、B 两个数组各自要按不同瓦片形状（`(tm,tk)` 与 `(tk,tn)`）切，建两个视图不如直接问一句方便。
+
+**④ 测试中的方法用法**：
+
+[test/test_tiled_view.py:71-74](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L71-L74) —— `test_tiled_view_copy_2d` 里用方法查询并把结果写回一个标量数组，与 host 端 `cdiv` 的参考值比对：
+
+```python
+nt1, nt2 = tv_x.num_tiles(0), tv_x.num_tiles(1)
+```
+
+host 端参考值为 `[ct.cdiv(shape[0], tile_size[0]), ct.cdiv(shape[1], tile_size[1])]`（[test/test_tiled_view.py:79-81](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L79-L81)），这正是上面公式的直接印证。
 
 #### 4.2.4 代码实践
 
-**实践目标**：手算 `num_tiles` 并与 cuTile 的输出对照，建立 element↔tile space 的直觉。
+**实践目标**：用 `num_tiles` 让一个 1D 拷贝内核**完全自洽**——host 只传数组和瓦片大小，循环上界由内核自己推导。
 
-**操作步骤**：
+**操作步骤**（参考 [test/test_tiled_view.py:212-229](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L212-L229) 的 `test_tiled_view_helper_func`）：
 
-1. 给定 `array.shape = (42, 64)`，`tile_shape = (4, 8)`。
-2. 手算：`num_tiles[0] = ceil(42/4) = 11`，`num_tiles[1] = ceil(64/8) = 8`。
-3. 写一个最小内核把 `ct.num_tiles(x, 0, shape=(4,8))` 和 `ct.num_tiles(x, 1, shape=(4,8))` 存出来（示例代码）：
+```python
+# 示例代码：基于 test_tiled_view_helper_func 改写
+@ct.kernel
+def kernel(x, y, TILE: ConstInt):
+    tv_x = x.tiled_view(TILE)
+    tv_y = y.tiled_view(TILE)
+    for i in range(tv_x.num_tiles(0)):     # 循环上界来自内核内查询
+        tv_y.store(i, tv_x.load(i))
+```
 
-   ```python
-   # 示例代码
-   @ct.kernel
-   def cnt(x, out):
-       if ct.bid(0) == 0:
-           out.tiled_view(()).store(0, ct.num_tiles(x, 0, shape=(4, 8)))
-           out.tiled_view(()).store(1, ct.num_tiles(x, 1, shape=(4, 8)))
-   ```
+启动时只用 **1 个 block**（`grid=(1,)`），让这唯一一个 block 串行遍历所有瓦片。
 
-**需要观察的现象**：`out` 应为 `[11, 8]`。
+**需要观察的现象**：
 
-**预期结果**：与文档示例 `_stub.py:1184`（"11 rows and 8 columns"）一致。
+- 对 `shape=(128,)`、`TILE=64`，循环应跑 2 次（`cdiv(128,64)=2`）。
+- 即便 host 不把「2」作为参数传入，内核也能正确拷贝全部数据。
 
-**若无法本地运行**：待本地验证。
+**预期结果**：`y` 与 `x` 逐元素相等。**待本地验证**。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`num_tiles` 返回的是编译期常量还是运行时值？为什么？
+**练习 1**：对 `(42, 64)` 的数组，`ct.num_tiles(x, 0, shape=(4, 8))` 与 `ct.num_tiles(x, 1, shape=(4, 8))` 各返回多少？
 
-> **答案**：运行时 `int32`。因为数组 `shape` 是运行时值（u2-l2），`num_tiles = ceil(dim/step)` 自然也依赖运行时的 `dim`，无法在编译期确定。所以你**不能**把它用作 `range` 的编译期上界之外的地方需要常量的场合——但可以作为 `range` 的运行时上界（`for i in range(tv.num_tiles(0))`，见 u3-l3，循环次数是运行时的）。
+**答案**：分别是 `cdiv(42,4)=11` 与 `cdiv(64,8)=8`（与源码 docstring 的 testoutput 一致，[src/cuda/tile/_stub.py:1209-1210](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1209-L1210)）。
 
-**练习 2**：模块级 `ct.num_tiles(A, axis, shape=...)` 和 `A.tiled_view(shape).num_tiles(axis)` 有何异同？
+**练习 2**：既然 `num_tiles == cdiv(shape, tile_shape)`，为什么不直接在内核里写 `ct.cdiv(x.shape[0], TILE)` 而要用 `num_tiles`？
 
-> **答案**：结果相同（默认步距下），但前者**不必创建视图对象**，适合「我只要数一下」的场景（如 GEMM 的 `num_tiles_k`）；后者要复用同一视图多次访问时更方便，且会继承视图的 `traversal_steps`（4.3）。
+**答案**：两者数值相等，但 `num_tiles` 把「按某种瓦片形状切」的语义显式表达出来，并且在引入 `traversal_steps`（4.3 节）与 `order` 后，分母会变成 `traversal_steps` 而非 `tile_shape`，此时只有 `num_tiles` 能给出正确值。另外 `num_tiles` 直接对应瓦片空间概念，可读性更好。
 
 ---
 
-### 4.3 traversal_steps：重叠与间隔 tile
+### 4.3 traversal_steps：重叠与间隔的滑动窗口
 
 #### 4.3.1 概念说明
 
-到目前为止，相邻瓦片**首尾相接、无重叠无间隔**：第 `t` 个瓦片的元素原点是 `t · tile_shape[i]`。但很多算法需要**滑动窗口**：
+到目前为止，相邻瓦片都是「严丝合缝」的：第 `i` 块覆盖 `[i*ts:(i+1)*ts]`，第 `i+1` 块紧接着从 `(i+1)*ts` 开始。但有两类常见场景需要打破这种紧邻：
 
-- **卷积 / stencil**：每个输出元素依赖一小块输入邻域，相邻窗口的输入块**大量重叠**。
-- **下采样 / strided 访问**：相邻采样点之间**留有间隔（gap）**。
+- **重叠瓦片（overlap）**：卷积、滑动窗口、stencil 计算——相邻窗口共享一部分元素。需要 `traversal_steps < tile_shape`。
+- **间隔瓦片（gaps / strided）**：跨步采样、下采样——跳过一部分元素。需要 `traversal_steps > tile_shape`。
 
-`traversal_steps` 就是控制「相邻瓦片原点前进多少个元素」的旋钮：
+`tiled_view` 的 `traversal_steps` 参数就是控制「相邻瓦片原点之间相隔多少个元素」。文档原文（[docs/source/data.rst:170-174](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/docs/source/data.rst#L170-L174)）：
 
-- `traversal_steps[i] == tile_shape[i]`（默认）：瓦片刚好铺满，无重叠无间隔。
-- `traversal_steps[i] < tile_shape[i]`：相邻瓦片**重叠**（窗口滑动步长小于窗口大小）。
-- `traversal_steps[i] > tile_shape[i]`：相邻瓦片之间**有间隔**（跳着采样）。
+> Specifying `traversal_steps` to `Array.tiled_view` changes the advance per step to `traversal_steps[i]`, producing overlapping tiles when `traversal_steps[i] < tile_shape[i]` or gapped tiles when `traversal_steps[i] > tile_shape[i]`.
 
-注意：`traversal_steps` 与 `tile_shape` 都必须是编译期常量，且 `traversal_steps` 的秩必须等于数组秩；每个分量必须**严格为正**（负数或零会报 `TileTypeError`）。`traversal_steps` 自 CTK 13.3 起支持，旧版字节码会抛 `TileUnsupportedFeatureError`。
-
-一个重要推论：给定 `traversal_steps` 后，瓦片数变成 `ceil(dim / traversal_steps)`（不是除以 `tile_shape`），见 4.2 的公式。
+> ⚠️ `traversal_steps` 是 **CTK 13.3（tileiras `V_13_3`）** 才支持的特性，旧版本会抛 `TileUnsupportedFeatureError`（见 4.3.4）。
 
 #### 4.3.2 核心流程
 
+引入 `traversal_steps` 后，瓦片索引 `i` 与元素范围的映射变为：
+
+\[ \text{元素范围}(i) = \big[\, i \cdot \text{step},\ \min(i \cdot \text{step} + \text{tile\_shape},\ \text{shape}) \,\big) \]
+
+超出 `shape` 的部分按 `padding_mode` 填充。三种情形对比（1D，`shape=16`，`tile_shape=4`）：
+
+| `traversal_steps` | 相邻瓦片关系 | 瓦片索引 0..3 覆盖的元素 | `num_tiles` |
+| --- | --- | --- | --- |
+| `=4`（默认） | 紧邻无重叠 | `[0:4] [4:8] [8:12] [12:16]` | `cdiv(16,4)=4` |
+| `=2`（< tile） | **重叠** 2 个元素 | `[0:4] [2:6] [4:8] [6:10] …` | `cdiv(16,2)=8` |
+| `=8`（> tile） | **间隔** 4 个元素 | `[0:4] [8:12]`（跳过 `[4:8]`） | `cdiv(16,8)=2` |
+
+注意：`num_tiles` 的分母变成了 `traversal_steps`，而不是 `tile_shape`——这是 4.2 节公式里分母写成 `traversal_steps` 的原因。
+
+伪代码（滑动窗口拷贝）：
+
 ```text
-对每个轴 i，瓦片 t 的元素原点与覆盖范围：
-
-  origin[i] = t * traversal_steps[i]
-  覆盖元素区间 [origin[i], origin[i] + tile_shape[i])
-
-三种模式（以 1D、tile_shape=4 为例）：
-
-  traversal_steps=4（默认）：  [0,4) [4,8) [8,12) ...        → 无重叠
-  traversal_steps=2（<tile）： [0,4) [2,6) [4,8) [6,10) ...   → 重叠 2 个元素
-  traversal_steps=8（>tile）： [0,4) .... [8,12) ....         → 间隔 4 个元素
+tv     = x.tiled_view(TILE, traversal_steps=STEP)
+tv_out = out.tiled_view(TILE, traversal_steps=STEP)
+for i in range(tv.num_tiles(0)):           # = cdiv(N, STEP)
+    tv_out.store(i, tv.load(i))            # 每块瓦片从 i*STEP 开始
 ```
-
-零维 tile（`tile_shape=()`）的特例：`traversal_steps` 默认广播为 `(1,1,...,1)`。此时每个「瓦片」就是一个标量元素，`traversal_steps=(sh, sw)` 等价于按步长 `(sh, sw)` 在元素空间里采样——测试里用 `x[::step_h, ::step_w]` 作为参照正是这个道理。
 
 #### 4.3.3 源码精读
 
-`traversal_steps` 是 `tiled_view` 的关键字参数，文档里明确列出了三种模式：
+**① `tiled_view` 的 `traversal_steps` 形参**：
 
-[tiled_view 的 traversal_steps 参数 — src/cuda/tile/_stub.py:251-262](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L251-L262)：`None` 或等于 `tile_shape` 时无重叠无间隔；小于则重叠；大于则有间隔；（Since CTK 13.3）。
+[src/cuda/tile/_stub.py:251-262](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L251-L262) —— docstring 明确给出三种取值的语义，并标注 `(Since CTK 13.3)`。
 
-文档示例直观对比了默认步距与 `traversal_steps=(1,4)`（行方向步长 1，瓦片重叠）：
+**② `TiledView.traversalsteps` 属性**：
 
-[tiled_view 示例 — src/cuda/tile/_stub.py:277-290](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L277-L290)：`tv2.load((1,0))` 取到的第二块从第 1 行开始（与第一块重叠第 1 行），输出 `[[4,5,6,7],[8,9,10,11]]`。
+[src/cuda/tile/_stub.py:795-805](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L795-L805) —— 返回实际生效的步长，默认等于 `tile_shape`；当 `tile_shape == ()`（零维 tile / 标量视图）时，`traversalsteps` 被广播为 `(1,) * 秩`。
 
-`TiledView.traversal_steps` 属性把实际生效的步距暴露出来（默认回退到 `tile_shape`，零维 tile 回退到 `(1,)*rank`）：
+**③ 滑动窗口测试**：
 
-[TiledView.traversal_steps 属性 — src/cuda/tile/_stub.py:795-805](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L795-L805)：未显式提供时默认等于 `tile_shape`；`tile_shape` 为 `()` 时为 `(1,)*rank`。
+[test/test_tiled_view.py:290-304](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L290-L304) —— `test_tiled_view_traversal_steps_sliding_window` 用三组参数覆盖三种情形：
 
-测试覆盖了三种典型场景。先看「滑动窗口」参数化测试，它把 `step` 与 `tile_size` 解耦，并和 `torch` 的 `ref[start:start+tile_size]` 逐窗口对比：
+```python
+@pytest.mark.parametrize("tile_size,step,n", [
+    (4, 2, 8),   # traversal_steps < tile_shape: overlapping tiles
+    (4, 8, 16),  # traversal_steps > tile_shape: strided tiles with gaps
+    (4, 3, 12),  # traversal_steps is not a power of two
+])
+```
 
-[sliding_window 测试 — test/test_tiled_view.py:283-304](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_tiled_view.py#L283-L304)：三组参数 `step<tile`（重叠）、`step>tile`（间隔）、`step` 非 2 的幂；参照逻辑 `for start in range(0, n, step)` 即 `ceil(n/step)` 个窗口。
+注意第三组 `(4, 3, 12)`：`traversal_steps` **不要求是 2 的幂**（只有 `tile_shape` 要求是 2 的幂）。host 端参考实现用纯 Python 复现滑动窗口语义（[test/test_tiled_view.py:301-303](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L301-L303)）：
 
-再看一个真实的 2D box-filter（无 padding 卷积），用 `traversal_steps < tile_shape` 实现重叠窗口：
+```python
+for start in range(0, n, step):
+    ref[start:start + tile_size] = x[start:start + tile_size]
+```
 
-[2D 卷积（滑动窗口）测试 — test/test_tiled_view.py:307-333](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_tiled_view.py#L307-L333)：`tv = x.tiled_view((KH,KW), traversal_steps=(SH,SW))`，窗口 `(KH,KW)` 按步长 `(SH,SW)` 滑动；每个窗口 `ct.sum(tile)` 即 box-filter 输出。
+这正是「瓦片 `i` 从 `i*step` 开始」的可执行定义。
 
-最后，`num_tiles` 在给定 `traversal_steps` 后按步距计数（验证 `ceil(dim/step)`）：
+**④ `num_tiles` 与 `traversal_steps` 的关系测试**：
 
-[num_tiles 与 traversal_steps — test/test_tiled_view.py:336-352](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_tiled_view.py#L336-L352)：`N=16, TILE=4, STEP=2` 时 `num_tiles(0) == cdiv(16,2) == 8`，确认按 `step` 而非 `tile` 计数。
+[test/test_tiled_view.py:336-352](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L336-L352) —— `test_tiled_view_traversal_steps_num_tiles`：`N=16, TILE=4, STEP=2`，断言 `tv.num_tiles(0) == ct.cdiv(16, 2) == 8`，直接验证「分母是 step 而非 tile」。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用 `traversal_steps` 实现一个 1D **滑动窗口求和**（box-filter），观察重叠窗口的行为。
+**实践目标**：用 `traversal_steps` 实现一个 2D box-filter（盒滤波）的滑动窗口，体会「重叠瓦片」。
 
-**操作步骤**：
+**操作步骤**（参考 [test/test_tiled_view.py:307-333](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L307-L333) 的 `test_tiled_view_2d_conv_no_padding`）：
 
-1. 设 `N=8, TILE=4, STEP=2`，则窗口数为 `ceil(8/2)=4`，窗口分别覆盖元素 `[0,4),[2,6),[4,8),[6,10)`（最后一个部分越界，需 `padding_mode=ZERO`）。
-2. 写内核（示例代码）：
+```python
+# 示例代码：2D box-filter，窗口 (KH,KW)，步长 (SH,SW)
+@ct.kernel
+def kernel(x, out, KH: ConstInt, KW: ConstInt, SH: ConstInt, SW: ConstInt,
+           OUT_H: ConstInt, OUT_W: ConstInt):
+    tv = x.tiled_view((KH, KW), traversal_steps=(SH, SW))   # 重叠窗口
+    out_tv = out.tiled_view(())
+    for i in range(OUT_H):
+        for j in range(OUT_W):
+            tile = tv.load((i, j))                           # 取 (KH,KW) 窗口
+            out_tv.store(i * OUT_W + j, ct.sum(tile))        # 窗口求和 -> 标量
+```
 
-   ```python
-   # 示例代码
-   @ct.kernel
-   def boxsum(x, out, TILE: ct.Constant[int], STEP: ct.Constant[int]):
-       tv = x.tiled_view(TILE, traversal_steps=STEP,
-                         padding_mode=ct.PaddingMode.ZERO)
-       out_tv = out.tiled_view(())            # 标量输出视图
-       for i in range(tv.num_tiles(0)):
-           out_tv.store(i, ct.sum(tv.load(i)))
-   ```
+host 端：`H=W=6`、`KH=KW=2`、`SH=SW=1`，输出 `out_h = (H-KH)//SH + 1 = 5` 个有效窗口。
 
-3. host 端：`x = [1,2,3,4,5,6,7,8]`，`out` 长度 `cdiv(8,2)=4`。
+**需要观察的现象**：
 
-**需要观察的现象**：窗口和应分别为 `[1+2+3+4, 3+4+5+6, 5+6+7+8, 7+8+0+0] = [10, 18, 26, 15]`，注意相邻窗口**共享** `3,4` 与 `5,6` 与 `7`（重叠），最后一个窗口越界部分补 0。
+- 这里循环上界用的是 host 传入的 `OUT_H/OUT_W`（**有效**窗口数 = `shape - tile + 1`），**不是** `tv.num_tiles(0)`（= `cdiv(6,1)=6`，含一个部分越界窗口）。体会两者的差别：`num_tiles` 数「步长能迈几次」，而卷积的「有效」窗口数还要扣掉窗口自身宽度。
+- 若把 `traversal_steps` 改成 `None`，瓦片不再重叠，结果就不再是卷积。
 
-**预期结果**：`out == [10, 18, 26, 15]`（float32）。
+**预期结果**：`out` 与 `x.unfold(0,KH,SH).unfold(1,KW,SW).sum(dim=(-2,-1)).flatten()` 一致。**待本地验证**。
 
-**若无法本地运行**：待本地验证（且需 CTK ≥ 13.3，否则会抛 `traversal_steps requires tileiras 13.3`，见 `test_tiled_view.py:387-399`）。
+> **版本门控**：若你的环境 tileiras 版本低于 13.3，本实践的内核会在编译期抛 `TileUnsupportedFeatureError: traversal_steps requires tileiras 13.3`。对应的回归测试在 [test/test_tiled_view.py:381-399](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L381-L399)（`test_tiled_view_traversal_steps_version_error`）。此外，`traversal_steps` 的秩必须等于数组秩、且每维必须为正，否则抛 `TileTypeError`（见 [test/test_tiled_view.py:408-437](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L408-L437)）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`traversal_steps` 可以是负数或零吗？为什么？
+**练习 1**：`shape=16`、`tile_shape=4`、`traversal_steps=2` 时，瓦片索引 0、1、2 各覆盖哪些元素？一共有几块瓦片？
 
-> **答案**：不可以。每个分量必须严格为正，否则报 `TileTypeError: ... of traversal_steps ... is not positive`（见 `test_tiled_view.py:421-437`）。因为负步距会让瓦片原点倒退、零步距会让所有瓦片重叠在同一点，二者都无意义。
+**答案**：索引 0→`[0:4]`、1→`[2:6]`、2→`[4:8]`，相邻瓦片重叠 2 个元素；共 `cdiv(16,2)=8` 块（最后一块索引 7→`[14:18)`，`[16:18)` 越界按 padding 填充）。
 
-**练习 2**：给定 `tile_shape=(4,)`、`traversal_steps=(2,)`、数组长度 `N=16`，瓦片数是多少？第 3 个瓦片（索引从 0 计）覆盖哪些元素？
+**练习 2**：`traversal_steps` 是否必须为 2 的幂？
 
-> **答案**：瓦片数 `= ceil(16/2) = 8`。第 3 个瓦片原点 `= 3*2 = 6`，覆盖元素 `[6, 10)`。
+**答案**：不必。只有 `tile_shape` 必须每维为 2 的幂（u2-l3）。`traversal_steps` 可以是任意正整数，例如 `(4, 3, 12)` 这组测试里 `step=3` 完全合法（[test/test_tiled_view.py:285-289](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L285-L289)）。
 
 ---
 
@@ -366,148 +403,216 @@ cuTile 提供了**两个**不同层次的 `num_tiles`，不要混淆：
 
 #### 4.4.1 概念说明
 
-到目前为止，你的内核都是「**一个 block 处理一个输出瓦片**」，host 端 `grid` 的大小等于输出瓦片数。这对 GEMM 这类「输出瓦片数远多于 SM 数」的内核有个代价：每个 block 完成自己那一个瓦片后就结束，GPU 要不断地调度新 block 上 SM，存在调度与启动开销。
+到目前为止，我们的内核都是「**一个 block 处理一块瓦片**」：host 启动的 block 数 = 瓦片总数。对于小内核这没问题，但当输出瓦片数很大时（比如大 GEMM 有成千上万块输出瓦片），会启动成千上万个 block，带来可观的 **调度 / 启动开销**，且 block 之间的负载可能不均。
 
-**persistent kernel（常驻内核）** 的思路相反：
+**persistent kernel（持久内核）**的思路是反过来的：
 
-- host 端只启动 **`NUM_SMS` 个 block**（每个 SM 一个），让它们**常驻** SM；
-- 每个 block 在一个 `for` 循环里**串行处理多个输出瓦片**，瓦片之间不再需要 block 重新调度。
+- 只启动**与 SM 数量相当**的少量 block（让 GPU 一次铺满）；
+- 每个 block 在一个**循环**里串行处理**多块**输出瓦片。
 
-实现的关键是两个运行时查询：
+这样把「瓦片数」与「block 数」解耦：瓦片空间可以很大，但 block 空间固定为 SM 数。
 
-- `ct.bid(0)`：当前 block 的编号（0 ~ `num_blocks-1`）。
-- `ct.num_blocks(0)`：本次启动的 block 总数（即 host 端 `grid[0]`）。
+要写 persistent 内核，需要两个新工具：
 
-然后用一个**跨步循环**把瓦片分配给 block：
-
-\[
-\text{for } \text{cur} \in [\,\text{bid},\ \text{total\_tiles},\ \text{num\_blocks}\,)
-\]
-
-即编号为 `bid` 的 block 处理瓦片 `bid, bid+num_blocks, bid+2*num_blocks, ...`，直到超过瓦片总数。这是一种**循环分块（cyclic distribution）**：瓦片被轮流分配给各 block，天然负载均衡。
-
-为什么这是 persistent？因为 block 数被 host 限制成 `NUM_SMS`（与 SM 数相等），每个 block 拿到多个瓦片，**block 不再是「一次性」的**，而是「常驻 + 循环」。注意 cuTile 不暴露线程，这里的「常驻」是 block（CTA）级语义。
-
-> 与 `traversal_steps` 的区别：`traversal_steps` 是**单个 block 内**遍历输入瓦片的步距（数据视角）；persistent 循环是**跨 block**分配输出瓦片的方式（调度视角）。两者正交，常一起用。
+- **`ct.num_blocks(axis)`**：在内核内查询「本次启动沿 `axis` 一共有几个 block」——也就是 host 传给 `ct.launch` 的 grid 尺寸。这是**块空间**的尺寸，区别于「瓦片空间」的 `num_tiles`。
+- 一个步长为 `num_blocks` 的 `range` 循环，让 block `bid` 认领瓦片 `bid, bid+num_blocks, bid+2*num_blocks, …`。
 
 #### 4.4.2 核心流程
 
-persistent 内核的标准骨架：
+persistent 循环的标准惯用法（来自 [samples/MatMul.py:148-149](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L148-L149)）：
 
 ```text
-host 端：
-  total_tiles = num_bid_m * num_bid_n          # 输出瓦片总数
-  grid_size   = min(NUM_SMS, total_tiles)      # 不超过 SM 数，也不超过瓦片数
-  grid        = (grid_size, 1, 1)
-  launch(..., grid, kernel, ...)
-
-kernel 内：
-  bid            = ct.bid(0)                   # 我的 block 编号
-  num_tile_blocks = ct.num_blocks(0)           # == grid_size（启动的 block 数）
-  for cur in range(bid, total_tiles, num_tile_blocks):
-      (bidx, bidy) = 把线性索引 cur 映射回 2D 瓦片坐标   # 如 swizzle
-      ... 处理 (bidx, bidy) 这个输出瓦片（load / 计算 / store）...
+bid            = ct.bid(0)                      # 我是第几个 block
+upper_bound    = num_bid_m * num_bid_n          # 输出瓦片总数
+num_tile_blocks = ct.num_blocks(0)              # 一共启动了多少个 block
+for current_bid in range(bid, upper_bound, num_tile_blocks):
+    # 处理第 current_bid 块输出瓦片
 ```
 
-「线性索引 → 2D 坐标」的映射可以是简单的除/模，也可以是 `swizzle`（重排以提升 L2 复用，见 u3-l6）。关键不变量：所有 block 的 `cur` 集合**恰好覆盖** `[0, total_tiles)` 且**无交集**——因为起点 `bid` 互不相同、步长 `num_tile_blocks` 相同。
+`range(start, stop, step)` 的语义是：`current_bid` 依次取 `bid, bid+num_blocks, bid+2*num_blocks, …`，直到 `>= upper_bound`。因此：
 
-注意 `range(bid, total_tiles, num_tile_blocks)` 的步长是 `num_tile_blocks`（运行时正整数，恒 ≥ 1），满足 cuTile 对 `range` 步长须为正的约束（u3-l3）。当 `total_tiles ≤ num_tile_blocks` 时，退化为「一个 block 一个瓦片」，与普通内核等价。
+- block 0 处理瓦片 `0, B, 2B, …`；
+- block 1 处理瓦片 `1, B+1, 2B+1, …`；
+- ……
+- block `B-1` 处理瓦片 `B-1, 2B-1, …`。
+
+（其中 `B = num_blocks`。）这是一种**循环切块（round-robin / cyclic）**的瓦片→block 映射。
+
+host 侧配套（[samples/MatMul.py:233-237](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L233-L237)）：
+
+```text
+grid_size = num_bid_m * num_bid_n               # 输出瓦片总数
+if persistent:
+    NUM_SMS  = 设备的 multi_processor_count
+    grid_size = min(NUM_SMS, grid_size)         # 不超过 SM 数
+grid = (grid_size, 1, 1)
+```
+
+注意三个空间的最终关系：
+
+| 空间 | persistent 时的大小 | 关系 |
+| --- | --- | --- |
+| 瓦片空间（输出） | `num_bid_m * num_bid_n` | 由数组 shape 与 tile_shape 决定 |
+| 块空间（grid） | `min(NUM_SMS, 瓦片数)` | host 决定，≤ SM 数 |
+| 每 block 处理瓦片数 | `cdiv(瓦片数, 块数)` | 由循环自动消化 |
+
+> **与 u3-l3 的衔接**：`range(bid, upper_bound, num_tile_blocks)` 是三参数 `range`，step = `num_tile_blocks`。u3-l3 讲过 `range` 的 step 必须 > 0；这里 `num_blocks ≥ 1` 恒成立，故合法。step 是运行时 `int32`（来自 `num_blocks`），不是编译期常量——cuTile 允许运行时 step，只要它在运行时为正。
 
 #### 4.4.3 源码精读
 
-`num_blocks` 是 persistent 循环的另一个支柱，返回本次启动沿某轴的 block 数（即 host 端 `grid[axis]`）：
+**① `ct.num_blocks` 与 `ct.bid`**：
 
-[ct.num_blocks — src/cuda/tile/_stub.py:1116-1148](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1116-L1148)：`num_blocks(axis)` 返回 `int32`；示例里 `ct.launch(stream, (2,3,4), kernel, ())` 启动后，内核内 `num_blocks(0/1/2)` 得到 `(2,3,4)`。它与 `bid` 对称：`bid` 是「我是第几个」，`num_blocks` 是「一共多少个」。
+[src/cuda/tile/_stub.py:1142-1174](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1142-L1174) —— `num_blocks(axis)` 返回本次 launch 沿 `axis` 的 block 数，取值就是 host 传给 `ct.launch` 的 `grid`。docstring 的例子：`ct.launch(stream, (2,3,4), kernel, ())` 时，`num_blocks(0/1/2)` 分别返回 `2/3/4`。
 
-权威范本是 MatMul 示例里的 persistent 版本。先看 host 端如何把 grid 限制到 SM 数：
+[src/cuda/tile/_stub.py:1116-1139](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1116-L1139) —— `bid(axis)` 返回当前 block 的坐标。两者合起来给出「我在第几个 block / 一共有几个 block」。
 
-[host 端 persistent grid — samples/MatMul.py:233-238](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L233-L238)：`NUM_SMS = multi_processor_count`，`grid_size = min(NUM_SMS, grid_size)`，即「不超过 SM 数、也不超过瓦片数」。
+> 区分 `num_blocks`（块空间）与 `num_tiles`（瓦片空间）：非 persistent 内核里它们常常相等（grid = 瓦片数），但 persistent 内核里 `num_blocks < num_tiles`，**正是这个差让循环有了意义**。
 
-再看内核内的 persistent 循环本体：
+**② 非 persistent GEMM**（对照基准）：
 
-[persistent_matmul_kernel 循环 — samples/MatMul.py:128-149](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L128-L149)：`num_tile_blocks = ct.num_blocks(0)`；`for current_bid in range(bid, upper_bound, num_tile_blocks)` 把线性瓦片索引 `current_bid` 轮流分给各 block，再用 `swizzle_2d_from_bid(...)` 映射回 `(bidx, bidy)`。
+[samples/MatMul.py:33-101](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L33-L101) —— `matmul_kernel` 里，每个 block 只算**一块**输出瓦片：
 
-循环体内部与非 persistent 版**逐行相同**——都是「K 维循环累加 + mma」：
+```python
+bidx, bidy = swizzle_2d(M, N, tm, tn, GROUP_SIZE_M)   # 把 1D bid 映射到 2D 瓦片
+num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))
+accumulator = ct.full((tm, tn), 0, dtype=ct.float32)
+for k in range(num_tiles_k):                           # 仅沿 K 维循环
+    a = ct.load(A, index=(bidx, k), shape=(tm, tk), ...).astype(dtype)
+    b = ct.load(B, index=(k, bidy), shape=(tk, tn), ...).astype(dtype)
+    accumulator = ct.mma(a, b, accumulator)
+ct.store(C, index=(bidx, bidy), tile=accumulator.astype(C.dtype))
+```
 
-[persistent 内核的 K 维累加体 — samples/MatMul.py:156-176](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L156-L176)：`for k in range(num_tiles_k)` 里 `load A/B → mma → 累加`，最后 `astype` + `store`。这部分正是 4.2 里 `num_tiles` 的应用。
+host 侧 `grid_size = grid_x * grid_y`（输出瓦片总数，[samples/MatMul.py:230-232](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L230-L232)），即「一个 block 一块瓦片」。
 
-对照非 persistent 版本可以看出**唯一区别**就是外层多了一个 `for current_bid` 循环、以及 grid 从「瓦片总数」缩成「SM 数」：
+**③ persistent GEMM**（目标形态）：
 
-[非 persistent 版本 — samples/MatMul.py:33-101](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L33-L101)：每个 block 用 `swizzle_2d(...)` 由 `bid` 直接算出**唯一一个** `(bidx, bidy)`，没有外层循环；host 端 `grid_size = grid_x * grid_y`（瓦片总数）。
+[samples/MatMul.py:104-176](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L104-L176) —— `persistent_matmul_kernel` 的关键差异在前 10 行：
+
+```python
+bid = ct.bid(0)
+M, N = A.shape[0], B.shape[1]
+num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))
+...
+num_bid_m = ct.cdiv(M, tm)
+num_bid_n = ct.cdiv(N, tn)
+upper_bound = num_bid_m * num_bid_n            # 输出瓦片总数
+num_tile_blocks = ct.num_blocks(0)             # 启动的 block 数
+for current_bid in range(bid, upper_bound, num_tile_blocks):
+    accumulator = ct.full((tm, tn), 0, dtype=ct.float32)
+    bidx, bidy = swizzle_2d_from_bid(M, N, tm, tn, GROUP_SIZE_M, current_bid)
+    for k in range(num_tiles_k):
+        ...                                    # 与非 persistent 版完全相同的 K 维累加
+    ct.store(C, index=(bidx, bidy), tile=accumulator.astype(C.dtype))
+```
+
+也就是说：**K 维的内层循环一字未改**，只是外面**套了一层「认领多块输出瓦片」的循环**，并把原来的 `bidx, bidy = swizzle_2d(...)`（用 `ct.bid(0)`）改成 `swizzle_2d_from_bid(..., current_bid)`（用循环变量 `current_bid`）。
+
+host 侧把 grid 压到 SM 数（[samples/MatMul.py:233-237](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L233-L237)）：
+
+```python
+if persistent:
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    grid_size = min(NUM_SMS, grid_size)
+```
+
+并按开关选用内核（[samples/MatMul.py:248](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L248)）：`kernel = persistent_matmul_kernel if persistent else matmul_kernel`。
+
+> **不要混淆**：[docs/source/performance.rst:107](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/docs/source/performance.rst#L107) 里提到的 `nvidia-smi -pm 1`「persistent mode」是**GPU 硬件层的持久化模式**（让驱动常驻、避免初始化开销），与本讲的 **persistent kernel**（内核层、block 复用处理多瓦片）是完全不同的两个概念，仅是同名。
 
 #### 4.4.4 代码实践
 
-**实践目标**：把 samples/MatMul.py 的**非 persistent** `matmul_kernel` 改写成 persistent 版本，让每个 block 处理多个输出瓦片，并用 torch 验证数值一致。这正本讲综合实践要求（详见第 5 节），此处先给最小骨架。
+**实践目标**：在不看 `persistent_matmul_kernel` 的前提下，亲手把非 persistent 的 `matmul_kernel` 改写成 persistent 版，再与样本对照。
 
 **操作步骤**：
 
-1. 复制 `matmul_kernel`，在函数体开头加入：
+1. 复制 [samples/MatMul.py:33-101](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L33-L101) 的 `matmul_kernel`，重命名为 `my_persistent_matmul`。
+2. 把函数体里 `bidx, bidy = swizzle_2d(M, N, tm, tn, GROUP_SIZE_M)` 这一行**连同它之后到 `ct.store` 为止的整段**，包进一个 persistent 循环：
+   - 在循环前算 `num_bid_m = ct.cdiv(M, tm)`、`num_bid_n = ct.cdiv(N, tn)`、`upper_bound = num_bid_m * num_bid_n`、`num_tile_blocks = ct.num_blocks(0)`。
+   - 用 `for current_bid in range(bid, upper_bound, num_tile_blocks):` 包住那段代码。
+   - 把段内的 `swizzle_2d(...)` 改成 `swizzle_2d_from_bid(M, N, tm, tn, GROUP_SIZE_M, current_bid)`（`bid` 已经在循环外取过，见 [samples/MatMul.py:128](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/samples/MatMul.py#L128)）。
+3. host 侧（参考 `cutile_matmul`）按 `persistent=True` 分支把 grid 压到 `NUM_SMS`。
 
-   ```python
-   # 示例代码（在 matmul_kernel 基础上改造）
-   bid = ct.bid(0)
-   num_bid_m = ct.cdiv(M, tm)
-   num_bid_n = ct.cdiv(N, tn)
-   upper_bound = num_bid_m * num_bid_n
-   num_tile_blocks = ct.num_blocks(0)
-   for current_bid in range(bid, upper_bound, num_tile_blocks):
-       bidx, bidy = swizzle_2d_from_bid(M, N, tm, tn, GROUP_SIZE_M, current_bid)
-       # ... 原 K 维累加循环 + store 原样保留 ...
-   ```
+**需要观察的现象**：
 
-2. host 端把 grid 改成 `min(NUM_SMS, grid_x*grid_y)`。
+- 改写后的内核与样本里的 `persistent_matmul_kernel` 应**逐行等价**——这正好用来检验你是否理解了那几步变换。
+- 用 `python samples/MatMul.py --correctness-check` 跑 Test Case 4，应打印 `Correctness check passed`。
 
-**需要观察的现象**：输出与 `A @ B` 数值一致；启动的 block 数从 `grid_x*grid_y` 降为 `NUM_SMS`（可用 nsys/ncu 观察到 grid 维度变小）。
+**预期结果**：persistent 版的输出与非 persistent 版、与 `A @ B` 数值一致（容差同 u3-l6 的 tf32 设置）。**待本地验证**（需要 GPU 与 tileiras）。
 
-**预期结果**：`torch.testing.assert_close(C, A @ B)` 通过。
-
-**若无法本地运行**：待本地验证（需 GPU）。也可直接运行 `python samples/MatMul.py --correctness-check`，它会自动跑「Test Case 4: Persistent Matmul」做这个对照（见 `samples/MatMul.py:333-342`）。
+> 进阶观察：用 Nsight Compute 或 `ct.tune`（见 [u8-l3](u8-l3-autotuning.md)）对比 persistent 与非 persistent 版的执行时间。当输出瓦片数远大于 SM 数时，persistent 版通常因调度开销减少而更快；当瓦片数 ≤ SM 数时两者基本无差（`min(NUM_SMS, grid_size)` 退化为 `grid_size`）。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 persistent 循环用 `range(bid, total, num_blocks)` 而不是 `range(bid, total, 1)`？
+**练习 1**：persistent 内核里，若 host 启动了 `B = num_blocks(0)` 个 block、输出瓦片总数为 `T`，那么 block `bid` 会处理哪几块瓦片？每个 block 最多处理几块？
 
-> **答案**：步长必须等于 `num_blocks`，才能让编号 `0..num_blocks-1` 的各 block **无重叠地瓜分**所有瓦片（`bid` 互不相同 + 等步长 → 集合无交并全覆盖）。若步长为 1，每个 block 都会遍历**全部**瓦片，造成 `num_blocks` 倍的重复计算。
+**答案**：block `bid` 处理瓦片 `bid, bid+B, bid+2B, …`（cyclic 映射）。每个 block 最多处理 `cdiv(T, B)` 块（当 `T` 不被 `B` 整除时，前 `T mod B` 个 block 会多处理一块）。
 
-**练习 2**：当输出瓦片总数 `total_tiles` 小于 `NUM_SMS` 时，persistent 内核会怎样？
+**练习 2**：为什么 persistent 内核要把 grid 压到 `min(NUM_SMS, T)` 而不是随便取一个比 `T` 小的数？
 
-> **答案**：host 端 `grid_size = min(NUM_SMS, total_tiles) = total_tiles`，于是 `num_blocks(0) == total_tiles`，`range(bid, total, total)` 让每个 block 恰好处理一个瓦片（`bid` 即瓦片索引），退化为普通内核。这正是 `min` 防退化（见 `samples/MatMul.py:237`）。
+**答案**：取 `NUM_SMS` 是为了「**正好铺满 GPU 的所有 SM**」——少于 SM 数会有 SM 空闲浪费；多于 SM 数则多余的 block 仍要排队复用 SM，并不能真正并行，反而增加调度开销。因此 `NUM_SMS` 是「块数足够并行、又不过度排队」的天然上限（当 `T < NUM_SMS` 时显然不能启动比瓦片还多的 block，故取 `min`）。
+
+**练习 3**：在 persistent 内核中，`num_blocks(0)` 是编译期常量还是运行时值？为什么这很重要？
+
+**答案**：运行时 `int32`——它等于 host 传入的 grid 尺寸，每次 launch 可能不同。正因为它不是编译期常量，persistent 循环的步长与迭代次数**不会被烘焙进 cubin**，同一份 cubin 可以服务不同的 grid 大小（只要瓦片形状等编译期参数不变）。这与 `Constant` 参数（会触发重新编译，见 u3-l5）形成对照。
 
 ---
 
 ## 5. 综合实践
 
-把本讲的四个模块串起来，完成这个任务：**把 samples/MatMul.py 的非 persistent `matmul_kernel` 改写为 persistent 版本，使每个 block 处理多个输出 tile，并验证正确性。**
+把本讲四个模块串起来，完成一个 **persistent + 滑动窗口** 的小内核。
 
-仓库里其实已经提供了官方 persistent 版（`persistent_matmul_kernel`），所以这个实践的真正价值在于**自己动手把转换过程走一遍**，而不是照抄。建议按下面顺序做：
+**任务**：实现一个 1D **滑动窗口拷贝 + persistent 调度**的内核 `sliding_copy_persistent`：
 
-1. **先读懂非 persistent 版**（[samples/MatMul.py:33-101](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L33-L101)）：确认「`swizzle_2d` 由 `bid` 算出唯一 `(bidx,bidy)` → K 维 `num_tiles_k` 循环累加 → store」这条链。
+- 输入 `x` 形状 `(N,)`，输出 `out` 形状 `(N,)`。
+- 窗口 `tile_shape = TILE`、`traversal_steps = STEP`（`STEP < TILE`，相邻窗口重叠）。
+- 用 **persistent** 方式：host 只启动 `min(NUM_SMS, num_tiles)` 个 block，每个 block 在循环里认领多个窗口，把每个窗口原样拷到 `out` 的对应位置。
 
-2. **改造为 persistent**（自行实现，不要看官方版）：
-   - 函数体顶部加 `bid = ct.bid(0)`、`num_tile_blocks = ct.num_blocks(0)`、`upper_bound = num_bid_m * num_bid_n`。
-   - 用 `for current_bid in range(bid, upper_bound, num_tile_blocks)` 包住原来的「计算单个瓦片」逻辑，把里面的 `swizzle_2d(...)` 换成 `swizzle_2d_from_bid(M, N, tm, tn, GROUP_SIZE_M, current_bid)`（[samples/MatMul.py:14-24](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L14-L24)）。
-   - K 维循环里的 `num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))` 保持不变（这就是模块级 `num_tiles` 的用武之地）。
+**要求把本讲四个模块都用上**：
 
-3. **改 host 端 grid**（参考 [samples/MatMul.py:233-238](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L233-L238)）：`grid_size = min(NUM_SMS, grid_x*grid_y)`。
+1. 用 `x.tiled_view(TILE, traversal_steps=STEP)` 与 `out.tiled_view(TILE, traversal_steps=STEP)` 建立**滑动窗口视图**（模块 4.1 + 4.3）。
+2. 用 `tv.num_tiles(0)` 推导**瓦片总数**作为循环上界的一部分（模块 4.2）。
+3. 用 `ct.num_blocks(0)` + `range(bid, upper_bound, num_blocks)` 写 **persistent 循环**（模块 4.4）。
 
-4. **验证**：用 `python samples/MatMul.py --correctness-check` 跑「Test Case 4: Persistent Matmul」（[samples/MatMul.py:333-342](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/samples/MatMul.py#L333-L342)），确认与 `A @ B` 数值一致。
+**参考骨架**（示例代码，需自行补全 host 侧）：
 
-5. **进阶观察**（可选）：把一个小的 element-wise 内核（如 `scale`）也改成 persistent：让一个 block 用 `TiledView` + `for i in range(tv.num_tiles(0))` 遍历多个瓦片，体会「`TiledView` 遍历 + persistent 循环」的组合。注意：纯 element-wise 内核通常**不需要** persistent（它已经访存-bound），这里只是为了练手。
+```python
+# 示例代码：persistent + 滑动窗口拷贝
+@ct.kernel
+def sliding_copy_persistent(x, out, TILE: ConstInt, STEP: ConstInt):
+    bid = ct.bid(0)
+    tv_x   = x.tiled_view(TILE, traversal_steps=STEP)
+    tv_out = out.tiled_view(TILE, traversal_steps=STEP)
+    upper_bound = tv_x.num_tiles(0)            # = cdiv(N, STEP)
+    num_tile_blocks = ct.num_blocks(0)
+    for i in range(bid, upper_bound, num_tile_blocks):
+        tv_out.store(i, tv_x.load(i))
+```
 
-**预期结果**：persistent 版与非 persistent 版数值一致；persistent 版启动的 block 数被限制在 SM 数。若无法本地运行，待本地验证。
+**host 侧要点**：
+
+- `num_tiles_host = cdiv(N, STEP)`；`grid_size = min(NUM_SMS, num_tiles_host)`；`grid = (grid_size,)`。
+- 参考输出可仿照 [test/test_tiled_view.py:301-303](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tiled_view.py#L301-L303) 用纯 Python 的 `for start in range(0, N, STEP): ref[start:start+TILE] = x[start:start+TILE]` 生成。
+
+**验证**：
+
+- 数值：`out` 与参考实现逐元素相等（注意越界部分的 padding 不参与比较）。
+- 行为：把 `grid_size` 从 `NUM_SMS` 改成 `1`，结果应**完全不变**（因为循环会自动让这 1 个 block 处理所有窗口）——这验证了「瓦片数与 block 数解耦」。
+
+**预期结果**：拷贝结果与参考一致；改 grid 大小不影响正确性。**待本地验证**（需 tileiras ≥ 13.3 以支持 `traversal_steps`）。
 
 ## 6. 本讲小结
 
-- **`TiledView`** 把「数组 + 一种 tile 切分方式」固化成一个对象，让你在**瓦片空间**里用 `tv.load(index)` / `tv.store(index, tile)` 按索引读写多个瓦片，不必每次重复传 `shape`；它不拷贝存储，只是对原 `Array` 的视图。
-- **`num_tiles`** 有两个层次：模块级 `ct.num_tiles(array, axis, shape)`（不必建视图，GEMM 里用来数 K 维瓦片）与 `TiledView.num_tiles(axis)`（复用视图的切分方式）；它返回运行时 `int32`，计算式是 `ceil(dim / step)`。
-- **`traversal_steps`** 控制相邻瓦片原点的步距：等于 `tile_shape`（默认）无重叠无间隔；小于则**重叠**（滑动窗口/卷积）；大于则**间隔**（下采样）。给定后瓦片数按 `ceil(dim / traversal_steps)` 计。要求每分量严格为正、秩等于数组秩，且需 CTK ≥ 13.3。
-- **`num_blocks(axis)`** 返回本次启动的 block 总数（即 host 端 `grid[axis]`），与 `bid` 对称；它是 persistent 循环的步长来源。
-- **persistent 内核**：host 端只启动 `NUM_SMS` 个 block，每个 block 用 `for cur in range(bid, total_tiles, num_blocks)` 轮流认领多个输出瓦片，从而把「block 数」与「输出瓦片数」解耦，减少调度开销。
-- **`traversal_steps`（数据视角，单 block 内遍历输入）与 persistent 循环（调度视角，跨 block 分配输出）正交**，常在 GEMM 等内核中组合使用。
+- **TiledView** 把「数组 + 瓦片形状 + 填充 + 步长」凝固成一个对象，`tv.load(i)` / `tv.store(i, tile)` 与裸 `ct.load`/`ct.store` 等价，但更适于在循环里反复读写同一数组的瓦片。
+- 关键是分清三个层面：**元素空间**（真实数据）、**瓦片空间**（`num_tiles`，由 `cdiv(shape, traversal_steps)` 决定）、**块空间**（`num_blocks`，由 host 的 grid 决定）。
+- **`num_tiles`** 让内核**自己**推导循环上界，避免把循环范围硬塞成 `Constant`；分母是 `traversal_steps` 而非 `tile_shape`。
+- **`traversal_steps`** 让相邻瓦片**重叠**（`< tile_shape`，卷积/stencil）或**留间隔**（`> tile_shape`，跨步采样），是 CTK 13.3 引入的特性。
+- **persistent 内核**用 `num_blocks` + `range(bid, upper_bound, num_blocks)` 把「瓦片数」与「block 数」解耦：host 只启动 SM 数量级个 block，每个 block 串行认领多块瓦片，减少调度开销。
+- `samples/MatMul.py` 同时给出 GEMM 的非 persistent 与 persistent 两版，两者仅差一层「认领多块输出瓦片」的外层循环，是理解 persistent 模式的最佳真实样本。
 
 ## 7. 下一步学习建议
 
-- 下一讲 **u4-l2 gather/scatter 与高级索引** 会讲非常规索引模式（按索引 tile 读写、`load_advanced_indexing`），适合实现 embedding gather 等场景；与本讲的 `TiledView` 形成「规则切分 vs 任意索引」的对照。
-- 若想深入「跨 block 写入的并发正确性」，接着读 **u4-l3 内存模型与原子操作**，其中 `TiledView.atomic_store_*`（本讲提到的 `_stub.py:891` 起）会在那里展开。
-- 想理解 `TiledView` / `traversal_steps` 在底层如何变成 IR，可跳到 **u5-7 stub 与实现注册**，看 `@stub` 标记的 `tiled_view` 如何对接到具体 IR 操作（`PartitionView` / `StridedView`，见 `test_tiled_view.py:355-359` 的注释）。
-- 想理解 persistent 内核为何能减少开销、以及如何用 Nsight 观察 grid 维度变化，可读 **u8-l5 调试、性能与开发者工具**。
+- **下一讲 [u4-l2](u4-l2-gather-scatter-advanced-indexing.md)**：把瓦片按**任意索引**读写——`gather`/`scatter` 与 `load_advanced_indexing`，从「规则瓦片网格」走向「不规则访存」。
+- **[u4-l3](u4-l3-memory-model-and-atomics.md)**：当多个 block 处理同一输出（如直方图）时，会需要原子操作与内存序——persistent 内核让这种竞争更激烈，理解内存模型很重要。
+- **回到源码**：本讲的 `@stub`（`tiled_view`/`num_tiles`/`num_blocks`）都只是签名，真正的 IR 实现见 [src/cuda/tile/_ir/ops.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py) 与注册系统（[u5-l7](u5-l7-stub-and-impl-registry.md)）；想理解 `traversal_steps` 如何被编译进 TMA load，可继续读后端字节码生成（[u7-l1](u7-l1-ir-to-bytecode.md)）。
+- **调优实践**：写好 persistent 内核后，用 [u8-l3 的 `ct.tune.exhaustive_search`](u8-l3-autotuning.md) 在若干 `(tm, tn, tk)` 组合里搜最优 tile 尺寸。

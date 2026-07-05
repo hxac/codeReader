@@ -1,403 +1,665 @@
 # kernel 装饰器与 AnnotatedFunction
 
+> 所属单元：U5 编译前端——从 Python 到 Tile IR
+> 依赖：u1-l4（顶层 API 全景）、u3-l1（load/store 范式）
+> 关联：u3-l7（元组参数与静态形状特化）、u5-l2（compile_tile 流水线）
+
 ## 1. 本讲目标
 
-本讲是「编译前端」单元的第一讲。在前面的入门单元里，我们已经会**写**内核、**启动**内核，也已经在 u1-l4 里把 `@ct.kernel` 当作一个「黑盒入口」用过了。从本讲开始，我们要**拆开这个黑盒**，看清一个被 `@ct.kernel` 装饰的 Python 函数，在被 `ct.launch` 真正编译执行之前，Python 侧到底为它构造了哪些对象、抽取了哪些信息。
+本讲是「编译前端」单元的第一讲，回答一个贯穿全单元的问题：
 
-读完本讲你应该能够：
+> 当你写下 `@ct.kernel def my_kernel(...)` 时，Python 层到底**构造出了什么对象**？这些对象又携带了哪些信息交给后端编译器？
 
-- 区分 `function`、`stub`、`kernel` 三类装饰器各自标记的「执行空间」语义，并理解它们在装饰时分别做了什么。
-- 说清 `kernel` 是一个**类**（而不是返回函数的普通装饰器），它继承自 C++ 类型 `TileDispatcher`，并在构造时把「参数掩码」和「编译选项」分别保存下来。
-- 理解 `AnnotatedFunction` 如何从一个 Python 函数的类型注解里，抽出三套与参数一一对应的布尔掩码（`constant` / `int64_index` / `int64`），以及这三套掩码分别流向何处。
-- 掌握 `CompilerOptions` 如何承载编译期 hint，以及 `ByTarget` 如何让同一个 hint 针对不同 GPU 架构取不同值。
+读完本讲，你应当能够：
 
-本讲只讲「装饰与对象构造」这一段，**不**展开 `compile_tile` 内部的 AST→HIR→IR→字节码流水线（那是 u5-l2 的事），也**不**展开 `@impl` 注册系统（那是 u5-l7 的事）。
+1. 说清 `kernel` / `function` / `stub` 三类装饰器的语义差异与各自的执行空间标记。
+2. 描述 `kernel` 对象上保存的两个核心字段：`_annotated_function`（参数注解）与 `_compiler_options`（编译旋钮）。
+3. 理解 `AnnotatedFunction` 如何把 Python 类型注解解析成一棵 **`ParameterAnnotationNode` 树**，以及为什么这次重构要用「树」取代旧的「扁平布尔掩码」。
+4. 掌握 `LeafAnnotationNode` / `HomogeneousTupleNode` / `HeterogeneousTupleNode` 三种节点如何统一表达 `Constant` / `Array` / `Scalar` / `List` 与 `tuple` 参数。
+5. 理解 `TileDispatcher.__init__` 现在只接收 `parameter_annotations`（注解树），并由 C++ 侧镜像同一棵树。
+
+本讲**不讲**编译流水线本身的执行顺序（那是 u5-l2 的主题），只聚焦「装饰阶段产出的对象模型」。
+
+> 重构建说明：本讲原版本描述的是旧设计——`AnnotatedFunction` 用三个扁平布尔掩码（`constant_parameter_mask` / `int64_index_parameter_mask` / `int64_parameter_mask`）描述参数。那次重构之后，注解表示被替换为统一的 `ParameterAnnotationNode` 树以支持 tuple 参数与静态形状特化，`TileDispatcher.__init__` 也随之改为只接收注解树。本讲按新设计全面重写。
 
 ## 2. 前置知识
 
-本讲假设你已经掌握以下概念（它们在前置讲义中已建立，这里只做最简提示）：
+在进入源码前，先建立三个直觉。
 
-- **三种执行空间**（u2-l1）：host code（CPU）、SIMT code（单线程级设备代码）、tile code（block 级集体代码）。`@ct.kernel` 装饰的函数体属于 tile code。
-- **load–compute–store 范式**（u3-l1）：内核用 `ct.bid` 定位自己、`ct.load` 取 tile、`ct.store` 写回，`ct.launch` 在 host 端启动。
-- **顶层 API 分组**（u1-l4）：`kernel` / `function` / `stub` 是三类装饰器；`kernel` 继承 `TileDispatcher`、抽取参数注解掩码与 `CompilerOptions`、禁止直接调用。
+**直觉一：装饰器产出的不是「函数」，而是「携带元数据的对象」。**
+`@ct.kernel` 装饰一个函数后，得到的 `my_kernel` 不再是一个普通 `def`——它是一个继承自 `TileDispatcher` 的对象实例，内部保存着原始 Python 函数、参数注解、编译选项。它**不能被直接调用**（直接调用会抛错），只能交给 `ct.launch` 在 host 端 JIT 启动。这一点在 u1-l4、u3-l1 已经建立。
 
-如果你还没读过 u1-l4，至少要记住一句话：**`@ct.kernel` 装饰之后得到的是一个「内核对象」，它不能像普通函数那样被调用，必须交给 `ct.launch` 启动。** 本讲要回答的，就是「这个对象里到底装了什么」。
+**直觉二：参数的「角色」是用 Python 类型注解表达的。**
+cuTile 不像 CUDA C++ 那样区分 `__global__` / `__device__` 参数语义，而是借助 Python 的 `typing.Annotated` 机制，在类型注解里附加「元数据」。例如：
 
-补充一个 Python 语言层面的前置点：本讲大量用到 `typing.Annotated`。`Annotated[T, meta1, meta2]` 表示「类型是 `T`，并附带若干元数据 `meta`」。cuTile 正是把这些元数据（如 `ConstantAnnotation`、`ArrayAnnotation`）挂在参数注解上，再在装饰时把它们读出来。
+```python
+# 示例代码：参数注解的几种写法（不是项目原有代码）
+@ct.kernel
+def k(
+    a: ct.Array,                                   # 普通数组
+    big: ct.IndexedWithInt64,                      # 用 int64 做 shape/stride 的数组
+    n: ct.Constant[int],                           # 编译期常量
+    pair: tuple[ct.Array, int],                    # 元组参数（一个数组 + 一个标量）
+    ...
+):
+    ...
+```
+
+这些注解告诉编译器：哪个参数要常量嵌入、哪个要用 int64 索引、哪个参数是一个打包的元组。本讲要讲清楚的就是**这些注解如何被解析、归一成一种统一的内部表示**。
+
+**直觉三：为什么需要「树」。**
+在最近一次重构前，`AnnotatedFunction` 用**三个扁平的布尔掩码**记录每个参数：
+
+```python
+# 旧设计（已废弃，仅作对照，见 git 462fecc~1）
+@dataclass
+class AnnotatedFunction:
+    constant_parameter_mask: Sequence[bool]       # 每个参数是否为 Constant
+    int64_index_parameter_mask: Sequence[bool]    # 每个参数的数组索引是否用 int64
+    int64_parameter_mask: Sequence[bool]          # 每个标量参数是否用 int64
+```
+
+「一个参数一个 bool」这套机制无法表达 `tuple[Constant[int], float]` 这种**嵌套结构**——一个参数内部既有常量元素又有非常量元素。为了支持元组参数（u3-l7）与静态形状特化，注解表示被重写为一棵递归的 `ParameterAnnotationNode` 树。本讲的 4.4 节会精读这棵树。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件及其职责：
+| 文件 | 角色 | 本讲关注点 |
+|------|------|-----------|
+| `src/cuda/tile/_execution.py` | 装饰器定义 | `kernel` / `function` / `stub` 三个装饰器与 `kernel` 类的字段 |
+| `src/cuda/tile/_annotated_function.py` | 注解解析 | `AnnotatedFunction`、`ParameterAnnotationNode` 树、`get_annotated_function` |
+| `src/cuda/tile/_compiler_options.py` | 编译选项 | `CompilerOptions` dataclass 与校验 |
+| `src/cuda/tile/_cext.pyi` | C++ 桥接类型存根 | `TileDispatcher.__init__` 签名、`CallingConvention` |
+| `src/cuda/tile/_stub.py` | 注解元数据类 | `ConstantAnnotation` / `ArrayAnnotation` / `ScalarAnnotation` / `ListAnnotation` |
+| `cext/tile_kernel.cpp` | C++ 运行时 | 镜像同一棵注解树的 `parse_parameter_annotation_node` |
 
-| 文件 | 职责 |
-| --- | --- |
-| `src/cuda/tile/_execution.py` | 定义 `function` / `stub` / `kernel` 三类装饰器；`kernel` 类的构造与 `_compile` 入口都在这里。 |
-| `src/cuda/tile/_annotated_function.py` | `AnnotatedFunction` 数据类与 `get_annotated_function`，负责从类型注解抽取三套参数掩码。 |
-| `src/cuda/tile/_compiler_options.py` | `CompilerOptions` 数据类，承载并校验编译期 hint。 |
-| `src/cuda/tile/_by_target.py` | `ByTarget` 泛型类，表达「按 GPU 架构取不同值」的 hint。 |
-| `src/cuda/tile/_stub.py`（节选） | `ConstantAnnotation` / `ArrayAnnotation` / `ScalarAnnotation` / `ListAnnotation` 等注解元数据，以及 `Constant` / `IndexedWithInt64` / `ScalarInt64` 便捷别名。 |
-| `src/cuda/tile/_dispatch_mode.py` | `DispatchMode` / `NormalMode` / `StaticEvalMode`，决定「从 host 调用一个 tile 函数」时的行为。 |
-| `cext/tile_kernel.cpp`（节选） | C++ 侧 `TileDispatcher` 的真实构造函数，揭示三套掩码最终的落脚点。 |
-
-> 提示：`src/cuda/tile/_cext.pyi` 里 `TileDispatcher.__init__` 只声明了一个参数，这是**过时的类型存根**；真实实现（见 4.2）接受三个位置掩码参数。读源码时以 `_execution.py` 的调用与 `cext/tile_kernel.cpp` 的实现为准。
+记住一句话：**`_execution.py` 把注解交给 `_annotated_function.py` 解析成树，再把树连同编译选项一起存进 `kernel` 对象，最后由 C++ 的 `TileDispatcher` 镜像消费。**
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 三类装饰器：function / stub / kernel 与执行空间标记
+### 4.1 kernel 装饰器：内核的 Python 入口
 
 #### 4.1.1 概念说明
 
-cuTile 用装饰器来回答一个问题：**「这个被装饰的可调用对象，能在哪些执行空间里被调用？」** 三个装饰器给出三种答案：
+`kernel` 是 cuTile 最核心的装饰器：被它装饰的函数是一个 **tile kernel**——grid 中每个 block 都会完整执行一遍的函数体，是 tile code 的唯一入口。它有三个关键性质：
 
-- `function`：声明一个**普通 tile 函数**的执行空间。默认 `tile=True, host=False`，即「只能在 tile code 里被调用」。可以被内核或其他 tile 函数调用。
-- `stub`：标记一个**内置操作**（builtin）。它先套上 `function`，再打一个 `_cutile_python_stub = True` 的标记，让后端注册系统能识别「这是签名在前端、实现在后端的内置操作」。`ct.load` / `ct.add` / `ct.sum` 这类都是 stub。
-- `kernel`：声明一个**内核**——tile code 的入口。它的执行空间只能是 tile code，**不能**从 host code 直接调用，必须用 `ct.launch` 启动。
+1. **它是类，不是普通函数装饰器**：`kernel` 继承自 C++ 扩展类型 `TileDispatcher`，装饰后得到的是该类的实例，承载元数据。
+2. **它禁止直接调用**：直接 `my_kernel(...)` 会抛 `TypeError`，必须经 `ct.launch` 启动。
+3. **它在装饰阶段就完成注解解析与选项构造**：等到真正 `launch` 时，这些信息已经被准备好，可以直接交给编译器。
 
-注意 `kernel` 和前两者有本质区别：`function` / `stub` 装饰后得到的仍是**函数**（或包装后的函数），而 `kernel` 装饰后得到的是一个**对象**（一个 `TileDispatcher` 子类的实例）。这一点决定了它们后续的命运完全不同。
+`function` 与 `stub` 是另外两个装饰器：`function` 标记一个可被 tile code 调用的辅助函数（声明执行空间），`stub` 在 `function` 基础上再加一个 `_cutile_python_stub` 标记，表明这是「签名在前端、实现在后端」的内置操作（如 `ct.add`、`ct.load`）。
 
 #### 4.1.2 核心流程
 
-`function` 装饰器的分两种情况：
-
-1. 若 `host=True`：函数也能在 host 调用，直接原样返回，不做包装。
-2. 若 `host=False`（默认）：返回一个包装函数 `wrapped`。当有人**从 host 端**调用它时，`wrapped` 不会真的执行函数体，而是交给当前的 `DispatchMode` 去决定怎么办。
-
-`DispatchMode` 是一个线程局部状态（`_current_mode`），有两种取值：
-
-- `NormalMode`（默认）：从 host 调用 tile 函数 → 直接抛 `RuntimeError("Tile functions can only be called from tile code.")`。
-- `StaticEvalMode`（编译期求值时）：从 host 调用 tile 函数 → 抛 `TileStaticEvalError`，提示「不能在 static_eval / static_assert 内部调用 tile 函数」。
-
-也就是说，tile 函数的函数体**只有在编译器翻译内核、进入 tile code 上下文时**才会被执行；在普通 Python 运行时里调用它，会被拦截。
-
-`stub` 的流程更简单：先 `function(func, host=host)` 得到包装函数，再把 `_cutile_python_stub` 标志设为 `True`。配套的 `is_stub(func)` 会顺着 `__wrapped__` 链向上查找这个标志，用于判断某个可调用对象是不是内置操作。
-
-`kernel` 的流程留到 4.2 详解。
-
-#### 4.1.3 源码精读
-
-`function` 装饰器的定义与分情况处理：[src/cuda/tile/_execution.py:L25-L58](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_execution.py#L25-L58)。关键是 `host=False` 分支里那行 `DispatchMode.get_current().call_tile_function_from_host(...)`，它把「从 host 调用」这件事整个委托给了当前分派模式，并给包装函数打上 `_cutile_function_wrapper = True` 标记。
-
-`DispatchMode` 与两个子类的行为：[src/cuda/tile/_dispatch_mode.py:L16-L54](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_dispatch_mode.py#L16-L54)。`NormalMode.call_tile_function_from_host` 抛 RuntimeError；`StaticEvalMode` 则根据 `kind`（来自 `static_eval` / `static_assert` / `static_iter`）拼出更具体的错误信息。
-
-`stub` 装饰器与 `is_stub` 辅助函数：[src/cuda/tile/_execution.py:L173-L191](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_execution.py#L173-L191)。注意 `is_stub` 用 `while True` 沿 `__wrapped__` 链追溯，因此即便一个 stub 被 `functools.wraps` 再次包装，也能正确识别。
-
-#### 4.1.4 代码实践
-
-**实践目标**：亲手验证「tile 函数不能从 host 直接调用」这条规则，并观察它经由 `NormalMode` 抛错。
-
-**操作步骤**：
-
-1. 写一个最简 tile 函数（不是内核），用 `@ct.function` 装饰：
-   ```python
-   import cuda.tile as ct
-
-   @ct.function
-   def helper(x):
-       return x + 1
-   ```
-2. 在 host 端直接调用 `helper(5)`。
-3. 再读取它的标志：`print(getattr(helper, "_cutile_function_wrapper", False))`。
-
-**需要观察的现象**：第 2 步应抛出 `RuntimeError: Tile functions can only be called from tile code.`；第 3 步应打印 `True`。
-
-**预期结果**：上述错误来自 [src/cuda/tile/_dispatch_mode.py:L34-L36](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_dispatch_mode.py#L34-L36)。如果运行环境里 `cuda.tile` 尚未安装，则「待本地验证」。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：`@ct.function` 和 `@ct.function(host=True)` 装饰后得到的对象，类型上有何区别？
-**答案**：`host=True` 时装饰器**原样返回**原来的 `FunctionType`，没有任何包装；`host=False`（默认）时返回一个由 `functools.wraps` 生成、带 `_cutile_function_wrapper=True` 标记的包装函数，从 host 调用会被 `DispatchMode` 拦截。
-
-**练习 2**：为什么 `is_stub` 要用 `while` 循环沿 `__wrapped__` 链查找，而不是只看一层？
-**答案**：因为 stub 经常被 `functools.wraps` 等机制再次包装，真正的 `_cutile_python_stub` 标志可能挂在最内层的原始函数上；逐层追溯才能保证识别正确。
-
-### 4.2 kernel 类详解：装饰器即类、TileDispatcher 继承与字段
-
-#### 4.2.1 概念说明
-
-`kernel` 是本讲的主角。它看起来像个装饰器，但定义成一个**类**（`class kernel(TileDispatcher)`）。这有两个重要含义：
-
-1. **`@ct.kernel` 装饰一个函数后，得到的是这个类的一个实例**，而不是函数。这个实例同时「是一个 `TileDispatcher`」——`TileDispatcher` 是 C++ 扩展 `_cext` 里定义的类型，负责在 launch 时把 Python 参数翻译成 CUDA 启动参数。
-2. 这个实例身上保存了后续编译所需的全部「身份信息」：被装饰的原函数（经 `AnnotatedFunction` 包装）、编译选项（`CompilerOptions`），以及交给 C++ 层的三套参数掩码。
-
-为什么要做成类而不是函数装饰器？因为内核对象需要在**装饰时**（一次性）抽取并固化这些信息，再在**多次 launch 时**（按不同签名）复用——它是一个带状态、可被 `launch` 反复查询的对象，天然适合用类表达。
-
-#### 4.2.2 核心流程
-
-`@ct.kernel(...)` 的构造流程（以 `@ct.kernel(occupancy=2)` 为例）：
+`@ct.kernel` 装饰一个函数 `f` 时发生的事情：
 
 ```text
 @ct.kernel(occupancy=2)
-def my_kernel(a, b, c): ...
-
-# 等价于：my_kernel = kernel(my_kernel, occupancy=2)
-#
-#   1. kernel.__new__(cls, my_kernel, occupancy=2)
-#      └─ function 不为 None → super().__new__(cls, ...) 分配对象
-#   2. kernel.__init__(self, my_kernel, occupancy=2)
-#      ├─ 校验 function 是 FunctionType
-#      ├─ ann_func = get_annotated_function(my_kernel)   # 抽三套掩码
-#      ├─ compiler_options = CompilerOptions(occupancy=2, ...)  # 建+校验 hint
-#      ├─ super().__init__(constant_mask, int64_index_mask, int64_mask)
-#      │      └─ 进入 C++ TileDispatcher_init，把三套掩码存进对象
-#      ├─ self._annotated_function = ann_func
-#      └─ self._compiler_options = compiler_options
+def f(...): ...
+        │
+        ▼
+kernel.__new__(f, occupancy=2)        # 支持裸 @ct.kernel 与带参 @ct.kernel(...) 两种写法
+        │
+        ▼
+kernel.__init__(f, occupancy=2)
+        │
+        ├─ 校验 f 是普通函数 (FunctionType)
+        ├─ ann_func = get_annotated_function(f)        # 解析注解 → ParameterAnnotationNode 树
+        ├─ compiler_options = CompilerOptions(occupancy=2, ...)  # 构造编译选项
+        ├─ super().__init__(ann_func.parameter_annotations)     # 把注解树交给 C++ TileDispatcher
+        ├─ self._annotated_function = ann_func                   # 保存注解产物
+        └─ self._compiler_options = compiler_options             # 保存编译选项
+        │
+        ▼
+得到一个 kernel 实例，禁用 __call__，等待 ct.launch
 ```
 
-注意第 4 步：`kernel.__init__` 通过 `super().__init__(...)` 把**三个**掩码传给父类 `TileDispatcher`。这跟 `.pyi` 存根里「只收一个参数」的声明不一致——以 C++ 实现为准（见源码精读）。三套掩码按下标与内核参数一一对应，含义见 4.3。
+注意一个细节：`super().__init__(...)` 调用的是 C++ 扩展类型 `TileDispatcher` 的初始化函数，它把注解树**拷贝到 C++ 侧**，因为后续的签名推断、参数约束、cubin 生成都在 C++ 运行时里完成。
 
-之后，当 `ct.launch(...)` 在某个签名下第一次需要这个内核时，C++ 层会回调该对象的 `_compile(signature, context)` 方法，它把保存好的 `_annotated_function` 与 `_compiler_options` 交给 `compile_tile`，完成真正的编译：
+#### 4.1.3 源码精读
+
+`kernel` 类的声明与文档字符串，说明它是 tile code 入口且只能用 `launch` 启动，并列出全部编译选项参数：
+
+[`_execution.py:61-92`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L61-L92) —— `kernel` 继承 `TileDispatcher`，文档列出了 `num_ctas` / `occupancy` / `opt_level` / `num_worker_warps` 四个编译期旋钮，并支持 `ByTarget` 做目标特定的取值。
+
+`__new__` 用一个技巧同时兼容「裸装饰」与「带参数装饰」两种写法：
+
+[`_execution.py:93-99`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L93-L99) —— 当 `function is None`（即写成 `@ct.kernel(occupancy=2)`）时返回一个 `decorate` 闭包，等拿到真正的函数再调用 `kernel(func, **kwargs)`。
+
+构造的核心在 `__init__`，这是本讲最重要的几行：
+
+[`_execution.py:101-123`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L101-L123) —— 先校验入参是 `FunctionType`；再延迟导入 `CompilerOptions` 与 `get_annotated_function`（避免循环导入）；用 `get_annotated_function(function)` 把函数解析成 `AnnotatedFunction`；用四个旋钮构造 `CompilerOptions`；调用 `super().__init__(ann_func.parameter_annotations)` 把注解树交给 C++ 基类；最后把 `ann_func` 与 `compiler_options` 存到 `self` 上。**这两行赋值（`self._annotated_function`、`self._compiler_options`）就是 kernel 对象持久携带的全部前端元数据。**
+
+`__call__` 显式禁用直接调用：
+
+[`_execution.py:168-169`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L168-L169) —— 任何对 kernel 实例的直接调用都抛 `TypeError`，提示用 `cuda.tile.launch()`。
+
+`_compile` 是真正 `launch` 时才会被回调到的方法（本讲只看它的签名，执行细节留给 u5-l2）：
+
+[`_execution.py:125-130`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L125-L130) —— 它把 `self._annotated_function`、SM 架构、`self._compiler_options` 与 `TileContext` 一起传给 `compile_tile`，取回 cubin 与符号名。可以理解为：**装饰阶段存进去的字段，启动阶段取出来用**。
+
+`function` 与 `stub` 装饰器：
+
+[`_execution.py:25-58`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L25-L58) —— `function(host=False, tile=True)` 声明执行空间；当 `host=False`（默认）时，包一层 wrapper，让从 host 端调用它时经 `DispatchMode` 转发到 tile code，并打上 `_cutile_function_wrapper` 标记。
+
+[`_execution.py:172-181`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L172-L181) —— `stub` 先复用 `function`，再追加 `_cutile_python_stub = True` 标记。后端的注册系统（u5-l7）正是靠这个标记识别「哪些 API 需要对接到 IR 实现」。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手观察一个 `kernel` 实例上保存的字段，验证它确实「不是普通函数」。
+
+**操作步骤**（假设你已按 u1-l2 安装好 cuTile）：
 
 ```python
-def _compile(self, signature, context):
-    result = compile_tile(self._annotated_function, (signature,),
-                          get_sm_arch(), self._compiler_options, context)
-    ...
-    return result.cubin, kernel_sig.symbol, None, []
+# 示例代码：自检脚本，可保存为 inspect_kernel.py
+import cuda.tile as ct
+
+@ct.kernel(occupancy=2, opt_level=3)
+def my_kernel(a: ct.Array, out: ct.Array, n: ct.Constant[int]):
+    t = ct.load(a, (0,), (n,))
+    ct.store(out, (0,), t + 1)
+
+# 1. 它是什么类型？
+print(type(my_kernel).__mro__)
+# 2. 直接调用应当抛错
+try:
+    my_kernel()
+except TypeError as e:
+    print("直接调用被拒：", e)
+# 3. 观察装饰阶段存进去的字段
+print("compiler_options :", my_kernel._compiler_options)
+print("annotated_function 的参数注解树：")
+for i, node in enumerate(my_kernel._annotated_function.parameter_annotations):
+    print(f"  参数 {i}: {node}")
 ```
 
-于是「装饰时固化的信息」与「launch 时才知道的签名」在这里汇合。此外，`kernel` 还重写了 `__call__`，直接调用内核会抛 `TypeError`，强制走 `launch`；并提供 `replace_hints(...)` 返回一个带新 hint、独立 JIT 缓存的新内核对象。
+**需要观察的现象**：
+
+- `type(my_kernel).__mro__` 里应出现 `cuda.tile._cext.TileDispatcher`，证明它是该 C++ 类型的实例。
+- 直接调用会抛 `TypeError: Tile kernels cannot be called directly...`。
+- `_compiler_options` 是一个 `CompilerOptions(occupancy=2, opt_level=3, ...)` 的 dataclass 实例。
+- 参数注解树会打印出三个节点，其中第三个参数（`n`）的节点是 `LeafAnnotationNode(constant=True, ...)`。
+
+**预期结果**：如果环境正常，前两项的输出是确定的；后两项的打印格式取决于 dataclass 默认 `__repr__`（`LeafAnnotationNode` / `HomogeneousTupleNode` / `HeterogeneousTupleNode` 的字段名）。若你暂未配置好 GPU 运行环境，前两步不依赖 CUDA 也能验证，**待本地确认后两项在 dataclass repr 下的具体打印形式**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`@ct.kernel` 与 `@ct.kernel(occupancy=2)` 两种写法为什么都能工作？是哪段代码处理的？
+
+**答案**：`kernel.__new__` 在 `function is None` 时返回一个 `decorate` 闭包，从而把「带参装饰」延迟到拿到真正函数的那一刻，再调用 `kernel(func, **kwargs)`（见 [`_execution.py:93-99`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L93-L99)）。
+
+**练习 2**：为什么 `kernel` 的 `__init__` 里要用延迟导入（`from cuda.tile._compiler_options import CompilerOptions`），而不是写在文件顶部？
+
+**答案**：为了避免循环导入。`_execution` 与 `_annotated_function`、`_compiler_options` 之间存在相互引用关系，把导入推迟到函数体内能打破「模块加载时」的循环依赖，只在实际装饰函数时才解析这些符号。
+
+---
+
+### 4.2 CompilerOptions：编译期可调旋钮
+
+#### 4.2.1 概念说明
+
+`CompilerOptions` 是一个**冻结的 dataclass**（`frozen=True`），承载四个编译期可调旋钮。它对应 `kernel` 装饰器的四个参数，描述「这个内核希望编译器怎么编」：
+
+| 字段 | 含义 | 取值 |
+|------|------|------|
+| `num_ctas` | CGA（线程块集群）中的 CTA 数 | 1–16 的 2 的幂 |
+| `occupancy` | 每 SM 上预期活跃 CTA 数 | 1–32 |
+| `opt_level` | 优化级别 | 0–3，默认 3 |
+| `num_worker_warps` | warp-specialized 内核中 CUDA core warp 组的 warp 数 | 4 或 8（CTK 13.3+） |
+
+每个字段还支持 `ByTarget[int]`，即「针对不同 SM 架构给不同取值」。
+
+#### 4.2.2 核心流程
+
+`CompilerOptions` 的构造流程很简洁：
+
+```text
+CompilerOptions(occupancy=2, ...)
+        │
+        ▼
+__post_init__ 遍历每个字段
+        │
+        ├─ 若字段是 ByTarget：对每个目标值 + default 分别校验
+        └─ 否则：直接校验该值
+        │
+        ▼
+校验函数 _validate_<field> 按范围/集合约束做检查，越界抛 ValueError
+        │
+        ▼
+得到一个不可变、已校验的 CompilerOptions 实例
+```
+
+它对外提供两个查询方法：`hints_by_target()` 把所有字段按目标拆成 `{target: {field: value}}`；`opt_level_for_target(name)` 取特定目标的优化级别。
 
 #### 4.2.3 源码精读
 
-`kernel` 类的整体定义（含 docstring 列出的全部 hint 参数）：[src/cuda/tile/_execution.py:L61-L99](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_execution.py#L61-L99)。注意 `__new__` 里 `function is None` 的分支——它让 `@ct.kernel(occupancy=2)`（带括号、先不接函数）这种用法也能工作：先返回一个 `decorate` 闭包，等真正收到函数后再 `kernel(func, **kwargs)`。
+dataclass 定义与四个字段：
 
-构造与字段保存的核心：[src/cuda/tile/_execution.py:L101-L124](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_execution.py#L101-L124)。可以看到三件关键事：构造 `AnnotatedFunction`、构造 `CompilerOptions`、用三个掩码调用 `super().__init__`，然后保存 `_annotated_function` 与 `_compiler_options`。
+[`_compiler_options.py:16-22`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_compiler_options.py#L16-L22) —— 四个字段全部带默认值，`frozen=True` 保证装饰后选项不会被意外篡改（改动需走 `kernel.replace_hints` 创建新实例）。
 
-`_compile` 方法——装饰期信息与运行期签名的汇合点：[src/cuda/tile/_execution.py:L126-L131](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_execution.py#L126-L131)。
+`__post_init__` 用一个巧妙的小技巧——按字段名动态查找校验函数：
 
-禁止直接调用与 `replace_hints`：[src/cuda/tile/_execution.py:L137-L170](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_execution.py#L137-L170)。`replace_hints` 用 `dataclasses.replace` 生成新的 `CompilerOptions`，再用 `dataclasses.asdict` 把它展开回 `kernel(...)` 构造参数，从而得到一个全新的、缓存隔离的内核对象。
+[`_compiler_options.py:23-33`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_compiler_options.py#L23-L33) —— `globals()[f"_validate_{field.name}"]` 按命名约定（`_validate_num_ctas` 等）取出校验器；对 `ByTarget` 还会展开它的每个目标值与默认值分别校验。
 
-C++ 侧 `TileDispatcher` 的真实构造函数，证明它确实接收**三个**位置掩码：[cext/tile_kernel.cpp:L2511-L2535](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/cext/tile_kernel.cpp#L2511-L2535)。`PyArg_ParseTupleAndKeywords` 用格式串 `"OOO"` 解析出 `constant_arg_flags`、`int64_index_flags`、`int64_param_flags` 三组，存入结构体（见 [cext/tile_kernel.cpp:L1797-L1800](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/cext/tile_kernel.cpp#L1797-L1800)）。这三组掩码随后在 `extract_cuda_args` 里被用来决定每个参数「是否常量嵌入、索引位宽 32/64、标量整数是否 int64」（见 [cext/tile_kernel.cpp:L1392-L1395](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/cext/tile_kernel.cpp#L1392-L1395)）。
+四个校验器实现范围/集合约束：
+
+[`_compiler_options.py:61-86`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_compiler_options.py#L61-L86) —— 例如 `num_ctas` 须在 `[1,16]` 且为 2 的幂（用 `num_ctas & (num_ctas-1) == 0` 判定），`num_worker_warps` 只能取 4 或 8。
+
+`kernel.replace_hints` 正是利用 `dataclasses.replace` 在不可变 dataclass 上派生新选项：
+
+[`_execution.py:136-166`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L136-L166) —— `replace_hints(occupancy=4)` 生成一个新的 `kernel` 实例；因为编译选项影响 cubin，所以新 kernel 拥有独立的 JIT 缓存。
 
 #### 4.2.4 代码实践
 
-**实践目标**：对应任务要求——跟踪一个 `@ct.kernel(occupancy=2)` 内核从装饰到 `_compile` 被调用的对象构造过程，列出内核对象上保存的关键字段。
+**实践目标**：体会 `frozen=True` 与校验机制。
 
 **操作步骤**：
 
-1. 定义并装饰一个内核（先不 launch，避免触发编译）：
-   ```python
-   import cuda.tile as ct
+```python
+# 示例代码
+from cuda.tile._compiler_options import CompilerOptions
 
-   @ct.kernel(occupancy=2, opt_level=3)
-   def add(a, b, c, n: ct.Constant[int]):
-       bid = ct.bid(0)
-       x = ct.load(a, (bid,), (16,))
-       y = ct.load(b, (bid,), (16,))
-       ct.store(c, (bid,), x + y)
-   ```
-2. 装饰完成后，立即（不 launch）查看内核对象上的字段：
-   ```python
-   print(type(add))                              # <class 'cuda.tile._execution.kernel'>
-   print(add._compiler_options)                  # CompilerOptions(..., occupancy=2, opt_level=3, ...)
-   print(add._annotated_function.constant_parameter_mask)   # 预期 (False, False, False, True)
-   print(add._annotated_function.pyfunc.__name__)           # 'add'
-   ```
-3. 观察禁止直接调用：`add(None, None, None, 16)` 应抛 `TypeError`。
+opt = CompilerOptions(occupancy=2, opt_level=3)
+print(opt)
+try:
+    opt.occupancy = 4          # frozen，应抛 FrozenInstanceError
+except Exception as e:
+    print("不可变：", type(e).__name__, e)
+try:
+    CompilerOptions(num_ctas=3)   # 非 2 的幂，应抛 ValueError
+except ValueError as e:
+    print("校验拒绝：", e)
+```
 
-**需要观察的现象**：第 2 步能看到 `_compiler_options` 是一个 `CompilerOptions` 实例且 `occupancy=2`；`constant_parameter_mask` 是一个长度等于参数个数（4）的布尔元组，只有被 `Constant[int]` 标注的 `n` 对应位置为 `True`。
+**需要观察的现象**：第一次赋值被冻结拒绝；第二次构造因 `num_ctas=3` 不是 2 的幂被拒绝。
 
-**预期结果**：`constant_parameter_mask == (False, False, False, True)`。若 `_compiler_options` 的精确 `repr` 与上述不符，以本地实际输出为准（「待本地验证」精确字符串）。
+**预期结果**：`num_ctas` 校验信息为 `num_ctas should be power of 2, got 3`（见 [`_compiler_options.py:65-66`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_compiler_options.py#L65-L66)）。`frozen` 抛出的异常类型是 dataclass 标准的 `dataclasses.FrozenInstanceError`（`AttributeError` 子类），**待本地确认具体异常名**。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`kernel.__new__` 里 `function is None` 的分支解决了什么问题？
-**答案**：它让带参数的装饰器写法 `@ct.kernel(occupancy=2)`（先给关键字参数、还没收到被装饰函数）能正常工作——此时返回一个 `decorate` 闭包，等 Python 把被装饰函数传进来后再真正构造 `kernel` 实例。
+**练习 1**：为什么 `CompilerOptions` 要做成 `frozen=True`？
 
-**练习 2**：为什么 `kernel.__call__` 要主动抛错，而不是让 C++ 的 `TileDispatcher` 去处理调用？
-**答案**：为了让错误信息尽早、明确地提示用户「内核必须用 `ct.launch` 启动」，而不是产生一个含义不清的底层错误。这是一个明确的「API 契约」保护。
+**答案**：编译选项是 kernel 的身份标识之一，参与 JIT 缓存键。一旦允许就地修改，会导致「同一个 kernel 对象前后对应不同的 cubin」，破坏缓存一致性。需要改动时，应通过 `replace_hints` 派生**新**对象，让它有独立的缓存。
 
-### 4.3 AnnotatedFunction：从类型注解抽取三套参数掩码
+**练习 2**：`num_worker_warps` 的注释说「CTK 13.3 才生效，否则带警告忽略」。如果不满足版本，传了非法值（比如 6）会怎样？
+
+**答案**：`_validate_num_worker_warps` 在构造期就会拒绝 6（只允许 4 或 8），抛 `ValueError`。版本门控只影响「合法值是否被编译器实际采用」，不影响构造期校验。
+
+---
+
+### 4.3 AnnotatedFunction：参数注解的解析产物
 
 #### 4.3.1 概念说明
 
-`AnnotatedFunction` 是 Python 函数与编译器之间的「翻译表」。编译器不直接读 Python 注解，而是依赖 `kernel` 在装饰时调用 `get_annotated_function(function)` 生成的一个 `AnnotatedFunction` 对象，里面预计算好了三套**与参数一一对应的布尔掩码**：
+`AnnotatedFunction` 是「被装饰的 Python 函数 + 解析后的参数注解」的打包体。它做了一件关键的事：把 Python 那套灵活但松散的类型注解（`typing.Annotated`、`tuple[...]`、裸类型），归一成 cuTile 自己的内部数据结构——一棵 `ParameterAnnotationNode` 树。
 
-- `constant_parameter_mask`：哪些参数是「常量嵌入」（`Constant[T]`），需要在编译期烘焙进内核、每个唯一取值单独编译一份 cubin。
-- `int64_index_parameter_mask`：哪些数组参数要求用 **int64** 表示 shape / stride（`IndexedWithInt64`），用于支持维数超过 32 位范围的超大张量。
-- `int64_parameter_mask`：哪些标量整数参数要被推断为 **int64**（`ScalarInt64`），默认整数参数是 int32。
+它的字段只有三个：
 
-每套掩码都是一个长度等于「参数个数」的元组，第 `i` 个元素描述第 `i` 个参数。用公式表达即：
+```python
+@dataclass
+class AnnotatedFunction:
+    pyfunc: FunctionType                                  # 原始 Python 函数
+    pysig: inspect.Signature                              # 函数签名（用于参数名/顺序）
+    parameter_annotations: Sequence[ParameterAnnotationNode]  # 每个参数对应一棵子树
+```
 
-\[
-\textit{constant\_mask}[i] = 1 \iff \text{参数 } i \text{ 的注解元数据含 } \texttt{ConstantAnnotation}
-\]
-
-这套设计的妙处在于：**类型注解是声明式的、静态的，而掩码是扁平的、可直接索引的**。C++ 层（`TileDispatcher` / `extract_cuda_args`）只需按位置查一个布尔数组，就能知道每个运行时参数该怎么处理，而不必再去解析 Python 注解。
+注意：`parameter_annotations` 是**按参数位置**排列的序列，序列长度等于参数个数，序列里每个元素是该参数对应的注解树根节点。
 
 #### 4.3.2 核心流程
 
-`get_annotated_function(pyfunc)` 的处理顺序：
+`get_annotated_function(pyfunc)` 的解析流程：
 
-1. `inspect.signature(pyfunc)` 拿到参数列表与顺序。
-2. `typing.get_type_hints(pyfunc, include_extras=True)` 解析注解——**关键**：`include_extras=True` 才能保留 `Annotated[T, ...]` 里的元数据；同时这一步会把 `from __future__ import annotations` 产生的**字符串注解**解析回真实类型。
-3. 对每个参数的注解，分别用三个辅助函数判断它是否含 `ConstantAnnotation` / `int64` 索引 / `int64` 标量，得到三个布尔元组。
-4. 封装成 `AnnotatedFunction(pyfunc, pysig, 三个掩码)`。
+```text
+get_annotated_function(f)
+        │
+        ├─ sig = inspect.signature(f)            # 拿到参数顺序
+        ├─ hints = typing.get_type_hints(f, include_extras=True)
+        │        └─ 关键：include_extras=True 保留 Annotated 的元数据
+        │        └─ 同时解析 from __future__ import annotations 的字符串注解
+        ├─ 对每个参数，取其类型注解 ann
+        └─ parameter_annotations = tuple(_build_annotation_node(ann) for ann in ...)
+                    │
+                    ▼
+              _build_annotation_node 把注解递归构建成节点（详见 4.4）
+```
 
-三个判断函数的共同套路是：先 `get_origin(annotation) is Annotated` 确认是 `Annotated` 类型，再用 `get_args` 取出 `(T, meta1, meta2, ...)`，在元数据列表里找特定类的实例。其中 `int64_index` 的判断稍复杂——它对 `ArrayAnnotation(index_dtype=int64)` 直接命中，也接受「列表里套着 int64 索引数组」的 `ListAnnotation` 情形。
+这里有一个**易错点**：必须用 `typing.get_type_hints(..., include_extras=True)` 而不是直接读 `param.annotation`。因为：(1) 如果源码写了 `from __future__ import annotations`，所有注解会变成字符串，`get_type_hints` 才会真正求值；(2) 默认的 `get_type_hints` 会**剥掉** `Annotated` 的元数据，必须 `include_extras=True` 才能保住 `ConstantAnnotation()` 等元数据。
 
 #### 4.3.3 源码精读
 
-`AnnotatedFunction` 数据类：[src/cuda/tile/_annotated_function.py:L15-L22](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_annotated_function.py#L15-L22)。它只是把原函数、签名、三套掩码打包在一起。
+`AnnotatedFunction` dataclass 定义：
 
-`get_annotated_function` 的完整流程：[src/cuda/tile/_annotated_function.py:L25-L38](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_annotated_function.py#L25-L38)。注意第 29 行的列表推导：它优先用 `get_type_hints` 的结果，回退到 `param.annotation`，确保字符串注解也能被解析。
+[`_annotated_function.py:55-59`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L55-L59) —— 三个字段。注意它取代了旧设计里的三个布尔掩码字段；旧字段 `constant_parameter_mask` / `int64_index_parameter_mask` / `int64_parameter_mask` 已不存在。它是普通 `@dataclass`（非 frozen），因为内部代码有时会就地调整；对外的不可变性由 `kernel` 层保证。
 
-三个判断辅助函数：[src/cuda/tile/_annotated_function.py:L41-L66](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_annotated_function.py#L41-L66)。可以清楚看到「先确认 `Annotated`，再在 metadata 里找特定类」的模式。
+`get_annotated_function` 的实现：
 
-这些掩码消费的两端：C++ 端见 4.2.3 的 `extract_cuda_args`；Python 端在 IR 生成时也用到 `constant_parameter_mask`，见 [src/cuda/tile/_compile.py:L277](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_compile.py#L277)（把常量参数从运行时签名里剔除、烘焙进 IR）。
+[`_annotated_function.py:62-70`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L62-L70) —— 第 64 行注释专门解释了为什么要用 `get_type_hints`；第 66 行用 `hints.get(name, param.annotation)` 做了一个 fallback：拿不到 hint 时退回签名里的原始注解；第 67 行对每个注解调用 `_build_annotation_node` 构建节点。
 
-注解元数据本身的定义：`ConstantAnnotation` 与便捷别名 `Constant`（[src/cuda/tile/_stub.py:L974-L991](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L974-L991)）、`ArrayAnnotation`（[src/cuda/tile/_stub.py:L998-L1011](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L998-L1011)）、`ScalarAnnotation`（[src/cuda/tile/_stub.py:L1014-L1025](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1014-L1025)），以及把它们包装成 `Annotated` 别名的 `IndexedWithInt64` / `ScalarInt64`（[src/cuda/tile/_stub.py:L1059-L1070](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1059-L1070)）。
+这正好是 `kernel.__init__` 里 `get_annotated_function(function)` 的产物，存入 `self._annotated_function`（见 [`_execution.py:114`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L114)）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用三种注解各装饰一个参数，观察三套掩码如何随之变化。
+**实践目标**：直接调用 `get_annotated_function`，观察它对同一组参数注解的解析结果，绕开 GPU 依赖。
 
 **操作步骤**：
 
-1. 写一个带三种注解的内核（不 launch）：
-   ```python
-   import cuda.tile as ct
+```python
+# 示例代码：纯前端，不需要 GPU
+import cuda.tile as ct
+from cuda.tile._annotated_function import get_annotated_function
 
-   @ct.kernel
-   def k(big: ct.IndexedWithInt64,        # int64 索引
-         cnt: ct.ScalarInt64,             # int64 标量
-         n:   ct.Constant[int],           # 常量嵌入
-         normal):                         # 普通参数
-       ...
-   ```
-2. 打印三套掩码：
-   ```python
-   af = k._annotated_function
-   print("constant     :", af.constant_parameter_mask)       # (False, False, True, False)
-   print("int64_index  :", af.int64_index_parameter_mask)    # (True,  False, False, False)
-   print("int64        :", af.int64_parameter_mask)          # (False, True,  False, False)
-   ```
+def f(a: ct.Array, out: ct.Array, n: ct.Constant[int]):
+    pass
 
-**需要观察的现象**：每个掩码只有对应那个参数的位置为 `True`，其余为 `False`；三个掩码互不干扰。
+ann = get_annotated_function(f)
+print("参数个数:", len(ann.parameter_annotations))
+for i, node in enumerate(ann.parameter_annotations):
+    print(f"  参数 {i} 节点 KIND = {node.KIND}")
+    if node.KIND == "leaf":
+        print(f"     constant={node.constant}, array={node.array}, scalar={node.scalar}")
+```
 
-**预期结果**：如注释所示的三组布尔元组。精确字符串以本地输出为准。
+**需要观察的现象**：前两个参数的节点 `KIND == "leaf"`、`constant=False`；第三个参数 `n` 的节点 `constant=True`。
+
+**预期结果**：可确定的是第三个参数 `constant=True`（来自 [`_build_annotation_node`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L81-L94) 检测到 `ConstantAnnotation` 元数据）。裸 `ct.Array` 不经 `Annotated` 包装时，节点会是 `LeafAnnotationNode(constant=False)`，`array/scalar/list` 均为 `None`——**待本地确认**这一表现。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：如果内核文件顶部写了 `from __future__ import annotations`，导致所有注解变成字符串，`get_annotated_function` 还能正确抽取掩码吗？
-**答案**：能。第 28 行用了 `typing.get_type_hints(pyfunc, include_extras=True)`，它会把字符串注解解析回真实类型；`include_extras=True` 又保证 `Annotated[T, ...]` 的元数据不被丢弃。
+**练习 1**：如果把 `include_extras=True` 去掉，会发生什么？
 
-**练习 2**：为什么 `int64_index_parameter_mask` 还要额外检查 `ListAnnotation` 套 `ArrayAnnotation(index_dtype=int64)` 的情况？
-**答案**：因为 cuTile 允许「列表参数」`List[Array]`，列表里每个元素都是数组；当这些数组要求 int64 索引时，需要透过 `ListAnnotation.element` 找到内层的 `ArrayAnnotation` 才能判定，所以判断函数要递归一层。
+**答案**：`typing.get_type_hints` 默认会剥离 `Annotated[X, meta]` 里的 `meta`，只返回 `X`。于是 `ConstantAnnotation()` 等元数据全部丢失，`_build_annotation_node` 拿不到 `ConstantAnnotation`，会把本该是常量的参数误判为非常量。这正是第 65 行必须加 `include_extras=True` 的原因。
 
-### 4.4 CompilerOptions 与 ByTarget：编译期 hint 的承载与按目标取值
+**练习 2**：`parameter_annotations` 这个序列的长度由什么决定？
+
+**答案**：由函数的参数个数决定。它是一个位置对齐的序列——第 `i` 个元素就是第 `i` 个参数的注解树根节点。
+
+---
+
+### 4.4 ParameterAnnotationNode 树：统一的注解表示（核心）
+
+> 这是本次重构的核心，也是本讲的重点。
 
 #### 4.4.1 概念说明
 
-`CompilerOptions` 是一个**冻结的数据类**（`@dataclass(frozen=True)`），承载四类会影响编译结果的「hint」：
+`ParameterAnnotationNode` 是一个**联合类型**，由三种节点构成一棵树：
 
-| 字段 | 含义 | 取值范围 |
-| --- | --- | --- |
-| `num_ctas` | 一个 CGA 里的 CTA 数 | 1–16，且为 2 的幂 |
-| `occupancy` | 每 SM 期望活跃 CTA 数 | 1–32 |
-| `opt_level` | 优化级别 | 0–3（默认 3） |
-| `num_worker_warps` | warp-specialized 内核里 CUDA 核 warp 组数 | 仅 4 或 8 |
+| 节点类型 | `KIND` | 字段 | 表达什么 |
+|----------|--------|------|---------|
+| `LeafAnnotationNode` | `"leaf"` | `constant` / `scalar` / `array` / `list` | 一个**标量/数组**参数的注解 |
+| `HomogeneousTupleNode` | `"homogeneous_tuple"` | `each` | 一个**变长同质元组** `tuple[T, ...]`，所有元素共享同一注解 |
+| `HeterogeneousTupleNode` | `"heterogeneous_tuple"` | `items` | 一个**定长异质元组** `tuple[A, B, ...]`，每个位置注解不同 |
 
-这些 hint 与「正确性」无关，只影响生成的 cubin 的性能特征。它们在 `kernel` 装饰时被固化为 `self._compiler_options`，在 `_compile` 时随签名一起传给 `compile_tile`。
+**叶子节点** `LeafAnnotationNode` 是基础，它用四个字段表达「传统」参数的所有可能角色：
 
-`ByTarget[T]` 解决的是另一个维度的问题：**同一个 hint 在不同 GPU 架构上可能想取不同值**。例如某内核在 `sm_100` 上想用 `num_ctas=8`，在 `sm_120` 上却只想用 4。`ByTarget` 让你写成 `num_ctas=ByTarget(sm_100=8, sm_120=4, default=2)`，于是 `CompilerOptions` 的任意一个字段都可以是「标量」或「`ByTarget`」。
+- `constant: bool`——是否常量嵌入（`ct.Constant`）。
+- `scalar: ScalarAnnotation | None`——标量的 dtype 提示（`ct.ScalarInt64`）。
+- `array: ArrayAnnotation | None`——数组的索引 dtype 与静态形状（`ct.IndexedWithInt64`、`ArrayAnnotation(static_shape_dims=...)`）。
+- `list: ListAnnotation | None`——列表元素的数组注解（`ct.List[...]`）。
+
+`validate()` 方法强制一个约束：这四种「角色」**互斥**，一个叶子节点只能扮演其中一种。例如 `Constant` 与 `ScalarAnnotation` 不能同时出现在一个参数上（见测试 `test_constant_i64_scalar_tuple_arg` 期望的报错信息 `Constant annotation cannot be combined with ScalarAnnotation/ScalarInt64`）。
+
+**元组节点**是新增能力。`tuple[A, B]` 这种定长异质元组被建成 `HeterogeneousTupleNode`，`items` 是各位置子节点的元组；`tuple[T, ...]` 这种变长同质元组被建成 `HomogeneousTupleNode`，`each` 是元素子节点。子节点本身又可以是叶子或元组，从而支持任意嵌套（测试里有 `((2, 3), 5)` 这种嵌套元组）。
+
+为什么是「树」而不是「扁平掩码」？因为元组参数让一个参数位置内部出现了**结构**——`tuple[Constant[int], float]` 的第一个元素是常量、第二个不是，扁平的「一个参数一个 bool」表达不了。树能递归地描述任意嵌套，是支持元组参数（u3-l7）的前提。
 
 #### 4.4.2 核心流程
 
-`CompilerOptions` 的构造与自校验：
+注解到节点的构建由两个互相递归的函数完成。判定一条注解建成什么节点，关键是看它的「形状」：
 
-1. `kernel.__init__` 用装饰器参数构造 `CompilerOptions(num_ctas=..., occupancy=..., opt_level=..., num_worker_warps=...)`。
-2. `__post_init__` 对每个字段调用对应的 `_validate_*` 函数。**若字段是 `ByTarget`**，则对其每一个「按架构取值」以及 default 都分别校验——保证不会因为某个冷门架构的取值非法而在很久之后才报错。
-3. 编译时，`opt_level_for_target(target_name)` 等方法根据当前 `sm_arch` 解析出该架构应使用的具体值。
+```text
+_build_annotation_node(ann, outer_constant=False)
+        │
+        ├─ 若 ann 是 Annotated[X, meta...]：
+        │     ├─ inner = X, meta = 元数据列表
+        │     ├─ is_constant = outer_constant 或 meta 含 ConstantAnnotation
+        │     ├─ 若 inner 是 tuple → _build_tuple_node(inner, is_constant)
+        │     └─ 否则 → LeafAnnotationNode(constant=is_constant,
+        │                                   array=_get_annotation(meta, ArrayAnnotation),
+        │                                   scalar=_get_annotation(meta, ScalarAnnotation),
+        │                                   list =_get_annotation(meta, ListAnnotation))
+        │
+        ├─ 若 ann 是 tuple（无 Annotated 包装）→ _build_tuple_node(ann, outer_constant)
+        │
+        └─ 否则 → LeafAnnotationNode(constant=outer_constant)
 
-`ByTarget` 自身的构造：接受一个关键字参数 `default`（缺省值，用哨兵 `UNSPECIFIED` 表示「未指定」）和若干 `sm_<major><minor>` 形式的关键字（如 `sm_100=8`）。构造时用 `_is_valid_sm_string` 校验每个 key 必须形如 `sm_` 加纯数字。它只存数据（`_default` 与 `_by_target` 字典），真正的「按架构解析」逻辑在 `CompilerOptions` 一侧（`hints_by_target` / `opt_level_for_target`）。
 
-`hints_by_target` 的输出是一个「以架构名为键」的嵌套字典，把所有字段展平成每个架构一组完整的 hint，方便后端按架构一次性取用。
+_build_tuple_node(ann, outer_constant)
+        │
+        ├─ args = get_args(ann)
+        ├─ 若 args == (T, Ellipsis) → HomogeneousTupleNode(_build_annotation_node(T, outer_constant))
+        │                              # tuple[T, ...]：变长同质
+        └─ 否则 → HeterogeneousTupleNode(tuple(_build_annotation_node(arg, outer_constant) for arg in args))
+                                       # tuple[A, B, ...]：定长异质
+```
+
+`outer_constant` 参数承担「常量性向下传播」：当外层是 `ct.Constant[tuple[...]]` 时，`is_constant=True` 会作为 `outer_constant` 传给子节点，使整个元组（包括所有后代叶子）都被标记为常量。这就是「整组常量」与「部分常量」的实现机制：
+
+- `ct.Constant[tuple[int, float]]`——外层 Constant，`outer_constant` 向下传，所有叶子 `constant=True`。
+- `tuple[ct.Constant[int], float]`——只有第一个元素带 ConstantAnnotation，只有那个叶子 `constant=True`。
+
+举个具体例子，对参数 `cfg: tuple[ct.Constant[int], int]`，构建出的树是：
+
+```text
+HeterogeneousTupleNode
+├─ items[0]: LeafAnnotationNode(constant=True)     ← Constant，进入 JIT 缓存键
+└─ items[1]: LeafAnnotationNode(constant=False)    ← 普通 int，不进缓存键
+```
 
 #### 4.4.3 源码精读
 
-`CompilerOptions` 数据类、校验入口与按目标解析：[src/cuda/tile/_compiler_options.py:L16-L58](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_compiler_options.py#L16-L58)。重点看 `__post_init__`（L23-L33）：它遍历每个字段，对 `ByTarget` 会把内部所有取值逐一过校验器；`hints_by_target`（L35-L46）把 `ByTarget` 展平成 `{target_name: {field: value}}`，default 缺省时回退到字段默认值。
+三个节点类的定义：
 
-四个校验函数：[src/cuda/tile/_compiler_options.py:L61-L85](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_compiler_options.py#L61-L85)。例如 `num_ctas` 用 `num_ctas & (num_ctas - 1)` 判 2 的幂（经典位运算技巧）。
+[`_annotated_function.py:14-35`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L14-L35) —— `LeafAnnotationNode`，注意 `validate()` 列出 `given` 列表后用 `len(given) > 1` 拒绝组合，错误信息就是测试里期望的那句。
 
-`ByTarget` 的定义与 sm 字符串校验：[src/cuda/tile/_by_target.py:L22-L78](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_by_target.py#L22-L78)。注意它实现了 `__eq__` 和 `__deepcopy__`（后者见 L13-L15，返回自身），便于作为不可变值在缓存键里使用。
+[`_annotated_function.py:38-42`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L38-L42) —— `HomogeneousTupleNode`，只有一个 `each` 字段。
+
+[`_annotated_function.py:45-49`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L45-L49) —— `HeterogeneousTupleNode`，`items` 是子节点元组。
+
+[`_annotated_function.py:52`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L52) —— 联合类型定义 `ParameterAnnotationNode = LeafAnnotationNode | HomogeneousTupleNode | HeterogeneousTupleNode`。
+
+两个构建函数：
+
+[`_annotated_function.py:73-78`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L73-L78) —— `_build_tuple_node` 用 `args[1] is ...` 区分变长同质（`tuple[T, ...]`）与定长异质。
+
+[`_annotated_function.py:81-94`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L81-L94) —— `_build_annotation_node` 是主入口，三段分支处理 `Annotated`、裸 `tuple`、其它；注意第 85 行 `is_constant = outer_constant or any(...)`，这是常量性「或」传播的关键；第 94 行的兜底 `LeafAnnotationNode(constant=outer_constant)` 处理完全没有注解的参数（如裸 `int`）。
+
+`_get_annotation` 辅助函数从元数据列表里挑出指定类型的注解：
+
+[`_annotated_function.py:100-104`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L100-L104) —— 简单的 `isinstance` 过滤，返回第一个匹配项或 `None`。
+
+可以对照测试理解这些节点对应的真实用法：
+
+- `tuple[Tensor, int]`（异质）→ [`test_tuple_arguments.py:51-63`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tuple_arguments.py#L51-L63) 中的 `kernel_mixed_tuple`。
+- `tuple[ct.Constant[int], int]`（部分常量）→ [`test_tuple_arguments.py:145-156`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tuple_arguments.py#L145-L156) 中的 `kernel_partial_const_first`。
+- `ct.Constant[tuple[...]]`（整组常量）→ [`test_tuple_arguments.py:111-122`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tuple_arguments.py#L111-L122) 中的 `kernel_constant_tuple`。
 
 #### 4.4.4 代码实践
 
-**实践目标**：触发 `CompilerOptions` 的校验逻辑，并构造一个 `ByTarget` 观察其内部结构。
+**实践目标**：给一个含 tuple 参数的内核**手画** `ParameterAnnotationNode` 树，并用 `get_annotated_function` 验证。
 
 **操作步骤**：
 
-1. 直接构造非法的 `CompilerOptions`，观察校验报错（这一步无需 GPU，纯 Python）：
-   ```python
-   from cuda.tile._compiler_options import CompilerOptions
-   CompilerOptions(num_ctas=5)      # 期望 ValueError: num_ctas should be power of 2
-   CompilerOptions(opt_level=4)     # 期望 ValueError: opt_level should be [0, 3]
-   CompilerOptions(occupancy=0)     # 期望 ValueError: occupancy should be [1, 32]
-   ```
-2. 构造一个合法的、按架构取值的 `ByTarget` 并查看内部：
-   ```python
-   from cuda.tile import ByTarget
-   bt = ByTarget(sm_100=8, sm_120=4, default=2)
-   print(bt)                       # ByTarget(sm_100=8, sm_120=4, default=2)
-   print(bt._by_target, bt._default)
-   CompilerOptions(num_ctas=bt)    # 期望成功：每个取值都通过 power-of-2 校验
-   ```
-3. 构造非法 sm 名：`ByTarget(sm100=8)` 期望 `ValueError: Invalid GPU architecture name`。
+```python
+# 示例代码：纯前端，不需要 GPU
+import cuda.tile as ct
+from cuda.tile._annotated_function import get_annotated_function
 
-**需要观察的现象**：第 1 步三行分别抛出对应的 `ValueError`；第 2 步 `CompilerOptions(num_ctas=bt)` 不报错，说明 `ByTarget` 内部所有取值都逐一通过了校验。
+def k(pair: tuple[ct.Constant[int], int], out):
+    pass
 
-**预期结果**：如上。精确错误字符串以本地输出为准（「待本地验证」精确文案）。
+ann = get_annotated_function(k)
+root = ann.parameter_annotations[0]      # pair 参数
+print("根节点 KIND:", root.KIND)          # 期望 heterogeneous_tuple
+print("items:", root.items)
+for i, item in enumerate(root.items):
+    print(f"  子节点 {i} KIND={item.KIND}, constant={getattr(item, 'constant', None)}")
+```
+
+**需要观察的现象**：根节点 `KIND == "heterogeneous_tuple"`，有两个子节点；子节点 0 是 `constant=True` 的叶子，子节点 1 是 `constant=False` 的叶子。
+
+**预期结果**：依据 [`_build_annotation_node`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L81-L94)，`tuple[ct.Constant[int], int]` 会被建成：
+
+```text
+HeterogeneousTupleNode
+├─ items[0]: LeafAnnotationNode(constant=True)    # ct.Constant[int]
+└─ items[1]: LeafAnnotationNode(constant=False)   # 裸 int
+```
+
+这是确定的，但 dataclass `__repr__` 的具体字符串形式**待本地确认**。
+
+**延伸练习**：把注解换成 `ct.Constant[tuple[int, int]]`（整组常量），再观察两个子节点的 `constant` 值——依据 `outer_constant` 的向下传播，两者都应是 `True`。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`CompilerOptions` 被声明为 `frozen=True`，这和 `kernel.replace_hints` 的实现有什么关系？
-**答案**：因为不可变，`replace_hints` 用 `dataclasses.replace(self._compiler_options, **hints)` 生成一个**新的** `CompilerOptions`，再用 `dataclasses.asdict` 把它展平回 `kernel(...)` 的构造参数、得到一个全新的内核对象。不可变性保证了「换 hint = 换对象 = 独立 JIT 缓存」这条语义不会被意外破坏。
+**练习 1**：`tuple[int, int]` 和 `tuple[int, ...]` 分别建成什么节点？区别在哪？
 
-**练习 2**：`ByTarget(default=2)` 与直接写标量 `2`，在 `hints_by_target` 输出里有区别吗？
-**答案**：几乎没有。`hints_by_target` 在字段不是 `ByTarget` 时直接用该标量作为 `default` 架构的取值；当字段是 `ByTarget(default=2)` 时，由于没有按架构覆盖，`default` 同样解析为 2。两者对编译结果等价，`ByTarget` 的意义只在于**额外**允许按架构覆盖。
+**答案**：前者建成 `HeterogeneousTupleNode`（`items` 是两个叶子节点的元组，定长 2）；后者建成 `HomogeneousTupleNode`（只有一个 `each` 字段，元素数量在运行时可变）。区分依据是 [`_build_tuple_node`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py#L73-L78) 里 `args[1] is ...` 的判定——`...`（Ellipsis）表示变长。
+
+**练习 2**：`ct.Constant[tuple[int, float]]` 与 `tuple[ct.Constant[int], float]` 在树上的差别是什么？这会导致什么行为差异？
+
+**答案**：前者是「整组常量」——`outer_constant=True` 向下传播，**两个**叶子都是 `constant=True`，整个元组的取值都进入 JIT 缓存键；后者是「部分常量」——只有第一个叶子 `constant=True`，第二个不是。行为差异：前者改变任何一个元素的取值都触发重新编译；后者只有改变第一个元素才触发，第二个元素的变化不重新编译。这正是 u3-l7 讲的「Constant 与 tuple 的两种组合」。
+
+**练习 3**：为什么 `LeafAnnotationNode.validate()` 要禁止 `constant=True` 同时带 `ScalarAnnotation`？
+
+**答案**：`Constant` 参数会被「常量嵌入」烘焙进 cubin、从运行时签名消失（见 u3-l5），而 `ScalarAnnotation`（如 `ScalarInt64`）是在描述运行时标量的 dtype。两者语义矛盾——一个已经不存在于运行时的参数，再去约束它的运行时 dtype 没有意义。测试 `test_constant_i64_scalar_tuple_arg` 正好验证这条禁令（[`test_tuple_arguments.py:125-142`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_tuple_arguments.py#L125-L142)）。
+
+---
+
+### 4.5 TileDispatcher：把注解树桥接到 C++ 运行时
+
+#### 4.5.1 概念说明
+
+`kernel` 继承的 `TileDispatcher` 是一个 **C++ 扩展类型**（定义在 `cext` 里，见 u1-l3）。它是 Python 前端与 C++ 运行时之间的桥：装饰阶段把注解树交给它，启动阶段由它驱动签名推断、JIT 编译、`cuLaunchKernel`。
+
+本次重构的一个重要外部表现是：**`TileDispatcher.__init__` 的签名简化了**。它现在只接收一个参数 `parameter_annotations`（注解树序列），而不再是过去那一堆布尔掩码。相应地，C++ 侧也镜像了同一棵 `ParameterAnnotationNode` 树。
+
+另一个相关的桥接概念是 `CallingConvention`（调用约定）。`cutile_python_v1` 是原始调用约定，`cutile_python_v2` 是为支持 tuple 参数与静态形状特化而引入的新约定——它在 `KernelSignature` 构造期被门控（u8-l1、u8-l2 详讲）。本讲只需知道：注解树里的 tuple/静态形状信息，最终会触发 v2 调用约定。
+
+#### 4.5.2 核心流程
+
+注解树如何「跨过」Python/C++ 边界：
+
+```text
+kernel.__init__
+        │
+        ├─ ann_func = get_annotated_function(f)        # Python 侧建树
+        └─ super().__init__(ann_func.parameter_annotations)   # 把树传给 C++
+                    │
+                    ▼
+        TileDispatcher_init (C++, cext/tile_kernel.cpp)
+                    │
+                    ├─ 取出 py_parameter_annotations
+                    └─ parse_parameter_annotation_nodes_seq(...)
+                                │
+                                ▼
+                    对每个 Python 节点递归调用 parse_parameter_annotation_node
+                    按 KIND 字符串 ("leaf"/"homogeneous_tuple"/"heterogeneous_tuple")
+                    分派，构建对应的 C++ 节点，存进 C++ TileDispatcher
+```
+
+注意：Python 侧的节点用 `KIND` 字符串字段做「自描述」，C++ 侧靠读取这个字段来分派。这是一种轻量的、不依赖 pybind 类型系统的跨语言结构映射。
+
+#### 4.5.3 源码精读
+
+Python 侧的桥接签名（类型存根）：
+
+[`_cext.pyi:55-57`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_cext.pyi#L55-L57) —— `TileDispatcher.__init__(self, parameter_annotations: Sequence)`，只接收注解树这一个参数。
+
+`kernel.__init__` 里的调用点：
+
+[`_execution.py:121`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L121) —— `super().__init__(ann_func.parameter_annotations)`。
+
+C++ 侧的镜像解析，按 `KIND` 分派：
+
+[`cext/tile_kernel.cpp:2831-2891`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/cext/tile_kernel.cpp#L2831-L2891) —— `parse_parameter_annotation_node` 读取 `KIND`，对 `"leaf"` 取 `constant/scalar/array/list` 四个字段建 `LeafAnnotationNode`；对 `"homogeneous_tuple"` 取 `each` 递归；对 `"heterogeneous_tuple"` 遍历 `items` 递归。这正好是 Python 侧三种节点的镜像。
+
+`TileDispatcher_init` 入口：
+
+[`cext/tile_kernel.cpp:2979-2993`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/cext/tile_kernel.cpp#L2979-L2993) —— 从 Python 参数取出 `py_parameter_annotations`，调用 `parse_parameter_annotation_nodes_seq` 解析成 C++ 节点序列，存进 `TileDispatcher`。
+
+调用约定的两个版本（类型存根）：
+
+[`_cext.pyi:77-100`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_cext.pyi#L77-L100) —— `CallingConvention` 提供 `cutile_python_v1()` / `cutile_python_v2()` 两个静态工厂，以及 `version` 属性。注解树里的 tuple 与静态形状最终要求 v2。
+
+#### 4.5.4 代码实践
+
+**实践目标**：验证 `TileDispatcher` 接收的是注解树（而非多个布尔掩码），并理解 C++ 镜像。
+
+**操作步骤**（源码阅读型实践，不需要 GPU）：
+
+1. 在 [`_execution.py:121`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L121) 处确认 `super().__init__` 只传了一个参数 `ann_func.parameter_annotations`。
+2. 跟到 [`cext/tile_kernel.cpp:2831-2891`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/cext/tile_kernel.cpp#L2831-L2891)，对照三种 `KIND` 的分派分支，与 [`_annotated_function.py`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_annotated_function.py) 的三个节点类一一对应。
+3. 想一个反例：如果 Python 侧传过来一个 `KIND="unknown"` 的节点，C++ 会在哪一行报错？
+
+**需要观察的现象**：Python 三种节点与 C++ 三个分支严格一一对应；任何未知 `KIND` 都会落到 C++ 的 `else` 分支抛 `TypeError`。
+
+**预期结果**：可确定 C++ 在 [`tile_kernel.cpp:2886-2889`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/cext/tile_kernel.cpp#L2886-L2889) 抛出 `expected a ParameterAnnotationNode (leaf/homogeneous_tuple/heterogeneous_tuple), got KIND=...`。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：为什么 Python 节点要带一个字符串字段 `KIND`，而不是靠 C++ 用 `isinstance` 判断 Python 类型？
+
+**答案**：因为这些是普通 Python `dataclass`，没有注册到 C++ 的类型系统里（cuTile 的 cext 没有用 pybind11 自动绑定这些类）。用 `KIND` 字符串做自描述，让 C++ 侧只靠 `getattr(obj, "KIND")` + 字符串比较就能分派，是一种轻量、解耦的跨语言方案。
+
+**练习 2**：`cutile_python_v1` 与 `cutile_python_v2` 调用约定的本质区别（本讲层面）是什么？
+
+**答案**：v1 是面向「扁平参数 + 扁平布尔掩码」时代的调用约定；v2 才支持 tuple 参数与静态形状特化。当注解树里出现 tuple 节点或 `ArrayAnnotation(static_shape_dims=...)` 时，会要求 v2，由 `KernelSignature` 构造期的 `_validate_constraint_support` 门控（详见 u8-l1、u8-l2）。
+
+---
 
 ## 5. 综合实践
 
-把本讲四块内容串起来：完整跟踪一个 `@ct.kernel(occupancy=2)` 内核从「装饰」到「`_compile` 被调用」的对象构造过程，并列出内核对象上保存的关键字段。
+把本讲的五个最小模块串起来，完成下面这个**追踪型**任务。
 
-**任务**：写下面这个内核并装饰（**只装饰、先不 launch**，避免触发真实编译）：
+**任务背景**：下面这个内核取自测试（略有改写）：
 
 ```python
+# 示例代码（改编自 test_tuple_arguments.py）
 import cuda.tile as ct
 
-@ct.kernel(occupancy=2, opt_level=3, num_worker_warps=ct.ByTarget(sm_120=8, default=4))
-def gemm_kernel(a, b, c,
-                m: ct.Constant[int],
-                n: ct.Constant[int],
-                big_a: ct.IndexedWithInt64):
-    ...
+@ct.kernel(occupancy=2)
+def my_kernel(a: ct.Array, out: ct.Array, cfg: tuple[ct.Constant[int], int]):
+    t = ct.load(a, (0,), (cfg[0],))
+    ct.store(out, (0,), t + cfg[1])
 ```
 
-完成后，回答并验证以下问题：
+**请完成**：
 
-1. **装饰器分派**：`@ct.kernel(occupancy=2, ...)` 是先走了 `kernel.__new__` 的哪个分支？为什么？（提示：带括号、先给关键字参数。）
-2. **AnnotatedFunction 掩码**：打印 `gemm_kernel._annotated_function` 的三套掩码，验证 `m`、`n` 在 `constant_parameter_mask` 中为 `True`，`big_a` 在 `int64_index_parameter_mask` 中为 `True`，且掩码长度等于参数个数。
-3. **CompilerOptions 字段**：打印 `gemm_kernel._compiler_options`，确认 `occupancy=2`、`opt_level=3`，并说明 `num_worker_warps` 是一个 `ByTarget`、其 default 与 `sm_120` 取值分别是什么。
-4. **C++ 承接**：回顾 4.2.3，说明 `super().__init__(...)` 传下去的三套掩码最终被 C++ `TileDispatcher_init` 存成哪三个字段，以及它们在 `extract_cuda_args` 里如何影响每个参数的处理。
-5. **`_compile` 的角色**：解释为什么 `_compile` 要同时接收 `signature`（运行期才知道）与使用 `self._annotated_function` / `self._compiler_options`（装饰期就固化）——这两类信息为何必须分两次获得？
+1. **追踪对象构造**：从 `@ct.kernel(occupancy=2)` 触发，按顺序列出 `kernel.__init__` 里发生的每一步，并指出最终 `my_kernel` 对象上保存的两个关键字段及其类型。
+2. **手画注解树**：对三个参数 `a` / `out` / `cfg`，分别画出它们的 `ParameterAnnotationNode` 树。特别地，`cfg` 的树应当体现「部分常量」语义。
+3. **预测行为**：如果用 `cfg = (8, 5)` 启动一次，再用 `cfg = (8, 9)` 启动第二次，会不会触发重新编译？为什么？如果换成 `cfg = (16, 5)` 呢？
 
-**验收**：把 1–5 的答案整理成一张「装饰期固化信息 vs 运行期信息」的对照表。精确的掩码元组与 `repr` 字符串以本地运行输出为准。
+**参考答案**：
+
+1. 构造顺序见 [`_execution.py:101-123`](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_execution.py#L101-L123)：校验函数 → `get_annotated_function` 解析注解树 → `CompilerOptions(occupancy=2, opt_level=3, ...)` → `super().__init__(parameter_annotations)` 把树交给 C++ → 存 `_annotated_function`（`AnnotatedFunction`）与 `_compiler_options`（`CompilerOptions`）。
+
+2. 注解树：
+
+   ```text
+   参数 a (ct.Array)            → LeafAnnotationNode(constant=False, array=None)
+   参数 out (ct.Array)          → LeafAnnotationNode(constant=False, array=None)
+   参数 cfg (tuple[Constant[int], int])
+         → HeterogeneousTupleNode(items=(
+               LeafAnnotationNode(constant=True),     # Constant，进 JIT 缓存键
+               LeafAnnotationNode(constant=False),    # 普通 int，不进缓存键
+           ))
+   ```
+
+3. 因为只有 `cfg[0]` 是常量（进入 JIT 缓存键），`cfg[1]` 不是：所以 `(8,5)` → `(8,9)` 两次启动**不会**重新编译（`cfg[0]` 都是 8）；但 `(8,5)` → `(16,5)` 会触发重新编译（`cfg[0]` 从 8 变成 16）。这正是「部分常量元组」的核心收益——把不该常量化的维度排除出缓存键，避免不必要的重新编译。
 
 ## 6. 本讲小结
 
-- `function` / `stub` / `kernel` 是三类装饰器：`function` 声明执行空间，从 host 调用 tile 函数会被 `DispatchMode` 拦截；`stub` 在 `function` 基础上加 `_cutile_python_stub` 标记；`kernel` 则返回一个**对象**（`TileDispatcher` 子类实例），是 tile code 的唯一入口，禁止直接调用。
-- `kernel` 是类不是函数：装饰时在 `__init__` 里一次性构造 `AnnotatedFunction` 与 `CompilerOptions`，并把三套参数掩码通过 `super().__init__` 交给 C++ `TileDispatcher` 保存；`_compile(signature, context)` 是装饰期信息与运行期签名的汇合点。
-- `AnnotatedFunction` 用 `typing.get_type_hints(include_extras=True)` 解析注解（含字符串注解），把 `Constant` / `IndexedWithInt64` / `ScalarInt64` 等元数据翻译成三套与参数一一对应的扁平布尔掩码，供 C++ 层按位置高效查询。
-- `CompilerOptions` 是冻结数据类，承载并自校验 `num_ctas` / `occupancy` / `opt_level` / `num_worker_warps` 四类 hint；任一字段都可是标量或 `ByTarget`，从而支持「同一内核在不同 sm 架构用不同 hint」。
-- `.pyi` 里的 `TileDispatcher.__init__` 存根已过时（只声明一个参数），真实 C++ 实现 `_execution.py` 的调用一致地使用三个位置掩码——读源码要以实现为准。
+- `kernel` 是继承自 C++ 类型 `TileDispatcher` 的装饰器，装饰产物是一个**携带元数据的对象实例**，禁止直接调用，须经 `ct.launch` 启动。
+- `kernel` 对象持久保存两个前端字段：`_annotated_function`（参数注解）与 `_compiler_options`（四个编译旋钮的不可变 dataclass）。
+- `AnnotatedFunction` 用 `typing.get_type_hints(..., include_extras=True)` 解析参数注解，关键是保留 `Annotated` 元数据并解析字符串注解。
+- 注解表示在本次重构中从「三个扁平布尔掩码」升级为统一的 **`ParameterAnnotationNode` 树**——`LeafAnnotationNode`（标量/数组角色，四字段互斥）+ `HomogeneousTupleNode`（变长同质）+ `HeterogeneousTupleNode`（定长异质），从而支持任意嵌套的 tuple 参数。
+- 常量性通过 `outer_constant` 在树中**向下传播**，表达「整组常量」与「部分常量」两种组合，决定哪些值进入 JIT 缓存键。
+- `TileDispatcher.__init__` 现在只接收 `parameter_annotations`（注解树），C++ 侧用 `KIND` 字符串分派镜像同一棵树；tuple 与静态形状最终要求 `cutile_python_v2` 调用约定。
 
 ## 7. 下一步学习建议
 
-本讲只覆盖了「装饰与对象构造」。建议接下来：
+本讲只讲了「装饰阶段产出的对象模型」，还没讲这些对象**怎么被用起来**。建议按以下顺序继续：
 
-- **u5-l2 编译总流程：compile_tile 流水线**：顺着本讲的 `_compile` 往下走，看 `compile_tile` 如何用 `_annotated_function` 与 `_compiler_options` 驱动 `get_function_hir → hir2ir → _transform_ir → generate_bytecode_for_kernel → compile_cubin` 整条流水线，以及 `_IrKeeper` 如何按签名懒生成 final IR。
-- **u5-l3 AST 到 HIR**：看 `AnnotatedFunction.pyfunc` 是如何被 `get_function_hir` 解析成高层 IR 的。
-- **u5-l7 Stub 与实现注册**：本讲提到的 `_cutile_python_stub` 标志最终如何被 `tile_impl_registry` / `@impl` 对接到具体 IR 实现。
-
-如果你想在读 u5-l2 之前先做个热身，可以回到本讲的综合实践，把对照表填满——它会让你在进入 `compile_tile` 时，清楚地知道每一段流水线用到的是「装饰期」还是「运行期」的信息。
+1. **u5-l2 编译总流程：compile_tile 流水线**——看 `_compile` 被回调后，`_annotated_function` 与 `_compiler_options` 如何流入 `compile_tile`，以及 `_IrKeeper._create_kernel_parameters` 如何递归消费注解树生成内核参数 `Var`。
+2. **u5-l5 IR 核心**与 **u5-l6 类型系统**——理解参数最终如何变成 IR 里的 `Var` 与 `ArrayTy`（含静态形状维度）。
+3. **u3-l7 元组参数与静态形状特化**——从用户视角反过来理解本讲建的注解树到底解锁了什么能力。
+4. **u8-l1 launch 与调度**与 **u8-l2 AOT 导出与签名**——看 `CallingConvention.cutile_python_v2` 与 `TupleConstraint` / `ArrayConstraint.shape_constant` 如何在运行时与导出阶段被门控使用。

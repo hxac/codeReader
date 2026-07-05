@@ -8155,46 +8155,60 @@
           "error": null
         },
         "u1-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "update",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194781,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.426939,
+          "error": null
         },
         "u1-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.4733139999999993,
+          "error": null
         },
         "u1-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.326419,
+          "error": null
         },
         "u1-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.7947919999999997,
+          "error": null
         },
         "u2-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "rebuild",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.352504,
+          "error": null
         },
         "u2-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.5718980000000002,
+          "error": null
         },
         "u2-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.7390020000000002,
+          "error": null
         },
         "u2-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "rebuild",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.905655,
+          "error": null
         },
         "u2-l5": {
           "status": "keep",
@@ -8202,9 +8216,11 @@
           "retries": 0
         },
         "u2-l6": {
-          "status": "pending",
+          "status": "failed",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188686,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u3-l1": {
           "status": "pending",
@@ -8343,7 +8359,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/NVlabs/cuda-oxide/cuda-oxide-tutorial",
       "last_head": "29396b7f643b1d42eb4d80b7347ad27bb011525a",
-      "last_run_at": "2026-07-04T23:01:32Z",
+      "last_run_at": "2026-07-05T11:01:31Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "NVIDIA/cuda-tile": {
@@ -8669,52 +8685,55 @@
           "retries": 0
         },
         "u3-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6219660000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l6": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l7": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.0168110000000001,
+          "cost": 1.067488,
           "error": null
         },
         "u4-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.04658,
+          "cost": 1.904495,
           "error": null
         },
         "u4-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.146645,
+          "cost": 1.486903,
           "error": null
         },
         "u4-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.1529119999999997,
+          "cost": 1.570661,
           "error": null
         },
         "u5-l1": {
           "status": "done",
-          "action": "new",
+          "action": "rebuild",
           "retries": 0,
-          "cost": 1.017579,
+          "cost": 1.567152,
           "error": null
         },
         "u5-l2": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.0693460000000001,
+          "cost": 1.674123,
           "error": null
         },
         "u5-l3": {
@@ -8722,7 +8741,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193160,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":184459,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u5-l4": {
           "status": "pending",
@@ -8810,19 +8829,19 @@
           "retries": 0
         }
       },
-      "manifest_head": "0c46a6222c61217a3fa740f01a1b14c9fef0ecec",
-      "prev_head": "dc83f62035193b0b7b0475a9706f80456015d5f8",
+      "manifest_head": "40bcc5aa0161ac0d70f064c98286029ac756101b",
+      "prev_head": "0c46a6222c61217a3fa740f01a1b14c9fef0ecec",
       "phase": "workers",
       "mode": "incremental",
       "tutorial_path": "tutorials/nvidia/cutile-python/cutile-python-tutorial",
-      "last_head": "0c46a6222c61217a3fa740f01a1b14c9fef0ecec",
-      "last_run_at": "2026-07-02T15:03:49Z",
+      "last_head": "40bcc5aa0161ac0d70f064c98286029ac756101b",
+      "last_run_at": "2026-07-05T11:01:31Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "NVIDIA/cutlass": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-02T15:03:49Z",
+      "last_run_at": "2026-07-05T11:01:31Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -8934,7 +8953,7 @@
           "action": "new",
           "retries": 1,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186373,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":190828,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u3-l1": {
           "status": "done",
@@ -11766,26 +11785,29 @@
           "error": null
         },
         "u10-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196340,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.653743,
+          "error": null
         },
         "u10-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.949098,
+          "error": null
         }
       },
       "manifest_head": "8e93e0478ca5b6e0b51652a1395f54160be2a672",
       "prev_head": "c3a772bd1344d4b95beb76fd8340a0c067be92e7",
-      "phase": "workers",
+      "phase": "done",
       "mode": "incremental",
       "tutorial_path": "tutorials/scipy/scipy/scipy-scipy-special-tutorial",
       "last_head": "8e93e0478ca5b6e0b51652a1395f54160be2a672",
-      "last_run_at": "2026-07-04T23:01:32Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-05T11:01:31Z",
+      "last_error": null,
+      "abandoned": []
     },
     "scipy/scipy@scipy/stats": {
       "prompt_hash": "b21aef51792b02df",
@@ -12748,56 +12770,71 @@
           "error": null
         },
         "u4-l12": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188274,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.823728,
+          "error": null
         },
         "u4-l13": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.387727,
+          "error": null
         },
         "u4-l14": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.548807,
+          "error": null
         },
         "u4-l15": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 2.5672789999999996,
+          "error": null
         },
         "u5-l16": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.1897600000000002,
+          "error": null
         },
         "u5-l17": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.0999339999999997,
+          "error": null
         },
         "u5-l18": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.8236810000000001,
+          "error": null
         },
         "u5-l19": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.1247219999999998,
+          "error": null
         }
       },
       "manifest_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/crossbeam-rs/crossbeam/crossbeam-crossbeam-skiplist-tutorial",
       "last_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
-      "last_run_at": "2026-07-04T23:01:32Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-05T11:01:31Z",
+      "last_error": null,
+      "abandoned": []
     },
     "crossbeam-rs/crossbeam@crossbeam-utils": {
       "prompt_hash": "b21aef51792b02df",
@@ -12845,71 +12882,95 @@
           "error": null
         },
         "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9431430000000001,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6527959999999999,
+          "error": null
+        },
+        "u2-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8035380000000001,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.640227,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.632418,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.835314,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.708156,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.805416,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.614941,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.041453,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.205014,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0554320000000001,
+          "error": null
+        },
+        "u5-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":195532,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u2-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188792,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         }
       },
       "manifest_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
@@ -12918,7 +12979,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/crossbeam-rs/crossbeam/crossbeam-crossbeam-utils-tutorial",
       "last_head": "6195355ef1862f2c6172365d00645cb6f77417dc",
-      "last_run_at": "2026-07-04T23:01:32Z",
+      "last_run_at": "2026-07-05T11:01:31Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "NVIDIA/cuda-quantum": {},
@@ -12993,6 +13054,26 @@
     "hw-native-sys/pto-isa": {},
     "hw-native-sys/pypto": {},
     "oomol-lab/pdf-craft": {},
-    "ai-dynamo/dynamo": {}
+    "ai-dynamo/dynamo": {},
+    "typst/typst@”self“": {},
+    "typst/typst@crates/typst-bundle": {},
+    "typst/typst@crates/typst-cli": {},
+    "typst/typst@crates/typst-eval": {},
+    "typst/typst@crates/typst-html": {},
+    "typst/typst@crates/typst-ide": {},
+    "typst/typst@crates/typst-kit": {},
+    "typst/typst@crates/typst-layout": {},
+    "typst/typst@crates/typst-library": {},
+    "typst/typst@crates/typst-macros": {},
+    "typst/typst@crates/typst-pdf": {},
+    "typst/typst@crates/typst-realize": {},
+    "typst/typst@crates/typst-render": {},
+    "typst/typst@crates/typst-svg": {},
+    "typst/typst@crates/typst-syntax": {},
+    "typst/typst@crates/typst-timing": {},
+    "typst/typst@crates/typst-utils": {},
+    "typst/typst@crates/typst": {},
+    "SFU-HiAccel/uBench": {},
+    "passlab/CUDAMicroBench": {}
   }
 }

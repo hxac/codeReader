@@ -2,527 +2,420 @@
 
 ## 1. 本讲目标
 
-本讲是「高级数据访问」单元的第二讲，承接 u4-l1（TiledView 与 persistent 遍历）。到目前为止，你访问全局数组的手段只有两类：
+在 u3-l1 中，我们建立了 cuTile 内核最核心的 **load–compute–store** 三段式范式：`ct.load(array, index, shape)` 用一个**瓦片索引（tile space index）**从数组里取出一整块连续、对齐的 tile，`ct.store` 是它的逆操作。这种「规则瓦片」访问覆盖了 GEMM、归约、卷积等绝大多数高性能场景。
 
-- `ct.load(array, index, shape)` / `ct.store(array, index, tile)`——按**瓦片空间（tile space）**索引，取的是一块**规则、连续、网格对齐**的 tile（u3-l1）。
-- `tv.load(tile_index)` / `tv.store(tile_index, tile)`——把切分方式固化成 `TiledView`，但仍然是**规则的瓦片索引**（u4-l1）。
+但有一类访问模式规则瓦片表达不了：**按下标随机读写**。例如：
 
-这两类有一个共同点：访问的内存区域是**沿每个轴都连续、且按 tile 对齐的矩形块**，因此能高效地映射到 TMA（Tensor Memory Accelerator）/ 合并访存（coalesced load）。但很多真实算子并不满足这个约束——例如 embedding 查表（按下标抓若干**任意行**）、稀疏索引拷贝、直方图回写、按索引更新参数。这些场景需要**非常规索引**：要么每个元素各自指向一个任意位置，要么「沿一个轴是任意下标、沿其余轴仍是连续切片」。
+- **embedding 查表**：给定一组 token id，从权重表里把对应行「抽」出来。
+- **稀疏矩阵**：按行列索引数组取散落的非零元。
+- **scatter 累加**：把一组计算结果按索引散播到全局输出数组的任意位置（如 top-k、直方图、反向梯度）。
+- **2D 数组中「行随机、列连续」**：例如按行索引取若干整行（advanced indexing）。
 
-本讲就教你这两套非常规索引 API：
+学完本讲，你应当能够：
 
-- **`ct.gather` / `ct.scatter`**：最通用的**逐点（pointwise）**索引——每个维度都用一个**元素空间（element space）**的整数 tile 来逐点寻址，结果 tile 的形状由各索引 tile 广播决定。这是 cuTile 里最灵活、也最「散乱」的访问方式。
-- **`ct.load_advanced_indexing` / `ct.store_advanced_indexing`**：**混合索引**——恰好有一个维度是「稀疏（sparse）」逐点下标（一个 1D 整数 tile），其余维度是「稠密（dense）」的连续 `ct.Slice(start, length)`。它相当于「抓若干整行/整列」，稠密维仍然连续、仍可用 TMA。
+1. 掌握 **`ct.gather` / `ct.scatter`**：用一/多维「索引 tile」按元素下标随机读写数组，理解索引广播、`mask`、`check_bounds`、`padding_value` 的语义。
+2. 掌握 **`ct.load_advanced_indexing` / `ct.store_advanced_indexing`**：在多维数组上做「某一维稀疏、其余维稠密连续切片」的混合索引，理解 `ct.Slice(start, length)` 的作用与「恰好一个稀疏维」的约束。
+3. 从底层 IR 理解这两组 API 的差异：`gather`/`scatter` 把所有索引降级为一个**扁平指针 + 标量掩码**走 `LoadPointer`/`StorePointer`；advanced indexing 走的是结构化的 `TileLoad` 视图，可能落到 TMA。从而理解它们在**对齐与性能**上的不同含义。
 
-读完本讲，你应该能够：
-
-- 理解 `gather`/`scatter` 的**元素空间逐点寻址**语义，以及 `indices` 元组、形状广播、`mask`、`padding_value`、`check_bounds` 的精确含义。
-- 理解 `scatter` 写入**重复下标属未定义行为（UB）**这一关键陷阱。
-- 理解 `load_advanced_indexing`/`store_advanced_indexing` 的「一维稀疏 + 多维连续切片」约定，以及 `ct.Slice`、稀疏维 / 稠密维的区分。
-- 能判断三类访存 API（`load`/`gather`/`load_advanced_indexing`）的**性能与对齐**差异，并在正确场景选用正确的工具。
-
-本讲覆盖三个最小模块：**`gather`、`scatter`、`load_advanced_indexing`**（`store_advanced_indexing` 与第三个模块成对出现，一并讲解）。
+---
 
 ## 2. 前置知识
 
-在进入本讲前，请确认你已经理解下面这些来自前面讲义的概念（本讲直接使用，不再重复解释）：
+本讲默认你已掌握（来自 u2、u3）：
 
-- **Array 与 Tile**：`Array` 是 host 分配、全局显存、可读写、运行时 shape 的数组；`Tile` 是内核内部不可变、编译期 shape（每维为 2 的幂）的数据块（u2-l2、u2-l3）。
-- **load–compute–store 与 tile space 索引**：`ct.load(array, index, shape)` 里的 `index` 是**瓦片下标**（不是元素下标），`shape` 是编译期 tile 大小；访问的区域是 `array[i*shape0 + x, j*shape1 + y]` 这种**规则矩形块**；部分越界按 `padding_mode` 填充、整体越界未定义（u3-l1）。
-- **NumPy 式形状广播**：末尾对齐、对应维相等或其一为 1、维度少者左侧补 1；既不拷贝数据也不破坏「每维为 2 的幂」约束（u2-l3）。
-- **类型提升与隐式 cast**：`store`/`scatter` 写入时若 tile dtype 与数组 dtype 不同会做隐式 cast，某些方向（如 float→int）会被拒绝并抛 `TileTypeError`（u2-l4）。
-- **`@ct.kernel` 与 `ct.launch`**：kernel 不在定义时执行，由 host 端 `ct.launch(stream, grid, kernel, args)` 启动（u1-l2、u2-l1）。
-- **`Constant[int]` 与 `ct.arange`**：编译期常量参数会嵌入 cubin；`ct.arange(size, dtype=...)` 生成 `[0,1,...,size-1]` 的 1D 整数 tile，是构造索引 tile 的常用工厂（u3-l5、u3-l2）。
-- **stub 与后端实现**：`ct.gather` 等都是 `@stub`，只有签名与文档，真正的实现在后端 IR 注册系统（见 u5-l7）；本讲只讲**语义与用法**，不深入 IR 实现。
+- **全局数组 Array**：放在 GPU 全局显存、由 host 分配、带 `shape`/`strides`/`dtype` 的多维数组（u2-l2）。地址公式为：
 
-一句话回顾：`load`/`store` 用「瓦片下标」取「规则矩形块」。本讲要让你能取**任意位置的单个元素**（gather/scatter），以及**任意下标的整行/整列**（advanced indexing）。
+  \[
+  \text{addr}(\mathbf{i}) = \text{base} + \text{sizeof}(dt)\cdot\sum_{k}\text{stride}_k \cdot i_k
+  \]
+
+- **tile space vs element space**：常规 `ct.load` 的 `index` 是**瓦片索引**——`array[i*tm + x]`；本讲里的「索引 tile」则是**元素下标**——直接指向 `array[i]`。这是最关键的概念区分，请时刻留意。
+
+- **tile 不可变、广播规则与 NumPy 一致**（u2-l3）：`gather` 的多组索引会按 NumPy 广播规则合并出结果形状。
+
+- **PaddingMode**（u2-l4）：越界填充模式，advanced indexing 沿用了它。
+
+- **stub 与 @impl 注册机制**（u5-l7 会深入，本讲只需知道）：`ct.gather` 等是「签名在前端、实现在后端」的 stub，真正的逻辑在 `_ir/ops.py` 的 `gather_impl` 等函数里。
+
+一个直觉性的对比：
+
+| API | 索引含义 | 访问模式 | 典型用途 |
+|---|---|---|---|
+| `ct.load/store` | 瓦片索引 | 规则、对齐、整块 | GEMM、卷积、归约 |
+| `ct.gather/scatter` | 元素下标 tile | 完全随机、逐元素 | embedding、top-k、稀疏 |
+| `ct.load/store_advanced_indexing` | 一维稀疏 + 其余稠密切片 | 半结构化 | 取若干整行/整列 |
+
+---
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件：
-
 | 文件 | 作用 |
-|------|------|
-| [src/cuda/tile/_stub.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1571-L1663) | `gather`、`scatter` 的**权威签名与文档**（`indices` 约定、`mask`/`padding_value`/`check_bounds` 语义）。stub 只有签名，实现在后端。 |
-| [src/cuda/tile/_stub.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1463-L1568) | `load_advanced_indexing`、`store_advanced_indexing` 的签名与文档，定义「一维稀疏 + 稠密切片」约定。 |
-| [src/cuda/tile/_stub.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L948-L967) | `ct.Slice` 类：稠密维的 `(start, length)` 描述符。 |
-| [test/test_gather_scatter.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L24-L56) | `gather`/`scatter` 的完整测试：1D/2D 拷贝、标量、自定义 `padding_value`、边界检查开关、自定义 `mask`。是理解语义最干净的范本。 |
-| [test/test_load_store_advanced_indexing.py](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_load_store_advanced_indexing.py#L21-L72) | `load_advanced_indexing`/`store_advanced_indexing` 的测试：基本读写、稀疏 gather 行、动态/常量 `Slice.start`、越界零填充、重复稀疏下标 UB、各类错误用例。 |
+|---|---|
+| [src/cuda/tile/_stub.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py) | 公共 API 的签名与文档：`Slice`、`load_advanced_indexing`、`store_advanced_indexing`、`gather`、`scatter`。 |
+| [src/cuda/tile/_ir/ops.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py) | 上述 stub 的 IR 实现：`gather_impl`/`scatter_impl`/`load_advanced_impl`、辅助函数 `_gather_scatter_pointer_and_mask`/`_parse_advanced_index`、底层 `LoadPointer`/`StorePointer` 操作。 |
+| [test/test_gather_scatter.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py) | `gather`/`scatter` 的端到端测试：1D/2D 复制、标量、自定义 padding、bounds 检查开关、自定义/broadcast/scalar mask、类型校验。 |
+| [test/test_load_store_advanced_indexing.py](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py) | advanced indexing 的端到端测试：非连续行 gather/scatter、动态/常量 Slice start、越界零填充、重复索引、各类错误用例。 |
+
+> 阅读建议：先看 `_stub.py` 里的文档字符串建立语义直觉，再看 `test/*` 里的真实内核确认行为，最后下钻到 `_ir/ops.py` 的 impl 理解底层做了什么。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 gather：按元素索引读数组
+本讲拆为三个最小模块：**4.1 gather**、**4.2 scatter**、**4.3 load/store_advanced_indexing**。三者都解决「按元素下标而非瓦片索引访问数组」的问题，但抽象层级与适用形态不同。
+
+### 4.1 gather：按下标 tile 读取
 
 #### 4.1.1 概念说明
 
-回忆 `ct.load(array, index, shape)`：`index` 是**瓦片下标**，访问的是 `array[i*shape0 + x, ...]` 这种**网格对齐的矩形块**。如果你想取的不是矩形块，而是「**每个元素各自来自一个任意位置**」——比如按下标数组 `[3, 7, 0, 5]` 抓出第 3、7、0、5 个元素拼成一个新 tile——`load` 就无能为力了，因为它的 `index` 只能给一个矩形原点。
+`ct.gather(array, indices)` 从 `array` 中按「**元素下标**」读取数据，返回一个 tile。这里的 `indices` 不再是 u3-l1 里的瓦片索引，而是**与结果同形的下标 tile**——每个元素直接指出「我要取 `array` 的第几个元素」。
 
-`ct.gather(array, indices)` 正是为这种**逐点（pointwise）寻址**设计的。它的关键差别是：
+关键点：
 
-- `indices` 是**元素空间（element space）**的整数 tile，**每一个元素就是一个独立的下标**，而不是瓦片坐标。
-- 结果 tile 的第 \(k\) 个元素，等于 `array` 在「由各索引 tile 在第 \(k\) 处取值组成的坐标」处的元素。
+- `indices` 必须是一个 **tuple**，长度等于 `array` 的秩（rank）。例如 2D 数组要传 `(ind0, ind1)`。
+- 元组里每个分量是**整数 tile 或标量**，形状不必相同，但必须能按 NumPy 规则**广播**到一个公共形状；结果 tile 的形状就是这个广播形状。
+- 1D 数组的特例：`indices` 可以直接传一个 tile，等价于长度为 1 的 tuple。
+- 负下标被当作**越界**处理，不遵循 Python 的负索引约定。
 
-也就是说，`gather` 把「索引」从 `load` 的**瓦片坐标**提升为**逐元素坐标**，是 cuTile 里最通用的读操作。它解决三类问题：
+`gather` 还提供三个控制读安全的参数：
 
-1. **任意重排 / 抽取**：按下标数组抽取若干元素（embedding 查表、top-k 抽取）。
-2. **非连续拷贝**：跨步、间隔地取元素。
-3. **条件寻址**：配合 `mask`，按布尔掩码选择性加载。
-
-代价是：因为每个元素都可能指向任意地址，访存模式**最不规整、最难合并**，通常是三类读操作里最慢的（见 4.4 的性能讨论）。
+- `mask`：布尔 tile/标量，`False` 处不读取、改用 `padding_value`。
+- `padding_value`：掩码掉或越界时返回的值（默认 0），可以是标量或可广播 tile。
+- `check_bounds`：是否做越界检查，默认 `True`。设为 `False` 时调用者自负其责，越界是**未定义行为**（但省掉 mask 计算开销）。
 
 #### 4.1.2 核心流程
 
-`gather` 的索引规则用一句话概括：**`indices` 是长度等于数组秩的元组，每个分量是一个整数 tile 或标量，所有分量的形状互相广播到一个公共形状，结果 tile 的形状就是这个公共形状。**
-
-对一个 2D 数组，设两个索引 tile `ind0`（形状 (M,N,1)）和 `ind1`（形状 (M,1,K)），则：
-
-```text
-t = ct.gather(array, (ind0, ind1))   # t 的形状 = 广播(ind0, ind1) = (M, N, K)
-```
-
-结果 tile 的每个元素按下面的公式计算（广播后）：
+设数组秩为 \(r\)，索引分量为 \(I_0,\dots,I_{r-1}\)，公共广播形状为 \(S\)。则结果 tile \(T\) 满足：
 
 \[
-t[i, j, k] \;=\; \texttt{array}\big[\,\texttt{ind0}[i,j,0],\;\; \texttt{ind1}[i,0,k]\,\big]
-\quad\text{对所有 } 0\le i<M,\;0\le j<N,\;0\le k<K
+T[\mathbf{j}] = \text{array}[I_0[\mathbf{j}],\; I_1[\mathbf{j}],\; \dots,\; I_{r-1}[\mathbf{j}]],\quad \forall \mathbf{j} \in S
 \]
 
-几个要点：
+底层把每个下标按对应 stride 折叠成一个**线性偏移**，加到基地址上得到一个「散落指针 tile」，再走逐元素 load。若 `check_bounds=True`，会逐维生成「下标 < 该维长度」的布尔掩码，再 AND 起来作为 load 的 mask。整体伪代码：
 
-- **元组长度 = 数组秩**：1D 数组传长度 1 的元组；2D 传长度 2；以此类推。
-- **1D 数组的简写**：`ct.gather(array, ind0)` 严格等价于 `ct.gather(array, (ind0,))`，即单个 tile 自动包成长度 1 的元组。
-- **广播**：各索引分量形状不必相同，只要能按 NumPy 规则广播到同一形状即可（u2-l3）。
-- **逐点寻址**：与 `load` 的瓦片坐标完全不同——这里没有「瓦片大小」概念，索引直接是元素下标。
-- **边界与填充**：默认 `check_bounds=True`，越界下标返回 `padding_value`（默认 0）；负下标**不**遵循 Python 的「负索引」约定，一律视为越界。
-
-`gather` 还有三个控制选项，都通过「掩码」机制影响哪些元素真正被加载：
-
-```text
-mask (bool tile/scalar, 广播到公共形状):
-    where mask == False  →  返回 padding_value，不真正读内存
-padding_value (标量/tile, 广播到公共形状):
-    越界 或 mask==False 时返回的值；默认 0
-check_bounds (默认 True):
-    True  → 自动生成「边界掩码」(0 <= idx < dim)，越界处返回 padding_value
-    False → 关闭边界检查，越界访问是未定义行为 (UB)，由调用者保证下标合法
-
-有效掩码 = mask AND (check_bounds ? 边界掩码 : 全 True)
+```
+final_offset = Σ_k  (astype(I_k, uint64) * stride_k)         # 广播到公共形状 S
+final_mask   = AND_k (I_k < array.shape[k])    if check_bounds
+final_mask   = final_mask AND custom_mask      若还传了 mask
+result       = LoadPointer(ptr=base+offset, mask=final_mask, pad=padding_value)
 ```
 
-当 `mask` 与 `check_bounds=True` 同时存在时，有效掩码是两者的**逻辑与**：一个元素只有在「自定义 mask 为 True」**且**「下标在界内」时才真正被加载。
+这就是「逐元素随机读」的本质：**一个带掩码的散落地址 load**。
 
 #### 4.1.3 源码精读
 
-`gather` 的权威签名与文档（语义全在 docstring 里，stub 没有函数体）：
+公共签名与文档：[src/cuda/tile/_stub.py:L1597-L1644](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1597-L1644) 定义了 `gather` 的参数与语义，文档里明确：结果形状等于索引的广播形状；`mask` 与 `check_bounds` 同时存在时取逻辑 AND；负下标视为越界。
 
-[gather 签名与语义 — src/cuda/tile/_stub.py:L1571-L1618](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1571-L1618)
-
-> 这段代码定义了 `gather(array, indices, /, *, mask=None, padding_value=0, check_bounds=True, latency=None)`，并逐条说明：`indices` 元组长度须等于数组秩、各分量可广播、结果形状为广播形状、1D 数组的单 tile 简写、`mask`/`padding_value`/`check_bounds` 的掩码语义，以及「负下标视为越界」。
-
-最干净的语义范本是「按 `ct.arange` 构造索引做 1D 拷贝」的测试内核：
-
-[1D gather/scatter 拷贝内核 — test/test_gather_scatter.py:L24-L30](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L24-L30)
+底层实现在 [src/cuda/tile/_ir/ops.py:L1208-L1230](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L1208-L1230) 的 `gather_impl`。它的核心只有两步：
 
 ```python
-@ct.kernel
-def array_copy_1d(x, y, TILE: ct.Constant[int]):
-    bid = ct.bid(0)
-    indices = ct.arange(TILE, dtype=np.int64)   # [0,1,...,TILE-1]
-    indices += bid*TILE                           # 偏移到当前 block 的区间
-    tx = ct.gather(x, indices)                    # 按元素下标读
-    ct.scatter(y, indices, tx)                     # 按元素下标写
+pointer, final_mask = _gather_scatter_pointer_and_mask(array, indices, check_bounds, mask)
+...
+result, _token = load_pointer(pointer, final_mask, padding_value, latency)
 ```
 
-> 这段代码用 `ct.arange` 生成连续元素下标 `[bid*TILE, bid*TILE+1, ...]`，`gather` 把这些下标处的元素读成一个 tile，`scatter` 再写回 `y` 的相同下标处。注意 `indices` 直接作为元素下标传给 `gather`（1D 数组的单 tile 简写），而不是 `load` 那样的瓦片坐标。
+即把 `array + indices` 折算成一个**指针 + 掩码**，再调用通用的 `load_pointer`。
 
-2D 情形展示了「元组长度 = 秩」和「广播」：
-
-[2D gather/scatter 与广播索引 — test/test_gather_scatter.py:L49-L56](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L49-L56)
+指针与掩码的折算在 [src/cuda/tile/_ir/ops.py:L1308-L1383](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L1308-L1383) 的 `_gather_scatter_pointer_and_mask`。逐维累加偏移、逐维生成越界掩码的关键片段（节选）：
 
 ```python
-@ct.kernel
-def array_copy_2d(x, y, TILE_X: ct.Constant[int], TILE_Y: ct.Constant[int]):
-    bidx = ct.bid(0)
-    bidy = ct.bid(1)
-    ind_x = ct.arange(TILE_X, dtype=ct.int32) + bidx * TILE_X   # (TILE_X,)
-    ind_y = ct.arange(TILE_Y, dtype=ct.int32) + bidy * TILE_Y   # (TILE_Y,)
-    t = ct.gather(x, (ind_x[:, None], ind_y))   # 广播 (TILE_X,1) 与 (TILE_Y,) → (TILE_X, TILE_Y)
-    ct.scatter(y, (ind_x[:, None], ind_y), t)
+ind = astype(ind, datatype.uint64)
+ind = broadcast_to(ind, common_shape)
+if check_bounds:
+    array_size = array_val.shape[dim]
+    dim_mask = compare_tensorlike("lt", ind, array_size)   # 该维越界掩码
+    mask = ... and_ ...                                     # 跨维 AND
+offset_delta = binary_arithmetic_tensorlike("mul", ind, stride)
+offset = ... + offset_delta                                 # 累加成线性偏移
 ```
 
-> 这段代码对 2D 数组传长度为 2 的元组：行下标 `ind_x[:, None]` 形状 (TILE_X,1)，列下标 `ind_y` 形状 (TILE_Y,)，二者广播成 (TILE_X, TILE_Y)，正好是结果 tile 的形状。这正是 4.1.2 公式中 `ind0`/`ind1` 广播的具体实例。
+最终落到的 `LoadPointer` IR 操作见 [src/cuda/tile/_ir/ops.py:L1116-L1136](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L1116-L1136)：它有 `pointer`/`mask`/`padding_value`/`token` 四个 operand，对应上面算出的散落指针与掩码。
 
-`mask` + `check_bounds` 的「逻辑与」语义，看带注释的测试最清楚：
-
-[自定义 mask 与边界检查同时生效 — test/test_gather_scatter.py:L261-L285](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L261-L285)
-
-> 这段代码用一组混合下标（含越界的 15、20）和混合 mask（含 False）验证：只有「mask=True **且** 下标在界内」的位置才真正加载 `x` 的值，其余位置（mask=False 或越界）都填 `padding_value=-1.0`。注释逐元素列出了期望结果，是理解有效掩码的最佳材料。
+> **性能含义**：因为地址完全随机、不保证对齐，`gather` 通常无法走 TMA（Tensor Memory Accelerator），访存效率低于规则 `ct.load`。它适合「数据本身随机」的场景，不要用它来做本可以用瓦片覆盖的规则访问。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手用 `gather` 实现一个「按下标数组抽取元素」的内核，观察 `padding_value` 与 `check_bounds` 的效果。
+**实践目标**：用一个 1D `gather`+`scatter` 实现数组拷贝，并验证越界处填默认 0。
 
-**操作步骤**（示例代码，需自行放入可运行环境）：
+**操作步骤**：
 
-```python
-# 示例代码：需在已安装 cuda-tile 的环境（含 GPU）中运行
-import torch, math
-import cuda.tile as ct
+1. 阅读测试 [test/test_gather_scatter.py:L24-L30](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L24-L30) 中的 `array_copy_1d` 内核：
 
-@ct.kernel
-def gather_demo(x, y, N: ct.Constant[int]):
-    # 构造下标 [0, 2, 4, 6, 8, 10, 12, 14]，对一个长度仅 10 的数组部分越界
-    idx = ct.arange(N, dtype=ct.int32) * 2
-    # 默认 check_bounds=True：越界处(下标 12,14 → 元素不存在)填 padding_value
-    t = ct.gather(x, idx, padding_value=-1.0)
-    ct.scatter(y, ct.arange(N, dtype=ct.int32), t)
+   ```python
+   @ct.kernel
+   def array_copy_1d(x, y, TILE: ct.Constant[int]):
+       bid = ct.bid(0)
+       indices = ct.arange(TILE, dtype=np.int64)
+       indices += bid*TILE
+       tx = ct.gather(x, indices)
+       ct.scatter(y, indices, tx)
+   ```
 
-x = torch.arange(10, dtype=torch.float32, device="cuda")   # [0..9]
-y = torch.zeros(8, dtype=torch.float32, device="cuda")
-ct.launch(torch.cuda.current_stream(), (1,), gather_demo, (x, y, 8))
-print(y.cpu().tolist())
-```
+   注意：这里 `indices` 是**元素下标**（`bid*TILE + 局部偏移`），与常规 `ct.load(x, (bid,))` 的瓦片索引写法不同，但语义等价。
+
+2. 自行写一个最小内核：长度为 6 的数组，用 `ct.arange(8)`（8 个下标，最后两个越界）做 `gather`，`padding_value` 用默认值，再 `store` 到输出。
 
 **需要观察的现象**：
 
-- `idx = [0,2,4,6,8,10,12,14]`，其中 10、12、14 越界（数组长度仅 10，最大合法下标是 9）。
-- 因此结果应是 `[x[0], x[2], x[4], x[6], x[8], -1.0, -1.0, -1.0]`，即 `[0,2,4,6,8,-1,-1,-1]`。
+- 输出前 6 个元素等于输入，最后 2 个元素为 0（默认 `padding_value`）。
+- 这与 [test/test_gather_scatter.py:L90-L103](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L90-L103) 的 `custom_padding_constant` 行为一致（那里把 pad 换成自定义常量）。
 
-**预期结果**：`[0.0, 2.0, 4.0, 6.0, 8.0, -1.0, -1.0, -1.0]`。
+**预期结果**：输入 `[100,101,102,103,104,105]` → 输出 `[100,101,102,103,104,105,0,0]`。
 
-**延伸观察（待本地验证）**：把 `padding_value=-1.0` 改成 `ct.gather(x, idx, check_bounds=False)` 并维持下标越界，行为是**未定义**的——可能读到随机值或崩溃。这正好对照出 `check_bounds` 的作用：它给 `gather` 注入了一个「边界掩码」，把越界访问变成「返回填充值」的安全行为。
+> 若无法本地运行 GPU，标记「待本地验证」，仅做源码阅读理解。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：对一个 shape 为 (16,) 的 1D 数组，如何用一次 `gather` 调用取出**倒序**的 8 个元素（下标 `[15,14,...,8]`）？写出索引 tile 的构造代码。
+**练习 1**：对一个 shape `(4,4)` 的 2D 数组，写一个 gather 取出主对角线 4 个元素。索引该怎么传？
 
-**参考答案**：构造一个**递减**下标 tile 即可：`idx = ct.arange(8, dtype=ct.int32, start=15, step=-1)`（`ct.arange` 的 `step` 可以为负，见 u3-l2 工厂节）。然后 `t = ct.gather(x, idx)`。注意 `gather` 本身不要求下标有序或唯一，每个下标都是独立的逐点寻址。
+**答案**：两个下标分量都取 `[0,1,2,3]`，即 `ind = ct.arange(4, dtype=ct.int32); t = ct.gather(x, (ind, ind))`。结果 shape 为 `(4,)`，`t[i] = x[i,i]`。可对照 [test/test_gather_scatter.py:L49-L56](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L49-L56) 的 2D 广播写法（那里用 `ind_x[:, None]` 与 `ind_y` 广播成 `(TILE_X, TILE_Y)`）。
 
-**练习 2**：对一个 shape 为 (4, 4) 的 2D 数组，想取出主对角线 4 个元素 `[x[0,0], x[1,1], x[2,2], x[3,3]]` 成一个 (4,) tile。`indices` 该怎么写？
+**练习 2**：`gather` 同时传 `mask=m` 和 `check_bounds=True`，某处 `m` 为 `False`、且下标越界，结果取什么？
 
-**参考答案**：行、列下标都用同一个 `arange`：`i = ct.arange(4, dtype=ct.int32)`，然后 `t = ct.gather(x, (i, i))`。两个分量形状都是 (4,)，广播后仍是 (4,)，每个位置 `t[k] = x[i[k], i[k]] = x[k, k]`。
+**答案**：取 `padding_value`。因为有效掩码是「自定义 mask AND 越界 mask」，两者其一为假即不读取（见 stub 文档 [src/cuda/tile/_stub.py:L1634-L1636](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1634-L1636)）。
 
 ---
 
-### 4.2 scatter：按元素索引写数组
+### 4.2 scatter：按下标 tile 写入
 
 #### 4.2.1 概念说明
 
-`ct.scatter(array, indices, value)` 是 `gather` 的逆操作——按逐点下标**写**而不是读。它和 `gather` 共享同一套 `indices` 约定（元组长度 = 秩、各分量可广播、1D 数组的单 tile 简写），也共享 `mask` 与 `check_bounds` 语义：
+`ct.scatter(array, indices, value)` 是 `gather` 的对偶：把 `value` 里的每个元素按下标写到 `array` 的对应位置。语义为：
 
-- `mask == False` 处**不发生写入**。
-- `check_bounds=True`（默认）时，越界下标处**什么都不写**；`check_bounds=False` 时越界写入是 UB。
+\[
+\text{array}[I_0[\mathbf{j}],\dots,I_{r-1}[\mathbf{j}]] = \text{value}[\mathbf{j}]
+\]
 
-但 `scatter` 有一个 `gather` 没有的**关键陷阱**：**当多个位置指向同一个下标时（重复下标），写入是未定义行为（UB）。** 这不是 API 的疏忽，而是硬件并行的本质——一个 block 内的集体写入由许多线程并行完成，若多个线程写同一地址，最终留下哪一个是不确定的。
+`indices` 的约定与 `gather` 完全一致（元组长度等于秩、可广播、1D 可省略 tuple）。`value` 可以是标量或可广播到公共形状的 tile。`mask` 与 `check_bounds` 的语义也一致：`False` 或越界处**不写入**。
 
-这一点在「直方图」这类需要「多对一累加」的场景尤为要命：直方图必须用 `ct.atomic_add`（u4-l3），**不能**用 `scatter`——`scatter` 是「覆盖写」而非「累加」。
+**关键差异与陷阱**：
+
+- `gather` 的越界是「读不到→填 pad」，**安全**；`scatter` 的越界是「不写」，但若**多个下标指向同一位置**（重复索引），则是**数据竞争 / 未定义行为**——因为没有原子语义（要原子请用 `ct.atomic_*`）。
+- 因此 scatter 适合「写出位置互不重叠」的场景。
 
 #### 4.2.2 核心流程
 
-`scatter` 的写入规则：
-
-```text
-对结果公共形状中的每个位置 (i,j,k,...)：
-    若 有效掩码(i,j,k,...) == True 且 check_bounds 保证下标在界内：
-        array[ ind0[i,j,k,...], ind1[...], ... ] = value[i,j,k,...]
-    否则：
-        不写入（越界或 mask=False）
-
-⚠️ 若两个不同位置映射到同一个 (ind0, ind1, ...) 下标 → 未定义行为
-    （最终值是其中「某一个」写入，但不指定是哪一个）
+```
+pointer, final_mask = _gather_scatter_pointer_and_mask(array, indices, check_bounds, mask)
+value               = astype/broadcast 到 pointer 形状
+StorePointer(ptr=pointer, value=value, mask=final_mask)
 ```
 
-`value` 可以是标量或 tile，形状须能广播到 `indices` 的公共形状（与 `gather` 的 `padding_value` 同样的广播规则）。
-
-一个常被忽略的安全特性：`scatter` 的越界处理是「**静默忽略**」，不会报错。配合数组的 `slice` 视图使用时，这意味着写到视图范围外的位置会被自动丢弃——这其实是安全的边界裁剪，下面的测试会演示。
+与 gather 共用同一个 `_gather_scatter_pointer_and_mask`，只是把 `LoadPointer` 换成 `StorePointer`。
 
 #### 4.2.3 源码精读
 
-`scatter` 的权威签名与文档：
+公共签名：[src/cuda/tile/_stub.py:L1647-L1689](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1647-L1689)。文档明确写出赋值语义 `array[ind0[i,j,0], ind1[i,0,k]] = value[j,k]`，以及「重复下标的写顺序未指定」的隐含风险。
 
-[scatter 签名与语义 — src/cuda/tile/_stub.py:L1621-L1663](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1621-L1663)
+底层实现 [src/cuda/tile/_ir/ops.py:L1233-L1245](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L1233-L1245) 的 `scatter_impl` 与 `gather_impl` 结构对称：复用同一指针/掩码折算，最后调用 `store_pointer`。
 
-> 这段代码定义 `scatter(array, indices, value, /, *, mask=None, check_bounds=True, latency=None)`，说明 `value` 须可广播到公共形状、`mask=False` 处不写、越界处不写，并明确「重复下标属 UB」。
+最终的 `StorePointer` IR 操作见 [src/cuda/tile/_ir/ops.py:L1153-L1172](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L1153-L1172)，operand 为 `pointer`/`value`/`mask`/`token`。
 
-`scatter` 静默忽略越界写入的安全特性，看「写到视图外被丢弃」的测试：
-
-[写到切片视图之外被静默忽略 — test/test_gather_scatter.py:L172-L180](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L172-L180)
-
-> 这段代码把长度 8 的 `y` 取前 5 个元素的视图 `y_slice = y[:5]` 作为写入目标，然后 `scatter` 8 个下标 `[0..7]`。下标 5、6、7 超出视图范围（视图只覆盖 `y[0:5]`），因此这三个写入被**静默忽略**，`y[5:8]` 保留原值 `[105,106,107]`，结果 `y = [10,11,12,13,14,105,106,107]`。这证明了越界写入不会越权写到视图之外的内存。
-
-「重复稀疏下标是 UB」这一陷阱，测试用「只断言未重复位置」的方式规避：
-
-[重复稀疏下标的 UB 行为 — test/test_load_store_advanced_indexing.py:L206-L222](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_load_store_advanced_indexing.py#L206-L222)
-
-> 这段代码用下标 `[0, 0, 4, 6]`（前两个重复指向行 0）调用 `store_advanced_indexing`。注释明确：**行 0 是 UB**（被下标 0 和下标 1 两次写入，最终值未定义），因此测试**不**对行 0 做任何断言，只断言行 4 和行 6（下标唯一）被正确写为 99。这是 cuTile 文档化「重复下标 UB」语义的权威依据。（该 UB 规则对 `scatter` 同样成立。）
-
-`mask` 选择性写入的范本：
-
-[scatter 配合自定义 mask — test/test_gather_scatter.py:L288-L295](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L288-L295)
-
-> 这段代码用 `[T,F,T,F,T,F,T,F]` 的布尔 mask 调用 `scatter(..., mask=mask_tile, check_bounds=False)`，结果只有偶数位置被写入、奇数位置保持 0。注意这里同时关掉了边界检查（`check_bounds=False`），因为下标都在界内、无需运行时掩码开销。
+一个能验证「越界不写」的测试是 [test/test_gather_scatter.py:L172-L180](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L172-L180)：对一个只覆盖前 5 元素的 slice 视图写 8 个元素，后 3 个越界，原数组后 3 个元素保持不变。而 [test/test_gather_scatter.py:L183-L194](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L183-L194) 的 `copy_8_unchecked` 展示了 `check_bounds=False` 时 IR 里 mask 为 `None`（可由 [test/test_gather_scatter.py:L201-L216](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L201-L216) 的 IR 断言验证：`store_ops[0].mask is not None` 仅在 checked 模式成立）。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用 `scatter` 实现「按下标数组**重排**写入」，并亲手验证「重复下标是 UB」。
+**实践目标**：用 scatter 实现一个「带 mask 的选择性写入」，理解 mask 过滤。
 
-**操作步骤**（示例代码）：
+**操作步骤**：
 
-```python
-# 示例代码
-import torch
-import cuda.tile as ct
+1. 阅读 [test/test_gather_scatter.py:L288-L311](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_gather_scatter.py#L288-L311) 的 `scatter_with_custom_mask`：
 
-@ct.kernel
-def scatter_reorder(x, y, N: ct.Constant[int]):
-    # 把 x[0..7] 按 [7,6,5,4,3,2,1,0] 的顺序写到 y 的 [0..7]
-    src_idx = ct.arange(N, dtype=ct.int32)            # 读 x 的位置 [0..7]
-    dst_idx = ct.arange(N, dtype=ct.int32, start=N-1, step=-1)  # 写 y 的位置 [7..0]
-    t = ct.gather(x, src_idx)
-    ct.scatter(y, dst_idx, t)
+   ```python
+   mask_tile = ct.gather(mask_array, indices)        # 从数组读 mask
+   values    = ct.gather(x, indices)
+   ct.scatter(y, indices, values, mask=mask_tile, check_bounds=False)
+   ```
 
-x = torch.arange(8, dtype=torch.float32, device="cuda")
-y = torch.zeros(8, dtype=torch.float32, device="cuda")
-ct.launch(torch.cuda.current_stream(), (1,), scatter_reorder, (x, y, 8))
-print(y.cpu().tolist())   # 期望 [7,6,5,4,3,2,1,0]
-```
+2. 运行后对照断言：`mask` 为 `False`（奇数位）的位置保持 0，偶数位写入对应值。
 
-**需要观察的现象**：`y` 被倒序填充，`[7,6,5,4,3,2,1,0]`。所有 `dst_idx` 互不重复，因此写入是良定义的。
+**需要观察的现象**：输出为 `[100, 0, 102, 0, 104, 0, 106, 0]`——mask 直接控制了哪些位置被写入。
 
-**延伸观察（待本地验证）**：把 `dst_idx` 改成全部指向 0（如 `ct.full((N,), 0, dtype=ct.int32)`），即所有位置都写 `y[0]`。运行多次，观察 `y[0]` 的值是否稳定——由于重复下标是 UB，`y[0]` 可能是任意一个被写入的值，且不同运行可能不同。这正是直方图必须用 `atomic_add` 而非 `scatter` 的根本原因。
+**预期结果**：与上述断言一致。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么「直方图统计」不能用 `scatter` 实现，而必须用 `ct.atomic_add`？
+**练习 1**：如果想把多个梯度**累加**到同一个输出位置（如反向传播的 scatter-add），能直接用 `ct.scatter` 吗？
 
-**参考答案**：直方图是「多对一」累加——多个输入元素可能落入同一个 bin，需要把计数**相加**。`scatter` 是「覆盖写」（最后写者胜），且重复下标是 UB（不保证顺序）。`ct.atomic_add` 对每个 bin 做**原子读-改-写**，保证累加正确且无 UB（u4-l3）。
+**答案**：不能。`scatter` 对重复下标是数据竞争，不是累加。应改用 `ct.atomic_add` 等原子 RMW 操作（u4-l3 会讲原子族；`atomic_cas` 等遵循与 gather/scatter 相同的下标约定，见 [src/cuda/tile/_stub.py:L1708-L1713](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1708-L1713)）。
 
-**练习 2**：`scatter` 写入时若 `value` 的 dtype 与 `array` 的 dtype 不同会怎样？
+**练习 2**：`ct.scatter(array, ind, value)` 与 `ct.store(array, (k,), tile)` 都把数据写到数组，本质区别是什么？
 
-**参考答案**：会做隐式 cast（与 `store` 一致，u3-l1）。若 cast 方向非法（例如把 float 值隐式写入 int 数组），编译期抛 `TileTypeError`（"cannot implicitly cast"）；若合法则静默转换。`gather`/`scatter` 测试套件用 `_is_implicit_cast_ok` 预判这一点（见 test_gather_scatter.py 的 `test_array_copy_1d`）。
+**答案**：`store` 的索引是**瓦片索引**（一个标量 `k` 表示「第 k 个瓦片」，写到 `array[k*tm : (k+1)*tm]`），写整块连续区域；`scatter` 的索引是**元素下标 tile**，每个元素各自决定写往何处，位置可散落、可越界。前者规则高效，后者灵活但可能不对齐、可能冲突。
 
 ---
 
-### 4.3 load_advanced_indexing：一维稀疏 + 连续切片
+### 4.3 load/store_advanced_indexing：稀疏维 + 稠密切片
 
 #### 4.3.1 概念说明
 
-`gather` 虽然通用，但有个性能隐患：**每个元素都是一次独立的随机访存**。而很多真实场景其实只需要「沿**一个**轴任意取，沿**其余**轴仍取连续块」——最典型的就是 **embedding 查表**：给定一批 token 下标 `[t0, t1, ...]`，从权重表 `W`（shape (词表大小, 向量维 D)）里取出 `W[t0, :]`、`W[t1, :]`……每行是一个**连续**的 D 维向量，只有「选哪一行」是任意的。
+`gather` 要求**每一维**都给下标 tile，结果是逐元素随机。但很多真实场景是**半结构化**的：「我想取若干整行，每行内部是连续的」。例如 embedding 查表——行号随机、列连续。
 
-对这种「一维稀疏 + 多维连续」的模式，用 `gather` 需要给列维也造一个 `arange(D)` 索引 tile，相当于把「连续的 D 个元素」拆成 D 次独立寻址，浪费了连续性。`ct.load_advanced_indexing` 就是为了保留这种连续性而设计的：
+`ct.load_advanced_indexing(array, indices)` 正是为这种形态设计的。它的 `indices` 是一个长度等于 `array.ndim` 的 tuple，其中：
 
-> `indices` 是长度等于 `array.ndim` 的元组。**恰好一个**分量是 1D 整数 tile（「稀疏维 / sparse dim」），**其余**分量是 `ct.Slice(start, length)`（「稠密维 / dense dim」）。
+- **恰好一个**分量是 **1D 整数 tile**（称为**稀疏维 sparse dim**），给出要取的若干个切片编号；
+- **其余分量**都是 `ct.Slice(start, length)`（称为**稠密维 dense dim**），表示该维上 `[start, start+length)` 这段连续区间。
 
-这相当于 NumPy 的「混合高级索引」：一个 fancy-indexed 轴 + 若干切片轴。稠密维描述的是连续区间 `[start, start+length)`，因此后端仍可对这些连续段用 TMA / 合并访存，效率远高于纯 `gather`。
+结果 tile 的形状为 `(len_0, ..., len_{n-1})`：稀疏维的长度 = 索引 tile 的长度，稠密维的长度 = 对应 `Slice.length`。
 
-`ct.Slice(start, length)` 是稠密维的描述符：
+`ct.Slice(start, length)` 的语义见 [src/cuda/tile/_stub.py:L948-L967](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L948-L967)：`start` 是元素空间的运行时偏移；`length` 是 tile 大小，**必须是 2 的幂且为编译期常量**。
 
-- `start`：元素空间的**运行时**起始偏移（可以是标量、0D tile，或运行时计算的值）。
-- `length`：tile 在该维的长度，必须是 **2 的幂的编译期常量**。
+`store_advanced_indexing` 是其对偶，约定完全一致，且要求 tile 形状与 indices 隐含的形状严格相等。
 
-结果 tile 的形状是 `(len_0, ..., len_{n-1})`：稀疏维的长度 = 索引 tile 的长度；稠密维的长度 = 对应 `Slice.length`。
+**约束**（来自 stub 文档与实现）：
+
+1. tuple 长度必须等于数组秩，否则报错。
+2. **恰好一个**稀疏维——零个或多个都报错。
+3. 稀疏维必须是 **1D** 整数 tile（2D 报错）。
+4. 每个稠密维 `Slice.length` 必须 > 0 且为 2 的幂。
+5. 数组秩必须 ≥ 2（1D 数组请直接用 `gather`）。
+6. 需要 `BytecodeVersion.V_13_3`（即较新的 tileiras）。
 
 #### 4.3.2 核心流程
 
-设 2D 数组 `x`，`row_indices` 是长度 R 的 1D 整数 tile，`col_slice = ct.Slice(col_start, C)`，则：
-
-```text
-tile = ct.load_advanced_indexing(x, (row_indices, col_slice))
-# tile 形状 = (R, C)
-# tile[r, c] = x[ row_indices[r], col_start + c ]   对 0<=r<R, 0<=c<C
-```
-
-用公式表达（2D 情形，稀疏维在第 0 轴）：
+设数组为 \(A\)，稀疏维为 \(d\)，稀疏索引 tile \(I\)（长度 \(L_d\)），其余维 \(k\neq d\) 为稠密切片 \([s_k, s_k+\ell_k)\)。则结果 tile：
 
 \[
-\texttt{tile}[r, c] \;=\; \texttt{x}\big[\,\texttt{row\_indices}[r],\;\; \texttt{col\_start} + c\,\big]
-\quad\text{对 } 0\le r<R,\;0\le c<C
+T[j_0,\dots,j_{r-1}] = A\big[\;\text{if }k=d\text{ then }I[j_d]\text{ else }s_k + j_k\;\big]_{k=0}^{r-1}
 \]
 
-要点：
+其中 \(0\le j_d < L_d\)，\(0\le j_k < \ell_k\)（\(k\neq d\)）。本质上：稀疏维做 gather，稠密维做规则 load，二者在视图层融合。
 
-- **恰好一个稀疏维**：元组里必须有且仅有一个 1D 整数 tile。多了或少了都会在编译期抛 `TileTypeError`（"exactly one index must be a 1D integer Tile"）。
-- **稀疏维必须是 1D**：传 2D 整数 tile 作稀疏维会报错（"1D"）。
-- **元组长度 = 数组秩**：少了或多了都会报错（"does not match array rank"）。
-- **稠密维 length 必须 2 的幂**：`ct.Slice(0, 3)` 会报错（"power of two"）。
-- **越界填充**：稀疏维越界（如 `row_indices` 里某行号 ≥ 行数）与稠密维越界（`Slice` 超出数组）都按 `padding_mode` 填充，默认 `UNDETERMINED`，可设 `ct.PaddingMode.ZERO`（u2-l4）。
-- **稀疏维可任意、可重复、可乱序**：与 `scatter` 不同，`load_advanced_indexing` 的稀疏维**重复下标是良定义的**——每个重复下标都独立读出同一行（读操作天然安全）。
+底层会构造一个 **gather/scatter 视图**（`make_gather_scatter_view`），再发一条结构化的 `TileLoad` 操作（与常规 `ct.load` 同族），因此**有机会落到 TMA**，性能优于纯 `gather`。
 
-`store_advanced_indexing` 用同一套 `indices` 约定，把一个形状须**精确匹配**索引所暗示形状的 tile 写回。和 `scatter` 一样，它的**稀疏维重复下标属 UB**（多写一地址）。
+> **越界语义**：稠密维越界元素被忽略（store）或按 `padding_mode` 填充（load，默认 `UNDETERMINED`）；稀疏维越界同理，整体越界为未定义行为。重复的稀疏索引在 load 是良定义的（重复读同一行），在 store 是数据竞争。
 
 #### 4.3.3 源码精读
 
-`ct.Slice` 是稠密维描述符：
+公共签名与示例：
 
-[Slice 类 — src/cuda/tile/_stub.py:L948-L967](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L948-L967)
+- `load_advanced_indexing`：[src/cuda/tile/_stub.py:L1489-L1549](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1489-L1549)。文档给出典型用法 `ct.load_advanced_indexing(x, (row_indices, ct.Slice(col_start, 4)))`——行稀疏、列稠密。
+- `store_advanced_indexing`：[src/cuda/tile/_stub.py:L1552-L1594](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_stub.py#L1552-L1594)。
 
-> 这段代码定义 `Slice(start, length)`：`start` 是元素空间起始偏移，`length` 是 tile 大小，必须是 2 的幂且为编译期常量。它专用于 `load_advanced_indexing`/`store_advanced_indexing` 的稠密维。
-
-`load_advanced_indexing` 的权威签名与文档：
-
-[load_advanced_indexing 签名与语义 — src/cuda/tile/_stub.py:L1463-L1523](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/src/cuda/tile/_stub.py#L1463-L1523)
-
-> 这段代码定义「恰好一个稀疏 1D 整数 tile + 其余 Slice」的约定、结果形状 `(len_0,...,len_{n-1})`、`padding_mode` 对稀疏/稠密两维越界都生效，并给出一个 2D 示例（`ct.Slice(col_start, 4)` 取 4 列）。
-
-「按行稀疏 gather + 列连续切片」的范本内核：
-
-[稀疏行 gather 内核 — test/test_load_store_advanced_indexing.py:L41-L55](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_load_store_advanced_indexing.py#L41-L55)
+实现入口 [src/cuda/tile/_ir/ops.py:L3279-L3298](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L3279-L3298) 的 `load_advanced_impl`：
 
 ```python
-@ct.kernel
-def gather_even_rows(x, y, ROWS: ct.Constant[int], COLS: ct.Constant[int]):
-    indices = ct.arange(ROWS, dtype=ct.int32) * 2      # [0, 2, 4, 6] —— 稀疏维(行)
-    tile = ct.load_advanced_indexing(x, (indices, ct.Slice(0, COLS)))  # 取每行的前 COLS 列
-    ct.store(y, (0, 0), tile)
+if array_ty.ndim < 2:
+    raise TileTypeError("... use ct.gather() for 1D arrays")
+sparse_dim, tile_shape, gs_index = _parse_advanced_index(indices, array_ty.ndim)
+...
+view = make_gather_scatter_view(array, tile_shape, sparse_dim, padding_mode_val)
+result, _token = add_operation_variadic(TileLoad, ..., view=view, index=gs_index, ...)
 ```
 
-> 这段代码取出 `x` 的**偶数行**（行下标 `[0,2,4,6]`，稀疏维），每行取前 `COLS` 列（稠密维 `Slice(0, COLS)`）。结果 tile 形状 `(ROWS, COLS)`，相当于 `x[::2, :COLS]`。这正是「embedding 查表」的形态：`indices` 是 token 下标，`Slice(0, D)` 取整行向量。
+注意它生成的是 `TileLoad`（结构化、可 TMA），而非 `LoadPointer`（散落指针）——这是它与 `gather` 在底层最本质的区别。
 
-稠密维 `start` 可以是运行时值（动态列起点）：
+索引的解析与校验在 [src/cuda/tile/_ir/ops.py:L3213-L3276](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L3213-L3276) 的 `_parse_advanced_index`：遍历每个分量，区分 `TileTy`（稀疏维，记录其维度号）与 `IndexSliceTI`（稠密维，校验 length 为编译期常量、为正、为 2 的幂），最后强制「恰好一个稀疏维」并校验所有维度为 2 的幂。
 
-[动态 Slice.start — test/test_load_store_advanced_indexing.py:L80-L95](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_load_store_advanced_indexing.py#L80-L95)
+`ct.Slice` 对象本身的构造实现在 [src/cuda/tile/_ir/ops.py:L3205-L3210](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/src/cuda/tile/_ir/ops.py#L3205-L3210)，它要求 start/length 都是 0D 整数 tile，产出 `IndexSliceTI` 类型。
 
-> 这段代码把 `Slice(col_start, COLS)` 的 `col_start` 作为运行时参数传入，验证可取任意起点开始的连续 `COLS` 列。`start` 是运行时值、`length`（COLS）是编译期常量，体现了「稠密维 = 运行时起点 + 编译期长度」的设计。
+行为层面的端到端验证：
 
-稀疏维越界用 `padding_mode=ZERO` 填充：
-
-[稀疏维部分越界零填充 — test/test_load_store_advanced_indexing.py:L166-L181](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_load_store_advanced_indexing.py#L166-L181)
-
-> 这段代码对 8 行数组用下标 `[6,7,8,9]`（后两个越界），`padding_mode=ZERO` 时越界行被填 0。注释明确「6、7 在界内，8、9 越界」并给出期望结果，是理解稀疏维边界行为的最小例子。
-
-各类约束错误的判定：
-
-[错误用例集 — test/test_load_store_advanced_indexing.py:L304-L323](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_load_store_advanced_indexing.py#L304-L323)
-
-> 这段代码集中展示两类错误：(1) 索引元组长度 ≠ 数组秩（报 "does not match array rank"）；(2) 稠密维 `Slice` 的 length 不是 2 的幂（报 "power of two"）。同文件 L243-L301 还覆盖了「无稀疏维」「多个稀疏维」「稀疏维是 2D tile」等错误，统一报 "exactly one index must be a 1D integer Tile" 或 "1D"。
+- 非连续行 gather：[test/test_load_store_advanced_indexing.py:L41-L55](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L41-L55) 用 `indices = arange(ROWS)*2` 取偶数行，等价于 PyTorch 的 `x[::2, :y_cols]`。
+- 稀疏维部分越界零填充：[test/test_load_store_advanced_indexing.py:L166-L181](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L166-L181)，索引 `[6,7,8,9]` 对 8 行数组，后两个越界行被填 0。
+- 错误用例：2D tile 当稀疏维报「1D」、零/多个稀疏维报「exactly one」、tuple 长度不等于秩、`Slice.length` 非 2 的幂——见 [test/test_load_store_advanced_indexing.py:L243-L323](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L243-L323)。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用 `load_advanced_indexing` 实现一个最小 embedding 查表，并对照 PyTorch 的 fancy indexing 验证数值。
+**实践目标**：理解 `Slice.length` 的「2 的幂」约束，并对比常量 vs 动态 start。
 
-**操作步骤**（示例代码）：
+**操作步骤**：
 
-```python
-# 示例代码
-import torch
-import cuda.tile as ct
-
-@ct.kernel
-def embed_lookup(W, idx, out, VOCAB: ct.Constant[int], D: ct.Constant[int]):
-    # idx: 下标数组(稀疏维)  W: 权重表 (VOCAB, D)
-    # 取出 idx 指定的若干整行，每行前 D 列
-    rows = ct.load_advanced_indexing(W, (idx, ct.Slice(0, D)))
-    ct.store(out, (0, 0), rows)
-
-V, D, B = 16, 4, 4                    # 词表16, 向量维4, 查4个token
-W = torch.arange(V * D, dtype=torch.float32, device="cuda").reshape(V, D)
-idx = torch.tensor([3, 0, 7, 3], dtype=torch.int32, device="cuda")   # 含重复下标 3
-out = torch.zeros(B, D, dtype=torch.float32, device="cuda")
-ct.launch(torch.cuda.current_stream(), (1,), embed_lookup, (W, idx, out, V, D))
-print(out.cpu().tolist())
-# 对照
-print(W[idx].cpu().tolist())
-```
+1. 阅读 [test/test_load_store_advanced_indexing.py:L315-L323](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L315-L323)：传 `ct.Slice(0, 3)`（length=3，非 2 的幂）应抛 `TileTypeError`，match 字符串 `"power of two"`。
+2. 阅读 [test/test_load_store_advanced_indexing.py:L103-L116](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L103-L116) 的常量 start 版本，与 [test/test_load_store_advanced_indexing.py:L79-L95](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L79-L95) 的动态 start 版本对比：`Slice` 的 `start` 可以是运行时变量（如参数 `col_start`），但 `length` 必须是编译期常量。
 
 **需要观察的现象**：
 
-- `out` 的每一行 = `W` 中对应下标的整行，形状 `(B, D)`。
-- 注意 `idx` 里下标 3 出现了两次——对 `load_advanced_indexing`（读）这是**良定义**的：`out[0]` 和 `out[3]` 都等于 `W[3]`。
+- length=3 时编译期报错，错误信息明确提到 `power of two`。
+- 动态 start 改变时，取出的列窗口随之平移，但 `length` 不变。
 
-**预期结果**：`out` 与 `W[idx]`（PyTorch fancy indexing）逐元素相等。
-
-**延伸观察（待本地验证）**：把上面的 `load_advanced_indexing` + `store` 换成等价的纯 `gather` 写法——给列维也造索引 `col = ct.arange(D, dtype=ct.int32)`，`rows = ct.gather(W, (idx[:, None], col[None, :]))`。功能相同，但语义上把连续的 D 列拆成了 D 次逐点寻址，性能通常更差。这正是 `load_advanced_indexing` 存在的价值（见 4.4）。
+**预期结果**：常量 start 测试取出 `x[:, 2:6]`；动态 start=2 时取出 `x[:, 2:4]`。若本地无 GPU/新版 tileiras，标记「待本地验证」（advanced indexing 需 `BytecodeVersion.V_13_3`）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：对一个 shape (8, 8) 的 2D 数组，下面哪个调用合法？为什么？
-(a) `ct.load_advanced_indexing(x, (ct.Slice(0,4), ct.Slice(0,4)))`
-(b) `ct.load_advanced_indexing(x, (idx, ct.Slice(0,4)))`（`idx` 是 (4,) 整数 tile）
-(c) `ct.load_advanced_indexing(x, (idx, ct.Slice(0,3)))`
+**练习 1**：对一个 `(8, 8)` 数组，想取出第 `[7, 4, 2, 3]` 行、每行前 4 列，怎么写？
 
-**参考答案**：只有 **(b)** 合法。(a) 没有稀疏维（全是 Slice）→ 报 "exactly one index must be a 1D integer Tile"。(c) 稀疏维有了，但稠密维 `Slice(0,3)` 的 length 3 不是 2 的幂 → 报 "power of two"。(b) 恰好一个稀疏维 `idx`、一个稠密维 `Slice(0,4)`（length 4 是 2 的幂），合法，结果形状 (4, 4)。
+**答案**：稀疏维放行索引 tile，列维放稠密 Slice：
 
-**练习 2**：`load_advanced_indexing` 的稀疏维允许重复下标（良定义），但 `store_advanced_indexing` 的稀疏维重复下标却是 UB。为什么读和写的规则不同？
+```python
+indices = ... # 形状 (4,)，值为 [7,4,2,3]，可用 ct.where 构造
+tile = ct.load_advanced_indexing(x, (indices, ct.Slice(0, 4)))
+```
 
-**参考答案**：读操作天然幂等——多个位置读同一地址得到相同值，无副作用，完全安全。写操作是「覆盖」——多个位置写同一地址时，硬件并行写入的顺序不确定，最终值未定义。因此读允许重复下标、写不允许。这与 `gather`（读，越界/重复都安全）和 `scatter`（写，重复下标 UB）的区分完全一致。
+结果 shape `(4, 4)`，等价于 PyTorch 的 `x[[7,4,2,3], :4]`。可对照 [test/test_load_store_advanced_indexing.py:L124-L138](https://github.com/nvidia/cutile-python/blob/40bcc5aa0161ac0d70f064c98286029ac756101b/test/test_load_store_advanced_indexing.py#L124-L138)。
+
+**练习 2**：能否用 `load_advanced_indexing` 取「行连续、列稀疏」？稀疏维能在列上吗？
+
+**答案**：能。稀疏维可以是任意一维（实现里用 `sparse_dim` 记录其维度号，见 `_parse_advanced_index`）。例如取若干列、所有行：`(ct.Slice(0, ROWS), col_indices)`，此时列是稀疏维。约束仍是「恰好一个稀疏维」。
 
 ---
 
-### 4.4 三类读操作的对齐与性能（综合对比）
+## 5. 综合实践
 
-在收尾前，把本讲的 `gather`、`load_advanced_indexing` 与前置的 `load`/`TiledView.load` 放在一起对比，帮你建立「该用哪个」的直觉。核心维度是**访存规整度**——越规整，越能合并（coalesce）或走 TMA，越快：
+**任务：实现一个 embedding gather 内核。**
 
-| 操作 | 索引方式 | 访问区域 | 规整度 | 典型用途 |
-|------|----------|----------|--------|----------|
-| `load` / `tv.load` | 瓦片坐标（tile space） | 网格对齐的**矩形连续块** | 最高（可 TMA / 合并） | GEMM、LayerNorm 等规整 tile 计算 |
-| `load_advanced_indexing` | 一维**稀疏**下标 + 稠密连续 `Slice` | 若干**整行/整列**（稀疏散乱，稠密连续） | 中（稠密维仍可合并） | embedding 查表、按行索引抽取 |
-| `gather` | **全逐点**元素下标 | 每个元素各自任意位置 | 最低（最散乱） | 任意重排、top-k、完全非连续抽取 |
+给定：
 
-经验法则：
+- 权重表 `W`，shape `(vocab_size, embed_dim)`，float32；
+- token id 数组 `ids`，shape `(num_tokens,)`，int32，每个值 ∈ `[0, vocab_size)`；
+- 输出 `out`，shape `(num_tokens, embed_dim)`。
 
-- **能规整就规整**：如果你的访问模式是规则矩形块，永远优先 `load`/`TiledView`。
-- **一维任意、其余连续**：用 `load_advanced_indexing`，保留稠密维的连续性，比 `gather` 快。
-- **真的每个元素都任意**：才用 `gather`，接受它的随机访存代价。
+要求把每个 token 对应的权重行写到 `out`。即 `out[i] = W[ids[i]]`。
 
-一个常被忽略的对齐细节：`gather` 的 `check_bounds=True` 会给底层 `LoadPointer` 操作注入一个**运行时边界掩码**，使越界访问变成「返回填充值」的安全行为；`check_bounds=False` 则不生成掩码、访问更快但越界是 UB。这套机制在测试里通过检查 IR 中 `LoadPointer.mask` 是否为 `None` 来验证：
+**实现要点**：
 
-[checked vs unchecked 在 IR 上的体现 — test/test_gather_scatter.py:L197-L216](https://github.com/nvidia/cutile-python/blob/0c46a6222c61217a3fa740f01a1b14c9fef0ecec/test/test_gather_scatter.py#L197-L216)
+1. 这正是「行稀疏（按 id 取行）、列稠密（取整行）」的半结构化访问，**首选 `load_advanced_indexing`**。
+2. `embed_dim` 必须 tile 化，且 `Slice.length` 须为 2 的幂——若 `embed_dim` 不是 2 的幂，取最近的上界 2 的幂并用 `padding_mode` 处理越界列，或在 host 端把 `embed_dim` 补齐到 2 的幂。
+3. token 数量 `num_tokens` 可能不是 2 的幂——稀疏维 tile 的长度（即一次取多少 token）需要是 2 的幂，用 persistent 循环（u4-l1）或分块覆盖全部 token。
 
-> 这段代码编译同一个内核的两个版本（`check_bounds` 为 True/False），遍历最终 IR 断言：开启边界检查时 `LoadPointer` 的 `mask` 非 None，关闭时为 None。这把「安全但略慢」与「快但 UB」的取舍落实到了可见的 IR 层面。
-
-## 5. 综合实践：embedding gather 内核
-
-把本讲三个模块串起来，实现一个完整的 embedding 查表内核，并对比两种实现路径。
-
-**任务**：给定权重表 `W`（shape (V, D)）和 token 下标数组 `idx`（shape (B,)），输出 `out`（shape (B, D)），其中 `out[b] = W[idx[b]]`。
-
-**路径 A（推荐）——用 `load_advanced_indexing`**：稀疏维 = 行下标，稠密维 = `Slice(0, D)` 取整行。保留列方向的连续性，是 embedding 查表的惯用法。
+**参考内核骨架**（示例代码，非项目原有代码）：
 
 ```python
-# 示例代码
-import torch
 import cuda.tile as ct
 
 @ct.kernel
-def embed_lookup_advanced(W, idx, out, D: ct.Constant[int]):
-    rows = ct.load_advanced_indexing(W, (idx, ct.Slice(0, D)))
-    ct.store(out, (0, 0), rows)
+def embedding_gather(W, ids, out,
+                     EMBED: ct.Constant[int],    # embed_dim，须为 2 的幂
+                     TOKENS: ct.Constant[int]):  # 本 block 处理的 token 数（2 的幂）
+    bid = ct.bid(0)
+    # 本 block 负责的 token 下标：bid*TOKENS .. bid*TOKENS+TOKENS
+    row_idx = ct.arange(TOKENS, dtype=ct.int32) + bid * TOKENS
+    # 行稀疏：按 row_idx 取若干行；列稠密：取 [0, EMBED) 整行
+    tile = ct.load_advanced_indexing(W, (row_idx, ct.Slice(0, EMBED)))
+    # 写到 out 的对应行块（规则瓦片写，用普通 store 即可）
+    ct.store(out, (bid, 0), tile)
 ```
 
-**路径 B（对比）——用纯 `gather`**：给行、列各造一个索引 tile 并广播。
+启动：`grid = (cdiv(num_tokens, TOKENS), 1, 1)`，参数 `(W, ids, out, embed_dim, TOKENS)`。
+
+**进阶对比**：用纯 `ct.gather` 也写得出来，但需要把列下标也凑成索引 tile：
 
 ```python
-@ct.kernel
-def embed_lookup_gather(W, idx, out, B: ct.Constant[int], D: ct.Constant[int]):
-    col = ct.arange(D, dtype=ct.int32)              # (D,)
-    rows = ct.gather(W, (idx[:, None], col[None, :]))  # 广播 (B,1)+(1,D) → (B,D)
-    ct.store(out, (0, 0), rows)
+ind_row = row_idx[:, None]                      # (TOKENS, 1)
+ind_col = ct.arange(EMBED, dtype=ct.int32)      # (EMBED,)
+tile = ct.gather(W, (ind_row, ind_col))         # 广播成 (TOKENS, EMBED)
 ```
 
-**验证步骤**：
+功能等价，但底层走的是 `LoadPointer`（散落地址、不走 TMA），通常比 `load_advanced_indexing` 慢。
 
-1. 用 `V=32, D=8, B=16`，随机初始化 `W` 和 `idx`（可含重复 token）。
-2. 分别用两条路径各跑一次，得到 `out_A`、`out_B`。
-3. 用 PyTorch 的 `W[idx]` 作为参考，断言三者逐元素相等。
-4.（可选，待本地验证）用 Nsight Compute 或事件计时对比两条路径的耗时，预期路径 A 不慢于路径 B。
+**验证**：用 PyTorch 写 `expected = W[ids]`，与 cuTile 输出逐元素比较（注意 `num_tokens`/`embed_dim` 的 2 的幂处理边界）。
 
-**思考题**：
+> 若本地无 GPU 或 tileiras 版本低于 V_13_3，可只做源码阅读：跟踪 `load_advanced_indexing` 在 `_parse_advanced_index` → `make_gather_scatter_view` → `TileLoad` 的调用链，标注每一步处理的是「稀疏维」还是「稠密维」。
 
-- 为什么路径 A 在列方向更高效？（提示：稠密维 `Slice` 是连续区间，可合并访存 / TMA；路径 B 把每行的 D 个元素拆成 D 次逐点寻址。）
-- 若 `idx` 含重复 token（如 `[3, 3, 7, ...]`），路径 A 和路径 B 都安全吗？（提示：读操作的重复下标永远良定义。）
-- 若把任务反过来——「按 `idx` 把 `out` 的若干行**写回** `W`」（参数更新），该用哪个 API？重复 token 还安全吗？（提示：写操作的重复下标是 UB；多对一更新须用 `atomic_*`。）
+---
 
 ## 6. 本讲小结
 
-- **`gather`/`scatter` 是逐点（pointwise）元素空间寻址**：`indices` 是长度等于数组秩的元组，各分量是可广播的整数 tile，结果形状 = 广播形状；1D 数组可省略元组直接传单 tile。
-- **`mask` + `padding_value` + `check_bounds` 三者通过「有效掩码」协同**：`gather` 越界或 `mask=False` 返回 `padding_value`；`scatter` 越界或 `mask=False` 不写入；`check_bounds=False` 关闭运行时边界掩码（更快但越界是 UB）。
-- **`scatter` 的重复下标是未定义行为（UB）**——因为硬件并行写入顺序不确定；直方图等多对一累加必须改用 `ct.atomic_add`（u4-l3）。
-- **`load_advanced_indexing`/`store_advanced_indexing` 是「一维稀疏 + 多维连续切片」**：元组里恰好一个 1D 整数 tile（稀疏维），其余是 `ct.Slice(start, length)`（稠密维，length 须为 2 的幂编译期常量）。
-- **读的重复下标良定义、写的重复下标 UB**——这是 `load_advanced_indexing` 与 `store_advanced_indexing`、以及 `gather` 与 `scatter` 共同的区分。
-- **性能直觉**：访存规整度 `load` > `load_advanced_indexing` > `gather`；能规整就规整，一维任意才用 advanced indexing，全逐点才用 gather。
+- `ct.gather` / `ct.scatter` 用**元素下标 tile** 随机读写数组，索引元组长度等于数组秩、各分量按 NumPy 规则广播；底层都折算成一个**散落指针 + 越界/自定义掩码**，落到 `LoadPointer`/`StorePointer`。
+- `mask` 与 `check_bounds` 同时存在时有效掩码取逻辑 AND；gather 越界返回 `padding_value`，scatter 越界/被掩码处不写入；**scatter 对重复下标是数据竞争**（要原子语义用 `ct.atomic_*`）。
+- `ct.load_advanced_indexing` / `ct.store_advanced_indexing` 解决「**一维稀疏 + 其余维稠密连续切片**」的半结构化访问，用 `ct.Slice(start, length)` 表达稠密维（`length` 须为 2 的幂且编译期常量），稀疏维必须是 1D 整数 tile 且**恰好一个**。
+- advanced indexing 底层走结构化 `TileLoad`（与常规 load 同族），**可能落到 TMA**，性能优于纯 gather；需要 `BytecodeVersion.V_13_3`。
+- 选型直觉：规则整块用 `load/store`；完全随机逐元素用 `gather/scatter`；行/列稀疏+其余连续用 `advanced_indexing`。
+
+---
 
 ## 7. 下一步学习建议
 
-- **u4-l3（内存模型与原子操作）**：本讲反复提到「直方图/多对一累加要用 `atomic_add`」，下一讲会系统讲解 cuTile 的内存模型（`MemoryOrder`/`MemoryScope`）与原子操作族（`atomic_add/max/cas/...`）、`fence`，正是 `scatter` 无法覆盖的场景。建议紧接着学。
-- **重读 u5-l7（stub 与实现注册）**：本讲的 `gather`/`scatter`/`load_advanced_indexing` 都是 `@stub`，若你想知道它们在后端如何被分派到具体的 IR 操作（如 `LoadPointer`/`StorePointer` 带掩码的版本），u5-l7 给出了从 `@stub` 到 `@impl` 的完整注册链路。
-- **源码延伸**：想看 `check_bounds` 如何在 IR 层注入掩码，可结合 u6（优化 Pass）阅读 `LoadPointer`/`StorePointer` 的定义与数据流分析；想看字节码如何编码这些带掩码的访存，可参考 u7-l1（ir2bytecode）。
+- **u4-l3 内存模型与原子操作**：当 scatter 的写出位置可能重叠（如直方图、scatter-add），需要 `ct.atomic_add`/`ct.atomic_cas`，它们遵循与 gather/scatter 相同的下标约定，是本讲的自然延续。
+- **u4-l1 TiledView 与 persistent 遍历**：综合实践里 token 数非 2 的幂时的分块/persistent 处理，与 `num_tiles`/`traversal_steps` 直接相关。
+- **源码延伸阅读**：想深入了解 advanced indexing 的视图如何构造，可阅读 `_ir/ops.py` 中 `make_gather_scatter_view` 的实现，以及 `TileLoad` 操作的定义，理解「稀疏维 gather 与稠密维规则 load 在视图层融合」的具体机制（对应 u5-l5/u5-l6 的 IR 核心与类型系统）。
