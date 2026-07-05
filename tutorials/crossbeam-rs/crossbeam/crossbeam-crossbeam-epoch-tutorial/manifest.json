@@ -1,0 +1,694 @@
+{
+  "project": "crossbeam-crossbeam-epoch",
+  "head": "6195355ef1862f2c6172365d00645cb6f77417dc",
+  "rationale": "crossbeam-epoch 是一个基于 epoch（纪元）的并发内存回收库，核心难点在于「为什么不能立刻释放共享对象」「如何用 epoch 安全回收」「Atomic/Owned/Shared 三类指针与 Guard 的协作」。因此学习路线按照「先建立心智模型，再逐层剥开源码」的顺序设计：第 1 单元从项目定位、目录与构建、最小可运行示例入手，让读者先跑起来；第 2 单元专攻指针三剑客（Pointable→Atomic→Owned→Shared→CAS），因为它们是后续一切操作的基础；第 3 单元聚焦 Guard 与延迟回收（defer/defer_destroy/Deferred/repin），这是读者最常直接使用的 API；第 4 单元进入 Collector/默认收集器/Local 参与者/Global 与 Bag 的整体结构；第 5 单元把最核心的 epoch 推进与回收链路（Epoch 表示、pin/unpin 屏障、try_advance/collect）打通；第 6 单元留给专家层，讲解底层的无锁侵入式链表与 Michael-Scott 队列、no_std/loom 可移植性抽象以及测试与基准。依赖关系严格遵循「指针先于 Guard、Guard 先于 Collector、数据结构先于回收链路」的递进，确保每篇讲义都可独立读懂且只讲一个主题。共 6 单元 23 篇讲义，对应中型偏大项目规模。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 crossbeam-epoch",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 epoch-based 内存回收思想",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 crossbeam-epoch 是什么、解决什么问题，以及基于 epoch 的内存回收（EBR）的基本思想与适用场景。",
+          "learning_goals": [
+            "理解并发数据结构中「移除对象后不能立即释放」的核心难题",
+            "掌握 epoch-based reclamation 的基本原理：延迟回收与 grace period",
+            "了解 crossbeam-epoch 在 no_std 与 std 下的定位"
+          ],
+          "source_files": [
+            "README.md",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "EBR 要解决的问题背景",
+            "epoch 与 grace period 的直觉模型",
+            "crate 级文档导读（src/lib.rs 顶部模块注释）"
+          ],
+          "practice_task": "用一段中文（不超过 200 字）向同事解释「为什么删除链表节点后不能直接 drop，而要走 epoch 回收」，并举一个不使用 EBR 会出问题的并发场景。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "项目结构、构建配置与特性开关",
+          "order": 2,
+          "filename": "u1-l2-project-structure-and-build.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录布局、Cargo.toml 的特性开关（std/alloc/loom）、build.rs 与 crate 根模块如何组织子模块。",
+          "learning_goals": [
+            "掌握 crossbeam-epoch 的目录与模块划分",
+            "理解 std/alloc/loom 三大 feature 的作用与依赖关系",
+            "了解 build.rs 中 crossbeam_sanitize_thread cfg 的来源"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "build.rs",
+            "src/lib.rs",
+            "src/sync/mod.rs"
+          ],
+          "minimal_modules": [
+            "目录结构与源文件清单",
+            "feature flags：default=std，std 依赖 alloc，loom 依赖 crossbeam-utils/loom",
+            "cfg(target_has_atomic) 与模块的条件编译"
+          ],
+          "practice_task": "在自己的实验项目里把 crossbeam-epoch 配置为路径依赖，分别尝试开启和关闭 std/alloc 特性，记录编译结果并解释为什么「同时关闭 std 和 alloc 不被支持」。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速上手：pin 与 Atomic 的最小例子",
+          "order": 3,
+          "filename": "u1-l3-quickstart-pin-and-atomic.md",
+          "level": "beginner",
+          "topic": "用一个最小可运行例子演示 pin()、Atomic::new/load/swap、defer_destroy 的完整使用闭环，并对照示例代码。",
+          "learning_goals": [
+            "学会调用默认收集器的 pin() 获得 Guard",
+            "会用 Atomic::new / load / swap 与 Shared/Owned 互转",
+            "理解 defer_destroy 的调用时机与 unsafe 边界"
+          ],
+          "source_files": [
+            "src/default.rs",
+            "src/guard.rs",
+            "examples/sanitize.rs"
+          ],
+          "minimal_modules": [
+            "pin() 的最小用法",
+            "Atomic 指针的 load/swap",
+            "defer_destroy 延迟释放对象"
+          ],
+          "practice_task": "写一个单线程程序：用 Atomic::new 创建一个堆上数字，pin 后 load 出 Shared，swap 替换为新值，并对旧值调用 defer_destroy；最后 flush 并循环 pin 直到对象被回收（用一个带 Drop 计数的类型验证回收发生）。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "指针三剑客：Pointable / Atomic / Owned / Shared",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l4",
+          "title": "Pointable 与指针抽象：把任意类型变成「一个字」",
+          "order": 1,
+          "filename": "u2-l4-pointable-trait.md",
+          "level": "beginner",
+          "topic": "讲解 Pointable trait 如何把 sized 类型与动态大小数组抽象成可用单字指针指向的对象，以及 Array 的内存布局。",
+          "learning_goals": [
+            "理解为什么并发数据结构需要用「一个字」表示对象",
+            "掌握 Pointable 的 init/as_ptr/as_mut_ptr/drop 与 ALIGN 常量",
+            "了解 [MaybeUninit<T>] 作为 Pointable 的动态数组布局"
+          ],
+          "source_files": [
+            "src/atomic.rs"
+          ],
+          "minimal_modules": [
+            "Pointable trait 定义与语义",
+            "为 T: Sized 的默认实现（Box 包装）",
+            "Array<T> 与 [MaybeUninit<T>] 的 Pointable 实现（size 与 elements 的布局）"
+          ],
+          "practice_task": "用 Owned::<[MaybeUninit<i32>]>::init(10) 分配一个 10 元素数组，遍历读取其长度与元素指针，验证它与普通 Box<[T]> 在布局上的区别。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Atomic：共享原子指针与标记位（tagged pointer）",
+          "order": 2,
+          "filename": "u2-l5-atomic-tagged-pointer.md",
+          "level": "beginner",
+          "topic": "讲解 Atomic<T> 的内部表示、利用对齐低位存储 tag 的技巧，以及 load/store/swap/load_consume 等基本操作。",
+          "learning_goals": [
+            "掌握 Atomic<T> 的字段结构与 Send/Sync 推导",
+            "理解 low_bits/compose_tag/decompose_tag 的标记位原理",
+            "会用 load/store/swap 并理解 Guard 参数的作用"
+          ],
+          "source_files": [
+            "src/atomic.rs"
+          ],
+          "minimal_modules": [
+            "Atomic<T> 结构与 new/null/init/from_ptr",
+            "标记位工具函数：low_bits / compose_tag / decompose_tag / map_addr",
+            "load / load_consume / store / swap 与 Ordering"
+          ],
+          "practice_task": "创建 Atomic::<u64> 指针并用 Shared::null().with_tag(3) 设置 tag，通过 load 后的 tag() 验证标记位被正确存取；解释为什么 u64 能存 3 而 i8 只能存 0。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "Owned：所有权指针（类 Box）",
+          "order": 3,
+          "filename": "u2-l6-owned-pointer.md",
+          "level": "beginner",
+          "topic": "讲解 Owned<T> 作为堆上独占指针的语义、与 Box 的互转、into_shared、tag 与 with_tag、Drop 行为。",
+          "learning_goals": [
+            "理解 Owned 与 Box 的异同及 into_box/from_raw/from 的互转",
+            "掌握 into_shared 如何把所有权交给 Shared",
+            "理解 Owned 的 Drop 会调用 T::drop 释放对象"
+          ],
+          "source_files": [
+            "src/atomic.rs"
+          ],
+          "minimal_modules": [
+            "Owned<T> 结构与 new/init/from_raw/into_box",
+            "into_shared 转换与生命周期",
+            "tag / with_tag 与 Drop 实现"
+          ],
+          "practice_task": "用 Owned::new(1234) 创建对象，演示 into_box 转成 Box、with_tag(2) 设置标记位、并通过 from(Box) 反向构造 Owned，观察 tag 是否保留。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "Shared：受 epoch 保护的指针与生命周期 'g",
+          "order": 4,
+          "filename": "u2-l7-shared-pointer-and-lifetime.md",
+          "level": "beginner",
+          "topic": "讲解 Shared<'g, T> 的生命周期约束、null/is_null、deref/deref_mut/as_ref、into_owned 与 tag/with_tag。",
+          "learning_goals": [
+            "理解 'g 生命周期与 Guard 的绑定关系及安全含义",
+            "掌握 deref/as_ref 的 unsafe 前提（数据竞争与 Ordering）",
+            "会用 into_owned/try_into_owned 取回所有权"
+          ],
+          "source_files": [
+            "src/atomic.rs",
+            "src/guard.rs"
+          ],
+          "minimal_modules": [
+            "Shared<'g,T> 结构与 Clone/Copy",
+            "deref / deref_mut / as_ref 的 unsafe 约束",
+            "into_owned / try_into_owned / tag / with_tag"
+          ],
+          "practice_task": "从 Atomic load 出 Shared，分别用 as_ref 安全判空与 deref 取值；用 release/acquire 的 store+load 写一个跨线程读写的最小例子，说明为什么用 Relaxed 会有数据竞争。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "CAS 与指针运算：compare_exchange / fetch_update / fetch_and-or-xor",
+          "order": 5,
+          "filename": "u2-l8-cas-and-pointer-arithmetic.md",
+          "level": "intermediate",
+          "topic": "讲解 Atomic 上的比较交换、fetch_update 循环 CAS、以及对 tag 的位运算操作，并解释 Pointer sealed trait。",
+          "learning_goals": [
+            "掌握 compare_exchange / compare_exchange_weak 的返回值（CompareExchangeValue/Error）",
+            "理解 fetch_update 的循环重试语义",
+            "理解 fetch_and/or/xor 只作用于 tag 低位与 miri/非 miri 的实现差异"
+          ],
+          "source_files": [
+            "src/atomic.rs"
+          ],
+          "minimal_modules": [
+            "compare_exchange / compare_exchange_weak 与 CompareExchangeValue/CompareExchangeError",
+            "fetch_update 的循环 CAS 实现",
+            "fetch_and / fetch_or / fetch_xor 的 tag 位运算与 AtomicPtr/AtomicUsize 实现",
+            "Pointer sealed trait（Owned/Shared 共有）"
+          ],
+          "practice_task": "用 compare_exchange_weak 实现一个原子的「tag 自增 1（回绕）」循环；再写一个 fetch_update 版本做同样的事，对比两段代码并说明哪个更易读。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Guard 与延迟回收",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l9",
+          "title": "Guard：pin 语义与可重入",
+          "order": 1,
+          "filename": "u3-l9-guard-and-pin.md",
+          "level": "intermediate",
+          "topic": "讲解 Guard 如何作为「线程已 pin」的凭证、Drop 时自动 unpin、可重入 pin、以及 unprotected() 假守卫。",
+          "learning_goals": [
+            "理解 Guard 与 Local 的引用关系及其 Drop 的 unpin",
+            "掌握 pin 的可重入性（多个 Guard 共享一次实际 pin）",
+            "理解 unprotected() 的用途与安全约束（构造/析构场景）"
+          ],
+          "source_files": [
+            "src/guard.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "Guard 结构（local 指针）与 Drop::unpin",
+            "可重入 pin 的例子与 is_pinned 行为",
+            "unprotected() 的 null-local 假守卫与典型用途"
+          ],
+          "practice_task": "验证 pin 的可重入：连续创建两个 guard，在它们各自 drop 前后调用 epoch::is_pinned() 记录状态；再写一个用 unprotected() 在单线程析构 Treiber 栈的 Drop 实现示例。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "延迟执行：defer / defer_unchecked / defer_destroy",
+          "order": 2,
+          "filename": "u3-l10-defer-and-defer-destroy.md",
+          "level": "intermediate",
+          "topic": "讲解 Guard 上三种延迟执行 API 的差异、安全约束、缓存机制与 flush 的作用。",
+          "learning_goals": [
+            "区分 defer（要求 F:Send+'static）与 defer_unchecked（放宽 Send）的安全权衡",
+            "掌握 defer_destroy 作为回收对象的标准用法",
+            "理解 defer 先入本地 bag、满则入全局队列、flush 触发回收"
+          ],
+          "source_files": [
+            "src/guard.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "defer / defer_unchecked 的契约与 move 闭包要求",
+            "defer_destroy 的典型用法与 unsafe 约束",
+            "flush 把本地 bag 推入全局并触发 collect",
+            "unprotected guard 下 defer 立即执行"
+          ],
+          "practice_task": "实现一个简化版 Treiber 栈的 push/pop，在 pop 时用 defer_destroy 延迟释放旧 head；并用 unsafe defer_unchecked 做一个「延迟打印」的例子，强调闭包必须 move。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l11",
+          "title": "Deferred：内联或装箱的 FnOnce",
+          "order": 3,
+          "filename": "u3-l11-deferred-fnonce-storage.md",
+          "level": "intermediate",
+          "topic": "深入 deferred.rs 中 Deferred 类型如何把不定大小的 FnOnce 用三个 usize 字内联存储或退化为堆分配。",
+          "learning_goals": [
+            "理解 Deferred 的「函数指针+数据缓冲」表示法与 !Send/!Sync 标记",
+            "掌握小闭包内联、大闭包装箱的选择策略（DATA_WORDS=3）",
+            "理解 Bag 的 try_push、Drop 时调用、NO_OP 哨兵"
+          ],
+          "source_files": [
+            "src/deferred.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "Deferred 的字段布局与 NO_OP 常量",
+            "new() 的内联/堆分配分支与泛型 call 函数",
+            "Bag：try_push / seal / Drop 调用 / MAX_OBJECTS"
+          ],
+          "practice_task": "对照 deferred.rs 的测试，构造两个闭包（一个捕获 [usize;1]、一个捕获 [usize;10]），断言前者走内联、后者走堆；思考如何用 size_of 验证你的判断（可写一个实验性 helper）。",
+          "depends_on": [
+            "u3-l10"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l12",
+          "title": "repin 与 repin_after：避免阻塞 epoch 推进",
+          "order": 4,
+          "filename": "u3-l12-repin-and-repin-after.md",
+          "level": "intermediate",
+          "topic": "讲解 Guard::repin 与 repin_after 的用途、&mut self 约束、以及为何能加速全局 epoch 推进。",
+          "learning_goals": [
+            "理解长期持有旧 epoch 会拖慢 GC 推进的原因",
+            "掌握 repin 在唯一活跃 guard 下的更新逻辑",
+            "理解 repin_after 用 ScopeGuard 保证 panic 后重新 pin"
+          ],
+          "source_files": [
+            "src/guard.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "repin：unpin+pin 等价更新与 guard_count==1 约束",
+            "repin_after：临时 unpin 执行长任务再 re-pin",
+            "ScopeGuard 保证 panic 安全"
+          ],
+          "practice_task": "写一个长时间循环：持有 guard 反复 load 一个 Atomic，每隔 N 次调用 guard.repin()，对比不 repin 时全局 epoch 推进频率（用 Global::epoch 观察，或阅读 collector 测试 drop_array 的思路构造验证）。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Collector 与全局/本地结构",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l13",
+          "title": "Collector 与 LocalHandle：自建收集器",
+          "order": 1,
+          "filename": "u4-l13-collector-and-local-handle.md",
+          "level": "intermediate",
+          "topic": "讲解 Collector（Arc<Global> 的包装）与 LocalHandle 的公开 API、克隆语义、register 与 Drop 行为。",
+          "learning_goals": [
+            "理解 Collector 是 Arc<Global> 的轻量包装与 Clone/PartialEq 含义",
+            "掌握 LocalHandle::pin/is_pinned/collector 与 Drop 的 release_handle",
+            "理解「drop(collector) 后 handle 仍可用」的原因"
+          ],
+          "source_files": [
+            "src/collector.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "Collector 结构与 new/clone/register",
+            "LocalHandle 结构与 pin/is_pinned/collector",
+            "LocalHandle::Drop -> release_handle 的引用计数"
+          ],
+          "practice_task": "创建自己的 Collector，在两个线程里各自 register 得到 LocalHandle 并 pin，验证 handle.collector() 指向同一个 Collector；然后 drop(collector) 后继续用 handle 操作，确认仍正常。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l14",
+          "title": "默认收集器与线程局部 HANDLE",
+          "order": 2,
+          "filename": "u4-l14-default-collector-thread-local.md",
+          "level": "intermediate",
+          "topic": "讲解 default.rs 中惰性初始化的全局 Collector、线程局部 LocalHandle、pin/is_pinned/default_collector 的实现。",
+          "learning_goals": [
+            "理解 OnceLock 惰性初始化全局 Collector（及 loom 的 lazy_static 分支）",
+            "掌握 thread_local HANDLE 的注册时机与 with_handle 的回退",
+            "理解 pin_while_exiting 测试为何不能 panic（线程退出时 HANDLE 已析构）"
+          ],
+          "source_files": [
+            "src/default.rs",
+            "src/collector.rs"
+          ],
+          "minimal_modules": [
+            "全局 COLLECTOR 的惰性初始化（OnceLock vs loom）",
+            "thread_local HANDLE 与 with_handle 回退注册",
+            "pin / is_pinned / default_collector 公开函数"
+          ],
+          "practice_task": "运行 pin_while_exiting 风格的实验：在线程里先初始化一个会触发 Drop 时调用 pin() 的对象，再首次 pin，观察线程退出顺序；解释为何 with_handle 在 HANDLE 已析构时仍能正常工作。",
+          "depends_on": [
+            "u4-l13",
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l15",
+          "title": "Local：参与者结构与注册/计数",
+          "order": 3,
+          "filename": "u4-l15-local-participant.md",
+          "level": "intermediate",
+          "topic": "深入 internal.rs 中 Local 参与者的字段（entry/collector/bag/guard_count/handle_count/pin_count/epoch）、注册流程与 IsElement 实现。",
+          "learning_goals": [
+            "理解 Local 的字段含义与 #[repr(C)] 使 entry 为首字段的侵入式布局",
+            "掌握 register 的分配与插入全局链表流程",
+            "理解 guard_count / handle_count 双计数与 finalize 的触发条件"
+          ],
+          "source_files": [
+            "src/internal.rs",
+            "src/sync/list.rs"
+          ],
+          "minimal_modules": [
+            "Local 字段布局与 CachePadded",
+            "register：Owned::new -> insert 链表 -> LocalHandle",
+            "is_pinned / acquire_handle / release_handle / finalize 的计数逻辑",
+            "IsElement<Local> 实现（entry_of/element_of/finalize）"
+          ],
+          "practice_task": "画出 Local 在内存中的字段布局图（标注 repr(C) 与 CachePadded），并解释 handle_count 和 guard_count 各自由谁增减、finalize 在哪两种情况下被调用。",
+          "depends_on": [
+            "u4-l13",
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l16",
+          "title": "Global 全局数据与 Bag 队列",
+          "order": 4,
+          "filename": "u4-l16-global-and-bag-queue.md",
+          "level": "intermediate",
+          "topic": "讲解 Global 的三件套（locals 链表、queue 队列、epoch）、SealedBag 的过期判定，以及 push_bag 如何把本地 bag 封箱入队。",
+          "learning_goals": [
+            "理解 Global 的三个核心字段及其职责",
+            "掌握 SealedBag::is_expired 的「两个 epoch 间隔」安全判据",
+            "理解 push_bag 用 SeqCst fence + 当前 epoch 封箱入队"
+          ],
+          "source_files": [
+            "src/internal.rs",
+            "src/deferred.rs"
+          ],
+          "minimal_modules": [
+            "Global 结构：locals / queue / epoch",
+            "SealedBag 与 is_expired 的 wrapping_sub >= 2 判定",
+            "push_bag：fence + epoch + queue.push"
+          ],
+          "practice_task": "用文字推演一个场景：线程 A 在 epoch=2 pin 并产生垃圾，线程 B 持续 pin/collect 推进 epoch；说明在全局 epoch 至少推进到多少时，A 的垃圾 bag 才会被 is_expired 判定可回收，并解释「两步」安全窗口的来源。",
+          "depends_on": [
+            "u4-l15",
+            "u3-l11"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "epoch 推进与回收主链路",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l17",
+          "title": "Epoch 表示：pinned 位与原子操作",
+          "order": 1,
+          "filename": "u5-l17-epoch-representation.md",
+          "level": "intermediate",
+          "topic": "讲解 epoch.rs 中如何用整数的最低位表示 pinned、successor 推进、wrapping_sub 距离计算与 AtomicEpoch 封装。",
+          "learning_goals": [
+            "理解 LSB 作为 pinned 标志的编码与 successor 每次加 2",
+            "掌握 wrapping_sub 计算 epoch 距离（带符号右移）",
+            "理解 AtomicEpoch 在 64 位与非 64 位平台用 AtomicU64/AtomicUsize 的取舍"
+          ],
+          "source_files": [
+            "src/epoch.rs"
+          ],
+          "minimal_modules": [
+            "Epoch 结构与 starting/pinned/unpinned/is_pinned",
+            "successor（+2）与 wrapping_sub（带符号距离）",
+            "AtomicEpoch：load/store/compare_exchange 与平台类型别名"
+          ],
+          "practice_task": "手动模拟：从 starting() 出发，对若干次 pin/unpin 与 successor 画出 data 值变化表；验证 wrapping_sub(self=epoch5.pinned(), rhs=epoch3) 与 wrapping_sub(epoch3, epoch5.pinned()) 的符号。",
+          "depends_on": [
+            "u4-l16"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l18",
+          "title": "pin / unpin 与内存屏障（含 x86 优化 hack）",
+          "order": 2,
+          "filename": "u5-l18-pin-unpin-memory-barriers.md",
+          "level": "advanced",
+          "topic": "深入 Local::pin/unpin 的实现，重点讲解 SeqCst fence 的作用、x86 上用 compare_exchange 代替 mfence 的 hack 与周期性 collect。",
+          "learning_goals": [
+            "理解 pin 时写入 pinned epoch 后必须 SeqCst fence 以阻止后续 load 重排",
+            "掌握 x86 分支用 compare_exchange(SeqCst) 替代 fence 的原因与 compiler_fence 补救",
+            "理解 PINNINGS_BETWEEN_COLLECT 周期触发 collect"
+          ],
+          "source_files": [
+            "src/internal.rs",
+            "src/epoch.rs"
+          ],
+          "minimal_modules": [
+            "pin：guard_count 计数、首 Guard 时写 epoch+屏障、pin_count 与周期 collect",
+            "x86 分支：compare_exchange 作为全屏障 + compiler_fence 的 hack 与风险",
+            "unpin：最后一个 guard 时清 epoch、handle_count==0 时 finalize"
+          ],
+          "practice_task": "阅读 pin 的两个分支注释，用一段话解释「为什么 fence 必须在写完 local epoch 之后、而在任何 Atomic::load 之前」；并说明若去掉该 fence，在弱内存模型下可能出现什么数据竞争。",
+          "depends_on": [
+            "u4-l15",
+            "u5-l17"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l19",
+          "title": "try_advance 与 collect：推进 epoch 并回收垃圾",
+          "order": 3,
+          "filename": "u5-l19-try-advance-and-collect.md",
+          "level": "advanced",
+          "topic": "讲解 Global::try_advance 遍历所有 Local 判断能否推进、collect 用 try_pop_if 回收过期 bag、以及 finalize 的销毁流程。",
+          "learning_goals": [
+            "掌握 try_advance 的推进条件：所有 pinned 参与者都在当前 epoch",
+            "理解 collect 的 COLLECT_STEPS 增量回收与 try_pop_if 条件弹出",
+            "理解 finalize：把本地 bag 入队、从链表删除、释放 Collector 引用"
+          ],
+          "source_files": [
+            "src/internal.rs",
+            "src/sync/queue.rs"
+          ],
+          "minimal_modules": [
+            "try_advance：遍历 locals、Stalled 处理、Acquire fence、store successor",
+            "collect：try_advance + 最多 COLLECT_STEPS 个过期 bag 弹出销毁",
+            "Local::finalize：临时 pin、push_bag、entry.delete、drop collector"
+          ],
+          "practice_task": "对照 collector.rs 的 incremental / buffering 测试，解释「为什么单线程不断 defer+collect 时，每次 collect 回收量不超过 1024」；并画出 finalize 在线程退出时的完整调用时序。",
+          "depends_on": [
+            "u4-l16",
+            "u5-l17",
+            "u4-l15"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家层：底层无锁数据结构与工程实践",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l20",
+          "title": "无锁侵入式链表 sync/list",
+          "order": 1,
+          "filename": "u6-l20-lock-free-intrusive-list.md",
+          "level": "advanced",
+          "topic": "讲解 Michael 风格的无锁侵入式链表：Entry 的 next 用 tag=1 标记逻辑删除、insert 的 CAS、Iter 的物理 unlink 与 Stalled 重启。",
+          "learning_goals": [
+            "理解侵入式链表与 IsElement trait 的 entry_of/element_of/finalize",
+            "掌握逻辑删除（fetch_or tag=1）与物理 unlink 的两阶段",
+            "理解 Iter 在并发修改下的 Stalled 重启与 deferred 回收"
+          ],
+          "source_files": [
+            "src/sync/list.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "Entry / List / IsElement 与侵入式设计",
+            "insert 的 head CAS 与 delete 的逻辑标记",
+            "Iter::next：链接断开、finalize 延迟回收、Stalled 重启"
+          ],
+          "practice_task": "阅读 list.rs 的 insert_delete_multi 测试，画出多线程同时插删时 Iter 如何处理一个「已被逻辑删除但尚未物理 unlink」的节点；尝试用 IsElement 模式把一个含两个 Entry 的结构同时挂到两个 List（设计即可）。",
+          "depends_on": [
+            "u2-l8",
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l21",
+          "title": "Michael-Scott 无锁队列 sync/queue",
+          "order": 2,
+          "filename": "u6-l21-michael-scott-queue.md",
+          "level": "advanced",
+          "topic": "讲解 Michael-Scott 无锁队列：哨兵节点、push_internal/pop_internal 的 CAS、tail 滞后与 helping、try_pop_if 条件弹出与 defer_destroy。",
+          "learning_goals": [
+            "理解哨兵节点与 tail 可滞后于真实尾的设计",
+            "掌握 push 的 helping（协助推进 tail）与 CAS 链接新节点",
+            "理解 pop 时 defer_destroy 旧 head 与 try_pop_if 的条件回收"
+          ],
+          "source_files": [
+            "src/sync/queue.rs",
+            "src/internal.rs"
+          ],
+          "minimal_modules": [
+            "Queue/Node 结构与哨兵初始化",
+            "push_internal：判断真实尾、链接新节点、推进 tail（含 helping）",
+            "pop_internal / pop_if_internal：head CAS、推进 tail、defer_destroy、try_pop_if 条件"
+          ],
+          "practice_task": "对照 push_try_pop_many_mpmc 测试，手画一次「producer A 推进 tail 失败时 producer B 如何 helping」的时序；并解释为什么 pop 在 head==tail 时还要尝试推进 tail。",
+          "depends_on": [
+            "u2-l8",
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l22",
+          "title": "no_std / loom / 可移植性抽象层",
+          "order": 3,
+          "filename": "u6-l22-no_std-loom-portability.md",
+          "level": "advanced",
+          "topic": "讲解 lib.rs 中 primitive 抽象层如何在 loom 与真实环境间切换、UnsafeCell 包装、const_fn! 宏、alloc_helper 与 strict-provenance 注意点。",
+          "learning_goals": [
+            "理解 primitive::cell/sync 在 loom 与 std/core 间的双实现",
+            "掌握 UnsafeCell wrapper 的 with/with_mut 与 loom API 对齐",
+            "理解 alloc_helper::Global、Array 自定义分配与 without_provenance_mut 的 miri/CHERI 处理"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/alloc_helper.rs",
+            "src/atomic.rs"
+          ],
+          "minimal_modules": [
+            "primitive 模块：loom 分支 vs std/core 分支（cell/sync/thread_local）",
+            "const_fn! 宏：在 const 与非 const 间切换",
+            "alloc_helper::Global 与 without_provenance_mut 的可移植性"
+          ],
+          "practice_task": "在自己的 crate 里写一个最小 wrapper：用 core::cell::UnsafeCell 实现 with/with_mut 方法对齐 loom 风格 API；再解释 Atomic 的 fetch_and 在 miri 下用 AtomicPtr::fetch_and、非 miri 下用 AtomicUsize::fetch_and 的 strict-provenance 原因。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l14"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l23",
+          "title": "测试、基准与示例：Treiber 栈与压测",
+          "order": 4,
+          "filename": "u6-l23-tests-benchmarks-examples.md",
+          "level": "advanced",
+          "topic": "讲解 tests/loom.rs 的 loom 模型检验（Treiber 栈）、benches 的 pin/defer/flush 基准、examples/sanitize.rs 的多线程压测与 build.rs 的 thread sanitizer 支持。",
+          "learning_goals": [
+            "理解 loom 如何对 epoch 回收做有界状态模型检验",
+            "掌握 benches 中 single/multi pin 与 defer 的测量维度",
+            "理解 crossbeam_sanitize_thread cfg 与 examples 压测的配合"
+          ],
+          "source_files": [
+            "tests/loom.rs",
+            "benches/pin.rs",
+            "benches/defer.rs",
+            "examples/sanitize.rs",
+            "build.rs"
+          ],
+          "minimal_modules": [
+            "loom 模型测试：it_works 与 Treiber 栈",
+            "benches：single/multi pin、single/multi defer、flush",
+            "examples/sanitize.rs：16 线程 swap/load+defer_destroy 压测"
+          ],
+          "practice_task": "运行 examples/sanitize.rs（或自行实现一个 Treiber 栈并用 crossbeam_epoch），用 cargo bench 测量 single_pin vs multi_pin；再用 RUSTFLAGS 开启 sanitize=thread 重跑，观察 build.rs 的 cfg 如何生效（仅记录现象，不必修复）。",
+          "depends_on": [
+            "u3-l10",
+            "u4-l14"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
