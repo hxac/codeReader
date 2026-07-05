@@ -1,0 +1,570 @@
+{
+  "project": "crossbeam-crossbeam-utils",
+  "head": "6195355ef1862f2c6172365d00645cb6f77417dc",
+  "rationale": "crossbeam-utils 是一个面向并发编程的 no_std 工具集，模块边界清晰、彼此相对独立，非常适合按「认知→使用→机制→工程」四段式推进。第一单元(beg) 让读者先建立全局认知：项目定位(Cargo.toml/README/lib.rs 顶层文档)、模块地图(按 feature 导出 atomic/sync/thread 与顶层 backoff/cache_padded)、构建与测试(build.rs 的 no_atomic 检测、features、loom)。第二、三单元(int) 是手册主体：先把 atomic 模块的核心 AtomicCell 当作一条完整链路来讲——公共 API→无锁 transmute 路径→全局 SeqLock 锁池回退，再补上 AtomicConsume、Backoff、CachePadded 三个独立原语；然后用 sync 单元讲清三大同步原语 Parker/WaitGroup/ShardedLock 及其依赖的内部 OnceLock。第四单元讲 thread::scope 作用域线程(原理+spawn/join 句柄)，它依赖 WaitGroup，因此放在 sync 之后。第五单元(adv) 面向二次开发与深度理解：集中剖析 AtomicCell 的 unsafe 安全性论证、算术宏的批量生成、跨平台 cfg/loom 抽象与宽 SeqLock、以及并发测试与基准策略。讲义依赖按「理解所需的硬前置」刻画，例如 u2-l3 全局锁回退依赖无锁路径 u2-l2，ShardedLock 依赖 CachePadded，thread::scope 依赖 WaitGroup，避免硬拆数量堆砌。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步与认识 crossbeam-utils",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "crossbeam-utils 是什么：一个面向并发编程的 no_std 工具集，提供 AtomicCell、AtomicConsume、Parker、ShardedLock、WaitGroup、Backoff、CachePadded、thread::scope 等原语。",
+          "learning_goals": [
+            "理解 crate 的定位与它解决的并发问题",
+            "了解 no_std 设计、MSRV 1.56 与版本 0.8.21",
+            "知道有哪些主要类型与它们所属的功能类别"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "README 概述与功能分类",
+            "Cargo.toml 元信息与 MSRV",
+            "lib.rs 顶层模块文档"
+          ],
+          "practice_task": "新建一个 binary crate 并加入 crossbeam-utils 依赖，用 AtomicCell 写一个多线程计数器：多个线程并发 fetch_add，最后打印累加结果验证正确性。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-module-map.md",
+          "level": "beginner",
+          "topic": "讲解 src/ 目录组织，以及 lib.rs 如何按 feature(std/atomic)导出 atomic、sync、thread 与顶层 backoff/cache_padded 模块，区分 pub 与 pub(crate) 内部模块。",
+          "learning_goals": [
+            "画出模块依赖与导出关系图",
+            "理解 feature gate 如何控制可见模块",
+            "区分对外公开类型与内部辅助模块"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/atomic/mod.rs",
+            "src/sync/mod.rs",
+            "Cargo.toml"
+          ],
+          "minimal_modules": [
+            "lib.rs 的模块导出与 cfg",
+            "atomic/mod.rs 子模块",
+            "sync/mod.rs 子模块"
+          ],
+          "practice_task": "在本地产出一份模块树文档：标注每个 pub 类型(AtomicCell/Parker/WaitGroup/ShardedLock/Backoff/CachePadded/scope)所在的源文件路径、所属 feature 与是否对 crate 外可见。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建特性、build.rs 与运行测试",
+          "order": 3,
+          "filename": "u1-l3-features-build-and-tests.md",
+          "level": "beginner",
+          "topic": "讲清 features(default std、atomic)、build.rs 与 no_atomic.rs 如何检测目标平台原子支持并发出 crossbeam_no_atomic 等 cfg、loom 并发测试支持、cargo test/bench 的运行方式。",
+          "learning_goals": [
+            "理解 features(default/std/atomic)与 atomic feature 需要 Rust 1.74",
+            "理解 build.rs 发出的 crossbeam_no_atomic/sanitize_thread/force_fallback cfg",
+            "掌握用不同 feature 构建与运行测试、bench 的命令"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "build.rs",
+            "src/lib.rs",
+            "benches/atomic_cell.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml 的 features 与依赖",
+            "build.rs 的 cfg 发射",
+            "benches 与测试入口"
+          ],
+          "practice_task": "分别用 default features、--no-default-features、--features atomic 三种配置编译并通过 cargo test，记录 AtomicCell 与 sync 模块在各配置下是否可用，整理成对照表。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "原子模块 atomic",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "AtomicCell 公共 API 与数据结构",
+          "order": 1,
+          "filename": "u2-l1-atomiccell-api.md",
+          "level": "intermediate",
+          "topic": "AtomicCell<T> 的内部定义(UnsafeCell<MaybeUninit<T>>、repr(transparent))与公共方法 new/load/store/swap/take/compare_exchange/fetch_update 的语义，以及 load 用 Acquire、store 用 Release 的排序约定。",
+          "learning_goals": [
+            "掌握 AtomicCell 的基本用法与生命周期",
+            "理解 load(Acquire)/store(Release) 的排序约定",
+            "理解 MaybeUninit 与 Drop、needs_drop 的关系"
+          ],
+          "source_files": [
+            "src/atomic/atomic_cell.rs",
+            "src/atomic/mod.rs"
+          ],
+          "minimal_modules": [
+            "AtomicCell 结构与 new/into_inner",
+            "load/store/swap/take",
+            "compare_exchange/fetch_update"
+          ],
+          "practice_task": "用 AtomicCell 实现一个线程安全的「最新值快照」结构：多个写线程不断 store，一个读线程周期性 load 并打印，验证读到的总是某个完整写入值。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "AtomicCell 的无锁路径",
+          "order": 2,
+          "filename": "u2-l2-atomiccell-lockfree.md",
+          "level": "intermediate",
+          "topic": "当 T 可 transmute 为原生原子类型时如何走无锁路径：can_transmute 常量判断(size/align)、atomic! 宏的编译期分发、AtomicUnit 对 () 的特判、atomic_is_lock_free。",
+          "learning_goals": [
+            "理解 atomic! 宏如何编译期在无锁与回退间选择",
+            "理解 can_transmute 的 size==、align>= 判据",
+            "理解 is_lock_free 的真实含义与 AtomicUnit 特例"
+          ],
+          "source_files": [
+            "src/atomic/atomic_cell.rs",
+            "src/atomic/mod.rs"
+          ],
+          "minimal_modules": [
+            "can_transmute 常量函数",
+            "atomic! 宏分发",
+            "AtomicUnit 与 atomic_is_lock_free"
+          ],
+          "practice_task": "构造若干类型(usize、自定义 #[repr(C)] 单字段包装、[u8;1000]、())，调用 AtomicCell::<T>::is_lock_free() 打印结果，并与你基于 can_transmute 的预测逐项对照。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "AtomicCell 的全局锁回退与 SeqLock",
+          "order": 3,
+          "filename": "u2-l3-atomiccell-global-lock-seqlock.md",
+          "level": "intermediate",
+          "topic": "当 T 无法原子化时回退到由 67 个 SeqLock 组成的全局锁池：lock() 按地址取模选锁(为何用素数)、SeqLock 的 optimistic_read/validate_read/write/abort 印戳机制，以及 atomic_load 的乐观读+ptr::read_volatile 路径。",
+          "learning_goals": [
+            "理解全局锁池为何用素数个 CachePadded<SeqLock>",
+            "理解 SeqLock 印戳如何让读者无锁地读到一致快照",
+            "理解乐观读为何用 read_volatile 并配合 validate_read 校验"
+          ],
+          "source_files": [
+            "src/atomic/atomic_cell.rs",
+            "src/atomic/seq_lock.rs",
+            "src/atomic/mod.rs"
+          ],
+          "minimal_modules": [
+            "lock() 锁池选择",
+            "SeqLock 印戳与 write/abort",
+            "atomic_load 的乐观读路径"
+          ],
+          "practice_task": "阅读 atomic_load 的 fallback 分支，画出多读者与单写者并发时：写者持锁→读者 optimistic_read→read_volatile→validate_read 失败重试的时序图，说明为何不会读到撕裂值。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "AtomicConsume 与 consume 内存序",
+          "order": 4,
+          "filename": "u2-l4-atomic-consume.md",
+          "level": "intermediate",
+          "topic": "AtomicConsume trait 与 load_consume：为何在 ARM/AArch64 用 load(Relaxed)+compiler_fence(Acquire) 而其他平台退化为 load(Acquire)，以及 miri/loom/tsan 的限制。",
+          "learning_goals": [
+            "理解 consume 序的概念与在弱内存模型上的潜在收益",
+            "理解分平台的 impl_consume 宏与 cfg 条件",
+            "理解为何多数平台与 sanitizer 下退化为 Acquire"
+          ],
+          "source_files": [
+            "src/atomic/consume.rs",
+            "src/atomic/mod.rs"
+          ],
+          "minimal_modules": [
+            "AtomicConsume trait",
+            "impl_consume 分平台宏",
+            "impl_atomic 类型列表"
+          ],
+          "practice_task": "写一个用 load_consume 读取 AtomicPtr 并解引用的示例，结合 consume.rs 注释解释：为何在 x86-64 上它实际仍表现为 Acquire，而在 aarch64 上可能省略 fence。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Backoff 指数退避自旋",
+          "order": 5,
+          "filename": "u2-l5-backoff.md",
+          "level": "intermediate",
+          "topic": "Backoff 的 step 与 SPIN_LIMIT(6)/YIELD_LIMIT(10) 设计；spin(lock-free 重试)与 snooze(阻塞等待)的差异；is_completed 决定何时改用 park 等其他阻塞机制；no_std 下 snooze 退化为 spin。",
+          "learning_goals": [
+            "掌握 spin/snooze 两种自旋退避的适用场景",
+            "理解指数增长与上限为何能减少 contention",
+            "理解 is_completed 与 thread::park 的配合"
+          ],
+          "source_files": [
+            "src/backoff.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "spin 实现",
+            "snooze 实现",
+            "is_completed"
+          ],
+          "practice_task": "用 Backoff + AtomicUsize 实现一个 fetch_mul 风格的 CAS 循环，分别测量加 Backoff 与裸自旋在高竞争下的吞吐差异，记录并解释结果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "CachePadded 缓存行填充",
+          "order": 6,
+          "filename": "u2-l6-cachepadded.md",
+          "level": "intermediate",
+          "topic": "CachePadded<T> 通过 repr(align) 按 target_arch 对齐到缓存行长度(x86-64/aarch64/powerpc64=128、多数=64、arm/mips=32、m68k=16、s390x=256)；为何能避免 false sharing，以及它与原子锁池、ShardedLock 的结合。",
+          "learning_goals": [
+            "理解 false sharing 与缓存行对齐的原理",
+            "理解各架构 align 取值的来源与悲观假设",
+            "掌握 CachePadded 的新建、解引用与 into_inner 用法"
+          ],
+          "source_files": [
+            "src/cache_padded.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "repr(align) 分架构分支",
+            "new/into_inner/Deref/DerefMut",
+            "与原子锁池的结合"
+          ],
+          "practice_task": "构造一个含两个相邻 AtomicUsize 的结构，分别用与不用 CachePadded 包装，两个线程各只自增其中一个字段，测量并解释两种写法的耗时差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "sync 同步原语",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Parker / Unparker 线程挂起",
+          "order": 1,
+          "filename": "u3-l1-parker.md",
+          "level": "intermediate",
+          "topic": "Parker 的 token 模型与 EMPTY/PARKED/NOTIFIED 三态机；park/park_timeout/park_deadline；unpark 用 swap(NOTIFIED) 并随后获取 lock 防 lost-wakeup；Arc<Inner> 让 Parker 与 Unparker 共享状态；UnparkReason。",
+          "learning_goals": [
+            "理解三态机如何同时避免 spurious wakeup 与 lost wakeup",
+            "理解 Mutex+Condvar 在 park/unpark 中的协作",
+            "理解 Unparker 可 Clone、Parker/Unparker 的 raw 指针转换"
+          ],
+          "source_files": [
+            "src/sync/parker.rs",
+            "src/sync/mod.rs"
+          ],
+          "minimal_modules": [
+            "Parker/Unparker 与 Inner",
+            "Inner::park 三态流转",
+            "Inner::unpark 的 swap 与加锁"
+          ],
+          "practice_task": "用 Parker+Unparker 实现两个线程的「乒乓」交替打印：线程 A 打印后 unpark B 并 park 自己，线程 B 同理，循环若干轮。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "WaitGroup 引用计数同步",
+          "order": 2,
+          "filename": "u3-l2-waitgroup.md",
+          "level": "intermediate",
+          "topic": "WaitGroup 基于 Arc<Inner{count,cvar,lock}>：clone 增计数、drop/wait 减计数，归零后加锁并 notify_all；为何先 fetch_sub(AcqRel) 再 lock 能避免漏通知；与 std::sync::Barrier 的差异。",
+          "learning_goals": [
+            "理解引用计数式同步的工作方式",
+            "理解计数归零后「先减后锁」的顺序为何能避免丢失通知",
+            "理解 WaitGroup 与 Barrier 在用法与语义上的差异"
+          ],
+          "source_files": [
+            "src/sync/wait_group.rs",
+            "src/sync/mod.rs"
+          ],
+          "minimal_modules": [
+            "WaitGroup/Inner 结构",
+            "wait/clone/drop 与计数",
+            "归零后的加锁通知"
+          ],
+          "practice_task": "用 WaitGroup 并发执行 N 个任务并在主线程等待全部完成；再改写为等价的 std::sync::Barrier 版本，对比两种写法的代码量与语义差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "ShardedLock 分片读写锁",
+          "order": 3,
+          "filename": "u3-l3-shardedlock.md",
+          "level": "intermediate",
+          "topic": "ShardedLock 内部是 8 个 CachePadded<Shard>：读按 ThreadId(current_index)取模选分片、写需逐个锁全部 8 个分片并暂存 guard；为何读快写慢、利于读扩展；poison 语义与 guard 生命周期 transmute。",
+          "learning_goals": [
+            "理解分片如何降低并发读的 cache line 争用",
+            "理解 current_index 选 shard 与 NUM_SHARDS 为 2 的幂",
+            "理解写锁全部分片的开销、guard 暂存与 poison 处理"
+          ],
+          "source_files": [
+            "src/sync/sharded_lock.rs",
+            "src/sync/mod.rs",
+            "src/cache_padded.rs"
+          ],
+          "minimal_modules": [
+            "Shard 与 NUM_SHARDS",
+            "read/try_read 选分片",
+            "write/try_write 逐个锁"
+          ],
+          "practice_task": "在多读少写场景下，对比 ShardedLock 与 std::sync::RwLock 的读吞吐随读线程数增长的趋势，画出折线并解释 ShardedLock 的优势来源。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "内部 OnceLock 惰性初始化",
+          "order": 4,
+          "filename": "u3-l4-oncelock.md",
+          "level": "intermediate",
+          "topic": "pub(crate) OnceLock<T> 基于 std::sync::Once + UnsafeCell<MaybeUninit<T>>：get_or_init 的快路径(is_completed)+call_once 慢路径、get_unchecked 的安全性、Drop 释放；它被 ShardedLock 的 current_index 注册表使用。",
+          "learning_goals": [
+            "理解 Once 驱动的两阶段惰性初始化",
+            "理解 get_unchecked/initialize 的 unsafe 安全性前提",
+            "理解 ShardedLock 为何需要 OnceLock 来惰性建立线程索引注册表"
+          ],
+          "source_files": [
+            "src/sync/once_lock.rs",
+            "src/sync/sharded_lock.rs",
+            "src/sync/mod.rs"
+          ],
+          "minimal_modules": [
+            "OnceLock 结构与 new",
+            "get_or_init/initialize",
+            "Drop 与 get_unchecked"
+          ],
+          "practice_task": "仿照实现一个简化版 OnceLock(基于 std::sync::Once)，并用它在多线程下安全地惰性初始化一个共享 HashMap，验证初始化函数只执行一次。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "thread::scope 作用域线程",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "thread::scope 作用域线程原理",
+          "order": 1,
+          "filename": "u4-l1-thread-scope.md",
+          "level": "intermediate",
+          "topic": "为何需要 scoped threads(让线程借用栈上变量)；scope() 用 WaitGroup + Arc<Mutex<Vec<JoinHandle>>> 管理，AbortOnPanic 守卫在解栈前把 unwinding panic 提升为 abort 防止线程逃逸；与 std::thread::scope 的关系(soft-deprecated)。",
+          "learning_goals": [
+            "理解作用域线程安全性来自于「scope 结束前保证 join」的承诺",
+            "理解 scope() 的执行流程：catch_unwind→等子 scope→join→resume unwind",
+            "理解 panic 处理与 AbortOnPanic 守卫的作用"
+          ],
+          "source_files": [
+            "src/thread.rs",
+            "src/sync/wait_group.rs"
+          ],
+          "minimal_modules": [
+            "scope() 函数主体",
+            "AbortOnPanic 守卫",
+            "自动 join 与 panic 汇总"
+          ],
+          "practice_task": "用 thread::scope 并发处理一个栈上 Vec 的多个分片：每个线程借用对应分片求局部和，主线程在 scope 返回后汇总，体会栈上借用如何通过编译。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Scope、ScopedThreadBuilder 与 ScopedJoinHandle",
+          "order": 2,
+          "filename": "u4-l2-scope-builder-handle.md",
+          "level": "intermediate",
+          "topic": "Scope::spawn 与 builder().name().stack_size() 的线程配置；闭包装箱(Box<dyn FnOnce>)擦除 'env 生命周期为 'static 以便传入 std::thread；ScopedJoinHandle::join 经 SharedOption 取回返回值；嵌套 spawn 的写法。",
+          "learning_goals": [
+            "理解 'env invariant lifetime 与闭包装箱擦除生命周期的技巧",
+            "理解 ScopedJoinHandle 如何用 SharedOption 存储并取回线程返回值",
+            "理解嵌套 spawn 为何要通过参数传入新的 Scope 引用"
+          ],
+          "source_files": [
+            "src/thread.rs"
+          ],
+          "minimal_modules": [
+            "Scope::spawn 与 builder",
+            "ScopedThreadBuilder 配置与 spawn 装箱",
+            "ScopedJoinHandle 与 SharedOption 结果存储"
+          ],
+          "practice_task": "在 scope 内 spawn 一个返回 i32 的线程，通过 ScopedJoinHandle::join() 取回结果并断言；再实现一层嵌套：外层线程内通过传入的 Scope 再 spawn 一个子线程。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "深入机制与工程实践",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AtomicCell 的 unsafe 与内存安全深析",
+          "order": 1,
+          "filename": "u5-l1-atomiccell-unsafe-safety.md",
+          "level": "advanced",
+          "topic": "集中剖析 atomic_cell.rs 中的 unsafe：transmute_copy_by_val 的 const union hack(为 const 上下文做的 by-value transmute)、MaybeUninit 防止外部观察部分初始化、Drop 处理非 Copy 类型避免泄漏、ptr::read_volatile 在乐观读路径读取可能未初始化值的安全性论证、compare_exchange 的语义相等重试。",
+          "learning_goals": [
+            "能为 atomic_cell.rs 中每处 unsafe 写出安全性前提",
+            "理解 MaybeUninit 与 needs_drop 配合如何避免 double-drop 与泄漏",
+            "理解 compare_exchange 为何用 T: Eq 并在语义相等但字节不等时重试"
+          ],
+          "source_files": [
+            "src/atomic/atomic_cell.rs",
+            "src/atomic/seq_lock.rs"
+          ],
+          "minimal_modules": [
+            "transmute_copy_by_val const hack",
+            "Drop 与 needs_drop",
+            "read_volatile 与 compare_exchange 的安全论证"
+          ],
+          "practice_task": "审计 atomic_load 与 atomic_compare_exchange_weak 的 fallback 路径，为每条 unsafe 语句列出它成立所需的安全性前提(SAFETY 注释清单)，并指出 SeqLock 印戳在其中扮演的角色。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "AtomicCell 算术运算的宏生成",
+          "order": 2,
+          "filename": "u5-l2-atomiccell-arithmetic-macros.md",
+          "level": "advanced",
+          "topic": "impl_arithmetic! 宏为各整数类型批量生成 fetch_add/sub/and/nand/or/xor/max/min；每个方法都同时具备「原生原子路径 / fetch_update 回退 / 全局锁回退」三条路径；为何 AtomicCell<bool> 的逻辑运算要单独 impl 而不走算术宏。",
+          "learning_goals": [
+            "理解宏驱动的批量 API 生成与 cfg(target_has_atomic) 分发",
+            "理解 fetch_update 如何作为缺少原子 CAS 平台的通用回退",
+            "理解 bool 类型为何需要单独实现且与整数 fetch_* 的差别"
+          ],
+          "source_files": [
+            "src/atomic/atomic_cell.rs"
+          ],
+          "minimal_modules": [
+            "impl_arithmetic! 宏定义",
+            "单个 fetch_* 的三条路径",
+            "AtomicCell<bool> 的逻辑运算特例"
+          ],
+          "practice_task": "选取 fetch_max 展开其三条路径，分别说明在 target_has_atomic=\"ptr\" 成立、不成立(走 fetch_update)、以及完全无原子 CAS(走全局锁)三种情况下实际执行了什么代码。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "跨平台 cfg、loom 抽象与宽 SeqLock",
+          "order": 3,
+          "filename": "u5-l3-cfg-loom-wideseqlock.md",
+          "level": "advanced",
+          "topic": "primitive 模块如何在 crossbeam_loom 下用 loom::sync::atomic/Arc/Mutex/Condvar 替换标准库以做交错测试；build.rs 发出的 crossbeam_no_atomic/sanitize_thread/force_fallback 等 cfg 的作用；seq_lock_wide.rs 在 16/32 位指针宽度下用宽计数防止印戳 wrap；atomic feature 依赖 atomic-maybe-uninit。",
+          "learning_goals": [
+            "理解为可测试性引入的 primitive 抽象层及其 loom 分支",
+            "理解各 cfg 在不同目标/sanitizer 下如何切换 AtomicCell 的实现路径",
+            "理解窄架构下 SeqLock 印戳 wrap 风险与宽计数对策"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "build.rs",
+            "src/atomic/seq_lock_wide.rs",
+            "src/atomic/seq_lock.rs"
+          ],
+          "minimal_modules": [
+            "primitive 抽象层与 loom 分支",
+            "build.rs 发射的 cfg",
+            "seq_lock_wide 宽计数"
+          ],
+          "practice_task": "对照阅读 seq_lock.rs 与 seq_lock_wide.rs，找出两者在状态类型与 stamp 运算上的差异，并结合 mod.rs 的 cfg_attr(path=...) 解释为何 16/32 位指针宽度必须使用宽版本。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "并发测试策略与基准",
+          "order": 4,
+          "filename": "u5-l4-testing-and-benchmarks.md",
+          "level": "advanced",
+          "topic": "tests/ 下针对 atomic_cell/parker/sharded_lock/wait_group/thread/cache_padded 的测试组织；loom 用于穷举线程交错、Miri/TSan 的特殊 cfg 处理；benches/atomic_cell.rs 的基准维度与写法。",
+          "learning_goals": [
+            "学会为并发原语设计多线程压力测试与不变量断言",
+            "理解 loom 与 Miri/TSan 在验证数据竞争中的互补角色",
+            "理解并发基准测试应关注的维度(吞吐/竞争度/无锁 vs 锁回退)"
+          ],
+          "source_files": [
+            "tests/atomic_cell.rs",
+            "tests/parker.rs",
+            "benches/atomic_cell.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "tests 目录的组织与断言",
+            "loom/Miri/TSan 的 cfg 门控",
+            "benches 基准写法"
+          ],
+          "practice_task": "为自己在前面练习中实现的某个原语(如多线程计数器或快照结构)补充一个多线程压力测试，并尝试在 loom(设置 crossbeam_loom)或 Miri 下运行，验证不存在数据竞争。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

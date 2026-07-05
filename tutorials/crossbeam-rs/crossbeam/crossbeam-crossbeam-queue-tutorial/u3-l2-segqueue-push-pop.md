@@ -408,7 +408,7 @@ loop:
 1. **第 1 个 push**：唯一一次触发「首块分配」。`tail.block` 与 `head.block` 同时从 null 变为 B0。
 2. **第 31 个 push**：唯一一次触发「安装下一块」。`offset` 从 0 一路涨到 30，写满 B0 的最后一格。此 push 内 `tail.index` 先被 CAS 到 62（缝合位，瞬态），随即被 store 到 64（B1 的 offset 0）；`tail.block` 从 B0 切到 B1；`B0.next` 从 null 变为 B1。从此生产者开始往 B1 写。
 3. **缝合位 62（offset 31）从未被任何元素占用**：它只在 CAS 与 store 之间瞬态存在，是「块写满、正换块」的信号。这就是 `BLOCK_CAP = LAP - 1 = 31` 的物理含义——每块在 index 空间占 32 个 offset 槽位，但只有 31 个存数据。
-4. **`head.block` 在前 31 次 push 里始终是 B0**：push 不改 head.block（只有 pop 跨块时才推进 head.block）。所以即便 tail 已经进了 B1，消费者如果还没消费，head 还停在 B0。
+4. **`head.block` 在 push #1 之后到第 31 次 push 之间始终是 B0**：除首块分配那一次（push #1 通过 [src/seg_queue.rs:248](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-queue/src/seg_queue.rs#L248) 把 `head.block` 从 null 镜像成 B0）外，push 不再改 `head.block`，只有 pop 跨块时才推进它。所以即便 tail 已经进了 B1，只要消费者还没消费，head 还停在 B0。
 
 **如何验证你的手算**：写一个小测试，在第 31 次 push 前后用 `dbg!` 打印不可行（这些字段是私有的）。可行的方式是观察**可观测的副作用**：连续 push 31 个值后再 push 第 32 个，然后 pop 32 次，断言顺序为 `0..32`（参考 [tests/seg_queue.rs:36-52](https://github.com/crossbeam-rs/crossbeam/blob/6195355ef1862f2c6172365d00645cb6f77417dc/crossbeam-queue/tests/seg_queue.rs#L36-L52) 的 `len` 测试思路）。若跨块的 index 推进算错，FIFO 顺序或 `len()` 就会对不上。
 
