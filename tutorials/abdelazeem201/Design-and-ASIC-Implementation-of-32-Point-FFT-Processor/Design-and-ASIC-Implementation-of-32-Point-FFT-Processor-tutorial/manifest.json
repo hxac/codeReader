@@ -1,0 +1,693 @@
+{
+  "project": "Design-and-ASIC-Implementation-of-32-Point-FFT-Processor",
+  "head": "89ce7665eca8b77a0c48e610dab11928108566b6",
+  "rationale": "本项目是一个基于 Verilog 的 32 点 FFT 处理器，采用 radix-2 DIF（频率抽取）算法的单路延迟换向器 SDC 流水线架构，并完整覆盖从 RTL 仿真到 ASIC 综合（Design Compiler）与布局布线（Innovus）的全流程。学习路线按\"先认知项目 → 再理解算法 → 再逐个读 RTL 模块 → 再串成流水线 → 再做功能验证 → 最后走 ASIC 流程并深入架构优化\"的顺序展开。单元划分对应七个层次：U1 帮助读者从零认识项目定位、目录结构与仿真方式；U2 借助 Python/C 参考模型讲清 radix-2 DIF 算法、旋转因子定点化与位反转输出；U3 逐个拆解 FFT 顶层、radix2 蝶形、移位延时、ROM 状态控制四大核心 RTL 模块；U4 把模块串成五级流水线，并讲解输出排序（位反转还原）与控制时序；U5 讲解基于 SNR 的 testbench 验证方法与测试激励/黄金数据流；U6 走完 Design Compiler 综合与 Innovus 布局布线的完整 ASIC 流程并解读报告；U7 深入 SDC 处理元的加法器优化、架构取舍与可扩展性。讲义之间通过 depends_on 形成清晰依赖，每篇只解决一个主题并配套可操作的代码实践，确保读者由浅入深、结合真实源码进行学习。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目与运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：32 点 FFT 处理器是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 32 点 FFT 处理器的定位、radix-2 DIF 算法背景、单路延迟换向器（SDC）流水线架构的设计目标，以及关键设计规格（100MHz、UMC 130nm、面积与功耗）。",
+          "learning_goals": [
+            "理解 FFT 处理器在数字信号处理中的用途与本项目目标",
+            "掌握 radix-2 DIF 与 SDC 流水线架构的核心思想",
+            "记住关键设计规格：周期 10ns、技术 UMC 130nm、面积/功耗指标"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目背景与动机",
+            "radix-2 DIF 算法概述",
+            "SDC 流水线架构与设计亮点",
+            "设计规格表解读"
+          ],
+          "practice_task": "阅读 README.md，整理出本项目的输入位宽（12bit）、输出位宽（16bit）、FFT 点数（32）、时钟周期与工艺节点，并用自己的话写一段 200 字以内的项目定位说明。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与文件地图",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库 RTL / SIM / SYN / Pnr / Pics 五大目录的组织方式，说明每个目录承担的职责，以及 RTL 中各模块文件与顶层 FFT.v 的关系。",
+          "learning_goals": [
+            "看懂 RTL/SIM/SYN/Pnr 四大目录的职责分工",
+            "识别 RTL 下 10 个源文件与顶层模块的对应关系",
+            "理解从源码到仿真、综合、版图的完整文件链路"
+          ],
+          "source_files": [
+            "README.md",
+            "RTL/FFT.v",
+            "SIM/FFT_tb.v"
+          ],
+          "minimal_modules": [
+            "RTL 目录：源码模块清单",
+            "SIM 目录：仿真与参考模型",
+            "SYN 目录：综合脚本与报告",
+            "Pnr 目录：布局布线脚本与版图输出"
+          ],
+          "practice_task": "用 git ls-files 列出仓库文件，画出一张目录树，标注每个 RTL 文件属于哪类模块（顶层 / 蝶形 / 移位 / ROM），并指出 SIM 下哪些是参考模型、哪些是测试激励。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仿真快速上手：用 testbench 跑通 FFT",
+          "order": 3,
+          "filename": "u1-l3-simulation-quickstart.md",
+          "level": "beginner",
+          "topic": "讲解如何使用 QuestaSim/仿真器加载 RTL 与 testbench，输入 5 组测试 pattern，观察输出并通过 SNR 判定，让读者第一次跑通整个设计。",
+          "learning_goals": [
+            "理解 testbench 的时钟、复位、in_valid 时序与输入激励流程",
+            "掌握如何读入 IN_real/IN_imag 测试 pattern 与 OUT 黄金数据",
+            "理解 SNR 判定通过条件（SNR≥40dB 或 noise=0）与平均延迟统计"
+          ],
+          "source_files": [
+            "SIM/FFT_tb.v",
+            "SIM/Test_cases/IN_real_pattern01.txt",
+            "SIM/Test_cases/OUT_real_16_pattern01.txt"
+          ],
+          "minimal_modules": [
+            "时钟与复位生成",
+            "输入激励与 in_valid 控制",
+            "输出比对与 SNR 计算",
+            "延迟统计与通过判定"
+          ],
+          "practice_task": "在本地仿真器中编译 RTL/FFT.v 与 SIM/FFT_tb.v，运行仿真，记录 5 组测试数据集的 SNR 与平均延迟输出，截图保存波形中 in_valid 与 out_valid 的时序关系。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "算法基础：radix-2 DIF 与参考模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "radix-2 DIF FFT 算法原理",
+          "order": 1,
+          "filename": "u2-l1-radix2-dif-algorithm.md",
+          "level": "beginner",
+          "topic": "结合 Python 参考模型 FFT.py，讲解 radix-2 DIF 的分治思想、五级 stage 的逐级分解（32→16→8→4→2→1）以及每级的加/减法与复数乘法运算结构。",
+          "learning_goals": [
+            "理解 DIF 分治：把 N 点分成两半做蝶形运算",
+            "看懂 FFT.py 中 stage1~stage5 的逐级计算逻辑",
+            "理解每级中加法分支、减法分支与乘旋转因子的作用"
+          ],
+          "source_files": [
+            "SIM/FFT.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "DFT 与 FFT 的关系",
+            "radix-2 DIF 蝶形运算",
+            "五级 stage 的数据分组",
+            "复数乘旋转因子结构"
+          ],
+          "practice_task": "运行 SIM/FFT.py（指向 pattern01 输入文件），打印出 stage1 到 stage5 的中间结果，对照手算一个 4 点 DIF 蝶形，验证加/减分支的正确性。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "旋转因子与定点表示",
+          "order": 2,
+          "filename": "u2-l2-twiddle-factors-fixed-point.md",
+          "level": "beginner",
+          "topic": "讲解旋转因子 W_N^k 的来源，如何用 twiddle_gen.py 生成 16 点复数旋转因子，以及如何将其定点化为 24 位二进制补码存入 ROM。",
+          "learning_goals": [
+            "理解旋转因子 W=cos(-2πk/N)+j·sin(-2πk/N) 的三角定义",
+            "掌握定点量化：浮点 ×256 后转为 22 位二进制补码",
+            "对照 ROM_16.v 中的二进制值与 twiddle_gen.py 输出"
+          ],
+          "source_files": [
+            "SIM/twiddle_gen.py",
+            "RTL/ROM_16.v"
+          ],
+          "minimal_modules": [
+            "旋转因子的复数三角定义",
+            "定点量化（×256 缩放）",
+            "二进制补码生成",
+            "ROM 中旋转因子的存储格式"
+          ],
+          "practice_task": "运行 SIM/twiddle_gen.py 生成 twiddle_r.txt 与 twiddle_i.txt，对照 ROM_16.v 中 count=33~39 的 w_r/w_i 值，验证前若干个旋转因子的定点值是否一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "位反转与输出顺序还原",
+          "order": 3,
+          "filename": "u2-l3-bit-reversal-output-order.md",
+          "level": "beginner",
+          "topic": "讲解 DIF 输出的位反转（bit-reverse）顺序，结合 FFT.py 末尾的 '{:05b}'[::-1] 还原逻辑，理解为什么硬件需要一个排序模块把输出整理成正常顺序。",
+          "learning_goals": [
+            "理解 DIF 输出天然呈位反转顺序",
+            "看懂 FFT.py 中按位反转索引写入 final_ans 的逻辑",
+            "建立软件位反转与硬件排序模块（FFT.v 大 case）的对应关系"
+          ],
+          "source_files": [
+            "SIM/FFT.py"
+          ],
+          "minimal_modules": [
+            "位反转索引的概念",
+            "Python 位反转还原实现",
+            "正常顺序输出的需求"
+          ],
+          "practice_task": "用 Python 写一个函数，输入 0~31 的自然顺序索引，输出其 5 位反转后的索引，并打印 0→0、1→16、3→24 等映射，验证与 FFT.py 的 final_ans 还原逻辑一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心 RTL 模块拆解",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "顶层 FFT 模块结构",
+          "order": 1,
+          "filename": "u3-l1-top-level-fft-module.md",
+          "level": "intermediate",
+          "topic": "通读 RTL/FFT.v 顶层模块，讲解输入输出口、内部 wire 网络、5 级 radix2+shift+ROM 的例化结构，以及输入位宽扩展（12→24bit）与输出截位（24→16bit）的处理。",
+          "learning_goals": [
+            "理解 FFT 顶层的端口定义与数据流方向",
+            "看清 5 级（radix_no1~radix_no5）的级联与 shift/ROM 配对",
+            "理解 din_r/din_i 从 12bit 符号扩展到 24bit、out_r[23:8] 截位到 16bit 的定点对齐"
+          ],
+          "source_files": [
+            "RTL/FFT.v"
+          ],
+          "minimal_modules": [
+            "端口与时钟复位",
+            "输入符号扩展与定点对齐",
+            "五级蝶形+移位+ROM 例化",
+            "输出截位"
+          ],
+          "practice_task": "在 FFT.v 中标出 din_r 到第一级 radix2 输入之间的位宽变换路径（din_r[11:0]→24bit），并统计 5 级流水线中各级使用的 shift 延时长度（16/8/4/2/1）。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "radix2 蝶形单元与 SDC 处理元",
+          "order": 2,
+          "filename": "u3-l2-radix2-butterfly-pe.md",
+          "level": "intermediate",
+          "topic": "深入 RTL/radix2.v，讲解 SDC 处理元的三态机（waiting/first half/second half），重点剖析 second half 中把复数乘法从 4 乘 2 加优化为 3 乘 5 加的推导。",
+          "learning_goals": [
+            "理解 radix2 的 4 个状态（2'b00/01/10/11）含义",
+            "掌握 first half 的加/减分支输出 op 与 delay",
+            "理解 second half 的复数乘法优化：inter=b(c-d)、mul_r=c(a-b)+inter、mul_i=d(a+b)+inter"
+          ],
+          "source_files": [
+            "RTL/radix2.v"
+          ],
+          "minimal_modules": [
+            "三态机与 outvalid 控制",
+            "first half 加减分支",
+            "second half 复数乘法（3 乘 5 加）",
+            "结果截位 [31:8]"
+          ],
+          "practice_task": "在纸上用 radix2 second half 的公式手算一次复数乘法（给定 a,b 与旋转因子 c,d），并与标准 4 乘 2 加结果对比，验证两种实现数值一致。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "移位寄存器与延时单元",
+          "order": 3,
+          "filename": "u3-l3-shift-delay-registers.md",
+          "level": "intermediate",
+          "topic": "讲解 shift_16/8/4/2/1.v 这一族 FIFO 移位延时模块，分析其宽位寄存器（如 384bit）左移拼接的实现、valid 握手与延时深度对应关系。",
+          "learning_goals": [
+            "理解 shift_N 用一个超宽寄存器实现 N×24bit 的 FIFO 延时",
+            "掌握 (tmp_reg<<24)+din 的左移拼接写法与 dout 取高位窗口",
+            "理解 in_valid/valid 握手与各级延时深度（16/8/4/2/1）的递减规律"
+          ],
+          "source_files": [
+            "RTL/shift_16.v",
+            "RTL/shift_2.v",
+            "RTL/shift_1.v"
+          ],
+          "minimal_modules": [
+            "超宽移位寄存器结构",
+            "左移拼接与窗口读取",
+            "valid 握手与计数器",
+            "延时深度的递减规律"
+          ],
+          "practice_task": "对照 shift_16.v 与 shift_2.v，填写一张表：每个 shift 模块的寄存器位宽、dout 的高位窗口、对应延时点数，归纳出延时点数与寄存器宽度的关系式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "ROM 与状态控制模块",
+          "order": 4,
+          "filename": "u3-l4-rom-state-control.md",
+          "level": "intermediate",
+          "topic": "讲解 ROM_16/8/4/2.v 如何同时承担旋转因子存储与状态控制双重职责，分析 count/s_count 计数器如何产生 state 信号驱动 radix2 的三态机。",
+          "learning_goals": [
+            "理解 ROM 模块用计数器产生 state（2'b00/01/10）驱动蝶形状态机",
+            "掌握旋转因子在 case(count) / case(s_count) 中的查表输出",
+            "理解不同级 ROM 的等待/前半/后半计数阈值差异"
+          ],
+          "source_files": [
+            "RTL/ROM_16.v",
+            "RTL/ROM_8.v",
+            "RTL/ROM_2.v"
+          ],
+          "minimal_modules": [
+            "计数器与 state 生成",
+            "旋转因子查表",
+            "等待/前半/后半阈值",
+            "valid 菊花链传递"
+          ],
+          "practice_task": "对比 ROM_16.v、ROM_8.v、ROM_2.v 的 state 切换阈值（如 16/8/2），总结每级 ROM 的等待周期数与前半/后半周期数，画出 ROM_2 的状态跳转时序图。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "流水线集成与控制时序",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "五级流水线数据流串讲",
+          "order": 1,
+          "filename": "u4-l1-pipeline-dataflow.md",
+          "level": "intermediate",
+          "topic": "把 radix2、shift、ROM 三类模块串起来，讲解一个 32 点样本从 din 进入到第 5 级 out_r/out_i 输出的完整数据流，以及 valid 信号在级间的菊花链传递。",
+          "learning_goals": [
+            "理解 5 级流水线的级联拓扑与每级 radix+shift+ROM 的反馈回路",
+            "掌握 in_valid 如何逐级演化为 radix_noX_outvalid 驱动下一级",
+            "理解第 5 级使用固定旋转因子（w_r=256,w_i=0）的特殊处理"
+          ],
+          "source_files": [
+            "RTL/FFT.v",
+            "RTL/radix2.v"
+          ],
+          "minimal_modules": [
+            "级联拓扑与反馈回路",
+            "valid 菊花链传递",
+            "第 5 级固定旋转因子",
+            "流水线吞吐与时延"
+          ],
+          "practice_task": "在 FFT.v 的实例化部分画出一张数据流框图，标出从 din 到 5 级 out 的信号路径，以及 radix_no1_outvalid→rom8/shift_8、radix_no2_outvalid→rom4/shift_4 等级间 valid 传递关系。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2",
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "输出排序模块：硬件位反转还原",
+          "order": 2,
+          "filename": "u4-l2-output-sort-bit-reversal.md",
+          "level": "intermediate",
+          "topic": "深入 FFT.v 中那段大型 case(y_1) 语句，讲解它如何把乱序输出的样本按位反转映射写入 result_r/result_i 二维数组，并在 32 拍后顺序输出 dout。",
+          "learning_goals": [
+            "理解 result_r[0:31] 二维数组作为排序缓冲的作用",
+            "看懂 case(y_1) 把每个输出样本写入位反转对应位置的映射表",
+            "理解 over/next_over/count_y/y_1_delay 配合实现 32 拍后顺序读出 dout"
+          ],
+          "source_files": [
+            "RTL/FFT.v",
+            "SIM/FFT.py"
+          ],
+          "minimal_modules": [
+            "二维数组排序缓冲",
+            "case(y_1) 位反转映射表",
+            "over 完成标志与顺序读出",
+            "out_valid 生成"
+          ],
+          "practice_task": "提取 FFT.v 中 case(y_1) 的 y_1→result_r_ns[索引] 映射关系，写成一张 0~31 的表，验证它等价于 5 位反转索引（对照 u2-l3 的位反转函数），并用 Python 复现该排序过程。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "控制时序与握手信号",
+          "order": 3,
+          "filename": "u4-l3-timing-control-signals.md",
+          "level": "intermediate",
+          "topic": "聚焦 FFT.v 中的两个 always 块，讲解 s5_count/no5_state 第 5 级状态生成、count_y 计数、assign_out/out_valid 输出有效，以及复位与寄存器更新时序。",
+          "learning_goals": [
+            "理解第 5 级 no5_state 由 r4_valid 与 s5_count 共同生成的逻辑",
+            "掌握 count_y 累计输出样本数并驱动排序索引 y_1",
+            "理解时序 always（posedge clk）与组合 always(*) 的分工及 next_xxx 命名约定"
+          ],
+          "source_files": [
+            "RTL/FFT.v"
+          ],
+          "minimal_modules": [
+            "第 5 级 no5_state 生成",
+            "count_y 与 y_1 计数",
+            "out_valid 与 dout 寄存输出",
+            "时序块与组合块的协同"
+          ],
+          "practice_task": "在 FFT.v 的两个 always 块中，标注每个 next_xxx 信号（next_count_y、next_out_valid、next_over、no5_state）的生成位置与对应的时序寄存器，画出第 5 级从 r4_valid 到 out_valid 的控制时序波形。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "功能验证方法",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Testbench 与 SNR 验证方法",
+          "order": 1,
+          "filename": "u5-l1-testbench-snr-verification.md",
+          "level": "intermediate",
+          "topic": "通读 SIM/FFT_tb.v，讲解它如何依次喂入 5 组数据集、用 signal_energy/noise_energy 计算 SNR、判定通过（SNR≥40dB 或 noise=0），并支持 RTL 与 GATE 两种仿真模式。",
+          "learning_goals": [
+            "理解 testbench 的数据集循环（dataset=5）与复位/喂入时序",
+            "掌握 SNR=10·log10(signal_energy/noise_energy) 的计算与判定阈值",
+            "理解 RTL/GATE 宏与 SDF 反标（$sdf_annotate）的门级仿真支持"
+          ],
+          "source_files": [
+            "SIM/FFT_tb.v"
+          ],
+          "minimal_modules": [
+            "数据集循环与喂入时序",
+            "SNR 能量计算",
+            "通过/失败判定",
+            "RTL 与 GATE 仿真模式"
+          ],
+          "practice_task": "在 FFT_tb.v 中找到 signal_energy、noise_energy 的累加公式，手动计算当 dout 与 gold 完全相等时的 SNR 表现（noise=0→infinity），并解释 SNR_ratio>=10000 对应的 dB 阈值。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "测试激励与黄金参考模型",
+          "order": 2,
+          "filename": "u5-l2-test-patterns-golden-model.md",
+          "level": "intermediate",
+          "topic": "讲解 Test_cases 目录下的 5 组 IN/OUT 文本激励如何生成与使用，并对照 Python（FFT.py）与 C（FFT_test.c/FFT.c）两类参考模型理解黄金数据的来源。",
+          "learning_goals": [
+            "理解 IN_real/IN_imag 输入 pattern 与 OUT_real/OUT_imag 黄金输出的文件格式",
+            "掌握 FFT.py 作为多级 radix-2 参考模型的生成方式",
+            "了解 FFT_test.c 中 in-place 位反转 + 蝶形求值的 C 参考实现"
+          ],
+          "source_files": [
+            "SIM/Test_cases/IN_real_pattern01.txt",
+            "SIM/Test_cases/OUT_real_16_pattern01.txt",
+            "SIM/FFT.py",
+            "SIM/FFT_test.c"
+          ],
+          "minimal_modules": [
+            "输入/输出 pattern 文件格式",
+            "Python 参考模型生成黄金数据",
+            "C 语言 in-place FFT 参考",
+            "数据集一致性"
+          ],
+          "practice_task": "用 SIM/FFT.py 处理 IN_real/IN_imag_pattern01.txt 生成一组输出，与 Test_cases 下的 OUT_real_16_pattern01.txt 黄金数据比对，统计最大误差并判断是否在定点量化允许范围内。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "ASIC 综合与物理实现",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "综合流程：Design Compiler 脚本解读",
+          "order": 1,
+          "filename": "u6-l1-synthesis-design-compiler.md",
+          "level": "advanced",
+          "topic": "讲解 SYN/scripts/syn.tcl 的完整综合流程：库设置、analyze/elaborate、约束载入、compile/compile_ultra 优化、以及写出 netlist/sdc/sdf/ddc 的步骤。",
+          "learning_goals": [
+            "理解 search_path/link_library/target_library 的 UMC130nm 标准单元库配置",
+            "掌握 analyze-elaborate-uniquify-link-compile 的综合主流程",
+            "理解 compile → optimize_registers → compile_ultra 的多轮优化策略"
+          ],
+          "source_files": [
+            "SYN/scripts/syn.tcl"
+          ],
+          "minimal_modules": [
+            "工艺库与搜索路径设置",
+            "RTL 读入与 elaborate",
+            "多轮编译优化",
+            "网表/SDC/SDF/DDC 输出"
+          ],
+          "practice_task": "把 syn.tcl 的 42 行脚本分成 5 个阶段（环境设置、读入、约束、优化、输出），用中文为每个关键命令（analyze、elaborate、compile_ultra、write_sdf）写一句话注释。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "综合约束与时序模型",
+          "order": 2,
+          "filename": "u6-l2-synthesis-constraints.md",
+          "level": "advanced",
+          "topic": "解读 SYN/cons/cons.tcl，讲解 10ns 时钟约束、输入/输出延迟、时钟不确定性、多工况（MMMC）操作条件、wireload 模型与 set_max_area 等约束设置。",
+          "learning_goals": [
+            "理解 create_clock 10ns 与 input/output delay 的建立时间预算",
+            "掌握 set_clock_uncertainty/latency 与 false_path hold 的时序例外",
+            "理解 set_operating_conditions 多角（ss/ff）与 wireload 模型的作用"
+          ],
+          "source_files": [
+            "SYN/cons/cons.tcl"
+          ],
+          "minimal_modules": [
+            "时钟与 I/O 延迟约束",
+            "时序例外与不确定性",
+            "多工况操作条件",
+            "面积优化与路径分组"
+          ],
+          "practice_task": "根据 cons.tcl 计算建立时间裕量预算：10ns 周期 − 5ns 输入延迟 − 5ns 输出延迟 − 0.1ns uncertainty，分析寄存器到寄存器路径的可用时间窗口，并解释 group_path 的三个分组用途。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "综合报告解读：面积/时序/功耗",
+          "order": 3,
+          "filename": "u6-l3-synthesis-results-analysis.md",
+          "level": "advanced",
+          "topic": "结合 SYN/report 下的 synth_qor/area/power/timing 报告，解读关键路径长度、时序裕量、单元与寄存器数量、面积与功耗结果，验证是否满足 10ns 约束。",
+          "learning_goals": [
+            "看懂 synth_qor.rpt 中 INREG/REGOUT/clk 三个路径组的 slack 与违规数",
+            "理解 leaf cell、sequential cell、buf/inv count 等单元统计",
+            "对照 synth_area/power/timing 报告评估面积（202213µm²）与功耗（9.95mW）"
+          ],
+          "source_files": [
+            "SYN/report/synth_qor.rpt",
+            "SYN/report/synth_timing.rpt",
+            "SYN/report/synth_area.rpt",
+            "SYN/report/synth_power.rpt"
+          ],
+          "minimal_modules": [
+            "QoR 时序路径组解读",
+            "单元与寄存器统计",
+            "面积报告解读",
+            "功耗报告解读"
+          ],
+          "practice_task": "从 synth_qor.rpt 提取 clk 路径组的 Critical Path Length（9.68）与 Slack（0.00），说明设计恰好满足 10ns 时钟，并从 synth_area.rpt / synth_power.rpt 摘录总面积与总功耗数值填入一张结论表。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "布局布线：Innovus 物理实现流程",
+          "order": 4,
+          "filename": "u6-l4-place-and-route-innovus.md",
+          "level": "advanced",
+          "topic": "讲解 Pnr/scripts/pnr.tcl 的完整流程：floorplan、电源环/条带、布局、CTS、详细布线、RC 提取、写 SDF/GDS，最终生成 FFT.gds 版图。",
+          "learning_goals": [
+            "理解 floorPlan 利用率（0.7）与电源网络（addRing/addStripe）设计",
+            "掌握 placeDesign → clockDesign → routeDesign → optDesign 的物理实现主流程",
+            "理解 extractRC、write_sdf、saveNetlist、streamOut GDS 的签核输出"
+          ],
+          "source_files": [
+            "Pnr/scripts/pnr.tcl",
+            "Pnr/scripts/MMMC.tcl",
+            "Pnr/output/FFT.gds"
+          ],
+          "minimal_modules": [
+            "Floorplan 与电源网络",
+            "布局与 CTS",
+            "详细布线与优化",
+            "RC 提取与 GDS 输出"
+          ],
+          "practice_task": "把 pnr.tcl 分成 6 个物理阶段（规划、电源、布局、CTS、布线、签核输出），列出每阶段的代表性命令，并说明 timeDesign 在 prePlace/preCTS/postCTS/postRoute 四个节点的不同作用。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "架构深入与可扩展性",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "SDC 处理元的加法器优化分析",
+          "order": 1,
+          "filename": "u7-l1-sdc-pe-adder-optimization.md",
+          "level": "advanced",
+          "topic": "深入剖析 radix2.v second half 的复数乘法公式，推导如何从传统 4 乘 2 加优化为 3 乘 5 加，并解释 SDC PE 相比典型蝶形单元节省一个复数加法器的原理。",
+          "learning_goals": [
+            "推导 inter=b(c-d)、mul_r=c(a-b)+inter、mul_i=d(a+b)+inter 的代数等价性",
+            "理解 3 乘 5 加相比 4 乘 2 加在加法器数量上的节省",
+            "结合 first half 的加/减分支解释整体加法器 50% 减少"
+          ],
+          "source_files": [
+            "RTL/radix2.v",
+            "SIM/FFT.py"
+          ],
+          "minimal_modules": [
+            "复数乘法的代数恒等变形",
+            "3 乘 5 加实现",
+            "加法器/乘法器资源对比",
+            "SDC PE 与典型蝶形的差异"
+          ],
+          "practice_task": "从 (a+jb)(c+jd)=(ac−bd)+j(ad+bc) 出发，推导出用 3 个乘法（c(a-b)、d(a+b)、b(c-d)）和 5 个加法表达实部/虚部的等价公式，并与 radix2.v 的 inter/mul_r/mul_i 逐行对齐。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "架构取舍与设计权衡",
+          "order": 2,
+          "filename": "u7-l2-architecture-tradeoffs.md",
+          "level": "advanced",
+          "topic": "结合 README 的设计指标与综合/版图报告，讨论 SDC 流水线架构在硬件利用率（100%）、加法器数量（减半）、吞吐、面积、功耗上的权衡，以及与现有方法的对比。",
+          "learning_goals": [
+            "理解单路 SDC 流水线实现 100% 硬件利用率的原因",
+            "对比位反转器带来的存储减半收益",
+            "评估面积（1.27mm）、功耗（28mW@版图）、字长（3x）与吞吐的综合权衡"
+          ],
+          "source_files": [
+            "README.md",
+            "SYN/report/synth_qor.rpt",
+            "Pnr/scripts/pnr.tcl"
+          ],
+          "minimal_modules": [
+            "硬件利用率分析",
+            "加法器/存储减半收益",
+            "面积功耗吞吐权衡",
+            "与现有方法对比"
+          ],
+          "practice_task": "综合 README 设计指标与综合/版图报告，写一份不超过 300 字的架构评估，列出 SDC 流水线的 3 个优点（利用率/加法器/存储）与 1 个潜在代价（如单路吞吐限制），并给出适用场景建议。",
+          "depends_on": [
+            "u4-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "设计扩展：从 32 点到参数化",
+          "order": 3,
+          "filename": "u7-l3-extending-the-design.md",
+          "level": "advanced",
+          "topic": "基于现有 5 级结构，讨论如何将设计扩展为 64 点 FFT、参数化点数/位宽、替换旋转因子 ROM，以及引入流水线寄存器/折叠等二次开发方向。",
+          "learning_goals": [
+            "理解 N 点 FFT 需要 log2(N) 级蝶形与对应 shift/ROM 的扩展规律",
+            "掌握参数化位宽/点数时 shift 寄存器宽度与 ROM 内容的改造点",
+            "识别可二次开发的扩展点：旋转因子、流水线寄存器、折叠/展开"
+          ],
+          "source_files": [
+            "RTL/FFT.v",
+            "RTL/shift_16.v",
+            "RTL/ROM_16.v",
+            "SIM/twiddle_gen.py"
+          ],
+          "minimal_modules": [
+            "级数与点数的关系",
+            "shift/ROM 的参数化改造",
+            "旋转因子重新生成",
+            "二次开发扩展点"
+          ],
+          "practice_task": "设计一份把 32 点扩展为 64 点 FFT 的改造清单：需要几级蝶形、新增哪些 shift_N/ROM_N、shift 寄存器位宽如何变化、如何用 twiddle_gen.py 重新生成所需旋转因子，并指出 FFT.v 顶层需要新增的实例化与排序表改动。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
