@@ -1,0 +1,450 @@
+# Engram：RDMA 远程内存拉取（KV/存储 fetch）
+
+## 1. 本讲目标
+
+本讲聚焦 DeepEP 的实验性特性 **Engram**——一个建立在 NCCL Gin 对称内存之上的「远程内存拉取」原语。学完后你应当掌握：
+
+1. Engram 解决什么问题：把分散在各 rank 本地存储里的 entry（典型场景是 KV cache、embedding 表、专家权重分片），用 **RDMA get** 按需拉到发起 rank，而不是用 `all_gather` 把全量数据搬一遍。
+2. 它的「**CPU 段存储 + GPU 段接收区 + RDMA get 拉取**」三段式内存模型，以及为何存储要放在 CPU 段而不是 GPU 段。
+3. `engram_fetch` 为何采用**两段式异步设计**——调用时下发 RDMA get 并立即返回一个 callable（wait hook），显式调用 hook 才阻塞等待数据落地。
+4. FP8 模式下 **scaling factor（SF）的全局复制**与 **TMA 对齐列主序布局**对后续 GEMM 的意义。
+
+本讲是 U7 实验性特性单元的第二篇，承接 [u7-l1 跨 rank GPU Barrier 同步机制](./u7-l1-barrier.md)（Engram 的 write/fetch 都依赖 barrier 保证可见性），并依赖 [u3-l4 NCCL Gin 后端与对称内存上下文](./u3-l4-nccl-gin-symmetric.md) 建立的对称内存模型。
+
+## 2. 前置知识
+
+阅读本讲前，你需要先理解以下几个概念（若不熟悉，建议先看对应讲义）：
+
+- **NCCL Gin 后端与对称内存**（u3-l4）：DeepEP V2 复用 NCCL communicator，在每个 rank 上建立一块所有 rank 互可见的「对称内存窗口」，布局为 `[[[Workspace] GPU buffer] CPU buffer]`。任何 rank 都能用 `gin.get_sym_ptr` 把窗口内的偏移翻译成对端可寻址的物理地址。Engram 就跑在这套窗口之上。
+- **RDMA get**：与 dispatch/combine 用的「RDMA put（写）」相反，get 是**接收端发起**的拉取——本 rank 的 GPU 主动向远端 rank 的内存发读请求，数据通过 RDMA 网卡（如 CX7）直接 DMA 进本 rank 显存，不经远端 CPU/GPU 参与。这正是「按需拉取」的物理基础。
+- **QP（Queue Pair）**：RDMA 的发送/接收队列对。DeepEP 里 **1 个 QP 占用 1 个 SM**（见 [test_engram.py:20-21](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py#L20-L21) 的注释），所以 `num_qps` 同时决定了通信并发度与 SM 占用。
+- **FP8 与 scaling factor（SF）**：FP8（`float8_e4m3fn`）每个数据元素 1 字节，并伴随逐 token 的缩放因子。DeepEP 用 `sf_pack_t`（4 字节，`float` 与 `ue8m0x4` 的 union）打包 SF，详见 [compiled.cuh:74-77](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/common/compiled.cuh#L74-L77)。
+- **GPU barrier**（u7-l1）：Engram 在 `engram_write` 前后各加一次 `barrier`，保证「写存储」对全体 rank 可见后，fetch 才能读到。
+
+一个贯穿全讲的关键直觉：**Engram 把每个 rank 的本地存储变成一块可被任意 rank 用 RDMA get 远程读取的「内存盘」**。这非常像分布式 KV cache 或 parameter server 的「pull」操作，只是 pull 的发起方和落地都在 GPU 上、且走零拷贝 RDMA。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|------|------|
+| [`csrc/elastic/buffer.hpp`](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp) | C++ host 层。定义 `engram_write`（写本地存储到 CPU 段）、`engram_fetch`（下发 RDMA get + 返回 wait hook），以及 Engram 的成员变量与缓冲区断言。 |
+| [`deep_ep/buffers/elastic.py`](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/elastic.py) | Python 接口层。`get_engram_storage_size_hint`（算缓冲区尺寸）、`engram_write`、`engram_fetch` 的薄封装。 |
+| [`csrc/kernels/elastic/engram.hpp`](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/elastic/engram.hpp) | JIT 启动器。`EngramFetchRuntime` / `EngramFetchWaitRuntime` 两个 `LaunchRuntime` 派生类，负责把运行时参数填进模板并 build/launch。 |
+| [`deep_ep/include/deep_ep/impls/engram_fetch.cuh`](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh) | 真正的 fetch GPU 内核 `engram_fetch_impl`：循环下发 `gin.get`、本地 gather SF、flush 并记录最后一条请求。 |
+| [`deep_ep/include/deep_ep/impls/engram_fetch_wait.cuh`](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch_wait.cuh) | wait GPU 内核 `engram_fetch_wait_impl`：对每条 `last_gin_request` 调 `gin.wait` 阻塞至 RDMA get 落地。 |
+| [`tests/elastic/test_engram.py`](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py) | 端到端测试。构造多 rank 存储、随机 indices 拉取，并用 `all_gather` 参考结果逐位比对正确性。 |
+
+调用方向（自上而下）：
+
+```
+Python: buffer.engram_fetch(indices)            # deep_ep/buffers/elastic.py
+   └─> C++ host: ElasticBuffer::engram_fetch    # csrc/elastic/buffer.hpp
+         ├─> launch_engram_fetch                # csrc/kernels/elastic/engram.hpp (下发 get)
+         └─> 返回 lambda（wait hook）
+                 └─> hook() 调 launch_engram_fetch_wait → engram_fetch_wait_impl  # 等待落地
+```
+
+## 4. 核心概念与源码讲解
+
+### 4.1 Engram 是什么：远程内存拉取模型
+
+#### 4.1.1 概念说明
+
+dispatch/combine 解决的是「把 token 搬到专家所在的 rank」的 **all-to-all** 问题；Engram 解决的是一个更松散的问题：**「我（某个 rank）现在需要一批 entry，它们分散在各 rank 的本地存储里，请帮我按需拉过来」**。典型场景包括：
+
+- **KV cache 拉取**：推理时某个 rank 算到需要另一张卡上的历史 KV，按索引拉取。
+- **分布式 embedding / 参数分片**：模型参数按 rank 切片存放，前向时按 token 的索引远程取。
+- **稀疏专家权重**：MoE 里某些不常用专家的权重分片存放，按需取。
+
+与 `all_gather` 的根本区别：`all_gather` 会把**所有 rank 的全量数据**广播给每个 rank，代价是 \(O(\text{world\_size} \times \text{数据量})\)；Engram 只拉取**实际被索引命中的 entry**，代价是 \(O(\text{命中数} \times \text{entry大小})\)。当命中率低（稀疏访问）时，Engram 远胜 `all_gather`。
+
+#### 4.1.2 核心流程
+
+Engram 的生命周期分三个阶段：
+
+1. **构造缓冲区**：每个 rank 创建一个 `ElasticBuffer`，其中 `num_bytes` 里划出一段 `num_cpu_bytes` 作为「Engram 本地存储区」（CPU 段），剩余是 GPU 段（接收区 + workspace）。
+2. **`engram_write(storage)`**：每个 rank 把自己的本地存储（`[num_entries, hidden]`）拷进自己的 CPU 段。前后各一次 `barrier` 保证全局可见。
+3. **`engram_fetch(indices)`**：发起 rank 用一组全局索引 `[num_tokens, num_entries_per_token]` 描述要哪些 entry；内核把每个索引翻译成「源 rank + 源偏移」，用 RDMA get 拉到本 rank GPU 段的接收区。返回一个 hook，调用 hook 等待全部 get 完成。
+
+整个模型是 **pull 模型**（接收端发起），与 dispatch 的 **push 模型**（发送端 put）互补。
+
+#### 4.1.3 源码精读
+
+先看成员变量与缓冲区布局。Engram 复用 `ElasticBuffer` 的对称内存窗口，仅多记三个字段：
+
+[csrc/elastic/buffer.hpp:61-63](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L61-L63) 记录「写入了多少 entry、每个 entry 的 hidden、以及（FP8 模式下）全局复制的 SF 表」：
+
+```cpp
+// Some Engram storage settings
+int num_engram_entries = 0, engram_hidden = 0;
+std::optional<torch::Tensor> engram_sf;
+```
+
+缓冲区布局遵循 [csrc/elastic/buffer.hpp:108](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L108) 的注释 `Symmetric memory layout: [[[Workspace] GPU buffer] CPU buffer]`：workspace 在最前并按 2 MB 对齐，紧跟着 GPU buffer，最后是 CPU buffer。`num_gpu_buffer_bytes = num_bytes - num_cpu_bytes`（[buffer.hpp:101](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L101)）。Engram 把**接收区放在 GPU buffer 最前**、**存储区放在 CPU buffer**。
+
+> 为何存储放 CPU 段？因为 CPU 段（host pinned/mapped 内存）可被 RDMA 网卡直接 GPUDirect 读取，远端 rank 发 get 时数据从源 rank 的 CPU 内存直达本 rank 的 GPU 显存，不经源 rank GPU——这正是「按需拉取」最省的路径。而 GPU 段留给接收结果，方便后续 GEMM 直接在显存里用。
+
+#### 4.1.4 代码实践
+
+**实践目标**：用 `get_engram_storage_size_hint` 估算 Engram 所需缓冲区，理解 GPU 段与 CPU 段各自存放什么。
+
+**操作步骤**：
+
+1. 阅读 [deep_ep/buffers/elastic.py:408-435](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/elastic.py#L408-L435)。
+2. 取 `num_entries=524288, hidden=128, num_max_tokens_per_rank=512*24=12288, dtype=bfloat16`（即 test 默认值）。
+3. 手算：
+   - `num_bytes_per_entry = align(128 * 2, 32) = 256` 字节（每个 entry 按 32 字节对齐，对应 LDG.256）。
+   - `num_cpu_bytes = align(256 * 524288, 2MB) = 128 MB`（本地存储区）。
+   - `num_gpu_bytes = align(256 * 12288, 2MB) = 3 MB`（接收区）。
+
+**需要观察的现象**：CPU 段远大于 GPU 段（存储量大、接收量小），这是稀疏拉取场景的典型比例。
+
+**预期结果**：与你手算的量级一致。若不一致，检查 `align` 是否按 2 MB（`buffer_alignment`）向上取整。**待本地验证**：可在 Python 里 `print(ElasticBuffer.get_engram_storage_size_hint(...))` 直接核对。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：若把 `dtype` 从 BF16 换成 FP8，`num_cpu_bytes` 大致变成原来的多少倍？  
+**答案**：约 1/2。因为每个 entry 的数据从 2 字节/元素降为 1 字节/元素，`num_bytes_per_entry` 减半。注意 SF 不进 CPU 段（见 4.4），故不抵消这一节省。
+
+**练习 2**：为什么 Engram 的接收区放在 GPU 段最前、而不是单独分配一块显存？  
+**答案**：放在对称窗口的 GPU 段内，才能用 `torch::from_blob(buffer, ...)` 做零拷贝视图（见 4.3），内核 `gin.get` 直接写窗口内地址、无需额外中转；同时这块显存已被 NCCL 注册为可被 RDMA 网卡访问的对称内存。
+
+---
+
+### 4.2 engram_write：本地存储写入 CPU 段
+
+#### 4.2.1 概念说明
+
+`engram_write` 把本 rank 的本地存储「登记」进对称窗口的 CPU 段，使其可被任意 rank 远程 get。它是一个**全 rank 同步**操作：所有 rank 必须先各自写完、互相可见后，fetch 才能安全进行。因此函数内部首尾各包一次 `barrier`。
+
+#### 4.2.2 核心流程
+
+1. 先 `barrier`，确保之前可能进行中的 fetch 已结束（避免新旧存储数据竞争）。
+2. 校验 `storage` 形状为 `[num_entries, hidden]`、dtype 为 BF16 或 FP8、连续且在 GPU 上；记录 `num_engram_entries` 与 `engram_hidden`。
+3. 若提供 `sf`（FP8），校验其二维、连续、元素大小为 4 字节（`sf_pack_t`），保存为 `engram_sf` 供 fetch 时本地 gather。
+4. 用 `cudaMemcpyAsync` 把 `storage` 拷到 CPU 段。注意 `cudaMemcpyDeviceToDevice`——CPU 段虽叫「CPU buffer」，实际是 host pinned 且 mapped 进 GPU 地址空间，故用 D2D 拷贝即可由 GPU 直接写。
+5. **hybrid 模式偏移**：节点内多个 scaleup rank 共享同一节点的 CPU 段，每个 rank 写到 `scaleup_rank_idx * num_cpu_buffer_bytes` 偏移处；direct 模式偏移为 0。
+6. 再 `barrier`，保证写入对所有 rank 可见。
+
+#### 4.2.3 源码精读
+
+[csrc/elastic/buffer.hpp:210-240](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L210-L240) 是 `engram_write` 全貌：
+
+```cpp
+void engram_write(const torch::Tensor& storage, const std::optional<torch::Tensor>& sf) {
+    barrier(false, true);                         // 前置 barrier
+    ...
+    num_engram_entries = num_entries, engram_hidden = hidden;
+    if (sf.has_value()) ... engram_sf = sf;       // 保存全局 SF 表
+    EP_HOST_ASSERT(storage.nbytes() <= num_cpu_buffer_bytes ...);
+    const auto cpu_write_offset = allow_hybrid_mode
+        ? static_cast<int64_t>(nccl_context->scaleup_rank_idx) * num_cpu_buffer_bytes : 0;
+    CUDA_RUNTIME_CHECK(cudaMemcpyAsync(
+        math::advance_ptr(buffer, num_gpu_buffer_bytes + cpu_write_offset),
+        storage.data_ptr(), storage.nbytes(),
+        cudaMemcpyDeviceToDevice, compute_stream));
+    barrier(false, true);                         // 后置 barrier
+}
+```
+
+关键点解读：
+
+- `math::advance_ptr(buffer, num_gpu_buffer_bytes + cpu_write_offset)`：从 `buffer` 起点（workspace 之后）跨过整个 GPU buffer，进入 CPU 段，再按 scaleup rank 偏移定位本 rank 的存储块。这与 fetch 内核里 `src_byte_offset = intra_peer_rank_idx * kIntraRankStorageStride + ...`（[engram_fetch.cuh:65-66](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L65-L66)）严格对应——`kIntraRankStorageStride` 正是 `num_cpu_bytes_per_rank`（见 4.3.3）。
+- 两次 `barrier(false, true)`：第二个参数 `with_cpu_sync=true` 意味着 barrier 前后都 `cudaDeviceSynchronize`，这是「写存储」这种数据流切换场景需要的强保证（见 u7-l1 关于 `barrier` 用作资源/数据一致性围栏的讨论）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：跟踪 `engram_write` 的偏移计算，理解 hybrid 与 direct 模式下存储布局的差异。
+
+**操作步骤**：
+
+1. 在单机多卡环境创建 `ElasticBuffer(..., allow_hybrid_mode=False)`（direct 模式），调用 `engram_write`。
+2. 阅读上述源码，确认此时 `cpu_write_offset = 0`，即本 rank 存储写在 CPU 段起点。
+3. 假想切换 `allow_hybrid_mode=True`，推导 8 卡单节点时 rank 0~7 的 `cpu_write_offset` 分别是 `0, num_cpu_buffer_bytes, 2*num_cpu_buffer_bytes, ...`。
+
+**需要观察的现象**：direct 模式下每个 rank 的存储独占自己窗口的 CPU 段起点；hybrid 模式下同节点 rank 在共享 CPU 段内依次排开。
+
+**预期结果**：能画出 CPU 段内 `[scaleup_rank_idx][num_entries, hidden]` 的二维布局。**待本地验证**（hybrid 模式需多节点或多平面网络才能体现差异，单机 direct 下偏移恒为 0）。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `engram_write` 用 `cudaMemcpyDeviceToDevice` 而不是 `cudaMemcpyDeviceToHost`？  
+**答案**：CPU 段是 host pinned 且映射进 GPU 地址空间（对称内存窗口的一部分），对 GPU 而言就是一个可写的设备地址，故按 D2D 拷贝即可，且拷贝在 `compute_stream` 上异步执行。
+
+**练习 2**：若省略首部那次 `barrier`，可能出什么问题？  
+**答案**：若上一次 fetch 的 RDMA get 尚未全部落地，新写入的存储可能被旧 fetch 的尾部写入覆盖，或旧 fetch 读到新数据，造成数据竞争与正确性问题。
+
+---
+
+### 4.3 engram_fetch：两段式异步 RDMA get
+
+#### 4.3.1 概念说明
+
+`engram_fetch` 是 Engram 的核心。它有两点设计值得关注：
+
+1. **两段式异步**：`engram_fetch(indices)` **不阻塞**——它下发所有 RDMA get 请求后立即返回一个 callable（wait hook）；用户在「合适的时机」调用 `hook()` 才真正等待数据落地并取回张量。这样 fetch 的下发可以和其它 GPU 计算重叠。
+2. **零拷贝接收**：拉到的数据直接写进 GPU buffer 最前的接收区，函数用 `torch::from_blob` 把这块窗口内存包成一个 `[num_tokens, hidden * num_entries_per_token]` 的张量返回，无额外拷贝。
+
+#### 4.3.2 核心流程
+
+下发阶段（`engram_fetch` 主体）：
+
+1. 由 `engram_sf.has_value()` 判定 BF16 还是 FP8，决定元素大小与 dtype。
+2. 校验 `indices` 为 `[num_tokens, num_entries_per_token]` 的 `torch.int`、连续、在 GPU 上；断言接收区放得下 `num_tokens * num_entries_per_token * hidden * elem_size`。
+3. 决定 QP 数（`num_qps=0` 时取 `num_allocated_qps`）。
+4. 用 `torch::from_blob(buffer, {num_tokens, hidden*num_entries_per_token}, ...)` 构造零拷贝接收张量 `fetched`。
+5. （FP8）构造 `fetched_sf`，根据 `use_tma_aligned_col_major_sf` 选列主序或行主序 stride。
+6. 分配 `last_gin_requests` 张量（`num_gin_ranks * num_qps` 个 `ncclGinRequest_t`），用于 wait 阶段逐条等待。
+7. 调 `launch_engram_fetch` 下发 `engram_fetch_impl` 内核。
+8. 返回 lambda：调用时下发 `engram_fetch_wait_impl` 并返回 `{fetched, fetched_sf}`。
+
+#### 4.3.3 源码精读
+
+**Python 入口** [deep_ep/buffers/elastic.py:584-604](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/elastic.py#L584-L604) 明确标注返回 `Callable`：
+
+```python
+def engram_fetch(self, indices, num_qps=0, use_tma_aligned_col_major_sf=False) -> Callable:
+    """... Returns a callable that, when invoked, waits for the RDMA gets to complete ..."""
+    return self.runtime.engram_fetch(indices, num_qps, use_tma_aligned_col_major_sf)
+```
+
+**C++ host** [csrc/elastic/buffer.hpp:242-325](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L242-L325)：
+
+```cpp
+std::function<std::tuple<torch::Tensor, std::optional<torch::Tensor>>()>
+engram_fetch(const torch::Tensor& indices, int num_qps, const bool& use_tma_aligned_col_major_sf) const {
+    ...
+    // 零拷贝接收张量：直接包 GPU buffer 最前
+    const auto fetched = torch::from_blob(
+        buffer, {num_tokens, engram_hidden * num_entries_per_token}, ...);
+    ...
+    // wait 阶段用的请求记录
+    const auto last_gin_requests = torch::empty({num_gin_ranks * num_qps, sizeof(ncclGinRequest_t)}, ...);
+    // 下发 get 内核（storage 指向 CPU 段起点 = buffer + num_gpu_buffer_bytes）
+    launch_engram_fetch(..., math::advance_ptr(buffer, num_gpu_buffer_bytes), fetched.data_ptr(), ...);
+    // 返回 wait hook
+    return [=, this]() {
+        launch_engram_fetch_wait(static_cast<ncclGinRequest_t*>(last_gin_requests.data_ptr()), ...);
+        return {fetched, fetched_sf};
+    };
+}
+```
+
+注意返回类型是 `std::function<...()>()`——一个**无参、返回张量元组的可调用对象**。`fetched` 与 `fetched_sf` 被 lambda 捕获，确保 hook 调用时返回的还是同一块接收区内存。
+
+**fetch 内核** [deep_ep/include/deep_ep/impls/engram_fetch.cuh:11-106](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L11-L106) 是 RDMA get 的下发主体。grid 维度 = `num_qps`（每个 QP 一个 block，对应一个 SM）：
+
+```cpp
+const auto qp_idx = static_cast<int>(blockIdx.x);
+const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
+...
+// 每条 get：从源 rank 的 storage 拉一个 entry 到本 rank 的 fetched
+const auto issue_rdma_get = [=](const int& token_idx, const int& peer_idx, const int64_t& src_byte_offset, ...) {
+    gin.get<team_t, ncclCoopThread, ncclGin_SegmentMixed>(
+        math::advance_ptr(storage, src_byte_offset),                  // 源：CPU 段内偏移
+        math::advance_ptr(fetched, (int64_t)token_idx * kNumHiddenBytes), // 目的：GPU 接收区
+        kNumHiddenBytes, peer_idx, extra_options);
+};
+```
+
+每个 warp 用步长循环认领待拉取的 `(token, entry)` 对（[engram_fetch.cuh:53-90](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L53-L90)）：
+
+```cpp
+for (int i = global_warp_idx; i < num_tokens * kNumEntriesPerToken; i += kNumQPs * kNumWarps) {
+    const auto global_idx = __ldg(indices + i);
+    const auto owner_rank_idx = global_idx / kNumEntriesPerRank;     // entry 在哪个 rank
+    const auto local_entry_idx = global_idx % kNumEntriesPerRank;    // 在该 rank 内的第几条
+    const auto peer_idx = owner_rank_idx / kNumRanksPerRDMAPeer;     // 映射到 RDMA peer（节点）
+    const auto intra_peer_rank_idx = owner_rank_idx % kNumRanksPerRDMAPeer;
+    const auto src_byte_offset = (int64_t)intra_peer_rank_idx * kIntraRankStorageStride
+                               + (int64_t)local_entry_idx * kNumHiddenBytes;
+    issue_rdma_get(i, peer_idx, src_byte_offset, /*aggregate flag*/);
+    ...  // FP8 SF 本地 gather（见 4.4）
+}
+```
+
+> **索引三段译码**是理解 Engram 的关键：全局索引 `global_idx` 先除/模 `kNumEntriesPerRank` 得到「源 rank + rank 内 entry 号」；再把源 rank 映射成「RDMA peer（节点）+ 节点内 rank」。`kIntraRankStorageStride`（= `num_cpu_bytes_per_rank`）正是 4.2 里 `engram_write` 写入时的 rank 间步长，两端严格对齐。
+
+**请求聚合与 flush**（[engram_fetch.cuh:69-105](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L69-L105)）：RDMA QP 有深度限制（`kGinQPDepth=1024`，[compiled.cuh:84-85](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/common/compiled.cuh#L84-L85)）。内核用 `ncclGinOptFlagsAggregateRequests` 把多条 get 聚合，每凑满 `kGinQPFlushDepth=768` 条强制 flush 一次（去掉聚合标志）；循环结束后再对每个 peer 发一次 `gin.flush_async` 并把最后一条请求写进 `last_gin_requests`，供 wait 内核逐条等待。
+
+**wait 内核** [deep_ep/include/deep_ep/impls/engram_fetch_wait.cuh:9-29](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch_wait.cuh#L9-L29)：grid 同样是 `num_qps` 个 block，每个线程负责一个 peer，读出 `last_gin_requests`，非零则 `gin.wait`：
+
+```cpp
+for (int i = thread_idx; i < kNumRDMAPeers; i += kNumThreads) {
+    auto last_gin_req_int4 = __ldg(reinterpret_cast<int4*>(last_gin_requests + qp_idx * kNumRDMAPeers + i));
+    if (last_gin_req_int4.x != 0 or ... ) {          // 全零表示该 peer 无请求，跳过
+        auto last_gin_req = *reinterpret_cast<ncclGinRequest_t*>(&last_gin_req_int4);
+        gin.wait(last_gin_req);                       // 阻塞至该 QP 上所有 get 落地
+    }
+}
+```
+
+> 这里用了一个 trick：`ncclGinRequest_t` 大小恰为 `int4`（16 字节，[engram_fetch.cuh:101](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L101) 的 `EP_STATIC_ASSERT`），故可用一条 128 位 `__ldg` 一次性读出，并以「全零」兼作「无请求」哨兵。
+
+**启动器模板实例化** [csrc/kernels/elastic/engram.hpp:41-67](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/elastic/engram.hpp#L41-L67) 与 [csrc/kernels/elastic/engram.hpp:101-122](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/elastic/engram.hpp#L101-L122)：把 `num_qps`、`num_entries_per_rank`、`num_hidden_bytes` 等运行时整数填进 `engram_fetch_impl<...>` 模板尖括号，`LaunchArgs(num_qps, kNumEngramFetchThreads=1024)` 让 grid 维度 = `num_qps`、每 block 1024 线程。这是 U4 讲过的「取模板地址强转 `void*` 强制实例化」技巧（见 [engram.hpp:63-65](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/elastic/engram.hpp#L63-L65)）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：跑通 test_engram.py，亲眼看到两段式调用 `engram_fetch(...)()` 的写法并验证正确性。
+
+**操作步骤**：
+
+1. 单机 8 卡环境（Hopper/SM90），进入仓库根目录。
+2. 运行：
+   ```bash
+   python tests/elastic/test_engram.py --num-processes 8 --num-entries 4096 --hidden 128 \
+       --num-tokens 512 --num-entries-per-token 24
+   ```
+3. 关注 [test_engram.py:60-71](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py#L60-L71) 的正确性检查：代码先用 `dist.all_gather_into_tensor` 收集全局存储作为参考 `ref_data`，再调用 `buffer.engram_fetch(indices, ...)()` 拉取，最后 `assert torch.equal(ref_data, data)`。
+4. 观察 [test_engram.py:79-96](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py#L79-L96) 的性能数字：issue（下发 get）与 wait（等待落地）分别多少 us，以及端到端带宽 GB/s。
+
+**需要观察的现象**：
+- 正确性 `assert` 全部通过（无 `data mismatch`）。
+- 性能行打印 issue/wait/带宽/MPPS。
+
+**预期结果**：单机 NVLink 环境下，fetch 走的是节点内路径（peer 即各 rank），带宽应在数 GB/s~数十 GB/s 量级（取决于 hidden 与命中率）。若硬件不支持 RDMA get / NCCL Gin，会报后端错误。**待本地验证**（若无 8 卡 Hopper，至少 4 卡即可跑通正确性）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`engram_fetch` 为何把「下发 get」和「等待」拆成两个内核、用 hook 串接，而不直接在一个内核里发完就 `gin.wait`？  
+**答案**：拆分后，下发（issue）内核可立即返回，把 hook 调用时机交给用户——用户可在 issue 与 wait 之间插入与结果无关的 GPU 计算或其它通信，让 RDMA 传输与计算重叠；若合成一个内核，整个 fetch 必须串行等待，丧失重叠机会。这也对应 test 里分别测 `issue_t` 与 `wait_t` 的做法。
+
+**练习 2**：`kIntraRankStorageStride` 在 direct 模式和 hybrid 模式下分别对应什么？  
+**答案**：它等于 `num_cpu_bytes_per_rank`。direct 模式下 `kNumRanksPerRDMAPeer=1`，每个 RDMA peer 只有一个 rank，stride 用于在该 rank 的存储块内寻址；hybrid 模式下 `kNumRanksPerRDMAPeer=num_scaleup_ranks`，同节点多个 rank 的存储块在共享 CPU 段内依次排开，stride 是相邻 rank 存储块的字节间距（即 4.2 中 `engram_write` 的写入步长）。
+
+---
+
+### 4.4 FP8 scaling factor 的全局复制与 TMA 对齐列主序布局
+
+#### 4.4.1 概念说明
+
+FP8 数据若不带 SF 无法还原数值。Engram 在 FP8 模式下面临一个选择：SF 是随数据一起 RDMA 传，还是另想办法？
+
+DeepEP 的选择是 **SF 全局复制**：在 `engram_write` 前，用 `dist.all_gather_into_tensor` 把每个 rank 的本地 SF 复制到所有 rank（[test_engram.py:48-51](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py#L48-L51)）。这样 fetch 时只需 RDMA 传 1 字节的 FP8 数据，**SF 在本地用 `__ldg` 直接 gather**，省下 SF 的远程传输。代价是每个 rank 多存一份全局 SF 表（\(O(\text{总entry数} \times \text{SF大小})\)），但 SF 远小于数据本身（每 token 几个 4 字节 pack），故划算。
+
+gather 出来的 SF 还要喂给后续 FP8 GEMM。某些 GEMM 内核（如 CUTLASS/FlashAttention 的 FP8 路径）要求 SF 以 **TMA 对齐的列主序**排布，于是 Engram 提供 `use_tma_aligned_col_major_sf` 开关。
+
+#### 4.4.2 核心流程
+
+1. `engram_write(storage, sf)`：`sf` 是 `[num_ranks*num_entries, num_sf_packs]` 的全局复制表，host 保存为 `engram_sf`。
+2. `engram_fetch(indices, use_tma_aligned_col_major_sf=...)`：
+   - 根据 `use_tma_aligned_col_major_sf` 决定 `fetched_sf` 的 stride：
+     - **行主序**（`False`）：`sf_token_stride = num_entries_per_token * num_sf_packs`，`sf_hidden_stride = 1`。
+     - **TMA 对齐列主序**（`True`）：`sf_token_stride = 1`，`sf_hidden_stride = align(num_tokens, kNumAlignedSFPacks)`。
+   - 内核里 SF gather 走 [engram_fetch.cuh:78-88](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L78-L88)，用 `__ldg` 从本地 `sf_table` 读、按 stride 写进 `fetched_sf`。
+
+#### 4.4.3 源码精读
+
+**全局复制**（测试侧）[test_engram.py:48-53](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py#L48-L53)：
+
+```python
+sf = torch.empty((num_ranks * args.num_entries, local_sf.shape[1]), ...)
+dist.all_gather_into_tensor(sf, local_sf, group)   # 全局复制
+buffer.engram_write(local_storage, sf=sf)
+```
+
+**host 层 stride 选择** [csrc/elastic/buffer.hpp:268-280](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L268-L280)：
+
+```cpp
+if (use_tma_aligned_col_major_sf) {
+    // TMA-aligned column-major layout for the next GEMM input
+    sf_token_stride = 1, sf_hidden_stride = math::align(num_tokens, kNumAlignedSFPacks);
+} else {
+    sf_token_stride = num_entries_per_token * num_sf_packs, sf_hidden_stride = 1;
+}
+fetched_sf = torch::empty_strided({num_tokens, num_entries_per_token * num_sf_packs},
+                                  {sf_token_stride, sf_hidden_stride}, engram_sf->options());
+```
+
+其中 `kNumAlignedSFPacks = 16 / sizeof(sf_pack_t) = 16/4 = 4`（[compiled.cuh:80](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/common/compiled.cuh#L80)）。列主序下，相邻 token 的同一 SF pack 在内存中紧挨（token 维 stride=1），hidden/pack 维 stride 为 `align(num_tokens, 4)`，即每 4 个 token 的 SF 凑成 16 字节一块——正好对齐 TMA 的 16 字节最小粒度，后续 GEMM 可用 TMA 一次搬一小块 SF tile。
+
+**内核 gather** [deep_ep/include/deep_ep/impls/engram_fetch.cuh:78-88](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/include/deep_ep/impls/engram_fetch.cuh#L78-L88)：
+
+```cpp
+if constexpr (kNumSFPacks > 0) {
+    const auto token_idx = i / kNumEntriesPerToken;
+    const auto entry_idx = i % kNumEntriesPerToken;
+    const auto* src = reinterpret_cast<const int*>(sf_table) + global_idx * kNumSFPacks;
+    auto* dst = reinterpret_cast<int*>(fetched_sf)
+              + token_idx * sf_token_stride + entry_idx * kNumSFPacks * sf_hidden_stride;
+    #pragma unroll
+    for (int p = 0; p < kNumSFPacks; ++p)
+        dst[p * sf_hidden_stride] = __ldg(src + p);   // 本地读，不走 RDMA
+}
+```
+
+注意 `__ldg` 走只读数据缓存（texture/L1 read-only），因 `sf_table` 是全局复制、本 rank 完整持有，故 gather 不需任何跨 rank 通信。
+
+#### 4.4.4 代码实践
+
+**实践目标**：对比两种 SF 布局，验证它们数值等价但内存排布不同。
+
+**操作步骤**：
+
+1. 运行 FP8 模式测试：
+   ```bash
+   python tests/elastic/test_engram.py --num-processes 8 --use-fp8 --num-entries 4096 \
+       --hidden 128 --num-tokens 512 --num-entries-per-token 24
+   ```
+2. 阅读 [test_engram.py:66-71](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/elastic/test_engram.py#L66-L71)：测试对 `use_tma_aligned_col_major_sf` 取 `False` 与 `True` 两个值各跑一次，分别 `assert torch.equal(ref_sf, fetched_sf)`。
+3. 在 [buffer.hpp:270-275](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/elastic/buffer.hpp#L270-L275) 处理解：两种 stride 下 `fetched_sf` 的逻辑形状都是 `[num_tokens, num_entries_per_token*num_sf_packs]`，但物理排布一是行主、一是列主。
+
+**需要观察的现象**：两种布局的 `fetched_sf` 都通过 `torch.equal` 与参考 `ref_sf` 比对——因为 `torch.equal` 比的是逻辑元素而非物理 stride，这证明两者数值等价。
+
+**预期结果**：两个 `assert` 均通过。若你用 `.contiguous()` 后再比较 `.stride()`，会看到行主序与列主序的差异。**待本地验证**。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 SF 用 `all_gather` 全局复制、而不是像数据那样按需 RDMA get？  
+**答案**：SF 数据量小（每 entry 仅几个 4 字节 pack）且访问频繁；全局复制后 fetch 时只需本地 `__ldg`，免去每条 SF 一次 RDMA 往返的低效。代价是每 rank 多存一份全局 SF，但相对数据量可忽略。
+
+**练习 2**：`use_tma_aligned_col_major_sf=True` 时，为何要把 token 维 stride 设为 1、hidden 维 stride 设为 `align(num_tokens, 4)`？  
+**答案**：这是「列主序」——同一 SF pack 在不同 token 间相邻，便于把 4 个 token 的该 pack 凑成 16 字节块，对齐 TMA 的最小加载粒度，让后续 FP8 GEMM 用 TMA 高效加载 SF tile。`align(num_tokens, 4)` 保证每列（每个 pack）的步长是 4 的整数倍，使 16 字节块跨列也对齐。
+
+## 5. 综合实践
+
+把本讲三个模块串起来，完成一个最小的「分布式 KV 拉取」demo（基于 test_engram.py 改写）：
+
+**任务**：实现一个函数 `distributed_lookup(buffer, local_storage, indices)`，要求：
+
+1. 输入：本 rank 的本地存储 `local_storage` 形状 `[num_entries, hidden]`（BF16），以及全局索引 `indices` 形状 `[num_tokens, num_entries_per_token]`。
+2. 内部：
+   - 调 `buffer.engram_write(local_storage)` 完成存储登记（注意它会自带 barrier）。
+   - 调 `hook = buffer.engram_fetch(indices)` 下发 RDMA get。
+   - 在调用 `hook()` 之前，插入一段独立的 GPU 计算（例如一次 `torch.matmul` 与 fetch 结果无关），体会两段式异步的重叠收益。
+   - 调 `data, _ = hook()` 等待并取回数据。
+3. 用 `dist.all_gather_into_tensor` 收集全局存储作参考，`assert torch.equal(ref, data)`。
+4. 用 `torch.cuda.Event` 分别计时「issue 到 wait 开始」与「wait 结束」，验证插入的计算确实与 RDMA 传输重叠（端到端时间应小于「串行 fetch + 计算」）。
+
+**评估标准**：
+- 正确性 `assert` 通过。
+- 能解释为何 `engram_write` 必须在 `engram_fetch` 之前、且两者之间无需手动加 barrier（`engram_write` 末尾的 barrier 已保证可见）。
+- 能指出 `hook()` 调用前插入的计算与 RDMA 传输重叠的物理原因（RDMA get 由网卡 DMA 完成，几乎不占 GPU SM，故可与 GPU 计算并行）。
+
+参考实现骨架（**示例代码**，非项目原有代码）：
+
+```python
+# 示例代码：仅示意，需在多进程 init_dist 之后运行
+def distributed_lookup(buffer, local_storage, indices, overlap_work):
+    buffer.engram_write(local_storage)            # 登记（自带前后 barrier）
+    hook = buffer.engram_fetch(indices)           # 下发 RDMA get，立即返回
+    _ = overlap_work()                            # 与 RDMA 传输重叠的独立计算
+    data, _ = hook()                              # 等待并取回
+    return data
+```
+
+## 6. 本讲小结
+
+- **Engram 是 pull 模型的远程内存拉取原语**：每个 rank 把本地存储登记进对称窗口的 CPU 段，任意 rank 用 RDMA get 按索引按需拉取，适用于稀疏访问的 KV cache / embedding / 参数分片场景，远胜全量 `all_gather`。
+- **三段式内存模型**：存储在 CPU 段（host pinned，可被 GPUDirect RDMA 读）、接收区在 GPU 段最前（零拷贝 `from_blob`）、SF 全局复制在本地（`__ldg` gather，不走 RDMA）。
+- **`engram_write` 前后双 barrier**：保证存储写入对所有 rank 可见；hybrid 模式下按 `scaleup_rank_idx * num_cpu_buffer_bytes` 偏移在共享 CPU 段内排开。
+- **两段式异步 fetch**：`engram_fetch(indices)` 下发 get 并立即返回 callable hook；调用 `hook()` 才等待落地。下发与等待拆成 `engram_fetch_impl` 与 `engram_fetch_wait_impl` 两个内核，便于传输与计算重叠。
+- **索引三段译码**：`global_idx → (owner_rank, local_entry) → (rdma_peer, intra_peer_rank)`，`kIntraRankStorageStride` 与 write 端写入步长严格对齐。
+- **FP8 SF 全局复制 + TMA 对齐列主序**：SF 小而频访，全局复制后本地 gather；`use_tma_aligned_col_major_sf` 把 SF 排成 16 字节对齐的列主序 tile，供后续 FP8 GEMM 用 TMA 高效加载。
+
+## 7. 下一步学习建议
+
+- **接下来读 u7-l3（Pipeline Parallelism：环形 send/recv）与 u7-l4（AGRS）**：它们与 Engram 同属 `ElasticBuffer` 的实验性通信原语，同样建立在 NCCL Gin 对称内存与 barrier 之上，对照阅读可加深对「同套缓冲区、不同通信模式」的理解。
+- **回顾 u3-l4（NCCL Gin 后端与对称内存上下文）**：若对 `gin.get` / `gin.flush_async` / `gin.wait` 的底层仍不清晰，建议重读 `csrc/kernels/backend/symmetric.hpp` 与 `api.cuh`，理解 QP、`ncclGinRequest_t` 与对称窗口寻址的细节。
+- **深入 PTX 原语（u8-l1）**：`__ldg`、`int4` 的 128 位加载、`atomicAdd_block` 等 device 级原语的内存序语义，在 `deep_ep/include/deep_ep/common/ptx.cuh` 与 `math.cuh` 中有封装。
+- **动手扩展**：尝试为 Engram 增加「批量 token 的命中率统计」日志（在 fetch 内核里累加每个 peer 的请求计数并写回 workspace），实测不同索引分布下的 RDMA 流量，验证「稀疏访问省带宽」的结论。

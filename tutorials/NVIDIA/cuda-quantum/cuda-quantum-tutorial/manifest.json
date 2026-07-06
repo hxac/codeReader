@@ -1,7 +1,7 @@
 {
   "project": "cuda-quantum",
-  "head": "61face2b9a41d1ef9b6ea6e7941bc22441c75ab9",
-  "rationale": "CUDA-Q 是一个体量巨大的混合量子-经典计算平台，由「MLIR 编译器（nvq++/Quake/CC）」「C++ 运行时（qis/算法/算符/平台/nvqir 模拟器）」「Python 前端」「Realtime 实时子系统」四大部分组成，因此学习路线必须先建立全局认知，再分栈深入。整体设计为 8 个单元、40 篇讲义、三层难度递进：单元 1 让读者从零跑通第一个 C++/Python 内核并理解仓库布局；单元 2 聚焦量子类型、门、测量、内核组合这套核心编程模型；单元 3 进入执行模型与 sample/observe/优化/算符等算法原语；单元 4 拆解从 C++ 源码到 QIR 的编译流水线（Quake 方言、AST Bridge、nvq++、优化 Pass、CodeGen）；单元 5 单独讲解 Python 前端的 kernel 装饰器与 AST 桥；单元 6 进入后端与模拟器（CircuitSimulator API、CPU/GPU 后端、噪声、目标配置、远程 QPU、多 QPU）；单元 7 覆盖动力学、Realtime、扩展新后端/自定义门；单元 8 收束于测试、调试与架构取舍。讲义之间通过 depends_on 形成清晰依赖链：编译器与后端类讲义依赖编程模型与执行模型，扩展类讲义依赖对应的核心机制讲义，确保读者循序渐进、每篇都能结合真实源码并完成一个动手任务。",
+  "head": "9a967173787bb85dda5e6b06b09aeef13320dc4a",
+  "rationale": "CUDA-Q 是一个体量巨大的混合量子-经典计算平台，由「MLIR 编译器（nvq++/Quake/CC）」「C++ 运行时（qis/算法/算符/平台/nvqir 模拟器）」「Python 前端」「Realtime 实时子系统」四大部分组成，因此学习路线必须先建立全局认知，再分栈深入。整体设计为 8 个单元、40 篇讲义、三层难度递进：单元 1 让读者从零跑通第一个 C++/Python 内核并理解仓库布局；单元 2 聚焦量子类型、门、测量、内核组合这套核心编程模型；单元 3 进入执行模型与 sample/observe/优化/算符等算法原语；单元 4 拆解从 C++ 源码到 QIR 的编译流水线（Quake 方言、AST Bridge、nvq++、优化 Pass、CodeGen）；单元 5 单独讲解 Python 前端的 kernel 装饰器与 AST 桥；单元 6 进入后端与模拟器（CircuitSimulator API、CPU/GPU 后端、噪声、目标配置、远程 QPU、多 QPU）；单元 7 覆盖动力学、Realtime、扩展新后端/自定义门；单元 8 收束于测试、调试与架构取舍。讲义之间通过 depends_on 形成清晰依赖链：编译器与后端类讲义依赖编程模型与执行模型，扩展类讲义依赖对应的核心机制讲义，确保读者循序渐进、每篇都能结合真实源码并完成一个动手任务。本次增量更新（61face2b9a..9a967173787bb85dda5e6b06b09aeef13320dc4a）仅含三处小改动——cudaq.evolve 在「单个哈密顿量配多个初始状态」时的批处理修复、QIR 输出记录解析（RecordLogParser）的健壮性加固、pytest 的 skip_arm64_jit 平台跳过标记——分别映射到 u7-l1、u4-l7、u8-l1 三篇讲义的小幅 update（并补充对应源码文件），其余 37 篇讲义内容与所列源码均未受影响，标记为 keep。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 Overview.md，画出从 C++ 源码到可执行程序的编译/运行数据流图，标注每个阶段发生在哪个子系统。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -89,7 +89,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -117,7 +117,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -145,7 +145,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -183,7 +183,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -211,7 +211,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -239,7 +239,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -267,7 +267,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -294,7 +294,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -330,7 +330,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -359,7 +359,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -388,7 +388,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -416,7 +416,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -446,7 +446,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l6",
@@ -475,7 +475,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -512,7 +512,7 @@
             "u1-l4",
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -541,7 +541,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -569,7 +569,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -599,7 +599,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l5",
@@ -627,7 +627,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l6",
@@ -657,36 +657,39 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l7",
-          "title": "CodeGen：从 Quake 到 QIR/LLVM",
+          "title": "CodeGen：从 Quake 到 QIR/LLVM（含输出记录解析）",
           "order": 7,
           "filename": "u4-l7-codegen-qir.md",
           "level": "advanced",
-          "topic": "讲解 CodeGen 阶段如何把 Quake/CC 降低为 QIR 与 LLVM IR，包括 QuakeToLLVM、ConvertToQIR 以及到执行管理器的桥接。",
+          "topic": "讲解 CodeGen 阶段如何把 Quake/CC 降低为 QIR 与 LLVM IR（QuakeToLLVM、ConvertToQIR、QuakeToExecMgr），以及运行时如何用 RecordLogParser 解析并校验 QIR 输出记录（采样计数、结构化结果）回传宿主——后者在近期提交中做了帧格式/数值合法性等健壮性加固。",
           "learning_goals": [
             "理解 QIR 规范与 CUDA-Q 的 Lowering 目标",
             "掌握 QuakeToLLVM/ConvertToQIR 的职责划分",
-            "了解设备代码生成与宿主执行管理器的衔接"
+            "了解设备代码生成与宿主执行管理器的衔接",
+            "理解 QIR 输出记录的生成与 RecordLogParser 的解析/校验机制（含符号指数、非有限浮点等边界处理）"
           ],
           "source_files": [
             "cudaq/lib/Optimizer/CodeGen/QuakeToLLVM.cpp",
             "cudaq/lib/Optimizer/CodeGen/ConvertToQIR.cpp",
             "cudaq/lib/Optimizer/CodeGen/QuakeToExecMgr.cpp",
-            "cudaq/lib/Optimizer/CodeGen/Pipelines.cpp"
+            "cudaq/lib/Optimizer/CodeGen/Pipelines.cpp",
+            "runtime/common/RecordLogParser.h"
           ],
           "minimal_modules": [
             "QIR 规范与 Lowering 目标",
             "QuakeToLLVM/ConvertToQIR 职责",
-            "设备代码与执行管理器衔接"
+            "设备代码与执行管理器衔接",
+            "输出记录解析与校验"
           ],
-          "practice_task": "用 cudaq-quake | cudaq-opt | quake-translate --convert-to=qir 流水线生成 QIR，对照 ConvertToQIR.cpp 理解关键函数的降低过程。",
+          "practice_task": "用 cudaq-quake | cudaq-opt | quake-translate --convert-to=qir 流水线生成 QIR，对照 ConvertToQIR.cpp 理解关键函数的降低过程；再阅读 RecordLogParser.h，说明输出记录的帧格式与数值校验规则，并指出解析失败时的错误处理路径。",
           "depends_on": [
             "u4-l6"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -723,7 +726,7 @@
             "u1-l5",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -752,7 +755,7 @@
             "u5-l1",
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -780,7 +783,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -816,7 +819,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -845,7 +848,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -874,7 +877,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -903,7 +906,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -932,7 +935,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l6",
@@ -961,7 +964,7 @@
             "u3-l2",
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -973,32 +976,35 @@
       "lectures": [
         {
           "id": "u7-l1",
-          "title": "量子动力学与时间演化",
+          "title": "量子动力学与时间演化（含批处理 evolve）",
           "order": 1,
           "filename": "u7-l1-dynamics-evolution.md",
           "level": "advanced",
-          "topic": "讲解 cudaq::evolve 算法、积分器（Runge-Kutta、Crank-Nicolson、Magnus）以及 cudensitymat 后端的动力学模拟。",
+          "topic": "讲解 cudaq::evolve 算法、积分器（Runge-Kutta、Crank-Nicolson、Magnus）、cudensitymat 后端的动力学模拟，以及 evolve 在「单个哈密顿量配多个初始状态」时的批处理语义与逐状态 schedule 重置（近期修复了该路径下结果为空的批处理 bug）。",
           "learning_goals": [
             "理解 evolve 算法的时间演化流程",
             "掌握不同积分器策略的原理与适用场景",
-            "了解 cudensitymat 后端的密度矩阵演化"
+            "了解 cudensitymat 后端的密度矩阵演化",
+            "理解 evolve 的批处理调度：共享哈密顿量时为每个初始状态复用同一哈密顿量并重置 schedule"
           ],
           "source_files": [
             "runtime/cudaq/algorithms/evolve.h",
             "runtime/cudaq/dynamics_integrators.h",
             "runtime/nvqir/cudensitymat/CuDensityMatSim.cpp",
-            "runtime/nvqir/cudensitymat/CuDensityMatEvolution.cpp"
+            "runtime/nvqir/cudensitymat/CuDensityMatEvolution.cpp",
+            "python/cudaq/dynamics/evolution.py"
           ],
           "minimal_modules": [
             "evolve 时间演化",
             "积分器策略",
-            "cudensitymat 后端"
+            "cudensitymat 后端",
+            "批处理初始状态调度"
           ],
-          "practice_task": "用 evolve 模拟一个简单自旋系统在含时哈密顿量下的演化，画出可观测量随时间的变化曲线。",
+          "practice_task": "用 evolve 模拟一个简单自旋系统在含时哈密顿量下的演化，画出可观测量随时间的变化曲线；再用「同一哈密顿量 + 一组初始状态」做批处理演化，验证每个初始状态都返回独立结果（而非空列表），并对比 qpp-cpu 与 density-matrix-cpu 两个目标。",
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u7-l2",
@@ -1027,7 +1033,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -1057,7 +1063,7 @@
             "u6-l1",
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -1086,7 +1092,7 @@
             "u5-l3",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -1110,12 +1116,12 @@
             "动态 vs 静态内核",
             "builder 与 Quake 交互"
           ],
-          "practice_task": "用 C++ kernel_builder 动态构造一个参数化_ansatz，交给 cudaq::observe 计算期望值，对比静态内核写法。",
+          "practice_task": "用 C++ kernel_builder 动态构造一个参数化 ansatz，交给 cudaq::observe 计算期望值，对比静态内核写法。",
           "depends_on": [
             "u3-l3",
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1127,32 +1133,35 @@
       "lectures": [
         {
           "id": "u8-l1",
-          "title": "测试体系：FileCheck、unittests 与 targettests",
+          "title": "测试体系：FileCheck、unittests 与 targettests（含平台跳过标记）",
           "order": 1,
           "filename": "u8-l1-testing-strategy.md",
           "level": "advanced",
-          "topic": "讲解 CUDA-Q 的三类测试：编译器的 FileCheck 测试（cudaq/test）、运行时的单元测试（unittests）、跨目标的 targettests，以及如何运行它们。",
+          "topic": "讲解 CUDA-Q 的三类测试：编译器的 FileCheck 测试（cudaq/test）、运行时的单元测试（unittests，含 output_record 等子目录）、跨目标的 targettests，以及 pytest 的平台跳过标记（如 skip_arm64_jit，覆盖 macOS arm64 与 Linux aarch64）与如何运行它们。",
           "learning_goals": [
             "理解三类测试的分工与定位",
             "掌握 ctest 与 pytest 运行特定测试的方法",
-            "学会为新功能选择合适的测试位置"
+            "学会为新功能选择合适的测试位置",
+            "了解平台相关跳过/预期失败标记（skip_arm64_jit、xfail）在 CI 中防止 worker 崩溃的作用"
           ],
           "source_files": [
             "Developing.md",
             "unittests/CMakeLists.txt",
             "targettests/lit.cfg.py",
-            "cudaq/test/"
+            "cudaq/test/",
+            "python/tests/conftest.py"
           ],
           "minimal_modules": [
             "FileCheck 编译器测试",
             "运行时单元测试",
-            "targettests 跨目标测试"
+            "targettests 跨目标测试",
+            "pytest 平台跳过标记"
           ],
-          "practice_task": "在 build 目录运行 ctest -R 选一个编译器测试和一个运行时测试，阅读其源文件理解断言方式。",
+          "practice_task": "在 build 目录运行 ctest -R 选一个编译器测试和一个运行时测试，阅读其源文件理解断言方式；并在 python/tests 中找到一个使用 skip_arm64_jit 标记的用例（如 test_adjoint_bug），解释它为何在 Linux aarch64 上需要跳过而非 xfail。",
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l2",
@@ -1181,7 +1190,7 @@
             "u8-l1",
             "u4-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -1210,7 +1219,7 @@
             "u8-l2",
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

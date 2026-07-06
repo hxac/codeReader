@@ -1,0 +1,481 @@
+# Metal 后端运行时与图调度
+
+> 对应大纲：u5-l2 · 学习阶段 intermediate · 依赖 u5-l1（GPU 张量抽象与 CPU 后端）
+
+## 1. 本讲目标
+
+ds4 把 Apple Metal 作为**首要后端**（README 明确写明："Metal is our primary target"）。本讲只盯一个问题：
+
+> `ds4_metal.m` 这层 Objective-C「胶水」是如何把 Metal 设备、`.metal` 内核和 C 引擎的推理图粘到一起的？
+
+学完后你应当能够：
+
+1. 说清 Metal 运行时的五类对象（device / command queue / library / pipeline / command buffer）在 ds4 里各自由哪个全局变量持有、何时创建。
+2. 解释为什么 `metal/` 目录下的 `.metal` 内核**不参与 make 编译**，而是在进程启动时被拼成一个大源码、交给 Metal 驱动运行时编译。
+3. 看懂「layer-major 图调度」：一次 prefill 的一个 chunk 里，**所有 43 层被编码进同一个 command buffer**，而 chunk 之间才切分。
+4. 对应到真实代码行，把 `metal/flash_attn.metal`（flash attention）和 `metal/dsv4_kv.metal`（KV 写入）这两类内核，与一次 prefill 命令里的具体绑定点对上号。
+
+本讲**不**展开 MLA 注意力或 MoE 的数学（见 u4-l1/u4-l2），也**不**讲 CUDA/ROCm 后端（见 u5-l3），只讲 Metal 这条路径的「运行时 + 调度」机制。
+
+## 2. 前置知识
+
+在进入本讲前，请确认你已建立以下认知（这些是前面讲义的结论，本讲直接承接，不重复推导）：
+
+- **tensor-resident 执行模型**（u5-l1）：激活、KV 缓存、scratch 一旦在设备上分配就全程留在设备，算子之间用设备指针交接，宿主只在头尾读写少量数据。`ds4_gpu.h` 把设备张量声明为不透明指针 `ds4_gpu_tensor`，对外只暴露 `alloc/view/read/write/copy` 等原语。
+- **权重走 model map 零拷贝**（u5-l1 + u3-l1）：几十到几百 GB 的 GGUF 通过 `mmap` 映射进进程；Metal 后端用 `MAP_SHARED`，再把权重区段包装成 Metal buffer 直接给 GPU 寻址，**绝不在每次推理时拷贝上传**。
+- **DeepSeek V4 单层结构**（u4-l1）：一层 = attention（MLA）+ FFN（routed/shared MoE），层数 `DS4_N_LAYER` 是编译期常量（43 层），残差流在层间流动。
+- **prefill 与 decode 是两种姿态**（u1-l5 + u6-l1）：prefill 一次性吃进一段 prompt 填 KV 缓存，decode 每次只前进一个 token。本讲的「图调度」会清楚区分这两条路径。
+
+一个关键的 Metal 术语对照（不熟悉的读者先看这里）：
+
+| Metal 概念 | 通俗理解 | ds4 中的角色 |
+| --- | --- | --- |
+| `MTLDevice` | 一块 GPU | 全局 `g_device` |
+| `MTLCommandQueue` | 往 GPU 投递工作的队列 | 全局 `g_queue` |
+| `MTLLibrary` | 编译好的内核集合（一份 .metallib） | 全局 `g_library` |
+| `MTLFunction` / `MTLComputePipelineState` | 一个内核函数 / 它编译后的可执行管道 | `g_*_pipeline` 一族全局 |
+| `MTLCommandBuffer` | 一批待执行的工作（录制好后 `commit`） | 批处理用的 `g_batch_cb` |
+| `MTLComputeCommandEncoder` | 往 command buffer 里「录」一次 dispatch | 批处理用的 `g_batch_enc` |
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲关注点 |
+| --- | --- | --- |
+| `ds4_metal.m`（约 2.7 万行 Objective-C） | Metal 后端的全部实现 | 运行时对象、内核编译、命令批处理、内核绑定 |
+| `ds4_gpu.h` | 三后端共用的 GPU 公共 API 头 | tensor-resident 模型注释、命令生命周期、model map 接口 |
+| `metal/flash_attn.metal` | Flash Attention 内核（Metal Shading Language） | decode/prefill 注意力内核、模板特化 |
+| `metal/dsv4_kv.metal` | DSV4 专属 KV 缓存内核 | FP8 KV 量化、raw 行写入、compressor frontier 更新 |
+| `metal/*.metal`（其余 17 个） | 其余内核 | 按职责分类（见 4.3） |
+| `ds4.c` 中的 `metal_graph_*` 一族函数 | C 引擎侧的图编排 | layer-major 调度、chunk 切分、output head |
+| `Makefile` | 构建 | Metal 内核只是依赖、不参与 make 编译 |
+
+## 4. 核心概念与源码讲解
+
+本讲拆成四个最小模块：Metal 运行时对象、命令批处理与张量/权重常驻设备、`metal/*.metal` 内核分类与运行时编译、layer-major 图调度与 chunk prefill。
+
+---
+
+### 4.1 Metal 运行时对象
+
+#### 4.1.1 概念说明
+
+Metal 把 GPU 看作一个「投递工作 → 取回结果」的异步设备。要用它，必须先建立一套**长生命周期**的运行时对象：
+
+1. **设备（device）**：代表一块物理 GPU。macOS 上用 `MTLCreateSystemDefaultDevice()` 拿到系统默认 GPU（Apple Silicon 上即统一内存 GPU）。
+2. **命令队列（command queue）**：一个向设备投递 command buffer 的通道，进程内通常只建一个。
+3. **库（library）**：一份**已编译**的内核集合。普通 Metal 程序会把 `.metal` 在构建期编译成 `.metallib` 打进 App Bundle；**ds4 不这么做**（见 4.3）。
+4. **管道（pipeline）**：把库里的一个内核函数实例化成「可执行管道」（`MTLComputePipelineState`）。一个内核可能因参数不同被特化出多个管道。
+5. **命令缓冲（command buffer）与编码器（encoder）**：command buffer 是一卷「待执行的指令磁带」；encoder 是录指令的笔。录完一条 `dispatchThreadgroups` 就是录了一次内核启动。
+
+ds4 把前四类都做成**进程级全局**（懒初始化、只建一次），第五类做成**批处理全局**（见 4.2）。
+
+#### 4.1.2 核心流程
+
+设备/队列/库/管道的初始化发生在**第一次**调用任何 GPU 函数时（懒初始化），入口是 `ds4_gpu_init`：
+
+```
+任何 ds4_gpu_* 调用
+   └─ if (!g_initialized && !ds4_gpu_init()) return 失败;
+         ├─ MTLCreateSystemDefaultDevice()        → g_device
+         ├─ 打印设备摘要、探测 Metal 4 特性
+         ├─ [g_device newCommandQueue]             → g_queue
+         ├─ 建各 bookkeeping 字典（管道缓存、模型 buffer 缓存等）
+         ├─ ds4_gpu_full_source()                  → 拼接全部 .metal 源码
+         ├─ [g_device newLibraryWithSource:...]    → g_library  ★运行时编译
+         └─ 逐个 [library newFunctionWithName:] →
+            [g_device newComputePipelineStateWithFunction:] → g_*_pipeline
+```
+
+注意「运行时编译」这一步：`.metal` 源码是在**进程启动时**被 Metal 驱动编译成库的，而不是在 `make` 时。这是 ds4 Metal 后端最反直觉、也最关键的设计点，4.3 节会展开。
+
+#### 4.1.3 源码精读
+
+运行时全局的声明，文件头注释道明了这层文件的「窄边界」哲学——C 代码拥有模型语义与图调度，本文件只拥有 Metal 对象：
+
+[ds4_metal.m:44-49](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L44-L49) — 声明五个核心全局：设备 `g_device`、命令队列 `g_queue`、库 `g_library`，以及批处理用的 command buffer `g_batch_cb` 和 encoder `g_batch_enc`。这五行就是整个 Metal 后端的「根对象」。
+
+设备与队列的创建（`ds4_gpu_init` 的开头，含懒初始化保护 `if (g_initialized) return 1`）：
+
+[ds4_metal.m:4561-4578](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4561-L4578) — `MTLCreateSystemDefaultDevice()` 拿到 GPU；无设备直接报错返回；有设备后先打印摘要、探测 Metal 4 特性，再 `[g_device newCommandQueue]` 建队列。任何一步失败都把已建的 `g_device` 置 nil 并返回 0，保证「失败安全」。
+
+随后是库的运行时编译（这是 4.3 节的重点，先看接口形态）：
+
+[ds4_metal.m:4604-4665](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4604-L4665) — `ds4_gpu_full_source()` 返回拼接好的大源码字符串 `source`；接着构造 `MTLCompileOptions`，注入一组预处理宏（见下）；`[g_device newLibraryWithSource:source options:options error:&error]` 让 Metal 驱动**当场编译**整份源码成 `g_library`。编译失败会打印错误并回滚。
+
+这里注入的预处理宏值得专门一看——它们是 ds4 用来**对抗数值漂移**的开关：
+
+[ds4_metal.m:4617-4647](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4617-L4647) — 一组 `DS4_METAL_*` 环境变量被翻译成 shader 宏。默认开启 `DS4_METAL_HC_STABLE`（超连接稳定实现）和 `DS4_METAL_NORM_RSQRT_DISABLE`（RMSNorm 不用 rsqrt 近似），默认关闭 `KV_RAW_F32`、`ROPE_EXP2_LOG2`、`MATH_SAFE`（后者会把整库钉到严格 IEEE-754，仅诊断用）。这正解释了 u4-l3 提到的「tiny 三角函数 codegen 变化会翻转采样 token」——ds4 用编译期宏把这些代码路径**焊死**以保证可复现。
+
+库建好后，逐个内核实例化成管道。以 `get_rows` 为例的样板代码：
+
+[ds4_metal.m:4667-4682](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4667-L4682) — `[library newFunctionWithName:@"kernel_get_rows_f32"]` 从库里按名字取出内核函数，再 `[g_device newComputePipelineStateWithFunction:fn error:&error]` 编译成可执行管道存进 `g_get_rows_f32_pipeline`。文件后面有几十个这样的「取函数 → 建管道」对，把文件头那 80+ 个 `g_*_pipeline` 全局一一填满。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲眼看到「运行时编译」发生，并理解设备/队列/库三对象的创建顺序。
+
+**操作步骤**（源码阅读型，无需 GPU）：
+
+1. 打开 [ds4_metal.m:4561](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4561) 的 `ds4_gpu_init`。
+2. 用编辑器在该函数里搜索 `g_device =`、`g_queue =`、`g_library =` 三次赋值，记下它们的相对先后。
+3. 注意每个赋值之后的 `if (!...) { fprintf(...); g_queue = nil; g_device = nil; return 0; }` 失败处理。
+
+**需要观察的现象**：
+
+- 设备最先建，队列紧跟其后；库的创建夹在「拼源码」与「建管道」之间。
+- 失败处理总是把**已建的对象逆序置 nil**，避免悬空全局。
+
+**预期结果**：你能画出 `device → queue → (bookkeeping 字典) → full_source → library → N 个 pipeline` 这条单向链条，且每一步都有独立失败处理。若你在 Apple Silicon Mac 上运行 `./ds4 --inspect`，会在 stderr 看到一行 `ds4: drift-patch flags ...`，那就是 [ds4_metal.m:4648-4655](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4648-L4655) 打印的宏状态。其余运行结果「待本地验证」（本环境无 Metal 设备）。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `g_device` / `g_queue` / `g_library` 用进程级全局、只建一次，而不是每次推理重建？
+
+> **答案**：创建 device、command queue 和（尤其）编译 library 都很昂贵——library 编译要几百毫秒到数秒。而它们都是**只读且线程安全**的资源（pipeline 是不可变的可执行句柄），建一次反复用即可。把它们做成全局也使「tensor-resident」模型成立：KV 缓存、scratch buffer 绑定在这一个 device 上，整个推理期间不重建。
+
+**练习 2**：`MTLCreateSystemDefaultDevice()` 在没有 Metal 设备的机器上返回什么？ds4 如何应对？
+
+> **答案**：返回 `nil`。ds4 在 [ds4_metal.m:4565-4569](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4565-L4569) 检测到 `nil` 后打印 `"ds4: Metal device not available"` 并返回 0，`ds4_gpu_init` 失败，调用方随之失败。这正是 Linux 上不能跑 Metal 构建、必须用 CUDA/ROCm/CPU 后端的根因。
+
+---
+
+### 4.2 命令批处理与张量/权重常驻设备
+
+#### 4.2.1 概念说明
+
+GPU 内核启动有固定开销。如果每个算子都「开一个 command buffer → 录一条 dispatch → commit → 等」就会把 GPU 喂不饱、被宿主-CPU 端的往返延迟淹没。ds4 的做法是**命令批处理（command batching）**：
+
+- 维护一个「当前正在录的」command buffer（`g_batch_cb`）和一个共享的 compute encoder（`g_batch_enc`）。
+- 所有内核 dispatch 默认都**录进当前这卷**，而不是各开各的。
+- 只有在需要强制同步点时（读完 logits、要等结果、要切换读回）才 `flush` 或 `end` 把整卷提交。
+- `flush` 的特别之处：它**提交当前卷后立刻新开一卷**，让 GPU 跑当前卷的同时 CPU 能继续录下一卷——这就是「提交一批、再开一批」隐藏延迟的核心机制（u5-l1 已点出）。
+
+与之配套的是两类「常驻设备」内存：
+
+- **激活 / KV / scratch 张量**：用 `ds4_gpu_tensor_alloc` 分配，存在设备上，整个命令序列里复用。
+- **权重 buffer**：用 model map 把 mmap 区段**零拷贝包装**成 Metal buffer，并缓存进 `g_model_buffer_cache`，按 `model_map + offset + bytes` 作键去重，第二次访问同一权重段直接命中缓存。
+
+#### 4.2.2 核心流程
+
+批处理命令的生命周期由四个公共函数刻画（都在 `ds4_gpu.h` 里声明）：
+
+```
+ds4_gpu_begin_commands()       ← 新开一卷 g_batch_cb（若已开则报错）
+   for 每个要录的内核:
+      enc = ds4_gpu_compute_encoder(cb)   ← 复用 g_batch_enc
+      [enc setComputePipelineState:pipe]   ← 绑内核
+      [enc setBytes:...]/[enc setBuffer:...] ← 绑参数
+      [enc dispatchThreadgroups:...]        ← 录一次启动
+      ds4_gpu_end_compute_encoder(cb, enc) ← 批处理时是 no-op，保持 encoder 开着
+   可选: ds4_gpu_flush_commands()  ← 提交并立即新开一卷（隐藏延迟）
+ds4_gpu_end_commands()         ← 提交并等待完成
+ds4_gpu_synchronize()         ← 兜底：提交未提交的、等所有 pending
+```
+
+权重包装与缓存：
+
+```
+引擎要访问某权重段 (model_map, offset, bytes)
+   └─ ds4_gpu_cache_model_range / wrap_model_exact_range
+         ├─ 查 g_model_buffer_cache[model_map:size:offset:bytes]
+         ├─ 命中 → 直接返回已有 buffer
+         └─ 未命中 → newBufferWithBytesNoCopy(mmap 指针, ...)  ★零拷贝
+                     存进缓存、累计字节数
+```
+
+#### 4.2.3 源码精读
+
+公共命令生命周期函数的实现——注意它们如何共享 `g_batch_cb`：
+
+[ds4_metal.m:6414-6420](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L6414-L6420) — `ds4_gpu_begin_commands`：懒初始化保护后，若已有 `g_batch_cb` 就返回 0（防止嵌套覆盖），否则从队列取一个新 command buffer 存进 `g_batch_cb`。
+
+[ds4_metal.m:6422-6441](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L6422-L6441) — `ds4_gpu_flush_commands`：先 `close_batch_encoder`（结束当前 encoder），把 `g_batch_cb` 拿出来 `commit` 并加入 `g_pending_cbs`，**然后立刻新建一个 `g_batch_cb`** 返回。这就是「提交一批、再开一批」。
+
+[ds4_metal.m:6605-6613](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L6605-L6613) — `ds4_gpu_end_commands`：关闭 encoder，把当前卷交给 `ds4_gpu_finish_command_buffer`（内部 `waitUntilCompleted`）等待完成。提交即等待，是强同步点。
+
+共享 encoder 的复用逻辑——这是「批处理」之所以成立的细节：
+
+[ds4_metal.m:717-735](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L717-L735) — `ds4_gpu_compute_encoder`：若传入的 buffer 正是当前的批处理 buffer，就返回**已存在的** `g_batch_enc`（必要时才 `[cb computeCommandEncoder]` 新建一次）；`ds4_gpu_close_batch_encoder` 负责在 flush/end 时 `[enc endEncoding]` 并把 `g_batch_enc` 置 nil。`ds4_gpu_end_compute_encoder` 在批处理路径上是 no-op——这样连续多个 dispatch 共用同一个 encoder，避免了「每个算子开/关 encoder」的开销。
+
+设备张量的分配——注意 storage mode：
+
+[ds4_metal.m:6200-6213](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L6200-L6213) — `ds4_gpu_tensor_alloc` 用 `newBufferWithLength:options:MTLResourceStorageModeShared` 分配。`Shared` 模式意味着 CPU 和 GPU 共享这块内存（Apple Silicon 统一内存下几乎零成本），这正是「tensor-resident」模型能成立的前提：激活、KV、scratch 都在这里分配，全程留在设备，宿主只在头尾 `read`/`write`。分配还会被 `ds4_gpu_tensor_track_alloc_locked` 计入 live/peak 统计（用于内存报告）。
+
+权重的零拷贝包装与缓存——这是 u5-l1「model map」的具体落地：
+
+[ds4_metal.m:7402-7438](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L7402-L7438) — 以 `model_map:size:page_offset:view_bytes` 拼成 key，先查 `g_model_buffer_cache`；未命中则 `newBufferWithBytesNoCopy:(mmap 指针 + 偏移) length:... options:ds4_gpu_model_resource_options() deallocator:nil`。`newBufferWithBytesNoCopy` 是关键：它**不拷贝数据**，而是让 Metal buffer 直接覆盖已有内存（即 mmap 区段），`deallocator:nil` 表示这块内存由 mmap 管理、Metal 不要释放它。命中后存进缓存、累计字节数（`ds4_gpu_model_buffer_cache_note_insert`）。这就是「权重通过 model map 而非每次拷贝上传」的代码根。
+
+#### 4.2.4 代码实践
+
+**实践目标**：理解一个内核 dispatch 是如何被「录进」批处理 command buffer 的。
+
+**操作步骤**（源码阅读型）：
+
+1. 打开 [ds4_metal.m:16988-17001](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L16988-L17001) 的 flash attention vec 内核绑定。
+2. 逐行标注：`ds4_gpu_compute_encoder(cb)` 取 encoder → `[enc setComputePipelineState:vec_pipeline]` 绑管道 → `[enc setBytes:&vec_args ...]` 绑标量参数结构体 → 多个 `[enc setBuffer:... atIndex:N]` 绑设备 buffer → `[enc setThreadgroupMemoryLength:...]` 设共享内存 → `[enc dispatchThreadgroups:threadsPerThreadgroup:]` 录启动 → `ds4_gpu_end_compute_encoder(cb, enc)`（批处理下 no-op）。
+3. 注意这些调用**没有任何 commit 或 wait**——它们只是「录」，真正的提交由外层的 `ds4_gpu_end_commands` 完成。
+
+**需要观察的现象**：
+
+- 单个内核的录制就是固定的「取 encoder → 绑管道 → 绑参数 → dispatch」四步。
+- 录制过程不阻塞、不提交，所以连续几十个内核可以堆进同一卷。
+
+**预期结果**：你能解释为什么 ds4 能在一次 prefill 里调度上千个内核启动而不被宿主往返延迟拖垮——因为它们全被录进同一个 `g_batch_cb`，最后一次性 `commit`。这是 layer-major 调度（4.4）能成立的基础设施。运行结果「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`ds4_gpu_flush_commands` 和 `ds4_gpu_end_commands` 都会提交 command buffer，区别在哪？什么场景该用 flush？
+
+> **答案**：`end_commands` 提交后**等待完成**（强同步点），`flush_commands` 提交后**立刻新开一卷**就返回（不等）。flush 用于「这卷里的工作 GPU 可以独立跑、CPU 想继续录下一卷」的场景——典型是 SSD 流式里 expert 加载与推理重叠、或带进度回调的长 prefill 想把「已完成层」作为调度/保活点（见 4.4 的 `callback_split`）。
+
+**练习 2**：`ds4_gpu_tensor_alloc` 用 `StorageModeShared`，但 scratch buffer 在 M5 上可能用 `StorageModePrivate`（[ds4_metal.m:973-985](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L973-L985)）。为什么有这个差别？
+
+> **答案**：Shared 模式让 CPU 可读写（便于 `write`/`read`），但会占共享内存带宽。M5 上那些**只在内核之间流动、CPU 从不访问**的长 prefill scratch 池，改用 `Private`（纯设备内存）能减少共享内存流量与常驻压力，且不改变公共 buffer 生命周期模型。需要 CPU 访问的（带 `needs_cpu_access`）仍保持 Shared。
+
+---
+
+### 4.3 `metal/*.metal` 内核分类与运行时编译
+
+#### 4.3.1 概念说明
+
+这是 ds4 Metal 后端最容易被误读的一点。普通 Metal 工程会把 `.metal` 在 Xcode/构建期编译成 `.metallib` 资源，运行时只加载。**ds4 不这样**：
+
+- `metal/*.metal` 是纯文本源文件，**make 不编译它们**（只是把它们列为 `ds4_metal.o` 的依赖，便于改了内核后重新编译宿主端胶水）。
+- 进程启动时，`ds4_gpu_full_source()` 把全部 19 个 `.metal` 文件**读出来、首尾拼接成一个大字符串**，再交给 `[g_device newLibraryWithSource:...]` 让 Metal 驱动**当场编译**。
+
+这样做的好处：
+
+1. 内核与宿主端同源 revision、同宏定义，不会出现「编译好的 metallib 与代码不匹配」。
+2. 一份源码里可以用 C++ 模板 + `[[host_name(...)]]` 特化，在运行时按需生成大量内核变体（如 flash attention 针对不同 head_dim 的特化），不必为每个变体手写一份。
+3. 诊断时可用环境变量 `DS4_METAL_*_SOURCE` **换掉单个内核文件**而不重编译二进制。
+
+代价：每次启动多花一次「编译 library」的时间（前面提到的几百毫秒到数秒）。
+
+#### 4.3.2 核心流程
+
+```
+进程启动
+  └─ ds4_gpu_init
+        └─ ds4_gpu_full_source()
+              ├─ base = 内联的 ds4_gpu_source（兜底/公共头）
+              ├─ for 每个必需源 (env override 路径 → 仓库路径 → ./仓库路径):
+              │     读文件内容，append 到 source
+              └─ 返回拼接大字符串
+        └─ newLibraryWithSource:source  → 编译 → g_library
+        └─ newFunctionWithName:... → newComputePipelineStateWithFunction:... → 管道
+```
+
+`metal/` 目录的 19 个内核文件按职责可分五大类（按体积/职责排序）：
+
+| 文件 | 大致职责 |
+| --- | --- |
+| `moe.metal`（最大，~180KB） | MoE expert 矩阵向量乘（IQ2_XXS/Q2_K/Q4_K 各类 slots/group/table 变体） |
+| `dense.metal` | 稠密 matmul、proj 等 |
+| `flash_attn.metal` | Flash Attention（pad/blk/vec/reduce 四阶段） |
+| `dsv4_hc.metal` | DeepSeek V4 超连接（HC）split/expand/weighted_sum |
+| `dsv4_misc.metal` | router、indexer topk/mask、indexed attention 等 |
+| `dsv4_kv.metal` | **KV 缓存**：FP8 量化、raw 行写入、compressor/indexer 行维护 |
+| `dsv4_rope.metal` | RoPE 旋转位置编码 |
+| `norm.metal` / `softmax.metal` / `glu.metal` / `unary.metal` / `bin.metal` | 归一化、softmax、激活、逐元素二元运算 |
+| `cpy.metal` / `concat.metal` / `repeat.metal` / `get_rows.metal` / `set_rows.metal` / `sum_rows.metal` / `argsort.metal` | 数据搬运、拼接、行读写、归约、排序等「工具」内核 |
+
+本讲实践聚焦其中两类：**flash attention**（`flash_attn.metal`）和 **KV 写入**（`dsv4_kv.metal`）。
+
+#### 4.3.3 源码精读
+
+`ds4_gpu_full_source` 的「拼接表」——这就是被运行时编译的 19 个文件清单：
+
+[ds4_metal.m:3047-3067](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L3047-L3067) — `required_sources` 数组把 `DS4_METAL_*_SOURCE`（环境变量名）与 `metal/*.metal`（仓库相对路径）配对。注释点明设计意图：「Kernels are kept as separate files for review, then concatenated into one Metal library」（分开存是为了便于审阅，运行时拼成一个库）。
+
+[ds4_metal.m:3069-3105](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L3069-L3105) — 遍历清单：对每个文件按「env override → 仓库路径 → `./`仓库路径」三处查找，找到就读内容 `appendFormat` 进大字符串；找不到就报错返回 nil。注意它**读文件**——这印证了内核是磁盘上的文本，运行时才编译。
+
+为什么 make 里看不到内核编译？看 Makefile 的依赖声明：
+
+[Makefile:15](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/Makefile#L15) 与 [Makefile:208-209](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/Makefile#L208-L209) — `METAL_SRCS := $(wildcard metal/*.metal)` 把内核列为变量；`ds4_metal.o` 的依赖里带上 `$(METAL_SRCS)`，但规则只是 `$(CC) $(OBJCFLAGS) -c -o $@ ds4_metal.m`——**只编译宿主端胶水 `.m`，没有任何编译 `.metal` 的命令**。Makefile 把它们列为依赖的唯一作用是：改了某个 `.metal` 后，`make` 会重新编译 `ds4_metal.o`（虽然二进制本身不包含内核字节，但这是为了让构建系统能感知到内核变更）。真正的内核编译发生在进程启动时的 `newLibraryWithSource`。
+
+**Flash attention 内核**（prefill/decode 注意力的核心）。这是一个 C++ Metal 模板，用 `[[host_name(...)]]` 特化出具体内核名：
+
+[metal/flash_attn.metal:1379](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/flash_attn.metal#L1379) — 模板特化 `kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 512, 512, 1>`，用 `[[host_name("kernel_flash_attn_ext_vec_f16_dk512_dv512")]]` 给它一个具名入口。`512, 512` 就是 DeepSeek V4 的 KV head_dim（u4-l1 讲的 512 维潜向量），`half4` 表示 KV 用 f16。这正是 ds4_metal.m 在 [ds4_metal.m:16860-16866](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L16860-L16866) 通过 `newFunctionWithName:@"kernel_flash_attn_ext_vec_f16_dk512_dv512"` 取出的那个内核。一条命令里的「取函数」与「模板特化」在此对上号。
+
+flash attention 的四阶段结构在文件头用一组常量勾勒：
+
+[metal/flash_attn.metal:1-9](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/flash_attn.metal#L1-L9) — `FC_FLASH_ATTN_EXT_PAD/BLK/EXT/VEC/VEC_REDUCE` 与 `OP_FLASH_ATTN_EXT_NQPSG/NCPSG` 定义了 pad（补齐）、blk（分块）、ext（主）、vec（向量化）、reduce（归约）各阶段的线程组规模常量。一次完整注意力要按 pad → vec → reduce 顺序录多条 dispatch（u4-l1 的 softmax/加权和在 GPU 上被拆成分块累积）。
+
+**KV 缓存内核**（`dsv4_kv.metal`）。这个文件负责把 MLA 投影后的 KV 行写进缓存，并模拟官方 FP8 语义。先看一个 decode 期使用的 KV 终结内核：
+
+[metal/dsv4_kv.metal:208-265](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L208-L265) — `kernel_dsv4_kv_fp8_store_f32`：decode 期 RoPE 之后，把 KV 行的非 RoPE 前缀过一遍 E4M3FN FP8 往返（`dsv4_e4m3fn_dequant`），再把整行以 F16 精度写进 raw cache（FlashAttention 用的半精度缓冲）。文件头注释（[metal/dsv4_kv.metal:204-207](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L204-L207)）点明它**故意和普通 RoPE 内核分开**——因为「微小的三角函数 codegen 变化会翻转后续采样 token」，这正是 u4-l3 提到的可复现性约束在 GPU 侧的体现。
+
+再看 compressor frontier 更新（u4-l2 讲的「正在攒的半窗口」）：
+
+[metal/dsv4_kv.metal:288-314](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L288-L314) — `kernel_dsv4_compressor_store_one`：decode 时把一个投影后的 KV 行 + score 行写进小 recurrent state（compressor frontier），同时把 APE（绝对位置编码）加进 score。它把原本要拆成「APE 拷贝 + score 加 + 两次 set_rows」的通用操作，融合成一个 DS4 专用内核直接写两块状态张量。这是「DS4 专用内核替代通用拼装」的典型——也是 u4-l2 压缩 KV 设计在 Metal 上的落地。
+
+prefill 期对应的批量 FP8 量化内核：
+
+[metal/dsv4_kv.metal:104-152](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L104-L152) — `kernel_dsv4_fp8_kv_quantize_f32`：把一段 KV 行的非 RoPE 部分按 64 元素一组、用 threadgroup 归约求 amax、算 scale、过 E4M3FN 往返后写回 float。注释（[metal/dsv4_kv.metal:101-103](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L101-L103)）点明目的：让 Metal 图的缓存 buffer 保持 float 可寻址，同时匹配官方 FP8 KV 语义。
+
+#### 4.3.4 代码实践（本讲指定的核心实践）
+
+**实践目标**：把 flash attention 内核与 KV 写入内核，与一次 prefill 命令里的具体绑定点对上号。
+
+**操作步骤**：
+
+1. 在 `metal/` 目录中定位两个内核文件：
+   - **flash attention** → [metal/flash_attn.metal:1379](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/flash_attn.metal#L1379) 的 `kernel_flash_attn_ext_vec_f16_dk512_dv512`（特化模板）。
+   - **KV 写入** → [metal/dsv4_kv.metal:208](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L208) 的 `kernel_dsv4_kv_fp8_store_f32`（decode KV 终结）与 [metal/dsv4_kv.metal:104](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L104) 的 `kernel_dsv4_fp8_kv_quantize_f32`（prefill 批量 FP8 量化）。
+2. 回到 `ds4_metal.m`，找到这两个内核被「取出 → 建管道 → 绑定」的代码：
+   - flash attention 取出与特化：[ds4_metal.m:2163-2191](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L2163-L2191)（pad/blk 管道按 `ncpsg` 缓存）与 [ds4_metal.m:16860-16869](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L16860-L16869)（vec/reduce 管道）。
+   - flash attention 绑定进命令：[ds4_metal.m:16988-17001](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L16988-L17001)（setComputePipelineState → setBuffer×7 → dispatchThreadgroups）。
+3. 对照 ds4.c 的 `metal_graph_encode_layer_attention_batch`（[ds4.c:17313](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L17313)）理解：一层的 attention 编码会**依次**录多条 dispatch——RMSNorm → QKV matmul → RoPE → flash attention（pad/vec/reduce）→ KV store → 输出投影——它们全部进同一个 command buffer。
+
+**需要观察的现象**：
+
+- `.metal` 里 kernel 的**名字**与 `ds4_metal.m` 里 `newFunctionWithName:@"..."` 的字符串一一对应；模板特化用 `[[host_name]]` 提供名字。
+- 内核参数结构体（如 `ds4_metal_args_flash_attn_ext`、`ds4_metal_args_dsv4_kv_fp8_store`）在 `.metal` 与 `.m` 两侧**布局必须一致**，靠 `setBytes` 整块传入。
+- 一次 prefill 的某一层里，flash attention 与 KV 写入是**前后两条 dispatch**，共享同一 encoder、同一 command buffer。
+
+**预期结果**：你能写出一条「内核名 → 取出位置 → 绑定位置 → 在层编码里的调用点」的对照链。例如 `kernel_flash_attn_ext_vec_f16_dk512_dv512`：定义于 flash_attn.metal:1379 → 取管道于 ds4_metal.m:16860 → 绑定于 ds4_metal.m:16988 → 由 ds4.c:17313 的 attention 批编码驱动。这条链就是「内核如何被绑进一次 prefill 命令」的完整答案。运行结果「待本地验证」。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果我想临时改一个 flash attention 内核做实验，但不想动二进制，怎么做？
+
+> **答案**：设环境变量 `DS4_METAL_FLASH_ATTN_SOURCE=/path/to/my_flash_attn.metal`。[ds4_metal.m:3071-3077](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L3071-L3077) 会优先读 env 指定的路径，跳过仓库里的 `metal/flash_attn.metal`。下次启动 `ds4_gpu_init` 会把你的版本拼进大源码重新编译。代价是每次启动都要重编译 library。
+
+**练习 2**：为什么 `dsv4_kv.metal` 的注释强调 KV 终结内核「故意和普通 RoPE 内核分开」？
+
+> **答案**：因为 GPU 编译器对三角函数的 codegen 微小变化（即使数值上「等价」）会改变 FP8 往返后的最低位，进而改变后续采样到的 token（u4-l3 的可复现性约束）。把 FP8 往返单独成一个内核、并用 4.1 的 `DS4_METAL_*` 宏锁住相关代码路径，是为了把这条敏感路径**隔离并焊死**，避免被其他内核的改动牵连漂移。
+
+---
+
+### 4.4 layer-major 图调度与 chunk prefill
+
+#### 4.4.1 概念说明
+
+前三个模块讲的是「Metal 对象怎么建、内核怎么编译、命令怎么批」。本模块回答最关键的问题：**C 引擎如何编排这些内核，跑完一次 prefill 或 decode？**
+
+ds4 的调度策略叫 **layer-major（层主序）**：
+
+- **prefill**：把一个 chunk 里**所有 43 层**编码进**同一个 command buffer**。也就是说，一个 command buffer 横跨「输入 embedding → 43 层前向 → output head → logits」的整条管线，最后一次性提交、读回 logits。层与层之间靠**双缓冲**残差张量（`batch_cur_hc` / `batch_next_hc`）交替。
+- **chunk 切分**：长 prompt 不会被塞进一个无限大的 command buffer。它被切成多个 chunk，每个 chunk 走一次完整的 layer-major prefill；chunk 大小由 `DS4_METAL_PREFILL_CHUNK`（默认 Flash 4096 / PRO 8192）决定，且**续 prefill 时对齐到 chunk 边界**（u6-l1 会展开这对 KV checkpoint 的影响）。
+- **decode**：每次只前进一个 token，同样是「一个 command buffer 编码所有层」，但走单 token 路径（`metal_graph_encode_decode_layer`），并且 KV 只写一行。
+
+「layer-major」是相对于「tensor-major / op-major」而言：另一种可能的调度是按算子类型把所有层的同一算子批在一起。ds4 选层主序，是因为残差流在层间是串行依赖的——一层算完才能算下一层，按层顺序录制最自然、也最能让中间张量留在设备 scratch 里复用。
+
+#### 4.4.2 核心流程
+
+一次 chunked prefill 的整体形状：
+
+```
+metal_graph_prefill_chunked_range(start, n_tokens)
+  ├─ 按 chunk 边界把 [start, end) 切成多段
+  └─ for 每段 [pos0, pos0+chunk):
+        metal_graph_prefill_layer_major(pos0, chunk)
+          ├─ 上传 prompt token / embedding
+          ├─ warmup 内核
+          ├─ ds4_gpu_begin_commands()              ← 开一卷
+          │     for il in 0..DS4_N_LAYER:
+          │         metal_graph_encode_layer_batch(il):
+          │             encode_layer_attention_batch(il)   ← RMSNorm/QKV/RoPE/flash attn/KV store
+          │             encode_layer_ffn_batch(il)         ← router/MoE experts/shared
+          │             swap(batch_cur_hc, batch_next_hc)  ← 残差双缓冲
+          │     encode_output_head()                ← 最后一层 → logits
+          ├─ ds4_gpu_end_commands()                 ← 提交并等待
+          └─ ds4_gpu_tensor_read(logits)            ← 读回 vocab 维 logits
+```
+
+decode 的形状（单 token）类似但更轻：`begin_commands → embed → for 每层 encode_decode_layer → output_head → end_commands → read logits`。
+
+#### 4.4.3 源码精读
+
+**chunked prefill 的入口**——注意它如何切分与对齐：
+
+[ds4.c:20997-21040](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20997-L21040) — `metal_graph_prefill_chunked_range`：取 `chunk_cap = g->prefill_cap`；在 `for (pos0 = start; pos0 < end; )` 循环里，每轮算出当前 chunk 大小。关键在对齐逻辑 [ds4.c:21019-21025](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L21019-L21025)：续 prefill（`start != 0`）时，若 `pos0` 不在 `prefill_cap` 边界上，就把当前 chunk 截短到下一个边界——这保证 chunk 边界与 KV checkpoint 边界对齐（u6-l1/u8 的磁盘 KV 依赖于此）。每个 chunk 调一次 `metal_graph_prefill_layer_major`。
+
+**chunk 大小从哪来**：
+
+[ds4.c:8330-8354](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L8330-L8354) — `ds4_prefill_cap_for_prompt`：优先用调用方显式指定的 `requested_chunk`；否则读 `DS4_METAL_PREFILL_CHUNK` 环境变量；都没给时，若 prompt 超过 4096 则取 PRO=8192 / Flash=4096。最后钳到 `[1, prompt_len]`。这就是「默认 4096、可调」的来源。
+
+**layer-major 的核心**——一个 chunk 的完整编码：
+
+[ds4.c:20360-20383](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20360-L20383) — `metal_graph_prefill_layer_major` 的非切分路径（`split_commands == false`）：先 `ds4_gpu_begin_commands()` 开一卷，然后 `for (il = 0; il < DS4_N_LAYER; il++)` 循环对**每一层**调 `metal_graph_encode_layer_batch`，把全部 43 层编码进同一卷。注释 [ds4.c:20343-20349](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20343-L20349) 解释了 `split_commands` 的取舍：长 prefill 在需要进度回调/保活时会改成「每完成一层就提交一卷」，使回调成为真实调度点，否则一条巨型 command buffer 期间发出的回调只是装饰。
+
+层编码结束后取最后一层的残差、过 output head：
+
+[ds4.c:20399-20409](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20399-L20409) — 取最后一个 token 的 HC 行做 `tensor_row_view`，临时把它当成 `g->cur_hc`，调 `metal_graph_encode_output_head` 把它投影到 vocab 维，然后恢复原 `cur_hc`。output head 也被录进同一卷。
+
+最后提交并读回：
+
+[ds4.c:20411-20426](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20411-L20426) — `ds4_gpu_end_commands()` 提交并等待整卷完成；成功后 `ds4_gpu_tensor_read(g->logits, ...)` 把 vocab 维 logits 读回宿主。注意整条「43 层 + output head」是**一次性提交、一次性等待**——这正是命令批处理 + 层主序带来的吞吐收益所在。
+
+**一层的内部**——attention + ffn + 残差交换：
+
+[ds4.c:19261-19284](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L19261-L19284) — `metal_graph_encode_layer_batch`：先 `encode_layer_attention_batch`（注意力的全部 dispatch），再 `encode_layer_ffn_batch`（router + MoE 的全部 dispatch），最后 `swap(batch_cur_hc, batch_next_hc)` 交换残差双缓冲。这「三步」就是一层的全部工作，且全部录进当前 command buffer。
+
+attention 批编码的开头，能清楚看到「一层 attention」要录多少类内核：
+
+[ds4.c:17313-17382](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L17313-L17382) — `metal_graph_encode_layer_attention_batch`：算出 hc 维、Q 维、rank、compress ratio 等常量，建一批 `tensor_view`（按当前 token 数切片大缓冲），然后依次 `rms_norm_plain_rows_tensor` → `matmul_f16_tensor`（hc 投影）……一直录到 RoPE、flash attention、KV store、输出投影。每个 `ds4_gpu_*` 调用都向当前 encoder 追加 dispatch。
+
+**decode 单 token 路径**也是层主序：
+
+[ds4.c:19322-19350](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L19322-L19350) — `metal_graph_eval_token_raw_swa_streaming`（decode 入口）：`ds4_gpu_begin_commands()` 开卷 → embed 一个 token → `for (il ...) metal_graph_encode_decode_layer(...)` 编码所有层 → 之后 output head + end + read logits。结构与 prefill 同构，区别是每层只处理 1 个 token、KV 只写一行（`raw_row = pos % raw_cap`）。
+
+#### 4.4.4 代码实践
+
+**实践目标**：跟踪一次 chunk prefill 的「开卷 → 43 层 → output head → 提交 → 读回」全链，确认它是 layer-major。
+
+**操作步骤**（源码阅读型）：
+
+1. 从 [ds4.c:21012](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L21012) 的 chunk 循环开始。
+2. 进入 [ds4.c:20369](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20369) 的层循环，确认它 `for il in 0..DS4_N_LAYER` 且都在同一次 `begin_commands`/`end_commands` 之间。
+3. 进入 [ds4.c:19268-19273](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L19268-L19273) 的一层编码，确认 attention 在前、ffn 在后。
+4. 用 `DS4_METAL_GRAPH_PREFILL_PROFILE=1`（[ds4.c:20355](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20355)）跑一次（若你有 Mac），观察 encode 与 execute 的耗时分离。
+
+**需要观察的现象**：
+
+- 在非切分路径下，整 chunk 的「编码」（CPU 录 dispatch）与「执行」（GPU 跑）被 `end_commands` 明确分界：`encode_s` 累计所有层的录制时间，`execute_s` 是 `end_commands` 的等待时间。
+- 改变 `DS4_METAL_PREFILL_CHUNK` 会改变 chunk 数，从而改变 `begin/end_commands` 的次数与 KV checkpoint 路径（u6-l1）。
+
+**预期结果**：你能用一句话描述「ds4 的 prefill 是层主序的：一个 chunk = 一个 command buffer = 全部 43 层 + output head，层间靠双缓冲残差交替」。profile 数据「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 ds4 选 layer-major，而不是「先算所有层的 attention，再算所有层的 ffn」这种 op-major 调度？
+
+> **答案**：因为残差流是层间串行依赖的——第 il+1 层的输入就是第 il 层的输出，必须算完一层才能算下一层。layer-major 让相邻算子共享同一批设备 scratch 张量（一层算完即可覆用），并把一整层的所有 dispatch 录进同一 command buffer，最大化批处理收益。op-major 反而要在层间反复同步、且 scratch 复用更差。
+
+**练习 2**：续 prefill（`start != 0`）时，chunk 为什么要对齐到 `prefill_cap` 边界？
+
+> **答案**：因为磁盘 KV checkpoint（u8）与 compressor frontier（u4-l2）都按 chunk 边界对齐保存/裁剪。若一个 chunk 跨越边界，checkpoint 就无法廉价地对应到「已存盘的 token 前缀」，重建与复用语义都会破坏。[ds4.c:21019-21025](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L21019-L21025) 把当前 chunk 截短到下一个 `prefill_cap` 边界，正是为了保证 chunk 边界 == checkpoint 边界。
+
+---
+
+## 5. 综合实践
+
+把本讲四个模块串起来，完成下面这个「一次 prefill 的内核编排」追踪任务：
+
+**任务**：假设用户运行 `./ds4 -p "<一段 5000 token 的提示>"`（Flash 模型，默认 chunk 4096），请画出从「Metal 设备初始化」到「首 token logits 读回」的完整链路，并标注每一步落在哪个文件、哪一行。
+
+**要求覆盖的检查点**：
+
+1. **懒初始化**：第一次 GPU 调用触发 [ds4_metal.m:4561](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4561) 的 `ds4_gpu_init`——指出 device/queue/library 的创建顺序，以及 `.metal` 在 [ds4_metal.m:3039](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L3039) 被拼接、运行时编译。
+2. **chunk 切分**：5000 token 的 prompt 在 [ds4.c:20954](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20954) 被切成「4096 + 904」两段（默认 cap 4096，[ds4.c:8347](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L8347)）。
+3. **层主序编码**：每个 chunk 在 [ds4.c:20369](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20369) 的循环里编码全部 43 层，每层 attention（[ds4.c:17313](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L17313)）+ ffn（[ds4.c:18780](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L18780)）+ 残差交换（[ds4.c:19279](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L19279)）。
+4. **具体内核绑定**：在 attention 里，flash attention 内核（[metal/flash_attn.metal:1379](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/flash_attn.metal#L1379)）经 [ds4_metal.m:16988](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L16988) 绑定；KV 写入内核（[metal/dsv4_kv.metal:104](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L104) / [:208](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal#L208)）负责把投影后的 KV 行写进缓存。
+5. **提交与读回**：[ds4.c:20412](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20412) 的 `end_commands` 一次性提交整卷并等待，[ds4.c:20425](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20425) 读回 logits，送给采样器（u4-l3）。
+
+**产出**：一张时序图（文字版即可），横轴是时间，标出 `init（一次性）→ chunk1 编码 → chunk1 提交/等待 → chunk2 编码 → chunk2 提交/等待 → 读回 logits → 采样`，并确认 chunk1 的 KV 写入与 chunk2 的 KV 写入落在同一组常驻 KV 张量上（tensor-resident）。这张图能把本讲的「运行时对象 → 内核编译 → 命令批处理 → 层主序调度」四个模块贯通成一条数据流。
+
+## 6. 本讲小结
+
+- ds4 的 Metal 后端把 device/queue/library 做成**进程级全局懒初始化**对象（[ds4_metal.m:4561](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4561)），管道从库里逐个实例化；创建顺序固定、失败逐级回滚。
+- `metal/*.metal` 内核**不参与 make 编译**——[Makefile:208](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/Makefile#L208) 只把它们列为依赖；进程启动时 [ds4_metal.m:3039](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L3039) 把 19 个文件拼接成大源码，由 `newLibraryWithSource` **运行时编译**，并用一组 `DS4_METAL_*` 宏焊死敏感数值路径。
+- 命令走**批处理**模型：`begin_commands` 开卷 → 多个 dispatch 共享一个 encoder 录进同一卷 → `flush_commands`（提交并新开，隐藏延迟）或 `end_commands`（提交并等待）。激活/KV/scratch 是 `StorageModeShared` 的常驻张量，权重经 `newBufferWithBytesNoCopy` 零拷贝包装并缓存（[ds4_metal.m:7414](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L7414)）。
+- 推理采用 **layer-major 调度**：一个 chunk = 一个 command buffer = 全部 43 层（attention + ffn）+ output head，层间靠双缓冲残差交替（[ds4.c:20369](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L20369)、[ds4.c:19261](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L19261)）；长 prompt 按 `DS4_METAL_PREFILL_CHUNK`（默认 4096/8192）切 chunk 并对齐到边界（[ds4.c:21012](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L21012)）。
+- flash attention（[metal/flash_attn.metal](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/flash_attn.metal)）与 KV 写入（[metal/dsv4_kv.metal](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/metal/dsv4_kv.metal)）是两类代表性内核：前者用 C++ 模板 `[[host_name]]` 特化出 `kernel_flash_attn_ext_vec_f16_dk512_dv512`，后者把官方 FP8 KV 语义焊进 `kernel_dsv4_kv_fp8_store_f32` 等专用内核，二者都在一次 prefill 的某层 attention 编码里被绑定进同一 command buffer。
+
+## 7. 下一步学习建议
+
+- **u5-l3（CUDA 与 ROCm 后端）**：看 ds4_cuda.cu / ds4_rocm.cu 如何复用同一套 `ds4_gpu.h` 接口实现「tensor-resident + 命令缓冲」模型，对比 Metal 的 `MTLCommandBuffer` 与 CUDA stream / ROCm 的对应物。
+- **u6-l1（分块 prefill 主路径）**：本讲的 chunk 切分只讲了「为什么切、怎么对齐」；u6-l1 会深入 chunk 边界如何决定 KV checkpoint/logit 路径，以及 `DS4_METAL_PREFILL_CHUNK` 的调参影响。
+- **继续阅读源码**：想加深调度理解，可精读 `metal_graph_encode_layer_ffn_batch`（[ds4.c:18780](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4.c#L18780)）看 MoE router + 6 专家 + shared expert 如何在一层内编排；想加深内核理解，可读 `metal/moe.metal`（最大、变体最多）与 `metal/dsv4_hc.metal`（超连接）。
+- **可复现性专题**：把 [ds4_metal.m:4617-4647](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_metal.m#L4617-L4647) 的 `DS4_METAL_*` 漂移补丁宏与 u4-l3 的采样可复现性、u11-l3 的本地 golden 测试向量串起来读，理解 ds4 为何对「最低位漂移」如此敏感。

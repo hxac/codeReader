@@ -1,0 +1,419 @@
+# Legacy Buffer：NVSHMEM 后端与三类内核
+
+## 1. 本讲目标
+
+本讲是 U9 单元（遗留 V1 与 V1/V2 架构对比）的第一篇。DeepEP 当前版本（`__version__ = '2.1.0'`）默认推荐使用 V2 的 `ElasticBuffer`（NCCL Gin + JIT + 解析式 SM/QP），但仓库仍完整保留了 V1 的 `Buffer` 实现，并以 `legacy` 命名空间归档。读懂 V1 有三重价值：
+
+1. **理解架构演进**：V2 的几乎所有设计（统一缓冲区、解析式计算、运行时 JIT）都是对 V1 某个痛点的回应，不读 V1 就难以体会 V2 的动机。
+2. **理解两类对称显存技术**：V1 用 **NVSHMEM** 分配 RDMA 对称显存、用 **CUDA IPC handle** 共享 NVLink buffer，这是两条截然不同的跨 GPU 共享路径，V2 改用 NCCL Gin 后把它们统一了。
+3. **理解三类内核的分工**：`intranode`（纯 NVLink 高吞吐）、`internode`（RDMA+NVLink 两级转发高吞吐）、`low_latency`（纯 RDMA IBGDA 低延迟）——这套「按场景分内核」的思路在 V2 里被 `direct/hybrid` + `low_latency`(仍走 V1) 继承。
+
+学完本讲，你应当能够：
+
+- 说清 V1 `Buffer` 的 `num_nvl_bytes` / `num_rdma_bytes` 双缓冲与 `low_latency_mode` 各自的用途；
+- 复现 V1 用 NVSHMEM 分配对称显存、用 IPC handle 同步 NVLink buffer 的完整初始化流程；
+- 区分 `intranode` / `internode` / `low_latency` 三套 dispatch/combine 的适用场景，并解释 V1 为何需要 `get_dispatch_layout` + `Config` 两步式手动调用。
+
+## 2. 前置知识
+
+本讲默认你已读过 **u2-l2（创建 ElasticBuffer）**，知道 V2 的 `ElasticBuffer` 用一个统一 `num_bytes` 描述「GPU+CPU buffer」、用 NCCL Gin 后端建对称内存窗口、用解析公式决定 SM/QP 数。本讲会反复把 V1 与这套认知做对照，因此先回顾三个 V2 的关键结论：
+
+- V2 的对称内存建立在 **NCCL communicator** 之上（NCCL Gin 后端），窗口布局是 `[[[Workspace] GPU buffer] CPU buffer]`。
+- V2 的 SM/QP 数由 `get_theoretical_num_sms` / `get_theoretical_num_qps` **解析式**算出，无需预热。
+- V2 的内核是**运行时 JIT** 实例化的（`deep_ep/include/impls/*.cuh`），而 `csrc/*` 在安装期只编译 host 侧启动器。
+
+V1 与之**全部相反**：对称内存走 NVSHMEM 与 IPC；SM 数与 chunked 收发 token 数靠**人工调参表** `config_map`；内核在**安装期**就编译进 `_C.so`。理解这三点对立，本讲就成功了一半。
+
+此外需要两个底层概念：
+
+- **对称内存（symmetric memory）**：所有 rank 在各自 GPU 上分配**相同大小、相同偏移**的一块显存，使得 `rank A` 的本地地址加上某个偏移就能直接读写 `rank B` 的对应位置。NVLink 与 RDMA 都依赖这种对称性来「直接寻址对端」。
+- **IPC handle（进程间通信句柄）**：CUDA 提供的把一块显存「导出」成一个可序列化句柄、再由另一个进程「导入」并映射到自己地址空间的能力，是节点内 NVLink 共享显存的标准做法。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [deep_ep/buffers/legacy.py](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py) | V1 的 Python `Buffer` 类：构造参数、NVSHMEM 环境变量编排、`get_dispatch_config`/`get_combine_config` 调参表、dispatch/combine/low_latency 三套 API 的 Python 包装 |
+| [csrc/legacy/buffer.hpp](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp) | V1 的 C++ `Buffer` 结构体：双缓冲字段、构造（本地分配 + IPC 导出）、`sync`（IPC 导入 + NVSHMEM 初始化）、destroy、dispatch/combine/low_latency 的 host 实现、pybind11 注册 |
+| [csrc/legacy/config.hpp](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/config.hpp) | `Config` 调参结构体、`get_nvl_buffer_size_hint`/`get_rdma_buffer_size_hint` 估算、`LowLatencyBuffer`/`LowLatencyLayout` 低延迟双缓冲布局 |
+| [csrc/kernels/legacy/compiled.cuh](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/legacy/compiled.cuh) | V1 编译期常量：最大 NVLink/RDMA 对等体数、workspace 大小、对齐字节数、低延迟 phase 标志、CPU 超时秒数 |
+| [csrc/kernels/backend/nvshmem.cu](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/backend/nvshmem.cu) | NVSHMEM 的薄封装：`get_unique_id`/`init`/`alloc`/`free`/`barrier`/`finalize` |
+| [csrc/utils/shared_memory.hpp](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/utils/shared_memory.hpp) | `SharedMemoryAllocator`：NVLink buffer 的本地分配与 IPC handle 导出/导入（支持普通 `cudaIpcMemHandle` 与 fabric handle 两种模式） |
+| [docs/legacy.md](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/docs/legacy.md) | V1 归档文档：性能表、依赖、训练/解码示例、UB PTX 说明 |
+
+调用方向（V1）：Python `Buffer.dispatch` → `_C.Buffer.intranode_dispatch`（pybind）→ C++ `Buffer::intranode_dispatch`（host，负责 CPU 同步与张量分配）→ `intranode::dispatch`（`csrc/kernels/legacy/` 里安装期编译的 GPU kernel）。注意 V1 没有运行时 JIT，所有 GPU kernel 在 `pip install` 时已编进 `_C.so`。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 V1 Buffer 的双缓冲模型与构造
+
+#### 4.1.1 概念说明
+
+V1 用一个 `Buffer` 类同时承载**两条物理链路**所需的两块缓冲区：
+
+- `num_nvl_bytes`：**节点内 NVLink buffer**。所有同节点 rank 通过 IPC handle 互相映射这块显存，dispatch/combine 的 `intranode` 内核直接经 NVLink 读写对端。即便走 `internode`，节点内的二级转发（scaleup）也用这块。
+- `num_rdma_bytes`：**节点间 RDMA buffer**。由 NVSHMEM 在所有参与 RDMA 的 rank 间分配成**对称显存**，`internode` 内核的跨节点流量与 `low_latency` 内核的全部流量都走这块。
+
+这与 V2 的「单 `num_bytes` 统一描述」截然不同。V2 在构造时按拓扑自动算出 workspace/GPU/CPU 三段；V1 则要求用户**自己**算好两块 buffer 的大小（文档 `get_buffer` 示例里手动取 `dispatch_config` 与 `combine_config` 两个 hint 的最大值）。`low_latency_mode` 是第三种工作模式：开启后 buffer 退化成「只 RDMA、无 NVLink 数据通路、固定双缓冲」的低延迟布局，专用于推理解码。
+
+#### 4.1.2 核心流程
+
+构造一个 V1 Buffer 分三阶段：
+
+1. **构造 C++ runtime**（`_C.Buffer`）：本地 `cudaMalloc` 出 NVLink buffer 与 workspace、导出本地 IPC handle、建立 CPU↔GPU 映射的 MoE 计数器。此时还无法通信。
+2. **Python 侧 all-gather**：把本 rank 的 `device_id`、`ipc_handle`、（必要时）`nvshmem_unique_id` 收集到所有 rank。
+3. **`sync`**：C++ 侧导入对端 IPC handle、拷贝指针表到 GPU、初始化 NVSHMEM 并分配对称 RDMA buffer，最后 `available = true`。
+
+`num_rdma_ranks`（RDMA 域大小）与 `num_nvl_ranks`（NVLink 域大小）由固定的 `LEGACY_NUM_MAX_NVL_PEERS = 8` 切分：
+
+\[ \text{num\_ranks} = \text{num\_rdma\_ranks} \times \text{num\_nvl\_ranks},\quad \text{num\_nvl\_ranks} = \min(\text{num\_ranks}, 8) \]
+
+即每节点最多 8 卡（Hopper DGX 的 NVLink 对等体数），超过 8 rank 即进入多节点 `internode` 模式。
+
+#### 4.1.3 源码精读
+
+Python `Buffer` 的类文档与属性直白地列出了两块 buffer 与三类内核：
+
+[deep_ep/buffers/legacy.py:L14-L29](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L14-L29) —— 注意三个 `high-throughput/low-latency` 内核描述，以及 `num_nvl_bytes`/`num_rdma_bytes` 双属性。
+
+构造函数把尺寸存为成员、并构造 C++ runtime：
+
+[deep_ep/buffers/legacy.py:L87-L93](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L87-L93) —— 注意第 8 个参数 `allow_mnnvl` 在 C++ 侧对应 `use_fabric`（见下文 4.3）。
+
+C++ `Buffer` 的成员字段一眼看清双缓冲结构：
+
+[csrc/legacy/buffer.hpp:L30-L42](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L30-L42) —— `num_nvl_bytes` + `buffer_ptrs[8]`（节点内每 peer 一个指针）+ `num_rdma_bytes` + `rdma_buffer_ptr`（单一对称指针）；`low_latency_mode` 与 `low_latency_buffer_idx`（低延迟双缓冲的奇偶索引）单独存放。
+
+rank 切分与设备探测在构造函数前段完成：
+
+[csrc/legacy/buffer.hpp:L119-L130](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L119-L130) —— `rdma_rank = rank / 8`，`nvl_rank = rank % 8`；并断言每通道字节数不超过 `int` 上限（因为内核用 32 位偏移寻址）。
+
+接着是本地 NVLink buffer 分配与 IPC 导出：
+
+[csrc/legacy/buffer.hpp:L132-L146](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L132-L146) —— 一次性 `malloc` 出 `num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes`，把尾部的「指针表区」「barrier 信号区」与本 rank 的信号区首地址都落在同一块显存里，方便后续 `cudaMemcpy` 到 GPU。注意 `barrier_signal` 区在此**清零**（V1 的 intranode barrier 依赖信号初值为 0，与 V2 一致）。
+
+workspace 与 MoE 计数器是「本地」资源（不走对称内存）：
+
+[csrc/legacy/buffer.hpp:L148-L168](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L148-L168) —— workspace 是普通 `cudaMalloc` 的 32 MiB；三个 MoE 计数器用 `cudaMallocHost(..., cudaHostAllocMapped)` 分配**可映射到设备的 pinned host 内存**，再 `cudaHostGetDevicePointer` 拿到设备地址——这正是后面 CPU busy-wait 能直接读到 GPU 写入值的基础（见 4.4）。初值全部置 `-1`，用「负数 = 未就绪」做哨兵（与 V2 的 `encode_decode_positive` 异曲同工，但 V1 直接用 `-1`）。
+
+#### 4.1.4 代码实践
+
+**实践目标**：在不开 NVSHMEM 的最小情况下，验证 V1 Buffer 的「双缓冲 + 本地资源」字段确实各归各位。
+
+**操作步骤**：
+
+1. 打开 [csrc/legacy/buffer.hpp:L132-L168](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L132-L168)，把每一段分配对应到一张表：NVLink buffer（对称、IPC）、workspace（本地、cudaMalloc）、三个 MoE 计数器（本地、pinned mapped）。
+2. 在构造函数断言 [csrc/legacy/buffer.hpp:L107-L116](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L107-L116) 里找到 `num_nvl_bytes` 与 `num_rdma_bytes` 必须按 `LEGACY_NUM_BUFFER_ALIGNMENT_BYTES`（128）对齐的要求。
+
+**需要观察的现象**：NVLink buffer、workspace、MoE 计数器三者使用了**三种不同的分配 API**（`shared_memory_allocator.malloc` / `cudaMalloc` / `cudaMallocHost`），分别对应「跨进程共享 / 本地 GPU / CPU↔GPU 映射」三种用途。
+
+**预期结果**：能口述出「V1 的对称性只施加在 NVLink buffer（IPC）与 RDMA buffer（NVSHMEM）两块上，workspace 与计数器都是本地资源」。
+
+> 说明：本实践为源码阅读型，无需运行；若要真正构造 Buffer 需多进程 + NVLink/RDMA 环境，见 4.5 与第 5 节。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：V1 为何把 `num_nvl_bytes` 和 `num_rdma_bytes` 设计成两个独立参数，而不是像 V2 那样一个 `num_bytes`？
+
+**参考答案**：因为两者来自**不同的共享机制**、服务于**不同的物理链路**。NVLink buffer 由本 rank `cudaMalloc` 后用 IPC handle 共享给同节点 peer；RDMA buffer 由 NVSHMEM 在跨节点 rank 间对称分配。单节点场景只需 NVLink buffer（`num_rdma_bytes=0`），多节点才需要 RDMA buffer；低延迟模式则只用 RDMA buffer（`num_nvl_bytes=0`）。拆开参数让用户按拓扑只分配真正需要的显存。V2 之所以能统一，是因为 NCCL Gin 后端把两类共享收口到一个对称窗口里。
+
+**练习 2**：构造函数里 `moe_recv_counter` 初值为什么是 `-1` 而不是 `0`？
+
+**参考答案**：`0` 是一个合法的接收计数（某 rank 恰好没收到任何 token）。用 `-1` 作「尚未就绪」哨兵，CPU 轮询时 `while (*moe_recv_counter < 0)`，一旦 GPU 写入真实计数（`>= 0`）即认为就绪，避免把「真的收到 0 个」误判成「还没准备好」。
+
+---
+
+### 4.2 NVSHMEM：RDMA 对称显存的分配与初始化
+
+#### 4.2.1 概念说明
+
+**NVSHMEM** 是 NVIDIA 的 PGAS（Partitioned Global Address Space）库：让多个 GPU 进程在各自的显存里分配出一块**对称**区域，任一 PE（Processing Element）都能用 `nvshmem_ptr` / RDMA 直接读写另一个 PE 的对称地址。DeepEP V1 用它做两件事：
+
+1. **分配 RDMA 对称 buffer**：`rdma_buffer_ptr = nvshmem::alloc(...)`，所有 RDMA rank 拿到逻辑对称的指针，`internode` 内核据此算出对端地址发 RDMA 写。
+2. **提供 IBGDA（InfiniBand GPUDirect Async）通道**：低延迟内核里，GPU 线程直接发起 RDMA 操作（不走 CPU），这是把 dispatch 延迟压到 ~百微秒的关键。
+
+NVSHMEM 的初始化需要所有 rank 协商一个 **unique id**（由 root rank 调 `nvshmemx_get_uniqueid` 生成、广播给其它 rank），再各自 `nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, ...)` 加入同一个 world。这是 V1 与 V2 最显著的工程差异之一：V2 复用 PyTorch 已有的 NCCL communicator（见 u8-l2），不引入新的通信初始化栈。
+
+#### 4.2.2 核心流程
+
+V1 的 NVSHMEM 初始化是「Python 编排环境变量 + 收集 unique id」与「C++ `sync` 里真正 `init`」两段式：
+
+1. Python `__init__` 在 `num_rdma_ranks > 1 or low_latency_mode` 时，设置一整套 `NVSHMEM_*` 环境变量（IBGDA 开关、QP 数、QP depth、team 上限、显存粒度、MNNVL 开关），并让 root rank 生成 unique id 后 all-gather。
+2. C++ `sync` 在 `num_rdma_bytes > 0` 时调用 `nvshmem::init` 加入 world、`nvshmem::alloc` 分配对称 buffer、`cudaMemset` 清零、最后 `nvshmem::barrier(true)` 保证所有 rank 分配完毕。
+
+关键约束：低延迟模式要求 `num_qps_per_rank` **等于本地专家数**（`num_experts // group.size()`），因为低延迟内核给每个专家分配独立的 RDMA RC（Receive Context），实现 per-expert 流水线。
+
+#### 4.2.3 源码精读
+
+Python 侧的环境变量编排：
+
+[deep_ep/buffers/legacy.py:L104-L132](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L104-L132) —— 逐行要点：
+- L108：`NVSHMEM_DISABLE_P2P` 控制 low-latency 是否允许 NVLink 流量（PCIe 会有内存序问题）；
+- L109-L110：开启 IBGDA 并设 `NVSHMEM_IBGDA_NUM_RC_PER_PE = num_qps_per_rank`；
+- L113-L114：把 `NVSHMEM_QP_DEPTH` 抬到 ≥ 在途 WR 数，从而**跳过 WQ 槽位检查**（低延迟快路径的关键）；
+- L118-L122：限制 team 数、关 NVLS、抬高 `NVSHMEM_CUMEM_GRANULARITY` 到 256 MiB 以省显存；
+- L124-L126：除非 `allow_mnnvl`，否则关掉多节点 NVLink 探测；
+- L129-L132：仅 root rank 生成 unique id（低延迟用全局 rank 0，普通模式用 RDMA rank 0），再 all-gather。
+
+C++ `sync` 里 NVSHMEM 的真正初始化：
+
+[csrc/legacy/buffer.hpp:L256-L286](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L256-L286) —— L262-L265 算出 `nvshmem_rank`（低延迟=全局 rank，否则=rdma_rank）与 `num_nvshmem_ranks`，`team_split_stride` 在低延迟时传 0（用 whole world）、否则传 `LEGACY_NUM_MAX_NVL_PEERS`（按节点切 strided team）；L268 `nvshmem::alloc` 分配对称 buffer 并断言返回的 rank 等于本 rank（校验拓扑正确）；L271 清零（低延迟内核要求部分 buffer 初始为零）；L274-L281 若 `enable_shrink` 则额外分配 mask/sync buffer；L284 `nvshmem::barrier(true)` 确保所有 rank 都分配完才放行。
+
+NVSHMEM 的薄封装实现（全部转发到 libnvshmem）：
+
+[csrc/kernels/backend/nvshmem.cu:L49-L76](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/backend/nvshmem.cu#L49-L76) —— `init` 用 unique-id 属性初始化，并在 `team_split_stride > 0` 时 `nvshmem_team_split_strided` 切出子 team（V1 internode 内核靠这个子 team 区分节点内/跨节点 rank）。`alloc`/`free`/`barrier`/`finalize` 见 [csrc/kernels/backend/nvshmem.cu:L23-L47](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/backend/nvshmem.cu#L23-L47) 与 [csrc/kernels/backend/nvshmem.cu:L78-L85](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/backend/nvshmem.cu#L78-L85)。
+
+销毁时对称地先 barrier 再 free/finalize：
+
+[csrc/legacy/buffer.hpp:L314-L324](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L314-L324) —— 注意必须先 `cudaDeviceSynchronize` + `nvshmem::barrier(true)`，否则某个 rank 已 `finalize` 而其它 rank 还在发 RDMA，会崩。
+
+#### 4.2.4 代码实践
+
+**实践目标**：理解 NVSHMEM 初始化的「root 生成 unique id → 全体 all-gather → 各自 init」三步握手，以及为何要在 Python 侧提前烘焙环境变量。
+
+**操作步骤**：
+
+1. 在 [deep_ep/buffers/legacy.py:L129-L132](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L129-L132) 找到 root rank 的判定条件（低延迟 vs 普通），画出 unique id 在 8 rank 单节点 + 2 节点 × 8 rank 两种拓扑下的传播路径。
+2. 对照 [csrc/legacy/buffer.hpp:L262-L265](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L262-L265) 与 [csrc/kernels/backend/nvshmem.cu:L60-L71](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/kernels/backend/nvshmem.cu#L60-L71)，说明 `team_split_stride` 在两种模式下分别取值及其对 `cpu_rdma_team` 的影响。
+
+**需要观察的现象**：`NVSHMEM_IBGDA_NUM_RC_PER_PE`、`NVSHMEM_QP_DEPTH` 等**必须在 `nvshmem_init` 之前**设进环境变量——这就是为什么 Python 在构造 C++ runtime 之前先把它们写进 `os.environ`。
+
+**预期结果**：能解释「NVSHMEM 的配置是进程级的、且只在 init 时读取一次，因此必须在 Python 构造 Buffer 之前完成环境变量编排」。
+
+> 说明：实际运行需要 NVSHMEM 已安装且集群配置 RDMA；本实践为源码阅读型。若本地无 RDMA，可只看 `num_rdma_bytes=0` 分支被跳过的路径。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `nvshmem::init` 之后必须 `nvshmem::barrier(true)` 才能开始通信？
+
+**参考答案**：NVSHMEM 的对称分配是**各 rank 独立**调 `nvshmem::alloc`，但没有全局屏障保证「所有 rank 都已完成分配」。若 rank A 分配完就开始发 RDMA 写 rank B 的对称地址，而 rank B 还没分配，会写到无效地址。`barrier(true)`（含 `cudaDeviceSynchronize`）确保所有 rank 的分配与清零都落地后才放行。
+
+**练习 2**：V2 为什么能完全去掉 NVSHMEM？
+
+**参考答案**：V2 用 NCCL Gin 后端在已有 NCCL communicator 上建立对称内存窗口（见 u3-l4/u8-l2），通信初始化复用 PyTorch 的 NCCL，无需额外协商 unique id；GPUDirect RDMA 的发起也从 NVSHMEM 的 IBGDA API 改为 NCCL Gin 的 `gin.put`/`gin.signal`。代价是 V2 不再支持 V1 那套「QP 数 = 本地专家数」的 per-expert 低延迟流水线，低延迟模式在 V2 里仍保留为 legacy 路径。
+
+---
+
+### 4.3 IPC handle：NVLink buffer 的跨进程共享
+
+#### 4.3.1 概念说明
+
+NVSHMEM 解决了 RDMA buffer 的对称性，但**节点内 NVLink buffer 不走 NVSHMEM**——它走更轻量的 **CUDA IPC handle**。原因：
+
+- 节点内 8 卡通过 NVLink 两两直连，延迟极低，不需要 NVSHMEM 那套重型的 RDMA 协商；
+- IPC handle 是 CUDA 原生的「把 `cudaMalloc` 出的显存跨进程映射」机制，开销小、兼容性好（甚至支持 fabric handle 用于 MNNVL）。
+
+流程：每个 rank 自己 `cudaMalloc` 一块 NVLink buffer，调 `cudaIpcGetMemHandle` 把它导出成一个可序列化的 `cudaIpcMemHandle_t`（一个普通结构体），经 Python `dist.all_gather_object` 广播给所有同节点 peer；peer 收到后调 `cudaIpcOpenMemHandle` 把它映射进自己的地址空间，拿到一个能直接经 NVLink 读写的本地指针。最后把所有 peer 的指针拼成一张表 `buffer_ptrs[8]` 拷到 GPU，内核据此寻址对端。
+
+注意：这里用 `use_fabric`（Python 的 `allow_mnnvl`）在「普通 IPC」与「fabric handle」之间二选一——后者支持 MNNVL（多节点 NVLink），是 V1 对 Hopper B200 这类 fabric 互联的适配。
+
+#### 4.3.2 核心流程
+
+1. 构造期：本 rank `shared_memory_allocator.malloc` 分配 NVLink buffer（含尾部信号/指针表区），`get_mem_handle` 导出 handle。
+2. `sync` 期：遍历同节点 peer，`open_mem_handle` 导入对端 handle，填 `buffer_ptrs[i]`；并把 `buffer_ptrs` / `barrier_signal_ptrs` 两张表 `cudaMemcpy` 到 GPU。
+3. `destroy` 期：`close_mem_handle` 关闭对端映射、`free` 释放本地 buffer。
+
+`SharedMemoryAllocator` 是一个**双模式**分配器：`use_fabric=false` 时走 `cudaMalloc` + `cudaIpcMemHandle`；`use_fabric=true` 时走 CUDA VMM（`cuMemCreate`/`cuMemMap`/`cuMemSetAccess`）+ `CUmemFabricHandle`。后者把显存映射到所有 GPU（`cu_mem_set_access_all`），适配 fabric 拓扑。
+
+#### 4.3.3 源码精读
+
+构造期本地分配与导出（已在 4.1.3 引用，这里聚焦 IPC 部分）：
+
+[csrc/legacy/buffer.hpp:L134-L137](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L134-L137) —— `malloc` 后立刻 `get_mem_handle` 取出本 rank 的 IPC handle。
+
+`sync` 期导入对端 handle 并拷贝指针表：
+
+[csrc/legacy/buffer.hpp:L233-L253](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L233-L253) —— L236 用 `offset = rdma_rank * num_nvl_ranks` 只遍历**同节点**的 peer（跨节点 peer 不共享 NVLink buffer）；L241-L242 把收到的字节串反序列化成 `MemHandle` 并 `open_mem_handle` 映射；L245 对本 rank 自身做一致性校验（收到的 handle 应与自己导出的相同）；L250-L251 把两张指针表拷到 GPU 供内核寻址。
+
+`SharedMemoryAllocator` 的双模式分配：
+
+[csrc/utils/shared_memory.hpp:L52-L76](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/utils/shared_memory.hpp#L52-L76) —— fabric 分支用 VMM 三步（`cuMemCreate` 建物理分配、`cuMemAddressReserve` 预留虚拟地址、`cuMemMap` 绑定），再 `cu_mem_set_access_all` 让所有 GPU 可读写；非 fabric 分支直接 `cudaMalloc`。
+
+handle 的导出与导入：
+
+[csrc/utils/shared_memory.hpp:L86-L98](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/utils/shared_memory.hpp#L86-L98) —— `get_mem_handle` 按 `use_fabric` 选 `cuMemExportToShareableHandle` 或 `cudaIpcGetMemHandle`；
+[csrc/utils/shared_memory.hpp:L100-L113](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/utils/shared_memory.hpp#L100-L113) —— `open_mem_handle` 对应地选 `cuMemImportFromShareableHandle` 或 `cudaIpcOpenMemHandle`。`MemHandle` 用 `union` 同时容纳两种句柄（见 [csrc/utils/shared_memory.hpp:L10-L18](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/utils/shared_memory.hpp#L10-L18)）。
+
+Python 侧收集 device_id 与 IPC handle（用于 `cudaIpcOpenMemHandle` 的对端 device 校验）：
+
+[deep_ep/buffers/legacy.py:L96-L101](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L96-L101) —— 注意 IPC handle 是 `pybind11::bytearray`（原始字节），用 `dist.all_gather_object` 在 rank 间传递；`sync` 的最终调用在 [deep_ep/buffers/legacy.py:L135-L136](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L135-L136)。
+
+#### 4.3.4 代码实践
+
+**实践目标**：理清「NVLink buffer 对称性」是靠 IPC handle 在 `sync` 阶段动态建立的，而非分配时天然存在。
+
+**操作步骤**：
+
+1. 跟踪一次 `sync` 调用的输入：`device_ids`（Python all-gather 的本地 device id 列表）、`all_gathered_handles`（Python all-gather 的 IPC handle 字节串列表）、`root_unique_id`（NVSHMEM 用）。在 [csrc/legacy/buffer.hpp:L227-L253](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L227-L253) 里确认只有「同节点 peer」被 `open_mem_handle`。
+2. 对照 [csrc/utils/shared_memory.hpp:L100-L113](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/utils/shared_memory.hpp#L100-L113)，说明 `cudaIpcOpenMemHandle` 返回的指针与本 rank 自己 `cudaMalloc` 的指针在数值上**不同**，但指向同一块物理显存——这正是对称寻址能成立的原因。
+
+**需要观察的现象**：`buffer_ptrs[i]`（i ≠ nvl_rank）是通过对端 IPC handle 映射进来的「本地指针」，内核用它与对端的 NVLink buffer 通信，但每个 rank 看到的指针数值各不相同（V2 的 NCCL Gin 则用 `get_sym_ptr` 给出统一的对称指针，对比 u3-l4）。
+
+**预期结果**：能解释「V1 的节点内对称寻址靠 `buffer_ptrs_gpu` 这张指针表，由内核在运行时查表；V2 改为编译期/对称指针直接计算」。
+
+> 说明：本实践为源码阅读型。运行需要至少 2 张同节点 GPU + 多进程。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `sync` 里 `open_mem_handle` 的循环用 `offset = rdma_rank * num_nvl_ranks`，而不是遍历全部 rank？
+
+**参考答案**：NVLink buffer 只在**同节点**的 peer 间共享。`all_gathered_handles` 收集了全部 rank 的 handle，但只有「与本 rank 同属一个 RDMA rank（即同节点）」的那 `num_nvl_ranks` 个 handle 才是 NVLink 可达的；其余节点的 handle 应通过 NVSHMEM 的 RDMA buffer 访问，不能也不应 `cudaIpcOpenMemHandle`。
+
+**练习 2**：`allow_mnnvl`（Python）为何映射到 C++ 的 `use_fabric`？
+
+**参考答案**：MNNVL（Multi-Node NVLink）要求显存能跨节点经 NVLink fabric 直接寻址，普通 `cudaIpcMemHandle` 只支持单节点 IPC；必须改用 CUDA VMM 的 fabric handle（`cuMemCreate` + `CU_MEM_HANDLE_TYPE_FABRIC`）并 `cuMemSetAccess` 到所有 GPU。因此「允许 MNNVL」在实现层面就等于「用 fabric API 分配 buffer」，两者用同一个布尔开关。
+
+---
+
+### 4.4 三类内核与 Config 调参
+
+#### 4.4.1 概念说明
+
+V1 把 dispatch/combine 拆成三套**独立编译**的内核，按物理链路与延迟目标选用：
+
+| 内核族 | 链路 | 模式触发条件 | 典型场景 |
+| --- | --- | --- | --- |
+| `intranode` | 纯 NVLink | `num_rdma_ranks == 1` | 单节点训练 / prefill |
+| `internode` | RDMA + NVLink 两级转发 | `num_rdma_ranks > 1` 且非低延迟 | 多节点训练 / prefill |
+| `low_latency` (`internode_ll`) | 纯 RDMA (IBGDA) | `low_latency_mode=True` | 推理解码 |
+
+`dispatch`/`combine`（高层 API）会按 `num_rdma_ranks` 自动在 `intranode_*` 与 `internode_*` 之间二选一（见 [deep_ep/buffers/legacy.py:L378-L382](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L378-L382)）；低延迟则需用户显式调 `low_latency_dispatch`/`low_latency_combine`。
+
+每套内核的性能由一个 `Config` 结构体控制，含 5 个旋钮：`num_sms`、`num_max_nvl_chunked_send_tokens`、`num_max_nvl_chunked_recv_tokens`、`num_max_rdma_chunked_send_tokens`、`num_max_rdma_chunked_recv_tokens`。V1 **没有**解析式公式，而是用一张人工调参表 `config_map: num_ranks → Config` 给出「DeepSeek 内部集群上调出来的最优值」（代码里两处 `# TODO: automatically tune` 注释印证了这是待自动化的手动表）。
+
+`intranode`/`internode` 还共享一个关键设计：**channel = num_sms / 2**，一个 channel 用两个 block（偶数 block 发送、奇数 block 接收）；这与 V2 的「a warp is a channel」（见 u5-l1/u5-l2）是两套完全不同的 channel 模型。
+
+#### 4.4.2 核心流程
+
+一次高层 `dispatch` 的完整流程：
+
+1. **（仅 V1）`get_dispatch_layout`**：扫描 `topk_idx`，算出 `num_tokens_per_rank` / `num_tokens_per_rdma_rank` / `num_tokens_per_expert` / `is_token_in_rank` 四张布局表。
+2. **取 Config**：`get_dispatch_config(group_size)` 查 `config_map`（用户也可传自调的 `config`）。
+3. **路由分发**：按 `num_rdma_ranks` 选 `intranode_dispatch` 或 `internode_dispatch`。
+4. **CPU 同步**（默认）：host busy-wait 三个 MoE 计数器（`moe_recv_counter` / `moe_recv_rdma_counter` / `moe_recv_expert_counter`）直到全部 `>= 0`，从而拿到精确的 `num_recv_tokens` 再分配 `recv_x`。
+
+低延迟路径则完全不同：不查 layout、不 CPU 同步，靠固定双缓冲 + IBGDA 直接 RDMA，并可返回 `hook` 把「真正接收」推迟到用户显式调用——从而实现「RDMA 在后台跑、不占 SM」的重叠。
+
+#### 4.4.3 源码精读
+
+`config_map` 调参表（dispatch 版）：
+
+[deep_ep/buffers/legacy.py:L245-L260](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L245-L260) —— 每个 `num_ranks` 对应一个 `Config(num_sms, nvl_send, nvl_recv, rdma_send, rdma_recv)`，例如 `8: Config(20, 6, 256, 6, 128)`。`# TODO: automatically tune` 注释表明这是手动调参。combine 版见 [deep_ep/buffers/legacy.py:L275-L290](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L275-L290)。
+
+高层 `dispatch` 的内核选择与默认 config：
+
+[deep_ep/buffers/legacy.py:L374-L382](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L374-L382) —— `config = self.get_dispatch_config(self.group_size) if config is None else config`，`num_rdma_ranks > 1` 时转 `internode_dispatch`。
+
+intranode 的 channel 划分与 CPU busy-wait：
+
+[csrc/legacy/buffer.hpp:L435-L437](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L435-L437) —— `int num_channels = config.num_sms / 2`，并断言 `num_sms % 2 == 0`（偶数 block 配对）；
+[csrc/legacy/buffer.hpp:L578-L599](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L578-L599) —— CPU 同步分支：`num_worst_tokens == 0` 时进入 `while(true)` 轮询 `*moe_recv_counter >= 0` 与每个 expert 计数器，超时 `LEGACY_NUM_CPU_TIMEOUT_SECS=100` 秒抛异常；`num_worst_tokens > 0` 时跳过同步、按最坏值分配（仅 intranode 支持，兼容 CUDA graph，与 V2 的「无 CPU sync 模式」同思路，见 u5-l4）。
+
+internode 的 CPU 同步多了一个 RDMA 计数器，且为防 GIL 阻塞先 `gil_scoped_release`：
+
+[csrc/legacy/buffer.hpp:L895-L898](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L895-L898) —— 注释解释：busy-wait 期间若其它 Python 线程（如 KV 传输）需要 GIL 会被卡死，故释放 GIL；
+[csrc/legacy/buffer.hpp:L1085-L1108](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L1085-L1108) —— 同时等 `moe_recv_counter`、`moe_recv_rdma_counter`、expert 计数器三者就绪。
+
+低延迟的双缓冲翻转与 send/recv phase：
+
+[csrc/legacy/buffer.hpp:L1502-L1505](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L1502-L1505) —— `auto buffer = layout.buffers[low_latency_buffer_idx]; auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];` 每次调用在奇/偶两块缓冲间翻转（双 micro-batch 重叠的基础）；
+[csrc/legacy/buffer.hpp:L1545-L1577](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L1545-L1577) —— `launcher` lambda 按 `phases` 位掩码决定跑 `SEND_PHASE`（=1）还是 `RECV_PHASE`（=2）：无 hook 时两者都跑，有 hook 时先只跑 SEND，把 RECV 封进回调（见 [csrc/legacy/buffer.hpp:L1589-L1592](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L1589-L1592)）。
+
+低延迟的 QP depth 约束（Python 侧断言）：
+
+[deep_ep/buffers/legacy.py:L609](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L609) —— `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`，保证 QP 深度恒大于在途 WR 数，从而内核可跳过 WQ 槽位检查。
+
+`Config` 的 buffer 估算与低延迟布局：
+
+[csrc/legacy/config.hpp:L24-L51](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/config.hpp#L24-L51) —— `Config` 构造体与对 chunked token 数的不变式（如 `num_max_*_chunked_send_tokens <= num_max_*_chunked_recv_tokens / 2`，与「RDMA 惰性 head 更新」防死锁设计相关）；
+[csrc/legacy/config.hpp:L122-L183](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/config.hpp#L122-L183) —— `LowLatencyLayout` 把 RDMA buffer 切成「2 块对称发送 / 2 块对称接收 / 2 块对称信号」三段，dispatch 与 combine 复用同一物理区（靠 `clean_meta` 在每次调用前清信号区）。
+
+#### 4.4.4 代码实践
+
+**实践目标**：跑通 V1 的最小端到端测试，观察三类内核的实际触发与 CPU 同步行为。
+
+**操作步骤**：
+
+1. 单机 8 卡环境，按 [docs/legacy.md:L41-L72](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/docs/legacy.md#L41-L72) 的说明构建（需 `NVSHMEM_DIR`），运行 `python tests/legacy/test_intranode.py`（参考 [tests/legacy/test_intranode.py:L99-L116](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/legacy/test_intranode.py#L99-L116) 看 dispatch 的标准调用：先 `get_dispatch_layout` 再 `dispatch(..., num_tokens_per_rank=..., is_token_in_rank=..., num_tokens_per_expert=..., config=...)`）。
+2. 把 `--num-experts` 改为不等于 `group.size()` 整数倍的值，观察构造期断言 `num_experts % num_ranks == 0` 报错。
+3. （若有 RDMA）运行 `tests/legacy/test_internode.py` 与 `tests/legacy/test_low_latency.py`，对比三类内核的输出带宽/延迟与 [docs/legacy.md:L19-L39](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/docs/legacy.md#L19-L39) 的参考值。
+
+**需要观察的现象**：
+- intranode 测试输出里 `num_rdma_ranks == 1`，`dispatch` 走 `intranode_dispatch`，CPU 同步正常返回 `num_recv_tokens_per_expert_list`；
+- 若故意把某次 dispatch 的输入 token 数改大到使接收计数超过缓冲容量，应在 [csrc/legacy/buffer.hpp:L627-L637](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L627-L637) 的容量断言处报错。
+
+**预期结果**：能复现 README 表格里 intranode dispatch ≈153 GB/s（NVLink）的量级；低延迟 dispatch 在 EP=8 时 ≈77 μs。
+
+> 说明：实际运行依赖 NVSHMEM 安装与多卡环境；若本地不具备，可退化为源码阅读型——按上述步骤在 [tests/legacy/test_intranode.py](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/tests/legacy/test_intranode.py) 里跟踪 `buffer.get_dispatch_layout` → `buffer.dispatch` → `buffer.combine` 的调用与断言。运行结果待本地验证。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`config_map` 为什么按 `num_ranks` 索引，而不是按 `hidden` 或 `num_tokens`？
+
+**参考答案**：`Config` 的 5 个旋钮（SM 数、chunked send/recv token 数）主要影响的是**通道深度与并发度**，而这些与「多少个 rank 在同时收发」强相关——rank 数变了，每个 channel 承担的 peer 数、RDMA buffer 的切分都变，最优 chunked token 数随之变化。相对地，`hidden` 影响的是每 token 字节数（线性放大 buffer 容量，但不太改变最优并发结构），`num_tokens` 是运行时变量。因此把经验值按 `num_ranks` 索引最经济。这正是 V1 「auto-tuning on your cluster」思路的体现（见 [docs/legacy.md:L318-L321](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/docs/legacy.md#L318-L321)）。
+
+**练习 2**：低延迟模式为什么要求 `num_qps_per_rank == num_local_experts`？
+
+**参考答案**：低延迟内核给每个本地专家分配一条独立的 RDMA RC（`NVSHMEM_IBGDA_NUM_RC_PER_PE = num_qps_per_rank`），让不同专家的 dispatch/combine 流水线互不阻塞、把延迟压到最低。若 QP 数少于专家数，多个专家会复用同一条 RC 串行发送，延迟显著上升；多于则浪费 RDMA 资源。故强制相等。这也是 V1 文档 [docs/legacy.md:L253-L256](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/docs/legacy.md#L253-L256) 强调的约束。
+
+---
+
+### 4.5 V1 的两步式调用与 config_map（衔接 V2 对比）
+
+> 本小节是「Legacy Buffer」与「NVSHMEM」两个最小模块的收束点，直接服务于本讲指定的实践任务：对照 V1/V2 的 dispatch 签名差异。
+
+#### 4.5.1 V1 dispatch 的两步式调用
+
+V1 用户必须**先**调 `get_dispatch_layout(topk_idx, num_experts)` 拿到四张布局表，**再**把它们作为参数传给 `dispatch`：
+
+[deep_ep/buffers/legacy.py:L292-L319](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L292-L319) 返回 `(num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, event)`；
+[deep_ep/buffers/legacy.py:L322-L359](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L322-L359) 的 `dispatch` 形参里 `num_tokens_per_rank` / `is_token_in_rank` / `num_tokens_per_expert` 都是**必传**（非 cached 模式下断言三者非 None，见 [csrc/legacy/buffer.hpp:L395-L396](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/csrc/legacy/buffer.hpp#L395-L396) 对应的 host 检查 L442-L444），还需显式传 `config: Config`。
+
+#### 4.5.2 V2 dispatch 的一步式调用
+
+V2 的 `dispatch` 把布局计算内化，用户只需给 `x` / `topk_idx` / `num_experts`：
+
+[deep_ep/buffers/elastic.py:L855-L873](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/elastic.py#L855-L873) —— 没有 `num_tokens_per_rank` 等参数；SM/QP 由 `num_sms`/`num_qps`（默认 0 = 解析式自动）控制，没有 `config: Config`；返回的是结构化 `EPHandle` 而非裸 tuple。
+
+#### 4.5.3 config_map 的作用
+
+`config_map`（[deep_ep/buffers/legacy.py:L245-L258](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L245-L258)）是 V1 「替代解析式计算」的人工经验表：键是 `num_ranks`，值是 `Config(num_sms, num_max_nvl_chunked_send_tokens, num_max_nvl_chunked_recv_tokens, num_max_rdma_chunked_send_tokens, num_max_rdma_chunked_recv_tokens)`。它把「在 DeepSeek 内部集群上跑各种 EP 规模、调出来的最优 chunked 收发 token 数」固化成查表。V2 用 `get_theoretical_num_sms`（带宽建模，见 u3-l3）替代了 `num_sms` 的查表，并把 chunked token 数的旋钮连同整个 channel 队列模型一起重构为「warp 即 channel」，从而不再需要这张表。
+
+## 5. 综合实践
+
+**任务**：完成本讲指定的对照实践——把 V1 与 V2 的 dispatch 工作流并排读懂，并用一张表说清差异，最后解释 `config_map` 的角色。
+
+**步骤**：
+
+1. 打开两个文件并排：
+   - V1：[deep_ep/buffers/legacy.py:L322-L405](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L322-L405)（`dispatch`）+ [deep_ep/buffers/legacy.py:L292-L319](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L292-L319)（`get_dispatch_layout`）+ [deep_ep/buffers/legacy.py:L245-L260](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/legacy.py#L245-L260)（`get_dispatch_config`）。
+   - V2：[deep_ep/buffers/elastic.py:L855-L876](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/deep_ep/buffers/elastic.py#L855-L876)（`dispatch`）。
+
+2. 列出 V1 需要用户手动做、而 V2 内化了的步骤：
+   - **布局计算**：V1 必须先 `get_dispatch_layout` 得到 `num_tokens_per_rank`/`num_tokens_per_rdma_rank`/`num_tokens_per_expert`/`is_token_in_rank` 四张表并传入；V2 内部完成。
+   - **性能配置**：V1 必须传 `config: Config`（或让 `get_dispatch_config(num_ranks)` 查 `config_map`）；V2 用解析式 `num_sms`/`num_qps`（默认自动）。
+   - **handle 结构**：V1 返回裸 tuple（`rank_prefix_matrix, channel_prefix_matrix, ...`），combine 时手动解包；V2 返回结构化 `EPHandle`。
+
+3. 解释 `config_map`（`num_ranks → Config`）的作用：它是 V1 在「没有解析式 SM/QP 公式」时，把集群上调出的最优 `num_sms` 与 chunked send/recv token 数按 EP 规模（`num_ranks`）固化的查表；`num_ranks` 是键因为通道并发结构对 rank 数最敏感。两处 `# TODO: automatically tune` 注释印证这是待自动化的手动表，V2 的解析式公式正是对这个 TODO 的回应。
+
+4. （可选，需多卡）写一个最小脚本，分别用 `deep_ep.Buffer`（V1）与 `deep_ep.ElasticBuffer`（V2）对同一份 `topk_idx`/`x` 做 dispatch+combine，验证两者结果一致，并对比调用代码的「步骤数」。
+
+**预期产出**：一张三列表（「步骤 / V1 / V2」），覆盖布局计算、性能配置、handle、CPU 同步四个维度；一段说明 `config_map` 由来与局限的文字。
+
+> 说明：第 4 步运行需 Hopper + 多卡 + NVSHMEM（V1）；若无环境，前三步的源码对照已足以达成实践目标。运行结果待本地验证。
+
+## 6. 本讲小结
+
+- V1 `Buffer` 用 **`num_nvl_bytes` + `num_rdma_bytes` 双缓冲**分别承载节点内 NVLink 与节点间 RDMA，外加 `low_latency_mode` 切到纯 RDMA 的第三种布局；workspace 与 MoE 计数器是本地资源，不参与对称共享。
+- **NVSHMEM** 负责分配 RDMA 对称显存与提供 IBGDA 通道：Python 先编排 `NVSHMEM_*` 环境变量并广播 root unique id，C++ `sync` 里 `nvshmem::init` + `nvshmem::alloc` + `nvshmem::barrier` 完成初始化。
+- 节点内 NVLink buffer 不走 NVSHMEM，而走更轻量的 **CUDA IPC handle**：本 rank `cudaMalloc` + `get_mem_handle` 导出，peer `open_mem_handle` 导入，再把指针表拷到 GPU 供内核寻址；`use_fabric`/`allow_mnnvl` 切换普通 IPC 与 fabric handle（MNNVL）。
+- 三类内核——`intranode`（纯 NVLink）/ `internode`（RDMA+NVLink 两级）/ `low_latency`（纯 RDMA IBGDA）——按 `num_rdma_ranks` 与 `low_latency_mode` 选用；前两者共享 `num_channels = num_sms/2` 的「两 block 一 channel」模型，后者用固定双缓冲 + send/recv phase + hook 实现零占 SM 重叠。
+- V1 内核在**安装期**编译（无 JIT），性能靠人工 `config_map: num_ranks → Config` 查表；用户必须两步式调用 `get_dispatch_layout` + `dispatch(config=...)`。
+- V2 把上述痛点全部重构：NCCL Gin 统一两类共享、解析式 SM/QP 取代 `config_map`、JIT 取代安装期编译、`EPHandle` 取代裸 tuple——本讲是理解这些演进的基准线。
+
+## 7. 下一步学习建议
+
+- 下一篇 **u9-l2（V1 vs V2 架构演进与对比）** 会把本讲梳理的 V1 事实（NVSHMEM、IPC、`config_map`、安装期编译）与 V2 的对应物（NCCL Gin、对称指针、解析式 SM/QP、JIT）整理成一张完整对比表，建议学完本讲后紧接着读。
+- 若想深入 V1 内核实现，可读 `csrc/kernels/legacy/`（`api.cuh` 声明、`buffer.cuh`/`launch.cuh` 启动器、`ibgda_device.cuh` 是 IBGDA 设备端代码），对照本讲的 host 侧 `Buffer::*` 方法看数据如何流入流出。
+- 若想理解 V2 如何「吃掉」IPC 与 NVSHMEM 的职责，回顾 **u3-l4（NCCL Gin 后端与对称内存上下文）** 与 **u8-l2（NCCL communicator 复用与拓扑探测）**，把 `get_sym_ptr`/对称窗口与本讲的 `buffer_ptrs_gpu` 表对照看。
+- 低延迟路径在 V2 仍未被重写，仍走本讲的 `internode_ll` 内核；若关注推理部署，可顺读 [docs/legacy.md:L229-L290](https://github.com/deepseek-ai/DeepEP/blob/099d5f2bad488b9c534ea785062b12f2e91d1d41/docs/legacy.md#L229-L290) 的双 micro-batch 重叠示例与图。
