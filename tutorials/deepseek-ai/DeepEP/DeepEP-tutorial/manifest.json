@@ -1,0 +1,962 @@
+{
+  "project": "DeepEP",
+  "head": "099d5f2bad488b9c534ea785062b12f2e91d1d41",
+  "rationale": "DeepEP 是一个面向 MoE 专家并行（EP）的高性能 GPU 通信库，代码量大、跨语言（Python/C++/CUDA）、且包含一套自研的运行时 JIT 编译子系统，难度跨度极大。因此学习路线设计为“先见森林后见树木、先跑通再深入内核”。\n\n单元划分遵循“由外到内、由用到造”的顺序：U1 让读者建立项目定位与运行能力；U2 打通 Python 层 EP 工作流（这是绝大多数用户唯一需要掌握的内容）；U3 讲清楚支撑 EP 的三大机制——拓扑域、缓冲区内存布局、SM/QP 解析计算；U4 单独讲解 JIT 编译系统，因为它是理解后续所有内核如何“凭空生成并加载”的前提；U5/U6 深入 dispatch 与 combine 两条核心内核链路（直接模式、hybrid 两级模式、epilogue、cached handle、确定性排序）；U7 覆盖 barrier/Engram/PP/AGRS 四个相对独立的实验性特性；U8 收束到底层 PTX/TMA 原语、NCCL 通信域复用、环境变量体系与测试基准；U9 单独讲遗留 V1（NVSHMEM 后端）并与 V2 对比，帮助理解架构演进。\n\n讲义之间通过 depends_on 显式标注依赖，确保读者按序学习时前置知识齐备。大型项目按规则规划 30+ 篇讲义，每篇只解决一个主题、引用 1~6 个真实源码文件、并给出可操作的代码实践任务。所有 action 在 full 模式下均为 new。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 DeepEP 与跑通第一个测试",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "DeepEP 是什么：专家并行通信库的整体定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 DeepEP 的定位——面向 MoE 训练与推理的高性能专家并行（EP）通信库，讲清楚 EP、dispatch/combine、NVLink/RDMA、FP8、JIT 等核心概念。",
+          "learning_goals": [
+            "理解专家并行（Expert Parallelism）在 MoE 模型中的作用以及 dispatch/combine 通信的含义",
+            "了解 DeepEP V2 相对 V1 的关键变化：NCCL Gin 后端、全 JIT、解析式 SM/QP 计算",
+            "建立对 NVLink（节点内）与 RDMA（节点间）两类物理链路的初步认识"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "EP/MoE 概念"
+          ],
+          "practice_task": "阅读 README 的 Performance 表格，用自己的话写出在 SM90/CX7/EP8x2 配置下 dispatch 与 combine 的瓶颈带宽分别是多少，并解释“逻辑带宽”的含义。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与代码分层：Python / C++ / JIT 内核",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库的整体目录组织：Python 包 deep_ep/、C++ 绑定 csrc/、JIT 内核源 deep_ep/include/、测试 tests/、文档 docs/ 之间的职责分工与调用方向。",
+          "learning_goals": [
+            "分清 deep_ep/（Python 接口与 JIT 内核源）、csrc/（C++ 缓冲区与编译子系统）、tests/、docs/ 各自的职责",
+            "理解一次 EP 调用从 Python 到 C++ 再到 JIT 编译内核的调用方向",
+            "识别 elastic（V2）、legacy（V1）、jit、kernels、backend 等子模块的边界"
+          ],
+          "source_files": [
+            "csrc/python_api.cpp",
+            "deep_ep/__init__.py"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "Python↔C++ 绑定"
+          ],
+          "practice_task": "画出从用户调用 buffer.dispatch() 到最终 GPU kernel 执行所经过的文件/模块依赖图（至少包含 elastic.py、buffer.hpp、kernels/elastic/dispatch.hpp、jit/compiler.hpp、include/impls/dispatch.cuh）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "环境依赖、安装与构建流程",
+          "order": 3,
+          "filename": "u1-l3-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解 DeepEP 的运行依赖（Hopper/SM90、CUDA、PyTorch、NCCL、NVSHMEM）以及 setup.py 的构建逻辑、持久化环境变量、SO 名称解析等工程细节。",
+          "learning_goals": [
+            "了解 DeepEP 的硬件与软件依赖以及 pip 安装 NCCL 的方式",
+            "读懂 setup.py 如何拼接源文件、include、链接库与编译标志",
+            "理解持久化环境变量（persistent_env_names）在构建时被烘焙进包的机制"
+          ],
+          "source_files": [
+            "setup.py",
+            "deep_ep/__init__.py",
+            "docs/nvshmem.md"
+          ],
+          "minimal_modules": [
+            "setup.py",
+            "构建依赖"
+          ],
+          "practice_task": "在 setup.py 中找到 persistent_env_names 的定义，并解释为何 EP_JIT_CACHE_DIR、EP_NCCL_ROOT_DIR 等变量需要在构建时被捕获；尝试说明 get_nccl_lib_name 解决了 pip wheel 的什么问题。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "快速上手：初始化分布式环境并跑通 test_ep.py",
+          "order": 4,
+          "filename": "u1-l4-run-first-test.md",
+          "level": "beginner",
+          "topic": "以 tests/elastic/test_ep.py 为例，讲解如何初始化 torch.distributed、构造 ElasticBuffer、运行 dispatch/combine 并解读输出中的带宽与延迟数字。",
+          "learning_goals": [
+            "掌握 init_dist / init_seed 等 test 工具如何拉起多进程分布式环境",
+            "学会用 ElasticBuffer 构造缓冲区并运行一次 dispatch+combine 的完整测试",
+            "能解读测试输出中的 SO/SU 带宽、copy 带宽与延迟（us）"
+          ],
+          "source_files": [
+            "tests/elastic/test_ep.py",
+            "deep_ep/utils/envs.py"
+          ],
+          "minimal_modules": [
+            "test_ep.py",
+            "init_dist"
+          ],
+          "practice_task": "修改 test_ep.py 的命令行参数（如 --num-tokens、--num-experts、--num-topk）在单机 8 卡上跑一次，记录 dispatch 与 combine 的 SO/SU 带宽，并对比是否接近 README 给出的参考值。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Python 接口层：ElasticBuffer 与 EP 工作流",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "import deep_ep 背后做了什么：NCCL 校验与 JIT 初始化",
+          "order": 1,
+          "filename": "u2-l1-import-init.md",
+          "level": "intermediate",
+          "topic": "逐行解读 deep_ep/__init__.py：加载持久化环境变量、check_nccl_so 校验运行时与链接版本一致、init_jit 把库根路径与 CUDA/NCCL 路径注入 JIT 编译器。",
+          "learning_goals": [
+            "理解 import deep_ep 时自动执行的 check_nccl_so 与 init_jit 两个步骤",
+            "知道为何要校验 PyTorch加载的 NCCL 与 DeepEP 链接的 NCCL 二进制一致",
+            "掌握 find_cuda_home / find_nccl_root 如何为 JIT 定位工具链"
+          ],
+          "source_files": [
+            "deep_ep/__init__.py",
+            "deep_ep/utils/find_pkgs.py",
+            "csrc/jit/api.hpp"
+          ],
+          "minimal_modules": [
+            "__init__.py",
+            "init_jit"
+          ],
+          "practice_task": "设置 EP_SUPPRESS_NCCL_CHECK=1 重新 import，对比行为差异；并解释如果 PyTorch 自带的 NCCL 与 pip 安装的 nvidia-nccl-cu13 版本不一致会发生什么。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "创建 ElasticBuffer：构造参数、缓冲区与拓扑属性",
+          "order": 2,
+          "filename": "u2-l2-elastic-buffer-ctor.md",
+          "level": "intermediate",
+          "topic": "讲解 ElasticBuffer.__init__ 的两种尺寸指定方式（num_bytes 或 MoE 设置）、allow_hybrid_mode/allow_multiple_reduction 等配置、QP 自动分配，以及创建后暴露的拓扑属性。",
+          "learning_goals": [
+            "掌握用 MoE 设置（hidden/num_topk/use_fp8_dispatch）或显式 num_bytes 两种方式创建缓冲区",
+            "理解 allow_hybrid_mode、allow_multiple_reduction、prefer_overlap_with_compute 三个开关的语义",
+            "了解 num_scaleout_ranks/num_scaleup_ranks/num_rdma_ranks/num_nvlink_ranks 等拓扑属性的含义"
+          ],
+          "source_files": [
+            "deep_ep/buffers/elastic.py",
+            "csrc/elastic/buffer.hpp"
+          ],
+          "minimal_modules": [
+            "ElasticBuffer 构造",
+            "缓冲区尺寸"
+          ],
+          "practice_task": "分别用 get_buffer_size_hint 估算和直接传 num_max_tokens_per_rank+hidden 两种方式创建 ElasticBuffer，打印两者的 num_bytes 与拓扑属性，验证它们一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "MoE Dispatch/Combine 的 Python 工作流与 EPHandle",
+          "order": 3,
+          "filename": "u2-l3-dispatch-combine-workflow.md",
+          "level": "intermediate",
+          "topic": "讲解 dispatch/combine 的完整参数（BF16 与 FP8、expand、cached handle）、返回值，以及 EPHandle 如何承载路由元数据并把 dispatch 与 combine 串起来。",
+          "learning_goals": [
+            "掌握 dispatch 与 combine 的输入输出张量形状与类型约束（含 FP8 的 (data, scale) 元组）",
+            "理解 EPHandle 各字段（psum_num_recv_tokens_per_expert、recv_src_metadata、dst_buffer_slot_idx 等）的作用",
+            "了解 expand 布局、do_cpu_sync、cached handle 在训练前向/反向与推理解码中的不同用法"
+          ],
+          "source_files": [
+            "deep_ep/buffers/elastic.py",
+            "csrc/elastic/buffer.hpp"
+          ],
+          "minimal_modules": [
+            "dispatch/combine API",
+            "EPHandle"
+          ],
+          "practice_task": "参照 README 的训练示例，写一个最小函数：用随机 topk_idx 调用 dispatch 得到 handle，再用 handle 调用 combine，并打印 num_recv_tokens_per_expert_list 与每专家接收 token 数。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "通信-计算重叠：EventOverlap 与双流控制",
+          "order": 4,
+          "filename": "u2-l4-stream-overlap-event.md",
+          "level": "intermediate",
+          "topic": "讲解 comm stream 与 compute stream 的关系、async_with_compute_stream / allocate_on_comm_stream / previous_event 的组合用法，以及 EventOverlap 如何作为等待与重叠的同步原语。",
+          "learning_goals": [
+            "理解通信流与计算流分离带来的重叠收益与同步需求",
+            "掌握 async_with_compute_stream + event.current_stream_wait() 的标准重叠模式",
+            "了解 EventOverlap 的 with 语法、register_hook_after_wait 与 record_stream 的关系"
+          ],
+          "source_files": [
+            "deep_ep/buffers/elastic.py",
+            "deep_ep/utils/event.py",
+            "csrc/utils/event.hpp"
+          ],
+          "minimal_modules": [
+            "EventOverlap",
+            "双流控制"
+          ],
+          "practice_task": "写一段代码：dispatch 时开启 async_with_compute_stream，在等待 event 之前插入一段独立的 GPU 计算（如一次矩阵乘），再用 event.current_stream_wait() 等待，验证通信与计算确实重叠（可用 CUDA event 计时对比串行版本）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心机制一：拓扑域、缓冲区布局与 SM/QP 解析计算",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "物理域与逻辑域：RDMA/NVLink rank 与 scaleout/scaleup",
+          "order": 1,
+          "filename": "u3-l1-topology-domains.md",
+          "level": "intermediate",
+          "topic": "讲解 physical domain（rdma ranks / nvlink ranks）与 logical domain（scaleout ranks / scaleup ranks）的区别，hybrid 模式如何把 scaleout+scaleup 组合成两级通信。",
+          "learning_goals": [
+            "区分物理域（RDMA/NVLink）与逻辑域（scaleout/scaleup）两套 rank 划分",
+            "理解 allow_hybrid_mode 如何影响 logical domain 的计算与多平面网络友好性",
+            "掌握 is_scaleup_nvlink 的判定及其对缓冲区布局的影响"
+          ],
+          "source_files": [
+            "deep_ep/buffers/elastic.py",
+            "csrc/kernels/backend/api.cuh",
+            "deep_ep/utils/envs.py"
+          ],
+          "minimal_modules": [
+            "拓扑域",
+            "hybrid 模式"
+          ],
+          "practice_task": "在单机 8 卡环境打印 get_physical_domain_size 与 get_logical_domain_size 的结果；并推理当 allow_hybrid_mode=True 与 False 时 num_scaleup_ranks 分别是多少。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "缓冲区内存布局与大小解析计算",
+          "order": 2,
+          "filename": "u3-l2-buffer-layout-sizing.md",
+          "level": "intermediate",
+          "topic": "讲解 [[[Workspace] GPU buffer] CPU buffer] 的对称内存布局、calculate_buffer_size 如何按 dispatch/combine 布局取最大值并对齐 2MB，以及 layout.cuh 中 WorkspaceLayout/TokenLayout/BufferLayout 的字段含义。",
+          "learning_goals": [
+            "理解 NCCL 对称窗口内 workspace+GPU buffer+CPU buffer 的地址排布",
+            "掌握 calculate_elastic_buffer_size 在直接模式与 hybrid 模式下分别累加哪些 send/recv 布局",
+            "读懂 TokenLayout 中 hidden/sf/metadata/mbarrier 各段的偏移计算"
+          ],
+          "source_files": [
+            "csrc/elastic/buffer.hpp",
+            "deep_ep/include/deep_ep/common/layout.cuh"
+          ],
+          "minimal_modules": [
+            "缓冲区布局",
+            "Layout 结构体"
+          ],
+          "practice_task": "给定 num_max_tokens_per_rank=4096、hidden=7168、num_topk=6、num_ranks=8、BF16，手算（或对照代码）直接模式下 dispatch 所需的 send+recv 字节数，并与 get_buffer_size_hint 的返回值核对量级。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "SM 与 QP 数量的解析式计算（无需 auto-tuning）",
+          "order": 3,
+          "filename": "u3-l3-sm-qp-analytical.md",
+          "level": "intermediate",
+          "topic": "讲解 get_theoretical_num_sms 基于带宽建模（rdma/nvlink GBS、sm read/write GBS、期望 top-k）推导最优 SM 数，以及 get_theoretical_num_qps 在 direct 与 hybrid 模式下的 QP 分配策略。",
+          "learning_goals": [
+            "理解 V2 用带宽建模代替 V1 auto-tuning 的思路与 expected top-k 的组合数计算",
+            "掌握 prefer_overlap_with_compute 如何在省 SM 与满性能之间权衡",
+            "了解 QP 数量在 direct（少 QP）与 hybrid（每 channel 独立 QP）模式下的差异"
+          ],
+          "source_files": [
+            "deep_ep/buffers/elastic.py",
+            "deep_ep/utils/envs.py"
+          ],
+          "minimal_modules": [
+            "SM 建模",
+            "QP 分配"
+          ],
+          "practice_task": "调用 buffer.get_theoretical_num_sms(num_experts, num_topk) 并打印内部的 sm_read/sm_write/rdma_traffic/nvlink_traffic（设置 EP_BUFFER_DEBUG=1），解释最终 num_sms 是如何从这些量算出来的。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "NCCL Gin 后端与对称内存上下文",
+          "order": 4,
+          "filename": "u3-l4-nccl-gin-symmetric.md",
+          "level": "intermediate",
+          "topic": "讲解 NCCLSymmetricMemoryContext 如何在 NCCL communicator 上建立对称内存窗口（GPU+CPU）、symmetric.hpp 用 CUDA VMM 创建可 GPUDirect RDMA 的显存，以及 get_sym_ptr 跨 rank 寻址的原理。",
+          "learning_goals": [
+            "理解 NCCL Gin 后端复用已有 NCCL communicator、header-only 的轻量化设计",
+            "掌握对称内存（symmetric memory）窗口与 mapped_window_ptr 的作用",
+            "了解 CUDA VMM（cuMemCreate/cuMemSetAccess）如何分配并暴露给所有 peer GPU 与 RDMA"
+          ],
+          "source_files": [
+            "csrc/kernels/backend/symmetric.hpp",
+            "csrc/kernels/backend/api.cuh",
+            "csrc/elastic/buffer.hpp"
+          ],
+          "minimal_modules": [
+            "对称内存",
+            "NCCL Gin"
+          ],
+          "practice_task": "在 csrc/elastic/buffer.hpp 构造函数中找到 NCCLSymmetricMemoryContext 的创建处，梳理 num_sym_bytes、num_gpu_bytes、num_cpu_bytes 三者的关系，并解释 workspace 为何要放在窗口最前并对齐 2MB。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "核心机制二：运行时 JIT 编译系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "JIT 系统总览：从 init_jit 到 build 的全流程",
+          "order": 1,
+          "filename": "u4-l1-jit-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 csrc/jit/ 的整体结构：Compiler/NVCCCompiler、KernelRuntime、KernelRuntimeCache、LaunchRuntime、DeviceRuntime、IncludeParser 各自职责，以及一次 build 的端到端流程。",
+          "learning_goals": [
+            "建立 JIT 子系统的整体地图：编译器、缓存、运行时、启动框架",
+            "理解为何 DeepEP 选择运行时 JIT 而非安装期编译 CUDA",
+            "掌握 Compiler::build 从生成代码到加载 cubin 的主流程"
+          ],
+          "source_files": [
+            "csrc/jit/api.hpp",
+            "csrc/jit/compiler.hpp",
+            "csrc/jit/cache.hpp"
+          ],
+          "minimal_modules": [
+            "JIT 总览",
+            "Compiler"
+          ],
+          "practice_task": "画出 JIT build 的流程图：generate → make_tmp_dir → nvcc compile → fsync → atomic rename → KernelRuntimeCache::get，标注每一步对应的函数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "内核代码生成：模板实例化的 .cu 注入技巧",
+          "order": 2,
+          "filename": "u4-l2-kernel-codegen.md",
+          "level": "intermediate",
+          "topic": "以 DispatchRuntime 为例，讲解 generate_impl 如何把运行时参数（SM 数、rank 数、hidden 等）填充进 C++ 模板参数，生成一段仅 include 头文件并取函数地址的 .cu 代码，从而强制 nvcc 实例化特定 kernel。",
+          "learning_goals": [
+            "理解 LaunchRuntime<Derived> 的 CRTP 模式与 generate/launch 两段式设计",
+            "掌握用 reinterpret_cast<void*>(&func<...>) 强制模板实例化的代码生成技巧",
+            "了解为何要把大量运行时参数编译期常量化（寄存器/共享内存/循环展开优化）"
+          ],
+          "source_files": [
+            "csrc/kernels/elastic/dispatch.hpp",
+            "csrc/jit/launch_runtime.hpp"
+          ],
+          "minimal_modules": [
+            "代码生成",
+            "模板实例化"
+          ],
+          "practice_task": "在 DispatchRuntime::generate_impl 中找到直接模式与 hybrid 模式生成不同 func_name 的分支，说明 num_scaleout_ranks==1 时实例化的是哪个头文件里的哪个模板，并列举被编译期化的参数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "编译缓存、原子目录重命名与 cubin 加载",
+          "order": 3,
+          "filename": "u4-l3-jit-cache-and-load.md",
+          "level": "intermediate",
+          "topic": "讲解 Compiler::build 如何用签名+代码的哈希摘要作缓存目录、先编译到临时目录再原子 rename、在分布式文件系统上 fsync，以及 KernelRuntime 如何用 cuobjdump 提取唯一符号并加载 cubin。",
+          "learning_goals": [
+            "理解基于内容哈希的内核缓存机制与多 rank 并发编译的竞态处理",
+            "掌握原子目录 rename + fsync 保证分布式文件系统可见性的做法",
+            "了解 KernelRuntime 从 cubin 中提取并加载唯一 kernel 符号的流程与损坏检测"
+          ],
+          "source_files": [
+            "csrc/jit/compiler.hpp",
+            "csrc/jit/cache.hpp",
+            "csrc/jit/kernel_runtime.hpp"
+          ],
+          "minimal_modules": [
+            "编译缓存",
+            "cubin 加载"
+          ],
+          "practice_task": "设置 EP_JIT_CACHE_DIR 指向一个临时目录，运行一次测试后观察该目录下 cache/kernel.* 的结构（kernel.cu / kernel.cubin），并解释为何要保留 kernel.cu。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "内核启动框架：LaunchArgs 与设备能力探测",
+          "order": 4,
+          "filename": "u4-l4-launch-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 LaunchRuntime::launch 如何根据 LaunchArgs（grid/block/smem/cluster/cooperative/pdl）构造启动配置并调用 launch_impl，以及 DeviceRuntime 如何缓存 GPU 属性（SM 数、共享内存、时钟频率、arch）。",
+          "learning_goals": [
+            "掌握 LaunchArgs 各字段（cluster_dim、cooperative、pdl_enabled）对内核启动的影响",
+            "理解 DeviceRuntime 缓存 cudaDeviceProp 与时钟频率用于超时周期换算",
+            "了解 include_parser 如何为缓存签名贡献头文件哈希"
+          ],
+          "source_files": [
+            "csrc/jit/launch_runtime.hpp",
+            "csrc/jit/device_runtime.hpp",
+            "csrc/jit/include_parser.hpp"
+          ],
+          "minimal_modules": [
+            "LaunchRuntime",
+            "DeviceRuntime"
+          ],
+          "practice_task": "在 dispatch.hpp 的 launch_dispatch 中找到 LaunchArgs 的构造，解释 cluster_dim=2-(num_sms%2)、cooperative=true 的作用，并说明 num_smem_bytes 来自哪里。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Dispatch 内核链路深入",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "直接模式 Dispatch：notify 与 dispatch warps 的协作",
+          "order": 1,
+          "filename": "u5-l1-direct-dispatch.md",
+          "level": "intermediate",
+          "topic": "以单节点（num_scaleout_ranks==1）dispatch 为例，讲解 launch_dispatch 如何按共享内存容量决定 num_dispatch_warps、notify warps 如何写计数、dispatch warps 如何把 token 经 NVLink 写入对端 buffer。",
+          "learning_goals": [
+            "理解直接模式 dispatch 的 warp 划分（notify + dispatch）与共享内存占用计算",
+            "掌握 dst_buffer_slot_idx、psum_num_recv_tokens_per_scaleup_rank 等输出张量的写入时机",
+            "了解 NVLink 对称内存写入与 LDG.128/256 拷贝的配合"
+          ],
+          "source_files": [
+            "csrc/kernels/elastic/dispatch.hpp",
+            "deep_ep/include/deep_ep/impls/dispatch.cuh"
+          ],
+          "minimal_modules": [
+            "直接 dispatch",
+            "warp 划分"
+          ],
+          "practice_task": "在 launch_dispatch 中追踪 num_dispatch_warps 的计算公式，解释它如何同时被 num_smem_bytes 与 32-num_notify_warps 约束，并推导给定 hidden 时每 SM 能放下的最大 warp 数。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Hybrid Dispatch：scaleout + scaleup 两级通信",
+          "order": 2,
+          "filename": "u5-l2-hybrid-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解多节点（num_scaleout_ranks>1）hybrid dispatch：channel 模型、scaleout warps 经 RDMA 发到对端节点、forward warps 在节点内 scaleup 转发、token_metadata_at_forward 与 channel_linked_list 的作用。",
+          "learning_goals": [
+            "理解 hybrid 模式为何引入 channel 概念以及 num_channels_per_sm 的推导",
+            "掌握 scaleout（RDMA）与 scaleup（NVLink）两级转发的数据通路",
+            "了解 token_metadata_at_forward、channel_linked_list 等 cached handle 元数据的布局"
+          ],
+          "source_files": [
+            "csrc/kernels/elastic/dispatch.hpp",
+            "deep_ep/include/deep_ep/impls/hybrid_dispatch.cuh",
+            "csrc/elastic/buffer.hpp"
+          ],
+          "minimal_modules": [
+            "hybrid dispatch",
+            "channel 模型"
+          ],
+          "practice_task": "对照 csrc/elastic/buffer.hpp 中 hybrid 模式下 dst_buffer_slot_idx（[num_channels, num_scaleout_ranks, num_max_tokens_per_channel, num_topk]）与 token_metadata_at_forward 的形状，解释 channel_linked_list 如何把收到的 token 串起来供 combine 使用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Dispatch copy epilogue 与 expand 布局",
+          "order": 3,
+          "filename": "u5-l3-dispatch-epilogue.md",
+          "level": "advanced",
+          "topic": "讲解 dispatch_copy_epilogue 内核如何把 buffer 中的 token 拷出到 recv_x/recv_topk_idx/recv_topk_weights，以及 do_expand（每专家一槽）布局、expert_alignment 对齐、do_zero_padding 零填充的实现。",
+          "learning_goals": [
+            "理解 dispatch 后为何需要一个独立的 copy epilogue 内核及其与主 kernel 的分工",
+            "掌握 expand 与非 expand 两种接收布局对 GEMM 输入的影响",
+            "了解 expert_alignment 对齐与 do_zero_padding 保证 padding 槽为零的机制"
+          ],
+          "source_files": [
+            "csrc/kernels/elastic/dispatch.hpp",
+            "deep_ep/include/deep_ep/impls/dispatch_copy_epilogue.cuh",
+            "deep_ep/include/deep_ep/common/layout.cuh"
+          ],
+          "minimal_modules": [
+            "copy epilogue",
+            "expand 布局"
+          ],
+          "practice_task": "运行 test_ep.py 中带 do_expand=True 与 do_zero_padding=True 的用例，对照代码解释为何 expand 模式下 psum_num_recv_tokens_per_expert 的语义（含对齐）与非 expand 不同，并验证 padding 区被清零。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "CPU 同步、cached handle 与推理解码复用",
+          "order": 4,
+          "filename": "u5-l4-cpu-sync-cached-handle.md",
+          "level": "advanced",
+          "topic": "讲解 dispatch 三种模式（do_cpu_sync 同步计数、cached handle 复用布局、无同步最坏情况分配），以及推理解码时如何用 cached EPHandle 跳过布局重算与 CPU 同步。",
+          "learning_goals": [
+            "理解 do_cpu_sync 的轮询+超时机制与 encode_decode_positive 编码",
+            "掌握 cached handle 如何复用 num_recv_tokens、布局张量以避免重复计算",
+            "了解无 CPU sync 模式下按最坏情况分配张量以兼容 CUDA graph 的取舍"
+          ],
+          "source_files": [
+            "csrc/elastic/buffer.hpp",
+            "deep_ep/buffers/elastic.py"
+          ],
+          "minimal_modules": [
+            "CPU 同步",
+            "cached handle"
+          ],
+          "practice_task": "在 README 的 decode_dispatch 示例基础上，写一段“首次 dispatch 生成 handle → 后续多次用同一 cached handle dispatch”的最小代码，并对照 csrc/elastic/buffer.hpp 解释 cached_mode 分支跳过了哪些 CPU 同步与张量分配。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Combine 内核链路深入",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Combine 主流程：把 expert 输出推回原 rank",
+          "order": 1,
+          "filename": "u6-l1-combine-main.md",
+          "level": "intermediate",
+          "topic": "讲解 combine 如何用 dispatch 返回的 handle（recv_src_metadata、psum、channel_linked_list）把每个 expert 计算后的 token 经 NVLink/RDMA 推回原始 rank，以及 expand 与非 expand 两种输入布局。",
+          "learning_goals": [
+            "理解 combine 是 dispatch 的“逆过程”以及 EPHandle 元数据如何驱动反向路由",
+            "掌握 launch_combine 的输入约束（BF16、16 字节对齐）与 reduce_buffer 的作用",
+            "了解 hybrid combine 复用 token_metadata_at_forward/channel_linked_list 的方式"
+          ],
+          "source_files": [
+            "csrc/kernels/elastic/combine.hpp",
+            "deep_ep/include/deep_ep/impls/combine.cuh",
+            "deep_ep/include/deep_ep/impls/hybrid_combine.cuh"
+          ],
+          "minimal_modules": [
+            "combine 主流程",
+            "反向路由"
+          ],
+          "practice_task": "对照 csrc/elastic/buffer.hpp 的 combine 函数，列出它从 EPHandle 读取了哪些张量，并解释 use_expanded_layout 如何决定 topk_weights 的形状（1D vs 2D）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Combine reduce epilogue 与 multiple reduction",
+          "order": 2,
+          "filename": "u6-l2-combine-reduce-epilogue.md",
+          "level": "advanced",
+          "topic": "讲解 combine_reduce_epilogue 如何在本地对收到的多 rank token 做加权归约、bias 叠加，以及 allow_multiple_reduction 在精度（少次归约）与传输量之间的权衡。",
+          "learning_goals": [
+            "理解 reduce epilogue 如何把 buffer 中的多份 token 归约成 combined_x",
+            "掌握 allow_multiple_reduction 对 scaleup/scaleout 两级归约次数的影响",
+            "了解 bias（0/1/2 个张量）如何在 epilogue 中叠加到输出"
+          ],
+          "source_files": [
+            "csrc/kernels/elastic/combine.hpp",
+            "deep_ep/include/deep_ep/impls/combine_reduce_epilogue.cuh",
+            "deep_ep/include/deep_ep/impls/combine_utils.cuh"
+          ],
+          "minimal_modules": [
+            "reduce epilogue",
+            "multiple reduction"
+          ],
+          "practice_task": "在 test_ep.py 中分别用 allow_multiple_reduction=0/1 跑 combine，对照代码解释“单次归约更精确但传输更多”与“多次归约（先 scaleup 内归约再全局）”在缓冲区布局上的差异。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "确定性路由：EPHandle.deterministic_sort",
+          "order": 3,
+          "filename": "u6-l3-deterministic-sort.md",
+          "level": "advanced",
+          "topic": "讲解 deterministic 模式下 EPHandle.deterministic_sort 如何在 current_stream_wait 之后对收到的 token 按源 token 全局索引排序，保证多次 dispatch 输出位序确定，并区分 expand/非 expand 与 cached 的处理差异。",
+          "learning_goals": [
+            "理解非确定性来源（多 channel/多 rank 到达顺序）以及为何需要确定性排序",
+            "掌握 deterministic_sort 在 expand 与非 expand 模式下排序键的构造方法",
+            "了解 register_hook_after_wait 把排序挂到 event 等待之后的时机"
+          ],
+          "source_files": [
+            "deep_ep/buffers/elastic.py",
+            "deep_ep/utils/event.py"
+          ],
+          "minimal_modules": [
+            "确定性排序",
+            "hook"
+          ],
+          "practice_task": "用 deterministic=True 创建 ElasticBuffer 并连续 dispatch 两次，验证两次 recv_x 位序完全一致（test_ep.py 中已有对应断言），并解释 expand 模式下为何只对 recv_x/sf/weights 排序而不动 recv_src_metadata 本身。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "实验性特性：Barrier / Engram / PP / AGRS",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "跨 rank GPU Barrier 同步机制",
+          "order": 1,
+          "filename": "u7-l1-barrier.md",
+          "level": "advanced",
+          "topic": "讲解 ElasticBuffer.barrier 如何用 NVLink/RDMA 信号在 GPU 级别完成全 rank 同步、sequential 与并行两种模式、以及它在 Engram/PP/AGRS 等操作前后保证可见性的作用。",
+          "learning_goals": [
+            "理解 launch_barrier 用对称内存信号实现 GPU 级 barrier 的原理",
+            "掌握 sequential 参数对同步严格性与性能的影响",
+            "了解 barrier 在 engram_write、pp/agrs 配置刷新等场景下保证数据可见性的角色"
+          ],
+          "source_files": [
+            "csrc/elastic/buffer.hpp",
+            "csrc/kernels/elastic/barrier.hpp",
+            "deep_ep/include/deep_ep/impls/barrier.cuh"
+          ],
+          "minimal_modules": [
+            "GPU barrier",
+            "信号同步"
+          ],
+          "practice_task": "运行 tests/elastic/test_barrier.py，分别用 sequential=True/False 测量 barrier 延迟，并对照代码解释两种模式在 SM 占用与同步保证上的差异。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Engram：RDMA 远程内存拉取（KV/存储 fetch）",
+          "order": 2,
+          "filename": "u7-l2-engram.md",
+          "level": "advanced",
+          "topic": "讲解 engram_write 把本地存储写入 CPU 段、engram_fetch 用 RDMA get 从远端 rank 拉取指定 entry，以及 FP8 scaling factor 的全局复制与 TMA 对齐列主序布局。",
+          "learning_goals": [
+            "理解 Engram 的 CPU 段存储 + GPU 段接收区 + RDMA get 拉取模型",
+            "掌握 engram_fetch 返回 callable（wait hook）的两段式异步设计",
+            "了解 FP8 模式下 SF 全局复制与 use_tma_aligned_col_major_sf 对后续 GEMM 的意义"
+          ],
+          "source_files": [
+            "csrc/elastic/buffer.hpp",
+            "csrc/kernels/elastic/engram.hpp",
+            "deep_ep/include/deep_ep/impls/engram_fetch.cuh",
+            "tests/elastic/test_engram.py"
+          ],
+          "minimal_modules": [
+            "Engram",
+            "RDMA get"
+          ],
+          "practice_task": "参照 test_engram.py，构造一个多 rank 的 Engram 存储，每 rank 写入若干 entry，再用随机 indices 调用 engram_fetch 拉取并与 all_gather 参考结果比对正确性。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Pipeline Parallelism：环形 send/recv",
+          "order": 3,
+          "filename": "u7-l3-pp-send-recv.md",
+          "level": "advanced",
+          "topic": "讲解 pp_set_config 配置张量大小与 in-flight 数量、pp_send/pp_recv 仅在环形相邻 rank（prev/next）间通信、以及双缓冲与超时机制。",
+          "learning_goals": [
+            "理解 PP 仅支持 prev/next 相邻 rank 的环形通信约束",
+            "掌握 num_max_inflight_tensors 与缓冲区大小（4 倍因子）的关系",
+            "了解 pp_send/recv 的 SM 分配与 GPU 超时周期保护"
+          ],
+          "source_files": [
+            "csrc/elastic/buffer.hpp",
+            "csrc/kernels/elastic/pp_send_recv.hpp",
+            "tests/elastic/test_pp.py"
+          ],
+          "minimal_modules": [
+            "PP send/recv",
+            "环形通信"
+          ],
+          "practice_task": "参照 test_pp.py，实现一个最小的两 rank 环形传递：rank0 pp_send 给 rank1，rank1 pp_recv 后再 send 回 rank0，验证数据一致并测量往返延迟。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "All-Gather Reduce-Scatter（AGRS）session 模型",
+          "order": 4,
+          "filename": "u7-l4-agrs.md",
+          "level": "advanced",
+          "topic": "讲解 AGRS 的 session（create/destroy）模型、agrs_get_inplace_tensor 零拷贝获取本 rank 槽位、all_gather 用 cudaMemcpyBatchAsync + 信号完成 NVLink 聚合并返回 wait hook。",
+          "learning_goals": [
+            "理解 AGRS 为何采用 session + slot 的批量 all-gather 模型",
+            "掌握 inplace 张量与 batched 模式（多张量一次 all-gather）的用法",
+            "了解 all_gather 用 cudaMemcpyBatchAsync 发送 + batched_write_and_wait 信号等待的实现"
+          ],
+          "source_files": [
+            "csrc/elastic/buffer.hpp",
+            "csrc/kernels/backend/cuda_driver.cu",
+            "tests/elastic/test_agrs.py"
+          ],
+          "minimal_modules": [
+            "AGRS",
+            "session 模型"
+          ],
+          "practice_task": "参照 test_agrs.py，在一个 session 内连续做 2 次 all_gather（一次单张量、一次 batched），用返回的 handle 等待数据到达，并解释 agrs_buffer_offset/ slot_idx 如何在 session 内累加。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "底层原语、后端工程与测试体系",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "PTX 原语：TMA、mbarrier 与 fence.proxy",
+          "order": 1,
+          "filename": "u8-l1-ptx-tma-mbarrier.md",
+          "level": "advanced",
+          "topic": "讲解 deep_ep/include/deep_ep/common/ptx.cuh 封装的 TMA load/store、mbarrier arrive/wait、fence.proxy.async.shared 等底层 PTX 原语，以及它们在 dispatch/combine 内核中保证内存序与异步拷贝的作用。",
+          "learning_goals": [
+            "理解 TMA（Tensor Memory Access）异步批量拷贝与 mbarrier 同步原语",
+            "掌握 fence.proxy.async.shared::cta 在 mbarrier wait 与 TMA load 之间建立顺序的必要性",
+            "了解 common/math.cuh 的 align/encode_decode_positive 等工具在内核中的用途"
+          ],
+          "source_files": [
+            "deep_ep/include/deep_ep/common/ptx.cuh",
+            "deep_ep/include/deep_ep/common/math.cuh",
+            "deep_ep/include/deep_ep/common/layout.cuh"
+          ],
+          "minimal_modules": [
+            "PTX 原语",
+            "TMA/mbarrier"
+          ],
+          "practice_task": "在 ptx.cuh 中找到 mbarrier 与 TMA 相关封装，结合近期 commit “Add fence.proxy.async.shared::cta between mbarrier wait and TMA load”，说明缺失该 fence 可能导致的内存序问题。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "NCCL communicator 复用与拓扑探测",
+          "order": 2,
+          "filename": "u8-l2-nccl-comm-reuse.md",
+          "level": "advanced",
+          "topic": "讲解 deep_ep/utils/comm.py 如何优先复用 PyTorch 的 NCCL communicator（_comm_ptr）、否则用 unique id 重建，以及 csrc/kernels/backend/nccl.cu 如何从 communicator 推断物理/逻辑域与 NVLink 连通性。",
+          "learning_goals": [
+            "理解 NCCLCommHandle 的缓存与 managed 生命周期管理",
+            "掌握 EP_REUSE_NCCL_COMM 与 force_new_comm 的取舍",
+            "了解 nccl.cu 如何判定 is_scaleup_nvlink 与 num_rdma_ranks/num_nvl_ranks"
+          ],
+          "source_files": [
+            "deep_ep/utils/comm.py",
+            "csrc/kernels/backend/nccl.cu",
+            "csrc/kernels/backend/api.cuh"
+          ],
+          "minimal_modules": [
+            "NCCL 复用",
+            "拓扑探测"
+          ],
+          "practice_task": "阅读 get_nccl_comm_handle，解释为何带 CPU buffer（num_cpu_bytes>0）时要 force_new_comm，并说明复用 PyTorch communicator 带来的好处与潜在风险。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "环境变量体系：运行时、网络、JIT、构建四类",
+          "order": 3,
+          "filename": "u8-l3-environment-variables.md",
+          "level": "advanced",
+          "topic": "系统梳理 README 列出的环境变量：通用（EP_BUFFER_DEBUG 等）、网络（EP_NIC_NAME、EP_OVERRIDE_RDMA_SL、EP_DISABLE_GIN）、JIT（EP_JIT_* 系列）、构建（EP_NCCL_ROOT_DIR 等），以及持久化变量的烘焙机制。",
+          "learning_goals": [
+            "掌握四大类环境变量的作用与默认值",
+            "理解持久化变量在构建期烘焙、运行期可被覆盖的两级默认值机制",
+            "了解 RDMA 服务级（SL）/虚拟通道（VL）与流量隔离的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py",
+            "deep_ep/__init__.py",
+            "csrc/jit/compiler.hpp"
+          ],
+          "minimal_modules": [
+            "环境变量",
+            "持久化配置"
+          ],
+          "practice_task": "挑选 3 个 JIT 调试变量（如 EP_JIT_DEBUG、EP_JIT_DUMP_SASS、EP_JIT_PTXAS_CHECK）实际设置后跑一次测试，观察输出或生成的 PTX/SASS 文件，并总结它们各自的调试场景。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-4",
+          "title": "测试、参考实现与基准测试体系",
+          "order": 4,
+          "filename": "u8-l4-testing-and-bench.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 下的正确性测试如何用 deep_ep/utils/refs.py 的纯 NCCL/PyTorch 参考实现做逐位比对、utils/testing.py 的 bench_kineto 如何用 barrier+kineto 测量内核带宽，以及 gate.py 的不均衡分数生成。",
+          "learning_goals": [
+            "理解 ref_dispatch/ref_combine 参考实现如何作为正确性金标准",
+            "掌握 bench_kineto 用通信 barrier 隔离 + CUDA Kineto 计时测量带宽的方法",
+            "了解 get_unbalanced_scores 如何构造可控的 MoE 负载不均衡场景"
+          ],
+          "source_files": [
+            "tests/elastic/test_ep.py",
+            "deep_ep/utils/refs.py",
+            "deep_ep/utils/testing.py",
+            "deep_ep/utils/gate.py"
+          ],
+          "minimal_modules": [
+            "参考实现",
+            "基准测试"
+          ],
+          "practice_task": "阅读 refs.py 中的 ref_dispatch，对比它返回的 ref_recv_src_token_idx 与 DeepEP dispatch 后 handle.recv_src_metadata[:,0] 的排序结果，解释 test_ep.py 中那条 torch.equal 断言为何成立。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "遗留 V1（NVSHMEM）与 V1/V2 架构对比",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Legacy Buffer：NVSHMEM 后端与三类内核",
+          "order": 1,
+          "filename": "u9-l1-legacy-buffer.md",
+          "level": "advanced",
+          "topic": "讲解 deep_ep/buffers/legacy.py 的 Buffer 类与 csrc/legacy/buffer.hpp 的 C++ 实现：NVLink intranode、RDMA+NVLink internode、IBGDA low-latency 三类内核，以及 NVSHMEM 初始化与 IPC handle 同步。",
+          "learning_goals": [
+            "理解 V1 Buffer 的 num_nvl_bytes/num_rdma_bytes 双缓冲与 low_latency_mode",
+            "掌握 V1 用 NVSHMEM 分配对称显存、用 IPC handle 同步 NVLink buffer 的方式",
+            "了解 intranode/internode/low_latency 三套 dispatch/combine 的适用场景"
+          ],
+          "source_files": [
+            "deep_ep/buffers/legacy.py",
+            "csrc/legacy/buffer.hpp",
+            "csrc/legacy/config.hpp",
+            "docs/legacy.md"
+          ],
+          "minimal_modules": [
+            "Legacy Buffer",
+            "NVSHMEM"
+          ],
+          "practice_task": "对照 legacy.py 与 elastic.py 的 dispatch 签名，列出 V1 需要用户手动调用 get_dispatch_layout + get_dispatch_config 而 V2 不需要的差异，并解释 V1 config_map（num_ranks→Config）的作用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "V1 vs V2 架构演进与对比",
+          "order": 2,
+          "filename": "u9-l2-v1-vs-v2.md",
+          "level": "advanced",
+          "topic": "总结 V1→V2 的架构演进：NVSHMEM 后端→NCCL Gin、安装期编译→运行时 JIT、auto-tuning config→解析式 SM/QP、双 buffer→统一 ElasticBuffer、以及性能与 SM 占用的提升。",
+          "learning_goals": [
+            "理解后端从 NVSHMEM 切换到 NCCL Gin 的动机（轻量、复用 communicator）",
+            "掌握 auto-tuning→解析式计算与双 buffer→ElasticBuffer 的接口统一带来的收益",
+            "能够从性能、SM 占用、可扩展性（EP2048）三方面对比 V1 与 V2"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/legacy.md",
+            "deep_ep/buffers/elastic.py",
+            "deep_ep/buffers/legacy.py"
+          ],
+          "minimal_modules": [
+            "架构对比",
+            "V1/V2"
+          ],
+          "practice_task": "写一份对比表：从后端、编译方式、SM/QP 决定方式、缓冲区接口、最大 EP 规模、低延迟 RDMA 支持六个维度比较 V1 与 V2，并标注 V2 文档中明确“不再支持”的特性。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
