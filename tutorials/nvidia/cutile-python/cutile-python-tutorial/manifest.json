@@ -1,0 +1,1196 @@
+{
+  "project": "cutile-python",
+  "head": "40bcc5aa0161ac0d70f064c98286029ac756101b",
+  "rationale": "本次增量（0c46a62..40bcc5a）带来两个面向用户的内核参数新特性，以及一次 AnnotatedFunction 内部数据模型重构：(1) 支持 Python tuple 作为内核参数（如 tuple[Tensor,int]、ct.Constant[tuple[int,float]]、tuple[ct.Constant[int],float]），新增 TupleConstraint 与 cutile_python_v2 调用约定（带 CallingConvention.version）；(2) 支持 ArrayAnnotation(static_shape_dims=...) 把数组某些维度特化为编译期常量，对应 ArrayConstraint.shape_constant 与静态形状的 mangling/demangling。为承载 tuple 注解，AnnotatedFunction 从旧的三个布尔掩码（constant/int64_index/int64_parameter_mask）重构为统一的 parameter_annotations——一棵 ParameterAnnotationNode 树（LeafAnnotationNode/HomogeneousTupleNode/HeterogeneousTupleNode），TileDispatcher.__init__ 也改为接收该注解树；_compile._create_kernel_parameters 被重写以递归处理 tuple 与静态形状，_get_array_ty 现在接收注解并产出带静态 shape 的 ArrayTy；dataflow_analysis 增加 TupleConstraint 处理并把静态形状折叠为整除性事实；jax.cutile_call 改用注解树并对 tuple 参数显式抛 NotImplementedError；cext 侧镜像了 ParameterAnnotationNode 层级并新增 cutile_python_v2/.version。影响判定：u5-l1（AnnotatedFunction）的核心数据模型被替换、旧讲义描述的掩码已不存在，标记 rebuild；u5-l2（compile_tile 流水线）整体阶段不变、仅 _create_kernel_parameters/_get_array_ty 内部重写，标记 update；新增 u3-l7「元组参数与静态形状特化」专门讲这两个用户特性；尚未生成的 u6-l2/u8-l1/u8-l2/u8-l4 刷新内容字段以纳入 TupleConstraint/静态形状/cutile_python_v2/注解树，action 仍为 new；u8-l3 自动调优、U7 后端等源码机制本次未变，保持 new；experimental/cuda-lang 的 gluon 教程移植属于另一实验语言、非本 cuda.tile 手册范围，不计入。已生成且未受影响的讲义（U1-U4、u3-l5/u3-l6）标记 keep。讲义依赖仍构成 DAG：源码机制讲义依赖 U5 的 IR 基础，后端依赖前端，扩展依赖运行时与签名体系；每篇引用 1-6 个真实源码文件，确保「结合源码」并可操作。\"",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认知与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "cuTile Python 是什么：tile DSL 与 Tile IR",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 cuTile Python 的定位、设计目标、与 Tile IR 和 tileiras 编译器的关系，以及它相对于 SIMT CUDA 的抽象层级。",
+          "learning_goals": [
+            "理解 cuTile 是面向 NVIDIA GPU 的 tile 级（block 级）并行 DSL",
+            "理解 Python 内核经 Tile IR 字节码被 tileiras 编译为 cubin 的整体链路",
+            "区分 host 代码、SIMT 代码与 tile 代码三种执行空间"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/index.rst",
+            "docs/source/execution.rst"
+          ],
+          "minimal_modules": [
+            "cuTile Python",
+            "Tile IR",
+            "tileiras"
+          ],
+          "practice_task": "阅读 README 中的 vector_add 示例，用一段话解释 @ct.kernel 装饰的函数被 cuLaunchKernel 之前经历了哪些编译阶段，并把对应阶段名称标注在代码旁。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与第一个内核",
+          "order": 2,
+          "filename": "u1-l2-install-and-first-kernel.md",
+          "level": "beginner",
+          "topic": "讲解系统依赖、pip 安装（含 [tileiras] 可选依赖）、从源码构建，并运行 vector_add 快速入门。",
+          "learning_goals": [
+            "掌握 cuda-tile 与 cuda-tile[tileiras] 两种安装方式的区别",
+            "能用 pip install -e . 完成可编辑构建并理解 C++ 扩展符号链接机制",
+            "成功运行 samples/quickstart/VectorAdd_quickstart.py 并验证结果"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/quickstart.rst",
+            "samples/quickstart/VectorAdd_quickstart.py"
+          ],
+          "minimal_modules": [
+            "pip install cuda-tile[tileiras]",
+            "setup.py editable build"
+          ],
+          "practice_task": "在虚拟环境中安装 cuTile，运行 VectorAdd_quickstart.py，把 TILE_SIZE 改成 32 并重新计算 grid，确认结果仍正确。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构与构建系统",
+          "order": 3,
+          "filename": "u1-l3-repo-layout-and-build.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构（src/cuda/tile、cext、docs、samples、test、experimental），以及 setup.py + CMake 构建 C++ 扩展的方式。",
+          "learning_goals": [
+            "看清 src/cuda/tile 下 _ir、_passes、_bytecode、compilation、tune、jax 等子包的职责",
+            "理解 pyproject.toml 的包发现规则与 setup.py 如何驱动 CMake 构建 cext",
+            "理解 cext（C++ 扩展）在整体架构中的桥接角色"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "setup.py",
+            "CMakeLists.txt",
+            "cext/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "setuptools package find",
+            "cext CMake build"
+          ],
+          "practice_task": "画出一张从 src/cuda/tile/__init__.py 出发的模块依赖树，标注每个子目录属于「前端」「优化」「后端」「运行时」中的哪一类。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "顶层 API 全景：cuda.tile 公共接口",
+          "order": 4,
+          "filename": "u1-l4-top-level-api-surface.md",
+          "level": "beginner",
+          "topic": "通览 src/cuda/tile/__init__.py 暴露的全部公共 API，分类理解 kernel/function/launch、stub 操作、DType、内存模型等。",
+          "learning_goals": [
+            "掌握 cuda.tile 顶层导出的 API 分组：装饰器、启动、数据类型、stub 操作、内存模型、异常",
+            "理解 kernel、function、stub 三类装饰器的语义差异",
+            "能根据需求在 __all__ 中定位正确的入口"
+          ],
+          "source_files": [
+            "src/cuda/tile/__init__.py",
+            "src/cuda/tile/_execution.py"
+          ],
+          "minimal_modules": [
+            "cuda.tile.__init__",
+            "kernel/function/stub decorators"
+          ],
+          "practice_task": "把 __init__.py 中导出的符号按「装饰器/启动/数据类型/内存操作/算术/归约/形状/索引/原子/常量与断言」分类，整理成一张速查表。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "执行模型与数据模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "执行模型：grid、block 与执行空间",
+          "order": 1,
+          "filename": "u2-l1-execution-model.md",
+          "level": "beginner",
+          "topic": "讲解 cuTile 的抽象机：grid/block 并行、标量串行而数组集体并行、host/SIMT/tile 三种执行空间。",
+          "learning_goals": [
+            "理解一个 kernel 由 grid 中的 block 并行执行，tile 表达 block 级并行而非线程级",
+            "区分 host code、SIMT code、tile code 三类执行空间",
+            "理解 block 内不允许显式同步、block 间允许的设计取舍"
+          ],
+          "source_files": [
+            "docs/source/execution.rst",
+            "docs/source/index.rst"
+          ],
+          "minimal_modules": [
+            "grid",
+            "block",
+            "execution space"
+          ],
+          "practice_task": "用一段文字解释「为什么 cuTile 不暴露单个线程」，并指出这种抽象在硬件上映射到什么（CTA / warp）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "数据模型：全局数组 Array",
+          "order": 2,
+          "filename": "u2-l2-data-model-array.md",
+          "level": "beginner",
+          "topic": "讲解 global array 的概念、strided 内存布局、shape/strides/dtype、以及通过 DLPack/CUDA Array Interface 接收宿主张量。",
+          "learning_goals": [
+            "理解数组的 strided 布局与地址计算公式 base+stride*idx",
+            "理解数组只能由 host 分配、内核中只能创建视图",
+            "理解可传入内核的对象类型（CuPy、PyTorch 等 DLPack 对象）"
+          ],
+          "source_files": [
+            "docs/source/data.rst",
+            "src/cuda/tile/_stub.py"
+          ],
+          "minimal_modules": [
+            "Array",
+            "strides",
+            "DLPack"
+          ],
+          "practice_task": "给定一个 float32、shape=(4,8)、strides=(8,1) 的数组，手算元素 (1,3) 的字节偏移量；再写一个接受 torch.Tensor 与 cupy.ndarray 的最小内核启动代码。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "数据模型：Tile、Scalar 与形状广播",
+          "order": 3,
+          "filename": "u2-l3-data-model-tile.md",
+          "level": "beginner",
+          "topic": "讲解 tile 作为不可变编译期值、零维 tile 即 scalar、tile 维度须为 2 的幂、以及 NumPy 式形状广播与 element/tile space。",
+          "learning_goals": [
+            "理解 tile 的不可变性与编译期 shape 约束（每维为 2 的幂）",
+            "理解 scalar 是零维 tile、字面量是 loosely typed 常量 scalar",
+            "掌握 tile 间形状广播规则及与 NumPy 的一致性"
+          ],
+          "source_files": [
+            "docs/source/data.rst",
+            "src/cuda/tile/_stub.py"
+          ],
+          "minimal_modules": [
+            "Tile",
+            "Scalar",
+            "broadcasting"
+          ],
+          "practice_task": "预测 (4,1) tile 与 (1,8) tile 相加后的结果 shape；再说明为何把 tile 维度设成 3 会编译失败。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "数据类型 DType 与类型提升",
+          "order": 4,
+          "filename": "u2-l4-dtype-and-promotion.md",
+          "level": "beginner",
+          "topic": "讲解 DType 类、整数/浮点/受限浮点（float8/bfloat16/tfloat32）类型族、loosely/strictly typed 常量、算术提升规则与 rounding/padding 模式。",
+          "learning_goals": [
+            "掌握 int8..int64、float16/32/64、bfloat16、tfloat32、float8_e4m3fn 等类型的用途",
+            "理解 loosely typed 与 strictly typed 常量的区别及提升结果",
+            "理解 RoundingMode 与 PaddingMode 在 load/store 中的作用"
+          ],
+          "source_files": [
+            "src/cuda/tile/_datatype.py",
+            "src/cuda/tile/_numeric_semantics.py",
+            "docs/source/data.rst"
+          ],
+          "minimal_modules": [
+            "DType",
+            "promote_types",
+            "RoundingMode/PaddingMode"
+          ],
+          "practice_task": "推断 ct.int16(5) + 2、ct.int16(5) + ct.int32(7)、5 + 3.0 三个表达式的结果类型，并对照文档的提升表验证。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "编写内核：用户 API 实战",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "load/store 与 load-compute-store 范式",
+          "order": 1,
+          "filename": "u3-l1-load-store-pattern.md",
+          "level": "beginner",
+          "topic": "讲解 cuTile 内核最核心的「从数组 load tile、计算、再 store 回数组」范式，含 index/shape 参数与 bid()。",
+          "learning_goals": [
+            "掌握 ct.load / ct.store 的 index、shape、padding_mode 参数",
+            "理解 bid(0) 如何确定当前 block、index 如何定位 tile",
+            "能写出 load-compute-store 的完整一维 vector_add 内核"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "samples/quickstart/VectorAdd_quickstart.py",
+            "test/test_copy.py"
+          ],
+          "minimal_modules": [
+            "load",
+            "store",
+            "bid"
+          ],
+          "practice_task": "实现一个一维 scale 内核：result = a * alpha，自行计算 grid 并用 torch 张量验证数值正确。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "tile 算术运算与形状操作",
+          "order": 2,
+          "filename": "u3-l2-tile-arithmetic-and-shape.md",
+          "level": "intermediate",
+          "topic": "讲解 tile 上的逐元素算术、astype 类型转换，以及 reshape/permute/transpose/broadcast_to/cat 等形状操作。",
+          "learning_goals": [
+            "掌握 tile 的逐元素算术、运算符重载与 astype",
+            "掌握 reshape/permute/transpose/cat 等形状变换的语义",
+            "理解这些操作产生新 tile 而不修改原值"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "samples/Transpose.py"
+          ],
+          "minimal_modules": [
+            "add/mul/...arithmetic",
+            "astype",
+            "reshape/permute"
+          ],
+          "practice_task": "实现一个 transpose 内核：把 (M,N) 矩阵转置为 (N,M)，用 ct.load 的 order 参数或 permute 完成tile内转置。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "控制流：if/for/while 与 range 限制",
+          "order": 3,
+          "filename": "u3-l3-control-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 tile 代码支持的 Python 控制流子集（if/for/while、嵌套）、range 的 step>0 限制，以及控制流在 IR 中的 IfElse/Loop 映射概念。",
+          "learning_goals": [
+            "掌握 tile 代码中可用的 Python 控制流及其限制（step 须为正）",
+            "理解循环可任意嵌套、但循环体内对象不可变",
+            "理解循环在底层会映射为携带值的 IR Loop"
+          ],
+          "source_files": [
+            "docs/source/execution.rst",
+            "src/cuda/tile/_ir/control_flow_ops.py"
+          ],
+          "minimal_modules": [
+            "if/for/while",
+            "range step restriction",
+            "Loop/IfElse"
+          ],
+          "practice_task": "写一个内核：对每个 block，仅当 bid(0) 为偶数时执行 store，并解释这在底层会编译成什么样的分支结构。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "归约与扫描：sum/max/cumsum/scan",
+          "order": 4,
+          "filename": "u3-l4-reductions-and-scan.md",
+          "level": "intermediate",
+          "topic": "讲解 tile 上的归约（sum/prod/max/min/argmax/argmin）、axis 与 keepdims，以及前缀扫描 cumsum/cumprod/scan。",
+          "learning_goals": [
+            "掌握 sum/max/min/argmax/argmin 的 axis、keepdims 参数",
+            "理解 cumsum/cumprod/scan 的前缀语义",
+            "能写出如 row-wise norm 的归约内核"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "samples/LayerNorm.py",
+            "test/test_scan.py"
+          ],
+          "minimal_modules": [
+            "reduce/sum/max",
+            "cumsum/scan"
+          ],
+          "practice_task": "实现一个行归约内核：对 (M,N) 矩阵按行求均值并写回 (M,) 结果数组。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "常量嵌入与编译期求值",
+          "order": 5,
+          "filename": "u3-l5-constants-and-static-eval.md",
+          "level": "intermediate",
+          "topic": "讲解 Constant 参数（每个唯一值生成一份内核）、static_eval 静态求值、static_assert 静态断言。",
+          "learning_goals": [
+            "理解 Constant 参数如何做常量嵌入、及其对 JIT 缓存的影响",
+            "掌握 static_eval / static_assert 的编译期行为",
+            "理解 constantness 与严格类型常量的关系"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "docs/source/execution.rst",
+            "test/test_static_assert.py"
+          ],
+          "minimal_modules": [
+            "Constant",
+            "static_eval",
+            "static_assert"
+          ],
+          "practice_task": "把 vector_add 的 TILE_SIZE 改为 Constant[int] 参数，分别用 16 和 32 启动两次，观察是否生成两份内核（用 dump 或日志确认）。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "矩阵乘与张量核：mma、matmul 与 tfloat32",
+          "order": 6,
+          "filename": "u3-l6-matmul-and-tensor-cores.md",
+          "level": "intermediate",
+          "topic": "讲解分块 matmul 内核结构（K 维循环累加）、ct.mma 张量核乘累加、tfloat32/float16 的使用，以及 swizzle 与 persistent 内核模式。",
+          "learning_goals": [
+            "掌握分块 GEMM 的 tile 化 K 维累加结构",
+            "理解 ct.mma 如何利用张量核、以及 float32→tfloat32 的转换",
+            "理解 persistent kernel 与 swizzle 调度的基本思想"
+          ],
+          "source_files": [
+            "samples/MatMul.py",
+            "src/cuda/tile/_stub.py",
+            "test/test_mma.py"
+          ],
+          "minimal_modules": [
+            "mma",
+            "matmul",
+            "tfloat32",
+            "swizzle"
+          ],
+          "practice_task": "基于 samples/MatMul.py 实现一个最小 float16 GEMM，把 tm/tn/tk 作为 Constant 传入并验证与 torch.matmul 的数值一致性。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l7",
+          "title": "元组参数与静态形状特化",
+          "order": 7,
+          "filename": "u3-l7-tuple-args-and-static-shape.md",
+          "level": "intermediate",
+          "topic": "讲解本次新增的两类内核参数特性：把 Python tuple 作为内核参数（含每元素 Constant 注解，如 tuple[ct.Constant[int], float]、ct.Constant[tuple[int, float]]），以及用 ArrayAnnotation(static_shape_dims=...) 把数组某些维度特化为编译期常量；两者均要求 cutile_python_v2 调用约定，并影响内核特化与 JIT 缓存键。",
+          "learning_goals": [
+            "掌握 tuple 参数写法：tuple[Tensor, int]、tuple[Tensor, Tensor]、ct.Constant[tuple[int,float]]、tuple[ct.Constant[int], float]，及 plain tuple 简写",
+            "理解 TupleConstraint 与 cutile_python_v2 调用约定的关系（v1 不支持 tuple 与静态形状）",
+            "掌握 ArrayAnnotation(static_shape_dims=(0,-1)) 把指定维度特化为编译期常量、负索引支持",
+            "理解静态形状/tuple 特化如何改变 JIT 缓存键与生成的内核数量"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "src/cuda/tile/_annotated_function.py",
+            "src/cuda/tile/compilation/_signature.py",
+            "test/test_tuple_arguments.py",
+            "test/test_array.py"
+          ],
+          "minimal_modules": [
+            "ArrayAnnotation.static_shape_dims",
+            "TupleConstraint",
+            "ParameterAnnotationNode",
+            "cutile_python_v2"
+          ],
+          "practice_task": "写一个接收 tuple[Tensor, Tensor] 参数的内核（如两向量相加），再用 Annotated[ct.Array, ct.ArrayAnnotation(static_shape_dims=(0,))] 把某维度特化；通过日志/compile_tile 调用计数对比特化前后不同 shape 是否触发重新编译（参考 test_static_shape_standalone_recompile）。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "高级数据访问",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "TiledView 与 persistent 遍历",
+          "order": 1,
+          "filename": "u4-l1-tiled-view-and-persistent.md",
+          "level": "intermediate",
+          "topic": "讲解 TiledView 抽象、num_tiles/num_blocks、traversal_steps（重叠/间隔 tile）以及 persistent 内核循环。",
+          "learning_goals": [
+            "理解 tile space、num_tiles 与 element/tile space 的对应",
+            "掌握 traversal_steps 如何产生重叠或带间隔的 tile",
+            "能用 num_blocks + range 写 persistent 内核"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "docs/source/data.rst",
+            "test/test_tiled_view.py",
+            "samples/MatMul.py"
+          ],
+          "minimal_modules": [
+            "TiledView",
+            "num_tiles",
+            "num_blocks",
+            "persistent loop"
+          ],
+          "practice_task": "把 samples/MatMul.py 的非 persistent 版本改写为 persistent 版本，使每个 block 处理多个输出 tile。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "gather/scatter 与高级索引",
+          "order": 2,
+          "filename": "u4-l2-gather-scatter-advanced-indexing.md",
+          "level": "intermediate",
+          "topic": "讲解 gather/scatter、load_advanced_indexing/store_advanced_indexing 等非常规索引模式及其语义。",
+          "learning_goals": [
+            "掌握 gather/scatter 按索引 tile 读写数组",
+            "理解 advanced indexing 与常规 tile load/store 的区别",
+            "理解这些操作对性能与对齐的影响"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "test/test_gather_scatter.py",
+            "test/test_load_store_advanced_indexing.py"
+          ],
+          "minimal_modules": [
+            "gather",
+            "scatter",
+            "load_advanced_indexing"
+          ],
+          "practice_task": "实现一个 embedding gather 内核：给定索引数组，从一个权重表中 gather 出对应的向量行。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "内存模型与原子操作",
+          "order": 3,
+          "filename": "u4-l3-memory-model-and-atomics.md",
+          "level": "intermediate",
+          "topic": "讲解 cuTile 内存模型（跨 block 操作可重排）、MemoryOrder、MemoryScope、原子操作族（atomic_add/max/cas/...）及 fence。",
+          "learning_goals": [
+            "理解跨 block 内存访问无显式同步时顺序不保证",
+            "掌握 MemoryOrder 与 MemoryScope 的语义",
+            "掌握 atomic_add/max/cas 等原子操作的使用"
+          ],
+          "source_files": [
+            "docs/source/memory_model.rst",
+            "src/cuda/tile/_memory_model.py",
+            "src/cuda/tile/_stub.py"
+          ],
+          "minimal_modules": [
+            "MemoryOrder",
+            "MemoryScope",
+            "atomic_*",
+            "fence"
+          ],
+          "practice_task": "实现一个直方图内核：用 atomic_add 把多个 tile 的计数累加到全局直方图数组，并讨论为何需要原子操作。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "编译前端：从 Python 到 Tile IR",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "kernel 装饰器与 AnnotatedFunction",
+          "order": 1,
+          "filename": "u5-l1-kernel-decorator-and-annotated-function.md",
+          "level": "intermediate",
+          "topic": "讲解 kernel/function/stub 装饰器、kernel 继承 TileDispatcher、CompilerOptions，以及 AnnotatedFunction 如何把参数注解解析为统一的 ParameterAnnotationNode 树（LeafAnnotationNode / HomogeneousTupleNode / HeterogeneousTupleNode），取代旧的 constant/int64 布尔掩码，以同时表达 Constant/Array/Scalar/List 注解与 tuple 参数。",
+          "learning_goals": [
+            "理解 kernel 类如何承载 CompilerOptions 与参数注解树 parameter_annotations",
+            "掌握 ParameterAnnotationNode 层级（叶子/同质元组/异质元组）如何统一表达 Constant/Array/Scalar/List 与 tuple 注解",
+            "理解 TileDispatcher.__init__ 现在接收 parameter_annotations（而非多个布尔掩码）",
+            "理解 stub 与 function 装饰器如何标记执行空间"
+          ],
+          "source_files": [
+            "src/cuda/tile/_execution.py",
+            "src/cuda/tile/_annotated_function.py",
+            "src/cuda/tile/_compiler_options.py",
+            "src/cuda/tile/_cext.pyi"
+          ],
+          "minimal_modules": [
+            "kernel",
+            "AnnotatedFunction",
+            "ParameterAnnotationNode",
+            "CompilerOptions",
+            "TileDispatcher"
+          ],
+          "practice_task": "跟踪一个 @ct.kernel(occupancy=2) 内核从装饰到 _compile 被调用的对象构造过程，列出 kernel 对象上保存的关键字段；再对一个含 tuple 参数的内核画出其 ParameterAnnotationNode 树结构。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1"
+          ],
+          "action": "rebuild"
+        },
+        {
+          "id": "u5-l2",
+          "title": "编译总流程：compile_tile 流水线",
+          "order": 2,
+          "filename": "u5-l2-compile-tile-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 compile_tile 的完整流程：get_function_hir、_IrKeeper、hir2ir、_transform_ir、generate_bytecode_for_kernel、compile_cubin 与缓存；并说明 _IrKeeper 经 _create_kernel_parameters（现已重写为递归处理 parameter_annotations 树、tuple 与静态形状）创建内核参数。",
+          "learning_goals": [
+            "掌握从 Python 函数到 cubin 的完整编译流水线顺序",
+            "理解 _IrKeeper 如何按 signature 懒生成 final IR、以及 _create_kernel_parameters 如何从注解树+约束创建参数 Var",
+            "理解 return_cubin/return_bytecode/return_final_ir 的分支"
+          ],
+          "source_files": [
+            "src/cuda/tile/_compile.py"
+          ],
+          "minimal_modules": [
+            "compile_tile",
+            "_IrKeeper",
+            "_create_kernel_parameters",
+            "_transform_ir",
+            "compile_cubin"
+          ],
+          "practice_task": "在 compile_tile 中标注每一行的阶段（前端/IR 变换/后端/缓存），并用 CUDA_TILE_DUMP_TILEIR 跑通一个内核观察中间产物。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u5-l3",
+          "title": "AST 到 HIR：ast2hir",
+          "order": 3,
+          "filename": "u5-l3-ast-to-hir.md",
+          "level": "intermediate",
+          "topic": "讲解 get_function_hir 如何把 Python AST 解析为高层 IR（hir.Function/Block/Call），以及支持的 Python 子集与作用域处理。",
+          "learning_goals": [
+            "理解 HIR 是 AST 的结构化中间表示，用通用 Call 表达一切操作",
+            "掌握 hir.Function/Block/Call/Value 的结构",
+            "理解 ast_get_all_local_names 的作用域分析作用"
+          ],
+          "source_files": [
+            "src/cuda/tile/_passes/ast2hir.py",
+            "src/cuda/tile/_ir/hir.py",
+            "src/cuda/tile/_passes/ast_util.py"
+          ],
+          "minimal_modules": [
+            "get_function_hir",
+            "hir.Function/Block/Call",
+            "ast_get_all_local_names"
+          ],
+          "practice_task": "对一个含 for 循环与 if 的内核，画出其 HIR Block/Call 结构草图，标注 jump 与 stored variable。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "HIR 到 IR：hir2ir",
+          "order": 4,
+          "filename": "u5-l4-hir-to-ir.md",
+          "level": "intermediate",
+          "topic": "讲解 hir2ir 如何把 HIR Call 分派到具体 IR 操作、函数内联、循环/分支的 phi 状态管理，以及参数变量创建。",
+          "learning_goals": [
+            "理解 hir2ir 如何通过分派把 HIR Call 降级为具体 IR Op",
+            "理解函数内联与作用域管理",
+            "理解循环携带变量如何用 phi 状态合并"
+          ],
+          "source_files": [
+            "src/cuda/tile/_passes/hir2ir.py",
+            "src/cuda/tile/_ir/control_flow_ops.py",
+            "src/cuda/tile/_ir/scope.py"
+          ],
+          "minimal_modules": [
+            "hir2ir",
+            "loop_impl",
+            "if_else_impl",
+            "PhiState"
+          ],
+          "practice_task": "跟踪一个简单循环内核经 hir2ir 后生成的 Loop IR 操作，标出归纳变量与携带值（carried values）。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "IR 核心：IRContext、Builder、Block、Var、Operation",
+          "order": 5,
+          "filename": "u5-l5-ir-core.md",
+          "level": "intermediate",
+          "topic": "讲解 Tile IR 的核心数据结构：IRContext、Builder（线程局部）、Block、Var（SSA 值与常量）、Operation 基类及 operand/attribute/nested_block 字段。",
+          "learning_goals": [
+            "掌握 IRContext/Builder/Block/Var/Operation 的职责与关系",
+            "理解 SSA 风格的 Var、聚合展开与常量追踪",
+            "理解 Operation 的 operand/attribute/nested_block 声明式字段"
+          ],
+          "source_files": [
+            "src/cuda/tile/_ir/ir.py",
+            "src/cuda/tile/_ir/core_ops.py"
+          ],
+          "minimal_modules": [
+            "IRContext",
+            "Builder",
+            "Block",
+            "Var",
+            "Operation"
+          ],
+          "practice_task": "用 Builder 模式手写（在脑海中）一段 IR：创建两个 Var、做一次 add、把结果加入 Block，并描述每个对象的状态。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "类型系统：TileTy、ArrayTy、ListTy 与 TypingHooks",
+          "order": 6,
+          "filename": "u5-l6-ir-type-system.md",
+          "level": "intermediate",
+          "topic": "讲解 IR 类型层级 Type/TensorLikeTy/TileTy/ArrayTy/ListTy/TupleTy、聚合类型的展开与序列化（含 ArrayTy.shape 现可携带静态维度常量），以及 TypingHooks 扩展点。",
+          "learning_goals": [
+            "掌握 TileTy（flyweight）、ArrayTy（base_ptr+shape+strides，shape 可含静态维度）、ListTy 的结构",
+            "理解聚合类型如何 flatten 为可序列化的参数",
+            "理解 TypingHooks.get_tensor_like_type 作为前端扩展点"
+          ],
+          "source_files": [
+            "src/cuda/tile/_ir/type.py",
+            "src/cuda/tile/_ir/aggregate_support.py",
+            "src/cuda/tile/_ir/ir.py"
+          ],
+          "minimal_modules": [
+            "TileTy",
+            "ArrayTy",
+            "ListTy",
+            "TupleTy",
+            "TypingHooks",
+            "flatten_block_parameters"
+          ],
+          "practice_task": "给定一个 List[Array] 参数，描述它如何被 flatten 成扁平 Var 序列以进入内核函数体；再说明静态形状维度如何进入 ArrayTy.shape。",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l7",
+          "title": "Stub 与实现注册：从 builtin 到 IR",
+          "order": 7,
+          "filename": "u5-l7-stub-and-impl-registry.md",
+          "level": "advanced",
+          "topic": "讲解 stub 装饰器、@impl 注册、tile_impl_registry、ImplRegistry 的重载分派，把用户 API（如 ct.add、build_tuple）与具体 IR 实现连接起来（含 result_var 模式）。",
+          "learning_goals": [
+            "理解 @stub 标记的 API 与 @impl 注册的 IR 实现如何对应",
+            "掌握 tile_impl_registry 聚合 core/arithmetic/control_flow/static_eval 子注册表",
+            "理解基于类型的重载分派与 WILDCARD 匹配，以及 build_tuple/loosely_typed_const 的 result_var 复用入口 Var 的写法"
+          ],
+          "source_files": [
+            "src/cuda/tile/_stub.py",
+            "src/cuda/tile/_ir/ops.py",
+            "src/cuda/tile/_ir/op_impl.py",
+            "src/cuda/tile/_ir/arithmetic_ops.py",
+            "src/cuda/tile/_ir/core_ops.py"
+          ],
+          "minimal_modules": [
+            "@stub",
+            "@impl",
+            "tile_impl_registry",
+            "ImplRegistry",
+            "overload_dispatcher",
+            "build_tuple"
+          ],
+          "practice_task": "选一个 builtin（如 add），画出从 ct.add(...) 调用到对应 RawBinaryArithmeticOperation 的注册与分派路径。",
+          "depends_on": [
+            "u5-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "IR 优化 Pass",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Pass 流水线总览与死代码消除",
+          "order": 1,
+          "filename": "u6-l1-pass-pipeline-and-dce.md",
+          "level": "intermediate",
+          "topic": "讲解 _transform_ir 中 Pass 的执行顺序与职责划分，并深入死代码消除 pass（dead_code_elimination_pass）。",
+          "learning_goals": [
+            "掌握 _transform_ir 中各 pass 的调用顺序与依赖原因",
+            "理解 DCE 如何构建数据流图并剪除无用操作",
+            "理解为何消除 assign ops 要先行"
+          ],
+          "source_files": [
+            "src/cuda/tile/_compile.py",
+            "src/cuda/tile/_passes/dce.py",
+            "src/cuda/tile/_passes/eliminate_assign_ops.py"
+          ],
+          "minimal_modules": [
+            "_transform_ir",
+            "dead_code_elimination_pass",
+            "eliminate_assign_ops"
+          ],
+          "practice_task": "对一个含未使用中间 tile 的内核，用 dump 的 IR 对照说明 DCE 前后 IR 的差异。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "数据流分析与整除性传播",
+          "order": 2,
+          "filename": "u6-l2-dataflow-and-divby.md",
+          "level": "advanced",
+          "topic": "讲解 dataflow_analysis 的别名与整除性不动点分析（含对 TupleConstraint 的递归处理 _register_tuple_params，以及把静态形状 shape_constant 折叠为整除性事实），以及 add_divby_pass / assume_div_by 如何插入 AssumeDivBy 以优化对齐的内存操作（并对已知常量做整除性校验）。",
+          "learning_goals": [
+            "理解数据流分析如何追踪别名集与整除性谓词",
+            "理解 TupleConstraint 如何递归注册其叶参数、静态形状如何折叠为整除性事实",
+            "理解 AssumeDivBy op 如何向编译器传递对齐信息、并对常量做 assume_divisible_by 校验",
+            "理解 stride/base_addr 整除性假设的来源"
+          ],
+          "source_files": [
+            "src/cuda/tile/_passes/dataflow_analysis.py",
+            "src/cuda/tile/_passes/propagate_divby.py",
+            "src/cuda/tile/_ir/ops.py"
+          ],
+          "minimal_modules": [
+            "dataflow_analysis",
+            "_register_tuple_params",
+            "add_divby_pass",
+            "AssumeDivBy",
+            "shape_constant folding"
+          ],
+          "practice_task": "用一个 base address 对齐到 16 的数组内核，对照 dump 说明 add_divby 为哪些操作注入了整除性假设；再用一个 static_shape_dims 内核说明静态形状如何成为整除性事实。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "内存序 Token 排序",
+          "order": 3,
+          "filename": "u6-l3-token-order-pass.md",
+          "level": "advanced",
+          "topic": "讲解 token_order_pass 如何用 token 链为内存操作定序以保证 GPU 内存模型正确性，含循环与分支的 token 传播。",
+          "learning_goals": [
+            "理解 token 排序为何对内存正确性必不可少",
+            "掌握 token_order_pass 如何构建内存操作间的依赖链",
+            "理解循环并行 store 优化与 CUDA_TILE_TESTING_DISABLE_TOKEN_ORDER"
+          ],
+          "source_files": [
+            "src/cuda/tile/_passes/token_order.py"
+          ],
+          "minimal_modules": [
+            "token_order_pass",
+            "memory token chain"
+          ],
+          "practice_task": "在一个含多次 store 的内核上，用 dump 观察插入的 token 操作，并解释若无 token 会出什么正确性问题。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "代码外提、循环分裂与模式重写",
+          "order": 4,
+          "filename": "u6-l4-code-motion-loop-split-rewrite.md",
+          "level": "advanced",
+          "topic": "讲解 hoist_loop_invariants、split_loops、rewrite_patterns（如 FMA 融合）、unhoist_partition_views 等变换 pass。",
+          "learning_goals": [
+            "理解循环不变量外提的可移动性分类与为何要在 token pass 之后",
+            "理解 split_loops 如何按可分裂条件拆分循环",
+            "理解 rewrite_patterns 的 FMA 融合与安全校验"
+          ],
+          "source_files": [
+            "src/cuda/tile/_passes/code_motion.py",
+            "src/cuda/tile/_passes/loop_split.py",
+            "src/cuda/tile/_passes/rewrite_patterns.py",
+            "src/cuda/tile/_passes/unhoist_partition_views.py"
+          ],
+          "minimal_modules": [
+            "hoist_loop_invariants",
+            "split_loops",
+            "rewrite_patterns",
+            "unhoist_partition_views"
+          ],
+          "practice_task": "对比 FMA 融合前后 dump 的算术 IR，指出哪几条 mul+add 被合并成一条融合指令。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "后端：字节码与 cubin 生成",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "IR 到字节码：ir2bytecode",
+          "order": 1,
+          "filename": "u7-l1-ir-to-bytecode.md",
+          "level": "advanced",
+          "topic": "讲解 generate_bytecode_for_kernel 如何遍历 IR Block、用 CodeBuilder/BytecodeContext 把每个 Op 编码成线性字节码流。",
+          "learning_goals": [
+            "理解 BytecodeContext 如何维护值映射与类型/常量表",
+            "掌握 CodeBuilder.new_op 如何分配 SSA value id",
+            "理解控制流 Op 的嵌套 region 编码"
+          ],
+          "source_files": [
+            "src/cuda/tile/_ir2bytecode.py",
+            "src/cuda/tile/_bytecode/code_builder.py"
+          ],
+          "minimal_modules": [
+            "generate_bytecode_for_kernel",
+            "BytecodeContext",
+            "CodeBuilder.new_op"
+          ],
+          "practice_task": "跟踪一个含循环的内核，描述其 IR Loop 如何被编码为带 nested region 的字节码片段。",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "字节码格式与版本：writer、encodings、类型表",
+          "order": 2,
+          "filename": "u7-l2-bytecode-format-and-versioning.md",
+          "level": "advanced",
+          "topic": "讲解 TileIR 字节码的二进制布局（magic、section、表）、BytecodeVersion（V_13_1/2/3）版本门控、操作数与类型编码。",
+          "learning_goals": [
+            "理解字节码的 section 顺序与表结构（func/global/constant/type/string）",
+            "掌握 BytecodeVersion 如何门控特性与最大支持版本探测",
+            "理解 encode_*Op 的 opcode/类型/标志/属性/操作数编码模式"
+          ],
+          "source_files": [
+            "src/cuda/tile/_bytecode/writer.py",
+            "src/cuda/tile/_bytecode/encodings.py",
+            "src/cuda/tile/_bytecode/type.py",
+            "src/cuda/tile/_bytecode/version.py",
+            "src/cuda/tile/_bytecode/__init__.py"
+          ],
+          "minimal_modules": [
+            "BytecodeWriter",
+            "write_bytecode",
+            "BytecodeVersion",
+            "TypeTable",
+            "encode_*Op"
+          ],
+          "practice_task": "用十六进制查看一个 dump 出的 .tileirbc 文件，定位 magic 头与各 section，对照 writer.py 解释其结构。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "tileiras 编译器调用与 cubin 生成",
+          "order": 3,
+          "filename": "u7-l3-tileiras-and-cubin.md",
+          "level": "advanced",
+          "topic": "讲解 compile_cubin 如何定位并调用 tileiras（pip 包/PATH/CUDA_HOME）、传递 sm_arch/O 选项、超时与错误处理，以及 sm_arch 探测。",
+          "learning_goals": [
+            "掌握 _find_compiler_bin 的多级查找顺序（pip/PATH/CUDA_HOME）",
+            "理解 compile_cubin 的参数（--gpu-name、-O、--lineinfo/--device-debug）",
+            "理解 get_sm_arch 与字节码版本探测逻辑"
+          ],
+          "source_files": [
+            "src/cuda/tile/_compile.py",
+            "src/cuda/tile/_load_libcuda.py"
+          ],
+          "minimal_modules": [
+            "compile_cubin",
+            "_find_compiler_bin",
+            "get_sm_arch",
+            "_get_max_supported_bytecode_version"
+          ],
+          "practice_task": "在未安装 pip tileiras 而只有系统 CTK 的环境下，验证 cuTile 能正确定位 tileiras，并说明 --lineinfo 与 --device-debug 的触发条件。",
+          "depends_on": [
+            "u7-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "JIT 磁盘缓存",
+          "order": 4,
+          "filename": "u7-l4-jit-disk-cache.md",
+          "level": "advanced",
+          "topic": "讲解基于 SQLite 的 cubin 磁盘缓存：cache_key 的构成、cache_lookup/cache_store 与 LRU 淘汰策略。",
+          "learning_goals": [
+            "掌握 cache_key 由编译器版本/sm_arch/opt/bytecode/debug 哈希而成",
+            "理解 SQLite 表结构与 LRU（atime + 窗口累计大小）淘汰",
+            "理解 CUDA_TILE_CACHE_DIR / CUDA_TILE_CACHE_SIZE 配置"
+          ],
+          "source_files": [
+            "src/cuda/tile/_cache.py",
+            "src/cuda/tile/_context.py"
+          ],
+          "minimal_modules": [
+            "cache_key",
+            "cache_lookup",
+            "cache_store",
+            "evict_lru",
+            "TileContextConfig"
+          ],
+          "practice_task": "设置 CUDA_TILE_CACHE_DIR，连续两次启动同一内核，第二次应命中缓存；再修改 opt_level 观察缓存 key 变化。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "运行时调度、导出与扩展",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "launch 与调度：C++ 扩展桥接与调用约定",
+          "order": 1,
+          "filename": "u8-l1-launch-and-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 launch 的 JIT 流程、TileDispatcher（现以 parameter_annotations 注解树初始化）、DispatchMode、从运行时参数推断 KernelSignature，以及 cutile_python_v1 / cutile_python_v2 两套调用约定（含 CallingConvention.version 与对 tuple/静态形状的支持门控）。",
+          "learning_goals": [
+            "掌握 launch 触发的 JIT 链：签名推断→编译→缓存→cuLaunchKernel",
+            "理解 DispatchMode（NormalMode/StaticEvalMode）如何控制 tile 函数从 host 调用",
+            "理解 cutile_python_v1 与 cutile_python_v2 调用约定的差异（v2 才支持 tuple 参数与静态形状），以及 cext 暴露的 launch/TileDispatcher/TileContext 接口"
+          ],
+          "source_files": [
+            "src/cuda/tile/_cext.pyi",
+            "src/cuda/tile/_dispatch_mode.py",
+            "src/cuda/tile/_execution.py",
+            "docs/source/compilation.rst"
+          ],
+          "minimal_modules": [
+            "launch",
+            "TileDispatcher",
+            "DispatchMode",
+            "CallingConvention.cutile_python_v1",
+            "CallingConvention.cutile_python_v2"
+          ],
+          "practice_task": "跟踪一次 ct.launch 调用，列出从 Python 到 cuLaunchKernel 之间每一步发生的事情，并说明 cuLaunchKernel 所需参数如何由调用约定填充；再说明为何使用 tuple 参数会要求 cutile_python_v2。",
+          "depends_on": [
+            "u5-l1",
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "AOT 导出与内核签名/名称修饰",
+          "order": 2,
+          "filename": "u8-l2-aot-export-and-signatures.md",
+          "level": "advanced",
+          "topic": "讲解 export_kernel 的 AOT 编译（cubin/tileir_bytecode）、KernelSignature 与 ParameterConstraint 体系（含新增 TupleConstraint、ArrayConstraint.shape_constant 静态形状，以及移入 KernelSignature 构造器的调用约定校验 _validate_constraint_support），以及 name mangling 规则（含 tuple 的 T 前缀编码、静态形状 s 谓词与可逆 demangle）。",
+          "learning_goals": [
+            "掌握 AOT 导出与 JIT 的差异及适用场景",
+            "理解 Scalar/Array/List/Tuple/ConstantConstraint 表达的假设，以及 shape_constant 与 static_shape_dims 的关系",
+            "理解 _validate_constraint_support 如何按 calling_convention.version 门控 tuple/静态形状（需 v2）",
+            "理解 mangle_kernel_name 的符号编码格式（含 tuple T、静态形状 s）与可逆 demangle"
+          ],
+          "source_files": [
+            "src/cuda/tile/compilation/_export.py",
+            "src/cuda/tile/compilation/_signature.py",
+            "src/cuda/tile/compilation/_name_mangling.py",
+            "src/cuda/tile/compilation/__init__.py"
+          ],
+          "minimal_modules": [
+            "export_kernel",
+            "KernelSignature",
+            "ParameterConstraint",
+            "TupleConstraint",
+            "shape_constant",
+            "_validate_constraint_support",
+            "mangle_kernel_name"
+          ],
+          "practice_task": "为一个带 Array（含 static_shape_dims）与 tuple 参数的内核导出 cubin（使用 cutile_python_v2），用 demangle_kernel_name 反推其签名验证一致性，并指出 tuple 与静态形状在 mangled name 中的编码。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l2",
+            "u3-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "自动调优 tune：exhaustive_search 与子进程 benchmark 安全",
+          "order": 3,
+          "filename": "u8-l3-autotuning.md",
+          "level": "advanced",
+          "topic": "讲解 cuda.tile.tune 的 exhaustive_search 执行主流程：三阶段收敛（warmup + 动态超时过滤、Top-K 收敛、按 cutoff 剪枝慢配置）、benchmark 在子进程 worker 中经 IPC 执行以隔离内核死锁（_tune_utils 的 _TimedBenchmarkRunner/benchmark_with_timeout 与 cext 的 _export_ipc_benchmark_payload/_benchmark_with_ipc_payload）、TileLaunchTimeoutError 与 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS，以及实验性 autotune_launch 的两级缓存。",
+          "learning_goals": [
+            "掌握 exhaustive_search 的三阶段搜索与收敛流程：warmup + 超时过滤、Top-K 收敛、剩余按 cutoff 剪枝慢配置",
+            "理解 benchmark 为何在子进程 worker 中经 IPC 执行以隔离内核死锁/超时，以及 benchmark_with_timeout 的动态启动超时调整",
+            "理解 _export_ipc_benchmark_payload / _benchmark_with_ipc_payload 如何把启动 payload 序列化到子进程并回传计时",
+            "理解 TuningResult/Measurement 的统计字段（Welford 均值/方差、95% 置信区间）、TileLaunchTimeoutError 与 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS",
+            "理解实验性 autotune_launch 的两级缓存与 reservoir 采样"
+          ],
+          "source_files": [
+            "src/cuda/tile/tune/_tune.py",
+            "src/cuda/tile/tune/_tune_utils.py",
+            "src/cuda/tile/tune/_benchmark_worker.py",
+            "src/cuda/tile/tune/__init__.py",
+            "src/cuda/tile/_cext.pyi",
+            "experimental/tile_experimental/src/cuda/tile_experimental/_autotuner.py"
+          ],
+          "minimal_modules": [
+            "exhaustive_search",
+            "_TimingCandidate",
+            "benchmark_with_timeout",
+            "_TimedBenchmarkRunner",
+            "_benchmark_worker",
+            "CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS",
+            "TuningResult/Measurement",
+            "autotune_launch"
+          ],
+          "practice_task": "对一个 GEMM 内核，用 exhaustive_search 在若干 (tm,tn,tk) 组合中搜索，打印 top_k 配置及计时；再人为构造一个会超时/死锁的配置，观察子进程 worker 如何用 TileLaunchTimeoutError 过滤掉它，并用 CUDA_TILE_BENCHMARK_DISABLE_SUBPROCESS=1 对比行为。",
+          "depends_on": [
+            "u3-l6",
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "JAX / XLA FFI 互操作",
+          "order": 4,
+          "filename": "u8-l4-jax-interop.md",
+          "level": "advanced",
+          "topic": "讲解 cuda.tile.jax 的 cutile_call 如何把 cuTile 内核接入 JAX 计算图（基于 parameter_annotations 注解树按叶子节点一一映射 buffer/constraint，并对 tuple 参数显式抛 NotImplementedError），以及底层 XLA FFI C++ 桥接（KernelEntry、cubin 注册）。",
+          "learning_goals": [
+            "掌握 cutile_call / OutputPlaceholder / InputOutput 的使用",
+            "理解 register_ffi/register_primitive 如何注册 XLA FFI",
+            "理解 cutile_call 如何从注解树派生 role/constraint 与 int64 标量/索引判定，以及为何 tuple 参数暂不支持",
+            "理解 cext/xla_ffi 的 KernelEntry 与 cubin 生命周期管理"
+          ],
+          "source_files": [
+            "src/cuda/tile/jax/_jax.py",
+            "src/cuda/tile/jax/__init__.py",
+            "cext/xla_ffi.h",
+            "cext/xla_ffi.cpp",
+            "cext/xla_ffi_py.cpp"
+          ],
+          "minimal_modules": [
+            "cutile_call",
+            "OutputPlaceholder",
+            "register_ffi",
+            "cutile_call_handler",
+            "KernelEntry",
+            "parameter_annotations"
+          ],
+          "practice_task": "用 cutile_call 把一个 vector_add 内核接入一个最小 JAX 程序，验证 jax.Array 输入输出的正确性；并尝试传入 tuple 参数，观察 NotImplementedError。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "调试、性能与开发者工具",
+          "order": 5,
+          "filename": "u8-l5-debugging-and-performance.md",
+          "level": "advanced",
+          "topic": "讲解 cuTile 的调试与性能工具：环境变量日志（log_cutile_ir/log_tileir）、dump（CUDA_TILE_DUMP_BYTECODE/TILEIR）、crash dump、超时、Nsight Compute 集成。",
+          "learning_goals": [
+            "掌握 CUDA_TILE_LOGS / CUDA_TILE_DUMP_* / CUDA_TILE_COMPILER_TIMEOUT_SEC 等环境变量",
+            "理解 crash dump 的产物（bytecode + cutileir + debug_info）",
+            "理解性能调优建议（tile 大小、num_worker_warps、occupancy）与 Nsight 集成"
+          ],
+          "source_files": [
+            "src/cuda/tile/_debug.py",
+            "src/cuda/tile/_context.py",
+            "src/cuda/tile/_compile.py",
+            "docs/source/debugging.rst",
+            "docs/source/performance.rst"
+          ],
+          "minimal_modules": [
+            "CUDA_TILE_DUMP_TILEIR",
+            "CUDA_TILE_LOGS",
+            "enable_crash_dump",
+            "compiler_timeout",
+            "replace_hints"
+          ],
+          "practice_task": "开启 log_cutile_ir 与 CUDA_TILE_DUMP_TILEIR，对一个内核导出中间 IR 与 MLIR，并用 Nsight Compute 生成性能 profile。",
+          "depends_on": [
+            "u7-l3",
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
