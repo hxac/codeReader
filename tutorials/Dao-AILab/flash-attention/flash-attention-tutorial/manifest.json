@@ -1,0 +1,1037 @@
+{
+  "project": "flash-attention",
+  "head": "5835c733e7e9c07606b045255768e8a7e9e851bd",
+  "rationale": "本仓库同时容纳三代实现：FA2（顶层 flash_attn/ + csrc/，C++/CUDA）、FA3（hopper/）、以及当前主力开发的 FA4（flash_attn/cute/，用 Python + CuTeDSL 编写，运行时 JIT 编译为 PTX/CUBIN）。由于 FA4 既是开发重点又是 Python 可读的源码，本手册以 FA4 为主线，同时在入门层交代整个仓库的多代共存结构，避免读者迷失。\\n\\n学习顺序按「先宏观后微观、先数据结构后算法、先 Ampere 基线后 Hopper/Blackwell 特化」设计：第 1 单元做项目定位与上手；第 2 单元拆公共接口与架构分发；第 3-4 单元讲贯穿所有 kernel 的核心数据结构（掩码/分块/变长/在线 softmax/score_mod）；第 5 单元补齐流水线、TMA 拷贝、屏障等运行机制；有了这些基础，第 6 单元才进入前向主循环（先 Ampere 基线再 Hopper），第 7 单元讲 pack_gqa、SplitKV、paged KV 等前向高级特性。专家层（第 8-11 单元）依次深入 Blackwell 专用 kernel（UMMA/2CTA/CLC 调度）、反向传播（含 MLA 反向）、稀疏与 MLA、以及编译缓存、测试、基准与 GPU 调试。每篇讲义只解决一个主题、引用 1-6 个真实源码文件并配一个可操作实践任务，依赖关系严格向后指向前置讲义，构成一条由浅入深的完整路径。\\n\\n本次增量（1f7ce2f..5835c73）只有两个 PR：在 SM120 上实现 Pack-GQA 并修复其编译期参数处理，以及让 Ampere 前向基线（SM120 继承自它）完整支持 pack_gqa_layout、显式断言 SM120 不支持 SplitKV、并给反向 Sm80 kernel 加上滑窗(local)掩码与 BlockInfo 块范围/空块早退。受影响而需更新的是直接引用这些源码的已生成讲义：u6-l1（Ampere 前向主循环，pack_gqa 代码路径与 use_tma_O 边界变化、行号位移）、u7-l1（pack_gqa 现已覆盖 SM80/SM120 前向、不再仅 epilogue）、u7-l2（SplitKV 在 SM120 上现为显式断言）；u2-l2 既有引用行号仍在未改动区间且已正确记述 SM120 不支持 SplitKV，故 keep。尚未生成的讲义（u7-l3 起）保持 new，其中 u9-l1 的 topic/minimal_modules/source_files 已增补「滑窗/局部掩码反向 + BlockInfo 块范围 + 空块早退」以保证首生成时覆盖新代码。\"",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目总览与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FlashAttention 是什么：从朴素注意力到 IO 感知",
+          "order": 1,
+          "filename": "u1-l1-what-is-flashattention.md",
+          "level": "beginner",
+          "topic": "讲解标准注意力的计算与显存瓶颈，引出 FlashAttention 的三个核心思想：分块(tiling)、在线 softmax(online softmax)、避免实例化 N×N 注意力矩阵；并梳理 FA1/2/3/4 的演进。",
+          "learning_goals": [
+            "理解朴素 SDPA 为何在长序列下显存爆炸与变慢",
+            "掌握 tiling 与 online softmax 的基本直觉",
+            "了解 FA1→FA4 各代的核心改进点"
+          ],
+          "source_files": [
+            "README.md",
+            "usage.md"
+          ],
+          "minimal_modules": [
+            "朴素注意力的复杂度与显存问题",
+            "Tiling 与 online softmax 思想",
+            "FA1/2/3/4 演进脉络"
+          ],
+          "practice_task": "用纯 PyTorch 实现 scaled-dot-product attention，对 seqlen=4096 的输入测量其峰值显存，验证其近似 O(N²) 的显存行为，并写出观察结论。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与多代代码共存",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "解读根目录布局：FA2 在顶层 flash_attn/ 与 csrc/、FA3 在 hopper/、FA4 在 flash_attn/cute/，以及 tests/、examples/、benchmarks/、AI/ 调试文档、setup.py 构建脚本。",
+          "learning_goals": [
+            "看懂仓库根目录各文件夹的职责",
+            "区分三代实现各自所在的目录",
+            "知道构建入口 setup.py 与 FA4 子包 pyproject.toml 的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py",
+            "flash_attn/__init__.py",
+            "flash_attn/cute/README.md"
+          ],
+          "minimal_modules": [
+            "根目录与三代实现定位",
+            "测试/示例/基准目录",
+            "构建脚本与子包配置"
+          ],
+          "practice_task": "绘制一张仓库目录树，用不同颜色标注 FA2/FA3/FA4 的代码位置，并为每个关键目录写一句话说明其用途。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "安装并第一次调用 FA4",
+          "order": 3,
+          "filename": "u1-l3-install-and-first-run.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 flash-attn-4 及其依赖（cutlass-dsl、torch、einops、quack），给出 flash_attn_func 的最小调用示例，并强调张量布局 (batch, seqlen, num_heads, head_dim) 与最后一维连续、16 字节对齐的要求。",
+          "learning_goals": [
+            "能够安装并导入 flash_attn.cute",
+            "掌握 flash_attn_func 的最小调用方式与张量布局",
+            "理解头维对齐等输入约束"
+          ],
+          "source_files": [
+            "flash_attn/cute/__init__.py",
+            "flash_attn/cute/pyproject.toml",
+            "flash_attn/cute/README.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "安装方式与依赖",
+            "flash_attn_func 最小示例",
+            "张量布局与对齐约束"
+          ],
+          "practice_task": "构造 fp16 的 q/k/v（batch=2, seqlen=512, heads=8, head_dim=64），调用 flash_attn_func(q,k,v,causal=True)，打印输出形状、dtype，并与 PyTorch 参考注意力对比最大误差。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "FA2 与 FA4 接口对比与共存机制",
+          "order": 4,
+          "filename": "u1-l4-fa2-vs-fa4-coexistence.md",
+          "level": "beginner",
+          "topic": "解释 flash_attn/__init__.py 通过 pkgutil.extend_path 让 FA2 与 FA4 子包共存，对比两套 flash_attn_func 的来源（C++/CUDA 内核 vs CuTeDSL 内核），说明何时该用哪一个。",
+          "learning_goals": [
+            "理解 extend_path 实现的多代共存",
+            "区分 FA2 与 FA4 的 flash_attn_func",
+            "知道在不同硬件/场景下应选哪一代"
+          ],
+          "source_files": [
+            "flash_attn/__init__.py",
+            "flash_attn/flash_attn_interface.py",
+            "flash_attn/cute/interface.py"
+          ],
+          "minimal_modules": [
+            "extend_path 命名空间包机制",
+            "两套接口的来源差异",
+            "选型建议"
+          ],
+          "practice_task": "写一段脚本分别 import FA2 (flash_attn) 与 FA4 (flash_attn.cute) 的 flash_attn_func，打印二者的 __module__ 路径与所在文件，确认它们来自不同实现。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共接口与架构分发",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "flash_attn_func 公共 API 详解",
+          "order": 1,
+          "filename": "u2-l1-public-api.md",
+          "level": "intermediate",
+          "topic": "逐项讲解 flash_attn_func 与 flash_attn_varlen_func 的参数（causal、window_size、softmax_scale、softcap、score_mod、mask_mod、block_sparse_tensors、num_splits、pack_gqa、m/n_block_size、num_threads 等）及返回值（输出 O 与 logsumexp LSE）。",
+          "learning_goals": [
+            "掌握 flash_attn_func / flash_attn_varlen_func 的完整参数语义",
+            "理解返回的 LSE 的形状与用途",
+            "知道哪些参数会影响 kernel 特化与重编译"
+          ],
+          "source_files": [
+            "flash_attn/cute/interface.py",
+            "flash_attn/cute/__init__.py"
+          ],
+          "minimal_modules": [
+            "标准与变长接口签名",
+            "关键参数语义",
+            "返回值 O 与 LSE"
+          ],
+          "practice_task": "调用 flash_attn_func 并打印返回的 LSE 张量形状与数值范围，再用 LSE 手动还原 softmax 归一化因子，验证其与输出 O 的一致性。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "架构分发与 tile 配置选择",
+          "order": 2,
+          "filename": "u2-l2-arch-dispatch-and-config.md",
+          "level": "intermediate",
+          "topic": "讲解 interface.py 如何通过 _get_device_arch()（可用 FLASH_ATTENTION_ARCH 覆盖）选择 SM80/SM90/SM100/SM120 kernel 类，_validate_head_dims 校验头维，FwdConfig 与 _tile_size_fwd_sm90 等函数依据架构与因果/局部选择 tile_m/tile_n。",
+          "learning_goals": [
+            "理解运行时如何根据 GPU 架构选择 kernel",
+            "掌握头维合法性校验规则",
+            "了解 tile 尺寸配置是如何被决定的"
+          ],
+          "source_files": [
+            "flash_attn/cute/interface.py"
+          ],
+          "minimal_modules": [
+            "_get_device_arch 与 FLASH_ATTENTION_ARCH",
+            "头维校验 _validate_head_dims",
+            "FwdConfig 与 tile 尺寸选择"
+          ],
+          "practice_task": "用 FLASH_ATTENTION_ARCH=sm_80 环境变量强制选择 Ampere 路径运行一次前向，再设为 sm_90 运行一次，记录两次输出是否数值一致，并说明架构分发为何不影响数学结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "掩码、分块与变长",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "AttentionMask：因果/滑窗/块稀疏掩码",
+          "order": 1,
+          "filename": "u3-l1-attention-mask.md",
+          "level": "intermediate",
+          "topic": "讲解 mask.py 的 AttentionMask 抽象：如何把因果、滑窗、块稀疏统一表达，用户自定义 mask_mod 如何被注入 kernel，以及 R2P（register-to-pred）32 列位图掩码机制。",
+          "learning_goals": [
+            "理解 AttentionMask 统一掩码抽象",
+            "掌握 mask_mod 的签名与注入方式",
+            "了解 R2P 位图如何把掩码压进寄存器谓词"
+          ],
+          "source_files": [
+            "flash_attn/cute/mask.py",
+            "flash_attn/cute/block_info.py"
+          ],
+          "minimal_modules": [
+            "AttentionMask 抽象",
+            "mask_mod 用户回调",
+            "R2P 位图掩码"
+          ],
+          "practice_task": "参考 tests/cute/mask_mod_definitions.py，自定义一个 mask_mod 实现「仅保留前一半 key」的文档级掩码，传入 flash_attn_func 并与一个等价的 PyTorch 掩码参考实现对比。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "BlockInfo：分块与有效范围计算",
+          "order": 2,
+          "filename": "u3-l2-block-info.md",
+          "level": "intermediate",
+          "topic": "讲解 block_info.py 的 BlockInfo：tile_m/tile_n 维度，以及 get_n_block_min_max / get_m_block_min_max 如何根据因果、滑窗、split_kv 计算每个 Q/KV tile 真正需要遍历的 n/m block 范围，避免无效计算。",
+          "learning_goals": [
+            "理解 tile_m/tile_n 分块参数",
+            "掌握因果/滑窗下 n_block 范围的推导",
+            "了解 split_kv 如何切分 n block"
+          ],
+          "source_files": [
+            "flash_attn/cute/block_info.py",
+            "flash_attn/cute/seqlen_info.py"
+          ],
+          "minimal_modules": [
+            "tile 维度与 BlockInfo 字段",
+            "n_block_min_max 因果/滑窗裁剪",
+            "split_kv 切分逻辑"
+          ],
+          "practice_task": "给定 tile_m=128、tile_n=128、seqlen_q=seqlen_k=1024、causal=True，手算 m_block=3 时 n_block_min 与 n_block_max，再用一段 Python 小脚本复现 get_n_block_min_max 的逻辑核对结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "SeqlenInfo：变长序列与偏移",
+          "order": 3,
+          "filename": "u3-l3-seqlen-info-varlen.md",
+          "level": "intermediate",
+          "topic": "讲解 seqlen_info.py 的 SeqlenInfo / SeqlenInfoQK：如何用 cu_seqlens 把一个 batch 内不等长序列紧凑打包，offset 与 offset_padded 的区别，以及为何在每个 tile 开头一次性读取序列长度信息。",
+          "learning_goals": [
+            "理解 varlen 的 cu_seqlens 打包方式",
+            "掌握 offset / offset_padded 的作用与对齐",
+            "了解 SeqlenInfoQK 如何同时跟踪 Q 与 K 的长度"
+          ],
+          "source_files": [
+            "flash_attn/cute/seqlen_info.py",
+            "flash_attn/cute/interface.py"
+          ],
+          "minimal_modules": [
+            "cu_seqlens 打包与解包",
+            "offset 与 offset_padded",
+            "SeqlenInfoQK 的 Q/K 长度跟踪"
+          ],
+          "practice_task": "构造 3 条长度分别为 128、256、64 的序列，用 unpad_input 风格打包成 1D 并构造 cu_seqlens，调用 flash_attn_varlen_func，再与逐条调用 flash_attn_func 的结果拼接对比。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "在线 Softmax 与 score_mod",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "在线 Softmax 数值核心",
+          "order": 1,
+          "filename": "u4-l1-online-softmax.md",
+          "level": "intermediate",
+          "topic": "讲解 softmax.py 的 Softmax 类：寄存器中的 row_max / row_sum 跟踪、分块累加后的 rescale（重缩放）、scale_log2 与 exp2 思想，以及为什么分块 online softmax 在数学上等价于完整 softmax。",
+          "learning_goals": [
+            "理解 online softmax 的 row_max/row_sum/rescale 三步",
+            "掌握 scale_log2 与 exp2 的数值技巧",
+            "明白分块累加为何能保证精确结果"
+          ],
+          "source_files": [
+            "flash_attn/cute/softmax.py",
+            "flash_attn/cute/utils.py"
+          ],
+          "minimal_modules": [
+            "row_max / row_sum 跟踪",
+            "rescale 重缩放",
+            "scale_log2 与 exp2"
+          ],
+          "practice_task": "用纯 PyTorch 实现一个分块 online softmax（按 128 列分块累加并 rescale），与 torch.softmax 在 fp32 下对比最大相对误差，验证二者等价。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "score_mod：可编程打分修改",
+          "order": 2,
+          "filename": "u4-l2-score-mod.md",
+          "level": "intermediate",
+          "topic": "讲解 softmax.py 的 call_score_mod / call_score_mod_bwd，以及 score_mod 作为 @cute.jit 回调的签名 (score, batch_idx, head_idx, q_idx, kv_idx, seqlen_info, aux_tensors)，并用 score_mod_definitions.py 里的 ALiBi、softcap、相对偏置等例子说明。",
+          "learning_goals": [
+            "掌握 score_mod 的回调签名与编译期注入",
+            "理解 ALiBi / softcap / 相对位置偏置的实现",
+            "了解 aux_tensors / aux_scalars 扩展机制"
+          ],
+          "source_files": [
+            "flash_attn/cute/softmax.py",
+            "tests/cute/score_mod_definitions.py"
+          ],
+          "minimal_modules": [
+            "call_score_mod 注入机制",
+            "score_mod 回调签名",
+            "ALiBi/softcap/rel_bias 实例"
+          ],
+          "practice_task": "参考 score_mod_definitions.py，实现一个 softcap score_mod（对 score 做 tanh(score/cap)*cap），传入 flash_attn_func 并与一个 PyTorch 参考实现对比数值。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "流水线、拷贝与同步机制",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "循环缓冲流水线 PipelineStateSimple",
+          "order": 1,
+          "filename": "u5-l1-pipeline-state.md",
+          "level": "intermediate",
+          "topic": "讲解 pipeline.py 的 PipelineStateSimple：用一个 Int32 同时编码循环缓冲的 index 与 phase，divmod 推进，power-of-2 stages 退化为位运算，producer/consumer 与多级流水如何隐藏全局内存延迟。",
+          "learning_goals": [
+            "理解 index/phase 编码与推进方式",
+            "掌握 producer/consumer 流水模型",
+            "了解多级 stages 如何隐藏访存延迟"
+          ],
+          "source_files": [
+            "flash_attn/cute/pipeline.py",
+            "flash_attn/cute/named_barrier.py"
+          ],
+          "minimal_modules": [
+            "index/phase 编码",
+            "divmod 推进与位运算特化",
+            "producer/consumer 流水"
+          ],
+          "practice_task": "用纯 Python 模拟一个 stages=4 的循环缓冲：写一个生产-消费循环打印每一步的 index 与 phase，验证它们在 0..3 之间正确轮转且 phase 按需翻转。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "copy_utils 与 TMA / cp.async 拷贝",
+          "order": 2,
+          "filename": "u5-l2-copy-utils-and-tma.md",
+          "level": "intermediate",
+          "topic": "讲解 copy_utils.py 提供的类型转换拷贝、shared→register 加载、TMA copy atom，以及对齐假设（assume_strides_aligned），并联系 paged_kv.py 中分页拷贝如何复用这些原子。",
+          "learning_goals": [
+            "理解 gmem↔smem↔rmem 的拷贝原子",
+            "掌握 TMA 异步拷贝与类型转换",
+            "了解对齐假设如何帮助编译器优化"
+          ],
+          "source_files": [
+            "flash_attn/cute/copy_utils.py",
+            "flash_attn/cute/paged_kv.py",
+            "flash_attn/cute/cute_dsl_utils.py"
+          ],
+          "minimal_modules": [
+            "类型转换拷贝",
+            "TMA / cp.async copy atom",
+            "对齐假设"
+          ],
+          "practice_task": "在 flash_fwd.py 的前向主循环中定位一次 K tile 全局→共享内存加载，指出它使用的拷贝原子与对应的 pipeline stage，画出该次拷贝的数据路径。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "命名屏障与 warp 同步",
+          "order": 3,
+          "filename": "u5-l3-named-barriers.md",
+          "level": "intermediate",
+          "topic": "讲解 named_barrier.py 与 barrier.py：NamedBarrierFwd/Bwd/Sm100 等枚举如何用编号屏障同步不同 warp/warp-group（如 PFull/PEmpty、SoftmaxStats、Epilogue），mbarrier 在异步拷贝完成通知中的作用。",
+          "learning_goals": [
+            "理解命名屏障编号同步机制",
+            "掌握前向/反向各屏障同步的对象",
+            "了解 mbarrier 与异步拷贝完成的配合"
+          ],
+          "source_files": [
+            "flash_attn/cute/named_barrier.py",
+            "flash_attn/cute/barrier.py"
+          ],
+          "minimal_modules": [
+            "命名屏障枚举",
+            "warp/warp-group 同步对象",
+            "mbarrier 与异步通知"
+          ],
+          "practice_task": "列出 NamedBarrierFwdSm100 中每个屏障（Epilogue、TmemPtr、SoftmaxStatsW0..W7）同步的是哪类操作，写成一张对照表，并说明为何 softmax 统计需要 8 个独立屏障。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "前向 Kernel 主循环",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Ampere 前向 Kernel 全景",
+          "order": 1,
+          "filename": "u6-l1-ampere-forward-kernel.md",
+          "level": "intermediate",
+          "topic": "以 flash_fwd.py 的 FlashAttentionForwardSm80（也是 SM120 的基类）为基线，完整走一遍前向主循环：加载 Q tile → 流水化遍历 K/V block → 在线 softmax 累加 → 存储 O 与 LSE；并说明本版本新增的 pack_gqa 代码路径（__init__ 里对 mQ/mO/mLSE 调用 pack_gqa_layout、用 PackGQA 加载 Q）、use_tma_O 现限定为 sm_90<=arch<sm_120（SM120 回退 cp.async 输出），以及 tile/线程配置与 gmem/smem/rmem 边界。",
+          "learning_goals": [
+            "掌握 FA 前向主循环的整体数据流",
+            "理解 Q 常驻、K/V 流水的分块策略",
+            "看清 gmem/smem/rmem 三级存储边界，以及 SM80/SM120 下 pack_gqa 与 TMA/cp.async 的取舍"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_fwd.py",
+            "flash_attn/cute/ampere_helpers.py",
+            "flash_attn/cute/pack_gqa.py"
+          ],
+          "minimal_modules": [
+            "Q tile 加载与常驻（含 pack_gqa 路径）",
+            "K/V 流水遍历主循环",
+            "在线 softmax 累加与 O/LSE 存储",
+            "use_tma_O 的架构边界与 SM120 回退"
+          ],
+          "practice_task": "阅读 FlashAttentionForwardSm80 的主循环与 __init__，绘制一张数据流图，标注 Q/K/V 在 gmem→smem→rmem 之间的移动、MMA 计算与 softmax rescale 发生的位置；并指出开启 pack_gqa 时 Q 是如何被 PackGQA.load_Q 加载、use_tma_O 在 SM120 上为何为 False。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Hopper 前向 Kernel 与 TMA",
+          "order": 2,
+          "filename": "u6-l2-hopper-forward-kernel.md",
+          "level": "intermediate",
+          "topic": "讲解 flash_fwd_sm90.py 的 FlashAttentionForwardSm90 相对 Ampere 基线的升级：warp-group (wg) MMA、TMA 异步批量拷贝、更深的流水级数、以及 Sm90 特有的共享内存布局与 fence/commit/wait。",
+          "learning_goals": [
+            "理解 SM90 warp-group MMA 的优势",
+            "掌握 TMA 异步拷贝在前向中的用法",
+            "了解 Hopper 与 Ampere kernel 的关键差异"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_fwd_sm90.py",
+            "flash_attn/cute/flash_fwd.py"
+          ],
+          "minimal_modules": [
+            "warp-group MMA",
+            "TMA 异步拷贝与 mbarrier",
+            "Sm90 共享内存布局与同步"
+          ],
+          "practice_task": "在同一组 fp16/hdim128/causal 输入上分别用 FLASH_ATTENTION_ARCH=sm_80 与 sm_90 运行前向，对比输出 O 与 LSE 是否一致，并列出 Sm90 kernel 相比 Sm80 多用到的 3 项硬件特性。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "前向高级特性",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "GQA / MQA 与 pack_gqa",
+          "order": 1,
+          "filename": "u7-l1-pack-gqa.md",
+          "level": "intermediate",
+          "topic": "讲解 pack_gqa.py：当 Q 头数多于 KV 头数（GQA/MQA）时，pack_gqa_layout 把 qhead_per_kvhead 折叠进 seqlen 维，同时保持 TMA 维度不变，从而让每个 KV tile 被多个 Q 头复用；并说明本版本起 Ampere/SM120 前向基线（flash_fwd.py 的 Sm80）也完整支持 pack_gqa（__init__ 折叠 + PackGQA 加载/存储 Q/O/LSE），此前 Ampere 仅在 epilogue 处理输出。",
+          "learning_goals": [
+            "理解 GQA/MQA 的头数配比关系",
+            "掌握 pack_gqa_layout 的维度折叠技巧",
+            "了解 pack_gqa 为何能提升 GQA 性能",
+            "知道 SM80/SM120 前向现已支持 pack_gqa 的完整路径"
+          ],
+          "source_files": [
+            "flash_attn/cute/pack_gqa.py",
+            "flash_attn/cute/interface.py",
+            "flash_attn/cute/flash_fwd.py"
+          ],
+          "minimal_modules": [
+            "GQA/MQA 头数配比",
+            "pack_gqa_layout 维度折叠",
+            "TMA 维度保持与 cp.async 回退",
+            "SM80/SM120 前向 pack_gqa 支持"
+          ],
+          "practice_task": "构造 num_heads=8、nheads_kv=2、head_dim=64 的 GQA 输入，分别用 pack_gqa=True 与 False 调用 flash_attn_func，验证输出一致并记录二者的运行时间差异；若在 SM120/SM80 上运行，确认 pack_gqa=True 不再回退到旧路径。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u7-l2",
+          "title": "SplitKV 与 Combine Kernel",
+          "order": 2,
+          "filename": "u7-l2-splitkv-and-combine.md",
+          "level": "intermediate",
+          "topic": "讲解长上下文/解码场景下为何要把 KV 切分到多个 thread block（num_splits），每个 split 产出部分 O 与 LSE，再由 flash_fwd_combine.py 的 FlashAttentionForwardCombine 用 log-sum-exp 合并成最终结果；并说明 SM120 前向现已显式断言 num_splits==1（interface.py：arch//10==12 时 assert），与 SM90 同样不支持 SplitKV。",
+          "learning_goals": [
+            "理解 SplitKV 的切分与并行动机",
+            "掌握 combine kernel 用 LSE 合并部分结果的数学",
+            "了解 num_splits / log_max_splits 的选择",
+            "知道 SM90/SM120 前向不支持 SplitKV 的显式约束"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_fwd_combine.py",
+            "flash_attn/cute/interface.py"
+          ],
+          "minimal_modules": [
+            "KV 切分与多 block 并行",
+            "部分 O+LSE 的 log-sum-exp 合并",
+            "num_splits 配置",
+            "SM90/SM120 的 num_splits==1 断言"
+          ],
+          "practice_task": "对一条长序列（如 seqlen=8192）分别用 num_splits=1 与 num_splits=4 运行前向，验证输出数值一致，并说明 combine kernel 如何用 LSE 修正各 split 的 rescale；在 SM120 上用 num_splits=3 应触发 AssertionError（与 tests/cute/test_flash_attn.py::test_flash_attn_sm120_rejects_splitkv 对照）。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Paged KV Cache",
+          "order": 3,
+          "filename": "u7-l3-paged-kv.md",
+          "level": "intermediate",
+          "topic": "讲解 paged_kv.py 的 PagedKVManager：如何用 page_table 把不连续的 KV cache 页（page）映射成逻辑序列，page_size 与对齐约束，SM100 上 V 在 gmem 中转置以利于访问，以及与 TMA 的配合。",
+          "learning_goals": [
+            "理解分页 KV cache 的页表映射模型",
+            "掌握 page_size 对齐与约束",
+            "了解 SM100 V 转置布局的意义"
+          ],
+          "source_files": [
+            "flash_attn/cute/paged_kv.py",
+            "flash_attn/cute/interface.py"
+          ],
+          "minimal_modules": [
+            "page_table 页表映射",
+            "page_size 与对齐",
+            "SM100 V 转置与 TMA"
+          ],
+          "practice_task": "构造一个 block_table 风格的分页 KV cache（page_size=128），调用支持 paged 的前向路径，并与把同一份 KV 连续展开后的非分页结果对比，验证数值一致。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Blackwell 专用 Kernel",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Blackwell 前向 Kernel 全景",
+          "order": 1,
+          "filename": "u8-l1-blackwell-forward.md",
+          "level": "advanced",
+          "topic": "讲解 flash_fwd_sm100.py 的 FlashAttentionForwardSm100：基于 tcgen05 的 UMMA 矩阵乘、片上 tmem 累加、persistent kernel、以及对 SplitKV / paged KV / 2CTA 的全面支持，说明它与 Hopper kernel 的本质差异。",
+          "learning_goals": [
+            "理解 Blackwell UMMA(tcgen05) 与片上 tmem 累加",
+            "掌握 persistent kernel 的运行模型",
+            "了解 Sm100 kernel 集成的全部高级特性"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_fwd_sm100.py"
+          ],
+          "minimal_modules": [
+            "UMMA / tcgen05 GEMM",
+            "片上 tmem 累加",
+            "persistent kernel 与全特性集成"
+          ],
+          "practice_task": "阅读 FlashAttentionForwardSm100，整理出一份 Blackwell 专属特性清单（UMMA、tmem、persistent、2CTA、SplitKV、paged），并标注每项特性对应的代码段或类。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Tile Scheduler 与 CLC 动态持久化调度",
+          "order": 2,
+          "filename": "u8-l2-tile-scheduler-clc.md",
+          "level": "advanced",
+          "topic": "讲解 tile_scheduler.py：SingleTileScheduler / SingleTileVarlenScheduler / persistent / CLC 动态调度，SchedulingMode(NONE/STATIC/DYNAMIC/CLC) 的区别，ClcState 如何把硬件 CLC 调度器返回的 work tile 映射成逻辑坐标。",
+          "learning_goals": [
+            "掌握各类 tile scheduler 的适用场景",
+            "理解 persistent 与 CLC 动态调度的差异",
+            "了解 ClcState 的硬件-逻辑坐标映射"
+          ],
+          "source_files": [
+            "flash_attn/cute/tile_scheduler.py"
+          ],
+          "minimal_modules": [
+            "单 tile / varlen / persistent 调度",
+            "SchedulingMode 四种模式",
+            "ClcState 与 WorkTileInfo 映射"
+          ],
+          "practice_task": "解释在负载不均（如变长序列 + 因果掩码）的场景下，CLC 动态调度相比静态调度为何能减少尾延迟，写出你的推理过程并与 AI/CLC_TRACE_DEBUG.md 的描述对照。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "UMMA Descriptor 与 Blackwell Helpers",
+          "order": 3,
+          "filename": "u8-l3-mma-desc-and-helpers.md",
+          "level": "advanced",
+          "topic": "讲解 mma_sm100_desc.py 的硬件 MMA descriptor（格式、饱和、缩放字段）与 blackwell_helpers.py 提供的 UMMA GEMM、共享内存布局创建、2CTA 协调等 PTX 优化路径。",
+          "learning_goals": [
+            "理解 MMA descriptor 的字段与编码",
+            "掌握 blackwell_helpers 的 UMMA 与布局工具",
+            "了解 2CTA 协调所需的共享 mbarrier 机制"
+          ],
+          "source_files": [
+            "flash_attn/cute/mma_sm100_desc.py",
+            "flash_attn/cute/blackwell_helpers.py"
+          ],
+          "minimal_modules": [
+            "MMA descriptor 字段",
+            "UMMA GEMM 与布局工具",
+            "2CTA 共享 mbarrier 协调"
+          ],
+          "practice_task": "选取 mma_sm100_desc.py 中的一个 descriptor 枚举，逐字段解读其含义（如格式、饱和位、缩放因子），写一段说明解释它如何指导 UMMA 单元读取 tmem 中的矩阵块。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "hd256 2CTA 专用 Kernel",
+          "order": 4,
+          "filename": "u8-l4-hd256-2cta-kernel.md",
+          "level": "advanced",
+          "topic": "讲解 sm100_hd256_2cta_fmha_forward.py / sm100_hd256_2cta_fmha_backward.py 这组 head_dim=256 专用 kernel：cluster 内两个 CTA 协作、cta_group_size 对 tx_count 的放大、共享 mbarrier 同步，以及常见的死锁陷阱。",
+          "learning_goals": [
+            "理解 hd256 为何需要专用 2CTA kernel",
+            "掌握 2CTA cluster 协作与 tx_count 放大",
+            "了解 2CTA 死锁的典型成因与排查"
+          ],
+          "source_files": [
+            "flash_attn/cute/sm100_hd256_2cta_fmha_forward.py",
+            "flash_attn/cute/sm100_hd256_2cta_fmha_backward.py"
+          ],
+          "minimal_modules": [
+            "hd256 专用 kernel 动机",
+            "2CTA cluster 协作与 tx_count",
+            "2CTA 同步与死锁风险"
+          ],
+          "practice_task": "阅读 AI/DEBUG_2CTA.md，总结 2CTA kernel 常见的死锁/挂起陷阱（如 tx_count 未乘 cta_group_size、屏障错配），并写出至少两条规避原则。",
+          "depends_on": [
+            "u8-l1",
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "反向传播 Kernel",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "反向算法与 Sm80 反向 Kernel",
+          "order": 1,
+          "filename": "u9-l1-backward-algorithm-sm80.md",
+          "level": "advanced",
+          "topic": "讲解 flash_bwd.py 的 FlashAttentionBackwardSm80：注意力反向 dQ/dK/dV 的推导，为何需要重计算 S=P=softmax(QK^T)，前向保存的 LSE 与 D（行和）如何复用，dQ 的原子累加策略；并讲解本版本新增的滑窗/局部(local)掩码反向支持（is_local + window_size_left/right、AttentionMask 的 mask_local、用 BlockInfo.get_m_block_min_max 统一计算因果/滑窗下的 m_block 范围），以及 m_block_min<m_block_max 的空块早退保护。",
+          "learning_goals": [
+            "掌握 dQ/dK/dV 的推导与依赖关系",
+            "理解反向中重计算 S/P 的必要性",
+            "了解 dQ 累加与 D（softmax 行和）的作用",
+            "理解滑窗/局部掩码下的反向块范围与空块早退"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_bwd.py",
+            "flash_attn/cute/block_info.py",
+            "flash_attn/cute/mask.py"
+          ],
+          "minimal_modules": [
+            "dQ/dK/dV 推导",
+            "S/P 重计算",
+            "dQ 累加与 LSE/D 复用",
+            "滑窗/局部掩码反向与 BlockInfo 块范围",
+            "空块范围早退保护"
+          ],
+          "practice_task": "用 PyTorch autograd 对一组小规模 q/k/v 求梯度，再手写 dQ/dK/dV 公式核对，并在阅读 kernel 后指出哪段代码对应 dV、哪段对应 dK、哪段对应 dQ 累加；再用带 window_size 的滑窗输入验证反向 m_block 范围由 BlockInfo.get_m_block_min_max 计算且空块时早退。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "反向预处理与后处理",
+          "order": 2,
+          "filename": "u9-l2-backward-prepost.md",
+          "level": "advanced",
+          "topic": "讲解 flash_bwd_preprocess.py 与 flash_bwd_postprocess.py：预处理如何准备 dQ、计算 softmax 统计 D 与缩放，后处理如何合并来自不同 split/CTA 的 dQ 累加并做必要的类型转换与转置。",
+          "learning_goals": [
+            "理解反向主循环前需要的预处理步骤",
+            "掌握 D（行和）的计算与 dQ 初始化",
+            "了解后处理如何合并 dQ 并收尾"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_bwd_preprocess.py",
+            "flash_attn/cute/flash_bwd_postprocess.py"
+          ],
+          "minimal_modules": [
+            "预处理：dQ/D/缩放准备",
+            "D 行和计算",
+            "后处理：dQ 合并与类型转换"
+          ],
+          "practice_task": "梳理反向三阶段（preprocess → 主循环 → postprocess）的输入输出张量，画一张数据依赖图，标明 LSE、D、dO、dQ 在三阶段之间的流动。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Hopper / Blackwell 反向与 2CTA",
+          "order": 3,
+          "filename": "u9-l3-hopper-blackwell-backward.md",
+          "level": "advanced",
+          "topic": "讲解 flash_bwd_sm90.py 与 flash_bwd_sm100.py：Hopper 反向如何用 warp-group MMA 与 TMA 加速，Blackwell 反向如何用 UMMA、2CTA dQ reduce、以及块稀疏反向支持来提升吞吐。",
+          "learning_goals": [
+            "理解 Sm90 反向对 warp-group/TMA 的利用",
+            "掌握 Sm100 反向的 2CTA dQ reduce",
+            "了解块稀疏反向的支持方式"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_bwd_sm90.py",
+            "flash_attn/cute/flash_bwd_sm100.py"
+          ],
+          "minimal_modules": [
+            "Sm90 warp-group/TMA 反向",
+            "Sm100 UMMA 与 2CTA dQ reduce",
+            "块稀疏反向"
+          ],
+          "practice_task": "对比 Sm80、Sm90、Sm100 三个反向 kernel 的 dQ 累加策略（原子加 vs 2CTA reduce vs tmem 归约），写成一张对比表，并分析各自在数值一致性与性能上的取舍。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "稀疏注意力与 MLA",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "块稀疏注意力",
+          "order": 1,
+          "filename": "u10-l1-block-sparsity.md",
+          "level": "advanced",
+          "topic": "讲解 block_sparsity.py / block_sparse_utils.py / compute_block_sparsity.py：BlockSparseTensors（mask_block_cnt/idx、full_block_cnt/idx、cu_total_m_blocks、dq_write_order）如何描述稀疏块结构，ordered→dense 转换，以及 block_sparse_tensors 参数如何接入前向/反向。",
+          "learning_goals": [
+            "掌握块稀疏的数据结构表示",
+            "理解 ordered 索引与稠密掩码的转换",
+            "了解稀疏结构如何接入 FA kernel"
+          ],
+          "source_files": [
+            "flash_attn/cute/block_sparsity.py",
+            "flash_attn/cute/block_sparse_utils.py",
+            "flash_attn/cute/compute_block_sparsity.py"
+          ],
+          "minimal_modules": [
+            "BlockSparseTensors 数据结构",
+            "ordered↔dense 转换",
+            "block_sparse_tensors 接入"
+          ],
+          "practice_task": "构造一个 64×64 块粒度的稀疏掩码（保留对角线附近若干块），转成 block_sparse_tensors 传入 flash_attn_func，并与一个稠密掩码参考实现对比输出。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "MLA (Multi-head Latent Attention)",
+          "order": 2,
+          "filename": "u10-l2-mla.md",
+          "level": "advanced",
+          "topic": "讲解 flash_fwd_mla_sm100.py 与 flash_bwd_mla_sm100.py：DeepSeek 风格 MLA 的 absorbed 形状（如 (head_dim,head_dim_v)=(64,512) 或 (192,128)），单 KV 向量潜在表示，以及 FlashAttentionMLAForwardSm100 的特殊处理。",
+          "learning_goals": [
+            "理解 MLA 的 absorbed 形状与潜在 KV",
+            "掌握 MLA 前向 kernel 的特殊处理",
+            "了解 MLA 反向的稀疏实现"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_fwd_mla_sm100.py",
+            "flash_attn/cute/flash_bwd_mla_sm100.py"
+          ],
+          "minimal_modules": [
+            "MLA absorbed 形状与潜在 KV",
+            "MLA 前向 kernel",
+            "MLA 稀疏反向"
+          ],
+          "practice_task": "用 absorbed MLA 形状（如 q: head_dim=64，kv: head_dim_v=512）构造输入，调用 MLA 前向路径，并与一个等价的展开式 PyTorch 参考实现对比输出。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "Top-k KV Gather 稀疏",
+          "order": 3,
+          "filename": "u10-l3-topk-gather-kv.md",
+          "level": "advanced",
+          "topic": "讲解 topk_gather_kv.py：如何根据初步打分选取 top-k 个 KV 块再做精确注意力，从而减少计算量，以及它与块稀疏注意力的关系与区别。",
+          "learning_goals": [
+            "理解 top-k KV 块选择的动机",
+            "掌握 topk_gather_kv 的工作方式",
+            "了解 top-k 稀疏与静态块稀疏的异同"
+          ],
+          "source_files": [
+            "flash_attn/cute/topk_gather_kv.py"
+          ],
+          "minimal_modules": [
+            "top-k 块选择策略",
+            "gather 后的精确注意力",
+            "与静态块稀疏的对比"
+          ],
+          "practice_task": "阅读 topk_gather_kv.py，说明 top-k 选择如何降低 FLOPs，估算在保留 top-25% KV 块时理论计算量下降的比例，并指出该路径适用的场景。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "编译、测试、基准与调试",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "JIT 编译与缓存机制",
+          "order": 1,
+          "filename": "u11-l1-jit-and-cache.md",
+          "level": "advanced",
+          "topic": "讲解 cache_utils.py 与 cute_dsl_utils.py：CuTeDSL kernel 在运行时 JIT 编译为 PTX/CUBIN，缓存键由 dtype、head_dim、causal、mask/score_mod 哈希、架构、block 尺寸等构成；源码指纹 _compute_source_fingerprint；内存 LRU + 可选磁盘缓存（FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED）。",
+          "learning_goals": [
+            "理解 CuTeDSL 的 JIT 编译流程",
+            "掌握缓存键的构成与失效条件",
+            "了解两级缓存与相关环境变量"
+          ],
+          "source_files": [
+            "flash_attn/cute/cache_utils.py",
+            "flash_attn/cute/cute_dsl_utils.py"
+          ],
+          "minimal_modules": [
+            "JIT 编译为 PTX/CUBIN",
+            "缓存键与源码指纹",
+            "LRU + 磁盘缓存与环境变量"
+          ],
+          "practice_task": "启用 FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1，首次运行记录编译耗时，清缓存后第二次运行对比，并用 FLASH_ATTENTION_FAKE_TENSOR=1 体验免 GPU 编译流程。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "Constexpr 特化与 @cute.jit 注入",
+          "order": 2,
+          "filename": "u11-l2-constexpr-specialization.md",
+          "level": "advanced",
+          "topic": "讲解 cutlass.Constexpr 编译期常量如何驱动 kernel 特化（如 head_dim、causal、tile 尺寸、qhead_per_kvhead、pack_gqa），score_mod / mask_mod 作为 @cute.jit 回调如何在编译期被内联进 kernel，从而解释为何更换这些参数会触发重新编译。",
+          "learning_goals": [
+            "掌握 Constexpr 驱动的编译期特化",
+            "理解 score_mod/mask_mod 的编译期内联",
+            "明白参数变化触发重编译的原因"
+          ],
+          "source_files": [
+            "flash_attn/cute/flash_fwd.py",
+            "flash_attn/cute/softmax.py",
+            "flash_attn/cute/mask.py"
+          ],
+          "minimal_modules": [
+            "Constexpr 编译期常量",
+            "score/mask_mod 内联注入",
+            "特化与重编译触发条件"
+          ],
+          "practice_task": "设计一个实验：先以 causal=False 编译运行，再切换 causal=True，观察是否发生重新编译（记录耗时），并用本讲知识解释为何 causal 改变会触发特化；额外观察切换 pack_gqa 是否同样触发重编译。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "测试体系与参考实现",
+          "order": 3,
+          "filename": "u11-l3-tests-and-reference.md",
+          "level": "advanced",
+          "topic": "讲解 tests/cute/ 下的测试体系：testing.py 的 attention_ref 参考实现与 generate_qkv 数据生成，test_flash_attn.py 的参数化（dtype、head_dim、seqlen、causal、GQA/MQA），IS_SM120 判定与 test_flash_attn_sm120_rejects_splitkv 等架构能力守卫用例，两段式编译/执行测试流程，以及 OOM 重试与 conftest 配置。",
+          "learning_goals": [
+            "掌握测试套件的组织与参数化维度",
+            "理解参考实现 attention_ref 的作用",
+            "了解两段式测试与 OOM 重试机制",
+            "了解 SM90/SM120 SplitKV 不支持在测试中的守卫方式"
+          ],
+          "source_files": [
+            "tests/cute/test_flash_attn.py",
+            "flash_attn/cute/testing.py",
+            "tests/cute/conftest.py"
+          ],
+          "minimal_modules": [
+            "参考实现 attention_ref",
+            "参数化测试维度",
+            "架构能力守卫用例（如 SM120 SplitKV）",
+            "两段式测试与 OOM 重试"
+          ],
+          "practice_task": "运行 pytest tests/cute/test_flash_attn.py -k 'test_flash_attn_output' -x 单个用例，记录 max diff，并对照 attention_ref 说明误差为何在容忍范围内；阅读 test_flash_attn_sm120_rejects_splitkv 说明为何 SM120 前向拒绝 num_splits>1。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "性能基准与配置搜索",
+          "order": 4,
+          "filename": "u11-l4-benchmark-and-config-search.md",
+          "level": "advanced",
+          "topic": "讲解 benchmark.py / bench_utils.py / sm90_config_search.py：基准测试如何测量 TFLOPs 与 MFU，如何遍历不同 tile/线程/级数配置寻找最优 kernel 参数，以及配置搜索结果如何回填到 interface.py 的 tile 选择逻辑。",
+          "learning_goals": [
+            "掌握 FA 性能基准的测量方法",
+            "理解 TFLOPs / MFU 的计算",
+            "了解配置搜索如何指导 tile 选择"
+          ],
+          "source_files": [
+            "flash_attn/cute/benchmark.py",
+            "flash_attn/cute/bench_utils.py",
+            "flash_attn/cute/sm90_config_search.py"
+          ],
+          "minimal_modules": [
+            "基准测量与 TFLOPs/MFU",
+            "tile/级数配置遍历",
+            "搜索结果回填"
+          ],
+          "practice_task": "运行一个 benchmark 脚本（或 bench_utils 提供的计时工具），记录 fp16/hdim128 在几个 seqlen 下的前向+反向耗时与 TFLOPs，绘制一张简易性能曲线。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l5",
+          "title": "GPU Kernel 调试与 PTX/SASS",
+          "order": 5,
+          "filename": "u11-l5-debugging-ptx-sass.md",
+          "level": "advanced",
+          "topic": "讲解 GPU kernel 调试方法：用带线程守卫的 cute.printf 定点输出，compute-sanitizer --tool=racecheck（注意 cp.async.bulk 的假阳性），CUTE_DSL_KEEP_PTX / CUTE_DSL_LINEINFO 导出 PTX，CUTE_CUBIN_PATH / cute_dsl_ptxas.py 导出 SASS，以及 AI/ 下文档记录的 2CTA 死锁、TMA 竞争、CLC trace 排查经验。",
+          "learning_goals": [
+            "掌握用 cute.printf 做定点调试的技巧",
+            "理解 compute-sanitizer 的用法与假阳性",
+            "学会导出 PTX/SASS 并结合 AI 文档排查问题"
+          ],
+          "source_files": [
+            "AI/DEBUG_2CTA.md",
+            "AI/RACECHECK_TMA_HAZARD.md",
+            "AI/CLC_TRACE_DEBUG.md",
+            "flash_attn/cute/fa_logging.py",
+            "flash_attn/cute/cute_dsl_ptxas.py"
+          ],
+          "minimal_modules": [
+            "cute.printf 定点调试",
+            "compute-sanitizer 与假阳性",
+            "PTX/SASS 导出与 AI 排查文档"
+          ],
+          "practice_task": "设置 CUTE_DSL_KEEP_PTX=1 与 CUTE_DSL_LINEINFO=1 运行一次前向，导出 PTX 文件，在其中定位一段 online softmax 的 exp2/rescale 指令，并简要说明其作用。",
+          "depends_on": [
+            "u8-4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
