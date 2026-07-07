@@ -1,0 +1,1273 @@
+{
+  "project": "ds4",
+  "head": "80ebbc396aee40eedc1d829222f3362d10fa4c6c",
+  "rationale": "ds4（DwarfStar）是一个约 11 万行的纯 C 原生推理引擎，覆盖模型加载、多 GPU 后端、推理内核、HTTP 服务器、磁盘 KV、SSD 流式、分布式、原生 agent、评测与 GGUF 工具链等多个相对独立的子系统。学习顺序遵循“先认识是什么 → 再理解公共 API 边界 → 再看模型如何进入内存 → 再理解推理与采样如何发生 → 再理解 GPU 加速 → 再进入高级推理路径 → 再到对外服务（服务器）→ 再到持久化（磁盘 KV）→ 再到横向扩展（SSD/分布式）→ 再到产品化能力（agent/评测/基准）→ 最后到生态工具链与测试贡献”。这样依赖关系单向收敛：每一层只建立在已讲过的概念之上（例如服务器依赖 session 同步与采样，分布式依赖权重绑定与 prefill，agent 依赖会话/工具/DSML）。单元按 beginner→intermediate→advanced 三层递进：beginner 单元保证读者从零跑起来并建立源码地图；intermediate 单元拆开引擎 API、模型加载与推理内核；advanced 单元深入服务器、KV 持久化、SSD/分布式扩展、agent 与工具链。讲义粒度按“一个相对独立的主题 + 2~5 个最小模块 + 一个代码实践任务”切分，大型子系统（服务器、分布式、agent）拆 3~5 篇，小工具拆 1~2 篇，不硬凑数量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 DwarfStar",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "DwarfStar 项目定位与设计哲学",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ds4 是什么、为什么做一个专用推理引擎，以及它与 llama.cpp/GGML 的关系。",
+          "learning_goals": [
+            "理解 DwarfStar 的定位：为 DeepSeek V4 Flash/PRO 打造的自包含原生推理引擎",
+            "了解项目的核心取舍：窄而精、官方向量校验、本地高端机器优先",
+            "理解“KV 缓存即一等磁盘公民”等核心理念"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENT.md"
+          ],
+          "minimal_modules": [
+            "项目动机与定位",
+            "与 llama.cpp/GGML 的关系",
+            "beta 质量与状态说明"
+          ],
+          "practice_task": "阅读 README，用一段话写下 ds4 不同于通用 GGUF runner 的三个设计取舍，并指出它们分别体现在哪个源码文件或文档中。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "DeepSeek V4 模型背景与量化策略",
+          "order": 2,
+          "filename": "u1-l2-model-and-quant-strategy.md",
+          "level": "beginner",
+          "topic": "DeepSeek V4 Flash/PRO 的能力与 KV 缓存效率，以及 ds4 采用的非对称量化（routed MoE 用 IQ2_XXS/Q2_K/Q4_K）。",
+          "learning_goals": [
+            "区分 Flash 与 PRO 及其适用内存档位",
+            "理解非对称量化只压缩 routed MoE 的原因",
+            "了解 MTP 与长上下文对本地推理的意义"
+          ],
+          "source_files": [
+            "README.md",
+            "MODEL_CARD.md"
+          ],
+          "minimal_modules": [
+            "Flash 与 PRO 的区别与内存档位",
+            "2bit/4bit 非对称量化策略",
+            "MTP 与长上下文"
+          ],
+          "practice_task": "对照 MODEL_CARD 与 README 速度表，解释为什么 routed MoE 被量化而 shared/projection 不被量化，并写下 96/128GB、256GB、512GB 机器分别推荐哪个 GGUF。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码地图",
+          "order": 3,
+          "filename": "u1-l3-directory-map.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录布局，建立“哪个文件负责什么”的心智地图。",
+          "learning_goals": [
+            "掌握核心 C/ObjC/CUDA 源文件的职责划分",
+            "认识 metal/rocm/gguf-tools/tests 等子目录的作用",
+            "建立可导航的源码地图"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENT.md",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "核心源文件分工",
+            "子目录用途",
+            "辅助文档与脚本"
+          ],
+          "practice_task": "制作一张源码地图表，列出 ds4.c、ds4_server.c、ds4_agent.c、ds4_distributed.c、ds4_metal.m 等各自的职责与行数量级。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "构建系统与多后端编译",
+          "order": 4,
+          "filename": "u1-l4-build-and-backends.md",
+          "level": "beginner",
+          "topic": "通过 Makefile 理解 Metal/CUDA/ROCm/CPU 四种后端的构建方式与链接依赖。",
+          "learning_goals": [
+            "理解 Makefile 的平台分支与 CORE_OBJS",
+            "区分 cuda-spark/cuda-generic/strix-halo/cpu 构建目标",
+            "掌握 DS4_NO_GPU 与 CPU 构建开关"
+          ],
+          "source_files": [
+            "Makefile",
+            "STRIXHALO.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "Makefile 平台分支与 CORE_OBJS",
+            "各后端构建目标",
+            "DS4_NO_GPU 开关"
+          ],
+          "practice_task": "阅读 Makefile 推演（或执行 make cpu），解释为什么普通 make 在 Linux 上只打印帮助；列出每个后端需要链接的库。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "下载模型与首次运行",
+          "order": 5,
+          "filename": "u1-l5-download-and-first-run.md",
+          "level": "beginner",
+          "topic": "用 download_model.sh 下载 GGUF，用 ds4 完成 one-shot 与交互式推理。",
+          "learning_goals": [
+            "理解 download_model.sh 的目标与缓存续传行为",
+            "掌握 ./ds4 -p 一次性推理",
+            "熟悉交互式 REPL 与斜杠命令"
+          ],
+          "source_files": [
+            "download_model.sh",
+            "README.md",
+            "ds4_help.c"
+          ],
+          "minimal_modules": [
+            "download_model.sh 行为",
+            "one-shot 推理",
+            "REPL 与斜杠命令"
+          ],
+          "practice_task": "运行 ./download_model.sh q2-imatrix（或阅读脚本说明其行为），用 ./ds4 -p \"...\" 完成一次推理，记录首 token 延迟与生成速度。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "引擎公共 API 与 CLI",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ds4.h：引擎边界与生命周期",
+          "order": 1,
+          "filename": "u2-l1-engine-api-boundary.md",
+          "level": "intermediate",
+          "topic": "讲解 ds4.h 定义的 engine/session 公共边界、引擎选项与 open/close 生命周期。",
+          "learning_goals": [
+            "理解 engine 与 session 的职责划分",
+            "掌握 ds4_engine_options 各字段含义",
+            "理清 open/summary/close 生命周期"
+          ],
+          "source_files": [
+            "ds4.h",
+            "ds4.c"
+          ],
+          "minimal_modules": [
+            "engine vs session 边界",
+            "ds4_engine_options 字段",
+            "生命周期函数"
+          ],
+          "practice_task": "阅读 ds4.h，画出 ds4_engine_options 的字段分类（路径、后端、SSD 流式、分布式、功耗），并指出哪些字段会被 ds4_engine_open 直接消费。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "CLI 主流程",
+          "order": 2,
+          "filename": "u2-l2-cli-main-flow.md",
+          "level": "intermediate",
+          "topic": "通过 ds4_cli.c 的 main 与 cli_config 理解命令解析、一次性模式与交互模式的区别。",
+          "learning_goals": [
+            "掌握 cli_config 与 cli_generation_options",
+            "区分 one-shot 与 interactive 分支",
+            "理解信号处理与协作式中断"
+          ],
+          "source_files": [
+            "ds4_cli.c",
+            "ds4_help.h",
+            "linenoise.h"
+          ],
+          "minimal_modules": [
+            "配置结构体",
+            "one-shot vs interactive",
+            "信号与中断"
+          ],
+          "practice_task": "在 ds4_cli.c 中追踪 -p 一次性推理从参数解析到 ds4_engine_generate_argmax 的调用链，写出关键函数名。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Session 同步与前缀复用",
+          "order": 3,
+          "filename": "u2-l3-session-sync.md",
+          "level": "intermediate",
+          "topic": "讲解 ds4_session_sync 如何基于 token 前缀复用 KV、何时只增量评估后缀、何时重建。",
+          "learning_goals": [
+            "理解 ds4_session_sync 的前缀匹配逻辑",
+            "掌握 common_prefix 与 rewrite 判定",
+            "了解 invalidate/rewind 等控制"
+          ],
+          "source_files": [
+            "ds4.h",
+            "ds4.c"
+          ],
+          "minimal_modules": [
+            "前缀匹配与增量评估",
+            "rewrite 判定",
+            "会话控制原语"
+          ],
+          "practice_task": "阅读 ds4_session_sync 与 ds4_session_common_prefix，描述当用户在多轮对话中追加消息时，session 如何避免从 0 重新 prefill。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模型加载、权重与分词",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "GGUF 内存映射加载",
+          "order": 1,
+          "filename": "u3-l1-gguf-mmap-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 model_open 如何以 mmap 方式加载 GGUF，保留模型在磁盘映射而不整体拷贝。",
+          "learning_goals": [
+            "理解 model_open 与 ds4_model 结构",
+            "掌握 mmap 映射与 inspect_only 模式",
+            "了解 config_validate_model 的校验"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4.h"
+          ],
+          "minimal_modules": [
+            "model_open 与模型结构",
+            "mmap 与 inspect_only",
+            "配置校验"
+          ],
+          "practice_task": "在 ds4.c 中找到 model_open，说明它如何决定是否做 Metal mapping，以及 inspect_only 模式跳过了哪些步骤。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "权重绑定与张量布局",
+          "order": 2,
+          "filename": "u3-l2-weights-binding.md",
+          "level": "intermediate",
+          "topic": "讲解 weights_bind 如何把 GGUF 张量按层绑定到 ds4_weights，以及 MoE expert 的排布。",
+          "learning_goals": [
+            "掌握 weights_bind / weights_bind_layer / weights_bind_output",
+            "理解层权重结构 ds4_layer_weights",
+            "了解 load_slice 与分布式层裁剪的衔接"
+          ],
+          "source_files": [
+            "ds4.c"
+          ],
+          "minimal_modules": [
+            "权重绑定函数族",
+            "层权重结构",
+            "load_slice 衔接"
+          ],
+          "practice_task": "追踪 weights_bind_layer，列出一个 transformer 层绑定了哪些权重张量（attention 投影、shared expert、routed experts 的 gate/up/down）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "分词器与聊天模板渲染",
+          "order": 3,
+          "filename": "u3-l3-tokenizer-and-chat-template.md",
+          "level": "intermediate",
+          "topic": "讲解 vocab_load 加载词表，以及 ds4_encode_chat_prompt 等如何渲染 DeepSeek 聊天模板、thinking 模式与 DSML 特殊 token。",
+          "learning_goals": [
+            "理解 vocab_load 与 BPE 词表",
+            "掌握聊天模板与 thinking 模式 token",
+            "了解 DSML 特殊 token 与 --dump-tokens"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4.h"
+          ],
+          "minimal_modules": [
+            "词表加载",
+            "聊天模板与 thinking",
+            "DSML token 与 dump-tokens"
+          ],
+          "practice_task": "用 ./ds4 --dump-tokens -p \"...\" 观察一段带工具描述的提示如何被切分，并对照 ds4_encode_chat_prompt 说明系统/用户/助手段如何拼接。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "量化格式与张量族",
+          "order": 4,
+          "filename": "u3-l4-quantization-formats.md",
+          "level": "intermediate",
+          "topic": "讲解 ds4 使用的量化格式（q8_0/q4_K/q2_K/IQ2_XXS）及其在 quants.c 中的实现与 CPU dot product 参考逻辑。",
+          "learning_goals": [
+            "认识 block_q8_K / q4_K / q2_K / iq2_xxs 结构",
+            "理解 dot product 参考实现",
+            "掌握量化与 MoE expert 的关系"
+          ],
+          "source_files": [
+            "gguf-tools/quants.c",
+            "gguf-tools/quants.h",
+            "ds4.c"
+          ],
+          "minimal_modules": [
+            "量化 block 结构",
+            "dot product 参考",
+            "量化与 MoE"
+          ],
+          "practice_task": "阅读 quants.h 中的 block 结构与 ds4.c 中 vec_dot 函数，解释为什么 2bit 量化需要 imatrix（列重要性）而 q4_K 不一定需要。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "DeepSeek V4 推理与采样",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "DeepSeek V4 架构总览",
+          "order": 1,
+          "filename": "u4-l1-deepseek-v4-architecture.md",
+          "level": "intermediate",
+          "topic": "从模型结构角度讲解 MLA 注意力、routed/shared MoE、每层数据流，建立推理内核整体图景。",
+          "learning_goals": [
+            "理解 MLA 压缩注意力",
+            "区分 routed 与 shared 专家",
+            "掌握单层前向数据流"
+          ],
+          "source_files": [
+            "ds4.c",
+            "MODEL_CARD.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "MLA 注意力",
+            "MoE 专家",
+            "单层数据流"
+          ],
+          "practice_task": "对照 ds4.c 中的层权重与一次前向，画出“输入 hidden → attention → router → routed+shared experts → 输出”的数据流图。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "KV 缓存设计：滑动窗口 + 压缩/indexer",
+          "order": 2,
+          "filename": "u4-l2-kv-cache-design.md",
+          "level": "intermediate",
+          "topic": "讲解 DeepSeek V4 的 KV 缓存：raw 滑动窗口 + 压缩层（compressor + ratio-4 indexer），以及它如何支撑超长上下文。",
+          "learning_goals": [
+            "理解 raw sliding-window KV ring",
+            "掌握 compressed KV 与 compressor frontier",
+            "理解 ratio-4 indexer 行的作用"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "滑动窗口 KV",
+            "compressed KV 与 frontier",
+            "ratio-4 indexer"
+          ],
+          "practice_task": "阅读 README 的“Disk KV Cache”DSV4 payload 段落与 ds4.c 中的 KV 结构，解释 indexer 相比 compressor 进一步压缩了什么、为什么这对 1M 上下文至关重要。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "生成与采样",
+          "order": 3,
+          "filename": "u4-l3-generation-and-sampling.md",
+          "level": "intermediate",
+          "topic": "讲解 token 生成循环 ds4_session_eval、采样（temperature/top_p/min_p/top_k）、argmax 与 top_logprobs。",
+          "learning_goals": [
+            "理解 ds4_session_eval 单步生成",
+            "掌握 ds4_sample_logits 采样过滤器",
+            "了解 argmax / top_logprobs / logprob 查询"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4.h"
+          ],
+          "minimal_modules": [
+            "单步生成",
+            "采样过滤器",
+            "logprob 查询"
+          ],
+          "practice_task": "阅读 ds4_sample_logits，说明默认 temperature=1/top_p=1/min_p=0.05 的含义，以及 thinking 模式为何固定采样参数。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "GPU 后端",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "GPU 张量抽象与 CPU 后端",
+          "order": 1,
+          "filename": "u5-l1-gpu-abstraction-and-cpu.md",
+          "level": "intermediate",
+          "topic": "讲解 ds4_gpu.h 的 tensor-resident 执行模型（张量常驻设备、命令缓冲），以及 CPU 参考后端与 DS4_NO_GPU 的角色。",
+          "learning_goals": [
+            "理解 ds4_gpu_tensor 生命周期与命令缓冲",
+            "掌握 model map 缓存与 expert table 预加载",
+            "了解 CPU 参考路径与 DS4_NO_GPU"
+          ],
+          "source_files": [
+            "ds4_gpu.h",
+            "ds4.c"
+          ],
+          "minimal_modules": [
+            "张量与命令原语",
+            "model map 与 expert table",
+            "CPU 参考后端"
+          ],
+          "practice_task": "阅读 ds4_gpu.h，列出张量 alloc/view/read/write/copy 等原语，并解释为什么模型权重通过 model map 而非每次拷贝上传。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Metal 后端运行时与图调度",
+          "order": 2,
+          "filename": "u5-l2-metal-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 ds4_metal.m 如何管理 Metal 设备、编译 metal/*.metal 内核、按 layer-major 图调度 prefill/decode。",
+          "learning_goals": [
+            "理解 Metal 设备/命令队列/管道",
+            "认识 metal/*.metal 内核分类",
+            "掌握 layer-major 图调度与 chunk prefill"
+          ],
+          "source_files": [
+            "ds4_metal.m",
+            "ds4_gpu.h",
+            "metal/flash_attn.metal",
+            "metal/dsv4_kv.metal"
+          ],
+          "minimal_modules": [
+            "Metal 运行时对象",
+            "内核分类",
+            "图调度"
+          ],
+          "practice_task": "在 metal/ 目录中找出负责 flash attention 与 KV 写入的内核文件，对照 ds4_metal.m 说明它们如何被绑定到一次 prefill 命令中。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "CUDA 与 ROCm 后端",
+          "order": 3,
+          "filename": "u5-l3-cuda-rocm-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 ds4_cuda.cu（DGX Spark/通用 CUDA）与 ds4_rocm.cu + rocm/*.cuh（Strix Halo/gfx1151）后端的实现要点。",
+          "learning_goals": [
+            "理解 CUDA 张量/内核与 managed KV",
+            "掌握 ROCm/HIP 后端与 gfx1151",
+            "理解三后端共用 ds4_gpu.h 抽象"
+          ],
+          "source_files": [
+            "ds4_cuda.cu",
+            "ds4_rocm.cu",
+            "ds4_rocm.h",
+            "rocm/ds4_rocm_attention.cuh",
+            "STRIXHALO.md"
+          ],
+          "minimal_modules": [
+            "CUDA 后端",
+            "ROCm/HIP 后端",
+            "统一抽象"
+          ],
+          "practice_task": "对照 Makefile 的 cuda-spark/cuda-generic/strix-halo 目标，解释三个 GPU 后端如何复用同一套 ds4_gpu.h 接口，并列出各自独有的链接库。",
+          "depends_on": [
+            "u5-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "高级推理路径",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "分块 prefill 主路径",
+          "order": 1,
+          "filename": "u6-l1-chunked-prefill.md",
+          "level": "advanced",
+          "topic": "讲解 chunked prefill（默认 4096，DS4_METAL_PREFILL_CHUNK 可调）如何复用同一 layer-major 图处理长提示。",
+          "learning_goals": [
+            "理解 prefill chunk 切分与边界对齐",
+            "掌握 layer-major 图复用",
+            "理解绝对 compressor/indexer 边界保持"
+          ],
+          "source_files": [
+            "ds4.c",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "chunk 切分与对齐",
+            "layer-major 图复用",
+            "边界保持"
+          ],
+          "practice_task": "阅读 README 的 Benchmarking 段与 ds4.c prefill 相关代码，解释改变 DS4_METAL_PREFILL_CHUNK 为何会改变 KV checkpoint/logit 路径。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "MTP 投机解码",
+          "order": 2,
+          "filename": "u6-l2-mtp-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "讲解多 token 预测（MTP）投机解码路径、置信度门控（--mtp-margin）及其作为实验性加速的现状。",
+          "learning_goals": [
+            "理解 MTP draft 模型与 draft tokens",
+            "掌握 eval_speculative_argmax 接受逻辑",
+            "了解 --mtp-margin 置信度门控"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "MTP draft 模型",
+            "接受/拒绝逻辑",
+            "置信度门控"
+          ],
+          "practice_task": "阅读 ds4_session_eval_speculative_argmax，描述 draft token 如何被验证接受/拒绝，并解释为什么 MTP 状态不随磁盘 KV 持久化。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "功耗管理与方向性引导",
+          "order": 3,
+          "filename": "u6-l3-power-and-steering.md",
+          "level": "advanced",
+          "topic": "讲解 --power 节流机制（在层/token 间插入睡眠）与 dir-steering 单向量激活引导（FFN/attention 后投影消除）。",
+          "learning_goals": [
+            "理解 --power 百分比节流实现",
+            "掌握方向性引导的数学形式",
+            "理解 FFN vs attention 引导目标选择"
+          ],
+          "source_files": [
+            "ds4.c",
+            "dir-steering/README.md",
+            "ds4.h"
+          ],
+          "minimal_modules": [
+            "--power 节流",
+            "方向性引导公式",
+            "引导目标选择"
+          ],
+          "practice_task": "阅读 dir-steering/README.md 的公式与 ds4.c 中 steering 应用点，说明为什么 FFN 输出通常是首选引导目标，并设计一个让回答更简短的实验。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "HTTP 服务器",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "服务器架构与线程模型",
+          "order": 1,
+          "filename": "u7-l1-server-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 ds4_server.c 的整体架构：客户端线程解析请求、单一 graph worker 串行推理、单活 KV checkpoint。",
+          "learning_goals": [
+            "理解客户端线程 vs graph worker",
+            "掌握单活 KV session 前缀复用",
+            "了解 --chdir 与运行时文件解析"
+          ],
+          "source_files": [
+            "ds4_server.c",
+            "ds4.h"
+          ],
+          "minimal_modules": [
+            "线程模型",
+            "单活 KV session",
+            "运行时文件解析"
+          ],
+          "practice_task": "阅读 ds4_server.c 的 main 与请求分发，解释为什么并发请求会排队等待单一 graph worker，以及这对长 prompt 客户端意味着什么。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "OpenAI/Anthropic/Responses 端点",
+          "order": 2,
+          "filename": "u7-l2-server-endpoints.md",
+          "level": "advanced",
+          "topic": "讲解 /v1/chat/completions、/v1/responses、/v1/messages、/v1/completions 端点的请求解析与参数映射。",
+          "learning_goals": [
+            "掌握四类端点路由",
+            "理解采样/温度/tools 参数映射",
+            "了解模型别名 deepseek-v4-flash/pro"
+          ],
+          "source_files": [
+            "ds4_server.c",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "端点路由",
+            "参数映射",
+            "模型别名"
+          ],
+          "practice_task": "用 curl 向本地 ds4-server 发一个 /v1/chat/completions 流式请求，并对照 ds4_server.c 的端点分发列出它识别的请求字段。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "SSE 流式输出与 thinking 模式",
+          "order": 3,
+          "filename": "u7-l3-streaming-and-thinking.md",
+          "level": "advanced",
+          "topic": "讲解各端点的 SSE 流式实现，以及 thinking 模式下推理内容的原生 API 形态输出。",
+          "learning_goals": [
+            "理解 SSE 事件生命周期（chat/responses/anthropic）",
+            "掌握 thinking 内容的流式形态",
+            "了解 stream_options.include_usage"
+          ],
+          "source_files": [
+            "ds4_server.c",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "SSE 事件生命周期",
+            "thinking 流式形态",
+            "include_usage"
+          ],
+          "practice_task": "阅读 ds4_server.c 流式相关代码，对比 chat 与 anthropic 端点在 thinking 模式下如何分别输出推理内容。",
+          "depends_on": [
+            "u7-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "工具调用：DSML、精确回放、规范化",
+          "order": 4,
+          "filename": "u7-l4-tool-call-dsml.md",
+          "level": "advanced",
+          "topic": "讲解 DSML 工具格式、tool id → 精确 DSML 回放（rax 基数树）、规范化回退路径，以及语法 token 强制贪婪解码。",
+          "learning_goals": [
+            "理解 DSML 工具调用文本格式",
+            "掌握精确 DSML 回放 map（tool id → 采样块）",
+            "理解规范化渲染与 checkpoint 改写及语法贪婪解码"
+          ],
+          "source_files": [
+            "ds4_server.c",
+            "rax.h",
+            "rax.c",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "DSML 格式",
+            "精确回放 map",
+            "规范化与语法贪婪"
+          ],
+          "practice_task": "阅读 ds4_server.c 与 rax.h，解释为什么“精确回放”能避免无状态 API 重发工具调用时 KV 前缀失配，以及规范化路径何时作为后备。",
+          "depends_on": [
+            "u7-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "实时 KV 前缀复用与检查点改写",
+          "order": 5,
+          "filename": "u7-l5-live-prefix-reuse.md",
+          "level": "advanced",
+          "topic": "讲解服务器如何用 token 前缀检查 + 渲染字节比对复用 KV，必要时改写或回退磁盘快照重放后缀。",
+          "learning_goals": [
+            "理解 exact token-prefix 检查",
+            "掌握渲染字节 vs 解码 checkpoint 比对",
+            "理解 rewrite_from_common 与 rebuild 判定"
+          ],
+          "source_files": [
+            "ds4_server.c",
+            "ds4.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "token-prefix 检查",
+            "字节比对",
+            "rewrite/rebuild 判定"
+          ],
+          "practice_task": "阅读 ds4_session_rewrite_requires_rebuild 与服务器前缀复用逻辑，描述一个“客户端轻微改写历史”的请求会走哪条路径。",
+          "depends_on": [
+            "u2-l3",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "磁盘 KV 缓存与序列化",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "磁盘 KV 缓存文件格式",
+          "order": 1,
+          "filename": "u8-l1-kv-cache-file-format.md",
+          "level": "advanced",
+          "topic": "讲解 ds4_kvstore 的 KVC 文件格式：固定头、渲染文本、DS4 payload、可选 tool-id map 段。",
+          "learning_goals": [
+            "理解 KVC 固定头字段含义",
+            "掌握渲染文本作为查找身份与文件名",
+            "了解 KTM tool-id map 段"
+          ],
+          "source_files": [
+            "ds4_kvstore.c",
+            "ds4_kvstore.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "KVC 固定头",
+            "渲染文本与文件名",
+            "KTM 段"
+          ],
+          "practice_task": "对照 README 的字节布局与 ds4_kvstore.h 的宏/结构，画出一份 KVC 文件的内存布局图并标注各段用途。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "KV store 策略与淘汰",
+          "order": 2,
+          "filename": "u8-l2-kvstore-policy.md",
+          "level": "advanced",
+          "topic": "讲解 cold/continued/evict/shutdown 四种保存时机、对齐裁剪策略与基于命中半衰期的淘汰评分。",
+          "learning_goals": [
+            "理解四种保存时机与原因码",
+            "掌握 boundary trim/align 与 continued 间隔",
+            "理解 eviction_score 淘汰"
+          ],
+          "source_files": [
+            "ds4_kvstore.c",
+            "ds4_kvstore.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "保存时机与原因码",
+            "对齐与裁剪",
+            "淘汰评分"
+          ],
+          "practice_task": "阅读 ds4_kvstore 的存储/淘汰函数，解释 cold save 为什么要对齐到 prefill chunk 边界并裁掉尾部 token。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "会话 payload 序列化（DSV4）",
+          "order": 3,
+          "filename": "u8-l3-session-payload-serialization.md",
+          "level": "advanced",
+          "topic": "讲解 ds4_session_save_payload/load_payload 的 DSV4 序列化：13 个 u32 头、token/logits、逐层 KV 张量与 frontier。",
+          "learning_goals": [
+            "理解 DSV4 头部 13 字段",
+            "掌握 checkpoint tokens + logits",
+            "理解逐层 raw/compressed/indexer KV 与 frontier"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "DSV4 头部",
+            "tokens 与 logits",
+            "逐层 KV 与 frontier"
+          ],
+          "practice_task": "阅读 ds4_session_save_payload，说明 logits 为何紧随 checkpoint tokens 保存，以及加载后如何免去一次额外 decode。",
+          "depends_on": [
+            "u4-l2",
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "SSD 流式与分布式推理",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "SSD 流式专家缓存",
+          "order": 1,
+          "filename": "u9-l1-ssd-expert-cache.md",
+          "level": "advanced",
+          "topic": "讲解 ds4_ssd.c 的缓存规划：把 NGB 预算换算成完整 expert 数、mlock 锁定与自动预算算法。",
+          "learning_goals": [
+            "理解 ds4_ssd_auto_cache_plan 预算算法",
+            "掌握 mlock 锁定与可锁定上限裁剪",
+            "了解 hot expert 预加载"
+          ],
+          "source_files": [
+            "ds4_ssd.c",
+            "ds4_ssd.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "自动预算算法",
+            "mlock 与裁剪",
+            "hot expert 预加载"
+          ],
+          "practice_task": "阅读 ds4_ssd_auto_cache_plan，描述自动预算如何从推荐工作集减去非 routed 权重得到 expert 缓存大小。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "SSD 流式推理路径与延迟隐藏",
+          "order": 2,
+          "filename": "u9-l2-ssd-streaming-path.md",
+          "level": "advanced",
+          "topic": "讲解 routed expert 从 GGUF 按需读取、与 shared/in-cache expert 推理重叠隐藏加载延迟、prefill 层预取。",
+          "learning_goals": [
+            "理解 expert cache miss 的按需读取",
+            "掌握与 shared/in-cache expert 推理重叠",
+            "了解 prefill 下一层预取与 hotlist 驱逐"
+          ],
+          "source_files": [
+            "ds4.c",
+            "ds4_gpu.h",
+            "ds4_streaming_hotlist.inc",
+            "AGENT.md"
+          ],
+          "minimal_modules": [
+            "按需读取",
+            "重叠隐藏延迟",
+            "预取与 hotlist"
+          ],
+          "practice_task": "阅读 AGENT.md 的 SSD 设计原则与 ds4.c 流式路径，解释为什么生成比 prefill 对 cache miss 更敏感。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "分布式推理架构与层切分",
+          "order": 3,
+          "filename": "u9-l3-distributed-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 coordinator/worker 角色、--layers 区间切分、每个进程只加载自己的层片与 KV 切片。",
+          "learning_goals": [
+            "理解 coordinator/worker 角色与 ds4_dist_session",
+            "掌握 --layers 区间与 output head 归属",
+            "理解层切分如何映射到 weights_bind/load_slice"
+          ],
+          "source_files": [
+            "ds4_distributed.c",
+            "ds4_distributed.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "角色与 dist_session",
+            "--layers 与 output head",
+            "层切分映射"
+          ],
+          "practice_task": "阅读两机 PRO Q4 配置示例与 ds4_distributed.h，解释为什么最终 worker 通常拥有 output head，以及 --layers 20:42 在慢链路上的取舍。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "分布式协议、路由与流水线",
+          "order": 4,
+          "filename": "u9-l4-distributed-protocol.md",
+          "level": "advanced",
+          "topic": "讲解 HELLO/WORK/RESULT 协议帧、route 组建、worker-worker 直连、prefill 流水线与生成自回归、KV/hash 校验与恢复。",
+          "learning_goals": [
+            "理解控制连接 HELLO 注册与 data 连接 WORK/RESULT",
+            "掌握 prefill 流水线（chunk N+1/N 重叠）与生成自回归",
+            "理解 rolling token-prefix hash 校验与重放恢复"
+          ],
+          "source_files": [
+            "ds4_distributed.c",
+            "ds4_distributed.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "协议帧与 route",
+            "prefill 流水线与生成",
+            "hash 校验与恢复"
+          ],
+          "practice_task": "阅读 README 的 Distributed protocol overview 与 ds4_distributed.c，画出一次 prefill chunk 在 A→B→C→A 上的帧流转，并说明 worker 掉线后 coordinator 如何重建 KV。",
+          "depends_on": [
+            "u9-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "原生 Agent、评测与基准",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "原生编码 Agent 设计",
+          "order": 1,
+          "filename": "u10-l1-native-agent-design.md",
+          "level": "advanced",
+          "topic": "讲解 ds4-agent 的垂直设计：推理在 agent 进程内、session 即磁盘 KV、低延迟、无 DSML 转换、会话 /save /list /switch。",
+          "learning_goals": [
+            "理解 agent 进程内推理与 KV-as-session",
+            "掌握系统提示与工具的垂直设计",
+            "了解会话持久化 /save /list /switch /strip"
+          ],
+          "source_files": [
+            "ds4_agent.c",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "进程内推理与 KV-as-session",
+            "垂直设计",
+            "会话持久化"
+          ],
+          "practice_task": "阅读 ds4_agent.c 的 main 与会话命令，解释为什么 KV mismatch 在该架构下“按构造不可能”。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Agent 工具系统",
+          "order": 2,
+          "filename": "u10-l2-agent-tools.md",
+          "level": "advanced",
+          "topic": "讲解 agent 内建工具（read/more/write/list/edit/search/bash 等）的 DSML 原生解析、执行与可视化。",
+          "learning_goals": [
+            "理解 agent_tool_call 解析与 DSML 参数种类",
+            "掌握各内建工具执行函数",
+            "了解工具调用可视化"
+          ],
+          "source_files": [
+            "ds4_agent.c",
+            "linenoise.h"
+          ],
+          "minimal_modules": [
+            "工具解析与参数种类",
+            "工具执行函数",
+            "可视化"
+          ],
+          "practice_task": "在 ds4_agent.c 中找到工具分发（read/write/edit/bash/search 等），列出每个工具的参数，并说明 AGENT_TOOL_PARAM_DIFF_OLD/NEW 等参数种类的用途。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "Agent web 搜索",
+          "order": 3,
+          "filename": "u10-l3-agent-web-search.md",
+          "level": "advanced",
+          "topic": "讲解 ds4_web.c 提供的 google_search 与 visit_page 能力及其在 agent 中的集成。",
+          "learning_goals": [
+            "理解 ds4_web_config 回调（confirm/log/cancel）",
+            "掌握 google_search 与 visit_page 实现",
+            "了解 agent 中的 google_search/visit_page 工具"
+          ],
+          "source_files": [
+            "ds4_web.c",
+            "ds4_web.h",
+            "ds4_agent.c"
+          ],
+          "minimal_modules": [
+            "web 回调接口",
+            "搜索与访问实现",
+            "agent 集成"
+          ],
+          "practice_task": "阅读 ds4_web.h 的回调接口，解释 confirm/log/cancel 三个回调分别用于什么场景，以及为何 web 访问需要用户确认。",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "能力评测 ds4-eval",
+          "order": 4,
+          "filename": "u10-l4-capability-eval.md",
+          "level": "advanced",
+          "topic": "讲解 ds4-eval 的 92 题集（GPQA/SuperGPQA/AIME/COMPSEC）、TUI、答案抽取/评分与 --regrade-trace。",
+          "learning_goals": [
+            "理解四类题集与渐进难度",
+            "掌握答案抽取与评分（find_*_answer / answer_matches）",
+            "了解 TUI 与 --regrade-trace/--self-test-extractors"
+          ],
+          "source_files": [
+            "ds4_eval.c",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "题集与难度",
+            "抽取与评分",
+            "TUI 与 regrade"
+          ],
+          "practice_task": "阅读 ds4_eval.c 的抽取/评分函数与 README 的 q1..q4 期望表，说明为何这套集子是“能力回归套件”而非单纯通过/失败单测。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l5",
+          "title": "速度基准 ds4-bench",
+          "order": 5,
+          "filename": "u10-l5-speed-benchmark.md",
+          "level": "advanced",
+          "topic": "讲解 ds4-bench 在上下文前沿测量 prefill/生成吞吐、内存快照保存/恢复、CSV 输出与 speed-bench 脚本。",
+          "learning_goals": [
+            "理解前沿步进与增量 prefill 测量",
+            "掌握 KV 内存快照 save/restore 探针",
+            "了解 CSV 输出与 plot_speed.py 绘图"
+          ],
+          "source_files": [
+            "ds4_bench.c",
+            "speed-bench/README.md",
+            "speed-bench/plot_speed.py"
+          ],
+          "minimal_modules": [
+            "前沿步进与增量测量",
+            "KV 快照探针",
+            "CSV 与绘图"
+          ],
+          "practice_task": "运行（或推演）一次 ds4-bench，解释它为何在每个前沿保存/恢复 KV 快照再继续 prefill，并用 speed-bench 数据说明 prefill 与生成速度随上下文的变化。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "GGUF 工具链、测试与贡献",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "GGUF 生成与量化工具",
+          "order": 1,
+          "filename": "u11-l1-gguf-generation-tools.md",
+          "level": "advanced",
+          "topic": "讲解 gguf-tools/deepseek4-quantize 如何从 HF safetensors + 模板 GGUF 重新生成 Q2/Q4 GGUF，--compare-tensor/--dry-run 校验。",
+          "learning_goals": [
+            "理解模板 GGUF + HF safetensors 重生成流程",
+            "掌握 --experts/--routed-w2 等张量族覆盖",
+            "了解 --compare-tensor/--dry-run 校验"
+          ],
+          "source_files": [
+            "gguf-tools/deepseek4-quantize.c",
+            "gguf-tools/quants.c",
+            "gguf-tools/README.md"
+          ],
+          "minimal_modules": [
+            "模板 + HF 重生成",
+            "张量族覆盖",
+            "校验选项"
+          ],
+          "practice_task": "阅读 gguf-tools/README.md 的 Q2/Q4 生成命令，解释 template GGUF 提供了哪些东西（元数据/分词器/张量顺序），而 HF 提供 tensor 字节。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "imatrix 收集与质量测试",
+          "order": 2,
+          "filename": "u11-l2-imatrix-and-quality-testing.md",
+          "level": "advanced",
+          "topic": "讲解 routed-MoE imatrix 的收集（ds4 --imatrix-out）与 quality-testing 对官方 DeepSeek 续写的打分对比。",
+          "learning_goals": [
+            "理解 imatrix 收集流程与 .dat 格式",
+            "掌握 collect_official 抓取官方续写",
+            "理解 score_official 打分与 compare_scores 对比"
+          ],
+          "source_files": [
+            "gguf-tools/imatrix/README.md",
+            "gguf-tools/quality-testing/README.md",
+            "gguf-tools/quality-testing/score_official.c",
+            "ds4.c"
+          ],
+          "minimal_modules": [
+            "imatrix 收集与 .dat",
+            "官方续写抓取",
+            "打分与对比"
+          ],
+          "practice_task": "阅读 gguf-tools/quality-testing 流程，描述本地 GGUF 如何对照官方 DeepSeek V4 续写被打分，以及 imatrix 缺失时的合成 fallback 公式。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "测试向量与回归",
+          "order": 3,
+          "filename": "u11-l3-test-vectors.md",
+          "level": "advanced",
+          "topic": "讲解 tests/test-vectors 的官方/本地 golden 向量、ds4_test C runner、--dump-logprobs 与 DS4_METAL_PREFILL_CHUNK=2048 严格比对。",
+          "learning_goals": [
+            "理解 official.vec / local-golden.vec 向量",
+            "掌握 ds4_test --logprob-vectors/--server",
+            "了解 --dump-logprobs 与严格 prefill chunk"
+          ],
+          "source_files": [
+            "tests/ds4_test.c",
+            "tests/test-vectors/README.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "测试向量",
+            "C runner",
+            "严格比对"
+          ],
+          "practice_task": "阅读 tests/test-vectors/README.md，解释为什么本地 golden 向量比官方 top-logprobs 切片更能发现后端 logits 漂移。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "贡献与 QA 工作流",
+          "order": 4,
+          "filename": "u11-l4-contributing-and-qa.md",
+          "level": "advanced",
+          "topic": "讲解 CONTRIBUTING.md 的正确性/速度回归测试要求、QA_BEFORE_RELEASES.md 的检查清单、AGENT.md 的安全约束与四大路径保护。",
+          "learning_goals": [
+            "理解贡献前的正确性/速度回归要求",
+            "掌握 QA 发布前检查清单",
+            "理解四大推理路径（Metal/SSD/分布式/CUDA）保护与安全约束"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            "QA_BEFORE_RELEASES.md",
+            "AGENT.md",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "贡献回归要求",
+            "QA 检查清单",
+            "路径保护与安全"
+          ],
+          "practice_task": "阅读 CONTRIBUTING.md 与 AGENT.md，写一份“修改 KV 缓存代码后必须执行的回归检查清单”，覆盖 Metal/SSD/分布式/CUDA 四条路径。",
+          "depends_on": [
+            "u9-l4",
+            "u10-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
