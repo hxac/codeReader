@@ -1,0 +1,397 @@
+{
+  "project": "FPGA-FixedPoint",
+  "head": "35b175d6912f085c01f5b986e4f41c70a3807909",
+  "rationale": "本项目是一个高度聚焦的 Verilog 定点数运算库：13 个可综合模块集中在单一文件 RTL/fixedpoint.v 中，外加 4 个 iverilog 仿真测试平台。整条学习主线是「定点数格式 + 统一参数命名 + fxp_zoom 位宽变换核心 + 各运算模块 + 流水线/浮点扩展」。学习路径从外到内、由浅入深：入门层先让读者跑通仿真、建立定点数格式与统一参数（WOI/WOF/WII/WIF…）的直觉，再彻底吃透 fxp_zoom——它带有溢出饱和与舍入控制，是被 add/addsub/mul/div/sqrt 等几乎所有模块复用的核心原语；进阶层在此之上逐一拆解加减乘除开的单周期实现及底层算法（恢复余数法、逐位开方）；专家层上升到流水线改造（把组合循环展开为级联寄存器）、IEEE754 单精度浮点互转，以及自校验仿真方法学。讲义之间用 depends_on 严格串起「格式→fxp_zoom→各运算→流水线/浮点/仿真」的依赖链，保证读者每篇都建立在前一篇的源码理解之上，且每篇都引用真实存在的源码文件并给出可操作的代码实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门层：认识项目、定点格式与核心原语",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与首次仿真运行",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 FPGA-FixedPoint 是什么、能做什么、目录如何组织，以及如何用 iverilog 跑通第一个仿真，建立对整个库的直观认识。",
+          "learning_goals": [
+            "了解项目的定位、特性和模块清单（加减乘除开方、溢出检测、舍入控制、浮点互转）",
+            "理解仓库目录结构：RTL/fixedpoint.v 存放全部可综合模块，SIM/ 存放测试平台与 .bat 脚本",
+            "学会安装 iverilog 并运行 SIM 下的 .bat 脚本完成首次仿真",
+            "读懂 testbench 中用 $signed/位移把定点数还原为浮点数再打印对比的套路"
+          ],
+          "source_files": [
+            "README.md",
+            "SIM/tb_add_sub_mul_div.v",
+            "SIM/tb_add_sub_mul_div_run_iverilog.bat"
+          ],
+          "minimal_modules": [
+            "fxp_add",
+            "fxp_addsub",
+            "fxp_mul",
+            "fxp_div"
+          ],
+          "practice_task": "安装 iverilog，运行 tb_add_sub_mul_div_run_iverilog.bat 完成首次仿真并观察 HW-result 与 SW-result 的对比输出；随后在 tb_add_sub_mul_div.v 的 initial 块中追加 3 组自定义测试向量（包含一个会触发溢出的用例），重新仿真并确认输出中出现 (o) 溢出标记。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "定点数格式与统一参数命名",
+          "order": 2,
+          "filename": "u1-l2-fixedpoint-format.md",
+          "level": "beginner",
+          "topic": "讲解定点数 = 二进制补码整数 ÷ 2^小数位宽 这一格式，以及全库统一的参数命名约定 WOI/WOF、WII/WIF、WIIA/WIFA/WIIB/WIFB 与 ROUND。",
+          "learning_goals": [
+            "掌握定点数值 = 有符号补码整数 / 2^WOF 的换算关系，能读懂 README 的取值表",
+            "理解整数位宽与小数位宽如何决定定点数的表示范围与精度",
+            "记住全库统一的位宽参数命名约定，能看懂任意模块的 parameter 列表",
+            "理解 ROUND 参数控制截断时是否四舍五入的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "RTL/fixedpoint.v"
+          ],
+          "minimal_modules": [
+            "fxp_mul",
+            "fxp_zoom"
+          ],
+          "practice_task": "给定一组定点配置（如 WOI=10,WOF=6），手算 3.14、-2.5、127.99 这三个值对应的二进制码；再写一个最小 testbench 用 $signed(code)*1.0/(1<<WOF) 把码值打印回浮点数，验证你的手算结果一致。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "fxp_zoom：被全库复用的位宽变换核心",
+          "order": 3,
+          "filename": "u1-l3-fxp-zoom.md",
+          "level": "beginner",
+          "topic": "深入 fxp_zoom 模块：它实现定点数位宽变换，内含小数位扩展/截断（含 ROUND 舍入）与整数位扩展/截断（含上溢出/下溢出饱和），是几乎所有运算模块复用的基础原语。",
+          "learning_goals": [
+            "理解 fxp_zoom 如何处理 WOF<WIF（截断+舍入）、WOF==WIF、WOF>WIF（补零扩展）三种小数位情况",
+            "理解 WOI<WII 时如何检测上溢出（正超限→饱和到正最大）与下溢出（负超限→饱和到负最小）",
+            "看懂 generate+always@(*) 中 inr/outi/outf 的拼接与符号位判断逻辑",
+            "认识到 add/addsub/mul/div/sqrt 都通过例化 fxp_zoom 来对齐位宽、做舍入与溢出饱和"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_add_sub_mul_div.v"
+          ],
+          "minimal_modules": [
+            "fxp_zoom"
+          ],
+          "practice_task": "单独例化 fxp_zoom 做一个最小 testbench：设置 WII=8,WIF=8,WOI=6,WOF=4（输出更窄以强制截断与可能溢出），分别喂入会触发舍入、上溢出、下溢出的输入，观察 out 与 overflow 的饱和/舍入行为是否符合预期。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶层：加减乘除开的单周期实现",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "fxp_add 与 fxp_addsub：基于 fxp_zoom 的加减法",
+          "order": 1,
+          "filename": "u2-l1-add-sub.md",
+          "level": "intermediate",
+          "topic": "讲解加法与加减法模块如何先把两路输入用 fxp_zoom 对齐到统一中间位宽、再做有符号加法、最后用 fxp_zoom 还原为输出位宽并检测溢出；addsub 用 sub 控制位把减法转成补码加法。",
+          "learning_goals": [
+            "理解 fxp_add 用 max 取公共位宽 WII/WIF、再扩展 1 位防止加法溢出的设计",
+            "看懂 fxp_addsub 如何用 (~inb)+1 实现 0 加/1 减的可控二目运算",
+            "理解三个 fxp_zoom 例化（ina 对齐、inb 对齐、res 还原）各自的作用",
+            "能定位 add 与 addsub 在中间位宽计算（WRI=WII+1）上的差异原因"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_add_sub_mul_div.v"
+          ],
+          "minimal_modules": [
+            "fxp_add",
+            "fxp_addsub",
+            "fxp_zoom"
+          ],
+          "practice_task": "写一个 testbench 同时例化 fxp_add 与 fxp_addsub（sub=0），用相同输入验证二者输出与 overflow 完全一致；再构造「正最大值+正最大值」「负最小值+负最小值」两组用例，确认溢出饱和到正确极值。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "fxp_mul：乘法与结果位宽推导",
+          "order": 2,
+          "filename": "u2-l2-mul.md",
+          "level": "intermediate",
+          "topic": "讲解定点乘法：积的整数位宽=WIIA+WIIB、小数位宽=WIFA+WIFB，用 $signed 相乘后再交由 fxp_zoom 截断到输出位宽并做舍入与溢出检测。",
+          "learning_goals": [
+            "理解定点乘积位宽为何是 WRI=WIIA+WIIB、WRF=WIFA+WIFB",
+            "看懂 $signed(ina)*$signed(inb) 直接得到全精度积、再由 fxp_zoom 收敛到 WOI/WOF 的两段式结构",
+            "理解乘法中 ROUND 控制的是积小数位截断时的四舍五入",
+            "能判断什么配置下乘积会溢出输出范围"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_add_sub_mul_div.v"
+          ],
+          "minimal_modules": [
+            "fxp_mul",
+            "fxp_zoom"
+          ],
+          "practice_task": "配置一个输出位宽明显小于乘积真实范围的 fxp_mul（例如 WIIA=WIFA=WIIB=WIFB=8 但 WOI=8,WOF=8），喂入两个大数使其乘积必然溢出，确认 overflow=1 且 out 被饱和；再对比 ROUND=1 与 ROUND=0 时输出精度的差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "fxp_div：恢复余数法实现的单周期除法",
+          "order": 3,
+          "filename": "u2-l3-div.md",
+          "level": "intermediate",
+          "topic": "讲解单周期除法如何先把被除数/除数取绝对值、用 for 循环按位移逐位试探商（恢复余数思想）、再做舍入、补回符号并做溢出饱和；并说明其组合逻辑关键路径过长、不推荐综合使用。",
+          "learning_goals": [
+            "理解先把操作数转成正数、最后按 sign 异或结果补回符号的处理流程",
+            "看懂 for(shamt=WOI-1; shamt>=-WOF; ...) 用 divr<<shamt 或 >>(-shamt) 逐位试探商的恢复余数法",
+            "理解舍入逻辑 acct-divd<divd-acc 的几何含义（更接近哪个边界）",
+            "理解除法符号恢复与上溢出/下溢出饱和的判定"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_add_sub_mul_div.v"
+          ],
+          "minimal_modules": [
+            "fxp_div",
+            "fxp_zoom"
+          ],
+          "practice_task": "用 C/Python 写一个与 fxp_div 相同的恢复余数除法参考模型（含取绝对值、逐位试探、舍入、补符号），对若干组随机输入比对 RTL 与参考模型的 out 和 overflow 是否一致；并测试除数为 0 时的行为。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "fxp_sqrt：逐位求解的开方算法",
+          "order": 4,
+          "filename": "u2-l4-sqrt.md",
+          "level": "intermediate",
+          "topic": "讲解单周期开方如何逐位试探平方根的每一位：维护当前部分根 resu 与它的二倍平方累计 resu2，按位移试探 (2*resu+1)^2 是否不超过输入，最后经 fxp_zoom 收敛位宽。",
+          "learning_goals": [
+            "理解逐位开方的数学原理：维护 resu（部分根）与 resu2（其平方累计），每试探一位更新二者",
+            "看懂 for(ii=WRI-1; ii>=-WIF; ...) 中左移/右移与 ONET<<(2*ii+WIF) 的作用",
+            "理解对负数输入取绝对值开方、再恢复符号 sign 的处理（含 resushort 取反）",
+            "理解开方结果位宽 WRI=WTI/2 的由来（平方根位数约为原数一半）"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_fxp_sqrt.v"
+          ],
+          "minimal_modules": [
+            "fxp_sqrt",
+            "fxp_zoom"
+          ],
+          "practice_task": "针对若干「完全平方」定点输入（其平方根为精确值）验证 fxp_sqrt 输出精确无误差；再测试一个负数输入，确认模块对其取绝对值开方后给出负结果的符号处理；最后与 sqrt() 软件参考比对随机输入的误差。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家层：流水线、浮点互转与仿真方法学",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "流水线设计模式与 fxp_mul_pipe",
+          "order": 1,
+          "filename": "u3-l1-mul-pipe.md",
+          "level": "advanced",
+          "topic": "以 fxp_mul_pipe（2 级流水线）为入门范例，讲解本库统一的流水线改造套路：把组合逻辑切成若干段、在段间插入 @(posedge clk) 寄存器、用 rstn 异步复位、initial 初始化输出。",
+          "learning_goals": [
+            "掌握本库流水线模块的统一接口：增加 rstn/clk，输出改为 reg 并用 initial 初始化",
+            "看懂 fxp_mul_pipe 把乘法寄存一拍、再把 fxp_zoom 结果寄存一拍构成 2 级流水线",
+            "理解流水线模块与对应单周期模块在功能上等价、只是引入了固定延迟",
+            "能根据 latency 对齐输入与输出进行验证"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_fxp_mul_div_pipe.v"
+          ],
+          "minimal_modules": [
+            "fxp_mul_pipe",
+            "fxp_mul",
+            "fxp_zoom"
+          ],
+          "practice_task": "编写一个连续流式 testbench：每个时钟都给 fxp_mul_pipe 喂入新输入，同时用软件记录输入时间戳；在 2 拍延迟后比对输出与软件预期，统计正确样本数，验证 2 级延迟对齐且无气泡损失。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "fxp_div_pipe：把除法循环展开为流水线",
+          "order": 2,
+          "filename": "u3-l2-div-pipe.md",
+          "level": "advanced",
+          "topic": "讲解如何把单周期除法里 WOI+WOF 次迭代的 for 循环展开成 WOI+WOF+3 级流水线：用数组 acc/res/divdp/divrp/sign 等作为级间寄存器，每拍处理一位商，最后两级做舍入与溢出饱和。",
+          "learning_goals": [
+            "理解把 for 循环每一位迭代映射成一拍流水线、用数组做级间寄存器的展开手法",
+            "看懂 res[ii+1][WOF+WOI-1-ii] 逐位写商、acc[ii+1] 累加余数的级联逻辑",
+            "理解独立的舍入级（roundedres）与最后的符号/溢出饱和输出级",
+            "理解流水线级数 = WOI+WOF+3 的构成（首位+逐位+舍入+输出）"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_fxp_mul_div_pipe.v"
+          ],
+          "minimal_modules": [
+            "fxp_div_pipe",
+            "fxp_div",
+            "fxp_zoom"
+          ],
+          "practice_task": "构造一个对齐延迟为 WOI+WOF+3 拍的验证环境，用同一组输入同时驱动 fxp_div（单周期）与 fxp_div_pipe（流水线），在正确的延迟节拍上逐拍比对两者 out/overflow，确认功能等价。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "fxp_sqrt_pipe：开方算法的流水线化",
+          "order": 3,
+          "filename": "u3-l3-sqrt-pipe.md",
+          "level": "advanced",
+          "topic": "讲解如何把逐位开方展开成 WII/2+WIF+2 级流水线：用 sign/inu/resu/resu2 数组做级间寄存器，每拍试探平方根的一位，末级经 fxp_zoom 后再寄存输出。",
+          "learning_goals": [
+            "理解逐位开方循环展开为流水线时级间寄存器数组 sign/inu/resu/resu2 的作用",
+            "看懂 jj=WRI-1-ii 把算法位序映射为流水线级序的技巧",
+            "理解末尾 fxp_zoom 做位宽收敛后再加一级输出寄存器的设计",
+            "理解流水线级数 = [WII/2]+WIF+2 的构成"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_fxp_sqrt.v"
+          ],
+          "minimal_modules": [
+            "fxp_sqrt_pipe",
+            "fxp_sqrt",
+            "fxp_zoom"
+          ],
+          "practice_task": "搭建对齐延迟为 WII/2+WIF+2 拍的验证环境，用同一组输入驱动 fxp_sqrt 与 fxp_sqrt_pipe，在正确节拍比对两者输出，确认流水线版本与单周期版本功能一致。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "fxp2float 与 float2fxp：IEEE754 浮点互转（单周期）",
+          "order": 4,
+          "filename": "u3-l4-float-convert.md",
+          "level": "advanced",
+          "topic": "讲解定点与 IEEE754 单精度浮点的双向转换：fxp2float 通过扫描最高有效位确定指数、收集尾数；float2fxp 根据指数把隐含 1 的尾数安放到定点对应位、处理舍入与溢出饱和。",
+          "learning_goals": [
+            "理解 IEEE754 单精度 {sign,8bit exp,23bit tail} 的位域与隐含前导 1",
+            "看懂 fxp2float 用 for 扫描找到最高有效位计算 expz=jj+127-WIF、再收集 23 位尾数的逻辑",
+            "看懂 float2fxp 用 expi=exp-127+WOF 把尾数逐位安置到定点输出位、处理 ROUND 与 overflow",
+            "理解两个模块对超大/超小数值（指数溢出、下溢截断）的饱和与舍入处理"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_convert_fxp_float.v"
+          ],
+          "minimal_modules": [
+            "fxp2float",
+            "float2fxp"
+          ],
+          "practice_task": "搭建一个往返（round-trip）验证：随机生成若干定点值 → fxp2float → float2fxp → 比对还原值与原值的误差，统计最大误差；再测试指数极大（接近 254）与极小（接近 0）的浮点输入，确认 overflow 与饱和行为。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "fxp2float_pipe 与 float2fxp_pipe：流水线浮点转换",
+          "order": 5,
+          "filename": "u3-l5-float-convert-pipe.md",
+          "level": "advanced",
+          "topic": "讲解两个浮点转换的流水线版本：fxp2float_pipe 把逐位扫描展开为 WII+WIF+2 级，float2fxp_pipe 用尾数安置+指数递减的移位流水线构成 WOI+WOF+4 级，末级统一做符号与溢出饱和。",
+          "learning_goals": [
+            "理解 fxp2float_pipe 用 exp/inu/sign 数组把逐位扫描展开成级联流水线",
+            "看懂 float2fxp_pipe 用 outs/rounds/exps/signs 数组配合 exps 递减逐级移位安置尾数的设计",
+            "理解 generate 根据 WOI+WOF 是否 ≥23 分支处理尾数宽度差异的原因",
+            "理解两个流水线模块末级统一做取补符号与上/下溢出饱和的逻辑"
+          ],
+          "source_files": [
+            "RTL/fixedpoint.v",
+            "SIM/tb_convert_fxp_float.v"
+          ],
+          "minimal_modules": [
+            "fxp2float_pipe",
+            "float2fxp_pipe",
+            "fxp2float",
+            "float2fxp"
+          ],
+          "practice_task": "在 tb_convert_fxp_float.v 已有结构基础上，编写按各自正确延迟（WII+WIF+2 与 WOI+WOF+4 拍）对齐的自检逻辑，逐拍比对 fxp2float_pipe 与 fxp2float、float2fxp_pipe 与 float2fxp 的输出，确认流水线版与单周期版完全一致。",
+          "depends_on": [
+            "u3-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "仿真验证方法学：自校验测试平台",
+          "order": 6,
+          "filename": "u3-l6-simulation-testbench.md",
+          "level": "advanced",
+          "topic": "总结本库 4 个 testbench 的共同套路：用 $signed/位移把定点码还原为浮点做软件参考、用 @(posedge clk) 驱动与采样、用 (o) 标记溢出；并指导读者写出带通过/失败计数与汇总的自校验 testbench。",
+          "learning_goals": [
+            "掌握用 $signed(x)*1.0/(1<<W) 在仿真中把定点码还原为浮点软件参考的通用技巧",
+            "理解单周期 testbench（test task+定时采样）与流水线 testbench（每拍喂入+延迟对齐采样）两种风格的差异",
+            "学会用 iverilog -g2001 编译、vvp 运行、$dumpvars 波形导出的完整流程",
+            "能设计带 pass/fail 计数器和 $display 汇总的自校验 testbench"
+          ],
+          "source_files": [
+            "SIM/tb_add_sub_mul_div.v",
+            "SIM/tb_fxp_mul_div_pipe.v",
+            "SIM/tb_fxp_sqrt.v",
+            "SIM/tb_convert_fxp_float.v",
+            "SIM/tb_fxp_sqrt_run_iverilog.bat"
+          ],
+          "minimal_modules": [
+            "fxp_add",
+            "fxp_mul_pipe",
+            "fxp_sqrt",
+            "fxp2float"
+          ],
+          "practice_task": "以 tb_add_sub_mul_div.v 为模板，改写成一个自校验 testbench：定义 pass/fail 计数寄存器，在每次比对 HW-result 与 SW-result 时判断误差是否在 1 LSB 以内并累加计数，仿真结束时 $display 汇总 PASS/FAIL 数；运行后确认 FAIL=0。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
