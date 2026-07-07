@@ -1,7 +1,7 @@
 {
   "project": "flash-attention",
-  "head": "1f7ce2f7cb503473559f3d44d575ae05b1ed8557",
-  "rationale": "本仓库同时容纳三代实现：FA2（顶层 flash_attn/ + csrc/，C++/CUDA）、FA3（hopper/）、以及当前主力开发的 FA4（flash_attn/cute/，用 Python + CuTeDSL 编写，运行时 JIT 编译为 PTX/CUBIN）。由于 FA4 既是开发重点又是 Python 可读的源码，本手册以 FA4 为主线，同时在入门层交代整个仓库的多代共存结构，避免读者迷失。\\n\\n学习顺序按「先宏观后微观、先数据结构后算法、先 Ampere 基线后 Hopper/Blackwell 特化」设计：第 1 单元做项目定位与上手；第 2 单元拆公共接口与架构分发；第 3-4 单元讲贯穿所有 kernel 的核心数据结构（掩码/分块/变长/在线 softmax/score_mod）；第 5 单元补齐流水线、TMA 拷贝、屏障等运行机制；有了这些基础，第 6 单元才进入前向主循环（先 Ampere 基线再 Hopper），第 7 单元讲 pack_gqa、SplitKV、paged KV 等前向高级特性。专家层（第 8-11 单元）依次深入 Blackwell 专用 kernel（UMMA/2CTA/CLC 调度）、反向传播（含 MLA 反向）、稀疏与 MLA、以及编译缓存、测试、基准与 GPU 调试。每篇讲义只解决一个主题、引用 1-6 个真实源码文件并配一个可操作实践任务，依赖关系严格向后指向前置讲义，构成一条由浅入深的完整路径。",
+  "head": "5835c733e7e9c07606b045255768e8a7e9e851bd",
+  "rationale": "本仓库同时容纳三代实现：FA2（顶层 flash_attn/ + csrc/，C++/CUDA）、FA3（hopper/）、以及当前主力开发的 FA4（flash_attn/cute/，用 Python + CuTeDSL 编写，运行时 JIT 编译为 PTX/CUBIN）。由于 FA4 既是开发重点又是 Python 可读的源码，本手册以 FA4 为主线，同时在入门层交代整个仓库的多代共存结构，避免读者迷失。\\n\\n学习顺序按「先宏观后微观、先数据结构后算法、先 Ampere 基线后 Hopper/Blackwell 特化」设计：第 1 单元做项目定位与上手；第 2 单元拆公共接口与架构分发；第 3-4 单元讲贯穿所有 kernel 的核心数据结构（掩码/分块/变长/在线 softmax/score_mod）；第 5 单元补齐流水线、TMA 拷贝、屏障等运行机制；有了这些基础，第 6 单元才进入前向主循环（先 Ampere 基线再 Hopper），第 7 单元讲 pack_gqa、SplitKV、paged KV 等前向高级特性。专家层（第 8-11 单元）依次深入 Blackwell 专用 kernel（UMMA/2CTA/CLC 调度）、反向传播（含 MLA 反向）、稀疏与 MLA、以及编译缓存、测试、基准与 GPU 调试。每篇讲义只解决一个主题、引用 1-6 个真实源码文件并配一个可操作实践任务，依赖关系严格向后指向前置讲义，构成一条由浅入深的完整路径。\\n\\n本次增量（1f7ce2f..5835c73）只有两个 PR：在 SM120 上实现 Pack-GQA 并修复其编译期参数处理，以及让 Ampere 前向基线（SM120 继承自它）完整支持 pack_gqa_layout、显式断言 SM120 不支持 SplitKV、并给反向 Sm80 kernel 加上滑窗(local)掩码与 BlockInfo 块范围/空块早退。受影响而需更新的是直接引用这些源码的已生成讲义：u6-l1（Ampere 前向主循环，pack_gqa 代码路径与 use_tma_O 边界变化、行号位移）、u7-l1（pack_gqa 现已覆盖 SM80/SM120 前向、不再仅 epilogue）、u7-l2（SplitKV 在 SM120 上现为显式断言）；u2-l2 既有引用行号仍在未改动区间且已正确记述 SM120 不支持 SplitKV，故 keep。尚未生成的讲义（u7-l3 起）保持 new，其中 u9-l1 的 topic/minimal_modules/source_files 已增补「滑窗/局部掩码反向 + BlockInfo 块范围 + 空块早退」以保证首生成时覆盖新代码。\"",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "用纯 PyTorch 实现 scaled-dot-product attention，对 seqlen=4096 的输入测量其峰值显存，验证其近似 O(N²) 的显存行为，并写出观察结论。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -90,7 +90,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -118,7 +118,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -153,7 +153,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -179,7 +179,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -214,7 +214,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -241,7 +241,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -268,7 +268,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -303,7 +303,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -330,7 +330,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -365,7 +365,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -393,7 +393,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -420,7 +420,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -436,28 +436,30 @@
           "order": 1,
           "filename": "u6-l1-ampere-forward-kernel.md",
           "level": "intermediate",
-          "topic": "以 flash_fwd.py 的 FlashAttentionForwardSm80 为基线，完整走一遍前向主循环：加载 Q tile → 流水化遍历 K/V block → 在线 softmax 累加 → 存储 O 与 LSE，并说明 tile/线程配置与 gmem/smem/rmem 边界。",
+          "topic": "以 flash_fwd.py 的 FlashAttentionForwardSm80（也是 SM120 的基类）为基线，完整走一遍前向主循环：加载 Q tile → 流水化遍历 K/V block → 在线 softmax 累加 → 存储 O 与 LSE；并说明本版本新增的 pack_gqa 代码路径（__init__ 里对 mQ/mO/mLSE 调用 pack_gqa_layout、用 PackGQA 加载 Q）、use_tma_O 现限定为 sm_90<=arch<sm_120（SM120 回退 cp.async 输出），以及 tile/线程配置与 gmem/smem/rmem 边界。",
           "learning_goals": [
             "掌握 FA 前向主循环的整体数据流",
             "理解 Q 常驻、K/V 流水的分块策略",
-            "看清 gmem/smem/rmem 三级存储边界"
+            "看清 gmem/smem/rmem 三级存储边界，以及 SM80/SM120 下 pack_gqa 与 TMA/cp.async 的取舍"
           ],
           "source_files": [
             "flash_attn/cute/flash_fwd.py",
-            "flash_attn/cute/ampere_helpers.py"
+            "flash_attn/cute/ampere_helpers.py",
+            "flash_attn/cute/pack_gqa.py"
           ],
           "minimal_modules": [
-            "Q tile 加载与常驻",
+            "Q tile 加载与常驻（含 pack_gqa 路径）",
             "K/V 流水遍历主循环",
-            "在线 softmax 累加与 O/LSE 存储"
+            "在线 softmax 累加与 O/LSE 存储",
+            "use_tma_O 的架构边界与 SM120 回退"
           ],
-          "practice_task": "阅读 FlashAttentionForwardSm80 的主循环，绘制一张数据流图，标注 Q/K/V 在 gmem→smem→rmem 之间的移动、MMA 计算与 softmax rescale 发生的位置。",
+          "practice_task": "阅读 FlashAttentionForwardSm80 的主循环与 __init__，绘制一张数据流图，标注 Q/K/V 在 gmem→smem→rmem 之间的移动、MMA 计算与 softmax rescale 发生的位置；并指出开启 pack_gqa 时 Q 是如何被 PackGQA.load_Q 加载、use_tma_O 在 SM120 上为何为 False。",
           "depends_on": [
             "u3-l2",
             "u4-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l2",
@@ -484,7 +486,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -500,26 +502,29 @@
           "order": 1,
           "filename": "u7-l1-pack-gqa.md",
           "level": "intermediate",
-          "topic": "讲解 pack_gqa.py：当 Q 头数多于 KV 头数（GQA/MQA）时，pack_gqa_layout 把 qhead_per_kvhead 折叠进 seqlen 维，同时保持 TMA 维度不变，从而让每个 KV tile 被多个 Q 头复用，提升效率。",
+          "topic": "讲解 pack_gqa.py：当 Q 头数多于 KV 头数（GQA/MQA）时，pack_gqa_layout 把 qhead_per_kvhead 折叠进 seqlen 维，同时保持 TMA 维度不变，从而让每个 KV tile 被多个 Q 头复用；并说明本版本起 Ampere/SM120 前向基线（flash_fwd.py 的 Sm80）也完整支持 pack_gqa（__init__ 折叠 + PackGQA 加载/存储 Q/O/LSE），此前 Ampere 仅在 epilogue 处理输出。",
           "learning_goals": [
             "理解 GQA/MQA 的头数配比关系",
             "掌握 pack_gqa_layout 的维度折叠技巧",
-            "了解 pack_gqa 为何能提升 GQA 性能"
+            "了解 pack_gqa 为何能提升 GQA 性能",
+            "知道 SM80/SM120 前向现已支持 pack_gqa 的完整路径"
           ],
           "source_files": [
             "flash_attn/cute/pack_gqa.py",
-            "flash_attn/cute/interface.py"
+            "flash_attn/cute/interface.py",
+            "flash_attn/cute/flash_fwd.py"
           ],
           "minimal_modules": [
             "GQA/MQA 头数配比",
             "pack_gqa_layout 维度折叠",
-            "TMA 维度保持"
+            "TMA 维度保持与 cp.async 回退",
+            "SM80/SM120 前向 pack_gqa 支持"
           ],
-          "practice_task": "构造 num_heads=8、nheads_kv=2、head_dim=64 的 GQA 输入，分别用 pack_gqa=True 与 False 调用 flash_attn_func，验证输出一致并记录二者的运行时间差异。",
+          "practice_task": "构造 num_heads=8、nheads_kv=2、head_dim=64 的 GQA 输入，分别用 pack_gqa=True 与 False 调用 flash_attn_func，验证输出一致并记录二者的运行时间差异；若在 SM120/SM80 上运行，确认 pack_gqa=True 不再回退到旧路径。",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u7-l2",
@@ -527,11 +532,12 @@
           "order": 2,
           "filename": "u7-l2-splitkv-and-combine.md",
           "level": "intermediate",
-          "topic": "讲解长上下文/解码场景下为何要把 KV 切分到多个 thread block（num_splits），每个 split 产出部分 O 与 LSE，再由 flash_fwd_combine.py 的 FlashAttentionForwardCombine 用 log-sum-exp 合并成最终结果。",
+          "topic": "讲解长上下文/解码场景下为何要把 KV 切分到多个 thread block（num_splits），每个 split 产出部分 O 与 LSE，再由 flash_fwd_combine.py 的 FlashAttentionForwardCombine 用 log-sum-exp 合并成最终结果；并说明 SM120 前向现已显式断言 num_splits==1（interface.py：arch//10==12 时 assert），与 SM90 同样不支持 SplitKV。",
           "learning_goals": [
             "理解 SplitKV 的切分与并行动机",
             "掌握 combine kernel 用 LSE 合并部分结果的数学",
-            "了解 num_splits / log_max_splits 的选择"
+            "了解 num_splits / log_max_splits 的选择",
+            "知道 SM90/SM120 前向不支持 SplitKV 的显式约束"
           ],
           "source_files": [
             "flash_attn/cute/flash_fwd_combine.py",
@@ -540,13 +546,14 @@
           "minimal_modules": [
             "KV 切分与多 block 并行",
             "部分 O+LSE 的 log-sum-exp 合并",
-            "num_splits 配置"
+            "num_splits 配置",
+            "SM90/SM120 的 num_splits==1 断言"
           ],
-          "practice_task": "对一条长序列（如 seqlen=8192）分别用 num_splits=1 与 num_splits=4 运行前向，验证输出数值一致，并说明 combine kernel 如何用 LSE 修正各 split 的 rescale。",
+          "practice_task": "对一条长序列（如 seqlen=8192）分别用 num_splits=1 与 num_splits=4 运行前向，验证输出数值一致，并说明 combine kernel 如何用 LSE 修正各 split 的 rescale；在 SM120 上用 num_splits=3 应触发 AssertionError（与 tests/cute/test_flash_attn.py::test_flash_attn_sm120_rejects_splitkv 对照）。",
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u7-l3",
@@ -704,21 +711,26 @@
           "order": 1,
           "filename": "u9-l1-backward-algorithm-sm80.md",
           "level": "advanced",
-          "topic": "讲解 flash_bwd.py 的 FlashAttentionBackwardSm80：注意力反向 dQ/dK/dV 的推导，为何需要重计算 S=P=softmax(QK^T)，前向保存的 LSE 与 D（行和）如何复用，以及 dQ 的原子累加策略。",
+          "topic": "讲解 flash_bwd.py 的 FlashAttentionBackwardSm80：注意力反向 dQ/dK/dV 的推导，为何需要重计算 S=P=softmax(QK^T)，前向保存的 LSE 与 D（行和）如何复用，dQ 的原子累加策略；并讲解本版本新增的滑窗/局部(local)掩码反向支持（is_local + window_size_left/right、AttentionMask 的 mask_local、用 BlockInfo.get_m_block_min_max 统一计算因果/滑窗下的 m_block 范围），以及 m_block_min<m_block_max 的空块早退保护。",
           "learning_goals": [
             "掌握 dQ/dK/dV 的推导与依赖关系",
             "理解反向中重计算 S/P 的必要性",
-            "了解 dQ 累加与 D（softmax 行和）的作用"
+            "了解 dQ 累加与 D（softmax 行和）的作用",
+            "理解滑窗/局部掩码下的反向块范围与空块早退"
           ],
           "source_files": [
-            "flash_attn/cute/flash_bwd.py"
+            "flash_attn/cute/flash_bwd.py",
+            "flash_attn/cute/block_info.py",
+            "flash_attn/cute/mask.py"
           ],
           "minimal_modules": [
             "dQ/dK/dV 推导",
             "S/P 重计算",
-            "dQ 累加与 LSE/D 复用"
+            "dQ 累加与 LSE/D 复用",
+            "滑窗/局部掩码反向与 BlockInfo 块范围",
+            "空块范围早退保护"
           ],
-          "practice_task": "用 PyTorch autograd 对一组小规模 q/k/v 求梯度，再手写 dQ/dK/dV 公式核对，并在阅读 kernel 后指出哪段代码对应 dV、哪段对应 dK、哪段对应 dQ 累加。",
+          "practice_task": "用 PyTorch autograd 对一组小规模 q/k/v 求梯度，再手写 dQ/dK/dV 公式核对，并在阅读 kernel 后指出哪段代码对应 dV、哪段对应 dK、哪段对应 dQ 累加；再用带 window_size 的滑窗输入验证反向 m_block 范围由 BlockInfo.get_m_block_min_max 计算且空块时早退。",
           "depends_on": [
             "u6-l1",
             "u4-l1"
@@ -909,7 +921,7 @@
           "order": 2,
           "filename": "u11-l2-constexpr-specialization.md",
           "level": "advanced",
-          "topic": "讲解 cutlass.Constexpr 编译期常量如何驱动 kernel 特化（如 head_dim、causal、tile 尺寸、qhead_per_kvhead），score_mod / mask_mod 作为 @cute.jit 回调如何在编译期被内联进 kernel，从而解释为何更换这些参数会触发重新编译。",
+          "topic": "讲解 cutlass.Constexpr 编译期常量如何驱动 kernel 特化（如 head_dim、causal、tile 尺寸、qhead_per_kvhead、pack_gqa），score_mod / mask_mod 作为 @cute.jit 回调如何在编译期被内联进 kernel，从而解释为何更换这些参数会触发重新编译。",
           "learning_goals": [
             "掌握 Constexpr 驱动的编译期特化",
             "理解 score_mod/mask_mod 的编译期内联",
@@ -925,7 +937,7 @@
             "score/mask_mod 内联注入",
             "特化与重编译触发条件"
           ],
-          "practice_task": "设计一个实验：先以 causal=False 编译运行，再切换 causal=True，观察是否发生重新编译（记录耗时），并用本讲知识解释为何 causal 改变会触发特化。",
+          "practice_task": "设计一个实验：先以 causal=False 编译运行，再切换 causal=True，观察是否发生重新编译（记录耗时），并用本讲知识解释为何 causal 改变会触发特化；额外观察切换 pack_gqa 是否同样触发重编译。",
           "depends_on": [
             "u6-l1"
           ],
@@ -937,11 +949,12 @@
           "order": 3,
           "filename": "u11-l3-tests-and-reference.md",
           "level": "advanced",
-          "topic": "讲解 tests/cute/ 下的测试体系：testing.py 的 attention_ref 参考实现与 generate_qkv 数据生成，test_flash_attn.py 的参数化（dtype、head_dim、seqlen、causal、GQA/MQA），两段式编译/执行测试流程，以及 OOM 重试与 conftest 配置。",
+          "topic": "讲解 tests/cute/ 下的测试体系：testing.py 的 attention_ref 参考实现与 generate_qkv 数据生成，test_flash_attn.py 的参数化（dtype、head_dim、seqlen、causal、GQA/MQA），IS_SM120 判定与 test_flash_attn_sm120_rejects_splitkv 等架构能力守卫用例，两段式编译/执行测试流程，以及 OOM 重试与 conftest 配置。",
           "learning_goals": [
             "掌握测试套件的组织与参数化维度",
             "理解参考实现 attention_ref 的作用",
-            "了解两段式测试与 OOM 重试机制"
+            "了解两段式测试与 OOM 重试机制",
+            "了解 SM90/SM120 SplitKV 不支持在测试中的守卫方式"
           ],
           "source_files": [
             "tests/cute/test_flash_attn.py",
@@ -951,9 +964,10 @@
           "minimal_modules": [
             "参考实现 attention_ref",
             "参数化测试维度",
+            "架构能力守卫用例（如 SM120 SplitKV）",
             "两段式测试与 OOM 重试"
           ],
-          "practice_task": "运行 pytest tests/cute/test_flash_attn.py -k 'test_flash_attn_output' -x 单个用例，记录 max diff，并对照 attention_ref 说明误差为何在容忍范围内。",
+          "practice_task": "运行 pytest tests/cute/test_flash_attn.py -k 'test_flash_attn_output' -x 单个用例，记录 max diff，并对照 attention_ref 说明误差为何在容忍范围内；阅读 test_flash_attn_sm120_rejects_splitkv 说明为何 SM120 前向拒绝 num_splits>1。",
           "depends_on": [
             "u2-l1"
           ],
@@ -1013,7 +1027,7 @@
           ],
           "practice_task": "设置 CUTE_DSL_KEEP_PTX=1 与 CUTE_DSL_LINEINFO=1 运行一次前向，导出 PTX 文件，在其中定位一段 online softmax 的 exp2/rescale 指令，并简要说明其作用。",
           "depends_on": [
-            "u8-l4"
+            "u8-4"
           ],
           "action": "new"
         }

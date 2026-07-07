@@ -1,0 +1,382 @@
+# 能力评测 ds4-eval
+
+## 1. 本讲目标
+
+本讲讲解 ds4 自带的能力评测工具 `ds4-eval`。读完本讲，你应当能够：
+
+- 说清楚 `ds4-eval` 为什么**不是**一个 leaderboard 跑分器，而是一套**能力回归套件（capability regression suite）**。
+- 知道内嵌的 92 道题由哪四类题集组成、各自的难度特征与渐进式排序意图。
+- 读懂答案抽取（`find_case_answer` 系列）与评分（`answer_matches`）三套并行逻辑：多选字母、整数、COMPSEC 行号。
+- 理解 TUI 双栏界面与 `--regrade-trace`、`--self-test-extractors` 两条“不加载模型”的离线审计路径。
+
+本讲承接 [u4-l3 生成与采样](u4-l3-generation-and-sampling.md)：那里讲的是“logits 算出之后怎么采样出一个 token”，本讲讲的是“采出一整段 token 之后，怎么判断模型答对了”。本讲不重复推理内核，只讲评测的“题—答—判”三件事。
+
+## 2. 前置知识
+
+在进入源码前，先建立三个直觉。
+
+**第一，什么是“能力回归套件”。** 普通单元测试是“通过 / 失败”二元的：你改一行代码，测试要么还绿要么变红。但大模型评测不是这样：即使推理逻辑完全没变，同一道题换一个随机种子、换一个 prefill chunk 大小，模型也可能因为采样抖动而答错。所以 `ds4-eval` 的设计哲学是——**它要回答的工程问题不是“模型得几分”，而是“我改了内核 / 量化 / 提示渲染 / KV 缓存 / 工具流之后，DeepSeek V4 Flash 还能不能用用户实际跑的同一条推理路径，解出一组有代表性的硬题”**。因此它追求的不是 92/92 满分，而是**分数的稳定性**与**逐题可见性**。
+
+**第二，什么是 trace（轨迹）。** `ds4-eval` 在跑题时可以把每一题的完整信息——系统提示、题目提示、模型逐字输出、采样参数、token 数、用时、最终抽取的答案——写进一个文本文件，这就是 `--trace` 产物。有了 trace，你事后可以**不重新加载模型**地重判（regrade）答案，这把“跑题（贵、要 GPU）”和“判题（便宜、纯 CPU 文本处理）”解耦了。
+
+**第三，为什么“判题”本身也是代码。** 模型的回答是一大段自由文本（尤其是开了 thinking 模式后，前面还有一长串 `<think>...</think>` 推理），而正确答案只是一个字母 `B` 或一个整数 `70`。把“模型说人话”翻译成“一个可比较的答案”需要一段相当讲究的抽取代码——这正是 `ds4_eval.c` 里最值得精读的部分，也是本讲的重点。
+
+**前置术语**（本讲会用到，不再展开）：prefill（一次性填 KV 缓存）、decode（自回归生成）、thinking 模式（DeepSeek 的 `<think>` 推理段）、session（u2-l1 引擎边界里的可变推理时间线）。
+
+## 3. 本讲源码地图
+
+本讲主要读两个文件：
+
+| 文件 | 角色 | 本讲关注的内容 |
+|---|---|---|
+| [ds4_eval.c](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c) | `ds4-eval` 二进制的全部源码（约 4290 行，单文件） | 题集数据、抽取、评分、TUI、regrade、self-test |
+| [README.md](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md) | 项目说明 | `Capability Evaluation` 一节，含 q1..q4 期望表 |
+
+`ds4_eval.c` 是一个**自包含的单文件前端**：它包含自己的 `main`、自己的题库（直接以 C 结构体数组硬编码进二进制）、自己的 TUI、自己的答案抽取与评分。它复用的只是引擎公共边界（`ds4_engine` / `ds4_session`，见 u2-l1）——也就是说，`ds4-eval` 跑题用的是和 `ds4` 命令行、`ds4-server` 完全相同的推理路径，这一点对“回归”至关重要。
+
+文件头注释开门见山地定义了它的自我定位（这是理解全篇的钥匙）：
+
+> [ds4_eval.c:6-9](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L6-L9) ——「这个程序**故意不是一个单元测试**。它加载真实模型、渲染 chat 提示、通过 `ds4_session_sync()` 做 prefill、逐 token 采样、并给最终答案打分。」
+
+随后一段还交代了各题集的**数据来源与许可证**（GPQA 为 CC BY 4.0、SuperGPQA 为 ODC-BY、AIME 2025 镜像为 MIT），并强调 SuperGPQA 切片是**经过审计（audited）**的——上游有错误答案键、缺图、题意不清的行会被替换而非本地改键，因为“一个坏靶子比一个 merely 难的靶子更糟”。
+
+---
+
+## 4. 核心概念与源码讲解
+
+本讲按三个最小模块展开：**4.1 题集与难度**、**4.2 抽取与评分**、**4.3 TUI 与 regrade**。
+
+### 4.1 题集与难度
+
+#### 4.1.1 概念说明
+
+`ds4-eval` 把 92 道题**硬编码**进二进制本身（不是运行时从磁盘读 JSON）。这样做有两个好处：一是评测可复现——任何人拿到同一份编译产物就拿到同一份题；二是题面与正确答案对最终用户“半透明”——你能看到题目，但 COMPSEC 题的 CVE 锚点与评分理由不会渲染给模型（见文件头注释）。
+
+92 道题分为四类，前 75 题交替排列，最后 17 题是 COMPSEC：
+
+| 题集 | 数量 | 答案形态 | 难度特征 |
+|---|---|---|---|
+| GPQA Diamond | 25 | 多选字母（A–D） | 研究生级科学题，单题仍需谨慎的物理/化学/生物推理 |
+| SuperGPQA | 25 | 多选字母（A–J，最多 10 选项） | 广泛专业知识，模型卡分数远低于 GPQA，预期“参差不齐” |
+| AIME 2025 | 25 | 整数（精确答案） | 竞赛数学，无部分分，一个算术/代数失误就改写成绩 |
+| COMPSEC | 17 | C/C++ 源码行号 | 单函数漏洞定位（源自公开 CVE），找引入防御缺陷的最佳行，或对安全函数返回 `0` |
+
+顺序是**故意渐进式**的：前面的题是有用的烟雾测试（smoke test），后面的题足够难，以至于一个强推理模型也应当仍然答错其中一些。
+
+#### 4.1.2 核心流程
+
+题集在内存里是一张结构体数组，每道题一个 `eval_case`。三种“题型判定”完全由结构体字段派生，没有显式的 `type` 枚举：
+
+```text
+eval_case
+  ├── source   "GPQA Diamond" / "SuperGPQA" / "AIME2025" / "COMPSEC"
+  ├── id       原始数据集行 id（如 "recNu3MXkvWUzHZr9"）
+  ├── domain   学科
+  ├── question 题面
+  ├── choice[] 多选选项数组（AIME/COMPSEC 为空）
+  └── answer   正确答案：字母 / 整数字符串 / 行号规格（如 "9-10"）
+
+题型判定（派生）：
+  is_multiple_choice  := choice[0] != NULL      （GPQA / SuperGPQA）
+  is_compsec          := source == "COMPSEC"     （COMPSEC）
+  否则                                            （AIME，整数）
+```
+
+`main` 里用一句经典的“数组大小 / 元素大小”算出题数，再用 `--questions N` 可选截断（[ds4_eval.c:4107-4113](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L4107-L4113)）：
+
+```c
+int ncases = (int)(sizeof(eval_cases) / sizeof(eval_cases[0]));
+if (cfg.question_limit > 0 && cfg.question_limit < ncases)
+    ncases = cfg.question_limit;
+```
+
+#### 4.1.3 源码精读
+
+**容量常量**——固定了选项上限、答案缓冲、上下文上限（[ds4_eval.c:57-59](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L57-L59)）：`EVAL_MAX_CHOICES 10`（所以 SuperGPQA 最多 A–J 共 10 选项）、`EVAL_ANSWER_MAX 32`（抽取出的答案字符串缓冲）、`EVAL_MAX_CONTEXT 1000000`（拒绝超过 1M 上下文的运行）。
+
+**题目结构体**（[ds4_eval.c:85-94](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L85-L94)）——注意 `answer` 是 `const char *`，对不同题型承载不同语义：对多选题是单个字母 `"B"`，对 AIME 是整数字符串 `"70"`，对 COMPSEC 是行号规格 `"9-10"`。
+
+**题型派生函数**（[ds4_eval.c:1374-1386](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L1374-L1386)）——三个一行函数决定了后续走哪条抽取/评分分支。`eval_case_nchoices` 数非 NULL 的选项数；`is_compsec` 直接比字符串 `"COMPSEC"`：
+
+```c
+static int eval_case_nchoices(const eval_case *tc) {
+    int n = 0;
+    while (n < EVAL_MAX_CHOICES && tc->choice[n]) n++;
+    return n;
+}
+static bool eval_case_is_compsec(const eval_case *tc) {
+    return tc->source && !strcmp(tc->source, "COMPSEC");
+}
+```
+
+**渐进式排列**——题库 `eval_cases[]` 从 [ds4_eval.c:95](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L95) 开始，第一题是 GPQA Diamond 物理题（相对论飞船），AIME 整数题最早出现在第 127 行附近（`.source = "AIME2025"`），三类交替混排，COMPSEC 排在最后 17 道。这种“先易后难、多类交替”的排列让一次完整跑测既能当烟雾测试，又能暴露深层能力退化。
+
+#### 4.1.4 代码实践
+
+**实践目标**：用纯文本工具核验 92 题的构成，确认 README 的说法与二进制内嵌数据一致。
+
+**操作步骤**：
+
+1. 在仓库根目录统计 `eval_cases[]` 里各 `source` 的出现次数（注意：这条命令也会数到本讲后面要讲的 self-test 用例，它们也带 `.source`，需要扣掉）。
+2. 对照 README 的 `Capability Evaluation` 一节（[README.md:629-631](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L629-L631)）里“25 GPQA + 25 SuperGPQA + 25 AIME + 17 COMPSEC = 92”的说法。
+
+```sh
+grep -oE '\.source = "[^"]+"' ds4_eval.c | sort | uniq -c
+```
+
+**需要观察的现象**：你会看到类似 `GPQA Diamond 24`、`GPQA Diamond (modified) 1`、`SuperGPQA 30`、`AIME2025 31`、`COMPSEC 18`。其中 SuperGPQA/AIME2025/COMPSEC 的计数都比真实题数多——多出来的正是 `run_extractor_self_tests()`（[ds4_eval.c:3416](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3416)）里为测试抽取器而**临时构造**的 `eval_case`（它们的 `.source` 也填了真实题集名）。
+
+**预期结果**：扣除 self-test 用例后，四类分别是 25 / 25 / 25 / 17，合计 92，与 README 完全吻合。这道练习本身就在演示一个重要事实——**self-test 用例与真实题库共用同一套抽取/评分代码**，这正是 self-test 能守护抽取器正确性的原因。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `eval_case` 没有一个显式的 `type` 字段，而是用 `source == "COMPSEC"` 和 `choice[0] != NULL` 来派生题型？
+
+**参考答案**：题型与题集来源高度耦合——COMPSEC 题集必是行号题、AIME 必是整数题、GPQA/SuperGPQA 必是多选题。用派生判定避免了“`type` 字段与 `source`/`choice` 不一致”的第二真相源（single source of truth 问题），加题时只需照常填 `source`/`choice`/`answer` 三字段，题型自动归位。
+
+**练习 2**：README 说“不应期待 92/92 满分”。给出两个即使推理逻辑完全不变、也可能导致单题答错的因素。
+
+**参考答案**：（1）采样抖动——默认 thinking 模式 + 采样参数下，换 `--seed` 可能让模型在边界题上选不同选项；（2）prefill chunk 大小变化（`DS4_METAL_PREFILL_CHUNK`）会改变 KV checkpoint / logit 落点，进而漂移生成（见 u6-l1）。这正是这套集子要做成“回归套件”而非“通过/失败单测”的根本原因。
+
+---
+
+### 4.2 抽取与评分
+
+#### 4.2.1 概念说明
+
+模型给出的是一大段自由文本（thinking 模式下还拖着 `<think>...</think>`），正确答案只是一个字母或数字。**抽取（extraction）**负责从自由文本里“挖”出模型最终选的答案；**评分（scoring）**负责把挖出的答案与隐藏的正确答案比较。
+
+为什么这件事难？因为模型会用各种自然语言花样表达同一个答案：
+
+- “Answer: B”（最规整）
+- “所以选 F。最终答案：F。”（前面有冗余计算）
+- “Answer: A careful reading shows C.”（开头的 `A` 是冠词，不是选项）
+- “Answer: It isn't B, so D”（`B` 是被排除的干扰项，`D` 才是答案）
+- “Answer: m+n = 256+37 = 293”（要取等号右边，不是第一个数字）
+- “Answer: 082”（前导零要归一化成 `82`）
+
+抽取器必须高精度地处理这些情况，否则会把**答对的题误判成答错**（假阴性），污染回归信号。文件里有一整段注释（[ds4_eval.c:3481-3483](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3481-L3483)）专门标注这些是“答案抽取器假阴性的回归用例”。
+
+#### 4.2.2 核心流程
+
+抽取按题型三分，由总开关 `find_case_answer` 派发；评分也按题型三分，由 `answer_matches` 派发。两者的题型判定完全对称：
+
+```text
+find_case_answer(tc, generated, dst)        answer_matches(tc, got)
+        │                                            │
+        ├── 多选 → find_answer_letter                ├── 多选 → got[0] == answer[0]
+        ├── COMPSEC → find_compsec_answer            ├── COMPSEC → compsec_answer_matches(answer, got)
+        └── 整数 → find_integer_answer               └── 整数 → normalize(answer) == strcmp(got)
+```
+
+**三条抽取路径共享一个核心策略**：先跳过 `<think>` 段（只看 `</think>` 之后的可见文本），再找最后一个 `answer:` 标记，在标记所在行内按题型规则取值；找不到标记才回退到“松散”启发式（全文最后一个合法候选）。这优先“强标记”、兜底“松散”，是 [ds4_eval.c:2664-2666](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2664-L2666) 注释里点明的策略：
+
+> 「模型可能在被迫 `</think>` 后先写一段临时的 answer 文本、再写真正的最终行。严格的最终 `Answer:` 标记是最好的评分靶子；没有标记的输出才保留原始松散回退。」
+
+#### 4.2.3 源码精读
+
+**(a) 多选字母抽取 `find_answer_letter`**（[ds4_eval.c:2756-2800](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2756-L2800)）。流程：
+
+1. 跳到 `</think>` 之后；算出合法字母上界 `max_answer = 'A' + nchoices - 1`（4 选项时上界是 `D`，10 选项时是 `J`）。
+2. 找最后一个 `answer:` 标记（`find_last_answer_marker`），在标记后 96 字符内**正向**扫描第一个“合法的独立大写字母”。
+3. “合法”要过三关：字母边界（前后都不是字母，排除 `ABC` 这种连写）、不是散文词首（后跟小写字母说明是 “A careful” 里的冠词）、不是缩写（后跟 `'` 说明是 “I'll”）、不是被显式排除的干扰项（`mc_letter_is_negated`）。
+4. 标记内找不到，才**反向**扫描全文最后一个独立字母兜底。
+
+干扰项排除 `mc_letter_is_negated`（[ds4_eval.c:2709-2754](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2709-L2754)）是高精度设计：它只识别“同一答案行内、字母**之前**的明确否定词”——`not`、`except`、`eliminate`、`reject`、缩写 `n't`、双字 `rule out`，且绝不跨行回看。注释（[ds4_eval.c:2700-2708](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2700-L2708)）强调 cue 集故意保持小而精，不做通用的“选择 vs 排除”句法分析（issue #321）。
+
+**(b) 整数抽取 `find_integer_answer`**（[ds4_eval.c:2829-2867](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2829-L2867)）。关键巧思在 [ds4_eval.c:2839-2849](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2839-L2849)：
+
+```c
+/* Restrict to the final answer line: digits after it (continued
+ * reasoning, footnotes, years) must not override the answer. */
+const char *nl = memchr(answer, '\n', (size_t)(end - answer));
+if (nl) end = nl;
+/* When the line shows arithmetic ("m+n = 256+37 = 293") the stated
+ * result is the right-hand side of the LAST '='. */
+const char *eq = NULL;
+for (const char *r = answer; r < end; r++) if (*r == '=') eq = r;
+if (scan_first_integer(eq ? eq + 1 : answer, end, dst, dstlen)) return;
+```
+
+即：答案只取标记所在**那一行**（防后续年份 `2025` 等数字污染）；若行内有等号，取**最后一个等号右边**的整数（处理 `m+n = 256+37 = 293`）。`normalize_integer_answer`（[ds4_eval.c:2802-2812](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2802-L2812)）再去掉前导零，让 `082` 与 `82` 等价。
+
+**(c) COMPSEC 行号抽取与评分**。`find_compsec_answer`（[ds4_eval.c:2909-2925](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2909-L2925)）调 `normalize_compsec_line_spec`（[ds4_eval.c:2869-2907](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2869-L2907)）把 “line 9”、“9 and 15”、“9, 15”、“20-22” 统一归一化成紧凑行规格串（如 `9,15`、`20-22`）。评分 `compsec_answer_matches`（[ds4_eval.c:2957-2975](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2957-L2975)）把双方都解析成 `bool[256]` 的行集合，判定规则是：
+
+> 「模型给出的每个行号都必须落在**接受的集合**内（隐藏答案可能是一个审计过的小区间，因为相邻行可能是同一个 bug 的等价位置），且至少要命中一行。」
+
+**(d) 评分总开关 `answer_matches`**（[ds4_eval.c:2990-3000](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2990-L3000)）——三分支与抽取完全对称；整数分支在比较前对正确答案也做一次同样的前导零归一化，保证双向一致。
+
+#### 4.2.4 代码实践
+
+**实践目标**：不加载模型，直接验证抽取器对一组“刁钻”输入的行为。
+
+**操作步骤**：`ds4-eval` 提供了 `--self-test-extractors`（[ds4_eval.c:1642-1643](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L1642-L1643)），它不打开模型、只跑抽取器回归用例，是 `make test` 的第一步（[README.md:1234](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L1234)）。
+
+```sh
+# 1. 先编译一个 CPU 版（无需 GPU），见 u1-l4
+make cpu
+
+# 2. 只跑抽取器自测（不加载模型，秒级完成）
+./ds4-eval --self-test-extractors
+```
+
+**需要观察的现象**：程序打印 `ds4-eval: answer extractor self-tests passed` 并以退出码 0 返回。若有任何用例失败，会打印 `ds4-eval: extractor self-test failed: <用例名> (got X, expected Y, key Z)` 并退出码 1。
+
+**预期结果**：全部通过。这些用例（定义在 `run_extractor_self_tests`，[ds4_eval.c:3416-3571](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3416-L3571)）正是 4.2.1 列举的那些刁钻输入，每条都断言“抽出的答案 == 期望 且 `answer_matches` 为真”。**若无法本地编译/运行，明确写「待本地验证」**，但你仍然可以静态阅读 [ds4_eval.c:3436-3566](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3436-L3566) 里每个 `extractor_self_test_case(...)` 的输入字符串，逐条推演 `find_case_answer` 会返回什么。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：对于输入 `"Answer: m+n = 256+37 = 293"`，朴素“取第一个数字”会得 `256`。`find_integer_answer` 实际返回什么、靠哪几行代码？
+
+**参考答案**：返回 `293`。靠 [ds4_eval.c:2846-2848](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2846-L2848)：先在答案行内正向扫描所有 `=` 记下最后一个的位置 `eq`，再从 `eq+1` 起调 `scan_first_integer` 取第一个整数。这保证取到“算式陈述的结果”而非第一个被加数。self-test 用例 `int_293`（[ds4_eval.c:3551-3554](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3551-L3554)）守护这条行为。
+
+**练习 2**：`compsec_answer_matches` 为什么要求“模型给出的每一行都必须落在接受集合内、且至少命中一行”，而不是简单的“集合相等”？
+
+**参考答案**：题目要求模型给“最佳单行”，或仅在无法定位到单行时给最小精确行集；隐藏正确答案可能是一个审计过的小区间（相邻行是同一 bug 的等价位置）。因此判分是**子集 + 非空命中**：模型给的行不能越界（落在 bug 之外算错），但在等价区间内少给几行仍算对；而“集合相等”会因模型少报一个等价行而误判失败（假阴性）。
+
+---
+
+### 4.3 TUI 与 regrade
+
+#### 4.3.1 概念说明
+
+本模块讲两件事：跑题时人看到的**界面**，以及跑完题后不重新加载模型的**离线重判**。
+
+**TUI（终端界面）**：`ds4-eval` 跑题时默认开一个双栏分屏——左栏是题目列表与每题状态（PENDING/PREFILL/THINKING/PASSED/FAILED…），右栏实时流式显示当前题的模型输出（thinking 段会暗色显示）。它故意**不依赖 ncurses**，只用 ANSI 光标移动与颜色（文件头注释 [ds4_eval.c:11-13](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L11-L13)），保持零外部依赖。
+
+**regrade（重判）**：你第一次跑题时用 `--trace /tmp/ds4-eval.txt` 把每题的模型逐字输出写进 trace 文件。事后如果你**改动了抽取器或评分器**（比如修了一个假阴性 bug），你不必重新跑一遍模型（很贵），只需 `--regrade-trace /tmp/ds4-eval.txt`，程序会读旧 trace、用**新的**抽取/评分逻辑重新判每题，并告诉你哪些题的判决**变了**（旧的 picked → 新的 picked）。这把“跑题”与“判题”解耦。
+
+#### 4.3.2 核心流程
+
+**单题驱动 `run_one_case`** 是 TUI 与推理的交汇点，它的骨架是经典的“prefill → 采样循环 → 抽取评分”三段式（[ds4_eval.c:3621-3949](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3621-L3949)）：
+
+```text
+run_one_case(engine, session, cfg, ui, trace, idx, rng)
+  1. build_question_prompt(tc)            构造题目提示
+  2. ds4_encode_chat_prompt(...)           渲染成 DeepSeek chat token 序列
+  3. 若 prompt 不进上下文 → 状态 SKIPPED，记 trace，返回
+  4. ds4_session_sync(session, &prompt)    prefill（沿用 u2-l3 的前缀复用）
+  5. 状态置 THINKING，进入 token 生成循环：
+       for i in 0..generation_limit:
+         - (TUI) 消费键盘输入：p 暂停 / q 退出 / ↑↓ 选择 / Enter 切题
+         - think-close 控制器：预算将尽时强制/软性闭合 </think>
+         - token = ds4_session_sample(...)         采样（u4-l3）
+         - ds4_session_eval(session, token)        前进一格（u4-l3）
+         - 流式追加到 ui->stream，刷新 TUI
+         - 命中 EOS 则 break
+  6. find_case_answer(tc, raw, got)        抽取答案
+  7. pass = answer_matches(tc, got)        评分
+  8. trace_write_case(...)                 写 trace（含 status / picked / MODEL_OUTPUT）
+  9. 状态置 PASSED/FAILED
+```
+
+其中第 5 步的 **think-close 控制器**值得单独点出（[ds4_eval.c:3833-3857](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3833-L3857)）：DeepSeek 在 thinking 模式下可能把整个 token 预算都耗在 `<think>` 里、来不及写可见答案。控制器在“仍处于 thinking 且预算将尽”时介入——**硬限制**（`hard_limit_reply_budget`，默认 512）是统一基准：留一个固定答案储备，避免因 token 全花在思考里而失败；**软限制**（`soft_limit_reply_budget`，默认 1024）更保守：仅当 `</think>` 已在分布顶部附近时才顺水推舟地提前闭合。这保证了模型有空间写出可见答案，同时尽量不扭曲其自然行为。
+
+**regrade 流程** `regrade_trace_file`（[ds4_eval.c:3242-3325](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3242-L3325)）：
+
+```text
+读整个 trace 文件进内存
+循环对每个 "===== CASE n/total source/id =====" 块：
+  1. 解析 source / id / status / picked 四个字段
+  2. find_eval_case_by_source_id(source, id) 在内嵌题库定位题目
+  3. trace_copy_model_output(...) 字节级精确复制 MODEL_OUTPUT 块
+  4. regrade_case_outcome(tc, status, output, got):
+       - 仅 PASSED/FAILED/(空) 才可判；STOPPED/SKIPPED/SWITCHED/ERROR → NOT_GRADED
+       - find_case_answer + answer_matches → PASSED/FAILED
+  5. 若新判决与 trace 旧判决不一致，或 picked 变了 → 打印 changed 行
+汇总打印 passed/failed/changed/not_graded/unknown/parse_errors
+```
+
+关键细节：**只有 `PASSED`/`FAILED`/空状态的 trace 才会被重判**（[ds4_eval.c:3231-3237](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3231-L3237)）。因为 `STOPPED`/`SKIPPED` 等状态的模型输出是不完整的，判它们会虚增总数并制造虚假的“变化”漂移。空状态是为了兼容“写在加 status 行之前”的旧 trace。
+
+#### 4.3.3 源码精读
+
+**状态枚举**（[ds4_eval.c:61-69](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L61-L69)）——`eval_status` 有 7 个值：`PENDING`（未跑）、`PREFILL`（正在填 KV）、`THINKING`（正在生成）、`SKIPPED`（题进不了上下文）、`STOPPED`（用户 q 中断）、`PASSED`、`FAILED`。TUI 左栏每一行就是这 7 种状态之一（报告里映射成可读名，见 [ds4_eval.c:4062-4073](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L4062-L4073)）。
+
+**TUI 状态结构体 `eval_ui`**（[ds4_eval.c:1235-1272](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L1235-L1272)）——承载所有逐题结果：`status[]`、`guess[][EVAL_ANSWER_MAX]`（每题抽出的答案）、`prompt_tokens[]`、`generated_tokens[]`、以及当前流的 `stream`/`styles` 缓冲。报告 `print_eval_report`（[ds4_eval.c:4075-4100](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L4075-L4100)）就是把这些数组打成一张表：`# state prompt gen total given correct test`。
+
+**trace 每题记录 `trace_write_case`**（[ds4_eval.c:2583-2662](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2583-L2662)）——写出 `source`/`id`/`status`/`picked`/`expected`/`prompt_tokens`/`generated_tokens`/`elapsed_sec`/采样参数/`think_close` 信息，以及三个带字节计数的块：`SYSTEM_PROMPT`、`QUESTION_PROMPT`、`MODEL_OUTPUT`。其中 **MODEL_OUTPUT 块的字节计数**（`MODEL_OUTPUT_BEGIN bytes=N`）是 regrade 能精确还原模型输出的关键——`trace_copy_model_output`（[ds4_eval.c:3179-3214](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3179-L3214)）优先用这个计数做字节级精确复制，避免模型输出里恰好包含 `MODEL_OUTPUT_END` 字样时被提前截断（`trace_copy_self_test_case`，[ds4_eval.c:3340-3388](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3340-L3388) 正是测这个边界）。
+
+**main 的短路分支**（[ds4_eval.c:4102-4105](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L4102-L4105)）——两条离线路径在加载模型**之前**就返回：
+
+```c
+eval_config cfg = parse_options(argc, argv);
+if (cfg.self_test_extractors) return run_extractor_self_tests();
+if (cfg.regrade_trace_path) return regrade_trace_file(cfg.regrade_trace_path);
+```
+
+退出码语义（[ds4_eval.c:4288](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L4288)）：`rc || failed ? 1 : 0`——只要有一题 FAILED 就退出 1。这让它能直接接进 CI（但 README 反复提醒：因为模型会自然答错难题，**不要**把完整 92 题跑成 CI 的硬性通过门；要用下面 4.3.4 的 q1..q4 确定性闸门）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用 README 给出的 **q1..q4 确定性闸门**做一次“能进 CI”的回归检查，并理解为什么是 4 题而非 92 题。
+
+**操作步骤**：这条命令是 README 明确给出的、用于检测“可能影响生成漂移的推理改动”的确定性闸门（[README.md:610-618](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L610-L618)）：
+
+```sh
+./ds4-eval \
+  -m ds4flash.gguf \
+  --plain \
+  --questions 4 \
+  --tokens 2048 \
+  --temp 0 \
+  --seed 1
+```
+
+关键参数：`--temp 0` 关掉采样随机性（走 argmax，见 u4-l3）、`--seed 1` 固定 RNG、`--questions 4` 只跑前 4 题、`--tokens 2048` 固定预算、`--plain` 关 TUI（适合 CI）。
+
+**需要观察的现象**：程序末尾打出报告表，对照 README 的期望基线（[README.md:622-627](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L622-L627)）：
+
+| 题 | 期望状态 | 期望生成 token | 期望 given/correct |
+|---:|---|---:|---|
+| 1 | `PASSED` | 2048 | `B` / `B` |
+| 2 | `PASSED` | 438 | `C` / `C` |
+| 3 | `PASSED` | 666 | `70` / `70` |
+| 4 | `FAILED` | 2048 | `A` / `C` |
+
+注意第 4 题**预期就是 FAILED**（且生成满 2048 token）——这正演示了“不能把单题当单测”的哲学：即使基线本身也包含一道预期失败的难题。
+
+**预期结果**：4 题的 generated-token 数与 given/correct 与上表逐行对齐。**只要任何一题的 token 数漂移了**（哪怕最终仍 PASSED），就说明你的改动引起了生成漂移，应当停下来排查。**若本地无 GPU/模型，明确写「待本地验证」**；你仍可静态阅读报告格式 [ds4_eval.c:4082-4098](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L4082-L4098) 来理解每列含义。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：你修了一个抽取器的假阴性 bug。重新跑 92 题要几十分钟且要 GPU；如何最快验证“哪些题的判决因这次修改而变了”？
+
+**参考答案**：如果你之前那次跑测用了 `--trace /tmp/old.txt`，现在直接 `./ds4-eval --regrade-trace /tmp/old.txt`。它不加载模型、用新抽取/评分逻辑重判旧 trace，只打印 `changed` 的题（旧 picked → 新 picked），秒级完成（见 `regrade_trace_file`，[ds4_eval.c:3242-3325](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3242-L3245)）。这正是 trace 把“跑题”与“判题”解耦的价值。
+
+**练习 2**：为什么 `regrade_case_outcome` 要把 `STOPPED` 状态的 trace 判为 `NOT_GRADED` 而不是照常判分？
+
+**参考答案**：`STOPPED` 表示该题在生成途中被用户 `q` 中断，MODEL_OUTPUT 是不完整的。如果照常抽取评分，一段恰好看起来正确的**部分输出**会被判成 PASSED，既虚增了 passed 总数，又会在“新判 vs 旧判”对比里制造虚假的 changed 漂移（旧 trace 记的是 STOPPED，新判成了 PASSED）。注释（[ds4_eval.c:3222-3226](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3222-L3226)）明确说“给它们判分会虚增总数并引发虚假漂移”。
+
+---
+
+## 5. 综合实践
+
+**综合任务**：完整走一遍“跑题 → 重判”闭环，亲手制造一次 regrade 的 `changed` 事件，从而把本讲三个模块串起来。
+
+**背景设定**：假设你想验证“前导零归一化”是否真的影响判分。你怀疑某道 AIME 题模型答了 `082` 而正确答案是 `82`。
+
+**步骤**：
+
+1. **造一份最小 trace**。不必真跑模型——`--self-test-extractors` 已经覆盖了 `082`→`82`（用例 [ds4_eval.c:3458-3462](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3458-L3462)）。先跑 `./ds4-eval --self-test-extractors` 确认绿。
+2. **读懂 trace 格式**。阅读 `trace_write_case`（[ds4_eval.c:2583-2662](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L2583-L2662)），手工写出（或从一次真实 `--trace` 跑测里截取）一个最小 CASE 块：`source: AIME2025`、一个真实 `id`、`status: PASSED`、`picked: 082`、以及一个 `MODEL_OUTPUT` 块内含 `Answer: 082`。注意 `MODEL_OUTPUT_BEGIN bytes=N` 的 N 必须等于内容字节数（这是 `trace_copy_model_output` 字节级复制的依据，[ds4_eval.c:3187-3199](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3187-L3199)）。
+3. **跑 regrade**：`./ds4-eval --regrade-trace 你的trace.txt`。
+4. **观察**：因为当前抽取器会把 `082` 归一化成 `82`、评分时正确答案 `82` 也归一化成 `82`、二者相等，所以重判应为 `PASSED`、`picked` 从 trace 里的 `082` 变成 regrade 输出的 `82`——这是一次合法的 `changed`（picked 字符串变了，但 PASSED 状态没变）。
+
+**这个任务把三件事串起来**：(1) 题集结构（AIME 整数题，模块 4.1）；(2) 抽取归一化（`normalize_integer_answer`，模块 4.2）；(3) trace 字节级复制与 regrade 判决对比（模块 4.3）。若某一步本地无法运行，**标注「待本地验证」**并写明你预期的输出。
+
+## 6. 本讲小结
+
+- `ds4-eval` **不是 leaderboard 跑分器**，而是一套**能力回归套件**：它回答的是“改了内核/量化/提示/KV/工具流之后，模型还能不能解一组有代表性的硬题”，而非“得几分”。README 明确禁止把它当官方 GPQA/SuperGPQA/AIME/安全分上报。
+- 92 道题**硬编码**进二进制：25 GPQA Diamond + 25 SuperGPQA + 25 AIME 2025 + 17 COMPSEC，前 75 题三类交替、渐进式排列（前易后难），题型完全由 `source`/`choice` 字段派生，无显式 type。
+- **抽取与评分三分**：多选字母（`find_answer_letter`，处理冠词/缩写/否定干扰项）、整数（`find_integer_answer`，取答案行最后一个等号右边、去前导零）、COMPSEC 行号（`compsec_answer_matches`，子集 + 非空命中）。三者都遵循“先跳 `<think>`、优先强 `answer:` 标记、兜底松散回退”。
+- **TUI 不依赖 ncurses**，纯 ANSI 双栏分屏；`run_one_case` 是 prefill → 采样循环（含 think-close 预算控制器）→ 抽取评分的经典三段式，复用的是与 `ds4`/`ds4-server` 完全相同的推理路径。
+- **两条离线审计路径**在加载模型前就返回：`--self-test-extractors`（守护抽取器，是 `make test` 第一步）与 `--regrade-trace`（用新逻辑重判旧 trace，只报 `changed`，只判 PASSED/FAILED/空状态）。
+- 进 CI 用 **q1..q4 确定性闸门**（`--temp 0 --seed 1 --questions 4 --tokens 2048`），比对 generated-token 数基线；不要把完整 92 题当硬性通过门（连基线都含一道预期 FAILED 的难题）。
+
+## 7. 下一步学习建议
+
+- **速度基准 ds4-bench**（[u10-l5 速度基准](u10-l5-speed-benchmark.md)）：`ds4-eval` 关心“答得对不对”，`ds4-bench` 关心“跑得快不快”。两者互补，构成 ds4 的两条质量底线（正确性 + 速度）。建议接着学 ds4-bench 的前沿步进与 KV 快照探针。
+- **测试向量与回归**（[u11-l3 测试向量与回归](u11-l3-test-vectors.md)）：本讲的 q1..q4 闸门是“生成端”漂移检测；u11-l3 的 `ds4_test --logprob-vectors` 是更底层的“logits 端”漂移检测（用 `--dump-logprobs` 逐 token 比对，`DS4_METAL_PREFILL_CHUNK=2048` 钉死）。两者一宏观一微观，建议对照阅读。
+- **贡献与 QA 工作流**（[u11-l4 贡献与 QA 工作流](u11-l4-contributing-and-qa.md)）：本讲的 `make test`（先 `--self-test-extractors` 再 `ds4_test --all`）只是发布检查清单的一环；u11-l4 会把它放进完整的“正确性/速度回归 + 四大推理路径保护”框架里。
+- **继续阅读源码**：想加深对采样与 thinking 模式的理解，可重读 [ds4_eval.c:3833-3860](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_eval.c#L3833-L3860) 里 think-close 控制器与 `ds4_session_sample` 的衔接，对照 u4-l3 的采样过滤器。

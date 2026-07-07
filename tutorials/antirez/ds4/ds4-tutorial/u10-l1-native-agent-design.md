@@ -2,50 +2,44 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应当能够：
+学完本讲后，你应该能够：
 
-- 说清 `ds4-agent` 与「LLM + 外部客户端通过 HTTP API 调用」这类常见 agent 架构的本质区别。
-- 解释什么是「进程内推理（in-process inference）」和「KV 即会话（KV-as-session）」，以及它们为什么带来低延迟。
-- 理解为什么在这种架构下 **KV mismatch 按构造不可能发生**——这正是本讲的核心论点。
-- 看懂 `ds4-agent` 如何把系统提示与 DSML 工具「垂直化（vertically）」地为 DeepSeek V4 Flash/PRO 量身设计。
-- 掌握会话持久化命令 `/save`、`/list`、`/switch`、`/strip`、`/del` 背后的磁盘 KV 缓存机制。
-
-本讲属于 **advanced** 层，是「原生 Agent、评测与基准」单元（u10）的第一篇。它承接 u2-l3（Session 同步与前缀复用）与 u3-l3（分词器与聊天模板渲染），并作为 u10-l2（Agent 工具系统）与 u10-l3（Agent web 搜索）的基础。
+- 说清 `ds4-agent` 与 `ds4-server`（u7）在架构上的根本区别：**推理就在 agent 进程内，会话就是磁盘 KV 缓存本身**。
+- 解释为什么在这种「KV-as-session」架构下，**KV mismatch 按构造不可能发生**——并能在源码里指出保证这一点的具体代码。
+- 理解「垂直设计」的三个含义：系统提示与工具专为 DeepSeek V4 调、工具调用原生走 DSML 无 JSON 转换、低延迟体验主要受 prefill 速度约束。
+- 掌握会话持久化命令族 `/save` `/list` `/switch` `/del` `/strip` `/new` 背后的机制：会话身份（SHA）如何生成、磁盘 `.kv` 文件如何写、加载时如何免 prefill 直接恢复、`/strip` 后如何用渲染文本重建。
 
 ## 2. 前置知识
 
-在进入本讲前，请确保你理解以下几个概念（都在前置讲义中讲过）：
+本讲是 advanced 层，依赖你已经建立的两条认知（否则请先读对应讲义）：
 
-- **prefill 与 decode**：一次性把提示填进 KV 缓存叫 prefill，决定首 token 延迟；之后自回归逐 token 生成叫 decode，决定生成速度（见 u1-l5）。
-- **`ds4_session` 与前缀复用**：session 是一条可变推理时间线，持有 KV 缓存；`ds4_session_sync` 会用 token 前缀匹配，只对新增后缀做增量 prefill（见 u2-l3）。
-- **token 序列**：模型真正消费的单位是 token id 序列，不是文本。文本要经过分词器（BPE）变成 token（见 u3-l3）。
-- **聊天模板渲染**：`ds4_chat_append_message`、`ds4_tokenize_rendered_chat` 等函数把系统/用户/助手段落按 DeepSeek 聊天格式拼成 token 序列（见 u3-l3）。
-- **DSML**：DeepSeek 的工具调用文本格式，用全角竖线标记 `<｜DSML｜tool_calls>`，模型以 token 流直接生成（见 u7-l4）。
+- **u2-l3 Session 同步与前缀复用**：`ds4_session` 用 `checkpoint`（KV 当前对应的 token 序列）刻画状态；`ds4_session_common_prefix` 测量前缀长度；`ds4_session_sync` 在 checkpoint 是 prompt 的前缀时只增量评估后缀，否则整段重建。本讲会反复用到这两个原语。
+- **u3-l3 分词器与聊天模板渲染**：文本→token 靠字节级 BPE 与聊天模板；DSML 是 DeepSeek V4 的工具调用文本格式，以全角竖线包裹的 `｜DSML｜` 标记表达，模型直接以 token 流生成。
 
-一个关键对比心智模型：在 **`ds4-server`**（见 u7 单元）里，客户端通过无状态 HTTP API 重发整段对话文本，服务器要把文本重新分词，再与前缀复用 KV。这个「重新分词」步骤可能和模型当初采样的字节对不上，于是出现了 u7-l4 / u7-l5 讲的那一整套「精确回放 + 规范化 + 字节比对」机制。
+另外有两点背景对照，理解了会事半功倍：
 
-本讲要回答的核心问题是：**如果 agent 把推理引擎直接嵌在自己进程里，根本不经过文本往返，上面这套复杂的修补机制还需要吗？**
+1. **对照 u7（HTTP 服务器）**。服务器是「无状态 API」：客户端每次把整段对话以 JSON 重发，服务器要重新渲染成 token、再用多级回退链（活 token 前缀 → 渲染字节比对 → 磁盘快照 → 冷 prefill）去复用 KV。这条链之所以复杂，正是因为「重渲染的字节」很难和「模型当初采样的字节」逐字节相等，于是在工具调用处会 KV 前缀失配，需要「精确 DSML 回放」「规范化」等大量机制（见 u7-l4、u7-l5）。
+2. **`ds4-agent` 走了相反的路**。它干脆不做无状态 API：会话状态常驻进程，token 序列只追加、不重渲染，于是上面那套复杂机制统统不需要。本讲的核心就是论证这一句。
 
-答案是：**完全不需要。这就是 `ds4-agent` 的全部设计起点。**
+几个术语先约定：
+
+| 术语 | 含义 |
+|---|---|
+| transcript | 会话的 token 序列（`ds4_tokens`），整个对话的唯一真相（single source of truth） |
+| live session / 活会话 | 进程内的 `ds4_session`，持有 KV 缓存与当前 logits |
+| KV-as-session | 「会话 = 磁盘 KV 缓存文件」的设计哲学 |
+| sysprompt.kv | 系统提示的固定 KV 检查点，避免反复为系统提示付 prefill 代价 |
+| stripped 会话 | 只保留渲染文本与标题、删掉重 KV payload 的 `.kv` 文件 |
 
 ## 3. 本讲源码地图
 
-本讲主要涉及两个文件：
-
 | 文件 | 作用 |
-|------|------|
-| `ds4_agent.c` | agent 的全部实现，约 1 万行。包含配置解析、双线程模型、生成循环、DSML 流式解析、工具执行、会话持久化、TUI 渲染等 |
-| `README.md` | `Native agent` 一节给出了 agent 的设计动机与命令说明，是理解意图的最佳入口 |
+|---|---|
+| `ds4_agent.c` | agent 的全部实现：CLI 解析、UI 线程、worker 线程、会话保存/加载/切换/剥离、DSML 工具流式渲染、内建工具。约 1 万行，本讲只看其中「设计与生命周期」部分 |
+| `ds4.h` | 引擎公共边界。本讲用到 `ds4_session_sync` / `ds4_session_common_prefix` / `ds4_session_tokens` / `ds4_session_eval` / `ds4_session_load_payload` 等签名 |
+| `README.md` | `Native agent` 一节给出官方对「KV mismatch impossible by construction」「session 即磁盘 KV」等设计取舍的说明 |
 
-`ds4_agent.c` 是一个自包含前端二进制：它链接引擎核心（`ds4.o` 等 CORE_OBJS）和辅助 `.o`（见 u1-l4），自己拥有 `main`，进程内持有一个 `ds4_engine`（已加载模型）和一个 `ds4_session`（活 KV 时间线）。
-
-本讲会重点精读以下函数（行号均为当前 HEAD）：
-
-- `main`、`run_agent`、`worker_main`、`worker_submit`：进程结构与双线程。
-- `worker_run_turn`（生成循环）、`agent_worker_sync_tokens`：进程内推理与前缀复用。
-- `agent_kv_save_path`：**KV mismatch 不可能** 的关键断言所在。
-- `agent_append_system_prompt`、`agent_build_tools_prompt`：垂直化系统提示。
-- `agent_worker_save_session_now`、`agent_session_identity_sha`、`agent_worker_reset_to_sysprompt`、`agent_worker_strip_session`：会话持久化。
+> 本讲**不**展开内建工具（read/write/edit/bash/search 等）的参数与执行——那是 u10-l2 的主题；也不展开 web 搜索——那是 u10-l3。
 
 ## 4. 核心概念与源码讲解
 
@@ -53,590 +47,301 @@
 
 #### 4.1.1 概念说明
 
-大多数 agent 系统（如基于 OpenAI API 的编码助手）是「客户端—服务端」结构：
-
-```
-┌──────────────┐   HTTP/JSON    ┌──────────────┐
-│  agent client │ ────────────▶ │  LLM 服务端  │
-│ （你的终端）  │ ◀──────────── │ （推理引擎）  │
-└──────────────┘   文本流式回   └──────────────┘
-```
-
-客户端每次发请求时，要把**整段对话历史**重新发成文本；服务端是无状态的，靠它自己想办法复用 KV 缓存。问题就出在「文本往返」上：文本 → token 的分词过程，可能与上次推理时的 token 序列不一致，导致 KV 缓存前缀对不上（这就是 u7-l5 讲的 KV mismatch）。
-
-`ds4-agent` 反其道而行，README 一句话点明设计：
+大多数 LLM agent 系统是「客户端 + 服务端」两层：一个 agent 编排进程通过 HTTP/WebSocket socket 调一个推理服务。`ds4-agent` 的 README 一开头就点明它不是这样：
 
 > the inference is controlled from within the agent itself, without socket/API boundaries, so the session is represented by the on-disk KV cache itself.
 
-参考 [README.md:509-516](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L509-L516)。
+这句话拆成两个断言：
 
-这就是两个核心概念：
+1. **进程内推理**：推理（prefill、decode、采样）就在 agent 进程里直接发生，没有 socket、没有 HTTP、没有 JSON 序列化边界。
+2. **会话即磁盘 KV**：一条「会话」在物理上就是一个 `.kv` 文件（即 u8-l1 讲过的 KVC 文件格式）。会话的权威状态不是某个数据库里的消息表，而是这个 KV 检查点本身。
 
-- **进程内推理（in-process inference）**：推理引擎（`ds4_engine` + `ds4_session`）和 agent 的用户界面跑在**同一个进程**里，中间没有 socket、没有 JSON、没有文本序列化。agent 把用户输入分词成 token 后，**直接**喂给 session，模型吐出的 token 也**直接**追加到 session 与 transcript（会话文本/词表记录）。
-- **KV 即会话（KV-as-session）**：会话状态不是某个外部数据库里存的「消息列表」，而是 **活 KV 缓存本身**。KV 缓存记录了到当前为止所有 token 的注意力状态，它就是会话进度的唯一真相（single source of truth）。持久化时，把 KV 缓存连同 token 序列一起写盘（见 4.3）。
-
-这套设计带来的直接红利（README 原文）：
-
-- **低延迟**：显示文本、工具调用、开新会话几乎瞬时，瓶颈只在 prefill 速度。
-- **prefill 实时进度条**：因为推理就在本进程，UI 线程能边算边显示进度。
-- **无 DSML 转换**：工具调用直接用模型原生的 DSML token 流处理（见 4.2）。
-- **KV mismatch 按构造不可能**：当前活状态永远是真相。
-- **`/switch` 恢复完整 KV 会话不需要重新 prefill**。
-
-参考 [README.md:518-523](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L518-L523)。
+这两个断言合起来就是 **KV-as-session**：你保存会话 = 把活 KV 缓存序列化落盘；恢复会话 = 把 KV 缓存反序列化回内存，**跳过 prefill**。
 
 #### 4.1.2 核心流程
 
-`ds4-agent` 进程内有**两个线程**，这是理解一切行为的关键：
+`ds4-agent` 是一个**单进程、双线程**的程序：
 
-```
-┌─────────────────── agent 进程 ──────────────────────┐
-│                                                      │
-│   UI 线程（主线程）            worker 线程（后台）    │
-│   ───────────────────         ────────────────────   │
-│   linenoise 行编辑              拥有 session（活 KV）│
-│   读用户输入                    拥有 transcript       │
-│   渲染流式输出                  跑 prefill/decode    │
-│   处理 /slash 命令              执行工具             │
-│         │                            ▲               │
-│         │ worker_submit(cmd)         │               │
-│         └────── cmd_text ────────────┘               │
-│                  （互斥锁+条件变量唤醒）             │
-│         ◀────── out / status ────────                │
-│           （worker 把生成字节写进缓冲）              │
-└──────────────────────────────────────────────────────┘
-```
+- **UI 线程**（main 所在线程）：拥有终端输入输出、跑 linenoise 行编辑器、解析斜杠命令。
+- **worker 线程**：独占活 `ds4_session` 与 KV 状态，串行执行所有推理（prefill + decode + 采样）。
 
-1. **UI 线程**用 linenoise 读用户输入；普通文本被 `worker_submit` 交到 worker；斜杠命令（`/save` 等）则 UI 线程自己处理（必要时也委托 worker）。
-2. **worker 线程**拿到 `cmd_text` 后进入一轮生成（`worker_run_turn`）：
-   - 把用户文本用 `ds4_chat_append_message` 分词并追加到 `transcript`；
-   - 调 `ds4_session_sync`，它内部用 `ds4_session_common_prefix` 找出 transcript 与活 KV 已对齐的前缀，**只对新增后缀增量 prefill**；
-   - 进入 `while` 循环：采样一个 token → `ds4_session_eval` 吃进 → 渲染到屏幕 → 若遇到 DSML 工具调用则就地解析执行，把工具结果作为 `tool` 消息追加进 transcript，继续生成。
-3. 生成出的 token 字节由 worker 写入 `w->out` 缓冲，UI 线程取出渲染到终端（带语法高亮、进度条）。
+为什么把推理单独放到 worker 线程？因为 UI 必须在模型生成长文本时仍然能响应按键（中断、排队输入），而推理又是重活——用独立线程把两者解耦。文件头注释把这条设计写得很清楚：
 
-关键点：**transcript（token 序列）和活 KV 是同一个进程里、同一个线程里同步维护的两份状态**。每追加一个 token，两者同时前进，永远对齐——这就是「mismatch 按构造不可能」的根。
+[ds4_agent.c:40-48](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L40-L48) —— 注释说明 agent 故意是单进程：UI 线程拥有终端，worker 线程拥有活 DS4 session 与 KV 状态。
 
-#### 4.1.3 源码精读
+这两个线程通过一个共享结构 `agent_worker` 衔接，它把「进程内推理」所需的全部状态收拢在一起：
 
-**(1) `agent_worker` 结构体：进程内的全部共享状态**
+[ds4_agent.c:98-149](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L98-L149) —— `agent_worker` 结构体：持有 `engine`、`session`、`transcript`、`cache_dir`、`session_sha`、互斥锁/条件变量 `mu`/`cond`、唤醒管道 `wake_fd` 等。
 
-[ds4_agent.c:98-149](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L98-L149) 定义了 worker 的核心字段（节选关键部分）：
+注意其中三个关键字段的耦合关系：
 
-```c
-typedef struct {
-    ds4_engine *engine;          // 已加载模型，进程级、只读
-    agent_config *cfg;
-    ds4_session *session;        // 活 KV 时间线 —— 会话状态的真相
-    ds4_tokens transcript;       // 当前 token 序列（与活 KV 对齐）
-    char *cache_dir;             // ~/.ds4/kvcache，持久化目录
-    char session_sha[41];        // 当前会话的稳定身份
-    char *session_title;         // 首条用户提示派生的标题
-    ...
-    pthread_t thread;            // worker 线程
-    pthread_mutex_t mu;
-    pthread_cond_t cond;
-    char *cmd_text;              // UI 线程→worker 的输入交接点
-    char *out; size_t out_len;   // worker→UI 线程的输出缓冲
-    agent_status status;
-    ...
-} agent_worker;
-```
+- `ds4_session *session` —— 活会话（KV 缓存 + logits）。
+- `ds4_tokens transcript` —— 会话的 token 序列（唯一真相）。
+- `char session_sha[41]` —— 当前会话的身份（文件名）。
 
-注意 `session` 与 `transcript` 并列存在：`session` 是图计算状态（KV 张量），`transcript` 是 token id 数组。两者由 worker 线程独占修改。
+整个生命周期由 `main` 串起：
 
-**(2) 双线程模型：UI 线程负责 IO，worker 线程独占推理**
+[ds4_agent.c:10215-10243](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10215-L10243) —— `main`：解析选项 → `ds4_engine_open`（u2-l1）打开引擎 → 安装 SIGINT 处理 → 进入 `run_agent`（交互）或 `run_agent_non_interactive`（一次性）→ 关闭引擎。
 
-文件顶部注释明确写出设计意图：
+打开引擎之后，`run_agent` 会调用 `agent_worker_init`，它创建活会话、建缓存目录、起 worker 线程：
 
-> The agent is intentionally a single process: the UI thread owns terminal input/output, while the worker thread owns the live DS4 session and KV state.
+[ds4_agent.c:9421-9466](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L9421-L9466) —— `agent_worker_init`：`ds4_session_create` 建活会话、`agent_default_cache_dir` 建 `~/.ds4/kvcache`、`pthread_create(&w->thread, NULL, worker_main, w)` 起 worker 线程。
 
-参考 [ds4_agent.c:44-47](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L44-L47)。
+worker 线程的主循环是一个「等条件变量 → 取命令 → 跑一轮」的循环：
 
-worker 线程的主循环 [ds4_agent.c:8068-8119](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L8068-L8119)：它在条件变量上睡眠，等 UI 线程通过 `worker_submit` 投递 `cmd_text`，醒来后调用 `worker_run_turn(w, cmd)` 跑一整轮生成：
+[ds4_agent.c:8068-8123](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L8068-L8123) —— `worker_main`：启动时先建系统提示（`agent_worker_reset_to_sysprompt`），然后循环等待 `cmd_text`/`save_requested`/`compact_requested`/`power_requested`，有用户文本就 `worker_run_turn`。
 
-```c
-while (true) {
-    pthread_mutex_lock(&w->mu);
-    while (!w->stop && !w->cmd_text && !w->save_requested &&
-           !w->compact_requested && !w->power_requested)
-        pthread_cond_wait(&w->cond, &w->mu);     // 等待被唤醒
-    ...
-    char *cmd = w->cmd_text;
-    w->cmd_text = NULL;
-    pthread_mutex_unlock(&w->mu);
-    worker_run_turn(w, cmd);                      // 一轮推理 + 工具循环
-    ...
-}
-```
+UI 线程要发起一轮对话时，调用 `worker_submit` 把文本塞进 `w->cmd_text` 并唤醒 worker：
 
-UI 线程投递输入的入口 `worker_submit` [ds4_agent.c:8163-8184](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L8163-L8184)：它在锁内把文本存进 `cmd_text` 并 `pthread_cond_signal` 唤醒 worker。
+[ds4_agent.c:8163-8184](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L8163-L8184) —— `worker_submit`：仅当 worker 空闲时才接收文本，复制进 `cmd_text`，状态置 `AGENT_WORKER_PREFILL`，发条件变量信号。
 
-**(3) 一轮生成的核心：transcript 即真相，只增量 prefill 后缀**
+注意 `worker_submit` 是「忙时拒绝」的（`ok = ... w->status.state == AGENT_WORKER_IDLE ...`）：UI 不会把文本静默排队，而是让用户继续编辑，这样输入始终可改。这是「低延迟体验」的一个细节。
 
-`worker_run_turn` 内层循环的开头 [ds4_agent.c:7698-7729](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7698-L7729) 是「进程内推理 + 前缀复用」的精华：
+#### 4.1.3 源码精读：为什么 KV mismatch 按构造不可能
 
-```c
-const ds4_tokens *prompt_for_sync = &w->transcript;
-int old_pos = ds4_session_pos(w->session);
-int common = ds4_session_common_prefix(w->session, &w->transcript);
-int cached = common == old_pos && w->transcript.len >= old_pos ? common : 0;
-int suffix = prompt_for_sync->len - cached;
-...
-int sync_rc = ds4_session_sync(w->session, prompt_for_sync, err, sizeof(err));
-```
+这是本讲的核心论证。它由两段代码共同保证。
 
-这段逻辑直接复用了 u2-l3 讲的 session 同步原语：`common_prefix` 算出活 KV 已经覆盖到第几个 token，剩下的 `suffix` 才需要 prefill。因为 transcript 是 worker 自己一手维护的、与活 KV 严格对齐，所以这里 **`cached` 几乎总是等于上一轮的 `old_pos`，`suffix` 就是本轮新增的那一小段**——这就是低延迟的来源：用户发一句话，agent 只 prefill 这一句话的 token，而不是整段历史。
+**第一段：生成时双写。** 每采样出一个 token，worker 同时做两件事——把它喂进活会话（推进 KV），又把它追加进 transcript：
 
-随后是采样循环 [ds4_agent.c:7782-7789](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7782-L7789)（伪代码）：
+[ds4_agent.c:7530-7533](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7530-L7533) —— `worker_accept_generated_token` 的核心：先 `ds4_session_eval(w->session, token, ...)` 推进活会话 KV，紧接着 `ds4_tokens_push(&w->transcript, token)` 把**同一个 token id** 追加进 transcript。
 
-```c
-while (generated < max_tokens && !worker_should_interrupt(w)) {
-    int token = worker_sample_with_mode(w, cfg, greedy_sampling, &rng);
-    // 把 token 喂回 session，KV 前进一格
-    // 同时把 token 的文本写进 w->out 缓冲供 UI 渲染
-    // 若 token 流构成 DSML 工具调用，就地解析并执行
-}
-```
+关键是「同一个 token id」。token 是整数 id（来自词表），不是文本；这里不存在「先生成文本、再重新分词」的步骤，因此不可能出现「重渲染的字节和当初采样的字节不一致」。活会话的 KV 所对应的 token 序列，和 transcript 里的 token 序列，是被同一行代码同步写入的两份拷贝——它们必然逐 id 相等。
 
-注意「采样 → eval」都在 worker 线程内、对同一个 `session` 操作，token 一边被喂进 KV、一边被追加进 transcript，两者原子同步。
+**第二段：保存时断言。** 当把会话落盘时，保存函数会做一个防御性检查：活会话的 token 序列必须和待保存的 transcript 逐 id 相等，否则拒绝保存：
 
-**(4) KV mismatch 按构造不可能：保存时的断言**
+[ds4_agent.c:3880-3884](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3880-L3884) —— `agent_kv_save_path` 开头：`ds4_session_tokens(w->session)` 取活会话的 token 序列，与传入的 `tokens`（transcript）用 `agent_tokens_equal` 比较，不等则报 `"live KV state does not match session transcript"` 并返回失败。
 
-本讲的核心论点落在一个 `assert` 风格的检查上。`agent_kv_save_path`（把会话写盘）在写任何字节之前，先做这一步 [ds4_agent.c:3880-3884](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3880-L3884)：
-
-```c
-const ds4_tokens *live = ds4_session_tokens(w->session);
-if (!agent_tokens_equal(live, tokens)) {
-    snprintf(err, err_len, "live KV state does not match session transcript");
-    return false;
-}
-```
-
-这段代码读起来像一个普通的校验，但它表达的是整个架构的不变量（invariant）：
-
-- `live` 是**活 KV 当前对应的 token 序列**（直接从 session 里取，`ds4_session_tokens`）。
-- `tokens` 是 **transcript**（要保存的 token 序列）。
-- 在 agent 架构里，这两个东西**永远应当逐 token 相等**，因为它们由同一个 worker 线程、在每一步生成里同时推进。
-
-对比 `ds4-server`：服务端要面对「客户端用 JSON 文本重发历史」的场景，活 KV 的 token 序列与「重新分词得到的 token 序列」**天然可能不等**，所以才需要 u7-l5 那套逐级回退、字节比对、规范化改写。而 agent 因为没有文本往返这一步，`agent_tokens_equal` 这个检查**正常情况下恒为真**；它存在的意义不是「经常拦住错误」，而是**把架构不变量写成代码**——一旦它为假，意味着出了 bug（比如有人错误地改了 transcript），保存会立即失败而不是写出坏数据。这就是「按构造不可能（impossible by construction）」的精确含义：**架构本身保证它为真，代码用断言把这个保证钉死**。
-
-README 把这点凝练成一句 [README.md:521](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L521)：
+把两段串起来看：生成时双写保证了「活 KV token 序列 == transcript」，所以保存时的断言在正常路径上**永远成立**。这就是 README 说的：
 
 > KV cache mismatch are impossible by construction, the current state is always the truth.
 
-#### 4.1.4 代码实践
+[README.md:521](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L521) —— 官方对「KV mismatch 按构造不可能」的说明。
 
-**实践目标**：通过阅读 `main` → `run_agent` → `worker_main` → `worker_run_turn` 的调用链，亲眼确认「进程内推理」与「transcript/活 KV 同步前进」，并用自己的话解释为什么 KV mismatch 在此架构下不可能。
+**对照服务器（u7）的痛苦。** 在 u7-l4/u7-l5 里，服务器要面对的问题是：客户端用 JSON 重发整段历史，服务器重新渲染成 token，而重渲染出的 DSML 字节很难和模型当初采样的 DSML 逐字节相等，于是 `ds4_session_common_prefix` 在工具调用处断开、后缀要重 prefill。服务器为此发明了「精确 DSML 回放（rax 基数树）」「规范化改写 checkpoint」「语法 token 强制贪婪」等一大套机制。`ds4-agent` 因为是状态ful 进程内推理、只追加 token id、从不重渲染，**这整层复杂度都不存在**——这就是 KV-as-session 架构最大的工程红利。
 
-**操作步骤（源码阅读型实践）**：
+#### 4.1.4 前缀复用：状态ful 不代表每次都从头 prefill
 
-1. 打开 [ds4_agent.c:10215](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10215)（`main`）。注意它只做三件事：解析配置 → `ds4_engine_open` 打开模型 → 调 `run_agent`。确认**整个进程只持有一个 engine**，没有 socket、没有 HTTP。
-2. 跳到 [ds4_agent.c:9792](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L9792)（`run_agent`）。`agent_worker_init` 会启动 worker 线程；之后主线程进入 linenoise 输入循环。
-3. 找到用户输入分发的位置 [ds4_agent.c:10164](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10164)：普通文本走 `worker_submit(&worker, cmd)`，斜杠命令走各自的分支。
-4. 读 worker 主循环 [ds4_agent.c:8086-8119](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L8086-L8119)，确认它从 `cmd_text` 取出输入后调 `worker_run_turn`。
-5. 在 `worker_run_turn` 里定位前缀复用与采样循环 [ds4_agent.c:7698-7789](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7698-L7789)。
-6. 最后读保存断言 [ds4_agent.c:3880-3884](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3880-L3884)。
+即便会话常驻，agent 也复用 KV。多轮对话里，每追加一条用户消息或工具结果，transcript 变长，worker 调用 `ds4_session_common_prefix` 测量「活会话已覆盖到哪里」，再让 `ds4_session_sync` 只 prefill 新后缀：
 
-**需要观察的现象（在你的笔记里写下）**：
+[ds4_agent.c:7698-7729](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7698-L7729) —— `worker_run_turn` 里每一轮工具循环的开头：`common = ds4_session_common_prefix(...)` 算前缀，`suffix = len - cached`，再 `ds4_session_sync` 只评估后缀。
 
-- `ds4_session_sync` 拿到的 `prompt_for_sync` 是 `&w->transcript`，而不是任何「重新渲染的文本」。整个生成过程**没有任何一处把 token 序列重新解码成文本再分词**。
-- 采样循环里，每生成一个 token，这个 token 既被 `ds4_session_eval` 喂进 KV、又（在循环体内）被追加进 transcript。两个状态在同一个临界区内、由同一个线程推进。
-- 因此当 `agent_kv_save_path` 比较 `live` 与 `tokens` 时，二者必然来自同一段连续的、同步推进的历史。
+这套语义正是 u2-l3 讲过的「checkpoint 是 prompt 的前缀时只增量评估后缀」。在 agent 里它几乎总能命中纯追加情形（因为对话只会往后长），所以前缀复用率极高、增量 prefill 很短。配合「活 KV == transcript」的不变量，这里永远不会走到 u2-l3 里那种「中间改写须重建」的分支。
 
-**预期结果**：你能用一句话写出本讲练习任务要求的答案，例如：
+#### 4.1.5 代码实践
 
-> 在 `ds4-agent` 中，活 KV 的 token 序列与 transcript 由同一个 worker 线程在每一步生成里同步追加，二者之间没有任何文本往返或重新分词；保存时的 `agent_tokens_equal(live, tokens)` 检查在正常路径上恒为真，它把「活状态即真相」这一架构不变量钉死成代码。而 `ds4-server` 必须把客户端重发的 JSON 文本重新分词，重新分词结果可能与活 KV 不一致——正是这一步文本往返在 agent 里被消灭了，所以 mismatch 按构造不可能。
+> **实践目标**：在源码里亲眼追踪「KV mismatch 按构造不可能」这条断言的两端，确认它由双写保证。
+>
+> **操作步骤**：
+> 1. 打开 `ds4_agent.c`，定位 `worker_accept_generated_token`（约 7523 行），确认它的前两行是 `ds4_session_eval(...)` 与 `ds4_tokens_push(&w->transcript, token)`——即「同一个 token id 同时进活会话与 transcript」。
+> 2. 在文件里搜索 `worker_accept_generated_token` 的所有调用点（生成循环、`worker_force_generated_text`），确认**每条**让活会话前进的路径都经过这个函数、都同步 push 了 transcript，不存在「只 eval 不 push」或「只 push 不 eval」的旁路。
+> 3. 定位 `agent_kv_save_path`（约 3873 行），读开头 `agent_tokens_equal(live, tokens)` 的断言与失败分支。
+> 4. 在 `ds4.h`（约 278 行）确认 `ds4_session_tokens` 返回的就是活会话 checkpoint 对应的 token 序列。
+>
+> **需要观察的现象**：eval 与 push 在同一个函数里、紧挨着、操作同一个 `token` 变量；没有任何一条生成路径绕过这个配对。
+>
+> **预期结果**：你能用一句话回答——「因为每个推进 KV 的 token 都被同一行代码同步追加进 transcript，二者是被原子地一起写的两份相等拷贝，所以保存时的相等性断言恒成立」。如果你找到一条「推进 KV 却不同步 push transcript」的路径，那就是这条不变量被破坏的 bug。
+>
+> 待本地验证项：本实践是源码阅读型，无需运行；若要运行验证，可在带 GPU 的机器上 `./ds4-agent` 跑一轮后 `/save`，确认保存成功（即断言通过）。
 
-如果你没有可运行的硬件（agent 需要 GPU 与大模型），本实践为纯源码阅读型，**待本地验证**指的是「实际跑 agent 观察首 token 延迟」那一步——阅读部分本身可在任何环境完成。
+#### 4.1.6 小练习与答案
 
-#### 4.1.5 小练习与答案
+**练习 1**：如果有人把 `worker_accept_generated_token` 里的 `ds4_tokens_push(&w->transcript, token)` 删掉，只保留 `ds4_session_eval`，表面上看模型照样能生成文本。这会破坏什么不变量？在哪个函数会先暴露？
 
-**练习 1**：如果把 `worker_run_turn` 里的 `ds4_session_common_prefix` 换成「每次都返回 0」（强制整段重建 prefill），功能上还能跑吗？会损失什么？
+> **答案**：会破坏「活 KV token 序列 == transcript」。后果是 transcript 滞后于活会话：下一轮 `ds4_session_common_prefix` 会以为前缀更短、把已经算过的 token 当后缀重 prefill；而 `/save` 时 `agent_kv_save_path` 的 `agent_tokens_equal(live, tokens)` 断言会失败，报 `"live KV state does not match session transcript"`，保存直接被拒。这正说明那条断言是这道不变量的守门员。
 
-> **答案**：功能上仍能跑（`ds4_session_sync` 在前缀不匹配时会整段重建，见 u2-l3），但每轮对话都要对整段历史重新 prefill，首 token 延迟随对话变长而线性恶化，丧失了「进程内推理低延迟」这一核心优势。前缀复用正是低延迟的来源。
+**练习 2**：`ds4-server`（u7）需要「精确 DSML 回放」和「规范化改写 checkpoint」，而 `ds4-agent` 完全不需要这两套机制。用一句话说清根本原因。
 
-**练习 2**：为什么 agent 用两个线程而不是一个？把推理也放进主线程会怎样？
+> **答案**：服务器面对的是无状态客户端用 JSON 重发历史、必须重新渲染成 token，重渲染字节可能与原采样字节不一致；agent 是状态ful 进程内推理，token id 只追加、从不重渲染，活 KV 与 transcript 恒等，根本没有「重渲染失配」这个问题。
 
-> **答案**：因为推理（尤其 prefill）耗时，且需要边算边把 token 流式渲染到屏幕、还要响应 Ctrl+C 协作式中断。若用单线程，prefill 期间既无法刷新终端、也无法读输入；双线程让 UI 线程始终能渲染与响应，worker 线程独占 KV 做长计算。注意「session 无锁」是可行的，正因为它只在 worker 线程被读写（见 u7-l1 的同类设计哲学）。
-
----
-
-### 4.2 垂直设计：系统提示与原生 DSML 工具
+### 4.2 垂直设计（Vertical Design）
 
 #### 4.2.1 概念说明
 
-README 用一个词概括 agent 的系统提示与工具设计：**vertically designed**——垂直化、专门化、为一个模型量身定制（[README.md:514-515](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L514-L515)）。
+README 用了一个词叫 **vertically designed for DeepSeek v4 Flash and PRO**——「垂直设计」。在这里它的意思是：agent 不是一个「能接任意模型的通用编排框架」，而是**专门为 DeepSeek V4 这一个模型**定制的。系统提示、工具格式、采样默认值、上下文预算，都只对着这一个模型调。
 
-「垂直」对应「水平（通用）」：一个通用 agent 客户端要兼容 OpenAI、Anthropic 等多家协议，系统提示和工具描述得写得四平八稳、抽象；而 `ds4-agent` 只服务 DeepSeek V4 一个模型，于是它可以：
+这跟 u1-l1 讲过的 ds4 总体哲学「窄而精」是一脉相承的：ds4 引擎本身就是「一次只死磕 DeepSeek V4」，agent 自然延续这个取向。
 
-- 直接用模型的**原生 DSML 工具格式**做工具调用，**不做任何 JSON ↔ DSML 转换**（[README.md:520](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L520)）。这一点极其关键：在 `ds4-server` 里，要把客户端发来的 OpenAI 风格 `tools` JSON 翻译成模型能懂的 DSML 文本、再把模型生成的 DSML 翻译回 JSON（见 u7-l4）；agent 则完全省掉这个翻译层。
-- 把系统提示写得**完全贴合**这个模型的分词习惯（例如示例里的全角竖线 `｜DSML｜` 要被分词成模型的专用 DSML 控制符）。
-- 把工具行为（`read`、`edit`、`bash` 等）的细节参数（如 `read` 默认只读 500 行、`edit` 用 `[upto]` 锚点）直接焊进提示，针对编码任务反复打磨。
+垂直设计在 agent 里落地为三件事：
 
-#### 4.2.2 核心流程
+1. **原生 DSML，无 JSON 转换**：模型直接用 DSML 文本格式产出工具调用，agent 在 token 流里就地解析，不与任何外部 JSON 工具协议互相转换。
+2. **低延迟体验**：因为没有 socket/序列化往返，显示生成文本、触发工具调用、开新会话都几乎瞬时，延迟主要被 prefill 速度约束。
+3. **一切为这个模型调优**：默认 think 模式、采样参数、上下文窗口都按 DeepSeek V4 的特性选定。
 
-系统提示的构建链：
+#### 4.2.2 核心流程：原生 DSML 的工具迭代
 
-```
-agent_worker_build_system_tokens
-   ├── ds4_chat_begin                       // 起 BOS / 聊天头
-   ├── ds4_chat_append_max_effort_prefix    // 仅 Think Max 模式
-   └── agent_append_system_prompt
-          ├── agent_build_tools_prompt      // 拼接三段常量字符串
-          │     ├── agent_tools_prompt_intro
-          │     ├── agent_tools_prompt_edit_line
-          │     └── agent_tools_prompt_after_edit
-          └── ds4_tokenize_rendered_chat     // 关键：按「渲染回扫」分词
-```
+agent 的核心循环 `worker_run_turn` 处理一条用户消息，但**一条用户消息可能引发很多轮「assistant 生成 → 工具调用 → 工具结果 → 继续」**。编码 agent 天然会做很长的 read/edit/test 循环，所以这里**故意没有「工具调用次数上限」**——上下文压力、压缩（compaction）、用户 Ctrl+C、模型给出最终答案，才是真正的停止条件：
 
-最微妙的一步是 `ds4_tokenize_rendered_chat`：系统提示文本里包含 DSML 示例（如 `<｜DSML｜tool_calls>`），这些字面量的全角竖线必须被分词器识别成模型的**专用 DSML 控制符**，而不是几个普通字符。这正是 u3-l3 讲的「渲染回扫（rendered chat rescan）」路径——把已经渲染好的聊天文本逐字符扫一遍，遇到特殊标记就原子地切成对应 token。
+[ds4_agent.c:7635-7682](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7635-L7682) —— `worker_run_turn` 开头与工具循环注释：明确「transcript 是唯一真相」，DSML 段完成后结束当前 assistant 消息、把工具结果作为 tool 消息追加、再让模型继续，全程无客户端/服务端协议。
 
-生成时，工具调用的处理流程：
+「无客户端/服务端协议」这句是关键。对比 u7 的服务器：客户端发 OpenAI/Anthropic 风格的 JSON，服务器要把它解析、渲染成 prompt token、再把模型产出的 DSML 投影回 OpenAI/Anthropic 的工具调用对象（u7-l4）。agent 把这整层「方言翻译」全砍掉了——它直接消费模型原生的 DSML token 流。
 
-```
-模型吐出 token 流
-   └── agent_dsml_parser 流式解析
-          ├── 普通 token → 渲染成正文
-          └── 识别到 <｜DSML｜tool_calls> → 进入工具调用解析
-                 ├── 解析 invoke name / parameter
-                 ├── 解析完成后调用对应工具执行函数（read/write/edit/bash/...）
-                 └── 把工具结果作为 tool 消息追加进 transcript，模型继续生成
-```
+每个生成的 token 在喂进会话的同时，也被流式喂给一个渲染器，由渲染器识别 `<｜DSML｜tool_calls>` 等标记、把工具调用可视化地画到终端（这部分细节属于 u10-l2）。当一段 DSML 解析完成（`dsml.state == AGENT_DSML_DONE`），循环就退出当前生成、执行工具、把结果追加进 transcript，再进入下一轮：
 
-注意：整个过程**没有任何 JSON**。工具名、参数名、参数值都是模型直接生成的 DSML 文本，agent 直接解析、直接执行。这就是「无 DSML 转换」的字面含义。
+[ds4_agent.c:7823-7826](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7823-L7826) —— 生成循环里检测 `dsml.state == AGENT_DSML_DONE` 即 `got_tool = true` 并 `break`，交给后续逻辑执行工具。
 
-#### 4.2.3 源码精读
+#### 4.2.3 默认值即调优证据
 
-**(1) 工具提示三段拼接**
+垂直设计最直接的证据是 `parse_options` 里写死的默认值——它们不是「安全通用值」，而是为 DeepSeek V4 选的：
 
-`agent_build_tools_prompt` 把三段 C 字符串常量拼成完整工具提示 [ds4_agent.c:948-958](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L948-L958)：
+[ds4_agent.c:512-528](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L512-L528) —— `parse_options` 的默认配置：默认模型 `ds4flash.gguf`、上下文 `ctx_size=100000`、最大生成 `n_predict=50000`、think 模式 `DS4_THINK_HIGH`、采样用 `DS4_DEFAULT_*` 常量。
 
-```c
-static char *agent_build_tools_prompt(void) {
-    const char *edit = agent_tools_prompt_edit_line;
-    size_t a = strlen(agent_tools_prompt_intro);
-    size_t b = strlen(edit);
-    size_t c = strlen(agent_tools_prompt_after_edit);
-    char *out = xmalloc(a + b + c + 1);
-    memcpy(out, agent_tools_prompt_intro, a);
-    memcpy(out + a, edit, b);
-    memcpy(out + a + b, agent_tools_prompt_after_edit, c + 1);
-    return out;
-}
-```
+`DS4_THINK_HIGH`（思考高强度）作为默认 think 模式，就是为 DeepSeek V4 这类推理模型定的——普通通用 agent 不会默认开启重型思考。README 也把「Everything is tuned for this model」列为优势之一：
 
-引言段 `agent_tools_prompt_intro` 直接「教」模型写 DSML [ds4_agent.c:711-717](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L711-L717)（节选）：
-
-```
-You have access to native DSML tools. Invoke tools by writing exactly this shape:
-
-<｜DSML｜tool_calls>
-<｜DSML｜invoke name="$TOOL_NAME">
-<｜DSML｜parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</｜DSML｜parameter>
-</｜DSML｜invoke>
-</｜DSML｜tool_calls>
-```
-
-这里直接把 DSML 文法作为示例喂给模型——这是「垂直化」最直观的体现：不是抽象描述工具协议，而是给出这个模型能逐字吐出的精确格式。
-
-**(2) 关键的分词路径选择**
-
-`agent_append_system_prompt` 的注释把这个微妙点讲得很透 [ds4_agent.c:984-993](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L984-L993)：
-
-```c
-/* The built-in tool prompt is trusted DS4 control text.  Tokenize it like a
- * rendered chat prompt so the literal ｜DSML｜ markers in the examples become
- * the model's dedicated DSML token.  Do not apply that tokenizer to user
- * supplied -sys text: arbitrary user text containing <｜User｜>, <think>, or
- * ｜DSML｜ must remain plain content, not control tokens. */
-static void agent_append_system_prompt(ds4_engine *engine, ds4_tokens *tokens,
-                                       const char *extra) {
-    char *tools_prompt = agent_build_tools_prompt();
-    ds4_tokenize_rendered_chat(engine, tools_prompt, tokens);   // 走渲染回扫
-    ...
-}
-```
-
-这是 u3-l3「渲染回扫」的真实应用：**内置工具提示**是可信的 DS4 控制文本，所以用 `ds4_tokenize_rendered_chat`，让示例里的 `｜DSML｜` 变成模型的专用 DSML token；而**用户用 `-sys` 传进来的额外文本**则不能这么处理（否则用户文本里恰好出现的 `<｜User｜>` 会被误当控制符）。同一个分词器，对两种来源的文本采用两种策略——这是「垂直化」必须的精细控制。
-
-**(3) 工具调用在生成流里就地解析**
-
-在 `worker_run_turn` 的采样循环里，每来一个 token，`agent_dsml_parser` 就喂一个字节流式解析 [ds4_agent.c:7761-7766](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7761-L7766)：
-
-```c
-agent_dsml_parser dsml = {.state = AGENT_DSML_SEARCH};
-agent_stream_renderer stream = {
-    .renderer = &renderer,
-    .parser = &dsml,
-    ...
-};
-```
-
-模型吐出的字节一边被渲染到屏幕、一边被 DSML 解析器消费；一旦一个完整的 `<｜DSML｜tool_calls>...</｜DSML｜tool_calls>` 段闭合，agent 就执行对应工具，把结果作为 `tool` 消息追加进 transcript，然后让模型继续生成。整条路径里没有 JSON 序列化、没有协议翻译。（具体每个工具的参数与执行函数，本讲不展开，留给 u10-l2。）
+[README.md:520-522](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L520-L522) —— 官方列出原生 agent 的优势：低延迟、prefill 进度条、无 DSML 转换、KV mismatch 不可能、为该模型全面调优。
 
 #### 4.2.4 代码实践
 
-**实践目标**：体会「垂直化」与「无 DSML 转换」如何体现在系统提示的字节里。
-
-**操作步骤（源码阅读型实践）**：
-
-1. 读工具提示引言 [ds4_agent.c:707-725](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L707-L725)，注意它把 `read` 默认只读 500 行、`whole=true`、`continue_offset` 这些**具体到参数级别**的行为写进提示——这是通用 agent 不会做的精细度。
-2. 读 `agent_append_system_prompt` 的注释与实现 [ds4_agent.c:984-993](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L984-L993)，对照 u3-l3 的「渲染回扫」概念，解释为什么内置提示用 `ds4_tokenize_rendered_chat` 而 `-sys` 用户文本不用。
-3. 对比 `ds4-server`：回忆 u7-l4 里服务器要做 DSML ↔ JSON 的双向翻译。在本讲源码里**搜索 `json`**（`ds4_agent.c` 里工具调用路径几乎不出现 JSON），确认 agent 这条路径是纯 DSML 的。
-
-**需要观察的现象**：
-
-- 内置工具提示里 DSML 示例的全角竖线，经 `ds4_tokenize_rendered_chat` 后会成为模型专用 DSML token；这与模型在训练时学到的 DSML 完全对齐。
-- 工具调用的解析、执行、结果回填，全部在 token/字节层面完成，没有「先把工具调用转成 JSON 对象，再转回文本」的往返。
-
-**预期结果**：你能写出一句话，对比 agent 与 server 在工具调用上的处理差异：**server 要做 DSML↔JSON 翻译并保证重发时 KV 前缀对齐；agent 直接吃模型原生 DSML token 流，无翻译、无前缀失配风险**。
-
-（本实践为源码阅读型，可在任何环境完成；若要实跑，需 GPU + 模型，待本地验证。）
+> **实践目标**：用源码佐证「垂直设计」的三个侧面。
+>
+> **操作步骤**：
+> 1. 在 `ds4_agent.c` 读 `parse_options` 的默认值（约 512 行），记下默认模型路径、`ctx_size`、`think_mode`，说明它们为何是「为 DeepSeek V4 选」而非「通用安全值」。
+> 2. 读 `worker_run_turn` 的工具循环注释（约 7675-7681 行），确认「无客户端/服务端协议」「transcript 是唯一真相」这两句。
+> 3. 对照 u7-l2 讲的服务器端点层（要解析 OpenAI/Anthropic/Responses 四种 JSON 方言），点出 agent 省掉了哪一整层。
+>
+> **需要观察的现象**：agent 里没有任何「把 JSON 工具调用翻译成 DSML」或「把 DSML 翻译成 JSON」的代码——模型说什么格式，agent 就直接消费什么格式。
+>
+> **预期结果**：你能列出垂直设计的三条具体表现：① 默认值针对 DeepSeek V4；② 工具调用原生 DSML 无 JSON 方言层；③ 无 socket 边界带来低延迟。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么系统提示里的 DSML 示例必须用全角竖线 `｜DSML｜` 而不是半角 `|DSML|`？
+**练习 1**：README 说 agent「No DSML tool calling conversion」。请结合 u7-l4 解释：服务器为什么**必须**做 DSML 转换，而 agent 为什么**可以不做**？
 
-> **答案**：全角竖线是模型词表里 DSML 控制符的真实组成字节；`ds4_tokenize_rendered_chat` 的渲染回扫会把它原子识别成专用 token（见 u3-l3）。若用半角竖线，分词器认不出这是控制符，会把示例拆成普通字符 token，模型也就学不到「该用 DSML 格式」这个意图。这正体现了「垂直化」：连示例的字节都必须贴合目标模型词表。
-
-**练习 2**：`-sys` 用户传入的文本为什么不能用 `ds4_tokenize_rendered_chat`？
-
-> **答案**：因为用户文本是「内容」而非「控制指令」。若用渲染回扫，用户文本里恰好出现的 `<｜User｜>`、`<think>`、`｜DSML｜` 会被误切成控制 token，可能让模型把用户内容当成对话结构或工具调用，产生注入式歧义。所以用户文本走普通分词，保持纯内容语义。
-
----
+> **答案**：服务器对外暴露的是 OpenAI/Anthropic 风格的 JSON 工具协议，客户端用 JSON 回发工具调用历史，服务器必须把 JSON 翻译成模型能续上的 DSML token（这就是 u7-l4 的「精确回放/规范化」要解决的失配问题）。agent 没有外部协议——它直接在终端里和用户交互、直接消费模型原生 DSML 流，根本没有 JSON 这一层，自然无需转换。
 
 ### 4.3 会话持久化：/save /list /switch /strip
 
 #### 4.3.1 概念说明
 
-「KV 即会话」还有一个推论：**持久化一个会话 = 把 KV 缓存连同 token 序列一起写盘**。agent 把会话存成磁盘上的 `.kv` 文件（文件格式见 u8-l1 / u8-l3，本讲只讲 agent 特有的策略）。
+KV-as-session 的另一半是「会话能落盘、能恢复」。agent 的会话存在一个固定目录：
 
-README 列出了命令（[README.md:525-531](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L525-L531)）：
+[ds4_agent.c:3609-3617](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3609-L3617) —— `agent_default_cache_dir`：默认 `$HOME/.ds4/kvcache`。
 
-- `/save`：把当前会话存盘。
-- `/list`：按最近更新时间列出已存会话。
-- `/switch <sha>`：恢复某个会话——**因为是完整的 KV 检查点，恢复后无需重新 prefill**（[README.md:523](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L523)）。
-- `/del <sha>`：删除某个会话。
-- `/strip <sha>`：保留渲染文本与标题，但删掉沉重的 KV payload；以后 `/switch` 到被 strip 的会话时，靠对保存的文本重新 prefill 来重建 KV。
+每个会话是一个 `.kv` 文件，文件名是会话身份的 SHA。会话命令族在 `runtime_help` 里列得很全：
 
-会话存放在 `~/.ds4/kvcache`（[README.md:525](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/README.md#L525)）。
+[ds4_agent.c:9367-9385](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L9367-L9385) —— `runtime_help`：`/save` `/compact` `/list` `/switch` `/del` `/strip` `/history` `/power` `/new` `/quit`。
 
-agent 的持久化策略与 `ds4-server` **故意不同**（见 [ds4_agent.c:3675-3687](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3675-L3687) 的注释）：
+理解会话持久化，要先理解一个反直觉的设计决定：**会话身份（文件名）与 transcript 解耦**。文件名不是 transcript 的哈希，而是「标题 + 创建时间」的哈希。这样对话越长、transcript 越变，文件名却保持稳定——多次 `/save` 同一个会话会覆写同一个文件，而不是产生一堆新文件：
 
-- **会话是显式保存（explicit saves only）**：不像 server 那样在 cold/continued/evict/shutdown 多个时机自动落盘（见 u8-l2），agent 只在用户敲 `/save`（或退出、切换前）时保存。这符合交互式 agent 的语义——用户掌控会话存档。
-- **会话身份独立于渲染文本**：文件名是 `SHA1(title || created_at_le64)`，一旦会话有了标题和创建时间，**反复保存都写同一个文件名**，而 transcript/KV 内容可以一直变（[ds4_agent.c:3630-3632](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3630-L3632)）。对比 server：server 的文件名是渲染文本的 SHA1，文本一变文件名就变。
+[ds4_agent.c:3630-3643](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3630-L3643) —— `agent_session_identity_sha`：对 `title || 创建时间戳` 取 SHA1；注释明说「身份刻意独立于渲染 transcript，重存保持同名」。
 
-#### 4.3.2 核心流程
+标题来自第一条用户消息（`agent_session_title_from_prompt`），创建时间是会话首次保存的时刻。
 
-**会话身份（identity）的生成**：
+#### 4.3.2 核心流程：保存 = 序列化活 KV
 
-```
-首条用户提示  ──►  title（截断后的首句）
-                    │
-创建时间 created_at ─┤
-                    ▼
-        SHA1(title || created_at_le64)   ──►  <40hex>.kv   （稳定文件名）
-```
+`/save` 的路径很短：UI 线程在 worker 空闲时直接调 `agent_worker_save_session`：
 
-**保存流程（`/save`）**：
+[ds4_agent.c:10024-10032](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10024-L10032) —— `/save` 命令分发：忙时改用 `worker_request_save`（延迟到下一个安全点），空闲时直接 `agent_worker_save_session`。
 
-```
-agent_worker_save_session_now
-   ├── agent_worker_sync_tokens        // 先确保活 KV 与 transcript 对齐
-   ├── ds4_kvstore_render_tokens_text  // 渲染出文本（用于列表/历史/strip 重建）
-   ├── agent_session_identity_sha      // 算稳定文件名
-   └── agent_kv_save_path
-          ├── assert: live KV == transcript   // 4.1 讲的不变量断言
-          ├── ds4_session_stage_payload       // 把 KV 序列化成 DSV4 payload
-          └── 写 KVC 文件：头 + 渲染文本 + payload + 标题 trailer
-```
+`agent_worker_save_session` 先确认 worker 空闲（否则拒绝，因为活 KV 正在被改），再调 `agent_worker_save_session_now` 计算身份、得到 `<sha>.kv` 路径，最终落盘：
 
-**加载/切换流程（`/switch`）**：
+[ds4_agent.c:4397-4407](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L4397-L4407) —— `agent_worker_save_session`：`worker_is_idle` 守门，调 `agent_worker_save_session_now`。
 
-```
-agent_worker_switch_session
-   └── agent_kv_load_path
-          ├── 读 KVC 头 + 渲染文本
-          ├── 校验 model_id（Flash/Pro 不串台）
-          ├── 校验渲染文本前缀匹配
-          └── ds4_session_load_payload   // 直接恢复 KV，无需 prefill！
-```
+真正的写盘在 `agent_kv_save_path`，它产出一个标准的 KVC 文件（u8-l1 讲过的格式）：固定头 + 渲染文本 + DS4 payload + 可选标题 trailer。核心步骤是先把活 KV 序列化成 staging 临时区域量出字节数，再原子地 `rename` 到目标路径：
 
-**strip 流程（`/strip`）**：
+[ds4_agent.c:3914-3974](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3914-L3974) —— `agent_kv_save_path` 的写盘：`ds4_session_stage_payload` 把活 KV 序列化到 staging，写 KVC 头/渲染文本/DS4 payload/标题 trailer，`mkstemp`+`rename` 原子落盘。
 
-```
-agent_worker_strip_session
-   ├── 读出头 + 渲染文本 + 标题
-   ├── 校验身份 SHA
-   └── 重写文件：保留头/文本/标题，丢弃 payload（KV 字节）
-```
+这里又一次用到 4.1.3 的不变量：函数开头先断言 `agent_tokens_equal(live, tokens)`——落盘的 KV 必然对应 transcript，绝不会存出「KV 与文本对不上」的坏文件。
 
-被 strip 的会话再 `/switch` 时，因为没有 payload，会走「对保存的渲染文本重新 prefill」的路径重建 KV。
+#### 4.3.3 核心流程：切换 = 免 prefill 恢复 KV
 
-另外还有一个**启动优化**：`sysprompt.kv`——agent 把固定的系统/工具提示 KV 检查点存成一个固定名字的文件，下次启动若渲染文本仍匹配就直接 load，**省掉每次启动都要 prefill 一大段系统提示的开销**（[ds4_agent.c:4187-4191](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L4187-L4191)）。文本变了就重建并覆盖。
+`/switch <sha前缀>` 是 KV-as-session 最能体现价值的地方：恢复一个会话时，**直接把 KV payload 反序列化回活会话，跳过 prefill**。长会话的 prefill 本来要花几秒到几十秒，这里变成一次文件读：
 
-#### 4.3.3 源码精读
+[ds4_agent.c:10087-10107](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10087-L10107) —— `/switch` 命令分发：先用 `agent_maybe_save_before_leaving_session` 保当前会话，再 `agent_worker_switch_session`。
 
-**(1) 稳定会话身份**
+[ds4_agent.c:5364-5423](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L5364-L5423) —— `agent_worker_switch_session`：`agent_kv_load_path` 加载，把 `loaded` tokens 赋给 `w->transcript`，恢复标题/创建时间/SHA，状态置空闲。注释点出 stripped 会话会触发重建。
 
-会话身份刻意独立于渲染文本，注释 [ds4_agent.c:3630-3643](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3630-L3643)：
+加载的核心在 `agent_kv_load_path`，它做三重校验（model_id、quant_bits、身份 SHA）后，走两条路之一：
 
-```c
-/* Agent session IDs are intentionally independent from the rendered transcript:
- * once a session has a title and creation time, resaving it keeps the same file
- * name while the transcript and KV payload evolve. */
-static void agent_session_identity_sha(const char *title, uint64_t created_at,
-                                       char sha_out[41]) {
-    size_t title_len = title ? strlen(title) : 0;
-    agent_buf b = {0};
-    agent_buf_append(&b, title ? title : "", title_len);
-    uint8_t ts[8];
-    agent_le_put64(ts, created_at);
-    agent_buf_append(&b, (const char *)ts, sizeof(ts));
-    ds4_kvstore_sha1_bytes_hex(b.ptr ? b.ptr : "", b.len, sha_out);
-    free(b.ptr);
-}
-```
+[ds4_agent.c:3771-3869](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3771-L3869) —— `agent_kv_load_path`：读 KVC 头/渲染文本/标题；校验 model_id 与 quant_bits 与当前引擎一致；`payload_bytes==0` 时走「重新分词+prefill」重建，否则 `ds4_session_load_payload` 直接反序列化 KV；末尾再校验加载后 token 数与头部一致。
 
-`title` 是首条用户提示派生的标题，`created_at` 是会话创建时间；二者都不随对话推进而变，所以文件名稳定。`created_at` 在反复保存中**被保留**（见 `agent_kv_save_path` [ds4_agent.c:3905-3906](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3905-L3906)），保证身份不漂移。
+两条路：
 
-**(2) 保存 = 写一份完整 KV 检查点**
+- **正常会话**（`payload_bytes != 0`）：`ds4_session_load_payload` 把逐层 KV 张量与 compressor frontier 直接灌回活会话——免 prefill。
+- **stripped 会话**（`payload_bytes == 0`）：用 `ds4_tokenize_rendered_chat` 把保存的渲染文本重新分词，再 `agent_worker_sync_tokens` 做一次完整 prefill 重建。
 
-`agent_worker_save_session_now` [ds4_agent.c:4341-4395](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L4341-L4395)（节选）：
+注意 model_id 校验：换个模型族（Flash ↔ PRO）去加载旧会话会被拒，因为 KV 是按模型布局存的，跨模型不兼容。
 
-```c
-static bool agent_worker_save_session_now(agent_worker *w, char sha_out[41],
-                                          int *tokens_out,
-                                          char *err, size_t err_len) {
-    if (!agent_worker_has_user_session(w)) { snprintf(err, err_len, "nothing to save"); return false; }
-    if (agent_worker_sync_tokens(w, &w->transcript, false, err, err_len) != 0) return false;
-    ...
-    char sha[41];
-    agent_session_identity_sha(w->session_title, w->session_created_at, sha);
-    char *path = agent_kv_path_for_sha(w->cache_dir, sha);
-    bool ok = agent_kv_save_path(w, path, &w->transcript, "agent-session",
-                                 sha_out, w->session_title, w->session_created_at,
-                                 err, err_len);
-    if (ok) { memcpy(w->session_sha, sha, sizeof(w->session_sha)); ... }
-    ...
-}
-```
+#### 4.3.4 核心流程：/strip 与 /list
 
-注意三件事：
+`/strip <sha前缀>` 是个「瘦身」操作：保留渲染文本与标题 trailer，删掉重的 KV payload（把头部 `payload_bytes` 写成 0）。这样 `.kv` 文件从可能几十上百 MB 缩到几 KB，代价是下次 `/switch` 要重 prefill：
 
-- 保存前先 `agent_worker_sync_tokens` 把活 KV 推进到与 transcript 完全对齐（保证 4.1 的不变量）。
-- 路径由稳定身份决定，所以**同名文件被覆盖更新**，而不会因为对话变长就生成一堆新文件。
-- 调用方要求模型必须 idle（`/save` 在 busy 时会被推迟到下一个安全点，见 `worker_request_save` + `worker_run_deferred_save`）。
+[ds4_agent.c:10126-10146](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10126-L10146) —— `/strip` 命令分发。
 
-**(3) 启动时复用系统提示 KV**
+[ds4_agent.c:5322-5336](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L5322-L5336) —— `agent_worker_strip_session` 写新头时把 payload 字节（`fill_header` 最后一个参数）置 `0`，保留文本与标题。
 
-`agent_worker_reset_to_sysprompt` [ds4_agent.c:4192-4230](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L4192-L4230)：先渲染当前系统提示文本，尝试从固定路径 `sysprompt.kv` load；若文本仍匹配且 model_id 对得上就命中、跳过 prefill；否则重建并覆盖。这把「每次启动都要 prefill 一长串工具提示」的开销摊到了首次。
+`/list` 扫描缓存目录，**按 model_id 过滤**（只列当前模型族的会话），按最近更新时间排序，显示 SHA、标题、年龄、token 数、文件大小、是否 stripped：
 
-**(4) slash 命令分发**
+[ds4_agent.c:5011-5070](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L5011-L5070) —— `agent_worker_list_sessions`：`opendir` 扫描、`ds4_kvstore_sha_hex_name` 认 `.kv` 文件名、`e.model_id == model_id` 过滤、`qsort` 按 recency 排序、打印。
 
-UI 线程在 linenoise 循环里用字符串比较分发斜杠命令 [ds4_agent.c:10024-10147](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10024-L10147)（节选）：
+#### 4.3.5 系统提示检查点：sysprompt.kv
 
-```c
-} else if (!strcmp(cmd, "/save")) {
-    if (busy) {
-        worker_request_save(&worker);
-        printf("save scheduled at next safe point\n");
-    } else {
-        char err[160] = {0};
-        if (!agent_worker_save_session(&worker, err, sizeof(err)))
-            printf("save failed: %s\n", err);
-    }
-} else if (!strcmp(cmd, "/list")) {
-    agent_worker_list_sessions(&worker);
-} ...
-} else if (!strncmp(cmd, "/switch", 7) && ...) {
-    ... agent_worker_switch_session(&worker, sha, AGENT_HISTORY_DEFAULT_TURNS, err, sizeof(err)) ...
-} ...
-} else if (!strncmp(cmd, "/strip", 6) && ...) {
-    ... agent_worker_strip_session(&worker, sha_arg, sha, &tokens, err, sizeof(err)) ...
-}
-```
+会话持久化里还有一个不起眼但重要的优化：**系统提示本身也被存成一个固定检查点 `sysprompt.kv`**。系统提示（含工具描述）很长，每个新会话都要 prefill 它一次很浪费。于是 agent 把它存成固定文件，新会话直接加载、跳过 prefill；只有当渲染出的系统提示文本变了（比如换了 `--system`）才重建：
 
-可识别的命令清单在 [ds4_agent.c:441-453](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L441-L453)，帮助文本在 [ds4_agent.c:9370-9376](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L9370-L9376)。注意：**斜杠命令若在模型 busy 时下发，大多会被要求 idle**（`/save` 是例外，它会被推迟到安全点），因为它们要操作 session 状态，而 session 归 worker 独占。
+[ds4_agent.c:4192-4252](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L4192-L4252) —— `agent_worker_reset_to_sysprompt`：先尝试 `agent_kv_load_path` 加载 `sysprompt.kv`；命中就跳过 prefill；未命中才同步 prefill 并把结果存回 `sysprompt.kv`。注释指出该文件 Flash/PRO 共用，靠 model_id 校验区分。
 
-**(5) strip：删 payload 留文本**
+`/new` 命令就是回到这个系统提示检查点、开一个全新空会话：
 
-`agent_worker_strip_session` [ds4_agent.c:5249-5296](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L5249-L5296)：读出头+渲染文本+标题，校验身份 SHA，然后重写文件——只保留头/文本/标题，丢弃沉重的 KV payload 字节。被 strip 的会话以后 `/switch` 时会因没有 payload 而走「对保存文本重新 prefill」的重建路径。这是「空间换时间」的旋钮：磁盘紧张时可以 strip 掉不常用会话的 KV，只留对话文本。
+[ds4_agent.c:10077-10086](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L10077-L10086) —— `/new` 命令分发：先保存当前会话，再 `agent_worker_reset_to_sysprompt`。
 
-#### 4.3.4 代码实践
+#### 4.3.6 代码实践
 
-**实践目标**：理解 agent 会话文件的命名、内容与命令语义，能预测 `/save` 后再 `/switch` 回来时会发生什么。
+> **实践目标**：把 `/save` → `/list` → `/switch` → `/strip` → `/switch` 这条会话生命周期在源码里走一遍，理解每一步动了 `.kv` 文件的哪一段。
+>
+> **操作步骤**：
+> 1. 在 `ds4_agent.c` 定位四个命令的 dispatch（`/save`≈10024、`/list`≈10037、`/switch`≈10087、`/strip`≈10126）。
+> 2. 跟进 `agent_worker_save_session_now`（≈4341）→ `agent_kv_save_path`（≈3873），确认写出的文件结构是「固定头 + 渲染文本 + DS4 payload + 标题 trailer」，且身份 SHA 来自 `title+创建时间`（≈3633）而非 transcript。
+> 3. 跟进 `agent_worker_switch_session`（≈5364）→ `agent_kv_load_path`（≈3771），确认正常会话走 `ds4_session_load_payload`（免 prefill），stripped 会话（`payload_bytes==0`）走重新分词 + prefill。
+> 4. 跟进 `agent_worker_strip_session`（≈5249），确认它把 payload 写成 0、保留文本与标题。
+>
+> **需要观察的现象**：保存时身份独立于 transcript（文件名稳定）；加载时正常会话免 prefill、stripped 会话才 prefill；model_id 不匹配会被拒。
+>
+> **预期结果**：你能画出一张表：命令 → 触发函数 → 对 `.kv` 文件的操作（写/读 payload / 清零 payload）→ 是否需要 prefill。
+>
+> 待本地验证项：若本地有模型，可 `./ds4-agent` 跑两轮后 `/save`、`/list` 记下 SHA、`/strip <SHA>`、再 `/switch <SHA>`，观察终端打印 `rebuilt from text` 与 `rebuilt from rendered text...`（对应 5383 行），即验证 stripped→prefill 重建路径。
 
-**操作步骤（源码阅读型 + 可选运行）**：
+#### 4.3.7 小练习与答案
 
-1. 读 `agent_default_cache_dir` [ds4_agent.c:3609-3617](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3609-L3617) 与 `agent_kv_path_for_sha` [ds4_agent.c:3619-3624](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3619-L3624)，确认会话文件落在 `~/.ds4/kvcache/<40hex>.kv`。
-2. 读身份函数 [ds4_agent.c:3633-3643](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3633-L3643)，弄清文件名由 `title + created_at` 决定、与对话内容无关。
-3. 读 `agent_kv_save_path` 的开头 [ds4_agent.c:3873-3912](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L3873-L3912)：注意 session_identity 为真时用 `agent_session_identity_sha`，否则（如 sysprompt.kv）用渲染文本 SHA。这解释了「会话文件」与「sysprompt 引导文件」命名规则的区别。
-4. （若有硬件）实跑：`./ds4-agent`，对话几轮，`/save`，然后 `ls ~/.ds4/kvcache/`，观察出现一个 `<40hex>.kv` 文件；再 `/list`、`/switch <sha前缀>`，观察恢复是瞬时（无 prefill 进度条）的。
+**练习 1**：为什么 agent 的会话文件名用「标题+创建时间」的 SHA，而不是 transcript 的 SHA？如果改用 transcript SHA 会出什么问题？
 
-**需要观察的现象**：
+> **答案**：为了让同一个会话在多次 `/save` 时覆写同一个文件（对话越长 transcript 越变，但文件名稳定，便于 `/list` `/switch` 用稳定 ID 追踪）。若改用 transcript SHA，每追加一轮对话文件名就变，`/save` 会不断产生新文件而非更新，`/switch <旧SHA>` 也会指向过时快照——会话身份会被对话内容「冲掉」。
 
-- 多次 `/save` 同一会话，`~/.ds4/kvcache` 里**文件数量不增加**（同名覆盖），但文件大小随对话变长而增长（payload 变大）。
-- `/strip` 某会话后文件显著变小（payload 没了），再 `/switch` 它时会看到 prefill 进度条（重建 KV）。
-- `/switch` 一个未 strip 的会话是瞬时的（直接 load payload，无 prefill）——这是「KV 即会话」最直观的体验。
+**练习 2**：`/strip` 把一个会话从 80 MB 缩到几十 KB。代价是什么？这个代价在什么场景下可以接受？
 
-**预期结果**：你能画出一张会话文件结构图：`KVC 头 + 渲染文本 + DSV4 payload（可被 strip 删除）+ 标题 trailer`，并解释每一部分分别服务于哪个命令（列表/历史用文本、恢复用 payload、命名用身份）。
+> **答案**：代价是下次 `/switch` 该会话时必须把保存的渲染文本重新分词、完整 prefill 一次来重建 KV（不能免 prefill 直接恢复）。可接受的场景：你想长期归档很多旧会话、磁盘吃紧，而这些会话短期内不会频繁打开——用 `/strip` 把它们压成纯文本存档，需要时再付一次 prefill 代价换回来。
 
-（运行部分需 GPU + 模型，待本地验证；源码阅读部分任意环境可做。）
+**练习 3**：`agent_kv_load_path` 为什么要校验 `model_id` 与 `quant_bits`？跨模型加载一个旧 `.kv` 会怎样？
 
-#### 4.3.5 小练习与答案
-
-**练习 1**：为什么 agent 的会话文件名用 `SHA1(title||created_at)` 而不是像 server 那样用 `SHA1(渲染文本)`？
-
-> **答案**：因为 agent 的会话是「同一个会话反复演进、显式覆盖保存」。若用渲染文本 SHA，对话每变一次文件名就变，会堆积一堆文件、`/save` 也无法更新旧档案。用 `title+created_at` 则身份稳定，反复保存覆盖同一文件，符合交互式 agent 的语义。server 则是无状态多客户端，每个不同对话天然是不同文本，用文本 SHA 正好作查找键。
-
-**练习 2**：`/strip` 一个会话后，它的「对话内容」丢失了吗？
-
-> **答案**：没有。strip 只删掉沉重的 KV payload 字节，**保留渲染文本与标题**。所以 `/list` 仍能看到它、`/history` 仍能渲染它的对话；只是 `/switch` 它时因为没有 payload，必须对保存的文本重新 prefill 来重建 KV。strip 是「牺牲恢复速度换磁盘空间」。
-
-**练习 3**：`sysprompt.kv` 和普通会话 `.kv` 在命名与策略上有何不同？
-
-> **答案**：`sysprompt.kv` 文件名固定（不是 SHA），内容是系统/工具提示的 KV 检查点，启动时若渲染文本匹配就 load、否则重建覆盖——它是启动加速用的引导缓存。普通会话用稳定身份 SHA 命名、显式 `/save` 才落盘、payload 随对话增长。两者都用同一套 KVC 文件格式与 payload 序列化，但策略层完全不同。
-
----
+> **答案**：KV 缓存是按模型层/head 布局与量化档存的，跨模型族（Flash↔PRO）或跨量化档（2bit↔4bit）的 KV 在字节布局上不兼容，强行加载会得到错乱的注意力状态。所以加载时校验 `model_id`/`quant_bits` 与当前引擎一致，不一致就拒绝（报「written for a different model/quantization」），避免静默出错。
 
 ## 5. 综合实践
 
-把本讲三个模块串起来，做一个「架构对比」小任务。
+把本讲三个最小模块串成一个端到端的「会话生命周期追踪」任务。
 
-**任务**：写一份不超过一页的对比表，对比 `ds4-agent`（进程内、KV-as-session）与 `ds4-server`（无状态 HTTP、文本往返）在以下维度上的差异，并标注每个结论对应的源码行号或讲义章节：
+**任务**：假设你要向一位新同事解释「为什么 `ds4-agent` 不需要 u7 服务器那套精确回放/规范化机制，却仍能做到会话断点续传」，请完成下面这份「证据链卡片」。
 
-| 维度 | ds4-agent | ds4-server |
-|------|-----------|------------|
-| 推理发生处 | 进程内（`worker_run_turn` 直接调 `ds4_session_*`） | 独立 graph worker，HTTP 触发（u7-l1） |
-| 会话状态真相 | 活 KV 本身 | 单活 KV checkpoint + 多级回退（u7-l5） |
-| 客户端如何续接对话 | 不存在「客户端重发」，transcript 即真相 | 重发整段对话文本，服务器重新分词（u7-l2） |
-| 工具调用格式 | 模型原生 DSML，无翻译 | DSML ↔ OpenAI/Anthropic JSON 翻译（u7-l4） |
-| KV mismatch 可能性 | 按构造不可能（`agent_kv_save_path` 断言） | 可能，需精确回放/规范化补救（u7-l4/u7-l5） |
-| 持久化时机 | 显式 `/save` | cold/continued/evict/shutdown 自动（u8-l2） |
-| 文件命名 | `SHA1(title‖created_at)` 稳定 | `SHA1(渲染文本)` 随文本变（u8-l1） |
+1. **架构对比图**：画两张极简方框图。
+   - 服务器：`客户端 --HTTP/JSON--> ds4-server [engine + 单活 session]`，标注「重渲染 → 字节可能失配 → 需精确回放/规范化」。
+   - agent：`终端 <-> ds4-agent [engine + 活 session + transcript]`，标注「进程内、token id 只追加、活 KV==transcript」。
+2. **不变量证据**：引用 `worker_accept_generated_token`（7530-7533）与 `agent_kv_save_path`（3880-3884）两段代码，说明「双写 → 相等性断言恒成立」。
+3. **持久化证据**：引用 `agent_session_identity_sha`（3633，身份独立于 transcript）、`agent_kv_save_path`（落盘结构）、`agent_kv_load_path`（3771，免 prefill 恢复 vs stripped 重建），说明会话如何落盘与恢复。
+4. **一句话总结**：用一句话回答本讲的核心问题——「为什么 KV mismatch 在该架构下按构造不可能」。
 
-**操作步骤**：
+**验收标准**：你的卡片里每条结论都能对应到本讲给出的具体源码行号；架构对比图能清楚点出 agent 砍掉了服务器的哪一整层（JSON 方言翻译 + 重渲染失配修复）。
 
-1. 自己先填表，**不要**先看答案。
-2. 填完后，逐行回到本讲与 u7、u8 讲义核对，修正记错的行号。
-3. 最后，用一段话回答本讲练习任务的核心问题（为什么 KV mismatch 在 agent 架构下按构造不可能），要求同时提到：①同一个 worker 线程同步推进 transcript 与活 KV；②没有文本往返/重新分词；③`agent_kv_save_path` 的断言把这个不变量钉成代码。
-
-**预期结果**：你能清晰地说出，agent 之所以能省掉 server 那一整套前缀复用补救机制，**不是因为它实现了更聪明的算法，而是因为它从架构上消灭了「文本往返」这个 mismatch 的唯一来源**。这是一个「架构选择消解了整个问题类别」的经典案例。
+待本地验证项：若有 GPU 机器，可实际跑 `./ds4-agent`，做 `/save`→`/list`→`/switch`→`/strip`→`/switch`，把终端输出贴进卡片作为运行证据。
 
 ## 6. 本讲小结
 
-- `ds4-agent` 把推理引擎嵌在**同一进程**内，UI 线程管终端 IO、worker 线程独占活 KV 与 transcript，中间没有 socket/JSON/文本往返。
-- **KV 即会话**：活 KV 缓存本身就是会话状态的唯一真相；transcript（token 序列）与活 KV 由同一个 worker 线程在每一步生成里同步追加。
-- **KV mismatch 按构造不可能**：因为没有「重新分词」这一步，`agent_kv_save_path` 里 `agent_tokens_equal(live, tokens)` 的断言在正常路径上恒为真——架构保证它为真，代码用断言把这个保证钉死。这对比 `ds4-server` 因文本往返而必须的一整套补救机制。
-- 系统提示与 DSML 工具是**垂直化**为 DeepSeek V4 量身设计的：直接用模型原生 DSML token 流，无 JSON 翻译；内置工具提示经「渲染回扫」分词，让 DSML 示例成为模型专用控制符。
-- 会话持久化用 `/save /list /switch /strip /del`：会话身份 `SHA1(title‖created_at)` 稳定（反复保存覆盖同一文件），`/switch` 直接 load 完整 KV 无需 prefill，`/strip` 删 payload 留文本、靠重 prefill 重建。
-- agent 的持久化策略与 server **故意不同**：显式保存、稳定身份命名，对应交互式 agent 的语义。
+- `ds4-agent` 是**单进程双线程**：UI 线程管终端，worker 线程独占活 `ds4_session` 与 KV 状态，推理就在进程内，没有 socket/API 边界。
+- **KV-as-session**：一条会话在物理上就是一个 `.kv` 文件（KVC 格式）；保存=序列化活 KV，恢复=反序列化回内存、跳过 prefill。
+- **KV mismatch 按构造不可能**：每个推进 KV 的 token 都被 `worker_accept_generated_token` 同一行代码同步追加进 transcript，活 KV token 序列与 transcript 恒等；`agent_kv_save_path` 的相等性断言只是这道不变量的守门员。
+- 前缀复用仍存在（`ds4_session_common_prefix` + `ds4_session_sync` 只 prefill 后缀），但因为只追加不改写，几乎总命中纯追加路径。
+- **垂直设计**三表现：默认值针对 DeepSeek V4；工具调用原生 DSML、无 JSON 方言转换层；无 socket 边界带来低延迟。
+- 会话命令族 `/save` `/list` `/switch` `/del` `/strip` `/new` 背后：会话身份=标题+创建时间的 SHA（稳定文件名）、`sysprompt.kv` 是系统提示固定检查点、stripped 会话删 payload 留文本、切换时按 model_id/quant_bits 校验。
 
 ## 7. 下一步学习建议
 
-- **u10-l2（Agent 工具系统）**：本讲只点到 DSML 工具就地解析为止，下一讲会逐一拆解 `read`/`write`/`edit`/`bash`/`search` 等内建工具的参数种类（如 `AGENT_TOOL_PARAM_DIFF_OLD/NEW`）与执行函数，以及工具调用的可视化渲染。
-- **u10-l3（Agent web 搜索）**：`google_search` 与 `visit_page` 如何通过 `ds4_web` 的 confirm/log/cancel 回调集成进 agent。
-- **复习 u7-l4 / u7-l5**：想真正吃透「为什么 agent 能省掉那套机制」，最好回头对比 server 的 DSML 精确回放与字节比对——你会更深刻地理解「架构消灭问题」的含义。
-- **阅读 u8-l1 / u8-l3**：本讲的 `.kv` 文件内部结构（KVC 头、DSV4 payload、frontier 序列化）在这两讲里有完整字节级拆解，是理解 `/switch` 如何免 prefill 的底层基础。
-- **源码延伸**：读 `worker_run_turn` 的工具循环 [ds4_agent.c:7682-7789](https://github.com/antirez/ds4/blob/80ebbc396aee40eedc1d829222f3362d10fa4c6c/ds4_agent.c#L7682-L7789) 与上下文压缩 `agent_worker_compact_if_needed`，理解长编码会话如何通过 summarization 控制上下文增长。
+- **u10-l2 Agent 工具系统**：本讲刻意没展开内建工具（read/write/edit/bash/search 等）的 DSML 参数解析、执行与终端可视化。下一讲钻进工具分发与 `AGENT_TOOL_PARAM_*` 参数种类。
+- **u10-l3 Agent web 搜索**：`ds4_web.c` 的 `google_search`/`visit_page` 与 `confirm/log/cancel` 回调如何在 agent 里集成。
+- **回看 u7-l4 / u7-l5**：现在你理解了 agent 的「无失配」架构，再去读服务器的「精确 DSML 回放 + 规范化改写」会非常通透——那是为无状态 API 不得不补上的复杂度。
+- **u8-l1 / u8-l3**：本讲的 `.kv` 文件格式与 DS4 payload 序列化细节在那两讲里有完整的字节级拆解，可作为本讲 4.3 节的深读材料。
