@@ -1,0 +1,1287 @@
+{
+  "project": "FasterTransformer",
+  "head": "df4a7534860137e060e18d2ebf019906120ea204",
+  "rationale": "FasterTransformer 是一个面向 transformer 推理加速的大型 C++/CUDA 库，代码量大、模型种类多（BERT/GPT/T5/ViT/Swin/Decoder/Decoding 等）、并覆盖 TF/PyTorch/Triton/TensorRT 多种框架集成与 INT8/FP8 量化。因此采用「先建立全局认知与运行能力，再掌握核心基础设施与基础算子层，再进入具体模型，最后深入并行、解码策略、量化、框架集成与工程扩展」的由浅入深顺序。Unit 1（入门层）让读者从零理解项目定位、构建运行与目录；Unit 2-3（进阶层）夯实 Tensor/显存/GEMM/权重等基础设施与 kernel/layer 通用机制；Unit 4-5（进阶层）按「编码器→解码器→端到端生成」的模型复杂度递进；Unit 6-11（专家层）覆盖大模型推理（ParallelGpt/KV cache/交互生成）、张量与流水并行、动态解码（beam search/sampling）、量化与 CUTLASS GEMM、框架集成部署以及测试与新增模型。讲义之间通过 depends_on 严格标注依赖，确保读者从任一终点都能追溯回入门单元，形成完整学习闭环。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认知与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FasterTransformer 项目总览：它是什么、解决什么问题",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 FasterTransformer 的定位：基于 CUDA/cuBLAS/cuBLASLt 的高度优化 transformer 推理库，覆盖的模型与框架支持矩阵。",
+          "learning_goals": [
+            "理解 FasterTransformer 的核心定位与优化目标",
+            "看懂支持矩阵中模型×框架×精度×并行能力的对应关系",
+            "了解项目的演进历史与已知限制"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/QAList.md"
+          ],
+          "minimal_modules": [
+            "README 中的 Model overview 与 Support matrix",
+            "docs/QAList.md 的常见问题"
+          ],
+          "practice_task": "阅读 README 的 Support matrix，整理一张表格列出 BERT、GPT、T5 三个模型在 PyTorch/Triton 下分别支持哪些精度与并行方式，并写出结论。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统：CMake 与构建选项",
+          "order": 2,
+          "filename": "u1-l2-build-system.md",
+          "level": "beginner",
+          "topic": "讲解顶层 CMakeLists.txt 的关键构建选项（BUILD_PYT、BUILD_TF、BUILD_TRT、BUILD_MULTI_GPU、ENABLE_FP8、SPARSITY_SUPPORT）以及如何针对不同框架/精度配置编译。",
+          "learning_goals": [
+            "理解顶层 CMakeLists 的 option 体系",
+            "掌握为 PyTorch / 多 GPU / FP8 编译时的 cmake 命令",
+            "了解 CUDA 版本对 BF16/FP8 能力的条件编译影响"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "docs/gpt_guide.md",
+            "docs/bert_guide.md"
+          ],
+          "minimal_modules": [
+            "CMakeLists.txt 的 option 与条件 add_definitions",
+            "docs 中 Setup / Build 章节"
+          ],
+          "practice_task": "根据 docs/gpt_guide.md 的 Build 指引，写出两条 cmake 命令：一条仅构建单 GPU 的 PyTorch 扩展，一条构建多 GPU + FP8 的 C++ 工程，并说明每个 -D 参数的含义。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构与代码规范",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 src/fastertransformer 下的 kernels/layers/models/utils 以及 th_op/tf_op/triton_backend/tensorrt_plugin 等目录职责，并介绍命名规范。",
+          "learning_goals": [
+            "掌握 src/fastertransformer 各子目录的职责划分",
+            "区分 kernel / layer / model 三层抽象",
+            "了解文件与函数命名约定"
+          ],
+          "source_files": [
+            "README.md",
+            "templates/adding_a_new_model/README.md"
+          ],
+          "minimal_modules": [
+            "README 中的目录结构说明",
+            "templates 中关于 Coding style 与目录组织的指引"
+          ],
+          "practice_task": "为 kernels / layers / models / utils / th_op 五个目录各写一句话职责说明，并从仓库中为每个目录挑一个代表性文件举例。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一个示例：编译并运行 BERT 与 GPT 的 C++ 示例",
+          "order": 4,
+          "filename": "u1-l4-first-run-examples.md",
+          "level": "beginner",
+          "topic": "以 examples/cpp 下的 bert_example 和 multi_gpu_gpt_example 为入口，讲解 main 函数如何解析参数、选择数据类型并调用模型 forward。",
+          "learning_goals": [
+            "看懂 C++ 示例 main 的参数解析与模板分发逻辑",
+            "理解 bert_example 的命令行参数与 config.ini",
+            "了解 multi_gpu_gpt_example 通过 INIReader 加载配置的流程"
+          ],
+          "source_files": [
+            "examples/cpp/bert/bert_example.cc",
+            "examples/cpp/multi_gpu_gpt/multi_gpu_gpt_example.cc",
+            "examples/cpp/bert/bert_config.ini",
+            "examples/cpp/multi_gpu_gpt/gpt_config.ini"
+          ],
+          "minimal_modules": [
+            "examples/cpp/bert/bert_example.cc 的 main 与 bertExample",
+            "examples/cpp/multi_gpu_gpt/multi_gpu_gpt_example.cc 的 main 与配置读取"
+          ],
+          "practice_task": "对照 bert_example.cc，写出运行 ./bin/bert_example 32 12 32 12 64 1 0 的完整命令，并逐个参数解释其含义（batch/layers/seq/head/size/data_type/remove_padding）。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "日志、调试与环境变量",
+          "order": 5,
+          "filename": "u1-l5-logging-debug-env.md",
+          "level": "beginner",
+          "topic": "讲解 logger 与 FT_LOG_LEVEL、FT_NVTX、FT_DEBUG_LEVEL 三个环境变量如何辅助调试与性能分析。",
+          "learning_goals": [
+            "掌握 FT_LOG_LEVEL / FT_DEBUG_LEVEL / FT_NVTX 的作用",
+            "理解 logger.h 的日志级别机制",
+            "知道调试模式下 cudaDeviceSynchronize 对性能的影响"
+          ],
+          "source_files": [
+            "README.md",
+            "src/fastertransformer/utils/logger.h",
+            "src/fastertransformer/utils/logger.cc",
+            "src/fastertransformer/utils/nvtx_utils.h"
+          ],
+          "minimal_modules": [
+            "README Advanced 章节的 Global Environment",
+            "logger.h 的日志级别宏与 nvtx_utils"
+          ],
+          "practice_task": "阅读 logger.h，列出至少三种日志级别，并写出一个调试命令示例：如何在终端设置环境变量以打开 DEBUG 级别日志并启用 NVTX 标记。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心基础设施",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "统一张量抽象：Tensor / TensorMap / DataType",
+          "order": 1,
+          "filename": "u2-l1-tensor-data-structure.md",
+          "level": "intermediate",
+          "topic": "讲解 utils/Tensor.h 中的 DataType 枚举、getTensorType、Tensor 与 TensorMap，它们是贯穿所有模型接口的统一数据载体。",
+          "learning_goals": [
+            "理解 DataType 枚举与 getTensorType 模板映射",
+            "掌握 Tensor 的内存所有权与 where( CPU/GPU ) 标记",
+            "理解模型 forward 接口为何统一用 std::vector<Tensor> 或 TensorMap"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/Tensor.h",
+            "src/fastertransformer/utils/Tensor.cc",
+            "src/fastertransformer/utils/convert_data_type.h"
+          ],
+          "minimal_modules": [
+            "Tensor.h 的 DataType 枚举与 Tensor 类",
+            "convert_data_type.h 的类型转换"
+          ],
+          "practice_task": "编写一段伪代码：构造一个 TensorMap，放入名为 input_ids 的 INT32 GPU 张量与名为 output_tokens 的张量，并说明 Tensor 如何区分 CPU/GPU 与是否拥有内存。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "GPU 显存管理：Allocator 与 memory_utils",
+          "order": 2,
+          "filename": "u2-l2-allocator-memory.md",
+          "level": "intermediate",
+          "topic": "讲解 AllocatorType/ReallocType、IAllocator 接口以及 memory_utils 中的 cudaMalloc/async pool、buffer 复用机制。",
+          "learning_goals": [
+            "理解 IAllocator 抽象与 CUDA/TF/TH 三种实现",
+            "掌握 ReallocType 的 INCREASE/REUSE 语义",
+            "了解 CUDA 11.2 异步内存池对显存复用的作用"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/allocator.h",
+            "src/fastertransformer/utils/memory_utils.h",
+            "src/fastertransformer/utils/memory_utils.cu"
+          ],
+          "minimal_modules": [
+            "allocator.h 的 IAllocator 与 ReallocType",
+            "memory_utils 的 deviceMalloc/deviceFree"
+          ],
+          "practice_task": "用 IAllocator 接口写一段伪代码：分配一块 buffer，在第二次请求更小尺寸时复用（REUSE），在请求更大尺寸时增长（INCREASE），并解释为何这样能减少 cudaMalloc 调用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "矩阵乘骨干：cublasMMWrapper 与 GEMM",
+          "order": 3,
+          "filename": "u2-l3-cublas-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 cublasMMWrapper 如何封装 cuBLAS/cuBLASLt handle，统一各类 GEMM（FP32/FP16/BF16）的调用入口。",
+          "learning_goals": [
+            "理解 cublasMMWrapper 封装 handle 与 workspace 的设计",
+            "掌握 Gemm/GenGemm 入参形式与 batched GEMM",
+            "了解 A/B/C 矩阵布局与 transpose 选项"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/cublasMMWrapper.h",
+            "src/fastertransformer/utils/cublasMMWrapper.cc",
+            "src/fastertransformer/utils/gemm.h",
+            "src/fastertransformer/utils/gemm.cc"
+          ],
+          "minimal_modules": [
+            "cublasMMWrapper.h 的 Gemm 系列接口",
+            "gemm.h 的 dataType 选择与底层调用"
+          ],
+          "practice_task": "对照 cublasMMWrapper 的 Gemm 接口，写出一个 FP16 矩阵乘的调用伪代码（M/N/K 与 leading dimension），并说明 cuBLAS handle 为何要在多线程下小心共享。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "GEMM 算法自动调优：cublasAlgoMap 与 gemm_test",
+          "order": 4,
+          "filename": "u2-l4-gemm-autotuning.md",
+          "level": "intermediate",
+          "topic": "讲解为何要为每个 (M,N,K) 选择最优 cuBLAS 算法，cublasAlgoMap 如何保存算法映射，以及 gemm_test 工具如何离线调优生成 algoMap 配置文件。",
+          "learning_goals": [
+            "理解 cuBLAS 算法选择对性能的影响",
+            "掌握 cublasAlgoMap 的 key-value 设计",
+            "了解 gemm_test 离线调优产物如何被模型加载"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/cublasAlgoMap.h",
+            "src/fastertransformer/utils/cublasAlgoMap.cc",
+            "src/fastertransformer/utils/gemm_test/gemm_func.h",
+            "src/fastertransformer/utils/gemm_test/gpt_gemm_func.cc"
+          ],
+          "minimal_modules": [
+            "cublasAlgoMap 的算法映射存取",
+            "gemm_test 中 gpt_gemm_func 的调优流程"
+          ],
+          "practice_task": "解释为什么同一模型在不同 batch/seq 下需要不同的 cuBLAS algoMap，并描述 gemm_test 工具大致如何遍历候选算法并挑选最优。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "权重容器与权重加载：DenseWeight / BaseWeight / 各模型 Weight",
+          "order": 5,
+          "filename": "u2-l5-weight-containers.md",
+          "level": "intermediate",
+          "topic": "讲解 DenseWeight、BaseWeight、各模型的 *Weight 与 *LayerWeight 类如何组织与加载权重，以及与 tensor parallel 切分的关系。",
+          "learning_goals": [
+            "理解 DenseWeight 对 kernel/bias 的封装",
+            "掌握模型级 Weight 与每层 LayerWeight 的层级关系",
+            "了解权重如何按 tensor parallel 切分加载"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/DenseWeight.h",
+            "src/fastertransformer/models/BaseWeight.h",
+            "src/fastertransformer/models/bert/BertWeight.h",
+            "src/fastertransformer/models/bert/BertLayerWeight.h",
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGptWeight.h"
+          ],
+          "minimal_modules": [
+            "DenseWeight 的 kernel/bias 字段",
+            "BertWeight / ParallelGptWeight 的层级结构"
+          ],
+          "practice_task": "对照 BertWeight 与 BertLayerWeight，画出一棵 BERT 模型权重的组织树（模型级→每层→DenseWeight），并说明 self-attention 的 QKV 权重在 tensor parallel=2 时如何切分。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "基础算子与层抽象",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "核心 CUDA kernel 总览：layernorm / activation / add_residual",
+          "order": 1,
+          "filename": "u3-l1-core-kernels.md",
+          "level": "intermediate",
+          "topic": "以 layernorm、activation、add_residual 等基础 kernel 为例，讲解 kernels 目录下 invokeXxx 函数风格与 block reduction 加速技巧。",
+          "learning_goals": [
+            "掌握 invokeXxx kernel 入口函数的统一风格",
+            "理解 layernorm kernel 的 reduction 实现",
+            "了解 add_residual/activation 等 elementwise kernel 的 fused 优化"
+          ],
+          "source_files": [
+            "src/fastertransformer/kernels/layernorm_kernels.cu",
+            "src/fastertransformer/kernels/layernorm_kernels.h",
+            "src/fastertransformer/kernels/activation_kernels.cu",
+            "src/fastertransformer/kernels/activation_kernels.h",
+            "src/fastertransformer/kernels/add_residual_kernels.cu",
+            "src/fastertransformer/kernels/add_residual_kernels.h"
+          ],
+          "minimal_modules": [
+            "layernorm_kernels 的 invokeLayerNorm",
+            "activation_kernels 的 gelu/silu",
+            "add_residual_kernels 的 invokeAddBiasResidual"
+          ],
+          "practice_task": "挑选 invokeLayerNorm，描述它的输入/输出张量形状与一个 block 处理多少元素，并解释为什么 warp/block reduction 能加速 layernorm。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "注意力 kernel：融合多头注意力与 decoder masked MHA",
+          "order": 2,
+          "filename": "u3-l2-attention-kernels.md",
+          "level": "intermediate",
+          "topic": "讲解 kernels/decoder_masked_multihead_attention 与融合多头注意力（来自 TensorRT 的 QKVToContext）的设计，以及 masked attention 在解码时的作用。",
+          "learning_goals": [
+            "理解融合多头注意力把 QKV→context 压进单个 kernel 的思路",
+            "掌握 decoder masked MHA 的 mask 处理",
+            "了解 FP16/INT8/FP8 多种版本的差异"
+          ],
+          "source_files": [
+            "src/fastertransformer/kernels/decoder_masked_multihead_attention.cu",
+            "src/fastertransformer/kernels/decoder_masked_multihead_attention.h",
+            "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h",
+            "src/fastertransformer/kernels/decoder_masked_multihead_attention/"
+          ],
+          "minimal_modules": [
+            "decoder_masked_multihead_attention 的 fused masked MHA",
+            "decoder_masked_multihead_attention 子目录的多版本实现"
+          ],
+          "practice_task": "解释在自回归解码第 t 步时，masked MHA 为何需要 causal mask，并描述融合 kernel 相比「分别做 QK^T、softmax、PV」朴素实现省了哪些中间显存读写。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "注意力层：Unfused / Fused / TensorParallel",
+          "order": 3,
+          "filename": "u3-l3-attention-layers.md",
+          "level": "intermediate",
+          "topic": "讲解 layers/attention_layers 下 Unfused、Fused 以及 TensorParallel 多种注意力层的封装层次与适用场景。",
+          "learning_goals": [
+            "区分 Unfused / Fused 注意力层的实现与取舍",
+            "理解 TensorParallel 注意力层如何插入 all-reduce",
+            "掌握 GptContextAttention 与 DecoderSelf/CrossAttention 的职责分工"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/attention_layers/UnfusedAttentionLayer.cc",
+            "src/fastertransformer/layers/attention_layers/UnfusedAttentionLayer.h",
+            "src/fastertransformer/layers/attention_layers/FusedAttentionLayer.cu",
+            "src/fastertransformer/layers/attention_layers/FusedAttentionLayer.h",
+            "src/fastertransformer/layers/attention_layers/TensorParallelUnfusedAttentionLayer.cc",
+            "src/fastertransformer/layers/attention_layers/TensorParallelGptContextAttentionLayer.cc",
+            "src/fastertransformer/layers/attention_layers/DecoderSelfAttentionLayer.cc"
+          ],
+          "minimal_modules": [
+            "UnfusedAttentionLayer / FusedAttentionLayer",
+            "TensorParallelUnfusedAttentionLayer / TensorParallelGptContextAttentionLayer"
+          ],
+          "practice_task": "用一张图说明 Unfused 与 Fused 两条注意力实现路径（分别用哪些 kernel 与 GEMM），并标注 TensorParallel 版本在何处插入 all-reduce 通信。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "FFN 层与张量并行 FFN 变体",
+          "order": 4,
+          "filename": "u3-l4-ffn-layers.md",
+          "level": "intermediate",
+          "topic": "讲解 FfnLayer 及其 TensorParallel 变体（Gelu/Relu/Silu）如何组合 GEMM 与激活，并按列/行切分实现张量并行。",
+          "learning_goals": [
+            "理解 FFN 的两段 GEMM + 激活结构",
+            "掌握 TensorParallel FFN 的列切分 + 行切分 + all-reduce 思路",
+            "了解 Gelu/Relu/Silu 激活如何影响 FFN 变体选择"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/FfnLayer.h",
+            "src/fastertransformer/layers/FfnLayer.cc",
+            "src/fastertransformer/layers/FfnWeight.h",
+            "src/fastertransformer/layers/TensorParallelGeluFfnLayer.cc",
+            "src/fastertransformer/layers/TensorParallelSiluFfnLayer.cc",
+            "src/fastertransformer/layers/TensorParallelReluFfnLayer.cc"
+          ],
+          "minimal_modules": [
+            "FfnLayer 的 forward",
+            "TensorParallelGeluFfnLayer / TensorParallelSiluFfnLayer 的切分逻辑"
+          ],
+          "practice_task": "画出一个 TensorParallel FFN（inter_size 在 4 张卡上列切分、输出层行切分后 all-reduce）的数据流图，并说明为何这种切分能保持与单卡等价。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "BaseLayer 架构：buffer 生命周期管理",
+          "order": 5,
+          "filename": "u3-l5-baselayer-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解 BaseLayer 抽象与 allocateBuffer / freeBuffer / queryBuffer 的生命周期约定，理解几乎所有 layer/model 如何复用 workspace。",
+          "learning_goals": [
+            "理解 BaseLayer 的模板化与 device 分发",
+            "掌握 allocateBuffer/freeBuffer 的 idempotent 约定",
+            "了解为什么用 buffer 复用而非每步 malloc"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/BaseLayer.h",
+            "src/fastertransformer/utils/gpu_buf.h",
+            "src/fastertransformer/utils/allocator.h"
+          ],
+          "minimal_modules": [
+            "BaseLayer 的 buffer 管理方法",
+            "gpu_buf.h 的 Buffer 抽象"
+          ],
+          "practice_task": "阅读 BaseLayer，写一段说明：当一个 layer 的 forward 被调用两次且 batch 变大时，allocateBuffer 依赖的 allocator 如何决定是 REUSE 还是 INCREASE，以及 freeBuffer 为何要设计成可重复调用安全。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "编码器模型",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "BERT 模型与 forward 主流程",
+          "order": 1,
+          "filename": "u4-l1-bert-model.md",
+          "level": "intermediate",
+          "topic": "以 models/bert/Bert.cc 为核心，拆解 BERT 一个 block 的 8 个 GEMM 与 6 个 custom kernel，以及 forward 主流程。",
+          "learning_goals": [
+            "理解 BERT block 的 GEMM + kernel 流水",
+            "掌握 Bert.cc forward 的输入输出张量约定",
+            "了解 remove_padding 开关对流程的影响"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/bert/Bert.cc",
+            "src/fastertransformer/models/bert/Bert.h",
+            "src/fastertransformer/models/bert/bert_gemm.cc",
+            "docs/bert_guide.md"
+          ],
+          "minimal_modules": [
+            "Bert.cc 的 forward 主循环",
+            "bert_gemm.cc 的 GEMM 初始化",
+            "bert_guide 中的 Model architecture"
+          ],
+          "practice_task": "对照 bert_guide 的流程图与 Bert.cc，列出单个 transformer block 依次调用的 GEMM 和 kernel 名称，并标注每个 GEMM 计算的是什么（QKV、projection、FFN 等）。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Effective FasterTransformer：去除 padding",
+          "order": 2,
+          "filename": "u4-l2-effective-bert.md",
+          "level": "intermediate",
+          "topic": "讲解 Effective FasterTransformer 如何用 remove padding（packing）减少无效计算，相关 bert_preprocess kernel 与 build/mask 逻辑被封装进 Bert forward。",
+          "learning_goals": [
+            "理解 padding 带来的无效计算开销",
+            "掌握 remove padding 的 compact/uncompact 流程",
+            "了解融合 mask 构建如何把开销降到可忽略"
+          ],
+          "source_files": [
+            "src/fastertransformer/kernels/bert_preprocess_kernels.cu",
+            "src/fastertransformer/kernels/bert_preprocess_kernels.h",
+            "src/fastertransformer/models/bert/Bert.cc",
+            "docs/bert_guide.md"
+          ],
+          "minimal_modules": [
+            "bert_preprocess_kernels 的 padding 处理",
+            "bert_guide 的 Effective FasterTransformer 章节"
+          ],
+          "practice_task": "解释 Effective FasterTransformer 在 average seq_len 远小于 max seq_len 时为何能显著提速，并描述 Bert forward 中 mask 构建与 padding 去除/恢复的时机。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "视觉编码器：ViT 与 Swin",
+          "order": 3,
+          "filename": "u4-l3-vit-swin-encoder.md",
+          "level": "intermediate",
+          "topic": "讲解 ViT 与 Swin 这两类视觉编码器如何复用 attention/FFN，并加入 patch embed、window attention、shift partition 等专属 kernel。",
+          "learning_goals": [
+            "理解 ViT 如何把图像分块后复用 transformer block",
+            "掌握 Swin 的 window attention 与 shift partition 机制",
+            "了解 swin_gemm / vit_gemm 与 BERT gemm 的差异"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/vit/ViT.cc",
+            "src/fastertransformer/models/vit/ViT.h",
+            "src/fastertransformer/models/vit/vit_gemm.cc",
+            "src/fastertransformer/models/swin/Swin.cc",
+            "src/fastertransformer/models/swin/SwinBasicLayer.cc",
+            "src/fastertransformer/models/swin/SwinBlock.cc",
+            "src/fastertransformer/models/swin/swin_gemm.cc",
+            "src/fastertransformer/kernels/image_shift_partition_kernels.cu",
+            "src/fastertransformer/kernels/image_merge_kernels.cu",
+            "docs/vit_guide.md",
+            "docs/swin_guide.md"
+          ],
+          "minimal_modules": [
+            "ViT.cc 的 forward",
+            "Swin.cc / SwinBasicLayer / SwinBlock 的层级",
+            "image_shift_partition / image_merge kernel"
+          ],
+          "practice_task": "对比 ViT 与 BERT 的 forward，指出它们的 transformer block 几乎相同但输入构造不同（图像 patch embed vs token embedding），并说明 Swin 相比 ViT 多出哪两个专属 kernel。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "解码与生成基础",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Decoder 模型：单步自注意力与交叉注意力",
+          "order": 1,
+          "filename": "u5-l1-decoder-model.md",
+          "level": "intermediate",
+          "topic": "讲解 models/decoder 的单步 Decoder，如何结合 self-attention（masked）与对 encoder 输出的 cross-attention。",
+          "learning_goals": [
+            "理解 Decoder 单步前向的 self+cross attention 结构",
+            "掌握 Decoder 如何接收 encoder memory",
+            "了解与 BERT encoder 的复用关系"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/decoder/Decoder.cc",
+            "src/fastertransformer/models/decoder/Decoder.h",
+            "src/fastertransformer/models/decoder/DecoderLayerWeight.h",
+            "docs/decoder_guide.md"
+          ],
+          "minimal_modules": [
+            "Decoder.cc 的 forward",
+            "decoder_guide 的模型说明"
+          ],
+          "practice_task": "对照 Decoder.cc 与 decoder_guide，画出单步 Decoder 的数据流：self-attention（masked）→ cross-attention（以 encoder memory 为 K/V）→ FFN，并指出它复用了 BERT 里的哪些层。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Decoding 模型：端到端 beam search 与 sampling",
+          "order": 2,
+          "filename": "u5-l2-decoding-model.md",
+          "level": "intermediate",
+          "topic": "讲解 models/decoding 的端到端 Decoding：循环调用 Decoder 并在每步执行 beam search 或 sampling，以及 finished 判断与 early stopping。",
+          "learning_goals": [
+            "理解 Decoding 的逐步生成循环",
+            "掌握 beam search 与 sampling 在 Decoding 中的接入点",
+            "了解 finished mask 如何避免无效计算"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/decoding/Decoding.cc",
+            "src/fastertransformer/models/decoding/Decoding.h",
+            "src/fastertransformer/models/decoding/decoding_gemm.cc",
+            "docs/decoder_guide.md"
+          ],
+          "minimal_modules": [
+            "Decoding.cc 的生成主循环",
+            "decoding_gemm.cc 的 GEMM 初始化"
+          ],
+          "practice_task": "解释 Decoding 在每一步如何：①运行一次 Decoder 前向 ②对 logits 做 beam search/sampling ③更新 finished 状态，并说明 finished mask 如何跳过已完成序列的后续计算。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "GPT 与大模型推理",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ParallelGpt 架构：ContextDecoder 与 Decoder 分裂",
+          "order": 1,
+          "filename": "u6-l1-parallel-gpt.md",
+          "level": "advanced",
+          "topic": "讲解 multi_gpu_gpt/ParallelGpt 把首步 prompt（context）与后续自回归步拆成 ParallelGptContextDecoder 和 ParallelGptDecoder 的设计动机与协作。",
+          "learning_goals": [
+            "理解 context 阶段（处理整段 prompt）与 decoder 阶段（逐 token）的分裂",
+            "掌握 ParallelGpt forward 的输入输出张量约定",
+            "了解 GptInitilizedParams 的关键字段（beam_width/tensor_para/int8_mode 等）"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.cc",
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h",
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.cc",
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoder.cc",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "ParallelGpt.cc 的 forward 主循环",
+            "ParallelGptContextDecoder 与 ParallelGptDecoder 的分工",
+            "gpt_guide 的 Model architecture / Workflow"
+          ],
+          "practice_task": "画出 ParallelGpt 的两阶段流程：context decoder 处理整段 prompt 生成初始 KV cache，再由 decoder 逐步生成新 token，并说明为何要把两阶段拆开（kernel 选择不同）。",
+          "depends_on": [
+            "u5-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "KV Cache 机制与拼装",
+          "order": 2,
+          "filename": "u6-l2-kv-cache.md",
+          "level": "advanced",
+          "topic": "讲解 GPT 解码中 K/V cache 的存储布局、append 与重排（beam search 下的 cache 复制）以及 gpt_kernels 中的 transpose/tile 辅助 kernel。",
+          "learning_goals": [
+            "理解 K/V cache 的内存布局与每层缓存",
+            "掌握 beam search 时如何按 beam id 重排 cache",
+            "了解 invokeTransposeAxis01 / invokeTileGptInputs 等 cache 辅助 kernel"
+          ],
+          "source_files": [
+            "src/fastertransformer/kernels/gpt_kernels.cu",
+            "src/fastertransformer/kernels/gpt_kernels.h",
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoder.cc",
+            "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.cc"
+          ],
+          "minimal_modules": [
+            "gpt_kernels 的 transpose/tile/compact 系列函数",
+            "ParallelGptDecoder 中 cache 的 append 与重排"
+          ],
+          "practice_task": "解释在 beam search 第 t 步选出新 beam 后，KV cache 为什么必须按 beam 索引重新排列，并指出 gpt_kernels 中哪个 invokeXxx 负责这种 cache 的复制/重排。",
+          "depends_on": [
+            "u6-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "交互式生成、共享上下文与流式生成",
+          "order": 3,
+          "filename": "u6-l3-interactive-generation.md",
+          "level": "advanced",
+          "topic": "讲解 GPT 的交互式生成（interactive_inputs）、shared context（findContextDups 复用相同前缀）与 streaming generation 的实现。",
+          "learning_goals": [
+            "理解交互式生成如何复用上一轮 KV cache",
+            "掌握 shared context 通过去重减少重复 prompt 计算",
+            "了解流式生成在 Triton backend 的接入"
+          ],
+          "source_files": [
+            "examples/cpp/multi_gpu_gpt/multi_gpu_gpt_interactive_example.cc",
+            "examples/cpp/multi_gpu_gpt/multi_gpu_gpt_async_example.cc",
+            "src/fastertransformer/kernels/gpt_kernels.h",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "interactive / async example 的输入约定",
+            "gpt_kernels 中 invokeFindContextDups / invokeCompactInputs"
+          ],
+          "practice_task": "描述 shared context 优化的场景（多个请求共享同一系统 prompt），并解释 invokeFindContextDups 与 invokeCompactInputs 如何让这些请求只计算一次 context。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "模型变体：GPT-J / GPT-NeoX / BART / T5",
+          "order": 4,
+          "filename": "u6-l4-gpt-variants.md",
+          "level": "advanced",
+          "topic": "对比 GPT-J（rotary）、GPT-NeoX（rotary 变体+并行 layernorm）、BART（encoder-decoder）、T5（encoder-decoder + relative bias）等变体的差异与共享机制。",
+          "learning_goals": [
+            "理解 rotary position embedding 在 GPT-J/NeoX 中的应用",
+            "掌握 BART/T5 作为 encoder-decoder 与 GPT 的区别",
+            "了解各变体如何复用 ParallelGpt 风格的 context/decoder 分裂"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/gptj/GptJ.cc",
+            "src/fastertransformer/models/gptneox/GptNeoX.cc",
+            "src/fastertransformer/models/bart/BartDecoding.cc",
+            "src/fastertransformer/models/t5/T5Decoding.cc",
+            "docs/gptj_guide.md",
+            "docs/gptneox_guide.md",
+            "docs/t5_guide.md",
+            "docs/bart_guide.md"
+          ],
+          "minimal_modules": [
+            "GptJ / GptNeoX 的 rotary 与并行结构",
+            "BartDecoding / T5Decoding 的 encoder-decoder 生成"
+          ],
+          "practice_task": "制作一张对比表：GPT、GPT-J、GPT-NeoX、BART、T5 在「position encoding、是否有 encoder、activation、layernorm 位置」四个维度上的差异。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "并行与分布式推理",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "张量并行：基于 NCCL 的切分与 all-reduce",
+          "order": 1,
+          "filename": "u7-l1-tensor-parallel.md",
+          "level": "advanced",
+          "topic": "讲解 NcclParam 抽象与 ftNcclAllReduceSum/AllGather/BroadCast 等通信原语，以及 attention/FFN 层如何按 tensor_para 切分。",
+          "learning_goals": [
+            "理解 NcclParam 的 rank/world_size/comm 设计",
+            "掌握 TP 下 attention 与 FFN 的切分 + all-reduce",
+            "了解 ftNccl 系列通信原语的使用"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/nccl_utils.h",
+            "src/fastertransformer/utils/nccl_utils.cc",
+            "src/fastertransformer/layers/attention_layers/TensorParallelUnfusedAttentionLayer.cc",
+            "src/fastertransformer/layers/TensorParallelGeluFfnLayer.cc",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "nccl_utils 的 NcclParam 与 ftNccl 原语",
+            "TensorParallel attention/FFN 的切分点"
+          ],
+          "practice_task": "以一个 TP=4 的 transformer block 为例，写出 attention 输出与 FFN 输出分别在哪一步调用 ftNcclAllReduceSum，并解释列切分（不需要通信）与行切分（需要 all-reduce）的区别。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l4",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "流水并行与多节点：MPI 组织",
+          "order": 2,
+          "filename": "u7-l2-pipeline-parallel-mpi.md",
+          "level": "advanced",
+          "topic": "讲解 mpi_utils 如何用 MPI 初始化 ranks、划分 tensor_para 与 pipeline_para，以及多节点 GPT 推理如何在不同节点间切层。",
+          "learning_goals": [
+            "理解 mpi::initialize 与 rank/world_size 划分",
+            "掌握 pipeline_para 把不同层分配到不同 rank 组",
+            "了解多节点运行示例（mpirun / slurm）"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/mpi_utils.h",
+            "src/fastertransformer/utils/mpi_utils.cc",
+            "examples/cpp/multi_gpu_gpt/multi_gpu_gpt_example.cc",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "mpi_utils 的初始化与 rank 工具",
+            "multi_gpu_gpt_example 中 tensor_para/pipeline_para 的设定"
+          ],
+          "practice_task": "对照 multi_gpu_gpt_example.cc 的 main，解释 mpi::initialize 之后如何确定本进程的 tensor_para rank 与 pipeline_para rank，并写出在 2 节点 × 4 GPU 上跑 TP=4 PP=2 的大致启动方式。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "自定义 all-reduce kernel",
+          "order": 3,
+          "filename": "u7-l3-custom-allreduce.md",
+          "level": "advanced",
+          "topic": "讲解 custom_ar_comm / custom_ar_kernels 如何在 DGX-A100 等拓扑上用 CUDA 直连代替 NCCL all-reduce 以降低延迟。",
+          "learning_goals": [
+            "理解 custom all-reduce 的适用拓扑与限制",
+            "掌握 enable_custom_all_reduce 选项的开启方式",
+            "了解 custom_ar_comm 与 NCCL 的切换条件"
+          ],
+          "source_files": [
+            "src/fastertransformer/utils/custom_ar_comm.h",
+            "src/fastertransformer/utils/custom_ar_comm.cc",
+            "src/fastertransformer/kernels/custom_ar_kernels.cu",
+            "src/fastertransformer/kernels/custom_ar_kernels.h"
+          ],
+          "minimal_modules": [
+            "custom_ar_comm 的初始化与通信接口",
+            "custom_ar_kernels 的 reduce kernel"
+          ],
+          "practice_task": "说明 custom all-reduce 相比 NCCL 在哪些场景（拓扑、tensor_para_size）下能获得更低延迟，并列出 README 提到的两条限制。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "解码策略与动态解码",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "DynamicDecodeLayer：运行期参数与统一解码入口",
+          "order": 1,
+          "filename": "u8-l1-dynamic-decode-layer.md",
+          "level": "advanced",
+          "topic": "讲解 DynamicDecodeLayer 如何根据运行期 runtime_args（beam_search_diversity_rate、top_k、top_p 等）动态选择 beam search 或 sampling 后端。",
+          "learning_goals": [
+            "理解 runtime_arg_names_ 的运行期参数机制",
+            "掌握 DynamicDecodeLayer 在 topk/topp/beamsearch 间分发的逻辑",
+            "了解 setup 与 forward 的协作"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/DynamicDecodeLayer.h",
+            "src/fastertransformer/layers/DynamicDecodeLayer.cc",
+            "src/fastertransformer/layers/DynamicDecodeBaseLayer.h"
+          ],
+          "minimal_modules": [
+            "DynamicDecodeLayer 的 forward / setup",
+            "runtime_arg_names_ 的参数列表"
+          ],
+          "practice_task": "解释 DynamicDecodeLayer 如何做到在「同一次推理、不同请求」中分别使用 beam search 与 top-p sampling，并列出至少 4 个 runtime_arg 名称。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Beam search 层（含 online beam search）",
+          "order": 2,
+          "filename": "u8-l2-beam-search-layers.md",
+          "level": "advanced",
+          "topic": "讲解 beam search 层的 topk 选择、penalty（diversity_rate、length penalty）以及 OnlineBeamSearchLayer 的在线变体。",
+          "learning_goals": [
+            "理解 beam search 的 topk + penalty 计算流程",
+            "掌握 OnlineBeamSearch 与普通 BeamSearch 的区别",
+            "了解 beam_search_topk_kernels 的作用"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/beam_search_layers/BeamSearchLayer.cu",
+            "src/fastertransformer/layers/beam_search_layers/BeamSearchLayer.h",
+            "src/fastertransformer/layers/beam_search_layers/OnlineBeamSearchLayer.cu",
+            "src/fastertransformer/layers/beam_search_layers/BaseBeamSearchLayer.h",
+            "src/fastertransformer/kernels/beam_search_topk_kernels.cu",
+            "src/fastertransformer/kernels/beam_search_penalty_kernels.cu"
+          ],
+          "minimal_modules": [
+            "BeamSearchLayer 的 forward",
+            "beam_search_topk / penalty kernel"
+          ],
+          "practice_task": "描述 beam_width=4 时每步如何在 vocab logits 上选出 4×4 候选并收缩回 4 条 beam，并说明 length penalty 如何影响最终选择。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Sampling 层：Top-K 与 Top-P",
+          "order": 3,
+          "filename": "u8-l3-sampling-layers.md",
+          "level": "advanced",
+          "topic": "讲解 TopKSamplingLayer 与 TopPSamplingLayer 的实现，Top-P（nucleus）如何在排序后动态截断概率分布。",
+          "learning_goals": [
+            "理解 Top-K sampling 的选择机制",
+            "掌握 Top-P nucleus sampling 的排序与累积截断",
+            "了解 BaseSamplingLayer 的统一接口"
+          ],
+          "source_files": [
+            "src/fastertransformer/layers/sampling_layers/TopKSamplingLayer.cu",
+            "src/fastertransformer/layers/sampling_layers/TopKSamplingLayer.h",
+            "src/fastertransformer/layers/sampling_layers/TopPSamplingLayer.cu",
+            "src/fastertransformer/layers/sampling_layers/TopPSamplingLayer.h",
+            "src/fastertransformer/layers/sampling_layers/BaseSamplingLayer.h"
+          ],
+          "minimal_modules": [
+            "TopKSamplingLayer / TopPSamplingLayer 的 forward",
+            "BaseSamplingLayer 接口"
+          ],
+          "practice_task": "解释 Top-P sampling 为什么需要对 logits 排序并按累积概率截断，而 Top-K 只需取最大的 K 个，并写出两者在并行 kernel 实现上的关键差异点。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "量化与高性能 GEMM",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "INT8 量化推理：BertINT8 与 SmoothQuant",
+          "order": 1,
+          "filename": "u9-l1-int8-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 bert_int8 模型与 INT8 kernel、ScaleList，以及 SmoothQuant（w8a8）思路和 int8_mode 的分级。",
+          "learning_goals": [
+            "理解 int8_mode 各级别的含义（weight-only / w8a8）",
+            "掌握 ScaleList 与量化/反量化 kernel 的协作",
+            "了解 SmoothQuant 的激活平滑思路"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/bert_int8/BertINT8.cc",
+            "src/fastertransformer/models/bert_int8/BertLayerINT8.cc",
+            "src/fastertransformer/utils/ScaleList.h",
+            "src/fastertransformer/utils/cublasINT8MMWrapper.cc",
+            "src/fastertransformer/kernels/int8_utils.cuh",
+            "src/fastertransformer/kernels/layernorm_int8_kernels.cu",
+            "docs/bert_guide.md"
+          ],
+          "minimal_modules": [
+            "BertINT8 / BertLayerINT8 的前向",
+            "cublasINT8MMWrapper 与 ScaleList",
+            "int8_utils / layernorm_int8"
+          ],
+          "practice_task": "对照 bert_guide 说明 weight-only INT8 与 w8a8（SmoothQuant）INT8 在精度收益和适用 batch 上的差异，并指出 ScaleList 中保存的是哪类缩放因子。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "权重仅量化与 CUTLASS 混合 GEMM",
+          "order": 2,
+          "filename": "u9-l2-weight-only-cutlass-gemm.md",
+          "level": "advanced",
+          "topic": "讲解 weight-only quantization（fpA_intB）通过 CUTLASS 混合精度 GEMM 实现，以及离线权重预处理与 cutlass_heuristic 选 kernel。",
+          "learning_goals": [
+            "理解 weight-only 量化为何对小 batch 大权重矩阵收益明显",
+            "掌握 CUTLASS fpA_intB 混合 GEMM 的输入布局",
+            "了解 cutlass_heuristic 如何按 shape 选最优 kernel"
+          ],
+          "source_files": [
+            "src/fastertransformer/kernels/cutlass_kernels/fpA_intB_gemm/",
+            "src/fastertransformer/kernels/cutlass_kernels/cutlass_heuristic.cc",
+            "src/fastertransformer/kernels/cutlass_kernels/cutlass_preprocessors.cc",
+            "src/fastertransformer/kernels/calibrate_quantize_weight_kernels.cu",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "fpA_intB_gemm 的混合精度 GEMM",
+            "cutlass_heuristic / cutlass_preprocessors",
+            "calibrate_quantize_weight kernel"
+          ],
+          "practice_task": "解释 weight-only 量化把权重存为 INT8/INT4 但激活仍为 FP16 的原因，并说明 cutlass_preprocessors 离线对权重做哪种预处理以适配 tensor core。",
+          "depends_on": [
+            "u9-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "FP8 推理（实验性）",
+          "order": 3,
+          "filename": "u9-l3-fp8-inference.md",
+          "level": "advanced",
+          "topic": "讲解 bert_fp8 / gpt_fp8 模型、cublasFP8MMWrapper 与 FP8 kernel，以及 Hopper 上 FP8 的使能条件（ENABLE_FP8）。",
+          "learning_goals": [
+            "理解 FP8 E4M3 数据类型与适用硬件",
+            "掌握 gpt_fp8/bert_fp8 的前向结构",
+            "了解 ENABLE_FP8 编译开关与条件编译"
+          ],
+          "source_files": [
+            "src/fastertransformer/models/gpt_fp8/GptFP8.cc",
+            "src/fastertransformer/models/gpt_fp8/GptFP8.h",
+            "src/fastertransformer/models/bert_fp8/",
+            "src/fastertransformer/utils/cublasFP8MMWrapper.cu",
+            "src/fastertransformer/utils/cuda_fp8_utils.cu",
+            "src/fastertransformer/kernels/activation_fp8_kernels.cu",
+            "src/fastertransformer/kernels/layernorm_fp8_kernels.cu",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "GptFP8 / bert_fp8 的前向",
+            "cublasFP8MMWrapper / cuda_fp8_utils",
+            "activation_fp8 / layernorm_fp8 kernel"
+          ],
+          "practice_task": "对照 gpt_guide 的 FP8 章节与 GptFP8.cc，说明启用 FP8 需要哪些条件（CUDA 版本、架构、cmake 选项），并指出 FP8 相比 INT8 w8a8 的精度优势来源。",
+          "depends_on": [
+            "u9-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "CUTLASS 扩展与 MoE GEMM",
+          "order": 4,
+          "filename": "u9-l4-cutlass-moe-gemm.md",
+          "level": "advanced",
+          "topic": "讲解 cutlass_extensions 对官方 CUTLASS 的扩展、int8_gemm 与 moe_gemm 内核，以及 GPT-MoE/T5-MoE 如何用 MoE GEMM。",
+          "learning_goals": [
+            "理解 cutlass_extensions 扩展了哪些 GEMM 能力",
+            "掌握 MoE GEMM 的分组计算特点",
+            "了解 BUILD_CUTLASS_MOE / BUILD_CUTLASS_MIXED_GEMM 编译选项"
+          ],
+          "source_files": [
+            "src/fastertransformer/cutlass_extensions/include/",
+            "src/fastertransformer/kernels/cutlass_kernels/moe_gemm/",
+            "src/fastertransformer/kernels/cutlass_kernels/int8_gemm/",
+            "CMakeLists.txt",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "cutlass_extensions 的扩展头文件",
+            "moe_gemm / int8_gemm 内核",
+            "CMake 中 BUILD_CUTLASS_MOE / MIXED_GEMM 选项"
+          ],
+          "practice_task": "解释 MoE 场景下「多个 expert 的 GEMM」为何需要专门的 grouped MoE GEMM kernel 而非逐 expert 调用 cuBLAS，并说明 BUILD_CUTLASS_MOE 开启会带来什么代价（编译时间）。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "框架集成与部署",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "PyTorch 集成：th_op 扩展",
+          "order": 1,
+          "filename": "u10-l1-pytorch-thop.md",
+          "level": "intermediate",
+          "topic": "讲解 th_op 如何把 C++ 模型封装成 torch 自定义 op（如 ParallelGptOp、BertOp），以及 examples/pytorch 的端到端使用与权重转换脚本。",
+          "learning_goals": [
+            "理解 th_op 的 Op 封装与 th_utils 张量桥接",
+            "掌握 ParallelGptOp / BertOp 的注册与调用",
+            "了解 examples/pytorch 下的 checkpoint 转换流程"
+          ],
+          "source_files": [
+            "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc",
+            "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.h",
+            "src/fastertransformer/th_op/bert/BertOp.cc",
+            "src/fastertransformer/th_op/th_utils.h",
+            "src/fastertransformer/th_op/th_utils.cu",
+            "src/fastertransformer/th_op/common/GptOps.cc"
+          ],
+          "minimal_modules": [
+            "ParallelGptOp / BertOp 的 forward 绑定",
+            "th_utils 的 torch↔FT 张量转换"
+          ],
+          "practice_task": "对照 ParallelGptOp.cc 与 th_utils.h，描述一个 torch tensor 如何被零拷贝映射成 FT 的 Tensor（指针、shape、device），并说明 BUILD_PYT 编译产物是一个怎样的 .so 扩展。",
+          "depends_on": [
+            "u1-l4",
+            "u6-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "TensorFlow 集成：tf_op",
+          "order": 2,
+          "filename": "u10-l2-tensorflow-tfop.md",
+          "level": "intermediate",
+          "topic": "讲解 tf_op 如何把 FT 封装为 TensorFlow 自定义 OP（BaseOp + 各模型 Op），以及 BUILD_TF/BUILD_TF2 的编译与 TF_PATH 设置。",
+          "learning_goals": [
+            "理解 BaseOp 抽象与 TF OP 的注册方式",
+            "掌握 bert/encoder/decoder/decoding/gpt 的 tf_op 组织",
+            "了解 TF 扩展在编译期的依赖（TF_PATH）"
+          ],
+          "source_files": [
+            "src/fastertransformer/tf_op/BaseOp.h",
+            "src/fastertransformer/tf_op/bert/",
+            "src/fastertransformer/tf_op/encoder/",
+            "src/fastertransformer/tf_op/gpt/",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "BaseOp 的 TF OP 基类",
+            "tf_op 下各模型 OP 目录组织"
+          ],
+          "practice_task": "对照 BaseOp.h 与一个 bert tf_op，说明 FT 的 TF OP 如何接收 TF Tensor、转换为内部 Tensor 并在 GPU stream 上执行，并写出编译 TF 模式时 cmake 需要的 -D 参数。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "Triton backend 部署",
+          "order": 3,
+          "filename": "u10-l3-triton-backend.md",
+          "level": "advanced",
+          "topic": "讲解 triton_backend 如何把 FT 包装成 Triton inference server 的自定义 backend（XxxTritonModel + XxxTritonModelInstance），以及多 GPU GPT 在 Triton 上的部署。",
+          "learning_goals": [
+            "理解 TritonModel / TritonModelInstance 的分层",
+            "掌握 multi_gpu_gpt / bert / t5 / gptj 等 backend 的组织",
+            "了解 USE_TRITONSERVER_DATATYPE 选项的作用"
+          ],
+          "source_files": [
+            "src/fastertransformer/triton_backend/transformer_triton_backend.hpp",
+            "src/fastertransformer/triton_backend/transformer_triton_backend.cpp",
+            "src/fastertransformer/triton_backend/multi_gpu_gpt/ParallelGptTritonModel.cc",
+            "src/fastertransformer/triton_backend/multi_gpu_gpt/ParallelGptTritonModelInstance.cc",
+            "src/fastertransformer/triton_backend/bert/BertTritonModel.cc",
+            "examples/cpp/multi_gpu_gpt/multi_gpu_gpt_triton_example.cc",
+            "docs/gpt_guide.md"
+          ],
+          "minimal_modules": [
+            "transformer_triton_backend 的通用封装",
+            "ParallelGptTritonModel / Instance",
+            "triton_example 的部署演示"
+          ],
+          "practice_task": "对照 ParallelGptTritonModel 与其 ModelInstance，说明 Model 负责加载权重/构造参数、ModelInstance 负责单次请求 forward 的分层意义，并解释 triton_example 如何用线程做 intra-node 并行而用 MPI 做 inter-node。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "TensorRT plugin 集成",
+          "order": 4,
+          "filename": "u10-l4-tensorrt-plugin.md",
+          "level": "advanced",
+          "topic": "讲解 tensorrt_plugin 如何把 FT（bert_fp8/swin/t5/vit/wenet）封装为 TensorRT plugin，以及与直接 FT 推理的取舍。",
+          "learning_goals": [
+            "理解 TensorRT plugin 的封装方式",
+            "掌握 tensorrt_plugin 支持的模型集合",
+            "了解 TensorRT 部署与 Triton 部署的差异"
+          ],
+          "source_files": [
+            "src/fastertransformer/tensorrt_plugin/bert_fp8/",
+            "src/fastertransformer/tensorrt_plugin/t5/",
+            "src/fastertransformer/tensorrt_plugin/vit/",
+            "src/fastertransformer/tensorrt_plugin/swin/",
+            "src/fastertransformer/tensorrt_plugin/wenet/",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "tensorrt_plugin 下各模型 plugin 目录",
+            "CMake 中 BUILD_TRT 选项"
+          ],
+          "practice_task": "列出 tensorrt_plugin 当前支持的 5 个模型类别，并说明在已有 FT C++ 模型的情况下，把它再封装为 TensorRT plugin 的收益（融入 TRT 图优化、序列化 engine）与代价。",
+          "depends_on": [
+            "u10-l3",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "工程实践与扩展",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "测试与基准：tests 与 benchmarks",
+          "order": 1,
+          "filename": "u11-l1-tests-benchmarks.md",
+          "level": "intermediate",
+          "topic": "讲解 tests/ 下的单元测试（unittests gtest、sampling/attention/gemm 等）与 benchmarks/ 脚本如何验证正确性与测量性能。",
+          "learning_goals": [
+            "理解 tests/unittests 的 gtest 组织",
+            "掌握 benchmark 脚本（tf/pyt benchmark）的运行方式",
+            "了解 GEMM / sampling / attention 测试如何定位回归"
+          ],
+          "source_files": [
+            "tests/unittests/test_sampling.cu",
+            "tests/unittests/test_attention_kernels.cu",
+            "tests/unittests/test_gemm.cu",
+            "tests/unittests/test_tensor.cu",
+            "tests/CMakeLists.txt",
+            "benchmarks/bert/pyt_benchmark.sh",
+            "benchmarks/bert/tf_benchmark.sh"
+          ],
+          "minimal_modules": [
+            "tests/unittests 的 gtest 用例",
+            "benchmarks 脚本"
+          ],
+          "practice_task": "选择 test_sampling.cu 或 test_attention_kernels.cu，说明它如何构造输入、调用 FT kernel 并与参考实现比较以验证正确性，并写出运行 benchmarks/bert/pyt_benchmark.sh 需要的前置条件。",
+          "depends_on": [
+            "u3-l2",
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "新增模型指南：从 templates 出发",
+          "order": 2,
+          "filename": "u11-l2-adding-new-model.md",
+          "level": "advanced",
+          "topic": "以 templates/adding_a_new_model 为指引，讲解如何复用 attention/FFN/layernorm 组件、新增 models/<model> 与专属 layer、并补齐 example 与 guide 的完整贡献流程。",
+          "learning_goals": [
+            "掌握新增模型的标准 7 步流程",
+            "理解复用现有 layer 而非改动既有模型的原则",
+            "了解编码风格（文件名/函数名/变量名）与 PR 要求"
+          ],
+          "source_files": [
+            "templates/adding_a_new_model/README.md",
+            "src/fastertransformer/models/longformer/",
+            "src/fastertransformer/layers/attention_layers/LongformerAttentionLayer.cc",
+            "src/fastertransformer/layers/attention_layers/LongformerAttentionLayer.h"
+          ],
+          "minimal_modules": [
+            "templates 的 7 步指引",
+            "longformer 作为新增模型范例（专属 attention layer + model 目录）"
+          ],
+          "practice_task": "以 Longformer 为范例，按 templates 的 7 步写一份「新增某 transformer 变体模型」的计划：指出哪些组件可复用（FFN、layernorm）、哪些必须新建（专属 attention layer），以及 example 与 guide 应放在哪里。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3",
+            "u3-l4",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
