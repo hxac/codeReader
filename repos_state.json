@@ -9801,36 +9801,43 @@
           "error": null
         },
         "u11-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196395,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.810456,
+          "error": null
         },
         "u11-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.5821070000000002,
+          "error": null
         },
         "u11-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.726435,
+          "error": null
         },
         "u11-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.983392,
+          "error": null
         }
       },
       "manifest_head": "80ebbc396aee40eedc1d829222f3362d10fa4c6c",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/antirez/ds4/ds4-tutorial",
       "last_head": "80ebbc396aee40eedc1d829222f3362d10fa4c6c",
-      "last_run_at": "2026-07-07T11:01:35Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-07T13:01:40Z",
+      "last_error": null,
+      "abandoned": []
     },
     "NVIDIA/FasterTransformer": {
       "prompt_hash": "b21aef51792b02df",
@@ -10053,11 +10060,11 @@
           "error": null
         },
         "u9-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":599642,\"duration_api_ms\":233398,\"num_turns\":36,\"result\":\"API Error: The operation timed out.\","
+          "cost": 1.947937,
+          "error": null
         },
         "u9-l3": {
           "status": "done",
@@ -10076,29 +10083,37 @@
         "u10-l1": {
           "status": "failed",
           "action": "new",
-          "retries": 0,
+          "retries": 1,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":187821,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":419765,\"duration_api_ms\":171851,\"num_turns\":27,\"result\":\"API Error: The operation timed out.\","
         },
         "u10-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.464357,
+          "error": null
         },
         "u10-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.7548790000000003,
+          "error": null
         },
         "u10-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.237031,
+          "error": null
         },
         "u11-l1": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":190810,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u11-l2": {
           "status": "pending",
@@ -10112,7 +10127,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/NVIDIA/FasterTransformer/FasterTransformer-tutorial",
       "last_head": "df4a7534860137e060e18d2ebf019906120ea204",
-      "last_run_at": "2026-07-07T11:01:35Z",
+      "last_run_at": "2026-07-07T13:01:40Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "xlite-dev/ffpa-attn": {
@@ -10266,11 +10281,11 @@
           "error": null
         },
         "u5-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 1,
-          "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":419785,\"duration_api_ms\":118776,\"num_turns\":11,\"result\":\"API Error: The operation timed out.\","
+          "cost": 2.1218269999999997,
+          "error": null
         },
         "u6-l1": {
           "status": "done",
@@ -10280,26 +10295,32 @@
           "error": null
         },
         "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.288688,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.646496,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":659782,\"duration_api_ms\":218249,\"num_turns\":16,\"result\":\"API Error: The operation timed out.\","
+        },
+        "u7-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186471,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192915,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u7-l2": {
           "status": "pending",
@@ -10373,7 +10394,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/xlite-dev/ffpa-attn/ffpa-attn-tutorial",
       "last_head": "882989c2a3aa465867de9ea2dbd19dbed08660d9",
-      "last_run_at": "2026-07-07T11:01:35Z",
+      "last_run_at": "2026-07-07T13:01:40Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "Dao-AILab/flash-attention": {
@@ -10483,36 +10504,46 @@
           "error": null
         },
         "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 3.624768,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.401955,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.491665,
+          "error": null
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.388415,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9279579999999998,
+          "error": null
+        },
+        "u9-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193776,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":191921,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u9-l3": {
           "status": "pending",
@@ -10566,10 +10597,14 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/Dao-AILab/flash-attention/flash-attention-tutorial",
       "last_head": "5835c733e7e9c07606b045255768e8a7e9e851bd",
-      "last_run_at": "2026-07-07T11:01:35Z",
+      "last_run_at": "2026-07-07T13:01:40Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "flashinfer-ai/flashinfer": {},
+    "flashinfer-ai/flashinfer": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n\n{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"duration_ms\":2,\"duration_api_ms\":714004,\"is_error\":true,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"e9e1c839-46f5-4422-8414-d3c072093393\",\"total_cost_usd\":3.021624,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cac",
+      "last_run_at": "2026-07-07T13:01:40Z"
+    },
     "deepseek-ai/FlashMLA": {},
     "WangXuan95/FPGA-FixedPoint": {},
     "WangXuan95/FPGA-FOC": {},

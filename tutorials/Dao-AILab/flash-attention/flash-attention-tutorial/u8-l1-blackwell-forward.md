@@ -2,17 +2,16 @@
 
 ## 1. 本讲目标
 
-本讲进入专家层，剖析 FA4 在 Blackwell（SM100/SM110）架构上的前向 kernel `FlashAttentionForwardSm100`。它是 FA4 中「最复杂、最高性能、特性最全」的前向实现。
+本讲带你走进 FA4 中最"重"的一块代码：Blackwell（SM100/SM110）专用前向 kernel `FlashAttentionForwardSm100`。
 
-读完本讲你应该能够：
+读完本讲，你应当能够：
 
-- 说清 **UMMA（tcgen05 矩阵乘单元）** 与 Ampere/Hopper 的 MMA 在指令层面有什么本质区别；
-- 解释 **片上 tmem 累加**（accumulator 落在 tmem 而非寄存器）为什么能同时省寄存器、省 smem 往返；
-- 画出 **persistent kernel（持久化 kernel）** 的运行模型：一个 CTA 在 `while` 循环里连续吃多个 work tile；
-- 知道 SplitKV、Paged KV、2CTA 这三大高级特性是如何「集成」进同一条 kernel 主干的，以及它们之间的互斥/退化关系；
-- 能在源码里定位上述每一项特性对应的代码段或类。
+1. 说清楚 **UMMA**（基于 `tcgen05` 的矩阵乘单元）是什么，它和 Ampere（`flash_fwd.py`）、Hopper（`flash_fwd_sm90.py`）的 MMA 在**累加器位置**上的本质区别。
+2. 理解 Blackwell 把累加器从寄存器（rmem）搬到了片上专用存储 **tmem**（tensor memory），并能看懂源码里 tmem 是如何被分区成 S（分数）、P（概率）、O（输出）三块的。
+3. 描述 **persistent kernel** 的运行模型：grid 里的 CTA 不再"一个 CTA 干一块然后退出"，而是在一个 `while work_tile.is_valid_tile` 循环里反复从 tile scheduler 领取新的工作块。
+4. 知道这个 kernel 同时集成了 SplitKV、paged KV、2CTA、块稀疏、varlen、pack_gqa、CLC 调度等几乎所有高级特性，并能指出每项特性在源码里的入口。
 
-本讲只看「全景与主干」。2CTA 的死锁排查、tile scheduler 的 CLC 动态调度、MMA descriptor 字段拆解分别在 u8-l2 / u8-l4 / u8-l3 单独深入。
+本讲是高级（advanced）层，只看"全景与主干"。前置是你已经读过 **u6-l1（Ampere 前向主循环）** 和 **u6-l2（Hopper 前向与 TMA）**，并对在线 softmax、tiling、TMA、命名屏障有基本概念。2CTA 死锁排查、CLC 动态调度、MMA descriptor 字段拆解分别在 u8-l4 / u8-l2 / u8-l3 单独深入。
 
 ## 2. 前置知识
 
@@ -27,460 +26,434 @@
 需要新引入的 Blackwell 硬件术语：
 
 | 术语 | 含义 |
-|------|------|
-| **tcgen05** | Blackwell 第 5 代 Tensor Core 指令族（`tcgen05.mma` 等）的总称 |
-| **UMMA** | Unified MMA，tcgen05 的矩阵乘指令。操作数可来自 smem 或 **tmem**，累加器必在 tmem |
-| **tmem（tensor memory）** | Blackwell 新增的、挂在 tcgen05 单元旁的片上存储（每 CTA 约 256 KB / 512 列），与寄存器文件、smem 并列的第四级存储 |
-| **CTA group / 2CTA** | 一条 UMMA 指令可由 `cta_group::2` 跨集群内两个 CTA 协作算更大的行块 |
-| **persistent kernel** | CTA 数固定为 SM 数量级，每个 CTA 在循环里反复领取新 tile，而非「一个 tile 一个 CTA」 |
-| **CLC** | Cooperative Launch Control，硬件动态 work-stealing 调度器（u8-l2 详讲） |
+| --- | --- |
+| **tmem**（tensor memory） | Blackwell 引入的片上专用存储，按"列"组织，是 UMMA 累加器的居所 |
+| **UMMA / tcgen05.mma** | Blackwell 的矩阵乘单元及其 PTX 指令，累加器在 tmem |
+| **idesc**（instruction descriptor） | 32 位指令描述符，编码一次 UMMA 的 dtype / M/N / 主轴 / 取反等 |
+| **persistent kernel** | CTA 在循环里持续领活而非算完即退，减少启动开销与尾延迟 |
+| **CLC**（Cooperative Launch Control） | Blackwell 硬件级动态 persistent 调度 |
+
+> 术语提醒：本仓库源码里把 Blackwell 辅助函数习惯叫做 `sm100_utils`、`sm100_utils_basic`、`sm100_desc`，分别对应 `flash_attn/cute/blackwell_helpers.py`、CUTLASS 自带的 `cutlass.utils.blackwell_helpers`、以及 `flash_attn/cute/mma_sm100_desc.py`。看到 `sm100` 不要误以为是抽象代号，它就是 Blackwell 架构代号。
 
 ## 3. 本讲源码地图
 
+本讲主要围绕以下文件展开：
+
 | 文件 | 作用 |
-|------|------|
-| [`flash_attn/cute/flash_fwd_sm100.py`](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py) | 本讲主角。`FlashAttentionForwardSm100` 类，约 3150 行，包含 host 端 `__call__` 与 device 端 `kernel` 及 Load/MMA/Softmax/Correction/Epilogue 五类 warp 实现 |
-| [`flash_attn/cute/blackwell_helpers.py`](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py) | UMMA 的 PTX 内联汇编封装（`gemm` / `gemm_ptx` / `gemm_ptx_precomputed_varname` 等）与 idesc/smem descriptor 工具 |
-| [`flash_attn/cute/named_barrier.py`](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/named_barrier.py) | `NamedBarrierFwdSm100`：Blackwell 前向用到的编号屏障枚举（TmemPtr、SoftmaxStatsW0..W7、Epilogue） |
-| [`flash_attn/cute/tile_scheduler.py`](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/tile_scheduler.py) | `SingleTileScheduler` / `StaticPersistentTileScheduler` / `SingleTileLPTScheduler` / `SingleTileVarlenScheduler` 与 `SchedulingMode`、`ClcState` |
-| [`flash_attn/cute/mma_sm100_desc.py`](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/mma_sm100_desc.py) | UMMA 的 idesc / smem descriptor 构造（u8-l3 详讲） |
-| [`flash_attn/cute/paged_kv.py`](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/paged_kv.py) | `PagedKVManager`：非 TMA 分页 KV 的散列 gather（u7-l3 讲过，本讲只看它如何被 Sm100 kernel 接入） |
+| --- | --- |
+| [flash_fwd_sm100.py](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py) | Blackwell 前向 kernel `FlashAttentionForwardSm100` 主体，约 3150 行，是本讲绝对主角 |
+| [blackwell_helpers.py](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py) | UMMA 的 PTX 包装：把 `cute.gemm` 落成一条条 `tcgen05.mma` 内联汇编，含 `gemm_ptx_partial`、`gemm_ptx_precomputed_varname` 等 |
+| [mma_sm100_desc.py](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/mma_sm100_desc.py) | MMA **指令描述符（idesc）** 与 **共享内存描述符** 的位域打包 |
+| [tile_scheduler.py](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/tile_scheduler.py) | persistent 调度器：`StaticPersistentTileScheduler`、`SingleTileLPTScheduler`、`SingleTileVarlenScheduler`，以及 CLC 状态机 `ClcState` |
+| [named_barrier.py](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/named_barrier.py) | Blackwell 前向专用命名屏障枚举 `NamedBarrierFwdSm100` |
 
-文件头部的注释本身就列出了支持矩阵，建议先读一眼：
+`FlashAttentionForwardSm100` 的方法结构（行号供定位）：
 
-- 支持：BF16/FP16、非因果/因果、MHA/GQA/MQA、hdim 64/96/128/(192,128)、varlen、sliding window、split-kv（见 [flash_fwd_sm100.py:1-11](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1-L11)）。
+- `__init__`（配置、warp 角色分配、tmem 分区、特性开关）
+- `_setup_attributes`（smem 大小、流水级数 `kv_stage`）
+- `__call__`（`@cute.jit`，建 TMA descriptor、smem 布局、屏障，并启动 kernel）
+- `kernel`（`@cute.kernel`，warp 专门化分发 + tmem 分配）
+- `load`（producer warp：TMA / cp.async 搬 Q/K/V，paged KV、块稀疏）
+- `mma`（consumer warp：跑 UMMA，持有 persistent 工作循环与内层 K/V 循环）
+- `softmax_loop` / `softmax_step`（softmax warp：从 tmem 读 S、算在线 softmax、把 P 写回 tmem）
+- `correction_loop` / `correction_rescale` / `correction_epilogue`（correction warp：对 O 重缩放、写 LSE、回写 O）
+- `epilogue_s2g`（epilogue warp：把 O 从 smem 搬回 gmem）
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成 4 个最小模块：
-
-1. **4.1 UMMA / tcgen05 GEMM** —— 新的矩阵乘指令长什么样。
-2. **4.2 片上 tmem 累加** —— 累加器搬进 tmem，连带 softmax 全流程留片上。
-3. **4.3 persistent kernel 运行模型** —— 一个 CTA 干多个 tile，scheduler 来派活。
-4. **4.4 全特性集成** —— SplitKV / Paged KV / 2CTA 如何挂进同一条主干。
-
-### 4.1 UMMA / tcgen05 GEMM
+### 4.1 UMMA 与 MMA descriptor：在 tmem 里做矩阵乘
 
 #### 4.1.1 概念说明
 
-Ampere 的 MMA（`mma.sync`，16×8×16）和 Hopper 的 WGMMA（`wg.mma`，64 行，操作数取 smem、异步、累加器在寄存器）你已经见过。Blackwell 把这条线再推一步，得到 **tcgen05.mma（UMMA）**，它有三个关键不同：
+UMMA（Unified MMA）是 Blackwell 的新一代矩阵乘单元，对应 PTX 里的 `tcgen05.mma` 指令。理解它的关键在于一句话：
 
-1. **累加器在 tmem，不在寄存器。** UMMA 写入的目标 `[tmem_acc]` 是 tmem 地址。这意味着巨大的累加器（一个 128×128 的 fp32 累加块就是 16384 个 fp32）不占寄存器文件，省下的寄存器可以养更深的流水、更大的 tile。
-2. **操作数 A 可以来自 tmem。** 对 PV 这一段 GEMM（`P @ V`），P（softmax 概率）由 softmax warp 写进 tmem 后，UMMA 直接从 tmem 读 P 当操作数 A，**P 全程不进 smem**。
-3. **`cta_group::2` 跨 CTA 协作。** 一条 UMMA 指令可以让集群（cluster）里两个 CTA 合算一个 `2×m_block_size` 行的大 tile，这就是 2CTA。
+> **UMMA 的累加器（C 矩阵）住在片上 tmem，而不是寄存器。**
 
-一句话总结：**UMMA 把「累加器」和「GEMM 的输入」都搬到了 tmem，从而把寄存器解放出来，并让 softmax↔MMA 之间免 smem 往返。**
+在 Ampere/Hopper 上，MMA 是"寄存器 → 寄存器"：输入 A、B 和累加器 C 都在寄存器里，MMA 把结果写回寄存器（`acc_O`、`acc_S` 都是寄存器张量）。Blackwell 的 UMMA 则是：
+
+- A 操作数：可以来自 smem 或 tmem；
+- B 操作数：来自 smem；
+- **C（累加器）：在 tmem**。
+
+为什么把累加器搬到 tmem？因为 tmem 是一块大得多的专用片上存储（SM100 上每 CTA 可分配多达数百"列"），且**不挤占通用寄存器**。注意力里 O 累加器很大（`tile_m × head_dim_v`），放寄存器会带来巨大寄存器压力；放 tmem 既省寄存器，又让一条 MMA 指令能覆盖更大的 tile。这就是 Blackwell FA 能跑更大 tile、更高吞吐的硬件根基。
+
+为了让一条 `tcgen05.mma` 指令"知道"要算什么，硬件需要两个描述符：
+
+1. **指令描述符 idesc（32 位）**：编码 A/B/C 的元素格式、矩阵 M/N 维度、主轴（K-major 还是 MN-major）、是否取反、是否饱和。
+2. **共享内存描述符（64 位）**：编码 smem 里 B 矩阵（以及 A 矩阵如果它在 smem）的基地址、字节步长、swizzle 模式。
 
 #### 4.1.2 核心流程
 
-UMMA 在 kernel 里的使用分两段 GEMM，对应你已经在 Ampere/Hopper 见过的节奏，只是把指令换了：
+UMMA 的一次矩阵乘大致是：
 
 ```
-QK 段：  Q(smem) · K(smem)^T  --tcgen05.mma-->  S(tmem)        # 操作数都来自 smem
-softmax: S(tmem) --读--> softmax warps --写--> P(tmem)
-PV 段：  P(tmem) · V(smem)    --tcgen05.mma-->  O(tmem)        # A 来自 tmem, B 来自 smem
+准备 idesc (32位，由 a/b/c dtype + M/N + major 打包)
+准备 B 的 smem descriptor (64位，地址+步长+swizzle)
+准备 C 的 tmem 地址 (累加器在 tmem 的列偏移)
+发射 tcgen05.mma.kind::{kind} [tmem_C], smem_desc_A, smem_desc_B, idesc
 ```
 
-注意 PV 段 A 的来源是 tmem，这一点在构造 tiled MMA 时就被显式声明为 `OperandSource.TMEM`。host 端构造两个 tiled MMA（QK 与 PV）的代码在 [flash_fwd_sm100.py:476-500](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L476-L500)：
-
-```python
-cta_group = tcgen05.CtaGroup.TWO if self.use_2cta_instrs else tcgen05.CtaGroup.ONE
-...
-p_source = tcgen05.OperandSource.TMEM          # PV 段的 P 来自 tmem
-p_major_mode = tcgen05.OperandMajorMode.K
-tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
-    self.q_dtype, q_major_mode, k_major_mode, self.qk_acc_dtype, cta_group, self.mma_tiler_qk[:2])
-tiled_mma_pv = sm100_utils_basic.make_trivial_tiled_mma(
-    self.v_dtype, p_major_mode, v_major_mode, self.pv_acc_dtype, cta_group, self.mma_tiler_pv[:2], p_source)
-```
-
-真正发射 UMMA 指令的地方在 MMA warp 内。QK 段用 `gemm_ptx_precomputed_varname`、PV 段用 `gemm_ptx_partial`，二者都被预先 `partial` 绑定好累加器地址，见 [flash_fwd_sm100.py:1590-1642](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1590-L1642)：
-
-```python
-gemm_Si = [partial(sm100_utils.gemm_ptx_precomputed_varname,
-            self.tmem_s_offset[stage], smem_desc_base_b=k_smem_base,
-            ..., kind=qk_mma_kind, zero_init=True, cta_group=self.cta_group_size)
-           for stage in range(self.q_stage)]
-gemm_Pi = [partial(sm100_utils.gemm_ptx_partial, pv_mma_op, self.tmem_o_offset[stage],
-            tOrP[None, None, None, stage], sA=None, ..., cta_group=self.cta_group_size)
-           for stage in range(self.q_stage)]
-```
-
-注意 `self.tmem_s_offset[stage]` 是 S 累加器的 tmem 地址，`self.tmem_o_offset[stage]` 是 O 累加器的 tmem 地址——累加器位置是手算出来的常量地址（见 4.2）。
+`kind` 是数据类型对应的 MMA 种类（如 `f16`、`f8f6f4`、`tf32`），由 `MmaOp` 推断。累加与否通过 `tcgen05.Field.ACCUMULATE` 字段控制：第一次写时要 `zero_init`，后续要 `ACCUMULATE`。
 
 #### 4.1.3 源码精读
 
-底层 PTX 长什么样？看 [blackwell_helpers.py:1036-1096](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py#L1036-L1096) 里的内联汇编，最核心的一行是：
+**idesc 的位域打包** 在 `mma_sm100_desc.py`：
 
-```ptx
-elect.sync _|leader_thread, -1;                       ; 只让一个线程发射
-...
-@leader_thread tcgen05.mma.cta_group::{cta_group}.kind::{kind} [tmem_acc],
-               {smem_var_name_prefix}_0, smem_desc_b_0, {idesc_var_name}, {pred_str};
-```
+[mma_sm100_desc.py:111-162](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/mma_sm100_desc.py#L111-L162)
 
-这段汇编说明三件事：① 只有一个 leader 线程（`elect.sync`）发射指令，UMMA 由整个 CTA/warp-group 隐式执行；② 累加器是 `[tmem_acc]`（tmem 地址）；③ `cta_group` 是 1 或 2，直接决定是否 2CTA。
+这段把 A/B 格式、C 格式、取反、主轴、M/N 维度等打包成一个 32 位整数。注意 M/N 被右移（`M>>4`、`N>>3`）压缩进 5/6 位字段。同文件还有从 `MmaOp` 直接生成 idesc 的便捷函数：
 
-PV 段的 `gemm_ptx_partial` 走的是同族逻辑，只是操作数 A 换成 tmem 指针（`[tmem_a]`）而非 smem descriptor——见 [blackwell_helpers.py:580](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py#L580) 那条 `[tmem_acc], [tmem_a], smem_desc_b, ...` 指令。
+[mma_sm100_desc.py:165-174](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/mma_sm100_desc.py#L165-L174)
 
-> 对照：Hopper WGMMA 的累加器在寄存器（`acc` 是 rmem tensor），P 要先落到 smem 再被 WGMMA 读。Blackwell 把 P 留 tmem，省掉这一趟 smem 写/读——这是「片上 tmem 累加」带来的直接红利之一。
+kernel 里正是用 `sm100_desc.mma_op_to_idesc(qk_mma_op)` 把 CUTLASS 的 `MmaOp` 转成 idesc。共享内存描述符由 `make_smem_desc_base`（同文件 L212 起）和 `smem_desc_base_from_tensor`（L290 起）构建。
+
+**UMMA 的 PTX 包装** 在 `blackwell_helpers.py`。最贴近实际使用的两个是：
+
+- `gemm_ptx_partial`：[blackwell_helpers.py:395-615](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py#L395-L615) —— 用于 P@V，支持 `split_arrive`（先把 P 的一部分写好就通知 MMA 开跑，做计算-搬运重叠），累加器地址是传入的 tmem 列偏移。
+- `gemm_ptx_precomputed_varname`：[blackwell_helpers.py:1035-1115](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py#L1035-L1115) —— 用于 Q@K^T，复用预先声明好的 PTX 寄存器变量以减少指令数。
+
+它们最终都内联出形如 `tcgen05.mma.cta_group::{N}.kind::{kind} [tmem_acc], ...` 的 PTX。其中 `cta_group` 字段就是 2CTA 的开关（见 4.4）。
+
+**在 kernel 里如何调用 UMMA**：`mma` 方法在循环外把两个 GEMM 绑成 partial：
+
+[flash_fwd_sm100.py:1590-1642](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1590-L1642)
+
+这里 `gemm_Si` 用 `gemm_ptx_precomputed_varname`（Q@K^T→S，累加器在 `self.tmem_s_offset[stage]`），`gemm_Pi` 用 `gemm_ptx_partial`（P@V→O，累加器在 `self.tmem_o_offset[stage]`）。注意 `zero_init` 语义和 `cta_group=self.cta_group_size`，后者直接决定发射单 CTA 还是双 CTA 指令。
+
+真正发射发生在循环里，例如首次 QK：
+
+[flash_fwd_sm100.py:1705-1710](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1705-L1710)
+
+`gemm_Si[stage](smem_desc_start_b=...)` 算完 S 后立刻 `pipeline_s_p_o.producer_commit_w_index(stage)`，通知 softmax warp "S 已就绪"。
+
+> 小结：UMMA = 一条 `tcgen05.mma` 指令，输入 B 来自 smem 描述符、累加器 C 在 tmem、运算语义由 32 位 idesc 决定。FA4 把它包成 `gemm_Si` / `gemm_Pi` 两个 partial 函数，在主循环里反复调用。
 
 #### 4.1.4 代码实践
 
-**实践目标**：在源码里确认「QK 段操作数都来自 smem、PV 段操作数 A 来自 tmem」这一差异。
+**目标**：亲手看清"一次 Q@K^T 在 Blackwell 上对应哪段代码、用了什么描述符"。
 
-**操作步骤**：
+**步骤**：
 
-1. 打开 [flash_fwd_sm100.py:476-500](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L476-L500)，找到 `p_source = tcgen05.OperandSource.TMEM`，确认它只传给了 `tiled_mma_pv`（PV 段），而没有传给 `tiled_mma_qk`。
-2. 打开 [flash_fwd_sm100.py:1590-1642](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1590-L1642)，对比 `gemm_Si`（QK，传 `smem_desc_base_b=k_smem_base`）与 `gemm_Pi`（PV，传 `sA=None` 且绑定 `tOrP` 这个 tmem tensor）。
+1. 打开 `mma_sm100_desc.py`，找到 `make_instr_desc`（L111）。对照本讲 4.1.3 的位域表，回答：fp16 输入、fp32 累加时，`a_format`、`b_format`、`c_format` 三个字段各是什么？（提示：`to_UMMA_format` / `to_C_format` 在同文件上方，约 L68-103）。
+2. 打开 `flash_fwd_sm100.py` 的 `mma` 方法（L1544），定位 `qk_mma_idesc = sm100_desc.mma_op_to_idesc(qk_mma_op)`（L1576）和 `declare_ptx_idesc`（L1584）。确认 idesc 是**编译期常量**（被 `const_expr` 内联进 PTX），这就是为什么换 dtype / tile 会触发重编译。
+3. 定位 `gemm_Si[stage](...)`（L1705）。顺着它进到 `blackwell_helpers.gemm_ptx_precomputed_varname`，找到那条形如 `tcgen05.mma.kind::{kind} [...]` 的内联 PTX 字符串。
 
-**需要观察的现象**：QK 的 partial 把 smem descriptor 当 B；PV 的 partial 把 tmem 上的 `tOrP` 当 A、`sA=None`（因为 A 不走 smem）。
+**需要观察的现象**：你会看到累加器地址是 `self.tmem_s_offset[stage]`（一个 tmem 列号），而不是某个寄存器变量名——这就是"累加器在 tmem"的直接证据。
 
-**预期结果**：你能用一句话写出「为什么 PV 段的 `sA=None`」——因为 P 已经在 tmem 里，UMMA 直接从 tmem 取 A，不需要 smem descriptor。
-
-**待本地验证**：若你有 B200，可设 `CUTE_DSL_KEEP_PTX=1` 编译一次 Sm100 kernel，在生成的 PTX 里 `grep tcgen05.mma`，应能看到 QK 段指令两个操作数都是 smem descriptor、PV 段指令第一个操作数是 `[tmem_a]`。
+**预期结果**：能用一句话讲清"Blackwell 上 `acc_S = Q @ K^T` 是怎么落成一条 PTX 指令的"。本步无需 GPU，属于源码阅读型实践。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 UMMA 只让一个线程（`elect.sync` / `@leader_thread`）发射指令，而不是像 Ampere `mma.sync` 那样所有线程都参与发射？
+**练习 1**：为什么 FA4 在 Blackwell 上几乎不用 `cute.gemm`（`blackwell_helpers.gemm`，L96）那种"高级"封装，而是大量用 `gemm_ptx_*` 系列手写 PTX 包装？
 
-**参考答案**：UMMA 是 warp-group 级 / CTA 级指令，整条指令的语义由硬件隐式映射到所有参与线程的寄存器与 tmem 上；多线程同时发射同一条指令是冗余且未定义行为，故只由 leader 发射一次，硬件负责广播执行。
+**参考答案**：高级封装难以表达 FA 需要的精细控制：`split_arrive`（P 边写边通知）、预声明 PTX 变量减少指令、显式 `cta_group`（2CTA）、把累加器精确钉在特定 tmem 列偏移。手写 PTX 包装把这些旋钮都暴露出来，性能更优。
 
-**练习 2**：`cta_group` 取 1 或 2 分别对应什么？它和 `use_2cta_instrs` 是什么关系？
+**练习 2**：`idesc` 里同时编码了 `a_format` 和 `b_format`，为什么还要单独的 `c_format`？
 
-**参考答案**：`cta_group::1` 单 CTA 执行，`cta_group::2` 集群内两个 CTA 协作执行（2CTA）。代码里 `cta_group = TWO if self.use_2cta_instrs else ONE`，且 `self.cta_group_size = 2 if self.use_2cta_instrs else 1`（[flash_fwd_sm100.py:171](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L171)），二者一一对应。
+**参考答案**：累加器 C 的精度可以和输入不同。FA 里输入是 fp16/bf16，但累加器用 fp32（`qk_acc_dtype = Float32`），所以必须单独告诉硬件 C 的格式，硬件才知道怎么读/写 tmem 累加器。
 
----
-
-### 4.2 片上 tmem 累加
+### 4.2 片上 tmem 累加与 tmem 分区
 
 #### 4.2.1 概念说明
 
-「片上 tmem 累加」是 Blackwell kernel 区别于前代最核心的架构特征。它包含三层含义：
+上一节说累加器在 tmem，但 FA 同时有 **S（分数）**、**P（概率）**、**O（输出）** 三个大矩阵要放在 tmem，它们怎么排布才不打架？这就是本节要解决的"tmem 分区"问题。
 
-1. **S、P、O 三个矩阵都住在 tmem 里**，不占寄存器、不进 smem（除了最后的 O 要写回 gmem）。
-   - `acc_S`（QK 累加器）→ tmem 的 S 区
-   - `P`（softmax 概率）→ tmem 的 P 区
-   - `acc_O`（PV 累加器，即最终输出）→ tmem 的 O 区
-2. **softmax 全流程留片上**：softmax warp 从 tmem 读 S、算 `row_max/row_sum`、把 P 写回 tmem，全程不经过 smem。
-3. **O 的 rescale（在线 softmax 修正）也在 tmem 里做**：所谓 correction warp，就是从 tmem 读 O、乘以 rescale 因子、再写回 tmem。
+关键设计：
 
-为什么这是革命性的？前代里 `acc_O` 是每个 warp 的寄存器张量，row 数大了寄存器就爆；要把 P 从 softmax warp 传给 MMA warp 还得走 smem。Blackwell 用 tmem 这块「大、快、贴着 tcgen05」的存储一次性解决了这两件事。
+- tmem 被抽象成"列"的集合（SM100 上每 CTA 最多 512 列，由 `cute.arch.get_max_tmem_alloc_cols("sm_100")` 给出）。
+- kernel 在 `__init__` 里预先算好 S、P、O 各自的**列偏移**，保证它们在 tmem 里互不重叠。
+- 只有 **MMA warp** 负责分配/释放 tmem（它是唯一发起 UMMA 的 warp），其它 warp（softmax、correction）通过 `tmem.retrieve_ptr` 拿到同一块 tmem 的指针，再用 `tcgen05` 的 load/store 原子（`Ld32x32b`、`St32x32b`）读写。
+
+注意 P 的特殊地位：P 既是 QK 的"输出"（S 经 softmax 后变 P），又是 PV 的"输入"。FA4 把 P 复用 S 的 tmem 区域（`tmem_s_to_p_offset`），省一块 tmem。
 
 #### 4.2.2 核心流程
 
-tmem 的「分配」与「分区」是这个模块的核心。每个 CTA 能用 **512 列** tmem（`tmem_alloc_cols`），kernel 把它切成若干命名区域：
+tmem 分区的伪代码（以 `m_block=128, n_block=128, head_dim_v=128, q_stage=2` 为例）：
 
 ```
-tmem 512 列（示意，hdim_v=128, n_block=128, q_stage=2）
-┌──────────────┬──────────────┬──────────────┬──────────────┐
-│ S0 / P0 区   │ S1 / P1 区   │ O0 区        │ O1 区        │
-│ cols [0,128) │ cols[128,256)│ cols[256,384)│ cols[384,512)│
-└──────────────┴──────────────┴──────────────┴──────────────┘
+tmem 列布局（512 列上限）:
+[0      .. 128)   → S0 / P0  (S 与 P 共用，P 偏移 n//2)
+[128    .. 256)   → S1 / P1
+[256    .. 384)   → O0       (head_dim_v=128 列)
+[384    .. 512)   → O1
+合计 tmem_total = 384 + 128 = 512 ≤ 512 ✓
 ```
 
-- S 与 P 共用一段：P 比 S「窄」（P 是 v_dtype 宽度，S 是 fp32），用 `tmem_s_to_p_offset = n_block_size // 2` 把 P 错开放在 S 区域的另一半，复用物理列。见 [flash_fwd_sm100.py:294-307](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L294-L307)。
-- O 区紧跟其后，每个 stage 占 `head_dim_v_padded` 列。
+运行时流程：
 
-整个 tmem 累加的生命周期：
-
-```
-MMA warp:    tmem.allocate(512列) ──► 拿到 tmem_ptr
-             QK gemm ──► 写 S(tmem)
-                          │ signal (mbar)
-             softmax warp:读 S(tmem) ─► 算 row_max/row_sum ─► 写 P(tmem)
-                          │ signal
-             MMA warp:    PV gemm(P@V) ─► 累加进 O(tmem)
-                          │ signal
-             correction:  读 O(tmem) ─► 乘 scale ─► 写回 O(tmem)   # rescale
-                          ...
-             epilogue:    O(tmem) ──t2s──► smem ──s2g──► gmem      # 唯一一次离片
-MMA warp:    tmem.free(tmem_ptr)
-```
+1. MMA warp `tmem.allocate(max_cols)` 分配整块 tmem，`wait_for_alloc()` 等所有依赖 warp 就位。
+2. 各 warp `retrieve_ptr` 拿到 tmem 基址，再用 `__init__` 里算好的偏移定位各自的 S/P/O。
+3. MMA warp 跑 UMMA 把结果写进 tmem 的 S/O 区；softmax warp 从 tmem 读 S、写 P；correction warp 读 O 做 rescale。
 
 #### 4.2.3 源码精读
 
-**tmem 分区地址**在 `__init__` 里手算（[flash_fwd_sm100.py:294-300](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L294-L300)）：
+**tmem 分区在 `__init__` 里一次算好**：
 
-```python
-self.tmem_s_offset = [0, self.n_block_size]                       # S0, S1 起始列
-self.tmem_o_offset = [self.tmem_s_offset[-1] + self.n_block_size  # O0, O1 起始列
-                      + i * self.head_dim_v_padded for i in range(self.q_stage)]
-self.tmem_total = self.tmem_o_offset[-1] + self.head_dim_v_padded
-assert self.tmem_total <= self.tmem_alloc_cols                    # 不能超 512 列
-```
+[flash_fwd_sm100.py:294-307](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L294-L307)
 
-**tmem 分配器**用 CUTLASS 的 `TmemAllocator`，由 MMA warp 独占发起（[flash_fwd_sm100.py:885-891](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L885-L891)）：
+要点：
 
-```python
-tmem = cutlass.utils.TmemAllocator(
-    storage.tmem_holding_buf.ptr,
-    barrier_for_retrieve=tmem_alloc_barrier,     # 用命名屏障 TmemPtr 同步
-    allocator_warp_id=self.mma_warp_id,          # 只有 MMA warp 负责分配
-    is_two_cta=self.use_2cta_instrs,
-    two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar.ptr,
-)
-```
+- `tmem_s_offset = [0, n_block_size]`：两个 stage 的 S 区（循环缓冲，`s_stage=2`）。
+- `tmem_o_offset`：S 区之后紧接着排 O，每个 stage 占 `head_dim_v_padded` 列。
+- `tmem_s_to_p_offset = n_block_size // 2`：P 复用 S 区，靠这个偏移错开（P 比 S 窄，因为 P 存 fp16 概率而 S 是 fp32 分数）。
+- `assert self.tmem_total <= self.tmem_alloc_cols`：守卫不越界。
 
-MMA warp 在自己的分支里真正分配并取回指针（[flash_fwd_sm100.py:1187-1189](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1187-L1189)），其它 warp（softmax/correction）则通过 `tmem.wait_for_alloc()` 等它就绪后再 `retrieve_ptr`：
+**累加器张量是 tmem fragment**：在 `kernel` 里，S 和 O 的累加器用 `thr_mma.make_fragment_C(...)` 创建，这是"指向 tmem"的张量：
 
-```python
-tmem.allocate(cute.arch.get_max_tmem_alloc_cols("sm_100"))
-tmem.wait_for_alloc()
-tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
-```
+[flash_fwd_sm100.py:1043-1056](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1043-L1056)
 
-> 关键认知：所有 warp 共享同一块 tmem（地址常量已知），靠 **mbarrier / 命名屏障** 约定「谁现在有权写哪段」，而不是靠拷贝传递。这就是 `pipeline_s_p_o`、`pipeline_o_acc`、`SoftmaxStatsW0..W7` 等同步原语的用意。
+注意 L1046 把 `tOtO` 的指针加上 `tmem_o_offset[0]`，把它钉到 O 区；L1052-1056 给 P（`tOrP`）设置跨 stage 的步长。这正是"累加器在 tmem"的代码体现。
 
-**O 的 rescale（在线 softmax 修正）纯在 tmem 内做**，见 `correction_rescale`（[flash_fwd_sm100.py:2674-2723](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2674-L2723)）：用 `tcgen05.copy` 的 tmem load 把 O 读进寄存器 fragment、`mul_packed_f32x2` 乘 scale、再用 tmem store 写回——一次 smem 都不碰。
+**MMA warp 独占 tmem 分配**：
 
-```python
-cute.copy(thr_tmem_load, tOtO_t2r_i, tOrO_frg)          # tmem -> rmem
-for j in ...: tOrO_frg[j], tOrO_frg[j+1] = cute.arch.mul_packed_f32x2(...)  # 乘 scale
-cute.copy(thr_tmem_store, tOrO_frg, tOtO_r2t_i)         # rmem -> tmem
-cute.arch.fence_view_async_tmem_store()
-```
+[flash_fwd_sm100.py:1186-1214](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1186-L1214)
 
-**唯一的离片**发生在 epilogue：O 从 tmem 经 smem 写到 gmem。`correction_epilogue` 用 `get_tmem_load_op` 把 O 从 tmem 拷到寄存器、做完最终缩放与类型转换后 `cvt_copy` 进 smem（[flash_fwd_sm100.py:2791-2801](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2791-L2801)），再由 epilogue warp 或 correction warp `s2g` 写回 gmem。
+`tmem.allocate` → `wait_for_alloc` → 干活 → `relinquish_alloc_permit` → `free`。`tmem_alloc_barrier`（`NamedBarrierFwdSm100.TmemPtr`）让 softmax/correction warp 等到 MMA warp 分配好 tmem、拿到指针后再 `retrieve_ptr`。
+
+**softmax 从 tmem 读 S、写 P**：
+
+[flash_fwd_sm100.py:1923-1943](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1923-L1943)
+
+这里用 `tcgen05.copy.Ld32x32bOp`（tmem→寄存器，读 S）和 `St32x32bOp`（寄存器→tmem，写 P、写 scale）。softmax 在寄存器里算完在线 softmax 的 `row_max/row_sum/rescale`，再把 P 写回 tmem 给 PV 的 UMMA 用。这就是"累加器在 tmem、计算在寄存器、用 tcgen05 copy 桥接"的完整数据通路。
 
 #### 4.2.4 代码实践
 
-**实践目标**：把「tmem 分区」与「warp 分工」对上号，理解 tmem 是被多类 warp 共享的临界资源。
+**目标**：手算一次 tmem 分区，验证不会越界。
 
-**操作步骤**：
+**步骤**：
 
-1. 读 [flash_fwd_sm100.py:254-273](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L254-L273)，把 16 个 warp 的分工抄下来：
-   - `softmax0/1_warp_ids=(0..3)/(4..7)`、`correction_warp_ids=(8..11)`、`mma_warp_id=12`、`epilogue=(13,)`、`load=(14,)`、`empty=(15,)`，共 16 warp = 512 线程。
-2. 读 [flash_fwd_sm100.py:294-307](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L294-L307)，算出 `hdim_v=128,n_block=128,q_stage=2` 时 S0/S1/O0/O1 各自的列区间。
+1. 假设 `m_block_size=128, n_block_size=128, head_dim=128, head_dim_v=128, q_stage=2`。按 L294-307 的公式手算：`tmem_s_offset`、`tmem_o_offset`、`tmem_total`。
+2. 改成 `head_dim_v=192`（如 MLA 风格的 `head_dim, head_dim_v = 128, 192`），再算一次 `tmem_total`，看是否仍 ≤ 512。
+3. 在源码里确认 `tmem_alloc_cols` 的来源（`cute.arch.get_max_tmem_alloc_cols("sm_100")`，L261）。
 
-**需要观察的现象**：哪几类 warp 会「碰」tmem 的 O 区？（答：MMA 写、correction 读改写、epilogue 读。）
+**需要观察的现象**：当 `head_dim_v` 变大，O 区占的 tmem 列成比例增加，可能逼近 512 列上限——这正是为什么大 head_dim 的配置要在 tile 大小/流水级数上做让步。
 
-**预期结果**：你能填出一张「tmem 区域 × warp 权限」表，说明 O 区被这三类 warp 在不同 pipeline 阶段交替访问，靠 `pipeline_o_acc` 的 mbarrier 保证「写完才读」。
-
-**待本地验证**：本实践为源码阅读型，无需 GPU；若想验证地址计算，可在 Python 里复现 `tmem_o_offset` 公式打印区间。
+**预期结果**：能写出一张"给定配置 → tmem 各区列范围"的小表。属于源码阅读 + 纸笔演算型实践，无需 GPU。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 correction（rescale O）不直接在 smem 或寄存器里做，而要绕「tmem→rmem→tmem」？
+**练习 1**：为什么 P 要复用 S 的 tmem 区域，而不是单独开一块？
 
-**参考答案**：因为 O 累加器是 tcgen05 的累加目标，物理上就在 tmem；softmax 修正发生在 PV 累加的间隙，O 还要继续被后续 PV GEMM 累加，不能搬到 smem（搬了就没法被 UMMA 累加）。所以最省事的就是原地 tmem 改写：读出来、乘 scale、写回去。
+**参考答案**：P 和 S 在时间上错峰——softmax 把 S 读出来算完就不再需要 S，转而需要写 P；随后 PV 用完 P 后也不再需要 P，下一轮又需要新的 S。复用同一块 tmem 能显著省存储，让大 tile 成为可能。
 
-**练习 2**：相比 Hopper，tmem 累加省下了哪一类 smem 往返？
+**练习 2**：softmax/correction warp 并不发起 UMMA，为什么它们也要 `retrieve_ptr`？
 
-**参考答案**：省下了「softmax 把 P 写到 smem、PV GEMM 再从 smem 读 P」这一趟。Blackwell 里 P 直接从 tmem 被 UMMA 当操作数 A 读走（`p_source=TMEM`）。
-
----
+**参考答案**：它们要用 `tcgen05.copy`（`Ld/St 32x32b`）读写 tmem 里的 S、P、O，而这些 copy 指令同样需要 tmem 的列地址。只有拿到 tmem 基址 + 自己的偏移，才能定位要读写的列。
 
 ### 4.3 persistent kernel 运行模型
 
 #### 4.3.1 概念说明
 
-「Persistent kernel（持久化 kernel）」是相对「一个 work tile 启动一个 CTA」的传统模型而言的。传统模型下，tile 数可能远多于 SM 数，每个 CTA 算完一个 tile 就结束，由硬件排队等下一个 tile 轮到该 SM。persistent 模型则：
+传统 kernel 是"一次性"的：grid 里的每个 CTA 算一个输出块（一个 `(m_block, head, batch, split)` 组合），算完就退出。当输出块数量远大于 CTA 数时，硬件调度器要不断启动新 CTA，且各 CTA 负载不均会产生**尾延迟**（有的 CTA 早干完闲着，有的还在算）。
 
-- **启动的 CTA 数 ≈ SM 数**（每个 SM 常驻一个 CTA）；
-- 每个 CTA 进入一个 `while work_tile.is_valid_tile:` 循环，**主动向 scheduler 索取下一个 tile**，算完再要，直到没有 tile 为止；
-- 好处：减少 kernel 启动/CTA 调度开销，便于做软件 pipeline 跨 tile 复用，也支持 CLC 这种硬件 work-stealing。
+**persistent kernel** 的做法是：启动固定数量的 CTA（通常等于 SM 数），每个 CTA 进入一个循环：
 
-在 Sm100 kernel 里，persistent 是默认行为（`is_persistent=True`），且**每一类 warp 都各自跑同一个 while 循环**——Load warp、MMA warp、Softmax warp、Correction warp、Epilogue warp 都在 `tile_scheduler` 上对齐推进，靠 mbarrier 在 warp 之间传递「第 i 个 tile 的数据已就绪」。
+```
+work = scheduler.initial_work_tile_info()
+while work.is_valid_tile:
+    处理 work 这一块
+    work = scheduler.advance_to_next_work()   # 领下一块
+```
+
+CTA 一直循环到所有工作被领完。好处：省去反复启动 CTA 的开销，且工作动态分发，负载更均衡。
+
+本 kernel 里**每个 warp 角色都各自跑一遍这个 persistent 循环**（load、mma、softmax、correction、epilogue），它们靠 tile scheduler 拿到**一致的工作序列**，再用流水线屏障（pipeline）彼此同步。换句话说，"哪个 CTA 算哪个块"由 scheduler 决定，"块内的各阶段由谁做"由 warp 专门化决定。
 
 #### 4.3.2 核心流程
 
-scheduler 选型逻辑（[flash_fwd_sm100.py:243-250](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L243-L250)）：
+调度器选择（在 `__init__` 里依据特性开关）：
 
 ```
-is_varlen_q        → SingleTileVarlenScheduler
-is_causal/is_local → SingleTileLPTScheduler   # LPT = Lazy Persistent Tile
-                    或 use_clc_scheduler       # CLC 动态调度
-is_persistent      → StaticPersistentTileScheduler
-否则               → SingleTileScheduler      # 传统一 tile 一 CTA
+if varlen_q:           SingleTileVarlenScheduler    # 变长，单 tile（不 persistent）
+elif causal/local/CLC: SingleTileLPTScheduler       # L2-persistent-tile（L2 局部性优化）
+elif is_persistent:    StaticPersistentTileScheduler # 静态 persistent
+else:                  SingleTileScheduler           # 单 tile
 ```
 
-`scheduling_mode` 只有两种取值（[flash_fwd_sm100.py:241](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L241)）：`CLC` 或 `STATIC`。注意 CLC 不能与某些特性共存，会自动退化（见 [flash_fwd_sm100.py:228-232](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L228-L232)）。
-
-每个 device 端 warp 的循环骨架完全一致，以 MMA warp 为例（[flash_fwd_sm100.py:1656-1668](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1656-L1668)）：
-
-```python
-work_tile = tile_scheduler.initial_work_tile_info()
-while work_tile.is_valid_tile:
-    m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx   # 逻辑坐标
-    seqlen = SeqlenInfoCls(batch_idx)
-    ...                                                                # 算这个 tile
-    work_tile = tile_scheduler.advance_to_next_work()                # 要下一个
-# End of persistent scheduler loop
-```
-
-`work_tile.tile_idx` 是一个四元组 `(m_block, head_idx, batch_idx, split_idx)`——scheduler 负责把硬件/静态的工作划分映射成这个逻辑坐标，kernel 主体只认逻辑坐标。SplitKV 的 `split_idx` 就是被 scheduler 编进 work tile 的（见 4.4）。
+LPT（L2 Persistent Tile）是一种特殊调度：让多个 batch/head 的"同一组 tile"尽量落在同一组 CTA 上，提高 L2 cache 命中率（KV 被复用）。工作坐标 `work_tile.tile_idx` 是四元组 `(m_block, head_idx, batch_idx, split_idx)`。
 
 #### 4.3.3 源码精读
 
-**host 端算 grid**：`__call__` 把问题规模打包成 `TileSchedulerArguments`，再由 scheduler 算出 grid 形状（[flash_fwd_sm100.py:643-673](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L643-L673)）：
+**调度器选择**：
 
-```python
-tile_sched_args = TileSchedulerArguments(
-    cute.ceil_div(cute.size(mQ.shape[0]), _num_block_divisor),  # m_block 数
-    cute.size(mQ.shape[2]),                                       # head 数
-    ..., num_splits, ..., is_persistent=self.is_persistent, ...)
-tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args, scheduling_mode=self.scheduling_mode)
-grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
-```
+[flash_fwd_sm100.py:243-252](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L243-L252)
 
-persistent 模式下 `get_grid_shape` 会把 CTA 数压到 ~SM 数；非 persistent 则约等于总 tile 数。最终 launch（[flash_fwd_sm100.py:778-784](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L778-L784)）：
+注意 `is_persistent` 由 `interface.py` 传入：只有在**非因果、非滑窗、非 varlen、非 SplitKV**时才为 persistent（见 4.4 的取舍）。
 
-```python
-).launch(grid=grid_dim, block=[self.threads_per_cta, 1, 1],
-         cluster=self.cluster_shape_mnk if cute.size(self.cluster_shape_mnk) > 1 else None,
-         stream=stream, min_blocks_per_mp=1)
-```
+**MMA warp 里的 persistent 主循环**：
 
-**CLC 模式**会额外启一个 scheduler warp（`clc_scheduler_warp_id`），它只负责向硬件 CLC 单元 `prefetch_next_work`，把硬件返回的 work tile 喂给其它 warp——见 [flash_fwd_sm100.py:2937-2958](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2937-L2958)（细节留待 u8-l2）。当 CLC 关闭时，那个 warp 退化成 `empty_warp`，只跟着循环空转（[flash_fwd_sm100.py:2960-2967](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2960-L2967)）。
+[flash_fwd_sm100.py:1656-1684](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1656-L1684)
 
-> 设计要点：因为所有 warp 都在同一个 scheduler 上对齐，persistent 模型天然支持「跨 tile 的软件 pipeline」——上一个 tile 的 epilogue 与下一个 tile 的 load 可以在同一批 warp 上重叠。这也是为什么 CLC（动态派活）能进一步压尾延迟：负载不均时，先算完的 SM 主动抢下一个 tile，而不是傻等。
+`while work_tile.is_valid_tile:` 是 persistent 的标志。每个 work tile 解出 `(m_block, head_idx, batch_idx, split_idx)`，用 `block_info.get_n_block_min_max` 算出这块要遍历的 K/V 范围，`block_iter_count = n_block_max - n_block_min` 是内层循环次数。循环末尾：
+
+[flash_fwd_sm100.py:1828-1829](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1828-L1829)
+
+`advance_to_next_work()` 领取下一块。
+
+**内层 K/V 循环**（在 persistent 循环之内）：
+
+[flash_fwd_sm100.py:1720-1787](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1720-L1787)
+
+这段是 FA 的算法内核：每个 n block 先 `gemm_Pi`（P@V→O，`zero_init` 控制是否累加），再 `gemm_Si`（Q@K→下一块 S），交替推进，对应"Q 常驻、K/V 流水"的主循环。
+
+**静态 persistent 调度器的推进逻辑**：
+
+[tile_scheduler.py:358-369](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/tile_scheduler.py#L358-L369)
+
+`advance_to_next_work` 把 `_tile_idx` 加上 `grid_dim()`（CTA 数）或 `cluster_dim()`（2CTA 时按 cluster 步进），实现"每个 CTA 隔 grid 个块领一块"的经典 persistent 步进。`get_current_work` 把线性 `_tile_idx` 映射回 `(m_block, head, batch, split)` 四元组。
+
+**load/softmax/correction 各自的同构循环**：例如 producer 在 [flash_fwd_sm100.py:1361-1362](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1361-L1362) 起同样的 `while`，末尾 [L1535](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1535) `advance_to_next_work`。softmax/correction 同理。它们靠 pipeline（见 4.4 与 u5 系列）保证"同一块上各阶段顺序执行"。
+
+> 小结：persistent = "CTA 不退出，循环领活"。本 kernel 把它和 warp 专门化叠加：scheduler 负责"算哪块"，warp 角色负责"块里干什么"，pipeline 负责让它们对齐。
 
 #### 4.3.4 代码实践
 
-**实践目标**：确认「每一类 warp 都跑同一个 while 循环、都调 `advance_to_next_work`」。
+**目标**：理解 persistent 步进，并对比它和单 tile 的 grid 大小差异。
 
-**操作步骤**：在 `flash_fwd_sm100.py` 里搜索 `while work_tile.is_valid_tile` 与 `advance_to_next_work`，统计它们出现在哪些方法里。
+**步骤**：
 
-**需要观察的现象**：应能在 `load`、`mma`、`softmax_loop`、`correction_loop`、`epilogue_s2g`、`clc_scheduler_warp`、`empty_warp` 这 7 处都看到同一个循环骨架。
+1. 读 `StaticPersistentTileScheduler.advance_to_next_work`（tile_scheduler.py L364），确认步长是 `grid_dim()[0]`。
+2. 读 `interface.py` 里 SM100 分支（约 L869-941）传给 kernel 的 `is_persistent` 表达式：`not causal and not local and cu_seqlens_q is None and seqused_q is None and not is_split_kv`。
+3. 在 `__call__` 里找到 `grid_dim = TileScheduler.get_grid_shape(...)`（约 L673），思考：persistent 时 grid 通常接近 SM 数；单 tile（如 causal）时 grid 等于总 m_block 数 × head × batch。
 
-**预期结果**：写一句话结论——「persistent 模型靠 7 个独立 warp 循环在 `tile_scheduler` 上同步推进，每个循环各管一段流水（load/load→mma→softmax→correction→epilogue），靠 mbarrier 跨 warp 传递每 tile 的就绪信号」。
+**需要观察的现象**：把一个 `seqlen=2048, heads=8, batch=2` 的非因果输入从 causal=False 改成 causal=True，理论上 grid 会从"≈SM 数"变成"=m_block×head×batch"。前者 CTA 数少但每个 CTA 干很多块，后者 CTA 数多但每个只干一块。
 
-**待本地验证**：纯源码阅读型实践。
+**预期结果**：能解释"为什么 causal 模式下通常退化为单 tile（LPT）而非静态 persistent"。属于源码阅读型实践。若本地有 Blackwell GPU，可用 `CUTE_DSL_KEEP_PTX=1` 观察 grid 维度差异（待本地验证）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：什么情况下 `is_persistent` 会被强制关掉（退回非 persistent）？
+**练习 1**：persistent kernel 里，如果总工作块数不能被 CTA 数整除，会怎样？
 
-**参考答案**：当 `overlap_sO_sQ` 为真时（`hdim_v` 较大或 split-kv 下，sO 与 sQ 复用同一块 smem），代码里 `self.is_persistent = False`（[flash_fwd_sm100.py:216-221](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L216-L221)）。因为这种 smem 复用模式下跨 tile 重叠不安全。
+**参考答案**：没问题。每个 CTA 用 `_tile_idx += grid_dim` 步进，当 `_tile_idx` 超出总块数时 `get_current_work` 返回 `is_valid_tile=False`，循环自然结束。最后多出来的几块由先完成的 CTA 领走——这正是 persistent 减少尾延迟的原理。
 
-**练习 2**：为什么 CLC 模式需要一个专门的 scheduler warp，而 STATIC 模式不需要？
+**练习 2**：为什么 causal/local 不用静态 persistent 而用 LPT 单 tile？
 
-**参考答案**：STATIC 模式下，每个 CTA 用 block_idx 静态算出自己的 tile 序列，无需额外通信；CLC 是硬件动态调度，需要持续向 CLC 单元发起请求、读取返回的 work tile，这件事由专用 scheduler warp 异步完成（`prefetch_next_work`），避免打断计算 warp。
+**参考答案**：因果掩码下各 m_block 的工作量严重不均（上面的 m_block 要遍历的 K/V 少，下面的多），静态等步进 persistent 会放大不均。LPT（L2 persistent tile）通过 L2 局部性重排遍历顺序，既缓解不均又提升 cache 命中，更适合 causal。
 
----
-
-### 4.4 全特性集成：SplitKV / Paged KV / 2CTA
+### 4.4 全特性集成：SplitKV / paged KV / 2CTA / 块稀疏 / varlen / pack_gqa / CLC
 
 #### 4.4.1 概念说明
 
-Sm100 kernel 是 FA4 里**唯一**把三大高级特性都集成进同一条前向主干的实现。这里的「集成」不是说它们各写一个 kernel，而是同一份 `mma`/`load`/`softmax_loop`/`correction_loop` 代码，用 `const_expr` 在编译期裁剪出不同分支。三者要点：
+`FlashAttentionForwardSm100` 是 FA4 里"集大成"的 kernel，它在一个 kernel 里同时支持多项高级特性。理解它在于看清**这些特性各自在源码里的开关与边界**，以及它们之间的互斥/组合关系。
 
-- **SplitKV**：把 KV 的 n_block 区间等分成 `num_splits` 段，每段由不同 work tile 并行算出部分 `O_s` 和 `LSE_s`，再由独立 combine kernel 合并（u7-l2）。在 Sm100 前向里，`split_idx` 是 work tile 四元组的一员，每个 split 写到 `mO` 的不同切片。
-- **Paged KV**：KV cache 散落在页池里。Sm100 支持两条路径——`page_size==tile_n` 走 TMA（每块查一个 `page_idx`），否则走 `PagedKVManager` 的 cp.async 散列 gather（u7-l3）。开关是 `paged_kv_non_tma`（等价于关掉 `use_tma_KV`）。
-- **2CTA**：集群内两个 CTA 用 `cta_group::2` 协作算一个大 tile，主要服务于 hdim=128/256 的高吞吐场景。
+- **SplitKV**：把长 KV 切成 `num_splits` 段并行算，每段产出部分 O + LSE，再由 combine kernel 合并（见 u7-l2）。本 kernel 里 `is_split_kv` 把 split 维度编进工作坐标 `(m_block, head, batch, split_idx)`。
+- **paged KV**：K/V 散落在显存页池，靠 page_table 映射。本 kernel 有两条路径：`page_size==tile_n` 走 TMA 直取，否则走 `PagedKVManager` 的 cp.async 散列 gather。
+- **2CTA**：cluster 里两个 CTA 协作，一条 UMMA 指令同时算两份输出，提升 MMA 利用率。
+- **块稀疏（block sparsity）**：只算被掩码保留的 KV 块。
+- **varlen / pack_gqa**：变长序列与 GQA 头折叠（见 u3-l3、u7-l1）。
+- **CLC**：Cooperative Launch Control，Blackwell 硬件级的动态 persistent 调度，比软件 static persistent 更省指令、负载更均衡。
 
-特性之间有 **互斥/退化** 关系，是阅读本模块最重要的「约束地图」：
-
-| 组合 | 状态 |
-|------|------|
-| SplitKV 与 hdim_v ≥ 192 | 断言拒绝（[flash_fwd_sm100.py:195-197](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L195-L197)） |
-| SplitKV 与 2CTA / persistent | 互斥（SplitKV 走非 persistent、单 CTA 路径） |
-| CLC 与 paged-KV-non-tma / overlap_sO_sQ | 自动退化为 STATIC（[flash_fwd_sm100.py:228-232](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L228-L232)） |
-| 块稀疏 + paged KV | `NotImplementedError`（[flash_fwd_sm100.py:734-735](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L734-L735)） |
+这些特性并非随意叠加，而是有明确的互斥与降级规则。
 
 #### 4.4.2 核心流程
 
-**SplitKV** 的关键在两处：① host 端给 `mO`/`mLSE` 多加一个 split 维并取出 `num_splits`（[flash_fwd_sm100.py:425-432](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L425-L432)）；② device 端 correction/epilogue 按 `split_idx` 写到对应切片，并对「空 split」（`n_block_min >= n_block_max`）写默认 `-inf` LSE、跳过计算（[flash_fwd_sm100.py:2437-2440](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2437-L2440)、[flash_fwd_sm100.py:2451](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2451)）。
+特性进入 kernel 的总开关大多在 `__init__` 里以 `cutlass.Constexpr` 或布尔字段存在，并在 `__call__`/`kernel` 里用 `const_expr` 裁剪分支（编译期特化）。例如：
 
-**Paged KV** 的关键在 load warp：TMA 路径在每个 n block 查 `page_idx = mPageTable[batch_idx, n_block]` 再发 TMA；非 TMA 路径构造 `PagedKVManager` 做散列 gather（[flash_fwd_sm100.py:1430-1449](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1430-L1449)）。
+```
+use_tma_KV  = not paged_kv_non_tma        # 页大小==tile_n 才用 TMA 取 KV
+use_tma_O   = 复杂条件（见下）             # pack_gqa/非对齐/varlen 时回退 cp.async
+use_2cta_instrs → cta_group_size, cluster_shape_mn=(2,1)
+use_clc_scheduler → 走 ClcState 硬件调度
+```
 
-**2CTA** 的关键在 `cta_group_size=2` 一路放大：cluster 形状 `(2,1)`、MMA tiler 的 M 维翻倍（`cta_group_size * m_block_size`）、UMMA 指令的 `cta_group::2`、tmem 释放需要跨 CTA 的 dealloc mbarrier。注意 2CTA 还要求 cluster N==1（[flash_fwd_sm100.py:235-239](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L235-L239)）。
+互斥规则举例：SplitKV 与 2CTA、CLC 不组合；块稀疏与 paged KV 不组合；CLC 要求 `use_tma_KV` 且不能 `overlap_sO_sQ`。
 
 #### 4.4.3 源码精读
 
-**SplitKV 写 O/LSE 切片**（[flash_fwd_sm100.py:2437-2440](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2437-L2440)）：
+**(1) SplitKV**：工作坐标带 `split_idx`，且有大 head_dim 守卫：
 
-```python
-if const_expr(self.is_split_kv):
-    mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[None, None, head_idx, split_idx]
-else:
-    mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[None, None, head_idx]
-```
+[flash_fwd_sm100.py:195-197](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L195-L197)
 
-LSE 同理按 `split_idx` 取切片并写每 split 的 log-sum-exp（[flash_fwd_sm100.py:2630-2631](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2630-L2631)），无效 split 写 `-inf`，让后续 combine kernel 用 log-sum-exp 自然把它丢弃。
+内层范围由 `block_info.get_n_block_min_max(seqlen, m_block, split_idx, num_splits)` 切分（见 u3-l2），空 split 用 `n_block_min < n_block_max` 跳过（L1678-1683）。部分 O+LSE 的合并由独立的 combine kernel 负责（u7-l2）。注意 FA4 里 **SplitKV 仅 SM100/SM110 前向支持**。
 
-**Paged KV 两条加载路径**（[flash_fwd_sm100.py:1430-1449](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1430-L1449)）：
+**(2) paged KV**：开关 `use_tma_KV = not paged_kv_non_tma`（[L144](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L144)）。非 TMA 路径在 producer 里创建 `PagedKVManager`：
 
-```python
-if const_expr(self.use_tma_KV):
-    tKsK, tKgK = cpasync.tma_partition(tma_atom_K, ...)   # TMA 直取, 调用方传 page_idx
-    paged_kv_manager = None
-else:
-    page_size = mK.shape[0]
-    paged_kv_manager = PagedKVManager.create(mPageTable, mK, mV, FastDivmodDivisor(page_size),
-        batch_idx, head_idx_kv, tidx, seqlen.seqlen_k, ..., self.n_block_size, ...)
-```
+[flash_fwd_sm100.py:1430-1449](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1430-L1449)
 
-每块加载前，TMA 路径算 `page_idx = mPageTable[batch_idx, n_block]`（[flash_fwd_sm100.py:1478-1486](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1478-L1486)），非 TMA 路径调 `paged_kv_manager.load_page_table(n_block)`（[flash_fwd_sm100.py:1483-1484](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1483-L1484)）。
+TMA 路径则在加载每个 n block 时查一次 `page_idx = mPageTable[batch_idx, n_block]`（L1478-1482、L1500-1504）。SM100 还会把 V 在 gmem 里转置（详见 u7-l3）。
 
-**2CTA 的放大效应**：cluster与线程组要包含两个 CTA 的 warp（[flash_fwd_sm100.py:910-918](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L910-L918)）：
+**(3) 2CTA**：`use_2cta_instrs` 让 `cta_group_size=2`、`cluster_shape_mn=(2,1)`，并让 MMA tiler 的 M 维覆盖两个 CTA：
 
-```python
-softmax_warps_cluster = ThreadCooperativeGroup(len(self.softmax0_warp_ids) * self.cta_group_size)
-correction_threads_cluster = ThreadCooperativeGroup(
-    cute.arch.WARP_SIZE * len(self.correction_warp_ids) * self.cta_group_size)
-```
+[flash_fwd_sm100.py:171-180](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L171-L180)
 
-tmem 释放也走 2CTA 专用 mbarrier（`is_two_cta`、`two_cta_tmem_dealloc_mbar_ptr`，见 [flash_fwd_sm100.py:889-890](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L889-L890)），否则两个 CTA 释放顺序错乱会出问题——这正是 u8-l4 要讲的 2CTA 死锁陷阱之一。
+UMMA 调用时把 `cta_group=self.cta_group_size` 透传（L1609、L1639），内联 PTX 就变成 `cta_group::2`。CLC 路径还要求 `cluster_shape_mn[0] == cta_group_size`（L237-239）。
+
+**(4) 块稀疏**：`use_block_sparsity` 改变工作量的统计与加载方式。MMA warp 用 `get_total_block_count` 代替 `n_block_max-n_block_min`（L1664-1676），producer 用 `produce_block_sparse_loads_sm100` 按稀疏结构加载（L1515-1532），softmax 用 `softmax_block_sparse_sm100`。块稀疏与 paged KV 互斥：
+
+[flash_fwd_sm100.py:733-735](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L733-L735)
+
+**(5) varlen / pack_gqa**：varlen 走 `SingleTileVarlenScheduler`（L243-244）。pack_gqa 在 `__call__` 里折叠 Q/O/LSE 的布局：
+
+[flash_fwd_sm100.py:553-558](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L553-L558)
+
+并影响 `use_tma_O` 的取值（折叠后若 `m_block % qhead_per_kvhead != 0` 就回退 cp.async 输出，[L188-192](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L188-L192)）。
+
+**(6) CLC 调度**：`use_clc_scheduler` 启用硬件 CLC，构造 `ClcState`：
+
+[flash_fwd_sm100.py:1092-1132](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1092-L1132)
+
+`ClcState`（[tile_scheduler.py:41-91](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/tile_scheduler.py#L41-L91)）封装硬件调度器返回的 work tile 和一条异步 pipeline。CLC 把"领下一块"从软件循环变成硬件原子操作，更省、更均衡（详见 u8-l2）。它有专职 warp `clc_scheduler_warp`（L292、L1138-1143）。
+
+**(7) 命名屏障全景**：所有这些特性的同步最终落在 `NamedBarrierFwdSm100`：
+
+[named_barrier.py:15-25](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/named_barrier.py#L15-L25)
+
+`Epilogue`、`TmemPtr`、`SoftmaxStatsW0..W7` 各管一类同步（见 u5-l3）。8 个 `SoftmaxStatsW*` 屏障是因为 8 个 softmax warp 要把各自的局部统计汇聚到 correction warp，需要每条通道独立屏障。
+
+> 小结：UMMA + tmem + persistent 是骨架；SplitKV/paged/2CTA/块稀疏/varlen/pack_gqa/CLC 是挂在这副骨架上的特性，每个都以编译期开关裁剪分支，互斥规则在 `__init__` 与 `interface.py` 里以 assert 守卫。
 
 #### 4.4.4 代码实践
 
-**实践目标**：把三大特性各自在源码里的「开关」与「接入点」整理成一张清单。
+**目标**：整理一份"Blackwell 专属特性清单"，把每项特性对应到具体代码段/类——这正是本讲的总实践任务。
 
-**操作步骤**：
+**步骤**：
 
-1. 在 `__init__` 与 `__call__` 里搜索这四个布尔：`is_split_kv`、`paged_kv_non_tma`、`use_2cta_instrs`、`use_clc_scheduler`，记录每个被读取的位置。
-2. 对每个特性，定位「它改变行为的那一行」（SplitKV 改输出布局、Paged 改 load 路径、2CTA 改 cluster/tmem 释放）。
+1. 打开 `flash_fwd_sm100.py`，按本节给出的行号定位每项特性的入口：UMMA 调用（L1590-1642）、tmem 分区（L294-307）、persistent 循环（L1656-1684）、SplitKV（L195）、paged KV（L1430-1449）、2CTA（L171-180）、块稀疏（L1664-1676、L733-735）、varlen（L243-244）、pack_gqa（L553-558）、CLC（L1092-1132）。
+2. 做一张表，三列：`特性 | 关键字段/参数 | 源码位置（文件:行）`。
+3. 在表后用一句话写出每项特性的"互斥伙伴"（如：CLC 与 overlap_sO_sQ 互斥；块稀疏与 paged KV 互斥）。
 
-**需要观察的现象**：注意哪些特性会触发 `assert` 或 `NotImplementedError`（互斥表）。
+**需要观察的现象**：你会发现几乎所有特性开关都是 `cutlass.Constexpr`/`const_expr`，意味着它们在编译期就被固化——这正是为什么换一个特性组合会触发重新编译（呼应 u11-l2）。
 
-**预期结果**：得到一张三列表格：特性 | 开关参数 | 主要接入点（行号） | 互斥约束。
-
-**待本地验证**：源码阅读型实践；若在 B200 上，可分别用 `num_splits>1`、`page_table`、`pack_gqa+hdim128` 跑三组输入，确认 kernel 走对应分支（用 `fa_log` 的日志级别 1 打印 TileScheduler/USE_2CTA，见 [flash_fwd_sm100.py:252](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L252)）。
+**预期结果**：得到一张可长期维护的"特性—代码"对照表。属于源码阅读型实践，是后续调试/改造 Blackwell kernel 的索引。本步无需 GPU。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 SplitKV 在 Sm100 前向里限制 `head_dim_v < 192`？
+**练习 1**：`use_tma_O` 在哪些情况下会变成 `False`？为什么？
 
-**参考答案**：见 [flash_fwd_sm100.py:195-197](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L195-L197) 的断言。hdim_v≥192 时单 tile 的 O 累加器与中间张量已逼近 tmem/smem 上限，再切 split 会让 combine 路径和寄存器压力失衡，故不支持。
+**参考答案**：见 L188-192：当 `pack_gqa` 且 `m_block % qhead_per_kvhead != 0`（折叠后 tile 边界不对齐），或 `pack_gqa + is_split_kv`，或 `is_varlen_q` 时为 False。原因是 TMA bulk store 需要规则的、对齐的输出块；这些情况下输出形状不规则，只能回退到 cp.async 逐元素回写（`use_correction_warps_for_epi = not use_tma_O`，让 correction warp 兼任 epilogue）。
 
-**练习 2**：`use_tma_KV = not paged_kv_non_tma`（[flash_fwd_sm100.py:144](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L144)）。请解释为什么「分页 KV + 非 128 page_size」会落到非 TMA 路径。
+**练习 2**：CLC 调度为什么要求 `use_tma_KV`？
 
-**参考答案**：TMA 要求源是一段连续、对齐的 gmem 描述符区域；当 page_size 不等于 tile_n 时，一个 tile 跨越多页且物理不连续，无法用一个 TMA descriptor 表达，只能用 `PagedKVManager` 逐行 cp.async 散列 gather。只有 `page_size==tile_n`（典型 128）时，每块恰好一页、可查一个 `page_idx` 发 TMA。
+**参考答案**：CLC 的硬件领活与 TMA 的异步搬运是配套设计的——硬件在领下一块的同时，TMA 已经按硬件指示开始搬对应 KV。如果走 cp.async（软件发起）就破坏了这种"硬件全权调度"的契约，所以 `use_clc_scheduler` 必须 `and self.use_tma_KV`（L228-232）。
 
----
+## 5. 综合实践
 
-## 5. 综合实践：整理 Blackwell 专属特性清单
+把本讲的四块知识串起来，完成一份 **"Blackwell 前向 kernel 数据流与特性地图"** 文档：
 
-把本讲四个模块串起来，完成下面这份「Blackwell 前向专属特性清单」。这是本讲的交付物，也是后续 u8-l2/u8-l3/u8-l4 的起点。
+1. **数据流图**：画出在 persistent 模式下，一次 work tile 内的数据流：
+   - producer warp：gmem →（TMA）→ smem（Q/K/V，多级循环缓冲）
+   - mma warp：smem K + smem Q →（UMMA）→ tmem S；softmax 处理后 tmem P + smem V →（UMMA）→ tmem O（累加）
+   - softmax warp：tmem S →（tcgen05 load）→ 寄存器算在线 softmax →（tcgen05 store）→ tmem P + tmem scale
+   - correction/epilogue warp：tmem O →（tcgen05 load）→ 寄存器 rescale → smem O →（TMA/cp.async）→ gmem O；同时写 gmem LSE
+   - 在图上标注每一步用的 pipeline 屏障（`pipeline_q`/`pipeline_kv`/`pipeline_s_p_o`/`pipeline_p_lastsplit`/`pipeline_o_acc`/`pipeline_sm_stats`/`pipeline_o_epi`）。
+2. **特性矩阵**：把 4.4 的特性表扩展为"特性 × 是否影响 tmem 分区 / 是否影响 scheduler 选择 / 是否改变 grid 形状 / 是否需要独立 warp"的四列矩阵。
+3. **对比 Hopper**：写一段话，列出本 kernel 相对 `FlashAttentionForwardSm90`（u6-l2）的三处本质差异：(a) 累加器从寄存器搬到 tmem；(b) warp 专门化（softmax/correction/epilogue 独立 warp）取代 Hopper 的 intra-wg-overlap；(c) persistent + CLC 调度取代固定 grid。
 
-**任务**：阅读 `FlashAttentionForwardSm100`（[flash_fwd_sm100.py:119](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L119) 起），为下表每一项填出「对应的代码段或类 + 一句话作用」。
-
-| 特性 | 对应代码段 / 类 | 一句话作用 |
-|------|----------------|-----------|
-| UMMA（tcgen05.mma） | `blackwell_helpers.gemm_ptx_precomputed_varname`（[L1036](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/blackwell_helpers.py#L1036)）与 `gemm_Si`/`gemm_Pi`（[L1590-1642](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1590-L1642)） | _自填_ |
-| 片上 tmem 累加 | `TmemAllocator`（[L885](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L885)）+ tmem 分区（[L294-300](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L294-L300)）+ `correction_rescale`（[L2674](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2674)） | _自填_ |
-| persistent kernel | `while work_tile.is_valid_tile`（如 [L1656-1668](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1656-L1668)）+ scheduler 选型（[L243-250](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L243-L250)） | _自填_ |
-| 2CTA | `cta_group_size`（[L171](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L171)）+ cluster groups（[L910-918](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L910-L918)） | _自填_ |
-| SplitKV | 输出布局（[L425-432](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L425-L432)）+ 写切片（[L2437-2440](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L2437-L2440)） | _自填_ |
-| Paged KV | `paged_kv_non_tma`（[L139-144](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L139-L144)）+ `PagedKVManager`（[L1432-1447](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L1432-L1447)） | _自填_ |
-
-**附加思考**（写一段话即可）：对照 u6-l2 的 Hopper kernel，指出 Sm100 kernel 多出的「三类 warp 间通信」（提示：S→softmax、softmax→P、O→correction/epilogue）为什么在 Hopper 上做不到、在 Blackwell 上能做。
-
-> 参考方向：Hopper 的累加器在寄存器、P 要落 smem 才能给 WGMMA 用，所以 softmax↔MMA 必须经过 smem；Blackwell 有 tmem 这块共享片上存储，S/P/O 都在 tmem，softmax warp 与 MMA warp 通过 mbarrier 共享同一段 tmem，于是这些「通信」退化成「对共享 tmem 的有序读写」，无需 smem 中转。
+这是一份纯源码阅读型综合实践，产出是文档而非可运行代码，但它会成为你后续阅读 Blackwell 反向（u9-l3）、hd256 2CTA（u8-l4）、MLA（u10-l2）时的"总索引图"。
 
 ## 6. 本讲小结
 
-- **UMMA（tcgen05.mma）** 把累加器搬进 tmem、并允许操作数 A 直接来自 tmem；只有 leader 线程发射，`cta_group::1/2` 区分单/双 CTA。
-- **片上 tmem 累加**：S、P、O 全部住在 tmem，softmax 与 O 的 rescale 都在 tmem 内原地完成，全流程唯一一次离片是 epilogue 把 O 写回 gmem。
-- **persistent kernel**：16 个 warp 分成 Load/MMA/Softmax/Correction/Epilogue(+CLC/empty) 五类，每类都跑同一个 `while work_tile.is_valid_tile` 循环、在 `tile_scheduler` 上对齐，靠 mbarrier/命名屏障跨 warp 传递每 tile 的就绪信号。
-- **全特性集成**：SplitKV（`split_idx` 进 work tile 四元组）、Paged KV（TMA vs `PagedKVManager` 两条 load 路径）、2CTA（`cta_group_size=2` 全面放大 cluster/tiler/tmem 释放）共用同一份主干，由 `const_expr` 编译期裁剪，且有明确的互斥/退化约束。
-- Sm100 kernel 是 FA4 中特性最全、最复杂的实现，是后续 Blackwell 反向（u9-l3）、MLA（u10-l2）的基础。
+- **UMMA（`tcgen05.mma`）** 是 Blackwell 的矩阵乘单元，与 Ampere/Hopper 的本质差异是**累加器住在片上 tmem 而非寄存器**；运算语义由 32 位 **idesc**（`make_instr_desc`）和 64 位 smem 描述符共同指定。
+- **tmem 分区**：kernel 在 `__init__` 把 tmem 列按 S/P/O 预先划分（`tmem_s_offset`/`tmem_o_offset`/`tmem_s_to_p_offset`），P 复用 S 区，只有 MMA warp 负责分配/释放，其余 warp 靠 `tcgen05.copy` 读写。
+- **persistent kernel**：CTA 在 `while work_tile.is_valid_tile` 循环里反复领活，靠 `StaticPersistentTileScheduler`/`SingleTileLPTScheduler` 决定"算哪块"；每个 warp 角色各跑一遍同构循环，用 pipeline 对齐。
+- **warp 专门化**：16 个 warp 分成 softmax0/softmax1/correction/mma/epilogue/load/empty 等角色，各自方法（`load`/`mma`/`softmax_loop`/`correction_loop`/`epilogue_s2g`）在 `kernel` 里按 `warp_idx` 分发。
+- **全特性集成**：SplitKV、paged KV、2CTA、块稀疏、varlen、pack_gqa、CLC 全挂在这副骨架上，以编译期开关裁剪，互斥规则由 assert 守卫。
+- **与 Hopper 的取舍**：用更大的 tile + tmem 累加换取吞吐，代价是更复杂的 warp 协同与屏障编排（8 个 `SoftmaxStatsW*` 屏障等）。
 
 ## 7. 下一步学习建议
 
-- **u8-l2 Tile Scheduler 与 CLC 动态调度**：本讲只点到 `tile_scheduler` 与 `clc_scheduler_warp`，下一讲深入 `SchedulingMode` 四种模式、`ClcState` 如何把硬件 work tile 映射成 `(m_block,head,batch,split)`。
-- **u8-l3 UMMA Descriptor 与 Blackwell Helpers**：深入 `mma_sm100_desc.py` 的 idesc / smem descriptor 字段编码，理解 UMMA 如何「看懂」一块 tmem/smem。
-- **u8-l4 hd256 2CTA 专用 Kernel**：本讲的 2CTA 是入门，hd256 有独立的 forward/backward kernel，下一讲结合 `AI/DEBUG_2CTA.md` 讲死锁排查。
-- 若想看 Sm100 kernel 的实测与调优旋钮，可读 [flash_fwd_sm100.py:72-107](https://github.com/Dao-AILab/flash-attention/blob/5835c733e7e9c07606b045255768e8a7e9e851bd/flash_attn/cute/flash_fwd_sm100.py#L72-L107) 的 `_TUNING_CONFIG`（寄存器分配与 ex2 仿真频率），并在 u11-l4 的基准与配置搜索讲义里看这些旋钮如何被搜索。
+- **u8-l2（Tile Scheduler 与 CLC）**：深入 `tile_scheduler.py`，理解 `SingleTileLPTScheduler` 的 L2 局部性重排，以及 CLC 硬件调度如何把"领活"原子化。
+- **u8-l3（UMMA Descriptor 与 Blackwell Helpers）**：逐字段拆解 `mma_sm100_desc.py` 的位域，并通读 `blackwell_helpers.py` 的 `gemm_ptx_*` 系列，理解 2CTA 共享 mbarrier 协调。
+- **u8-l4（hd256 2CTA 专用 Kernel）**：`head_dim=256` 的专用 2CTA kernel 把本讲的 2CTA 机制推到极致，是理解 cluster 协作与死锁陷阱的最佳材料。
+- **u9-l3（Hopper/Blackwell 反向）**：看反向如何复用 UMMA + tmem，以及 Blackwell 反向的 2CTA dQ reduce。
+- 如果你想验证本讲的特性边界，可读 `interface.py` 的 SM100 分支（约 L869-941）与 `tests/cute/test_flash_attn.py` 的参数化用例，对照确认哪些特性组合被 assert 拒绝。
