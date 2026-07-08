@@ -10389,36 +10389,43 @@
           "error": null
         },
         "u9-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":185999,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.188396,
+          "error": null
         },
         "u9-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.6549230000000004,
+          "error": null
         },
         "u9-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.1488729999999998,
+          "error": null
         },
         "u9-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.645172,
+          "error": null
         }
       },
       "manifest_head": "882989c2a3aa465867de9ea2dbd19dbed08660d9",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/xlite-dev/ffpa-attn/ffpa-attn-tutorial",
       "last_head": "882989c2a3aa465867de9ea2dbd19dbed08660d9",
-      "last_run_at": "2026-07-07T18:01:46Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-07T23:01:38Z",
+      "last_error": null,
+      "abandoned": []
     },
     "Dao-AILab/flash-attention": {
       "prompt_hash": "b21aef51792b02df",
@@ -10644,8 +10651,8 @@
     },
     "flashinfer-ai/flashinfer": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n\n{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"duration_ms\":21,\"duration_api_ms\":356178,\"is_error\":true,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"2ff7e812-1f68-4459-9f1f-c27ea71bae2d\",\"total_cost_usd\":3.0983739999999997,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tok",
-      "last_run_at": "2026-07-07T18:01:46Z"
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n\n{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"duration_ms\":5,\"duration_api_ms\":538077,\"is_error\":true,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"c8ac0f7c-ec5b-4c68-8a63-04c93b5796e8\",\"total_cost_usd\":3.5195060000000002,\"usage\":{\"input_tokens\":0,\"cache_creation_input_toke",
+      "last_run_at": "2026-07-07T23:01:38Z"
     },
     "deepseek-ai/FlashMLA": {
       "prompt_hash": "b21aef51792b02df",
@@ -10707,101 +10714,137 @@
           "error": null
         },
         "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.458377,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9610590000000001,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5702610000000001,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2492210000000001,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.187747,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.113983,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.192554,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.000899,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.015767,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3874469999999999,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.100126,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1066060000000002,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.312559,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.278175,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0707360000000001,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.366996,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.751574,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2799239999999998,
+          "error": null
+        },
+        "u7-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196817,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188122,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u8-l1": {
           "status": "pending",
@@ -10840,28 +10883,291 @@
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/FlashMLA/FlashMLA-tutorial",
       "last_head": "9241ae3ef9bac614dd25e45e507e089f888280e0",
-      "last_run_at": "2026-07-07T18:01:46Z",
+      "last_run_at": "2026-07-07T23:01:38Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "WangXuan95/FPGA-FixedPoint": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.865711,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9882770000000002,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8069789999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.808065,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9225889999999999,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.068521,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.097895,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3846489999999998,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.1108849999999997,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.01148,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.995996,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.160476,
+          "error": null
+        },
+        "u3-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0248040000000003,
+          "error": null
+        }
+      },
+      "manifest_head": "35b175d6912f085c01f5b986e4f41c70a3807909",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/WangXuan95/FPGA-FixedPoint/FPGA-FixedPoint-tutorial",
+      "last_head": "35b175d6912f085c01f5b986e4f41c70a3807909",
+      "last_run_at": "2026-07-07T23:01:38Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "WangXuan95/FPGA-FOC": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.733878,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.894739,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.709503,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.982467,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.038789,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9859680000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.958972,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.258481,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.854995,
+          "error": null
+        },
+        "u2-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.242523,
+          "error": null
+        },
+        "u2-l7": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.958715,
+          "error": null
+        },
+        "u2-l8": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4132570000000002,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.113604,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":182287,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u3-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":189283,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u4-l1": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":184483,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u4-l2": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":174465,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u4-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":179891,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        },
+        "u4-l4": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":529,\"duration_ms\":191756,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 529 [1305][该模型当前访问量过大，请您稍后再试][202"
+        }
+      },
+      "manifest_head": "3816c6c08f0cab4ff61e9ce9ff829c9f25b62cb3",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/WangXuan95/FPGA-FOC/FPGA-FOC-tutorial",
+      "last_head": "3816c6c08f0cab4ff61e9ce9ff829c9f25b62cb3",
+      "last_run_at": "2026-07-07T23:01:38Z",
+      "abandoned": [],
+      "last_error": "6 篇未完成: ['u3-l2', 'u3-l3', 'u4-l1', 'u4-l2', 'u4-l3']"
+    },
+    "dtysky/FPGA-Imaging-Library": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.47346,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.669832,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.925096,
+          "error": null
+        },
+        "u1-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194296,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u1-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u1-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189031,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u2-l1": {
           "status": "pending",
@@ -10872,59 +11178,17 @@
           "status": "pending",
           "action": "new",
           "retries": 0
-        },
-        "u2-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u2-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         }
       },
-      "manifest_head": "35b175d6912f085c01f5b986e4f41c70a3807909",
+      "manifest_head": "c8cd350dc07397be1979b51f5f99e5a7fddf98f6",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/WangXuan95/FPGA-FixedPoint/FPGA-FixedPoint-tutorial",
-      "last_head": "35b175d6912f085c01f5b986e4f41c70a3807909",
-      "last_run_at": "2026-07-07T18:01:46Z",
+      "tutorial_path": "tutorials/dtysky/FPGA-Imaging-Library/FPGA-Imaging-Library-tutorial",
+      "last_head": "c8cd350dc07397be1979b51f5f99e5a7fddf98f6",
+      "last_run_at": "2026-07-07T23:01:38Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "WangXuan95/FPGA-FOC": {},
-    "dtysky/FPGA-Imaging-Library": {},
     "laforest/FPGADesignElements": {},
     "embedeep/FREE-TPU-V3plus-for-FPGA": {},
     "git/git": {},
