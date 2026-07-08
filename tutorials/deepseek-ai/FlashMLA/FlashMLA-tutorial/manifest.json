@@ -1,0 +1,1042 @@
+{
+  "project": "FlashMLA",
+  "head": "9241ae3ef9bac614dd25e45e507e089f888280e0",
+  "rationale": "FlashMLA 是面向 DeepSeek-V3/V3.2 的高性能 MLA 注意力 CUDA kernel 库，覆盖 SM90(Hopper) 与 SM100(Blackwell) 两代架构、dense/sparse × decode/prefill 四类 kernel，代码以 CUTLASS+CUDA 为主、PyTorch 扩展为壳。学习路线从「认识项目 + 构建运行 + 目录与 Python 接口」起步(Unit 1)，再沿真实调用链「Python→pybind→ImplBase 派发器→kernel」建立全局观(Unit 2)，随后按 kernel 家族逐个深入：先讲 SM90 dense decode 的 seesaw 调度与 compute-bound 理论(Unit 3)，再讲贯穿所有解码路径的 Split-KV / combine / tile scheduler 机制(Unit 4)，接着进入 FP8 sparse decode 的反量化与 crossover 技术(Unit 5)和 token-level sparse prefill(Unit 6)；专家层聚焦基于 CUTLASS 的 dense MHA prefill/backward(Unit 7)、底层 kerutils 工具与测试/性能测量体系(Unit 8)，最后以 SM90/SM100 架构取舍、扩展点与端到端实战收尾(Unit 9)。单元内部统一按「理论分析→静态配置→核心 kernel→对外接口」逐层展开，保证每篇只讲一个独立主题、只引用真实存在的源码、并给出可操作的代码实践任务，依赖关系由浅入深、先公共框架后各 kernel 家族。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 FlashMLA 并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 MLA 背景",
+          "order": 1,
+          "filename": "u1-l1-project-overview-and-mla.md",
+          "level": "beginner",
+          "topic": "介绍 FlashMLA 是什么、解决什么问题，以及 Multi-head Latent Attention（MLA）与 DeepSeek-V3/V3.2 的关系，覆盖 dense/sparse × decode/prefill 四类 kernel 与支持矩阵。",
+          "learning_goals": [
+            "理解 FlashMLA 的定位与四类 kernel 的职责",
+            "理解 MLA 的 MQA/MHA 模式与 head_dim_k/head_dim_v 的含义",
+            "了解性能指标（TFlops / GB/s）与各 kernel 的目标场景"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/20250422-new-kernel-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "项目定位与四类 kernel",
+            "MLA / MQA / MHA 背景",
+            "kernel 支持矩阵与性能指标"
+          ],
+          "practice_task": "阅读 README 的支持矩阵，判断给定一块 GPU（SM90 还是 SM100）能走哪几条 kernel 路径；用 Python 打印 torch.cuda.get_device_capability() 并对照 README 的架构要求写一段说明。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境准备与源码构建安装",
+          "order": 2,
+          "filename": "u1-l2-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解如何克隆、初始化 CUTLASS 子模块并用 setup.py 编译安装 flash_mla.cuda 扩展，以及 NVCC 版本、sm_90a/sm_100f gencode 与 FLASH_MLA_DISABLE_* feature flag 的作用。",
+          "learning_goals": [
+            "掌握 CUDAExtension 的构建流程与源文件清单",
+            "理解 sm_90a / sm_100f gencode 与 NVCC 版本要求",
+            "了解 FLASH_MLA_DISABLE_SM90 / SM100 / FP16 等环境变量"
+          ],
+          "source_files": [
+            "setup.py",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "CUDAExtension 构建入口",
+            "NVCC 版本与 arch 检测",
+            "feature flag"
+          ],
+          "practice_task": "阅读 setup.py 的 get_arch_flags，解释为何 CUDA<12.9 时必须设置 FLASH_MLA_DISABLE_SM100，并针对当前环境的 NVCC 版本列出会启用哪些 -gencode。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码组织",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "带领读者浏览仓库目录结构：flash_mla/、csrc/api、csrc/sm90、csrc/sm100、csrc/smxx、csrc/kerutils、tests/、benchmark/、docs/，建立代码空间感。",
+          "learning_goals": [
+            "记住各顶层目录的职责",
+            "理解 csrc 按 sm{90,100,xx} 与 decode/prefill、dense/sparse 的组织方式",
+            "能根据功能快速定位 kernel 入口文件"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "顶层目录职责",
+            "csrc 架构/阶段/稀疏性划分",
+            "测试与文档目录"
+          ],
+          "practice_task": "把 setup.py 的 sources 列表里每个 .cu 文件映射到「架构 / 阶段（decode/prefill）/ 稀疏性（dense/sparse）」分类表，验证你对目录结构的理解。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Python 接口与最小运行示例",
+          "order": 4,
+          "filename": "u1-l4-python-api-quickstart.md",
+          "level": "beginner",
+          "topic": "讲解 flash_mla 包导出的函数与最小可运行用法：get_mla_metadata + flash_mla_with_kvcache 解码循环、flash_mla_sparse_fwd、以及 dense MHA 的 flash_attn_varlen_func 系列。",
+          "learning_goals": [
+            "掌握 Python 入口函数的签名与用途",
+            "理解 FlashMLASchedMeta「首次调用初始化、后续复用」的模式",
+            "能照着 README 跑通最小解码示例"
+          ],
+          "source_files": [
+            "flash_mla/__init__.py",
+            "flash_mla/flash_mla_interface.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "包导出 __init__",
+            "解码接口 flash_mla_with_kvcache",
+            "sparse prefill 与 dense MHA varlen 接口"
+          ],
+          "practice_task": "参照 tests/test_flash_mla_dense_decoding.py 的 generate_test_data，写出构造 q / block_table / blocked_k / cache_seqlens 并调用 flash_mla_with_kvcache 的最小脚本（无 GPU 时只做张量形状构造并加注释）。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "调用链与公共派发框架",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "调用链全景：Python 到 CUDA kernel",
+          "order": 1,
+          "filename": "u2-l1-callchain-overview.md",
+          "level": "intermediate",
+          "topic": "纵览从 Python 调用到 CUDA kernel 启动的完整链路：flash_mla_interface → flash_mla_cuda.*（pybind）→ csrc/api/*.h 接口 → ImplBase 派发器 → 具体 kernel 命名空间。",
+          "learning_goals": [
+            "建立 Python→C++→CUDA 的全局调用图",
+            "理解 pybind 模块 flash_mla.cuda 的 5 个绑定",
+            "能把每个接口定位到对应的 kernel 命名空间"
+          ],
+          "source_files": [
+            "flash_mla/flash_mla_interface.py",
+            "csrc/api/api.cpp",
+            "csrc/api/common.h"
+          ],
+          "minimal_modules": [
+            "Python 包装层",
+            "pybind 绑定 api.cpp",
+            "接口头文件与 kernel 命名空间"
+          ],
+          "practice_task": "画一张调用链图，把 flash_mla_cuda.dense_decode_fwd / sparse_decode_fwd / sparse_prefill_fwd / dense_prefill_fwd / dense_prefill_bwd 五个绑定逐一连到对应的 csrc 接口函数与最终 kernel 命名空间。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "统一参数结构 params.h",
+          "order": 2,
+          "filename": "u2-l2-params-structs.md",
+          "level": "intermediate",
+          "topic": "系统讲解 params.h 中的核心参数结构：DecodingSchedMeta、DenseAttnDecodeParams、SparseAttnDecodeParams、CombineParams、GetDecodeSchedMetaParams、SparseAttnFwdParams，以及 ModelType 与 SparseAttnFwdMode。",
+          "learning_goals": [
+            "理解每个参数结构承载的字段与含义",
+            "区分指针、stride、split-KV 相关字段",
+            "理解 MQA 与 head_dim 的约束如何编码进结构"
+          ],
+          "source_files": [
+            "csrc/params.h"
+          ],
+          "minimal_modules": [
+            "DecodingSchedMeta",
+            "Dense/Sparse Decode Params",
+            "Combine / SchedMeta / Fwd Params",
+            "ModelType 与 SparseAttnFwdMode"
+          ],
+          "practice_task": "选定 DenseAttnDecodeParams，逐字段注释说明它在 api/dense_decode.h 中如何被赋值（指针来自哪个张量、stride 来自哪个维度、split-KV 缓冲如何挂接）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Arch 检测与 DISPATCH 宏",
+          "order": 3,
+          "filename": "u2-l3-arch-and-dispatch-macros.md",
+          "level": "intermediate",
+          "topic": "讲解 common.h 中的 Arch 结构（SM 检测、SM 数）、int64→int32 stride 溢出保护，以及 DISPATCH_NUM_HEADS / DISPATCH_HEAD_DIM / DISPATCH_BOOLEAN_FLAG / DISPATCH_MODEL_TYPE 宏。",
+          "learning_goals": [
+            "理解运行时 GPU 架构检测与 num_sms 获取",
+            "掌握把运行时值编译期化的 DISPATCH 宏模式",
+            "理解为何要把 head_dim / num_heads 转成模板常量以生成特化 kernel"
+          ],
+          "source_files": [
+            "csrc/api/common.h"
+          ],
+          "minimal_modules": [
+            "Arch 检测",
+            "stride 溢出保护",
+            "DISPATCH 系列宏"
+          ],
+          "practice_task": "找一个 DISPATCH 调用点，说明传入未支持的 head_dim（如 256）会在哪一行、报什么错，并解释这种「立即调用 lambda」风格如何为每种枚举值生成独立的模板特化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "ImplBase 派发框架与 Feature 声明",
+          "order": 4,
+          "filename": "u2-l4-implbase-dispatcher.md",
+          "level": "intermediate",
+          "topic": "深入 ImplBase 模板基类、DECLARE_SUPPORTED_FEATURES 宏、feature 集合校验与 abort 流程，以及它如何支撑 sparse decode / sparse fwd 的多实现派发。",
+          "learning_goals": [
+            "理解「实现 = 支持的 feature 集合」的设计",
+            "掌握 run() 先校验 feature 再调用 run_ 的流程",
+            "理解 enum→字符串名反射在错误诊断中的作用"
+          ],
+          "source_files": [
+            "csrc/api/common.h",
+            "csrc/api/sparse_decode.h",
+            "csrc/api/sparse_fwd.h"
+          ],
+          "minimal_modules": [
+            "ImplBase 基类",
+            "DECLARE_SUPPORTED_FEATURES",
+            "feature 校验与 abort",
+            "enum 名字反射"
+          ],
+          "practice_task": "模仿 Decode_Sm100_Head64_Impl，写一个假想的「只支持 HEAD_64 + HEAD_DIM_512」的 Impl 类骨架（声明 features、实现 get_meta/run_ 占位），并解释 dispatcher 如何拒绝它处理 head128 请求。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Dense Decoding Kernel（SM90）核心",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "MLA 解码的 compute-bound 理论分析",
+          "order": 1,
+          "filename": "u3-l1-compute-bound-analysis.md",
+          "level": "intermediate",
+          "topic": "结合 deep-dive 博客，理论分析 MLA 解码为何在 h_q·s_q 较大时是 compute-bound，推导 FLOPs/byte 比并与 H800 峰值带宽/算力对比，得出分界条件。",
+          "learning_goals": [
+            "会算 MLA 解码的算术强度（FLOPs/byte）",
+            "掌握 memory/compute bound 的判定方法与分界（h_q·s_q≈128）",
+            "理解后续优化为何以喂饱 Tensor Core 为目标"
+          ],
+          "source_files": [
+            "docs/20250422-new-kernel-deep-dive.md",
+            "tests/test_flash_mla_dense_decoding.py"
+          ],
+          "minimal_modules": [
+            "FLOPs 与访存量推导",
+            "计算访存比",
+            "bound 判定"
+          ],
+          "practice_task": "复现博客的 FLOPs/byte 推导，并对 b=128, s_q=2, s_k=8192, d=576, dv=512 计算理论 TFlops 与 GB/s，判断该配置是 compute 还是 memory bound。",
+          "depends_on": [
+            "u1-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "静态配置 config.h 与 traits.h（GMMA）",
+          "order": 2,
+          "filename": "u3-l2-config-and-traits.md",
+          "level": "intermediate",
+          "topic": "讲解 sm90 dense decode 的 config.h（BLOCK_SIZE_M、PAGE_BLOCK_SIZE、HEAD_DIM_K/V）与 traits.h（GMMA TiledMMA 的 ss/rs 选择、SmemLayout、SharedMemoryPlan、NamedBarriers）。",
+          "learning_goals": [
+            "理解 kernel 的静态 tile 配置常量",
+            "理解 GMMA ss/rs op_selector 对 QK 与 PV 矩阵的选择",
+            "理解 smem 布局、TMA barrier 数量与命名 barrier 的用途"
+          ],
+          "source_files": [
+            "csrc/sm90/decode/dense/config.h",
+            "csrc/sm90/decode/dense/traits.h"
+          ],
+          "minimal_modules": [
+            "Config 常量",
+            "GMMA TiledMMA 选择",
+            "SharedMemoryPlan 与 NamedBarriers"
+          ],
+          "practice_task": "在 traits.h 中找到 PV 的 LocalP（rs）与 RemoteP（ss）两个 TiledMMA，解释它们如何对应 seesaw 调度里两个 warpgroup 对 P 的本地与远程访问。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Seesaw 调度与 TMA 流水",
+          "order": 3,
+          "filename": "u3-l3-seesaw-and-tma-pipeline.md",
+          "level": "intermediate",
+          "topic": "深入 splitkv_mla.cuh 的核心：seesaw（单输出矩阵的 ping-pong 变体）调度、双 warpgroup 交错的 online softmax、细粒度 TMA copy-GEMM 流水与 EVICT_FIRST cache hint。",
+          "learning_goals": [
+            "理解把 O 竖切成 O_L/O_R 与 seesaw 11 步的数学等价性",
+            "理解双 warpgroup 交错如何重叠 CUDA Core 与 Tensor Core",
+            "理解细粒度 TMA 分块拷贝与 GEMM 重叠、cache hint 的作用"
+          ],
+          "source_files": [
+            "csrc/sm90/decode/dense/splitkv_mla.cuh",
+            "csrc/sm90/decode/dense/traits.h",
+            "docs/20250422-new-kernel-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "seesaw 数学变换",
+            "双 warpgroup 交错",
+            "细粒度 TMA 流水与 cache hint"
+          ],
+          "practice_task": "对照博客的 11 步 seesaw 公式，在 splitkv_mla.cuh 中定位对应的两套 WGMMA（O_L/O_R）与 softmax/scale 更新代码，给关键行加注释。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Dense decode 接口与 split-KV 编排",
+          "order": 4,
+          "filename": "u3-l4-dense-decode-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 api/dense_decode.h：dtype/shape/layout 校验、q 的 head 维重排、num_sm_parts 计算、split-KV 缓冲（lse_accum / o_accum）分配、调度元数据生成与 combine 调用、输出 reshape。",
+          "learning_goals": [
+            "掌握接口层的张量校验与 head 维重排",
+            "理解 num_sm_parts 与 total_num_splits 的来源",
+            "把接口与底层 kernel、combine 串成完整流程"
+          ],
+          "source_files": [
+            "csrc/api/dense_decode.h",
+            "csrc/params.h"
+          ],
+          "minimal_modules": [
+            "校验与 head 重排",
+            "num_sm_parts 与缓冲分配",
+            "调度元数据与 combine 编排"
+          ],
+          "practice_task": "追踪一次 dense decode 调用，列出 out / lse / lse_accum / out_accum 的形状来源，并解释为何 seqlen_q==1 时强制 is_causal=false。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Split-KV、Combine 与 Tile Scheduler",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Split-KV 缓冲与 Flash-Decoding 思想",
+          "order": 1,
+          "filename": "u4-l1-splitkv-buffers.md",
+          "level": "intermediate",
+          "topic": "讲解 Split-KV（Flash-Decoding 式）思想：把长 KV 序列切成多 split，每个 split 产出局部 o / lse 写入 accumulate 缓冲，最终由 combine 归并；覆盖 num_splits / total_num_splits 与局部/全局 lse 的关系。",
+          "learning_goals": [
+            "理解解码阶段为何需要 split-KV",
+            "理解 num_splits 与 total_num_splits 的含义",
+            "掌握局部 lse 与全局 lse 的关系（rescale 合并）"
+          ],
+          "source_files": [
+            "csrc/api/dense_decode.h",
+            "csrc/params.h",
+            "csrc/sm90/decode/dense/splitkv_mla.h"
+          ],
+          "minimal_modules": [
+            "split-KV 动机",
+            "accumulate 缓冲",
+            "局部/全局 lse 关系"
+          ],
+          "practice_task": "用纯 PyTorch 实现简化版 split-KV：把一段 KV 切成 N 段各自做 online softmax，再用手写 logsumexp 合并两段 lse 与 o，验证与整体 softmax 数值等价。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Combine kernel：跨 split 归并",
+          "order": 2,
+          "filename": "u4-l2-combine-kernel.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 combine.cu：grid 划分、按 split 收集 lse_accum / o_accum、online softmax rescale 合并、单 split 早退、attn_sink 对输出的缩放。",
+          "learning_goals": [
+            "理解 combine 的 grid 与每个 CTA 的职责",
+            "掌握跨 split 的 rescale 合并公式",
+            "理解 attn_sink 如何缩放最终输出（且不影响返回的 lse）"
+          ],
+          "source_files": [
+            "csrc/smxx/decode/combine/combine.cu",
+            "csrc/smxx/decode/combine/combine.h"
+          ],
+          "minimal_modules": [
+            "grid 与 CTA 划分",
+            "跨 split rescale 合并",
+            "单 split 早退",
+            "attn_sink"
+          ],
+          "practice_task": "阅读 combine.cu 的 rescale 循环，写出三段 split 合并为单段输出的伪代码，并解释为何 my_num_splits==1 时直接 return 仍然正确。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Tile scheduler metadata 分配",
+          "order": 3,
+          "filename": "u4-l3-tile-scheduler-meta.md",
+          "level": "intermediate",
+          "topic": "讲解 get_decoding_sched_meta.cu：把 batch 的请求/块均衡切给 num_sm_parts 个 SM part，产出 DecodingSchedMeta 与 num_splits（前缀和），处理 sparse 的 topk / extra_topk 与空序列边界。",
+          "learning_goals": [
+            "理解 tile scheduler 的负载均衡目标",
+            "理解 begin/end_req_idx、begin/end_block_idx 与 split 标志",
+            "理解 num_splits 前缀和的生成与空序列的修正"
+          ],
+          "source_files": [
+            "csrc/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu",
+            "csrc/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.h",
+            "csrc/params.h"
+          ],
+          "minimal_modules": [
+            "负载均衡切分逻辑",
+            "DecodingSchedMeta 字段",
+            "num_splits 前缀和",
+            "空/边界序列处理"
+          ],
+          "practice_task": "手算一个小例子：b=3，三段序列块数为 [4,1,5]，num_sm_parts=2，按代码的 payload 逻辑推出两份 DecodingSchedMeta 与 num_splits 数组。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "FP8 Sparse Decoding Kernel（SM90）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "FP8 KV Cache 布局与量化",
+          "order": 1,
+          "filename": "u5-l1-fp8-kvcache-format.md",
+          "level": "intermediate",
+          "topic": "讲解 FP8-with-scale KV cache 布局：每 token 656 字节（512 fp8_e4m3 + 4 个 fp32 scale + 64 个 bf16 RoPE），V3.2 与 MODEL1 两种 layout，以及 NoPE / RoPE 的拆分理由。",
+          "learning_goals": [
+            "理解 tile 级（1×128）量化与 scale 因子",
+            "掌握 V32 与 MODEL1 两种 layout 的字节结构差异",
+            "理解为何 RoPE 部分不做量化"
+          ],
+          "source_files": [
+            "tests/quant.py",
+            "flash_mla/flash_mla_interface.py",
+            "docs/20250929-hopper-fp8-sparse-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "656 字节布局",
+            "tile 级量化与 scale",
+            "V32 vs MODEL1",
+            "NoPE / RoPE 拆分"
+          ],
+          "practice_task": "用 tests/quant.py 的 quantize_k_cache 对一个小 bf16 KV（如 [2,64,1,576]）做量化，再用 dequantize_k_cache 反量化，计算最大量化误差并验证字节布局符合文档描述。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "FP8→bf16 反量化与时钟周期分析",
+          "order": 2,
+          "filename": "u5-l2-dequant-flow.md",
+          "level": "intermediate",
+          "topic": "讲解反量化流水：fp8→half→fp32→bf16→×scale 的指令序列与代价，结合时钟周期分析说明为何 sparse decode kernel 是「dequantization-bound」。",
+          "learning_goals": [
+            "理解 H800 无法直接 fp8→bf16 的限制",
+            "估算反量化与 MMA 的时钟周期比",
+            "理解 dequant 成为瓶颈的原因"
+          ],
+          "source_files": [
+            "csrc/sm90/decode/sparse_fp8/components/dequant.h",
+            "csrc/sm90/decode/sparse_fp8/config.h",
+            "docs/20250929-hopper-fp8-sparse-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "反量化指令序列",
+            "时钟周期估算",
+            "dequant-bound 结论"
+          ],
+          "practice_task": "复现博客的周期估算（512 元素、按各步指令吞吐倒数），算出单 token 反量化约多少 cycle，并与 64 头 MMA 的约 34 cycle 比较，说明瓶颈所在。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Crossover 与 DSM / CTA cluster",
+          "order": 3,
+          "filename": "u5-l3-crossover-dsm.md",
+          "level": "intermediate",
+          "topic": "讲解 crossover 技术：用 size=2 的 CTA cluster + Distributed Shared Memory，让两个 CTA 各反量化一半 KV 再通过 st.async 互换，把反量化工作量减半；含 cluster transaction barrier 同步。",
+          "learning_goals": [
+            "理解 MQA 下两个 CTA 共享同一份 KV 的机会",
+            "掌握 DSM 与 CTA cluster 的用法",
+            "理解 cluster transaction barrier 的同步语义"
+          ],
+          "source_files": [
+            "csrc/sm90/decode/sparse_fp8/splitkv_mla.cuh",
+            "csrc/sm90/decode/sparse_fp8/components/dequant.h",
+            "docs/20250929-hopper-fp8-sparse-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "MQA 共享 KV 的机会",
+            "DSM / CTA cluster",
+            "cluster barrier 同步",
+            "各反量化一半并互换"
+          ],
+          "practice_task": "用文字 + 示意图说明 crossover 下两个 CTA 如何各自加载/反量化一半、通过 DSM 互换后都拿到完整 KV，并分析这对寄存器与 shared memory 压力的影响。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Sparse decode 接口与 DecodeFeatures 派发",
+          "order": 4,
+          "filename": "u5-l4-sparse-decode-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 api/sparse_decode.h：sparse decode 的校验、feature 集合构造、SM90/SM100/head64/head64x2/head128 多实现派发，以及 extra KV 与 topk_length 的处理。",
+          "learning_goals": [
+            "掌握 sparse decode 接口的校验与 feature 构造",
+            "理解 SM100f 上 head64 / head64x2 / head128 三条路径的选择",
+            "理解 extra KV 与 topk_length 的语义"
+          ],
+          "source_files": [
+            "csrc/api/sparse_decode.h",
+            "csrc/params.h"
+          ],
+          "minimal_modules": [
+            "校验与 feature 构造",
+            "多实现派发",
+            "head64x2 处理 head128",
+            "extra KV / topk_length"
+          ],
+          "practice_task": "追踪 SM100f + h_q=128 + d_qk=576 这一路径，解释为何选中 Decode_Sm100_Head64x2_Impl，并说明它如何把 q / lse / out 按头切成两段各跑一次 head64 kernel。",
+          "depends_on": [
+            "u2-l4",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Token-level Sparse Prefill Kernel",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Sparse attention 语义与 indices 编码",
+          "order": 1,
+          "filename": "u6-l1-sparse-attention-semantics.md",
+          "level": "intermediate",
+          "topic": "讲解 token-level sparse attention 的语义：indices 张量、indices_in_kvcache 的编码（page_block*block_size+offset）、无效索引 -1、topk_length，以及等价的 PyTorch 参考实现。",
+          "learning_goals": [
+            "理解 indices 如何把绝对/分页索引编码进 KV cache",
+            "掌握无效索引与 topk_length 的掩码语义",
+            "能对照 ref.py 写出等价的 sparse attention 实现"
+          ],
+          "source_files": [
+            "tests/ref.py",
+            "flash_mla/flash_mla_interface.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "indices 编码",
+            "无效索引与 topk_length",
+            "等价 PyTorch 参考",
+            "输出 (out, max_logits, lse)"
+          ],
+          "practice_task": "参照 tests/ref.py 的 ref_sparse_attn_fwd，写一个独立函数：给定 q / kv / indices / sm_scale，用 gather + softmax 复现 kernel 输出，并正确处理 -1 与 >=s_kv 的无效索引。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "SM90 sparse prefill phase1 kernel",
+          "order": 2,
+          "filename": "u6-l2-sm90-sparse-prefill-phase1.md",
+          "level": "intermediate",
+          "topic": "讲解 SM90 sparse prefill phase1 kernel：online softmax 主循环、block 调度、head_dim / topk_length 的模板特化与 instantiation 文件组织。",
+          "learning_goals": [
+            "理解 phase1 接口与 online softmax 主循环",
+            "掌握模板参数（HEAD_DIM, HAVE_TOPK_LENGTH）的特化",
+            "理解 instantiation 文件按组合拆分的目的"
+          ],
+          "source_files": [
+            "csrc/sm90/prefill/sparse/phase1.h",
+            "csrc/sm90/prefill/sparse/phase1.cuh",
+            "csrc/sm90/prefill/sparse/fwd.cu",
+            "csrc/sm90/prefill/sparse/config.h"
+          ],
+          "minimal_modules": [
+            "phase1 接口",
+            "online softmax 主循环",
+            "模板特化与实例化",
+            "config 配置"
+          ],
+          "practice_task": "列出 csrc/sm90/prefill/sparse/instantiations/ 下四个 .cu 各自实例化了哪些 (HEAD_DIM, HAVE_TOPK_LENGTH) 组合，并说明按组合拆分实例化文件的目的。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "SM100 sparse prefill 与 small_topk 变体",
+          "order": 3,
+          "filename": "u6-l3-sm100-sparse-prefill.md",
+          "level": "intermediate",
+          "topic": "讲解 SM100 sparse prefill 的 head64 / head128 phase1，以及为小 topk 优化的 fwd_for_small_topk 变体（同一 kernel 同时服务 prefill 与 decode）。",
+          "learning_goals": [
+            "理解 SM100 head64 / head128 phase1 的差异",
+            "掌握 small_topk 变体的设计动机",
+            "理解 prefill / decode 复用同一 kernel 的模板开关"
+          ],
+          "source_files": [
+            "csrc/sm100/prefill/sparse/fwd/head64/phase1.h",
+            "csrc/sm100/prefill/sparse/fwd/head64/phase1.cuh",
+            "csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.h",
+            "csrc/sm100/prefill/sparse/common_subroutine.h"
+          ],
+          "minimal_modules": [
+            "SM100 head64/head128 phase1",
+            "small_topk 变体",
+            "prefill/decode 复用",
+            "公共子例程"
+          ],
+          "practice_task": "对比 head128 普通 phase1 与 small_topk phase1 的 config.h，找出 tile/block 配置差异，并说明小 topk 场景为何需要专门变体。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Sparse fwd 接口与实现选择",
+          "order": 4,
+          "filename": "u6-l4-sparse-fwd-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 api/sparse_fwd.h：sparse prefill 接口校验、FwdFeatures 派发，以及 SM100 head128 下「small_topk vs 普通」实现的选择逻辑（topk≤1280 优先、否则 fallback）。",
+          "learning_goals": [
+            "掌握 sparse prefill 接口的校验流程",
+            "理解 FwdFeatures 的派发机制",
+            "理解 small_topk 选择阈值与 fallback 分支的作用"
+          ],
+          "source_files": [
+            "csrc/api/sparse_fwd.h",
+            "csrc/params.h"
+          ],
+          "minimal_modules": [
+            "接口校验",
+            "FwdFeatures 派发",
+            "small_topk 选择阈值",
+            "多实现 fallback"
+          ],
+          "practice_task": "阅读选择逻辑画出决策树：给定 (arch, h_q, d_qk, topk, features) 如何落到具体实现；并解释 `!regular_impl.check_if_all_features_are_supported(...)` 兜底分支的作用。",
+          "depends_on": [
+            "u6-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "CUTLASS Dense MHA Prefill/Backward（SM100）",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "CUTLASS 集成与分层结构",
+          "order": 1,
+          "filename": "u7-l1-cutlass-integration.md",
+          "level": "advanced",
+          "topic": "讲解 sm100 dense prefill 如何基于 CUTLASS 组织成 device / kernel / collective / common 多层（fmha.hpp device、tile scheduler、collective mainloop/epilogue/load），以及 fwd / bwd 入口 .cu 与 MLA 模板开关。",
+          "learning_goals": [
+            "理解 CUTLASS 的 device→kernel→collective 分层",
+            "定位 fwd/bwd 启动入口与各 collective 文件职责",
+            "理解 MLA 与普通 MHA 的模板开关"
+          ],
+          "source_files": [
+            "csrc/sm100/prefill/dense/device/fmha.hpp",
+            "csrc/sm100/prefill/dense/fmha_cutlass_fwd_sm100.cu",
+            "csrc/sm100/prefill/dense/fmha_cutlass_bwd_sm100.cu",
+            "csrc/sm100/prefill/dense/interface.h"
+          ],
+          "minimal_modules": [
+            "CUTLASS 分层",
+            "fwd / bwd 入口",
+            "device 层",
+            "MLA 开关"
+          ],
+          "practice_task": "画出 csrc/sm100/prefill/dense 的 include 依赖树（interface.h → fwd.cu → .cuh → device/kernel/collective），标注每层职责。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Mainloop collective 与 MLA fusion",
+          "order": 2,
+          "filename": "u7-l2-mainloop-collective-and-fusion.md",
+          "level": "advanced",
+          "topic": "讲解 collective 层：TMA warpspecialized mainloop、MLA 专用 load 与 fwd mainloop、epilogue 与 softmax fusion（fmha_fusion.hpp）。",
+          "learning_goals": [
+            "理解 warpspecialized mainloop 的流水结构",
+            "理解 MLA 专用 load / mainloop 与普通版本的差异",
+            "理解 fusion 在 attention 计算中的作用"
+          ],
+          "source_files": [
+            "csrc/sm100/prefill/dense/collective/sm100_fmha_mla_fwd_mainloop_tma_warpspecialized.hpp",
+            "csrc/sm100/prefill/dense/collective/sm100_fmha_mla_load_tma_warpspecialized.hpp",
+            "csrc/sm100/prefill/dense/collective/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp",
+            "csrc/sm100/prefill/dense/collective/fmha_fusion.hpp"
+          ],
+          "minimal_modules": [
+            "warpspecialized mainloop",
+            "MLA load",
+            "MLA fwd mainloop",
+            "fusion"
+          ],
+          "practice_task": "对比普通 fmha_fwd_mainloop 与 mla_fwd_mainloop 两个 collective，列出 MLA 版本独有的处理（如 K/V 同源、head_dim 拼接），并解释其数学含义。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Causal tile scheduler 与 mask",
+          "order": 3,
+          "filename": "u7-l3-tile-scheduler-and-mask.md",
+          "level": "advanced",
+          "topic": "讲解 kernel 层的 tile scheduler（causal 与通用）、mask.cuh 的掩码类型（CausalMask / ResidualMask）、fmha_options 与 pipeline_mla。",
+          "learning_goals": [
+            "理解 causal tile scheduler 如何跳过上三角 tile",
+            "掌握 MaskMode 到 CausalMask/ResidualMask 的映射",
+            "理解 fmha_options 与 pipeline_mla 的作用"
+          ],
+          "source_files": [
+            "csrc/sm100/prefill/dense/kernel/fmha_causal_tile_scheduler.hpp",
+            "csrc/sm100/prefill/dense/kernel/fmha_tile_scheduler.hpp",
+            "csrc/sm100/prefill/dense/common/mask.cuh",
+            "csrc/sm100/prefill/dense/kernel/fmha_options.hpp"
+          ],
+          "minimal_modules": [
+            "causal tile scheduler",
+            "通用 tile scheduler",
+            "mask 类型",
+            "options / pipeline"
+          ],
+          "practice_task": "阅读 mask.cuh 与 fwd 入口的 mask_mode 分派，说明 MaskMode 如何映射到 CausalMask / ResidualMask，并解释 causal tile scheduler 跳过 tile 的判定逻辑。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Autograd fwd/bwd 与 dense 接口",
+          "order": 4,
+          "filename": "u7-l4-autograd-bwd-and-interface.md",
+          "level": "advanced",
+          "topic": "讲解 dense MHA 的 autograd：Python 端 FlashAttnVarlenFunc（forward / backward、save_for_backward、LSE 暂不支持 bwd）、bwd workspace 分配，以及 dense_prefill_fwd / bwd 接口与 head_dim 分派。",
+          "learning_goals": [
+            "掌握 FlashAttnVarlenFunc 的 autograd 上下文保存与反向流程",
+            "理解 bwd workspace（dQ_acc / sum_OdO / scaled_lse）的字节计算",
+            "理解 dense fwd/bwd 接口的 mask_mode 与 head_dim 分派"
+          ],
+          "source_files": [
+            "flash_mla/flash_mla_interface.py",
+            "csrc/api/dense_fwd.h",
+            "csrc/sm100/prefill/dense/fmha_cutlass_fwd_sm100.cu",
+            "csrc/sm100/prefill/dense/fmha_cutlass_bwd_sm100.cu"
+          ],
+          "minimal_modules": [
+            "FlashAttnVarlenFunc autograd",
+            "bwd workspace",
+            "dense_prefill_fwd/bwd 接口",
+            "head_dim 分派"
+          ],
+          "practice_task": "追踪 _flash_attn_varlen_backward 的 workspace_bytes 计算，解释 dQ_acc / sum_OdO / scaled_lse 三块各占多少字节，并说明为何 bwd 暂不支持 GQA（num_qo_heads != num_kv_heads）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "底层工具、测试与性能测量",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "kerutils host / device 工具层",
+          "order": 1,
+          "filename": "u8-l1-kerutils.md",
+          "level": "advanced",
+          "topic": "讲解 csrc/kerutils 工具层：host 侧（torch_tensors、host.h）、device 侧 device.cuh 与 sm80/sm90/sm100 的 helpers / intrinsics / TMA / gemm，以及 defines.h / utils.h 的基础类型。",
+          "learning_goals": [
+            "掌握 KU_CHECK_* 张量校验宏与 get_optional_tensor_ptr 的用法",
+            "理解 device 公共工具与各架构 intrinsics/helpers 的分层",
+            "理解 defines.h 中的基础向量类型与 barrier 别名"
+          ],
+          "source_files": [
+            "csrc/kerutils/include/kerutils/device/device.cuh",
+            "csrc/kerutils/include/kerutils/host/host.h",
+            "csrc/kerutils/include/kerutils/device/sm100/intrinsics.cuh",
+            "csrc/kerutils/include/kerutils/supplemental/torch_tensors.h",
+            "csrc/defines.h",
+            "csrc/utils.h"
+          ],
+          "minimal_modules": [
+            "host 工具与张量校验宏",
+            "device 公共工具",
+            "sm{80,90,100} intrinsics/helpers",
+            "基础类型 defines"
+          ],
+          "practice_task": "在 kerutils 中找出 KU_CHECK_* 系列宏与 get_optional_tensor_ptr 的定义，说明它们如何被 api/*.h 复用做张量校验，并各给一处真实调用点。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "测试体系与 PyTorch 参考实现",
+          "order": 2,
+          "filename": "u8-l2-test-harness.md",
+          "level": "advanced",
+          "topic": "讲解测试体系：tests/lib.py 的 TestParam / Testcase 生成、ref.py 的参考实现（dense/sparse decode、sparse fwd，含 lse 合并、attn_sink、lonely q）、test_flash_mla_*.py 的 correctness / corner / performance 三类用例与容差。",
+          "learning_goals": [
+            "掌握用例生成与 TestParam/Testcase 的结构",
+            "理解 ref.py 中 lse 合并、attn_sink、lonely q 的处理",
+            "理解三类测试用例与三重容差（abs/rel/cos_diff）的判定"
+          ],
+          "source_files": [
+            "tests/lib.py",
+            "tests/ref.py",
+            "tests/test_flash_mla_dense_decoding.py",
+            "tests/test_flash_mla_sparse_prefill.py"
+          ],
+          "minimal_modules": [
+            "用例生成 lib.py",
+            "参考实现 ref.py",
+            "三类测试用例",
+            "容差与正确性判定"
+          ],
+          "practice_task": "仿照 test_flash_mla_dense_decoding.py，为一个新 (b, s_q, s_k) 组合编写一条 correctness 用例，并说明 abs_tol / rel_tol / cos_diff_tol 三重容差各自的作用。",
+          "depends_on": [
+            "u3-l4",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Benchmark、kernelkit 与性能调优",
+          "order": 3,
+          "filename": "u8-l3-benchmark-kernelkit-and-perf.md",
+          "level": "advanced",
+          "topic": "讲解性能测量：benchmark/bench_flash_mla.py 对比 torch / flashinfer / triton / flash_mla、FLOPs/bytes 计算；tests/kernelkit 的 bench / compare / precision 工具；以及 setup.py 的 NVCC 性能 flag（--use_fast_math、ptxas register-usage-level=10、lineinfo）与博客优化技巧汇总。",
+          "learning_goals": [
+            "掌握多实现对比的 benchmark 流程",
+            "会算给定 shape 的理论 TFlops / GB/s",
+            "理解关键 NVCC 性能 flag 与博客中的优化技巧"
+          ],
+          "source_files": [
+            "benchmark/bench_flash_mla.py",
+            "tests/kernelkit/bench.py",
+            "tests/kernelkit/compare.py",
+            "setup.py",
+            "docs/20250422-new-kernel-deep-dive.md"
+          ],
+          "minimal_modules": [
+            "多实现 benchmark",
+            "FLOPs / bytes 计算",
+            "kernelkit 工具",
+            "NVCC 性能 flag 与优化技巧"
+          ],
+          "practice_task": "阅读 bench_flash_mla.py 的 FLOPS / bytes 公式，对一个给定 shape 手算理论 TFlops / GB/s，并解释 register-usage-level=10、warn-on-spills 等 flag 对 kernel 性能与稳定性的意义。",
+          "depends_on": [
+            "u3-l1",
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "架构取舍与二次开发",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "SM90 与 SM100 的架构取舍",
+          "order": 1,
+          "filename": "u9-l1-arch-tradeoffs-sm90-sm100.md",
+          "level": "advanced",
+          "topic": "对比 SM90 与 SM100 的实现差异：dense decode 仅 SM90、dense prefill 仅 SM100、sparse 在两架构的路径选择、head128 在 SM100 的 head64x2 折中，以及寄存器 / smem / cluster 能力差异带来的设计取舍。",
+          "learning_goals": [
+            "系统理解支持矩阵背后的架构原因",
+            "掌握两架构在各 kernel 家族上的路径差异",
+            "理解 head64x2 等「能力不足时的折中」设计"
+          ],
+          "source_files": [
+            "csrc/api/sparse_decode.h",
+            "csrc/api/dense_decode.h",
+            "csrc/api/dense_fwd.h",
+            "csrc/api/sparse_fwd.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "支持矩阵回顾",
+            "两架构路径差异",
+            "head128 折中",
+            "能力差异与取舍"
+          ],
+          "practice_task": "整理一张「架构 × kernel 家族」表，标注每格使用的实现类 / 命名空间，并用 2-3 句解释为何 dense prefill 没有落在 SM90。",
+          "depends_on": [
+            "u3-l4",
+            "u5-l4",
+            "u6-l4",
+            "u7-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "扩展点：新增 head_dim / feature 的流程",
+          "order": 2,
+          "filename": "u9-l2-extension-points.md",
+          "level": "advanced",
+          "topic": "讲解如何扩展 FlashMLA：新增 head_dim / model_type 需要改 DISPATCH 宏、params、Impl 的 features、实例化文件与 setup.py sources；新增 feature（如新 attn_sink 变体）的完整改动面。",
+          "learning_goals": [
+            "掌握 DISPATCH 宏与 params 的扩展点",
+            "理解 Impl features 与实例化文件的扩展流程",
+            "能列出端到端新增能力时的改动清单"
+          ],
+          "source_files": [
+            "csrc/api/common.h",
+            "csrc/api/sparse_decode.h",
+            "csrc/params.h",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "DISPATCH 宏扩展点",
+            "params / feature 扩展点",
+            "实例化与构建注册",
+            "端到端改动清单"
+          ],
+          "practice_task": "写一份「为 sparse decode 新增 head_dim=384 支持」的改动计划，列出要修改的文件、宏、Impl features、实例化文件与 setup.py 条目。",
+          "depends_on": [
+            "u2-l4",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "端到端实战：复现一次 sparse decode",
+          "order": 3,
+          "filename": "u9-l3-end-to-end-practice.md",
+          "level": "advanced",
+          "topic": "综合实战：从构造数据 → 量化 FP8 → 生成 indices / sched_meta → 调用 kernel → 对照参考实现校验 → 测量性能，串起全链路；以 sparse decode 为例做一次端到端复现。",
+          "learning_goals": [
+            "把数据构造、量化、调用、校验、测速串成完整链路",
+            "能复用 tests/ 与 quant.py 拼出最小端到端脚本",
+            "理解每一步对最终正确性/性能的影响"
+          ],
+          "source_files": [
+            "tests/test_flash_mla_sparse_decoding.py",
+            "tests/quant.py",
+            "tests/ref.py",
+            "flash_mla/flash_mla_interface.py",
+            "tests/lib.py"
+          ],
+          "minimal_modules": [
+            "数据构造",
+            "FP8 量化与 indices",
+            "端到端调用",
+            "校验与测速"
+          ],
+          "practice_task": "基于 tests/ 现有代码组装一个最小端到端脚本：构造 bf16 KV → quant.py 量化 → 生成 indices → flash_mla_with_kvcache(is_fp8_kvcache=True, indices=...) → ref.py 校验 out/lse → 打印耗时与 TFlops（无 GPU 时给出完整可运行骨架与预期输出说明）。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l4",
+            "u6-l1",
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
