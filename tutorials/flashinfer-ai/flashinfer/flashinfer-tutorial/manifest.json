@@ -1,0 +1,1462 @@
+{
+  "project": "flashinfer",
+  "head": "3fd5c55bc84bc00b27bed5099031fa3aab8a4fb2",
+  "rationale": "FlashInfer 是一个体量大、子系统众多的 GPU kernel 库（attention/GEMM/MoE/通信等），其最大特色是\"默认 JIT 编译 + 三层架构（Python API → JIT 代码生成 → csrc/ 头文件 kernel）\"。因此学习路线必须先让读者\"跑起来\"并理解目录与分层（第 1 单元），再优先吃透贯穿全项目的 JIT 编译系统（第 2 单元）——它是理解其余所有算子的钥匙。随后按\"注意力（核心、最复杂）→ GEMM/低精度 → MoE → 其他算子 → 多 GPU 通信\"的顺序逐层深入核心模块（第 3-8 单元），每个算子单元都遵循\"Python wrapper 的 plan/run → csrc launcher → include kernel 模板 → JIT gen\"统一数据流。最后进入专家层：如何新增算子、TVM-FFI/Jinja/AOT/trace 等扩展与工程化机制（第 9-10 单元）。三层难度（beginner/intermediate/advanced）与依赖关系明确，第 1 单元从零开始，后续单元严格依赖前置。本次增量（a25af45e → 3fd5c55b）仅一个提交，只改动 flashinfer/gemm/gemm_base.py 中 _BF16_GEMM_SM100_TUNING_CONFIG 的两个 autotuning 标志（新增 use_cuda_graph=True 与 use_cold_l2_cache=True），属于 BF16/SM100 路径的局部调优变化，因此仅 u5-l1（直接引用 gemm_base.py 并讲解 mm_bf16）标记为 update，其余 48 篇讲义标记为 keep，无需新增或重建。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目导览与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FlashInfer 项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 FlashInfer 是什么、解决什么问题、核心特性与支持的 GPU 架构。",
+          "learning_goals": [
+            "理解 FlashInfer 作为 LLM 推理 GPU kernel 库的定位",
+            "掌握 attention/GEMM/MoE 三大核心能力与多后端特性",
+            "了解支持的 SM 架构范围（Turing 到 Blackwell）"
+          ],
+          "source_files": [
+            "README.md",
+            "CLAUDE.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "项目说明",
+            "核心特性",
+            "GPU 支持矩阵"
+          ],
+          "practice_task": "阅读 README，在自己的机器上确认 GPU 的 compute capability，并对照支持矩阵判断可用特性；写出一段话总结 FlashInfer 相比直接用 PyTorch attention 的价值。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与首次运行",
+          "order": 2,
+          "filename": "u1-l2-installation-and-first-run.md",
+          "level": "beginner",
+          "topic": "讲解 pip 安装、源码安装、--recursive 子模块、editable 开发安装与验证。",
+          "learning_goals": [
+            "掌握 flashinfer-python / cubin / jit-cache 三种包的差别",
+            "学会从源码 editable 安装并理解 --no-build-isolation 的原因",
+            "能用 flashinfer show-config 验证安装"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "build_backend.py",
+            "version.txt"
+          ],
+          "minimal_modules": [
+            "包选项",
+            "源码安装",
+            "构建后端"
+          ],
+          "practice_task": "克隆仓库并以 editable 模式安装（--recursive 初始化子模块），运行 flashinfer show-config 截取输出，说明 JIT 工作区与 cubin 目录分别指向哪里。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码分层",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解 include/、csrc/、flashinfer/、tests/、benchmarks/ 的职责，以及框架无关 kernel 与 TVM-FFI 绑定的分离原则。",
+          "learning_goals": [
+            "掌握四大顶层目录 include/csrc/flashinfer/tests 的职责",
+            "理解 include（框架无关）与 csrc（绑定层）的关键分离规则",
+            "认识 3rdparty（cutlass/spdlog）的作用"
+          ],
+          "source_files": [
+            "CLAUDE.md",
+            "README.md",
+            "flashinfer/__init__.py",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "目录布局",
+            "框架分离原则",
+            "第三方依赖"
+          ],
+          "practice_task": "在仓库中找到 decode 注意力的 4 个层次对应文件（include 模板、csrc launcher、python wrapper、jit gen），画一张从 Python 到 CUDA kernel 的调用层次图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 工具与配置查看",
+          "order": 4,
+          "filename": "u1-l4-cli-and-config.md",
+          "level": "beginner",
+          "topic": "讲解 flashinfer CLI 子命令（show-config/list-modules/module-status/clear-cache/download-cubin/export-compile-commands）的实现与用途。",
+          "learning_goals": [
+            "掌握 flashinfer CLI 的常用子命令",
+            "理解 list-modules / module-status / clear-cache 的作用",
+            "了解 export-compile-commands 对 IDE 集成的意义"
+          ],
+          "source_files": [
+            "flashinfer/__main__.py",
+            "flashinfer/__init__.py"
+          ],
+          "minimal_modules": [
+            "CLI 入口",
+            "模块注册",
+            "缓存管理"
+          ],
+          "practice_task": "运行 flashinfer list-modules 与 module-status，统计当前注册的 JIT 模块数量；再用 export-compile-commands 生成 compile_commands.json 并在编辑器中打开一个 kernel 文件。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "第一个注意力算子：single_decode/single_prefill 实践",
+          "order": 5,
+          "filename": "u1-l5-first-attention-kernel.md",
+          "level": "beginner",
+          "topic": "用最简单的 single_decode_with_kv_cache / single_prefill_with_kv_cache 跑通第一个 kernel，初步感知 JIT 首次编译。",
+          "learning_goals": [
+            "学会调用 single_decode/single_prefill 最简 API",
+            "观察首次调用触发 JIT 编译的过程",
+            "理解输入张量的 dtype/device/shape 约定"
+          ],
+          "source_files": [
+            "flashinfer/decode.py",
+            "flashinfer/prefill.py",
+            "examples/pytorch/flashinfer_modules.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "single decode",
+            "single prefill",
+            "基础用法"
+          ],
+          "practice_task": "参照 README 示例，构造 q/k/v 张量调用 single_decode_with_kv_cache，记录首次编译耗时与第二次调用耗时，说明两级缓存如何生效。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "JIT 编译系统",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "JIT 编译概览：三层架构与开发循环",
+          "order": 1,
+          "filename": "u2-l1-jit-overview.md",
+          "level": "intermediate",
+          "topic": "总览 FlashInfer 三层 JIT（JitSpec 定义 → 代码生成 → 编译加载）与",
+          "learning_goals": [
+            "理解为何默认 JIT 以及它带来的开发便利",
+            "掌握三层 JIT 架构的职责划分",
+            "了解编辑 .cuh 后自动重编译的原理"
+          ],
+          "source_files": [
+            "CLAUDE.md",
+            "flashinfer/jit/core.py"
+          ],
+          "minimal_modules": [
+            "三层架构",
+            "开发循环",
+            "实时重载"
+          ],
+          "practice_task": "修改 include 中某个简单算子的注释（如 activation），重新运行对应测试，观察日志中是否触发重新编译，并用 clear-cache 对比前后行为。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "JitSpec 与工作区环境（env.py）",
+          "order": 2,
+          "filename": "u2-l2-jitspec-and-env.md",
+          "level": "intermediate",
+          "topic": "讲解 JitSpec 数据类、gen_jit_spec、build/build_and_load，以及 env.py 中的各种工作区路径与可写性规则。",
+          "learning_goals": [
+            "掌握 JitSpec 的字段（name/sources/flags）与 build/build_and_load",
+            "理解 FLASHINFER_GEN_SRC_DIR / JIT_DIR / CSRC_DIR / AOT_DIR 的可写性",
+            "了解 workspace 目录按版本与 arch 命名的机制"
+          ],
+          "source_files": [
+            "flashinfer/jit/env.py",
+            "flashinfer/jit/core.py"
+          ],
+          "minimal_modules": [
+            "JitSpec",
+            "工作区路径",
+            "目录可写性"
+          ],
+          "practice_task": "定位本机的 FLASHINFER_JIT_DIR 与 FLASHINFER_GEN_SRC_DIR 实际路径，打开其中一个 generated 目录，说明里面 .cu/.inc/build.ninja 是如何产生的。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "gen_*_module 代码生成模式",
+          "order": 3,
+          "filename": "u2-l3-codegen-pattern.md",
+          "level": "intermediate",
+          "topic": "以 activation 为例讲解 gen_*_module 的标准五步：算 URI、建生成目录、渲染 Jinja、拷贝源文件、返回 JitSpec。",
+          "learning_goals": [
+            "掌握 gen_*_module 的标准模板与五步流程",
+            "理解 Jinja 渲染做类型特化的作用",
+            "学会读 gen_act_and_mul_module 这种最简生成器"
+          ],
+          "source_files": [
+            "flashinfer/jit/activation.py",
+            "flashinfer/jit/core.py",
+            "flashinfer/jit/utils.py"
+          ],
+          "minimal_modules": [
+            "URI 计算",
+            "Jinja 渲染",
+            "源文件拷贝"
+          ],
+          "practice_task": "在 activation gen 模块里加一条新的激活函数定义（如 relu）并渲染生成对应 .cu，确认生成的代码内容与预期一致（不一定要编译通过，重在理解生成流程）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "编译上下文与 CUDA 架构目标",
+          "order": 4,
+          "filename": "u2-l4-compilation-context.md",
+          "level": "intermediate",
+          "topic": "讲解 CompilationContext 如何确定 TARGET_CUDA_ARCHS、supported_major_versions 如何限制编译范围、以及相关环境变量。",
+          "learning_goals": [
+            "理解 CompilationContext 自动探测 GPU 与读取 FLASHINFER_CUDA_ARCH_LIST",
+            "掌握 supported_major_versions 限制 kernel 编译目标的机制",
+            "了解 nvcc 线程并行与 MAX_JOBS 的内存关系"
+          ],
+          "source_files": [
+            "flashinfer/compilation_context.py",
+            "flashinfer/jit/env.py"
+          ],
+          "minimal_modules": [
+            "架构目标",
+            "SM 版本限制",
+            "编译并行"
+          ],
+          "practice_task": "设置 FLASHINFER_CUDA_ARCH_LIST 只包含本机架构，编译一个 attention 模块，对比设置前后生成目录名与编译产物数量的差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "模块缓存与失效机制",
+          "order": 5,
+          "filename": "u2-l5-caching-and-invalidation.md",
+          "level": "intermediate",
+          "topic": "讲解 Python 级 @functools.cache 与文件级 .so 缓存的两级缓存，以及基于 URI 的自动失效。",
+          "learning_goals": [
+            "掌握两级缓存（内存 + 磁盘 .so）的工作方式",
+            "理解 URI 由操作类型+参数+源码哈希+flags+arch 组成",
+            "学会用环境变量管理/清理缓存"
+          ],
+          "source_files": [
+            "flashinfer/jit/core.py",
+            "flashinfer/jit/cpp_ext.py",
+            "flashinfer/decode.py"
+          ],
+          "minimal_modules": [
+            "functools.cache",
+            "磁盘缓存",
+            "URI 失效"
+          ],
+          "practice_task": "在 decode.py 中定位 @functools.cache 装饰的模块加载函数，解释参数如何决定缓存键；用 rm 清缓存后重新调用同一 API，对比是否重新编译。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "注意力基础",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "LLM 推理中的注意力与 Paged KV Cache",
+          "order": 1,
+          "filename": "u3-l1-attention-and-paged-kv.md",
+          "level": "intermediate",
+          "topic": "讲解 decode/prefill/append 三阶段、为什么需要 paged 与 ragged KV cache、以及 plan/run 两段式 API 设计动机。",
+          "learning_goals": [
+            "区分 decode/prefill/append 三个注意力阶段",
+            "理解 paged/ragged KV cache 解决的内存管理问题",
+            "掌握 plan/run 两段式 API 的设计动机"
+          ],
+          "source_files": [
+            "README.md",
+            "flashinfer/decode.py",
+            "flashinfer/prefill.py"
+          ],
+          "minimal_modules": [
+            "注意力阶段",
+            "分页 KV",
+            "plan/run 模式"
+          ],
+          "practice_task": "用一段文字 + 示意图说明在一个动态批处理推理服务中，为什么需要把 KV cache 分页存储，以及 plan 阶段需要预先知道哪些信息。",
+          "depends_on": [
+            "u1-l5",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Paged KV Cache 布局与 append",
+          "order": 2,
+          "filename": "u3-l2-paged-kv-layout-append.md",
+          "level": "intermediate",
+          "topic": "讲解 page.py 中的 TensorLayout(NHD/HND)、page table、append_paged_kv_cache 等数据结构与写入流程。",
+          "learning_goals": [
+            "掌握 NHD/HND 两种 KV 布局",
+            "理解 page table 如何把逻辑序列映射到物理页",
+            "学会使用 append_paged_kv_cache 写入新 token 的 KV"
+          ],
+          "source_files": [
+            "flashinfer/page.py",
+            "include/flashinfer/page.cuh",
+            "flashinfer/jit/page.py"
+          ],
+          "minimal_modules": [
+            "KV 布局",
+            "页表",
+            "append 写入"
+          ],
+          "practice_task": "分配一个分页 KV cache 张量并构造 page table，调用 append_paged_kv_cache 写入若干 token，校验读取出来的 K/V 与输入一致。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "BatchDecodeWithPagedKVCacheWrapper 的 plan/run",
+          "order": 3,
+          "filename": "u3-l3-batch-decode-wrapper.md",
+          "level": "intermediate",
+          "topic": "深入 decode.py 中 BatchDecodeWithPagedKVCacheWrapper 的 workspace、plan、run、end_forward 全流程。",
+          "learning_goals": [
+            "掌握 wrapper 的 plan/run/end_forward 调用顺序",
+            "理解 float/int workspace buffer 的作用与对齐",
+            "看清 Python wrapper 如何调用 JIT 模块的 plan/run"
+          ],
+          "source_files": [
+            "flashinfer/decode.py",
+            "csrc/batch_decode.cu",
+            "csrc/batch_decode_jit_binding.cu",
+            "include/flashinfer/attention/decode.cuh"
+          ],
+          "minimal_modules": [
+            "decode wrapper",
+            "workspace",
+            "plan/run binding"
+          ],
+          "practice_task": "用 BatchDecodeWithPagedKVCacheWrapper 完成一个多请求 decode：分配 workspace、plan、run，并追踪一次调用在 csrc batch_decode_jit_binding.cu 中导出的 plan/run 符号。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "BatchPrefillWithPagedKVCacheWrapper 的 plan/run",
+          "order": 4,
+          "filename": "u3-l4-batch-prefill-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 prefill.py 的 wrapper（paged 与 ragged 两种）及其与 decode 的差异。",
+          "learning_goals": [
+            "掌握 paged 与 ragged 两种 prefill wrapper",
+            "理解 prefill 与 decode 在调度上的差异",
+            "学会用 qo_indptr/seq_lens 描述变长请求"
+          ],
+          "source_files": [
+            "flashinfer/prefill.py",
+            "csrc/batch_prefill.cu",
+            "csrc/batch_prefill_jit_binding.cu",
+            "include/flashinfer/attention/prefill.cuh"
+          ],
+          "minimal_modules": [
+            "prefill wrapper",
+            "ragged/paged",
+            "变长索引"
+          ],
+          "practice_task": "构造一个变长 prefill 批次（ragged），调用 BatchPrefillWithRaggedKVCacheWrapper，对比它与 decode wrapper 在 plan 参数上的区别。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "后端选择机制（fa2/fa3/cudnn）",
+          "order": 5,
+          "filename": "u3-l5-backend-selection.md",
+          "level": "intermediate",
+          "topic": "讲解 determine_attention_backend 与 backend_requirement 如何根据硬件/dtype 选择 FlashAttention2/3、cuDNN、trtllm-gen 后端。",
+          "learning_goals": [
+            "掌握 determine_attention_backend 的选择逻辑",
+            "理解 @backend_requirement 装饰器及其 is_*_supported 查询",
+            "认识 fa2/fa3/cudnn/trtllm 各后端的适用场景"
+          ],
+          "source_files": [
+            "flashinfer/utils.py",
+            "flashinfer/cudnn/decode.py",
+            "flashinfer/cudnn/prefill.py",
+            "csrc/cudnn_sdpa_kernel_launcher.cu"
+          ],
+          "minimal_modules": [
+            "后端派发",
+            "backend_requirement",
+            "cuDNN 后端"
+          ],
+          "practice_task": "在不同 dtype/head_dim 下调用 determine_attention_backend（或观察 plan 日志），记录返回的后端字符串，并解释为何 fa3 需要 SM90a。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶注意力变体",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "MLA 多潜注意力（DeepSeek）",
+          "order": 1,
+          "filename": "u4-l1-mla-attention.md",
+          "level": "advanced",
+          "topic": "讲解 Multi-Latent Attention 的原理、BatchMLAWrapper 的 plan/run 以及后端派发。",
+          "learning_goals": [
+            "理解 MLA 用低秩潜向量压缩 KV 的动机",
+            "掌握 BatchMLAWrapper 的 plan/run 用法",
+            "了解 MLA 在不同 SM 上的后端选择"
+          ],
+          "source_files": [
+            "flashinfer/mla/_core.py",
+            "include/flashinfer/attention/mla.cuh",
+            "csrc/batch_mla_run.cu"
+          ],
+          "minimal_modules": [
+            "MLA 原理",
+            "MLA wrapper",
+            "后端派发"
+          ],
+          "practice_task": "用 BatchMLAWrapper 跑一个 DeepSeek 风格的 MLA decode，对比它与普通 MHA decode 在 K/V 张量形状上的差异。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Cascade 共享前缀注意力",
+          "order": 2,
+          "filename": "u4-l2-cascade-attention.md",
+          "level": "advanced",
+          "topic": "讲解 cascade 注意力如何利用共享前缀节省显存，以及 merge_state 系列合并函数。",
+          "learning_goals": [
+            "理解共享前缀带来的显存与带宽收益",
+            "掌握 cascade wrapper 的 plan/run",
+            "学会用 merge_state/merge_states 合并部分注意力结果"
+          ],
+          "source_files": [
+            "flashinfer/cascade.py",
+            "include/flashinfer/attention/cascade.cuh",
+            "csrc/cascade.cu"
+          ],
+          "minimal_modules": [
+            "共享前缀",
+            "cascade wrapper",
+            "state merge"
+          ],
+          "practice_task": "构造一个所有请求共享 system prompt 的场景，用 cascade wrapper 计算，再用 merge_state 把共享部分与独立部分合并，验证结果与普通 attention 一致。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "稀疏与块稀疏注意力",
+          "order": 3,
+          "filename": "u4-l3-sparse-attention.md",
+          "level": "advanced",
+          "topic": "讲解 block_sparse_attention / variable_block_sparse_attention 以及 BSR 到 VSA 的转换。",
+          "learning_goals": [
+            "理解块稀疏注意力的内存与计算节省",
+            "掌握 block_sparse_attention 的调用方式",
+            "了解 BSR 稀疏模式到内部表示的转换"
+          ],
+          "source_files": [
+            "flashinfer/sparse.py",
+            "include/flashinfer/attention/scheduler.cuh"
+          ],
+          "minimal_modules": [
+            "块稀疏",
+            "可变块稀疏",
+            "BSR 转换"
+          ],
+          "practice_task": "构造一个带状（band）稀疏模式的 block_sparse_attention 调用，对比它与稠密 attention 在长序列下的显存占用。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "POD 混合批处理注意力",
+          "order": 4,
+          "filename": "u4-l4-pod-attention.md",
+          "level": "advanced",
+          "topic": "讲解 POD（Position-Output Decoupled）如何在一个 kernel 里融合 prefill+decode 的混合批处理。",
+          "learning_goals": [
+            "理解混合批次中 prefill 与 decode 并存的场景",
+            "掌握 POD wrapper 的 plan/run",
+            "了解融合 kernel 带来的延迟收益"
+          ],
+          "source_files": [
+            "flashinfer/pod.py",
+            "include/flashinfer/attention/pod.cuh",
+            "csrc/batch_pod.cu"
+          ],
+          "minimal_modules": [
+            "混合批次",
+            "POD 融合",
+            "prefill+decode"
+          ],
+          "practice_task": "构造一个同时包含 prefill 请求与 decode 请求的批次，用 POD wrapper 运行，说明它相比分别调用 prefill/decode 的优势。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "BatchAttention 统一混合批处理",
+          "order": 5,
+          "filename": "u4-l5-batch-attention.md",
+          "level": "advanced",
+          "topic": "讲解 attention/_core.py 中 BatchAttention 如何按 qo_indptr 区间对每请求分派 paged-prefill/paged-decode。",
+          "learning_goals": [
+            "理解 BatchAttention 统一 wrapper 的分派逻辑",
+            "掌握按 q_indptr 划分 prefill/decode 区间",
+            "了解它与 POD 的区别与适用场景"
+          ],
+          "source_files": [
+            "flashinfer/attention/_core.py",
+            "flashinfer/attention/__init__.py",
+            "csrc/batch_attention.cu"
+          ],
+          "minimal_modules": [
+            "统一 wrapper",
+            "区间分派",
+            "混合批处理"
+          ],
+          "practice_task": "用 BatchAttention 处理一个混合批次（部分请求 prefill、部分 decode），追踪它在 _core.py 中如何根据 qo_indptr 决定每段走 prefill 还是 decode。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l6",
+          "title": "自定义注意力变体（JIT customize）",
+          "order": 6,
+          "filename": "u4-l6-custom-attention-variants.md",
+          "level": "advanced",
+          "topic": "讲解 customize_config.jinja 与 variants 机制，让用户为注意力注入额外参数实现自定义变体。",
+          "learning_goals": [
+            "掌握 *_customize_config.jinja 的类型特化机制",
+            "理解 attention variants（fa2/fa3）的声明方式",
+            "学会参照 test_jit_example.py 写自定义变体"
+          ],
+          "source_files": [
+            "csrc/batch_decode_customize_config.jinja",
+            "csrc/batch_prefill_customize_config.jinja",
+            "flashinfer/jit/attention/modules.py",
+            "tests/utils/test_jit_example.py"
+          ],
+          "minimal_modules": [
+            "customize_config",
+            "variants",
+            "自定义示例"
+          ],
+          "practice_task": "参照 tests/utils/test_jit_example.py，为一个 attention 变体注入一个额外参数（如自定义 logit 软截断），渲染 customize_config 并确认生成的 .inc 包含该参数。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "GEMM 与低精度计算",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "GEMM 全景与 mm_* API",
+          "order": 1,
+          "filename": "u5-l1-gemm-overview.md",
+          "level": "intermediate",
+          "topic": "总览 flashinfer/gemm 包：mm_bf16/mm_fp8/mm_fp4、bmm_*、grouped_*、deepgemm 与统一绑定。",
+          "learning_goals": [
+            "掌握 GEMM 包的主要入口 mm_*/bmm_*/grouped_*",
+            "理解 gemm_base.py 中 @backend_requirement 的统一封装",
+            "认识 cuBLAS/cuDNN/CUTLASS/CuTe-DSL 等后端"
+          ],
+          "source_files": [
+            "flashinfer/gemm/__init__.py",
+            "flashinfer/gemm/gemm_base.py",
+            "csrc/flashinfer_gemm_binding.cu"
+          ],
+          "minimal_modules": [
+            "GEMM 入口",
+            "backend_requirement",
+            "统一绑定"
+          ],
+          "practice_task": "调用 mm_bf16 做一次矩阵乘并核验结果；查询该 API 的 is_compute_capability_supported/is_backend_supported，记录支持的后端列表。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u5-l2",
+          "title": "FP8 GEMM",
+          "order": 2,
+          "filename": "u5-l2-fp8-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 per-tensor 与 groupwise 缩放的 FP8 GEMM 实现及 CUTLASS 后端。",
+          "learning_goals": [
+            "理解 FP8 的 per-tensor 与 groupwise 两种缩放",
+            "掌握 fp8 GEMM 的调用方式与约束",
+            "了解 CUTLASS fp8_gemm_cutlass 后端"
+          ],
+          "source_files": [
+            "flashinfer/gemm/gemm_base.py",
+            "include/flashinfer/gemm/fp8_gemm_cutlass.h",
+            "csrc/fp8_gemm_cutlass.cu"
+          ],
+          "minimal_modules": [
+            "FP8 缩放",
+            "groupwise",
+            "CUTLASS 后端"
+          ],
+          "practice_task": "用 groupwise FP8 缩放做一次 GEMM，与 BF16 参考结果对比最大误差，并说明 groupwise 相比 per-tensor 的精度优势。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "FP4 GEMM（NVFP4/MXFP4，Blackwell）",
+          "order": 3,
+          "filename": "u5-l3-fp4-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 NVFP4/MXFP4 的 BF16×FP4 GEMM、block-scale 重排以及 cuDNN/CuTe-DSL 后端选择。",
+          "learning_goals": [
+            "理解 NVFP4 与 MXFP4 的 4 比特量化格式",
+            "掌握 block-scale 重排（interleave）的必要性",
+            "了解 BF16×FP4 在 cuDNN 与 CuTe-DSL 间的后端选择"
+          ],
+          "source_files": [
+            "flashinfer/gemm/gemm_bf16_fp4.py",
+            "include/flashinfer/gemm/fp4_gemm_cutlass.h",
+            "csrc/fp4_gemm_cutlass.cu"
+          ],
+          "minimal_modules": [
+            "NVFP4/MXFP4",
+            "block-scale 重排",
+            "后端选择"
+          ],
+          "practice_task": "对一个 BF16 权重做 nvfp4 量化并重排 block-scale，再用 mm_bf16_fp4 做矩阵乘，对比 BF16 参考结果的相对误差。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Grouped GEMM",
+          "order": 4,
+          "filename": "u5-l4-grouped-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 grouped_mm 用于 LoRA 与多专家路由的批处理矩阵乘，以及 router gemm。",
+          "learning_goals": [
+            "理解 grouped GEMM 服务 LoRA/多专家的场景",
+            "掌握 grouped_mm_bf16/fp8 等入口",
+            "了解 router gemm 这类固定形状小 GEMM"
+          ],
+          "source_files": [
+            "flashinfer/grouped_mm/core.py",
+            "include/flashinfer/gemm/group_gemm.cuh",
+            "csrc/group_gemm.cu",
+            "flashinfer/gemm/routergemm.py"
+          ],
+          "minimal_modules": [
+            "grouped GEMM",
+            "LoRA/多专家",
+            "router gemm"
+          ],
+          "practice_task": "用 grouped_mm 完成一组不同形状的矩阵乘（模拟多专家），并用 cuBLAS 逐个验证结果一致性。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l5",
+          "title": "量化算子（FP8/FP4 quantize）",
+          "order": 5,
+          "filename": "u5-l5-quantization-ops.md",
+          "level": "intermediate",
+          "topic": "讲解 fp8/fp4 量化与反量化、per-tensor/groupwise/batched 量化及 KV cache 量化。",
+          "learning_goals": [
+            "掌握 fp8/fp4 量化与反量化 API",
+            "理解 per-tensor/groupwise/batched 量化的差异",
+            "了解 nvfp4 量化 paged KV cache 的用法"
+          ],
+          "source_files": [
+            "flashinfer/quantization/fp8_quantization.py",
+            "flashinfer/quantization/fp4_quantization.py"
+          ],
+          "minimal_modules": [
+            "量化/反量化",
+            "groupwise",
+            "KV 量化"
+          ],
+          "practice_task": "对一个权重张量分别做 mxfp4 与 nvfp4 量化，统计量化前后显存占用，并比较两种格式反量化后的误差分布。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "MoE 混合专家",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "MoE 基础与统一 API（MoEConfig）",
+          "order": 1,
+          "filename": "u6-l1-moe-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 MoE 的基本流程（gate→topk→dispatch→专家 FFN→combine）与 api.py 的 MoEConfig/RoutingConfig/ExpertConfig 等配置。",
+          "learning_goals": [
+            "理解 MoE 的门控、路由、分发、合并全流程",
+            "掌握 MoEConfig/RoutingConfig/ExpertConfig 等数据类",
+            "了解 RoutingInputMode 的几种输入模式"
+          ],
+          "source_files": [
+            "flashinfer/fused_moe/__init__.py",
+            "flashinfer/fused_moe/api.py"
+          ],
+          "minimal_modules": [
+            "MoE 流程",
+            "配置数据类",
+            "路由输入模式"
+          ],
+          "practice_task": "构造一个最小 MoEConfig（少量专家、BF16），用 cutlass_fused_moe 跑一次前向，并解释 RoutingInputMode 各取值的含义。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "融合 MoE 后端（cutlass/trtllm）",
+          "order": 2,
+          "filename": "u6-l2-fused-moe-backends.md",
+          "level": "advanced",
+          "topic": "讲解 cutlass_fused_moe、trtllm_bf16/fp8/fp4_moe 等 SM 特定后端及 JIT gen。",
+          "learning_goals": [
+            "掌握 cutlass 与 trtllm 两类 MoE 后端的差异",
+            "理解按 SM 版本（sm89/90/100/120）选择 gen 函数",
+            "了解 CuTe-DSL nvfp4 MoE 路径"
+          ],
+          "source_files": [
+            "flashinfer/fused_moe/core.py",
+            "flashinfer/jit/fused_moe.py",
+            "flashinfer/fused_moe/cute_dsl/fused_moe.py"
+          ],
+          "minimal_modules": [
+            "cutlass MoE",
+            "trtllm MoE",
+            "CuTe-DSL MoE"
+          ],
+          "practice_task": "在同一 MoEConfig 下分别调用 BF16 与 FP8 后端，对比输出与耗时；记录 jit/fused_moe.py 中按 SM 选择 gen 函数的逻辑。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "路由方法（DeepSeek-V3/Llama-4/top-k）",
+          "order": 3,
+          "filename": "u6-l3-moe-routing.md",
+          "level": "advanced",
+          "topic": "讲解 fused_routing_dsv3 的 group/topk_group 路由、Llama-4 路由与标准 top-k，以及 moe_utils 的 permute/sort。",
+          "learning_goals": [
+            "理解 DeepSeek-V3 的 n_group/topk_group 软路由",
+            "掌握 Llama-4 与标准 top-k 路由的差异",
+            "了解 moe_utils 中 permute/unpermute/sort 的作用"
+          ],
+          "source_files": [
+            "flashinfer/fused_moe/fused_routing_dsv3.py",
+            "flashinfer/jit/moe_utils.py"
+          ],
+          "minimal_modules": [
+            "DSV3 路由",
+            "Llama-4/top-k",
+            "permute/sort"
+          ],
+          "practice_task": "调用 fused_topk_deepseek 计算一组 logits 的专家分配与权重，手动复现 n_group/topk_group 筛选过程并核对结果。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "量化 MoE 与 MoELayer 派发",
+          "order": 4,
+          "filename": "u6-l4-quantized-moe-layer.md",
+          "level": "advanced",
+          "topic": "讲解 FP8/FP4 量化 MoE、MoELayer 跨后端状态化派发与 autotune。",
+          "learning_goals": [
+            "掌握 FP8/FP4 量化 MoE 的调用",
+            "理解 MoELayer 作为状态化跨后端派发器",
+            "了解 runners 适配器与 autotune 集成"
+          ],
+          "source_files": [
+            "flashinfer/fused_moe/layer.py",
+            "flashinfer/fused_moe/runners.py"
+          ],
+          "minimal_modules": [
+            "量化 MoE",
+            "MoELayer",
+            "runner 适配"
+          ],
+          "practice_task": "用 MoELayer 加载 FP8 专家权重并前向，观察它如何在多个 runner 间选择；用 autotune 标志对比不同后端的耗时。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "其他核心算子",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "采样与解码（top-k/p/min-p，投机采样）",
+          "order": 1,
+          "filename": "u7-l1-sampling-decoding.md",
+          "level": "intermediate",
+          "topic": "讲解 sampling.py 的 sorting-free top-k/top-p/min-p 采样、renorm 与 chain 投机采样。",
+          "learning_goals": [
+            "理解 sorting-free 采样的设计动机",
+            "掌握 top_k/top_p/min_p 采样与 renorm API",
+            "了解 chain_speculative_sampling 的链式投机采样"
+          ],
+          "source_files": [
+            "flashinfer/sampling.py",
+            "include/flashinfer/sampling.cuh",
+            "include/flashinfer/topk.cuh",
+            "flashinfer/topk.py"
+          ],
+          "minimal_modules": [
+            "sorting-free 采样",
+            "top-k/p/min-p",
+            "投机采样"
+          ],
+          "practice_task": "对一组 logits 同时做 top-k 与 top-p 采样，统计采样分布；再用 chain_speculative_sampling 接受/拒绝若干草稿 token。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "归一化（RMSNorm/LayerNorm/fused）",
+          "order": 2,
+          "filename": "u7-l2-normalization.md",
+          "level": "intermediate",
+          "topic": "讲解 norm 包的 rmsnorm、fused_add_rmsnorm、quant 变体与 gemma 风格归一化。",
+          "learning_goals": [
+            "掌握 rmsnorm 与 fused_add_rmsnorm 的用法",
+            "理解 rmsnorm_quant 等 fused 变体的收益",
+            "了解 gemma_rmsnorm 的差异"
+          ],
+          "source_files": [
+            "flashinfer/norm/__init__.py",
+            "include/flashinfer/norm.cuh",
+            "flashinfer/jit/norm.py"
+          ],
+          "minimal_modules": [
+            "RMSNorm",
+            "fused add+norm",
+            "Gemma 风格"
+          ],
+          "practice_task": "用 rmsnorm 与 fused_add_rmsnorm_quant 分别处理残差流，对比单独算 add+norm+quant 的耗时与 fused 版本的差异。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "RoPE 旋转位置编码",
+          "order": 3,
+          "filename": "u7-l3-rope.md",
+          "level": "intermediate",
+          "topic": "讲解 rope.py 的 LLaMA 风格旋转位置编码（含 LLaMA 3.1）及位置编码底层。",
+          "learning_goals": [
+            "掌握 RoPE 的数学原理与实现",
+            "学会对 Q/K 应用 rope（含 is_neox 风格）",
+            "了解 LLaMA 3.1 的大基频参数"
+          ],
+          "source_files": [
+            "flashinfer/rope.py",
+            "include/flashinfer/pos_enc.cuh",
+            "flashinfer/jit/rope.py"
+          ],
+          "minimal_modules": [
+            "RoPE 原理",
+            "LLaMA 风格",
+            "位置编码"
+          ],
+          "practice_task": "对一对 Q/K 应用 rope（标准与 LLaMA-3.1 参数），用解析公式手动验证旋转后的若干元素是否正确。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "激活函数（silu/gelu_and_mul）",
+          "order": 4,
+          "filename": "u7-l4-activations.md",
+          "level": "intermediate",
+          "topic": "讲解 activation.py 的 silu_and_mul/gelu_and_mul 及其与门控 FFN 的融合、JIT 生成。",
+          "learning_goals": [
+            "掌握 silu_and_mul/gelu_tanh_and_mul 在门控 FFN 中的作用",
+            "理解 activation Jinja 模板的类型特化",
+            "了解 PDL（programmatic stream serialization）启动"
+          ],
+          "source_files": [
+            "flashinfer/activation.py",
+            "include/flashinfer/activation.cuh",
+            "flashinfer/jit/activation.py"
+          ],
+          "minimal_modules": [
+            "门控激活",
+            "Jinja 特化",
+            "PDL 启动"
+          ],
+          "practice_task": "调用 silu_and_mul 处理一个门控 FFN 的中间张量，并用 PyTorch 参考实现核对结果；观察 enable_pdl 参数的影响。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l5",
+          "title": "Mamba/SSD 状态空间模型",
+          "order": 5,
+          "filename": "u7-l5-mamba-ssd.md",
+          "level": "intermediate",
+          "topic": "讲解 mamba 包的 selective_state_update、ssd_combined（state-space model）算子。",
+          "learning_goals": [
+            "理解状态空间模型（SSM/SSD）的递推结构",
+            "掌握 selective_state_update 更新隐状态",
+            "了解 ssd_combined 的融合实现"
+          ],
+          "source_files": [
+            "flashinfer/mamba/__init__.py",
+            "flashinfer/mamba/selective_state_update.py",
+            "flashinfer/mamba/ssd_combined.py"
+          ],
+          "minimal_modules": [
+            "SSM 递推",
+            "selective scan",
+            "SSD 融合"
+          ],
+          "practice_task": "用 selective_state_update 对一个小型 Mamba 模型更新若干步隐状态，并与朴素循环实现对比结果一致性。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l6",
+          "title": "GDN 与 KDA 等新型算子",
+          "order": 6,
+          "filename": "u7-l6-gdn-kda-newer-ops.md",
+          "level": "advanced",
+          "topic": "简要介绍较新的 GDN（gated delta net）decode 与 KDA（key-driven attention）等实验性算子。",
+          "learning_goals": [
+            "了解 GDN 这类线性注意力/gated delta 算子的定位",
+            "认识 KDA（key-driven attention）decode 的用途",
+            "学会在仓库中定位这些较新的子系统"
+          ],
+          "source_files": [
+            "flashinfer/gdn_decode.py",
+            "flashinfer/kda_decode.py"
+          ],
+          "minimal_modules": [
+            "GDN",
+            "KDA",
+            "实验性算子"
+          ],
+          "practice_task": "在仓库中检索 gdn_kernels/ 与 kda_kernels/ 目录，列出各自包含的 kernel 文件，并简述 GDN 与标准 attention 在状态表示上的区别。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "多 GPU 通信",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "通信概览与 AllReduce 融合",
+          "order": 1,
+          "filename": "u8-l1-comm-overview-allreduce.md",
+          "level": "advanced",
+          "topic": "总览 comm 包，讲解 allreduce_fusion、workspace 创建与 AllReduceFusionOp/Pattern。",
+          "learning_goals": [
+            "掌握 comm 包的整体能力分布",
+            "理解 allreduce 与 norm/residual 融合的动机",
+            "学会创建 AllReduceFusionWorkspace"
+          ],
+          "source_files": [
+            "flashinfer/comm/__init__.py",
+            "flashinfer/comm/allreduce.py",
+            "flashinfer/comm/trtllm_ar.py"
+          ],
+          "minimal_modules": [
+            "通信概览",
+            "AllReduce 融合",
+            "fusion workspace"
+          ],
+          "practice_task": "用 allreduce_fusion 在多卡上对一组张量做规约+融合算子，对比纯 NCCL allreduce 的耗时与通信量。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "自定义 AllReduce 后端（trtllm/vllm 策略）",
+          "order": 2,
+          "filename": "u8-l2-custom-allreduce-backends.md",
+          "level": "advanced",
+          "topic": "讲解 trtllm_ar 的策略（NCCL/MIN_LATENCY/ONESHOT/TWOSHOT）与 vllm 自定义 allreduce。",
+          "learning_goals": [
+            "掌握 AllReduceStrategyType 各策略的适用场景",
+            "理解 MIN_LATENCY/ONESHOT/TWOSHOT 的取舍",
+            "了解 vllm 自定义 allreduce 的注册方式"
+          ],
+          "source_files": [
+            "flashinfer/comm/trtllm_ar.py",
+            "flashinfer/comm/vllm_ar.py",
+            "include/flashinfer/comm/trtllm_allreduce.cuh"
+          ],
+          "minimal_modules": [
+            "AR 策略",
+            "oneshot/twoshot",
+            "vllm AR"
+          ],
+          "practice_task": "对同一规约任务分别用 NCCL 与 MIN_LATENCY 策略，记录不同消息大小下的耗时拐点，说明何时该用 oneshot/twoshot。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "AlltoAll 与多节点（MNNVL/NVSHMEM）",
+          "order": 3,
+          "filename": "u8-l3-alltoall-multinode.md",
+          "level": "advanced",
+          "topic": "讲解 MoE AlltoAll、decode-CP AlltoAll，以及 MNNVL/NVSHMEM 的多节点通信支持。",
+          "learning_goals": [
+            "掌握 moe_a2a_dispatch/combine 的多卡专家分发",
+            "理解 decode context parallel 的 AlltoAll",
+            "了解 MNNVL 与 NVSHMEM 在多节点中的作用"
+          ],
+          "source_files": [
+            "flashinfer/comm/trtllm_moe_alltoall.py",
+            "csrc/trtllm_alltoall.cu",
+            "flashinfer/jit/comm.py"
+          ],
+          "minimal_modules": [
+            "MoE AlltoAll",
+            "decode-CP AlltoAll",
+            "多节点通信"
+          ],
+          "practice_task": "在多卡环境下用 moe_a2a_dispatch/combine 完成一次专家分发与合并，解释 dispatch 阶段张量重排的含义。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "AllGather-Matmul 融合",
+          "order": 4,
+          "filename": "u8-l4-allgather-matmul.md",
+          "level": "advanced",
+          "topic": "讲解 all_gather_matmul 把 AllGather 与矩阵乘融合，按 SM 选择 cutile/triton 后端。",
+          "learning_goals": [
+            "理解 AllGather 与 GEMM 融合的带宽收益",
+            "掌握 all_gather_matmul 的调用",
+            "了解 cutile(SM≥100) 与 triton(SM<100) 的后端选择"
+          ],
+          "source_files": [
+            "flashinfer/comm/all_gather_matmul/all_gather_matmul.py",
+            "flashinfer/comm/allreduce.py"
+          ],
+          "minimal_modules": [
+            "AG-Matmul 融合",
+            "cutile/triton",
+            "后端选择"
+          ],
+          "practice_task": "用 all_gather_matmul 完成一次跨卡 AllGather 后接 GEMM，与",
+          "depends_on": [
+            "u8-l1",
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "扩展 FlashInfer",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "添加新 CUDA 算子全流程",
+          "order": 1,
+          "filename": "u9-l1-add-new-kernel.md",
+          "level": "advanced",
+          "topic": "依据 add-cuda-kernel skill 讲解从 include kernel → csrc launcher → binding → jit gen → python api → aot → 导出的完整十步流程。",
+          "learning_goals": [
+            "掌握新增算子的完整十步流程",
+            "理解每一步对应的目录与文件",
+            "学会参照 RMSNorm 这种简单范例起步"
+          ],
+          "source_files": [
+            ".claude/skills/add-cuda-kernel/skill.md",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "新增算子流程",
+            "目录对应",
+            "范例参照"
+          ],
+          "practice_task": "按 skill 步骤新增一个极简算子（如元素-wise 的 abs），完成 include/csrc/binding/jit/python 各层文件，并跑通一个最小测试。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "TVM-FFI 绑定与跨语言 ABI",
+          "order": 2,
+          "filename": "u9-l2-tvm-ffi-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 TVM_FFI_DLL_EXPORT_TYPED_FUNC 导出、jit_binding.cu 的 plan/run/workspace_size 符号与跨语言 ABI。",
+          "learning_goals": [
+            "掌握 TVM-FFI 的导出宏与命名约定",
+            "理解 jit_binding.cu 中 plan/run/workspace_size 的导出",
+            "了解为何同一 kernel 可被多框架复用"
+          ],
+          "source_files": [
+            "csrc/batch_decode_jit_binding.cu",
+            "flashinfer/jit/core.py"
+          ],
+          "minimal_modules": [
+            "TVM-FFI 导出",
+            "binding 符号",
+            "跨语言 ABI"
+          ],
+          "practice_task": "在一个 jit_binding.cu 中找到 plan/run/workspace_size 三个导出符号，画出 Python 调用如何经 TVM-FFI 路由到这些 C++ 函数。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Jinja 模板与分发宏",
+          "order": 3,
+          "filename": "u9-l3-jinja-dispatch-macros.md",
+          "level": "advanced",
+          "topic": "讲解 customize_config.jinja/kernel_inst.jinja 与 DISPATCH_DTYPE/DISPATCH_BLOCK_SIZE 等分发宏如何处理组合参数空间。",
+          "learning_goals": [
+            "掌握 customize_config.jinja 的类型特化渲染",
+            "理解 kernel_inst.jinja 的模板实例化",
+            "了解 DISPATCH_* 宏展开组合参数的机制"
+          ],
+          "source_files": [
+            "csrc/batch_decode_customize_config.jinja",
+            "csrc/batch_prefill_customize_config.jinja",
+            "flashinfer/jit/attention/variants.py"
+          ],
+          "minimal_modules": [
+            "customize_config",
+            "kernel 实例化",
+            "DISPATCH 宏"
+          ],
+          "practice_task": "渲染一个 batch_decode_customize_config.jinja（给定 dtype/head_dim），说明 DISPATCH_DTYPE 等宏在生成代码里展开成哪些分支。",
+          "depends_on": [
+            "u2-l3",
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "AOT 编译与预编译包（cubin/jit-cache）",
+          "order": 4,
+          "filename": "u9-l4-aot-precompiled-packages.md",
+          "level": "advanced",
+          "topic": "讲解 aot.py 的 register_default_modules、cubin_loader 的下载与校验、以及 jit-cache/cubin 包的构建。",
+          "learning_goals": [
+            "掌握 AOT 预编译所有 gen_*_module 的流程",
+            "理解 cubin 下载/缓存/校验机制",
+            "了解 flashinfer-jit-cache 与 flashinfer-cubin 两个包的差异"
+          ],
+          "source_files": [
+            "flashinfer/aot.py",
+            "flashinfer/jit/cubin_loader.py",
+            "flashinfer/jit/env.py"
+          ],
+          "minimal_modules": [
+            "AOT 注册",
+            "cubin 加载",
+            "预编译包"
+          ],
+          "practice_task": "阅读 register_default_modules，统计它会预编译多少模块；用 flashinfer download-cubin 下载一批 cubin 并说明版本校验如何工作。",
+          "depends_on": [
+            "u2-l5",
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l5",
+          "title": "Trace 系统与 fi_trace",
+          "order": 5,
+          "filename": "u9-l5-trace-fi-trace.md",
+          "level": "advanced",
+          "topic": "讲解 trace 模板（TraceTemplate）、@flashinfer_api(trace=...)、fi_trace 自动导出 benchmark 定义 JSON。",
+          "learning_goals": [
+            "掌握 TraceTemplate 的 axes/inputs/outputs/reference 结构",
+            "理解 @flashinfer_api(trace=...) 的接线方式",
+            "学会用 fi_trace 把一次调用导出为可复现的 benchmark JSON"
+          ],
+          "source_files": [
+            "flashinfer/fi_trace.py",
+            "flashinfer/trace/template.py",
+            "flashinfer/trace/templates/norm.py"
+          ],
+          "minimal_modules": [
+            "TraceTemplate",
+            "trace 装饰",
+            "fi_trace 导出"
+          ],
+          "practice_task": "为一个已有 API 添加/阅读一个 TraceTemplate（如 norm），运行 fi_trace 生成 JSON，并验证 JSON 中的 shapes/inputs 与实际调用一致。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "工程化、性能与运维",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "@flashinfer_api 日志与崩溃调试",
+          "order": 1,
+          "filename": "u10-l1-api-logging-debug.md",
+          "level": "advanced",
+          "topic": "讲解 @flashinfer_api 装饰器的崩溃安全日志、各级别（0/1/3/5）与 CUDA Graph 兼容性。",
+          "learning_goals": [
+            "掌握 FLASHINFER_LOGLEVEL/LOGDEST 的各级别含义",
+            "理解崩溃安全（执行前记录输入）的设计",
+            "了解 CUDA Graph 捕获时自动跳过 stats 的机制"
+          ],
+          "source_files": [
+            "flashinfer/api_logging.py",
+            "CLAUDE.md",
+            "flashinfer/__init__.py"
+          ],
+          "minimal_modules": [
+            "API 日志",
+            "崩溃安全",
+            "CUDA Graph 兼容"
+          ],
+          "practice_task": "设置 FLASHINFER_LOGLEVEL=3/5 跑一次会触发异常的调用，从日志中还原导致崩溃的输入张量形状/dtype。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "自动调优（autotuner）",
+          "order": 2,
+          "filename": "u10-l2-autotuning.md",
+          "level": "advanced",
+          "topic": "讲解 autotuner.py 的自动调优、结果序列化与从文件加载、tactics blocklist。",
+          "learning_goals": [
+            "理解 autotuner 的搜索与结果缓存",
+            "掌握 FLASHINFER_AUTOTUNER_LOAD_FROM_FILE 的用法",
+            "了解 tactics_blocklist 屏蔽劣质策略的机制"
+          ],
+          "source_files": [
+            "flashinfer/autotuner.py",
+            "flashinfer/compilation_context.py"
+          ],
+          "minimal_modules": [
+            "自动调优",
+            "结果序列化",
+            "tactics blocklist"
+          ],
+          "practice_task": "对一个支持 autotune 的算子先跑搜索保存结果，再用 LOAD_FROM_FILE 重放，对比两次耗时并确认命中缓存。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "基准测试框架（CUPTI/bench_gpu_time）",
+          "order": 3,
+          "filename": "u10-l3-benchmarking.md",
+          "level": "advanced",
+          "topic": "讲解 benchmarks/flashinfer_benchmark.py 统一框架、CUPTI 计时与 bench_gpu_time Python API。",
+          "learning_goals": [
+            "掌握 flashinfer_benchmark.py 的 routine/backends/batch 参数",
+            "理解 CUPTI 硬件级计时与 CUDA events 回退",
+            "学会在代码里用 bench_gpu_time 测量 kernel 时间"
+          ],
+          "source_files": [
+            "benchmarks/flashinfer_benchmark.py",
+            "flashinfer/testing/__init__.py"
+          ],
+          "minimal_modules": [
+            "benchmark 框架",
+            "CUPTI 计时",
+            "bench_gpu_time"
+          ],
+          "practice_task": "用 bench_gpu_time(enable_cupti=True) 测量一个 decode kernel 的中位数耗时与标准差，再用 flashinfer_benchmark.py 跑一次 --refcheck 批测。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l4",
+          "title": "测试框架与架构门控",
+          "order": 4,
+          "filename": "u10-l4-testing-arch-gating.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 组织、conftest 的 OOM 自动跳过、is_smXX_supported 与 backend_requirement 的架构门控。",
+          "learning_goals": [
+            "掌握 tests 目录组织与 pytest 调用方式",
+            "理解 conftest 的 OOM 自动跳过策略",
+            "学会用 is_smXX_supported/is_*_supported 做架构门控"
+          ],
+          "source_files": [
+            "tests/conftest.py",
+            "tests/attention/test_hopper.py",
+            "flashinfer/utils.py"
+          ],
+          "minimal_modules": [
+            "测试组织",
+            "OOM 跳过",
+            "架构门控"
+          ],
+          "practice_task": "为一个测试用 is_sm90a_supported() 加上门控，使其在非 Hopper 卡上自动 skip；运行该测试并确认跳过行为符合预期。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
