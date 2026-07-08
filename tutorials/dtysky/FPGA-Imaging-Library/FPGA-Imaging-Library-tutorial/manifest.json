@@ -1,0 +1,182 @@
+{
+  "project": "FPGA-Imaging-Library",
+  "head": "c8cd350dc07397be1979b51f5f99e5a7fddf98f6",
+  "rationale": "本手册按\"先建立统一心智模型，再逐层深入单一机制，最后落到系统集成与二次开发\"的顺序设计。入门单元(Unit1-2)先让读者认清项目定位、标准化IP文件夹布局与统一接口(work_mode/color_channels/color_width 与 clk/rst_n/in_enable/in_data/out_ready/out_data 的流水线/请求响应双模式)，并用最简单的ColorReversal与Threshold把这套约定跑通；进阶层(Unit3-7)按\"数据如何流动\"展开——Generator解决像素坐标/行缓存/窗口/帧寻址(含线性与二维随机)，点运算进阶引入常系数乘法器与定点增益，局部滤波器以加法树、比较矩阵、形态学归约覆盖窗口运算，几何变换由流式(Crop/Mirror/Pan)过渡到需随机访问的Rotate/Scale/Shear，Connector与InOut补齐数据整形与VGA/摄像头硬件接口；专家层(Unit8-9)把所有IP经BoardInit_AXI的AXI4-Lite寄存器聚合接入Zynq PS、用Block Design连成摄像头到VGA的完整通路并配以C驱动，最后以测试闭环、IP打包与Com2DocHDL、新增IP的二次开发收尾。这样安排使得每篇讲义只解决一个机制，且依赖关系严格向前，读者学完即可按F-I-L规范独立新增图像处理IP并完成软硬一致性验证。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍FPGA-Imaging-Library是什么——一个面向Xilinx FPGA的Verilog图像处理IP核库，所有IP遵循统一接口与文件夹结构，支持流水线与请求响应两种模式。",
+          "learning_goals": [
+            "认识项目定位、技术栈与许可证",
+            "理解IP核化图像处理的整体形态",
+            "了解七大功能分类(Point/Geometry/LocalFilter/Generator/Connector/InOut/BoardInit_AXI)的职责"
+          ],
+          "source_files": [
+            "README.md",
+            "TestOnBoard/README.md",
+            "Point/ColorReversal/README.md"
+          ],
+          "minimal_modules": [
+            "项目README",
+            "功能分类目录",
+            "仿真依赖说明"
+          ],
+          "practice_task": "克隆仓库后列出七大分类各自包含的IP名称，并用一句话描述每个分类在图像处理流水线中的职责。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与标准化IP文件夹布局",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "解析单个IP的标准文件夹布局：HDL源码、SoftwareSim软件仿真、HDLSimDataGen数据生成、FunSimForHDL功能仿真、SimResCheck结果比对、ImageForTest测试图像、README文档。",
+          "learning_goals": [
+            "掌握每个IP的固定目录约定",
+            "理解HDL/srcs下sources/sim/component.xml/xgui/gui的分工",
+            "能定位任意一个IP的关键源码与脚本文件"
+          ],
+          "source_files": [
+            "Point/ColorReversal/HDL/ColorReversal.srcs/sources_1/new/ColorReversal.v",
+            "Point/ColorReversal/HDL/ColorReversal.srcs/sim_1/new/ColorReversal_TB.sv",
+            "Point/ColorReversal/HDL/ColorReversal.srcs/component.xml",
+            "Point/ColorReversal/README.md"
+          ],
+          "minimal_modules": [
+            "HDL源码目录",
+            "仿真脚本目录",
+            "结果校验目录"
+          ],
+          "practice_task": "以ColorReversal为例画出一棵完整的IP目录树，并标注每个文件或子目录的作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链与仿真运行方式",
+          "order": 3,
+          "filename": "u1-l3-toolchain-and-simulation.md",
+          "level": "beginner",
+          "topic": "讲解运行所需工具链(Python2.7+PIL、ModelSim 10.1+、Vivado)与五步仿真流程：配置图像→软件仿真→生成dat→功能仿真→转换比对。",
+          "learning_goals": [
+            "了解三种工具链各自的分工",
+            "掌握软件仿真与功能仿真的执行步骤",
+            "理解软件参考结果与HDL结果比对的闭环"
+          ],
+          "source_files": [
+            "Point/ColorReversal/README.md",
+            "Point/ColorReversal/ImageForTest/conf.json",
+            "Point/ColorReversal/SoftwareSim/sim.py",
+            "Point/ColorReversal/HDLSimDataGen/create.py"
+          ],
+          "minimal_modules": [
+            "README仿真步骤",
+            "conf.json配置",
+            "仿真脚本入口"
+          ],
+          "practice_task": "在某个IP目录下按README步骤运行sim.py与create.py，记录生成的中间文件名及其所在路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "标准化IP接口与两种工作模式",
+          "order": 4,
+          "filename": "u1-l4-standard-interface-and-modes.md",
+          "level": "beginner",
+          "topic": "讲解所有IP共用的接口约定：参数work_mode/color_channels/color_width，端口clk/rst_n/in_enable/in_data/out_ready/out_data，以及Pipeline(0)与Req-ack(1)两种工作模式的时序差异。",
+          "learning_goals": [
+            "理解统一参数与端口的语义",
+            "区分流水线模式与请求响应模式的触发时序",
+            "理解in_enable在两种模式下的双重作用(复位/门控)"
+          ],
+          "source_files": [
+            "Point/ColorReversal/HDL/ColorReversal.srcs/sources_1/new/ColorReversal.v",
+            "Point/Threshold/HDL/Threshold.srcs/sources_1/new/Threshold.v"
+          ],
+          "minimal_modules": [
+            "work_mode参数",
+            "in_enable/out_ready握手",
+            "generate双分支"
+          ],
+          "practice_task": "在ColorReversal中把work_mode分别设为0和1，画出各自out_ready与out_data相对in_enable的时序波形。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "第一个IP核——点运算",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ColorReversal——最简单的点运算",
+          "order": 1,
+          "filename": "u2-l1-color-reversal.md",
+          "level": "beginner",
+          "topic": "以ColorReversal(颜色取反)为例讲解一个1周期点运算IP的完整实现，包括generate块、复位与in_enable联合触发、两种模式的寄存器写法。",
+          "learning_goals": [
+            "读懂一个最简点运算RTL",
+            "理解always@(posedge clk or negedge rst_n or negedge in_enable)的复位语义",
+            "掌握out_ready就绪信号的产生方式"
+          ],
+          "source_files": [
+            "Point/ColorReversal/HDL/ColorReversal.srcs/sources_1/new/ColorReversal.v"
+          ],
+          "minimal_modules": [
+            "generate块",
+            "联合复位",
+            "取反逻辑"
+          ],
+          "practice_task": "仿照ColorReversal写一个把像素值左移一位并截断的点运算模块ColorShift，保持统一接口与两种工作模式。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Threshold——灰度转二值",
+          "order": 2,
+          "filename": "u2-l2-threshold.md",
+          "level": "beginner",
+          "topic": "讲解Threshold如何用case实现Base与Contour两种阈值模式，将灰度图转为二值图，并对比其与ColorReversal在参数与输入上的差异。",
+          "learning_goals": [
+            "掌握带模式选择的点运算实现",
+            "理解th_mode/th1/th2的语义",
+            "能比较单通道与多通道IP的接口差异"
+          ],
+          "source_files": [
+            "Point/Threshold/HDL/Threshold.srcs/sources_1/new/Threshold.v"
+          ],
+          "minimal_modules": [
+            "th_mode模式选择",
+            "阈值比较",
+            "双模式寄存"
+          ],
+          "practice_task": "给Threshold增加一种"
+        }
+      ]
+    }
+  ]
+}

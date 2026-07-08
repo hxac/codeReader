@@ -1,0 +1,534 @@
+{
+  "project": "FPGA-FOC",
+  "head": "3816c6c08f0cab4ff61e9ce9ff829c9f25b62cb3",
+  "rationale": "本项目是一个基于纯 Verilog 的 FPGA 磁场定向控制 (FOC) 电流环实现，核心价值在于把 FOC 的数学链路（Clark/Park 变换、PI 控制、反 Park、SVPWM）和工程实现（SPI/I2C/UART 外设、ADC 同步采样、定点饱和运算）紧密结合。学习顺序按\"先看清全局、再顺电流环数据流、再补外设、最后深入定点/调参/扩展\"四层递进：第 1 单元让读者知道项目是什么、怎么跑、顶层如何接线；第 2 单元严格沿 foc_top.v 的信号流（角度换算→电流重构→clark→park→PI→cartesian2polar→反park→svpwm→采样时序）逐模块拆解，这是全库最核心的部分；第 3 单元补充三个硬件相关外设控制器（I2C 读角度、SPI 读 ADC、UART 监视）和用户逻辑；第 4 单元上升到专家视角，讲清定点运算与饱和保护、参数整定与跨平台移植、仿真方法论以及二次开发方向。这样划分保证了每篇讲义只讲一个独立主题、依赖关系清晰，且每篇都有可操作的代码实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 FPGA-FOC 项目",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与 FOC 背景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 FPGA-FOC 项目要解决什么问题：用 FPGA 实现永磁同步电机/无刷电机的磁场定向控制 (FOC) 电流环，以及整个系统的硬件构成和数据流向。",
+          "learning_goals": [
+            "理解 FOC 电流环（扭矩控制）的目标和为什么用 FPGA 实现实时性更好",
+            "对照系统框图认清四大组成部分：传感器控制器、FOC 固定算法、用户自定义逻辑、外部硬件电路",
+            "了解项目的技术特点：纯 Verilog、12bit 传感器、16bit 有符号计算、3 路 PWM+1 路 EN"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "系统框图中的四大功能块"
+          ],
+          "practice_task": "阅读 README 并用自己的话画出系统框图，标出 AS5600、AD7928、电机驱动板、FPGA 各自的位置，以及 FPGA 内部 FOC 模块与外部硬件之间的信号方向（角度、相电流、PWM）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块层次",
+          "order": 2,
+          "filename": "u1-l2-directory-and-hierarchy.md",
+          "level": "beginner",
+          "topic": "梳理 RTL/ 与 SIM/ 目录的组织方式，结合系统框图认清每个 .v 文件在整体中的角色（顶层、外设、FOC 固定算法、仿真）。",
+          "learning_goals": [
+            "掌握 RTL/ 与 RTL/foc/ 两级目录的分工：硬件相关 vs 硬件无关",
+            "把 12 个源文件映射到系统框图的粉色/蓝色/黄色三个 FPGA 内部区域",
+            "区分哪些是“固定功能一般不需改动”的核心模块，哪些是可替换的外设"
+          ],
+          "source_files": [
+            "README.md",
+            "RTL/fpga_top.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "fpga_top",
+            "foc_top"
+          ],
+          "practice_task": "列出一张表，把 RTL 下所有 .v 文件分成三组：传感器外设控制器、FOC 核心算法、用户逻辑，并标注每个文件是否“平台无关”。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层模块 fpga_top.v",
+          "order": 3,
+          "filename": "u1-l3-fpga-top.md",
+          "level": "beginner",
+          "topic": "逐段解读 FPGA 工程顶层 fpga_top.v：PLL 时钟生成、各子模块的例化与连线、对外 IO 引脚定义，以及把示例行为（顺逆交替）写成代码的用户逻辑。",
+          "learning_goals": [
+            "看懂 altpll 原语如何把 50MHz 倍频/分频成 36.864MHz 主时钟以及为何不能超 40MHz",
+            "理解顶层如何通过例化把角度传感器、ADC、FOC 核心、UART 四部分连成数据通路",
+            "读懂示例的用户逻辑：用 cnt[23] 让 iq_aim 在 +200/-200 之间交替"
+          ],
+          "source_files": [
+            "RTL/fpga_top.v"
+          ],
+          "minimal_modules": [
+            "fpga_top",
+            "altpll"
+          ],
+          "practice_task": "在 fpga_top.v 中找出从 AS5600 读到的机械角度 phi 是如何流入 foc_top 的，以及 foc_top 输出的 id/iq 是如何通过 uart_monitor 发送的，画出这条顶层连线路径。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "用 iverilog 跑仿真并看波形",
+          "order": 4,
+          "filename": "u1-l4-iverilog-simulation.md",
+          "level": "beginner",
+          "topic": "讲解如何用 iverilog + gtkwave 运行 SIM 目录里的两个 testbench，以及如何在波形里把有符号信号显示成模拟（Analog）曲线。",
+          "learning_goals": [
+            "掌握 iverilog -g2001 编译、vvp 运行、$dumpvars 生成 dump.vcd 的流程",
+            "学会在 gtkwave 中把 signed 信号设为 Signed Decimal 再设为 Analog→Step 显示正弦/马鞍波",
+            "理解为什么本项目只仿真了 clark/park 和 svpwm 子模块而没有整个 FOC（缺少电机模型）"
+          ],
+          "source_files": [
+            "SIM/tb_clark_park_tr.v",
+            "SIM/tb_svpwm.v",
+            "SIM/tb_clark_park_tr_run_iverilog.bat",
+            "SIM/tb_svpwm_run_iverilog.bat"
+          ],
+          "minimal_modules": [
+            "tb_clark_park_tr",
+            "tb_swpwm"
+          ],
+          "practice_task": "运行 tb_clark_park_tr_run_iverilog.bat（或在 Linux 下手动执行等价的 iverilog 命令），用 gtkwave 打开 dump.vcd，把 ia/ib/ic/ialpha/ibeta 设为模拟显示，截图并验证 ialpha 与 ibeta 相位相差 π/2。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：FOC 核心数据流",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "foc_top.v 全景与控制环路",
+          "order": 1,
+          "filename": "u2-l1-foc-top-overview.md",
+          "level": "intermediate",
+          "topic": "从 foc_top.v 的端口和内部连线入手，俯瞰整个 FOC 电流环的数据流：从机械角度 φ 和三相 ADC 值出发，一路到三相 PWM，并理解 i_en/o_en 脉冲握手协议。",
+          "learning_goals": [
+            "理清 foc_top.v 内部三大坐标系（定子直角 αβ、转子直角 dq、极坐标）之间的转换顺序",
+            "掌握 i_en/o_en 单周期高电平脉冲作为模块间“数据有效/节拍”握手的统一约定",
+            "理解控制频率 = clk/2048 = 采样率 = PID 更新率 = SVPWM 占空比更新率 的统一节拍"
+          ],
+          "source_files": [
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "foc_top"
+          ],
+          "practice_task": "在 foc_top.v 中标出从 en_adc（ADC 完成）→ en_iabc → en_ialphabeta → en_idq 这一串脉冲握手链，数清楚从电流采样到 PWM 占空比更新之间经过了多少级流水线节拍。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "角度换算与电流重构",
+          "order": 2,
+          "filename": "u2-l2-angle-and-current-recon.md",
+          "level": "intermediate",
+          "topic": "讲解 foc_top.v 中两个 always 块：用 ψ=N·(φ−Φ) 把机械角度换算成电角度（含 ANGLE_INV 正反向），以及用基尔霍夫电流定律从三路 ADC 值重构出 ia/ib/ic。",
+          "learning_goals": [
+            "理解电角度与机械角度的关系 ψ=N·(φ−Φ) 及极对数 POLE_PAIR 的作用",
+            "看懂为什么 ia = ADCb + ADCc − 2·ADCa（反向放大+偏置 + KCL: ia+ib+ic=0）",
+            "理解初始化阶段如何标定初始机械角度 Φ（令 Vsρ 最大、Vsθ=0 让转子回到电角度 0）"
+          ],
+          "source_files": [
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "foc_top"
+          ],
+          "practice_task": "推导为什么由 ADCa=−R·ia+Voff、ADCb=−R·ib+Voff、ADCc=−R·ic+Voff 以及 ia+ib+ic=0 可以推出 ia = ADCb+ADCc−2·ADCa，并把推导过程与代码第 105 行对照。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Clark 变换 clark_tr.v",
+          "order": 3,
+          "filename": "u2-l3-clark-transform.md",
+          "level": "intermediate",
+          "topic": "精读 clark_tr.v：把三相电流 ia/ib/ic 变换成定子直角坐标的 iα/iβ，重点理解三级流水线以及用移位加法近似 √3 的定点技巧。",
+          "learning_goals": [
+            "理解 Clark 变换公式 Iα=2·Ia−Ib−Ic、Iβ=√3·(Ib−Ic)（注：系数被放大 2 倍以避免整数截断）",
+            "看懂用 {N{sign}, val[15:k]} 这种符号扩展右移来近似 1/2、√3 的逐级累加写法",
+            "掌握 en_s1/en_s2/o_en 流水线寄存器如何让使能脉冲与数据同步下传"
+          ],
+          "source_files": [
+            "RTL/foc/clark_tr.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "clark_tr"
+          ],
+          "practice_task": "把 clark_tr.v 中 i_beta1_s2/i_beta2_s2/i_beta3_s2 的三段移位项分别换算成对 bmc_s1 的乘数（如 1、1/2、1/4 …），验证三段之和近似 √3，并计算近似误差有多大。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Park 变换与 sincos 计算器",
+          "order": 4,
+          "filename": "u2-l4-park-and-sincos.md",
+          "level": "intermediate",
+          "topic": "精读 park_tr.v（把 iα/iβ 旋转变换到转子坐标系的 id/iq）以及它调用的 sincos.v（用状态机+查表计算 sinψ/cosψ，−1~+1 映射到 −16384~+16384）。",
+          "learning_goals": [
+            "理解 Park 变换 id=iα·cosψ+iβ·sinψ、iq=iβ·cosψ−iα·sinψ 及其在 park_tr.v 里的乘加实现",
+            "看懂 sincos.v 用 IDLE→S1…→S5 状态机分象限、查 ROM 求 sin/cos 的流程",
+            "理解 sincos 把 0~2π 映射到 0~4095、把 −1~1 映射到 −16384~16384 的定点约定"
+          ],
+          "source_files": [
+            "RTL/foc/park_tr.v",
+            "RTL/foc/sincos.v"
+          ],
+          "minimal_modules": [
+            "park_tr",
+            "sincos"
+          ],
+          "practice_task": "结合 tb_clark_park_tr.v，说明当 psi 跟随 theta 变化时，为什么 id/iq 会从正弦波“坍缩”成近似常数，并用波形验证 park_tr 的乘法结果取 ide[31:16] 的定点缩放关系。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "PI 控制器 pi_controller.v",
+          "order": 5,
+          "filename": "u2-l5-pi-controller.md",
+          "level": "intermediate",
+          "topic": "精读 pi_controller.v：根据目标值与实际值的偏差算出执行变量 Vd/Vq，重点理解 4 级流水线、P+I 计算、以及防止溢出的 protect_add/protect_mul 饱和函数。",
+          "learning_goals": [
+            "理清 i_en→en1→en2→en3→en4→o_en 的 5 级节拍和每级做了什么（pdelta、kpdelta、idelta 累加、kidelta、求和）",
+            "理解 pdelta=i_aim−i_real、idelta=Σpdelta（积分项）、最终 value=Kp·pdelta+Ki·Σpdelta",
+            "看懂 protect_add/protect_mul 如何用更宽的中间位宽做饱和截断，防止 32bit 有符号运算溢出"
+          ],
+          "source_files": [
+            "RTL/foc/pi_controller.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "pi_controller"
+          ],
+          "practice_task": "在 pi_controller.v 里追踪一次 i_en 脉冲：画出 pdelta、kpdelta1、idelta、kpdelta、kidelta、kpidelta、value 在随后 5 个时钟周期的更新顺序，并解释 protect_mul 为何用 57bit 中间值。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "cartesian2polar 与反 Park 变换",
+          "order": 6,
+          "filename": "u2-l6-cartesian2polar-and-invpark.md",
+          "level": "intermediate",
+          "topic": "精读 cartesian2polar.v（把 Vd/Vq 直角坐标转成极坐标 Vrρ/Vrθ 的迭代算法），以及 foc_top.v 里把转子极坐标旋转到定子极坐标 (Vsρ,Vsθ) 的反 Park 变换。",
+          "learning_goals": [
+            "理解作者为何选择“输入极坐标的 SVPWM”——更易开环、反 park 更简单，代价是多一个直角转极坐标模块",
+            "看懂 cartesian2polar.v 用 cnt 倒数计数、accb/acca 逐次逼近求 arctan 的迭代思路",
+            "理解反 Park：由于幅值旋转不变 Vsρ=Vrρ，而角度 Vsθ=Vrθ+ψ（转子极坐标是定子极坐标旋转 ψ）"
+          ],
+          "source_files": [
+            "RTL/foc/cartesian2polar.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "cartesian2polar",
+            "foc_top"
+          ],
+          "practice_task": "对照 tb_svpwm.v，说明当输入 x=cosθ/5、y=sinθ/5 时，cartesian2polar 输出的 rho 应近似常数 3277、phi 应近似 θ，并解释代码里 absx/absy 交换（signxy）的作用。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "SVPWM 调制器 svpwm.v",
+          "order": 7,
+          "filename": "u2-l7-svpwm.md",
+          "level": "intermediate",
+          "topic": "精读 svpwm.v：七段式 SVPWM 生成器，输入定子极坐标电压矢量 (Vsρ,Vsθ)，输出三相 PWM，PWM 频率 = clk/2048；理解 cnt 计数器、ROM 查表与马鞍波 duty 的产生。",
+          "learning_goals": [
+            "理解 2048 周期计数器 cnt 如何定义一个 PWM 周期，以及 cnt 在 2041~2047 处的取值序列为何这样排",
+            "看懂 pwma_duty/pwmb_duty/pwmc_duty 鞍形波如何由查表+乘法得到，并决定 pwm_a/b/c 的占空比",
+            "理解 pwm_a <= ~pwm_act || cnt<=pwma_lb || cnt>pwma_ub 这种中心对齐 PWM 比较的写法"
+          ],
+          "source_files": [
+            "RTL/foc/svpwm.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "svpwm"
+          ],
+          "practice_task": "在 svpwm.v 里找出 pwma_duty 与 pwm_a 占空比的对应关系（duty 越大占空比越大），并结合 ROM_LATENCY 解释为何要在 cnt=2041−ROM_LATENCY 时提前锁存 v_theta/v_amp。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "ADC 采样时序 hold_detect.v",
+          "order": 8,
+          "filename": "u2-l8-hold-detect.md",
+          "level": "intermediate",
+          "topic": "精读 hold_detect.v：检测三相 PWM 均为低（下桥臂全导通=采样窗口）并延时 SAMPLE_DELAY 个周期后，在 sn_adc 上产生脉冲，指示 ADC 可以采样。",
+          "learning_goals": [
+            "理解为什么相电流采样必须发生在“三相下桥臂同时导通”的采样窗口内",
+            "看懂 latch1/latch2 两级打拍如何检测输入的下降沿/保持，cnt 如何做倒计时延时",
+            "理解 SAMPLE_DELAY 参数的作用：等待 MOS 管电流稳定再让 ADC 采样"
+          ],
+          "source_files": [
+            "RTL/foc/hold_detect.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "hold_detect",
+            "foc_top"
+          ],
+          "practice_task": "追踪 foc_top.v 里 hold_detect 的输入 in = ~pwm_a & ~pwm_b & ~pwm_c，说明 sn_adc 脉冲为何只会在三相 PWM 同时为低的窗口内出现，以及该窗口长度受 MAX_AMP 影响的原因。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：传感器与通信外设",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "I2C 角度读取 i2c_register_read.v",
+          "order": 1,
+          "filename": "u3-l1-i2c-angle-read.md",
+          "level": "intermediate",
+          "topic": "精读 i2c_register_read.v：通用 I2C 读控制器，配置 SLAVE_ADDR=0x36、REGISTER_ADDR=0x0E 读取 AS5600 磁编码器的 12bit 机械角度。",
+          "learning_goals": [
+            "理解 CLK_DIV 分频如何产生 SCL（频率=clk/(4·CLK_DIV)，需≤1MHz）以及 sda 用 sda_e/sda_o 实现开漏 inout",
+            "看懂 epoch 节拍、send_shift/recv_shift 移位、cnt 状态机驱动 START/ADDR/REG/RESTART/READ/STOP 的 I2C 时序",
+            "理解 fpga_top.v 里 start=1'b1 持续读、regout 高 4 位丢弃只取低 12 位 phi 的接法"
+          ],
+          "source_files": [
+            "RTL/i2c_register_read.v",
+            "RTL/fpga_top.v"
+          ],
+          "minimal_modules": [
+            "i2c_register_read",
+            "fpga_top"
+          ],
+          "practice_task": "根据 CLK_DIV=16、clk=36.864MHz 计算 SCL 频率，并说明若把传感器换成别的 I2C 编码器需要改哪几个 parameter（SLAVE_ADDR、REGISTER_ADDR、可能还有位宽处理）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SPI ADC 读取 adc_ad7928.v",
+          "order": 2,
+          "filename": "u3-l2-spi-adc-read.md",
+          "level": "intermediate",
+          "topic": "精读 adc_ad7928.v：通用 AD7928 ADC 控制器，收到 sn_adc 脉冲后串行采样多个通道，最后同步提交结果并产生 en_adc 脉冲；理解其与 FOC 的抽象接口约定。",
+          "learning_goals": [
+            "理解 CH_CNT/CH0..CH7 参数如何自由配置“单次转换用几个通道、各对应 AD7928 哪个物理通道”",
+            "看懂 cnt/idx 状态机驱动 SPI 的 ss/sck/mosi/miso 完成多通道串行采样与结果拼装",
+            "理解 sn_adc→（串行 3 次采样）→en_adc 同步提交 的接口抽象为何有利于可移植性（换并行 ADC 也只需满足此时序）"
+          ],
+          "source_files": [
+            "RTL/adc_ad7928.v",
+            "RTL/fpga_top.v"
+          ],
+          "minimal_modules": [
+            "adc_ad7928",
+            "fpga_top"
+          ],
+          "practice_task": "结合 FAQ，说明 AD7928 只有一个采样保持器为何仍能用于 FOC 三相电流采样，并计算“sn_adc 脉冲到 en_adc 脉冲的时间差 + SAMPLE_DELAY”必须小于采样窗口长度的约束来源。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "UART 监视器与用户逻辑",
+          "order": 3,
+          "filename": "u3-l3-uart-monitor-and-user-logic.md",
+          "level": "intermediate",
+          "topic": "精读 uart_monitor.v（115200,8,n,1 发送器，把 4 个有符号数转十进制打印）以及 fpga_top.v 里的用户逻辑（cnt 计数器让 iq_aim 顺逆交替、id_aim 恒 0）。",
+          "learning_goals": [
+            "理解 CLK_DIV=320 使波特率=clk/320=115200，以及 IDLE/SELECT/WAIT/PARSING/SENDING 状态机如何把数值转字符串逐字节发送",
+            "看懂 itoa 把有符号 16bit 转十进制字符串的过程和 i_en 脉冲触发发送的节拍",
+            "理解示例用户逻辑：用 24bit 自增计数器 cnt，按 cnt[23] 让 iq_aim 在 ±200 间切换，演示扭矩换向"
+          ],
+          "source_files": [
+            "RTL/uart_monitor.v",
+            "RTL/fpga_top.v"
+          ],
+          "minimal_modules": [
+            "uart_monitor",
+            "fpga_top"
+          ],
+          "practice_task": "把 fpga_top.v 里 iq_aim 的切换逻辑改成“根据某个外部按键或 uart 接收到的命令来切换方向”，并说明需要新增/修改哪些信号和模块；同时说明如何改 uart_monitor 监视其它变量（如 ψ、Vrρ）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：深入原理与二次开发",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "定点数运算与饱和保护",
+          "order": 1,
+          "filename": "u4-l1-fixed-point-and-saturation.md",
+          "level": "advanced",
+          "topic": "系统性梳理全库的定点约定（12bit 传感器、16bit 有符号、角度 0~4095 映射 0~2π、−1~1 映射 −16384~16384）、移位近似与饱和保护，以及系数不严格为何不影响控制。",
+          "learning_goals": [
+            "掌握全库统一的定点标度约定，能在不同模块间推算定点缩放关系（如 park 取 [31:16]）",
+            "理解用移位加法近似 √3、用更宽中间位宽做饱和截断（protect_add/protect_mul）的工程取舍",
+            "理解“FOC 是线性系统、系数误差可用 PID 调参消除”这一核心思想，从而看懂为何多处系数与理论公式不同"
+          ],
+          "source_files": [
+            "RTL/foc/pi_controller.v",
+            "RTL/foc/clark_tr.v",
+            "RTL/foc/park_tr.v",
+            "RTL/foc/foc_top.v"
+          ],
+          "minimal_modules": [
+            "pi_controller",
+            "clark_tr",
+            "park_tr"
+          ],
+          "practice_task": "整理一张表：列出 Clark、Park、PI、cartesian2polar 各模块输入输出的位宽与定点含义，并指出其中哪些系数被刻意放大或近似（如 Iα/Iβ 多乘 2、√3 用移位近似），分析这些近似对最终控制的影响。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "参数整定与跨平台移植",
+          "order": 2,
+          "filename": "u4-l2-parameter-tuning-and-porting.md",
+          "level": "advanced",
+          "topic": "系统讲解 foc_top 的 5 个关键 parameter（INIT_CYCLES/ANGLE_INV/POLE_PAIR/MAX_AMP/SAMPLE_DELAY）与 Kp/Ki 的含义和调参方法，以及把 altpll 换成其它平台 IP 核的移植要点。",
+          "learning_goals": [
+            "掌握每个参数的取值范围、物理含义和调参策略（如 INIT_CYCLES 决定初始化时长、MAX_AMP 影响最大力矩与采样窗口的折中）",
+            "理解 Kp/Ki 是 31bit 输入端口、可在运行时调整，以及 id_aim 一般设 0（不弱磁）",
+            "看懂除 altpll 外全库纯 RTL，移植到 Xilinx/Lattice 只需替换 PLL IP 核并保证主时钟≈36.864MHz"
+          ],
+          "source_files": [
+            "RTL/foc/foc_top.v",
+            "RTL/fpga_top.v",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "foc_top",
+            "fpga_top"
+          ],
+          "practice_task": "假设要换一块晶振 100MHz 的 Xilinx 开发板和一台极对数=14 的电机，列出需要修改的 parameter（POLE_PAIR、PLL 配置等）并计算新的 INIT_CYCLES（仍想初始化≈0.45s）；再说明 MAX_AMP 调大对采样窗口的影响。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "仿真方法论与波形解读",
+          "order": 3,
+          "filename": "u4-l3-simulation-methodology.md",
+          "level": "advanced",
+          "topic": "总结本项目的仿真策略：为何只仿真子模块、两个 testbench 如何用 sincos 当信号源、波形如何解读（三相→αβ→dq 的坍缩、马鞍波 duty→PWM 占空比），以及如何为新模块写 testbench。",
+          "learning_goals": [
+            "理解“无电机 Verilog 模型所以不能整体仿真”的限制，以及用 sincos 模块当可控正弦信号源的技巧",
+            "学会从波形验证 Clark/Park 的数学正确性（αβ 正交、dq 近似常数）和 SVPWM 的马鞍波/占空比关系",
+            "掌握编写新 testbench 的范式：产生 clk/rstn、用循环递增角度、$dumpvars、$finish"
+          ],
+          "source_files": [
+            "SIM/tb_clark_park_tr.v",
+            "SIM/tb_svpwm.v",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "tb_clark_park_tr",
+            "tb_swpwm"
+          ],
+          "practice_task": "为 pi_controller.v 单独编写一个 testbench：给定一组 sin 形的 i_real 和恒定的 i_aim，观察 o_value 是否能收敛到使误差趋零的方向，并用 gtkwave 的 Analog 显示验证 PI 的动态响应。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "二次开发与系统扩展",
+          "order": 4,
+          "filename": "u4-l4-extension-and-development.md",
+          "level": "advanced",
+          "topic": "在本电流环基础上探讨扩展方向：加位置环/速度环构成级联控制、多通道电机、MCU+FPGA 协同、更换传感器/ADC 型号，以及如何复用 foc_top 的可移植接口。",
+          "learning_goals": [
+            "理解电流环（扭矩）只是最内环，如何在 iq_aim 上叠加外环（速度环/位置环）形成级联控制",
+            "掌握 foc_top 对外接口（角度 phi、ADC sn/en、PWM、id/iq/id_aim/iq_aim）的抽象边界，知道改什么不影响核心",
+            "理解更换传感器/ADC 时只需重写对应外设控制器并满足 foc_top 的脉冲握手时序即可"
+          ],
+          "source_files": [
+            "RTL/foc/foc_top.v",
+            "RTL/fpga_top.v",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "foc_top",
+            "fpga_top"
+          ],
+          "practice_task": "设计一个方案：在 FPGA 内或用 MCU+FPGA 给本电流环外加一个速度环（用 φ 的差分估算转速，再由速度误差生成 iq_aim），画出模块框图并指出复用了哪些现有模块、需要新增哪些逻辑。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
