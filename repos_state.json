@@ -10651,8 +10651,8 @@
     },
     "flashinfer-ai/flashinfer": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-08T11:01:47Z",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":190576,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-07-09 02:00:26 重置。][2026070900231379e8fc40fdda4a5a]\",\"stop_reason\":\"stop_seq",
+      "last_run_at": "2026-07-08T15:47:13Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -11157,7 +11157,7 @@
           "action": "new",
           "retries": 1,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":479752,\"duration_api_ms\":210889,\"num_turns\":12,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194535,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u8-l1": {
           "status": "failed",
@@ -11208,8 +11208,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/FlashMLA/FlashMLA-tutorial",
       "last_head": "9241ae3ef9bac614dd25e45e507e089f888280e0",
-      "last_run_at": "2026-07-08T11:01:47Z",
-      "last_error": "3 篇未完成: ['u7-l4', 'u8-l1', 'u9-l2']",
+      "last_run_at": "2026-07-08T15:47:13Z",
+      "last_error": "quota exhausted; will resume next window",
       "abandoned": []
     },
     "WangXuan95/FPGA-FixedPoint": {
@@ -11451,7 +11451,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":479687,\"duration_api_ms\":198173,\"num_turns\":6,\"result\":\"API Error: The operation timed out.\",\""
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194116,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         }
       },
       "manifest_head": "3816c6c08f0cab4ff61e9ce9ff829c9f25b62cb3",
@@ -11460,9 +11460,9 @@
       "mode": "full",
       "tutorial_path": "tutorials/WangXuan95/FPGA-FOC/FPGA-FOC-tutorial",
       "last_head": "3816c6c08f0cab4ff61e9ce9ff829c9f25b62cb3",
-      "last_run_at": "2026-07-08T11:01:47Z",
+      "last_run_at": "2026-07-08T15:47:13Z",
       "abandoned": [],
-      "last_error": "1 篇未完成: ['u4-l4']"
+      "last_error": "quota exhausted; will resume next window"
     },
     "dtysky/FPGA-Imaging-Library": {
       "prompt_hash": "b21aef51792b02df",
@@ -11738,7 +11738,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186126,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196749,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u15-l2": {
           "status": "pending",
@@ -11782,7 +11782,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/laforest/FPGADesignElements/FPGADesignElements-tutorial",
       "last_head": "2450a548eeee2a4dc1c06878b7c00617dd94e2a8",
-      "last_run_at": "2026-07-08T11:01:47Z",
+      "last_run_at": "2026-07-08T15:47:13Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "embedeep/FREE-TPU-V3plus-for-FPGA": {},
