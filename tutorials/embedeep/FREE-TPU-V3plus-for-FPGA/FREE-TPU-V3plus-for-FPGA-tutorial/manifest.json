@@ -1,0 +1,850 @@
+{
+  "project": "FREE-TPU-V3plus-for-FPGA",
+  "head": "1d3b64b6f0160680e6391105bdfb3739c0aba14a",
+  "rationale": "本项目是面向 Xilinx ZynqMP FPGA 的 EEP-TPU V3+（深度学习边缘推理处理器）免费评估版，横跨「FPGA 硬件交付/工程构建」与「软件 SDK」两大领域，软件侧又分 Linux(libeeptpu_pub) 与裸机(standalone) 两条独立路径，再加上模型编译链路与三类网络(分类/检测/分割)的后处理，知识面较广。因此学习路线采用「先看清全貌与上板方式 → 再走最易上手的 Linux demo 路线 → 接着理解模型如何被编译成 TPU bin → 然后深入裸机路径下的寄存器协议与硬件数据格式 → 顺次进入推理执行与输出读取 → 再覆盖分类/检测/分割后处理 → 最后用进阶 demo 和外设(摄像头/SD/显示)收尾」的顺序。单元划分严格对应这条主链：U1 项目与硬件、U2 SDK 与 Linux 路线、U3 编译链路、U4 裸机路径、U5 推理与输出、U6 后处理算法、U7 进阶多核/多输入 demo、U8 外设与移植扩展。每篇讲义只解决一个问题、引用 1–6 个真实源码文件，并给出可操作的实践任务；讲义间通过 depends_on 形成清晰依赖，确保读者从零开始能逐层推进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目全貌与上板运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FREE-TPU V3+ 是什么：项目定位与 TPU 背景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 EEP-TPU V3+ 处理器的定位、Free 版与商用版的区别、核心特性（可重构架构、dataflow、混合精度、多核多线程）以及支持的算法与精度。",
+          "learning_goals": [
+            "理解 EEP-TPU V3+ 在深度学习边缘推理中的角色",
+            "区分 Free TPU 与商用 EEP-TPU 的差异（如一小时限制）",
+            "掌握其支持的算法类型与精度（FP16/FP8/INT8）"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目背景与定位",
+            "V3+ 核心特性",
+            "支持的算法与精度",
+            "性能数据解读"
+          ],
+          "practice_task": "阅读 README 中的性能表，写一段文字说明为什么同一网络 INT8 比 FP16 延迟更低，并结合「多核多线程」解释八核 MobileNetV2 为何能到 0.56ms。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构：六大目录各司其职",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "逐个说明 constr、doc、hardware、ip_repo、script、sdk 六个目录的作用，建立对整个仓库的整体地图。",
+          "learning_goals": [
+            "记住六大顶层目录的职责",
+            "区分硬件交付物与软件 SDK 的边界",
+            "定位后续学习要进入的具体目录"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "目录一览表",
+            "硬件相关目录(constr/hardware/ip_repo/script)",
+            "软件目录(sdk)",
+            "文档目录(doc)"
+          ],
+          "practice_task": "在仓库根目录画出目录树，并为每个目录写一句中文说明，标出哪些目录是「二进制交付物」、哪些是「可读源码」。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "硬件交付物与上板运行",
+          "order": 3,
+          "filename": "u1-l3-hardware-deliverables-boot.md",
+          "level": "beginner",
+          "topic": "讲解 hardware 目录下的 BOOT.BIN、image.ub、system_wrapper.xsa 三类交付物，以及在 ZynqMP 板卡上烧录启动、进入 Linux 的基本流程。",
+          "learning_goals": [
+            "理解 BOOT.BIN/image.ub/xsa 各自代表什么",
+            "了解 ZynqMP 的启动与加载链路",
+            "知道在哪里查到详细运行步骤(doc)"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/demo_readme.pdf"
+          ],
+          "minimal_modules": [
+            "BOOT.BIN 的组成",
+            "image.ub 与 Linux 内核",
+            "xsa 硬件导出包",
+            "上板启动流程"
+          ],
+          "practice_task": "查阅 doc 下的 demo_readme.pdf，整理出从拿到 BOOT.BIN 到在串口看到 Linux shell 的最小步骤清单（可用「待确认」标注需要硬件的步骤）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "FPGA 工程构建与 IP 集成",
+          "order": 4,
+          "filename": "u1-l4-fpga-project-and-ip.md",
+          "level": "beginner",
+          "topic": "讲解如何用 script/create_prj.sh 调用 Vivado TCL 脚本重建工程、加密 IP 如何被集成、约束文件 constr/top.xdc 的内容与作用。",
+          "learning_goals": [
+            "理解 create_prj.sh 与 system_rtl TCL 脚本的协作",
+            "认识加密 IP 的保护方式与黑盒集成",
+            "了解顶层约束 top.xdc 设置了哪些属性"
+          ],
+          "source_files": [
+            "script/create_prj.sh",
+            "script/system_rtl_MZU15A_TPU_IP_DVP_DP_v202101.tcl",
+            "constr/top.xdc",
+            "ip_repo/EEP_DVP_Top_128B_v6p3.v"
+          ],
+          "minimal_modules": [
+            "create_prj.sh 启动方式",
+            "system_rtl TCL 工程描述",
+            "加密 IP 与 DVP 顶层",
+            "xdc 约束属性"
+          ],
+          "practice_task": "打开 constr/top.xdc 与 system_rtl TCL，列出工程中用到的 IP 实例名，并解释 top.xdc 里两条 set_property 的含义（提示：bitstream 安全与压缩）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "SDK 全景与 Linux 路线",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "SDK 全景：编译器、运行库、demo 与 standalone",
+          "order": 1,
+          "filename": "u2-l1-sdk-overview.md",
+          "level": "beginner",
+          "topic": "依据 sdk/Readme.md 梳理 eeptpu_compiler、libeeptpu_pub、demo、standalone 四个部分的关系，建立 SDK 的整体认知。",
+          "learning_goals": [
+            "理清编译器、运行库、demo、standalone 的分工",
+            "理解「编译出 bin → 运行库加载 bin 推理」的主线",
+            "区分 Linux demo 与裸机 standalone 两条路线"
+          ],
+          "source_files": [
+            "sdk/Readme.md"
+          ],
+          "minimal_modules": [
+            "eeptpu_compiler 作用",
+            "libeeptpu_pub 接口库",
+            "demo 示例集",
+            "standalone 裸机方案"
+          ],
+          "practice_task": "画一张 SDK 数据流图：从框架模型(如 darknet) 出发，经过 eeptpu_compiler、libeeptpu_pub，最终在 demo 中完成推理，标注每一步对应的目录。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "eepimg 图像工具库：加载、缩放、绘制",
+          "order": 2,
+          "filename": "u2-l2-eepimg-library.md",
+          "level": "beginner",
+          "topic": "讲解 sdk/demo/common/eepimg_v0.2.6 提供的图像加载、resize、像素序(BGR/RGB/GRAY)、画框画字、保存等函数，它是所有 demo 的图像基础。",
+          "learning_goals": [
+            "掌握 image_bytes 结构与像素序/layout 常量",
+            "会用 eepimg_load_image/resize/save/draw_box 等接口",
+            "理解 demo 中读图与可视化都依赖该库"
+          ],
+          "source_files": [
+            "sdk/demo/common/eepimg_v0.2.6/eep_image.h",
+            "sdk/demo/common/eepimg_v0.2.6/eep_image.cpp"
+          ],
+          "minimal_modules": [
+            "image_bytes 数据结构",
+            "像素序与布局常量",
+            "加载/缩放/释放",
+            "绘制与保存"
+          ],
+          "practice_task": "基于 eep_image.h 的接口，写一段伪代码：加载一张 jpg、按指定宽高 resize、画一个绿色矩形框、保存为 result.jpg。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "EEPTPU 运行库 API 与 classify demo",
+          "order": 3,
+          "filename": "u2-l3-linux-api-and-classify.md",
+          "level": "beginner",
+          "topic": "通过 classify demo 逐段讲解 libeeptpu_pub 的 EEPTPU 类用法：init、set_base_address、load_bin、set_input、forward、读取结果，以及交叉编译与运行脚本。",
+          "learning_goals": [
+            "掌握 EEPTPU 类的典型调用顺序",
+            "理解 input_shape、EEPTPU_RESULT 结构",
+            "学会用 compile.sh 交叉编译并在板上 test.sh 运行"
+          ],
+          "source_files": [
+            "sdk/demo/classify/main.cpp",
+            "sdk/demo/classify/compile.sh",
+            "sdk/demo/classify/test.sh"
+          ],
+          "minimal_modules": [
+            "eeptpu_init 初始化流程",
+            "load_bin 与 set_input",
+            "forward 与结果读取",
+            "compile.sh/test.sh 工具链"
+          ],
+          "practice_task": "对照 main.cpp 列出从 main 入口到打印 top5 结果的完整函数调用序列，并说明 compile.sh 中 arm32/aarch64/x86 三种平台是如何切换编译器的。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "接口选择：SoC 内存映射 vs PCIE/XDMA",
+          "order": 4,
+          "filename": "u2-l4-interface-soc-vs-pcie.md",
+          "level": "beginner",
+          "topic": "讲解 eepInterfaceType_SOC 与 eepInterfaceType_PCIE 两种接口的配置差异：寄存器 zone、基地址、PCIE 的 xdma 设备文件，帮助读者根据硬件形态选择。",
+          "learning_goals": [
+            "理解 SoC(AXI 内存映射) 与 PCIE(xdma) 两种接入方式",
+            "掌握 reg_zones 与 set_base_address 的配置方法",
+            "知道 PCIE 模式下用到的 /dev/xdma0_* 设备"
+          ],
+          "source_files": [
+            "sdk/demo/classify/main.cpp",
+            "sdk/demo/yolo/main.cpp"
+          ],
+          "minimal_modules": [
+            "接口类型枚举",
+            "SoC 寄存器 zone 与基地址",
+            "PCIE xdma 设备文件",
+            "切换接口的编译宏 INTERFACE_PCIE"
+          ],
+          "practice_task": "在 classify 的 eeptpu_init 中分别标出 SoC 与 PCIE 两条分支设置了哪些参数，并解释为什么 arm32 与 arm64 的 reg zone 地址(0x43C00000 vs 0xA0000000)不同。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模型编译链路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "eeptpu_compiler 编译工作流与命令行参数",
+          "order": 1,
+          "filename": "u3-l1-compiler-workflow.md",
+          "level": "intermediate",
+          "topic": "通过 setting.ini 与 b_yolo4tiny.sh 讲解如何把 darknet 等框架模型编译成 TPU 可执行的 .pub.bin，重点解读 --public_bin --hybp、base 地址、mean/norm、--int8、--tpu_threads 等关键参数。",
+          "learning_goals": [
+            "理解编译器输入(cfg/weights/图像)与输出(pub.bin)",
+            "掌握 setting.ini 中各 global_cmd 组合的含义",
+            "知道 mean/norm/base_par/base_in 等参数如何影响生成的 bin"
+          ],
+          "source_files": [
+            "sdk/standalone/net_model/scripts/setting.ini",
+            "sdk/standalone/net_model/scripts/b_yolo4tiny.sh"
+          ],
+          "minimal_modules": [
+            "setting.ini 配置项",
+            "b_yolo4tiny.sh 编译流程",
+            "关键命令行参数解读",
+            "输出产物组织"
+          ],
+          "practice_task": "在 setting.ini 中有 s2/s2quant/s2t4/s2t2 多种注释掉的方案，请逐一说明它们在「量化、多线程、仿真数据」上的差异，并指出当前启用的是哪一种。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "eepBinCvt：把 bin 转成裸机可用的 mem/header",
+          "order": 2,
+          "filename": "u3-l2-eepbin-cvt.md",
+          "level": "intermediate",
+          "topic": "讲解 eepbin_cvt.sh 如何用 eepBinCvt 工具把 .pub.bin 转成裸机工程使用的 eepnet.mem、eepnet.h、eepinput.mem 等形式，打通编译与裸机部署。",
+          "learning_goals": [
+            "理解 .pub.bin 与 mem/header 形式的区别",
+            "掌握 eepBinCvt 的 --output header/mem 用法",
+            "明确裸机侧为何需要再做一次格式转换"
+          ],
+          "source_files": [
+            "sdk/standalone/net_model/scripts/eepbin_cvt.sh",
+            "sdk/standalone/net_model/scripts/b_yolo4tiny.sh"
+          ],
+          "minimal_modules": [
+            "eepBinCvt 工具作用",
+            "header 与 mem 两种输出",
+            "产物与裸机工程的对应",
+            "编译→转换的衔接"
+          ],
+          "practice_task": "描述完整链路：yolov4_tiny.cfg/.weights 经过哪些步骤、哪些工具，最终变成裸机 main.cc 里 #include 的 eepnet.h，写出每一步的命令。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "eepnet 配置数组格式解析",
+          "order": 3,
+          "filename": "u3-l3-eepnet-config-format.md",
+          "level": "intermediate",
+          "topic": "结合 eeptpu_sa.cpp 的 eeptpu_init 解析 eepnet_config 数组的二进制布局：interface、mem_base、bin_type、mem_cnt、输出 shape、输入 shape、mean/norm 等字段如何被读取。",
+          "learning_goals": [
+            "理解 eepnet_config 数组的字段顺序与含义",
+            "掌握 eeptpu_init 如何从该数组恢复输入输出与地址信息",
+            "认识 bin_type(enc=1/pub=2) 等关键字段"
+          ],
+          "source_files": [
+            "sdk/standalone/src/eeptpu/eeptpu_sa.cpp",
+            "sdk/standalone/src/net_data/eepnet.h"
+          ],
+          "minimal_modules": [
+            "配置数组总体布局",
+            "输出/输入 shape 与 exp",
+            "mean/norm 列表",
+            "eeptpu_init 的解析逻辑"
+          ],
+          "practice_task": "根据 eeptpu_sa.cpp 顶部的格式注释，画出 eepnet_config 数组各字段在内存中的排列顺序图，并标注哪些字段决定输入分辨率与通道数。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "裸机 standalone 路径",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "standalone 工程结构与 ZynqMP 平台初始化",
+          "order": 1,
+          "filename": "u4-l1-standalone-platform-init.md",
+          "level": "intermediate",
+          "topic": "讲解 standalone/src 的工程组织、main.cc 的整体菜单流程，以及 platform.c/sys_intr.c/dpdma 等平台初始化代码和 config.h 中的关键编译开关。",
+          "learning_goals": [
+            "理解裸机工程的文件组织与构建方式(Vitis)",
+            "掌握 main.cc 的菜单式交互流程",
+            "认识 config.h 中 NET_TYPE/SD_CARD_IS_READY/EEP_DP_ENABLE 等开关"
+          ],
+          "source_files": [
+            "sdk/standalone/src/main.cc",
+            "sdk/standalone/src/platform.c",
+            "sdk/standalone/src/platform.h",
+            "sdk/standalone/src/config.h",
+            "sdk/standalone/src/sys_intr.c"
+          ],
+          "minimal_modules": [
+            "工程结构与构建",
+            "main.cc 菜单流程",
+            "平台/中断初始化",
+            "config.h 编译开关"
+          ],
+          "practice_task": "阅读 main.cc 的 while 循环菜单，列出 1~5 各选项的功能，并说明如果想关掉 SD 卡和 DP 显示需要修改 config.h 中的哪些宏。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "EEPTPU_SA 类与 TPU 寄存器协议",
+          "order": 2,
+          "filename": "u4-l2-eeptpu-sa-and-register-protocol.md",
+          "level": "intermediate",
+          "topic": "讲解 EEPTPU_SA 类的职责与 config.h 中定义的 TPU 寄存器(BASEADDR0-3、ALGOADDR、STARTUP、STATUS、RUNTIMER)，以及 tpu_forward 里写基地址→启动→轮询完成的协议。",
+          "learning_goals": [
+            "掌握 EEPTPU_SA 类的核心成员与方法",
+            "理解 TPU 寄存器映射与各自偏移",
+            "学会 tpu_forward 的「写地址→启动→轮询」时序"
+          ],
+          "source_files": [
+            "sdk/standalone/src/eeptpu/eeptpu_sa.h",
+            "sdk/standalone/src/eeptpu/eeptpu_sa.cpp",
+            "sdk/standalone/src/config.h",
+            "sdk/standalone/src/main.cc"
+          ],
+          "minimal_modules": [
+            "EEPTPU_SA 类结构",
+            "TPU 寄存器定义",
+            "forward 寄存器时序",
+            "完成状态轮询"
+          ],
+          "practice_task": "对照 tpu_forward() 与 config.h，写出一次推理在寄存器层面发生的完整步骤：先写哪几个寄存器、写什么值启动、轮询哪个寄存器的哪一位判断完成。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "eep_interface：AXI 内存与寄存器读写",
+          "order": 3,
+          "filename": "u4-l4-eep-interface-axi.md",
+          "level": "intermediate",
+          "topic": "讲解 EEP_INTERFACE 类如何提供统一的 mem_write/mem_read/register_write/register_read/register_wait 接口，它是裸机侧访问 TPU 内存与寄存器的底层抽象。",
+          "learning_goals": [
+            "理解 EEP_INTERFACE 在分层设计中的位置",
+            "掌握 mem_read/write 与 register_read/write/wait 接口",
+            "认识 round_up 等对齐辅助宏"
+          ],
+          "source_files": [
+            "sdk/standalone/src/eeptpu/interface/eep_interface.h",
+            "sdk/standalone/src/eeptpu/interface/eep_interface.cpp"
+          ],
+          "minimal_modules": [
+            "EEP_INTERFACE 类接口",
+            "内存读写语义",
+            "寄存器读写与等待",
+            "地址对齐宏"
+          ],
+          "practice_task": "说明 EEPTPU_SA 的 forward/read_forward_result 是如何通过 eepif 这个成员调用到具体硬件操作的，并解释 register_wait 的 mask 与 want_val 参数含义。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "裸机输入预处理与硬件输入格式",
+          "order": 4,
+          "filename": "u4-l4-standalone-input-preprocessing.md",
+          "level": "intermediate",
+          "topic": "讲解 main.cc 的 get_input_data 如何完成 resize、mean/norm、定点缩放(exp)与通道重排，并把数据打包成硬件要求的 16-bit、32 字节步长的输入格式。",
+          "learning_goals": [
+            "理解硬件输入数据的定点与通道排列规则",
+            "掌握 mean/norm/exp 的预处理数学",
+            "认识 32 字节(16 通道×2字节)步长打包"
+          ],
+          "source_files": [
+            "sdk/standalone/src/main.cc",
+            "sdk/standalone/src/resize.h",
+            "sdk/standalone/src/resize.cpp",
+            "sdk/standalone/src/config.h"
+          ],
+          "minimal_modules": [
+            "双线性 resize",
+            "mean/norm/exp 定点化",
+            "RGB→BGR 通道重排",
+            "32 字节步长打包"
+          ],
+          "practice_task": "在 get_input_data 的 c==3 分支中，推导每个像素 6 字节有效数据后为何要 pdst += 32(提示：16 通道对齐)，并计算一张 416×416×3 输入最终占用多少字节。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "推理执行与结果读取",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "tpu_forward 寄存器时序与完成轮询",
+          "order": 1,
+          "filename": "u5-l1-forward-register-timing.md",
+          "level": "intermediate",
+          "topic": "深入 main.cc 与 eeptpu_sa.cpp 中的 forward 流程，细化启动寄存器(STARTUP=0x11)、状态位(STATUS&0x80000000)、RUNTIMER 计时与 XTime 性能计量的关系。",
+          "learning_goals": [
+            "精确掌握启动与完成判定的寄存器值",
+            "理解软件 XTime 与硬件 RUNTIMER 两种计时",
+            "认识 eep_tpu_start_work/wait_done 的封装"
+          ],
+          "source_files": [
+            "sdk/standalone/src/main.cc",
+            "sdk/standalone/src/config.h",
+            "sdk/standalone/src/eeptpu/eeptpu_sa.cpp"
+          ],
+          "minimal_modules": [
+            "启动寄存器写入",
+            "完成状态轮询",
+            "硬件运行计时",
+            "软件耗时计量"
+          ],
+          "practice_task": "对比 tused_forward(软件 XTime) 与 EEPTPU_RUNTIMER_REG(硬件计时)，说明二者为何会有差异，并指出哪个更反映纯 TPU 计算耗时。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "输出读取与 epmat→ncnn::Mat 转换",
+          "order": 2,
+          "filename": "u5-l2-output-read-and-epmat-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 read_forward_result 如何按输出地址与 shape 读取 epmat，再用 epmat2nmat 把 16 通道分组、32 字节步长、定点(exp)的数据还原为浮点 ncnn::Mat。",
+          "learning_goals": [
+            "理解 epmat 的内存布局(16 通道分组、步长 32)",
+            "掌握 epmat2nmat 的反量化(除以 2^exp)逻辑",
+            "认识 epmat_get_size 的尺寸对齐计算"
+          ],
+          "source_files": [
+            "sdk/standalone/src/eeptpu/eeptpu_sa.cpp",
+            "sdk/standalone/src/eeptpu/nmat.h"
+          ],
+          "minimal_modules": [
+            "read_forward_result 流程",
+            "epmat 尺寸计算",
+            "epmat2nmat 反量化",
+            "ncnn::Mat 输出"
+          ],
+          "practice_task": "对照 epmat2nmat，解释为何读取第 c 个通道要用 curr_ch_group=c/16 与 epmat_offset=(c%16)*2，并写出从 epmat 还原一个 float 值的计算公式。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "后处理算法",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "分类后处理：topk 排序",
+          "order": 1,
+          "filename": "u6-l1-classify-topk-postprocess.md",
+          "level": "intermediate",
+          "topic": "讲解分类网络的 topk 后处理：把输出 reshape 成得分向量，用 partial_sort 取概率最高的若干类别，Linux demo 与 standalone 的 get_topk 实现对照。",
+          "learning_goals": [
+            "掌握 EEPTPU_RESULT/ncnn::Mat 到得分向量的转换",
+            "理解 partial_sort 取 topk 的实现",
+            "认识两种 demo 中 topk 的细微差异"
+          ],
+          "source_files": [
+            "sdk/demo/classify/main.cpp",
+            "sdk/standalone/src/post_process/classify.cpp",
+            "sdk/standalone/src/post_process/post_process.h"
+          ],
+          "minimal_modules": [
+            "输出 reshape",
+            "partial_sort topk",
+            "结果打印",
+            "Linux/裸机实现对照"
+          ],
+          "practice_task": "给定一个长度为 1000 的分类输出，手写一段 partial_sort 代码取 top5，并说明为何要先构造 (score, index) pair 再排序。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "目标检测后处理：解析框与画框",
+          "order": 2,
+          "filename": "u6-l2-yolo-detect-postprocess.md",
+          "level": "intermediate",
+          "topic": "讲解 yolo demo 的 post_process_obj_detect：从输出每行的 label/prob/归一化坐标还原像素框、裁剪越界、再用 eepimg 画框画字保存结果图。",
+          "learning_goals": [
+            "理解检测输出每行 6 个字段的含义",
+            "掌握归一化坐标到像素坐标的换算与越界处理",
+            "学会用 eepimg_draw_box/draw_text 可视化"
+          ],
+          "source_files": [
+            "sdk/demo/yolo/main.cpp",
+            "sdk/demo/common/eepimg_v0.2.6/eep_image.h"
+          ],
+          "minimal_modules": [
+            "检测输出字段解析",
+            "坐标换算与裁剪",
+            "类别名获取",
+            "画框画字保存"
+          ],
+          "practice_task": "在 post_process_obj_detect 中，obj.w = values[4]*img.w - obj.x 这种「宽=右下角-左上角」写法，请推导当 values[4]*img.w 小于 obj.x 时会发生什么，并说明后续的越界修正逻辑如何补救。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "yolo3_detection_output 软件层",
+          "order": 3,
+          "filename": "u6-l3-yolo3-detection-output-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 standalone 中 yolo3_detection_output_forward 这一软件后处理算子：它把 TPU 输出的多个 yolo 分支做解码、anchor 匹配、NMS，输出最终检测框。",
+          "learning_goals": [
+            "理解为何 yolo3 最后一层要在 CPU 上软件实现",
+            "掌握该算子的输入(bottom_blobs)与输出(top_blobs)",
+            "认识其与画框主流程的衔接"
+          ],
+          "source_files": [
+            "sdk/standalone/src/layers/yolo3_detection_output.cpp",
+            "sdk/standalone/src/main.cc"
+          ],
+          "minimal_modules": [
+            "yolo 分支解码",
+            "anchor 与置信度",
+            "NMS 去重",
+            "输出 blob 结构"
+          ],
+          "practice_task": "在 main.cc 中找到调用 yolo3_detection_output_forward 的位置，说明它消费的是 TPU 的哪个输出、产出的 top_blobs 每行又包含哪些字段(对应后续画框的 label/prob/scale_x/y/w/h)。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "语义分割后处理：ICNet 着色叠加",
+          "order": 4,
+          "filename": "u6-l4-icnet-segmentation-postprocess.md",
+          "level": "intermediate",
+          "topic": "讲解 icnet demo 的后处理：把逐像素类别输出查 seg_color 调色板生成彩色掩码，再与原图按比例叠加保存。",
+          "learning_goals": [
+            "理解分割输出是逐像素类别索引",
+            "掌握调色板查表生成彩色图",
+            "学会掩码与原图加权叠加"
+          ],
+          "source_files": [
+            "sdk/demo/icnet/main.cpp",
+            "sdk/demo/common/eepimg_v0.2.6/eep_image.h"
+          ],
+          "minimal_modules": [
+            "逐像素类别读取",
+            "调色板查色",
+            "掩码生成",
+            "加权叠加保存"
+          ],
+          "practice_task": "icnet 中 img_final.data[i] = img_final.data[i]*0.4 + img_seg.data[i]*0.6，说明这个比例如何影响可视化效果，并思考为何要把 seg_color 的 R/B 顺序反过来写入(pseg)。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "进阶 demo：多核与多输入",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "multi_bins_test：多网络与多核实例",
+          "order": 1,
+          "filename": "u7-l1-multi-bins-multicore.md",
+          "level": "advanced",
+          "topic": "讲解 multi_bins_test 如何同时创建 tpu_classify 与 tpu_det 两个 EEPTPU 实例、配置多核 reg zone(core_id 0/1)，在同一进程里跑分类与检测两个网络。",
+          "learning_goals": [
+            "理解多 EEPTPU 实例的创建与独立初始化",
+            "掌握多核 reg_zones(core_id) 的配置",
+            "认识多网络共享进程时的资源管理"
+          ],
+          "source_files": [
+            "sdk/demo/multi_bins_test/main.cpp",
+            "sdk/demo/multi_bins_test/compile.sh"
+          ],
+          "minimal_modules": [
+            "双 EEPTPU 实例",
+            "多核寄存器 zone",
+            "fg_multi 基地址策略",
+            "分类+检测并发"
+          ],
+          "practice_task": "对比 classify demo 的单实例 eeptpu_init 与 multi_bins_test 带 fg_multi 参数的版本，说明多实例时 base_address 的设置策略有何不同，以及为何要注册 core_id=1 的 zone。",
+          "depends_on": [
+            "u2-l3",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "nntpu_test：多输入、npy 数据与 pack 模式",
+          "order": 2,
+          "filename": "u7-l2-nntpu-multi-input-npy.md",
+          "level": "advanced",
+          "topic": "讲解 nntpu_test 的进阶能力：多输入网络、从 npy 文件加载输入并做 mean/norm、不同 data_type/精度、以及 v2.0 的 pack 输出模式与多输入组合规则。",
+          "learning_goals": [
+            "理解多输入网络的输入列表组织规则",
+            "掌握 npy 加载(cnpy/npy_load)与数据类型处理",
+            "认识 pack 输出模式与版本兼容性"
+          ],
+          "source_files": [
+            "sdk/demo/nntpu_test/main.cpp",
+            "sdk/demo/common/npy/npy_load.h",
+            "sdk/demo/common/npy/cnpy.cpp"
+          ],
+          "minimal_modules": [
+            "多输入 input_list 组织",
+            "npy 加载与 mean/norm",
+            "data_type 与精度",
+            "pack 输出模式"
+          ],
+          "practice_task": "依据 nntpu_test 顶部注释，解释「网络输入数为 3、测试 N 次」时 input_list 的二维结构如何排列，并说明 pack 模式下为何不再需要手动设置 pack_shape。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "外设、平台与扩展实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "DVP 摄像头采集与 DP 显示链路",
+          "order": 1,
+          "filename": "u8-l1-dvp-camera-and-dp-display.md",
+          "level": "advanced",
+          "topic": "讲解 EEP_DVP_Top 摄像头 IP 包装、camera.c 的 I2C 配置与 dvp_capture 采集、RGB565→RGB888 转换，以及 dpdma_intr/DP 显示输出组成实时取流-推理-显示链路。",
+          "learning_goals": [
+            "理解 DVP 摄像头 IP 在系统中的位置与采集流程",
+            "掌握 RGB565→RGB888 转换与图像在内存中的布局",
+            "认识 DP/dpdma 显示输出链路"
+          ],
+          "source_files": [
+            "sdk/standalone/src/camera.c",
+            "sdk/standalone/src/camera.h",
+            "sdk/standalone/src/dpdma_intr.c",
+            "sdk/standalone/src/dpdma_intr.h",
+            "ip_repo/EEP_DVP_Top_128B_v6p3.v",
+            "sdk/standalone/src/main.cc"
+          ],
+          "minimal_modules": [
+            "DVP IP 与 I2C 配置",
+            "dvp_capture 采集",
+            "RGB565→RGB888",
+            "DP 显示输出"
+          ],
+          "practice_task": "在 main.cc 的 case '5' 实时 demo 循环中，梳理「采集→格式转换→预处理→forward→后处理→DP 显示」的完整数据流，并指出 mem_pic/img_data_888 等关键内存地址的作用。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "SD 卡网络数据加载与文件读写",
+          "order": 2,
+          "filename": "u8-l2-sd-card-load.md",
+          "level": "advanced",
+          "topic": "讲解 sd.c 的 SD_Init/file_read 如何把 eepnet.mem、eepinput.mem 从 SD 卡读到指定内存地址，以及 bmp_write 把采集图像保存为 BMP 的实现。",
+          "learning_goals": [
+            "理解 SD 卡在裸机部署中的作用(加载网络/输入)",
+            "掌握 file_read 把文件读到物理地址的用法",
+            "认识 BMP 保存与分辨率模式的关系"
+          ],
+          "source_files": [
+            "sdk/standalone/src/sd.c",
+            "sdk/standalone/src/sd.h",
+            "sdk/standalone/src/main.cc",
+            "sdk/standalone/src/config.h"
+          ],
+          "minimal_modules": [
+            "SD_Init 初始化",
+            "file_read 读 mem 到地址",
+            "eepnet/eepinput 加载",
+            "bmp_write 保存图像"
+          ],
+          "practice_task": "对比 main.cc 中 case '4' 的两条分支：SD 卡就绪时读 eepinput.mem、否则用 eepinput 数组，说明 SD_CARD_IS_READY 宏如何切换这两种输入来源，以及为何读完后要 Xil_DCacheFlush。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "simplestl 与 nmat：自实现容器与内存对齐",
+          "order": 3,
+          "filename": "u8-l3-simplestl-and-nmat.md",
+          "level": "advanced",
+          "topic": "讲解裸机工程为何自带 simplestl(精简 STL vector/string) 与 nmat.h(ncnn::Mat 最小实现、fastMalloc、alignSize 对齐)，理解嵌入式环境下的工程取舍。",
+          "learning_goals": [
+            "理解裸机环境自实现 STL 容器的原因",
+            "掌握 ncnn::Mat 的 channel/对齐内存模型",
+            "认识 alignSize/fastMalloc 的对齐策略"
+          ],
+          "source_files": [
+            "sdk/standalone/src/simplestl.h",
+            "sdk/standalone/src/simplestl.cpp",
+            "sdk/standalone/src/eeptpu/nmat.h"
+          ],
+          "minimal_modules": [
+            "自实现 vector/string",
+            "ncnn::Mat 通道模型",
+            "fastMalloc 对齐分配",
+            "alignSize 对齐计算"
+          ],
+          "practice_task": "阅读 nmat.h 的 fastMalloc/alignSize，解释 MALLOC_ALIGN=16 的对齐为何对 TPU 的 16 通道 epmat 数据友好，并说明 simplestl 为何能替代标准 std::vector。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "性能、精度与移植实践",
+          "order": 4,
+          "filename": "u8-l4-performance-precision-porting.md",
+          "level": "advanced",
+          "topic": "综合讨论影响延迟的因素(IP 频率、DDR 带宽、多核多线程、FP16/INT8)，结合编译参数(setting.ini 的 --tpu_threads/--int8)与 config.h，给出换网络、换板卡的移植要点。",
+          "learning_goals": [
+            "理解影响 TPU 延迟的关键因素",
+            "掌握通过编译参数调节线程数与精度",
+            "形成换模型/换板卡的移植checklist"
+          ],
+          "source_files": [
+            "README.md",
+            "sdk/standalone/net_model/scripts/setting.ini",
+            "sdk/standalone/src/config.h"
+          ],
+          "minimal_modules": [
+            "性能影响因素",
+            "多线程与量化参数",
+            "地址与分辨率移植",
+            "移植 checklist"
+          ],
+          "practice_task": "假设要把 demo 从 yolov4-tiny 换成 mobilenet-ssd 并改跑 INT8，请写出需要修改的 setting.ini 参数、需要重新生成的 bin/mem，以及 config.h 中 NET_TYPE 该如何设置。",
+          "depends_on": [
+            "u7-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

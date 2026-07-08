@@ -1,0 +1,537 @@
+# 扩展点：新增 head_dim / feature 的流程
+
+## 1. 本讲目标
+
+前面八单元，你一直在「读」FlashMLA——理解它已有的四类 kernel、它们的调度、它们的优化。本讲换一个视角：**如果你要给它「加一个能力」，到底要改哪些地方？**
+
+举个具体的例子：假设你的新模型用的是 `head_dim_k = 384` 的 MLA 变体，而 FlashMLA 现在只支持 `576`（V3.2）和 `512`（MODEL1）两种。你要让它跑起来，需要碰几个文件？改几个宏？加几个实例化？在 `setup.py` 里登记几行？
+
+这类「新增 head_dim」「新增 model_type」「新增一个 feature（比如一种新的 attn_sink 变体）」的工作，看似零散，其实**遵循一套高度规律的模式**。本讲的目标就是把这套模式抽出来，让你读完之后能够：
+
+1. 说出 FlashMLA 把「一个运行时维度值」变成「一份编译期模板特化」的三道关卡（DISPATCH 宏 → params 结构 → Impl feature 清单），并能在每一关指出新增取值要改的代码点；
+2. 区分 decode 路径与 prefill 路径在「head_dim 如何被编译期化」上的根本差异（一个走 `ModelType`、一个走 `DISPATCH_HEAD_DIM`），从而知道同一个「加 head_dim」诉求在两条路径上改动面完全不同；
+3. 看懂「实例化文件（`instantiations/*.cu`）+ `setup.py` sources」这套模板注册机制，知道新加一份模板特化要建什么文件、登记到哪一行；
+4. 拿到一份「新增能力」的端到端改动清单，能照着把每一格填满。
+
+本讲是 Unit 9 的第二篇，承接 u2-l4（ImplBase 派发框架）与 u5-l4（sparse decode 接口与实现派发），是 u9-l3（端到端实战）之前的「施工说明书」。本讲**只讲改动面与接线方式，不重新讲 kernel 内部算法**——算法属于前几单元。
+
+## 2. 前置知识
+
+本讲默认你已经吃透以下概念（都在前几单元建立过），这里只做一句话提醒：
+
+- **DISPATCH 宏**（u2-l3）：用「立即调用的 lambda（IIFE）」把运行时值（`head_dim` / `num_heads` / `model_type`）钉成 `static constexpr`，从而为每个合法取值实例化一份独立模板 kernel——运行时只走一条分支，编译期却生成全部特化。
+- **ImplBase 派发框架**（u2-l4）：把每个 kernel 实现抽象成「支持的能力清单（feature 子集）」，派发 = 校验「需求集合 R ⊆ 支持集合 S」，失败时打印需求/支持/差集三段诊断并 `TORCH_CHECK` 抛异常。
+- **params.h 数据契约**（u2-l2）：一组 POD 结构（`SparseAttnDecodeParams` 等）作为接口层与 kernel 层之间的「数据信封」，把指针、stride、split-KV 缓冲打包透传。
+- **ModelType 与 FP8 字节布局**（u5-l1 / u5-l4）：`ModelType`（`V32`/`MODEL1`）由 `d_qk` 运行时推断，它同时编码了「kernel 模板特化」和「FP8 KV cache 的字节布局」（V3.2 每块 656 字节、MODEL1 每块 584 字节）。
+- **MLA 的 head_dim 非对称**（u1-l1）：`head_dim_k=576`（含 64 维 RoPE）、`head_dim_v=512`，用于 decode 与 sparse prefill；dense prefill 用 MHA 的 `128/128`。
+- **支持矩阵的不对称**（u9-l1）：dense decode 仅 SM90、dense prefill 仅 SM100、sparse 两架构都有；SM100 上 V3.2 的 head128 无原生 kernel，靠 `Decode_Sm100_Head64x2_Impl` 把 head64 kernel 跑两遍。
+
+一个贯穿本讲的直觉：**FlashMLA 的每一份「能力」都要同时活在三个世界里**——运行时校验世界（`TORCH_CHECK`）、编译期模板世界（`DISPATCH` 宏 + 模板特化）、构建产物世界（`instantiations/*.cu` + `setup.py`）。漏掉任何一个世界，要么编译不过，要么运行时崩，要么能力静默失效。本讲就是教你如何让一个新能力在三个世界里都「登记在册」。
+
+## 3. 本讲源码地图
+
+本讲的「源码」是**接线层**，而非 kernel 算法层。涉及的关键文件按「三个世界」分组：
+
+| 文件 | 所属世界 | 作用 |
+| :--- | :--- | :--- |
+| [csrc/api/common.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h) | 编译期模板 | 四个 `DISPATCH_*` 宏、`DECLARE_SUPPORTED_FEATURES` 宏、`ImplBase` 基类 |
+| [csrc/params.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/params.h) | 数据契约 | `ModelType` 枚举、各 `*Params` 结构（`d_qk` 字段就在这里） |
+| [csrc/api/sparse_decode.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h) | 三个世界交汇 | `DecodeFeatures` 枚举、四个实现类、接口函数（校验+装配+派发） |
+| [csrc/api/sparse_fwd.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_fwd.h) | 三个世界交汇 | `FwdFeatures` 枚举、四个实现类（展示 `DISPATCH_HEAD_DIM` 用法） |
+| [csrc/sm90/decode/sparse_fp8/splitkv_mla.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/splitkv_mla.h) | 编译期模板 | kernel 入口模板签名 `<ModelType, int NUM_HEADS>`（decode 把 head_dim 折进 ModelType） |
+| [csrc/sm100/prefill/sparse/fwd/head64/phase1.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm100/prefill/sparse/fwd/head64/phase1.h) | 编译期模板 | kernel 入口模板签名 `<int D_QK>`（prefill 把 head_dim 直接当模板参数） |
+| [csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu) | 构建产物 | 一行 `template void ...<...>(...)` 显式实例化 |
+| [setup.py](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py) | 构建产物 | `sources` 列表（决定哪些 `.cu` 进 `.so`）、gencode、feature flag |
+
+记住一条主线：**新增一个能力 = 让它依次出现在「枚举/宏 → params → Impl features → 模板特化 → instantiation → setup.py」这条链上的每一环**。下面四节按这条链展开。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 DISPATCH 宏扩展点：让新的运行时值编译期化
+
+#### 4.1.1 概念说明
+
+GPU kernel 的性能高度依赖「把循环边界、矩阵维度变成编译期常量」，这样编译器才能展开循环、分配寄存器、选择 WGMMA/UMMA 的指令变体。但 Python 传进来的 `d_qk`、`h_q` 都是运行时整数。**DISPATCH 宏就是这两者之间的「编译期化开关」**：它是一组 `if/else if`，每个分支里把命中的值定义成 `static constexpr`，然后立即调用用户传进来的 lambda——于是 lambda 内部的模板代码就会被这个分支独有的常量实例化。
+
+要新增一个合法取值（比如 `head_dim=384`），本质上就是**给对应的 DISPATCH 宏加一个 `else if` 分支**。本节先看清现有四个宏各自的「合法取值集合」，再讨论加分支的影响面。
+
+#### 4.1.2 核心流程
+
+四个 DISPATCH 宏的分工与合法取值：
+
+| 宏 | 作用 | 当前合法取值 | 不命中时 |
+| :--- | :--- | :--- | :--- |
+| `DISPATCH_NUM_HEADS` | 把 `h_q` 编译期化 | `128`、`64` | `TORCH_CHECK(false, "Unsupported num_heads_q")` |
+| `DISPATCH_HEAD_DIM` | 把 `d_qk` 编译期化 | `576`、`512` | `TORCH_CHECK(false, "Unsupported head_dim_qk")` |
+| `DISPATCH_BOOLEAN_FLAG` | 把布尔开关编译期化 | `true`、`false` | （两个分支都覆盖，不会不命中） |
+| `DISPATCH_MODEL_TYPE` | 把 `ModelType` 编译期化 | `V32`、`MODEL1` | `TORCH_CHECK(false, "Unsupported model type")` |
+
+加一个取值的流程，以 `DISPATCH_HEAD_DIM` 为例（新增 `384`）：
+
+```text
+1. 在 DISPATCH_HEAD_DIM 的 if/else if 链里加一个分支：
+       else if (HEAD_DIM == 384) { static constexpr int CONSTEXPR_NAME = 384; return __VA_ARGS__(); }
+   → 这一行让「384」成为编译期可见的常量，lambda 内的所有模板会为 384 实例化一份。
+2. 因为 lambda 里的模板函数（如 run_fwd_phase1_kernel<HEAD_DIM_QK>）现在多了一个 384 的实例化点，
+   就必须有对应的一份显式实例化（instantiation）存在，否则链接器报「undefined reference」。
+   → 这一步把改动延伸到 §4.3 的 instantiation 文件。
+3. 新增的 instantiation .cu 必须登记进 setup.py 的 sources，才会被编译进 .so。
+   → 这一步把改动延伸到 §4.3 的 setup.py。
+```
+
+三步缺一不可：**宏分支负责「生成实例化点」，instantiation 负责「兑现实例化」，setup.py 负责「编译兑现」**。
+
+#### 4.1.3 源码精读
+
+四个宏都集中在 [csrc/api/common.h:51-99](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L51-L99)。以 `DISPATCH_HEAD_DIM` 为例看清楚「IIFE + 每分支独立 constexpr」的结构：
+
+```c
+// csrc/api/common.h:64-75
+#define DISPATCH_HEAD_DIM(HEAD_DIM, CONSTEXPR_NAME, ...) \
+[&] () { \
+    if (HEAD_DIM == 576) { \
+        static constexpr int CONSTEXPR_NAME = 576; \
+        return __VA_ARGS__(); \
+    } else if (HEAD_DIM == 512) { \
+        static constexpr int CONSTEXPR_NAME = 512; \
+        return __VA_ARGS__(); \
+    } else { \
+        TORCH_CHECK(false, "Unsupported head_dim_qk: ", HEAD_DIM); \
+    } \
+} ();
+```
+
+要点解读：
+- 每个 `if` 分支都各自定义一个名为 `CONSTEXPR_NAME` 的 `static constexpr int`，**值互不相同**。这就是「为每个取值生成独立模板特化」的关键——不同分支里的同名常量值不同，模板实参不同，实例化出来的就是不同的函数。
+- `__VA_ARGS__()` 是用户传进来的 lambda 的「立即调用」。因为这个 lambda 在每个分支里都被调用一次，但每个分支的 `CONSTEXPR_NAME` 值不同，所以编译器会为 `{576, 512}` 两个值各生成一份模板代码。运行时 `if` 只走一条，但编译期两份都已生成。
+- 最后的 `else` 兜底 `TORCH_CHECK(false, ...)`：**未支持的取值会被翻译成清晰的 Python 异常**，而不是默默走错分支。新增取值时若忘了加分支，用户传 `384` 就会在这里报 `Unsupported head_dim_qk: 384`——这是第一道防线的失败信号。
+
+`DISPATCH_MODEL_TYPE`（[common.h:88-99](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L88-L99)）与 `DISPATCH_NUM_HEADS`（[common.h:51-62](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L51-L62)）结构完全同构，只是常量类型从 `int` 换成 `ModelType` 或不同的整数值，不再展开。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手验证「DISPATCH 宏没加分支」会发生什么，从而理解这道防线的位置。
+
+**操作步骤**（源码阅读型，不修改真实源码）：
+
+1. 打开 [csrc/api/sparse_fwd.h:41-47](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_fwd.h#L41-L47)，确认 `Fwd_Sm90_Impl::run_` 用 `DISPATCH_HEAD_DIM(params.d_qk, HEAD_DIM_QK, ...)` 把 `d_qk` 编译期化。
+2. 假设你现在传入一个 `d_qk = 384` 的请求（接口层先放行），追踪它进入 `DISPATCH_HEAD_DIM` 后的路径：`384 != 576`、`384 != 512`，落入 [common.h:73](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L73) 的 `else` 分支。
+3. 阅读该 `else` 分支：`TORCH_CHECK(false, "Unsupported head_dim_qk: ", HEAD_DIM)` 会抛出 Python 异常，消息里带着 `384`。
+
+**需要观察的现象**：
+- 异常消息应当形如 `Unsupported head_dim_qk: 384`，由 `TORCH_CHECK` 翻译成 Python 端的 `RuntimeError`。
+
+**预期结果**（待本地验证）：在 sparse prefill 接口里强行传入 `d_qk=384`（即便绕过接口层的 `TORCH_CHECK(d_qk == 576 || d_qk == 512)`），最终会在 `DISPATCH_HEAD_DIM` 的 `else` 分支被拦下。这说明：**DISPATCH 宏本身就是一道校验**，新增取值必须同时修改宏，否则永远到不了 kernel。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`DISPATCH_BOOLEAN_FLAG`（[common.h:77-86](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L77-L86)）为什么没有 `else { TORCH_CHECK(false) }` 兜底分支？
+
+> **答案**：因为它只有两种取值（`true`/`false`），两个 `if/else` 分支已经完全覆盖了布尔全集，不存在「不命中」的情况。而 `DISPATCH_HEAD_DIM` 的合法取值只是 `int` 的一个子集（当前 `{512, 576}`），必须用 `else` 兜住所有其它整数。
+
+**练习 2**：如果要在 `DISPATCH_HEAD_DIM` 加 `384`，新增的分支应该插在哪里？为什么不能直接改最后的 `else`？
+
+> **答案**：应插在 `else if (HEAD_DIM == 512)` 之后、`else` 之前，写成 `else if (HEAD_DIM == 384) { static constexpr int CONSTEXPR_NAME = 384; return __VA_ARGS__(); }`。不能改 `else`，因为 `else` 是「所有未支持取值」的兜底异常分支，把它改成 `384` 会让 `768`、`1024` 等取值静默落到 `384` 分支，产生错误特化。
+
+---
+
+### 4.2 params / feature 扩展点：数据契约与能力清单
+
+#### 4.2.1 概念说明
+
+DISPATCH 宏负责「编译期化」，但它编译期化的值从哪来？从 `params` 结构的运行时字段来（如 `params.d_qk`、`params.model_type`）。而「哪些实现能吃这个值」则由 `feature` 清单表达。所以本节是上一节的「上游 + 下游」：
+
+- **上游（params）**：新增一个维度取值，往往意味着在 `params` 结构里要么复用已有字段（如 `d_qk`），要么新增字段；对于 MLA decode，还可能要新增一个 `ModelType` 枚举值（因为 decode 的 head_dim 是折进 `ModelType` 的，见 §4.2.3）。
+- **下游（feature）**：把这个取值「翻译」成一个能力位（如 `HEAD_DIM_576`），加进需求集合与各实现的支持集合，让 ImplBase 派发器能正确路由。
+
+这里有一个**初学者最容易踩的坑**：decode 路径和 prefill 路径对「head_dim」的处理方式根本不同。同样是「加一个 head_dim」，在两条路径上要碰的枚举、宏、模板参数完全不一样。本节把这个不对称讲透。
+
+#### 4.2.2 核心流程
+
+先看 `ModelType` 这个枚举——它是 decode 路径「head_dim 与 FP8 布局」的合体载体：
+
+```text
+ModelType ∈ { V32, MODEL1 }            // csrc/params.h:5-8
+        ↑ 运行时由 d_qk 推断
+        d_qk == 576 → V32              // csrc/api/sparse_decode.h:318-325
+        d_qk == 512 → MODEL1
+        其它     → TORCH_CHECK 失败
+```
+
+`ModelType` 一旦确定，就同时决定了三件事：(1) kernel 模板特化（经 `DISPATCH_MODEL_TYPE`）；(2) FP8 KV cache 的字节布局（V3.2 = 656 字节/块、MODEL1 = 584 字节/块）；(3) `DecodeFeatures` 里的 `V32_KVCACHE_FORMAT` / `MODEL1_KVCACHE_FORMAT` 能力位。这就是为什么 decode 的「head_dim」不是一个独立维度——它和「model 变体」「FP8 布局」三者绑定在 `ModelType` 上。
+
+再对照 prefill 路径：prefill 吃的是 bf16 KV（不是 FP8），没有「FP8 布局」这件事，所以它的 `d_qk` 直接经 `DISPATCH_HEAD_DIM` 编译期化，模板参数就是 `<int D_QK>`，与 `ModelType` 无关。
+
+把两条路径的「head_dim 接线方式」并排放：
+
+| 维度 | decode 路径（FP8 sparse） | prefill 路径（sparse / bf16） |
+| :--- | :--- | :--- |
+| head_dim 载体 | `ModelType`（折进枚举） | `d_qk`（独立 int 字段） |
+| 编译期化宏 | `DISPATCH_MODEL_TYPE` | `DISPATCH_HEAD_DIM` |
+| kernel 模板参数 | `<ModelType MODEL_TYPE, ...>` | `<int D_QK, ...>` |
+| 是否绑定 FP8 布局 | 是（V32=656B、MODEL1=584B） | 否（bf16，无量化布局） |
+| 新增 head_dim 要改 | `ModelType` 枚举 + `DISPATCH_MODEL_TYPE` + 字节布局 + `*_KVCACHE_FORMAT` feature | `DISPATCH_HEAD_DIM` + `HEAD_DIM_*` feature |
+| 对应 feature 枚举 | `DecodeFeatures` | `FwdFeatures` |
+
+这张表是本讲最重要的一张表。**「加 head_dim」不是一件事，是两类事**——先问「在哪条路径上加」，再决定改哪一组东西。
+
+#### 4.2.3 源码精读
+
+**先看 params 的 `ModelType` 与 `d_qk` 字段**。[csrc/params.h:5-8](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/params.h#L5-L8) 定义枚举：
+
+```c
+// csrc/params.h:5-8
+enum class ModelType {
+    V32,
+    MODEL1
+};
+```
+
+而 `SparseAttnDecodeParams` 把 `d_qk` 当成普通运行时 `int` 字段携带（[params.h:63-69](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/params.h#L63-L69)），同时单独存一个 `model_type`：
+
+```c
+// csrc/params.h:63-69
+struct SparseAttnDecodeParams {
+    int b, s_q;
+    int h_q, h_kv;
+    int d_qk, d_v;
+    float sm_scale, sm_scale_div_log2;
+    int num_blocks, page_block_size, topk;
+    ModelType model_type;
+    ...
+```
+
+注意：`d_qk` 和 `model_type` 在结构里**同时存在**，但 kernel 模板只用 `model_type`（见 §4.1 的 `DISPATCH_MODEL_TYPE` 调用）。也就是说，对 decode 而言，`d_qk` 的具体数值在 kernel 内部其实是由 `ModelType` 间接决定的（V32 对应 576、MODEL1 对应 512）。这是 decode 路径「head_dim 折进 ModelType」的直接证据。
+
+**再看 ModelType 的运行时推断**。[csrc/api/sparse_decode.h:318-325](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L318-L325) 是 `d_qk → ModelType` 的唯一翻译点：
+
+```c
+// csrc/api/sparse_decode.h:318-325
+ModelType model_type;
+if (d_qk == 576) {
+    model_type = ModelType::V32;
+} else if (d_qk == 512) {
+    model_type = ModelType::MODEL1;
+} else {
+    TORCH_CHECK(false, "Unsupported d_qk: ", d_qk);
+}
+```
+
+要新增一个 `d_qk`（比如 384），**这一段是必须改的**：要么给 384 一个新的 `ModelType` 值（比如 `MODEL_384`），要么把它并入某个现有值（但这会污染 FP8 布局语义，不推荐）。这是 decode 路径扩展 head_dim 的「源头改动」之一。紧挨着它上面的 [sparse_decode.h:289-298](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L289-L298) 还有一处「按 d_qk 算 FP8 字节数」的 `bytes_per_token` 分支，新增 head_dim 同样要在这里加一个布局 case（因为新 head_dim 几乎必然对应新的 FP8 tile 划分与字节数）。
+
+**接着看 feature 枚举**。decode 用 `DecodeFeatures`（[sparse_decode.h:13-28](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L13-L28)），prefill 用 `FwdFeatures`（[sparse_fwd.h:12-22](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_fwd.h#L12-L22)），两者高度相似：
+
+```c
+// csrc/api/sparse_decode.h:13-28
+enum class DecodeFeatures : int {
+    HEAD_64,  HEAD_128,
+    HEAD_DIM_576,  HEAD_DIM_512,
+    V32_KVCACHE_FORMAT,  MODEL1_KVCACHE_FORMAT,
+    ATTN_SINK,  TOPK_LENGTH,  EXTRA_KVCACHE,  EXTRA_TOPK_LENGTH
+};
+```
+
+每个枚举值就是一个「能力位」。注意 decode 把 `head_dim` 拆成了 `HEAD_DIM_576`/`HEAD_DIM_512` 两个独立位，**同时又用 `V32_KVCACHE_FORMAT`/`MODEL1_KVCACHE_FORMAT` 表达 FP8 布局**——这两组在语义上有冗余（V32 总是和 576 一起出现），但分成两组让 feature 校验能分别表达「这个实现支持哪些维度」与「支持哪些 FP8 布局」。
+
+**再看需求集合如何构造**。[sparse_decode.h:327-360](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L327-L360) 把运行时张量属性逐条翻译成 feature：
+
+```c
+// csrc/api/sparse_decode.h:335-348 （节选）
+if (d_qk == 576) {
+    features.push_back(DecodeFeatures::HEAD_DIM_576);
+} else if (d_qk == 512) {
+    features.push_back(DecodeFeatures::HEAD_DIM_512);
+} else {
+    TORCH_CHECK(false, "Unsupported d_qk: ", d_qk);
+}
+if (model_type == ModelType::V32) {
+    features.push_back(DecodeFeatures::V32_KVCACHE_FORMAT);
+} else if (model_type == ModelType::MODEL1) {
+    features.push_back(DecodeFeatures::MODEL1_KVCACHE_FORMAT);
+} else {
+    TORCH_CHECK(false, "Unsupported model type: ", (int)model_type);
+}
+```
+
+新增 `d_qk=384`，这里要加 `else if (d_qk == 384) features.push_back(DecodeFeatures::HEAD_DIM_384);`，以及对应的新 `ModelType` 分支。**注意这是第三处 `TORCH_CHECK` 兜底**（前两处在 [L235](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L235) 的接口校验和 §4.1 的宏里）——同一个「未支持取值」在三道关卡各有一次拦截，新增能力时三处都要同步打开，否则会在某一关误报。
+
+**最后看实现类如何声明支持集合**。每个 Impl 用 `DECLARE_SUPPORTED_FEATURES` 宏（[common.h:143-149](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L143-L149)）声明自己支持哪些能力位，例如 SM90 的 decode 实现（[sparse_decode.h:44-56](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L44-L56)）声明支持全部 decode feature。要让某个 Impl 支持 `HEAD_DIM_384`，就要在它的 `DECLARE_SUPPORTED_FEATURES(...)` 列表里加上 `DecodeFeatures::HEAD_DIM_384`（以及对应的新 KV cache 格式位）。这正是 §4.4 改动清单里「Impl features」一栏的来源。
+
+#### 4.2.4 代码实践
+
+**实践目标**：把 `d_qk → ModelType → feature` 这条翻译链在源码里走一遍，找到所有「新增 384 要打开的开关」。
+
+**操作步骤**（源码阅读型）：
+
+1. 从 [sparse_decode.h:235](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L235) 的接口层校验开始，记下：`TORCH_CHECK(d_qk == 576 || d_qk == 512, ...)`——第一处要改成 `... || d_qk == 384`。
+2. 下行到 [sparse_decode.h:289-298](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L289-L298) 的 `bytes_per_token`：当前有 `d_qk==576`（V3.2）与 `d_qk==512`（MODEL1）两个 case，要为 384 设计一个新布局并加 case。
+3. 再到 [sparse_decode.h:318-325](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L318-L325)：`d_qk → model_type` 推断，要给 384 一个新 `ModelType` 值。
+4. 然后 [sparse_decode.h:335-348](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L335-L348)：feature 构造，要加 `HEAD_DIM_384` 与新 KV 格式位。
+
+**需要观察的现象**：你会发现在 `sparse_decode.h` 这一个文件里，「`d_qk`」出现了至少四处（接口校验、字节布局、ModelType 推断、feature 构造），每一处都是一道需要同步打开的开关。
+
+**预期结果**：列出这四个行号，确认它们就是 decode 路径「新增 head_dim」在 `sparse_decode.h` 内的全部改动点（不含宏、Impl features、instantiation、setup.py）。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `SparseAttnDecodeParams` 里既有 `d_qk` 字段，又有 `model_type` 字段？kernel 模板到底用哪个？
+
+> **答案**：`d_qk` 是「原始维度值」，`model_type` 是「编译期化的模型变体」。两者冗余存在是为了方便：接口层用 `d_qk` 做校验和字节计算，kernel 模板则只用 `model_type`（经 `DISPATCH_MODEL_TYPE` 编译期化，见 [sparse_decode.h:69-75](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L69-L75)）。kernel 内部不直接读 `d_qk` 来决定模板，而是通过 `ModelType` 间接知道维度。
+
+**练习 2**：假设你要新增 `d_qk=384`，但又不想新增 `ModelType` 枚举值（比如临时复用 `MODEL1`），会带来什么副作用？
+
+> **答案**：会把「384 维」和「MODEL1 的 584 字节 FP8 布局」错误绑定。因为 kernel 模板按 `ModelType` 特化，复用 `MODEL1` 会让 384 维的请求跑进按 512 维设计的反量化/layout 代码，读到错误的字节数、错误的 scale 布局，结果完全错误且可能段错误。所以新增 head_dim 几乎必然要新增 `ModelType` 值，二者是耦合的。
+
+---
+
+### 4.3 实例化与构建注册：把模板特化编进 .so
+
+#### 4.3.1 概念说明
+
+上一节让 `DISPATCH` 宏「生成了实例化点」——但 C++ 模板只有被「显式实例化」或「被使用」时才会真正生成代码。FlashMLA 的 kernel 都是 header-only 模板（`.cuh`），接口层只引用它们的声明（`.h`）。如果不显式实例化，链接器会在最后报 `undefined reference to run_xxx_kernel<...>`。
+
+FlashMLA 的解法是**把每个 `(架构 × 模型/维度 × 头数)` 组合的显式实例化各放进一个独立的小 `.cu` 文件**（`instantiations/` 目录），再把这些 `.cu` 登记进 `setup.py` 的 `sources`。这样做有三个好处：
+
+1. **并行编译**：每个 instantiation 是独立翻译单元，NVCC 可以多线程并行编译（见 [setup.py:48-50](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L48-L50) 的 `NVCC_THREADS`），把巨大的模板编译时间摊开。
+2. **隔离编译爆炸**：把不同特化拆开，避免单个翻译单元过大撑爆编译器内存。
+3. **明确「哪些组合真的被编译」**：`instantiations/` 目录 + `setup.py` sources 就是「构建产物清单」，一眼能看出支持哪些组合。
+
+所以新增一个模板组合 = **新建一个 instantiation `.cu` + 在 `setup.py` 加一行**。这是扩展流程的「最后一公里」。
+
+#### 4.3.2 核心流程
+
+ instantiation 文件的模式极其固定，只有两类（对应 decode 与 prefill 不同的模板签名）：
+
+```text
+【decode 类】kernel 模板签名是 <ModelType, int NUM_HEADS>（sm90）或 <ModelType>（sm100 head64）
+    → instantiation 文件按 (ModelType, NUM_HEADS) 组合命名，每个文件一行显式实例化。
+    例：v32_persistent_h64.cu  →  run_...<ModelType::V32, 64>(...)
+        model1_persistent_h128.cu → run_...<ModelType::MODEL1, 128>(...)
+
+【prefill 类】kernel 模板签名是 <int D_QK>（可能还有 <int D_QK, bool HAVE_TOPK_LENGTH>）
+    → instantiation 文件按 (D_QK[, HAVE_TOPK_LENGTH]) 组合命名。
+    例：phase1_k512.cu        → run_fwd_phase1_kernel<512, false>(...)
+        phase1_k576_topklen.cu → run_fwd_phase1_kernel<576, true>(...)
+```
+
+命名约定（从现有文件归纳）：
+- decode：`{model}_{schedule}_{head}.cu`，如 `v32_persistent_h64.cu`、`model1_persistent_h128.cu`。
+- prefill：`phase1_k{d_qk}[_topklen].cu`，`_topklen` 后缀表示 `HAVE_TOPK_LENGTH=true`。
+
+新增组合的流程：
+
+```text
+1. 确定 kernel 模板签名（看对应 .h：decode 是 <ModelType[, NUM_HEADS]>，prefill 是 <D_QK[, bool]>）。
+2. 在 instantiations/ 下新建一个 .cu，写一行 template void ...<...>(const ...Params&);（显式实例化）。
+3. 在 setup.py 的 sources 列表对应分组下加一行字符串。
+4. （若新增了 ModelType / head_dim 枚举值）确保 DISPATCH 宏、feature、Impl features 都已同步——
+   否则 instantiation 即使存在也永远不会被调用。
+```
+
+#### 4.3.3 源码精读
+
+**先看一个 decode instantiation**。[csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu) 全文只有 8 行：
+
+```c
+// csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu:1-8
+#include "../splitkv_mla.cuh"
+
+namespace sm90::decode::sparse_fp8 {
+
+template void run_flash_splitkv_mla_fp8_sparse_kernel<ModelType::V32, 64>(const SparseAttnDecodeParams &params);
+
+}
+```
+
+这一行 `template void ...<ModelType::V32, 64>(...)` 就是「显式实例化」：它强迫编译器为 `<V32, 64>` 这一组模板实参生成一份完整的函数代码，放进这个翻译单元的目标文件。对应的模板声明在 [csrc/sm90/decode/sparse_fp8/splitkv_mla.h:7-8](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/splitkv_mla.h#L7-L8)：
+
+```c
+// csrc/sm90/decode/sparse_fp8/splitkv_mla.h:7-8
+template<ModelType MODEL_TYPE, int NUM_HEADS>
+void run_flash_splitkv_mla_fp8_sparse_kernel(const SparseAttnDecodeParams &params);
+```
+
+要新增 `ModelType::MODEL_384`（假设的新值）的 h64 版本，就照葫芦画瓢新建一个 `model384_persistent_h64.cu`，写 `template void run_...<ModelType::MODEL_384, 64>(...);`。SM90 decode 一共 4 个 instantiation 文件，正好对应 `{V32, MODEL1} × {h64, h128}` 的全组合（见 [setup.py:78-81](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L78-L81)）。
+
+**再看一个 prefill instantiation**。[csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu) 同样短，但带一段解释拆分动机的注释：
+
+```c
+// csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu:1-11
+#include "../phase1.h"
+#include "../phase1.cuh"
+
+namespace sm90::fwd {
+
+// NOTE (intlsy): We instantiate run_fwd_phase1_kernel in two .cu files as functions with HAVE_TOPK_LENGTH
+// = true / false respectively, to compile them in parallel.
+template void run_fwd_phase1_kernel<512, false>(const SparseAttnFwdParams& params);
+
+}
+```
+
+注释点明了「拆成多个 .cu 是为了并行编译」。要新增 `d_qk=384` 的 prefill，就建 `phase1_k384.cu` 和 `phase1_k384_topklen.cu`（分别对应 `HAVE_TOPK_LENGTH=false/true`），呼应 [fwd.cu:13-27](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/prefill/sparse/fwd.cu#L13-L27) 里 `run_fwd_kernel` 的四路派发。
+
+**最后看 setup.py 的 sources 登记**。[setup.py:65-105](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L65-L105) 是完整的构建清单，按 kernel 家族分组。SM90 sparse decode 那一组：
+
+```python
+# setup.py:77-81
+            # sm90 sparse decode
+            "csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h64.cu",
+            "csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h128.cu",
+            "csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu",
+            "csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h128.cu",
+```
+
+每加一个 instantiation `.cu`，就要在这个列表里加一行同路径字符串。**漏登记的后果**：文件存在但不会被编译进 `.so`，运行时调用该组合会报 `undefined reference`（链接期）或直接 missing symbol。
+
+另外注意 [setup.py:128](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L128) 的 `include_dirs` 含 `csrc/sm90`——这是为什么 instantiation 文件能用 `#include "../splitkv_mla.cuh"` 这种相对路径找到 kernel 模板头。
+
+#### 4.3.4 代码实践
+
+**实践目标**：把 `instantiation 文件 ↔ kernel 模板签名 ↔ setup.py 条目`三者一一对应起来，验证你理解了注册机制。
+
+**操作步骤**（源码阅读型）：
+
+1. 打开 SM100 sparse decode 的两个 instantiation：[v32.cu](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm100/decode/head64/instantiations/v32.cu) 与 [model1.cu](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm100/decode/head64/instantiations/model1.cu)，确认它们实例化的是 `<ModelType>` 单参数模板（不是 `<ModelType, NUM_HEADS>`）。
+2. 对照 kernel 声明 [csrc/sm100/decode/head64/kernel.h:7-8](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm100/decode/head64/kernel.h#L7-L8)：`template<ModelType MODEL_TYPE> void run_...(const SparseAttnDecodeParams&);`——确认签名匹配。
+3. 在 [setup.py:101-104](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L101-L104) 找到这两个文件被登记的行。
+
+**需要观察的现象**：SM100 head64 decode 只有 `{V32, MODEL1}` 两个 instantiation（不像 SM90 有四个），因为 SM100 head64 kernel 模板只有 `ModelType` 一个参数，头数由实现类路由（h64 走 `Decode_Sm100_Head64_Impl`，h128 走 `Head64x2` 或 `Head128`）。
+
+**预期结果**：你能画出一张「instantiation 文件名 → 模板实参 → setup.py 行号」的三列对照表。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果你新建了 `model384_persistent_h64.cu` 却忘了在 `setup.py` 加对应行，编译能通过吗？运行时会怎样？
+
+> **答案**：编译能通过（因为别的 `.cu` 没引用这个符号时，它只是不被编译，不报错）。但运行时一旦派发到 `<MODEL_384, 64>` 这个组合，动态加载的 `.so` 里找不到这个符号，会报 `undefined symbol` 导致调用失败。这就是为什么 instantiation 和 setup.py 必须成对改。
+
+**练习 2**：为什么 SM90 sparse prefill 要把 `{512, 576} × {topklen, no-topklen}` 四个组合拆成四个 `.cu`，而不是在一个 `.cu` 里写四行 `template void ...`？
+
+> **答案**：为了并行编译。注释（[phase1_k512.cu:6-7](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu#L6-L7)）明说「to compile them in parallel」。模板实例化是编译耗时大头，拆成独立翻译单元后，`NVCC_THREADS=32`（[setup.py:49](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L49)）能同时编译多个 `.cu`，显著缩短全量构建时间。
+
+---
+
+### 4.4 端到端改动清单：一张「新增能力」的施工图
+
+#### 4.4.1 概念说明
+
+前三节分别讲了「宏」「params/feature」「instantiation/setup.py」三道关卡。本节把它们**按施工顺序**串成一张清单——当产品提「我要支持 head_dim=384」时，你照这张清单逐项打钩即可。
+
+本节的切入案例是 **「为 sparse decode 新增 `head_dim_k = 384` 支持」**（也是本讲的实践任务）。之所以选 decode 而非 prefill，是因为 decode 路径牵涉 `ModelType` + FP8 字节布局 + `DISPATCH_MODEL_TYPE`，改动面最全，能把所有扩展点都覆盖到。prefill 路径是其简化版（少了 ModelType 与 FP8 布局两环）。
+
+#### 4.4.2 核心流程
+
+新增 `d_qk=384` 到 sparse decode 的端到端改动，按依赖顺序分七步：
+
+```text
+① params.h       ：ModelType 枚举加一个值（如 MODEL_384）。
+② common.h       ：DISPATCH_MODEL_TYPE 加 else if 分支（让新值编译期化）。
+③ sparse_decode.h：接口层四处同步——
+                    a) 接口校验 TORCH_CHECK(d_qk == ...) 加 || 384；
+                    b) bytes_per_token 加新 FP8 布局 case；
+                    c) d_qk → model_type 推断加 384 分支；
+                    d) DecodeFeatures 加 HEAD_DIM_384（与新 KV 格式位）；
+                    e) feature 构造加对应 push_back。
+④ sparse_decode.h：各实现类的 DECLARE_SUPPORTED_FEATURES 加新能力位（决定哪些 Impl 支持 384）。
+⑤ sparse_decode.h：派发表（arch × h_q × d_qk 路由）加 384 分支，选中能处理它的 Impl。
+⑥ kernel + instantiation：kernel 模板支持新 ModelType；新建 instantiations/*.cu 显式实例化。
+⑦ setup.py       ：sources 列表登记新 instantiation。
+```
+
+注意顺序有依赖：②依赖①（宏要引用新枚举值），③依赖①②，⑥依赖①（instantiation 要用新 `ModelType`），⑦依赖⑥（登记的文件要先存在）。但④⑤与⑥可以并行规划。
+
+#### 4.4.3 源码精读
+
+下面把每一步对应到真实源码点，方便你照着定位。
+
+**① `ModelType` 枚举**：当前 [params.h:5-8](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/params.h#L5-L8) 只有 `V32, MODEL1`。新增即加一行 `MODEL_384,`。这一步看似一行，但它的涟漪最广——`ModelType` 同时驱动 kernel 模板、FP8 布局、feature 三处。
+
+**② `DISPATCH_MODEL_TYPE`**：[common.h:88-99](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L88-L99) 加 `else if (MODEL_TYPE == ModelType::MODEL_384) { static constexpr ModelType CONSTEXPR_NAME = ModelType::MODEL_384; return __VA_ARGS__(); }`。
+
+**③ 接口层四处**：见 §4.2.3 已经逐行列出的 [sparse_decode.h:235](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L235)（校验）、[L289-298](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L289-L298)（字节布局）、[L318-325](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L318-L325)（ModelType 推断）、[L335-360](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L335-L360)（feature 构造）。`bytes_per_token` 的 384 case 需要你设计新的 FP8 tile 划分（参考 u5-l1 的 656/584 字节推导），这是整个扩展里唯一需要「算」而非「照搬」的部分。
+
+**④ Impl features**：以 SM90 实现为例，[sparse_decode.h:44-56](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L44-L56) 的 `DECLARE_SUPPORTED_FEATURES(...)` 列表里加 `DecodeFeatures::HEAD_DIM_384` 与新的 `MODEL_384_KVCACHE_FORMAT`。如果你只想让 SM100 支持而不让 SM90 支持，就只在 SM100 的实现类里加——这正是 feature 机制的意义：**支持与否是每个 Impl 自己声明的，不是全局开关**。
+
+**⑤ 派发表**：[sparse_decode.h:362-381](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L362-L381) 是 `arch × h_q × d_qk` 的路由 `if/else`。新增 384 要在这里加分支，比如 `else if (d_qk == 384) impl = new Decode_Sm90_Impl();`。注意这里选完 Impl 之后，`impl->run(params, features)` 还会经 [common.h:226-229](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L226-L229) 的 `ImplBase::run` 做 feature 子集校验作为安全网——所以即使路由选错，feature 校验也会兜住（见 u2-l4）。
+
+**⑥ kernel + instantiation**：让 kernel 模板内部 `if constexpr (MODEL_TYPE == ModelType::MODEL_384)` 处理新维度的 tile 划分；然后新建 `csrc/sm90/decode/sparse_fp8/instantiations/model384_persistent_h64.cu`（以及 h128），照 [v32_persistent_h64.cu:5](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu#L5) 的格式写显式实例化。
+
+**⑦ setup.py**：在 [setup.py:77-81](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L78-L81) 那一组下加 `"csrc/sm90/decode/sparse_fp8/instantiations/model384_persistent_h64.cu",` 等行。
+
+完成这七步后，新能力才算在「枚举/宏 → params → Impl features → 模板特化 → instantiation → setup.py」整条链上登记完毕。
+
+#### 4.4.4 代码实践
+
+**实践目标**：把上面的七步固化成一份可交付的「改动计划文档」。这是本讲的主实践，详见 §5 综合实践。
+
+**操作步骤**：见 §5。
+
+**需要观察的现象**：你会发现「真正写 kernel 算法」只是七步里的一小部分（⑥的一部分），大部分改动是「接线」——让新取值在每一道关卡都被识别、被编译、被路由。这是高性能 kernel 库的常态：**框架的扩展成本往往高过单个算法的实现成本**。
+
+**预期结果**：一份填满每一步具体文件路径、行号、新增代码骨架的改动计划。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：如果只完成了①②③④，但漏了⑥⑦（没建 instantiation、没改 setup.py），编译和运行分别会怎样？
+
+> **答案**：编译大概率能过（因为 DISPATCH 宏生成了实例化点，但如果没有 instantiation 兑现，链接期才会发现）。更准确地说：`DISPATCH_MODEL_TYPE` 的新分支会让接口层 `run_` 里的模板调用引用 `<MODEL_384, NUM_HEADS>` 符号，但没有任何 instantiation 生成它，链接报 `undefined reference to run_flash_splitkv_mla_fp8_sparse_kernel<ModelType::MODEL_384, 64>`。所以⑥⑦是不可省的「兑现 + 编译」环节。
+
+**练习 2**：新增一个 feature（例如一种新的 attn_sink 变体 `ATTN_SINK_V2`）和新增一个 head_dim，改动面哪个更大？
+
+> **答案**：通常新增 feature 改动面更小。新 feature 只需：在 `DecodeFeatures` 枚举加值（[sparse_decode.h:13-28](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L13-L28)）、在接口层按需 `push_back`、在支持它的 Impl 的 `DECLARE_SUPPORTED_FEATURES` 里加、在 kernel 内部用 `required_features` 列表判断是否启用对应代码路径。它**不需要**改 `ModelType`、不需要新 FP8 布局、通常也不需要新 instantiation（因为 feature 是运行时 `if` 而非模板参数）。而新增 head_dim 因为耦合 `ModelType` 与 FP8 布局，且要编译期化，改动面显著更大。
+
+## 5. 综合实践
+
+**任务**：为 FlashMLA 的 sparse decode 路径写一份「新增 `head_dim_k = 384` 支持」的完整改动计划。要求列出每一处要改的文件、行号、宏/枚举/Impl features、新建的 instantiation 文件、以及 setup.py 的新增条目，并给出关键改动点的代码骨架。
+
+**为什么做这个**：它强迫你把本讲四个模块（DISPATCH 宏、params/feature、instantiation/setup.py、端到端清单）全部用一遍。做完后，「如何给 FlashMLA 加能力」就不再是一个模糊的问题，而是一份可照着施工的清单。
+
+**操作步骤**：
+
+1. **确定维度载体**：先判断 384 在 decode 路径上应映射成什么。结论——decode 的 head_dim 折进 `ModelType`（§4.2.2），所以决定新增一个枚举值 `ModelType::MODEL_384`（命名待你定义）。在 [params.h:5-8](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/params.h#L5-L8) 标注新增行。
+
+2. **打开编译期化开关**：在 [common.h:88-99](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L88-L99) 的 `DISPATCH_MODEL_TYPE` 加分支。写出骨架：
+   ```c
+   // 示例代码（非项目原有）
+   } else if (MODEL_TYPE == ModelType::MODEL_384) {
+       static constexpr ModelType CONSTEXPR_NAME = ModelType::MODEL_384;
+       return __VA_ARGS__();
+   }
+   ```
+
+3. **同步接口层四处**：在 `sparse_decode.h` 标注这四处的改动——[L235](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L235) 校验加 `|| d_qk == 384`、[L289-298](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L289-L298) 新增 384 的 `bytes_per_token` case（需你给出 384 维的 FP8 tile 划分草案，可参照 u5-l1：假设前 320 维 NoPE 量化、后 64 维 RoPE 保留 bf16，算出字节数）、[L318-325](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L318-L325) ModelType 推断加 384 分支、[L335-360](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L335-L360) feature 构造加 `HEAD_DIM_384` 与 `MODEL_384_KVCACHE_FORMAT`。
+
+4. **声明 feature 枚举与 Impl 支持**：在 [sparse_decode.h:13-28](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L13-L28) 的 `DecodeFeatures` 加 `HEAD_DIM_384`、`MODEL_384_KVCACHE_FORMAT`；在选定的实现类（如 `Decode_Sm90_Impl`，[L44-56](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L44-L56)）的 `DECLARE_SUPPORTED_FEATURES` 里加这两个位。
+
+5. **更新派发表**：在 [sparse_decode.h:362-381](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L362-L381) 标注 384 应路由到哪个 Impl（例如 SM90 上走 `Decode_Sm90_Impl`）。
+
+6. **新建 instantiation**：列出要新建的文件，例如：
+   - `csrc/sm90/decode/sparse_fp8/instantiations/model384_persistent_h64.cu`
+   - `csrc/sm90/decode/sparse_fp8/instantiations/model384_persistent_h128.cu`
+   
+   并照 [v32_persistent_h64.cu:5](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu#L5) 给出每文件一行的显式实例化骨架。
+
+7. **登记 setup.py**：在 [setup.py:77-81](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L78-L81) 那一组下加两行新文件路径。
+
+**需要观察的现象**：把七步整理成一张表（列：步骤 / 文件 / 行号 / 改动类型 / 代码骨架）。你会看到「算法实现」（kernel 内部对 384 的 tile 处理）只是其中一格，其余六格都是接线。
+
+**预期结果**：一份完整的「新增 head_dim=384」改动计划表，每一步都可定位到真实源码行号。改动计划中凡涉及「384 维的 FP8 字节布局」「kernel 内部 tile 划分」等需要实际设计的部分，标注「待本地验证/待实现」——本实践只产出计划，不产出可运行 kernel。
+
+> **进阶（可选）**：把同一诉求套到 sparse **prefill** 路径上再做一遍。你会发现它走的是 `DISPATCH_HEAD_DIM`（[sparse_fwd.h:42](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_fwd.h#L42)）而非 `DISPATCH_MODEL_TYPE`，不涉及 `ModelType` 与 FP8 布局，改动面小一圈。对比两份计划，加深对 §4.2.2 那张「decode vs prefill」差异表的理解。
+
+## 6. 本讲小结
+
+- **三道关卡**：FlashMLA 的每一个「能力取值」都要同时通过运行时校验（`TORCH_CHECK`）、编译期化（`DISPATCH` 宏）、构建注册（`instantiations/*.cu` + `setup.py`）三道关卡，漏掉任何一道都会编译失败、运行崩溃或能力静默失效。
+- **DISPATCH 宏是扩展第一站**：新增一个合法取值 = 给对应宏加 `else if` 分支（[common.h:51-99](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L51-L99)），宏的 `else` 兜底本身就是一道「未支持取值」的校验防线。
+- **decode 与 prefill 的 head_dim 接线不同**：decode 把 head_dim 折进 `ModelType`（[params.h:5-8](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/params.h#L5-L8)），经 `DISPATCH_MODEL_TYPE` 编译期化，并绑定 FP8 字节布局；prefill 直接用 `DISPATCH_HEAD_DIM` 把 `d_qk` 编译期化，不涉及 ModelType。同样是「加 head_dim」，两条路径改动面不同。
+- **feature 清单是能力的「声明式注册」**：`DecodeFeatures`/`FwdFeatures` 枚举定义能力位，接口层把运行时属性翻译成需求集合，各 Impl 用 `DECLARE_SUPPORTED_FEATURES` 声明支持集合，ImplBase 做子集校验（[sparse_decode.h:13-28](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/sparse_decode.h#L13-L28)、[common.h:143-149](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/api/common.h#L143-L149)）。
+- **instantiation + setup.py 是「兑现 + 编译」**：宏生成实例化点，instantiation `.cu` 兑现实例化（[v32_persistent_h64.cu](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu)），setup.py sources 把它编进 `.so`（[setup.py:65-105](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/setup.py#L65-L105)）；三者缺一会导致 `undefined reference` 或 missing symbol。
+- **端到端清单是七步**：①枚举 → ②宏 → ③接口层四处 → ④Impl features → ⑤派发表 → ⑥kernel+instantiation → ⑦setup.py，按依赖顺序施工，大部分工作是「接线」而非「写算法」。
+
+## 7. 下一步学习建议
+
+- **动手做完 §5 的改动计划**：把它写成一份 Markdown 文档，对照真实源码逐行核对行号。这是检验你是否真懂扩展点的最好方式——能复述的是知识，能定位到行号的才是理解。
+- **阅读 u9-l3（端到端实战）**：那一讲把「构造数据 → 量化 → 调用 → 校验 → 测速」串成完整链路，与本讲的「扩展链路」互补——本讲讲「怎么加能力」，u9-l3 讲「怎么用现有能力跑通并验证」。
+- **对比 dense prefill 的扩展方式**：dense prefill 走 CUTLASS（u7-l1），它的「head_dim」用复合类型 `Shape<_128,_64>` 表达、经「立即调用 lambda」编译期化（与 DISPATCH 宏同构但不同实现）。阅读 [csrc/sm100/prefill/dense/interface.h](https://github.com/deepseek-ai/FlashMLA/blob/9241ae3ef9bac614dd25e45e507e089f888280e0/csrc/sm100/prefill/dense/interface.h)，理解第三种「编译期化」风格，与本讲的 DISPATCH 宏对照。
+- **尝试一个最小真实扩展**：如果手头有 SM90 GPU，挑一个最简单的扩展（如给 sparse prefill 加一个 `DISPATCH_BOOLEAN_FLAG` 控制的小开关），完整走一遍七步，亲手感受「宏 → instantiation → setup.py」的编译反馈循环。无 GPU 时，也可以只做到「让改动编译通过」这一步，验证接线正确性。

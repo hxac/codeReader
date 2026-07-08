@@ -1,0 +1,1353 @@
+{
+  "project": "git",
+  "head": "f85a7e662054a7b0d9070e432508831afa214b47",
+  "rationale": "git 是一个体量巨大的 C 语言项目，源码以「核心库 + builtin 子命令」的方式组织：git.c 作为总分发器查表调用 builtin/*.c，所有数据建立在「对象数据库 + 索引 + 引用」三大子系统之上。因此学习路线按三层推进。入门层（u1–u2）先让读者把项目跑起来、看懂目录结构、理解 git.c 的命令分发与 setup.c 的仓库发现机制，建立「一次 git 命令在源码里走过了哪些路径」的整体认知。进阶层（u3–u9）按数据从底层到上层的顺序讲解：对象模型与存储（blob/tree/commit/tag、松散对象、pack）→ 索引（index_state、cache-tree、sparse-index）→ 引用（ref_store、files/packed/reftable 后端、事务）→ 配置 → 版本遍历 revision.c → diff 引擎 → 工作树操作与提交/历史展示。这样读者能看清一次 add/commit/checkout/diff 在底层数据结构上的真实变化。专家层（u10–u15）进入合并、网络协议 v2、子模块/多工作树、性能优化（commit-graph/midx/bitmap/fsmonitor/trace2）、进程与基础设施（run-command/锁文件/错误处理）、以及测试框架与贡献流程，覆盖二次开发、性能取舍和参与上游所需的知识。讲义之间通过 depends_on 形成有向依赖，确保读者总是先掌握前置子系统再进入上层命令。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目总览与从源码构建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Git 是什么：定位、历史与设计哲学",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 git 作为分布式版本控制系统的定位、由 Linus Torvalds 创建的历史，以及「内容寻址的对象数据库」这一核心设计思想。",
+          "learning_goals": [
+            "理解 git 解决的问题与分布式版本控制的基本概念",
+            "了解 git 内容寻址存储的设计哲学",
+            "知道 git 项目的开源协作与文档入口"
+          ],
+          "source_files": [
+            "README.md",
+            "Documentation/MyFirstContribution.adoc",
+            "version.h",
+            "Documentation/gittutorial.adoc"
+          ],
+          "minimal_modules": [
+            "项目定位与许可",
+            "内容寻址设计思想",
+            "文档与社区入口"
+          ],
+          "practice_task": "阅读 README.md 与 Documentation/gittutorial.adoc，用自己的话写一段 200 字以内的说明：git 与传统版本控制系统（如 CVS/SVN）在设计理念上的两个关键差异。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从源码构建 git：Makefile 体系",
+          "order": 2,
+          "filename": "u1-l2-build-from-source.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Make 构建系统从源码编译 git，理解 Makefile 的可移植性定义、版本号生成与构建产物。",
+          "learning_goals": [
+            "掌握从源码编译并安装 git 的完整流程",
+            "理解 Makefile 中的可移植性开关与定义",
+            "认识版本号生成机制 GIT-VERSION-GEN"
+          ],
+          "source_files": [
+            "Makefile",
+            "shared.mak",
+            "GIT-VERSION-GEN",
+            "GIT-VERSION-FILE.in",
+            "INSTALL"
+          ],
+          "minimal_modules": [
+            "Make 默认目标与构建产物",
+            "可移植性编译开关",
+            "版本号生成"
+          ],
+          "practice_task": "执行 make 编译 git，然后用 ./git --version 验证版本字符串，再阅读 GIT-VERSION-GEN 说明版本号是从哪里读取出来的，并尝试修改默认版本前缀观察输出变化。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构地图",
+          "order": 3,
+          "filename": "u1-l3-source-tree-map.md",
+          "level": "beginner",
+          "topic": "梳理 git 顶层目录的分层组织：核心库源码、builtin/ 子命令、refs/ 引用后端、t/ 测试、Documentation/ 文档与 contrib/ 贡献脚本。",
+          "learning_goals": [
+            "建立 git 源码树的整体地图",
+            "区分核心库文件、子命令实现与辅助脚本",
+            "理解 command-list.txt 如何登记命令分类"
+          ],
+          "source_files": [
+            "README.md",
+            "command-list.txt",
+            "Makefile",
+            "Documentation/CodingGuidelines"
+          ],
+          "minimal_modules": [
+            "顶层文件与子命令目录 builtin/",
+            "refs/ 与 reftable/ 后端",
+            "t/ 测试与 Documentation/ 文档"
+          ],
+          "practice_task": "浏览顶层目录，列出三类文件各举三个例子（核心库源码、builtin 子命令、shell/perl 脚本），并在 command-list.txt 中找出 plumbing 与 porcelain 命令各一个。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "命令分发主入口 git.c",
+          "order": 4,
+          "filename": "u1-l4-command-dispatch.md",
+          "level": "beginner",
+          "topic": "深入 git.c，理解 cmd_main 入口、commands[] 命令表、handle_builtin 的查表调用、别名处理与 dashed external 外部命令执行。",
+          "learning_goals": [
+            "理解 git 如何把命令行映射到 builtin 函数",
+            "掌握 commands[] 表与命令选项标志位",
+            "了解别名与外部命令的回退执行机制"
+          ],
+          "source_files": [
+            "git.c",
+            "builtin.h",
+            "alias.c",
+            "help.c"
+          ],
+          "minimal_modules": [
+            "cmd_main 与命令表 commands[]",
+            "命令选项 RUN_SETUP/NEED_WORK_TREE 等",
+            "handle_builtin 与 execv_dashed_external"
+          ],
+          "practice_task": "在 git.c 的 commands[] 数组中追踪 git status 的分发路径，然后仿照表项结构在注释中画出一次 `git log` 从 argv 到 cmd_log 的调用流程图。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "仓库发现与 repository 对象",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "仓库发现：setup_git_directory",
+          "order": 1,
+          "filename": "u2-l1-repository-discovery.md",
+          "level": "beginner",
+          "topic": "讲解 setup.c 如何从当前目录向上搜索 .git 目录或 gitfile，识别 bare 仓库、校验所有权，并把仓库路径写入环境。",
+          "learning_goals": [
+            "理解 git 如何定位当前仓库的 gitdir",
+            "掌握 gitfile、bare 仓库与所有权校验逻辑",
+            "了解发现结果如何影响后续命令"
+          ],
+          "source_files": [
+            "setup.c",
+            "setup.h",
+            "environment.c"
+          ],
+          "minimal_modules": [
+            "setup_git_directory_gently_1 目录上溯",
+            "read_gitfile 与 gitfile 解析",
+            "bare 仓库与所有权校验"
+          ],
+          "practice_task": "在一个子目录中运行 git rev-parse --show-toplevel 与 --git-dir，然后阅读 setup.c 中对应函数，对照说明 git 是如何向上找到 .git 的。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "核心结构 struct repository",
+          "order": 2,
+          "filename": "u2-l2-repository-struct.md",
+          "level": "intermediate",
+          "topic": "剖析 repository.h 中的 struct repository，理解 gitdir、对象数据库、引用存储、索引与子模块引用库如何在单一仓库对象中聚合。",
+          "learning_goals": [
+            "掌握 struct repository 作为运行时上下文的角色",
+            "理解对象数据库、引用、索引在 repository 中的组织",
+            "了解 ref 存储格式枚举与默认值"
+          ],
+          "source_files": [
+            "repository.h",
+            "repository.c",
+            "repo-settings.h",
+            "environment.h"
+          ],
+          "minimal_modules": [
+            "struct repository 字段总览",
+            "对象数据库与引用存储指针",
+            "引用存储格式 REF_STORAGE_FORMAT"
+          ],
+          "practice_task": "阅读 struct repository 定义，画一张图标注 gitdir/commondir/objects/refs_private 等字段，并说明 the_repository 全局变量与它的关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "git init 与仓库模板",
+          "order": 3,
+          "filename": "u2-l3-git-init-templates.md",
+          "level": "beginner",
+          "topic": "讲解 builtin/init-db.c 如何创建新仓库的目录骨架、写入 HEAD 与配置，以及 templates/ 默认模板（hooks、info）的复制机制。",
+          "learning_goals": [
+            "理解 git init 创建的目录结构",
+            "掌握默认 HEAD、config 与样板 hooks 的来源",
+            "了解模板复制机制"
+          ],
+          "source_files": [
+            "builtin/init-db.c",
+            "setup.c",
+            "templates/"
+          ],
+          "minimal_modules": [
+            "init_db 目录骨架创建",
+            "默认 HEAD 与 config 写入",
+            "templates/ 模板复制"
+          ],
+          "practice_task": "运行 git init sample 创建一个新仓库，列出 .git 内的目录与文件，再对照 templates/ 目录说明哪些文件是从模板复制来的。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "对象模型与对象存储",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "四种对象类型与 struct object",
+          "order": 1,
+          "filename": "u3-l1-object-types.md",
+          "level": "intermediate",
+          "topic": "讲解 blob、tree、commit、tag 四种对象类型，以及 object.h 中统一的 struct object 与对象标志位分配。",
+          "learning_goals": [
+            "掌握四种 git 对象的结构与相互关系",
+            "理解 struct object 作为统一基类的设计",
+            "了解对象标志位的全局分配约定"
+          ],
+          "source_files": [
+            "object.h",
+            "blob.c",
+            "tree.c",
+            "commit.h",
+            "tag.c"
+          ],
+          "minimal_modules": [
+            "enum object_type 四种类型",
+            "struct object 统一基类",
+            "对象标志位分配表"
+          ],
+          "practice_task": "用 git cat-file -t 观察 blob/tree/commit/tag 四种对象，再阅读 commit.h 中 struct commit 定义，说明 commit 如何引用 tree 与 parent。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "对象哈希与松散对象存储",
+          "order": 2,
+          "filename": "u3-l2-object-hash-loose.md",
+          "level": "intermediate",
+          "topic": "讲解 object-file.c 如何计算对象内容哈希、压缩并以松散对象形式写入 .git/objects，以及 sha1/sha256 哈希算法抽象。",
+          "learning_goals": [
+            "理解 git 对象内容寻址的哈希计算流程",
+            "掌握松散对象的 zlib 压缩存储格式",
+            "了解 hash 算法抽象与 sha1/sha256 选择"
+          ],
+          "source_files": [
+            "object-file.c",
+            "object-file.h",
+            "loose.c",
+            "hash.h",
+            "sha1/sha1dgst.c"
+          ],
+          "minimal_modules": [
+            "对象哈希与写入 write_object_file",
+            "松散对象压缩与读取",
+            "哈希算法抽象 git_hash_algo"
+          ],
+          "practice_task": "用 git hash-object -w 写入一个文件，找到 .git/objects 下对应的松散对象，对照 loose.c 说明文件名与内容的关系。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "pack 文件格式与打包存储",
+          "order": 3,
+          "filename": "u3-l3-pack-format.md",
+          "level": "intermediate",
+          "topic": "讲解 packfile.c/pack-write.c 中 pack 文件的结构、索引、delta 压缩与多对象打包机制。",
+          "learning_goals": [
+            "理解 pack 文件与 .idx 索引的结构",
+            "掌握 delta 压缩如何节省空间",
+            "了解 pack 写入与读取流程"
+          ],
+          "source_files": [
+            "packfile.c",
+            "pack-write.c",
+            "pack.h",
+            "csum-file.c",
+            "delta.h"
+          ],
+          "minimal_modules": [
+            "pack 文件头与对象记录",
+            ".idx 索引与查找",
+            "delta 压缩 base/offset"
+          ],
+          "practice_task": "运行 git gc 触发打包，观察 .git/objects/pack 下生成的 .pack 与 .idx 文件，再阅读 packfile.c 说明索引如何定位对象。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "索引 index",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "index_state 与 cache_entry",
+          "order": 1,
+          "filename": "u4-l1-index-state.md",
+          "level": "intermediate",
+          "topic": "讲解 read-cache.c 中 index_state 与 cache_entry 如何表示暂存区，以及索引文件的读写。",
+          "learning_goals": [
+            "理解索引作为工作树与对象数据库之间桥梁的角色",
+            "掌握 cache_entry 的字段含义",
+            "了解索引文件的序列化格式"
+          ],
+          "source_files": [
+            "read-cache.c",
+            "read-cache.h",
+            "read-cache-ll.h",
+            "statinfo.c"
+          ],
+          "minimal_modules": [
+            "struct index_state 与 cache_entry",
+            "索引条目字段 mode/oid/stat",
+            "索引读写与扩展区"
+          ],
+          "practice_task": "用 git ls-files --stage 查看索引内容，再用 git update-index 修改一个条目，对照 read-cache.c 说明 cache_entry 各字段。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "缓存树 cache-tree 与 split-index",
+          "order": 2,
+          "filename": "u4-l2-cache-tree-split.md",
+          "level": "intermediate",
+          "topic": "讲解 cache-tree.c 如何缓存目录对应的 tree 对象哈希以加速 write-tree，以及 split-index.c 的共享/拆分索引机制。",
+          "learning_goals": [
+            "理解 cache-tree 如何避免重复构建 tree",
+            "掌握 split-index 在多工作树下的索引共享",
+            "了解索引扩展对性能的影响"
+          ],
+          "source_files": [
+            "cache-tree.c",
+            "cache-tree.h",
+            "split-index.c",
+            "name-hash.c"
+          ],
+          "minimal_modules": [
+            "cache-tree 目录哈希缓存",
+            "split-index 基础/共享索引",
+            "name-hash 路径快速查找"
+          ],
+          "practice_task": "对比有/无 cache-tree 时连续两次 write-tree 的耗时，阅读 cache-tree.c 说明缓存如何命中。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "稀疏索引 sparse-index",
+          "order": 3,
+          "filename": "u4-l3-sparse-index.md",
+          "level": "intermediate",
+          "topic": "讲解 sparse-index.c 如何用稀疏目录条目压缩巨型单仓库的索引，以及在稀疏与完整索引之间的展开/折叠。",
+          "learning_goals": [
+            "理解稀疏索引解决的问题场景",
+            "掌握稀疏目录条目的折叠与展开",
+            "了解稀疏索引与 sparse-checkout 的配合"
+          ],
+          "source_files": [
+            "sparse-index.c",
+            "sparse-index.h",
+            "dir.c"
+          ],
+          "minimal_modules": [
+            "稀疏目录条目表示",
+            "展开与折叠操作",
+            "与 sparse-checkout 的交互"
+          ],
+          "practice_task": "启用 git sparse-checkout 并设置 index.threads，用 git ls-files 观察稀疏索引行为，对照 sparse-index.c 说明折叠条目。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "引用 refs",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "refs 抽象与 ref_store API",
+          "order": 1,
+          "filename": "u5-l1-refs-api.md",
+          "level": "intermediate",
+          "topic": "讲解 refs.c/refs.h 中统一的引用读写抽象 ref_store，以及解析 ref、遍历 ref 的公共 API。",
+          "learning_goals": [
+            "理解引用作为对象哈希命名指针的角色",
+            "掌握 ref_store 抽象与公共读写 API",
+            "了解 symbolic ref 与 ref 解析"
+          ],
+          "source_files": [
+            "refs.c",
+            "refs.h",
+            "reflog.c"
+          ],
+          "minimal_modules": [
+            "ref_store 抽象接口",
+            "ref 解析 refs_resolve_ref_unsafe",
+            "ref 遍历 refs_for_each_ref"
+          ],
+          "practice_task": "用 git symbolic-ref HEAD 与 git rev-parse HEAD 对比，再阅读 refs.c 的解析函数说明符号引用如何展开为 oid。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "refs 后端：files、packed 与 reftable",
+          "order": 2,
+          "filename": "u5-l2-refs-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 refs/ 下三种引用后端实现：传统 files（松散 + packed-refs）、packed-backend 与新型 reftable。",
+          "learning_goals": [
+            "理解 files 后端的松散文件与 packed-refs 结构",
+            "掌握 reftable 的二进制块格式优势",
+            "了解后端如何通过统一接口接入"
+          ],
+          "source_files": [
+            "refs/files-backend.c",
+            "refs/packed-backend.c",
+            "refs/reftable-backend.c",
+            "refs/refs-internal.h"
+          ],
+          "minimal_modules": [
+            "files 后端松散与 packed-refs",
+            "reftable 二进制格式",
+            "后端注册与选择"
+          ],
+          "practice_task": "查看 .git/refs 与 .git/packed-refs，再用 git config init.refStorage reftable 创建一个 reftable 仓库，对比两种后端的磁盘布局。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "ref 事务与 ref-cache",
+          "order": 3,
+          "filename": "u5-l3-refs-transactions.md",
+          "level": "intermediate",
+          "topic": "讲解引用更新的事务机制（原子提交、ref-lock）以及 refs/ref-cache.c 的内存引用缓存。",
+          "learning_goals": [
+            "理解 ref 事务的原子性与回滚",
+            "掌握 ref-lock 排他锁机制",
+            "了解 ref-cache 的内存缓存组织"
+          ],
+          "source_files": [
+            "refs/refs-internal.h",
+            "refs/ref-cache.c",
+            "refs/iterator.c",
+            "refs/debug.c"
+          ],
+          "minimal_modules": [
+            "ref 事务 begin/commit/abort",
+            "ref-lock 文件锁",
+            "ref-cache 分层缓存"
+          ],
+          "practice_task": "阅读 ref_store_transaction_begin 周边代码，写一段伪代码描述一次 update-ref 的事务提交与失败回滚过程。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "配置 config",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "配置系统与 config 解析",
+          "order": 1,
+          "filename": "u6-l1-config-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 config.c 如何解析 git 配置文件（system/global/local）到 config_set，以及配置回调机制。",
+          "learning_goals": [
+            "理解配置文件的多级加载顺序",
+            "掌握 config_set 的查询 API",
+            "了解配置解析的回调驱动模型"
+          ],
+          "source_files": [
+            "config.c",
+            "config.h",
+            "parse-options.c"
+          ],
+          "minimal_modules": [
+            "配置文件加载层级",
+            "config_set 缓存与查询",
+            "parse-options 命令行解析"
+          ],
+          "practice_task": "用 git config --list --show-origin 查看各级配置来源，再阅读 config.c 说明配置项是如何被解析并存入 config_set 的。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "环境变量与配置层级",
+          "order": 2,
+          "filename": "u6-l2-config-environment.md",
+          "level": "intermediate",
+          "topic": "讲解 environment.c 管理的环境变量（GIT_DIR、GIT_*）如何覆盖配置，以及 CLI -c 选项的优先级。",
+          "learning_goals": [
+            "掌握环境变量对仓库上下文的覆盖优先级",
+            "理解 GIT_DIR/GIT_WORK_TREE 等关键环境变量",
+            "了解 -c 一次性配置注入"
+          ],
+          "source_files": [
+            "environment.c",
+            "environment.h",
+            "config.c",
+            "git.c"
+          ],
+          "minimal_modules": [
+            "环境变量定义与读取",
+            "配置优先级链",
+            "-c 与 --config-env 注入"
+          ],
+          "practice_task": "用 GIT_DIR 与 git -c user.name=Test 分别覆盖配置，对照 environment.c 与 git.c 说明环境变量与 -c 的生效时机。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "版本遍历 revision walk",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "revision.c 遍历机制",
+          "order": 1,
+          "filename": "u7-l1-revision-walk.md",
+          "level": "intermediate",
+          "topic": "讲解 revision.c 如何通过 revision_info 与 commit_list 实现有向无环图的提交遍历，支撑 log/rev-list。",
+          "learning_goals": [
+            "理解 revision 遍历的起点与终点（positive/negative）",
+            "掌握优先队列驱动的提交遍历",
+            "了解遍历标志与裁剪规则"
+          ],
+          "source_files": [
+            "revision.c",
+            "revision.h",
+            "builtin/rev-list.c",
+            "prio-queue.c"
+          ],
+          "minimal_modules": [
+            "struct rev_info 配置",
+            "提交遍历主循环",
+            "优先队列 prio-queue"
+          ],
+          "practice_task": "运行 git rev-list HEAD 与带路径过滤的变体，阅读 revision.c 说明遍历如何按提交时间排序并裁剪。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "commit 可达性与 commit-graph",
+          "order": 2,
+          "filename": "u7-l2-commit-graph-reach.md",
+          "level": "intermediate",
+          "topic": "讲解 commit-reach.c 的可达性/合并基算法，以及 commit-graph.c 的提交图加速缓存文件。",
+          "learning_goals": [
+            "理解 merge-base、可达性判定的算法",
+            "掌握 commit-graph 缓存文件的结构与作用",
+            "了解 commit-graph 对遍历性能的加速"
+          ],
+          "source_files": [
+            "commit-reach.c",
+            "commit-graph.c",
+            "commit-graph.h",
+            "commit-slab.h"
+          ],
+          "minimal_modules": [
+            "可达性与 merge-base 算法",
+            "commit-graph 文件结构",
+            "commit-slab 关联数据"
+          ],
+          "practice_task": "运行 git commit-graph write 生成提交图，再对比 git log 生成时间，阅读 commit-graph.c 说明它如何加速 parent 查找。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "diff 引擎",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "diff 核心引擎与 diffcore",
+          "order": 1,
+          "filename": "u8-l1-diff-core.md",
+          "level": "intermediate",
+          "topic": "讲解 diff.c 与 diffcore-*.c 管线如何配对文件、检测重命名、拆分/合并变更，输出 diff 结果。",
+          "learning_goals": [
+            "理解 diff 管线的多阶段处理",
+            "掌握 rename 检测与 break/delta 机制",
+            "了解 diff 输出的统一格式生成"
+          ],
+          "source_files": [
+            "diff.c",
+            "diff.h",
+            "diffcore.h",
+            "diffcore-rename.c",
+            "diffcore-break.c"
+          ],
+          "minimal_modules": [
+            "diff 管线阶段",
+            "diffcore rename 检测",
+            "diff 输出格式"
+          ],
+          "practice_task": "重命名一个文件后运行 git diff，对照 diffcore-rename.c 说明 rename 是如何被检测出来的，并用 -M/-B 选项验证行为变化。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "xdiff 底层行级差异",
+          "order": 2,
+          "filename": "u8-l2-xdiff-library.md",
+          "level": "intermediate",
+          "topic": "讲解 xdiff/ 目录中的 Myers 差异算法实现，以及 xdiff-interface.c 如何把它接入 git 主框架。",
+          "learning_goals": [
+            "理解 Myers 最长公共子序列差异算法",
+            "掌握 xdiff 与 git 主框架的接口桥接",
+            "了解 hunk 生成与直方图算法选项"
+          ],
+          "source_files": [
+            "xdiff-interface.c",
+            "xdiff/xdiffi.c",
+            "xdiff/xprepare.c",
+            "userdiff.c"
+          ],
+          "minimal_modules": [
+            "xdiff 差异算法核心",
+            "xdiff-interface 桥接",
+            "userdiff 文件类型规则"
+          ],
+          "practice_task": "阅读 xdiff/xdiffi.c 的核心函数，用两个短文本手动跑 git diff --histogram 与默认算法，说明输出可能的不同。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "工作树操作与提交历史",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "git add 与 update-index：暂存",
+          "order": 1,
+          "filename": "u9-l1-add-update-index.md",
+          "level": "intermediate",
+          "topic": "讲解 builtin/add.c 与 builtin/update-index.c 如何把工作树变更写入索引，含交互式 add 与路径规范 pathspec。",
+          "learning_goals": [
+            "理解 add 将工作树状态同步到索引的过程",
+            "掌握 pathspec 路径匹配机制",
+            "了解交互式 add 的分块选择"
+          ],
+          "source_files": [
+            "builtin/add.c",
+            "builtin/update-index.c",
+            "add-interactive.c",
+            "pathspec.c"
+          ],
+          "minimal_modules": [
+            "add 主流程与索引更新",
+            "pathspec 路径匹配",
+            "交互式 add 分块"
+          ],
+          "practice_task": "用 git add -p 分块暂存变更，再阅读 add-interactive.c 说明 hunk 是如何呈现与选择的。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "checkout/switch 与 unpack-trees",
+          "order": 2,
+          "filename": "u9-l2-checkout-unpack-trees.md",
+          "level": "intermediate",
+          "topic": "讲解 builtin/checkout.c 如何通过 unpack-trees.c 与 entry.c 将 tree 内容写入工作树，完成分支切换与文件检出。",
+          "learning_goals": [
+            "理解 checkout/switch 的两阶段索引与工作树更新",
+            "掌握 unpack-trees 的多路合并",
+            "了解 entry.c 的文件写出与冲突处理"
+          ],
+          "source_files": [
+            "builtin/checkout.c",
+            "unpack-trees.c",
+            "entry.c",
+            "dir.c"
+          ],
+          "minimal_modules": [
+            "checkout 索引与工作树更新",
+            "unpack-trees 多路遍历",
+            "entry 写出文件"
+          ],
+          "practice_task": "切换分支后观察工作树文件变化，阅读 unpack-trees.c 说明旧内容移除与新内容写入是如何协调的。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "git status 与 wt-status",
+          "order": 3,
+          "filename": "u9-l3-status-wt-status.md",
+          "level": "intermediate",
+          "topic": "讲解 wt-status.c 如何对比 HEAD/索引/工作树三层，生成 git status 的变更报告。",
+          "learning_goals": [
+            "理解 HEAD/索引/工作树三层对比模型",
+            "掌握 wt-status 的状态分类",
+            "了解 status 的输出格式生成"
+          ],
+          "source_files": [
+            "wt-status.c",
+            "wt-status.h",
+            "builtin/commit.c",
+            "preload-index.c"
+          ],
+          "minimal_modules": [
+            "三层差异对比",
+            "wt_status 状态收集",
+            "预加载索引加速"
+          ],
+          "practice_task": "制造 staged/unstaged/untracked 三类变更，运行 git status，对照 wt-status.c 说明每类是如何被识别的。",
+          "depends_on": [
+            "u4-l1",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "commit 创建与 log/pretty 展示",
+          "order": 4,
+          "filename": "u9-l4-commit-log-pretty.md",
+          "level": "intermediate",
+          "topic": "讲解 builtin/commit.c 如何用索引生成新提交对象，以及 builtin/log.c 与 pretty.c 如何遍历并格式化展示历史。",
+          "learning_goals": [
+            "理解从索引到 commit 对象的创建链路",
+            "掌握 pretty 格式化与 log-tree 输出",
+            "了解 graph 的提交图 ASCII 渲染"
+          ],
+          "source_files": [
+            "builtin/commit.c",
+            "commit.c",
+            "builtin/log.c",
+            "pretty.c",
+            "log-tree.c"
+          ],
+          "minimal_modules": [
+            "commit 创建主流程",
+            "pretty 格式化",
+            "log-tree 与 graph 输出"
+          ],
+          "practice_task": "创建一次提交后用 git cat-file -p 查看内容，再阅读 builtin/commit.c 说明 commit 是如何从 tree + parent + message 组装的。",
+          "depends_on": [
+            "u9-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "合并 merge",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "merge-ort 与合并策略",
+          "order": 1,
+          "filename": "u10-l1-merge-ort.md",
+          "level": "advanced",
+          "topic": "讲解 merge-ort.c 的递归 ort 合并策略、builtin/merge.c 的合并主流程与 merge-ll.c 的低层三方合并驱动。",
+          "learning_goals": [
+            "理解 ort 合并策略的递归树合并",
+            "掌握合并驱动与冲突标记生成",
+            "了解 builtin/merge 的多策略调度"
+          ],
+          "source_files": [
+            "merge-ort.c",
+            "merge-ll.c",
+            "builtin/merge.c",
+            "commit-reach.c"
+          ],
+          "minimal_modules": [
+            "ort 递归合并核心",
+            "merge-ll 低层合并驱动",
+            "合并策略调度"
+          ],
+          "practice_task": "构造一个三方合并产生冲突，运行合并后阅读 merge-ort.c 说明冲突区段是如何标记与记录的。",
+          "depends_on": [
+            "u9-l2",
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "unpack-trees 三方合并与冲突",
+          "order": 2,
+          "filename": "u10-l2-unpack-trees-merge.md",
+          "level": "advanced",
+          "topic": "深入 unpack-trees.c 在 index/worktree 层面的三方合并与冲突恢复，以及 resolve-undo 的撤销记录。",
+          "learning_goals": [
+            "理解 unpack-trees 在合并中的角色",
+            "掌握三方文件级冲突判定",
+            "了解 resolve-undo 撤销机制"
+          ],
+          "source_files": [
+            "unpack-trees.c",
+            "merge-blobs.c",
+            "resolve-undo.c",
+            "resolve-undo.h"
+          ],
+          "minimal_modules": [
+            "unpack-trees 合并回调",
+            "merge-blobs 三方内容合并",
+            "resolve-undo 撤销信息"
+          ],
+          "practice_task": "阅读 unpack-trees.c 中的合并分支，说明一个被双方都修改的条目是如何进入冲突状态并被记录的。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "传输与协议",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "transport/connect 与 pkt-line",
+          "order": 1,
+          "filename": "u11-l1-transport-connect.md",
+          "level": "advanced",
+          "topic": "讲解 transport.c 的传输抽象、connect.c 的远程连接建立，以及 pkt-line.c 的线协议分包格式。",
+          "learning_goals": [
+            "理解传输层抽象与远程助手机制",
+            "掌握 pkt-line 线协议的分包格式",
+            "了解连接建立与 capability 协商"
+          ],
+          "source_files": [
+            "transport.c",
+            "transport-internal.h",
+            "connect.c",
+            "pkt-line.c",
+            "remote.c"
+          ],
+          "minimal_modules": [
+            "transport 传输抽象",
+            "connect 远程连接",
+            "pkt-line 分包协议"
+          ],
+          "practice_task": "用 GIT_TRACE_PACKET=1 运行一次 git ls-remote，阅读 pkt-line.c 说明每个数据包的长度前缀格式。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "协议 v2 与 serve",
+          "order": 2,
+          "filename": "u11-l2-protocol-v2-serve.md",
+          "level": "advanced",
+          "topic": "讲解 protocol v2 的命令式协议设计，serve.c 的服务端分发，以及 ls-refs/protocol-caps 命令实现。",
+          "learning_goals": [
+            "理解协议 v2 相对 v0/v1 的改进",
+            "掌握 serve.c 的命令分发模型",
+            "了解 ls-refs 与 capability 声明"
+          ],
+          "source_files": [
+            "serve.c",
+            "ls-refs.c",
+            "protocol-caps.c",
+            "protocol.c",
+            "protocol.h"
+          ],
+          "minimal_modules": [
+            "协议 v2 命令模型",
+            "serve 命令分发",
+            "ls-refs 与 caps"
+          ],
+          "practice_task": "用 GIT_TRACE_PACKET=1 与 -c protocol.version=2 观察一次 fetch 的握手，对照 serve.c 说明 v2 的命令交互顺序。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "fetch-pack / send-pack 协商",
+          "order": 3,
+          "filename": "u11-l3-fetch-send-pack.md",
+          "level": "advanced",
+          "topic": "讲解 fetch-pack.c 与 send-pack.c 的对象协商与传输，以及 fetch-negotiator.c 的协商算法。",
+          "learning_goals": [
+            "理解 fetch/send 双方的对象集协商",
+            "掌握 negotiator 的提交通告算法",
+            "了解 pack 对象的生成与接收"
+          ],
+          "source_files": [
+            "fetch-pack.c",
+            "send-pack.c",
+            "fetch-negotiator.c",
+            "negotiator/default.c",
+            "connect.c"
+          ],
+          "minimal_modules": [
+            "fetch-pack 客户端协商",
+            "send-pack 服务端打包",
+            "negotiator 通告算法"
+          ],
+          "practice_task": "运行一次 git fetch 并配合 GIT_TRACE_PACKET，阅读 fetch-negotiator.c 说明客户端如何决定通告哪些 commit。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "子模块与多工作树",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "submodule 机制",
+          "order": 1,
+          "filename": "u12-l1-submodule.md",
+          "level": "advanced",
+          "topic": "讲解 submodule.c 与 submodule-config.c 如何把外部仓库作为 gitlink 嵌入，并处理子模块的初始化与同步。",
+          "learning_goals": [
+            "理解 submodule 作为 gitlink 嵌入主仓库的模型",
+            "掌握 .gitmodules 配置解析",
+            "了解子模块的初始化/更新/同步流程"
+          ],
+          "source_files": [
+            "submodule.c",
+            "submodule-config.c",
+            "builtin/submodule--helper.c",
+            "submodule.h"
+          ],
+          "minimal_modules": [
+            "gitlink 与 .gitmodules",
+            "子模块配置加载",
+            "子模块操作流程"
+          ],
+          "practice_task": "添加一个子模块后查看索引中的 gitlink 条目与 .gitmodules，对照 submodule-config.c 说明配置是如何被加载的。",
+          "depends_on": [
+            "u9-l2",
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "多工作树 worktree",
+          "order": 2,
+          "filename": "u12-l2-worktree.md",
+          "level": "advanced",
+          "topic": "讲解 worktree.c 与 builtin/worktree.c 如何通过 .git/worktrees 与 per-worktree HEAD 支持多个工作树共享同一对象库。",
+          "learning_goals": [
+            "理解 linked worktree 与共享对象库的模型",
+            "掌握 per-worktree gitdir/admin 文件",
+            "了解 worktree 的增删与锁定"
+          ],
+          "source_files": [
+            "worktree.c",
+            "worktree.h",
+            "builtin/worktree.c",
+            "setup.c"
+          ],
+          "minimal_modules": [
+            "多工作树目录结构",
+            "per-worktree gitdir/admin",
+            "worktree 增删与锁"
+          ],
+          "practice_task": "用 git worktree add 创建一个链接工作树，检查 .git/worktrees 布局，对照 worktree.c 说明它如何共享对象库。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "性能与可扩展性",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "commit-graph 与 multi-pack-index",
+          "order": 1,
+          "filename": "u13-l1-commit-graph-midx.md",
+          "level": "advanced",
+          "topic": "讲解 commit-graph.c 的提交图与 midx.c 的多包索引如何为大型仓库提供常数级查找与跨包寻址。",
+          "learning_goals": [
+            "理解 commit-graph 对遍历的加速原理",
+            "掌握 multi-pack-index 的跨包对象索引",
+            "了解两者的写入与维护时机"
+          ],
+          "source_files": [
+            "commit-graph.c",
+            "midx.c",
+            "midx.h",
+            "chunk-format.c"
+          ],
+          "minimal_modules": [
+            "commit-graph 结构与查找",
+            "multi-pack-index 跨包索引",
+            "chunk-format 通用分块"
+          ],
+          "practice_task": "生成 commit-graph 与 midx，对比 git log 在大型仓库（可用 git 自身历史）下的耗时变化，说明加速来源。",
+          "depends_on": [
+            "u7-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "位图、fsmonitor 与并行检出",
+          "order": 2,
+          "filename": "u13-l2-bitmap-fsmonitor.md",
+          "level": "advanced",
+          "topic": "讲解 pack-bitmap.c 的可达性位图、fsmonitor.c 的文件系统监视集成与 parallel-checkout.c 的并发写出。",
+          "learning_goals": [
+            "理解 pack 位图如何加速 clone/fetch 对象计数",
+            "掌握 fsmonitor 减少状态扫描的机制",
+            "了解并行检出对大规模 checkout 的加速"
+          ],
+          "source_files": [
+            "pack-bitmap.c",
+            "pack-bitmap.h",
+            "fsmonitor.c",
+            "parallel-checkout.c"
+          ],
+          "minimal_modules": [
+            "pack 位图与 EWAH",
+            "fsmonitor 文件监视",
+            "并行检出线程模型"
+          ],
+          "practice_task": "启用 fsmonitor 与位图（git config core.fsmonitor true 并写 pack bitmap），clone 一个大型仓库的子集，说明每项优化减少了哪部分工作。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "trace2 与性能分析",
+          "order": 3,
+          "filename": "u13-l3-trace2-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 trace2/ 子系统的结构化事件追踪、多目标输出，以及如何用它定位 git 命令的性能瓶颈。",
+          "learning_goals": [
+            "理解 trace2 事件模型与目标后端",
+            "掌握用 trace2 收集性能数据的方法",
+            "了解 region/counter 事件在源码中的埋点"
+          ],
+          "source_files": [
+            "trace2.c",
+            "trace2.h",
+            "trace2/tr2_tgt_event.c",
+            "trace2/tr2_tgt_normal.c"
+          ],
+          "minimal_modules": [
+            "trace2 事件模型",
+            "目标后端 event/normal/perf",
+            "region/counter 埋点"
+          ],
+          "practice_task": "用 GIT_TRACE2_PERF=1 运行一次 git status，阅读 trace2 输出，对照 trace2.c 说明 region 事件如何刻画耗时分布。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "进程与基础设施",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "run-command 子进程管理",
+          "order": 1,
+          "filename": "u14-l1-run-command.md",
+          "level": "advanced",
+          "topic": "讲解 run-command.c 的 child_process 抽象，git 如何统一地 spawn 子进程、捕获输出、处理管道与信号。",
+          "learning_goals": [
+            "理解 child_process 子进程抽象",
+            "掌握管道、环境与信号处理",
+            "了解 strvec 参数构造与回收"
+          ],
+          "source_files": [
+            "run-command.c",
+            "run-command.h",
+            "strvec.c",
+            "sigchain.c"
+          ],
+          "minimal_modules": [
+            "child_process 抽象",
+            "管道与环境构造",
+            "sigchain 信号链"
+          ],
+          "practice_task": "在源码中找出三处 run_command 调用（如 execv_dashed_external），阅读 run-command.c 说明子进程的参数如何通过 strvec 组装。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "临时文件与文件锁",
+          "order": 2,
+          "filename": "u14-l2-tempfile-lockfile.md",
+          "level": "advanced",
+          "topic": "讲解 tempfile.c 的临时文件注册表与 lockfile.c 的 .lock 排他锁机制，保证并发写安全与崩溃恢复。",
+          "learning_goals": [
+            "理解 tempfile 注册表如何自动清理",
+            "掌握 .lock 文件锁的获取与释放",
+            "了解原子提交与崩溃一致性"
+          ],
+          "source_files": [
+            "tempfile.c",
+            "tempfile.h",
+            "lockfile.c",
+            "lockfile.h"
+          ],
+          "minimal_modules": [
+            "tempfile 注册表与清理",
+            ".lock 文件锁",
+            "原子 commit 与回滚"
+          ],
+          "practice_task": "阅读 lockfile.c 说明索引写入如何先持锁再原子改名，写一段文字描述断电后索引的恢复行为。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "错误处理、usage 与国际化",
+          "order": 3,
+          "filename": "u14-l3-error-usage-gettext.md",
+          "level": "advanced",
+          "topic": "讲解 git 的 die/error/usage 错误处理约定、usage.c 的用法提示生成，以及 gettext.c 的 i18n 翻译机制。",
+          "learning_goals": [
+            "掌握 die/error/BUG 的使用约定",
+            "理解 usage 帮助文本的生成",
+            "了解 gettext 翻译包裹与 po 文件"
+          ],
+          "source_files": [
+            "usage.c",
+            "write-or-die.c",
+            "gettext.c",
+            "gettext.h"
+          ],
+          "minimal_modules": [
+            "die/error/BUG 错误处理",
+            "usage 帮助生成",
+            "gettext 国际化"
+          ],
+          "practice_task": "在源码中找出 N_() 与 _() 包裹的字符串，阅读 gettext.c 说明翻译如何按 locale 加载 po 文件。",
+          "depends_on": [],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "测试与贡献流程",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "测试框架 test-lib",
+          "order": 1,
+          "filename": "u15-l1-test-framework.md",
+          "level": "advanced",
+          "topic": "讲解 t/ 目录下的 shell 测试框架：test-lib.sh 的测试夹具、test-lib-functions.sh 的断言助手与 aggregate 聚合。",
+          "learning_goals": [
+            "理解 t/ 测试的组织与命名约定",
+            "掌握 test_expect_success 等断言助手",
+            "了解测试隔离沙箱与夹具"
+          ],
+          "source_files": [
+            "t/test-lib.sh",
+            "t/test-lib-functions.sh",
+            "t/Makefile",
+            "t/README"
+          ],
+          "minimal_modules": [
+            "test-lib 测试夹具",
+            "断言与测试助手",
+            "测试聚合与编号"
+          ],
+          "practice_task": "运行 make -C t t0001-init 并查看 trash 目录，阅读 test-lib.sh 说明每个测试用例的沙箱是如何建立的。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "编写一个测试用例",
+          "order": 2,
+          "filename": "u15-l2-writing-tests.md",
+          "level": "advanced",
+          "topic": "以 t/t0001-init.sh 为范例，演示如何用 test-lib 助手编写端到端 shell 测试，覆盖一个 git 子命令的行为。",
+          "learning_goals": [
+            "掌握编写新测试用例的完整流程",
+            "理解 setup/test_expect_success/收尾结构",
+            "了解测试稳定性与可移植性注意事项"
+          ],
+          "source_files": [
+            "t/t0001-init.sh",
+            "t/test-lib-functions.sh",
+            "t/chainlint.pl",
+            "t/lib-pack.sh"
+          ],
+          "minimal_modules": [
+            "测试用例骨架",
+            "断言与期望",
+            "chainlint 子 shell 检查"
+          ],
+          "practice_task": "参照 t0001-init.sh 的结构，为某个 git 命令（如 git rev-parse）草拟一个包含 setup 与两段 test_expect_success 的测试脚本骨架。",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l3",
+          "title": "贡献流程与编码规范",
+          "order": 3,
+          "filename": "u15-l3-contributing.md",
+          "level": "advanced",
+          "topic": "讲解向上游 git 贡献的流程：SubmittingPatches 的邮件补丁提交、CodingGuidelines 的代码风格，以及 MyFirstContribution 的入门指引。",
+          "learning_goals": [
+            "理解 git 项目的邮件列表补丁提交流程",
+            "掌握 CodingGuidelines 的 C 与 shell 风格",
+            "了解首次贡献的完整路径"
+          ],
+          "source_files": [
+            "Documentation/SubmittingPatches",
+            "Documentation/CodingGuidelines",
+            "Documentation/MyFirstContribution.adoc",
+            "Documentation/ReviewingGuidelines"
+          ],
+          "minimal_modules": [
+            "补丁提交与邮件列表",
+            "编码风格规范",
+            "首次贡献指引"
+          ],
+          "practice_task": "阅读 MyFirstContribution.adoc，按其指引为 git 增加一个最小的 builtin 命令骨架（不提交），并整理出你需要改动的源码文件清单。",
+          "depends_on": [
+            "u15-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

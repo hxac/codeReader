@@ -1,7 +1,7 @@
 {
   "project": "flashinfer",
-  "head": "a25af45eca5a5a7e40848d69e60609edb6f3b4ec",
-  "rationale": "FlashInfer 是一个体量大、子系统众多的 GPU kernel 库（attention/GEMM/MoE/通信等），其最大特色是\"默认 JIT 编译 + 三层架构（Python API → JIT 代码生成 → csrc/ 头文件 kernel）\"。因此学习路线必须先让读者\"跑起来\"并理解目录与分层（第 1 单元），再优先吃透贯穿全项目的 JIT 编译系统（第 2 单元）——它是理解其余所有算子的钥匙。随后按\"注意力（核心、最复杂）→ GEMM/低精度 → MoE → 其他算子 → 多 GPU 通信\"的顺序逐层深入核心模块（第 3-8 单元），每个算子单元都遵循\"Python wrapper 的 plan/run → csrc launcher → include kernel 模板 → JIT gen\"统一数据流。最后进入专家层：如何新增算子、TVM-FFI/Jinja/AOT/trace 等扩展与工程化机制（第 9-10 单元）。三层难度（beginner/intermediate/advanced）与依赖关系明确，第 1 单元从零开始，后续单元严格依赖前置，大型项目共 47 篇讲义保证每个主题独立可学。",
+  "head": "3fd5c55bc84bc00b27bed5099031fa3aab8a4fb2",
+  "rationale": "FlashInfer 是一个体量大、子系统众多的 GPU kernel 库（attention/GEMM/MoE/通信等），其最大特色是\"默认 JIT 编译 + 三层架构（Python API → JIT 代码生成 → csrc/ 头文件 kernel）\"。因此学习路线必须先让读者\"跑起来\"并理解目录与分层（第 1 单元），再优先吃透贯穿全项目的 JIT 编译系统（第 2 单元）——它是理解其余所有算子的钥匙。随后按\"注意力（核心、最复杂）→ GEMM/低精度 → MoE → 其他算子 → 多 GPU 通信\"的顺序逐层深入核心模块（第 3-8 单元），每个算子单元都遵循\"Python wrapper 的 plan/run → csrc launcher → include kernel 模板 → JIT gen\"统一数据流。最后进入专家层：如何新增算子、TVM-FFI/Jinja/AOT/trace 等扩展与工程化机制（第 9-10 单元）。三层难度（beginner/intermediate/advanced）与依赖关系明确，第 1 单元从零开始，后续单元严格依赖前置。本次增量（a25af45e → 3fd5c55b）仅一个提交，只改动 flashinfer/gemm/gemm_base.py 中 _BF16_GEMM_SM100_TUNING_CONFIG 的两个 autotuning 标志（新增 use_cuda_graph=True 与 use_cold_l2_cache=True），属于 BF16/SM100 路径的局部调优变化，因此仅 u5-l1（直接引用 gemm_base.py 并讲解 mm_bf16）标记为 update，其余 48 篇讲义标记为 keep，无需新增或重建。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README，在自己的机器上确认 GPU 的 compute capability，并对照支持矩阵判断可用特性；写出一段话总结 FlashInfer 相比直接用 PyTorch attention 的价值。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -62,7 +62,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -91,7 +91,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -118,7 +118,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -147,7 +147,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -182,7 +182,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -209,7 +209,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -237,7 +237,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -264,7 +264,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -292,7 +292,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -329,7 +329,7 @@
             "u1-l5",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -357,7 +357,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -387,7 +387,7 @@
             "u3-l2",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -416,7 +416,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -445,7 +445,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -481,7 +481,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -509,7 +509,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -536,7 +536,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -564,7 +564,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l5",
@@ -593,7 +593,7 @@
             "u3-l3",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l6",
@@ -623,7 +623,7 @@
             "u3-l3",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -659,7 +659,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l2",
@@ -687,7 +687,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -715,7 +715,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -744,7 +744,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -771,7 +771,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -806,7 +806,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -835,7 +835,7 @@
             "u6-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -862,7 +862,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -890,7 +890,7 @@
             "u6-l2",
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -927,7 +927,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -955,7 +955,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -983,7 +983,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -1011,7 +1011,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -1039,7 +1039,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l6",
@@ -1066,7 +1066,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1102,7 +1102,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -1130,7 +1130,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -1159,7 +1159,7 @@
             "u8-l1",
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -1187,7 +1187,7 @@
             "u8-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1223,7 +1223,7 @@
             "u2-l3",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1250,7 +1250,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1279,7 +1279,7 @@
             "u2-l3",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1308,7 +1308,7 @@
             "u2-l5",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l5",
@@ -1336,7 +1336,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1372,7 +1372,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1399,7 +1399,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1426,7 +1426,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1454,7 +1454,7 @@
           "depends_on": [
             "u3-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

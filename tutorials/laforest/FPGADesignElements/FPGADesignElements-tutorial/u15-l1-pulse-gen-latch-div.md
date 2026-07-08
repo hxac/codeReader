@@ -4,21 +4,21 @@
 
 学完本讲后，你应该能够：
 
-- 说清楚 `Pulse_Latch` 如何把一个**一闪而过的脉冲**「冻住」成一个持续的电平，并讲明白它其实就是一个 `Register`，为什么 `clear` 的优先级高于 `pulse_in`。
-- 用 `Pulse_Generator` 检测一个电平信号的**上升沿/下降沿**，并解释为什么输出脉冲出现在电平变化的**同一周期**、而不是下一周期。
-- 用 `Pulse_Divider` 对一串脉冲做**整数分频**，说清「倒计数到 1 就发一个输出脉冲并重装」的工作过程，以及为什么输出脉冲与触发它的输入脉冲落在同一拍。
-- 把三个模块的源码串成一条「事件捕获 → 边沿检测 → 事件计数」的脉冲处理工具链，并定位每个关键代码点。
+- 说清楚 `Pulse_Latch` 如何把一个**只高一拍就消失的脉冲**「冻住」成一个持续电平，并解释它本质就是一个 `Register`、为什么 `clear` 的优先级高于 `pulse_in`。
+- 用 `Pulse_Generator` 检测一个电平信号的**上升沿/下降沿/任意沿**，并说明为什么输出的那一拍脉冲出现在电平变化的**同一周期**（而不是下一周期），以及为什么输入必须已经同步于本时钟。
+- 用 `Pulse_Divider` 对一串脉冲做**整数分频**（每收到 `divisor` 个输入脉冲发一个输出脉冲），讲清「下计数到 1 就发脉冲并重装、永远绕过 0」的工作过程，以及 `pulses_in → pulse_out` 这条组合路径为什么是有意为之。
+- 把三个模块串成一条「事件捕获 → 边沿还原 → 事件计数」的脉冲处理工具链，并能在源码里定位每个关键代码点。
 
 ## 2. 前置知识
 
-本讲是「脉冲逻辑与接口转换」单元的第一篇，处理的是同一时钟域内**脉冲与电平之间的相互转换**。你只需要两块基础：
+本讲是「脉冲逻辑与接口转换」单元的第一篇，处理的是**同一时钟域内**脉冲（pulse）与电平（level）两种信号形态之间的相互转换。你只需要两块基础：
 
-- **u6-l1（Register 家族）**：这是本讲的正式前置。你已经知道 `Register` 是一个同步寄存器，有 `clock`/`clock_enable`/`clear`/`data_in`/`data_out` 五个端口，时钟块里用「**最后赋值胜出**」（last-assignment-wins）的并列 `if` 让 `clear` 自然优先于 `clock_enable`。本讲的 `Pulse_Latch` 和 `Pulse_Generator` 都只是 `Register` 的一种特定接法。
-- **u8-l2（二进制计数器与可复用函数）**（学习路径上的前置）：你已经知道 `Counter_Binary` = 1 个 `Adder_Subtractor_Binary` 算下一拍值 + 几个 `Register` 存储，操作优先级是 `clear > load > run`，且 `load` 覆盖 `run`。本讲的 `Pulse_Divider` 就是建立在这样一个下计数器之上。
+- **u6-l1（Register 家族）**：这是本讲的正式前置。你已经知道 `Register` 是一个无异步复位的同步寄存器，端口有 `clock`/`clock_enable`/`clear`/`data_in`/`data_out` 五个，时钟块内用「**最后赋值胜出**」（last-assignment-wins）的并列 `if` 让 `clear` 自然优先于 `clock_enable`。本讲的 `Pulse_Latch`、`Pulse_Generator` 都只是 `Register` 的一种固定接法。
+- **u8-l2（二进制计数器与可复用函数）**（学习路径上的前置，非强依赖）：`Counter_Binary` = 1 个 `Adder_Subtractor_Binary` 算下一拍值 + 几个 `Register` 存储，操作优先级是 `clear > load > run`，且 `load` 覆盖 `run`。本讲的 `Pulse_Divider` 就建立在这样一个下计数器之上，「绕过 0」正是靠 `load` 覆盖 `run` 实现的。
 
-一个直觉式的复习：在数字电路里，信息有两种基本形态——**电平**（一个持续高或低的信号）和**脉冲**（只高高的一拍、随即回落）。FSM 的状态、握手里的 `valid`/`ready` 是电平；「计数器到顶了」「收到一个字节了」这种事件天然是脉冲。很多设计困难就来自「我手上是个脉冲，但下游要电平」或反过来。本讲三个模块就是在这两种形态之间来回翻译的最小工具。
+一个直觉式的复习：在数字电路里，信息有两种基本形态——**电平**（一个持续高或低的信号）和**脉冲**（只高高的一拍、随即回落）。FSM 的状态、握手里的 `valid`/`ready` 是电平；「计数器到顶了」「收到一个字节了」这类事件天然是脉冲。很多设计困难来自「我手上是个脉冲，但下游要电平」或反过来。本讲三个模块就是在这两种形态之间来回翻译的最小工具。
 
-> 你在 **u14-l1（字同步与脉冲同步）** 里其实已经见过这三种模块的用法：`Pulse_Latch` 充当 4 相握手的「置位/清零」原语，`Pulse_Generator` 把 toggle 的边沿还原成接收脉冲。本讲把它们从 CDC 场景里拆出来，单独讲清楚各自是怎么实现的。
+> 本讲三个模块你在 **u14-l1（字同步与脉冲同步）** 里其实已经见过用法：`Pulse_Latch` 充当 4 相握手的「置位/清零」原语，`Pulse_Generator` 把 toggle 的边沿还原成接收脉冲。本讲把它们从 CDC 场景里拆出来，单独讲清楚各自是怎么实现的。
 
 ## 3. 本讲源码地图
 
@@ -27,7 +27,7 @@
 | `Pulse_Latch.v` | 捕获一个高脉冲并**保持为电平**，直到被 `clear` 清零。本质是一个 `Register`。 |
 | `Pulse_Generator.v` | 把 `level_in` 的**电平变化（边沿）**变成一拍宽的脉冲，给出上升沿/下降沿/任意沿三种输出。 |
 | `Pulse_Divider.v` | 每收到 `divisor` 个输入脉冲就发一个输出脉冲，即对脉冲流做**整数分频**。内部是一个下计数器。 |
-| 辅助原语（已在前序讲义学过） | `Register`（u6-l1）、`Counter_Binary`（u8-l2）。 |
+| 辅助原语（已在前序讲义学过，本讲直接复用） | `Register`（u6-l1）、`Counter_Binary`（u8-l2）。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -43,7 +43,9 @@
 
 > Captures a high pulse and holds it until cleared. This device simplifies FSM logic by converting a transient event into a steady signal that the FSM can pick up later once it reaches the correct state.
 
-这里要先澄清一个**命名陷阱**：模块叫 `Pulse_Latch`，但它**不是** Verilog 里那种电平敏感的 `latch`（那是综合时要极力避免的东西）。这里的「latch」是动词「锁存/捕获」的意思——它捕获一个事件并冻结成电平。在硬件层面它就是一个**触发器（flip-flop）**，由 `Register` 实现，完全同步、完全可综合。
+[Pulse_Latch.v:2-6](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Latch.v#L2-L6)——「把瞬时事件变成 FSM 稍后能读到的稳态信号」，这就是它的全部职责。
+
+先澄清一个**命名陷阱**：模块叫 `Pulse_Latch`，但它**不是** Verilog 里那种电平敏感的 `latch`（那是综合时要极力避免的锁存器）。这里的「latch」是动词「锁存/捕获」——它捕获一个事件并冻结成电平。在硬件层面它就是一个**触发器（flip-flop）**，由 `Register` 实现，完全同步、完全可综合。
 
 #### 4.1.2 核心流程
 
@@ -63,16 +65,16 @@ pulse_in ──▶ clock_enable  ──┐
 由此推出行为：
 
 1. 某拍 `pulse_in` 为高 → 当拍时钟沿把 `data_in`（=1）写入 → 下一拍起 `level_out = 1`。
-2. `pulse_in` 回落后，`level_out` **仍是 1**（`Register` 不变就不动）——脉冲被「冻」成了电平。
+2. `pulse_in` 回落后，`level_out` **仍是 1**（`Register` 的输入不变，输出就不动）——脉冲被「冻」成了电平。
 3. `clear` 拉高一拍 → 当拍时钟沿把 `level_out` 写回 `RESET_VALUE`（默认 0）——事件被「消费」完毕。
 
 关键点：`clear` 与 `pulse_in` 同拍为高时，**`clear` 胜出**。这来自 `Register` 的「最后赋值胜出」——我们会在 4.1.3 用源码确认。
 
 #### 4.1.3 源码精读
 
-整个模块就是一个 `Register` 实例，端口定义如下：
+整个模块只有一个 `Register` 实例。先看端口定义：
 
-[Pulse_Latch.v:10-19](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Latch.v#L10-L19)——只有 `clock`/`clear`/`pulse_in`/`level_out` 四个端口，`RESET_VALUE` 参数决定清零后的电平。
+[Pulse_Latch.v:10-19](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Latch.v#L10-L19)——只有 `clock`/`clear`/`pulse_in`/`level_out` 四个端口，`RESET_VALUE` 参数决定清零后的电平（默认 `1'b0`）。
 
 核心实现就这一处：
 
@@ -109,7 +111,7 @@ end
 
 [Register.v:65-73](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Register.v#L65-L73)——这是 u3-l2 讲过的「最后赋值胜出」惯用法：两个并列 `if`，非阻塞赋值 `<=` 在时间步末统一生效，**后一条** `if` 命中时盖掉前一条。所以 `clear` 与 `pulse_in` 同拍有效时，`clear` 必赢，`level_out` 被清成 `RESET_VALUE`。这正是 4 相握手（set/clear）需要的语义：`pulse_in` 置位、`clear` 清零，清零权威最高。
 
-> 注意：`pulse_in` 必须已经同步于 `clock`。`Pulse_Latch` 是个触发器，不是 CDC 同步器；跨时钟域的事件要先过 `CDC_*` 同步器，再喂给它。
+> 注意：`pulse_in` 必须已经同步于 `clock`。`Pulse_Latch` 是个触发器，**不是** CDC 同步器；跨时钟域的事件要先过 `CDC_*` 同步器，再喂给它。
 
 #### 4.1.4 代码实践
 
@@ -121,12 +123,17 @@ end
 
 ```verilog
 // 示例代码：仅供阅读理解，非项目原有文件
-reg pulse_in = 1'b0;
-reg clear    = 1'b0;
+reg  pulse_in = 1'b0;
+reg  clear    = 1'b0;
 wire level_out;
 
-Pulse_Latch event_capture(.clock(clock), .clear(clear),
-                          .pulse_in(pulse_in), .level_out(level_out));
+Pulse_Latch event_capture
+(
+    .clock     (clock),
+    .clear     (clear),
+    .pulse_in  (pulse_in),
+    .level_out (level_out)
+);
 
 // 测试序列（每行一个时钟周期）：
 // N  : pulse_in=1, clear=0   -> 下一拍 level_out=1
@@ -135,7 +142,7 @@ Pulse_Latch event_capture(.clock(clock), .clear(clear),
 // M  : pulse_in=0, clear=1   -> 下一拍 level_out=0（消费完毕）
 ```
 
-2. 把 `Pulse_Latch.v:21-33` 的接法对照上面序列，逐拍推演 `Register` 内部那两个 `if` 的命中情况。
+2. 把 [Pulse_Latch.v:21-33](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Latch.v#L21-L33) 的接法对照上面序列，逐拍推演 `Register` 内部那两个 `if` 的命中情况。
 3. 再构造一拍 `pulse_in=1` 且 `clear=1` 同时有效，预测 `level_out`。
 
 **需要观察的现象 / 预期结果**：
@@ -151,7 +158,7 @@ Pulse_Latch event_capture(.clock(clock), .clear(clear),
 
 **参考答案**：它会变成一个「**带同步清零的使能寄存器**」——`pulse_in` 当使能、采样 `set_value`、`clear` 同步清零。此时它捕获的不再是「事件有无」，而是「事件发生时的某个值」。换言之，原版 `Pulse_Latch` 是它的 1 bit 单值特例（`set_value` 恒为 1）。
 
-**练习 2**：为什么 `Pulse_Latch` 用 `Register` 的 `clock_enable` 来响应 `pulse_in`，而不是写一个 `always @(posedge clock) if (pulse_in) level_out <= 1;`？
+**练习 2**：为什么 `Pulse_Latch` 用 `Register` 的 `clock_enable` 来响应 `pulse_in`，而不是直接写一个 `always @(posedge clock) if (pulse_in) level_out <= 1;`？
 
 **参考答案**：复用 `Register` 把「数据/控制分离」做到了最底层（见 u4-l1、u6-l1）：复位（`clear`）的优先级、`last-assignment-wins` 的正确性、综合时触发器的推断，都由 `Register` 统一保证，不必在每个用到的地方重写时序逻辑、也就不必处处重新论证正确性。这正是本书「构建块库」的核心收益。
 
@@ -167,7 +174,9 @@ Pulse_Latch event_capture(.clock(clock), .clear(clear),
 
 > Converts a change in `level_in` (an edge) into a pulse lasting one clock cycle. **The input edge must be synchronous to the clock.** The pulse outputs are combinational: a given pulse is generated in the same cycle as the relevant change in signal level.
 
-两条要点先记住：① 输入必须已在本时钟域（它不是 CDC 同步器，内部只是一个 1 拍延迟寄存器）；② 输出是**组合的**，脉冲落在电平变化的**同一拍**。第二点是它与「先打一拍再异或」的朴素写法的关键区别，下面用源码讲透。
+[Pulse_Generator.v:4-7](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L4-L7)——两条要点先记住：① 输入必须已在本时钟域（它不是 CDC 同步器，内部只是一个 1 拍延迟寄存器）；② 输出是**组合的**，脉冲落在电平变化的**同一拍**。第二点是它与「先打一拍再异或」的朴素写法的关键区别，下面用源码讲透。
+
+一个常被忽视的用法（注释 [Pulse_Generator.v:9-11](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L9-L11)）：它能把一个「持续时间未知」的条件转成一次性事件，从而**消灭一些简单 FSM**。例如「某信号一变化就只更新一次寄存器」，不必写状态机记「是否已更新过」，取个上升沿当使能即可。
 
 #### 4.2.2 核心流程
 
@@ -198,7 +207,7 @@ level_in ──▶ [Register（延迟 1 拍）] ──▶ level_in_delayed
 
 端口给出三种边沿输出：
 
-[Pulse_Generator.v:15-22](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L15-L22)——`pulse_posedge_out`/`pulse_negedge_out`/`pulse_anyedge_out` 三个 `output reg`，对应上升沿、下降沿、任意沿。
+[Pulse_Generator.v:15-22](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L15-L22)——`pulse_posedge_out`/`pulse_negedge_out`/`pulse_anyedge_out` 三个 `output reg`，分别对应上升沿、下降沿、任意沿。
 
 **第一步：把输入延迟一拍。** 用一个常使能、不清零的 `Register` 当 D 触发器：
 
@@ -227,11 +236,7 @@ always @(*) begin
 end
 ```
 
-[Pulse_Generator.v:52-56](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L52-L56)——这是 u3-l1 讲过的「组合块用阻塞赋值 + 三元/等式比较」范式。注意它把布尔式写成等式比较 `(level_in == 1'b1)` 而非按位 `level_in`，这样能正确传播 X 值，也更好读。
-
-[Pulse_Generator.v:4-7](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L4-L7)——源码注释明确两条性质：输入边沿必须同步于时钟；脉冲输出是组合的、与电平变化同周期。
-
-一个常被忽视的用处（注释 [Pulse_Generator.v:9-11](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L9-L11)）：它能把一个「持续时间未知」的条件转成一次性事件，从而**消灭一些简单 FSM**。例如「某信号一变化就只更新一次寄存器」，不必写状态机记「是否已更新过」，用一个 `Pulse_Generator` 取上升沿当使能即可。
+[Pulse_Generator.v:52-56](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Generator.v#L52-L56)——这是 u3-l1 讲过的「组合块用阻塞赋值 + 等式比较」范式。注意它把布尔式写成等式比较 `(level_in == 1'b1)` 而非按位 `level_in`，这样能正确传播 X 值，也更好读。
 
 #### 4.2.4 代码实践
 
@@ -294,7 +299,7 @@ Pulse_Generator edge_detect
 
 > 9 input pulses will produce 3 output pulses; 5 input pulses will produce 1 output pulse; 7 input pulses will produce 2 output pulses.
 
-写成数学式，输入 \(N_{\text{in}}\) 个脉冲、除数为 \(d\) 时：
+[Pulse_Divider.v:5-11](https://github.com/laforest/FPGADesignElements/blob/2450a548eeee2a4dc1c06878b7c00617dd94e2a8/Pulse_Divider.v#L5-L11)——这就是「整数分频」的定义。写成数学式，输入 \(N_{\text{in}}\) 个脉冲、除数为 \(d\) 时：
 
 \[ N_{\text{out}} = \left\lfloor \frac{N_{\text{in}}}{d} \right\rfloor, \qquad r = N_{\text{in}} \bmod d \]
 
@@ -429,10 +434,10 @@ end
 
 ```verilog
 // 示例代码：仅供阅读理解
-localparam W = 4;                 // 计数位宽，需实例化时指定
-reg  [W-1:0] divisor = 4'd3;
-reg         pulses_in = 1'b0;
-reg         restart   = 1'b0;
+localparam W = 4;                  // 计数位宽，需实例化时指定
+reg  [W-1:0] divisor    = 4'd3;
+reg         pulses_in   = 1'b0;
+reg         restart     = 1'b0;
 wire        pulse_out, div_by_zero;
 
 Pulse_Divider
