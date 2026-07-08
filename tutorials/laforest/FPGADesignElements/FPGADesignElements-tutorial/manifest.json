@@ -1,0 +1,1225 @@
+{
+  "project": "FPGADesignElements",
+  "head": "2450a548eeee2a4dc1c06878b7c00617dd94e2a8",
+  "rationale": "本项目是一本\"FPGA 的标准库\"：用受限的 Verilog-2001 写成的 150+ 个可复用构建块，外加 Verilog/系统设计标准、ready/valid 握手与 CDC 理论等概念章，并通过 v2h.py 把带注释的源码直接渲染成网页（注释即 Markdown）。学习路线据此分三层。入门层用 4 个单元建立\"读得懂、跑得起、懂规范\"的基础：项目定位与目录约定、Verilog 编码规范(上：类型/参数/位宽；下：赋值/三元/复位)、系统设计标准与模块化(Core/Instance/Adapter/Shim)。进阶层按依赖关系自底向上铺开构件族：组合逻辑→寄存器/流水线寄存器→RAM→算术与计数器→ready/valid 握手→以 Skid Buffer 为范本的 COTTC FSM 方法→仲裁与同步原语→弹性流水线控制家族(buffer/fork/join/branch/merge/gate)→CDC 理论与基础同步器。专家层聚焦跨主题难点与工程化：CDC 字/脉冲/FIFO、脉冲逻辑与接口转换、位操作库、由构建块组装的复合引擎(Iterator/握手乘法器/差分反串行化)，最后落到工具链、二次开发与仿真验证。每篇讲义只解决一个主题、引用 1-6 个真实源码文件并配一个动手任务；讲义间通过 depends_on 形成清晰 DAG，使读者从零开始逐步具备阅读、使用并向本书贡献新模块的能力。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 FPGA Design Elements",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与阅读方式",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍这本自称'FPGA 的 libc'的在线书是什么、如何在线与本地阅读，以及 index.html 的分类目录如何组织。",
+          "learning_goals": [
+            "理解项目定位与'硬件标准库'比喻",
+            "学会本地 clone 并用浏览器打开 index.html 进行导航",
+            "识别每个模块页 Source/License/Index 链接与源码一一对应的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "outline.html",
+            "index.html"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "阅读入口",
+            "分类目录"
+          ],
+          "practice_task": "克隆仓库并用浏览器打开 index.html，列出顶层分类及每个分类下 3 个代表性模块，并说明每个模块页面顶部 Source/License/Index 三个链接的含义。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与开箱即用约束",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-conventions.md",
+          "level": "beginner",
+          "topic": "讲解扁平单目录结构、.v/.vh/.html/.py 文件职责、一模块一文件命名约定，以及'参数默认值为 0'这一有意设计带来的后果。",
+          "learning_goals": [
+            "理解扁平目录与一模块一文件的命名约定",
+            "理解 v2h 生成的 .html 与 .v 一一对应",
+            "理解'参数默认 0/空串'为何使模块不能直接综合、必须实例化设置参数"
+          ],
+          "source_files": [
+            "README.md",
+            "index.html",
+            "CONTRIBUTING.md",
+            "v2h.py"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "文件命名约定",
+            "参数默认值约束"
+          ],
+          "practice_task": "任选一个模块，找出其 .v、.html 以及在 index.html 中的链接三处对应关系；解释若实例化时忘记设置 WORD_WIDTH 会发生什么。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Verilog 编码规范（上）：类型、参数与位宽",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "受限的 Verilog-2001 与 default_nettype",
+          "order": 1,
+          "filename": "u2-l1-verilog2001-and-default-nettype.md",
+          "level": "beginner",
+          "topic": "讲解为何选用 Verilog-2001 可综合子集、`default_nettype none`、reg/wire 使用规则，以及只用 0/1 值与寄存器初始化。",
+          "learning_goals": [
+            "理解 Verilog-2001 选型与避免 SystemVerilog 的理由",
+            "掌握 default_nettype none 与 reg/wire 的使用约定",
+            "掌握寄存器初始化以避免 X/Z 传播"
+          ],
+          "source_files": [
+            "verilog.html",
+            "Register.v"
+          ],
+          "minimal_modules": [
+            "语言版本选型",
+            "default_nettype",
+            "reg/wire 与初始化"
+          ],
+          "practice_task": "按 Register.v 的头部风格写一个最小模块：包含 `default_nettype none`、参数化端口、用 initial 初始化 reg 输出端口。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "参数化与位宽处理",
+          "order": 2,
+          "filename": "u2-l2-parameterization-and-widths.md",
+          "level": "beginner",
+          "topic": "讲解参数默认 0、localparam、位宽匹配、拼接/复制、参数化位宽初始化的陷阱，以及 clog2 函数的用途。",
+          "learning_goals": [
+            "掌握用参数定义端口宽度与 localparam 内部常量",
+            "掌握位宽匹配与拼接/复制惯用法",
+            "理解参数化位宽初始化的问题与 clog2 用法"
+          ],
+          "source_files": [
+            "verilog.html",
+            "Register.v",
+            "clog2_function.vh"
+          ],
+          "minimal_modules": [
+            "参数与 localparam",
+            "位宽匹配",
+            "clog2 函数"
+          ],
+          "practice_task": "用 {WORD_WIDTH{1'b0}} 复制法为一个参数化寄存器构造 RESET_VALUE 常量；并用 clog2 计算索引 N 个项目所需的二进制位数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Verilog 编码规范（下）：赋值、逻辑与复位",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "赋值风格、三元运算符与逻辑设计",
+          "order": 1,
+          "filename": "u3-l1-assignments-and-ternary.md",
+          "level": "beginner",
+          "topic": "讲解组合用阻塞、时钟用非阻塞、三元优于 if/else、链式三元不嵌套、向后依赖，以及把布尔表达式写成等式比较并估算 LUT 用量。",
+          "learning_goals": [
+            "掌握阻塞/非阻塞赋值分用于组合/时钟块的规则",
+            "掌握链式三元写法并避免嵌套三元",
+            "掌握布尔等式比较写法与按 LUT 输入项数估算逻辑"
+          ],
+          "source_files": [
+            "verilog.html",
+            "Pipeline_Skid_Buffer.v"
+          ],
+          "minimal_modules": [
+            "阻塞/非阻塞赋值",
+            "三元运算符链式",
+            "布尔表达式与 LUT 估算"
+          ],
+          "practice_task": "把一段嵌套三元的逻辑改写成两行链式阻塞赋值；并估算一个 4:1 mux 占用多少个 6 输入 LUT。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "复位哲学与 Register 模块",
+          "order": 2,
+          "filename": "u3-l2-resets-and-register-module.md",
+          "level": "beginner",
+          "topic": "讲解上电复位、同步 vs 异步复位、'最后赋值胜出'惯用法，以及 Register 模块如何封装这些取舍。",
+          "learning_goals": [
+            "理解 FPGA 上电复位与优先使用同步复位的原因",
+            "掌握 last-assignment-wins 复位写法",
+            "理解把复位封装进 Register 模块的意义"
+          ],
+          "source_files": [
+            "verilog.html",
+            "Register.v",
+            "Register_areset.v"
+          ],
+          "minimal_modules": [
+            "上电/同步/异步复位",
+            "last-assignment-wins",
+            "Register 封装"
+          ],
+          "practice_task": "用 last-assignment-wins 写一个带 clock_enable 与 clear 的时钟 always 块；说明为何 clear 不能用三元运算符实现。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "系统设计标准与模块化哲学",
+      "level": "beginner",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "极致模块化与构建块库",
+          "order": 1,
+          "filename": "u4-l1-modularization-and-building-blocks.md",
+          "level": "beginner",
+          "topic": "讲解为何极度模块化、数据/控制/接口分离、构建块库思想，以及用 elaboration/synthesis/Place&Route 三阶段原理图检查设计。",
+          "learning_goals": [
+            "理解模块化的收益与'把无关连接移入子模块'的分解原则",
+            "理解处理/控制/接口三分的设计组织",
+            "学会用综合三阶段原理图发现缺失连接与流水线对齐问题"
+          ],
+          "source_files": [
+            "system.html"
+          ],
+          "minimal_modules": [
+            "模块化原则",
+            "数据/控制/接口分离",
+            "构建块库"
+          ],
+          "practice_task": "给定一段混在一起的逻辑，提出把它拆成'处理+控制+接口'三个模块的方案，并说明这样拆分后能在哪一阶段原理图里看到好处。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Core/Instance/Adapter/Shim 分层与约束",
+          "order": 2,
+          "filename": "u4-l2-system-architecture-and-constraints.md",
+          "level": "beginner",
+          "topic": "讲解自底向上的 Core/Instance/Adapter/Shim 四层架构、按类型分离约束文件，以及 ASYNC_REG 等必须写在源码里的约束。",
+          "learning_goals": [
+            "理解四层架构各自的职责与向上抽象的方向",
+            "理解把位流/布局/引脚/时序/优化约束分文件管理",
+            "理解哪些约束(如 ASYNC_REG、PRESERVE)必须放在源码中"
+          ],
+          "source_files": [
+            "system.html",
+            "CDC_Bit_Synchronizer.v"
+          ],
+          "minimal_modules": [
+            "四层架构",
+            "约束文件分离",
+            "源码内约束"
+          ],
+          "practice_task": "为一个简单设计画出 Core/Instance/Adapter/Shim 四层；指出 CDC_Bit_Synchronizer 中 ASYNC_REG/PRESERVE/IOB 等属性为何要写在源码里。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "组合逻辑基础构件",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "常量、置零与位/字归约",
+          "order": 1,
+          "filename": "u5-l1-constant-annuller-reducer.md",
+          "level": "intermediate",
+          "topic": "讲解 Constant、Annuller、Bit_Reducer、Word_Reverser/Reducer 这些最基础的组合构件，如何体现'连一个与门阵列都做成模块'的思想。",
+          "learning_goals": [
+            "理解为何把常量与门阵列封装成模块",
+            "掌握 Annuller 与 Bit_Reducer 的用法",
+            "理解模块即文档、模块即设计意图"
+          ],
+          "source_files": [
+            "Constant.v",
+            "Annuller.v",
+            "Bit_Reducer.v",
+            "Word_Reverser.v"
+          ],
+          "minimal_modules": [
+            "Constant",
+            "Annuller",
+            "Bit_Reducer/Word_Reducer"
+          ],
+          "practice_task": "用 Annuller 配合一个数据通路实现'按使能清零输出'；并用 Bit_Reducer 对一个向量做 AND 归约。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "多路选择器、解复用与地址译码",
+          "order": 2,
+          "filename": "u5-l2-mux-demux-address.md",
+          "level": "intermediate",
+          "topic": "讲解二进制/独热/位宽多路选择器、解复用器，以及静态/行为/算术地址译码器与地址翻译器的选型。",
+          "learning_goals": [
+            "掌握各类 mux 的结构与选型",
+            "掌握 demux 与地址译码/翻译",
+            "理解 one-hot 与 binary 编码的取舍"
+          ],
+          "source_files": [
+            "Multiplexer_Binary_Behavioural.v",
+            "Multiplexer_One_Hot.v",
+            "Demultiplexer_Binary.v",
+            "Address_Decoder_Static.v"
+          ],
+          "minimal_modules": [
+            "多路选择器",
+            "解复用器",
+            "地址译码/翻译"
+          ],
+          "practice_task": "用 Address_Decoder_Static 配合 Multiplexer_One_Hot 搭一个'地址→片选'简单逻辑，并说明为何选独热。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Dyadic/Triadic 参数化布尔运算器",
+          "order": 3,
+          "filename": "u5-l3-dyadic-triadic-boolean.md",
+          "level": "intermediate",
+          "topic": "讲解用运算表参数化的二元/三元布尔运算器，如何用一个模块实现多种布尔函数。",
+          "learning_goals": [
+            "理解用参数(运算编码)选择布尔函数的设计",
+            "掌握 Dyadic/Triadic 运算器的实例化",
+            "理解运算表 .vh 的组织方式"
+          ],
+          "source_files": [
+            "Dyadic_Boolean_Operator.v",
+            "Dyadic_Boolean_Operations.vh",
+            "Triadic_Boolean_Operator.v"
+          ],
+          "minimal_modules": [
+            "Dyadic 运算器",
+            "运算表",
+            "Triadic 运算器"
+          ],
+          "practice_task": "实例化一个 Dyadic_Boolean_Operator 实现 XOR；并解释 Triadic 运算器为何有双输出。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "寄存器与流水线寄存器",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Register 家族",
+          "order": 1,
+          "filename": "u6-l1-register-family.md",
+          "level": "intermediate",
+          "topic": "讲解 Register、Register_Toggle、Register_areset 三个寄存器变体及其控制信号差异。",
+          "learning_goals": [
+            "掌握 Register 的 clock_enable/clear 控制",
+            "掌握 toggle 与 areset 变体的用途",
+            "理解何时应使用哪种寄存器变体"
+          ],
+          "source_files": [
+            "Register.v",
+            "Register_Toggle.v",
+            "Register_areset.v"
+          ],
+          "minimal_modules": [
+            "Register",
+            "Register_Toggle",
+            "Register_areset"
+          ],
+          "practice_task": "用 Register_Toggle 实现一个按 enable 翻转的标志位；并对比 Register_areset 的异步复位敏感性列表写法。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "寄存器流水线",
+          "order": 2,
+          "filename": "u6-l2-register-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 Register_Pipeline、Register_Pipeline_Simple、Register_Pipeline_Variable 三种流水线寄存器，如何实现固定/可变深度延迟。",
+          "learning_goals": [
+            "掌握固定深度流水线寄存器的用法",
+            "掌握可变深度流水线寄存器",
+            "理解移位方向与初始化"
+          ],
+          "source_files": [
+            "Register_Pipeline.v",
+            "Register_Pipeline_Simple.v",
+            "Register_Pipeline_Variable.v"
+          ],
+          "minimal_modules": [
+            "Register_Pipeline",
+            "Simple Pipeline",
+            "Variable Pipeline"
+          ],
+          "practice_task": "实例化一个 4 级 Register_Pipeline 实现固定延迟；并说明 Variable 版本的深度如何在运行时改变。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "片上存储器 (RAM)",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "单端口与双端口 RAM 推断",
+          "order": 1,
+          "filename": "u7-l1-ram-inference.md",
+          "level": "intermediate",
+          "topic": "讲解 RAM_Single_Port 的写转发(READ_NEW_DATA)、用阻塞/非阻塞赋值推断内存的差异，以及 Simple/True 双端口 RAM 的选型。",
+          "learning_goals": [
+            "理解读写同址时返回新/旧数据的推断控制",
+            "掌握阻塞/非阻塞赋值推断 BRAM 的技巧",
+            "掌握双端口 RAM 的选型"
+          ],
+          "source_files": [
+            "RAM_Single_Port.v",
+            "RAM_Simple_Dual_Port.v",
+            "RAM_True_Dual_Port.v"
+          ],
+          "minimal_modules": [
+            "单端口 RAM",
+            "写转发",
+            "双端口 RAM"
+          ],
+          "practice_task": "解释 RAM_Single_Port 中 READ_NEW_DATA=1 分支为何使用阻塞赋值；并为一个寄存器堆选择 Simple_Dual_Port 还是 True_Dual_Port。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "多端口存储器与初始化",
+          "order": 2,
+          "filename": "u7-l2-multiport-ram-and-init.md",
+          "level": "intermediate",
+          "topic": "讲解用逻辑单元实现的多端口 RAM(RAM_Multiported_LE)、复制法 1WnR、冲突处理，以及内存初始化文件。",
+          "learning_goals": [
+            "理解多端口 RAM 的实现策略与读写冲突处理",
+            "掌握 1WnR 复制法支持多读端口",
+            "掌握内存初始化文件与 $readmemh"
+          ],
+          "source_files": [
+            "RAM_Multiported_LE.v",
+            "RAM_1WnR_Replicated.v",
+            "RAM_generate_empty_init_file.py"
+          ],
+          "minimal_modules": [
+            "多端口 LE RAM",
+            "1WnR 复制",
+            "内存初始化"
+          ],
+          "practice_task": "用 RAM_generate_empty_init_file.py 生成一个空初始化文件；并说明 RAM_1WnR_Replicated 如何通过复制支持多个读端口。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "整数算术与计数器",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "加减法、进位与算术谓词",
+          "order": 1,
+          "filename": "u8-l1-adder-predicates.md",
+          "level": "intermediate",
+          "topic": "讲解 Adder_Subtractor_Binary、CarryIn_Binary、Arithmetic_Predicates_Binary、Width_Adjuster，以及把算术推断技巧封装进模块的做法。",
+          "learning_goals": [
+            "掌握加减法器与进位链",
+            "掌握算术谓词(比较)模块",
+            "掌握位宽调整与符号/零扩展"
+          ],
+          "source_files": [
+            "Adder_Subtractor_Binary.v",
+            "CarryIn_Binary.v",
+            "Arithmetic_Predicates_Binary.v",
+            "Width_Adjuster.v"
+          ],
+          "minimal_modules": [
+            "加减法器",
+            "进位/谓词",
+            "位宽调整"
+          ],
+          "practice_task": "用 Arithmetic_Predicates_Binary 实现有符号比较；并用 Width_Adjuster 对一个窄向量做零扩展。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "二进制计数器与可复用函数",
+          "order": 2,
+          "filename": "u8-l2-counter-and-functions.md",
+          "level": "intermediate",
+          "topic": "讲解 Counter_Binary 如何由 Adder_Subtractor + Register 组合而成，以及 clog2 等可复用函数库的组织。",
+          "learning_goals": [
+            "理解计数器=加法器+寄存器的组合实现",
+            "掌握增量/初值/级联计数",
+            "掌握 .vh 函数库的包含用法"
+          ],
+          "source_files": [
+            "Counter_Binary.v",
+            "clog2_function.vh"
+          ],
+          "minimal_modules": [
+            "Counter_Binary",
+            "加法器+寄存器组合",
+            "函数库"
+          ],
+          "practice_task": "实例化 Counter_Binary 实现'每 N 字节计数一次'的 INCREMENT 用法；并用 clog2 计算地址位宽。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "Ready/Valid 握手原理",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "握手接口与握手过程",
+          "order": 1,
+          "filename": "u9-l1-handshake-interfaces.md",
+          "level": "intermediate",
+          "topic": "讲解 source/destination 接口、valid/ready/data 三信号、握手完成条件，以及'AXI 并不根本'的观点。",
+          "learning_goals": [
+            "掌握 source/destination 接口与三信号定义",
+            "掌握握手完成的判定条件",
+            "理解为何从 ready/valid 原语自建接口而非直接用 AXI"
+          ],
+          "source_files": [
+            "handshake.html"
+          ],
+          "minimal_modules": [
+            "接口定义",
+            "握手过程",
+            "AXI 不根本"
+          ],
+          "practice_task": "画出一个 source→destination 连接并标注 valid/ready/data 方向；说明在哪个时钟周期握手完成。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "死锁/活锁避免与底层同步",
+          "order": 2,
+          "filename": "u9-l2-deadlock-and-synchronization.md",
+          "level": "intermediate",
+          "topic": "讲解避免接口内组合环、死锁/活锁约束、内部状态只能在握手完成周期改变，以及 OK_IN/OK_OUT 会合同步的本质。",
+          "learning_goals": [
+            "掌握用信号约束避免死锁与活锁",
+            "掌握 handshake_complete 门控内部状态",
+            "理解 ready/valid 之上的会合(rendez-vous)同步"
+          ],
+          "source_files": [
+            "handshake.html",
+            "Pipeline_Skid_Buffer.v"
+          ],
+          "minimal_modules": [
+            "组合环与死锁/活锁",
+            "handshake_complete",
+            "会合同步"
+          ],
+          "practice_task": "写出 handshake_complete 的组合表达式并用它门控一个包计数器的状态更新；解释为何 valid 一旦拉高就必须保持到握手完成。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "Skid Buffer 与 FSM 实现方法",
+      "level": "intermediate",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "Skid Buffer 与 COTTC FSM 方法",
+          "order": 1,
+          "filename": "u10-l1-skid-buffer-fsm.md",
+          "level": "intermediate",
+          "topic": "以 Pipeline_Skid_Buffer 为范例讲解数据/控制分离、状态图、load/flow/fill/flush/unload 等数据通路变换，以及 COTTC 状态机设计法。",
+          "learning_goals": [
+            "理解 skid buffer 解决的流水线握手矛盾",
+            "掌握数据通路与控制通路的分离",
+            "掌握 COTTC(约束/操作/变换/转移/控制)状态机设计法"
+          ],
+          "source_files": [
+            "Pipeline_Skid_Buffer.v",
+            "fsm.html"
+          ],
+          "minimal_modules": [
+            "Skid Buffer",
+            "数据/控制分离",
+            "COTTC FSM"
+          ],
+          "practice_task": "追踪一次'满状态下输入输出同时握手'的状态变换路径；并列出 EMPTY/BUSY/FULL 三态及它们之间的边。",
+          "depends_on": [
+            "u9-l2",
+            "u6-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Half Buffer 与延迟握手",
+          "order": 2,
+          "filename": "u10-l2-half-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解 Pipeline_Half_Buffer 如何用延迟握手实现迭代计算控制，以及它与 Skid Buffer 的区别。",
+          "learning_goals": [
+            "理解延迟握手对吞吐的影响",
+            "掌握 Half Buffer 作为迭代控制机制",
+            "区分 Half Buffer 与 Skid Buffer 的适用场景"
+          ],
+          "source_files": [
+            "Pipeline_Half_Buffer.v",
+            "handshake.html"
+          ],
+          "minimal_modules": [
+            "Half Buffer",
+            "延迟握手",
+            "迭代控制"
+          ],
+          "practice_task": "解释 Half Buffer 在等时流水线中为何使吞吐减半、却适合迭代计算；画出其内部 valid/ready 路径。",
+          "depends_on": [
+            "u10-l1",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "仲裁与同步原语",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "优先编码与仲裁器",
+          "order": 1,
+          "filename": "u11-l1-priority-and-arbiters.md",
+          "level": "intermediate",
+          "topic": "讲解 Priority_Encoder、Arbiter_Priority、Arbiter_Round_Robin 的结构与公平性差异。",
+          "learning_goals": [
+            "掌握优先编码器",
+            "掌握优先仲裁与轮询仲裁",
+            "理解公平性与饥饿的取舍"
+          ],
+          "source_files": [
+            "Priority_Encoder.v",
+            "Arbiter_Priority.v",
+            "Arbiter_Round_Robin.v"
+          ],
+          "minimal_modules": [
+            "优先编码器",
+            "优先仲裁器",
+            "轮询仲裁器"
+          ],
+          "practice_task": "用 Arbiter_Round_Robin 实现两路请求的公平授权；并对比优先仲裁器可能出现的饥饿问题。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "Muller C 元素与流水线同步",
+          "order": 2,
+          "filename": "u11-l2-muller-c-and-synchronizer.md",
+          "level": "intermediate",
+          "topic": "讲解 Synchronous_Muller_C_Element 作为会合同步原语，以及 Pipeline_Synchronizer_Lazy 的多路同步。",
+          "learning_goals": [
+            "理解 Muller C 元素的会合语义",
+            "掌握流水线同步器的多路会合",
+            "联系握手章里的 OK_IN/OK_OUT 会合"
+          ],
+          "source_files": [
+            "Synchronous_Muller_C_Element.v",
+            "Pipeline_Synchronizer_Lazy.v"
+          ],
+          "minimal_modules": [
+            "Muller C 元素",
+            "流水线同步器",
+            "会合"
+          ],
+          "practice_task": "用 Muller C 元素解释'双方都 OK 才一起前进'；并说明 Pipeline_Synchronizer_Lazy 如何实现 N 路会合。",
+          "depends_on": [
+            "u11-l1",
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "弹性流水线控制构件家族",
+      "level": "intermediate",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "缓冲与停顿平滑",
+          "order": 1,
+          "filename": "u12-l1-buffers-and-stall-smoother.md",
+          "level": "intermediate",
+          "topic": "讲解 Pipeline_FIFO_Buffer、Pipeline_Credit_Buffer、Pipeline_Stall_Smoother、Skid_Buffer_Pipeline 的缓冲深度与停顿处理。",
+          "learning_goals": [
+            "掌握 FIFO/Credit 缓冲的深度与流控",
+            "掌握停顿平滑器吸收偶发停顿",
+            "理解 skid buffer 链"
+          ],
+          "source_files": [
+            "Pipeline_FIFO_Buffer.v",
+            "Pipeline_Credit_Buffer.v",
+            "Pipeline_Stall_Smoother.v",
+            "Skid_Buffer_Pipeline.v"
+          ],
+          "minimal_modules": [
+            "FIFO 缓冲",
+            "Credit 缓冲",
+            "停顿平滑"
+          ],
+          "practice_task": "为'偶发停顿的下游'选择 Stall_Smoother 所需深度；并比较 FIFO_Buffer 与 Credit_Buffer 的控制差异。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "Fork/Join/Branch 分流与合流",
+          "order": 2,
+          "filename": "u12-l2-fork-join-branch.md",
+          "level": "intermediate",
+          "topic": "讲解 Pipeline_Fork(lazy/eager/blocking)、Pipeline_Join、Pipeline_Branch_One_Hot 的分流与会合语义。",
+          "learning_goals": [
+            "掌握三种 Fork 的语义差异",
+            "掌握 Join 的会合",
+            "掌握 Branch 的分流"
+          ],
+          "source_files": [
+            "Pipeline_Fork_Blocking.v",
+            "Pipeline_Fork_Lazy.v",
+            "Pipeline_Join.v",
+            "Pipeline_Branch_One_Hot.v"
+          ],
+          "minimal_modules": [
+            "Fork 变体",
+            "Join",
+            "Branch"
+          ],
+          "practice_task": "解释 Fork_Blocking 为何可能阻塞上游；并用 Fork + Join 实现一对二再合一的结构。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "Merge 仲裁合流与控制门",
+          "order": 3,
+          "filename": "u12-l3-merge-and-gate.md",
+          "level": "intermediate",
+          "topic": "讲解 Pipeline_Merge(One-Hot/Priority/Round-Robin)、Pipeline_Gate、Pipeline_Credit_Gate 如何复用仲裁器实现合流与门控。",
+          "learning_goals": [
+            "掌握三类 Merge 的合流",
+            "掌握 Gate 的门控",
+            "理解 Merge 复用仲裁器"
+          ],
+          "source_files": [
+            "Pipeline_Merge_Round_Robin.v",
+            "Pipeline_Merge_Priority.v",
+            "Pipeline_Gate.v",
+            "Pipeline_Credit_Gate.v"
+          ],
+          "minimal_modules": [
+            "Merge 合流",
+            "Gate",
+            "Credit Gate"
+          ],
+          "practice_task": "用 Pipeline_Merge_Round_Robin 合流两路数据流；并用 Pipeline_Gate 实现按使能放行。",
+          "depends_on": [
+            "u12-l2",
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "时钟域穿越 (CDC) 理论与基础同步",
+      "level": "intermediate",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "亚稳态与 CDC 基本理论",
+          "order": 1,
+          "filename": "u13-l1-cdc-theory.md",
+          "level": "intermediate",
+          "topic": "讲解亚稳态、同步器 1-3 周期不确定延迟、单次只能同步一位、以及 1.5x/3 边沿的频率约束。",
+          "learning_goals": [
+            "理解亚稳态的成因",
+            "掌握同步器不确定延迟与基本构建块",
+            "掌握单位同步规则与 3 边沿频率约束"
+          ],
+          "source_files": [
+            "cdc.html",
+            "CDC_Bit_Synchronizer.v"
+          ],
+          "minimal_modules": [
+            "亚稳态",
+            "同步器延迟",
+            "频率约束"
+          ],
+          "practice_task": "给定发送/接收时钟频率，判断一个单周期脉冲能否被可靠采样；并计算最坏情况下所需的 3 个接收时钟边沿。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "复位同步与标志同步",
+          "order": 2,
+          "filename": "u13-l2-reset-and-flag-sync.md",
+          "level": "intermediate",
+          "topic": "讲解 Reset_Synchronizer、CDC_Flag_Bit、避免逻辑毛刺，以及 ASYNC_REG/PRESERVE/IOB 等同步器布局约束。",
+          "learning_goals": [
+            "掌握复位同步器",
+            "掌握标志位同步",
+            "理解毛刺来源与同步器寄存器必须紧挨布局的约束"
+          ],
+          "source_files": [
+            "Reset_Synchronizer.v",
+            "CDC_Flag_Bit.v",
+            "CDC_Bit_Synchronizer.v"
+          ],
+          "minimal_modules": [
+            "复位同步器",
+            "标志同步",
+            "毛刺与布局约束"
+          ],
+          "practice_task": "用 Reset_Synchronizer 为一个时钟域生成同步复位；并解释为何同步器输入必须直接来自寄存器、中间不能有组合逻辑。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "CDC 数据/脉冲同步与 FIFO",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "字同步与脉冲同步",
+          "order": 1,
+          "filename": "u14-l1-word-and-pulse-sync.md",
+          "level": "advanced",
+          "topic": "讲解 CDC_Word_Synchronizer(单控制位+直接采多位)、CDC_Pulse_Synchronizer 的 2 相/4 相 toggling 方法。",
+          "learning_goals": [
+            "掌握多位数据跨域的同步策略",
+            "掌握脉冲同步的 toggling 原理",
+            "区分 2 相与 4 相握手"
+          ],
+          "source_files": [
+            "CDC_Word_Synchronizer.v",
+            "CDC_Pulse_Synchronizer_4phase.v",
+            "CDC_Pulse_Synchronizer_2phase.v"
+          ],
+          "minimal_modules": [
+            "字同步",
+            "脉冲同步",
+            "2/4 相握手"
+          ],
+          "practice_task": "解释 CDC_Word_Synchronizer 为何只同步一个 valid、却直接采样数据；并对比 2 相与 4 相脉冲同步所用边沿数。",
+          "depends_on": [
+            "u13-l2",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "Flancter 与 CDC FIFO",
+          "order": 2,
+          "filename": "u14-l2-flancter-and-cdc-fifo.md",
+          "level": "advanced",
+          "topic": "讲解 Weinstein_Flancter 的跨域事件计数、CDC_FIFO_Buffer/CDC_FIFO_Repacker 的 Gray 码指针与跨域 FIFO 位宽转换。",
+          "learning_goals": [
+            "理解 Flancter 跨域计数原理",
+            "掌握 CDC FIFO 的 Gray 码指针",
+            "理解 FIFO Repacker 的位宽重组"
+          ],
+          "source_files": [
+            "Weinstein_Flancter.v",
+            "CDC_FIFO_Buffer.v",
+            "CDC_FIFO_Repacker.v"
+          ],
+          "minimal_modules": [
+            "Flancter",
+            "CDC FIFO",
+            "Gray 指针"
+          ],
+          "practice_task": "解释 Flancter 如何用 toggle + 同步器统计快事件；并说明 CDC FIFO 为何用 Gray 码做读写指针跨域。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "脉冲逻辑与接口转换",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "脉冲生成、锁存与分频",
+          "order": 1,
+          "filename": "u15-l1-pulse-gen-latch-div.md",
+          "level": "advanced",
+          "topic": "讲解 Pulse_Latch、Pulse_Generator、Pulse_Divider 的脉冲处理与时序。",
+          "learning_goals": [
+            "掌握脉冲锁存",
+            "掌握脉冲生成(边沿检测)",
+            "掌握脉冲分频"
+          ],
+          "source_files": [
+            "Pulse_Latch.v",
+            "Pulse_Generator.v",
+            "Pulse_Divider.v"
+          ],
+          "minimal_modules": [
+            "脉冲锁存",
+            "脉冲生成",
+            "脉冲分频"
+          ],
+          "practice_task": "用 Pulse_Generator 检测一个电平信号的上升沿；并用 Pulse_Divider 对脉冲流分频。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "脉冲与流水线互转",
+          "order": 2,
+          "filename": "u15-l2-pulse-pipeline-interface.md",
+          "level": "advanced",
+          "topic": "讲解 Pulse_to_Pipeline 与 Pipeline_to_Pulse 如何在脉冲接口与 ready/valid 弹性接口之间转换。",
+          "learning_goals": [
+            "掌握脉冲→流水线的转换",
+            "掌握流水线→脉冲的转换",
+            "理解与 CDC 及握手的关系"
+          ],
+          "source_files": [
+            "Pulse_to_Pipeline.v",
+            "Pipeline_to_Pulse.v"
+          ],
+          "minimal_modules": [
+            "Pulse_to_Pipeline",
+            "Pipeline_to_Pulse",
+            "接口转换"
+          ],
+          "practice_task": "把一个脉冲源接到弹性流水线(用 Pulse_to_Pipeline)；反之把流水线事件转成脉冲输出。",
+          "depends_on": [
+            "u15-l1",
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u16",
+      "title": "位操作与高级布尔运算",
+      "level": "advanced",
+      "order": 16,
+      "lectures": [
+        {
+          "id": "u16-l1",
+          "title": "计数、检测与投票",
+          "order": 1,
+          "filename": "u16-l1-popcount-ntz-voting.md",
+          "level": "advanced",
+          "topic": "讲解 Population_Count、Number_of_Trailing/Leading_Zeros、Hamming_Distance、Bit_Voting 的结构与用途。",
+          "learning_goals": [
+            "掌握 popcount 的电路结构",
+            "掌握 ntz/nlz 的实现",
+            "掌握汉明距离与位投票"
+          ],
+          "source_files": [
+            "Population_Count.v",
+            "Number_of_Trailing_Zeros.v",
+            "Number_of_Leading_Zeros.v",
+            "Hamming_Distance.v",
+            "Bit_Voting.v"
+          ],
+          "minimal_modules": [
+            "popcount",
+            "ntz/nlz",
+            "汉明距离/位投票"
+          ],
+          "practice_task": "用 Population_Count 统计向量中 1 的个数；并用 Hamming_Distance 比较两个向量的差异位数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u16-l2",
+          "title": "Bitmask 位操作库",
+          "order": 2,
+          "filename": "u16-l2-bitmask-library.md",
+          "level": "advanced",
+          "topic": "讲解 isolate/turn/thermometer/next-constant-popcount 等 bitmask 位操作惯用法的电路实现。",
+          "learning_goals": [
+            "掌握右起 1/0 位的隔离与翻转",
+            "掌握温度计码生成",
+            "掌握恒定 popcount 的下一排列"
+          ],
+          "source_files": [
+            "Bitmask_Isolate_Rightmost_1_Bit.v",
+            "Bitmask_Next_with_Constant_Popcount_ntz.v",
+            "Bitmask_Thermometer_from_Count.v",
+            "Turn_Off_Rightmost_1_Bit.v"
+          ],
+          "minimal_modules": [
+            "位隔离/翻转",
+            "温度计码",
+            "恒定 popcount"
+          ],
+          "practice_task": "用 Bitmask_Next_with_Constant_Popcount_ntz 生成下一个等 popcount 排列；并解释 Turn_Off_Rightmost_1_Bit 对应的 x & (x-1) 技巧。",
+          "depends_on": [
+            "u16-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u17",
+      "title": "复合流水线引擎",
+      "level": "advanced",
+      "order": 17,
+      "lectures": [
+        {
+          "id": "u17-l1",
+          "title": "Pipeline_Iterator 与握手乘法器",
+          "order": 1,
+          "filename": "u17-l1-iterator-and-handshake-mult.md",
+          "level": "advanced",
+          "topic": "讲解 Pipeline_Iterator 作为迭代计算引擎的控制结构，以及 Pipeline_Handshake_Multiplier 的握手数据通路。",
+          "learning_goals": [
+            "理解迭代引擎的握手控制",
+            "掌握握手乘法器的数据通路",
+            "理解用构建块组装大型引擎"
+          ],
+          "source_files": [
+            "Pipeline_Iterator.v",
+            "Pipeline_Handshake_Multiplier.v"
+          ],
+          "minimal_modules": [
+            "迭代引擎",
+            "握手乘法器",
+            "引擎组装"
+          ],
+          "practice_task": "概述一个迭代算法(如恢复余数除法)如何映射到 Pipeline_Iterator；并说明 Handshake_Multiplier 的启动/完成握手时序。",
+          "depends_on": [
+            "u10-l1",
+            "u12-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u17-l2",
+          "title": "串并转换与差分反串行化",
+          "order": 2,
+          "filename": "u17-l2-serial-parallel-deserializer.md",
+          "level": "advanced",
+          "topic": "讲解 Pipeline_Serial_Parallel、Parallel_Serial、Deserializer_Differential_1toN 与 IDELAYCTRL 的高速接口应用。",
+          "learning_goals": [
+            "掌握串并/并串转换",
+            "掌握 1:N 差分反串行化的比特重排时序",
+            "理解 IDELAYCTRL 在高速反串行化中的作用"
+          ],
+          "source_files": [
+            "Pipeline_Serial_Parallel.v",
+            "Parallel_Serial.v",
+            "Deserializer_Differential_1toN.v",
+            "IDELAYCTRL_Instance.v"
+          ],
+          "minimal_modules": [
+            "串并转换",
+            "差分反串行化",
+            "IDELAYCTRL"
+          ],
+          "practice_task": "画出 1:4 反串行化的比特重排时序图；并说明为何在差分反串行化前需要 IDELAYCTRL_Instance。",
+          "depends_on": [
+            "u17-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u18",
+      "title": "工具链、二次开发与验证",
+      "level": "advanced",
+      "order": 18,
+      "lectures": [
+        {
+          "id": "u18-l1",
+          "title": "文档与实例生成工具链",
+          "order": 1,
+          "filename": "u18-l1-toolchain-and-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 v2h.py(注释即 Markdown→HTML)、generate_instance.py、generate_file_skeleton.py、verilinter、FuseSoC .core，以及贡献流程。",
+          "learning_goals": [
+            "掌握 v2h 的注释→HTML 渲染机制",
+            "掌握实例/骨架生成与 lint 工具",
+            "掌握 FuseSoC 集成与贡献新模块的流程"
+          ],
+          "source_files": [
+            "v2h.py",
+            "generate_instance.py",
+            "generate_file_skeleton.py",
+            "FPGA_Design_Elements.core",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "v2h 文档生成",
+            "实例/骨架生成与 lint",
+            "FuseSoC/贡献"
+          ],
+          "practice_task": "按 CONTRIBUTING 流程：用 generate_file_skeleton 生成骨架写一个新模块，运行 v2h 生成页面，并在 index.html 加入对应链接。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u18-l2",
+          "title": "仿真、测试台与综合验证",
+          "order": 2,
+          "filename": "u18-l2-simulation-and-verification.md",
+          "level": "advanced",
+          "topic": "讲解 Simulation_Clock 的无竞争时钟惯用法、Synthesis_Harness_Input/Output 综合测试桩，以及用 cocotb(SystemVerilog) 写测试台(tests/)。",
+          "learning_goals": [
+            "掌握无竞争仿真时钟的 === 惯用法",
+            "掌握综合测试桩的用途",
+            "掌握 cocotb 测试台写法"
+          ],
+          "source_files": [
+            "Simulation_Clock.v",
+            "Synthesis_Harness_Input.v",
+            "tests/Counter_Gray_Tb.py",
+            "tests/Counter_Gray_Tb.sv"
+          ],
+          "minimal_modules": [
+            "仿真时钟",
+            "综合测试桩",
+            "cocotb 测试台"
+          ],
+          "practice_task": "用 Simulation_Clock 与 Synthesis_Harness 为某个模块搭测试台，并仿照 tests/ 用 cocotb 写一个简单自检。",
+          "depends_on": [
+            "u18-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
