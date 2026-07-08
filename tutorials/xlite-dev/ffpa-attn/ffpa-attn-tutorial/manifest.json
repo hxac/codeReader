@@ -1,0 +1,1193 @@
+{
+  "project": "ffpa-attn",
+  "head": "882989c2a3aa465867de9ea2dbd19dbed08660d9",
+  "rationale": "ffpa-attn 是一个面向大 head_dim（D>256）预填充注意力的 GPU kernel 库，核心创新是 Split-D（在 MMA 层做 D 维精细分块），并提供 SDPA/CUDA/Triton/CuTeDSL 四套后端、autograd 反向、torch.compile 兼容、持久化自动调优和复杂构建系统，属于大型项目，因此规划 40 篇讲义、9 个单元。学习顺序遵循「先会用→再懂分发→再读 kernel→最后玩构建/调优/扩展」的递进：第 1-2 单元（入门）让读者跑起来并掌握公共 API 的所有典型用法；第 3 单元打通「公共 API→Backend 配置→Meta 校验/回退→autograd Function→自定义算子」这条贯穿全库的 Python 分发主链路，是理解所有后端的钥匙；第 4-5 单元深入默认的 Triton 后端前向/反向 kernel（Split-D、online softmax、shared-pid 反向、decode 路径、高级开关）；第 6-9 单元（专家）覆盖 CuTeDSL 后端、手写 CUDA 后端与 env.py 构建系统、持久化自动调优与 Ray 多卡、基准测试，以及测试、E2E 集成与二次开发扩展。每篇讲义只解决一个独立问题，依赖关系严格按「主链路先行、kernel 依赖分发层、构建/调优依赖 kernel」组织。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "FFPA 是什么：Split-D 与大 head_dim 注意力",
+          "order": 1,
+          "filename": "u1-l1-what-is-ffpa-split-d.md",
+          "level": "beginner",
+          "topic": "介绍 FFPA 的定位、要解决的问题（标准 FlashAttention 仅支持 D≤256）、Split-D 的核心思想及其 O(1) SRAM、O(d/4) 寄存器复杂度。",
+          "learning_goals": [
+            "理解 FFPA 与 SDPA/FlashAttention-2 的关系及差异",
+            "理解大 head_dim 带来的 SRAM/寄存器压力以及 Split-D 如何解决",
+            "掌握 FFPA 的适用场景与已知局限（N<512 或 D≤256 时不如 SDPA）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "README Split-D 章节",
+            "docs/index.md ffpa-design"
+          ],
+          "practice_task": "阅读 README 与 docs/index.md 的 Split-D 章节，用自己的话画出 Q×K^T 与 P×V 在 D 维被切成 16 宽片段的示意，并写一段说明为什么 SRAM 复杂度能降到 O(Br×16)≈O(1)。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、构建与三种构建模式",
+          "order": 2,
+          "filename": "u1-l2-install-and-build-modes.md",
+          "level": "beginner",
+          "topic": "讲解从 PyPI 安装、源码 Triton-only 构建、以及用 ENABLE_FFPA_CUDA_IMPL=1 构建可选 CUDA 前向扩展三种模式，以及对应的依赖与产物差异。",
+          "learning_goals": [
+            "区分三种安装/构建模式及其产物（是否带 ffpa_attn._C）",
+            "理解 setup.py 与 env.py 在构建中的职责分工",
+            "学会用 tools/build_fast.sh 加速源码构建"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "setup.py",
+            "tools/build_fast.sh",
+            "docs/env.md"
+          ],
+          "minimal_modules": [
+            "setup.py BUILD_CUDA_EXT 分支",
+            "env.enable_fwd_cuda_impl",
+            "pyproject dependencies"
+          ],
+          "practice_task": "在本地执行 `pip install -e . --no-build-isolation`（Triton-only）确认能 import ffpa_attn；再阅读 setup.py 找到控制 CUDA 扩展的两个环境变量，写出开启 CUDA 前向扩展的完整命令。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码地图",
+          "order": 3,
+          "filename": "u1-l3-repo-layout-code-map.md",
+          "level": "beginner",
+          "topic": "梳理 src/ffpa_attn（Python 分发与四后端）、csrc/cuffpa（手写 CUDA）、bench、tests、tools、docs 各目录的职责，建立整体代码地图。",
+          "learning_goals": [
+            "记住 src/ffpa_attn 下 aten/triton/cute/cuda/ray/cli 子包各自对应什么",
+            "理解 csrc/cuffpa 手写 CUDA kernel 与 generated/ 代码生成的关系",
+            "能在仓库中快速定位某个功能对应的源码位置"
+          ],
+          "source_files": [
+            "README.md",
+            "src/ffpa_attn/__init__.py",
+            "docs/env.md"
+          ],
+          "minimal_modules": [
+            "src/ffpa_attn 包结构",
+            "csrc/cuffpa 目录",
+            "bench、tests、tools"
+          ],
+          "practice_task": "用树形图画出 src/ffpa_attn 的子包结构，并为每个子包写一句职责说明；再在 csrc/cuffpa/generated/ 中找出某个 head_dim 对应的生成文件并解释其命名规则。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "一行代码替换 SDPA：ffpa_attn_func 与 monkey-patch",
+          "order": 4,
+          "filename": "u1-l4-one-line-sdpa-monkey-patch.md",
+          "level": "beginner",
+          "topic": "演示用 `F.scaled_dot_product_attention = ffpa_attn_func` 一行 monkey-patch 接入，并解释 FFPA 不支持的情形如何自动回退到 SDPA（避免递归）。",
+          "learning_goals": [
+            "掌握 ffpa_attn_func 与 SDPA 签名对齐的含义",
+            "理解 monkey-patch 后为何要调用 torch._C._nn.scaled_dot_product_attention 避免递归",
+            "能验证 FFPA 是否真的接管了大 D 的前向"
+          ],
+          "source_files": [
+            "src/ffpa_attn/__init__.py",
+            "src/ffpa_attn/ffpa_attn_interface.py",
+            "tests/test_monkey_patch.py"
+          ],
+          "minimal_modules": [
+            "ffpa_attn_func",
+            "FFPAAttnMeta.fallback",
+            "test_monkey_patch._native_sdpa"
+          ],
+          "practice_task": "仿照 tests/test_monkey_patch.py，写一段脚本：先 monkey-patch SDPA，分别用 D=128 与 D=512 调用，观察哪个走 FFPA、哪个回退，并打印二者的 max_abs_err。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "公共 API 与典型使用场景",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ffpa_attn_func 签名、张量布局与返回",
+          "order": 1,
+          "filename": "u2-l1-ffpa-attn-func-signature-layout.md",
+          "level": "beginner",
+          "topic": "逐参数讲解 ffpa_attn_func 的签名、[B,Nh,N,D] 张量布局、dtype 约束（fp16/bf16）、scale 默认值与返回值。",
+          "learning_goals": [
+            "掌握 query/key/value 的 [B,Nh,N,D] 布局与 Nh_q 必须是 Nh_kv 整数倍的约束",
+            "理解 scale/is_causal/dropout_p/enable_gqa 参数语义",
+            "知道返回 O 的形状与 dtype"
+          ],
+          "source_files": [
+            "src/ffpa_attn/ffpa_attn_interface.py",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "ffpa_attn_func 签名与 docstring",
+            "docs self-attn 示例"
+          ],
+          "practice_task": "阅读 docstring 后，构造 B=1,H=32,N=8192,D=512 的 bf16 q/k/v，调用 ffpa_attn_func 并与 SDPA 对比 max_abs_err，复现 docs/index.md 的 self-attention 示例。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "自注意力 / 交叉注意力 / 解码注意力",
+          "order": 2,
+          "filename": "u2-l2-self-cross-decode-attention.md",
+          "level": "beginner",
+          "topic": "讲解 Nq 与 Nkv 可不相等带来的交叉注意力与解码（短 query/长 KV）场景，以及 key/value 必须共享 Nkv 的约束。",
+          "learning_goals": [
+            "区分 self/cross/decode 三种注意力的 Nq 与 Nkv 关系",
+            "理解为什么 FFPA 对解码（Nq=1）走专门的 split-KV 路径",
+            "能正确构造短 query/长 KV 的输入"
+          ],
+          "source_files": [
+            "docs/index.md",
+            "src/ffpa_attn/ffpa_attn_interface.py"
+          ],
+          "minimal_modules": [
+            "ffpa_attn_func cross/decode 说明",
+            "docs cross-attn 示例"
+          ],
+          "practice_task": "复现 docs/index.md 的 cross-attention 示例（Nq=128,Nkv=8192,D=512），并额外测一个 Nq=1 的解码用例，对比 FFPA 与 SDPA 的输出。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "因果掩码 is_causal 与可加 attn_mask",
+          "order": 3,
+          "filename": "u2-l3-causal-and-attn-mask.md",
+          "level": "beginner",
+          "topic": "讲解 is_causal 的「query 对齐到 KV 尾部」语义（需 Nkv>=Nq），以及 attn_mask 的布尔/可加两种语义和广播规则。",
+          "learning_goals": [
+            "理解 is_causal 下 query 行 r 只看 k<=r+(Nkv-Nq) 的尾部对齐约定",
+            "掌握 attn_mask 的 2/3/4 维广播与布尔→-inf 转换",
+            "知道 is_causal 与显式 attn_mask 不能同时设置"
+          ],
+          "source_files": [
+            "src/ffpa_attn/ffpa_attn_interface.py",
+            "src/ffpa_attn/functional.py"
+          ],
+          "minimal_modules": [
+            "normalize_inputs 因果校验",
+            "normalize_attn_mask",
+            "_validate_attn_mask_shape"
+          ],
+          "practice_task": "复现 docs 的 causal 示例；再构造一个 [1,1,1,Nkv] 的可加 key 位置偏置，传入 attn_mask 调用 ffpa_attn_func 并与手动加偏置的 SDPA 对比。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "GQA / MQA 分组查询注意力",
+          "order": 4,
+          "filename": "u2-l4-gqa-mqa-grouped-attention.md",
+          "level": "beginner",
+          "topic": "讲解 enable_gqa 显式开启 GQA/MQA（Nh_q 是 Nh_kv 的整数倍，MQA 是 Nh_kv=1 特例）以及与 SDPA 的 enable_gqa 语义对齐。",
+          "learning_goals": [
+            "理解 group_size=Nh_q/Nh_kv 与 enable_gqa 默认 False 的设计",
+            "掌握 GQA 输入构造与参考实现（repeat_interleave 对齐）",
+            "知道为何 enable_gqa=False 但头数不等会报错"
+          ],
+          "source_files": [
+            "src/ffpa_attn/ffpa_attn_interface.py",
+            "src/ffpa_attn/functional.py"
+          ],
+          "minimal_modules": [
+            "enable_gqa 校验",
+            "docs gqa 示例"
+          ],
+          "practice_task": "复现 docs 的 GQA 示例（Nh_q=32,Nh_kv=8,D=512）；再构造一个 MQA（Nh_kv=1）用例并验证输出与 repeat_interleave 后的 SDPA 一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "变长注意力 ffpa_attn_varlen_func",
+          "order": 5,
+          "filename": "u2-l5-varlen-packed-thd.md",
+          "level": "beginner",
+          "topic": "讲解 packed THD 变长 API 的签名、cu_seqlens 约定、return_lse，以及它目前仅 CuTeDSL 后端在 SM8x/SM90 大 D 上支持的限制。",
+          "learning_goals": [
+            "理解 [T,H,D] packed 布局与 cu_seqlens_q/cu_seqlens_k 的 B+1 累计偏移约定",
+            "掌握 max_seqlen_q/k 与 return_lse 的用法",
+            "知道哪些选项（window_size/softcap/...）会被拒绝"
+          ],
+          "source_files": [
+            "src/ffpa_attn/ffpa_attn_interface.py",
+            "src/ffpa_attn/cute/__init__.py"
+          ],
+          "minimal_modules": [
+            "ffpa_attn_varlen_func",
+            "_ffpa_attn_varlen_cute",
+            "_check_supported_options"
+          ],
+          "practice_task": "阅读 varlen docstring，写出两个变长序列（长度分别为 1024、2048）的 cu_seqlens_q 张量，并调用 ffpa_attn_varlen_func（CuTeDSL 后端、SM90）验证输出形状为 [T_q,H_q,D]。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "分发层与后端架构",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "四后端总览与选型矩阵",
+          "order": 1,
+          "filename": "u3-l1-four-backends-overview.md",
+          "level": "intermediate",
+          "topic": "总览 SDPA/CUDA/Triton/CuTeDSL 四后端的架构、前/反向支持、head_dim 范围、自动调优与推荐场景。",
+          "learning_goals": [
+            "记住每个后端的 fwd/bwd/head_dim/autotune 能力矩阵",
+            "理解默认后端是 Triton、CuTeDSL 在 H200 上最快",
+            "知道 CUDA 后端仅前向且需 ENABLE_FFPA_CUDA_IMPL 编译"
+          ],
+          "source_files": [
+            "README.md",
+            "src/ffpa_attn/functional.py",
+            "src/ffpa_attn/cuda/__init__.py"
+          ],
+          "minimal_modules": [
+            "README Backends 表",
+            "functional 后端 import 与 try/except",
+            "cuda CUDA_FWD_AVAILABLE"
+          ],
+          "practice_task": "画一张四后端能力对照表（Arch/Fwd/Bwd/Headdim/Autotune/Speedup/Recommend），并说明为什么默认是 Triton 而非 CUDA。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Backend 配置类体系",
+          "order": 2,
+          "filename": "u3-l2-backend-config-dataclasses.md",
+          "level": "intermediate",
+          "topic": "讲解 Backend 基类及 SDPABackend/CUDABackend/TritonBackend/CuTeDSLBackend 子类的字段、__post_init__ 校验与 forward/backward 语义。",
+          "learning_goals": [
+            "理解 Backend.forward/backward 的 None 语义与自动补全规则",
+            "掌握 TritonBackend 的 autotune/enable_tma/enable_ws/persist_dkdv/split_launch 等开关",
+            "知道 backend/forward_backend/backward_backend 三者的优先级"
+          ],
+          "source_files": [
+            "src/ffpa_attn/functional.py"
+          ],
+          "minimal_modules": [
+            "Backend/SDPABackend/CUDABackend/TritonBackend/CuTeDSLBackend",
+            "_coerce_backend",
+            "from_kwargs"
+          ],
+          "practice_task": "阅读 functional.py 中四个 Backend 子类，写一段代码用 `backend=`、`forward_backend=`/`backward_backend=` 三种方式分别指定 CuTeDSL，并解释它们的等价性与优先级。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "FFPAAttnMeta：输入校验与 SDPA 回退判定",
+          "order": 3,
+          "filename": "u3-l3-meta-normalize-and-fallback.md",
+          "level": "intermediate",
+          "topic": "讲解 FFPAAttnMeta 的 from_kwargs 构造、fallback() 回退判定、normalize_inputs() 校验与 normalize_attn_mask() 掩码归一化。",
+          "learning_goals": [
+            "掌握 fallback() 中 D≤256、D>1024、Nq<512、Nkv<512 等回退条件",
+            "理解 normalize_inputs 对形状/GQA/causal/dropout 的全套校验",
+            "理解 attn_mask 从布尔/可加归一化为 4D 可加 bias 的过程"
+          ],
+          "source_files": [
+            "src/ffpa_attn/functional.py"
+          ],
+          "minimal_modules": [
+            "FFPAAttnMeta.fallback",
+            "normalize_inputs",
+            "normalize_attn_mask",
+            "_should_use_aten_small_d_forward"
+          ],
+          "practice_task": "追踪 fallback() 逻辑，列出所有会触发回退 SDPA 的条件；再写一个用例触发「is_causal=True 但 Nkv<Nq」并确认抛出 ValueError。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "FFPAAttnFunc autograd Function 前向/反向分发",
+          "order": 4,
+          "filename": "u3-l4-autograd-function-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 _FFPAAttnFunc 的 forward 按 head_dim 与 backend 分发到 aten/cuda/triton/cute，backward 按 backward_meta 路由到 Triton/CuTeDSL/SDPA 的设计。",
+          "learning_goals": [
+            "理解 forward 中 use_aten_small_d_forward 与各 backend 分支",
+            "掌握 save_for_backward 保存了哪些张量（q/k/v/O/lse/rng_state）",
+            "理解 backward 如何根据 backward_meta 选择反向 kernel"
+          ],
+          "source_files": [
+            "src/ffpa_attn/functional.py"
+          ],
+          "minimal_modules": [
+            "_FFPAAttnFunc.forward",
+            "_FFPAAttnFunc.backward",
+            "_reserve_large_d_dropout_rng"
+          ],
+          "practice_task": "画出 forward 分发的决策树（head_dim→aten/cuda/triton/cute），并解释为什么 CUDA 前向可以配 Triton 或 SDPA 反向。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "torch.compile 兼容与 torch.library 自定义算子",
+          "order": 5,
+          "filename": "u3-l5-torch-compile-custom-ops.md",
+          "level": "intermediate",
+          "topic": "讲解为何用 torch.library.define/impl/register_fake 注册 ffpa_attn::_fwd_* 算子，以及 FFPAAttnFunc 通过 torch._dynamo.disable 守卫的 _ffpa_apply 在 autograd 边界制造图断的原因。",
+          "learning_goals": [
+            "理解 register_fake（meta 实现）对 torch.compile 的作用",
+            "掌握为何不能用 register_autograd 绑定单一反向（一前向多反向）",
+            "理解 _ffpa_apply 的 dynamo.disable 图断设计"
+          ],
+          "source_files": [
+            "src/ffpa_attn/functional.py",
+            "src/ffpa_attn/triton/__init__.py",
+            "src/ffpa_attn/cuda/__init__.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_apply/FFPAAttnFunc.apply",
+            "_fwd_triton define/impl/register_fake",
+            "functional.py 顶部关于 register_autograd 的注释"
+          ],
+          "practice_task": "阅读 functional.py 顶部那段注释，解释「forward_backend=cuda 配 backward_backend=sdpa」为何不能用 register_autograd；再用 torch.compile 包裹一次 ffpa_attn_func 调用验证不报错。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Triton 后端 — 前向",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Triton 前向 kernel 与 online softmax 主循环",
+          "order": 1,
+          "filename": "u4-l1-triton-fwd-online-softmax.md",
+          "level": "intermediate",
+          "topic": "讲解 _ffpa_fwd_kernel_impl 的 grid/program_id 映射、KV 块循环、rowmax/rowsum 在线 softmax 重缩放与输出累加。",
+          "learning_goals": [
+            "理解 pid(0)=Q 行块、pid(1)=batch×heads 的网格映射",
+            "掌握 online softmax 的 m_i/l_i/alpha 更新公式",
+            "理解输出 o_accs/(l_i+eps) 的最终归一"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_fwd.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_fwd_kernel_impl",
+            "_ffpa_attn_forward_generic_impl",
+            "online softmax 更新段"
+          ],
+          "practice_task": "在 _ffpa_fwd_kernel_impl 中定位 KV 块循环与 rowmax/rowsum 更新代码行，画出单 program 的数据流（Q 块、K/V 块、score、P、O 累加）。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Split-D：大 head_dim 的 MMA 级精细分块",
+          "order": 2,
+          "filename": "u4-l2-split-d-fine-grained-tiling.md",
+          "level": "intermediate",
+          "topic": "讲解 NUM_V_GROUPS=cdiv(D,BLOCK_HEADDIM_V) 如何把 D 维切成片段，QK^T 跨所有 D 片段计算完整 score，再按 V-group 累加 P@V_slice。",
+          "learning_goals": [
+            "理解为何把 D 切成 BLOCK_HEADDIM_V(16) 片段而非整 D 加载",
+            "掌握 score 在所有 D 片段上累加、P@V 按 V-group 累加的拆分",
+            "理解这与标准 FlashAttention tiling 的区别"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_fwd.py"
+          ],
+          "minimal_modules": [
+            "NUM_V_GROUPS",
+            "D 片段循环算 score",
+            "V-group 累加 P@V"
+          ],
+          "practice_task": "用伪代码写出 Split-D 下「算一个 KV 块的完整 score」与「按 V-group 累加 P@V」两个嵌套循环，标注哪些张量驻留寄存器、哪些驻留 SRAM。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Decode 前向：split-KV 两阶段",
+          "order": 3,
+          "filename": "u4-l3-decode-fwd-split-kv.md",
+          "level": "intermediate",
+          "topic": "讲解 Nq=1/短 query 时走 _ffpa_decode_fwd_stage1_kernel（按 KV chunk 算部分 O 与局部 LSE）+ stage2 做 log-sum-exp 合并的两阶段路径。",
+          "learning_goals": [
+            "理解 decode 为何要把 KV 切成 chunk 并行算部分结果",
+            "掌握 stage1 的 GEMV（Nq=1）与多行 MMA 两条子路径",
+            "理解 stage2 如何用 LSE 做对数域合并"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_fwd.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_decode_fwd_stage1_kernel",
+            "_ffpa_decode_fwd_stage2_kernel",
+            "_ffpa_attn_forward_decode_impl",
+            "num_splits"
+          ],
+          "practice_task": "追踪 _ffpa_attn_forward_decode_impl，说明 stage1 的 grid(0)=chunk_idx、stage2 的 grid 如何对应；并解释 Nq=1 时为何用 GEMV 路径更快。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "前向特性：GQA / attn_bias / causal / dropout 实现",
+          "order": 4,
+          "filename": "u4-l4-fwd-features-gqa-mask-dropout.md",
+          "level": "intermediate",
+          "topic": "讲解前向 kernel 内 GQA 头映射、attn_bias 广播 stride、causal 尾部对齐掩码、dropout Philox 重放的实现细节。",
+          "learning_goals": [
+            "理解 off_hkv=off_hq//group_size 的 GQA 头映射",
+            "掌握 attn_bias 用零 stride 表示广播维度避免物化的技巧",
+            "理解 causal 的 offs_kv<=offs_m+(Nk-Nq) 与 dropout 的 Philox 元素偏移"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_fwd.py",
+            "src/ffpa_attn/triton/__init__.py"
+          ],
+          "minimal_modules": [
+            "GQA 头映射段",
+            "_attn_bias_broadcast_strides",
+            "causal 掩码段",
+            "_curcurand_uniform_from_element_offset"
+          ],
+          "practice_task": "在 kernel 中分别找出 GQA、attn_bias 广播、causal、dropout 四段代码并标注行号；解释 attn_bias 的 [1,1,1,Nkv] 紧凑掩码如何不物化为 [B,H,Nq,Nkv]。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Triton 后端 — 反向",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "FlashAttention-2 反向算法与 Delta 预处理",
+          "order": 1,
+          "filename": "u5-l1-bwd-algo-delta-preprocess.md",
+          "level": "intermediate",
+          "topic": "讲解反向的两阶段：先用 _ffpa_bwd_pre_impl 算 delta=rowsum(dO*O)，再在主反向 kernel 里用它做 rescale，对应 FA-2 反向推导。",
+          "learning_goals": [
+            "理解 delta=Dpreprocess 在反向 rescale 中的作用",
+            "掌握反向为何需要保存 O 与 LSE",
+            "理解 preprocess_d_chunk 把 D 维分块处理的选项"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_bwd.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_bwd_pre_impl",
+            "_ffpa_attn_backward_triton_impl",
+            "preprocess_d_chunk 选项"
+          ],
+          "practice_task": "复现 docs 的 backward 示例，对比 dQ/dK/dV 与 SDPA 的误差；再阅读 _ffpa_bwd_pre_impl 解释 delta 为何是 dO 与 O 的逐行内积。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "dK/dV 与 dQ kernel：shared program-id 设计",
+          "order": 2,
+          "filename": "u5-l2-dkdv-dq-shared-pid.md",
+          "level": "intermediate",
+          "topic": "讲解 _ffpa_bwd_dkdv（按 Q 块累加 dK/dV）与 _ffpa_bwd_dq（按 K 块累加 dQ）的 shared-pid 网格：pid 同时索引 K 列块与 Q 行块。",
+          "learning_goals": [
+            "理解 grid dim0=max(cdiv(Nk,BN),cdiv(Nq,BM)) 的 shared-pid 设计",
+            "掌握 dK/dV 用非原子 store、dQ 在融合路径才用 atomic_add 的原因",
+            "理解 _ffpa_bwd_dkdvdq 融合变体与触发条件"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_bwd.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_bwd_dkdv",
+            "_ffpa_bwd_dq",
+            "_ffpa_bwd_dkdvdq",
+            "shared pid 网格"
+          ],
+          "practice_task": "画出 shared-pid 下同一个 program 同时承担一个 K 列块（算 dK/dV）和一个 Q 行块（算 dQ）的映射图；解释为何非融合 dQ 路径可以不用 atomic。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Decode 反向与 dQ 跨块归约",
+          "order": 3,
+          "filename": "u5-l3-decode-bwd-dq-reduce.md",
+          "level": "intermediate",
+          "topic": "讲解 Nq<8 的 decode 反向：_ffpa_bwd_decode_stage1_kernel 写每个 K 块的部分 dQ，再用 _ffpa_bwd_decode_dq_reduce_kernel 跨块归约，Nq==1 走 GEMV。",
+          "learning_goals": [
+            "理解 decode 反向为何需要 stage1+reduce 两步",
+            "掌握 USE_GEMV 单 query 特化路径",
+            "理解 dQ 跨 K 块归约的正确性"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_bwd.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_bwd_decode_stage1_kernel",
+            "_ffpa_bwd_decode_dq_reduce_kernel",
+            "USE_GEMV 路径"
+          ],
+          "practice_task": "追踪 decode 反向（Nq=1,Nkv=8192）的数据流，说明 stage1 产出的部分 dQ 形状与 reduce kernel 如何合并；解释为何 Nq==1 用 GEMV。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "反向高级开关：TMA / warp-specialize / persist / split-launch",
+          "order": 4,
+          "filename": "u5-l4-bwd-advanced-tma-ws-persist.md",
+          "level": "intermediate",
+          "topic": "讲解 enable_tma、enable_ws、persist_dkdv、split_launch、grad_kv/grad_q_storage_dtype 等反向开关的作用与权衡，以及 SM90 专用变体。",
+          "learning_goals": [
+            "理解 TMA TensorDescriptor 加载与 warp_specialize 的收益",
+            "掌握 persist_dkdv 用 fp32 寄存器跨块累加的精度收益",
+            "理解 grad_kv/grad_q_storage_dtype 如何影响跨 tile 全局累加精度与显存"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_bwd.py",
+            "src/ffpa_attn/triton/_ffpa_bwd_sm90.py",
+            "src/ffpa_attn/triton/__init__.py"
+          ],
+          "minimal_modules": [
+            "enable_tma/enable_ws/persist_dkdv/split_launch 分支",
+            "_ffpa_bwd_dkdv_persist_sm90",
+            "_triton_bwd_grad_tensor_like"
+          ],
+          "practice_task": "阅读 TritonBackend 中 persist_dkdv/split_launch 的断言约束，写一段启用 enable_tma+persist_dkdv 的反向调用；再说明 grad_kv_storage_dtype=fp32 的显存代价（结合 _triton_bwd_grad_tensor_like 注释）。",
+          "depends_on": [
+            "u5-2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "CuTeDSL 后端",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "CuTeDSL 后端总览与 SM80/SM90 分发",
+          "order": 1,
+          "filename": "u6-l1-cutedsl-overview-sm80-sm90.md",
+          "level": "advanced",
+          "topic": "讲解 CuTeDSL 后端的入口、cute_forward_available/cute_max_supported_head_dim 能力探测、_require_cute_supported 校验与 _use_sm90_specialized 分发。",
+          "learning_goals": [
+            "理解 CuTeDSL 仅 SM8x/SM90、大 D、fp16/bf16 的支持范围",
+            "掌握 _use_sm90_specialized 的对称 head_dim<=512 判定",
+            "理解 cute 在 H200 上达 427 TFLOPS 的定位"
+          ],
+          "source_files": [
+            "src/ffpa_attn/cute/__init__.py",
+            "src/ffpa_attn/cute/README.md"
+          ],
+          "minimal_modules": [
+            "cute_forward_available",
+            "cute_max_supported_head_dim",
+            "_require_cute_supported",
+            "_use_sm90_specialized"
+          ],
+          "practice_task": "阅读 __init__.py 的能力探测与校验函数，列出 CuTeDSL 支持的 (arch, head_dim, dtype) 组合；再说明 SM90 专用路径与 SM80 通用路径的分界条件。",
+          "depends_on": [
+            "u3-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "CuTeDSL 布局转换、校验与 varlen 接入",
+          "order": 2,
+          "filename": "u6-l2-cutedsl-layout-varlen.md",
+          "level": "advanced",
+          "topic": "讲解 SDPA [B,H,N,D]↔FA [B,N,H,D] 的转转换、_check_supported_options 选项拒绝、以及 _ffpa_attn_varlen_cute 的 packed THD varlen 接入与 torch op 注册。",
+          "learning_goals": [
+            "掌握 _bhnd_to_bnhd/_bnhd_to_bhnd 在前/反向入口的转换时机",
+            "理解 _check_supported_options 对 dropout/window/softcap 等的统一拒绝",
+            "理解 varlen custom_op + register_autograd 的自管 autograd 边界"
+          ],
+          "source_files": [
+            "src/ffpa_attn/cute/__init__.py",
+            "src/ffpa_attn/cute/utils/seqlen_info.py",
+            "src/ffpa_attn/cute/utils/pack_gqa.py"
+          ],
+          "minimal_modules": [
+            "_ffpa_attn_forward_cute/_ffpa_attn_backward_cute",
+            "_ffpa_attn_varlen_cute",
+            "_check_supported_options",
+            "_varlen_fwd_cute custom_op"
+          ],
+          "practice_task": "追踪一次 dense CuTeDSL 前向：从 ffpa_attn_func 到 _ffpa_attn_forward_cute 的转置→op→反转置全过程；再列出 varlen 路径会拒绝的所有非默认 kwarg。",
+          "depends_on": [
+            "u6-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Tile scheduler 与 producer/consumer pipeline",
+          "order": 3,
+          "filename": "u6-l3-tile-scheduler-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 SingleTileScheduler/SingleTileLPTScheduler/SingleTileVarlenScheduler 的 tile 映射与 L2 swizzle，以及 PipelineTmaAsync/PipelineAsync 的 producer/consumer warp 特化。",
+          "learning_goals": [
+            "理解不同 scheduler 对应的 causal/varlen/deterministic 场景",
+            "掌握 LPT(Longest Processing Time) L2 swizzle 调度的目的",
+            "理解 NamedBarrier 与 producer_acquire 的 warp 特化流水线"
+          ],
+          "source_files": [
+            "src/ffpa_attn/cute/utils/tile_scheduler.py",
+            "src/ffpa_attn/cute/utils/pipeline.py",
+            "src/ffpa_attn/cute/utils/named_barrier.py"
+          ],
+          "minimal_modules": [
+            "SingleTileScheduler/SingleTileLPTScheduler/SingleTileVarlenScheduler",
+            "PipelineTmaAsync/PipelineAsync",
+            "NamedBarrier"
+          ],
+          "practice_task": "阅读 tile_scheduler.py，画表对比四种 scheduler 的适用场景；再解释 PipelineTmaAsync 如何用 TMA + barrier 实现 g2s 与 MMA 的重叠。",
+          "depends_on": [
+            "u6-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "CuTeDSL SM90 专用 kernel：d384 / d512 与 generic",
+          "order": 4,
+          "filename": "u6-l4-cutedsl-sm90-specialized-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 SM90 专用前向（_fwd_d384/d512/generic_sm90）与反向（_dkdv_*/_dq_*）kernel 类的设计，以及与 SM80 generic 的取舍。",
+          "learning_goals": [
+            "理解为何对 d384/d512 做 head_dim 专用特化",
+            "掌握 FFPAAttnFwdSm90SplitD 系列类的职责",
+            "理解 SM80 generic 路径作为通用回退的角色"
+          ],
+          "source_files": [
+            "src/ffpa_attn/cute/_fwd_d512_sm90.py",
+            "src/ffpa_attn/cute/_fwd_d384_sm90.py",
+            "src/ffpa_attn/cute/_fwd_generic_sm90.py",
+            "src/ffpa_attn/cute/_dkdv_d512_sm90.py"
+          ],
+          "minimal_modules": [
+            "FFPAAttnFwdSm90SplitD",
+            "FFPAAttnFwdSm90SplitDD384Aware",
+            "FFPAAttnFwdSm90SplitDGeneric",
+            "FFPAAttnBwdDKDVSm90SplitD"
+          ],
+          "practice_task": "对比 _fwd_d512_sm90 与 _fwd_generic_sm90 的类结构，列出 d512 特化相对 generic 做了哪些针对 head_dim 的优化假设。",
+          "depends_on": [
+            "u6-1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "手写 CUDA 后端与构建系统",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "CUDA 前向 kernel 架构（prefill / mma / tma / swizzle）",
+          "order": 1,
+          "filename": "u7-l1-cuda-fwd-kernel-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 csrc/cuffpa 下 ffpa_attn_fwd.cuh 的前向主循环、prefill.cuh 的 prefill 组织、mma.cuh 的 MMA 封装、tma.cuh 与 swizzle.cuh 的作用。",
+          "learning_goals": [
+            "理解手写 CUDA 前向如何组织 g2s→s2r→MMA 流水线",
+            "掌握 mma.cuh 对 PTX mma 指令的封装",
+            "理解 tma.cuh 与 cp_async.cuh 的异步加载角色"
+          ],
+          "source_files": [
+            "csrc/cuffpa/ffpa_attn_fwd.cuh",
+            "csrc/cuffpa/prefill.cuh",
+            "csrc/cuffpa/mma.cuh",
+            "csrc/cuffpa/tma.cuh",
+            "csrc/cuffpa/cp_async.cuh"
+          ],
+          "minimal_modules": [
+            "ffpa_attn_fwd 主循环",
+            "prefill kernel",
+            "mma 封装",
+            "tma/cp_async 异步加载"
+          ],
+          "practice_task": "在 ffpa_attn_fwd.cuh 中定位 KV 块循环与 online softmax 段，画出从 g2s 到 MMA 的流水线；列出 mma.cuh 封装了哪些 PTX 指令。",
+          "depends_on": [
+            "u3-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "CUDA SRAM/寄存器复杂度与 swizzle/persist 策略",
+          "order": 2,
+          "filename": "u7-l2-cuda-sram-register-swizzle-persist.md",
+          "level": "advanced",
+          "topic": "结合 swizzle.cuh、launch_templates.cuh 讲解 SMEM bank-conflict-free 的 swizzle vs padding、Q/KV persist g2s/s2r 策略与寄存器压力权衡。",
+          "learning_goals": [
+            "理解 swizzle 如何消除 SMEM bank 冲突",
+            "掌握 persist Q/KV g2s 与 s2r 的 SRAM/寄存器/IO 权衡",
+            "理解 Split-D 下 O(1) SRAM、O(d/4) 寄存器的来源"
+          ],
+          "source_files": [
+            "csrc/cuffpa/swizzle.cuh",
+            "csrc/cuffpa/launch_templates.cuh",
+            "csrc/cuffpa/warp.cuh",
+            "docs/env.md"
+          ],
+          "minimal_modules": [
+            "swizzle 布局",
+            "launch_templates",
+            "persist 策略 env 开关"
+          ],
+          "practice_task": "对照 docs/env.md 的 ENABLE_FFPA_SMEM_SWIZZLE_Q/K/V 与 ENABLE_FFPA_PERSIST_Q_G2S/PERSIST_Q_S2R，解释每个开关在 kernel 里对应的行为与代价。",
+          "depends_on": [
+            "u7-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "每个 head_dim 代码生成与 C++ pybind 分发",
+          "order": 3,
+          "filename": "u7-l3-per-headdim-codegen-pybind.md",
+          "level": "advanced",
+          "topic": "讲解 env.py 如何按 (dtype,acc) 生成 csrc/cuffpa/generated/ 下每个 head_dim 的 .cu 翻译单元，以及 ffpa_attn_api.cc 的统一 pybind 入口按 dtype/acc 分发。",
+          "learning_goals": [
+            "理解 per-headdim 代码生成缩短编译时间、支持模板特化的目的",
+            "掌握 ffpa_attn_fwd_fp16f16/fp16f32/bf16f32 的 (dtype,acc) 分发",
+            "理解 acc 编码 0=f16/1=f32 与 bf16 必须 f32 的约束"
+          ],
+          "source_files": [
+            "csrc/cuffpa/ffpa_attn_api.cc",
+            "csrc/cuffpa/generated/ffpa_attn_fwd_dispatch.cu",
+            "csrc/cuffpa/generated/ffpa_attn_fwd_decls.h",
+            "env.py"
+          ],
+          "minimal_modules": [
+            "ffpa_attn_forward 统一入口",
+            "ffpa_attn_fwd_{fp16f16,fp16f32,bf16f32}",
+            "generate_split_headdim_sources",
+            "PYBIND11_MODULE"
+          ],
+          "practice_task": "阅读 ffpa_attn_api.cc，写出 dtype=bf16 时 acc 必须为 1 的原因；再在 generated/ 目录找出 fp16、acc=f32、head_dim=512 对应的生成文件并解释 dispatch 如何选中它。",
+          "depends_on": [
+            "u7-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "env.py 构建配置与 FFPA_* 构建期变量",
+          "order": 4,
+          "filename": "u7-l4-env-build-config.md",
+          "level": "advanced",
+          "topic": "讲解 env.py 的 get_build_arch_list/get_build_sources/get_build_cuda_cflags/get_enabled_headdims 等方法及 FFPA_BUILD_ARCH/ENABLE_FFPA_ALL_HEADDIM/ENABLE_FFPA_ALL_STAGES 等构建期变量。",
+          "learning_goals": [
+            "理解 FFPA_BUILD_ARCH 的 SM 别名（ampere/hopper/...）解析与回退",
+            "掌握 headdim 集合优先级：FFPA_DEV_HEADDIMS>ALL_HEADDIM>默认",
+            "理解 stages 全集(1-4)与精简集(1-2)对构建时间的影响"
+          ],
+          "source_files": [
+            "env.py",
+            "setup.py",
+            "docs/env.md"
+          ],
+          "minimal_modules": [
+            "get_build_arch_list",
+            "get_build_sources/generate_split_headdim_sources",
+            "get_enabled_headdims",
+            "get_build_cuda_cflags"
+          ],
+          "practice_task": "用 FFPA_DEV_HEADDIMS=\"512\" ENABLE_FFPA_ALL_STAGES=0 配置一次仅编译 head_dim=512、stages 1-2 的快速构建，并解释它相比全量构建省下了哪些翻译单元。",
+          "depends_on": [
+            "u7-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "运行时 kernel 选择开关",
+          "order": 5,
+          "filename": "u7-l5-runtime-kernel-selection-knobs.md",
+          "level": "advanced",
+          "topic": "讲解 env.py 在运行时读取的 MMA acc dtype、SMEM swizzle、prefetch/persist、launch grid 等 ENABLE_FFPA_* 开关及其对 kernel 行为的影响。",
+          "learning_goals": [
+            "区分构建期与运行期 FFPA_* 开关",
+            "掌握 ENABLE_FFPA_FORCE_QK_F16/FORCE_PV_F16 的混合精度互斥语义",
+            "理解 ENABLE_FFPA_LAUNCH_GRID_DNHB 对网格布局的影响"
+          ],
+          "source_files": [
+            "env.py",
+            "docs/env.md"
+          ],
+          "minimal_modules": [
+            "运行期 ENABLE_FFPA_* 解析",
+            "MMA acc 开关",
+            "prefetch/swizzle/persist/launch 开关"
+          ],
+          "practice_task": "对照 docs/env.md，把所有运行期开关分成「MMA 精度」「预取/共享」「swizzle」「persist」「流水线/网格」五类，各举一例说明开关后 kernel 行为如何变化。",
+          "depends_on": [
+            "u7-1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "持久化自动调优与基准测试",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Triton 自动调优机制：fast/max 与候选 config",
+          "order": 1,
+          "filename": "u8-l1-triton-autotune-mechanism.md",
+          "level": "advanced",
+          "topic": "讲解 _gen_fwd_autotune_configs 等如何生成 BLOCK_M/N、num_warps/num_stages 候选，fast(小搜索空间)与 max(大搜索空间)模式，以及 autotune key 的 seqlen 分桶。",
+          "learning_goals": [
+            "理解 fast 与 max 模式候选数量与字段差异",
+            "掌握 autotune key 按 headdim/(BLOCK_M,BLOCK_N)/seqlen 桶缓存",
+            "理解高 SMEM 设备才追加 full-D config 的条件"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_ffpa_fwd.py",
+            "src/ffpa_attn/triton/_autotune_utils.py",
+            "src/ffpa_attn/functional.py"
+          ],
+          "minimal_modules": [
+            "_gen_fwd_autotune_configs",
+            "_gen_decode_fwd_stage1_autotune_configs",
+            "TritonBackend.autotune/autotune_mode",
+            "seqlen 分桶"
+          ],
+          "practice_task": "阅读 _gen_fwd_autotune_configs，统计 fast 与 max 各产生多少候选；再用 TritonBackend(autotune=True,autotune_mode='max') 跑一次前向并观察调优日志。",
+          "depends_on": [
+            "u4-1",
+            "u5-2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "持久化调优配置生成器 CLI",
+          "order": 2,
+          "filename": "u8-l2-persistent-autotune-cli-generator.md",
+          "level": "advanced",
+          "topic": "讲解 python -m ffpa_attn.autotune 的 argparse（mode/directions/dtypes/full-tasks/B/H/enable-*-tma/num-gpus）、任务网格（headdim×seqlen×变体）与 JSON schema 及输出命名。",
+          "learning_goals": [
+            "掌握 DEFAULT_HEADDIMS/DEFAULT_SEQLENS 任务网格与 decode/prefill 划分",
+            "理解 --full-tasks 增加的 attn_mask/dropout/gqa/mqa 变体",
+            "掌握 JSON entry 的 direction/kernel/causal/dtype/has_attn_bias/has_dropout/config 字段"
+          ],
+          "source_files": [
+            "src/ffpa_attn/autotune.py",
+            "docs/user_guide/autotune.md"
+          ],
+          "minimal_modules": [
+            "_parse_args",
+            "_iter_forward_tasks/_iter_backward_tasks",
+            "_iter_full_variant_tasks",
+            "_entry_base/device_config_path"
+          ],
+          "practice_task": "用 FFPA_AUTOTUNE_MAX_CONFIGS=4 跑一次 `python -m ffpa_attn.autotune --mode fast --output-dir /tmp/ffpa-smoke`，打开生成的 JSON 指出一个 entry 并解释每个字段含义。",
+          "depends_on": [
+            "u8-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "运行时配置查找与就近匹配回退",
+          "order": 3,
+          "filename": "u8-l3-runtime-config-lookup-fallback.md",
+          "level": "advanced",
+          "topic": "讲解 lookup_persistent_config 如何按 direction/kernel/causal/dtype/has_attn_bias/has_dropout 过滤，再用 nearest/upper_or_max 就近匹配 head_dim 与 seqlen，以及相关环境变量。",
+          "learning_goals": [
+            "掌握过滤字段与 dtype/TMA/WS 的推断回退",
+            "理解 nearest_value(并列取大)与 upper_or_max_value 的 seqlen 匹配规则",
+            "掌握 FFPA_TUNED_CONFIG_DIR/FFPA_SKIP_PERSISIT_TUNED_CONFIG 的作用"
+          ],
+          "source_files": [
+            "src/ffpa_attn/triton/_persistent_autotune.py",
+            "docs/user_guide/autotune.md"
+          ],
+          "minimal_modules": [
+            "lookup_persistent_config/_lookup_persistent_config_cached",
+            "load_config_entries/_load_arch_config_entries",
+            "nearest_value/upper_or_max_value"
+          ],
+          "practice_task": "设 FFPA_LOGGER_LEVEL=DEBUG 与一个临时 config 目录，运行一次前向并观察日志确认命中持久化配置；再解释运行时 D=384 如何就近匹配到已持久化的 D=320。",
+          "depends_on": [
+            "u8-2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Ray 多 GPU 并行调优",
+          "order": 4,
+          "filename": "u8-l4-ray-multi-gpu-autotune.md",
+          "level": "advanced",
+          "topic": "讲解 TritonAutotuneWorker（每 GPU 一个 actor、私有 Triton cache 防编译竞争）与 run_ray_autotune 的 actor pool + 队列调度（Phase A 填充、Phase B 完成即派发）。",
+          "learning_goals": [
+            "理解 @ray.remote(num_gpus=1) 的单卡独占与 PCI bus 隔离 cache",
+            "掌握 ray.wait 动态派发保持 GPU 占满的调度",
+            "理解 --num-gpus 与 --ray-address 的用法与校验"
+          ],
+          "source_files": [
+            "src/ffpa_attn/ray/_autotune_engine.py",
+            "src/ffpa_attn/ray/_autotune_worker.py",
+            "docs/user_guide/autotune.md"
+          ],
+          "minimal_modules": [
+            "TritonAutotuneWorker actor",
+            "run_ray_autotune",
+            "ray.wait 调度"
+          ],
+          "practice_task": "阅读 _autotune_engine.py，描述多卡调优时任务如何被分配到空闲 worker；解释为何每个 worker 要用按 PCI bus 隔离的私有 Triton cache。",
+          "depends_on": [
+            "u8-2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "基准测试 CLI 与 TFLOPS 评估",
+          "order": 5,
+          "filename": "u8-l5-bench-cli-tflops.md",
+          "level": "advanced",
+          "topic": "讲解 python -m ffpa_attn.bench 的多后端基准、run_forward/backward_examples 的 8 类用例、_flops.py 的 TFLOPS 公式与对 SDPA 的正确性校验。",
+          "learning_goals": [
+            "掌握前向 4*bnh*D*pairs 与反向 2.5x 的 FLOPS 公式",
+            "理解 8 类基准用例（self/cross/decode/gqa/causal/attn-mask/dropout/non-aligned）",
+            "掌握延迟测量（warmup+iters）与对 SDPA 的 allclose 容差"
+          ],
+          "source_files": [
+            "src/ffpa_attn/cli/_bench.py",
+            "src/ffpa_attn/cli/_flops.py",
+            "src/ffpa_attn/cli/_runner_fwd.py",
+            "src/ffpa_attn/cli/_runner_bwd.py",
+            "src/ffpa_attn/bench.py",
+            "bench/README.md"
+          ],
+          "minimal_modules": [
+            "_bench.main",
+            "run_forward_examples/run_backward_examples",
+            "attention_fwd_flops/attention_bwd_flops",
+            "_time_fn"
+          ],
+          "practice_task": "运行 `python -m ffpa_attn.bench --no-bwd --fwd-backend triton`，对照 bench/README.md 的 L20 表格理解 TFLOPS 与 speedup 列；再用 _flops.py 手算一个 self-attn 用例的理论 FLOPS。",
+          "depends_on": [
+            "u3-1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "测试、集成与扩展",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "正确性测试与 monkey-patch 测试",
+          "order": 1,
+          "filename": "u9-l1-correctness-monkey-patch-tests.md",
+          "level": "advanced",
+          "topic": "讲解 tests/test_ffpa_fwd.py、test_ffpa_bwd.py 的正确性矩阵（dtype×headdim×seqlen）与 test_monkey_patch.py 对回退不递归的锁定。",
+          "learning_goals": [
+            "理解 CORRECTNESS_SHAPES/DISPATCH_SHAPES 的覆盖策略",
+            "掌握正确性对 SDPA 的容差与 ROCm 差异处理",
+            "理解 monkey-patch 测试如何确保回退走原生 SDPA 而非递归"
+          ],
+          "source_files": [
+            "tests/test_ffpa_fwd.py",
+            "tests/test_ffpa_bwd.py",
+            "tests/test_monkey_patch.py"
+          ],
+          "minimal_modules": [
+            "CORRECTNESS_SHAPES/DISPATCH_SHAPES",
+            "_sdpa_ref/_sdpa_fallback",
+            "IS_ROCM 差异",
+            "_native_sdpa 回退"
+          ],
+          "practice_task": "运行 pytest tests/test_ffpa_fwd.py -k '512' 子集，阅读其中一个测试断言；再说明 test_monkey_patch 如何验证回退路径不递归。",
+          "depends_on": [
+            "u2-1",
+            "u3-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "持久化配置与自动调优模式测试",
+          "order": 2,
+          "filename": "u9-l2-persistent-config-autotune-tests.md",
+          "level": "advanced",
+          "topic": "讲解 tests/test_persistent_autotune_config.py 与 test_triton_autotune_mode.py 如何校验配置查找、就近匹配与 fast/max 模式一致性。",
+          "learning_goals": [
+            "理解持久化配置测试的 schema 与匹配断言",
+            "掌握 autotune mode 测试如何保证 fast/max 一致",
+            "理解这些测试在 CI 中的角色"
+          ],
+          "source_files": [
+            "tests/test_persistent_autotune_config.py",
+            "tests/test_triton_autotune_mode.py"
+          ],
+          "minimal_modules": [
+            "test_persistent_autotune_config",
+            "test_triton_autotune_mode"
+          ],
+          "practice_task": "运行 pytest tests/test_persistent_autotune_config.py tests/test_triton_autotune_mode.py -q，阅读其中一个用例说明它如何注入临时 config 目录并断言查找结果。",
+          "depends_on": [
+            "u8-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "E2E 训练集成与日志可观测性",
+          "order": 3,
+          "filename": "u9-l3-e2e-training-and-logging.md",
+          "level": "advanced",
+          "topic": "讲解用 ffpa_attn_func 替换模型中 D=512 全注意力层的 E2E 集成模式（NeMo Gemma4-31B 案例），以及 logger.py 的 FFPA_LOGGER_LEVEL、once 去重与 rank0 过滤。",
+          "learning_goals": [
+            "理解只替换大 D 全注意力层、其余回退 SDPA 的集成策略",
+            "掌握 FFPA_LOGGER_LEVEL / FFPA_FORCE_ONLY_RANK0_LOGGING 调试用法",
+            "理解 info_once/debug_once/warning_once 的去重语义"
+          ],
+          "source_files": [
+            "README.md",
+            "src/ffpa_attn/logger.py",
+            "src/ffpa_attn/ffpa_attn_interface.py"
+          ],
+          "minimal_modules": [
+            "README E2E Training",
+            "logger.init_logger/_log_once",
+            "Rank0Filter"
+          ],
+          "practice_task": "设 FFPA_LOGGER_LEVEL=DEBUG 运行一次前向，观察 warning_once/debug_once 输出；再写一段说明：为何 E2E 集成只替换 D=512 层而非全部注意力层。",
+          "depends_on": [
+            "u2-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "二次开发扩展指南：新增后端 / head_dim",
+          "order": 4,
+          "filename": "u9-l4-extension-guide.md",
+          "level": "advanced",
+          "topic": "总结如何为 FFPA 新增一个后端（实现 Backend 子类、forward/backward、注册 torch op、接入 FFPAAttnFunc 分发）或新增一个 head_dim（代码生成、autotune 任务网格、测试形状）。",
+          "learning_goals": [
+            "掌握新增后端需要改动的 Python 分发层与 op 注册清单",
+            "掌握新增 head_dim 在 env.py 代码生成与 autotune 网格的改动点",
+            "理解扩展时保持 torch.compile/autograd 兼容的注意事项"
+          ],
+          "source_files": [
+            "src/ffpa_attn/functional.py",
+            "src/ffpa_attn/triton/__init__.py",
+            "env.py",
+            "src/ffpa_attn/autotune.py"
+          ],
+          "minimal_modules": [
+            "Backend 子类与 _coerce_backend",
+            "_BACKEND_MAP",
+            "ffpa_attn::_fwd_* op 注册",
+            "DEFAULT_HEADDIMS",
+            "generate_split_headdim_sources"
+          ],
+          "practice_task": "写一份扩展清单：若要新增一个 head_dim=448，需要同步修改哪些文件（代码生成、autotune 网格、测试形状、持久化 config）；若要新增一个后端，需要在 functional.py 与 __init__.py 哪些位置接入。",
+          "depends_on": [
+            "u3-2",
+            "u7-3",
+            "u8-2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
