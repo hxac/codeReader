@@ -1,0 +1,1066 @@
+{
+  "project": "instant-ngp",
+  "head": "abe236ee00cf90cfca6e36e65c00435d5b21f50a",
+  "rationale": "instant-ngp 是 NVIDIA 的「即时神经图形基元」项目，核心是用多分辨率哈希编码（multiresolution hash encoding）驱动一个轻量 MLP，在 GPU 上秒级训练/渲染四种图形基元：NeRF、SDF、图像、体素。整个项目以一个巨大的 Testbed 类为中心，承担模式分发、训练、渲染、GUI、VR 等全部职责，底层神经网络能力来自 tiny-cuda-nn。基于这一结构，我把学习路线设计为「先会跑、再读懂架构、再深入各原语、最后做自动化与二次开发」四段递进。\\n\\n第一单元（入门）让读者从零认识项目、看懂目录、完成编译并跑通 fox/armadillo/albert/cloud 四个示例，建立感性认识。第二单元聚焦中枢 Testbed：四种模式 ETestbedMode、frame() 主循环、load_file 自动判别场景、基于 JSON 的网络配置体系——这是理解后续一切的基础。第三单元专门讲神经网络与本项目最核心的创新「多分辨率哈希编码」，配合 reset_network() 的真实代码与 configs 对比实验。第四单元是体量最大的 NeRF 深入：数据集 transforms.json、NerfNetwork 双头结构、光线步进渲染、train_nerf 训练循环、密度网格空区域跳过。第五单元把另外三种原语 SDF/图像/体素讲清，含 BVH、八叉树与 OptiX。第六单元关注「产物」：渲染缓冲与 CUDA-GL 互操作、相机路径出视频、快照 .ingp、Marching Cubes 出网格。第七单元进入 Python 自动化（pyngp 绑定、run.py、数据准备脚本）。第八单元（专家层）讲性能与扩展点：多 GPU、JIT 全融合内核、相机位姿/镜头优化、DLSS/VR/注视点渲染、以及如何扩展配置做二次开发。\\n\\n单元之间用 depends_on 串联成 DAG：所有深入内容都依赖第二单元的 Testbed 架构；NeRF/SDF/图像/体素各自独立成线，可按需选读；高级特性再依赖前面的渲染与训练线。每篇讲义只解决一个问题、引用 2-6 个真实源码文件，并配一个可操作的代码实践任务（修改 JSON 配置、跑通 colmap2nerf、用 pyngp 出截图/网格等），确保读者边读边动手。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 instant-ngp 并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位：instant-ngp 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 instant-ngp 的定位、它实现的四种神经图形基元（NeRF/SDF/图像/体素）、核心创新多分辨率哈希编码，以及论文与可执行物的关系。",
+          "learning_goals": [
+            "理解 instant-ngp 要解决的问题：用秒级训练的 MLP 表达高频图形信号",
+            "区分四种基元各自的输入输出与典型用途",
+            "知道多分辨率哈希编码是本项目的核心加速思想",
+            "了解项目与 tiny-cuda-nn、NeRF 论文的关系"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/nerf_dataset_tips.md"
+          ],
+          "minimal_modules": [
+            "项目背景",
+            "四种图形基元",
+            "多分辨率哈希编码思想"
+          ],
+          "practice_task": "阅读 README 的 Installation 与 Usage 两节，用一句话写下 instant-ngp 与原始 NeRF 在训练速度上的差异，并列举四种基元各对应一个 data/ 下的示例。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与代码组织",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库的整体目录布局：src 源码、include 头文件、configs 网络配置、dependencies 第三方库、scripts 脚本、data 示例数据，以及它们如何协作。",
+          "learning_goals": [
+            "掌握 src/ 与 include/neural-graphics-primitives/ 的对应关系",
+            "理解 configs/ 按 nerf/sdf/image/volume 四种模式组织的原因",
+            "认识 dependencies/ 中的关键库（tiny-cuda-nn、imgui、glfw、pybind11 等）",
+            "知道 testbed.cu/testbed.h 是整个项目的中枢"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "目录布局",
+            "第三方依赖",
+            "中枢文件定位"
+          ],
+          "practice_task": "在仓库根目录统计 src/ 下每个 .cu 文件的行数，找出最大的三个文件，并说明为什么 testbed.cu（约 5600 行）会成为中枢。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建与编译：用 CMake 跑通构建",
+          "order": 3,
+          "filename": "u1-l3-build-system.md",
+          "level": "beginner",
+          "topic": "解读 CMakeLists.txt 的构建逻辑：C++14/CUDA、NGP_BUILD_WITH_GUI/OPTIX/PYTHON_BINDINGS/VULKAN 等可选开关、CUDA 架构、子模块依赖、可执行物与 pyngp 的产出。",
+          "learning_goals": [
+            "掌握标准编译命令（cmake -B build、cmake --build）的每一步含义",
+            "理解 NGP_BUILD_WITH_* 系列开关各自引入什么能力",
+            "认识 TCNN_CUDA_ARCHITECTURES 与 GPU 代际的对应",
+            "区分 instant-ngp 可执行物与 pyngp Python 模块两条构建产物"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            ".gitmodules",
+            "requirements.txt"
+          ],
+          "minimal_modules": [
+            "CMake 构建流程",
+            "可选功能开关",
+            "CUDA 架构选择"
+          ],
+          "practice_task": "假设你要在没有 Vulkan 的机器上禁用 DLSS 编译一个无 GUI 版本，写出对应的 cmake 配置命令；并说明 git submodule 缺失时构建会报什么错。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "命令行运行与示例场景",
+          "order": 4,
+          "filename": "u1-l4-cli-and-scenes.md",
+          "level": "beginner",
+          "topic": "讲解 instant-ngp 的 CLI 入口 main.cu：参数解析（--scene/--network/--snapshot/--no-gui/--width/--height）、加载文件、进入 frame() 循环；并用 fox/armadillo/albert/cloud 四个示例演示四种基元。",
+          "learning_goals": [
+            "读懂 main_func 的参数解析与启动流程",
+            "理解场景如何自动决定 Testbed 模式",
+            "会用命令行加载四种基元的示例数据",
+            "知道 --no-gui 无头模式如何报告训练进度"
+          ],
+          "source_files": [
+            "src/main.cu",
+            "scripts/run.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "main 入口",
+            "命令行参数",
+            "四种基元示例"
+          ],
+          "practice_task": "阅读 src/main.cu，列出所有支持的命令行参数；然后用 `./instant-ngp data/nerf/fox` 与 `./instant-ngp data/sdf/armadillo.obj` 分别说明两个命令加载后 Testbed 会进入哪个模式。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "交互式 GUI 与操作",
+          "order": 5,
+          "filename": "u1-l5-interactive-gui.md",
+          "level": "beginner",
+          "topic": "介绍基于 Dear ImGui 的交互界面与 frame() 循环如何驱动 GUI：键盘控制、Snapshot/相机路径/裁剪框等面板、VR 连接，以及 frame() 里训练与渲染如何交替。",
+          "learning_goals": [
+            "理解 frame() 主循环里 begin_frame/handle_user_input/train_and_render/draw_gui 的时序",
+            "掌握常用键盘控制（WASD、T 训练开关、1-8 渲染模式等）",
+            "认识 GUI 各面板（Snapshot、Rendering、Camera path）的功能",
+            "了解 NGP_GUI 编译宏的作用"
+          ],
+          "source_files": [
+            "src/main.cu",
+            "src/testbed.cu",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "frame 主循环",
+            "键盘与面板",
+            "训练/渲染交替"
+          ],
+          "practice_task": "在 README 的键盘表里挑出控制训练开关、相机移动、渲染模式切换的按键，并描述一次完整操作：加载 fox → 按 T 观察损失下降 → 用 1-8 切换渲染模式。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心架构：理解 Testbed 中枢",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Testbed 类与四种模式",
+          "order": 1,
+          "filename": "u2-l1-testbed-and-modes.md",
+          "level": "intermediate",
+          "topic": "剖析 Testbed 类的整体结构：构造、ETestbedMode 枚举、set_mode 重置、内嵌的 m_nerf/m_sdf/m_image/m_volume 状态、以及网络相关成员（m_trainer/m_network/m_encoding/m_optimizer）。",
+          "learning_goals": [
+            "理解 Testbed 为何是一个承载全部状态的巨型类",
+            "掌握 ETestbedMode 四种模式与 None 的切换语义",
+            "看懂 set_mode 如何重置各模式专属成员",
+            "区分顶层网络成员（loss/optimizer/encoding/network/trainer）的职责"
+          ],
+          "source_files": [
+            "include/neural-graphics-primitives/testbed.h",
+            "include/neural-graphics-primitives/common.h",
+            "src/testbed.cu"
+          ],
+          "minimal_modules": [
+            "Testbed 类结构",
+            "ETestbedMode",
+            "模式专属状态"
+          ],
+          "practice_task": "在 testbed.h 中找到 m_nerf / m_sdf / m_image / m_volume 四个内嵌结构体，分别记录它们各自最关键的 2 个字段，并说明 set_mode 为何要清空它们。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "主帧循环：frame / train_and_render / train / render_frame",
+          "order": 2,
+          "filename": "u2-l2-frame-loop.md",
+          "level": "intermediate",
+          "topic": "追踪一帧的完整生命周期：frame() 决定是否跳过渲染、train_and_render() 调用 train() 再渲染、train() 按模式分发到 train_nerf/train_sdf/train_image/train_volume，render_frame 负责出图。",
+          "learning_goals": [
+            "画出 frame() 一帧内的事件时序图",
+            "理解 m_render_skip_due_to_lack_of_camera_movement 等跳过渲染的优化",
+            "掌握 train() 如何按 m_testbed_mode 分发并按需 reload 网络",
+            "区分训练、训练准备（training_prep_*）与渲染三阶段"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "frame 时序",
+            "train 分发",
+            "跳过渲染优化"
+          ],
+          "practice_task": "阅读 src/testbed.cu 的 frame() 与 train_and_render()，回答：当相机不动且训练已收敛时，渲染会被跳过吗？训练会被跳过吗？给出代码行号佐证。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "文件加载与模式自动识别",
+          "order": 3,
+          "filename": "u2-l3-file-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 load_file / load_training_data 如何根据文件后缀与内容自动判断它是训练数据、网络配置、快照还是相机路径，以及 mode_from_scene 如何从路径推断 Testbed 模式。",
+          "learning_goals": [
+            "理解 load_file 对 .ingp/.msgpack/.json/其他后缀的分支处理",
+            "掌握 mode_from_scene 的判别规则（obj/stl→SDF，nvdb→Volume，图片→Image，目录→NeRF）",
+            "看懂 load_training_data 按模式分发到 load_nerf/load_mesh/load_image/load_volume",
+            "理解拖入文件后自动开启训练的逻辑"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "src/common_host.cu",
+            "include/neural-graphics-primitives/common_host.h"
+          ],
+          "minimal_modules": [
+            "load_file 分发",
+            "mode_from_scene",
+            "load_training_data 分发"
+          ],
+          "practice_task": "给定四个文件路径（fox/、armadillo.obj、albert.exr、cloud.nvdb），写出 load_file/load_training_data 会把它们分别路由到哪个加载函数、最终进入哪个 ETestbedMode。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "网络配置体系：JSON 与继承",
+          "order": 4,
+          "filename": "u2-l4-network-config.md",
+          "level": "intermediate",
+          "topic": "讲解 configs/*.json 配置体系：encoding/network/optimizer/loss 四大块、parent 继承机制、find_network_config 的路径解析、reload_network_from_file/load_network_config 的加载流程。",
+          "learning_goals": [
+            "读懂一份 base.json 里 encoding/network/optimizer/loss 各字段含义",
+            "理解 parent 继承与 merge_parent_network_config 的合并逻辑",
+            "掌握 find_network_config 如何在 configs/<mode>/ 下解析相对路径",
+            "区分 .json 配置与 .ingp/.msgpack 快照的加载方式"
+          ],
+          "source_files": [
+            "configs/nerf/base.json",
+            "configs/sdf/base.json",
+            "src/testbed.cu",
+            "include/neural-graphics-primitives/json_binding.h"
+          ],
+          "minimal_modules": [
+            "配置四大块",
+            "parent 继承",
+            "路径解析"
+          ],
+          "practice_task": "对比 configs/nerf/base.json 与 configs/sdf/base.json，列出两者在 encoding（n_levels/log2_hashmap_size）、loss、optimizer 上的差异，并解释 log2_hashmap_size 不同意味着什么。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "神经网络与多分辨率哈希编码",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "tiny-cuda-nn 模型对象与 reset_network",
+          "order": 1,
+          "filename": "u3-l1-model-objects-and-reset-network.md",
+          "level": "intermediate",
+          "topic": "讲解 reset_network() 如何从 JSON 构造 Loss/Optimizer/Encoding/Network/Trainer 五大对象，理解 Testbed 持有的这些 shared_ptr 成员，以及训练精度 LOSS_SCALE。",
+          "learning_goals": [
+            "理解 reset_network 在切换配置/模式时的重建职责",
+            "掌握 m_loss/m_optimizer/m_encoding/m_network/m_trainer 五个对象的关系",
+            "认识 create_loss/create_optimizer/create_encoding/create_network 工厂",
+            "理解混合精度训练下 LOSS_SCALE 放大梯度的原因"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "reset_network 流程",
+            "五大模型对象",
+            "工厂函数"
+          ],
+          "practice_task": "在 src/testbed.cu 的 reset_network 中找到 create_loss/create_optimizer 的调用点，说明 optimizer 配置里的 Ema→ExponentialDecay→Adam 嵌套结构是如何被构造出来的。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "多分辨率哈希编码（核心创新）",
+          "order": 2,
+          "filename": "u3-l2-hash-grid-encoding.md",
+          "level": "intermediate",
+          "topic": "深入多分辨率哈希编码算法：n_levels、n_features_per_level、log2_hashmap_size、base_resolution、per_level_scale 的含义，以及 reset_network 如何自动推导 per_level_scale。",
+          "learning_goals": [
+            "理解多层级网格从粗到细逼近高频信号的思想",
+            "掌握空间哈希如何用固定大小哈希表表达任意分辨率",
+            "看懂 per_level_scale = exp(log(Nmax/Nmin)/(L-1)) 的推导代码",
+            "理解哈希碰撞与竞争对训练的影响"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "configs/nerf/hashgrid.json",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "多层级网格",
+            "空间哈希",
+            "per_level_scale 推导"
+          ],
+          "practice_task": "阅读 reset_network 中自动计算 per_level_scale 的代码段，给定 n_levels=16、base_resolution=16、desired_resolution=2048，手算 per_level_scale 的近似值并与代码对账。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "网络构建与 FullyFusedMLP",
+          "order": 3,
+          "filename": "u3-l3-network-and-fullyfused-mlp.md",
+          "level": "intermediate",
+          "topic": "讲解 reset_network 中网络部分如何按模式构造：NeRF 用 NerfNetwork（双头），SDF/Image/Volume 用 NetworkWithInputEncoding；FullyFusedMLP 与 MegakernelMLP 的选择与对齐要求（16/8 对齐）。",
+          "learning_goals": [
+            "理解 FullyFusedMLP 为何需要 16 维对齐输入",
+            "掌握 network_config 中 n_neurons/n_hidden_layers/activation 的作用",
+            "看懂 NeRF 分支与其他模式分支在网络构造上的差异",
+            "认识 NetworkWithInputEncoding 如何把编码与 MLP 组合"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "include/neural-graphics-primitives/nerf_network.h",
+            "configs/nerf/base.json"
+          ],
+          "minimal_modules": [
+            "网络构造分支",
+            "FullyFusedMLP 对齐",
+            "NetworkWithInputEncoding"
+          ],
+          "practice_task": "在 reset_network 里找出 alignment 取 16 还是 8 的判断条件，并解释为什么 FullyFusedMLP/MegakernelMLP 需要 16 对齐而其他网络只需 8。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "编码方式对比实验",
+          "order": 4,
+          "filename": "u3-l4-encoding-comparison.md",
+          "level": "intermediate",
+          "topic": "通过 configs/nerf 下 hashgrid/oneblob/frequency/densegrid/none 等多份配置对比不同输入编码（哈希网格、OneBlob、频率、稠密网格、无编码）的效果与参数差异。",
+          "learning_goals": [
+            "对比 HashGrid/OneBlob/Frequency/DenseGrid 编码的结构差异",
+            "理解不同编码在参数量与表达力上的权衡",
+            "掌握用 -n/--network 切换配置进行对照实验的方法",
+            "认识 encoding otype 如何影响 per_level_scale 等自动参数"
+          ],
+          "source_files": [
+            "configs/nerf/hashgrid.json",
+            "configs/nerf/oneblob.json",
+            "configs/nerf/frequency.json",
+            "configs/nerf/densegrid.json",
+            "configs/nerf/none.json"
+          ],
+          "minimal_modules": [
+            "编码对比",
+            "配置切换",
+            "参数权衡"
+          ],
+          "practice_task": "用同一 fox 数据分别加载 hashgrid 与 frequency 配置训练，记录两者的参数量与最终损失，说明哈希编码为何在参数量更少时仍能逼近高频细节。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "NeRF 原语深入",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "NeRF 数据集与 transforms.json",
+          "order": 1,
+          "filename": "u4-l1-nerf-dataset.md",
+          "level": "intermediate",
+          "topic": "讲解 NeRF 数据集格式：NerfDataset 结构、transforms.json（相机内外参、aabb_scale、frames）、坐标系转换（ngp↔nerf），以及 colmap2nerf 从图像重建位姿的流程。",
+          "learning_goals": [
+            "理解 transforms.json 的字段与 frames 列表结构",
+            "掌握 aabb_scale 对场景包围盒与质量的影响",
+            "看懂 nerf_matrix_to_ngp / nerf_position_to_ngp 的坐标轴循环转换",
+            "了解 aabb_scale 调优与数据采集建议（来自 nerf_dataset_tips）"
+          ],
+          "source_files": [
+            "include/neural-graphics-primitives/nerf_loader.h",
+            "src/nerf_loader.cu",
+            "scripts/colmap2nerf.py",
+            "docs/nerf_dataset_tips.md"
+          ],
+          "minimal_modules": [
+            "NerfDataset",
+            "transforms.json",
+            "坐标系转换"
+          ],
+          "practice_task": "阅读 nerf_loader.h 的 nerf_matrix_to_ngp，说明它对非 mitsuba 数据做了哪三步坐标轴变换；再根据 nerf_dataset_tips 解释 aabb_scale 从 128 开始调参的建议。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "NerfNetwork 双头架构",
+          "order": 2,
+          "filename": "u4-l2-nerf-network-architecture.md",
+          "level": "intermediate",
+          "topic": "剖析 NerfNetwork：位置编码→density MLP→密度，方向编码→拼接密度特征→rgb MLP→颜色；前向/反向、密度专用前向（用于密度网格）、JIT 设备函数生成。",
+          "learning_goals": [
+            "理解密度头与颜色头的两段式 MLP 结构",
+            "掌握 pos_encoding/dir_encoding/density_network/rgb_network 四个组件",
+            "看懂 forward_impl 中密度特征如何被复用到 rgb 网络输入",
+            "理解 density/density_forward 为何单独提供（供密度网格采样）"
+          ],
+          "source_files": [
+            "include/neural-graphics-primitives/nerf_network.h",
+            "include/neural-graphics-primitives/testbed.h",
+            "configs/nerf/base.json"
+          ],
+          "minimal_modules": [
+            "双头 MLP",
+            "四组件",
+            "密度专用前向"
+          ],
+          "practice_task": "在 nerf_network.h 的 forward_impl 中追踪一个输入张量，标出它分别经过 pos_encoding、density_network、dir_encoding、rgb_network 的顺序，并说明密度值如何被 extract_density 写入输出第 4 维。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "NeRF 光线步进与体渲染",
+          "order": 3,
+          "filename": "u4-l3-nerf-ray-marching.md",
+          "level": "intermediate",
+          "topic": "讲解 NeRF 渲染管线：NerfTracer.init_rays_from_camera 生成光线、trace 沿光线步进采样 NerfNetwork、render_nerf 的 alpha 合成、圆锥步距（cone_angle_constant）与级联（cascade）。",
+          "learning_goals": [
+            "理解从相机发射光线到体素采样的完整链路",
+            "掌握 alpha 合成（transmittance 累积）如何得到像素颜色",
+            "看懂 cone_angle_constant 控制的步距随距离增大",
+            "认识多级联（max_cascade）如何覆盖大场景"
+          ],
+          "source_files": [
+            "src/testbed_nerf.cu",
+            "include/neural-graphics-primitives/fused_kernels/render_nerf.cuh",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "NerfTracer",
+            "render_nerf",
+            "体渲染合成"
+          ],
+          "practice_task": "阅读 render_nerf 与 render_nerf.cuh，描述一根光线从进入包围盒到输出 RGBA 经历的主要步骤；并说明 render_min_transmittance 如何提前终止光线节省计算。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "NeRF 训练循环",
+          "order": 4,
+          "filename": "u4-l4-nerf-training-loop.md",
+          "level": "intermediate",
+          "topic": "深入 train_nerf / train_nerf_step：按批采样光线、 marching 生成训练样本、NerfCounters 统计与压缩、损失计算（loss_type）、反向与优化器更新、随机背景色与误差图。",
+          "learning_goals": [
+            "理解每步从训练图像采样光线的批量机制",
+            "掌握 NerfCounters 记录 numsteps/loss 的作用",
+            "看懂 random_bg_color 迫使模型学习透明度的原因",
+            "认识 error_map 重要性采样如何聚焦难样本"
+          ],
+          "source_files": [
+            "src/testbed_nerf.cu",
+            "include/neural-graphics-primitives/fused_kernels/train_nerf.cuh",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "train_nerf_step",
+            "NerfCounters",
+            "loss_type 与误差图"
+          ],
+          "practice_task": "阅读 train_nerf_step 与 NerfCounters::update_after_training，回答：measured_batch_size_before_compaction 与 measured_batch_size 的区别是什么？为什么要做光线压缩（compaction）？",
+          "depends_on": [
+            "u4-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "密度网格与空区域跳过",
+          "order": 5,
+          "filename": "u4-l5-density-grid.md",
+          "level": "intermediate",
+          "topic": "讲解密度网格机制：density_grid/density_grid_bitfield 的 EMA 更新、update_density_grid_nerf 采样、update_density_grid_mean_and_bitfield 压缩成位域、级联 mip，用于渲染时跳过空区域。",
+          "learning_goals": [
+            "理解密度网格如何用 EMA 平滑跟踪网络输出密度",
+            "掌握 density_grid_bitfield 位域如何加速光线步进",
+            "看懂 density_grid_decay 与均匀/非均匀采样的作用",
+            "认识 mark_density_grid_in_sphere_empty 等交互编辑能力"
+          ],
+          "source_files": [
+            "src/testbed_nerf.cu",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "density_grid EMA",
+            "位域压缩",
+            "空区域跳过"
+          ],
+          "practice_task": "追踪 update_density_grid_nerf → update_density_grid_mean_and_bitfield 的数据流，说明一个 3D 网格单元的密度如何最终变成 bitfield 里的一个比特，以及该比特在渲染时如何被 NerfTracer 用于跳采样。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "其他原语：SDF / 图像 / 体素",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "SDF 原语与球面追踪",
+          "order": 1,
+          "filename": "u5-l1-sdf-sphere-tracing.md",
+          "level": "intermediate",
+          "topic": "讲解 SDF 原语：从网格采样距离场训练数据（generate_training_samples_sdf）、SphereTracer 球面追踪渲染、train_sdf 在线生成样本、阴影光线与有限差分法线。",
+          "learning_goals": [
+            "理解 SDF 表示的是空间到表面距离的有向场",
+            "掌握 SphereTracer.trace 如何沿光线推进直到命中表面",
+            "看懂 train_sdf 在表面附近均匀采样与扰动采样的策略",
+            "认识 FD 法线近似与阴影光线"
+          ],
+          "source_files": [
+            "src/testbed_sdf.cu",
+            "include/neural-graphics-primitives/testbed.h",
+            "include/neural-graphics-primitives/sdf.h",
+            "include/neural-graphics-primitives/fused_kernels/trace_sdf.cuh"
+          ],
+          "minimal_modules": [
+            "SphereTracer",
+            "train_sdf 采样",
+            "距离场渲染"
+          ],
+          "practice_task": "阅读 SphereTracer::trace 与 trace_sdf.cuh，描述球面追踪每一步如何用网络预测的距离推进光线；并说明 distance_scale/zero_offset 如何影响追踪收敛。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "网格 BVH、八叉树与 OptiX",
+          "order": 2,
+          "filename": "u5-l2-mesh-bvh-octree-optix.md",
+          "level": "intermediate",
+          "topic": "讲解 SDF 训练所需的几何加速结构：TriangleBvh 用于光线-三角形求交得到真值距离、TriangleOctree 支持 Takikawa 编码、OptiX（raytrace/raystab/pathescape）提供硬件加速的网格 SDF 真值。",
+          "learning_goals": [
+            "理解 TriangleBvh 如何加速网格距离查询作为 SDF 真值",
+            "掌握 EMeshSdfMode（Watertight/Raystab/PathEscape）三种网格距离计算方式",
+            "看懂 Takikawa 八叉树编码如何作为 SDF 的输入编码",
+            "认识 OptiX PTX 程序在 CMake 中如何被打包进头文件"
+          ],
+          "source_files": [
+            "src/triangle_bvh.cu",
+            "include/neural-graphics-primitives/triangle_bvh.cuh",
+            "include/neural-graphics-primitives/triangle_octree.cuh",
+            "src/optix/raytrace.cu"
+          ],
+          "minimal_modules": [
+            "TriangleBvh",
+            "TriangleOctree",
+            "OptiX 程序"
+          ],
+          "practice_task": "对比 EMeshSdfMode 的三种模式，说明各自对网格是否水密的要求；并在 CMakeLists.txt 中找到 optix_program 的 PTX→头文件打包步骤，解释它如何被运行时代码使用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "图像原语：神经图像拟合",
+          "order": 3,
+          "filename": "u5-l3-image-primitive.md",
+          "level": "intermediate",
+          "topic": "讲解图像原语：用 2D 坐标→RGB 的 MLP 拟合一张图（含 gigapixel）、load_image 支持 stbi/exr/binary 三种格式、train_image 的像素采样与 random_mode。",
+          "learning_goals": [
+            "理解图像原语是用坐标网络拟合像素颜色的回归任务",
+            "掌握 ERandomMode（Random/Halton/Sobol/Stratified）采样策略",
+            "看懂 load_stbi_image/load_exr_image/load_binary_image 三条加载路径",
+            "认识 .bin 自定义格式如何提升大图加载速度"
+          ],
+          "source_files": [
+            "src/testbed_image.cu",
+            "configs/image/base.json",
+            "scripts/convert_image.py"
+          ],
+          "minimal_modules": [
+            "图像拟合",
+            "采样策略",
+            "多格式加载"
+          ],
+          "practice_task": "阅读 load_image 的三条分支与 convert_image.py，说明为什么要为 gigapixel 大图转成 .bin 格式；再用 configs/image 下不同编码配置说明哈希编码如何帮助拟合高频纹理。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "体素原语与 NanoVDB",
+          "order": 4,
+          "filename": "u5-l4-volume-primitive.md",
+          "level": "intermediate",
+          "topic": "讲解体素原语：加载 NanoVDB（.nvdb）稀疏体素网格、体积光线步进与散射渲染（albedo/scattering/inv_distance_scale）、train_volume 的体素采样目标。",
+          "learning_goals": [
+            "理解体素原语渲染的是稀疏体素网格而非 MLP（与 NeRF 的区别）",
+            "掌握 m_volume 的 nanovdb_grid/bitgrid/global_majorant 等字段",
+            "看懂体积渲染的散射与反照率参数",
+            "认识 world2index_scale/offset 的坐标映射"
+          ],
+          "source_files": [
+            "src/testbed_volume.cu",
+            "configs/volume/base.json",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "NanoVDB 加载",
+            "体积光线步进",
+            "散射渲染参数"
+          ],
+          "practice_task": "对比 NeRF（u4）与 Volume 两种体积渲染：在 testbed.h 中找出 m_nerf 与 m_volume 各自代表的数据来源（网络 vs NanoVDB），并说明 global_majorant 在体积步进中的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "渲染输出与产物",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "渲染缓冲区与 CUDA-GL 互操作",
+          "order": 1,
+          "filename": "u6-l1-render-buffer.md",
+          "level": "advanced",
+          "topic": "讲解渲染缓冲体系：CudaRenderBuffer/CudaSurface2D/GLTexture、CUDA 与 OpenGL 互操作（CUDAMapping）、动态分辨率（m_dynamic_res）、注视点渲染（Foveation）与累积采样（spp）。",
+          "learning_goals": [
+            "理解 CUDA 渲染结果如何映射到 OpenGL 纹理上屏",
+            "掌握 CudaRenderBufferView 与 CudaRenderBuffer 的关系",
+            "看懂动态分辨率如何根据帧率自适应缩放",
+            "认识 Foveation 注视点渲染的分块采样"
+          ],
+          "source_files": [
+            "src/render_buffer.cu",
+            "include/neural-graphics-primitives/render_buffer.h"
+          ],
+          "minimal_modules": [
+            "CudaRenderBuffer",
+            "CUDA-GL 互操作",
+            "动态分辨率与注视点"
+          ],
+          "practice_task": "在 render_buffer.h 中找到 CUDAMapping 类，说明它如何用 cudaGraphicsGLRegisterImage 在 CUDA 与 GL 之间共享纹理；再描述 dynamic_res 如何随 m_dynamic_res_target_fps 调整渲染分辨率。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "相机路径与视频渲染",
+          "order": 2,
+          "filename": "u6-l2-camera-path-and-video.md",
+          "level": "advanced",
+          "topic": "讲解 CameraPath 关键帧插值与视频渲染：添加关键帧、样条求值（eval_camera_path）、run.py 中按帧 render 并用 ffmpeg 合成 mp4、滚动快门与运动模糊。",
+          "learning_goals": [
+            "理解相机路径由关键帧与样条插值生成",
+            "掌握 camera_path.cu 的 add_camera/eval_camera_path 机制",
+            "看懂 run.py 的 video 分支如何按时间渲染并导出帧",
+            "认识 rolling_shutter 与 shutter_fraction 的运动模糊模拟"
+          ],
+          "source_files": [
+            "src/camera_path.cu",
+            "include/neural-graphics-primitives/camera_path.h",
+            "scripts/run.py"
+          ],
+          "minimal_modules": [
+            "CameraPath 关键帧",
+            "样条求值",
+            "视频导出流程"
+          ],
+          "practice_task": "阅读 run.py 的 video_camera_path 分支，描述从加载相机路径到生成 mp4 的完整步骤；并说明 camera_smoothing 在视频渲染中的作用与端点不可达的代价。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "快照：保存与加载训练结果",
+          "order": 3,
+          "filename": "u6-l3-snapshots.md",
+          "level": "advanced",
+          "topic": "讲解快照机制：save_snapshot/load_snapshot 序列化网络参数与配置、.ingp（zlib 压缩 msgpack）与 .msgpack 格式、是否包含优化器状态、压缩选项。",
+          "learning_goals": [
+            "理解快照保存的是网络参数与完整网络配置",
+            "掌握 .ingp 与 .msgpack 两种格式的压缩与解析差异",
+            "看懂 include_optimizer_state 对继续训练的意义",
+            "认识 save/load_snapshot 在 Python 与 GUI 两种入口"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "include/neural-graphics-primitives/testbed.h",
+            "scripts/run.py"
+          ],
+          "minimal_modules": [
+            "save/load_snapshot",
+            "ingp/msgpack 格式",
+            "优化器状态"
+          ],
+          "practice_task": "追踪 load_network_config 对 .ingp（zlib+msgpack）与 .json 的不同解析路径，说明为什么快照里要同时保存 network 配置；再用 run.py 演示一次保存→加载→继续训练的流程。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Marching Cubes 网格提取",
+          "order": 4,
+          "filename": "u6-l4-marching-cubes.md",
+          "level": "advanced",
+          "topic": "讲解如何从 NeRF/SDF 提取网格：get_density_on_grid/get_sdf_gt_on_grid 在 3D 网格上采样、marching_cubes 等值面提取、compute_and_save_marching_cubes_mesh 导出 OBJ/PLY、MeshState 后处理优化。",
+          "learning_goals": [
+            "理解等值面提取把隐式场变成显式网格的原理",
+            "掌握 get_density_on_grid 如何在网络输出上构建标量场",
+            "看懂 marching_cubes 的分辨率与阈值（thresh）参数",
+            "认识 MeshState 的平滑/膨胀/顶点颜色后处理"
+          ],
+          "source_files": [
+            "src/marching_cubes.cu",
+            "include/neural-graphics-primitives/marching_cubes.h",
+            "src/testbed.cu"
+          ],
+          "minimal_modules": [
+            "网格采样",
+            "Marching Cubes",
+            "网格导出与后处理"
+          ],
+          "practice_task": "用 run.py 的 --save_mesh 选项从一个 fox 快照导出 OBJ，记录 marching_cubes_res 与 thresh 两个参数；再说明 thresh（默认 2.5）如何决定等值面位置。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Python 绑定与自动化",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "pyngp 绑定架构",
+          "order": 1,
+          "filename": "u7-l1-pyngp-bindings.md",
+          "level": "advanced",
+          "topic": "剖析 python_api.cu 的 pybind11 绑定：PYBIND11_MODULE(pyngp) 注册 Testbed 类与所有方法、枚举（TestbedMode/TrainMode 等）、BoundingBox/Lens 等辅助类型、numpy 数组与 json 的互转。",
+          "learning_goals": [
+            "理解 pyngp 模块如何把 C++ Testbed 暴露给 Python",
+            "掌握 Testbed 的构造、load_file、render、save_snapshot 等 Python API",
+            "看懂 def_property/def_readwrite 如何映射成员变量",
+            "认识 numpy 数组（render_to_cpu）与 json 配置的绑定方式"
+          ],
+          "source_files": [
+            "src/python_api.cu",
+            "include/neural-graphics-primitives/testbed.h",
+            "include/neural-graphics-primitives/pybind11_vec.hpp"
+          ],
+          "minimal_modules": [
+            "pybind11 模块注册",
+            "Testbed Python API",
+            "numpy/json 互转"
+          ],
+          "practice_task": "在 python_api.cu 的 PYBIND11_MODULE 中找出 render、load_training_data、save_snapshot、compute_and_save_marching_cubes_mesh 的绑定行，写一段 Python 代码：构造 Testbed → 加载 fox → 训练 1000 步 → 保存快照。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "run.py：程序化训练、评测与渲染",
+          "order": 2,
+          "filename": "u7-l2-run-py-script.md",
+          "level": "advanced",
+          "topic": "精读 scripts/run.py：参数解析、scene 名映射、训练循环、--test_transforms 计算 PSNR/SSIM、--screenshot_transforms 批量出图、--save_mesh 与视频渲染，以及 rfl/rflrelax 训练调度。",
+          "learning_goals": [
+            "理解 run.py 如何复刻并扩展 instant-ngp 命令行的全部能力",
+            "掌握用 --test_transforms 做 PSNR/SSIM 评测的流程",
+            "看懂 --screenshot_transforms 按相机位姿批量出图",
+            "认识 Rfl/RflRelax 训练模式的时间段调度逻辑"
+          ],
+          "source_files": [
+            "scripts/run.py",
+            "scripts/common.py",
+            "scripts/scenes.py"
+          ],
+          "minimal_modules": [
+            "run.py 主流程",
+            "PSNR 评测",
+            "批量截图与视频"
+          ],
+          "practice_task": "用 run.py 对一个带 test transforms 的数据集做评测，记录 PSNR/SSIM 输出；再解释 rflrelax_begin_step/rflrelax_end_step 如何在训练中切换 NeRF 与 RflRelax 模式。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "数据集准备脚本",
+          "order": 3,
+          "filename": "u7-l3-dataset-prep-scripts.md",
+          "level": "advanced",
+          "topic": "讲解数据准备脚本生态：colmap2nerf（图像→COLMAP→transforms.json）、nerfcapture2nerf（iPhone Record3D）、nsvf2nerf、mask_images（动态物体遮罩）、convert_image（大图→.bin），以及 Colab notebook。",
+          "learning_goals": [
+            "掌握用 colmap2nerf 从一组照片生成 NeRF 数据集的完整流程",
+            "理解 nerfcapture2nerf 适配手机 LiDAR 采集的坐标处理",
+            "看懂 dynamic_mask（mask_images）如何剔除动态物体",
+            "认识 convert_image.py 的 .bin 格式与 Colab notebook 的用法"
+          ],
+          "source_files": [
+            "scripts/colmap2nerf.py",
+            "scripts/convert_image.py",
+            "scripts/nerfcapture2nerf.py",
+            "notebooks/instant_ngp.ipynb"
+          ],
+          "minimal_modules": [
+            "colmap2nerf 流程",
+            "手机采集适配",
+            "遮罩与大图转换"
+          ],
+          "practice_task": "梳理 colmap2nerf 的关键参数（--colmap_matcher、--aabb_scale、--images 等），写出从一堆手机照片到可训练 transforms.json 的命令；并说明 mask_images 生成的 dynamic_mask 文件如何被训练器识别。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "性能、扩展与高级特性",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "多 GPU 与辅助设备",
+          "order": 1,
+          "filename": "u8-l1-multi-gpu.md",
+          "level": "advanced",
+          "topic": "讲解多 GPU 支持：CudaDevice 抽象、主/辅设备、use_device/device_guard 切换、render_frame_main 多设备并行渲染、VR 双眼各用一 GPU、m_use_aux_devices 仅 NeRF 启用。",
+          "learning_goals": [
+            "理解 CudaDevice 如何封装每块 GPU 的流、网络副本与渲染缓冲",
+            "掌握主设备与辅助设备的协作与事件同步（wait_for/signal）",
+            "看懂 render_frame_main 如何把视口分给多设备渲染",
+            "认识多 GPU 仅用于 NeRF 渲染与 VR 双眼的限制"
+          ],
+          "source_files": [
+            "src/testbed.cu",
+            "include/neural-graphics-primitives/testbed.h",
+            "include/neural-graphics-primitives/thread_pool.h"
+          ],
+          "minimal_modules": [
+            "CudaDevice 抽象",
+            "设备切换与同步",
+            "多设备渲染"
+          ],
+          "practice_task": "在 testbed.h 的 CudaDevice 内嵌类中找出 device_guard/wait_for/signal，说明辅助设备如何与主设备同步渲染结果；并解释为什么 set_mode 仅在 NeRF 下启用 m_use_aux_devices。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "JIT 融合与全融合内核",
+          "order": 2,
+          "filename": "u8-l2-jit-fusion.md",
+          "level": "advanced",
+          "topic": "讲解运行时编译（RTC）与 JIT 融合：CudaRtcKernel 把编码+MLP 融合成单一内核、fused_kernels/ 下的 render_nerf/train_nerf/trace_sdf、NerfNetwork::generate_device_function 自动生成设备函数、jit_fusion 开关与缓存。",
+          "learning_goals": [
+            "理解 JIT 融合如何减少内核启动与中间显存读写",
+            "掌握 fused_kernels 三类融合内核的适用场景",
+            "看懂 generate_device_function 如何拼接出端到端设备函数",
+            "认识 rtc/cache 缓存机制与 set_jit_fusion 开关"
+          ],
+          "source_files": [
+            "include/neural-graphics-primitives/fused_kernels/render_nerf.cuh",
+            "include/neural-graphics-primitives/fused_kernels/train_nerf.cuh",
+            "include/neural-graphics-primitives/nerf_network.h",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "CudaRtcKernel",
+            "融合内核",
+            "设备函数生成"
+          ],
+          "practice_task": "阅读 nerf_network.h 的 generate_device_function，说明它如何把 pos_encoding/density_mlp/dir_encoding/rgb_mlp 拼成一个设备函数；再解释 jit_fusion 开启后渲染/训练路径有何不同。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "相机位姿与镜头优化",
+          "order": 3,
+          "filename": "u8-l3-camera-lens-optimization.md",
+          "level": "advanced",
+          "topic": "讲解 NeRF 的相机自标定：cam_pos/cam_rot/cam_exposure/cam_focal_length 的 Adam 优化器（optimize_extrinsics/optimize_focal_length/optimize_exposure）、可训练畸变图（distortion_map）、可训练环境贴图（envmap）、额外潜码（extra_dims）。",
+          "learning_goals": [
+            "理解每张训练图都可带独立的位姿/曝光/焦距偏移并联合优化",
+            "掌握 AdamOptimizer/RotationAdamOptimizer/VarAdamOptimizer 的用途",
+            "看懂 distortion_map 与 envmap 这两个可训练缓冲",
+            "认识 extra_dims（每图潜码）与光照方向的应用"
+          ],
+          "source_files": [
+            "include/neural-graphics-primitives/testbed.h",
+            "include/neural-graphics-primitives/adam_optimizer.h",
+            "src/testbed_nerf.cu",
+            "include/neural-graphics-primitives/envmap.cuh"
+          ],
+          "minimal_modules": [
+            "相机自标定",
+            "Adam 系列优化器",
+            "畸变图与环境贴图"
+          ],
+          "practice_task": "在 testbed.h 的 m_nerf.training 中列出所有 optimize_* 开关与对应的 cam_*_offset 优化器，说明开启 optimize_extrinsics 后训练每 N 步如何更新相机位姿（n_steps_between_cam_updates）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "DLSS、VR/OpenXR 与注视点渲染",
+          "order": 4,
+          "filename": "u8-l4-dlss-vr-foveated.md",
+          "level": "advanced",
+          "topic": "讲解高级显示特性：DLSS 超分（dlss.cu、NGP_VULKAN、IDlssProvider）、OpenXR VR（openxr_hmd.cu、双眼视图、深度重投影、隐藏区域遮罩）、动态注视点渲染（foveated_rendering）。",
+          "learning_goals": [
+            "理解 DLSS 如何在低分辨率渲染后超分提升帧率",
+            "掌握 OpenXR 双眼渲染与深度重投影（depth_reproject）",
+            "看懂动态注视点渲染如何随视线移动中心高分辨率区",
+            "认识这些特性的编译依赖（Vulkan/OpenXR）与运行时条件"
+          ],
+          "source_files": [
+            "src/dlss.cu",
+            "src/openxr_hmd.cu",
+            "include/neural-graphics-primitives/render_buffer.h",
+            "include/neural-graphics-primitives/testbed.h"
+          ],
+          "minimal_modules": [
+            "DLSS 超分",
+            "OpenXR 双眼渲染",
+            "注视点渲染"
+          ],
+          "practice_task": "对比 DLSS 与动态注视点渲染两种提速手段：前者依赖 Vulkan 且仅特定 Lens 模式可用，后者依赖头显视线——请在源码中找出各自的启用条件，并说明 VR 下为何推荐先停止训练再进入。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "扩展 instant-ngp：自定义配置与二次开发",
+          "order": 5,
+          "filename": "u8-l5-extending-instant-ngp.md",
+          "level": "advanced",
+          "topic": "总结如何基于本项目二次开发：修改 configs 调参、用 pyngp 做受控实验、用 tiny-cuda-nn PyTorch 扩展自建模型、可能的扩展点（新编码/新原语/自定义损失），以及 tiny-cuda-nn 与本仓库的边界。",
+          "learning_goals": [
+            "掌握通过改 configs 进行超参实验的标准做法",
+            "理解用 pyngp 编写自动化实验脚本的范式",
+            "认识在 tiny-cuda-nn 层面扩展编码/网络/损失的入口",
+            "看清 instant-ngp（应用层）与 tiny-cuda-nn（库层）的职责边界"
+          ],
+          "source_files": [
+            "configs/nerf/base.json",
+            "include/neural-graphics-primitives/testbed.h",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "配置调参",
+            "pyngp 实验",
+            "tiny-cuda-nn 扩展边界"
+          ],
+          "practice_task": "设计一个实验：拷贝 configs/nerf/base.json 修改 n_levels 与 log2_hashmap_size，用 pyngp 写脚本对比参数量与训练损失曲线；并说明若要改损失函数应去 tiny-cuda-nn 还是 instant-ngp 修改。",
+          "depends_on": [
+            "u3-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
