@@ -1,0 +1,294 @@
+# 常用流处理工具：宽度转换与握手分发
+
+## 1. 本讲目标
+
+本讲聚焦 `common` 模块里一组「围绕 AXI-Stream 式握手约定（见 [u2-l1](u2-l1-handshake-convention.md)）做数据流加工」的实用构建块。学完后你应当能够：
+
+- 说清 `width_conversion` 如何在宽窄两种位宽之间安全转换，以及 `strobe`/`last`/`user` 在转换中的语义与边界处理。
+- 解释 `handshake_splitter`（一分多）与 `handshake_merger`（多合一）在不破坏 ready/valid 规则的前提下，如何让多路接口同步完成一次事务。
+- 理解 `debounce` 如何用同步链 + 稳定计数消除外部引脚的噪声与亚稳态，以及 `periodic_pulser` 如何用「移位寄存器 + 互质因子分解」廉价地产生周期脉冲。
+- 能够独立实例化 `width_conversion` 与 `periodic_pulser`，并设计简单的 testbench 验证其行为。
+
+## 2. 前置知识
+
+本讲默认你已经掌握 [u2-l1](u2-l1-handshake-convention.md) 建立的握手约定：
+
+- 一次事务（beat）只在 `valid='1'` 且 `ready='1'` 的同一拍发生。
+- `valid` 不得组合依赖 `ready`；`ready` 可以组合依赖 `valid`。
+- 若干 beat 组成一个 packet，由 `last` 标记结尾；`strobe` 是字节有效位（类比 AXI-Stream 的 `tkeep`）。
+
+另外需要一点基础概念：
+
+- **组合逻辑路径与时序收敛**：信号穿过越多查找表（LUT），关键路径越长，时钟频率越低。本讲的 `handshake_splitter`/`handshake_merger` 是纯组合的，会加深握手信号的逻辑级数。
+- **亚稳态（metastability）与同步链**：异步外部输入可能在触发器上停留在一个非 0 非 1 的中间电平，需两级以上寄存器采样来提高 MTBF（平均无故障时间）。详见 [u3-l1](u3-l1-resync-basics.md)。
+- **移位寄存器原语（SRL）**：Xilinx/AMD 器件里可用单个 LUT 实现很长的移位寄存器，比等价的 FF 链省资源。`periodic_pulser` 正是围绕它设计的。
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件都在 `modules/common/src/` 下：
+
+| 文件 | 作用 |
+| --- | --- |
+| `width_conversion.vhd` | 主角：把 AXI-Stream 式数据流在宽↔窄位宽之间转换。 |
+| `width_conversion_pkg.vhd` | 配套纯函数包，只提供 `output_user` 位宽的计算。 |
+| `handshake_splitter.vhd` | 把一路握手信号组合地分发给 N 个从设备（广播）。 |
+| `handshake_merger.vhd` | 把 N 路握手信号组合地合并成一路（齐步走）。 |
+| `debounce.vhd` | 对外部引脚做去抖 + 同步，输出稳定电平与上升/下降沿脉冲。 |
+| `periodic_pulser.vhd` | 每隔 `period` 个 `count_enable` 产生一个单拍脉冲，资源极省。 |
+
+对应的 testbench 在 `modules/common/test/` 下，同名前缀 `tb_`，是本讲代码实践与「读测试理解行为」的主要依据。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 width_conversion：数据位宽重整
+
+#### 4.1.1 概念说明
+
+在很多系统里，上下游模块的数据位宽不一致：例如一个 ADC 吐 8 位字节，而下游 DDR 控制器要 32 位字。`width_conversion` 就是夹在中间、把 AXI-Stream 式数据流在宽窄位宽之间转换的构件。它既能**降宽（downsizing，宽→窄，一拍拆成多拍）**，也能**升宽（upsizing，窄→宽，多拍拼成一拍）**。
+
+它的接口完全遵循项目的握手约定，两侧都是 ready/valid，并可选地携带 `last`、`strobe`、`user` 三类辅助信号。设计上有几条硬约束（见源码开头的 `assert ... severity failure`）：
+
+- 输入输出位宽不能相等；
+- 较大位宽必须是较小位宽的**2 的幂次倍**（支持 8→32、16→8，不支持 8→24）；
+- 启用 `strobe` 时，两侧位宽都必须是 `strobe_unit_width`（典型为 8，即字节）的整数倍。
+
+#### 4.1.2 核心流程
+
+整个转换的核心思想是引入一个最小公共单位——**「原子（atom）」**：原子位宽取输入、输出位宽中较小者。这样一次输入 beat 恰好含若干原子，一次输出 beat 也恰好含若干原子，转换就退化为「把输入原子流式灌进一个移位寄存器，再按输出需要的原子数取出来」。
+
+以 8→32（升宽）为例，伪代码如下：
+
+```
+atom_data_width = min(8, 32) = 8
+input_width_atoms  = 8 / 8  = 1   # 每拍输入 1 个原子
+output_width_atoms = 32 / 8 = 4   # 每拍输出 4 个原子
+
+每个时钟：
+  若输入发生事务：把新原子压入 shift_reg 的高端，num_atoms_stored += 1
+  若输出发生事务：取走 4 个原子，         num_atoms_stored -= 4
+  output_valid <= (num_atoms_stored >= 4)   # 攒够 4 个原子才能输出一拍
+  input_ready  <= (num_atoms_stored <= 上限 - 1)  # 还能再收输入
+```
+
+降宽（如 32→8）则相反：每拍输入 4 个原子、每拍输出 1 个原子。
+
+关于 `last` 与 `strobe` 的对齐，是本模块最微妙的地方，分两种情况：
+
+- **降宽**：一拍输入拆成多拍输出，输出包长天然与输入位宽对齐。若开 `support_unaligned_packet_length`，会用 `strobe` 把「被抹掉的尾部字节」连同错误的 `last` 位置一起剔除。
+- **升宽**：多拍输入拼成一拍输出，要求输入包长是输出位宽的整数倍。若开 `support_unaligned_packet_length`，则在收到 `last` 时自动**补零**（被补的字节 `strobe='0'`）凑满一个输出字。
+
+#### 4.1.3 源码精读
+
+**「原子」类型与打包宽度**。模块用 record 定义了原子，并把可选信号按需拼进一个定宽向量，未启用的信号对应字段宽度为 0，从而在综合时彻底消失：
+
+[modules/common/src/width_conversion.vhd:169-186](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/width_conversion.vhd#L169-L186) —— 定义 `atom_t` record（含 data/strobe/user/last），并按 `enable_last`/`enable_strobe`/`enable_user` 开关计算 `packed_atom_width`，体现「generic 裁剪、未启用即零资源」的项目风格。
+
+**核心移位寄存器与计数**。整个转换状态只靠一个扁平的 `shift_reg` 和一个 `num_atoms_stored` 计数器维护。注意 `num_atoms_next` 用「先加输入、再减输出」的临时变量来计算下一拍的有效原子数，使 `output_valid` 在同拍就能正确反映：
+
+[modules/common/src/width_conversion.vhd:413-436](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/width_conversion.vhd#L413-L436) —— `main` 进程：输入事务时把打包好的输入原子移入 `shift_reg`；用 `num_atoms_next` 同步算出本拍是否凑够输出；`padded_input_ready`（即真正的 `input_ready`）在还放得下一整拍输入时才拉高。
+
+**升宽时补零的状态机**。当 `is_upsizing and support_unaligned_packet_length` 时，多出一个两态机 `let_data_pass`/`send_padding`：收到 `last` 但还没凑满一个输出字时，切到 `send_padding`，伪造 `strobe` 全零的输入拍直到填满：
+
+[modules/common/src/width_conversion.vhd:253-317](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/width_conversion.vhd#L253-L317) —— `pad_input_data_generate`：补零逻辑用 `beats_filled` 跟踪本输出字已收的输入拍数，在 `send_padding` 态插入 `strobe=(others=>'0')` 的假拍。
+
+**降宽时剔除空拍**。对称地，降宽 + 非对齐模式下，输出端可能出现 `strobe` 全零的拍（即被抹掉、无有效字节的输出），需要从输出流里「弹掉」：
+
+[modules/common/src/width_conversion.vhd:548-560](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/width_conversion.vhd#L548-L560) —— `strip_output_data_generate`：当输出 `strobe` 全零时，悄悄把这一拍从输出流里丢掉（拉高内部 ready 吞掉、屏蔽 output_valid），对下游不可见。
+
+**配套包：output_user 位宽**。`user` 辅助数据的处理随方向不同：降宽时每个输出拍复制同一份 user（位宽不变），升宽时把多个输入拍的 user 拼接（位宽乘以倍数）。这个位宽必须能在实体端口声明时算出，因此抽成一个纯函数：
+
+[modules/common/src/width_conversion_pkg.vhd:23-37](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/width_conversion_pkg.vhd#L23-L37) —— `width_conversion_output_user_width`：降宽返回原宽，升宽返回 `input_user_width * (output_data_width/input_data_width)`。这是精化期（elaboration）求值的纯函数，不占电路资源。
+
+#### 4.1.4 代码实践
+
+**实践目标**：实例化一个 8→32 的升宽 `width_conversion`，验证 4 个输入字节被正确拼成一个 32 位输出字，且字节顺序（小端对齐）与 `strobe` 语义符合预期。
+
+**操作步骤**（本项目已有完整的 `tb_width_conversion`，推荐先读懂它再动手）：
+
+1. 阅读 [modules/common/test/tb_width_conversion.vhd:282-367](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/test/tb_width_conversion.vhd#L282-L367)：它用 `bfm.axi_stream_master` 喂入随机数据队列，用 `bfm.axi_stream_slave` 比对输出队列，DUT 实例化的 generic 取自 testbench 顶层。
+2. 参照它的结构，写一个最小的、固定数据的 testbench：连续 4 拍输入 `0x01`、`0x02`、`0x03`、`0x04`（8 位），`enable_last=true` 且在最后一拍拉 `input_last`，`enable_strobe=true`、`strobe` 全 `1`。
+3. 观察输出：应当只在第 4 拍输入完成、`output_valid` 攒够 4 个原子后才出现**一拍** `output_data = 0x04030201`（小端，先入字节在低位）、`output_last='1'`。
+4. 再做一组：把第 4 拍之前的某拍 `strobe` 改为 `0`（关掉某字节），观察 `width_conversion` 在升宽 + 非对齐模式下的行为变化。
+
+**需要观察的现象**：升宽时输出拍数严格等于「输入拍数 / 倍数」；未启用 `support_unaligned_packet_length` 时，若输入字节数不是 4 的倍数，最后一个不完整的字会卡在转换器里送不出去（因为没有 `last` 补零）。
+
+**预期结果**：4 个连续字节在输出端合并为单个 32 位字，低字节为先入字节。**若你尚未配置好 VUnit/Vivado 仿真环境，可先把这一步标注为「待本地验证」，转而用读测试断言的方式确认行为**（见 [4.1.5](#415-小练习与答案)）。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么模块要求「较大位宽是较小位宽的 2 的幂次倍」，而不允许 8→24？
+
+**答案**：因为内部以「原子 = 较小位宽」为单位切分与重组。8→24 时 24 不能被 8 整除成 2 的幂（24/8=3），移位寄存器里原子的对齐与取出边界会错乱；2 的幂次约束保证每个输入/输出拍都能被整齐地切成整数个原子。
+
+**练习 2**：升宽模式下，如果输入包长（字节数）不是输出位宽的整数倍，且**没有**开 `support_unaligned_packet_length`，会发生什么？
+
+**答案**：最后不足一个输出字的输入原子会永远留在 `shift_reg` 里、`output_valid` 始终凑不够 `output_width_atoms` 而无法输出，数据被「卡住」。开启该 generic 后，模块会在 `last` 时自动补 `strobe='0'` 的假拍凑满一个输出字再送出。
+
+### 4.2 handshake_splitter 与 handshake_merger：握手的一分多与多合一
+
+#### 4.2.1 概念说明
+
+`handshake_splitter` 解决「一份数据要同时发给 N 个从设备」的广播需求：它把一路输入握手扇出成 N 路输出握手，并保证**只有当所有 N 个从设备都各自完成了一次事务后，输入端才真正弹出这一拍**。`handshake_merger` 则相反——把 N 路输入握手合并成一路结果，要求**N 路输入在同一拍同时有效**才产生一次结果事务。
+
+两者都是**纯组合**的：它们不缓存数据、不插寄存器，只搬运握手信号，并把「数据该怎么广播或拼接」留给用户在实体外部接线。好处是面积小、满吞吐（无 stall 时）；代价是会加深握手信号（`valid`/`ready`）的组合逻辑级数，时序紧时需配合 `handshake_pipeline`（见 [u2-l1](u2-l1-handshake-convention.md)）。
+
+#### 4.2.2 核心流程
+
+**splitter 的「各自完成、齐步弹出」**。对每一路输出，用一个粘滞位 `transaction_done_sticky` 记录「这一路是否已经完成事务」：
+
+```
+每路输出 i：
+  output_valid(i) <= input_valid and not transaction_done_sticky(i)
+  transaction_done(i) <= transaction_done_sticky(i) or (output_ready(i) and output_valid(i))
+  # 一旦本拍输入事务发生，清掉所有 sticky（开始等下一拍）
+input_ready <= and transaction_done   # 全部 N 路都完成才弹输入
+```
+
+这样每一路的 `valid` 在自己完成事务后先降下来，但输入端会一直等到所有路都完成才弹出，从而保证数据被每个从设备都收到。该机制满吞吐、且满足 AXI-Stream 规则（`valid` 不依赖 `ready`、事务未完成前 `valid` 不掉）。
+
+**merger 的「全部到位才出结果」**：
+
+```
+result_valid <= and input_valid                # 全部输入有效
+input_ready  <= (others => result_ready and result_valid)  # 一起弹
+result_last  <= or  input_last
+```
+
+当 `result_valid` 拉高时，保证所有输入的数据同时有效，用户可在实体外直接把它们组合使用。
+
+#### 4.2.3 源码精读
+
+**splitter 的粘滞事务记录**。每一路在 generate 块里各自维护一个 `transaction_done_sticky`，输入事务发生时统一清零：
+
+[modules/common/src/handshake_splitter.vhd:54-69](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/handshake_splitter.vhd#L54-L69) —— `transaction_done_sticky` 在本路完成事务时置 1、在输入事务时清 0；注意这里需要 `clk`，因为粘滞位是寄存器，但 valid/ready 本身仍是组合的。
+
+[modules/common/src/handshake_splitter.vhd:71-77](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/handshake_splitter.vhd#L71-L77) —— 每路 `output_valid` 在 sticky 置位后降下；`input_ready` 用 VHDL-2008 的 `and` 归约算子要求所有路都完成才弹输入。
+
+**merger 的三行核心与包长一致性断言**。合并逻辑极其精简，但额外加了一条运行期断言：当结果有效时，要求各路 `input_last` 必须一致（异或为 0），否则报「输入包长不同」：
+
+[modules/common/src/handshake_merger.vhd:44-59](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/handshake_merger.vhd#L44-L59) —— `result_valid <= and input_valid`、`result_last <= or input_last`；并用 `assert not (xor input_last)` 在仿真期守护「各路 packet 必须同时结束」，这是把协议约束写进断言、防止用户误接的典型做法。`assert_false_on_last_mismatch` generic 允许关闭该检查。
+
+#### 4.2.4 代码实践
+
+**实践目标**：用 `handshake_splitter` 把一路输入广播给 2 个从设备，其中一个故意施加背压（晚几拍才 ready），验证输入端会等到「慢的那路」也完成后才弹出。
+
+**操作步骤**：
+
+1. 实例化 `handshake_splitter`，`num_interfaces=>2`；输入侧接一个简单的激励进程，输出 0 路 ready 始终为 1，输出 1 路在前 3 拍 ready=0、之后才 1。
+2. 维持 `input_valid='1'`，观察两路 `output_valid` 与 `input_ready` 的波形。
+3. 对照 [modules/common/test/tb_handshake_splitter.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/test/tb_handshake_splitter.vhd) 的随机背压验证思路。
+
+**需要观察的现象**：输出 0 路先完成事务、其 `output_valid(0)` 随即降下并保持，但 `input_ready` 仍为 0（因为输出 1 路还没完成）；直到输出 1 路 ready 拉高并完成事务，`input_ready` 才在同一拍变 1，输入才弹出。
+
+**预期结果**：无论哪路慢，输入端都只在两路都完成的那一拍弹出，数据不丢、不重。**本步若无仿真环境，可改为阅读断言式测试 tb_handshake_splitter.vhd 中关于背压的检查来确认行为（待本地验证）。**
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`handshake_splitter` 是纯组合的，但实体端口里有 `clk`，为什么？
+
+**答案**：因为每一路需要用寄存器保存「本路是否已完成事务」的粘滞信息（`transaction_done_sticky`），这一拍完成、下一拍仍要记得，所以需要时钟；但 valid/ready 这些握手信号本身不经过寄存器，仍是组合直连。
+
+**练习 2**：`handshake_merger` 要求所有输入同时有效才输出，如果两路输入的 packet 长度不同会怎样？
+
+**答案**：默认会在仿真里触发断言「Input packet lengths are different」报错（`assert_false_on_last_mismatch=true`）。因为 merger 是齐步走的，包长不一致意味着一路已经结束、另一路还在送，无法对齐合并。
+
+### 4.3 事件处理辅助：debounce 与 periodic_pulser
+
+#### 4.3.1 概念说明
+
+这两个模块处理「离散事件」而非数据流：`debounce` 把可能带噪声、毛刺、亚稳态的外部引脚（按键、拨码开关）净化成干净电平；`periodic_pulser` 则按固定周期产生单拍脉冲，常作采样使能、刷新节拍或事件计数器的时钟分频替代品。
+
+二者都体现了「面积优先」的项目取向：`debounce` 用三级同步链 + 稳定计数器一次解决亚稳态与抖动；`periodic_pulser` 则尽量用廉价的移位寄存器（SRL）而不是普通计数器来产生周期，把 FF 占用压到最低。
+
+#### 4.3.2 核心流程
+
+**debounce**：先用三级寄存器对异步输入做同步（消除亚稳态），再要求输入连续 `stable_count` 拍保持在新值上，才把 `stable_result` 更新过去。这样短暂的毛刺（远短于 `stable_count` 个时钟）会被忽略。同时输出上升沿、下降沿两个单拍脉冲。
+
+**periodic_pulser**：目标是「每 `period` 个 `count_enable` 产生一个 `pulse`」。直接做法是用一个模 `period` 计数器，但计数器要占较多 FF。更省的做法是用移位寄存器：一根长度为 L、初值只有一个 `'1'` 的移位寄存器，每拍循环左移，其最高位每 L 拍出现一次 `'1'`，正好是周期 L 的脉冲源。
+
+关键在于：多个长度**两两互质**的移位寄存器，把它们的输出 **AND** 在一起，合成周期是各自长度的**乘积**。这是因为互质数的联合周期是它们的最小公倍数，而互质时最小公倍数等于乘积：
+
+\[
+\mathrm{lcm}(L_1, L_2, \dots, L_k) = L_1 \cdot L_2 \cdots L_k \quad (\text{当 } L_i \text{ 两两互质})
+\]
+
+于是 `periodic_pulser` 把 `period` 分解成尽量大的互质因子，每个因子用一个移位寄存器实现并 AND 起来；剩下的无法分解的部分，递归地再实例化一个 `periodic_pulser`，或退化为一个计数器/长移位寄存器。
+
+#### 4.3.3 源码精读
+
+**debounce 的三级同步链与属性**。`non_metastable_input_m2` 是离输入最近的采样寄存器：开 `enable_iob` 时打 `IOB=true` 属性让它放进 IOB（首拍即采样、延迟最小）；否则与后两级一起打 `async_reg=true`，绑在同一 slice 上保 MTBF（与 [u3-l1](u3-l1-resync-basics.md) 的同步链约定一致）：
+
+[modules/common/src/debounce.vhd:52-75](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/debounce.vhd#L52-L75) —— 用 `if_then_else` 在精化期决定 `IOB`/`async_reg` 属性字符串，三级寄存器链 `m2 → m1 → non_metastable_input` 完成同步。
+
+**debounce 的稳定计数**。只有当同步后的输入与当前稳定值不同、且连续不同达到 `stable_count-1` 拍时才更新，并据此算出上升/下降沿：
+
+[modules/common/src/debounce.vhd:85-105](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/debounce.vhd#L85-L105) —— `num_cycles_with_new_value` 计新值持续拍数；`stable_rising_edge`/`stable_falling_edge` 用「当前值与上一拍值」做边沿检测，产生单拍脉冲。
+
+**periodic_pulser 的互质因子分解**。`get_mutual_prime_factors` 从大到小试探因子，只接受与已选因子两两互质的（用 math_pkg 的 `is_mutual_prime`/`greatest_common_divisor`），剩下的余数留给下一级：
+
+[modules/common/src/periodic_pulser.vhd:86-117](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/periodic_pulser.vhd#L86-L117) —— 这是一个精化期纯函数，返回本级的因子数组、余数 `next_stage` 与因子个数，决定后续走哪条 generate 分支。
+
+**用移位寄存器 + AND 合成周期**。每个因子实例化一根对应长度的移位寄存器，循环移位，把各自的输出 AND 起来作为本级脉冲；若还有余数，递归实例化下一个 `periodic_pulser`，把本级脉冲当它的 `count_enable`：
+
+[modules/common/src/periodic_pulser.vhd:196-226](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/periodic_pulser.vhd#L196-L226) —— `gen_mutual_prime_srls` 为每个因子造一根循环移位寄存器；`pulse_this_stage <= and(shift_reg_outputs) and count_enable` 把它们 AND 出本级周期。
+
+**递归与兜底**。当某个因子无法再分解（`num_factors_this_stage=0`）时，按余数大小选择计数器或长移位寄存器。计数器特意从 `2^bits - period` 起算，用「溢出位」判脉冲，比逐位数值比较省逻辑：
+
+[modules/common/src/periodic_pulser.vhd:126-167](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/src/periodic_pulser.vhd#L126-L167) —— `gen_counter`：`start_value = 2**num_counter_bits - period`，让计数器在恰好 `period` 次自增后溢出，`pulse <= count_enable and tick_count_next(最高位)` 利用进位位廉价地产生脉冲。
+
+> 注：源码注释特别说明，递归处刻意**不用** `else generate`，因为那会破坏 Vivado 的递归例化——这是工程实践里被踩过的坑，值得留意。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用 `periodic_pulser` 产生周期为 1000 的脉冲，驱动一个计数器每 1000 拍自增一次；观察脉冲间隔是否准确。
+
+**操作步骤**（本项目已有 `tb_periodic_pulser` 可直接借鉴）：
+
+1. 阅读 [modules/common/test/tb_periodic_pulser.vhd:71-96](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/test/tb_periodic_pulser.vhd#L71-L96)：它的 `check` 进程用一个参考计数器 `tick_count`，每收到一个 `count_enable` 自增，到 `period-1` 时期待 `pulse='1'`，并连续核对 3 个脉冲。
+2. 仿照它实例化 `periodic_pulser`，`period=>1000`、`shift_register_length=>33`（Xilinx 7 系列 / UltraScale(+) 的推荐值，源码注释有说明），`count_enable` 恒为 `'1'`。
+3. 在 testbench 里数两个相邻 `pulse` 之间的时钟周期数。
+
+**需要观察的现象**：`pulse` 每 1000 个时钟周期出现一次、每次仅一拍；计数器恰好在每个 `pulse` 上加 1。注意 1000 = 8 × 125 = 2³ × 5³，其中 8 与 125 互质，分解后应是一根长度 8 的移位寄存器 AND 上一级处理 125 的递归实例——可在综合后的资源报告里观察 SRL 的使用。
+
+**预期结果**：脉冲间隔精确为 1000 拍。`tb_periodic_pulser` 在 CI 里用 `period` 取 5、15、127 以及若干随机值（见 [modules/common/module_common.py:183-196](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/common/module_common.py#L183-L196)）覆盖了各种因子分解路径。**若本地未配仿真，可改为阅读该 check 进程的断言来确认「脉冲时机」语义（待本地验证）。**
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`debounce` 的 `enable_iob=true` 和 `enable_iob=false` 在综合结果上有什么区别？
+
+**答案**：`enable_iob=true` 时，第一个采样寄存器被打上 `IOB=true` 属性，综合工具会把它放进 FPGA 的输入 IOB（I/O Block），信号一进芯片就被采样，延迟最小；此时 `async_reg=false`。`enable_iob=false` 时，三级寄存器都打 `async_reg=true`，绑在同一 slice 内组成标准同步链，优先保证 MTBF 而非最低延迟。
+
+**练习 2**：`periodic_pulser` 为什么要把周期分解成「互质」因子再 AND，而不是任意因子？
+
+**答案**：AND 门输出 `'1'` 要求所有移位寄存器同时输出 `'1'`，其周期是各长度的最小公倍数。只有当各长度两两互质时，最小公倍数才等于乘积，分解才有意义；若不互质（如 4 和 6）， lcm(4,6)=12 而非 24，实际周期会小于因子乘积，与设计意图不符。
+
+## 5. 综合实践
+
+把本讲的三个主题串起来，设计一个小型「采样数据采集前端」：
+
+- 用 `periodic_pulser`（`period` 例如 1024）产生一个固定节拍的采样使能 `sample_enable`。
+- 用一个外部引脚（`noisy_input`）模拟「采集使能按键」，经 `debounce` 净化成 `acquire_enable`。
+- 仅当 `acquire_enable='1'` 且 `sample_enable` 脉冲到来时，把一个 8 位 ADC 的输出打成一字节，送入 `width_conversion`（8→32，升宽）；`width_conversion` 每攒够 4 个字节输出一个 32 位字，下游接一个简单的 32 位寄存器或 FIFO（参考 [u4-l1](u4-l1-synchronous-fifo.md)）。
+
+要求：
+
+1. 画出数据通路框图，标注每一段的 ready/valid（或脉冲）方向。
+2. 思考：`sample_enable` 是单拍脉冲而非 ready/valid 流，如何安全地转换成一个 AXI-Stream 式的 valid？提示：把脉冲当 `valid`，并要求下游 `ready` 在该拍必须能接收，或之间加一个握手适配（可用本讲的 `handshake_merger` 把 `sample_enable` 与 `acquire_enable` 的「同时为 1」语义合并）。
+3. 在 testbench 里验证：连续按下按键期间，每 1024 拍产生一个字节，4 个字节拼成一个 32 位字送出；松开按键后字节不再产生，但已攒在 `width_conversion` 里的不足 4 个字节会如何？结合 [4.1.5](#415-小练习与答案) 的结论给出处理办法（提示：在采集结束时给一个 `last` 并开 `support_unaligned_packet_length`）。
+
+这个任务综合了「周期脉冲产生」「按键去抖」「位宽升宽」「非对齐包长处理」四件事，是把本讲知识连成片的好练习。
+
+## 6. 本讲小结
+
+- `width_conversion` 以「原子 = 较小位宽」为最小单位，用一根移位寄存器 + 原子计数器统一处理升宽与降宽；`last`/`strobe`/`user` 是可选附加信号，generic 裁剪后未启用部分零资源。
+- 升宽要求包长对齐输出位宽，否则需开 `support_unaligned_packet_length` 自动补零；降宽则可剔除被 `strobe` 抹掉的空拍。
+- `handshake_splitter` 用每路粘滞事务位实现「全部完成才弹输入」的广播；`handshake_merger` 要求所有输入同时有效，并用断言守护各路 packet 长度一致。两者都是纯组合、满吞吐，代价是加深握手逻辑级数。
+- `debounce` 用三级同步链（`async_reg`/`IOB` 属性二选一）+ 稳定计数，一次性消除外部引脚的亚稳态与抖动，并输出上升/下降沿脉冲。
+- `periodic_pulser` 把周期分解成互质因子，用移位寄存器 AND 门合成周期（互质时 lcm = 乘积），剩余部分递归或退化为计数器，从而把脉冲发生器的 FF 占用压到很低。
+
+## 7. 下一步学习建议
+
+- 这些流处理工具大多建立在 [u2-l1](u2-l1-handshake-convention.md) 的握手约定之上；如果你还没读过 `handshake_pipeline`（本讲 splitter/merger 时序不达标时的解药），建议回去补上。
+- `width_conversion` 与 `fifo`/`asynchronous_fifo` 经常级联使用：升宽/降宽后再做缓冲，或缓冲后再做位宽转换。学完 [u4-l1](u4-l1-synchronous-fifo.md)、[u4-l2](u4-l2-asynchronous-fifo.md) 后，可尝试把本讲的 `width_conversion` 接到 `fifo` 两端，体会它们即插即用的组合方式。
+- 想看更复杂的「字节级」流处理，可继续阅读 [u5-l1](u5-l1-axi-stream.md) 的 AXI-Stream 记录化与 `axi_stream_fifo`，本讲的 `strobe`/`last` 语义在那里会被复用为工业标准协议。
+- 对随机化背压验证方法论感兴趣的读者，可参考本讲 testbench 里大量使用的 `bfm.axi_stream_master`/`slave` 与 `stall_config`，系统讲解见 [u8-l1](u8-l1-bfm-simulation-models.md)。
