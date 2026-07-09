@@ -2,545 +2,596 @@
 
 ## 1. 本讲目标
 
-本讲是专家层「合并 merge」单元的第一讲，承接 u9（工作树操作与提交历史）与 u8（diff 引擎），把前面学过的「索引、对象、tree 遍历、行级 diff」拼成 git 里最复杂的一件事：**把两条历史合并成一条**。
+本讲讲解 git 合并（merge）的源码实现。读完本讲，你应当能够：
 
-读完本讲，你应当能够：
+1. 说清楚 `merge-ort.c` 的「递归 + 内存中三方合并」算法是怎么运转的：它如何收集三方树信息、如何处理多合并基（merge base）、如何为每条路径做决策、如何把冲突写回索引。
+2. 说清楚 `merge-ll.c` 这个「单文件三方合并」底层驱动：它如何按 `.gitattributes` 选驱动、内置 `text/binary/union` 三种驱动如何工作、用户自定义驱动如何被调用、冲突标记 `<<<<<<<` 是从哪条代码路径冒出来的。
+3. 说清楚 `builtin/merge.c` 如何调度多种合并策略：fast-forward 与真实合并的分叉、策略表与标志位、`ort` 为何是默认、以及「多策略择优」循环如何挑选结果。
 
-1. 画出一次 `git merge` 在源码里从 `builtin/merge.c` 到行级 diff 的完整调用栈，并说清每一层各管什么。
-2. 说清 **ort 策略的三阶段管线**（收集合并信息 → 检测重命名 → 逐条目处理），以及为什么 ort 在「交叉合并（criss-cross merge）」时要**递归地先把多个合并基合并成一个**。
-3. 解释 **三方文件合并的真值表**（match_mask），知道哪些情况自动干净合并、哪些会触发真正的 `ll_merge`。
-4. 掌握 **低层合并驱动 merge-ll.c** 如何调 `xdl_merge` 生成 `<<<<<<<` 冲突标记，以及冲突如何以 stage 1/2/3 写进索引。
-5. 理解 `builtin/merge.c` 如何按策略名调度，以及为什么 `recursive` 策略在内部其实就是 `ort`。
-
----
+本讲承接 [u9-l2 checkout/unpack-trees](u9-l2-checkout-unpack-trees.md)（`unpack_trees`、`twoway_merge`、`entry.c`）与 [u8-l1 diff 引擎](u8-l1-diff-core.md)（重命名检测、`diff_filepair`）。合并基的计算逻辑已在 [u7-l2 commit 可达性与 commit-graph](u7-l2-commit-graph-reach.md) 讲过（`paint_down_to_common`），本讲直接引用其结论。
 
 ## 2. 前置知识
 
-本讲默认你已经掌握以下概念（在前置讲义中已建立）：
+在进入源码前，先用大白话建立三个直觉。
 
-- **三层快照模型**：工作树 / 索引 / 对象数据库（u4-l1）。合并主要发生在「对象数据库的 tree」与「索引」两个层面。
-- **tree 对象与 tree 遍历**：一个 commit 指向一棵 tree，tree 是「路径 → (mode, oid)」的清单（u3-l1）。合并本质上是「把三棵 tree 合并成一棵新 tree」。
-- **合并基（merge base）与世代号**：两条历史最近的公共祖先，靠 `paint_down_to_common` 的「涂色」算法求出（u7-l2）。
-- **行级 diff（xdiff）**：Myers 算法在两段文本间找最长公共子序列（u8-l2）。三方合并的「行级」部分就是连续调用 xdiff。
-- **索引条目的 stage**：`git ls-files -u` 看到的 stage 0 = 已合并，stage 1/2/3 = base/ours/theirs 三方（u4-l1）。本讲会看到这些 stage 是怎么被写入的。
+**什么是三方合并。** 合并不是「把两份代码叠在一起」。git 知道两条分支是从一个共同祖先分叉出去的，于是它手里有三棵树：
 
-几个本讲要新引入的术语：
+- **base**（合并基，common ancestor）：两条分支分叉前的状态。
+- **ours**（本侧）：当前所在分支的状态。
+- **theirs**（对侧）：被合并进来的分支的状态。
 
-- **三方合并（3-way merge）**：给定「共同祖先 O、我方 A、对方 B」三个版本，自动算出合并结果。当 A、B 对同一处有不同改动时产生冲突。
-- **合并策略（merge strategy）**：实现「如何把多条历史合一条」的一套算法，git 内置 `ort`、`recursive`、`octopus`、`resolve`、`ours`、`subtree` 等。`ort` 是默认策略。
-- **冲突标记（conflict marker）**：`<<<<<<<`、`=======`、`>>>>>>>`（diff3 风格还多一个 `|||||||` 祖先段），由行级合并器写进文件内容里。
-- **交叉合并（criss-cross merge）**：两条历史有**不止一个**合并基的情形，需要递归地先把合并基自己合并起来。
+对每一个路径，git 比较 base / ours / theirs 三者。关键判定是：**只有一方相对 base 改了，就采用那一方（这叫平凡合并 trivial merge）；两方都改了且改得不一样，才需要真正做行级合并或报冲突。** 这个「谁改了、改没改」的信息，在源码里被压缩成两个 3 位掩码 `filemask`/`match_mask`。
 
----
+**什么是「递归」合并。** 两条分支的合并基可能不止一个（菱形分叉、即 criss-cross 历史）。ort 的做法是：先把多个合并基两两合并成一个**虚拟提交**（virtual commit），用这个虚拟提交当作「合并基」，再去做真正的那次合并。这种「合并合并基」是递归进行的，故叫递归策略（recursive）。注意：合并合并基时本身也可能冲突，所以这些中间结果以「带冲突标记的树」形式存在内存里，而不真正落盘。
+
+**什么是「in-core」合并。** ort 的设计要点是：**整个合并计算都在内存里完成，期间不碰工作树和索引**。算完得到一棵结果树（可能含冲突文件）；只有到最后一步 `merge_switch_to_result` 才把结果 checkout 到工作树、把冲突条目写进索引。这样做的好处是可重入、可被 rebase/cherry-pick 复用、且便于在内存里嵌套（合并合并基时）。
+
+一个贯穿本讲的术语表：
+
+| 术语 | 含义 |
+|------|------|
+| merge base（合并基） | 两条分支的共同最近祖先 |
+| 三方合并（3-way） | base / ours / theirs 三棵树参与 |
+| 虚拟提交（virtual commit） | 合并合并基时构造的、不真正落盘的中间提交 |
+| stage（阶段） | 索引中冲突条目的来源：1=base，2=ours，3=theirs（见 [u4-l1](u4-l1-index-state.md)） |
+| in-core | 纯内存、不碰工作树/索引 |
+| 冲突标记 | `<<<<<<<`、`=======`、`>>>>>>>` 三段 |
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件，按「从上到下」的调用顺序排列：
-
-| 文件 | 行数 | 作用 |
+| 文件 | 体量 | 作用 |
 |------|------|------|
-| `builtin/merge.c` | 1887 | `git merge` 子命令实现：解析参数、选策略、调用后端、提交结果。**策略调度**就在这里。 |
-| `merge-ort-wrappers.c` | 135 | 一层薄胶水：把 `builtin/merge.c` 期望的「返回 clean 标志 + 改索引」接口，适配成 `merge-ort.c` 的「返回 `merge_result` + 不碰工作树」接口。 |
-| `merge-ort.c` | 5608 | **ort 合并策略主体**。三棵 tree 怎么合成一棵，重命名怎么处理，冲突怎么分类——全在这里。 |
-| `merge-ort.h` | 181 | ort 对外公共 API：`struct merge_options`、`struct merge_result`、`merge_incore_recursive()` 等。 |
-| `merge-ll.c` | 470 | **单文件三方合并**（low-level merge）。它接三个 blob，吐出合并后的文本（可能含冲突标记）。 |
-| `merge-ll.h` | 114 | 单文件合并的公共 API：`struct ll_merge_options`、`ll_merge()`、`enum ll_merge_result`。 |
-| `commit-reach.c` | 1432 | 提供合并基计算（`repo_get_merge_bases`），ort 用它找出两条历史的公共祖先。 |
+| `merge-ort.c` | ~5600 行 | ort 策略的全部实现：递归合并基、三方树收集、重命名、逐路径决策、冲突记录 |
+| `merge-ort.h` | 头文件 | 公开 API：`struct merge_options`、`struct merge_result`、`merge_incore_*` |
+| `merge-ort-wrappers.c` | 小 | 给 porcelain 命令用的薄包装：加 `unclean()` 安全检查 + 把结果落到工作树/索引 |
+| `merge-ll.c` | ~470 行 | 单文件三方合并的低层驱动引擎 |
+| `merge-ll.h` | 头文件 | `struct ll_merge_options`、`enum ll_merge_result`、`ll_merge()` |
+| `builtin/merge.c` | ~1900 行 | `git merge` 命令：策略调度、fast-forward 分叉、多策略择优 |
+| `merge.c` | 小 | `try_merge_command`（子进程派发非 ort 策略）、`checkout_fast_forward` |
+| `commit-reach.c` | 见 u7-l2 | `repo_get_merge_bases` / `paint_down_to_common`，本讲直接引用 |
 
-一句话的调用栈（自顶向下）：
-
-```
-git merge <branch>
-  └─ cmd_merge()                     [builtin/merge.c]
-       └─ try_merge_strategy("ort")  [builtin/merge.c]   ← 策略调度
-            └─ merge_ort_recursive()  [merge-ort-wrappers.c]
-                 └─ merge_incore_recursive()  [merge-ort.c]
-                      └─ merge_ort_internal()           ← 递归合并合并基
-                           └─ merge_ort_nonrecursive_internal()  ← 三阶段管线
-                                ├─ collect_merge_info()        ← 阶段1
-                                ├─ detect_and_process_renames()← 阶段2
-                                └─ process_entries()           ← 阶段3
-                                     └─ handle_content_merge()
-                                          └─ merge_3way()
-                                               └─ ll_merge()  [merge-ll.c]
-                                                    └─ xdl_merge()  ← 行级 diff
-```
-
-下面三个最小模块分别讲这条栈的三个层次：**策略调度**（builtin/merge.c）、**ort 引擎**（merge-ort.c）、**低层合并驱动**（merge-ll.c）。
-
----
+> **重要事实**：在本版本的 git 源码里，**已不存在 `merge-recursive.c`**。文件顶部的注释把 ort 定义为「Ostensibly Recursive's Twin」（名义上是 recursive 的孪生兄弟）——它是旧 recursive 策略的替代品（[merge-ort.c:1-14](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L1-L14)）。更关键的是，`builtin/merge.c` 在派发时把名字为 `recursive`、`subtree`、`ort` 三者**全部路由到同一份 ort 实现**（见 [4.3 节](#43-合并策略调度)），所以 `git merge -s recursive` 今天其实跑的就是 ort。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 合并策略调度（builtin/merge.c）
+### 4.1 ort 递归合并核心
 
 #### 4.1.1 概念说明
 
-`git merge` 命令本身不实现任何合并算法，它只是一个**调度器（dispatcher）**。真正的「怎么合并」被抽象成一个个**策略（strategy）**，每个策略有名字（`ort`、`resolve`、`octopus`……）和一组属性。`git merge` 的工作是：
+ort 解决的问题是：给定两条提交（side1、side2）以及它们的合并基，计算出一棵「合并后的结果树」。
 
-1. 确定要用哪些策略（默认 `ort`，可用 `-s` 指定，可用 `-s a -s b` 让多个策略竞争）。
-2. 把共同祖先（merge base）、HEAD、对方提交交给策略后端。
-3. 后端把结果写进索引和工作树，返回一个 clean 标志（0=干净、1=有冲突、2=本策略根本处理不了）。
-4. 根据返回值决定：直接提交、停下来让用户解决冲突、还是换一个策略再试。
+它的工程结构是三层 API（从外到内）：
 
-之所以要做成「多策略可竞争」，是历史遗留：早年 `recursive` 策略处理不好某些场景，git 会用多策略轮询，挑「留下冲突最少」的那个。今天默认的 `ort` 已经足够强，单策略就够了，但调度框架保留了下来。
+1. **porcelain 包装层**（`merge-ort-wrappers.c`）：`merge_ort_recursive` / `merge_ort_nonrecursive` / `merge_ort_generic`。负责合并前的安全检查（索引必须与 HEAD 一致，否则报「本地改动会被覆盖」）、合并后把结果落到工作树与索引、持索引锁原子写入。`builtin/merge.c` 调用的就是这一层。
+2. **公开 in-core 层**（`merge-ort.h`）：`merge_incore_recursive` / `merge_incore_nonrecursive`。只算结果，不碰工作树/索引。这是 rebase、cherry-pick 等需要「算完先看看、不立刻落盘」的场景的入口。
+3. **内部算法层**（`merge-ort.c` static）：`merge_ort_internal`（处理递归合并基）和 `merge_ort_nonrecursive_internal`（单合并基的三方合并主体）。
+
+「递归」二字体现在第 3 层：当合并基不止一个时，`merge_ort_internal` 会**递归地调用自己**，把多个合并基两两合并成虚拟提交，最终塌缩成单一合并基再交给 `merge_ort_nonrecursive_internal`。
 
 #### 4.1.2 核心流程
 
-策略调度的核心是两张表 + 一个分发函数。
-
-**策略表 `all_strategy[]`** 是一个静态数组，每项是「策略名 + 属性位」。属性位用四个宏：
+整个非递归三方合并主体 `merge_ort_nonrecursive_internal` 是三段流水线，外加一个重命名后重做（redo）的回环：
 
 ```
-DEFAULT_TWOHEAD (1<<0)  — 适合「两个头」(普通两路合并) 的默认策略
-DEFAULT_OCTOPUS (1<<1)  — 适合「多个头」(章鱼合并) 的默认策略
-NO_FAST_FORWARD (1<<2)  — 该策略永远不产生快进
-NO_TRIVIAL      (1<<3)  — 该策略不能做「平凡合并」(trivial, 即纯快进) 的捷径
+merge_incore_recursive(opt, bases, side1, side2, result)
+  └─ merge_ort_internal           # 递归塌缩多个合并基为单一虚拟基
+  │    └─ (若 bases>1) 递归 merge_ort_internal(prev, next) → 虚拟提交
+  │    └─ merge_ort_nonrecursive_internal(merge_base, side1, side2)
+  │
+  └─ merge_ort_nonrecursive_internal   # 主体三段：
+       1. collect_merge_info           # 三方 traverse_trees，填 opt->priv->paths
+       2. detect_and_process_renames   # 复用 diff 引擎做重命名/目录重命名
+            └─ 若 redo_after_renames==2 → clear → goto redo
+       3. process_entries              # 逐路径决策，写出结果树
+            └─ process_entry           # 单路径：filemask/match_mask 决策
+                 └─ handle_content_merge → merge_3way → ll_merge  # 真正行级合并
+  └─ (调用方) merge_switch_to_result   # checkout 结果 + 记录冲突到索引 + 写 AUTO_MERGE
 ```
 
-**分发函数 `try_merge_strategy()`** 按策略名分流：
+单路径决策的「数学」可以压成一句话：用 3 位 `match_mask` 表示 base/ours/theirs 三者中**哪几个彼此相同**（bit0=base，bit1=ours，bit2=theirs）。
 
-- 若是 `recursive` / `subtree` / `ort`：走内置 ort 后端，调 `merge_ort_recursive()`。
-- 否则（`octopus` / `resolve` / `ours` 等）：走 `try_merge_command()`，它会去 PATH 找 `git-merge-<strategy>` 外部脚本（`git-merge-octopus`、`git-merge-resolve` 其实是 shell 脚本）。
+- 若三方全同（`match_mask==7`）：在收集阶段已直接判定为干净，根本不进 `process_entry`。
+- 若两方相同、第三方不同：取「改过的那一方」。例如 `match_mask==6`（ours==theirs，base 不同）表示两边做了相同改动，直接取该值；`match_mask==3`（base==ours，theirs 不同）则取 theirs。
+- 若没有任何两方相同：两方都相对 base 改了，进入真正的内容合并或冲突。
 
-**别名映射**：`get_strategy()` 里有一个小技巧——当用户写 `-s recursive` 而默认策略已是 `ort` 时，悄悄把 `recursive` 改名成 `ort`。也就是说，在当代 git 里 `recursive` 和 `ort` 走的是同一套代码，`recursive` 只是一个向后兼容的名字。
+用集合符号表达平凡性判定——只有当三者中出现「至少一对相等」时才可能平凡合并：
 
-**cmd_merge 的主循环**：如果只指定一个策略，直接调；如果指定多个，则逐个尝试，每次失败先回退工作树到干净状态再试下一个，最后用 `evaluate_result()` 数索引里的冲突条目数，挑最少的那个留下的结果。
+\[
+\text{可能平凡} \iff \exists\, i\neq j,\; s_i = s_j \quad (s_0=\text{base},\, s_1=\text{ours},\, s_2=\text{theirs})
+\]
+
+只有当三者两两皆不同时，才需要调用 `merge_3way` 做行级合并。
 
 #### 4.1.3 源码精读
 
-先看属性宏和策略结构体（属性位用一个 `unsigned` 承载）：
+**结果结构 `struct merge_result`** —— 合并的对外产物。注意 `clean` 字段的三态语义：`1` 干净、`0` 有冲突、`<0` 中途失败（[merge-ort.h:12-46](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.h#L12-L46)）。`tree` 是结果树；即使不干净，它也代表「将要写进工作树的版本」（可能含冲突标记）。`priv` 是仅供内部用的私有数据（带冲突详情、待写索引信息）。
 
-- [builtin/merge.c:L55-L63](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L55-L63)：定义 `DEFAULT_TWOHEAD`/`DEFAULT_OCTOPUS`/`NO_FAST_FORWARD`/`NO_TRIVIAL` 四个属性位，以及 `struct strategy { name; attr; }`。
+**配置结构 `struct merge_options`** —— 装载所有合并选项（[merge-ort.h:49-92](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.h#L49-L92)）。关键字段：`branch1`/`branch2` 是冲突标记里的标签名；`detect_renames`/`rename_score`/`rename_limit` 控制重命名检测；`xdl_opts` 透传给 xdiff；`conflict_style` 决定冲突标记风格；`recursive_variant`（`NORMAL`/`OURS`/`THEIRS`）对应 `-Xours`/`-Xtheirs`。`priv` 指向 `struct merge_options_internal`，是算法运行期的全部状态。
 
-再看内置策略表——注意 `ort` 带着 `DEFAULT_TWOHEAD | NO_TRIVIAL`（两路合并的默认策略），`octopus` 带 `DEFAULT_OCTOPUS`：
+**路径的数据表示** 是理解算法的钥匙。干净路径用 `struct merged_info`，冲突路径用 `struct conflict_info`，后者把前者放在首个成员位置实现 C 风格继承（[merge-ort.c:436-528](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L436-L528)）：
 
-- [builtin/merge.c:L101-L108](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L101-L108)：`all_strategy[]`，六项 `recursive`/`octopus`/`ort`/`resolve`/`ours`/`subtree`，每项带各自的属性位。
+```c
+struct version_info { struct object_id oid; unsigned short mode; };
 
-分发函数把策略名翻译成实际的合并调用：
+struct merged_info {                 /* 干净路径 */
+    struct version_info result;
+    unsigned is_null:1;
+    unsigned clean:1;
+    size_t basename_offset;
+    const char *directory_name;
+};
 
-- [builtin/merge.c:L800-L801](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L800-L801)：`if (!strcmp(strategy, "recursive") || !strcmp(strategy, "subtree") || !strcmp(strategy, "ort"))`——这三种都走内置 ort 后端。
-- [builtin/merge.c:L833-L834](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L833-L834)：`clean = merge_ort_recursive(&o, head, remoteheads->item, reversed, &result);`——把 HEAD、对方提交、倒序的合并基列表交给 ort，拿回 clean 标志。
-- [builtin/merge.c:L846-L850](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L846-L850)：`else` 分支调 `try_merge_command()`，即把 `octopus`/`resolve`/`ours` 等交给外部 `git-merge-*` 脚本。
+struct conflict_info {               /* 冲突路径：merged_info 在首成员 */
+    struct merged_info merged;       /* WARNING: merged.clean==1 后禁读其余字段 */
+    struct version_info stages[3];   /* base/ours/theirs 三方的 oid+mode */
+    const char *pathnames[3];        /* 三方各自的路径（重命名后可能不同） */
+    unsigned df_conflict:1;          /* 目录/文件冲突 */
+    unsigned path_conflict:1;        /* 非内容冲突（rename/rename 等） */
+    unsigned filemask:3;             /* bit i：第 i 方在此路径是文件 */
+    unsigned dirmask:3;              /* bit i：第 i 方在此路径是目录 */
+    unsigned match_mask:3;           /* bit i：哪几方彼此相同 */
+};
+```
 
-别名映射的小技巧（当代 git 把 `recursive` 等同于 `ort`）：
+`merged.clean` 是一个**安全闸门**：分配的 `merged_info` 总是 `clean=1`，分配的 `conflict_info` 初始 `clean=0`；代码约定「只有 `clean==0` 才允许读 `stages` 等字段」（见结构体上方注释 [merge-ort.c:472-485](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L472-L485)）。
 
-- [builtin/merge.c:L182-L184](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L182-L184)：当默认策略是 `ort` 而用户要 `recursive` 时，`name = "ort";` 直接改名。
+**冲突类型枚举** —— 决定了你看到的那行 `CONFLICT (contents)` 文案（[merge-ort.c:530-615](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L530-L615)）。它把所有冲突/信息分类：`CONFLICT_CONTENTS`、`CONFLICT_MODIFY_DELETE`、`CONFLICT_RENAME_RENAME`、`CONFLICT_FILE_DIRECTORY`……并有配套的 `type_short_descriptions[]` 字符串表，外部工具依赖这些字符串不变。
 
-最后是 cmd_merge 的多策略竞争主循环：
+**合并主体三段流水线**（[merge-ort.c:5245-5308](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5245-L5308)），核心骨架：
 
-- [builtin/merge.c:L1781-L1820](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L1781-L1820)：逐个策略尝试，`ret < 2` 表示该策略「处理了」（0 干净、1 有冲突），其中 `ret == 0` 立即成功跳出；多个策略时用 `evaluate_result()`（数索引冲突条目）挑最优。
+```c
+redo:
+    collect_merge_info(opt, merge_base, side1, side2);   /* 阶段 1：收集 */
+    result->clean = detect_and_process_renames(opt);     /* 阶段 2：重命名 */
+    if (opt->priv->renames.redo_after_renames == 2) {
+        clear_or_reinit_internal_opts(opt->priv, 1);
+        goto redo;                                        /* 重命名改变了图，重做 */
+    }
+    process_entries(opt, &working_tree_oid);             /* 阶段 3：决策+建树 */
 
-ort 之上的薄胶水层把「返回 clean 标志 + 自动写索引」对接到 ort「返回 `merge_result` + 不碰磁盘」的设计：
+    if (result->clean >= 0) {
+        result->tree = repo_parse_tree_indirect(..., &working_tree_oid);
+        result->clean &= strmap_empty(&opt->priv->conflicted);  /* 有冲突即不干净 */
+    }
+```
 
-- [merge-ort-wrappers.c:L54-L74](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort-wrappers.c#L54-L74)：`merge_ort_recursive()` 先用 `unclean()` 检查索引是否干净，再调 `merge_incore_recursive()` 算出内存里的 `merge_result`，最后 `merge_switch_to_result()` 把结果真正写进工作树与索引。
-- [merge-ort-wrappers.c:L15-L28](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort-wrappers.c#L15-L28)：`unclean()`——合并前确认索引与 HEAD 一致，避免覆盖用户未提交的改动（这道闸和 u9-l2 讲的 checkout 保护机制同一思想）。
+三个 `trace2_region_enter/leave` 把三段切成可测量的性能区间（见 [u13-l3 trace2](u13-l3-trace2-profiling.md)）。`redo` 回环是 ort 的一个特色：重命名检测可能反过来影响目录内容（目录重命名），于是清空内部 map 重跑一次收集。
+
+**递归合并基塌缩**（[merge-ort.c:5313-5401](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5313-L5401)）。若调用方未给合并基，先用 `repo_get_merge_bases` 算（来自 commit-reach.c，见 u7-l2），并**反转成「最旧在前」**（注释引用了经验结论：按最旧到最新顺序递归合并表现更好）。然后弹出一个 `merged_merge_bases`，若还有剩余，就在循环里**递归调用自身**把 `prev` 与 `next` 合并成虚拟提交：
+
+```c
+for (next = pop_commit(&merge_bases); next; next = pop_commit(&merge_bases)) {
+    opt->priv->call_depth++;
+    opt->branch1 = "Temporary merge branch 1";
+    opt->branch2 = "Temporary merge branch 2";
+    merge_ort_internal(opt, NULL, prev, next, result);   /* 递归 */
+    opt->priv->call_depth--;
+    merged_merge_bases = make_virtual_commit(opt->repo, result->tree, "merged tree");
+    /* 给虚拟提交挂两个 parent，使其看上去像个真合并 */
+    commit_list_insert(prev,    &merged_merge_bases->parents);
+    commit_list_insert(next, &merged_merge_bases->parents->next);
+    clear_or_reinit_internal_opts(opt->priv, 1);
+}
+```
+
+`call_depth>0` 这一标志会在多处改变行为（例如 `merge_3way` 里设 `virtual_ancestor=1`、`variant=0`；符号链接冲突时回退到 base）——因为合并合并基时不需要真冲突，只要「尽量合并出一个可用的基」。没有共同祖先时则用空树兜底（[merge-ort.c:5336-5343](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5336-L5343)）。
+
+**逐路径决策 `process_entry`**（[merge-ort.c:4079-4198](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4079-L4198)）开头先处理目录/文件冲突（`dirmask`、`df_conflict`），随后进入一段长长的 if-elseif 决策链。其中最核心的「平凡合并」分支（[merge-ort.c:4205-4225](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4205-L4225)）：
+
+```c
+if (ci->match_mask) {
+    ci->merged.clean = !ci->df_conflict && !ci->path_conflict;
+    if (ci->match_mask == 6) {                 /* ours==theirs */
+        ci->merged.result.mode = ci->stages[1].mode;
+        oidcpy(&ci->merged.result.oid, &ci->stages[1].oid);
+    } else {                                   /* 取「改过的那一方」 */
+        unsigned int othermask = 7 & ~ci->match_mask;
+        int side = (othermask == 4) ? 2 : 1;
+        ci->merged.result.mode = ci->stages[side].mode;
+        ci->merged.is_null = !ci->merged.result.mode;   /* mode==0 即删除 */
+        if (ci->merged.is_null) ci->merged.clean = 1;
+        oidcpy(&ci->merged.result.oid, &ci->stages[side].oid);
+    }
+}
+```
+
+`7 & ~match_mask` 是个巧妙的小技巧：`match_mask` 标出「相同的两方」，取反后剩下的那一位就是「改过的第三方」。当两方类型不同（一个文件一个符号链接）时走「改名分流」分支，把各自改名到独立路径（[merge-ort.c:4226-4278](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4226-L4278)）。
+
+**内容合并 `handle_content_merge`**（[merge-ort.c:2179-2325](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L2179-L2325)）。当两方都改了内容、且都是普通文件时，先做平凡的 mode/oid 合并（`oideq` 判等取值），剩下的才调 `merge_3way`：
+
+```c
+/* 平凡 oid 合并：任一方等于 base 即取另一方 */
+if (oideq(&a->oid, &b->oid) || oideq(&a->oid, &o->oid))
+    oidcpy(&result->oid, &b->oid);
+else if (oideq(&b->oid, &o->oid))
+    oidcpy(&result->oid, &a->oid);
+else if (S_ISREG(a->mode)) {
+    merge_status = merge_3way(opt, path, &o->oid, &a->oid, &b->oid,
+                              pathnames, extra_marker_size, &result_buf);
+    ...
+    if (merge_status > 0) clean = 0;          /* >0 表示有冲突 */
+}
+```
+
+注意 `extra_marker_size`：当发生「内容合并的内容合并」（如 rename/rename(2to1)）时，嵌套的冲突标记需要加长，否则无法区分层级。
+
+**桥到低层驱动 `merge_3way`**（[merge-ort.c:2107-2177](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L2107-L2177)）填好 `struct ll_merge_options`，把 oid 读成内存缓冲 `mmfile_t`，再调 `ll_merge`（下一节详述）。冲突标记的标签来自 `opt->ancestor`/`branch1`/`branch2`，路径不一致时拼成 `branch:path`。
+
+**主循环 `process_entries`**（[merge-ort.c:4498-4600](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4498-L4600)）。它把 `opt->priv->paths` 倒进 `plist`，用特殊比较器 `sort_dirs_next_to_their_children` 排序，然后**逆序遍历**——先处理目录下的文件、再处理目录本身，这样写出子树时子内容已就绪，也能正确判断目录/文件冲突时「目录是否还挡在路中」。干净条目直接 `record_entry_for_tree`，冲突条目交给 `process_entry`。最后由 `write_tree` 把累积的 `directory_versions` 转成一棵结果树。
+
+**把结果落到工作树与索引 `merge_switch_to_result`**（[merge-ort.c:4927-4977](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4927-L4977)）做了三件事：
+
+```c
+checkout(opt, head, result->tree);                 /* 把工作树/索引切到结果树 */
+record_conflicted_index_entries(opt);              /* 冲突路径写回 stage 1/2/3 */
+refs_update_ref(..., "AUTO_MERGE", &result->tree->object.oid, ...);  /* 记 AUTO_MERGE */
+```
+
+**冲突写索引 `record_conflicted_index_entries`**（[merge-ort.c:4648-4702](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4648-L4702)）：`checkout` 已经为每个冲突路径写了一条「尽可能合并好的版本」（stage=0）；本函数再把它替换成 base/ours/theirs 各自的 stage 1/2/3 条目（这就是 `git ls-files -u` 能看到三阶段的原因）。配套的 `merge_get_conflicted_files`（[merge-ort.c:4896-4925](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4896-L4925)）则把同样的阶段信息导出给外部。
+
+> 注：`AUTO_MERGE` 是较新的机制——即使合并有冲突，git 也把「自动合并出的那一版结果树」记成一个引用，供 `git mergetool`、`git diff AUTO_MERGE` 等使用。
 
 #### 4.1.4 代码实践
 
-**实践目标**：从命令行观察策略调度，并用 `-s` 强制切换策略，验证 `recursive` 实际走 ort。
+**实践目标：构造一次真实的文本冲突，验证冲突区段是如何被标记并记录进索引的。**
 
-**操作步骤**：
+操作步骤（在任意临时仓库执行）：
 
-```sh
-# 1. 建一个玩具仓库
-git init merge-dispatch && cd merge-dispatch
-printf 'line1\n' > f.txt && git add f.txt && git commit -m base
+```bash
+mkdir mg && cd mg && git init -q
+printf 'line1\nline2\n' > greeting.txt
+git add greeting.txt && git -c user.email=a@b.c -c user.name=A commit -qm base
 
-# 2. 在 main 上改一行
-git checkout -b topic 2>/dev/null
-printf 'line1-topic\n' > f.txt && git commit -am topic
+git checkout -q -b feature
+printf 'line1\nFEATURE\n' > greeting.txt
+git add greeting.txt && git -c user.email=a@b.c -c user.name=A commit -qm feature
 
-# 3. 切回 main，对同一行做不同改动，制造冲突
-git checkout master 2>/dev/null || git checkout main
-printf 'line1-main\n' > f.txt && git commit -am main
+git checkout -q master
+printf 'MAIN\nline2\n' > greeting.txt
+git add greeting.txt && git -c user.email=a@b.c -c user.name=A commit -qm main
 
-# 4a. 默认策略（ort）合并
-git merge topic            # 预期冲突
-git merge --abort
-
-# 4b. 显式用 ort
-git merge -s ort topic
-git merge --abort
-
-# 4c. 用 resolve（外部脚本策略）
-git merge -s resolve topic
-git merge --abort
+git merge feature        # 触发冲突
 ```
 
-**需要观察的现象**：
+需要观察的现象：
 
-- 4a、4b 都报冲突，且 `git config merge.conflictstyle` 决定标记样式。
-- 用 `GIT_TRACE2_PERF=1 git merge -s ort topic`（合并前先 abort 干净）能在 trace 输出里看到 `merge` 的各个 region（`collect_merge_info`、`renames`、`process_entries`），印证三阶段管线。
+1. 控制台应打印一行 `Auto-merging greeting.txt`（对应 `merge-ort.c` 里 `INFO_AUTO_MERGING` 的 `path_msg`）与 `CONFLICT (contents): Merge conflict in greeting.txt`（对应 `CONFLICT_CONTENTS`）。
+2. 文件 `greeting.txt` 内出现三段标记：
+   ```
+   <<<<<<< HEAD
+   MAIN
+   line2
+   =======
+   line1
+   FEATURE
+   >>>>>>> feature
+   ```
+3. `git ls-files -u greeting.txt` 会列出**三个阶段**的条目：stage 1 = base，stage 2 = ours（HEAD），stage 3 = theirs（feature）。
 
-**预期结果**：默认 `git merge` 与 `-s ort` 行为一致；`-s recursive` 也一致（因为是别名）。**待本地验证** `resolve` 策略在该冲突下给出的冲突区段是否与 ort 完全相同。
+阅读源码对照：`process_entry` 的平凡分支因为「base/ours/theirs 两两皆不同」不命中，落到 `handle_content_merge` → `merge_3way` → `ll_merge`，`ll_merge` 返回 `LL_MERGE_CONFLICT`（`>0`），于是 `clean=0`；随后 `record_conflicted_index_entries` 把三方各写成一个 stage 条目。
+
+4. 用 `git rev-parse AUTO_MERGE` 查看 git 是否记下了自动合并结果树（待本地验证：较旧版本的 git 可能没有此引用）。
+
+若运行后未出现上述现象（例如自动合并成功），说明两方改动恰好可自动合并——调整文本使两方改了**同一行不同内容**即可复现冲突。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`all_strategy[]` 里 `ours` 策略带 `NO_FAST_FORWARD | NO_TRIVIAL`，这两个属性分别意味着什么？
+**练习 1**：为什么 `struct conflict_info` 把 `struct merged_info` 放在第一个成员？这样设计后，`process_entries` 里 `struct merged_info *mi = entry->util;` 与 `struct conflict_info *ci = (struct conflict_info *)mi;` 之间的强转为何是安全的？
 
-**参考答案**：`NO_FAST_FORWARD` 表示该策略永远不会产生快进合并（`ours` 本就是「丢弃对方、只保留我方」，与快进语义无关）；`NO_TRIVIAL` 表示它不能走「平凡合并」捷径（即对方是我方祖先时直接移动指针那种快路径），因为 `ours` 即使在能快进时也要丢弃对方内容。
+**参考答案**：这是 C 语言里模拟继承的惯用法——基类结构体放在首成员位置，基类指针与派生类指针的二进制地址相同，因此可以在二者间安全强转。安全的前提是先检查 `mi->clean`：只有 `clean==0` 时 `mi` 实际指向一个 `conflict_info`，此时访问其 `stages`/`filemask` 等字段才合法（这正是结构体注释里强调的 WARNING）。
 
-**练习 2**：为什么 `try_merge_strategy()` 只把 `recursive`/`subtree`/`ort` 走内置后端，而 `octopus`/`resolve` 走 `try_merge_command()`？
+**练习 2**：`process_entries` 为什么要逆序遍历排好序的路径列表？
 
-**参考答案**：因为 `octopus`（多路合并）和 `resolve`（古老的两路策略）在 git 源码里实现为 `git-merge-octopus`、`git-merge-resolve` 这些 shell 脚本，不在 C 主二进制里；`try_merge_command()` 去 PATH 找并执行它们。而 ort/recursive 是性能关键的 C 实现，直接在进程内调用。
+**参考答案**：排序规则是「把目录紧挨其子项」。逆序意味着「先处理子项、再处理目录」。这样在处理一个目录时，它下面的文件已经处理完毕、子树内容已就绪，可以直接写出该目录对应的 tree；同时也让目录/文件冲突（D/F conflict）能正确判断「此刻目录是否还挡在文件路径上」。
 
 ---
 
-### 4.2 ort 递归合并核心（merge-ort.c）
+### 4.2 merge-ll 低层合并驱动
 
 #### 4.2.1 概念说明
 
-ort（**O**stensibly **R**ecursive's **T**win，意为「recursive 的孪生」）是 git 2.34 起的默认合并策略，用来取代更老的 `recursive`。两者算法思想一致，但 ort 重写了实现，主要改进是：
+`merge-ll.c` 是**单文件**层面的三方合并引擎。ort 在「两方都改了同一个文件」时，最终都汇流到这里。它解决两件事：
 
-- **在内存里合并（in-core）**：recursive 边合并边反复读写索引和工作树，ort 全程只在内存的 tree 上操作，最后一次性 `merge_switch_to_result()` 落盘，故快得多。
-- **数据结构更好**：用 `strmap` 按「路径 → 合并信息」组织，避免反复遍历。
-- **可重用重命名结果**：连续合并（如 rebase 一串提交）时，前一次的重命名检测可以缓存给后一次用。
+1. **选驱动**：按 `.gitattributes` 里的 `merge` 属性，决定这个文件该用哪种合并方式。内置三种：`text`（默认，调 xdiff 做行级三方合并）、`binary`（二进制不能合并，按规则取一方）、`union`（把两方简单拼接）。还支持用户自定义驱动（`[merge "<name>"] driver = ...`）。
+2. **生成冲突标记**：当 `text` 驱动发现两方在同一区域都改了且无法自动合并时，由底层 xdiff 的 `xdl_merge` 产出 `<<<<<<<` / `=======` / `>>>>>>>` 三段，返回 `LL_MERGE_CONFLICT`。
 
-**为什么要「递归」？** 关键在交叉合并（criss-cross）。看这个历史：
-
-```
-       C
-      / \
-     D   E
-      \ /
-       F      ← 要合并 D 和 E
-```
-
-D 和 E 有**两个**共同祖先 C 和 F'（假设 F 是更早的合并提交）。于是合并基不唯一。如果直接拿其中一个当祖先，结果可能偏向某一方（`recursive` 早期因此有 bug）。解决办法是**递归地先把多个合并基自己合并成一个「虚拟祖先」**，再用它当唯一祖先去做最终合并。这就是 `merge_ort_internal()` 里那段递归循环的来历。
+它被设计成与 ort **解耦**的薄层：`ll_merge()` 只关心「三个内存缓冲 + 路径 + 选项」，不关心你是在做分支合并、cherry-pick 还是 rebase。这也正是 `git merge-file`、`git apply --3way` 等命令都能复用它的原因。
 
 #### 4.2.2 核心流程
 
-ort 的对外入口有两个，区别只在「要不要递归合并合并基」：
+```
+ll_merge(result, path, ancestor, ours, theirs, istate, opts)
+  ├─ git_check_attr(path)                # 查 merge 属性 + conflict-marker-size
+  ├─ find_ll_merge_driver(attr_value)    # 选驱动：text/binary/union/自定义
+  │     └─ 若 opts->virtual_ancestor 且 driver->recursive 非空 → 换成 recursive 驱动
+  ├─ marker_size += opts->extra_marker_size
+  └─ driver->fn(...)                     # 分派到具体驱动：
+        ├─ ll_xdl_merge → xdl_merge       # text：xdiff 行级三方合并，产出冲突标记
+        ├─ ll_binary_merge                # binary：取 ours/theirs/ancestor
+        └─ ll_union_merge                 # union：variant=FAVOR_UNION 后走 xdl_merge
+```
 
-- `merge_incore_nonrecursive()`：调用方**自己**已经算好唯一的合并基（一棵 tree），直接三路合并。用于「我知道只有一个祖先」的场景。
-- `merge_incore_recursive()`：调用方给的是**提交列表**，ort 自己去算合并基、必要时递归合并它们。`git merge` 走的是这个。
-
-`merge_incore_recursive()` → `merge_ort_internal()` 的核心逻辑分两段：
-
-**第一段：递归塌缩合并基**。如果有多个合并基，两两取出来，用 `merge_ort_internal()` 自己（递归！）合并成一个虚拟提交，循环直到只剩一个。最后把这个虚拟祖先当成唯一合并基。
-
-**第二段：三阶段管线**（`merge_ort_nonrecursive_internal()`）：
-
-1. **`collect_merge_info`**：用 `traverse_trees()` 同时并行遍历「合并基、side1、side2」三棵 tree，对每个路径收集三方的 mode/oid，存进 `opt->priv->paths` 这张 map。回调里用一张「真值表」判定该路径能否平凡解决。
-2. **`detect_and_process_renames`**：处理重命名（`-X` 选项、目录重命名等），把「对方把 a.txt 改名成 b.txt」这种跨路径变更对齐回同一逻辑文件。本讲只点到为止，细节属重命名检测。
-3. **`process_entries`**：逐条目做最终决策——能干净合并的写进结果 tree，有冲突的记进 `opt->priv->conflicted` 并生成带冲突标记的文件内容。遍历顺序是「先子后父」，这样能先写出子树、再组装父树（u4-l2 的 cache-tree 思想）。
-
-最后 `process_entries` 产出结果 tree 的 oid，存进 `result->tree`；冲突则由后续 `merge_switch_to_result()` 写进索引的 stage 1/2/3（见 4.3）。
+`find_ll_merge_driver` 的选择规则值得记（[merge-ll.c:363-394](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L363-L394)）：`merge` 属性为 `true` → `text`；`false` → `binary`；未设且无 `merge.default` → `text`；设成具体名字则按名字在「用户驱动链 → 内置三驱动」里查，查不到也兜底 `text`。
 
 #### 4.2.3 源码精读
 
-先看内存里的核心数据结构——「每个路径的合并信息」分两种：能干净合并的用小的 `merged_info`，有冲突的用大的 `conflict_info`（把 `merged_info` 放在首成员，实现 C 风格继承，u3-l1 讲过这套手法）：
+**入口 `ll_merge`**（[merge-ll.c:406-451](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L406-L451)）：
 
-- [merge-ort.c:L441-L470](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L441-L470)：`struct merged_info`——结果版本 `result`、`is_null`、`clean` 标志、以及目录名等性能字段。注释明确「检查 `clean` 之后才能安全读 `conflict_info` 的其余字段」。
-- [merge-ort.c:L472-L486](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L472-L486)：`struct conflict_info`——`merged` 基类之外，还存三方的 `stages[3]`（mode+oid）、`pathnames[3]`（重命名后可能不同）、`df_conflict`（目录/文件冲突）等。
+```c
+git_check_attr(istate, path, check);          /* 查 merge 属性与 marker-size */
+ll_driver_name = check->items[0].value;
+...                                            /* 解析 conflict-marker-size */
+driver = find_ll_merge_driver(ll_driver_name);
 
-合并的三方用枚举编号，后面写索引 stage 时会用到（stage = 编号+1）：
+if (opts->virtual_ancestor) {                 /* 合并合并基时：换 recursive 驱动 */
+    if (driver->recursive)
+        driver = find_ll_merge_driver(driver->recursive);
+}
+if (opts->extra_marker_size)
+    marker_size += opts->extra_marker_size;
+return driver->fn(driver, result_buf, path, ancestor, ancestor_label,
+                  ours, our_label, theirs, their_label, opts, marker_size);
+```
 
-- [merge-ort.c:L76-L78](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L76-L78)：`MERGE_BASE = 0, MERGE_SIDE1 = 1, MERGE_SIDE2 = 2`。
+注意 `virtual_ancestor` 分支：这正是 4.1 节里「合并合并基时 `call_depth>0`」在底层驱动的对应物——某些文件在「合成祖先」时可能需要换一种合并方式（如二进制文件），由 `[merge "<driver>"] recursive` 配置指定。
 
-再看两个对外入口的内部实现。递归版会先算合并基：
+**text 驱动 `ll_xdl_merge`**（[merge-ll.c:103-147](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L103-L147)）。它先做两道安全检查：任一缓冲过大（`MAX_XDIFF_SIZE`）或含 NUL 字节（`buffer_is_binary`）就降级为 `ll_binary_merge`；否则填好 `xmparam_t`（合并级别 `XDL_MERGE_ZEALOUS`、`favor` 来自 `-Xours/-Xtheirs`、`style` 来自 conflict_style、`marker_size`），调用 xdiff 的 `xdl_merge`：
 
-- [merge-ort.c:L5429-L5451](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5429-L5451)：`merge_incore_recursive()` 先 `merge_start()` 初始化内部状态，再调 `merge_ort_internal()`。
+```c
+status = xdl_merge(orig, src1, src2, &xmp, result);
+ret = (status > 0) ? LL_MERGE_CONFLICT : status;   /* >0 = 有冲突 */
+```
 
-`merge_ort_internal()` 是「递归塌缩合并基 + 调三阶段管线」的枢纽：
+`xdl_merge` 在 [u8-l2 xdiff](u8-l2-xdiff-library.md) 讲过的 Myers/直方图算法基础上做三方合并，当两方改动重叠无法自动调和时，把两段连同标记写进 `result`。这就是 `<<<<<<<` 的真正出处。
 
-- [merge-ort.c:L5319-L5333](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5319-L5333)：若调用方没给合并基，用 `repo_get_merge_bases()` 自己算（commit-reach.c 提供，u7-l2 讲过它的涂色算法），并按「从旧到新」倒序。
-- [merge-ort.c:L5355-L5387](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5355-L5387)：**递归核心**——对剩余的每一个合并基 `next`，把它和已合并出的 `prev` 用 `merge_ort_internal(opt, NULL, prev, next, result)` 自己合并（`call_depth++` 标记「现在是虚拟祖先合并」，会让 `ll_merge` 走 `virtual_ancestor` 模式），结果做成一个虚拟提交。循环结束就只剩一个合并基。
-- [merge-ort.c:L5390-L5395](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5390-L5395)：拿塌缩后的唯一合并基、两棵 tree，调 `merge_ort_nonrecursive_internal()` 进入三阶段管线。
+**binary 驱动 `ll_binary_merge`**（[merge-ll.c:58-101](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L58-L101)）。二进制无法做行级合并，规则是：合成祖先时取 base；否则默认报 `LL_MERGE_BINARY_CONFLICT` 并取 ours（`-Xours`/`-Xtheirs` 可改取 theirs）。
 
-三阶段管线本身（注意每阶段都包在 trace2 region 里，方便性能分析）：
+**union 驱动 `ll_union_merge`**（[merge-ll.c:149-166](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L149-L166)）：把 `variant` 改成 `XDL_MERGE_FAVOR_UNION` 后复用 `ll_xdl_merge`，结果是两方内容都保留、用 `=======` 分隔但不报冲突——常用于 `CHANGELOG` 这类「两边都追加」的文件。
 
-- [merge-ort.c:L5260-L5290](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5260-L5290)：`collect_merge_info` → `detect_and_process_renames` → `process_entries` 三段顺序，每段一对 `trace2_region_enter/leave`；`result->clean` 初值由 `detect_and_process_renames` 给，`process_entries` 可能把它改成 -1（出错）。
+**驱动注册表**（[merge-ll.c:168-175](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L168-L175)）：
 
-阶段一——并行遍历三棵 tree：
+```c
+static struct ll_merge_driver ll_merge_drv[] = {
+    { "binary", "built-in binary merge",      ll_binary_merge },
+    { "text",   "built-in 3-way text merge",  ll_xdl_merge },
+    { "union",  "built-in union merge",       ll_union_merge },
+};
+```
 
-- [merge-ort.c:L1738-L1768](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L1738-L1768)：`collect_merge_info()` 把三棵 tree 装进 `tree_desc t[3]`，调 `traverse_trees(NULL, 3, t, &info)`，回调设成 `collect_merge_info_callback`。
+**用户自定义驱动 `ll_ext_merge`**（[merge-ll.c:191-269](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L191-L269)）。它把三方内容各写进一个临时文件，然后用 `strbuf_expand_step` 把命令行模板里的占位符替换成路径：
 
-回调里那张著名的「三方合并真值表」（match_mask）。三个布尔分别表示 side1/侧2 是否等于合并基、两侧是否相等：
+| 占位符 | 含义 |
+|--------|------|
+| `%O` | base 的临时文件 |
+| `%A` | ours 的临时文件（驱动要把结果写回这里） |
+| `%B` | theirs 的临时文件 |
+| `%L` | 冲突标记长度 |
+| `%P` | 原始路径（已转义） |
+| `%S` / `%X` / `%Y` | base / ours / theirs 的版本标识 |
 
-- [merge-ort.c:L1327-L1333](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L1327-L1333)：计算 `match_mask`。位 0=合并基、位 1=side1、位 2=side2；置位的那些「彼此相等」。
-- [merge-ort.c:L1349-L1358](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L1349-L1358)：`match_mask == 7`（三方全等）直接判定为已解决，无需进一步合并。
+退出码语义：0=干净、`<=128`=冲突、`>128`（被信号杀死）=错误（[merge-ll.c:261-268](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L261-L268)）。
 
-这张真值表整理成表格（A=side1/我方，B=side2/对方，O=合并基）：
-
-| match_mask | 含义 | 处理 | 是否冲突 |
-|------------|------|------|----------|
-| 7 (111) | O == A == B | 直接用任一方 | 干净 |
-| 6 (110) | A == B，O 不同 | 两边做了相同改动，用 A/B | 干净 |
-| 5 (101) | O == B，A 不同 | 只有一方（A）改了，用 A | 干净 |
-| 3 (011) | O == A，B 不同 | 只有一方（B）改了，用 B | 干净 |
-| 0 | 三方都不同 | 真正的内容冲突，交给 `ll_merge` | **冲突** |
-
-> 数学上，这就是经典的三方合并规则：若只有一方相对 O 发生了变化，采用变化方；若两方变化相同，采用任一方；若两方变化不同，冲突。形式化地，设 \( \Delta_X = (X \ne O) \) 表示方 X 改了，则干净合并的条件是 \( \neg(\Delta_A \land \Delta_B \land A \ne B) \)。
-
-阶段三——逐条目决策。`process_entry()` 是「文件级冲突判定」的总控，开头就断言 match_mask 只可能是 {0,3,5,6}（7 已在阶段一平凡解决）：
-
-- [merge-ort.c:L4079-L4098](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4079-L4098)：`process_entry()` 入口，处理目录/文件冲突（dirmask）等。`assert(ci->match_mask == 0 || ... == 6)` 印证了上面的真值表。
-- [merge-ort.c:L4498-L4577](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4498-L4577)：`process_entries()` 把所有路径排成「子在前、父在后」的顺序，逆序遍历；`mi->clean` 为真就 `record_entry_for_tree` 写进结果 tree，否则调 `process_entry` 处理冲突。
-
-冲突的类型用一个大枚举区分（merge-ort.c:L530-L586），每类有固定文案，外部工具依赖这些字符串，故不可改动：
-
-- [merge-ort.c:L530-L586](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L530-L586)：`enum conflict_and_info_types`，如 `CONFLICT_CONTENTS`（文本冲突）、`CONFLICT_MODIFY_DELETE`、`CONFLICT_RENAME_RENAME` 等。
-- [merge-ort.c:L594-L636](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L594-L636)：`type_short_descriptions[]`，把枚举映射成 `"CONFLICT (contents)"` 等固定字符串。
+**配置解析 `read_merge_config`**（[merge-ll.c:277-353](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L277-L353)）：监听 `merge.<name>.driver` / `.name` / `.recursive` 与 `merge.default`，把用户定义的驱动挂进 `ll_user_merge` 链表。这印证了 [u6-l1 config](u6-l1-config-parsing.md) 讲的「回调驱动解析」模型。
 
 #### 4.2.4 代码实践
 
-**实践目标**：阅读源码理解递归合并基，并在真实仓库里复现交叉合并。
+**实践目标：体验自定义合并驱动，并观察它如何接管某个文件类型的合并。**
 
-**操作步骤**：
+操作步骤：
 
-```sh
-# 1. 制造交叉历史：两条分支各有自己的合并，形成多个合并基
-git init crisscross && cd crisscross
-printf '1\n' > f && git add f && git commit -m base       # C0
-git branch b1
-git branch b2
+```bash
+mkdir mll && cd mll && git init -q
+# 注册一个自定义驱动 "fillet"：遇到冲突就保留两段
+git config merge.fillet.name "two-way keep both"
+git config merge.fillet.driver "cp -f %B %A && printf '\n===\n' >> %A && cat %O >> %A"
+# 让所有 .log 文件使用该驱动
+printf '*.log merge=fillet\n' > .gitattributes
+git add .gitattributes
+git -c user.email=a@b.c -c user.name=A commit -qm attrs
 
-# 在 b1 上：base -> m1
-printf '2\n' > f && git commit -am b1-m1                   # C1
+printf 'v1\n' > app.log; git add app.log
+git -c user.email=a@b.c -c user.name=A commit -qm base
 
-# 在 b2 上：base -> m2
-git checkout -q b2
-printf '3\n' > f && git commit -am b2-m2                   # C2
+git checkout -q -b b1; printf 'v1\nFROM_B1\n' > app.log
+git add app.log && git -c user.email=a@b.c -c user.name=A commit -qm b1
 
-# 互相合并产生交叉：b1 合 b2，b2 合 b1（用 ours 避免冲突）
-git checkout -q b1 && git merge -s ours b2 -m cross1       # M1
-git checkout -q b2 && git merge -s ours b1 -m cross2       # M2
+git checkout -q master; printf 'v1\nFROM_MAIN\n' > app.log
+git add app.log && git -c user.email=a@b.c -c user.name=A commit -qm main
 
-# 2. 现在合并 M1 与 M2，二者有两个共同祖先 C1、C2 —— 触发递归合并基
-git checkout -q b1
-git merge b2
+git merge b1
+cat app.log       # 观察结果是否被自定义驱动接管（而非出现 <<<<<<< 标记）
 ```
 
-**需要观察的现象**：
+需要观察的现象：
 
-- 最后一次 `git merge b2` 时，M1 和 M2 的共同祖先是 C1 和 C2 两个，于是 ort 会先递归把 C1、C2 合并成一个虚拟祖先，再做最终合并。
-- 用 `GIT_TRACE2_PERF=1 git merge b2` 可以看到嵌套的 `merge` region（内层那次就是合并基之间的虚拟合并）。
+- 因为 `app.log` 命中了 `merge=fillet`，`ll_merge` 经 `find_ll_merge_driver("fillet")` 选中自定义驱动 `ll_ext_merge`，它执行了你配置的命令，把结果写回 `%A`。文件内容应是「theirs + `===` + base」的拼接，而**不是** `<<<<<<<` 标记。
+- 若改用内置的 union 驱动（直接 `printf '*.log merge=union\n'`），则会看到两方内容以 `=======` 分隔。
 
-**阅读源码对应**：把上面的现象对照 [merge-ort.c:L5355-L5387](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5355-L5387) 的递归循环，确认「两个合并基 → 一次内层 `merge_ort_internal` → 一个虚拟祖先」。
+对照源码：`ll_ext_merge` 里 `run_command(&child)` 执行命令、退出码 `<=128` 被判为 `LL_MERGE_CONFLICT`（[merge-ll.c:241-268](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L241-L268)）。如果驱动退出码非 0，ort 仍会把这个路径记为冲突（写回 stage）。
 
-**预期结果**：合并正常完成（因为两边内容经 ours 已确定，最终多为干净或可自动解决）。**待本地验证** trace 输出中是否真的出现内层 `incore_recursive` region。
+> 此实践依赖自定义 shell 命令正确执行；若环境无 `cp`/`cat`/`printf`，可仅做源码阅读：在 `ll_ext_merge` 的 `strbuf_expand_step` 循环处确认 `format` 串里 `%A`/`%B`/`%O` 被替换为实际临时文件路径（待本地验证具体命令输出）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`merge_ort_internal()` 在递归合并合并基时，把分支名临时改成了 `"Temporary merge branch 1/2"`（见 L5371-L5372）。为什么？
+**练习 1**：为什么 `ll_xdl_merge` 在调用 `xdl_merge` 之前要先检查 `buffer_is_binary`？
 
-**参考答案**：因为内层那次合并产生的冲突标记里会带分支名，而这些分支名是给「最终合并」用的。如果直接复用真实分支名，虚拟祖先合并产生的冲突标记会误导用户（看起来像最终冲突）。改成临时占位名，说明这些只是内部中间产物；而且内层合并的 clean 标志会被忽略（注释 L5361-L5368 说明），冲突标记只是被「当成已解决」存进虚拟提交。
+**参考答案**：xdiff 是**行级**文本差异算法，依赖「按行切分」。二进制文件含 NUL 字节、没有稳定的「行」概念，强行做行级合并会产生乱码甚至截断。因此检测到二进制内容时直接降级到 `ll_binary_merge`，按 ours/theirs/ancestor 规则取一方并报 `LL_MERGE_BINARY_CONFLICT`，避免产出无意义结果。`MAX_XDIFF_SIZE` 则防止把超大文件喂给差异算法拖垮性能。
 
-**练习 2**：`process_entries` 为什么要按「子目录在前、父目录在后」的顺序遍历（L4548 的逆序遍历）？
+**练习 2**：`opts->virtual_ancestor` 为真时，`ll_merge` 会做什么额外动作？它和 ort 的 `call_depth` 有什么关系？
 
-**参考答案**：因为要边遍历边**组装结果 tree**：必须先把一个目录下所有文件/子树写好、算出该目录的 tree oid，才能把它登记进父目录。逆序（子在前）保证了处理到父目录时，它所有子节点的 tree 都已就绪。同时这也是处理「目录/文件冲突」所必需的——得先知道某个目录最终是否还挡着同名文件。
+**参考答案**：会检查当前驱动是否配了 `recursive` 字段（`[merge "<driver>"] recursive = <other>`），若配了就换成那个「合成祖先专用驱动」。这是因为 ort 在递归合并合并基时（`call_depth>0`，见 4.1 节 `merge_3way` 里设 `virtual_ancestor=1`），某些文件——尤其二进制——可能需要换一种更宽松或不同的合并方式来得到一个可用的虚拟基，而不是像最终合并那样严格报冲突。
 
 ---
 
-### 4.3 merge-ll 低层合并驱动（merge-ll.c）
+### 4.3 合并策略调度
 
 #### 4.3.1 概念说明
 
-当 ort 的真值表判定某文件是「真正的内容冲突」（match_mask == 0），就要对**单个文件的三方内容**做行级合并。这件事交给 `merge-ll.c`（ll = low-level）。
+`builtin/merge.c` 是 `git merge` 命令的总指挥。它要在合并前回答几个问题：
 
-`ll_merge()` 的契约很直接：传入共同祖先 blob（O）、我方 blob（A）、对方 blob（B）三个内存缓冲，以及三方的标签（用于填冲突标记），它返回合并后的文本（存在冲突就把 `<<<<<<<`/`=======`/`>>>>>>>` 直接写进文本里），并用返回码告诉调用方是否干净。
+- 这次合并能不能**快进（fast-forward）**？即当前 HEAD 是否是对方的祖先——若是，只需把指针往前挪、更新工作树，根本不需要做三方合并。
+- 用哪个**策略（strategy）**？默认是 `ort`；多分支合并可能用 `octopus`；用户可用 `-s` 指定。
+- 如果配了多个策略（`-s ours -s ort`），按什么规则挑出最终结果？
 
-关键设计是「**合并驱动（merge driver）**」可插拔。git 内置三个：
-
-| 驱动 | 行为 |
-|------|------|
-| `text` | 正常的行级三方合并（调 xdiff），冲突时写标记——**默认**。 |
-| `binary` | 二进制文件没法行级合并，直接按 `-Xours/-Xtheirs` 选一边，或报二进制冲突。 |
-| `union` | 并集合并，两侧内容都保留、不加冲突标记（如 `git merge-file --union`）。 |
-
-用户还能在 `.gitattributes` 里给特定路径指定**自定义合并驱动**（`*.doc merge=word` 之类），甚至写 `[merge "word"] driver = ...` 调外部程序。`ll_merge()` 第一步就是查 `.gitattributes` 决定用哪个驱动。
-
-冲突标记的长度（`<<<<<<<` 是 7 个字符）由 `conflict-marker-size` 属性控制，默认 7（`DEFAULT_CONFLICT_MARKER_SIZE`，定义在 xdiff/xdiff.h:144）。嵌套冲突时 ort 会通过 `extra_marker_size` 加长标记以区分层次。
+理解调度的关键是一张 `all_strategy[]` 策略表和它上面的标志位。标志位把「能否快进」「是否参与默认选择」「是否需要 trivial 检查」等横切属性集中描述，由 `cmd_merge` 统一读取。
 
 #### 4.3.2 核心流程
 
-`ll_merge()` 内部分三步：
+```
+cmd_merge
+  ├─ 解析参数、加载配置、确定策略集 use_strategies[]
+  ├─ 若当前 HEAD 是对方祖先 → checkout_fast_forward()（unpack_trees 的 twoway_merge）
+  ├─ 若对方是 HEAD 祖先 → "Already up to date."，结束
+  └─ 否则进入真实合并：
+       for (i in use_strategies):
+           save_state / restore_state        # 多策略时保存/恢复工作树
+           ret = try_merge_strategy(name)
+             ├─ name ∈ {ort, recursive, subtree} → 进程内 merge_ort_recursive()
+             └─ 其他(octopus/resolve/ours)   → try_merge_command() 子进程 git merge-<name>
+           若 ret==0（干净）→ 记录 best_strategy 并 break
+           否则按 evaluate_result()（未合并条目数 + 差异文件数）取「最干净」者为 best
+       最终：用 best_strategy 的结果落到工作树（或回滚重跑一次 best）
+```
 
-1. **查属性**：`load_merge_attributes()` + `git_check_attr()` 读 `.gitattributes`，拿到该路径的 `merge` 属性（驱动名）和 `conflict-marker-size`。
-2. **选驱动**：`find_ll_merge_driver()` 把属性值映射到一个 `struct ll_merge_driver *`——`true`→`text`、`false`→`binary`、具体名字→查用户驱动表再查内置三驱动、找不到→默认 `text`。
-3. **执行驱动**：调 `driver->fn(...)`。对 `text` 驱动就是 `ll_xdl_merge()`，它把参数装进 `xmparam_t`，最终调 `xdl_merge()`（u8-l2 的行级 diff）。返回码 `>0` 表示有冲突。
-
-ort 侧的入口是 `merge_3way()`：它读三个 blob 进内存、组装 `ll_merge_options`、设好三方标签、调 `ll_merge()`，把返回的缓冲当作「合并后内容」（即便含冲突标记）写进工作树。
-
-冲突一旦产生，ort 在内存里把它登记进 `opt->priv->conflicted`；最后 `merge_switch_to_result()` → `record_conflicted_index_entries()` 把这些路径以 **stage 1/2/3** 写进索引（替换掉 stage 0），并写出带冲突标记的工作树文件。
+**进程内 vs 子进程**是个重要分野：`ort`（以及别名 `recursive`/`subtree`）直接在当前进程里调 `merge_ort_recursive`，无 fork 开销、能共享内存中的对象缓存；`octopus`/`resolve`/`ours` 则通过 `try_merge_command` 派生 `git merge-<name>` 子进程（[merge.c:22-50](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge.c#L22-L50)），跑完再重读索引。
 
 #### 4.3.3 源码精读
 
-先看公共选项与结果类型：
+**策略表与标志位**（[builtin/merge.c:55-63](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L55-L63)、[builtin/merge.c:101-108](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L101-L108)）：
 
-- [merge-ll.h:L49-L86](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.h#L49-L86)：`struct ll_merge_options`——`virtual_ancestor`（虚拟祖先合并时为 1，影响二进制处理）、`variant`（`XDL_MERGE_FAVOR_OURS/THEIRS/UNION`，对应 `-Xours` 等）、`renormalize`、`extra_marker_size`、`conflict_style`、`xdl_opts`。
-- [merge-ll.h:L90-L95](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.h#L90-L95)：`enum ll_merge_result`——`LL_MERGE_OK`（干净）、`LL_MERGE_CONFLICT`（文本冲突）、`LL_MERGE_BINARY_CONFLICT`（二进制冲突）、`LL_MERGE_ERROR`。
+```c
+#define DEFAULT_TWOHEAD  (1<<0)   /* 双头合并的默认策略 */
+#define DEFAULT_OCTOPUS  (1<<1)   /* 多头合并的默认策略 */
+#define NO_FAST_FORWARD  (1<<2)   /* 不允许快进 */
+#define NO_TRIVIAL       (1<<3)   /* 跳过 trivial（快进式）优化 */
 
-驱动本身是一个带函数指针的结构体（典型的 C 虚表，和 u5-l1 的 `ref_storage_be` 同一思路）：
+struct strategy { const char *name; unsigned attr; };
 
-- [merge-ll.c:L32-L39](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L32-L39)：`struct ll_merge_driver { name; description; fn; recursive; next; cmdline; }`——`fn` 是合并函数指针。
-- [merge-ll.c:L171-L175](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L171-L175)：内置三驱动表 `ll_merge_drv[]`：`binary`/`text`/`union`。
-
-三个驱动的实现。`text` 驱动先做二进制检测，正常则转给 xdiff：
-
-- [merge-ll.c:L103-L147](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L103-L147)：`ll_xdl_merge()`——任一输入过大或含 NUL（`buffer_is_binary`）就退化成 `ll_binary_merge`；否则装 `xmparam_t`（`level = XDL_MERGE_ZEALOUS`、`favor`、`style`、`marker_size`、ancestor/file1/file2 标签），调 `xdl_merge(orig, src1, src2, &xmp, result)`。`xdl_merge` 返回 `>0` 表示冲突。
-- [merge-ll.c:L58-L101](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L58-L101)：`ll_binary_merge()`——二进制不合并，按 `virtual_ancestor`/`variant` 决定取祖先、我方或对方，否则报 `LL_MERGE_BINARY_CONFLICT`。
-- [merge-ll.c:L149-L166](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L149-L166)：`ll_union_merge()`——把 `variant` 改成 `XDL_MERGE_FAVOR_UNION` 后转调 `ll_xdl_merge`，两侧内容都保留、不插冲突标记。
-
-公共入口 `ll_merge()`：查属性、选驱动、派发：
-
-- [merge-ll.c:L406-L451](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L406-L451)：`ll_merge()` 主体。L429 `git_check_attr` 查 `merge` 与 `conflict-marker-size` 两个属性；L439 `find_ll_merge_driver` 选驱动；L441-L444 若 `virtual_ancestor` 且该驱动配了 `recursive` 替代驱动则换用；L445-L447 叠加 `extra_marker_size`；L448 调 `driver->fn(...)` 执行。
-- [merge-ll.c:L363-L394](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L363-L394)：`find_ll_merge_driver()`——`ATTR_TRUE`→`text`、`ATTR_FALSE`→`binary`、未设但有 `default_ll_merge` 配置则用它、具体名字先查用户驱动链再查内置三驱动、找不到默认 `text`。
-
-ort 侧的调用方 `merge_3way()`：组装选项与标签，调 `ll_merge`：
-
-- [merge-ort.c:L2107-L2163](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L2107-L2163)：`merge_3way()`。L2124-L2127 把 `opt` 的 renormalize/xdl_opts/conflict_style 装进 `ll_opts`；L2129-L2144 若 `call_depth`（虚拟祖先合并）则 `virtual_ancestor=1` 且 `variant=0`，否则按 `recursive_variant` 设 `-Xours/-Xtheirs`；L2147-L2155 生成三方标签（同名时只写分支名，重命名时写 `分支:路径`）；L2157-L2159 把三个 blob 读进 `mmfile_t`；L2161 调 `ll_merge(...)` 拿回含（可能）冲突标记的结果缓冲。
-
-最后是冲突如何落进索引——这是「冲突被记录」的真正含义：
-
-- [merge-ort.c:L4648-L4680](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4648-L4680)：`record_conflicted_index_entries()` 遍历 `opt->priv->conflicted`，准备把冲突路径的索引条目改成多 stage。
-- [merge-ort.c:L4741-L4749](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4741-L4749)：**关键**——对 base/side1/side2 每个存在的方，`make_cache_entry(index, vi->mode, &vi->oid, path, i+1, 0)` 生成 stage 为 `i+1`（即 1/2/3）的索引条目并 `add_index_entry(..., ADD_CACHE_JUST_APPEND)`。这正好对应 `git ls-files -u` 看到的三行。
-- [merge-ort.c:L4757-L4759](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4757-L4759)：追加完后 `remove_marked_cache_entries` 清掉旧的 stage-0 条目，再排序索引，让 stage 1/2/3 各就各位。
-
-> 冲突的「双重表示」：同一份冲突既在**工作树文件**里（用 `<<<<<<<` 标记表示，方便人读），又在**索引**里（用 stage 1/2/3 三条目表示，方便机器解析）。`git diff` 显示前者，`git ls-files -u` 显示后者，二者描述的是同一个冲突。
-
-#### 4.3.4 代码实践（本讲主实践）
-
-**实践目标**：亲手制造一个三方内容冲突，运行合并，然后对照源码说明「冲突区段是如何标记与记录的」。
-
-**操作步骤**：
-
-```sh
-git init conflict-demo && cd conflict-demo
-
-# 共同祖先 O：f.txt 内容是 "base"
-printf 'base\n' > f.txt && git add f.txt && git commit -m base
-
-# side1（我方 main）：改成 "ours"
-git checkout -q -b side2 2>/dev/null; git checkout -q master 2>/dev/null || git checkout -q main
-printf 'ours\n' > f.txt && git commit -am ours
-
-# side2（对方）：同一行改成 "theirs"
-git checkout -q -b side2 HEAD~1
-printf 'theirs\n' > f.txt && git commit -am theirs
-
-# 合并 → 冲突
-git checkout -q master 2>/dev/null || git checkout -q main
-git merge side2          # 预期：Auto-merging f.txt / CONFLICT (contents)
+static struct strategy all_strategy[] = {
+    { "recursive",  NO_TRIVIAL },
+    { "octopus",    DEFAULT_OCTOPUS },
+    { "ort",        DEFAULT_TWOHEAD | NO_TRIVIAL },   /* 双头默认 */
+    { "resolve",    0 },
+    { "ours",       NO_FAST_FORWARD | NO_TRIVIAL },
+    { "subtree",    NO_FAST_FORWARD | NO_TRIVIAL },
+};
 ```
 
-**第一步：观察工作树里的冲突标记**：
+`ort` 同时带 `DEFAULT_TWOHEAD`（所以双头合并默认就是它）和 `NO_TRIVIAL`（即使能快进也不走快进优化，因为 ort 要做完整三方合并）。
 
-```sh
-cat f.txt
-# <<<<<<< HEAD
-# ours
-# =======
-# theirs
-# >>>>>>> side2
+**策略名查找 `get_strategy`**（[builtin/merge.c:170-189](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L170-L189)）：在 `all_strategy[]` 里按名字线性查找；找不到时还会用 `load_command_list("git-merge-", ...)` 去 `PATH` 里找外部 `git-merge-*` 程序，使策略可扩展。
+
+**派发核心 `try_merge_strategy`**（[builtin/merge.c:789-851](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L789-L851)）。最关键的一段证明了「recursive 其实是 ort」：
+
+```c
+if (!strcmp(strategy, "recursive") || !strcmp(strategy, "subtree") ||
+    !strcmp(strategy, "ort")) {
+    ...
+    init_ui_merge_options(&o, the_repository);
+    if (!strcmp(strategy, "subtree")) o.subtree_shift = "";
+    for (x = 0; x < xopts.nr; x++) parse_merge_opt(&o, xopts.v[x]);  /* -X 选项 */
+    o.branch1 = head_arg;
+    o.branch2 = merge_remote_util(remoteheads->item)->name;
+    ...
+    clean = merge_ort_recursive(&o, head, remoteheads->item, reversed, &result);
+    ...
+    return clean ? 0 : 1;
+} else {
+    return try_merge_command(..., strategy, ...);   /* 子进程 git merge-<name> */
+}
 ```
 
-对照 [merge-ll.c:L103-L147](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L103-L147)：这 7 字符的标记是 `xdl_merge()` 在发现 A、B 对同一行有不同改动时写出的，标记里的 `HEAD`/`side2` 来自 [merge-ort.c:L2147-L2155](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L2147-L2155) 生成的 `name1`/`name2`。
+`-X` 选项（如 `-Xours`/`-Xtheirs`/`-Xpatience`/`-Xignore-space-change`）由 `parse_merge_opt` 解析进 `merge_options`（其中 `recursive_variant` 决定 ours/theirs，`xdl_opts` 决定 diff 算法）。`subtree` 策略只是给 ort 设了 `subtree_shift`，本质也是 ort。
 
-**第二步：换 diff3 风格，看到祖先段**：
+**多策略择优循环**（[builtin/merge.c:1781-1820](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L1781-L1820)）。当用户给了多个策略（`-s a -s b`）时，逐个尝试：每个策略跑之前若不是第一个就 `restore_state` 把工作树复位，跑完若干净（`ret==0`）立刻记录 `best_strategy` 并 `break`；否则用 `evaluate_result()` 量化「这个策略留下了多少烂摊子」，取最小者：
 
-```sh
-git merge --abort
-git -c merge.conflictstyle=diff3 merge side2
-cat f.txt
-# <<<<<<< HEAD
-# ours
-# ||||||| merged common ancestors
-# base
-# =======
-# theirs
-# >>>>>>> side2
+```c
+for (i = 0; i < use_strategies_nr; i++) {
+    ...
+    ret = try_merge_strategy(wt_strategy, common, remoteheads, head_commit);
+    /* 后端：1=有冲突待解，2=根本不处理这种合并 */
+    if (ret < 2) {
+        if (!ret) { merge_was_ok = 1; best_strategy = wt_strategy; break; }
+        cnt = (use_strategies_nr > 1) ? evaluate_result() : 0;
+        if (best_cnt <= 0 || cnt <= best_cnt) { best_strategy = wt_strategy; best_cnt = cnt; }
+    }
+}
 ```
 
-对照 [merge-ll.c:L135-L136](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ll.c#L135-L136)：`opts->conflict_style` 来自 `merge.conflictstyle` 配置，透传给 `xmp.style`，决定 xdiff 是否多输出 `|||||||` 祖先段。
+**择优量化 `evaluate_result`**（[builtin/merge.c:1070-1092](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L1070-L1092)）：它跑一次「索引 vs 工作树」的 diff（`run_diff_files` 配 `count_diff_files` 回调）数差异文件，再加上 `count_unmerged_entries()` 数出的未合并（stage>0）条目，和越小代表该策略「自动解决得越干净」。循环结束后若没有策略产出干净结果，就选 `best_strategy` 重跑一次，把结果留给用户手工解决（[builtin/merge.c:1838-1859](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L1838-L1859)）。
 
-**第三步：观察索引里的 stage 1/2/3**：
+**快进路径** `checkout_fast_forward`（[merge.c:52-113](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge.c#L52-L113)）：当可以快进时，它不碰策略，直接用 `unpack_trees` 的 `twoway_merge`（见 [u9-l2](u9-l2-checkout-unpack-trees.md)）把工作树从 HEAD 树切到目标树——这也是为什么 fast-forward 合并在历史里是线性的、不产生合并提交。
 
-```sh
-git ls-files -u
-# 100644 <oid-base>  1  f.txt
-# 100644 <oid-ours>  2  f.txt
-# 100644 <oid-theirs> 3  f.txt
+#### 4.3.4 代码实践
+
+**实践目标：观察策略选择、`-X` 选项的效果，以及 recursive 与 ort 的等价性。**
+
+操作步骤（沿用 4.1.4 的冲突仓库，或新建）：
+
+```bash
+# 1) 递归策略其实是 ort：两种写法产生的合并结果应一致
+git checkout -q master
+git merge -s ort feature 2>&1 | head -3 ; git merge --abort 2>/dev/null
+git checkout -q master
+git merge -s recursive feature 2>&1 | head -3 ; git merge --abort 2>/dev/null
+# 二者都应打印同样的 "Auto-merging greeting.txt" / "CONFLICT (contents)"
+
+# 2) -Xours：冲突时自动偏向我方
+git checkout -q master
+git merge -Xours feature
+cat greeting.txt    # 冲突区域应只保留 HEAD(ours) 的内容，且无未解决冲突
+git merge --abort 2>/dev/null
+
+# 3) octopus 多头合并（>2 个分支）
+git checkout -q master
+git merge feature b_oct 2>&1 | head    # 多头默认走 octopus 策略
 ```
 
-对照 [merge-ort.c:L4741-L4749](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4741-L4749)：这三行正是 `i+1`（1/2/3）三个 stage 的 `cache_entry`，oid 分别是 base、ours、theirs 三个 blob。
+需要观察的现象：
 
-**第四步：验证 oid 来源**：
+1. `-s ort` 与 `-s recursive` 输出一致——因为 `try_merge_strategy` 把两者都路由到 `merge_ort_recursive`（[builtin/merge.c:800-801](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L800-L801)）。
+2. `-Xours` 时 `parse_merge_opt` 把 `recursive_variant` 设为 `MERGE_VARIANT_OURS`，传递到 `merge_3way` 的 `ll_opts.variant = XDL_MERGE_FAVOR_OURS`，于是冲突处自动取 ours，合并干净。
+3. 合并超过两个分支时，`DEFAULT_OCTOPUS` 标志使 `octopus` 成为默认，它经 `try_merge_command` 派生 `git merge-octopus` 子进程。
 
-```sh
-git ls-files -u | awk '{print $2}' | while read o; do git cat-file -p "$o" | head -1; done
-# base
-# ours
-# theirs
-```
-
-**预期结果**：工作树 `f.txt` 含 7 字符冲突标记；索引 `ls-files -u` 显示同一路径三个 stage（1=base、2=ours、3=theirs），每个 stage 的 oid 反解出来正是三方原始内容。这就完整对应了「冲突在工作树用标记表示、在索引用 stage 表示」的双重记录。
+> 若手头没有现成的多头历史，第 3 步可改为源码阅读：在 `try_merge_strategy` 的 `else` 分支确认 `strategy=="octopus"` 会走 `try_merge_command`，并对照 `merge.c` 的 `strvec_pushf(&cmd.args, "merge-%s", strategy)`。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：把一个**二进制**文件（如 PNG）在两侧都修改后合并，会发生什么？对应 `merge-ll.c` 哪段代码？
+**练习 1**：`all_strategy[]` 里 `ort` 带 `DEFAULT_TWOHEAD | NO_TRIVIAL` 两个标志，分别影响什么？
 
-**参考答案**：`ll_xdl_merge` 在 L117-L129 检测到输入含 NUL 字节（`buffer_is_binary`）或过大，立即退化成 `ll_binary_merge`。后者（L58-L101）对二进制不做行级合并：默认 `variant` 下返回 `LL_MERGE_BINARY_CONFLICT` 并取我方内容，工作树文件不会被插入冲突标记（二进制插不了文本标记），ort 侧 `merge_3way` 据此发 `CONFLICT (binary)` 警告（见 L2164-L2168）。用户只能手动选边。
+**参考答案**：`DEFAULT_TWOHEAD` 让 `ort` 成为「双头合并」的默认策略——用户不指定 `-s` 时就选它。`NO_TRIVIAL` 表示即使检测到「对方相对 base 只有一方改动」这种可平凡合并的情形，也不走 fast-forward 式的捷径，而是老老实实跑完整三方合并（ort 本身就很快，且能正确处理重命名/目录重命名等复杂情况）。
 
-**练习 2**：为什么 `ll_merge()` 在 `opts->virtual_ancestor` 为真时，会查找驱动是否配了 `recursive` 替代驱动（L441-L444）？
+**练习 2**：为什么 `ort` 走进程内、而 `octopus`/`resolve`/`ours` 走子进程？这种差异在源码哪里体现？
 
-**参考答案**：`virtual_ancestor` 表示当前这次 `ll_merge` 是在「合并基之间的虚拟合并」里调的（4.2 的递归塌缩），其结果只会当祖先用、不会进最终工作树。某些合并驱动在「产生真冲突」和「产生虚拟祖先」时希望表现不同（例如对二进制，真合并要报冲突让用户看，而虚拟祖先合并应尽量取一方避免污染祖先），故允许在 `[merge "<driver>"] recursive = <另一个驱动>` 里指定虚拟祖先场景下的替代驱动。
-
----
+**参考答案**：ort 是 git 最核心、最常用的合并路径，做成进程内调用可避免 fork 开销、复用内存中的对象与索引缓存、并支持 in-core 嵌套（合并合并基）。其余策略历史上是独立脚本，保留子进程派发既能复用既有实现、又保持了「策略可外部扩展」的能力。差异体现在 `try_merge_strategy`：`recursive/subtree/ort` 命中 `if` 分支直接调 `merge_ort_recursive`，其余落入 `else` 调 `try_merge_command`（后者用 `run_command` 执行 `git merge-<name>`）。
 
 ## 5. 综合实践
 
-把三个最小模块串起来：**追踪一次冲突合并从命令行到索引的完整数据流，并在每个环节对照源码**。
+把三个模块串起来，做一次「从策略调度到冲突标记」的完整跟踪。
 
-**任务**：在一个仓库里制造「文本冲突 + 重命名」的复合场景，然后回答下面四个问题，每个问题都给出**源码行号依据**。
+任务：在仓库里制造一个**两方都改了同一文件、且其中一方还重命名了它**的合并，然后：
 
-**准备**：
+1. 用 `GIT_TRACE2_PERF=1 git merge feature` 跑一次合并，观察 trace2 输出里的 `collect_merge_info`、`renames`、`process_entries`、`checkout`、`record_conflicted` 等区间——它们正好对应 4.1 节的三段流水线加 `merge_switch_to_result` 的落盘步骤（trace2 机制见 [u13-l3](u13-l3-trace2-profiling.md)）。
+2. 在冲突文件里查看冲突标记，确认它的标签是 `branch1`/`branch2`（即 `o.branch1`/`o.branch2`，被 `try_merge_strategy` 设成 `HEAD` 与远程分支名）。
+3. 用 `git ls-files -u` 确认 stage 1/2/3 三阶段条目，并思考：为什么 stage 2 的路径可能与 stage 3 不同？（提示：重命名检测让 `pathnames[3]` 三方可能不一致，见 `merge_3way` 里 `branch:path` 标签拼接）。
+4. 给该文件配一个 `[merge "<name>"] driver` 并在 `.gitattributes` 声明 `merge=<name>`，重跑合并，确认冲突被自定义驱动接管（不再出现 `<<<<<<<`）。
+5. 最后用 `git merge -s octopus feature another` 触发多头合并，对照 `try_merge_command` 确认它派生了 `git merge-octopus` 子进程。
 
-```sh
-git init integration && cd integration
-printf 'v1\n' > old.txt && git add old.txt && git commit -m base
-
-# side1：修改 old.txt 内容（不动文件名）
-git branch side2
-printf 'ours\n' > old.txt && git commit -am edit-on-main
-
-# side2：把 old.txt 改名成 new.txt，并修改内容
-git checkout -q side2
-git mv old.txt new.txt
-printf 'theirs\n' > new.txt && git commit -am rename-and-edit
-
-# 合并
-git checkout -q master 2>/dev/null || git checkout -q main
-git merge side2
-```
-
-**回答（带着源码验证）**：
-
-1. **调度层**：这次合并走了哪个策略？依据 [builtin/merge.c:L800-L801](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L800-L801) 说明为什么 `git merge`（不带 `-s`）最终进了 `merge_ort_recursive`。
-2. **管线层**：用 `GIT_TRACE2_PERF=1 git merge side2`（合并前先 reset 干净）找到三个 region（`collect_merge_info`/`renames`/`process_entries`）。重命名是在哪个阶段被处理的？依据 [merge-ort.c:L5277-L5290](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5277-L5290)。
-3. **冲突判定**：本次是否产生冲突？若产生，是哪一类（依据 [merge-ort.c:L594-L606](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L594-L606) 的文案）？为什么重命名+修改通常能自动解决而纯文本冲突不能（回到 4.2 的真值表）？
-4. **记录层**：若有冲突，`git ls-files -u` 的输出里 stage 1/2/3 分别对应哪三方？依据 [merge-ort.c:L4741-L4749](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4741-L4749) 说明 `i+1` 如何变成 1/2/3。
-
-**预期结果**：因为 side2 重命名 + 改内容、side1 改的是旧名 old.txt 的内容，ort 在阶段 2 检测到重命名后，会把两边的修改对齐到同一逻辑文件并尝试三方合并；若两边的行改动不重叠则干净合并、若重叠则报 `CONFLICT (content)`。**待本地验证**你这次具体落到了哪种结果，并用源码行号解释。
-
----
+预期：你能用一句话说清「一次 `git merge` 从 `cmd_merge` → 策略表 → `merge_ort_recursive` → `merge_ort_internal`（合并基塌缩）→ `merge_ort_nonrecursive_internal`（收集/重命名/决策）→ `merge_3way` → `ll_merge` → `xdl_merge`（冲突标记）→ `record_conflicted_index_entries`（写 stage）」的完整链路。
 
 ## 6. 本讲小结
 
-- **合并是一条分层调用栈**：`builtin/merge.c`（调度）→ `merge-ort-wrappers.c`（胶水）→ `merge-ort.c`（策略引擎）→ `merge-ll.c`（单文件三方合并）→ `xdl_merge`（行级 diff）。每层职责单一。
-- **策略调度在 `all_strategy[]` 表 + `try_merge_strategy()` 分发**；`recursive` 在当代 git 里是 `ort` 的别名（[builtin/merge.c:L182-L184](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/builtin/merge.c#L182-L184)）；`octopus`/`resolve` 走外部 shell 脚本。
-- **ort 用递归解决交叉合并的多合并基问题**：`merge_ort_internal()` 把多个合并基两两合并成虚拟祖先（[merge-ort.c:L5355-L5387](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L5355-L5387)），再进入三阶段管线。
-- **三阶段管线**：`collect_merge_info`（并行遍历三 tree，用 match_mask 真值表判定平凡解决）→ `detect_and_process_renames` → `process_entries`（写结果 tree、处理冲突）。
-- **三方合并真值表**：只有一方改、或两方改得相同，都干净；三方都不同才算冲突（match_mask == 0），交给 `ll_merge`。
-- **冲突有双重表示**：工作树文件里用 7 字符的 `<<<<<<<` 标记（由 `xdl_merge` 写，受 `merge.conflictstyle` 控制），索引里用 stage 1/2/3 三条目（[merge-ort.c:L4741-L4749](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/merge-ort.c#L4741-L4749)）。
-
----
+- **ort 是当前 git 的默认与核心合并策略**，旧 `merge-recursive.c` 已被移除；`git merge -s recursive` 今天跑的就是 ort（`try_merge_strategy` 把 recursive/subtree/ort 路由到同一份 `merge_ort_recursive`）。
+- **ort 是「递归 + in-core」**：`merge_ort_internal` 递归地把多个合并基两两合并成虚拟提交（用空树兜底无祖先情况），`merge_ort_nonrecursive_internal` 是「收集三方树信息 → 检测重命名 → 逐路径决策」三段流水线，全程在内存完成，最后才由 `merge_switch_to_result` 落到工作树与索引。
+- **逐路径决策靠两个 3 位掩码**：`filemask`/`dirmask` 标记各方在此路径是文件还是目录，`match_mask` 标记哪几方彼此相同；两方相同取第三方、三方全同在收集阶段就短路，只有两两皆不同才进 `handle_content_merge`。
+- **冲突写回索引靠 `record_conflicted_index_entries`**：它把 `checkout` 先写入的 stage=0 条目替换成 base/ours/theirs 的 stage 1/2/3；同时还会写一个 `AUTO_MERGE` 引用记录「自动合并结果树」。
+- **`merge-ll.c` 是单文件三方合并引擎**：`ll_merge` 按 `.gitattributes` 的 `merge` 属性经 `find_ll_merge_driver` 选驱动（内置 text/binary/union，或用户自定义），`ll_xdl_merge` 调 xdiff 的 `xdl_merge` 产出 `<<<<<<<` 标记并返回 `LL_MERGE_CONFLICT`。
+- **`builtin/merge.c` 是策略调度总指挥**：`all_strategy[]` 表 + 标志位（`DEFAULT_TWOHEAD` 等）决定默认策略与能否快进；多策略时用 `evaluate_result`（未合并条目数 + 差异文件数）择优；快进走 `checkout_fast_forward`（`unpack_trees` 的 `twoway_merge`）。
 
 ## 7. 下一步学习建议
 
-- **u10-l2（unpack-trees 三方合并与冲突）**：本讲的 ort 在内存 tree 上合并；而 `git merge` 把结果落到工作树时，以及更早的 `recursive` 策略，依赖 `unpack-trees.c` 在 index/worktree 层的三方合并与 `resolve-undo` 撤销记录。两者对照阅读能看清「内存合并」与「磁盘合并」的分工。
-- **重命名检测深入**：本讲对阶段 2（`detect_and_process_renames`）只点到为止。若想理解「同名改不同名、目录整体改名」如何影响合并，建议直接读 `merge-ort.c` 的 `detect_and_process_renames()`（L3553 起）及 diffcore 的 rename 检测（u8-l1）。
-- **行级 diff 算法**：`ll_xdl_merge` 最终调的 `xdl_merge` 是 Myers/直方图算法的实现，详见 u8-l2 的 `xdiff/xdiffi.c`。
-- **协议与协商**：合并产生的对象在 `git fetch`/`git pull` 时如何通过网络协商传输，见 u11 单元。
+- 想深入「冲突在工作树与索引层面的三方合并与回滚」，读 [u10-l2 unpack-trees 三方合并与冲突](u10-l2-unpack-trees-merge.md)（`unpack-trees.c` 的合并回调、`merge-blobs.c`、`resolve-undo.c`）。
+- 想理解合并基是如何被算出来的，回头精读 [u7-l2](u7-l2-commit-graph-reach.md) 的 `commit-reach.c`：`paint_down_to_common`、世代号剪枝、`repo_get_merge_bases`。
+- 想理解冲突标记背后的行级算法，精读 [u8-l2 xdiff](u8-l2-xdiff-library.md)：Myers 算法、`xdl_merge` 的三方扩展。
+- 对重命名/目录重命名如何影响合并感兴趣，可继续读 `merge-ort.c` 的 `detect_and_process_renames`、`compute_collisions`、`handle_path_level_conflicts`（本讲仅作流程引用，未展开）。
+- 想看合并性能如何被观测，结合 [u13-l3 trace2](u13-l3-trace2-profiling.md)：ort 内部大量 `trace2_region_enter/leave` 埋点正是为此服务。
