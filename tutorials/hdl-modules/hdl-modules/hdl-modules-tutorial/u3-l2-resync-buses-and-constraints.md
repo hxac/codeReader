@@ -2,310 +2,268 @@
 
 ## 1. 本讲目标
 
-本讲承接 u3-l1（电平、脉冲、计数器的跨域同步），把视野从「单比特信号」推进到「多比特总线」。
+本讲承接 [u3-l1（CDC 基础：电平、脉冲、计数器的同步）](u3-l1-resync-basics.md)，把视野从「单比特信号」推进到「多比特总线」。学完本讲，你应当能够：
 
-学完本讲，你应当能够：
-
-- 说清楚为什么一个多比特向量**不能**像单比特那样，给每一位各挂一条 `async_reg` 同步链就完事。
-- 理解 hdl-modules 用来保证「位一致性（bit coherency）」的两条互补路线：格雷码（`resync_counter`）与两相握手（`resync_twophase` / `resync_twophase_handshake`）。
-- 读懂 `resync_twophase`（自由运行版）和 `resync_twophase_handshake`（带 `ready/valid` 背压版）的源码，说清楚那个来回翻转的 level 令牌是如何保证数据在被采样时已经稳定的。
-- 看懂 `scoped_constraints/` 下的 `.tcl` 约束文件，区分 `set_false_path`、`set_max_delay -datapath_only` 和 `set_bus_skew` 三种命令分别用在什么路径上、为什么这么用。
-
----
+- 说清楚为什么一个相关多比特向量（状态字、控制寄存器、地址）**不能**像单比特那样，给每一位各挂一条 `async_reg` 同步链就完事——即「比特一致性（bit coherency）」问题。
+- 读懂 `resync_twophase`（自由运行版）与 `resync_twophase_handshake`（带 ready/valid 握手版），解释「一个单比特电平在两域间往返翻转」如何保证整字在被采样时已经稳定。
+- 区分三类时序约束的用途——`set_false_path`、`set_max_delay -datapath_only`、`set_bus_skew`——并对照 `resync_level.tcl` / `resync_counter.tcl` 解释它们为何落在同步链的第一级寄存器上。
+- 在 testbench 中验证多比特数据跨域后「不丢、不乱」，并理解项目配套 `.tcl` 作用域约束的必要性。
 
 ## 2. 前置知识
 
-本讲默认你已经读过 u3-l1，这里只做最简短的回顾，并引出本讲的新问题。
+本讲默认你已掌握 u3-l1 的内容，这里只做最简回顾并引出新问题。
 
-**亚稳态与同步链（来自 u3-l1）。** 当一个信号从时钟域 A 进入异步的时钟域 B 时，B 的寄存器可能在数据翻转的瞬间采样，输出陷入非 0 非 1 的亚稳态。亚稳态无法消除，只能靠「两级 `async_reg` 寄存器 + 布局到同一 slice + `dont_touch`」把平均无故障时间（MTBF）拉到可接受。这一招对**单比特**信号足够：一位要么最终变成 0，要么变成 1，功能上都能接受。
+**亚稳态与同步链（来自 u3-l1）。** 单比特信号跨异步时钟域时，目的寄存器可能在数据翻转瞬间采样而陷入亚稳态。亚稳态无法消除，只能靠「两级 `async_reg` 寄存器 + 布局到同一 slice + `dont_touch`」把 MTBF 拉到可接受。这一招对单比特足够：一位最终要么变 0、要么变 1，功能都能接受。
 
-**本讲的新问题：多比特的「位一致性」。** 现在假设要跨域传递一个 16 位的计数器值 `0x5A5A → 0x5A5B`。如果你给这 16 位**每一位各搭一条独立的两级同步链**，灾难就来了：各位走线延迟不同，在目的域的同一个时钟沿上，有的位已经翻转到新值，有的位还是旧值。于是你采样到的可能是 `0x5A5A`（全旧）、`0x5A5B`（全新），也可能是 `0x5A5A`、`0x5A5F`、`0x5B5B` 之类的**新旧混杂的垃圾值**。这种错误不会报错、不会亚稳，但数据是错的——比单比特亚稳危险得多。
+**本讲的新问题：多比特的「比特一致性」。** 假设要把一个 16 位计数器值 `0x5A5A → 0x5A5B` 跨域。若给这 16 位每位各搭一条独立的两级同步链，各位走线延迟不同，目的域同一拍就会采到「部分位已翻转、部分位还没翻」的拼接值——可能是 `0x5A5A`（全旧）、`0x5A5B`（全新），也可能是 `0x5A5F`、`0x5B5B` 之类**新旧混杂的垃圾值**。这种错误不亚稳、不报错，却让数据间歇性错乱，极难定位。
 
-所以多比特跨域必须用专门的结构保证「要么采到完整的新值，要么采到完整的旧值，绝不混杂」。hdl-modules 给出了两种解法，本讲讲其中一种——**两相握手（two-phase handshake）**，并在约束文件里对照另一种——**格雷码（Gray code）**。
+u3-l1 讲过，`resync_counter` 用**格雷码**化解它：相邻值只差 1 位，偏移最多造成「上一拍/这一拍」两种合法结果。但很多数据天然不是格雷码（各位会同时跳变），格雷码帮不上忙——这时就要用本讲的**两相握手（two-phase handshake）**：先用源时钟把整字锁进寄存器，等它肯定稳定后，再发一个「可以采样了」的单比特令牌过去，目的域看到令牌才采样。
 
-> 术语速查：位一致性（bit coherency）、两相握手 / 翻转握手（toggle handshake）、令牌（token）、bus skew、`set_max_delay -datapath_only`、`set_false_path`、`set_bus_skew`。
-
----
+> 名词速查
+> - **比特一致性（bit coherency）**：采样到的所有比特来自同一个源时钟拍的快照，不存在「半新半旧」。
+> - **两相握手 / 翻转握手（toggle handshake）**：用「电平跳变」而非「电平高低」表示一次事件，每次翻转 = 一次事务，对 CDC 延迟不敏感。
+> - **`-datapath_only`**：`set_max_delay` 选项，表示只约束数据路径延迟、忽略两异步时钟间的偏斜（偏斜本就无意义）。
+> - **`set_bus_skew`**：约束「一个总线各比特之间的相对偏斜」而非绝对延迟，专为多比特 CDC 设计。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
-| --- | --- |
-| [modules/resync/src/resync_twophase.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd) | 自由运行的两相握手，把一个多比特向量从 `clk_in` 搬到 `clk_out`，保证位一致性 |
-| [modules/resync/src/resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd) | 上一条的「带 `ready/valid` 背压」版本，输入/结果两侧都是 AXI-Stream 式接口 |
-| [modules/resync/scoped_constraints/resync_level.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl) | 单比特电平同步的约束：能找到两个时钟就用 `set_max_delay`，否则退化为 `set_false_path` |
-| [modules/resync/scoped_constraints/resync_counter.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl) | 格雷计数器同步的约束：用 `set_bus_skew` 限制同一字内各位之间的相对偏移 |
-| [modules/resync/scoped_constraints/resync_twophase.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl) | 两相握手的约束：分别约束数据并行通路和 level 通路 |
-| [modules/resync/test/tb_resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd) | 实践参考：用 AXI-Stream master/slave BFM 跨域传随机数据并校验无丢失 |
+| 文件 | 作用 | 进哪个工程 |
+| --- | --- | --- |
+| [modules/resync/src/resync_twophase.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd) | 自由运行的两相 CDC，保证多比特向量跨域的比特一致性 | 综合 + 仿真 |
+| [modules/resync/src/resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd) | 带 AXI-Stream 式 ready/valid 握手的版本，支持背压 | 综合 + 仿真 |
+| [modules/resync/scoped_constraints/resync_level.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl) | 单比特电平同步链的约束（本讲约束部分的锚点） | 仅综合 |
+| [modules/resync/scoped_constraints/resync_counter.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl) | 格雷计数器多比特同步的约束（`set_bus_skew` 范例） | 仅综合 |
+| [modules/resync/scoped_constraints/resync_twophase.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl) | `resync_twophase` 的作用域约束（数据通路 + 两条 level 通路） | 仅综合 |
+| [modules/resync/test/tb_resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd) | 用 BFM 验证「跨域无丢失」的 testbench | 仅仿真 |
 
----
+> 提醒（承接 [u1-l2](u1-l2-repo-and-module-layout.md)）：`scoped_constraints/*.tcl` 不是 VHDL、不参与编译，只在综合期由 `read_xdc -ref <实体名>` 应用；`test/tb_*.vhd` 只进仿真工程。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 多比特总线跨域的核心难题
+### 4.1 为什么多比特总线不能直接用寄存器链同步
 
 #### 4.1.1 概念说明
 
-「总线跨域」要解决的本质问题是：让目的域**一次性、原子地**采样到一整组相关联的比特，而不是采到一堆新旧混杂的中间态。
+「总线跨域」的本质，是让目的域**一次性、原子地**采样到一整组相关联的比特，而不是采到一堆新旧混杂的中间态。hdl-modules 给出两条互补路线：
 
-hdl-modules 里有两类数据需要跨域，对应两种解法：
-
-1. **单调 ±1 的计数器类数据**（如 FIFO 的读写指针）：用**格雷码**。格雷码保证相邻两次值之间只有 1 位不同，所以即使各位有偏移，采样结果最多是「上一拍」或「这一拍」，两者都是合法值，绝不会混杂。代表实体是 `resync_counter`（u3-l1 已讲）。
-2. **任意的、各位相关的向量**（如控制/状态寄存器、一组配置位）：格雷码帮不上忙（因为它的值可能任意跳变），改用**两相握手**。核心思想是：**先用源时钟把整条总线稳稳地锁进一个寄存器，等它肯定稳定之后，再发一个「可以采样了」的令牌过去；目的域看到令牌才采样。** 令牌本身是单比特，用普通的 `async_reg` 链同步即可。本讲的 `resync_twophase` / `resync_twophase_handshake` 就属此类。
+1. **单调 ±1 的计数器类数据**（如 FIFO 读写指针）：用**格雷码**。相邻值只差 1 位，偏移最多造成「上一拍/这一拍」两种合法结果。代表实体 `resync_counter`（u3-l1 已讲）。
+2. **任意跳变的相关向量**（控制/状态寄存器、配置位组）：格雷码失效，改用**两相握手**。先用源时钟把整字锁进寄存器，待其稳定后再发单比特「许可」令牌，目的域见令牌才采样。令牌是单比特，可安全走 `async_reg` 链。
 
 一句话对比：**格雷码靠「每次只变 1 位」化解偏移；两相握手靠「数据先稳定、后给许可」化解偏移。**
 
 #### 4.1.2 核心流程
 
-两相握手的关键，是在源域和目的域之间让一个**单比特 level 令牌来回翻转（toggle）**。每完成一次往返，就搬运一个数据字。流程如下：
+两相握手的关键，是在源域与目的域之间让一个**单比特 level 令牌来回翻转（toggle）**，每完成一次往返搬运一个字：
 
 ```text
 源域(clk_in)                         目的域(clk_out)
 -----------                          ---------------
 1. 把 data 锁进 data_in_sampled  ─┐
-2. 翻转 request level ──────────┼──> [async_reg x2] ──> 3. 看到 level 变化
+2. 翻转 request level ──────────┼──> [async_reg x2] ──> 3. 看到 level 跳变
                                    │                       4. 采样 data_in_sampled -> data_out
                                    │                       5. 翻转 acknowledge level
-6. 看到 level 变化(ack回来了) <──┤── [async_reg x2] <────┘
+6. 看到 level 跳变(ack 回来) <──┤── [async_reg x2] <────┘
 7. 锁入新 data，回到第 2 步 ──────┘
 ```
 
 要点：
 
-- **数据走并行通路**（多位一起过），但它**只在令牌到达、即「许可」生效时才被采样**。
-- 令牌（request / acknowledge）是单比特，各经过一条两级 `async_reg` 链跨域。
-- 由于令牌要穿两级同步链（至少消耗 2 个目的时钟周期），等目的域采到令牌时，源域早就把数据稳定保持了若干拍，各位都已结束翻转——这就保证了位一致性。
+- **数据走并行通路**（多位一起过），但**只在令牌到达、即「许可」生效时才被采样**。
+- 令牌（request / acknowledge）是单比特，各经一条两级 `async_reg` 链跨域。
+- 令牌要穿两级同步链（至少 2 个目的时钟周期），等目的域采到令牌时，源域早已把数据稳定保持了若干拍——这就保证了比特一致性。
+
+为什么用「跳变」而非「高低」？跨域有延迟，一个「高脉冲」可能恰好在两个目的沿之间被错过；而「跳变」只要最终到达，目的域迟早会在某一拍发现「与记录不符」并处理，**事件绝不会丢**。
 
 #### 4.1.3 源码精读
 
-`resync_counter.tcl` 是「格雷码路线」的约束范例，最能直观体现位偏移问题。它先用 `get_cells` 抓住**稳定的源寄存器**和**第一级同步寄存器**：
+`resync_twophase` 的头注释把这套动机说得很直白：与 `resync_slv_level` 不同，它**内建了保证比特一致性的机制**——一个电平在输入/输出间往返，每次往返翻转一次，两侧各自在跳变时采样：
 
-[modules/resync/scoped_constraints/resync_counter.tcl:18-19](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L18-L19) 抓取 `counter_in_gray_reg*`（稳定源）与 `counter_in_gray_p1_reg*`（第一级同步寄存器）。
+[modules/resync/src/resync_twophase.vhd:9-21](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L9-L21) —— 说明本实体「保证比特一致性」，机制是「电平在输入与输出之间往返旋转、每次往返翻转一次，两侧各自在跳变时采样」。
 
-随后用 `set_bus_skew` 限制**同一字内各位**从源到第一级同步寄存器的相对延迟差：
+它还划定了适用边界：适合**慢变**的相关数据（计数器、状态字），**不能**处理脉冲：
 
-```tcl
-set_bus_skew -from ${stable_registers} -to ${first_resync_registers} ${clk_in_period}
-```
+[modules/resync/src/resync_twophase.vhd:28-40](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L28-L40) —— 适合「比特相关」的慢变数据；脉冲会被漏掉；并且与 `resync_level` 不同，本实体输入**可以**用 LUT 驱动（因为数据先被锁存、不在 CDC 通路上）。
 
-[modules/resync/scoped_constraints/resync_counter.tcl:35](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L35) 把字内偏移限制在一个源时钟周期内——配合格雷码「只变 1 位」，保证采样时最多只有 1 位处于翻转中。
+#### 4.1.4 代码实践
 
-这条 `set_bus_skew` 思路只对「每次最多变 1 位」的数据成立。若数据是任意跳变的总线，bus skew 再小也挡不住「有的位新、有的位旧」——那就要换成 4.2 节的两相握手了。
+**目标**：在纸上把「跳变即事件」走一遍，建立直觉（源码阅读型，无需运行）。
 
-#### 4.1.4 代码实践（源码阅读型）
+1. 假设 `req`、`ack` 初值都为 `0`，源域要发两笔数据。
+2. 写出每一步 `req`、`ack` 的值：发第 1 笔 → `req` 翻成 `1` → 目的域采样 → `ack` 翻成 `1` → 源域发第 2 笔 → `req` 翻成 `0` → ……
+3. 观察：`req`/`ack` 在 `0/1` 间反复跳变，每跳一次代表一笔事务，与「高有效脉冲」不同，它对到达时刻不敏感。
 
-1. **目标**：用约束文件反推两类跨域数据的差异。
-2. **步骤**：打开 `resync_counter.tcl`，找到 `set_bus_skew` 那一行（第 35 行）和 `set_max_delay` 那一行（第 50 行）；再打开 4.4 节将要讲的 `resync_twophase.tcl`，看它有没有用 `set_bus_skew`。
-3. **观察**：`resync_twophase.tcl` 里**没有** `set_bus_skew`，取而代之的是对 `data_in_sampled -> data_out_int` 这条并行数据通路单独下 `set_max_delay`。
-4. **预期结论**：计数器路线靠格雷码 + bus_skew；两相握手路线靠「先稳定后许可」+ 数据通路 max_delay。两者都解决了位一致性，但机制不同。
-5. 结果待本地验证：可在 Vivado 里分别综合两个实体，观察 `report_cdc` 报告中对这两类路径的不同提示。
+**预期结果**：电平序列呈 `0→1→0→1…`，每个跳变对应一笔数据。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么不能把一个 16 位状态寄存器按位拆成 16 个 `resync_level` 来跨域？
-**答案**：`resync_level` 只保证每一位单独不亚稳，但 16 条链的路由延迟不同，目的域同一拍采样时会拿到新旧混杂的值（位一致性被破坏）。状态寄存器各位可能同时跳变，不满足「每次只变 1 位」，所以也不能套用格雷码，必须用两相握手。
+**练习 1**：如果把 16 位状态寄存器每位各接一条 `resync_level` 跨域，为什么会出错？
+**答案**：各链布线延迟不同，目的域同一拍会采到「新旧拼接」的值，破坏比特一致性。`resync_level` 只解决单比特亚稳态，不保证多比特同时采样；状态寄存器各位可能同时跳变，也不满足格雷码「只变 1 位」，故必须用两相握手。
 
-**练习 2**：FIFO 的读写指针跨域为什么可以用格雷码，而状态寄存器不行？
-**答案**：读写指针每次只 ±1，格雷码化后相邻值恰好差 1 位，偏移最多造成「上一拍/这一拍」两种合法结果。状态寄存器可以任意跳变（例如一次写多个字段），多位同时变，格雷码失效。
+**练习 2**：两相握手为什么用「电平跳变」而非「高电平脉冲」表示事务？
+**答案**：跨域同步链有延迟，高脉冲可能被错过；而跳变只要最终传到，目的域迟早会发现「与记录不符」并处理，事件不会被丢弃。
 
 ---
 
-### 4.2 resync_twophase：自由运行的两相握手
+### 4.2 resync_twophase：自由运行的两相 CDC
 
 #### 4.2.1 概念说明
 
-`resync_twophase` 是「自由运行（free-running）」版的两相握手：它没有 `ready/valid` 握手信号，只要源域数据在变，它就不停地把最新值往目的域搬，back-to-back 地采样。适合**慢变化的计数器、状态字**这类「我只要一个最新的、一致的快照」的场景。
-
-文件头注释明确点出它的定位与限制：保证位一致性，但**抓不住脉冲**（脉冲很可能被漏掉）。
-
-[modules/resync/src/resync_twophase.vhd:9-31](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L9-L31) 头注释说明：它用电平在输入/输出之间往返翻转、每次往返翻转一次 level，两侧各自在 level 跳变时采样；自由运行、back-to-back；适合位一致性关键的场景，但抓不住脉冲。
+`resync_twophase` 是上面原理的最小实现，**自由运行（free-running）**：只要上电就不停地把输入端采样、往输出端送，**不管输入数据有没有变化**。对「状态字/计数快照」正合适——随时想读都能拿到一个比特一致的、新鲜的快照，重复送同一个值没有副作用。代价是它抓不住脉冲。
 
 #### 4.2.2 核心流程
 
-实体接口极简——两套时钟 + 一条数据总线，加一个上电默认值：
+实体接口极简——两套时钟 + 一条数据总线 + 一个上电默认值，没有 ready/valid：
 
-[modules/resync/src/resync_twophase.vhd:92-106](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L92-L106) 实体声明：`width` 决定总线位宽，`default_value` 给出上电初期、第一个数据到达前的输出值。
+[modules/resync/src/resync_twophase.vhd:92-106](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L92-L106) —— `width` 定位宽，`default_value` 给出上电初期、第一笔真实数据到达前的输出值。
 
-内部有两个并行通路：一条**数据通路**（`data_in_sampled -> data_out_int`，多位并行），两条**level 通路**（request 与 acknowledge，各为单比特，经 `async_reg` 链跨域）。`dont_touch` 防止综合工具把数据寄存器优化掉或挪动逻辑；`async_reg` 让 level 的两级同步链布局在同一 slice 以最大化 MTBF：
+内部有三条并行通路：一条**数据通路**（`data_in_sampled → data_out_int`，多位），两条**level 往返通路**（request、acknowledge，各单比特，经 `async_reg` 链跨域）。最坏情况输入到输出延迟约为：
 
-[modules/resync/src/resync_twophase.vhd:110-129](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L110-L129) 信号与属性声明：`data_in_sampled`/`data_out_int` 加 `dont_touch`；四个 level 寄存器加 `async_reg`。
+\[
+T_{\text{latency}} \approx 4\,T_{\text{clk\_in}} + 4\,T_{\text{clk\_out}}
+\]
 
-源域进程在「检测到 acknowledge 回来的 level 跳变」时锁入新数据，并把 request level 往目的域送：
+这也决定了它的采样周期（吞吐的倒数），所以**只适合慢变信号**。资源方面 LUT 恒为 3，FF 随位宽线性增长：
 
-```vhdl
-handle_input : process
-begin
-  wait until rising_edge(clk_in);
-  if input_level = input_level_not_p1 then   -- level 刚翻转 => 收到 acknowledge
-    data_in_sampled <= data_in;              -- 锁入新数据（并行通路源头）
-  end if;
-  input_level_not_p1 <= not input_level;     -- 形成 request level
-  input_level       <= input_level_m1;       -- 经 async_reg 链来自目的域
-  input_level_m1    <= output_level_p1;
-end process;
-```
+[modules/resync/src/resync_twophase.vhd:43-73](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L43-L73) —— 给出延迟公式 `4*Tin + 4*Tout`、LUT 恒为 3、FF 以 `2*width` 速率增长，并与 `resync_counter`、浅 `asynchronous_fifo` 做了面积/延迟对比。
 
-[modules/resync/src/resync_twophase.vhd:134-147](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L134-L147) 源域进程：检测 level 跳变锁数据，并驱动 request level 进入 async_reg 链。
+#### 4.2.3 源码精读
 
-目的域进程镜像地对偶：检测到 request level 跳变时，把（早已稳定多拍的）`data_in_sampled` 采进 `data_out_int`，并把 acknowledge level 送回去：
+信号与属性声明：数据寄存器与电平寄存器都被 `dont_touch` 钉死，防综合工具吸收/移动逻辑；进同步链的电平寄存器再叠加 `async_reg`，强制布局到同一 slice 以优化 MTBF（属性来自 u2-l2 讲过的 `attribute_pkg`）：
 
-```vhdl
-handle_output : process
-begin
-  wait until rising_edge(clk_out);
-  if output_level /= output_level_p1 then    -- level 刚翻转 => 收到 request
-    data_out_int <= data_in_sampled;         -- 并行采样（此时数据早已稳定）
-  end if;
-  output_level_p1 <= output_level;
-  output_level    <= output_level_m1;
-  output_level_m1 <= input_level_not_p1;     -- 经 async_reg 链来自源域
-end process;
-```
+[modules/resync/src/resync_twophase.vhd:108-129](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L108-L129) —— 声明 `data_in_sampled/data_out_int` 两级数据寄存器并加 `dont_touch`；声明输入侧 `input_level_m1/input_level/input_level_not_p1`、输出侧 `output_level_m1/output_level/output_level_p1` 三段电平，对进同步链的 4 个寄存器打 `async_reg`。
 
-[modules/resync/src/resync_twophase.vhd:151-165](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L151-L165) 目的域进程：检测 level 跳变后采样并行数据，并驱动 acknowledge level 返回。
+输入侧进程（`clk_in`）：检测电平回环来锁存数据，维护「取反 + 移位进同步链」的电平往返：
 
-**位一致性是怎么保证的？** 关键在于「数据先稳定、令牌后到达」。源域把数据锁进 `data_in_sampled` 后，request level 要穿**两级 `async_reg`**（至少 2 个 `clk_out` 周期）才到目的域；这期间源域不会改 `data_in_sampled`（要等 acknowledge 回来才改）。所以当目的域终于看到 level 跳变、决定采样时，`data_in_sampled` 已经稳定了至少两个目的时钟周期，所有位都已结束翻转——采样到的必然是一个完整一致的值。
+[modules/resync/src/resync_twophase.vhd:134-147](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L134-L147) —— `if input_level = input_level_not_p1` 时锁存 `data_in_sampled`；`input_level_not_p1 <= not input_level`（取反准备发往输出）；`input_level <= input_level_m1; input_level_m1 <= output_level_p1` 把后向电平移入同步链。
 
-#### 4.2.3 源码精读（补充）
+输出侧进程（`clk_out`）对称：检测跳变来采样数据，维护前向电平：
 
-关于「`if input_level = input_level_not_p1` 怎么就等于检测到跳变」：`input_level_not_p1` 是 `not input_level` 寄存一拍后的值，即「上一拍 level 取反」。当前 `input_level` 等于「上一拍取反」，等价于「当前 ≠ 上一拍」，即 level 刚刚翻转。目的域的 `output_level /= output_level_p1`（`output_level_p1` 是 `output_level` 寄存一拍）同理。这两个看似绕口的判断，本质都是**边沿检测**。
+[modules/resync/src/resync_twophase.vhd:151-165](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L151-L165) —— `if output_level /= output_level_p1`（检测到跳变）时把 `data_in_sampled` 采进 `data_out_int`；`output_level_p1 <= output_level`；`output_level <= output_level_m1; output_level_m1 <= input_level_not_p1` 把前向电平移入同步链。
 
-资源与延迟（来自文件头注释）：LUT 固定 3 个，FF 随位宽线性增长（约 `2 * width`）；最坏延迟
+> 关键理解：`input_level_not_p1` 是「`not input_level` 寄存一拍」的值，所以采样条件 `input_level = input_level_not_p1` 本质是「检测 `input_level` 刚发生过跳变」——每次后向电平到达，输入侧就锁一笔新数据并把取反后的电平送回。电平就这样在两域间反复跳变，每往返一次各自采样一笔。
+>
+> **比特一致性从何而来**：源域把数据锁进 `data_in_sampled` 后，request level 要穿两级 `async_reg`（至少 2 个 `clk_out` 周期）才到目的域；这期间源域不会改 `data_in_sampled`（要等 acknowledge 回来才改）。所以当目的域终于看到 level 跳变、决定采样时，`data_in_sampled` 已稳定多拍，所有位都已结束翻转——采样到的必然是一个完整一致的值。
 
-\[ T_{\text{latency}} \lesssim 4\,T_{\text{clk\_in}} + 4\,T_{\text{clk\_out}} \]
+#### 4.2.4 代码实践
 
-参见 [modules/resync/src/resync_twophase.vhd:43-64](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L43-L64)。延迟较大，所以它只适合慢信号。
+**目标**：在源码里把「两条 level 链 + 一条数据链」找出来，并与资源回归数对上（源码阅读型，无需运行）。
 
-#### 4.2.4 代码实践（源码阅读型）
+1. 在 [resync_twophase.vhd:117-129](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L117-L129) 中分别列出属于「前向链」「后向链」「数据通路」的信号。
+2. 数一下打 `async_reg` 的寄存器（应为 4 个：输入/输出各两级）。
+3. 打开 [module_resync.py:230-234](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/module_resync.py#L230-L234)，确认 `resync_twophase` 的 netlist 资源断言是 `lut=3, ff=2*width+6`，与头注释「LUT 恒 3、FF 随 `2*width` 增长」一致。
 
-1. **目标**：跟踪 level 令牌的一次完整往返。
-2. **步骤**：在 [modules/resync/src/resync_twophase.vhd:134-165](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L134-L165) 两个进程里，画出 6 个 level 信号（`input_level`、`input_level_m1`、`input_level_not_p1`、`output_level`、`output_level_m1`、`output_level_p1）之间的数据流向。
-3. **观察**：你会看到一个闭环——`input_level_not_p1 -> output_level_m1 -> output_level -> output_level_p1 -> input_level_m1 -> input_level -> input_level_not_p1`，令牌在这个环里转，每转一圈搬运一个字。
-4. **预期结果**：能口述「令牌每经过一对 async_reg 链，对应一侧就采样一次数据」。
-5. 结果待本地验证：可参考 [modules/resync/test/tb_resync_twophase.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase.vhd) 跑仿真，观察 `data_out` 相对 `data_in` 的延迟拍数。
+**预期结果**：4 个 `async_reg`、3 个 `dont_touch`；`width=8` 时 FF=22、`width=32` 时 FF=70。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：`data_in_sampled` 和 `data_out_int` 为什么都要加 `dont_touch`？
-**答案**：它们是并行数据通路的两端，综合工具若把它们吸收/合并/挪动，可能改变数据相对 level 令牌的时序关系，破坏「数据先稳定后采样」的前提。`dont_touch` 把这两个寄存器钉死，让 4.4 节的约束能精确作用于它们之间的路径。
+**答案**：它们是并行数据通路的两端，综合工具若吸收/合并/挪动它们，可能改变数据相对 level 令牌的时序关系，破坏「数据先稳定后采样」的前提。`dont_touch` 把它们钉死，让 4.4 节的约束能精确作用于它们之间的路径。
 
-**练习 2**：为什么头注释说这个实体「抓不住脉冲」？
-**答案**：它是自由运行、back-to-back 采样的——它按自己的节拍（令牌往返周期）采样源数据。若源数据出现一个短脉冲，很可能在两次采样之间就被略过了。要传脉冲得用 `resync_pulse`（u3-l1）。
+**练习 2**：头注释为什么说这个实体「抓不住脉冲」？
+**答案**：它自由运行、按自己的节拍（令牌往返周期）采样源数据；源端短脉冲很可能落在两次采样之间而被略过。传脉冲要用 `resync_pulse`（u3-l1）。
 
 ---
 
-### 4.3 resync_twophase_handshake：带 ready/valid 背压的两相握手
+### 4.3 resync_twophase_handshake：带 ready/valid 握手的版本
 
 #### 4.3.1 概念说明
 
-`resync_twophase` 是「我一直在搬」；但很多场景需要「搬一个字要等对方确认」，即**背压（backpressure）**。`resync_twophase_handshake` 在两相握手之上加了 AXI-Stream 式的 `ready/valid` 接口：
-
-- 输入侧：`input_valid` + `input_ready` + `input_data`（主→从方向的有效+数据，从→主的准备好）。
-- 结果侧：`result_valid` + `result_ready` + `result_data`。
-
-文件头把它定位为 `resync_twophase` 的超集：多了握手就多了背压能力，资源略增。
-
-[modules/resync/src/resync_twophase_handshake.vhd:9-27](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L9-L27) 头注释：它是 `resync_twophase` 的超集，多了 `ready/valid` 握手，支持背压但资源略增。
+`resync_twophase` 没有「数据有效」概念，源端无法表达「这拍是新的、务必送过去」，目的端也无法背压。`resync_twophase_handshake` 在同一套两相机制上叠加 **AXI-Stream 式 ready/valid 握手**（见 [u2-l1](u2-l1-handshake-convention.md)）：输入侧 `input_valid/input_ready`，结果侧 `result_valid/result_ready`。既能「按需发送」，也支持背压，代价是多花几个 LUT/FF。
 
 #### 4.3.2 核心流程
 
-实体接口分两组（输入域 / 结果域），各有完整的 ready/valid/data：
+实体把数据握手明确出来：
 
-[modules/resync/src/resync_twophase_handshake.vhd:56-71](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L56-L71) 实体声明：`data_width` generic；输入侧 `input_clk/input_ready/input_valid/input_data`，结果侧 `result_clk/result_ready/result_valid/result_data`。
+[modules/resync/src/resync_twophase_handshake.vhd:56-71](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L56-L71) —— 输入侧 `input_clk/input_ready/input_valid/input_data`，结果侧 `result_clk/result_ready/result_valid/result_data`；只有一个 generic `data_width`。
 
-一个小细节很关键：几个 level 信号的**默认初值不同**——大多数是 `'0'`，而 `input_level_m1`、`input_level`、`result_level_feedback` 初值是 `'1'`。这是为了上电后**立刻触发第一次 `input_ready`**：
+握手语义建立在与 4.2 相同的「电平跳变」之上，但用 `xor` 把跳变翻译成 ready：
 
-[modules/resync/src/resync_twophase_handshake.vhd:84-87](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L84-L87) level 信号声明，注释点明 `input_level_m1/input_level/result_level_feedback` 用了与其它不同的默认值 `'1'`，用以触发首个 `input_ready` 事件。
+- **`input_ready = input_level xor input_level_p1`**：二者不同时，表示「上一笔已被结果侧确认、可接收新数据」。
+- 一次成功的输入握手（`input_valid and input_ready`）翻转 `input_level_p1`，这一翻转作为「有新数据」的请求过同步链到结果侧。
+- 结果侧检测到电平跳变、且当前没有未取走的结果时，置 `result_valid`、采样数据，并**立即翻转反馈电平**——输入侧据此重新变 ready。
+- 消费者通过 `result_ready/result_valid` 取走数据，取走后翻转 `result_level_handshake`，确保在下一笔新数据到来前不重复置 valid。
 
-**输入侧**：只要 `input_ready` 为高就先把数据采进 `input_data_sampled`（无论 `input_valid` 与否）；当 `input_valid` 也有效时，翻转 request level 通知结果侧「有新字」。`input_ready` 用异或产生：
+延迟与吞吐（头注释给出）：
 
-```vhdl
-if input_ready then
-  input_data_sampled <= input_data;          -- 先把数据稳住
-end if;
-if input_valid then
-  input_level_p1 <= input_level;             -- 翻转 request level
-end if;
-...
-input_ready <= input_level xor input_level_p1;
-```
+\[
+T_{\text{latency}} \le T_{\text{input\_clk}} + 3\,T_{\text{result\_clk}}
+\]
 
-[modules/resync/src/resync_twophase_handshake.vhd:103-126](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L103-L126) 输入进程：`input_ready` 时预采数据，`input_valid` 时翻转 request；`input_ready = input_level xor input_level_p1`。
+\[
+T_{\text{sampling\_period}} \approx 3\,T_{\text{input\_clk}} + 3\,T_{\text{result\_clk}}
+\]
 
-**结果侧**：收到 request level 跳变时，只要**当前没有未取走的老字**（`not result_valid`）就拉高 `result_valid` 并采样数据，同时**立刻**翻转 feedback level 通知输入侧「可以送下一个了」。当结果被消费（`result_ready and result_valid`）时清 `result_valid`：
-
-```vhdl
-if (result_level xor result_level_handshake) and not result_valid then
-  result_valid <= '1';
-  result_data_int <= input_data_sampled;     -- 并行采样
-  result_level_feedback <= not result_level_feedback;  -- 立即反馈，不必等结果被取走
-end if;
-if result_ready and result_valid then
-  result_valid <= '0';
-  result_level_handshake <= not result_level_handshake;
-end if;
-```
-
-[modules/resync/src/resync_twophase_handshake.vhd:130-161](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L130-L161) 结果进程：新 level 到来且无积压时采数并立即反馈；结果被消费时清有效。
-
-**背压优化**：注意 feedback 是在「采样到新数据」时就翻转的，**而不是**等到「结果被消费」才翻转。注释说这一点点额外的 FF/LUT 能在某些场景下把吞吐近乎翻倍——因为输入侧不必等结果真的被取走，就能开始送下一个字，相当于在结果侧做了一个字的预取缓冲。
-
-延迟与吞吐（文件头给出）：单字延迟
-
-\[ T_{\text{latency}} \le T_{\text{input\_clk}} + 3\,T_{\text{result\_clk}} \]
-
-采样周期（吞吐的倒数）约为
-
-\[ T_{\text{sample}} \approx 3\,T_{\text{input\_clk}} + 3\,T_{\text{result\_clk}} \]
-
-参见 [modules/resync/src/resync_twophase_handshake.vhd:30-46](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L30-L46)。
+[modules/resync/src/resync_twophase_handshake.vhd:30-46](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L30-L46) —— 给出延迟与采样周期公式，并指出「结果侧背压时，输入仍可在上一笔结果送出前采样下一笔」从而提升吞吐。
 
 #### 4.3.3 源码精读
 
-`input_ready <= input_level xor input_level_p1` 这一行的妙处：`input_level_p1` 是 `input_level` 在 `input_valid & input_ready` 时的拷贝，二者相等表示「上一拍已经发过 request、还没收到 feedback」→ `input_ready=0`（忙）；二者不等表示「feedback 回来了」→ `input_ready=1`（可以收新字）。整套机制用一个异或就把「忙/闲」状态表达出来了，不需要状态机。
+注意电平信号初值被故意设成不对称，以便上电就产生第一个 `input_ready`：
+
+[modules/resync/src/resync_twophase_handshake.vhd:84-98](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L84-L98) —— `input_level_m1/input_level/result_level_feedback` 初值为 `'1'`，其余为 `'0'`；注释明说这是「为了触发第一个 `input_ready` 事件」。结果 `input_level='1'`、`input_level_p1='0'`，`xor` 出 `input_ready='1'`，开机即可接收。
+
+输入侧进程：只要 ready 就先把数据锁存（无论 valid），valid 时才翻转请求电平：
+
+[modules/resync/src/resync_twophase_handshake.vhd:102-126](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L102-L126) —— `if input_ready` 锁 `input_data_sampled`；`if input_valid` 翻转 `input_level_p1`（注释：若此时 ready 成立，这一赋值既拉低 ready、又向结果侧声明新数据）；最后把反馈电平移入同步链。第 [126 行](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L126) `input_ready <= input_level xor input_level_p1` 用异或把跳变翻译成 ready。
+
+结果侧进程：检测「请求电平相对上次握手发生了跳变」且当前无积压 → 置 valid、采样、翻转反馈；消费者取走 → 清 valid、翻转握手电平：
+
+[modules/resync/src/resync_twophase_handshake.vhd:130-161](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L130-L161) —— `(result_level xor result_level_handshake) and not result_valid` 时置 `result_valid`、采 `result_data_int`、翻转 `result_level_feedback`（注释称这是背压机制，多花一个 FF、几个 LUT，却能在某些场景把吞吐翻倍）；`result_ready and result_valid` 时清 valid 并翻转 `result_level_handshake`。
+
+> **背压优化**：反馈电平在「采样到新数据」时就翻转，**而不是**等「结果被取走」才翻转。于是输入侧不必等结果真的被消费就能开始送下一个字（相当于结果侧预存一个字），在某些场景把吞吐近似翻倍——这正是头注释 [L45-46](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L45-L46) 所说的吞吐收益。
+
+资源对比（来自 netlist 回归）：`resync_twophase` 为 `lut=3, ff=2*width+6`；`resync_twophase_handshake` 为 `lut=5, ff=2*width+8`——握手逻辑多花 2 个 LUT、2 个 FF：
+
+[module_resync.py:236-244](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/module_resync.py#L236-L244) —— `resync_twophase_handshake` 的 `lut=5, ff=2*width+8, logic=2` 断言。若不需要背压，把 `input_valid`/`result_ready` 恒接 `'1'` 即退化为 `resync_twophase`，但资源略高，故无需背压时直接用 `resync_twophase` 更省。
 
 #### 4.3.4 代码实践
 
-本讲的主实践任务的第一部分。我们要跨域传一个数据流，验证**无丢失、无错码**。
+**目标**：运行项目自带的「无丢失」回归测试，亲眼看到跨域数据被逐拍核对。
 
-1. **目标**：用 `resync_twophase_handshake` 把一串数据从 `input_clk` 域搬到 `result_clk` 域，确认对端逐字收到、内容一致。
-2. **操作步骤**：
-   - 阅读 [modules/resync/test/tb_resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd)，它正是这个实践的「官方版」。
-   - 它实例化了 `bfm.axi_stream_master`（[L178-191](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L178-L191)）在输入域发数据，`bfm.axi_stream_slave`（[L195-209](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L195-L209)）在结果域收数据。
-   - 数据校验靠 slave BFM 的 `reference_data_queue`：master 把随机数据压入 `input_queue`，同一份数据也压入 `result_queue`（[L117-127](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L117-L127)），slave BFM 收到一拍就与 reference queue 比对——**一旦有任何错码或丢失，BFM 会立即报错**。这就是「无丢失」的断言机制。
-   - `stall_config`（[L88-93](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L88-L93)）给两侧都加了随机背压（默认 20% stall），验证背压鲁棒性。
-3. **需要观察的现象**：`test_random_data` 用例（[L150-151](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L150-L151)）跑完 1000 拍不报错；`test_init_state`（[L141-148](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L141-L148)）验证上电初态 `input_ready=1`、`result_valid=0`。
-4. **预期结果**：仿真通过，无 BFM 校验失败。
-5. 结果待本地验证（需要先按 u1-l3 配好 VUnit/tsfpga 环境再跑 `tools/simulate.py`）。
+testbench 把同一份随机数组同时压入输入队列与结果队列：输入侧 BFM 按它发，结果侧 BFM 自动核对收到的每一拍是否与队列一致——任何丢失或错码都会断言失败：
+
+[modules/resync/test/tb_resync_twophase_handshake.vhd:113-130](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L113-L130) —— `run_test` 生成随机数组，`copy` 后一份送输入、一份送结果核对队列，然后等到 `num_beats_checked` 达到 `num_beats`。
+
+[modules/resync/test/tb_resync_twophase_handshake.vhd:177-209](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L177-L209) —— 实例化 `bfm.axi_stream_master`（输入侧，带 stall）与 `bfm.axi_stream_slave`（结果侧，自动比对 `reference_data_queue`），DUT 即 `resync_twophase_handshake`。
+
+操作步骤（承接 [u1-l3](u1-l3-toolchain-and-deps.md) 工具链）：
+
+1. 配好 `PYTHONPATH` 指向仓库根目录，安装 `vunit-hdl` 预发布版。
+2. 运行该 testbench（VUnit 标准过滤语法，**待本地验证**确切的 `--help` 选项）：
+   ```bash
+   python tools/simulate.py resync.tb_resync_twophase_handshake
+   ```
+3. 观察 [module_resync.py:100-125](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/module_resync.py#L100-L125) 已为该 tb 配置了 5 种时钟快慢关系 × `{8,16}` 位宽组合，全部应通过。
+
+**需要观察的现象**：即使结果时钟比输入时钟快 20 倍或慢 20 倍、即使 BFM 施加随机 stall，`num_beats_checked` 都能稳步增长到 `num_beats` 而不报错——证明无丢失、无重复、比特一致。
+
+**预期结果**：所有配置通过；`test_count_sampling_period` 还会打印实测采样周期与理论值 `3*Tin + 3*Tout` 的比值，应在 0.80～1.001 之间（见 [tb 第 133-161 行](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd#L133-L161)）。若本地暂无法运行 Vivado/tsfpga，标记「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么结果侧在「采样到新数据」时就翻转 feedback，而不是等「结果被取走」才翻？
-**答案**：提前反馈让输入侧能更早开始送下一个字，相当于在结果侧预存一个字。当结果侧消费较慢时，这能把吞吐近似翻倍；代价是多一个 FF 和少量 LUT（注释 [L137-138](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_handshake.vhd#L137-L138) 有说明）。
+**练习 1**：`input_ready <= input_level xor input_level_p1` 用异或，相比直接用电平值，有什么好处？
+**答案**：异或检测的是「跳变」而非「绝对高低」，无论请求电平当前是 0 还是 1，只要相对上一拍变了，就被识别为一次事件——这正是两相握手对 CDC 延迟不敏感的根源。
 
-**练习 2**：`result_valid` 何时拉高、何时拉低？
-**答案**：当检测到 request level 跳变（`result_level xor result_level_handshake`）**且**当前没有积压（`not result_valid`）时拉高并采数；当 `result_ready and result_valid`（结果被消费）时拉低。
+**练习 2**：结果侧的 `not result_valid` 守卫有什么作用？
+**答案**：它防止「上一笔结果还没被消费者取走」时用新数据覆盖 `result_data_int`，从而实现背压——结果占线时不会丢正在等待的数据。
 
-**练习 3**：如果完全不要背压，把 `input_valid` 和 `result_ready` 恒接 `'1'`，它会退化成什么？
-**答案**：功能上等价于自由运行的 `resync_twophase`（见 [resync_twophase.vhd:76-82](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L76-L82) 的说明），但资源会比专门实现的 `resync_twophase` 略高——所以「不需要背压」时直接用 `resync_twophase` 更省。
+**练习 3**：如果把 `input_valid` 和 `result_ready` 恒接 `'1'`，它会退化成什么？
+**答案**：功能上等价于自由运行的 `resync_twophase`（见 [resync_twophase.vhd:76-82](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase.vhd#L76-L82)），但资源比专门实现的 `resync_twophase` 略高——所以无需背压时直接用 `resync_twophase` 更省。
 
 ---
 
-### 4.4 scoped_constraints：CDC 路径的时序约束
+### 4.4 配套约束：set_false_path / set_max_delay / set_bus_skew
 
 #### 4.4.1 概念说明
 
-两相握手和单比特 `resync_level` 一样，本质上都有一条「跨越异步时钟域」的物理连线。综合/布线工具默认会用同一套时序规则去检查所有路径，但 CDC 路径的源和目的用的是**没有确定相位关系**的两个时钟，常规的 setup/hold 检查要么报一堆假错误、要么干脆无法计算。
+任何 CDC 路径都横跨两个**异步**时钟，静态时序分析器（STA）无法用「单一时钟周期」去检查它——放任不管，工具要么报一堆假错误，要么把这条路径当普通路径去优化布局，反而破坏同步链。所以**每条 CDC 路径都必须显式约束**，告诉工具「按 CDC 规则处理」。项目用三种命令分工：
 
-所以每个 CDC 实体都配了一个**作用域约束文件（scoped constraint）** `.tcl`，告诉工具「这条路径是 CDC，请按 CDC 的方式对待」。三类命令各管一种场景：
-
-| 命令 | 用在哪 | 含义 |
+| 命令 | 作用 | 适用 |
 | --- | --- | --- |
-| `set_false_path` | 找不到时钟时的退路 | 「这条路径别做时序检查了」，延迟完全听任布局布线，**延迟不确定** |
-| `set_max_delay -datapath_only` | 能找到时钟时的首选 | 给 CDC 路径设一个延迟上限（去掉时钟偏移/抖动），**延迟有上界** |
-| `set_bus_skew` | 格雷码多比特计数器 | 限制**同一字内各位**的相对偏移，配合「只变 1 位」保证一致 |
+| `set_false_path` | 彻底切断检查，**不设延迟上限** | 找不到时钟时的兜底；延迟无所谓 |
+| `set_max_delay -datapath_only` | 切断时钟关系，给数据延迟设上限（忽略两时钟偏斜） | 知道两个时钟时的首选；要确定性延迟 |
+| `set_bus_skew` | 约束**总线各比特之间的相对偏斜**（非绝对延迟） | 多比特 CDC，配合格雷码 |
 
-为什么优先 `set_max_delay` 而不是 `set_false_path`？因为 `false_path` 让延迟完全失控，信号可能在芯片上慢悠悠走几十纳秒，导致采样时机不可预期；`max_delay` 给了一个上界（取两个时钟周期的较小值），延迟确定、可分析。u3-l1 讲 `resync_level` 时提过「想要确定延迟就得开 `enable_input_register` 并接 `clk_in`」，根因就在这里——只有能找到 `clk_in`，约束才会走 `max_delay` 分支。
+为什么优先 `max_delay` 而非 `false_path`？`false_path` 让延迟完全失控，信号可能慢悠悠走几十纳秒，采样时机不可预期；`max_delay` 给一个上界（取两时钟周期较小者），延迟确定、可分析。u3-l1 讲 `resync_level` 时提过「想要确定延迟就得开 `enable_input_register` 并接 `clk_in`」，根因就在这里——只有能找到 `clk_in`，约束才走 `max_delay` 分支。
 
 #### 4.4.2 核心流程
 
@@ -323,95 +281,95 @@ end if;
    - 格雷码多比特：set_bus_skew -from <稳定源> -to <第一级同步寄存器> <源周期>
 ```
 
-`-datapath_only` 这个标志几乎是 Xilinx CDC 约束的标配：它把时钟偏移、抖动和悲观余量从延迟计算里剔除。代价是「实际延迟可能略大于一个周期」，但因为有两级 `async_reg` 兜底亚稳态，这点余量损失可以接受；而且某些派生时钟/IP 时钟场景下，不加这个标志约束会直接失败（`resync_pulse.tcl` 注释里有详细说明）。
+`-datapath_only` 几乎是 Xilinx CDC 约束的标配：它把时钟偏移、抖动和悲观余量从延迟计算里剔除。代价是「实际延迟可能略大于一个周期」，但两级 `async_reg` 已兜底亚稳态，这点余量损失可接受；某些派生时钟/IP 时钟场景下不加它约束会直接失败（`resync_pulse.tcl` 注释有详述）。
 
 #### 4.4.3 源码精读
 
-**`resync_level.tcl`——`max_delay` 与 `false_path` 的二选一。** 先定位「第一级同步寄存器」（对应 `resync_level.vhd` 里的 `data_in_p1` 寄存器），再分两种情况：
+**`resync_level.tcl`** —— 本讲约束部分的锚点，逻辑只有两分支。先取两个时钟与第一级同步寄存器：
 
-[modules/resync/scoped_constraints/resync_level.tcl:18-20](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L18-L20) 抓取两个端口上的时钟，以及第一级同步寄存器 `data_in_p1_reg`。
+[modules/resync/scoped_constraints/resync_level.tcl:18-20](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L18-L20) —— `get_clocks` 取 `clk_in/clk_out`，`get_cells data_in_p1_reg` 取同步链第一级寄存器。
 
-```tcl
-if {${clk_in} != "" && ${clk_out} != ""} {
-  set min_period [expr {min(${clk_in_period}, ${clk_out_period})}]
-  set_max_delay -datapath_only -from ${clk_in} -to ${first_resync_register} ${min_period}
-} else {
-  set_false_path -setup -hold -to ${first_resync_register}
-}
-```
+两个时钟都在时，算 `min_period` 并下 `set_max_delay -datapath_only`，给出确定性延迟：
 
-[modules/resync/scoped_constraints/resync_level.tcl:22-54](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L22-L54) 两个时钟都在 → `set_max_delay`（[L46](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L46)）；否则退化为 `set_false_path`（[L53](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L53)）。这就是「为什么需要对同步寄存器设 false_path/max_delay」——告诉工具这条到 `data_in_p1_reg` 的路径是 CDC，别用常规 setup/hold 卡它，但又给它一个延迟上界（理想情况）。
+[modules/resync/scoped_constraints/resync_level.tcl:22-46](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L22-L46) —— 取两时钟周期、算 `min`，`set_max_delay -datapath_only -from clk_in -to data_in_p1_reg min_period`。注释还解释了为何没用更「优雅」的 `get_timing_paths` 自动找驱动——因为在作用域脚本里该命令会报 critical warning。
 
-**`resync_twophase.tcl`——两相握手要约束「数据并行通路 + 两条 level 通路」共三处。** 数据通路用 `max_delay` 限定并行位之间的延迟上界：
+找不到时钟时（如 `clk_in` 非端口时钟、或时钟尚未创建），退回 `set_false_path`：
 
-```tcl
-set data_in_sampled [get_cells "data_in_sampled_reg*"]
-set data_out        [get_cells "data_out_int_reg*"]
-set_max_delay -datapath_only -from ${data_in_sampled} -to ${data_out} ${min_period}
-```
+[modules/resync/scoped_constraints/resync_level.tcl:47-54](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L47-L54) —— 兜底 `set_false_path -setup -hold -to data_in_p1_reg`，并打印警告。
 
-[modules/resync/scoped_constraints/resync_twophase.tcl:41-43](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl#L41-L43) 约束并行数据通路 `data_in_sampled -> data_out_int`，保证各位延迟有上界。两条 level 通路（request、acknowledge）各自一条 `max_delay`，见 [L60-66](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl#L60-L66)。它还用 `create_waiver`（[L50-57](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl#L50-L57)）把「Clock Enable controlled CDC」这类已知安全的告警屏蔽掉，让 CDC 报告更干净。`resync_twophase_handshake.tcl` 几乎与之逐行对应，只是信号名换成 `input_*`/`result_*`。
+**`resync_counter.tcl`** —— 格雷码多比特的约束，多了 `set_bus_skew`。先取「源域稳定寄存器组」与「目的域第一级同步寄存器组」：
 
-**`resync_counter.tcl`——`set_bus_skew` 只此一家。** 见 4.1.3 节引用的 [L35](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L35)，它限的是「字内各位之间的相对偏移」，与 `max_delay`（限绝对延迟上界，[L50](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L50)）配合使用。两相握手之所以**不需要** `bus_skew`，正是因为它不依赖「只变 1 位」，而是靠令牌保证整字稳定。
+[modules/resync/scoped_constraints/resync_counter.tcl:18-19](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L18-L19) —— `counter_in_gray_reg*`（稳定）与 `counter_in_gray_p1_reg*`（第一级同步）。
+
+`set_bus_skew` 限制字内各比特的相对偏斜，确保「采样时最多一个比特在翻转」：
+
+[modules/resync/scoped_constraints/resync_counter.tcl:33-35](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L33-L35) —— `set_bus_skew -from stable_registers -to first_resync_registers clk_in_period`。
+
+再下 `set_max_delay` 给延迟封顶，并用 `create_waiver` 压掉「多比特走 ASYNC_REG」的安全告警：
+
+[modules/resync/scoped_constraints/resync_counter.tcl:49-64](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L49-L64) —— `set_max_delay -datapath_only ... min_period`；`create_waiver -id CDC-6` 说明「格雷码 + 正确约束下多比特同步是安全的」。
+
+**`resync_twophase.tcl`**（`_handshake` 版除信号名外几乎逐行相同）—— 给两相实体的三类路径下约束。并行数据通路封顶 + 压掉 CDC-15 时钟使能告警：
+
+[modules/resync/scoped_constraints/resync_twophase.tcl:41-57](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl#L41-L57) —— 对 `data_in_sampled_reg* → data_out_int_reg*` 下 `set_max_delay`；`create_waiver -id CDC-15` 说明「时钟使能是本 CDC 概念的一部分，无需告警」。
+
+两条 level 往返通路各下一条 `set_max_delay`：
+
+[modules/resync/scoped_constraints/resync_twophase.tcl:59-66](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase.tcl#L59-L66) —— `input_level_not_p1 → output_level_m1` 与 `output_level_p1 → input_level_m1` 两条单比特通路各一条 `set_max_delay`，注释说「与 `resync_level.tcl` 非常相似」。两相握手之所以**不需要** `bus_skew`，正因为不依赖「只变 1 位」，而是靠令牌保证整字稳定。
 
 #### 4.4.4 代码实践
 
-本讲主实践任务的第二部分：解释「为什么要对同步寄存器设 false_path/max_delay」。
+**目标**：对照 `resync_level.tcl`，讲清楚「为何必须对同步寄存器下 false_path / max_delay」（源码阅读型，无需运行）。
 
-1. **目标**：对照 `resync_level.tcl`，说清两种约束各自的含义与触发条件。
-2. **操作步骤**：
-   - 打开 [modules/resync/scoped_constraints/resync_level.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl)。
-   - 找到第 46 行 `set_max_delay` 和第 53 行 `set_false_path`，确认它们落在同一个 `if/else` 的两个分支里。
-   - 回看 [modules/resync/src/resync_level.vhd:96-138](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_level.vhd#L96-L138)，确认约束里的 `data_in_p1_reg` 对应源码里带 `async_reg` 属性的 `data_in_p1` 信号。
-3. **需要观察/解释**：
-   - 为什么必须对「进入第一级同步寄存器的路径」下约束？——因为这条路径跨异步时钟，常规 setup/hold 检查不适用，工具会误报或无法分析。
-   - 为什么两个时钟都在时用 `max_delay` 而不是 `false_path`？——`max_delay` 给延迟一个上界（min_period），让通过同步链的延迟**确定且有限**；`false_path` 完全放任，延迟可能任意大，导致下游采样时机不可预期。
-   - 为什么有 `false_path` 这个退路？——有些场景（如 `clk_in` 没接、或时钟由 IP 核派生、暂时还没建出来）脚本找不到时钟，此时若硬下 `max_delay` 会失败，所以安全退化成 `false_path`，至少不让工具报错。
-4. **预期结果**：能用自己的话讲清「CDC 路径必须脱离常规时序检查；能在确定延迟时就给上界（max_delay），不能就放任（false_path）」。
-5. 结果待本地验证：在 Vivado 里综合一个实例化的 `resync_level`（分别给 `enable_input_register=true` 和不接 `clk_in`），对比 `report_cdc` 与时序报告里对该路径的处理差异。
+1. 读 [resync_level.tcl:18-54](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_level.tcl#L18-L54) 全文。
+2. 回答：如果**不下**任何约束，`data_in_p1_reg` 这条跨域路径在 STA 里会怎样？（提示：两异步时钟没有公共周期，工具按各自周期检查，要么假失败、要么把同步链拆散重布局。）
+3. 解释 `set_false_path` 与 `set_max_delay -datapath_only` 的取舍：何时用哪个？为什么后者更可取却仍要保留前者兜底？
+4. 对照 [resync_counter.tcl:33-35](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_counter.tcl#L33-L35) 的 `set_bus_skew`，说明它解决的是 `resync_level.tcl` 不需考虑的「多比特一致性」问题。
+
+**预期结果**：能得出类似结论——「CDC 路径必须脱离常规 STA 检查；知道两时钟时优先 `set_max_delay -datapath_only`（有界、确定延迟），找不到时退回 `set_false_path`（无界但至少不假错）；多比特还要 `set_bus_skew` 保证同字采样。」
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`set_max_delay -datapath_only` 的 `-datapath_only` 去掉了什么？为什么去掉它反而安全？
-**答案**：去掉了时钟偏移、抖动和悲观余量。CDC 路径本来就跨越相位不确定的两个时钟，把这些不确定算进去只会让约束频繁误判失败；而两级 `async_reg` 已经把亚稳态风险降到可接受，所以剔除这些余量、只看数据通路延迟，既能让约束可解，又不影响可靠性。
+**练习 1**：`set_max_delay` 为什么要带 `-datapath_only`？
+**答案**：两时钟本就异步，其间偏斜无意义；`-datapath_only` 让工具只看数据路径延迟、忽略时钟偏斜，给出有物理意义的上界。两级 `async_reg` 已兜底亚稳态，故剔除偏斜余量既能让约束可解，又不影响可靠性。
 
-**练习 2**：`resync_twophase.tcl` 为什么没有 `set_bus_skew`？
-**答案**：bus_skew 配合「格雷码只变 1 位」使用。两相握手传的是任意总线，不依赖「只变 1 位」，而是靠令牌保证整字在被采样时已稳定，所以用 `max_delay` 限定数据通路延迟上界即可，不需要 bus_skew。
+**练习 2**：`resync_level.tcl` 为什么要在「找不到两个时钟」时退回 `set_false_path`？
+**答案**：找不到时钟（如 `clk_in` 非端口时钟、或时钟此时尚未创建）时无法算 `min_period`、无法下 `set_max_delay`；`set_false_path` 至少把这条路径从普通 STA 中切出来，避免假错误，代价是失去延迟上界（延迟不确定）。
 
-**练习 3**：如果把两相握手实例化后**忘记**加它对应的 `.tcl` 约束，功能上会立刻出错吗？
-**答案**：仿真不会出错（仿真里没有真实布线延迟）。但在真实 FPGA 上，工具要么把 CDC 路径当普通路径硬做 setup 检查（误报时序违规），要么完全不做约束（延迟失控），两种都会让「数据先稳定后采样」的时序前提不再有保证，可靠性下降。所以头注释反复强调「必须配合 scoped constraint 使用」。
+**练习 3**：`resync_counter.tcl` 用了 `set_bus_skew`，而 `resync_level.tcl` 没有，为什么？
+**答案**：`resync_level` 只同步一个比特，没有「字内一致性」问题；`resync_counter` 同步多比特格雷字，必须限制各比特相对偏斜，才能保证采样时「最多一个比特在翻转」从而安全。
 
 ---
 
 ## 5. 综合实践
 
-把本讲三条主线串起来：**多比特一致性 → 两相握手实现 → CDC 约束**。
+把本讲三条主线——**多比特一致性 → 两相握手实现 → CDC 约束**——串成一个完整小任务。
 
-任务：为 `resync_twophase_handshake` 设计一个最小验证场景，并解释其约束。
+**场景**：一个工作在 `clk_in`（如 50 MHz）下的 16 位递增计数器，需要被 `clk_out`（如 200 MHz）域的逻辑安全读取，且要求每次读到的是一个**比特一致**的快照、绝不丢数。
 
-1. **搭环境**：参照 [tb_resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd)，把输入侧换成「一个每拍自增 1 的计数器」作为 `input_data`（而不是随机数据），`input_valid` 通过 `input_ready` 门控——即只在 `input_ready=1` 时让计数器前进，保证不丢数。
-2. **校验无丢失**：在结果侧用一个进程接收 `result_data`（`result_ready` 恒为 1），每收到一个字就检查它是否严格比上一个收到的字大 1。若出现「跳变 > 1」或「回退」，说明丢了字或采到了不一致的值——这正是位一致性失效的信号。
-3. **施加约束**：列出该实体综合时必须随附的 [resync_twophase_handshake.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_twophase_handshake.tcl)，指出它约束了哪三条 CDC 路径（数据并行通路、request level、feedback level），并解释每条为什么需要 `set_max_delay -datapath_only`。
-4. **对比**：把同一个递增计数器改接到 `resync_twophase`（自由运行版），观察它**不等 ready** 就持续搬运的行为差异，并说明为何这种用法下你无法施加背压。
+**任务**：
 
-预期：结果侧收到的值是连续递增、步长为 1 的序列，证明两相握手在跨域传递多比特相关向量时既不丢数、也不产生新旧混杂的脏值。结果待本地验证。
+1. **搭 testbench**：以 [tb_resync_twophase_handshake.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/test/tb_resync_twophase_handshake.vhd) 为模板，把输入侧 BFM 改成「发送一个递增的 `slv` 序列 `0,1,2,...,N-1`」（可仍借用 `stall_bfm_pkg` 施加随机 stall），结果侧核对「收到的每个值都比上一个正好大 1」。这一条比原 tb 的「随机数组比对」更严格，能直接暴露任何丢数或跳变。
+2. **跑多种时钟关系**：参照 [module_resync.py:102-108](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/module_resync.py#L102-L108) 的五种快慢组合，至少跑「结果域远快」「结果域远慢」「同频」三种，确认递增关系始终成立。
+3. **施加约束**：确认综合工程里通过 `read_xdc -ref resync_twophase_handshake .../resync_twophase_handshake.tcl` 加载约束（手动流程）或由 tsfpga 自动加载（见 [getting_started.rst:73-101](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/doc/sphinx/getting_started.rst#L73-L101)）。打开 `report_cdc`，确认对应路径只剩被 `create_waiver` 压掉的 CDC-15 提示，而**没有**未约束的裸 CDC 路径。
+4. **对比**：把同一递增计数器改接到 `resync_twophase`（自由运行版），观察它**不等 ready** 就持续搬运的行为差异，并说明为何这种用法下无法施加背压。
+5. **写一段说明**：解释如果忘记加载该 `.tcl`，`input_data_sampled_reg* → result_data_int_reg*` 这条并行数据通路会怎样（延迟无界、可能被工具重排，极端情况下采样到未稳定的数据）。
 
----
+**预期结果**：递增序列在三种时钟关系下都严格 `+1` 传递；`report_cdc` 干净。若本地无 Vivado 环境，仿真部分可跑、综合/约束核对部分标记「待本地验证」。
 
 ## 6. 本讲小结
 
-- 多比特总线跨域的核心风险不是亚稳态，而是**位一致性**：各位到达时间不同，会让目的域采到新旧混杂的脏值。
+- 多比特总线跨域的核心风险不是亚稳态，而是**比特一致性**：各位到达时间不同，会让目的域采到新旧混杂的脏值。
 - hdl-modules 给出两条互补解法：**格雷码**（每次只变 1 位，配 `set_bus_skew`，适合单调计数器）与**两相握手**（数据先稳定、令牌后许可，配数据通路 `set_max_delay`，适合任意相关向量）。
-- `resync_twophase` 是自由运行版：一个 level 令牌在两域间往返翻转，每往返一次搬一个字，靠「令牌穿两级 async_reg 期间数据早已稳定」保证位一致性；适合慢变化信号，抓不住脉冲。
-- `resync_twophase_handshake` 在其上加 `ready/valid` 握手：`input_ready = input_level xor input_level_p1` 一行表达忙闲；结果侧采样后立即反馈（不等消费）以提升吞吐。
-- CDC 路径必须配 scoped constraint 脱离常规 setup/hold 检查：能确定延迟时用 `set_max_delay -datapath_only`（有上界），找不到时钟时退化为 `set_false_path`（无上界），格雷码多比特额外用 `set_bus_skew` 限字内偏移。
+- `resync_twophase` 是自由运行版：一个 level 令牌在两域间往返翻转，每往返一次搬一个字，靠「令牌穿两级 `async_reg` 期间数据早已稳定」保证比特一致性；适合慢变信号，抓不住脉冲。
+- `resync_twophase_handshake` 在其上加 ready/valid：`input_ready = input_level xor input_level_p1` 一行表达忙闲；结果侧采样后立即反馈（不等消费）以提升吞吐；资源多 2 LUT、2 FF。
+- 每条 CDC 路径都必须配 scoped constraint 脱离常规 setup/hold 检查：能确定延迟时用 `set_max_delay -datapath_only`（有上界），找不到时钟时退化为 `set_false_path`（无上界），格雷码多比特额外用 `set_bus_skew` 限字内偏移；预期告警用 `create_waiver` 压掉。
 - `dont_touch` 钉死数据寄存器、`async_reg` 把 level 同步链布局到同一 slice——属性与约束协同，才让「数据先稳定后采样」的时序前提在真实硅片上成立。
-
----
 
 ## 7. 下一步学习建议
 
-- **向下游走**：第 4 单元（FIFO 系列）会用到本讲的两相握手与 u3-l1 的 `resync_counter`——异步 FIFO 正是「格雷码读写指针跨域」的最大用户，读完本讲再去看 [modules/fifo/src/asynchronous_fifo.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/fifo/src/asynchronous_fifo.vhd) 会非常顺。
+- **向下游走**：[第 4 单元 FIFO 系列](u4-l1-synchronous-fifo.md)——异步 FIFO 内部正是用 `resync_counter` 同步格雷码读写指针，本讲的「多比特跨域 + bus_skew 约束」是其直接前置。
 - **向 AXI 走**：第 5 单元的 `axi_read_cdc` / `axi_write_cdc` 会把 AXI 各通道拆成异步 FIFO 跨域，是本讲握手与 FIFO 的综合应用。
-- **深入约束**：想彻底搞懂 `-datapath_only`、bus_skew 与 CDC 报告，建议读 `resync_pulse.tcl` 头注释引用的两篇 LinkedIn 文章（`reliable-cdc-constraints-1` 与 `-2-counters-fifos`），以及 AMD UG903。
-- **验证方法**：本讲的实践用到了 `bfm.axi_stream_master/slave`，第 8 单元（u8-l1）会系统讲这些 BFM 如何驱动随机化握手验证。
+- **阅读变体**：[resync_twophase_lutram.vhd](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/src/resync_twophase_lutram.vhd) 与同名 `.tcl`，看一种「用 LUTRAM 替代 FF 存数据」的面积优化变体。
+- **深入约束**：[resync_pulse.tcl](https://github.com/hdl-modules/hdl-modules/blob/0271e3b128e7fec80bb0991c31c294cb38d2cb31/modules/resync/scoped_constraints/resync_pulse.tcl) 头注释解释了「为何用这种笨办法找最小周期」「为何用 `-datapath_only`」的通用背景，本讲三份 `.tcl` 都引用了它；头注释里的 LinkedIn「Reliable CDC constraints」系列文章是最佳延伸阅读。
+- **验证方法**：本讲实践用到的 `bfm.axi_stream_master/slave`，[u8-l1](u8-l1-bfm-simulation-models.md) 会系统讲解这些 BFM 如何驱动随机化握手验证。
