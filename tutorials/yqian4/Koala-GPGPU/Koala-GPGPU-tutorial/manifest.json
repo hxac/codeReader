@@ -1,0 +1,94 @@
+{
+  "project": "Koala-GPGPU",
+  "head": "9ee908ccd4bb5dd37837aaaf1f69c17db6a96060",
+  "rationale": "本手册按\"先认识全局、再读公共基础设施、最后吃透 SM 流水线\"的顺序设计。第 1 单元从项目定位、构建运行方式、目录结构、全局参数到顶层接口，帮助零基础读者建立整体视图。第 2 单元先讲公共硬件积木（独热转二进制、仲裁器、同步 FIFO），因为它们是后续每一个流水级都依赖的底层单元，先掌握它们能让阅读核心模块时事半功倍。第 3 单元给出 SM 核心整体数据通路与 Fermi 64 位指令译码，作为理解后面两个单元的骨架。第 4–6 单元严格按真实数据流\"取指/指令缓冲 → 冒险检测/操作数收集 → 执行/写回\"的顺序，逐个拆解 9 个核心模块。第 7 单元用 Cocotb 测试与端到端逐周期追踪收口，并以\"新增一条指令\"作为综合扩展实践。讲义之间严格按照数据通路建立 depends_on 依赖，确保读者每读一篇都建立在前一篇之上；层次划分上，入门层聚焦\"是什么/怎么跑/目录在哪\"，进阶层聚焦\"模块/调用链/数据结构/握手\"，专家层聚焦\"验证/追踪/扩展与架构取舍\"。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与总体认识",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位：什么是 Koala-GPGPU",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Koala-GPGPU 是什么——一个用 SystemVerilog 模仿 NVIDIA Fermi 架构的 GPGPU，实现单 SM（streaming multiprocessor）流水线与基于 warp 的执行模型。",
+          "learning_goals": [
+            "理解项目目标与 Fermi GPU 架构背景",
+            "建立 SM、warp、寄存器堆、取指等基本概念",
+            "对照 README 的架构树建立对整体模块划分的直觉"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "gpgpu_top",
+            "sm_core"
+          ],
+          "practice_task": "阅读 README，画出 gpgpu_top → sm_core → 9 个子模块的顶层结构树，并为每个模块标注一句中文职责。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与运行测试",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解顶层 Makefile 如何把 RTL 与 test 拷贝到 build/，再用 Common.Makefile 中的 iverilog -g2012 编译、通过 cocotb VPI 插件用 vvp 运行仿真。",
+          "learning_goals": [
+            "理解 make test_integer 的完整执行流程",
+            "掌握 iverilog + vvp + cocotb 的仿真工具链",
+            "学会在 build/ 与 logs/ 中找到仿真产物与日志"
+          ],
+          "source_files": [
+            "Makefile",
+            "Common.Makefile",
+            "Main.Makefile",
+            "rtl/gpgpu.Makefile",
+            "rtl/sm_core/sm_core.Makefile"
+          ],
+          "minimal_modules": [
+            "Makefile",
+            "Common.Makefile",
+            "Main.Makefile"
+          ],
+          "practice_task": "运行 make clean && make test_integer，记录生成的 build/ 目录结构，并从日志中找到最终的寄存器验证结果（R1/R2/R3）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构导览",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "浏览 rtl/common、rtl/sm_core、test、project/altera 四个目录的作用，建立整个项目的代码地图，区分公共基础设施、SM 核心流水线、测试与 FPGA 工程的边界。",
+          "learning_goals": [
+            "掌握仓库的整体目录布局",
+            "区分公共模块、核心流水线、测试与 FPGA 工程的边界",
+            "知道每个 .sv 文件大致属于哪一层"
+          ],
+          "source_files": [
+            "README.md",
+            "rtl/common/common.Makefile",
+            "rtl/sm_core/sm_core.Makefile",
+            "project/altera/koala_gpu.qsf"
+          ],
+          "minimal_modules": [
+            "rtl/common",
+            "rtl/sm_core",
+            "test",
+            "project/altera"
+          ],
+          "practice_task": "制作一张"
+        }
+      ]
+    }
+  ]
+}
