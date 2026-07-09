@@ -1,0 +1,870 @@
+{
+  "project": "hdl-modules",
+  "head": "0271e3b128e7fec80bb0991c31c294cb38d2cb31",
+  "rationale": "本手册面向「从零开始学 FPGA/VHDL 复用 IP」的读者，按「先认识项目再深入模块」的顺序组织。第 1 单元帮助读者从零建立全局认知（项目定位、目录约定、Python/tsfpga 工具链、module_*.py 模块模式）；第 2 单元打地基，先讲贯穿全项目的 AXI-Stream 式 ready/valid 握手约定以及 common/math 的基础类型与函数包。之后按依赖关系从底层走向高层：第 3 单元讲跨时钟域 resync（CDC 是后续 FIFO/AXI 的前提），第 4 单元讲 FIFO（同步→异步→硬核封装），第 5 单元讲 AXI/AXI-Stream/AXI-Lite 三套总线，第 6 单元讲寄存器与常用流处理工具。能力具备后进入专家层：第 7 单元剖析正弦发生器与 DMA 等专用 IP，第 8 单元讲基于 VUnit/BFM 的验证方法论与资源占用回归，第 9 单元讲文档生成、综合构建流程与发布/规范。每一讲只解决一个独立主题，源码引用控制在 1–6 个真实文件，并配一个可操作的代码实践任务，讲义之间通过 depends_on 形成清晰的学习链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目导览与工程组织",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "hdl-modules 是什么：项目定位与设计哲学",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 hdl-modules 项目的定位、许可证、模块清单，以及「高质量、可复用、面积优化、用 generic 裁剪功能」的设计哲学。",
+          "learning_goals": [
+            "理解 hdl-modules 是一组可复用、同行评审的 VHDL-2008 构建块",
+            "记住 BSD 3-Clause 许可与 14 个模块的总体划分",
+            "理解用 generic 开关功能以节省 FPGA 资源的设计取向"
+          ],
+          "source_files": [
+            "readme.rst",
+            "hdl_modules/about.py",
+            "license.txt",
+            "doc/sphinx/getting_started.rst"
+          ],
+          "minimal_modules": [
+            "readme.rst",
+            "hdl_modules/about.py"
+          ],
+          "practice_task": "阅读 readme.rst 与 about.py，用一句话总结每个模块解决什么问题；在本地克隆仓库并确认 license.txt 为 BSD 3-Clause。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库布局与单个模块的目录约定",
+          "order": 2,
+          "filename": "u1-l2-repo-and-module-layout.md",
+          "level": "beginner",
+          "topic": "讲解顶层目录（modules/tools/test/doc/hdl_modules）以及每个模块内 src/test/sim/doc/rtl/scoped_constraints 的职责划分和库命名约定。",
+          "learning_goals": [
+            "掌握顶层目录的职责分工",
+            "记住单个模块目录里 src（可综合）、test（仿真）、sim（BFM）、scoped_constraints（约束）的作用",
+            "理解 VHDL 库名与模块名一致、所有文件按 VHDL-2008 处理的约定"
+          ],
+          "source_files": [
+            "doc/sphinx/getting_started.rst",
+            "modules/resync/readme.rst",
+            "modules/fifo/readme.rst"
+          ],
+          "minimal_modules": [
+            "doc/sphinx/getting_started.rst"
+          ],
+          "practice_task": "以 resync 模块为例，列出其 src/test/scoped_constraints 下各文件的归属类别，并说明哪些文件应加入综合工程、哪些只加入仿真工程。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链与依赖：如何仿真与构建",
+          "order": 3,
+          "filename": "u1-l3-toolchain-and-deps.md",
+          "level": "beginner",
+          "topic": "讲解项目依赖（tsfpga、VUnit、hdl-registers、Vivado）、Python 工具目录的入口脚本，以及手动流程与 tsfpga 流程两种使用方式。",
+          "learning_goals": [
+            "了解运行仿真/构建所需的 tsfpga、VUnit 5.0.0.dev5、hdl-registers 依赖",
+            "理解 tools/ 目录下各脚本的入口作用与 tools_env/tools_pythonpath 的角色",
+            "区分手动添加源码与通过 tsfpga get_hdl_modules() 两种集成方式"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "doc/sphinx/getting_started.rst",
+            "tools/tools_env.py",
+            "tools/tools_pythonpath.py"
+          ],
+          "minimal_modules": [
+            "tools/tools_env.py",
+            "pyproject.toml"
+          ],
+          "practice_task": "安装 vunit-hdl==5.0.0.dev5，配置 PYTHONPATH 指向仓库根目录，运行 tools/simulate.py --help 确认仿真入口可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Python 入口与 tsfpga Module 模式",
+          "order": 4,
+          "filename": "u1-l4-python-entry-and-module-pattern.md",
+          "level": "beginner",
+          "topic": "讲解 hdl_modules/__init__.py 的 get_hdl_modules() 入口，以及每个模块 module_*.py 中继承 BaseModule、用 setup_vunit 配置仿真、用 get_build_projects 配置综合的统一模式。",
+          "learning_goals": [
+            "理解 get_hdl_modules() 如何扫描 modules 目录返回 ModuleList",
+            "掌握 module_*.py 中 setup_vunit 与 get_build_projects 两个钩子的职责",
+            "认识 BaseModule 提供的 add_vunit_config、netlist_build_name 等辅助方法"
+          ],
+          "source_files": [
+            "hdl_modules/__init__.py",
+            "modules/fifo/module_fifo.py",
+            "modules/common/module_common.py"
+          ],
+          "minimal_modules": [
+            "hdl_modules/__init__.py",
+            "modules/fifo/module_fifo.py"
+          ],
+          "practice_task": "在 module_common.py 中找到 setup_vunit 调用了哪些 _setup_*_tests 方法，并解释 setup_vunit 与 get_build_projects 各自被谁调用、何时调用。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "地基：握手约定与基础包",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "贯穿全项目的 AXI-Stream 式握手约定",
+          "order": 1,
+          "filename": "u2-l1-handshake-convention.md",
+          "level": "beginner",
+          "topic": "讲解项目通用的 ready/valid 握手接口（含 data/last/strobe），以及 handshake_pipeline、handshake_mux 如何基于该约定做流水线与多路复用。",
+          "learning_goals": [
+            "理解 ready/valid 握手的语义与组合逻辑路径对时序的影响",
+            "掌握 handshake_pipeline 的 full_throughput/pipeline_control/pipeline_data 各模式",
+            "理解 handshake_mux 的轮询仲裁方式"
+          ],
+          "source_files": [
+            "modules/common/src/handshake_pipeline.vhd",
+            "modules/common/src/handshake_mux.vhd",
+            "doc/sphinx/getting_started.rst"
+          ],
+          "minimal_modules": [
+            "modules/common/src/handshake_pipeline.vhd",
+            "modules/common/src/handshake_mux.vhd"
+          ],
+          "practice_task": "实例化一个 handshake_pipeline，分别用全吞吐与降吞吐两组 generic 配置，在 testbench 中观察两种模式下的吞吐量与组合逻辑路径差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "common 基础包：types、attribute、common",
+          "order": 2,
+          "filename": "u2-l2-common-packages.md",
+          "level": "beginner",
+          "topic": "讲解 types_pkg 的数组类型与 boolean/std_logic 转换、attribute_pkg 的 Xilinx 属性与 ram_style_t 枚举，以及 common_pkg 的杂项工具。",
+          "learning_goals": [
+            "掌握 types_pkg 提供的 slv_vec_t、natural_vec_t 等数组类型与常用函数",
+            "理解 async_reg、dont_touch、ram_style 等综合属性的含义与用法",
+            "认识 ram_style_t 枚举与 to_attribute 转换函数"
+          ],
+          "source_files": [
+            "modules/common/src/types_pkg.vhd",
+            "modules/common/src/attribute_pkg.vhd",
+            "modules/common/src/common_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "modules/common/src/types_pkg.vhd",
+            "modules/common/src/attribute_pkg.vhd"
+          ],
+          "practice_task": "利用 types_pkg 的 natural_vec_t 与 sum 函数计算一组数值之和；并编写一段代码用 attribute_pkg 的 ram_style_t 指定某信号使用 block RAM。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "math 模块：常用数学函数",
+          "order": 3,
+          "filename": "u2-l3-math-module.md",
+          "level": "beginner",
+          "topic": "讲解 math_pkg 的数学工具以及 saturate_signed、truncate_round_signed、unsigned_divider 三个有符号/无符号运算实现。",
+          "learning_goals": [
+            "理解饱和（saturate）与四舍五入截断（truncate_round）的硬件实现",
+            "掌握 unsigned_divider 的无符号除法时序结构",
+            "认识 math_pkg 提供的常用常量与函数"
+          ],
+          "source_files": [
+            "modules/math/src/math_pkg.vhd",
+            "modules/math/src/saturate_signed.vhd",
+            "modules/math/src/truncate_round_signed.vhd",
+            "modules/math/src/unsigned_divider.vhd"
+          ],
+          "minimal_modules": [
+            "modules/math/src/saturate_signed.vhd",
+            "modules/math/src/unsigned_divider.vhd"
+          ],
+          "practice_task": "实例化 saturate_signed，给定上下限与一组递增输入，在 testbench 中验证输出被正确钳位；再用 unsigned_divider 完成一次多周期除法并核对商与余数。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "跨时钟域：resync",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CDC 基础：电平、脉冲、计数器的同步",
+          "order": 1,
+          "filename": "u3-l1-resync-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 resync_level 的双 async_reg 同步链、resync_pulse 的脉冲跨越时钟域、resync_counter 的格雷计数器同步以及 resync_cycles 的延迟测量。",
+          "learning_goals": [
+            "理解 metastability 与双寄存器 async_reg 同步链如何提升 MTBF",
+            "区分电平信号与脉冲信号的同步方式及各自适用场景",
+            "掌握 resync_counter 用格雷码安全同步多比特计数的原理"
+          ],
+          "source_files": [
+            "modules/resync/src/resync_level.vhd",
+            "modules/resync/src/resync_pulse.vhd",
+            "modules/resync/src/resync_counter.vhd",
+            "modules/resync/src/resync_cycles.vhd"
+          ],
+          "minimal_modules": [
+            "modules/resync/src/resync_level.vhd",
+            "modules/resync/src/resync_counter.vhd"
+          ],
+          "practice_task": "实例化 resync_level（enable_input_register=true）和 resync_pulse，在两个异步时钟域的 testbench 中验证电平稳定传递与单周期脉冲被正确采样。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "总线与握手的跨域同步及约束",
+          "order": 2,
+          "filename": "u3-l2-resync-buses-and-constraints.md",
+          "level": "intermediate",
+          "topic": "讲解 resync_twophase 两相握手与 resync_twophase_handshake 的总线同步，以及配套 scoped_constraints 中 set_false_path/set_max_delay 的作用。",
+          "learning_goals": [
+            "理解两相握手如何安全跨域传递多比特数据",
+            "认识为何多比特向量不能用简单寄存器链同步",
+            "掌握 scoped_constraints 中 set_false_path 与 set_max_delay 的使用意图"
+          ],
+          "source_files": [
+            "modules/resync/src/resync_twophase.vhd",
+            "modules/resync/src/resync_twophase_handshake.vhd",
+            "modules/resync/scoped_constraints/resync_counter.tcl",
+            "modules/resync/scoped_constraints/resync_level.tcl"
+          ],
+          "minimal_modules": [
+            "modules/resync/src/resync_twophase.vhd",
+            "modules/resync/scoped_constraints/resync_level.tcl"
+          ],
+          "practice_task": "用 resync_twophase_handshake 跨域传递一个递增的 slv 向量，在 testbench 中确认无数据丢失；对照 resync_level.tcl 解释为何需要对同步寄存器设 false_path/max_delay。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "FIFO 系列",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "同步 FIFO：多功能与面积优化",
+          "order": 1,
+          "filename": "u4-l1-synchronous-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解 fifo 实体的 AXI-Stream 式接口、用 generic 开关 last/packet_mode/drop_packet/peek_mode/output_register 等特性，以及 ram_type 对存储原语的选择。",
+          "learning_goals": [
+            "掌握 FIFO 的 ready/valid 接口与 level/almost_full/almost_empty 信号",
+            "理解各 generic 特性的功能与对面积的影响",
+            "认识 output_register 如何映射到 BRAM 硬输出寄存器以改善时序"
+          ],
+          "source_files": [
+            "modules/fifo/src/fifo.vhd",
+            "modules/fifo/doc/fifo.rst",
+            "modules/fifo/test/tb_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "modules/fifo/src/fifo.vhd"
+          ],
+          "practice_task": "实例化 fifo，启用 enable_last 与 enable_packet_mode，向其写入一个 packet，验证 read_valid 只在收到 write_last 后才拉高，并能完整读出整包。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "异步 FIFO：双时钟与指针跨域",
+          "order": 2,
+          "filename": "u4-l2-asynchronous-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解 asynchronous_fifo 的双时钟结构、用 resync_counter 同步读写指针、fifo_wrapper 的统一封装，以及异步 FIFO 的 scoped_constraints。",
+          "learning_goals": [
+            "理解异步 FIFO 用格雷码指针 + resync_counter 实现安全跨域的原理",
+            "掌握 fifo_wrapper 如何用一个实体在同步/异步模式间切换",
+            "认识异步 FIFO 约束文件对读数据寄存器 false_path 的处理"
+          ],
+          "source_files": [
+            "modules/fifo/src/asynchronous_fifo.vhd",
+            "modules/fifo/src/fifo_wrapper.vhd",
+            "modules/fifo/scoped_constraints/asynchronous_fifo.tcl"
+          ],
+          "minimal_modules": [
+            "modules/fifo/src/asynchronous_fifo.vhd",
+            "modules/fifo/src/fifo_wrapper.vhd"
+          ],
+          "practice_task": "实例化 asynchronous_fifo，用两个频率不同的时钟分别写读，验证无数据丢失；对照 asynchronous_fifo.tcl 说明对 LUTRAM 读数据寄存器设 false_path 的原因。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "hard_fifo：硬核 FIFO 原语封装",
+          "order": 3,
+          "filename": "u4-l3-hard-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解 hard_fifo 模块如何用 cleaner 的 AXI-Stream 式接口封装 Xilinx 硬 FIFO 原语（如 fifo36e2_wrapper），以及同步/异步两种封装。",
+          "learning_goals": [
+            "理解硬核 FIFO 原语相对推断 RAM 的优势与局限",
+            "掌握 hard_fifo/asynchronous_hard_fifo 的接口封装方式",
+            "认识 hard_fifo_pkg 中的公共定义"
+          ],
+          "source_files": [
+            "modules/hard_fifo/src/hard_fifo.vhd",
+            "modules/hard_fifo/src/asynchronous_hard_fifo.vhd",
+            "modules/hard_fifo/src/fifo36e2_wrapper.vhd",
+            "modules/hard_fifo/src/hard_fifo_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "modules/hard_fifo/src/hard_fifo.vhd",
+            "modules/hard_fifo/src/fifo36e2_wrapper.vhd"
+          ],
+          "practice_task": "实例化 hard_fifo 并与普通推断式 fifo 做一次资源/时序对比（可借助 tools/synthesize.py），总结硬核 FIFO 在何种场景下更优。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "AXI / AXI-Stream / AXI-Lite 总线",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AXI-Stream 模块与包定义",
+          "order": 1,
+          "filename": "u5-l1-axi-stream.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_stream_pkg 的记录/子类型定义，以及 axi_stream_fifo 如何在 AXI-Stream 接口上提供缓冲。",
+          "learning_goals": [
+            "掌握 AXI-Stream tdata/tvalid/tready/tlast/tkeep 信号的语义",
+            "理解 axi_stream_pkg 提供的类型定义如何简化接口书写",
+            "认识 axi_stream_fifo 的内部结构与 fifo 的复用关系"
+          ],
+          "source_files": [
+            "modules/axi_stream/src/axi_stream_pkg.vhd",
+            "modules/axi_stream/src/axi_stream_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "modules/axi_stream/src/axi_stream_pkg.vhd",
+            "modules/axi_stream/src/axi_stream_fifo.vhd"
+          ],
+          "practice_task": "实例化 axi_stream_fifo，通过 master BFM 写入一包带 tlast 的数据，再用 slave BFM 读出，验证数据与 last 标记一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "AXI 交叉栏、节流与流水线",
+          "order": 2,
+          "filename": "u5-l2-axi-crossbars-throttle-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_pkg 的总线定义、简单 N-to-1 读/写交叉栏的仲裁锁定机制，以及 read/write_throttle 与 read/write_pipeline 的作用。",
+          "learning_goals": [
+            "理解 simple crossbar 锁定单端口直到响应完成的小面积仲裁策略",
+            "掌握 throttle 与 pipeline 对 AXI 时序与吞吐的调节作用",
+            "认识 axi_pkg 中各通道记录的定义"
+          ],
+          "source_files": [
+            "modules/axi/src/axi_pkg.vhd",
+            "modules/axi/src/axi_simple_read_crossbar.vhd",
+            "modules/axi/src/axi_simple_write_crossbar.vhd",
+            "modules/axi/src/axi_read_throttle.vhd",
+            "modules/axi/src/axi_read_pipeline.vhd"
+          ],
+          "minimal_modules": [
+            "modules/axi/src/axi_simple_read_crossbar.vhd",
+            "modules/axi/src/axi_read_pipeline.vhd"
+          ],
+          "practice_task": "实例化 axi_simple_read_crossbar 连接两个 master 到一个 slave，发起交错读事务，观察交叉栏锁定行为并解释为何不能达到满吞吐。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "AXI 跨时钟域与通道 FIFO",
+          "order": 3,
+          "filename": "u5-l3-axi-cdc-and-fifos.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_read_cdc/axi_write_cdc 如何用异步 FIFO 跨域，以及 axi_address_fifo、axi_b_fifo/axi_r_fifo/axi_w_fifo 各通道缓冲的作用。",
+          "learning_goals": [
+            "理解 AXI 各通道（AR/R/AW/W/B）跨时钟域的实现方式",
+            "掌握按通道拆分 FIFO 以解耦地址与数据路径的设计",
+            "认识 CDC 模块对 resync/asynchronous_fifo 的复用"
+          ],
+          "source_files": [
+            "modules/axi/src/axi_read_cdc.vhd",
+            "modules/axi/src/axi_write_cdc.vhd",
+            "modules/axi/src/axi_address_fifo.vhd",
+            "modules/axi/src/axi_b_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "modules/axi/src/axi_read_cdc.vhd",
+            "modules/axi/src/axi_b_fifo.vhd"
+          ],
+          "practice_task": "实例化 axi_read_cdc，在两个时钟域间完成一次读事务，验证 AR/R 通道数据正确跨域；列出它内部复用了哪些 fifo/resync 实体。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "AXI-Lite 子系统",
+          "order": 4,
+          "filename": "u5-l4-axi-lite-subsystem.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_lite_pkg 定义、axi_lite_mux/cdc/pipeline、简单读/写交叉栏，以及 axi_to_axi_lite 的协议转换。",
+          "learning_goals": [
+            "掌握 AXI-Lite 寄存器总线的信号与握手",
+            "理解 mux/cdc/pipeline 在 Lite 子系统中的组合方式",
+            "认识 axi_to_axi_lite 如何把完整 AXI 降级为 Lite"
+          ],
+          "source_files": [
+            "modules/axi_lite/src/axi_lite_pkg.vhd",
+            "modules/axi_lite/src/axi_lite_mux.vhd",
+            "modules/axi_lite/src/axi_lite_cdc.vhd",
+            "modules/axi_lite/src/axi_to_axi_lite.vhd",
+            "modules/axi_lite/src/axi_lite_simple_read_crossbar.vhd"
+          ],
+          "minimal_modules": [
+            "modules/axi_lite/src/axi_lite_pkg.vhd",
+            "modules/axi_lite/src/axi_lite_mux.vhd",
+            "modules/axi_lite/src/axi_to_axi_lite.vhd"
+          ],
+          "practice_task": "用 axi_to_axi_lite 将一个 AXI master 接到 AXI-Lite slave，完成一次写和一次读，验证地址/数据正确转换。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "寄存器与流处理工具",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "通用寄存器文件核心",
+          "order": 1,
+          "filename": "u6-l1-register-file-core.md",
+          "level": "intermediate",
+          "topic": "讲解 register_file_pkg 的寄存器宽度/模式（r/w/r_w 等）定义、axi_lite_register_file 实体如何经 AXI-Lite 访问寄存器，以及 interrupt_register 的中断机制。",
+          "learning_goals": [
+            "掌握 register_file_pkg 中 register_mode_t 各模式的软件/硬件语义",
+            "理解 axi_lite_register_file 如何把寄存器阵列挂到 AXI-Lite 总线",
+            "认识 interrupt_register 如何聚合与清中断"
+          ],
+          "source_files": [
+            "modules/register_file/src/register_file_pkg.vhd",
+            "modules/register_file/src/axi_lite_register_file.vhd",
+            "modules/register_file/src/interrupt_register.vhd"
+          ],
+          "minimal_modules": [
+            "modules/register_file/src/register_file_pkg.vhd",
+            "modules/register_file/src/axi_lite_register_file.vhd"
+          ],
+          "practice_task": "定义一组包含 r、w、r_w 模式的寄存器，实例化 axi_lite_register_file，通过 AXI-Lite master BFM 写入并回读，验证各模式行为符合预期。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "常用流处理工具：宽度转换与握手分发",
+          "order": 2,
+          "filename": "u6-l2-stream-utilities.md",
+          "level": "intermediate",
+          "topic": "讲解 width_conversion 的位宽重整、handshake_splitter/handshake_merger 的一分多/多合一，以及 debounce、periodic_pulser 等辅助工具。",
+          "learning_goals": [
+            "掌握 width_conversion 在不同 strobe 单位下的宽窄转换逻辑",
+            "理解 handshake_splitter/merger 的分流与合流策略",
+            "认识 debounce 与 periodic_pulser 在事件处理中的用途"
+          ],
+          "source_files": [
+            "modules/common/src/width_conversion.vhd",
+            "modules/common/src/width_conversion_pkg.vhd",
+            "modules/common/src/handshake_splitter.vhd",
+            "modules/common/src/handshake_merger.vhd",
+            "modules/common/src/debounce.vhd",
+            "modules/common/src/periodic_pulser.vhd"
+          ],
+          "minimal_modules": [
+            "modules/common/src/width_conversion.vhd",
+            "modules/common/src/handshake_splitter.vhd",
+            "modules/common/src/periodic_pulser.vhd"
+          ],
+          "practice_task": "实例化 width_conversion 把窄数据流（如 8 位）拼成宽数据流（如 32 位），验证字节对齐与 strobe 语义；再用 periodic_pulser 产生周期脉冲驱动一个计数器。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "LFSR 伪随机与环形缓冲",
+          "order": 3,
+          "filename": "u6-l3-lfsr-and-ring-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解 lfsr_pkg 的最大长度抽头表、lfsr_fibonacci_single/multi 的伪随机序列生成，以及 ring_buffer_write_simple 的环形写入。",
+          "learning_goals": [
+            "理解最大长度 LFSR 的抽头表与序列周期",
+            "掌握 single/multi 抽头 LFSR 的结构差异",
+            "认识 ring_buffer_write_simple 的环形地址管理"
+          ],
+          "source_files": [
+            "modules/lfsr/src/lfsr_pkg.vhd",
+            "modules/lfsr/src/lfsr_fibonacci_single.vhd",
+            "modules/lfsr/src/lfsr_fibonacci_multi.vhd",
+            "modules/ring_buffer/src/ring_buffer_write_simple.vhd",
+            "modules/ring_buffer/src/ring_buffer_write_simple_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "modules/lfsr/src/lfsr_fibonacci_single.vhd",
+            "modules/ring_buffer/src/ring_buffer_write_simple.vhd"
+          ],
+          "practice_task": "实例化 lfsr_fibonacci_single，采集一段输出序列并验证其周期等于 2^n-1；再用 ring_buffer_write_simple 在固定深度缓冲上连续写入并观察写指针回绕。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专用 IP 深入",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "正弦发生器（DDS/NCO）",
+          "order": 1,
+          "filename": "u7-l1-sine-generator.md",
+          "level": "advanced",
+          "topic": "讲解 sine_generator 的相位累加、sine_lookup 的查表、taylor_expansion_core 的精度提升，以及 sine_calculator 的整体计算与相位抖动（dither）。",
+          "learning_goals": [
+            "理解相位累加器如何由 phase_increment 决定输出频率",
+            "掌握查表 + 泰勒展开提升 SFDR 的方法",
+            "认识分数相位截断与 dither 对频谱杂散的影响"
+          ],
+          "source_files": [
+            "modules/sine_generator/src/sine_generator.vhd",
+            "modules/sine_generator/src/sine_calculator.vhd",
+            "modules/sine_generator/src/sine_lookup.vhd",
+            "modules/sine_generator/src/taylor_expansion_core.vhd",
+            "modules/sine_generator/src/sine_generator_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "modules/sine_generator/src/sine_generator.vhd",
+            "modules/sine_generator/src/sine_calculator.vhd",
+            "modules/sine_generator/src/sine_lookup.vhd"
+          ],
+          "practice_task": "实例化 sine_generator，给定一个 phase_increment，导出若干周期的正弦/余弦样本，验证频率符合公式并估算 SFDR。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "DMA：流式写 DDR 的架构",
+          "order": 2,
+          "filename": "u7-l2-dma-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 dma_axi_write_simple 如何把 AXI-Stream 数据高效写入 DDR（S2MM），其 AXI 写路径、地址管理与对齐检查，以及带 AXI-Lite 控制的版本和仿真支持包。",
+          "learning_goals": [
+            "理解 DMA 的 S2MM 数据通路与突发写策略",
+            "掌握 buffer_start/end/read/written 地址的环形管理",
+            "认识对齐错误等状态如何上报"
+          ],
+          "source_files": [
+            "modules/dma_axi_write_simple/src/dma_axi_write_simple.vhd",
+            "modules/dma_axi_write_simple/src/dma_axi_write_simple_axi_lite.vhd",
+            "modules/dma_axi_write_simple/sim/dma_axi_write_simple_sim_pkg.vhd",
+            "modules/dma_axi_write_simple/readme.rst"
+          ],
+          "minimal_modules": [
+            "modules/dma_axi_write_simple/src/dma_axi_write_simple.vhd",
+            "modules/dma_axi_write_simple/src/dma_axi_write_simple_axi_lite.vhd"
+          ],
+          "practice_task": "在 testbench 中用流 master BLM 喂入定长 packet，配置 buffer 起止地址并使能 DMA，验证数据被写入模拟 DDR 且 written 地址正确推进。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "DMA 寄存器定义与 C++ 驱动",
+          "order": 3,
+          "filename": "u7-l3-dma-registers-and-cpp-driver.md",
+          "level": "advanced",
+          "topic": "讲解 regs_dma_axi_write_simple.toml 的寄存器/位字段定义、hdl-registers 生成的 VHDL/C++ 代码，以及 cpp 下的 zero-copy C++ 驱动如何与硬件配合。",
+          "learning_goals": [
+            "掌握 toml 中寄存器模式与位字段的声明方式",
+            "理解 hdl-registers 生成 VHDL 寄存器包与 C++ 头/实现的流程",
+            "认识 zero-copy C++ 驱动如何消费 written/read 地址"
+          ],
+          "source_files": [
+            "modules/dma_axi_write_simple/regs_dma_axi_write_simple.toml",
+            "modules/dma_axi_write_simple/cpp/dma_axi_write_simple_no_copy.cpp",
+            "modules/dma_axi_write_simple/cpp/include/dma_axi_write_simple_no_copy.h",
+            "tools/build_docs.py"
+          ],
+          "minimal_modules": [
+            "modules/dma_axi_write_simple/regs_dma_axi_write_simple.toml",
+            "modules/dma_axi_write_simple/cpp/include/dma_axi_write_simple_no_copy.h"
+          ],
+          "practice_task": "阅读 toml 列出所有寄存器及其模式；对照 C++ 头文件找到读写这些寄存器的方法，并解释 zero-copy 驱动如何根据 buffer_written_address 与 buffer_read_address 计算可消费数据量。",
+          "depends_on": [
+            "u7-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "验证方法论",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "BFM：总线功能模型仿真",
+          "order": 1,
+          "filename": "u8-l1-bfm-simulation-models.md",
+          "level": "advanced",
+          "topic": "讲解 bfm 模块提供的 AXI/AXI-Lite/AXI-Stream/handshake master 与 slave 仿真模型，以及 queue_bfm_pkg 等支撑包如何驱动随机化的握手验证。",
+          "learning_goals": [
+            "掌握 master/slave BFM 驱动事务与施加背压的方式",
+            "理解 queue/memory/integer_array 等支撑包的作用",
+            "认识 stall 概率等参数对覆盖率的影响"
+          ],
+          "source_files": [
+            "modules/bfm/sim/axi_master.vhd",
+            "modules/bfm/sim/axi_slave.vhd",
+            "modules/bfm/sim/axi_lite_master.vhd",
+            "modules/bfm/sim/axi_stream_master.vhd",
+            "modules/bfm/sim/queue_bfm_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "modules/bfm/sim/axi_master.vhd",
+            "modules/bfm/sim/axi_slave.vhd",
+            "modules/bfm/sim/queue_bfm_pkg.vhd"
+          ],
+          "practice_task": "用 axi_master 与 axi_slave BFM 搭建一个回环测试，配合随机 stall 概率验证若干读写事务的正确性与背压鲁棒性。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "VUnit 测试台模式与 generic 矩阵",
+          "order": 2,
+          "filename": "u8-l2-vunit-testbench-patterns.md",
+          "level": "advanced",
+          "topic": "讲解 module_*.py 的 setup_vunit 如何用嵌套循环与 add_vunit_config 生成 generic 组合矩阵，tb_*.vhd 的断言式自检结构，以及 test/conftest.py 的 Python 路径设置。",
+          "learning_goals": [
+            "掌握 setup_vunit 中按测试名定制 generic 的模式",
+            "理解 VUnit testbench 的 run_all/process/wait 自检写法",
+            "认识 Python 测试侧的 conftest/tools_pythonpath 约定"
+          ],
+          "source_files": [
+            "modules/fifo/module_fifo.py",
+            "modules/common/module_common.py",
+            "modules/resync/test/tb_resync_twophase.vhd",
+            "test/conftest.py"
+          ],
+          "minimal_modules": [
+            "modules/fifo/module_fifo.py",
+            "modules/resync/test/tb_resync_twophase.vhd"
+          ],
+          "practice_task": "为一个新实体编写最小 VUnit testbench，并在对应 module_*.py 的 setup_vunit 中用两三个 generic 取值的组合通过 add_vunit_config 生成多组配置。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "资源占用回归：netlist 构建与检查器",
+          "order": 3,
+          "filename": "u8-l3-resource-utilization-regression.md",
+          "level": "advanced",
+          "topic": "讲解 get_build_projects 如何用 netlist 构建工程，build_result_checker（LUT/FF/RAM/逻辑级数）把资源占用纳入 CI 回归，以及 fifo_netlist_build_wrapper 这类顶层包装的作用。",
+          "learning_goals": [
+            "理解 netlist build 作为资源/时序回归的价值",
+            "掌握 EqualTo 等 checker 如何断言具体资源数",
+            "认识最小化顶层 wrapper 用于隔离被测特性"
+          ],
+          "source_files": [
+            "modules/fifo/module_fifo.py",
+            "modules/fifo/rtl/fifo_netlist_build_wrapper.vhd",
+            "tools/build_fpga.py"
+          ],
+          "minimal_modules": [
+            "modules/fifo/module_fifo.py",
+            "modules/fifo/rtl/fifo_netlist_build_wrapper.vhd"
+          ],
+          "practice_task": "在 module_fifo.py 的 get_build_projects 中找到一组构建配置，解释每个 build_result_checker 断言的资源数对应启用了哪些 generic 特性；尝试为某一新 generic 取值预测资源变化。",
+          "depends_on": [
+            "u1-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "工具、文档与贡献",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "文档生成：build_docs 与 Sphinx",
+          "order": 1,
+          "filename": "u9-l1-documentation-generation.md",
+          "level": "advanced",
+          "topic": "讲解 tools/build_docs.py 如何调用 hdl-registers 生成 VHDL/C++ 代码、用 tsfpga 的 ModuleDocumentation/Sphinx 构建网站，以及 conf.py 与 getting_started.rst 的文档结构。",
+          "learning_goals": [
+            "理解 build_docs.py 中各 generator 的代码生成职责",
+            "掌握 Sphinx 文档的目录与 conf.py 配置",
+            "认识文档与源码头注释自动提取的关系"
+          ],
+          "source_files": [
+            "tools/build_docs.py",
+            "doc/sphinx/conf.py",
+            "doc/sphinx/getting_started.rst"
+          ],
+          "minimal_modules": [
+            "tools/build_docs.py",
+            "doc/sphinx/getting_started.rst"
+          ],
+          "practice_task": "运行 tools/build_docs.py（或阅读其逻辑），找到生成寄存器 VHDL 包与 C++ 头文件的 generator 调用，说明它们如何被集成进仿真与构建流程。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Netlist 综合与 FPGA 构建流程",
+          "order": 2,
+          "filename": "u9-l2-netlist-build-fpga-flow.md",
+          "level": "advanced",
+          "topic": "讲解 tools/synthesize.py 如何把任意实体快速综合为 netlist 做设计反馈，tools/build_fpga.py 如何驱动完整构建，以及 tools_env 定义的生成路径。",
+          "learning_goals": [
+            "掌握 synthesize.py 的 --generic 解析与多组合综合机制",
+            "理解 build_fpga.py 作为统一构建入口的角色",
+            "认识 HDL_MODULES_GENERATED 等路径约定"
+          ],
+          "source_files": [
+            "tools/synthesize.py",
+            "tools/build_fpga.py",
+            "tools/tools_env.py"
+          ],
+          "minimal_modules": [
+            "tools/synthesize.py",
+            "tools/build_fpga.py"
+          ],
+          "practice_task": "用 tools/synthesize.py 对 fifo 实体以两组不同 generic 取值做综合，比较资源报告；解释 --generic name=v1,v2 如何展开为多组构建。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "发布工程、Lint 与贡献规范",
+          "order": 3,
+          "filename": "u9-l3-release-lint-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 tools/tag_release.py 的发版流程、test/lint 下的版权/文件格式/Python lint 测试、pyproject.toml 的 ruff 配置，以及 contributing 指南。",
+          "learning_goals": [
+            "理解 tag_release.py 如何管理版本与发布说明",
+            "掌握 CI 中版权头、文件格式、ruff lint 的检查方式",
+            "认识贡献代码需要遵守的规范与测试要求"
+          ],
+          "source_files": [
+            "tools/tag_release.py",
+            "test/lint/test_copyright.py",
+            "test/lint/test_python_lint.py",
+            "doc/sphinx/contributing.rst",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "tools/tag_release.py",
+            "test/lint/test_python_lint.py",
+            "doc/sphinx/contributing.rst"
+          ],
+          "practice_task": "运行 ruff 检查项目并阅读 pyproject.toml 中的忽略规则；参照 contributing 指南，为一段新代码补齐版权头并通过 lint 测试。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
