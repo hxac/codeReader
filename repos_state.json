@@ -11912,7 +11912,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":419770,\"duration_api_ms\":158542,\"num_turns\":14,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":190593,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u8-l2": {
           "status": "done",
@@ -11942,8 +11942,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/embedeep/FREE-TPU-V3plus-for-FPGA/FREE-TPU-V3plus-for-FPGA-tutorial",
       "last_head": "1d3b64b6f0160680e6391105bdfb3739c0aba14a",
-      "last_run_at": "2026-07-09T13:03:21Z",
-      "last_error": "1 篇未完成: ['u8-l1']",
+      "last_run_at": "2026-07-09T15:03:12Z",
+      "last_error": "quota exhausted; will resume next window",
       "abandoned": []
     },
     "git/git": {
@@ -12101,7 +12101,7 @@
           "action": "new",
           "retries": 2,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":479772,\"duration_api_ms\":125357,\"num_turns\":23,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189034,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u9-l1": {
           "status": "done",
@@ -12220,7 +12220,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/git/git/git-tutorial",
       "last_head": "f85a7e662054a7b0d9070e432508831afa214b47",
-      "last_run_at": "2026-07-09T13:03:21Z",
+      "last_run_at": "2026-07-09T15:03:12Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "hdl-modules/hdl-modules": {
@@ -12595,7 +12595,7 @@
           "action": "new",
           "retries": 1,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":719646,\"duration_api_ms\":486497,\"num_turns\":30,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":181619,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u6-l1": {
           "status": "done",
@@ -12673,7 +12673,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/nvdla/hw/hw-tutorial",
       "last_head": "8e06b1b9d85aab65b40d43d08eec5ea4681ff715",
-      "last_run_at": "2026-07-09T13:03:21Z",
+      "last_run_at": "2026-07-09T15:03:12Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "NVlabs/instant-ngp": {
@@ -12726,7 +12726,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":183870,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186736,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u2-l3": {
           "status": "pending",
@@ -12870,7 +12870,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/NVlabs/instant-ngp/instant-ngp-tutorial",
       "last_head": "abe236ee00cf90cfca6e36e65c00435d5b21f50a",
-      "last_run_at": "2026-07-09T13:03:21Z",
+      "last_run_at": "2026-07-09T15:03:12Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "yqian4/Koala-GPGPU": {},
