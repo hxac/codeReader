@@ -1,7 +1,7 @@
 {
   "project": "git",
-  "head": "f85a7e662054a7b0d9070e432508831afa214b47",
-  "rationale": "git 是一个体量巨大的 C 语言项目，源码以「核心库 + builtin 子命令」的方式组织：git.c 作为总分发器查表调用 builtin/*.c，所有数据建立在「对象数据库 + 索引 + 引用」三大子系统之上。因此学习路线按三层推进。入门层（u1–u2）先让读者把项目跑起来、看懂目录结构、理解 git.c 的命令分发与 setup.c 的仓库发现机制，建立「一次 git 命令在源码里走过了哪些路径」的整体认知。进阶层（u3–u9）按数据从底层到上层的顺序讲解：对象模型与存储（blob/tree/commit/tag、松散对象、pack）→ 索引（index_state、cache-tree、sparse-index）→ 引用（ref_store、files/packed/reftable 后端、事务）→ 配置 → 版本遍历 revision.c → diff 引擎 → 工作树操作与提交/历史展示。这样读者能看清一次 add/commit/checkout/diff 在底层数据结构上的真实变化。专家层（u10–u15）进入合并、网络协议 v2、子模块/多工作树、性能优化（commit-graph/midx/bitmap/fsmonitor/trace2）、进程与基础设施（run-command/锁文件/错误处理）、以及测试框架与贡献流程，覆盖二次开发、性能取舍和参与上游所需的知识。讲义之间通过 depends_on 形成有向依赖，确保读者总是先掌握前置子系统再进入上层命令。",
+  "head": "f60db8d575adb79761d363e026fb49bddf330c73",
+  "rationale": "git 是一个体量巨大的 C 语言项目，源码以「核心库 + builtin 子命令」的方式组织：git.c 作为总分发器查表调用 builtin/*.c，所有数据建立在「对象数据库 + 索引 + 引用」三大子系统之上。因此学习路线按三层推进。入门层（u1–u2）先让读者把项目跑起来、看懂目录结构、理解 git.c 的命令分发与 setup.c 的仓库发现机制，建立「一次 git 命令在源码里走过了哪些路径」的整体认知。进阶层（u3–u9）按数据从底层到上层的顺序讲解：对象模型与存储（blob/tree/commit/tag、松散对象、pack）→ 索引（index_state、cache-tree、sparse-index）→ 引用（ref_store、files/packed/reftable 后端、事务）→ 配置 → 版本遍历 revision.c → diff 引擎 → 工作树操作与提交/历史展示。这样读者能看清一次 add/commit/checkout/diff 在底层数据结构上的真实变化。专家层（u10–u15）进入合并、网络协议 v2、子模块/多工作树、性能优化（commit-graph/midx/bitmap/fsmonitor/trace2）、进程与基础设施（run-command/锁文件/错误处理）、以及测试框架与贡献流程，覆盖二次开发、性能取舍和参与上游所需的知识。讲义之间通过 depends_on 形成有向依赖，确保读者总是先掌握前置子系统再进入上层命令。本次增量更新：相比上次 HEAD（f85a7e66），当前 HEAD（f60db8d5）仅多出一个提交，内容为向 .mailmap 增加一行贡献者邮箱映射，不触及任何源码、构建、文档或讲义所引用的文件，因此全部讲义维持 keep。",
   "units": [
     {
       "id": "u1",
@@ -34,7 +34,7 @@
           ],
           "practice_task": "阅读 README.md 与 Documentation/gittutorial.adoc，用自己的话写一段 200 字以内的说明：git 与传统版本控制系统（如 CVS/SVN）在设计理念上的两个关键差异。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -64,7 +64,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -93,7 +93,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -122,7 +122,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -158,7 +158,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -187,7 +187,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -215,7 +215,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -253,7 +253,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -283,7 +283,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -313,7 +313,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -350,7 +350,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -379,7 +379,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -407,7 +407,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -443,7 +443,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -472,7 +472,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -501,7 +501,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -537,7 +537,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -566,7 +566,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -604,7 +604,7 @@
             "u3-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -633,7 +633,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -671,7 +671,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -700,7 +700,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -737,7 +737,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -767,7 +767,7 @@
             "u4-l1",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -797,7 +797,7 @@
             "u4-l1",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -828,7 +828,7 @@
             "u9-l1",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -866,7 +866,7 @@
             "u9-l2",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -895,7 +895,7 @@
           "depends_on": [
             "u9-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -933,7 +933,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -963,7 +963,7 @@
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -993,7 +993,7 @@
           "depends_on": [
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1031,7 +1031,7 @@
             "u9-l2",
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1060,7 +1060,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1098,7 +1098,7 @@
             "u7-l2",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l2",
@@ -1128,7 +1128,7 @@
             "u3-l3",
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l3",
@@ -1157,7 +1157,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1194,7 +1194,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l2",
@@ -1223,7 +1223,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l3",
@@ -1250,7 +1250,7 @@
           ],
           "practice_task": "在源码中找出 N_() 与 _() 包裹的字符串，阅读 gettext.c 说明翻译如何按 locale 加载 po 文件。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1287,7 +1287,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u15-l2",
@@ -1316,7 +1316,7 @@
           "depends_on": [
             "u15-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u15-l3",
@@ -1345,7 +1345,7 @@
           "depends_on": [
             "u15-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

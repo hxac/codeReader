@@ -1,0 +1,1114 @@
+{
+  "project": "ktransformers",
+  "head": "cb9f47d142a507cac5d74450b30463d2e8d1cf58",
+  "rationale": "本项目是面向 MoE 大模型的 CPU-GPU 异构推理/微调框架，且仓库已重组：根目录的 ktransformers 是轻量 shim 包，真实运行时在 kt-kernel/，旧一体化框架归档于 archive/。因此学习路线以 kt-kernel 为核心，按\"先认知、再构建、后用 CLI、再读 Python API、再进后端与集成、最后下探 C++/CUDA/SFT 内核与测试\"的顺序展开三层。入门层（单元1-3）帮读者建立项目定位、仓库结构、构建安装与 kt CLI 使用；进阶层（单元4-7）讲清 KTMoEWrapper 工厂、CPUInfer 引擎、四类后端、权重加载、SGLang 集成、专家调度与权重量化；专家层（单元8-11）下探 pybind 绑定、AMX/AVX/llamafile/moe_kernel/kvcache 算子、CUDA 路径、SFT 训练子系统及性能测试与二次开发。单元划分对应真实目录边界，讲义间通过 depends_on 形成 DAG，每篇只解决一个主题并配真实源码与实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认知与仓库结构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "KTransformers 项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清 KTransformers 是什么：面向 MoE 大模型的 CPU-GPU 异构推理与微调框架，以及推理（kt-kernel）与微调（SFT）两条主线。",
+          "learning_goals": [
+            "理解 CPU-GPU 异构推理（热专家在 GPU、冷专家在 CPU）的核心思想",
+            "区分 kt-kernel 推理与 LLaMA-Factory 集成 SFT 两条能力",
+            "了解项目维护方与应用场景"
+          ],
+          "source_files": [
+            "README.md",
+            "README_ZH.md",
+            "kt-kernel/README.md"
+          ],
+          "minimal_modules": [
+            "项目概述",
+            "能力矩阵",
+            "性能示例"
+          ],
+          "practice_task": "阅读 README，用自己的话写出 KTransformers 解决的三个核心问题，并列举它支持的两类用户能力及各自入口文件。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与代码组织",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库顶层与 kt-kernel 子目录结构，说明 archive/ 与 kt-kernel/ 的关系，定位 python/、operators/、cpu_backend/、cuda/、scripts/ 等核心目录。",
+          "learning_goals": [
+            "掌握仓库顶层与 kt-kernel 内部目录布局",
+            "理解为何旧框架归档到 archive/，新代码集中在 kt-kernel/",
+            "能快速定位推理内核、CLI、SFT、构建脚本所在位置"
+          ],
+          "source_files": [
+            "README.md",
+            "kt-kernel/README.md",
+            "kt-kernel/pyproject.toml"
+          ],
+          "minimal_modules": [
+            "顶层目录",
+            "kt-kernel 子目录",
+            "归档目录说明"
+          ],
+          "practice_task": "绘制一张仓库目录树（到二级），标注每个目录的职责，并指出推理 Python 包、C++ 算子、CUDA 算子分别位于何处。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层 shim 包与安装入口",
+          "order": 3,
+          "filename": "u1-l3-top-level-package.md",
+          "level": "beginner",
+          "topic": "讲解根目录 ktransformers.py 轻量 shim、setup.py 的 extras（[sft]、[sglang]）、version.py 与 pyproject.toml 如何把安装转发到 kt-kernel。",
+          "learning_goals": [
+            "理解 pip install ktransformers 实际安装的是 kt-kernel",
+            "掌握 [sft] 与 [sglang] 两个 extras 的作用",
+            "了解 has_sft_support() 的检测逻辑"
+          ],
+          "source_files": [
+            "ktransformers.py",
+            "setup.py",
+            "pyproject.toml",
+            "version.py"
+          ],
+          "minimal_modules": [
+            "shim 模块",
+            "extras 依赖",
+            "版本管理"
+          ],
+          "practice_task": "在本地执行 python -c \"import ktransformers; print(ktransformers.__version__, ktransformers.has_sft_support())\"，记录输出并解释每个值的来源。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "构建与安装",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "安装方式总览",
+          "order": 1,
+          "filename": "u2-l1-installation-overview.md",
+          "level": "beginner",
+          "topic": "对比 PyPI 预编译 wheel 与源码编译两种安装路径，介绍根目录 install.sh 与 kt-kernel/install.sh、autosetup.sh 的分工。",
+          "learning_goals": [
+            "区分 pip install kt-kernel 与源码 ./install.sh 的适用场景",
+            "理解 wheel 内置多 CPU 变体与静态 CUDA 运行时",
+            "掌握安装后用 kt version 与 import kt_kernel 验证的方法"
+          ],
+          "source_files": [
+            "install.sh",
+            "kt-kernel/install.sh",
+            "kt-kernel/autosetup.sh",
+            "kt-kernel/README.md"
+          ],
+          "minimal_modules": [
+            "PyPI 安装",
+            "源码安装",
+            "验证步骤"
+          ],
+          "practice_task": "按 README 用 pip 安装 kt-kernel，运行 kt version 与 import kt_kernel 打印 __cpu_variant__ 与 __version__，截图或记录结果。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "构建系统与 CPU 指令集配置",
+          "order": 2,
+          "filename": "u2-l2-build-cmake-cpu.md",
+          "level": "beginner",
+          "topic": "讲解 CMakeLists.txt 的构建选项（CUDA/AMX/KML/MOE_KERNEL 等）、CPUINFER_* 环境变量与 cmake/DetectCPU.cmake 的指令集检测。",
+          "learning_goals": [
+            "掌握 KTRANSFORMERS_USE_CUDA、KTRANSFORMERS_CPU_USE_AMX 等关键开关",
+            "理解 CPUINFER_CPU_INSTRUCT（NATIVE/AVX512/AVX2/FANCY）与多变体构建",
+            "了解 DetectCPU.cmake 如何从 /proc/cpuinfo 自动探测能力"
+          ],
+          "source_files": [
+            "kt-kernel/CMakeLists.txt",
+            "kt-kernel/CMakePresets.json",
+            "kt-kernel/cmake/DetectCPU.cmake",
+            "kt-kernel/install.sh"
+          ],
+          "minimal_modules": [
+            "CMake 选项",
+            "指令集检测",
+            "环境变量"
+          ],
+          "practice_task": "用 --manual 模式配置一次 AVX2+AMX=OFF 的可分发构建，列出你设置的环境变量并解释每个的作用。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "运行时 CPU 变体检测与加载",
+          "order": 3,
+          "filename": "u2-l3-cpu-variant-detect.md",
+          "level": "beginner",
+          "topic": "讲解 python/_cpu_detect.py 如何在 import 时探测 CPU 特性、选择最优 .so 变体并支持回退链与 KT_KERNEL_CPU_VARIANT 覆盖。",
+          "learning_goals": [
+            "理解 amx/avx512_bf16/.../avx2 变体的优先级与判定",
+            "掌握多变体 .so 与单变体 .so 的加载与回退链",
+            "会用 KT_KERNEL_DEBUG 与 KT_KERNEL_CPU_VARIANT 排查加载问题"
+          ],
+          "source_files": [
+            "kt-kernel/python/_cpu_detect.py",
+            "kt-kernel/python/__init__.py"
+          ],
+          "minimal_modules": [
+            "特性探测",
+            "扩展加载",
+            "回退链"
+          ],
+          "practice_task": "设置 KT_KERNEL_DEBUG=1 后 import kt_kernel，观察打印的检测与加载过程；再强制 KT_KERNEL_CPU_VARIANT=avx2 重复一次，对比差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "KT CLI 入门",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "KT CLI 总览与入口结构",
+          "order": 1,
+          "filename": "u3-l1-cli-overview.md",
+          "level": "beginner",
+          "topic": "讲解 kt 命令行工具的整体结构：typer 框架、console-script 入口、子命令注册、首运行向导与 i18n。",
+          "learning_goals": [
+            "掌握 kt run/chat/model/doctor/config/version 等子命令用途",
+            "理解 pyproject.toml 中 kt 入点与 cli/main.py 的关系",
+            "了解 i18n 与 shell 补全机制"
+          ],
+          "source_files": [
+            "kt-kernel/python/cli/main.py",
+            "kt-kernel/pyproject.toml",
+            "kt-kernel/python/cli/i18n.py"
+          ],
+          "minimal_modules": [
+            "入口与子命令",
+            "首运行向导",
+            "国际化"
+          ],
+          "practice_task": "运行 kt --help 与 kt version，列出所有子命令，并用 kt config init 走一遍首运行向导。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "用 kt run 启动推理服务",
+          "order": 2,
+          "filename": "u3-l2-kt-run-launch.md",
+          "level": "beginner",
+          "topic": "讲解 commands/run.py 如何把模型名解析为路径、交互式收集参数，并拼装 python -m sglang.launch_server 命令启动 CPU-GPU 异构推理。",
+          "learning_goals": [
+            "理解 kt run 从模型名到 sglang 启动命令的完整流程",
+            "掌握 _build_sglang_command 注入的 kt-* 参数",
+            "了解交互式配置与未知参数透传机制"
+          ],
+          "source_files": [
+            "kt-kernel/python/cli/commands/run.py",
+            "kt-kernel/python/cli/utils/run_interactive.py",
+            "kt-kernel/python/cli/utils/sglang_checker.py"
+          ],
+          "minimal_modules": [
+            "模型解析",
+            "参数收集",
+            "命令拼装"
+          ],
+          "practice_task": "用 kt run 选择一个已注册或本地模型（可先用 --help 查看选项），打印最终将执行的 sglang 启动命令（不真正启动大模型也可只观察命令构造）。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "模型管理与配置",
+          "order": 3,
+          "filename": "u3-l3-model-config-mgmt.md",
+          "level": "beginner",
+          "topic": "讲解 commands/model.py 的用户模型注册表、scan/add/edit/verify/download，以及 commands/config.py 与 config/settings.py 的配置文件管理。",
+          "learning_goals": [
+            "理解 user_models.yaml 注册表与内置 ModelRegistry 的区别",
+            "掌握 kt model scan/add/list 与 kt config show/set 的用法",
+            "了解配置文件 ~/.ktransformers/config.yaml 的结构"
+          ],
+          "source_files": [
+            "kt-kernel/python/cli/commands/model.py",
+            "kt-kernel/python/cli/commands/config.py",
+            "kt-kernel/python/cli/config/settings.py",
+            "kt-kernel/python/cli/utils/user_model_registry.py"
+          ],
+          "minimal_modules": [
+            "模型注册表",
+            "配置管理",
+            "内置模型库"
+          ],
+          "practice_task": "用 kt model add 登记一个本地模型目录，再 kt config set 修改一项服务器配置并 kt config show 查看结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Python 推理 API",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "KTMoEWrapper 工厂与后端分发",
+          "order": 1,
+          "filename": "u4-l1-ktmoewrapper-factory.md",
+          "level": "intermediate",
+          "topic": "讲解 experts.py 中 KTMoEWrapper 作为工厂接口，依据 mode 与 method 分发到 AMX/Native/Llamafile/General 后端，并列出推理与 SFT 方法集合。",
+          "learning_goals": [
+            "理解 KTMoEWrapper.__new__ 的工厂分发逻辑",
+            "掌握 INFERENCE_METHODS 与 SFT_METHODS 的分类",
+            "了解 method 到 backend_cls 的映射关系"
+          ],
+          "source_files": [
+            "kt-kernel/python/experts.py",
+            "kt-kernel/python/__init__.py"
+          ],
+          "minimal_modules": [
+            "工厂接口",
+            "方法集合",
+            "后端选择"
+          ],
+          "practice_task": "写一段脚本尝试用不同 method 构造 KTMoEWrapper（可用小尺寸假参数），观察分发到哪个 backend 类，并故意传非法 method 触发报错。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "BaseMoEWrapper 与 CPUInfer 引擎",
+          "order": 2,
+          "filename": "u4-l2-base-wrapper-cpuinfer.md",
+          "level": "intermediate",
+          "topic": "讲解 experts_base.py 中 _MoEBase 如何通过 WorkerPoolConfig 创建 CPUInfer 单例，以及 BaseMoEWrapper 的初始化与配置校验。",
+          "learning_goals": [
+            "理解 CPUInfer 单例与 WorkerPoolConfig 的 NUMA 子池配置",
+            "掌握 subpool_count/subpool_numa_map/subpool_thread_count 的含义",
+            "了解 _validate_base_config 的约束"
+          ],
+          "source_files": [
+            "kt-kernel/python/experts_base.py",
+            "kt-kernel/python/experts.py"
+          ],
+          "minimal_modules": [
+            "CPUInfer 单例",
+            "WorkerPoolConfig",
+            "配置校验"
+          ],
+          "practice_task": "阅读 _get_cpu_infer，计算当 cpuinfer_threads=64、threadpool_count=2 时每个子池的线程数，并解释 numa_nodes 为 None 时的默认映射。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "CPU 缓冲区与异步前向",
+          "order": 3,
+          "filename": "u4-l3-cpu-buffer-async-forward.md",
+          "level": "intermediate",
+          "topic": "讲解 KExpertsCPUBuffer 的 pinned memory 双缓冲管理，以及 submit_forward/sync_forward/forward 的异步提交与 CUDA 流同步。",
+          "learning_goals": [
+            "理解 pinned memory 双缓冲与 capture batch sizes 的作用",
+            "掌握 submit_forward/sync_forward 的非阻塞执行模型",
+            "了解 forward_task 与 submit_with_cuda_stream 的协作"
+          ],
+          "source_files": [
+            "kt-kernel/python/experts_base.py"
+          ],
+          "minimal_modules": [
+            "缓冲区管理",
+            "异步提交",
+            "流同步"
+          ],
+          "practice_task": "用 set_capture_batch_sizes([1,2,4,8]) 配置缓冲，画出 submit_forward 中 current_slot/next_slot 的双缓冲流转示意，并解释为何要 buffer_depth=2。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "GPU 专家掩码与放置",
+          "order": 4,
+          "filename": "u4-l4-gpu-expert-mask.md",
+          "level": "intermediate",
+          "topic": "讲解 generate_gpu_experts_masks 基于激活频率选 top-k 专家放 GPU，以及 gpu_experts_mask 在 BaseMoEWrapper 中的处理与物理-逻辑映射。",
+          "learning_goals": [
+            "理解激活频率表到 GPU 掩码的 top-k 选择",
+            "掌握 gpu_experts_mask 的形状与 pinned memory 处理",
+            "了解 physical_to_logical_map 的作用"
+          ],
+          "source_files": [
+            "kt-kernel/python/experts_base.py",
+            "kt-kernel/python/experts.py"
+          ],
+          "minimal_modules": [
+            "掩码生成",
+            "掩码处理",
+            "专家映射"
+          ],
+          "practice_task": "构造一个 (num_layers=2, num_experts=4) 的假激活频率张量，调用 generate_gpu_experts_masks(num_gpu_experts=3) 并验证哪些专家被放到 GPU。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "后端实现与权重加载",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AMX 与 Native 后端实现",
+          "order": 1,
+          "filename": "u5-l1-amx-native-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 utils/amx.py 中 AMXMoEWrapper（AMXINT4/INT8）与 NativeMoEWrapper（FP8/BF16/RAWINT4/MXFP4 等），以及 AMX/AVX2/AVXVNNI 后端选择逻辑。",
+          "learning_goals": [
+            "理解 AMXMoEWrapper 与 NativeMoEWrapper 的职责划分",
+            "掌握 _select_gptq_int4_backend/_select_rawint4_backend 的回退选择",
+            "了解各类 *_MOE C++ 类的可用性探测"
+          ],
+          "source_files": [
+            "kt-kernel/python/utils/amx.py",
+            "kt-kernel/python/experts.py"
+          ],
+          "minimal_modules": [
+            "AMX 后端",
+            "Native 后端",
+            "后端选择"
+          ],
+          "practice_task": "梳理 amx.py 中 method 到具体 *_MOE 类的映射表，并说明 KT_RAWINT4_BACKEND=amx 与默认自动选择的差异。",
+          "depends_on": [
+            "u4-l2",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Llamafile GGUF 后端",
+          "order": 2,
+          "filename": "u5-l2-llamafile-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 utils/llamafile.py 中 LlamafileMoEWrapper 如何从 GGUF 加载权重、QK_K 对齐的 TP 切分与 MOEConfig 配置。",
+          "learning_goals": [
+            "理解 GGUFLoader 单例与 ffn_gate/up/down_exps 权重加载",
+            "掌握 moe_intermediate_size 必须整除 QK_K=256 的 TP 切分",
+            "了解 Llamafile 不支持在线量化的原因"
+          ],
+          "source_files": [
+            "kt-kernel/python/utils/llamafile.py",
+            "kt-kernel/python/utils/loader.py"
+          ],
+          "minimal_modules": [
+            "GGUF 加载",
+            "TP 切分",
+            "MoE 配置"
+          ],
+          "practice_task": "给定 moe_intermediate_size=14336、threadpool_count=2，手算每个 TP 分到的 blocks 与 size，验证 Llamafile 的 TP 切分逻辑。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "通用 MoE Kernel 后端",
+          "order": 3,
+          "filename": "u5-l3-general-moe-kernel.md",
+          "level": "intermediate",
+          "topic": "讲解 utils/moe_kernel.py 中 GeneralMoEWrapper 支持 MOE_INT4/MOE_INT8，使用 SafeTensorLoader 加载合并权重并支持在线量化保存。",
+          "learning_goals": [
+            "理解 Int4_KERNEL_MOE/Int8_KERNEL_MOE 的选择",
+            "掌握合并 safetensors 权重的指针收集与 NUMA 布局",
+            "了解 cpu_save 在线量化保存路径"
+          ],
+          "source_files": [
+            "kt-kernel/python/utils/moe_kernel.py",
+            "kt-kernel/python/utils/loader.py"
+          ],
+          "minimal_modules": [
+            "通用后端",
+            "SafeTensor 加载",
+            "在线量化"
+          ],
+          "practice_task": "对比 GeneralMoEWrapper 的 load_weights 与 load_weights_from_tensors 两条路径，说明 save/load 标志如何切换量化与加载。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "权重加载器体系",
+          "order": 4,
+          "filename": "u5-l4-weight-loaders.md",
+          "level": "intermediate",
+          "topic": "讲解 utils/loader.py 中 SafeTensorLoader、GGUFLoader、FP8/BF16/GPTQ/MXFP4/MXFP8 等多种加载器的设计与 NUMA 感知布局。",
+          "learning_goals": [
+            "理解不同权重格式对应的 Loader 类",
+            "掌握 NUMA 感知的权重切分与 numa.{idx} 命名",
+            "了解加载器单例化与各后端的复用关系"
+          ],
+          "source_files": [
+            "kt-kernel/python/utils/loader.py",
+            "kt-kernel/python/utils/amx.py",
+            "kt-kernel/python/utils/llamafile.py"
+          ],
+          "minimal_modules": [
+            "Loader 类层次",
+            "NUMA 布局",
+            "单例复用"
+          ],
+          "practice_task": "列出 loader.py 中所有 Loader 子类及其服务的 method，画一张 method→Loader→后端 的对应关系图。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "SGLang 集成与专家调度",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "SGLang 集成与 kt-* 参数",
+          "order": 1,
+          "filename": "u6-l1-sglang-integration.md",
+          "level": "intermediate",
+          "topic": "讲解 kt-kernel 与 sglang-kt fork 的集成方式，以及 --kt-method/--kt-weight-path/--kt-cpuinfer/--kt-threadpool-count 等参数的语义与取值。",
+          "learning_goals": [
+            "理解为何必须用 sglang-kt 而非官方 sglang",
+            "掌握各 kt-* 参数的取值与调优原则",
+            "了解 GPU 权重与 CPU 权重的分工"
+          ],
+          "source_files": [
+            "kt-kernel/README.md",
+            "kt-kernel/python/cli/commands/run.py"
+          ],
+          "minimal_modules": [
+            "集成安装",
+            "kt 参数",
+            "权重准备"
+          ],
+          "practice_task": "参照 README 的 Qwen3-30B-A3B 示例，为你的硬件写出一份 AMXINT8 后端的 sglang.launch_server 启动命令并解释每个 kt-* 参数。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "专家放置策略与动态更新",
+          "order": 2,
+          "filename": "u6-l2-expert-placement.md",
+          "level": "intermediate",
+          "topic": "讲解 uniform/frequency/front-loading/random 四种专家放置策略，以及 layerwise prefill 下的动态专家更新机制。",
+          "learning_goals": [
+            "理解四种初始放置策略的适用场景与数据依赖",
+            "掌握 kt-enable-dynamic-expert-update 的触发条件",
+            "了解 kt-gpu-prefill-token-threshold 对 prefill 策略的影响"
+          ],
+          "source_files": [
+            "kt-kernel/README.md",
+            "kt-kernel/python/experts_base.py"
+          ],
+          "minimal_modules": [
+            "放置策略",
+            "动态更新",
+            "prefill 阈值"
+          ],
+          "practice_task": "对比 uniform 与 frequency 策略的优劣，说明 frequency 策略为何需要 --init-expert-location 统计文件，并描述动态更新在低 GPU 专家比例下的收益。",
+          "depends_on": [
+            "u4-l4",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "NUMA 感知线程池",
+          "order": 3,
+          "filename": "u6-l3-numa-thread-pool.md",
+          "level": "intermediate",
+          "topic": "讲解 cpu_backend 的 WorkerPool/InNumaPool/task_queue 设计，以及 threadpool_count 与 NUMA 节点数的关系和 Python 侧配置。",
+          "learning_goals": [
+            "理解 NUMA 子池如何提升内存带宽利用",
+            "掌握 threadpool_count 应等于 NUMA 节点数而非 CPU 数",
+            "了解 subpool_numa_map 与 numa_nodes 显式映射"
+          ],
+          "source_files": [
+            "kt-kernel/cpu_backend/worker_pool.h",
+            "kt-kernel/cpu_backend/worker_pool.cpp",
+            "kt-kernel/python/experts_base.py"
+          ],
+          "minimal_modules": [
+            "WorkerPool",
+            "NUMA 子池",
+            "任务队列"
+          ],
+          "practice_task": "用 lscpu 查看一台多插槽机器的 NUMA 节点数与物理核数，据此给出 kt-threadpool-count 与 kt-cpuinfer 的推荐值并说明理由。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "延迟专家与流水线执行",
+          "order": 4,
+          "filename": "u6-l4-deferred-experts-pipelining.md",
+          "level": "intermediate",
+          "topic": "讲解 max_deferred_experts_per_token 与 select_deferred_experts 如何把部分专家延迟到下一 slot 执行，实现 CPU/GPU 流水线重叠。",
+          "learning_goals": [
+            "理解 immediate/deferred 专家划分与 protected_k 机制",
+            "掌握延迟专家数对延迟与精度的影响区间",
+            "了解 _layer_has_pending_deferred 的跨层状态"
+          ],
+          "source_files": [
+            "kt-kernel/python/experts_base.py"
+          ],
+          "minimal_modules": [
+            "专家延迟选择",
+            "双缓冲流水线",
+            "跨层状态"
+          ],
+          "practice_task": "追踪 submit_forward 在 max_deferred_experts_per_token=2、num_experts_per_tok=8 时的 immediate/deferred 划分，画出 current_slot/next_slot 的流水线时序。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "权重量化与原生精度",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "CPU 权重量化工具",
+          "order": 1,
+          "filename": "u7-l1-cpu-weight-quant.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/convert_cpu_weights.py 将 BF16/FP16/FP8 权重量化为 AMX 友好的 INT4/INT8，并按 NUMA 布局写出 safetensors。",
+          "learning_goals": [
+            "理解 --quant-method int4/int8 与 --input-type 的组合",
+            "掌握 NUMA 感知的 blk.{layer}.ffn_{proj}_exps.{expert}.numa.{idx} 输出布局",
+            "了解 --no-merge-safetensor 低内存模式与 --resume-layer"
+          ],
+          "source_files": [
+            "kt-kernel/scripts/convert_cpu_weights.py",
+            "kt-kernel/scripts/README.md"
+          ],
+          "minimal_modules": [
+            "量化方法",
+            "NUMA 输出布局",
+            "低内存模式"
+          ],
+          "practice_task": "用一个小模型目录跑一次 convert_cpu_weights.py 生成 INT8 权重（可用 --no-merge-safetensor），检查输出文件命名是否符合 NUMA 布局约定。",
+          "depends_on": [
+            "u5-l4",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "GPU 权重量化工具",
+          "order": 2,
+          "filename": "u7-l2-gpu-weight-quant.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/convert_gpu_weights.py 用 llmcompressor 对热专家做 GPTQ/RTN 的 W4A16/W8A16 量化，以及显存需求差异。",
+          "learning_goals": [
+            "理解 GPTQ 与 RTN 的精度/速度/显存权衡",
+            "掌握 W4A16/W8A16 量化类型与校准数据配置",
+            "了解 --max_gpu_memory 与 OOM 应对策略"
+          ],
+          "source_files": [
+            "kt-kernel/scripts/convert_gpu_weights.py",
+            "kt-kernel/scripts/README.md"
+          ],
+          "minimal_modules": [
+            "GPTQ/RTN",
+            "量化类型",
+            "显存管理"
+          ],
+          "practice_task": "针对 24GB 显卡，给出一次 GPTQ W4A16 量化的推荐 --max_gpu_memory 与 --num_calibration_samples，并解释为何要预留约 50% 显存。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "原生精度后端",
+          "order": 3,
+          "filename": "u7-l3-native-precision-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 FP8/BF16/RAWINT4/MXFP4/MXFP8 等原生精度后端如何让 CPU 与 GPU 共享同一份权重，以及 layerwise prefill 策略。",
+          "learning_goals": [
+            "理解原生精度后端共享权重省内存的核心优势",
+            "掌握各原生 method 对 CPU 指令集的要求",
+            "了解 swiglu_limit/swiglu_alpha 等 MXFP4/MXFP8 专属参数"
+          ],
+          "source_files": [
+            "kt-kernel/python/utils/amx.py",
+            "kt-kernel/README.md"
+          ],
+          "minimal_modules": [
+            "原生后端",
+            "指令集要求",
+            "prefill 策略"
+          ],
+          "practice_task": "对比 RAWINT4 与 AMXINT4 的权重来源与适用模型，说明为何原生后端能省去额外 CPU 量化权重，并指出各自需要的 CPU 指令集。",
+          "depends_on": [
+            "u5-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "C++ 内核与绑定",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "pybind11 绑定层",
+          "order": 1,
+          "filename": "u8-l1-pybind-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 ext_bindings.cpp 暴露的 CPUInfer、WorkerPoolConfig、MOEConfig 及各 *_MOE 类，以及 moe/mlp/linear/mla/kvcache 子模块结构。",
+          "learning_goals": [
+            "理解 ext_bindings.cpp 的模块与子模块组织",
+            "掌握 CPUInfer 的 submit/sync/submit_with_cuda_stream 接口",
+            "了解 MOEConfig 字段如何对应 Python 侧配置"
+          ],
+          "source_files": [
+            "kt-kernel/ext_bindings.cpp",
+            "kt-kernel/operators/common.hpp"
+          ],
+          "minimal_modules": [
+            "模块结构",
+            "CPUInfer 接口",
+            "MOEConfig"
+          ],
+          "practice_task": "在 ext_bindings.cpp 中定位 CPUInfer 与 MOEConfig 的绑定代码，列出 MOEConfig 暴露给 Python 的至少 8 个字段并说明用途。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "AMX 与 AVX2 算子实现",
+          "order": 2,
+          "filename": "u8-l2-amx-avx-operators.md",
+          "level": "advanced",
+          "topic": "讲解 operators/amx 与 operators/avx2 下针对不同量化类型的 MoE 算子头文件，以及 amx/la 低层 kernel。",
+          "learning_goals": [
+            "理解 bf16/fp8/mxfp8/awq 等 MoE 算子的实现分层",
+            "掌握 AMX 与 AVX2 后端的算子对应关系",
+            "了解 amx/la 下 amx_kernels/amx_buffers 的职责"
+          ],
+          "source_files": [
+            "kt-kernel/operators/amx/bf16-moe.hpp",
+            "kt-kernel/operators/amx/fp8-moe.hpp",
+            "kt-kernel/operators/amx/la/amx_kernels.hpp",
+            "kt-kernel/operators/avx2/bf16-moe.hpp"
+          ],
+          "minimal_modules": [
+            "AMX 算子",
+            "AVX2 算子",
+            "低层 kernel"
+          ],
+          "practice_task": "对比 operators/amx 与 operators/avx2 下同名算子头文件，列出 AVX2 作为回退后端缺少哪些 AMX 专属能力。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Llamafile 与通用 MoE Kernel 算子",
+          "order": 3,
+          "filename": "u8-l3-llamafile-moe-kernel-operators.md",
+          "level": "advanced",
+          "topic": "讲解 operators/llamafile 的 moe/mlp/linear/mla 实现，以及 operators/moe_kernel 通过 api/la/mat_kernel 接入外部矩阵库（BLIS/KML）的框架。",
+          "learning_goals": [
+            "理解 llamafile 算子在通用 CPU 上的角色",
+            "掌握 moe_kernel 的 api/la/mat_kernel 三层抽象",
+            "了解如何通过 mat_kernel 接入 BLIS(AMD) 或 KML(ARM)"
+          ],
+          "source_files": [
+            "kt-kernel/operators/llamafile/moe.hpp",
+            "kt-kernel/operators/moe_kernel/moe.hpp",
+            "kt-kernel/operators/moe_kernel/api/mat_kernel.h",
+            "kt-kernel/operators/moe_kernel/mat_kernel/batch_gemm_api.hpp"
+          ],
+          "minimal_modules": [
+            "llamafile 算子",
+            "moe_kernel 框架",
+            "矩阵库接入"
+          ],
+          "practice_task": "梳理 operators/moe_kernel 的目录结构，说明 mat_kernel 抽象如何让同一 MoE 逻辑在 AMD BLIS 与 ARM KML 上复用。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "KV Cache 与 MLA 注意力算子",
+          "order": 4,
+          "filename": "u8-l4-kvcache-mla-operators.md",
+          "level": "advanced",
+          "topic": "讲解 operators/kvcache 的分页 KV 缓存与注意力实现，以及 MLA（Multi-head Latent Attention）算子和 rope。",
+          "learning_goals": [
+            "理解 KVCacheConfig 与 AnchorType/RetrievalType 的设计",
+            "掌握 kvcache_attn/read_write/load_dump 的职责",
+            "了解 MLA 与 rope 算子在 DeepSeek 类模型中的作用"
+          ],
+          "source_files": [
+            "kt-kernel/operators/kvcache/kvcache.h",
+            "kt-kernel/operators/kvcache/kvcache_attn.cpp",
+            "kt-kernel/operators/llamafile/mla.hpp",
+            "kt-kernel/operators/rope.hpp"
+          ],
+          "minimal_modules": [
+            "KV 缓存",
+            "MLA 注意力",
+            "RoPE"
+          ],
+          "practice_task": "阅读 kvcache.h 中的 AnchorType 与 RetrievalType 枚举，说明它们如何支撑不同的前缀缓存/检索策略。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "CUDA 与 GPU 路径",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "CUDA 绑定与 MoE 路由",
+          "order": 1,
+          "filename": "u9-l1-cuda-binding-moe-routing.md",
+          "level": "advanced",
+          "topic": "讲解 cuda/binding.cpp 暴露的 KTransformersOps 模块，以及 cuda/moe 的 top-k softmax 路由核如何为 MoE 选择专家。",
+          "learning_goals": [
+            "理解 CUDA 侧 KTransformersOps 绑定的作用",
+            "掌握 moe_topk_softmax 核在专家路由中的位置",
+            "了解 GPU 侧路由与 CPU 侧专家计算的协作"
+          ],
+          "source_files": [
+            "kt-kernel/cuda/binding.cpp",
+            "kt-kernel/cuda/moe/moe_topk_softmax_kernels.cu",
+            "kt-kernel/cuda/moe/ops.h"
+          ],
+          "minimal_modules": [
+            "CUDA 绑定",
+            "top-k 路由",
+            "GPU-CPU 协作"
+          ],
+          "practice_task": "在 binding.cpp 中定位 KTransformersOps 注册的算子，并说明 moe_topk_softmax 的输入输出如何对接 topk_ids/topk_weights。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "GPTQ-Marlin 与 GGUF 反量化核",
+          "order": 2,
+          "filename": "u9-l2-gptq-marlin-gguf-dequant.md",
+          "level": "advanced",
+          "topic": "讲解 cuda/gptq_marlin 的 Marlin 格式 GPTQ 反量化核与 cuda/custom_gguf 的 Q2_K~Q8_K/IQ 反量化核。",
+          "learning_goals": [
+            "理解 Marlin 格式 GPTQ 核对 GPU 热专家的加速",
+            "掌握 custom_gguf 反量化支持的量化类型",
+            "了解 GPU 侧反量化与 CPU 后端的权重格式对应"
+          ],
+          "source_files": [
+            "kt-kernel/cuda/gptq_marlin/gptq_marlin.cu",
+            "kt-kernel/cuda/gptq_marlin/gptq_marlin_dtypes.cuh",
+            "kt-kernel/cuda/custom_gguf/dequant.cu"
+          ],
+          "minimal_modules": [
+            "GPTQ-Marlin",
+            "GGUF 反量化",
+            "数据类型"
+          ],
+          "practice_task": "列出 custom_gguf/dequant.cu 支持的 GGML 量化类型，并说明它们如何对应 Llamafile 后端可用的 GGUF 量化格式。",
+          "depends_on": [
+            "u9-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "SFT 微调子系统",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "SFT 架构与模型封装",
+          "order": 1,
+          "filename": "u10-l1-sft-arch-wrapper.md",
+          "level": "advanced",
+          "topic": "讲解 sft/wrapper.py 与 sft/arch.py 如何把 MoE 层包装为 KT 训练层、构建 GPU/CPU 混合 device_map 并加载模型。",
+          "learning_goals": [
+            "理解 wrap_moe_layers_with_kt_wrapper 与 build_kt_device_map",
+            "掌握 MOEArchConfig 如何提取专家结构信息",
+            "了解 load_kt_model 的加载流程"
+          ],
+          "source_files": [
+            "kt-kernel/python/sft/wrapper.py",
+            "kt-kernel/python/sft/arch.py",
+            "kt-kernel/python/sft/__init__.py"
+          ],
+          "minimal_modules": [
+            "模型封装",
+            "device_map",
+            "架构配置"
+          ],
+          "practice_task": "阅读 build_kt_device_map，说明 embed_tokens/norm/lm_head 与各 MoE 层分别放到哪个设备，以及 num_gpu_experts 如何影响放置。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "SFT 后端、LoRA 与 Autograd",
+          "order": 2,
+          "filename": "u10-l2-sft-backend-lora-autograd.md",
+          "level": "advanced",
+          "topic": "讲解 sft/amx.py 的 AMXSFTMoEWrapper、sft/lora.py 的专家 LoRA 与 sft/autograd.py 的 KTMoEFunction 自定义前向/反向。",
+          "learning_goals": [
+            "理解 AMXSFTMoEWrapper 的训练方法集合（AMXBF16_SFT 等）",
+            "掌握 LoRAExperts 的专家级 LoRA 注入与梯度同步",
+            "了解 KTMoEFunction 如何衔接 autograd 与 C++ 训练核"
+          ],
+          "source_files": [
+            "kt-kernel/python/sft/amx.py",
+            "kt-kernel/python/sft/lora.py",
+            "kt-kernel/python/sft/autograd.py"
+          ],
+          "minimal_modules": [
+            "SFT 后端",
+            "专家 LoRA",
+            "自定义 Autograd"
+          ],
+          "practice_task": "对比 AMXBF16_SFT 与 AMXBF16_SFT_SkipLoRA 的差异，说明 SkipLoRA 变体在反向阶段省略了什么计算及适用场景。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "SFT 配置、权重与分布式",
+          "order": 3,
+          "filename": "u10-l3-sft-config-weights-dist.md",
+          "level": "advanced",
+          "topic": "讲解 sft/config.py 的 KTConfig、sft/weights.py 的专家权重提取/加载、sft/layer.py 的层包装与 sft/dist_utils.py 的分布式支持。",
+          "learning_goals": [
+            "理解 KTConfig 字段与 HfTrainerKTConfig 的对应",
+            "掌握 extract_moe_weights/load_experts_from_checkpoint_files",
+            "了解分布式训练下的权重与梯度同步"
+          ],
+          "source_files": [
+            "kt-kernel/python/sft/config.py",
+            "kt-kernel/python/sft/weights.py",
+            "kt-kernel/python/sft/layer.py",
+            "kt-kernel/python/sft/dist_utils.py"
+          ],
+          "minimal_modules": [
+            "KTConfig",
+            "权重管理",
+            "分布式"
+          ],
+          "practice_task": "梳理 SFT 训练中权重从 checkpoint 加载到专家、再到 LoRA 注入的完整链路，并指出 dist_utils 在多卡训练中负责的环节。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "扩展、性能与测试",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "性能基准与示例",
+          "order": 1,
+          "filename": "u11-l1-bench-examples-demo.md",
+          "level": "advanced",
+          "topic": "讲解 bench/ 的 Python 基准、examples/ 的端到端用法示例与 demo/ 的 C++ 内核验证程序，帮助读者度量与复现性能。",
+          "learning_goals": [
+            "理解 bench_moe/bench_mla 等基准的度量目标",
+            "掌握 examples/test_moe_amx 等示例的运行方式",
+            "了解 demo/ 下 C++ 测试如何验证单个 kernel"
+          ],
+          "source_files": [
+            "kt-kernel/bench/bench_moe.py",
+            "kt-kernel/bench/bench_moe_amx.py",
+            "kt-kernel/examples/test_moe_amx.py",
+            "kt-kernel/demo/simple_test.cpp"
+          ],
+          "minimal_modules": [
+            "Python 基准",
+            "用法示例",
+            "C++ 验证"
+          ],
+          "practice_task": "运行一个 examples/test_moe_amx.py（或小尺寸版）并对照 bench/bench_moe_amx.py，记录吞吐与延迟指标，解释测量方法。",
+          "depends_on": [
+            "u4-l1",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "测试体系与 CI",
+          "order": 2,
+          "filename": "u11-l2-test-suite-ci.md",
+          "level": "advanced",
+          "topic": "讲解 test/run_suite.py 测试编排、test/per_commit 的逐提交精度测试与 pytest.ini 配置，以及 CI 如何注册测试。",
+          "learning_goals": [
+            "理解 run_suite.py 如何组织测试套件",
+            "掌握 per_commit 精度测试（如 AMX INT8 精度）的目的",
+            "了解 pytest.ini 与 test/ci 的协作"
+          ],
+          "source_files": [
+            "kt-kernel/test/run_suite.py",
+            "kt-kernel/test/per_commit/test_moe_amx_accuracy_int8.py",
+            "kt-kernel/pytest.ini"
+          ],
+          "minimal_modules": [
+            "测试编排",
+            "精度测试",
+            "CI 注册"
+          ],
+          "practice_task": "运行一个 test/per_commit 下的精度测试（或阅读其断言），说明它如何保证量化后 MoE 输出与参考值的误差在阈值内。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "二次开发与贡献流程",
+          "order": 3,
+          "filename": "u11-l3-contributing-extending.md",
+          "level": "advanced",
+          "topic": "讲解如何扩展 kt-kernel：新增后端/MOE 类的绑定路径、clang-format 与 git hooks、Conventional Commits 规范与 MAINTAINERS。",
+          "learning_goals": [
+            "掌握新增 C++ MOE 类并在 ext_bindings.cpp 暴露的流程",
+            "理解 install-git-hooks.sh 与 clang-format/black 的代码规范",
+            "了解 Conventional Commits 与贡献者维护约定"
+          ],
+          "source_files": [
+            "kt-kernel/ext_bindings.cpp",
+            "kt-kernel/scripts/install-git-hooks.sh",
+            "kt-kernel/CMakeLists.txt",
+            "MAINTAINERS.md"
+          ],
+          "minimal_modules": [
+            "后端扩展",
+            "代码规范",
+            "提交约定"
+          ],
+          "practice_task": "设计一个假想的新量化后端 MYINT4，写出需要在 amx.py、ext_bindings.cpp、CMakeLists.txt 中分别改动的内容清单。",
+          "depends_on": [
+            "u2-l2",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
