@@ -1,0 +1,461 @@
+# transport/connect 与 pkt-line：一次远程操作在源码里如何落地
+
+## 1. 本讲目标
+
+本讲是「传输与协议」单元（u11）的第一讲，专门讲清「一次 `git ls-remote` / `git fetch` / `git push` 在真正协商对象之前发生了什么」。
+
+读完本讲，你应当能够回答：
+
+1. git 与远端通信时，线上的字节流长什么样——也就是 **pkt-line 分包格式**（4 字节十六进制长度前缀 + 载荷，以及 `0000`/`0001`/`0002` 等控制包）。
+2. git 如何用 `struct transport` 加一张虚表 `struct transport_vtable`，把 `git://`、`ssh://`、`file://`、bundle 文件、外部 helper 等差异巨大的后端，统一成同一套「列 ref / 抓取 / 推送 / 断开」接口。
+3. `git_connect` 如何根据一个 URL 字符串，决定是开一条 TCP socket（`git://`）还是 spawn 一个子进程（`ssh://` / `file://`），并在这条流上完成**协议版本协商**。
+4. `GIT_TRACE_PACKET=1` 能看到什么，这些输出对应源码里的哪几行。
+
+> 说明：本讲只覆盖「建立连接 + 握手列 ref」这一前置环节。具体的对象协商与 pack 传输（fetch-pack / send-pack）留待 **u11-l3**；协议 v2 的命令式模型（serve.c / ls-refs）留待 **u11-l2**。
+
+## 2. 前置知识
+
+- **引用 refs（来自 u5-l1）**：远程操作的本质是「先列出对方的 ref → 再协商需要哪些对象 → 最后收发 pack」。本讲只讲最前面那一步——怎么连上对方、怎么握手列 ref。
+- **一次远程命令的三段式**：任何 `git ls-remote` / `git fetch` / `git push` 在概念上都做三件事：(1) 建立一条到远端的**字节流**；(2) 在这条流上用 **pkt-line 格式**互发「分包」；(3) 协商并传输。本讲覆盖 (1) 和 (2)，(3) 留给后续。
+- **`child_process`（u14-l1 会详讲）**：git 用它 spawn 子进程。本讲只需知道，对 `ssh://` 和 `file://`，远端的服务程序 `git-upload-pack`（抓取）或 `git-receive-pack`（推送）是被当作**子进程**拉起的；而对 `git://`，则是一条** TCP socket** 直连 `git-daemon`。
+- **文件描述符对 `fd[2]`**：约定俗成 `fd[0]` 用于读取（接远端 stdout），`fd[1]` 用于写入（送远端 stdin）。无论 socket 还是子进程管道，最终都被抽象成这一对 fd。
+- **流式管道的痛点**：一条裸字节流没有「消息边界」。如果不规定一种**分包（framing）**机制，读取方就无法判断「这一条命令到哪结束、下一条 pack 数据从哪开始」。pkt-line 就是 git 给出的答案。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲用到的关键符号 |
+| --- | --- | --- |
+| `pkt-line.h` / `pkt-line.c` | 线协议「分包」格式：4 字节十六进制长度前缀 + 载荷；`flush`/`delim`/`response_end` 控制包；`packet_reader` 读取器；trace | `packet_length`、`set_packet_header`、`packet_flush`、`packet_read_with_status`、`struct packet_reader` |
+| `transport.h` | `struct transport`（一个远端连接的运行时对象）与 `struct git_transport_options` | `struct transport` |
+| `transport-internal.h` | 虚表 `struct transport_vtable`（内部头，只对 transport.c 与 helper 暴露） | `struct transport_vtable` |
+| `transport.c` | 三个 vtable 实例 + `transport_get` 按 URL 选后端 + `handshake` 完成协议握手 | `builtin_smart_vtable`、`transport_get`、`handshake`、`connect_git` |
+| `connect.h` / `connect.c` | `git_connect` 按 URL 建连；`parse_connect_url` 解析 URL；`git_connect_git` 走 git:// TCP；`discover_version` 协商版本；capability 解析 | `git_connect`、`parse_connect_url`、`git_connect_git`、`discover_version` |
+| `remote.h` / `remote.c` | `struct remote`（远端配置：url、uploadpack、receivepack、server_options）与 `remote_get` | `struct remote`、`remote_get` |
+| `url.h` | URL scheme 枚举 | `enum url_scheme` |
+
+## 4. 核心概念与源码讲解
+
+本讲按**自底向上**的顺序拆三个最小模块：先讲最底层的线协议分包（pkt-line），再讲如何用 connect 建立一条会讲 pkt-line 的字节流，最后讲 transport 如何把这一切抽象成统一的远端对象。
+
+### 4.1 pkt-line 分包协议
+
+#### 4.1.1 概念说明
+
+pkt-line 是 git 自定义的**线协议分包格式（wire framing）**。它解决的问题，源码注释里说得很直白：
+
+> Write a packetized stream, where each line is preceded by its length (including the header) as a 4-byte hex number.
+> …we use this packetized line format to make a streaming format possible without ever over-running the read buffers. That way we'll never read into what might be the pack data (which should go to another process entirely).
+
+翻译过来就是：git 的远程协议是**流式**的——命令、ref 列表、pack 数据共用同一条管道。为了让读取方永远知道「当前这个包有多长、到哪结束」，git 在**每一段数据前面加上一个 4 字节的十六进制长度前缀**。这样读取方就能精确地「读 4 字节长度 → 按长度读载荷」，绝不会把 pack 数据误读成命令。
+
+一条 pkt-line 的格式是：
+
+```
+<4 字节十六进制长度><载荷>
+```
+
+其中**长度是「前缀自身 + 载荷」的总字节数**（注意：长度含那 4 个字节本身）。例如要发送字符串 `hello`（5 字节），总长 \(4 + 5 = 9\)，写成 `0009hello`。
+
+长度值还被复用为几个**控制包**（载荷为空的特殊包）：
+
+| 长度前缀 | 含义 | 写入函数 |
+| --- | --- | --- |
+| `0000` | flush——「我说完了，请你处理 / 本段流结束」 | `packet_flush` |
+| `0001` | delim——v2 协议里分隔请求的不同部分 | `packet_delim` |
+| `0002` | response-end——v2 协议里标记响应结束 | `packet_response_end` |
+| `0003` | 非法（小于 4 的长度除上述三个外都是错误） | —— |
+| `0004`~`<65520` | 普通数据包，载荷为 `长度-4` 字节 | `packet_write` 等 |
+
+#### 4.1.2 核心流程
+
+**写入侧**（把一段内存变成线上的一个包）：
+
+```
+1. 取载荷长度 N（字节数）。
+2. 校验 N 不超过 LARGE_PACKET_DATA_MAX（65516），否则报错。
+3. 计算 total = N + 4。
+4. 把 total 格式化成 4 位十六进制 set_packet_header()，作为前缀。
+5. 顺序写入：先写 4 字节前缀，再写 N 字节载荷。
+6. （若开了 trace）记一条 GIT_TRACE_PACKET 日志。
+```
+
+**读取侧**（从流里还原一个包）：
+
+```
+1. 先读死 4 字节，得到长度前缀 linelen。
+2. 用 packet_length() 把 4 个十六进制字符转成数字 len。
+3. 按 len 分派：
+     len == 0   → flush 包
+     len == 1   → delim 包
+     len == 2   → response_end 包
+     len < 4    → 协议错误，die
+     len >= 4   → 普通包，再读 (len-4) 字节作为载荷
+4. 给载荷末尾补 '\0'，方便当 C 字符串用。
+5. （若开了 trace）记一条日志。
+```
+
+**包大小的数学**：4 位十六进制能表示的最大值是 \(16^4 - 1 = 65535\)。git 故意保留高位不用，把单包总长上限设为
+
+\[
+\text{LARGE\_PACKET\_MAX} = 65520 = \text{0xFFF0}
+\]
+
+于是单个包的**载荷**上限为
+
+\[
+\text{LARGE\_PACKET\_DATA\_MAX} = 65520 - 4 = 65516
+\]
+
+超过这个大小的载荷（比如一个大 pack）会被**拆成多个包**发送，这正是 `write_packetized_from_buf_no_flush_count` 循环切包的依据。还有一个 `DEFAULT_PACKET_MAX = 1000`，用于 v0 协议里 ref 广告行的软上限。
+
+#### 4.1.3 源码精读
+
+先看常量定义——这三个宏是整个格式的「合同」：
+
+[ pkt-line.h:232-234 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.h#L232-L234) 定义 `DEFAULT_PACKET_MAX`、`LARGE_PACKET_MAX 65520`、`LARGE_PACKET_DATA_MAX = LARGE_PACKET_MAX - 4`，以及全局静态缓冲 `packet_buffer[LARGE_PACKET_MAX]`（读取时的默认落点）。
+
+**4 位十六进制 ↔ 整数**是 pkt-line 的核心编解码。读取侧用 `packet_length` 把 4 个十六进制字符拼回数字（每位移位 4bit）：
+
+[ pkt-line.c:377-385 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L377-L385) `packet_length()` 用 `hexval()` 逐字符取值并按 `<<12 / <<8 / <<4` 移位拼接，返回 `lenbuf_hex` 的数值；含非十六进制字符时返回负数。
+
+写入侧的逆函数是 `set_packet_header`，把一个整数拆回 4 个十六进制字符：
+
+[ pkt-line.c:134-144 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L134-L144) `set_packet_header()` 用查表 `hexchar[]="0123456789abcdef"` 把 `size` 的高/中/低 nibble 分别写入 `buf[0..3]`。
+
+**三个控制包**的实现极其朴素——它们就是写死 4 个字节：
+
+[ pkt-line.c:93-112 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L93-L112) `packet_flush`/`packet_delim`/`packet_response_end` 分别 `write_in_full(fd, "0000"/"0001"/"0002", 4)`，写之前都先调 `packet_trace` 记日志。
+
+**普通数据包的写入**经过 `format_packet`（组装）与 `do_packet_write`（落盘）两步。`format_packet` 先占位 `0000`、拼前缀与载荷、算出真实总长 `n`、校验不超过 `LARGE_PACKET_MAX`，再回填前缀：
+
+[ pkt-line.c:146-162 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L146-L162) `format_packet()`：`strbuf_addstr(out,"0000")` 占位 → 拼载荷 → `n = out->len - orig_len` → `if (n > LARGE_PACKET_MAX) die(...)` → `set_packet_header()` 回填真实长度。这正是「长度含 4 字节前缀」的来源（`n` 把前缀算进去了）。
+
+[ pkt-line.c:202-231 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L202-L231) `do_packet_write()`：先 `if (size > LARGE_PACKET_DATA_MAX) 报错`，再 `packet_size = size + 4`，`set_packet_header(header, packet_size)`，然后**分两次写**（先 4 字节头、再载荷），注释解释这是为了「不分配大缓冲、也不把大缓冲压栈引起线程问题」。
+
+**读取侧的主函数** `packet_read_with_status` 是整个格式的「解析器」：
+
+[ pkt-line.c:413-451 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L413-L451) 先 `get_packet_data(... linelen, 4 ...)` 读死 4 字节 → `packet_length()` 转成 `len` → 按 `len==0/1/2/<4/>=4` 五分支返回 `PACKET_READ_FLUSH / DELIM / RESPONSE_END / 协议错误 / NORMAL`。这就是 §4.1.2「读取侧流程」的逐行对应。
+
+[ pkt-line.c:461-513 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L461-L513) 对普通包，再 `get_packet_data(... buffer, len ...)` 读 `len` 字节载荷；按 `PACKET_READ_CHOMP_NEWLINE` 选项去掉末尾换行；`buffer[len]=0` 补 `\0`；若开了 `PACKET_READ_DIE_ON_ERR_PACKET` 且载荷以 `"ERR "` 开头则直接 `die`；最后置 `*pktlen = len` 返回 `PACKET_READ_NORMAL`。
+
+底层的「读死 N 字节、处理 EOF/读错」在 `get_packet_data`：
+
+[ pkt-line.c:339-375 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L339-L375) `get_packet_data()` 既支持从 `fd` 用 `read_in_full` 读，也支持从内存 `src_buf` 读（无 fd 时）；读不够 `size` 字节时按 `PACKET_READ_GENTLE_ON_EOF` / `GENTLE_ON_READ_ERROR` 决定是返回 -1 还是 `die("the remote end hung up unexpectedly")`。
+
+**读取结果的状态枚举**与「读到的包类型」一一对应：
+
+[ pkt-line.h:113-119 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.h#L113-L119) `enum packet_read_status { PACKET_READ_EOF, PACKET_READ_NORMAL, PACKET_READ_FLUSH, PACKET_READ_DELIM, PACKET_READ_RESPONSE_END }`，调用方据此区分「对方发了个 flush」还是「对方发了一条数据」。
+
+**`struct packet_reader` 是更高层的读取器**，把「读一个包 + 记录状态 + 可偷看下一行」封装成状态机，握手代码大量用它：
+
+[ pkt-line.h:165-200 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.h#L165-L200) `struct packet_reader` 持有 `fd`、源缓冲、落点 `buffer`、`options`、上一次的 `status`/`pktlen`/`line`、偷看标志 `line_peeked`，以及 sideband 与 hash_algo 等字段。
+
+[ pkt-line.c:624-675 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L624-L675) `packet_reader_read()` 是「读一行」；`packet_reader_peek()` 是「先读一行但设 `line_peeked=1` 不消费」，下一次 `read` 会原样返回——握手阶段需要**先看一眼第一行再决定怎么处理**（见 §4.2 的版本协商）。
+
+**trace** 是本讲实践的关键。`packet_trace` 决定了 `GIT_TRACE_PACKET=1` 输出的长相：
+
+[ pkt-line.c:40-87 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/pkt-line.c#L40-L87) `packet_trace()` 把每个包格式化成 `packet: <prefix><dir> <content>`，其中 `prefix` 通常是 `git`（async 上下文里是 `sideband`），`dir` 为 `>`（写）或 `<`（读）；内容里换行被抑制、不可打印字符以八进制 `\NNN` 转义。所以你看到的 `packet:          git> ...` 是「我发出的」，`packet:          git< ...` 是「我收到的」。它还能识别 `PACK` 头，把后续 pack 字节流单独导向 `GIT_TRACE_PACKFILE`。
+
+#### 4.1.4 代码实践
+
+> 目标：把一段真实的 pkt-line trace 行**手工解码**，验证你真的理解了「4 字节十六进制长度前缀 + 载荷」。
+
+1. 在任意 git 仓库目录下执行（`file://` 本地智能传输，无需联网）：
+   ```bash
+   GIT_TRACE_PACKET=1 git ls-remote . 2>&1 | grep '^packet:' | head -20
+   ```
+2. 在输出里随便挑一行**读取方向**（含 `git<`）的数据包，比如形如 `packet:          git< <前缀已被去掉的载荷>`。
+3. 注意：trace 行里**只显示载荷、不显示那 4 字节长度前缀**（`packet_trace` 在 pkt-line.c:161 用 `out->buf + orig_len + 4` 跳过了前缀）。所以你看到的是「去壳后的内容」。
+4. 自己回答：如果这条载荷是 `version 2` 这 9 个字符，那么线上真正发出的字节串是什么？
+5. **预期结果**：载荷 `version 2` 长 9 字节，总长 \(9+4=13\)，故线上字节串为 `000dversion 2`（`000d` 即十进制 13）。
+6. 挑一条 `git>` 的写入行，重复同样的「载荷长度 + 4 = 前缀」心算，与上面的读取行对照，确认读写两侧用的是同一套格式。
+7. **待本地验证**：具体看到的 `version 2`、`git-upload-pack`、ref 行等内容，取决于你的 `protocol.version` 配置与仓库 ref 情况；本步骤只验证「格式」，不验证「内容」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么长度前缀要「把前缀自身也算进总长」，而不是只算载荷？
+
+**答案**：这样可以用「极小值」做控制信号：`0000`/`0001`/`0002` 表示「没有载荷」的 flush/delim/response-end。若长度只算载荷，则载荷为 0 时无法与「读到了流尾 EOF」区分，也无法复用这些特殊值。把前缀算进去，让 `1`/`2`/`3` 这些本来非法的长度天然成为控制包编码空间。
+
+**练习 2**：假设要发送一个 70000 字节的 pack 数据，pkt-line 会怎么处理？
+
+**答案**：单包载荷上限 `LARGE_PACKET_DATA_MAX = 65516`，70000 超过它，会被拆成至少 2 个包（`65516 + 4484`）。`write_packetized_from_buf_no_flush_count`（pkt-line.c:317）正是循环按 `LARGE_PACKET_DATA_MAX` 切片、逐个 `packet_write_gently` 发送，最后由调用方发一个 `flush` 收尾。
+
+---
+
+### 4.2 connect 远程连接
+
+#### 4.2.1 概念说明
+
+pkt-line 解决了「在这条流上怎么分包」，但**这条流从哪来**？这就是 `connect.c` 的工作：给定一个 URL，建立一条**可读写的字节流**，并在上面跑 git 协议。
+
+git 认识的 URL scheme（见 `enum url_scheme`）决定了建连方式：
+
+| scheme | URL 形态 | 建连方式 | 谁在远端应答 |
+| --- | --- | --- | --- |
+| `URL_SCHEME_GIT` | `git://host[:port]/path` | 开 **TCP socket** 到 git-daemon | `git-daemon` |
+| `URL_SCHEME_SSH` | `ssh://[user@]host[:port]/path` 或 `host:path` | spawn **ssh** 子进程 | 远端 shell 调起 `git-upload-pack` |
+| `URL_SCHEME_FILE` / `URL_SCHEME_LOCAL` | `file:///path` 或 `/path`、`./repo` | 本地 spawn 子进程 | 本机 `git-upload-pack` |
+
+[ url.h:26-32 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/url.h#L26-L32) `enum url_scheme { URL_SCHEME_UNKNOWN, LOCAL, FILE, SSH, GIT }`——建连分支就是按这个枚举 switch 的。
+
+无论哪种方式，结果都被归一成**一对 fd**：`fd[0]`（读，接远端 stdout）和 `fd[1]`（写，送远端 stdin）。之后 pkt-line 就在这对 fd 上读写。
+
+**协议版本协商**：连上之后，双方要先用 pkt-line 互报家门，约定用 v0 / v1 / v2 哪个协议版本，并交换 capability（能力声明，比如是否支持 `side-band`、`object-format=sha256`、`session-id`）。这是 `discover_version` 做的事。
+
+#### 4.2.2 核心流程
+
+```
+git_connect(fd, url, service, prog, flags)
+  │
+  ├─ version = get_protocol_version_config()   # 读 protocol.version 配置
+  │   （若想用 v2 但本次不是 upload-pack，则回退 v0）
+  ├─ signal(SIGCHLD, SIG_DFL)                  # 让 waitpid 可靠
+  ├─ scheme = parse_connect_url(url, &host, &path)   # 拆 URL
+  │
+  ├─ if scheme == GIT:
+  │     git_connect_git() → 开 TCP / 走 proxy
+  │       → 把请求行作为第一个 pkt-line 发出去：
+  │         "git-upload-pack <path>\0host=<host>\0[version=2\0]"
+  │
+  ├─ else (SSH / FILE / LOCAL):
+  │     构造命令行 "git-upload-pack '<path>'"
+  │     设 use_shell=1，清掉 local_repo_env
+  │     if SSH: fill_ssh_args() 拼 ssh 参数 + SendEnv GIT_PROTOCOL
+  │     else  : 往 env 注入 GIT_PROTOCOL=version=N
+  │     start_command(conn)   # spawn 子进程
+  │     fd[0]=conn->out; fd[1]=conn->in
+  │
+  └─ return conn   # 后续 finish_connect(conn) 收尾
+
+# 连上之后（在 transport 层的 handshake 里）：
+handshake() → discover_version(reader)
+  ├─ packet_reader_peek() 偷看第一行
+  ├─ 第一行若含 "version 2" → protocol_v2 → process_capabilities_v2()
+  ├─ 含 "version 1"        → protocol_v1
+  ├─ 是 ref 广告行 / flush → protocol_v0
+  └─ 据此走 v0 的 get_remote_heads 或 v2 的 get_remote_refs
+```
+
+#### 4.2.3 源码精读
+
+**入口 `git_connect`** 是建连的总分发器：
+
+[ connect.c:1401-1500 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L1401-L1500) `git_connect()` 依次：读 `get_protocol_version_config()` 决定版本（并对「非 fetch 的 v2」做回退）、`signal(SIGCHLD, SIG_DFL)`、`parse_connect_url()` 拆出 host/path、按 `scheme` 三分支——`URL_SCHEME_GIT` 走 `git_connect_git()`；`SSH` 走 `fill_ssh_args()` 拼 ssh；其余（`FILE`/`LOCAL`）直接 spawn。最后 `start_command(conn)` 拉起子进程，并把 `conn->out`/`conn->in` 映射成 `fd[0]`/`fd[1]`。
+
+注意 1454-1487 行：对 `SSH` 与 `FILE` 两条非 git:// 分支，都把目标程序名（`prog`，即 `git-upload-pack` / `git-receive-pack`）拼成命令行 `"git-upload-pack '<path>'"`，设 `use_shell=1`，并清掉 `local_repo_env` 里的仓库局部变量（防止把本地仓库上下文泄漏给远端）。版本号经环境变量传递：file 分支往 `conn->env` 注 `GIT_PROTOCOL=version=N`，ssh 分支则在 `fill_ssh_args` 里用 `-o SendEnv=GIT_PROTOCOL` 让 ssh 把它带过去。
+
+**URL 解析** `parse_connect_url` 把一个 URL 字符串切成 host 和 path，并判定 scheme：
+
+[ connect.c:1054-1123 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L1054-L1123) `parse_connect_url()`：找 `://` 分出 scheme 与剩余；若无 `://` 且非本地路径（`url_is_local_not_ssh` 为假），则当作 `URL_SCHEME_SSH`、分隔符改用 `:`（即 `host:path` 这种 scp 风格）；再分离 host 与 path，返回 scheme。这就是为什么 `git fetch host:repo.git` 会被当成 ssh。
+
+**git:// 的建连** `git_connect_git` 不 spawn 子进程，而是开 TCP socket，并把「我要什么」作为第一个 pkt-line 发给 daemon：
+
+[ connect.c:1221-1275 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L1221-L1275) `git_connect_git()`：`transport_check_allowed("git")` 做协议白名单安检 → 校验 host/path 不含换行（防注入）→ `git_use_proxy` 时走 `git_proxy_connect`，否则 `git_tcp_connect` 开 socket → 用 `strbuf` 拼出请求行 `"<prog> <path>\0host=<target>\0"`（若 `version>0` 再追加 `"\0version=N\0"`）→ `packet_write(fd[1], request)` 发出。注释特意警告：**不要在这条请求行里加别的 header**，否则会让旧版 git-daemon 崩溃。
+
+**协议版本协商** `discover_version` 是握手的第一步——它先**偷看**服务器返回的第一行，再决定按哪个版本解析：
+
+[ connect.c:143-181 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L143-L181) `discover_version()`：`packet_reader_peek(reader)` 偷看第一行；`EOF` 就 `die_initial_contact`；若是 `flush`/`delim` 等控制包则当作 `protocol_v0`；若是普通行则交给 `determine_protocol_version_client()` 判定（行首是不是 `version 2` / `version 1`）。然后 `switch`：v2 调 `process_capabilities_v2`，v1 消费掉那行，v0 什么都不做。最后 `trace2_data_intmax(... "negotiated-version" ...)` 记录协商结果。
+
+**capability 解析**（v0 路径）：v0 的能力声明紧跟在第一条 ref 行末尾、用 `\0` 分隔：
+
+[ connect.c:235-258 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L235-L258) `process_capabilities()`：在 `reader->line` 里找第一个 `\0`，把 `\0` 之后的内容存进全局 `server_capabilities_v1`；并解析 `object-format=sha256` 这类能力，据此设置 `reader->hash_algo`（默认回退 SHA-1）。这就是 git 在握手阶段「得知对方用哪种哈希」的地方。
+
+收尾：[ connect.c:1502-1511 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L1502-L1511) `finish_connect()`：若 `conn` 是子进程则 `finish_command` 等它退出；若是 socket（`git_connection_is_socket`）则直接返回 0。
+
+> 安全提示：`transport_check_allowed("git"/"ssh"/"file")`（见 git_connect_git 第 1239 行、git_connect 第 1457/1480 行）结合 `protocol.allow` / `protocol.<name>.allow` 配置，决定是否允许某个 scheme。这是为了防范恶意仓库通过 `ext::`、`file://` 等 scheme 触发意外行为。
+
+#### 4.2.4 代码实践
+
+> 目标：用 `--diag-url` 观察 `parse_connect_url` 的拆分结果，**无需联网、无需真的建连**。
+
+1. 执行：
+   ```bash
+   git clone --diag-url git://example.com:9418/foo.git
+   git clone --diag-url ssh://user@git.example.org:22/var/git/repo.git
+   git clone --diag-url host:repo.git
+   ```
+2. 观察输出里的 `Diag: protocol=`、`Diag: hostandport=`（或 ssh 的 `userandhost=`/`port=`）、`Diag: path=` 三行。
+3. 对照 [ connect.c:1425-1430 与 1463-1469 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/connect.c#L1425-L1469)（`CONNECT_DIAG_URL` 分支直接 `printf` 这些字段后 `return NULL`，不真的建连）。
+4. **预期结果**：三条命令分别被识别为 `git`（带端口 9418）、`ssh`（带 user 与 port 22）、`ssh`（scp 风格 `host:path`）。
+5. **待本地验证**：scp 风格 `host:repo.git` 是否真的被归为 ssh，取决于 `url_is_local_not_ssh` 的判定；可在你的环境确认。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：对 `git://` 协议，客户端建连后发出的「第一个 pkt-line」是什么？为什么 git:// 与 ssh/file 的版本号传递方式不同？
+
+**答案**：第一个包是请求行 `git-upload-pack <path>\0host=<host>\0[\0version=N\0]`（见 git_connect_git 的 `packet_write`）。git:// 走的是裸 TCP，没有进程边界，所以「我要什么程序、什么版本」必须写进线协议的第一条消息里；而 ssh/file 是 spawn 一个**具体的子进程**（程序名已在命令行给出），版本号不方便放进命令行（会被 `ps` 看到、且解析麻烦），于是改用环境变量 `GIT_PROTOCOL=version=N`（file 直接注入 env，ssh 用 `-o SendEnv` 带过去）传递。
+
+**练习 2**：`discover_version` 为什么要先 `packet_reader_peek` 而不是直接 `packet_reader_read`？
+
+**答案**：因为 v0 服务器**根本不会**发 `version` 行——它上来直接发 ref 广告。如果直接 `read` 并消费，v0 的第一条 ref 就丢了。`peek` 只看不动：若是 `version 2` 行就按 v2 处理（之后正式 `read` 消费它），若是 ref 行（v0）则保留给后续的 ref 解析逻辑去读。这是「用偷看实现协议自描述」的经典手法。
+
+---
+
+### 4.3 transport 传输抽象
+
+#### 4.3.1 概念说明
+
+pkt-line 是「线上的语言」，connect 是「建立连接」。但上层命令（`fetch`、`push`、`ls-remote`）不该关心「这个 URL 是 git:// 还是 ssh://」——它只想说「给我对方的 ref 列表」「把这些对象抓过来」「把这些 ref 推上去」。
+
+`struct transport` 就是这层抽象：它代表「**一个到远端的连接对象**」，把所有差异封进一张**虚表** `struct transport_vtable`。上层只调 `transport_get_remote_refs()` / `transport_fetch_refs()` 这类公共函数，虚表负责分发到具体后端。这与 u5-l1 的 `ref_store` 虚表、u2-l2 的 `struct repository` 是同一种「数据 + 函数指针表」的设计套路。
+
+后端共有四种来源：
+
+1. **内置智能传输**（`builtin_smart_vtable`）：`git://`、`ssh://`、`file://` 及本地路径——都跑 git 原生智能协议，靠 `git_connect` 建连。
+2. **bundle**（`bundle_vtable`）：当 URL 指向一个本地 `.bundle` 文件时，没有「远端」，直接从文件读。
+3. **接管传输**（`taken_over_vtable`）：当调用方已经自己 spawn 好了子进程（如 `git fetch` 内部某些路径），用 `transport_take_over` 把它「接管」成一个 transport。
+4. **外部 helper**（`transport_helper_init`）：URL 形如 `https://`、或 `foo::url`（`::` 前是 helper 名），git 自身不直接说这些协议，而是 spawn 一个 `git-remote-<helper>` 外部程序当中间人。HTTP/HTTPS 走的就是内置的 `git-remote-http` helper。
+
+`transport_get(remote, url)` 是工厂方法：看一眼 URL，挑出该用哪个 vtable 和哪个 `data`。
+
+#### 4.3.2 核心流程
+
+```
+上层：transport = transport_get(remote, url)
+                     │
+                     ├─ 看 url 形态：
+                     │    "xxx::..."           → transport_helper_init("xxx")
+                     │    本地且是 .bundle 文件 → bundle_vtable
+                     │    file:// / git:// / ssh:// / 本地路径 → builtin_smart_vtable
+                     │    其他未知 scheme       → transport_helper_init(<scheme>)
+                     │
+                     └─ 填默认 smart_options（uploadpack="git-upload-pack" 等）
+
+上层：refs = transport_get_remote_refs(transport, ...)
+        → vtable->get_refs_list()  [对智能传输即 get_refs_via_connect]
+              → handshake()
+                   → connect_setup()  [首次才建连]
+                        → git_connect()  ← §4.2
+                   → discover_version() + 列 ref   ← §4.2 + pkt-line
+        返回 struct ref 链表
+
+上层：vtable->fetch_refs()  [智能传输即 fetch_refs_via_pack]   → u11-l3
+上层：vtable->disconnect()  [disconnect_git：发 flush、关 fd、finish_connect]
+```
+
+关键点：**连接是懒建立的**。`transport_get` 只分配对象、不建连；直到第一次真正需要 ref（`connect_setup` 里 `if (data->conn) return 0`）才调 `git_connect`。连接建立后被缓存在 `git_transport_data.conn` 里复用，直到 `disconnect` 才关。
+
+#### 4.3.3 源码精读
+
+**虚表**定义了所有后端都要实现的操作：
+
+[ transport-internal.h:11-72 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport-internal.h#L11-L72) `struct transport_vtable` 的函数指针：`set_option`、`get_refs_list`（列对方 ref，带 `for_push` 提示以便复用连接）、`get_bundle_uri`、`fetch_refs`（抓对象）、`push_refs`（推对象与 ref）、`connect`（拿一条半双工连接，供 `git fetch-pack`/`git send-pack` 直接用）、`disconnect`（释放连接等资源）。注释点明 `get_refs_list`/`fetch`/`push_refs` 可以「保留连接以复用」，由 `disconnect` 释放。
+
+**transport 对象**本身：
+
+[ transport.h:67-139 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.h#L67-L139) `struct transport` 持有：`vtable`（虚表指针）、`remote`（远端配置）、`url`、`data`（后端私有数据，如 `git_transport_data`）、`remote_refs`、若干状态位（`got_remote_refs`、`cannot_reuse`、`stateless_rpc`、`cloning`）、`smart_options`、`pack_lockfiles`、`hash_algo` 等。它就是「一个远端连接的全部运行时上下文」。
+
+**智能传输的私有数据**把「连接 + fd + 握手状态」拢在一起：
+
+[ transport.c:229-237 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L229-L237) `struct git_transport_data` 持有 `options`、子进程/连接 `conn`、读写 fd 对 `fd[2]`、握手完成标志 `finished_handshake`、协商到的 `version`，以及 `extra_have`/`shallow`。`transport->data` 在智能传输里就指向它。
+
+**三个内置 vtable 实例**：
+
+[ transport.c:1168-1175 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L1168-L1175) `builtin_smart_vtable`：`get_refs_list=get_refs_via_connect`、`fetch_refs=fetch_refs_via_pack`、`push_refs=git_transport_push`、`connect=connect_git`、`disconnect=disconnect_git`。这是 git://、ssh://、file:// 共用的「原生智能协议」后端。
+
+[ transport.c:1162-1166 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L1162-L1166) `bundle_vtable`：`get_refs_from_bundle` / `fetch_refs_from_bundle` / `close_bundle`——没有连接概念，直接读 bundle 文件。
+
+[ transport.c:1003-1009 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L1003-L1009) `taken_over_vtable`：复用智能传输的大部分函数，但 `cannot_reuse=1`（接管来的连接用完即弃）。
+
+**工厂方法** `transport_get` 按 URL 选后端：
+
+[ transport.c:1177-1262 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L1177-L1262) `transport_get()`：分配 `struct transport`、初始化 `bundles`；解析 URL——`xxx::` 形态取 helper 名调 `transport_helper_init`；本地 `.bundle` 文件用 `bundle_vtable`；`file://`/`git://`/`ssh://`/本地路径用 `builtin_smart_vtable` 并配 `git_transport_data`；未知 scheme 取 scheme 名也交给 helper（于是 `https://` 会找 `git-remote-https`）。最后给 `smart_options` 填默认 `uploadpack="git-upload-pack"`、`receivepack="git-receive-pack"`，并 `sideband_apply_url_config`。
+
+**建连与握手**串起前两个模块：
+
+[ transport.c:296-320 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L296-L320) `connect_setup()`：`if (data->conn) return 0`——已建连就直接返回（懒建连 + 复用）；否则按 `for_push` 选 `GIT_CONNECT_RECEIVE_PACK` 或 `GIT_CONNECT_UPLOAD_PACK`，调 `git_connect()` 建连并把结果存进 `data->conn`。
+
+[ transport.c:339-394 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L339-L394) `handshake()`：`connect_setup()` 建连 → 初始化 `packet_reader`（带 `CHOMP_NEWLINE|GENTLE_ON_EOF|DIE_ON_ERR_PACKET`）→ `discover_version(&reader)` 协商版本 → 按版本分支：v2 调 `get_remote_refs`（u11-l2 详讲），v0/v1 调 `get_remote_heads`；并提取 `session-id` 写 trace2。最后置 `finished_handshake=1`，把 `reader.hash_algo` 回填给 `transport->hash_algo`。
+
+[ transport.c:396-400 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L396-L400) `get_refs_via_connect()` 一行：`return handshake(transport, for_push, options, 1)`。可见「列 ref」对智能传输就是「完成一次握手」。
+
+**虚表的 `connect` 钩子**把 fd 交给上层 fetch-pack 直接使用：
+
+[ transport.c:964-974 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L964-L974) `connect_git()`：调 `git_connect()`，把得到的 `data->fd` 拷给出参 `fd[2]`。`git fetch`/`git push` 在某些路径下会先 `vtable->connect` 拿到这对 fd，再交给 `fetch-pack`/`send-pack` 直接读写。
+
+**断开**收尾：
+
+[ transport.c:976-1001 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L976-L1001) `disconnect_git()`：若 `finished_handshake` 且非 stateless，先 `packet_flush(fd[1])` 告诉远端「我结束了」，再 `close` 两个 fd、`finish_connect(conn)` 等子进程退出、释放各类 `oid_array` 与 filter options。
+
+**远端配置**作为 transport 的输入：
+
+[ remote.h:74-125 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/remote.h#L74-L125) `struct remote`：`name`（昵称）、`url`/`pushurl`（strvec，可多个）、`foreign_vcs`（指定 helper）、`uploadpack`/`receivepack`（远端程序名，覆盖默认）、`server_options`（v2 的 server-option）、refspec 等。`transport_get` 优先用传入的 url，否则取 `remote->url.v[0]`。
+
+[ remote.c:832-836 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/remote.c#L832-L836) `remote_get(name)`：先 `read_config(the_repository, 0)` 解析 `[remote "..."]`、`[branch "..."]` 等配置，再返回对应的 `struct remote`。这就是「`origin` 这个名字如何变成一组 url 与 refspec」的地方。
+
+#### 4.3.4 代码实践
+
+> 目标：确认 transport 后端是**按 URL scheme 自动选择**的，并对照源码理清选择规则。
+
+1. 在一个已配置 `origin` 远端的仓库里执行：
+   ```bash
+   git remote -v
+   ```
+   记下 `origin` 的 URL（比如 `https://...` 或 `git@github.com:...`）。
+2. 推断这个 URL 会被 `transport_get` 路由到哪个后端：
+   - `https://github.com/...` → 未知 scheme，取 scheme 名 `https` → `transport_helper_init("https")` → 找 `git-remote-https`。
+   - `git@github.com:org/repo.git`（scp 风格）→ `URL_SCHEME_SSH` → `builtin_smart_vtable`。
+   - `/home/me/repo.git` 或 `./repo` → 本地路径 → `builtin_smart_vtable`（spawn 本机 upload-pack）。
+3. 对照 [ transport.c:1197-1245 ](https://github.com/git/git/blob/f85a7e662054a7b0d9070e432508831afa214b47/transport.c#L1197-L1245) 的四分支（helper / rsync 报错 / bundle / 智能传输 / 未知→helper），核对你的推断。
+4. **预期结果**：你能对着 URL 形态准确说出它命中哪一分支、用哪个 vtable。
+5. **待本地验证**：若你的 `origin` 是 https，`git ls-remote origin` 是否真的拉起 `git-remote-https`，可用 `GIT_TRACE=1` 观察子进程名确认。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `transport_get` 不在创建 transport 时就立刻 `git_connect` 建连？
+
+**答案**：延迟到真正需要时（`connect_setup` 里 `if (data->conn) return 0` 才建）。原因有二：(1) 很多命令只需读本地配置、不一定真要连远端（如 `git remote -v`、dry-run）；(2) 连接是昂贵且需清理的资源，按需建立、`disconnect` 时统一释放，避免无用连接和资源泄漏。
+
+**练习 2**：`git clone https://github.com/...` 时，git 主程序自己会讲 HTTP 协议吗？
+
+**答案**：不会。`https://` 不是 git 内置认识的 scheme（见 transport_get 的分支），会被当作「未知 scheme」交给 `transport_helper_init("https")`，由外部程序 `git-remote-https` 充当中间人。主程序只和这个 helper 之间跑 git 智能协议（仍是 pkt-line），由 helper 把它翻译成 HTTP 请求。所以「线上的语言」对 helper 后端依然是 pkt-line，只是 helper 再多包一层 HTTP。
+
+---
+
+## 5. 综合实践
+
+设计一个把三个模块串起来的端到端任务：**用 trace 观察一次本地 `ls-remote` 的完整生命周期**，并把每一步映射回源码。
+
+1. 在 git 仓库目录执行，把三个 trace 通道都打开：
+   ```bash
+   GIT_TRACE=1 GIT_TRACE_PACKET=1 git ls-remote . > /tmp/refs.txt 2> /tmp/trace.txt
+   ```
+2. 打开 `trace.txt`，按时间顺序找出以下几类行，并在源码里定位它们各自由哪段代码产生：
+   - **spawn 子进程**：`GIT_TRACE` 会显示启动了 `git-upload-pack`（file 传输的 `start_command`，对应 §4.2 `git_connect` 的 `start_command(conn)`）。
+   - **握手请求 / 版本**：`packet: ...>` 与 `packet: ...<` 的最初几行（对应 §4.3 `handshake` → §4.2 `discover_version`）。辨认出 `version` 协商那一行。
+   - **ref 列表**：后续 `packet: ...<` 的 ref 广告行（v0 走 `get_remote_heads`，v2 走 `get_remote_refs`）。
+   - **flush 收尾**：结尾的 `0000` flush（对应 §4.3 `disconnect_git` 的 `packet_flush`）。
+3. 对其中**任意一条 `packet:` 行**，做 §4.1.4 的解码心算：它的载荷长度是多少、线上真实字节串的前缀应是哪 4 个十六进制字符。
+4. 写一段总结，回答：从「敲下 `git ls-remote .`」到「屏幕打印出 ref 列表」，字节流经过了哪些函数？建议画出调用链：
+   ```
+   cmd_ls_remote
+     → transport_get(remote, ".")          # 选 builtin_smart_vtable
+     → transport_get_remote_refs
+         → get_refs_via_connect → handshake
+             → connect_setup → git_connect  # spawn upload-pack
+             → discover_version             # packet_reader_peek
+             → get_remote_heads/get_remote_refs  # 读 pkt-line ref 广告
+     → 打印 ref
+     → transport_disconnect → disconnect_git → packet_flush + finish_connect
+   ```
+5. **预期结果**：你能把 trace 里的每一行现象，都对到上面调用链的某个函数与某段源码。
+6. **待本地验证**：trace 的具体内容（v0 还是 v2、ref 数量、是否出现 sideband）取决于你的 `protocol.version` 配置与仓库实际 ref；本任务验证的是「函数链与格式的对应关系」，不验证具体字节。
+
+> 进阶（可选）：把 URL 换成 `git clone --diag-url ssh://...` 与 `git clone --diag-url git://...`，对比 §4.2 的 URL 拆分差异；再读 `connect.c` 里 `git_tcp_connect_sock`、`fill_ssh_args`，理解三种建连方式的最后一公里。
+
+## 6. 本讲小结
+
+- **pkt-line** 是 git 线协议的分包格式：每段数据前加 **4 字节十六进制长度前缀**（长度含前缀自身），`0000`/`0001`/`0002` 是 flush/delim/response_end 控制包；单包载荷上限 `LARGE_PACKET_DATA_MAX = 65516`，超出则拆包。
+- 读写两侧对称：写经 `format_packet`/`do_packet_write`（先校验大小、算 `size+4`、回填前缀），读经 `packet_read_with_status`（读 4 字节长度、按值分派、再读载荷）。
+- `packet_reader` 提供「读一行 + 偷看下一行」的状态机，是协议握手的基础设施；`GIT_TRACE_PACKET` 的输出由 `packet_trace` 生成，`>` 为写、`<` 为读。
+- **connect**（`git_connect`）按 URL scheme 建连：`git://` 开 TCP 并把请求行作为第一个 pkt-line 发出，`ssh://`/`file://` spawn 子进程、版本号经 `GIT_PROTOCOL` 环境变量传递；建连结果统一归一成 `fd[2]`。
+- 连上后 `discover_version` 用 `packet_reader_peek` 偷看第一行协商 v0/v1/v2，并解析 capability（含 `object-format` 决定哈希算法）。
+- **transport** 用 `struct transport` + 虚表 `struct transport_vtable` 把 git/ssh/file/bundle/helper 统一成「列 ref / 抓取 / 推送 / 断开」接口；`transport_get` 是按 URL 选后端的工厂，连接懒建立、`disconnect` 时发 flush 收尾。
+
+## 7. 下一步学习建议
+
+- **u11-l2 协议 v2 与 serve**：本讲把版本协商讲到了 `discover_version`，但 v2 的命令式模型（`command=ls-refs`、`command=fetch`）与服务端 `serve.c` 的分发还没展开。学完本讲再读 `serve.c`、`ls-refs.c`、`protocol-caps.c`，就能看懂 v2 握手之后的完整命令交互。
+- **u11-l3 fetch-pack / send-pack**：本讲只到「列 ref + 握手」。对象协商（客户端通告哪些 commit、双方算差集、收发 pack）在 `fetch-pack.c` / `send-pack.c` / `fetch-negotiator.c`，是传输链路的下半场。
+- **u14-l1 run-command**：本讲反复出现 `start_command`/`finish_command`/`child_process`，它是 git spawn 子进程的统一抽象，读懂它能让 connect 与 transport 的子进程分支更清晰。
+- **延伸阅读**：`Documentation/technical/pack-protocol.txt`（v0/v1 线协议规范）与 `Documentation/technical/protocol-v2.txt`（v2 规范）是本讲源码对应的权威文字说明，建议对照阅读。
