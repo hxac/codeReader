@@ -1,0 +1,480 @@
+# CDMA：特征图与权重的取数引擎
+
+## 1. 本讲目标
+
+本讲深入卷积主流水线的第一级——CDMA（Convolution DMA，卷积直接存储器访问引擎）。读完本讲你应当能够：
+
+- 说清 CDMA 在卷积核心五级流水（CDMA→CBUF→CSC→CMAC→CACC）中的位置：它是「取数级」，负责把输入特征图与权重从外部存储搬进片上缓冲。
+- 区分 CDMA 内部四条取数通路 **IMG / DC / WG / WT** 各自的职责，并理解为什么特征图取数有三条互斥路径、而权重取数单独一条。
+- 掌握 **dma_mux** 如何把多路取数请求仲裁成单一存储接口请求、**shared_buffer** 如何作为数据侧的片上暂存 SRAM。
+- 看懂权重压缩/解压的真实路径：`weight_format` → `is_compressed` → WGS/WMB 协助解压 → 写入 CBUF，并能指出它**不经过** shared_buffer。
+
+> ⚠️ 一个需要先纠正的认知：本讲学习规格里把 DC 标注为「解压」。对照真实源码，**DC 是「直接卷积取数」（Direct convolution DMA），负责搬特征图数据；权重的压缩解压发生在 WT（Weight DMA）通路**。本讲一律以源码为准，并在第 4.3、4.4 节给出依据。
+
+## 2. 前置知识
+
+在进入 CDMA 之前，请先具备以下概念（来自前置讲义 u3-l1）：
+
+- **卷积主流水线五级**：CDMA（取数）→ CBUF（片上 SRAM 缓冲）→ CSC（按节拍分发）→ CMAC（乘加阵列）→ CACC（累加）。CDMA 是这五级的源头。
+- **dat 与 wt**：NVDLA 源码里把「输入特征图数据」统称 **dat**（data），把「权重」统称 **wt**（weight）。CDMA 同时搬运这两类数据。
+- **C 维与 K 维**：C 维是输入通道（卷积的累加/归约维），K 维是输出通道。一次卷积要把多个输入通道的 dat 与对应 wt 相乘累加。
+- **MCIF 与 CVIF**：两套存储读接口——MCIF 接主存 DBB（primary），CVIF 接片上 CVSRAM（secondary）。CDMA 的取数请求会按 `ram_type` 选择走哪一套。
+- **背压（backpressure）与 valid/ready 握手**：CDMA 与 CSC 之间通过 `sc2cdma_*` 信用/状态信号回压，防止 CBUF 溢出。
+- **影偶配置（shadow）**：CDMA 也有 `dual_reg`，CPU 可在当前层运行期间预装下一层参数。这一点已在 u2-l3 讲过，本讲不再重复。
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件全部位于 `vmod/nvdla/cdma/` 下：
+
+| 文件 | 作用 |
+| --- | --- |
+| `NV_NVDLA_cdma.v` | CDMA 顶层。例化 regfile、wt、dc、wg、img、dma_mux、cvt、shared_buffer、status 九大子模块，是本讲的「总装车间」。 |
+| `NV_NVDLA_CDMA_img.v` | 图像/特征图取数（Image convolution DMA）。内含 ctrl/sg/pack 三个子模块，做像素格式转换、scatter-gather 取数与打包。 |
+| `NV_NVDLA_CDMA_dc.v` | 直接卷积取数（Direct convolution DMA）。搬特征图数据，走 shared_buffer → cvt → CBUF。 |
+| `NV_NVDLA_CDMA_wt.v` | 权重取数（Weight DMA）。支持压缩权重，用 WGS（权重组状态）+ WMB（权重掩码位图）解压，直接写 CBUF。 |
+| `NV_NVDLA_CDMA_dma_mux.v` | DMA 多路复用器。把 dc/wg/img 三路读请求仲裁成单一 mcif/cvif 请求，响应再分拆回三路。 |
+| `NV_NVDLA_CDMA_shared_buffer.v` | 共享缓冲。16 个 `nv_ram_rws_16x256` bank，作为 dat 侧取数与重排之间的片上暂存 SRAM。 |
+
+数据流向全景图（建议先在脑中建立这张图，再读源码）：
+
+```
+                ┌──── MCIF (主存 DBB) ────┐
+   外部存储 ───→ │                          │ ← 读请求/读响应
+                └──── CVIF (片上 CVSRAM) ──┘
+                          ▲
+                  ┌───────┴────────┐
+                  │   dma_mux      │  3→1 请求仲裁 / 1→3 响应分拆
+                  └───┬────┬────┬───┘
+              ┌────────┘    │    └────────┐
+        ┌─────▼─────┐  ┌────▼────┐  ┌──────▼──────┐
+        │  IMG/DC/WG│  │ (dat侧) │  │     WT      │  (wt侧)
+        │  特征图取数│  │         │  │  权重取数    │
+        └─────┬─────┘  └────┬────┘  └──────┬──────┘
+              │             │              │
+        ┌─────▼─────┐       │        ┌─────▼─────┐
+        │shared_buf │←─读/写─┘        │ (无 sbuf)  │
+        │  16 bank  │                │ 直接送 cvt?│ × WT 不经 cvt
+        └─────┬─────┘                └─────┬─────┘
+              │ 读回重排                   │ 解压后
+        ┌─────▼─────┐                ┌─────▼─────┐
+        │   cvt     │← dat ──────────│           │
+        │ 精度/补值  │                │ cdma2buf  │
+        └─────┬─────┘                │ _wt_wr    │
+              │                       └─────┬─────┘
+        ┌─────▼─────┐                      │
+        │cdma2buf   │← dat (1024b) ────────┘  wt (512b)
+        │ _dat_wr   │
+        └─────┬─────┘
+              ▼
+            CBUF（卷积缓冲，下一级）
+```
+
+关键结论先记住：**dat 侧（IMG/DC/WG）走 shared_buffer → cvt → CBUF；wt 侧（WT）解压后直接写 CBUF，不经过 shared_buffer 也不经过 cvt。**
+
+## 4. 核心概念与源码讲解
+
+### 4.1 CDMA 顶层：四路取数与共享基础设施
+
+#### 4.1.1 概念说明
+
+CDMA 是卷积核心的「采购员」。卷积每算一个输出点都需要两样东西：一块输入特征图（dat）和一组权重（wt）。这两样都放在外部存储里，CDMA 的任务就是提前把它们搬进片上，供后续 CSC/CMAC/CACC 消费。
+
+为什么需要四条取数通路？因为特征图和权重的**数据布局与处理方式不同**：
+
+- 特征图是 2D 图像，要按卷积窗口做 scatter-gather（把分散的像素聚成一块），还要支持像素格式转换、均值减法、补零等。根据卷积模式不同，又分三条互斥路径：**IMG**（图像输入，带像素处理）、**DC**（直接卷积，常规特征图）、**WG**（Winograd 卷积，需要 Winograd 变换前的数据重排）。三者由寄存器 `conv_mode` 选择，同一时刻只有一条在工作。
+- 权重是 4D 张量（K×C×H×W），布局规整，可整体成块搬运；但它可能被**压缩**以省带宽，所以单独一条 **WT** 通路，并内置解压逻辑。
+
+四条通路共享同一对外存储接口（MCIF/CVIF），所以需要一个 `dma_mux` 做仲裁；dat 侧三条通路共享一片片上 SRAM 做暂存，所以有 `shared_buffer`；dat 侧还需要统一的精度转换与补零，所以有 `cvt`。
+
+#### 4.1.2 核心流程
+
+CDMA 顶层把九大子模块连成一张网，流程如下：
+
+1. **配置**：CPU 经 CSB 写 `cdma_regfile`，下发本层参数（输入地址、尺寸、stride、精度、卷积模式、权重格式等）并置 `op_en` 点火。
+2. **取数**：根据 `conv_mode`，IMG/DC/WG 中之一启动；WT 同时启动。各通路向 dma_mux 发读请求。
+3. **仲裁**：dma_mux 把多路读请求合成单一 mcif/cvif 请求，送外部存储；响应回来后再按来源分拆。
+4. **暂存/解压**：dat 侧把取回的数据写入 shared_buffer，再读出做重排；wt 侧若压缩则用 WGS/WMB 解压。
+5. **转换与交付**：dat 经 cvt 做精度转换/补零后写 `cdma2buf_dat_wr`（1024 位）入 CBUF；wt 直接写 `cdma2buf_wt_wr`（512 位）入 CBUF。
+6. **状态与中断**：status 控制器汇总各通路进度，向 CSC 报告可用 entries/slices，完成后经 `cdma_dat2glb_done_intr_pd` / `cdma_wt2glb_done_intr_pd` 上报 GLB。
+
+#### 4.1.3 源码精读
+
+顶层模块端口分三大类：CSB 配置口、两组存储读接口（dat 走一组、wt 走一组，每组又分 mcif/cvif）、与 CSC 的信用/状态握手及 done 中断：
+
+[NV_NVDLA_cdma.v:11-75](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L11-L75) —— CDMA 顶层端口。注意 dat 与 wt 各有独立的 `*2cvif` / `*2mcif` 读请求与 `*2cdma_*_rd_rsp` 读响应，说明特征图与权重是两套独立的 DMA 通道。
+
+顶层对 CBUF 的两组写端口宽度不同，体现 dat 与 wt 的吞吐差异：
+
+[NV_NVDLA_cdma.v:84-92](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L84-L92) —— `cdma2buf_dat_wr_data` 为 **1024 位**（特征图，宽进），`cdma2buf_wt_wr_data` 为 **512 位**（权重）。
+
+顶层例化九大子模块，注释已点明每个的职责：
+
+[NV_NVDLA_cdma.v:482-545](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L482-L545) —— `Weight DMA`（u_wt），权重取数与解压。
+
+[NV_NVDLA_cdma.v:560-633](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L560-L633) —— `Direct convolution DMA`（u_dc），直接卷积取数。源码注释明确写的是 "Direct convolution DMA"，**不是**「解压」。
+
+[NV_NVDLA_cdma.v:648-725](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L648-L725) —— `Winograd convolution DMA`（u_wg），Winograd 取数。
+
+[NV_NVDLA_cdma.v:740-828](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L740-L828) —— `Image convolution DMA`（u_img），图像取数。
+
+[NV_NVDLA_cdma.v:843-897](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L843-L897) —— `DMA mux`（u_dma_mux）。
+
+[NV_NVDLA_cdma.v:983-1026](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L983-L1026) —— `Shared buffer`（u_shared_buffer）。注意它只连了 dc/wg/img 的 `*2sbuf` 端口，**没有连 wt**——这是「权重不经 shared_buffer」的直接证据。
+
+每个子模块各配一个 `NV_NVDLA_CDMA_slcg` 时钟门控（如 [NV_NVDLA_cdma.v:548-558](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L548-L558)），空闲时关时钟省电，这是 u6-l1 将讲的 slcg 机制，此处不展开。
+
+#### 4.1.4 代码实践
+
+**实践目标**：建立 CDMA 顶层「模块即积木」的直觉，确认 dat 与 wt 是两套独立通道。
+
+**操作步骤**：
+
+1. 打开 `NV_NVDLA_cdma.v`，定位 9 个 `u_*` 例化，对照本节表格给每个写一句中文职责。
+2. 在顶层端口列表里，数清 `cdma_dat2*` 与 `cdma_wt2*` 各有几组读请求/响应口。
+3. 检查 `u_shared_buffer` 的端口连接，确认 wt 是否接进来。
+
+**需要观察的现象**：dat 侧有 `cdma_dat2mcif` 与 `cdma_dat2cvif` 两组请求、`mcif2cdma_dat` 与 `cvif2cdma_dat` 两组响应；wt 侧同样有 `cdma_wt2mcif`/`cdma_wt2cvif`。`u_shared_buffer` 实例端口里只出现 `dc2sbuf`/`wg2sbuf`/`img2sbuf`，没有 `wt2sbuf`。
+
+**预期结果**：dat 与 wt 是两条物理上独立的 DMA 通道；shared_buffer 只属于 dat 侧。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：CDMA 为什么要给特征图设三条互斥通路（IMG/DC/WG），而权重只有一条 WT？
+
+> **答**：特征图要按卷积模式做不同的数据重排——直接卷积按窗口取、Winograd 要做变换前的重排、图像输入还要做像素格式转换与均值减法，三者预处理逻辑差异大，故拆三条互斥路径由 `conv_mode` 选择。权重布局规整（K×C×H×W），无论哪种卷积模式权重形态都一样，只是可能压缩，故一条 WT 通路内置解压即可。
+
+**练习 2**：看顶层实例化，`u_cvt`（数据转换器）接收哪几路输入？为什么 wt 不在其中？
+
+> **答**：`u_cvt` 接收 `dc2cvt`/`wg2cvt`/`img2cvt` 三路 dat 输入，输出 `cdma2buf_dat_wr`。wt 不在其中，因为权重不需要精度转换/补零/均值处理，WT 解压后直接写 `cdma2buf_wt_wr` 入 CBUF。
+
+---
+
+### 4.2 IMG：特征图取数与 scatter-gather
+
+#### 4.2.1 概念说明
+
+IMG（Image convolution DMA）是三条特征图通路中功能最丰富的一条，专门处理「图像输入」场景。它的核心难题是：卷积窗口在输入图上是**滑动**的，相邻窗口之间有大量像素重叠；如果每个窗口都重新从外部存储取一遍，带宽浪费严重。解决办法是 **scatter-gather（聚散取数）**：先把一整块原始像素成块地（scatter 到 bank）搬进片上 shared_buffer，再按卷积窗口的需要把重叠像素**重用**（gather）出来，避免重复取数。
+
+IMG 还承担「像素级预处理」：支持多种 `pixel_format`（如 RGB/灰度等）、像素打包与展开、均值减法（`mean_ry/gu/bv/ax`）、补零（`pad_left/right`）。这些都在片上完成，避免污染外部存储。
+
+#### 4.2.2 核心流程
+
+IMG 内部又拆成三个子模块，流水协作：
+
+1. **ctrl（控制）**：解析本层参数，生成像素遍历顺序（`pixel_order`、`pixel_planar`）、bank 选择、包大小等控制信号；驱动 sg 与 pack 的节拍。
+2. **sg（scatter-gather）**：根据 ctrl 给的地址序列，向 mcif/cvif 发读请求；取回的 514 位响应数据写入 shared_buffer（`img2sbuf_p0/p1_wr`）。sg 维护 entries/slices 状态，向 status 报告。
+3. **pack（打包）**：从 shared_buffer 读回数据（`img2sbuf_p0/p1_rd`），按像素格式重排、做均值减法与补零，输出 1024 位 `img2cvt_dat_wr` 给 cvt。
+
+数据宽度演变：外部读回 514 位 → 存入 shared_buffer 256 位/bank → pack 拼出 1024 位 → cvt → CBUF。
+
+#### 4.2.3 源码精读
+
+IMG 顶层端口同时有 dat2mcif/cvif 请求与 img2cvt、img2sbuf 两组输出，体现「取数 → 暂存 → 打包」三段：
+
+[NV_NVDLA_CDMA_img.v:107-160](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_img.v#L107-L160) —— IMG 端口。`img2cvt_dat_wr_data` 为 1024 位，`img2sbuf_*` 为 256 位、8 位地址，p0/p1 双口。
+
+三个子模块的例化：
+
+[NV_NVDLA_CDMA_img.v:274-329](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_img.v#L274-L329) —— `u_ctrl`：解析 `pixel_format`/`pixel_mapping`/`datain_width` 等，输出 `pixel_order`、`pixel_planar*`、`pixel_bank` 等控制信号。
+
+[NV_NVDLA_CDMA_img.v:331-405](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_img.v#L331-L405) —— `u_sg`：scatter-gather 核心。它接收 `mcif2img`/`cvif2img` 读响应，输出 `img_dat2mcif`/`img_dat2cvif` 读请求，并把数据写入 `img2sbuf_p0/p1_wr`。地址由 `reg2dp_datain_addr_*`、`line_stride`、`pixel_y_offset` 等算出。
+
+[NV_NVDLA_CDMA_img.v:407-460](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_img.v#L407-L460) —— `u_pack`：从 `img2sbuf_p0/p1_rd_data` 读回数据，做打包/均值/补零，输出 `img2cvt_dat_wr_data`（1024 位）与 `img2cvt_dat_wr_pad_mask`（128 位补零掩码）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：理解 scatter-gather 如何用 shared_buffer 实现「取一次、重用多次」。
+
+**操作步骤**：
+
+1. 在 `NV_NVDLA_CDMA_img.v` 中找到 `u_sg` 的写端口 `img2sbuf_p0_wr_*` 和 `u_pack` 的读端口 `img2sbuf_p0_rd_*`。
+2. 追踪 `img2sbuf_p0_wr_addr[7:0]` 与 `img2sbuf_p0_rd_addr[7:0]`：它们都指向同一片 shared_buffer，但写地址由 sg 的取数顺序决定、读地址由 pack 的窗口重用顺序决定。
+3. 想象一个 3×3 卷积窗口在图上滑动两步：哪些像素会被两个窗口共用？这些共用像素应该只从外部取一次，存在 shared_buffer 里被读两次。
+
+**需要观察的现象**：sg 写 shared_buffer 的地址序列是「按存储布局」的线性块地址；pack 读 shared_buffer 的地址序列是「按卷积窗口」的重用地址。两者地址不一一对应，正是 gather 的体现。
+
+**预期结果**：能口述「sg 负责把外部数据 scatter 进 shared_buffer，pack 负责 gather 出卷积窗口所需数据」，并解释这为何减少外部带宽。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：IMG 的 `img2sbuf` 为什么有 p0、p1 两套读写口？
+
+> **答**：双口设计让 sg 写入与 pack 读出可以并行进行，避免读写竞争同一口导致流水停顿。p0/p1 还可用于交叉访问不同 bank，提升吞吐。
+
+**练习 2**：`img2cvt_dat_wr_pad_mask`（128 位）的作用是什么？
+
+> **答**：它标记 1024 位输出中哪些位置是补零（padding）而非真实像素。cvt 据此把补零位置填上 `pad_value`，保证卷积边缘窗口的正确性。
+
+---
+
+### 4.3 DC：直接卷积取数
+
+#### 4.3.1 概念说明
+
+DC（Direct convolution DMA）是「直接卷积模式」下的特征图取数通路。当 `conv_mode` 指示直接卷积（而非 Winograd）且输入并非需要 IMG 那套像素预处理的图像格式时，DC 接管取数职责。
+
+DC 与 IMG 的关键区别：DC **不做像素格式转换与均值减法**，它假设输入已经是特征图张量（线性的 C×H×W），只需按卷积窗口做 scatter-gather 取数与重排。因此 DC 的结构比 IMG 简单，但也走 shared_buffer → cvt → CBUF 这条 dat 通路。
+
+> 说明：本讲规格把 DC 标注为「解压」，但源码注释 [NV_NVDLA_cdma.v:560-562](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L560-L562) 明确是 `Direct convolution DMA`，且 DC 端口里没有任何 `weight_format`/`wgs`/`wmb` 信号——它不碰权重，更不做解压。解压在 4.4 节的 WT。
+
+#### 4.3.2 核心流程
+
+DC 的流程与 IMG 类似但更精简：
+
+1. 按 `reg2dp_datain_addr_*`、`line_stride`、`surf_stride`、`datain_width/height/channel` 计算取数地址序列。
+2. 向 mcif/cvif 发读请求（经 dma_mux），取回 514 位响应。
+3. 写入 shared_buffer（`dc2sbuf_p0/p1_wr`），按 `data_bank` 选 bank。
+4. 从 shared_buffer 读回（`dc2sbuf_p0/p1_rd`），重排为 512 位 `dc2cvt_dat_wr` 送 cvt。
+5. cvt 做精度转换后写 `cdma2buf_dat_wr` 入 CBUF。
+
+DC 支持 `data_reuse`（数据复用，类似 IMG 的窗口重叠重用）与 `skip_data_rls`（跳过数据释放，配合复用）。
+
+#### 4.3.3 源码精读
+
+DC 端口确认它是「数据取数」而非「权重解压」：
+
+[NV_NVDLA_CDMA_dc.v:26-28](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dc.v#L26-L28) —— DC 输入 `reg2dp_conv_mode`（卷积模式）与 `reg2dp_data_reuse`（数据复用）。没有任何 `weight_*` 端口。
+
+DC 同时驱动 cvt 与 shared_buffer，体现「暂存 → 重排 → 转换」三段：
+
+[NV_NVDLA_CDMA_dc.v:53-67](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dc.v#L53-L67) —— DC 输出 `dc2cvt_dat_wr_*`（送 cvt，512 位）与 `dc2sbuf_p0/p1_*`（读写 shared_buffer，256 位）。注意 `dc2cvt_dat_wr_data` 是 512 位，比 IMG 的 1024 位窄，反映 DC 处理的是常规特征图而非宽图像。
+
+DC 内部用一个 FIFO 缓冲读响应：
+
+[NV_NVDLA_CDMA_dc.v:7920](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dc.v#L7920) —— `NV_NVDLA_CDMA_DC_fifo u_fifo`，缓冲从 mcif/cvif 回来的读响应，解耦取数时序与重排时序。
+
+#### 4.3.4 代码实践
+
+**实践目标**：确认 DC 是数据取数通路，并与 IMG 对比其精简之处。
+
+**操作步骤**：
+
+1. 在 `NV_NVDLA_cdma.v` 的 `u_dc` 例化（560-633 行）里，列出 DC 用到的所有 `reg2dp_*` 参数。
+2. 与 `u_img` 例化（740-828 行）对比：DC 缺了哪些 IMG 才有的参数（如 `pixel_format`、`mean_*`、`pixel_mapping`）？
+3. 在 `NV_NVDLA_CDMA_dc.v` 里搜索 `weight_format`、`wgs`、`wmb`，确认不存在。
+
+**需要观察的现象**：DC 的参数集是 IMG 的子集，去掉了所有像素/均值相关项；DC 中搜不到任何权重压缩相关信号。
+
+**预期结果**：能说出「DC = 直接卷积特征图取数，比 IMG 精简，无像素处理、无权重解压」。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：同样从外部取特征图，IMG 与 DC 如何分工？
+
+> **答**：当输入是图像（需像素格式转换、均值减法）时走 IMG；当输入已是普通特征图张量、且为直接卷积模式时走 DC。两者由 `conv_mode` 与输入格式选择，互斥工作。
+
+**练习 2**：DC 的 `dc2cvt_dat_wr_data` 是 512 位，IMG 的 `img2cvt_dat_wr_data` 是 1024 位，为什么不同？
+
+> **答**：IMG 处理宽图像像素，单拍需吐出更多像素以匹配吞吐，故用 1024 位；DC 处理常规特征图，512 位即可。最终都由 cvt 对齐到 CBUF 所需的 1024 位 dat 写端口。
+
+---
+
+### 4.4 WT：权重取数与压缩解压
+
+#### 4.4.1 概念说明
+
+WT（Weight DMA）是 CDMA 的权重取数通路，也是**唯一真正做解压**的子模块。权重的特点是数据量大、且很多权重为 0（神经网络剪枝/稀疏化后尤其明显）。NVDLA 支持一种「权重压缩」格式：把权重按「组」存放，并用两类辅助数据描述其稀疏结构——
+
+- **WGS（Weight Group Status，权重组状态）**：描述每个权重组的元信息（组的规模、是否全零等），存放在独立地址 `wgs_addr`。
+- **WMB（Weight Mask Bitmap，权重掩码位图）**：用位图标记每个权重是否为非零，存放在 `wmb_addr`，长度 `wmb_bytes`。
+
+压缩权重本身（`weight_addr`）只存非零部分。WT 取数时，先用 WGS/WMB 还原出每个权重位置的「是否存在非零值」，再把压缩数据解压回完整的权重张量写入 CBUF。寄存器 `weight_format` 决定是否启用压缩（0=未压缩，1=压缩）。
+
+> 这才是本讲「解压」主题的真正所在——它在 WT，不在 DC。
+
+#### 4.4.2 核心流程
+
+WT 的压缩解压流程：
+
+1. **模式判定**：`is_compressed = (reg2dp_weight_format == 1)`。若为 1，启用 WGS/WMB 路径。
+2. **取 WGS**：按 `wgs_addr` 取权重组状态，存入 `u_wgs_fifo`，逐组驱动权重取数。
+3. **取 WMB**：按 `wmb_addr` 取掩码位图，`wmb_data_onfly`（在途）/`wmb_data_stored`（已存）/`wmb_data_avl`（可用）三组计数器管理其生命周期。
+4. **取压缩权重**：按 `weight_addr` 与 `byte_per_kernel` 取压缩权重数据。
+5. **解压**：用 WMB 位图把压缩数据展开为完整权重（零位补零）。
+6. **交付**：解压后的 512 位权重经 `cdma2buf_wt_wr_data` 直接写 CBUF，**不经 shared_buffer、不经 cvt**。
+
+WT 内部用两个仲裁器管理多路请求：`u_wrr_arb`（加权轮询）与 `u_sp_arb`（严格优先级），分别用于不同请求类的调度。
+
+解压过程涉及的数据计数关系（WMB 在途/已存/可用）：
+
+\[
+wmb\_req\_sum = wmb\_data\_onfly + wmb\_data\_stored + wmb\_data\_avl
+\]
+
+这三个量分别表示「已发请求但未返回」「已返回但未消费」「已解压待用」的 WMB 数据量，它们的和等于尚未完成的 WMB 请求总数，用于流控。
+
+#### 4.4.3 源码精读
+
+WT 端口包含完整的压缩相关信号：
+
+[NV_NVDLA_CDMA_wt.v:35-44](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L35-L44) —— WT 输入 `reg2dp_weight_format`、`reg2dp_wgs_addr_high/low`、`reg2dp_wmb_addr_high/low`、`reg2dp_wmb_bytes`。这是 DC/IMG 都没有的端口，证明解压只在 WT。
+
+`is_compressed` 寄存器声明与赋值：
+
+[NV_NVDLA_CDMA_wt.v:341](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L341) —— `reg is_compressed;` 寄存器声明。
+
+[NV_NVDLA_CDMA_wt.v:3090-3092](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L3090-L3092) —— `is_compressed = (reg2dp_weight_format == 1'h1);` 即 weight_format 为 1 时判定为压缩权重。
+
+WMB 三计数器与流控关系：
+
+[NV_NVDLA_CDMA_wt.v:5280-5285](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L5280-L5285) —— `{... wmb_req_sum} = wmb_data_onfly + wmb_data_stored + wmb_data_avl;` WMB 数据生命周期计数。
+
+两个仲裁器与 WGS FIFO：
+
+[NV_NVDLA_CDMA_wt.v:5789](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L5789) —— `NV_NVDLA_CDMA_WT_wrr_arb u_wrr_arb`，加权轮询仲裁器。
+
+[NV_NVDLA_CDMA_wt.v:5908](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L5908) —— `NV_NVDLA_CDMA_WT_sp_arb u_sp_arb`，严格优先级仲裁器。
+
+[NV_NVDLA_CDMA_wt.v:7220](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L7220) —— `NV_NVDLA_CDMA_WT_wgs_fifo u_wgs_fifo`，缓存取回的权重组状态。
+
+解压结果直接写 CBUF（不经 shared_buffer）：
+
+[NV_NVDLA_CDMA_wt.v:7555-7562](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v#L7555-L7562) —— `cdma2buf_wt_wr_data <= cdma2buf_wt_wr_data_w;` 解压后的权重直接寄存输出到 CBUF 写端口。对照 `u_shared_buffer` 端口（无 wt2sbuf），可证权重侧确实不使用 shared_buffer。
+
+#### 4.4.4 代码实践
+
+**实践目标**：追踪权重压缩数据从「判定压缩」到「解压写入 CBUF」的完整路径，并确认它不经过 shared_buffer。
+
+**操作步骤**：
+
+1. 在 `NV_NVDLA_CDMA_wt.v` 找到 `is_compressed` 的赋值（3090-3092 行），确认它由 `reg2dp_weight_format` 决定。
+2. 跟踪 `wgs_*` 信号：`wgs_pop_data`/`wgs_req_size` 如何驱动按组取数；`u_wgs_fifo` 缓存什么。
+3. 跟踪 `wmb_*` 信号：`wmb_data_onfly`/`wmb_data_stored`/`wmb_data_avl` 三计数器如何随请求发出、响应返回、消费解压而增减。
+4. 找到 `cdma2buf_wt_wr_data` 的赋值（7555-7562 行），确认解压结果直接送 CBUF。
+5. 回到 `NV_NVDLA_cdma.v` 的 `u_shared_buffer` 实例（986-1026 行），核对其端口里**没有** `wt2sbuf`。
+
+**需要观察的现象**：压缩权重数据流 = `weight_addr` 取压缩数据 + `wgs_addr` 取组状态 + `wmb_addr` 取掩码 → 三者在 WT 内部对齐合并 → `cdma2buf_wt_wr` 写 CBUF。整条链路中 shared_buffer 不出现。
+
+**预期结果**：能画出权重侧数据通路图，并标注「WT 内部解压，输出直达 CBUF，不经 shared_buffer/cvt」。
+
+**待本地验证**：若本地能跑仿真，可在 `cdma2buf_wt_wr_en` 拉高处 dump `cdma2buf_wt_wr_data`，对比 `weight_format=0`（未压缩，原样透传）与 `weight_format=1`（压缩，解压后）两种配置下的输出，观察解压是否补回了零权重。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：WGS 和 WMB 各自描述什么？为什么解压需要两者配合？
+
+> **答**：WGS 描述权重「组」的元信息（组的边界与规模），WMB 用位图标记组内每个权重是否非零。解压时按 WGS 划分组、按 WMB 决定每个位置是取压缩数据还是补零，两者配合才能把压缩数据还原成完整张量。
+
+**练习 2**：为什么权重解压后直接写 CBUF，而不像 dat 那样经过 shared_buffer？
+
+> **答**：权重布局规整、无需 scatter-gather 重排，也无需像素/精度预处理，解压即最终形态，故直接写 CBUF。dat 侧需要窗口重排与转换，才用 shared_buffer 与 cvt 做中间暂存。
+
+---
+
+### 4.5 dma_mux 与 shared_buffer：多路仲裁与共享缓冲
+
+#### 4.5.1 概念说明
+
+**dma_mux** 是 CDMA 对外存储接口的「收费站」。dat 侧三条通路（DC/WG/IMG）都要读外部存储，但 CDMA 对 MCIF 只有一组读请求口、对 CVIF 也只有一组。dma_mux 把三路请求仲裁成一路，响应再分拆回三路。
+
+**shared_buffer** 是 dat 侧的「中转仓库」。取回的原始数据先存进来，再按卷积窗口重排读出。它是一片 16 bank 的 SRAM，DC/WG/IMG 各有 p0/p1 双口读写访问权。
+
+两者合起来，解决了「多路取数共享一条外部总线」与「取数时序与重排时序解耦」两个问题。
+
+#### 4.5.2 核心流程
+
+dma_mux 对 MCIF 与 CVIF 各自独立做同样的处理（结构对称）：
+
+1. **请求合并**：dc/wg/img 三路请求中，同一时刻至多一路有效（由断言保证）。mux 用 `mc_sel_dc/wg/img` 选择信号把该路请求透传到 `cdma_dat2mcif`。
+2. **skid buffer + 流水**：为吸收背压，请求与响应各经一级 skid buffer + bubble-collapse 流水（p1~p4），保证 valid/ready 握手正确。
+3. **响应分拆**：响应回来时，按锁存的 `mc_sel_*` 把 `mcif2cdma_dat_rd_rsp` 路由到对应的 `mcif2dc/wg/img_dat_rd_rsp`。
+4. **来源不变式**：同一笔请求的请求路径（mcif 或 cvif）与响应路径必须一致，禁止中途切换，由 `nv_assert_never` 守护。
+
+shared_buffer 的流程：
+
+1. DC/WG/IMG 把取回的 256 位数据按 8 位地址写入各自 `*2sbuf_p0/p1_wr` 口。
+2. 8 位地址拆成「bank 选择（高位）」+「bank 内表项（低位 4 位）」，命中 16 个 bank 之一。
+3. 各通路再按重排需要从 `*2sbuf_p0/p1_rd` 读回，由 pack/dc/wg 内部重排后送 cvt。
+
+#### 4.5.3 源码精读
+
+dma_mux 端口对称地分 MCIF 与 CVIF 两组，各含 3 路请求输入与 1 路请求输出（及反向响应）：
+
+[NV_NVDLA_CDMA_dma_mux.v:11-62](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dma_mux.v#L11-L62) —— dma_mux 端口。可见 dc/wg/img 三路 `*_dat2mcif`/`*_dat2cvif` 输入，与单一 `cdma_dat2mcif`/`cdma_dat2cvif` 输出。
+
+请求合并（MCIF 侧）：三路 valid OR 起来，data 用 one-hot 掩码选择：
+
+[NV_NVDLA_CDMA_dma_mux.v:280-296](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dma_mux.v#L280-L296) —— `req_mc_in_pvld = dc | wg | img`；`req_mc_in_pd` 用 `{79{mc_sel_*}} & *_pd` 选出当前路的数据。
+
+响应按锁存的 sel 分拆回三路：
+
+[NV_NVDLA_CDMA_dma_mux.v:1595-1615](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dma_mux.v#L1595-L1615) —— `mcif2dc/wg/img_dat_rd_rsp_valid = rsp_mc_out_pvld & mc_sel_*`，把单一响应路由到对应通路。
+
+关键断言——同一时刻至多一路请求 MCIF（zero-one-hot）：
+
+[NV_NVDLA_CDMA_dma_mux.v:1111](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dma_mux.v#L1111) —— `nv_assert_zero_one_hot ... "Error! MCIF req conflict!"` 检查 `{dc_dat2mcif, wg_dat2mcif, img_dat2mcif}` 至多一位有效。
+
+请求/响应路径不可中途切换：
+
+[NV_NVDLA_CDMA_dma_mux.v:1923](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_dma_mux.v#L1923) —— `nv_assert_never ... "Error! Change dma from mcif to cvif!"` 禁止请求走 MCIF 而响应从 CVIF 回来。
+
+shared_buffer 的 16 bank 与 RAM 实例：
+
+[NV_NVDLA_CDMA_shared_buffer.v:128-143](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_shared_buffer.v#L128-L143) —— 16 个 bank 的读数据线 `sbuf_rdat_00..15`（各 256 位）。
+
+[NV_NVDLA_CDMA_shared_buffer.v:2176-2189](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_shared_buffer.v#L2176-L2189) —— 注释 `Instance 16 ... RAMs as local shared buffers` 与首个 `nv_ram_rws_16x256 u_shared_buffer_00` 实例。每个 bank 是一个 16 深 × 256 位的单口读写 SRAM（`ra`/`wa` 均为 4 位）。
+
+shared_buffer 端口只连 dc/wg/img，无 wt：
+
+[NV_NVDLA_CDMA_shared_buffer.v:15-50](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_CDMA_shared_buffer.v#L15-L50) —— 端口只有 `dc2sbuf`/`wg2sbuf`/`img2sbuf` 的 p0/p1 读写口，没有 `wt2sbuf`。再次印证权重侧不使用 shared_buffer。
+
+#### 4.5.4 代码实践
+
+**实践目标**：验证 dma_mux 的「三选一」与 shared_buffer 的「16 bank」结构。
+
+**操作步骤**：
+
+1. 在 `NV_NVDLA_CDMA_dma_mux.v` 找到 MCIF 请求合并逻辑（280-296 行）与 CVIF 对应逻辑（683-704 行），确认结构对称。
+2. 找到全部 `nv_assert_zero_one_hot` 断言，理解它们保证「同一时刻至多一路请求」——这是 mux 能用简单 OR+选择实现的**前提**。如果没有这个不变式，就需要真正的轮询仲裁器。
+3. 在 `NV_NVDLA_CDMA_shared_buffer.v` 数 `u_shared_buffer_*` 实例个数（应为 16），确认每个是 `nv_ram_rws_16x256`。
+4. 追踪一个 8 位读写地址如何拆成 bank 选择与 bank 内表项：观察 `dc2sbuf_p0_rd_bsel`（4 位 one-hot，选 16 bank 之一）与 RAM 的 `ra[3:0]`（选 bank 内 16 表项之一）。
+
+**需要观察的现象**：dma_mux 的请求合并是「OR valid + one-hot 选 data」，而非带状态机的轮询——因为上游断言保证了互斥。shared_buffer 的 8 位地址高位映射到 bank、低位 4 位映射到 bank 内行。
+
+**预期结果**：能解释「为什么 dma_mux 不需要复杂仲裁器」（因为 DC/WG/IMG 互斥工作，天然 zero-one-hot），并能算出 shared_buffer 总容量 = 16 bank × 16 行 × 256 位 = 8 KB。
+
+**待本地验证**：可在仿真中同时给 DC 与 WG 激活信号，观察 `Error! MCIF req conflict!` 断言是否触发（正常配置下不应触发，触发说明配置错误）。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：dma_mux 用简单的「OR + one-hot 选择」合并三路请求，为什么不担心多路同时请求导致数据错乱？
+
+> **答**：因为 DC/WG/IMG 由 `conv_mode` 选择，同一时刻只有一条通路工作，上游用 `nv_assert_zero_one_hot` 断言保证三路请求互斥。有了这个不变式，简单选择即可，无需带状态的轮询仲裁。
+
+**练习 2**：shared_buffer 的 8 位地址 `dc2sbuf_p0_wr_addr[7:0]` 如何映射到 16 个 `nv_ram_rws_16x256` bank？
+
+> **答**：高位用于 bank 选择（译码成 4 位 one-hot 的 `bsel` 选 16 bank 之一），低 4 位作为 bank 内 RAM 的行地址 `ra/wa[3:0]`（16 深）。于是 8 位地址可寻址 16×16=256 个 256 位表项。
+
+---
+
+## 5. 综合实践
+
+**任务**：给一个「带压缩权重的直接卷积层」画出 CDMA 内部的完整数据通路，并标注每一段用了哪个子模块、是否经过 shared_buffer。
+
+**背景**：假设本层 `conv_mode` = 直接卷积，输入是普通特征图（非图像格式），权重 `weight_format` = 1（压缩），权重存于主存 DBB，特征图存于片上 CVSRAM。
+
+**要求**：
+
+1. 指出特征图走哪条取数通路（IMG/DC/WG），为什么。→ 应选 **DC**（直接卷积、非图像格式）。
+2. 指出特征图数据流经的子模块序列：DC → ? → ? → CBUF。→ DC → shared_buffer → cvt → `cdma2buf_dat_wr` → CBUF。
+3. 指出权重数据流经的子模块序列，并说明解压发生在哪。→ WT（内部用 WGS/WMB 解压）→ `cdma2buf_wt_wr` → CBUF；解压在 WT 内，**不经** shared_buffer/cvt。
+4. 指出特征图读请求走哪套存储接口（MCIF/CVIF）。→ CVIF（因为特征图在 CVSRAM）。
+5. 说明 dma_mux 在此场景中仲裁哪几路请求。→ 因为只有 DC 在工作（dat 侧），dma_mux 此时实际只透传 DC 的一路请求到 CVIF；WT 的请求走独立的 wt 通道，不进 dat 侧的 dma_mux。
+
+**验收**：画出一张标注完整的框图，能把 dat 与 wt 两条通路、shared_buffer/cvt 的归属、MCIF/CVIF 的选择都说清楚，即合格。
+
+## 6. 本讲小结
+
+- CDMA 是卷积主流水线的「取数级」，对内搬特征图（dat）与权重（wt）入片上 CBUF。
+- 特征图取数有三条**互斥**通路：IMG（图像+像素处理）、DC（直接卷积）、WG（Winograd），由 `conv_mode` 选择；三者都走 shared_buffer → cvt → CBUF。
+- 权重取数单独一条 **WT** 通路，支持压缩格式：`weight_format==1` 时 `is_compressed` 置位，用 **WGS（权重组状态）+ WMB（权重掩码位图）** 解压，直接写 `cdma2buf_wt_wr` 入 CBUF。
+- **解压发生在 WT，不是 DC**——DC 是「直接卷积取数」（源码注释 `Direct convolution DMA`），不碰权重。
+- **dma_mux** 把 dc/wg/img 三路读请求仲裁成单一 mcif/cvif 请求，靠上游 zero-one-hot 互斥不变式用简单 OR+选择实现，并用 skid buffer 保证握手正确。
+- **shared_buffer** 是 16 个 `nv_ram_rws_16x256` bank 的片上暂存 SRAM（约 8 KB），只服务 dat 侧（dc/wg/img），权重侧不使用。
+
+## 7. 下一步学习建议
+
+- **下一讲 u3-l3（CBUF）**：CDMA 把 dat/wt 写进 CBUF 后，接下来要由 CSC 读取。建议重点看 CBUF 的 bank 组织与 CDMA 写口、CSC 读口的对应关系，理解「为何 CDMA dat 写 1024 位、wt 写 512 位」如何匹配 CBUF 的位宽。
+- **回看 u3-l1**：把本讲的 dat/wt 通路与 u3-l1 的「五级流水数据宽度鼓形（512→1024→…）」对照，确认 CDMA 输出端宽度与 CSC 输入端宽度一致。
+- **延伸阅读**：若对权重压缩格式感兴趣，可对照 `cmod/` 下 CDMA 的 C 参考模型（u7-l3 将讲），看 WGS/WMB 的具体位级定义与解压算法的黄金实现，与 RTL 的 `is_compressed` 路径相互印证。
+- **slcg 与时钟门控**：本讲多次出现 `u_slcg_*`，若想理解各通路空闲时如何关时钟，可预习 u6-l1（car/sync3d/slcg）。

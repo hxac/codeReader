@@ -1,0 +1,402 @@
+# 卷积主流水线总览：CDMA→CBUF→CSC→CMAC→CACC
+
+## 1. 本讲目标
+
+NVDLA 的「心脏」是一条卷积主流水线（Convolution Core Pipeline）。本讲是卷积核心的**总览篇**，不深入任何一级的内部实现，而是让你先建立整条数据通路的鸟瞰图。学完本讲你应该能够：
+
+- 说清楚卷积核心由 **CDMA、CBUF、CSC、CMAC（A/B 两半）、CACC** 五级构成，以及每一级「做什么」。
+- 对照 `NV_NVDLA_partition_c.v`，画出这五级之间的主数据连线，并理解它们**物理上分布在多个分区**、由顶层 `NV_nvdla.v` 拼接的特殊结构。
+- 用真实端口位宽和 `spec/defs/nv_full.spec` 里的规格宏，解释 CSC/CMAC/CACC 之间的**数据宽度与吞吐配对**关系，特别是「为什么是 2048 个 INT8 MAC」这个数字从何而来。
+
+后续 u3-l2～u3-l6 会逐级展开 CDMA、CBUF、CSC、CMAC、CACC 的内部实现；本讲只负责把这条链「串起来」。
+
+## 2. 前置知识
+
+本讲假设你已经读过以下内容（它们建立了必要认知，本讲直接承接、不再重复）：
+
+- **u1-l1 / u1-l5**：NVDLA 是可集成的推理加速器 IP；nvdlav1 分支固定 2048 个 INT8 MAC（或 1024 个 INT16/fp16 MAC）；顶层 `NV_nvdla.v` 把设计切成 `partition_o/c/m(ma/mb)/a/p` 等分区，其中 c=卷积前段、m=CMAC、a=CACC、p=后处理。
+- **u2-l1～u2-l3**：CPU 通过 CSB 总线编程各引擎；每个引擎有一套由 RDL/Ordt 生成的寄存器文件，并用 producer/consumer **影偶（shadow）** 机制做无停顿配置更新。本讲的五级流水都接受 CSB 配置（如 `csb2cdma_req`、`csb2csc_req`、`csb2cacc_req`），并各自上报 `done` 中断到 GLB。
+
+几个本讲会反复用到的术语：
+
+- **特征图（feature map / activation）**：卷积的输入数据，本讲里常称为 data/dat。
+- **权重（weight）**：卷积核参数，本讲里常称为 wt。
+- **MAC（Multiply-Accumulate，乘加）**：一次「乘法 + 累加」运算，是衡量加速器算力的基本单位。
+- **C 维 / K 维**：卷积里的两个关键维度。**C** 是输入通道（input channel）方向，是累加（reduction）维度；**K** 是输出通道（output channel / kernel）方向。
+- **反压（backpressure）**：当下游来不及处理时，向上游「拒绝接收」的握手机制。
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件及其作用：
+
+| 文件 | 作用 |
+| --- | --- |
+| `vmod/nvdla/top/NV_NVDLA_partition_c.v` | **卷积前段分区**，例化 CDMA、CBUF、CSC 三级，并把通往 CMAC 的数据/权重总线引到顶层。本讲最重要的「连接图」就在这里。 |
+| `vmod/nvdla/cdma/NV_NVDLA_cdma.v` | **CDMA（Convolution DMA）**：从存储搬特征图与权重进片上缓冲。 |
+| `vmod/nvdla/csc/NV_NVDLA_csc.v` | **CSC（Convolution Sequence Controller）**：按 MAC 阵列节拍，从缓冲读出数据/权重分发给 CMAC。 |
+| `vmod/nvdla/cmac/NV_NVDLA_cmac.v` | **CMAC（Convolution MAC）**：大规模并行乘加阵列，分 a/b 两半。 |
+| `vmod/nvdla/cacc/NV_NVDLA_cacc.v` | **CACC（Convolution ACCumulator）**：累加部分和、叠偏置、按精度装配并交付结果。 |
+| `vmod/nvdla/cbuf/NV_NVDLA_cbuf.v` | **CBUF（Convolution Buffer）**：CDMA 与 CSC 之间的片上 SRAM 工作缓冲。 |
+| `spec/defs/nv_full.spec` | nvdlav1 的固定规格宏（MAC 阵列尺寸、CBUF bank、存储接口宽度），是吞吐配对计算的「权威数据源」。 |
+| `vmod/nvdla/top/NV_nvdla.v` | 顶层，负责把跨分区的五级数据线（含 `cacc2sdp`）拼接起来。 |
+
+> 提示：CBUF 没有独立的「源码地图」条目是因为它在 `partition_c` 内部例化，本讲通过 `partition_c.v` 的例化语句来观察它。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 卷积五级流水总览
+
+#### 4.1.1 概念说明
+
+先建立直觉。一次卷积运算，硬件上可以拆成五个连贯的动作：
+
+1. **取数**：把输入特征图和权重从外部存储（DBB 或片上 CVSRAM）搬进来。
+2. **缓冲**：把搬进来的数据暂时存在片上 SRAM 里，按卷积窗口重排好。
+3. **分发**：按 MAC 阵列「吃得下」的节拍，把缓冲里的数据/权重一拍一拍喂给乘加阵列。
+4. **乘加**：阵列里成百上千个乘法器同时算「数据×权重」，并局部累加。
+5. **累加交付**：把跨多个 slot/批次的局部和累加成最终结果，叠加偏置，按精度格式装好，交给下一级（后处理）。
+
+NVDLA 把这五个动作分别固化成五个引擎，串成一条流水线：
+
+```
+CDMA  ──►  CBUF  ──►  CSC  ──►  CMAC(a/b)  ──►  CACC  ──► (后处理 SDP…)
+取数       缓冲       分发       乘加             累加交付
+```
+
+- **CDMA**（Convolution DMA）：同时搬运 **dat（特征图）** 与 **wt（权重）** 两路，并支持权重解压、Winograd 变换等特殊取数模式。
+- **CBUF**（Convolution Buffer）：CDMA 写、CSC 读的片上 SRAM 缓冲，是流水线的「蓄水池」，隔离慢速存储与快速 MAC 阵列。
+- **CSC**（Convolution Sequence Controller）：流水线的「指挥家」，生成数据序列与权重序列，按节拍推送给 CMAC。
+- **CMAC**（Convolution MAC）：乘加阵列，分 **cmac_a / cmac_b** 两半，每半 1024 个 INT8 MAC，合计 2048。
+- **CACC**（Convolution ACCumulator）：把 CMAC 的部分和累加成完整卷积结果，叠偏置，按 INT8/INT16/fp 装配后交付给 SDP。
+
+#### 4.1.2 核心流程
+
+一条数据（一个特征图像素流）从进到出的简化流程：
+
+```
+外部存储(DBB/CVSRAM)
+      │  cdma_dat2mcif/cvif（特征图）、cdma_wt2mcif/cvif（权重）读请求
+      ▼
+   [CDMA] img/dc/wg 子模块按窗口取数 ──► dma_mux 复用 ──► cvt 转换 ──►
+      │  cdma2buf_dat_wr（1024b 特征）、cdma2buf_wt_wr（512b 权重）
+      ▼
+   [CBUF] 16 bank × 64b × 512 深 的 SRAM 缓冲
+      │  sc2buf_dat_rd / sc2buf_wt_rd（CSC 按地址读出）
+      ▼
+   [CSC] sg 生成序列 → dl（数据装载）/ wl（权重装载）按节拍推送
+      │  sc2mac_dat_a/b（128×8b 特征 + 128b 掩码）、sc2mac_wt_a/b（128×8b 权重）
+      ▼
+   [CMAC] cmac_a / cmac_b 两半阵列并行乘加
+      │  mac_a2accu / mac_b2accu（各 8 路 ×176b 部分和）
+      ▼
+   [CACC] calculator 累加 → assembly_buffer → delivery_buffer
+      │  cacc2sdp_pd（514b 交付包）
+      ▼
+   后处理（SDP → PDP …，在 partition_p / partition_o）
+```
+
+关键的反压回路：CACC 通过 `accu2sc_credit_size/vld` 给 CSC 发「信用（credit）」，告诉 CSC 累加器还剩多少空位；CSC 只有拿到信用才会继续向 CMAC 推数据，避免累加器溢出。
+
+#### 4.1.3 源码精读
+
+整条流水线的「五级」并不是在同一个文件里挨个例化的——这是 NVDLA 一个容易让人困惑的点。我们在 `partition_c.v` 里搜索例化语句，会发现 **partition_c 只例化了前三级**（CDMA、CBUF、CSC），而 CMAC、CACC 在别的分区：
+
+```
+NV_NVDLA_cdma   u_NV_NVDLA_cdma   ( ... )   // 取数
+NV_NVDLA_cbuf   u_NV_NVDLA_cbuf   ( ... )   // 缓冲
+NV_NVDLA_csc    u_NV_NVDLA_csc    ( ... )   // 分发
+// CMAC 在 partition_m（例化两次：ma、mb 对应阵列两半）
+// CACC 在 partition_a
+```
+
+> 引用：[vmod/nvdla/top/NV_NVDLA_partition_c.v:1600-1698](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_NVDLA_partition_c.v#L1600-L1698) —— 依次例化 CDMA、CBUF、CSC 的三段，注释分别写明 *Convolution DMA / Convolution Buffer / Convolution Sequence Controller*。
+
+也就是说，**五级流水物理上跨越多个分区**：
+
+| 级 | 所在分区 | 引擎 |
+| --- | --- | --- |
+| 取数 | partition_c | CDMA |
+| 缓冲 | partition_c | CBUF |
+| 分发 | partition_c | CSC |
+| 乘加 | partition_m（ma + mb） | CMAC（两半） |
+| 累加交付 | partition_a | CACC |
+
+CSC 把通往 CMAC 的超宽数据/权重总线作为 **分区输出端口** 引到顶层，再由 `NV_nvdla.v` 跨分区接到 partition_m 的 CMAC；CACC 的输出 `cacc2sdp_pd` 同样跨分区接到 partition_p 的 SDP。这一点我们在 4.2 详讲。
+
+> 引用：[vmod/nvdla/top/NV_nvdla.v:194-196](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_nvdla.v#L194-L196) —— 顶层声明 `cacc2sdp_pd/valid/ready` 内部 wire，正是连接 CACC（partition_a）与 SDP（partition_p）的跨分区数据线。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+**目标**：用「模块清单」的方式确认五级引擎各自落在哪个文件、哪个分区。
+
+**步骤**：
+
+1. 打开 `vmod/nvdla/cdma/NV_NVDLA_cdma.v`、`csc/NV_NVDLA_csc.v`、`cmac/NV_NVDLA_cmac.v`、`cacc/NV_NVDLA_cacc.v`、`cbuf/NV_NVDLA_cbuf.v`，各自记下 `// File Name:` 注释里的模块全名。
+2. 在 `vmod/nvdla/top/NV_NVDLA_partition_c.v`、`NV_NVDLA_partition_m.v`、`NV_NVDLA_partition_a.v` 里分别搜索 `NV_NVDLA_cmac`、`NV_NVDLA_cacc` 的例化，确认 CMAC/CACC 不在 partition_c。
+3. 在顶层 `NV_nvdla.v` 搜索 `cacc2sdp_pd`，确认它是连接 partition_a 与 partition_p 的内部 wire。
+
+**需要观察的现象**：partition_c 里只有 cdma/cbuf/csc 三个引擎例化；CMAC 出现在 partition_m（且例化两次），CACC 出现在 partition_a。
+
+**预期结果**：你会得到一张「级 ↔ 分区 ↔ 文件」对照表，和本讲 4.1.3 的表一致。这是后续逐级精读的导航地图。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么要把 CDMA、CBUF、CSC 放进同一个分区（partition_c），却把 CMAC、CACC 拆到另外的分区？
+
+> **参考答案**：分区在 NVDLA 里同时是**时钟域/复位域/电源岛**的边界。CDMA/CBUF/CSC 之间是超宽（上千位）的紧耦合数据通路，放进同一分区可以缩短连线、共用门控时钟；而 CMAC（ma/mb）作为最大最耗电的阵列、CACC 作为独立的累加单元，单独成区便于分别做时钟门控（slcg）和电源管理，也让物理布局更灵活。
+
+**练习 2**：如果只能记住一个英文全称来对应「指挥家」这一级，应该是哪个？
+
+> **参考答案**：CSC = **C**onvolution **S**equence **C**ontroller。它生成喂给 MAC 阵列的数据/权重「序列」，是流水线的节拍控制器。
+
+---
+
+### 4.2 partition_c 的连接关系：CDMA→CBUF→CSC 及跨分区拼接
+
+#### 4.2.1 概念说明
+
+要画出框图，关键是抓住 **三段「点到点」的数据线**（都在 partition_c 内部）和 **两组「跨分区」的输出总线**（引到顶层）：
+
+- **CDMA → CBUF**：CDMA 把取回的特征图与权重分别写入 CBUF 的 dat 区与 wt 区。
+- **CBUF → CSC**：CSC 按自己生成的地址，从 CBUF 读出 dat 与 wt。
+- **CSC → CMAC**（跨分区）：CSC 把对齐好的 dat/wt 以超宽总线形式送出分区，经顶层接到 CMAC。
+- **CSC ↔ CACC**（跨分区，反压）：CACC 把累加器的空闲「信用」回送给 CSC。
+
+此外 CDMA 还向存储接口发读请求（`cdma_dat2mcif/cvif`、`cdma_wt2mcif/cvif`），并向上报两路 done 中断（dat、wt 分开）。
+
+#### 4.2.2 核心流程
+
+把 partition_c 内部的数据流抽象成伪代码：
+
+```
+// CDMA：把外部存储的数据搬进 CBUF
+cdma.img/dc/wg 取特征图  ──► cvt 转换 ──► cdma2buf_dat_wr   (写 CBUF dat 区)
+cdma.wt          取权重   ──►             ──► cdma2buf_wt_wr   (写 CBUF wt 区)
+
+// CBUF：被动响应两端的写/读
+on cdma2buf_dat_wr : 写入 dat SRAM
+on sc2buf_dat_rd   : 读出 dat 给 CSC
+on sc2buf_wt_rd    : 读出 wt  给 CSC
+on sc2buf_wmb_rd   : 读出 weight-mask 给 CSC
+
+// CSC：从 CBUF 取数，按节拍推给 CMAC（跨分区）
+sg 生成 dat/wt 序列 → dl 从 CBUF 读 dat → sc2mac_dat_a/b 输出
+                     → wl 从 CBUF 读 wt  → sc2mac_wt_a/b  输出
+
+// CACC → CSC 的反压信用（跨分区回程）
+若 CACC 累加器有空位 → accu2sc_credit_vld/size → CSC 才继续推数据
+```
+
+#### 4.2.3 源码精读
+
+**(1) CDMA → CBUF 的写口**：在 partition_c 例化 CDMA 时，CDMA 的输出 `cdma2buf_dat_wr_data` 直接连到后续 CBUF 例化的同名输入。
+
+> 引用：[vmod/nvdla/top/NV_NVDLA_partition_c.v:1603-1610](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_NVDLA_partition_c.v#L1603-L1610) —— CDMA 例化处引出 `cdma2buf_dat_wr_en/addr/hsel/data[1023:0]` 与 `cdma2buf_wt_wr_en/addr/hsel/data[511:0]`，即「特征图 1024 位、权重 512 位」两路写口。
+
+> 引用：[vmod/nvdla/top/NV_NVDLA_partition_c.v:1673-1680](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_NVDLA_partition_c.v#L1673-L1680) —— CBUF 例化处把这些同名信号作为输入接住，完成 CDMA→CBUF 的写连接（含 dat 与 wt 两路）。
+
+**(2) CBUF → CSC 的读口**：CSC 用 `sc2buf_*_rd_addr` 给地址，CBUF 回 `sc2buf_*_rd_data/valid`。
+
+> 引用：[vmod/nvdla/top/NV_NVDLA_partition_c.v:1681-1692](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_NVDLA_partition_c.v#L1681-L1692) —— CBUF 输出 `sc2buf_dat_rd_data[1023:0]`、`sc2buf_wt_rd_data[1023:0]`、`sc2buf_wmb_rd_data[1023:0]`，分别供 CSC 读取特征图、权重、权重掩码。
+
+**(3) CSC ↔ CDMA 的状态握手**：CSC 与 CDMA 之间还有一对 `cdma2sc_*` / `sc2cdma_*` 信号（entries/slices/pending），用来汇报「缓冲里准备好了多少数据/权重 slice」。这是 CDMA 决定「要不要再取一批数据」的依据。
+
+> 引用：[vmod/nvdla/top/NV_NVDLA_partition_c.v:1638-1660](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_NVDLA_partition_c.v#L1638-L1660) —— CDMA 与 CSC 互连的 `cdma2sc_dat_updt/entries/slices` 与 `sc2cdma_dat_updt/entries/slices`、以及 `sc2cdma_*_pending_req` / `cdma2sc_*_pending_ack` 的请求-应答对。
+
+**(4) CSC → CMAC 的超宽跨分区总线**：这是 partition_c 体积最大的端口——128 个独立命名的 8 位数据信号，外加 128 位掩码。它们经顶层连到 partition_m 的 CMAC。
+
+> 引用：[vmod/nvdla/top/NV_NVDLA_partition_c.v:703-712](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_NVDLA_partition_c.v#L703-L712) —— partition_c 的输出端口 `sc2mac_dat_a_src_pvld`、`sc2mac_dat_a_src_mask[127:0]`、以及 `sc2mac_dat_a_src_data0..127`（每个 `[7:0]`），构成送往 cmac_a 的特征图总线。
+
+**(5) CACC → CSC 的反压信用**：CSC 例化里把 CACC 的信用当作输入。
+
+> 引用：[vmod/nvdla/csc/NV_NVDLA_csc.v:1301-1302](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/csc/NV_NVDLA_csc.v#L1301-L1302) —— CSC 的 `u_sg`（序列发生器）输入 `accu2sc_credit_vld` 与 `accu2sc_credit_size[2:0]`，用累加器信用来节流推送。
+
+#### 4.2.4 代码实践（本讲主实践：画框图）
+
+**目标**：在 `partition_c.v` 中梳理 CDMA→CBUF→CSC→CMAC→CACC 的主数据连线，画出一张卷积核心框图。
+
+**步骤**：
+
+1. 在 `NV_NVDLA_partition_c.v` 中定位三个例化：`u_NV_NVDLA_cdma`（约 L1600）、`u_NV_NVDLA_cbuf`（约 L1669）、`u_NV_NVDLA_csc`（约 L1698）。
+2. 画出三个方框，分别标注 CDMA / CBUF / CSC。
+3. 从 CDMA 方框画两条箭头到 CBUF：
+   - `cdma2buf_dat_wr_*`（1024 位特征图写）
+   - `cdma2buf_wt_wr_*`（512 位权重写）
+4. 从 CBUF 画三条箭头到 CSC：
+   - `sc2buf_dat_rd_*`（特征图读）
+   - `sc2buf_wt_rd_*`（权重读）
+   - `sc2buf_wmb_rd_*`（权重掩码读）
+5. 从 CSC 画两条粗箭头「出分区」到右侧的 CMAC 框（虚线表示跨分区）：`sc2mac_dat_a/b_*`（特征）、`sc2mac_wt_a/b_*`（权重）。
+6. 从右侧 CACC 框画一条回程虚线到 CSC：`accu2sc_credit_*`（反压信用）。
+7. 再从 CDMA 向下画两组读请求箭头到「存储接口」：`cdma_dat2mcif/cvif`、`cdma_wt2mcif/cvif`。
+
+**需要观察的现象**：CDMA 与 CBUF 之间的写口、CBUF 与 CSC 之间的读口都是**同模块内**（partition_c）的 wire，端口名在两个例化里一一对应；而通往 CMAC 的总线是**跨分区**的，是 partition_c 的顶层输出端口。
+
+**预期结果**：你得到一张能体现「三段内部连线 + 两组跨分区总线 + 一条反压回路」的卷积核心框图。如果你愿意，可对照下图自检：
+
+```
+            ┌─────────────── partition_c ───────────────┐
+ 存储 ──rd──►│ CDMA ─dat/wt wr─► CBUF ─rd─► CSC          │
+ MCIF/CVIF   │                              │           │
+            └──────────────────────────────┼─dat/wt───┬──► partition_m: CMAC(a/b)
+                                           │          │   (乘加阵列)
+                                           ▲          ▼
+                                           │      partition_a: CACC
+                                           └─credit── (累加器) ─cacc2sdp─► partition_p: SDP
+```
+
+> 说明：上图是教学示意图，依据 `partition_c.v` 的端口命名归纳；实际方向（src/dst）以源码端口注释 `//|> o`（输出）/`//|< i`（输入）为准。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：CDMA 写 CBUF 时，特征图写口是 1024 位、权重写口是 512 位，为什么特征图比权重宽一倍？
+
+> **参考答案**：这是由两条数据流的**吞吐需求**决定的——每个卷积窗口里，特征图要按 input channel 维度大量铺开（每个输出点都要扫过 C 个输入通道），数据量更大、需要更宽的写入带宽；权重的总量相对小（一组 kernel 复用很多次），窄一些的写口已够用。精确的比例在 4.3 用规格宏进一步说明。
+
+**练习 2**：`accu2sc_credit_*` 这条线如果断开（恒为 0），流水线会出现什么现象？
+
+> **参考答案**：CSC 拿不到累加器的空闲信用，会**不敢**继续向 CMAC 推数据（或反过来，若实现成「无信用也推」则会丢部分和），表现为吞吐骤降或卷积结果错误。这条反压回路是保证 CACC 累加器不溢出的关键。
+
+---
+
+### 4.3 各级数据宽度与吞吐配对
+
+#### 4.3.1 概念说明
+
+「为什么 NVDLA 是 2048 个 INT8 MAC？」——这个数字不是凭空写的，而是由 `spec/defs/nv_full.spec` 里的两个规格宏相乘得到的：
+
+- **MAC_ATOMIC_C_SIZE_64**：每个 MAC「原子」在 C（输入通道）方向处理 64 个元素。
+- **MAC_ATOMIC_K_SIZE_32**：每个 MAC「原子」在 K（输出通道）方向处理 32 个元素。
+
+于是单个原子时间内的乘加数为：
+
+\[
+\text{MAC\_ATOMIC\_C\_SIZE} \times \text{MAC\_ATOMIC\_K\_SIZE}
+= 64 \times 32 = 2048
+\]
+
+这正是 nvdlav1 「每拍 2048 个 INT8 MAC」的由来（与 u1-l1 一致）。CMAC 阵列分 a/b 两半，每半 1024 个 INT8 MAC。
+
+要把这 2048 个 MAC「喂饱」，各级的数据宽度必须配套：
+
+- CSC 每拍要向**每半**阵列送 128 个 INT8 数据（1024 位）+ 128 位掩码，权重同理。
+- CACC 每拍从**每半**阵列收 8 路 176 位部分和。
+- CBUF 作为中转，dat 通路 1024 位、wt 通路 1024 位（读侧）/ 512 位（CDMA 写侧）。
+- 存储接口（MCIF/CVIF）统一 512 位宽，CBUF 16 个 bank × 64 位 = 1024 位，正好对齐。
+
+#### 4.3.2 核心流程
+
+把吞吐配对整理成一张「拍宽表」（均为 INT8 视角，每级每拍的有效数据位宽）：
+
+| 接口 | 方向 | 位宽 | 备注 |
+| --- | --- | --- | --- |
+| 存储接口 → CDMA | rd 数据 | 512 位 | `PRIMARY/SECONDARY_MEMIF_WIDTH_512` |
+| CDMA → CBUF | 特征图写 | 1024 位 | `cdma2buf_dat_wr_data[1023:0]` |
+| CDMA → CBUF | 权重写 | 512 位 | `cdma2buf_wt_wr_data[511:0]` |
+| CBUF 内部 | bank 组织 | 16×64 位 = 1024 位/行 | `CBUF_BANK_NUMBER_16` × `CBUF_BANK_WIDTH_64` |
+| CBUF → CSC | 特征图读 | 1024 位 | `sc2buf_dat_rd_data[1023:0]` |
+| CBUF → CSC | 权重读 | 1024 位 | `sc2buf_wt_rd_data[1023:0]` |
+| CSC → CMAC（每半） | 特征 | 128×8 = 1024 位 + 128b 掩码 | `sc2mac_dat_*_data0..127` |
+| CSC → CMAC（每半） | 权重 | 128×8 = 1024 位 | `sc2mac_wt_*_data0..127` |
+| CMAC → CACC（每半） | 部分和 | 8×176 位 | `mac_a2accu_data0..7` / `mac_b2accu_data0..7` |
+| CACC → SDP | 交付包 | 514 位 | `cacc2sdp_pd[513:0]` |
+
+读这张表的窍门：**位宽从存储的 512 位「扇出」到 CSC/CMAC 的 1024 位，再「收缩」回 CACC 的部分和与 SDP 的 514 位交付包**。中间鼓起的部分就是 MAC 阵列的并行度所在。
+
+#### 4.3.3 源码精读
+
+**(1) 规格宏——吞吐配对的权威来源**：
+
+> 引用：[spec/defs/nv_full.spec:16-22](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/spec/defs/nv_full.spec#L16-L22) —— 定义 `MAC_ATOMIC_C_SIZE_64`、`MAC_ATOMIC_K_SIZE_32`、`CBUF_BANK_NUMBER_16`、`CBUF_BANK_WIDTH_64`、`CBUF_BANK_DEPTH_512`。`64×32=2048` 即阵列规模，`16×64=1024` 即 CBUF 一行的位宽。
+
+> 引用：[spec/defs/nv_full.spec:31-33](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/spec/defs/nv_full.spec#L31-L33) —— `PRIMARY_MEMIF_WIDTH_512` 与 `SECONDARY_MEMIF_WIDTH_512`，规定存储接口两侧统一 512 位数据宽。
+
+**(2) CDMA 的双路写口宽度**：CDMA 把特征图与权重分两路写进 CBUF，宽度不同。
+
+> 引用：[vmod/nvdla/cdma/NV_NVDLA_cdma.v:84-92](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cdma/NV_NVDLA_cdma.v#L84-L92) —— CDMA 输出 `cdma2buf_dat_wr_data[1023:0]`（特征，1024 位）与 `cdma2buf_wt_wr_data[511:0]`（权重，512 位）。
+
+**(3) CSC → CMAC 的超宽总线**：CSC 每拍向每半阵列送 128 字节特征 + 128 字节权重。
+
+> 引用：[vmod/nvdla/cmac/NV_NVDLA_cmac.v:603-605](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cmac/NV_NVDLA_cmac.v#L603-L605) —— CMAC 的 `u_core` 输入 `sc2mac_dat_pvld`、`sc2mac_dat_mask[127:0]`、以及逐位展开的 `sc2mac_dat_data0..127`（每个 `[7:0]`），即 1024 位特征 + 128 位有效掩码。
+
+**(4) CMAC 的 8 个 MAC cell**：每半阵列由 8 个 `NV_NVDLA_CMAC_CORE_mac` 组成，是实现 1024 个 INT8 MAC 的物理单元。
+
+> 引用：[vmod/nvdla/cmac/NV_NVDLA_CMAC_core.v:2059-2276](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cmac/NV_NVDLA_CMAC_core.v#L2059-L2276) —— 例化 `u_mac_0` … `u_mac_7` 共 8 个 MAC cell（两个 cell 间距约 31 行）。两半共 16 个 cell，承载全阵列的 2048 MAC。
+
+**(5) CMAC → CACC 的部分和**：每半阵列每拍回送 8 路 176 位部分和。
+
+> 引用：[vmod/nvdla/cacc/NV_NVDLA_cacc.v:315-336](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cacc/NV_NVDLA_cacc.v#L315-L336) —— CACC 的 `u_calculator` 输入 `mac_a2accu_data0..7` 与 `mac_b2accu_data0..7`（每个 `[175:0]`），外加各自的 8 位 `mask`/`mode` 与 `pvld`。
+
+**(6) CACC → SDP 的交付包**：累加装配完成后，按 514 位包交付给后处理。
+
+> 引用：[vmod/nvdla/cacc/NV_NVDLA_cacc.v:96-98](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/cacc/NV_NVDLA_cacc.v#L96-L98) —— CACC 模块端口 `cacc2sdp_valid`（输出）、`cacc2sdp_ready`（输入）、`cacc2sdp_pd[513:0]`（输出交付包）。
+
+> 引用：[vmod/nvdla/top/NV_nvdla.v:3166-3168](https://github.com/nvdla/hw/blob/8e06b1b9d85aab65b40d43d08eec5ea4681ff715/vmod/nvdla/top/NV_nvdla.v#L3166-L3168) —— 顶层把 `cacc2sdp_*` 接到 `u_partition_p`（后处理分区），完成 CACC→SDP 的跨分区拼接。
+
+#### 4.3.4 代码实践（源码阅读型）
+
+**目标**：用真实端口位宽验证「2048 MAC」与各级位宽配对。
+
+**步骤**：
+
+1. 打开 `spec/defs/nv_full.spec`，抄下 `MAC_ATOMIC_C_SIZE` 与 `MAC_ATOMIC_K_SIZE` 的数值，计算乘积。
+2. 在 `NV_NVDLA_partition_c.v` 例化 CBUF 处，确认 `cdma2buf_dat_wr_data` 是 `[1023:0]`、`cdma2buf_wt_wr_data` 是 `[511:0]`。
+3. 在 `NV_NVDLA_cmac.v` 例化 `u_core` 处，数一数 `sc2mac_dat_data` 系列信号一共有多少个（应是 0..127，共 128 个 8 位）。
+4. 在 `NV_NVDLA_cacc.v` 例化 `u_calculator` 处，确认 `mac_a2accu_data0..7`、`mac_b2accu_data0..7` 各 8 路。
+5. 用 `MAC_ATOMIC_C_SIZE × MAC_ATOMIC_K_SIZE` 对照「CMAC 每半 1024 MAC、两半 2048」是否自洽。
+
+**需要观察的现象**：各级位宽形成一个「512 → 1024 → 1024 → (1024 partial-sum) → 514」的鼓形轮廓，最宽处正对 MAC 阵列。
+
+**预期结果**：你能用一句话解释「2048 = 64 × 32，由 spec 宏决定；CMAC 每半 8 个 cell × 128 MAC/cell = 1024，两半合计 2048」。其中「8 个 cell × 128 MAC/cell」属于阵列内部细分，可标注为**待确认**（需进入 `NV_NVDLA_CMAC_CORE_mac.v` 进一步核验每个 cell 的乘法器数，本讲不展开）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：存储接口是 512 位，CDMA 写 CBUF 的特征图口却是 1024 位，多出来的 512 位「宽度」从哪里补？
+
+> **参考答案**：CDMA 内部有缓冲与转换（`dma_mux` + `cvt` + `shared_buffer`），可以把多个 512 位存储读响应**拼装/重排**成 1024 位的特征图写口；CBUF 又是 16 bank × 64 位结构（一行 1024 位），天然能一次写满。换句话说，CDMA 做了「窄进宽出」的数据重排，把存储带宽转化为阵列需要的并行宽度。
+
+**练习 2**：如果工艺或时序不允许 1024 位这么宽的 CSC→CMAC 总线，设计上可以怎么折中？（开放讨论）
+
+> **参考答案**：常见折中是把单拍的超宽总线拆成「多拍、较窄」的分时传输（时间换空间），并在 CSC/CMAC 之间加流水/重定时寄存器（NVDLA 的 `retiming/RT_csc2cmac_*` 即用于此）；代价是有效吞吐降低或需要更高时钟频率来补偿。本仓库选择了「超宽单拍」方案以最大化每拍算力。
+
+---
+
+## 5. 综合实践
+
+把本讲的三条主线（五级结构、跨分区连接、吞吐配对）串成一个综合任务：
+
+**任务：编写一份「卷积核心数据通路说明」文档。**
+
+要求：
+
+1. **结构部分**：用你自己的话说明 CDMA→CBUF→CSC→CMAC→CACC 五级分别做什么，并指出它们分别位于哪个分区（c/m/a）。
+2. **连接部分**：列出 partition_c 内部的三段连线（CDMA→CBUF 的 dat/wt 写、CBUF→CSC 的 dat/wt/wmb 读、CSC↔CDMA 的状态握手），以及两组跨分区总线（CSC→CMAC 的 dat/wt、CACC→CSC 的 credit），每条都要给出对应的信号名前缀。
+3. **吞吐部分**：用 `spec/defs/nv_full.spec` 的宏算出阵列规模 2048，并填出一张「接口—位宽」表（存储 512、CBUF dat 1024、CMAC 每半 1024+128b 掩码、CACC 每半 8×176b、CACC→SDP 514）。
+4. **反压部分**：解释 `accu2sc_credit_*` 如何防止 CACC 累加器溢出。
+
+**自检方法**：把你的文档与 4.2.4 的框图、4.3.2 的拍宽表对照，凡是能给出准确信号名与位宽的条目，就算通过；标注「待确认」的，记下来留给后续逐级讲义（u3-l2～u3-l6）回答。
+
+> 本实践为源码阅读型，不涉及运行仿真；若你想在波形上验证，可参考 u1-l4 用 `DUMP=1 DUMPER=VERDI` 跑一个 sanity trace，在 `sc2mac_dat_a_src_pvld` 与 `accu2sc_credit_vld` 上观察推送与反压的节拍关系（具体波形**待本地验证**）。
+
+## 6. 本讲小结
+
+- 卷积核心是一条五级流水线：**CDMA（取数）→ CBUF（缓冲）→ CSC（分发）→ CMAC（乘加）→ CACC（累加交付）**。
+- 这五级**物理上跨多个分区**：CDMA/CBUF/CSC 在 partition_c，CMAC（ma/mb 两半）在 partition_m，CACC 在 partition_a；由顶层 `NV_nvdla.v` 用内部 wire（如 `cacc2sdp_pd`）把它们拼接成完整通路。
+- partition_c 内部的连接靠三段「点到点」数据线：CDMA→CBUF（dat 1024 位 / wt 512 位写）、CBUF→CSC（dat/wt/wmb 读）、CSC↔CDMA（entries/slices 状态握手）。
+- 「2048 INT8 MAC」= `MAC_ATOMIC_C_SIZE_64 × MAC_ATOMIC_K_SIZE_32`，由 `spec/defs/nv_full.spec` 锁定；CMAC 每半含 8 个 MAC cell（u_mac_0..7）。
+- 各级位宽呈「512 → 1024 → 1024 → 8×176b → 514」的鼓形，最宽处正对 MAC 阵列，体现「窄进宽出」的重排。
+- CACC 通过 `accu2sc_credit_*` 给 CSC 反压信用，是保证累加器不溢出的关键回路。
+
+## 7. 下一步学习建议
+
+本讲只画了「地图」，下一阶段建议沿流水线方向**逐级深入**：
+
+- **u3-l2 CDMA**：搞清 CDMA 的 img/dc/wg/wt 四个子模块与 `dma_mux`、`cvt`、`shared_buffer` 如何把存储读请求重排成 CBUF 的宽写口。
+- **u3-l3 CBUF**：看 16 bank × 64 位 × 512 深的 SRAM 如何组织，以及 dat/wt/wmb 三类访问如何分 bank。
+- **u3-l4 CSC**：理解 `sg`（序列发生器）如何生成 `sg2dl`/`sg2wl`，`dl`/`wl` 如何按节拍把数据/权重推给 CMAC，并关注信用反压的具体实现。
+- **u3-l5 CMAC**：进入 `NV_NVDLA_CMAC_CORE_mac` 与 `CORE_MAC_mul/exp/nan`，看清每个 cell 的乘法器数与定点/浮点、NaN 处理。
+- **u3-l6 CACC**：看 `assembly_buffer`/`delivery_buffer` 两级缓冲与 INT8/INT16/fp 三条精度路径如何装配交付。
+
+读完 u3 全部六讲，你就能从「五级框图」一路下钻到「单个乘法器」，建立起对 NVDLA 卷积核心的完整理解。之后再进入 u5（后处理 SDP/PDP/CDP/RUBICK）看 CACC 之后的故事。

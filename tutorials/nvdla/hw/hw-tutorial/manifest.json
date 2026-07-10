@@ -1,0 +1,1166 @@
+{
+  "project": "hw",
+  "head": "8e06b1b9d85aab65b40d43d08eec5ea4681ff715",
+  "rationale": "nvdla/hw 是一个大型 SystemVerilog 深度学习推理加速器 RTL 项目，因此学习手册按「先宏观后微观、先运行后源码、沿数据通路推进」的顺序设计为 8 个单元 36 篇讲义。入门层（单元1）让读者从零建立认知：项目定位、目录结构、tmake/eperl/defgen 构建链、跑通第一次 trace-player 仿真，再到顶层 NV_nvdla.v 的分区结构。进阶层（单元2-5）沿两条核心轴线展开：纵向是配置链（apb2csb→csb_master→寄存器文件→GLB 中断），横向是数据处理链（卷积主链 CDMA→CBUF→CSC→CMAC→CACC、存储接口 MCIF/CVIF/BDMA、后处理 SDP/PDP/CDP/RUBIK）。专家层（单元6-8）覆盖横切基础设施（时钟复位 car/sync3d/slcg、FIFO 与 vlibs 原语、RAM 模型、浮点单元、retiming/eperl 插件）、验证与参考模型（trace-player、CSB 激励、C-model、Verilator）、以及配置与综合集成（spec/defs、RDL/Ordt 寄存器生成、Synopsys DC 综合流程、端到端编程一个网络层）。讲义之间通过 depends_on 形成清晰依赖，每篇只聚焦一个模块或机制并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "NVDLA 项目总览：它是什么、能做什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 NVDLA 硬件项目的定位：开源深度学习推理加速器、nvdlav1 全精度分支的算力规格与整体架构。",
+          "learning_goals": [
+            "理解 NVDLA 是可集成的深度学习推理硬件 IP，而非独立芯片",
+            "掌握 nvdlav1 分支的固定规格（2048 个 8-bit / 1024 个 16-bit MAC）与稳定维护定位",
+            "了解仓库包含 RTL、C-model、testbench、综合脚本四类资产"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE",
+            "VERSION"
+          ],
+          "minimal_modules": [
+            "README 概述",
+            "nvdlav1 分支说明",
+            "硬件架构概览"
+          ],
+          "practice_task": "阅读 README，用自己的话写出 NVDLA 的三个核心卖点，并列出本仓库中 RTL、C-model、testbench 各自对应的目录。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构详解",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "逐层讲解 vmod/spec/tools/verif/cmod/syn/perf 各目录的职责与子模块布局，建立源码地图。",
+          "learning_goals": [
+            "掌握顶层目录 vmod/spec/tools/verif/cmod/syn 的职责划分",
+            "认识 vmod/nvdla 下 16 个功能子模块（apb2csb/bdma/cacc/car/cbuf/cdma/cdp/cmac/csb_master/csc/glb/nocif/pdp/rubik/sdp/top）",
+            "区分 vlibs（库单元）、rams（存储模型）、include（头文件）三类支撑目录"
+          ],
+          "source_files": [
+            "README.md",
+            "Makefile",
+            "vmod/README.md",
+            "spec/manual/README.md"
+          ],
+          "minimal_modules": [
+            "vmod 目录",
+            "verif 目录",
+            "spec 目录",
+            "tools 目录"
+          ],
+          "practice_task": "对照讲义画出目录树，标注每个 vmod/nvdla 子模块的中文名，并指出哪几个子模块属于卷积核心、哪几个属于后处理。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与工具链：tmake 与 build.config",
+          "order": 3,
+          "filename": "u1-l3-build-system-toolchain.md",
+          "level": "beginner",
+          "topic": "讲解 tmake 脚本、build.config 依赖树、defgen/eperl 生成器与 vmod_common.make 如何协同编译 RTL。",
+          "learning_goals": [
+            "理解顶层 Makefile 交互式生成 tree.make 的过程",
+            "掌握 tmake 如何按 build.config 的 YAML 依赖拓扑驱动各 sandbox 的 make",
+            "认识 defgen 展开 spec 宏定义、eperl 用插件预处理 Verilog 模板的作用"
+          ],
+          "source_files": [
+            "Makefile",
+            "tools/bin/tmake",
+            "tools/etc/build.config",
+            "tools/bin/defgen",
+            "tools/make/vmod_common.make",
+            "tools/make/common.make"
+          ],
+          "minimal_modules": [
+            "tmake 脚本",
+            "build.config 依赖图",
+            "tree.make 环境配置",
+            "eperl/defgen 生成器"
+          ],
+          "practice_task": "在 build.config 中定位 vmod_nvdla_top 的全部依赖，并解释为何卷积子模块（cdma/csc/cmac/cacc）必须在 top 之前编译。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "运行第一次仿真：trace-player 与 run_sanity",
+          "order": 4,
+          "filename": "u1-l4-first-simulation.md",
+          "level": "beginner",
+          "topic": "演示如何用 verif/sim/Makefile 构建并运行 sanity trace，理解 DUMP/VERDI 波形开关与 run_sanity 流程。",
+          "learning_goals": [
+            "掌握 make build / make run TESTDIR=... 的标准仿真流程",
+            "理解 sanity0-3 等 trace 样例的用途与结果目录位置",
+            "认识 DUMP 与 DUMPER=VERDI 如何开启波形调试"
+          ],
+          "source_files": [
+            "verif/sim/Makefile",
+            "tools/bin/run_sanity",
+            "verif/traces/README.md",
+            "verif/sim/checktest.pl"
+          ],
+          "minimal_modules": [
+            "verif/sim Makefile",
+            "trace 样例",
+            "run_sanity 脚本",
+            "checktest 结果校验"
+          ],
+          "practice_task": "运行 sanity0 trace 仿真，找到并打开 _test_ 结果目录中的 checktest 输出，确认测试 PASSED，并记录一条关键日志。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "顶层 RTL：NV_nvdla.v 与分区结构",
+          "order": 5,
+          "filename": "u1-l5-top-rtl-partitions.md",
+          "level": "beginner",
+          "topic": "剖析 NV_nvdla.v 的端口（CSB 配置口、AXI 双 memif、CVSRAM、中断）及其 partition_a/c/m(ma/mb)/o/p 分区实例化。",
+          "learning_goals": [
+            "读懂顶层模块对外端口：CSB2NVDLA 配置总线、core2dbb 与 core2cvsram 两组 AXI 接口、中断",
+            "理解分区按功能/时钟域划分：a=config、c=卷积核心、m=存储接口(ma/mb 双实例)、o=复位与观测、p=后处理",
+            "建立从顶层端口到各分区的信号归属直觉"
+          ],
+          "source_files": [
+            "vmod/nvdla/top/NV_nvdla.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_a.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_c.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_m.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_o.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_p.v"
+          ],
+          "minimal_modules": [
+            "NV_nvdla 顶层端口",
+            "partition_a 配置分区",
+            "partition_c 卷积分区",
+            "partition_m 存储分区"
+          ],
+          "practice_task": "在 NV_nvdla.v 中找到 csb2nvdla_* 端口所属的分区，并追踪 nvdla_core2dbb AXI 写地址通道连接到哪个分区实例。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "配置空间与寄存器子系统",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CSB 总线协议与 apb2csb 桥",
+          "order": 1,
+          "filename": "u2-l1-csb-bus-apb2csb.md",
+          "level": "intermediate",
+          "topic": "讲解 NVDLA 内部配置空间总线 CSB 的握手协议，以及 apb2csb 如何把外部 APB 桥接成 CSB。",
+          "learning_goals": [
+            "掌握 CSB 的 valid/ready/addr/wdat/write/nposted 请求与 valid/data/wr_complete 响应握手",
+            "理解 apb2csb 把标准 APB 转换为内部 CSB 的桥接逻辑",
+            "认识 CSB 是 CPU 编程加速器各引擎的唯一入口"
+          ],
+          "source_files": [
+            "vmod/nvdla/apb2csb/NV_NVDLA_apb2csb.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_a.v",
+            "vmod/nvdla/csb_master/NV_NVDLA_csb_master.v"
+          ],
+          "minimal_modules": [
+            "CSB 请求/响应握手",
+            "apb2csb 协议转换",
+            "csb2nvdla 端口"
+          ],
+          "practice_task": "对照 NV_NVDLA_apb2csb.v 列出 CSB 一次写事务所需的所有信号，画出 APB 写到 CSB 写的信号映射表。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "csb_master：中央配置路由器",
+          "order": 2,
+          "filename": "u2-l2-csb-master-router.md",
+          "level": "intermediate",
+          "topic": "剖析 csb_master 如何按地址把 CSB 请求分发到 glb/cdma/csc/cmac/cacc/sdp/pdp/cdp/bdma/mcif/cvif 等各引擎的寄存器。",
+          "learning_goals": [
+            "理解 csb_master 把单一 CSB 端口扇出到所有功能块的地址译码与多路响应合并",
+            "认识 csb2*_req_pvld/prdy/pd 与 *2csb_resp_valid/pd 的请求-响应网络",
+            "了解跨 core/falcon 时钟域的 csb2falcon/falcon2csb FIFO"
+          ],
+          "source_files": [
+            "vmod/nvdla/csb_master/NV_NVDLA_csb_master.v",
+            "vmod/nvdla/csb_master/NV_NVDLA_CSB_MASTER_csb2falcon_fifo.v",
+            "vmod/nvdla/csb_master/NV_NVDLA_CSB_MASTER_falcon2csb_fifo.v"
+          ],
+          "minimal_modules": [
+            "CSB 地址译码分发",
+            "多路响应合并",
+            "跨时钟域 FIFO"
+          ],
+          "practice_task": "在 NV_NVDLA_csb_master.v 中统计它向多少个引擎输出了 csb2*_req_pvld，并解释响应数据如何汇拢回 nvdla2csb_data。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "寄存器文件与影偶配置机制",
+          "order": 3,
+          "filename": "u2-l3-register-files-shadow-config.md",
+          "level": "intermediate",
+          "topic": "讲解由 RDL/Ordt 自动生成的 CSB_reg/dual_reg/single_reg 寄存器文件，以及 producer/consumer 影偶（shadow）配置机制。",
+          "learning_goals": [
+            "理解 _CSB_reg.v / _dual_reg.v / _single_reg.v 三类自动生成寄存器文件的分工",
+            "掌握 dual_reg 影偶配置：CPU 写 producer 组、引擎运行时切换到 consumer 组，实现无停顿配置更新",
+            "认识 reg_offset/reg_wr_en/reg_wr_data/reg_rd_data 的统一读写接口"
+          ],
+          "source_files": [
+            "vmod/nvdla/glb/NV_NVDLA_GLB_CSB_reg.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_dual_reg.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_single_reg.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_regfile.v"
+          ],
+          "minimal_modules": [
+            "CSB_reg 寄存器文件",
+            "dual_reg 影偶组",
+            "single_reg 即时配置",
+            "producer/consumer 切换"
+          ],
+          "practice_task": "以 CDMA 为例，在 dual_reg 中找到 producer/consumer 切换相关字段，说明一次新配置如何在当前卷积运行期间被预装而不打断流水。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "GLB 全局配置与中断聚合",
+          "order": 4,
+          "filename": "u2-l4-glb-config-interrupts.md",
+          "level": "intermediate",
+          "topic": "剖析 NV_NVDLA_glb 如何聚合所有引擎的 done 中断、管理全局状态与中断掩码/状态寄存器。",
+          "learning_goals": [
+            "理解 GLB 收集 bdma/cdma/cacc/cdp/pdp/sdp/rubik 等引擎 done_intr 的中断网络",
+            "掌握 done_mask/done_set/done_status 中断掩码与状态机制",
+            "认识 GLB_CSB_reg / GLB_csb / GLB_ic / GLB_fc 四个子模块分工"
+          ],
+          "source_files": [
+            "vmod/nvdla/glb/NV_NVDLA_glb.v",
+            "vmod/nvdla/glb/NV_NVDLA_GLB_CSB_reg.v",
+            "vmod/nvdla/glb/NV_NVDLA_GLB_csb.v",
+            "vmod/nvdla/glb/NV_NVDLA_GLB_ic.v",
+            "vmod/nvdla/glb/NV_NVDLA_GLB_fc.v"
+          ],
+          "minimal_modules": [
+            "done 中断聚合",
+            "mask/set/status 寄存器",
+            "GLB 子模块"
+          ],
+          "practice_task": "在 GLB_CSB_reg.v 中列出所有 *_done_mask0/_done_status0 引擎，画出一次卷积完成后中断如何从 cacc 传到 core_intr 输出。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "卷积计算主流水线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "卷积主流水线总览：CDMA→CBUF→CSC→CMAC→CACC",
+          "order": 1,
+          "filename": "u3-l1-conv-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "从宏观讲解卷积核心五级数据通路：取数与权重、缓冲、分发、乘加、累加的协作关系。",
+          "learning_goals": [
+            "理解卷积核心由 CDMA、CBUF、CSC、CMAC(A/B)、CACC 五级构成",
+            "掌握数据流：CDMA 从存储取特征图与权重，经 CBUF 缓冲，CSC 喂给 CMAC 阵列，CACC 累加",
+            "认识 CSC/CMAC/CACC 之间的数据宽度与吞吐配对关系"
+          ],
+          "source_files": [
+            "vmod/nvdla/top/NV_NVDLA_partition_c.v",
+            "vmod/nvdla/cdma/NV_NVDLA_cdma.v",
+            "vmod/nvdla/csc/NV_NVDLA_csc.v",
+            "vmod/nvdla/cmac/NV_NVDLA_cmac.v",
+            "vmod/nvdla/cacc/NV_NVDLA_cacc.v"
+          ],
+          "minimal_modules": [
+            "卷积五级流水",
+            "partition_c 连接关系",
+            "数据吞吐配对"
+          ],
+          "practice_task": "在 partition_c.v 中梳理 CDMA→CBUF→CSC→CMAC→CACC 的主数据连线，画出一张卷积核心框图。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "CDMA：特征图与权重的取数引擎",
+          "order": 2,
+          "filename": "u3-l2-cdma-dma.md",
+          "level": "intermediate",
+          "topic": "剖析 CDMA 的 IMG(特征图)/WT(权重)/WG/DC(解压) 子模块，及其 scatter-gather、共享缓冲与 DMA 多路复用。",
+          "learning_goals": [
+            "理解 CDMA 同时搬运输入特征图（IMG）与权重（WT），并支持权重解压（DC）与权重组（WG）",
+            "掌握 IMG_sg/scatter-gather 如何按卷积窗口预取 2D 数据块",
+            "认识 dma_mux、shared_buffer 在多路取数请求间的仲裁与缓存"
+          ],
+          "source_files": [
+            "vmod/nvdla/cdma/NV_NVDLA_cdma.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_img.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_wt.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_dc.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_dma_mux.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_shared_buffer.v"
+          ],
+          "minimal_modules": [
+            "IMG 特征图取数",
+            "WT 权重取数",
+            "DC 解压",
+            "dma_mux/shared_buffer"
+          ],
+          "practice_task": "区分 CDMA_img、CDMA_wt、CDMA_dc 各自职责，写一段说明权重压缩数据如何经 DC 解压后送入 shared_buffer。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "CBUF：卷积缓冲与存储分 Bank",
+          "order": 3,
+          "filename": "u3-l3-cbuf-convolution-buffer.md",
+          "level": "intermediate",
+          "topic": "讲解 NV_NVDLA_cbuf 作为 CDMA 与 CSC 之间的 SRAM 工作缓冲，按 bank 组织数据。",
+          "learning_goals": [
+            "理解 CBUF 是卷积核心内部的大容量 SRAM 缓冲，缓存输入特征图与权重",
+            "掌握 bank 数量/宽度/深度配置（如 16 bank）如何决定并行度",
+            "认识 CDMA 写入 CBUF、CSC 从 CBUF 读出的双口访问关系"
+          ],
+          "source_files": [
+            "vmod/nvdla/cbuf/NV_NVDLA_cbuf.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_shared_buffer.v",
+            "vmod/nvdla/csc/NV_NVDLA_csc.v"
+          ],
+          "minimal_modules": [
+            "CBUF SRAM 缓冲",
+            "bank 组织",
+            "CDMA 写/CSC 读"
+          ],
+          "practice_task": "阅读 NV_NVDLA_cbuf.v，列出它的 bank 数与位宽配置，说明一次卷积窗口的数据如何被预取进 CBUF 再被 CSC 消费。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "CSC：时隙/条带控制器与权重分发",
+          "order": 4,
+          "filename": "u3-l4-csc-slot-controller.md",
+          "level": "intermediate",
+          "topic": "剖析 CSC（Convolution Slot/Strip Controller）如何从 CBUF 读数据并按 MAC 阵列节拍分发给 CMAC，含 winograd。",
+          "learning_goals": [
+            "理解 CSC 把 CBUF 中的数据与权重按卷积节拍对齐喂给 MAC 阵列",
+            "掌握 SG(slot gather)、WL(weight list)、DL(data list) 等子模块的协作",
+            "认识 winograd 变换路径在 CSC 中的作用"
+          ],
+          "source_files": [
+            "vmod/nvdla/csc/NV_NVDLA_csc.v",
+            "vmod/nvdla/csc/NV_NVDLA_CSC_sg.v",
+            "vmod/nvdla/csc/NV_NVDLA_CSC_wl.v",
+            "vmod/nvdla/csc/NV_NVDLA_CSC_dl.v",
+            "vmod/nvdla/csc/NV_NVDLA_CSC_regfile.v"
+          ],
+          "minimal_modules": [
+            "CSC 节拍分发",
+            "SG/WL/DL 子模块",
+            "winograd 支持"
+          ],
+          "practice_task": "对照 NV_NVDLA_CSC_sg.v 说明一个 slot 内的数据与权重如何被组装，并指出它们送往 cmac_a 还是 cmac_b。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "CMAC：乘加阵列与定点/浮点计算",
+          "order": 5,
+          "filename": "u3-l5-cmac-mac-array.md",
+          "level": "intermediate",
+          "topic": "剖析 CMAC 的 MAC 阵列（cmac_a/cmac_b 两半），其乘法、累加单元与 nan/异常处理。",
+          "learning_goals": [
+            "理解 CMAC 是大规模并行乘加阵列，分 cmac_a 与 cmac_b 两半",
+            "掌握 CORE_MAC_mul/exp/nan 单元的定点与浮点乘法、特殊值处理",
+            "认识 CMAC_reg 影偶配置与 active/cfg 控制逻辑"
+          ],
+          "source_files": [
+            "vmod/nvdla/cmac/NV_NVDLA_cmac.v",
+            "vmod/nvdla/cmac/NV_NVDLA_CMAC_core.v",
+            "vmod/nvdla/cmac/NV_NVDLA_CMAC_CORE_mac.v",
+            "vmod/nvdla/cmac/NV_NVDLA_CMAC_CORE_MAC_mul.v",
+            "vmod/nvdla/cmac/NV_NVDLA_CMAC_REG_dual.v"
+          ],
+          "minimal_modules": [
+            "MAC 阵列 cmac_a/b",
+            "乘法/exp/nan 单元",
+            "CMAC 影偶寄存器"
+          ],
+          "practice_task": "统计 CMAC 阵列的并行乘法器规模（结合 spec 中 MAC_ATOMIC_C/K_SIZE），并说明一个 partial sum 如何由 mul/exp/nan 流水产生。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "CACC：累加器、偏置与精度输出",
+          "order": 6,
+          "filename": "u3-l6-cacc-accumulator.md",
+          "level": "intermediate",
+          "topic": "剖析 CACC 如何累加 CMAC 的部分和、叠加偏置，并按 int8/int16/fp 精度装配与交付结果。",
+          "learning_goals": [
+            "理解 CACC 累加跨 slot/批次的卷积部分和并叠加偏置",
+            "掌握 CALC_int8/int16/fp_48b 三种精度计算路径",
+            "认识 assembly_buffer（装配）与 delivery_buffer（交付）两级缓冲及对应 ctrl"
+          ],
+          "source_files": [
+            "vmod/nvdla/cacc/NV_NVDLA_cacc.v",
+            "vmod/nvdla/cacc/NV_NVDLA_CACC_calculator.v",
+            "vmod/nvdla/cacc/NV_NVDLA_CACC_CALC_int16.v",
+            "vmod/nvdla/cacc/NV_NVDLA_CACC_assembly_buffer.v",
+            "vmod/nvdla/cacc/NV_NVDLA_CACC_delivery_buffer.v"
+          ],
+          "minimal_modules": [
+            "部分和累加",
+            "int8/int16/fp 精度路径",
+            "assembly/delivery 缓冲"
+          ],
+          "practice_task": "对比 CACC_CALC_int16 与 CALC_int8 的累加位宽，说明累加完成后结果如何在 delivery_buffer 中等待交付给 SDP。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "存储接口子系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "存储接口架构总览：MCIF/CVIF 与读写通路",
+          "order": 1,
+          "filename": "u4-l1-memif-architecture.md",
+          "level": "intermediate",
+          "topic": "从宏观讲解 nocif 下 MCIF（主存/DBB）与 CVIF（CVSRAM）两套接口，及其统一的 IG/cq/eg 读写通路结构。",
+          "learning_goals": [
+            "理解 NVDLA 有 primary(MCIF→DBB) 与 secondary(CVIF→CVSRAM) 两套存储接口",
+            "掌握每套接口都分 READ 与 WRITE 两条通路，各自含 IG(ingress)/cq(命令队列)/eg(egress)",
+            "认识 IG 内 bpt(背压)/spt(单口)/cvt(转换) 子级的分工"
+          ],
+          "source_files": [
+            "vmod/nvdla/nocif/NV_NVDLA_mcif.v",
+            "vmod/nvdla/nocif/NV_NVDLA_cvif.v",
+            "vmod/nvdla/nocif/NV_NVDLA_XXIF_libs.v",
+            "vmod/nvdla/top/NV_NVDLA_partition_m.v"
+          ],
+          "minimal_modules": [
+            "MCIF/CVIF 双接口",
+            "READ/WRITE 通路",
+            "IG/cq/eg 结构"
+          ],
+          "practice_task": "对照 partition_m.v 区分 ma（primary）与 mb（secondary）两个存储分区，并列出每个分区包含的接口模块。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "MCIF：主存接口（DBB/AXI）",
+          "order": 2,
+          "filename": "u4-l2-mcif-primary-memif.md",
+          "level": "intermediate",
+          "topic": "剖析 MCIF 的读写通路细节：IG 仲裁、背压(bpt)、单口(spt)、转换(cvt)、命令队列(cq)与 egress。",
+          "learning_goals": [
+            "理解 MCIF_read/MCIF_write 如何把内部多路请求仲裁后送外部 AXI(DBB)",
+            "掌握 READ_IG_arb/bpt/spt/cvt 各级的功能与数据流",
+            "认识命令队列 cq 与 egress eg 的缓冲作用"
+          ],
+          "source_files": [
+            "vmod/nvdla/nocif/NV_NVDLA_MCIF_read.v",
+            "vmod/nvdla/nocif/NV_NVDLA_MCIF_write.v",
+            "vmod/nvdla/nocif/NV_NVDLA_MCIF_READ_ig.v",
+            "vmod/nvdla/nocif/NV_NVDLA_MCIF_READ_IG_bpt.v",
+            "vmod/nvdla/nocif/NV_NVDLA_MCIF_READ_IG_spt.v",
+            "vmod/nvdla/nocif/NV_NVDLA_MCIF_READ_eg.v"
+          ],
+          "minimal_modules": [
+            "MCIF 读写通路",
+            "IG 仲裁与背压",
+            "cq 命令队列",
+            "egress"
+          ],
+          "practice_task": "追踪一次 MCIF 读请求从 arb→bpt→spt→cvt→cq→eg 的完整路径，说明 bpt 与 spt 分别解决什么问题。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "CVIF：卷积 SRAM（CVSRAM）接口",
+          "order": 3,
+          "filename": "u4-l3-cvif-cvsram.md",
+          "level": "intermediate",
+          "topic": "剖析 CVIF 与 MCIF 同构但面向片上 CVSRAM 的读写通路，及其与 MCIF 的差异。",
+          "learning_goals": [
+            "理解 CVIF 是面向片上 CVSRAM 的低延迟二级存储接口",
+            "掌握 CVIF_read/write 与 MCIF 的结构同构性（IG/cq/eg）",
+            "认识何时使用 CVSRAM（secondary memif）而非 DBB"
+          ],
+          "source_files": [
+            "vmod/nvdla/nocif/NV_NVDLA_cvif.v",
+            "vmod/nvdla/nocif/NV_NVDLA_CVIF_read.v",
+            "vmod/nvdla/nocif/NV_NVDLA_CVIF_write.v",
+            "vmod/nvdla/nocif/NV_NVDLA_CVIF_READ_ig.v",
+            "vmod/nvdla/nocif/NV_NVDLA_CVIF_CSB_reg.v"
+          ],
+          "minimal_modules": [
+            "CVIF 二级接口",
+            "读写通路",
+            "与 MCIF 的差异"
+          ],
+          "practice_task": "对比 CVIF 与 MCIF 的 IG 子模块命名与结构，说明为何两者可共享 XXIF_libs，并指出 CVSRAM 适合存放哪类数据。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "BDMA：桥 DMA 与存储间搬运",
+          "order": 4,
+          "filename": "u4-l4-bdma-bridge-dma.md",
+          "level": "intermediate",
+          "topic": "剖析 BDMA 如何在两套存储接口（DBB↔CVSRAM）间批量搬运数据，以卸载 CPU。",
+          "learning_goals": [
+            "理解 BDMA 作为独立 DMA 引擎在 primary 与 secondary 存储间搬数据",
+            "掌握 load/store/cq/reg 子模块构成的命令队列式搬运流程",
+            "认识 BDMA 完成后如何向 GLB 上报 done 中断"
+          ],
+          "source_files": [
+            "vmod/nvdla/bdma/NV_NVDLA_bdma.v",
+            "vmod/nvdla/bdma/NV_NVDLA_BDMA_load.v",
+            "vmod/nvdla/bdma/NV_NVDLA_BDMA_store.v",
+            "vmod/nvdla/bdma/NV_NVDLA_BDMA_cq.v",
+            "vmod/nvdla/bdma/NV_NVDLA_BDMA_reg.v"
+          ],
+          "minimal_modules": [
+            "BDMA 桥 DMA",
+            "load/store 搬运",
+            "命令队列 cq",
+            "done 上报"
+          ],
+          "practice_task": "写出一个典型 BDMA 用例：把权重从 DBB 预搬到 CVSRAM，列出所需配置的源/目的地址与长度寄存器，并说明搬运完成的中断路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "后处理流水线",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "SDP：单点数据处理器（BN/EW/LUT）",
+          "order": 1,
+          "filename": "u5-l1-sdp-single-point.md",
+          "level": "intermediate",
+          "topic": "剖析 SDP 对 CACC 输出逐激活点做元素级运算：bias(BS)、batch-norm(BN)、element-wise(EW)、LUT 激活。",
+          "learning_goals": [
+            "理解 SDP 在卷积输出上逐点做后处理（缩放、归一化、逐元素、激活）",
+            "掌握 BS/BN/EW 三类子操作与 LUT 查表激活",
+            "认识 SDP 的 mrdma/nrdma/brdma/erdma 读 DMA 与 wdma 写 DMA 的数据通路"
+          ],
+          "source_files": [
+            "vmod/nvdla/sdp/NV_NVDLA_sdp.v",
+            "vmod/nvdla/sdp/NV_NVDLA_SDP_core.v",
+            "vmod/nvdla/sdp/NV_NVDLA_SDP_CORE_y.v",
+            "vmod/nvdla/sdp/NV_NVDLA_SDP_CORE_Y_lut.v",
+            "vmod/nvdla/sdp/NV_NVDLA_SDP_wdma.v"
+          ],
+          "minimal_modules": [
+            "SDP 逐点后处理",
+            "BS/BN/EW 子操作",
+            "LUT 激活",
+            "RDMA/WDMA 通路"
+          ],
+          "practice_task": "为一个 ReLU+缩放层规划 SDP 配置：指出应启用哪个子操作、LUT 是否必需，并说明数据从 CACC 进 SDP 再经 WDMA 写回的路径。",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "PDP：平面数据处理器（池化）",
+          "order": 2,
+          "filename": "u5-l2-pdp-pooling.md",
+          "level": "intermediate",
+          "topic": "剖析 PDP 跨空间维度做池化（max/average），含 1d/2d 计算单元与 RDMA/WDMA 通路。",
+          "learning_goals": [
+            "理解 PDP 在通道平面内做空间池化，支持 max/average pooling",
+            "掌握 CORE_cal1d/cal2d/unit1d/preproc 的池化计算流水",
+            "认识 PDP_rdma 读入待池化特征、PDP_wdma 写回结果的通路"
+          ],
+          "source_files": [
+            "vmod/nvdla/pdp/NV_NVDLA_pdp.v",
+            "vmod/nvdla/pdp/NV_NVDLA_PDP_core.v",
+            "vmod/nvdla/pdp/NV_NVDLA_PDP_CORE_cal2d.v",
+            "vmod/nvdla/pdp/NV_NVDLA_PDP_rdma.v",
+            "vmod/nvdla/pdp/NV_NVDLA_PDP_wdma.v"
+          ],
+          "minimal_modules": [
+            "PDP 空间池化",
+            "cal1d/cal2d 计算单元",
+            "RDMA/WDMA 通路"
+          ],
+          "practice_task": "为一次 2x2 max pooling 说明 PDP 如何用 cal2d 在二维窗口内取最大值，并指出池化窗口数据如何由 RDMA 预取。",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "CDP：通道数据处理器（LRN）",
+          "order": 3,
+          "filename": "u5-l3-cdp-lrn.md",
+          "level": "intermediate",
+          "topic": "剖析 CDP 跨通道做局部响应归一化(LRN)，含 intp/lut/mul/sum 计算单元与定点↔浮点转换。",
+          "learning_goals": [
+            "理解 CDP 在通道维做 LRN 等跨通道运算",
+            "掌握 DP_intp/lut/mul/sum 等计算单元的流水",
+            "认识 cvtin/cvtout 的定点与浮点格式转换"
+          ],
+          "source_files": [
+            "vmod/nvdla/cdp/NV_NVDLA_cdp.v",
+            "vmod/nvdla/cdp/NV_NVDLA_CDP_dp.v",
+            "vmod/nvdla/cdp/NV_NVDLA_CDP_DP_lut.v",
+            "vmod/nvdla/cdp/NV_NVDLA_CDP_DP_intp.v",
+            "vmod/nvdla/cdp/NV_NVDLA_CDP_rdma.v",
+            "vmod/nvdla/cdp/NV_NVDLA_CDP_wdma.v"
+          ],
+          "minimal_modules": [
+            "CDP 跨通道 LRN",
+            "intp/lut/mul/sum 单元",
+            "定点浮点转换"
+          ],
+          "practice_task": "对照 CDP_dp.v 说明一次 LRN 如何由 mul 与 sum 单元协作完成，并解释输入为何需经 cvtin 转浮点再 cvtout 转回。",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Rubik：数据重排引擎（reshape/contract）",
+          "order": 4,
+          "filename": "u5-l4-rubik-reshape.md",
+          "level": "intermediate",
+          "topic": "剖析 Rubik 引擎按 reshape/contract 模式重新排列张量布局，含序列生成与读写命令通路。",
+          "learning_goals": [
+            "理解 Rubik 用 DMA 搬运并对数据做布局重排（reshape 与 contract 两种模式）",
+            "掌握 rf_core/rf_ctrl/rf_rcmd/rf_wcmd 的重排核心与命令流水",
+            "认识 seq_gen 生成的访问序列如何驱动读写"
+          ],
+          "source_files": [
+            "vmod/nvdla/rubik/NV_NVDLA_rubik.v",
+            "vmod/nvdla/rubik/NV_NVDLA_RUBIK_rf_core.v",
+            "vmod/nvdla/rubik/NV_NVDLA_RUBIK_rf_ctrl.v",
+            "vmod/nvdla/rubik/NV_NVDLA_RUBIK_seq_gen.v",
+            "vmod/nvdla/rubik/NV_NVDLA_RUBIK_dma.v"
+          ],
+          "minimal_modules": [
+            "Rubik 布局重排",
+            "reshape/contract 模式",
+            "seq_gen 访问序列",
+            "读写命令通路"
+          ],
+          "practice_task": "举例说明何时需要 Rubik（如把 NHWC 重排为引擎期望布局），并指出 reshape 与 contract 模式的差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "横切基础设施",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "时钟域、复位与时钟门控（car/sync3d/slcg）",
+          "order": 1,
+          "filename": "u6-l1-clock-reset-car.md",
+          "level": "advanced",
+          "topic": "讲解 car 模块的复位同步器（sync3d/ssync3d）、core_reset 以及各引擎的 slcg 时钟门控。",
+          "learning_goals": [
+            "理解 NVDLA 多时钟域（core/csb/falcon）与跨域同步需求",
+            "掌握 NV_NVDLA_reset/core_reset/sync3d/sync3d_s 复位同步机制",
+            "认识 slcg（second-level clock gating）按需关闭引擎时钟的低功耗策略"
+          ],
+          "source_files": [
+            "vmod/nvdla/car/NV_NVDLA_reset.v",
+            "vmod/nvdla/car/NV_NVDLA_core_reset.v",
+            "vmod/nvdla/car/NV_NVDLA_sync3d.v",
+            "vmod/nvdla/car/NV_NVDLA_sync3d_s.v",
+            "vmod/nvdla/cdma/NV_NVDLA_CDMA_slcg.v"
+          ],
+          "minimal_modules": [
+            "多时钟域",
+            "复位同步 sync3d",
+            "core_reset",
+            "slcg 时钟门控"
+          ],
+          "practice_task": "找出 CSB 配置时钟到 core 时钟的同步路径，并说明某个引擎 slcg 在空闲时如何门控其时钟以省电。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "FIFO 与 vlibs 库原语",
+          "order": 2,
+          "filename": "u6-l2-fifo-vlibs-primitives.md",
+          "level": "advanced",
+          "topic": "梳理 vlibs 中的同步器(sync/p_SSYNC)、FIFO、多路选择等可复用 RTL 原语，及其在各引擎中的使用。",
+          "learning_goals": [
+            "认识 vlibs 提供的标准单元：sync3d/p_SSYNC3DO、MUX、NV_BLKBOX、HLS 浮点单元等",
+            "掌握 nv_assert_fifo.vlib 等 FIFO 断言/原语约定",
+            "理解为何大量 RTL 由这些库原语拼装以保持一致性"
+          ],
+          "source_files": [
+            "vmod/vlibs/sync3d.v",
+            "vmod/vlibs/p_SSYNC3DO.v",
+            "vmod/vlibs/sync3d_s_ppp.v",
+            "vmod/vlibs/nv_assert_fifo.vlib",
+            "vmod/vlibs/MUX2D4.v",
+            "vmod/vlibs/NV_BLKBOX_BUFFER.v"
+          ],
+          "minimal_modules": [
+            "sync 同步原语",
+            "FIFO 原语",
+            "MUX/BLKBOX 单元",
+            "库复用约定"
+          ],
+          "practice_task": "在 vmod/nvdla 中统计 sync3d 系列原语被多少引擎调用，并说明统一使用库原语对综合与时序收敛的好处。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "RAM 行为模型与综合模型",
+          "order": 3,
+          "filename": "u6-l3-ram-models.md",
+          "level": "advanced",
+          "topic": "对比 vmod/rams/model（仿真用行为 RAM）与 vmod/rams/synth（综合用 RAM wrapper）两套存储模型。",
+          "learning_goals": [
+            "理解 rams/model 提供仿真用行为级双口/单口 RAM（RAMDP/RAMSP 等）",
+            "掌握 rams/synth 的 nv_ram_rws_* wrapper 用于真实工艺 RAM 替换",
+            "认识 CBUF/shared_buffer 等大缓冲如何映射到这些 RAM 实例"
+          ],
+          "source_files": [
+            "vmod/rams/model/RAMDP_256X8_GL_M2_E2.v",
+            "vmod/rams/model/RAMDP_16X256_GL_M1_E2.v",
+            "vmod/rams/synth/nv_ram_rws_256x512.v",
+            "vmod/rams/synth/nv_ram_rws_16x256.v",
+            "vmod/nvdla/cbuf/NV_NVDLA_cbuf.v"
+          ],
+          "minimal_modules": [
+            "行为 RAM 模型",
+            "综合 RAM wrapper",
+            "RAM 实例映射"
+          ],
+          "practice_task": "找到一个 CBUF 中使用的 RAM 类型，分别说明它在仿真（rams/model）与综合（rams/synth）下被替换成什么模型。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "浮点运算单元（fp17/fp32）",
+          "order": 4,
+          "filename": "u6-l4-floating-point-units.md",
+          "level": "advanced",
+          "topic": "讲解 vlibs 中 HLS_ 系列浮点单元：fp17 内部格式、fp32、加减乘与格式互转。",
+          "learning_goals": [
+            "理解 NVDLA 内部采用 fp17 中间格式以平衡精度与面积",
+            "掌握 HLS_fp17_add/mul/sub 与 fp16/fp17/fp32 互转单元",
+            "认识这些 FPU 在 CMAC/CACC/CDP/PDP 中的使用场景"
+          ],
+          "source_files": [
+            "vmod/vlibs/HLS_fp17_add.v",
+            "vmod/vlibs/HLS_fp17_mul.v",
+            "vmod/vlibs/HLS_fp16_to_fp17.v",
+            "vmod/vlibs/HLS_fp17_to_fp32.v",
+            "vmod/vlibs/HLS_fp32_mul.v",
+            "vmod/vlibs/HLS_fp32_add.v"
+          ],
+          "minimal_modules": [
+            "fp17 内部格式",
+            "加减乘单元",
+            "格式互转",
+            "FPU 使用场景"
+          ],
+          "practice_task": "说明一次 fp16 输入如何先转 fp17、在内部完成乘加、再转回 fp16/fp32 输出，并解释为何不直接用 fp32。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "重定时与 eperl 流水线插件",
+          "order": 5,
+          "filename": "u6-l5-retiming-eperl-plugins.md",
+          "level": "advanced",
+          "topic": "讲解 retiming 目录的 RT_ 流水寄存器、以及 eperl 的 flop/pipe/retime 插件如何从模板生成 RTL。",
+          "learning_goals": [
+            "理解 NV_NVDLA_RT_* 模块作为模块间重定时/流水寄存器包装",
+            "掌握 eperl 预处理器配合 flop.pm/pipe.pm/retime.pm 插件生成 RTL 的机制",
+            "认识这种模板化生成对时序收敛与代码维护的意义"
+          ],
+          "source_files": [
+            "vmod/nvdla/retiming/NV_NVDLA_RT_csc2cmac_a.v",
+            "vmod/nvdla/retiming/NV_NVDLA_RT_cmac_a2cacc.v",
+            "vmod/nvdla/retiming/NV_NVDLA_RT_sdp2nocif.v",
+            "vmod/plugins/eperl.pm",
+            "vmod/plugins/flop.pm",
+            "vmod/plugins/pipe.pm",
+            "vmod/plugins/retime.pm"
+          ],
+          "minimal_modules": [
+            "RT_ 重定时寄存器",
+            "eperl 预处理",
+            "flop/pipe/retime 插件",
+            "模板化生成"
+          ],
+          "practice_task": "对照 NV_NVDLA_RT_csc2cmac_a.v 与 retime.pm 插件，说明一段 CSC→CMAC 通路如何通过插件自动插入流水寄存器。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "验证与参考模型",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "trace-player 测试平台架构",
+          "order": 1,
+          "filename": "u7-l1-traceplayer-testbench.md",
+          "level": "advanced",
+          "topic": "剖析 verif/synth_tb 测试平台：tb_top 顶层、memory/axi_slave 存储模型与 zemi3 监控。",
+          "learning_goals": [
+            "理解 tb_top.v 如何例化 DUT 并连接 CSB master、AXI slave 与 memory 模型",
+            "掌握 memory.v/axi_slave.v 及各类 fifo 构成的可回压存储模型",
+            "认识 zemi3_tb.sv 作为监控/检查器的角色"
+          ],
+          "source_files": [
+            "verif/synth_tb/tb_top.v",
+            "verif/synth_tb/memory.v",
+            "verif/synth_tb/axi_slave.v",
+            "verif/synth_tb/slave_mem_wrap.v",
+            "verif/synth_tb/zemi3_tb.sv",
+            "verif/synth_tb/syn_tb_defines.vh"
+          ],
+          "minimal_modules": [
+            "tb_top 顶层",
+            "存储模型",
+            "AXI slave",
+            "zemi3 监控"
+          ],
+          "practice_task": "在 tb_top.v 中梳理 DUT 与 CSB master、AXI slave 的连接，画出测试平台框图并标注时钟与复位来源。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "CSB 激励序列与 trace 格式",
+          "order": 2,
+          "filename": "u7-l2-csb-sequence-trace.md",
+          "level": "advanced",
+          "topic": "剖析 csb_master_seq 如何把 trace 文件解码成一串 CSB 寄存器读写，从而编程并启动各引擎。",
+          "learning_goals": [
+            "理解 csb_master.v/csb_master_seq.v 把 trace 事务翻译为 CSB 写的过程",
+            "掌握 trace 文件由一系列寄存器写（地址+数据）构成的格式",
+            "认识 id_fifo/raddr/waddr 等 fifo 如何维持事务顺序与背压"
+          ],
+          "source_files": [
+            "verif/synth_tb/csb_master.v",
+            "verif/synth_tb/csb_master_seq.v",
+            "verif/synth_tb/id_fifo.v",
+            "verif/synth_tb/raddr_fifo.v",
+            "verif/synth_tb/wdata_fifo.v",
+            "verif/synth_tb/wstrb_fifo.v"
+          ],
+          "minimal_modules": [
+            "csb_master_seq 译码",
+            "trace 事务格式",
+            "事务 fifo"
+          ],
+          "practice_task": "打开一个 sanity trace 样例，识别其中的寄存器写序列，说明它如何先配置再 kick-off 卷积引擎。",
+          "depends_on": [
+            "u7-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "C-model 参考模型（cmod）",
+          "order": 3,
+          "filename": "u7-l3-cmodel-reference.md",
+          "level": "advanced",
+          "topic": "讲解 cmod 目录的 SystemC/C++ 参考模型结构，及其作为黄金参考与 RTL 比对的作用。",
+          "learning_goals": [
+            "理解 cmod 是与 RTL 一一对应的 C++/SystemC 黄金参考模型",
+            "掌握 nvdla_core 与各引擎（bdma/cdma/csc/cmac/cacc/sdp/pdp/cdp）的 C 模型组织",
+            "认识 cmod 用于生成期望输出、与 RTL 仿真结果比对验证"
+          ],
+          "source_files": [
+            "cmod/README.md",
+            "cmod/nvdla_core/NV_NVDLA_core.cpp",
+            "cmod/nvdla_core/NV_NVDLA_core.h",
+            "cmod/Makefile"
+          ],
+          "minimal_modules": [
+            "cmod 参考模型",
+            "nvdla_core",
+            "黄金比对"
+          ],
+          "practice_task": "对照 cmod 的子目录与 vmod/nvdla 的引擎，说明 C 模型与 RTL 的对应关系，并指出用 C 模型做比对的典型流程。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Verilator 开源仿真路径",
+          "order": 4,
+          "filename": "u7-l4-verilator-path.md",
+          "level": "advanced",
+          "topic": "讲解 verif/verilator 如何用开源 Verilator 编译 RTL、用 nvdla.cpp 驱动并跑通 trace。",
+          "learning_goals": [
+            "理解 Verilator 路径作为不依赖 VCS 的开源仿真替代方案",
+            "掌握 verilator.f 文件列表与 nvdla.cpp 顶层驱动的职责",
+            "认识 input_txn_to_verilator.pl 把 trace 转为 Verilator 输入的过程"
+          ],
+          "source_files": [
+            "verif/verilator/Makefile",
+            "verif/verilator/nvdla.cpp",
+            "verif/verilator/verilator.f",
+            "verif/verilator/input_txn_to_verilator.pl"
+          ],
+          "minimal_modules": [
+            "Verilator 编译",
+            "nvdla.cpp 驱动",
+            "trace 转换"
+          ],
+          "practice_task": "对比 verif/sim(VCS) 与 verif/verilator 两条仿真路径，说明各自适用场景，并尝试用 Verilator 跑通一个 sanity trace。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "配置、综合与端到端集成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "spec/defs 配置体系与 defgen",
+          "order": 1,
+          "filename": "u8-l1-spec-defs-config.md",
+          "level": "advanced",
+          "topic": "讲解 spec/defs 下 nv_full.spec/projects.spec 的特性宏，以及 defgen 如何将其展开为 RTL define。",
+          "learning_goals": [
+            "理解 nv_full.spec 用一组 ENABLE/DISABLE 宏描述 nvdlav1 的固定特性集",
+            "掌握 projects.spec 把用户宏映射为 NVDLA_* 内部宏并做完整性校验",
+            "认识 defgen 展开 spec、生成供 eperl/编译使用的 define 的流程"
+          ],
+          "source_files": [
+            "spec/defs/nv_full.spec",
+            "spec/defs/projects.spec",
+            "spec/defs/Makefile",
+            "tools/bin/defgen"
+          ],
+          "minimal_modules": [
+            "nv_full 特性宏",
+            "projects.spec 映射校验",
+            "defgen 展开"
+          ],
+          "practice_task": "在 nv_full.spec 中找到 MAC_ATOMIC_C_SIZE_64 等规格宏，追踪它如何经 projects.spec 与 defgen 影响最终 RTL。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "寄存器规格与 RDL/Ordt 生成",
+          "order": 2,
+          "filename": "u8-l2-rdl-ordt-reggen.md",
+          "level": "advanced",
+          "topic": "讲解 spec/manual 用 SystemRDL(test.rdl) 经 Ordt.jar 自动生成 Verilog 寄存器模型、RAL 与 cmod 寄存器。",
+          "learning_goals": [
+            "理解 SystemRDL 是寄存器空间的单一可信源(single source of truth)",
+            "掌握 Ordt.jar 由 test.rdl 生成 regs_v.v（RTL）、regs_ral.sv（RAL）、cmod/sv 模型的多后端流程",
+            "认识生成的 _CSB_reg.v 与 u2-l3 讲解的寄存器文件的对应关系"
+          ],
+          "source_files": [
+            "spec/manual/README.md",
+            "spec/manual/test.rdl",
+            "spec/manual/Ordt.jar",
+            "spec/manual/Makefile",
+            "vmod/nvdla/glb/NV_NVDLA_GLB_CSB_reg.v"
+          ],
+          "minimal_modules": [
+            "SystemRDL 源",
+            "Ordt 多后端生成",
+            "RTL/RAL/cmod 寄存器"
+          ],
+          "practice_task": "用 spec/manual 的 make 流程说明 test.rdl 如何生成 GLB 的 CSB_reg.v，并对照 GLB_CSB_reg.v 验证其中断寄存器字段来源。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "综合流程：SDC 与 Synopsys DC",
+          "order": 3,
+          "filename": "u8-l3-synthesis-flow.md",
+          "level": "advanced",
+          "topic": "讲解 syn 目录的综合脚本：按分区的 SDC 约束、dc_run.tcl 流程与 syn_launch.sh 启动。",
+          "learning_goals": [
+            "理解综合按 partition_a/c/m/o/p 分别施加 SDC 约束",
+            "掌握 dc_run.tcl/dc_app_vars.tcl 的 DC 综合主流程与 wlm/dct/dcg/de 模式",
+            "认识 config.sh 模板中 TARGET_LIB/LINK_LIB/MW_LIB 等工艺库配置"
+          ],
+          "source_files": [
+            "syn/README.md",
+            "syn/scripts/syn_launch.sh",
+            "syn/scripts/dc_run.tcl",
+            "syn/scripts/default_config.sh",
+            "syn/cons/NV_NVDLA_partition_c.sdc",
+            "syn/templates/config.sh"
+          ],
+          "minimal_modules": [
+            "分区 SDC",
+            "DC 综合流程",
+            "综合模式与工艺库配置"
+          ],
+          "practice_task": "为 partition_c 选择一种综合模式（如 wlm），列出 syn_launch.sh 需要的 config.sh 关键变量，并说明 SDC 如何约束卷积核心时序。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "端到端：编程一个网络层与集成指南",
+          "order": 4,
+          "filename": "u8-l4-end-to-end-integration.md",
+          "level": "advanced",
+          "topic": "综合运用所学，讲解如何配置并运行一个完整卷积+后处理层，以及把 NVDLA 集成到 SoC 的要点。",
+          "learning_goals": [
+            "理解一个网络层从 BDMA 搬数据、配置卷积+SDP/PDP、启动到中断完成的端到端编程序列",
+            "掌握 producer/consumer 影偶配置与各引擎 done 中断的协作",
+            "认识 SoC 集成所需的 CSB/APB 接入、AXI memif 接入、时钟复位与电源要求"
+          ],
+          "source_files": [
+            "vmod/nvdla/top/NV_nvdla.v",
+            "vmod/nvdla/glb/NV_NVDLA_glb.v",
+            "vmod/nvdla/csb_master/NV_NVDLA_csb_master.v",
+            "vmod/nvdla/bdma/NV_NVDLA_bdma.v",
+            "verif/traces/README.md",
+            "perf/NVDLA_OpenSource_Performance.xlsx"
+          ],
+          "minimal_modules": [
+            "端到端编程序列",
+            "影偶配置与中断协作",
+            "SoC 集成要点"
+          ],
+          "practice_task": "编写一份伪代码启动序列：用 BDMA 预装权重→配置 CDMA/CSC/CMAC/CACC→配置 SDP→kick-off→轮询 GLB done 中断，并指出集成时需连接的对外接口。",
+          "depends_on": [
+            "u3-l6",
+            "u5-l1",
+            "u2-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
