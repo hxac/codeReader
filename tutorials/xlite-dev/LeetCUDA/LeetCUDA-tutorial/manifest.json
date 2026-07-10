@@ -1,0 +1,1185 @@
+{
+  "project": "LeetCUDA",
+  "head": "3af51ebd83b98d37e27bbee065ed2fcbe3bbb93e",
+  "rationale": "本次为 incremental 更新（上次 HEAD 7d9ce2a → 当前 HEAD 3af51eb）。两个 commit 仅修改 kernels/interview/notes-v2.cu 与其编译产物 notes-v2.pdf，且全部为注释增强、无任何逻辑/接口/架构变化：在 Phase 7b-2（hgemm_mma_stages_tn 统一循环版 multistage TN kernel）补充了 warp 2x4 layout 按 col-major 排列 MMA0~MMA7、prefetch loop 已预加载 K_STAGE-1 个 stage、ldmatrix.x4 需 warp 内 32 线程参与而 ldmatrix.x2 仅前 16 线程、epilogue 中 RC0/RC1 寄存器按 col-major 表达两个 8x8 子矩阵相邻行等说明；并在 Phase 7b-3 swizzle_permuted_A_j 注释中点明 8 half=16B=128bit=4 bank 构成一个 phase、对应 TMA 的 SWIZZLE_32B pattern。原大纲骨架（notes-v2.cu 8 Phase 为主轴 + 各算子目录 README+.cu+.py 三件套）仍然成立，单元划分与讲义顺序保持不变。由于变化只落在 notes-v2.cu 的 MMA Stage TN 段（ldmatrix/TN 布局/统一循环 multistage/寄存器 epilogue），唯一受影响的是直接引用该段的 u10-l3（MMA m16n8k16 PTX 与 TN 布局），其 practice_task 指引读者阅读的 Phase 7b 段落获得更详尽注释，故标记 update 做轻量补充；引用独立 .cu 文件的其他 GEMM/Swizzle 讲义（u11-l1/l2/l3、u7-l2 等）未受 notes-v2.cu 注释变化影响，全部 keep；其余讲义亦无关联改动，全部 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：定位、运行与目录结构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "LeetCUDA 是什么：项目定位与核心特性",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LeetCUDA 的定位（面向初学者的 CUDA 学习笔记）、核心特性（Tensor/CUDA Cores、TF32/F16/BF16/F8、200+ kernel、HGEMM 与 flash-attn）以及整体学习路线。",
+          "learning_goals": [
+            "理解 LeetCUDA 项目的目标受众与学习价值",
+            "掌握项目包含的核心技术栈与算子分类",
+            "了解从入门到专家的整体学习路径"
+          ],
+          "source_files": [
+            "README.md",
+            "kernels/interview/README.md"
+          ],
+          "minimal_modules": [
+            "项目 README",
+            "interview notes-v2 说明"
+          ],
+          "practice_task": "阅读 README 与 kernels/interview/README.md，用中文写一段话总结 LeetCUDA 解决什么问题、包含哪几大类算子，并指出 notes-v2.cu 的 8 个 Phase 分别对应哪些主题。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "编译运行第一个 CUDA kernel",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 nvcc 编译运行 notes-v2.cu，包括不同架构（sm_89 Ada、sm_90a Hopper）、CuTe/WGMMA 宏开关、lcublas/lcuda 链接以及 verification harness 输出含义。",
+          "learning_goals": [
+            "掌握 nvcc 基本编译命令与常见参数（-arch、-std、-D 宏）",
+            "理解 sm_89/sm_90a 等架构选项与 CuTe/WGMMA 条件编译",
+            "能运行 verification harness 并解读 Max Err / Pass 结果"
+          ],
+          "source_files": [
+            "README.md",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "Quick Start 编译命令",
+            "notes-v2 verification harness"
+          ],
+          "practice_task": "按 README Quick Start 在本机或记下命令编译 notes-v2.cu（sm_89 或 sm_90a），运行二进制并记录任意 3 个 kernel 的 Max Err 与 Pass 结果，说明为什么这些误差是可接受的。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与 kernel 模块约定",
+          "order": 3,
+          "filename": "u1-l3-directory-and-module-convention.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构（kernels/ 下各算子目录、hgemm/flash-attn 子结构、third-party/cutlass 子模块、others、slides、docs），并讲解每个算子目录通用的 README.md + <kernel>.cu + <kernel>.py 三件套约定。",
+          "learning_goals": [
+            "熟悉仓库顶层与 kernels/ 的目录组织",
+            "掌握每个算子目录的 README+.cu+.py 标准模块约定",
+            "理解 .cu（CUDA+pybind）与 .py（PyTorch 包装+验证+基准）的分工"
+          ],
+          "source_files": [
+            "README.md",
+            "kernels/relu/README.md",
+            "kernels/relu/relu.cu",
+            "kernels/relu/relu.py"
+          ],
+          "minimal_modules": [
+            "仓库目录树",
+            "relu 模块三件套"
+          ],
+          "practice_task": "以 kernels/relu/ 为例，画出 .cu 中定义的 kernel 函数与 .py 中调用入口的对应关系，并新建一个目录结构图标注 kernels/ 下至少 10 个算子目录及其作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "CUDA 编程模型与内存基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "线程层次：grid / block / warp",
+          "order": 1,
+          "filename": "u2-l1-thread-hierarchy.md",
+          "level": "beginner",
+          "topic": "通过 ReLU / ElementwiseAdd 讲解 GPU 的 grid-block-thread-warp 线程层次、SIMT 执行模型，以及 grid/block 维度与数据规模 N 的映射关系。",
+          "learning_goals": [
+            "理解 grid/block/warp/thread 的层次与 SIMT 模型",
+            "掌握 blockIdx/blockDim/threadIdx 计算全局索引的方法",
+            "能根据数据规模 N 设计合理的 grid/block 配置"
+          ],
+          "source_files": [
+            "kernels/relu/relu.cu",
+            "kernels/elementwise/elementwise.cu"
+          ],
+          "minimal_modules": [
+            "relu_f32_kernel",
+            "elementwise_add kernel"
+          ],
+          "practice_task": "阅读 relu.cu 中 relu_f32_kernel，手算当 N=1000、block=256 时的 grid 大小，并仿照它写一个 LeakyReLU 的 naive kernel（grid/block 配置相同）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "内存层次与合并访问（coalesced access）",
+          "order": 2,
+          "filename": "u2-l2-memory-coalesced-access.md",
+          "level": "beginner",
+          "topic": "讲解 GPU 内存层次（HBM/L2/SMEM/Register）的带宽与延迟数量级，以及同一 warp 线程访问连续对齐地址才能合并为一次内存事务的原理，结合 elementwise 与 dot product 说明。",
+          "learning_goals": [
+            "理解 HBM/L2/SMEM/Register 的带宽与延迟差异",
+            "掌握 coalesced memory access 的判定条件",
+            "能识别 kernel 中是否产生合并访问"
+          ],
+          "source_files": [
+            "kernels/elementwise/elementwise.cu",
+            "kernels/dot-product/dot_product.cu",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "elementwise_add",
+            "Phase 0 内存层次速查注释"
+          ],
+          "practice_task": "阅读 notes-v2.cu Phase 0 的 Memory Hierarchy 注释，列出各层带宽量级；分析 dot_product.cu 中 dot kernel 的访存模式是否为合并访问，说明理由。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "向量化访存：float4 / half2 / 128-bit pack",
+          "order": 3,
+          "filename": "u2-l3-vectorized-memory-access.md",
+          "level": "beginner",
+          "topic": "讲解使用 float4/half2/LDST128BITS 等向量类型把多条 load/store 合并为单条 128-bit 指令，减少访存指令数，并结合 relu_vec4 / elementwise_add_vec4 展示索引与 grid 的调整。",
+          "learning_goals": [
+            "掌握 FLOAT4/HALF2/LDST128BITS 等向量宏的用法",
+            "理解向量化后 grid/block 维度需相应缩小（除以 4）",
+            "能将 naive kernel 改写为向量化版本"
+          ],
+          "source_files": [
+            "kernels/relu/relu.cu",
+            "kernels/elementwise/elementwise.cu"
+          ],
+          "minimal_modules": [
+            "relu_f32x4_kernel",
+            "elementwise_add_vec4"
+          ],
+          "practice_task": "对比 relu.cu 中 relu_f32_kernel 与 relu_f32x4_kernel 的 grid 计算与指令数，并将 u2-l1 写的 LeakyReLU naive 版本改写为 float4 向量化版本。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "PyTorch 绑定与测试模式",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CUDAExtension 与 pybind 绑定机制",
+          "order": 1,
+          "filename": "u3-l1-pytorch-cuda-extension.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 torch.utils.cpp_extension 的 CUDAExtension + BuildExtension 把 .cu kernel 暴露为 Python 可调用函数，包括 PYBIND11_MODULE / m.def 注册、Tensor 类型约定与 setup.py 的 sources/include_dirs 配置。",
+          "learning_goals": [
+            "理解 CUDAExtension 与 BuildExtension 的工作原理",
+            "掌握 pybind 注册 kernel 函数与 torch::Tensor 参数约定",
+            "能看懂 setup.py 中 sources、include_dirs、nvcc 编译参数配置"
+          ],
+          "source_files": [
+            "kernels/hgemm/setup.py",
+            "kernels/hgemm/pybind/hgemm.cc",
+            "kernels/relu/relu.cu"
+          ],
+          "minimal_modules": [
+            "setup.py CUDAExtension",
+            "pybind/hgemm.cc TORCH_BINDING 宏"
+          ],
+          "practice_task": "阅读 hgemm.cc 中 TORCH_BINDING_COMMON_EXTENSION 宏与 setup.py 的 include_dirs，说明 .cu 中的 C++ 函数如何被 Python 调用；列出 hgemm 扩展依赖的 include 目录。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "正确性验证与基准测试模式",
+          "order": 2,
+          "filename": "u3-l2-verify-and-benchmark.md",
+          "level": "intermediate",
+          "topic": "讲解 .py 包装脚本中的标准模式：构造输入张量、与 PyTorch 参考实现比对最大误差、warmup + 多轮计时计算 TFLOPS/带宽，并以 hgemm.py / prof.py 为例说明基准脚手架。",
+          "learning_goals": [
+            "掌握 kernel 正确性验证（max error vs PyTorch）的标准写法",
+            "理解 warmup、iters、GPU 同步与计时流程",
+            "能读懂 hgemm.py 的 argparse 基准参数与 prof.py 的 profiling 流程"
+          ],
+          "source_files": [
+            "kernels/relu/relu.py",
+            "kernels/hgemm/hgemm.py",
+            "kernels/hgemm/bench/prof.py"
+          ],
+          "minimal_modules": [
+            "relu.py 验证流程",
+            "hgemm.py 基准参数"
+          ],
+          "practice_task": "阅读 relu.py 的验证部分与 hgemm.py 的 warmup/iters 计时逻辑，为 u2-l3 的 LeakyReLU kernel 写一个最小验证+计时脚本，输出与 torch.nn.functional 的最大误差和耗时。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "归约原语：warp/block reduce 与 dot product",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Warp Reduce 与 Block Reduce",
+          "order": 1,
+          "filename": "u4-l1-warp-and-block-reduce.md",
+          "level": "intermediate",
+          "topic": "讲解 warp 内归约（纯寄存器、__shfl_xor 同步树）与 block 内两级别归约（warp→shared memory→warp reduce），以及它们作为 softmax/norm 等算子基础原语的地位。",
+          "learning_goals": [
+            "掌握 warp reduce 的 __shfl_xor 同步树原理",
+            "理解 block reduce 的两级（warp→smem→warp）实现",
+            "认识归约原语在后续 softmax/norm 中的复用"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/reduce/block_all_reduce.cu"
+          ],
+          "minimal_modules": [
+            "Phase 1a Warp Reduce",
+            "Phase 1b Block Reduce",
+            "block_all_reduce.cu"
+          ],
+          "practice_task": "阅读 notes-v2.cu Phase 1a/1b，画出 warp reduce 的同步树（线程 0 最终得到所有值的和）；用 __shfl_xor 实现一个 warp 内求最大值的归约。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Dot Product 与 broadcast 增强",
+          "order": 2,
+          "filename": "u4-l2-dot-product-broadcast.md",
+          "level": "intermediate",
+          "topic": "以 dot / dot_vec4 讲解点积的逐元素乘加 + 归约结构，以及向量化版本如何减少指令，并引出后续 softmax/norm 中反复出现的 reduce 模式。",
+          "learning_goals": [
+            "掌握 dot product 的乘加+归约实现结构",
+            "理解 dot_vec4 相对 dot 的优化点",
+            "建立归约原语与 softmax/norm 的联系"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/dot-product/dot_product.cu"
+          ],
+          "minimal_modules": [
+            "dot kernel",
+            "dot_vec4 kernel"
+          ],
+          "practice_task": "对比 dot 与 dot_vec4 的实现，说明向量化版本 grid 维度的变化；将 u4-l1 的 warp 求和归约用于实现一个完整的 dot_vec4 kernel。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Softmax 三级递进",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Naive 与 Safe Softmax：数值稳定性",
+          "order": 1,
+          "filename": "u5-l1-naive-and-safe-softmax.md",
+          "level": "intermediate",
+          "topic": "讲解 per-token softmax 的 naive 三遍实现（求和→归一化，易数值溢出）与 safe softmax（先减最大值再 exp 求和）的差异，强调 max subtraction 的数值稳定性意义。",
+          "learning_goals": [
+            "理解 naive softmax 的三遍计算与数值溢出风险",
+            "掌握 safe softmax 减最大值的数值稳定性原理",
+            "能写出 per-token 的 safe softmax kernel"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/softmax/softmax.cu"
+          ],
+          "minimal_modules": [
+            "softmax_per_token",
+            "safe_softmax_per_token"
+          ],
+          "practice_task": "阅读 softmax_per_token 与 safe_softmax_per_token，构造一个含大数（如 x=[1000,1001,1002]）的输入说明 naive 版为何溢出而 safe 版正常；实现 safe softmax 的 block 版本。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Online Softmax 与 merge attention states",
+          "order": 2,
+          "filename": "u5-l2-online-softmax-merge-states.md",
+          "level": "intermediate",
+          "topic": "讲解 online safe softmax 的单遍算法（边累加边修正 max 与 sum），介绍 MD{m,d} 合并结构，并延伸到 merge attention states（分布式的 max/dot 归并），为 FlashAttention 埋下伏笔。",
+          "learning_goals": [
+            "掌握 online softmax 单遍合并 max 与 sum 的推导",
+            "理解 MD{m,d} 结构的合并规则",
+            "认识 merge attention states 与 FlashAttention 的联系"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/softmax/softmax.cu",
+            "kernels/openai-triton/merge-attn-states/cuda_merge_attn_states.cu"
+          ],
+          "minimal_modules": [
+            "online_safe_softmax_per_token",
+            "MD 结构注释",
+            "cuda_merge_attn_states.cu"
+          ],
+          "practice_task": "推导 online softmax 中当新 max 大于旧 max 时 d（sum）的修正公式；阅读 cuda_merge_attn_states.cu 说明两个 MD 状态如何合并，并指出它在 FlashAttention 中的作用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "归一化层与 LLM 小算子",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "RMSNorm 与 LayerNorm 的归约实现",
+          "order": 1,
+          "filename": "u6-l1-rms-and-layer-norm.md",
+          "level": "intermediate",
+          "topic": "对比 RMSNorm（1-pass：只求平方均值）与 LayerNorm（2-pass：先求 mean 再求 var）的归约次数差异，讲解它们在 LLM 中的用途及 reduce 原语的复用。",
+          "learning_goals": [
+            "掌握 RMSNorm 的单遍平方均值归约",
+            "理解 LayerNorm 的双遍 mean/var 归约",
+            "能区分两类归一化在计算量上的差异"
+          ],
+          "source_files": [
+            "kernels/rms-norm/rms_norm.cu",
+            "kernels/layer-norm/layer_norm.cu",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "rms_norm",
+            "layer_norm"
+          ],
+          "practice_task": "对比 rms_norm 与 layer_norm 的归约次数，说明为何 RMSNorm 更省算力；基于 u4 的 block reduce 实现一个 rms_norm 的完整 kernel。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "向量化归一化 + RoPE + Embedding",
+          "order": 2,
+          "filename": "u6-l2-vecnorm-rope-embedding.md",
+          "level": "intermediate",
+          "topic": "讲解 rms_norm_vec4 / layer_norm_vec4 的向量化优化，并介绍两个 LLM 高频小算子：旋转位置编码 RoPE（Llama 风格 theta=10000）与 Embedding 查表。",
+          "learning_goals": [
+            "掌握归一化 kernel 的 float4 向量化写法",
+            "理解 RoPE 旋转位置编码的数学与实现",
+            "了解 Embedding 查表 kernel 的访存模式"
+          ],
+          "source_files": [
+            "kernels/rms-norm/rms_norm.cu",
+            "kernels/rope/rope.cu",
+            "kernels/embedding/embedding.cu",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "rms_norm_vec4",
+            "rope",
+            "embedding"
+          ],
+          "practice_task": "阅读 rope kernel，写出给定 seq_len 与维度 N 时每个线程负责的 (i, j) 索引与旋转角度计算；将 u6-l1 的 rms_norm 改写为 vec4 版本。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "共享内存访存模式：转置、bank conflict 与原子",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "矩阵转置：naive 与 BCF merge_write",
+          "order": 1,
+          "filename": "u7-l1-matrix-transpose-bcf.md",
+          "level": "intermediate",
+          "topic": "讲解矩阵转置的 naive 版本（读行写列导致写不合并）与基于 shared memory 的 merge_write（BCF）最佳版，说明如何通过 smem 中转实现读写都合并。",
+          "learning_goals": [
+            "理解转置写不合并导致的性能问题",
+            "掌握用 shared memory 中转实现 merge_write 的方法",
+            "认识 mat_transpose_padded 中 padding 的作用"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/mat-transpose/mat_transpose.cu"
+          ],
+          "minimal_modules": [
+            "mat_transpose",
+            "mat_transpose_padded"
+          ],
+          "practice_task": "阅读 mat_transpose 与 mat_transpose_padded，画出朴素转置写阶段的 bank conflict；说明 padding 一个元素为何能缓解冲突。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Bank Conflict 与 SMEM Swizzle",
+          "order": 2,
+          "filename": "u7-l2-bank-conflict-smem-swizzle.md",
+          "level": "intermediate",
+          "topic": "系统讲解 shared memory 32 banks 的结构、bank conflict 的产生与分类，以及 SMEM Swizzle（通过 XOR 重排线程-地址映射）实现 bank-conflict-free 访问（含 LDSM 场景），结合 ncu 指标验证。",
+          "learning_goals": [
+            "掌握 shared memory 32 banks 结构与 bank conflict 分类",
+            "理解 SMEM Swizzle 的 XOR 映射原理",
+            "能用 ncu bank conflict 指标验证 swizzle 效果"
+          ],
+          "source_files": [
+            "kernels/swizzle/README.md",
+            "kernels/swizzle/mat_trans_swizzle.cu",
+            "kernels/swizzle/mma_simple_swizzle.cu",
+            "kernels/nvidia-nsight/bank_conflicts.md"
+          ],
+          "minimal_modules": [
+            "swizzle README ncu 命令",
+            "mat_trans_swizzle",
+            "mma_simple_swizzle",
+            "bank_conflicts.md"
+          ],
+          "practice_task": "阅读 swizzle/README.md 的 ncu 命令与 bank_conflicts.md，用文字推演 mma_simple_swizzle 中线程到 smem 地址的 XOR 映射如何避免 32-bank 冲突；列出验证 bank conflict 的关键 ncu 指标。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Histogram 与原子操作",
+          "order": 3,
+          "filename": "u7-l3-histogram-atomics.md",
+          "level": "intermediate",
+          "topic": "以 histogram kernel 讲解 atomicAdd 的使用场景、原子操作的串行化代价，以及多线程并发更新同一 bin 时的正确性与性能权衡。",
+          "learning_goals": [
+            "掌握 atomicAdd 在 histogram 中的用法",
+            "理解原子操作的串行化代价",
+            "认识直方图类 kernel 的优化方向（分桶/私有化）"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/histogram/histogram.cu"
+          ],
+          "minimal_modules": [
+            "histogram kernel"
+          ],
+          "practice_task": "阅读 histogram kernel，分析当大量线程命中同一 bin 时的串行化问题；提出一种用 shared memory 私有化直方图再归并的优化思路（伪代码即可）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "GEMV：矩阵向量乘",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "SGEMV warp-per-row 策略",
+          "order": 1,
+          "filename": "u8-l1-sgemv-warp-per-row.md",
+          "level": "intermediate",
+          "topic": "讲解矩阵向量乘（M 或 N=1，纯 memory-bound）的 warp-per-row 策略，对比 K32/K128/K16 三种 K 维度切分下每行用 1 个 warp 归约的实现与适用场景。",
+          "learning_goals": [
+            "理解 GEMV 的 memory-bound 本质",
+            "掌握 warp-per-row + warp reduce 的实现",
+            "能区分 K32/K128/K16 三种切分的适用场景"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/sgemv/sgemv.cu"
+          ],
+          "minimal_modules": [
+            "sgemv_k32",
+            "sgemv_k128",
+            "sgemv_k16"
+          ],
+          "practice_task": "对比 sgemv_k32/k128/k16 三个 kernel，说明 K 维切分大小如何影响每线程读取元素数与 warp 内归约次数；分析为何 GEMV 是 memory-bound。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "HGEMV 与 CuTe GEMV",
+          "order": 2,
+          "filename": "u8-l2-hgemv-cute-gemv.md",
+          "level": "intermediate",
+          "topic": "讲解半精度 HGEMV 的实现要点（half2 向量化、pack 访存）以及用 CUTLASS CuTe 表达 GEMV 的方式，作为后续 CuTe 学习的预热。",
+          "learning_goals": [
+            "掌握 HGEMV 的 half2 向量化访存",
+            "了解 CuTe 表达 GEMV 的基本方式",
+            "认识 FP16 GEMV 的精度与性能权衡"
+          ],
+          "source_files": [
+            "kernels/hgemv/hgemv.cu",
+            "kernels/hgemv/hgemv_cute.cu"
+          ],
+          "minimal_modules": [
+            "hgemv.cu",
+            "hgemv_cute.cu"
+          ],
+          "practice_task": "对比 hgemv.cu 与 hgemv_cute.cu，说明手写 kernel 与 CuTe 表达在代码量与抽象层次上的差异；指出 HGEMV 相对 SGEMV 在带宽利用上的优势。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "SGEMM 基础",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Naive 与 Tiled SGEMM",
+          "order": 1,
+          "filename": "u9-l1-naive-and-tiled-sgemm.md",
+          "level": "intermediate",
+          "topic": "讲解 SGEMM 的 naive 实现（每线程算一个输出元素、K 维全遍历、重复访存）与基于 shared memory 分块（Block Tile BMxBN + K Tile BK）的优化，量化复用带来的访存减少。",
+          "learning_goals": [
+            "理解 naive GEMM 的访存浪费",
+            "掌握 Block Tile + K Tile 的分块复用原理",
+            "能计算 tiled GEMM 相对 naive 的访存减少倍数"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/sgemm/sgemm.cu"
+          ],
+          "minimal_modules": [
+            "sgemm (naive)",
+            "sgemm (tiled)"
+          ],
+          "practice_task": "阅读 sgemm 的 naive 与 tiled 版本，画出 BMxBN Block Tile 下每个元素被复用的次数；计算 M=N=K=1024、BM=BN=BK=16 时 tiled 版减少的 HBM 访问量。",
+          "depends_on": [
+            "u4-l1",
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Thread-tile 与向量化 SGEMM",
+          "order": 2,
+          "filename": "u9-l2-thread-tile-vec4-sgemm.md",
+          "level": "intermediate",
+          "topic": "讲解 Thread Tile（每个线程计算 TMxTN 个输出元素以提高计算密度、降低同步开销）与 float4 向量化加载（sgemm_vec4）的联合优化。",
+          "learning_goals": [
+            "掌握 Thread Tile 提高计算密度的原理",
+            "理解向量化加载在 tiled GEMM 中的应用",
+            "能分析 Thread Tile 对 occupancy 与同步开销的影响"
+          ],
+          "source_files": [
+            "kernels/sgemm/sgemm.cu",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "sgemm_vec4",
+            "thread tile 注释"
+          ],
+          "practice_task": "阅读 sgemm_vec4，说明 Thread Tile TMxTN 如何减少线程总数与 shared memory 加载次数；为 u9-l1 的 tiled SGEMM 增加 float4 向量化加载。",
+          "depends_on": [
+            "u9-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "cp.async 双缓冲与 TF32 WMMA",
+          "order": 3,
+          "filename": "u9-l3-async-dbuf-tf32-wmma.md",
+          "level": "intermediate",
+          "topic": "讲解用 cp.async 异步拷贝 + double buffer 流水线隐藏访存延迟（sgemm_async），以及用 TF32 + WMMA 走 Tensor Core 的 sgemm_wmma_tf32_stage 路径，作为进入 HGEMM 的过渡。",
+          "learning_goals": [
+            "掌握 cp.async + double buffer 流水线原理",
+            "理解 stage 数与延迟隐藏、smem 占用的权衡",
+            "了解 TF32/WMMA 走 Tensor Core 的基本用法"
+          ],
+          "source_files": [
+            "kernels/sgemm/sgemm_async.cu",
+            "kernels/sgemm/sgemm_wmma_tf32_stage.cu"
+          ],
+          "minimal_modules": [
+            "sgemm_async (dbuf)",
+            "sgemm_wmma_tf32_stage"
+          ],
+          "practice_task": "阅读 sgemm_async，画出 double buffer 下『计算当前 tile + 拷贝下一 tile』的流水线时序；说明 stage=2 与 stage=4 在 smem 占用上的差异。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "HGEMM 与 Tensor Core（WMMA/MMA）",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "WMMA m16n16k16 入门",
+          "order": 1,
+          "filename": "u10-l1-wmma-basics.md",
+          "level": "advanced",
+          "topic": "讲解 WMMA（warp 级矩阵乘累加）API 的使用：load_matrix_sync/fragment/mma_sync/store_matrix_sync，以 m16n16k16 半精度矩阵乘入门 Tensor Core。",
+          "learning_goals": [
+            "掌握 WMMA fragment 与 mma_sync 的基本用法",
+            "理解 m16n16k16 的矩阵分块与 warp 映射",
+            "能看懂 wmma naive kernel 的数据流"
+          ],
+          "source_files": [
+            "kernels/hgemm/wmma/hgemm_wmma.cu"
+          ],
+          "minimal_modules": [
+            "hgemm_wmma naive",
+            "wmma fragment"
+          ],
+          "practice_task": "阅读 hgemm_wmma.cu 的 naive 版本，列出 WMMA 三类 fragment（A/B/C）的维度与类型；说明一个 warp 一次 mma_sync 完成的矩阵乘规模。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "HGEMM naive sliced-K 与 pack LDST",
+          "order": 2,
+          "filename": "u10-l2-hgemm-naive-sliced-k.md",
+          "level": "advanced",
+          "topic": "讲解 HGEMM 的手写 Tensor Core 路径：sliced-K（沿 K 切分多次 mma 累加）、t_8x8 线程分块、f16x4/f16x8 pack LDST（128-bit 向量化）等优化手段的递进。",
+          "learning_goals": [
+            "掌握 sliced-K 多次 mma 累加的实现",
+            "理解 t_8x8 线程分块与 pack LDST 优化",
+            "认识 hgemm naive→bcf→dbuf 的递进优化链条"
+          ],
+          "source_files": [
+            "kernels/hgemm/naive/hgemm.cu",
+            "kernels/hgemm/naive/hgemm_async.cu"
+          ],
+          "minimal_modules": [
+            "hgemm_t_8x8_sliced_k",
+            "f16x4/f16x8 pack",
+            "hgemm_async"
+          ],
+          "practice_task": "梳理 hgemm.cu 中从 naive 到 sliced_k_f16x4_pack_bcf 的优化递进（至少 4 个版本），每步说明改进点（pack/bcf/线程分块）；指出 hgemm_async 引入的异步拷贝作用。",
+          "depends_on": [
+            "u10-l1",
+            "u9-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "MMA m16n8k16 PTX 与 TN 布局",
+          "order": 1,
+          "filename": "u10-l3-mma-ptx-tn-layout.md",
+          "level": "advanced",
+          "topic": "讲解比 WMMA 更底层的 MMA PTX 指令（m16n8k16）、ldmatrix 加载、A 行主序/B 列主序的 TN 布局语义，以及统一循环版 multistage kernel 的结构。本次 notes-v2.cu Phase 7b-2（hgemm_mma_stages_tn）补充了大量注释：warp 2x4 layout 按 col-major 排列 MMA0~MMA7、prefetch loop 已预加载 K_STAGE-1 个 stage、ldmatrix.x4 需 warp 内 32 线程参与而 ldmatrix.x2 仅前 16 线程、epilogue 中 RC0/RC1 寄存器按 col-major 表达两个 8x8 子矩阵相邻行。",
+          "learning_goals": [
+            "掌握 MMA m16n8k16 PTX 指令与 ldmatrix 用法",
+            "理解 BLAS N/T 布局语义与 TN 布局",
+            "能看懂 hgemm_mma_stage_tn 的统一循环结构"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/hgemm/mma/basic/hgemm_mma_stage_tn.cu"
+          ],
+          "minimal_modules": [
+            "MMA PTX 宏定义",
+            "hgemm_mma_stage_tn kernel"
+          ],
+          "practice_task": "阅读 notes-v2.cu Phase 7b 的 MMA PTX 宏与 hgemm_mma_stages_tn（注意新增的 ldmatrix 线程参与说明与 RC0/RC1 寄存器注释），说明 m16n8k16 相对 WMMA m16n16k16 的区别；解释 TN 布局下 A、B 矩阵的存储主序。",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "HGEMM 高级优化",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "Multistage pipeline + 寄存器 double buffer",
+          "order": 1,
+          "filename": "u11-l1-multistage-pipeline-dbuf.md",
+          "level": "advanced",
+          "topic": "深入讲解 multistage（2~4 stage）流水线、cp.async commit/wait 同步、寄存器 double buffer（fragment ping-pong）如何进一步隐藏 mma 与访存延迟。",
+          "learning_goals": [
+            "掌握 multistage 流水线的 stage 数权衡",
+            "理解 cp.async commit/wait 的同步语义",
+            "认识寄存器 double buffer 的 ping-pong 复用"
+          ],
+          "source_files": [
+            "kernels/hgemm/mma/basic/hgemm_mma_stage.cu",
+            "kernels/hgemm/wmma/hgemm_wmma_stage.cu"
+          ],
+          "minimal_modules": [
+            "hgemm_mma_stage",
+            "hgemm_wmma_mma4x2_warp2x4_stages"
+          ],
+          "practice_task": "阅读 hgemm_mma_stage 的 multistage 循环，画出 stage=3 时 3 个 smem buffer 的生产/消费时序；说明寄存器 double buffer 如何与 smem stage 配合。",
+          "depends_on": [
+            "u10-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "SMEM Swizzle 消除bank conflict（LDSM）",
+          "order": 2,
+          "filename": "u11-l2-smem-swizzle-bank-free.md",
+          "level": "advanced",
+          "topic": "讲解在 HGEMM TN 布局下为 ldmatrix（LDSM）配置 SMEM Swizzle（x2/x4 stride）实现 0 bank conflict，对比 swizzle 前后的 ncu bank conflict 指标。",
+          "learning_goals": [
+            "掌握 HGEMM 中为 LDSM 配置 SMEM Swizzle 的方法",
+            "理解 x2/x4 swizzle stride 的选择依据",
+            "能用 ncu 验证 swizzle 后 bank conflict 归零"
+          ],
+          "source_files": [
+            "kernels/hgemm/mma/swizzle/hgemm_mma_stage_tn_swizzle.cu",
+            "kernels/hgemm/mma/swizzle/hgemm_mma_stage_tn_swizzle_x4.cu"
+          ],
+          "minimal_modules": [
+            "hgemm_mma_stage_tn_swizzle",
+            "swizzle_x4"
+          ],
+          "practice_task": "对比 hgemm_mma_stage_tn_swizzle 与 _x4 版本，说明 swizzle stride 翻倍对 bank conflict 与 smem 布局的影响；列出验证 LDSM bank conflict 的 ncu 指标。",
+          "depends_on": [
+            "u7-l2",
+            "u11-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "Tiling/Swizzle 策略与 cuBLAS 基准对比",
+          "order": 3,
+          "filename": "u11-l3-tiling-swizzle-benchmark.md",
+          "level": "advanced",
+          "topic": "讲解 Block Tile/Warp Tile/Thread Tile 三级分块策略、Block Swizzle（XOR 分配 block）与 Warp Swizzle 的作用，并用 hgemm.py 基准与 cuBLAS 对比，分析如何逼近 98%~100% cuBLAS 性能。",
+          "learning_goals": [
+            "掌握 Block/Warp/Thread 三级 tiling 的设计权衡",
+            "理解 Block/Warp Swizzle 对 L2 命中与负载均衡的作用",
+            "能用 hgemm.py 解读 TFLOPS 与 cuBLAS 的性能差距"
+          ],
+          "source_files": [
+            "kernels/hgemm/hgemm.py",
+            "kernels/hgemm/makefile",
+            "kernels/hgemm/cublas/hgemm_cublas.cu"
+          ],
+          "minimal_modules": [
+            "hgemm.py 基准",
+            "makefile 编译目标",
+            "hgemm_cublas"
+          ],
+          "practice_task": "阅读 hgemm.py 与 makefile，列出评测各 MMA 变体的编译目标；说明 Block Swizzle 如何改善 L2 cache 命中，并解释为何该仓库 HGEMM 能逼近 cuBLAS。",
+          "depends_on": [
+            "u11-l1",
+            "u11-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "CuTe DSL 与 CUTLASS",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "CuTe 基础：tile 与 layout",
+          "order": 1,
+          "filename": "u12-l1-cute-tile-layout-basics.md",
+          "level": "advanced",
+          "topic": "讲解 CUTLASS CuTe 的核心抽象：tile（分块）与 layout（行列主序/swizzle 编码），通过 vector_add.cu 与 mma_tile_tex.cc 入手理解 CuTe 的张量与布局表达。",
+          "learning_goals": [
+            "理解 CuTe 的 tile 与 layout 核心抽象",
+            "掌握 CuTe 表达简单 kernel（vector_add）的方式",
+            "认识 mma_tile_tex 中 tile 与张量布局的关系"
+          ],
+          "source_files": [
+            "kernels/cutlass/cute/vector_add.cu",
+            "kernels/cutlass/cute/mma_tile_tex.cc"
+          ],
+          "minimal_modules": [
+            "vector_add.cu",
+            "mma_tile_tex.cc"
+          ],
+          "practice_task": "阅读 vector_add.cu，用中文解释 CuTe 中 layout 如何描述线程到数据的映射；说明 mma_tile_tex.cc 展示的 tile 分块与 MMA 的关系。",
+          "depends_on": [
+            "u10-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l2",
+          "title": "CuTe HGEMM：TN + Swizzle + Multistage",
+          "order": 2,
+          "filename": "u12-l2-cute-hgemm.md",
+          "level": "advanced",
+          "topic": "讲解用 CuTe DSL 实现完整 HGEMM（TN 布局 + SMEM Swizzle + Multistage Pipeline + Tensor Core 自动调度），对比手写 MMA PTX 版本的代码量与可维护性。",
+          "learning_goals": [
+            "掌握 CuTe HGEMM 的 TN 布局与 swizzle 配置",
+            "理解 CuTe 如何自动调度 Tensor Core 与流水线",
+            "能对比 CuTe 与手写 MMA PTX 的取舍"
+          ],
+          "source_files": [
+            "kernels/hgemm/cutlass/hgemm_mma_stage_tn_cute.cu",
+            "kernels/hgemm/makefile"
+          ],
+          "minimal_modules": [
+            "hgemm_mma_stage_tn_cute",
+            "cute_89 makefile 目标"
+          ],
+          "practice_task": "阅读 hgemm_mma_stage_tn_cute.cu，对比 u10-l3 的手写 MMA 版本，列出 CuTe 版本省去了哪些手写细节（ldmatrix/swizzle/流水线同步）；说明其编译开关（CUTE_HGEMM_DEBUG）。",
+          "depends_on": [
+            "u12-l1",
+            "u11-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "Hopper：WGMMA + TMA + Warp Specialization",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "WGMMA m64n128k16 与 TMA",
+          "order": 1,
+          "filename": "u13-l1-wgmma-tma.md",
+          "level": "advanced",
+          "topic": "讲解 Hopper 的 warpgroup 级异步指令 WGMMA（m64n128k16）与 TMA（Tensor Memory Accelerator）异步批量搬运，对比 Ampere MMA 的同步语义。",
+          "learning_goals": [
+            "掌握 WGMMA warpgroup（128 threads）异步语义",
+            "理解 TMA 异步批量搬运 shared memory 的优势",
+            "能对比 WGMMA 与 Ampere MMA 的执行模型差异"
+          ],
+          "source_files": [
+            "kernels/interview/notes-v2.cu",
+            "kernels/hgemm/wgmma/hgemm_wgmma_fp32acc_stages_tn.cu"
+          ],
+          "minimal_modules": [
+            "Phase 7d WGMMA kernel",
+            "hgemm_wgmma_fp32acc_stages_tn"
+          ],
+          "practice_task": "阅读 notes-v2.cu Phase 7d 的 WGMMA kernel，说明 warpgroup（128 线程）与 warp（32 线程）的区别；指出 TMA 相对 cp.async 在大块搬运上的优势。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u13-l2",
+          "title": "Warp Specialization：生产者/消费者",
+          "order": 2,
+          "filename": "u13-l2-warp-specialization.md",
+          "level": "advanced",
+          "topic": "讲解 Warp Specialization 范式：将 warp 划分为 producer（TMA 搬运）与 consumer（WGMMA 计算），通过异步 barrier 协作，以 ws-hgemm 为例说明其结构与收益。",
+          "learning_goals": [
+            "掌握 Warp Specialization 的 producer/consumer 划分",
+            "理解异步 barrier 在生产/消费者间的同步作用",
+            "认识 ws-hgemm 相对持久 kernel 的性能优势"
+          ],
+          "source_files": [
+            "kernels/ws-hgemm/naive_ws_hgemm_sm8x.cu",
+            "kernels/ws-hgemm/README.md"
+          ],
+          "minimal_modules": [
+            "naive_ws_hgemm_sm8x",
+            "ws-hgemm README"
+          ],
+          "practice_task": "阅读 ws-hgemm 的 naive_ws_hgemm_cute kernel，画出 producer warp（搬运）与 consumer warp（计算）的协作时序；说明异步 barrier 如何替代显式 __syncthreads。",
+          "depends_on": [
+            "u13-l1",
+            "u12-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "FlashAttention（MMA 实现）",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "FlashAttention 算法与 online softmax tiling",
+          "order": 1,
+          "filename": "u14-l1-flash-attn-algorithm.md",
+          "level": "advanced",
+          "topic": "讲解 FlashAttention 的核心思想：分块（Br/Bc tiling）+ online softmax（避免实例化完整 N×N attention 矩阵）+ 寄存器复用 P@V，结合 notes-v2.cu Phase 8 的 split_q kernel。",
+          "learning_goals": [
+            "理解 FlashAttention 分块避免 O(N²) 显存的思想",
+            "掌握 online softmax 在 attention 中的应用",
+            "认识 Br/Bc tiling 与 P@V 寄存器复用"
+          ],
+          "source_files": [
+            "kernels/flash-attn/README.md",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "flash-attn README 特性表",
+            "Phase 8 split_q kernel"
+          ],
+          "practice_task": "阅读 flash-attn/README 与 Phase 8 kernel，说明 FlashAttention 如何把完整 softmax 缩放分摊到每个 KV 块；推导 online softmax 修正对输出 O 的影响。",
+          "depends_on": [
+            "u5-l2",
+            "u10-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u14-l2",
+          "title": "Split-KV（FA-1）MMA kernel",
+          "order": 2,
+          "filename": "u14-l2-flash-attn-split-kv.md",
+          "level": "advanced",
+          "topic": "讲解 FlashAttention-1 风格的 Split-KV 实现：将 Q/KV 切分到多个 MMA(warp)，分析其 warp 间通过 smem/shfl 通信的开销。",
+          "learning_goals": [
+            "掌握 Split-KV 的 warp 分配与 tiling 策略",
+            "理解 warp 间通信（smem/shfl）的开销",
+            "认识 Split-KV 为何慢于 Split-Q"
+          ],
+          "source_files": [
+            "kernels/flash-attn/mma/basic/flash_attn_mma_split_kv.cu",
+            "kernels/flash-attn/mma/basic/flash_attn_mma_share_kv.cu"
+          ],
+          "minimal_modules": [
+            "flash_attn_mma_split_kv",
+            "flash_attn_mma_share_kv"
+          ],
+          "practice_task": "阅读 split_kv 与 share_kv kernel，画出 Q/KV 在多个 warp 间的切分布局；说明 share_kv（K/V 共享 smem）如何提升 block occupancy。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u14-l3",
+          "title": "Split-Q（FA-2）+ Shared QKV + Tiling",
+          "order": 3,
+          "filename": "u14-l3-flash-attn-split-q-share-qkv.md",
+          "level": "advanced",
+          "topic": "讲解更快的 Split-Q（FA-2 风格：Q 切分、KV 全 warp 共享，减少通信）以及 share_qkv（Q/K/V 共享 smem）、QKV fine-grained tiling、prefetch 等进阶优化。",
+          "learning_goals": [
+            "掌握 Split-Q 相对 Split-KV 减少通信的原因",
+            "理解 share_qkv 共享 smem 与 prefetch 优化",
+            "认识 QKV fine-grained tiling 的作用"
+          ],
+          "source_files": [
+            "kernels/flash-attn/mma/basic/flash_attn_mma_split_q.cu",
+            "kernels/flash-attn/mma/basic/flash_attn_mma_share_qkv.cu",
+            "kernels/flash-attn/mma/basic/flash_attn_mma_tiling_qkv.cu"
+          ],
+          "minimal_modules": [
+            "flash_attn_mma_split_q",
+            "flash_attn_mma_share_qkv",
+            "flash_attn_mma_tiling_qkv"
+          ],
+          "practice_task": "对比 split_q 与 split_kv，说明 Split-Q 为何减少 warp 间通信；梳理 share_qkv→tiling_qkv 的优化递进（shared smem/prefetch/tiling）。",
+          "depends_on": [
+            "u14-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "Triton kernel",
+      "level": "intermediate",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "Triton 基础：vector-add 与编程模型",
+          "order": 1,
+          "filename": "u15-l1-triton-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 OpenAI Triton 的 block-level 编程模型（@triton.jit、tl.make_block_ptr、program_id），以 vector_add 入门并对比手写 CUDA 的抽象层次差异。",
+          "learning_goals": [
+            "掌握 Triton 的 block-level JIT 编程模型",
+            "理解 program_id 与 grid 的映射",
+            "能读懂 triton_vector_add 并对比 CUDA 版本"
+          ],
+          "source_files": [
+            "kernels/openai-triton/vector-add/triton_vector_add.py"
+          ],
+          "minimal_modules": [
+            "triton_vector_add"
+          ],
+          "practice_task": "阅读 triton_vector_add.py，用中文说明 @triton.jit 装饰器与 program_id 的作用；对比手写 CUDA vector_add，指出 Triton 省去了哪些底层细节。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u15-l2",
+          "title": "Fused softmax / layer-norm（Triton）",
+          "order": 2,
+          "filename": "u15-l2-triton-fused-kernels.md",
+          "level": "intermediate",
+          "topic": "讲解用 Triton 实现 fused softmax 与 layer-norm（含前向/反向），强调 fusion 减少 HBM 读写带来的带宽收益，并与手写 CUDA softmax/norm 对照。",
+          "learning_goals": [
+            "掌握 Triton fused softmax 的 online 归约写法",
+            "理解 layer-norm 前向/反向在 Triton 中的实现",
+            "认识 fusion 减少显存读写的带宽收益"
+          ],
+          "source_files": [
+            "kernels/openai-triton/fused-softmax/triton_fused_softmax.py",
+            "kernels/openai-triton/layer-norm/triton_layer_norm.py"
+          ],
+          "minimal_modules": [
+            "triton_fused_softmax",
+            "triton_layer_norm"
+          ],
+          "practice_task": "阅读 triton_fused_softmax，对比 u5 的手写 CUDA safe softmax，说明 Triton 的融合写法如何减少 HBM 访问次数；指出 layer-norm 反向需要的中间量。",
+          "depends_on": [
+            "u15-l1",
+            "u5-l1",
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u16",
+      "title": "性能分析与生态扩展",
+      "level": "intermediate",
+      "order": 16,
+      "lectures": [
+        {
+          "id": "u16-l1",
+          "title": "nsight compute 指标与 Roofline / occupancy",
+          "order": 1,
+          "filename": "u16-l1-ncu-roofline-occupancy.md",
+          "level": "intermediate",
+          "topic": "讲解用 Nsight Compute（ncu）测量关键指标（bank conflict、内存吞吐、占用率），结合 Roofline 模型判断 memory-bound/compute-bound，以及 occupancy 的三类资源约束公式。",
+          "learning_goals": [
+            "掌握 ncu 关键指标（bank conflict/吞吐/occupancy）",
+            "理解 Roofline 模型与算术强度的关系",
+            "能计算 occupancy 受寄存器/smem/block 大小的约束"
+          ],
+          "source_files": [
+            "kernels/nvidia-nsight/README.md",
+            "kernels/interview/notes-v2.cu"
+          ],
+          "minimal_modules": [
+            "ncu 指标示例",
+            "Phase 0 Roofline/occupancy 注释"
+          ],
+          "practice_task": "阅读 nvidia-nsight/README 与 Phase 0 的 Roofline/occupancy 注释，列出判断 memory/compute bound 的公式；为某个 kernel 估算其算术强度并判断瓶颈类型。",
+          "depends_on": [
+            "u2-l2",
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u16-l2",
+          "title": "PyTorch 分布式、TensorRT plugin 与 NMS",
+          "order": 2,
+          "filename": "u16-l2-pytorch-tensorrt-ecosystem.md",
+          "level": "intermediate",
+          "topic": "扩展到 CUDA kernel 之外：PyTorch 分布式集合通信（all_reduce/all_gather 等）、TensorRT plugin/fmha 集成思路，以及经典 CV 算子 NMS 的 CUDA 实现要点。",
+          "learning_goals": [
+            "了解 PyTorch 分布式集合通信的基本算子",
+            "认识 TensorRT plugin/fmha 的集成方式",
+            "掌握 NMS CUDA kernel 的实现与 PyTorch 绑定"
+          ],
+          "source_files": [
+            "others/pytorch/distributed/README.md",
+            "others/tensorrt/fmha/export_fmha.py",
+            "kernels/nms/nms.cu"
+          ],
+          "minimal_modules": [
+            "distributed 集合通信测试",
+            "tensorrt fmha 导出",
+            "nms kernel"
+          ],
+          "practice_task": "阅读 nms.cu 与 distributed 测试，说明 NMS kernel 的并行策略与 PyTorch 绑定方式；列出至少 4 种 PyTorch 分布式集合通信算子及其用途。",
+          "depends_on": [
+            "u3-l1",
+            "u16-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
