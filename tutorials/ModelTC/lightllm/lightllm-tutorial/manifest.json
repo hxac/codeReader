@@ -1,0 +1,1094 @@
+{
+  "project": "lightllm",
+  "head": "5d59e4907dc9b5338426b56723bdee42d8af9309",
+  "rationale": "LightLLM 是一个以纯 Python、token 级 KV Cache 管理、多进程协作为核心特色的 LLM 推理服务框架，体量大（46 个模型族、多模态、PD 分离、MoE/MLA、MTP 等）。学习路线从「整体认知」到「请求链路」再到「推理内核」，遵循请求从 HTTP 进入到生成 token 输出的真实数据流：HttpServer→Router→ModelBackend→Detokenization。第一单元带读者从零认识项目、安装运行并理解多进程编排；第二、三单元沿主链路拆解调度循环、请求队列、模型推理框架与 KV 管理；第四单元聚焦 RadixCache/内存管理这一 lightllm 最具特色的设计；第五单元通过注册机制和 Llama/Deepseek 实例引导读者动手适配新模型；第六单元覆盖 CUDA Graph、overlap、FP8 量化、多级缓存等性能优化；第七单元面向二开与部署，讲解 PD 分离、多模态、数据并行、分布式通信、MTP 与约束解码。共 37 篇，按依赖关系串成一条由浅入深、可逐步动手实践的路径。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与整体认知",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "LightLLM 项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LightLLM 是什么、解决什么问题、技术特色与生态定位。",
+          "learning_goals": [
+            "理解 LightLLM 作为 LLM 推理服务框架的定位与核心卖点（轻量、易扩展、高性能）",
+            "了解其 token 级 KV Cache 管理、多进程架构等设计思想",
+            "认识项目背后的论文、生态与参考实现"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "项目说明",
+            "版本与依赖"
+          ],
+          "practice_task": "阅读 README 并用一段话总结 LightLLM 与 vLLM/TGI 的差异，列出它最核心的三个技术特色。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境安装与快速启动",
+          "order": 2,
+          "filename": "u1-l2-install-and-quickstart.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 LightLLM 依赖并以最简命令启动一个推理服务。",
+          "learning_goals": [
+            "掌握 LightLLM 的安装方式与运行环境要求",
+            "学会用一行命令加载模型并启动 HTTP 服务",
+            "知道如何向启动后的服务发送推理请求验证可用性"
+          ],
+          "source_files": [
+            "docs/EN/source/getting_started/installation.rst",
+            "docs/EN/source/getting_started/quickstart.rst",
+            "requirements.txt"
+          ],
+          "minimal_modules": [
+            "安装",
+            "快速启动",
+            "依赖列表"
+          ],
+          "practice_task": "在本地或容器中安装 LightLLM，加载一个小模型（如 llama）启动服务，并用 curl 发送一次 /generate 请求得到输出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码组织",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库顶层与 lightllm 包内的目录划分，建立代码地图。",
+          "learning_goals": [
+            "理解仓库顶层目录（lightllm、docs、test、demos、docker 等）的作用",
+            "掌握 lightllm 包内 server/common/models/distributed/utils 各模块职责",
+            "能够快速定位某类功能对应的源码位置"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py",
+            "lightllm/__init__.py"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "包组织"
+          ],
+          "practice_task": "画出 lightllm/server 与 lightllm/common 的二级目录树，并标注每个子目录负责的职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "服务启动入口与命令行参数",
+          "order": 4,
+          "filename": "u1-l4-entry-and-cli-args.md",
+          "level": "beginner",
+          "topic": "从 api_server.py 入口和 api_cli.py 参数解析理解如何启动与配置服务。",
+          "learning_goals": [
+            "掌握 python -m lightllm.server.api_server 的入口流程",
+            "理解 run_mode（normal/prefill/decode/pd_master 等）的不同启动形态",
+            "认识关键命令行参数（tp、dp、model_dir、port 等）"
+          ],
+          "source_files": [
+            "lightllm/server/api_server.py",
+            "lightllm/server/api_cli.py"
+          ],
+          "minimal_modules": [
+            "入口文件",
+            "命令行参数解析"
+          ],
+          "practice_task": "运行 api_server 的 --help 列出全部参数，挑出 run_mode、tp、dp、max_total_token_num、port 五个参数说明其作用并尝试不同 run_mode 启动。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "多进程编排启动流程",
+          "order": 5,
+          "filename": "u1-l5-process-orchestration.md",
+          "level": "beginner",
+          "topic": "讲解 api_start.py 如何按 run_mode 编排并拉起各个子进程模块。",
+          "learning_goals": [
+            "理解 normal_or_p_d_start 中如何依次启动 router、detokenization、metric、visual 等子进程",
+            "认识端口分配、共享内存 id、信号处理等启动期准备工作",
+            "理解 http 服务（hypercorn）与各子进程的拉起关系"
+          ],
+          "source_files": [
+            "lightllm/server/api_start.py"
+          ],
+          "minimal_modules": [
+            "启动编排",
+            "端口分配",
+            "信号处理"
+          ],
+          "practice_task": "在 api_start.py 中追踪 normal 模式下被拉起的进程列表，写一份「进程→职责→通信端口」对照表。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "多进程架构与请求链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "多进程架构总览",
+          "order": 1,
+          "filename": "u2-l1-architecture-overview.md",
+          "level": "intermediate",
+          "topic": "用官方架构图与源码串联 HttpServer/Router/ModelBackend/Metric 等模块及其通信方式。",
+          "learning_goals": [
+            "理解 LightLLM 以 zmq+rpyc+共享内存协作的多进程架构",
+            "掌握各进程模块的职责边界",
+            "建立请求在进程间流转的整体认知"
+          ],
+          "source_files": [
+            "docs/EN/source/framework/framework.rst",
+            "lightllm/server/api_start.py"
+          ],
+          "minimal_modules": [
+            "架构总览",
+            "进程职责",
+            "进程间通信"
+          ],
+          "practice_task": "依据 framework.rst 绘制一张多进程数据流图，标注一次推理请求经过的进程与通信通道（zmq 端口/rpyc）。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "HTTP API 服务与请求分发",
+          "order": 2,
+          "filename": "u2-l2-http-api-and-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 api_http.py 的路由端点与 HttpServerManager 如何接收并分发请求。",
+          "learning_goals": [
+            "掌握 /generate、/v1/chat/completions 等端点的处理逻辑",
+            "理解 HttpServerManager 如何将请求 tokenize 并发送到 router/visual",
+            "认识生成结果如何通过 zmq 回流到 http server"
+          ],
+          "source_files": [
+            "lightllm/server/api_http.py",
+            "lightllm/server/httpserver/manager.py"
+          ],
+          "minimal_modules": [
+            "HTTP 路由",
+            "请求分发",
+            "结果回流"
+          ],
+          "practice_task": "在 api_http.py 中找出 generate 与 chat_completions 两个端点的处理函数，并跟踪一次请求从进入到 send_to_router 的完整代码路径。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "请求对象与共享内存通信",
+          "order": 3,
+          "filename": "u2-l3-req-and-shm-ipc.md",
+          "level": "intermediate",
+          "topic": "讲解 Req 数据结构与基于共享内存的跨进程对象传递机制。",
+          "learning_goals": [
+            "理解 Req（ctypes Structure）的字段与生命周期状态",
+            "掌握 ShmReqManager/ShmObjsIOBuffer 如何在 router 与 model 进程间传对象",
+            "认识 FinishStatus、prefix token 等关键结构"
+          ],
+          "source_files": [
+            "lightllm/server/core/objs/req.py",
+            "lightllm/server/core/objs/shm_objs_io_buffer.py",
+            "lightllm/server/core/objs/shm_req_manager.py"
+          ],
+          "minimal_modules": [
+            "请求对象",
+            "共享内存",
+            "进程间通信"
+          ],
+          "practice_task": "列出 Req 结构中与调度和 KV 管理相关的关键字段，并解释 ShmObjsIOBuffer 的 write_obj/set_ready 机制如何避免拷贝大对象。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Model Backend 推理后端与 RPC",
+          "order": 4,
+          "filename": "u2-l4-model-backend-and-rpc.md",
+          "level": "intermediate",
+          "topic": "讲解每个 GPU 上 ModelRpcServer/Client 与 ModeBackend 的职责与交互。",
+          "learning_goals": [
+            "理解每个设备一个 ModelRpcServer 进程的 rpyc 服务模型",
+            "掌握 ModeBackend 的 init_model/prefill_batch/decode_batch 接口",
+            "认识 router 与 model backend 之间通过 rpyc+共享内存的调用方式"
+          ],
+          "source_files": [
+            "lightllm/server/router/model_infer/model_rpc.py",
+            "lightllm/server/router/model_infer/mode_backend/base_backend.py",
+            "lightllm/server/router/model_infer/infer_batch.py"
+          ],
+          "minimal_modules": [
+            "RPC 服务",
+            "推理后端",
+            "批推理接口"
+          ],
+          "practice_task": "在 model_rpc.py 中说明 ModelRpcClient 如何把 router 的调用异步化包装，并解释 base_backend.py 中 infer_loop 的主循环做了哪些事。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Router 调度循环",
+          "order": 5,
+          "filename": "u2-l5-router-scheduling-loop.md",
+          "level": "intermediate",
+          "topic": "深入 RouterManager 的 loop_for_fwd/_step 调度主循环。",
+          "learning_goals": [
+            "理解 router 以固定时间间隔（默认 30ms）驱动的事件循环",
+            "掌握 _step 中接收新请求、生成新 batch、处理中止/停止串的逻辑",
+            "认识激进调度与保守调度的区别（router_token_ratio）"
+          ],
+          "source_files": [
+            "lightllm/server/router/manager.py",
+            "lightllm/server/router/batch.py"
+          ],
+          "minimal_modules": [
+            "调度循环",
+            "事件处理",
+            "批管理"
+          ],
+          "practice_task": "在 manager.py 中标注 _step 的处理顺序，并说明 schedule_new_batch、running_batch、req_queue 三者在新请求进入推理时的协同关系。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "请求队列与 chunked prefill 调度",
+          "order": 6,
+          "filename": "u2-l6-reqqueue-chunked-prefill.md",
+          "level": "intermediate",
+          "topic": "讲解请求队列的抽象与 chunked prefill 调度算法。",
+          "learning_goals": [
+            "理解 BaseQueue/ChunkedPrefillQueue 的抽象设计",
+            "掌握 generate_new_batch 如何决定本轮 prefill 哪些请求及 token 数",
+            "认识 _can_add_new_req、token load 估算对调度的影响"
+          ],
+          "source_files": [
+            "lightllm/server/router/req_queue/chunked_prefill/impl.py",
+            "lightllm/server/router/req_queue/base_queue.py",
+            "lightllm/server/router/req_queue/__init__.py"
+          ],
+          "minimal_modules": [
+            "请求队列",
+            "chunked prefill",
+            "调度算法"
+          ],
+          "practice_task": "阅读 ChunkedPrefillQueue.generate_new_batch，描述它如何根据当前 batch 是否为空选择不同的 token 负载计算策略。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "Detokenization 与流式输出",
+          "order": 7,
+          "filename": "u2-l7-detokenization-streaming.md",
+          "level": "intermediate",
+          "topic": "讲解反 token 化进程如何把生成 token 转为文本并流式推送给 http server。",
+          "learning_goals": [
+            "理解 DeTokenizationManager 接收 router 推送的 token 并解码",
+            "掌握解码增量（避免重复输出前缀）与流式 PUB 给 httpserver 的机制",
+            "认识与 tokenizer、特殊 token 处理的关系"
+          ],
+          "source_files": [
+            "lightllm/server/detokenization/manager.py",
+            "lightllm/server/detokenization/decode.py",
+            "lightllm/server/tokenizer.py"
+          ],
+          "minimal_modules": [
+            "反 token 化",
+            "增量解码",
+            "流式推送"
+          ],
+          "practice_task": "说明 detokenization 进程如何通过 decode_mode_fix 实现增量文本输出，并解释它向 http_server_port 的 zmq PUB 订阅关系。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模型推理内核",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "TpPartBaseModel 推理框架",
+          "order": 1,
+          "filename": "u3-l1-tp-part-base-model.md",
+          "level": "intermediate",
+          "topic": "讲解所有模型基类 TpPartBaseModel 的初始化与组件组装方式。",
+          "learning_goals": [
+            "理解 TpPartBaseModel 如何组合 weights/layer_infer/mem_manager/att_backend",
+            "掌握 _init_config/_init_weights/_init_mem_manager 等初始化顺序",
+            "认识 infer_state、req_manager 等核心组件"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/basemodel.py",
+            "lightllm/common/basemodel/infer_struct.py"
+          ],
+          "minimal_modules": [
+            "模型基类",
+            "组件初始化",
+            "推理状态"
+          ],
+          "practice_task": "在 basemodel.py 的 __init__ 中梳理 TpPartBaseModel 的初始化步骤，列出各 _init_* 方法的调用顺序与职责。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "prefill 与 decode 推理主流程",
+          "order": 2,
+          "filename": "u3-l2-prefill-decode-flow.md",
+          "level": "intermediate",
+          "topic": "深入 _prefill/_decode/_context_forward/_token_forward 的推理执行流程。",
+          "learning_goals": [
+            "理解 prefill（context）与 decode（token）两阶段的差异",
+            "掌握 ModelInput→InferState→ModelOutput 的数据流",
+            "认识 padding/动态 batch 处理与 cuda graph 入口"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/basemodel.py",
+            "lightllm/common/basemodel/batch_objs.py"
+          ],
+          "minimal_modules": [
+            "prefill 流程",
+            "decode 流程",
+            "输入输出结构"
+          ],
+          "practice_task": "对比 _prefill 与 _decode 两个方法，说明它们在创建 infer_state、调用 layer 推理、采样上的不同，并解释 _context_forward 与 _token_forward 的分工。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "推理层模板与层推理",
+          "order": 3,
+          "filename": "u3-l3-layer-infer-template.md",
+          "level": "intermediate",
+          "topic": "讲解 Pre/Transformer/Post 三类推理层及其模板实现。",
+          "learning_goals": [
+            "理解 embedding 层、transformer 层、logits 后处理层的推理职责",
+            "掌握模板类如何用 context_forward/token_forward 统一 prefill 与 decode",
+            "认识 attention kernel 与 ffn 的组合方式"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py",
+            "lightllm/common/basemodel/layer_infer/template/pre_layer_infer_template.py",
+            "lightllm/common/basemodel/layer_infer/template/post_layer_infer_template.py",
+            "lightllm/common/basemodel/layer_infer/transformer_layer_infer.py"
+          ],
+          "minimal_modules": [
+            "推理层模板",
+            "上下文/token 前向",
+            "注意力与 FFN"
+          ],
+          "practice_task": "以 transformer_layer_infer_template 为例，说明 context_forward 与 token_attention_forward 如何分别服务 prefill 和 decode，并指出子类需要覆写哪些钩子方法。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "权重加载与张量并行切分",
+          "order": 4,
+          "filename": "u3-l4-weights-and-tp-split.md",
+          "level": "intermediate",
+          "topic": "讲解权重基类如何从 HF 格式加载并按 tp 切分。",
+          "learning_goals": [
+            "理解 PreAndPostLayerWeight 与 TransformerLayerWeight 的职责",
+            "掌握 hf_load_utils 的权重映射与命名处理",
+            "认识按 tp 切分 qkv/o、ffn 权重的方式"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/layer_weights/transformer_layer_weight.py",
+            "lightllm/common/basemodel/layer_weights/pre_and_post_layer_weight.py",
+            "lightllm/common/basemodel/layer_weights/hf_load_utils.py"
+          ],
+          "minimal_modules": [
+            "权重基类",
+            "HF 权重加载",
+            "张量并行切分"
+          ],
+          "practice_task": "选择一个权重（如 qkv 或 o_proj），说明它在加载后被如何按 tp 维度切分到不同 rank，并指出 verify/load 流程中的关键校验。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "注意力后端机制",
+          "order": 5,
+          "filename": "u3-l5-attention-backends.md",
+          "level": "intermediate",
+          "topic": "讲解多种注意力后端（fa3/flashinfer/triton/nsa）的选择与抽象。",
+          "learning_goals": [
+            "理解 BaseAttBackend 的 prefill/decode 状态抽象",
+            "掌握 get_prefill/decode_att_backend_class 的优先级自动选择",
+            "认识不同后端的适用场景与 MLA/NSA 变体"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/attention/create_utils.py",
+            "lightllm/common/basemodel/attention/base_att.py"
+          ],
+          "minimal_modules": [
+            "注意力后端抽象",
+            "后端选择",
+            "prefill/decode 状态"
+          ],
+          "practice_task": "说明 create_utils.py 如何根据优先级列表和数据类型自动选择 prefill/decode 后端，并解释 base_att.py 中 AttControl 的作用。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "采样与后处理",
+          "order": 6,
+          "filename": "u3-l6-sampling-postprocess.md",
+          "level": "intermediate",
+          "topic": "讲解 top-k/top-p 采样、惩罚项与随机采样实现。",
+          "learning_goals": [
+            "理解 sample 函数如何对 logits 应用惩罚并采样",
+            "掌握 _top_p_top_k 与 _random_sample 的实现",
+            "认识 apply_penalty 等 triton kernel 的作用"
+          ],
+          "source_files": [
+            "lightllm/server/router/model_infer/mode_backend/generic_post_process.py",
+            "lightllm/common/basemodel/triton_kernel/post_process/apply_penalty.py",
+            "lightllm/common/basemodel/triton_kernel/gen_sampling_params.py"
+          ],
+          "minimal_modules": [
+            "采样",
+            "top-k/top-p",
+            "惩罚项"
+          ],
+          "practice_task": "在 generic_post_process.py 中追踪一次采样的完整流程，说明 penalty 如何作用到 logits，以及 top_p/top_k 采样的执行顺序。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "KV 缓存与前缀缓存",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "KV Cache 内存管理",
+          "order": 1,
+          "filename": "u4-l1-kv-cache-memory-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 MemoryManager 与分配器如何管理 token 级 KV Cache。",
+          "learning_goals": [
+            "理解 MemoryManager 维护的 KV buffer 形状与层结构",
+            "掌握 KvCacheAllocator 的 alloc/free/free_all 分配策略",
+            "认识 profile_size 如何根据 mem_fraction 确定可缓存 token 数"
+          ],
+          "source_files": [
+            "lightllm/common/kv_cache_mem_manager/mem_manager.py",
+            "lightllm/common/kv_cache_mem_manager/allocator.py"
+          ],
+          "minimal_modules": [
+            "内存管理器",
+            "KV 分配器",
+            "容量估算"
+          ],
+          "practice_task": "说明 MemoryManager 如何在 alloc 时返回索引张量、free 时回收，并解释 profile_size 与 mem_fraction 如何决定 max_total_token_num。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "RadixCache 前缀缓存机制",
+          "order": 2,
+          "filename": "u4-l2-radix-prefix-cache.md",
+          "level": "intermediate",
+          "topic": "深入 RadixCache 的树结构、前缀匹配与淘汰机制。",
+          "learning_goals": [
+            "理解 TreeNode 与 token 序列构成的基数树结构",
+            "掌握 match_prefix 复用历史 KV、insert 写入新 KV 的流程",
+            "认识引用计数与 evict 淘汰策略"
+          ],
+          "source_files": [
+            "lightllm/server/router/dynamic_prompt/radix_cache.py"
+          ],
+          "minimal_modules": [
+            "基数树",
+            "前缀匹配",
+            "引用计数与淘汰"
+          ],
+          "practice_task": "解释 RadixCache 如何在一次 prefill 中通过 match_prefix 复用已有 KV，并说明 ref counter 与 evict 如何决定哪些节点被回收。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Token 负载估算与调度配额",
+          "order": 3,
+          "filename": "u4-l3-token-load-and-quota.md",
+          "level": "intermediate",
+          "topic": "讲解 TokenLoad 与 RouterStatics 如何为调度提供负载依据。",
+          "learning_goals": [
+            "理解 estimated_peak_token_count、current_load 等负载指标含义",
+            "掌握共享内存中 token_load 如何被 router 与 httpserver 共享",
+            "认识负载估算对是否能加入新请求的判断作用"
+          ],
+          "source_files": [
+            "lightllm/server/router/token_load.py",
+            "lightllm/server/router/stats.py",
+            "lightllm/server/router/dynamic_prompt/shared_arr.py"
+          ],
+          "minimal_modules": [
+            "Token 负载",
+            "统计",
+            "共享数组"
+          ],
+          "practice_task": "说明 TokenLoad 中的 logical_max_load 与 dynamic_max_load 区别，并解释这些共享值如何影响 chunked prefill 能否加入新请求。",
+          "depends_on": [
+            "u2-l6",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "模型适配实践",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "模型注册机制",
+          "order": 1,
+          "filename": "u5-l1-model-registry.md",
+          "level": "intermediate",
+          "topic": "讲解模型如何通过装饰器注册并按 config 条件被选中。",
+          "learning_goals": [
+            "理解 _ModelRegistries 的注册装饰器与 ModelConfig",
+            "掌握 get_model 如何依据 config.json 条件匹配模型类",
+            "认识 condition/is_multimodal 等注册属性"
+          ],
+          "source_files": [
+            "lightllm/models/registry.py",
+            "lightllm/models/__init__.py"
+          ],
+          "minimal_modules": [
+            "注册装饰器",
+            "模型匹配",
+            "条件分发"
+          ],
+          "practice_task": "阅读 registry.py，描述一个新模型类需要怎样写装饰器才能被注册，并解释 get_model 在多个匹配时的冲突处理逻辑。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "以 Llama 为例理解完整模型实现",
+          "order": 2,
+          "filename": "u5-l2-llama-model-walkthrough.md",
+          "level": "intermediate",
+          "topic": "以 llama 模型为范例，串起 model/layer_infer/layer_weights 的完整实现。",
+          "learning_goals": [
+            "理解 LlamaTpPartModel 如何继承基类并指定各组件类",
+            "掌握 rotary embedding 的多种初始化方式",
+            "认识一个完整模型由哪些文件协作构成"
+          ],
+          "source_files": [
+            "lightllm/models/llama/model.py",
+            "lightllm/models/llama/layer_infer/transformer_layer_infer.py",
+            "lightllm/models/llama/layer_weights/transformer_layer_weight.py",
+            "lightllm/models/llama/infer_struct.py"
+          ],
+          "minimal_modules": [
+            "Llama 模型",
+            "层推理",
+            "权重"
+          ],
+          "practice_task": "梳理 llama 模型的组成文件，说明 LlamaTpPartModel 指定的 pre/post/transformer 推理类与权重类分别来自哪里，并指出 rotary 的初始化分支。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "如何新增模型支持",
+          "order": 3,
+          "filename": "u5-l3-add-new-model.md",
+          "level": "intermediate",
+          "topic": "依据官方 add_new_model 指南，实践新增一个模型的支持流程。",
+          "learning_goals": [
+            "掌握新增模型需要实现的 weight/infer 三件套",
+            "理解如何利用 template 减少重复代码",
+            "认识注册、配置校验、单元测试的完整闭环"
+          ],
+          "source_files": [
+            "docs/EN/source/models/add_new_model.md",
+            "lightllm/models/llama/model.py",
+            "lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py"
+          ],
+          "minimal_modules": [
+            "新增模型流程",
+            "模板复用",
+            "注册与校验"
+          ],
+          "practice_task": "参照指南，为一个结构类似 llama 的新模型列出需要新建的文件与需要继承的基类/模板，写出最小骨架代码（不必可运行）。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "MoE 模型推理",
+          "order": 4,
+          "filename": "u5-l4-moe-model-infer.md",
+          "level": "intermediate",
+          "topic": "讲解 Mixtral/Deepseek 等 MoE 模型的专家路由与融合算子。",
+          "learning_goals": [
+            "理解 MoE 层的专家选择（top-k gating）与权重加载",
+            "掌握 fused_moe triton kernel 的作用",
+            "认识 MoE 与普通 FFN 层推理的差异"
+          ],
+          "source_files": [
+            "lightllm/models/mixtral/model.py",
+            "lightllm/models/deepseek2/model.py",
+            "lightllm/common/basemodel/triton_kernel/fused_moe"
+          ],
+          "minimal_modules": [
+            "MoE 推理",
+            "专家路由",
+            "fused_moe 算子"
+          ],
+          "practice_task": "对比 mixtral 与 llama 的 transformer 层推理，说明 MoE 层如何替换普通 FFN，并指出 fused_moe 目录下算子承担的计算。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "MLA 注意力实现",
+          "order": 5,
+          "filename": "u5-l5-mla-attention.md",
+          "level": "intermediate",
+          "topic": "讲解 Deepseek 的多头潜变量注意力（MLA）及其 KV 压缩。",
+          "learning_goals": [
+            "理解 MLA 相对标准 MHA 的 KV 压缩思想",
+            "掌握 deepseek2 中 MLA 相关推理与权重结构",
+            "认识 mla_att triton kernel 与权重解压"
+          ],
+          "source_files": [
+            "lightllm/models/deepseek2/model.py",
+            "lightllm/models/deepseek2/infer_struct.py",
+            "lightllm/common/basemodel/triton_kernel/mla_att"
+          ],
+          "minimal_modules": [
+            "MLA 注意力",
+            "KV 压缩",
+            "MLA 算子"
+          ],
+          "practice_task": "说明 MLA 如何用潜变量减少 KV cache 体积，并指出 deepseek2 模型中哪些文件/类负责 MLA 的吸收（weight absorption）逻辑。",
+          "depends_on": [
+            "u5-l4",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "性能优化",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "CUDA Graph 捕获与重放",
+          "order": 1,
+          "filename": "u6-l1-cuda-graph.md",
+          "level": "advanced",
+          "topic": "讲解 decode/prefill 阶段的 CUDA Graph 捕获与重放优化。",
+          "learning_goals": [
+            "理解 CudaGraph 的 capture/replay 机制与 batch size 对齐",
+            "掌握 decode cuda graph 与 prefill cuda graph 的差异",
+            "认识 can_run/find_closest_graph_batch_size 的选择策略"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/cuda_graph.py",
+            "lightllm/common/basemodel/prefill_cuda_graph.py"
+          ],
+          "minimal_modules": [
+            "CUDA Graph",
+            "捕获与重放",
+            "batch 对齐"
+          ],
+          "practice_task": "说明 CudaGraph 如何在 warmup 阶段对一组 batch size 捕获图，并在推理时用 find_closest_graph_batch_size 选择重放，解释其对 decode 延迟的意义。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "microbatch overlap 与 TPSP 混合并行",
+          "order": 2,
+          "filename": "u6-l2-microbatch-overlap-tpsp.md",
+          "level": "advanced",
+          "topic": "讲解 microbatch 重叠推理与 TP/SP 混合并行的性能优化。",
+          "learning_goals": [
+            "理解 microbatch_overlap_prefill/decode 如何重叠计算与通信",
+            "掌握 _overlap_tpsp_context/token_forward 的双流执行",
+            "认识 enable_tpsp_mix_mode 的触发条件与收益"
+          ],
+          "source_files": [
+            "lightllm/common/basemodel/basemodel.py"
+          ],
+          "minimal_modules": [
+            "microbatch 重叠",
+            "TPSP 混合",
+            "计算通信重叠"
+          ],
+          "practice_task": "在 basemodel.py 中对比 microbatch_overlap_prefill 与普通 _prefill，说明它如何用两个 infer_state 交错执行来隐藏延迟。",
+          "depends_on": [
+            "u3-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "FP8 KV Cache 量化",
+          "order": 3,
+          "filename": "u6-l3-fp8-kv-quant.md",
+          "level": "advanced",
+          "topic": "讲解 FP8 KV Cache 的 per-tensor/per-head 量化内存管理。",
+          "learning_goals": [
+            "理解 fp8kv_sph/fp8kv_spt 两种量化模式",
+            "掌握量化内存管理器如何替换默认 MemoryManager",
+            "认识校准配置（kv_quant_calibration_config_path）的作用"
+          ],
+          "source_files": [
+            "lightllm/common/kv_cache_mem_manager/fp8_static_per_tensor_quant_mem_manager.py",
+            "lightllm/common/kv_cache_mem_manager/fp8_static_per_head_quant_mem_manager.py",
+            "lightllm/common/kv_cache_mem_manager/operator"
+          ],
+          "minimal_modules": [
+            "FP8 量化",
+            "量化内存管理",
+            "校准配置"
+          ],
+          "practice_task": "说明 fp8kv 推理模式为何需要校准配置，并对比 per-tensor 与 per-head 量化在精度与显存上的取舍。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "多级 KV Cache（CPU/磁盘）",
+          "order": 4,
+          "filename": "u6-l4-multi-level-kv-cache.md",
+          "level": "advanced",
+          "topic": "讲解 GPU→CPU→磁盘的多级 KV Cache 卸载与回填。",
+          "learning_goals": [
+            "理解 multi_level_kv_cache 进程的职责与触发条件",
+            "掌握 cpu_cache_client/disk_cache_worker 的协作",
+            "认识 KV 在级间迁移对长上下文/大并发的意义"
+          ],
+          "source_files": [
+            "lightllm/server/multi_level_kv_cache/manager.py",
+            "lightllm/server/multi_level_kv_cache/cpu_cache_client.py",
+            "lightllm/server/multi_level_kv_cache/disk_cache_worker.py"
+          ],
+          "minimal_modules": [
+            "多级缓存",
+            "CPU/磁盘卸载",
+            "回填"
+          ],
+          "practice_task": "说明 enable_cpu_cache 启用后，被换出的 KV 如何落盘并在需要时回填到 GPU，并解释 manager 与 disk_cache_worker 的分工。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "分布式部署与扩展特性",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "PD 分离部署与 KV 迁移",
+          "order": 1,
+          "filename": "u7-l1-pd-disaggregation-kv-transfer.md",
+          "level": "advanced",
+          "topic": "讲解 prefill/decode 分离部署下的 KV 迁移与传输。",
+          "learning_goals": [
+            "理解 PD 分离架构中 prefill 与 decode 节点的角色",
+            "掌握 PDChunckedTransTask 等 IO 结构与 kv_transporter",
+            "认识 nccl/nixl 两种 KV 传输后端"
+          ],
+          "source_files": [
+            "lightllm/server/pd_io_struct.py",
+            "lightllm/common/kv_trans_kernel/kv_trans.py",
+            "lightllm/server/router/model_infer/mode_backend/pd/kv_transporter.py"
+          ],
+          "minimal_modules": [
+            "PD 分离",
+            "KV 迁移任务",
+            "传输后端"
+          ],
+          "practice_task": "说明 prefill 节点计算出的 KV 如何被切块并通过 PDChunckedTransTask 传给 decode 节点，并对比 nccl 与 nixl 后端的差异。",
+          "depends_on": [
+            "u2-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "多模态推理服务",
+          "order": 2,
+          "filename": "u7-l2-multimodal-serving.md",
+          "level": "advanced",
+          "topic": "讲解视觉/音频多模态服务的进程组织与嵌入缓存。",
+          "learning_goals": [
+            "理解 visualserver/audioserver 作为独立进程的职责",
+            "掌握 embed_cache 如何用 MD5 缓存多模态嵌入避免重复计算",
+            "认识多模态请求从 httpserver 到 visual 再到 router 的流转"
+          ],
+          "source_files": [
+            "lightllm/server/visualserver/manager.py",
+            "lightllm/server/embed_cache/manager.py",
+            "lightllm/server/multimodal_params.py"
+          ],
+          "minimal_modules": [
+            "多模态服务",
+            "视觉/音频进程",
+            "嵌入缓存"
+          ],
+          "practice_task": "描述一次图片+文本请求如何经 httpserver 分发到 visualserver 计算图像嵌入，再交由 router 推理，并说明 embed_cache 的命中机制。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "数据并行与负载均衡",
+          "order": 3,
+          "filename": "u7-l3-dp-and-load-balance.md",
+          "level": "advanced",
+          "topic": "讲解多 DP 组下的请求分发与负载均衡策略。",
+          "learning_goals": [
+            "理解 dp_base_queue 与 dp_balancer 的抽象",
+            "掌握 roundrobin 与基于负载（bs）两种均衡策略",
+            "认识 dp prompt cache fetch 等高级特性"
+          ],
+          "source_files": [
+            "lightllm/server/router/req_queue/dp_balancer/roundrobin.py",
+            "lightllm/server/router/req_queue/dp_balancer/bs.py",
+            "lightllm/server/router/req_queue/dp_base_queue.py"
+          ],
+          "minimal_modules": [
+            "数据并行",
+            "负载均衡",
+            "DP 队列"
+          ],
+          "practice_task": "对比 roundrobin 与 bs 两种均衡策略，说明它们如何根据各 DP 组的 token load 分配新请求，并指出 enable_dp_prefill_balance 的前置条件。",
+          "depends_on": [
+            "u2-l6",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "分布式通信与集合通信",
+          "order": 4,
+          "filename": "u7-l4-distributed-comm.md",
+          "level": "advanced",
+          "topic": "讲解 NCCL 封装与 all-reduce 等集合通信实现。",
+          "learning_goals": [
+            "理解 pynccl/pynccl_wrapper 如何封装 NCCL 通信域",
+            "掌握 all-reduce（flashinfer/symm_mem）的实现选择",
+            "认识通信在 TP/多机场景下的初始化与使用"
+          ],
+          "source_files": [
+            "lightllm/distributed/pynccl.py",
+            "lightllm/distributed/communication_op.py",
+            "lightllm/distributed/pynccl_wrapper.py"
+          ],
+          "minimal_modules": [
+            "NCCL 封装",
+            "集合通信",
+            "all-reduce"
+          ],
+          "practice_task": "说明 lightllm 如何为每个 rank 建立 NCCL 通信域，并解释 TP 下 all-reduce 在哪些算子之后被调用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "MTP 推测解码",
+          "order": 5,
+          "filename": "u7-l5-mtp-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "讲解 Multi-Token Prediction（MTP）推测解码的实现。",
+          "learning_goals": [
+            "理解 MTP draft 模型与主模型的协作方式",
+            "掌握 mtp_pre_process 的处理流程",
+            "认识 mtp_step、mtp_draft_model_dir 等参数的约束"
+          ],
+          "source_files": [
+            "lightllm/server/router/model_infer/mode_backend/mtp_pre_process.py",
+            "lightllm/models/deepseek_mtp/model.py",
+            "lightllm/common/basemodel/triton_kernel/mtp_utils.py"
+          ],
+          "minimal_modules": [
+            "MTP 推测解码",
+            "draft 模型",
+            "多 token 生成"
+          ],
+          "practice_task": "说明 MTP 模式下 draft 模型如何一次预测多个 token 并与主模型验证，并解释 mtp_mode/mtp_step 参数的校验关系（见 api_start.py）。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l6",
+          "title": "约束解码、推理解析与函数调用",
+          "order": 6,
+          "filename": "u7-l6-constrained-decoding-fc.md",
+          "level": "advanced",
+          "topic": "讲解结构化输出约束、推理内容解析与函数调用解析。",
+          "learning_goals": [
+            "理解 output_constraint_mode 提供的约束解码能力",
+            "掌握 reasoning_parser 对思考链的解析",
+            "认识 function_call_parser 对工具调用的解析与不同 parser 类型"
+          ],
+          "source_files": [
+            "lightllm/server/function_call_parser.py",
+            "lightllm/server/reasoning_parser.py",
+            "lightllm/server/build_prompt.py"
+          ],
+          "minimal_modules": [
+            "约束解码",
+            "推理解析",
+            "函数调用解析"
+          ],
+          "practice_task": "说明 function_call_parser 如何根据 tool_call_parser 类型把生成文本解析为工具调用，并指出推理（reasoning）内容如何被分离输出。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l7",
+          "title": "指标监控与健康检查",
+          "order": 7,
+          "filename": "u7-l7-metrics-health-monitor.md",
+          "level": "advanced",
+          "topic": "讲解 metric 与 health 监控进程的指标采集与暴露。",
+          "learning_goals": [
+            "理解 MetricManager/MetricClient 的指标收集与查询",
+            "掌握 batch_size、queue_size、token used ratio 等关键指标",
+            "认识 health_monitor 对系统可用性的监控"
+          ],
+          "source_files": [
+            "lightllm/server/metrics/manager.py",
+            "lightllm/server/metrics/metrics.py",
+            "lightllm/server/health_monitor/manager.py"
+          ],
+          "minimal_modules": [
+            "指标采集",
+            "指标查询",
+            "健康检查"
+          ],
+          "practice_task": "列出 router 通过 MetricClient 上报的几个关键 gauge（如 lightllm_batch_current_size），并说明它们如何通过 /metrics 端点暴露。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

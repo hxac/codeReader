@@ -1,0 +1,755 @@
+{
+  "project": "LLM2FPGA",
+  "head": "b6dc8abcc023e241016a1fe19564b0d5af0c25b4",
+  "rationale": "LLM2FPGA 的本质是一条「把 PyTorch 大模型经开源编译链降级到 FPGA 硬件」的流水线，因此学习顺序直接沿这条主线由浅入深展开。第一单元先讲清项目定位、仓库结构与可复现的 Nix 工具链，让读者能真正把环境跑起来；第二、三单元按真实数据流向，依次拆解 PyTorch 前端导出、torch-MLIR 降级、CIRCT 的 Linalg→CF→Handshake→HW→SystemVerilog 一长串 dialect 降级，这是整个项目最核心也最难的部分；第四单元插入仿真与黄金参考，验证「前端语义等价」这一关键工程约束；第五单元把生成的 SystemVerilog 经 Yosys+slang 综合成 RTLIL 并产出资源报告与（matmul 的）比特流；第六单元进入真实 TinyStories-1M 模型带来的专家级挑战——自测外壳自动生成、超大 Handshake 存储外部化、浮点原语近似、CIRCT 补丁栈，以及「比目标 FPGA 大约 141 倍」的瓶颈结论；最后第七单元讲如何注册新模型、CI 质量门禁与后续 Task 4/5/6 的资源优化路线，收束到二次开发。三层（入门/进阶/专家）对应读者从「能跑通」到「看懂降级链」再到「能扩展与优化」的成长路径。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位与可复现环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "LLM2FPGA 是什么：项目目标与所选技术路线",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LLM2FPGA 的目标：用完全开源的 EDA 工具链把开源大模型（从 TinyStories-1M 起步）跑到 FPGA 上，以及它为什么选择 PyTorch → torch-MLIR → CIRCT → SystemVerilog → Yosys 这条编译链路线。",
+          "learning_goals": [
+            "理解项目要解决的问题与「全开源工具链」这一核心约束",
+            "记住所选路线的五个阶段及其理由",
+            "了解项目的当前状态（TinyStories-1M 可降级但超出 FPGA 预算约 141 倍）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/project-plan_v2.md",
+            "deliverables/1c-selected_route.md"
+          ],
+          "minimal_modules": [
+            "项目动机与开源约束",
+            "PyTorch 到 Yosys 的总路线",
+            "当前阶段结论与风险"
+          ],
+          "practice_task": "阅读 README 与 1c-selected_route，用自己的话写一段不超过 200 字的说明，解释「为什么不能直接用 Vitis HLS」，并指出所选路线的三个风险。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与文档体系",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-and-docs.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录布局：src/ 模型、scripts/pipeline/ 降级脚本、rtl/ 与 fpga/ 硬件、sim/ 仿真、deliverables/ 与 docs/ 的 Org/Markdown 双格式文档，以及 git submodule 的作用。",
+          "learning_goals": [
+            "能说出每个顶层目录的职责",
+            "理解 .org 为权威源、.md 由 docs-md 生成的文档机制",
+            "识别 src/、scripts/、rtl/、sim/、nix/ 之间的分工"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitmodules",
+            "docs/project-plan_v2.md"
+          ],
+          "minimal_modules": [
+            "目录职责速览",
+            "Org 权威源与 Markdown 生成",
+            "deliverables/docs 的任务编号体系"
+          ],
+          "practice_task": "不借助工具，画出仓库的目录树（到二级），并标注 src/matmul.py、scripts/pipeline、rtl、sim、nix 各自属于流水线的哪一段。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Nix 与可复现工具链入门",
+          "order": 3,
+          "filename": "u1-l3-nix-reproducible-toolchain.md",
+          "level": "beginner",
+          "topic": "讲解 flake.nix 如何把 torch-MLIR、CIRCT、Yosys、yosys-slang、openXC7/nextpnr、Verilator 等一整套互相版本敏感的工具钉死并组合在一起，以及 devShell 的用法。",
+          "learning_goals": [
+            "理解为什么这个项目用 Nix flake 而不是 pip/conda",
+            "看懂 flake inputs 如何 pin 各上游工具版本（CIRCT 分支、LLVM pin、yosys-slang 等）",
+            "会用 nix develop 进入带全部工具的 shell"
+          ],
+          "source_files": [
+            "flake.nix"
+          ],
+          "minimal_modules": [
+            "flake inputs 与版本 pin",
+            "devShell 与工具集合",
+            "LLVM/torch-MLIR 的独立 pin 策略"
+          ],
+          "practice_task": "在 flake.nix 中找到「为什么 torch-MLIR 的 LLVM 要单独 pin」的注释，复述其原因；并列出 devShell 默认提供的 5 个关键工具。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "跑通第一个构建命令",
+          "order": 4,
+          "filename": "u1-l4-first-build-and-reproduce.md",
+          "level": "beginner",
+          "topic": "手把手复现 README 给出的 gate 命令 nix build .#tiny-stories-1m-baseline-float-selftest-all-memory-utilization，并解读 result/summary.txt 的关键字段与目标名 breakdown。",
+          "learning_goals": [
+            "能执行 nix build 并读懂构建产物结构",
+            "理解目标名 tiny-stories-1m / baseline-float / selftest / all-memory / utilization 各段含义",
+            "知道 clb_luts 是判断是否装得下的关键指标"
+          ],
+          "source_files": [
+            "README.md",
+            "deliverables/3e-tiny-stories-1m-resource-report.md",
+            "flake.nix"
+          ],
+          "minimal_modules": [
+            "nix build 与 result 符号链接",
+            "目标命名约定",
+            "summary.txt/summary.json/stat.json 三类产物"
+          ],
+          "practice_task": "执行 gate 命令构建，打开 result/summary.txt，记录 clb_luts 的 used 与 capacity，计算超配倍数，并说明为什么这不是一个 nextpnr 的 PnR 报告。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：PyTorch 前端与模型适配",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "模型与适配器契约",
+          "order": 1,
+          "filename": "u2-l1-models-and-adapters.md",
+          "level": "intermediate",
+          "topic": "讲解 src/matmul.py 这个最小核与两个适配器（matmul_adapter.py、TinyStories/model_adapter.py）如何通过统一的 build_model/example_inputs 接口向流水线暴露任意 PyTorch 模型。",
+          "learning_goals": [
+            "理解「模型本身」与「适配器」分离的设计",
+            "掌握适配器必须实现的 build_model(model_path) 与 example_inputs() 契约",
+            "对比最小 matmul 核与真实 TinyStories-1M 适配器的差异"
+          ],
+          "source_files": [
+            "src/matmul.py",
+            "src/matmul_adapter.py",
+            "TinyStories/model_adapter.py",
+            "sim/sim_utils.py"
+          ],
+          "minimal_modules": [
+            "MatmulModule 最小核",
+            "适配器接口契约",
+            "HuggingFace 模型加载与 export 选项"
+          ],
+          "practice_task": "仿照 matmul_adapter.py，为一个只做 torch.add(a,b) 的新模块写一个 adapter（实现 build_model 与 example_inputs），并说明 example_inputs 的形状为何必须与 build_model 的输入一致。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "compile-pytorch.py 与 torch.export",
+          "order": 2,
+          "filename": "u2-l2-compile-pytorch-torch-export.md",
+          "level": "intermediate",
+          "topic": "逐行讲解 scripts/compile-pytorch.py：如何动态加载适配器、用 torch.export.export 导出图、再用 torch_mlir.fx.export_and_import 把图转成 torch 方言 MLIR 文本。",
+          "learning_goals": [
+            "理解 torch.export.export(strict) 在这里的作用与 EXPORT_STRICT 的意义",
+            "掌握 export_and_import(output_type=\"torch\") 的产出",
+            "看清动态加载适配器的 sys.path 处理技巧"
+          ],
+          "source_files": [
+            "scripts/compile-pytorch.py",
+            "TinyStories/model_adapter.py"
+          ],
+          "minimal_modules": [
+            "动态加载适配器模块",
+            "torch.export.export 导出图",
+            "torch_mlir.fx.export_and_import 转 MLIR"
+          ],
+          "practice_task": "把 compile-pytorch.py 跑在 matmul 适配器上，截取输出的 torch 方言 MLIR 前 40 行，标出 module @main 与其中的 torch.aten.matmul 算子。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "torch-MLIR 前端降级：torch 方言到 Linalg",
+          "order": 3,
+          "filename": "u2-l3-torch-mlir-frontend-lowering.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/pipeline/torch_to_linalg.sh 如何用 torch-mlir-opt 把 torch 方言经 torch-function-to-torch-backend-pipeline 与 torch-backend-to-linalg-on-tensors-backend-pipeline 降到 Linalg-on-Tensors，以及 common.sh 的工具函数。",
+          "learning_goals": [
+            "理解 torch-MLIR 的两条 backend pipeline 各做什么",
+            "看懂 common.sh 里 require_file/require_executable/run_to_output 的复用模式",
+            "明白 shell 脚本如何包装单一工具+一组 pass"
+          ],
+          "source_files": [
+            "scripts/pipeline/torch_to_linalg.sh",
+            "scripts/pipeline/common.sh",
+            "nix/pipeline.nix"
+          ],
+          "minimal_modules": [
+            "torch-mlir-opt 两条降级 pipeline",
+            "Linalg-on-Tensors 中间表示",
+            "common.sh 脚手架"
+          ],
+          "practice_task": "对照 common.sh，解释 torch_to_linalg.sh 第 31-34 行每个 --pass 的作用；并说明为何这一阶段输出的是 tensor 上的 Linalg 而不是 buffer 上的。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：CIRCT 后端的 MLIR 降级链",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Linalg 到 CF：bufferize 与循环展开",
+          "order": 1,
+          "filename": "u3-l1-linalg-to-cf-bufferize.md",
+          "level": "intermediate",
+          "topic": "讲解 linalg_to_cf.sh：用 mlir-opt 做 one-shot bufferize、把 buffer 结果转出参、lower-deallocations，再把 Linalg 展开成循环、SCF 转 CF，得到控制流+memref 形式。",
+          "learning_goals": [
+            "理解 one-shot bufferize 与 bufferize-function-boundaries 的作用",
+            "看懂 buffer-results-to-out-params 为何对硬件接口关键",
+            "掌握 convert-linalg-to-loops + convert-scf-to-cf 的展开过程"
+          ],
+          "source_files": [
+            "scripts/pipeline/linalg_to_cf.sh",
+            "nix/pipeline.nix"
+          ],
+          "minimal_modules": [
+            "one-shot bufferize",
+            "出参化 buffer 结果",
+            "Linalg/SCF 到 CF 循环"
+          ],
+          "practice_task": "在 linalg_to_cf.sh 的 pass 序列里，标出哪些 pass 负责「从 tensor 变 buffer」、哪些负责「把张量运算变循环」，并预测去掉 buffer-results-to-out-params 会导致接口出现什么。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "CF 到 Handshake：弹性数据流降级",
+          "order": 2,
+          "filename": "u3-l2-cf-to-handshake-dataflow.md",
+          "level": "intermediate",
+          "topic": "讲解 cf_to_handshake.sh 的三段式：先用 flatten-memref + handshake-legalize-memrefs 把 memref 整理成 Handshake 可处理形式，再用 mlir-opt 把 SCF 归一成 CF，最后 lower-cf-to-handshake 并插入 buffer，得到弹性数据流图。",
+          "learning_goals": [
+            "理解 Handshake 弹性数据流（valid/ready）模型",
+            "看懂 flatten-memref 与 handshake-legalize-memrefs 的预处理",
+            "明白 handshake-insert-buffers 插入缓冲的意义与代价"
+          ],
+          "source_files": [
+            "scripts/pipeline/cf_to_handshake.sh",
+            "nix/pipeline.nix"
+          ],
+          "minimal_modules": [
+            "flatten-memref 与 memref 合法化",
+            "SCF 归一为 CF",
+            "lower-cf-to-handshake 与插缓冲"
+          ],
+          "practice_task": "解释 cf_to_handshake.sh 为什么需要先 flatten-memref 再 lower-cf-to-handshake；并结合 3e 报告说明 Handshake 方言带来的资源开销为什么是 Task 6 想替换的对象。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Handshake 到 HW 与 ESI 降级",
+          "order": 3,
+          "filename": "u3-l3-handshake-to-hw-esi.md",
+          "level": "intermediate",
+          "topic": "讲解 handshake_to_hs_ext.sh、hs_ext_to_hw0.sh、hw0_to_hw.sh、hw_to_hw_clean.sh 四个脚本：把 Handshake+外部存储降到 hs-ext，再 lower-handshake-to-hw，经 ESI 类型/端口/到 HW 的降级，最后做符号死代码消除得到干净的 HW dialect。",
+          "learning_goals": [
+            "理解 handshake-lower-extmem-to-hw 如何把外部存储暴露成硬件端口",
+            "掌握 ESI（lower-esi-types/ports/to-hw）在 Handshake→HW 中的桥梁作用",
+            "看清 hw_to_hw_clean 的符号 DCE 与 canonicalize/cse 清理"
+          ],
+          "source_files": [
+            "scripts/pipeline/handshake_to_hs_ext.sh",
+            "scripts/pipeline/hs_ext_to_hw0.sh",
+            "scripts/pipeline/hw0_to_hw.sh",
+            "scripts/pipeline/hw_to_hw_clean.sh"
+          ],
+          "minimal_modules": [
+            "extmem 到 HW 的外部存储",
+            "ESI 类型与端口降级",
+            "符号 DCE 与 canonicalize/cse"
+          ],
+          "practice_task": "为这四个脚本画一张数据流箭头图（hs-ext → hw0 → hw → hw-clean），并在每个箭头上标注 circt-opt 用到的关键 pass；说明 lower-handshake-to-hw 与 lower-esi-to-hw 的先后为什么不能颠倒。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "HW 到 SystemVerilog 导出与 FP extern 处理",
+          "order": 4,
+          "filename": "u3-l4-hw-to-systemverilog-export.md",
+          "level": "intermediate",
+          "topic": "讲解 hw_clean_to_sv.sh：lower-seq-* 与 lower-hw-to-sv 把 HW 降到 SV、export-split-verilog 拆分输出，并重点说明如何检测 hw.module.extern、用 ALLOW_HW_EXTERNS + FP_PRIMS_SV 为浮点 extern 提供实现。",
+          "learning_goals": [
+            "理解 seq/hw 到 SV 的最后降级 pass",
+            "掌握 extern 模块检测与「禁止裸 extern」的安全门",
+            "明白 FP extern 如何挂接到外部 SV 实现文件"
+          ],
+          "source_files": [
+            "scripts/pipeline/hw_clean_to_sv.sh",
+            "rtl/fp/circt_fp_primitives.sv"
+          ],
+          "minimal_modules": [
+            "seq/hw 到 SV 降级",
+            "export-split-verilog 拆分",
+            "FP extern 检测与挂接"
+          ],
+          "practice_task": "阅读 hw_clean_to_sv.sh，说明当 ALLOW_HW_EXTERNS 未设但输入含 extern 时会发生什么；并指出 FP_PRIMS_SV 缺失某个 extern 实现时的报错路径。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "nix/pipeline.nix：把降级链编排成可缓存派生",
+          "order": 5,
+          "filename": "u3-l5-pipeline-nix-orchestration.md",
+          "level": "intermediate",
+          "topic": "讲解 nix/pipeline.nix 如何把前面每个 shell 脚本包成 runCommand 派生，并用 mkPipeline 的惰性自引用把 torch→linalg→cf→handshake→hs-ext→hw0→hw→hw-clean→sv→il 串成一条可缓存的依赖链。",
+          "learning_goals": [
+            "理解 runCommand 如何包装每个降级脚本为派生",
+            "看懂 mkPipeline 中 let self = {...} 的惰性自引用技巧",
+            "明白 Nix 缓存如何让重跑不重复计算早期阶段"
+          ],
+          "source_files": [
+            "nix/pipeline.nix",
+            "nix/models.nix",
+            "scripts/pipeline/common.sh"
+          ],
+          "minimal_modules": [
+            "runCommand 包装降级脚本",
+            "mkPipeline 惰性自引用",
+            "registerModel 统一注册"
+          ],
+          "practice_task": "在 nix/pipeline.nix 中跟踪 matmul 模型从 torch 到 sv 的派生依赖链，列出每个阶段的派生名；并说明改了 linalg 阶段后，哪些阶段会重算、哪些不会。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：仿真与语义等价性验证",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "黄金参考与测试向量的生成",
+          "order": 1,
+          "filename": "u4-l1-golden-reference-and-vectors.md",
+          "level": "intermediate",
+          "topic": "讲解 sim/gen_tb_data.py 与 sim_utils.py 如何用真实 PyTorch matmul 跑固定 int32 向量得到 expected，再生成可直接 include 的 tb_data.sv（a_mem/b_mem/expected），作为仿真黄金参考。",
+          "learning_goals": [
+            "理解「PyTorch 是唯一真相源」的等价性策略",
+            "看懂 test_vectors.json 的形状/dtype 校验",
+            "掌握把 Python 张量结果写成 SV initial 块的技巧"
+          ],
+          "source_files": [
+            "sim/gen_tb_data.py",
+            "sim/sim_utils.py",
+            "sim/test_vectors.json",
+            "src/matmul.py"
+          ],
+          "minimal_modules": [
+            "PyTorch 黄金参考",
+            "test_vectors.json 校验",
+            "生成 tb_data.sv"
+          ],
+          "practice_task": "阅读 gen_tb_data.py，解释为什么它要校验 dtype=int32 与 shape=[16]；并说明 expected 这个值是如何由 PyTorch 计算出来的。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Verilator 仿真与波形捕获",
+          "order": 2,
+          "filename": "u4-l2-verilator-sim-and-waveform.md",
+          "level": "intermediate",
+          "topic": "讲解 sim/tb_main.sv 如何驱动 DUT、直接给内部 handshake memory 播种、在 in2_st0_valid 时比对 expected 并打印 PASS/FAIL，以及 flake.nix 里 matmulSvSim（--binary --timing）与 matmulSvWave（--trace，ENABLE_WAVES_VCD）两个派生。",
+          "learning_goals": [
+            "理解 testbench 如何与生成 RTL 的 valid/ready 接口握手",
+            "掌握直接给内部存储播种的层次化引用技巧",
+            "看懂 Verilator --timing 与 --trace 的用法与 VCD 输出"
+          ],
+          "source_files": [
+            "sim/tb_main.sv",
+            "flake.nix",
+            "sim/gen_tb_data.py"
+          ],
+          "minimal_modules": [
+            "valid/ready 握手驱动",
+            "内部存储层次化播种",
+            "Verilator 仿真与 VCD 波形"
+          ],
+          "practice_task": "对照 tb_main.sv 与 flake.nix 的 matmulSvSim 派生，说明 PASS 行的 expected 与 got 分别来自哪里；并解释 dut.handshake_memory0._handshake_memory_5[i] 这种引用为何可行。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：Yosys 综合与资源报告",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Yosys + slang 前端：SystemVerilog 到 RTLIL",
+          "order": 1,
+          "filename": "u5-l1-yosys-slang-frontend.md",
+          "level": "intermediate",
+          "topic": "讲解 sv_to_il.sh 与 yosys_common.sh：用 yosys-slang 插件以 read_slang 读 SystemVerilog，做 hierarchy -top main、stat、write_rtlil，并理解按文件 extern 模块 vs 全量读入两种模式及 OOM 处理。",
+          "learning_goals": [
+            "理解 yosys-slang 为何比原生 yosys 更适合 SystemVerilog",
+            "看懂 write_yosys_slang_script 对文件列表的分类与排序",
+            "掌握 run_yosys_script 对 exit 137/9（OOM）的识别与提示"
+          ],
+          "source_files": [
+            "scripts/pipeline/sv_to_il.sh",
+            "scripts/pipeline/yosys_common.sh"
+          ],
+          "minimal_modules": [
+            "yosys-slang 插件与 read_slang",
+            "文件分类与 extern 模式",
+            "stat 与 write_rtlil"
+          ],
+          "practice_task": "解释 YOSYS_SLANG_PER_FILE_EXTERNS=1 时为何要把 000_*、main.sv、其余文件分早中晚三批读入；并说明 run_yosys_script 如何区分正常失败与 OOM。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "matmul 端到端综合与比特流生成",
+          "order": 2,
+          "filename": "u5-l2-matmul-synth-and-bitstream.md",
+          "level": "intermediate",
+          "topic": "讲解 flake.nix 里 matmul 的完整后端：mkSynthJson（synth_xilinx 出 JSON）、mkXdc 合并约束、mkFasm（nextpnr-xilinx json→fasm）、mkBitstream（fasm2frames+xc7frames2bit 出 .bit），以及 matmul_selftest_top.sv 自测外壳。",
+          "learning_goals": [
+            "理解 openXC7/nextpnr 全开源比特流三段式 JSON→FASM→bit",
+            "看懂 mkXdc/mkFasm/mkBitstream 的依赖与所用工具",
+            "掌握 matmul_selftest_top 用 LED 上的 pass/fail 自测机制"
+          ],
+          "source_files": [
+            "flake.nix",
+            "fpga/rtl/matmul_selftest_top.sv",
+            "fpga/constraints/matmul_selftest.xdc"
+          ],
+          "minimal_modules": [
+            "synth_xilinx 到 JSON",
+            "nextpnr json→fasm",
+            "fasm2frames→bit 与 selftest 外壳"
+          ],
+          "practice_task": "在 flake.nix 中追踪 matmulSelftestBitstream 的派生链（json→xdc→fasm→bit），列出每步工具；并说明 matmul_selftest_top.sv 里 EXPECTED 是如何在综合期用函数算出的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "资源利用报告：从 JSON 到容量对比",
+          "order": 3,
+          "filename": "u5-l3-utilization-report.md",
+          "level": "intermediate",
+          "topic": "讲解 write_utilization_report.py 如何递归展开模块层次统计叶单元、把 LUT/FF/DSP/BRAM 归类求和，并与 flake.nix 里 fpgaCapacities（XC7K480T 容量）对比，产出 summary.txt/json 与 stat.json。",
+          "learning_goals": [
+            "理解 leaf_counts 的递归模块层次展开与 memo",
+            "看懂 LUT_RE、FF_TYPES、DSP/BRAM 类型集合的分类规则",
+            "掌握 slices 下界估计与各资源百分比的计算"
+          ],
+          "source_files": [
+            "scripts/pipeline/write_utilization_report.py",
+            "flake.nix"
+          ],
+          "minimal_modules": [
+            "递归叶单元统计",
+            "资源类型分类正则",
+            "容量对比与百分比"
+          ],
+          "practice_task": "读 write_utilization_report.py，说明 slices_lower_bound 为何取 ceil(luts/8) 与 ceil(ffs/8) 的较大值；并结合 fpgaCapacities 算出 XC7K480T 的 clb_luts 容量。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "分阶段 Yosys 综合与 targeted memory_map",
+          "order": 4,
+          "filename": "u5-l4-staged-synth-memory-map.md",
+          "level": "advanced",
+          "topic": "讲解 flake.nix 里 mkSynthJsonStages 的 9 个 stage 如何把 synth_xilinx 拆成 begin:prepare、coarse、opt、targeted memory_map、fine、map_cells、map_ffs、final 等可观察步骤，以及 filter_rtlil_modules.py 在 stage9 前剥离待确认模块的作用。",
+          "learning_goals": [
+            "理解为何把 synth_xilinx 拆成 -run 区间逐步执行",
+            "看懂 mkSynthStageMemoryMapIl 如何定位含 $mem 的模块做 memory_map",
+            "掌握 filter_rtlil_modules 按 \\<大写模块名 过滤的策略"
+          ],
+          "source_files": [
+            "flake.nix",
+            "scripts/pipeline/filter_rtlil_modules.py"
+          ],
+          "minimal_modules": [
+            "synth_xilinx 分阶段 -run",
+            "targeted memory_map",
+            "RTLIL 模块过滤"
+          ],
+          "practice_task": "对照 mkSynthJsonStages，写出 stage1 到 stage9 每个阶段对应的 synth_xilinx -run 区间或命令；并说明 stage4 的 memory_map 为什么要先 awk 找出含 cell $mem 的模块。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：TinyStories 实战与瓶颈分析",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "自测外壳的自动生成",
+          "order": 1,
+          "filename": "u6-l1-selftest-wrapper-autogen.md",
+          "level": "advanced",
+          "topic": "讲解 gen_tiny_stories_selftest_top.py 如何解析生成 main.sv 的端口、自动识别 start/done/load/store 通道、生成驱动这些 ESI 通道并带 pass/fail LED 的 tiny_stories_selftest_top.sv，并与手写版 tiny_stories_selftest_top.sv 对照。",
+          "learning_goals": [
+            "理解为何要按 main.sv 端口自动生成 wrapper 而非手写",
+            "看懂 choose_start/done/store/load 通道的启发式选择",
+            "掌握 load（带地址）与 store（带 done token）的握手指令生成"
+          ],
+          "source_files": [
+            "scripts/pipeline/gen_tiny_stories_selftest_top.py",
+            "rtl/tiny_stories_selftest_top.sv"
+          ],
+          "minimal_modules": [
+            "解析 main.sv 端口",
+            "ESI 通道启发式识别",
+            "生成 pass/fail 监控逻辑"
+          ],
+          "practice_task": "阅读 gen_tiny_stories_selftest_top.py，解释 choose_start_channel 为何选 in\\d+_valid 中编号最大的、而 choose_done_channel 选 out\\d+_valid 中编号最小的；并把生成的某段 load 驱动逻辑与手写 tiny_stories_selftest_top.sv 对照。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "外部化超大 Handshake 存储",
+          "order": 2,
+          "filename": "u6-l2-externalize-large-memories.md",
+          "level": "advanced",
+          "topic": "讲解 externalize_large_memories.py 如何扫描 RTLIL，挑出总位宽 ≥128kbit 的 \\handshake_memory_* 模块，生成 blackbox 脚本把它们当作外部存储候选，以及 flake.nix 里 mkExternalizedMemoryPlan/mkTinyStoriesSelftestBundle 如何编排这一 all-memory 流程。",
+          "learning_goals": [
+            "理解为什么要把超大存储 blackbox（板载 DDR 候选）",
+            "看懂 collect_selected_modules 按 module/memory 行扫描的解析",
+            "掌握 blackbox + setattr 标记的 Yosys 用法"
+          ],
+          "source_files": [
+            "scripts/pipeline/externalize_large_memories.py",
+            "flake.nix"
+          ],
+          "minimal_modules": [
+            "RTLIL 模块/存储扫描",
+            "128kbit 阈值筛选",
+            "blackbox 外部化与报告"
+          ],
+          "practice_task": "读 externalize_large_memories.py，说明它是如何用 MODULE_RE/MEMORY_RE 逐行解析出每个模块的 total_bits；并解释 mkTinyStoriesSelftestBundle 里 model-opt → externalize → shell 的三步顺序。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "浮点原语的定点近似实现",
+          "order": 3,
+          "filename": "u6-l3-fp-primitives-approximation.md",
+          "level": "advanced",
+          "topic": "讲解 rtl/fp/circt_fp_primitives.sv：CIRCT Handshake 把浮点算子降成 extern 后，这里用 f32/f64 解码到 Q16.16 定点、定点运算、再编码回 f32 的近似可综合实现，及其对模型精度与资源的影响。",
+          "learning_goals": [
+            "理解为何用定点近似而非真浮点 IP",
+            "看懂 f32_to_q16_16/f64_to_q16_16 的解码与缩放",
+            "掌握 sat32 饱和与定点表示的精度取舍"
+          ],
+          "source_files": [
+            "rtl/fp/circt_fp_primitives.sv",
+            "scripts/pipeline/hw_clean_to_sv.sh"
+          ],
+          "minimal_modules": [
+            "FP extern 的产生背景",
+            "Q16.16 解码/缩放/饱和",
+            "近似实现的精度代价"
+          ],
+          "practice_task": "读 circt_fp_primitives.sv 的 f32_to_q16_16，解释 shift = e - 23 + 16 的含义，并讨论这种 Q16.16 近似对 LLM 推理精度的潜在影响。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "CIRCT 补丁栈与瓶颈结论",
+          "order": 4,
+          "filename": "u6-l4-circt-patches-and-bottleneck.md",
+          "level": "advanced",
+          "topic": "讲解 patches/circt-task3-rfp/ 这组为让 TinyStories-1M 跑通 Handshake→HW 降级而打的 CIRCT 补丁（flatten memref、处理 CFG-threaded memrefs、float 算子降为 extern 等），并结合 3e 报告给出「超出 LUT 预算约 141 倍、nextpnr OOM」的瓶颈结论。",
+          "learning_goals": [
+            "理解上游工具不足时用补丁栈定制的工程方法",
+            "看懂补丁命名隐含的每类降级问题",
+            "掌握 3e 资源报告的核心数字与下一步方向"
+          ],
+          "source_files": [
+            "patches/circt-task3-rfp/0015-lower-float-ops-as-externs-in-handshake-to-hw.patch",
+            "patches/circt-task3-rfp/0003-flatten-memref-shape-ops.patch",
+            "deliverables/3e-tiny-stories-1m-resource-report.md",
+            "deliverables/1c-selected_route.md"
+          ],
+          "minimal_modules": [
+            "补丁栈定位与命名约定",
+            "float 算子降为 extern 的处理",
+            "141x 超配与 nextpnr OOM 结论"
+          ],
+          "practice_task": "浏览 patches/circt-task3-rfp/ 的文件名，归纳补丁要解决的 3 大类问题；并结合 3e 报告说明为什么下一步是 Task 6（资源最小化）而不是 Task 4（硬件集成）。",
+          "depends_on": [
+            "u6-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：扩展、质量门禁与后续路线",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "注册一个新模型进入流水线",
+          "order": 1,
+          "filename": "u7-l1-register-new-model.md",
+          "level": "advanced",
+          "topic": "以 nix/models.nix 的 registerModel 为核心，讲解从写 adapter、到在 models.nix 注册、到复用 pipeline.nix 全链派生的完整二次开发流程，以及 allowHwExterns/fpPrimsSv/slangPerFileExternModules 等开关的含义。",
+          "learning_goals": [
+            "掌握新增一个可降级模型的端到端步骤",
+            "理解 registerModel 的各可选参数与对应流水线开关",
+            "看清 models.nix 如何把 Python 环境、模型快照与派生绑定"
+          ],
+          "source_files": [
+            "nix/models.nix",
+            "nix/pipeline.nix",
+            "scripts/compile-pytorch.py"
+          ],
+          "minimal_modules": [
+            "adapter + 注册两步法",
+            "registerModel 选项开关",
+            "Python 环境与模型快照绑定"
+          ],
+          "practice_task": "参照 tiny-stories-1m-baseline-float 的注册，写一个新条目把一个更小的 HuggingFace 模型接入流水线（只需给出 nix 片段与 adapter 函数签名），并说明何时需要打开 allowHwExterns 与 fpPrimsSv。",
+          "depends_on": [
+            "u3-l5",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "CI 与代码质量门禁",
+          "order": 2,
+          "filename": "u7-l2-ci-and-quality-checks.md",
+          "level": "advanced",
+          "topic": "讲解 .github/workflows/ci.yml 用 nix flake check 触发 flake.nix 里定义的 checks（statix/deadnix/nixfmt、Python compile、verilator lint、shellcheck），以及 apps.docs-md 用 pandoc 把 .org 转 .md 的文档生成机制。",
+          "learning_goals": [
+            "理解 nix flake check 如何汇总所有 checks",
+            "看懂 Nix/Python/SystemVerilog/Shell 四类静态检查",
+            "掌握 docs-md 的 Org→Markdown 生成与权威源约定"
+          ],
+          "source_files": [
+            ".github/workflows/ci.yml",
+            "flake.nix",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "nix flake check 汇总",
+            "四语言静态 lint",
+            "docs-md 文档生成"
+          ],
+          "practice_task": "列出 flake.nix checks 里的四个检查名及其工具；并解释为什么 docs-md 只处理 README.org、deliverables/*.org、docs/*.org 而非所有文件。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "后续路线与资源优化方向",
+          "order": 3,
+          "filename": "u7-l3-roadmap-and-resource-optimization.md",
+          "level": "advanced",
+          "topic": "结合 docs/project-plan_v2.md 的 Task 4/5/6，讲解项目后续方向：FPGA 硬件集成验证、TinyStories 家族 scaling、以及资源最小化策略（更直接用板载内存、换掉 Handshake 方言、量化等），并回扣 3e 的瓶颈结论。",
+          "learning_goals": [
+            "理解 Task 4/5/6 的目标与依赖关系",
+            "掌握资源优化的候选方向及其权衡",
+            "能把当前 141x 超配结论与后续策略联系起来"
+          ],
+          "source_files": [
+            "docs/project-plan_v2.md",
+            "deliverables/3e-tiny-stories-1m-resource-report.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "Task 4/5/6 路线图",
+            "资源优化候选策略",
+            "瓶颈到策略的映射"
+          ],
+          "practice_task": "读 project-plan_v2.md 的 Task 6，列出至少 3 条资源优化策略并按「预期收益/实现难度」排序；并指出哪一条直接对应 3e 报告里提到的「换掉 Handshake 方言」。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

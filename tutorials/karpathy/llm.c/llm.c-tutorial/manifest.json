@@ -1,0 +1,970 @@
+{
+  "project": "llm.c",
+  "head": "f1e2ace651495b74ae22d45d1723443fd00ecd3a",
+  "rationale": "llm.c 的核心教学价值在于「用最朴素的 C 讲清楚 GPT-2 训练的每一步」，因此学习路线以根目录约 1180 行的 CPU fp32 参考实现 train_gpt2.c 为脊柱：先用 Unit 1 让读者从零跑起来并理解数据/词表/训练主循环，再用 Unit 2 逐层剖析前向（encoder、layernorm、matmul、attention、gelu/residual、softmax/crossentropy）并把前向组装成 gpt2_forward，Unit 3 接着讲反向组装、AdamW、采样生成与数值正确性测试。理解了 CPU 参考后，Unit 4 通过 PyTorch 参考实现 train_gpt2.py 做交叉对照，并讲解 .bin 权重协议与 GPU fp32 legacy 版作为过渡。Unit 5 进入 CUDA 主线 train_gpt2.cu 与 llmc/ 头文件库（精度宏、CUDA 工具层、cuBLASLt matmul、各层 kernel、attention 与 cuDNN flash attention）。Unit 6 覆盖训练工程的高级话题：混合精度与 master weights、重计算/融合算子/global_norm、学习率调度与 MFU、ZeRO 多 GPU、多节点。Unit 7 收束于 dev/cuda 内核库的性能对比、评测（hellaswag/mmlu）、剖析与二次开发/复现训练。单元由浅入深（beginner→advanced），讲义之间通过 depends_on 形成清晰的前置依赖链，每篇只解决一个相对独立的主题并配有可操作的代码实践。该仓库文件量大（train_gpt2.cu 1904 行、llmc/ 头文件合计约 4700 行、dev/cuda 内核库），因此拆成 32 篇讲义以保持每篇聚焦。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：从零认识并运行 llm.c",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位：llm.c 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 llm.c 的目标——用纯 C/CUDA 训练 GPT-2/GPT-3，以及 C 参考、CUDA 主线、PyTorch 参考三套实现的关系与目录结构。",
+          "learning_goals": [
+            "理解 llm.c 的项目定位与教育意义",
+            "区分 train_gpt2.c、train_gpt2.cu、train_gpt2.py 三套实现及其分工",
+            "掌握仓库根目录、dev/、llmc/、doc/、scripts/ 的职责"
+          ],
+          "source_files": [
+            "README.md",
+            "train_gpt2.c",
+            "train_gpt2.cu",
+            "train_gpt2.py"
+          ],
+          "minimal_modules": [
+            "项目目标与 GPT-2/GPT-3 复现定位",
+            "三套实现的分工与对照",
+            "仓库目录结构地图"
+          ],
+          "practice_task": "阅读 README 后，用一段话说明 CPU 版、CUDA 主线版、PyTorch 版三者各自适合什么场景，并列出根目录下每个 train_/test_ 文件对应的实现。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与三种运行方式",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "解读 Makefile 的自动探测机制（OpenMP、NCCL、MPI、cuDNN、精度），并跑通 CPU / GPU fp32 / 混合精度三条 quick start 路径。",
+          "learning_goals": [
+            "看懂 Makefile 如何自动探测编译环境",
+            "掌握 train_gpt2、train_gpt2fp32cu、train_gpt2cu 三个构建目标",
+            "理解 PRECISION、USE_CUDNN、GPU_COMPUTE_CAPABILITY 等关键变量"
+          ],
+          "source_files": [
+            "Makefile",
+            "README.md",
+            "dev/download_starter_pack.sh"
+          ],
+          "minimal_modules": [
+            "Makefile 目标与编译规则",
+            "OpenMP/NCCL/MPI/cuDNN 自动探测",
+            "精度与算力架构选项"
+          ],
+          "practice_task": "运行 ./dev/download_starter_pack.sh 下载 starter pack，执行 make train_gpt2 并用 OMP_NUM_THREADS 跑通 CPU 版前几步，记录打印出的 loss。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "CPU 参考实现全景与训练主循环",
+          "order": 3,
+          "filename": "u1-l3-cpu-reference-overview.md",
+          "level": "beginner",
+          "topic": "通览 train_gpt2.c 的结构：GPT2Config、ParameterTensors/ActivationTensors、从 checkpoint 构建、以及 main 中的训练-验证-生成主循环。",
+          "learning_goals": [
+            "理解 GPT2Config 与 16 个参数张量、23 个激活张量的内存布局",
+            "掌握 gpt2_build_from_checkpoint 如何分配并指参数指针",
+            "看懂 main 中验证/采样/训练步的调度"
+          ],
+          "source_files": [
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "GPT2Config 与参数/激活张量结构体",
+            "内存一次性 malloc 与指针排布",
+            "main 训练主循环"
+          ],
+          "practice_task": "在 train_gpt2.c 的 main 中定位前向-清零梯度-反向-更新的四行调用，解释为什么采样时把 gen_tokens 填成 eot_token 并逐 token 重新前向。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "数据管线：tokenized .bin、dataloader 与 tokenizer",
+          "order": 4,
+          "filename": "u1-l4-data-and-tokenizer.md",
+          "level": "beginner",
+          "topic": "讲解数据如何被下载分词存成 .bin（1024 字节头 + uint16 token 流），dataloader 如何切 batch、按进程分片，以及 GPT-2 BPE tokenizer 的加载与解码。",
+          "learning_goals": [
+            "理解 .bin 数据格式（header + uint16 tokens）",
+            "掌握 dataloader 的 B/T 切分与多进程分片",
+            "了解 tokenizer_init/decode 的作用"
+          ],
+          "source_files": [
+            "llmc/dataloader.h",
+            "llmc/tokenizer.h",
+            "dev/data/tinyshakespeare.py",
+            "dev/data/data_common.py"
+          ],
+          "minimal_modules": [
+            ".bin 文件格式与数据集脚本",
+            "DataLoader 初始化与 next_batch",
+            "Tokenizer 加载与解码"
+          ],
+          "practice_task": "运行 python dev/data/tinyshakespeare.py 生成 .bin，用 llmc/dataloader.h 的逻辑说明一个 batch 的 inputs/targets 如何错位一位形成下一个 token 预测目标。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "前向各层：从公式到 C 实现",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "编码层 encoder：token 与 position embedding",
+          "order": 1,
+          "filename": "u2-l1-encoder-layer.md",
+          "level": "beginner",
+          "topic": "讲解 encoder_forward 如何把 token id 查 wte、把位置查 wpe 并相加得到 (B,T,C) 的嵌入，以及反向如何把梯度累加回 wte/wpe。",
+          "learning_goals": [
+            "理解 token embedding 与 position embedding 的相加",
+            "掌握查表（gather）式的指针寻址",
+            "理解反向时用 += 累加梯度到 wte/wpe 的原因"
+          ],
+          "source_files": [
+            "train_gpt2.c",
+            "doc/layernorm/layernorm.c"
+          ],
+          "minimal_modules": [
+            "encoder_forward 的查表与相加",
+            "encoder_backward 的梯度累加",
+            "指针算术与 (B,T,C) 布局"
+          ],
+          "practice_task": "手写一个最小 C 程序：给定 wte(V,C)、wpe(maxT,C) 和一段 token id，输出对应位置的嵌入向量，验证等于 wte[ix]+wpe[t]。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "LayerNorm：均值、方差与 rstd",
+          "order": 2,
+          "filename": "u2-l2-layernorm-layer.md",
+          "level": "intermediate",
+          "topic": "对照 doc/layernorm 教程，讲解 layernorm_forward 计算 mean/var/rstd 并归一化、缩放、偏移，以及反向如何复用缓存的 mean/rstd。",
+          "learning_goals": [
+            "理解 LayerNorm 的数学定义与 pre-norm 位置",
+            "掌握 mean/var/rstd 的计算与缓存",
+            "推导并实现 layernorm_backward"
+          ],
+          "source_files": [
+            "train_gpt2.c",
+            "doc/layernorm/layernorm.md",
+            "doc/layernorm/layernorm.py",
+            "doc/layernorm/layernorm.c"
+          ],
+          "minimal_modules": [
+            "LayerNorm 的 PyTorch 手动实现对照",
+            "前向 mean/var/rstd 与缓存",
+            "反向梯度推导"
+          ],
+          "practice_task": "参照 doc/layernorm/layernorm.py 的手动实现，在纸上写出 layernorm_backward 中 dweight/dbias/dinp 的公式，并对照 train_gpt2.c 中的 C 代码确认一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "MatMul：朴素版与缓存分块版",
+          "order": 3,
+          "filename": "u2-l3-matmul-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 matmul_forward_naive 与带 cache-blocking 的 matmul_forward，以及 matmul_backward 如何对输入、权重、偏置求梯度。",
+          "learning_goals": [
+            "理解朴素三重循环矩阵乘的指针布局",
+            "掌握 cache-blocking（分块）带来的访存优化",
+            "实现 matmul_forward/backward"
+          ],
+          "source_files": [
+            "train_gpt2.c",
+            "dev/cpu/matmul_forward.c"
+          ],
+          "minimal_modules": [
+            "朴素 matmul 与指针寻址",
+            "cache blocking 版本",
+            "matmul_backward 三路梯度"
+          ],
+          "practice_task": "对比 train_gpt2.c 的 matmul_forward_naive 与带分块的版本，说明为什么分块后 cache 命中更好；再用 dev/cpu/matmul_forward.c 验证输出一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "因果自注意力 attention forward/backward",
+          "order": 4,
+          "filename": "u2-l4-attention-layer.md",
+          "level": "intermediate",
+          "topic": "讲解多头因果自注意力：QKV 投影、缩放点积、因果 mask 的 softmax、加权求和，以及对应反向传播。",
+          "learning_goals": [
+            "理解多头注意力的 Q/K/V 与 reshape",
+            "掌握因果 mask 与 softmax(preatt/att) 的关系",
+            "推导 attention_backward 对 qkv 的梯度"
+          ],
+          "source_files": [
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "QKV 投影与多头切分",
+            "因果 mask 的 preatt/att 与 softmax",
+            "attention 反向梯度"
+          ],
+          "practice_task": "在 train_gpt2.c 的 attention_forward 中标出哪些位置被因果 mask 置零，并解释 preatt 与 att 两个缓冲区分别保存什么、为什么反向都需要。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "GELU 与残差连接",
+          "order": 5,
+          "filename": "u2-l5-gelu-residual.md",
+          "level": "beginner",
+          "topic": "讲解 GELU 激活（精确版与 tanh 近似）的前向反向，以及残差连接的前向相加与反向把梯度直通两侧。",
+          "learning_goals": [
+            "理解 GELU 的精确与 tanh 近似公式",
+            "实现 gelu_forward/backward",
+            "理解 residual_forward/backward 的梯度分流"
+          ],
+          "source_files": [
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "GELU 前向与反向",
+            "残差相加前向",
+            "残差反向梯度分流"
+          ],
+          "practice_task": "用 tanh 近似公式实现 gelu_forward，验证在 x 取 -2,0,2 时与精确 GELU 的差异在可接受范围；并说明 residual_backward 为什么直接把 dout 复制到 dinp1 和 dinp2。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "Softmax、CrossEntropy 与融合反向",
+          "order": 6,
+          "filename": "u2-l6-softmax-crossentropy.md",
+          "level": "intermediate",
+          "topic": "讲解 logits 经 softmax 得 probs、交叉熵损失，以及 crossentropy_softmax_backward 把 dlogits 一步算出的融合技巧。",
+          "learning_goals": [
+            "理解数值稳定 softmax 的实现",
+            "掌握交叉熵损失与 mean_loss 的聚合",
+            "推导并实现融合的 crossentropy_softmax_backward"
+          ],
+          "source_files": [
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "数值稳定 softmax_forward",
+            "crossentropy_forward 损失",
+            "融合反向 dlogits"
+          ],
+          "practice_task": "推导 crossentropy_softmax_backward 中 dlogits = (probs - onehot)/N 的来源，并对照 train_gpt2.c 确认目标 token 处的梯度减一实现方式。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "前向组装：gpt2_forward 串起整个模型",
+          "order": 7,
+          "filename": "u2-l7-forward-assembly.md",
+          "level": "intermediate",
+          "topic": "讲解 gpt2_forward 如何按 pre-norm Transformer 块顺序调用各层：ln1→qkv→att→attproj→residual→ln2→fc→gelu→fcproj→residual→…→lnf→logits。",
+          "learning_goals": [
+            "把单个层组合成完整的 12 层 Transformer 前向",
+            "理解残差流与各层激活缓冲的层索引偏移",
+            "看懂 logits 与 mean_loss 的最终计算"
+          ],
+          "source_files": [
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "Transformer 块的前向顺序",
+            "残差流与层间激活寻址",
+            "最终 lnf 与 logits"
+          ],
+          "practice_task": "画出 train_gpt2.c 中一个 Transformer block 的前向数据流图（标出 residual 与每层输入输出），并指出 acts.residual2/residual3 的层索引 l 偏移如何计算。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3",
+            "u2-l4",
+            "u2-l5",
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "反向传播、优化与生成",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "反向组装：gpt2_backward",
+          "order": 1,
+          "filename": "u3-l1-backward-assembly.md",
+          "level": "intermediate",
+          "topic": "讲解 gpt2_backward 如何以与前向相反的顺序，从 dlogits 一路反传到 dwte/dwpe，复用各层 backward。",
+          "learning_goals": [
+            "理解反向传播与前向顺序的镜像关系",
+            "掌握残差梯度的合流与各层反向调用顺序",
+            "理解 gpt2_zero_grad 的作用"
+          ],
+          "source_files": [
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "反向顺序与残差合流",
+            "各层 backward 调用链",
+            "零梯度初始化"
+          ],
+          "practice_task": "对照 gpt2_forward 列出 gpt2_backward 的层调用逆序，说明为什么必须从 crossentropy_softmax_backward 开始、并以 encoder_backward 收尾。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "AdamW 优化器：gpt2_update",
+          "order": 2,
+          "filename": "u3-l2-adamw-optimizer.md",
+          "level": "intermediate",
+          "topic": "讲解 gpt2_update 如何维护一阶/二阶动量 m/v、偏差修正、更新参数并应用解耦权重衰减。",
+          "learning_goals": [
+            "理解 AdamW 与经典 Adam 的区别（解耦权重衰减）",
+            "掌握 m/v 动量更新与偏差修正",
+            "看懂 train_gpt2.c main 中传入的超参数"
+          ],
+          "source_files": [
+            "train_gpt2.c",
+            "llmc/adamw.cuh"
+          ],
+          "minimal_modules": [
+            "AdamW 更新公式",
+            "动量与偏差修正",
+            "解耦权重衰减"
+          ],
+          "practice_task": "把 train_gpt2.c main 中 gpt2_update 的超参数（lr=1e-4, beta1=0.9, beta2=0.999, eps=1e-8, wd=0）代入，手算第 1 步某个参数的更新量公式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "采样与自回归生成",
+          "order": 3,
+          "filename": "u3-l3-sampling-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 sample_mult 的多项分布采样、random_f32 的简单 RNG，以及 main 中逐 token 重新前向的自回归生成循环。",
+          "learning_goals": [
+            "理解多项采样与累计概率的实现",
+            "掌握简单 xorshift/线性同余 RNG",
+            "理解自回归生成为何每个 token 都要重算前向"
+          ],
+          "source_files": [
+            "train_gpt2.c",
+            "llmc/sampler.h",
+            "llmc/rand.h"
+          ],
+          "minimal_modules": [
+            "多项采样 sample_mult",
+            "随机数生成 random_f32",
+            "自回归生成循环"
+          ],
+          "practice_task": "说明 sample_mult 如何用一枚 [0,1) 的硬币落到累计概率区间来选 token；并解释生成时只取 probs[0,t-1,:] 的原因。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "数值正确性测试：对照 PyTorch debug state",
+          "order": 4,
+          "filename": "u3-l4-correctness-test.md",
+          "level": "intermediate",
+          "topic": "讲解 test_gpt2.c 如何加载 gpt2_124M_debug_state.bin，跑一次前向比对 logits/loss，再做 10 步训练比对每步 loss，打印 overall okay。",
+          "learning_goals": [
+            "理解 debug state 二进制的作用与来源",
+            "掌握前向 logits/loss 的逐元素容差比对",
+            "理解 10 步训练 loss 比对的回归测试思路"
+          ],
+          "source_files": [
+            "test_gpt2.c",
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "debug state 加载",
+            "前向 logits/loss 比对",
+            "训练步 loss 回归"
+          ],
+          "practice_task": "编译运行 make test_gpt2 && ./test_gpt2，确认打印 overall okay: 1；并说明若某步 loss 超过 1e-2 容差，测试如何判定失败。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "PyTorch 参考与二进制协议",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "PyTorch 参考实现 train_gpt2.py",
+          "order": 1,
+          "filename": "u4-l1-pytorch-reference.md",
+          "level": "intermediate",
+          "topic": "对照讲解 train_gpt2.py（nanoGPT 风格）的 GPTConfig、CausalSelfAttention/MLP/Block/GPT 模块、configure_optimizers 与训练循环，与 C 实现逐一对应。",
+          "learning_goals": [
+            "理解 PyTorch 参考与 C 实现的逐层对应",
+            "掌握 NewGELU/CausalSelfAttention/MLP/Block 的实现",
+            "理解 configure_optimizers 的分组权重衰减"
+          ],
+          "source_files": [
+            "train_gpt2.py",
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "GPTConfig 与 GPT 模块",
+            "注意力/MLP/Block 子模块",
+            "优化器配置与训练循环"
+          ],
+          "practice_task": "把 train_gpt2.py 的 CausalSelfAttention 与 train_gpt2.c 的 attention_forward/_backward 做一份逐行对照表，标注哪些是框架自动完成的（如 autograd）。",
+          "depends_on": [
+            "u2-l7",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "权重 .bin 二进制协议与 checkpoint",
+          "order": 2,
+          "filename": "u4-l2-binary-checkpoint-format.md",
+          "level": "intermediate",
+          "topic": "讲解 train_gpt2.py 的 write_model/write_state 如何把权重与 debug state 写成 .bin（版本号 + GPTConfig 头 + 张量流），以及 C 端 gpt2_build_from_checkpoint 的对称读取与词表对齐填充。",
+          "learning_goals": [
+            "理解 .bin 文件头（版本、config、填充到 1024 字节）",
+            "掌握 write_model 的张量写入顺序与 fp32/bf16 选择",
+            "理解 padded_vocab_size 的 128 对齐"
+          ],
+          "source_files": [
+            "train_gpt2.py",
+            "train_gpt2.c",
+            "llmc/tokenizer.h"
+          ],
+          "minimal_modules": [
+            ".bin 头格式与 write_model",
+            "fp32/bf16 写出与 pad_vocab",
+            "C 端对称读取"
+          ],
+          "practice_task": "运行 python train_gpt2.py 生成 gpt2_124M.bin 与 debug_state.bin，对照 write_model 说明 16 个参数张量的写出顺序，并解释为什么 padded_vocab_size=50304 而非 50257。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "GPU fp32 legacy 版：CUDA 入门",
+          "order": 3,
+          "filename": "u4-l3-gpu-fp32-legacy.md",
+          "level": "intermediate",
+          "topic": "以 train_gpt2_fp32.cu 为入门切入点，讲解把 CPU 各层前向/反向改写成 CUDA kernel 的基本模式：__global__ 核函数、grid/block 划分、cudaMalloc/Memcpy。",
+          "learning_goals": [
+            "理解 CUDA kernel 与 host 端启动的基本模式",
+            "掌握 (B,T,C) 并行到 grid/block 的映射",
+            "对比 fp32 legacy 版与 CPU 参考的逐层对应"
+          ],
+          "source_files": [
+            "train_gpt2_fp32.cu",
+            "train_gpt2.c"
+          ],
+          "minimal_modules": [
+            "kernel 与 grid/block 划分",
+            "显存管理与数据搬运",
+            "各层前向/反向的 CUDA 化"
+          ],
+          "practice_task": "在 train_gpt2_fp32.cu 中挑一个最简单的层（如 residual 或 gelu），对照 CPU 版说明它的 grid/block 如何把 N 个元素并行化，并解释 cudaMemcpy 在前向后用于做什么。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "CUDA 主线 train_gpt2.cu 与 llmc 头文件库",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "CUDA 主线架构与 llmc 头文件库",
+          "order": 1,
+          "filename": "u5-l1-cuda-mainline-architecture.md",
+          "level": "advanced",
+          "topic": "通览 train_gpt2.cu 的整体架构：include 的 llmc/ 头文件库、floatX 精度宏、CUDA 版 ParameterTensors/ActivationTensors、TensorSpec 与 recompute 控制下的激活分配。",
+          "learning_goals": [
+            "理解 train_gpt2.cu 如何通过 llmc/ 头文件模块化各层",
+            "掌握 floatX/floatX* 精度宏与 static_assert 一致性检查",
+            "理解 TensorSpec 与 recompute 下激活缓冲的复用策略"
+          ],
+          "source_files": [
+            "train_gpt2.cu",
+            "llmc/cuda_common.h",
+            "llmc/cuda_utils.cuh"
+          ],
+          "minimal_modules": [
+            "头文件库组织与精度宏",
+            "CUDA 版参数/激活结构体",
+            "TensorSpec 与激活分配"
+          ],
+          "practice_task": "列出 train_gpt2.cu 顶部 include 的所有 llmc/ 头文件，分类标注每个负责哪一层或哪类工具，并说明 floatX 如何随 PRECISION 切换。",
+          "depends_on": [
+            "u4-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "CUDA 工具层：streams、kernel 启动与错误检查",
+          "order": 2,
+          "filename": "u5-l2-cuda-utility-layer.md",
+          "level": "advanced",
+          "topic": "讲解 cuda_common.h / cuda_utils.cuh / cublas_common.h 提供的基础设施：cudaCheck、kernel 启动宏、多 stream 调度、device 属性与 cuBLAS handle 管理。",
+          "learning_goals": [
+            "掌握 cudaCheck/cublasCheck 错误检查宏",
+            "理解多 stream 与 cudaStream 的并发调度",
+            "了解 cublas/cublasLt handle 的创建与复用"
+          ],
+          "source_files": [
+            "llmc/cuda_common.h",
+            "llmc/cuda_utils.cuh",
+            "llmc/cublas_common.h"
+          ],
+          "minimal_modules": [
+            "错误检查与 kernel 启动宏",
+            "多 stream 调度",
+            "cuBLAS handle 管理"
+          ],
+          "practice_task": "在 cuda_utils.cuh 中找到 kernel 启动辅助宏，说明它如何根据张量大小计算 grid/block；并解释 main_stream 之外为什么还存在其他 stream。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "MatMul：cuBLASLt 的调用与封装",
+          "order": 3,
+          "filename": "u5-l3-matmul-cublas.md",
+          "level": "advanced",
+          "topic": "讲解 llmc/matmul.cuh 如何用 cuBLASLt 替代手写 GEMM，包括 bias 融合、gelu fusion 选项、TF32 与混合精度，以及对应反向。",
+          "learning_goals": [
+            "理解 matmul_forward_cublaslt 的封装与 bias 融合",
+            "掌握 cuBLASLt 的 epilogue（bias/gelu）能力",
+            "理解 TF32 在 matmul 中的意义"
+          ],
+          "source_files": [
+            "llmc/matmul.cuh",
+            "llmc/cublas_common.h",
+            "train_gpt2.cu"
+          ],
+          "minimal_modules": [
+            "cuBLASLt GEMM 封装",
+            "bias/gelu epilogue 融合",
+            "TF32 与精度"
+          ],
+          "practice_task": "在 train_gpt2.cu 的 gpt2_forward 中统计有多少处调用 matmul_forward_cublaslt，说明它们对应模型中的哪些线性层（qkv/attproj/fc/fcproj/output）。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "各层 CUDA kernel：layernorm/encoder/gelu/adamw",
+          "order": 4,
+          "filename": "u5-l4-cuda-layer-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 llmc 下 layernorm.cuh、encoder.cuh、gelu.cuh、adamw.cuh、global_norm.cuh 等 header kernel 的并行化思路与 warp/共享内存优化。",
+          "learning_goals": [
+            "理解 layernorm 用 warp reduce 计算均值方差",
+            "掌握 encoder/gelu kernel 的并行映射",
+            "了解 adamw/global_norm 的 kernel 化"
+          ],
+          "source_files": [
+            "llmc/layernorm.cuh",
+            "llmc/encoder.cuh",
+            "llmc/gelu.cuh",
+            "llmc/adamw.cuh",
+            "llmc/global_norm.cuh"
+          ],
+          "minimal_modules": [
+            "layernorm warp reduce",
+            "encoder/gelu 并行 kernel",
+            "adamw/global_norm kernel"
+          ],
+          "practice_task": "对照 train_gpt2.c 的 layernorm 与 llmc/layernorm.cuh，说明 CUDA 版如何用 warp 级归约替代 CPU 的内层循环求 mean/var。",
+          "depends_on": [
+            "u2-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "Attention CUDA：手写版与 cuDNN Flash Attention",
+          "order": 5,
+          "filename": "u5-l5-attention-cuda-cudnn.md",
+          "level": "advanced",
+          "topic": "讲解 llmc/attention.cuh 的手写因果注意力 kernel，以及通过 cudnn_att.cpp 调用 cuDNN frontend 的 Flash Attention（USE_CUDNN 时启用）两条路径。",
+          "learning_goals": [
+            "理解手写 attention kernel 的 online softmax 思路",
+            "掌握 cuDNN Flash Attention 的启用条件与封装",
+            "理解两种实现的取舍"
+          ],
+          "source_files": [
+            "llmc/attention.cuh",
+            "llmc/cudnn_att.cpp",
+            "llmc/cudnn_att.h",
+            "train_gpt2.cu"
+          ],
+          "minimal_modules": [
+            "手写 attention kernel",
+            "cuDNN frontend 封装",
+            "编译期 ENABLE_CUDNN 切换"
+          ],
+          "practice_task": "在 train_gpt2.cu 的 gpt2_forward 中找到 attention_forward_cudnn 与 attention_forward 的分支，说明由哪个宏/变量决定走哪条路径，以及为何默认关闭 cuDNN。",
+          "depends_on": [
+            "u2-l4",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "训练工程：混合精度、融合算子与分布式",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "混合精度、master weights 与 TF32",
+          "order": 1,
+          "filename": "u6-l1-mixed-precision.md",
+          "level": "advanced",
+          "topic": "讲解 BF16/FP16/FP32 三种精度（PRECISION 编译选项）、master weights 的 fp32 备份与转换、以及 TF32 在 matmul 中的开启。",
+          "learning_goals": [
+            "理解 BF16/FP16/FP32 的取舍与 PRECISION 切换",
+            "掌握 use_master_weights 的 fp32 备份机制",
+            "了解 override_enable_tf32 的作用"
+          ],
+          "source_files": [
+            "train_gpt2.cu",
+            "Makefile",
+            "llmc/cuda_common.h"
+          ],
+          "minimal_modules": [
+            "三种精度与编译选项",
+            "master weights 备份",
+            "TF32 开关"
+          ],
+          "practice_task": "说明 bf16 训练时为何仍保留 fp32 master weights，并在 Makefile 中找到控制精度的 PRECISION 变量及其默认值。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "重计算、融合算子与 global norm",
+          "order": 2,
+          "filename": "u6-l2-fusion-recompute-norm.md",
+          "level": "advanced",
+          "topic": "讲解 recompute（前向丢弃 gelu 激活、反向重算）的显存换算力策略，以及 fused_residual_forward5、fused_classifier 等融合算子和 global_norm 梯度裁剪。",
+          "learning_goals": [
+            "理解 recompute 选项 0/1 的显存-算力权衡",
+            "掌握 fused_residual/fused_classifier 的融合收益",
+            "了解 global_norm 全局梯度范数与裁剪"
+          ],
+          "source_files": [
+            "llmc/fused_classifier.cuh",
+            "llmc/global_norm.cuh",
+            "llmc/layernorm.cuh",
+            "train_gpt2.cu"
+          ],
+          "minimal_modules": [
+            "recompute 策略",
+            "融合残差/分类器算子",
+            "global norm 与裁剪"
+          ],
+          "practice_task": "在 train_gpt2.cu 的 gpt2_forward 中找到 recompute 控制下 fch_gelu 缓冲复用的三元表达式，解释 recompute=1 时如何省显存、增算力。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "学习率调度、MFU 估算与日志",
+          "order": 3,
+          "filename": "u6-l3-scheduler-mfu-logging.md",
+          "level": "advanced",
+          "topic": "讲解 schedulers.h 的 cosine/linear 学习率调度（含 warmup）、mfu.h 的 Model Flops Utilization 估算，以及 logger.h 的训练日志输出。",
+          "learning_goals": [
+            "理解 cosine/linear 调度与 warmup",
+            "掌握 MFU 的定义与按 GPU 估算方法",
+            "了解 logger 的多进程安全输出"
+          ],
+          "source_files": [
+            "llmc/schedulers.h",
+            "llmc/mfu.h",
+            "llmc/logger.h",
+            "train_gpt2.cu"
+          ],
+          "minimal_modules": [
+            "学习率调度",
+            "MFU 估算",
+            "日志输出"
+          ],
+          "practice_task": "在 schedulers.h 中对照 cosine 与 linear 两条公式，画出学习率随 step 的曲线趋势，并说明 final_learning_rate_frac 控制什么。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "多 GPU 训练：ZeRO 分片与 NCCL",
+          "order": 4,
+          "filename": "u6-l4-multi-gpu-zero.md",
+          "level": "advanced",
+          "topic": "讲解 llmc/zero.cuh 的 ZeRO 优化器分片、NCCL all-reduce 梯度同步、以及 gpt2_backward_and_reduce 的梯度累积与多卡规约。",
+          "learning_goals": [
+            "理解 ZeRO Stage 对参数/梯度/优化器状态的分片",
+            "掌握 NCCL all-reduce 的梯度同步时机",
+            "了解 micro-batch 梯度累积与 total_batch_size 的关系"
+          ],
+          "source_files": [
+            "llmc/zero.cuh",
+            "train_gpt2.cu",
+            "llmc/dataloader.h"
+          ],
+          "minimal_modules": [
+            "ZeRO 分片",
+            "NCCL all-reduce",
+            "梯度累积与全局 batch"
+          ],
+          "practice_task": "说明 dataloader 的 process_rank/num_processes 如何让每张卡看到不同数据分片，并解释 zero_stage 分片为何能降低单卡显存。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "多节点训练：MPI / TCP / FS 三种初始化",
+          "order": 5,
+          "filename": "u6-l5-multi-node.md",
+          "level": "advanced",
+          "topic": "讲解 multi_gpu_config_init 支持的 mpi/tcp/fs 三种 NCCL 初始化方式，以及 scripts/multi_node 下对应脚本与 mpirun 启动方式。",
+          "learning_goals": [
+            "理解 NCCL 唯一 ID 的三种交换方式",
+            "掌握 scripts/multi_node 三种脚本的适用环境",
+            "了解 num_processes/process_rank/gpus_per_node 的来源"
+          ],
+          "source_files": [
+            "llmc/zero.cuh",
+            "train_gpt2.cu",
+            "scripts/multi_node/run_gpt2_124M_mpi.sh",
+            "scripts/multi_node/run_gpt2_124M_tcp.sbatch",
+            "scripts/multi_node/run_gpt2_124M_fs.sbatch"
+          ],
+          "minimal_modules": [
+            "mpi/tcp/fs 三种初始化",
+            "多节点启动脚本",
+            "进程拓扑参数"
+          ],
+          "practice_task": "对比 scripts/multi_node 下三个脚本，说明各自依赖的运行时环境（slurm/PMIx、共享文件系统、TCP），并指出 -pi 参数取值。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "内核库、评测、剖析与二次开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "dev/cuda 内核库：每层多版本与性能对比",
+          "order": 1,
+          "filename": "u7-l1-cuda-kernel-library.md",
+          "level": "advanced",
+          "topic": "讲解 dev/cuda 作为「逐步优化的内核教学库」，以 layernorm_forward.cu 的 kernel1~6 为例，说明从朴素到 cooperative groups、方差巧算的演进与 benchmark 方法。",
+          "learning_goals": [
+            "理解 dev/cuda 每个文件包含同一层的多个版本",
+            "掌握从 kernel1 到 kernel6 的优化思路",
+            "了解 CPU 参考比对与 block size 扫描的 benchmark 流程"
+          ],
+          "source_files": [
+            "dev/cuda/layernorm_forward.cu",
+            "dev/cuda/attention_forward.cu",
+            "dev/cuda/matmul_forward.cu",
+            "dev/cuda/README.md"
+          ],
+          "minimal_modules": [
+            "多版本内核演进",
+            "方差巧算与 cooperative groups",
+            "benchmark 与正确性比对"
+          ],
+          "practice_task": "运行 dev/cuda 下的 layernorm_forward（参考文件顶部命令）依次跑 kernel1 与 kernel4，记录耗时差异，并用一句话总结 kernel4 快在哪。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "评测：HellaSwag / MMLU 与采样器",
+          "order": 2,
+          "filename": "u7-l2-evaluation-sampler.md",
+          "level": "advanced",
+          "topic": "讲解 dev/data 下 hellaswag.py/mmlu.py 的数据准备、dev/eval 的评测流程，以及 train_gpt2.cu 中 -h hellaswag_eval 与 sampler 的使用。",
+          "learning_goals": [
+            "理解 HellaSwag/MMLU 数据集准备与评测协议",
+            "掌握 dev/eval 的导出与汇总脚本",
+            "了解训练中 hellaswag_eval 的调用"
+          ],
+          "source_files": [
+            "dev/data/hellaswag.py",
+            "dev/data/mmlu.py",
+            "dev/eval/run_eval.sh",
+            "dev/eval/summarize_eval.py",
+            "llmc/sampler.h"
+          ],
+          "minimal_modules": [
+            "评测数据准备",
+            "评测运行与汇总",
+            "采样器与训练中评测"
+          ],
+          "practice_task": "阅读 dev/eval/README.md，说明 export_hf.py 与 run_eval.sh 的关系，并解释 hellaswag 任务如何从多个候选续写中选出概率最高者。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "性能剖析：profile_gpt2cu 与 ncu",
+          "order": 3,
+          "filename": "u7-l3-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 profile_gpt2.cu 这个精简的训练循环如何配合 NVIDIA Nsight Compute (ncu) 剖析单个 kernel，以及 profile_gpt2cu.py 的解析脚本。",
+          "learning_goals": [
+            "理解 profile_gpt2.cu 作为剖析入口的作用",
+            "掌握 make profile_gpt2cu 与 ncu 的基本用法",
+            "了解如何定位性能瓶颈 kernel"
+          ],
+          "source_files": [
+            "profile_gpt2.cu",
+            "profile_gpt2cu.py"
+          ],
+          "minimal_modules": [
+            "剖析专用入口",
+            "ncu 命令与指标",
+            "瓶颈定位"
+          ],
+          "practice_task": "阅读 profile_gpt2.cu 顶部注释，写出用 ncu 生成报告的命令，并说明为何要单独维护一个 profile 入口而非直接剖析 train_gpt2cu。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "二次开发与复现训练：scripts 与 Llama3 扩展",
+          "order": 4,
+          "filename": "u7-l4-extend-and-reproduce.md",
+          "level": "advanced",
+          "topic": "讲解如何用 scripts/ 下的脚本复现 GPT-2 各规模与 GPT-3 训练、gpt_build_from_descriptor 如何按描述符切换模型，以及 train_llama3.py 展示的架构扩展方向。",
+          "learning_goals": [
+            "理解 scripts 下各 run_*.sh 的参数与复现目标",
+            "掌握模型规模描述符与 gpt3_set_hyperparameters",
+            "了解向 Llama3 等新架构扩展的思路"
+          ],
+          "source_files": [
+            "scripts/run_gpt2_124M.sh",
+            "scripts/run_gpt3_125M.sh",
+            "scripts/README.md",
+            "train_gpt2.cu",
+            "train_llama3.py"
+          ],
+          "minimal_modules": [
+            "复现训练脚本",
+            "模型规模描述符",
+            "架构扩展方向"
+          ],
+          "practice_task": "打开 scripts/run_gpt2_124M.sh 与 scripts/run_gpt3_125M.sh，对比它们在 B/T/total_batch_size/learning_rate/max_steps 上的差异，并说明 -d 描述符如何决定层数与通道。",
+          "depends_on": [
+            "u6-l3",
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
