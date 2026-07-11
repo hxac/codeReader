@@ -403,7 +403,7 @@ session_len_act = ArgumentHelper.session_len(pt_group)
 ...
 ```
 
-再把同一个 action 对象追加到 TurboMind 分组（[serve.py:146-161](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/cli/serve.py#L146-L161)）：
+再把同一个 action 对象追加到 TurboMind 分组（[serve.py:144-161](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/cli/serve.py#L144-L161)）：
 
 ```python
 tb_group = parser.add_argument_group('TurboMind engine arguments')
@@ -566,7 +566,7 @@ def add_parser_auto_awq():
 
 **③ `auto_awq` 处理函数（延迟导入 + 转发）**
 
-[lite.py:110-115](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/cli/lite.py#L110-L115)：
+[lite.py:111-116](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/cli/lite.py#L111-L116)：
 
 ```python
 @staticmethod
