@@ -1,0 +1,514 @@
+# 算子后端分发 backends
+
+## 1. 本讲目标
+
+本讲聚焦 `lmdeploy/pytorch/backends/`——PyTorch 引擎里**「接口」与「实现」的分水岭**。学完后你应该能够：
+
+- 说清 `selector.py` 如何根据**设备类型**选定一个算子后端类。
+- 画出 `OpsBackend` 的类继承层级（`Default → Cuda`、`Default → Dlinfer → Ascend/Maca/Camb`），以及它为什么用「命中即返回、未命中回退父类」的方式组织。
+- 理解 `OpType` 枚举是**接口树（`nn/`）与实现树（`backends/`）唯一的共同词汇**，并解释为什么「设备」和「量化」其实是两个**正交维度**，分别由 `selector.py` 与 `get_layer_impl_builder` 负责。
+- 看懂 `attention backend` 的 `Impl / Builder / Metadata` 三件套，以及 `linear`、`norm` 的薄接口族。
+- 认识 `token_dispatcher` 与 `moe_router` 这两个 MoE 专用算子的抽象。
+
+承接 u5-l2 的结论：线性层积木在运行时按「量化策略 → Python 类（`OpType`）→ 设备 kernel」两段式派发。本讲正是把这两段中的**第二段**讲透——`backends/` 如何把同一个 `OpType` 翻译成不同设备、不同量化下的真实算子。
+
+## 2. 前置知识
+
+阅读本讲前，你需要先建立以下直觉（来自前置讲义）：
+
+- **积木与实现分离**（u5-l1）：`nn/` 下的 `Attention`、`RMSNorm`、`Linear` 等都是「薄包装」，构造时 `get_backend().get_layer_impl_builder(OpType.X)` 拿到一个 builder，`build()` 出 `self.impl`，前向时 `self.impl.forward(...)`。积木不写数学公式，公式藏在 `backends/`。
+- **量化的两段式派发**（u5-l2）：`build_linear` 先按 `quant_method` 选 Python 类（决定权重布局与加载），该类再用 `OpType`（`Linear` / `LinearW4A16` / `LinearW8A8` / `LinearBlockedF8`）在 `backends/` 选 kernel。
+- **PyTorch 引擎跨设备**（u1-l3）：lmdeploy 通过 `LMDEPLOY_TARGET_DEVICE` 支持 `cuda/ascend/maca/camb` 等多设备，运行时依赖按设备拆分（`requirements/runtime_<device>.txt`）。本讲解释这套「一份模型代码、多设备运行」在算子层是如何落到实处的。
+- **什么是抽象基类**：Python 的 `abc.ABC` + `@abstractmethod` 定义「必须实现哪些方法」的契约，子类负责给具体实现。本讲大量出现 `Impl`（实现）与 `Builder`（构造器）成对的抽象基类。
+
+一个一句话总结：`models/*.py`（u3-l4）是「拓扑」，`nn/`（u5-l1/u5-l2）是「积木接口」，`backends/`（本讲）是「积木里真正干活的设备算子」。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| `lmdeploy/pytorch/backends/selector.py` | **入口路由器**：读当前设备上下文，返回对应的 `OpsBackend` 子类 |
+| `lmdeploy/pytorch/backends/base.py` | **公共契约**：`OpType` 枚举（共同词汇）+ `OpsBackend` 抽象基类 |
+| `lmdeploy/pytorch/backends/attention.py` | attention 算子的抽象：`AttentionMetadata` / `AttentionImpl` / `AttentionBuilder` |
+| `lmdeploy/pytorch/backends/linear.py` | 线性算子的抽象：`LinearImpl` / `LinearBuilder` |
+| `lmdeploy/pytorch/backends/norm.py` | 归一化算子的抽象：`RMSNorm` / `LayerNorm` 各一对 `Impl/Builder` |
+| `lmdeploy/pytorch/backends/token_dispatcher.py` | MoE 的 token 在专家间分发/聚合的抽象 |
+| `lmdeploy/pytorch/backends/moe_router.py` | MoE 门控路由（`noaux_tc`）的抽象 |
+| `backends/default/op_backend.py` | 纯 PyTorch 参考实现，是所有设备后端的**回退兜底** |
+| `backends/cuda/op_backend.py` | CUDA/Triton 实现，未命中时回退到 default |
+| `backends/dlinfer/op_backend.py` + `ascend/`、`maca/`、`camb/` | 国产芯片通过 dlinfer 的实现，ascend 是其中最完整的子类 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 Selector：按设备选定算子后端类
+
+#### 4.1.1 概念说明
+
+不同硬件（NVIDIA GPU、昇腾 NPU、海光 DCU 等）有完全不同的算子生态：CUDA 上靠 Triton/FlashAttention/自研 CUDA kernel，昇腾上靠 dlinfer + torch_npu。如果让每个模型文件（`llama.py`、`qwen.py`……）都去写 `if device == 'cuda' ... elif device == 'ascend' ...`，代码会爆炸式膨胀。
+
+`selector.py` 用一个**经典手段**解决这个问题：把「设备 → 实现类」的映射集中在一处，对外只暴露 `get_backend()`，返回一个**多态的 `OpsBackend` 子类**。调用方拿到这个类后，就能用统一的方法名（`get_layer_impl_builder`、`update_step_context` 等）驱动任意设备，而无需关心它具体是 `CudaOpsBackend` 还是 `AscendOpsBackend`。
+
+关键提醒：`selector.py` **只看设备**，不看量化。量化的维度在 4.2 节由 `OpType` 负责。这是理解整个分发的核心。
+
+#### 4.1.2 核心流程
+
+```text
+                ┌──────────────────────────────────────┐
+  调用方 ──────▶│ get_backend()                         │
+  (nn/、引擎)   │  1. 读 DeviceContext.device_type      │
+                │  2. 查设备 → OpsBackend 子类          │
+                │  3. 返回该子类（类本身，非实例）       │
+                └──────────────────────────────────────┘
+                          │
+        device_type 决定 ↓
+   ┌──────────┬───────────┬───────────┬───────────┐
+   │  cuda    │  ascend   │   maca    │   camb    │
+   │ CudaOps  │ AscendOps │  MacaOps  │  CambOps  │
+   │ Backend  │  Backend  │  Backend  │  Backend  │
+   └──────────┴───────────┴───────────┴───────────┘
+```
+
+设备上下文 `DeviceContext` 来自引擎：每个 worker 进程在启动时确定自己的 `device_type`（默认 `cuda`），并把该上下文「压栈」，于是线程内任何一次 `get_backend()` 调用都能读到正确的设备。
+
+#### 4.1.3 源码精读
+
+`_get_backend()` 是路由的真正核心，一个 `if/elif` 决定一切：
+
+[lmdeploy/pytorch/backends/selector.py:5-25](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/selector.py#L5-L25) — `_get_backend` 读 `device_mgr.current_context().device_type`，按设备返回不同的 `OpsBackend` 子类。注意每个分支都是**延迟导入**（`from .cuda import CudaOpsBackend`），避免在 import 期就拉起整套 CUDA/昇腾依赖。
+
+三个公开函数的分工：
+
+[lmdeploy/pytorch/backends/selector.py:28-36](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/selector.py#L28-L36) — `get_backend(backend_type=None)`：不传参时走当前设备上下文（最常用）；显式传参时，临时用 `with device_mgr.context(DeviceContext(backend_type))` 进入指定设备的上下文再解析，**不污染**外部上下文栈。
+
+[lmdeploy/pytorch/backends/selector.py:39-42](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/selector.py#L39-L42) — `init_backend(backend_type)`：解析后端后调一次 `backend.init()`，做设备级初始化。
+
+那么「当前设备上下文」是谁压进去的？worker 进程启动时调用 `init_backend`：
+
+[lmdeploy/pytorch/engine/executor/mp_executor.py:519-520](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/engine/executor/mp_executor.py#L519-L520) — 每个 worker 子进程的主循环第一件事就是 `init_backend(device_type)`，随后 `torch.cuda.set_device(proc_id)` 锁定本进程负责的卡。`device_type` 透传自用户的 `PytorchEngineConfig.device_type`。
+
+而 worker 包装器持有并进入 `DeviceContext`，保证后续建模型时 `get_backend()` 能读到正确设备：
+
+[lmdeploy/pytorch/engine/executor/base_worker.py:81](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/engine/executor/base_worker.py#L81) — `self.device_ctx = DeviceContext(device_type=self.device_type)`，worker 在自己的作用域内激活该上下文。
+
+设备上下文本体非常朴素，它就是一个带 `device_type` 字段的数据类：
+
+[lmdeploy/pytorch/devices/device_manager.py:8-13](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/devices/device_manager.py#L8-L13) — `DeviceContext` 默认 `device_type='cuda'`，`DefaultContext` 即 cuda。这意味着「不显式配置设备」的常见场景下，整条链路天然解析为 `CudaOpsBackend`。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手验证 `selector.py` 是「纯设备派发」，并发现它**不**感知量化。
+
+**操作步骤**：
+
+1. 打开 Python（已安装 lmdeploy 的 cuda 环境），执行：
+
+   ```python
+   from lmdeploy.pytorch.backends.selector import get_backend
+   from lmdeploy.pytorch.devices import get_device_manager, DeviceContext
+
+   # 默认上下文是 cuda
+   print(get_backend())              # <class '...cuda.op_backend.CudaOpsBackend'>
+
+   # 临时切到 ascend 上下文（不要求真有昇腾卡，只是解析类）
+   mgr = get_device_manager()
+   with mgr.context(DeviceContext('ascend')):
+       print(get_backend())          # <class '...dlinfer.ascend.op_backend.AscendOpsBackend'>
+   ```
+
+2. 在 `selector.py` 里搜索 `quant` / `awq` / `fp8`，确认**搜不到任何量化分支**。
+
+**需要观察的现象**：
+
+- 切换 `device_type` 后，`get_backend()` 返回的类**确实变了**。
+- `selector.py` 中**完全没有**量化相关代码。
+
+**预期结果**：`get_backend()` 的返回值只随 `device_type` 变化。量化并不在这一层进入。结论：**设备维度由 selector.py 负责，量化维度另寻他处（4.2 的 `OpType`）**。这与本讲规格里「按 device+quant 选定后端」的措辞略有出入——准确说法是「设备在后端类选择、量化在算子选择」，两者正交。
+
+> 若运行环境未安装 lmdeploy 的 PyTorch 后端，或 `DeviceContext` 接口在不同版本有差异，以上脚本可能无法直接跑通，则改为「源码阅读型实践」：直接读 `selector.py` 全文，确认 `device_type` 的分支数量与每个分支对应的类。**待本地验证**。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `_get_backend` 里每个设备分支都用 `from .xxx import ...` 而不是文件顶部统一 import？
+**答案**：延迟导入。顶部 import 会一次性拉起 cuda、ascend、maca、camb 全部依赖（torch_npu、dlinfer 等），在只有 GPU 的机器上会直接 import 失败。延迟到分支内部，保证「只装了 cuda」的环境也能正常工作。
+
+**练习 2**：`get_backend('ascend')` 在纯 GPU 机器上调用会发生什么？
+**答案**：它**能**返回 `AscendOpsBackend` 类（因为 import 是延迟的，类定义本身不一定需要真卡），但随后任何真正初始化或前向（如 `AscendOpsBackend.init()` 里 `import torch_npu`）才会因缺 torch_npu 而报警。返回「类」与「能跑」是两件事。
+
+---
+
+### 4.2 OpType 与 OpsBackend：算子后端的公共契约
+
+#### 4.2.1 概念说明
+
+`selector.py` 解决了「用哪台设备的后端」，但同一个后端内部还要回答：「Attention 用哪个实现？LinearW8A8 用哪个实现？RMSNorm 用哪个实现？」这就需要一个**算子种类的枚举**作为共同词汇——它就是 `OpType`。
+
+`OpType` 是接口树（`nn/`）与实现树（`backends/`）**唯一的交汇点**：`nn/` 调用方只会说「我要 `OpType.LinearW8A8`」，而每个设备后端各自决定这个枚举值映射到哪个具体 Builder。这样 `nn/` 与 `models/` 完全不用关心设备差异——换设备时它们一行都不用改（承接 u5-l1 的「薄包装+委托」桥接模式）。
+
+把 4.1 与 4.2 合起来看，整个分发是一个**二维查表**：
+
+\[
+\text{实现} = \text{OpsBackend(device)}.\text{get\_layer\_impl\_builder}(\text{OpType})
+\]
+
+- 第一维 `device`：由 `selector.py` 定（cuda / ascend / …）。
+- 第二维 `OpType`：在 `get_layer_impl_builder` 内部定（含量化变体，如 `Linear` / `LinearW8A8` / `LinearW4A16` / `LinearBlockedF8`）。
+
+#### 4.2.2 核心流程
+
+```text
+nn 某积木构造期：
+  get_backend() ──▶ OpsBackend 子类（device 决定）
+        │
+        └─▶ .get_layer_impl_builder(OpType.X)
+                  │
+                  └─▶ Builder 类（device × OpType 共同决定）
+                          │
+                          └─▶ .build(...) ──▶ Impl 实例 ──▶ self.impl.forward(...)
+```
+
+`get_layer_impl_builder` 是一个很长的 `if/elif`：命中就返回该设备专用的 Builder；**未命中就回退到父类**（`super().get_layer_impl_builder(...)`）。父类链最终到 `DefaultOpsBackend`，如果连它都不认识，就抛 `RuntimeError`。这条「回退链」是整个层级的关键。
+
+类继承层级如下：
+
+```text
+OpsBackend (抽象, base.py)
+  └─ DefaultOpsBackend (纯 PyTorch 参考实现, default/)
+       ├─ CudaOpsBackend (Triton/CUDA, cuda/)          ← cuda 设备
+       └─ DlinferOpsBackend (dlinfer, dlinfer/)
+              ├─ AscendOpsBackend (dlinfer/ascend/)     ← ascend 设备
+              ├─ MacaOpsBackend  (dlinfer/maca/)        ← maca 设备
+              └─ CambOpsBackend  (dlinfer/camb/)        ← camb 设备
+```
+
+#### 4.2.3 源码精读
+
+先看共同词汇 `OpType`，它把「算子种类 + 量化变体」编码进枚举名：
+
+[lmdeploy/pytorch/backends/base.py:12-41](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/base.py#L12-L41) — `OpType` 枚举。注意命名规律：同一个算子的不同量化版本是不同枚举值——`Linear`（FP16）、`LinearW8A8`（INT8）、`LinearW4A16`（AWQ）、`LinearBlockedF8`（分块 FP8）；MoE 同理有 `FusedMoE` / `FusedMoEW8A8` / `FusedMoEBlockedF8`。**量化就藏在这个命名里**，而非 selector。
+
+抽象基类 `OpsBackend` 规定每个设备后端必须实现什么：
+
+[lmdeploy/pytorch/backends/base.py:44-86](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/base.py#L44-L86) — `OpsBackend` 的抽象方法：`get_name`（后端名）、`get_layer_impl_builder`（**核心**：OpType → Builder）、`get_attention_metadata_cls`、`get_k/v_block_shape`（KV cache 物理块形状，承接 u4-l5 的 Paged Attention）。这些是「设备后端」与「引擎其余部分」之间的契约。
+
+`get_layer_impl_builder` 在 `OpsBackend` 中是纯抽象：
+
+[lmdeploy/pytorch/backends/base.py:53-57](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/base.py#L53-L57) — 抽象方法签名，子类必须实现「OpType → Builder」的查表。
+
+接下来看回退兜底 `DefaultOpsBackend`——它是纯 PyTorch 参考实现，谁都能用：
+
+[lmdeploy/pytorch/backends/default/op_backend.py:14-54](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/default/op_backend.py#L14-L54) — `DefaultOpsBackend.get_layer_impl_builder` 处理一批「设备无关、纯 PyTorch 就够」的算子（`Linear`、`RotaryEmbedding`、`RMSNorm`、`SiluAndMul` 等），最后 `else` 分支抛 `RuntimeError`，明确告诉你「这个 OpType 在 default 不支持」。注意：default 目录下**没有** `attention.py`，所以 attention 永远不能回退到 default——它必须由具体设备提供。
+
+CUDA 后端覆盖大量高性能实现，并把不认识的算子交给父类：
+
+[lmdeploy/pytorch/backends/cuda/op_backend.py:14-81](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/cuda/op_backend.py#L14-L81) — `CudaOpsBackend(DefaultOpsBackend)`：对 `PagedAttention` 返回 `TritonAttentionBuilder`，对 `LinearW8A8` 返回 `TritonLinearW8A8Builder`，对 `LinearBlockedF8` 返回 `TritonLinearBlockedF8Builder`……每个分支都是延迟 import。末尾：
+
+[lmdeploy/pytorch/backends/cuda/op_backend.py:79-81](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/cuda/op_backend.py#L79-L81) — 未命中时 `super().get_layer_impl_builder(layer_type)`，回退到 `DefaultOpsBackend`。例如 `OpType.Linear`（普通 FP16 线性层）cuda 没单独写，就用 default 的纯 PyTorch `F.linear`。
+
+dlinfer 后端结构完全对称：
+
+[lmdeploy/pytorch/backends/dlinfer/op_backend.py:13-62](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/dlinfer/op_backend.py#L13-L62) — `DlinferOpsBackend(DefaultOpsBackend)`：同样一份 `if/elif`，把 `OpType` 映射到 `DlinferXxxBuilder`，未命中回退 default。
+
+昇腾是 dlinfer 的一个**特化子类**，覆盖最完整：
+
+[lmdeploy/pytorch/backends/dlinfer/ascend/op_backend.py:118-128](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/dlinfer/ascend/op_backend.py#L118-L128) — `AscendOpsBackend(DlinferOpsBackend)`：它本身**不重写** `get_layer_impl_builder`（直接继承 dlinfer 那份映射），而是重写 `update_step_context`、`get_k/v_block_shape`、`init`、`build_graph_runner` 等设备级方法——因为昇腾的「OpType → Builder」映射与通用 dlinfer 一致，差别只在元数据构造与设备初始化。`maca`、`camb` 同理各自继承 `DlinferOpsBackend`。
+
+最后，看 `nn/` 调用方如何使用这条链路：
+
+[lmdeploy/pytorch/nn/attention.py:49-50](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/nn/attention.py#L49-L50) — `nn.Attention` 构造时：`layer_backend = get_backend()`（拿设备后端），`impl_builder = layer_backend.get_layer_impl_builder(OpType.PagedAttention)`（拿该设备的 attention builder）。一行 `get_backend()` 就完成了设备无关 → 设备相关的跨越。
+
+#### 4.2.4 代码实践
+
+**实践目标**：构造出 4.2.1 的二维查表，直观看到「设备 × OpType → Builder」。
+
+**操作步骤**：
+
+1. 写一个小脚本（cuda 环境）：
+
+   ```python
+   # 示例代码：列出 cuda 后端对若干 OpType 的派发结果
+   from lmdeploy.pytorch.backends.selector import get_backend
+   from lmdeploy.pytorch.backends.base import OpType
+
+   cuda = get_backend()   # 当前设备（默认 cuda）的 OpsBackend 子类
+   for op in [OpType.PagedAttention, OpType.Linear, OpType.LinearW8A8,
+              OpType.LinearW4A16, OpType.LinearBlockedF8, OpType.RMSNorm]:
+       try:
+           b = cuda.get_layer_impl_builder(op)
+           print(f'{op.name:20s} -> {b.__name__}')
+       except Exception as e:
+           print(f'{op.name:20s} -> ERROR {e}')
+   ```
+
+2. 对照 [cuda/op_backend.py:22-81](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/cuda/op_backend.py#L22-L81) 与 [default/op_backend.py:14-54](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/default/op_backend.py#L14-L54)，逐行验证每个输出从哪个分支来。
+
+**需要观察的现象**：
+
+- `PagedAttention` → `TritonAttentionBuilder`（cuda 分支命中）。
+- `Linear` → **不是** cuda 命中，而是回退到 default 的 `DefaultLinearBuilder`（cuda 没有单独的普通线性实现）。
+- `LinearW8A8` / `LinearW4A16` / `LinearBlockedF8` → 各自的 Triton/AWQ/blocked-fp8 builder（cuda 命中）。
+
+**预期结果**：你会清楚看到「同一个 OpType 在不同设备走不同 Builder」「未命中回退 default」两件事。若脚本因 import 链（如缺 flash-attn）报错，则改为纯阅读：在两张表里手工对齐每个 OpType 的来源。**待本地验证**。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`DefaultOpsBackend` 的 `else` 分支抛异常，而 `CudaOpsBackend` 的 `else` 分支调 `super()`。为什么 default 不能也回退 super？
+**答案**：default 已经是继承根（直接继承抽象 `OpsBackend`），它的 super 是 `OpsBackend`，那里 `get_layer_impl_builder` 是纯抽象、会抛 `NotImplementedError`。为了让「不支持的算子」有清晰报错，default 自己在 `else` 里抛 `RuntimeError(f'{layer_type} not supported.')`。各设备后端则用 `super()` 借用 default 的纯 PyTorch 实现，省去重复造轮子。
+
+**练习 2**：如果未来新增一种量化（比如 `LinearW4A8`），需要改哪些地方？
+**答案**：（1）在 `OpType` 枚举加 `LinearW4A8`（base.py）；（2）在需要支持的设备后端 `get_layer_impl_builder` 加分支返回对应 Builder（如 cuda）；（3）`nn/linear/` 加该量化的 Python 类并在构造时用新 `OpType`。`models/*.py` 与 `selector.py` 基本不用动——这正是二维分发的收益。
+
+---
+
+### 4.3 attention backend：Impl / Builder / Metadata 三件套
+
+#### 4.3.1 概念说明
+
+attention 是推理里最复杂的算子：它既要表达 MHA/GQA/MLA 等多种头结构，又要对接 Paged Attention 的块状 KV cache（u4-l5），还要支持滑动窗口、ALiBi、logit softcapping、FP8 KV cache 等变体。`backends/attention.py` 把这套复杂性拆成三个角色：
+
+- **`AttentionMetadata`**：一次 forward 所需的「调度元数据」（哪些序列、多长、块偏移、是否 decode、KV 量化策略）。
+- **`AttentionImpl`**：抽象的「怎么做这次 attention」，定义 `forward` 签名，但具体数学留给设备子类。
+- **`AttentionBuilder`**：抽象的「工厂」，`build(...)` 产出一个 `AttentionImpl` 实例。
+
+这套 `Impl + Builder + Metadata` 的三件套是 `backends/` 里反复出现的模式（linear、norm 同构），掌握它就能快速读懂所有算子抽象。
+
+#### 4.3.2 核心流程
+
+```text
+引擎每步 forward 前：
+  OpsBackend.update_step_context(step_context)
+    └─ 用 step_context 里的 q/kv_seqlens、block_offsets 等
+       构造 AttentionMetadata，挂回 step_context.attn_metadata
+
+nn.Attention.forward 时：
+  self.impl.forward(query, key, value, k_cache, v_cache, attn_metadata, ...)
+    └─ 设备 kernel 读取 attn_metadata 完成一次 attention
+```
+
+`AttentionMetadata` 由设备后端的 `update_step_context`（见 4.2.3 的 cuda/ascend 实现）在每步构造，因为它包含的 `cu_seqlens`、`kv_start_indices` 等字段是**设备相关**的——cuda 用 `cu_seqlens_q/k`，ascend 还要算 `kv_start_indices` 与 `attention_mask`。这就是为什么 `update_step_context` 也是 `OpsBackend` 的可重写方法。
+
+#### 4.3.3 源码精读
+
+`AttentionMetadata` 是一个 dataclass，字段横跨「通用 + 量化」：
+
+[lmdeploy/pytorch/backends/attention.py:12-23](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/attention.py#L12-L23) — 基类 `AttentionMetadata`：`is_decoding`（prefill 还是 decode）、`block_offsets`（逻辑→物理块表，u4-l5）、`q_start_loc`/`q_seqlens`/`kv_seqlens`（变长 batch 的累积/逐序列长度）、`cu_seqlens_q/k`（flash attention 风格的累积序列长度）、`quant_policy`（KV cache 量化，承接 u2-l2 的 `QuantPolicy`）。设备子类（如 `TritonAttentionMetadata`、`DlinferAttentionMetadata`）可在此之上扩展自己的字段。
+
+`AttentionImpl` 用泛型绑定到具体的 metadata 类型，并定义 `forward` 契约：
+
+[lmdeploy/pytorch/backends/attention.py:29-106](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/attention.py#L29-L106) — `AttentionImpl(ABC, Generic[T])`：构造时把 `num_heads`、`head_size`、`scale`、`num_kv_heads`、`v_head_size`、`alibi`、`sliding_window`、`logit_softcapping`、`causal`、`use_flash_mla` 等存为属性（`scale` 默认 \(1/\sqrt{\text{head\_size}}\)）。`forward` 的入参里 `k_cache`/`v_cache` 就是 Paged Attention 的物理块池，`k_scales_zeros`/`v_scales_zeros` 服务 FP8 KV cache，`nsa_indices` 服务 Native Sparse Attention。这一长串参数就是「一个 attention impl 要面对的全部多样性」。
+
+> 行内公式：缩放系数 \( \text{scale} = 1 / \sqrt{d_k} \)，其中 \( d_k \) 为 `head_size`。见 [attention.py:46-47](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/attention.py#L46-L47)。
+
+`AttentionBuilder` 是配套工厂：
+
+[lmdeploy/pytorch/backends/attention.py:109-130](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/attention.py#L109-L130) — `AttentionBuilder.build(...)` 的参数与 `AttentionImpl.__init__` 一一对应，设备子类实现它来实例化自己的 impl（如 cuda 的 `TritonAttentionBuilder.build` → `TritonAttention`）。这正是 `get_layer_impl_builder(OpType.PagedAttention)` 返回的那个对象。
+
+设备侧实现（仅指路，不展开）：CUDA 的 attention 实现住在 `backends/cuda/attention/` 包里（`default.py`/`fa3.py`/`mla.py` 三个子文件分别对应 Triton 默认、FlashAttention-3、MLA 三套路径）；dlinfer 的住在 `backends/dlinfer/attention.py`。它们都继承本讲的 `AttentionImpl`/`AttentionBuilder`。
+
+#### 4.3.4 代码实践
+
+**实践目标**：理解 metadata 是「每步动态构造」的，而非模型常量。
+
+**操作步骤**：
+
+1. 读 [cuda/op_backend.py:198-256](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/cuda/op_backend.py#L198-L256) 的 `CudaOpsBackend.update_step_context`，找到它如何用 `step_context.q_seqlens`/`kv_seqlens` 计算 `cu_seqlens_q/k`，并实例化 `TritonAttentionMetadata`。
+2. 回到本讲 [attention.py:12-23](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/attention.py#L12-L23)，逐字段标注「这个值在 `update_step_context` 哪一行被填入」。
+
+**需要观察的现象**：`cu_seqlens` 是用 `torch.cumsum` + `pad` 算出来的，每步都重算，随 batch 里序列长度变化而变化。
+
+**预期结果**：你能说出「metadata 不是模型的一部分，而是每步 forward 的输入之一」，并指出 cuda 与 ascend 在 metadata 字段上的差异（ascend 多了 `kv_start_indices`、`attention_mask`）。
+
+#### 4.3.5 小练习与答案
+
+**练习**：为什么 `AttentionImpl` 要带 `Generic[T]`，`T` 绑定到 `AttentionMetadata`？
+**答案**：为了让「impl 接收的 metadata 类型」可被子类收窄。基类声明接收 `AttentionMetadata`，但 cuda 的 impl 实际只认 `TritonAttentionMetadata`（带 `cu_seqlens` 等额外字段），ascend 的只认 `DlinferAttentionMetadata`（带 `kv_start_indices`）。泛型让类型检查器能捕捉「传错设备 metadata」这类错误。
+
+---
+
+### 4.4 linear 与 norm backend：薄接口族
+
+#### 4.4.1 概念说明
+
+与 attention 相比，linear 和 norm 的抽象简单得多——它们没有「每步变化的调度元数据」，只是「给权重和输入，算输出」。因此它们的 `backends/` 接口文件非常薄，只定义 `Impl`（怎么算）和 `Builder`（怎么造）两件套。
+
+但「简单」不等于「无趣」。linear 的多样性体现在**量化**：同一个 `forward` 签名，背后可能是 FP16 的 `F.linear`、INT8 的 W8A8 GEMM、4bit 的 AWQ 反量化、分块 FP8。这些由 `OpType`（4.2）在 `get_layer_impl_builder` 处分流到不同 Builder——也就是说，linear backend 的「多种实现」靠的是**枚举值的不同**，而非一个类里堆 if/else。这正是 u5-l2 「两段式派发」第二段的落点。
+
+norm 的多样性则体现在**是否量化**：`OpType.RMSNorm`（普通）与 `OpType.RMSNormW8A8`（配合 SmoothQuant 的 INT8 归一化）。
+
+#### 4.4.2 核心流程
+
+```text
+nn/linear/<variant>.py 构造期：
+  get_backend().get_layer_impl_builder(OpType.Linear<W8A8|W4A16|BlockedF8>)
+    └─ Builder.build(in_features, out_features, bias, dtype) ──▶ LinearImpl
+
+nn/linear/base.py forward 时：
+  self.impl.forward(x, weight, bias, all_reduce, group, rank, scatter_size)
+    └─ 设备 + 量化 的真实 GEMM
+```
+
+```text
+nn/norm.py 构造期：
+  量化分支 ? OpType.RMSNormW8A8 : OpType.RMSNorm
+    └─ get_backend().get_layer_impl_builder(...) ──▶ RMSNormImpl
+```
+
+#### 4.4.3 源码精读
+
+linear 接口极薄，但 `forward` 签名藏了张量并行（承接 u5-l2）：
+
+[lmdeploy/pytorch/backends/linear.py:8-25](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/linear.py#L8-L25) — `LinearImpl.forward(x, weight, bias, all_reduce, group, rank, scatter_size)`：`all_reduce`/`group` 服务行切分线性层的跨卡 all-reduce，`rank`/`scatter_size` 服务列切分的分片。`update_weights` 是给某些量化（需在加载期改写权重）留的钩子。
+
+[lmdeploy/pytorch/backends/linear.py:28-35](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/linear.py#L28-L35) — `LinearBuilder.build(in_features, out_features, bias, dtype)`：纯工厂签名。各设备/量化子类（`DefaultLinearBuilder`、`TritonLinearW8A8Builder`、`AwqLinearW4A16Builder`、`TritonLinearBlockedF8Builder`、`DlinferLinearBuilder` 等）实现它。
+
+`nn/linear/` 各变体如何调用——以默认线性层为例：
+
+[lmdeploy/pytorch/nn/linear/default.py:42](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/nn/linear/default.py#L42) — `impl_builder = get_backend().get_layer_impl_builder(OpType.Linear)`。其他量化变体（`awq.py`、`w8a8.py`、`blocked_fp8.py`、`lora.py`）只是换了 `OpType` 值（见 4.2.3 grep 结果），代码结构完全一致。
+
+norm 是同构的双子对（RMSNorm 与 LayerNorm 各一对）：
+
+[lmdeploy/pytorch/backends/norm.py:7-22](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/norm.py#L7-L22) — `RMSNormImpl.forward(x, weight, residual=None)`：`residual` 非空表示「残差融合」（Add+Norm 合一，承接 u5-l1），由设备 kernel 一次算完。
+
+[lmdeploy/pytorch/backends/norm.py:26-42](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/norm.py#L26-L42) — `LayerNormImpl/Builder`：与 RMSNorm 同构，多了 `bias` 参数（LayerNorm 有仿射偏置，RMSNorm 通常没有）。
+
+`nn/norm.py` 如何按量化选 OpType：
+
+[lmdeploy/pytorch/nn/norm.py:28-40](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/nn/norm.py#L28-L40) — `RMSNorm` 构造时按是否 W8A8 在 `OpType.RMSNormW8A8` 与 `OpType.RMSNorm` 间二选一，再 `get_backend().get_layer_impl_builder(...)`。这就是 norm 的「量化分支」，仅此一行 if。
+
+#### 4.4.4 代码实践
+
+**实践目标**：把 linear/norm 的接口族与 4.2 的派发表对齐。
+
+**操作步骤**：
+
+1. 读 [linear.py:8-35](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/linear.py#L8-L35)，记下 `LinearImpl.forward` 的全部参数。
+2. 在 `nn/linear/` 下分别打开 `default.py`、`awq.py`、`w8a8.py`、`blocked_fp8.py`，找出它们各自用的 `OpType`，填入下表：
+
+   | nn 变体 | OpType | cuda Builder |
+   | --- | --- | --- |
+   | default | `Linear` | `DefaultLinearBuilder`（回退 default） |
+   | awq | `LinearW4A16` | `AwqLinearW4A16Builder` |
+   | … | … | … |
+
+3. 对照 [cuda/op_backend.py:40-66](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/cuda/op_backend.py#L40-L66) 验证 cuda 端 Builder 名。
+
+**需要观察的现象**：`nn/linear/` 下各文件的构造代码**几乎一样**，差别只在传给 `get_layer_impl_builder` 的 `OpType`。
+
+**预期结果**：你得出结论——「linear 的量化分支不在 forward 里，而在构造期选哪个 OpType」。这是理解 u5-l2 两段式派发的关键观察。
+
+#### 4.4.5 小练习与答案
+
+**练习**：为什么 `LinearImpl.forward` 不接收 `quant_method` 参数，而要在构造期就分好类？
+**答案**：性能与清晰度。每次 forward 都判量化会引入分支开销且打乱 kernel 调用；构造期通过 `OpType` 选定专门的 impl，forward 直接走该量化的最优 kernel，零分支。这也让每个量化实现独立演进、互不污染。
+
+---
+
+### 4.5 token_dispatcher 与 moe_router：MoE 专用算子
+
+#### 4.5.1 概念说明
+
+MoE（混合专家，承接 u5-l3）有两段关键计算需要专用算子：
+
+- **门控路由（router）**：小线性层产出 `router_logits` 后，要选出 top-k 专家并算出加权权重。DeepSeek-V3 的 `noaux_tc` 路由（无辅助损失的负载均衡）是其中一种实现。
+- **token 分发/聚合（dispatcher）**：把每个 token 按它命中的专家「重排」到对应专家队列（dispatch），各专家算完后再把结果「还原」回原 token 顺序并加权求和（combine）。多卡时这一步伴随 all-to-all 通信。
+
+这两件事在多设备上实现差异很大（单卡是纯 index_select，多卡是集合通信 MC2/all-to-all），所以也走 `backends/` 的抽象，由各设备给具体实现。
+
+#### 4.5.2 核心流程
+
+```text
+MoE 前向：
+  router_logits = gate(x)
+  ├─ RouterNoauxTCImpl.forward(logits, bias) ──▶ (topk_weight, topk_ids)
+  │
+  ├─ TokenDispatcherImpl.dispatch(hidden, probs, topk_ids, local_experts)
+  │     └─ 把 token 按专家重排 + （多卡）集合通信 ──▶ 专家输入
+  │
+  ├─ 各专家 GEMM（FusedMoE* impl）
+  │
+  └─ TokenDispatcherImpl.combine(hidden) ──▶ 还原顺序 + 加权聚合
+```
+
+#### 4.5.3 源码精读
+
+`TokenDispatcherImpl` 既有「设备无关的纯 PyTorch 默认实现」（`permute`/`unpermute` 借鉴 Megatron-Core），也有「设备相关的抽象方法」（`dispatch`/`combine`）：
+
+[lmdeploy/pytorch/backends/token_dispatcher.py:7-22](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/token_dispatcher.py#L7-L22) — `permute`：按 `routing_map`（哪些 token 去哪个专家）把 token 重排成「按专家分组」的顺序，返回重排后的输入与索引。这是单卡、纯 PyTorch 的默认行为。
+
+[lmdeploy/pytorch/backends/token_dispatcher.py:24-40](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/token_dispatcher.py#L24-L40) — `unpermute`：`dispatch` 的逆操作，用 `scatter_add_` 把专家输出按索引还原回原 token 顺序，并乘上路由概率 `probs` 完成加权聚合。
+
+[lmdeploy/pytorch/backends/token_dispatcher.py:42-72](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/token_dispatcher.py#L42-L72) — `indices_to_multihot` 把 top-k 索引转成多热（multihot）路由图；`dispatch`/`combine` 是抽象方法——单卡实现可直接复用上面的 `permute`/`unpermute`，多卡实现（cuda 的 MC2、ascend 的 all-to-all）需自行重写以插入集合通信。这就是 token_dispatcher 作为「设备相关算子」进入 `backends/` 的原因。
+
+moe_router 抽象更短：
+
+[lmdeploy/pytorch/backends/moe_router.py:7-11](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/moe_router.py#L7-L11) — `RouterNoauxTCImpl.forward(logits, bias) -> (topk_weight, topk_ids)`：定义 noaux_tc 路由的契约——偏置 `bias` 仅参与选专家，权重来自不带偏置的 sigmoid 得分（承接 u5-l3 的 `NoauxTCRouter`）。
+
+[lmdeploy/pytorch/backends/moe_router.py:16-32](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/moe_router.py#L16-L32) — `RouterNoauxTCBuilder.build(...)`：把 `scoring_func`、`top_k`、`n_group`、`topk_group`、`n_routed_experts`、`routed_scaling_factor`、`renormalize` 等路由超参固化进 impl。它的 OpType 是 `OpType.RouterNoauxTC`（见 base.py 枚举），在 cuda 走 `TritonRouterNoauxTCBuilder`、未命中回退 default 的 `DefaultRouterNoauxTCBuilder`。
+
+`nn/` 侧调用：
+
+[lmdeploy/pytorch/nn/moe/route.py:23](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/nn/moe/route.py#L23) — `impl_builder = get_backend().get_layer_impl_builder(OpType.RouterNoauxTC)`，与 attention/linear 完全同构的桥接。
+
+#### 4.5.4 代码实践
+
+**实践目标**：理解 dispatcher 的「单卡 permute/unpermute」是默认行为，「多卡集合通信」是设备特化。
+
+**操作步骤**：
+
+1. 读 [token_dispatcher.py:10-40](https://github.com/InternLM/lmdeploy/blob/b56ddfb634f069b600f0fe3f4730fe289ac7fafe/lmdeploy/pytorch/backends/token_dispatcher.py#L10-L40)，用纸笔走一遍：假设 4 个 token、3 个专家，`routing_map` 指明每个 token 去哪几个专家，画出 `permute` 后 token 的排列与 `unpermute` 还原的过程。
+2. 在 `backends/cuda/token_dispatcher.py` 与 `backends/dlinfer/`（或 ascend 的相关实现）中找到 `dispatch`/`combine` 的具体实现，对比它们是否插入了 all-to-all / MC2 通信。
+
+**需要观察的现象**：单卡实现是纯 `index_select` + `scatter_add_`（无通信）；多卡实现会出现 `dist.all_to_all` 或厂商集合通信 API。
+
+**预期结果**：你能用一句话说出「token_dispatcher 把 MoE 的 token 路由计算与多卡通信封装成统一接口，单卡用默认重排、多卡走设备集合通信」。若找不到某设备的实现，标注「待确认」。
+
+#### 4.5.5 小练习与答案
+
+**练习**：`permute`/`unpermute` 是具体方法（非抽象），而 `dispatch`/`combine` 是抽象方法。为什么这样设计？
+**答案**：`permute`/`unpermute` 是「token 重排」的纯数学，与设备无关，故在基类给出默认实现供单卡复用；`dispatch`/`combine` 是「带通信的入口」，单卡与多卡行为不同（多卡要插集合通信），故设为抽象，强制各设备给自己的版本。这样单卡后端只需组合默认方法，多卡后端重写关键两步即可。
+
+---
+
+## 5. 综合实践
+
+**任务**：画出一张完整的「请求 → token → 算子后端」分发追踪图，验证本讲的二维分发模型。
+
+**步骤**：
+
+1. 选定一个模型（例如 `Qwen/Qwen2.5-7B-Instruct`），在 cuda 环境下用 `pipeline()` 跑一次推理（u1-l4）。
+2. 在以下三处分别设断点或加日志（仅阅读，不改源码逻辑）：
+   - `selector._get_backend` 的返回值（确认是 `CudaOpsBackend`）。
+   - `CudaOpsBackend.get_layer_impl_builder` 收到的 `OpType`（统计一次 forward 触发了哪些 OpType）。
+   - `nn/attention.py:49` 的 `impl_builder`（确认是 `TritonAttentionBuilder`）。
+3. 把观测到的 `OpType` 列表填入下表，并标注每个是「cuda 命中」还是「回退 default」：
+
+   | OpType | 命中位置 | Builder |
+   | --- | --- | --- |
+   | `PagedAttention` | cuda | `TritonAttentionBuilder` |
+   | `RMSNorm` | cuda | `TritonRMSNormBuilder` |
+   | `Linear` | default（回退） | `DefaultLinearBuilder` |
+   | `SiluAndMul` | cuda | `TritonSiluAndMulBuilder` |
+   | `ApplyRotaryEmb` | cuda | `TritonApplyRotaryEmbBuilder` |
+   | … | … | … |
+
+4. **回答两个问题**：
+   - 如果把同一模型换到 ascend 设备跑，上表里哪些 Builder 会变、哪些不变？（提示：继承自 dlinfer 与回退 default 的会变，回退 default 的不变。）
+   - 如果把模型换成 W8A8 量化版，`get_layer_impl_builder` 收到的 `OpType` 列表会多出哪些值？（提示：`LinearW8A8`、`RMSNormW8A8`，可能还有 `FusedMoEW8A8`。）
+
+**预期产出**：一张标注了「设备维度（selector）× 算子/量化维度（OpType）」的二维表，以及「换设备 vs 换量化分别影响哪一维」的清晰结论。
+
+> 若无法实际运行带断点的推理，可降级为纯源码阅读：静态对照 `default/op_backend.py` 与 `cuda/op_backend.py` 两张映射表，手工完成上表的「命中/回退」判定。**待本地验证**。
+
+## 6. 本讲小结
+
+- `selector.py` 是**纯设备路由**：`get_backend()` 读 `DeviceContext.device_type`，返回 `OpsBackend` 的某个子类；量化不在这层。
+- 分发是**二维查表**：设备维度由 `selector.py` 定（cuda/ascend/maca/camb），算子与量化维度由 `get_layer_impl_builder(OpType)` 定；`OpType` 枚举是接口树与实现树的唯一共同词汇。
+- 类层级用「命中即返回、未命中 `super()` 回退」组织：`DefaultOpsBackend`（纯 PyTorch 兜底）← `CudaOpsBackend` / `DlinferOpsBackend` ← `AscendOpsBackend` 等。default 不支持的算子抛 `RuntimeError`，attention 不能回退 default。
+- `attention backend` 是 `Impl / Builder / Metadata` 三件套：metadata 每步由 `update_step_context` 动态构造，impl 定义 `forward` 契约，builder 是工厂；linear/norm 是更薄的 `Impl/Builder` 两件套。
+- linear 的量化分支不在 `forward`，而在构造期选哪个 `OpType`（`Linear` / `LinearW4A16` / `LinearW8A8` / `LinearBlockedF8`）；换设备改第一维，换量化改第二维，互不干扰。
+- `token_dispatcher`（permute/unpermute 默认 + dispatch/combine 抽象）与 `moe_router`（`RouterNoauxTC`）是 MoE 的专用算子抽象，单卡用默认重排、多卡走设备集合通信。
+
+## 7. 下一步学习建议
+
+- **u5-l5（Triton/CUDA Kernel）**：本讲只到「Builder」这一层。真正的 kernel 住在 `backends/cuda/` 各文件里（如 `qmodules.py` 的 W8A8、`awq_modules.py` 的 W4A16、`blockedf8_modules.py` 的分块 FP8），下一讲带你打开 `TritonAttention` 等 impl，看 `@triton.jit` 写的 GPU kernel 长什么样。
+- **横向对照 TurboMind**：u6 会讲 TurboMind（C++）后端。届时可对比：PyTorch 后端靠 `backends/` 的 Python 抽象做设备分发，TurboMind 则把分发编译期化进 C++，体会两条路线的设计取舍。
+- **回头加深 u5-l3**：MoE 的 `dispatch/combine` 在多卡下的集合通信（MC2、all-to-all）与 EPLB 负载均衡强相关，可结合 u5-l3 的 eplb 一起读，理解「专家并行」的全貌。

@@ -1,0 +1,635 @@
+# DDP 分布式、混合精度与梯度累积
+
+## 1. 本讲目标
+
+本讲是「训练基础设施」单元的第 3 讲，承接 u4-l1（公共工具）与 u4-l2（检查点续训），聚焦于一次真实训练循环内部最核心的三件事：**怎么用多张卡一起跑、怎么用低精度省显存、怎么在显存不够时模拟大 batch**。
+
+读完本讲，你应当能够：
+
+- 说清楚 `torchrun --nproc_per_node N` 启动后到底往每个进程里塞了什么环境变量，`init_distributed_mode` 又如何据此决定是否进入 DDP 模式。
+- 看懂 `train_pretrain.py` 里 `train_epoch` 的完整一步：`autocast` 前向 → `scaler.scale().backward()` 反向 → `unscale_` → `clip_grad_norm_` → `scaler.step` → `scaler.update` → `zero_grad`，并能解释为什么这个顺序不能乱。
+- 区分 `bfloat16` 与 `float16` 两种混合精度的差异，理解为什么 `GradScaler` 只对 `float16` 开启。
+- 推导「梯度累积」为什么能模拟大 batch，并算出有效 batch size。
+- 理解 `DistributedDataParallel` 包装、`.module` 解包与 `torch.compile` 的装配顺序。
+
+本讲以 `trainer/train_pretrain.py` 的 `train_epoch` 为「模板代码」精读，它也是后续 SFT / LoRA / DPO / PPO 等所有 `train_*.py` 训练循环的范式。
+
+## 2. 前置知识
+
+在进入本讲前，建议你已经具备以下概念（不熟悉的术语下面会再点一遍）：
+
+- **训练一步在做什么**：前向算 loss → 反向算梯度 → 优化器用梯度更新参数 → 清空梯度。这是 u3-l5 与 u4-l1 已经反复出现的链路。
+- **DDP（DistributedDataParallel）**：PyTorch 的数据并行方案。每张卡放一份完整模型副本，各自处理不同数据，反向时把各卡梯度做「全部求和再平均」（all-reduce），让所有副本同步更新。
+- **NCCL**：NVIDIA 提供的 GPU 间集合通信库（"NVIDIA Collective Communication Library"），是 DDP 默认后端，负责跨卡的 all-reduce。
+- **混合精度（Automatic Mixed Precision, AMP）**：让部分算子（主要是矩阵乘）在低精度（fp16 或 bf16）下运算，节省显存、提速，同时用 fp32 保存关键累加以保证数值稳定。
+- **梯度累积（gradient accumulation）**：显存放不下大 batch 时，把一个大 batch 拆成若干 micro-batch 顺序前向反向，梯度累加，凑够再更新一次，等效于一次性跑了那个大 batch。
+- **梯度裁剪（gradient clipping）**：把所有梯度的整体范数限制在一个阈值内，防止训练中途梯度爆炸。
+
+本讲用到的工程背景（来自 u4-l1/u4-l2）：`get_lr` 每步手动把学习率写回 `optimizer.param_groups`；`lm_checkpoint` 同时保存推理权重与续训字典；`SkipBatchSampler` 在索引层跳过已训练 batch。这些会作为已知设施出现，不再展开。
+
+## 3. 本讲源码地图
+
+本讲只涉及两个文件，其中 `train_pretrain.py` 是主角：
+
+| 文件 | 作用 | 本讲引用的关键位置 |
+| --- | --- | --- |
+| `trainer/train_pretrain.py` | 预训练脚本，含 `train_epoch` 训练一步的模板与主流程装配 | `train_epoch`（24-80 行）、主流程中的 DDP/AMP/compile 装配（109-154 行）、收尾清理（169-172 行） |
+| `trainer/trainer_utils.py` | 训练公共工具箱 | `init_distributed_mode`（44-51 行）、`is_main_process`（31-32 行） |
+
+> 说明：DDP、AMP、梯度累积这套写法在项目里是**统一的训练范式**。后续讲义（u5、u6、u7）里的 `train_full_sft.py` / `train_lora.py` / `train_dpo.py` 等都沿用同样的骨架，只是换了 Dataset、loss 函数和可训练参数过滤逻辑。把本讲吃透，等于把项目里 8 个训练脚本的「底座」吃透了一半。
+
+## 4. 核心概念与源码讲解
+
+本讲拆成 4 个最小模块：
+
+1. `init_distributed_mode`：torchrun 启动与进程组初始化
+2. `DistributedDataParallel` 包装与分布式数据采样
+3. 混合精度训练：`autocast` 与 `GradScaler`
+4. `train_epoch`：梯度累积、梯度裁剪与更新时机
+
+### 4.1 `init_distributed_mode`：torchrun 启动与进程组初始化
+
+#### 4.1.1 概念说明
+
+「多卡训练」在本项目里指的是**单机多卡的数据并行**：你有一台机器、N 张 GPU，希望它们一起跑训练， ideally 训练速度近似线性提升。
+
+直接 `python train_pretrain.py` 只会起 1 个进程、用 1 张卡。要用 N 张卡，得用 PyTorch 自带的启动器 `torchrun`：
+
+```bash
+torchrun --nproc_per_node N train_pretrain.py
+```
+
+`torchrun` 会在后台帮你起 N 个进程（`--nproc_per_node N` 指定每台机器起几个，本讲只考虑单机）。每个进程跑的是**同一份 `train_pretrain.py` 脚本**，但 `torchrun` 给每个进程注入了不同的环境变量来区分身份：
+
+- `RANK`：全局进程编号（0 到 world_size-1）。
+- `WORLD_SIZE`：总进程数（即总卡数）。
+- `LOCAL_RANK`：本机内的进程编号，用来决定「这张进程该绑定哪一块物理 GPU」。
+
+所以脚本的第一个任务就是：**读取这些环境变量，判断自己是不是在 DDP 模式下、自己是第几号进程、该用哪块卡**。这件事封装在 `init_distributed_mode()` 里。
+
+#### 4.1.2 核心流程
+
+`init_distributed_mode` 的判别逻辑只有一句关键判断：**`RANK` 环境变量在不在**。
+
+- 用户直接 `python train_pretrain.py`：没有 `torchrun` 注入环境变量，`RANK` 读不到，函数返回 `0`，全程单卡模式，**不初始化任何进程组**。
+- 用户 `torchrun --nproc_per_node N ...`：每个进程都能读到 `RANK`，于是：
+  1. 调 `dist.init_process_group(backend="nccl")`，建立 NCCL 通信组，N 个进程相互「握手」。
+  2. 读 `LOCAL_RANK`，调 `torch.cuda.set_device(local_rank)`，把当前进程绑定到对应的物理 GPU——这一步很重要，后续所有 `tensor.to(device)`、DDP 通信都默认走这张卡。
+  3. 返回 `local_rank` 供主流程使用。
+
+用伪代码表示：
+
+```
+function init_distributed_mode():
+    if 环境变量 RANK 不存在:
+        return 0          # 单卡，不做任何分布式初始化
+    dist.init_process_group("nccl")     # 建立 NCCL 通信
+    local_rank = int(LOCAL_RANK)
+    torch.cuda.set_device(local_rank)   # 绑定本进程的物理 GPU
+    return local_rank
+```
+
+设计上有一个值得学习的点：**单卡与多卡共用同一份脚本**。函数用「环境变量在不在」来自动探测，调用方只需要 `if dist.is_initialized():` 判断一下要不要走分布式分支（如设置 `device`、用 `DistributedSampler`、包 DDP），而不需要为单卡/多卡维护两套代码。
+
+#### 4.1.3 源码精读
+
+`init_distributed_mode` 本体非常短，位于 [trainer/trainer_utils.py:44-51](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/trainer_utils.py#L44-L51)：
+
+```python
+def init_distributed_mode():
+    if int(os.environ.get("RANK", -1)) == -1:
+        return 0  # 非DDP模式
+
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank
+```
+
+- `os.environ.get("RANK", -1)`：取不到时给默认值 `-1`，于是 `int(-1) == -1` 触发「非 DDP」分支返回 0。这是一个用「魔法默认值 + 比较」代替 `try/except KeyError` 的常见写法。
+- `backend="nccl"`：GPU 训练的事实标准后端；CPU 多机训练才会用 `gloo`。
+- 注意函数返回的是 **`local_rank`**（本机编号），不是全局 `rank`。单机多卡时两者数值相等，但语义不同——后续 `device_ids=[local_rank]` 必须用本机编号。
+
+主流程里紧接着的「设备绑定 + 种子偏移」在 [trainer/train_pretrain.py:109-112](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L109-L112)：
+
+```python
+local_rank = init_distributed_mode()
+if dist.is_initialized(): args.device = f"cuda:{local_rank}"
+setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
+```
+
+- 第 2 行：只有进入 DDP 模式才把 `device` 从默认的 `cuda:0` 改成 `cuda:{local_rank}`，保证每张进程用自己的卡。
+- 第 3 行：种子设成 `42 + 全局 rank`。这是 u4-l1 讲过的技巧——各进程**种子不同**才能保证 `DistributedSampler` 切出的数据子集、以及数据增强的多样性；同时 cuDNN 关 benchmark 保证可复现。
+
+#### 4.1.4 代码实践
+
+**实践目标**：直观看到 `torchrun` 到底注入了哪些环境变量、`init_distributed_mode` 返回了什么。
+
+**操作步骤**：
+
+1. 在 `trainer/train_pretrain.py` 第 110 行 `local_rank = init_distributed_mode()` 之后**临时加一行**打印（仅用于本实践，验证完删掉）：
+
+   ```python
+   print(f"[debug] RANK={os.environ.get('RANK')}, WORLD_SIZE={os.environ.get('WORLD_SIZE')}, LOCAL_RANK={os.environ.get('LOCAL_RANK')}, local_rank={local_rank}, is_init={dist.is_initialized()}")
+   ```
+
+2. 分别用两种方式启动（在 `trainer/` 目录下）：
+
+   ```bash
+   # 方式 A：单进程，不经过 torchrun
+   python train_pretrain.py --epochs 1 --data_path ../dataset/pretrain_t2t_mini.jsonl
+
+   # 方式 B：经 torchrun 起单卡
+   torchrun --nproc_per_node 1 train_pretrain.py --epochs 1 --data_path ../dataset/pretrain_t2t_mini.jsonl
+   ```
+
+**需要观察的现象**：
+
+- 方式 A：`RANK=None, WORLD_SIZE=None, LOCAL_RANK=None, local_rank=0, is_init=False`。
+- 方式 B：`RANK=0, WORLD_SIZE=1, LOCAL_RANK=0, local_rank=0, is_init=True`。
+
+**预期结果**：方式 A 因为没有环境变量，`init_distributed_mode` 走「非 DDP」分支，`is_init=False`；方式 B 经 `torchrun` 注入了三个变量并初始化了进程组。这就是「同一份脚本、两种模式」的开关。
+
+> 待本地验证：上述打印输出取决于你的机器是否有可用 CUDA。若只有 CPU，`torch.cuda.set_device` 那行不会被执行（因为根本进不到 DDP 分支），但环境变量探测部分仍可验证。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果执行 `torchrun --nproc_per_node 4 train_pretrain.py`，4 个进程各自的 `LOCAL_RANK` 分别是多少？`WORLD_SIZE` 是多少？
+
+**答案**：4 个进程的 `LOCAL_RANK` 分别是 0、1、2、3，`WORLD_SIZE=4`。`LOCAL_RANK` 决定每个进程绑定第几张物理 GPU（`cuda:0` ~ `cuda:3`）。
+
+**练习 2**：为什么 `init_distributed_mode` 用「`RANK` 是否存在」来判断 DDP 模式，而不是给脚本加一个 `--ddp` 命令行参数？
+
+**答案**：因为 `torchrun` 本来就会自动注入 `RANK` 等变量，复用这个信号可以让 `python xxx.py`（单卡）和 `torchrun ... xxx.py`（多卡）共用同一份脚本、同一个入口，不需要用户额外记一个开关；同时也支持未来扩展到多机（多机也是 `torchrun` 注入同样的环境变量）。
+
+---
+
+### 4.2 `DistributedDataParallel` 包装与分布式数据采样
+
+#### 4.2.1 概念说明
+
+进程组建立之后，每个进程都已经有了一份独立的、随机初始化的模型（因为 `init_model` 在每个进程里都各自跑了一遍）。要让它们「协同训练」而非「各跑各的」，需要解决两个问题：
+
+1. **数据切分**：不能让每张卡都看到完整数据集的同一个 batch，否则 4 张卡就是在做 4 倍的重复计算。需要每张卡看到**不同的数据子集**。
+2. **梯度同步**：每张卡用自己的数据算出自己的梯度后，必须把各卡梯度合并，让所有副本朝同一个方向更新，否则 4 张卡训完会得到 4 个不同的模型。
+
+PyTorch 用两个组件分别解决：
+
+- `DistributedSampler`：按 `rank` 把数据集切片，保证每个 epoch 各卡看到互不重叠的数据。
+- `DistributedDataParallel`（DDP）：包装模型，在 `loss.backward()` 时**自动**触发梯度的 all-reduce（求和后除以 `world_size` 取平均），让所有副本的 `.grad` 完全一致。
+
+#### 4.2.2 核心流程
+
+一次 DDP 训练步的完整数据流：
+
+```
+DistributedSampler.set_epoch(epoch)         # 改变洗牌种子，每个 epoch 数据顺序不同
+        │
+        ▼
+每张卡各自取一个 batch（互不重叠） ──► 前向算 loss
+        │
+        ▼
+loss.backward()                             # DDP 在这里挂了钩子
+        │  ┌──────────────────────────────────────────┐
+        │  │ DDP 自动：把本卡梯度 all-reduce 给所有卡  │
+        │  │         并对 world_size 求平均           │
+        │  └──────────────────────────────────────────┘
+        ▼
+所有卡的 model.parameters().grad 现在完全一致
+        │
+        ▼
+optimizer.step()                            # 各卡用相同梯度更新 → 副本保持同步
+```
+
+关键点：
+
+- DDP 的梯度同步是**自动且重叠**的：它在 `backward()` 计算出某个参数梯度的瞬间，就通过后台通信把该梯度 all-reduce 出去，与反向计算重叠，从而隐藏通信延迟（称为 **bucket + overlap**）。
+- 因为同步发生在反向，所以**每张卡必须用相同的 batch size 跑同样多步**，否则会有进程卡在 all-reduce 等待。MiniMind 用 `DistributedSampler` 保证各卡 batch 数相同。
+- 因为各卡梯度被平均，最终所有副本更新后完全一致，所以**保存权重只需要保存 rank 0 的副本**（用 `is_main_process()` 门控）。
+
+#### 4.2.3 源码精读
+
+**数据切分**：`DistributedSampler` 的创建在 [trainer/train_pretrain.py:136](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L136)：
+
+```python
+train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
+```
+
+- 单卡时为 `None`，`DataLoader` 走默认顺序采样；多卡时用 `DistributedSampler`，它内部根据 `rank` 与 `world_size` 把数据集切片，第 `r` 号进程只取索引满足 `index % world_size == rank` 的样本（粗略说法，实际还有 drop_last/padding 细节）。
+
+**每个 epoch 重洗**：[trainer/train_pretrain.py:158](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L158)：
+
+```python
+train_sampler and train_sampler.set_epoch(epoch)
+```
+
+- `DistributedSampler` 默认在每次迭代前用 `epoch + rank` 做种子洗牌。**不调用 `set_epoch` 的话，每个 epoch 各卡拿到的数据顺序完全相同**，等于反复训练同一批顺序。这一行用 `and` 短路：单卡时 `train_sampler is None`，表达式直接为 `None`，不报错。
+
+**模型包装**：[trainer/train_pretrain.py:153-154](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L153-L154)：
+
+```python
+if dist.is_initialized():
+    model = DistributedDataParallel(model, device_ids=[local_rank])
+```
+
+- `device_ids=[local_rank]`：告诉 DDP 这张进程的输入输出都在 `cuda:{local_rank}` 上，单卡单进程时传单元素列表。
+- 包装后，`model(input_ids, labels=labels)` 实际调用的是 DDP 的 `forward`，它内部再调真实模型的 `forward`，并在 `backward` 时挂上 all-reduce 钩子。
+
+**装配顺序（含 torch.compile）**：[trainer/train_pretrain.py:150-154](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L150-L154)：
+
+```python
+if args.use_compile == 1:
+    model = torch.compile(model)
+    Logger('torch.compile enabled')
+if dist.is_initialized():
+    model = DistributedDataParallel(model, device_ids=[local_rank])
+```
+
+- 注意顺序：**先 `torch.compile`，再包 DDP**。这是 PyTorch 官方推荐顺序——DDP 必须包在最外层，才能正确地在编译后的模块上挂梯度同步钩子。反过来包会导致编译图与 DDP 钩子不兼容。
+- `torch.compile`（默认触发时）会把整个训练步编译成 fused kernel，提升速度；它需要预热几步，前几步会慢。注意 LoRA 训练（u6）**禁用** compile，因为 LoRA 的 `apply_lora` 用 monkey-patch 改写了 `Linear.forward`，与 compile 的图捕获冲突。
+
+**解包保存权重**：训练中保存检查点时，必须把外层 DDP / compile 壳剥掉，拿到真实的 `state_dict`。这在 [trainer/train_pretrain.py:65-67](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L65-L67)：
+
+```python
+raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+raw_model = getattr(raw_model, '_orig_mod', raw_model)
+state_dict = raw_model.state_dict()
+```
+
+- 第一行：DDP 包装的真实模型挂在 `.module` 属性上，剥掉它。
+- 第二行：`torch.compile` 包装的真实模型挂在 `._orig_mod` 上，剥掉它。`getattr(..., '_orig_mod', raw_model)` 表示「如果有这个属性就取，没有就原样返回」，从而兼容「只开了 DDP 没开 compile」和「两个都没开」的情况。
+
+**主进程门控**：保存只在 rank 0 做，靠 [trainer/trainer_utils.py:31-32](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/trainer_utils.py#L31-L32) 的 `is_main_process`：
+
+```python
+def is_main_process():
+    return not dist.is_initialized() or dist.get_rank() == 0
+```
+
+- 单卡（未初始化）时也是「主进程」，所以保存逻辑同时适用于单卡和多卡 rank 0。
+
+**收尾清理**：训练结束销毁进程组，[trainer/train_pretrain.py:169-172](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L169-L172)：
+
+```python
+if dist.is_initialized():
+    dist.barrier()
+    dist.destroy_process_group()
+```
+
+- `dist.barrier()` 让所有进程在这里同步，确保 rank 0 的保存动作完成后再统一退出，避免有的进程已退出、有的还在写文件。
+- `destroy_process_group()` 释放 NCCL 资源。
+
+#### 4.2.4 代码实践
+
+**实践目标**：通过阅读 + 改一行配置，验证「DDP 包装改变了 `model` 的类型」与「解包保存」的必要性。
+
+**操作步骤**（源码阅读型，无需多卡）：
+
+1. 阅读 [trainer/train_pretrain.py:134-154](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L134-L154)，在纸上标注 `model` 变量经过 `init_model` →（可选 `torch.compile`）→（可选 DDP）后类型如何变化。
+2. 思考：如果保存权重时**不**剥 `.module`，直接 `model.state_dict()`，存下来的 key 会带什么前缀？这会在 `eval_llm.py` 用 `strict=False` 加载时埋下什么隐患？
+
+**需要观察的现象 / 预期结果**：
+
+- 直接对 DDP 包装后的 `model` 取 `state_dict()`，所有参数名都会带上 `module.` 前缀（如 `module.embed_tokens.weight`）。剥壳后才是干净的 `embed_tokens.weight`。
+- 若带前缀保存，`init_model` 里 `model.load_state_dict(weights, strict=False)` 因为 key 对不上会**静默跳过全部权重**，模型等于从头初始化——这正是 `strict=False` 容错的副作用（u4-l1 讲过）。
+
+> 待本地验证：多卡环境下，可临时把第 65 行改成不剥壳并保存，再用 `eval_llm.py` 加载，对比输出是否「像未训练」。单卡环境下 DDP 不生效，这条路径不触发，可作为纯阅读理解题。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：DDP 为什么在 `backward()` 时同步梯度，而不是在 `forward()` 时同步激活？
+
+**答案**：同步梯度只需 all-reduce 每个参数一个梯度（参数量级 MB~GB），而同步激活要传每层中间张量（大得多，且层间依赖）。梯度同步还能与反向计算 overlap 隐藏通信开销。同步梯度后各副本 `.grad` 一致，`optimizer.step` 后副本保持同步，这是 DDP 高效的关键。
+
+**练习 2**：`train_sampler.set_epoch(epoch)` 不调用会怎样？
+
+**答案**：`DistributedSampler` 内部用 `epoch` 作随机种子洗牌。不调用 `set_epoch` 则每个 epoch 拿到的样本顺序相同，模型反复见到完全相同的「epoch 内容」，相当于变相减少有效训练数据、降低泛化。
+
+---
+
+### 4.3 混合精度训练：`autocast` 与 `GradScaler`
+
+#### 4.3.1 概念说明
+
+「混合精度」是说在一次训练步里**故意混用多种数值精度**：矩阵乘这类对精度不敏感、但耗时耗显存的算子用低精度（fp16 或 bf16）跑；累加、归一化这类容易丢精度的操作仍用 fp32。
+
+为什么这么做？以 fp16 为例，一个 fp16 数只占 2 字节（fp32 是 4 字节），显存直接减半，GPU 上的 fp16 算力通常也显著高于 fp32。但 fp16 有两个毛病：
+
+1. **动态范围小**：最大值约 \(6.5\times10^4\)，反向传播的梯度常常极小（如 \(10^{-6}\)），在 fp16 里会**下溢为 0**，导致这部分参数永远不更新。
+2. **舍入误差**：大数吃小数。
+
+针对第 1 点，PyTorch 提供 `GradScaler`：在反向前把 loss 放大 \(S\) 倍，让梯度一起被放大而不下溢；更新参数前再缩回来。
+
+而 **bf16（bfloat16）** 用与 fp32 相同的 8 位指数（只是尾数少），动态范围和 fp32 一样大，**没有下溢问题**，所以 bf16 训练**不需要 `GradScaler`**。这是现代训练默认选 bf16 的原因。
+
+| 精度 | 字节 | 指数位 | 尾数位 | 最大值 | 动态范围 | 需要 GradScaler |
+| --- | --- | --- | --- | --- | --- | --- |
+| fp32 | 4 | 8 | 23 | ~\(3.4\times10^{38}\) | 大 | 否 |
+| fp16 | 2 | 5 | 10 | ~\(6.5\times10^{4}\) | 小 | **是** |
+| bf16 | 2 | 8 | 7 | ~\(3.4\times10^{38}\) | 大 | 否 |
+
+MiniMind 默认用 `bfloat16`（见 `--dtype` 默认值）。
+
+#### 4.3.2 核心流程
+
+混合精度一步的关键动作：
+
+```
+with autocast(dtype):          # 进入自动混合精度上下文
+    res = model(input_ids, labels=labels)   # 矩阵乘自动降精度
+    loss = res.loss + res.aux_loss
+scaled_loss = scaler.scale(loss)   # 仅 fp16：把 loss 乘 S
+scaled_loss.backward()             # 反向：梯度 = S·真实梯度（不下溢）
+# —— 累积到 N 步后 ——
+scaler.unscale_(optimizer)         # 把 .grad 除以 S 还原
+clip_grad_norm_(...)               # 在「真实尺度」的梯度上裁剪
+scaler.step(optimizer)             # 若梯度无 inf/nan 则 optimizer.step()，否则跳过
+scaler.update()                    # 根据是否出现 inf/nan 动态调整 S
+```
+
+数学上，设真实损失为 \(L\)，缩放因子为 \(S\)：
+
+- 放大损失：\(\tilde{L} = S \cdot L\)
+- 反向得到的放大梯度：\(\tilde{g} = S \cdot g\)
+- `unscale_` 还原：\(g = \tilde{g} / S\)
+
+`GradScaler` 的自适应逻辑：若 `scaler.step` 检测到梯度里出现 `inf/nan`（说明 \(S\) 太大把梯度顶爆了），就**跳过本次更新**并把 \(S\) 调小；连续若干步都正常就把 \(S\) 调大，始终维持在「恰好不下溢」的区间。
+
+bf16 模式下，`GradScaler` 会被设为 `enabled=False`，此时 `scaler.scale(loss)` 直接返回原 loss，`scaler.step(optimizer)` 直接调 `optimizer.step()`，整套缩放逻辑变成空操作——同一份代码兼容两种精度。
+
+#### 4.3.3 源码精读
+
+**autocast 上下文的创建**在 [trainer/train_pretrain.py:119-122](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L119-L122)：
+
+```python
+device_type = "cuda" if "cuda" in args.device else "cpu"
+dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
+```
+
+- 第 2 行：`--dtype` 只有两种取值映射——`bfloat16` 或 `float16`。
+- 第 3 行：CPU 训练时用 `nullcontext()`（什么都不做的上下文管理器），因为 CPU 上没有混合精度收益；CUDA 上才创建 `autocast`。`autocast_ctx` 之后在 `train_epoch` 里被 `with autocast_ctx:` 复用，**整个训练只创建一次上下文对象，反复进入退出**，避免每步重建。
+
+**GradScaler 的创建**在 [trainer/train_pretrain.py:137](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L137)：
+
+```python
+scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
+```
+
+- 关键就是 `enabled=(args.dtype == 'float16')`：bf16 时传 `False`，scaler 变成「透明直通」，所有方法调用都是空操作，但 API 形式不变。这就是为什么 `train_epoch` 里无脑写 `scaler.scale(...).backward()` / `scaler.step(...)`，无需 `if` 分支。
+
+**前向 + 反向**在 `train_epoch` 里，[trainer/train_pretrain.py:35-40](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L35-L40)：
+
+```python
+with autocast_ctx:
+    res = model(input_ids, labels=labels)
+    loss = res.loss + res.aux_loss
+    loss = loss / args.accumulation_steps
+
+scaler.scale(loss).backward()
+```
+
+- `with autocast_ctx:` 包住前向：进入后，`model` 内部的矩阵乘（`q_proj`/`k_proj`/`lm_head` 等）自动用 bf16/fp16 执行，而 softmax、归一化等会保持 fp32。
+- 第 38 行 `loss = loss / args.accumulation_steps` 是为**梯度累积**做准备（见 4.4），与混合精度本身无关，但写在 autocast 块内、`backward` 之前。
+- 第 40 行 `scaler.scale(loss).backward()`：放大 loss 再反向。bf16 时 `scale` 返回原 loss。
+
+#### 4.3.4 代码实践
+
+**实践目标**：观察 bf16 与 fp16 在本项目里的差异，并验证 `GradScaler` 的开关行为。
+
+**操作步骤**：
+
+1. 在 `train_pretrain.py` 第 137 行 `scaler` 创建后加一行打印：
+
+   ```python
+   print(f"[debug] dtype={args.dtype}, scaler.enabled={scaler.is_enabled()}")
+   ```
+
+2. 分别用两种精度各跑 1 个 epoch（数据用 `pretrain_t2t_mini.jsonl`）：
+
+   ```bash
+   torchrun --nproc_per_node 1 train_pretrain.py --dtype bfloat16 --epochs 1
+   torchrun --nproc_per_node 1 train_pretrain.py --dtype float16  --epochs 1
+   ```
+
+**需要观察的现象**：
+
+- `--dtype bfloat16`：`scaler.enabled=False`。
+- `--dtype float16`：`scaler.enabled=True`。
+
+**预期结果**：bf16 训练完全不走缩放逻辑，更稳但需要 Ampere 及以上架构（如 A100/RTX 30xx+）；fp16 走缩放逻辑，在较老显卡（如 GTX/V100）上也能跑，但训练初期可能看到个别 step 被 `scaler.step` 跳过（表现为 loss 偶尔不更新）。
+
+> 待本地验证：fp16 是否会出现「跳过 step」取决于模型规模与数据，小模型小数据上可能整轮都不触发；若想强制观察，可把 `--learning_rate` 调到异常大（如 1e-2）制造梯度爆炸。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 bf16 不需要 `GradScaler`，而 fp16 需要？
+
+**答案**：bf16 的指数位与 fp32 相同（8 位），动态范围足够大，反向的小梯度不会下溢为 0；fp16 只有 5 位指数，动态范围小，小梯度在 fp16 里会变成 0 导致参数不更新，所以要先放大 loss 把梯度抬出下溢区。
+
+**练习 2**：`scaler.step(optimizer)` 与直接调 `optimizer.step()` 有什么区别？
+
+**答案**：`scaler.step` 内部会先检查「unscale 后的梯度」是否含 `inf/nan`：若含，则**跳过**本次 `optimizer.step()`（避免用坏梯度更新参数），并把内部缩放因子 \(S\) 调小；若正常，则执行 `optimizer.step()` 并可能逐步调大 \(S\)。直接调 `optimizer.step()` 没有这层保护。
+
+---
+
+### 4.4 `train_epoch`：梯度累积、梯度裁剪与更新时机
+
+#### 4.4.1 概念说明
+
+理想情况下，我们想用很大的 batch size 训练（梯度估计更稳、训练更平滑）。但显存有限：batch 越大，前向激活值占的显存越多，很容易 OOM。
+
+**梯度累积**（gradient accumulation）是显存与 batch size 之间的折中：把一个「逻辑大 batch」拆成 \(N\) 个能放进显存的「micro-batch」，依次前向反向，**梯度自然累加在 `param.grad` 里**，等攒够 \(N\) 份再调一次 `optimizer.step()`。从优化器视角看，这等价于一次性跑了那个大 batch。
+
+**梯度裁剪**（gradient clipping）则是一道保险：反向得到梯度后，如果整体范数超过阈值 `grad_clip`，就把所有梯度等比缩小到阈值，防止梯度爆炸把训练打飞。本项目用 `clip_grad_norm_`，做的是「全局 L2 范数裁剪」。
+
+#### 4.4.2 核心流程
+
+`train_epoch` 的主循环把 AMP、累积、裁剪、scaler 全部交织在一起。一个完整「逻辑 step」（含 \(N\) 个 micro-step）的流程：
+
+```
+for step, (input_ids, labels) in enumerate(loader):
+    ── 每个 micro-step 都执行 ──
+    1. lr = get_lr(...); 写回 optimizer              # 手动学习率（u4-l1）
+    2. with autocast_ctx: forward → loss             # 混合精度前向（4.3）
+    3. loss = (res.loss + res.aux_loss) / N          # 除以累积步数
+    4. scaler.scale(loss).backward()                 # 放大反向，梯度累加到 .grad
+
+    ── 每 N 个 micro-step 才执行一次 ──
+    if step % N == 0:
+        5. scaler.unscale_(optimizer)                # 还原梯度真实尺度
+        6. clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪
+        7. scaler.step(optimizer)                    # （检查 inf/nan 后）更新参数
+        8. scaler.update()                           # 动态调整缩放因子
+        9. optimizer.zero_grad(set_to_none=True)     # 清空 .grad，开始下一轮累积
+```
+
+**为什么 loss 要除以 \(N\)？** 因为 PyTorch 的 `.grad` 是**累加**的（`backward` 不会自动清零）。若每个 micro-step 反向 \(\ell_i\)，累积后 `.grad = \sum_i \nabla \ell_i`，这是「和」而不是「均值」。为了让它等价于「把 \(N\) 个 batch 合成一个大批次后求平均梯度」，需要每个 \(\ell_i\) 先除以 \(N\)：
+
+\[
+\sum_{i=1}^{N} \nabla \left(\frac{\ell_i}{N}\right) = \nabla \left( \frac{1}{N}\sum_{i=1}^{N} \ell_i \right) = \nabla\,\overline{\ell}
+\]
+
+这正是第 3 步 `loss = loss / args.accumulation_steps` 的数学含义。
+
+**有效 batch size**：综合单卡 batch、累积步数、卡数：
+
+\[
+\text{effective\_batch\_size} = \text{batch\_size} \times \text{accumulation\_steps} \times \text{world\_size}
+\]
+
+以 MiniMind 默认 `batch_size=32`、`accumulation_steps=8`、单卡为例：有效 batch \(= 32 \times 8 \times 1 = 256\)。若换 4 卡：\(= 32 \times 8 \times 4 = 1024\)。
+
+**梯度裁剪**：`clip_grad_norm_(params, max_norm)` 计算所有参数梯度的全局 L2 范数 \(g = \sqrt{\sum_i \|\nabla_i\|_2^2}\)，若 \(g > \text{max\_norm}\) 则把每个梯度乘 \(\text{max\_norm}/g\)。本项目 `--grad_clip` 默认 `1.0`。
+
+**为什么 `unscale_` 必须在 `clip` 之前？** 因为裁剪阈值 `1.0` 是针对「真实梯度尺度」定的。若先 clip 再 unscale，clip 的对象是被放大了 \(S\) 倍的梯度，阈值就失去意义；而且 PyTorch 规定 `unscale_` 每个 `optimizer` 只能调一次，必须放在 step 之前。
+
+#### 4.4.3 源码精读
+
+**主循环 + 手动学习率**：[trainer/train_pretrain.py:24-33](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L24-L33)：
+
+```python
+def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+    start_time = time.time()
+    last_step = start_step
+    for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
+        input_ids = input_ids.to(args.device)
+        labels = labels.to(args.device)
+        last_step = step
+        lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+```
+
+- `for step, (...) in enumerate(loader, start=start_step + 1)`：`start_step` 来自断点续训（u4-l2），`enumerate` 的 `start` 让 step 编号连续，从而 `get_lr` 用的全局步数 `epoch*iters+step` 连续，学习率曲线不因中断错位。
+- 第 31-33 行：手动把余弦退火（u4-l1）算出的 lr 写回所有 `param_groups`，不用 `lr_scheduler`。
+
+**前向 + 累积 + 反向**：[trainer/train_pretrain.py:35-40](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L35-L40)（前文 4.3.3 已贴，此处聚焦累积）：注意 `loss = loss / args.accumulation_steps` 在 `backward` 之前完成。
+
+**更新块（每 N 步）**：[trainer/train_pretrain.py:42-49](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L42-L49)：
+
+```python
+if step % args.accumulation_steps == 0:
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+    scaler.step(optimizer)
+    scaler.update()
+
+    optimizer.zero_grad(set_to_none=True)
+```
+
+- 顺序严格：`unscale_` → `clip_grad_norm_` → `scaler.step` → `scaler.update` → `zero_grad`。这正是 4.4.2 流程图里第 5-9 步。
+- `zero_grad(set_to_none=True)`：把 `.grad` 直接设成 `None` 而不是 0，省显存、且让优化器下次能区分「未累积」与「累积为 0」。
+
+**日志显示的「真实 loss」**：[trainer/train_pretrain.py:51-58](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L51-L58)：
+
+```python
+current_loss = loss.item() * args.accumulation_steps
+```
+
+- 因为存进 `loss` 的是除以 \(N\) 之后的值，打印时再乘回 \(N\)，让日志里的 loss 数值反映「单 micro-batch 的真实量级」，便于人眼看趋势。同时 `logits_loss = loss - aux_loss` 把 MoE 负载均衡损失拆出来单独显示（u3-l4、u3-l5）。
+
+**尾部残余更新**：[trainer/train_pretrain.py:75-80](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L75-L80)：
+
+```python
+if last_step > start_step and last_step % args.accumulation_steps != 0:
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+```
+
+- 若一个 epoch 的总 batch 数不能被 \(N\) 整除，最后会剩下不足 \(N\) 个 micro-batch 的梯度没被 step 掉。这段在循环结束后补做一次更新，避免「最后几步梯度白白累积」。
+- `last_step > start_step` 守卫确保这个 epoch 真的跑过 batch（而不是续训时整个 epoch 已完成）才补更新。
+
+#### 4.4.4 代码实践
+
+**实践目标**：用单卡启动一次预训练，在代码里观察 `local_rank` / `world_size`，并量化「梯度累积对有效 batch 的放大」。
+
+**操作步骤**：
+
+1. 在 [trainer/train_pretrain.py:110](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L110) 的 `local_rank = init_distributed_mode()` 之后加入：
+
+   ```python
+   ws = dist.get_world_size() if dist.is_initialized() else 1
+   print(f"[debug] local_rank={local_rank}, world_size={ws}")
+   print(f"[debug] effective_batch = batch_size({args.batch_size}) × accumulation_steps({args.accumulation_steps}) × world_size({ws}) = {args.batch_size * args.accumulation_steps * ws}")
+   ```
+
+2. 在 [trainer/train_pretrain.py:42](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L42) 的 `if step % args.accumulation_steps == 0:` 块内、`scaler.step` 之前加一行：
+
+   ```python
+   if step % args.log_interval == 0:
+       print(f"[debug] step={step} 真正执行 optimizer.step()，本次更新累积了 {args.accumulation_steps} 个 micro-batch 的梯度")
+   ```
+
+3. 启动训练（`trainer/` 目录下）：
+
+   ```bash
+   torchrun --nproc_per_node 1 train_pretrain.py \
+     --epochs 1 --batch_size 32 --accumulation_steps 8 \
+     --data_path ../dataset/pretrain_t2t_mini.jsonl
+   ```
+
+**需要观察的现象**：
+
+- 开头一行：`local_rank=0, world_size=1, effective_batch = 32 × 8 × 1 = 256`。
+- 训练中：`optimizer.step()` 的 debug 只在 step 是 8 的倍数时打印（如 step=8、16、24…），而前向 loss 日志（`step % log_interval`）打印更频繁——直观体现「前向每步都做、更新每 8 步做一次」。
+
+**预期结果**：单卡下有效 batch 为 256；每 8 个 micro-step 才发生一次真实参数更新，optimizer 内部「看到」的是 8 个 micro-batch 的平均梯度。把 `--accumulation_steps` 改成 1 再跑，会看到每步都 `optimizer.step()`、显存几乎不变但训练更「抖」（因为 batch 变小、梯度估计方差变大）。
+
+> 待本地验证：实际 loss 曲线、显存占用与 tokens/s 取决于硬件。无 GPU 时，可把 `--device cpu` 配 `--dtype` 失效（autocast 自动退化为 `nullcontext`），仅验证 step 触发节奏与有效 batch 公式，不验证加速效果。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：默认配置 `batch_size=32, accumulation_steps=8`，单卡下有效 batch 是多少？若想在不改显存占用的前提下把有效 batch 提升到 512，最直接的办法是什么？
+
+**答案**：有效 batch \(= 32 \times 8 \times 1 = 256\)。单 micro-batch 显存只与 `batch_size`（32）有关，与累积步数无关，所以把 `--accumulation_steps` 改成 16 即可让有效 batch 翻倍到 512，而显存占用基本不变（代价是每步要做更多次前向反向、训练变慢）。
+
+**练习 2**：如果把 `scaler.unscale_(optimizer)` 和 `clip_grad_norm_(...)` 的顺序对调，会发生什么？
+
+**答案**：两件事——① 裁剪阈值 `1.0` 是针对真实梯度定的，先 clip 等于在被放大 \(S\) 倍的梯度上裁剪，阈值完全失去意义；② PyTorch 规定 `unscale_` 在一次 `scaler` 生命周期内对同一 optimizer 只能调一次，且必须在 `step` 之前。乱序会抛错或导致裁剪在错误尺度上进行。正确顺序永远是 `unscale_ → clip → step → update`。
+
+**练习 3**：为什么训练日志里要写 `loss.item() * args.accumulation_steps`，而不是直接打印 `loss`？
+
+**答案**：因为存进 `loss` 变量的是 `loss / accumulation_steps`（为梯度累积做的归一），直接打印会让人觉得 loss 异常小。乘回累积步数后，日志里的数值对应单个 micro-batch 的真实 loss 量级，方便人眼对比趋势。
+
+## 5. 综合实践
+
+把本讲四个最小模块串起来，做一个「阅读 + 推演」的综合任务。
+
+**任务**：阅读 [trainer/train_pretrain.py:24-80](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L24-L80) 的 `train_epoch` 与 [trainer/train_pretrain.py:83-172](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L83-L172) 的主流程，回答下面的问题，并画一张「一次 `optimizer.step()` 之内的时序图」。
+
+1. **环境探测**：`init_distributed_mode` 返回 `0` 有哪两种语义？（提示：单卡返回 0；多卡返回的是 `local_rank`，也可能是 0 号进程。）这两种情况分别如何被 `if dist.is_initialized():` 区分？
+2. **装配顺序**：把第 150-154 行的 `torch.compile` 与 `DistributedDataParallel` 包装顺序对调，会出什么问题？为什么 DDP 必须在最外层？
+3. **有效 batch**：假设你在 2 卡机器上跑 `torchrun --nproc_per_node 2 train_pretrain.py --batch_size 16 --accumulation_steps 4`，请算出有效 batch size，并说明每张卡一次 `optimizer.step()` 实际累积了多少个样本的梯度。
+4. **精度选择**：把 `--dtype` 从 `bfloat16` 改成 `float16`，第 137 行的 `GradScaler` 行为如何变化？为什么 bf16 不需要 scaler，却仍然写 `scaler.scale(loss).backward()` 而不报错？
+5. **更新时机**：若一个 epoch 总共 30 个 batch，`accumulation_steps=8`，那么主循环里 `optimizer.step()` 在 epoch 内被调用几次？最后那段 [75-80 行](https://github.com/jingyaogong/minimind/blob/512eed0b6556e741d80864f054d45d271459772a/trainer/train_pretrain.py#L75-L80) 的「尾部更新」会不会触发？为什么？
+
+**参考答案要点**：
+
+1. 返回 0 的两种语义：① 单卡（无 `RANK`），完全没初始化进程组，`is_initialized()=False`；② 多卡的 rank 0 进程，`local_rank=0`，`is_initialized()=True`。两者靠 `dist.is_initialized()` 区分，而不是靠返回值。
+2. 对调会让 DDP 被编译进 compile 的图里，DDP 的梯度同步钩子无法正确挂载。官方推荐顺序是 compile 内层、DDP 外层（`DDP(compile(model))`），这样 DDP 能在编译后的模块上正常工作。
+3. 有效 batch \(= 16 \times 4 \times 2 = 128\)。每张卡一次 `optimizer.step()` 累积了 \(16 \times 4 = 64\) 个样本的梯度；两卡各 64，梯度 all-reduce 平均后等效于 128 个样本的平均梯度。
+4. `--dtype float16` 时 `enabled=True`，scaler 真正放大 loss；`bfloat16` 时 `enabled=False`，`scaler.scale` 返回原 loss，`scaler.step` 直接调 `optimizer.step()`——API 不变只是内部短路，所以同一份 `train_epoch` 代码兼容两种精度。
+5. 30 个 batch、累积 8：主循环 `step=8,16,24` 时各触发一次（共 3 次），`step=30` 时不是 8 的倍数不触发；循环结束后 `last_step=30`，`30 % 8 = 6 ≠ 0`，且 `last_step > start_step`，所以尾部更新**会触发**一次，把最后 6 个 batch 的梯度用掉。总更新 \(3+1=4\) 次。
+
+> 这一题集覆盖了本讲全部 4 个最小模块：①对应 `init_distributed_mode`，②对应 DDP/compile 装配，③对应有效 batch 与梯度累积，④对应混合精度，⑤对应 `train_epoch` 的更新时机与尾部处理。
+
+## 6. 本讲小结
+
+- **DDP 由环境变量自动探测**：`init_distributed_mode` 用 `RANK` 是否存在判断是否进入分布式，单卡与多卡共用同一份脚本；`torchrun --nproc_per_node N` 负责注入 `RANK/WORLD_SIZE/LOCAL_RANK` 并起 N 个进程，`LOCAL_RANK` 决定每张进程绑定哪块 GPU。
+- **DDP = 数据切分 + 梯度同步**：`DistributedSampler` 按 rank 切数据并需 `set_epoch` 重洗；`DistributedDataParallel` 在 `backward` 自动 all-reduce 平均梯度使副本同步；保存权重时须剥 `.module` / `._orig_mod`，且装配顺序是「先 compile 后 DDP」。
+- **混合精度 = autocast + 可选 GradScaler**：`autocast` 让矩阵乘自动降精度；fp16 动态范围小、需 `GradScaler` 放大 loss 防梯度下溢，bf16 不需要——靠 `enabled=(dtype=='float16')` 让同一份代码兼容两者。
+- **梯度累积以 loss/N 模拟大 batch**：每个 micro-step 反向 \(\ell/N\)，梯度累加到 `.grad`，攒够 \(N\) 步才 `step`；有效 batch \(=\) batch_size \(\times\) accumulation_steps \(\times\) world_size，显存只取决于单 micro-batch。
+- **更新块顺序不可乱**：`scaler.unscale_` → `clip_grad_norm_` → `scaler.step` → `scaler.update` → `zero_grad`；裁剪必须在还原真实梯度尺度之后；尾部不足 \(N\) 的梯度由循环结束后的补更新处理。
+- **这套写法是项目所有训练脚本的底座**：u5 的 Pretrain/SFT、u6 的 LoRA/蒸馏、u7 的 DPO/PPO/GRPO/Agent 都沿用同样的 DDP + AMP + 梯度累积骨架，区别只在 Dataset、loss 与可训练参数过滤。
+
+## 7. 下一步学习建议
+
+- **进入主线训练链路**：下一讲 u5-l1「预训练：从 0 学会词语接龙」会把本讲的 `train_epoch` 模板与 `PretrainDataset`、next-token prediction 目标拼成完整的预训练流程，建议带着「一次 `optimizer.step()` 内部到底发生了什么」的理解去读。
+- **回顾检查点机制**：若对续训时的 `start_step` 如何喂给 `train_epoch` 的 `start_step` 参数、以及跨卡 step 换算还不够熟，回头重读 u4-l2「检查点保存与断点续训」。
+- **对比不同训练阶段的差异**：之后读到 `train_lora.py`（u6）时，重点对比它在「可训练参数过滤」和「禁用 compile」上与 `train_pretrain.py` 的不同，那是本讲底座之上的第一处变体。
+- **延伸阅读**（官方文档，非本项目源码）：PyTorch 的 *Distributed Data Parallel* 与 *Automatic Mixed Precision* 教程，能帮助理解 DDP 的 bucket/overlap 通信优化与 GradScaler 自适应缩放的更多细节。

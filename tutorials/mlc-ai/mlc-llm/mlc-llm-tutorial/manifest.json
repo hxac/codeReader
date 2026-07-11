@@ -1,0 +1,1235 @@
+{
+  "project": "mlc-llm",
+  "head": "a2bcc5c86678b72a86b7aadc29b643a5ce63c747",
+  "rationale": "MLC LLM 是一个「ML 编译器 + 高性能推理引擎」的大型多语言项目，核心链路是 convert_weight → gen_config → compile（Python/TVM Relax）→ chat/serve（C++ ThreadedEngine + Python REST）。学习顺序据此分三层铺开：入门层（U1–U2）先建立项目定位、目录结构、构建方式、CLI 子命令与端到端工作流的整体认知；进阶层（U3–U7、U11）拆解五大相对独立子系统——模型定义（Model 注册表 + Relax nn）、权重加载与映射、量化、对话模板与 OpenAI 协议、编译接口与 pass 流水线，以及 Python 引擎与 REST 服务，使读者理解「一个 HF 模型如何变成可运行产物」的全过程；专家层（U8–U10、U12）深入编译优化 pass、C++ 推理引擎的事件-动作循环、分页 KV 缓存/前缀缓存（Radix Tree）/采样/推测解码，以及多 GPU、微服务路由、分离式推理与多端部署等扩展点。讲义按「单主题、2–5 个最小模块、1 个实践任务、引用真实源码」拆分，单元间通过 depends_on 形成清晰依赖（编译产物驱动引擎、模型定义被加载/量化/编译依赖、协议贯穿服务端）。共 12 单元 38 篇，匹配项目规模。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 MLC LLM：定位、结构与工作流",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：ML 编译驱动的通用 LLM 部署引擎",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 MLC LLM 是什么、解决什么问题：基于 TVM/Relax 的机器学习编译器与跨平台 LLM 推理引擎，支持 CUDA/Metal/Vulkan/WebGPU 等。",
+          "learning_goals": [
+            "理解 MLC LLM 的定位：编译器 + 部署引擎双重身份",
+            "了解支持的平台与后端（GPU/移动端/Web）",
+            "认识 MLCEngine 提供 OpenAI 兼容 API 的统一抽象"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/get_started/introduction.rst",
+            "docs/index.rst"
+          ],
+          "minimal_modules": [
+            "项目使命与定位",
+            "支持的平台/后端矩阵",
+            "MLCEngine 与 OpenAI 兼容 API"
+          ],
+          "practice_task": "阅读 README 与 introduction 文档，用一句话写出 MLC LLM 的定位，并列举它至少支持的三种目标后端；在本地运行 python -c \"import mlc_llm; print(mlc_llm.__path__)\" 验证安装。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与多语言布局",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录划分：python/（编译器与 CLI）、cpp/（推理引擎与 json_ffi）、android/、ios、docs/、examples/、3rdparty/（tvm、tokenizers-cpp、xgrammar）等。",
+          "learning_goals": [
+            "掌握顶层目录与各自职责",
+            "区分编译期（Python）与运行期（C++）代码",
+            "认识第三方依赖 tvm/tokenizers-cpp/xgrammar 的作用"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "python/setup.py",
+            "docs/index.rst"
+          ],
+          "minimal_modules": [
+            "顶层目录职责映射",
+            "Python 包与 C++ 库的边界",
+            "第三方依赖（TVM 等）"
+          ],
+          "practice_task": "对照 git ls-files 输出，绘制一张顶层目录思维导图，标注每个目录属于「编译」「引擎」「部署」「文档」哪一类，并指出 C++ 入口在 cpp/serve 与 cpp/json_ffi。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "安装、构建与快速运行",
+          "order": 3,
+          "filename": "u1-l3-install-and-quickstart.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 mlc_llm Python 包、为何编译模型还需要 TVM，以及三种快速运行方式：chat CLI、Python MLCEngine、REST 服务器。",
+          "learning_goals": [
+            "完成 mlc_llm 与 tvm 的安装验证",
+            "会用 chat CLI 加载 HF:// MLC 模型对话",
+            "会用 Python MLCEngine 与 REST 服务器"
+          ],
+          "source_files": [
+            "docs/get_started/quick_start.rst",
+            "examples/python/sample_mlc_engine.py",
+            "python/mlc_llm/libinfo.py"
+          ],
+          "minimal_modules": [
+            "安装与验证",
+            "chat CLI 一键运行",
+            "Python API 与 REST 用法"
+          ],
+          "practice_task": "运行 examples/python/sample_mlc_engine.py，使用 MLCEngine 对 Llama-3-8B-Instruct-q4f16_1-MLC 发起一次流式 chat completion，并打印每秒 token 数（/stats）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "端到端工作流与模型产物",
+          "order": 4,
+          "filename": "u1-l4-workflow-and-artifacts.md",
+          "level": "beginner",
+          "topic": "串联完整工作流 convert_weight → gen_config → compile → serve，并解释三大产物：MLC 权重、model library、mlc-chat-config.json。",
+          "learning_goals": [
+            "理解四步工作流与各步产物",
+            "区分 model weights / model lib / chat config",
+            "知道何时可跳过显式 compile（JIT）"
+          ],
+          "source_files": [
+            "docs/compilation/compile_models.rst",
+            "docs/get_started/introduction.rst",
+            "python/mlc_llm/protocol/mlc_chat_config.py"
+          ],
+          "minimal_modules": [
+            "四步工作流",
+            "三类模型产物",
+            "JIT 编译兜底机制"
+          ],
+          "practice_task": "浏览 mlc_chat_config.py 中的 MLCChatConfig 字段，列出至少 8 个关键字段（如 model_lib、quantization、conv_template、context_window_size），并说明它们分别由哪一步工作流生成。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "命令行与入口：mlc_llm CLI",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CLI 总入口与子命令分发",
+          "order": 1,
+          "filename": "u2-l1-cli-entrypoint.md",
+          "level": "beginner",
+          "topic": "解析 python/mlc_llm/__main__.py 如何把单一入口分发到 compile/convert_weight/gen_config/chat/serve/package/calibrate/router 等子命令。",
+          "learning_goals": [
+            "理解 mlc_llm 的入口与子命令体系",
+            "掌握 CLI 层（cli/）与接口层（interface/）的分层",
+            "知道 package.json console_scripts 注册方式"
+          ],
+          "source_files": [
+            "python/mlc_llm/__main__.py",
+            "python/mlc_llm/__init__.py",
+            "python/setup.py"
+          ],
+          "minimal_modules": [
+            "子命令分发机制",
+            "cli/ 与 interface/ 分层",
+            "入口点注册"
+          ],
+          "practice_task": "运行 mlc_llm --help，列出全部子命令；随后追踪某一个子命令（如 compile）从 __main__.py 到 cli/compile.py 再到 interface/compile.py 的调用链并画出来。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "模型编译三件套：convert_weight / gen_config / compile",
+          "order": 2,
+          "filename": "u2-l2-compile-trio-commands.md",
+          "level": "beginner",
+          "topic": "讲解 cli/convert_weight.py、cli/gen_config.py、cli/compile.py 三个命令的参数与作用，以及它们如何把 HF 模型变成 MLC 可运行产物。",
+          "learning_goals": [
+            "会用三条命令完成模型准备",
+            "理解 --quantization、--model-type、--target 等关键参数",
+            "认识参数自动探测（detect_*）"
+          ],
+          "source_files": [
+            "python/mlc_llm/cli/convert_weight.py",
+            "python/mlc_llm/cli/gen_config.py",
+            "python/mlc_llm/cli/compile.py"
+          ],
+          "minimal_modules": [
+            "convert_weight 命令",
+            "gen_config 命令",
+            "compile 命令与 target"
+          ],
+          "practice_task": "选一个小模型（如 RedPajama-INCITE-Chat-3B-v1），依次运行 convert_weight、gen_config、compile，记录每一步产出的文件，并用 file 命令查看产出的 .so/.tar 格式。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "运行入口：chat / serve / package",
+          "order": 3,
+          "filename": "u2-l3-run-commands.md",
+          "level": "beginner",
+          "topic": "讲解 cli/chat.py（交互对话）、cli/serve.py（启动 REST 服务器）、cli/package.py（打包 iOS/Android 库与权重）三类运行命令。",
+          "learning_goals": [
+            "会用 chat CLI 交互并使用 /set、/stats 等指令",
+            "会用 serve 启动 OpenAI 兼容服务器",
+            "了解 package 打包移动端产物的用途"
+          ],
+          "source_files": [
+            "python/mlc_llm/cli/chat.py",
+            "python/mlc_llm/cli/serve.py",
+            "python/mlc_llm/cli/package.py"
+          ],
+          "minimal_modules": [
+            "chat CLI 与特殊指令",
+            "serve 启动参数",
+            "package 打包流程"
+          ],
+          "practice_task": "用 mlc_llm serve 启动一个服务器，再用 curl 向 /v1/chat/completions 发送请求；接着尝试 /set temperature=0.5 在 chat CLI 中覆盖生成参数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模型定义系统：用 Relax 描述架构",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Model 注册表：如何描述一个模型架构",
+          "order": 1,
+          "filename": "u3-l1-model-registry.md",
+          "level": "intermediate",
+          "topic": "解析 model/model.py 中 Model dataclass 与 MODELS 注册表：name、config、model、source、quantize、model_task 等字段如何把架构、配置、加载、量化绑定在一起。",
+          "learning_goals": [
+            "理解 Model dataclass 的字段含义",
+            "掌握 MODELS 注册表的注册模式",
+            "区分 chat 与 embedding 两种 model_task"
+          ],
+          "source_files": [
+            "python/mlc_llm/model/model.py",
+            "python/mlc_llm/model/model_preset.py"
+          ],
+          "minimal_modules": [
+            "Model dataclass 字段",
+            "MODELS 注册表",
+            "source/quantize 映射字典"
+          ],
+          "practice_task": "在 model.py 的 MODELS 中挑两个模型（如 llama 与 mistral），对比它们的 source 与 quantize 配置差异，并解释 supports_awq、supports_per_tensor 等开关的作用。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "用 TVM Relax nn 编写模型",
+          "order": 2,
+          "filename": "u3-l2-relax-nn-model.md",
+          "level": "intermediate",
+          "topic": "以 llama_model.py 为例，讲解如何用 tvm.relax.frontend.nn（nn.Module、nn.Linear、nn.RMSNorm）定义 LlamaConfig/LlamaAttention/LlamaDecoderLayer/LlamaForCausalLM，以及 prefill/decode/batch_verify 等方法与 get_default_spec。",
+          "learning_goals": [
+            "掌握 Relax nn.Module 定义模型的方式",
+            "理解 prefill/decode/verify 等执行入口",
+            "认识 get_default_spec 与张量接口约定"
+          ],
+          "source_files": [
+            "python/mlc_llm/model/llama/llama_model.py",
+            "python/mlc_llm/model/model_utils.py"
+          ],
+          "minimal_modules": [
+            "Relax nn 模型结构",
+            "注意力与 FFN 层",
+            "执行入口与 spec"
+          ],
+          "practice_task": "阅读 LlamaForCausalLM，找到 prefill、decode、create_paged_kv_cache、get_logits 四个方法，分别用一句话描述其输入输出；再说明 RoPE 配置在 create_paged_kv_cache 中如何传入。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "模型配置探测与 preset",
+          "order": 3,
+          "filename": "u3-l3-model-config-preset.md",
+          "level": "intermediate",
+          "topic": "讲解 model_preset.py 内置配置、ModelConfig.from_file 读取 HF config.json 的方式，以及 support/auto_config.py 如何自动探测 model_type、quantization、mlc-chat-config。",
+          "learning_goals": [
+            "理解 preset 与 from_file 两种配置来源",
+            "掌握 detect_model_type/detect_quantization 的自动探测",
+            "知道配置校验（__post_init__）"
+          ],
+          "source_files": [
+            "python/mlc_llm/model/model_preset.py",
+            "python/mlc_llm/support/auto_config.py"
+          ],
+          "minimal_modules": [
+            "MODEL_PRESETS 内置配置",
+            "from_file 读取 HF config",
+            "自动探测与校验"
+          ],
+          "practice_task": "在 model_preset.py 中找到 llama2_7b 的 preset，列出其关键字段；再用 detect_model_type 对一个本地 HF 模型目录运行，观察它如何推断 model_type。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "权重加载与转换",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Loader 抽象与 HuggingFaceLoader",
+          "order": 1,
+          "filename": "u4-l1-loader-abstraction.md",
+          "level": "intermediate",
+          "topic": "解析 loader/loader.py 的 LOADER 注册表与 loader/huggingface_loader.py 的 HuggingFaceLoader：如何以迭代器方式按文件加载 PyTorch/SafeTensor 权重并控制内存。",
+          "learning_goals": [
+            "理解 LOADER 注册表与加载器接口",
+            "掌握 HuggingFaceLoader 的迭代式加载",
+            "认识加载时的缓存/卸载内存控制"
+          ],
+          "source_files": [
+            "python/mlc_llm/loader/loader.py",
+            "python/mlc_llm/loader/huggingface_loader.py",
+            "python/mlc_llm/loader/stats.py"
+          ],
+          "minimal_modules": [
+            "LOADER 注册表",
+            "HuggingFaceLoader 迭代加载",
+            "Stats 统计与内存"
+          ],
+          "practice_task": "阅读 HuggingFaceLoader.load，说明它如何逐文件 yield (name, Tensor)，并借助 Stats 统计加载时间与峰值内存；思考为何要用迭代器而非一次性全加载。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "参数名映射：ExternMapping 与 QuantizeMapping",
+          "order": 2,
+          "filename": "u4-l2-param-mapping.md",
+          "level": "intermediate",
+          "topic": "解析 loader/mapping.py 的 ExternMapping（MLC→源参数名）与 QuantizeMapping（未量化→量化输出），以及 standard_loader.py 如何处理 QKV 拼接、gate/up 拼接等常见模式。",
+          "learning_goals": [
+            "掌握 ExternMapping 的 param_map 与 map_func",
+            "理解 QuantizeMapping 的用途",
+            "会用 make_standard_hf_loader 处理拼接模式"
+          ],
+          "source_files": [
+            "python/mlc_llm/loader/mapping.py",
+            "python/mlc_llm/loader/standard_loader.py",
+            "python/mlc_llm/model/llama/llama_loader.py"
+          ],
+          "minimal_modules": [
+            "ExternMapping 名称映射",
+            "QuantizeMapping 量化映射",
+            "标准 HF 拼接模式"
+          ],
+          "practice_task": "对照 llama_loader.py 的 awq 映射，写出 HF 的 q_proj/k_proj/v_proj 是如何合并为 MLC 的 qkv_proj 的；再找一处 gate_proj+up_proj→gate_up_proj 的拼接。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "convert_weight 全流程与预分片",
+          "order": 3,
+          "filename": "u4-l3-convert-weight-flow.md",
+          "level": "intermediate",
+          "topic": "解析 interface/convert_weight.py 的 ConversionArgs 与主流程：加载→映射→量化→预分片（preshard，张量并行）→保存为 MLC 权重格式。",
+          "learning_goals": [
+            "掌握 convert_weight 的完整阶段",
+            "理解 preshard 预分片为张量并行准备",
+            "认识 MLC 权重存储格式（tvmjs）"
+          ],
+          "source_files": [
+            "python/mlc_llm/interface/convert_weight.py",
+            "python/mlc_llm/support/preshard.py",
+            "python/mlc_llm/support/auto_weight.py"
+          ],
+          "minimal_modules": [
+            "ConversionArgs 与流程",
+            "preshard 预分片",
+            "权重保存格式"
+          ],
+          "practice_task": "跟踪 convert_weight 从 detect_weight 选权重、Loader 加载、QuantizeMapping 量化到 apply_preshard 的顺序；解释当 tensor_parallel_shards>1 时 preprocs 如何为每个参数生成分片信息。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "量化体系",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Quantization 注册表与统一接口",
+          "order": 1,
+          "filename": "u5-l1-quantization-registry.md",
+          "level": "intermediate",
+          "topic": "解析 quantization/quantization.py 的 QUANTIZATION 注册表（如 q4f16_1、q0f16、q8f16_1）与 Quantization 接口：name、kind、quantize_model、quantize_weight。",
+          "learning_goals": [
+            "理解 QUANTIZATION 注册表与命名约定",
+            "掌握 Quantization 的统一接口",
+            "认识 quantize_model 与 quantize_weight 两条路径"
+          ],
+          "source_files": [
+            "python/mlc_llm/quantization/quantization.py",
+            "python/mlc_llm/quantization/model_quantization.py"
+          ],
+          "minimal_modules": [
+            "QUANTIZATION 注册表",
+            "Quantization 接口",
+            "make_quantization_functions 工厂"
+          ],
+          "practice_task": "列出 QUANTIZATION 中至少 6 个量化名并解读其命名（如 q4f16_1 中 4/16/1 各代表什么）；说明 quantize_model（改图）与 quantize_weight（转权重）分别在哪个阶段使用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Group Quantization 深入",
+          "order": 2,
+          "filename": "u5-l2-group-quantization.md",
+          "level": "intermediate",
+          "topic": "深入 quantization/group_quantization.py：group_size、quantize_dtype、storage_dtype，以及用 visitor 模式把 Linear/Embedding/MixtralExperts 替换为 GroupQuantize* 的量化层。",
+          "learning_goals": [
+            "掌握 group quantization 的参数含义",
+            "理解 visitor 改图替换量化层的机制",
+            "认识量化权重存储格式（weight + scale）"
+          ],
+          "source_files": [
+            "python/mlc_llm/quantization/group_quantization.py",
+            "python/mlc_llm/quantization/utils.py"
+          ],
+          "minimal_modules": [
+            "GroupQuantize 参数",
+            "visitor 改图替换",
+            "量化权重布局"
+          ],
+          "practice_task": "阅读 quantize_model，说明它如何遍历 nn.Module 并把 nn.Linear 替换为 GroupQuantizeLinear；计算 group_size=32、quantize_dtype=int4 时一个 [4096,4096] 权重量化后的存储形状。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "其他量化方案对比",
+          "order": 3,
+          "filename": "u5-l3-other-quantization-schemes.md",
+          "level": "intermediate",
+          "topic": "对比 awq（qweight/qzeros/scales）、per_tensor FP8、block_scale FP8、ft（FasterTransformer 兼容）、no_quant（仅 dtype 转换）等量化方案的差异与适用场景。",
+          "learning_goals": [
+            "区分各量化方案的存储格式",
+            "理解 FP8 per-tensor 与 block-scale 的差别",
+            "知道何时用 no_quant"
+          ],
+          "source_files": [
+            "python/mlc_llm/quantization/awq_quantization.py",
+            "python/mlc_llm/quantization/per_tensor_quantization.py",
+            "python/mlc_llm/quantization/block_scale_quantization.py",
+            "python/mlc_llm/quantization/no_quantization.py"
+          ],
+          "minimal_modules": [
+            "AWQ 格式",
+            "FP8 per-tensor/block-scale",
+            "ft 与 no_quant"
+          ],
+          "practice_task": "制作一张量化方案对比表（方案名、kind、输出张量、是否需校准、典型用途）；并说明 per_tensor FP8 为何可能需要 calibrate（联系 cli/calibrate.py）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "对话模板与 API 协议",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Conversation 模板协议",
+          "order": 1,
+          "filename": "u6-l1-conversation-protocol.md",
+          "level": "intermediate",
+          "topic": "解析 protocol/conversation_protocol.py 的 Conversation 模型：system_template、roles、seps、role_content_sep、stop_str/stop_token_ids、role_templates，以及 as_prompt 如何拼装多模态提示。",
+          "learning_goals": [
+            "掌握 Conversation 模板的字段结构",
+            "理解 as_prompt 如何拼装最终输入",
+            "认识多模态（ImageData）与 stop 控制"
+          ],
+          "source_files": [
+            "python/mlc_llm/protocol/conversation_protocol.py"
+          ],
+          "minimal_modules": [
+            "Conversation 字段",
+            "as_prompt 拼装",
+            "stop 与多模态"
+          ],
+          "practice_task": "构造一个 Conversation 对象，给定 system 与两条 user/assistant 消息，调用 as_prompt 打印最终提示串；再修改 stop_str 观察输出变化。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "对话模板注册表与实例",
+          "order": 2,
+          "filename": "u6-l2-conversation-registry.md",
+          "level": "intermediate",
+          "topic": "解析 conversation_template/registry.py 的 ConvTemplateRegistry（register/get）注册模式，并以 llama.py 为例讲解 Llama2/Llama3 模板的演化（[INST] 标签与特殊 header token）。",
+          "learning_goals": [
+            "掌握注册表的注册/查询机制",
+            "理解模块导入即注册的模式",
+            "对比 Llama2 与 Llama3 模板差异"
+          ],
+          "source_files": [
+            "python/mlc_llm/conversation_template/registry.py",
+            "python/mlc_llm/conversation_template/llama.py"
+          ],
+          "minimal_modules": [
+            "ConvTemplateRegistry",
+            "导入即注册",
+            "Llama2/3 模板演化"
+          ],
+          "practice_task": "用 get_conv_template('llama-3') 取出模板，打印其 roles 与 seps；再对比 llama-2 模板，指出 Llama3 引入的特殊 header/role token。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "OpenAI 兼容协议与生成配置",
+          "order": 3,
+          "filename": "u6-l3-openai-protocol.md",
+          "level": "intermediate",
+          "topic": "解析 protocol/openai_api_protocol.py 的请求/响应 Pydantic 模型（ChatCompletionRequest/Response、流式响应）与 protocol/generation_config.py 的采样参数。",
+          "learning_goals": [
+            "掌握 OpenAI 兼容的请求/响应模型",
+            "理解 generation_config 的采样参数",
+            "认识 function calling 与 debug_config 扩展"
+          ],
+          "source_files": [
+            "python/mlc_llm/protocol/openai_api_protocol.py",
+            "python/mlc_llm/protocol/generation_config.py"
+          ],
+          "minimal_modules": [
+            "请求/响应 Pydantic 模型",
+            "generation_config 采样参数",
+            "function calling 扩展"
+          ],
+          "practice_task": "用 ChatCompletionRequest 构造一个 temperature=0.7、max_tokens=100 的请求并序列化为 JSON；说明 check_function_call_usage 在启用 function calling 时做了什么。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "编译接口与 compiler pass 流水线",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "compile 接口与编译主流程",
+          "order": 1,
+          "filename": "u7-l1-compile-interface.md",
+          "level": "intermediate",
+          "topic": "解析 interface/compile.py 的 CompileArgs 与 compile() 主流程：构建 IRModule、预处理参数（shard/pipeline preprocs）、挂载并运行 pass 流水线、调用 build_func 导出 model lib。",
+          "learning_goals": [
+            "掌握 CompileArgs 与编译主流程",
+            "理解参数预处理（shard/pipeline）",
+            "认识 build_func 与产物导出"
+          ],
+          "source_files": [
+            "python/mlc_llm/interface/compile.py",
+            "python/mlc_llm/interface/compiler_flags.py"
+          ],
+          "minimal_modules": [
+            "CompileArgs",
+            "参数预处理 preprocs",
+            "build_func 导出"
+          ],
+          "practice_task": "跟踪 compile() 从 IRModule 构建到 build_func 的调用顺序；解释 _apply_preproc_to_params_and_check_pipeline 如何为 tensor_parallel_shards>1 的参数生成分片 TIR。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "compiler pass pipeline 总览",
+          "order": 2,
+          "filename": "u7-l2-pass-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "解析 compiler_pass/pipeline.py 的 _mlc_llm_pipeline 五个阶段：附加元数据/运行时函数 → 高层图优化 → Relax 到 TIR 降级 → TIR 级优化 → 底层优化与 CUDA graph/内存规划。",
+          "learning_goals": [
+            "掌握五阶段流水线顺序",
+            "理解每阶段的目标",
+            "认识 PassContext 的使用"
+          ],
+          "source_files": [
+            "python/mlc_llm/compiler_pass/pipeline.py"
+          ],
+          "minimal_modules": [
+            "五阶段流水线",
+            "各阶段目标",
+            "PassContext 驱动"
+          ],
+          "practice_task": "把 pipeline.py 中的 pass 按「附加/融合/派发/降级/TIR 优化/底层」分组列表，并标注哪些 pass 仅在 GPU target 下生效。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "gen_config 生成 mlc-chat-config.json",
+          "order": 3,
+          "filename": "u7-l3-gen-config.md",
+          "level": "intermediate",
+          "topic": "解析 interface/gen_config.py 如何聚合 model config、conversation template、tokenizer、quantization，生成 mlc-chat-config.json 与 tokenizer 配置。",
+          "learning_goals": [
+            "掌握 gen_config 的聚合逻辑",
+            "理解 mlc-chat-config.json 的来源",
+            "认识 tokenizer_model 生成（含 RWKV/tiktoken）"
+          ],
+          "source_files": [
+            "python/mlc_llm/interface/gen_config.py",
+            "python/mlc_llm/protocol/mlc_chat_config.py"
+          ],
+          "minimal_modules": [
+            "config 聚合",
+            "系统默认填充",
+            "tokenizer 配置生成"
+          ],
+          "practice_task": "运行 gen_config 对一个小模型生成 mlc-chat-config.json，打开文件并对照 MLCChatConfig 字段，标注每个值来自 model config 还是 conversation template 还是系统默认。",
+          "depends_on": [
+            "u6-l2",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "编译优化 pass 深入",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "算子融合 pass",
+          "order": 1,
+          "filename": "u8-l1-fusion-passes.md",
+          "level": "advanced",
+          "topic": "深入融合类 pass：fuse_dequantize_matmul_ewise（反量化+matmul+elementwise）、fuse_add_norm（残差加+RMSNorm）、fuse_transpose_matmul、fuse_dequantize_transpose，理解它们如何减少访存与 kernel 启动。",
+          "learning_goals": [
+            "掌握各融合 pass 的输入模式",
+            "理解融合带来的访存/启动收益",
+            "认识模式匹配改图机制"
+          ],
+          "source_files": [
+            "python/mlc_llm/compiler_pass/fuse_dequantize_matmul_ewise.py",
+            "python/mlc_llm/compiler_pass/fuse_add_norm.py",
+            "python/mlc_llm/compiler_pass/fuse_transpose_matmul.py"
+          ],
+          "minimal_modules": [
+            "dequantize+matmul+ewise 融合",
+            "add+RMSNorm 融合",
+            "transpose 融合"
+          ],
+          "practice_task": "选 fuse_add_norm.py，画出融合前后的 IR 对比示意图（输入算子→输出算子），并说明它消除了哪个中间 buffer。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "后端派发 pass",
+          "order": 2,
+          "filename": "u8-l2-dispatch-passes.md",
+          "level": "advanced",
+          "topic": "深入派发类 pass：blas_dispatch（cuBLAS/hipBLAS）、dispatch_triton_kernel（mlc.triton.* → 具体 Triton kernel）、dispatch_kv_cache_creation（FlashInfer vs 通用）。",
+          "learning_goals": [
+            "掌握 BLAS/Triton/KV cache 派发机制",
+            "理解通用算子到后端实现的替换",
+            "认识 FlashInfer 与通用 KV cache 的取舍"
+          ],
+          "source_files": [
+            "python/mlc_llm/compiler_pass/blas_dispatch.py",
+            "python/mlc_llm/compiler_pass/dispatch_triton_kernel.py",
+            "python/mlc_llm/compiler_pass/dispatch_kv_cache_creation.py"
+          ],
+          "minimal_modules": [
+            "BLAS 派发",
+            "Triton kernel 派发",
+            "KV cache 创建派发"
+          ],
+          "practice_task": "阅读 dispatch_kv_cache_creation.py，说明它如何根据配置在 FlashInfer 与通用实现间选择；并指出 blas_dispatch 在何种 target 下不生效。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "运行时函数附加 pass",
+          "order": 3,
+          "filename": "u8-l3-attach-passes.md",
+          "level": "advanced",
+          "topic": "深入附加类 pass：attach_sampler（GPU 采样：multinomial/top-p/argsort）、attach_logit_processor（重复惩罚等）、attach_spec_decode_aux_funcs（推测解码辅助）、attach_embedding_allocator。",
+          "learning_goals": [
+            "掌握运行时函数附加机制",
+            "理解采样/logit 处理函数注入",
+            "认识推测解码辅助函数"
+          ],
+          "source_files": [
+            "python/mlc_llm/compiler_pass/attach_sampler.py",
+            "python/mlc_llm/compiler_pass/attach_logit_processor.py",
+            "python/mlc_llm/compiler_pass/attach_spec_decode_aux_funcs.py"
+          ],
+          "minimal_modules": [
+            "GPU 采样函数附加",
+            "logit 处理附加",
+            "推测解码辅助函数"
+          ],
+          "practice_task": "阅读 attach_sampler.py，列出它附加的采样相关 PrimFunc（如 multinomial、top_p、argsort），并说明这些函数为何要在编译期而非运行期生成。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "低 batch 特化、内存估计与流水线并行",
+          "order": 4,
+          "filename": "u8-l4-lowbatch-memory-pipeline.md",
+          "level": "advanced",
+          "topic": "解析 low_batch_specialization（batch≤8 的 GEMV 特化）、estimate_memory_usage（按函数估算显存用于运行期分配）、pipeline_parallel_rewrite（把单模型 IR 改写为分阶段+通信的流水线并行）。",
+          "learning_goals": [
+            "掌握低 batch GEMV 特化策略",
+            "理解内存估计如何辅助运行期规划",
+            "认识流水线并行改写与 stage 通信"
+          ],
+          "source_files": [
+            "python/mlc_llm/compiler_pass/low_batch_specialization.py",
+            "python/mlc_llm/compiler_pass/estimate_memory_usage.py",
+            "python/mlc_llm/compiler_pass/pipeline_parallel_rewrite.py"
+          ],
+          "minimal_modules": [
+            "低 batch GEMV 特化",
+            "显存估算",
+            "流水线并行改写"
+          ],
+          "practice_task": "说明 low_batch_specialization 为何能为小 batch 生成更快的 GEMV kernel；再追踪 pipeline_parallel_rewrite 如何在函数间插入 stage 边界与通信算子。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "C++ 推理引擎架构",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Engine、ThreadedEngine 与 EngineState",
+          "order": 1,
+          "filename": "u9-l1-engine-threaded-state.md",
+          "level": "advanced",
+          "topic": "解析 cpp/serve/engine.h（Engine 抽象：Create/Reset/AddRequest/Step）、threaded_engine.h（后台线程驱动 + 线程安全接口）、engine_state.h（running_queue/waiting_queue/request_states/prefix_cache/metrics）。",
+          "learning_goals": [
+            "掌握 Engine 三类接口（管理/请求/动作循环）",
+            "理解 ThreadedEngine 的后台循环与同步",
+            "认识 EngineState 持有的运行期状态"
+          ],
+          "source_files": [
+            "cpp/serve/engine.h",
+            "cpp/serve/threaded_engine.h",
+            "cpp/serve/engine_state.h"
+          ],
+          "minimal_modules": [
+            "Engine 抽象接口",
+            "ThreadedEngine 后台循环",
+            "EngineState 状态容器"
+          ],
+          "practice_task": "画出 Engine/ThreadedEngine/EngineState 三者关系图；说明 AddRequest 如何把请求放入 waiting_queue，以及 Step 由谁驱动（前台/后台线程）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "事件-动作循环与 Action 接口",
+          "order": 2,
+          "filename": "u9-l2-action-loop.md",
+          "level": "advanced",
+          "topic": "解析 engine_actions/action.h 的 EngineActionObj 接口（Step(estate) → Array<Request>）与 engine.cc 的动作循环；讲解 Action 如何分析状态、调用模型函数、运行采样、更新状态。",
+          "learning_goals": [
+            "掌握事件-动作（Action）模型",
+            "理解 Step 循环的调度",
+            "认识 action_commons 的抢占/后处理工具"
+          ],
+          "source_files": [
+            "cpp/serve/engine_actions/action.h",
+            "cpp/serve/engine.cc",
+            "cpp/serve/engine_actions/action_commons.h"
+          ],
+          "minimal_modules": [
+            "EngineActionObj 接口",
+            "Step 调度循环",
+            "action_commons 工具"
+          ],
+          "practice_task": "列举所有 Action（NewRequestPrefill/BatchDecode/BatchDraft/BatchVerify/Eagle*/AutoSpecDecode/Disagg* 等），分类标注每个 Action 处理「进入/解码/推测/校验/分离」哪一阶段。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "请求生命周期与状态机",
+          "order": 3,
+          "filename": "u9-l3-request-lifecycle.md",
+          "level": "advanced",
+          "topic": "解析 request.h（Request：id/inputs/prompt_tokens/generation_cfg）与 request_state.h（RequestState/RequestStateEntry/RequestModelState：committed_tokens、draft_output_tokens、status）。",
+          "learning_goals": [
+            "掌握 Request 与 RequestState 的区别",
+            "理解多分支生成（n>1）的树结构",
+            "认识 committed/draft token 与 status 状态机"
+          ],
+          "source_files": [
+            "cpp/serve/request.h",
+            "cpp/serve/request_state.h"
+          ],
+          "minimal_modules": [
+            "Request 不可变请求",
+            "RequestState/Entry/ModelState",
+            "状态流转与抢占"
+          ],
+          "practice_task": "追踪一个请求从 waiting_queue→running_queue→finished 的状态变化；说明当显存不足时抢占（preemption）如何把请求移回 waiting，以及 draft_output_tokens 在推测解码中的作用。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "模型运行时与 FunctionTable",
+          "order": 4,
+          "filename": "u9-l4-model-runtime-functiontable.md",
+          "level": "advanced",
+          "topic": "解析 cpp/serve/model.h（ModelObj：TokenEmbed/BatchPrefill/BatchDecode/BatchVerify/CreateKVCache 等）、function_table.h（加载编译库并初始化 TVM 函数）、config.h（EngineConfig：KV cache、spec decode、disagg 等配置）。",
+          "learning_goals": [
+            "掌握 Model 的计算函数与 KV cache 接口",
+            "理解 FunctionTable 如何加载 model lib",
+            "认识 EngineConfig 的关键配置项"
+          ],
+          "source_files": [
+            "cpp/serve/model.h",
+            "cpp/serve/function_table.h",
+            "cpp/serve/config.h"
+          ],
+          "minimal_modules": [
+            "Model 计算函数",
+            "FunctionTable 加载",
+            "EngineConfig 配置"
+          ],
+          "practice_task": "列出 ModelObj 暴露的核心函数（embed/prefill/decode/verify/get_logits/create_paged_kv_cache），并说明 FunctionTable.Init 如何从 model lib 中解析出这些函数。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "KV 缓存、前缀缓存、采样与推测解码",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "分页 KV 缓存模型接口",
+          "order": 1,
+          "filename": "u10-l1-paged-kv-cache.md",
+          "level": "advanced",
+          "topic": "解析 cpp/serve/model.h 的 CreateKVCache/AddNewSequence/ForkSequence/CommitAcceptedTokenTreeNodesToKVCache 等，以及 config.h 中 page_size/max_num_sequence/prefill_chunk_size 的分页 KV 缓存设计。",
+          "learning_goals": [
+            "掌握分页 KV cache 的概念",
+            "理解序列的增/分叉/删除操作",
+            "认识 page_size 等配置的影响"
+          ],
+          "source_files": [
+            "cpp/serve/model.h",
+            "cpp/serve/config.h"
+          ],
+          "minimal_modules": [
+            "分页 KV cache",
+            "序列增删分叉",
+            "分页配置参数"
+          ],
+          "practice_task": "解释 page_size、max_num_sequence、prefill_chunk_size 三者如何共同决定可服务的并发数与上下文长度；说明 ForkSequence 如何支持前缀共享。",
+          "depends_on": [
+            "u9-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "前缀缓存与 Radix Tree",
+          "order": 2,
+          "filename": "u10-l2-prefix-cache-radix-tree.md",
+          "level": "advanced",
+          "topic": "解析 prefix_cache.h（InsertSequence/ExtendSequence/RecycleSequence/TryFreeMemory 与 PrefixCacheMatchedResult）与 radix_tree.h（PagedRadixTree 的 MatchPrefix/ForkSequence/Extend/RollBack）。",
+          "learning_goals": [
+            "掌握前缀缓存复用 KV 的机制",
+            "理解 Radix Tree 的 token 路径存储",
+            "认识回收/驱逐与 lazy commit"
+          ],
+          "practice_task": "描述新请求到达时如何通过 MatchPrefix 找到最长公共前缀并 ForkSequence；说明 RecycleSequence 与 TryFreeMemory 如何在显存紧张时驱逐最旧序列。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "采样器：CPU 与 GPU",
+          "order": 3,
+          "filename": "u10-l3-sampler.md",
+          "level": "advanced",
+          "topic": "解析 sampler/sampler.h 的接口（TopP 重归一化、按概率采样、校验 draft token）与 cpu_sampler.cc、gpu_sampler.cc 两种实现及 Sampler::SupportGPUSampler 的选择逻辑。",
+          "learning_goals": [
+            "掌握采样器接口与 top-p 处理",
+            "理解 CPU 与 GPU 采样实现差异",
+            "认识 draft token 校验在推测解码中的作用"
+          ],
+          "source_files": [
+            "cpp/serve/sampler/sampler.h",
+            "cpp/serve/sampler/cpu_sampler.cc",
+            "cpp/serve/sampler/gpu_sampler.cc"
+          ],
+          "minimal_modules": [
+            "采样器接口",
+            "CPU vs GPU 实现",
+            "GPU 采样支持判定"
+          ],
+          "practice_task": "说明 Sampler::SupportGPUSampler 如何根据 device 类型选择 CPU/GPU 采样；对比两种实现在延迟与显存上的取舍，并指出 BatchVerifyDraftTokensWithProbAfterTopP 的用途。",
+          "depends_on": [
+            "u9-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "推测解码动作链",
+          "order": 4,
+          "filename": "u10-l4-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "解析推测解码三段式：batch_draft/eagle_batch_draft（小模型/EAGLE 起草）、batch_verify/eagle_batch_verify（大模型校验）、auto_spec_decode（自动选择推测 vs 普通解码），以及 draft_token_workspace_manager 的作用。",
+          "learning_goals": [
+            "掌握推测解码起草-校验流程",
+            "理解 EAGLE 与普通 draft 的区别",
+            "认识 AutoSpecDecode 的自动决策"
+          ],
+          "source_files": [
+            "cpp/serve/engine_actions/batch_draft.cc",
+            "cpp/serve/engine_actions/batch_verify.cc",
+            "cpp/serve/engine_actions/eagle_batch_draft.cc",
+            "cpp/serve/engine_actions/auto_spec_decode.cc"
+          ],
+          "minimal_modules": [
+            "起草动作",
+            "校验动作",
+            "AutoSpecDecode 决策"
+          ],
+          "practice_task": "画出一次推测解码的时间线（draft → verify → 接受/拒绝 token），并说明 draft_output_tokens 与 CommitAcceptedTokenTreeNodesToKVCache 如何把接受的 token 提交进 KV cache。",
+          "depends_on": [
+            "u9-l2",
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "Python 引擎与服务端",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "MLCEngine 与 JSON FFI 桥接",
+          "order": 1,
+          "filename": "u11-l1-mlc-engine-json-ffi.md",
+          "level": "intermediate",
+          "topic": "解析 python json_ffi/engine.py（EngineState/BackgroundLoops/Completions，用 JSON 字符串跨 FFI 调用 C++ 引擎）与 cpp/json_ffi/json_ffi_engine.h（ChatCompletion/AddRequest/StreamBack），以及 serve/engine.py 的 AsyncMLCEngine/MLCEngine 封装。",
+          "learning_goals": [
+            "掌握 Python↔C++ 的 JSON FFI 桥接",
+            "理解后台循环与流式回调队列",
+            "认识 MLCEngine/AsyncMLCEngine 的 OpenAI 风格 API"
+          ],
+          "source_files": [
+            "python/mlc_llm/json_ffi/engine.py",
+            "cpp/json_ffi/json_ffi_engine.h",
+            "python/mlc_llm/serve/engine.py"
+          ],
+          "minimal_modules": [
+            "JSON FFI 引擎",
+            "后台循环与流式队列",
+            "MLCEngine/AsyncMLCEngine"
+          ],
+          "practice_task": "用 MLCEngine 跑一次流式 chat completion，并对照源码说明：Python 请求如何变成 JSON 字符串经 FFI 进入 C++ ThreadedEngine，再经 run_background_stream_back_loop 把结果推回 sync_queue。",
+          "depends_on": [
+            "u9-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "REST 服务器与 OpenAI 端点",
+          "order": 2,
+          "filename": "u11-l2-rest-server-openai.md",
+          "level": "intermediate",
+          "topic": "解析 interface/serve.py（创建 AsyncMLCEngine、ServerContext、FastAPI app、uvicorn）与 serve/entrypoints/openai_entrypoints.py（/v1/chat/completions、/v1/completions、/v1/embeddings、/v1/models）。",
+          "learning_goals": [
+            "掌握 mlc_llm serve 的启动流程",
+            "理解 OpenAI 兼容端点的实现",
+            "认识 CORS/API key/异常处理中间件"
+          ],
+          "source_files": [
+            "python/mlc_llm/interface/serve.py",
+            "python/mlc_llm/serve/entrypoints/openai_entrypoints.py",
+            "python/mlc_llm/serve/server/server_context.py"
+          ],
+          "minimal_modules": [
+            "serve 启动编排",
+            "OpenAI 端点路由",
+            "中间件与依赖注入"
+          ],
+          "practice_task": "启动 serve 后用 curl 同时测试 /v1/models、/v1/chat/completions、/v1/completions 三个端点；并在 openai_entrypoints.py 中定位处理 chat completion 流式响应的 async generator。",
+          "depends_on": [
+            "u11-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "异步引擎与后台循环管理",
+          "order": 3,
+          "filename": "u11-l3-async-engine-background.md",
+          "level": "intermediate",
+          "topic": "解析 serve/engine_base.py（EngineConfig/EngineMetrics/_check_engine_config/detect_device）与 serve/sync_engine.py（同步封装），以及 ServerContext 作为多模型注册中心的生命周期管理。",
+          "learning_goals": [
+            "掌握 EngineConfig 与配置校验",
+            "理解同步/异步引擎封装差异",
+            "认识 ServerContext 的多模型生命周期管理"
+          ],
+          "source_files": [
+            "python/mlc_llm/serve/engine_base.py",
+            "python/mlc_llm/serve/sync_engine.py",
+            "python/mlc_llm/serve/server/server_context.py"
+          ],
+          "minimal_modules": [
+            "EngineConfig 校验",
+            "同步引擎封装",
+            "ServerContext 生命周期"
+          ],
+          "practice_task": "阅读 ServerContext 的 __enter__/__exit__，说明它如何在服务启停时管理 AsyncMLCEngine 与 embedding engine 的生命周期；并用 _check_engine_config 解释配置覆盖如何生效。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "扩展部署与工程化",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "多 GPU 与张量并行",
+          "order": 1,
+          "filename": "u12-l1-multi-gpu-tensor-parallel.md",
+          "level": "advanced",
+          "topic": "解析 support/tensor_parallel.py（shard_strategy、为参数生成分片 TIR）与 cpp/multi_gpu/multi_gpu_loader.cc（多 GPU 加载），联系 convert_weight 的 preshard 与 disco 分布式会话。",
+          "learning_goals": [
+            "掌握张量并行的分片策略",
+            "理解 preshard 与运行期 disco 协作",
+            "认识多 GPU 权重加载"
+          ],
+          "source_files": [
+            "python/mlc_llm/support/tensor_parallel.py",
+            "cpp/multi_gpu/multi_gpu_loader.cc",
+            "python/mlc_llm/__init__.py"
+          ],
+          "minimal_modules": [
+            "shard_strategy 分片",
+            "preshard 与 disco",
+            "多 GPU 加载"
+          ],
+          "practice_task": "追踪 tensor_parallel_shards>1 时权重的分片路径（convert_weight preshard → multi_gpu_loader）；并说明 __init__.py 中 _create_socket_session_local_workers 如何为 disco 建立多进程会话。",
+          "depends_on": [
+            "u9-l4",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "微服务与路由器",
+          "order": 2,
+          "filename": "u12-l2-microserving-router.md",
+          "level": "advanced",
+          "topic": "解析 cli/router.py 与 interface/router.py（微服务路由器）以及 examples/python/microserving/custom_router.py，结合 docs/microserving/tutorial.rst 讲解多模型/分离式服务的路由编排。",
+          "learning_goals": [
+            "掌握微服务路由器的作用",
+            "理解自定义 router 的扩展点",
+            "认识微服务部署模式"
+          ],
+          "source_files": [
+            "python/mlc_llm/cli/router.py",
+            "python/mlc_llm/interface/router.py",
+            "examples/python/microserving/custom_router.py"
+          ],
+          "minimal_modules": [
+            "router CLI/接口",
+            "自定义路由扩展",
+            "微服务部署"
+          ],
+          "practice_task": "阅读 examples/python/microserving/custom_router.py，写一段说明它如何把请求分派到不同后端模型；并指出微服务模式与单一 serve 的区别。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "分离式推理（Disaggregation）",
+          "order": 3,
+          "filename": "u12-l3-disaggregation.md",
+          "level": "advanced",
+          "topic": "解析 cpp/serve/engine_actions/disagg_remote_send.cc（本地 prefill 后发送 KV）与 disagg_prepare_recv.cc（接收方准备 KV），以及 ThreadedEngine 中 disco 远程会话的协作机制。",
+          "learning_goals": [
+            "掌握分离式 prefill/decode 的分工",
+            "理解 KV cache 跨实例传输",
+            "认识 disco 远程会话协作"
+          ],
+          "source_files": [
+            "cpp/serve/engine_actions/disagg_remote_send.cc",
+            "cpp/serve/engine_actions/disagg_prepare_recv.cc",
+            "cpp/serve/threaded_engine.h"
+          ],
+          "minimal_modules": [
+            "DisaggRemoteSend",
+            "DisaggPrepareReceive",
+            "disco 远程协作"
+          ],
+          "practice_task": "描述分离式推理的一次请求流程（发送方 prefill → 远程发送 KV → 接收方准备接收 → 继续 decode），并说明它如何提升吞吐与显存利用。",
+          "depends_on": [
+            "u9-l2",
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "多端部署与工程化（Android/iOS/WebLLM、bench、tests）",
+          "order": 4,
+          "filename": "u12-l4-multi-platform-and-engineering.md",
+          "level": "advanced",
+          "topic": "概览多端部署（android/mlc4j、ios、webllm，由 package 命令打包），以及 bench/ 基准测试与 tests/ 测试体系如何保障引擎与编译质量。",
+          "learning_goals": [
+            "了解移动端/Web 端打包与部署方式",
+            "掌握 bench 基准测试入口",
+            "认识 tests 目录覆盖的子系统"
+          ],
+          "source_files": [
+            "android/README.md",
+            "docs/deploy/android.rst",
+            "docs/deploy/webllm.rst",
+            "python/mlc_llm/bench/__main__.py"
+          ],
+          "minimal_modules": [
+            "移动端/Web 部署",
+            "package 打包",
+            "bench 与 tests 体系"
+          ],
+          "practice_task": "浏览 tests/python 目录，按 compiler_pass/model/loader/quantization/serve/json_ffi 分类统计测试文件；并运行 bench __main__ 的 --help 了解基准测试可用命令。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
