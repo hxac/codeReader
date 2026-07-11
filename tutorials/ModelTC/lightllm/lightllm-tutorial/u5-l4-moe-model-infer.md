@@ -2,659 +2,458 @@
 
 ## 1. 本讲目标
 
-Mixtral、DeepSeek-V2/V3 这类 **MoE（Mixture of Experts，混合专家）** 模型用「一组并行的小 FFN + 一个路由器」替换了普通 transformer 里的那一个 FFN，从而在大幅扩大参数量的同时把单次推理的计算量压在低位。本讲要回答的核心问题是：**这套替换在 LightLLM 的代码里到底落在哪一层、怎么实现？** 学完后你应该能够：
+在 u5-l2 中，我们以 Llama 为例走完了一个**稠密（dense）**模型的完整推理。本讲把视角从「一个固定的 FFN」切换到「一篮子可选的 FFN」——即 **MoE（Mixture of Experts，混合专家）**。学完本讲你应当掌握：
 
-1. 说清楚 MoE 层与普通 FFN 层的**推理差异**：普通 FFN 是「每个 token 走同一个门」，MoE 是「每个 token 经路由器挑 top-k 个专家、各算各的再加权求和」。
-2. 理解**专家路由（top-k gating）**的两种形态：Mixtral 的朴素 softmax top-k，以及 DeepSeek 的「分组 + 偏置」grouped top-k。
-3. 掌握 **fused_moe 融合算子**的五步流水线（`moe_align` → `grouped_matmul(w1)` → `silu_and_mul` → `grouped_matmul(w2)` → `moe_sum_reduce`），并知道每一步对应 `lightllm/common/basemodel/triton_kernel/fused_moe/` 下的哪个文件。
-4. 动手对比 llama 与 mixtral 的 transformer 层推理，亲自验证「MoE = 把模板的 `_ffn` 钩子换掉」这一结论。
+- 说清 MoE 层与普通 FFN 层在**计算结构**上的本质差异，以及它在推理框架中「替换」普通 FFN 的方式。
+- 理解**专家路由（expert routing）**：门控（gate）打分、top-k 选择、权重归一化这三步如何决定「每个 token 由哪几个专家处理」。
+- 掌握 LightLLM 的 **fused_moe 算子族**：`fused_experts_impl` 内部分组矩阵乘（grouped GEMM）、SiLU 融合、跨专家求和等阶段各自承担什么计算。
+- 认识 DeepSeek-V2/V3 在标准 top-k 之上引入的**分组选择（grouped top-k）**、**共享专家（shared experts）**与 **EP（专家并行）**等进阶机制。
 
-本讲承接 [u5-l2 以 Llama 为例理解完整模型实现](./u5-l2-llama-model-walkthrough.md) 与 [u5-l3 如何新增模型支持](./u5-l3-add-new-model.md)。那里我们建立了两个关键认知：① transformer 层模板写死两条残差骨架，只把 `_ffn` 留成「必须由子类实现」的钩子；② llama 用一个稠密 FFN（gate_up → silu_and_mul → down）填这个钩子。本讲就来看 MoE 模型如何**用另一套实现填同一个钩子**。
+本讲是 u5-l5（MLA 注意力）的前置，因为 DeepSeek 系列同时用到 MoE 与 MLA，理解 MoE 后才能拼出完整的 DeepSeek 推理图。
 
 ## 2. 前置知识
 
-在动手之前，请确认你已经理解下面几个概念（都来自前序讲义，这里只做最简回顾）：
+阅读本讲前，请确认你已了解（这些都在前几讲建立）：
 
-- **`_ffn` 是模板钩子**（[u3-l3](./u3-l3-layer-infer-template.md)）：transformer 层模板的 `context_forward`/`token_forward` 在第二段残差处调用 `self._ffn(...)`，模板本身只把这个方法声明为 `raise Exception("need to impl")`。稠密模型（llama）与 MoE 模型（mixtral/deepseek2）的区别，**仅仅在于各自如何实现 `_ffn`**。
-- **llama 的稠密 FFN**（[u5-l2](./u5-l2-llama-model-walkthrough.md)）：`gate_up_proj.mm(x)` → `silu_and_mul_fwd`（SwiGLU）→ `down_proj.mm`。三个权重 `gate_proj`/`up_proj`/`down_proj` 只有一份。
-- **元权重与 TP 切分**（[u3-l4](./u3-l4-weights-and-tp-split.md)）：权重是「外层容器 + 内层元权重」两层结构，`ROWMMWeight`（列并行，无需 all-reduce）与 `COLMMWeight`（行并行，需 all-reduce）封装了切分细节。
-- **模型即插槽**（[u5-l1](./u5-l1-model-registry.md)、[u3-l1](./u3-l1-tp-part-base-model.md)）：模型类靠填六个插槽组装，MoE 模型的「MoE 性」全部集中在 `transformer_weight_class`（专家权重）与 `transformer_layer_infer_class`（MoE 推理）这两个插槽里。
+- **FFN / MLP**：Transformer 每层在注意力之后都有一个前馈网络，Llama 用 SwiGLU 结构，即 `down_proj( SiLU(gate·x) ⊙ up·x )`，对应 `_ffn_tp` 里的 `gate_up_proj → silu_and_mul → down_proj` 三步。
+- **TPSP 混合并行**：`_tpsp_allgather` / `_tpsp_reduce` 这一对通信原语，用于把注意力/MoE 的输入在 TP 组间收集、输出再规约（见 u6-l2）。
+- **模板方法模式**：基类 `LlamaTransformerLayerInfer` 写好了残差骨架，子类只覆写 `_ffn` 等钩子（见 u3-l3、u5-l2）。
+- **Triton kernel**：LightLLM 把性能关键路径写成 Triton，前面讲过采样、注意力等 kernel，本讲的 fused_moe 也是同类。
 
-> 关键直觉：MoE 不改变 transformer 的整体骨架（注意力 + 两段残差照旧），它**只替换 FFN 那一段**。所以读懂 MoE，本质上就是读懂「`_ffn` 钩子的 MoE 版本」与「承载 N 个专家权重的 `FusedMoeWeight`」。
+**MoE 的核心直觉**：稠密 FFN 对每个 token 都做一模一样的全部计算，参数量大、算力贵。MoE 把一个大 FFN 拆成 \(E\) 个小 FFN（「专家」），每个 token 只激活其中 \(k\) 个（\(k \ll E\)），从而在「总参数量」很大的同时，把「单 token 的实际计算量」压到接近一个小模型。代价是需要一个**路由器（router）**来为每个 token 选择专家，且权重存储与访存模式更复杂。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件如下：
+本讲涉及的关键文件按「模型层 / 算子层 / 权重层」三组列出：
 
 | 文件 | 作用 |
 | --- | --- |
-| `lightllm/models/mixtral/model.py` | Mixtral 模型类：注册 + 填插槽，是最简 MoE 范例的入口 |
-| `lightllm/models/mixtral/layer_infer/transformer_layer_infer.py` | Mixtral 的 MoE `_ffn`：路由 + 融合专家，结构最短最直观 |
-| `lightllm/models/mixtral/layer_infer/_custom_ops.py` | Mixtral 用的朴素 top-k 路由（softmax + topk + 归一化），PyTorch 版 |
-| `lightllm/models/mixtral/layer_weights/transformer_layer_weight.py` | Mixtral 权重：`moe_gate` 路由权重 + `FusedMoeWeight` 专家权重 |
-| `lightllm/models/deepseek2/model.py` | DeepSeek-V2/V3 模型类：注册 EP 通信组，是当前**主力维护**的 MoE 实现 |
-| `lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py` | DeepSeek MoE 推理：区分 dense/MoE 层、TP/EP 两种实现、共享专家、overlap |
-| `lightllm/models/deepseek2/layer_weights/transformer_layer_weight.py` | DeepSeek 权重：按层判断 dense/MoE、加载共享专家、`FusedMoeWeight` |
-| `lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py` | `FusedMoeWeight`：N 个专家权重的容器，对外暴露统一的 `experts()` 接口 |
-| `lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py` | Triton 版 MoE 实现：`_select_experts`（路由）+ `_fused_experts`（融合专家） |
-| `lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py` | 统一路由入口 `select_experts`：按 `use_grouped_topk` 分派朴素/分组路由 |
-| `lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py` | DeepSeek 专用 grouped top-k Triton kernel（含 `e_score_correction_bias`） |
-| `lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py` | **fused_moe 主算子**：`fused_experts_impl` 五步流水线 + `grouped_matmul` |
-| `lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py` | 把 top-k 个专家输出按 token 加权求和归并 |
-| `lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe_ep.py` | EP（专家并行）版融合专家，走 DeepEP 的 all-to-all dispatch/combine |
-| `lightllm/models/llama/layer_infer/transformer_layer_infer.py` | llama 稠密 `_ffn`/`_ffn_tp`，作为 MoE 的对照基准 |
+| [lightllm/models/mixtral/model.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/model.py) | Mixtral 模型本体，几乎为空，只填插槽 + 注册 |
+| [lightllm/models/mixtral/layer_infer/transformer_layer_infer.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/transformer_layer_infer.py) | Mixtral 层推理：覆写 `_ffn`，串联 gate→topk→fused_experts |
+| [lightllm/models/mixtral/layer_infer/_custom_ops.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/_custom_ops.py) | Mixtral 自带的 PyTorch 版 `fused_topk`（参考实现） |
+| [lightllm/models/mixtral/layer_weights/transformer_layer_weight.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_weights/transformer_layer_weight.py) | Mixtral 权重：在 Llama 权重基础上把 FFN 换成 `FusedMoeWeight` |
+| [lightllm/models/deepseek2/model.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/model.py) | DeepSeek-V2/V3 模型本体（继承 Llama） |
+| [lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py) | DeepSeek 层推理：分组 top-k、共享专家、EP/TP 双路径 |
+| [lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py) | **核心**：`fused_experts_impl` 分组矩阵乘主流程 |
+| [lightllm/common/basemodel/triton_kernel/fused_moe/softmax_topk.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/softmax_topk.py) | 单 kernel 版 softmax+topk（mixtral 用） |
+| [lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py) | 分组 top-k kernel（DeepSeek 用） |
+| [lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py) | 选择函数总入口 `select_experts`，按模型分流 |
+| [lightllm/common/basemodel/triton_kernel/fused_moe/moe_silu_and_mul.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/moe_silu_and_mul.py) | 融合的 SiLU·mul 激活 kernel |
+| [lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py) | 跨被选专家的加权求和 kernel |
+| [lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py) | `FusedMoeWeight`：把所有专家权重打包、选择计算后端 |
 
-> 一个重要的事实提示（详见 4.1.3）：Mixtral 的 `model.py` 与 `_ffn` 是讲解 MoE **概念**的最佳入口（短、直白），但它的 `_ffn` 函数体里引用的 `fused_experts_impl` 导入路径与 `experts.w1[0]` 访问方式相对当前的 `FusedMoeWeight` 已经**滞后**（当前 `FusedMoeWeight` 没有 `.w1` 属性，统一用 `.w13/.w2`）。因此本讲用 Mixtral 讲「MoE 长什么样」，用 **DeepSeek-V2/V3** 讲「MoE 在当前代码里真正怎么跑」。源码精读的关键结论请以 DeepSeek 路径为准。
+> 提示：fused_moe 目录下还有 `grouped_fused_moe_ep.py`（EP 路径）、`append_shared_expert_topk.py`（共享专家并入）、`deepep_scatter_gather.py`（DeepEP 分发收集）等，本讲会点到，深入留作练习。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成三个最小模块：**MoE 推理**（MoE 如何替换普通 FFN）、**专家路由**（top-k gating）、**fused_moe 算子**（融合专家的五步流水线）。
-
-### 4.1 MoE 推理
+### 4.1 MoE 推理：把单个 FFN 换成一篮子专家
 
 #### 4.1.1 概念说明
 
-普通 transformer 的每一层只有一个 FFN，所有 token 都走同一个 `gate_up → act → down`。**MoE** 把这一个 FFN 换成 \(E\) 个「专家」\(F_1, F_2, \dots, F_E\)（每个专家本身就是一个小 FFN），再加一个**路由器（router / gate）**：一个形状为 `[hidden, E]` 的小矩阵，把 token 映射成 \(E\) 个得分。每个 token 只激活得分最高的 \(k\) 个专家（top-k），把它们的输出按路由权重加权求和：
+稠密 FFN 的计算（Llama 的 `_ffn_tp`）可以写成：
 
 \[
-\text{out}(x)=\sum_{i\in\text{topk}} g_i(x)\cdot F_i(x),\qquad g(x)=\text{softmax}(W_g x)
+y = W_{down}\,\big(\,\text{SiLU}(W_{gate}\,x)\ \odot\ W_{up}\,x\,\big)
 \]
 
-这样虽然总参数量是稠密 FFN 的约 \(E/k\) 倍，但**单次推理每个 token 只动用 \(k\) 个专家**，计算量与一个普通 FFN 相当——这就是 MoE「参数量大、计算量小」的由来。
+每个 token 都用**同一组** \(W_{gate}, W_{up}, W_{down}\)。MoE 则把它换成：
 
-> 名词解释——**专家（expert）**：MoE 层里一个独立的 FFN（自带 gate/up/down 三权重）。**路由器（gate/router）**：决定 token 送进哪些专家的小线性层。**top-k**：每个 token 只选路由得分最高的 \(k\) 个专家（Mixtral 是 2，DeepSeek-V3 是 8）。**共享专家（shared expert）**：DeepSeek 特有的、对所有 token 都激活的额外专家，单独以稠密形式计算，最后加到 MoE 输出上。
+\[
+y = \sum_{i \in \mathcal{S}(x)} \tilde{p}_i(x)\ \cdot\ \text{FFN}_i(x)
+\]
+
+其中：
+
+- \(E\) 是专家总数，每个专家 \(\text{FFN}_i\) 是一套独立的小 FFN（同样 gate/up/down 三件套）。
+- \(\mathcal{S}(x)\) 是路由器为 token \(x\) 选出的 \(k\) 个专家集合（\(k \ll E\)，例如 Mixtral \(E=8,k=2\)，DeepSeek-V3 \(E=256,k=8\)）。
+- \(\tilde{p}_i(x)\) 是每个被选专家的**融合权重**，通常由门控打分经 softmax + top-k + 归一化得到。
+
+因此 MoE 推理在框架层的「落点」非常清晰：**它就是替换掉 Transformer 层里的 `_ffn` 钩子，其余（注意力、残差、归一化）原样复用稠密模型基类。** 这正是 LightLLM 用模板方法模式的价值——子类只换一个 `_ffn`，就完成了从 Llama 到 Mixtral 的改造。
 
 #### 4.1.2 核心流程
 
-MoE 不改 transformer 骨架，只把模板的 `_ffn` 钩子换成 MoE 版本。一次 MoE 前向（以 TP 模式、单卡视角）是：
+一个 MoE 层的前向可以拆成两段——**路由**与**专家计算**：
 
-```text
-_ffn(x):                                    # MoE 版 _ffn（替换 llama 的稠密 _ffn）
-  ├─ x = _tpsp_allgather(x)                 # TPSP：先 allgather 完整 hidden
-  ├─ router_logits = moe_gate.mm(x)         # 路由器：[N, hidden] × [hidden, E] → [token, E]
-  ├─ topk_weights, topk_ids = 路由(x, router_logits)   # 每个 token 选 k 个专家（见 4.2）
-  ├─ out = fused_experts(x, experts权重, topk_weights, topk_ids)  # 融合专家五步（见 4.3）
-  ├─（若有 shared expert）out += shared_output
-  └─ return _tpsp_reduce(out)                # TPSP：行并行结果 all-reduce
+```
+输入 hidden_states (num_tokens, hidden_dim)
+        │
+        ▼  ① 路由 router_logits = moe_gate(hidden_states)
+        │
+   ┌────┴─────── 分支：选专家 ─────────────────┐
+   │  softmax(或 sigmoid) → top-k → 归一化      │
+   │  得到 topk_ids (num_tokens, k)             │
+   │       topk_weights (num_tokens, k)         │
+   └────┬──────────────────────────────────────┘
+        ▼  ② 专家计算 fused_experts
+        │  按专家把 token 重排 (moe_align)
+        │  分组 GEMM₁: x @ W_gate_up^e   (per expert)
+        │  SiLU·mul 激活
+        │  分组 GEMM₂: · @ W_down^e       (per expert，乘 topk_weight)
+        │  跨 k 个专家求和 (moe_sum_reduce)
+        ▼
+输出 (num_tokens, hidden_dim)
 ```
 
-与 llama 稠密 `_ffn` 对比，MoE 版多了「路由 + 选专家 + 按专家分组计算 + 归并」这几步，而 `gate/up/down` 从「一份」变成「E 份」。
+注意：① 产出的只是「选了谁、权重多少」的轻量张量；② 才是真正的大块矩阵乘。LightLLM 把 ② 做成一个**融合**实现 `fused_experts_impl`，避免为每个专家单独起 kernel、避免中间张量反复落盘。
 
-DeepSeek 在此基础上还多两个维度：① **逐层判断 dense/MoE**——前几层是稠密 FFN，后面才切到 MoE；② **TP / EP 两种实现**——`--enable_ep_moe` 时走专家并行（专家分散到各 rank，用 DeepEP all-to-all 传递 token），否则走张量并行（每个 rank 持有全部专家的一片）。
+#### 4.1.3 源码精读：MoE 层如何挂在 Llama 基类上
 
-#### 4.1.3 源码精读
+先看模型本体有多薄。Mixtral 的 `MixtralTpPartModel` 继承 `TpPartBaseModel`，除了插槽，只做了 rotary 初始化：
 
-**(a) MoE 是怎么「插」进 transformer 的：`_ffn` 钩子**
+[lightllm/models/mixtral/model.py:L18-L49](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/model.py#L18-L49) —— 用 `@ModelRegistry("mixtral")` 注册；把 `transformer_layer_infer_class` 指向 `MixtralTransformerLayerInfer`、`transformer_weight_class` 指向 `MixtralTransformerLayerWeight`，其余插槽（pre/post 推理类、权重类、infer state）直接复用 Llama。也就是说，Mixtral 相对 Llama 的全部「MoE 性」都集中在这两个类里。
 
-transformer 层模板在 prefill/decode 两条骨架里都在第二段残差处调用 `self._ffn(...)`，而模板自身把 `_ffn` 留成空钩子：
+真正的 MoE 推理在层推理类。`MixtralTransformerLayerInfer` 继承 `LlamaTransformerLayerInfer`，**只覆写 `_ffn`**：
 
-[lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py:53-54](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py#L53-L54) —— 模板的 `_ffn` 必须由子类实现：
+[lightllm/models/mixtral/layer_infer/transformer_layer_infer.py:L18-L45](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/transformer_layer_infer.py#L18-L45) —— 这段代码完整刻画了 MoE 的两段式：
 
-```python
-def _ffn(self, input, infer_state, layer_weight) -> torch.Tensor:
-    raise Exception("need to impl")
-```
+1. `_tpsp_allgather`：TPSP 混合并行下，先把各 rank 的部分 hidden 收集全。
+2. `router_logits = layer_weight.moe_gate.mm(hidden_states)`：门控线性层，输出形状 `(num_tokens, num_local_experts)`。
+3. `fused_topk(...)`：softmax + top-k + 归一化（见 4.2）。
+4. `fused_experts_impl(...)`：融合专家计算（见 4.3），传入 `w1`（gate_up）、`w2`（down）、`topk_weights`、`topk_ids`。
+5. `_tpsp_reduce`：把各 rank 的部分输出规约。
 
-[lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py:73-74](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py#L73-L74) —— 骨架在固定位置调用它，prefill（`context_forward`）与 decode（`token_forward`，见第 95-96 行）各调一次：
+对比稠密 Llama 的 `_ffn`：
 
-```python
-input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-ffn_out = self._ffn(input1, infer_state, layer_weight)   # ← MoE 与稠密的分叉点
-```
+[lightllm/models/llama/layer_infer/transformer_layer_infer.py:L111-L129](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/llama/layer_infer/transformer_layer_infer.py#L111-L129) —— Llama 的 `_ffn_tp` 是 `gate_up_proj.mm → silu_and_mul → down_proj.mm` 三行，因为它只有一套 FFN 权重；而 Mixtral 把这三步**搬进了 `fused_experts_impl` 内部，并对每个专家各做一次**。这就是「MoE 替换普通 FFN」的字面含义：调用点从 `layer_weight.gate_up_proj` 换成了 `layer_weight.experts` + `fused_experts_impl`。
 
-**对照基准——llama 用稠密 FFN 填这个钩子**：
+权重侧的对应改造同样轻量。`MixtralTransformerLayerWeight` 继承 Llama 权重，把 `_init_ffn` 重定向到 `_init_moe`：
 
-[lightllm/models/llama/layer_infer/transformer_layer_infer.py:118-129](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/llama/layer_infer/transformer_layer_infer.py#L118-L129) —— 一次 matmul（gate+up 融合）+ SwiGLU + 一次 matmul（down），权重只有一份：
+[lightllm/models/mixtral/layer_weights/transformer_layer_weight.py:L30-L60](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_weights/transformer_layer_weight.py#L30-L60) —— 关键两点：`moe_gate` 用 `ROWMMWeight(..., tp_world_size=1)`，即门控**不做张量并行**（每个 rank 都持有完整 gate，独立为每个 token 打分）；专家本体用 `FusedMoeWeight`，把所有专家的 `gate_proj(w1)/down_proj(w2)/up_proj(w3)` 打包到一起。注意第 46 行有一处运行期断言 `assert get_env_start_args().enable_ep_moe, "Mixtral only support tp mode."`（其提示信息与断言条件语义相反，属历史遗留，阅读时以断言条件为准）。
 
-```python
-def _ffn_tp(self, input, infer_state, layer_weight):
-    input = input.view(-1, self.embed_dim_)
-    up_gate_out = layer_weight.gate_up_proj.mm(input)
-    ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-    silu_and_mul_fwd(up_gate_out, ffn1_out)      # SwiGLU 激活
-    ffn2_out = layer_weight.down_proj.mm(ffn1_out)
-    return ffn2_out
-```
-
-**MoE 版——Mixtral 用「路由 + 融合专家」填同一个钩子**：
-
-[lightllm/models/mixtral/layer_infer/transformer_layer_infer.py:18-45](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/transformer_layer_infer.py#L18-L45) —— 结构与上面一一对应，只是在两次 matmul 之外多了「路由 + 选专家」，权重从 `gate_up_proj`/`down_proj` 换成承载 E 个专家的 `experts`：
-
-```python
-def _ffn(self, input, infer_state, layer_weight):
-    hidden_states = input.view(-1, self.embed_dim_)
-    hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
-    router_logits = layer_weight.moe_gate.mm(hidden_states)          # 路由器打分
-    topk_weights, topk_ids = fused_topk(                            # 选 top-k 专家
-        hidden_states=hidden_states, gating_output=router_logits,
-        topk=self.num_experts_per_tok, renormalize=self.renormalize,
-        alloc_tensor_func=self.alloc_tensor)
-    ffn2_out = fused_experts_impl(                                  # 融合专家（见 4.3）
-        hidden_states=hidden_states, w1=..., w2=...,
-        topk_weights=topk_weights, topk_ids=topk_ids, inplace=True, ...)
-    return self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
-```
-
-> 准确性提示：Mixtral 这段 `_ffn` 里 `from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl` 的导入路径，以及 `layer_weight.experts.w1[0]`/`experts.w2[0]` 的取法，相对当前 HEAD 已**滞后**——真实的融合专家算子在 `lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py`，而当前 `FusedMoeWeight` 用 `.w13/.w2`（`WeightPack`）而非 `.w1[0]`。所以 Mixtral 这段代码更适合理解「MoE 的骨架长什么样」，**真正能跑通、被持续维护的是 DeepSeek 路径**（见 (c)）。下面 (b) 先看 Mixtral 的权重组织，(c) 再看 DeepSeek 的完整实现。
-
-**(b) Mixtral 的 MoE 权重组装**
-
-[lightllm/models/mixtral/layer_weights/transformer_layer_weight.py:33-60](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_weights/transformer_layer_weight.py#L33-L60) —— Mixtral 在 `_init_moe` 里建两样东西：一个路由权重 `moe_gate`，一个 `FusedMoeWeight` 专家集合：
-
-```python
-def _init_moe(self):
-    inter_size = self.network_config_["intermediate_size"]
-    self.moe_gate = ROWMMWeight(                       # 路由器：[hidden] × [E]
-        in_dim=self.n_embed, out_dims=[self.n_routed_experts],
-        weight_names=self.moe_gate_weight_name, ...)
-    self.experts = FusedMoeWeight(                     # E 个专家的 gate/up/down
-        gate_proj_name="w1", down_proj_name="w2", up_proj_name="w3",
-        weight_prefix=f"model.layers.{self.layer_num_}.block_sparse_moe.experts",
-        n_routed_experts=self.n_routed_experts, hidden_size=self.n_embed,
-        moe_intermediate_size=inter_size, ...)
-```
-
-注意路由权重 `moe_gate` 显式设了 `tp_world_size=1`——**路由器不切分**，每个 rank 都用完整的路由矩阵给所有 token 打分；专家本身的 TP 切分交给 `FusedMoeWeight` 内部处理。
-
-[lightllm/models/mixtral/model.py:18-30](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/model.py#L18-L30) —— Mixtral 的模型类依然是「填插槽」，与 llama 唯一的不同只是 `transformer_weight_class` 换成了带专家的 `MixtralTransformerLayerWeight`、`transformer_layer_infer_class` 换成了 MoE 版推理类：
-
-```python
-@ModelRegistry("mixtral")
-class MixtralTpPartModel(TpPartBaseModel):
-    pre_and_post_weight_class = LlamaPreAndPostLayerWeight     # 复用 llama 的 pre/post
-    transformer_weight_class = MixtralTransformerLayerWeight   # ★ 带 MoE 专家
-    pre_layer_infer_class = LlamaPreLayerInfer
-    post_layer_infer_class = LlamaPostLayerInfer
-    transformer_layer_infer_class = MixtralTransformerLayerInfer  # ★ MoE 推理
-    infer_state_class = LlamaInferStateInfo
-```
-
-这正是 [u5-l3](./u5-l3-add-new-model.md) 强调的「模型 = 子类填好的插槽」——MoE 并没有打破这个范式。
-
-**(c) 当前主力实现：DeepSeek 的 dense/MoE 分层与 TP/EP 双实现**
-
-DeepSeek-V2/V3 比 Mixtral 复杂得多：模型的前几层是稠密 FFN，后续层才是 MoE；并且 MoE 层还支持 TP 与 EP 两种并行。这两个「分叉」都在推理类的初始化里就决定好了。
-
-[lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py:32-42](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L32-L42) —— 构造时按层号判断当前层是不是 MoE，并读出路由相关超参：
-
-```python
-self.is_moe = (
-    network_config["n_routed_experts"] is not None
-    and layer_num >= network_config["first_k_dense_replace"]      # 前几层稠密
-    and layer_num % network_config.get("moe_layer_freq", 1) == 0  # 每 moe_layer_freq 层一个 MoE
-)
-self.n_shared_experts = network_config["n_shared_experts"]
-self.num_experts_per_tok = network_config["num_experts_per_tok"]
-self.norm_topk_prob = network_config["norm_topk_prob"]
-self.n_group = network_config["n_group"]            # DeepSeek 分组路由的组数
-self.topk_group = network_config["topk_group"]      # 每个 token 选用几个组
-```
-
-[lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py:63-71](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L63-L71) —— `_bind_ffn` 在初始化末尾把 `self._ffn` 绑成三种实现之一，模板骨架调用 `self._ffn` 时就会走到对应分支：
-
-```python
-def _bind_ffn(self):
-    if self.is_moe:
-        enable_ep_moe = get_env_start_args().enable_ep_moe
-        if enable_ep_moe:
-            self._ffn = self._ffn_ep_impl     # 专家并行：专家分散到各 rank
-        else:
-            self._ffn = self._ffn_tp_impl     # 张量并行：每 rank 持有全部专家的一片
-    else:
-        self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)   # 稠密层：直接复用 llama 的
-```
-
-[lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py:214-240](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L214-L240) —— TP 模式的 MoE 主体 `_moe_ffn_tp`，是与 Mixtral 同构的「路由 + 融合专家 + 共享专家」，但路由与融合都委托给 `layer_weight.experts`（`FusedMoeWeight`）的统一接口 `experts(...)`：
-
-```python
-def _moe_ffn_tp(self, input, infer_state, layer_weight):
-    hidden_states = input.view(-1, self.embed_dim_)
-    # 若未启用共享专家融合，则单独把共享专家当稠密 FFN 算
-    if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
-        shared_output = LlamaTransformerLayerInfer._ffn_tp(self, hidden_states, infer_state, layer_weight)
-    router_logits = layer_weight.moe_gate.mm(hidden_states.to(layer_weight.moe_gate.data_type_))
-    layer_weight.experts.experts(                       # ★ 统一入口：内部完成「路由 + 融合专家」
-        hidden_states, router_logits=router_logits,
-        top_k=self.num_experts_per_tok, renormalize=self.norm_topk_prob,
-        use_grouped_topk=self.n_group, topk_group=self.topk_group, num_expert_group=self.n_group)
-    if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
-        hidden_states.add_(shared_output)               # 共享专家结果加回去
-    return hidden_states.view(num_tokens, hidden_dim)
-```
-
-注意 `experts()` 是**原地写回** `hidden_states`（`fused_experts` 用 `inplace=True`，见 4.3），所以没有左值赋值。`_ffn_tp_impl`（[第 270-279 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L270-L279)）只在外面再包一层 `_tpsp_allgather`/`_tpsp_reduce`，把 MoE 嵌进 TPSP 混合并行（见 [u6-l2](./u6-l2-microbatch-overlap-tpsp.md)）。
-
-**(d) DeepSeek 的模型类：建 EP 通信组**
-
-[lightllm/models/deepseek2/model.py:49-56](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/model.py#L49-L56) —— DeepSeek 在 `_init_custom` 里（RoPE 之外）调用 `dist_group_manager.new_deepep_group(...)`，把专家数、隐层维度、每 token 专家数等注册成一个 DeepEP 通信组——这是 `--enable_ep_moe` 时 all-to-all dispatch/combine 的前提：
-
-```python
-def _init_custom(self):
-    self._init_to_get_yarn_rotary()
-    dist_group_manager.new_deepep_group(
-        self.config["n_routed_experts"], self.config["hidden_size"],
-        self.config.get("num_experts_per_tok", 1),
-        self.config.get("moe_intermediate_size", self.config.get("intermediate_size")))
-```
+> 结论：MoE 模型在 LightLLM 里的「适配成本」很低——继承 Llama，覆写一个 `_ffn`，再加一份把 FFN 权重换成 `FusedMoeWeight` 的权重类即可。这和 u5-l3 讲的「新增模型 = 填骨架钩子」一脉相承。
 
 #### 4.1.4 代码实践
 
-**实践目标**：通过对比 llama 与 mixtral 的 transformer 推理类，亲眼确认「MoE = 换 `_ffn` 钩子」这一结论，并定位 MoE 与稠密在代码上的**唯一分叉点**。
+**实践目标**：直观确认「MoE 层 = 稠密 `_ffn_tp` 的 per-expert 推广」。
 
 **操作步骤**：
 
-1. 打开 [lightllm/models/llama/layer_infer/transformer_layer_infer.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/llama/layer_infer/transformer_layer_infer.py)，确认它的钩子集合：`_att_norm`/`_ffn_norm`/`_get_qkv`/两个注意力核/`_get_o`/`_ffn`（与 [u5-l2](./u5-l2-llama-model-walkthrough.md) 一致）。
-2. 打开 [lightllm/models/mixtral/layer_infer/transformer_layer_infer.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/transformer_layer_infer.py)，发现它**只覆写了 `_ffn`**（其余注意力、归一化钩子全部继承自 `LlamaTransformerLayerInfer`）。
-3. 打开 [lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py)，找到 `_bind_ffn`（[第 63 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L63)），看它如何把 `self._ffn` 绑成 dense / MoE-TP / MoE-EP 三种之一。
-4. 回到模板 [transformer_layer_infer_template.py:73-74 与 95-96](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py#L73-L74)，确认 prefill/decode 骨架调用的是 `self._ffn`——所以无论 `_ffn` 被绑成什么，骨架代码一行都不用改。
+1. 打开 `lightllm/models/llama/layer_infer/transformer_layer_infer.py`，阅读 `_ffn_tp`（L118-L129）的三行 SwiGLU。
+2. 打开 `lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py`，定位 `fused_experts_impl`（L992 起），找出与「gate_up→silu_and_mul→down」对应的三段调用。
+3. 列一张对照表：Llama 的哪一行 ↔ Mixtral/fused_experts 里的哪一段。
 
-**需要观察的现象**：
+**需要观察的现象**：`fused_experts_impl` 内部会出现两次 `grouped_matmul`（一次对应 `gate_up_proj`，一次对应 `down_proj`），中间夹一次 `silu_and_mul_fwd`，末尾一次 `moe_sum_reduce`——这正是把 Llama 的三步 FFN「按专家批量重复」后的形态。
 
-- Mixtral 的推理类比 llama **只多了一个 `_ffn` 的覆写**，其余钩子完全复用——MoE 的「全部复杂性」都被收拢进 `_ffn`。
-- DeepSeek 的 `_bind_ffn` 把「这层是不是 MoE」「走 TP 还是 EP」两个决策在初始化期就固化成具体的函数绑定，运行期 `self._ffn(...)` 直接派发，没有额外分支开销。
-- 模板骨架对稠密与 MoE **完全无感**：它只认 `self._ffn` 这个名字。
+**预期结果**：你应能写出类似下面的映射（答案见 4.3.4）：
 
-**预期结果**：你会得出结论——在 LightLLM 里实现一个 MoE 模型，注意力部分可以原样复用 llama，**真正要写的只有 `_ffn` 的 MoE 版本与承载专家的 `FusedMoeWeight`**；这与 [u5-l3](./u5-l3-add-new-model.md) 「结构偏离标准 transformer 的程度决定工作量」的论断一致。
+| Llama 稠密 FFN | fused_experts_impl 内对应 |
+| --- | --- |
+| `gate_up_proj.mm(input)` | 第一次 `grouped_matmul(... expert_weights=w1 ...)` |
+| `silu_and_mul_fwd(up_gate_out, ffn1_out)` | `silu_and_mul_fwd(cache1, cache2)` |
+| `down_proj.mm(ffn1_out)` | 第二次 `grouped_matmul(... expert_weights=w2, mul_routed_weight=True)` |
+| （无） | `moe_sum_reduce(...)` 跨专家求和 |
 
-> 待本地验证：第 2、3 步里「Mixtral 只覆写 `_ffn`」「DeepSeek 三分支绑定」建议你亲手用编辑器折叠/搜索确认，行号会随提交漂移。
+> 待本地验证：若你能在本地跑通一个小 Mixtral，可在门控后打印 `topk_ids` 的直方图，观察每个专家被命中的频次是否大致均衡（MoE 负载均衡话题见 4.4）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：DeepSeek 为什么要在构造函数里判断 `self.is_moe`，而不是为稠密层和 MoE 层各写一个推理类？
+**练习 1**：为什么 Mixtral 的 `moe_gate` 要设 `tp_world_size=1`，而专家本体却参与张量并行？
 
-**参考答案**：因为同一个模型（DeepSeek-V2/V3）**内部混合了两种层**——前 `first_k_dense_replace` 层是稠密 FFN，其后才是 MoE 层。这些层共享同一套注意力实现（MLA）、同一套权重容器结构，只有 FFN 段不同。用一个推理类 + `_bind_ffn` 按层号绑定不同 `_ffn`，既避免了重复实现注意力，又能让模板骨架对每一层统一调用 `self._ffn`。这正是模板方法模式的价值：把「变化的部分」（FFN）做成可替换钩子，把「不变的部分」（残差、注意力、KV 落池）固化在骨架里。
+**参考答案**：门控必须为**每个 token 选出全局一致的专家集合**，若各 rank 用被切片的 gate 会得到不一致的路由结果，导致各 rank 计算的是不同专家、无法规约；因此 gate 不切分、每 rank 完整一份。而专家本体的权重矩阵很大，沿中间维切分到各 rank 才能省显存，且各 rank 各算各的那一片、最后 `_tpsp_reduce` 求和即可还原完整结果。
 
-**练习 2**：Mixtral 的 `moe_gate`（路由权重）为什么显式设 `tp_world_size=1` 不做切分，而专家权重却要切分？
+**练习 2**：如果把 `num_experts_per_tok` 从 2 改成 1，MoE 层的输出语义会变成什么？
 
-**参考答案**：路由器要为每个 token 在**全部** \(E\) 个专家里打分并选 top-k，所以每个 rank 都必须看到完整的 \(E\) 维得分，路由矩阵不能沿专家维切分（否则每个 rank 只能看到部分专家、无法做全局 top-k）。而专家本身是「互相独立」的 FFN，可以按张量并行把每个专家的 `gate/up`（列并行）、`down`（行并行）像普通 FFN 那样切开，由 `FusedMoeWeight` 内部的 `row_slicer`/`col_slicer` 完成。
+**参考答案**：每个 token 只激活 1 个专家，路由退化为「硬路由（hard routing）」，`moe_sum_reduce` 退化为对单专家结果的恒等映射（求和只有一项）。计算更省，但表达能力下降、负载更易不均衡。
 
-### 4.2 专家路由
+---
+
+### 4.2 专家路由：门控打分与 top-k 选择
 
 #### 4.2.1 概念说明
 
-路由（expert routing / top-k gating）是 MoE 的灵魂：它决定**每个 token 送进哪 \(k\) 个专家**。LightLLM 里有两套路由实现：
+路由要回答一个问题：**对当前 token，挑哪 \(k\) 个专家、各给多大权重？** 标准做法是：
 
-- **朴素 top-k**（Mixtral 用）：`softmax(路由得分)` → 取 top-k → 归一化。逻辑直白，是一个 `[token, E]` 上的 softmax + topk。
-- **分组 top-k（grouped top-k）**（DeepSeek-V2/V3 用）：先把 \(E\) 个专家分成 \(n\_group\) 组，**先在组间选 `topk_group` 个组**，再在选中的组里取 top-k 专家，并可叠加一个 `e_score_correction_bias` 偏置。这是 DeepSeek 为均衡专家负载而设计的「biased grouped top-k」。
+1. **打分**：门控线性层把 hidden（维度 \(d\)）映射到 \(E\) 维 logits \(g \in \mathbb{R}^E\)。
+2. **归一化为概率**：\(p = \text{softmax}(g)\)（DeepSeek 也可选 `sigmoid`）。
+3. **top-k**：取概率最大的 \(k\) 个专家，记其下标为 `topk_ids`、概率为 `topk_weights`。
+4. **再归一化**：把被选 \(k\) 个的概率重新归一为和为 1（`renormalize=True`），即
+   \[
+   \tilde{p}_i = \frac{p_i}{\sum_{j \in \mathcal{S}} p_j},\quad i \in \mathcal{S}
+   \]
+   这保证融合权重的尺度与专家输出的尺度稳定。
 
-> 名词解释——**`e_score_correction_bias`**：DeepSeek 给每个专家的一个可学习偏置项，加在路由得分上用来**纠正专家被选中的频率**（负载均衡）。朴素 top-k 没有这一项。**`norm_topk_prob`（renormalize）**：选出 top-k 后，是否把 \(k\) 个路由权重重新归一化到和为 1。
+DeepSeek-V2/V3 在此基础上还做了**分组选择**：把 \(E\) 个专家分成 \(G\) 组，先选「最好的若干组」，再在被选组里挑 top-k 专家。这是一种无需辅助损失的负载均衡策略（auxiliary-loss-free load balancing），避免少数专家被过度使用、其余闲置。
 
 #### 4.2.2 核心流程
 
-**朴素 top-k**（Mixtral 的 `_custom_ops.fused_topk`）：
-
-```text
-scores = softmax(router_logits)            # [token, E]
-topk_weights, topk_ids = topk(scores, k)   # 每 token 取最大的 k 个
-if renormalize: topk_weights /= topk_weights.sum()   # 归一化
 ```
+mixtral（简单 top-k）:
+  router_logits --softmax--> scores --topk(k)--> ids/weights --renorm--> topk_weights/topk_ids
 
-**分组 top-k**（DeepSeek，Triton kernel `grouped_topk_kernel`）：
-
-```text
-scores = softmax(router_logits) + e_score_correction_bias   # 加偏置
-group_scores = scores.view(token, n_group, E/n_group)       # 分组
-               .topk(group_score_used_topk_num).sum(-1)     # 每组取前几名求和作为「组分」
-group_topk_value = sort(group_scores)[topk_group - 1]       # 第 topk_group 大的组分作阈值
-mask_scores = where(group_scores >= group_topk_value, scores, -inf)  # 只保留选中组里的专家
-topk_weights, topk_ids = argsort(mask_scores)[:topk]        # 在选中组里取 top-k
-if renormalize: topk_weights /= topk_weights.sum()
+deepseek（分组 top-k）:
+  router_logits --(+correction_bias)--> scores
+     --按 group 求 group_score(组内 top-2 之和)--> 选 top-k_g 个组
+     --屏蔽未选组专家--> 在剩余里 topk(k)--> renorm
 ```
-
-二者最终都产出两个形状为 `[token, k]` 的张量：`topk_weights`（float32，路由权重）与 `topk_ids`（int32/int64，被选中的专家编号）。下游的融合专家算子只认这两个张量，不关心路由是怎么选出来的——这就是路由与计算解耦的关键。
 
 #### 4.2.3 源码精读
 
-**(a) Mixtral 的朴素路由（PyTorch 版）**
+**Mixtral 的参考实现（PyTorch 版，易读）**：`_custom_ops.py` 里的 `fused_topk` / `topk_softmax`：
 
-[lightllm/models/mixtral/layer_infer/_custom_ops.py:15-46](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/_custom_ops.py#L15-L46) —— 这是 LightLLM 里最直白的路由实现，用来理解概念最合适：
+[lightllm/models/mixtral/layer_infer/_custom_ops.py:L15-L46](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/mixtral/layer_infer/_custom_ops.py#L15-L46) —— `topk_softmax` 就三行：`softmax → torch.topk(k) → 返回`；`fused_topk` 负责分配输出张量、调用 `topk_softmax`、再做一次 `topk_weights / sum` 的归一化。这是「打分→选专家→归一化」的最直白表达。
 
-```python
-def topk_softmax(topk_weights, topk_ids, token_expert_indicies, gating_output, topk=2):
-    scores = torch.softmax(gating_output, dim=-1)
-    topk_weights, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
-    return topk_weights, topk_ids
+> 注意：Mixtral 的 `_ffn` 实际 import 的是**这份** PyTorch 版 `fused_topk`（见 `transformer_layer_infer.py` 第 6 行 `from ..._custom_ops import fused_topk`）。它易于理解，但每拍都启动多个 PyTorch op、对 decode 这种 token 数极少的场景不划算。性能版本是单 kernel 的 `softmax_topk`：
 
-def fused_topk(hidden_states, gating_output, topk, renormalize, alloc_tensor_func=torch.empty):
-    ...
-    topk_weights, topk_ids = topk_softmax(..., gating_output.float(), topk)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    return topk_weights, topk_ids
-```
+**Triton 单 kernel 版 `softmax_topk`**：
 
-> 准确性提示：这是 Mixtral 目录里**自带的、偏教学/旧式**的 PyTorch 版路由。当前主力 MoE（DeepSeek）并不用它，而是走下面的 `select_experts` 统一入口；那里的 `fused_topk`（[topk_select.py:27-48](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L27-L48)）会优先调用 sglang 的 `sgl_ops.topk_softmax` CUDA 算子，找不到才退化到 Triton `softmax_topk`。两处都叫 `fused_topk`，注意区分上下文。
+[lightllm/common/basemodel/triton_kernel/fused_moe/softmax_topk.py:L6-L63](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/softmax_topk.py#L6-L63) —— 一个 kernel 处理一行（一个 token）：先整行减最大值、`exp`、求和得到分母（即手写 softmax），再循环 `top_k` 次，每次取当前最大值下标作为被选专家、计算概率、然后用 `tl.where(offsets == idx, -inf, values)` 把刚选中的位置「屏蔽」掉以选下一个。若 `RENORM` 为真，末尾再除以这 \(k\) 个概率之和。这就把「softmax + top-k + 归一化」三步融进了单个 kernel，避免多次访存。
 
-**(b) DeepSeek 的统一路由入口 `select_experts`**
+> 这份 `softmax_topk` 被通用入口 `select_experts`（4.2.3 末）在「非分组」分支下使用（`topk_select.py` 里 `fused_topk` 内部优先用 sgl_ops，否则回落到 `softmax_topk`）。
 
-[lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py:126-160](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L126-L160) —— DeepSeek 的 `FuseMoeTriton._select_experts` 调用的就是它。它按 `use_grouped_topk` 分派到两种实现：
+**DeepSeek 的分组 top-k**：先用一个等价的 PyTorch 版讲清逻辑：
 
-```python
-def select_experts(hidden_states, router_logits, correction_bias, top_k,
-                   use_grouped_topk, renormalize, topk_group, num_expert_group, scoring_func="softmax", ...):
-    if use_grouped_topk:                       # DeepSeek：分组路由
-        topk_weights, topk_ids = triton_grouped_topk(
-            hidden_states, router_logits, correction_bias, topk=top_k, renormalize=renormalize,
-            num_expert_group=num_expert_group, topk_group=topk_group, scoring_func=scoring_func, ...)
-    elif custom_routing_function is None:      # 朴素路由（Mixtral 风格）
-        topk_weights, topk_ids = fused_topk(hidden_states, router_logits, topk=top_k, renormalize=renormalize)
-    ...
-    return topk_weights, topk_ids
-```
+[lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py:L52-L87](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L52-L87) —— `grouped_topk` 的四步：
 
-[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py:34-63](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py#L34-L63) —— Triton 版 MoE 实现里，`_select_experts` 把 `correction_bias`（即 DeepSeek 的 `e_score_correction_bias`）与分组参数透传给 `select_experts`，并在路由完成后处理 `routed_scaling_factor`（DeepSeek-V3 路由权重的全局缩放）：
+1. `scores = softmax(gating_output)`（或 sigmoid）；
+2. `group_scores = scores.view(n, G, -1).max(dim=-1)`：每组取组内最大值作为「组的代表分」；
+3. `group_idx = topk(group_scores, topk_group)`：选出得分最高的 `topk_group` 个组，构造组掩码；
+4. 把未选中组里的专家分数置 0（`masked_fill`），再 `topk(topk)` 选出最终 \(k\) 个专家，从**原始** `scores` 上 gather 权重并归一化。
 
-```python
-def _select_experts(self, input_tensor, router_logits, correction_bias, top_k, renormalize,
-                    use_grouped_topk, topk_group, num_expert_group, scoring_func, ...):
-    topk_weights, topk_ids = select_experts(
-        hidden_states=input_tensor, router_logits=router_logits, correction_bias=correction_bias,
-        use_grouped_topk=use_grouped_topk, top_k=top_k, renormalize=renormalize,
-        topk_group=topk_group, num_expert_group=num_expert_group, scoring_func=scoring_func)
-    if self.routed_scaling_factor != 1.0:
-        topk_weights.mul_(self.routed_scaling_factor)
-    ...
-    return topk_weights, topk_ids
-```
+这套逻辑的 Triton 版（DeepSeek 实跑路径）在 `grouped_topk.py`，把上述步骤融进单 kernel `grouped_topk_kernel`，并支持 `e_score_correction_bias`（DeepSeek-V3 的偏置校正）与 sigmoid 打分：
 
-**(c) DeepSeek 分组路由 kernel 的关键逻辑**
+[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py:L93-L202](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py#L93-L202) —— 注意它对每组先用 `tl.sort(..., descending=True)` 取组内前几名之和作为 `group_value`（V3 用组内 top-2 之和，见 `GROUP_SCORE_USED_TOPK_NUM`），再选 `group_topk_num` 个组，最后用 `argsort` 在掩码后的分数上选 top-k。该 kernel 的 host 端封装是 `triton_grouped_topk`（L205-L265）。
 
-[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py:123-166](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py#L123-L166) —— 这是单个 token 的路由逻辑（一个 program 处理一个 token）。先算分（softmax 或 sigmoid），叠偏置，再分组选组：
+**选择函数总入口**：`select_experts` 按 `use_grouped_topk` 在两条路径间分流：
 
-```python
-if IS_SIGMOID: old_scores = tl.sigmoid(hidden_states)
-else:          old_scores = tl.softmax(hidden_states)
-if HAS_CORRECTION_BIAS:
-    scores = old_scores + tl.load(correction_bias_ptr + offs_n, ...)   # 叠 e_score_correction_bias
-...
-group_value = tl.sum(                                                    # 组分 = 组内 top-N 求和
-    tl.where(..., tl.sort(group_scores, dim=1, descending=True), 0.0), axis=1)
-sorted_group_value = tl.sort(group_value, descending=True)
-group_topk_value = tl.sum(tl.where(offs_group == group_topk_num - 1, sorted_group_value, 0.0))  # 第 topk_group 大
-mask_group_scores = tl.where(group_value >= group_topk_value, group_scores, -1e7)  # 只留选中组
-```
-
-随后 [第 185-201 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py#L185-L201) 对 `mask_scores` 做一次 `argsort`（用 bitonic 排序，见 [第 79-89 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py#L79-L89)），取出前 `topk_num` 个专家的权重与编号，可选地归一化后写回输出张量。
-
-> 注意 `topk_select.py:145-148` 有一处特判：当 `topk_group==4, num_expert_group==8, top_k==8`（DeepSeek-V3 的标准配置）时，组分用「组内 top-2 求和」（`group_score_topk_num=2`）；否则用 top-1。这是为了匹配 DeepSeek-V3 官方的路由实现。
+[lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py:L126-L179](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L126-L179) —— DeepSeek（`use_grouped_topk=True`）走 `triton_grouped_topk`；其余走 `fused_topk`（→ `softmax_topk`）。末尾有一段「autotune warmup 时把 topk_ids 随机化」的逻辑，是为了在自动调参预热阶段让分组矩阵乘遇到更均匀的负载分布，避免调出来的配置只在某种路由分布上最优。
 
 #### 4.2.4 代码实践
 
-**实践目标**：把两种路由的「输入 → 输出」对齐，确认它们都产出同样形状的 `(topk_weights, topk_ids)`，从而理解「路由与计算解耦」。
+**实践目标**：在源码层面区分「简单 top-k」与「分组 top-k」两种路由。
 
 **操作步骤**：
 
-1. 在 [topk_select.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py) 里对比 `fused_topk`（[第 27-48 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L27-L48)）与 `grouped_topk`（[第 52-87 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L52-L87)）的返回类型，确认两者都返回 `(float32 [token,k], int32 [token,k])`。
-2. 阅读 `grouped_topk`（PyTorch 参考版，[第 52-87 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/topk_select.py#L52-L87)），它用 `view + max + topk + scatter_ + masked_fill` 把「分组选组」表达得比 Triton kernel 更易懂，可作为理解 4.2.3(c) 的脚手架。
-3. 追踪 `correction_bias` 的来源：从 [triton_impl.py __call__ 转发 correction_bias（第 129 行）](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py#L126-L130) 出发，回到 [fused_moe_weight.py 的 experts() 传 correction_bias（第 145 行）与 _create_weight 创建它（第 289-298 行）](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L289-L298)，看 `e_score_correction_bias` 这个张量是怎么从 HF 权重里加载的（键名 `mlp.gate.e_score_correction_bias`，见 [deepseek2 权重 _init_weight_names:57](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_weights/transformer_layer_weight.py#L57)）。
+1. 在 `_custom_ops.py` 的 `topk_softmax` 上，手动推演一个 \(E=8, k=2\) 的样例：给定 logits，写出 softmax 后的 8 个概率，圈出 top-2，再写出归一化后的权重。
+2. 在 `topk_select.py` 的 `grouped_topk` 上，假设 \(E=8, G=4\)（每组 2 专家）、`topk_group=2`、`topk=2`，推演一遍：先选 2 个组，再在被选 4 个专家里挑 2 个。
+3. 对比两者，回答：分组选择相比直接 top-k，主要改变了什么？
 
-**需要观察的现象**：
+**预期结果**：分组选择**强制专家分散在不同的组里**，避免某几个专家被反复选中、从而起到负载均衡作用；代价是可能略损失「全局最优」的 top-k。
 
-- 朴素与分组两种路由的**输出形状完全一致**，都是 `[token, k]` 的权重与编号——下游 `fused_experts` 对路由算法无感。
-- `e_score_correction_bias` 是一个长度为 \(E\) 的一维向量（每专家一个偏置），在路由 kernel 里**加在 softmax 之后、分组之前**。
-- DeepSeek-V3 的 `routed_scaling_factor` 是在路由**之后**乘到 `topk_weights` 上的（`triton_impl.py:62-63`），不在 kernel 内部。
-
-**预期结果**：你会确认「路由」是一个**可独立替换的模块**——只要产出符合约定的 `(topk_weights, topk_ids)`，换一套路由算法（比如改成 sigmoid 评分、改成更多的组）完全不用动融合专家算子。这正是 LightLLM 把路由与 `fused_experts` 分成两步的设计动机。
-
-> 待本地验证：第 2 步的 PyTorch 参考版 `grouped_topk` 非常适合在 CPU 上造一个小张量手算验证，建议有条件时实际跑一下，对照 Triton kernel 结果。
+> 待本地验证：上述两步推演建议用纸笔完成；若想验证，可写一个独立的小脚本调用 `softmax_topk` 与 `triton_grouped_topk`，喂相同的 `gating_output`，对比 `topk_ids` 差异。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：DeepSeek 的 grouped top-k 为什么要「先选组、再在组里选专家」，而不是直接在全部专家里选 top-k？
+**练习 1**：`renormalize=True` 时，被选 \(k\) 个专家的权重之和是多少？为什么需要这一步？
 
-**参考答案**：主要是为了**专家负载均衡**。直接全局 top-k 容易让少数「强势」专家被几乎所有 token 选中、其他专家闲置，既浪费参数又让显存/计算热点集中。DeepSeek 把专家分成若干组，先保证 token 的选择来自「足够多」的组（`topk_group`），从而把流量强制分散到更多组、更多专家上；`e_score_correction_bias` 进一步在训练中学习纠正各专家的被选频率。这是一种「结构性 + 可学习」的负载均衡策略。
+**参考答案**：和为 1。因为 softmax 后只取了 \(k\) 个，它们的概率之和小于 1；若不归一化，MoE 输出的整体尺度会随 \(k\) 和具体专家分布变化，导致训练 / 推理数值不稳定。归一化后，输出尺度与稠密 FFN 可比。
 
-**练习 2**：路由权重 `topk_weights` 最终在哪里、以什么方式作用到专家输出上？
+**练习 2**：DeepSeek 的分组 top-k 里，`group_score_used_topk_num`（V3 设为 2）的作用是什么？
 
-**参考答案**：作用点在融合专家算子的**第二次 `grouped_matmul`（w2/down）**里，通过参数 `mul_routed_weight=True` 实现——它把每个 token-专家对的 `topk_weights` 直接乘到该专家 down 投影的输出上（见 4.3 的 `fused_experts_impl` 第二次 `grouped_matmul`）。随后 `moe_sum_reduce` 把同一 token 的 \(k\) 个专家加权输出**求和**，得到 \(\sum_i g_i \cdot F_i(x)\)。所以路由权重是「在 w2 之后、求和之前」乘上去的。
+**参考答案**：它是「评价一个组好坏」时，取组内前几名专家分数之和。V3 取组内 top-2 之和作为组的代表分，比只取 max 更能反映该组的整体实力，使组选择更稳健（见 `topk_select.py` L145-L160 对 V3 配置 `topk_group==4, num_expert_group==8, top_k==8` 的特判）。
 
-### 4.3 fused_moe 算子
+---
+
+### 4.3 fused_moe 算子：一次融合的分组矩阵乘
 
 #### 4.3.1 概念说明
 
-选完专家后，要把每个 token 送进它挑中的 \(k\) 个专家各算一遍，再加权求和。**朴素实现**是循环 \(E\) 个专家、对每个专家挑出分配给它的 token 做一次 batched matmul——但这样会有大量小 kernel launch、且 token-to-expert 的分发/归并开销大。**fused_moe** 的做法是把这整个过程融合进一组 Triton kernel：
+选出专家后，真正的计算是「对每个被选 token-专家对，跑一遍那个专家的小 FFN」。朴素实现是双重循环：对每个专家，挑出分配给它的 token，做两次 matmul，再把结果加回。问题在于：
 
-1. **`moe_align`**：按 `topk_ids` 把 token 重新分桶到各专家（产出「专家 → token 索引列表」的映射），让同一专家要算的 token 在内存里连续。
-2. **`grouped_matmul`（w1，gate+up 融合）**：一个 kernel 跑完所有专家的第一次 matmul，每个 program block 处理「某专家 × 某 token 段」。
-3. **`silu_and_mul`**：SwiGLU 激活（gate 与 up 相乘），与 llama 稠密版用的是同一个 `silu_and_mul_fwd`。
-4. **`grouped_matmul`（w2，down）**：第二次 matmul，这次 `mul_routed_weight=True` 把路由权重乘上。
-5. **`moe_sum_reduce`**：把每个 token 的 \(k\) 个专家输出沿 expert 维求和，得到最终 `[token, hidden]`。
+- 专家数 \(E\) 很大（DeepSeek 256），逐个起 kernel 调度开销高；
+- 每个 token 只激活 \(k\) 个专家，逐专家的 batch（分配到的 token 数）很小，小矩阵乘 GPU 利用率低；
+- 中间张量（每个 token-专家对的隐层输出）体积 \(O(\text{tokens} \times k \times \text{intermediate})\) 很大，反复分配/落盘代价高。
 
-> 名词解释——**`grouped_matmul`（分组矩阵乘）**：一次 kernel 调用完成「多个不同权重矩阵（各专家）× 各自的 token 段」的乘法，按 `(expert_id, m_block, n_block)` 三维 grid 并行，避免逐专家 launch。**`moe_align`**：把「token 选了哪些专家」这种稀疏、分散的信息，重排成「每个专家对应一段连续 token」的稠密索引，为 grouped_matmul 喂数据。
+LightLLM 的 `fused_experts_impl` 用**分组矩阵乘（grouped GEMM）**解决：先把所有 token-专家对**按专家重排**，让同一专家的 token 连续排布，再用一个 `grouped_matmul` kernel 一次性算完所有专家的矩阵乘（kernel 内部按专家切分 grid），中间激活也用融合 kernel，最后用一个 kernel 把 \(k\) 个专家的结果加权求和。整个过程只有寥寥几个 kernel launch。
 
 #### 4.3.2 核心流程
 
-fused_moe 的五步流水线（对应 `fused_experts_impl`，TP 模式）：
+`fused_experts_impl` 对输入分块（`CHUNK_SIZE = 32*1024` 个 token 一块）循环，每块内五步：
 
-```text
-输入：hidden_states [M, hidden]，topk_weights/topk_ids [M, k]，专家权重 w1[E,2N,hidden]、w2[E,hidden,N]
-
-for chunk in chunks(hidden_states, FFN_MOE_CHUNK_SIZE):     # 长序列分块，控制显存
-  ① moe_align_fused(topk_ids, topk_weights)
-       → expert_to_tokens[E, ...], expert_to_token_num[E]   # 每 expert 的 token 列表与计数
-  ② grouped_matmul(x, w1, expert_to_tokens, mul_routed_weight=False)
-       → cache1 [m, k, 2N]                                   # 每 token-k 的 gate∥up
-  ③ silu_and_mul_fwd(cache1) → cache2 [m, k, N]             # SwiGLU：silu(gate)*up
-  ④ grouped_matmul(cache2, w2, expert_to_tokens, mul_routed_weight=True)
-       → cache3 [m, k, hidden]                               # down 投影，乘上路由权重
-  ⑤ moe_sum_reduce(cache3) → out [m, hidden]                # k 个专家加权求和
+```
+对每个 chunk:
+  ① moe_align_fused:  按 topk_ids 把 token 重排到「按专家分组」的索引表
+                      expert_to_tokens[E, k*tokens] / expert_to_weights / expert_token_num[E]
+  ② grouped_matmul(w1, mul_routed_weight=False):
+        per-expert:  cache1[t,k] = (W_gate^e x) ⊕ (W_up^e x)      # 拼成 2N 维
+  ③ silu_and_mul_fwd: cache2[t,k] = SiLU(gate) ⊙ up                # 2N → N
+  ④ grouped_matmul(w2, mul_routed_weight=True):
+        per-expert:  cache3[t,k] = W_down^e cache2[t,k] · topk_weight[t,k]
+  ⑤ moe_sum_reduce:   out[t] = Σ_k cache3[t,k]                     # 跨专家求和
 ```
 
-> 第三步的 `silu_and_mul` 与 llama 稠密 FFN（[u5-l2](./u5-l2-llama-model-walkthrough.md)）用的是**同一个 kernel** `silu_and_mul_fwd`——MoE 与稠密 FFN 在「激活函数」这一步没有任何区别，区别只在外层的「分组计算 + 求和」。
+关键张量形状（设隐层 `N = 2 * intermediate`）：
+
+- `cache1`：`(tokens, k, N)` —— gate_up 拼接后的输出；
+- `cache2`：`(tokens, k, N//2)` —— 激活后，恢复到 intermediate 维；
+- `cache3`：`(tokens, k, hidden)` —— down 投影后回到 hidden 维；
+- `out`：`(tokens, hidden)` —— 对 k 求和后的最终输出。
 
 #### 4.3.3 源码精读
 
-**(a) `FusedMoeWeight`：N 个专家的统一容器**
+`fused_experts_impl` 主体（去掉 scale/bias 等可选参数后）：
 
-路由之后、融合专家之前，要先看懂专家权重是怎么存的。[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py:127-155](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L127-L155) —— 对外的统一入口是 `experts()`，它把所有细节（路由权重、w13/w2、偏置、评分函数）打包转发给一个具体实现 `self.fuse_moe_impl`：
+[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py:L992-L1115](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L992-L1115) —— 这就是上面流程图的代码实现。要点逐段对应：
 
-```python
-def experts(self, input_tensor, router_logits, top_k, renormalize,
-            use_grouped_topk, topk_group, num_expert_group, is_prefill=None, ...):
-    return self.fuse_moe_impl(
-        input_tensor=input_tensor, router_logits=router_logits,
-        w13=self.w13, w2=self.w2, correction_bias=self.e_score_correction_bias,
-        scoring_func=self.scoring_func, top_k=top_k, renormalize=renormalize,
-        use_grouped_topk=use_grouped_topk, ...)
-```
+- L1026-L1035：分配 `intermediate_cache1/2/3`（即 cache1/2/3），并把 cache1 与 cache3 的底层显存做**共享复用**（`intermediate_cache13_shared` 切两段视图），因为它们的存活区间不重叠，省一块大显存。
+- L1044-L1055：对 `num_tokens` 按 `FFN_MOE_CHUNK_SIZE=32*1024` 分块处理，避免一次性把 `(tokens, k, N)` 中间张量撑爆显存。
+- L1056-L1065：调用 `moe_align_fused` 生成「专家 → token 索引表」`expert_to_tokens`、对应权重 `expert_to_weights`、每专家 token 计数 `expert_token_num`。这张表是分组 GEMM 的核心：它告诉 kernel「第 \(e\) 个专家要处理哪些 token」。
+- L1067-L1083：第一次 `grouped_matmul`，`expert_weights=w1`、`mul_routed_weight=False`、输出写进 `cache1`。即每个专家的 gate_up 投影，**不乘**路由权重（留到下一步之后）。
+- L1085-L1091：`silu_and_mul_fwd(cache1 → cache2)`，逐元素 `SiLU(gate)⊙up`，2N 维压回 N 维。
+- L1093-L1110：第二次 `grouped_matmul`，`expert_weights=w2`、`mul_routed_weight=True`、输出 `cache3`。这一步在 down 投影的同时把 `topk_weights` 乘上去（`expert_to_weights_scale` 即路由权重）。
+- L1112-L1114：`moe_sum_reduce(cache3 → out)`，沿 `k` 维把 \(k\) 个专家的结果相加，得到每个 token 的最终 FFN 输出。
 
-[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py:287-324](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L287-L324) —— 专家权重的实体是 `w13`（gate+up，形状 `[local_n_experts, intermediate, hidden]`）与 `w2`（down，形状 `[local_n_experts, hidden, intermediate]`），由 `quant_method.create_moe_weight` 按**本 rank 实际持有的专家数** `local_n_routed_experts` 分配（TP 时持有全部专家的一片，EP 时只持有分到本 rank 的那几个专家 + 冗余专家）：
+**激活 kernel `silu_and_mul_fwd`**：
 
-```python
-def _create_weight(self):
-    intermediate_size = self.split_inter_size            # TP 切分后的 intermediate
-    self.w13, w13_param_list = self.quant_method.create_moe_weight(
-        out_dims=[intermediate_size, intermediate_size], in_dim=self.hidden_size,
-        ..., num_experts=self.local_n_routed_experts)    # gate 与 up 各一份
-    self.w2, _ = self.quant_method.create_moe_weight(
-        out_dims=[self.hidden_size], in_dim=intermediate_size,
-        ..., num_experts=self.local_n_routed_experts)
-```
+[lightllm/common/basemodel/triton_kernel/fused_moe/moe_silu_and_mul.py:L117-L176](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/moe_silu_and_mul.py#L117-L176) —— 它支持 `blocked`（`[gate0,gate1,...,up0,up1,...]`）与 `interleaved`（`[gate0,up0,gate1,up1,...]`）两种内存布局，因为 w1 把 gate 与 up 拼接的方式可能不同；核心计算是 `gate = gate / (1+exp(-gate))`（即 SiLU）后 `up * gate`。它带有 autotuner（`@autotune`），会为不同 token 数自动挑最优的 `BLOCK_M/BLOCK_N/num_warps/NUM_STAGES`。
 
-[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py:91-125](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L91-L125) —— TP 与 EP 下「本 rank 持有哪些专家」的差异就体现在 `_init_parallel_params`：TP 时 `local_expert_ids = range(E)`（每 rank 持全部专家的一片），EP 时按 `global_rank` 算出本 rank 的专家段并叠加冗余专家：
+**求和 kernel `moe_sum_reduce`**：
 
-```python
-if self.enable_ep_moe:
-    n_experts_per_rank = self.n_routed_experts // self.global_world_size
-    start_expert_id = self.global_rank_ * n_experts_per_rank
-    self.local_expert_ids = list(range(start_expert_id, start_expert_id + n_experts_per_rank)) + self.redundancy_expert_ids
-else:
-    self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
-```
+[lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py:L70-L108](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py#L70-L108) —— 对形状 `(tokens, k, hidden)` 的输入沿 `k` 累加成 `(tokens, hidden)`。kernel 内层 `for i in range(topk_num)` 把 \(k\) 个专家的结果累加进 `accumulator`，同样带 autotune。
 
-[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py:359-375](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L359-L375) —— 每个专家的 `gate/up`（w1/w3）用 `row_slicer`（列并行）切，`down`（w2）用 `col_slicer`（行并行）切，与 [u3-l4](./u3-l4-weights-and-tp-split.md) 元权重的切分规则一致，只不过这里**逐专家**循环：
+**对齐 kernel `moe_align`** 的作用用其 docstring 最能说明：
 
-```python
-def _load_expert(self, expert_idx, local_expert_idx, weights):
-    ...
-    if w1_weight in weights:
-        self.quant_method.load_weight(row_slice_func(weights[w1_weight]), self.w1_list[local_expert_idx])  # gate，列并行
-    if w3_weight in weights:
-        self.quant_method.load_weight(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])  # up，列并行
-    if w2_weight in weights:
-        self.quant_method.load_weight(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])  # down，行并行
-```
+[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py:L64-L99](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L64-L99) —— 给定 `topk_ids = [[0,1,2],[0,3,1],[3,1,4]]`（3 token 各选 3 专家），输出一张 `[expert_num, token_num*topk_num]` 的 0/1 矩阵，行是专家、列是「token-专家槽位」，1 表示该槽位属于本专家。`grouped_matmul` 据此把对应 token 的 hidden 拉到一起做矩阵乘。
 
-**(b) Triton 实现：路由 + 融合专家**
+> 这套 fused 实现**与权重的量化方式解耦**：`FusedMoeWeight` 在内部按 `quant_method` 选择具体计算后端（`FuseMoeTriton`、`deepgemm_impl`、`marlin_impl` 等）。无量化时 `FuseMoeTriton._fused_experts` 直接转调本讲的 `fused_experts`：
 
-[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py:109-148](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py#L109-L148) —— `FuseMoeTriton.__call__` 把「路由」与「融合专家」明确分成两步，正好对应 4.2 与本节：
-
-```python
-def __call__(self, input_tensor, router_logits, w13, w2, correction_bias, scoring_func,
-             top_k, renormalize, use_grouped_topk, topk_group, num_expert_group, ...):
-    topk_weights, topk_ids = self._select_experts(...)   # 步骤一：路由（4.2）
-    output = self._fused_experts(                         # 步骤二：融合专家（本节）
-        input_tensor=input_tensor, w13=w13, w2=w2,
-        topk_weights=topk_weights, topk_ids=topk_ids, ...)
-    return output
-```
-
-[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py:80-107](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py#L80-L107) —— `_fused_experts` 解出 `w13_weight`/`w2_weight`（以及 FP8 时的 scale），调用真正的五步流水线 `fused_experts`，并默认 `inplace=True`（结果直接写回 `input_tensor`，所以 `_moe_ffn_tp` 里没有左值赋值）：
-
-```python
-def _fused_experts(self, input_tensor, w13, w2, topk_weights, topk_ids, ...):
-    w13_weight, w13_scale = w13.weight, w13.weight_scale
-    w2_weight, w2_scale = w2.weight, w2.weight_scale
-    use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn
-    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
-    fused_experts(hidden_states=input_tensor, w1=w13_weight, w2=w2_weight,
-                  topk_weights=topk_weights, topk_ids=topk_ids, inplace=True,
-                  use_fp8_w8a8=use_fp8_w8a8, w1_scale=w13_scale, w2_scale=w2_scale)
-    return input_tensor
-```
-
-**(c) 五步流水线本体 `fused_experts_impl`**
-
-[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py:1044-1115](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L1044-L1115) —— 这是 4.3.2 流程图的真实代码，按 chunk 循环，每段依次执行五步：
-
-```python
-for chunk in range(triton.cdiv(num_tokens, CHUNK_SIZE)):
-    ...
-    # ① 分桶：把 chunk 内 token 按 topk_ids 归到各专家
-    moe_align_fused(expert_to_token_index=expert_to_tokens, expert_to_weight=expert_to_weights,
-                    expert_token_num=expert_to_token_num, topk_ids=curr_topk_ids, topk_weights=curr_topk_weights)
-    # ② 第一次 grouped_matmul：x × w1(gate∥up)
-    grouped_matmul(curr_topk_ids.numel(), curr_hidden_states, a1_scale,
-                   expert_to_token_num, expert_to_tokens, expert_weights=w1, topk_num=topk_num,
-                   out=intermediate_cache1.view(-1, N), mul_routed_weight=False, ...)
-    # ③ SwiGLU 激活
-    silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2.view(-1, N // 2), ...)
-    # ④ 第二次 grouped_matmul：× w2(down)，这次把路由权重乘上
-    grouped_matmul(curr_topk_ids.numel(), intermediate_cache2.view(-1, N // 2), a2_scale,
-                   expert_to_token_num, expert_to_tokens, expert_weights=w2, topk_num=1,
-                   out=intermediate_cache3.view(-1, w2.shape[1]), mul_routed_weight=True, ...)
-    # ⑤ 把 k 个专家输出求和归并回 [m, hidden]
-    moe_sum_reduce(intermediate_cache3, out_hidden_states[begin_chunk_idx:end_chunk_idx])
-```
-
-[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py:778-807](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L778-L807) —— `grouped_matmul` 的入参揭示了两步 matmul 的差异：第一次 `mul_routed_weight=False`（纯 matmul），第二次 `mul_routed_weight=True`（顺带乘路由权重）。其入参 `expert_to_token_num`/`expert_to_token_index` 正是 `moe_align_fused` 的产物：
-
-```python
-def grouped_matmul(token_num_mul_topk_num, token_inputs, token_input_scale,
-                   expert_to_token_num, expert_to_token_index, expert_to_weights,
-                   expert_weights, expert_to_weights_scale, topk_num, out,
-                   mul_routed_weight, use_fp8_w8a8, ...):
-    """
-    expert_to_token_num  形状 [expert_num]          —— 每个 expert 分到多少 token
-    expert_to_token_index 形状 [expert_num, token*topk] —— 每个 expert 的 token 索引列表
-    expert_weights       形状 [expert_num, out_dim, hidden_dim]
-    out                  形状 [token_num * topk_num, out_dim]
-    """
-```
-
-**(d) 归并求和 `moe_sum_reduce`**
-
-[lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py:39-46](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/moe_sum_reduce.py#L39-L46) —— 输入形状 `[token, k, hidden]`，沿 `k`（专家）维累加，写出 `[token, hidden]`，对应公式 \(\sum_{i\in\text{topk}} g_i\cdot F_i(x)\) 的最后一步求和（\(g_i\) 已在 ④ 里乘上了）：
-
-```python
-for token_index in range(token_start, token_end):
-    accumulator = tl.zeros((BLOCK_DIM,), dtype=tl.float32)
-    input_t_ptr = input_ptr + token_index * input_stride_0 + offs_dim
-    for i in tl.range(0, topk_num, num_stages=NUM_STAGE):       # 沿 k 个专家累加
-        tmp = tl.load(input_t_ptr + i * input_stride_1, mask=offs_dim < dim_end, other=0.0)
-        accumulator += tmp
-    tl.store(output_ptr + token_index * output_stride_0 + offs_dim, accumulator.to(...), ...)
-```
-
-**(e) EP 版：用 DeepEP all-to-all 替代 `moe_align`**
-
-[lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe_ep.py:258-277](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe_ep.py#L258-L277) —— EP 模式下，本 rank 只持有部分专家，于是「分桶」从单卡的 `moe_align_fused` 升级成跨 rank 的 all-to-all `buffer.dispatch`：把每个 token 发给它选中专家所在的 rank，对端算完再 `combine` 收回。这是 DeepSeek-V3 多卡部署的关键路径：
-
-```python
-if is_prefill:
-    qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
-    recv_x, recv_topk_idx, recv_topk_weights, handle, _ = buffer.dispatch(
-        (qinput_tensor, input_scale), topk_idx=topk_idx, topk_weights=topk_weights,
-        num_experts=num_experts, num_max_tokens_per_rank=...,
-        expert_alignment=128, previous_event=previous_event, ...)
-```
-
-EP 版的 GEMM 用 `masked_group_gemm`/`prefilled_group_gemm`（见 [fused_moe_weight.py:209-239](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L209-L239)），并且 dispatch/combine 可以与注意力计算 overlap（见 [deepseek2 推理类的 overlap_tpsp_*_forward](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L291-L415)），这部分属于 [u6-l2](./u6-l2-microbatch-overlap-tpsp.md) 的性能优化主题。
+[lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py:L80-L107](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py#L80-L107) —— 注意它先做 `select_experts`（路由），再 `_fused_experts`（计算），并在传入时自动判断 `use_fp8_w8a8`（权重是 `float8_e4m3fn` 时启用 FP8 路径，衔接 u6-l3 的量化）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：在 `grouped_fused_moe.py` 里把五步流水线「对号入座」，弄清每一步读什么、写什么，从而能独立解释一次 MoE FFN 的计算走向。
+**实践目标**：把 fused_moe 的五个阶段与 Llama 稠密 FFN 严格对应起来。
 
 **操作步骤**：
 
-1. 打开 [grouped_fused_moe.py 的 fused_experts_impl](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L992-L1115)，按 `moe_align_fused` → `grouped_matmul(..., mul_routed_weight=False)` → `silu_and_mul_fwd` → `grouped_matmul(..., mul_routed_weight=True)` → `moe_sum_reduce` 的顺序定位五处调用。
-2. 对照 [grouped_matmul 的入参文档](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L796-L807)，确认 `expert_to_token_num`/`expert_to_token_index`（① 的产物）如何被 ② 和 ④ 复用——它们告诉 kernel「每个专家要算哪些 token」。
-3. 在 [fused_moe_weight.py 的 experts()](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py#L127-L155) 与 [triton_impl.py 的 __call__](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/impl/triton_impl.py#L109-L148) 之间，串起从 DeepSeek `_moe_ffn_tp` 调 `experts(...)` → `fuse_moe_impl(...)` → `_select_experts` + `_fused_experts` → `fused_experts` → `fused_experts_impl` 的完整调用链。
-4. 思考：为什么 `silu_and_mul_fwd` 这一步不需要知道任何「专家」信息？
+1. 打开 `grouped_fused_moe.py` 的 `fused_experts_impl`（L992-L1115）。
+2. 在源码旁标注每个阶段对应的数学运算，重点确认：
+   - 第一次 `grouped_matmul` 的 `out=intermediate_cache1.view(-1, N)` 与 Llama 的 `gate_up_proj.mm` 对应；
+   - `silu_and_mul_fwd` 与 Llama 的 `silu_and_mul_fwd` 是**同一个 kernel**（被两处复用）；
+   - 第二次 `grouped_matmul` 的 `mul_routed_weight=True`，说明路由权重在哪一步乘上去；
+   - `moe_sum_reduce` 是稠密 FFN 里**没有**的额外步骤。
+3. 回答：为什么第一次 `grouped_matmul` 的 `mul_routed_weight=False`，而第二次是 `True`？
 
-**需要观察的现象**：
+**预期结果**：路由权重 `topk_weights` 只在**第二次矩阵乘（down 投影）**时乘入，第一次（gate_up 投影）不乘。原因：gate_up 投影是「为每个 token-专家对算隐层」，与权重无关；只有当各专家都把隐层映射回 hidden 维、准备「融合」时，才需要乘以每个专家的融合权重 \(\tilde{p}_i\)，再加总。把它放在第二次 matmul 内部一起做，省一次访存。
 
-- ② 与 ④ 用的是**同一个** `grouped_matmul` 函数，区别仅在 `mul_routed_weight` 与 `topk_num`（② 的 `topk_num=k`，④ 的 `topk_num=1`）。
-- `expert_to_token_*` 这些「分桶」张量在 ① 产出后，被 ②④ **复用**，不会重新分桶——分桶开销被摊薄。
-- `silu_and_mul_fwd` 只对 `[m*k, 2N]` 的张量做逐元素 `silu(gate)*up`，输入输出形状里**根本没有专家维度**——它对每个 token-专家对独立作用，天然与「专家」无关。
-
-**预期结果**：你会得到一张清晰的「数据流向表」：`hidden [M,H]` →（路由）→ `topk_ids [M,k]` →（① 分桶）→ `expert_to_tokens` →（② w1）→ `[M,k,2N]` →（③ 激活）→ `[M,k,N]` →（④ w2，乘路由权重）→ `[M,k,H]` →（⑤ 求和）→ `out [M,H]`。并能解释为什么 fused_moe 比朴素循环专家快：①把稀疏分发重排成连续访问，②④用 grouped GEMM 把多专家多 token 段塞进一个 kernel，整体大幅减少 launch 与显存搬运。
-
-> 待本地验证：第 1 步的五处调用行号建议亲手核对；第 2 步的 `expert_to_token_index` 形状 `[E, token*topk]` 是理解分桶的关键，可结合 `moe_align_fused`（[第 388 行](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe.py#L388)）的实现细读。
+> 待本地验证：若你修改 `mul_routed_weight` 的取值重新运行（仅作学习用，勿提交），观察输出尺度变化——把它设为 `False` 会丢掉权重归一化、输出幅度异常。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：第二次 `grouped_matmul`（w2）为什么要把 `mul_routed_weight` 设为 `True`，而第一次（w1）设为 `False`？能不能反过来，或者两次都不乘、最后统一乘？
+**练习 1**：`intermediate_cache13_shared` 为什么能把 cache1 和 cache3 放在同一段显存上？
 
-**参考答案**：因为路由权重 \(g_i\) 语义上是「第 \(i\) 个专家整体输出的权重」，而 down 投影（w2）的输出正是「第 \(i\) 个专家对某 token 的最终输出」，所以乘在 w2 之后最自然、数值上也最合理（在 down 的输出域上缩放）。第一次 w1 的输出还只是中间态（gate/up 未激活相乘），此时乘路由权重没有物理意义。理论上也可以「两次都不乘、在 `moe_sum_reduce` 时把 \(g_i\) 作为加权系数」——但那样求和就要从「等权加法」变成「加权加法」，多一次乘法；而把它合并进 ④ 的 grouped_matmul，相当于**把这次乘法免费搭车**进已有 kernel，更高效。所以「在 w2 后乘」是语义正确与计算经济的双重选择。
+**参考答案**：cache1 存活于「第一次 grouped_matmul 之后、silu_and_mul 之前」；cache3 存活于「第二次 grouped_matmul 之后、moe_sum_reduce 之前」，两者生命周期不重叠，且最大长度都 ≤ `M * topk * max(N, hidden)`。把它们映射到同一段物理显存的两个视图，可省下一块与中间隐层等大的显存。这是显存复用（buffer reuse）的典型手法。
 
-**练习 2**：EP 模式下，`moe_align_fused` 这一步为什么被 `buffer.dispatch` 取代了？
+**练习 2**：`CHUNK_SIZE = 32*1024` 分块处理解决了什么问题？
 
-**参考答案**：因为 TP 模式下所有专家都在本 rank，「分桶」只是在本机内存里把 token 按专家重排（`moe_align`）。而 EP 模式下**专家被分散到不同 rank**——本 rank 只持有部分专家，token 选中的专家很可能在别的 rank 上。于是「把 token 送到对应专家那里」必须是一次**跨 rank 的通信**，即 DeepEP 的 all-to-all `dispatch`（发出去）与 `combine`（收回来），替代了单机的 `moe_align`。这也解释了为什么 EP 模式的 GEMM 用 `prefilled_group_gemm`（已经按真实接收到的 token 数排好）、而 TP 用 `grouped_matmul`（用 `expert_to_token_*` 索引）。
+**参考答案**：中间张量体积是 \(O(\text{tokens} \times k \times \text{intermediate})\)，prefill 时 tokens 可能很大（数万），一次性分配会撑爆显存。分块把单次处理的 token 数限制在 32k 以内，把峰值显存压住，代价是外层多一个循环。
 
-## 5. 综合实践
+---
 
-**任务**：以 DeepSeek-V2/V3 的 MoE 层为对象，画出一次 TP 模式 MoE FFN 的**完整调用链与数据流向图**，并指出它与 llama 稠密 FFN 的「分叉点」与「相同点」各在哪里。
+### 4.4 DeepSeek 的进阶：分组选择、共享专家与 EP 并行
+
+#### 4.4.1 概念说明
+
+DeepSeek-V2/V3 在标准 MoE 之上多了三件事，理解它们就理解了 DeepSeek 推理与 Mixtral 的差异：
+
+- **分组选择（grouped top-k）**：已在 4.2 讲，用于负载均衡。
+- **共享专家（shared experts）**：除 \(k\) 个被路由命中的专家外，还有 \(n\_shared\_experts\) 个**对所有 token 都激活**的专家。直觉是「把通用知识放进共享专家、把专门知识放进路由专家」，减少路由专家的重复负担。LightLLM 还支持把它「融合」进路由专家集合一起算（`enable_fused_shared_experts`）。
+- **稠密层 + MoE 层混合**：DeepSeek 的前若干层（`first_k_dense_replace`）是普通稠密 FFN，之后每隔 `moe_layer_freq` 层才是 MoE。即一个模型里两种层共存。
+
+此外在并行上：
+
+- **TP 模式**（`enable_ep_moe=False`）：专家权重沿中间维切到各 TP rank，走本讲的 `fused_experts_impl`（`_ffn_tp_impl`）。
+- **EP 模式**（`enable_ep_moe=True`，专家并行）：每个 rank 只持有**一部分专家**，token 需要在 rank 间「分发到持有对应专家的 rank、算完再收集回来」（DeepEP），走 `_ffn_ep_impl` / `_moe_ffn_edp`。
+
+#### 4.4.2 核心流程
+
+DeepSeek 层推理在初始化时就按层号决定本层是否 MoE，并把 `_ffn` 绑到对应实现：
+
+```
+__init__:
+  is_moe = (n_routed_experts != None) and (layer_num >= first_k_dense_replace)
+           and (layer_num % moe_layer_freq == 0)
+  _bind_ffn():
+    if is_moe:
+        _ffn = enable_ep_moe ? _ffn_ep_impl : _ffn_tp_impl
+    else:
+        _ffn = 稠密 Llama._ffn
+```
+
+TP 模式下的 MoE 前向（`_moe_ffn_tp`）：
+
+```
+if 有共享专家 and 未融合: shared_out = 稠密 Llama._ffn_tp(hidden)   # 共享专家当成普通 FFN 算
+router_logits = moe_gate.mm(hidden)
+experts(hidden, router_logits, top_k, ...)                          # 4.2 + 4.3 的融合计算
+if 有共享专家 and 未融合: hidden += shared_out                      # 共享专家结果加回
+return hidden
+```
+
+#### 4.4.3 源码精读
+
+DeepSeek 层推理类初始化与绑定：
+
+[lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py:L32-L71](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L32-L71) —— 注意 `is_moe` 的三个条件（专家数非空、超过首个稠密层、满足 moe 频率）；`_bind_ffn` 据此把 `_ffn` 绑到 EP / TP / 稠密三种实现之一。绑定用的是把方法**赋值给实例属性**（`self._ffn = self._ffn_ep_impl`），这样模板骨架调用 `self._ffn(...)` 时就直连到具体实现，省去运行期分支判断。
+
+权重侧的 `is_moe` 判定与共享专家融合开关：
+
+[lightllm/models/deepseek2/layer_weights/transformer_layer_weight.py:L25-L43](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_weights/transformer_layer_weight.py#L25-L43) —— `num_fused_shared_experts` 仅当「开启融合共享专家且不是 EP」时才非 0。融合的含义是：共享专家不再单独算，而是当作「第 \(E\) 个额外专家」追加进路由专家集合（见 `append_shared_expert_topk.py`），让一次 fused_experts 同时算完路由专家与共享专家。
+
+TP 模式 MoE 前向：
+
+[lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py:L214-L240](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L214-L240) —— `_moe_ffn_tp` 与 Mixtral 的 `_ffn` 结构几乎一致（gate → experts → reduce），区别仅在于：①多了 `n_shared_experts` 分支（未融合时单独算一次稠密 FFN 作为共享专家、再相加）；②调用的是 `layer_weight.experts.experts(...)` 这个统一入口，由 `FusedMoeWeight` 内部根据 `quant_method` 与 `enable_ep_moe` 选后端（4.3.3 末）。它把 `n_group`、`topk_group` 等分组参数透传进去，触发 4.2 的分组 top-k。
+
+EP 模式 MoE 前向：
+
+[lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py:L242-L289](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L242-L289) —— `_moe_ffn_edp` / `_ffn_ep_impl` 不再调用本讲的 `fused_experts_impl`，而是调用 `experts.dispatch / masked_group_gemm / combine`（基于 DeepEP）。EP 的核心是把「按专家分组」变成「按专家**跨 rank** 分发」：本 rank 把不属于自己专家的 token 发出去、收下属于自己的 token、本地用 grouped GEMM 算完、再把结果组合回去。`_ffn_ep_impl` 因此**不做** `_tpsp_allgather/_tpsp_reduce`（注释明说「EP 本身就是一种 SP 兼容」）。
+
+> EP 路径还有低延迟版本（decode 用 `low_latency_dispatch/masked_group_gemm/low_latency_combine`，见同文件 L291-L415 的 `overlap_tpsp_token_forward`），把两个 batch 的 MoE 计算与 DeepEP 通信交错重叠，隐藏 dispatch/combine 的延迟。这部分属于 u6-l2 的 overlap 优化范畴，本讲点到为止。
+
+模型本体的 DeepSeek 特化：
+
+[lightllm/models/deepseek2/model.py:L17-L56](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/model.py#L17-L56) —— 继承 `LlamaTpPartModel`（所以 RoPE、注意力之外几乎都白嫖 Llama），只在 `_init_custom` 里建 DeepEP 通信组（`dist_group_manager.new_deepep_group`，参数是专家数、hidden、top-k、intermediate），并把 MLA 相关维度读进 `infer_struct`（MLA 留给 u5-l5）。注意 `_init_some_value` 里 `tp_k_head_num_=1, tp_v_head_num_=0`——这是 MLA 的特征，不是本讲重点。
+
+#### 4.4.4 代码实践
+
+**实践目标**：在 DeepSeek 层推理中追踪「稠密层 / TP-MoE 层 / EP-MoE 层」三态切换。
 
 **操作步骤**：
 
-1. **定位分叉点**：从模板 [transformer_layer_infer_template.py:73-74](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py#L73-L74) 的 `self._ffn(...)` 出发，沿 `_bind_ffn`（[deepseek2:63-71](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L63-L71)）找到 `_ffn_tp_impl` → `_moe_ffn_tp`。
-2. **画路由段**：`moe_gate.mm` 产出 `router_logits` → `experts()` → `fuse_moe_impl.__call__` → `_select_experts` → `select_experts` →（DeepSeek 分组）`triton_grouped_topk`，产出 `topk_weights/topk_ids`。
-3. **画计算段**：`_fused_experts` → `fused_experts` → `fused_experts_impl` 的五步：`moe_align_fused` → `grouped_matmul(w1)` → `silu_and_mul_fwd` → `grouped_matmul(w2, mul_routed_weight=True)` → `moe_sum_reduce`，原地写回 `hidden_states`。
-4. **画收尾段**：可选的 `shared_output` 加和（[deepseek2:237-238](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L237-L238)）→ `_tpsp_reduce`（[deepseek2:277](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py#L277)）。
-5. **对照 llama**：把上面的链路与 [llama `_ffn_tp`](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/models/llama/layer_infer/transformer_layer_infer.py#L118-L129) 的 `gate_up_proj → silu_and_mul_fwd → down_proj` 并排，用两种颜色标出「相同部分」与「MoE 独有部分」。
+1. 在 `deepseek2/layer_infer/transformer_layer_infer.py` 的 `__init__`（L20-L56）找到 `is_moe` 表达式，列出它依赖的三个 config 字段。
+2. 在 `_bind_ffn`（L63-L71）确认三种绑定分支。
+3. 打开一份 DeepSeek-V3 的 `config.json`（可从 HuggingFace 仓库或本仓库 `test/` 下的测试配置寻找），查出 `first_k_dense_replace`、`moe_layer_freq`、`n_routed_experts`、`n_shared_experts`、`num_experts_per_tok`、`n_group`、`topk_group` 的值。
+4. 回答：对于 DeepSeek-V3，第 0 层是稠密还是 MoE？第 3 层呢？
 
-**需要观察的现象**：
+**预期结果**：DeepSeek-V3 通常 `first_k_dense_replace=1`、`moe_layer_freq=1`，即第 0 层稠密、第 1 层起全部是 MoE；`n_group=8, topk_group=4, num_experts_per_tok=8`，正好匹配 `topk_select.py` 里 V3 的特判分支（L147-L148）。
 
-- **相同点**：注意力部分（MLA 见 [u5-l5](./u5-l5-mla-attention.md)）、两段残差、`silu_and_mul_fwd` 激活——这些 DeepSeek 与 llama 完全共享。
-- **MoE 独有**：路由（`moe_gate` + top-k）、按专家分组计算（`moe_align` + `grouped_matmul` ×2）、求和归并（`moe_sum_reduce`）、可选共享专家、TPSP allgather/reduce 的位置。
-- `silu_and_mul_fwd` 是**唯一一个稠密 FFN 与 MoE 都原样调用**的核心算子——它是两者共享的「最小公倍数」。
+> 待本地验证：具体 config 值请以你实际拿到的 `config.json` 为准；若仅做源码阅读，可跳过数值核对，重点确认「层号 → 是否 MoE」的判定逻辑。
 
-**验收标准**：你能脱稿画出这条调用链，能说出五步流水线每步的输入输出形状，能解释「为什么 MoE 只替换 `_ffn` 就够了」，并能指出 Mixtral 与 DeepSeek 在路由复杂度上的差异（朴素 top-k vs 分组 + 偏置）。
+#### 4.4.5 小练习与答案
+
+**练习 1**：`enable_fused_shared_experts` 开启后，共享专家的权重发生了什么？
+
+**参考答案**：共享专家不再以独立的 `gate_up_proj/down_proj` 加载（见权重类 `_init_moe` 里 `if self.num_fused_shared_experts == 0: self._load_mlp(...shared_experts...)`），而是被「重命名」并并入路由专家集合，作为第 \(E\) 个额外专家（`_rename_shared_experts` 把 `mlp.shared_experts` 改名到 `mlp.experts.<E>`）。运行时通过 `append_shared_expert_topk` 把共享专家的 id 追加进每个 token 的 `topk_ids`，使其在同一个 fused_experts 里被算掉，省一次独立 FFN 的 kernel。
+
+**练习 2**：为什么 `_ffn_ep_impl` 不需要 `_tpsp_allgather/_tpsp_reduce`？
+
+**参考答案**：EP（专家并行）本身已经把「不同 rank 处理不同专家」天然地当作一种切分，dispatch/combine 阶段已经完成了 token 在 rank 间的分发与结果回收，等价于完成了 SP 所需的全收集与全规约；再叠一层 `_tpsp_allgather/reduce` 会重复通信，故省略（代码注释 L284-L285 明确说明）。
+
+---
+
+## 5. 综合实践
+
+把本讲三个最小模块串起来，完成一次「**从稠密 FFN 到 MoE 的完整对照阅读**」：
+
+1. **基线**：在 `llama/layer_infer/transformer_layer_infer.py` 的 `_ffn_tp` 旁画一张「gate_up → silu_and_mul → down」的三步图，标注每步的张量形状。
+2. **路由**：在纸上为一个假想 token 推演 Mixtral 的 `fused_topk`（softmax→topk→renorm），再推演 DeepSeek 的 `grouped_topk`（softmax→选组→组内 topk→renorm），对比得到的 `topk_ids`。
+3. **融合计算**：打开 `grouped_fused_moe.py` 的 `fused_experts_impl`，把五个阶段（moe_align_fused → grouped_matmul(w1) → silu_and_mul_fwd → grouped_matmul(w2, 乘权重) → moe_sum_reduce）逐一标注在第 1 步的三步图上，指出 MoE 比稠密 FFN 多出的两件事——「按专家重排 token」与「跨专家加权求和」。
+4. **进阶**：在 `deepseek2/layer_infer/transformer_layer_infer.py` 里追踪 `_bind_ffn` 的三态分支，写清「稠密层 / TP-MoE / EP-MoE」各自调用的下游函数（`Llama._ffn_tp` / `fused_experts_impl` / DeepEP 的 dispatch+group_gemm+combine）。
+
+**产出**：一份三栏对照表——「阶段 / Llama 稠密 FFN 对应代码 / Mixtral+DeepSeek MoE 对应代码」，以及一张标了三种 `_ffn` 绑定分支的 DeepSeek 层流程图。
+
+> 待本地验证：若条件允许，启动一个 Mixtral 服务（`--model_dir <mixtral>` 并按权重类断言设置 `--enable_ep_moe`），发送一条请求确认服务可跑；再用 `nsys` 之类工具抓一拍 decode，观察 fused_moe 相关 kernel 在时间轴上的占比，印证「MoE 是 decode 阶段的主要计算之一」。
 
 ## 6. 本讲小结
 
-- **MoE 只替换 `_ffn` 钩子**：transformer 层模板把 FFN 段留成 `raise Exception("need to impl")` 的 `_ffn` 钩子；llama 用稠密 FFN（`gate_up → silu_and_mul → down`）填它，Mixtral/DeepSeek 用「路由 + 融合专家」填它。骨架（注意力、两段残差、KV 落池）对所有模型完全共享。
-- **MoE 推理的结构**：`_tpsp_allgather` → `moe_gate.mm` 出路由得分 → 选 top-k 专家 → `fused_experts` 融合计算 →（可选）加共享专家 → `_tpsp_reduce`。DeepSeek 还按层号区分 dense/MoE，并按 `--enable_ep_moe` 区分 TP/EP 两种实现，全部在 `_bind_ffn` 里提前绑定。
-- **专家路由有两套**：Mixtral 的朴素 softmax top-k（`fused_topk`，PyTorch 版偏教学），DeepSeek 的分组 + 偏置 grouped top-k（`triton_grouped_topk`，带 `e_score_correction_bias`、`n_group`、`topk_group`，用于负载均衡）。两者产出同形的 `(topk_weights, topk_ids)`，下游对路由算法无感。
-- **`FusedMoeWeight` 是 N 个专家的统一容器**：对外暴露 `experts()` 入口，内部按 TP/EP 决定本 rank 持有哪些专家，逐专家用 `row_slicer`（gate/up，列并行）/`col_slicer`（down，行并行）切分，并把实现策略委托给 `select_fuse_moe_impl`（Triton/DeepGemm/Marlin）。
-- **fused_moe 是五步融合流水线**：`moe_align_fused`（分桶）→ `grouped_matmul(w1)` → `silu_and_mul_fwd`（SwiGLU，与稠密共用）→ `grouped_matmul(w2, mul_routed_weight=True)`（乘路由权重）→ `moe_sum_reduce`（按 token 求 k 个专家之和）。它把「循环专家」融合成一组 grouped GEMM，大幅减少 launch 与显存搬运。
-- **EP 模式用 DeepEP all-to-all 替代单机分桶**：`--enable_ep_moe` 时专家分散到各 rank，`buffer.dispatch`/`combine` 跨 rank 传递 token，`masked_group_gemm`/`prefilled_group_gemm` 做分组 GEMM，并可与注意力 overlap；这是 DeepSeek-V3 多卡高性能部署的关键路径。
-- **准确性提醒**：Mixtral 的 `_ffn` 是讲解 MoE 概念的简明入口，但其函数体里的 `fused_experts_impl` 导入路径与 `experts.w1[0]` 取法相对当前 HEAD 已滞后；当前主力维护、能跑通的 MoE 实现是 **DeepSeek-V2/V3** 路径，源码精读结论应以它为准。
+- **MoE = 把一个稠密 FFN 换成一篮子专家**；在 LightLLM 里它仅替换 Transformer 层的 `_ffn` 钩子，注意力、残差、归一化全部复用稠密基类（Mixtral 层推理类只覆写 `_ffn`）。
+- **专家路由**分三步：门控打分 → softmax/sigmoid → top-k → 归一化；Mixtral 用简单 top-k，DeepSeek 用分组 top-k（先选组、再选专家）做负载均衡。
+- **fused_moe 算子**（`fused_experts_impl`）把「per-expert 双矩阵乘 + SiLU + 加权求和」融成五个 kernel：`moe_align_fused`（按专家重排 token）→ `grouped_matmul(w1)` → `silu_and_mul_fwd` → `grouped_matmul(w2，乘路由权重)` → `moe_sum_reduce`（跨专家求和）。
+- 路由权重 `topk_weights` 只在**第二次 grouped_matmul**（down 投影）乘入，第一次（gate_up）不乘；这是稠密 FFN 没有的维度。
+- **DeepSeek 三特化**：稠密层与 MoE 层混合（由 `first_k_dense_replace`/`moe_layer_freq` 控制）、共享专家（可融合进路由专家集合）、TP / EP 两条并行路径（EP 走 DeepEP 的 dispatch/combine，不再做 `_tpsp` 通信）。
+- 量化与计算后端解耦：`FusedMoeWeight` 按 `quant_method` 在 Triton / DeepGEMM / Marlin / FP8 等后端间选择，无量化时落到本讲的 `fused_experts`。
 
 ## 7. 下一步学习建议
 
-- 若想看 DeepSeek「连注意力都换掉」的深度定制，继续 [u5-l5 MLA 注意力实现](./u5-l5-mla-attention.md)：本讲的 MoE 替换了 FFN 段，而 MLA 替换了注意力段（含 KV 压缩与权重吸收），两者叠加才是完整的 DeepSeek 模型。
-- 若想了解 EP 模式下「dispatch/combine 与注意力 overlap」的细节，进入 [u6-l2 microbatch overlap 与 TPSP 混合并行](./u6-l2-microbatch-overlap-tpsp.md)，那里会拆解 DeepSeek 推理类里 `overlap_tpsp_token_forward`/`overlap_tpsp_context_forward` 的双流交错执行（本讲 4.1.3(c) 提到的 `_0_hook`/`_1_hook` 就是 overlap 的接缝）。
-- 若关心 MoE 的量化（DeepSeek-V3 的 FP8 block-wise 量化专家权重），可顺读 [u6-l3 FP8 KV Cache 量化](./u6-l3-fp8-kv-quant.md) 与 `fused_experts_impl` 里 `use_fp8_w8a8`/`w1_scale`/`w2_scale` 分支，以及 EP 版的 `per_token_group_quant_fp8` + DeepGemm 分组 FP8 GEMM（[grouped_fused_moe_ep.py](https://github.com/ModelTC/lightllm/blob/5d59e4907dc9b5338426b56723bdee42d8af9309/lightllm/common/basemodel/triton_kernel/fused_moe/grouped_fused_moe_ep.py)）。
-- 若你想动手新增一个 MoE 模型，回到 [u5-l3 如何新增模型支持](./u5-l3-add-new-model.md) 的三件套流程：MoE 模型的工作量主要集中在 `transformer_layer_weight.py`（声明 `moe_gate` + `FusedMoeWeight`，见本讲 4.1.3(b)）与 `transformer_layer_infer.py`（写 MoE 版 `_ffn`，见本讲 4.1.3(c)），其余文件（pre/post 层、attention、注册）多数可复用 llama/deepseek2。
+- **u5-l5（MLA 注意力）**：DeepSeek 同时使用 MoE 与 MLA，读完 MLA 即可拼出完整的 DeepSeek-V2/V3 推理图；本讲已多次预告 `q_lora_rank`、`kv_lora_rank` 等字段，正好衔接。
+- **u6-l2（microbatch overlap 与 TPSP）**：本讲反复出现的 `_tpsp_allgather/_tpsp_reduce`、DeepSeek EP 的 `overlap_tpsp_token_forward`（MoE 计算与 DeepEP 通信的交错重叠）将在那里系统讲解。
+- **u6-l3（FP8 量化）**：`fused_experts_impl` 的 `use_fp8_w8a8` 与 `w1_scale/w2_scale` 参数、`FuseMoeTriton` 里对 `float8_e4m3fn` 的判断，是 MoE + FP8 的入口。
+- **继续阅读源码**：`fused_moe/grouped_fused_moe_ep.py`（EP 路径的 grouped GEMM）、`append_shared_expert_topk.py`（共享专家如何并入 top-k）、以及 `grouped_matmul` kernel 本体（L481-L991，本讲只讲了它的调用，未展开其内部按专家切 grid 的实现），可作为深入 fused_moe 的练习。

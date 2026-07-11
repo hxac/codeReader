@@ -1,0 +1,783 @@
+{
+  "project": "LMCache",
+  "head": "2756b828e86e94c18662037bb4a0c24b9de1bf13",
+  "rationale": "LMCache 是一个体量大、模块多的 KV cache 管理层，同时存在 legacy storage_backend 与新的 v1/ 架构（含独立的 multiprocess daemon 与 mp_coordinator），因此学习路线设计成四个递进单元、共 26 篇讲义。第一单元（入门层）从零开始：先讲定位、安装、目录结构、三种进程入口、配置系统、最后落到核心 LMCacheEngine 的 store/retrieve/lookup 公共 API，让读者先\"能跑起来、能看懂入口\"。第二单元（进阶层）沿着主调用链拆解：多硬件设备抽象 → GPU 连接器 → 存储后端层次 → StorageManager 调度 → vLLM 集成适配器 → CacheBlend 非前缀复用 → KV 编解码，覆盖单机主链路的每一环。第三单元（进阶层）单独讲新的多进程架构：MP 总览、server/client 与 IPC、跨实例 coordinator、HTTP/二进制协议、可观测性，对应项目最新且最重要的方向。第四单元（专家层）面向二次开发与生产：CLI 扩展、分布式 L1/L2 存储、可插拔 L2 适配器、SERDE 变换、淘汰与配额、内存分配器、PD 分离与传输通道、测试与基准。讲义之间通过 depends_on 建立清晰依赖，确保读者由浅入深、每一篇只解决一个相对独立的主题，并结合真实源码与可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门层：从零认识 LMCache",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "LMCache 是什么：KV Cache 管理层定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 LMCache 作为 LLM 推理 KV cache 管理层的定位、要解决的问题（降低 TTFT、提升吞吐、跨请求复用）、核心特性与典型部署形态。",
+          "learning_goals": [
+            "理解 KV cache 是什么以及它为什么占用大量显存",
+            "说明 LMCache 的核心价值：降低 TTFT、提升吞吐、跨请求/会话/引擎复用 KV cache",
+            "列举 LMCache 的关键特性：分层存储、可观测性、可插拔后端、非前缀复用、PD 分离"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/design/README.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "docs/design"
+          ],
+          "practice_task": "阅读 README，用自己的话画出『请求 → prefill → KV cache → LMCache 存储 → 复用』的数据流草图，并给出一个适合用 LMCache 加速的真实业务场景（如多轮对话/RAG）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、构建与运行方式",
+          "order": 2,
+          "filename": "u1-l2-install-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 LMCache 的 Python 包结构、依赖管理、pip 安装、从源码构建 C++/CUDA 扩展，以及三种命令行入口脚本。",
+          "learning_goals": [
+            "读懂 pyproject.toml 中的构建依赖与 [project.scripts] 入口",
+            "区分 lmcache / lmcache_server / lmcache_controller 三个命令及其对应的 Python 入口函数",
+            "了解从源码构建 C 扩展的流程与 CPU-only slim 安装"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "setup.py",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "pyproject.toml",
+            "setup.py",
+            "requirements"
+          ],
+          "practice_task": "在本地 pip install -e . 安装项目（或在无 GPU 主机上做 slim 安装），运行 lmcache --help 列出可用子命令，并记录三个入口脚本对应的 Python main() 函数路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "代码目录结构与组织",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 lmcache/ 顶层模块树，重点区分新的 v1/ 架构、legacy storage_backend、integration 集成层、sdk 与 cli 的职责边界。",
+          "learning_goals": [
+            "画出 lmcache/ 顶层模块树并说明各目录职责",
+            "区分 v1/ 新架构与 legacy storage_backend 的关系",
+            "定位 integration、sdk、cli 各自代码位置"
+          ],
+          "source_files": [
+            "lmcache/__init__.py",
+            "lmcache/v1/__init__.py",
+            "examples/README.md"
+          ],
+          "minimal_modules": [
+            "lmcache/__init__.py",
+            "lmcache/v1/",
+            "lmcache/integration/",
+            "lmcache/sdk/"
+          ],
+          "practice_task": "用 ls 列出 lmcache/v1/ 的一级子目录，给每个子目录写一句话职责说明，并标注哪些属于『新 MP 架构』（multiprocess、mp_coordinator、mp_observability）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "进程入口与启动方式",
+          "order": 4,
+          "filename": "u1-l4-entry-points.md",
+          "level": "beginner",
+          "topic": "详细讲解 CLI 入口（cli/main.py）、独立 server（v1/server/__main__.py）与 MP coordinator（v1/mp_coordinator/__main__.py）的启动流程与各自角色。",
+          "learning_goals": [
+            "跟踪 pyproject.toml scripts 到具体 main() 函数",
+            "说明 CLI 子命令的自动发现机制",
+            "理解 server daemon 与 coordinator daemon 两种进程的差别"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "lmcache/cli/main.py",
+            "lmcache/v1/server/__main__.py",
+            "lmcache/v1/mp_coordinator/__main__.py"
+          ],
+          "minimal_modules": [
+            "cli/main.py",
+            "v1/server/__main__.py",
+            "v1/mp_coordinator/__main__.py"
+          ],
+          "practice_task": "分别运行 lmcache --help、阅读 server/__main__.py 的 LMCacheServer 启动逻辑、用 python -m lmcache.v1.mp_coordinator 了解 coordinator 配置来源（环境变量），整理出三种进程的『输入 → 启动』对照表。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "配置系统：LMCacheEngineConfig",
+          "order": 5,
+          "filename": "u1-l5-configuration-system.md",
+          "level": "beginner",
+          "topic": "讲解配置如何用 make_dataclass 动态生成（config_base）、关键字段、环境变量覆盖与加载入口 load_ec_engine_config。",
+          "learning_goals": [
+            "理解 config.py 基于 config_base 工具动态生成配置类的思路",
+            "说明环境变量与 YAML 配置如何覆盖默认值",
+            "定位配置加载函数 load_ec_engine_config / load_engine_config_with_overrides"
+          ],
+          "source_files": [
+            "lmcache/v1/config.py",
+            "lmcache/v1/config_base.py"
+          ],
+          "minimal_modules": [
+            "v1/config.py",
+            "v1/config_base.py"
+          ],
+          "practice_task": "在 config.py 中找到 chunk_size、local_cpu、max_local_cpu_size 等关键字段，编写一个最小 YAML 配置，并用环境变量覆盖其中一项，打印最终生效的配置对象。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l6",
+          "title": "LMCacheEngine 公共 API：store/retrieve/lookup",
+          "order": 6,
+          "filename": "u1-l6-engine-public-api.md",
+          "level": "beginner",
+          "topic": "以 cache_engine.py 的 LMCacheEngine 为核心，讲解 store / retrieve / lookup 三条主链路 API 的签名、用途与返回值。",
+          "learning_goals": [
+            "读懂 LMCacheEngine 的构造参数与生命周期",
+            "说明 store、retrieve、lookup 各自的输入输出与语义",
+            "理解 lookup 返回的命中率信息与 unpin 机制"
+          ],
+          "source_files": [
+            "lmcache/v1/cache_engine.py",
+            "lmcache/v1/cache_interface.py"
+          ],
+          "minimal_modules": [
+            "LMCacheEngine",
+            "LMCacheModelRequest"
+          ],
+          "practice_task": "阅读 store()/retrieve()/lookup() 的 docstring，编写伪代码（或调用 examples 最小脚本）演示『存一次 prefix → 第二次 lookup 命中 → retrieve 取回』的完整流程。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶层：核心模块与主调用链",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "多硬件平台与设备抽象",
+          "order": 1,
+          "filename": "u2-l1-multi-hardware-platform.md",
+          "level": "intermediate",
+          "topic": "讲解 lmcache/__init__.py 的设备检测、platform/ 注册机制与 torch_dev 统一抽象，以及如何扩展新硬件。",
+          "learning_goals": [
+            "理解 torch_dev / torch_device_type 统一入口与 monkey patch 点",
+            "说明 platform/_registry 的设备注册机制",
+            "了解 CPU stub 退化路径与无 torch 的 CLI-only 模式"
+          ],
+          "source_files": [
+            "lmcache/__init__.py",
+            "lmcache/v1/platform/__init__.py",
+            "docs/design/ARCHITECTURE_MULTI_HARDWARE.md"
+          ],
+          "minimal_modules": [
+            "lmcache/__init__.py",
+            "v1/platform/__init__.py",
+            "v1/platform/_registry.py"
+          ],
+          "practice_task": "阅读 ARCHITECTURE_MULTI_HARDWARE.md，画出『torch_device_type → connector 路由』的图，并说明在 CPU-only 主机上 _detect_device() 分别在有 torch / 无 torch 时返回什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "GPU 连接器层",
+          "order": 2,
+          "filename": "u2-l2-gpu-connector-layer.md",
+          "level": "intermediate",
+          "topic": "讲解 gpu_connector/ 如何把不同推理引擎/硬件的 KV cache 布局抽象为统一接口，包括 CUDA 主连接器与 KV 格式检测。",
+          "learning_goals": [
+            "理解 GPUConnectorInterface 的职责",
+            "说明 gpu_connectors.py 中 VLLMPagedMemGPUConnector 的作用",
+            "了解 kv_format/ 如何检测 KV 布局（HND/NHD）"
+          ],
+          "source_files": [
+            "lmcache/v1/gpu_connector/__init__.py",
+            "lmcache/v1/gpu_connector/gpu_connectors.py",
+            "lmcache/v1/gpu_connector/kv_format/detection.py"
+          ],
+          "minimal_modules": [
+            "gpu_connector/__init__.py",
+            "gpu_connectors.py",
+            "gpu_connector/kv_format"
+          ],
+          "practice_task": "在 gpu_connector/__init__.py 中找到 CreateGPUConnector 的路由分支，列出每种 torch_device_type 对应的连接器类，并解释为什么 cpu 会抛 RuntimeError。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "存储后端层次结构",
+          "order": 3,
+          "filename": "u2-l3-storage-backend-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 v1/storage_backend/ 的分层设计：abstract_backend、LocalCPU、LocalDisk、Remote 等后端的职责与统一接口。",
+          "learning_goals": [
+            "理解 abstract_backend 定义的存储后端契约",
+            "说明 LocalCPU/LocalDisk/Remote 三层的关系与数据流动",
+            "了解 p2p/pd/gds/nixl 等特殊后端的存在"
+          ],
+          "source_files": [
+            "lmcache/v1/storage_backend/abstract_backend.py",
+            "lmcache/v1/storage_backend/local_cpu_backend.py",
+            "lmcache/v1/storage_backend/local_disk_backend.py",
+            "lmcache/v1/storage_backend/remote_backend.py"
+          ],
+          "minimal_modules": [
+            "abstract_backend",
+            "local_cpu_backend",
+            "local_disk_backend",
+            "remote_backend"
+          ],
+          "practice_task": "阅读抽象后端的接口方法，给 LocalCPU/LocalDisk/Remote 各写一句话职责，并画出『GPU → CPU → Disk → Remote』的逐层 offload 流向图。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "StorageManager 与异步序列化",
+          "order": 4,
+          "filename": "u2-l4-storage-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 storage_manager.py 如何编排多个后端、AsyncMultiSerializer/AsyncSingleSerializer 异步序列化与 WeightedSemaphore 资源控制。",
+          "learning_goals": [
+            "理解 StorageManager 如何选择/调度后端",
+            "说明异步 serializer 在 store/retrieve 路径中的作用",
+            "了解 WeightedSemaphore 如何限制并发"
+          ],
+          "source_files": [
+            "lmcache/v1/storage_backend/storage_manager.py"
+          ],
+          "minimal_modules": [
+            "StorageManager",
+            "AsyncMultiSerializer",
+            "WeightedSemaphore"
+          ],
+          "practice_task": "在 storage_manager.py 中定位 StorageManager 的初始化与 store/retrieve 调度逻辑，画出『engine.store → manager → 后端 + serializer』的调用时序。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "vLLM 集成适配器",
+          "order": 5,
+          "filename": "u2-l5-vllm-integration.md",
+          "level": "intermediate",
+          "topic": "讲解 integration/vllm/ 如何把 LMCache 接入 vLLM V1 的 KVConnector 框架，以及 LMCacheConnectorV1Impl 的对接点。",
+          "learning_goals": [
+            "理解 vLLM KVConnectorBase_V1 的对接模型",
+            "说明 lmcache_connector_v1.py 的 Dynamic 与 vllm_v1_adapter.py 的 Impl 的分工",
+            "了解不同 vLLM 版本的 connector 文件差异"
+          ],
+          "source_files": [
+            "lmcache/integration/vllm/lmcache_connector_v1.py",
+            "lmcache/integration/vllm/vllm_v1_adapter.py",
+            "lmcache/integration/vllm/vllm_multi_process_adapter.py"
+          ],
+          "minimal_modules": [
+            "lmcache_connector_v1.py",
+            "vllm_v1_adapter.py",
+            "vllm_multi_process_adapter.py"
+          ],
+          "practice_task": "跟踪 register_kv_caches / get_num_new_matched_tokens 等回调在 connector 中的实现，写出 vLLM 一次 forward 中 LMCache 被调用的顺序。",
+          "depends_on": [
+            "u1-l6",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "CacheBlend：非前缀 KV 复用",
+          "order": 6,
+          "filename": "u2-l6-cacheblend.md",
+          "level": "intermediate",
+          "topic": "讲解 compute/blend/ 如何实现非前缀位置的 KV 复用，通过选择性重算（selective recompute）恢复生成质量。",
+          "learning_goals": [
+            "理解前缀缓存与非前缀复用的区别",
+            "说明 blender.py 的 blend 流程",
+            "了解 selective recompute 的动机与适用场景"
+          ],
+          "source_files": [
+            "lmcache/v1/compute/blend/blender.py",
+            "lmcache/v1/compute/blend/metadata.py"
+          ],
+          "minimal_modules": [
+            "compute/blend/blender.py",
+            "compute/blend/metadata.py"
+          ],
+          "practice_task": "阅读 blender 的核心函数，用一个 RAG 场景（检索文档拼在 prompt 中间）解释为什么纯前缀缓存会失效，而 CacheBlend 仍能部分命中。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "KV 编解码与 SERDE",
+          "order": 7,
+          "filename": "u2-l7-kv-codec-serde.md",
+          "level": "intermediate",
+          "topic": "讲解 KV cache 的序列化/反序列化：legacy cachegen serde（压缩 + 流式）与 v1 kv_codec（如 asym_k16_v8）两套编码路径。",
+          "learning_goals": [
+            "理解 SERDE 在 store/取回路径中的位置",
+            "说明 cachegen 的压缩思路",
+            "了解 v1 kv_codec 中 asym_k16_v8 这类编解码"
+          ],
+          "source_files": [
+            "lmcache/storage_backend/serde/serde.py",
+            "lmcache/storage_backend/serde/cachegen_encoder.py",
+            "lmcache/v1/kv_codec/asym_k16_v8.py"
+          ],
+          "minimal_modules": [
+            "storage_backend/serde",
+            "v1/kv_codec"
+          ],
+          "practice_task": "对比 legacy cachegen serde 与 v1 kv_codec 两套编码路径，列出『原始 KV → 编码 → 存储 → 解码』各阶段的输入输出。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶层：多进程 (MP) 架构",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "多进程 (MP) 架构总览",
+          "order": 1,
+          "filename": "u3-l1-mp-architecture-overview.md",
+          "level": "intermediate",
+          "topic": "讲解新的多进程架构：为什么把 KV cache 管理独立成 daemon，multiprocess/ 与 mp_coordinator/ 的整体职责划分。",
+          "learning_goals": [
+            "理解 MP 架构『engine 与 cache 进程分离、不与引擎共命运』的动机",
+            "说明 multiprocess（per-worker runtime）与 mp_coordinator（跨实例协调）的分工",
+            "了解 MP 架构带来的收益（如 MoE 推理加速）"
+          ],
+          "source_files": [
+            "docs/design/v1/multiprocess/mp_runtime_plugin.md",
+            "lmcache/v1/multiprocess/server.py",
+            "lmcache/v1/mp_coordinator/app.py"
+          ],
+          "minimal_modules": [
+            "v1/multiprocess/",
+            "v1/mp_coordinator/"
+          ],
+          "practice_task": "阅读设计文档与 server.py，画出『vLLM worker → MP runtime plugin → MP server daemon → coordinator』的进程拓扑图，并标注每段职责。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "MP Server/Client 与进程间通信",
+          "order": 2,
+          "filename": "u3-l2-mp-server-client-ipc.md",
+          "level": "intermediate",
+          "topic": "讲解 multiprocess/server.py、futures.py、mq.py、posix_shm.py 如何实现 worker 与 daemon 之间的消息队列、future 与 CUDA IPC / 共享内存传递。",
+          "learning_goals": [
+            "理解 message queue 的请求/响应模型",
+            "说明 futures.py 如何等待异步结果",
+            "了解 CUDA IPC handle / 共享内存在进程间传递 GPU 张量的机制"
+          ],
+          "source_files": [
+            "lmcache/v1/multiprocess/server.py",
+            "lmcache/v1/multiprocess/futures.py",
+            "lmcache/v1/multiprocess/mq.py",
+            "lmcache/v1/multiprocess/posix_shm.py"
+          ],
+          "minimal_modules": [
+            "server.py",
+            "futures.py",
+            "mq.py",
+            "posix_shm.py"
+          ],
+          "practice_task": "在 mq.py 与 futures.py 中找到请求提交与结果获取的代码路径，画出『client 发请求 → mq → server 处理 → future 返回』的时序，并说明 IPC handle 在哪一步跨进程传递。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "MP Coordinator：跨实例协调",
+          "order": 3,
+          "filename": "u3-l3-mp-coordinator.md",
+          "level": "intermediate",
+          "topic": "讲解 mp_coordinator/ 如何作为独立 uvicorn 服务，承担 peer 发现、blend lookup、L2 预取与用量/淘汰的全局协调。",
+          "learning_goals": [
+            "理解 coordinator 在多实例部署中的角色",
+            "说明 app.py / registrar.py / registry.py 的注册与发现机制",
+            "了解 blend_client 与 blend_directory 的作用"
+          ],
+          "source_files": [
+            "lmcache/v1/mp_coordinator/app.py",
+            "lmcache/v1/mp_coordinator/registrar.py",
+            "lmcache/v1/mp_coordinator/registry.py",
+            "lmcache/v1/mp_coordinator/blend_directory.py",
+            "docs/design/v1/mp_coordinator/README.md"
+          ],
+          "minimal_modules": [
+            "mp_coordinator/app.py",
+            "registrar.py",
+            "registry.py",
+            "blend_directory.py"
+          ],
+          "practice_task": "阅读 mp_coordinator/README.md 与 blend_lookup 设计文档，用一句话描述 coordinator 解决的『哪个实例持有哪些 KV』问题，并列出 coordinator 暴露给 worker 的主要 HTTP 能力。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "HTTP API 与通信协议",
+          "order": 4,
+          "filename": "u3-l4-http-api-protocol.md",
+          "level": "intermediate",
+          "topic": "讲解 multiprocess/http_api_registry.py 的扩展机制，以及 protocol.py（daemon 二进制协议）与 schemas.py 的消息定义。",
+          "learning_goals": [
+            "理解 HTTP API 的注册扩展方式",
+            "说明 protocol.py 中 ClientCommand/ServerReturnCode 与 meta message 的二进制协议",
+            "了解 schemas 的数据结构"
+          ],
+          "source_files": [
+            "lmcache/v1/multiprocess/http_api_registry.py",
+            "lmcache/v1/multiprocess/protocol.py",
+            "lmcache/v1/protocol.py",
+            "lmcache/v1/mp_coordinator/schemas.py"
+          ],
+          "minimal_modules": [
+            "http_api_registry.py",
+            "multiprocess/protocol.py",
+            "v1/protocol.py",
+            "schemas.py"
+          ],
+          "practice_task": "对照 v1/protocol.py（独立 server 协议）与 multiprocess/protocol.py（MP 协议），各列出 PUT/GET 命令的 meta message 字段，并说明 http_api_registry 如何让插件注册新 endpoint。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "可观测性体系",
+          "order": 5,
+          "filename": "u3-l5-observability.md",
+          "level": "intermediate",
+          "topic": "讲解 observability.py 的指标体系，以及 mp_observability/ 的事件总线、metrics 与 trace 子系统。",
+          "learning_goals": [
+            "理解 KV cache 可观测的指标分类（健康、prefix 命中、token 级、请求级）",
+            "说明 mp_observability 的事件/订阅模型",
+            "了解 trace 与 OTel 集成"
+          ],
+          "source_files": [
+            "lmcache/observability.py",
+            "lmcache/v1/mp_observability/__init__.py",
+            "docs/design/v1/mp_observability/README.md",
+            "docs/design/v1/mp_observability/METRICS.md"
+          ],
+          "minimal_modules": [
+            "observability.py",
+            "v1/mp_observability/"
+          ],
+          "practice_task": "阅读 METRICS.md，挑选 3 个对运维最有价值的指标（如 cache hit rate、read/write 吞吐），说明它们如何从事件总线聚合而来，并对照 examples/observability/ 的 docker compose 栈说明落盘到 Prometheus/Grafana 的链路。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家层：扩展、性能与生产实践",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "CLI 命令框架与扩展",
+          "order": 1,
+          "filename": "u4-l1-cli-command-framework.md",
+          "level": "advanced",
+          "topic": "讲解 cli/commands/base.py 的 BaseCommand/CompositeCommand 抽象与自动发现机制，以及如何新增一个子命令。",
+          "learning_goals": [
+            "理解 BaseCommand 的 name/help/add_arguments/execute 契约",
+            "说明 _discover_commands 的子类自动发现原理",
+            "掌握 CompositeCommand 的子子命令组合方式"
+          ],
+          "source_files": [
+            "lmcache/cli/commands/base.py",
+            "lmcache/cli/commands/__init__.py",
+            "lmcache/cli/commands/ping.py"
+          ],
+          "minimal_modules": [
+            "cli/commands/base.py",
+            "cli/commands/__init__.py",
+            "ping.py"
+          ],
+          "practice_task": "仿照 ping.py 实现一个最小的 BaseCommand 子命令（例如 lmcache hello 打印版本号），验证子类自动发现能把它注册进 lmcache --help。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "分布式存储架构（L1/L2）",
+          "order": 2,
+          "filename": "u4-l2-distributed-storage.md",
+          "level": "advanced",
+          "topic": "讲解 v1/distributed/ 的新存储架构：storage_controller、L1/L2 层级、tiers、serde 与 quota 的整体设计。",
+          "learning_goals": [
+            "理解 distributed/ 与 legacy storage_backend/ 的区别",
+            "说明 L1（本地）/L2（远端）两级模型",
+            "了解 storage_controllers/ 下 store/prefetch/eviction 控制器分工"
+          ],
+          "source_files": [
+            "lmcache/v1/distributed/api.py",
+            "lmcache/v1/distributed/storage_manager.py",
+            "lmcache/v1/distributed/tiers.py",
+            "lmcache/v1/distributed/storage_controller.py"
+          ],
+          "minimal_modules": [
+            "distributed/api.py",
+            "storage_manager.py",
+            "tiers.py",
+            "storage_controller.py"
+          ],
+          "practice_task": "阅读 api.py 中 ObjectKey/EncodedObjectKey 与 tiers.py，画出『对象 key → L1 命中? 否则查 L2 → 回填 L1』的两级存储流转图。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "L2 适配器与可插拔存储",
+          "order": 3,
+          "filename": "u4-l3-l2-adapters.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/l2_adapters/ 的统一接口与多种实现（Redis/Valkey、S3、Mooncake、NIXL、P2P、FS 等）以及工厂与 reconfiguration。",
+          "learning_goals": [
+            "理解 L2 adapter base 契约",
+            "说明 factory 如何按配置选择适配器",
+            "了解各远端存储后端的差异与适用场景"
+          ],
+          "source_files": [
+            "lmcache/v1/distributed/l2_adapters/base.py",
+            "lmcache/v1/distributed/l2_adapters/factory.py",
+            "lmcache/v1/distributed/l2_adapters/resp_l2_adapter.py",
+            "lmcache/v1/distributed/l2_adapters/s3_l2_adapter.py"
+          ],
+          "minimal_modules": [
+            "l2_adapters/base.py",
+            "l2_adapters/factory.py",
+            "resp_l2_adapter.py",
+            "s3_l2_adapter.py"
+          ],
+          "practice_task": "选择 Redis(resp) 与 S3 两个适配器，对比它们 get/put 的实现要点，并写一段配置让 LMCache 使用 Redis 作为 L2。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "SERDE 变换与压缩",
+          "order": 4,
+          "filename": "u4-l4-serde-transforms.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/serde/ 的 SERDE 接口与变换实现（fp8、turboquant、multi、asym_k16_v8），作为研究者的扩展点。",
+          "learning_goals": [
+            "理解 SERDE 作为『可插拔 KV 变换』接口的设计",
+            "说明 fp8/turboquant 等量化压缩方案",
+            "了解 multi serde 的组合机制与 async_processor"
+          ],
+          "source_files": [
+            "lmcache/v1/distributed/serde/base.py",
+            "lmcache/v1/distributed/serde/factory.py",
+            "lmcache/v1/distributed/serde/fp8.py",
+            "lmcache/v1/distributed/serde/multi.py"
+          ],
+          "minimal_modules": [
+            "serde/base.py",
+            "serde/factory.py",
+            "serde/fp8.py",
+            "serde/multi.py"
+          ],
+          "practice_task": "阅读 base.py 的 SERDE 接口，仿照 fp8.py 设计一个『截断为 int8』的最小 serde 骨架，并通过 factory 注册。",
+          "depends_on": [
+            "u2-l7",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "淘汰策略与配额管理",
+          "order": 5,
+          "filename": "u4-l5-eviction-and-quota.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/eviction_policy/（LRU/isolated_lru/noop）、quota_manager.py 与 storage_controllers/eviction_controller 的协同。",
+          "learning_goals": [
+            "理解淘汰策略的可插拔设计与 factory 选择",
+            "说明 quota_manager 如何限制每个 salt/用户的存储量",
+            "了解 eviction_controller 的删除上限（delete cap）调度"
+          ],
+          "source_files": [
+            "lmcache/v1/distributed/eviction_policy/factory.py",
+            "lmcache/v1/distributed/eviction_policy/lru.py",
+            "lmcache/v1/distributed/quota_manager.py",
+            "lmcache/v1/distributed/storage_controllers/eviction_controller.py"
+          ],
+          "minimal_modules": [
+            "eviction_policy/factory.py",
+            "eviction_policy/lru.py",
+            "quota_manager.py",
+            "eviction_controller.py"
+          ],
+          "practice_task": "对比 LRU 与 isolated_lru 的语义差异，并解释 quota_manager + eviction_controller 如何避免某个租户挤占全部 L1/L2 空间。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "内存管理与分配器",
+          "order": 6,
+          "filename": "u4-l6-memory-management.md",
+          "level": "advanced",
+          "topic": "讲解 memory_management.py 的 MemoryFormat 与 memory_allocators/ 的多种分配器（mixed/paged/lazy/pin/host 等）。",
+          "learning_goals": [
+            "理解 KV 张量的内存格式与布局",
+            "说明各类 allocator 的适用场景",
+            "了解 PagedTensor/buffer 分配器如何避免碎片"
+          ],
+          "source_files": [
+            "lmcache/v1/memory_management.py",
+            "lmcache/v1/memory_allocators/mixed_memory_allocator.py",
+            "lmcache/v1/memory_allocators/paged_tensor_memory_allocator.py",
+            "lmcache/v1/memory_allocators/pin_memory_allocator.py"
+          ],
+          "minimal_modules": [
+            "memory_management.py",
+            "mixed_memory_allocator.py",
+            "paged_tensor_memory_allocator.py",
+            "pin_memory_allocator.py"
+          ],
+          "practice_task": "阅读混合分配器与 paged tensor 分配器，画出『申请一块 KV 缓冲 → allocator 选择 CPU/GPU/pinned → 归还』的流程，并说明 pin memory 对异步传输的意义。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "PD 分离与传输通道",
+          "order": 7,
+          "filename": "u4-l7-pd-disaggregation-transfer.md",
+          "level": "advanced",
+          "topic": "讲解 Prefill/Decode 分离场景下的 KV 传输：storage_backend/pd_backend、distributed/transfer_channel（NIXL 实现）与 v1/transfer_channel。",
+          "learning_goals": [
+            "理解 PD 分离的动机与 KV 从 prefill worker 到 decode worker 的流转",
+            "说明 transfer_channel 的抽象接口与 NIXL 实现",
+            "了解多种底层传输（NVLink/RDMA/TCP/socket）"
+          ],
+          "source_files": [
+            "lmcache/v1/storage_backend/pd_backend.py",
+            "lmcache/v1/distributed/transfer_channel/abstract.py",
+            "lmcache/v1/distributed/transfer_channel/impl/nixl_impl.py",
+            "lmcache/v1/transfer_channel/abstract.py"
+          ],
+          "minimal_modules": [
+            "pd_backend.py",
+            "distributed/transfer_channel/abstract.py",
+            "distributed/transfer_channel/impl/nixl_impl.py",
+            "transfer_channel/abstract.py"
+          ],
+          "practice_task": "对照 examples/disagg_prefill_mp/，画出『P worker prefill → 通过 pd_backend/transfer_channel → D worker 接收复用』的链路，标注每段使用的传输实现。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l8",
+          "title": "测试与基准测试",
+          "order": 8,
+          "filename": "u4-l8-testing-and-benchmarking.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 的测试组织与 benchmarks/ 的基准工具，以及如何验证功能与度量 TTFT/吞吐/命中率。",
+          "learning_goals": [
+            "了解项目的测试分层与运行方式（pytest.ini）",
+            "理解 benchmarks/ 如何度量缓存收益（TTFT/吞吐/命中率）",
+            "掌握用 examples（如 online_session）做端到端验证的方法"
+          ],
+          "source_files": [
+            "pytest.ini",
+            "AGENTS.md",
+            "examples/README.md"
+          ],
+          "minimal_modules": [
+            "tests/",
+            "benchmarks/",
+            "examples/online_session/"
+          ],
+          "practice_task": "运行 pytest.ini 指定测试套件的一个子集，再用 examples/online_session 的脚本对比冷启动与缓存命中下的 TTFT，记录命中率与首 token 延迟差异。",
+          "depends_on": [
+            "u1-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

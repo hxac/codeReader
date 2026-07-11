@@ -1,0 +1,1362 @@
+{
+  "project": "lmdeploy",
+  "head": "b56ddfb634f069b600f0fe3f4730fe289ac7fafe",
+  "rationale": "lmdeploy 是一个覆盖「压缩—推理—服务」全栈的大型 LLM 部署工具包，包含 PyTorch 与 TurboMind 两套引擎。学习路径按「从外到内、从用法到机制」组织：U1 让读者先认识项目定位、目录与安装并跑通第一次推理；U2 拆解贯穿全项目的核心数据类型与配置（messages / model / archs），这是理解一切后续模块的钥匙；U3–U5 深入 PyTorch 引擎，从模型 Patch 重写、Engine 调度到 nn 算子与 kernel，因为它纯 Python、可读性最高、最能讲清推理引擎本质；U6 讲 TurboMind（C++ 高性能后端）的包装、转换与构建器；U7 讲 Lite 量化压缩链路；U8 讲 serve 服务部署；U9 进入高级特性（VLM、投机解码、Prefix 缓存、张量并行、PD 分离）；U10 收尾于二次开发（新增模型、LoRA、测试、监控与构建发布）。共 10 单元 46 讲，逻辑优先于数量，依赖关系呈 DAG 递进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 LMDeploy：定位、安装与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与核心定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清楚 lmdeploy 是什么、解决什么问题、相对 vLLM/TGI 的定位，以及持续批处理、Paged Attention、张量并行等核心特性。",
+          "learning_goals": [
+            "理解 lmdeploy 作为 LLM 压缩—推理—服务一体化工具包的定位",
+            "列举 lmdeploy 的核心能力（高效推理、量化、服务、VLM）",
+            "区分 PyTorch 引擎与 TurboMind 引擎两条路线"
+          ],
+          "source_files": [
+            "README.md",
+            "README_zh-CN.md",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "README 项目介绍",
+            "Latest News 特性演进"
+          ],
+          "practice_task": "阅读 README，在本地用 pip 安装 lmdeploy，并在 README 中找出「PyTorch 引擎」与「TurboMind 引擎」各自的首发时间与一句话定位，整理成笔记。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与架构全景",
+          "order": 2,
+          "filename": "u1-l2-directory-and-architecture.md",
+          "level": "beginner",
+          "topic": "从仓库根目录出发，画出 lmdeploy 顶层模块（pipeline/messages/model/serve/pytorch/turbomind/lite/vl）的关系图，建立全局地图。",
+          "learning_goals": [
+            "看懂仓库顶层目录与 lmdeploy 包内子目录的职责",
+            "理解「两条后端、一个 Pipeline」的架构主线",
+            "定位核心入口文件 api.py、pipeline.py、__init__.py"
+          ],
+          "source_files": [
+            "CLAUDE.md",
+            "lmdeploy/__init__.py",
+            "lmdeploy/api.py"
+          ],
+          "minimal_modules": [
+            "顶层目录",
+            "lmdeploy 子包划分",
+            "Pipeline 统一入口"
+          ],
+          "practice_task": "用树状图画出 lmdeploy 包目录，并为 pytorch/turbomind/lite/serve/vl 各写一句职责说明；标出 pipeline() 调用最终会进入哪两个引擎。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "安装与构建方式",
+          "order": 3,
+          "filename": "u1-l3-installation-and-build.md",
+          "level": "beginner",
+          "topic": "讲解 pip 安装、按设备拆分的 requirements、setup.py 与 CMake 构建 TurboMind C++ 扩展的方式及关键环境变量。",
+          "learning_goals": [
+            "掌握不同设备（cuda/ascend/rocm 等）的安装方式",
+            "理解 setup.py + CMake 构建 TurboMind 扩展的流程",
+            "认识 LMDEPLOY_TARGET_DEVICE、DISABLE_TURBOMIND 等构建变量"
+          ],
+          "source_files": [
+            "setup.py",
+            "requirements_cuda.txt",
+            "requirements_ascend.txt",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "requirements 分设备",
+            "setup.py 构建入口",
+            "CMakeLists.txt"
+          ],
+          "practice_task": "查看 requirements_cuda.txt 列出 3 个关键依赖；尝试用 DISABLE_TURBOMIND=1 pip install -e . 仅安装 PyTorch 后端并验证 import lmdeploy 成功。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "pipeline 推理快速上手",
+          "order": 4,
+          "filename": "u1-l4-pipeline-quickstart.md",
+          "level": "beginner",
+          "topic": "通过 pipeline() / Pipeline 类跑通第一次文本推理与流式推理，理解模型路径、返回 Response 的基本用法。",
+          "learning_goals": [
+            "使用 lmdeploy.pipeline 完成一次离线推理",
+            "理解 Pipeline 的 infer/stream_infer/batch_infer 接口",
+            "看懂 api.py 中 pipeline 工厂函数的参数含义"
+          ],
+          "source_files": [
+            "lmdeploy/api.py",
+            "lmdeploy/pipeline.py"
+          ],
+          "minimal_modules": [
+            "api.pipeline 工厂",
+            "Pipeline 类",
+            "infer/stream_infer"
+          ],
+          "practice_task": "编写一个脚本，用 pipeline('Qwen/Qwen2.5-7B-Instruct') 完成非流式与流式各一次推理，打印每个 token；并阅读 pipeline.__init__ 找到 backend 默认选择逻辑所在行。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "命令行工具体系 (CLI)",
+          "order": 5,
+          "filename": "u1-l5-cli-toolchain.md",
+          "level": "beginner",
+          "topic": "讲解 lmdeploy 命令行子命令（serve / lite / chat 等）的组织方式与如何注册子命令。",
+          "learning_goals": [
+            "理解 CLI 入口 __main__.py 与 cli/entrypoint.py 的分发逻辑",
+            "认识 serve、lite、chat 三类子命令",
+            "学会用 --help 查看 lite auto_awq 等命令参数"
+          ],
+          "source_files": [
+            "lmdeploy/__main__.py",
+            "lmdeploy/cli/entrypoint.py",
+            "lmdeploy/cli/lite.py",
+            "lmdeploy/cli/serve.py",
+            "lmdeploy/cli/chat.py"
+          ],
+          "minimal_modules": [
+            "CLI 基类与子命令注册",
+            "SubCliLite",
+            "SubCliServe"
+          ],
+          "practice_task": "运行 lmdeploy --help 与 lmdeploy lite auto_awq --help，截图并解释每个参数；在 cli/lite.py 中找到 auto_awq 子命令的注册代码行。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心数据类型与配置",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "核心消息与响应类型 messages.py",
+          "order": 1,
+          "filename": "u2-l1-core-message-types.md",
+          "level": "beginner",
+          "topic": "讲解 messages.py 中贯穿全项目的类型：GenerationConfig、Response、EngineEvent、MessageStatus、SchedulerSequence 等。",
+          "learning_goals": [
+            "理解 GenerationConfig / Response / EngineOutput 的字段",
+            "认识 MessageStatus 状态机与会话/消息概念",
+            "看懂 EngineEvent 事件机制"
+          ],
+          "source_files": [
+            "lmdeploy/messages.py"
+          ],
+          "minimal_modules": [
+            "GenerationConfig",
+            "Response",
+            "MessageStatus",
+            "EngineEvent"
+          ],
+          "practice_task": "在 messages.py 中列出 MessageStatus 的所有取值，并写一段代码构造 GenerationConfig（temperature/top_p/top_k）并打印其字段。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "生成配置 GenerationConfig 详解",
+          "order": 2,
+          "filename": "u2-l2-generation-config.md",
+          "level": "intermediate",
+          "topic": "深入 GenerationConfig 的采样参数（temperature/top_p/top_k/repetition_penalty/stop/logprobs 等）及其对推理结果的影响。",
+          "learning_goals": [
+            "掌握 GenerationConfig 各采样参数含义与默认值",
+            "理解 n、best_of、logprobs 等高级采样选项",
+            "学会在 pipeline 调用时传入 gen_config"
+          ],
+          "source_files": [
+            "lmdeploy/messages.py"
+          ],
+          "minimal_modules": [
+            "GenerationConfig 采样字段",
+            "QuantPolicy 枚举"
+          ],
+          "practice_task": "用不同 temperature/top_p 组合对同一 prompt 推理 3 次，观察输出差异；阅读源码确认 repetition_penalty 默认值与作用阶段。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "引擎配置 TurbomindEngineConfig 与 PytorchEngineConfig",
+          "order": 3,
+          "filename": "u2-l3-engine-configs.md",
+          "level": "intermediate",
+          "topic": "讲解两套引擎配置类的关键字段：tp/dp、cache/max_batch_size/session_len、enable_prefix_caching 等。",
+          "learning_goals": [
+            "区分 TurbomindEngineConfig 与 PytorchEngineConfig 的共有与差异字段",
+            "理解 tp、dp、session_len、max_batch_size、cache 配置含义",
+            "学会按显存/并发需求调整引擎配置"
+          ],
+          "source_files": [
+            "lmdeploy/messages.py",
+            "lmdeploy/__init__.py"
+          ],
+          "minimal_modules": [
+            "TurbomindEngineConfig",
+            "PytorchEngineConfig"
+          ],
+          "practice_task": "构造一个 PytorchEngineConfig(tp=2, cache_max_entry_count=0.5) 并解释每个字段对显存占用的影响；在源码中找到 cache_max_entry_count 的默认值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Chat 模板体系 model.py",
+          "order": 4,
+          "filename": "u2-l4-chat-templates.md",
+          "level": "intermediate",
+          "topic": "讲解 chat 模板如何把对话格式化成模型输入 token，包括 ChatTemplateConfig 与 BaseChatTemplate 及 HFChatTemplate。",
+          "learning_goals": [
+            "理解 ChatTemplateConfig 与 BaseChatTemplate 的关系",
+            "看懂 Vicuna/Llama2/HFChatTemplate 等模板的差异",
+            "学会为新模型选择或自定义 chat 模板"
+          ],
+          "source_files": [
+            "lmdeploy/model.py",
+            "lmdeploy/messages.py"
+          ],
+          "minimal_modules": [
+            "ChatTemplateConfig",
+            "BaseChatTemplate",
+            "HFChatTemplate"
+          ],
+          "practice_task": "用 ChatTemplateConfig(model_name='vicuna') 跑一次推理；阅读 model.py 找到 HFChatTemplate 如何调用 tokenizer 的 apply_chat_template。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "架构注册与后端自动选择 archs.py",
+          "order": 5,
+          "filename": "u2-l5-arch-registry-and-backend-selection.md",
+          "level": "intermediate",
+          "topic": "讲解 autoget_backend / get_model_arch 如何根据 HF config 自动判定 PyTorch 还是 TurboMind 后端及任务类型。",
+          "learning_goals": [
+            "理解模型架构(arch)如何映射到运行时实现",
+            "看懂 autoget_backend 与 autoget_backend_config 的决策逻辑",
+            "认识 check_vl_llm 如何区分纯文本与多模态任务"
+          ],
+          "source_files": [
+            "lmdeploy/archs.py",
+            "lmdeploy/pipeline.py"
+          ],
+          "minimal_modules": [
+            "autoget_backend",
+            "autoget_backend_config",
+            "get_model_arch"
+          ],
+          "practice_task": "对一个本地 HF 模型目录调用 autoget_backend，打印返回的后端名；阅读源码梳理出后端选择的判定分支。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "PyTorch 后端：模型加载与 Patch 机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Pipeline 如何选择并实例化后端",
+          "order": 1,
+          "filename": "u3-l1-pipeline-backend-selection.md",
+          "level": "intermediate",
+          "topic": "追踪 Pipeline.__init__ 中根据 backend_config/autoget 决定走 PyTorchEngine 还是 TurboMind 的代码路径。",
+          "learning_goals": [
+            "理解 Pipeline 如何决定后端",
+            "看懂 _infer / _request_generator 的请求驱动方式",
+            "认识 Pipeline 与 Engine 的职责边界"
+          ],
+          "source_files": [
+            "lmdeploy/pipeline.py",
+            "lmdeploy/archs.py"
+          ],
+          "minimal_modules": [
+            "Pipeline.__init__",
+            "后端分支",
+            "_infer"
+          ],
+          "practice_task": "在 pipeline.py 中定位后端选择代码，画出 Pipeline -> Engine -> create_instance 的调用链；写一个最小示例手动构造 PytorchEngineConfig 并创建 pipeline。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "PyTorch 引擎配置数据类 config.py",
+          "order": 2,
+          "filename": "u3-l2-pytorch-config-dataclasses.md",
+          "level": "intermediate",
+          "topic": "讲解 pytorch/config.py 中的 ModelConfig/CacheConfig/SchedulerConfig/BackendConfig/DistConfig 等引擎内部配置。",
+          "learning_goals": [
+            "区分用户侧 PytorchEngineConfig 与引擎内部 config 数据类",
+            "理解 ModelConfig/CacheConfig/SchedulerConfig 的关键字段",
+            "看懂 TPMode、QuantizationConfig 等枚举"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/config.py"
+          ],
+          "minimal_modules": [
+            "ModelConfig",
+            "CacheConfig",
+            "SchedulerConfig",
+            "DistConfig"
+          ],
+          "practice_task": "列出 config.py 中所有 @dataclass 类名；阅读 CacheConfig 找到 block_size 与 num_cpu_blocks 等字段含义。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "模型 Patch 重写机制",
+          "order": 3,
+          "filename": "u3-l3-model-patch-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 LMDeploy 的核心机制：加载 HF 模型后用 module_map 把原 layer 动态替换为优化实现，涉及 patch.py 与 module_map.py。",
+          "learning_goals": [
+            "理解 module_map 从 HF 类名映射到 LMDeploy 实现类",
+            "看懂 _get_rewrite_qualname / get_rewrite_cls 的替换流程",
+            "认识设备特定 DEVICE_SPECIAL_MODULE_MAP 与 REMOVED_MODEL_MAP"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/models/module_map.py",
+            "lmdeploy/pytorch/models/patch.py"
+          ],
+          "minimal_modules": [
+            "MODULE_MAP 注册表",
+            "build_patched_model",
+            "get_rewrite_cls"
+          ],
+          "practice_task": "在 module_map.py 中找到 LlamaForCausalLM 与 Qwen3 的映射目标；用 build_patched_model 打印替换前后某层的类名变化。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "以 Llama 为例的模型重写实现",
+          "order": 4,
+          "filename": "u3-l4-llama-model-rewrite.md",
+          "level": "intermediate",
+          "topic": "以 models/llama.py 为例，讲清一个被 patch 进来的模型如何重写 attention/MLP/embedding 并复用 nn 模块。",
+          "learning_goals": [
+            "看懂 LlamaForCausalLM 重写类的结构",
+            "理解它如何调用 nn.attention / nn.linear 等优化模块",
+            "掌握 attention/MLP 子模块的替换思路"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/models/llama.py",
+            "lmdeploy/pytorch/nn/attention.py"
+          ],
+          "minimal_modules": [
+            "LlamaForCausalLM",
+            "LlamaAttentionWrapper",
+            "LlamaMLP"
+          ],
+          "practice_task": "对照 HF 原版 LlamaForCausalLM 与 lmdeploy 版，列出被替换的关键类；定位 llama.py 中 attention 的前向实现并标注复用的 nn 模块。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "权重加载 weight_loader",
+          "order": 5,
+          "filename": "u3-l5-weight-loading.md",
+          "level": "intermediate",
+          "topic": "讲解如何把 HF/量化权重加载进 patched model，涉及 weight_loader/model_weight_loader.py 与 safetensors 处理。",
+          "learning_goals": [
+            "理解 ModelWeightLoader 的加载流程",
+            "认识权重分片、device map、dtype 转换",
+            "看懂 loader 与 patched model 的对接"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/weight_loader/model_weight_loader.py",
+            "lmdeploy/pytorch/engine/engine.py"
+          ],
+          "minimal_modules": [
+            "ModelWeightLoader",
+            "from_pretrained"
+          ],
+          "practice_task": "阅读 model_weight_loader.py，梳理出从 HF 权重目录到模型 state_dict 的步骤；在 engine.py 中找到 from_pretrained 调用权重加载的位置。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "PyTorch 后端：引擎执行与调度",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Engine 主类与请求管理",
+          "order": 1,
+          "filename": "u4-l1-engine-and-request-management.md",
+          "level": "intermediate",
+          "topic": "讲解 pytorch/engine/engine.py 中 Engine 类如何管理 session/message、绑定 RequestManager 并启动推理循环。",
+          "learning_goals": [
+            "理解 Engine 的生命周期（start/stop/close）",
+            "看懂 session/message 的添加与状态回调",
+            "认识 RequestManager 与响应分发"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/engine/engine.py",
+            "lmdeploy/pytorch/engine/request.py"
+          ],
+          "minimal_modules": [
+            "Engine",
+            "_on_add_message",
+            "_bind_request_manager",
+            "RequestManager"
+          ],
+          "practice_task": "在 engine.py 中列出所有 _on_* 回调方法，说明各自触发时机；定位 create_instance 的实现并解释 cuda_stream_id 作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "异步推理循环 EngineLoop",
+          "order": 2,
+          "filename": "u4-l2-async-engine-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 engine/engine_loop.py 中的 asyncio 推理主循环：preprocess_loop、send_response_loop、调度与 forward 的协作。",
+          "learning_goals": [
+            "理解 EngineLoop 的多协程结构",
+            "看懂 _main_loop_get_outputs / _send_resps 的数据流",
+            "认识 RunableEventAsync 与 CounterEvent 同步原语"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/engine/engine_loop.py",
+            "lmdeploy/pytorch/engine/engine.py"
+          ],
+          "minimal_modules": [
+            "EngineLoop",
+            "preprocess_loop",
+            "send_response_loop"
+          ],
+          "practice_task": "画出 EngineLoop 中输入预处理→调度→forward→输出回送的协程协作图；在源码中找到调用 scheduler.tick() 的位置。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "引擎实例与流式推理 engine_instance",
+          "order": 3,
+          "filename": "u4-l3-engine-instance-streaming.md",
+          "level": "intermediate",
+          "topic": "讲解 engine_instance.py 如何包装单个推理实例、处理输入构造与流式输出，以及 input_process/inputs_maker 的协作。",
+          "learning_goals": [
+            "理解 EngineInstance 与 Engine 的关系",
+            "看懂流式 step 推进与停止条件",
+            "认识 input_process / inputs_maker 对 prompt 的预处理"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/engine/engine_instance.py",
+            "lmdeploy/pytorch/engine/input_process.py",
+            "lmdeploy/pytorch/engine/inputs_maker.py"
+          ],
+          "minimal_modules": [
+            "EngineInstance",
+            "stream_infer",
+            "inputs_maker"
+          ],
+          "practice_task": "在 engine_instance.py 中追踪一次 stream_infer 从输入到 yield token 的完整路径；阅读 inputs_maker 了解多模态/普通输入如何构造。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "调度器 Scheduler：prefill 与 decode",
+          "order": 4,
+          "filename": "u4-l4-scheduler-prefill-decode.md",
+          "level": "advanced",
+          "topic": "讲解 paging/scheduler.py 中持续批处理的核心：_schedule_prefill / _schedule_decoding / schedule 如何把 sequences 组织成 batch。",
+          "learning_goals": [
+            "理解持续批处理（continuous batching）原理",
+            "看懂 prefill 与 decode 两种调度分支",
+            "认识长上下文分块、前缀匹配准入等策略"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/paging/scheduler.py",
+            "lmdeploy/pytorch/paging/state_manager.py"
+          ],
+          "minimal_modules": [
+            "Scheduler",
+            "_schedule_prefill",
+            "_schedule_decoding",
+            "schedule"
+          ],
+          "practice_task": "在 scheduler.py 中梳理 schedule() 的执行顺序；阅读 _schedule_prefill 找出 max_prefill token 限制相关逻辑并解释其作用。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "分块 KV 缓存与 BlockManager",
+          "order": 5,
+          "filename": "u4-l5-block-manager-kv-cache.md",
+          "level": "advanced",
+          "topic": "讲解 Paged Attention 背后的物理块管理：block.py、block_manager/default_block_manager.py 如何分配/释放/驱逐 KV 块。",
+          "learning_goals": [
+            "理解 KV cache 分块（block）组织方式",
+            "看懂 BlockManager 的分配与释放流程",
+            "认识块驱逐(eviction)与物理-逻辑块映射"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/block.py",
+            "lmdeploy/pytorch/paging/block_manager/default_block_manager.py",
+            "lmdeploy/pytorch/paging/block_manager/base_block_manager.py"
+          ],
+          "minimal_modules": [
+            "Block",
+            "DefaultBlockManager",
+            "BaseBlockManager"
+          ],
+          "practice_task": "阅读 default_block_manager.py 列出 allocate/free/evict 关键方法；用 block_size 概念估算一个 8B 模型在 1GB KV 预算下能容纳多少 token。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "PyTorch 后端：算子与高性能模块",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "优化 nn 模块：attention / norm / rope",
+          "order": 1,
+          "filename": "u5-l1-nn-optimized-modules.md",
+          "level": "intermediate",
+          "topic": "讲解 nn/ 下可复用的优化模块：attention.py、norm.py、rotary_embedding.py，它们是模型重写的积木。",
+          "learning_goals": [
+            "理解 attention/norm/rotary 模块如何被各模型复用",
+            "看懂 RMSNorm、RotaryEmbedding 的接口",
+            "认识 attention wrapper 对 GQA/MHA 的抽象"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/nn/attention.py",
+            "lmdeploy/pytorch/nn/norm.py",
+            "lmdeploy/pytorch/nn/rotary_embedding.py"
+          ],
+          "minimal_modules": [
+            "Attention",
+            "RMSNorm",
+            "RotaryEmbedding"
+          ],
+          "practice_task": "在 nn/ 下找出 attention 类并标注其关键方法；对比 RMSNorm 与 PyTorch 原生 LayerNorm 实现差异（读源码）。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "线性层与权重量化变体",
+          "order": 2,
+          "filename": "u5-l2-linear-quant-variants.md",
+          "level": "intermediate",
+          "topic": "讲解 nn/linear/ 下 default/awq/w8a8/blocked_fp8/lora 等线性层实现，以及它们如何在运行时按量化策略选用。",
+          "learning_goals": [
+            "理解不同量化线性层（AWQ/W8A8/blocked-FP8）的实现差异",
+            "看懂线性层如何与 backends 配合选择 kernel",
+            "认识 LoRA 线性层的扩展点"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/nn/linear/base.py",
+            "lmdeploy/pytorch/nn/linear/awq.py",
+            "lmdeploy/pytorch/nn/linear/w8a8.py",
+            "lmdeploy/pytorch/nn/linear/blocked_fp8.py"
+          ],
+          "minimal_modules": [
+            "LinearBase",
+            "AwqLinear",
+            "W8A8Linear",
+            "BlockedF8Linear"
+          ],
+          "practice_task": "对比 awq.py 与 w8a8.py 的 forward 实现，列出各自权重的 dtype 与形状；在 base.py 中找到根据量化类型分发实现的逻辑。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "MoE 模块与专家负载均衡",
+          "order": 3,
+          "filename": "u5-l3-moe-modules.md",
+          "level": "advanced",
+          "topic": "讲解 nn/moe/ 下 MoE 实现（专家层、路由、blocked_fp8/w8a8 变体）与 eplb 负载均衡。",
+          "learning_goals": [
+            "理解 MoE 路由(route)与专家分发",
+            "看懂 default/blocked_fp8/w8a8 MoE 变体",
+            "认识 eplb 专家负载均衡的作用"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/nn/moe/base.py",
+            "lmdeploy/pytorch/nn/moe/route.py",
+            "lmdeploy/pytorch/nn/moe/blocked_fp8.py",
+            "lmdeploy/pytorch/nn/eplb.py"
+          ],
+          "minimal_modules": [
+            "MoE base",
+            "FusedMoE route",
+            "eplb"
+          ],
+          "practice_task": "在 moe/route.py 中梳理出 top-k 专家选择与 gate 计算流程；阅读 eplb.py 用一句话解释 eplb 如何减少 MoE all-to-all 通信不均。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "算子后端分发 backends",
+          "order": 4,
+          "filename": "u5-l4-op-backend-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 backends/ 如何按设备(cuda/ascend/dlinfer)与量化类型(FP8/AWQ)统一分发 attention/norm/rotary/sampling 等算子。",
+          "learning_goals": [
+            "理解 selector.py 的算子后端选择机制",
+            "看懂 cuda/default/dlinfer 等后端目录的职责",
+            "认识 token_dispatcher 与 moe_router 的作用"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/backends/selector.py",
+            "lmdeploy/pytorch/backends/attention.py",
+            "lmdeploy/pytorch/backends/linear.py",
+            "lmdeploy/pytorch/backends/norm.py"
+          ],
+          "minimal_modules": [
+            "Selector",
+            "attention backend",
+            "linear backend"
+          ],
+          "practice_task": "阅读 selector.py，说明它如何根据 device+quant 选定后端；列出 backends/ 下的设备子目录并各写一句用途。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "Triton / CUDA Kernel",
+          "order": 5,
+          "filename": "u5-l5-triton-cuda-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 kernels/ 下的 Triton/CUDA kernel（如 w8a8_triton_kernels）与 dispatcher 如何按设备选用 kernel。",
+          "learning_goals": [
+            "理解 w8a8 Triton kernel 的入口与作用",
+            "看懂 kernels/dispatcher.py 的设备分发",
+            "认识 cuda/default/dlinfer kernel 子目录"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/kernels/w8a8_triton_kernels.py",
+            "lmdeploy/pytorch/kernels/dispatcher.py"
+          ],
+          "minimal_modules": [
+            "w8a8 triton kernel",
+            "kernel dispatcher"
+          ],
+          "practice_task": "阅读 w8a8_triton_kernels.py 找到一个 @triton.jit 装饰的 kernel 并解释其 grid 与输入张量；说明 dispatcher.py 如何在 cuda/ascend 间选择。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "TurboMind 后端",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "TurboMind 后端概览与 C++ 扩展",
+          "order": 1,
+          "filename": "u6-l1-turbomind-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 TurboMind 作为高性能 C++ 后端的定位、src/turbomind 的源码结构（engine/models/kernels）与 pybind 桥接。",
+          "learning_goals": [
+            "理解 TurboMind 与 PyTorch 后端的分工与差异",
+            "看懂 src/turbomind 目录结构",
+            "认识 lmdeploy.lib._turbomind pybind 扩展的桥接方式"
+          ],
+          "source_files": [
+            "lmdeploy/turbomind/turbomind.py",
+            "src/turbomind/turbomind.h",
+            "src/turbomind/engine/BlockManager.h"
+          ],
+          "minimal_modules": [
+            "TurboMind C++ 入口",
+            "engine/BlockManager",
+            "pybind 桥接"
+          ],
+          "practice_task": "浏览 src/turbomind 目录树，列出 engine/models/kernels 各一个代表文件；在 turbomind.py 中找到 import _turbomind 的位置。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Python 包装 TurboMind / TurboMindInstance",
+          "order": 2,
+          "filename": "u6-l2-turbomind-python-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 turbomind.py 中 TurboMind 类如何创建引擎/权重、以及 TurboMindInstance 如何准备输入与处理输出。",
+          "learning_goals": [
+            "理解 TurboMind._from_hf / _create_engine 流程",
+            "看懂 TurboMindInstance.prepare_inputs / 流式输出",
+            "认识 torch.from_dlpack 张量互操作"
+          ],
+          "source_files": [
+            "lmdeploy/turbomind/turbomind.py",
+            "lmdeploy/turbomind/text_model.py"
+          ],
+          "minimal_modules": [
+            "TurboMind",
+            "TurboMindInstance",
+            "dlpack 互操作"
+          ],
+          "practice_task": "在 turbomind.py 中追踪 from_pretrained 到 create_instance 的路径；找到 prepare_inputs 并解释 input_meta 的字段。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "模型转换 converter 与权重格式",
+          "order": 3,
+          "filename": "u6-l3-model-converter-weights.md",
+          "level": "intermediate",
+          "topic": "讲解 lmdeploy convert 的转换逻辑：converter.py 生成 tm config、loader.py/weight_format.py 处理权重映射与重排。",
+          "learning_goals": [
+            "理解 HF 模型如何转换为 TurboMind 权重目录",
+            "看懂 get_tm_config / resolver / dtype 解析",
+            "认识 weight_format 与 StateDictLoader"
+          ],
+          "source_files": [
+            "lmdeploy/turbomind/converter.py",
+            "lmdeploy/turbomind/weight_format.py",
+            "lmdeploy/turbomind/loader.py"
+          ],
+          "minimal_modules": [
+            "converter.get_tm_config",
+            "weight_format",
+            "create_loader"
+          ],
+          "practice_task": "运行 lmdeploy convert（或阅读 converter.py）梳理转换步骤；在 loader.py 中找到 StateDictLoader 的映射机制。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "TurboMind 模型构建器 builders",
+          "order": 4,
+          "filename": "u6-l4-turbomind-builders.md",
+          "level": "advanced",
+          "topic": "讲解 turbomind/builders/ 如何按模型结构（attention/ffn/decoder_layer/moe/mla）组装权重布局，对接 C++。",
+          "learning_goals": [
+            "理解 builders 如何描述模型结构",
+            "看懂 attention/ffn/moe/mla builder 的职责",
+            "认识 module_list 的组装方式"
+          ],
+          "source_files": [
+            "lmdeploy/turbomind/builders/text_model.py",
+            "lmdeploy/turbomind/builders/attention.py",
+            "lmdeploy/turbomind/builders/moe.py",
+            "lmdeploy/turbomind/builders/mla.py",
+            "lmdeploy/turbomind/builders/decoder_layer.py"
+          ],
+          "minimal_modules": [
+            "text_model builder",
+            "attention builder",
+            "moe/mla builder"
+          ],
+          "practice_task": "在 builders/ 中选择 attention.py，说明它如何定义 attention 权重布局；对比 moe.py 与 mla.py 的结构差异。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Lite 量化压缩",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Lite 模块概览与校准流程",
+          "order": 1,
+          "filename": "u7-l1-lite-calibration-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 lmdeploy lite 的总体流程：加载 HF 模型 → calibrate 收集激活统计 → 计算缩放 → 写出量化权重。",
+          "learning_goals": [
+            "理解 lite/apis 的入口与 calibrate 主流程",
+            "看懂校准数据集/采样/序列长度等参数",
+            "认识 CalibrationContext 的统计收集"
+          ],
+          "source_files": [
+            "lmdeploy/lite/apis/calibrate.py",
+            "lmdeploy/cli/lite.py"
+          ],
+          "minimal_modules": [
+            "calibrate",
+            "CalibrationContext",
+            "load_model_and_tokenizer"
+          ],
+          "practice_task": "运行 lmdeploy lite auto_awq --help 并对照 cli/lite.py 列出关键参数；阅读 calibrate.py 梳理出校准→量化→保存的主步骤。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "AWQ 量化原理与实现",
+          "order": 2,
+          "filename": "u7-l2-awq-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 AWQ 算法实现：auto_awq 入口、awq.py 中的 NORM_FCS_MAP/FC_FCS_MAP 逐层结构与缩放计算。",
+          "learning_goals": [
+            "理解 AWQ 的激活感知权重量化原理",
+            "看懂 per-model 层映射 NORM_FCS_MAP/FC_FCS_MAP",
+            "认识 auto_awq 的完整调用链"
+          ],
+          "source_files": [
+            "lmdeploy/lite/apis/auto_awq.py",
+            "lmdeploy/lite/quantization/awq.py"
+          ],
+          "minimal_modules": [
+            "auto_awq",
+            "awq 层映射",
+            "scale 计算"
+          ],
+          "practice_task": "在 awq.py 中找到一个模型的 NORM_FCS_MAP/FC_FCS_MAP 定义并解释其含义；用 auto_awq 对一个小模型做 4bit 量化（或阅读流程）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "GPTQ 与 SmoothQuant",
+          "order": 3,
+          "filename": "u7-l3-gptq-smoothquant.md",
+          "level": "advanced",
+          "topic": "讲解 gptq.py 与 smooth_quant.py 两个量化入口，以及 lite/modeling 下逐模型 GPTQ 实现的差异。",
+          "learning_goals": [
+            "理解 GPTQ 与 SmoothQuant 的目标与区别",
+            "看懂 gptq/smooth_quant API 参数",
+            "认识 lite/modeling 中模型特定 GPTQ 实现"
+          ],
+          "source_files": [
+            "lmdeploy/lite/apis/gptq.py",
+            "lmdeploy/lite/apis/smooth_quant.py",
+            "lmdeploy/lite/modeling/internlm2_gptq.py"
+          ],
+          "minimal_modules": [
+            "gptq",
+            "smooth_quant",
+            "modeling GPTQ"
+          ],
+          "practice_task": "对比 auto_awq 与 gptq 两个 CLI 的参数差异；阅读 internlm2_gptq.py 说明模型特定 GPTQ 需要改写哪些层。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "权重与激活量化器",
+          "order": 4,
+          "filename": "u7-l4-weight-activation-quantizers.md",
+          "level": "advanced",
+          "topic": "讲解量化底层组件：weight/quantizer.py 权重量化器与 activation/observer.py 激活统计观察器。",
+          "learning_goals": [
+            "理解权重量化器(quantizer)的接口",
+            "看懂激活 observer 如何收集统计量",
+            "认识 quant_utils 的参数计算工具"
+          ],
+          "source_files": [
+            "lmdeploy/lite/quantization/weight/quantizer.py",
+            "lmdeploy/lite/quantization/activation/observer.py",
+            "lmdeploy/lite/quantization/weight/quant_utils.py"
+          ],
+          "minimal_modules": [
+            "weight quantizer",
+            "activation observer",
+            "quant_utils"
+          ],
+          "practice_task": "阅读 quantizer.py 列出权重量化的主要方法；在 observer.py 中找到记录激活 min/max 或分位数的位置。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "服务部署 serve",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "OpenAI 兼容 API 服务总览",
+          "order": 1,
+          "filename": "u8-l1-openai-api-server-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 serve/openai/ 提供的 OpenAI 兼容服务：api_server、serving_chat_completion、serving_completion、protocol 的组织。",
+          "learning_goals": [
+            "理解 serve/openai 模块的组成",
+            "看懂 chat/completion/generate 三类接口",
+            "认识 protocol.py 中的请求/响应模型"
+          ],
+          "source_files": [
+            "lmdeploy/serve/openai/api_server.py",
+            "lmdeploy/serve/openai/protocol.py",
+            "lmdeploy/serve/openai/serving_chat_completion.py"
+          ],
+          "minimal_modules": [
+            "api_server",
+            "protocol",
+            "serving_chat_completion"
+          ],
+          "practice_task": "浏览 serve/openai/ 目录，列出对外暴露的路由；在 protocol.py 中找到一个请求模型并说明字段。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "服务启动 launch_server",
+          "order": 2,
+          "filename": "u8-l2-server-launch.md",
+          "level": "intermediate",
+          "topic": "讲解 lmdeploy serve api_server 命令如何启动服务：launch_server.py 的多进程/多卡编排与 api_server.py 的 FastAPI 入口。",
+          "learning_goals": [
+            "理解 launch_server 的进程/端口编排",
+            "看懂 api_server.py 的 FastAPI 启动与路由注册",
+            "认识 server_port_range、dp 等启动参数"
+          ],
+          "source_files": [
+            "lmdeploy/serve/openai/launch_server.py",
+            "lmdeploy/serve/openai/api_server.py",
+            "lmdeploy/serve/openai/api_client.py"
+          ],
+          "minimal_modules": [
+            "launch_server",
+            "api_server FastAPI",
+            "api_client"
+          ],
+          "practice_task": "本地用 lmdeploy serve api_server 启动一个小模型服务，用 api_client 或 curl 发一次 chat 请求；在 launch_server.py 中找到多卡进程分配逻辑。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "异步引擎封装 async_engine",
+          "order": 3,
+          "filename": "u8-l3-async-engine-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 serve/core/async_engine.py 如何把底层 Engine 包装成可被 API 服务调用的异步推理引擎。",
+          "learning_goals": [
+            "理解 AsyncEngine 对 Engine 的异步封装",
+            "看懂 vl_async_engine 的多模态扩展",
+            "认识 health.py 健康检查机制"
+          ],
+          "source_files": [
+            "lmdeploy/serve/core/async_engine.py",
+            "lmdeploy/serve/core/vl_async_engine.py",
+            "lmdeploy/serve/core/health.py"
+          ],
+          "minimal_modules": [
+            "AsyncEngine",
+            "vl_async_engine",
+            "health"
+          ],
+          "practice_task": "在 async_engine.py 中找到将请求转发到底层 engine 的方法；阅读 health.py 说明健康检查探针如何获取引擎状态。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "代理与多机部署 proxy",
+          "order": 4,
+          "filename": "u8-l4-proxy-multi-node.md",
+          "level": "advanced",
+          "topic": "讲解 serve/proxy 如何支持多模型/多机/多卡推理服务的代理与请求路由。",
+          "learning_goals": [
+            "理解 proxy.py 的请求路由机制",
+            "看懂 streaming_response 的流式转发",
+            "认识多机部署的拓扑概念"
+          ],
+          "source_files": [
+            "lmdeploy/serve/proxy/proxy.py",
+            "lmdeploy/serve/proxy/streaming_response.py",
+            "lmdeploy/serve/proxy/utils.py"
+          ],
+          "minimal_modules": [
+            "proxy",
+            "streaming_response"
+          ],
+          "practice_task": "阅读 proxy.py，梳理出一个请求被路由到后端某实例的过程；说明 streaming_response 如何把底层流式输出转发给客户端。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "高级特性",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "视觉语言模型 VLM 处理",
+          "order": 1,
+          "filename": "u9-l1-vision-language-models.md",
+          "level": "advanced",
+          "topic": "讲解 VLM 全链路：vl/model 预处理、vl/engine、pytorch/multimodal 多模态输入处理，以 qwen3 为参考实现。",
+          "learning_goals": [
+            "理解图像/视频预处理流程",
+            "看懂 multimodal 输入如何注入推理",
+            "认识 InternVL/Qwen-VL/LLaVA 等模型适配"
+          ],
+          "source_files": [
+            "lmdeploy/vl/engine.py",
+            "lmdeploy/vl/model/qwen3.py",
+            "lmdeploy/pytorch/multimodal/__init__.py"
+          ],
+          "minimal_modules": [
+            "vl engine",
+            "vl/model 预处理",
+            "multimodal 输入"
+          ],
+          "practice_task": "用 pipeline 跑一次图文推理；阅读 qwen3.py 找到图像预处理输出（embedding/range）如何被送入模型。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "投机解码 spec_decode",
+          "order": 2,
+          "filename": "u9-l2-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "讲解投机解码框架：proposers（如 EAGLE）、reject_sampler、guided_spec_helper 与 spec_agent 的协作。",
+          "learning_goals": [
+            "理解投机解码的 draft-verify 流程",
+            "看懂 proposer 与 reject sampler 的职责",
+            "认识 guided speculative 解码"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/spec_decode/spec_agent.py",
+            "lmdeploy/pytorch/spec_decode/reject_sampler.py",
+            "lmdeploy/pytorch/spec_decode/guided_spec_helper.py"
+          ],
+          "minimal_modules": [
+            "spec_agent",
+            "reject_sampler",
+            "guided_spec_helper"
+          ],
+          "practice_task": "在 spec_decode/ 中梳理出 proposal→verify→accept/reject 的数据流；阅读 reject_sampler 说明接受/拒绝判定逻辑。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Prefix 缓存与 BlockTrie",
+          "order": 3,
+          "filename": "u9-l3-prefix-cache-blocktrie.md",
+          "level": "advanced",
+          "topic": "讲解基于块的前缀缓存：block_trie.py 的 BlockTrie/Node 如何实现 token 级前缀命中与 LRU 驱逐。",
+          "learning_goals": [
+            "理解 Paged Attention 上的前缀缓存原理",
+            "看懂 BlockTrie 的插入/匹配/驱逐",
+            "认识 PrefixCacheStats 与命中率统计"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/paging/block_trie.py",
+            "lmdeploy/pytorch/paging/scheduler.py"
+          ],
+          "minimal_modules": [
+            "BlockTrie",
+            "Node",
+            "PrefixCacheStats"
+          ],
+          "practice_task": "阅读 block_trie.py 画出 trie 节点结构；用相同 system prompt 连续发两次请求，观察第二次的 prefix 命中（可开启 debug 日志或读统计字段）。",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "张量并行与分布式",
+          "order": 4,
+          "filename": "u9-l4-tensor-parallelism-distribution.md",
+          "level": "advanced",
+          "topic": "讲解 PyTorch 引擎的张量并行/数据并行机制：distributed.py、DistConfig 与多卡通信初始化。",
+          "learning_goals": [
+            "理解 tp/dp 在 PyTorch 引擎中的实现",
+            "看懂 distributed.py 的通信初始化",
+            "认识 DistConfig 的关键字段"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/distributed.py",
+            "lmdeploy/pytorch/config.py",
+            "lmdeploy/pytorch/engine/engine.py"
+          ],
+          "minimal_modules": [
+            "distributed",
+            "DistConfig",
+            "TP 通信"
+          ],
+          "practice_task": "用 PytorchEngineConfig(tp=2) 跑推理并观察多卡分配；阅读 distributed.py 找到进程组/通信初始化的位置。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "PD 分离部署 disagg",
+          "order": 5,
+          "filename": "u9-l5-pd-disaggregation.md",
+          "level": "advanced",
+          "topic": "讲解 prefill/decode 分离部署框架：pytorch/disagg 的 backend/conn/config 如何与 DLSlime、Mooncake 等对接。",
+          "learning_goals": [
+            "理解 PD disaggregation 的动机与架构",
+            "看懂 disagg backend/conn 的对接方式",
+            "认识 disagg config 与连接消息"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/disagg/config.py",
+            "lmdeploy/pytorch/disagg/backend/__init__.py",
+            "lmdeploy/pytorch/disagg/messages.py",
+            "lmdeploy/pytorch/disagg/README.md"
+          ],
+          "minimal_modules": [
+            "disagg config",
+            "disagg backend",
+            "disagg conn"
+          ],
+          "practice_task": "阅读 disagg/README.md 与 config.py，画出 prefill 节点 → KV 传输 → decode 节点的数据流；说明 conn 模块负责哪一段通信。",
+          "depends_on": [
+            "u9-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "二次开发、测试与运维",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "添加新 PyTorch 模型完整流程",
+          "order": 1,
+          "filename": "u10-l1-add-new-pytorch-model.md",
+          "level": "advanced",
+          "topic": "总结支持一个新模型的全流程：在 module_map 注册、实现 models/xxx.py 重写、复用 nn 模块、对接权重加载与 chat 模板。",
+          "learning_goals": [
+            "掌握新模型的接入步骤清单",
+            "理解 module_map 注册与 REMOVED_MODEL_MAP",
+            "看懂如何复用 nn/backends 现有模块"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/models/module_map.py",
+            "lmdeploy/pytorch/models/patch.py",
+            "lmdeploy/pytorch/models/llama.py",
+            "lmdeploy/archs.py"
+          ],
+          "minimal_modules": [
+            "module_map 注册",
+            "models 实现",
+            "archs 接入"
+          ],
+          "practice_task": "为一个假设的新模型写出接入步骤清单：需新增/修改哪些文件；参考 llama.py 给出一个最小重写类骨架。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "LoRA 适配器机制",
+          "order": 2,
+          "filename": "u10-l2-lora-adapter.md",
+          "level": "advanced",
+          "topic": "讲解 LoRA 多适配器支持：pytorch/adapter/adapter.py 的适配器管理与 nn/linear/lora.py 的 LoRA 线性层。",
+          "learning_goals": [
+            "理解适配器的加载与切换",
+            "看懂 LoRA 线性层实现",
+            "认识 adapter manager 的生命周期"
+          ],
+          "source_files": [
+            "lmdeploy/pytorch/adapter/adapter.py",
+            "lmdeploy/pytorch/nn/linear/lora.py",
+            "lmdeploy/pytorch/engine/engine.py"
+          ],
+          "minimal_modules": [
+            "adapter manager",
+            "LoRA linear",
+            "adapters 加载"
+          ],
+          "practice_task": "阅读 adapter.py 列出适配器加载/切换方法；在 nn/linear/lora.py 中找到 base+adapter 权重合并/叠加的实现。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "测试体系与运行方式",
+          "order": 3,
+          "filename": "u10-l3-testing-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 tests/test_lmdeploy 的测试组织（pipeline/model/lite/vl/serve）与如何用 pytest 定向运行。",
+          "learning_goals": [
+            "理解测试目录与分类",
+            "掌握 pytest 运行单文件/单目录的方式",
+            "认识 test_pipeline/test_model 等代表性用例"
+          ],
+          "source_files": [
+            "tests/test_lmdeploy/test_pipeline.py",
+            "tests/test_lmdeploy/test_model.py",
+            "tests/test_lmdeploy/test_messages.py"
+          ],
+          "minimal_modules": [
+            "test_pipeline",
+            "test_model",
+            "test_messages"
+          ],
+          "practice_task": "运行 pytest tests/test_lmdeploy/test_messages.py 并通过；选一个测试用例阅读，说明它验证了什么行为。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "性能监控与构建发布",
+          "order": 4,
+          "filename": "u10-l4-metrics-monitoring-build.md",
+          "level": "advanced",
+          "topic": "讲解可观测性（metrics/、profiler.py、monitoring 的 prometheus/grafana）与构建发布（setup.py + CMake）实践。",
+          "learning_goals": [
+            "理解 metrics/stats 与 metrics_processor 的统计上报",
+            "看懂 profiler.py 的性能采集",
+            "认识 monitoring 的 prometheus/grafana 配置"
+          ],
+          "source_files": [
+            "lmdeploy/metrics/stats.py",
+            "lmdeploy/metrics/metrics_processor.py",
+            "lmdeploy/profiler.py",
+            "lmdeploy/monitoring/prometheus.yaml"
+          ],
+          "minimal_modules": [
+            "metrics stats",
+            "metrics_processor",
+            "profiler",
+            "monitoring"
+          ],
+          "practice_task": "启动服务并访问 metrics 端点（或阅读 stats.py）列出 3 个关键指标；阅读 setup.py 说明 TurboMind 扩展如何被打包进 wheel。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
