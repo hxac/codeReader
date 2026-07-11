@@ -1,0 +1,406 @@
+{
+  "project": "Mayoiuta",
+  "head": "100706ee7dbee8ff5b05d0ca1fcecc887b38187a",
+  "rationale": "Mayoiuta 是一个由「Verilog RTL 硬件设计 + Windows WDF 内核驱动」两部分组成的开源 NPU 项目，仓库不包含构建/仿真脚手架，定位为源码阅读型项目。学习路线据此分五层递进：第 1 单元（入门）从项目定位、仓库导航到顶层 SoC，帮助读者建立全局地图；第 2 单元（进阶）聚焦核心计算通路——脉动阵列 PE、卷积引擎、多精度自适应 PE；第 3 单元（进阶）覆盖存储与数据调度——存储控制器、数据格式重排、动态形状适配；第 4 单元（专家）讲解高级加速与能效——稀疏计算、DVFS，并以一讲综合端到端数据通路串起前述模块；第 5 单元（专家）落到软硬件接口，讲解 Windows 驱动骨架与 IOCTL/DMA/中断交互。讲义按「单主题、单模块、2-5 个最小模块、配一个可操作实践任务」的原则拆分，依赖关系由整体架构自上而下展开，并将仓库中引用但未提供的子模块（npu_core/npu_controller/performance_monitor/ecc_checker/sparse_encoder）以及若干非标准/待修正的 Verilog 语法如实标注为待确认，避免编造。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门与项目概览",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Mayoiuta 是什么：开源 NPU 项目定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Mayoiuta 是一个开源 NPU 项目，讲解其定位、愿景与核心特性，并说明项目由 RTL 硬件设计与 Windows 驱动两部分源码构成。",
+          "learning_goals": [
+            "理解 NPU 与通用 CPU/GPU 在 AI 加速上的区别",
+            "说出 Mayoiuta 的四大愿景（开放、灵活、可扩展、教育）与核心特性",
+            "识别项目由 hardware/rtl 与 driver/win32 两部分源码组成"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE"
+          ],
+          "minimal_modules": [],
+          "practice_task": "阅读 README 后，用 200 字以内写下项目定位摘要；并指出 README 中提到但仓库尚未提供的内容（如编译器/汇编器/调试器工具链、仿真环境），逐项标注为待确认。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与源码导航",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录结构：hardware/rtl 下按 core/memory/power/sparse/control/top 分类的 Verilog 模块，以及 driver/win32 下的 Windows 内核驱动源码，建立全局导航地图。",
+          "learning_goals": [
+            "画出仓库目录树并说明各子目录职责",
+            "理解 Verilog 文件名与顶层模块名的对应关系",
+            "区分 RTL 硬件部分与驱动部分各自的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "hardware/rtl/top/npu_soc.v",
+            "driver/win32/setup.inf"
+          ],
+          "minimal_modules": [
+            "NPU_SOC"
+          ],
+          "practice_task": "列出仓库中所有 .v 文件及其顶层模块名（module xxx），制作一张「文件路径 → 模块名 → 所属功能域」的对照表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层 SoC 架构：NPU_SOC",
+          "order": 3,
+          "filename": "u1-l3-soc-top.md",
+          "level": "beginner",
+          "topic": "拆解 npu_soc.v 中的 NPU_SOC 顶层模块：CORES 参数化多核、NoC 互连网络、npu_controller、performance_monitor，以及 PCIe/DDR/中断等外部接口。",
+          "learning_goals": [
+            "理解 generate-for 实现的参数化多核实例化",
+            "理解 NoC 数据在核间的环形/链式传递（noc_data[i] → noc_data[(i+1)%CORES]）",
+            "识别顶层对外接口（pcie_data、ddr_data、interrupt、status）"
+          ],
+          "source_files": [
+            "hardware/rtl/top/npu_soc.v"
+          ],
+          "minimal_modules": [
+            "NPU_SOC",
+            "npu_controller",
+            "npu_core",
+            "performance_monitor"
+          ],
+          "practice_task": "在 CORES=4 时追踪 noc_data[i] 与 noc_ctrl[i] 的连接关系，画出多核 NoC 的互连拓扑图，并标注哪些子模块（npu_controller/npu_core/performance_monitor）当前为待确认（仓库未提供源码）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心计算通路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "处理单元与脉动阵列 PE Array",
+          "order": 1,
+          "filename": "u2-l1-pe-array.md",
+          "level": "intermediate",
+          "topic": "讲解 pe_array.v 中的 Processing_Element 与 PE_Array：脉动阵列的 north/west→south/east 数据流、opcode（加载权重/乘加/直通）与累加器机制。",
+          "learning_goals": [
+            "理解脉动阵列（systolic array）的数据流动方向与边界输入选择（i==0、j==0）",
+            "解释三条 opcode（0x1 加载权重、0x2 乘加、0x3 直通）的含义",
+            "理解 accumulator 与 weight_reg 的作用"
+          ],
+          "source_files": [
+            "hardware/rtl/core/pe_array.v"
+          ],
+          "minimal_modules": [
+            "PE_Array",
+            "Processing_Element"
+          ],
+          "practice_task": "为 Processing_Element 增加一条新 opcode（例如清零累加器或加偏置 bias），在 case 中写出对应分支并说明其对阵列数据流的影响。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "卷积加速引擎 Conv Engine",
+          "order": 2,
+          "filename": "u2-l2-conv-engine.md",
+          "level": "intermediate",
+          "topic": "讲解 conv_engine.v 的 3x3 卷积加速：32x32 特征图输入、滑动窗口生成器、window_buffer 缓冲、九点乘累加，以及 KERNEL_SIZE/STRIDE/PAD 参数。",
+          "learning_goals": [
+            "理解滑动窗口缓存思路与 window_buffer 的作用",
+            "理解九点卷积乘累加与输出特征图 31x31 维度的由来",
+            "识别窗口缓冲索引逻辑中的待确认之处（如 j%3 移位写法）"
+          ],
+          "source_files": [
+            "hardware/rtl/core/conv_engine.v"
+          ],
+          "minimal_modules": [
+            "Conv_Engine"
+          ],
+          "practice_task": "手动计算 KERNEL_SIZE=3、STRIDE=1、PAD=1 时 32x32 输入对应的输出尺寸，并与代码中 conv_result[0:30][0:30] 的维度对照；指出窗口缓冲移位逻辑中存疑的写法并标注待确认。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "自适应多精度计算单元 Adaptive_PE",
+          "order": 3,
+          "filename": "u2-l3-adaptive-pe.md",
+          "level": "intermediate",
+          "topic": "讲解 adaptive_pe.v 的多精度计算单元：INT8/FP16/BFLOAT16/INT16 四种精度模式切换，以及 fp16_mult 函数实现的 IEEE754 半精度浮点乘法。",
+          "learning_goals": [
+            "理解 precision_mode 通过 case 选择计算精度的机制",
+            "解释 FP16 乘法中符号位、指数（减偏置 15）、尾数的处理",
+            "对比 INT8 与 INT16 模式对 32 位输入位宽的不同利用"
+          ],
+          "source_files": [
+            "hardware/rtl/core/adaptive_pe.v"
+          ],
+          "minimal_modules": [
+            "Adaptive_PE"
+          ],
+          "practice_task": "给定两个 FP16 值（自行选定），按 fp16_mult 的逻辑手算符号、指数、尾数三段结果，验证与公式一致；并指出该实现相比标准 IEEE754 半精度的近似之处。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "存储与数据调度",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "存储控制器与多 Bank 设计",
+          "order": 1,
+          "filename": "u3-l1-memory-controller.md",
+          "level": "intermediate",
+          "topic": "讲解 mem_ctl.v 的 Memory_Controller：多 Bank 存储体（BANK_NUM=8）、主机写/NPU 读双接口、地址解码（bank 选择 + bank 内偏移），以及 ECC 校验例化。",
+          "learning_goals": [
+            "理解 memory_bank 二维数组的组织方式",
+            "解释 host_addr[2:0] 选 bank、高位作 bank 内偏移的地址解码",
+            "识别 ecc_checker 为待确认的外部例化模块"
+          ],
+          "source_files": [
+            "hardware/rtl/memory/mem_ctl.v"
+          ],
+          "minimal_modules": [
+            "Memory_Controller",
+            "ecc_checker"
+          ],
+          "practice_task": "计算 ADDR_WIDTH=32、DATA_WIDTH=256、BANK_NUM=8 时每个 bank 的深度（字数）与总存储容量，并说明同一周期内主机写与 NPU 读访问不同 bank 时的行为。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "数据格式重排 Data Reorder",
+          "order": 2,
+          "filename": "u3-l2-data-reorder.md",
+          "level": "intermediate",
+          "topic": "讲解 data_reorder.v 的 Data_Reorder：NCHW / NHWC / Blocked 三种数据排布到 PE 阵列格式的转换，reorder_buffer 缓冲与输出调度。",
+          "learning_goals": [
+            "区分通道优先（NCHW）与空间优先（NHWC）的位拼接差异",
+            "理解 Blocked 格式直接透传的设计意图",
+            "识别 read_ptr 未声明等待确认的语法问题"
+          ],
+          "source_files": [
+            "hardware/rtl/memory/data_reorder.v"
+          ],
+          "minimal_modules": [
+            "Data_Reorder"
+          ],
+          "practice_task": "为 data_format 增加一种新排布（例如 CHWN），写出对应的位重排赋值逻辑，并说明该格式适合何种计算模式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "动态形状适配 Shape Adaptor",
+          "order": 3,
+          "filename": "u3-l3-shape-adaptor.md",
+          "level": "intermediate",
+          "topic": "讲解 shape_adaptor.v 的 Shape_Adaptor：根据输入尺寸、卷积核、STRIDE/PAD 动态计算输出尺寸、自动 padding 检测、MAX_DIM 边界保护，以及运行时 configure 任务。",
+          "learning_goals": [
+            "掌握卷积输出尺寸公式（(H+2PAD-K)/STRIDE+1）",
+            "理解 pad_enable 的触发条件与 MAX_DIM 边界保护",
+            "识别 STRIDE/PAD 在模块中来源待确认（未在参数/端口声明）的问题"
+          ],
+          "source_files": [
+            "hardware/rtl/control/shape_adaptor.v"
+          ],
+          "minimal_modules": [
+            "Shape_Adaptor"
+          ],
+          "practice_task": "修改 configure 任务接口，增加 dilation（膨胀）参数，并据此改写输出尺寸计算公式，同时保留 MAX_DIM 边界保护。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "高级加速与能效",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "稀疏计算引擎 Sparse Engine",
+          "order": 1,
+          "filename": "u4-l1-sparse-engine.md",
+          "level": "advanced",
+          "topic": "讲解 sparse_engine.v 的 Sparse_Engine：零值检测、稀疏度阈值判断、sparse_encoder 压缩（值+索引）与稀疏矩阵乘法核心。",
+          "learning_goals": [
+            "理解零值计数与稀疏度阈值 SPARSE_THRESH 的判断",
+            "解释压缩格式（compressed 值 + index 索引）的设计",
+            "识别 sparse_encoder 为待确认的外部例化模块"
+          ],
+          "source_files": [
+            "hardware/rtl/sparse/sparse_engine.v"
+          ],
+          "minimal_modules": [
+            "Sparse_Engine",
+            "sparse_encoder"
+          ],
+          "practice_task": "给定一个 4x4 含若干零值的激活矩阵，手算其零值比例并判断是否超过 SPARSE_THRESH=0.3，进而说明 sparse_valid 是否置位。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "动态电压频率调节 DVFS",
+          "order": 2,
+          "filename": "u4-l2-dvfs.md",
+          "level": "advanced",
+          "topic": "讲解 dvfs_ctrl.v 的 DVFS_Controller：workload 工作量输入、8 级 history_buffer 移动平均滤波、四档电压/频率调节策略。",
+          "learning_goals": [
+            "理解 history_buffer 移动平均对 workload 的平滑作用",
+            "解释四档电压（0.8V~1.2V）/频率（500MHz~1.2GHz）的映射",
+            "识别 case 区间语法（如 0-50:）的待确认/非标准写法"
+          ],
+          "source_files": [
+            "hardware/rtl/power/dvfs_ctrl.v"
+          ],
+          "minimal_modules": [
+            "DVFS_Controller"
+          ],
+          "practice_task": "设计一套新的三档调节阈值（取代现有四档），改写 case 逻辑，并说明移动平均窗口长度对调节滞后性的影响。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "全系统数据通路与集成",
+          "order": 3,
+          "filename": "u4-l3-system-integration.md",
+          "level": "advanced",
+          "topic": "综合讲解一次 NPU 计算请求如何端到端流经系统：SoC 仲裁 → NoC 传输 → 存储控制器取数据 → data_reorder 重排 → PE 阵列/卷积引擎计算 → 结果写回，并梳理架构中待确认/未实现的环节。",
+          "learning_goals": [
+            "将前述各模块串联为端到端数据通路",
+            "识别架构中引用但仓库未提供的子模块与连接断点",
+            "理解多核协同与性能监控在整体中的位置"
+          ],
+          "source_files": [
+            "hardware/rtl/top/npu_soc.v",
+            "hardware/rtl/memory/mem_ctl.v",
+            "hardware/rtl/memory/data_reorder.v",
+            "hardware/rtl/core/pe_array.v"
+          ],
+          "minimal_modules": [
+            "NPU_SOC",
+            "Memory_Controller",
+            "Data_Reorder",
+            "PE_Array"
+          ],
+          "practice_task": "绘制端到端数据通路框图，标出数据在 SoC→存储→重排→计算→写回各模块间的流动路径，并用不同标记区分「已实现」与「待确认」的环节。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1",
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "设备驱动与软硬件接口",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Windows WDF 驱动骨架与 INF",
+          "order": 1,
+          "filename": "u5-l1-driver-skeleton.md",
+          "level": "advanced",
+          "topic": "讲解 Windows WDF 内核驱动骨架：DriverEntry 入口、NpuEvtDeviceAdd（设备/中断/DMA/IO 队列创建）、setup.inf 的 PCI 设备匹配，以及 npudriver.h 的寄存器与设备上下文定义。",
+          "learning_goals": [
+            "理解 WDF 驱动加载入口与 DriverEntry 的作用",
+            "解释 setup.inf 中 PCI ID（VEN_1ACE&DEV_BEEF）与驱动绑定的关系",
+            "理解 NPU_REGISTERS 与 DEVICE_CONTEXT 结构的组成"
+          ],
+          "source_files": [
+            "driver/win32/npudriver.c",
+            "driver/win32/npudriver.h",
+            "driver/win32/setup.inf"
+          ],
+          "minimal_modules": [
+            "DriverEntry",
+            "NpuEvtDeviceAdd",
+            "DEVICE_CONTEXT",
+            "NPU_REGISTERS"
+          ],
+          "practice_task": "阅读 setup.inf 与 npudriver.h，写出该驱动绑定的厂商 ID 与设备 ID，并说明 NPU_DEVICE_ID/NPU_VENDOR_ID 宏与 INF 中 PCI 字符串的对应关系。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "驱动 IOCTL、DMA 与中断交互",
+          "order": 2,
+          "filename": "u5-l2-driver-ioctl-dma.md",
+          "level": "advanced",
+          "topic": "讲解 npudriver.c 的设备交互：三个 IOCTL（EXECUTE/LOAD_WEIGHTS/GET_STATUS）、寄存器 MMIO 读写、DMA 散列收集传输权重、中断 ISR/DPC 处理。",
+          "learning_goals": [
+            "理解 IOCTL 命令码的 CTL_CODE 构造方式",
+            "解释通过 DMA 加载权重到设备的流程",
+            "理解 ISR 确认中断与 DPC 延迟处理的分工"
+          ],
+          "source_files": [
+            "driver/win32/npudriver.c",
+            "driver/win32/npudriver.h"
+          ],
+          "minimal_modules": [
+            "NpuEvtIoDeviceControl",
+            "NpuEvtPrepareHardware",
+            "NpuEvtInterruptIsr",
+            "NpuEvtInterruptDpc"
+          ],
+          "practice_task": "为驱动增加一个新 IOCTL（例如 IOCTL_NPU_SET_CONFIG），在 npudriver.h 中用 CTL_CODE 定义命令码，并在 NpuEvtIoDeviceControl 的 switch 中新增对应 case 写入一个配置寄存器。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
