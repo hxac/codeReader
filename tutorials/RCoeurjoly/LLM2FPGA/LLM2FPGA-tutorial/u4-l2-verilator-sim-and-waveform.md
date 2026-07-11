@@ -1,0 +1,298 @@
+# Verilator 仿真与波形捕获
+
+## 1. 本讲目标
+
+上一讲（u4-l1）我们造好了「黄金参考」——一段由真实 PyTorch 算出来的 `tb_data.sv`。本讲要回答的下一个问题是：**生成的硬件（DUT）真的算对了吗？**
+
+学完本讲，你应当能够：
+
+- 读懂 `sim/tb_main.sv` 这个 testbench 如何驱动被测设计（DUT）、喂入数据、抓取结果。
+- 理解 Handshake/ESI 接口的 **valid/ready 握手**，并能在 testbench 里正确驱动它。
+- 掌握用**层次化引用（hierarchical reference）**直接给 DUT 内部存储播种的仿真技巧，以及它为什么只能在仿真里用。
+- 看懂 `flake.nix` 里 `matmulSvSim`（出 PASS/FAIL 文本与 JSON）和 `matmulSvWave`（出 VCD 波形）两个 Verilator 派生的命令行参数。
+
+## 2. 前置知识
+
+在进入源码前，先用大白话把三个概念讲清楚。
+
+### 2.1 valid/ready 握手（弹性数据流）
+
+这是上一讲降级链里 Handshake 方言（u3-l2）落到硬件后的接口形态。一次数据传输需要两条控制线：
+
+- **valid**：发送方说「我手上有有效数据」。
+- **ready**：接收方说「我准备好接了」。
+
+只有当二者在同一个时钟上升沿**同时为高**，这次传输才真正发生。设 `v` 为 valid、`r` 为 ready，则在某时钟沿发生传输的充要条件是：
+
+\[
+\text{transfer} = v \land r
+\]
+
+这种「双方都点头才传」的协议叫**弹性数据流（elastic dataflow）**——任一方都可以随时反压（把 valid 或 ready 拉低）暂停流水线，比固定时序的总线灵活得多，代价是控制线更多。
+
+### 2.2 DUT 与 testbench
+
+- **DUT（Design Under Test，被测设计）**：这里就是降级链最终生成的 `main.sv`（matmul 模块经整条链导出的 SystemVerilog）。
+- **testbench（测试台）**：一段**只为仿真存在**的代码，负责产生时钟、复位、喂入激励、检查输出。它不会被综合成真实电路，所以可以使用一切「仿真专用」的写法（延迟、层次化引用、`$display` 等）。
+
+### 2.3 Verilator 与 VCD
+
+- **Verilator** 是一个开源的 SystemVerilog 仿真器。与商业仿真器（VCS、ModelSim）不同，它把 Verilog **翻译成 C++** 再用 gcc 编译成一个可执行文件，跑起来很快，但默认是「2 状态 + 周期驱动」，对带时延的写法（如 `#40`、`always #5`）需要显式打开 `--timing` 才支持。
+- **VCD（Value Change Dump）** 是一种标准波形文件格式，记录每个信号在每个时刻的跳变。可用 GTKWave 打开查看。本项目的 testbench 通过宏开关决定是否、以及用哪种格式（VCD/FST）dump 波形。
+
+## 3. 本讲源码地图
+
+本讲围绕三份文件：
+
+| 文件 | 作用 |
+| --- | --- |
+| [sim/tb_main.sv](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv) | testbench 主体：生时钟/复位、握手驱动、播种内部存储、抓结果判 PASS/FAIL、可选波形 dump。 |
+| [flake.nix](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix) | 用 Verilator 把 testbench + DUT 编译成可执行文件的两个派生 `matmulSvSim` / `matmulSvWave`，以及编译用的 `simMain`。 |
+| [sim/gen_tb_data.py](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/gen_tb_data.py) | （上一讲已讲）生成被 `include` 进来的 `tb_data.sv`，提供 `a_mem`、`b_mem`、`expected` 三个量。本讲只消费它。 |
+
+降级链产物 `matmulSv`（`main.sv` + `sources.f` 文件清单）由 `nix/pipeline.nix` 产出（见 u3-l5），本讲把它当作「黑盒 DUT」直接驱动。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 valid/ready 握手驱动
+
+#### 4.1.1 概念说明
+
+降级链把 matmul 降成硬件后，`main` 模块对外暴露的是一组 ESI（弹性硅互连）通道，每条通道都是一对 valid/ready 控制线加一条数据线。要让 DUT 跑起来，testbench 必须扮演「对端」：在输入通道上当发送方、在输出通道上当接收方，按 valid/ready 协议与它一问一答。
+
+本设计里有两类通道需要 testbench 配合：
+
+- **start 触发通道（`in3`）**：testbench 是发送方。给 DUT 一个脉冲，告诉它「开始算」。
+- **结果/输出通道（`out0`、`in2_st0` 等）**：testbench 是接收方。把 `ready` 常拉高表示「我随时能接」，再观察 `valid` 何时拉高来取走结果。
+
+#### 4.1.2 核心流程
+
+testbench 驱动一次仿真的握手时序大致如下：
+
+1. 复位期间，把 start 通道的 `in3_valid` 拉高（准备好发触发）。
+2. 释放复位后，每个时钟沿检查 `in3_ready`：一旦 DUT 点头（ready=1），就把 `in3_valid` 拉低（触发已被接收，只发一次）。
+3. 同时把所有输出通道的 `ready` 常置 1，确保 DUT 一旦算出结果就能立刻吐出来、不会被反压卡住。
+4. 监听结果通道的 `valid`，一旦拉高就取走数据并比对。
+
+#### 4.1.3 源码精读
+
+先看 testbench 如何实例化 DUT 并把对端的 ready 钉死。
+
+[sim/tb_main.sv:36-48](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L36-L48) 实例化 `main` 模块（取名 `dut`）。注意几个**输出通道的 ready 都被常接 1**：`.out0_ready(1'b1)`、`.in2_st0_ready(1'b1)`——这是「接收方永远就绪」，保证 DUT 结果不被反压；而 `.in2_st0_done_valid(1'b0)` 则表示我们不往「done」通道发东西。
+
+[sim/tb_main.sv:52-58](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L52-L58) 是 start 通道的握手驱动：复位时把 `in3_valid` 置 1，非复位期间一旦 `in3_ready` 为 1 就把 `in3_valid` 拉回 0。这正是上式 \(\text{transfer}=v\land r\) 的代码化：有效传输发生在 `in3_valid && in3_ready` 同时为 1 的那个沿，之后我们就停止发送。
+
+[sim/tb_main.sv:73-92](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L73-L92) 是结果捕获：每当时钟沿到来且不在复位时，计数器 `cycles` 自增；一旦 `in2_st0_valid` 拉高（DUT 把结果送上 `in2_st0` 通道），就比较 `in2_st0_data` 与 `expected`，打印 PASS 或 FAIL 并结束仿真。`cycles > 10000` 是一个**看门狗**：若等不到结果就 `$fatal`，避免仿真挂死。
+
+> 说明：matmul 的最终结果并不从名字里带 "out" 的通道出来，而是出现在 `in2_st0` 通道上。这种「结果从 `in2` 命名的通道出」的怪异命名，源自 CIRCT/ESI 把「把结果存回外部存储」的 store 通道编号为 `in2`。通道命名的完整语义留到 u6-l1（自测外壳自动生成）细讲；本讲只需知道「`in2_st0_valid` 拉高时，`in2_st0_data` 就是 DUT 算出的结果」。
+
+#### 4.1.4 代码实践
+
+**实践目标**：确认你对 start 通道握手的理解。
+
+**操作步骤**：
+
+1. 打开 [sim/tb_main.sv:52-58](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L52-L58)。
+2. 假设把第 55 行的 `else if (in3_ready)` 改成 `else`（即不看 ready，复位一结束就立刻拉低 valid）。
+
+**需要观察的现象 / 预期结果**：思考这会带来什么风险。提示：valid 的撤销与 DUT 采样 valid 是异步竞争的——如果 DUT 还没在那个沿把 ready 拉高（即还没「确认接收」），valid 就已经消失，DUT 可能根本没收到 start 触发，于是永远算不出结果，最终被第 80 行的看门狗 `cycles > 10000` 触发 `$fatal`。这说明「等 `ready` 再撤销 valid」是单脉冲握手的标准安全写法。
+
+**运行结果**：待本地验证（可在 nix devShell 里改后 `nix build .#matmul-sv-sim -L` 观察）。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 testbench 把 `out0_ready` 和 `in2_st0_ready` 都接成常 1，而不是也写一套握手状态机？
+
+**答案**：因为本测试只关心「最终能否算对」，不需要给 DUT 施加反压。把接收方 ready 常置 1，能让 DUT 一有结果就立刻送出，简化 testbench、缩短仿真周期。若要测试 DUT 在反压下的正确性，才需要让 ready 周期性拉低。
+
+**练习 2**：结果捕获用的是 `!==`（四态不等）而不是 `!=`，有什么意义？
+
+**答案**：`!==` 是四态比较，`!=` 会把 `x`/`z` 当作确定值比较。用 `!==` 能在结果出现未定值 `x`（比如某信号未驱动、复位不彻底）时也判定为「不等」从而报 FAIL，更严格地暴露问题。
+
+---
+
+### 4.2 内部存储层次化播种
+
+#### 4.2.1 概念说明
+
+正常硬件接口下，外部没法直接读写模块**内部**的寄存器或存储器——只能通过端口。但本设计的 matmul 把两个输入 `a`、`b`「内化」成了 DUT 内部的 Handshake 存储器（`handshake_memory0`、`handshake_memory1`），并没有把它们暴露成输入端口。那么 testbench 怎么把测试向量喂进去？
+
+答案是仿真专用的**层次化引用**：用一个点分的路径从 testbench 一直「点」进 DUT 内部某个具体存储单元，直接赋值。例如：
+
+```
+dut.handshake_memory0._handshake_memory_5[i] = a_mem[i];
+```
+
+这行从外到内是：实例 `dut` → 其内部子模块实例 `handshake_memory0` → 该子模块内的存储数组 `_handshake_memory_5` → 第 `i` 个字。
+
+#### 4.2.2 核心流程
+
+testbench 的初始化时序：
+
+1. **在复位仍有效期间**，用 for 循环遍历 16 个元素，把 `a_mem[i]`、`b_mem[i]` 分别写进 DUT 内部两块存储。
+2. 把时钟初值置 0、复位置 1。
+3. 用 `#40` 延迟（即 4 个时钟周期）让复位维持一段。
+4. 拉低复位，DUT 开始从已播种的存储里读取数据计算。
+
+关键点：**播种必须在释放复位之前完成**，这样 DUT 一启动就能读到正确的输入。
+
+#### 4.2.3 源码精读
+
+[sim/tb_main.sv:60-71](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L60-L71) 是播种与复位的核心。注释（第 60-62 行）直接说明了动机：「生成的 matmul 设计把两个输入存储内化了，因此在释放复位前直接给生成出来的存储实例播种」。第 63-66 行的 for 循环把 `a_mem`/`b_mem`（来自 `include "tb_data.sv"`，由 [sim/gen_tb_data.py:29-37](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/gen_tb_data.py#L29-L37) 生成）写进 `dut.handshake_memory0._handshake_memory_5` 与 `dut.handshake_memory1._handshake_memory_4`。第 67-70 行初始化时钟、置复位，`#40` 后撤销复位。
+
+**为什么这种引用在 Verilator 里可行？** Verilator 把整个设计展平并翻译成一棵 C++ 类的层次树，每个信号（包括内部信号）都成了某个类对象的成员变量。testbench 的层次化路径会被编译成对应的 C++ 成员访问，因此任何内部信号在仿真层面都可读可写。这与**综合**完全不同——综合时内部网没有「外部地址」，无法从模块外驱动。所以这是纯仿真技巧，绝不能出现在可综合 RTL 里。
+
+**一个隐患**：`_handshake_memory_5`、`_handshake_memory_4` 这类带数字后缀的名字是 CIRCT 降级时自动生成的（与 IR 里的 SSA 值编号有关）。如果降级链改动导致编号变化，这些名字会跟着变，testbench 就会编译失败。这是一种与生成器内部实现**强耦合**的写法，属于「冒烟测试」可接受、但生产级验证应避免的脆弱依赖。
+
+#### 4.2.4 代码实践
+
+**实践目标**：理解层次化播种与黄金参考数据的来源衔接。
+
+**操作步骤**：
+
+1. 读 [sim/gen_tb_data.py:29-37](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/gen_tb_data.py#L29-L37)，确认它打印出的 `a_mem[i] = 32'd...;` 形式就是 `tb_data.sv` 里 `initial` 块的内容。
+2. 对照 [sim/tb_main.sv:63-66](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L63-L66)，跟踪数据流：`test_vectors.json` → PyTorch 张量 → `tb_data.sv` 的 `a_mem`/`b_mem` → testbench 的 for 循环 → DUT 内部存储 `_handshake_memory_5`。
+
+**需要观察的现象 / 预期结果**：能说清「输入数据从 JSON 一路走到 DUT 内部存储」经过了哪几道工序，并理解为什么这道工序只能发生在仿真里（综合时无法做）。
+
+**运行结果**：这是源码阅读型实践，无需运行命令。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：如果把第 63-66 行的播种循环搬到 `reset = 1'b0`（第 70 行）之后会怎样？
+
+**答案**：可能出错。复位一撤销，DUT 内部逻辑立即开始按自己的状态机运行并读取存储；若播种发生在复位撤销之后，DUT 可能在存储还没写好时就启动读取，读到未定义值。把播种放在复位有效期间，能保证「DUT 看到的第一个有效输入」就是播种值。此外这些赋值写在 `initial` 块里，本质是仿真零时刻的一次性初始化，与复位时序解耦。
+
+**练习 2**：为什么作者选择「直接给内部存储播种」而不是「把 a、b 设计成通过输入端口喂入」？
+
+**答案**：因为本设计的 matmul 在 Handshake→HW 降级后，输入存储是**内化**在数据流图里的（见 u3-l2/u3-l3 的 extmem 处理），自然形态就是内部存储而非端口。为冒烟测试专门改设计、把输入暴露成端口既费事又改动降级产物。层次化播种是用「仿真特权」换取「不动 DUT」的便利，是验证生成式 RTL 的常见折中。
+
+---
+
+### 4.3 Verilator 仿真与 VCD 波形
+
+#### 4.3.1 概念说明
+
+前面两节讲的是「怎么写 testbench」。本节讲「怎么把 testbench + DUT 跑起来」，对应 `flake.nix` 里的三个派生：
+
+- **`simMain`**：用 Verilator 把 testbench 和 DUT 编译成一个可执行文件 `sim_main`。
+- **`matmulSvSim`**：跑 `sim_main`，抓出 PASS 行，产出一个 JSON 报告（status/expected/got）。
+- **`matmulSvWave`**：在编译时打开波形开关，跑完产出 `wave.vcd` 波形文件。
+
+#### 4.3.2 核心流程
+
+Verilator 仿真的两个阶段：
+
+1. **elaboration + 编译（`verilator --binary`）**：Verilator 解析所有 `.sv`，展开成 C++，再调 gcc 链接成一个可执行文件。
+2. **执行**：运行该可执行文件，内部按 testbench 的时钟驱动一拍拍推进，遇到 `$finish`/`$fatal` 或返回即结束。
+
+要打开波形，需要在**编译期**给 Verilator 传 `--trace`，并通过宏 `ENABLE_WAVES` / `ENABLE_WAVES_VCD` 让 testbench 里的 `$dumpfile`/`$dumpvars` 生效。运行结束后 `wave.vcd` 才会落盘。
+
+#### 4.3.3 源码精读
+
+先看 testbench 里波形 dump 的开关：
+
+[sim/tb_main.sv:15-24](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L15-L24) 用宏控制波形：`ifdef ENABLE_WAVES` 才打开 dump，再由 `ENABLE_WAVES_VCD` 决定写 `wave.vcd` 还是 `wave.fst`（FST 是 GTKWave 的更紧凑格式）。默认（两个宏都不定义）则完全不 dump，仿真跑得最快。
+
+再看 Nix 派生如何调起 Verilator。
+
+[flake.nix:711-720](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix#L711-L720) 是 `simMain`，关键参数：
+
+- `--binary`：直接编译成可执行文件（一步到位）。
+- `--timing`：**打开时序支持**——没有它，`always #5 clock = ~clock;`（第 50 行）和 `#40`（第 69 行）这类延迟语句 Verilator 会拒绝。这是本 testbench 能跑的必要开关。
+- `--language 1800-2017`：按 SystemVerilog 2017 标准解析。
+- `-Wno-fatal`：警告不致命（不阻断编译）。
+- `-I${tbDataSv}`：把 `tb_data.sv` 所在目录加进 include 路径，让第 4 行的 `` `include "tb_data.sv" `` 能找到。
+- `-top tb`：顶层模块是 testbench `tb`。
+- `-f ${matmulSv}/sources.f`：读降级链产出的文件清单，把所有 DUT `.sv` 一次性喂给 Verilator。
+- `${./sim/tb_main.sv}`：最后追加 testbench 本身。
+
+[flake.nix:722-741](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix#L722-L741) 是 `matmulSvSim`：它**不重新编译**，直接跑 `${simMain}/obj_dir/sim_main`，把输出 `tee` 到 `sim.log`；用 `grep` 抓 `PASS: expected <E> got <G>` 这一行，再用 `awk` 取第 3、第 5 个字段分别作为 `expected` 和 `got`，写成 JSON：
+
+```json
+{ "status": "PASS", "expected": <E>, "got": <G> }
+```
+
+若 grep 不到 PASS 行（仿真 FAIL 或挂死），则 `exit 1` 让 Nix 派生失败——这把「语义等价性」变成了 CI 能直接判定通过/失败的硬门禁。
+
+[flake.nix:743-758](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix#L743-L758) 是 `matmulSvWave`：相比 `simMain` 多了 `--trace -DENABLE_WAVES -DENABLE_WAVES_VCD`——`--trace` 让 Verilator 在生成的可执行文件里内置波形记录代码，两个 `-D` 定义宏从而触发第 17-18 行的 `$dumpfile("wave.vcd")` 与 `$dumpvars`。跑完后校验 `wave.vcd` 已生成，再 `cp` 到 `$out`。这两个派生最后都在 [flake.nix:793-794](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix#L793-L794) 暴露为 `.#matmul-sv-sim` 和 `.#matmul-sv-wave`。
+
+> 顺带一提：[flake.nix:834-849](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix#L834-L849) 还有一个 `--lint-only` 的 Verilator 派生，只做语法/风格检查、不仿真，用作 CI 静态门禁（见 u7-l2）。
+
+#### 4.3.4 代码实践（本讲指定实践）
+
+**实践目标**：把 testbench 的 PASS 行与 Nix 派生的解析对应起来，并解释层次化引用为何可行。
+
+**操作步骤**：
+
+1. 看 [sim/tb_main.sv:82-89](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv#L82-L89) 的 PASS 行：`$display("PASS: expected %0d got %0d", expected, in2_st0_data);`。
+2. 对照 [flake.nix:727-733](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix#L727-L733) 的 grep + awk。
+
+**需要观察的现象 / 预期结果**：
+
+- **PASS 行里的 `expected` 来自哪里？** 来自 testbench 的 `expected` 变量——它由 `include "tb_data.sv"` 引入，而 `tb_data.sv` 是 [sim/gen_tb_data.py:31](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/gen_tb_data.py#L31) 用**真实 PyTorch** 跑 matmul 算出来的黄金参考（见 u4-l1）。也就是说，`expected` = PyTorch 的真相。
+- **PASS 行里的 `got` 来自哪里？** 来自 `in2_st0_data`，即 DUT 把计算结果送上 `in2_st0` 通道时的数据——这是降级链产出的硬件算出来的值。`got` = 硬件的答案。
+- 二者一致即 PASS，证明「PyTorch 语义 ≡ 硬件语义」。Nix 派生里 `awk '{print $3}'` 取到的就是 `expected` 数值、`awk '{print $5}'` 取到的就是 `got` 数值（`PASS:` 是第 1 字段、`expected` 是第 2、数字是第 3、`got` 是第 4、数字是第 5）。
+
+3. **解释 `dut.handshake_memory0._handshake_memory_5[i]` 为何可行**：因为 Verilator 把整个设计展平成 C++ 类层次，testbench 的点分路径被编译成对内部 C++ 成员的直接访问，所以仿真里任何内部信号都能从外部读写；而综合时内部网没有外部地址、不可被模块外驱动，因此这是仿真专属特权。它之所以必要，是因为本设计的输入存储被内化在数据流图里、没有暴露成端口（见 4.2 节）。
+
+**运行结果**：完整运行见下一节综合实践（`nix build .#matmul-sv-sim -L`）。若仅阅读，本实践的结论可由源码直接得出，无需运行。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `matmulSvSim` 不传 `--trace`，而 `matmulSvWave` 才传？
+
+**答案**：波形记录会显著拖慢仿真、增大产物体积。日常回归只关心 PASS/FAIL（用 `matmulSvSim`），不需要波形；只有调试时才用 `matmulSvWave` 产出 VCD 用 GTKWave 看。分开两个派生是把「快速回归」与「调试波形」按需隔离的常见做法。
+
+**练习 2**：去掉 `--timing` 会怎样？
+
+**答案**：Verilator 默认不支持带时序控制（`#delay`、`@event`）的代码，testbench 里的 `always #5 clock = ~clock;` 与 `#40` 会触发错误，编译失败。`--timing` 是让这个 testbench 能跑起来的硬性开关。
+
+**练习 3**：`matmulSvSim` 如何把一次「仿真结果」变成 Nix 能识别的「成功/失败」？
+
+**答案**：它 grep `sim.log` 里的 `PASS: expected ... got ...` 行；抓不到就 `exit 1`，抓到就把两个数写成 JSON 放进 `$out`。Nix 派生以进程退出码判定成功失败，于是「DUT 是否与 PyTorch 等价」就被转译成了一条 CI 可直接门禁的硬规则。
+
+---
+
+## 5. 综合实践
+
+把本讲三块知识串起来跑一次完整仿真。
+
+**实践目标**：亲手跑通 matmul 的 SystemVerilog 仿真，确认 DUT 与 PyTorch 黄金参考一致，并产出可查看的波形。
+
+**操作步骤**：
+
+1. 进入带全套工具的 shell（u1-l3）：`nix develop`。
+2. 跑语义仿真：`nix build .#matmul-sv-sim -L`。
+3. 查看结果：`cat $(readlink -f result)`，应得到一段含 `"status": "PASS"` 与 `expected`/`got` 两个相等数字的 JSON（数字应为 PyTorch 对 `a=[1..16]`、`b=[16..1]` 的点积，即 1×16+2×15+…+16×1 = 816）。
+4. 跑波形仿真：`nix build .#matmul-sv-wave -L`。
+5. 查看波形：用 devShell 里自带的 `gtkwave` 打开 `result`（它指向 `wave.vcd`），观察 `clock`、`reset`、`in3_valid`/`in3_ready` 的握手、以及 `in2_st0_valid` 拉高的时刻与 `in2_st0_data` 的值。
+
+**需要观察的现象 / 预期结果**：
+
+- `matmul-sv-sim` 产出 `{"status": "PASS", "expected": 816, "got": 816}`（具体数值以本地为准；预期 expected == got == PyTorch 点积结果）。
+- 波形里 `in3_valid` 在复位期被拉高，待 `in3_ready` 出现后拉低；若干周期后 `in2_st0_valid` 拉高，`in2_st0_data` 等于 expected。
+
+**运行结果**：待本地验证（依赖 nix build 完成；构建机器需能编译 Verilator/gcc 工具链，u1-l3 已用 Nix pin 好）。
+
+> 若 PASS 行的 `expected` 与 `got` 相等，就完成了「PyTorch 黄金参考 ≡ 生成硬件」这条贯穿降级链的语义等价性闭环：这正是 u4 单元要建立的工程信心。
+
+## 6. 本讲小结
+
+- testbench 用 **valid/ready 握手**与 DUT 通信：输入通道上等 `ready` 再撤销 `valid` 做单脉冲触发，输出通道把 `ready` 常置 1 取结果。
+- matmul 的结果从 `in2_st0` 通道出来（ESI 的 store 通道命名），`in2_st0_valid` 拉高时 `in2_st0_data` 即为硬件算出的值，与 `expected` 比对判 PASS/FAIL。
+- 因为输入被内化为内部 Handshake 存储，testbench 用**层次化引用** `dut.handshake_memory0._handshake_memory_5[i]` 在复位期直接播种——这是仿真特权，综合不可用。
+- PASS 行的 `expected` = PyTorch 黄金参考（经 `gen_tb_data.py` → `tb_data.sv`），`got` = DUT 的 `in2_st0_data`；二者相等即语义等价。
+- `flake.nix` 用 `simMain`（`verilator --binary --timing`）编译、`matmulSvSim` 跑并解析 PASS 行成 JSON、`matmulSvWave`（`--trace -DENABLE_WAVES -DENABLE_WAVES_VCD`）产 VCD 波形；`--timing` 是支持延迟语句的必要开关。
+- `matmulSvSim` 的「grep 不到 PASS 行就 `exit 1`」把语义等价性变成了 Nix/CI 的硬门禁。
+
+## 7. 下一步学习建议
+
+本讲完成了 matmul 冒烟测试的**功能**验证（算得对）。接下来的方向有两条：
+
+- **横向（综合与上板）**：进入 u5 单元，看同一份 SystemVerilog 如何被 Yosys + slang 综合成 RTLIL、再由 openXC7/nextpnr 生成比特流（u5-l1、u5-l2），把「功能正确」推进到「能烧进 FPGA」。
+- **纵向（更大模型）**：进入 u6 单元，看 TinyStories-1M 这种真实大模型生成的 SV，其 testbench 顶端 `tiny_stories_selftest_top.sv` 是如何**自动生成**的——届时你会看到本讲手工驱动的 valid/ready 握手、start/done/load/store 通道选择被脚本化（u6-l1），以及超大内部存储为什么不能再靠层次化播种、而要外部化（u6-l2）。
+
+建议继续阅读 [sim/tb_main.sv](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/sim/tb_main.sv) 与 [flake.nix](https://github.com/RCoeurjoly/LLM2FPGA/blob/b6dc8abcc023e241016a1fe19564b0d5af0c25b4/flake.nix) 的 `matmulSvSim`/`matmulSvWave` 派生，作为理解后续自动生成 testbench 的基线对照。
