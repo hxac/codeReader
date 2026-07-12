@@ -2,532 +2,551 @@
 
 ## 1. 本讲目标
 
-SDB（简单调试器）很多命令都需要接受「表达式」作为参数，例如 `p $a0 + 4` 打印寄存器加偏移的值、`x 10 *0x80000000` 查看某地址附近的内存。要让这些命令工作，NEMU 必须先把一串人类可读的字符「切成」一个个有意义的片段。这一步就叫**词法分析（lexing）**。
+在前一讲里，我们建好了 SDB 的命令框架：命令表 + 主循环 + 分发。本讲我们开始为 SDB 增加一个真正有用的能力——**让用户在命令行里输入一个表达式，NEMU 帮忙算出它的值**。
 
-本讲聚焦 `src/monitor/sdb/expr.c` 里的词法分析部分。学完本讲你应该能够：
+例如，未来你希望能这样用：
 
-- 说清楚「词法分析」要解决什么问题，它的输入输出是什么。
-- 读懂 `rules` 规则表驱动的设计，并知道如何新增一条词法规则。
-- 解释 `init_regex` 为什么要在使用前把正则「预编译」一次。
-- 描述 `make_token` 的逐字符扫描循环，并能正确地把识别到的 token 记录进 `tokens[]` 数组。
-- 理解 `TK_NOTYPE = 256` 这个看似奇怪的起点背后的设计意图。
+```
+(nemu) p $a0 + 0x10
+```
 
-本讲只做「切词」，不计算结果。如何由 token 求出表达式的值是下一讲 `u2-l7`（递归下降求值）的内容。
+让 NEMU 打印寄存器 `a0` 的值加上十六进制 `0x10` 的结果。要做到这件事，第一步不是「算」，而是先把这一串字符 `"$a0 + 0x10"` **切碎成一串有意义的「词」**：
+
+| 字符片段 | 含义 |
+| --- | --- |
+| `$a0` | 寄存器名 |
+| `+` | 加号运算符 |
+| `0x10` | 十六进制数字 |
+
+这个「把字符串切成词」的过程，就叫做**词法分析（lexical analysis，简称 lexing）**，切出来的每一个「词」叫做一个 **token（记号）**。
+
+学完本讲，你应当能够：
+
+1. 理解 NEMU 中 `rules` **规则表驱动的词法分析设计**——为什么用一张表来描述「怎么识别 token」。
+2. 掌握 `make_token` 的**逐字符匹配与 token 记录流程**——扫描指针怎么前进、匹配失败怎么报错。
+3. 知道 `TK_NOTYPE`、`TK_EQ` 等 **token 类型如何扩展**，并能动手为数字、寄存器、运算符增加新的 token 类型。
+
+本讲只做「切词」，**不做求值**。求值（递归下降）是下一讲 `u2-l7` 的主题。
 
 ## 2. 前置知识
 
-在进入源码前，先建立几个直觉。
+在进入源码前，先用通俗语言解释三个本讲要用到的基础概念。
 
-### 2.1 什么是 token
+### 2.1 什么是 token（记号）
 
-考虑表达式字符串 `"$a0 + 0x10"`。对人来说一眼就能看出它由 5 个有意义的片段组成：
+用户输入是一串**没有结构的字符**。词法分析的任务，是按某种规则把这些字符归并成一个个**有类型的、不能再分的最小单位**，这就是 token。例如字符串 `"12 + 34"` 会被切成三个 token：数字 `12`、加号 `+`、数字 `34`。每个 token 至少要记录两样东西：
 
-| 片段 | 含义 |
-|------|------|
-| `$a0` | 寄存器名 |
-| ` `（空格） | 无意义，可忽略 |
-| `+` | 加号运算符 |
-| ` `（空格） | 无意义 |
-| `0x10` | 十六进制数字 |
+- **类型**（type）：它是数字？运算符？寄存器名？
+- **字面值**（lexeme / 文本）：它在原文中具体是哪几个字符，比如 `"12"`、`"0x10"`、`"$a0"`。
 
-每一个这样的片段就叫一个 **token（记号）**。词法分析的任务，就是从左到右扫描字符串，把它切成一串 token。这是编译器前端「扫描器（scanner）」做的事，也是 `p`/`x` 等调试命令解析参数的第一步。
+> 一个直觉记忆：词法分析像「读句子时先把字分成词」，语法分析（下一讲）才像「把词拼成有结构的句子」。
 
-### 2.2 用正则描述「什么样的串是一个 token」
+### 2.2 正则表达式与 POSIX regex
 
-每种 token 都有一个可描述的字符模式，而**正则表达式**正是描述字符模式的工具。例如：
+NEMU 用**正则表达式**来描述「什么样的字符串算一个 token」。例如 `[0-9]+` 表示「一个或多个数字」。NEMU 使用 C 标准库里的 **POSIX regex** 系列 API，核心三个函数：
 
-- 十进制数字：`[0-9]+`
-- 十六进制数字：`0x[0-9a-fA-F]+`
-- 空白：` +`
-- 等号：`==`
+| 函数 | 作用 |
+| --- | --- |
+| `regcomp` | 把一个**正则字符串**编译成内部表示（`regex_t`），便于后续快速匹配。 |
+| `regexec` | 用编译好的 `regex_t` 去匹配一段文本，返回是否匹配、匹配的位置。 |
+| `regerror` | 当 `regcomp`/`regexec` 出错时，把错误码翻译成可读字符串。 |
 
-NEMU 借用 POSIX 标准库 `<regex.h>` 提供的正则引擎来做匹配，这样我们只需「声明」每种 token 长什么样，不必自己写状态机。
+> 想了解更多可在终端执行 `man regex`。源码里也写了一句同样的提示：`expr.c` 第 18-20 行的注释。
 
-### 2.3 POSIX 正则三件套
+关键数据结构 `regmatch_t` 有两个成员：
 
-理解本讲源码只需三个库函数：
+- `rm_so`（match start offset）：匹配到的**起始偏移**（相对于传入的字符串）。
+- `rm_eo`（match end offset）：匹配到的**结束偏移**（指向最后一个匹配字符的下一个位置）。
 
-- `regcomp(&re, pattern, flags)`：把字符串形式的正则 `pattern` **编译**成一个内部状态机 `re`（类型 `regex_t`）。编译是较重的操作。
-- `regexec(&re, str, nmatch, pmatch, flags)`：用编译好的 `re` 在 `str` 上尝试匹配。匹配成功返回 0，并把匹配区间写进 `pmatch`（类型 `regmatch_t`）。
-- `regmatch_t`：`rm_so` 是匹配起点的偏移（start offset），`rm_eo` 是终点的偏移（end offset）。当匹配发生在字符串开头时 `rm_so == 0`，`rm_eo` 正好等于匹配的长度。
+所以匹配到的子串长度 \( = \text{rm\_eo} - \text{rm\_so} \)。本讲后面会反复用到这两个字段。
 
-### 2.4 与上一讲的衔接
+### 2.3 表驱动设计（table-driven design）
 
-上一讲 `u2-l5` 我们建立了 SDB 的命令框架：`cmd_table` 表驱动分发、`sdb_mainloop` 用 `strtok` 切出命令名。本讲是对「命令的参数」做更精细的解析——`strtok` 只能按空格切，而表达式里 `(a+b)*c` 是不能有空格的，必须靠真正的词法分析器。本讲的产物（`tokens[]` 数组）会直接喂给下一讲 `u2-l7` 的求值器。
+NEMU 的词法分析采用「表驱动」思路：**把「识别规则」写在一张表里，匹配逻辑写一份通用代码去查这张表**。这样要新增一种 token，只需要「在表里加一行 + 在记录分支里加一个 case」，而**扫描主循环完全不用改**。这种设计与上一讲 `u2-l5` 的 `cmd_table` 命令表如出一辙——你应当已经熟悉这种风格。
 
 ## 3. 本讲源码地图
 
+本讲几乎所有内容都集中在一个文件里：
+
 | 文件 | 作用 |
-|------|------|
-| [src/monitor/sdb/expr.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c) | 本讲主角。词法分析（`rules`/`init_regex`/`make_token`）与求值入口 `expr()` 都在这里，目前大量是留给学生实现的 TODO 脚手架。 |
-| [src/monitor/sdb/sdb.h](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/sdb.h) | 声明对外接口 `word_t expr(char *e, bool *success)`。 |
-| [src/monitor/sdb/sdb.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/sdb.c) | `init_sdb()` 在这里调用 `init_regex()` 完成规则预编译（第 139 行）。 |
-| [include/debug.h](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/debug.h) | 定义 `Log`、`panic`、`TODO` 宏；本讲里 `make_token` 用 `Log` 打印每个匹配，未实现处用 `TODO()`。 |
-| [include/macro.h](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/macro.h) | `ARRLEN` 宏用于由 `rules[]` 反推规则条数 `NR_REGEX`。 |
+| --- | --- |
+| [src/monitor/sdb/expr.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c) | 表达式的**词法分析**（本讲）与求值（下一讲）全部在此。包含 `rules` 表、`init_regex`、`make_token`、`Token` 结构、`expr` 入口。 |
+| [src/monitor/sdb/sdb.h](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/sdb.h) | 声明对外接口 `word_t expr(char *e, bool *success);` |
+| [src/monitor/sdb/sdb.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/sdb.c) | `init_sdb()` 在此调用 `init_regex()` 完成正则预编译。 |
+| [include/macro.h](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/macro.h) | 提供 `ARRLEN` 宏，用于自动计算 `rules` 表的条目数。 |
+| [src/isa/riscv32/reg.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/isa/riscv32/reg.c) | 寄存器名表 `regs[]`，本讲实践任务里识别寄存器 token 时会用到这些名字。 |
+
+> 提示：`expr.c` 是一个**大量留空、由学生补全**的 PA 文件。本讲会先讲清楚框架已经搭好的部分（`rules`、`init_regex`、`make_token` 骨架、`Token`），再带你动手补全它。
 
 ## 4. 核心概念与源码讲解
 
-本讲按四个最小模块推进：先认识切词的产物 **Token**，再看声明规则的 **rules 表**，接着是预编译的 **init_regex**，最后是真正干活的扫描循环 **make_token**。
+按数据流向，本讲拆成四个最小模块。建议按顺序读：先认识「产物」长什么样（Token 结构），再认识「识别规则」怎么描述（rules），再看「编译优化」（init_regex），最后看「主循环」把它们串起来（make_token）。
 
-### 4.1 词法分析的产物：Token 结构与类型空间
+---
+
+### 4.1 Token 结构与 token 类型枚举
 
 #### 4.1.1 概念说明
 
-词法分析的产出是一串 token。要描述一个 token，需要两样东西：
+词法分析的**产物**是一个 token 序列。所以第一个要回答的问题是：**每一个 token 在内存里用什么数据结构表示？** NEMU 的答案是 `Token` 结构：一个 `type` 字段表示「这是哪一类 token」，外加一个 `str` 字符数组保存它的字面值（比如数字 `"123"`、寄存器名 `"$a0"`）。
 
-1. **类型（type）**：它是数字、运算符、寄存器名，还是空格？
-2. **字面值（str）**：对数字和寄存器名这类 token，光知道「它是数字」不够，还得把 `0x10` 这个字符串记下来，后面求值时才能转成数值；而对 `+`、`-` 这类运算符，类型本身已经说明了含义，不需要额外存字面值。
+而 token 的「类型」用一个整数表示。这里有一个**非常巧妙的设计**：
 
-NEMU 用一个很小的结构体来表达：
+- 单字符的运算符（如 `+` `-` `*` `/` `(` `)`）直接用**该字符的 ASCII 码**作为类型值。`+` 的类型就是 `'+'`（即 43）。
+- 多字符的、无法用单个字符表示的类型（如空格、`==`、数字、寄存器名），则用从 **256** 开始的自定义枚举值。
 
-```c
-typedef struct token {
-  int type;
-  char str[32];
-} Token;
-```
-
-同时用一个静态数组收集所有切出来的 token，并用一个计数器记录数量：
-
-```c
-static Token tokens[32] __attribute__((used)) = {};
-static int nr_token __attribute__((used)) = 0;
-```
-
-`tokens[32]` 表示一条表达式最多切成 32 个 token，`nr_token` 是当前实际切出的个数。`__attribute__((used))` 告诉编译器「别因为我现在没人用就把这两个变量优化掉」——它们是留给学生填写的全局状态，早期版本里确实可能暂时没被引用。
+为什么是 256？因为 ASCII 字符的取值范围是 \( [0, 255] \)，即 \( 2^8 - 1 \)。从 256（\( 2^8 \)）开始定义自定义类型，可以**保证不和任何单字符类型冲突**。这样做的好处是：下一讲做求值时，可以直接 `switch (token.type)` 里写 `case '+':`、`case '*':`，单字符运算符不用单独定义枚举常量，代码非常清爽。
 
 #### 4.1.2 核心流程
 
-把表达式切成 token 后，数据是这样的（以 `"$a0 + 4"` 为例，假设你已实现了相关规则）：
+token 类型的取值规则可以用下面的伪代码描述：
 
 ```
-tokens[0] = { type=TK_REG,  str="$a0" }
-tokens[1] = { type='+' ,    str=""   }   // 运算符不存字面值
-tokens[2] = { type=TK_DEC,  str="4"  }
-nr_token  = 3
+若 token 是单字符运算符  → type = 该字符的 ASCII 值（如 '+' → 43）
+若 token 是多字符类别    → type = 从 256 开始的自定义枚举值
+                           （TK_NOTYPE=256, TK_EQ=257, TK_DECIMAL=258, ...）
 ```
 
-注意几个设计要点：
+`Token` 结构本身只有两个字段，记录流程为：
 
-- **空格不进表**：`$a0` 与 `+` 之间的空格被识别为 `TK_NOTYPE`，记录时直接跳过、不占 `tokens` 槽位。
-- **类型用 `int`**：单个字符运算符直接拿它的 ASCII 值当类型（`'+'` 即 43），省去为每个运算符起名的麻烦。这也解释了下面 4.1.3 要讲的「为什么 enum 从 256 起」。
-- **str 容量 32**：足够装下一个 64 位十六进制数或寄存器名，但若用户输入一个超长数字会有截断风险（见本节练习）。
+```
+识别到一个 token 时：
+  tokens[nr_token].type = 该 token 的类型;
+  若是数字/寄存器等"带值"token:
+    把字面值拷贝到 tokens[nr_token].str;
+  nr_token ++;   // 指向下一个空位
+```
 
 #### 4.1.3 源码精读
 
-Token 类型用枚举定义，目前只有两个种子值（[expr.c:L23-L28](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L23-L28)）：
+**token 类型枚举**，起始值从 256 开始：
 
-```c
-enum {
-  TK_NOTYPE = 256, TK_EQ,
-  /* TODO: Add more token types */
-};
-```
+[src/monitor/sdb/expr.c:L23-L28](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L23-L28) —— 定义 `TK_NOTYPE = 256`、`TK_EQ`，并留 `TODO` 给你新增类型。`TK_NOTYPE` 表示「空白字符」，匹配到后**不产生 token**（直接丢弃）。
 
-这里把第一个值显式设成 **256** 是有意为之：运算符 `+ - * / ( )` 这些单字符 token 直接用字符常量（0–255 范围）当 type，而 `TK_NOTYPE`、`TK_EQ`、`TK_DEC` 这类「多个字符才表示得清楚」的 token，类型号必须从 256 起步，才不会和某个 ASCII 字符撞车。`TK_EQ` 没有显式赋值，会自动取 257。学生扩展时新增的 `TK_DEC`/`TK_HEX`/`TK_REG` 等会接着往下排：258、259、260……
+**Token 结构**：
 
-> 小知识：`TK_NOTYPE` 专门留给「空格」——它被识别、却不该进入 `tokens`，在 `make_token` 的 switch 里它对应的分支什么也不做。
+[src/monitor/sdb/expr.c:L65-L68](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L65-L68) —— `type` 是 int 类型；`str[32]` 用来保存字面值，长度 32 足够装下一个 32 位十六进制数（`"0xffffffff"` 仅 10 个字符）或寄存器名。
 
-Token 结构与全局数组定义在 [expr.c:L65-L71](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L65-L71)，`str[32]` 这个尺寸直接决定了「一个数字 token 最多能存多少位字符」。
+**存放 token 的全局数组与计数器**：
+
+[src/monitor/sdb/expr.c:L70-L71](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L70-L71) —— `tokens[32]` 表示一条表达式最多切出 32 个 token；`nr_token` 记录当前已经切出多少个。`__attribute__((used))` 是为了让编译器在变量暂时未被引用时也不要报「未使用」警告（因为现在 `make_token` 还没真正写入它们）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：直观感受 `tokens[]` 与 `nr_token` 这对「数组 + 计数器」如何承载切词结果，并体会 `str[32]` 的容量限制。
+**实践目标**：亲手感受「单字符类型用 ASCII、自定义类型从 256 起」这条约定。
 
-**操作步骤（源码阅读 + 推理）**：
+**操作步骤**：
 
-1. 打开 [expr.c:L65-L71](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L65-L71)，确认 `tokens` 最多容纳 32 个 token。
-2. 对表达式 `"1 + (2 * 3)"` 手工数一下 token 个数（提示：注意空格不进表），判断是否会超过 32 的上限。
-3. 考虑一个边界：若用户输入一个 40 位的十进制数（理论上 128 位整数），它被切成 1 个 token，但字面值要塞进 `str[32]`。讨论：直接用 `strcpy` 会发生什么？应该用什么方式安全地拷贝？
+1. 打开 `src/monitor/sdb/expr.c`，找到第 23-28 行的 `enum`。
+2. 在注释 `/* TODO: Add more token types */` 下方，新增你计划用到的类型，例如：
+
+   ```c
+   /* 示例代码：新增 token 类型 */
+   TK_DECIMAL, TK_HEX, TK_REG,
+   ```
+
+   （这是示例代码，按本讲惯例标注；后续模块会用到它们。）
+
+3. 不需要编译运行，直接对照下面的「预期结果」回答问题。
 
 **需要观察的现象 / 预期结果**：
 
-- `"1 + (2 * 3)"` 含数字 3 个、运算符 `+` `*` 2 个、括号 2 个，共 7 个 token，远未超限。
-- 对超长数字，`str[32]` 容纳不下 40 个字符 + 结尾 `\0`；应使用带长度限制的 `strncpy(tokens[nr_token].str, substr_start, substr_len)` 并手动补 `\0`，或在拷贝前判断 `substr_len < sizeof(tokens[nr_token].str)`，避免缓冲区溢出。**待本地验证**：你可以在 4.4 节实现完拷贝逻辑后，故意输入超长数字观察是否被正确截断或报错。
+- `TK_NOTYPE` 显式赋值 256，其后逗号分隔的枚举项自动递增：`TK_EQ = 257`、`TK_DECIMAL = 258`、`TK_HEX = 259`、`TK_REG = 260`……
+- 思考并验证：如果把 `TK_NOTYPE` 改成从 `0` 开始，会发生什么冲突？（提示：`'+'` 的 ASCII 是 43，`'('` 是 40；只要自定义枚举值越过 40 就会和某个单字符运算符撞车，下一讲求值的 `switch` 就会判错类型。）
+
+> 待本地验证：如果你好奇某个字符的 ASCII 值，可以写一段最小 C 程序 `printf("%d\n", '+');` 打印确认。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么把 `TK_NOTYPE` 设为 256，而不是 0、1、2 这样的小数字？
+**练习 1**：为什么 `TK_NOTYPE` 从 256 开始，而不是 0 或 1？
 
-**答案**：因为单字符运算符 token 直接用 ASCII 值（0–255）当类型，例如 `'+'` 是 43、`'*'` 是 42。若 `TK_NOTYPE` 取小数字就会与某个运算符冲突。从 256 起步保证所有「多字符 token」的类型号落在 ASCII 区间之外，互不干扰。
+**参考答案**：因为单字符运算符直接用其 ASCII 码作为 `type`，ASCII 范围是 0–255。自定义类型从 256 开始可避免与任何单字符类型冲突，让求值阶段的 `switch` 可以同时处理 `case '+'` 和 `case TK_DECIMAL` 而互不干扰。
 
-**练习 2**：`tokens` 数组大小为 32，如果一条表达式切出了 33 个 token 会怎样？
+**练习 2**：`Token.str[32]` 里，哪些 token 需要写字面值，哪些不需要？
 
-**答案**：会发生数组越界写。健壮的做法是在写入 `tokens[nr_token]` 前检查 `nr_token < ARRLEN(tokens)`，越界时返回 `false` 表示表达式过长、词法失败（这会让 `expr` 把 `*success` 置 `false`）。
+**参考答案**：数字（十进制、十六进制）和寄存器名**需要**写字面值，因为后续要把字符串转成数值。单字符运算符（`+ - * / ( )`）和 `==` **不需要**写字面值——它们的 `type` 本身就足以表达含义，`str` 留空即可。
 
 ---
 
-### 4.2 rules 规则表：声明式地描述词法
+### 4.2 rules 规则表
 
 #### 4.2.1 概念说明
 
-如何告诉扫描器「数字长什么样、空格长什么样、等号长什么样」？NEMU 采用了**表驱动（table-driven）**的设计：把每条词法规则写成一行 `{ 正则字符串, token 类型 }`，堆在一张 `rules[]` 表里。扫描时依次用每条规则去试，谁先匹配上就用谁。
+有了 token 的「产物结构」，下一个问题是：**怎么描述「什么样的字符串算哪一类 token」？** NEMU 的回答是一张 `rules` 表——每一行描述「一条正则 + 它对应的 token 类型」。这就是 2.3 节说的**表驱动设计**：规则是数据，扫描逻辑是代码，两者分离。
 
-这种「数据即逻辑」的好处是：**新增一种 token，只需往表里加一行，扫描循环一行都不用改**。这与上一讲 `cmd_table` 的表驱动思想完全一致。
+这张表有两点需要特别理解：
+
+1. **规则的顺序很重要**。扫描时，代码会**从上到下**依次尝试每条规则，**第一个能匹配上的规则胜出**。因此，当两条规则可能匹配同一段文本时，必须把「更具体 / 更长」的规则写在前面。例如（实践任务里你会遇到）识别 `0x1f`：若把十进制规则 `[0-9]+` 写在十六进制 `0x[0-9a-fA-F]+` 之前，`0x1f` 会被当成十进制 `0` 先匹配走，造成错误。
+2. **正则里特殊字符要在 C 字符串里转义**。例如字面量加号在正则里要写成 `\+`，而在 C 字符串里反斜杠本身要再转义一次，于是写成 `"\\+"`。
 
 #### 4.2.2 核心流程
 
-`rules[]` 表的骨架（[expr.c:L30-L42](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L30-L42)）：
+规则表里每一条的结构是：
 
-```c
-static struct rule {
-  const char *regex;     // 正则字符串
-  int token_type;        // 匹配成功时该 token 的类型
-} rules[] = {
-  {" +", TK_NOTYPE},     // 空格
-  {"\\+", '+'},          // 加号（+号在扩展正则里要转义？见下）
-  {"==", TK_EQ},         // 等号
-};
+```
+{ 正则字符串, 该 token 的类型 }
 ```
 
-两个关键点要记牢：
+当扫描指针停留在某个位置时，匹配流程为：
 
-1. **规则有先后，先到先得**。`make_token` 会按数组下标从小到大逐条试，**第一条能在当前位置匹配的规则胜出**并立即 `break`。因此顺序很重要：当两条规则存在「前缀冲突」时，更长/更具体的必须排前面。最典型的例子是 `==`（`TK_EQ`）与若日后加入的 `=`（赋值）——`==` 必须排在 `=` 之前，否则 `==` 会被当成两个 `=`。同理，十六进制 `0x[0-9a-fA-F]+` 必须排在十进制 `[0-9]+` 之前，否则 `0x1f` 会被十进制规则先吃掉一个 `0`。
+```
+for 表里每一条规则 rules[i]（按顺序）:
+    用 rules[i].regex 去匹配「从当前位置开始的剩余串」
+    若匹配且起点就在当前位置 → 选中这条规则，token 类型 = rules[i].token_type
+```
 
-2. **`+` 号为何写成 `\\+`**。C 字符串里 `\\` 先变成一个 `\`，传给正则引擎的是 `\+`；在扩展正则（`REG_EXTENDED`）里 `+` 是「前一元素重复 1 次以上」的元字符，要表示字面的加号必须转义成 `\+`。`*`、`(`、`)` 同理需要转义。
-
-> 关于转义的细节容易绕晕。规则是「先过 C 字符串这一关，再过正则引擎这一关」。想要正则里的 `\+`，C 源码里就得写 `"\\+"`。
+> 注意：第一个匹配上的就 break，后面的规则不再尝试。所以**顺序 = 优先级**。
 
 #### 4.2.3 源码精读
 
-规则结构体与表的定义见 [expr.c:L30-L42](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L30-L42)。表后面紧跟一个由表长反推常量的宏（[expr.c:L44-L46](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L44-L46)）：
+**rules 表的定义**：
 
-```c
-#define NR_REGEX ARRLEN(rules)
-static regex_t re[NR_REGEX] = {};
-```
+[src/monitor/sdb/expr.c:L30-L42](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L30-L42) —— 当前框架只给了三条规则作为示范：
 
-`ARRLEN` 来自 [include/macro.h:L29](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/macro.h#L29)，即 `(int)(sizeof(arr)/sizeof(arr[0]))`。这样无论你往 `rules[]` 加多少行，`NR_REGEX` 与 `re[]` 数组都自动跟着变，**不需要手动维护「规则条数」这个魔法数字**。
+- `{" +", TK_NOTYPE}` —— 一个或多个空格，类型为 `TK_NOTYPE`（空白，将被丢弃）。
+- `{"\\+", '+'}` —— C 字符串 `"\\+"` 对应正则 `\+`，匹配字面量 `+`，类型直接用字符 `'+'`。
+- `{"==", TK_EQ}` —— 匹配 `==`，类型为 `TK_EQ`。
 
-`re[NR_REGEX]` 是与规则一一对应的「编译后的状态机」数组，初始值 `{}` 全零，等待 `init_regex` 填充（见 4.3）。
+注释 L35-37 提醒你「注意不同规则的优先级（precedence）」——正是 4.2.1 讲的顺序问题。
+
+**用 `ARRLEN` 自动计算条目数**：
+
+[src/monitor/sdb/expr.c:L44](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L44) —— `#define NR_REGEX ARRLEN(rules)`。
+
+[include/macro.h:L29](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/macro.h#L29) —— `ARRLEN` 的定义是 `sizeof(arr) / sizeof(arr[0])`，即「整个数组字节数 ÷ 一个元素字节数 = 元素个数」。这样你往 `rules` 里加几行，`NR_REGEX` 会自动更新，扫描循环不用改任何数字。这和 `u2-l5` 里 `NR_CMD ARRLEN(cmd_table)` 是同一个手法。
 
 #### 4.2.4 代码实践
 
-**实践目标**：动手往 `rules[]` 加几条规则，体会「加一行就能识别新 token」。
+**实践目标**：体会「规则顺序 = 优先级」以及 C 字符串里的正则转义。
 
 **操作步骤**：
 
-1. 先在 4.1.3 提到的枚举里补上新的类型（[expr.c:L23-L28](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L23-L28)）：
+1. 在 `rules[]` 里临时加一条十进制规则（**示例代码**）：
 
    ```c
-   enum {
-     TK_NOTYPE = 256, TK_EQ,
-     TK_DEC,            // 十进制数
-     TK_HEX,            // 十六进制数 0x...
-     TK_REG,            // 寄存器名 $...
-   };
+   {"[0-9]+", TK_DECIMAL},    // 十进制数（临时演示，正式放综合实践）
    ```
 
-2. 按下面的顺序往 `rules[]` 添加（**顺序很关键**，注意十六进制在十进制之前）：
-
-   ```c
-   {" +", TK_NOTYPE},                      // 空格（已有）
-   {"\\(", '('},                           // 左括号
-   {"\\)", ')'},                           // 右括号
-   {"\\+", '+'},                           // 加（已有）
-   {"-", '-'},                             // 减
-   {"\\*", '*'},                           // 乘（兼作解引用，见 u2-l7）
-   {"/", '/'},                             // 除
-   {"==", TK_EQ},                          // 等号（已有）
-   {"0[xX][0-9a-fA-F]+", TK_HEX},          // 十六进制，必须在十进制之前
-   {"[0-9]+", TK_DEC},                     // 十进制
-   {"\\$[a-zA-Z0-9]+", TK_REG},            // 寄存器名，如 $a0 $0 $pc
-   ```
-
-3. 暂时**不要**改 `make_token` 的 switch（它仍是 `TODO()`），先编译看看 `init_regex` 是否能把你新加的正则全部编译通过。
+2. 暂时**不要**编译运行，先在脑海里推演：对输入 `"0x1f"`，扫描到第 0 个字符 `0` 时，`[0-9]+` 会匹配到什么？
 
 **需要观察的现象 / 预期结果**：
 
-- 编译应能通过。运行 NEMU 时 `init_sdb()` → `init_regex()` 会预编译所有规则；如果某条正则语法错误，`regcomp` 会返回非 0，`init_regex` 会调用 `panic` 打印 `regex compilation failed` 并终止（见 4.3.3）。若看到该错误，多半是转义层数写错了，按「C 字符串 → 正则」两道关排查。
-- 因 switch 仍是 `TODO()`，此刻还无法真正跑通切词，**真正观察 token 输出放在第 5 节综合实践**。
+- `[0-9]+` 会贪婪匹配 `0`（因为 `x` 不是数字），匹配长度为 1。于是 `0x1f` 被错误地切成 `0`、`x`（无法识别）……
+- 结论：等做综合实践时，**十六进制规则 `0x[0-9a-fA-F]+` 必须写在十进制规则 `[0-9]+` 之前**，才能让 `0x1f` 整体被识别为一个十六进制 token。
+
+> 待本地验证：综合实践（第 5 节）会让你真正加上所有规则并跑通；这里只做静态推演。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果把 `{"[0-9]+", TK_DEC}` 放在 `{"0[xX][0-9a-fA-F]+", TK_HEX}` **之前**，对输入 `"0x1f"` 会发生什么？
+**练习 1**：写出「十六进制数」「寄存器名（`$` 开头）」「减号」「左括号」四条规则。
 
-**答案**：十进制规则先匹配，吃掉开头的 `0`，得到一个值为 0 的 `TK_DEC` token；接下来扫描位置落在 `x`，没有规则能匹配 `x`，`make_token` 会打印 `no match at position ...` 并返回 `false`。所以十六进制规则必须排在十进制之前。
+**参考答案**（示例代码）：
 
-**练习 2**：为什么 `+`、`(`、`*` 要写成 `\\+`、`\\(`、`\\*`，而 `-`、`/` 不用转义？
+```c
+{"0x[0-9a-fA-F]+", TK_HEX},   // 十六进制数，必须放在十进制规则之前
+{"\\$[A-Za-z0-9]+", TK_REG},  // 寄存器名：C 串 "\\$" → 正则 \$ → 字面量 $
+{"-", '-'},                    // 减号，类型用字符 '-'
+{"\\(", '('},                  // 左括号：正则 \( → 字面量 (
+```
 
-**答案**：在 `REG_EXTENDED` 扩展正则里，`+`、`(`、`)`、`*` 都是元字符（分别表示重复、分组、重复 0 次以上），要匹配字面字符必须用 `\` 转义；而 `-`、`/` 不是元字符，无需转义。再叠上 C 字符串层，`\+` 要写成 `"\\+"`。
+**练习 2**：为什么 `+` 的规则写成 `"\\+"`，而 `==` 直接写成 `"=="`？
+
+**参考答案**：因为 NEMU 用 `REG_EXTENDED`（扩展正则，见 4.3 节），在扩展正则里 `+` 是「重复一次或多次」的特殊字符，要表示字面量加号必须转义为 `\+`，对应 C 字符串 `"\\+"`。而 `=` 在正则里不是特殊字符，`==` 就是它本身，无需转义。
 
 ---
 
-### 4.3 init_regex：把规则预编译成状态机
+### 4.3 init_regex 预编译
 
 #### 4.3.1 概念说明
 
-正则编译（`regcomp`）是把字符串形式的模式翻译成内部状态机的较重操作。而词法规则在程序整个生命周期里是**不变**的，却可能被匹配成千上万次（每输入一个表达式就扫一遍）。合理的做法是：**只编译一次，重复使用**。
+正则表达式如果在每次匹配时都临时解析，会很慢。POSIX regex 的做法是：先用 `regcomp` 把正则字符串**编译**成一种内部表示（`regex_t`），之后用 `regexec` 直接拿编译好的结果去匹配，速度快得多。
 
-`init_regex` 正是干这件事的「一次性预编译器」：它在程序启动早期把 `rules[]` 里每条正则都编译进对应的 `re[i]`，之后 `make_token` 直接拿编译好的 `re[i]` 去匹配，省掉重复编译开销。
+由于 NEMU 的 `rules` 表在运行期间是**固定不变**的，所以最划算的策略是：**程序启动时把所有规则各编译一次，之后反复用**。这正是 `init_regex` 的职责——它把「编译一次」这件事集中在一个函数里完成。
 
 #### 4.3.2 核心流程
 
-```text
+```
 init_regex():
-  对 i = 0 .. NR_REGEX-1:
-    regcomp(&re[i], rules[i].regex, REG_EXTENDED)
-    若失败 → regerror 取错误信息 → panic 终止
+  for 表里每一条规则 rules[i]:
+    用 regcomp 把 rules[i].regex 编译进 re[i]（使用 REG_EXTENDED 扩展正则）
+    若编译失败（返回非 0）:
+      用 regerror 取得错误信息
+      panic 终止（规则写错了是程序员 bug，必须立刻暴露）
 ```
 
-用伪代码表示就是「遍历规则表，逐条编译，遇错即停」。注意它用 `REG_EXTENDED` 标志，表示采用**扩展正则语法**（这是上面 4.2 讨论 `+`、`(`、`|` 等元字符转义规则的前提）。
-
-调用时机很关键：`init_regex` 必须在**任何一次** `make_token` 之前完成。NEMU 把它放在 `init_sdb()` 里，而 `init_sdb()` 又在 `init_monitor()` 初始化链中较早执行，保证用户在 SDB 里输入第一个表达式时所有规则早已编译好。
+编译好的 `regex_t` 数组 `re[]` 在整个程序生命周期内有效，无需 `regfree`（因为 `re` 是 static 的，随进程结束自动回收）。
 
 #### 4.3.3 源码精读
 
-预编译函数见 [expr.c:L51-L63](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L51-L63)：
+**预编译好的正则数组**：
 
-```c
-void init_regex() {
-  int i;
-  char error_msg[128];
-  int ret;
-  for (i = 0; i < NR_REGEX; i ++) {
-    ret = regcomp(&re[i], rules[i].regex, REG_EXTENDED);
-    if (ret != 0) {
-      regerror(ret, &re[i], error_msg, 128);
-      panic("regex compilation failed: %s\n%s", error_msg, rules[i].regex);
-    }
-  }
-}
-```
+[src/monitor/sdb/expr.c:L44-L46](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L44-L46) —— `NR_REGEX` 条 `regex_t re[]`，初始为空 `{}`，等待 `init_regex` 填充。
 
-要点：
+**init_regex 函数**：
 
-- `regcomp` 成功返回 0，失败返回非 0 的错误码。失败时 `regerror` 把错误码翻译成人话写进 `error_msg`，再交给 `panic`。
-- `panic` 定义在 [include/debug.h:L39](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/debug.h#L39)，本质是 `Assert(0, ...)`，会打印红色错误信息并终止程序。所以**正则写错会导致 NEMU 启动即崩**，且错误信息里会带上出问题的模式串，方便定位。
+[src/monitor/sdb/expr.c:L51-L63](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L51-L63) —— 遍历每条规则，调用：
 
-调用点在 [src/monitor/sdb/sdb.c:L137-L143](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/sdb.c#L137-L143)：
+- `regcomp(&re[i], rules[i].regex, REG_EXTENDED)`：第二个参数是正则字符串，第三个 `REG_EXTENDED` 表示用**扩展正则语法**（`+`、`?`、`|`、`()` 等无需反斜杠即为特殊含义）。
+- 若 `ret != 0`：调用 `regerror(ret, &re[i], error_msg, 128)` 把错误码翻译成可读字符串，再用 `panic` 打印错误信息和出错的正则，终止程序。
 
-```c
-void init_sdb() {
-  init_regex();     // 第 139 行：编译正则
-  init_wp_pool();   // 初始化监视点池（u2-l8）
-}
-```
+L48-50 的注释说明了设计意图：「规则会被使用很多次，因此只在首次使用前编译一次。」
+
+**谁调用 init_regex**：
+
+[src/monitor/sdb/sdb.c:L137-L143](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/sdb.c#L137-L143) —— `init_sdb()` 第一件事就是 `init_regex()`（其次是初始化监视点池）。回忆 `u1-l3`，`init_sdb` 是 `init_monitor` 初始化链中的一环，所以**正则编译发生在程序启动阶段、进入命令循环之前**，时机正好。
 
 #### 4.3.4 代码实践
 
-**实践目标**：亲手触发一次「正则编译失败」，看清 `init_regex` 的错误诊断输出，体会「编译期就把语法错误挡在门外」的好处。
+**实践目标**：直观感受「正则写错会被 init_regex 立刻拦截」。
 
 **操作步骤**：
 
-1. 临时把 `rules[]` 里某条正则改坏，例如把 `{" +", TK_NOTYPE}` 改成 `{"[0-", TK_NOTYPE}`（一个未闭合的字符类）。
-2. 重新 `make` 编译并运行 NEMU。
-3. 观察终端输出后，**务必把正则改回正确形态**（本讲禁止改源码成品，这里只是为了观察）。
+1. 在 `rules[]` 里临时塞一条**故意写错**的正则（**示例代码**，验证完务必删掉）：
+
+   ```c
+   {"[0-9", TK_DECIMAL},   // 故意少写右方括号，这是非法正则
+   ```
+
+2. 重新编译并运行 NEMU（不必加载程序，启动阶段就会触发）。
+3. 观察终端输出后，**删掉这条错误规则**。
 
 **需要观察的现象 / 预期结果**：
 
-- 程序在 `init_regex` 处 `panic`，红色输出形如 `regex compilation failed: ...`，并附上出问题的模式串 `[0-` 与文件行号。这说明语法错误在「预编译」阶段就被发现，而不会拖到运行匹配时才暴露。
+- 程序启动时立即 `panic`，打印类似 `regex compilation failed` 的信息，并附上出错的那条正则 `[0-9`。
+- 这验证了 `init_regex` 的「快速失败」设计：规则表的错误属于编译期/启动期 bug，越早暴露越好。
 
-**待本地验证**：不同 glibc 版本的 `regerror` 文案略有差异，但一定会终止程序。
+> 待本地验证：具体 panic 文本格式取决于 `panic` 实现，但一定会包含你写错的那条正则字符串，便于定位。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：如果把 `init_regex()` 的调用从 `init_sdb()` 里删掉，直接运行 SDB 输入 `p 1+2`，会发生什么？
+**练习 1**：为什么 `re[]` 不需要调用 `regfree` 释放？
 
-**答案**：`re[]` 全是零初始化的 `regex_t`，从未被 `regcomp` 编译。随后 `make_token` 调 `regexec(&re[i], ...)` 对未编译的状态机匹配，行为未定义，通常会返回错误码或直接崩溃。这正说明「预编译」是必须的前置步骤。
+**参考答案**：`re` 是文件作用域的 static 数组，生命周期与整个进程相同；规则在运行期不变，编译一次后一直要用到程序退出。进程结束时操作系统会统一回收内存，所以无需手动 `regfree`。
 
-**练习 2**：为什么把编译放进 `init_regex` 一次性完成，而不是在 `make_token` 里每条规则现用现编？
+**练习 2**：如果删掉 `REG_EXTENDED` 标志，`{"\\+", '+'}` 这条规则还能正确匹配 `+` 吗？
 
-**答案**：因为规则集合在整个运行期不变，重复编译同一批正则是浪费。预编译一次、反复匹配，把昂贵的「翻译」摊到启动时一次性付清，后续每次切词只付出廉价的 `regexec` 匹配成本。
+**参考答案**：仍然能。`\+` 在基本正则（BRE）和扩展正则（ERE）里都表示字面量加号。但删掉 `REG_EXTENDED` 会影响**你新增的规则**——例如实践任务里类似 `[0-9]+` 的 `+` 在 BRE 里需写成 `[0-9]\+` 才是「重复」，否则 `+` 被当字面量。所以保持 `REG_EXTENDED` 能让你写更直观的正则。
 
 ---
 
-### 4.4 make_token：逐字符扫描并记录 token
+### 4.4 make_token 主匹配循环
 
 #### 4.4.1 概念说明
 
-`make_token(char *e)` 是词法分析的核心。它接收一个表达式字符串 `e`，从左到右扫描，在每个位置依次试用所有规则，识别出一个 token 就推进位置、记录下来，直到字符串末尾。若某个位置所有规则都匹配不上，说明出现了非法字符，返回 `false`。
+前三个模块备齐了「产物结构（Token）」「识别规则（rules）」「编译好的正则（re）」。`make_token` 是把它们**串起来的核心**：它拿着用户输入的字符串，从头到尾**逐段扫描**，每一段去查 `rules` 表，识别出一个 token 就记录到 `tokens[]` 数组里，扫描指针向前推进，直到字符串末尾。
 
-它解决的问题是：把「一维字符串」变成「token 序列」这个后续求值器能消费的结构化输入。
+这里有一个**最关键的细节**：`regexec` 默认**不是锚定的**——它会在传入的整段字符串里找「任意位置」的第一个匹配。但词法分析要求「必须从当前位置开始匹配」。所以 NEMU 用一个小技巧：传入 `e + position`（从当前位置开始的剩余串），并**额外检查 `pmatch.rm_so == 0`**（匹配的起始偏移恰好是 0，也就是当前位置）来强制「锚定」。少了这个检查，就会把「后面才出现的匹配」误当成「当前位置的匹配」。
 
 #### 4.4.2 核心流程
 
-`make_token` 的主循环骨架（伪代码）：
+`make_token` 的主循环伪代码：
 
-```text
+```
 make_token(e):
-  position = 0
-  nr_token = 0
-  当 e[position] != '\0':
-    matched = false
-    对 i = 0 .. NR_REGEX-1:               # 依次试每条规则
-      若 regexec(re[i], e+position) 成功 且 匹配起点就在当前位置(rm_so==0):
-        matched = true
-        substr_len = rm_eo                 # 从开头匹配时，rm_eo 即匹配长度
-        position += substr_len             # 推进扫描位置
-        根据 rules[i].token_type 记录 token:
-          - TK_NOTYPE(空格): 什么都不做（不占 tokens 槽）
-          - 数字/寄存器: 把字面子串拷进 tokens[nr_token].str，type 字段赋值，nr_token++
-          - 运算符/括号: 只设 type，str 可留空，nr_token++
-        break                              # 当前位置只取第一条命中
-    若没匹配到任何规则:
-      打印 "no match at position ..."
-      return false
-  return true
+  position = 0          // 扫描指针
+  nr_token = 0          // 已切出的 token 数
+  while e[position] != '\0':           // 还没到字符串末尾
+    选中 = false
+    for i in 0 .. NR_REGEX:            // 依次试每条规则
+      若 regexec(re[i], e+position) 成功 且 pmatch.rm_so == 0:   // 锚定在当前位置
+        substr_len = pmatch.rm_eo      // 因为 rm_so==0，长度就是 rm_eo
+        position += substr_len          // 指针前进
+        switch rules[i].token_type:
+          case TK_NOTYPE: 不记录（空白丢弃）
+          case 数字/寄存器: 把字面值拷进 tokens[nr_token].str，记录类型，nr_token++
+          case '+','-',...: 仅记录类型，nr_token++
+        选中 = true
+        break                          // 选中一条就不再试后面的规则
+    if not 选中:                        // 所有规则都匹配不了当前位置
+      打印错误位置（带 ^ 指示符）
+      return false                     // 词法错误
+  return true                          // 全部切完，成功
 ```
 
-两个最精妙、也最易看漏的细节：
-
-1. **`rm_so == 0` 锚定当前位置**。`regexec` 默认会在 `e+position` 这个子串里**搜索**任意位置的匹配（不一定从开头）。但词法分析要求「从当前位置开始」匹配，所以必须额外检查 `pmatch.rm_so == 0`，确保命中起点就是子串开头。没有这个判断，扫描器会允许「跳过非法字符」继续匹配，掩盖错误。
-
-2. **`substr_len = pmatch.rm_eo`**。当 `rm_so == 0` 时，匹配区间的终点偏移 `rm_eo` 恰好等于匹配串的长度，因此直接用它作为推进步长。
+注意循环结束判断里的一个 C 语言细节：内层 `for` 若被 `break` 提前退出，循环变量 `i` 会停在「选中的那条规则」上（`i < NR_REGEX`）；若一直没 `break`、自然结束，则 `i == NR_REGEX`。外层正是用 `if (i == NR_REGEX)` 来判断「一条都没匹配上」。
 
 #### 4.4.3 源码精读
 
-完整函数见 [expr.c:L73-L112](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L73-L112)。核心匹配与推进这段（[expr.c:L80-L102](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L80-L102)）：
+**make_token 函数签名与状态初始化**：
+
+[src/monitor/sdb/expr.c:L73-L78](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L73-L78) —— `position` 是扫描指针，`pmatch` 用来接收匹配位置，`nr_token = 0` 每次重新清零（保证 `make_token` 可重复调用）。
+
+**主循环：逐字符扫描**：
+
+[src/monitor/sdb/expr.c:L80-L83](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L80-L83) —— `while (e[position] != '\0')` 驱动扫描；内层 `for` 依次尝试每条规则，关键调用是：
 
 ```c
-while (e[position] != '\0') {
-  for (i = 0; i < NR_REGEX; i ++) {
-    if (regexec(&re[i], e + position, 1, &pmatch, 0) == 0 && pmatch.rm_so == 0) {
-      char *substr_start = e + position;
-      int substr_len = pmatch.rm_eo;
-      Log("match rules[%d] = \"%s\" at position %d with len %d: %.*s",
-          i, rules[i].regex, position, substr_len, substr_len, substr_start);
-      position += substr_len;
-      /* TODO: 把识别到的 token 记录进 tokens[] */
-      switch (rules[i].token_type) {
-        default: TODO();
-      }
-      break;
-    }
-  }
-  if (i == NR_REGEX) {                     // 所有规则都没命中
-    printf("no match at position %d\n%s\n%*.s^\n", position, e, position, "");
-    return false;
-  }
-}
+regexec(&re[i], e + position, 1, &pmatch, 0) == 0 && pmatch.rm_so == 0
 ```
 
-逐行解读：
+两个条件缺一不可：`== 0` 表示匹配成功，`pmatch.rm_so == 0` 表示**匹配起点就在当前位置**（锚定）。
 
-- 第 83 行：`regexec` 第 2 个参数是 `e + position`，即「从当前位置开始的子串」；第 4 个参数 `&pmatch` 接收匹配区间；`== 0` 且 `pmatch.rm_so == 0` 两个条件合起来保证「从当前位置开头的匹配」。
-- 第 84–85 行：`substr_start` 指向命中起点，`substr_len = pmatch.rm_eo` 取命中长度。
-- 第 87–88 行：现成的 `Log` 调试输出，会把每一个识别到的 token 打印到终端（`Log` → `_Log` → `printf`，见 [include/utils.h:L70-L74](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/include/utils.h#L70-L74)）。**这是后续观察切词结果的关键窗口**。
-- 第 90 行：推进扫描位置。
-- 第 97–99 行：留空的 switch，目前 `default: TODO()` 会直接 `panic`，需要你按 token 类型补全记录逻辑。
-- 第 105–108 行：`if (i == NR_REGEX)`——只有当内层 for 循环**一次都没 break**（即 `i` 走到了 `NR_REGEX`）时才成立，表示当前位置无规则可匹配，是非法字符。`printf` 用 `%*.s^` 在错误位置正下方打印一个 `^` 指示符，非常直观。
+**截取子串与调试日志**：
 
-入口函数 `expr` 调用 `make_token` 并据此决定成败（[expr.c:L115-L125](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L115-L125)）：词法失败就把 `*success` 置 `false` 并返回 0；词法成功则进入（下一讲的）求值阶段。
+[src/monitor/sdb/expr.c:L84-L90](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L84-L90) —— `substr_start` 指向匹配起点，`substr_len = pmatch.rm_eo`（因为锚定 `rm_so==0`，所以长度就是 `rm_eo`）；随后打印一条 `Log` 显示「第几条规则、在哪个位置、匹配了多长、内容是什么」——这是**最重要的调试手段**，调词法时全靠看这些 Log。最后 `position += substr_len` 让指针前移，准备识别下一个 token。
+
+**TODO：记录 token**：
+
+[src/monitor/sdb/expr.c:L92-L101](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L92-L101) —— 注释明确告诉你「现在用 rules[i] 识别出了一个新 token，请补代码把它记进 `tokens[]`；某些类型的 token 还要做额外动作」。目前的 `switch` 只有一个 `default: TODO()`，意味着**只要匹配到任何一个 token 就会触发 TODO 停下**——这正是你要补全的地方（见下方实践）。`break` 跳出内层 `for`，不再试后续规则。
+
+**匹配失败的报错**：
+
+[src/monitor/sdb/expr.c:L105-L108](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L105-L108) —— 若 `i == NR_REGEX`（所有规则都没匹配当前位置），打印出错位置并用 `^` 指示符指出来，返回 `false`。例如输入里有 `@` 这种规则里没定义的字符，就会在这里报「no match at position N」。
 
 #### 4.4.4 代码实践
 
-**实践目标**：补全 `make_token` 里 switch 的记录逻辑，让 `tokens[]` 真正装满切好的 token。
+**实践目标**：补全 `make_token` 的 `switch`，让词法分析真正能切出 token，并观察 Log 调试输出。
 
-**操作步骤**：
+**操作步骤**（基于框架已有的 `{" +", TK_NOTYPE}`、`{"\\+", '+'}`、`{"==", TK_EQ}` 三条规则）：
 
-1. 在 [expr.c:L97-L99](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L97-L99) 的 switch 中替换 `default: TODO();`，参考实现：
+1. 把第 97-99 行的 `switch` 改成（**示例代码**）：
 
    ```c
    switch (rules[i].token_type) {
-     case TK_NOTYPE:   /* 空格：跳过，不入表 */
-       break;
-     case TK_DEC:
-     case TK_HEX:
-     case TK_REG:
-       /* 带字面值的 token：把子串拷进 str，注意限长 */
+     case TK_NOTYPE: break;   // 空白：丢弃，不记录
+     default:
        tokens[nr_token].type = rules[i].token_type;
-       Assert(substr_len < sizeof(tokens[nr_token].str),
-              "token string is too long");
-       strncpy(tokens[nr_token].str, substr_start, substr_len);
-       tokens[nr_token].str[substr_len] = '\0';
-       nr_token++;
-       break;
-     default:          /* 单字符运算符/括号：类型即其 ASCII */
-       tokens[nr_token].type = rules[i].token_type;
+       // 对于单字符运算符/==，type 就够；这里统一记录类型
        nr_token++;
        break;
    }
    ```
 
-   注意：`Assert`、`strncpy` 需要头文件已包含（`debug.h` 经 `isa.h`→`common.h` 链路已可用；`string.h` 在 `common.h` 已包含）。`strncpy` 不保证补 `\0`，所以手动补结尾。
+   （此时还没有数字/寄存器规则，所以暂时不需要往 `str` 里写值；带值 token 的处理放在第 5 节综合实践。）
 
-2. 暂时**不要**实现 `expr()` 里的求值（那是 u2-l7）。保留它本来的 `TODO()` 即可——但这样 `expr` 仍会 panic，无法端到端跑通。要观察切词，请用第 5 节综合实践里的临时命令。
+2. 在 `expr` 函数（[L115-L125](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L115-L125)）的 `make_token(e)` 成功之后、`TODO()` 之前，临时加一段调试打印（**示例代码**）：
+
+   ```c
+   for (int i = 0; i < nr_token; i++) {
+     printf("token[%d]: type=%d\n", i, tokens[i].type);
+   }
+   ```
+
+3. 编译运行 NEMU（先确保日志开启，能看到 `Log` 输出）。
 
 **需要观察的现象 / 预期结果**：
 
-- 编译通过后，`make_token` 自身不再 panic。
-- 真正观察 token 需要触发 `expr()`，做法见第 5 节综合实践。
+- 当 `make_token` 处理 `"  + =="` 时，会依次打印多行 `Log`：先匹配到空格（`TK_NOTYPE`），再 `+`，再空格，再 `==`。
+- 你临时加的 `printf` 会打印出：跳过空白后，记录了 `+`（type=43）和 `==`（type=257=TK_EQ）两个 token。
+- 输入 `"1+2"` 会看到「no match at position 0」——因为还没有数字规则，`1` 无法被识别。这正是下一节综合实践要解决的。
+
+> 待本地验证：`Log` 是否输出到终端取决于 `nemu-log.txt` 配置与日志等级（详见 `u8-l25`）。若没看到 Log，可检查日志设置。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：如果删掉条件里的 `&& pmatch.rm_so == 0`，对输入 `"1 @ 2"`（`@` 是非法字符）会发生什么？
+**练习 1**：如果把判断条件里的 `&& pmatch.rm_so == 0` 去掉，对输入 `"1+2"`（假设已有数字规则）会造成什么问题？
 
-**答案**：`regexec` 会允许「跳过 `@`」后在后面的 `2` 处匹配数字规则，于是 `@` 被悄悄跳过而不报错，最终把非法表达式误判为合法。`rm_so == 0` 强制匹配必须从当前位置开头发生，从而正确地在 `@` 处停下并报 `no match`。
+**参考答案**：`regexec` 默认在整段剩余串里找第一个匹配，不要求从起点开始。去掉 `rm_so == 0` 后，当指针停在某个位置、该位置的字符自己不匹配任何规则，但**后面**出现了可匹配的字符时，会被误判为「匹配成功」并错误地跳过中间字符，导致词法错误被掩盖、token 位置错乱。`rm_so == 0` 是把匹配**锚定到当前位置**的关键。
 
-**练习 2**：`if (i == NR_REGEX)` 这个「无匹配」判断为什么成立？把它写成 `if (!matched)` 引入一个布尔变量是否等价？
+**练习 2**：`tokens[32]` 只能存 32 个 token。如果用户输入一个超长表达式（超过 32 个 token）会怎样？应该如何防御？
 
-**答案**：内层 for 循环只有在「没有任何规则命中」时才会自然走完，使 `i` 自增到 `NR_REGEX`；一旦命中就 `break`，`i` 必然小于 `NR_REGEX`。所以 `i == NR_REGEX` 等价于「一整轮都没匹配」。引入 `bool matched = false;` 在命中时置 true、循环后判断 `if (!matched)` 是完全等价、且可读性更好的写法，二者都对。
+**参考答案**：会数组越界，行为未定义。应在每次 `nr_token++` 前加边界检查，例如 `if (nr_token >= 32) return false;`（或用 `ARRLEN(tokens)` 代替硬编码 32），越界时返回 `false` 表示词法失败。
+
+**练习 3**：`Log("match rules[%d] ...")` 这行（L87-88）在最终产品里似乎「多余」，为什么 PA 仍保留它？
+
+**参考答案**：它是**调试利器**。词法分析最容易出错（正则写错、顺序写反、锚定遗漏），而这行 Log 会逐个 token 报告「命中第几条规则、位置、长度、内容」，让你一眼看出切词是否正确。`u8-l25` 会讲到 NEMU 如何用日志窗口（`TRACE_START/END`）控制这类输出的开销。
 
 ---
 
 ## 5. 综合实践
 
-把本讲的四个模块串起来，完成「表达式切词器」并真正观察它的输出。
+把本讲的四个模块串起来，完成 PA 规定的词法分析扩展任务。这是本讲的主实践，也是下一讲表达式求值的前置准备。
 
-### 实践任务
+### 5.1 实践目标
 
-1. **扩展枚举与规则表**（模块 4.1 + 4.2）：按 4.2.4 新增 `TK_DEC`/`TK_HEX`/`TK_REG` 及 `+ - * / ( ) ==` 等规则，注意排列顺序。
-2. **补全记录逻辑**（模块 4.4）：按 4.4.4 填好 `make_token` 的 switch。
-3. **临时挂一个命令触发切词**：因为目前 `expr()` 还没人调用、`p` 命令也未实现，为了观察切词，临时在 `src/monitor/sdb/sdb.c` 的 `cmd_table` 里加一条 `p` 命令（属于学生练习范畴，本讲仅用于观察词法）：
+让 `make_token` 能正确识别以下几类 token：**十进制数、十六进制数、寄存器名（`$` 开头）、加减乘除、括号**，并把数字和寄存器的字面值记录到 `token.str` 中。
+
+### 5.2 操作步骤
+
+1. **扩展 token 类型枚举**（4.1 模块）。在 `expr.c` 第 23-28 行的 `enum` 中加入：
 
    ```c
-   static int cmd_p(char *args) {
-     bool success = true;
-     word_t val = expr(args, &success);
-     if (!success) { printf("Bad expression\n"); return 0; }
-     printf("%u (0x%08x)\n", (unsigned)val, (unsigned)val);  // 值在 u2-l7 后才正确
-     return 0;
+   /* 示例代码 */
+   TK_DECIMAL, TK_HEX, TK_REG,
+   ```
+
+2. **扩展 rules 表**（4.2 模块）。在 `rules[]` 里按**正确顺序**新增规则（顺序很关键）：
+
+   ```c
+   /* 示例代码：注意顺序 */
+   {"0x[0-9a-fA-F]+", TK_HEX},     // 十六进制，必须在前
+   {"[0-9]+",        TK_DECIMAL},  // 十进制
+   {"\\$[A-Za-z0-9]+", TK_REG},    // 寄存器名：$0, $a0, $ra ...
+   {"\\+", '+'},                   // 加（框架已有）
+   {"-",    '-'},                  // 减
+   {"\\*", '*'},                   // 乘（* 在正则里要转义）
+   {"/",    '/'},                  // 除
+   {"\\(", '('},                   // 左括号
+   {"\\)", ')'},                   // 右括号
+   {"==",   TK_EQ},                // 等于（框架已有，求值时用）
+   ```
+
+   > 思考：为什么 `0x...` 必须在 `[0-9]+` 之前？为什么 `\*` 要转义而 `/` 不用？（答案见 4.2.5）
+
+3. **补全 make_token 的 switch**（4.4 模块）。对于带值 token，把字面值拷进 `str`：
+
+   ```c
+   /* 示例代码 */
+   switch (rules[i].token_type) {
+     case TK_NOTYPE: break;   // 空白丢弃
+     case TK_DECIMAL:
+     case TK_HEX:
+     case TK_REG:
+       tokens[nr_token].type = rules[i].token_type;
+       // substr_start / substr_len 在上方已算好（L84-L85）
+       // 注意按 str[32] 截断，防止越界
+       if (substr_len >= sizeof(tokens[nr_token].str)) substr_len = sizeof(tokens[nr_token].str) - 1;
+       strncpy(tokens[nr_token].str, substr_start, substr_len);
+       tokens[nr_token].str[substr_len] = '\0';
+       nr_token++;
+       break;
+     default:
+       // 单字符运算符与 TK_EQ：只记类型
+       tokens[nr_token].type = rules[i].token_type;
+       nr_token++;
+       break;
    }
-   /* 在 cmd_table 里加：{ "p", "Evaluate an expression", cmd_p }, */
-   ```
-   并在 `expr()` 中**临时**把 `TODO();` 改成 `return 0;`（仅为单独验证词法；求值留给 u2-l7）。
-
-4. **编译运行并观察**：`make && ./build/riscv32-nemu-interpreter`（二进制名随 ISA/引擎而变），在 SDB 提示符里输入：
-
-   ```
-   (nemu) p 0x10 + 5 * ($a0 + 2)
    ```
 
-### 需要观察的现象
+   并在 `nr_token++` 前加 `if (nr_token >= ARRLEN(tokens)) return false;` 防止越界。
 
-- 由于 `make_token` 里有现成的 `Log`，终端会逐行打印每个识别到的 token，形如：
+4. **验证识别结果**。临时在 `expr` 里（`make_token` 成功后）打印 token 流（参考 4.4.4），用以下输入测试：
 
-  ```
-  match rules[...] = "0[xX][0-9a-fA-F]+" at position 0 with len 4: 0x10
-  match rules[...] = " +" at position 4 with len 1: (空格)
-  match rules[...] = "\+" at position 6 with len 1: +
-  ...
-  ```
+   | 输入 | 期望切出的 token |
+   | --- | --- |
+   | `1+2` | DECIMAL("1"), '+', DECIMAL("2") |
+   | `0x10 * ($a0 - 3)` | HEX("0x10"), '*', '(', REG("$a0"), '-', DECIMAL("3"), ')' |
+   | `==` | TK_EQ |
+   | `@` | `no match at position 0`（词法错误） |
 
-- 空格会被识别为 `TK_NOTYPE` 但不进 `tokens`（你可加一句 `Log` 验证 `nr_token`）。
-- 输入非法字符（如 `p 1 @ 2`）应看到 `no match at position ...` 与一个 `^` 指向出错位置，命令打印 `Bad expression`。
+5. **可选：接入 SDB 的 `p` 命令**。在 `sdb.c` 的 `cmd_table`（参考 `u2-l5`）里新增 `p` 命令，调用 `expr(args, &success)` 并打印结果。本讲只需 `make_token` 成功即可（`expr` 的求值部分 `TODO()` 留给下一讲）。
 
-### 预期结果
+### 5.3 需要观察的现象
 
-- 切词器能正确识别十进制、十六进制、寄存器名、四则运算符与括号；空格被忽略；非法字符被准确定位。
-- 打印出的「值」此刻是占位的 0（因为求值未实现），属正常现象——这正是下一讲 `u2-l7` 要补齐的环节。
+- `nemu-log.txt`（或终端）里的 `Log` 行应逐 token 报告命中规则，顺序与你输入一致。
+- 对带值 token，`token.str` 中应能看到 `"1"`、`"0x10"`、`"$a0"` 等字面值。
+- 对非法字符应触发「no match at position N」并带上 `^` 指示。
 
-> 说明：步骤 3、4 是为了「单独验证词法」而引入的临时接线，正式的 `p` 命令与求值逻辑在 `u2-l7` 完成。本讲遵循「不改源码成品」的约定，以上改动属于 PA 学生练习区，请在自己的工作副本上操作。
+### 5.4 预期结果
+
+- 所有合法输入都能被完整切分为 token 流，`make_token` 返回 `true`。
+- 规则顺序错误（如 `0x...` 写在 `[0-9]+` 之后）会导致 `0x10` 被切成 `DECIMAL("0")` 后紧跟无法识别的 `x`——这时应回头检查顺序。
+
+> 待本地验证：寄存器名的具体拼写（`$0`、`a0`、`ra` 等）以 [src/isa/riscv32/reg.c:L19-L24](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/isa/riscv32/reg.c#L19-L24) 的 `regs[]` 表为准；下一讲求值时会把 `str` 里的寄存器名交给 `isa_reg_str2val` 解析（见 `u5-l15`）。
 
 ## 6. 本讲小结
 
-- **Token 是词法分析的产物**：`tokens[32]` + `nr_token` 这对「定长数组 + 计数器」承载切出的 token 序列；`Token.str[32]` 只对数字、寄存器等带字面值的 token 有意义，单字符运算符直接用 ASCII 当类型。
-- **类型号从 256 起步**：`TK_NOTYPE = 256` 是为了让多字符 token 不与 0–255 的单字符运算符冲突，这是 enum 设计的关键。
-- **rules 表是声明式词法**：每条规则 `{正则, 类型}` 一行，扫描循环零改动；规则有先后、先到先得，前缀冲突时长者/具体者在前（如十六进制先于十进制、`==` 先于 `=`）。
-- **init_regex 一次性预编译**：用 `regcomp + REG_EXTENDED` 把不变的正则编译成状态机，避免重复编译；失败即 `panic`，把语法错误挡在启动期。
-- **make_token 是核心扫描循环**：`regexec(...) == 0 && pmatch.rm_so == 0` 锚定「从当前位置开头」匹配，`pmatch.rm_eo` 当推进步长；无任何规则命中时按 `if (i == NR_REGEX)` 报错并返回 `false`。
-- **本讲只切词、不求值**：词法产物喂给下一讲 `u2-l7` 的递归下降求值器。
+- **词法分析**是把用户输入的字符串切成一串 token 的过程；本讲只做「切词」，不做「求值」。
+- **表驱动设计**：`rules[]` 表把「识别规则」写成数据（`{正则, token 类型}`），扫描逻辑 `make_token` 通用且无需改动，新增 token 只需「加表项 + 加 case」。
+- **token 类型编码**：单字符运算符直接用 ASCII 码，自定义类型从 256 起，二者天然不冲突，求值时可统一 `switch`。
+- **规则顺序即优先级**：`regexec` 依次试规则、第一个匹配胜出，故 `0x...` 须写在 `[0-9]+` 之前。
+- **预编译优化**：`init_regex` 用 `regcomp` 在启动时把每条正则编译一次，之后高速复用；正则写错会立即 `panic`。
+- **锚定匹配**：`make_token` 靠传入 `e+position` 并检查 `pmatch.rm_so == 0` 强制「从当前位置开始匹配」，这是最容易出错也最关键的细节。
 
 ## 7. 下一步学习建议
 
-词法分析产出的 `tokens[]` 还只是一串「片段」，要算出 `0x10 + 5 * ($a0 + 2)` 的实际数值，需要：
+本讲结束时，`make_token` 已经能把字符串切成 token 流，但 `expr` 里的求值部分仍是 `TODO()`（[expr.c:L121-L124](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c#L121-L124)）。
 
-1. 学习**递归下降求值**：用 BNF 文法定义表达式语法，把「找主运算符 + 递归求左右子表达式」实现成 `eval(p, q)`。这是下一讲 **u2-l7 表达式求值（递归下降）** 的主题。
-2. 用 [tools/gen-expr/gen-expr.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/tools/gen-expr/gen-expr.c) 生成大量随机表达式，把 gcc 的计算结果当作「标准答案」与你的 `expr()` 做差分对比——这正是本仓库自带的小型差分测试工具，建议在实现完求值后用它压测。
-3. （延伸）把 `expr()` 接到 `p`/`x` 命令与 **u2-l8 监视点** 上：监视点要监控的正是「一个表达式的值」随执行是否变化，因此词法 + 求值是监视点机制的底层依赖。
-
-读完本讲后，建议回头再扫一遍 [expr.c](https://github.com/NJU-ProjectN/nemu/blob/8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0/src/monitor/sdb/expr.c) 全文，确认 `rules → init_regex → make_token → tokens → expr` 这条数据流在自己脑中是通畅的，再进入 u2-l7。
+- **下一讲 `u2-l7 表达式求值（递归下降）`** 将基于本讲的 token 流，用递归下降算法算出表达式值，并处理运算符优先级、括号、一元负号、寄存器与内存解引用；还会用 `tools/gen-expr/gen-expr.c` 做随机对比测试。请确保本讲的 `make_token` 已能正确切出带值 token，否则求值无从谈起。
+- **横向衔接**：寄存器 token 的字面值最终由 `isa_reg_str2val` 解析（`u5-l15`）；内存解引用 `*0x80000000` 形式的求值会用到 `vaddr_read`（`u4-l13`）。可先记住这两处联系，学到对应章节时再回看。
+- **建议阅读的源码**：本讲之外，建议浏览 `tools/gen-expr/gen-expr.c`（下一讲要用）以及 `man regex`，加深对 POSIX regex 的理解。

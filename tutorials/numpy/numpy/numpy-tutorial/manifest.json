@@ -1,0 +1,1120 @@
+{
+  "project": "numpy",
+  "head": "71d523a529c873cde8a11af2d4935a4082d4a60e",
+  "rationale": "NumPy 是科学计算基础库，规模大、由 Python/Cython/C 三层构成，因此学习路线按「先会用、再读源码、最后深入 C 层与扩展开发」三层递进。单元 1 帮助零基础读者认识项目并跑起来；单元 2-3 聚焦最常用的数组创建、dtype、索引、形状、视图与广播，这部分是日常 80% 用法的核心；单元 4 进入 ufunc 与计算机制，把 Python 层和 C 层衔接起来；单元 5-7 覆盖各核心子系统（multiarray、打印、einsum、linalg、fft、random、子类化、调度、遮罩数组、多项式与字符串）；单元 8-9 面向专家，深入 Meson 构建、C-API、自定义 dtype、f2py 与 C 扩展、内存管理、nditer、Array API 与 CI/基准。依赖关系遵循「先理解 ndarray 内存模型再读 ufunc 实现，先理解 Python 层接口再下钻 C 层」的原则，确保每篇讲义只解决一个独立问题且引用真实源码。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 NumPy 与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体概览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "NumPy 是什么、解决什么问题、由哪些能力组成（N 维数组、广播、C/Fortran 集成、线性代数/FFT/随机数）。",
+          "learning_goals": [
+            "理解 NumPy 在 Python 科学计算生态中的定位",
+            "说出 NumPy 提供的四大核心能力",
+            "在源码中找到项目说明与元信息"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "numpy/__init__.py"
+          ],
+          "minimal_modules": [
+            "项目简介与核心能力（README）",
+            "包元信息与版本号（pyproject.toml, numpy/version.pyi）",
+            "顶层导入与公开 API 集合（numpy/__init__.py）"
+          ],
+          "practice_task": "克隆仓库后阅读 README 与 pyproject.toml，写一段 200 字说明 NumPy 是什么、依赖哪些构建工具，并列出 np.ndarray 之外你能在顶层导入的 5 个对象。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、安装与运行方式",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "NumPy 如何用 meson-python 构建、如何用 spin 开发、如何运行测试。",
+          "learning_goals": [
+            "掌握 meson-python + Cython 的构建链路",
+            "学会用 spin build/test 运行开发流程",
+            "知道测试入口与 sanity check"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "meson.build",
+            ".spin/cmds.py",
+            "INSTALL.rst"
+          ],
+          "minimal_modules": [
+            "构建后端与依赖（pyproject.toml [build-system]）",
+            "spin 命令体系（.spin/cmds.py 的 build/test/docs/bench）",
+            "安装与构建文档（INSTALL.rst）"
+          ],
+          "practice_task": "使用 pip install -e . --no-build-isolation 或 spin build 从源码构建 NumPy，并运行 python -c \"import numpy; numpy.test('full')\" 截图记录构建与首个测试结果。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层目录结构与模块导出",
+          "order": 3,
+          "filename": "u1-l3-directory-and-exports.md",
+          "level": "beginner",
+          "topic": "numpy 顶层目录如何组织，公共 API 如何从 _core/lib 等子包汇聚到顶层命名空间。",
+          "learning_goals": [
+            "画出 numpy 顶层目录结构",
+            "理解 _core 与 lib 的职责分工",
+            "看懂 numpy/__init__.py 的再导出机制"
+          ],
+          "source_files": [
+            "numpy/__init__.py",
+            "numpy/_core/__init__.py",
+            "numpy/lib/__init__.py"
+          ],
+          "minimal_modules": [
+            "顶层子包一览（_core, lib, linalg, fft, random, ma, polynomial, f2py）",
+            "_core 模块的导入与 __all__ 汇聚",
+            "懒加载子模块（numpy/__init__.py __getattr__）"
+          ],
+          "practice_task": "画出 numpy/_core、numpy/lib、numpy/linalg 等子包的依赖关系图，并解释为什么 np.array 来自 _core 而非 lib。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "ndarray 初体验与核心属性",
+          "order": 4,
+          "filename": "u1-l4-ndarray-first-look.md",
+          "level": "beginner",
+          "topic": "ndarray 是什么，shape/strides/dtype/ndim 等核心属性的含义。",
+          "learning_goals": [
+            "创建第一个 ndarray 并读取其属性",
+            "理解 shape、ndim、dtype、strides 的物理含义",
+            "在源码层面定位 ndarray 类"
+          ],
+          "source_files": [
+            "numpy/_core/multiarray.py",
+            "numpy/_core/numeric.py",
+            "numpy/_core/__init__.py"
+          ],
+          "minimal_modules": [
+            "ndarray 类的来源（_core/multiarray.py）",
+            "常用创建与属性函数（_core/numeric.py）",
+            "属性背后对应 C 层 getset（numpy/_core/src/multiarray/getset.c）"
+          ],
+          "practice_task": "创建一个 3x4 的 float64 数组，打印其 shape、strides、dtype、ndim、flags，并用一句话解释 strides 数组每个数字的含义。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "测试体系与导入时 sanity check",
+          "order": 5,
+          "filename": "u1-l5-testing-and-sanity.md",
+          "level": "beginner",
+          "topic": "NumPy 如何用 pytest 组织测试，以及导入时的 BLAS/环境自检。",
+          "learning_goals": [
+            "了解 numpy.testing 的组成",
+            "学会用 numpy.test() 运行测试",
+            "理解导入时 sanity check 的作用"
+          ],
+          "source_files": [
+            "numpy/testing/__init__.py",
+            "numpy/_pytesttester.py",
+            "numpy/__init__.py"
+          ],
+          "minimal_modules": [
+            "PytestTester 机制（_pytesttester.py）",
+            "testing 工具集（numpy/testing/__init__.py）",
+            "导入时 _sanity_check 与 _mac_os_check（numpy/__init__.py）"
+          ],
+          "practice_task": "运行 numpy.test('quick') 并统计通过/失败/跳过的数量；再阅读 numpy/__init__.py 中 _sanity_check，说明它检测什么类型的错误。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "数组创建与数据类型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "数组创建方式全览",
+          "order": 1,
+          "filename": "u2-l1-array-creation.md",
+          "level": "beginner",
+          "topic": "np.array / zeros / ones / arange / linspace / empty 等创建函数的实现与差异。",
+          "learning_goals": [
+            "区分各种数组创建函数的用途与底层实现",
+            "理解 array() 的输入归一化（array_like）",
+            "在源码中定位创建函数"
+          ],
+          "source_files": [
+            "numpy/_core/numeric.py",
+            "numpy/_core/multiarray.py",
+            "numpy/_core/_asarray.py"
+          ],
+          "minimal_modules": [
+            "显式创建与数值区间（_core/numeric.py 的 arange/linspace/zeros）",
+            "asarray/asanyarray 的归一化（_core/_asarray.py）",
+            "底层 C 构造路径（_core/src/multiarray/ctors.c）"
+          ],
+          "practice_task": "分别用 5 种方式创建等价的 0-9 整数数组，比较它们的内存布局（flags）与是否共享内存，并解释 asarray 与 array(copy=True) 的区别。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "dtype 与标量类型体系",
+          "order": 2,
+          "filename": "u2-l2-dtype-and-scalars.md",
+          "level": "beginner",
+          "topic": "dtype 的层次分类、标量类型、内置数值类型的组织方式。",
+          "learning_goals": [
+            "理解 dtype 的 kind/type/byteorder 等属性",
+            "区分 np.float64、np.floating、np.number 等抽象层级",
+            "定位类型定义源码"
+          ],
+          "source_files": [
+            "numpy/_core/numerictypes.py",
+            "numpy/dtypes.py",
+            "numpy/_core/_type_aliases.py"
+          ],
+          "minimal_modules": [
+            "标量类型层次（_core/numerictypes.py）",
+            "公开 DType 类（numpy/dtypes.py）",
+            "类型别名表（_core/_type_aliases.py）"
+          ],
+          "practice_task": "写一个函数，输入任意数组返回其 dtype 的 kind、itemsize、所属抽象父类（如 integer/floating），并用 np.issubdtype 验证。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "类型转换、提升规则与精度",
+          "order": 3,
+          "filename": "u2-l3-casting-and-promotion.md",
+          "level": "beginner",
+          "topic": "astype、result_type、promote_types 的语义与 NumPy 2.x 的类型提升规则（NEP 50）。",
+          "learning_goals": [
+            "掌握 result_type / promote_types 的用法",
+            "理解 NEP 50 的提升规则与 Python 标量优先级",
+            "定位转换与提升的源码"
+          ],
+          "source_files": [
+            "numpy/_core/_dtype.py",
+            "numpy/_core/numerictypes.py",
+            "numpy/_core/_ufunc_config.py"
+          ],
+          "minimal_modules": [
+            "提升规则 Python 层（_core/numerictypes.py 的 promote_types/result_type）",
+            "dtype 工具（_core/_dtype.py）",
+            "提升策略配置（_core/_ufunc_config.py 与 NPY_PROMOTION_STATE）"
+          ],
+          "practice_task": "预测 np.arange(3, dtype=np.int8) + 1 与 np.arange(3, dtype=np.int8) + np.int8(1) 的结果 dtype，验证后用源码/NEP 50 规则解释差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "索引、形状、视图与广播",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "索引机制：基础索引与花式索引",
+          "order": 1,
+          "filename": "u3-l1-indexing.md",
+          "level": "intermediate",
+          "topic": "基础切片、整数数组索引、布尔索引、np.ix_ 的实现机制。",
+          "learning_goals": [
+            "区分基础索引与高级（花式）索引",
+            "理解索引何时返回视图、何时返回拷贝",
+            "在 C 层定位映射实现"
+          ],
+          "source_files": [
+            "numpy/_core/numeric.py",
+            "numpy/_core/src/multiarray/mapping.c",
+            "numpy/lib/_index_tricks_impl.py"
+          ],
+          "minimal_modules": [
+            "基本切片语义（_core/numeric.py）",
+            "映射与索引 C 实现（mapping.c）",
+            "索引辅助器 ix_/r_/c_（lib/_index_tricks_impl.py）"
+          ],
+          "practice_task": "构造一个 5x5 数组，分别用基础切片、布尔掩码、整数数组取出行与列，并用 np.shares_memory 判断每个结果是视图还是拷贝。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "形状操作：reshape、transpose 与轴",
+          "order": 2,
+          "filename": "u3-l2-shape-manipulation.md",
+          "level": "intermediate",
+          "topic": "reshape、transpose、swapaxes、moveaxis 等形状操作如何只改视图不改数据。",
+          "learning_goals": [
+            "理解 reshape 何时返回视图",
+            "掌握 transpose 对 strides 的操作",
+            "定位形状操作源码"
+          ],
+          "source_files": [
+            "numpy/_core/shape_base.py",
+            "numpy/_core/src/multiarray/shape.c",
+            "numpy/_core/numeric.py"
+          ],
+          "minimal_modules": [
+            "reshape/transpose 的 Python 封装（_core/shape_base.py, _core/numeric.py）",
+            "C 层形状计算（shape.c）",
+            "轴操作 moveaxis/swapaxes（_core/numeric.py）"
+          ],
+          "practice_task": "对一个 C 连续的 2x6 数组做 reshape(3,4) 和 transpose，分别打印结果与 strides，解释为什么 transpose 不复制数据。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "视图、拷贝与 strides 技巧",
+          "order": 3,
+          "filename": "u3-l3-views-copies-strides.md",
+          "level": "intermediate",
+          "topic": "as_strided、sliding_window_view、broadcast_to 的底层 stride 操纵原理与安全风险。",
+          "learning_goals": [
+            "理解视图与拷贝的根本区别",
+            "掌握 strides 与 as_strided 的危险与威力",
+            "学会安全使用 sliding_window_view"
+          ],
+          "source_files": [
+            "numpy/lib/_stride_tricks_impl.py",
+            "numpy/_core/_internal.py",
+            "numpy/_core/src/multiarray/getset.c"
+          ],
+          "minimal_modules": [
+            "as_strided / sliding_window_view 实现（lib/_stride_tricks_impl.py）",
+            "broadcast_to 内部（lib/_stride_tricks_impl.py）",
+            "strides 属性与 flags（getset.c）"
+          ],
+          "practice_task": "用 sliding_window_view 计算长度为 100 的数组的滑动平均（窗口 5），再用 as_strided 复现同样效果并设置 writeable=False，说明为何要禁写。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "广播机制原理与实现",
+          "order": 4,
+          "filename": "u3-l4-broadcasting.md",
+          "level": "intermediate",
+          "topic": "广播规则的数学原理，以及 broadcast_to/broadcast_shapes 在源码中的实现。",
+          "learning_goals": [
+            "掌握 NumPy 广播三条规则",
+            "理解广播如何用 strides=0 实现",
+            "在源码层确认广播实现"
+          ],
+          "source_files": [
+            "numpy/lib/_stride_tricks_impl.py",
+            "numpy/_core/numeric.py",
+            "doc/source/user/theory.broadcasting.rst"
+          ],
+          "minimal_modules": [
+            "广播规则理论（theory.broadcasting.rst）",
+            "broadcast_to / broadcast_arrays / broadcast_shapes（lib/_stride_tricks_impl.py）",
+            "nditer 在广播中的角色（lib/_stride_tricks_impl.py _broadcast_to）"
+          ],
+          "practice_task": "用 broadcast_to 把 (3,) 数组扩成 (4,3)，打印其 strides；再解释为什么广播后的数组不是 C 连续以及为何只读。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "ufunc 与数组计算机制",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "ufunc 概念与 frompyfunc",
+          "order": 1,
+          "filename": "u4-l1-ufunc-concept.md",
+          "level": "intermediate",
+          "topic": "什么是通用函数（ufunc），它如何逐元素广播执行，以及如何用 frompyfunc 包装 Python 函数。",
+          "learning_goals": [
+            "理解 ufunc 的逐元素+广播执行模型",
+            "认识 nin/nout/identity/nin 等属性",
+            "用 frompyfunc 创建自定义 ufunc"
+          ],
+          "source_files": [
+            "numpy/_core/umath.py",
+            "numpy/_core/src/umath/umathmodule.c",
+            "numpy/_core/__init__.py"
+          ],
+          "minimal_modules": [
+            "ufunc 公开命名空间（_core/umath.py）",
+            "frompyfunc 的 C 实现（src/umath/umathmodule.c）",
+            "ufunc 方法 reduce/accumulate 入口"
+          ],
+          "practice_task": "用 np.frompyfunc 把一个 Python 字符串处理函数包装成 ufunc，对一个 object 数组逐元素执行，并对比普通 list 推导的写法。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ndarray 内存模型（C 层）",
+          "order": 2,
+          "filename": "u4-l2-ndarray-memory-model.md",
+          "level": "intermediate",
+          "topic": "PyArrayObject 结构体的字段（data、dimensions、strides、descr、flags）及其物理含义。",
+          "learning_goals": [
+            "看懂 PyArrayObject_fields 结构体",
+            "理解 data/dimensions/strides/descr/flags 字段",
+            "掌握内联访问宏 PyArray_DATA/PyArray_STRIDES"
+          ],
+          "source_files": [
+            "numpy/_core/include/numpy/ndarraytypes.h",
+            "numpy/_core/include/numpy/ndarrayobject.h",
+            "doc/source/dev/internals.code-explanations.rst"
+          ],
+          "minimal_modules": [
+            "PyArrayObject_fields 结构（ndarraytypes.h）",
+            "内联访问宏（ndarrayobject.h）",
+            "内存模型文档（internals.code-explanations.rst）"
+          ],
+          "practice_task": "在 ndarraytypes.h 中找到 PyArrayObject_fields，列出每个字段，并写一段说明 strides 为何用 char* 字节单位而非元素单位。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "ufunc 内部实现与类型解析",
+          "order": 3,
+          "filename": "u4-l3-ufunc-internals.md",
+          "level": "intermediate",
+          "topic": "PyUFuncObject 结构、循环注册、类型解析与 ArrayMethod 的关系。",
+          "learning_goals": [
+            "理解 PyUFuncObject 的 nin/nout/functions/types 字段",
+            "掌握类型解析流程（type resolution）",
+            "认识 ArrayMethod 作为新式循环机制"
+          ],
+          "source_files": [
+            "numpy/_core/include/numpy/ufuncobject.h",
+            "numpy/_core/src/umath/ufunc_object.c",
+            "numpy/_core/src/umath/ufunc_type_resolution.c"
+          ],
+          "minimal_modules": [
+            "PyUFuncObject 结构（ufuncobject.h）",
+            "ufunc vectorcall 与循环选择（ufunc_object.c）",
+            "默认类型解析（ufunc_type_resolution.c）"
+          ],
+          "practice_task": "选 np.add，用 types 属性列出它注册的全部 (in0,in1,out) 组合，并说明 ufunc 如何根据输入 dtype 选择具体 C 循环。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "归约、累积与方法分发",
+          "order": 4,
+          "filename": "u4-l4-reductions.md",
+          "level": "intermediate",
+          "topic": "sum/mean/max/prod 等归约的 Python 方法层（_methods）、fromnumeric 封装与 C 层 reduction 实现。",
+          "learning_goals": [
+            "理解 ndarray.sum() 的调用链",
+            "掌握 axis/keepdims/dtype/out 参数语义",
+            "定位 C 层归约循环"
+          ],
+          "source_files": [
+            "numpy/_core/_methods.py",
+            "numpy/_core/fromnumeric.py",
+            "numpy/_core/src/umath/reduction.c"
+          ],
+          "minimal_modules": [
+            "方法层分发（_core/_methods.py _methods）",
+            "顶层归约函数（fromnumeric.py）",
+            "C 层归约循环（src/umath/reduction.c）"
+          ],
+          "practice_task": "对一个 4x5x3 数组分别沿不同 axis 求 sum 与 mean，对照 _methods.py 说明结果形状如何由 axis/keepdims 决定。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "广播、SIMD 与性能优化",
+          "order": 5,
+          "filename": "u4-l5-simd-and-performance.md",
+          "level": "intermediate",
+          "topic": "CPU 运行时分发（baseline + dispatch）、SIMD 内联循环、.dispatch.c 机制如何加速 ufunc。",
+          "learning_goals": [
+            "理解运行时 CPU 特性检测与分发",
+            "认识 .dispatch.c 文件的用途",
+            "学会用 asv 基准验证性能"
+          ],
+          "source_files": [
+            "numpy/_core/src/common/npy_cpu_dispatch.h",
+            "numpy/_core/src/umath/_umath_tests.dispatch.c",
+            "benchmarks/benchmarks/bench_ufunc.py"
+          ],
+          "minimal_modules": [
+            "CPU 分发宏（npy_cpu_dispatch.h）",
+            "dispatch 源码示例（_umath_tests.dispatch.c）",
+            "asv 基准（benchmarks/benchmarks/bench_ufunc.py）"
+          ],
+          "practice_task": "设置 NPY_CPU_DISPATCH_TRACE=1 运行一次大数组 np.exp，观察它实际使用了哪些 SIMD 分支；再用 asv 跑一个 ufunc 基准对比。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "核心子系统源码",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "multiarray 模块全貌",
+          "order": 1,
+          "filename": "u5-l1-multiarray-module.md",
+          "level": "intermediate",
+          "topic": "_core/multiarray.py 再导出的 C 扩展 _multiarray_umath，以及 multiarraymodule.c 注册的顶层函数。",
+          "learning_goals": [
+            "理解 multiarray 模块在 Python/C 间的桥梁角色",
+            "认识 multiarraymodule.c 导出的函数",
+            "看懂 _core/__init__.py 的导入容错"
+          ],
+          "source_files": [
+            "numpy/_core/multiarray.py",
+            "numpy/_core/src/multiarray/multiarraymodule.c",
+            "numpy/_core/__init__.py"
+          ],
+          "minimal_modules": [
+            "multiarray Python 封装（_core/multiarray.py）",
+            "C 模块入口（multiarraymodule.c）",
+            "导入失败诊断（_core/__init__.py）"
+          ],
+          "practice_task": "在 multiarray.py 中找出 set_typeDict、may_share_memory 等函数的来源，并在 multiarraymodule.c 中找到它们的 C 注册位置。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "数组打印与 dragon4 浮点格式化",
+          "order": 2,
+          "filename": "u5-l2-array-printing.md",
+          "level": "intermediate",
+          "topic": "arrayprint.py 如何分块/对齐/截断打印大数组，dragon4.c 如何生成最短精确浮点表示。",
+          "learning_goals": [
+            "理解大数组打印的阈值与边缘逻辑",
+            "认识 printoptions 配置机制",
+            "了解 dragon4 算法在浮点转字符串中的作用"
+          ],
+          "source_files": [
+            "numpy/_core/arrayprint.py",
+            "numpy/_core/printoptions.py",
+            "numpy/_core/src/multiarray/dragon4.c"
+          ],
+          "minimal_modules": [
+            "打印主逻辑（_core/arrayprint.py）",
+            "打印选项（_core/printoptions.py）",
+            "浮点格式化 dragon4（src/multiarray/dragon4.c）"
+          ],
+          "practice_task": "用 np.set_printoptions 修改 threshold/precision/linewidth，打印一个大数组，并在 arrayprint.py 中定位处理 edge_items 与截断省略号的函数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "einsum 与张量缩并",
+          "order": 3,
+          "filename": "u5-l3-einsum.md",
+          "level": "intermediate",
+          "topic": "np.einsum 的下标表示法、路径优化（einsum_path）与底层实现。",
+          "learning_goals": [
+            "掌握 einsum 的下标语法",
+            "理解 einsum_path 的优化策略",
+            "定位 einsum 实现"
+          ],
+          "source_files": [
+            "numpy/_core/einsumfunc.py",
+            "numpy/_core/numeric.py",
+            "numpy/_core/__init__.py"
+          ],
+          "minimal_modules": [
+            "Einsum 类与下标解析（_core/einsumfunc.py）",
+            "路径优化（einsumfunc.py einsum_path）",
+            "C 层 einsum 调用入口"
+          ],
+          "practice_task": "用 einsum 实现 batch 矩阵乘法 'bij,bjk->bik'，再比较 optimize=True/False 的性能，并说明 einsum_path 的作用。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "线性代数 numpy.linalg 与 BLAS/LAPACK",
+          "order": 4,
+          "filename": "u5-l4-linalg.md",
+          "level": "intermediate",
+          "topic": "numpy.linalg 如何封装 BLAS/LAPACK，dot/matmul/solve 等的来源与后端选择。",
+          "learning_goals": [
+            "理解 linalg 对 BLAS/LAPACK 的依赖",
+            "区分顶层 dot/matmul 与 linalg 函数",
+            "认识 OpenBLAS/MKL/Accelerate 后端切换"
+          ],
+          "source_files": [
+            "numpy/linalg/__init__.py",
+            "numpy/linalg/_linalg.py",
+            "numpy/_core/numeric.py"
+          ],
+          "minimal_modules": [
+            "linalg 模块导出与说明（linalg/__init__.py）",
+            "linalg 函数实现（linalg/_linalg.py）",
+            "顶层 dot/matmul/tensordot（_core/numeric.py）"
+          ],
+          "practice_task": "用 numpy.show_config() 查看构建使用的 BLAS/LAPACK 后端，再对 1000x1000 矩阵比较 np.dot 与 np.matmul 的耗时，解释它们的关系。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "FFT 与 pocketfft",
+          "order": 5,
+          "filename": "u5-l5-fft.md",
+          "level": "intermediate",
+          "topic": "numpy.fft 的 API 设计、pocketfft 后端、归一化模式与多维变换。",
+          "learning_goals": [
+            "掌握 fft/fftfreq/rfft 等函数用法",
+            "理解 norm 参数与归一化模式",
+            "定位 fft 模块结构"
+          ],
+          "source_files": [
+            "numpy/fft/__init__.py",
+            "numpy/fft/_pocketfft.py",
+            "numpy/fft/_helper.py"
+          ],
+          "minimal_modules": [
+            "fft 模块导出（fft/__init__.py）",
+            "pocketfft 封装（fft/_pocketfft.py）",
+            "fftfreq/fftshift 辅助（fft/_helper.py）"
+          ],
+          "practice_task": "对一个含两个频率分量的信号做 fft 并用 fftfreq 生成频率轴，画出频谱；再对比 norm='ortho' 与默认模式的幅值差异。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "随机数生成子系统",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "随机架构与 Generator",
+          "order": 1,
+          "filename": "u6-l1-random-generator.md",
+          "level": "intermediate",
+          "topic": "新一代 Generator API（default_rng）、与 BitGenerator 的分层关系，以及分布采样方法。",
+          "learning_goals": [
+            "理解 Generator / BitGenerator 两层架构",
+            "掌握 default_rng() 与常用分布方法",
+            "对比与 RandomState 的差异"
+          ],
+          "source_files": [
+            "numpy/random/__init__.py",
+            "numpy/random/_generator.pyx",
+            "numpy/random/_pickle.py"
+          ],
+          "minimal_modules": [
+            "random 模块导出（random/__init__.py）",
+            "Generator 实现（random/_generator.pyx）",
+            "序列化支持（random/_pickle.py）"
+          ],
+          "practice_task": "用 default_rng(42) 创建 Generator，采样标准正态与 1000 个 [0,10) 整数；再阅读 __init__.py 列出可用的 BitGenerator。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "BitGenerator 与 SeedSequence",
+          "order": 2,
+          "filename": "u6-l2-bitgenerator-seed.md",
+          "level": "intermediate",
+          "topic": "BitGenerator 的熵源与流式接口、SeedSequence 的种子派生与可复现性、并发分流。",
+          "learning_goals": [
+            "理解 BitGenerator 提供原始随机位流",
+            "掌握 SeedSequence 派生子种子用于并行",
+            "认识 bitgen.h C-API 接口"
+          ],
+          "source_files": [
+            "numpy/random/bit_generator.pyx",
+            "numpy/random/_pickle.py",
+            "numpy/_core/include/numpy/random/bitgen.h"
+          ],
+          "minimal_modules": [
+            "BitGenerator 基类（random/bit_generator.pyx）",
+            "SeedSequence 派生（bit_generator.pyx）",
+            "C 接口 bitgen.h（include/numpy/random/bitgen.h）"
+          ],
+          "practice_task": "用 SeedSequence(42).spawn(4) 生成 4 个独立流，分别创建 4 个 Generator 并验证它们的样本不重复，说明 spawn 的用途。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "经典 RandomState 与迁移",
+          "order": 3,
+          "filename": "u6-l3-randomstate-legacy.md",
+          "level": "intermediate",
+          "topic": "遗留 RandomState（mtrand）的全局随机状态、np.random.seed，以及向 Generator 迁移的注意点。",
+          "learning_goals": [
+            "理解 RandomState 的全局状态模型",
+            "认识 np.random.seed/randn 的遗留行为",
+            "掌握向 Generator 迁移的要点"
+          ],
+          "source_files": [
+            "numpy/random/mtrand.pyx",
+            "numpy/random/__init__.py",
+            "numpy/random/_pickle.py"
+          ],
+          "minimal_modules": [
+            "RandomState 实现（random/mtrand.pyx）",
+            "顶层遗留别名（random/__init__.py）",
+            "RandomState 序列化（random/_pickle.py）"
+          ],
+          "practice_task": "对比 np.random.RandomState(0).standard_normal(5) 与 np.random.default_rng(0).standard_normal(5) 的结果，说明为何二者数值不同。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高级数组机制与扩展子模块",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "ndarray 子类化机制",
+          "order": 1,
+          "filename": "u7-l1-subclassing.md",
+          "level": "intermediate",
+          "topic": "如何继承 ndarray、__array_finalize__/__array_wrap__/__array_ufunc__ 协议的作用。",
+          "learning_goals": [
+            "掌握 ndarray 子类化的三大协议",
+            "理解视图创建时的属性继承",
+            "定位子类化文档"
+          ],
+          "source_files": [
+            "doc/source/user/basics.subclassing.rst",
+            "numpy/ma/core.py",
+            "numpy/_core/src/multiarray/arraywrap.c"
+          ],
+          "minimal_modules": [
+            "子类化协议文档（basics.subclassing.rst）",
+            "MaskedArray 子类范例（numpy/ma/core.py）",
+            "C 层 arraywrap 支持（src/multiarray/arraywrap.c）"
+          ],
+          "practice_task": "实现一个记录创建时间的 ndarray 子类，重写 __array_finalize__ 透传属性，并验证切片后属性是否被继承。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "__array_function__ 与函数调度",
+          "order": 2,
+          "filename": "u7-l2-array-function-dispatch.md",
+          "level": "intermediate",
+          "topic": "NEP-18 的 __array_function__ 协议、array_function_dispatch 装饰器与 like= 参数机制。",
+          "learning_goals": [
+            "理解 __array_function__ 让非 NumPy 数组重载函数",
+            "认识 array_function_dispatch 装饰器",
+            "了解 like= 创建兼容数组"
+          ],
+          "source_files": [
+            "numpy/_core/overrides.py",
+            "numpy/_core/src/multiarray/arrayfunction_override.c",
+            "doc/source/user/basics.dispatch.rst"
+          ],
+          "minimal_modules": [
+            "调度装饰器（_core/overrides.py）",
+            "C 层调度器（arrayfunction_override.c）",
+            "调度文档（basics.dispatch.rst）"
+          ],
+          "practice_task": "阅读 overrides.py 的 array_function_dispatch，手动追踪一次 np.concatenate 的调度过程，说明它如何收集实现 __array_function__ 的参数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "遮罩数组 numpy.ma",
+          "order": 3,
+          "filename": "u7-l3-masked-arrays.md",
+          "level": "intermediate",
+          "topic": "MaskedArray 如何用掩码标记无效数据、运算时如何忽略被遮罩元素。",
+          "learning_goals": [
+            "理解 MaskedArray 的数据+掩码结构",
+            "掌握掩码在归约与广播中的传播",
+            "认识 ma 子模块组织"
+          ],
+          "source_files": [
+            "numpy/ma/core.py",
+            "numpy/ma/extras.py",
+            "numpy/ma/__init__.py"
+          ],
+          "minimal_modules": [
+            "MaskedArray 核心（numpy/ma/core.py）",
+            "额外函数（numpy/ma/extras.py）",
+            "ma 模块导出（numpy/ma/__init__.py）"
+          ],
+          "practice_task": "构造一个含 NaN/极大值的数组，用 np.ma.masked_where 遮罩异常值，再计算均值并与 np.nanmean 对比结果与处理方式。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "多项式与字符串数组",
+          "order": 4,
+          "filename": "u7-l4-polynomial-and-strings.md",
+          "level": "intermediate",
+          "topic": "numpy.polynomial 的现代多项式基类体系，以及 numpy.strings/char 的字符串数组运算。",
+          "learning_goals": [
+            "掌握 polynomial 的各正交基类用法",
+            "理解 numpy.strings 与 numpy.char 的关系",
+            "认识字符串 dtype（str_/bytes_）"
+          ],
+          "source_files": [
+            "numpy/polynomial/_polybase.py",
+            "numpy/polynomial/polynomial.py",
+            "numpy/strings/__init__.py"
+          ],
+          "minimal_modules": [
+            "多项式基类（polynomial/_polybase.py）",
+            "幂基实现（polynomial/polynomial.py）",
+            "字符串 ufunc 命名空间（numpy/strings/__init__.py）"
+          ],
+          "practice_task": "用 numpy.polynomial.Polynomial 拟合一组带噪数据并求值，再对一个 str_ 数组用 numpy.strings.upper 与 np.char.upper 各做一次，对比二者关系。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "构建系统、C-API 与扩展开发",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Meson 构建系统深入",
+          "order": 1,
+          "filename": "u8-l1-meson-build.md",
+          "level": "advanced",
+          "topic": "numpy/meson.build 与 _core/meson.build 的结构、Cython 编译、CPU 分发配置与生成文件（_numpyconfig.h/config.h）。",
+          "learning_goals": [
+            "理解 meson-python 构建的组织方式",
+            "认识 CPU 分发、BLAS、SIMD 的构建开关",
+            "了解生成头文件与 ABI 版本号"
+          ],
+          "source_files": [
+            "numpy/meson.build",
+            "numpy/_core/meson.build",
+            "numpy/_core/include/numpy/numpyconfig.h"
+          ],
+          "minimal_modules": [
+            "顶层构建（numpy/meson.build）",
+            "核心扩展构建与生成头（_core/meson.build）",
+            "公开配置宏（numpyconfig.h）"
+          ],
+          "practice_task": "阅读 _core/meson.build 找到 C_API_VERSION、C_ABI_VERSION 与 use_svml/use_highway 开关，说明它们影响哪些源文件被编译。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "C-API 头文件体系",
+          "order": 2,
+          "filename": "u8-l2-c-api-headers.md",
+          "level": "advanced",
+          "topic": "include/numpy/ 下一组头文件的职责分层与包含关系，如何用 PyArray_SimpleNew 等编写 C 扩展。",
+          "learning_goals": [
+            "掌握 ndarrayobject.h / ndarraytypes.h / ufuncobject.h 的分层",
+            "学会用 PyArray_SimpleNew/PyArray_DATA 操作数组",
+            "理解 ABI 与 API 版本控制"
+          ],
+          "source_files": [
+            "numpy/_core/include/numpy/arrayobject.h",
+            "numpy/_core/include/numpy/ndarrayobject.h",
+            "numpy/_core/include/numpy/npy_common.h"
+          ],
+          "minimal_modules": [
+            "公共总头（arrayobject.h）",
+            "访问宏与便捷构造（ndarrayobject.h）",
+            "平台与基础宏（npy_common.h）"
+          ],
+          "practice_task": "写一个最小 C 扩展，include numpy/arrayobject.h，用 PyArray_SimpleNew 创建 2x2 数组并用 PyArray_DATA 写入数据，编译后导入验证。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "自定义 dtype 与 DType API",
+          "order": 3,
+          "filename": "u8-l3-custom-dtype.md",
+          "level": "advanced",
+          "topic": "新一代 DType/ArrayMethod API：descriptor.c/dtypemeta.c 的实现，以及如何注册自定义 dtype 与强制转换。",
+          "learning_goals": [
+            "理解 PyArray_Descr 与 DType 元类的关系",
+            "认识 ArrayMethod 作为统一的循环/转换机制",
+            "了解 __common_dtype__ 与 cast 安全级别"
+          ],
+          "source_files": [
+            "numpy/_core/src/multiarray/descriptor.c",
+            "numpy/_core/src/multiarray/dtypemeta.c",
+            "numpy/_core/include/numpy/dtype_api.h"
+          ],
+          "minimal_modules": [
+            "dtype 描述符实现（descriptor.c）",
+            "DType 元类（dtypemeta.c）",
+            "公开 DType/ArrayMethod API（dtype_api.h）"
+          ],
+          "practice_task": "对照 _scaled_float_dtype.c 或 _rational_tests.c（在 src/umath/ 下）解释一个实验性 dtype 如何注册 resolve_descriptors 与 strided loop；输出调用链说明。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "f2py 生成 Fortran 扩展",
+          "order": 4,
+          "filename": "u8-l4-f2py.md",
+          "level": "advanced",
+          "topic": "f2py 的命令行入口 f2py2e.py、Fortran 解析（crackfortran）与包装代码生成规则。",
+          "learning_goals": [
+            "掌握 f2py 构建 Fortran 扩展的流程",
+            "理解 crackfortran 的解析能力",
+            "认识生成规则模块"
+          ],
+          "source_files": [
+            "numpy/f2py/f2py2e.py",
+            "numpy/f2py/crackfortran.py",
+            "numpy/f2py/rules.py"
+          ],
+          "minimal_modules": [
+            "命令行入口（f2py/f2py2e.py）",
+            "Fortran 解析（f2py/crackfortran.py）",
+            "包装代码生成规则（f2py/rules.py）"
+          ],
+          "practice_task": "编写一个简单 Fortran 子例程（如矩阵乘法），用 f2py -c 生成扩展并在 Python 中调用，检查 crackfortran 产生的 .pyf 签名。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "底层架构与工程实践",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "内存管理、分配缓存与 memmap",
+          "order": 1,
+          "filename": "u9-l1-memory-and-memmap.md",
+          "level": "advanced",
+          "topic": "alloc.c 的小对象缓存与 hugepage 优化、PyDataMem_Handler 自定义分配器，以及 memmap 的内存映射数组。",
+          "learning_goals": [
+            "理解 ndarray 数据内存的分配缓存机制",
+            "认识 madvise hugepage 对大数组的影响",
+            "掌握 memmap 处理超大文件的用法"
+          ],
+          "source_files": [
+            "numpy/_core/src/multiarray/alloc.c",
+            "numpy/_core/memmap.py",
+            "numpy/__init__.py"
+          ],
+          "minimal_modules": [
+            "分配缓存（src/multiarray/alloc.c）",
+            "内存映射数组（_core/memmap.py）",
+            "导入时 hugepage 设置（numpy/__init__.py hugepage_setup）"
+          ],
+          "practice_task": "用 np.memmap 映射一个 1GB 二进制文件并切片求和，对比直接 np.load 的内存占用；再阅读 alloc.c 说明 datacache 如何减少 malloc 次数。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "迭代器 nditer",
+          "order": 2,
+          "filename": "u9-l2-nditer.md",
+          "level": "advanced",
+          "topic": "np.nditer 的高级迭代能力（广播、多数组、外积、写回）、C 层 nditer_api 的实现，以及 broadcast_to 如何复用它。",
+          "learning_goals": [
+            "掌握 nditer 的 flags 与 op_flags",
+            "理解 nditer 对广播与降维的作用",
+            "定位 C 层迭代器实现"
+          ],
+          "source_files": [
+            "numpy/_core/numeric.py",
+            "numpy/_core/src/multiarray/nditer_api.c",
+            "numpy/lib/_stride_tricks_impl.py"
+          ],
+          "minimal_modules": [
+            "Python nditer 入口（_core/numeric.py）",
+            "C 迭代器 API（nditer_api.c）",
+            "nditer 在广播中的应用（lib/_stride_tricks_impl.py）"
+          ],
+          "practice_task": "用 nditer 同时遍历两个形状可广播的数组并逐元素求和，再用 multi_index 模式手动重建广播后的索引，对照结果。",
+          "depends_on": [
+            "u3-l4",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "配置、互操作与 Array API",
+          "order": 3,
+          "filename": "u9-l3-config-interop-array-api.md",
+          "level": "advanced",
+          "topic": "show_config/__config__、DLPack/CUDA/零拷贝互操作、以及 Array API 标准与 __array_namespace_info__。",
+          "learning_goals": [
+            "理解 numpy.show_config 暴露的构建信息",
+            "掌握 DLPack/缓冲协议的零拷贝交换",
+            "认识 Array API 标准入口"
+          ],
+          "source_files": [
+            "numpy/_array_api_info.py",
+            "numpy/_core/src/multiarray/dlpack.c",
+            "doc/source/user/basics.interoperability.rst"
+          ],
+          "minimal_modules": [
+            "Array API 命名空间信息（_array_api_info.py）",
+            "DLPack 导出导入（src/multiarray/dlpack.c）",
+            "互操作总览（basics.interoperability.rst）"
+          ],
+          "practice_task": "用 np.from_dlpack 与另一个数组库（如 PyTorch 或 minimal 数组）做零拷贝往返，再用 numpy.__array_namespace_info__() 查看 NumPy 的 Array API 能力。",
+          "depends_on": [
+            "u7-l2",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "测试、基准与持续集成",
+          "order": 4,
+          "filename": "u9-l4-testing-bench-ci.md",
+          "level": "advanced",
+          "topic": "numpy.testing 的断言工具、asv 基准体系、GitHub Actions 多平台 wheel 构建，以及 spin 的工程命令。",
+          "learning_goals": [
+            "掌握 assert_allclose/assert_array_equal 等工具",
+            "理解 asv 基准的组织与对比",
+            "认识多平台 wheel 构建与 BLAS 矩阵"
+          ],
+          "source_files": [
+            "numpy/testing/_private/utils.py",
+            "benchmarks/benchmarks/bench_ufunc.py",
+            ".spin/cmds.py"
+          ],
+          "minimal_modules": [
+            "测试断言实现（testing/_private/utils.py）",
+            "asv 基准范例（benchmarks/benchmarks/bench_ufunc.py）",
+            "工程命令（.spin/cmds.py 的 test/bench/lint/docs）"
+          ],
+          "practice_task": "用 numpy.testing.assert_allclose 写一个带相对/绝对容差的浮点比较；再用 spin bench 运行一次 ufunc 基准并解读 asv 输出。",
+          "depends_on": [
+            "u1-l5",
+            "u4-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
