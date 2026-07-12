@@ -1,0 +1,558 @@
+{
+  "project": "nano-vllm",
+  "head": "bb823b3e06983d71485a8e1f23715ebd87d98ef8",
+  "rationale": "nano-vllm 代码量虽小（约 1200 行），但概念密度高，涵盖 LLM 推理引擎的调度、PagedAttention 显存管理、Prefix Caching、Triton 内核、CUDA Graph、torch.compile 与张量并行等机制。因此学习路线按「先宏观后微观、先数据流后优化」设计：第 1 单元（入门）让读者跑通推理并建立全局代码地图；第 2 单元讲解请求生命周期与 Scheduler 的 prefill/decode 调度、分块与抢占，这是理解引擎主循环的关键；第 3 单元聚焦显存侧，讲解 PagedAttention 的块管理、基于哈希的 Prefix Caching 以及 KV Cache 显存预算；第 4 单元进入模型执行侧，依次讲解输入张量准备、Attention 与 Triton 内核、Context 元数据传递、Qwen3 模型结构和张量并行线性层；第 5 单元覆盖高级优化（CUDA Graph、torch.compile 算子融合）与运行时扩展（多进程+共享内存的 TP、safetensors 权重加载与 packed_modules_mapping）。讲义依赖关系呈线性递进，每篇只解决一个主题并配备可操作的实践任务，便于读者由浅入深逐层吃透整个推理系统。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：项目认知与首次推理",
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "learning_goals": [
+            "理解 nano-vllm 的定位与核心特性（离线推理、Prefix Caching、张量并行、CUDA Graph）",
+            "掌握 pip 安装与 HuggingFace 模型下载方式",
+            "跑通 example.py 完成第一次 LLM 推理并读懂输出"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "LLM",
+            "SamplingParams"
+          ],
+          "order": 1,
+          "practice_task": "克隆仓库并安装依赖，下载 Qwen3-0.6B 模型权重，运行 example.py；随后修改 prompts 列表与 SamplingParams 的 max_tokens/temperature，观察生成结果与长度变化。",
+          "source_files": [
+            "README.md",
+            "example.py"
+          ],
+          "title": "项目总览与快速上手",
+          "topic": "介绍 nano-vllm 是什么、它的核心特性、安装方式，并用 example.py 跑通第一次推理。"
+        },
+        {
+          "id": "u1-l2",
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-codebase-structure.md",
+          "learning_goals": [
+            "掌握 engine/layers/models/utils 四个子包的职责划分",
+            "理解 LLM 与 LLMEngine 的继承关系",
+            "能根据功能需求快速定位到对应源码文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "LLM",
+            "LLMEngine"
+          ],
+          "order": 2,
+          "practice_task": "阅读 nanovllm/__init__.py 与 llm.py，绘制一张从 LLM.generate 到模型前向的模块依赖关系图，标出沿途经过的每个文件。",
+          "source_files": [
+            "nanovllm/__init__.py",
+            "nanovllm/llm.py",
+            "pyproject.toml"
+          ],
+          "title": "目录结构与代码入口",
+          "topic": "梳理 nanovllm 包的目录组织，从 __init__ 的导出到 LLM 子类，建立全局代码地图。"
+        },
+        {
+          "id": "u1-l3",
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-generate-flow.md",
+          "learning_goals": [
+            "理解 generate 的整体流程：编码、add_request、循环 step",
+            "掌握一次 step 中 schedule→run→postprocess 的职责",
+            "理解 prefill/decode 阶段的吞吐统计逻辑"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "LLMEngine.generate",
+            "LLMEngine.step",
+            "Scheduler"
+          ],
+          "order": 3,
+          "practice_task": "在 LLMEngine.step() 中加日志，打印每一步是 prefill 还是 decode、调度了多少条 seq、产出多少 token，跑一次推理并记录节奏。",
+          "source_files": [
+            "nanovllm/engine/llm_engine.py"
+          ],
+          "title": "从 generate 到推理主循环",
+          "topic": "跟踪 LLMEngine 的 generate/add_request/step，理解「调度-前向-后处理」的推理主循环。"
+        },
+        {
+          "id": "u1-l4",
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l4-config-and-sampling-params.md",
+          "learning_goals": [
+            "掌握 Config 各字段的含义与默认值",
+            "理解 SamplingParams 如何影响生成",
+            "了解 hf_config 的自动加载与 max_model_len 的裁剪"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Config",
+            "SamplingParams"
+          ],
+          "order": 4,
+          "practice_task": "分别修改 max_num_batched_tokens、enforce_eager、tensor_parallel_size 等参数，用 bench.py 对比不同配置下的吞吐与显存表现。",
+          "source_files": [
+            "nanovllm/config.py",
+            "nanovllm/sampling_params.py"
+          ],
+          "title": "配置体系：Config 与 SamplingParams",
+          "topic": "讲解 Config 的引擎参数与 SamplingParams 的采样参数，理解引擎可调旋钮与默认值。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "order": 2,
+      "title": "调度与请求管理",
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-sequence-lifecycle.md",
+          "learning_goals": [
+            "理解 Sequence 的 token 计数字段（num_tokens/num_cached_tokens/num_scheduled_tokens）",
+            "掌握 WAITING/RUNNING/FINISHED 状态机流转",
+            "理解 __getstate__/__setstate__ 为多进程通信做的精简"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Sequence",
+            "SequenceStatus"
+          ],
+          "order": 1,
+          "practice_task": "手动构造一个 Sequence 对象，模拟 prefill 与多次 append_token 过程，逐步打印各计数字段和 block_table 的变化。",
+          "source_files": [
+            "nanovllm/engine/sequence.py"
+          ],
+          "title": "Sequence：请求状态与生命周期",
+          "topic": "解析 Sequence 如何记录请求的 token、block_table、调度进度，以及三种状态的流转。"
+        },
+        {
+          "id": "u2-l2",
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-scheduler-prefill-decode.md",
+          "learning_goals": [
+            "理解 schedule 的返回值与 prefill 优先于 decode 的策略",
+            "掌握 max_num_seqs 与 max_num_batched_tokens 的约束作用",
+            "理解 postprocess 如何写回 token 并判定序列终止"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Scheduler.schedule",
+            "Scheduler.postprocess"
+          ],
+          "order": 2,
+          "practice_task": "把 max_num_batched_tokens 设得很小，构造多个长短不一的请求，画出每一步 schedule 返回的 seq 列表与各自的 num_scheduled_tokens。",
+          "source_files": [
+            "nanovllm/engine/scheduler.py"
+          ],
+          "title": "Scheduler：prefill 与 decode 调度",
+          "topic": "讲解 Scheduler 如何在 waiting/running 队列间调度，受 max_num_seqs 与 max_num_batched_tokens 约束。"
+        },
+        {
+          "id": "u2-l3",
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-chunked-prefill-preemption.md",
+          "learning_goals": [
+            "理解 chunked prefill 的触发条件与只对首条序列切片的设计",
+            "掌握 preempt 的抢占与恢复逻辑",
+            "理解 decode 阶段 can_append 的显存检查"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Scheduler.schedule",
+            "Scheduler.preempt",
+            "BlockManager.can_append"
+          ],
+          "order": 3,
+          "practice_task": "通过调小可用块或调大 max_num_seqs 制造显存压力，观察 preempt 是否被触发，记录 waiting/running 队列的变化时序。",
+          "source_files": [
+            "nanovllm/engine/scheduler.py",
+            "nanovllm/engine/block_manager.py"
+          ],
+          "title": "Chunked prefill 与抢占机制",
+          "topic": "讲解分块 prefill 如何把长 prompt 切片处理，以及 KV 不足时如何 preempt 回退 decode 序列。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "显存与 KV Cache",
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-block-manager.md",
+          "learning_goals": [
+            "理解 block 概念与序列的 block_table",
+            "掌握引用计数与 free/used 块池管理",
+            "理解 may_append 在跨块时分配新块的逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BlockManager",
+            "Block"
+          ],
+          "order": 1,
+          "practice_task": "实例化 BlockManager，模拟两条序列的 allocate/append/deallocate 过程，打印 free_block_ids 与 used_block_ids 验证引用计数。",
+          "source_files": [
+            "nanovllm/engine/block_manager.py",
+            "nanovllm/engine/sequence.py"
+          ],
+          "title": "PagedAttention 块管理 BlockManager",
+          "topic": "讲解 Block 与 BlockManager 的块分配、引用计数、追加，理解 paged KV cache 的组织方式。"
+        },
+        {
+          "id": "u3-l2",
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-prefix-caching.md",
+          "learning_goals": [
+            "理解 compute_hash 的链式哈希与前缀依赖",
+            "掌握 can_allocate 返回缓存命中块数的语义",
+            "理解 hash_blocks 在后处理时把新块登记进哈希表"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BlockManager.compute_hash",
+            "BlockManager.can_allocate",
+            "BlockManager.hash_blocks"
+          ],
+          "order": 2,
+          "practice_task": "构造两条共享前缀的序列，第一次推理后第二次命中缓存，对比 can_allocate 返回的缓存块数并验证 num_cached_tokens 的跳过。",
+          "source_files": [
+            "nanovllm/engine/block_manager.py"
+          ],
+          "title": "Prefix Caching 哈希匹配机制",
+          "topic": "讲解基于 xxhash 的链式前缀哈希如何实现缓存命中与块复用。"
+        },
+        {
+          "id": "u3-l3",
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1"
+          ],
+          "filename": "u3-l3-kv-cache-allocation.md",
+          "learning_goals": [
+            "理解基于剩余显存与 gpu_memory_utilization 的块数预算公式",
+            "掌握单个 block 的字节数构成",
+            "理解 kv_cache 张量形状与各层 k_cache/v_cache 的挂载"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ModelRunner.allocate_kv_cache",
+            "ModelRunner.warmup_model"
+          ],
+          "order": 3,
+          "practice_task": "调整 gpu_memory_utilization，打印实际分配到的 num_kvcache_blocks，并计算理论 block_bytes 验证块数估算。",
+          "source_files": [
+            "nanovllm/engine/model_runner.py",
+            "nanovllm/config.py"
+          ],
+          "title": "KV Cache 显存预算与分配",
+          "topic": "讲解 ModelRunner 如何根据剩余显存和 gpu_memory_utilization 计算块数并分配 KV cache。"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "advanced",
+      "order": 4,
+      "title": "模型执行",
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "filename": "u4-l1-model-runner-input-prep.md",
+          "learning_goals": [
+            "理解 prefill 的 varlen 打包（input_ids/positions/cu_seqlens）",
+            "掌握 slot_mapping 如何把 token 映射到 KV cache 槽位",
+            "理解 decode 阶段 context_lens 与 block_tables 的构造"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ModelRunner.prepare_prefill",
+            "ModelRunner.prepare_decode",
+            "ModelRunner.run"
+          ],
+          "order": 1,
+          "practice_task": "在 prepare_prefill 中打印一组 seq 的 cu_seqlens_q/cu_seqlens_k 与 slot_mapping，手动验证它们与 block_table 的对应关系。",
+          "source_files": [
+            "nanovllm/engine/model_runner.py"
+          ],
+          "title": "ModelRunner 与输入准备",
+          "topic": "讲解 prepare_prefill/prepare_decode 如何构造 input_ids、positions、slot_mapping、cu_seqlens 等张量。"
+        },
+        {
+          "id": "u4-l2",
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-attention-triton-kernel.md",
+          "learning_goals": [
+            "理解 flash_attn_varlen_func 与 flash_attn_with_kvcache 的使用差异",
+            "掌握 store_kvcache 把新 K/V 写入对应槽位的逻辑",
+            "理解前缀缓存命中时用 cache 中的 k/v 替换计算结果"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Attention",
+            "store_kvcache",
+            "store_kvcache_kernel"
+          ],
+          "order": 2,
+          "practice_task": "阅读 store_kvcache_kernel，画出给定 slot_mapping 时 key/value 写入 k_cache/v_cache 的偏移映射，并解释 slot=-1 的跳过分支。",
+          "source_files": [
+            "nanovllm/layers/attention.py"
+          ],
+          "title": "Attention 与 Triton store_kvcache 内核",
+          "topic": "讲解 Attention 如何用 flash_attn 做 varlen prefill 与 paged decode，以及 Triton 内核如何把 K/V 写入 paged cache。"
+        },
+        {
+          "id": "u4-l3",
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-context-metadata.md",
+          "learning_goals": [
+            "理解 Context dataclass 各字段的含义",
+            "掌握 set_context/get_context/reset_context 的生命周期",
+            "理解 prefill 时 ParallelLMHead 只取每序列最后一个 token 的优化"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Context",
+            "set_context",
+            "get_context"
+          ],
+          "order": 3,
+          "practice_task": "追踪一次 run() 中 set_context 设置的字段，分别说明它们被 Attention.forward 和 ParallelLMHead.forward 如何消费。",
+          "source_files": [
+            "nanovllm/utils/context.py",
+            "nanovllm/layers/attention.py",
+            "nanovllm/layers/embed_head.py"
+          ],
+          "title": "Context 元数据传递机制",
+          "topic": "讲解全局 Context 如何在 ModelRunner 与 Attention/LMHead 之间传递注意力元数据，避免改函数签名。"
+        },
+        {
+          "id": "u4-l4",
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-qwen3-architecture.md",
+          "learning_goals": [
+            "理解 DecoderLayer 的前向计算流与残差 RMSNorm",
+            "掌握 q_norm/k_norm 与 RoPE 在 attention 中的位置",
+            "理解 tie_word_embeddings 与 compute_logits 的关系"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Qwen3ForCausalLM",
+            "Qwen3DecoderLayer",
+            "Qwen3Attention",
+            "Qwen3MLP"
+          ],
+          "order": 4,
+          "practice_task": "跟踪一个 token 从 embed_tokens 经各 decoder layer 到 lm_head 的完整前向，标注每一步输入输出张量的形状。",
+          "source_files": [
+            "nanovllm/models/qwen3.py",
+            "nanovllm/layers/rotary_embedding.py",
+            "nanovllm/layers/layernorm.py",
+            "nanovllm/layers/activation.py"
+          ],
+          "title": "Qwen3 模型结构详解",
+          "topic": "讲解 Qwen3ForCausalLM/Model/DecoderLayer 的前向，含带 q/k norm 的 attention、MLP 与残差 RMSNorm。"
+        },
+        {
+          "id": "u4-l5",
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-parallel-linear-tp.md",
+          "learning_goals": [
+            "理解列并行与行并行的切分差异",
+            "掌握 QKVParallelLinear 中 q/k/v 的分片偏移计算",
+            "理解 RowParallelLinear 的 all_reduce 与 VocabParallelEmbedding 的词表切分"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ColumnParallelLinear",
+            "RowParallelLinear",
+            "QKVParallelLinear",
+            "MergedColumnParallelLinear",
+            "VocabParallelEmbedding"
+          ],
+          "order": 5,
+          "practice_task": "在 tensor_parallel_size=1 下验证各并行层权重等于完整权重；并推演 tp_size=2 时每个 rank 持有 qkv_proj 的哪些行。",
+          "source_files": [
+            "nanovllm/layers/linear.py",
+            "nanovllm/layers/embed_head.py"
+          ],
+          "title": "张量并行线性层与权重分片",
+          "topic": "讲解 Column/Row/QKV/Merged 并行线性层如何在 TP 下切分权重，以及 VocabParallelEmbedding/ParallelLMHead 的词表切分。"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "advanced",
+      "order": 5,
+      "title": "高性能优化与运行时扩展",
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u5-l1-cuda-graph.md",
+          "learning_goals": [
+            "理解 CUDA Graph 的捕获流程与 graph_bs 选择",
+            "掌握 graph_vars 在回放时如何填充输入",
+            "理解 run_model 中何时走图、何时走 eager"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ModelRunner.capture_cudagraph",
+            "ModelRunner.run_model"
+          ],
+          "order": 1,
+          "practice_task": "对比 enforce_eager=True 与 False 的 decode 吞吐，在 graph.replay() 前后记录单步耗时验证 CUDA Graph 的加速效果。",
+          "source_files": [
+            "nanovllm/engine/model_runner.py"
+          ],
+          "title": "CUDA Graph 捕获与回放",
+          "topic": "讲解 capture_cudagraph 如何预录多档 batch 的计算图，run_model 如何在 decode 时回放以降低 kernel launch 开销。"
+        },
+        {
+          "id": "u5-l2",
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u5-l2-torch-compile-fusion.md",
+          "learning_goals": [
+            "识别哪些层使用了 @torch.compile",
+            "理解算子融合对 kernel launch 与中间显存的影响",
+            "理解 Sampler 基于指数分布的一步采样实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "RMSNorm",
+            "RotaryEmbedding",
+            "SiluAndMul",
+            "Sampler"
+          ],
+          "order": 2,
+          "practice_task": "挑选 RMSNorm 或 RotaryEmbedding，分析 @torch.compile 融合了哪些逐元素算子，用一段简单 benchmark 验证融合前后的速度差。",
+          "source_files": [
+            "nanovllm/layers/layernorm.py",
+            "nanovllm/layers/rotary_embedding.py",
+            "nanovllm/layers/activation.py",
+            "nanovllm/layers/sampler.py"
+          ],
+          "title": "torch.compile 算子融合",
+          "topic": "讲解 RMSNorm、RoPE、SiluAndMul、Sampler 上的 @torch.compile 如何融合小算子以加速。"
+        },
+        {
+          "id": "u5-l3",
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u5-l3-tp-runtime-mp-shm.md",
+          "learning_goals": [
+            "理解 LLMEngine 用 spawn 拉起 worker 与事件同步",
+            "掌握 write_shm/read_shm 的 pickle 广播协议",
+            "理解多 rank 下只由 rank 0 负责采样的设计"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LLMEngine.__init__",
+            "ModelRunner.loop",
+            "ModelRunner.call",
+            "ModelRunner.write_shm",
+            "ModelRunner.read_shm"
+          ],
+          "order": 3,
+          "practice_task": "用 tensor_parallel_size=2 跑推理，梳理一次 run 调用从 rank0 write_shm 广播到各 worker loop 执行的完整时序。",
+          "source_files": [
+            "nanovllm/engine/llm_engine.py",
+            "nanovllm/engine/model_runner.py"
+          ],
+          "title": "张量并行运行时：多进程与共享内存 IPC",
+          "topic": "讲解 LLMEngine 如何用 spawn 多进程拉起 worker，rank 0 通过共享内存 + Event 广播调用实现 TP 协同。"
+        },
+        {
+          "id": "u5-l4",
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u5-l4-weight-loading.md",
+          "learning_goals": [
+            "理解 safetensors 文件的遍历加载流程",
+            "掌握 packed_modules_mapping 把 HF 权重名映射到合并张量",
+            "理解各并行层 weight_loader 的分片写入行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "load_model",
+            "packed_modules_mapping",
+            "weight_loader"
+          ],
+          "order": 4,
+          "practice_task": "追踪 HF 权重 q_proj/k_proj/v_proj 如何经 packed_modules_mapping 与 QKVParallelLinear.weight_loader 装入 qkv_proj，画出 shard_offset 与 shard_size 的索引映射。",
+          "source_files": [
+            "nanovllm/utils/loader.py",
+            "nanovllm/models/qwen3.py",
+            "nanovllm/layers/linear.py"
+          ],
+          "title": "safetensors 权重加载与 packed_modules_mapping",
+          "topic": "讲解 load_model 如何从 safetensors 读权重，借助 packed_modules_mapping 把 HF 的 q/k/v、gate/up 等权重装入合并后的张量。"
+        }
+      ]
+    }
+  ]
+}
