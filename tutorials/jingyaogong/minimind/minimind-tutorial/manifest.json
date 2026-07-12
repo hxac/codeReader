@@ -1,0 +1,852 @@
+{
+  "project": "minimind",
+  "head": "512eed0b6556e741d80864f054d45d271459772a",
+  "rationale": "minimind 是一个从 0 用 PyTorch 原生实现的大模型全链路训练项目，覆盖分词器、模型结构、Pretrain、SFT、LoRA、白盒蒸馏、DPO、PPO/GRPO/CISPO、Agentic RL 直到推理部署的完整过程，且核心算法均不依赖 transformers/trl/peft 的高层封装。学习路线遵循「先跑起来再读结构、先吃透主干再深入后训练」的原则：第 1 单元让读者从 README 与 eval_llm.py 快速建立项目全景并完成一次推理；第 2 单元打通分词器（BPE+ByteLevel、特殊标记、chat_template）与数据集（Pretrain/SFT/DPO/RLAIF/Agent 多种 Dataset 与标签构造）这两条输入链路；第 3 单元由外到内拆解 model_minimind.py：配置与骨架、RMSNorm/GQA Attention、RoPE/YaRN 外推、SwiGLU/MoE 路由、CausalLM 前向损失、自定义 generate 采样；第 4 单元提炼训练公共设施（学习率调度、DDP、混合精度、断点续训、跨卡恢复）；第 5 单元串起 Pretrain→Full SFT 主线；第 6 单元进入参数高效微调（LoRA 原理与训练）与白盒知识蒸馏；第 7 单元是项目最具特色的后训练强化学习部分，从 RL 统一视角与 DPO 入手，依次讲解训推分离的 Rollout 引擎、奖励模型与奖励塑造、GRPO/CISPO、PPO（Critic/GAE）以及多轮工具 Agentic RL；第 8 单元收束于模型格式转换与生态对接、OpenAI 兼容 API 服务、WebUI 与工具调用评测。单元之间通过 depends_on 显式标注依赖，确保读者始终在前置知识完备的前提下推进，整体由 beginner 到 advanced 形成一条可复现、可理解、可扩展的学习闭环。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：定位、目录与首次推理",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "MiniMind 是什么：项目定位与全链路全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "用 README 介绍 MiniMind 的定位、设计理念（大道至简、从 0 原生实现）、覆盖的训练阶段与已发布模型，帮助读者建立全局认知。",
+          "learning_goals": [
+            "理解 MiniMind 是一个从 0 训练超小语言模型的全链路开源项目及其核心卖点",
+            "列出项目覆盖的训练阶段：Pretrain / SFT / LoRA / 蒸馏 / DPO / PPO / GRPO / CISPO / Agentic RL",
+            "了解 minimind-3 与 minimind-3-moe 的参数规模与对齐 Qwen3 生态的取向"
+          ],
+          "source_files": [
+            "README.md",
+            "README_en.md"
+          ],
+          "minimal_modules": [
+            "项目介绍",
+            "更新日志",
+            "已发布模型列表"
+          ],
+          "practice_task": "阅读 README，绘制一张训练阶段流程图（Pretrain→SFT→DPO/RL→Agent），并标注每个阶段对应的训练脚本文件名。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与本地运行环境搭建",
+          "order": 2,
+          "filename": "u1-l2-directory-and-run.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录结构（model / dataset / trainer / scripts）、依赖安装（requirements.txt）、数据集放置与软硬配置，让读者能把项目跑起来。",
+          "learning_goals": [
+            "掌握 model/dataset/trainer/scripts 四大目录的职责划分",
+            "能根据 requirements.txt 配置可运行环境并确认 CUDA 可用性",
+            "知道各 jsonl 数据集应放在 ./dataset 目录及其推荐组合"
+          ],
+          "source_files": [
+            "README.md",
+            "requirements.txt",
+            "dataset/dataset.md"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "requirements",
+            "快速开始第0步"
+          ],
+          "practice_task": "克隆仓库、安装 requirements.txt，并用 `import torch; print(torch.cuda.is_available())` 验证后端，列出 trainer 目录下所有训练脚本。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一次推理：eval_llm.py 与对话体验",
+          "order": 3,
+          "filename": "u1-l3-inference-and-generate.md",
+          "level": "beginner",
+          "topic": "通过 eval_llm.py 体验模型推理，理解 load_from（torch 权重 vs transformers 格式）、weight 前缀、open_thinking 与 historys 等关键参数。",
+          "learning_goals": [
+            "能用 eval_llm.py 加载预训练/SFT 权重完成一次对话",
+            "理解 --load_from 与 --weight 参数如何定位模型权重",
+            "初步认识 chat_template 的 add_generation_prompt 与 open_thinking 开关"
+          ],
+          "source_files": [
+            "eval_llm.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "eval_llm.main",
+            "init_model",
+            "CLI 推理章节"
+          ],
+          "practice_task": "下载 minimind-3 权重后，分别用 `--load_from ./minimind-3` 与 `--load_from model --weight full_sft --open_thinking 1` 各跑一次对话，对比思考开关效果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "分词器与数据：模型吃什么",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Tokenizer、BPE 与 chat_template",
+          "order": 1,
+          "filename": "u2-l1-tokenizer-and-chat-template.md",
+          "level": "beginner",
+          "topic": "讲解 train_tokenizer.py 如何从 0 训练 BPE+ByteLevel 分词器、定义特殊标记与 buffer token，以及 tokenizer_config.json 中 chat_template 如何组织多轮对话、tool_call 与 think 标签。",
+          "learning_goals": [
+            "理解 BPE+ByteLevel 分词与 6400 词表的取舍",
+            "掌握特殊标记（<|im_start|>/<|im_end|>/<tool_call>/<think> 等）的作用",
+            "能看懂 chat_template 的 jinja 结构与 open_thinking 分支如何注入 <think>"
+          ],
+          "source_files": [
+            "trainer/train_tokenizer.py",
+            "model/tokenizer_config.json",
+            "model/tokenizer.json"
+          ],
+          "minimal_modules": [
+            "train_tokenizer.train_tokenizer",
+            "special_tokens_list",
+            "chat_template"
+          ],
+          "practice_task": "运行 train_tokenizer.py 的 eval_tokenizer 部分打印压缩率，并手动用 tokenizer.apply_chat_template 渲染一条带 tool_calls 的多轮对话，检查 <tool_call>/<tool_response> 输出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "数据集加载与标签/掩码构造",
+          "order": 2,
+          "filename": "u2-l2-datasets-and-labels.md",
+          "level": "beginner",
+          "topic": "逐类讲解 lm_dataset.py 中的 PretrainDataset、SFTDataset、DPODataset、RLAIFDataset、AgentRLDataset，重点说明 SFT 的 bos/eos 掩码、loss_mask 构造与 pre/post_processing_chat。",
+          "learning_goals": [
+            "理解 PretrainDataset 如何加 bos/eos 并把 padding 设为 -100",
+            "掌握 SFTDataset 用 bos_id/eos_id 定位 assistant 段并构造 labels 的方法",
+            "区分 DPO chosen/rejected、RLAIF 留空 answer、Agent 的 messages+gt 数据形态"
+          ],
+          "source_files": [
+            "dataset/lm_dataset.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "PretrainDataset",
+            "SFTDataset.generate_labels",
+            "RLAIFDataset",
+            "pre_processing_chat"
+          ],
+          "practice_task": "写一段脚本，加载 sft_t2t_mini.jsonl 的一条样本，打印其 input_ids 与 labels 对齐结果，验证只有 assistant 回答部分参与 loss。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模型结构：从配置到逐层拆解",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "MiniMindConfig 与模型整体骨架",
+          "order": 1,
+          "filename": "u3-l1-config-and-model-skeleton.md",
+          "level": "intermediate",
+          "topic": "讲解 MiniMindConfig 的全部超参（hidden_size、num_layers、num_heads/kv_heads、rope_theta、MoE 选项、tie_word_embeddings 等）以及 MiniMindModel/MiniMindForCausalLM 的整体组装。",
+          "learning_goals": [
+            "理解 MiniMindConfig 各字段与 Qwen3 对齐的工程取舍",
+            "掌握 MiniMindModel 的 embed→blocks→norm→lm_head 数据流与权重共享 tie",
+            "能根据 dim/n_layers 选择配置并计算参数量"
+          ],
+          "source_files": [
+            "model/model_minimind.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "MiniMindConfig",
+            "MiniMindModel",
+            "MiniMindForCausalLM"
+          ],
+          "practice_task": "修改 MiniMindConfig 的 hidden_size 与 num_hidden_layers，用 get_model_params 打印两种配置的总参数量与差异。",
+          "depends_on": [
+            "u1-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "RMSNorm 与 GQA 注意力（含 KV Cache）",
+          "order": 2,
+          "filename": "u3-l2-rmsnorm-and-attention.md",
+          "level": "intermediate",
+          "topic": "拆解 RMSNorm 的归一化、Attention 的 q/k/v 投影、q_norm/k_norm、GQA 的 repeat_kv、Flash Attention 分支与 KV Cache 拼接。",
+          "learning_goals": [
+            "理解 RMSNorm 相比 LayerNorm 的优势与实现细节",
+            "掌握 GQA（q_heads=8/kv_heads=4）中 repeat_kv 的广播逻辑",
+            "理解 scaled_dot_product_attention 分支与手动 causal mask 的触发条件"
+          ],
+          "source_files": [
+            "model/model_minimind.py"
+          ],
+          "minimal_modules": [
+            "RMSNorm",
+            "Attention.forward",
+            "repeat_kv"
+          ],
+          "practice_task": "构造一个 (1,8,768) 输入手动调用 Attention，打印启用/不启用 flash 分支时的输出形状，并验证 KV Cache 累积后的 key/value 长度。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "RoPE 旋转位置编码与 YaRN 长度外推",
+          "order": 3,
+          "filename": "u3-l3-rope-and-yarn.md",
+          "level": "intermediate",
+          "topic": "讲解 precompute_freqs_cis 频率预计算、apply_rotary_pos_emb 旋转嵌入，以及 YaRN 的 ramp 插值如何实现 4 倍长度外推。",
+          "learning_goals": [
+            "理解 RoPE 用旋转矩阵编码相对位置的数学原理",
+            "掌握 freqs_cos/freqs_sin 的构造与 rotate_half 的实现",
+            "理解 YaRN 通过 ramp 缩放频率实现长度外推的机制"
+          ],
+          "source_files": [
+            "model/model_minimind.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "precompute_freqs_cis",
+            "apply_rotary_pos_emb",
+            "rope_scaling 配置"
+          ],
+          "practice_task": "对比 inference_rope_scaling 开启/关闭时 precompute_freqs_cis 输出的频率曲线，并在长文本上用 eval_llm.py --inference_rope_scaling 观察 PPL 变化。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "SwiGLU 前馈网络与 MoE 路由",
+          "order": 4,
+          "filename": "u3-l4-swiglu-and-moe.md",
+          "level": "intermediate",
+          "topic": "讲解 FeedForward 的 SwiGLU（gate/up/down）结构，以及 MOEFeedForward 的 top-k 路由、专家分发、负载均衡 aux_loss。",
+          "learning_goals": [
+            "理解 SwiGLU 激活 gate*up 的前馈计算",
+            "掌握 MoE 的 softmax gate、top-k 选择与 index_add_ 分发",
+            "理解 router_aux_loss 如何缓解专家负载不均"
+          ],
+          "source_files": [
+            "model/model_minimind.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "FeedForward",
+            "MOEFeedForward",
+            "MiniMindBlock"
+          ],
+          "practice_task": "实例化一个 use_moe=True 的 MiniMindBlock，送入随机 token，打印 aux_loss 数值并解释 4 experts/top-1 为何只比 dense 慢约 50%。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "CausalLM 前向传播与交叉熵损失",
+          "order": 5,
+          "filename": "u3-l5-forward-and-loss.md",
+          "level": "intermediate",
+          "topic": "讲解 MiniMindForCausalLM.forward 如何组织 hidden_states、logits_to_keep 切片、labels 的位移交叉熵，以及 aux_loss 的聚合与返回。",
+          "learning_goals": [
+            "理解 logits_to_keep 切片对训练/推理效率的优化",
+            "掌握 labels 位移（x[:-1] vs y[1:]）与 ignore_index=-100 的交叉熵",
+            "理解 MoE 下 loss = CE + aux_loss 的组合"
+          ],
+          "source_files": [
+            "model/model_minimind.py"
+          ],
+          "minimal_modules": [
+            "MiniMindForCausalLM.forward",
+            "MiniMindModel.forward",
+            "MoeCausalLMOutputWithPast"
+          ],
+          "practice_task": "构造一段 input_ids+labels 调用 forward，分别打印 dense 与 moe 配置下的 loss 与 aux_loss，验证 aux_loss 对总 loss 的贡献。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "自定义 generate：采样、解码与流式输出",
+          "order": 6,
+          "filename": "u3-l6-custom-generate.md",
+          "level": "intermediate",
+          "topic": "逐段拆解 MiniMindForCausalLM.generate：KV Cache 复用、temperature/top_k/top_p/repetition_penalty 采样、batch finished 处理与 streamer 流式输出。",
+          "learning_goals": [
+            "理解自回归生成循环与 KV Cache 增量推理",
+            "掌握 top-k/top-p/temperature/repetition_penalty 的采样实现",
+            "理解 streamer 与 num_return_sequences、return_kv 等扩展点"
+          ],
+          "source_files": [
+            "model/model_minimind.py",
+            "eval_llm.py"
+          ],
+          "minimal_modules": [
+            "MiniMindForCausalLM.generate",
+            "TextStreamer 调用"
+          ],
+          "practice_task": "在 generate 中临时把 do_sample 设为 False 改为贪心解码，对比同一条 prompt 在贪心与采样下的输出差异，并统计 tokens/s。",
+          "depends_on": [
+            "u3-l5",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "训练基础设施：公共工具与分布式",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "训练公共工具：日志、学习率、种子与采样器",
+          "order": 1,
+          "filename": "u4-l1-training-common-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 trainer_utils.py 中的 Logger、get_lr 余弦调度、setup_seed、init_model、SkipBatchSampler、init_distributed_mode 等训练公共组件。",
+          "learning_goals": [
+            "理解 get_lr 的余弦退火公式与手动 lr 设置方式",
+            "掌握 init_model 如何根据 from_weight 加载/初始化权重并统计参数",
+            "理解 SkipBatchSampler 如何支持断点续训跳过已训练 batch"
+          ],
+          "source_files": [
+            "trainer/trainer_utils.py"
+          ],
+          "minimal_modules": [
+            "get_lr",
+            "init_model",
+            "SkipBatchSampler",
+            "setup_seed"
+          ],
+          "practice_task": "用 matplotlib 画出 get_lr 在 total_steps 上的学习率曲线，并写一个 SkipBatchSampler 小例子验证跳过前 N 个 batch 的行为。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "检查点保存与断点续训",
+          "order": 2,
+          "filename": "u4-l2-checkpoint-and-resume.md",
+          "level": "intermediate",
+          "topic": "讲解 lm_checkpoint 的双重保存（推理权重 .pth + 续训 _resume.pth）、跨 GPU 数量自动换算 step、wandb run 恢复与原子写入（os.replace）。",
+          "learning_goals": [
+            "理解推理权重与续训检查点的区别与命名规则",
+            "掌握跨 GPU 数量恢复时 step 的自动换算逻辑",
+            "理解 wandb_id 续传与 os.replace 原子写入的工程意义"
+          ],
+          "source_files": [
+            "trainer/trainer_utils.py",
+            "trainer/train_pretrain.py"
+          ],
+          "minimal_modules": [
+            "lm_checkpoint",
+            "init_distributed_mode",
+            "续训说明"
+          ],
+          "practice_task": "在 train_pretrain.py 中用 --from_resume 1 跑几步后中断，再次启动验证能从断点 step 恢复，并解释换卡后 step 如何调整。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "DDP 分布式、混合精度与梯度累积",
+          "order": 3,
+          "filename": "u4-l3-ddp-and-amp.md",
+          "level": "intermediate",
+          "topic": "以 train_pretrain.py 的 train_epoch 为模板，讲解 DistributedDataParallel 包装、autocast 混合精度、GradScaler、梯度累积与 clip_grad_norm、torch.compile 的协作。",
+          "learning_goals": [
+            "理解 torchrun --nproc_per_node 启动 DDP 的流程与 LOCAL_RANK 设置",
+            "掌握 autocast + GradScaler 的 fp16/bf16 混合精度训练",
+            "理解梯度累积与 grad_clip 如何在有限显存下模拟大 batch"
+          ],
+          "source_files": [
+            "trainer/train_pretrain.py",
+            "trainer/trainer_utils.py"
+          ],
+          "minimal_modules": [
+            "train_epoch",
+            "init_distributed_mode",
+            "DistributedDataParallel 包装"
+          ],
+          "practice_task": "用 `torchrun --nproc_per_node 1 train_pretrain.py` 启动一次预训练，在代码里打印 local_rank 与 world_size，并解释 accumulation_steps 对有效 batch 的放大。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "主线训练链路：Pretrain 与 Full SFT",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "预训练：从 0 学会词语接龙",
+          "order": 1,
+          "filename": "u5-l1-pretrain.md",
+          "level": "intermediate",
+          "topic": "完整走读 train_pretrain.py 的训练主流程，结合 PretrainDataset 讲解 next-token prediction 目标、loss=CE+aux_loss、权重命名 pretrain_{dim}.pth。",
+          "learning_goals": [
+            "理解预训练无监督 next-token prediction 的训练范式",
+            "掌握 train_pretrain.py 的 9 步初始化与训练循环结构",
+            "能解读预训练日志中的 loss/logits_loss/aux_loss/lr 含义"
+          ],
+          "source_files": [
+            "trainer/train_pretrain.py",
+            "dataset/lm_dataset.py",
+            "trainer/trainer_utils.py"
+          ],
+          "minimal_modules": [
+            "train_epoch",
+            "PretrainDataset",
+            "main 训练主流程"
+          ],
+          "practice_task": "用 pretrain_t2t_mini.jsonl 跑若干步预训练，记录 loss 曲线，并用 `python eval_llm.py --weight pretrain` 测试续写效果。",
+          "depends_on": [
+            "u4-l3",
+            "u2-l2",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "全参数监督微调（Full SFT）与多轮对话",
+          "order": 2,
+          "filename": "u5-l2-full-sft.md",
+          "level": "intermediate",
+          "topic": "走读 train_full_sft.py，结合 SFTDataset 与 chat_template 讲解多轮对话、指令/回答掩码、混合 Tool Call 与思考标签的监督训练。",
+          "learning_goals": [
+            "理解 SFT 阶段对齐多轮对话模板的目标",
+            "掌握 SFTDataset 如何只对 assistant 段计算 loss",
+            "理解 sft_t2t 数据如何混入 Tool Call 与 reasoning 样本"
+          ],
+          "source_files": [
+            "trainer/train_full_sft.py",
+            "dataset/lm_dataset.py",
+            "model/tokenizer_config.json"
+          ],
+          "minimal_modules": [
+            "train_epoch",
+            "SFTDataset",
+            "create_chat_prompt"
+          ],
+          "practice_task": "基于 pretrain 权重跑 full_sft，得到 full_sft_768.pth 后用 eval_llm.py 对话，并对比 pretrain 与 full_sft 的回答质量。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "参数高效微调与知识蒸馏",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "LoRA 原理与从 0 实现",
+          "order": 1,
+          "filename": "u6-l1-lora-implementation.md",
+          "level": "advanced",
+          "topic": "讲解 model_lora.py 中 LoRA 低秩分支（A 高斯/B 置零初始化）、apply_lora 对方阵 Linear 的 monkey-patch、save/load/merge 的实现。",
+          "learning_goals": [
+            "理解 LoRA 用 BA 低秩增量逼近权重更新的数学动机",
+            "掌握 apply_lora 用 setattr 改写 forward 的注入方式与 in==out 方阵筛选",
+            "理解 save_lora 只存增量、merge_lora 把 BA 合并回 base 的流程"
+          ],
+          "source_files": [
+            "model/model_lora.py"
+          ],
+          "minimal_modules": [
+            "LoRA",
+            "apply_lora",
+            "merge_lora"
+          ],
+          "practice_task": "对一个加载好的模型调用 apply_lora，统计 LoRA 可训练参数占比，并用 save_lora/load_lora 验证增量权重能正确复现输出。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "LoRA 训练流程与垂域适配",
+          "order": 2,
+          "filename": "u6-l2-lora-training.md",
+          "level": "advanced",
+          "topic": "走读 train_lora.py：冻结 base 只训练含 'lora' 的参数、lora_xxx_{dim}.pth 命名、为何禁用 torch.compile，以及医学/自我认知垂域数据用法。",
+          "learning_goals": [
+            "理解 train_lora 如何冻结 base 参数并过滤 LoRA 参数进优化器",
+            "掌握 LoRA 权重命名规则与 eval_llm.py --lora_weight 组合推理",
+            "理解 torch.compile 与 monkey-patch forward 不兼容的原因"
+          ],
+          "source_files": [
+            "trainer/train_lora.py",
+            "model/model_lora.py",
+            "eval_llm.py"
+          ],
+          "minimal_modules": [
+            "train_epoch",
+            "参数冻结与过滤",
+            "save_lora"
+          ],
+          "practice_task": "准备一份小型 lora_identity.jsonl 自我认知数据，训练 lora_identity 权重，用 `eval_llm.py --weight full_sft --lora_weight lora_identity` 验证身份回答。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "白盒知识蒸馏：教师-学生与 KL 损失",
+          "order": 1,
+          "filename": "u6-l3-knowledge-distillation.md",
+          "level": "advanced",
+          "topic": "走读 train_distillation.py：教师/学生双模型加载、温度缩放的 KL 蒸馏损失、alpha 加权的 CE+KL 组合、词表对齐与混合精度。",
+          "learning_goals": [
+            "理解黑盒蒸馏（SFT）与白盒蒸馏（分布拟合）的区别",
+            "掌握温度 T 缩放与 T²KL 损失的实现 distillation_loss",
+            "理解 alpha 控制硬标签 CE 与软标签 KL 的权重"
+          ],
+          "source_files": [
+            "trainer/train_distillation.py",
+            "dataset/lm_dataset.py"
+          ],
+          "minimal_modules": [
+            "distillation_loss",
+            "train_epoch",
+            "教师/学生模型加载"
+          ],
+          "practice_task": "配置一个更小的学生模型与 full_sft 教师，跑若干步蒸馏，打印 CE_loss 与 KL distill_loss 的数值变化，验证学生 logit 逐步逼近教师分布。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "强化学习后训练：DPO、RLAIF 与 Agentic RL",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "DPO 偏好优化与 Policy Optimization 统一视角",
+          "order": 1,
+          "filename": "u7-l1-dpo-and-unified-rl.md",
+          "level": "advanced",
+          "topic": "以 train_dpo.py 讲解 DPO 的 chosen/rejected、ref 模型、logits_to_log_probs、dpo_loss；并引入 PO 算法策略项/优势项/正则项的统一框架。",
+          "learning_goals": [
+            "理解 DPO 直接最大化 chosen 优于 rejected 对数几率的损失",
+            "掌握 logits_to_log_probs 与 dpo_loss 中 ref/policy log-ratio 的计算",
+            "建立策略项 f(r)、优势项 g(A)、正则项 h(KL) 的统一 PO 视角"
+          ],
+          "source_files": [
+            "trainer/train_dpo.py",
+            "dataset/lm_dataset.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "logits_to_log_probs",
+            "dpo_loss",
+            "PO 统一框架"
+          ],
+          "practice_task": "基于 full_sft 跑若干步 DPO，记录 dpo_loss 下降，并对照 README 的统一 PO 表格说明 DPO 的三项分别是什么。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "训推分离：Rollout 引擎抽象与实现",
+          "order": 2,
+          "filename": "u7-l2-rollout-engine.md",
+          "level": "advanced",
+          "topic": "讲解 rollout_engine.py 的 RolloutEngine 抽象、TorchRolloutEngine（本地 generate + compute_per_token_logps）与 SGLangRolloutEngine（HTTP /generate + update_weights_from_disk）及工厂函数。",
+          "learning_goals": [
+            "理解训推分离：训练侧更新 policy、rollout 侧高吞吐采样的解耦",
+            "掌握 TorchRolloutEngine 如何用 generate 采样并回算 old logps",
+            "理解 SGLangRolloutEngine 通过 HTTP 同步权重与返回 logprob 的流程"
+          ],
+          "source_files": [
+            "trainer/rollout_engine.py"
+          ],
+          "minimal_modules": [
+            "RolloutResult",
+            "TorchRolloutEngine",
+            "SGLangRolloutEngine",
+            "compute_per_token_logps"
+          ],
+          "practice_task": "写一个小脚本调用 create_rollout_engine('torch', ...) 对几个 prompt 做 rollout，打印 completion_ids、per_token_logps 与 prompt_lens 的形状。",
+          "depends_on": [
+            "u3-l6",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "奖励信号：Reward Model 与奖励塑造",
+          "order": 3,
+          "filename": "u7-l3-reward-model-and-shaping.md",
+          "level": "advanced",
+          "topic": "讲解 LMForRewardModel（InternLM2-Reward 包装、分数截断）与 train_grpo.calculate_rewards 的多维奖励（长度、think 格式、重复惩罚、RM 分数）以及奖励稀疏问题。",
+          "learning_goals": [
+            "理解 model-based 连续奖励如何缓解小模型奖励稀疏",
+            "掌握 calculate_rewards 中长度/think 格式/rep_penalty/RM 的加权和",
+            "理解 RLAIF 数据 assistant 留空、由 policy 实时采样的设定"
+          ],
+          "source_files": [
+            "trainer/trainer_utils.py",
+            "trainer/train_grpo.py",
+            "dataset/lm_dataset.py"
+          ],
+          "minimal_modules": [
+            "LMForRewardModel",
+            "calculate_rewards",
+            "RLAIFDataset"
+          ],
+          "practice_task": "加载 InternLM2-Reward，对一组 prompt+response 调用 get_score，再对照 calculate_rewards 解释为何小模型要用连续奖励而非二元奖励。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "GRPO 与 CISPO：分组相对优势与无梯度截断",
+          "order": 4,
+          "filename": "u7-l4-grpo-and-cispo.md",
+          "level": "advanced",
+          "topic": "走读 train_grpo.grpo_train_epoch：分组归一化优势、ratio、token 级 KL、GRPO clip 与 CISPO 的 clamp(ratio)*log π 分支、completion_mask 构造。",
+          "learning_goals": [
+            "理解 GRPO 用组内均值/方差作 baseline 消除 Critic 的优势计算",
+            "掌握 ratio=exp(logp-old_logp)、PPO clip 与 per_token_kl 的实现",
+            "理解 CISPO 把策略项改写为 clamp(ratio)·A·logπ 以避免 clip 截断梯度"
+          ],
+          "source_files": [
+            "trainer/train_grpo.py",
+            "trainer/rollout_engine.py"
+          ],
+          "minimal_modules": [
+            "grpo_train_epoch",
+            "calculate_rewards",
+            "loss_type 分支"
+          ],
+          "practice_task": "用 rlaif.jsonl 跑若干步 GRPO，再切 --loss_type cispo 跑同样步数，对比 reward、policy_loss、KL_ref 曲线差异。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2",
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "PPO：Actor-Critic 与 GAE 优势估计",
+          "order": 5,
+          "filename": "u7-l5-ppo-and-gae.md",
+          "level": "advanced",
+          "topic": "走读 train_ppo.py：CriticModel 价值头、GAE（gamma/lambda）优势、多轮 PPO 更新与 early_stop_kl、policy/value 双损失与双优化器。",
+          "learning_goals": [
+            "理解 PPO 的 Actor-Critic 双网络结构与 CriticModel 价值头",
+            "掌握 GAE 用 gamma/lambda 计算优势 A=R-V(s) 的流程",
+            "理解 ppo_update_iters、mini_batch、early_stop_kl 的多轮更新机制"
+          ],
+          "source_files": [
+            "trainer/train_ppo.py",
+            "trainer/rollout_engine.py"
+          ],
+          "minimal_modules": [
+            "CriticModel",
+            "ppo_train_epoch",
+            "GAE 优势计算"
+          ],
+          "practice_task": "基于 full_sft 跑若干步 PPO，记录 actor loss、value loss 与 KL，对照 README 解释 PPO 为何 reward 提升缓慢且显存约 1.5-2 倍。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l6",
+          "title": "Agentic RL：多轮工具调用与延迟奖励",
+          "order": 6,
+          "filename": "u7-l6-agentic-rl.md",
+          "level": "advanced",
+          "topic": "走读 train_agent.py：parse_tool_calls/execute_tool 多轮 rollout、rollout_single 的工具执行循环、calculate_rewards 的多维度延迟奖励与 gt 校验、GRPO/CISPO 更新。",
+          "learning_goals": [
+            "理解多轮 Tool-Use rollout：生成 tool_call→执行→拼回 observation→续写",
+            "掌握 Agentic RL 的延迟整轮奖励 R(answer)+R(tool)+R(format)+R(rm)-R(unfinished)",
+            "理解 gt 校验、工具合法性、SIGALRM 超时等工程细节"
+          ],
+          "source_files": [
+            "trainer/train_agent.py",
+            "dataset/lm_dataset.py",
+            "model/tokenizer_config.json"
+          ],
+          "minimal_modules": [
+            "rollout_single",
+            "execute_tool",
+            "calculate_rewards",
+            "rl_train_epoch"
+          ],
+          "practice_task": "用 agent_rl_math.jsonl 跑若干步 Agentic RL，用 `eval_toolcall.py --weight agent` 测试一组数学 ToolUse 任务并统计成功率，对比 full_sft。",
+          "depends_on": [
+            "u7-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "推理部署、评测与生态对接",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "模型格式转换与第三方生态对接",
+          "order": 1,
+          "filename": "u8-l1-model-conversion.md",
+          "level": "advanced",
+          "topic": "讲解 convert_model.py 的 torch↔transformers 互转、转 Qwen3/Qwen3-MoE 格式、convert_merge_base_lora 合并 LoRA、jinja/json 模板互转，以及 llama.cpp/ollama/vllm/SGLang 对接要点。",
+          "learning_goals": [
+            "理解 torch .pth 与 transformers 格式的区别与互转",
+            "掌握 convert_merge_base_lora 把基模+LoRA 合并导出完整模型",
+            "了解向 llama.cpp/ollama/vllm/MNN 对接的关键步骤"
+          ],
+          "source_files": [
+            "scripts/convert_model.py",
+            "model/model_minimind.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "convert_torch2transformers",
+            "convert_merge_base_lora",
+            "第三方框架章节"
+          ],
+          "practice_task": "用 convert_model.py 把 full_sft_768.pth 转为 transformers 格式，再用 ollama 或 vllm 加载做一次推理，对比与 eval_llm.py 的输出。",
+          "depends_on": [
+            "u3-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "OpenAI 兼容 API 服务：流式、思考与工具调用",
+          "order": 2,
+          "filename": "u8-l2-openai-api-server.md",
+          "level": "advanced",
+          "topic": "走读 serve_openai_api.py：FastAPI + /v1/chat/completions、ChatRequest、CustomStreamer 线程队列流式、parse_response 拆分 reasoning_content 与 tool_calls、SSE 输出。",
+          "learning_goals": [
+            "理解如何用 FastAPI 实现兼容 OpenAI 协议的 chat completions 端点",
+            "掌握 CustomStreamer 基于线程队列的 SSE 流式生成",
+            "理解 parse_response 如何把 <think>/<tool_call> 解析为 reasoning_content 与 tool_calls"
+          ],
+          "source_files": [
+            "scripts/serve_openai_api.py",
+            "scripts/chat_api.py",
+            "eval_llm.py"
+          ],
+          "minimal_modules": [
+            "/v1/chat/completions",
+            "CustomStreamer",
+            "parse_response",
+            "ChatRequest"
+          ],
+          "practice_task": "启动 serve_openai_api.py，用 scripts/chat_api.py 或 curl 调用，分别测试 open_thinking 与 tools 字段，观察 reasoning_content 与 tool_calls 的返回结构。",
+          "depends_on": [
+            "u3-l6",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "WebUI 聊天界面与工具调用评测",
+          "order": 3,
+          "filename": "u8-l3-webui-and-toolcall-eval.md",
+          "level": "advanced",
+          "topic": "走读 web_demo.py（Streamlit 多轮工具交互、思考折叠展示、双语 UI、session_state）与 eval_toolcall.py（本地/API 双后端、TEST_CASES、多轮工具执行评测）。",
+          "learning_goals": [
+            "理解 Streamlit WebUI 的模型加载、流式生成与多轮工具执行循环",
+            "掌握 eval_toolcall.py 的 local/api 双后端与多轮 tool_call 评测流程",
+            "理解思考内容与工具调用的 HTML 渲染与状态管理"
+          ],
+          "source_files": [
+            "scripts/web_demo.py",
+            "scripts/eval_toolcall.py",
+            "scripts/chat_api.py"
+          ],
+          "minimal_modules": [
+            "load_model_tokenizer",
+            "run_case",
+            "execute_tool",
+            "process_assistant_content"
+          ],
+          "practice_task": "运行 streamlit run web_demo.py 体验多轮工具对话，再用 eval_toolcall.py --backend local --weight agent 自动跑 TEST_CASES，统计工具调用成功率。",
+          "depends_on": [
+            "u8-l2",
+            "u7-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
