@@ -2,130 +2,147 @@
 
 ## 1. 本讲目标
 
-上一讲（u4-l1）我们看到 `ModelRunner.prepare_prefill` / `prepare_decode` 构造出了一大堆注意力元数据——`cu_seqlens_q`、`cu_seqlens_k`、`slot_mapping`、`context_lens`、`block_tables`、`max_seqlen_q/k`——并且只把 `input_ids` 和 `positions` 作为返回值显式传给 `run_model`。可问题是：底层的 `Attention` 层要写 KV cache、读 paged cache，离不开 `slot_mapping` 和 `block_tables`；`ParallelLMHead` 在 prefill 时要「只取每条序列最后一个 token」，离不开 `cu_seqlens_q`。这些元数据**没有**出现在模型前向的函数签名里，它们是怎么「凭空」到达底层各个层的？
+本讲解决一个贯穿整个模型执行层的问题：**每一步推理需要传给 Attention 的大量「注意力元数据」（写哪、读哪、序列边界、是否 prefill……）到底是怎么从调度器流到神经网络层里的？**
 
-答案就是本讲的主角：一个名为 `Context` 的**全局单例**。本讲回答三个问题：
+学完后你应当能够：
 
-- 这个全局 `Context` 装了哪些字段，每个字段被谁消费？
-- `set_context` / `get_context` / `reset_context` 三件套是如何协同，让元数据「按推理步存活、按推理步清空」的？
-- 为什么 nano-vllm 选择「全局变量传参」而不是「改函数签名」？这种设计在 CUDA Graph 场景下又带来了什么约束？
+1. 说清楚为什么 nano-vllm 选择用一个**全局 `Context` 对象**来传递这些元数据，而不是把它们塞进函数签名。
+2. 逐字段解释 `Context` 的八个字段各自含义、形状、以及在哪类阶段被使用。
+3. 描述 `set_context` / `get_context` / `reset_context` 三个函数在一步推理中的生命周期，理解「先设置、再前向、后清空」的纪律。
+4. 读懂 `Attention.forward` 与 `ParallelLMHead.forward` 是如何消费这些字段的，尤其是 prefill 时 LMHead「只取每序列最后一个 token」这一关键优化。
 
-学完本讲，你应当能够：
-
-- 逐字段说清 `Context` dataclass 的含义，并画出「字段 → 消费者」的映射表。
-- 描述一次 `run()` 调用中 `Context` 的完整生命周期：`prepare_*` 设值 → 各层 `get_context()` 读值 → `reset_context()` 清空。
-- 解释 `ParallelLMHead.forward` 在 prefill 时用 `cu_seqlens_q[1:] - 1` 只取每序列最后一个 token 的优化原理，并手算给定 batch 时的下标。
-- 理解「全局 Context」这一架构取舍的收益（保持 Transformer 前向签名干净）与代价（隐式依赖、需配合 reset）。
-
-本讲是「模型执行」单元的接口骨架，承接 u4-l1（张量从哪来）与 u4-l2（attention 怎么用），为 u4-l4（Qwen3 结构）、u5-l1（CUDA Graph）打基础。
+本讲是 u4-l1（ModelRunner 输入准备）与 u4-l2（Attention/Triton 内核）的承接：那两讲已经讲清楚 `slot_mapping`、`cu_seqlens_q/k`、`block_tables`、`context_lens` 这些张量**是什么、怎么算出来的**；本讲专门讲它们**用什么管道送到消费方手里**。
 
 ## 2. 前置知识
 
-本讲默认你已掌握以下前置结论，这里只做最简回顾：
-
-- **模型前向签名（来自 u4-l1）**：`Qwen3ForCausalLM.forward(input_ids, positions)` 与 `Qwen3Model.forward(input_ids, positions)` 只吃这两个张量。`Attention.forward(q, k, v)` 只吃当前层的 q/k/v。这些签名里**没有** `slot_mapping`、`block_tables` 之类的注意力元数据。
-- **prefill / decode 的张量结构（来自 u4-l1）**：prefill 用 varlen 打包，`cu_seqlens_q`（新 token）/ `cu_seqlens_k`（含缓存前缀的全部 key）标记边界；decode 每序列送 1 个 token，靠 `context_lens`（序列总长）和 `block_tables` 读历史 cache。
-- **Attention 的两套路径（来自 u4-l2）**：prefill 走 `flash_attn_varlen_func`（靠 `cu_seqlens`），decode 走 `flash_attn_with_kvcache`（靠 `context_lens` + `block_table`），新 K/V 都由 `store_kvcache` 经 `slot_mapping` 写入 cache。
-
-此外你需要一个 Python 工程概念：
-
-- **全局单例（module-level singleton）**：在一个模块里定义一个对象，同一进程内所有 `import` 它的代码拿到的都是同一个实例。这里用一个模块级变量 `_CONTEXT` 当「消息板」，写入方（`ModelRunner`）往里放数据，读取方（`Attention` / `ParallelLMHead`）从中取数据，从而绕开函数参数传递。
-
-一句话直觉：**`Context` 是 `ModelRunner` 与底层 attention 层之间的一条「侧信道」——主路（函数参数）只走 `input_ids` / `positions`，旁路（全局 Context）走所有注意力元数据。**
+- **`nn.Module.forward` 的签名约束**：PyTorch 里一个层的计算入口是 `forward(...)`，子模块由父模块在它自己的 `forward` 里逐个调用。如果你想给深层的一个子模块（比如第 5 层的 Attention）传一个新参数，通常得让这条调用链上**每一层**的 `forward` 都多接一个参数并透传下去。
+- **全局变量模式（global / singleton）**：在模块顶层定义一个对象，任何地方都能读写它。好处是「随用随取、不用透传」；坏处是隐式耦合（读方依赖一个看不见的全局状态）、不利于并发测试。nano-vllm 在这里刻意用了这个模式，并靠严格的「设置—清空」纪律来规避它的缺点。
+- **varlen 打包**：多条不等长序列首尾相接拼成一维张量，用累计长度数组（`cu_seqlens`）标记每条的边界。这是 u4-l1 的核心概念，本讲直接复用。
+- **prefill 与 decode 两阶段**：prefill 一次性算完 prompt（每序列多个 token），decode 每步每序列只算 1 个新 token。两者需要的元数据不同，`Context.is_prefill` 就是切换开关。
 
 ## 3. 本讲源码地图
 
-本讲围绕一个核心文件，并追踪它的两类消费者：
+| 文件 | 作用 | 本讲关注点 |
+| --- | --- | --- |
+| `nanovllm/utils/context.py` | 定义全局 `Context` 与三个访问函数 | 全部内容，本讲的核心 |
+| `nanovllm/engine/model_runner.py` | 引擎执行器，`Context` 的**写端** | `prepare_prefill` / `prepare_decode` / `run` / `capture_cudagraph` 里对 `set_context` / `get_context` / `reset_context` 的调用 |
+| `nanovllm/layers/attention.py` | Attention 层，`Context` 的**读端**之一 | `Attention.forward` 如何按 `is_prefill` 分流、如何用 `slot_mapping` / `cu_seqlens` / `block_tables` / `context_lens` |
+| `nanovllm/layers/embed_head.py` | 词表嵌入与 LM Head，`Context` 的**读端**之二 | `ParallelLMHead.forward` 如何用 `cu_seqlens_q` 抽取每序列最后一个 token |
+| `nanovllm/models/qwen3.py` | Qwen3 模型结构 | 仅用于观察：调用链上各 `forward` 的签名里**没有**任何注意力元数据，验证「走 Context 不走签名」 |
 
-| 文件 | 作用 |
-| --- | --- |
-| [nanovllm/utils/context.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/context.py) | 本讲主角。定义 `Context` dataclass 与 `set_context` / `get_context` / `reset_context` 三件套，全文件不到 30 行。 |
-| [nanovllm/layers/attention.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py) | 消费方一：`Attention.forward` 用 `get_context()` 取 `slot_mapping`（写 cache）、`cu_seqlens`/`max_seqlen`（prefill）、`context_lens`/`block_tables`（decode）。 |
-| [nanovllm/layers/embed_head.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py) | 消费方二：`ParallelLMHead.forward` 用 `get_context()` 取 `is_prefill` 与 `cu_seqlens_q`，在 prefill 时只取每序列最后一个 token。 |
-| [nanovllm/engine/model_runner.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py) | 写入方：`prepare_prefill` / `prepare_decode` 调 `set_context`，`run` 末尾调 `reset_context`，`capture_cudagraph` 在捕获期也会 `set_context`。 |
+---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 Context：为什么需要一个全局单例来传参
+### 4.1 为什么需要 Context：动机与取舍
 
 #### 4.1.1 概念说明
 
-先看一个对照：标准 Transformer 的前向签名是什么样的？在 nano-vllm 里，模型主干是这样调用的（来自 u4-l1）：
+一次 decode 步里，Attention 层要正确地读写 paged KV cache，至少需要这些信息：
 
-```python
-logits = self.model.compute_logits(self.model(input_ids, positions))
-```
+- `slot_mapping`：本步新算出的 K/V 要写到 cache 的哪个物理槽位。
+- `block_tables`：每条序列的历史 K/V 分散在哪些物理块里，attention 要去读。
+- `context_lens`：每条序列当前总长，告诉 attention 往回读多远。
+- `is_prefill`：走 varlen prefill 内核还是 paged decode 内核。
 
-`self.model(input_ids, positions)` 会层层下传：`Qwen3ForCausalLM → Qwen3Model → Qwen3DecoderLayer → Qwen3Attention → Attention`。这条链路上的每一层，签名都只认 `input_ids` / `positions`（以及层内部的 `hidden_states`、`residual`）。
+prefill 步还要多一组 `cu_seqlens_q` / `cu_seqlens_k` / `max_seqlen_q` / `max_seqlen_k`（varlen 打包的边界与最大长度）。这些值**每一步都在变**，因为每步调度的序列集合不同。
 
-可是底层 `Attention` 在 nano-vllm 里要做的事远不止「标准 attention」——它要写 paged KV cache、要从 cache 跨块读历史 K/V、要区分 varlen prefill 与单 token decode。这些都依赖本步的注意力元数据。如果走「改函数签名」这条路，会发生什么？
+问题在于：这些信息**只有最顶层的 `ModelRunner` 知道**（是它根据 `Sequence` 列表算出来的），而**真正需要它们的却是埋在模型深处第 N 层的 `Attention`**。中间隔着 `Qwen3ForCausalLM.forward → Qwen3Model.forward → Qwen3DecoderLayer.forward → Qwen3Attention.forward → Attention.forward` 一长串调用。
 
-```text
-Qwen3Model.forward(input_ids, positions, cu_seqlens_q, cu_seqlens_k,
-                   max_seqlen_q, max_seqlen_k, slot_mapping,
-                   context_lens, block_tables, is_prefill)
-  └── DecoderLayer.forward(... 同样十几个参数 ...)
-        └── Qwen3Attention.forward(... 同样十几个参数 ...)
-              └── Attention.forward(q, k, v, ... 同样十几个参数 ...)
-```
+有两种走法：
 
-每个中间层都得在自己签名里塞进 8 个它**根本不关心、只为往下透传**的参数，签名臃肿、易错、还和 HuggingFace 标准 Transformer 的接口对不齐。`ParallelLMHead`（`lm_head`）就更尴尬：它也需要 `is_prefill` 和 `cu_seqlens_q`，但它住在模型最末端，要把参数一路从 `compute_logits` 传过来。
+1. **透传参数**：给调用链上每一层的 `forward` 都加上这些参数。但 `Qwen3MLP`、`RMSNorm`、`VocabParallelEmbedding` 这些层根本用不到它们，却被迫在签名里挂着、一路往下传，签名臃肿、耦合严重。
+2. **全局 `Context`**：在模块顶层放一个全局对象，`ModelRunner` 在前向前把它填好，任何一层在 `forward` 里 `get_context()` 随用随取，前向结束后清空。
 
-nano-vllm 的解法是**侧信道（side channel）**：用一个全局 `Context` 对象当「消息板」，`ModelRunner` 在每步前向**之前**把本步的元数据贴上去，需要这些数据的层（`Attention`、`ParallelLMHead`）在 `forward` 里**主动去取**。这样：
+nano-vllm 选了第 2 种。这是一个**刻意的设计取舍**：用「全局可变状态」这一通常被视为坏味道的模式，换取调用链签名的干净。它能成立，前提是推理主循环是严格单线程、单步串行的——每一步都是「设置 → 前向 → 清空」的封闭区间，不会有两个步的元数据互相串台。
 
-- 模型主干签名保持干净：`forward(input_ids, positions)`，与标准 Transformer 一致。
-- 只有真正需要元数据的层才 `get_context()`，中间层完全无感。
-- 新增一种元数据（比如未来的某优化）只需给 `Context` 加字段、给写入方加赋值、给消费方加读取，**不动**任何中间层签名。
-
-代价是引入了**隐式依赖**：`Attention.forward` 的行为不再只由参数决定，还取决于全局 `Context` 的当前状态。这就是为什么后面要专门讲生命周期——必须保证 `Attention` 读到的 `Context` 永远是「当前这一步」的。
-
-#### 4.1.2 核心流程：八个字段与一个全局变量
-
-`Context` 是一个带 `slots=True` 的 dataclass，共 8 个字段。`slots=True` 的作用是禁止动态新增属性、节省内存——它本质上是一个「定长结构体」，字段固定：
+#### 4.1.2 核心流程
 
 ```text
-Context 字段            含义                                主要写入方           主要消费方
-─────────────────────────────────────────────────────────────────────────────────────────────
-is_prefill             本步是否 prefill                    prepare_prefill/     Attention 分流、
-                                                            prepare_decode       ParallelLMHead 分流
+一步推理（ModelRunner.run）的 Context 生命周期：
 
-cu_seqlens_q           varlen 的 query 累积长度            prepare_prefill      Attention(prefill)、
-                                                            （decode 留 None）    ParallelLMHead(末 token)
-
-cu_seqlens_k           varlen 的 key 累积长度              prepare_prefill      Attention(prefill)
-                                                            （decode 留 None）
-
-max_seqlen_q           batch 内最长 query 序列长           prepare_prefill      Attention(prefill,
-                                                            （decode 留 0）       flash_attn 内核启动)
-
-max_seqlen_k           batch 内最长 key 序列长             prepare_prefill      Attention(prefill)
-                                                            （decode 留 0）
-
-slot_mapping           每个 token 的 K/V 写入槽位           prepare_prefill/     Attention → store_kvcache
-                                                            prepare_decode       （两个阶段都用）
-
-context_lens           decode 时每序列总长                 prepare_decode       Attention(decode,
-                                                            （prefill 留 None）   cache_seqlens)
-
-block_tables           分页块表（物理块号矩阵）            prepare_decode（必）  Attention(读 cache)、
-                                                            prepare_prefill      （仅前缀缓存时）
+  prepare_prefill / prepare_decode
+        │
+        ├── 计算各项张量（slot_mapping、cu_seqlens、block_tables…）
+        └── set_context(...)          ← 把元数据写进全局 _CONTEXT
+        │
+        ▼
+  model 前向（model.forward → ... → Attention.forward / LMHead.forward）
+        │
+        └── 每个需要的层 get_context()  ← 从全局 _CONTEXT 读元数据
+        │
+        ▼
+  reset_context()                     ← 清空，回到默认空 Context
 ```
 
-一句话归纳：**`cu_seqlens_q/k`、`max_seqlen_q/k` 是 prefill 专属；`context_lens` 是 decode 专属；`slot_mapping` 两个阶段都用；`block_tables` decode 必用、prefill 仅前缀缓存时用；`is_prefill` 是总开关。**
-
-这 8 个字段在「同一步内」是一组一致的快照——要么整组是 prefill 的元数据，要么整组是 decode 的。不存在「半 prefill 半 decode」的混搭，因为调度器每一步只产生纯 prefill 或纯 decode（见 u2-l2）。
+关键直觉：`Context` 是一个**只活一步**的临时信使。它在前向开始前被装满，前向中被层层查阅，前向一结束就被清空。没有任何跨步的状态残留。
 
 #### 4.1.3 源码精读
 
-整个 `Context` 机制的全貌只有这一个文件，请通读：
+先看调用链上的签名，确认元数据**没有**出现在任何 `forward` 参数里。
 
-[utils/context.py:1-27 — Context 三件套全貌](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/context.py#L1-L27)
+`Qwen3ForCausalLM.forward` 只接收 `input_ids` 和 `positions`（[nanovllm/models/qwen3.py:205-210](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L205-L210)），`Qwen3DecoderLayer.forward` 只多一个 `residual`（[nanovllm/models/qwen3.py:146-151](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L146-L151)）。全链路里找不到 `slot_mapping`、`cu_seqlens`、`block_tables` 这些名字——它们根本不在签名里。
+
+再看 `Attention.forward` 怎么拿到这些值的：第一行就是 `context = get_context()`（[nanovllm/layers/attention.py:60](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L60)），此后所有元数据都从 `context` 这个局部变量取。这就是「走 Context 不走签名」的实证。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手验证「注意力元数据走全局 `Context`，而非函数参数」。
+
+**操作步骤**：
+
+1. 打开 `nanovllm/models/qwen3.py`，记录 `Qwen3ForCausalLM.forward`、`Qwen3Model.forward`、`Qwen3DecoderLayer.forward`、`Qwen3Attention.forward` 四个函数的形参列表。
+2. 打开 `nanovllm/layers/attention.py`，记录 `Attention.forward` 的形参。
+3. 用搜索工具（`Grep`）在整个 `nanovllm/` 目录里搜 `slot_mapping`、`cu_seqlens_q`，统计它们作为「函数形参」出现的次数 vs 作为「`context.xxx` 属性访问」出现的次数。
+
+**需要观察的现象**：这些元数据名字**从不**作为模型层 `forward` 的形参出现，只出现在 `ModelRunner.prepare_*`（写入侧）和 `Attention.forward` / `ParallelLMHead.forward` 内部对 `context` 的属性访问里。
+
+**预期结果**：你会在 `model_runner.py` 看到它们作为局部变量被构造并塞进 `set_context`，在 `attention.py` / `embed_head.py` 看到 `context.xxx` 的读取，而在 `qwen3.py` 的所有 `forward` 签名里一无所获。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果改用「参数透传」方案，`Qwen3MLP.forward` 需不需要接收 `slot_mapping`？为什么？
+
+> **答**：逻辑上不需要，MLP 根本不碰 KV cache。但透传方案下，为了让更深层的 `Attention` 拿到 `slot_mapping`，调用链每一层（含 MLP）都得在签名里挂上它并往下传——这正是 nano-vllm 用全局 `Context` 想避免的污染。
+
+**练习 2**：全局可变状态通常被批评为「不利于并发」。为什么 nano-vllm 这里可以接受？
+
+> **答**：因为推理主循环是严格单步串行的，且每步都用 `reset_context()` 收尾，`_CONTEXT` 在任一时刻只反映当前这一步的元数据，不存在多步并发读写同一全局的问题。多进程张量并行时，每个进程有自己独立的 `_CONTEXT`（见 4.3.4）。
+
+---
+
+### 4.2 Context 数据类：八字段速查表
+
+#### 4.2.1 概念说明
+
+`Context` 是一个用 `@dataclass(slots=True)` 定义的轻量数据类（与 `Config`、`SamplingParams` 同一种写法）。它本身**不持有任何可训练参数、不分配显存**，只是八个字段的容器：一个布尔标志、四个「张量或 None」、两个整数、再一个「张量或 None」。它的全部价值在于：把这些异构的元数据**打包成一个对象**，方便整体设置、整体清空。
+
+#### 4.2.2 核心流程
+
+字段一览（按源码声明顺序）：
+
+| 字段 | 类型 | 默认值 | 含义 | prefill 用 | decode 用 |
+| --- | --- | --- | --- | --- | --- |
+| `is_prefill` | `bool` | `False` | 阶段开关：True 走 varlen prefill 内核，False 走 paged decode 内核；同时控制 LMHead 是否抽取最后一个 token | ✅ | ✅ |
+| `cu_seqlens_q` | `Tensor \| None` | `None` | 本步**新算的 Q** 的累计序列长度，形状 `(num_seqs+1,)`，int32 | ✅ | ❌（None） |
+| `cu_seqlens_k` | `Tensor \| None` | `None` | **全部 K**（含缓存前缀）的累计序列长度，形状 `(num_seqs+1,)`，int32；`cu_seqlens_k > cu_seqlens_q` 即命中前缀缓存 | ✅ | ❌（None） |
+| `max_seqlen_q` | `int` | `0` | 本步新 token 中最长的序列长度，供 flash attention 内核选 launch 配置 | ✅ | ❌（0） |
+| `max_seqlen_k` | `int` | `0` | 全部 K 中最长的序列长度，同上 | ✅ | ❌（0） |
+| `slot_mapping` | `Tensor \| None` | `None` | 每个新 token 的 K/V 要写入的物理槽位 `slot = block_id*block_size + 偏移`；prefill 形状 `(总新token数,)`，decode 形状 `(num_seqs,)`；值为 `-1` 表示跳过（CUDA Graph 填充位） | ✅ | ✅ |
+| `context_lens` | `Tensor \| None` | `None` | 每条序列当前总长（历史长度），告诉 decode attention 往回读多远，形状 `(num_seqs,)`，int32 | ❌（None） | ✅ |
+| `block_tables` | `Tensor \| None` | `None` | 每条序列的物理块号表，形状 `(num_seqs, max_num_blocks)`，int32；`-1` 为填充；prefill 仅在命中前缀缓存时才设置 | 视情况 | ✅ |
+
+几个要点：
+
+- 同一个字段在不同阶段语义一致：`slot_mapping` 永远表示「新 K/V 写哪里」，`block_tables` 永远表示「历史 K/V 从哪些块读」。
+- prefill 与 decode 是**互补**的：prefill 不需要 `context_lens`（因为它通过 `cu_seqlens_k` 自己描述了全部 K 的范围），decode 不需要 `cu_seqlens_*`（因为每序列就 1 个 token，没有「打包边界」可言）。
+- `block_tables` 在 prefill 中**条件性**出现：只有当前缀缓存命中、`cu_seqlens_k > cu_seqlens_q` 时才设置（见 u4-l1 / u4-l2）。这时 attention 要从 paged cache 里读出缓存的前缀 K/V，必须知道块号。
+
+#### 4.2.3 源码精读
+
+数据类定义见 [nanovllm/utils/context.py:5-14](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/context.py#L5-L14)：
 
 ```python
-from dataclasses import dataclass
-import torch
-
-
 @dataclass(slots=True)
 class Context:
     is_prefill: bool = False
@@ -136,146 +153,130 @@ class Context:
     slot_mapping: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
     block_tables: torch.Tensor | None = None
+```
 
-_CONTEXT = Context()
+注意几个细节：
+
+- `slots=True` 禁止运行时新增属性，既省内存，也防止拼写错误地写入一个不存在的字段（比如 `context.solt_mapping=...`）而不报错。
+- 所有字段都有默认值，因此 `Context()`（无参构造）会得到一个「全空」对象：`is_prefill=False`、所有张量为 `None`。这正是 `reset_context()` 想要的干净状态。
+- 类型用 `torch.Tensor | None`，明确表示「这个阶段可能没有这个字段」，读端必须容忍 `None`。
+
+#### 4.2.4 代码实践
+
+**实践目标**：在不跑模型的前提下，亲手构造 `Context` 并观察字段默认值与赋值效果（纯 CPU 即可）。
+
+**操作步骤**：
+
+1. 在仓库根目录起一个 Python REPL（无需 GPU）。
+2. 执行：
+   ```python
+   import torch
+   from nanovllm.utils.context import Context, get_context, set_context, reset_context
+
+   c = Context()
+   print(c)                          # 观察默认值
+   print(get_context().is_prefill)   # 模块初始全局对象
+   ```
+3. 手工塞入一组假张量：
+   ```python
+   cu = torch.tensor([0, 5, 12, 20], dtype=torch.int32)
+   sm = torch.arange(20, dtype=torch.int32)
+   set_context(True, cu, cu, 8, 20, sm, None, None)
+   ctx = get_context()
+   print(ctx.is_prefill, ctx.cu_seqlens_q.tolist(), ctx.slot_mapping.tolist())
+   reset_context()
+   print(get_context().slot_mapping)   # 应回到 None
+   ```
+
+**需要观察的现象**：`set_context` 之后 `get_context()` 拿到的是新填的对象；`reset_context()` 之后所有张量字段变回 `None`、`is_prefill` 变回 `False`。
+
+**预期结果**：第三次打印输出 `None`，证明 reset 确实清空了全局状态。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：decode 阶段调用 `set_context(False, slot_mapping=..., context_lens=..., block_tables=...)` 时，`cu_seqlens_q` 会是什么值？为什么 decode 不需要它？
+
+> **答**：会是默认值 `None`。decode 每序列每步只算 1 个 token，不存在「多条不等长序列打包」的边界问题，因此不需要 `cu_seqlens_*`；decode 内核 `flash_attn_with_kvcache` 靠 `context_lens` 与 `block_tables` 直接定位历史。
+
+**练习 2**：为什么 `block_tables` 在 prefill 阶段有时是 `None`、有时又不是？
+
+> **答**：prefill 默认直接用本步新算出的 K/V 做 attention（无前缀缓存时 `cu_seqlens_k == cu_seqlens_q`），不需要查物理块，故 `block_tables=None`；一旦命中前缀缓存（`cu_seqlens_k > cu_seqlens_q`），attention 要去 paged cache 读缓存的前缀 K/V，就必须知道块号，于是 `prepare_prefill` 会调用 `prepare_block_tables` 生成它（见 u4-l1）。
+
+---
+
+### 4.3 生命周期：set / get / reset 与 ModelRunner 的写入时序
+
+#### 4.3.1 概念说明
+
+光有数据类还不够，还要有三个访问函数把它的生命周期管起来：
+
+- `set_context(...)`：**写入**。用传入的参数新建一个 `Context` 对象，替换掉全局的 `_CONTEXT`。注意它是「整体替换」而非「逐字段修改」——每次都造一个全新对象。
+- `get_context()`：**读取**。返回当前的全局 `_CONTEXT`。任何消费方在前向里调它来拿元数据。
+- `reset_context()`：**清空**。把 `_CONTEXT` 替换成一个全默认值的空 `Context()`，为下一步腾出干净状态。
+
+这三者构成一个严格的「开—用—关」括号，由 `ModelRunner` 负责合上。
+
+#### 4.3.2 核心流程
+
+一步 `ModelRunner.run` 中的时序：
+
+```text
+run(seqs, is_prefill):
+  1. prepare_prefill(seqs)  ──┐
+     或 prepare_decode(seqs)   │ 内部末尾调用 set_context(...)
+                              ─┘  → 全局 _CONTEXT 被填满
+  2. run_model(input_ids, positions, is_prefill)
+     └─ model 前向：Attention/LMHead 各自 get_context() 读元数据
+        （decode 走 CUDA Graph 时，run_model 自己也 get_context()
+         把元数据拷进静态 graph_vars，详见 4.3.4）
+  3. sampler(logits, temperatures)   ← 与 Context 无关
+  4. reset_context()                 → 全局 _CONTEXT 清空
+```
+
+两条写入路径：
+
+- **prefill 路径**（`prepare_prefill`）：`set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)`，按位置参数填满七个槽，`context_lens` 显式传 `None`，`block_tables` 视前缀缓存而定。
+- **decode 路径**（`prepare_decode`）：`set_context(False, slot_mapping=..., context_lens=..., block_tables=...)`，用关键字参数只填 decode 需要的三个，其余保持默认（`cu_seqlens_*=None`、`max_seqlen_*=0`）。
+
+无论哪条路径，`run` 的最后一步永远是 `reset_context()`。
+
+#### 4.3.3 源码精读
+
+三个函数的定义极简，见 [nanovllm/utils/context.py:16-27](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/context.py#L16-L27)：
+
+```python
+_CONTEXT = Context()                      # 模块级全局，初始为空
 
 def get_context():
     return _CONTEXT
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None):
+def set_context(is_prefill, cu_seqlens_q=None, ...):
     global _CONTEXT
-    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables)
+    _CONTEXT = Context(is_prefill, cu_seqlens_q, ...)   # 整体替换
 
 def reset_context():
     global _CONTEXT
-    _CONTEXT = Context()
+    _CONTEXT = Context()                   # 换回全默认空对象
 ```
 
-逐行拆解：
+注意 `set_context` / `reset_context` 都用了 `global _CONTEXT` 声明，因为它们要**重新绑定**模块级变量（而不是修改对象内部）。这是 Python 里「替换全局对象」的标准写法。
 
-- `@dataclass(slots=True)`：自动生成 `__init__`，字段顺序就是构造函数参数顺序。每个字段都带默认值，所以 `Context()` 会得到一个「全默认」的空对象——这正是 `reset_context` 想要的「白板」状态：`is_prefill=False`、所有张量为 `None`、所有整数为 `0`。
-- 字段顺序不是随便排的：`is_prefill` 在最前，因为 `set_context` 把它作为唯一的位置必填参数；其余字段都有默认值，调用方可按需用关键字传。
-- `_CONTEXT = Context()`：模块级变量，进程内唯一。它在 `import` 时就被初始化为一个空 `Context`。
-- `get_context()`：只读，直接返回当前 `_CONTEXT`。**它不拷贝**——返回的是对象引用，所以消费方拿到后应「即取即用」，不要跨步持有（下一步 `set_context` 会换一个新对象）。
-- `set_context(...)`：**新建**一个 `Context` 对象并让 `_CONTEXT` 重新指向它。注意它不是修改旧对象的字段，而是整个换一个新对象——这样上一步的对象即便被某处意外持有，也不会被「就地改坏」，每一步的数据互不污染。
-- `reset_context()`：把 `_CONTEXT` 换回一个全默认的空 `Context()`，等价于「清空消息板」。
-
-这里有一个值得注意的对比：`set_context` 选择「换新对象」而非「改字段」，是出于安全——每步的数据都是一次性的快照，换新对象能保证旧引用不可变，调试时也更容易定位「这一步的 Context 到底是什么」。但这也意味着：**不能用「把某字段置 None」来表示「本步不需要它」之外的任何渐进状态**，因为下一步 `set_context` 会整体覆盖。
-
-#### 4.1.4 代码实践
-
-**实践目标**：动手确认 `Context` 是全局单例、且 `set_context` 换的是对象引用。
-
-**操作步骤**：
-
-1. 写一个最小的 Python 片段（**示例代码，不需放进仓库**），单独 import 这个模块：
-
-   ```python
-   # 示例代码：验证 Context 单例语义
-   from nanovllm.utils.context import get_context, set_context, reset_context, Context
-
-   c0 = get_context()
-   print("初始 is_prefill =", c0.is_prefill, "slot_mapping =", c0.slot_mapping)
-
-   set_context(True, slot_mapping="fake_tensor_a")   # 字符串代替张量，仅观察引用
-   c1 = get_context()
-   print("set 后 is_prefill =", c1.is_prefill, "slot_mapping =", c1.slot_mapping)
-
-   print("c0 is c1 ?", c0 is c1)   # set_context 是否换了对象？
-   print("c0.is_prefill =", c0.is_prefill)   # 旧引用是否被就地改坏？
-
-   reset_context()
-   c2 = get_context()
-   print("reset 后 is_prefill =", c2.is_prefill, "c1.is_prefill =", c1.is_prefill)
-   ```
-
-2. 在仓库根目录（已 `pip install -e .` 或 `PYTHONPATH` 含当前目录）运行：
-   ```bash
-   python -c "exec(open('your_snippet.py').read())"
-   ```
-
-**需要观察的现象**：
-
-- 初始 `c0.is_prefill` 为 `False`、`slot_mapping` 为 `None`（全默认空对象）。
-- `set_context` 后 `c1.is_prefill=True`、`slot_mapping="fake_tensor_a"`。
-- `c0 is c1` 应为 `False`——`set_context` **新建**了对象，`c0` 仍指向旧的空对象。
-- `c0.is_prefill` 仍为 `False`——旧引用未被就地修改，证明「换新对象」而非「改字段」。
-- `reset_context` 后 `c2.is_prefill=False`，而 `c1.is_prefill` 仍为 `True`（旧对象不受影响）。
-
-**预期结果**：上述五条全部成立，说明 `Context` 是「按步替换、不可变快照」的全局单例。**待本地验证**（本实践不依赖 GPU）。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：如果把 `@dataclass(slots=True)` 改成普通 `@dataclass`，本讲的逻辑会出错吗？
-**答案**：不会立刻出错，但会失去两点好处。其一，普通 dataclass 允许 `c.some_new_field = x` 这种动态新增属性，容易把字段名拼错（比如 `c.cu_seqlens_q` 写成 `c.cu_seqLens_q`）却悄悄创建新属性而非报错，调试困难；`slots=True` 会直接 `AttributeError`。其二，普通 dataclass 每个实例多一个 `__dict__`，占用更大。这里用 `slots` 是为了「字段固定、早报错、省内存」。
-
-**练习 2**：`set_context` 为什么用「新建对象再赋值」而不是「直接改 `_CONTEXT` 的字段」？请给出一个「改字段会出问题」的场景。
-**答案**：换新对象能让每一步的 Context 成为一个不可变快照。若改成「就地改字段」，假设某段代码在某步前提前 `c = get_context()` 抓了一个引用，并在异步/延迟执行时才读取 `c.slot_mapping`，那么当主流程在下一步 `set_context` 就地改了字段后，这个旧引用读到的就是「下一步」的新值，造成错乱。换新对象则保证旧引用永远停留在它被抓那一刻的状态。nano-vllm 实际上每步都即时消费、不跨步持有，所以两种写法在正常路径下表现一致；换新对象是更稳健的防御式写法。
-
----
-
-### 4.2 set_context / get_context / reset_context 的生命周期
-
-#### 4.2.1 概念说明
-
-全局单例最大的风险是「读到脏数据」——如果上一步的元数据没清干净，本步的 `Attention` 就可能用到上一步的 `slot_mapping`，把 K/V 写错位置。因此 nano-vllm 给 `Context` 设计了一套严格的**「每步生命周期」**：
-
-- **每步开始**：`prepare_prefill` 或 `prepare_decode` 调 `set_context`，把本步的元数据贴上去。
-- **前向期间**：模型主干被调用，沿途每个 `Attention` 层、末端的 `ParallelLMHead` 都 `get_context()` 取用本步数据。
-- **每步结束**：`run` 的最后一行 `reset_context()`，把消息板擦回白板，为下一步兜底。
-
-这套生命周期是「前向正确性」的基石：任何一层只要在前向期间调 `get_context()`，拿到的必然是「当前这一步」的元数据。
-
-#### 4.2.2 核心流程
-
-一次 `ModelRunner.run(seqs, is_prefill)` 中 `Context` 的状态变迁：
-
-```text
-run() 入口
-  │
-  ▼
-(1) prepare_prefill / prepare_decode
-    └── set_context(is_prefill, ...)     ← 写入本步元数据（消息板贴满）
-  │
-  ▼
-(2) run_model(input_ids, positions, is_prefill)
-    └── self.model(...) 前向
-          ├── Qwen3DecoderLayer.forward(...)
-          │     └── Qwen3Attention.forward(...)
-          │           └── Attention.forward(q, k, v)
-          │                 └── context = get_context()   ← 读取本步元数据
-          │                       store_kvcache(... context.slot_mapping)
-          │                       flash_attn_...(context.cu_seqlens_q, ...)
-          ...（多层重复）...
-          └── compute_logits(hidden_states)
-                └── ParallelLMHead.forward(x)
-                      └── context = get_context()         ← 读取本步元数据
-                            if context.is_prefill: 用 context.cu_seqlens_q 取末 token
-  │
-  ▼
-(3) sampler(logits, temperatures)         （采样，不碰 Context）
-  │
-  ▼
-(4) reset_context()                       ← 消息板擦回白板（兜底）
-  │
-  ▼
-run() 返回 token_ids
-```
-
-三条不变式（invariant）：
-
-1. **写入早于读取**：`set_context` 一定在 `self.model(...)` 之前发生（二者都在 `run` 内、且 `prepare_*` 先返回）。否则 attention 会读到上一步或空白的 Context。
-2. **读取方只读不写**：`Attention` / `ParallelLMHead` 只调 `get_context()`，从不 `set_context`。写入权独占在 `ModelRunner` 手里，避免多源写入冲突。
-3. **每步必 reset**：无论本步是 prefill 还是 decode、无论采样是否成功，`run` 末尾的 `reset_context()` 都会执行（除非前向抛异常提前退出）。
-
-#### 4.2.3 源码精读
-
-先看 `run` 里的「设值—前向—清空」三连。这是 `Context` 生命周期的主舞台：
-
-[model_runner.py:214-220 — run 中 Context 的设值与清空](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L214-L220)
+写端的两次调用在 `ModelRunner` 里。prefill 的填入见 [nanovllm/engine/model_runner.py:169](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L169)：
 
 ```python
-def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+```
+
+decode 的填入见 [nanovllm/engine/model_runner.py:187](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L187)：
+
+```python
+set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+```
+
+而「合上括号」的清空在 `run` 的末尾，[nanovllm/engine/model_runner.py:219](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L219)（`reset_context()`），紧跟在采样之后、`return` 之前。把 `run` 的完整骨架列出来看最清楚（[nanovllm/engine/model_runner.py:214-220](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L214-L220)）：
+
+```python
+def run(self, seqs, is_prefill):
     input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
     temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
     logits = self.run_model(input_ids, positions, is_prefill)
@@ -284,372 +285,222 @@ def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
     return token_ids
 ```
 
-注意 `prepare_prefill` / `prepare_decode` 在返回 `input_ids, positions` 的同时，**副作用**就是调了 `set_context`。来看两个写入点的具体参数：
+#### 4.3.4 CUDA Graph 与多进程下的 Context
 
-[model_runner.py:169 — prepare_prefill 末尾的 set_context（prefill 全字段）](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L169)
+有两处进阶场景也依赖 `Context`，这里点到为止，细节留给后续讲义：
 
-```python
-set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
-```
+1. **CUDA Graph 捕获/回放**（详见 u5-l1）。捕获时，`capture_cudagraph` 对每个 batch 档位调用 `set_context(False, slot_mapping=..., context_lens=..., block_tables=...)` 设置一组**静态**元数据（[nanovllm/engine/model_runner.py:240](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L240)），捕获完再 `reset_context()`（[nanovllm/engine/model_runner.py:248](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L248)）。真正 decode 回放时，`run_model` 不在前向里读 `Context`，而是**在前向之外**用 `get_context()` 把当前步的 `slot_mapping` / `context_lens` / `block_tables` 拷进静态 `graph_vars` 缓冲区（[nanovllm/engine/model_runner.py:201-210](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L201-L210)），然后 `graph.replay()`。也就是说：图内的 Attention 在捕获时绑定的是静态张量的指针，图外靠 `get_context()` 往这些指针里填新内容。
 
-prefill 模式按**位置参数**顺序填满：`is_prefill=True`、`cu_seqlens_q`、`cu_seqlens_k`、`max_seqlen_q`、`max_seqlen_k`、`slot_mapping`、第 7 位 `context_lens=None`（prefill 用不到）、第 8 位 `block_tables`（仅前缀缓存时非 `None`）。prefill 显式把 `context_lens` 设为 `None`，保证即便上一步是 decode、`context_lens` 曾有值，本步也不会「漏」过来。
+2. **多进程张量并行**（详见 u5-l3）。`_CONTEXT` 是**进程级**全局，每个 worker 进程各有一份。因为 `run` 在每个 rank 上都被独立调用，每个 rank 各自跑 `prepare_*` 并 `set_context`，而调度元数据（块布局、`cu_seqlens`）在所有 rank 上完全一致，所以各进程的 `Context` 内容等价，无需跨进程同步。
 
-[model_runner.py:187 — prepare_decode 末尾的 set_context（decode 用关键字）](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L187)
+#### 4.3.5 代码实践
 
-```python
-set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
-```
-
-decode 模式只传 `is_prefill=False` 与三个关键字参数：`slot_mapping`、`context_lens`、`block_tables`。其余字段（`cu_seqlens_q/k`、`max_seqlen_q/k`）取默认值 `None` / `0`——decode 的 attention 分支根本不读它们，所以留空无妨。
-
-> **对比两种调用风格**：prefill 用位置参数「全填」，decode 用关键字参数「只填需要的」。二者都依赖 `set_context` 的默认值把未用字段填成「安全空值」。这正是 `Context` 每个字段都带默认值的设计意图——让 prefill / decode 各自只关心自己用得到的字段，未用字段自动是 `None`/`0`，消费方只要在对应分支里读对应字段就不会踩到脏数据。
-
-再看一个容易被忽略的写入点：**CUDA Graph 捕获期**也会 `set_context`。这一点留到 u5-l1 详讲，这里只点出它的存在，因为它揭示了一个 `Context` 设计的深层约束：
-
-[model_runner.py:238-248 — capture_cudagraph 在捕获每档 batch 时 set_context / reset_context](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L238-L248)
-
-```python
-for bs in reversed(self.graph_bs):
-    graph = torch.cuda.CUDAGraph()
-    set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
-    outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
-    with torch.cuda.graph(graph, self.graph_pool):
-        outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
-    ...
-    reset_context()
-```
-
-捕获时 `Attention` / `ParallelLMHead` 同样会 `get_context()`，所以必须在捕获前 `set_context` 把元数据喂上，捕获后再 `reset_context`。这里有一个 `Context` 与 CUDA Graph 交互的关键细节：捕获期 `set_context` 传入的 `slot_mapping[:bs]` 等是**对持久张量 `slot_mapping`（即后文 `graph_vars["slot_mapping"]`）的视图**，而图捕获的是「读这个张量存储」的操作。因此真正 decode 回放时，`run_model` 不能去 `set_context` 换新张量（换了图就读不到了），而是**就地修改 `graph_vars` 里那些持久张量的内容**：
-
-[model_runner.py:200-210 — run_model 图回放路径：就地改 graph_vars，而非 set_context](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L200-L210)
-
-```python
-bs = input_ids.size(0)
-context = get_context()
-graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
-graph_vars = self.graph_vars
-graph_vars["input_ids"][:bs] = input_ids
-graph_vars["positions"][:bs] = positions
-graph_vars["slot_mapping"].fill_(-1)
-graph_vars["slot_mapping"][:bs] = context.slot_mapping
-graph_vars["context_lens"].zero_()
-graph_vars["context_lens"][:bs] = context.context_lens
-graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-graph.replay()
-```
-
-可以看到：图回放路径里 `context = get_context()` 只读不写，把 `context.slot_mapping` 等**拷进** `graph_vars` 的持久张量，然后 `graph.replay()`。这一段深刻体现了 `Context` 的定位——它是「每步的元数据入口」，但**真正被 CUDA Graph 固化的张量身份**是 `graph_vars`，而非 `Context` 本身。完整机制留到 u5-l1；这里只需记住：`Context` 在 eager 与 capture 两条路径下都被 `get_context` 读取，只是图回放路径多了一层「拷进持久张量」的转换。
-
-#### 4.2.4 代码实践
-
-**实践目标**：在真实推理中打印 `set_context` / `reset_context` 的调用时序与字段，验证「每步一设一清」的生命周期（即本讲指定的实践任务的上半部分）。
+**实践目标**：把写端的两个 `set_context` 调用画成一张「字段来源表」，并解释 warmup 时的边界情况。
 
 **操作步骤**：
 
-1. 打开 `nanovllm/engine/model_runner.py`，给三处临时加日志（**示例代码，仅用于观察，验证后请删掉，勿提交**）。最不打扰逻辑的办法是包装 `set_context` / `reset_context`：
+1. 阅读 [nanovllm/engine/model_runner.py:129-170](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129-L170)（`prepare_prefill`），逐个写出 `cu_seqlens_q`、`cu_seqlens_k`、`max_seqlen_q`、`max_seqlen_k`、`slot_mapping`、`block_tables` 是由哪个局部变量、哪段循环算出来的。
+2. 同样阅读 [nanovllm/engine/model_runner.py:172-188](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L172-L188)（`prepare_decode`），列出 decode 只填了哪三个字段。
+3. 阅读 `warmup_model`（[nanovllm/engine/model_runner.py:91-101](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L91-L101)）：它构造的 `Sequence([0]*seq_len)` 没有 `block_table`。结合 `prepare_prefill` 里 `if not seq.block_table: continue`（[nanovllm/engine/model_runner.py:149](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L149)），解释 warmup 时 `slot_mapping` 与 `block_tables` 分别是什么。
 
-   ```python
-   # 示例代码：在 model_runner.py 顶部 import 之后加一个轻量探针
-   import nanovllm.utils.context as _ctxmod
-   _orig_set = _ctxmod.set_context
-   _orig_reset = _ctxmod.reset_context
-   def _tracing_set(is_prefill, **kw):
-       print(f"[set_context] is_prefill={is_prefill} "
-             f"cu_seqlens_q={'set' if kw.get('cu_seqlens_q') is not None else 'None'} "
-             f"slot_mapping={'set' if kw.get('slot_mapping') is not None else 'None'} "
-             f"context_lens={'set' if kw.get('context_lens') is not None else 'None'} "
-             f"block_tables={'set' if kw.get('block_tables') is not None else 'None'}")
-       _orig_set(is_prefill, **kw)
-   def _tracing_reset():
-       print("[reset_context] <-- 清空")
-       _orig_reset()
-   _ctxmod.set_context = _tracing_set
-   _ctxmod.reset_context = _tracing_reset
-   ```
+**需要观察的现象**：warmup 时 `slot_mapping` 是空列表、`block_tables` 是 `None`；而此时 Attention 的 `k_cache`/`v_cache` 还没分配（仍是 `torch.tensor([])`）。
 
-   > 注意：`attention.py` / `embed_head.py` 里写的是 `from ... import get_context`，所以 `get_context` 不需要替换；`set_context` / `reset_context` 只在 `model_runner.py` 内部用，而上面替换的是 `model_runner.py` 已 import 进来的名字空间——实践中更稳妥的做法是直接在 `set_context` / `reset_context` 函数体内加 `print`。下面给出**最稳妥**的改法，直接改 `context.py`：
+**预期结果**：你能解释为什么 warmup 这次 prefill 不会真的写 KV cache——因为 `Attention.forward` 里有 `if k_cache.numel() and v_cache.numel():` 这道守卫（见 4.4.3），空 cache 时 `store_kvcache` 被跳过。warmup 只是为了触发算子、测量激活峰值（u3-l3）。
 
-   ```python
-   # 示例代码：直接在 context.py 内打点（验证后务必还原）
-   def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None):
-       global _CONTEXT
-       print(f"[set_context] is_prefill={is_prefill} "
-             f"has_cu_q={cu_seqlens_q is not None} has_slot={slot_mapping is not None} "
-             f"has_ctx_lens={context_lens is not None} has_bt={block_tables is not None}")
-       _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables)
+#### 4.3.6 小练习与答案
 
-   def reset_context():
-       global _CONTEXT
-       print("[reset_context]")
-       _CONTEXT = Context()
-   ```
+**练习 1**：如果把 `run` 末尾的 `reset_context()` 删掉，下一步会发生什么？
 
-2. 用 `example.py` 跑一次推理（需 GPU + 已下载的 Qwen3-0.6B）：
-   ```bash
-   python example.py
-   ```
+> **答**：全局 `_CONTEXT` 会残留上一步的元数据。下一步前向开始前虽然会被新的 `set_context` 覆盖大部分字段，但万一某条新路径漏掉了某个字段（例如某个分支没设置 `block_tables`），就会读到上一步的脏值，产生难以排查的隐式 bug。`reset_context` 是一道「归零」保险。
 
-**需要观察的现象**：
+**练习 2**：`set_context` 为什么选择「整体替换对象」而不是「逐个给 `_CONTEXT` 的属性赋值」？
 
-- 第一组：`[set_context] is_prefill=True has_cu_q=True has_slot=True has_ctx_lens=False has_bt=False/True` → 紧跟一次前向 → `[reset_context]`。
-- 之后每组：`[set_context] is_prefill=False has_cu_q=False has_slot=True has_ctx_lens=True has_bt=True` → 前向 → `[reset_context]`。
-- 整个推理过程中，`set_context` 与 `reset_context` **严格成对、交替**出现，永不嵌套、永不为偶数个连续 `set_context`。
-
-**预期结果**：日志呈现 `set → reset → set → reset → …` 的稳定节拍，prefill 那一次带 `cu_seqlens_q`、decode 那些次带 `context_lens`。具体次数取决于生成长度——**待本地验证**。
-
-> 若无 GPU，可做「源码阅读型实践」：对照本节给出的状态变迁图，手动模拟两条序列各 prefill 一次、decode 三步的 `Context` 状态，列出每一步 `is_prefill` 与各字段是否非空，验证「prefill 与 decode 的非空字段集合互补」。
-
-#### 4.2.5 小练习与答案
-
-**练习 1**：为什么 `prepare_prefill` 要显式把第 7 个位置参数写成 `None`（即 `context_lens=None`）？省略它（依赖默认值）会有什么不同？
-**答案**：行为完全等价——`set_context` 的 `context_lens` 默认就是 `None`。显式写 `None` 是为了**可读性**：让读者一眼看出「prefill 不需要 context_lens」。同时它也起到防御作用：万一未来有人改了 `set_context` 的默认值，显式 `None` 仍能保证 prefill 路径下 `context_lens` 一定是空。这是一种「意图自文档化」的写法。
-
-**练习 2**：假设某次推理中途 `run_model` 抛了异常，导致 `run` 末尾的 `reset_context()` 没有执行。下一步会出错吗？
-**答案**：通常不会**立刻**出错，因为下一步的 `prepare_prefill` / `prepare_decode` 会再次 `set_context` 整体覆盖 `_CONTEXT`，把残留的旧元数据冲掉。所以 `reset_context` 在正常交替的步进里是「冗余的兜底」。它的真正价值在异常路径与边界场景：比如某段代码在两次前向之间 `get_context()` 去读「应当为空」的 Context（用于断言当前不在前向中），若没 reset 就会读到上一步的脏数据。`reset_context` 把 Context 的「空闲态」明确化，让这种自检成为可能。
-
-**练习 3**：decode 路径下 `set_context` 没传 `cu_seqlens_q`，那它为什么是 `None` 而不是「保留上一步 prefill 的值」？
-**答案**：因为 `set_context` 是「换一个全新的 `Context` 对象」，新对象里 `cu_seqlens_q` 取默认值 `None`，与上一步的对象完全无关。这正是「换新对象」而非「改字段」的好处：不需要显式把每个字段清零，新建对象时所有未传字段自动是默认空值，杜绝了跨步残留。
+> **答**：整体替换更安全、更清晰——一次调用要么全部生效、要么全不生效，不会出现「半个字段更新完」的中间态被别的读取方看到；同时与 `reset_context`（替换成空对象）对称，心智模型统一。
 
 ---
 
-### 4.3 消费方：Attention 与 ParallelLMHead 如何读取 Context
+### 4.4 读端消费：Attention 与 ParallelLMHead 如何用 Context
 
-#### 4.3.1 概念说明
+#### 4.4.1 概念说明
 
-前面两节讲清了「消息板」本身。这一节看「读消息的人」——也就是 `get_context()` 的两个调用方：
+`Context` 有两个读者，都在神经网络层里：
 
-1. **`Attention.forward`**：它在每个 decoder 层里被调用一次，是 `Context` 最重的消费者。它读 `is_prefill`（分流）、`slot_mapping`（写 cache）、`cu_seqlens_q/k` + `max_seqlen_q/k`（prefill 的 varlen）、`context_lens` + `block_tables`（decode 的 paged 读）。
-2. **`ParallelLMHead.forward`**：它在模型最末端被 `compute_logits` 调用一次，只读两个字段：`is_prefill` 与 `cu_seqlens_q`。但它对 `cu_seqlens_q` 的用法很巧妙——**在 prefill 时只取每条序列最后一个 token**去算 logits。
+- **`Attention.forward`**：消费几乎所有字段。它要做两件事——把新算的 K/V 写进 paged cache（用 `slot_mapping`），再做注意力计算（prefill 用 `cu_seqlens_*`，decode 用 `context_lens` + `block_tables`），用 `is_prefill` 在两条内核间切换。
+- **`ParallelLMHead.forward`**：只消费两个字段——`is_prefill` 与 `cu_seqlens_q`。它做的是一个优雅的优化：prefill 时**只算每条序列最后一个 token 的 logits**，其余 token 的 logits 直接不算，省下巨量线性层计算。
 
-第二个用法正是本节的重点。为什么只取最后一个 token？因为 prefill 阶段虽然一次性算了整条 prompt 的每个 token 的隐状态，但「生成下一个 token」只需要**每条序列最后一个位置**的 logits（用它的分布去采样下一个 token）。中间 token 的 logits 对采样毫无用处，算它们纯属浪费。`ParallelLMHead` 利用 `cu_seqlens_q` 精确地把这些「末 token」挑出来，把 logits 计算量从「所有 token」降到「每序列一个」。decode 阶段每序列本来就只有 1 个 token，无需此优化。
+#### 4.4.2 核心流程
 
-#### 4.3.2 核心流程：末 token 下标的数学
+**Attention 的消费分流**：
 
-设一个 batch 有 \(n\) 条序列，它们的 query 长度（`seqlen_q`）分别是 \(l_1, l_2, \dots, l_n\)。varlen 打包后，这些序列首尾相接成一个一维张量，总长 \(\sum_i l_i\)。累积长度数组：
+```text
+context = get_context()
+if k_cache/v_cache 已分配:
+    store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)   # 写：新 K/V → 槽位
+if context.is_prefill:
+    if context.block_tables is not None:   # 命中前缀缓存
+        k, v = k_cache, v_cache            # 改读整张 cache（前缀+刚写入后缀）
+    o = flash_attn_varlen_func(q, k, v,
+            max_seqlen_q, cu_seqlens_q, max_seqlen_k, cu_seqlens_k,
+            block_table=context.block_tables)                       # prefill 内核
+else:   # decode
+    o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
+            cache_seqlens=context.context_lens,
+            block_table=context.block_tables)                       # decode 内核
+```
 
-\[
-\text{cu\_seqlens\_q} = [\,0,\ c_1,\ c_2,\ \dots,\ c_n\,], \quad c_i = \sum_{j=1}^{i} l_j
-\]
+**ParallelLMHead 的「只取最后一个 token」优化**：
 
-第 \(i\) 条序列（从 1 计数）占据一维张量的区间 \([c_{i-1},\ c_i)\)，其**最后一个 token** 的一维下标是 \(c_i - 1\)。于是「每条序列末 token 的下标」恰为：
-
-\[
-[\,c_1 - 1,\ c_2 - 1,\ \dots,\ c_n - 1\,] = \text{cu\_seqlens\_q}[1:] - 1
-\]
-
-这正是源码里那一行 `last_indices = context.cu_seqlens_q[1:] - 1` 的全部数学。它无需知道每条序列的长度，只需累积长度的「右端点」减一。
-
-举例：两条序列，\(l_1=4,\ l_2=3\)。
-
-\[
-\text{cu\_seqlens\_q} = [0, 4, 7]
-\]
-
-末 token 下标：
+prefill 时，varlen 打包后的隐状态 `x` 包含**所有序列的所有 token**。但采样只需要每条序列**最后一个 token** 的 logits（只有它负责预测下一个 token）。设 `cu_seqlens_q = [c_0, c_1, …, c_n]`（`c_0=0`），则序列 `i` 在打包张量里占据区间 \([c_{i-1}, c_i)\)，其最后一个 token 的下标是 \(c_i - 1\)。于是所有序列的末 token 下标为：
 
 \[
-\text{cu\_seqlens\_q}[1:] - 1 = [4, 7] - 1 = [3, 6]
+\text{last\_indices} = [\,c_1-1,\ c_2-1,\ \ldots,\ c_n-1\,] = \text{cu\_seqlens\_q}[1:] - 1
 \]
 
-即第 1 条序列末 token 在一维下标 3、第 2 条在 6——与「第 1 条占 [0,4) 末位 3、第 2 条占 [4,7) 末位 6」完全吻合。
+用 `x[last_indices]` 抽出这 `num_seqs` 行，再做 `F.linear(x, weight)` 算 logits。计算量从「总 token 数 × 词表」降到「序列数 × 词表」——当 prompt 很长、batch 较小时，这是数量级的节省。
 
-#### 4.3.3 源码精读
+decode 时 `x` 本来就每序列一行，无需抽取。
 
-先看 `Attention.forward`——`Context` 的主消费者。它第一件事就是 `get_context()`，之后所有元数据都来自这个 `context`：
+#### 4.4.3 源码精读
 
-[layers/attention.py:59-75 — Attention.forward 全貌：get_context 后按 is_prefill 分流](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L59-L75)
+**Attention.forward**，[nanovllm/layers/attention.py:59-75](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L59-L75)：
 
 ```python
-def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+def forward(self, q, k, v):
     context = get_context()
     k_cache, v_cache = self.k_cache, self.v_cache
     if k_cache.numel() and v_cache.numel():
-        store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-    if context.is_prefill:
-        if context.block_tables is not None:    # prefix cache
+        store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)   # 消费 slot_mapping
+    if context.is_prefill:                                             # 消费 is_prefill
+        if context.block_tables is not None:    # prefix cache         # 消费 block_tables（条件）
             k, v = k_cache, v_cache
         o = flash_attn_varlen_func(q, k, v,
-                                   max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                   max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                   softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+                max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,   # 消费 4 个字段
+                max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                softmax_scale=self.scale, causal=True, block_table=context.block_tables)
     else:    # decode
         o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                    cache_seqlens=context.context_lens, block_table=context.block_tables,
-                                    softmax_scale=self.scale, causal=True)
+                cache_seqlens=context.context_lens, block_table=context.block_tables,   # 消费 context_lens + block_tables
+                softmax_scale=self.scale, causal=True)
     return o
 ```
 
-逐字段对应（这正是 u4-l1 构造、本讲传递、u4-l2 使用的闭环）：
+字段到行号的对应（均在同一函数内）：
 
-- `context.slot_mapping` → `store_kvcache`：把当前层刚算出的 k/v 按 slot 写进本层的 `k_cache`/`v_cache`。两个阶段都用。
-- `context.is_prefill` → 分流到 `flash_attn_varlen_func`（prefill）或 `flash_attn_with_kvcache`（decode）。
-- prefill 分支：`context.max_seqlen_q/k`、`context.cu_seqlens_q/k`、`context.block_tables`（前缀缓存时）。
-- decode 分支：`context.context_lens`（作 `cache_seqlens`）、`context.block_tables`。
+- `context.slot_mapping` → 写 K/V 的槽位（[L63](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L63)）。
+- `context.is_prefill` → 内核分支开关（[L64](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L64)）。
+- `context.block_tables` → prefill 命中前缀时改读 cache（[L65-L66](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L65-L66)），并传给两个 flash 内核（[L70](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L70)、[L73](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L73)）。
+- `context.max_seqlen_q` / `cu_seqlens_q` / `max_seqlen_k` / `cu_seqlens_k` → prefill 内核的边界参数（[L68-L69](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L68-L69)）。
+- `context.context_lens` → decode 内核读取的历史长度（[L73](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L73)）。
 
-注意 `Attention` 本身**没有任何可训练参数**（`__init__` 里 `k_cache = v_cache = torch.tensor([])`，由 `ModelRunner.allocate_kv_cache` 事后挂载本层视图，见 u3-l3）。它只是「读 Context + 调 flash-attn + 写 cache」的薄封装。这种「无参数 + 靠 Context 拿元数据」的设计，正是 Transformer 主体签名能保持 `forward(q, k, v)` 这么干净的原因。
+注意 `store_kvcache` 的守卫 `if k_cache.numel() and v_cache.numel():`（[L62](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L62)）：Attention 在 `__init__` 时把 `k_cache`/`v_cache` 初始化为空张量 `torch.tensor([])`（[L57](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L57)），直到 `allocate_kv_cache` 才挂上真实视图（见 u3-l3）。warmup 发生在分配之前，这道守卫正是为了避免 warmup 时往空 cache 里写。
 
-再看 `ParallelLMHead.forward`——`Context` 的另一个消费者，也是本节重点的「末 token 优化」：
-
-[layers/embed_head.py:56-66 — ParallelLMHead.forward：prefill 时用 cu_seqlens_q 取末 token](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L56-L66)
+**ParallelLMHead.forward**，[nanovllm/layers/embed_head.py:56-66](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L56-L66)：
 
 ```python
-def forward(self, x: torch.Tensor):
+def forward(self, x):
     context = get_context()
-    if context.is_prefill:
-        last_indices = context.cu_seqlens_q[1:] - 1
-        x = x[last_indices].contiguous()
-    logits = F.linear(x, self.weight)
-    if self.tp_size > 1:
+    if context.is_prefill:                                  # 消费 is_prefill
+        last_indices = context.cu_seqlens_q[1:] - 1         # 消费 cu_seqlens_q，算末 token 下标
+        x = x[last_indices].contiguous()                    # 只保留每序列最后一个 token
+    logits = F.linear(x, self.weight)                       # 只对这 num_seqs 行算 logits
+    if self.tp_size > 1:                                    # 张量并行 gather（u4-l5）
         all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
         dist.gather(logits, all_logits, 0)
         logits = torch.cat(all_logits, -1) if self.tp_rank == 0 else None
     return logits
 ```
 
-四步逐行：
+`ParallelLMHead` 继承自 `VocabParallelEmbedding`（[L45](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L45)），复用其词表分片权重 `self.weight` 与 `weight_loader`，张量并行的细节（词表按 `tp_size` 切分、`gather` 回收）留给 u4-l5。
 
-1. `context = get_context()`：取本步元数据。
-2. `if context.is_prefill:` **末 token 优化**：`last_indices = context.cu_seqlens_q[1:] - 1`，再用 `x[last_indices]` 把 `x` 从「所有 token 的隐状态」筛成「每序列末 token 的隐状态」。`.contiguous()` 保证切片后内存连续（`F.linear` 对连续张量更高效）。decode 时跳过此分支，因为 `x` 本来就每序列只有一行。
-3. `logits = F.linear(x, self.weight)`：用（可能被筛过的）`x` 乘以词表权重，得到 logits。注意 pref​ill 优化后 `x` 的行数 = 序列数，而非 token 总数，**矩阵乘法的规模直接降了一个量级**。
-4. `if self.tp_size > 1:` 张量并行收尾：词表按 rank 切分（见 u4-l5），各 rank 只算自己那段 logits，再 `dist.gather` 到 rank 0 拼成完整词表。这是 u5-l3 的内容，本讲只需知道它读的是 `is_prefill` 优化后的 `logits`。
+#### 4.4.4 代码实践
 
-`compute_logits` 把 `ParallelLMHead` 接到模型主干上，串联起这条侧信道：
-
-[models/qwen3.py:212-216 — compute_logits 调用 lm_head（ParallelLMHead）](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L212-L216)
-
-```python
-def compute_logits(
-    self,
-    hidden_states: torch.Tensor,
-) -> torch.Tensor:
-    return self.lm_head(hidden_states)
-```
-
-`hidden_states` 是 `self.model(input_ids, positions)` 返回的「所有 token 的最后一层隐状态」。在 prefill 时，它被 `ParallelLMHead` 用 `cu_seqlens_q` 筛成「末 token 的隐状态」再算 logits。注意 `compute_logits` 的签名里**也没有** `cu_seqlens_q`——它通过 `ParallelLMHead` 内部 `get_context()` 拿到。整条链路 `run_model → compute_logits → lm_head.forward → get_context` 全程不改函数签名，这正是侧信道的威力。
-
-把两个消费方对字段的读取汇总成一张表（本讲最值得记的一张表）：
-
-| Context 字段 | Attention.forward | ParallelLMHead.forward | 备注 |
-| --- | --- | --- | --- |
-| `is_prefill` | ✓ 分流 varlen / with_kvcache | ✓ 是否做末 token 筛选 | 总开关 |
-| `cu_seqlens_q` | ✓ prefill varlen 边界 | ✓ 末 token 下标 `[1:]-1` | prefill 专属 |
-| `cu_seqlens_k` | ✓ prefill varlen 边界 | — | prefill 专属 |
-| `max_seqlen_q` | ✓ flash 内核启动参数 | — | prefill 专属 |
-| `max_seqlen_k` | ✓ flash 内核启动参数 | — | prefill 专属 |
-| `slot_mapping` | ✓ store_kvcache 写 cache | — | 两阶段共用 |
-| `context_lens` | ✓ decode 的 cache_seqlens | — | decode 专属 |
-| `block_tables` | ✓ 读 paged cache | — | decode 必用、prefill 仅前缀缓存 |
-
-这张表也回答了「为什么 prefill 不需要 `context_lens`、decode 不需要 `cu_seqlens`」——因为每个消费者只在对应分支读对应字段，互不越界。
-
-#### 4.3.4 代码实践
-
-**实践目标**：追踪一次 `run()` 中 `set_context` 设置的字段，分别说明它们被 `Attention.forward` 和 `ParallelLMHead.forward` 如何消费（即本讲指定的实践任务的下半部分）。
+**实践目标**：手算 `ParallelLMHead` 的末 token 抽取，确认它与 `cu_seqlens_q` 的对应关系。
 
 **操作步骤**：
 
-1. 给两个消费者加探针，打印它们从 Context 读到的关键量（**示例代码，验证后删除**）。在 `attention.py` 的 `forward` 开头：
-
+1. 假设一个 prefill 步打包了 3 条序列，新 token 数分别为 5、7、8，即 `cu_seqlens_q = [0, 5, 12, 20]`。
+2. 手算 `last_indices = cu_seqlens_q[1:] - 1`。
+3. 写一小段 CPU 代码验证：
    ```python
-   # 示例代码：Attention 消费探针
-   def forward(self, q, k, v):
-       context = get_context()
-       print(f"[Attention] is_prefill={context.is_prefill} "
-             f"q.shape={tuple(q.shape)} slot_mapping={None if context.slot_mapping is None else context.slot_mapping.shape} "
-             f"block_tables={None if context.block_tables is None else context.block_tables.shape}")
-       # ... 原逻辑 ...
+   import torch
+   cu_seqlens_q = torch.tensor([0, 5, 12, 20], dtype=torch.int32)
+   last_indices = cu_seqlens_q[1:] - 1
+   print(last_indices.tolist())          # 期望 [4, 11, 19]
+   x = torch.arange(20*4).reshape(20, 4) # 假装是 20 个 token 的隐状态
+   y = x[last_indices]                    # 抽出 3 行
+   print(y.shape)                         # 期望 torch.Size([3, 4])
    ```
+4. 对照 [nanovllm/layers/embed_head.py:57-61](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L57-L61)，确认逻辑一致。
 
-   在 `embed_head.py` 的 `ParallelLMHead.forward` 开头：
+**需要观察的现象**：`last_indices` 恰好是每条序列在打包张量里的最后一个位置；抽取后行数等于序列数 `num_seqs`。
 
-   ```python
-   # 示例代码：ParallelLMHead 消费探针
-   def forward(self, x):
-       context = get_context()
-       if context.is_prefill:
-           last_indices = context.cu_seqlens_q[1:] - 1
-           print(f"[LMHead] prefill: x.shape={tuple(x.shape)} -> "
-                 f"after_select={tuple(x[last_indices].shape)} last_indices={last_indices.tolist()}")
-           x = x[last_indices].contiguous()
-       else:
-           print(f"[LMHead] decode: x.shape={tuple(x.shape)} (no selection)")
-       # ... 原逻辑 ...
-   ```
+**预期结果**：输出 `[4, 11, 19]` 与 `torch.Size([3, 4])`。
 
-2. 跑 `example.py`，跑两个长度不同的 prompt（如 `example.py` 默认的两条）。
+#### 4.4.5 小练习与答案
 
-**需要观察的现象**：
+**练习 1**：decode 步里 `ParallelLMHead` 还会执行 `x = x[last_indices]` 吗？为什么？
 
-- prefill 步（第一条序列被 prefill 时）：
-  - `[Attention] is_prefill=True`，`q.shape` 第 0 维 = 该 prompt 的 token 数；`slot_mapping` 与 `q` 同长；`block_tables` 多数为 `None`（无前缀缓存）。
-  - `[LMHead] prefill: x.shape=(L, H) -> after_select=(1, H)`，`last_indices=[L-1]`（单条序列时 `cu_seqlens_q=[0, L]`，末 token 下标 `L-1`）——**整条 prompt 的隐状态被筛成 1 行**。
-- decode 步：
-  - `[Attention] is_prefill=False`，`q.shape=(num_seqs, num_heads, head_dim)`，`block_tables` 形状 `(num_seqs, max_blocks)`。
-  - `[LMHead] decode: x.shape=(num_seqs, H)`，不做筛选（每序列已是 1 行）。
-- 若 batch 同时 prefill 多条序列：`after_select` 的第 0 维 = 序列数，`last_indices` 长度 = 序列数。
+> **答**：不会。decode 时 `context.is_prefill` 为 `False`，整个 `if context.is_prefill:` 块被跳过。decode 每序列本来就只有 1 个 token，`x` 已经是 `(num_seqs, hidden)`，无需抽取。
 
-**手算小例**（教学示意）：设 batch 两条序列，`seqlen_q` 分别为 4、3，无前缀缓存。
-- `cu_seqlens_q = [0, 4, 7]`。
-- `last_indices = [4, 7] - 1 = [3, 6]`。
-- `x` 形状 `(7, hidden)` → 筛后 `(2, hidden)`，即取第 3、6 行（分别是两条序列的末 token）。
-- 验证：第 1 条占一维 [0,4)，末位 3；第 2 条占 [4,7)，末位 6。✓
+**练习 2**：在命中前缀缓存的 prefill 中，`cu_seqlens_k` 会大于 `cu_seqlens_q`。`ParallelLMHead` 用的是哪一个？为什么不会出错？
 
-**预期结果**：prefill 时 `LMHead` 打印的 `after_select` 第 0 维恰等于本步 batch 中的序列数；`last_indices` 的每个值都能由 `cu_seqlens_q` 还原。decode 时 `x` 行数 = 序列数、无筛选。具体数字依分词与序列数——**待本地验证**。
+> **答**：用的是 `cu_seqlens_q`。因为隐状态 `x` 是按「本步新算的 token」打包的（对应 `cu_seqlens_q`），缓存的前缀 token 并不在 `x` 里。我们要的是每条序列「最后一个新 token」的 logits，它正是 `cu_seqlens_q[i] - 1` 处那一行。若误用 `cu_seqlens_k`，下标会越过 `x` 的长度而越界。
 
-> 若无 GPU，可做「源码阅读型实践」：阅读本节引用的两段源码，对照「字段 → 消费者」表，逐行标注 `Attention.forward` 与 `ParallelLMHead.forward` 各读了 `Context` 的哪些字段，并解释为什么 decode 分支下 `ParallelLMHead` 不需要 `cu_seqlens_q`（因 `x` 每序列已是 1 行）。
+**练习 3**：`Attention.forward` 在前缀缓存命中时把 `k, v = k_cache, v_cache`（[L66](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L66)），随后把 `context.block_tables` 传给 `flash_attn_varlen_func`。这两步配合解决了什么问题？
 
-#### 4.3.5 小练习与答案
-
-**练习 1**：`last_indices = context.cu_seqlens_q[1:] - 1` 中，为什么用 `cu_seqlens_q` 而不是 `cu_seqlens_k`？
-**答案**：因为筛选的是「隐状态 `x`」的行，而 `x` 是对 `input_ids`（即 query，新 token）做前向得到的，它的行数 = query 总数 = `cu_seqlens_q[-1]`。`cu_seqlens_k` 含缓存前缀的 key 数，在前缀缓存时大于 query 数，用它会导致下标越界或取错行。`ParallelLMHead` 要的是「每条序列最后一个**新算的** token」，对应 query 的末位，故用 `cu_seqlens_q`。
-
-**练习 2**：如果 prefill 时不做这个「末 token」优化，直接对全部 token 算 logits，结果会错吗？
-**答案**：数值上不会错（多算的中间 token logits 只是没人用），但会**严重浪费算力与显存**。prefill 的目的是「为每条序列预测下一个 token」，采样只需要末 token 的 logits。若对全部 token 算 logits，`F.linear` 的输入从「序列数行」膨胀到「token 总数行」，矩阵乘法规模大一个量级，且多算出的 logits 还占显存。所以这个优化是用 `cu_seqlens_q` 把计算量从 \(O(\text{token 总数} \cdot \text{词表})\) 压回 \(O(\text{序列数} \cdot \text{词表})\)。
-
-**练习 3**：decode 阶段 `ParallelLMHead` 跳过了末 token 筛选，但 `Attention` 仍然读 `slot_mapping` 写 cache。这两者矛盾吗？
-**答案**：不矛盾。`ParallelLMHead` 跳过筛选是因为 decode 每序列本就只有 1 个 token（`x` 行数 = 序列数），无需再筛；`Attention` 读 `slot_mapping` 是为了把这一个新 token 的 K/V 写进 cache 供**后续步**读。两者关心的是 `Context` 的不同字段、不同用途：`Attention` 管「读/写 cache」，`ParallelLMHead` 管「算 logits」。`Context` 把这些字段聚合在一个对象里，让两个消费者各取所需。
+> **答**：前缀缓存的 K/V 物理上躺在 paged cache 的若干块里，不在本地 `k`/`v` 张量中。把 `k,v` 重指向整张 cache、并配上 `block_tables`，flash attention 才能按块号去 cache 里读出「前缀 + 刚由 `store_kvcache` 写入的后缀」，拼出完整的 key/value 参与注意力（详见 u4-l2）。
 
 ---
 
 ## 5. 综合实践
 
-把本讲三块知识串起来：**绘制一张「一次 prefill 步」的 Context 全景图——从写入到两类消费者**。
+本任务对应本讲规格里的实践要求：**追踪一次 `run()` 中 `set_context` 设置的字段，分别说明它们被 `Attention.forward` 和 `ParallelLMHead.forward` 如何消费**。
 
-**任务**：
+**实践目标**：用插桩的方式，把一次 prefill + 一次 decode 中 `Context` 的「写入—读取」全过程落到一张表里，验证你对字段流向的理解。
 
-1. 准备一个最小的 prefill 场景：batch 两条序列，`seqlen_q` 分别为 4、3（无前缀缓存）。在脑中（或纸上）列出 `prepare_prefill` 会传给 `set_context` 的全部参数值：
-   - `is_prefill=True`
-   - `cu_seqlens_q = [0, 4, 7]`、`cu_seqlens_k = [0, 4, 7]`（无前缀缓存，二者相等）
-   - `max_seqlen_q = 4`、`max_seqlen_k = 4`
-   - `slot_mapping` = 7 个槽位（按 u4-l1 的公式由 `block_table` 算出）
-   - `context_lens = None`
-   - `block_tables = None`（无前缀缓存）
+**操作步骤**：
 
-2. 画一张「字段流向图」，左列为 `Context` 的 8 个字段，中列为字段值或形状，右列分两栏标注 `Attention.forward` 与 `ParallelLMHead.forward` 各用了哪些字段、用在哪一行。完成后应与 4.3.3 的「字段 → 消费者」表一致。
+1. 在 `nanovllm/utils/context.py` 的 `set_context` 与 `get_context` 里临时加打印（**仅为观察，勿提交**）。例如：
+   ```python
+   def set_context(is_prefill, cu_seqlens_q=None, ...):
+       global _CONTEXT
+       _CONTEXT = Context(...)
+       import traceback
+       print(f"[set_context] is_prefill={is_prefill} "
+             f"from={traceback.extract_stack()[-3].name}")
+   ```
+   （`get_context` 同理打印调用方名；可在 `Attention.forward` / `ParallelLMHead.forward` 里临时打印 `context.is_prefill`、`context.slot_mapping.shape` 等字段。）
+2. 用 `example.py` 跑一次最小推理（1～2 条短 prompt，`max_tokens` 设小一些）。
+3. 针对其中一次 prefill 步和一次 decode 步，填写下表：
 
-3. 接着改造场景为「命中前缀缓存」：第二条序列命中长度 2 的前缀，于是 `seqlen_q=3`、`seqlen_k=5`。重新算 `cu_seqlens_q = [0, 4, 7]`、`cu_seqlens_k = [0, 4, 9]`。指出：
-   - `cu_seqlens_k[-1] (9) > cu_seqlens_q[-1] (7)` → `block_tables` 非 `None`。
-   - `Attention` 此时会把 k/v 重指向整张 cache（`k, v = k_cache, v_cache`），用 `block_tables` 读前缀。
-   - `ParallelLMHead` 的 `last_indices` 仍用 `cu_seqlens_q`：`[4,7]-1 = [3,6]`，不受前缀缓存影响（因为它筛的是 query，不是 key）。
+   | 字段 | prefill 步的值（形状/示例） | decode 步的值 | 写入方 | `Attention` 怎么用 | `ParallelLMHead` 怎么用 |
+   | --- | --- | --- | --- | --- | --- |
+   | `is_prefill` | `True` | `False` | `prepare_*` | 选 `flash_attn_varlen_func` | 决定是否抽取末 token |
+   | `cu_seqlens_q` | `(num_seqs+1,)` | `None` | `prepare_prefill` | varlen 边界 | `last_indices = [1:]-1` |
+   | `slot_mapping` | `(总新token数,)` | `(num_seqs,)` | `prepare_*` | `store_kvcache` 写槽位 | 不用 |
+   | `block_tables` | 命中前缀时 `(num_seqs,max_blocks)`，否则 `None` | `(num_seqs,max_blocks)` | `prepare_*` | 读历史 K/V | 不用 |
+   | `context_lens` | `None` | `(num_seqs,)` | `prepare_decode` | decode 读历史长度 | 不用 |
 
-4. 在真实代码上验证（需 GPU）：开启 4.2.4 与 4.3.4 的探针，跑 `example.py`，对照你画的图核对每一条字段值与消费者。
+4. 在 decode 步观察 `run_model` 走的是 eager 还是 CUDA Graph 分支（取决于 `enforce_eager`）。若走 Graph，确认 `get_context()` 是在 `graph.replay()` **之前**被调用、把元数据拷进 `graph_vars` 的（[L201-L210](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L201-L210)）。
 
-**产出**：一张覆盖「`ModelRunner.prepare_*` 写入 → `Context` 8 字段 → `Attention`/`ParallelLMHead` 读取」的全景图，并写明前缀缓存命中时哪些字段与读取行为发生变化。
+**需要观察的现象**：每次 `model` 前向前都有恰好一次 `set_context`；前向后必有 `reset_context`；`Attention` 与 `ParallelLMHead` 对 `Context` 的读取都发生在前向内部。
+
+**预期结果**：你能用一句话说清每个字段「谁写、谁读、读去做什么」，并把 `slot_mapping`（写 K/V）、`block_tables`（读历史 K/V）、`cu_seqlens_q`（varlen 边界 + 末 token 下标）这三者的角色区分清楚。
+
+> 说明：本实践需要 GPU 环境与模型权重才能真正运行 `example.py`；插桩与填表部分可先在源码层面完成推演，**实际运行结果待本地验证**。若暂无 GPU，可只做步骤 1、3 的源码阅读与手算，跳过步骤 2 的实跑。
 
 ## 6. 本讲小结
 
-- `Context` 是 `ModelRunner` 与底层 attention 层之间的**侧信道**：用一个全局单例对象当消息板，让注意力元数据（`cu_seqlens`、`slot_mapping`、`block_tables`、`context_lens` 等）绕开函数参数传递，从而保持 Transformer 主干签名 `forward(input_ids, positions)` 干净、与标准实现对齐。
-- `Context` 是带 `slots=True` 的 dataclass，8 个字段：`is_prefill`（总开关）、`cu_seqlens_q/k` + `max_seqlen_q/k`（prefill 专属）、`context_lens`（decode 专属）、`slot_mapping`（两阶段共用，写 cache）、`block_tables`（decode 必用、prefill 仅前缀缓存时用）。
-- 生命周期严格遵循「每步一设一清」：`prepare_prefill`/`prepare_decode` 调 `set_context`（换一个新对象，未传字段取默认空值），前向期间各层 `get_context()` 只读，`run` 末尾 `reset_context()` 擦回白板兜底。写入权独占在 `ModelRunner`，读取方只读不写。
-- `set_context` 选择「新建对象再赋值」而非「改字段」，保证每步 Context 是不可变快照、杜绝跨步残留与旧引用被就地改坏。
-- `Attention.forward` 是 `Context` 的主消费者：读 `slot_mapping` 写 cache、按 `is_prefill` 分流到 `flash_attn_varlen_func`（用 `cu_seqlens`/`max_seqlen`）或 `flash_attn_with_kvcache`（用 `context_lens`/`block_tables`）；它本身无参数，全靠 Context 拿元数据。
-- `ParallelLMHead.forward` 的 prefill 末 token 优化：用 `last_indices = context.cu_seqlens_q[1:] - 1` 把「所有 token 的隐状态」筛成「每序列末 token」，把 logits 计算从 \(O(\text{token 总数}\cdot\text{词表})\) 压回 \(O(\text{序列数}\cdot\text{词表})\)；decode 每序列已 1 行，无需筛选。
+- nano-vllm 用一个**模块级全局 `Context`** 在 `ModelRunner`（写端）与 `Attention` / `ParallelLMHead`（读端）之间传递注意力元数据，目的是不让这些每步都变的张量污染整条 `forward` 调用链的签名。
+- `Context` 是 `@dataclass(slots=True)`，含八个字段：`is_prefill`、`cu_seqlens_q/k`、`max_seqlen_q/k`、`slot_mapping`、`context_lens`、`block_tables`；prefill 与 decode 各用其中互补的子集。
+- 生命周期由三个函数管理：`set_context` 整体替换全局对象，`get_context` 返回当前对象，`reset_context` 清空回默认。`ModelRunner.run` 严格按「prepare→set → forward(get) → reset」封口，每步不留残留。
+- `Attention.forward` 消费几乎所有字段：`slot_mapping` 写 K/V，`is_prefill` 切内核，prefill 用 `cu_seqlens_*`（命中前缀时改读 cache 并用 `block_tables`），decode 用 `context_lens` + `block_tables`。
+- `ParallelLMHead.forward` 只用 `is_prefill` 和 `cu_seqlens_q`：prefill 时用 `cu_seqlens_q[1:] - 1` 抽取每序列最后一个 token，把 logits 计算从「总 token 数」降到「序列数」，是一项兼具正确性与性能的优化。
+- `Context` 的设计能成立，靠的是推理主循环单步串行 + 每步 `reset`；在多进程张量并行下，每个 rank 各持一份等价的 `Context`，无需跨进程同步。
 
 ## 7. 下一步学习建议
 
-本讲把「元数据如何到达底层」讲透了。建议接着阅读：
-
-- **u4-l4 Qwen3 模型结构详解**：看 `Qwen3ForCausalLM → Qwen3Model → DecoderLayer → Attention` 这条调用链的每一层内部到底算了什么。本讲看到 `self.model(input_ids, positions)` 是一句调用，u4-l4 把它展开成 embed、多层 decoder、norm 的完整前向，你会更清楚 `Attention.forward` 与 `ParallelLMHead.forward` 在整条链路里的位置。
-- **u4-l5 张量并行线性层与权重分片**：本讲提到 `ParallelLMHead` 在 `tp_size > 1` 时用 `dist.gather` 把各 rank 的 logits 汇总到 rank 0，u4-l5 会讲清词表如何按 rank 切分、`ColumnParallelLinear`/`RowParallelLinear` 如何配合。
-- **u5-l1 CUDA Graph 捕获与回放**：本讲 4.2.3 点出了 `capture_cudagraph` 也用 `set_context`，以及图回放路径要「就地改 `graph_vars` 而非 `set_context`」这一约束。u5-l1 会完整解释为什么 CUDA Graph 要求张量身份固定、`Context` 在其中扮演什么角色。
-- 回顾 **u4-l1** 的「字段流向图」与本讲的「字段 → 消费者」表，把它们合并成一张从 `Sequence` 到 `Context` 到 attention 内核的端到端映射，作为「模型执行」单元的总览。
+- **向「优化」走（u5-l1 CUDA Graph）**：本讲提到 decode 回放时 `run_model` 用 `get_context()` 把元数据拷进静态 `graph_vars`。下一讲会完整讲清 `capture_cudagraph` 的捕获流程与 `graph_bs` 分档，你会看到 `Context` 在静态图场景下的特殊用法。
+- **向「采样」走（u5-l2 / Sampler）**：`ParallelLMHead` 产出的 logits 进入 `Sampler`。建议阅读 `nanovllm/layers/sampler.py`，看它如何基于指数分布对 logits 做一步采样（这也是 `SamplingParams` 禁止 `temperature=0` 的根源）。
+- **向「张量并行」走（u4-l5 / u5-l3）**：本讲的 `ParallelLMHead` 已经露出了词表分片与 `gather` 的尾巴。可继续读 `nanovllm/layers/linear.py` 与 `embed_head.py`，理解 `VocabParallelEmbedding` 如何按 `tp_size` 切词表，以及多进程运行时如何协同。
+- **回头巩固**：若对 `slot_mapping`、`cu_seqlens`、`block_tables` 的具体构造还有疑问，建议重读 u4-l1（输入准备）与 u4-l2（Attention/Triton 内核），它们是本讲字段含义的真正来源。

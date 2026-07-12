@@ -1,0 +1,862 @@
+{
+  "project": "nemu",
+  "head": "8e7a0fecc95b5b5d2c1f6be0ec1b703da93356c0",
+  "rationale": "NEMU 是南京大学 ICS 课程的教学用全系统模拟器，源码以 PA（编程作业）形式组织，大量 TODO 留待学生实现。学习路线遵循 PA 的自然进阶顺序：先用 U1 建立全局认知（项目定位/构建系统/启动流程/目录与 ISA 抽象），再实现用户态调试器 SDB（U2 命令框架/词法分析/表达式求值/监视点），随后进入 CPU 执行引擎与标志性的 INSTPAT 模式匹配译码（U3），接着是内存系统（U4 物理内存 paddr/虚拟内存 vaddr 与 MMU 接口）和 ISA 指令实现（U5 ISA 抽象与寄存器/RISC-V 指令/x86 变长指令对比），然后是设备与 I/O（U6 IOMap 框架/典型外设/时钟与中断轮询），最后是进阶系统机制（U7 中断异常/分页 MMU/trap 状态机）与工程化（U8 差分测试/指令追踪反汇编/宏与条件编译体系）。依赖关系沿执行链自底向上铺设：启动→SDB→CPU 主循环→取指译码→内存→ISA→设备→中断→测试与工程化，使每篇讲义都建立在前序源码理解之上，且每篇只聚焦一个独立主题并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "NEMU 是什么——教学全系统模拟器的定位与能力",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 NEMU 作为南京大学教学用全系统模拟器的定位、支持的 ISA 与核心特性（监视器、CPU、内存、分页、中断、设备），帮助读者建立全局认知。",
+          "learning_goals": [
+            "理解 NEMU 的教学定位及其与 ICS PA、AM 项目的关系",
+            "列举 NEMU 的核心能力与明确不支持的特性",
+            "知道 NEMU 各子系统的大致对应源码目录"
+          ],
+          "source_files": [
+            "README.md",
+            "Kconfig"
+          ],
+          "minimal_modules": [
+            "README 概述",
+            "Kconfig 顶层选项"
+          ],
+          "practice_task": "阅读 README，绘制一张 NEMU 子系统组成图（监视器/CPU/内存/分页/中断/设备），标注每个子系统对应的源码目录；在 Kconfig 中找到默认 ISA 与运行模式。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统——Makefile 与 Kconfig 配置机制",
+          "order": 2,
+          "filename": "u1-l2-build-system-kconfig.md",
+          "level": "beginner",
+          "topic": "讲解 NEMU 借鉴 Linux 内核的 Makefile + Kconfig 构建体系：menuconfig 选择 ISA/引擎/模式/设备，filelist.mk 收集源文件，scripts 下编译链接规则。",
+          "learning_goals": [
+            "掌握 menuconfig 配置流程与 .config/auto.conf/autoconf.h 的关系",
+            "理解 filelist.mk 的 DIRS-y/SRCS-y/BLACKLIST 源文件收集机制",
+            "知道 native.mk/build.mk 如何编译链接生成二进制"
+          ],
+          "source_files": [
+            "Makefile",
+            "Kconfig",
+            "scripts/config.mk",
+            "scripts/build.mk",
+            "scripts/native.mk",
+            "src/filelist.mk"
+          ],
+          "minimal_modules": [
+            "Makefile 变量提取",
+            "filelist.mk 源文件收集",
+            "config.mk menuconfig 规则",
+            "build.mk 编译模式"
+          ],
+          "practice_task": "运行 make menuconfig 选择 riscv32 系统模式并开启设备，观察生成的 .config 与 include/generated/autoconf.h；再运行 make 编译，记录产物路径与二进制名。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "启动流程——从 main 到引擎运行",
+          "order": 3,
+          "filename": "u1-l3-startup-flow.md",
+          "level": "beginner",
+          "topic": "追踪 NEMU 从 main() 到 engine_start() 的完整初始化链路：参数解析、日志、内存、设备、ISA、镜像加载、difftest、SDB、disasm 初始化，最后进入引擎主循环。",
+          "learning_goals": [
+            "描述 init_monitor 的初始化顺序及各步骤职责",
+            "理解 load_img 如何把程序载入 RESET_VECTOR",
+            "区分 native 模式与 AM 模式的启动差异"
+          ],
+          "source_files": [
+            "src/nemu-main.c",
+            "src/monitor/monitor.c",
+            "src/engine/interpreter/init.c"
+          ],
+          "minimal_modules": [
+            "nemu-main 入口",
+            "init_monitor 初始化链",
+            "engine_start 分发"
+          ],
+          "practice_task": "删除 monitor.c 中 welcome() 里的 assert(0)（教学约定的第一个练习），重新编译并运行内置镜像，观察输出与退出状态。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "目录结构与 ISA 抽象层",
+          "order": 4,
+          "filename": "u1-l4-directory-and-isa-abstraction.md",
+          "level": "beginner",
+          "topic": "介绍 src 各子目录职责，重点讲解 ISA 抽象层：通过 __GUEST_ISA__ 宏与 concat 拼接出 CPU_state 等类型，使同一套框架代码适配多种 ISA。",
+          "learning_goals": [
+            "画出 src 目录树与模块归属",
+            "理解 isa.h 如何用宏拼接实现 ISA 无关接口",
+            "知道 common.h 中 word_t/vaddr_t/paddr_t 的 ISA 相关定义"
+          ],
+          "source_files": [
+            "src/filelist.mk",
+            "src/isa/filelist.mk",
+            "include/isa.h",
+            "include/common.h"
+          ],
+          "minimal_modules": [
+            "目录组织",
+            "isa.h ISA 接口",
+            "common.h 基本类型",
+            "filelist ISA 切换"
+          ],
+          "practice_task": "切换 GUEST_ISA（如从 riscv 改为 x86）重新编译，对比 include/generated/autoconf.h 与最终二进制名变化，理解 __GUEST_ISA__ 如何驱动 isa.h 的类型拼接。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "监视器与简单调试器 SDB",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l5",
+          "title": "SDB 命令框架",
+          "order": 1,
+          "filename": "u2-l5-sdb-command-framework.md",
+          "level": "beginner",
+          "topic": "讲解简单调试器 SDB 的命令表设计、readline 交互主循环、batch 模式，以及如何扩展新命令。",
+          "learning_goals": [
+            "理解 cmd_table 命令分发机制",
+            "掌握 sdb_mainloop 的 token 解析与调度",
+            "知道 batch 模式与交互模式的区别"
+          ],
+          "source_files": [
+            "src/monitor/sdb/sdb.c",
+            "src/monitor/sdb/sdb.h"
+          ],
+          "minimal_modules": [
+            "cmd_table 命令表",
+            "rl_gets 输入",
+            "sdb_mainloop 分发",
+            "init_sdb"
+          ],
+          "practice_task": "在 cmd_table 中新增 si（单步执行 N 条指令）命令，调用 cpu_exec(N)，并在 help 中显示；测试 si 1 后查看状态。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "表达式词法分析",
+          "order": 2,
+          "filename": "u2-l6-expression-lexing.md",
+          "level": "beginner",
+          "topic": "讲解 expr.c 中基于 POSIX regex 的词法分析：rules 规则表、regcomp 预编译、make_token 逐字符匹配并记录 token。",
+          "learning_goals": [
+            "理解 rules 表驱动的词法规则设计",
+            "掌握 make_token 的匹配与 token 记录流程",
+            "知道 TK_NOTYPE/TK_EQ 等 token 类型的扩展方式"
+          ],
+          "source_files": [
+            "src/monitor/sdb/expr.c"
+          ],
+          "minimal_modules": [
+            "rules 规则表",
+            "init_regex 编译",
+            "make_token 匹配",
+            "Token 结构"
+          ],
+          "practice_task": "扩展 rules 增加十进制与十六进制数、寄存器名（$ 开头）、加减乘除与括号 token 类型，并在 make_token 的 switch 中记录数值与寄存器名到 token.str。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "表达式求值（递归下降）",
+          "order": 3,
+          "filename": "u2-l7-expression-evaluation.md",
+          "level": "beginner",
+          "topic": "讲解在词法分析基础上用递归下降实现表达式求值：BNF 文法、运算符优先级、括号与一元负号处理、寄存器与内存访问，并用 gen-expr 工具做随机测试。",
+          "learning_goals": [
+            "用 BNF 描述表达式文法并转化为递归下降求值函数",
+            "正确处理运算符优先级与括号匹配",
+            "利用 gen-expr 生成测试用例验证正确性"
+          ],
+          "source_files": [
+            "src/monitor/sdb/expr.c",
+            "tools/gen-expr/gen-expr.c"
+          ],
+          "minimal_modules": [
+            "递归下降 eval",
+            "check_parentheses",
+            "主运算符查找",
+            "gen-expr 测试"
+          ],
+          "practice_task": "实现 expr() 的递归下降求值，支持 + - * /、括号、寄存器、十六进制与内存解引用；用 gen-expr 生成 100 个随机表达式与 gcc 结果对比并修复错误。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "监视点机制",
+          "order": 4,
+          "filename": "u2-l8-watchpoint.md",
+          "level": "beginner",
+          "topic": "讲解 watchpoint.c 的池化设计：静态 WP 数组、head/free_ 链表、init_wp_pool，以及 new_wp/free_wp/检查值变化的实现思路。",
+          "learning_goals": [
+            "理解静态池+空闲链表的对象管理模式",
+            "实现监视点的申请、释放与每步检查",
+            "将监视点与表达式求值结合"
+          ],
+          "source_files": [
+            "src/monitor/sdb/watchpoint.c",
+            "src/monitor/sdb/sdb.h"
+          ],
+          "minimal_modules": [
+            "wp_pool 池",
+            "head/free_ 链表",
+            "init_wp_pool",
+            "监视点检查"
+          ],
+          "practice_task": "为 WP 增加 expr 字段与旧值字段，实现 new_wp（从 free_ 取）、free_wp（归还 free_），并在 cpu_exec 每步检查监视点表达式值变化时暂停。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "CPU 执行引擎与译码",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l9",
+          "title": "CPU 执行主循环",
+          "order": 1,
+          "filename": "u3-l9-cpu-exec-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 cpu-exec.c 的核心执行循环：cpu_exec(n) 状态机驱动、execute→exec_once 循环、trace_and_difftest、device_update 调度、statistic 统计。",
+          "learning_goals": [
+            "描述 cpu_exec 的状态转换（RUNNING/STOP/END/ABORT/QUIT）",
+            "理解 exec_once 单步执行与 g_nr_guest_inst 计数",
+            "掌握 trace 与 difftest 的插入点"
+          ],
+          "source_files": [
+            "src/cpu/cpu-exec.c",
+            "include/cpu/cpu.h"
+          ],
+          "minimal_modules": [
+            "cpu_exec 状态分发",
+            "execute 循环",
+            "exec_once 单步",
+            "trace_and_difftest",
+            "statistic"
+          ],
+          "practice_task": "在 exec_once 后增加一个简单 itrace 打印（pc 与指令字节），运行内置镜像观察前 10 条指令；分析 MAX_INST_TO_PRINT 的作用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "取指与译码数据结构",
+          "order": 2,
+          "filename": "u3-l10-fetch-and-decode-struct.md",
+          "level": "intermediate",
+          "topic": "讲解 Decode 结构（pc/snpc/dnpc/isa/logbuf）、inst_fetch 取指并推进 pc、hostcall.c 中的 set_nemu_state 与 invalid_inst 错误处理。",
+          "learning_goals": [
+            "区分 pc/snpc/dnpc 三种 PC 的语义",
+            "理解 inst_fetch 如何取指并更新 snpc",
+            "掌握 invalid_inst 的诊断输出与 NEMU_ABORT 设置"
+          ],
+          "source_files": [
+            "include/cpu/decode.h",
+            "include/cpu/ifetch.h",
+            "src/engine/interpreter/hostcall.c"
+          ],
+          "minimal_modules": [
+            "Decode 结构",
+            "snpc/dnpc",
+            "inst_fetch 取指",
+            "invalid_inst 诊断"
+          ],
+          "practice_task": "追踪一条跳转指令（如 jal）执行后 snpc 与 dnpc 的差异，画出 pc→snpc→dnpc→cpu.pc 的数据流；触发一次 invalid_inst 观察输出。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l11",
+          "title": "INSTPAT 模式匹配译码机制",
+          "order": 3,
+          "filename": "u3-l11-instpat-pattern-matching.md",
+          "level": "intermediate",
+          "topic": "讲解 NEMU 标志性的 INSTPAT 指令模式匹配机制：pattern_decode 把 \"01??\" 串编译为 key/mask/shift，运行时用位掩码比较匹配指令，配合 INSTPAT_MATCH 执行译码体。",
+          "learning_goals": [
+            "理解 pattern_decode 编译模式串为 key/mask/shift 的原理",
+            "掌握 INSTPAT/INSTPAT_START/INSTPAT_END 宏的协作",
+            "知道如何用 INSTPAT 新增一条指令"
+          ],
+          "source_files": [
+            "include/cpu/decode.h"
+          ],
+          "minimal_modules": [
+            "pattern_decode",
+            "pattern_decode_hex",
+            "INSTPAT 宏",
+            "INSTPAT_START/END 标签跳转"
+          ],
+          "practice_task": "阅读一条已有 INSTPAT 项，手动验证其 key/mask/shift 计算；用 INSTPAT 为 riscv32 新增一条 addi 指令的模式与执行体。",
+          "depends_on": [
+            "u3-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "内存系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l12",
+          "title": "物理内存 paddr",
+          "order": 1,
+          "filename": "u4-l12-physical-memory-paddr.md",
+          "level": "intermediate",
+          "topic": "讲解 paddr.c 物理内存实现：pmem 数组/malloc 两种后端、guest_to_host 地址转换、paddr_read/write 的 in_pmem 检查与 mmio 分流、init_mem 的随机初始化。",
+          "learning_goals": [
+            "理解 guest 物理地址到 host 虚拟地址的映射",
+            "掌握 paddr_read/write 的 pmem/mmio/out_of_bound 三分支",
+            "知道 PMEM_LEFT/RIGHT/RESET_VECTOR 的计算"
+          ],
+          "source_files": [
+            "src/memory/paddr.c",
+            "include/memory/paddr.h",
+            "include/memory/host.h"
+          ],
+          "minimal_modules": [
+            "pmem 后端",
+            "guest_to_host",
+            "paddr_read/write",
+            "host_read/write",
+            "init_mem"
+          ],
+          "practice_task": "在 init_mem 中改用 malloc 后端并开启 MEM_RANDOM，运行程序观察未初始化内存访问的潜在问题；解释 in_pmem 为何用无符号减法判断区间。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l13",
+          "title": "虚拟内存 vaddr 与 MMU 接口",
+          "order": 2,
+          "filename": "u4-l13-virtual-memory-and-mmu-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 vaddr.c 当前直接转发 paddr 的实现，以及 isa.h 定义的 MMU 抽象接口（isa_mmu_check/isa_mmu_translate、MMU_DIRECT/TRANSLATE/FAIL、MEM_RET 跨页返回值），为后续分页扩展铺垫。",
+          "learning_goals": [
+            "理解 vaddr_ifetch/read/write 与 paddr 的关系",
+            "掌握 isa_mmu_check 的三种返回语义",
+            "知道 MEM_RET_CROSS_PAGE 等返回值如何指导分页实现"
+          ],
+          "source_files": [
+            "src/memory/vaddr.c",
+            "include/memory/vaddr.h",
+            "include/isa.h",
+            "src/isa/riscv32/system/mmu.c"
+          ],
+          "minimal_modules": [
+            "vaddr 读写转发",
+            "isa_mmu_check 接口",
+            "MMU 模式枚举",
+            "isa_mmu_translate",
+            "MEM_RET 返回值"
+          ],
+          "practice_task": "阅读 riscv32 isa-def.h 中 isa_mmu_check 宏返回 MMU_DIRECT 的含义；设计启用分页时 vaddr_read 先 check 再 translate 再 paddr_read 的调用链（伪代码）。",
+          "depends_on": [
+            "u4-l12",
+            "u3-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "ISA 实现与指令",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l14",
+          "title": "ISA 抽象与 CPU 状态定义",
+          "order": 1,
+          "filename": "u5-l14-isa-abstraction-and-cpu-state.md",
+          "level": "intermediate",
+          "topic": "讲解 ISA 抽象层完整接口（isa.h）与 riscv32 的 isa-def.h：CPU_state 结构（gpr+pc）、ISADecodeInfo、宏拼接命名、riscv32/riscv64 与 RVE 的条件定义。",
+          "learning_goals": [
+            "理解 isa.h 如何用 concat 拼接出 ISA 专属类型与函数",
+            "掌握 riscv32 CPU_state 与 ISADecodeInfo 的字段",
+            "知道 RV64/RVE 配置如何改变结构体大小"
+          ],
+          "source_files": [
+            "include/isa.h",
+            "src/isa/riscv32/include/isa-def.h",
+            "include/common.h"
+          ],
+          "minimal_modules": [
+            "isa.h 接口分类",
+            "concat 类型拼接",
+            "riscv32 CPU_state",
+            "ISADecodeInfo",
+            "RV64/RVE 条件"
+          ],
+          "practice_task": "对比 riscv32 与 x86 的 isa-def.h，列出各自 CPU_state 字段差异；解释 CONFIG_RVE 如何使 gpr 从 32 缩为 16 及对 difftest 寄存器大小的影响。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l10"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l15",
+          "title": "寄存器实现",
+          "order": 2,
+          "filename": "u5-l15-register-implementation.md",
+          "level": "intermediate",
+          "topic": "讲解 reg.c/reg.h/init.c：gpr 宏与 check_reg_idx 越界检查、regs[] 寄存器名表、isa_reg_display/isa_reg_str2val（待实现）、restart 初始化 pc 与 $0、built-in 镜像。",
+          "learning_goals": [
+            "实现 isa_reg_display 打印所有寄存器",
+            "实现 isa_reg_str2val 把名字解析为值",
+            "理解 $0 恒为 0 与 restart 的初始化"
+          ],
+          "source_files": [
+            "src/isa/riscv32/reg.c",
+            "src/isa/riscv32/local-include/reg.h",
+            "src/isa/riscv32/init.c"
+          ],
+          "minimal_modules": [
+            "gpr 宏",
+            "check_reg_idx",
+            "regs 名表",
+            "isa_reg_display/str2val",
+            "restart 初始化",
+            "built-in img"
+          ],
+          "practice_task": "实现 isa_reg_display 格式化打印 32 个通用寄存器与 pc；实现 isa_reg_str2val 支持寄存器名（如 a0）与 $0；在 SDB info r 命令中调用并验证。",
+          "depends_on": [
+            "u5-l14"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l16",
+          "title": "RISC-V 指令实现",
+          "order": 3,
+          "filename": "u5-l16-riscv-instruction-implementation.md",
+          "level": "intermediate",
+          "topic": "以 riscv32 inst.c 为例讲解指令实现全流程：isa_exec_once 取指、decode_operand 解码 I/U/S 类型立即数与寄存器、INSTPAT 匹配 auipc/lbu/sb/ebreak、R(0)=0 复位、NEMUTRAP。",
+          "learning_goals": [
+            "掌握 RISC-V I/U/S 类型立即数解码（immI/immU/immS）",
+            "用 INSTPAT 实现一条完整指令",
+            "理解 ebreak 作为 nemu_trap 的约定与 R(10) 返回值"
+          ],
+          "source_files": [
+            "src/isa/riscv32/inst.c",
+            "src/isa/riscv32/local-include/reg.h",
+            "include/cpu/decode.h"
+          ],
+          "minimal_modules": [
+            "isa_exec_once",
+            "decode_operand",
+            "immI/U/S",
+            "INSTPAT 实例",
+            "R(0) 复位",
+            "ebreak/NEMUTRAP"
+          ],
+          "practice_task": "为 riscv32 实现 add/lw/sw/jal/jalr/beq 等基本指令，使一个简单 RISC-V 程序能跑通并 HIT GOOD TRAP；分析立即数符号扩展 SEXT 的作用。",
+          "depends_on": [
+            "u3-l11",
+            "u5-l15",
+            "u4-l13"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l17",
+          "title": "x86 变长指令实现对比",
+          "order": 4,
+          "filename": "u5-l17-x86-variable-length-instruction.md",
+          "level": "intermediate",
+          "topic": "以 x86 inst.c 对比讲解变长指令译码：ModR_M/SIB 字节解析、load_addr 计算内存地址、操作数大小前缀（0x66）、两字节转义（0x0f）、x86_inst_fetch 增量取指与指令队列。",
+          "learning_goals": [
+            "理解 x86 变长指令的逐字节取指与 ModR/M 解码",
+            "对比 RISC-V 定长指令译码的差异",
+            "掌握 TYPE_G2E/E2G 等操作数类型的地址/寄存器分流"
+          ],
+          "source_files": [
+            "src/isa/x86/inst.c",
+            "include/cpu/decode.h"
+          ],
+          "minimal_modules": [
+            "ModR_M/SIB",
+            "load_addr",
+            "decode_rm",
+            "操作数大小前缀",
+            "两字节转义",
+            "INSTPAT x86 用法"
+          ],
+          "practice_task": "切换到 x86 编译，对比 riscv32 与 x86 的 isa_exec_once 取指长度差异；为 x86 新增一条 mov 指令变体并验证；总结定长与变长 ISA 译码复杂度差异。",
+          "depends_on": [
+            "u5-l16"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "设备与 I/O",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l18",
+          "title": "设备框架与 IOMap 映射",
+          "order": 1,
+          "filename": "u6-l18-device-framework-iomap.md",
+          "level": "intermediate",
+          "topic": "讲解设备 I/O 框架：IOMap 结构、map_read/write 的回调机制、mmio.c 的 add_mmio_map 与地址查找、port-io.c 的端口 I/O、new_space 分配、init_device 装配流程。",
+          "learning_goals": [
+            "理解 IOMap 把地址区间绑定到设备空间与回调的机制",
+            "掌握 mmio/pio 两套映射的异同",
+            "知道 paddr_read 如何分流到 mmio_read"
+          ],
+          "source_files": [
+            "src/device/device.c",
+            "src/device/io/map.c",
+            "src/device/io/mmio.c",
+            "src/device/io/port-io.c",
+            "include/device/map.h"
+          ],
+          "minimal_modules": [
+            "IOMap 结构",
+            "map_read/write 回调",
+            "add_mmio_map",
+            "add_pio_map",
+            "find_mapid_by_addr",
+            "init_device"
+          ],
+          "practice_task": "阅读一个设备的 add_mmio_map 调用链，画出从 paddr_write 到设备回调的完整路径；解释为何 mmio 区域不能与 pmem 重叠（report_mmio_overlap）。",
+          "depends_on": [
+            "u4-l12"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l19",
+          "title": "典型外设实现",
+          "order": 2,
+          "filename": "u6-l19-typical-devices.md",
+          "level": "intermediate",
+          "topic": "讲解串口、定时器、键盘、VGA 四个典型设备实现：serial_io_handler 输出到 stderr、rtc_io_handler 读取主机时间、i8042 键盘队列与 scancode 映射、vga 帧缓冲与 vgactl 寄存器。",
+          "learning_goals": [
+            "掌握 io_handler 回调读写设备寄存器的模式",
+            "理解串口/RTC/键盘/VGA 各自的寄存器语义",
+            "知道 SDL 如何在宿主机呈现外设行为"
+          ],
+          "source_files": [
+            "src/device/serial.c",
+            "src/device/timer.c",
+            "src/device/keyboard.c",
+            "src/device/vga.c"
+          ],
+          "minimal_modules": [
+            "serial_io_handler",
+            "rtc_io_handler",
+            "i8042 键盘队列",
+            "vga vmem/vgactl",
+            "SDL 渲染"
+          ],
+          "practice_task": "实现 vga_update_screen：当 sync 寄存器非零时调用 update_screen() 并清零 sync；再让串口程序输出一段文字到 stderr 验证 serial 路径。",
+          "depends_on": [
+            "u6-l18"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l20",
+          "title": "设备时钟与中断轮询",
+          "order": 3,
+          "filename": "u6-l20-device-timer-and-interrupt-polling.md",
+          "level": "intermediate",
+          "topic": "讲解设备时间驱动：device_update 基于 TIMER_HZ 的轮询、alarm.c 用 SIGVTALRM 信号触发 timer_intr、timer_intr→dev_raise_intr→isa_query_intr 的中断挂起链路。",
+          "learning_goals": [
+            "理解 device_update 的节流轮询与 SDL 事件抽取",
+            "掌握 alarm 信号机制如何模拟硬件时钟中断",
+            "知道 dev_raise_intr/isa_query_intr 的待实现职责"
+          ],
+          "source_files": [
+            "src/device/device.c",
+            "src/device/alarm.c",
+            "src/device/timer.c",
+            "src/device/intr.c",
+            "include/device/alarm.h"
+          ],
+          "minimal_modules": [
+            "device_update 轮询",
+            "init_alarm/SIGVTALRM",
+            "add_alarm_handle",
+            "timer_intr",
+            "dev_raise_intr",
+            "isa_query_intr"
+          ],
+          "practice_task": "实现 dev_raise_intr 设置中断挂起标志、isa_query_intr 返回挂起的中断号；分析为何 alarm 在 AM 模式下被 blacklist（见 device/filelist.mk）。",
+          "depends_on": [
+            "u6-l19"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "中断、异常与系统模式",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l21",
+          "title": "中断与异常机制",
+          "order": 1,
+          "filename": "u7-l21-interrupt-and-exception.md",
+          "level": "advanced",
+          "topic": "讲解中断/异常的完整机制：isa_raise_intr 保存 epc 并跳转到中断向量、isa_query_intr 查询挂起中断、CSR 概念、与 cpu_exec 主循环的协作（每步查询中断）。",
+          "learning_goals": [
+            "理解异常/中断的 epc 保存与返回地址设置",
+            "实现 isa_raise_intr 与 isa_query_intr",
+            "掌握中断在 exec_once 循环中的检查时机"
+          ],
+          "source_files": [
+            "src/isa/riscv32/system/intr.c",
+            "include/isa.h",
+            "src/cpu/cpu-exec.c",
+            "src/device/intr.c"
+          ],
+          "minimal_modules": [
+            "isa_raise_intr",
+            "isa_query_intr",
+            "INTR_EMPTY",
+            "epc/中断向量",
+            "exec_once 中断检查点"
+          ],
+          "practice_task": "为 riscv32 实现 isa_raise_intr（保存 epc、设置 pc 为 trap 向量、记录中断号）与 isa_query_intr；让定时器中断能被正确响应并返回。",
+          "depends_on": [
+            "u6-l20",
+            "u5-l16",
+            "u4-l13"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l22",
+          "title": "分页与 MMU 地址翻译",
+          "order": 2,
+          "filename": "u7-l22-paging-and-mmu-translation.md",
+          "level": "advanced",
+          "topic": "讲解分页扩展机制：isa_mmu_check 判定地址是否需翻译、isa_mmu_translate 页表遍历与 TLB、跨页访问 MEM_RET_CROSS_PAGE 处理、vaddr 读写对翻译结果的分支处理。",
+          "learning_goals": [
+            "理解三级 MMU 检查返回值的语义",
+            "设计页表基址寄存器与页表遍历流程",
+            "处理跨页读写拆分与可选 TLB 加速"
+          ],
+          "source_files": [
+            "src/isa/riscv32/system/mmu.c",
+            "src/isa/riscv32/include/isa-def.h",
+            "include/isa.h",
+            "src/memory/vaddr.c"
+          ],
+          "minimal_modules": [
+            "isa_mmu_check",
+            "isa_mmu_translate",
+            "MMU_DIRECT/TRANSLATE/FAIL",
+            "MEM_RET_CROSS_PAGE",
+            "页表遍历设计"
+          ],
+          "practice_task": "设计并实现 riscv32 SV32 页表翻译：isa_mmu_check 依据 satp 判定模式、isa_mmu_translate 遍历两级页表返回物理地址；处理跨 4KB 页的读写拆分。",
+          "depends_on": [
+            "u4-l13",
+            "u5-l14"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l23",
+          "title": "NEMU trap 与执行状态机",
+          "order": 3,
+          "filename": "u7-l23-nemu-trap-and-state-machine.md",
+          "level": "advanced",
+          "topic": "讲解 NEMU 的执行状态机：NEMUTRAP/INV 宏、set_nemu_state、invalid_inst 诊断、NEMUState 五种状态、is_exit_status_bad 判定成功/失败、HIT GOOD/BAD TRAP 输出。",
+          "learning_goals": [
+            "理解 nemu_trap 作为程序结束信号的约定与返回值",
+            "掌握 NEMU 状态机的转换条件",
+            "区分 HIT GOOD TRAP 与 HIT BAD TRAP 的判定逻辑"
+          ],
+          "source_files": [
+            "src/engine/interpreter/hostcall.c",
+            "src/utils/state.c",
+            "include/cpu/cpu.h",
+            "src/cpu/cpu-exec.c"
+          ],
+          "minimal_modules": [
+            "NEMUTRAP/INV 宏",
+            "set_nemu_state",
+            "invalid_inst 诊断",
+            "NEMUState 状态",
+            "is_exit_status_bad",
+            "statistic"
+          ],
+          "practice_task": "追踪 ebreak 触发 NEMUTRAP 后到 is_exit_status_bad 的完整状态流；构造一个返回非 0 的 trap 与一个 invalid_inst，分别观察 HIT BAD TRAP 与 ABORT 输出。",
+          "depends_on": [
+            "u3-l9",
+            "u5-l16"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "测试、追踪与工程化",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l24",
+          "title": "差分测试机制",
+          "order": 1,
+          "filename": "u8-l24-differential-testing.md",
+          "level": "advanced",
+          "topic": "讲解差分测试原理与实现：DUT 用 dlopen 加载 REF 动态库、ref_difftest_* 函数指针、difftest_step 每步比对寄存器、difftest_skip_ref/skip_dut 处理指令打包差异、REF 侧接口与 difftest-def.h 寄存器布局。",
+          "learning_goals": [
+            "理解 DUT/REF 双方通过动态库+函数指针协作的架构",
+            "掌握 difftest_step 的比对与跳过逻辑",
+            "知道为何 MMIO 访问要 difftest_skip_ref"
+          ],
+          "source_files": [
+            "src/cpu/difftest/dut.c",
+            "src/cpu/difftest/ref.c",
+            "include/cpu/difftest.h",
+            "include/difftest-def.h",
+            "tools/difftest.mk"
+          ],
+          "minimal_modules": [
+            "init_difftest dlopen",
+            "ref_difftest_* 函数指针",
+            "difftest_step 比对",
+            "skip_ref/skip_dut",
+            "REF 侧接口",
+            "DIFFTEST_REG_SIZE"
+          ],
+          "practice_task": "阅读 difftest_step 与 checkregs，解释 skip_dut_nr_inst 如何处理 QEMU 指令打包；在 menuconfig 开启 DIFFTEST 并以 spike 为 REF 编译运行，分析输出。",
+          "depends_on": [
+            "u5-l16",
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l25",
+          "title": "指令追踪与反汇编",
+          "order": 2,
+          "filename": "u8-l25-instruction-trace-and-disasm.md",
+          "level": "advanced",
+          "topic": "讲解 itrace 指令追踪与 capstone 反汇编：exec_once 中 logbuf 组装 pc/指令字节/disassemble、disasm.c 用 dlopen 加载 capstone 动态库、log.c 的 trace 窗口（TRACE_START/END）控制。",
+          "learning_goals": [
+            "理解 logbuf 的组装格式与大小端字节序处理",
+            "掌握 capstone 通过 dlopen 动态加载的跨平台策略",
+            "知道 trace 窗口如何控制日志量"
+          ],
+          "source_files": [
+            "src/cpu/cpu-exec.c",
+            "src/utils/disasm.c",
+            "src/utils/log.c"
+          ],
+          "minimal_modules": [
+            "exec_once logbuf 组装",
+            "init_disasm dlopen capstone",
+            "disassemble",
+            "log_enable trace 窗口",
+            "ITRACE_COND"
+          ],
+          "practice_task": "开启 ITRACE 并设置 TRACE_START/END 窗口，运行程序后从 nemu-log.txt 中定位出错指令；分析 disasm.c 中 CS_LIB_SUFFIX 如何区分 macOS/Linux。",
+          "depends_on": [
+            "u3-l9",
+            "u5-l16"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l26",
+          "title": "宏体系与条件编译工程化",
+          "order": 3,
+          "filename": "u8-l26-macro-and-conditional-compilation.md",
+          "level": "advanced",
+          "topic": "讲解 NEMU 工程化的宏基础设施：MUXDEF/IFDEF/IFNDEF 条件编译、BITS/SEXT 位操作、concat/str/ARRLEN、MAP X-macro，以及如何用一套源码适配多 ISA/多模式/多目标。",
+          "learning_goals": [
+            "理解 MUXDEF 基于“宏是否定义”选择分支的原理",
+            "掌握 IFDEF/IFNDEF 在多 ISA/多模式代码中的贯穿使用",
+            "能新增一个 CONFIG 选项并在源码中条件编译"
+          ],
+          "source_files": [
+            "include/macro.h",
+            "include/common.h",
+            "Kconfig",
+            "src/filelist.mk"
+          ],
+          "minimal_modules": [
+            "MUXDEF/IFDEF/IFNDEF",
+            "BITS/SEXT",
+            "concat/str/ARRLEN",
+            "MAP X-macro",
+            "CONFIG 条件编译贯穿"
+          ],
+          "practice_task": "参考 MEM_RANDOM 的模式在 Kconfig 新增一个 CONFIG_ 调试开关，在 macro.h/common.h 中用 IFDEF 使用它，重新 menuconfig 编译验证生效。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
