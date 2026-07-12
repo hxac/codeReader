@@ -2,476 +2,514 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+本讲聚焦 nano-vllm 推理引擎的「决策大脑」——`Scheduler`。学完后你应该掌握：
 
-- 说清 `Scheduler.schedule()` 返回值的含义，以及「prefill 优先于 decode」这条策略是如何用代码体现的。
-- 解释 `max_num_seqs` 与 `max_num_batched_tokens` 这两个约束分别在 prefill 和 decode 阶段起什么作用。
-- 读懂分块 prefill（chunked prefill）「只对首条序列切片」的设计，并能手算出每一步调度了哪些序列、各调度了多少 token。
-- 理解 `postprocess()` 如何把采样到的 token 写回序列、推进「已计算」水位，并在合适的时候把序列标记为 `FINISHED`。
+1. `Scheduler.schedule()` 的返回值结构，以及「prefill 优先于 decode」这一核心策略是如何用代码体现的。
+2. 两个调度约束 `max_num_seqs`（批次内最多多少条序列）与 `max_num_batched_tokens`（单步最多算多少个 token）分别作用在哪一层，二者如何共同决定一个 step 里调度哪些序列。
+3. `postprocess()` 如何把模型产出的 token 写回序列、推进 KV 计算水位、登记前缀缓存，并在命中 EOS 或达到 `max_tokens` 时判定序列终止。
 
-本讲是上一讲「Sequence 生命周期」的延续：上一讲讲了序列「长什么样」，本讲讲序列「被谁、按什么规则推着走」。
+本讲只讲 `Scheduler` 本身的调度与后处理逻辑；它调用的 `BlockManager`（块分配、缓存命中）的内部细节留给第 3 单元，分块 prefill 与抢占（preempt）的深入机制留给下一讲（u2-l3）。
 
 ## 2. 前置知识
 
-在进入源码前，先用大白话把几个关键概念对齐。
+在进入 `Scheduler` 之前，先回顾两个来自前序讲义的关键认知。
 
-- **prefill 与 decode**：大模型生成文本分两个阶段。prefill 阶段把整条 prompt（用户输入）一次性喂给模型，算出每一个位置的 KV（Key/Value），并预测第一个新 token；decode 阶段则是每次只把上一步生成的 1 个 token 喂进去，再预测下一个 token，如此循环。prefill 是「算一大批」，decode 是「一次一个」。
-- **token 与 batch**：这里把「一个序列里的一个位置」叫一个 token。一个 step（一步）里可以同时处理多条序列，本步所有序列的 token 数加起来叫「本步的 batched tokens」。
-- **KV Cache 与 block**：模型每算一个 token 都会产生 K/V，存起来给后续位置复用，这就是 KV Cache。nano-vllm 把 KV Cache 切成固定大小的「块（block）」来管理（详见 u3 单元）。调度器在调度时需要关心「块够不够分」。
-- **两队列模型**：调度器内部维护两个队列。`waiting` 存「还没开始 prefill 或没 prefill 完」的序列；`running` 存「已经 prefill 完、正在 decode」的序列。
-- **Sequence 的计数**（上一讲）：`num_tokens`（当前总长度）、`num_cached_tokens`（已经算过 KV 的进度水位）、`num_scheduled_tokens`（本步要新算多少 token）。本讲会反复用到这三个字段。
+**两个阶段：prefill 与 decode。** 大模型推理分两段。prefill 阶段一次性吃下整条 prompt，算出所有位置的 KV Cache，并在最后产出一个 token；decode 阶段每次只吃上一个 token，逐步续写。prefill 是算力密集型（并行算一长串），decode 是访存密集型（每步只算一个）。引擎必须显式区分这两个阶段来调度。
+
+**Sequence 的计数字段。** 这是上一讲（u2-l1）的主角，本讲会反复用到其中三个：
+
+- `num_tokens`：当前序列的总 token 数（prompt 长度 + 已生成的 completion）。
+- `num_cached_tokens`：已经算过 KV 的 token 水位，即「计算进度」。
+- `num_scheduled_tokens`：本次 step 被调度去算的 token 增量，由 `schedule` 写入、`postprocess` 清零。
+
+字段定义见 [nanovllm/engine/sequence.py:25-26](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L25-L26)（`num_cached_tokens` 与 `num_scheduled_tokens` 初值均为 0）。
+
+**三态状态机。** 序列有三种状态（[nanovllm/engine/sequence.py:8-11](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L8-L11)）：`WAITING`（排队等 prefill）、`RUNNING`（prefill 完毕、正在 decode）、`FINISHED`（生成结束）。`Scheduler` 正是驱动这些状态迁移的角色。
+
+**step 的三段式。** 来自 u1-l3：`LLMEngine.step()` 严格按 `schedule`（决策）→ `run`（前向采样）→ `postprocess`（写回）执行（[nanovllm/engine/llm_engine.py:49-55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L49-L55)）。本讲就是要把 `schedule` 和 `postprocess` 这一头一尾彻底讲透。
 
 ## 3. 本讲源码地图
 
-本讲主要围绕一个文件展开，并少量引用它的协作者：
+本讲主要涉及以下文件：
 
 | 文件 | 作用 |
 | --- | --- |
-| [nanovllm/engine/scheduler.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py) | 调度器本体。`schedule()` 决策、`postprocess()` 写回、`preempt()` 抢占都在这里。 |
-| [nanovllm/engine/llm_engine.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py) | 引擎主循环 `step()`，串起 `schedule → run → postprocess`。 |
-| [nanovllm/config.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/config.py) | 提供 `max_num_seqs`、`max_num_batched_tokens` 等约束参数。 |
-| [nanovllm/engine/block_manager.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py) | 块管理器，提供 `can_allocate / allocate / can_append / may_append / hash_blocks`，被调度器调用。 |
-| [nanovllm/engine/sequence.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py) | `Sequence` 数据结构，提供 `append_token`、`num_completion_tokens` 等。 |
+| [nanovllm/engine/scheduler.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py) | **本讲主角**。`Scheduler` 类，含 `schedule`/`preempt`/`postprocess`。 |
+| [nanovllm/engine/llm_engine.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py) | `step()` 调用 `schedule`/`postprocess`，展示返回值如何被消费。 |
+| [nanovllm/engine/block_manager.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py) | `schedule`/`postprocess` 调用的块管理方法（`can_allocate`/`allocate`/`can_append`/`may_append`/`hash_blocks`/`deallocate`）。本讲只看接口语义，内部留到第 3 单元。 |
+| [nanovllm/engine/sequence.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py) | `Sequence` 的计数字段与 `append_token`。 |
+| [nanovllm/config.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/config.py) | `max_num_seqs`、`max_num_batched_tokens` 的默认值。 |
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成四个最小模块：先看调度器的「两队列模型与构造」，再分别精读 `schedule()` 的 prefill 分支、decode 分支（含抢占），最后看 `postprocess()` 的写回与终止判定。
+本讲把 `Scheduler` 拆成四个最小模块：双队列与 prefill 优先策略、prefill 调度的双约束、decode 调度与显存检查、postprocess 写回与终止判定。
 
-### 4.1 调度器的两队列模型与构造
+### 4.1 双队列与 prefill 优先策略
 
 #### 4.1.1 概念说明
 
-调度器是引擎的「决策大脑」。模型前向计算很贵，所以每一步必须先决定：
+`Scheduler` 内部维护两个双端队列（`deque`）：
 
-1. 这一步跑哪些序列？
-2. 这一步是 prefill 还是 decode？
-3. 每条序列本步算多少 token？
+- `waiting`：等待 prefill 的序列。新请求经 `add()` 进来时一律入此队（[nanovllm/engine/scheduler.py:22-23](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L22-L23)）。
+- `running`：已经完成 prefill、正在 decode 的序列。
 
-nano-vllm 用一个非常直观的模型来回答这些问题：**两个队列 + 一条优先级规则**。
+引擎每次 `step` 都要回答一个问题：**这一步该 prefill 还是 decode？** nano-vllm 的回答是「prefill 优先」——只要 `waiting` 里有可以调度的序列，就优先做 prefill；只有当 `waiting` 空（或里面的序列暂时不可调度）时，才对 `running` 做 decode。这样做的好处是让新请求尽快进入生成态，降低首 token 延迟。
 
-- `waiting` 队列：装着等待 prefill 的序列（刚进来的新请求，或被抢占退回来的请求）。
-- `running` 队列：装着已经 prefill 完、正在逐 token decode 的序列。
-- 优先级规则：**只要 waiting 里还有能调度的序列，就优先做 prefill**；只有 waiting 空了，才去处理 running 做 decode。
+`schedule()` 的返回值是一个二元组 `(scheduled_seqs, is_prefill)`：
 
-这套规则的好处是：新请求不会被正在 decode 的长请求饿死——只要有新请求，引擎会立刻先把它的 prompt 算完。
+- `scheduled_seqs`：本次 step 真正要送进模型前向的序列列表。
+- `is_prefill`：布尔标志，告诉调用方这批序列处于哪个阶段。
 
-调度器还受两个容量上限约束（来自 `Config`）：
-
-- `max_num_seqs`：一步里最多同时处理多少条序列。
-- `max_num_batched_tokens`：一步里所有序列的 token 数之和不能超过这个值（主要约束 prefill，因为 prefill 一次吃很多 token）。
+这个布尔标志非常关键，它一路影响后续：`step()` 用它决定吞吐量统计的正负号（[nanovllm/engine/llm_engine.py:51](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L51)），`postprocess` 用它决定是否要把采样 token 追加进序列（见 4.4）。
 
 #### 4.1.2 核心流程
 
-调度器对外暴露的调用节奏是这样的（被 `LLMEngine.step()` 驱动）：
+`schedule` 的顶层结构可以用下面这段伪代码概括：
 
-```text
-add(seq)            # 新请求入队，进 waiting 尾部
-  ↓
-schedule()          # 决策：返回 (本步要跑的序列列表, 是否是 prefill)
-  ↓
-model_runner.run()  # 真正算（不在本讲范围）
-  ↓
-postprocess()       # 把算出的 token 写回序列，判定是否结束
+```
+function schedule():
+    scheduled_seqs = []
+    # 第一阶段：尝试 prefill
+    while waiting 非空 且 未超 max_num_seqs:
+        ... 取 waiting[0]，扣 token 预算，写 num_scheduled_tokens ...
+        scheduled_seqs.append(seq)
+    if scheduled_seqs 非空:
+        return scheduled_seqs, True        # ← prefill 优先：有就立刻返回
+
+    # 第二阶段：decode（只有 prefill 没产出时才走到这里）
+    while running 非空 且 未超 max_num_seqs:
+        ... 取 running 序列，每条调度 1 个 token ...
+    return scheduled_seqs, False
 ```
 
-辅助方法：
-
-- `is_finished()`：waiting 和 running 都空了，引擎主循环就停止。
-- `add(seq)`：把序列追加到 waiting 尾部（FIFO）。
+注意中间那句 `if scheduled_seqs: return ..., True`——它是「prefill 优先」的字面体现：只要 prefill 循环放过哪怕一条序列，就立刻返回，绝不让 decode 抢这一步。
 
 #### 4.1.3 源码精读
 
-构造函数把 Config 里的约束读进来，并初始化两个队列与块管理器：
+队列与约束参数在构造函数里初始化（[nanovllm/engine/scheduler.py:10-17](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L10-L17)），其中 `max_num_seqs`、`max_num_batched_tokens`、`eos`、`block_size` 都直接来自 `Config`，并构造一个 `BlockManager`：
 
-[Scheduler.__init__:L10-L17](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L10-L17) —— 读取 `max_num_seqs`、`max_num_batched_tokens`、`eos`、`block_size`，新建 `BlockManager`，并创建 `waiting` / `running` 两个空 `deque`。
+```python
+self.max_num_seqs = config.max_num_seqs
+self.max_num_batched_tokens = config.max_num_batched_tokens
+self.eos = config.eos
+self.block_size = config.kvcache_block_size
+self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+self.waiting: deque[Sequence] = deque()
+self.running: deque[Sequence] = deque()
+```
 
-两个辅助方法很短：
+`schedule` 的签名与「prefill 优先」的提前返回见 [nanovllm/engine/scheduler.py:25-55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L25-L55)，关键就是这一句：
 
-[is_finished 与 add:L19-L23](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L19-L23) —— `is_finished` 判据是「两个队列都空」；`add` 把序列 `append` 到 `waiting` 尾部。
+```python
+if scheduled_seqs:
+    return scheduled_seqs, True
+```
 
-约束参数的默认值在 Config 里：
-
-[max_num_batched_tokens / max_num_seqs:L9-L10](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/config.py#L9-L10) —— 默认每步最多 16384 个 token、最多 512 条序列。这两个值会在「综合实践」里被我们改小来放大调度细节。
-
-> 小提示：`waiting` 和 `running` 都是 `collections.deque`，因为它两端进出都是 O(1)。调度器会频繁从队首取、队首放回，`deque` 比 `list` 合适。
+只要 prefill 阶段攒到了序列，就立即带 `True` 返回；否则才继续往下走 decode 逻辑。
 
 #### 4.1.4 代码实践
 
-**实践目标**：在不跑模型的前提下，建立「调度器 = 两队列 + 约束参数」的直觉。
+**实践目标**：直观感受「prefill 优先」。
 
 **操作步骤**：
 
-1. 打开 [config.py:L9-L18](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/config.py#L9-L18)，记下 `max_num_batched_tokens=16384`、`max_num_seqs=512`、`kvcache_block_size=256`。
-2. 打开 [scheduler.py:L10-L23](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L10-L23)，对照确认 `__init__` 把这几个值存成了实例属性。
+1. 打开 [nanovllm/engine/llm_engine.py:49-55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L49-L55) 的 `step()`。
+2. 在 `seqs, is_prefill = self.scheduler.schedule()` 之后加一行日志：`print(f"[step] is_prefill={is_prefill}, num_seqs={len(seqs)}")`。
+3. 运行 `example.py`（见 u1-l1），传入多条 prompt。
 
-**需要观察的现象**：调度器自己「不持有任何模型对象」，它只持有队列和块管理器——也就是说，调度决策与模型计算是完全解耦的。
+**需要观察的现象**：日志会先连续打印若干行 `is_prefill=True`（把所有 prompt 依次 prefill 完），之后才进入大量 `is_prefill=False`（decode 阶段）。**不会出现 prefill 与 decode 在同一个 step 内混跑的情况**——这正是 prefill 优先策略的直接证据。
 
-**预期结果**：你能用一句话向别人解释「调度器构造时准备了哪两个队列、受哪两个数约束」。
+**预期结果**：待本地验证（需要 GPU 环境跑通推理）。若暂无环境，也可纯靠阅读 [nanovllm/engine/scheduler.py:54-55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L54-L55) 的提前返回逻辑推出同一结论。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果一个请求刚通过 `add()` 进入调度器，它会被放进哪个队列？状态是什么？
-**答案**：进入 `waiting` 队列尾部；状态是 `WAITING`（在 `Sequence.__init__` 中设定）。
+**练习 1**：如果 `waiting` 里有一条 100 万 token 的超长 prompt，且 `max_num_batched_tokens` 很小，引擎会不会一直卡在 prefill、永远不 decode 其它已就绪序列？
 
-**练习 2**：`is_finished()` 何时返回 `True`？只用 `running` 空来判断行不行？
-**答案**：当 `waiting` 和 `running` 都为空时返回 `True`。不行——如果有请求还在 `waiting`（比如显存不足一直没调度上），仅看 `running` 空会误判为结束。
+**答案**：会持续做该长 prompt 的分块 prefill，但不一定「永远不 decode」。因为分块 prefill 只对 `waiting` 的**首条**序列切片（见 4.2），且每个 step 只要 `scheduled_seqs` 非空就以 prefill 返回。在长 prompt 仍在 `waiting` 首部且未完成期间，引擎确实会一直返回 prefill；只有当它被切完、晋升 `RUNNING` 后，后续新请求才可能被 prefill。这是 nano-vllm 极简实现的取舍。
 
----
+**练习 2**：`schedule` 的返回元组里第二个值为什么必须是布尔而不是枚举？它被哪两处消费？
 
-### 4.2 schedule() 的 prefill 分支：prefill 优先与 token 预算
+**答案**：因为只有 prefill/decode 两态，布尔足够。它被 `step()` 的吞吐统计（`num_tokens` 正负号）和 `postprocess`（是否追加 token）消费。
+
+### 4.2 prefill 调度：token 预算与序列数双约束
 
 #### 4.2.1 概念说明
 
-`schedule()` 是本讲的主角。它返回一个元组 `(scheduled_seqs, is_prefill)`：
+prefill 调度同时受两个上限约束，二者分别限制「宽度」和「总量」：
 
-- `scheduled_seqs`：本步要送进模型的序列列表。
-- `is_prefill`：布尔值，标记本步是 prefill 还是 decode。
+- `max_num_seqs`：一个 step 内最多调度多少条序列（宽度上限，默认 512，见 [nanovllm/config.py:10](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/config.py#L10)）。
+- `max_num_batched_tokens`：一个 step 内所有序列加起来最多算多少个 token（总量上限，默认 16384，见 [nanovllm/config.py:9](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/config.py#L9)）。
 
-prefill 分支的核心是一条「**装填循环**」：从 `waiting` 队首开始，把序列一条条拿出来，尝试塞进本步的「token 预算筐」里，直到装不下或队列空了。
+为什么需要两个？因为 prefill 时每条序列贡献的 token 数等于其 prompt 长度，长短不一。光限制序列条数，可能让单步 token 总量爆炸（算力超载）；光限制 token 总量，又可能塞进极多短序列（调度开销大）。两个约束一起作用，才能把每个 step 的计算量稳定在一个可控区间。
 
-这里有两个精妙的设计要先点出来，否则代码会看不懂：
-
-1. **前缀缓存复用**：如果一条序列的 prompt 前缀已经在缓存里（上一讲提到的 `num_cached_tokens`，本讲的 `can_allocate` 会返回命中块数），那么这些已缓存的 token **不需要再算一遍**，本步真正要算的 token 数会减去这部分。
-2. **分块只给首条序列**：当 token 预算装不下当前序列时，如果它是本步的第一条（`scheduled_seqs` 为空），就允许「切片」——只算它前 `remaining` 个 token，剩下的留到后续 step；如果不是第一条，就直接停，把预算留给下次。
-
-为什么要「只给首条切片」？为了避免「一条超长 prompt 把整步预算吃光、同时让其它短请求干等」的反向极端——只要还有别的序列能整条塞进去，就先塞整条的。
+此外，prefill 还要处理两个细节：**前缀缓存命中**（部分 prompt 的 KV 已经算过、可直接复用，不应再算）与**分块 prefill**（一条 prompt 太长、一次算不完，需切片）。
 
 #### 4.2.2 核心流程
 
-prefill 分支的伪代码：
+prefill 循环对 `waiting` 队首序列逐一处理，流程如下：
 
-```text
-num_batched_tokens = 0
-while waiting 非空 and 已调度数 < max_num_seqs:
-    seq = waiting 队首
-    remaining = max_num_batched_tokens - num_batched_tokens   # 剩余预算
-    若 remaining == 0: break
-    if seq 还没分配过块:                       # 全新序列
-        num_cached_blocks = can_allocate(seq)  # 命中缓存的块数，-1 表示块不够
-        若 num_cached_blocks == -1: break
-        num_tokens = seq.num_tokens - num_cached_blocks * block_size   # 扣掉缓存
-    else:                                       # 之前分块过、续算的序列
+```
+while waiting 非空 且 len(scheduled_seqs) < max_num_seqs:
+    seq = waiting[0]
+    remaining = max_num_batched_tokens - 已累计 token 数
+    if remaining == 0: break                       # 预算耗尽
+
+    if seq 是新序列（block_table 为空）:
+        num_cached_blocks = block_manager.can_allocate(seq)   # 缓存命中块数
+        if num_cached_blocks == -1: break          # 显存不够
+        num_tokens = seq.num_tokens - num_cached_blocks * block_size   # 扣掉命中部分
+    else:  # 分块 prefill 的续算
         num_tokens = seq.num_tokens - seq.num_cached_tokens
-    若 remaining < num_tokens 且 scheduled_seqs 非空: break   # 非首条不切片
-    若 seq 是全新的: allocate(seq, num_cached_blocks)         # 一次性分配所有块
-    seq.num_scheduled_tokens = min(num_tokens, remaining)     # 本步实际算多少
-    num_batched_tokens += seq.num_scheduled_tokens
-    若 全部算完: 状态置 RUNNING，从 waiting 移到 running
-    把 seq 加入 scheduled_seqs
-若 scheduled_seqs 非空: return (scheduled_seqs, True)        # 本步是 prefill
-# ……否则进入 decode 分支
+
+    if remaining < num_tokens 且 scheduled_seqs 非空:
+        break          # 只允许首条序列被分块；非首条放不下就让步
+
+    给 seq 分配块；写 num_scheduled_tokens = min(num_tokens, remaining)
+    if 全部 prompt 都已覆盖:
+        seq 状态 → RUNNING，从 waiting 移到 running
+    scheduled_seqs.append(seq)
 ```
 
-注意一个关键事实：`allocate()` 会**一次性为整条序列分配所有需要的块**（从 `num_cached_blocks` 到 `seq.num_blocks`），见 [BlockManager.allocate:L75-L92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L75-L92)。也就是说，「分块」分的是**计算量**（一次算多少 token），不是显存块——块在第一次 prefill 时就全分好了。这也是为什么续算分支（`else`）里不再调用 `allocate`。
+这里有两个关键公式。每条序列本次实际算的 token 数：
+
+\[
+\text{num\_scheduled\_tokens} = \min(\text{num\_tokens},\ \text{remaining})
+\]
+
+而序列晋升为 `RUNNING` 的判据是「已算部分恰好覆盖整条 prompt」：
+
+\[
+\text{num\_cached\_tokens} + \text{num\_scheduled\_tokens} = \text{num\_tokens}
+\]
+
+注意这里的 `num_cached_tokens` 在 `allocate` 阶段被设成「命中的缓存块 × 块大小」（见 [nanovllm/engine/block_manager.py:92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L92)），所以缓存命中的 token 既不算进 `num_tokens`（被减掉了），又通过 `num_cached_tokens` 计入了「覆盖量」，逻辑自洽。
 
 #### 4.2.3 源码精读
 
-[ schedule() 的 prefill 循环:L29-L52](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L29-L52) —— 这是本模块最核心的一段，逐行解读如下：
+prefill 循环主体见 [nanovllm/engine/scheduler.py:29-52](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L29-L52)。几个要点逐段看。
 
-- L30：循环条件 `self.waiting and len(scheduled_seqs) < self.max_num_seqs`——队列非空且没超序列数上限。
-- L32：`remaining` 是本步剩余 token 预算。
-- L35-L39：全新序列（`not seq.block_table`）走 `can_allocate`。返回 `-1` 表示空闲块不够（L37-L38 直接 `break`）；否则用命中块数把要算的 token 数减下来。
-- L40-L41：续算序列（已有 `block_table` 但没算完），要算的是「总长 − 已算水位」。
-- L42-L43：**「非首条不切片」**规则。注意条件是 `remaining < num_tokens and scheduled_seqs`——只有当预算装不下 **且** 已经有别的序列在本步时才停。
-- L46：`seq.num_scheduled_tokens = min(num_tokens, remaining)`——本步真正要算的 token 数，受预算封顶。这就是「切片」发生的地方。
-- L48-L51：如果「已算水位 + 本步算的 == 总长」，说明 prefill 完成，状态转 `RUNNING`，从 `waiting` 弹出塞进 `running`。
+**双约束的 while 条件与预算检查**（[nanovllm/engine/scheduler.py:30-34](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L30-L34)）：
 
-[ prefill 完成则返回:L54-L55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L54-L55) —— 只要本步调度到了至少一条 prefill 序列，就立刻返回 `is_prefill=True`，**不会**再去碰 decode。这就是「prefill 优先」的代码体现。
+```python
+while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
+    seq = self.waiting[0]
+    remaining = self.max_num_batched_tokens - num_batched_tokens
+    if remaining == 0:
+        break
+```
 
-> 前缀缓存的细节（`can_allocate` 怎么算命中块数、`compute_hash` 怎么链式哈希）属于 u3-l2 的内容，本讲只需把它当成「返回命中块数或 -1」的黑盒。
+`len(scheduled_seqs) < self.max_num_seqs` 是宽度约束；`remaining == 0` 是总量约束（预算耗尽立即停）。
+
+**新序列 vs 续算的两分支**（[nanovllm/engine/scheduler.py:35-41](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L35-L41)）：
+
+```python
+if not seq.block_table:
+    num_cached_blocks = self.block_manager.can_allocate(seq)
+    if num_cached_blocks == -1:
+        break
+    num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
+else:
+    num_tokens = seq.num_tokens - seq.num_cached_tokens
+```
+
+`block_table` 是否为空是判别「首次 prefill」与「分块续算」的开关。`can_allocate` 返回 -1 表示显存不足以放下这条新序列（连扣掉缓存后所需的新块都凑不齐），此时直接 break，本步 prefill 终止（其内部判定逻辑留到 u3-l2）。
+
+**「只允许首条分块」的开关**（[nanovllm/engine/scheduler.py:42-43](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L42-L43)）：
+
+```python
+if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
+    break
+```
+
+注意 `and scheduled_seqs`——只有当「已经调度过至少一条序列」时，才不允许当前序列被切。换言之，**第一条序列允许 `num_scheduled_tokens < num_tokens`（被切），后续序列要么整条放下，要么让步**。这个设计避免了「一堆序列都被切一半」的混乱，把分块仅限于队首那条最长的。
+
+**分配、写调度量、晋升**（[nanovllm/engine/scheduler.py:44-52](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L44-L52)）：
+
+```python
+if not seq.block_table:
+    self.block_manager.allocate(seq, num_cached_blocks)
+seq.num_scheduled_tokens = min(num_tokens, remaining)
+num_batched_tokens += seq.num_scheduled_tokens
+if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
+    seq.status = SequenceStatus.RUNNING
+    self.waiting.popleft()
+    self.running.append(seq)
+scheduled_seqs.append(seq)
+```
+
+注意分块未完成的序列**不会被 popleft**，仍留在 `waiting[0]`，下次 `schedule` 会从 `else` 分支续算；只有整条 prompt 覆盖完毕才晋升 `RUNNING` 并搬到 `running` 队列。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用一组小数字手算 prefill 调度，验证你对 token 预算与「首条切片」规则的理解。这一步纯纸笔即可，不需要 GPU。
+这是本讲的**核心实践**（对应大纲指定的练习任务）：把 `max_num_batched_tokens` 设得很小，观察分块 prefill 与多序列调度。
 
-**场景设定**：`max_num_batched_tokens = 8`（故意极小），`max_num_seqs = 512`，`block_size = 256`。三条请求同时进来（假设没有前缀缓存命中，空闲块充足）：
+**实践目标**：亲手验证 token 预算如何切分长 prompt、如何放行/挡住后续序列。
 
-- A：prompt 长度 5
-- B：prompt 长度 10
-- C：prompt 长度 3
+**操作步骤**：
 
-`waiting = [A, B, C]`（按进入顺序）。
+1. 在 [nanovllm/engine/scheduler.py:46-52](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L46-L52) 的 `scheduled_seqs.append(seq)` 之前加日志：
+   ```python
+   print(f"[prefill] seq_id={seq.seq_id} num_tokens={num_tokens} "
+         f"num_scheduled={seq.num_scheduled_tokens} remaining={remaining} "
+         f"promoted={seq.status == SequenceStatus.RUNNING}")
+   ```
+2. 用很小的预算构造引擎（**示例代码，非项目原有**）：
+   ```python
+   from nanovllm import LLM, SamplingParams
+   llm = LLM("Qwen/Qwen3-0.6B", max_num_batched_tokens=10)
+   sp = SamplingParams(temperature=0.5, max_tokens=3)
+   llm.generate(["短句", "另一句稍长一点的输入", "第三句"], sp)
+   ```
+3. 把每一步 `schedule` 返回的 `(seq_id, num_scheduled_tokens)` 抄下来，画成表格。
 
-**操作步骤**：按 L29-L52 的逻辑，一步步推演每个 step 调度了谁。
+**需要观察的现象（手工推演，假设三条 prompt 长度分别为 12、5、8 token，无缓存命中，`max_num_batched_tokens=10`）**：
 
-**需要观察的现象 / 预期结果**（待本地验证，以下为按源码推演的结果）：
+| step | 返回 seq（num_scheduled） | 说明 |
+| --- | --- | --- |
+| 1 | seq0(10) | 预算 10 < 12，首条被切；seq0 仍 waiting |
+| 2 | seq0(2)→晋升, seq1(5)→晋升 | seq0 续算 2 个补满，再放 seq1(5)，此时累计 7；seq2 需 8 但 remaining=3，非首条→让步 |
+| 3 | seq2(8)→晋升 | seq2 整条放下 |
+| 4+ | seq0,seq1,seq2 各 1 | waiting 已空，进入 decode |
 
-| step | 类型 | 调度序列 | 各序列 `num_scheduled_tokens` | 说明 |
-| --- | --- | --- | --- | --- |
-| 1 | prefill | `[A]` | A=5 | A 用掉 5 预算；B 需要 10 但剩余 3 且 A 已在列 → 停 |
-| 2 | prefill | `[B]` | B=8 | B 是首条，允许切片，只算 8/10；B 未算完，留在 waiting |
-| 3 | prefill | `[B, C]` | B=2, C=3 | B 续算 2（剩 10−8=2），完成；剩余 6 够 C 整条算完 |
-| 4 | decode | `[A, B, C]` | 各=1 | waiting 空，转 decode，三条各算 1 个 token |
+**预期结果**：日志中能清楚看到 seq0 被切成两段、seq2 在 step 2 被「让步」推迟、每个 step 的 `num_scheduled_tokens` 之和不超过 10。待本地验证（需 GPU）。
 
-**关键观察**：step 2 里 B 被切成了两段（8 + 2）才算完；这正是「首条序列允许分块」的体现。如果你把 `max_num_batched_tokens` 调到 10 以上，B 就能一步算完，表格会少一行。
-
-> 注意：`num_scheduled_tokens` 是「本步新算的量」。step 2 里 B 算了 8，但 B 的 `num_tokens` 还是 10（prompt 没变），变的是 `num_cached_tokens` 从 0 涨到 8（在 `postprocess` 里推进，见 4.4）。
+> 如果没有 GPU，可把上表当作「源码阅读型实践」的答案——它完全由 [nanovllm/engine/scheduler.py:30-52](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L30-L52) 的逻辑推出，不必真跑。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果把 `max_num_batched_tokens` 设得比最长 prompt 还大，分块 prefill 还会发生吗？
-**答案**：不会。分块只在 `remaining < num_tokens` 时才有意义；预算够装下整条 prompt 时，`min(num_tokens, remaining) == num_tokens`，一步算完。
+**练习 1**：为什么分块 prefill 只允许作用于首条序列，而不是所有序列都切？
 
-**练习 2**：`schedule()` 在 prefill 分支里，最多会返回多少条序列？受什么约束？
-**答案**：受 `max_num_seqs` 与 `max_num_batched_tokens` 双重约束——既不能超过 `max_num_seqs` 条，所有序列的 `num_scheduled_tokens` 之和也不能超过 `max_num_batched_tokens`。
+**答案**：若所有序列都被切，`waiting` 里会堆积大量「半成品」序列，每条都占着已分配的块、状态又不明确，调度与显存管理会变复杂。限定只切队首一条，既解决了「单条过长」的痛点，又把分块状态局限在一条序列上，实现极简。
 
-**练习 3**：为什么续算分支（`else`）里不调用 `allocate`？
-**答案**：因为第一次 prefill 时 `allocate` 已经一次性为整条序列分好了全部块，续算只是补计算量，不需要再分块。
+**练习 2**：`can_allocate` 返回的 `num_cached_blocks` 同时影响了 `num_tokens` 和晋升判据中的 `num_cached_tokens`，二者如何配合？
 
----
+**答案**：`num_tokens` 减掉 `num_cached_blocks * block_size`，使本步只需算「未命中」的 token；而 `allocate` 把 `num_cached_tokens` 设为 `num_cached_blocks * block_size`（[block_manager.py:92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L92)），于是晋升判据 `num_cached_tokens + num_scheduled_tokens == num_tokens` 中，命中部分被计入「已覆盖」，未命中部分由本步 `num_scheduled_tokens` 补齐，正好凑满。
 
-### 4.3 schedule() 的 decode 分支：显存检查与 preempt 抢占
+### 4.3 decode 调度：显存检查与队列回填
 
 #### 4.3.1 概念说明
 
-只有当 prefill 分支一条序列都没调度到（`scheduled_seqs` 为空）时，才会进入 decode 分支。此时 `waiting` 已空，引擎专心为 `running` 里的序列逐 token 续命。
+decode 阶段每条序列每步只产 1 个 token，调度逻辑相对简单，但要处理一个显存问题：每生成一个新 token，就要往 KV Cache 里写一个新槽位；当 token 数跨越块边界时，需要新分配一个物理块。如果空闲块不够（显存紧张），就得**抢占**（preempt）一些正在 decode 的序列——把它们退回 `waiting`、释放块，腾出空间。
 
-decode 的逻辑比 prefill 简单：每条 running 序列本步算 1 个 token。但它多了一个**显存检查**环节——因为 decode 每生成一个 token 就要往 KV Cache 写一份 K/V，**当某条序列正好填满一个 block、需要开新 block 时**，必须确保还有空闲块可用。
+这里用到 `BlockManager` 的两个接口（本讲只讲语义，内部留到 u3-l1）：
 
-如果空闲块不够，引擎就要**抢占（preempt）**：把某些 running 序列「打回原形」——释放它的块、退回 waiting 队列、重置成 prefill 状态，腾出块给当前序列继续 decode。被抢占的序列之后要重新 prefill（代价较高，但总比崩掉好）。
-
-抢占的顺序很关键：调度器从 `running` 的**队尾**（最新加入的序列）开始牺牲，而被抢占的序列放到 `waiting` 的**队首**（下一次 prefill 优先处理），尽量保护那些「已经 decode 了很久、快要结束」的老序列。
+- `can_append(seq)`：判断序列追加一个 token 时是否还能拿到所需块（[block_manager.py:103-104](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L103-L104)）。
+- `may_append(seq)`：真正执行追加，必要时分配新块（[block_manager.py:106-108](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L106-L108)）。
 
 #### 4.3.2 核心流程
 
-decode 分支伪代码：
+decode 循环从 `running` 队首取序列，每条调度 1 个 token：
 
-```text
-while running 非空 and 已调度数 < max_num_seqs:
-    seq = running.popleft()        # 从队首取
-    while not can_append(seq):     # 需要新块但没有空闲块
-        if running 还有别的序列:
-            preempt(running.pop()) # 牺牲队尾序列，腾块
+```
+while running 非空 且 len(scheduled_seqs) < max_num_seqs:
+    seq = running.popleft()
+    while not can_append(seq):          # 显存不够
+        if running 里还有别的序列:
+            preempt(running.pop())      # 抢占尾部序列，释放块
         else:
-            preempt(seq); break    # 只能牺牲自己，本步不 decode 它
-    else:                          # while 正常结束（能 append）
+            preempt(seq); break         # 没别人可抢，抢自己并放弃本步
+    else:                               # can_append 通过（while 正常结束）
         seq.num_scheduled_tokens = 1
         seq.is_prefill = False
-        may_append(seq)            # 真正申请新块（如果需要）
+        may_append(seq)
         scheduled_seqs.append(seq)
-running.extendleft(reversed(scheduled_seqs))   # 把这批按原序插回队首
-return (scheduled_seqs, False)
+# 把这批序列按原顺序放回 running 队首
+running.extendleft(reversed(scheduled_seqs))
 ```
 
-这里有两个 Python 易错点要先讲清，否则代码会读不懂：
+这里有一个 Python 易错点：**`while ... else`** 中的 `else` 仅在循环**未被 `break` 打断**时执行。也就是说：
 
-1. **`while ... else`**：Python 的 while 循环可以接 `else`，**当循环条件变为假而退出时**执行 `else`；如果是被 `break` 打断的，则**不执行** `else`。所以上面的 `else` 分支表示「`can_append(seq)` 终于成功为 True」。
-2. **`can_append` 的返回值**：它是 `len(free_block_ids) >= (len(seq) % block_size == 1)`。右边的 `(len(seq) % block_size == 1)` 是个布尔值（True=1/False=0）。含义是：只有当序列长度正好「跨进新 block 的第一个 token」时才需要 1 个空闲块，否则不需要（返回恒真）。
+- `can_append` 一次通过 → 循环体不执行 → `else` 执行 → 序列正常调度。
+- `can_append` 失败 → 抢占别人释放块 → 重试通过 → `else` 执行 → 序列调度成功。
+- `can_append` 失败且无别人可抢 → `preempt(seq)` 后 `break` → **`else` 不执行** → 该序列被踢回 `waiting`，本步不参与。
+
+`preempt` 的动作见 [nanovllm/engine/scheduler.py:75-79](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L75-L79)：状态退回 `WAITING`、`is_prefill` 复位为 `True`（意味着要重做 prefill）、释放块、`appendleft` 回 `waiting` 队首。其恢复与重算的完整时序是下一讲 u2-l3 的主题。
 
 #### 4.3.3 源码精读
 
-[ decode 分支主体:L57-L73](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L57-L73) —— 解读：
+decode 循环见 [nanovllm/engine/scheduler.py:57-73](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L57-L73)：
 
-- L58：循环条件同样是 `max_num_seqs` 封顶。
-- L60-L65：`while not can_append(seq)` 处理块不足。L61-L62：还有别的 running 序列可牺牲时，`self.running.pop()` 从**队尾**取一条来 preempt；L63-L65：否则只能 preempt 自己并 `break`（此时 `else` 不执行，本条本步不 decode）。
-- L67-L70：`else` 分支——成功拿到块（或本来就不需要），设 `num_scheduled_tokens=1`、`is_prefill=False`，调用 `may_append` 真正落账新块，加入本步列表。
-- L71：`assert scheduled_seqs`——只要进了 decode 分支（说明 running 非空），至少能调度一条。
-- L72：`self.running.extendleft(reversed(scheduled_seqs))` 把这批序列**按原顺序**插回队首。`extendleft` 本身会逆序插入，所以先 `reversed` 一次抵消，保证顺序稳定。
+```python
+while self.running and len(scheduled_seqs) < self.max_num_seqs:
+    seq = self.running.popleft()
+    while not self.block_manager.can_append(seq):
+        if self.running:
+            self.preempt(self.running.pop())
+        else:
+            self.preempt(seq)
+            break
+    else:
+        seq.num_scheduled_tokens = 1
+        seq.is_prefill = False
+        self.block_manager.may_append(seq)
+        scheduled_seqs.append(seq)
+assert scheduled_seqs
+self.running.extendleft(reversed(scheduled_seqs))
+return scheduled_seqs, False
+```
 
-[preempt:L75-L79](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L75-L79) —— 抢占做了四件事：状态置回 `WAITING`、`is_prefill=True`（这样它会被当成 prefill 重算）、`deallocate` 释放所有块、`appendleft` 放到 waiting 队首。
+几个细节：
 
-配合看块管理器的两个方法：
-
-[can_append:L103-L104](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L103-L104) —— 「是否需要新块」取决于 `len(seq) % block_size == 1`（序列长度刚跨进新块的第一个位置）。
-
-[may_append:L106-L108](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L106-L108) —— 真正申请新块并追加到 `block_table`。
-
-> 关于 `len(seq)`：`Sequence.__len__` 返回 `num_tokens`（见 u2-l1）。decode 时每步 `append_token` 后 `num_tokens` 会 +1，所以「跨进新块」的判断会随生成长度推进而周期性触发。
+- decode 每条序列固定 `num_scheduled_tokens = 1`，并显式置 `is_prefill = False`（供 `__getstate__` 序列化时只传 `last_token`，详见 u2-l1）。
+- `assert scheduled_seqs` 是一道安全检查：decode 必须至少调度出一条序列。极端显存压力下（连一条序列的单个新块都凑不齐）会触发断言——这是 nano-vllm 极简实现未优雅处理的边界。
+- 末尾 `self.running.extendleft(reversed(scheduled_seqs))` 把刚取出的序列**按原顺序**放回 `running` 队首。因为 `extendleft` 会把列表倒着插，所以先 `reversed` 再插，正负抵消，保序。
 
 #### 4.3.4 代码实践
 
-**实践目标**：把 `while...else` 与 `extendleft(reversed(...))` 这两个 Python 易错点彻底搞懂。
+**实践目标**：观察 decode 阶段的稳定节奏与 `running` 队列保序回填。
 
 **操作步骤**：
 
-1. 在 Python 里跑一段最小复现，理解 while-else：
-
+1. 在 [nanovllm/engine/scheduler.py:72](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L72) 的 `extendleft` 之前加日志：
    ```python
-   # 示例代码（非项目源码）
-   n = 0
-   while n < 3:
-       n += 1
-   else:
-       print("正常结束，执行 else")   # 会打印
+   print(f"[decode] seq_ids={[s.seq_id for s in scheduled_seqs]} "
+         f"running_size={len(self.running)} free_blocks={len(self.block_manager.free_block_ids)}")
    ```
+2. 跑 `example.py`，待进入 decode 阶段（日志 `is_prefill=False` 后）观察输出。
 
-   再把循环改成 `while True: ... break`，观察 `else` 是否还执行（不会）。
+**需要观察的现象**：每步 decode 的 `seq_ids` 列表长度等于当前 `running` 序列数；随序列陆续 `FINISHED`，列表逐渐变短；`free_blocks` 在抢占发生时会有跳变。
 
-2. 在 Python 里验证 `extendleft` 的逆序行为：
-
-   ```python
-   # 示例代码（非项目源码）
-   from collections import deque
-   d = deque(["x"])
-   batch = ["A", "B", "C"]
-   d.extendleft(reversed(batch))
-   print(list(d))   # ['A', 'B', 'C', 'x']
-   ```
-
-   试试不加 `reversed` 会得到什么（`['C','B','A','x']`），从而理解 L72 为什么必须 `reversed`。
-
-**需要观察的现象**：确认你对「正常退出走 else、break 不走 else」「extendleft 逆序」的记忆。
-
-**预期结果**：你能向别人解释 L72 那行若去掉 `reversed`，running 队列的顺序会怎样被打乱。
+**预期结果**：待本地验证。无 GPU 时，可通过阅读 `extendleft(reversed(...))` 推断「每步 decode 处理全部 running 序列、且顺序稳定」这一结论。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`can_append` 里 `(len(seq) % block_size == 1)` 这个 `== 1` 是什么意思？为什么是 1 而不是 0？
-**答案**：它判断序列长度是否「刚好跨进一个新 block 的第一个 token」。因为 decode 是先检查再 `append_token`，当 `len(seq)` 对 block_size 取模等于 1 时，意味着即将写入的位置落在一个全新的 block 上，所以需要提前申请一个空闲块。
+**练习 1**：为什么不直接 `running.extend(scheduled_seqs)` 把序列放回队尾，而要用 `extendleft(reversed(...))` 放回队首？
 
-**练习 2**：被 `preempt` 的序列，下次被调度时是 prefill 还是 decode？为什么？
-**答案**：是 prefill。因为 `preempt` 把 `is_prefill` 置回 `True`、释放了块、状态置回 `WAITING` 并放进 `waiting` 队首，所以它要重新走 prefill 流程（好在有前缀缓存，重算成本可能比想象低，详见 u3-l2）。
+**答案**：decode 的语义是「每步推进所有 running 序列一格」，序列相对顺序应保持不变、且下一步仍从同一批开始。放回队尾会改变轮转顺序；`extendleft(reversed(...))` 利用两次反转互相抵消，把这批序列原序插回队首，保证下一步 `popleft` 取出的还是它们。
 
-**练习 3**：L72 的 `assert scheduled_seqs` 在什么情况下会失败？
-**答案**：理论上当进入 decode 分支时 `running` 非空，至少能调度一条，所以断言应当成立。如果它失败，说明 running 里的所有序列（含自己）都被 preempt 了——这只有在显存极度紧张、连一条序列的块都凑不齐时才会发生，属于异常状态。
+**练习 2**：`while not can_append(seq)` 循环里，抢占的是 `running.pop()`（队尾）而不是 `running.popleft()`（队首），为什么？
 
----
+**答案**：队尾是最近才加入 running 的序列，优先抢占它们可以让「资格最老、可能快结束」的队首序列尽量保留，减少重算浪费。这与 vLLM 的「recompute 式抢占」思路一致。
 
-### 4.4 postprocess()：写回 token、推进水位与终止判定
+### 4.4 postprocess：写回 token、推进水位与终止判定
 
 #### 4.4.1 概念说明
 
-`schedule()` 决策完、模型前向算完、采样拿到新 token 后，就轮到 `postprocess()` 收尾。它对每条本步参与计算的序列做三件事：
+`run`（模型前向 + 采样）之后，每条序列都会得到**恰好一个** token。`postprocess` 负责把这些 token 落袋为安，做四件事：
 
-1. **登记哈希块**：把本步新填满的 block 登记进哈希表，供后续请求做前缀缓存命中（`hash_blocks`）。
-2. **推进「已算」水位**：`num_cached_tokens += num_scheduled_tokens`，并清零 `num_scheduled_tokens`。
-3. **判定终止并写回 token**：决定是否把采样到的 token 追加进序列、是否结束这条序列。
-
-这里有个反直觉但很重要的分支：**在 prefill 阶段，如果序列还没 prefill 完，采到的 token 会被丢弃**。道理是：分块 prefill 时，本步算的「最后一个位置」并不是 prompt 真正的最后一个位置，它预测出的 token 没有意义。只有当 `num_cached_tokens` 追平 `num_tokens`（整条 prompt 都算完了），才把这一个 token 真正接上去，作为第一个生成 token。
-
-终止条件有两个，满足任一即结束：
-
-- 采到了 eos（结束符），且该请求没有设置 `ignore_eos`；
-- 生成的 token 数达到了 `max_tokens` 上限。
+1. **登记前缀缓存**：把本步新写满的整块 KV 注册进哈希表，供将来的请求命中。
+2. **推进计算水位**：`num_cached_tokens += num_scheduled_tokens`，把「本步算的」并入「已算的」。
+3. **（视情况）追加 token**：把采样结果接到序列末尾。
+4. **判定终止**：命中 EOS 或达到 `max_tokens` 则置 `FINISHED` 并释放块。
 
 #### 4.4.2 核心流程
 
-`postprocess` 伪代码：
-
-```text
-for (seq, token_id) in zip(seqs, token_ids):
-    block_manager.hash_blocks(seq)                       # 登记新块进哈希表
-    seq.num_cached_tokens += seq.num_scheduled_tokens    # 推进已算水位
+```
+for seq, token_id in zip(seqs, token_ids):       # 每序列一个 token
+    block_manager.hash_blocks(seq)               # 登记新写满的块
+    seq.num_cached_tokens += seq.num_scheduled_tokens   # 推进水位
     seq.num_scheduled_tokens = 0
-    if 是 prefill 且 还没算完 (num_cached_tokens < num_tokens):
-        continue                                         # 丢弃这个无意义的 token
-    seq.append_token(token_id)                           # 真正追加 token
-    if (未忽略 eos 且 token_id == eos) 或 已达 max_tokens:
-        状态置 FINISHED
-        deallocate(seq)                                  # 释放块
+    if is_prefill 且 num_cached_tokens < num_tokens:
+        continue                                 # 分块 prefill 未到末尾，丢弃本 token
+    seq.append_token(token_id)                   # 追加 token
+    if (未忽略 eos 且 token == eos) 或 num_completion_tokens == max_tokens:
+        seq.status = FINISHED
+        block_manager.deallocate(seq)            # 释放块
         running.remove(seq)
 ```
 
-需要说明 `is_prefill` 这个入参：它是 `schedule()` 返回的那个「本步是否 prefill」的布尔值，对所有序列一致。
+其中最易错的是那句 `if is_prefill and num_cached_tokens < num_tokens: continue`。它的含义是：**如果是 prefill 步骤、但 prompt 还没被全覆盖（即分块 prefill 的中间几步），就丢弃这次采样 token，不追加。** 因为只有整条 prompt 算完后的那个 token 才是真正有意义的「第一个生成 token」，中间步骤的采样结果不该混入序列。
+
+终止判据里 `num_completion_tokens` 的定义见 [nanovllm/engine/sequence.py:43-45](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L43-L45)，即 `num_tokens - num_prompt_tokens`，也就是已生成的 completion 数；`append_token` 把 `num_tokens` 加 1（[sequence.py:67-70](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L67-L70)），所以追加后立即检查它是否追平 `max_tokens`。
 
 #### 4.4.3 源码精读
 
-[postprocess:L81-L92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L81-L92) —— 逐行：
+`postprocess` 全文见 [nanovllm/engine/scheduler.py:81-92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L81-L92)：
 
-- L83：`hash_blocks` 把本步新写满的 block 登记进哈希表（前缀缓存的基础）。
-- L84-L85：推进水位 `num_cached_tokens`、清零 `num_scheduled_tokens`。这两个字段是调度与写回之间的「接力棒」。
-- L86-L87：**prefill 未完成则丢弃 token**。注意判断用 `seq.num_cached_tokens < seq.num_tokens`——刚刚 L84 已经把水位推进了，所以这里是在问「推进之后是否已经算完整条 prompt」。
-- L88：`append_token` 真正把 token 追加进 `token_ids`，并更新 `last_token` 和 `num_tokens`，见 [Sequence.append_token:L67-L70](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L67-L70)。
-- L89-L92：终止判定。`num_completion_tokens` 是「已生成 token 数」（`num_tokens - num_prompt_tokens`，见 [Sequence.num_completion_tokens:L43-L45](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/sequence.py#L43-L45)）。命中则置 `FINISHED`、释放块、从 running 移除。
+```python
+def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
+    for seq, token_id in zip(seqs, token_ids):
+        self.block_manager.hash_blocks(seq)
+        seq.num_cached_tokens += seq.num_scheduled_tokens
+        seq.num_scheduled_tokens = 0
+        if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+            continue
+        seq.append_token(token_id)
+        if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            seq.status = SequenceStatus.FINISHED
+            self.block_manager.deallocate(seq)
+            self.running.remove(seq)
+```
 
-再回头看一下 `postprocess` 的调用处，理解它和 `schedule` 的配合：
+几个要点：
 
-[step() 三段式:L49-L55](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/llm_engine.py#L49-L55) —— `step()` 严格按 `schedule() → model_runner.call("run", ...) → postprocess(...)` 三段执行。`num_tokens` 这一行（L51）用正负号区分阶段：prefill 取各序列 `num_scheduled_tokens` 之和（正），decode 取 `-len(seqs)`（负），供 `generate` 统计两类吞吐。
-
-> 设计代价：分块 prefill 时，模型其实为「本步最后一个位置」算了 logits 并采了样，但 `postprocess` 把这个 token 丢了。这是一种以少量冗余计算换取代码简洁的取舍。
+- `zip(seqs, token_ids)` 隐含一个不变量：**模型每步对每条序列只产 1 个 token**，无论 prefill 还是 decode。prefill 产出的是「prompt 末位的预测」，decode 产出的是「续写的下一个」。
+- `hash_blocks`（[block_manager.py:110-120](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L110-L120)）只在「整块恰好写满」时才登记，所以多数 decode 步（块未满）它是空操作。
+- 终止分支里的 `self.running.remove(seq)` 能安全执行，是因为：能走到这里的 prefill 序列都已在 `schedule` 中晋升 `RUNNING`（在 `running` 里）；而 `continue` 跳过的分块 prefill 序列还在 `waiting`，不会走到 `remove`，故不会误删。
 
 #### 4.4.4 代码实践
 
-**实践目标**：理解 prefill 未完成时 `continue` 分支的作用，以及它如何与「分块 prefill」配合。
+**实践目标**：验证终止判定的两条触发路径。
 
 **操作步骤**：
 
-1. 回顾 4.2 的手算表格。在 step 2，B 的 `num_scheduled_tokens=8`，但 `num_tokens=10`。
-2. 推演 step 2 的 `postprocess` 对 B 做了什么：
-   - `hash_blocks(B)`：B 还没填满任何 block（block_size=256，B 才 10 个 token），所以不登记（`hash_blocks` 内部 `start == end` 时直接 return，见 [hash_blocks:L110-L113](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L110-L113)）。
-   - `num_cached_tokens`：0 → 8；`num_scheduled_tokens`：8 → 0。
-   - `is_prefill` 为 True 且 `num_cached_tokens(8) < num_tokens(10)` → `continue`，B 的 token_ids 仍然是 10 个，**不追加**。
-3. 再推演 step 3 的 `postprocess` 对 B：`num_cached_tokens` 8 → 10；`10 < 10` 为假，不再 continue，执行 `append_token`，B 终于得到第一个生成 token。
+1. 在 [nanovllm/engine/scheduler.py:89-92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L89-L92) 的终止分支里加日志：
+   ```python
+   print(f"[FINISHED] seq_id={seq.seq_id} reason="
+         f"{'eos' if (not seq.ignore_eos and token_id==self.eos) else 'max_tokens'} "
+         f"completion={seq.num_completion_tokens}")
+   ```
+2. 用两组参数对比（**示例代码**）：
+   ```python
+   # 路径 A：靠 max_tokens 终止
+   SamplingParams(temperature=0.5, max_tokens=2)
+   # 路径 B：靠 eos 终止（设 ignore_eos=False，让其自然遇到 eos）
+   SamplingParams(temperature=0.5, max_tokens=1000)
+   ```
+3. 分别跑推理，观察日志里的 `reason` 字段。
 
-**需要观察的现象**：B 在 step 2 被采样出一个 token 但被丢弃，直到 step 3 prefill 完成才真正写入。
+**需要观察的现象**：路径 A 下序列在生成 2 个 token 后以 `reason=max_tokens` 结束；路径 B 下多数序列会在遇到句末符时以 `reason=eos` 提前结束（completion 远小于 1000）。
 
-**预期结果**：你能解释「为什么 B 的 `num_completion_tokens` 在 step 2 之后仍然是 0」。
+**预期结果**：待本地验证。无 GPU 时，可直接由 [nanovllm/engine/scheduler.py:89](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L89) 的或表达式推出这两条触发路径。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：一条序列在 prefill 完成的那一步，`postprocess` 会给它追加几个 token？
-**答案**：追加 1 个。prefill 完成意味着 `num_cached_tokens == num_tokens`，`continue` 条件不成立，于是执行一次 `append_token`，写入本步采样到的第一个生成 token。
+**练习 1**：为什么分块 prefill 的中间步要 `continue` 丢弃 token？如果不丢，会发生什么？
 
-**练习 2**：如果一条请求设置了 `ignore_eos=True`，它什么时候结束？
-**答案**：只有当 `num_completion_tokens == max_tokens` 时才结束（eos 被忽略，见 L89 的 `not seq.ignore_eos` 条件）。
+**答案**：分块 prefill 的中间步只算了 prompt 的一部分，此时对「部分 prompt」做采样得到的 token 没有意义，不是真正的下一个词。若不丢而追加，会把垃圾 token 混进序列、污染后续 decode。只有覆盖完整条 prompt（`num_cached_tokens == num_tokens`）后的那次采样才值得保留。
 
-**练习 3**：序列被标记 `FINISHED` 后，它的块会怎样？
-**答案**：L91 调用 `deallocate(seq)` 释放所有块（引用计数减到 0 的块回归 free 池），并从 `running` 移除。这也是前缀缓存能复用这些块的前提（块内容仍可能留在哈希表里，详见 u3）。
+**练习 2**：`ignore_eos=True` 时，序列还能怎样终止？
 
----
+**答案**：只能靠 `num_completion_tokens == max_tokens` 终止（[scheduler.py:89](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L89)）。此时 `not seq.ignore_eos` 为假，左半短路失效，全靠右半的长度上限。
 
 ## 5. 综合实践
 
-**任务**：把 `max_num_batched_tokens` 设成一个很小的值，构造多个长短不一的请求，给 `schedule()` 加日志，画出每一步返回的序列列表与各自的 `num_scheduled_tokens`，亲眼看到 prefill 优先、分块 prefill 与 decode 切换的全过程。
+**任务**：用一张表完整刻画「3 条长短不一的请求、在很小的 token 预算下、从 prefill 到全部 FINISHED」的全过程，把本讲四个模块串起来。
 
-**实践目标**：把本讲四个模块串起来——你会同时看到「两队列流转」「token 预算约束」「首条分块」「decode 阶段切换」。
+设定：`max_num_batched_tokens = 10`，`max_num_seqs = 512`，`block_size = 256`，无前缀缓存命中，三条 prompt 长度分别为 12、5、8 token，`max_tokens = 2`，`ignore_eos = True`（避免提前结束，便于观察）。
 
-**操作步骤**：
+请按下面要求填写（答案用「源码阅读型」推演，即直接依据 [scheduler.py:25-92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L25-L92) 推出）：
 
-1. **给调度器加日志**。在 [scheduler.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py) 的 `schedule()` 两个 `return` 之前各加一行打印（这只是教学用的临时日志，不要提交）：
+| step | 阶段 | 调度的 seq（num_scheduled） | 关键事件 |
+| --- | --- | --- | --- |
+| 1 | prefill | seq0(10) | seq0 被切，仍 waiting |
+| 2 | prefill | seq0(2)→RUNNING, seq1(5)→RUNNING | seq0 补满；seq2 因 remaining=3<8 且非首条被让步 |
+| 3 | prefill | seq2(8)→RUNNING | seq2 整条放下，waiting 空 |
+| 4 | decode | seq0(1), seq1(1), seq2(1) | 各自第 1 个 completion token |
+| 5 | decode | seq0(1), seq1(1), seq2(1) | 各自第 2 个 completion token；3 条全部 `num_completion_tokens==2==max_tokens` → FINISHED |
 
-   ```python
-   # 在 L55 之前（prefill return）
-   print(f"[PREFILL ] step seqs={[(s.seq_id, s.num_scheduled_tokens) for s in scheduled_seqs]}")
-   return scheduled_seqs, True
+**核查点**：
 
-   # 在 L73 之前（decode return）
-   print(f"[DECODE  ] step seqs={[(s.seq_id, s.num_scheduled_tokens) for s in scheduled_seqs]}")
-   return scheduled_seqs, False
-   ```
+1. step 2 为什么 seq2 不出现？→ 因为 [scheduler.py:42-43](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L42-L43) 的「非首条放不下就 break」。
+2. step 4-5 的 `num_scheduled_tokens` 为什么都是 1？→ decode 固定写 1（[scheduler.py:67](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L67)）。
+3. step 5 后为什么三条都结束？→ [scheduler.py:89](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L89) 右半 `num_completion_tokens == max_tokens` 命中。
 
-2. **改小预算**。在调用处把 `max_num_batched_tokens` 调小。最简单的办法是在 `example.py` 里构造引擎时传入：
-
-   ```python
-   # 示例代码：修改 example.py 的 LLM(...) 调用
-   llm = LLM(model, max_num_batched_tokens=16, enforce_eager=True)
-   ```
-
-   `enforce_eager=True` 顺手关掉 CUDA Graph（u5-l1），避免 batch size 变化干扰观察。
-
-3. **构造长短不一的请求**。把 example.py 的 prompts 改成几条长度差异明显的输入，并把 `max_tokens` 设小（比如 3），以便快速看到 decode 阶段：
-
-   ```python
-   # 示例代码
-   prompts = ["你好", "请用三句话介绍一下中国历史上的唐朝", "一" * 200]   # 短 / 中 / 长
-   sampling_params = SamplingParams(temperature=0.8, max_tokens=3)
-   ```
-
-4. **运行并记录**：`python example.py`，把每行 `[PREFILL]` / `[DECODE]` 日志按顺序抄下来。
-
-**需要观察的现象**：
-
-- 第一阶段全部是 `[PREFILL]`，且最长的 prompt 会因为 `max_num_batched_tokens=16` 被切成多步（同一 `seq_id` 连续出现多次，`num_scheduled_tokens` 逐步累加直到算完）。
-- waiting 清空后，日志切换成 `[DECODE]`，每步每条序列 `num_scheduled_tokens=1`。
-- 短请求先 decode 完（先从 `[DECODE]` 列表里消失），长请求继续。
-
-**预期结果**：你会得到一张类似 4.2.4 手算表格、但来自真实运行的时序表。把它和你手算的对照，验证理解。
-
-> 说明：本实践需要 GPU 与已下载的模型权重（沿用 u1-l1 的环境）。具体的 token 切分边界取决于你实际的 prompt 分词长度，所以数值结果标注为「待本地验证」——重点是观察「prefill 优先 → 长请求被分块 → 切换到 decode」这个节奏，而不是某个具体数字。
+> 若有 GPU，可把 4.2.4 的日志加上，跑一遍验证上表；若无，上表即为基于源码的可靠推演结果。
 
 ## 6. 本讲小结
 
-- 调度器用 **waiting / running 两个队列** 组织所有请求，遵循「**prefill 优先于 decode**」——只要 waiting 有可调度序列就先做 prefill，否则才 decode。
-- prefill 受 **`max_num_seqs`（条数）** 与 **`max_num_batched_tokens`（token 总量）** 双重约束；当预算装不下某条序列时，**只允许本步第一条序列分块**（`remaining < num_tokens and scheduled_seqs` 这个判断）。
-- decode 每条 running 序列每步算 1 个 token；写 KV 前用 `can_append` 检查是否需要新块，块不足时通过 **`preempt`** 牺牲队尾序列、退回 waiting 重做 prefill。
-- `postprocess` 三件事：登记哈希块、推进 `num_cached_tokens` 水位、判定终止；**prefill 未完成时采到的 token 会被丢弃**，只有整条 prompt 算完才写入第一个生成 token。
-- 序列在 `WAITING → RUNNING → FINISHED` 之间的迁移，全部由 `schedule()` 与 `postprocess()` 这两个方法驱动。
+- `Scheduler` 用 `waiting`/`running` 两个双端队列组织请求，新请求入 `waiting`，prefill 完成后晋升 `running`。
+- `schedule()` 遵循 **prefill 优先**：只要 prefill 循环产出序列就立即带 `is_prefill=True` 返回，否则才 decode，返回 `False`。
+- prefill 同时受 `max_num_seqs`（宽度）与 `max_num_batched_tokens`（token 总预算）双重约束；首条序列允许分块，其余序列要么整条放下要么让步。
+- 缓存命中由 `can_allocate` 返回的块数同时扣减 `num_tokens`、计入 `num_cached_tokens`，使晋升判据 `num_cached_tokens + num_scheduled_tokens == num_tokens` 自洽。
+- decode 每条序列每步调度 1 个 token，跨块时由 `can_append`/`may_append` 管理新块，显存不足时 `preempt` 退回尾部序列。
+- `postprocess` 完成四件事：`hash_blocks` 登记缓存、推进 `num_cached_tokens` 水位、按需 `append_token`（分块 prefill 中间步丢弃 token）、命中 EOS 或 `max_tokens` 时置 `FINISHED` 并释放块。
 
 ## 7. 下一步学习建议
 
-本讲把「调度决策」讲透了，但故意把两个东西当黑盒用了：
+本讲把 `schedule`/`postprocess` 的主干讲清了，但刻意留下了两块「深水区」：
 
-1. **块是怎么分配、回收、命中缓存的**——`can_allocate / allocate / can_append / hash_blocks` 的内部机制。这是 u3 单元的核心，建议接着读 **u3-l1（BlockManager 块管理）** 和 **u3-l2（Prefix Caching 哈希匹配）**，搞清调度器反复调用的那些块管理方法到底在做什么。
-2. **分块 prefill 与抢占的更极端场景**——当显存极度紧张时抢占会如何连锁触发。可以读 **u2-l3（Chunked prefill 与抢占机制）**，它专门讨论 `preempt` 与 `can_append` 在压力下的行为。
+1. **下一讲 u2-l3《Chunked prefill 与抢占机制》**：专门深挖分块 prefill 的完整触发与续算时序，以及 `preempt` 把序列退回 `waiting` 后如何重做 prefill、`can_append` 的显存检查内部逻辑。如果你觉得 4.2 的「首条切片」和 4.3 的 `while...else` 还没看透，u2-l3 会把它们彻底拆开。
+2. **第 3 单元《显存与 KV Cache》**：`can_allocate`/`allocate`/`can_append`/`may_append`/`hash_blocks`/`deallocate` 的内部实现——块池、引用计数、基于 xxhash 的链式前缀哈希。建议按 u3-l1（BlockManager）→ u3-l2（Prefix Caching）→ u3-l3（KV Cache 显存预算）的顺序阅读。
 
-读完 u3 之后，再回到 u4 单元看「调度好的张量是怎么送进模型算的」，就能把从请求到输出的整条链路彻底打通。
+建议在进入下一讲前，先回头把本讲「综合实践」的表格自己推一遍——能独立推出每一步的 `num_scheduled_tokens` 与状态迁移，就说明你真正掌握了 `Scheduler` 的调度逻辑。

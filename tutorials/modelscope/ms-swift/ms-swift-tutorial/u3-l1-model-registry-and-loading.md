@@ -2,509 +2,454 @@
 
 ## 1. 本讲目标
 
-在前面几讲里，我们已经知道 `swift sft --model xxx` 这条命令最终会进入训练管道。但训练管道要做的第一件事，就是「把 `--model` 指定的那个模型真正加载进来」。这一步看似简单——不就是个 `from_pretrained` 吗？其实不然：ms-swift 支持几百个模型，每个模型该用什么对话模板、哪些层该挂 LoRA、是否多模态、要不要走量化、是因果语言模型还是序列分类……这些信息必须有一个统一的地方登记和查询。
+学完本讲后，你应该能够：
 
-本讲学完后，你应当能够：
+- 说清 `MODEL_MAPPING` 注册表是什么、由谁填充、用什么键查找。
+- 看懂 `ModelMeta` / `ModelInfo` 这两份「模型档案」分别记录了什么，以及它们在加载链路里各自的角色。
+- 跟踪一次 `get_model_processor(...)` 调用，描述它如何从「一个模型 id 字符串」一路走到「`(model, processor)`」。
+- 理解 `ModelMeta.template` 字段如何把「模型加载」和「对话模板」这两个子系统粘合在一起。
 
-1. 说出 `ModelInfo` 与 `ModelMeta` 各自记录了什么，以及它们的区别。
-2. 读懂 `MODEL_MAPPING` 注册表和 `register_model` 注册函数，并理解「一个 `model_type` 对应一份 `ModelMeta`」的设计。
-3. 跟踪从 `model_id`（如 `Qwen/Qwen2.5-7B-Instruct`）到 `ModelMeta` 的匹配过程（`get_matched_model_meta` / `get_model_info_meta`）。
-4. 读懂 `ModelLoader.load()` 与 `get_model_processor` 的加载主流程，理解 config / processor / model 三者是如何被依次构造出来的。
-5. 解释 `ModelMeta.template` 字段是如何与模板系统（`get_template_meta`）联动的。
+本讲是 u3「模型与模板」单元的第一篇，只聚焦**模型这一侧**；模板本身的 `encode`/对话格式化会在 [u3-l3](u3-l3-template-and-chat-format.md) 详讲。
 
 ## 2. 前置知识
 
-阅读本讲前，建议你先建立以下概念（来自 u1-l3「目录结构与模块化架构」）：
+阅读本讲前，你需要建立以下几个直觉（若不熟悉可先看前置讲义）：
 
-- **「基类 + 注册表 + CLI 参数开关」三件套**：ms-swift 几乎每个可扩展子系统都遵循这个范式——一个抽象基类、一个全局字典注册表（常命名为 `XXX_MAPPING`）、以及一个 CLI 参数用来选择。本讲的「模型子系统」就是最典型的例子。
-- **懒加载 `_LazyModule`**：`swift/__init__.py` 通过懒加载组织对外 API，所以我们才能在顶层直接 `from swift.model import ModelMeta, register_model` 而不必关心内部文件路径。
-- **transformers 的 `from_pretrained`**：本讲假设你知道 `AutoModelForCausalLM.from_pretrained(path)` 会按 `config.json` 找到对应模型类并加载权重。ms-swift 的 `ModelLoader` 正是对它的封装与增强。
+- **ms-swift 的统一扩展范式**（来自 [u1-l3](u1-l3-directory-and-architecture.md)）：全项目几乎每个子系统都遵循「`base.py` 基类 + `mapping.py` 的 `*_map`/`*_MAPPING` 注册表 + CLI 参数开关」三件套。模型子系统正是这套范式的典型代表。
+- **transformers 的 `AutoModelForCausalLM.from_pretrained`**：ms-swift 的加载最终会落到 transformers 的 Auto 类上，它做的事是在此之上**做匹配、做兜底、做 patch**，而不是另起炉灶。
+- **「模型 id」与「模型类型」的区别**：`Qwen/Qwen2.5-7B-Instruct` 是模型 id（仓库地址），而 `qwen2` / `qwen3` 这种是 ms-swift 内部的「模型类型（model_type）」。一个 model_type 背后挂着一族结构相同的模型，共享同一套 `template`、`loader`、`model_arch`。本讲的核心就是把「id → type」这条映射讲清楚。
 
-另外需要区分两个容易混淆的词：
-
-- **`model_id` / `model_path`**：模型在 ModelScope/HuggingFace 上的仓库 ID（如 `Qwen/Qwen2.5-7B-Instruct`）或本地目录。这是**用户视角**的名字，一个 `model_type` 下通常会登记几十个 `model_id`。
-- **`model_type`**：ms-swift 内部的**唯一标识**（如 `qwen2_5`、`qwen3_vl`）。共享同一套「架构 + 模板 + loader」的模型归到同一个 `model_type`。注册表的键就是它。
+如果你还不清楚 `swift` 命令最终如何进入模型加载，可回头看 [u1-l4](u1-l4-cli-entry-and-dispatch.md) 的 CLI 分发链路。
 
 ## 3. 本讲源码地图
 
-本讲聚焦在 `swift/model/` 这个一级模块，关键文件如下：
-
 | 文件 | 作用 |
 | --- | --- |
-| [swift/model/model_meta.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py) | 定义 `Model` / `ModelGroup` / `ModelMeta` / `ModelInfo` 四个数据类，以及全局注册表 `MODEL_MAPPING`、匹配函数 `get_matched_model_meta` 与综合解析函数 `get_model_info_meta`。 |
-| [swift/model/register.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py) | 定义注册函数 `register_model`、加载器 `ModelLoader`（及其子类）、以及对外加载入口 `get_model_processor` / `get_processor`。 |
-| [swift/model/models/qwen.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py) | Qwen 系列模型的注册示例，是「如何调用 `register_model`」的最佳参考。 |
-| [swift/template/register.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py) | 模板系统的注册与匹配；其中 `get_template_meta` 消费了 `ModelMeta.template`，是模型↔模板的连接点。 |
+| [swift/model/model_meta.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py) | 定义 `ModelMeta`/`ModelInfo`/`ModelGroup`/`Model` 数据类，持有全局注册表 `MODEL_MAPPING`，并实现「id → meta」的匹配逻辑 `get_matched_model_meta` 与「id → info+meta」的 `get_model_info_meta`。 |
+| [swift/model/register.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py) | 定义 `ModelLoader`（真正的加载器）、顶层入口 `get_model_processor` / `get_processor`，以及注册函数 `register_model`。 |
+| [swift/model/models/qwen.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py) | 一个**具体的注册样例**：演示如何用 `register_model(ModelMeta(...))` 把 Qwen 系列登记进 `MODEL_MAPPING`，并自定义 `QwenLoader`。 |
+| [swift/model/constant.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/constant.py) | 定义 `LLMModelType`/`MLLMModelType`/`RMModelType`/`ModelType` 等命名空间，提供所有合法的 model_type 字符串常量。 |
+| [swift/template/register.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py) | 模板子系统的注册表。其中的 `get_template_meta` 会读取 `model_meta.template`，是「模型↔模板」联动的落点。 |
 
-> 提示：`swift/model/__init__.py` 通过 `from . import models` 触发所有 `models/*.py` 的执行——也就是说，注册动作发生在「import 时」，注册表在进程启动后就已经填满了。
+> 说明：`swift/model/__init__.py` 通过 `from . import models` 触发各 `models/*.py` 模块在导入时执行 `register_model(...)`，从而填充 `MODEL_MAPPING`。这就是「导入即注册」。
 
-## 4. 核心概念与源码精读
+## 4. 核心概念与源码讲解
 
-本讲拆成 4 个最小模块：
-
-1. `ModelInfo` / `ModelMeta`：模型的元信息（数据结构基础）。
-2. `MODEL_MAPPING` 注册表与 `register_model`：把模型登记进花名册。
-3. 模型匹配：从 `model_id` 反查 `ModelMeta`（`get_matched_model_meta` / `get_model_info_meta`）。
-4. `ModelLoader` 与 `get_model_processor`：把模型和 processor 真正载入内存。
-
-### 4.1 ModelInfo / ModelMeta：模型的元信息
+### 4.1 MODEL_MAPPING 注册表与 register_model 注册机制
 
 #### 4.1.1 概念说明
 
-要把一个模型加载好，框架需要两类信息，分别由两个 dataclass 承载：
-
-- **`ModelMeta`**：**「静态、可注册」** 的元信息。也就是开发者写代码时就确定好的、和具体某次下载无关的属性——这个 `model_type` 用哪个对话模板、是不是多模态、需要的 transformers 版本约束、有哪些对应的模型仓库 ID 等。它登记在 `MODEL_MAPPING` 里，跨进程共享。
-
-- **`ModelInfo`**：**「动态、按需生成」** 的信息。也就是这次加载、这个具体下载目录里读出来的事实——权重在哪个本地目录、`config.json` 里写的精度是什么、最大上下文长度、量化方式与量化位数等。它由 `config.json` 等运行时文件解析得到。
-
-一句话区分：**`ModelMeta` 描述「这一类模型」，`ModelInfo` 描述「这一次加载的这一个目录」**。
-
-辅助这两个主类的还有两个小 dataclass：
-
-- **`Model`**：登记一个具体的仓库来源，含 ModelScope ID（`ms_model_id`）、HuggingFace ID（`hf_model_id`）、本地路径（`model_path`）以及各自的 `revision`。
-- **`ModelGroup`**：把若干 `Model` 打包成一组，并可附带组级别的覆盖属性（`template` / `ignore_patterns` / `requires` / `tags`），组级别属性优先级高于 `ModelMeta` 顶层。
-
-#### 4.1.2 核心流程
-
-`ModelMeta` 的字段可以分成四组来看：
-
-| 分组 | 字段 | 含义 |
-| --- | --- | --- |
-| 身份 | `model_type` | 注册表键，唯一标识 |
-| 来源 | `model_groups` | 多个 `ModelGroup`，列出对应的仓库 ID |
-| 联动 | `template` / `model_arch` / `architectures` | 对话模板、架构描述、HF `architectures` 名 |
-| 加载 | `loader` / `torch_dtype` / `additional_saved_files` | 用哪个加载器、默认精度、额外需保存的文件 |
-| 能力标记 | `is_multimodal` / `is_reward` / `task_type` | 多模态/奖励模型/任务类型 |
-| 环境 | `ignore_patterns` / `requires` / `tags` | 下载忽略、依赖约束、标签 |
-
-`ModelMeta.__post_init__` 会做几件重要的推断与校验：
-
-1. 若 `loader` 为 `None`，默认填 `ModelLoader`。
-2. 把 `model_groups` 归一成列表。
-3. 汇总 `candidate_templates`（自身 `template` + 各组的 `template`，去重保序），用于模板自动匹配。
-4. 若 `model_type` 出现在 `MLLMModelType` / `RMModelType` 枚举里，自动置 `is_multimodal` / `is_reward` 为真。
-
-#### 4.1.3 源码精读
-
-`ModelMeta` 的定义与 `__post_init__`：
-
-[swift/model/model_meta.py:56-95](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L56-L95) —— 定义 `ModelMeta`，并在 `__post_init__` 中完成默认 loader、`candidate_templates` 推导与多模态/奖励标记。
-
-其中 `candidate_templates` 的推导逻辑很关键：
-
-```python
-self.candidate_templates = list(
-    dict.fromkeys(t for t in [self.template] + [mg.template for mg in self.model_groups] if t is not None))
-```
-
-`dict.fromkeys(...)` 是一个保序去重的惯用法——先把自身模板放最前，再追加各组模板，去掉重复和 `None`。这个列表稍后会被模板系统的 `get_template_meta` 用作「自动匹配模板」的候选。
-
-`ModelInfo` 的定义，注意它记录的是「这次加载」的事实：
-
-[swift/model/model_meta.py:125-143](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L125-L143) —— 定义 `ModelInfo`，并在 `__post_init__` 里由 `model_dir` 推导出 `model_name`。
-
-辅助 dataclass `Model` / `ModelGroup`：
-
-[swift/model/model_meta.py:20-43](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L20-L43) —— `Model` 登记仓库来源，`ModelGroup` 打包多个 `Model` 并允许组级别覆盖（如 `tags=['financial']`）。
-
-#### 4.1.4 代码实践
-
-**实践目标**：亲手构造一个 `ModelMeta`，观察 `__post_init__` 的自动推断。
-
-**操作步骤**：
-
-```python
-# 示例代码
-from swift.model import Model, ModelGroup, ModelMeta
-
-meta = ModelMeta(
-    model_type='my_demo',
-    model_groups=[
-        ModelGroup([
-            Model('MyOrg/Demo-1B', 'MyOrg/Demo-1B'),
-            Model('MyOrg/Demo-7B'),
-        ]),
-        ModelGroup([Model('MyOrg/Demo-VL')], template='demo_vl'),
-    ],
-    template='demo',
-)
-print('loader      :', meta.loader.__name__)        # 期望: ModelLoader（被自动填充）
-print('is_multimodal:', meta.is_multimodal)          # 期望: False（my_demo 不在 MLLMModelType）
-print('candidates  :', meta.candidate_templates)     # 期望: ['demo', 'demo_vl']
-```
-
-**需要观察的现象**：
-
-1. 我们没有传 `loader`，但 `meta.loader` 已经被填成了 `ModelLoader`。
-2. `candidate_templates` 把组级别的 `'demo_vl'` 也收了进来，且 `'demo'` 在前、去重保序。
-
-**预期结果**：打印出 `loader: ModelLoader`、`is_multimodal: False`、`candidates: ['demo', 'demo_vl']`。若 `model_type` 改成某个多模态枚举值（例如 `MLLMModelType.qwen_vl`），则 `is_multimodal` 会变成 `True`。**待本地验证**（取决于 `MLLMModelType` 的成员名）。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：为什么 `ModelMeta` 要把 `template` 放在两个地方——顶层一个、`ModelGroup` 里又一个？
-
-**答案**：顶层的 `template` 是这个 `model_type` 的「默认模板」；而某些同一 `model_type` 下的特殊仓库可能需要换模板，这时在对应 `ModelGroup.template` 覆盖即可，组级别优先级更高（见 4.3 的 `get_matched_model_meta`）。这避免了为换一个模板就新注册一个 `model_type`。
-
-**练习 2**：`ModelInfo` 的字段里，哪些是从「这次下载的目录」读出来的，哪些是框架推断/注入的？
-
-**答案**：`model_dir`、`torch_dtype`、`max_model_len`、`quant_method`、`quant_bits`、`rope_scaling`、`is_moe_model`、`config` 等来自 `config.json` 解析；而 `task_type`、`num_labels`、`problem_type`、`is_multimodal`（部分）是 `get_model_info_meta` 根据用户参数和 `ModelMeta` 标记推断后注入的；`model_name` 则由 `model_dir` 在 `__post_init__` 推导。
-
----
-
-### 4.2 MODEL_MAPPING 注册表与 register_model
-
-#### 4.2.1 概念说明
-
-有了 `ModelMeta` 这个数据结构，下一步就是「把这些元信息集中登记起来，供全框架查询」。这个集中登记处就是全局字典 `MODEL_MAPPING`：
+ms-swift 要支持几百个模型，但不可能为每个模型 id 写一套加载逻辑。它的做法是**把「结构相同的一族模型」抽象成一个 model_type**，再用一张全局字典把每个 model_type 映射到它的「档案」`ModelMeta`。这张字典就是 `MODEL_MAPPING`：
 
 ```python
 MODEL_MAPPING: Dict[str, ModelMeta] = {}
 ```
 
-它的键是 `model_type`，值是对应的 `ModelMeta`。整个 ms-swift 支持的模型清单，本质就是这个字典的内容。
+它定义在 [swift/model/model_meta.py:122](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L122)，键是 model_type（如 `'qwen3'`），值是 `ModelMeta` 对象。这张表在包导入时被各个 `models/*.py` 文件填充。
 
-登记动作由 `register_model` 完成。它被写在 `swift/model/models/*.py` 里——每 import 一个文件，就往 `MODEL_MAPPING` 里塞若干条。`swift/model/models/__init__.py` 会把所有这些文件 import 一遍，而 `swift/model/__init__.py` 又 `from . import models`，所以只要顶层 `import swift`（或任意触发模型模块加载的导入），注册表就满了。
+为什么用「模块导入时副作用」来填充？因为 ms-swift 用了 `_LazyModule` 懒加载（见 [u1-l3](u1-l3-directory-and-architecture.md)），只有真正用到某类模型时，对应的注册代码才会执行，避免一次性把所有重型依赖都拉起来。
+
+#### 4.1.2 核心流程
+
+注册一条模型的流程非常简单：
+
+1. 在 `swift/model/models/xxx.py` 里构造一个 `ModelMeta(...)`。
+2. 调用 `register_model(model_meta)`。
+3. `register_model` 校验 model_type 不重复，解析 `model_arch`，写入 `MODEL_MAPPING`。
+
+伪代码：
+
+```text
+register_model(meta):
+    if meta.model_type in MODEL_MAPPING and not exist_ok:
+        raise ValueError(重复注册)
+    if meta.model_arch:                       # 字符串 -> ModelArch 对象
+        meta.model_arch = get_model_arch(meta.model_arch)
+    MODEL_MAPPING[meta.model_type] = meta
+```
+
+#### 4.1.3 源码精读
+
+注册函数本体在 [swift/model/register.py:31-42](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L31-L42)：
+
+```python
+def register_model(model_meta: ModelMeta, *, exist_ok: bool = False) -> None:
+    from .model_arch import get_model_arch
+    model_type = model_meta.model_type
+    if not exist_ok and model_type in MODEL_MAPPING:
+        raise ValueError(f'The `{model_type}` has already been registered in the MODEL_MAPPING.')
+    if model_meta.model_arch:
+        model_meta.model_arch = get_model_arch(model_meta.model_arch)
+    MODEL_MAPPING[model_type] = model_meta
+```
+
+关键点：① 默认不允许重复注册（`exist_ok=False`），用来在开发期尽早发现「两个 model_type 撞车」的 bug；② `model_arch` 在注册时被「字符串 → `ModelArch` 对象」物化，这样后续 LoRA 选 `target_modules` 时就不必再解析（详见 [u3-l2](u3-l2-model-arch-and-keys.md)）。
+
+一个真实的注册样例见 [swift/model/models/qwen.py:76-114](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py#L76-L114)，它把 Qwen 系列挂在 `LLMModelType.qwen` 上，指定了专用 `QwenLoader`、架构名 `QWenLMHeadModel`、模板 `TemplateType.qwen`、`model_arch=ModelArch.qwen`。
+
+这些 model_type 字符串常量集中定义在 [swift/model/constant.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/constant.py)，并用多继承聚合成一个总表：
+
+```python
+class ModelType(LLMModelType, MLLMModelType, BertModelType, RMModelType):
+    ...
+```
+
+见 [swift/model/constant.py:269](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/constant.py#L269)。`ModelType` 把纯文本（LLM）、多模态（MLLM）、BERT、奖励模型（RM）四类命名空间拼在一起，`get_model_list()` 等工具函数就是遍历它的成员来枚举所有已知模型。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手「看见」`MODEL_MAPPING` 这张表被填充的过程。
+
+**操作步骤**：
+
+1. 在装好 ms-swift 的环境里执行一段最小 Python 脚本：
+
+   ```python
+   import swift.model  # 触发 models/*.py 的注册副作用
+   from swift.model import MODEL_MAPPING
+   print(len(MODEL_MAPPING))            # 已注册的 model_type 数量
+   print('qwen3' in MODEL_MAPPING)      # True
+   print(MODEL_MAPPING['qwen3'].template)
+   ```
+
+2. 在第 1 行 `import swift.model` 前后分别打印 `len(MODEL_MAPPING)`，观察导入前后表大小的变化。
+
+**需要观察的现象**：不 import 时 `MODEL_MAPPING` 为空；import 后被几百条记录填满；`qwen3` 的 `template` 字段是一个非空字符串（如 `'qwen3'`）。
+
+**预期结果**：你会直观看到「导入即注册」——这正是 `swift/model/__init__.py` 里 `from . import models` 这一行的意义。
+
+> 本实践依赖本地已安装 ms-swift；若仅做源码阅读，可在 [swift/model/models/qwen.py:76](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py#L76) 处对照阅读 `register_model` 调用。待本地验证。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果不执行任何 `import`，`MODEL_MAPPING` 里会有记录吗？为什么？
+
+> **答案**：不会有。`MODEL_MAPPING` 初始化为空字典（[model_meta.py:122](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L122)），记录是各 `models/*.py` 在被 import 时通过 `register_model` 填进去的；没人 import 就没人填。
+
+**练习 2**：`register_model` 默认拒绝重复注册同一个 model_type，这个设计是为了防止什么？
+
+> **答案**：防止两个不同模型族意外占用同一个 model_type 字符串，导致后注册的覆盖前者、加载行为不可预期。它是开发期的「防呆」校验，需要覆盖时显式传 `exist_ok=True`。
+
+---
+
+### 4.2 ModelMeta / ModelInfo 元信息与模型匹配
+
+#### 4.2.1 概念说明
+
+光有 model_type 还不够，加载一个模型需要两类信息，它们被拆成两个数据类：
+
+- **`ModelMeta`**：**静态档案**，写在源码里、注册进 `MODEL_MAPPING`。描述「这一族模型天生是什么样的」——用什么 loader、用什么 template、属于什么架构、是不是多模态/奖励模型。
+- **`ModelInfo`**：**运行时档案**，加载时才生成。描述「这一次加载的具体实例」——从哪个 `model_dir` 读、用什么 `torch_dtype`、量化方式是什么、最大长度多少。
+
+为什么要分两层？因为静态信息可以复用（所有 `qwen3` 模型都用 `qwen3` 模板），而运行时信息每次都变（你这次加载 bf16、下次加载 fp8 量化版）。把它们分开，`MODEL_MAPPING` 只存可复用的 `ModelMeta`，加载时再生成一次性的 `ModelInfo`。
 
 #### 4.2.2 核心流程
 
-`register_model` 的执行流程非常轻量：
+「模型 id → meta + info」的匹配是本节重点，由 `get_model_info_meta` 编排：
 
-1. 取出 `model_meta.model_type` 作为键。
-2. 若该键已存在且未指定 `exist_ok=True`，抛 `ValueError`（防止重复注册覆盖）。
-3. 若声明了 `model_arch`，调用 `get_model_arch` 把字符串名解析成 `ModelArch` 对象（用于 LoRA `target_modules` 选择，见下一讲 u3-l2）。
-4. `MODEL_MAPPING[model_type] = model_meta`。
+```text
+get_model_info_meta(model_id_or_path):
+    model_meta = get_matched_model_meta(id)      # 用 id 的末段去 MODEL_MAPPING 里找
+    model_dir  = safe_snapshot_download(id)      # 下载/解析到本地目录
+    model_info = _get_model_info(model_dir, type)# 读 config.json 推断 dtype/quant/长度等
+    # 兜底：若没匹配到 meta，非多模态则造一个 dummy ModelMeta
+    推断 task_type / num_labels
+    return model_info, model_meta
+```
 
-注意第 3 步：`model_arch` 在注册时就被「提前解析」成对象挂回 `ModelMeta` 上，这样后续每次加载都不必重复解析。
+其中「怎么从一个 id 找到 model_type」有三道防线，优先级从高到低：
+
+1. 调用方显式传 `model_type`。
+2. 本地 `model_dir/args.json` 里记录的 `model_type`（ms-swift 训练时会落盘 args.json，所以重新加载微调产物时能自动认出）。
+3. 读 `config.json` 的 `architectures` 字段，反查 `_get_arch_mapping()` 得到候选 model_type 列表；若唯一就用，若多个就报错要求手动指定。
 
 #### 4.2.3 源码精读
 
-`register_model` 的实现：
+`ModelMeta` 定义在 [swift/model/model_meta.py:56-95](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L56-L95)，关键字段：
 
-[swift/model/register.py:31-42](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L31-L42) —— 注册函数：校验重名、解析 `model_arch`、写入 `MODEL_MAPPING`。
+```python
+@dataclass
+class ModelMeta:
+    model_type: Optional[str]
+    model_groups: List[ModelGroup]
+    loader: Optional[Type[BaseModelLoader]] = None
+    template: Optional[str] = None
+    model_arch: Optional[str] = None
+    architectures: List[str] = field(default_factory=list)
+    additional_saved_files: List[str] = field(default_factory=list)
+    torch_dtype: Optional[torch.dtype] = None
+    is_multimodal: bool = False
+    is_reward: bool = False
+    task_type: Optional[str] = None
+    ...
+```
 
-`MODEL_MAPPING` 的声明位置在 `model_meta.py`：
+它的 `__post_init__`（[model_meta.py:82-95](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L82-L95)）做了三件重要的事：① `loader` 默认补成 `ModelLoader`；② 收集 `candidate_templates`（自身 template 加上各 `ModelGroup` 的 template）；③ 根据 model_type 是否出现在 `MLLMModelType`/`RMModelType` 命名空间里，自动设置 `is_multimodal`/`is_reward`。
 
-[swift/model/model_meta.py:122](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L122) —— 全局注册表，`Dict[str, ModelMeta]`。
+`ModelGroup`（[model_meta.py:30-42](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L30-L42)）把一组同族模型 id 聚到一起，并可附带「组级覆盖」（如不同的 `template`、`tags`）。`Model`（[model_meta.py:20-27](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L20-L27)）则同时记录 `ms_model_id`（魔搭）和 `hf_model_id`（HuggingFace），让一份注册同时服务两个 hub。
 
-一个真实的注册示例（Qwen 第一代），可以看到所有关键字段一起出现：
+「id 末段匹配」的核心是 `get_matched_model_meta`（[model_meta.py:162-171](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L162-L171)）：它取 id 的最后一段（如 `Qwen/Qwen2.5-7B-Instruct` → `qwen2.5-7b-instruct`，转小写），去每个 `ModelMeta` 的所有 model id 里找匹配，命中后返回一份**深拷贝**并把组级覆盖叠上去。深拷贝很关键——避免不同调用方改动同一份共享档案。
 
-[swift/model/models/qwen.py:76-114](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py#L76-L114) —— 用 `register_model(ModelMeta(...))` 登记了 `LLMModelType.qwen`：多个 `ModelGroup`、自定义 `QwenLoader`、`architectures=['QWenLMHeadModel']`、`template=TemplateType.qwen`、`model_arch=ModelArch.qwen`。
+运行时信息由 `_get_model_info`（[model_meta.py:204-244](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L204-L244)）从 `config.json` 提取，产出 `ModelInfo`（[model_meta.py:125-143](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L125-L143)）。注意它的 model_type 推断走的就是前面说的「显式 > args.json > architectures」三道防线（见 [model_meta.py:218-231](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L218-L231)）。
 
-这段代码值得注意的几点：
-
-- 第一个 `ModelGroup` 收纳了 chat/base/int4/int8 等几十个仓库 ID——它们共享同一个 `model_type='qwen'`。
-- 第二个 `ModelGroup`（通义金融）带了 `tags=['financial']`，是一个打了标签的子分组。
-- `loader=QwenLoader` 是 `ModelLoader` 的子类，说明同一类模型可以复用并扩展加载逻辑。
+兜底逻辑在 `get_model_info_meta`（[model_meta.py:280-287](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L280-L287)）：如果匹配不到 meta，多模态模型直接报错（多模态必须显式支持），纯文本模型则临时造一个 `template='dummy'` 的 `ModelMeta`，让加载继续——这是 ms-swift「对未知纯文本模型尽量兜底」的设计取向。
 
 #### 4.2.4 代码实践
 
-**实践目标**：把注册表「打开」看看里面到底有什么。
+**实践目标**：观察同一个 id 在「匹配到」和「匹配不到」两种情况下的不同行为。
 
 **操作步骤**：
 
-```python
-# 示例代码
-import swift  # 触发 models/*.py 的注册
-from swift.model import MODEL_MAPPING
+1. 阅读并对比 [get_matched_model_meta](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L162-L171) 与 [get_matched_model_types](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L187-L193) 两个匹配函数，前者用「id 末段」，后者用「architectures」。
+2. 写一段伪代码（不必运行）预测：传入 `model_id_or_path='Qwen/Qwen2.5-7B-Instruct'` 时，会走哪条匹配路径？传入一个完全自定义的本地路径 `/data/my-llama`（未注册）又会怎样？
 
-keys = list(MODEL_MAPPING.keys())
-print('已注册 model_type 数量:', len(keys))
-print('qwen 相关:', [k for k in keys if 'qwen' in k.lower()])
+**需要观察的现象**（源码阅读型）：
 
-meta = MODEL_MAPPING['qwen2_5']          # 待确认：键名以本地实际为准
-print('template    :', meta.template)
-print('arch        :', meta.model_arch)
-print('groups 数量 :', len(meta.model_groups))
-```
+- `Qwen/Qwen2.5-7B-Instruct`：末段 `qwen2.5-7b-instruct` 能在某个 `ModelGroup` 里命中 → 返回真实 `ModelMeta`。
+- `/data/my-llama`：末段匹配不到 → 转而读 `config.json` 的 `architectures`（如 `LlamaForCausalLM`）反查；若仍无法唯一确定，最终走 dummy 兜底。
 
-**需要观察的现象**：注册表里应该有几百个 `model_type`；Qwen 系列（`qwen` / `qwen2_5` / `qwen3` / `qwen3_vl` 等）各占一条，每条都有非空的 `template`。
+**预期结果**：能口述出「id 末段 → architectures → dummy」三级回退的判定顺序。
 
-**预期结果**：`len(keys)` 为数百量级；筛选出的 Qwen 相关键包含多个版本。具体键名（如是否叫 `qwen2_5`）**待本地验证**——可先 `print(keys)` 全量浏览再替换。
+> 若想实际运行，可在本地装好 ms-swift 后调用 `from swift.model import get_matched_model_meta; print(get_matched_model_meta('Qwen/Qwen2.5-7B-Instruct'))` 观察返回。待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果我两次调用 `register_model` 注册同一个 `model_type`，会发生什么？怎么才能允许覆盖？
+**练习 1**：`ModelMeta` 和 `ModelInfo` 谁是静态的、谁是运行时的？为什么 `MODEL_MAPPING` 只存前者？
 
-**答案**：第二次会抛 `ValueError(f'The {model_type} has already been registered ...')`。传 `register_model(meta, exist_ok=True)` 可允许覆盖（常用于自定义时替换默认元信息）。
+> **答案**：`ModelMeta` 是静态档案（写死在源码、可复用），`ModelInfo` 是运行时档案（每次加载依 dtype/量化/路径而变）。`MODEL_MAPPING` 作为全局注册表只应保存可复用的静态信息，运行时差异由 `ModelInfo` 在加载时单独承载，避免污染共享档案。
 
-**练习 2**：`register_model` 为什么要调用 `get_model_arch(model_meta.model_arch)`？
+**练习 2**：一个未注册的本地纯文本模型，为什么 ms-swift 还能加载它？
 
-**答案**：把字符串形式的架构名（如 `'qwen'`）解析成 `ModelArch` 对象。解析后的对象记录了各层模块名（`ModelKeys`），供后续 LoRA 选择 `target_modules`、Megatron 权重转换等使用。提前解析避免每次加载重复解析。
+> **答案**：因为 [model_meta.py:286](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L286) 会为匹配不到 meta 的纯文本模型临时创建一个 `template='dummy'` 的 `ModelMeta` 兜底；多模态模型因为模板/预处理复杂，必须显式支持，所以不兜底直接报错。
 
 ---
 
-### 4.3 模型匹配：从 model_id 到 ModelMeta
+### 4.3 ModelLoader 的加载流程
 
 #### 4.3.1 概念说明
 
-用户给的是 `--model Qwen/Qwen2.5-7B-Instruct`，框架拿到的是字符串 `model_id`。但训练管道需要的却是 `ModelMeta`（知道模板、架构）和 `ModelInfo`（知道目录、精度）。把字符串「翻译」成这两份元信息，就是匹配逻辑的职责。它由两个函数承担：
+`ModelMeta.loader` 指向一个加载器类，默认是 `ModelLoader`。它是一个有状态的「加载机器」：构造时接收 `model_info`/`model_meta` 和一堆加载选项，调用 `.load()` 后吐出 `(model, processor)`。基类契约定义在 `BaseModelLoader`（[model_meta.py:45-53](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L45-L53)），只要求实现 `__init__` 和 `load` 两个抽象方法。
 
-- **`get_matched_model_meta(model_id_or_path)`**：只看名字，纯靠字符串匹配在 `MODEL_MAPPING` 里反查 `ModelMeta`。不下载、不读 config。
-- **`get_model_info_meta(model_id_or_path, ...)`**：在反查之外，还会**下载模型**、读取 `config.json` 生成 `ModelInfo`，并把 `ModelMeta` 与 `ModelInfo` 协调一致（比如自动推断 `model_type`、`task_type`、`torch_dtype`）。这是真正进入加载前的「总装配」函数。
+为什么要把「加载」做成一个类而不是一个函数？因为加载过程步骤多（拿 config、拿 processor、拿 model、各种 patch、补 generation_config……），用类可以把这些步骤拆成可复写的方法（`get_config`/`get_processor`/`get_model`），子类只需覆盖其中一步就能定制某一族模型——这正是 [qwen.py:44](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py#L44) 里 `QwenLoader` 只覆盖 `get_model`/`_update_attn_impl`/`get_processor` 三个方法就能定制 Qwen 加载的原因。
 
 #### 4.3.2 核心流程
 
-**字符串匹配 `get_matched_model_meta` 的规则**：
+`ModelLoader.load()` 的主干（[register.py:470-482](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L470-L482)）是一个清晰的线性流水线：
 
-1. 先用 `get_model_name` 把 `model_id` 规范成 `model_name`（取最后一段、转小写、兼容 HF 缓存目录与 ModelScope `___` 转义）。
-2. 遍历 `MODEL_MAPPING` 里每个 `ModelMeta`，对它的每个 `ModelGroup` 调 `get_matched_model_group`：只要组里任一 `Model` 的 `ms_model_id` / `hf_model_id` / `model_path` 末段（小写）等于 `model_name`，就算命中该组。
-3. 命中后，把该 `ModelGroup` 的非空属性**覆盖**到一份 `deepcopy(ModelMeta)` 上（组级别优先），返回。
+```text
+load():
+    with 几个 patch 上下文:
+        config   = get_config(model_dir)        # 读 config.json
+        config   = _postprocess_config(config)  # 补 dtype/rope/max_len/attn_impl
+        model, processor = _get_model_processor(model_dir, config)
+            processor = get_processor(...)       # AutoTokenizer / AutoProcessor
+            if load_model:
+                model     = get_model(...)       # AutoModelForCausalLM.from_pretrained
+        _postprocess_processor(processor)        # 补 pad/eos token，挂 model_info
+        if model:
+            _postprocess_model(model)            # 挂 model_info/meta，init generation_config
+    _add_new_special_tokens(model, processor, config)
+    return model, processor
+```
 
-注意第 2 步用的是「末段小写匹配」。所以 `Qwen/Qwen2.5-7B-Instruct` 会被简化成 `qwen2.5-7b-instruct` 去比对。
-
-**总装配 `get_model_info_meta` 的流程**：
-
-1. `get_matched_model_meta` 拿到候选 `model_meta`。
-2. `safe_snapshot_download` 按需下载模型到本地 `model_dir`（带 `ignore_patterns`）。
-3. `_get_model_info` 读 `config.json`，解析出 `torch_dtype` / `max_model_len` / `quant_info` / `is_moe_model` / `is_multimodal` 等。
-4. 若 `model_type` 仍未知，依次尝试：从 `args.json` 读 → 从 `config.architectures` 反查（`get_matched_model_types`）→ 报错让用户指定。
-5. 协调 `torch_dtype`（优先用户参数 > `ModelMeta.torch_dtype` > config 默认）。
-6. 推断 `task_type`：默认 `causal_lm`；有 `num_labels` 则 `seq_cls`；奖励模型强制 `num_labels=1`；`ModelMeta.task_type` 可覆盖。
-7. `check_requires` 检查依赖（量化还需额外装 `bitsandbytes` / `autoawq` 等）。
-8. 返回 `(model_info, model_meta)`。
-
-一个重要的兜底：如果模型完全没被注册（如某个新上的纯文本模型），框架不会直接报错，而是临时造一个 `ModelMeta(None, [], ModelLoader, template='dummy', model_arch=None)`，走「裸 transformers」路径；但若是多模态模型未注册，则直接报错要求显式指定 `model_type`。
+要点：`load_model=False` 时只返回 processor、不加载权重——这正是 `get_processor` 顶层函数的实现原理（见 4.4）。
 
 #### 4.3.3 源码精读
 
-字符串匹配的核心：
+构造函数 [ModelLoader.__init__](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L163-L214) 把所有加载选项（`attn_impl`/`experts_impl`/`rope_scaling`/`max_model_len`/`auto_model_cls`…）存为成员，并根据 `quant_method` 决定 `torch_dtype`（fp8 量化时强制 `'auto'`）。它还要处理 transformers 4.x 与 5.x 的参数名差异（`torch_dtype` vs `dtype`）。
 
-[swift/model/model_meta.py:97-104](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L97-L104) —— `get_matched_model_group`：对三种 id 字段做「末段小写」比对。
+三步「拿东西」的方法：
 
-[swift/model/model_meta.py:162-171](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L162-L171) —— `get_matched_model_meta`：遍历注册表，命中后用 `asdict(model_group)` 把组级别属性覆盖到 `deepcopy` 的 meta 上。
+- [get_config](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L247-L249)：`AutoConfig.from_pretrained(model_dir, trust_remote_code=True)`。
+- [get_processor](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L259-L268)：优先用 `AutoProcessor`（当目录里有 `preprocessor_config.json`/`processor_config.json`，即多模态场景），否则退回 `AutoTokenizer`。
+- [get_model](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L270-L331)：根据 `task_type` 选 Auto 类。`seq_cls`/`reranker` 走 `AutoModelForSequenceClassification`，其余默认 `AutoModelForCausalLM`，并在加载前后套上各种 `patch_automodel*` 上下文来修正 transformers 的行为。
 
-`get_model_name` 的规范化处理（兼容多种路径写法）：
+加载后的收尾 `_postprocess_model`（[register.py:342-356](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L342-L356)）有一段非常关键：
 
-[swift/model/model_meta.py:146-159](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L146-L159) —— 取末段、兼容 HF `models--org--name` 缓存路径、Windows 反斜杠、ModelScope `___` 转义。
+```python
+model.model_info = self.model_info
+model.model_meta = self.model_meta
+model.model_dir = model_dir
+```
 
-总装配函数 `get_model_info_meta`（重点看下载、解析、协调三段）：
+它把两份档案**挂回到 model 对象本身**上。这意味着加载完成后，你在任何地方拿到这个 model，都能直接 `model.model_meta.template` 读出它的模板名——下游的模板系统正是依赖这一点（见 4.4.3）。
 
-[swift/model/model_meta.py:247-325](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L247-L325) —— 下载 → `_get_model_info` 读 config → `model_type` 回退链（args.json / architectures）→ `torch_dtype` / `task_type` 协调 → 依赖检查 → 返回 `(model_info, model_meta)`。
-
-其中未注册纯文本模型的兜底（造 `dummy` meta）：
-
-[swift/model/model_meta.py:280-287](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L280-L287) —— 找不到匹配且非多模态时，临时创建 `template='dummy'` 的 `ModelMeta`，让训练仍能以裸 transformers 方式跑起来。
-
-`model_type` 的 architectures 反查（`get_matched_model_types`）：
-
-[swift/model/model_meta.py:174-193](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L174-L193) —— 由 `MODEL_MAPPING` 反向构建 `architectures → model_type` 映射，用于在用户没给 `model_type` 时自动推断。
+此外，项目还内置了两个特殊 loader 子类：`SentenceTransformersLoader`（[register.py:485](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L485)）面向句向量 embedding，`RewardModelLoader`（[register.py:508](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L508)）面向奖励模型，它们都只覆盖 `get_model` 一步，体现了「基类管流水线、子类管定制点」的分工。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用不同形式的 `model_id` 喂给匹配函数，观察匹配结果，理解「末段小写」规则。
+**实践目标**：理解 `QwenLoader` 是如何通过「最小覆盖」定制 Qwen 加载的。
 
 **操作步骤**：
 
-```python
-# 示例代码
-from swift.model import get_matched_model_meta
+1. 打开 [swift/model/models/qwen.py:44-73](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py#L44-L73)，阅读 `QwenLoader`。
+2. 对照基类 [ModelLoader](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L160)，列出 `QwenLoader` 只覆盖了哪几个方法、各自定制了什么。
+3. 回答：为什么 `QwenLoader` 不需要重新实现 `load()`？
 
-for mid in ['Qwen/Qwen2.5-7B-Instruct', 'qwen2.5-7b-instruct', 'AI-ModelScope/xxx-Qwen2.5-7B-Instruct']:
-    meta = get_matched_model_meta(mid)
-    print(f'{mid:45s} -> template={meta.template if meta else None}, '
-          f'model_type={meta.model_type if meta else None}')
-```
+**需要观察的现象**：`QwenLoader` 仅覆盖 `get_model`（修正老版 Qwen 的 dtype 标志位与 mp+ddp 的 mask bug）、`_update_attn_impl`（设 `use_flash_attn`）、`get_processor`（补 `eos_token_id=eod_id`），其余全部继承。
 
-**需要观察的现象**：
-
-1. 前两种写法（带 org 前缀 / 裸末段）都应命中同一个 `ModelMeta`，得到相同的 `template`。
-2. 第三种末段名相同、但加了别的 org 前缀的，由于匹配只看末段，仍会命中同一个 meta——这正是「末段小写」匹配的副作用（也是为何不同组织的同名模型需要小心）。
-
-**预期结果**：三条都能匹配到 Qwen2.5 对应的 meta（前提是末段名确为 `Qwen2.5-7B-Instruct`）。若末段名在注册表里不存在，`get_matched_model_meta` 返回 `None`。**待本地验证**：不同 Qwen 版本的注册末段名以本地 `MODEL_MAPPING` 为准。
-
-> 注意：`get_matched_model_meta` 是纯内存操作，不联网，所以这个实践很轻量、可以放心跑。
+**预期结果**：你会得出结论——因为流水线骨架在基类 `load()` 里已经固定，子类只需覆盖「这一个模型族与众不同的那一步」，这就是把加载器做成可继承类的核心收益。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`get_matched_model_meta` 命中后为什么要把 `ModelGroup` 的属性「覆盖」回 `ModelMeta`，而不是直接返回 `ModelMeta`？
+**练习 1**：`ModelLoader.load()` 在 `load_model=False` 时还会去读权重吗？
 
-**答案**：因为 `ModelGroup` 可以携带比顶层 `ModelMeta` 更细粒度的覆盖（如某组的 `template`、`tags`、`ignore_patterns`）。覆盖后返回的是「针对这个具体仓库 ID 的、最终的」`ModelMeta`，让下游加载直接用即可，无需再关心组级别差异。
+> **答案**：不会。`_get_model_processor`（[register.py:463-468](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L463-L468)）里只有 `if self.load_model:` 才调用 `get_model`；否则 model 为 None，只返回 processor。
 
-**练习 2**：为什么多模态模型未注册时会直接报错，而纯文本模型未注册却允许走 `dummy` 兜底？
+**练习 2**：加载完成后，`model.model_meta` 是从哪里来的？为什么要把 meta 挂到 model 上？
 
-**答案**：纯文本因果语言模型的加载流程相对统一，裸 transformers 的 `AutoModelForCausalLM` 通常能直接处理，所以兜底风险可控；而多模态模型涉及图像/音频 processor、占位符、视觉塔等大量定制逻辑，没有正确的 `model_type` 与模板几乎必然出错，因此宁可显式报错让用户指定 `model_type`。
+> **答案**：来自 `_postprocess_model`（[register.py:351-352](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L351-L352)）的显式赋值。挂到 model 上是为了让下游（如模板系统、推理引擎）拿到 model 就能直接读到它的 model_type/template 等元信息，而不必再把 meta 单独传来传去。
 
 ---
 
-### 4.4 ModelLoader 与 get_model_processor
+### 4.4 get_model_processor 顶层入口与模板联动
 
 #### 4.4.1 概念说明
 
-元信息就绪后，就轮到真正的加载。ms-swift 把加载逻辑抽象成一个加载器基类 `BaseModelLoader`，它定义了一个极简契约：
+`ModelLoader` 是内部机器，对外暴露的「一键加载」入口是 `get_model_processor`。用户/上层 pipeline 只需提供一个模型 id（或本地路径），它负责把 4.2 的「匹配」和 4.3 的「加载」串起来，返回 `(model, processor)`。还有一个更轻的 `get_processor`，只返回 processor 不加载权重。
 
-```python
-class BaseModelLoader(ABC):
-    def __init__(self, model_info, model_meta, *args, **kwargs): ...
-    def load(self) -> Tuple[Optional[PreTrainedModel], Processor]: ...
-```
-
-即「构造时接收 `model_info` 与 `model_meta`，调用 `load()` 返回 `(model, processor)`」。默认实现是 `ModelLoader`；特殊模型可以子类化它，例如 `SentenceTransformersLoader`（句向量）、`RewardModelLoader`（奖励模型）、`QwenLoader`（Qwen 特有修复）。
-
-对外暴露的两个高层入口是：
-
-- **`get_model_processor(model_id_or_path, ...)`**：一站式加载，返回 `(model, processor)`。内部完成「匹配元信息 → 下载 → 构造 loader → loader.load()」全流程。
-- **`get_processor(model_id_or_path, ...)`**：只加载 processor（`load_model=False` 的便捷封装），适合「只想要分词器/多模态预处理器、不想拉权重」的场景（比如 4.3 之后的模板实践）。
-
-> `processor` 在这里是一个泛称：对纯文本模型它是 `tokenizer`；对多模态模型它是 `AutoProcessor`（内含 tokenizer + 图像/音频处理器）。`ModelLoader` 会按目录里有没有 `preprocessor_config.json` / `processor_config.json` 来自动选择用 `AutoProcessor` 还是 `AutoTokenizer`。
+本节还要回答规格里的核心问题：**`ModelMeta.template` 字段是如何与模板系统联动的？** 答案是——加载阶段并不调用模板，而是把 `model_meta` 挂到 model/processor 上；之后模板系统在需要时通过 `get_template_meta` 读取 `model_meta.template`，从而自动选出正确的对话模板。这是一种**延迟耦合**：模型加载与模板选择分开进行，靠 `model_meta` 这份共享档案衔接。
 
 #### 4.4.2 核心流程
 
-`get_model_processor` 的总体编排：
+```text
+get_model_processor(model_id_or_path, ...):
+    if load_model: patch_mp_ddp()                       # 多卡相关 patch
+    model_info, model_meta = get_model_info_meta(id)     # 4.2 的匹配
+    device_map = device_map or get_default_device_map()
+    loader = model_meta.loader(model_info, model_meta, ...)  # 4.3 的机器
+    return loader.load()                                 # -> (model, processor)
 
-1. `load_model=True` 时先 `patch_mp_ddp()`（多卡相关补丁）。
-2. 调 `get_model_info_meta(...)` 得到 `(model_info, model_meta)`（即 4.3 的总装配）。
-3. 决定 `device_map`（默认 `get_default_device_map()`），连同 `quantization_config` / `max_memory` 装进 `model_kwargs`。
-4. 实例化加载器：`loader = model_meta.loader(model_info, model_meta, load_model=..., **加载选项)`。
-5. `return loader.load()`。
-
-注意第 4 步用的是 **`model_meta.loader`**——也就是说，`ModelMeta` 里登记的 loader 类决定了具体加载行为。这就是「同一 `model_type` 复用 loader、特殊模型换 loader」的机制。
-
-`ModelLoader.load()` 内部是一个有序的三段式（外加前后处理）：
-
+# 之后，模板系统侧：
+get_template_meta(model_info, model_meta, template_type=None):
+    template_type = template_type or model_meta.template # ← 联动点！
+    return TEMPLATE_MAPPING[template_type]
 ```
-load():
-  ├─ get_config(model_dir)          # 读 config.json
-  ├─ _postprocess_config(config)     # 注入 dtype / rope_scaling / max_model_len / attn_impl / num_labels
-  ├─ _get_model_processor(...)       # 并行拿 processor 和 model
-  │    ├─ get_processor(model_dir)   # AutoProcessor / AutoTokenizer
-  │    └─ get_model(model_dir, ...)  # AutoModelForCausalLM 等 + 各种 patch 上下文
-  ├─ _postprocess_processor(processor)  # 修 pad/eos、挂 model_info/model_meta
-  ├─ _postprocess_model(model)           # 挂 model_info/model_meta、初始化 generation_config
-  └─ _add_new_special_tokens(...)        # 按需扩词表
-```
-
-`get_model` 里有一段重要的「按 `task_type` 选 AutoModel 类」逻辑：`seq_cls` / `reranker` 走 `AutoModelForSequenceClassification`（还会 patch tie_word_embeddings 等），否则走 `AutoModelForCausalLM`；并且会用 `patch_automodel` 等上下文管理器在加载时给模型打补丁（比如挂上 `model_info` / `model_meta` 属性，这正是后续 `model.model_meta.is_multimodal` 之类调用的来源）。
 
 #### 4.4.3 源码精读
 
-加载器抽象基类：
-
-[swift/model/model_meta.py:45-53](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L45-L53) —— `BaseModelLoader`：定义 `__init__(model_info, model_meta, ...)` 与 `load()` 契约。
-
-默认加载器 `ModelLoader` 的加载主入口 `load()`：
-
-[swift/model/register.py:470-482](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L470-L482) —— `ModelLoader.load()`：config → postprocess → 拿 model/processor → 后处理 → 扩词表。
-
-按目录内容自动选择 processor 类：
-
-[swift/model/register.py:259-268](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L259-L268) —— `get_processor`：目录有 `preprocessor_config.json`/`processor_config.json` 用 `AutoProcessor`，否则用 `AutoTokenizer`。
-
-按 `task_type` 选择模型类并打 patch：
-
-[swift/model/register.py:270-331](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L270-L331) —— `get_model`：`seq_cls`/`reranker` 用 `AutoModelForSequenceClassification`，否则 `AutoModelForCausalLM`；用 `patch_automodel` 等上下文挂载 `model_info` / `model_meta` 等属性。
-
-把 `model_info` / `model_meta` 挂回 model（这就是 `model.model_meta` 的来源）：
-
-[swift/model/register.py:342-356](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L342-L356) —— `_postprocess_model`：`model.model_info = ...; model.model_meta = ...; model.model_dir = ...`，并初始化 `generation_config`。
-
-对外的一站式入口与文档（注意 docstring 里给出的用法示例）：
-
-[swift/model/register.py:516-630](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L516-L630) —— `get_model_processor`：装配 `model_info`/`model_meta` → 组装 `model_kwargs` → `model_meta.loader(...).load()`。docstring 示例正是 `get_model_processor('Qwen/Qwen2.5-7B-Instruct')`。
-
-只取 processor 的便捷封装：
-
-[swift/model/register.py:633-664](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L633-L664) —— `get_processor`：内部就是 `get_model_processor(..., load_model=False)[1]`，避免拉权重。
-
-#### 4.4.4 代码实践（本讲主实践）
-
-**实践目标**：用 `get_model_processor` 加载一个 Qwen 模型的 processor（不拉权重，省时省显存），打印 `model_info` 与 `model_meta`，并验证 `model_meta.template` 能被模板系统识别。
-
-**操作步骤**（推荐轻量版：只取 processor）：
+顶层入口 [get_model_processor](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L516-L630) 的核心几行：
 
 ```python
-# 示例代码
-from swift.model import get_processor
-
-processor = get_processor('Qwen/Qwen2.5-7B-Instruct')   # load_model=False，不下载权重
-model_info = processor.model_info
-model_meta = processor.model_meta
-
-print('=== ModelInfo ===')
-print('model_type   :', model_info.model_type)
-print('model_dir    :', model_info.model_dir)
-print('torch_dtype  :', model_info.torch_dtype)
-print('max_model_len:', model_info.max_model_len)
-print('quant_method :', model_info.quant_method)
-print('is_multimodal:', model_info.is_multimodal)
-
-print('=== ModelMeta ===')
-print('model_type   :', model_meta.model_type)
-print('template     :', model_meta.template)
-print('candidates   :', model_meta.candidate_templates)
-print('model_arch   :', model_meta.model_arch)
-print('is_multimodal:', model_meta.is_multimodal)
+model_info, model_meta = get_model_info_meta(model_id_or_path, ...)
+...
+loader = model_meta.loader(
+    model_info, model_meta, load_model=load_model, ...,
+    model_kwargs=model_kwargs, **kwargs)
+return loader.load()
 ```
 
-接着验证 `template` 与模板系统的联动：
+注意 `model_meta.loader`——它就是 `ModelMeta.loader` 字段（默认 `ModelLoader`，可被 `QwenLoader` 等子类替换）。这一行实现了「按模型族选用不同加载器」的多态分发。函数签名上还暴露了 `attn_impl`、`experts_impl`、`rope_scaling`、`max_model_len`、`task_type`、`quantization_config` 等丰富选项，覆盖了日常训练/推理所需的全部加载控制。
+
+轻量入口 [get_processor](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L633-L664) 就是对 `get_model_processor` 的薄封装，固定 `load_model=False` 并返回元组第二项：
 
 ```python
-# 示例代码：用 ModelMeta.template 喂给模板系统
-from swift.template import get_template_meta
-tmeta = get_template_meta(model_info, model_meta)   # 不传 template_type，自动用 model_meta.template
-print('resolved template_type:', tmeta.template_type)
+return get_model_processor(..., load_model=False, **kwargs)[1]
 ```
+
+模板联动的关键一行在 [swift/template/register.py:36](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py#L36)：
+
+```python
+template_type = template_type or model_meta.template
+```
+
+它位于 `get_template_meta`（[template/register.py:31-52](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py#L31-L52)）里，逻辑是：如果调用方没显式传 `template_type`，就读 `model_meta.template`；若该字段也是 None，再用 `candidate_templates` 兜底；最终用选定的 `template_type` 去 `TEMPLATE_MAPPING` 取出 `TemplateMeta`。
+
+至此整条联动链路清晰了：
+
+\[
+\texttt{register\_model}(\text{template}=T)
+\;\longrightarrow\;
+\texttt{MODEL\_MAPPING}[\text{type}].\text{template}=T
+\;\longrightarrow\;
+\texttt{model.model\_meta.template}=T
+\;\longrightarrow\;
+\texttt{get\_template\_meta}\,\Rightarrow\,\texttt{TEMPLATE\_MAPPING}[T]
+\]
+
+也就是：注册时写下的 `template` 字段，经由 `model_meta` 这份档案，最终决定了训练/推理时用哪套对话格式——这就是「模型加载」与「模板系统」的衔接点。
+
+#### 4.4.4 代码实践
+
+**实践目标**：用 `get_model_processor` 加载一个 Qwen 模型，打印两份档案，并验证 `model_meta.template` 与模板系统的联动。
+
+**操作步骤**：
+
+1. 确保已按 [u1-l2](u1-l2-installation-and-dependencies.md) 装好 ms-swift，并在能联网的环境执行：
+
+   ```python
+   from swift.model import get_model_processor
+
+   # load_model=False 只拿 processor，不下载/加载权重，适合快速验证
+   _, processor = get_model_processor('Qwen/Qwen2.5-7B-Instruct', load_model=False)
+   print('--- model_info ---')
+   print(processor.model_info)
+   print('--- model_meta ---')
+   print(processor.model_meta)
+   print('--- template field ---')
+   print(processor.model_meta.template)
+   ```
+
+2. 接着验证联动——用同一个 `model_meta` 让模板系统自动选出模板：
+
+   ```python
+   from swift.template import get_template_meta
+   tmeta = get_template_meta(processor.model_info, processor.model_meta)
+   print('matched template_type:', tmeta.template_type)
+   ```
 
 **需要观察的现象**：
 
-1. `processor.model_info` / `processor.model_meta` 已经被 `ModelLoader._postprocess_processor` 挂上了——这正是 4.4.3 里 `tokenizer.model_info = self.model_info` 的效果。
-2. `model_meta.template` 是一个具体模板名（如 `qwen2_5`），且出现在 `candidate_templates` 里。
-3. `get_template_meta(model_info, model_meta)` 在不显式传 `template_type` 时，会取 `model_meta.template` 作为默认，从而把「模型」和「模板」自动绑定起来——这就是「训练即所见，推理即所得」的元信息基础。
+- `processor.model_info` 包含 `model_dir`/`torch_dtype`/`max_model_len` 等运行时字段。
+- `processor.model_meta.template` 是一个非空字符串（Qwen 对应的模板名）。
+- `get_template_meta` 在不传 `template_type` 的情况下，返回的 `template_type` 恰好等于上一步的 `model_meta.template`——证明联动成立。
 
-**预期结果**：`model_info.model_type` 与 `model_meta.model_type` 一致；`model_meta.template` 非空；`get_template_meta` 返回的 `template_type` 等于 `model_meta.template`。**待本地验证**：具体 `model_type` / `template` 名以本地注册表与下载到的模型为准；首次运行会联网下载 tokenizer/processor 文件。
+**预期结果**：三处的 template 值一致，说明「注册时写死的 template → model_meta → 模板系统」这条链路是通的。
 
-> 想加载完整模型权重的读者可改用 `model, processor = get_model_processor('Qwen/Qwen2.5-7B-Instruct', torch_dtype=torch.float16)`，但这需要 GPU 与下载几 GB 权重，建议本地具备条件时再尝试。
+> 本实践需要联网下载 config/processor 文件（`load_model=False` 时不会下载权重，体积很小）。若本地无法联网，可改为纯源码阅读：在 [get_template_meta](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py#L31-L52) 第 36 行确认 `template_type = template_type or model_meta.template`，并在 [qwen.py:113](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py#L113) 确认 Qwen 注册时确实写了 `template=TemplateType.qwen`。待本地验证。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`model.model_meta.is_multimodal` 这个属性是从哪里来的？为什么 model 对象上会有「元信息」属性？
+**练习 1**：`get_model_processor` 是如何决定用哪个 loader 类的？
 
-**答案**：来自 `ModelLoader._postprocess_model` 里的 `model.model_meta = self.model_meta`（以及 `_postprocess_processor` 里的 `tokenizer.model_meta = ...`）。加载器在加载完成后，把本次加载所依据的 `model_info` / `model_meta` 主动挂到 model 和 processor 上，方便下游管道（如训练器、推理引擎）随时取用，而不必再各自查注册表。
+> **答案**：通过 `model_meta.loader`（[register.py:617](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L617)）。匹配得到的 `ModelMeta` 自带 loader 字段（注册时指定，如 `QwenLoader`；未指定则在 `ModelMeta.__post_init__` 里默认成 `ModelLoader`），顶层入口直接 `model_meta.loader(...)` 实例化它。
 
-**练习 2**：`get_processor` 和 `get_model_processor(load_model=False)` 是什么关系？为什么不直接写两个独立实现？
+**练习 2**：如果用户既不传 `--template`，模型注册时也没写 `template` 字段，会发生什么？
 
-**答案**：`get_processor` 就是 `get_model_processor(..., load_model=False)[1]` 的薄封装（见源码末尾）。复用同一套匹配/下载/构造逻辑，只是跳过了 `get_model` 这一步，避免代码重复，也保证了「只取 processor」与「全量加载」得到的 `model_meta` / `model_info` 完全一致。
-
-**练习 3**：如果我希望某个新模型加载时多跑一段自定义修复代码，应该改哪里？
-
-**答案**：写一个 `ModelLoader` 的子类，重写 `get_model`（或 `get_processor`）加入修复逻辑，然后在注册该模型时把 `ModelMeta.loader` 指向你的子类（参考 `QwenAudioLoader` / `RewardModelLoader`）。这样修复只对该 `model_type` 生效，不影响其他模型。
+> **答案**：`get_template_meta` 会落到 `candidate_templates` 兜底（[template/register.py:38-48](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py#L38-L48)）：候选为空或多个时报错并提示用 `--template` 手动指定，恰好一个时自动采用。
 
 ---
 
 ## 5. 综合实践
 
-把本讲四个模块串起来，完成一个小任务：**为「一个本地未注册的纯文本模型」走一遍从识别到加载的全过程，并观察框架的兜底行为。**
+把本讲四个最小模块串起来，完成一次「手动重现加载链路」的源码追踪任务：
 
-任务步骤：
+**任务**：给定模型 id `Qwen/Qwen2.5-7B-Instruct`，画出从「id 字符串」到「`(model, processor)` + 选定模板」的完整调用图，并标注每一步落在哪个文件的哪一行。
 
-1. 准备一个本地 transformers 模型目录（可以是从 HF/ModelScope 任意下的小模型，比如 `Qwen/Qwen3-0.6B` 之类），记为 `LOCAL_DIR`。
-2. 编写脚本，依次调用：
-   - `get_matched_model_meta(LOCAL_DIR)` —— 看名字能否命中注册表；
-   - `get_model_info_meta(LOCAL_DIR)` —— 看总装配后 `model_type` 是被推断出来还是走了 `dummy` 兜底，`task_type` 落到哪个值；
-   - `get_processor(LOCAL_DIR)` —— 拿到 processor，打印 `processor.model_info` 与 `processor.model_meta`；
-   - `get_template_meta(processor.model_info, processor.model_meta)` —— 看 `template_type` 是否被解析（`dummy` 时会怎样？）。
-3. 回答三个问题：
-   - 这个模型的 `model_type` 是怎么被确定的（注册表命中 / architectures 反查 / args.json / dummy）？
-   - `model_meta.template` 在「已注册」和「未注册」两种情况下分别是什么？对后续模板加载意味着什么？
-   - `model_info` 里哪些字段确实来自 `config.json`，哪些来自框架推断？
+**建议步骤**：
 
-4. 进阶（可选）：仿照 `tests/llm/test_custom.py`，用 `register_model(ModelMeta(...))` 给这个模型登记一个自定义 `model_type`，指定一个已有模板（如 `qwen`），然后重新跑第 2 步，对比 `get_template_meta` 的输出变化——体会「注册让模型自动获得正确模板」的效果。
+1. 从顶层入口 [get_model_processor](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L516-L630) 出发。
+2. 进入 [get_model_info_meta](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L247-L325)，分别画出「匹配 meta」和「生成 info」两条支线，标出三道 model_type 推断防线。
+3. 回到顶层，进入 `model_meta.loader(...)` 实例化与 [ModelLoader.load](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/register.py#L470-L482)，画出 `get_config → get_processor → get_model → _postprocess_*` 流水线，并标出「把 model_meta 挂回 model」的那一行。
+4. 最后接上模板侧的 [get_template_meta](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/template/register.py#L31-L52)，标出 `template_type = template_type or model_meta.template` 这个联动点。
+5. 在图上用不同颜色区分「静态档案 ModelMeta」「运行时档案 ModelInfo」「注册表 MODEL_MAPPING/TEMPLATE_MAPPING」三类对象的生命周期。
 
-> 这个任务不需要 GPU，但会联网下载 tokenizer/processor 与可能的 config 文件；若网络受限，可改用 `LOCAL_DIR` 指向已下载好的目录。具体输出**待本地验证**。
+**验收标准**：你能指着图上的每个节点说出对应的 `文件:行号`，并能解释「为什么 `model.model_meta` 这个属性是模型子系统和模板子系统之间的桥梁」。
+
+> 提示：这张图里没有任何数学公式，但它的拓扑结构本身就是一种「数据流」——对象沿管线流动，每一步要么读注册表、要么生成运行时信息、要么挂载属性。把它画清楚，本讲就真正消化了。
 
 ## 6. 本讲小结
 
-- ms-swift 用两个 dataclass 切分模型信息：`ModelMeta` 是「可注册、静态」的类级别元信息；`ModelInfo` 是「按需生成、动态」的本次加载事实。
-- 全局字典 `MODEL_MAPPING` 是所有支持的模型的「花名册」，键是 `model_type`；`register_model` 在 `models/*.py` import 时填充它，并会把 `model_arch` 提前解析成对象。
-- `get_matched_model_meta` 靠「末段小写」字符串匹配把 `model_id` 反查到 `ModelMeta`；`get_model_info_meta` 在此基础上下载、读 config、协调 `model_type`/`torch_dtype`/`task_type`，是加载前的总装配函数，未注册纯文本模型会走 `dummy` 兜底。
-- 加载由 `BaseModelLoader` 抽象、`ModelLoader` 默认实现：`load()` 依次构造 config → processor → model，并把 `model_info`/`model_meta` 挂回对象；特殊模型通过子类化 loader 定制（如 `QwenAudioLoader`、`RewardModelLoader`）。
-- 对外入口 `get_model_processor` 一站式返回 `(model, processor)`，`get_processor` 是其「不拉权重」的便捷封装；选用哪个 loader 由 `ModelMeta.loader` 决定。
-- `ModelMeta.template`（及 `candidate_templates`）是模型↔模板的连接点：`get_template_meta` 在不显式指定模板时取它作默认，从而让「加载一个模型」自动带上「正确的对话格式」。
+- ms-swift 用一张全局字典 `MODEL_MAPPING`（[model_meta.py:122](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/model_meta.py#L122)）把 model_type 映射到静态档案 `ModelMeta`，靠各 `models/*.py` 在导入时调用 `register_model` 填充。
+- 元信息分两层：`ModelMeta` 是可复用的静态档案（loader/template/model_arch…），`ModelInfo` 是一次性的运行时档案（model_dir/dtype/quant…），两者共同喂给加载器。
+- 「id → model_type」走「显式传入 > args.json > architectures 反查」三道防线，匹配不到时纯文本模型走 dummy 兜底、多模态模型直接报错。
+- 加载由 `ModelLoader.load()` 编排成线性流水线（config → processor → model → 收尾），子类（如 `QwenLoader`）只覆盖少数方法即可定制；加载后 `model_meta` 会被挂回 model/processor。
+- 顶层入口 `get_model_processor` 串起「匹配 + 加载」，`get_processor` 是其 `load_model=False` 的薄封装。
+- `ModelMeta.template` 经 `model.model_meta` 流转，被模板系统的 `get_template_meta` 读取，实现「模型加载」与「对话模板」的延迟耦合。
 
 ## 7. 下一步学习建议
 
-本讲解决了「模型如何被识别与加载」。接下来建议：
-
-1. **u3-l2 模型架构 ModelArch 与 ModelKeys**：本讲多次提到 `model_arch` 在注册时被解析成对象，但没展开它内部结构。下一讲会讲 `ModelKeys` 如何定位 linear/embedding/norm 层，以及这如何决定 LoRA `target_modules=all-linear` 的实际命中范围——与本讲的 `register_model` 直接相关。
-2. **u3-l3 Template 体系与对话格式**：本讲只展示了 `ModelMeta.template` → `get_template_meta` 的连接点，下一讲深入 `Template.encode` 如何把 messages 变成 token 序列、`labels` 哪些部分被置 `-100`。
-3. **想动手扩展的读者**：直接阅读 `swift/model/models/qwen.py` 与 `tests/llm/test_custom.py`，尝试用 `register_model` + `register_template` 注册一个全新模型，这是 u10-l3「自定义模型、模板与 Agent 注册」的预习。
+- 想深入「`model_arch` 如何决定 LoRA 的 `target_modules`」：继续本单元的 [u3-l2 模型架构 ModelArch 与 ModelKeys](u3-l2-model-arch-and-keys.md)。
+- 想了解模板那侧的 `encode`/对话格式化：跳到 [u3-l3 Template 体系与对话格式](u3-l3-template-and-chat-format.md)，本讲 4.4 已为它铺好了「model_meta.template 联动」的前置。
+- 想看模型加载在训练主流程里处于什么位置：预习 [u5-l4 SFT 训练主流程 SwiftSft](u5-l4-sft-main-pipeline.md)，注意 `get_model_processor` 在准备模型阶段被调用。
+- 想自己注册一个新模型：直接读 [swift/model/models/qwen.py](https://github.com/modelscope/ms-swift/blob/3d61b9318b27fdd5659e530cd36db7f4ce740fd7/swift/model/models/qwen.py) 作为模板，参考 [u10-l3 自定义模型、模板与 Agent 注册](u10-l3-custom-model-template-agent.md)。
