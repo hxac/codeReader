@@ -1,0 +1,1142 @@
+{
+  "project": "ms-swift",
+  "head": "3d61b9318b27fdd5659e530cd36db7f4ce740fd7",
+  "rationale": "ms-swift 是 ModelScope 的大模型/多模态微调与部署框架，模块化程度高、功能链路长（训练-推理-评测-量化-部署）。本大纲按\"从认知到上手、从单模块到全链路、从单机到分布式、从使用到扩展\"的顺序设计：入门层先用 5 篇让读者建立项目定位、环境、目录、CLI 与快速跑通 SFT 的整体认知；进阶层按数据流顺序拆解参数、模型、模板、数据集、训练器与推理引擎六大核心子系统，每篇只解决一个子系统并给出可操作实践；专家层覆盖强化学习 GRPO、部署导出评测、分布式/序列并行/Megatron/Ray 高性能训练，以及 Loss、Callback、自定义注册、Web-UI 等二次开发扩展点。讲义间通过 depends_on 形成清晰依赖，确保读者按序学习时每一步都有前置知识支撑。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认知与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与生态定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ms-swift 是什么、解决什么问题、支持哪些模型与训练任务，以及它在 ModelScope 生态中的定位。",
+          "learning_goals": [
+            "理解 ms-swift 的定位：大模型与多模态大模型的微调与部署框架",
+            "了解支持的训练任务类型：pretrain/sft/rlhf/grpo/评测/量化/部署",
+            "认识项目支持的技术栈与硬件范围"
+          ],
+          "source_files": [
+            "README.md",
+            "README_CN.md"
+          ],
+          "minimal_modules": [
+            "项目简介与能力矩阵",
+            "支持的模型与训练方法概览",
+            "技术栈与依赖生态"
+          ],
+          "practice_task": "阅读 README，列出 ms-swift 支持的 5 种训练任务及对应的一条 CLI 命令示例，并说明它与原生 transformers/peft 的差异。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与环境依赖",
+          "order": 2,
+          "filename": "u1-l2-installation-and-dependencies.md",
+          "level": "beginner",
+          "topic": "讲解 ms-swift 的安装方式（pip/uv/源码）、可选依赖分组与运行环境要求。",
+          "learning_goals": [
+            "掌握 pip 与源码安装 ms-swift 的方法",
+            "理解 setup.py 中的 extras_require 分组（megatron/eval/ray 等）",
+            "了解 Python/torch/transformers/vllm 等版本要求"
+          ],
+          "source_files": [
+            "setup.py",
+            "requirements.txt",
+            "requirements/install_all.sh"
+          ],
+          "minimal_modules": [
+            "setup.py 的依赖解析与 entry_points",
+            "requirements 目录的分组依赖",
+            "运行环境版本矩阵"
+          ],
+          "practice_task": "在本地用源码方式安装 ms-swift（pip install -e .），并执行 `swift --help` 验证安装成功，记录遇到的依赖问题及解决方式。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块化架构",
+          "order": 3,
+          "filename": "u1-l3-directory-and-architecture.md",
+          "level": "beginner",
+          "topic": "梳理 swift 包的一级目录结构，解释模块化设计理念以及各模块职责。",
+          "learning_goals": [
+            "掌握 swift/ 下的核心一级模块划分",
+            "理解 arguments/pipelines/template/model/dataset/trainers 等模块职责",
+            "了解 Architecture.md 描述的模块化扩展思路"
+          ],
+          "source_files": [
+            "swift/__init__.py",
+            "docs/source_en/Customization/Architecture.md"
+          ],
+          "minimal_modules": [
+            "swift 包顶层 _LazyModule 懒加载机制",
+            "一级模块职责速查",
+            "模块化与可扩展设计"
+          ],
+          "practice_task": "依据 Architecture.md 绘制一张 ms-swift 模块依赖关系草图，标注出"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口与命令分发",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-dispatch.md",
+          "level": "beginner",
+          "topic": "解析 swift 命令行入口的注册与分发机制，包括子命令路由、torchrun 启动与 YAML 参数解析。",
+          "learning_goals": [
+            "理解 cli_main 的子命令路由表 ROUTE_MAPPING",
+            "掌握 torchrun/多卡启动的判定逻辑 use_torchrun",
+            "理解 parse_yaml_args 如何把 yaml/json 配置转成命令行参数"
+          ],
+          "source_files": [
+            "swift/cli/main.py",
+            "swift/cli/utils.py",
+            "swift/cli/sft.py"
+          ],
+          "minimal_modules": [
+            "ROUTE_MAPPING 子命令路由",
+            "torchrun 多进程启动",
+            "YAML/JSON 配置解析"
+          ],
+          "practice_task": "跟踪 `swift sft ...` 的执行路径，说明它如何被 main.py 路由并通过 torchrun 启动，并写一个最小 YAML 配置文件复现一条 sft 命令。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "快速上手：SFT 训练到推理全流程",
+          "order": 5,
+          "filename": "u1-l5-quick-start-sft-pipeline.md",
+          "level": "beginner",
+          "topic": "用一个 LoRA 自我认知微调示例串起 sft 训练、infer 推理、export 推送三个阶段，建立端到端直觉。",
+          "learning_goals": [
+            "能用 swift sft 跑通一个 LoRA 微调",
+            "能用 swift infer 加载 adapter 进行推理",
+            "能用 swift export 合并/推送模型"
+          ],
+          "source_files": [
+            "examples/train/lora_sft.sh",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "sft 命令关键参数（model/dataset/tuner_type/lora）",
+            "infer 加载 adapter 推理",
+            "export 合并与推送"
+          ],
+          "practice_task": "在单卡上复现 README 的 Quick Start：用 Qwen3-4B + alpaca 数据 + LoRA 训练 500 步，再用 swift infer 验证效果，最后用 swift export --merge_lora 合并权重。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "参数与配置体系",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Arguments 数据类体系",
+          "order": 1,
+          "filename": "u2-l1-arguments-dataclass-system.md",
+          "level": "intermediate",
+          "topic": "讲解 BaseArguments 通过多继承组合 DataArguments/ModelArguments/TemplateArguments 等的参数体系设计。",
+          "learning_goals": [
+            "理解 BaseArguments 的多继承组合结构",
+            "掌握各 SftArguments/RLHFArguments 等如何派生",
+            "了解参数解析 parse_args 与 from_pretrained 机制"
+          ],
+          "source_files": [
+            "swift/arguments/base_args/base_args.py",
+            "swift/arguments/__init__.py",
+            "swift/arguments/base_args/data_args.py",
+            "swift/arguments/base_args/model_args.py"
+          ],
+          "minimal_modules": [
+            "BaseArguments 多继承组合",
+            "DataArguments/ModelArguments/TemplateArguments",
+            "parse_args 与剩余参数校验"
+          ],
+          "practice_task": "阅读 BaseArguments 的继承链，列出 SftArguments 相比 BaseArguments 额外引入了哪些字段组，并解释为何用 dataclass 组合而非单一巨型类。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配置文件与命令行参数解析",
+          "order": 2,
+          "filename": "u2-l2-config-and-arg-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 YAML/JSON 配置文件、ENV 注入、命令行参数与 args.json 持久化的解析流程。",
+          "learning_goals": [
+            "掌握 parse_yaml_args 的配置展开逻辑",
+            "理解 ENV 块的环境变量注入",
+            "了解 args.json 在推理时自动回载的机制"
+          ],
+          "source_files": [
+            "swift/cli/main.py",
+            "examples/yaml/deepspeed",
+            "swift/arguments/base_args/base_args.py"
+          ],
+          "minimal_modules": [
+            "YAML/JSON 配置展开为 argv",
+            "ENV 环境变量注入",
+            "args.json 持久化与回载"
+          ],
+          "practice_task": "为一条 sft 命令编写等价的 YAML 配置文件（含 ENV 块），用 `swift sft config.yaml` 方式运行并对比输出参数，验证两者一致。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模型与模板",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "模型注册与加载机制",
+          "order": 1,
+          "filename": "u3-l1-model-registry-and-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 MODEL_MAPPING 注册表、ModelLoader、get_model_processor 如何根据模型 id 加载模型与 processor。",
+          "learning_goals": [
+            "理解 MODEL_MAPPING 与 register_model 注册机制",
+            "掌握 get_model_processor/get_processor 的加载流程",
+            "了解 ModelInfo/ModelMeta 的作用"
+          ],
+          "source_files": [
+            "swift/model/register.py",
+            "swift/model/model_meta.py",
+            "swift/model/__init__.py"
+          ],
+          "minimal_modules": [
+            "MODEL_MAPPING 注册表",
+            "ModelLoader 与 get_model_processor",
+            "ModelInfo/ModelMeta 元信息"
+          ],
+          "practice_task": "用 get_model_processor 加载一个 Qwen 模型，打印其 model_info 与 model_meta，并说明 ModelMeta 中 template 字段如何与模板系统联动。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "模型架构 ModelArch 与 ModelKeys",
+          "order": 2,
+          "filename": "u3-l2-model-arch-and-keys.md",
+          "level": "intermediate",
+          "topic": "讲解 ModelArch/ModelKeys/MultiModelKeys 如何描述模型结构，支撑 target_modules 选择与多模态分层控制。",
+          "learning_goals": [
+            "理解 MODEL_ARCH_MAPPING 与 get_model_arch",
+            "掌握 ModelKeys 如何定位 linear/embedding/norm",
+            "了解 MultiModelKeys 对多模态 vit/aligner/llm 的分层"
+          ],
+          "source_files": [
+            "swift/model/model_arch.py",
+            "swift/model/model_meta.py"
+          ],
+          "minimal_modules": [
+            "ModelArch 与 ModelKeys",
+            "MODEL_ARCH_MAPPING 匹配",
+            "MultiModelKeys 多模态分层"
+          ],
+          "practice_task": "查找某个模型的 ModelArch 定义，说明它的 ModelKeys 指向哪些模块，并解释这如何影响 LoRA 的 target_modules=all-linear 的实际命中范围。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Template 体系与对话格式",
+          "order": 1,
+          "filename": "u3-l3-template-and-chat-format.md",
+          "level": "intermediate",
+          "topic": "讲解 Template 基类如何把 messages 对话格式转换为 token 序列，以及 TEMPLATE_MAPPING 注册与 encode 流程。",
+          "learning_goals": [
+            "理解 Template 基类的职责与 encode/data_collator 流程",
+            "掌握 TEMPLATE_MAPPING 与 register_template 注册",
+            "了解 TemplateMeta 与 get_template 的匹配逻辑"
+          ],
+          "source_files": [
+            "swift/template/base.py",
+            "swift/template/register.py",
+            "swift/template/template_meta.py",
+            "swift/template/template_inputs.py"
+          ],
+          "minimal_modules": [
+            "Template 基类 encode/decode",
+            "TEMPLATE_MAPPING 注册",
+            "TemplateMeta 与 get_template 匹配"
+          ],
+          "practice_task": "用 get_template 取一个 Qwen 模板，对一段 messages 调用 template.encode，打印 input_ids 与 labels，说明 labels 中哪些部分被置为 -100。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "多模态 Template 与特殊 Token",
+          "order": 2,
+          "filename": "u3-l4-multimodal-template-and-special-tokens.md",
+          "level": "intermediate",
+          "topic": "讲解多模态模板如何处理 image/video/audio 占位符、特殊 token 与视觉工具函数。",
+          "learning_goals": [
+            "理解 special_tokens 与 image/video/audio 占位符机制",
+            "掌握 vision_utils 的图像/音频加载与预处理",
+            "了解多模态模板对 padding_free/packing 的支持差异"
+          ],
+          "source_files": [
+            "swift/template/base.py",
+            "swift/template/vision_utils.py",
+            "swift/template/grounding.py"
+          ],
+          "minimal_modules": [
+            "特殊 token 与占位符",
+            "vision_utils 多模态加载",
+            "support_padding_free 约束"
+          ],
+          "practice_task": "用一个多模态模型（如 Qwen3-VL）的 template，encode 一条带 image 的对话，打印占位符替换前后的 input_ids，并说明图像像素如何与占位 token 对齐。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数据集处理",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "数据集加载与注册",
+          "order": 1,
+          "filename": "u4-l1-dataset-loading-and-register.md",
+          "level": "intermediate",
+          "topic": "讲解 DatasetLoader、DATASET_MAPPING 注册表与 load_dataset 的加载流程，含数据集语法与子集。",
+          "learning_goals": [
+            "理解 DATASET_MAPPING 与 register_dataset 注册",
+            "掌握 DatasetLoader 从本地/hub 加载数据的流程",
+            "了解 DatasetSyntax 与 SubsetDataset 的数据集语法"
+          ],
+          "source_files": [
+            "swift/dataset/loader.py",
+            "swift/dataset/register.py",
+            "swift/dataset/dataset_syntax.py"
+          ],
+          "minimal_modules": [
+            "DATASET_MAPPING 注册",
+            "DatasetLoader 加载流程",
+            "DatasetSyntax 数据集语法"
+          ],
+          "practice_task": "用 load_dataset 加载一个内置数据集（如 swift/self-cognition）和一个本地 jsonl，对比两者的 DatasetMeta，并解释 `#500` 这类子集语法如何被解析。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "数据预处理器 Preprocessor",
+          "order": 2,
+          "filename": "u4-l2-data-preprocessor.md",
+          "level": "intermediate",
+          "topic": "讲解 RowPreprocessor 及 Alpaca/Messages/Response 等预处理器如何把原始数据规范化为统一格式。",
+          "learning_goals": [
+            "理解 RowPreprocessor 的列映射与清理逻辑",
+            "掌握 Alpaca/Messages/Response 预处理器的适用场景",
+            "了解 AutoPreprocessor 的自动选择机制"
+          ],
+          "source_files": [
+            "swift/dataset/preprocessor/__init__.py",
+            "swift/dataset/loader.py",
+            "swift/dataset/dataset_meta.py"
+          ],
+          "minimal_modules": [
+            "RowPreprocessor 列映射",
+            "Alpaca/Messages/Response 预处理",
+            "AutoPreprocessor 自动选择"
+          ],
+          "practice_task": "准备一份 alpaca 格式与一份 messages 格式的 jsonl，分别用对应预处理器跑通，输出规范化后的统一 messages 结构，验证两者可被同一 template 消费。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "编码与 Packing 机制",
+          "order": 3,
+          "filename": "u4-l3-encode-and-packing.md",
+          "level": "intermediate",
+          "topic": "讲解 EncodePreprocessor 把文本编码为 token、Packing 与 padding_free 如何提升训练效率。",
+          "learning_goals": [
+            "理解 EncodePreprocessor 的编码流程",
+            "掌握 PackingDataset/IterablePackingDataset 的拼接逻辑",
+            "了解 padding_free 与 packing 的适用条件与收益"
+          ],
+          "source_files": [
+            "swift/dataset/packing.py",
+            "swift/dataset/utils.py",
+            "swift/pipelines/train/sft.py"
+          ],
+          "minimal_modules": [
+            "EncodePreprocessor 编码",
+            "Packing 拼接",
+            "padding_free 与 LazyLLMDataset"
+          ],
+          "practice_task": "对同一数据集分别开启与关闭 packing，统计编码后的样本数与平均长度变化，并说明 padding_free 为何能减少无效 padding。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "自定义数据集格式",
+          "order": 4,
+          "filename": "u4-l4-custom-dataset-format.md",
+          "level": "intermediate",
+          "topic": "讲解如何组织和注册自定义数据集，包括 messages/response_format/loss 字段等。",
+          "learning_goals": [
+            "掌握自定义数据集的标准格式与字段",
+            "理解 register_dataset_info 注册自定义数据集",
+            "了解 loss 字段与多轮对话数据组织"
+          ],
+          "source_files": [
+            "swift/dataset/register.py",
+            "swift/dataset/dataset_meta.py",
+            "docs/source_en/Customization/Custom-dataset.md"
+          ],
+          "minimal_modules": [
+            "自定义数据集格式规范",
+            "register_dataset_info 注册",
+            "loss 字段与多轮组织"
+          ],
+          "practice_task": "将自己的业务数据整理成 ms-swift 的 messages 格式 jsonl，用 --dataset 指定本地路径跑通一次 sft，并尝试用 register_dataset_info 注册成内置数据集。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "训练器与轻量微调",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "TrainerFactory 与训练器体系",
+          "order": 1,
+          "filename": "u5-l1-trainer-factory-and-trainers.md",
+          "level": "intermediate",
+          "topic": "讲解 TrainerFactory 如何根据 task_type/rlhf_type 选择 Trainer 与 TrainingArguments，以及 Seq2SeqTrainer 的结构。",
+          "learning_goals": [
+            "理解 TrainerFactory 的 TRAINER_MAPPING 与 TRAINING_ARGS_MAPPING",
+            "掌握 task_type 到 Trainer 的派发逻辑",
+            "了解 Seq2SeqTrainer/mixin/patcher 的职责"
+          ],
+          "source_files": [
+            "swift/trainers/trainer_factory.py",
+            "swift/trainers/seq2seq_trainer.py",
+            "swift/trainers/mixin.py"
+          ],
+          "minimal_modules": [
+            "TrainerFactory 映射派发",
+            "Seq2SeqTrainer 与 mixin",
+            "patcher 与 trainer_factory"
+          ],
+          "practice_task": "阅读 TrainerFactory，列出 causal_lm/seq_cls/embedding/reranker 分别对应哪个 Trainer，并说明 task_type 是如何在 args 中被确定的。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "TunerPlugin 与模型适配",
+          "order": 2,
+          "filename": "u5-l2-tuner-plugin-and-model-adaptation.md",
+          "level": "intermediate",
+          "topic": "讲解 Tuner/PeftTuner 抽象与 tuners_map，以及 prepare_model/save_pretrained/from_pretrained 适配流程。",
+          "learning_goals": [
+            "理解 Tuner 基类的三个静态方法契约",
+            "掌握 PeftTuner 与 tuners_map 注册",
+            "了解 pipelines/train/tuner.py 中如何调用 Tuner 适配模型"
+          ],
+          "source_files": [
+            "swift/tuner_plugin/base.py",
+            "swift/tuner_plugin/mapping.py",
+            "swift/pipelines/train/tuner.py"
+          ],
+          "minimal_modules": [
+            "Tuner/PeftTuner 抽象",
+            "tuners_map 注册",
+            "prepare_model 适配与 freeze"
+          ],
+          "practice_task": "跟踪一次 sft 中 prepare_model 的调用链，说明 Tuner 如何在模型上挂载可训练参数、冻结其余参数，并实现 save_pretrained 只保存 adapter。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "LoRA 与轻量微调方法",
+          "order": 3,
+          "filename": "u5-l3-lora-and-lightweight-tuners.md",
+          "level": "intermediate",
+          "topic": "讲解 LoRA/Adapter/LLaMAPro 等 SWIFT_MAPPING 轻量微调方法的原理与配置。",
+          "learning_goals": [
+            "理解 SWIFT_MAPPING 中各 tuner 的注册",
+            "掌握 LoRA/LoRAConfig 的关键参数",
+            "了解 peft 集成与 swift_to_peft_format 转换"
+          ],
+          "source_files": [
+            "swift/tuners/mapping.py",
+            "swift/tuners/lora.py",
+            "swift/tuners/peft.py",
+            "swift/tuners/base.py"
+          ],
+          "minimal_modules": [
+            "SWIFT_MAPPING 注册",
+            "LoRA/LoRAConfig",
+            "peft 集成与格式转换"
+          ],
+          "practice_task": "分别用 lora、llamapro 两种 tuner 在同一小数据集上微调，对比可训练参数量与显存占用，并解释 lora_rank/lora_alpha/target_modules 的作用。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "SFT 训练主流程 SwiftSft",
+          "order": 4,
+          "filename": "u5-l4-sft-main-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 SwiftSft 管道如何串联模型准备、模板准备、数据集准备与 Trainer 训练的完整流程。",
+          "learning_goals": [
+            "理解 SwiftPipeline 基类与 SwiftSft 的关系",
+            "掌握 _prepare_model_tokenizer/_prepare_template/_get_dataset 流程",
+            "了解 RayHelper 装饰器与训练启动"
+          ],
+          "source_files": [
+            "swift/pipelines/train/sft.py",
+            "swift/pipelines/base.py",
+            "swift/pipelines/train/tuner.py"
+          ],
+          "minimal_modules": [
+            "SwiftPipeline 基类",
+            "SwiftSft 准备阶段",
+            "数据集与 Trainer 串联"
+          ],
+          "practice_task": "梳理 SwiftSft.main 的执行顺序，画出从参数解析到 trainer.train 的时序图，并指出数据集编码发生在哪个阶段。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l3",
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "推理引擎",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "推理引擎抽象与协议",
+          "order": 1,
+          "filename": "u6-l1-infer-engine-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 BaseInferEngine 抽象、InferRequest/RequestConfig 协议与 OpenAI 兼容响应结构。",
+          "learning_goals": [
+            "理解 BaseInferEngine 的 infer/infer_async 接口",
+            "掌握 InferRequest/RequestConfig/ChatCompletionResponse 协议",
+            "了解 InferClient 与引擎的关系"
+          ],
+          "source_files": [
+            "swift/infer_engine/base.py",
+            "swift/infer_engine/protocol.py",
+            "swift/infer_engine/infer_client.py"
+          ],
+          "minimal_modules": [
+            "BaseInferEngine 抽象",
+            "InferRequest/RequestConfig 协议",
+            "ChatCompletion 响应结构"
+          ],
+          "practice_task": "用 TransformersEngine 直接构造一个 InferRequest 并调用 infer，打印 ChatCompletionResponse 结构，说明它与 OpenAI API 字段的对应关系。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "多后端推理引擎",
+          "order": 2,
+          "filename": "u6-l2-multi-backend-infer-engines.md",
+          "level": "intermediate",
+          "topic": "讲解 Transformers/Vllm/Sglang/Lmdeploy 四种推理后端引擎的实现差异与选用。",
+          "learning_goals": [
+            "理解四种引擎的继承关系与差异",
+            "掌握 infer_backend 切换后端的机制",
+            "了解 GRPOVllmEngine 在 RL 中的特殊用途"
+          ],
+          "source_files": [
+            "swift/infer_engine/transformers_engine.py",
+            "swift/infer_engine/vllm_engine.py",
+            "swift/infer_engine/sglang_engine.py",
+            "swift/infer_engine/lmdeploy_engine.py",
+            "swift/infer_engine/grpo_vllm_engine.py"
+          ],
+          "minimal_modules": [
+            "TransformersEngine",
+            "VllmEngine/SglangEngine/LmdeployEngine",
+            "GRPOVllmEngine"
+          ],
+          "practice_task": "对同一模型分别用 transformers 与 vllm 后端推理，对比延迟与输出，并说明切换后端时 template/RequestConfig 如何保持一致。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "强化学习与 GRPO",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "RLHF 训练流程",
+          "order": 1,
+          "filename": "u7-l1-rlhf-training-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 SwiftRLHF 管道如何复用 SwiftSft 并接入 DPO/KTO/GRPO 等 RLHF 训练器与参数。",
+          "learning_goals": [
+            "理解 SwiftRLHF 继承 SwiftSft 的复用设计",
+            "掌握 RLHFArguments 与 rlhf_type 派发",
+            "了解 reward model 参数与 vllm 支持类型"
+          ],
+          "source_files": [
+            "swift/pipelines/train/rlhf.py",
+            "swift/arguments/rlhf_args.py",
+            "swift/trainers/trainer_factory.py"
+          ],
+          "minimal_modules": [
+            "SwiftRLHF 复用 SwiftSft",
+            "RLHFArguments 与 rlhf_type",
+            "TrainerFactory RLHF 派发"
+          ],
+          "practice_task": "用 `swift rlhf --rlhf_type dpo` 跑通一个 DPO 小实验，对比它与 sft 在数据格式与 loss 上的差异，并说明 rlhf_support_vllm_types 包含哪些。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "GRPO 算法核心",
+          "order": 2,
+          "filename": "u7-l2-grpo-algorithm-core.md",
+          "level": "advanced",
+          "topic": "讲解 rl_core 中 GRPO 的优势计算、奖励聚合与 GRPOTrainer 的训练循环。",
+          "learning_goals": [
+            "理解 GRPOSample 数据结构与 advantage 计算",
+            "掌握 compute_rewards_per_func 的多奖励函数聚合",
+            "了解 GRPOTrainer 的 rollout+训练循环"
+          ],
+          "source_files": [
+            "swift/rl_core/grpo_algorithm.py",
+            "swift/rl_core/advantage.py",
+            "swift/rl_core/data.py",
+            "swift/rlhf_trainers/grpo_trainer.py"
+          ],
+          "minimal_modules": [
+            "GRPOSample 与 advantage",
+            "多奖励函数聚合",
+            "GRPOTrainer 训练循环"
+          ],
+          "practice_task": "阅读 grpo_algorithm.py，说明一个 batch 的 completions 如何被多奖励函数评分并聚合成 [N, n_funcs] 张量，再追踪 advantage 如何归一化。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "奖励函数与 RM 插件",
+          "order": 3,
+          "filename": "u7-l3-reward-functions-and-rm-plugin.md",
+          "level": "advanced",
+          "topic": "讲解 rewards 模块的 orm/prm 奖励与 rm_plugin 如何接入判别式/生成式奖励模型。",
+          "learning_goals": [
+            "理解 orm/prm 奖励函数的差异",
+            "掌握 DefaultRMPlugin 对带 value head 模型的处理",
+            "了解生成式奖励模型（LLM-as-judge）接入方式"
+          ],
+          "source_files": [
+            "swift/rewards/rm_plugin.py",
+            "swift/rewards/orm.py",
+            "swift/rewards/prm.py"
+          ],
+          "minimal_modules": [
+            "orm/prm 奖励",
+            "DefaultRMPlugin 判别式 RM",
+            "生成式 RM 接入"
+          ],
+          "practice_task": "为 GRPO 训练编写一个自定义奖励函数（如根据输出长度或关键词打分），跑通一次小规模训练，并对比加/不加奖励模型插件的效果。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "多轮 Rollout 与环境交互",
+          "order": 4,
+          "filename": "u7-l4-multi-turn-rollout-and-env.md",
+          "level": "advanced",
+          "topic": "讲解 rollout 模块的多轮调度器、gym 环境与 agent_loop 如何支撑 agent 工具调用训练。",
+          "learning_goals": [
+            "理解 RolloutScheduler 多轮调度抽象",
+            "掌握 gym_env/Env 与 openenv_wrapper 的环境接入",
+            "了解 agent_loop 的工具调用循环"
+          ],
+          "source_files": [
+            "swift/rollout/multi_turn.py",
+            "swift/rollout/gym_env.py",
+            "swift/rollout/agent_loop.py",
+            "swift/rollout/openenv_wrapper.py"
+          ],
+          "minimal_modules": [
+            "RolloutScheduler 调度",
+            "gym_env 环境抽象",
+            "agent_loop 工具循环"
+          ],
+          "practice_task": "配置一个带工具调用的多轮 GRPO 实验（参考 examples 中 multi_turn），说明 RolloutScheduler 如何在每轮调用工具并把结果回填进对话。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "部署、导出与评测",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "模型导出与量化",
+          "order": 1,
+          "filename": "u8-l1-export-and-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 SwiftExport 管道如何完成 merge_lora、量化（GPTQ/AWQ/FP8/BNB）、ollama 导出与 mcore 转换。",
+          "learning_goals": [
+            "理解 SwiftExport 的分支式 run 流程",
+            "掌握 merge_lora 与 quantize_model 的实现",
+            "了解 ollama 导出与 hf/mcore 互转"
+          ],
+          "source_files": [
+            "swift/pipelines/export/export.py",
+            "swift/pipelines/export/quant.py",
+            "swift/pipelines/export/merge_lora.py",
+            "swift/pipelines/export/ollama.py"
+          ],
+          "minimal_modules": [
+            "SwiftExport 分支流程",
+            "merge_lora 与 quantize_model",
+            "ollama/hf/mcore 转换"
+          ],
+          "practice_task": "对一个 LoRA adapter 执行 merge_lora，再用 --quant_method fp8 导出量化模型，对比量化前后的体积与推理效果。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "部署与服务化",
+          "order": 2,
+          "filename": "u8-l2-deployment-and-serving.md",
+          "level": "advanced",
+          "topic": "讲解 swift deploy/app 如何基于 vllm/sglang 启动 OpenAI 兼容服务与交互界面。",
+          "learning_goals": [
+            "理解 deploy_main 与 run_deploy 的服务启动流程",
+            "掌握 app_main 的 Gradio 交互界面",
+            "了解 OpenAI 兼容 API 的协议实现"
+          ],
+          "source_files": [
+            "swift/pipelines/infer/deploy.py",
+            "swift/pipelines/infer/infer.py",
+            "swift/pipelines/app/app.py"
+          ],
+          "minimal_modules": [
+            "deploy_main 服务启动",
+            "app Gradio 界面",
+            "OpenAI 兼容协议"
+          ],
+          "practice_task": "用 `swift deploy --infer_backend vllm` 启动服务，用 curl/openai 客户端调用 /v1/chat/completions 验证，再启动 swift app 对比交互体验。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "模型评测",
+          "order": 3,
+          "filename": "u8-l3-model-evaluation.md",
+          "level": "advanced",
+          "topic": "讲解 swift eval 如何以 EvalScope 为后端完成文本与多模态模型评测。",
+          "learning_goals": [
+            "理解 eval_main 管道与 EvalScope 后端集成",
+            "掌握 eval_backend/eval_dataset 参数",
+            "了解评测指标与 infer_backend 的关系"
+          ],
+          "source_files": [
+            "swift/pipelines/eval/eval.py",
+            "swift/arguments/eval_args.py",
+            "swift/metrics/__init__.py"
+          ],
+          "minimal_modules": [
+            "eval_main 管道",
+            "EvalScope 后端集成",
+            "评测指标与引擎"
+          ],
+          "practice_task": "用 `swift eval --eval_backend OpenCompass --eval_dataset ARC_c` 评测一个模型，记录指标并说明 infer_backend 选择对评测速度的影响。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "分布式与高性能训练",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "分布式训练基础",
+          "order": 1,
+          "filename": "u9-l1-distributed-training-basics.md",
+          "level": "advanced",
+          "topic": "讲解 DDP/DeepSpeed ZeRO/FSDP/device_map 等分布式训练方式的启动与配置。",
+          "learning_goals": [
+            "理解 torchrun 启动与 NPROC_PER_NODE/NNODES 配置",
+            "掌握 DeepSpeed zero2/zero3 与 FSDP 的选用",
+            "了解 device_map 简单模型并行"
+          ],
+          "source_files": [
+            "swift/cli/main.py",
+            "swift/arguments/base_args/base_args.py",
+            "examples/yaml/deepspeed"
+          ],
+          "minimal_modules": [
+            "torchrun 多卡启动",
+            "DeepSpeed ZeRO 配置",
+            "FSDP/device_map 并行"
+          ],
+          "practice_task": "用 NPROC_PER_NODE=2 + deepspeed zero2 跑通一个多卡 sft，对比单卡与多卡的显存和速度，并解释 zero2/zero3 的差异。",
+          "depends_on": [
+            "u1-l4",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "序列并行 Ulysses 与 Ring-Attention",
+          "order": 2,
+          "filename": "u9-l2-sequence-parallel.md",
+          "level": "advanced",
+          "topic": "讲解 sequence_parallel 模块如何用 Ulysses 与 Ring-Attention 降低长文本训练显存。",
+          "learning_goals": [
+            "理解 sequence_parallel.prepare 的接入流程",
+            "掌握 Ulysses 与 Ring-Attention 的分片原理",
+            "了解 sequence_parallel_size 与 head 数约束"
+          ],
+          "source_files": [
+            "swift/sequence_parallel/sequence_parallel.py",
+            "swift/sequence_parallel/ulysses.py",
+            "swift/sequence_parallel/ring_utils.py",
+            "swift/sequence_parallel/zigzag_ring_attn.py"
+          ],
+          "minimal_modules": [
+            "sequence_parallel.prepare 接入",
+            "Ulysses 分片",
+            "Ring-Attention/zigzag"
+          ],
+          "practice_task": "用 --sequence_parallel_size 2 在长文本数据上训练，对比开启前后的显存峰值，并说明 Ulysses 与 ring-attention 组合时 head 数约束为何被解除。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Megatron-SWIFT 架构总览",
+          "order": 3,
+          "filename": "u9-l3-megatron-swift-overview.md",
+          "level": "advanced",
+          "topic": "讲解 swift/megatron 模块的整体架构、mcore-bridge 与 hf/mcore 权重互转。",
+          "learning_goals": [
+            "理解 megatron 模块的目录与子模块职责",
+            "掌握 convert_hf2mcore/convert_mcore2hf 权重转换",
+            "了解 mcore-bridge 让 Megatron 像 transformers 一样易用的设计"
+          ],
+          "source_files": [
+            "swift/megatron/__init__.py",
+            "swift/megatron/convert.py",
+            "swift/megatron/init.py",
+            "examples/megatron/mcore_bridge"
+          ],
+          "minimal_modules": [
+            "megatron 模块结构",
+            "hf/mcore 权重互转",
+            "mcore-bridge 设计"
+          ],
+          "practice_task": "用 `megatron` 命令的 convert 流程把一个 hf 模型转成 mcore 格式再转回，对比权重是否一致，并说明 mcore-bridge 的价值。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "Megatron 训练流程",
+          "order": 4,
+          "filename": "u9-l4-megatron-training-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 MegatronArguments 与 megatron trainers/pipelines 如何实现 TP/PP/SP/CP/EP 并行训练。",
+          "learning_goals": [
+            "理解 MegatronArguments 的并行参数",
+            "掌握 megatron_sft_main 与 MegatronTrainer 流程",
+            "了解 TP/PP/SP/CP/EP/VPP 并行策略"
+          ],
+          "source_files": [
+            "swift/megatron/arguments/megatron_args.py",
+            "swift/megatron/trainers/trainer.py",
+            "swift/megatron/pipelines/train/__init__.py",
+            "examples/megatron/sft.sh"
+          ],
+          "minimal_modules": [
+            "MegatronArguments 并行参数",
+            "megatron_sft_main 流程",
+            "TP/PP/CP/EP 并行策略"
+          ],
+          "practice_task": "用 `megatron sft --tuner_type lora` 在 2 卡上跑通一个 MoE 或稠密模型训练，记录 TP/PP 配置，并对比与 swift sft 的速度差异。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "Ray 分布式调度",
+          "order": 5,
+          "filename": "u9-l5-ray-distributed-scheduling.md",
+          "level": "advanced",
+          "topic": "讲解 ray_utils 的 RayHelper/RayArguments 与 megatron-ray 如何支撑跨机与异步 RL 训练。",
+          "learning_goals": [
+            "理解 RayHelper.worker/function 装饰器机制",
+            "掌握 RayArguments 的参数注入",
+            "了解 megatron-ray 在 GRPO/GKD 中的应用"
+          ],
+          "source_files": [
+            "swift/ray_utils/base.py",
+            "swift/ray_utils/arguments.py",
+            "swift/ray/megatron",
+            "docs/source_en/Instruction/Ray.md"
+          ],
+          "minimal_modules": [
+            "RayHelper 装饰器",
+            "RayArguments 注入",
+            "megatron-ray 应用"
+          ],
+          "practice_task": "阅读 RayHelper 在 SwiftSft 中的用法，说明 @RayHelper.worker/@RayHelper.function 如何把方法分发到 Ray actor，并尝试用 try_init_ray 启动一个 ray 会话。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "扩展机制与二次开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "自定义 Loss 与 Loss Scale",
+          "order": 1,
+          "filename": "u10-l1-custom-loss-and-loss-scale.md",
+          "level": "advanced",
+          "topic": "讲解 loss/loss_scale 模块如何自定义损失函数与按 token 控制损失权重。",
+          "learning_goals": [
+            "理解 BaseLoss 与 loss_map 注册",
+            "掌握 LossScale 的 get_loss_scale 与 base_strategy",
+            "了解 JSON 配置式 loss_scale（精确/正则匹配）"
+          ],
+          "source_files": [
+            "swift/loss/base.py",
+            "swift/loss/mapping.py",
+            "swift/loss_scale/base.py",
+            "swift/loss_scale/mapping.py",
+            "docs/source_en/Customization/Architecture.md"
+          ],
+          "minimal_modules": [
+            "BaseLoss 与 loss_map",
+            "LossScale 与 base_strategy",
+            "JSON 配置式 loss_scale"
+          ],
+          "practice_task": "实现一个自定义 Loss（继承 BaseLoss）并注册到 loss_map，用 --loss_type 跑通 sft；再用 hermes 这类 JSON loss_scale 控制特定 token 权重。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "Callbacks、Optimizers 与 Metrics 扩展",
+          "order": 2,
+          "filename": "u10-l2-callbacks-optimizers-metrics.md",
+          "level": "advanced",
+          "topic": "讲解 callbacks/optimizers/metrics 三类扩展点的注册与使用。",
+          "learning_goals": [
+            "理解 TrainerCallback 与 callbacks_map 注册",
+            "掌握 OptimizerCallback 与 optimizers_map（galore/lorap/muon）",
+            "了解 eval_metrics_map 与自定义指标"
+          ],
+          "source_files": [
+            "swift/callbacks/base.py",
+            "swift/callbacks/mapping.py",
+            "swift/optimizers/base.py",
+            "swift/optimizers/mapping.py",
+            "swift/metrics/mapping.py"
+          ],
+          "minimal_modules": [
+            "callbacks_map 注册",
+            "optimizers_map 优化器",
+            "eval_metrics_map 指标"
+          ],
+          "practice_task": "实现一个自定义 Callback（如训练开始打印显存），注册并用 --callbacks 指定；再尝试用 galore/lorap 优化器跑一次训练对比显存。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "自定义模型、模板与 Agent 注册",
+          "order": 3,
+          "filename": "u10-l3-custom-model-template-agent.md",
+          "level": "advanced",
+          "topic": "讲解如何通过 register_model/register_template/agent_template 注册自定义模型、模板与 Agent 模板。",
+          "learning_goals": [
+            "掌握 register_model 注册自定义模型",
+            "掌握 register_template 注册自定义模板",
+            "理解 BaseAgentTemplate 与 agent_template_map"
+          ],
+          "source_files": [
+            "swift/model/register.py",
+            "swift/template/register.py",
+            "swift/agent_template/base.py",
+            "swift/agent_template/mapping.py",
+            "docs/source_en/Customization/Custom-model.md"
+          ],
+          "minimal_modules": [
+            "register_model 自定义模型",
+            "register_template 自定义模板",
+            "BaseAgentTemplate 注册"
+          ],
+          "practice_task": "为一个新模型注册自定义 ModelMeta+Template（或 Agent 模板），用 get_template/get_model_processor 验证可用，并参考 tests 写一个最小测试。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "Web-UI 与 App 交互",
+          "order": 4,
+          "filename": "u10-l4-web-ui-and-app.md",
+          "level": "advanced",
+          "topic": "讲解 swift web-ui 与 app 模块如何以 Gradio 提供 zero-threshold 的训练/推理/评测界面。",
+          "learning_goals": [
+            "理解 web-ui 的启动与 UI 模块组织",
+            "掌握 app/build_ui 的界面构建",
+            "了解 UI 如何复用 pipelines 与 arguments"
+          ],
+          "source_files": [
+            "swift/ui/app.py",
+            "swift/ui/base.py",
+            "swift/pipelines/app/build_ui.py",
+            "swift/arguments/webui_args.py"
+          ],
+          "minimal_modules": [
+            "web-ui 启动与模块组织",
+            "build_ui 界面构建",
+            "UI 复用 pipelines/arguments"
+          ],
+          "practice_task": "启动 `swift web-ui`，分别体验训练/推理/导出面板，并阅读 build_ui 说明 UI 如何把表单参数映射到对应 arguments 与 pipeline。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
