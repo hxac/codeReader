@@ -1,0 +1,1419 @@
+{
+  "project": "nginx",
+  "head": "4d0e620f9ad4e81dc229ca423fbbf3c2e23b3f83",
+  "rationale": "nginx 是一个超大型的 C 项目，采用「master/worker 进程模型 + 事件驱动 + 高度模块化」架构，源码按 core/event/http/stream/mail/os 分层。学习路线因此设计为「由外到内、由基础设施到业务协议」的渐进式结构：第一单元先让读者从零认识项目定位、构建方式（auto/configure）、目录结构与 main() 启动入口；第二单元铺底座核心数据结构（内存池、字符串、容器、buf、时间日志），这是读懂一切后续源码的前提；第三单元讲配置文件解析与模块系统，这是 nginx 可扩展性的根基；第四单元讲进程模型与 OS 抽象层，揭示 master/worker 如何运转；第五单元讲事件驱动核心，这是 nginx 高性能的关键；第六单元是重头戏 HTTP 核心（框架、请求生命周期、解析、phases、location、过滤器、变量、静态文件、XSLT 过滤器与 XXE 安全）；第七单元讲 upstream 反向代理与负载均衡；第八单元讲 SSL/TLS、HTTP/2、HTTP/3+QUIC 等现代协议；第九单元讲 stream/mail 通用代理；第十单元讲缓存、限流、日志、自定义模块开发与调试性能分析等扩展实践。讲义之间通过 depends_on 形成清晰依赖链，确保读者始终在已掌握知识的基础上推进。本次增量更新（18ccebb1a → 4d0e620f9）代码变更仅触及 src/http/modules/ngx_http_xslt_filter_module.c，新增了 xml_external_entities 指令与外部实体（XXE）防护机制，因此新增一篇 XSLT 过滤器与 XXE 安全讲义（u6-l9，挂在过滤器链 u6-l6 之后）；其余讲义因引用的源码文件与主题均未变化，全部保持 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目总览、构建与启动入口",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "nginx 是什么：项目定位与核心概念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 nginx 作为高性能 Web 服务器/反向代理/负载均衡器的定位，以及 master/worker 进程模型、模块化、事件驱动三大核心思想。",
+          "learning_goals": [
+            "理解 nginx 的产品定位与主要使用场景",
+            "掌握 master 进程与 worker 进程的分工",
+            "建立模块化与事件驱动的整体印象"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/xml/index.xml"
+          ],
+          "minimal_modules": [
+            "README 中的 How it works / Modules / Runtime 章节"
+          ],
+          "practice_task": "阅读 README，在自己的机器上用 curl 访问一个运行中的 nginx，并用 nginx -V 查看编译时启用了哪些静态模块，记录下来。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从源码构建与运行 nginx",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 auto/configure 配置脚本、auto/options 编译选项、auto/sources 源文件清单以及 Makefile 生成与编译安装流程。",
+          "learning_goals": [
+            "理解 nginx 的 shell 脚本式构建系统",
+            "掌握 --with/--without 等常见 configure 选项",
+            "能够从源码编译并运行 nginx 二进制"
+          ],
+          "source_files": [
+            "auto/configure",
+            "auto/options",
+            "auto/sources"
+          ],
+          "minimal_modules": [
+            "auto/configure",
+            "auto/options 中的 --with-http_* 开关",
+            "auto/sources 中的 CORE/EVENT/HTTP 模块清单"
+          ],
+          "practice_task": "在源码根目录执行 auto/configure --with-http_v2_module，然后 make，定位生成的 objs/nginx 二进制并用 -V 验证 HTTP/2 模块已被编译进来。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构与分层总览",
+          "order": 3,
+          "filename": "u1-l3-source-tree.md",
+          "level": "beginner",
+          "topic": "梳理 src/core、src/event、src/http、src/stream、src/mail、src/os 的职责划分，以及 auto、conf、docs 等辅助目录。",
+          "learning_goals": [
+            "掌握 src 下各子目录的职责",
+            "理解 core/event/http 之间的依赖与分层",
+            "能在源码中快速定位功能所在目录"
+          ],
+          "source_files": [
+            "src/core/nginx.h",
+            "auto/sources",
+            "conf/nginx.conf"
+          ],
+          "minimal_modules": [
+            "src/core 基础设施",
+            "src/event 事件驱动",
+            "src/http/stream/mail 协议层",
+            "src/os/unix 与 src/os/win32 操作系统抽象"
+          ],
+          "practice_task": "对照 auto/sources 中的 CORE_DEPS / EVENT_MODULES / HTTP_MODULES 清单，把 src 下每个子目录与它承担的职责列成一张表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "程序启动入口 main() 全流程",
+          "order": 4,
+          "filename": "u1-l4-main-startup.md",
+          "level": "beginner",
+          "topic": "逐段讲解 src/core/nginx.c 中的 main()：解析命令行参数、继承监听套接字、创建 cycle、根据配置进入单进程或 master 进程循环。",
+          "learning_goals": [
+            "理解 main() 的整体启动顺序",
+            "掌握命令行参数处理与版本/测试模式",
+            "理解继承套接字用于平滑升级的机制"
+          ],
+          "source_files": [
+            "src/core/nginx.c"
+          ],
+          "minimal_modules": [
+            "ngx_get_options / ngx_process_options 命令行处理",
+            "ngx_add_inherited_sockets 继承套接字",
+            "ngx_init_cycle 初始化",
+            "ngx_single_process_cycle / ngx_master_process_cycle 分支"
+          ],
+          "practice_task": "在 nginx.c 的 main() 中标注出从命令行解析到进入 master 进程循环的关键步骤，并说明 nginx -t 与 nginx -s reload 分别走到哪段逻辑。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "core 核心基础设施",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "内存池 ngx_pool_t",
+          "order": 1,
+          "filename": "u2-l1-memory-pool.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx 内存池的设计：小块快速分配、大块单独 malloc、cleanup 回调链，以及为什么内存池能避免碎片并简化生命周期管理。",
+          "learning_goals": [
+            "理解 ngx_create_pool / ngx_palloc / ngx_pfree 的实现",
+            "区分 small block 与 large block 分配策略",
+            "掌握 cleanup 链与资源自动释放机制"
+          ],
+          "source_files": [
+            "src/core/ngx_palloc.c",
+            "src/core/ngx_palloc.h"
+          ],
+          "minimal_modules": [
+            "ngx_create_pool",
+            "ngx_palloc_small / ngx_palloc_large",
+            "ngx_pool_cleanup_add"
+          ],
+          "practice_task": "写一个小 C 程序，创建一个内存池，连续 palloc 多个对象，再注册一个 cleanup 回调打印释放顺序，最后 destroy 池观察输出。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "字符串与数值解析",
+          "order": 2,
+          "filename": "u2-l2-string-and-parse.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_str_t 长度前缀字符串、常用字符串操作，以及 ngx_parse 的整数解析与 ngx_parse_time 的时间间隔解析。",
+          "learning_goals": [
+            "理解 ngx_str_t 与 C 字符串的区别",
+            "掌握 ngx_atoi / ngx_atosz / ngx_parse_offset 解析",
+            "理解配置中时间单位（ms/s/m）如何被解析"
+          ],
+          "source_files": [
+            "src/core/ngx_string.c",
+            "src/core/ngx_string.h",
+            "src/core/ngx_parse.c",
+            "src/core/ngx_parse_time.c"
+          ],
+          "minimal_modules": [
+            "ngx_str_t 与 ngx_string()",
+            "ngx_atoi / ngx_atofp",
+            "ngx_parse_time / ngx_parse_url"
+          ],
+          "practice_task": "写一段代码用 ngx_parse_time 解析 \"1h30m\" 与 \"500ms\"，并用 ngx_atoi 解析一个字符串端口，验证返回的字节偏移量。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "容器数据结构：array/list/queue/rbtree/hash",
+          "order": 3,
+          "filename": "u2-l3-containers.md",
+          "level": "intermediate",
+          "topic": "系统讲解 nginx 自带的动态数组、链表、双向队列、红黑树、哈希表、radix 树等容器，理解它们如何基于内存池构建。",
+          "learning_goals": [
+            "掌握 ngx_array / ngx_list 的扩容机制",
+            "理解 ngx_queue 作为侵入式链表的设计",
+            "掌握 ngx_rbtree 与 ngx_hash 的典型用途（定时器、配置查找）"
+          ],
+          "source_files": [
+            "src/core/ngx_array.c",
+            "src/core/ngx_list.c",
+            "src/core/ngx_queue.c",
+            "src/core/ngx_rbtree.c",
+            "src/core/ngx_hash.c",
+            "src/core/ngx_radix_tree.c"
+          ],
+          "minimal_modules": [
+            "ngx_array_create/push",
+            "ngx_queue 插入与遍历",
+            "ngx_rbtree_init/insert",
+            "ngx_hash_init"
+          ],
+          "practice_task": "用 ngx_array 在内存池上存一组整数并遍历打印；再用 ngx_rbtree 实现一个按 key 排序的小集合，体会红黑树在 nginx 中的用法。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "缓冲区 buf 与输出链 output_chain",
+          "order": 4,
+          "filename": "u2-l4-buf-and-output-chain.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_buf_t 与 ngx_chain_t 这对贯穿 nginx 数据流的核心结构，以及 ngx_output_chain 通用的过滤式输出框架。",
+          "learning_goals": [
+            "理解 ngx_buf_t 的内存/文件、临时/只读标志",
+            "掌握 ngx_chain_t 链式缓冲的组织方式",
+            "理解 ngx_output_chain 如何驱动数据写出与背压"
+          ],
+          "source_files": [
+            "src/core/ngx_buf.c",
+            "src/core/ngx_buf.h",
+            "src/core/ngx_output_chain.c"
+          ],
+          "minimal_modules": [
+            "ngx_buf_t 字段含义",
+            "ngx_alloc_chain_link / ngx_chain_add_copy",
+            "ngx_output_chain 主循环"
+          ],
+          "practice_task": "构造一个含两个内存 buf 的 chain，调用 ngx_output_chain 模拟写出，在 filter 中只打印待写长度，观察 NEED_IN_MORE 等返回值的流转。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "时间缓存与日志系统",
+          "order": 5,
+          "filename": "u2-l5-time-and-log.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx 的高效时间缓存机制（避免每次调用 gettimeofday）与多级别、多目标的日志系统。",
+          "learning_goals": [
+            "理解 ngx_time_update 与缓存时间字段",
+            "掌握 ngx_log_error 的级别与格式化",
+            "理解日志的文件//syslog/内存多种输出后端"
+          ],
+          "source_files": [
+            "src/core/ngx_times.c",
+            "src/core/ngx_times.h",
+            "src/core/ngx_log.c",
+            "src/core/ngx_log.h"
+          ],
+          "minimal_modules": [
+            "ngx_time_update / ngx_current_msec",
+            "ngx_log_error 宏",
+            "ngx_log_set_levels"
+          ],
+          "practice_task": "写一个简单的 main，初始化内存池与日志，调用 ngx_log_error(NGX_LOG_INFO, ...) 输出一行日志到 stderr，并打印 ngx_current_msec。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "配置解析与模块系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "配置文件解析器 ngx_conf_parse",
+          "order": 1,
+          "filename": "u3-l1-conf-parse.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx 如何把文本配置文件解析成指令：词法切分 ngx_conf_read_token、指令分发 ngx_conf_handler、块级作用域与递归解析。",
+          "learning_goals": [
+            "理解 nginx 配置的词法与语法结构",
+            "掌握 ngx_command_t 指令描述符与类型标志",
+            "理解 NGX_HTTP_MAIN_CONF/SRV_CONF/LOC_CONF 等作用域"
+          ],
+          "source_files": [
+            "src/core/ngx_conf_file.c",
+            "src/core/ngx_conf_file.h",
+            "conf/nginx.conf"
+          ],
+          "minimal_modules": [
+            "ngx_conf_parse / ngx_conf_read_token",
+            "ngx_conf_handler 指令分发",
+            "ngx_command_t 与 conf slot 类型"
+          ],
+          "practice_task": "对照 conf/nginx.conf，在 ngx_conf_file.c 中追踪 events {} 和 http {} 块是如何被递归解析的，画出一次指令从文本到 set 回调的调用链。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "cycle 生命周期：配置加载与初始化",
+          "order": 2,
+          "filename": "u3-l2-cycle-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_cycle_t 作为全局上下文容器，ngx_init_cycle 如何完成模块加载、配置解析、打开文件/共享内存、创建监听端口等初始化。",
+          "learning_goals": [
+            "理解 ngx_cycle_t 承载的全局状态",
+            "掌握 ngx_init_cycle 的多阶段初始化流程",
+            "理解配置 reload 与热升级如何复用 cycle"
+          ],
+          "source_files": [
+            "src/core/ngx_cycle.c",
+            "src/core/ngx_cycle.h"
+          ],
+          "minimal_modules": [
+            "ngx_init_cycle 主流程",
+            "模块 create_conf / init_conf 回调",
+            "ngx_open_listening_sockets"
+          ],
+          "practice_task": "在 ngx_init_cycle 中标注出「解析配置 → 初始化模块 → 打开监听端口」三大阶段的边界函数，说明哪一步失败会导致 -t 测试配置报错。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "模块系统与动态模块加载",
+          "order": 3,
+          "filename": "u3-l3-module-system.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_module_t 模块结构、静态模块表 ngx_modules、模块类型（CORE/EVENT/HTTP/MAIL/STREAM）、以及动态模块 dlopen 的加载与索引机制。",
+          "learning_goals": [
+            "理解 ngx_module_t 的字段与回调（init_module/init_process）",
+            "掌握静态模块表与 ngx_max_module 索引空间",
+            "理解动态模块的 load_module 指令与版本校验"
+          ],
+          "source_files": [
+            "src/core/ngx_module.c",
+            "src/core/ngx_module.h",
+            "src/core/nginx.c"
+          ],
+          "minimal_modules": [
+            "ngx_preinit_modules",
+            "ngx_count_modules",
+            "ngx_load_module（nginx.c 中）"
+          ],
+          "practice_task": "追踪一个编译进来的 HTTP 模块从 ngx_modules 表注册到 init_module 回调被调用的全过程，说明模块的 index 与 ctx_index 如何分配。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "指令类型、conf slot 与地址族",
+          "order": 4,
+          "filename": "u3-l4-directives-and-inet.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_conf_set_*_slot 系列通用指令解析函数、offsetof 反射式赋值机制，以及 ngx_inet 对 IP/端口/监听地址的解析。",
+          "learning_goals": [
+            "掌握 flag/num/str/size/msec/sec 等 slot 函数",
+            "理解 offsetof 如何把配置直接写入结构体",
+            "理解 ngx_inet 解析 listen 地址与 CIDR"
+          ],
+          "source_files": [
+            "src/core/ngx_conf_file.c",
+            "src/core/ngx_inet.c",
+            "src/core/ngx_inet.h"
+          ],
+          "minimal_modules": [
+            "ngx_conf_set_flag_slot / set_num_slot",
+            "ngx_conf_set_str_slot / set_keyval_slot",
+            "ngx_parse_addr / ngx_cidr"
+          ],
+          "practice_task": "为一个虚构模块写一组 ngx_command_t，分别用 flag、num、msec、str 四种 slot，并说明每条指令解析后值被写到 conf 结构体的哪个 offset。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进程模型与操作系统抽象",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "master/worker 进程循环",
+          "order": 1,
+          "filename": "u4-l1-process-cycle.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_master_process_cycle 如何管理 worker 进程生命周期、处理信号，以及 ngx_worker_process_cycle 中 worker 处理事件的循环。",
+          "learning_goals": [
+            "理解 master 进程的信号驱动状态机",
+            "掌握 worker 的 init_process 与事件循环",
+            "理解 reload/upgrade/graceful-stop 的协调过程"
+          ],
+          "source_files": [
+            "src/os/unix/ngx_process_cycle.c",
+            "src/os/unix/ngx_process_cycle.h"
+          ],
+          "minimal_modules": [
+            "ngx_master_process_cycle",
+            "ngx_start_worker_processes",
+            "ngx_worker_process_cycle"
+          ],
+          "practice_task": "梳理 master 收到 SIGHUP（reload）与 SIGUSR2（升级）后分别触发的分支，写出 worker 重启与二进制交接的关键步骤。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "进程派生、信号与通道通信",
+          "order": 2,
+          "filename": "u4-l2-process-and-channel.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_spawn_process 的 fork 封装、信号处理函数 ngx_signal_handler，以及 master 与 worker 之间通过 socketpair 通道（ngx_channel）传递命令。",
+          "learning_goals": [
+            "理解 ngx_spawn_process 的进程表管理",
+            "掌握 nginx 信号到内部命令的映射",
+            "理解 channel 命令如 NGX_CMD_OPEN / QUIT / TERMINATE"
+          ],
+          "source_files": [
+            "src/os/unix/ngx_process.c",
+            "src/os/unix/ngx_process.h",
+            "src/os/unix/ngx_channel.c",
+            "src/os/unix/ngx_channel.h"
+          ],
+          "minimal_modules": [
+            "ngx_spawn_process",
+            "ngx_signal_handler",
+            "ngx_write_channel / ngx_read_channel"
+          ],
+          "practice_task": "追踪一条 nginx -s quit 命令：从读取 pid 文件、发送信号，到 master 通过 channel 通知所有 worker 优雅退出的完整路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "共享内存、slab 分配器与进程间锁",
+          "order": 3,
+          "filename": "u4-l3-shared-memory-and-slab.md",
+          "level": "intermediate",
+          "topic": "讲解 worker 之间共享数据的共享内存区、slab 内存分配器，以及用于进程互斥的 shmtx 自旋锁与 rwlock。",
+          "learning_goals": [
+            "理解 ngx_shared_memory_add 注册共享区",
+            "掌握 slab 分配器对小块/页帧的管理",
+            "理解 shmtx 锁在 accept 互斥与共享数据中的作用"
+          ],
+          "source_files": [
+            "src/os/unix/ngx_shmem.c",
+            "src/core/ngx_slab.c",
+            "src/core/ngx_shmtx.c",
+            "src/core/ngx_rwlock.c"
+          ],
+          "minimal_modules": [
+            "ngx_shared_memory_add",
+            "ngx_slab_alloc / ngx_slab_alloc_locked",
+            "ngx_shmtx_trylock / ngx_shmtx_lock"
+          ],
+          "practice_task": "说明 limit_req_zone 这类需要跨 worker 共享状态的指令是如何借助共享内存 + slab 分配器实现的，画出数据存放的位置。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "操作系统抽象层 src/os/unix",
+          "order": 4,
+          "filename": "u4-l4-os-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx 如何用统一接口封装 Linux/FreeBSD/Solaris/Darwin 差异：文件操作、socket 收发、sendfile、用户/权限、亲和性等。",
+          "learning_goals": [
+            "理解 src/os/unix 各 *_config.h 与 *_init.c 的职责",
+            "掌握 ngx_files / ngx_socket 的跨平台抽象",
+            "理解 sendfile/readv/writev 的高效 I/O 路径"
+          ],
+          "source_files": [
+            "src/os/unix/ngx_files.c",
+            "src/os/unix/ngx_files.h",
+            "src/os/unix/ngx_socket.c",
+            "src/os/unix/ngx_alloc.c",
+            "src/os/unix/ngx_linux_sendfile_chain.c"
+          ],
+          "minimal_modules": [
+            "ngx_alloc / ngx_alloc_buf 对齐分配",
+            "ngx_readv_chain / ngx_writev_chain",
+            "ngx_linux_sendfile_chain"
+          ],
+          "practice_task": "对比 ngx_linux_sendfile_chain 与 ngx_readv_chain，说明 nginx 在静态文件与 socket 读取时分别选择了哪条 I/O 快路径，为什么。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "事件驱动核心",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "事件模型总览 ngx_event",
+          "order": 1,
+          "filename": "u5-l1-event-model.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_event_t 结构、事件动作抽象 ngx_event_actions_t、以及 events 模块如何作为事件驱动调度的核心。",
+          "learning_goals": [
+            "理解 ngx_event_t 的 active/ready/timedout 等状态",
+            "掌握事件模块的 actions 接口（add/del/process）",
+            "理解 events {} 块与 use 指令选择后端"
+          ],
+          "source_files": [
+            "src/event/ngx_event.c",
+            "src/event/ngx_event.h"
+          ],
+          "minimal_modules": [
+            "ngx_event_t",
+            "ngx_event_actions_t",
+            "ngx_event_init_conf"
+          ],
+          "practice_task": "在 ngx_event.h 中列出 ngx_event_t 的全部关键字段，并说明 active、ready、eof、error 分别在什么场景被置位。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "epoll 事件后端模块",
+          "order": 2,
+          "filename": "u5-l2-epoll-module.md",
+          "level": "intermediate",
+          "topic": "以 Linux epoll 为例讲解事件后端的实现：epoll_create/ctl/wait 的封装、与 ngx_event_actions 接口的对接、边缘触发下的读写处理。",
+          "learning_goals": [
+            "理解 epoll 模块如何实现 add/del/process",
+            "掌握 ET 模式下 ngx_epoll_process_events 的处理",
+            "理解多 worker 下 epoll 与监听套接字的关系"
+          ],
+          "source_files": [
+            "src/event/modules/ngx_epoll_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_epoll_init / ngx_epoll_add_event",
+            "ngx_epoll_process_events",
+            "ngx_epoll_event_t"
+          ],
+          "practice_task": "对比 epoll 与 poll 模块（ngx_poll_module.c）在 process_events 实现上的差异，说明为什么 epoll 在大量连接时更高效。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "接受连接与 connection 管理",
+          "order": 3,
+          "filename": "u5-l3-accept-and-connection.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_event_accept 如何接受新连接、分配 ngx_connection_t，以及连接池、读写事件绑定与被动关闭机制。",
+          "learning_goals": [
+            "理解 accept 到 connection 分配的流程",
+            "掌握 ngx_get_connection / ngx_free_connection 的连接池",
+            "理解 ngx_connection_t 与读写事件的绑定"
+          ],
+          "source_files": [
+            "src/event/ngx_event_accept.c",
+            "src/core/ngx_connection.c",
+            "src/core/ngx_connection.h"
+          ],
+          "minimal_modules": [
+            "ngx_event_accept",
+            "ngx_get_connection / ngx_free_connection",
+            "ngx_close_connection"
+          ],
+          "practice_task": "追踪一个新 TCP 连接从 epoll 唤醒 accept 到分配 connection、设置读事件 handler 的全过程，统计涉及的内存分配次数。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "定时器与 posted 事件",
+          "order": 4,
+          "filename": "u5-l4-timer-and-posted.md",
+          "level": "intermediate",
+          "topic": "讲解基于红黑树的定时器机制，以及 posted 事件队列（accept 延迟、普通延迟）如何避免长任务阻塞关键路径。",
+          "learning_goals": [
+            "理解 ngx_event_expire_timers 与红黑树",
+            "掌握 ngx_event_add_timer / ngx_event_del_timer",
+            "理解 posted accept/events 两级队列的优先级"
+          ],
+          "source_files": [
+            "src/event/ngx_event_timer.c",
+            "src/event/ngx_event_timer.h",
+            "src/event/ngx_event_posted.c",
+            "src/event/ngx_event_posted.h"
+          ],
+          "minimal_modules": [
+            "ngx_event_find_timer / ngx_event_expire_timers",
+            "ngx_event_add_timer",
+            "ngx_event_process_posted"
+          ],
+          "practice_task": "说明为什么 nginx 要把 accept 事件与普通事件分两个 posted 队列处理，这对防止连接饿死有什么意义。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l5",
+          "title": "事件主循环 process_events_and_timers",
+          "order": 5,
+          "filename": "u5-l5-main-event-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 worker 主循环的核心 ngx_process_events_and_timers：计算超时、调用事件后端、处理 accept 互斥锁、再处理 posted 事件与超时。",
+          "learning_goals": [
+            "理解 worker 一次循环的完整调度顺序",
+            "掌握 accept_mutex 互斥避免惊群",
+            "理解事件、posted、定时器三者的优先级"
+          ],
+          "source_files": [
+            "src/event/ngx_event.c",
+            "src/os/unix/ngx_process_cycle.c"
+          ],
+          "minimal_modules": [
+            "ngx_process_events_and_timers",
+            "ngx_trylock_accept_mutex",
+            "ngx_event_process_posted / ngx_event_expire_timers"
+          ],
+          "practice_task": "画出 ngx_process_events_and_timers 的调用顺序图，标注获取 accept 锁成功与失败两种情况下的处理差异。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2",
+            "u5-l3",
+            "u5-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "HTTP 核心处理",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "HTTP 模块框架与上下文",
+          "order": 1,
+          "filename": "u6-l1-http-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_http.c 如何组织 HTTP 模块、监听端口与虚拟主机，ngx_http_core_module 作为 HTTP 框架核心的职责与配置结构。",
+          "learning_goals": [
+            "理解 http main/server/location 三层配置结构",
+            "掌握 HTTP 模块 ctx 与 create/merge conf 回调",
+            "理解 ngx_http_block 初始化流程"
+          ],
+          "source_files": [
+            "src/http/ngx_http.c",
+            "src/http/ngx_http_core_module.c",
+            "src/http/ngx_http_core_module.h",
+            "src/http/ngx_http_config.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_block",
+            "ngx_http_core_module",
+            "ngx_http_conf_ctx_t 三层"
+          ],
+          "practice_task": "用一个最小 nginx.conf（含一个 server 和一个 location）说明配置如何被解析成 main/srv/loc 三层 conf 指针数组。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "HTTP 请求生命周期",
+          "order": 2,
+          "filename": "u6-l2-request-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解从连接建立 ngx_http_init_connection、读请求 ngx_http_wait_request_handler、创建 ngx_http_request_t、到 finalize 的完整请求生命周期。",
+          "learning_goals": [
+            "理解请求从连接到响应的状态机推进",
+            "掌握 ngx_http_request_t 的关键字段",
+            "理解 keepalive 与请求复用的处理"
+          ],
+          "source_files": [
+            "src/http/ngx_http_request.c",
+            "src/http/ngx_http_request.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_init_connection",
+            "ngx_http_wait_request_handler / ngx_http_create_request",
+            "ngx_http_finalize_request"
+          ],
+          "practice_task": "在一个请求处理过程中标注出 read_event_handler 与 write_event_handler 在不同阶段被切换的值，说明 keepalive 下连接如何回到等待状态。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "请求行、头部与请求体解析",
+          "order": 3,
+          "filename": "u6-l3-http-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 ngx_http_parse 的状态机式请求行与头部解析，以及 ngx_http_request_body 如何读取与缓存请求体（含 content-length/chunked）。",
+          "learning_goals": [
+            "理解请求行/头部解析状态机",
+            "掌握 chunked 请求体的接收方式",
+            "理解请求体可被缓存到内存或临时文件"
+          ],
+          "source_files": [
+            "src/http/ngx_http_parse.c",
+            "src/http/ngx_http_request.c",
+            "src/http/ngx_http_request_body.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_parse_request_line",
+            "ngx_http_parse_header_line",
+            "ngx_http_read_client_request_body"
+          ],
+          "practice_task": "追踪一个带 chunked body 的 POST 请求，说明每个 chunk 是如何被解析、拼接并在必要时写入临时文件的。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "请求处理阶段 phases 机制",
+          "order": 4,
+          "filename": "u6-l4-http-phases.md",
+          "level": "intermediate",
+          "topic": "讲解 HTTP 11 个处理阶段（postread→content）的设计，ngx_http_core_run_phases 如何依次推进，以及模块如何注册 phase handler。",
+          "learning_goals": [
+            "理解 phase 检查表与引擎 phase_engine",
+            "掌握 NGX_OK/DECLINED/NEXT 在阶段中的语义",
+            "理解 content 阶段如何选择处理者"
+          ],
+          "source_files": [
+            "src/http/ngx_http_core_module.c",
+            "src/http/ngx_http_core_module.h",
+            "src/http/ngx_http.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_core_run_phases",
+            "ngx_http_init_phase_handlers",
+            "NGX_HTTP_POST_READ_PHASE ... NGX_HTTP_CONTENT_PHASE"
+          ],
+          "practice_task": "列出全部 HTTP 阶段，说明 access、rewrite、find_config、content 各阶段由哪些内置模块的 handler 参与处理。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "location 匹配与配置合并",
+          "order": 5,
+          "filename": "u6-l5-location-matching.md",
+          "level": "intermediate",
+          "topic": "讲解 nginx 如何对请求 URI 做前缀/正则/精确 location 匹配，以及 server/location 配置如何沿树合并（merge_loc_conf）。",
+          "learning_goals": [
+            "理解前缀最长匹配、正则优先、=精确匹配的顺序",
+            "掌握 named location 与内部重定向",
+            "理解 merge_conf 沿配置树继承默认值"
+          ],
+          "source_files": [
+            "src/http/ngx_http_core_module.c",
+            "src/http/ngx_http_core_module.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_core_find_location",
+            "ngx_http_core_find_static_location",
+            "merge_loc_conf 回调"
+          ],
+          "practice_task": "构造一组嵌套的 location（含 =、^~、正则、前缀），用 -t 与日志验证匹配优先级，并在源码中定位判定顺序。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "过滤器链 header/body filter",
+          "order": 6,
+          "filename": "u6-l6-filter-chain.md",
+          "level": "advanced",
+          "topic": "讲解 HTTP 响应的过滤器链：header filter 与 body filter 的链式调用、write_filter/copy_filter 等基础设施 filter 的作用。",
+          "learning_goals": [
+            "理解 filter 链通过 next 指针串联的机制",
+            "掌握 copy_filter 如何驱动文件/内存输出",
+            "理解 gzip、chunked、header 等 filter 的协作"
+          ],
+          "source_files": [
+            "src/http/ngx_http_header_filter_module.c",
+            "src/http/ngx_http_write_filter_module.c",
+            "src/http/ngx_http_copy_filter_module.c",
+            "src/http/ngx_http_postpone_filter_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_top_header_filter / top_body_filter",
+            "ngx_http_write_filter",
+            "ngx_http_copy_filter"
+          ],
+          "practice_task": "画出一次静态文件响应从 content handler 到最终写 socket 经过的所有 filter 节点顺序，说明每个 filter 的职责。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l7",
+          "title": "变量系统 ngx_http_variables",
+          "order": 7,
+          "filename": "u6-l7-variables.md",
+          "level": "advanced",
+          "topic": "讲解 nginx 强大的变量机制：变量注册、$name 引用解析、get_handler 惰性求值，以及内置与模块自定义变量。",
+          "learning_goals": [
+            "理解 ngx_http_variable_t 的注册与索引",
+            "掌握变量的惰性求值与缓存标志",
+            "理解复杂变量（map/geo）如何复用变量系统"
+          ],
+          "source_files": [
+            "src/http/ngx_http_variables.c",
+            "src/http/ngx_http_variables.h",
+            "src/http/modules/ngx_http_map_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_add_variable / get_indexed_variable",
+            "ngx_http_get_variable",
+            "变量 get_handler"
+          ],
+          "practice_task": "追踪 $request_uri 与 $remote_addr 两个变量的取值路径，并在日志格式中使用若干变量验证它们被正确求值。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l8",
+          "title": "静态文件 content handler",
+          "order": 8,
+          "filename": "u6-l8-static-content-handler.md",
+          "level": "intermediate",
+          "topic": "以 ngx_http_static_module 为例讲解 content 阶段处理者的实现：映射 URI 到文件、打开/缓存、sendfile 输出与错误响应。",
+          "learning_goals": [
+            "理解 content handler 的标准实现套路",
+            "掌握 open_file_cache 与文件信息缓存",
+            "理解 403/404 等特殊响应的生成"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_static_module.c",
+            "src/core/ngx_open_file_cache.c",
+            "src/http/ngx_http_special_response.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_static_handler",
+            "ngx_open_file_cache_lookup",
+            "ngx_http_special_response_handler"
+          ],
+          "practice_task": "阅读 ngx_http_static_handler，说明一个对 /index.html 的 GET 请求是如何映射到磁盘文件并发送给客户端的。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l9",
+          "title": "XSLT 过滤器与 XML 外部实体（XXE）安全",
+          "order": 9,
+          "filename": "u6-l9-xslt-filter-and-xxe-security.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_http_xslt_filter_module 如何作为 HTTP body filter 用 libxml2/libxslt 将 XML 响应按 xslt_stylesheet 转换后输出，并重点解析新增的 XXE 防护：通过 XML_PARSE_NONET 禁止网络加载、SAX entityDecl 回调剥离内部 DTD 子集里实体的 systemId，以及 xml_external_entities 指令如何按需重新放开外部实体。",
+          "learning_goals": [
+            "理解 XSLT 过滤器如何注册到 top header/body filter 链、累积响应块后做整体 XML 解析与样式表转换",
+            "掌握 libxml2 SAX 解析中 externalSubset 与 entityDecl 回调的作用与挂载方式",
+            "理解 XXE 攻击原理，以及 nginx 通过 XML_PARSE_NONET + 剥离 systemId 的默认防护与 xml_external_entities 指令的开关语义"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_xslt_filter_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_xslt_header_filter / ngx_http_xslt_body_filter（注册到 top filter 链）",
+            "ngx_http_xslt_add_chunk（xmlCtxtUseOptions 与 SAX 回调挂载）",
+            "ngx_http_xslt_sax_external_subset / ngx_http_xslt_sax_entity_decl（外部实体处理与 XXE 防护）",
+            "ngx_http_xslt_filter_preconfiguration（xmlCatalogSetDefaults）与 xml_external_entities 指令"
+          ],
+          "practice_task": "配置一个返回 XML 的 location 并用 xslt_stylesheet 做转换；构造一个在内部 DTD 子集中声明外部实体（如引用 file:///etc/passwd 或外部 http DTD）的 XML，观察默认情况下实体被忽略并出现 \"xslt filter external entity ignored\" 告警日志；再用 xml_external_entities on; 验证行为变化，结合源码说明 ngx_http_xslt_sax_entity_decl 是如何根据 conf->external_entities 决定是否剥离 systemId 的。",
+          "depends_on": [
+            "u6-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "upstream 反向代理与负载均衡",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "upstream 框架与请求流转",
+          "order": 1,
+          "filename": "u7-l1-upstream-framework.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_http_upstream 框架如何创建上游请求、建立后端连接、收发数据并与客户端请求联动（双向驱动）。",
+          "learning_goals": [
+            "理解 ngx_http_upstream_t 的状态机",
+            "掌握 create/connect/send/process 的回调钩子",
+            "理解 upstream 与客户端请求的写读联动"
+          ],
+          "source_files": [
+            "src/http/ngx_http_upstream.c",
+            "src/http/ngx_http_upstream.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_upstream_create",
+            "ngx_http_upstream_init_request",
+            "ngx_http_upstream_connect / send_request"
+          ],
+          "practice_task": "追踪一次 proxy_pass 请求，画出从客户端请求到后端连接建立、再到响应回传的状态机跳转。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "round_robin 负载均衡",
+          "order": 2,
+          "filename": "u7-l2-round-robin.md",
+          "level": "advanced",
+          "topic": "讲解默认的加权 round robin 调度：peer 初始化、get/peer 选择、free 释放与失败计数，以及与 upstream 框架的对接点。",
+          "learning_goals": [
+            "理解 ngx_http_upstream_rr_peer 的加权调度",
+            "掌握 peer 的 init/get/free 回调约定",
+            "理解故障 peer 的有效权重动态调整"
+          ],
+          "source_files": [
+            "src/http/ngx_http_upstream_round_robin.c",
+            "src/http/ngx_http_upstream_round_robin.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_upstream_init_round_robin",
+            "ngx_http_upstream_get_round_robin_peer",
+            "ngx_http_upstream_free_round_robin_peer"
+          ],
+          "practice_task": "配置三个权重不同的后端，结合源码说明每次请求 get_peer 时是如何按权重选择并调整 effective_weight 的。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "proxy 模块详解",
+          "order": 3,
+          "filename": "u7-l3-proxy-module.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_http_proxy_module 如何生成发往后端的请求、改写头部、处理响应，以及 proxy_set_header/proxy_pass 的实现。",
+          "learning_goals": [
+            "理解 proxy 请求的构造与头部改写",
+            "掌握 proxy_pass URL 解析与变量替换",
+            "理解 proxy 缓存键与响应处理回调"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_proxy_module.c",
+            "src/http/modules/ngx_http_proxy_module.h",
+            "src/http/ngx_http_script.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_proxy_handler",
+            "ngx_http_proxy_create_request",
+            "ngx_http_proxy_process_header"
+          ],
+          "practice_task": "用 proxy_set_header 改写 Host 与 X-Forwarded-For，结合 ngx_http_script 说明这些指令是如何编译成脚本在请求时执行的。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "upstream 调度算法模块",
+          "order": 4,
+          "filename": "u7-l4-upstream-balancers.md",
+          "level": "advanced",
+          "topic": "对比讲解 hash、ip_hash、least_conn、random、keepalive、sticky 等 upstream 调度模块的实现思路与适用场景。",
+          "learning_goals": [
+            "理解一致性 hash 的实现与虚拟节点",
+            "掌握 least_conn 的最小连接选择",
+            "理解 keepalive 连接池与 zone 共享状态"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_upstream_hash_module.c",
+            "src/http/modules/ngx_http_upstream_least_conn_module.c",
+            "src/http/modules/ngx_http_upstream_random_module.c",
+            "src/http/modules/ngx_http_upstream_keepalive_module.c",
+            "src/http/modules/ngx_http_upstream_zone_module.c"
+          ],
+          "minimal_modules": [
+            "hash 模块的一致性哈希",
+            "least_conn peer 比较",
+            "keepalive 连接缓存",
+            "zone 共享状态"
+          ],
+          "practice_task": "对比 hash 与 least_conn 两种调度在 get_peer 实现上的差异，并说明 upstream zone 模块如何让多 worker 共享同一份 peer 状态。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l5",
+          "title": "事件化缓冲 ngx_event_pipe",
+          "order": 5,
+          "filename": "u7-l5-event-pipe.md",
+          "level": "advanced",
+          "topic": "讲解 upstream 响应的大块缓冲机制 ngx_event_pipe：在客户端慢、后端快时的临时文件溢写与背压控制。",
+          "learning_goals": [
+            "理解 pipe 的 input/output 两条链",
+            "掌握 max_temp_file_size 等背压限制",
+            "理解临时文件分段写入 temp_file"
+          ],
+          "source_files": [
+            "src/event/ngx_event_pipe.c",
+            "src/event/ngx_event_pipe.h"
+          ],
+          "minimal_modules": [
+            "ngx_event_pipe",
+            "ngx_event_pipe_read_upstream",
+            "ngx_event_pipe_write_to_downstream"
+          ],
+          "practice_task": "模拟客户端慢速读取的场景，结合 proxy_buffering 说明响应数据如何先进入内存缓冲、再溢写到临时文件。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "SSL/TLS 与现代协议",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "OpenSSL 集成 ngx_event_openssl",
+          "order": 1,
+          "filename": "u8-l1-openssl-integration.md",
+          "level": "advanced",
+          "topic": "讲解 nginx 如何把 OpenSSL 集成进事件模型：SSL 握手、非阻塞读写、会话复用与错误处理的封装。",
+          "learning_goals": [
+            "理解 SSL 与 nginx connection 的集成",
+            "掌握 ngx_ssl_handshake 与非阻塞 retry",
+            "理解会话缓存与 SNI 的处理"
+          ],
+          "source_files": [
+            "src/event/ngx_event_openssl.c",
+            "src/event/ngx_event_openssl.h",
+            "src/http/modules/ngx_http_ssl_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_ssl_create_connection",
+            "ngx_ssl_handshake",
+            "ngx_ssl_recv_chain / ngx_ssl_send_chain"
+          ],
+          "practice_task": "配置一个 HTTPS server，结合源码说明一个 TLS 连接的握手是如何在 epoll 驱动下分多次完成的。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "HTTP/2 实现解析",
+          "order": 2,
+          "filename": "u8-l2-http2.md",
+          "level": "advanced",
+          "topic": "讲解 nginx HTTP/2 的帧层、多路复用流、HPACK 头部表与流量控制，以及 v2 过滤器如何与 HTTP 核心对接。",
+          "learning_goals": [
+            "理解 HTTP/2 帧与流的处理",
+            "掌握 HPACK 动态表的编解码",
+            "理解 v2 filter 与请求体读取的改造"
+          ],
+          "source_files": [
+            "src/http/v2/ngx_http_v2.c",
+            "src/http/v2/ngx_http_v2.h",
+            "src/http/v2/ngx_http_v2_filter_module.c",
+            "src/http/v2/ngx_http_v2_table.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_v2 主帧处理",
+            "ngx_http_v2_filter_module 响应输出",
+            "ngx_http_v2_table HPACK"
+          ],
+          "practice_task": "在浏览器中对启用 HTTP/2 的站点观察多路复用，结合源码说明一个 HTML 页面里的多个资源如何在同一 TCP 连接上以不同 stream 并发传输。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "HTTP/3 与 QUIC 实现",
+          "order": 3,
+          "filename": "u8-l3-http3-quic.md",
+          "level": "advanced",
+          "topic": "讲解 nginx 基于 UDP 的 QUIC 协议栈（传输、加密、拥塞控制）与 HTTP/3 的对接，理解 BPF 辅助的连接路由。",
+          "learning_goals": [
+            "理解 QUIC 数据包与帧的编解码",
+            "掌握 QUIC 的连接 ID 与迁移、ACK 机制",
+            "理解 HTTP/3 在 QUIC stream 上的承载"
+          ],
+          "source_files": [
+            "src/event/quic/ngx_event_quic.c",
+            "src/event/quic/ngx_event_quic_transport.c",
+            "src/event/quic/ngx_event_quic_protection.c",
+            "src/http/v3/ngx_http_v3.c",
+            "src/event/quic/ngx_event_quic_bpf.c"
+          ],
+          "minimal_modules": [
+            "ngx_event_quic 主输入",
+            "ngx_event_quic_transport 帧编解码",
+            "ngx_event_quic_protection 加密",
+            "ngx_http_v3 处理"
+          ],
+          "practice_task": "配置一个 HTTP/3 server（含 quic 重试与 0-RTT），结合源码说明一个 QUIC 数据包从 UDP 接收到交付 HTTP/3 的关键步骤。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "证书缓存与 OCSP Stapling",
+          "order": 4,
+          "filename": "u8-l4-cert-cache-stapling.md",
+          "level": "advanced",
+          "topic": "讲解 nginx 对 SSL 证书与密钥的缓存加载（支持变量动态证书），以及 OCSP Stapling 在线获取并附带证书状态的实现。",
+          "learning_goals": [
+            "理解证书按 server_name 的缓存机制",
+            "掌握 OCSP 响应的获取与刷新",
+            "理解动态证书与 SNI 的配合"
+          ],
+          "source_files": [
+            "src/event/ngx_event_openssl_cache.c",
+            "src/event/ngx_event_openssl_stapling.c"
+          ],
+          "minimal_modules": [
+            "ngx_ssl_certificate_cache",
+            "OCSP stapling 初始化与刷新"
+          ],
+          "practice_task": "配置 ssl_certificate 指向变量化的路径（按 $server_name 选证书），结合源码说明证书是如何被缓存并在握手时选取的。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "stream 与 mail 通用代理",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "stream 模块：TCP/UDP 代理",
+          "order": 1,
+          "filename": "u9-l1-stream-proxy.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_stream 框架如何复用事件核心实现 TCP/UDP 四层代理，stream_core 与 stream_proxy 模块的职责与处理流程。",
+          "learning_goals": [
+            "理解 stream 与 http 框架的平行结构",
+            "掌握 stream_proxy 的双向数据转发",
+            "理解 stream 的 phases（preread/log 等）"
+          ],
+          "source_files": [
+            "src/stream/ngx_stream.c",
+            "src/stream/ngx_stream_core_module.c",
+            "src/stream/ngx_stream_handler.c",
+            "src/stream/ngx_stream_proxy_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_stream_init_connection",
+            "ngx_stream_proxy_handler",
+            "stream phases"
+          ],
+          "practice_task": "配置一个 TCP stream proxy 转发到后端数据库端口，结合源码说明一个新建 TCP 会话的双向转发是如何被事件驱动推进的。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "mail 代理框架",
+          "order": 2,
+          "filename": "u9-l2-mail-proxy.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_mail 如何代理 SMTP/POP3/IMAP，包含认证（auth_http 外部认证）、协议解析与到后端的代理转发。",
+          "learning_goals": [
+            "理解 mail 三种协议的 handler 结构",
+            "掌握 auth_http 外部认证回调流程",
+            "理解 mail_proxy 到后端的转发"
+          ],
+          "source_files": [
+            "src/mail/ngx_mail.c",
+            "src/mail/ngx_mail_handler.c",
+            "src/mail/ngx_mail_core_module.c",
+            "src/mail/ngx_mail_auth_http_module.c",
+            "src/mail/ngx_mail_proxy_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_mail_init_connection",
+            "ngx_mail_auth_http_module 外部认证",
+            "ngx_mail_proxy_module 转发"
+          ],
+          "practice_task": "梳理一个 SMTP 客户端从连接 nginx 到通过 auth_http 完成认证、再由 mail_proxy 转发到后端的完整链路。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "缓存、安全、日志与扩展开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "共享文件缓存 ngx_http_file_cache",
+          "order": 1,
+          "filename": "u10-l1-file-cache.md",
+          "level": "advanced",
+          "topic": "讲解 nginx 的反向代理/静态文件共享缓存：缓存键、共享内存元数据、磁盘文件分层目录与缓存失效策略。",
+          "learning_goals": [
+            "理解缓存键与 cache manager/loader 进程",
+            "掌握共享内存中缓存节点的组织",
+            "理解缓存过期、purge 与 max_size 控制"
+          ],
+          "source_files": [
+            "src/http/ngx_http_file_cache.c",
+            "src/http/ngx_http_cache.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_file_cache_new / lookup",
+            "cache loader / cache manager",
+            "缓存键与失效"
+          ],
+          "practice_task": "配置一个带 proxy_cache 的反向代理，结合源码说明一个可缓存响应是如何被写入磁盘并在共享内存登记，后续命中如何快速返回。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "访问控制与请求限流",
+          "order": 2,
+          "filename": "u10-l2-access-and-limit.md",
+          "level": "advanced",
+          "topic": "讲解 access 模块的 IP 黑白名单、limit_conn 连接数限制、limit_req 的漏桶算法限流及其共享内存状态。",
+          "learning_goals": [
+            "理解 access 模块基于 CIDR 的判定",
+            "掌握 limit_req 的漏桶与突发队列",
+            "理解跨 worker 共享的限流计数"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_access_module.c",
+            "src/http/modules/ngx_http_limit_req_module.c",
+            "src/http/modules/ngx_http_limit_conn_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_access_handler",
+            "ngx_http_limit_req_handler（漏桶）",
+            "ngx_http_limit_conn_handler"
+          ],
+          "practice_task": "配置 limit_req 限制每秒请求数并允许突发，结合源码解释 rate、burst、nodelay 三个参数在漏桶算法中的具体作用。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "访问日志与 syslog 输出",
+          "order": 3,
+          "filename": "u10-l3-access-log-syslog.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_http_log_module 的 log_format 定义、惰性求值日志写入，以及 core 层 ngx_syslog 把日志发送到远端的实现。",
+          "learning_goals": [
+            "理解 log_format 脚本编译与运行时求值",
+            "掌握 access_log 的多目标与缓冲写入",
+            "理解 syslog 协议封装与重试"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_log_module.c",
+            "src/core/ngx_syslog.c",
+            "src/core/ngx_syslog.h"
+          ],
+          "minimal_modules": [
+            "ngx_http_log_handler",
+            "log_format 变量编译",
+            "ngx_syslog_send"
+          ],
+          "practice_task": "自定义一个 log_format 含若干变量，并把 access_log 同时输出到本地文件与远程 syslog，结合源码说明变量在请求结束时如何被批量求值。",
+          "depends_on": [
+            "u2-l5",
+            "u6-l7"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l4",
+          "title": "编写自定义 HTTP 模块（实战）",
+          "order": 4,
+          "filename": "u10-l4-write-custom-module.md",
+          "level": "advanced",
+          "topic": "综合前面知识，演示如何用 auto/module 编写一个自定义 content handler 模块：定义 commands、ctx、conf、注册到 phases、编译进 nginx。",
+          "learning_goals": [
+            "掌握一个最小 HTTP 模块的完整骨架",
+            "理解 config 文件如何驱动模块编译（auto/module）",
+            "能够实现自定义指令与 content handler"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_empty_gif_module.c",
+            "src/http/modules/ngx_http_stub_status_module.c",
+            "auto/module",
+            "auto/sources"
+          ],
+          "minimal_modules": [
+            "模块 ctx 与 commands 定义",
+            "create_loc_conf / merge_loc_conf",
+            "注册 content handler",
+            "auto/module 集成"
+          ],
+          "practice_task": "参考 ngx_http_empty_gif_module，编写一个返回固定 JSON 字符串的自定义 content handler 模块，用 auto/module 编译进 nginx 并验证访问。",
+          "depends_on": [
+            "u3-l3",
+            "u6-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l5",
+          "title": "调试、错误排查与性能分析",
+          "order": 5,
+          "filename": "u10-l5-debug-and-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 nginx 的调试日志（--with-debug）、常见问题排查手段，以及 google_perftools 等性能剖析工具的集成。",
+          "learning_goals": [
+            "掌握如何启用与定位 debug 日志",
+            "理解常见段错误与连接异常的排查路径",
+            "了解 perftools 集成与基本性能剖析"
+          ],
+          "source_files": [
+            "misc/ngx_google_perftools_module.c",
+            "src/core/ngx_log.c",
+            "src/os/unix/ngx_process_cycle.c"
+          ],
+          "minimal_modules": [
+            "debug 日志编译与 error_log debug",
+            "ngx_google_perftools_module",
+            "master/worker 调试信息"
+          ],
+          "practice_task": "用 --with-debug 编译 nginx，配置 error_log debug_http，抓取一次请求的完整 debug 日志，定位请求经过的事件与 phase 步骤。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
