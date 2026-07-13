@@ -4,31 +4,33 @@
 
 学完本讲，你应当能够：
 
-- 说清 `expand_dims` 是如何「在任意位置插入一个或多个长度为 1 的新轴」的，并理解它为什么是对 `reshape` 的薄包装。
-- 读懂 `apply_along_axis` 把任意「一维函数」沿某个轴铺开执行的实现套路：转置→切片→建缓冲→回填→再转置。
-- 理解 `apply_over_axes` 如何在多个轴上反复调用一个函数，并自动把「少了一维」的结果重新 `expand_dims` 回去。
-- 掌握 `_make_along_axis_idx` 构造「正交花式索引」的过程，从而彻底理解 `take_along_axis` / `put_along_axis` 与普通 `take` 在广播语义上的差别。
+- 说清 `expand_dims` 如何在任意位置插入一个或多个长度为 1 的新轴，并理解它本质上是对 `reshape` 的一层薄包装、返回视图而非拷贝。
+- 读懂 `apply_along_axis` 把任意「一维函数」沿某个轴铺开执行的实现套路：转置→切片→建缓冲→回填→再转置，并理解它为什么要「先跑一次」探测输出形状。
+- 理解 `apply_over_axes` 如何在多个轴上反复调用一个函数，并在函数「少返回一维」时用 `expand_dims` 把那一维补回去。
+- 掌握 `_make_along_axis_idx` 构造「正交花式索引」的过程，从而彻底分清 `take_along_axis` / `put_along_axis` 与普通 `take` 在广播语义上的差别。
 - 能用这几个函数写出按行归一化、按行排序、按索引批量改写等真实数据处理代码。
 
 ## 2. 前置知识
 
-在进入源码前，先建立三个直觉。
+进入源码前，先建立三个直觉。
 
-**轴（axis）与维度（ndim）。** 一个形状为 `(2, 3, 4)` 的数组有 3 个维度（`ndim == 3`），轴编号从 `0` 开始：`axis=0` 是第一个维度（大小 2），`axis=1` 是第二个（大小 3），`axis=2` 是第三个（大小 4）。负数轴从末尾数：`axis=-1` 等同于 `axis=2`。本讲几乎所有函数都要先把「用户给的轴」规整成「非负整数轴」，这件事由 `normalize_axis_index`（单轴）和 `normalize_axis_tuple`（多轴）完成。
+**轴（axis）与维度（ndim）。** 一个形状为 `(2, 3, 4)` 的数组有 3 个维度（`ndim == 3`），轴编号从 `0` 开始：`axis=0` 是第一个维度（大小 2），`axis=1` 是第二个（大小 3），`axis=2` 是第三个（大小 4）。负数轴从末尾倒数：`axis=-1` 等同于 `axis=2`。本讲几乎所有函数都要先把「用户给的轴」规整成「非负整数轴」，这件事由 `normalize_axis_index`（单轴）和 `normalize_axis_tuple`（多轴）完成。
 
-**视图（view）与 reshape。** `reshape` 在不改变数据总个数、且内存布局允许时，返回的是一个**视图**——它与原数组共享同一块内存，只是解读形状不同。`expand_dims` 的全部魔力就是算出新形状后调用 `reshape`，因此它几乎不拷贝数据。
+**视图（view）与 reshape。** `reshape` 在不改变元素总个数、且内存布局允许时，返回的是一个**视图**——它与原数组共享同一块内存，只是解读形状不同。`expand_dims` 的全部魔力就是算出新形状后调用 `reshape`，因此它几乎不拷贝数据。
 
-**花式索引与广播。** 当用一组数组组成的元组去索引 `arr[i0, i1, ...]`，且这些数组形状能互相广播时，NumPy 会逐元素地组合索引，得到一个形状等于「广播后形状」的结果。本讲的 `_make_along_axis_idx` 正是利用这一点，把「沿轴取值」转换成一次花式索引。
+**花式索引与广播。** 当用一组数组组成的元组去索引 `arr[i0, i1, ...]`，且这些数组形状能互相广播时，NumPy 会逐元素地组合索引，得到一个形状等于「广播后形状」的结果。本讲的 `_make_along_axis_idx` 正是利用这一点，把「沿轴逐切片取值」转换成一次花式索引。
 
 此外，本讲所有公开函数都采用 [u1-l2](u1-l2-module-organization.md) 讲过的 **dispatcher + impl 双函数写法**：`@array_function_dispatch(_xxx_dispatcher)` 装饰的公开函数背后，dispatcher 只返回参与运算的数组参数（用于 NEP-18 的 `__array_function__` 协议），真正的逻辑写在被装饰函数体内。本讲不再重复这套机制，只聚焦算法本身。
 
 ## 3. 本讲源码地图
 
-本讲的全部核心实现集中在一个文件里：
+本讲的核心实现集中在一个文件里：
 
 | 文件 | 作用 |
 | --- | --- |
 | `numpy/lib/_shape_base_impl.py` | 形状与维度操作函数的实现层，本讲覆盖 `expand_dims`、`apply_along_axis`、`apply_over_axes`、`take_along_axis`、`put_along_axis` 及内部辅助 `_make_along_axis_idx` |
+
+该文件的函数没有像 `npyio.py` 那样的薄再导出模块，而是由顶层 `numpy/__init__.py` 直接取名并收进 `np.` 命名空间——这正是 [u1-l2](u1-l2-module-organization.md) 所述「无薄模块、顶层直接 `from .lib._shape_base_impl import ...`」的情形，可对照 [numpy/\_\_init\_\_.py:L567](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/__init__.py#L567) 与 [numpy/\_\_init\_\_.py:L682](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/__init__.py#L682)（用 `set(lib._shape_base_impl.__all__)` 收集公开名）确认。
 
 涉及的两个外部依赖（用于轴规整与迭代）：
 
@@ -49,9 +51,9 @@
 
 #### 4.1.1 概念说明
 
-`expand_dims(a, axis)` 的作用是给数组**增加一个长度为 1 的新维度**。它最常见的用途是把一维数组「立起来」或「放平」：把形状 `(3,)` 变成 `(1, 3)`（行向量）或 `(3, 1)`（列向量）。它和 `a[np.newaxis, :]` 完全等价（`np.newaxis is None`），但 `expand_dims` 更适合写在参数化代码里，因为 `axis` 可以是变量，也可以是元组——一次插入多个新轴。
+`expand_dims(a, axis)` 给数组**增加一个长度为 1 的新维度**。它最常见的用途是把一维数组「立起来」或「放平」：把形状 `(3,)` 变成 `(1, 3)`（行向量）或 `(3, 1)`（列向量）。它和 `a[np.newaxis, :]` 完全等价（`np.newaxis is None`），但 `expand_dims` 更适合写在参数化代码里，因为 `axis` 可以是变量，也可以是元组——一次插入多个新轴。
 
-它解决的问题是：很多运算对维度数有硬性要求（例如矩阵乘法要求至少二维、广播对齐时需要显式的「哑维度」），而又不想真的拷贝数据。`expand_dims` 返回视图，零拷贝地把形状「撑」到目标维度数。
+它解决的问题是：很多运算对维度数有硬性要求（矩阵乘法要求至少二维、广播对齐时需要显式的「哑维度」），而又不想真的拷贝数据。`expand_dims` 返回视图，零拷贝地把形状「撑」到目标维度数。它不只是公开 API，还是本讲 `apply_over_axes` 与同文件 `kron` 的内部依赖。
 
 #### 4.1.2 核心流程
 
@@ -69,7 +71,7 @@
 
 #### 4.1.3 源码精读
 
-dispatcher 与公开函数签名，dispatcher 只返回数组本身：[_shape_base_impl.py:L509-L514](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/_shape_base_impl.py#L509-L514)
+dispatcher 只返回数组本身，签名即公开函数：[_shape_base_impl.py:L509-L514](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/_shape_base_impl.py#L509-L514)
 
 实现体分三段。第一段处理输入类型——`matrix` 子类是历史包袱，强制降级为普通 `asarray`，其余走 `asanyarray` 以保留子类：[_shape_base_impl.py:L586-L590](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/_shape_base_impl.py#L586-L590)
 
@@ -82,7 +84,7 @@ out_ndim = len(axis) + a.ndim
 axis = normalize_axis_tuple(axis, out_ndim)
 ```
 
-为什么是 `out_ndim`？因为新轴可插入的位置范围是 `0..a.ndim`（共 `a.ndim+1` 个缝隙），而 `out_ndim = a.ndim + len(axis)`。单轴插入时 `out_ndim = a.ndim+1`，正好覆盖这 `a.ndim+1` 个缝隙。`normalize_axis_tuple` 的定义见 [numeric.py:L1429-L1483](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/../../_core/numeric.py#L1429-L1483)，它对每个轴调 `normalize_axis_index` 转非负、并默认禁止重复轴。
+为什么是 `out_ndim`？因为新轴可插入的位置范围是 `0..a.ndim`（共 `a.ndim+1` 个缝隙），单轴插入时 `out_ndim = a.ndim + 1`，正好覆盖这 `a.ndim+1` 个缝隙。`normalize_axis_tuple` 的定义见 [numeric.py:L1429-L1483](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/_core/numeric.py#L1429-L1483)：它先用 `operator.index` 把单个整数包成列表，再对每个轴调 `normalize_axis_index` 转非负，最后默认禁止重复轴（`allow_duplicate=False`）。
 
 第三段用一个迭代器优雅地构造新形状——遍历 `out_ndim` 个位置，若该位置属于「新轴集合」就填 `1`，否则从原形状里取下一个大小：[_shape_base_impl.py:L597-L600](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/_shape_base_impl.py#L597-L600)
 
@@ -115,7 +117,7 @@ print(e.shape)                    # 期望 (2, 3, 1)
 ```
 
 3. 需要观察的现象：前三者 `shape` 应为 `(1, 2)`、`(2, 1)`、`(1, 1, 2)`；`shares_memory` 应为 `True`；`e.shape` 应为 `(2, 3, 1)`。
-4. 预期结果：如上。关键点：对 1D 数组 `x`，合法的 `axis` 只有 `0` 和 `1`（单轴插入时 `out_ndim = 1+1 = 2`），`np.expand_dims(x, 2)` 会抛 `AxisError`；而对 2D 数组 `a2`，`out_ndim = 2+1 = 3`，`axis=2`（等于 `a.ndim`）合法。这正是「规整针对 `out_ndim` 而非 `a.ndim`」带来的差别。
+4. 预期结果：如上。关键点：对 1D 数组 `x`，单轴插入时 `out_ndim = 1+1 = 2`，合法的 `axis` 只有 `0` 和 `1`，`np.expand_dims(x, 2)` 会抛 `AxisError`；而对 2D 数组 `a2`，`out_ndim = 2+1 = 3`，`axis=2`（等于 `a.ndim`）合法。这正是「规整针对 `out_ndim` 而非 `a.ndim`」带来的差别。
 5. 「待本地验证」部分：以上结论可由源码直接推出，运行应一致；可额外尝试 `np.expand_dims(x, 2)` 以确认它确实抛 `AxisError`。
 
 #### 4.1.5 小练习与答案
@@ -126,7 +128,7 @@ print(e.shape)                    # 期望 (2, 3, 1)
 
 **练习 2**：对一维数组 `x`，`np.expand_dims(x, 1)` 与 `np.expand_dims(x, 2)` 一个合法、一个非法，为什么？
 
-答案：单轴插入时 `out_ndim = a.ndim + 1 = 2`，`normalize_axis_tuple` 用 `out_ndim=2` 校验，合法轴只有 `0` 和 `1`（`-2,-1`）。`axis=1` 合法 → 形状 `(2,1)`，这就是一维数组的「插到末尾」；`axis=2` 越界 → 抛 `AxisError`。可见一维数组插一个轴，可插入的位置是 `0` 和 `1`，而非 `0` 和 `2`——判断边界前先算出 `out_ndim` 即可避免这类错误。
+答案：单轴插入时 `out_ndim = a.ndim + 1 = 2`，`normalize_axis_tuple` 用 `out_ndim=2` 校验，合法轴只有 `0` 和 `1`（负数即 `-2,-1`）。`axis=1` 合法 → 形状 `(2,1)`，这就是一维数组的「插到末尾」；`axis=2` 越界 → 抛 `AxisError`。可见一维数组插一个轴，可插入的位置是 `0` 和 `1`，而非 `0` 和 `2`——判断边界前先算出 `out_ndim` 即可避免这类错误。
 
 ---
 
@@ -136,7 +138,7 @@ print(e.shape)                    # 期望 (2, 3, 1)
 
 `apply_along_axis(func1d, axis, arr)` 把一个**只能处理一维数组的函数 `func1d`**，沿 `arr` 的指定轴「铺开」执行。例如 `func1d = np.sum`、`axis = 0`，就等价于沿 `axis=0` 求和；但 `func1d` 可以是任意自定义函数（比如「对一行做标准化」），这是普通 `sum`/`mean` 做不到的。
 
-它解决的问题是：你手上有一个现成的一维函数（可能是第三方库的、或自己写的复杂逻辑），想把它无脑套到 N 维数组的每个一维切片上，又不想手写嵌套循环。官方文档明确指出它「等价于但快于」一段用 `ndindex` + `s_` 写出的双重循环。
+它解决的问题是：你手上有一个现成的一维函数（可能是第三方库的、或自己写的复杂逻辑），想把它无脑套到 N 维数组的每个一维切片上，又不想手写嵌套循环。官方文档明确指出它「等价于但快于」一段用 `ndindex` + `s_` 写出的双重循环——「快于」的来源是它把每次结果写到一块连续缓冲上，而不是临时拼装。
 
 #### 4.2.2 核心流程
 
@@ -205,7 +207,7 @@ res = transpose(buff, buff_permute)
 return conv.wrap(res)
 ```
 
-这套「转置到末尾→建缓冲→回填→再转置」的写法，让每次 `buff[ind] = ...` 都落在连续内存上，是它比朴素双循环快的根源。
+这套「转置到末尾→建缓冲→回填→再转置」的写法，让每次 `buff[ind] = ...` 都落在连续内存上，是它比朴素双循环快的根源。注意它仍是 Python 层循环，性能上不能与真正的 ufunc 相提并论——它的价值在「灵活性」而非「速度」。
 
 #### 4.2.4 代码实践（本讲主实践）
 
@@ -233,14 +235,14 @@ print(out.std(axis=1))    # 每行标准差
 ```
 
 3. 需要观察的现象：`out` 与 `a` 同形状 `(3, 3)`；每行均值近似为 `0`、每行标准差近似为 `1`。
-4. 预期结果：三行的标准化结果大致为 `[-1.225, 0, 1.225]`（每行都是这个模式，因为 `[1,2,3]`、`[10,20,30]`、`[0,5,10]` 等差数列的标准化形状相同）。`out.mean(axis=1)` 应显示接近 `0`（浮点误差量级 1e-16），`out.std(axis=1)` 应显示接近 `1`。
-5. 若想验证「输出维度插入」语义，可把 `standardize` 换成返回二维数组的函数，例如 `np.apply_along_axis(np.diag, -1, b)`（见官方 docstring 示例），观察结果比输入多出的维度。
+4. 预期结果：三行的标准化结果大致为 `[-1.225, 0, 1.225]`（每行都是这个模式，因为 `[1,2,3]`、`[10,20,30]`、`[0,5,10]` 都是等差数列，标准化形状相同）。`out.mean(axis=1)` 应显示接近 `0`（浮点误差量级 1e-16），`out.std(axis=1)` 应显示接近 `1`。
+5. 若想验证「输出维度插入」语义，可把 `standardize` 换成返回二维数组的函数，例如 `np.apply_along_axis(np.diag, -1, b)`（见官方 docstring 示例 [_shape_base_impl.py:L353-L364](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/_shape_base_impl.py#L353-L364)），观察结果比输入多出的维度。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：`np.apply_along_axis(np.sum, 0, np.ones((20, 10)))` 的结果形状是什么？
 
-答案：`func1d = np.sum` 返回标量，`Nj...` 为空，故 `axis=0` 那一维被「吃掉」。输入 `(20, 10)` → 输出 `(10,)`，每个元素是 20。这与 [test_shape_base.py:L137-L145](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/tests/test_shape_base.py#L137-L145) 中 `apply_along_axis(len, 0, a)` 的用法同构。
+答案：`func1d = np.sum` 返回标量，`Nj...` 为空，故 `axis=0` 那一维被「吃掉」。输入 `(20, 10)` → 输出 `(10,)`，每个元素是 20。这与 [test_shape_base.py:L137-L145](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/tests/test_shape_base.py#L137-L145) 中 `apply_along_axis(len, 0, a)` 的用法同构（`len` 也返回标量，把对应轴消掉）。
 
 **练习 2**：为什么输入只要有一个迭代维大小为 0，就会抛「Cannot apply_along_axis when any iteration dimensions are 0」？
 
@@ -272,7 +274,7 @@ for axis in axes:
 return val
 ```
 
-注意：负轴用 `N`（原始维度数，常量）规整，而不是当前 `val.ndim`——因为循环每步都保证 `val.ndim == N`，二者等价但用 `N` 更直观。
+注意：负轴用 `N`（原始维度数，常量）规整，而不是当前 `val.ndim`——因为循环每步都保证 `val.ndim == N`，二者等价但用 `N` 更直观。这里直接复用了本讲 4.1 的 `expand_dims`，体现了两个函数的配合关系。
 
 #### 4.3.3 源码精读
 
@@ -302,7 +304,7 @@ for axis in axes:
 return val
 ```
 
-核心是那个 `if/else`：它同时兼容两种风格的 `func`——「保留维度」（如 `np.sum(..., keepdims=True)` 包装版）和「减少维度」（如默认 `np.sum`）。后者会被 `expand_dims` 补回一维，使下一轮 `axis` 编号依然有效。这里直接复用了本讲 4.1 的 `expand_dims`，体现了这两个函数的配合关系。
+核心是那个 `if/else`：它同时兼容两种风格的 `func`——「保留维度」（如 `np.sum(..., keepdims=True)` 包装版）和「减少维度」（如默认 `np.sum`）。后者会被 `expand_dims` 补回一维，使下一轮 `axis` 编号依然有效。
 
 #### 4.3.4 代码实践
 
@@ -391,6 +393,7 @@ def _make_along_axis_idx(arr_shape, indices, axis):
 `ind_shape` 的构造是关键：`shape_ones[:dim] + (-1,) + shape_ones[dim+1:]` 生成一个除第 `dim` 维为 `-1`（取满）外其余全 `1` 的形状，使 `arange(n)` 只沿第 `dim` 维展开，其余维度为 1 以便广播。
 
 举个例子：`arr` 形状 `(3, 4, 5)`、`indices` 形状 `(3, 2, 5)`、`axis=1`。则 `dest_dims = [0, None, 2]`：
+
 - 第 0 维：`arange(3).reshape(-1,1,1)` → 形状 `(3,1,1)`
 - 第 1 维（None）：`indices` → 形状 `(3,2,5)`
 - 第 2 维：`arange(5).reshape(1,1,-1)` → 形状 `(1,1,5)`
@@ -460,7 +463,7 @@ put_along_axis(arr, indices, values, axis):
     arr[ _make_along_axis_idx(arr.shape, indices, axis) ] = values   # 原地写
 ```
 
-注意 `take_along_axis` 的默认 `axis=-1`（自 2.3 起改为 `-1`，见 docstring 的 `versionchanged` 说明），而 `put_along_axis` 的 `axis` 是必填位置参数。
+注意 `take_along_axis` 的默认 `axis=-1`（自 2.3 起改为 `-1`，见 docstring 的 `versionchanged` 说明 [_shape_base_impl.py:L85-L86](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/lib/_shape_base_impl.py#L85-L86)），而 `put_along_axis` 的 `axis` 是必填位置参数（无默认值）。
 
 #### 4.5.3 源码精读
 
@@ -579,7 +582,7 @@ print(marked)                         # 每行最大值位置变为 99
    - `normed` 每行均值≈0、标准差≈1；
    - `batched` 比 `normed` 多出开头的长度 1 维度；
    - `ranked[0]` 每行严格降序；
-   - `marked` 每行恰有一个元素变为 `99`，位置对应该行标准化前的最大特征。
+   - `marked` 每行恰有一个元素变为 `99`，位置对应该行标准化后的最大特征。
 4. 预期结果：可由前述各模块的行为推出；运行应一致。若结果不符，重点检查第 4 步是否用了 `take_along_axis`（而非 `np.take`）以及第 5 步是否加了 `keepdims=True`。
 5. 待本地验证：第 4 步对负数取 `argsort` 得到降序索引的技巧，取决于「分数各不相同」；若存在并列，稳定排序会保留原顺序，可改用 `np.argsort(..., kind='stable')` 观察。
 

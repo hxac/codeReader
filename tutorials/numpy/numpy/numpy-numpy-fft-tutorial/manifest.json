@@ -1,7 +1,7 @@
 {
   "project": "numpy-numpy-fft",
-  "head": "2f93aec234bd1d6ff076147e56a6865547f77598",
-  "rationale": "numpy.fft 是一个结构清晰、分层明确的中小型子包：入口 __init__.py 聚合导出，_helper.py 提供频率箱与频谱平移的纯 Python helper，_pocketfft.py 是所有变换的 Python 主逻辑（统一走内部 _raw_fft/_raw_fftnd），真正的计算由 C++ 广义 ufunc 后端 _pocketfft_umath.cpp（调用 pocketfft 头文件库）完成。因此学习顺序按\"由外到内、由浅到深\"设计：第 1 单元让读者从零认识包的定位、目录、构建；第 2 单元补齐 DFT 数学约定与四个 helper，降低后续阅读门槛；第 3 单元以一维 fft/ifft 与 _raw_fft 为核心打通主流程，再分别展开 norm、out/类型提升、实数 rfft/irfft；第 4 单元把同样的机制推广到多维（fftn/fft2）与 Hermitian（hfft），并深入 _cook_nd_args 这块容易踩坑的形状/轴处理；第 5 单元进入 C++ ufunc 后端的注册、循环实现、向量化与 FFTpack 排序，最后用测试体系收尾。依赖关系严格遵循\"先入口后内核、先 1D 后 N-D、先 Python 后 C++\"，每篇都引用真实源码并配一个可操作的代码实践任务。共 18 篇，对应中型项目规模。",
+  "head": "b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b",
+  "rationale": "numpy.fft 是一个结构清晰、分层明确的中小型子包：入口 __init__.py 聚合导出，_helper.py 提供频率箱与频谱平移的纯 Python helper，_pocketfft.py 是所有变换的 Python 主逻辑（统一走内部 _raw_fft/_raw_fftnd），真正的计算由 C++ 广义 ufunc 后端 _pocketfft_umath.cpp（调用 pocketfft 头文件库）完成。因此学习顺序按\"由外到内、由浅到深\"设计：第 1 单元让读者从零认识包的定位、目录、构建；第 2 单元补齐 DFT 数学约定与四个 helper，降低后续阅读门槛；第 3 单元以一维 fft/ifft 与 _raw_fft 为核心打通主流程，再分别展开 norm、out/类型提升、实数 rfft/irfft；第 4 单元把同样的机制推广到多维（fftn/fft2）与 Hermitian（hfft），并深入 _cook_nd_args 这块容易踩坑的形状/轴处理；第 5 单元进入 C++ ufunc 后端的注册、循环实现、向量化与 FFTpack 排序，最后用测试体系收尾。依赖关系严格遵循\"先入口后内核、先 1D 后 N-D、先 Python 后 C++\"，每篇都引用真实源码并配一个可操作的代码实践任务。共 18 篇，对应中型项目规模。增量分析结论：previous HEAD 2f93aec234 到 current HEAD b21650c4f6 之间仅有 1 个提交（修复自定义标量类型 _convert_from_type 的引用泄漏），该提交不涉及 numpy/fft/ 子包（git diff 与 git log 对该路径均为空），所有讲义引用的源码文件均未变化且依然存在，故全部 18 篇 action 标为 keep，结构、依赖、源码引用保持原样。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "用 np.fft.fft 对两个正弦波叠加的信号做变换，再用 np.fft.ifft 还原，验证 ifft(fft(a)) 约等于 a，并打印 numpy.fft.__all__ 列表，分组标出哪些来自 _pocketfft、哪些来自 _helper。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -123,7 +123,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -151,7 +151,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -179,7 +179,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -206,7 +206,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -242,7 +242,7 @@
             "u2-l1",
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -269,7 +269,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -297,7 +297,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -325,7 +325,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -360,7 +360,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -388,7 +388,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -416,7 +416,7 @@
             "u3-l4",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -443,7 +443,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -480,7 +480,7 @@
             "u3-l1",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -510,7 +510,7 @@
             "u5-l1",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -520,7 +520,7 @@
           "level": "advanced",
           "topic": "结合 test_helper.py 与 test_pocketfft.py，讲解如何测试 FFT 的正确性、norm 保持、out 参数、输出顺序、整数/bool 输入、回归与线程安全。",
           "learning_goals": [
-            "掌握用 ifft(fft(x)) 恒等性与 fft1 参考 DFT 验证变换正确性的思路",
+            "掌握用 ifft(fft(x)) 恒等性和 fft1 参考 DFT 验证变换正确性的思路",
             "理解 out 参数与 s 交互的边界测试",
             "了解 FFT ufunc 线程安全测试与回归测试的写法"
           ],
@@ -542,7 +542,7 @@
             "u4-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

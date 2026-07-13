@@ -1,7 +1,7 @@
 {
   "project": "nginx",
-  "head": "18ccebb1a889eb6989c64754f4f9b2512d58a491",
-  "rationale": "nginx 是一个超大型的 C 项目，采用「master/worker 进程模型 + 事件驱动 + 高度模块化」架构，源码按 core/event/http/stream/mail/os 分层。学习路线因此设计为「由外到内、由基础设施到业务协议」的渐进式结构：第一单元先让读者从零认识项目定位、构建方式（auto/configure）、目录结构与 main() 启动入口；第二单元铺底座核心数据结构（内存池、字符串、容器、buf、时间日志），这是读懂一切后续源码的前提；第三单元讲配置文件解析与模块系统，这是 nginx 可扩展性的根基；第四单元讲进程模型与 OS 抽象层，揭示 master/worker 如何运转；第五单元讲事件驱动核心，这是 nginx 高性能的关键；第六单元是重头戏 HTTP 核心（框架、请求生命周期、解析、phases、location、过滤器、变量、静态文件）；第七单元讲 upstream 反向代理与负载均衡；第八单元讲 SSL/TLS、HTTP/2、HTTP/3+QUIC 等现代协议；第九单元讲 stream/mail 通用代理；第十单元讲缓存、限流、日志、自定义模块开发与调试性能分析等扩展实践。讲义之间通过 depends_on 形成清晰依赖链，确保读者始终在已掌握知识的基础上推进。大型项目拆分为 40+ 篇讲义以充分覆盖，但每篇聚焦一个独立主题且结合真实源码文件。",
+  "head": "4d0e620f9ad4e81dc229ca423fbbf3c2e23b3f83",
+  "rationale": "nginx 是一个超大型的 C 项目，采用「master/worker 进程模型 + 事件驱动 + 高度模块化」架构，源码按 core/event/http/stream/mail/os 分层。学习路线因此设计为「由外到内、由基础设施到业务协议」的渐进式结构：第一单元先让读者从零认识项目定位、构建方式（auto/configure）、目录结构与 main() 启动入口；第二单元铺底座核心数据结构（内存池、字符串、容器、buf、时间日志），这是读懂一切后续源码的前提；第三单元讲配置文件解析与模块系统，这是 nginx 可扩展性的根基；第四单元讲进程模型与 OS 抽象层，揭示 master/worker 如何运转；第五单元讲事件驱动核心，这是 nginx 高性能的关键；第六单元是重头戏 HTTP 核心（框架、请求生命周期、解析、phases、location、过滤器、变量、静态文件、XSLT 过滤器与 XXE 安全）；第七单元讲 upstream 反向代理与负载均衡；第八单元讲 SSL/TLS、HTTP/2、HTTP/3+QUIC 等现代协议；第九单元讲 stream/mail 通用代理；第十单元讲缓存、限流、日志、自定义模块开发与调试性能分析等扩展实践。讲义之间通过 depends_on 形成清晰依赖链，确保读者始终在已掌握知识的基础上推进。本次增量更新（18ccebb1a → 4d0e620f9）代码变更仅触及 src/http/modules/ngx_http_xslt_filter_module.c，新增了 xml_external_entities 指令与外部实体（XXE）防护机制，因此新增一篇 XSLT 过滤器与 XXE 安全讲义（u6-l9，挂在过滤器链 u6-l6 之后）；其余讲义因引用的源码文件与主题均未变化，全部保持 keep。",
   "units": [
     {
       "id": "u1",
@@ -30,7 +30,7 @@
           ],
           "practice_task": "阅读 README，在自己的机器上用 curl 访问一个运行中的 nginx，并用 nginx -V 查看编译时启用了哪些静态模块，记录下来。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -58,7 +58,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -87,7 +87,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -115,7 +115,7 @@
             "u1-l1",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -150,7 +150,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -179,7 +179,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -211,7 +211,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -240,7 +240,7 @@
             "u2-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -269,7 +269,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -306,7 +306,7 @@
             "u1-l4",
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -333,7 +333,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -361,7 +361,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -389,7 +389,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -425,7 +425,7 @@
             "u1-l4",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -454,7 +454,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -483,7 +483,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -513,7 +513,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -548,7 +548,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -574,7 +574,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -602,7 +602,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -631,7 +631,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -661,7 +661,7 @@
             "u5-l3",
             "u5-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -699,7 +699,7 @@
             "u3-l3",
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -726,7 +726,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -754,7 +754,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -782,7 +782,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -809,7 +809,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l6",
@@ -838,7 +838,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l7",
@@ -866,7 +866,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l8",
@@ -893,6 +893,33 @@
           "practice_task": "阅读 ngx_http_static_handler，说明一个对 /index.html 的 GET 请求是如何映射到磁盘文件并发送给客户端的。",
           "depends_on": [
             "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l9",
+          "title": "XSLT 过滤器与 XML 外部实体（XXE）安全",
+          "order": 9,
+          "filename": "u6-l9-xslt-filter-and-xxe-security.md",
+          "level": "advanced",
+          "topic": "讲解 ngx_http_xslt_filter_module 如何作为 HTTP body filter 用 libxml2/libxslt 将 XML 响应按 xslt_stylesheet 转换后输出，并重点解析新增的 XXE 防护：通过 XML_PARSE_NONET 禁止网络加载、SAX entityDecl 回调剥离内部 DTD 子集里实体的 systemId，以及 xml_external_entities 指令如何按需重新放开外部实体。",
+          "learning_goals": [
+            "理解 XSLT 过滤器如何注册到 top header/body filter 链、累积响应块后做整体 XML 解析与样式表转换",
+            "掌握 libxml2 SAX 解析中 externalSubset 与 entityDecl 回调的作用与挂载方式",
+            "理解 XXE 攻击原理，以及 nginx 通过 XML_PARSE_NONET + 剥离 systemId 的默认防护与 xml_external_entities 指令的开关语义"
+          ],
+          "source_files": [
+            "src/http/modules/ngx_http_xslt_filter_module.c"
+          ],
+          "minimal_modules": [
+            "ngx_http_xslt_header_filter / ngx_http_xslt_body_filter（注册到 top filter 链）",
+            "ngx_http_xslt_add_chunk（xmlCtxtUseOptions 与 SAX 回调挂载）",
+            "ngx_http_xslt_sax_external_subset / ngx_http_xslt_sax_entity_decl（外部实体处理与 XXE 防护）",
+            "ngx_http_xslt_filter_preconfiguration（xmlCatalogSetDefaults）与 xml_external_entities 指令"
+          ],
+          "practice_task": "配置一个返回 XML 的 location 并用 xslt_stylesheet 做转换；构造一个在内部 DTD 子集中声明外部实体（如引用 file:///etc/passwd 或外部 http DTD）的 XML，观察默认情况下实体被忽略并出现 \"xslt filter external entity ignored\" 告警日志；再用 xml_external_entities on; 验证行为变化，结合源码说明 ngx_http_xslt_sax_entity_decl 是如何根据 conf->external_entities 决定是否剥离 systemId 的。",
+          "depends_on": [
+            "u6-l6"
           ],
           "action": "new"
         }
@@ -929,7 +956,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -956,7 +983,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -984,7 +1011,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -1015,7 +1042,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -1042,7 +1069,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1078,7 +1105,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -1107,7 +1134,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -1139,7 +1166,7 @@
             "u8-l1",
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -1165,7 +1192,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1203,7 +1230,7 @@
             "u6-l1",
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1233,7 +1260,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1268,7 +1295,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1296,7 +1323,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1325,7 +1352,7 @@
             "u2-l5",
             "u6-l7"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1356,7 +1383,7 @@
             "u3-l3",
             "u6-l6"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l5",
@@ -1384,7 +1411,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
