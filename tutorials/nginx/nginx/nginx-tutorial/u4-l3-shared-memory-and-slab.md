@@ -2,515 +2,584 @@
 
 ## 1. 本讲目标
 
-nginx 采用 master + 多个 worker 的进程模型（见 u4-l1、u4-l2）。每个 worker 是一个独立进程，拥有**自己独立的地址空间和自己的 `ngx_pool_t` 内存池**。这就带来一个根本问题：
+本讲要解决一个核心问题：**nginx 的多个 worker 进程各自拥有独立的地址空间，它们凭什么能共享同一份限流计数、负载均衡状态、缓存元数据？**
 
-> 限流计数（`limit_req`）、负载均衡的 peer 状态、缓存元数据、SSL 会话……这些数据必须**所有 worker 看到同一份**。进程私有内存做不到。
+学完本讲，你应当能够：
 
-本讲要解决的就是「worker 之间如何安全地共享一份数据」。读完本讲你应当掌握：
+1. 说清楚 nginx 是怎样用 `mmap` 申请一块「跨进程共享」的内存，并用 `ngx_shared_memory_add` 在配置阶段把它「登记」进 cycle 的。
+2. 说清楚 `ngx_slab_alloc` / `ngx_slab_alloc_locked` 是如何在这块共享内存上做分层（small/exact/big/page）内存管理的，以及它与 u2-l1 讲过的进程私有内存池 `ngx_pool_t` 的本质区别。
+3. 说清楚 `ngx_shmtx_trylock` / `ngx_shmtx_lock` 自旋锁是如何用一条原子变量在多 worker 之间做互斥的，以及 `ngx_rwlock` 读写锁用在什么地方。
+4. 能把「共享内存 + slab + 自旋锁 + 红黑树」这四件套串起来，解释 `limit_req_zone` 这类指令的跨 worker 状态到底存放在哪里、由谁保护。
 
-1. nginx 如何向操作系统申请一段**所有进程共享**的内存（共享内存区）。
-2. 如何在这段共享内存里做**精细化的分配/回收**（slab 分配器），而不是粗暴地一刀切。
-3. 多个 worker 同时操作这段共享内存时，如何用**进程间锁**（shmtx 自旋锁、rwlock 读写锁）保证不踩坏数据。
-4. 把三者串起来：能讲清 `limit_req_zone` 这类指令的数据到底放在哪里、被谁保护。
+---
 
 ## 2. 前置知识
 
-在进入本讲前，你需要先建立几个概念（部分来自前几讲）：
+本讲建立在前面几讲已经建立的概念之上，先做一次最小回顾：
 
-- **进程与内存**：Linux 下 `fork()` 产生的子进程默认拥有「写时复制」的独立内存。要让多个进程看到同一块内存，必须显式申请「共享映射」。本讲讲的「共享内存」专指这种跨进程共享的段，**不是** `ngx_pool_t`（后者是进程私有的，见 u2-l1）。
-- **虚拟地址 vs 物理地址**：每个进程有自己的虚拟地址空间。共享内存的本质是：操作系统把同一块**物理页**映射进多个进程的（可能不同的）虚拟地址，于是对一个进程的写入，另一个进程立即可见。
-- **原子操作与 CAS**：「比较并交换」（Compare-And-Set）是一条不可被打断的 CPU 指令。nginx 用 `ngx_atomic_cmp_set(lock, old, new)` 表示「当 `*lock == old` 时把它改成 `new` 并返回真，否则返回假」。这是无锁自旋锁的地基。
-- **`ngx_cycle_t`**：nginx 的全局上下文容器（见 u3-l2）。共享内存区以一个链表 `cycle->shared_memory` 的形式登记在它上面。
-- **mmap**：Linux 把文件或匿名内存映射进进程地址空间的系统调用，`MAP_SHARED` 标志使映射可被 fork 出的子进程继承共享。
+- **进程模型（u4-l1）**：nginx 是一个 master + N 个 worker 的多进程程序。每个 worker 是一个独立的进程，拥有**独立的虚拟地址空间**。这意味着 worker A 里 `malloc` 返回的指针，worker B 是看不到的。
+- **fork 的语义（u4-l2）**：worker 由 master 经 `fork()` 派生。`fork` 之后父子进程的变量虽然初值相同，但此后任意一方写都会触发「写时复制」，二者就此分道扬镳。所以普通全局变量无法用来在 worker 之间传递动态状态。
+- **内存池（u2-l1）**：`ngx_pool_t` 是「一个请求一个池」的进程私有分配器，整池销毁回收。它**不能**跨进程共享。
+- **红黑树（u2-l3）**：nginx 自带的有序容器，是定时器、限流等模块查找状态用的底座。
+
+那么问题来了：限流要统计「这个 IP 最近一秒发了几次请求」，而请求是被随机分到某个 worker 上的，这次在 worker 0，下次可能在 worker 3。计数必须放在**所有 worker 都能读到、也都能写到**的同一块物理内存里。这就是本讲的全部出发点。
+
+跨进程共享内存的经典做法是：内核帮我把同一块物理内存**映射**到每个进程各自的虚拟地址空间里，于是不同进程里同一个虚拟地址（或不同虚拟地址）背后其实是同一块物理页，一个进程写，其它进程立刻能读到。在 Linux 上这件事由 `mmap(..., MAP_SHARED, ...)` 系统调用完成。
+
+---
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|---|---|
-| `src/os/unix/ngx_shmem.c` | 向 OS 申请/释放一段共享内存（mmap 或 SysV shmget 三种后端） |
-| `src/core/ngx_cycle.c` | `ngx_shared_memory_add` 注册共享区；`ngx_init_cycle` 物化并初始化它们；`ngx_init_zone_pool` 在段首建立 slab 池 |
-| `src/core/ngx_cycle.h` | `ngx_shm_zone_t` 与 `ngx_cycle_t.shared_memory` 的结构定义 |
-| `src/core/ngx_slab.c` / `ngx_slab.h` | slab 分配器：小块用位图管理、大块按整页分配，并带统计 |
-| `src/core/ngx_shmtx.c` / `ngx_shmtx.h` | 共享自旋锁（原子 CAS + 可选 POSIX 信号量） |
-| `src/core/ngx_rwlock.c` | 共享读写锁（读多写少场景，如 upstream zone） |
-| `src/http/modules/ngx_http_limit_req_module.c` | 综合实践对象：共享内存 + slab + shmtx 的真实用例 |
-| `src/event/ngx_event.c`、`src/event/ngx_event_accept.c` | `accept_mutex` 防惊群：shmtx 的另一个经典用法 |
+| --- | --- |
+| `src/os/unix/ngx_shmem.c` | 共享内存的**后端**：用 `mmap`/`shmget` 真正申请一段跨进程共享的内存 |
+| `src/os/unix/ngx_shmem.h` | `ngx_shm_t` 结构体：一块共享内存的描述符（地址、大小、名字） |
+| `src/core/ngx_cycle.c` | `ngx_shared_memory_add`（登记）与 `ngx_init_zone_pool`（物化 + 装 slab）；`ngx_init_cycle` 里调用它们的装配线 |
+| `src/core/ngx_cycle.h` | `ngx_shm_zone_t` 结构体：一个共享区的「登记条目」 |
+| `src/core/ngx_slab.c` | **slab 分配器**：在共享内存上做分层内存管理 |
+| `src/core/ngx_slab.h` | `ngx_slab_pool_t`、`ngx_slab_page_t`、`ngx_slab_stat_t` 结构体 |
+| `src/core/ngx_shmtx.c` | **进程间自旋锁** shmtx：原子变量 + 自旋退避 + 信号量回退 |
+| `src/core/ngx_shmtx.h` | `ngx_shmtx_sh_t`（共享部分）、`ngx_shmtx_t`（每进程句柄） |
+| `src/core/ngx_rwlock.c` | 读写锁 rwlock：读多写少场景 |
+| `src/event/ngx_event.c` / `src/event/ngx_event_accept.c` | accept 互斥锁：shmtx 的典型用例 |
+| `src/http/modules/ngx_http_limit_req_module.c` | `limit_req_zone`：shm + slab + shmtx + rbtree 的综合范例 |
 
-## 4. 核心概念与源码讲解
-
-本讲拆成四个最小模块：**(4.1) 共享内存区** → **(4.2) slab 分配器** → **(4.3) shmtx 自旋锁** → **(4.4) rwlock 读写锁**。三者是层层递进的：先有一块大共享内存，再用 slab 在里面切分，最后用锁保护对它的并发访问。
-
-### 4.1 共享内存区：从 mmap 到 ngx_shared_memory_add
-
-#### 4.1.1 概念说明
-
-nginx 对「共享内存」的使用分两个阶段：
-
-- **配置阶段（解析 nginx.conf 时）**：模块遇到需要共享区的指令（如 `limit_req_zone ... zone=one:10m`），只是「登记」一个名字和大小，**并不真正分配内存**。登记函数就是 `ngx_shared_memory_add`。
-- **初始化阶段（`ngx_init_cycle` 中）**：cycle 装配线走到「create shared memory」这一步，才遍历登记表，对每个区真正调用 `ngx_shm_alloc`（即 mmap）拿到一段共享内存，然后调用该区专属的 `init` 回调把它初始化成有用的数据结构。
-
-为什么分两步？因为配置可能 reload，nginx 需要在新旧 cycle 之间按「同名同 tag 同 size」**复用**已有的共享段（连同里面的数据），从而做到 reload 不丢限流计数、不丢缓存。这种复用只有在「登记」与「物化」分离后才可能实现（详见 u3-l2 的装配线）。
-
-#### 4.1.2 核心流程
-
-一段共享内存从无到有的流程：
-
-```
-模块指令解析
-   │  ngx_shared_memory_add(cf, name="one", size=10m, tag=&模块)
-   ▼
-登记进 cycle->shared_memory 链表（此时 addr=NULL，只记名/大小/tag/init）
-   │
-   ……reload 或启动……
-   ▼
-ngx_init_cycle 「create shared memory」阶段
-   │  遍历链表，对每个 zone：
-   │    1) 与 old_cycle 同名同 tag 同 size？ → 直接复用旧 addr，跳过 mmap
-   │    2) 否则 ngx_shm_alloc() → mmap(MAP_ANON|MAP_SHARED) 拿到 addr
-   │    3) ngx_init_zone_pool() → 在 addr 处建立 slab 池 + shmtx 锁
-   │    4) 调 zone->init(zone, data) → 模块自定义初始化（如建红黑树）
-   ▼
-worker fork 后继承这份映射 → 所有 worker 共享同一物理页
-```
-
-#### 4.1.3 源码精读
-
-**底层分配：`ngx_shm_alloc` 用 mmap。** nginx 优先使用匿名的 `MAP_ANON|MAP_SHARED`：
-
-[src/os/unix/ngx_shmem.c:L14-L28](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.c#L14-L28) — 用 `mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_SHARED, -1, 0)` 申请一段匿名共享内存；`MAP_SHARED` 是关键，它保证 `fork()` 出的 worker 继承同一物理页。失败时 `addr == MAP_FAILED`。
-
-该文件用条件编译提供三种后端（[L12](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.c#L12) 起）：`MAP_ANON`（现代 Linux/FreeBSD 默认）、退而求其次打开 `/dev/zero` 映射（[L40-L69](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.c#L40-L69)）、再老的 System V `shmget`/`shmat`（[L81-L114](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.c#L81-L114)）。三种后端函数名相同，由 `./configure` 探测到的宏决定编译哪一份。
-
-**登记函数：`ngx_shared_memory_add`。** 它的核心是「按名字去重」：
-
-[src/core/ngx_cycle.c:L1326-L1356](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1326-L1356) — 遍历已有的 `shared_memory` 链表，按 `name` 字节比较。若找到同名区：还要校验 `tag`（通常传「模块结构体地址」，如 `&ngx_http_limit_req_module`）一致；tag 不一致却同名会报 `the shared memory zone "..." is already declared for a different use` 并返回 NULL。同名同 tag 则**返回已有 zone**（并补齐 size），实现多模块/多次引用同一区的去重。
-
-[src/core/ngx_cycle.c:L1359-L1375](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1359-L1375) — 没找到则 `ngx_list_push` 新增一项，把 `addr=NULL`、`size`、`name`、`tag` 填好，`init=NULL`（留给模块自己设）。注意此刻**完全没有分配内存**。
-
-**物化与 slab 池建立：`ngx_init_cycle` 的共享内存段。**
-
-[src/core/ngx_cycle.c:L431-L503](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L431-L503) — 遍历登记表：先校验 `size != 0`；接着与 `old_cycle` 比对，若「同 tag 同 size」则直接复用旧 `addr` 并调 `init`（reload 复用路径，[L473-L488](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L473-L488)）；否则 `ngx_shm_alloc` 真正 mmap（[L493](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L493)），再 `ngx_init_zone_pool` 建池（[L497](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L497)），最后调模块的 `init` 回调（[L501](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L501)）。
-
-[src/core/ngx_cycle.c:L1001-L1025](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1001-L1025) — `ngx_init_zone_pool` 把刚 mmap 出的裸段首部当作 `ngx_slab_pool_t`：设 `end = addr + size`、`min_shift = 3`（最小分配 8 字节）、`addr` 指回自己；然后 `ngx_shmtx_create` 在段里建一把锁，最后 `ngx_slab_init(sp)` 初始化 slab 分配器。这一步是「共享内存」与「slab/锁」的接合点。
-
-**结构定义：**
-
-[src/core/ngx_cycle.h:L29-L36](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.h#L29-L36) — `ngx_shm_zone_t`：`shm`（含 `addr/size/name`）、`init` 回调、`tag`、`data`（模块挂在区上的私有数据指针）、`noreuse`（reload 时是否禁止复用）。`shm_zone->data` 是模块取回自己上下文的把手。
-
-#### 4.1.4 代码实践
-
-**目标**：验证「同名同 tag 的共享区会被去重，不同 tag 同名会冲突」。
-
-**步骤**：
-
-1. 在 `nginx.conf` 的 `http {}` 里写两条 `limit_req_zone`，用**同一个 zone 名**但不同的 key，例如：
-   ```nginx
-   limit_req_zone $binary_remote_addr zone=one:10m rate=1r/s;
-   limit_req_zone $request_uri zone=one:10m rate=1r/s;
-   ```
-2. 运行 `nginx -t`。
-
-**预期现象**：第二条会报类似 `limit_req_zone "one" is already bound to key "$binary_remote_addr"`。这是因为第二次进入 `ngx_shared_memory_add` 时，同名同 tag（都是 `&ngx_http_limit_req_module`）命中了去重分支返回**同一个** `shm_zone`，但 `shm_zone->data` 已被第一次绑定，于是在 [ngx_http_limit_req_module.c:L947-L954](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L947-L954) 报「already bound to key」。
-
-**预期结果**：`nginx -t` 失败，配置不合法。这反向证明了 `ngx_shared_memory_add` 的去重语义。**待本地验证**具体报错文案。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：为什么 `ngx_shared_memory_add` 要传 `tag`，而不是只用 `name` 去重？
-**答**：不同模块可能碰巧用了相同的 zone 名字（如都叫 `cache`）。`tag` 取模块结构体地址（指针唯一），只有「同一个模块 + 同一个名字」才算同一个区；否则报「declared for a different use」，防止两个不相关模块误共享同一块内存导致数据互相踩踏。
-
-**练习 2**：reload 时，共享内存里的限流计数会清零吗？
-**答**：不会。reload 走 [ngx_cycle.c:L473-L488](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L473-L488) 的复用路径：只要新配置里该 zone 的 name/tag/size 都没变，就直接沿用旧 `addr`，`init` 回调会拿到旧 `data` 继续用，计数得以保留。
+记住一条导航规律：**`src/os/unix` 提供「怎么向 OS 要共享内存」，`src/core` 提供「怎么管理和加锁」，`src/http/modules` 等业务层把它们组装成具体功能。**
 
 ---
 
-### 4.2 slab 分配器：在共享内存里做精细化管理
+## 4. 核心概念与源码讲解
+
+本讲拆成四个最小模块，按「先有内存 → 再管内存 → 再给内存加锁 → 读多写少的优化」的顺序推进。
+
+### 4.1 共享内存区：mmap 后端与 ngx_shared_memory_add 注册
+
+#### 4.1.1 概念说明
+
+要把一段内存共享给多个 worker，需要两步，这两步在 nginx 里被刻意分离开：
+
+1. **向 OS 要内存（后端）**：调一次 `mmap(..., MAP_SHARED, ...)`，内核返回一段虚拟地址，并且承诺它对应的物理页在所有进程里都是同一份。这是 `ngx_shm_alloc` 干的事。
+2. **向 nginx 登记（注册）**：nginx 不允许业务模块直接 `mmap`，而是要求每个模块在配置解析阶段，用一个**名字 + 大小 + tag** 去注册一个共享区，登记进 `cycle->shared_memory` 链表。等 `ngx_init_cycle` 走到固定阶段，再统一调用 `ngx_shm_alloc` 真正分配，并回调该模块的 `init` 钩子去初始化区里的内容。这是 `ngx_shared_memory_add` 干的事。
+
+为什么要把「登记」和「分配」分开？因为：
+
+- **reload 友好**：nginx 平滑重载（`nginx -s reload`）时要构造一个全新的 cycle。新 cycle 会逐个比对老 cycle 的 `shared_memory` 链表，若发现「同名、同 tag、同 size」的区，就直接**复用老的物理内存地址**（`shm.addr = oshm_zone.addr`），而不是重新分配。这样限流计数、缓存元数据在 reload 时就不会丢。
+- **配置校验**：同名共享区如果被两个不同 tag 声明，或两次声明的 size 不一致，注册阶段就能直接报错，避免运行时崩。
+
+#### 4.1.2 核心流程
+
+共享区从「配置文本」到「活内存」的生命周期：
+
+```text
+配置阶段： limit_req_zone ... zone=myzone:10m
+            └─ 模块 set 回调调用 ngx_shared_memory_add(name="myzone", size=10m, tag=&模块)
+                 └─ 在 cycle->shared_memory 链表里查重（名字 + tag + size）
+                 └─ 不存在则 push 一个新 ngx_shm_zone_t 条目（此时 addr 仍为 NULL，init 待定）
+
+init_cycle 阶段： 遍历 cycle->shared_memory
+            └─ reload 复用？ → 复用 oshm_zone.addr，调 init(zone, old_data)
+            └─ 否则 ngx_shm_alloc(shm)        ← 真正 mmap
+                 └─ ngx_init_zone_pool(zone)   ← 把 slab_pool_t 放到区首部，初始化它
+                 └─ zone->init(zone, data)     ← 模块钩子：建红黑树、建 hash 等
+```
+
+注意：**配置阶段只登记不分配**；真正的 `mmap` 发生在 `ngx_init_cycle` 里。这与 u3-l2 讲过的「解析只填登记表，物化在解析之后」是同一条原则。
+
+#### 4.1.3 源码精读
+
+**后端：`ngx_shm_alloc` 用 `mmap` 申请共享内存**
+
+nginx 按编译期探测到的 OS 能力，提供三种后端，优先级从高到低：`MAP_ANON`、`/dev/zero`、System V `shmget`。Linux 上几乎总是走第一种：
+
+[src/os/unix/ngx_shmem.c:L14-L28](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.c#L14-L28) — 用 `mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_SHARED, -1, 0)` 申请一段匿名共享内存。关键标志是 `MAP_SHARED`：它告诉内核「这块内存在 fork 出的子进程里要共享同一份物理页」。`MAP_ANON` 表示不关联任何文件，纯内存。失败返回 `MAP_FAILED`。
+
+[src/os/unix/ngx_shmem.c:L31-L38](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.c#L31-L38) — `ngx_shm_free` 用 `munmap` 归还，仅在不正常退出路径才会调到。
+
+这块内存的描述符就是简单的 `ngx_shm_t`：
+
+[src/os/unix/ngx_shmem.h:L16-L22](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/os/unix/ngx_shmem.h#L16-L22) — 只有 `addr`（起始地址）、`size`、`name`、`log`、`exists`（reload 复用时标记地址已存在）五个字段，没有任何锁或分配器——锁和分配器是后面才「装」上去的。
+
+**登记：`ngx_shared_memory_add`**
+
+[src/core/ngx_cycle.c:L1326-L1334](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1326-L1334) — 遍历 `cycle->shared_memory` 链表，按 `name` 字符串精确匹配找老条目（链表遍历用的是 nginx 通用的「分块逐个比」模式）。
+
+[src/core/ngx_cycle.c:L1336-L1356](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1336-L1356) — 找到同名条目后的两道校验：`tag != shm_zone[i].tag` 直接报 EMERG「already declared for a different use」（同名区被不同模块声明）；`size != shm_zone[i].shm.size` 报「size conflicts」。两道都过则返回老条目指针，让同一个区可以被多次引用（例如同一 zone 名被多条 `limit_req` 共用）。
+
+[src/core/ngx_cycle.c:L1359-L1375](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1359-L1375) — 没找到则 `ngx_list_push` 一个新条目，把 `addr=NULL`、`size`、`name`、`init=NULL`、`tag` 都填好，`noreuse=0`。注意此刻**地址是空的、init 钩子也是空的**——init 由调用方在拿到 `shm_zone` 后自己赋值（4.4 节综合实践会看到 limit_req 怎么做）。
+
+> tag 的取值约定：调用方把**自己模块结构体的地址**（如 `&ngx_http_limit_req_module`）当 tag 传进来。因为每个模块结构体在进程里地址唯一，这就天然成了「这个区归谁管」的身份证。
+
+**物化：`ngx_init_cycle` 里真正分配并装 slab**
+
+[src/core/ngx_cycle.c:L493-L503](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L493-L503) — 三步走：`ngx_shm_alloc` 真正 `mmap` → `ngx_init_zone_pool` 在区首部装上 slab 池头并初始化 → 调 `zone->init` 回调让业务模块建它自己的数据结构。reload 复用路径在 [L473-L488](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L473-L488)，那里直接把老 `addr` 赋给新 zone，跳过 `ngx_shm_alloc`。
+
+[src/core/ngx_cycle.c:L1001-L1025](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1001-L1025) — `ngx_init_zone_pool` 的核心几行：把整个共享区的结尾指针 `sp->end = addr + size`、最小分配粒度 `sp->min_shift = 3`（即 8 字节）记下，然后 `ngx_shmtx_create(&sp->mutex, &sp->lock, file)` 给这个池子造一把自旋锁（锁字就嵌在共享区里），最后 `ngx_slab_init(sp)` 把空闲页链表、slots 数组都建好。这一步是「共享内存」与「slab/锁」的接合点。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲眼看到 nginx 真的 `mmap` 出了共享内存区。
+
+1. 编译并启动一个带 `limit_req_zone` 的 nginx（配置见第 5 节综合实践）。
+2. 启动后查 master 进程的内存映射：
+
+```bash
+cat /proc/$(cat logs/nginx.pid)/maps | grep -E 'rw-s' | head -40
+```
+
+3. **需要观察的现象**：输出里能看到若干行权限为 `rw-s`（末尾 `s` = SHARED）的条目，且通常不关联文件名（匿名映射）。
+
+```
+7f2b3c000000-7f2b3c0a00000 rw-s 00000000 00:00 12345
+```
+
+4. **预期结果**：你会看到一块与 `zone` 大小（如 `10m` 即 `0xa00000`）相当的 `rw-s` 匿名段，且 master 和每个 worker 进程的 maps 里都有**相同**的一段（物理页共享）。
+
+> 上述 `/proc/.../maps` 命令依赖 Linux。其它平台或无 `/proc` 的容器内行为不同；若无法运行，明确标注「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `ngx_shared_memory_add` 要用 `tag` 而不光用 `name` 区分共享区？
+
+**答案**：`name` 是用户在配置里起的字符串，可能撞车（两个不同功能恰好都叫 `one`）；`tag` 是模块结构体地址，进程内唯一。`name + tag` 一起才能确定「这块区是哪个模块的哪个命名区」，避免不同模块误共享同一块内存导致数据互相踩踏。
+
+**练习 2**：用户在配置里把一个已存在的 zone 的 size 从 `10m` 改成了 `20m`，然后 `nginx -s reload`，会发生什么？
+
+**答案**：注册阶段 `ngx_shared_memory_add` 走到 [L1348](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L1348) 的 size 校验，发现新声明的 `20m` 与老登记的 `10m` 不一致，报 EMERG「size ... conflicts」，reload 失败、回退到老配置。共享区 size 在 reload 中不可变。
+
+---
+
+### 4.2 slab 分配器：在共享内存上做内存管理
 
 #### 4.2.1 概念说明
 
-4.1 拿到的是一整块（比如 10MB）共享内存。但模块需要的是「一个一个的小对象」：限流要存红黑树节点（几十字节），缓存要存元数据，负载均衡要存 peer 状态。直接把整段当裸内存用会很快碎片化，而且没法回收。
+`mmap` 只给我们一整块「裸」内存，从 `addr` 到 `addr+size`。但 `limit_req` 要频繁地「为一个新 IP 分配一个节点、为过期 IP 释放节点」。如果直接像 `malloc/free` 那样在这块裸内存上管理，既要防碎片又要跨进程加锁，复杂度很高。
 
-**slab 分配器**就是为共享内存量身定做的「内存池」。它的灵感来自经典 SLAB/SLUB 思想，但 nginx 做了大幅简化：
+nginx 的解法是 **slab 分配器**：把一整块共享内存划分成「页」（页大小就是 OS 的 `ngx_pagesize`，通常是 4096），再用一套**分层**策略分配不同大小的对象：
 
-- 把内存按**页**（page，通常是 4096 字节）管理。
-- 每页切成**等大小的对象槽**（chunk），用**位图**记录每个槽是否占用——一页同尺寸对象的集合叫一个 `slot`。
-- 按对象大小分档：**小块（SMALL）**、**精确块（EXACT）**、**大块（BIG）**，三档用不同的位图编码以节省元数据；**超过半页**的请求则直接按整页分配。
+| 层级 | 适用对象大小 | 管理方式 |
+| --- | --- | --- |
+| **page** | 大于 `ngx_slab_max_size`（= `pagesize/2`，即 2048） | 直接分配连续若干整页 |
+| **big** | 介于 exact 和 max 之间 | 一页切成等大块，用 `slab` 字段高位做位图 |
+| **exact** | 恰好 `ngx_slab_exact_size`（= `pagesize / (8*sizeof(uintptr_t))`，64 位下 64 字节） | 一页切成 64 块，`slab` 字段一个位图恰好 64 位 |
+| **small** | 小于 exact（最小 `min_shift=3` 即 8 字节） | 一页切成等小块，**页内开头放一张真位图** |
 
-这样既能高效分配小对象（O(1) 置位），又能避免碎片，还能精确回收——比 u2-l1 的 `ngx_pool_t`（只整体销毁、不单独回收）更适合「长期运行、对象频繁生灭」的共享区。
+slab 的妙处：**固定大小的对象从同一个「页」里切，永不碎片；空闲位用位图记录，分配释放都是 O(1) 位运算**。这跟 u2-l1 的 `ngx_pool_t` 是两套完全不同的设计：
 
-> 与 u2-l1 内存池的区别：`ngx_pool_t` 是**进程私有**的、随请求一次性销毁；slab 池位于**共享内存**，对象会被**单独 free 回收**，且多 worker 并发访问，必须配锁。
+- `ngx_pool_t`：进程私有、小对象 bump 分配、**不支持单对象 free**、整池销毁回收。生命周期简单。
+- `ngx_slab_pool_t`：进程共享、按大小分层、**支持精确 free 单对象**、必须加锁。生命周期复杂、对象频繁增删。
+
+一句话区分：内存池是为了「省事地一次性回收」，slab 是为了「在共享内存里精细地反复分配回收」。
 
 #### 4.2.2 核心流程
 
-slab 池在 `ngx_slab_init` 后的内存布局（自顶向下）：
+`ngx_slab_init` 把一块裸共享内存组织成下图布局（地址从低到高）：
 
-```
-共享段起始 addr
-┌───────────────────────────────┐
-│ ngx_slab_pool_t  (池头:锁/指针) │
-├───────────────────────────────┤
-│ slots[]   n 个槽头(链表头)      │  n = pagesize_shift - min_shift
-├───────────────────────────────┤     min_shift=3 → n=9 (8B..2048B)
-│ stats[]   n 个统计块            │
-├───────────────────────────────┤
-│ pages[]    页描述符数组         │  每个页一个 ngx_slab_page_t
-├───────────────────────────────┤  ← pool->start (页对齐)
-│                               │
-│   实际可分配的页数据区          │  切成 page_size 个页
-│                               │
-└───────────────────────────────┘ ← pool->end = addr + size
-```
-
-一次 `ngx_slab_alloc_locked(pool, size)` 的决策：
-
-```
-size > ngx_slab_max_size (= pagesize/2) ?
-│ yes → ngx_slab_alloc_pages( ceil(size/pagesize) )   【整页分配】
-│ no
-└→ 由 size 算出 shift = ceil(log2 size)，slot = shift - min_shift
-   │
-   ├─ 查 slots[slot] 链表有没有「未满的页」
-   │    有 → 在该页位图里找一个空闲位，置位，返回对应地址
-   │         若置位后页满了 → 把页从 slot 链表摘下
-   │    无 → ngx_slab_alloc_pages(1) 拿一个新页，按 shift 切槽，挂到 slot 链表
-   │
-   └─ 三档位图编码（由 shift 与 exact_shift 比较）：
-        shift < exact_shift → SMALL：对象多，位图放页内首部
-        shift == exact_shift → EXACT：一个字位图恰好管一页
-        shift >  exact_shift → BIG：对象少，位图与 shift 共存于 page->slab
+```text
+区首部 ┌─────────────────────────────┐  ← shm.addr = sp
+       │ ngx_slab_pool_t 头          │   (含 mutex、free 链表头、pages 指针...)
+       ├─────────────────────────────┤
+       │ slots[n] 数组               │   每个 slot 是一个 ngx_slab_page_t 链表头
+       ├─────────────────────────────│    （按对象 shift 分桶，部分满页挂这里）
+       │ stats[n] 数组               │   每桶的统计：total/used/reqs/fails
+       ├─────────────────────────────┤
+       │ pages[pages] 数组           │   每个数据页一个 ngx_slab_page_t 描述符
+       ├─────────────────────────────┤  ← 对齐到 ngx_pagesize
+       │ start                       │
+       │   ┌── 数据页 0 (4096B) ──┐  │
+       │   ├── 数据页 1 ─────────┤  │   真正放对象的数据区
+       │   ├── ...                ──┤  │
+       │   └── 数据页 N ─────────┘  │
+       └─────────────────────────────┘  ← sp->end = addr + size
 ```
 
-几个关键尺寸（64 位、页 4096 字节时）：
+`ngx_slab_alloc_locked(pool, size)` 的分配决策：
 
-- `ngx_slab_max_size = pagesize / 2 = 2048`：超过它就走整页分配。
-- `ngx_slab_exact_size = pagesize / (8 * sizeof(uintptr_t)) = 4096/64 = 64`：这是「一个 `uintptr_t`（64 位）的位图恰好能管完整一页」的对象尺寸。
+```text
+if size > ngx_slab_max_size:                    # 大对象
+    分配 ceil(size/pagesize) 个连续整页           #   ngx_slab_alloc_pages
+else:
+    算 shift = ceil(log2(size))                  # 2 的幂次对齐
+    slot  = shift - min_shift
+    到 slots[slot] 链表里找一个「部分满」的页
+        ├─ 有 → 在该页位图里找一个空位，置位，返回
+        └─ 无 → ngx_slab_alloc_pages(1) 拿一个新页，切成等大块，挂进 slots[slot]
+```
 
-为什么 64 字节是分界？一页 4096 字节切成 64 字节的槽，正好 \(4096/64 = 64\) 个槽，用一个 64 位字（每位代表一个槽）就能完整记录占用情况——这就是 EXACT 档，位图直接存进页描述符的 `slab` 字段，无需额外界外位图。数学上：
+`slots[slot]` 链表只挂「**部分占用**」的页；全满的页会从链表里摘下（`page->next = NULL`），free 一个对象后又会被挂回去。这是 slab 经典的「部分满页缓存」设计，避免每次分配都从头扫描所有页。
+
+为什么 64 字节（`exact_size`）是个分界？一页 4096 字节切成 64 字节的槽，正好 \(4096/64 = 64\) 个槽，一个 64 位的 `uintptr_t`（每位代表一个槽）恰好能管完整一页：
 
 \[
 \text{一页对象数} = \frac{\text{pagesize}}{2^{\text{shift}}},\quad
 \text{一个字位数} = 8 \cdot \text{sizeof(uintptr\_t)}
 \]
 
-当对象数 ≤ 字位数（即 size ≥ exact_size）时位图能塞进一个字；对象数更小（size 更大、shift 更大）也能塞进一个字，于是高 shift 的位图可与 shift 值共享 `slab` 字段（BIG 档）；对象数更多（size 更小、shift 更小）则一个字不够，位图只能放到页内数据区首部（SMALL 档）。
+当对象数等于字位数（size = exact_size）时位图刚好塞满一个字（EXACT 档）；对象更少（size 更大）位图只用低位，剩余位可放 shift 值（BIG 档）；对象更多（size 更小）一个字不够，位图只能放到页内数据区首部（SMALL 档）。
 
 #### 4.2.3 源码精读
 
-**池结构与页描述符：**
+**关键阈值：`ngx_slab_sizes_init`**
 
-[src/core/ngx_slab.h:L34-L59](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.h#L34-L59) — `ngx_slab_pool_t`：`lock`（`ngx_shmtx_sh_t`，锁的共享部分）、`min_size/min_shift`（最小档）、`pages/last/free`（页描述符数组与空闲链表）、`stats`（每档统计）、`pfree`（剩余页数）、`start/end`（数据区起止）、`mutex`（锁的私有部分）、`data`（模块挂在池上的根对象）。
+[src/core/ngx_slab.c:L85-L95](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L85-L95) — 在程序启动早期（早于任何 slab 初始化）算出三个全局阈值：
 
-[src/core/ngx_slab.h:L16-L22](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.h#L16-L22) — `ngx_slab_page_t` 是页描述符，只有三个字段：`slab`（多重含义：空闲页数 / 位图 / shift）、`next`、`prev`（低 2 位被复用为页类型标记，见 `NGX_SLAB_PAGE_MASK`）。
+- `ngx_slab_max_size = ngx_pagesize / 2`：超过它就走整页分配（64 位 Linux 默认 2048）。
+- `ngx_slab_exact_size = ngx_pagesize / (8 * sizeof(uintptr_t))`：64 位下是 `4096/64 = 64` 字节。
+- `ngx_slab_exact_shift`：`exact_size` 对应的移位数（6）。
 
-**关键阈值初始化：**
+这三个值把所有请求大小切成 small / exact / big / page 四段。
 
-[src/core/ngx_slab.c:L85-L95](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L85-L95) — `ngx_slab_sizes_init` 算出 `ngx_slab_max_size = ngx_pagesize/2` 与 `ngx_slab_exact_size`、`ngx_slab_exact_shift`。这三个全局量是 alloc 时分类的标尺。
+**初始化：`ngx_slab_init`**
 
-**池布局初始化：**
+[src/core/ngx_slab.c:L107-L123](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L107-L123) — `min_size = 1 << min_shift`（8 字节）；接着把 `slots[0..n)` 每个初始化成「自指循环链表头」（`next = &slots[i]`），这是 nginx 链表头的通用约定（空链表头指向自己）。
 
-[src/core/ngx_slab.c:L98-L165](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L98-L165) — `ngx_slab_init`：在池头之后依次摆好 `slots[]`（每档一个自环链表头）、`stats[]`、`pages[]`（页描述符数组），再把对齐后的剩余空间作为数据区，初始化 `free` 空闲链表包含全部页。注意它**根据 `pool->end - p` 反算能放多少页**（[L134](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L134)），页描述符本身也要占空间。
+[src/core/ngx_slab.c:L134-L160](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L134-L160) — 用 `size / (pagesize + sizeof(ngx_slab_page_t))` 算出能放多少个数据页（每个数据页配一个描述符），把首个页描述符 `pool->pages[0]` 标记为「连续 `pages` 个空闲页」并挂到 `pool->free` 链表；记下数据区起点 `pool->start`（按 pagesize 对齐）、末页 `pool->last`、空闲页计数 `pool->pfree`。
 
-**带锁包装 vs 不带锁核心：**
+**加锁外壳 vs 核心算法**
 
-[src/core/ngx_slab.c:L168-L180](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L168-L180) — `ngx_slab_alloc` = 加池锁 → `ngx_slab_alloc_locked` → 解锁。对外建议用这个，它自己保证线程/进程安全。
+[src/core/ngx_slab.c:L168-L180](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L168-L180) — `ngx_slab_alloc` 是「加锁外壳」：`shmtx_lock` → `alloc_locked` → `shmtx_unlock`。它把跨进程互斥和分配算法解耦。
 
-[src/core/ngx_slab.c:L183-L417](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L183-L417) — `ngx_slab_alloc_locked` 是真正的分配核心（**调用者必须已持锁**）。它的分类逻辑：
+[src/core/ngx_slab.c:L183-L206](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L183-L206) — `ngx_slab_alloc_locked` 开头的大对象分支：`size > ngx_slab_max_size` 时，按 `ceil(size/pagesize)` 调 `ngx_slab_alloc_pages` 拿连续整页，再用 `ngx_slab_page_addr` 反算出数据区地址。
 
-- [L191-L206](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L191-L206)：`size > ngx_slab_max_size` → `ngx_slab_alloc_pages`，整页分配。
-- [L208-L216](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L208-L216)：由 size 算 `shift` 与 `slot` 索引。
-- [L226-L330](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L226-L330)：优先在 `slots[slot]` 链表的「未满页」里找空位，按 SMALL/EXACT/BIG 三种位图编码分别处理。
-- [L332-L405](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L332-L405)：链表里没有可用页 → `ngx_slab_alloc_pages(pool, 1)` 拿一个新页，按 shift 切槽并挂入 `slots[slot]`。
+[src/core/ngx_slab.c:L208-L224](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L208-L224) — 小对象路径：把 `size` 向上取整到 2 的幂次得 `shift`，桶号 `slot = shift - min_shift`，统计该桶请求数 `stats[slot].reqs++`，然后到 `slots[slot].next` 找部分满页。注意 `slots` 是用宏 `ngx_slab_slots(pool)`（[L44-L45](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L44-L45)）从池首部按偏移算出来的。
 
-**整页分配：**
+`exact` 分支（最易读，建议先读它理解 slab 位图思想）：
 
-[src/core/ngx_slab.c:L677-L730](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L677-L730) — `ngx_slab_alloc_pages`：在 `free` 链表里找第一段 `≥ pages` 的空闲块，需要时把它劈成两段（前半分配、后半留作空闲），给分配出的页打上 `NGX_SLAB_PAGE_START` 标记并记录页数。这是 slab 内部的「物理页分配器」，相当于一个迷你 buddy。
+[src/core/ngx_slab.c:L271-L294](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L271-L294) — 当对象大小恰好是 `exact_size` 时，一页切成 `8*sizeof(uintptr_t)` 块（64 位下 64 块），`page->slab` 这个 `uintptr_t` 字段直接当 64 位位图：第 `i` 位为 0 表示第 `i` 块空闲。分配时找到第一个 0 位、置 1、用 `ngx_slab_page_addr + (i<<shift)` 算出对象地址。当位图变全 1（`NGX_SLAB_BUSY`），就把这一页从 `slots[slot]` 链表摘下（L280-287）。
 
-**为什么 limit_req 用 `_locked` 版本？** 因为它要在「持锁」的临界区里**先查红黑树、再决定分配节点**，整个查询+插入必须原子，所以它自己加锁并调用 `_locked` 变体（见 4.3.3 与综合实践）。
+**整页分配：`ngx_slab_alloc_pages`**
+
+[src/core/ngx_slab.c:L677-L710](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L677-L710) — 在 `pool->free` 链表里找第一个「空闲页数 ≥ 需求」的连续段。若该段比需求大，就把多余部分**重新挂回** free 链表（L686-695，buddy 风格的切分）；把拿到的第一页标 `NGX_SLAB_PAGE_START`，后续页标 `NGX_SLAB_PAGE_BUSY`，并把全局空闲计数 `pool->pfree` 减掉。
+
+[src/core/ngx_slab.c:L733-L810](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L733-L810) — `ngx_slab_free_pages` 释放时还会尝试与**物理相邻**的空闲页「合并」（L753-798），对抗碎片。这是 slab 比朴素位图更复杂也更强大的地方。
+
+> 用 `ngx_slab_free_locked` 释放（[src/core/ngx_slab.c:L461-L475](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L461-L475)）时，先校验指针是否落在 `[pool->start, pool->end]` 区间，再据它属于哪一页的哪一块，反查位图清位。
 
 #### 4.2.4 代码实践
 
-**目标**：用 debug 日志观察 slab 分配的档位与 slot。
+**实践目标**：通过 slab 的 debug 日志，直观看到对象按桶分配。
 
-**步骤**：
+1. 用 `--with-debug` 编译 nginx（见 u1-l2），`error_log` 加 `debug` 级别。
+2. 配置一个 `limit_req_zone $binary_remote_addr zone=one:10m rate=10r/s;`，在某 location 启用 `limit_req zone=one;`。
+3. 用 `ab` 或 `wrk` 从多个不同源 IP 打出数百个请求（简单起见可用局域网多客户端，或容器内多 IP）。
+4. 在 debug 日志里 grep `slab alloc`。
+5. **需要观察的现象**：会反复出现 `ngx_slab.c` 里 `ngx_log_debug2(... "slab alloc: %uz slot: %ui", size, slot)` 这一行（[src/core/ngx_slab.c:L220-L221](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L220-L221)）。
+6. **预期结果**：你会看到所有 `slot` 都集中在同一个值（因为 limit_req 节点大小固定），印证「固定大小对象命中同一桶」。若 zone 配得太小、对象过多，还会看到 `slab alloc failed` 与 `ngx_slab_alloc() failed: no memory`（[src/core/ngx_slab.c:L724-L727](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L724-L727)），这正是「共享内存耗尽」的真相。
 
-1. 用 `--with-debug` 编译 nginx（见 u1-l2）。
-2. 在 `nginx.conf` 顶层写 `error_log /path/to/debug.log debug;`（或 `debug_slab`）。
-3. 配置一个 `limit_req_zone $binary_remote_addr zone=one:10m rate=1r/s;` 并在某 location 启用 `limit_req zone=one;`。
-4. 启动 nginx，用 `ab` 或 `curl` 连发几个请求触发新限流节点分配。
-5. 在 debug.log 里 grep `slab alloc`。
-
-**预期现象**：会看到形如 `slab alloc: 80 slot: 3` 的行（见 [ngx_slab.c:L220-L221](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L220-L221) 的 `ngx_log_debug2(... "slab alloc: %uz slot: %ui", size, slot)`）。`slot` 是档位索引，反映这次分配落在哪一档。
-
-**预期结果**：每次首个来自某 IP 的请求会触发一次 `slab alloc`（新建红黑树节点）；同一 IP 的后续请求命中已有节点则不再分配。**待本地验证**确切的 size/slot 数值（取决于红黑树节点结构大小）。
+> 若没有 debug 版 nginx，本实践可降级为「源码阅读型」：在 L218、L365、L381、L397 处看 `stats[slot].total/reqs` 如何累加，理解每个桶的统计含义。具体 size/slot 数值「待本地验证」。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：申请 100 字节、申请 3000 字节，分别走 slab 的哪条路径？
-**答**：100 字节 < 2048（`ngx_slab_max_size`），走槽位分配：shift = ceil(log2 100) = 7（128 字节档），slot = 7 - 3 = 4。3000 字节 > 2048，走 [L191-L206](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L191-L206) 的整页分配 `ngx_slab_alloc_pages(1)`（3000 字节不到一页，向上取整 1 页）。
 
-**练习 2**：为什么 nginx 要区分 SMALL/EXACT/BIG 三档，而不是统一用一种位图？
-**答**：为了在不同对象尺寸下都节省元数据。EXACT 档把位图塞进页描述符的 `slab` 字段，零额外开销；BIG 档（对象少）位图短，可与 shift 共享 `slab` 字段；只有 SMALL 档（对象太多、位图超过一个字）才在页内数据区放位图。这样每种尺寸都用了最省的编码。
+**答案**：100 字节 < 2048（`ngx_slab_max_size`），走槽位分配：`shift = ceil(log2 100) = 7`（128 字节档），`slot = 7 - 3 = 4`。3000 字节 > 2048，走 [L191-L206](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L191-L206) 的整页分配 `ngx_slab_alloc_pages(1)`（3000 字节不到一页，向上取整 1 页）。
+
+**练习 2**：slab 分配器内部，为什么 `ngx_slab_alloc` 要调 `shmtx_lock`，而 `ngx_slab_alloc_locked` 不调？
+
+**答案**：`alloc` 是给「只分配一次」的外部调用者的便利函数，自动加锁解锁；`alloc_locked` 假定调用者**已经持有锁**，供「一次临界区里要分配/查找/插入多个对象」的场景使用，避免重复加锁开销。`limit_req` 在 handler 里就是先 `shmtx_lock`，再在临界区内连查带 `alloc_locked`，最后 `unlock`。
 
 ---
 
-### 4.3 shmtx 自旋锁：保护共享数据的互斥
+### 4.3 进程间锁：shmtx 自旋锁
 
 #### 4.3.1 概念说明
 
-有了共享内存和 slab，多个 worker 会**同时**来读写。例如两个 worker 同时给同一个 IP 的限流节点 `ngx_slab_alloc_locked` 插入，slab 的位图/链表会立刻被踩坏。必须有**互斥锁**。
+光有共享内存还不够。设想 worker 0 和 worker 3 同时给同一个红黑树插入节点——两个进程同时改同一组指针，数据结构瞬间被写坏。共享数据必须**加锁**。
 
-`ngx_shmtx_t`（shared mutex）是 nginx 的进程间自旋锁，专为共享内存设计：
+但这里的锁有个硬约束：它保护的资源在共享内存里，被多个进程争用，而 `pthread_mutex` 是线程级的（同进程内），派不上用场。nginx 需要一把**进程级**的锁。
 
-- 锁变量本身放在**共享内存**里（`ngx_shmtx_sh_t`，仅一个原子字 `lock`），所以所有进程看到同一把锁。
-- 用 **CAS 原子指令**抢占：谁先把 `lock` 从 0 改成自己的 pid，谁就拿到锁。
-- 抢不到就**自旋等待**（CPU 空转一段时间再重试），自旋许久仍抢不到再退化成 `sched_yield()` 让出 CPU，或（若启用 POSIX 信号量）`sem_wait` 睡眠。
-- 锁值存的是 **pid 而非 1**，于是 `ngx_shmtx_force_unlock` 能在持有者进程崩溃后**按 pid 强制释放**，避免死锁。
+nginx 的 `shmtx`（shared mutex）用一条**原子变量**实现自旋锁：
 
-它有两个最常用的用法：**(a) 给 slab 池当 `mutex`**（保护分配/释放），**(b) `accept_mutex`** 防止多 worker 同时 accept 造成惊群（见 u5-l5）。
+- 锁字 `*mtx->lock` 是一个 `ngx_atomic_t`，存在共享内存里（所有进程都能读写）。
+- **0 表示空闲**，**非 0（实际是持有者的 `ngx_pid`）表示被占用**。
+- 抢锁就是用原子 CAS（compare-and-swap）把 0 改成自己的 pid；成功就持有，失败就说明别人先拿了。
+
+shmtx 还有两层优化：
+
+1. **自旋退避**：抢锁失败时不立刻睡觉，而是「自旋」——CPU 空转一小段再试，因为临界区通常极短，对方马上就释放了。自旋量按 `1, 2, 4, 8, ...` 指数增长，给一点退避；中途插 `ngx_cpu_pause()` 降低功耗、减少总线争用。仅当 `ngx_ncpu > 1`（多核）才自旋，单核自旋毫无意义（持有者没机会运行）。
+2. **信号量回退**：自旋到底还没拿到？若编译期启用了 `NGX_HAVE_POSIX_SEM`，就 `sem_wait` 真正睡觉，由释放者 `sem_post` 唤醒；否则退化为 `sched_yield()` 让出 CPU。睡觉路径用 `mtx->wait` 计数器记录有多少人在等，释放者据此决定要不要 `sem_post`。
 
 #### 4.3.2 核心流程
 
-`ngx_shmtx_lock` 的等待策略（核心是「先忙等、后让出/睡眠」）：
+`ngx_shmtx_trylock`（非阻塞试锁，accept 互斥用）：
 
+```text
+return (*lock == 0 且 CAS(lock, 0, pid) 成功)
+# 抢到返回 1，没抢到返回 0，绝不等待
 ```
-for ( ;; ) {
-    if (*lock == 0 && CAS(lock, 0, my_pid)) return;   // 抢到
-    if (多核) {
-        for (n = 1; n < spin(=2048); n <<= 1) {       // 指数退避自旋
-            for (i = 0; i < n; i++) cpu_pause();      // 1,2,4,...1024 次 pause
-            if (*lock == 0 && CAS(lock,0,my_pid)) return;
-        }
-    }
-    if (有信号量) { wait++; sem_wait(); continue; }    // 睡眠等唤醒
-    sched_yield();                                    // 让出 CPU
+
+`ngx_shmtx_lock`（阻塞锁，共享数据保护用）：
+
+```text
+for (;;) {
+    if CAS(lock, 0, pid) 成功: return      # 0. 直接抢
+    if 多核:
+        for n = 1, 2, 4, ... < spin:        # 1. 自旋退避（总次数约 2048）
+            pause n 次
+            if CAS 成功: return
+    if 有信号量:                             # 2. 睡觉等唤醒
+        wait++ ; 若此时抢到则 wait-- 返回
+        sem_wait(sem)   # 阻塞，直到 unlock 唤醒
+        continue
+    else:
+        sched_yield()   # 退化：让出 CPU 后再循环
 }
 ```
 
-指数退避的总自旋次数约为 \( \sum_{n=1}^{1024} n \approx 2 \times 1024 = 2048 \) 次 `pause`，与 `mtx->spin = 2048` 对应。`pause`（`ngx_cpu_pause`）是一条提示 CPU「我在等内存」的指令，降低功耗并减少流水线争用。
+指数退避的总自旋次数约为 \(\sum_{k=0}^{10} 2^k \approx 2048\) 次 `pause`，与 `mtx->spin = 2048` 对应。`ngx_shmtx_unlock` 把锁字 CAS 回 0，若有信号量则 `sem_post` 唤醒一个等待者。
 
-解锁时 `ngx_shmtx_unlock` 把 `lock` 从 pid CAS 回 0，若有信号量则 `sem_post` 唤醒一个等待者（`ngx_shmtx_wakeup`）。
+注意一个关键设计：**锁字里存的是持有者 pid**，而不是简单的 1。这样 `ngx_shmtx_force_unlock(mtx, pid)` 能在某个 worker 崩溃后，由其它进程用它记录的 pid 强制释放这把「孤儿锁」。
 
 #### 4.3.3 源码精读
 
-**锁结构（共享部分 + 私有部分分离）：**
+**两段式结构：共享的锁字 vs 每进程的句柄**
 
-[src/core/ngx_shmtx.h:L16-L21](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.h#L16-L21) — `ngx_shmtx_sh_t`：放在共享内存里的部分，只有原子字 `lock`（启用信号量时还有 `wait`）。这是「锁本身」。
+[src/core/ngx_shmtx.h:L16-L37](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.h#L16-L37) — 这是理解 shmtx 最重要的地方：
 
-[src/core/ngx_shmtx.h:L24-L37](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.h#L24-L37) — `ngx_shmtx_t`：每个进程私有的部分，`lock` 是指向共享 `lock` 的指针、`spin` 是自旋次数、（可选）`sem` 信号量。`shmtx_sh_t` 与 `shmtx_t` 的分离，正是「共享数据 vs 私有数据」的清晰划分。
+- `ngx_shmtx_sh_t`（L16-21）：**放在共享内存里**的部分，只有一个 `lock` 原子字（有信号量时加一个 `wait` 计数）。
+- `ngx_shmtx_t`（L24-37）：**每进程的句柄**，含一个 `lock` 指针（指向共享内存里那个字）、`spin` 自旋次数、可选的 `sem`/`wait`/`semaphore`。
 
-**trylock / lock / unlock：**
+> 在 slab 池里，`ngx_slab_pool_t` 把这俩都嵌进自己（`ngx_shmtx_sh_t lock` 在 [slab.h L35](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.h#L35)、`ngx_shmtx_t mutex` 在 [slab.h L50](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.h#L50)），而整个池都在共享内存里，所以 `mutex.lock` 指针指向的锁字、以及 `mutex.sem` 信号量，对所有 worker 都是同一份。
 
-[src/core/ngx_shmtx.c:L62-L66](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L62-L66) — `ngx_shmtx_trylock`：一次 CAS 尝试，`*lock == 0 && ngx_atomic_cmp_set(lock, 0, ngx_pid)`。不等待，拿不到立即返回假。`accept_mutex` 用它（拿不到就本轮不 accept）。
+**创建：`ngx_shmtx_create`**
 
-[src/core/ngx_shmtx.c:L69-L133](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_slab.c#L69-L133) — `ngx_shmtx_lock`：自旋 + 退避 + 信号量/`sched_yield` 的完整等待循环，逻辑同 4.3.2 伪代码。`mtx->spin` 默认在 `ngx_shmtx_create` 里设为 2048（[L27](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L27)）。
+[src/core/ngx_shmtx.c:L18-L43](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L18-L43) — 让 `mtx->lock` 指向共享区里的锁字（`mtx->lock = &addr->lock`）；设默认自旋次数 `mtx->spin = 2048`。一个特殊值：若调用方先把 `mtx->spin` 设成 `(ngx_uint_t)-1`，函数直接返回——这表示「**这是一把只用 trylock 的锁，不要自旋也不要信号量**」。accept 互斥锁就用了这个技巧。
 
-> 注：上条链接指向 `ngx_shmtx.c` 同名行段（`ngx_shmtx_lock` 实际定义在 `src/core/ngx_shmtx.c` 第 69–133 行）。
+**试锁：`ngx_shmtx_trylock`**
 
-[src/core/ngx_shmtx.c:L136-L146](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L136-L146) — `ngx_shmtx_unlock`：CAS 把 `lock` 从 `ngx_pid` 改回 0，成功则唤醒一个等待者。
+[src/core/ngx_shmtx.c:L62-L66](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L62-L66) — 一行核心：`*mtx->lock == 0 && ngx_atomic_cmp_set(mtx->lock, 0, ngx_pid)`。注意这是「短路 &&」：先读到 0 才尝试 CAS，避免无谓的总线 CAS 风暴；CAS 把 0 改成自己的 pid。
 
-[src/core/ngx_shmtx.c:L149-L161](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L149-L161) — `ngx_shmtx_force_unlock(mtx, pid)`：按指定 pid 强制释放（只有当 `*lock == pid` 才 CAS 回 0）。用于持有锁的 worker 异常退出后的清理。
+**阻塞锁：`ngx_shmtx_lock`（全篇精华）**
 
-[src/core/ngx_shmtx.c:L164-L196](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L164-L196) — `ngx_shmtx_wakeup`：原子地把 `wait` 计数减一并 `sem_post`，唤醒一个睡眠在 `sem_wait` 的等待者，避免「锁释放了但没人被叫醒」。
+[src/core/ngx_shmtx.c:L76-L96](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L76-L96) — 先无脑试一次 CAS（L78）；失败后若多核，进入指数退避自旋：`for (n = 1; n < mtx->spin; n <<= 1)` 把自旋轮数翻倍，每轮 `ngx_cpu_pause()` n 次（L86-88）再试 CAS。
 
-**用法之一：slab 池的 mutex。** 4.1.3 已看到 `ngx_init_zone_pool` 调 `ngx_shmtx_create(&sp->mutex, &sp->lock, file)`，于是每个共享 slab 池自带一把锁；`ngx_slab_alloc`/`ngx_slab_free` 自动加解锁。
+[src/core/ngx_shmtx.c:L98-L131](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L98-L131) — 自旋到底还没拿到，走睡觉路径：`wait` 计数 +1，再抢一次（防「刚要睡对方就释放」的竞态，L103-105）；真抢不到才 `sem_wait` 阻塞。无信号量支持时退化 `sched_yield()`（L131）。
 
-**用法之二：limit_req 在更大临界区里手动加锁。** 因为它要「查树 + 分配 + 插入 + 计费」一气呵成，不能让 `ngx_slab_alloc` 自己的锁只保护分配那一瞬间，所以它直接持池锁并调用 `_locked`：
+**释放与唤醒：`ngx_shmtx_unlock` + `ngx_shmtx_wakeup`**
 
-[src/http/modules/ngx_http_limit_req_module.c:L246-L251](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L246-L251) — `ngx_shmtx_lock(&ctx->shpool->mutex)` → `ngx_http_limit_req_lookup(...)`（内部 [L494](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L494) 用 `ngx_slab_alloc_locked` 分配红黑树节点）→ `ngx_shmtx_unlock`。整段是原子临界区。
+[src/core/ngx_shmtx.c:L136-L146](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L136-L146) — `unlock` 用 `CAS(lock, ngx_pid, 0)` 把锁字改回 0（**只有持有者能改成功**，因为 CAS 要求旧值是自己的 pid）。成功后调 `wakeup`。
 
-**用法之三：accept_mutex 防惊群。**
+[src/core/ngx_shmtx.c:L149-L161](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L149-L161) — `force_unlock(mtx, pid)`：只有当 `*lock == pid` 才 CAS 回 0。用于持有锁的 worker 异常退出后的清理。
 
-[src/event/ngx_event.c:L580-L588](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/event/ngx_event.c#L580-L588) — nginx 启动时在一段专用共享内存上 `ngx_shmtx_create(&ngx_accept_mutex, ...)` 建立全局 accept 锁，`spin = (ngx_uint_t) -1`（[L581](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/event/ngx_event.c#L581)）表示**纯 trylock、不自旋**——accept 锁只该被一个 worker 短暂持有，抢不到就干活去。
-
-[src/event/ngx_event_accept.c:L345-L379](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/event/ngx_event_accept.c#L345-L379) — `ngx_trylock_accept_mutex`：`ngx_shmtx_trylock` 抢锁，抢到则 `ngx_enable_accept_events`（把监听 fd 加入 epoll），抢不到则若自己之前持有过就 `ngx_disable_accept_events`。这样任意时刻只有一个 worker 在 accept，杜绝惊群。（详见 u5-l5。）
+[src/core/ngx_shmtx.c:L164-L196](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L164-L196) — `wakeup` 用 CAS 把 `wait` 减 1（只有确实有人在等时才减），然后 `sem_post` 唤醒一个睡眠者。这种「CAS 减计数 + 有条件 post」避免了「虚假唤醒没人等」的浪费。
 
 #### 4.3.4 代码实践
 
-**目标**：感受 shmtx 在 slab 分配中的串行化效果。
+**实践目标**：观察 accept 互斥锁与共享数据锁的不同加锁姿态。
 
-**步骤**：
+1. 用 `--with-debug` 编译 nginx，配置 `worker_processes 4;` 和一个 `limit_req_zone`，`error_log` 加 `debug`。
+2. 用压力工具并发打请求。
+3. **需要观察的现象**：日志里会同时出现两类 shmtx 调试行：
+   - `accept mutex locked` / `accept mutex lock failed`（来自 [ngx_event_accept.c:L349-L368](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/event/ngx_event_accept.c#L349-L368)，trylock 姿态）。
+   - `shmtx lock` / `shmtx unlock`（来自 [ngx_shmtx.c:L74](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L74) 与 [L140](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L140)，阻塞锁姿态，由 limit_req 等共享数据操作触发）。
+4. **预期结果**：你能明显看到前者只「试一次就走」（成功或失败都立刻返回，从不等待），后者会成对出现（lock 后必然有 unlock）。这正是 trylock 与 lock 两种使用模式的区别。
 
-1. 配置 `limit_req_zone $binary_remote_addr zone=one:10m rate=100r/s;`（给一个较宽的速率，方便压测）。
-2. `worker_processes 4;`。
-3. 用 `ab -n 100000 -c 50` 高并发压测。
-4. 同时在另一终端用 `perf top -p $(cat logs/nginx.pid)` 或 `pidstat -t 1` 观察 worker。
-
-**预期现象**：高并发下，多个 worker 争抢 `ctx->shpool->mutex`，部分时间会出现在 `ngx_shmtx_lock`/`ngx_cpu_pause` 附近（自旋）。这正是锁在工作的证据。
-
-**预期结果**：能看到 worker 在 shmtx 自旋路径上消耗少量 CPU；若把 zone 调到极小（如 `1m`）加剧争用，现象更明显。**待本地验证**（需要 perf 工具权限）。
+> 无 debug 版时，可改为「源码阅读型」：对比 `ngx_shmtx_trylock`（L62）与 `ngx_shmtx_lock`（L69）的循环结构，说明为何前者没有 for 循环。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `ngx_shmtx_lock` 存的是 `ngx_pid` 而不是固定值 1？
-**答**：为了支持 `ngx_shmtx_force_unlock(mtx, pid)`。当某 worker 持锁期间被异常终止，锁里残留它的 pid；master/其他进程发现后可按该 pid 强制 CAS 回 0，释放这把孤儿锁。若存固定值 1，就无法判断该不该释放。
+**练习 1**：`ngx_shmtx_lock` 里，为什么在 `sem_wait` 之前要先 `wait++`，然后**再**试一次 CAS 抢锁？
 
-**练习 2**：accept_mutex 用 `trylock`（不自旋），而 slab 的 mutex 用 `lock`（自旋 2048）。为什么策略不同？
-**答**：accept 锁的目的是「选一个 worker 去 accept」，抢不到的 worker 应当**立即去处理已有连接**，自旋纯属浪费；而 slab 锁保护的临界区很短，且申请内存的 worker **必须**等到内存才能继续，自旋一会儿比让出 CPU（触发重新调度、缓存失效）更高效。
+**答案**：在「`wait++`」与「`sem_wait`」之间存在窗口——对方可能恰在此刻释放锁。如果不重试就直接睡，会错过这次释放、可能睡死（释放者 `sem_post` 只在 `wait>0` 时才发，但若释放发生在你 `wait++` 之前、对方看到 `wait==0` 就没 post）。先增计数再抢一次，抢到就 `wait--` 返回，没抢到才安全入睡。
+
+**练习 2**：accept 互斥锁为什么把 `spin` 设成 `-1`，而不是像 slab 锁那样用 2048？
+
+**答案**：accept 锁用 `trylock`——抢不到就**立刻**放弃本轮 accept、去处理已有连接，绝不等待。设 `spin=-1` 既让 `ngx_shmtx_create` 跳过信号量初始化（accept 锁不需要睡觉），也作为「禁止自旋/禁止阻塞」的语义标记。worker 不应为了抢 accept 权而空转 CPU 或睡觉，那会违背 accept 互斥「轻量、非阻塞」的设计初衷。
 
 ---
 
-### 4.4 rwlock 读写锁：读多写少的共享状态
+### 4.4 读写锁 rwlock：读多写少的优化
 
 #### 4.4.1 概念说明
 
-`ngx_shmtx_t` 是**互斥锁**：任何时刻只有一个进程能进入，不管是读还是写。但有些共享数据**读远多于写**——比如 upstream 的 peer 状态：每来一个请求都要「读」peer 列表选一台，只有偶尔的健康检查失败才「写」标记宕机。互斥锁会让大量并发的读互相阻塞，浪费多核。
+自旋锁是「互斥」的——无论读还是写都串行。但有些共享数据**读远多于写**（例如 upstream 的 peer 状态：每次请求都要读，只在 peer 故障时才写）。这种场景下，让多个读并发、只对写互斥，能显著降低争用。这就是**读写锁**（rwlock）。
 
-`ngx_rwlock_t`（read/write lock）解决这个问题：
+nginx 的 `ngx_rwlock` 同样用一条原子变量 `*lock` 巧妙编码两种模式：
 
-- **多个读可并发**：只要没人写，任意数量的进程可同时持有读锁。
-- **写独占**：有人写时，其他读和写都等待；写也要等所有读结束。
+- `*lock == 0`：空闲。
+- `*lock == NGX_RWLOCK_WLOCK`（即 `(ngx_atomic_uint_t)-1`，全 1）：被**写锁**持有。
+- `*lock == 正整数 n`：被 **n 个读者**同时持有。
 
-nginx 的 rwlock 同样基于一个共享原子字，靠 CAS 自己实现，无系统调用，适合在共享内存里保护高频读的状态。
+于是：「想读」只要确认当前不是写锁，就把 `*lock` 加 1；「想写」必须确认 `*lock == 0`，才 CAS 改成全 1。读者计数让多读并发，写者独占。
+
+> 读写锁在 nginx 里目前主要服务于 `NGX_HTTP_UPSTREAM_ZONE` / `NGX_STREAM_UPSTREAM_ZONE`（upstream 共享 peer 状态）。普通 HTTP 请求路径上用得更多的是 shmtx。`ngx_rwlock.c` 末尾的编译断言（[L111-L115](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L111-L115)）也印证了这一点——只有开了 upstream zone 才强制要求原子操作。
 
 #### 4.4.2 核心流程
 
-用一个原子字 `lock` 编码三种状态：
+**写锁** `ngx_rwlock_wlock`：
 
-- `lock == 0`：空闲。
-- `lock == NGX_RWLOCK_WLOCK`（即全 1，`(ngx_atomic_uint_t)-1`）：被写锁持有。
-- `lock == 正数 N`：被 N 个读者并发持有。
-
-加锁/解锁逻辑：
-
-```
-wlock: CAS(lock, 0, WLOCK)            // 必须从 0 一步抢成全 1
-rlock: 若 lock != WLOCK，CAS(lock, r, r+1)   // 只在无写时把读者数 +1
-unlock: 若原值是 WLOCK → CAS 回 0；否则读者数 -1
-downgrade: 把写锁(WLOCK)直接降级成「1 个读者」(置 1)
+```text
+for (;;):
+    if *lock==0 且 CAS(lock, 0, WLOCK): return   # 抢到
+    if 多核: 指数退避自旋
+    sched_yield()                                 # 让出 CPU 再循环
 ```
 
-读写都带与 shmtx 同款的指数退避自旋（`NGX_RWLOCK_SPIN = 2048`），多核下先忙等、再 `sched_yield`。
+**读锁** `ngx_rwlock_rlock`：
+
+```text
+for (;;):
+    readers = *lock
+    if readers != WLOCK 且 CAS(lock, readers, readers+1): return  # 抢到（加一个读者）
+    if 多核: 指数退避自旋（每次重新读 readers）
+    sched_yield()
+```
+
+**解锁** `ngx_rwlock_unlock`：
+
+```text
+if *lock == WLOCK:  CAS(lock, WLOCK, 0)     # 是写锁，直接清零
+else:               fetch_add(lock, -1)      # 是读锁，读者数减 1
+```
+
+注意读锁用 `ngx_atomic_fetch_add` 原子减 1，因为可能多个读者并发释放。
 
 #### 4.4.3 源码精读
 
-[src/core/ngx_rwlock.c:L15-L16](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L15-L16) — `NGX_RWLOCK_SPIN = 2048`、`NGX_RWLOCK_WLOCK = (ngx_atomic_uint_t)-1`（写锁标记）。
+**编码常量**
 
-[src/core/ngx_rwlock.c:L19-L48](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L19-L48) — `ngx_rwlock_wlock`：循环尝试 `*lock == 0 && CAS(lock, 0, WLOCK)`，多核时指数退避自旋，否则 `sched_yield`。
+[src/core/ngx_rwlock.c:L15-L16](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L15-L16) — `NGX_RWLOCK_SPIN = 2048`（与 shmtx 同量级）、`NGX_RWLOCK_WLOCK = (ngx_atomic_uint_t)-1`（写锁标记，全 1）。
 
-[src/core/ngx_rwlock.c:L51-L86](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L51-L86) — `ngx_rwlock_rlock`：读取当前 `readers`，只要 `readers != WLOCK`（即无写锁），就 `CAS(lock, readers, readers+1)` 成功；否则自旋重试。多个读者可同时把计数往上加。
+**写锁与读锁**
 
-[src/core/ngx_rwlock.c:L89-L97](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L89-L97) — `ngx_rwlock_unlock`：若原值是 `WLOCK`（写锁）则 CAS 回 0；否则 `fetch_add(lock, -1)` 把读者数减一。
+[src/core/ngx_rwlock.c:L19-L48](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L19-L48) — `wlock`：只有 `*lock` 恰为 0 才 CAS 成 WLOCK；多核下指数退避自旋（结构与 shmtx 如出一辙），单核或自旋耗尽则 `sched_yield`。
 
-[src/core/ngx_rwlock.c:L100-L106](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L100-L106) — `ngx_rwlock_downgrade`：把写锁直接写成 1（降为「一个读者」），用于「写完后想继续读、但允许其他读者进来」的场景，避免先释放写锁再加读锁的空窗。
+[src/core/ngx_rwlock.c:L51-L86](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L51-L86) — `rlock`：先读 `readers = *lock`；只要它不是 WLOCK（即没有写者），就 CAS 把它加 1。多个读者可并发 +1，故读不互斥；但有写者（WLOCK）时读者必须等。
 
-**典型用户**：当配置了 `zone` 指令的 upstream（`ngx_http_upstream_zone_module`）把 peer 状态放进共享内存、供多 worker 共享时，读 peer 列表用 rlock、修改 peer 状态用 wlock/downgrade。文件末尾的编译断言（[L111-L115](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L111-L115)）说明 rwlock 仅在启用 upstream zone 时被需要——没有原子 CAS 就直接 `#error`。
+**解锁与降级**
+
+[src/core/ngx_rwlock.c:L89-L97](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L89-L97) — `unlock` 按当前锁值分支：写锁用 CAS 清零，读锁用 `fetch_add(-1)`。
+
+[src/core/ngx_rwlock.c:L100-L106](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L100-L106) — `downgrade`：把已持有的**写锁直接降级为读锁**（`*lock = 1`，即一个读者）。这避免「先 unlock 写锁、再 rlock」之间其它写者插队的窗口，常用于「写完想接着读」的情景。
 
 #### 4.4.4 代码实践
 
-**目标**：对比 rwlock 与 shmtx 在读多场景下的语义差异（源码阅读型）。
+**实践目标**：在 upstream zone 场景下定位 rwlock 的真实调用方（源码阅读型）。
 
-**步骤**：
+1. 在 nginx 源码里搜索 rwlock 的调用点：
 
-1. 打开 [src/core/ngx_rwlock.c:L51-L86](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_rwlock.c#L51-L86)（`rlock`）与 [src/core/ngx_shmtx.c:L62-L66](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_shmtx.c#L62-L66)（`trylock`）。
-2. 想象 4 个 worker 同时「读」同一份 peer 状态：
-   - 用 shmtx：第 1 个拿到，其余 3 个自旋等待，串行进入。
-   - 用 rlock：4 个都看到 `readers` 非负，各自 `CAS(+1)` 成功，**4 个并发读**。
+```text
+grep -rn "ngx_rwlock_" src/http/modules/ngx_http_upstream_zone_module.c \
+                      src/stream/ngx_stream_upstream_zone_module.c
+```
 
-**预期结果**：在只读路径上，rwlock 的并发度是 shmtx 的 N 倍（N = worker 数）。这就是 upstream zone 等读多写少场景选择 rwlock 的原因。
+2. **需要观察的现象**：会看到 upstream zone 模块在更新/读取共享 peer 链表时，分别用 `ngx_rwlock_wlock` / `ngx_rwlock_rlock` 保护。
+3. **预期结果**：你能说清楚「配置了 `zone` 指令的 upstream，其 peer 状态被多 worker 共享，读（选 peer）用读锁、写（标记 peer 故障）用写锁」。
+4. 若未启用 upstream zone，本实践为纯源码阅读：直接阅读上述两个 zone 模块，理解 rwlock 把「读多写少」的 peer 状态争用降到最低。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`ngx_rwlock_rlock` 里为什么是「读取 readers → CAS(readers, readers+1)」两步，而不是直接 `fetch_add(lock, 1)`？
-**答**：必须先判断 `readers != WLOCK`（没有写者）。若直接 +1，可能在写者持有（`lock == WLOCK`）时把计数加乱，破坏写锁标记。两步 CAS 保证了「只在确认无写锁」的前提下才增加读者，CAS 失败（说明中间状态变了）就重读重试。
+**练习 1**：`ngx_rwlock_rlock` 里，为什么 CAS 的「期望值」是刚才读到的 `readers`，而不是固定值 0？
 
-**练习 2**：`ngx_rwlock_downgrade` 有什么用？
-**答**：持有写锁的进程写完后，若想**继续读**这块数据，可以先 `downgrade` 把写锁（`WLOCK`）直接改成「一个读者」（置 1）。这样它自己继续读，同时**立即放行其他等待的读者**，避免「先 unlock 写锁、再 rlock」之间被别人抢去写锁的空窗，减少抖动。
+**答案**：因为读锁允许并发——可能同时有多个读者，`*lock` 是「当前读者数」。要把读者数 +1，必须用「我读到的那个数」作期望值做 CAS，确保从「我读到」到「我 CAS」之间没有别人（包括写者或别的读者增减）改动它。写者期望值固定为 0；读者期望值随当前读者数变化。
+
+**练习 2**：`ngx_rwlock_downgrade` 把 `*lock` 从 WLOCK 直接写成 1，而不是先 CAS。这样安全吗？
+
+**答案**：安全。能调 `downgrade` 的前提是当前进程持有写锁，而写锁是独占的——此刻没有任何其它读者或写者，`*lock` 必定就是 WLOCK，普通赋值即可，无需 CAS。降级后变成「1 个读者」，新读者可立即加入。
 
 ---
 
-## 5. 综合实践：画出 limit_req_zone 的数据存放位置
+## 5. 综合实践：limit_req_zone 把四件套串起来
 
-本任务贯穿本讲三大模块（共享内存 + slab + shmtx），把 `limit_req_zone` 这条指令的数据「物理位置」与「保护机制」彻底讲清楚。
+本讲的 practice task 是：**说明 `limit_req_zone` 这类需要跨 worker 共享状态的指令，是如何借助「共享内存 + slab 分配器 + 进程间锁 + 红黑树」实现的，并画出数据存放的位置。**
 
-### 配置
+### 5.1 配置
 
 ```nginx
 http {
-    limit_req_zone $binary_remote_addr zone=one:10m rate=10r/s;
-
+    limit_req_zone $binary_remote_addr zone=myzone:10m rate=10r/s;
     server {
         listen 80;
         location / {
-            limit_req zone=one burst=20;
+            limit_req zone=myzone burst=20;
             proxy_pass http://backend;
         }
     }
 }
 ```
 
-### 任务
+### 5.2 四件套各自的职责
 
-请在一张图上标出：10MB 共享区是怎么被切分的？红黑树根、每个限流节点、锁分别放在哪里？请求来时谁加锁、谁分配？把下面的骨架补全并对着源码核对。
+下面四步，正好对应本讲四个模块（共享内存 / slab / shmtx）加上 u2-l3 的红黑树。请逐条对照源码理解。
 
-### 数据存放位置图（参考答案）
+**第 1 步：注册共享区（ngx_shared_memory_add）**
 
+[src/http/modules/ngx_http_limit_req_module.c:L941-L957](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L941-L957) — `limit_req_zone` 指令的 set 回调算出 `size=10m`（`10m` 经 `ngx_parse_size` 解析，见 u2-l2），调 `ngx_shared_memory_add(cf, &name="myzone", 10m, &ngx_http_limit_req_module)` 登记一个区；再把 `shm_zone->init = ngx_http_limit_req_init_zone` 钩子挂上。此刻区还没分配，只是登记。
+
+**第 2 步：物化 + 装 slab（ngx_init_cycle → ngx_init_zone_pool）**
+
+如 4.1 所述，`ngx_init_cycle` 走到固定阶段会 `ngx_shm_alloc`（mmap 出 10m）→ `ngx_init_zone_pool`（在区首部装 `ngx_slab_pool_t`、初始化自旋锁、初始化空闲页链表）→ 调 `init` 钩子。
+
+**第 3 步：用 slab 在共享区里建红黑树（init 钩子）**
+
+[src/http/modules/ngx_http_limit_req_module.c:L728-L746](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L728-L746) — `ngx_http_limit_req_init_zone` 里：
+
+- `ctx->shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;` —— 把区首部直接当 slab 池句柄。
+- `ctx->sh = ngx_slab_alloc(ctx->shpool, sizeof(...shctx_t));` —— 从 slab 池里**分配**一块放共享上下文（含红黑树根、sentinel、LRU 队列）。
+- `ngx_rbtree_init(&ctx->sh->rbtree, ...)`、`ngx_queue_init(&ctx->sh->queue)` —— 初始化红黑树与过期队列。
+
+注意：连 `log_ctx`（[L750](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L750)）都是从 slab 池里 `ngx_slab_alloc` 出来的——所有跨 worker 共享的结构，一律来自 slab。
+
+**第 4 步：请求时加锁 → 查/插红黑树（shmtx + slab_alloc_locked）**
+
+[src/http/modules/ngx_http_limit_req_module.c:L246-L251](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L246-L251) — 每个请求到来时，handler 先 `ngx_shmtx_lock(&ctx->shpool->mutex)` 进入临界区，再调 `ngx_http_limit_req_lookup` 在共享红黑树里查这个 IP 的上次访问时间。
+
+[src/http/modules/ngx_http_limit_req_module.c:L494-L516](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L494-L516) — 新 IP 没找到？用 `ngx_slab_alloc_locked` 在 slab 池里分配一个节点（**因为已在临界区，用 _locked 版本避免重锁**），`ngx_rbtree_insert` 插入共享红黑树，并挂进 LRU 队列。
+
+[src/http/modules/ngx_http_limit_req_module.c:L688-L693](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L688-L693) — 过期节点用 `ngx_slab_free_locked` 释放回 slab 池。
+
+### 5.3 数据存放位置图
+
+把上面的链路画成一张「内存地图」，这是本综合实践要求你交的「图」：
+
+```text
+                一块 10m 的共享内存（mmap MAP_SHARED，所有 worker 同一物理页）
+  shm.addr ────┬───────────────────────────────────────────────────────────────┐
+               │ ngx_slab_pool_t  sp                                          │
+               │   ├─ lock (ngx_shmtx_sh_t) ──┐                               │
+               │   │     .lock ───────────────┼──→ 锁字 (ngx_atomic_t, CAS)   │ ← 4.3 shmtx
+               │   ├─ mutex (ngx_shmtx_t)     │                               │
+               │   ├─ free / pages[] / slots[]/ stats[]  (slab 元数据)        │ ← 4.2 slab
+               │   ├─ start ──┐                                               │
+               │   └─ data ───┼──→ ctx->sh  (ngx_slab_alloc 分配出来)         │
+               ├──────────────┼──────────────────────────────────────────────┤
+               │ 数据区 start │                                               │
+               │   ┌──────────┴──────────┐  ← slab_alloc 分配出的节点        │
+               │   │ ngx_rbtree_node_t   │      （每个 IP 一个，挂在红黑树）  │
+               │   │   + limit_req 数据  │                                    │
+               │   ├─────────────────────┤                                    │
+               │   │ ... 更多节点 ...    │                                    │
+               │   └─────────────────────┘                                    │
+               └─────────────────────────────── shm.end (addr+10m) ──────────┘
+                         ↑                          ↑
+             master 与每个 worker 进程的虚拟地址空间里，
+             都映射到【同一块物理内存】，所以 worker 0 写入的节点，
+             worker 3 立刻能在红黑树里读到——由 shmtx 保证不会同时写坏。
 ```
-┌─ cycle->shared_memory 链表（ngx_cycle.c:68） ─────────────────────┐
-│  zone{name="one", size=10m, tag=&ngx_http_limit_req_module,        │
-│       init=ngx_http_limit_req_init_zone, addr=...}                  │
-└────────────────────────────────────────────────────────────────────┘
-                          │ ngx_init_cycle 物化：
-                          │  ngx_shm_alloc → mmap 10MB (ngx_shmem.c:14)
-                          │  ngx_init_zone_pool → 段首建 slab 池 + 锁
-                          ▼
-   共享段 addr ──────────────────────────────────────────────── addr+10m
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ ngx_slab_pool_t 池头                                            │
-   │   ├ lock     (ngx_shmtx_sh_t)  ← 「锁本身」在共享内存         │
-   │   ├ mutex    (ngx_shmtx_t)     ← spin/CAS 指针，私有           │
-   │   ├ data ──────────────────────┐  ← 指向模块根对象 sh          │
-   │   ├ pages[] / free / start/end │                                │
-   │   └ ...                         │                                │
-   ├─────────────────────────────────┼──────────────────────────────┤
-   │ slots[] / stats[] / pages[] 描述符                              │
-   ├─────────────────────────────────┼──────────────────────────────┤  ← start
-   │  ↑ sh = ngx_slab_alloc(...) 分配出的 ngx_http_limit_req_shctx_t│
-   │      ├ rbtree 根 + sentinel  (ngx_http_limit_req_module.c:743)  │
-   │      └ queue (LRU 队列)                                          │
-   │                                                                  │
-   │  ↑ 各个红黑树节点 = ngx_slab_alloc_locked(shpool, size)          │
-   │      含 key 哈希、excess（漏桶水量）、data($binary_remote_addr)  │
-   │      (ngx_http_limit_req_module.c:494)                          │
-   │                                                                  │
-   │            ……其余 slab 管理的页帧……                              │
-   └─────────────────────────────────────────────────────────────────┘  ← end
-```
 
-### 关键源码对应（请逐一核对）
+### 5.4 你需要做的
 
-1. **登记**：[ngx_http_limit_req_module.c:L941-L942](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L941-L942) — `ngx_shared_memory_add(cf, &name, size, &ngx_http_limit_req_module)`，登记 10MB 区。`size` 来自 `zone=one:10m` 的 `10m`（经 `ngx_parse_size` 解析，见 u2-l2）。
+1. 阅读上述四段源码，确认每一步分别落在「共享内存（4.1）/ slab（4.2）/ shmtx（4.3）/ 红黑树（u2-l3）」哪一层。
+2. 用 `--with-debug` 编译 nginx，配好上面的 `limit_req_zone`，从多个源 IP 并发请求，在 debug 日志里找出 `slab alloc`、`shmtx lock`、`shmtx unlock` 三类行，验证它们确实在一次请求处理中按 `lock → slab alloc → unlock` 的顺序出现。
+3. 把 5.3 的内存地图按你实际的 zone 名、size、节点数填一遍，标注「哪些字段是 mmap 出来的、哪些是 slab 分配出来的、哪条原子变量是锁」。
+4. 思考：如果把 `zone=myzone:10m` 改成 `1m`，压力足够大时会发生什么？预期会看到 `ngx_slab_alloc() failed: no memory`（4.2.4 节），`limit_req` 会因此返回 `503`——共享内存耗尽直接体现为限流行为变化。
 
-2. **init 回调绑定**：[ngx_http_limit_req_module.c:L956](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L956) — `shm_zone->init = ngx_http_limit_req_init_zone;`。
+> 若本地无法编译/压测，本任务可降级为纯源码阅读：仅完成第 1、3 步即可达成「说明它如何借助共享内存 + slab 实现」的目标，并明确标注「运行现象待本地验证」。
 
-3. **物化 + 建池**：[ngx_cycle.c:L493-L501](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L493-L501) — `ngx_shm_alloc`（mmap）→ `ngx_init_zone_pool`（段首建 slab 池）→ 调 `init`。
-
-4. **slab 池即段首**：[ngx_http_limit_req_module.c:L728](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L728) — `ctx->shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;`，模块直接把共享段首部当 slab 池用。
-
-5. **从 slab 分配根对象**：[ngx_http_limit_req_module.c:L736-L746](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L736-L746) — `ctx->sh = ngx_slab_alloc(shpool, sizeof(...shctx_t))` 分配含红黑树的结构，`ngx_rbtree_init` 初始化它，并把它存到 `shpool->data`。
-
-6. **请求路径：加锁 → 查/插 → 解锁**：[ngx_http_limit_req_module.c:L246-L251](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L246-L251) — `shmtx_lock` → `limit_req_lookup`（未命中时 [L494](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/http/modules/ngx_http_limit_req_module.c#L494) `ngx_slab_alloc_locked` 分配新节点并插入红黑树）→ `shmtx_unlock`。
-
-### 需要观察的现象 / 预期结果
-
-- 所有 worker 的 `ctx->shpool` 指向**同一物理地址**（共享映射），故红黑树、节点、计数全部跨 worker 共享——这正是「同一个 IP 无论被哪个 worker 收到，限流都累计」的根本原因。
-- 因为整段「查树+分配+插入+计费」被 `shmtx_lock`/`unlock` 包住，并发写不会踩坏 slab 与红黑树。
-- `reload` 后（zone 名/大小未变）走 [ngx_cycle.c:L473-L488](https://github.com/nginx/nginx/blob/18ccebb1a889eb6989c64754f4f9b2512d58a491/src/core/ngx_cycle.c#L473-L488) 复用路径，计数不归零。
-
-**待本地验证**：用 `nginx -s reload` 后立即压测，对比 reload 前后的限流行为是否连续（计数未清零）。
+---
 
 ## 6. 本讲小结
 
-- nginx 用 **mmap(`MAP_SHARED`)** 申请跨进程共享的内存段（`ngx_shmem.c`），worker 经 `fork` 继承同一物理页，从而看到同一份数据。
-- **`ngx_shared_memory_add`** 只在配置阶段「登记」一个区（名/大小/tag/init），真正的 mmap 与建池发生在 `ngx_init_cycle`；reload 时按「同名同 tag 同 size」**复用**旧段，保住限流计数与缓存。
-- **slab 分配器**在共享段内做精细分配：小块用位图（SMALL/EXACT/BIG 三档编码以省元数据），超半页走整页分配；`ngx_slab_alloc` 自带池锁，`_locked` 变体供已持锁的临界区使用。
-- **`ngx_shmtx_t`** 是基于 CAS 的进程间自旋锁，锁值存 pid 以支持 `force_unlock`；trylock 不等待（accept_mutex 用），lock 自旋 2048 再让出/睡眠（slab 用）。
-- **`ngx_rwlock_t`** 用一个原子字编码「写锁=全 1 / N 个读者=正数 N」，读多写少时可让多 worker 并发读，典型用户是 upstream zone。
-- 三者关系：共享内存提供「场地」，slab 在场地里「切分」,shmtx/rwlock 在切分时「排队」——`limit_req_zone` 是三者协同的范例。
+- **共享内存是跨 worker 共享状态的唯一通道**：worker 各有独立地址空间，只有 `mmap MAP_SHARED` 出来的区才是「同一块物理内存」。nginx 把「登记」（`ngx_shared_memory_add`，配置阶段、只填表）与「分配」（`ngx_shm_alloc`，`ngx_init_cycle` 阶段、真正 mmap）分离，并用 `name + tag + size` 支撑 reload 复用与冲突检测。
+- **slab 是共享内存上的内存管理器**：把裸内存分成 small/exact/big/page 四层，固定大小对象命中同桶、位图 O(1) 分配，支持精确 free 与相邻页合并，专为「共享内存里频繁增删对象」而生，与进程私有的 `ngx_pool_t` 是两套设计。
+- **shmtx 是进程级自旋锁**：一条原子变量（0=空闲、pid=持有者）+ CAS + 指数退避自旋 + 信号量回退。`trylock` 非阻塞（accept 互斥用，spin=-1）、`lock` 阻塞（共享数据用）。锁字存 pid 还能支持崩溃后的 `force_unlock`。
+- **rwlock 是读多写少的读写锁**：一条原子变量同时编码「写锁（全 1）」和「读者计数（正整数）」，多读并发、写独占，主要服务 upstream 共享 peer 状态。
+- **四件套缺一不可**：以 `limit_req_zone` 为代表的功能 = 共享内存（装数据）+ slab（管分配）+ shmtx（防并发写坏）+ 红黑树/队列（做查找与过期）。看懂这条链，就看懂了 nginx 一大类「跨 worker 有状态」功能（limit_req/limit_conn/ssl session cache/upstream zone/cache 等）的共同骨架。
+
+---
 
 ## 7. 下一步学习建议
 
-- **u5-l4（定时器与 posted 事件）**：定时器底座是 u2-l3 讲过的红黑树，而限流漏桶的「过期淘汰」正是用 limit_req 自己的 LRU 队列 + 定时回收，可对照阅读。
-- **u5-l5（事件主循环）**：会详细讲 `ngx_trylock_accept_mutex` 在 `ngx_process_events_and_timers` 里的调度位置，把本讲的 accept_mutex 用法放进完整循环理解。
-- **u7-l4（upstream 调度算法）**：`upstream_zone` 把 peer 状态放进共享内存并用 rwlock 保护，是本讲读写锁的直接进阶用例。
-- **u10-l1（共享文件缓存）**：`proxy_cache` 的元数据同样存在共享内存 + slab 上，并多了 cache manager/loader 进程，可看作本讲模式的大型应用。
-- 建议继续精读 `src/core/ngx_slab.c` 的 `ngx_slab_free_locked`（本讲未展开），体会位图回收与「页全空后归还 free 链表并尝试合并相邻空闲页」的逻辑。
+- **横向对比**：回到 u2-l1，把 `ngx_pool_t` 与本讲的 `ngx_slab_pool_t` 做一张对照表（私有/共享、是否支持单对象 free、加锁、生命周期），巩固「为什么需要两套分配器」。
+- **顺锁往下**：本讲只讲了「锁是什么」。下一讲（u5-l1 事件模型总览）会进入「锁怎么用」——尤其是 `ngx_process_events_and_timers` 里 accept 互斥锁如何与事件循环配合避免惊群（u5-l5）。
+- **看更多用例**：挑一个你感兴趣的共享区功能通读其 `shm_zone->init` 钩子与 handler，例如 `src/http/modules/ngx_http_limit_conn_module.c`（连接数限流）、`src/http/ngx_http_file_cache.c`（u10-l1 缓存元数据）、`src/event/ngx_event_openssl_stapling.c`（OCSP 状态）。它们都是本讲这套「四件套」的具体实例。
+- **动手实验**：如果你打算写自定义模块（u10-l4），试着在模块里用 `ngx_shared_memory_add` 注册一个自己的小 zone，在 `init` 钩子里 `ngx_slab_alloc` 一个结构、`ngx_rbtree_init` 一棵树，handler 里 `shmtx_lock`/`unlock` 做一次计数——这是检验你是否真懂本讲的最佳方式。
