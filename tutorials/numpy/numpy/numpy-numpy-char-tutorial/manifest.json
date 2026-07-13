@@ -1,0 +1,368 @@
+{
+  "project": "numpy-numpy-char",
+  "head": "4e7f3b33df3e5ed2e9f46f6febdee62364520c70",
+  "rationale": "本手册围绕 numpy.char 这一\"薄入口 + 厚实现\"的模块设计学习路径：numpy/char/__init__.py 仅是惰性再导出与弃用包装，真正的逻辑在 numpy/_core/defchararray.py，而其中绝大多数字符串函数又委托给 numpy.strings。因此第一单元（入门）先帮读者建立\"char / defchararray / strings\"三层心智模型，掌握字符串 dtype 基础并完成第一次向量化调用，同时讲清目录结构与入口文件；第二单元（进阶）深入模块机制——惰性 __getattr__、strings 再导出、比较运算符与 compare_chararrays、array_function_dispatch/set_module 装饰器与本地包装函数，逐层揭示\"导入即用\"背后的工程细节；第三单元（专家）聚焦遗留的 chararray 类（ndarray 子类化、运算符重载、方法委托）、array/asarray 工厂函数的输入归一化、2.5 弃用迁移策略以及测试体系。讲义之间按\"先看公共表现、再看内部机制、最后处理遗留与迁移\"的顺序递进，每篇都锚定真实源码并配套可运行实践任务，使读者既能用好 numpy.char，也能理解其弃用趋势并平滑迁移到 numpy.strings。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识与使用 numpy.char",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位、目录结构与三层关系",
+          "order": 1,
+          "filename": "u1-l1-module-overview.md",
+          "level": "beginner",
+          "topic": "介绍 numpy.char 模块的定位与目录结构（__init__.py 惰性入口、__init__.pyi 类型存根、真正实现位于 numpy/_core/defchararray.py），说明它与 numpy.strings 的层次关系，并演示如何导入与运行最基本的调用，同时交代 chararray 在 2.5 版本被弃用的背景。",
+          "learning_goals": [
+            "理解 numpy.char 的目录结构与入口文件",
+            "区分 char / defchararray / strings 三层关系",
+            "学会导入 numpy.char 并运行一次基本调用",
+            "了解 chararray 在 NumPy 2.5 被弃用的背景"
+          ],
+          "source_files": [
+            "numpy/char/__init__.py",
+            "numpy/char/__init__.pyi",
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "numpy.char 公共入口",
+            "defchararray 实现层",
+            "numpy.strings 现代层"
+          ],
+          "practice_task": "在本地安装的 NumPy 中执行 import numpy.char，打印 numpy.char.__file__、numpy.char.__doc__ 的前几行以及 len(numpy.char.__all__)，并用一句话记录 char / defchararray / strings 三者的关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "字符串 dtype 与数组基础",
+          "order": 2,
+          "filename": "u1-l2-string-dtypes.md",
+          "level": "beginner",
+          "topic": "讲解 char 操作所依赖的字符串 dtype（str_、bytes_、定长 itemsize、object 数组），以及定宽字符串在内存中的存储方式与 itemsize 的含义，结合 chararray 构造函数与 multiply 文档示例说明。",
+          "learning_goals": [
+            "区分 str_ 与 bytes_ 及其 itemsize 差异",
+            "理解定宽字符串与 itemsize 的关系",
+            "了解 object 数组与定宽字符串数组的取舍"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "chararray 构造",
+            "dtype 基础"
+          ],
+          "practice_task": "构造一个 dtype 为 '<U5' 的数组和一个 dtype 为 '|S3' 的数组，分别查看其 itemsize，结合源码注释解释为什么 unicode(str_) 的字符宽度是 bytes 的 4 倍。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "公共 API 全貌与第一次向量字符串操作",
+          "order": 3,
+          "filename": "u1-l3-public-api-and-first-ops.md",
+          "level": "beginner",
+          "topic": "浏览 __init__.pyi 与 defchararray 中的 __all__ 公共 API，按比较、变换、查询、拆分等类别归类，并通过 upper、add、center、multiply 等完成第一次元素级向量字符串操作。",
+          "learning_goals": [
+            "识别 __all__ 中函数的功能分类",
+            "学会导入并调用 char 的向量字符串函数",
+            "理解 element-wise（元素级）向量化语义与返回 dtype"
+          ],
+          "source_files": [
+            "numpy/char/__init__.pyi",
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "公共 API 表",
+            "向量化调用"
+          ],
+          "practice_task": "给定一个字符串数组，分别用 np.char.upper、np.char.add、np.char.center 完成大写化、拼接、居中填充，打印结果与 dtype，并对照 multiply 文档示例验证多元素拼接。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "模块机制与核心源码",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "惰性加载 __getattr__ 与弃用警告",
+          "order": 1,
+          "filename": "u2-l1-lazy-getattr-deprecation.md",
+          "level": "intermediate",
+          "topic": "精读 numpy/char/__init__.py，理解模块如何通过模块级 __getattr__ 实现惰性导入、如何用 __DEPRECATED 集合在访问 chararray/array/asarray 时发出 DeprecationWarning，以及 __dir__ 的作用。",
+          "learning_goals": [
+            "理解模块级 __getattr__ 的惰性加载原理",
+            "掌握 __DEPRECATED 集合与 DeprecationWarning 的触发逻辑",
+            "理解 __dir__ 为何要委托给底层 defchararray"
+          ],
+          "source_files": [
+            "numpy/char/__init__.py"
+          ],
+          "minimal_modules": [
+            "模块入口",
+            "弃用机制"
+          ],
+          "practice_task": "编写一段代码，分别访问 np.char.upper 和 np.char.chararray，用 warnings.catch_warnings(record=True) 捕获并断言只有后者触发 DeprecationWarning，再验证 np.char.array、np.char.asarray 同样触发。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "从 numpy.strings 再导出：现代委托关系",
+          "order": 2,
+          "filename": "u2-l2-reexport-from-strings.md",
+          "level": "intermediate",
+          "topic": "讲解 defchararray 通过 from numpy.strings import * 再导出现代字符串 ufunc，理清 char 与 strings 的委托关系，区分本地定义与再导出，并说明官方推荐的现代路径是直接使用 numpy.strings。",
+          "learning_goals": [
+            "理解 char 中大多数函数实际来自 numpy.strings",
+            "区分 defchararray 本地定义与从 strings 再导出的函数",
+            "知道官方推荐使用 numpy.strings 及其原因"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py",
+            "numpy/strings/__init__.py"
+          ],
+          "minimal_modules": [
+            "再导出层",
+            "numpy.strings"
+          ],
+          "practice_task": "找出 5 个 np.char 与 np.strings 中同名同源的函数，验证它们是同一个对象（如 np.char.capitalize is np.strings.capitalize），并列出 char 独有（strings 没有）的名字（如 chararray、array、asarray、compare_chararrays）。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "字符串比较运算符与 compare_chararrays",
+          "order": 3,
+          "filename": "u2-l3-comparison-ops.md",
+          "level": "intermediate",
+          "topic": "精读 equal/not_equal/greater/greater_equal/less/less_equal 六个比较函数，理解它们如何调用 C 层 compare_chararrays，以及'先剥离尾部空白'这一为 numarray 兼容而保留的特殊语义。",
+          "learning_goals": [
+            "理解六个比较函数的实现与统一调用模式",
+            "掌握尾部空白剥离的比较语义及其历史原因",
+            "了解 compare_chararrays 的比较码（==, !=, >=, <=, >, <）"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "比较运算",
+            "compare_chararrays(C 层)"
+          ],
+          "practice_task": "用 np.char.equal 比较 'aa' 与 'aa '（尾部带空格），再对比 numpy 原生 == 的行为，验证 char 版尾部空白被剥离；随后测试 not_equal、greater、less 并记录差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "array_function_dispatch 与 set_module 装饰器",
+          "order": 4,
+          "filename": "u2-l4-array-function-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解比较函数上的 @array_function_dispatch 装饰器如何支持 NEP-18 __array_function__ 协议，_binary_op_dispatcher 的作用，以及 @set_module('numpy.char') 如何把函数的 __module__ 改写为 numpy.char。",
+          "learning_goals": [
+            "理解 array_function_dispatch 的分发原理与 dispatcher 角色",
+            "理解 set_module 对 __module__ 的改写及其对文档/duck-typing 的意义",
+            "了解 _binary_op_dispatcher 为何只返回 (x1, x2)"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py",
+            "numpy/_core/overrides.py"
+          ],
+          "minimal_modules": [
+            "overrides 分发",
+            "模块归属"
+          ],
+          "practice_task": "打印 np.char.equal.__module__ 与一个被 @set_module 修饰函数的 __module__，验证它们显示为 numpy.char；阅读 overrides.py 中 array_function_dispatch 的定义，用自己的话解释 dispatcher 与 implementation 的分工。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "multiply / partition / rpartition 本地包装",
+          "order": 5,
+          "filename": "u2-l5-local-wrappers.md",
+          "level": "intermediate",
+          "topic": "精读 defchararray 中本地定义的 multiply、partition、rpartition，理解它们如何在 numpy.strings 对应函数之上做错误类型转换（TypeError→ValueError）与结果重组（np.stack 增加一维）。",
+          "learning_goals": [
+            "理解 multiply 把 TypeError 转为 ValueError 的兼容做法",
+            "理解 partition/rpartition 用 np.stack 把三元组重组为多一维数组的原因",
+            "区分 char 版与 strings 版 partition/rpartition 的返回形状差异"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "本地包装",
+            "strings 委托"
+          ],
+          "practice_task": "对比 np.char.partition 与 np.strings.partition 在同一输入上的输出形状，解释为什么 char 版多了一个长度为 3 的维度；再让 np.char.multiply 传入非整数（如浮点数），验证它抛出 ValueError 而非 TypeError。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "chararray 内部、工厂函数、迁移与测试",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "chararray 的 ndarray 子类化机制",
+          "order": 1,
+          "filename": "u3-l1-chararray-subclass.md",
+          "level": "advanced",
+          "topic": "精读 chararray 类的 __new__、__array_finalize__、__array_wrap__、__getitem__，理解它如何作为 ndarray 子类实现'取值自动剥离尾部空白'、dtype 校验与 ufunc 输出包装。",
+          "learning_goals": [
+            "掌握 ndarray 子类化的三件套 __new__/__array_finalize__/__array_wrap__",
+            "理解 __getitem__ 中对 character 标量做 rstrip 的行为",
+            "理解 __array_finalize__ 对 dtype.char 的校验（'VSUbc'）"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "chararray 类",
+            "ndarray 子类化"
+          ],
+          "practice_task": "参照源码用 ndarray.__new__ 的思路创建一个 chararray，存入带尾部空白的字符串，索引单个元素并验证它被自动 rstrip；再尝试用非字符串 dtype 去 view 并观察 ValueError。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "运算符重载与方法委托",
+          "order": 2,
+          "filename": "u3-l2-operators-and-delegation.md",
+          "level": "advanced",
+          "topic": "精读 chararray 的比较运算符 __eq__/__ne__/__ge__/__le__/__gt__/__lt__ 与算术运算符 __add__/__radd__/__mul__/__rmul__/__mod__，以及 capitalize/center/find 等大量字符串方法如何委托给本模块的自由函数。",
+          "learning_goals": [
+            "理解比较运算符如何委托给 equal/not_equal 等自由函数",
+            "理解 __add__/__mul__/__mod__ 的元素级字符串语义",
+            "理解方法委托设计以及为何部分方法用 asarray(...) 包裹返回值"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "运算符重载",
+            "方法委托"
+          ],
+          "practice_task": "构造一个 chararray，分别使用 ==、+、*、% 运算符，结合源码记录每个运算符实际调用的自由函数；并解释为何返回字符串的方法要用 asarray(...) 包裹（保持返回 chararray 类型）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "array / asarray 工厂函数源码精读",
+          "order": 3,
+          "filename": "u3-l3-array-asarray-factories.md",
+          "level": "advanced",
+          "topic": "精读 array() 与 asarray() 工厂函数，理解它们对 str/bytes、list/tuple、character dtype 的 ndarray、object ndarray 等不同输入的分支处理，以及 itemsize/unicode 的自动推断逻辑。",
+          "learning_goals": [
+            "理解 array() 对多种输入类型的分支处理顺序",
+            "理解 unicode 与 itemsize 的自动推断规则（含 str_ itemsize÷4）",
+            "理解 asarray() 如何复用 array(copy=False) 并尽量不拷贝"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "工厂函数",
+            "输入归一化"
+          ],
+          "practice_task": "分别用 str、bytes、Python list、object ndarray 作为输入调用 np.char.array，记录每条分支产生的 dtype 与 itemsize；再用 asarray 验证在输入已是 character ndarray 时尽量不发生拷贝的行为。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "弃用迁移：从 chararray 到 numpy.strings",
+          "order": 4,
+          "filename": "u3-l4-deprecation-migration.md",
+          "level": "advanced",
+          "topic": "系统讲解 NumPy 2.5 对 chararray/array/asarray 的弃用策略与时间线（2026-01-07），给出从 chararray 迁移到普通字符串 ndarray + numpy.strings 的实操路径，并提示尾部空白剥离语义需要手动处理。",
+          "learning_goals": [
+            "理解弃用时间线、警告来源与 __DEPRECATED 集合",
+            "掌握把 chararray 代码改写为 ndarray + numpy.strings 的方法",
+            "能识别并手动补偿 chararray 特有的尾部空白剥离语义"
+          ],
+          "source_files": [
+            "numpy/char/__init__.py",
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "弃用机制",
+            "迁移路径"
+          ],
+          "practice_task": "找一段使用 np.char.array(...).upper() 的旧代码，改写为 np.strings.upper(np.array(...)) 的等价写法；若原代码依赖 chararray 的尾部空白剥离，请在迁移时显式补充 np.strings.rstrip 调用。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "测试体系与 _vec_string",
+          "order": 5,
+          "filename": "u3-l5-testing.md",
+          "level": "advanced",
+          "topic": "通过 numpy/_core/tests/test_defchararray.py 了解 char/defchararray 的测试组织，理解 ignore_charray_deprecation 这个 pytest 标记如何过滤弃用警告，以及 _vec_string 在测试中作为底层入口的意义。",
+          "learning_goals": [
+            "理解测试如何用 filterwarnings 标记处理 chararray 弃用警告",
+            "了解 TestBasic 等测试类对 array/asarray/chararray 的覆盖",
+            "了解 _vec_string 作为 C 层底层测试入口的作用"
+          ],
+          "source_files": [
+            "numpy/_core/tests/test_defchararray.py",
+            "numpy/_core/defchararray.py"
+          ],
+          "minimal_modules": [
+            "测试组织",
+            "弃用过滤"
+          ],
+          "practice_task": "运行 test_defchararray.py 中的部分测试（如 TestBasic），并仿照 ignore_charray_deprecation 写一个 pytest 标记，使一个临时调用 np.char.asarray 的测试通过且不报 DeprecationWarning。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
