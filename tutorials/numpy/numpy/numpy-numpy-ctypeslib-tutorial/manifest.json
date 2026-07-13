@@ -1,0 +1,47 @@
+{
+  "project": "numpy-numpy-ctypeslib",
+  "head": "2f93aec234bd1d6ff076147e56a6865547f77598",
+  "rationale": "numpy.ctypeslib 是一个体量较小但职责清晰的模块（核心实现 _ctypeslib.py 约 600 行），唯一目标是让 NumPy 数组与 Python 标准库 ctypes（调用 C 共享库）互通。因此学习路线按\"先认识、再会用、后懂原理\"三层组织：第一单元（入门）带读者从模块结构与公共 API 全景入手，理解 __init__.py 的再导出、__all__、ctypes 不可用时的优雅降级以及 set_module 装饰器；第二单元（进阶）聚焦实际会用的四个核心机制——跨平台 load_library、平台相关的 c_intp、零拷贝互转 as_array/as_ctypes、以及动态建类的 ndpointer 工厂；第三单元（专家）下沉到内部原理：_ndptr.from_param 参数校验链、_concrete_ndptr 的返回值自动包装、as_ctypes_type 的递归 dtype→ctype 转换（含结构体 padding、联合体与大小端），最后用类型存根 .pyi 与 test_ctypeslib.py 测试体系收尾，帮助读者二次开发与贡献。依赖关系沿\"先看懂再拆解\"展开，每篇都配有可运行的代码实践任务。共 11 篇讲义，符合小型项目 8-15 篇的规模。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 numpy.ctypeslib",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与模块结构",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "numpy.ctypeslib 是什么——它是 NumPy 提供的 ctypes 工具集，负责在 NumPy 数组与 Python 标准库 ctypes（用来调用 C 共享库）之间搭桥；并讲解 __init__.py 如何从私有实现 _ctypeslib.py 再导出公共 API。",
+          "learning_goals": [
+            "理解 ctypeslib 的定位、使用场景与和 ctypes 的关系",
+            "理解 __init__.py 从 _ctypeslib.py 再导出公共对象的模块结构",
+            "学会通过 np.ctypeslib 访问这些函数并查看 __all__"
+          ],
+          "source_files": [
+            "numpy/ctypeslib/__init__.py",
+            "numpy/ctypeslib/_ctypeslib.py"
+          ],
+          "minimal_modules": [
+            "__init__",
+            "__all__"
+          ],
+          "practice_task": "编写脚本 import numpy.ctypeslib，打印 np.ctypeslib.__all__，逐个打印每个公共对象的类型与其 __module__，观察它们都显示为 numpy.ctypeslib，并解释为何实现文件叫 _ctypeslib 而 API 却属于 numpy.ctypeslib。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "公共 API 全景",
+          "order": 2,
+          "filename": "u1-l2-public-api.md",
+          "level": "beginner",
+          "topic": "六个公共对象 load_library、ndpointer、c_intp、as_ctypes、as_array、as_ctypes_type 各自做什么，以及它们如何串成"
+        }
+      ]
+    }
+  ]
+}

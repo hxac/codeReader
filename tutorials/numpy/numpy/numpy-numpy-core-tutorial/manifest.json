@@ -1,0 +1,349 @@
+{
+  "project": "numpy-numpy-core",
+  "head": "4e7f3b33df3e5ed2e9f46f6febdee62364520c70",
+  "rationale": "numpy/core 在 NumPy 2.0 之后已不再是实现所在，而是一个把 core 重命名为私有 _core 后留下的「向后兼容垫片（shim）」；因此本手册不把它当作 NumPy 数组实现来讲，而是把它当作一个高质量、可完整读懂的「兼容垫片工程」范例。学习顺序先建立全局认知（第一单元：它是什么、目录如何分类、如何运行并看到弃用警告），再进入核心机制（第二单元：PEP 562 模块级 __getattr__ 的惰性转发、sentinel 与 None 两种委派写法、统一弃用信息生成器 _raise_warning、包入口 __all__ 与 __getattr__ 的协作），最后攻克兼容性工程中最难的三块（第三单元：pickle 向后兼容的 eager 绑定、NumPy 1.x/2.x ABI 冲突的 ImportError 守卫、废弃模块的类型存根取舍），并以「亲手设计一个兼容垫片」作为综合实践收尾。单元与讲义之间严格按依赖排序，每篇只解决一个问题并配一个可操作的代码任务，规模控制在 11 篇，契合这个小目录的特点。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 numpy.core 兼容层",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "numpy.core 是什么：NumPy 2.0 命名空间迁移与兼容层定位",
+          "order": 1,
+          "filename": "u1-l1-what-is-numpy-core.md",
+          "level": "beginner",
+          "topic": "讲解 numpy/core 目录的真实身份——它只是 NumPy 2.0 把 core 改名为私有 _core 之后留下的向后兼容垫片，并交代迁移背景与它的存在意义。",
+          "learning_goals": [
+            "理解 numpy.core 不再包含任何实现，而是把属性转发到 numpy._core",
+            "了解 NumPy 2.0 将 core 重命名为私有 _core 的迁移背景",
+            "明白兼容垫片（shim）的职责以及它未来会被移除的命运"
+          ],
+          "source_files": [
+            "__init__.py",
+            "__init__.pyi"
+          ],
+          "minimal_modules": [
+            "numpy/core/__init__.py 的模块文档字符串",
+            "core 与 _core 的转发关系"
+          ],
+          "practice_task": "写一个脚本：导入 numpy.core，取一个属性（如 numpy.core.numeric.asarray）并打印它的 __module__，验证它其实来自 numpy._core；再用 print(numpy.core.__doc__) 输出垫片说明文字。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与文件分类：把约 30 个文件理清楚",
+          "order": 2,
+          "filename": "u1-l2-directory-map.md",
+          "level": "beginner",
+          "topic": "逐一盘点 numpy/core 下的文件，把它们分成四类：包入口、工具、纯转发垫片、类型存根，帮读者建立全局心智模型。",
+          "learning_goals": [
+            "能说出 numpy/core 目录下文件的四种角色",
+            "区分纯转发垫片与带有 eager 绑定的特殊垫片",
+            "理解每个 .py 与对应 .pyi 的关系"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_utils.py",
+            "numeric.py",
+            "_multiarray_umath.py",
+            "__init__.pyi"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 __all__",
+            "纯转发垫片（numeric.py 等同类）",
+            "特殊垫片 _multiarray_umath.py"
+          ],
+          "practice_task": "用 Python 遍历 numpy/core 目录，按「纯转发 / eager 绑定 / 存根 / 工具」四类给每个 .py 和 .pyi 文件归类，输出一张 Markdown 表格，并在表格里注明判断依据（例如是否只有 __getattr__、是否在顶部 for 循环绑定属性）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "运行 numpy.core：触发并捕获 DeprecationWarning",
+          "order": 3,
+          "filename": "u1-l3-run-and-observe-warning.md",
+          "level": "beginner",
+          "topic": "演示如何导入 numpy.core、触发 DeprecationWarning，并用标准库 warnings 模块捕获并断言它的内容。",
+          "learning_goals": [
+            "学会触发并阅读 numpy.core 的 DeprecationWarning",
+            "掌握用 warnings.catch_warnings(record=True) 捕获警告",
+            "理解警告只会提示、不会阻止属性被正常返回"
+          ],
+          "source_files": [
+            "_utils.py",
+            "__init__.py",
+            "numeric.py"
+          ],
+          "minimal_modules": [
+            "_utils._raise_warning",
+            "numeric.__getattr__",
+            "warnings 标准库"
+          ],
+          "practice_task": "写一个测试函数，用 warnings.catch_warnings(record=True) 捕获访问 numpy.core.numeric.zeros 时产生的 DeprecationWarning，断言它属于 DeprecationWarning 类别，并且消息文本里包含 \"numpy._core\"。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心机制：惰性转发与弃用信息",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "模块级 __getattr__（PEP 562）与惰性转发",
+          "order": 1,
+          "filename": "u2-l1-module-getattr.md",
+          "level": "intermediate",
+          "topic": "深入讲解 PEP 562 的模块级 __getattr__，以及 numpy.core 如何用它实现「按属性」的惰性转发，避免一次性加载所有子模块。",
+          "learning_goals": [
+            "理解 PEP 562 模块级 __getattr__ 的调用时机",
+            "掌握惰性导入如何避免在 import 时加载全部子模块",
+            "能解释 __getattr__ 内部 import 与 getattr 的配合方式"
+          ],
+          "source_files": [
+            "numeric.py",
+            "umath.py",
+            "arrayprint.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "PEP 562",
+            "模块级 __getattr__",
+            "numeric.py 转发范例"
+          ],
+          "practice_task": "创建一个包 mypkg，在其中的 lazy.py 里用模块级 __getattr__，在首次访问某属性时才 import 一个「昂贵」的子模块并返回其属性；用 print 日志证明第二次访问同一属性不会再触发 import。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "委派模式：sentinel 与 None 两种缺失属性处理",
+          "order": 2,
+          "filename": "u2-l2-delegation-patterns.md",
+          "level": "intermediate",
+          "topic": "对比 numpy.core 里两种判断「属性是否存在」的写法：用哨兵对象（numeric.py）与用 None 默认值（umath.py），分析它们对 falsy 但有效的属性的影响。",
+          "learning_goals": [
+            "理解用 None 做 getattr 默认值在面对 falsy 属性时的陷阱",
+            "掌握 sentinel 哨兵对象写法为什么更安全",
+            "能根据子模块特点选择合适的委派写法"
+          ],
+          "source_files": [
+            "numeric.py",
+            "umath.py",
+            "records.py"
+          ],
+          "minimal_modules": [
+            "numeric.py 的 sentinel 写法",
+            "umath.py 的 None 写法",
+            "AttributeError 分支处理"
+          ],
+          "practice_task": "分别实现两个转发模块：一个用 sentinel（仿 numeric.py），一个用 None（仿 umath.py）；在被转发模块里放一个值为 0 的属性，演示 None 写法会错误地把它判为「不存在」并抛 AttributeError，而 sentinel 写法不会，并解释原因。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "_raise_warning：统一弃用信息的生成与 stacklevel",
+          "order": 3,
+          "filename": "u2-l3-raise-warning.md",
+          "level": "intermediate",
+          "topic": "精读 _utils.py 的 _raise_warning，看它如何拼装弃用信息、附带子模块名，并正确设置 stacklevel 让警告指向真正的调用者。",
+          "learning_goals": [
+            "理解 DeprecationWarning 文本的拼装方式",
+            "掌握 stacklevel 对警告定位的作用",
+            "能复用一个统一的弃用警告函数"
+          ],
+          "source_files": [
+            "_utils.py",
+            "numeric.py",
+            "multiarray.py"
+          ],
+          "minimal_modules": [
+            "_utils._raise_warning",
+            "warnings.warn 与 stacklevel",
+            "可选的子模块名参数"
+          ],
+          "practice_task": "仿照 _raise_warning 写一个通用函数 deprecate(old_name, new_name, submodule=None)，在一个转发模块里调用它；先把 stacklevel 故意设错，观察警告指向了转发模块而非调用方，再把 stacklevel 调对并对比。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "包入口 __init__.py：__all__、__getattr__ 与 _ufunc_reconstruct",
+          "order": 4,
+          "filename": "u2-l4-package-init.md",
+          "level": "intermediate",
+          "topic": "精读 numpy/core/__init__.py，看包级 __all__ 如何声明可惰性加载的子模块、__getattr__ 如何转发到 numpy._core，以及 _ufunc_reconstruct 的历史作用。",
+          "learning_goals": [
+            "理解包级 __all__ 与 __getattr__ 的协作",
+            "明白 __init__ 里 __getattr__ 转发到 numpy._core 与子模块内部转发到 numpy._core.X 的区别",
+            "了解 _ufunc_reconstruct 为旧版 pickle 保留的原因"
+          ],
+          "source_files": [
+            "__init__.py",
+            "__init__.pyi"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 __all__",
+            "__init__.py 的 __getattr__",
+            "_ufunc_reconstruct"
+          ],
+          "practice_task": "创建一个包，在 __init__.py 中声明一个子模块名列表 __all__，并实现 __getattr__ 让这些子模块在首次访问时才被 import（输出加载日志）；验证 import 这个包本身不会触发任何子模块加载。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "兼容性工程：pickle、ABI 与类型存根",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Pickle 向后兼容：eager 绑定与 _reconstruct",
+          "order": 1,
+          "filename": "u3-l1-pickle-compat.md",
+          "level": "advanced",
+          "topic": "讲解为什么某些属性必须 eager 绑定：pickle 把对象来源记成模块路径，旧 pickle 里写着 numpy.core.*，所以 _reconstruct、_ufunc_reconstruct 和所有 ufunc 都必须能在不报警的情况下被取到。",
+          "learning_goals": [
+            "理解 pickle 如何用「模块路径 + 名字」定位重建函数",
+            "明白 eager 绑定与惰性 __getattr__ 在 pickle 场景下的取舍",
+            "能识别 _internal._reconstruct 与 _multiarray_umath 的 ufunc 绑定具有相同的兼容目的"
+          ],
+          "source_files": [
+            "_internal.py",
+            "_multiarray_umath.py",
+            "multiarray.py"
+          ],
+          "minimal_modules": [
+            "_internal._reconstruct",
+            "_multiarray_umath 的 ufunc eager 绑定",
+            "multiarray._reconstruct / scalar"
+          ],
+          "practice_task": "定义一个类并 pickle 它，手工把 pickle 里记录的模块路径改成「旧包名」；再新建一个「新包」，并在旧路径位置放一个 shim 模块（含重建函数），使旧 pickle 仍能用 pickle.loads 还原对象，仿照 _reconstruct 的思路。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "C-API/ABI 兼容：_ARRAY_API 守卫与 NumPy 1.x/2.x 冲突",
+          "order": 2,
+          "filename": "u3-l2-c-api-abi-guard.md",
+          "level": "advanced",
+          "topic": "精读 _multiarray_umath.__getattr__ 对 _ARRAY_API / _UFUNC_API 的特殊处理：访问它们会抛出带堆栈的 ImportError，拦截「用 NumPy 1.x 编译的二进制模块跑在 2.x 上」导致的崩溃。",
+          "learning_goals": [
+            "理解 NumPy 1.x 与 2.x 的 ABI 不兼容问题",
+            "明白为何用 ImportError（而非 DeprecationWarning）处理 ABI 冲突",
+            "学会用 traceback.format_stack 生成可读的错误上下文"
+          ],
+          "source_files": [
+            "_multiarray_umath.py",
+            "multiarray.py"
+          ],
+          "minimal_modules": [
+            "_multiarray_umath 的 _ARRAY_API/_UFUNC_API 分支",
+            "multiarray._ARRAY_API eager 绑定",
+            "ImportError 与 traceback.format_stack"
+          ],
+          "practice_task": "写一个模块，其 __getattr__ 在访问某个「已废弃 C 符号」名时，用 traceback.format_stack 收集调用栈（跳过 importlib 帧）拼成多行错误信息后 raise ImportError，模拟对旧版扩展的拦截；再写一个调用者验证错误信息里能看到自己的调用位置。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "类型存根策略：废弃模块的 .pyi 怎么写",
+          "order": 3,
+          "filename": "u3-l3-type-stubs.md",
+          "level": "advanced",
+          "topic": "比较 numpy/core 下三类 .pyi：完整再导出（numeric.pyi / umath.pyi）、省略再导出（overrides.pyi，附 NOTE 说明理由）、以及几乎为空（_internal.pyi），讨论废弃动态模块的类型存根取舍。",
+          "learning_goals": [
+            "理解类型存根不会触发运行时的弃用警告",
+            "明白为什么有的 .pyi 完整再导出、有的却选择省略",
+            "能根据是否「可验证」（存在 __all__ / __dir__）决定存根策略"
+          ],
+          "source_files": [
+            "numeric.pyi",
+            "umath.pyi",
+            "overrides.pyi",
+            "__init__.pyi",
+            "_internal.pyi"
+          ],
+          "minimal_modules": [
+            "numeric.pyi / umath.pyi（完整再导出）",
+            "overrides.pyi（NOTE 说明）",
+            "_internal.pyi（近空）"
+          ],
+          "practice_task": "为一个「被重命名」的动态模块分别写两版存根：A 版用 from new import * 完整再导出，B 版只写一行注释；用 pyright 或 mypy 分别检查同一段调用代码，记录类型检查器在两版下的不同表现并解释原因。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "综合实践：为自己的模块设计一个兼容垫片",
+          "order": 4,
+          "filename": "u3-l4-build-your-own-shim.md",
+          "level": "advanced",
+          "topic": "综合运用前面所有机制，为一个虚构的「mymath 改名为 _mymath」场景，从零搭建一个生产级兼容垫片包，作为整本手册的收尾。",
+          "learning_goals": [
+            "整合模块 __getattr__、_raise_warning、pickle 兼容、ABI 守卫、类型存根等机制",
+            "理解设计兼容垫片时的取舍与边界条件",
+            "能评估一个垫片何时可以被安全移除"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_utils.py",
+            "numeric.py",
+            "_multiarray_umath.py",
+            "__init__.pyi"
+          ],
+          "minimal_modules": [
+            "包入口 __init__.py",
+            "纯转发垫片范例",
+            "工具函数与存根"
+          ],
+          "practice_task": "建一个 mymath 包（含 _mymath 真实现）和兼容垫片 mymath.core：实现 __init__ 惰性子模块加载、每个子模块的 __getattr__ 转发、统一 _raise_warning、至少一处 pickle eager 绑定、以及配套 .pyi；写脚本验证三件事：访问触发弃用警告但功能正常、旧 pickle 可还原、类型检查通过。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l1",
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

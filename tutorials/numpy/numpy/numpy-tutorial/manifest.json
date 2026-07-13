@@ -1,7 +1,7 @@
 {
   "project": "numpy",
-  "head": "71d523a529c873cde8a11af2d4935a4082d4a60e",
-  "rationale": "NumPy 是科学计算基础库，规模大、由 Python/Cython/C 三层构成，因此学习路线按「先会用、再读源码、最后深入 C 层与扩展开发」三层递进。单元 1 帮助零基础读者认识项目并跑起来；单元 2-3 聚焦最常用的数组创建、dtype、索引、形状、视图与广播，这部分是日常 80% 用法的核心；单元 4 进入 ufunc 与计算机制，把 Python 层和 C 层衔接起来；单元 5-7 覆盖各核心子系统（multiarray、打印、einsum、linalg、fft、random、子类化、调度、遮罩数组、多项式与字符串）；单元 8-9 面向专家，深入 Meson 构建、C-API、自定义 dtype、f2py 与 C 扩展、内存管理、nditer、Array API 与 CI/基准。依赖关系遵循「先理解 ndarray 内存模型再读 ufunc 实现，先理解 Python 层接口再下钻 C 层」的原则，确保每篇讲义只解决一个独立问题且引用真实源码。",
+  "head": "4e7f3b33df3e5ed2e9f46f6febdee62364520c70",
+  "rationale": "NumPy 是科学计算基础库，规模大、由 Python/Cython/C 三层构成，因此学习路线按「先会用、再读源码、最后深入 C 层与扩展开发」三层递进。单元 1 帮助零基础读者认识项目并跑起来；单元 2-3 聚焦最常用的数组创建、dtype、索引、形状、视图与广播，这部分是日常 80% 用法的核心；单元 4 进入 ufunc 与计算机制，把 Python 层和 C 层衔接起来；单元 5-7 覆盖各核心子系统（multiarray、打印、einsum、linalg、fft、random、子类化、调度、遮罩数组、多项式与字符串）；单元 8-9 面向专家，深入 Meson 构建、C-API、自定义 dtype、f2py 与 C 扩展、内存管理、nditer、Array API 与 CI/基准。依赖关系遵循「先理解 ndarray 内存模型再读 ufunc 实现，先理解 Python 层接口再下钻 C 层」的原则，确保每篇讲义只解决一个独立问题且引用真实源码。\n\n本次为增量更新：上一个 HEAD 到当前 HEAD 之间仅有单个 bug 修复提交 #31975（修复花式索引赋值中，当数组超过一个缓冲区块时类型转换失败错误被静默吞掉的问题，改动位于 numpy/_core/src/multiarray/lowlevel_strided_loops.c.src 的 mapiter 缓冲赋值路径，并补充 test_indexing.py 测试）。该改动属于局部错误处理逻辑修复，不改变任何公开 API 或概念模型，仅与花式索引主题（u3-l1）相关，故 u3-l1 标记为 update，其余所有讲义保持 keep。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "克隆仓库后阅读 README 与 pyproject.toml，写一段 200 字说明 NumPy 是什么、依赖哪些构建工具，并列出 np.ndarray 之外你能在顶层导入的 5 个对象。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -62,7 +62,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -90,7 +90,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -118,7 +118,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -147,7 +147,7 @@
             "u1-l2",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -183,7 +183,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -211,7 +211,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -239,7 +239,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -255,27 +255,30 @@
           "order": 1,
           "filename": "u3-l1-indexing.md",
           "level": "intermediate",
-          "topic": "基础切片、整数数组索引、布尔索引、np.ix_ 的实现机制。",
+          "topic": "基础切片、整数数组索引、布尔索引、np.ix_ 的实现机制，以及花式索引赋值时缓冲类型转换错误的传播。",
           "learning_goals": [
             "区分基础索引与高级（花式）索引",
             "理解索引何时返回视图、何时返回拷贝",
-            "在 C 层定位映射实现"
+            "在 C 层定位映射实现",
+            "了解花式索引赋值在缓冲区块化下的错误传播修复（#31975）"
           ],
           "source_files": [
             "numpy/_core/numeric.py",
             "numpy/_core/src/multiarray/mapping.c",
+            "numpy/_core/src/multiarray/lowlevel_strided_loops.c.src",
             "numpy/lib/_index_tricks_impl.py"
           ],
           "minimal_modules": [
             "基本切片语义（_core/numeric.py）",
             "映射与索引 C 实现（mapping.c）",
+            "缓冲花式索引赋值与错误检查（lowlevel_strided_loops.c.src 的 mapiter）",
             "索引辅助器 ix_/r_/c_（lib/_index_tricks_impl.py）"
           ],
-          "practice_task": "构造一个 5x5 数组，分别用基础切片、布尔掩码、整数数组取出行与列，并用 np.shares_memory 判断每个结果是视图还是拷贝。",
+          "practice_task": "构造一个 5x5 数组，分别用基础切片、布尔掩码、整数数组取出行与列，并用 np.shares_memory 判断每个结果是视图还是拷贝；再用一个长度超过缓冲区块的 object 数组对 int 数组做花式索引赋值，验证类型转换错误现在会被正确抛出。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l2",
@@ -303,7 +306,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -331,7 +334,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -359,7 +362,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -396,7 +399,7 @@
             "u2-l1",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -424,7 +427,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -452,7 +455,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -480,7 +483,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l5",
@@ -508,7 +511,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -544,7 +547,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -572,7 +575,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -600,7 +603,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -628,7 +631,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -656,7 +659,7 @@
           "depends_on": [
             "u5-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -692,7 +695,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -720,7 +723,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -748,7 +751,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -784,7 +787,7 @@
           "depends_on": [
             "u4-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -812,7 +815,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -840,7 +843,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -868,7 +871,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -905,7 +908,7 @@
             "u5-l1",
             "u4-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -933,7 +936,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -961,7 +964,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -989,7 +992,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1025,7 +1028,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1054,7 +1057,7 @@
             "u3-l4",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1083,7 +1086,7 @@
             "u7-l2",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1112,7 +1115,7 @@
             "u1-l5",
             "u4-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
