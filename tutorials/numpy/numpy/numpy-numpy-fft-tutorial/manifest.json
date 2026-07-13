@@ -1,0 +1,550 @@
+{
+  "project": "numpy-numpy-fft",
+  "head": "b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b",
+  "rationale": "numpy.fft 是一个结构清晰、分层明确的中小型子包：入口 __init__.py 聚合导出，_helper.py 提供频率箱与频谱平移的纯 Python helper，_pocketfft.py 是所有变换的 Python 主逻辑（统一走内部 _raw_fft/_raw_fftnd），真正的计算由 C++ 广义 ufunc 后端 _pocketfft_umath.cpp（调用 pocketfft 头文件库）完成。因此学习顺序按\"由外到内、由浅到深\"设计：第 1 单元让读者从零认识包的定位、目录、构建；第 2 单元补齐 DFT 数学约定与四个 helper，降低后续阅读门槛；第 3 单元以一维 fft/ifft 与 _raw_fft 为核心打通主流程，再分别展开 norm、out/类型提升、实数 rfft/irfft；第 4 单元把同样的机制推广到多维（fftn/fft2）与 Hermitian（hfft），并深入 _cook_nd_args 这块容易踩坑的形状/轴处理；第 5 单元进入 C++ ufunc 后端的注册、循环实现、向量化与 FFTpack 排序，最后用测试体系收尾。依赖关系严格遵循\"先入口后内核、先 1D 后 N-D、先 Python 后 C++\"，每篇都引用真实源码并配一个可操作的代码实践任务。共 18 篇，对应中型项目规模。增量分析结论：previous HEAD 2f93aec234 到 current HEAD b21650c4f6 之间仅有 1 个提交（修复自定义标量类型 _convert_from_type 的引用泄漏），该提交不涉及 numpy/fft/ 子包（git diff 与 git log 对该路径均为空），所有讲义引用的源码文件均未变化且依然存在，故全部 18 篇 action 标为 keep，结构、依赖、源码引用保持原样。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 numpy.fft 子包",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "numpy.fft 项目定位与快速上手",
+          "filename": "u1-l1-project-overview.md",
+          "order": 1,
+          "level": "beginner",
+          "topic": "介绍 numpy.fft 子包是什么、它在 NumPy 生态中的定位（scipy.fft 的基础子集），以及如何 import 并完成第一次 FFT 正反变换。",
+          "learning_goals": [
+            "理解 numpy.fft 提供离散傅里叶变换能力，是 scipy.fft 的基础子集",
+            "学会 import numpy.fft 并用 fft/ifft 做一次正反变换",
+            "认识 __all__ 如何把 _pocketfft 与 _helper 的导出合并"
+          ],
+          "minimal_modules": [
+            "__all__ 导出聚合",
+            "fft / ifft 最基本调用",
+            "from ._pocketfft import * 与 from ._helper import *"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_pocketfft.py"
+          ],
+          "practice_task": "用 np.fft.fft 对两个正弦波叠加的信号做变换，再用 np.fft.ifft 还原，验证 ifft(fft(a)) 约等于 a，并打印 numpy.fft.__all__ 列表，分组标出哪些来自 _pocketfft、哪些来自 _helper。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与各文件职责",
+          "filename": "u1-l2-directory-structure.md",
+          "order": 2,
+          "level": "beginner",
+          "topic": "逐个介绍 numpy/fft/ 下每个文件（__init__、_helper、_pocketfft、_pocketfft_umath.cpp、.pyi 存根、tests、pocketfft 子模块）的职责和相互引用关系。",
+          "learning_goals": [
+            "看懂 fft 包的文件分层：入口 → Python 逻辑 → C++ 后端",
+            "区分 .py 实现文件与 .pyi 类型存根文件的作用",
+            "理解 pocketfft 子模块在整个体系中的位置"
+          ],
+          "minimal_modules": [
+            "_helper.py 频率与平移 helper",
+            "_pocketfft.py 变换主逻辑",
+            "_pocketfft_umath.cpp C++ ufunc 后端",
+            "tests/ 测试目录"
+          ],
+          "source_files": [
+            "__init__.py",
+            "meson.build",
+            "_pocketfft.py"
+          ],
+          "practice_task": "画一张文件依赖关系图：__init__.py 如何导入 _helper/_pocketfft，_pocketfft 如何导入 _pocketfft_umath，并标注每个文件是纯 Python 还是 C++ 扩展、是否带 .pyi 存根。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与 pocketfft 后端依赖",
+          "filename": "u1-l3-build-and-submodule.md",
+          "order": 3,
+          "level": "beginner",
+          "topic": "讲解 meson.build 如何编译 _pocketfft_umath 扩展、安装 Python 文件，以及 pocketfft 这个 git 子模块的作用与缺失时的报错。",
+          "learning_goals": [
+            "理解 Meson 如何把 _pocketfft_umath.cpp 编译成 Python 扩展模块",
+            "知道为何缺失 pocketfft 子模块会报错以及如何修复",
+            "区分需编译的扩展模块与直接安装的纯 Python 源"
+          ],
+          "minimal_modules": [
+            "py.extension_module('_pocketfft_umath')",
+            "py.install_sources",
+            "pocketfft/README.md 子模块存在性检查"
+          ],
+          "source_files": [
+            "meson.build",
+            "_pocketfft_umath.cpp"
+          ],
+          "practice_task": "阅读 meson.build，回答：哪些文件被编译、哪些被直接安装、install_tag='tests' 的作用是什么；并写出在缺失子模块时应当执行的 git submodule 命令。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "数学约定与频率 helper",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "DFT 数学定义与实现约定",
+          "filename": "u2-l1-dft-math-conventions.md",
+          "order": 1,
+          "level": "beginner",
+          "topic": "结合 __init__.py 的 docstring，讲清楚本实现采用的 DFT/IDFT 公式、standard 频率排列、幅度/相位谱、实输入的 Hermitian 对称等约定。",
+          "learning_goals": [
+            "掌握 numpy.fft 采用的 DFT/IDFT 数学定义与指数符号",
+            "理解输出数组的 standard 频率排列顺序",
+            "知道实输入下频谱的 Hermitian 对称性"
+          ],
+          "minimal_modules": [
+            "DFT/IDFT 公式约定（指数符号、1/n 归一化）",
+            "standard 频率排列（0、正频率、Nyquist、负频率）",
+            "Type Promotion 背景说明"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_pocketfft.py"
+          ],
+          "practice_task": "对长度 8 的实信号做 fft，标出 A[0]、正频率段、Nyquist、负频率段分别对应哪些索引，并用 np.abs、np.angle 得到幅度谱与相位谱，验证实输入频谱的共轭对称性。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "fftfreq 与 rfftfreq 频率箱",
+          "filename": "u2-l2-fftfreq-rfftfreq.md",
+          "order": 2,
+          "level": "beginner",
+          "topic": "讲解 _helper.py 中 fftfreq/rfftfreq 如何根据 n 和采样间距 d 生成频率数组，奇偶长度的差异，以及 device 参数。",
+          "learning_goals": [
+            "理解 fftfreq 生成正负频率箱的算法",
+            "理解 rfftfreq 只给非负频率且把 Nyquist 视为正",
+            "学会为 rfft 结果匹配正确的频率轴"
+          ],
+          "minimal_modules": [
+            "fftfreq(n, d, device)",
+            "rfftfreq(n, d, device)",
+            "N=(n-1)//2+1 的正负频率切分",
+            "integer_types 校验"
+          ],
+          "source_files": [
+            "_helper.py",
+            "_helper.pyi"
+          ],
+          "practice_task": "给定采样率 fs=100、n=10，分别用 fftfreq 和 rfftfreq 生成频率轴，并把 fft / rfft 的结果与对应频率轴对齐画在同一张图上，解释两者长度差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "fftshift 与 ifftshift 频谱居中",
+          "filename": "u2-l3-fftshift-ifftshift.md",
+          "order": 3,
+          "level": "beginner",
+          "topic": "讲解 fftshift/ifftshift 如何用 roll 把零频搬到频谱中心，处理 axes 与多维情况，以及奇偶长度下二者相差一个样本。",
+          "learning_goals": [
+            "理解 fftshift 把零频移到中心、ifftshift 为其逆",
+            "掌握 axes 参数对多维数组的控制",
+            "理解奇偶长度下 fftshift 与 ifftshift 相差一个样本"
+          ],
+          "minimal_modules": [
+            "fftshift(x, axes)",
+            "ifftshift(x, axes)",
+            "roll 平移",
+            "shift = dim//2 计算"
+          ],
+          "source_files": [
+            "_helper.py",
+            "tests/test_helper.py"
+          ],
+          "practice_task": "构造 1D 和 2D 频谱数组，验证 ifftshift(fftshift(x)) == x 对奇偶长度都成立，并测试只在部分轴上平移的效果，对照 test_helper.py 中的预期值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "array_function 调度与 set_module 机制",
+          "filename": "u2-l4-array-function-dispatch.md",
+          "order": 4,
+          "level": "intermediate",
+          "topic": "讲解 overrides.array_function_dispatch 与 set_module 装饰器如何让这些函数归属 numpy.fft 命名空间并支持 __array_function__ 协议。",
+          "learning_goals": [
+            "理解 array_function_dispatch 的分发器模式",
+            "理解 set_module 如何设置 __module__",
+            "知道这些装饰器对第三方数组库（__array_function__）的意义"
+          ],
+          "minimal_modules": [
+            "array_function_dispatch + dispatcher",
+            "functools.partial(..., module='numpy.fft')",
+            "set_module('numpy.fft')"
+          ],
+          "source_files": [
+            "_helper.py",
+            "_pocketfft.py"
+          ],
+          "practice_task": "在 _helper.py 和 _pocketfft.py 中找出所有被 array_function_dispatch 或 set_module 装饰的函数，写出各自 dispatcher 返回什么；并解释为何 fftshift 用 array_function_dispatch 而 fftfreq/rfftfreq 用 set_module（这两组装饰器各解决什么问题）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "一维 FFT 核心流程",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "fft/ifft 与 _raw_fft 主流程",
+          "filename": "u3-l1-fft-ifft-raw-fft.md",
+          "order": 1,
+          "level": "intermediate",
+          "topic": "以 fft/ifft 为例，追踪从公开函数到内部统一入口 _raw_fft 的完整调用链，理解 n、axis 如何影响输出。",
+          "learning_goals": [
+            "掌握 fft/ifft 的参数语义（n 截断/补零、axis 选择）",
+            "理解 _raw_fft 作为所有一维变换统一入口的设计",
+            "看懂 is_real/is_forward 如何决定调用哪个后端 ufunc"
+          ],
+          "minimal_modules": [
+            "fft(a,n,axis,norm,out)",
+            "ifft(a,n,axis,norm,out)",
+            "_raw_fft(a,n,axis,is_real,is_forward,norm,out)",
+            "ufunc = pfu.fft / pfu.ifft"
+          ],
+          "source_files": [
+            "_pocketfft.py"
+          ],
+          "practice_task": "对同一信号分别用 n 小于、大于原长度调用 fft，观察截断与补零效果；并画出 _raw_fft 内部根据 (is_real, is_forward) 四种组合选择后端 ufunc 的决策表。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "norm 归一化与 _swap_direction",
+          "filename": "u3-l2-norm-and-swap-direction.md",
+          "order": 2,
+          "level": "intermediate",
+          "topic": "讲解 backward/ortho/forward 三种归一化模式、fct（inv_norm）的计算方式，以及反向变换如何通过 _swap_direction 交换方向。",
+          "learning_goals": [
+            "掌握三种 norm 的缩放规则与数学含义",
+            "理解 _swap_direction 为何要在反向变换时交换前后向",
+            "知道为何用 inv_norm/fct 而非直接除以 n（零长度轴保护与精度）"
+          ],
+          "minimal_modules": [
+            "norm 分支与 fct 计算",
+            "_swap_direction + _SWAP_DIRECTION_MAP",
+            "reciprocal/sqrt 的 real_dtype 精度处理",
+            "real_dtype = result_type(a.real.dtype, 1.0)"
+          ],
+          "source_files": [
+            "_pocketfft.py"
+          ],
+          "practice_task": "用同一个数组计算 fft 在 backward/ortho/forward 下的结果，验证 ifft(fft(a, norm='ortho'), norm='ortho') 约等于 a；并解释为何传 norm=None 与 'backward' 等价。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "out 参数、类型提升与输出 dtype",
+          "filename": "u3-l3-out-arg-and-dtype.md",
+          "order": 3,
+          "level": "intermediate",
+          "topic": "讲解 out 参数的形状/dtype 校验、自动分配输出数组时的 dtype 决策（实/复、类型提升），以及 float32→float64 的提升行为。",
+          "learning_goals": [
+            "掌握 out 参数的约束与报错条件",
+            "理解 irfft 输出实数、其余变换输出复数的 dtype 决策",
+            "知道类型提升规则对 float32/complex64 输入的影响"
+          ],
+          "minimal_modules": [
+            "out 自动分配与形状校验",
+            "out_dtype = real_dtype 或 result_type(a.dtype, 1j)",
+            "ufunc(..., out=out) 传入",
+            "_pocketfft.pyi 中 out 的 overload"
+          ],
+          "source_files": [
+            "_pocketfft.py",
+            "_pocketfft.pyi"
+          ],
+          "practice_task": "预分配一个正确形状与 dtype 的 out 数组分别传给 fft 与 irfft，验证结果被写入 out；再故意传一个 axis 维长度不匹配的 out，观察抛出的 ValueError。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "rfft/irfft 实数变换与 Hermitian 对称",
+          "filename": "u3-l4-rfft-irfft-hermitian.md",
+          "order": 4,
+          "level": "intermediate",
+          "topic": "讲解 rfft 如何利用实输入的 Hermitian 对称只输出 n//2+1 个频率点，irfft 如何由这些点重建实信号，以及 n 默认值带来的奇偶歧义。",
+          "learning_goals": [
+            "理解 rfft 输出长度为何是 n//2+1",
+            "掌握 irfft 默认偶数长度带来的歧义与显式 n 的必要性",
+            "学会用 irfft(rfft(a), m) 做 Fourier 插值/重采样"
+          ],
+          "minimal_modules": [
+            "rfft(a,n,axis,norm,out) 输出 n//2+1",
+            "irfft(a,n,axis,norm,out) 默认 n=(m-1)*2",
+            "n_out = n//2+1",
+            "后端 rfft_n_even / rfft_n_odd 选择"
+          ],
+          "source_files": [
+            "_pocketfft.py",
+            "_pocketfft.pyi"
+          ],
+          "practice_task": "对长度 9 的实信号做 rfft 再 irfft，分别用默认 n 和显式 n=9 还原，比较差异；并用 irfft(rfft(a), m) 把信号重采样到 m 个点。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "多维变换与 Hermitian 变换",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "fftn/ifftn 与 fft2/ifft2 多维变换",
+          "filename": "u4-l1-fftn-fft2-multidim.md",
+          "order": 1,
+          "level": "intermediate",
+          "topic": "讲解 N 维变换如何通过对各轴依次调用一维变换实现（_raw_fftnd 反向迭代），以及 fft2/ifft2 只是 fftn/ifftn 的默认 axes 不同。",
+          "learning_goals": [
+            "理解多维 FFT 等价于沿每个轴依次做 1D FFT",
+            "掌握 fft2/ifft2 与 fftn/ifftn 仅默认 axes 不同的关系",
+            "看懂 _raw_fftnd 的反向迭代循环"
+          ],
+          "minimal_modules": [
+            "_raw_fftnd(a,s,axes,function,norm,out)",
+            "fftn / ifftn",
+            "fft2 / ifft2 默认 axes=(-2,-1)",
+            "itl.reverse() 迭代顺序"
+          ],
+          "source_files": [
+            "_pocketfft.py"
+          ],
+          "practice_task": "构造一个 3D 数组，用 fftn 在指定两轴上变换，再手工用循环对每轴分别 fft 验证结果一致；并对比 fft2 与 fftn(..., axes=(-2,-1)) 的输出是否完全相同。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "_cook_nd_args 形状与轴处理",
+          "filename": "u4-l2-cook-nd-args.md",
+          "order": 2,
+          "level": "intermediate",
+          "topic": "深入讲解 _cook_nd_args 如何规范化 s 与 axes、处理 s=None/-1/含 None、invreal 末轴推断，以及相关 DeprecationWarning。",
+          "learning_goals": [
+            "掌握 s 与 axes 的规范化与长度校验",
+            "理解 s[i]==-1 表示沿用整轴的含义",
+            "看懂 NumPy 2.0 关于 s/axes 的弃用迁移路径"
+          ],
+          "minimal_modules": [
+            "_cook_nd_args(a,s,axes,invreal)",
+            "shapeless 与 axes 自动推断",
+            "s[i]==-1 表示整轴",
+            "invreal 时 s[-1]=(m-1)*2",
+            "DeprecationWarning（s 含 None / axes 为 None）"
+          ],
+          "source_files": [
+            "_pocketfft.py"
+          ],
+          "practice_task": "构造若干 (s, axes) 组合，预测 _cook_nd_args 的返回值并与实际调用对比；并分别触发 s 含 None、axes=None 但 s 非 None 两条 DeprecationWarning。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "rfftn/irfftn 与 rfft2/irfft2 实数多维变换",
+          "filename": "u4-l3-rfftn-irfftn-multidim.md",
+          "order": 3,
+          "level": "intermediate",
+          "topic": "讲解 rfftn 如何先对末轴做 rfft、对其余轴做 fft；irfftn 反向先对其余轴做 ifft、末轴做 irfft，以及末轴长度的奇偶歧义。",
+          "learning_goals": [
+            "理解 rfftn 的变换顺序与输出末轴长度",
+            "掌握 irfftn 为何必须给出 s 以避免末轴奇偶歧义",
+            "理解 rfft2/irfft2 只是默认 axes 不同的封装"
+          ],
+          "minimal_modules": [
+            "rfftn 末轴 rfft + 其余 fft",
+            "irfftn 其余 ifft + 末轴 irfft",
+            "rfft2 / irfft2 默认 axes",
+            "_cook_nd_args(invreal=1)"
+          ],
+          "source_files": [
+            "_pocketfft.py"
+          ],
+          "practice_task": "对实 3D 数组做 rfftn 再 irfftn，分别用默认 s 和显式 s=原形状还原，比较是否一致；并解释为何不传 s 可能丢失信息。",
+          "depends_on": [
+            "u3-l4",
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "hfft/ihfft Hermitian 变换",
+          "filename": "u4-l4-hfft-ihfft-hermitian.md",
+          "order": 4,
+          "level": "intermediate",
+          "topic": "讲解 hfft/ihfft 这一对用于时域 Hermitian 对称、频域实信号的变换，以及它们如何复用 irfft/rfft 与共轭实现。",
+          "learning_goals": [
+            "理解 hfft/ihfft 与 rfft/irfft 的对偶关系",
+            "掌握它们通过 conjugate + 方向交换实现的技巧",
+            "理解为何 hfft 需要显式给出 n 才能得到奇数长度"
+          ],
+          "minimal_modules": [
+            "hfft = irfft(conjugate(a), n, ...)",
+            "ihfft = conjugate(rfft(a, n, ...))",
+            "_swap_direction",
+            "奇偶长度 n 的必要性"
+          ],
+          "source_files": [
+            "_pocketfft.py"
+          ],
+          "practice_task": "构造一个满足 Hermitian 对称的时域信号，用 ihfft/hfft 验证 ihfft(hfft(a, 2*len(a)-1)) 约等于 a（奇长度）与 2*len(a)-2（偶长度）两种情形。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "C++ ufunc 后端与工程实践",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "_pocketfft_umath gufunc 注册",
+          "filename": "u5-l1-gufunc-registration.md",
+          "order": 1,
+          "level": "advanced",
+          "topic": "讲解 C++ 后端如何用 PyUFunc_FromFuncAndDataAndSignature 注册 fft/ifft/rfft_n_even/rfft_n_odd/irfft 五个广义 ufunc，及其 signature 如 (n),()->(m)。",
+          "learning_goals": [
+            "理解 gufunc signature 如何表达批处理一维向量到一维向量",
+            "看懂函数表/类型表/data 三元组的注册结构",
+            "理解同一 fft_functions 表用不同 data 区分正向/反向"
+          ],
+          "minimal_modules": [
+            "add_gufuncs",
+            "PyUFunc_FromFuncAndDataAndSignature",
+            "signature \"(n),()->(m)\"",
+            "fft_types / data（FORWARD/BACKWARD）"
+          ],
+          "source_files": [
+            "_pocketfft_umath.cpp",
+            "meson.build"
+          ],
+          "practice_task": "写出五个 gufunc 各自的输入/输出 dtype 表与 signature；并解释为何 rfft 要拆成 rfft_n_even 和 rfft_n_odd 两个 gufunc（提示：从输出长度反推输入长度有歧义）。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "fft/rfft/irfft 循环实现、向量化与 FFTpack 排序",
+          "filename": "u5-l2-loops-vectorization-fftpack.md",
+          "order": 2,
+          "level": "advanced",
+          "topic": "深入 fft_loop/rfft_impl/irfft_loop 的实现：向量化快路径、缓冲拷贝、FFTPack 压缩排列（R0,R1,I1,...），以及 copy_input/copy_output 与异常转换。",
+          "learning_goals": [
+            "理解向量化快路径的触发条件（vlen、n_outer、nin>=nout、sf==0）",
+            "掌握 rfft 中实频谱的压缩/解包技巧",
+            "理解 C++ 异常如何被 wrap_legacy_cpp_ufunc 转换为 Python 异常"
+          ],
+          "minimal_modules": [
+            "fft_loop 向量化路径（c2c）与非向量化缓冲路径",
+            "rfft_impl 偏移+解包（I0->R0）",
+            "irfft_loop FFTpack 重排",
+            "copy_input / copy_output",
+            "wrap_legacy_cpp_ufunc 异常转换"
+          ],
+          "source_files": [
+            "_pocketfft_umath.cpp",
+            "pocketfft/pocketfft_hdronly.h"
+          ],
+          "practice_task": "阅读 fft_loop，列出走向量化路径需同时满足的全部条件；并对照注释解释 rfft_impl 中 'op_or_buff[0] = op_or_buff[0].imag()' 这一步在做什么、为什么需要它。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "测试体系、回归与线程安全",
+          "filename": "u5-l3-tests-regression-threadsafe.md",
+          "order": 3,
+          "level": "advanced",
+          "topic": "结合 test_helper.py 与 test_pocketfft.py，讲解如何测试 FFT 的正确性、norm 保持、out 参数、输出顺序、整数/bool 输入、回归与线程安全。",
+          "learning_goals": [
+            "掌握用 ifft(fft(x)) 恒等性和 fft1 参考 DFT 验证变换正确性的思路",
+            "理解 out 参数与 s 交互的边界测试",
+            "了解 FFT ufunc 线程安全测试与回归测试的写法"
+          ],
+          "minimal_modules": [
+            "fft1 参考朴素 DFT",
+            "TestFFT1D identity / 各变换 / out 参数",
+            "test_all_1d_norm_preserving",
+            "TestFFTThreadSafe",
+            "test_irfft_with_n_*_regression",
+            "test_fft_with_integer_or_bool_input"
+          ],
+          "source_files": [
+            "tests/test_pocketfft.py",
+            "tests/test_helper.py"
+          ],
+          "practice_task": "参照 test_all_1d_norm_preserving，自写一段测试验证 rfft/irfft 在三种 norm 下满足 irfft(rfft(a), len(a), norm=X) 约等于 a；并通过 numpy.fft.test() 运行该模块的测试套件观察结果。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
