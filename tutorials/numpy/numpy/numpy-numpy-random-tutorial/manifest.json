@@ -1,7 +1,7 @@
 {
   "project": "numpy-numpy-random",
-  "head": "b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b",
-  "rationale": "numpy.random 是一个采用「BitGenerator 产出比特流 + Generator 转换为分布」两层架构的子系统，同时保留了 legacy RandomState 兼容层。本手册据此由浅入深：入门单元先让读者跑通 default_rng 并建立目录/构建/新旧 API 的全局认知；第二单元拆解连接 C 与 Cython 的 bitgen_t 结构及 BitGenerator/Generator 基类，作为后续所有源码阅读的骨架；第三单元讲种子与 SeedSequence 的熵混合、generate_state 与 spawn，打通「可复现 + 并行独立流」这一核心诉求；第四单元进入 C 分布核心 distributions.c 与 npyrandom 静态库（均匀/指数/正态 Ziggurat/Lemire 区间整数）；第五单元讲 Generator 方法如何借助 _common.pyx 的 cont/disc/broadcast/约束框架把 C 采样封装成 NumPy 分布 API；第六单元逐一剖析 MT19937、PCG64(DXSM)、Philox、SFC64 四类生成器；第七单元讲 capsule/ctypes/cffi 互操作与 Cython/CFFI/Numba 扩展；第八单元覆盖 legacy RandomState、pickle 序列化与测试体系。各讲义依赖关系严格遵循「先架构后实现、先公共框架后具体生成器」的顺序，确保每篇只解决一个独立问题。",
+  "head": "9559a6b1ac93610711d8f1243f8c949fca4420bb",
+  "rationale": "本次为增量更新。经 git diff 分析，previous_head (b21650c4) 到 current_head (9559a6b1) 之间仅有 3 个文件变更，全部位于 numpy 核心的 ufunc 类型注解（gcd/lcm/按位 ufunc 的特化，涉及 numpy/__init__.pyi、numpy/_core/umath.pyi、numpy/typing/tests/data/reveal/ufuncs.pyi），且经 `git diff --stat ... -- numpy/random/` 验证：numpy/random 目录下零文件变更。由于现有 27 篇讲义全部基于 numpy/random 源码，而这些源码在两次 HEAD 之间完全未变，因此所有讲义 action 标记为 keep，无需重写或重建。学习路径本身保持原有设计：入门单元建立 default_rng 与目录/构建/新旧 API 全局认知；第二单元拆解 bitgen_t 结构及 BitGenerator/Generator 基类骨架；第三单元讲 SeedSequence 熵混合、generate_state 与 spawn 打通可复现+并行独立流；第四单元进入 distributions.c 与 npyrandom 静态库的均匀/指数/正态(Ziggurat)/区间整数(Lemire)；第五单元讲 _common.pyx 的 cont/disc/broadcast/约束框架如何把 C 采样封装为 NumPy 分布 API；第六单元剖析 MT19937/PCG64(DXSM)/Philox/SFC64；第七单元讲 capsule/ctypes/cffi 互操作与 Cython/CFFI/Numba 扩展；第八单元覆盖 legacy RandomState、pickle 序列化与测试体系。依赖关系严格遵循「先架构后实现、先公共框架后具体生成器」的顺序。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "导入 numpy，分别用 np.random.default_rng(42) 和 np.random.RandomState(42) 各生成 5 个 [0,1) 浮点数，对比两者的方法名与输出差异，并写一句话总结新 API 的推荐理由。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -87,7 +87,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -114,7 +114,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -149,7 +149,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -176,7 +176,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -204,7 +204,7 @@
             "u2-l2",
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -238,7 +238,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -265,7 +265,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -292,7 +292,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -329,7 +329,7 @@
             "u2-l1",
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -356,7 +356,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -383,7 +383,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -411,7 +411,7 @@
             "u4-l1",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -448,7 +448,7 @@
             "u2-l3",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -475,7 +475,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -504,7 +504,7 @@
             "u4-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -532,7 +532,7 @@
             "u5-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -569,7 +569,7 @@
             "u2-l2",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -598,7 +598,7 @@
             "u2-l2",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -626,7 +626,7 @@
             "u2-l2",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -654,7 +654,7 @@
             "u2-l2",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -689,7 +689,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -718,7 +718,7 @@
             "u7-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -746,7 +746,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -783,7 +783,7 @@
             "u2-l3",
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -812,7 +812,7 @@
             "u2-l2",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -842,7 +842,7 @@
             "u2-l3",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

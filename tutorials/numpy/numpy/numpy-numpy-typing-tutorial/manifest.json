@@ -1,0 +1,624 @@
+{
+  "project": "numpy-numpy-typing",
+  "head": "9559a6b1ac93610711d8f1243f8c949fca4420bb",
+  "rationale": "numpy.typing 是 NumPy 的静态类型子系统：它本身是一个极薄的公共壳（仅通过 __all__ 导出 ArrayLike/DTypeLike/NBitBase/NDArray），真实实现都集中在私有的 numpy._typing 中，并配套一套以 mypy 为核心的静态类型测试体系（pass/fail/reveal/misc fixture）。据此把学习路线设计为六层：单元 1 从公共 API、public/private 分层与 PEP 561 类型分发入手，让读者先建立全局认知；单元 2 深入三大核心别名 ArrayLike/DTypeLike/NDArray 及其背后的 char_codes 字符串编码；单元 3 拆解支撑这些别名的 Protocol 鸭子类型（__array__/__array_function__/_NestedSequence/_SupportsDType）；单元 4 讲清精度协变体系——NBitBase 层次（含 2.3 弃用）、平台精度 _nbit 与标量协变别名 _scalars，以及现代 TypeVar/overload 替代方案；单元 5 进入工程化细节——.py/.pyi 双轨制、ufunc 的 @type_check_only 类型建模、类型别名的 sphinx 文档生成与模块级 __getattr__ 延迟弃用；单元 6 以 mypy 静态测试方法论、运行时/打包完整性测试和综合实战收尾。每单元由浅入深，讲义之间通过 depends_on 形成清晰依赖链，所有 source_files 均为实际阅读确认存在的 numpy/typing 与 numpy/_typing 文件。共 6 单元 20 讲，符合中型专项模块的体量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 numpy.typing",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "numpy.typing 是什么：静态类型与 NumPy",
+          "order": 1,
+          "filename": "u1-l1-what-is-numpy-typing.md",
+          "level": "beginner",
+          "topic": "介绍 NumPy 的静态类型子系统定位，为什么科学计算库需要 PEP 484 类型标注，以及类型系统比运行时更严格的设计取舍。",
+          "learning_goals": [
+            "区分静态类型检查与运行时行为",
+            "了解 numpy.typing 自 1.20 引入的背景与价值",
+            "理解模块文档中列出的若干‘类型比运行时更严格’的差异"
+          ],
+          "source_files": [
+            "numpy/typing/__init__.py"
+          ],
+          "minimal_modules": [
+            "numpy.typing",
+            "PEP 484"
+          ],
+          "practice_task": "创建一个最小脚本 import numpy.typing as npt，给一个简单函数加注解，用 mypy 或 pyright 跑一次并记录输出。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "公共 API 与目录结构：public 壳与 private 实现",
+          "order": 2,
+          "filename": "u1-l2-public-api-and-layout.md",
+          "level": "beginner",
+          "topic": "numpy.typing 仅导出 ArrayLike/DTypeLike/NBitBase/NDArray 四个名字，真实实现集中在私有 numpy._typing，理解两层分层与聚合导入。",
+          "learning_goals": [
+            "掌握 __all__ 与四个公共别名的来源",
+            "理解 public typing 薄壳 + private _typing 实现的分层",
+            "会读 _typing/__init__.py 的大量 re-export 聚合"
+          ],
+          "source_files": [
+            "numpy/typing/__init__.py",
+            "numpy/typing/__init__.pyi",
+            "numpy/_typing/__init__.py"
+          ],
+          "minimal_modules": [
+            "numpy.typing",
+            "numpy._typing",
+            "__all__"
+          ],
+          "practice_task": "打印 npt.__all__，再对比 numpy._typing 中多出的内部别名，列出公共 API 与私有实现的边界清单。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "PEP 561 类型分发：py.typed 与 .pyi 桩文件",
+          "order": 3,
+          "filename": "u1-l3-pep561-py-typed-stubs.md",
+          "level": "beginner",
+          "topic": "py.typed 标记与 .pyi 桩文件如何让 NumPy 成为‘自带类型’的包，以及 test_isfile 如何验证桩文件随包安装。",
+          "learning_goals": [
+            "理解 PEP 561 与 py.typed 标记的作用",
+            "理解 .pyi 桩文件在类型检查时优先于 .py",
+            "了解 test_isfile 对安装完整性的断言"
+          ],
+          "source_files": [
+            "numpy/typing/__init__.pyi",
+            "numpy/typing/tests/test_isfile.py"
+          ],
+          "minimal_modules": [
+            "PEP 561",
+            "py.typed",
+            ".pyi 桩文件"
+          ],
+          "practice_task": "在已安装的 numpy 包中定位 py.typed 与若干 __init__.pyi，写脚本检查其存在，复刻 test_isfile 的核心断言。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "三大核心类型别名",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ArrayLike：一切可转为数组的对象",
+          "order": 1,
+          "filename": "u2-l1-arraylike.md",
+          "level": "intermediate",
+          "topic": "拆解 ArrayLike 别名的构成（Buffer、_SupportsArray、_NestedSequence、内置标量）以及为何刻意避开 object 数组。",
+          "learning_goals": [
+            "读懂 _array_like.py 中 ArrayLike/_DualArrayLike/_ArrayLike 的组合",
+            "理解 _SupportsArray 协议在 ArrayLike 中的角色",
+            "理解类型系统‘避免 object 数组’的取舍"
+          ],
+          "source_files": [
+            "numpy/_typing/_array_like.py",
+            "numpy/_typing/_nested_sequence.py"
+          ],
+          "minimal_modules": [
+            "ArrayLike",
+            "_DualArrayLike",
+            "_SupportsArray",
+            "_NestedSequence"
+          ],
+          "practice_task": "写一个接受 npt.ArrayLike 返回 npt.NDArray 的函数，分别传入 list/tuple/np.array/生成器，用类型检查器观察哪些会报错。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "DTypeLike：一切可转为 dtype 的对象",
+          "order": 2,
+          "filename": "u2-l2-dtypelike.md",
+          "level": "intermediate",
+          "topic": "拆解 DTypeLike 的构成（type/str/np.dtype/_SupportsDType/_VoidDTypeLike）与字典字段为何被刻意排除。",
+          "learning_goals": [
+            "读懂 _dtype_like.py 的 DTypeLike 与 _VoidDTypeLike",
+            "理解 _DTypeDict TypedDict 的字段定义",
+            "理解 dict-of-fields 写法被排除的原因"
+          ],
+          "source_files": [
+            "numpy/_typing/_dtype_like.py",
+            "numpy/_typing/_char_codes.py"
+          ],
+          "minimal_modules": [
+            "DTypeLike",
+            "_VoidDTypeLike",
+            "_DTypeDict",
+            "_SupportsDType"
+          ],
+          "practice_task": "写函数接受 npt.DTypeLike 返回 np.dtype，分别用字符串码、type 对象、字典字段构造，看类型检查器对字典的反应。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "NDArray 与 ndarray 的形状/元素类型泛型",
+          "order": 3,
+          "filename": "u2-l3-ndarray-shape-dtype-generics.md",
+          "level": "intermediate",
+          "topic": "NDArray[ScalarT] 别名与 ndarray[Shape, DType] 双参数泛型，以及 _Shape/_AnyShape/_ShapeLike 的含义。",
+          "learning_goals": [
+            "理解 NDArray = ndarray[_AnyShape, np.dtype[ScalarT]] 的展开",
+            "掌握 ndarray 的形状与元素类型两个类型参数",
+            "读懂 _shape.py 中三个别名"
+          ],
+          "source_files": [
+            "numpy/_typing/_array_like.py",
+            "numpy/_typing/_shape.py"
+          ],
+          "minimal_modules": [
+            "NDArray",
+            "_AnyShape",
+            "_Shape",
+            "_ShapeLike"
+          ],
+          "practice_task": "用 PEP 695 type 语法定义一个带具体形状/元素类型的别名（如 RGB 图像 ndarray[tuple[int,int,int], np.dtype[np.uint8]]），并标注一个变量。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "_char_codes：dtype 字符串编码的 Literal 体系",
+          "order": 4,
+          "filename": "u2-l4-char-codes-literals.md",
+          "level": "intermediate",
+          "topic": "dtype 字符串编码（float64/i8/字节序前缀等）如何用嵌套 Literal 表达，以及嵌套 Literal 在运行时会被展平去重。",
+          "learning_goals": [
+            "读懂 _char_codes.py 的 Literal 别名层次（_GenericCodes→_NumberCodes→…）",
+            "理解嵌套 Literal 展平去重的运行时行为",
+            "理解字节序前缀 |=|<|> 的含义"
+          ],
+          "source_files": [
+            "numpy/_typing/_char_codes.py"
+          ],
+          "minimal_modules": [
+            "Literal",
+            "_char_codes",
+            "dtype 字符串编码"
+          ],
+          "practice_task": "追踪 'float64' 从 _Float64Codes 到 _GenericCodes 的包含路径，并列出 np.dtype('float64') 的若干等价字符串。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "协议（Protocol）与鸭子类型",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "_SupportsArray 与 __array__ / __array_function__ 协议",
+          "order": 1,
+          "filename": "u3-l1-supportsarray-protocols.md",
+          "level": "intermediate",
+          "topic": "_SupportsArray（__array__）与 _SupportsArrayFunc（__array_function__）两个 runtime_checkable 协议，以及 PEP 695/696 泛型协议语法。",
+          "learning_goals": [
+            "理解 Protocol + @runtime_checkable 的含义",
+            "掌握 class _SupportsArray[DTypeT: np.dtype] 这一 PEP 696 泛型协议语法",
+            "理解鸭子类型在 ArrayLike 定义中的作用"
+          ],
+          "source_files": [
+            "numpy/_typing/_array_like.py"
+          ],
+          "minimal_modules": [
+            "_SupportsArray",
+            "_SupportsArrayFunc",
+            "Protocol",
+            "runtime_checkable",
+            "__array__",
+            "__array_function__"
+          ],
+          "practice_task": "实现一个带 __array__ 方法的类，验证 isinstance(obj, _SupportsArray) 运行时为真，并把它作为 ArrayLike 传入函数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "_NestedSequence：嵌套序列协议",
+          "order": 2,
+          "filename": "u3-l2-nested-sequence-protocol.md",
+          "level": "intermediate",
+          "topic": "_NestedSequence 如何用递归类型描述任意深度的嵌套序列，以及旧的 Protocol[_T_co] 语法与 TYPE_CHECKING 导入技巧。",
+          "learning_goals": [
+            "理解 _NestedSequence 返回类型的递归表达",
+            "理解协变 TypeVar _T_co",
+            "理解为兼容 typing_extensions 的 default 而做的 TYPE_CHECKING 导入分支"
+          ],
+          "source_files": [
+            "numpy/_typing/_nested_sequence.py"
+          ],
+          "minimal_modules": [
+            "_NestedSequence",
+            "Protocol[_T_co]",
+            "协变 TypeVar",
+            "TYPE_CHECKING"
+          ],
+          "practice_task": "写一个接受 _NestedSequence[float] 的函数，分别传入 list 与多层嵌套 list，用 reveal_type 观察推断结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "_SupportsDType 与 _HasDType 协议",
+          "order": 3,
+          "filename": "u3-l3-supportsdtype-protocols.md",
+          "level": "intermediate",
+          "topic": "_HasDType / _HasNumPyDType / _SupportsDType 协议，描述‘带 dtype 属性’的对象并支撑 DTypeLike。",
+          "learning_goals": [
+            "理解 _HasDType 与 _HasNumPyDType 两个协议",
+            "理解 _SupportsDType 是它们的联合",
+            "理解 _DTypeLike 别名如何复用 _SupportsDType"
+          ],
+          "source_files": [
+            "numpy/_typing/_dtype_like.py"
+          ],
+          "minimal_modules": [
+            "_SupportsDType",
+            "_HasDType",
+            "_HasNumPyDType",
+            "property 协议"
+          ],
+          "practice_task": "实现一个带 dtype property 的类，验证它满足 _SupportsDType 协议并能作为 DTypeLike 使用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数值精度与协变体系",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "NBitBase 精度层次（及其 2.3 弃用）",
+          "order": 1,
+          "filename": "u4-l1-nbitbase-hierarchy.md",
+          "level": "intermediate",
+          "topic": "NBitBase 及 _8Bit.._128Bit 精度层次，@final/@set_module/__init_subclass__ 的保护机制，以及 .py 与 .pyi 两套实现的差异。",
+          "learning_goals": [
+            "理解把精度当作不变泛型参数的思想",
+            "读懂 __init_subclass__ 限制合法子类名的机制",
+            "理解 @final/@set_module 以及 .pyi 中额外的 _256Bit/_80Bit"
+          ],
+          "source_files": [
+            "numpy/_typing/_nbit_base.py",
+            "numpy/_typing/_nbit_base.pyi"
+          ],
+          "minimal_modules": [
+            "NBitBase",
+            "_8Bit.._128Bit",
+            "@final",
+            "@set_module",
+            "__init_subclass__",
+            "@deprecated"
+          ],
+          "practice_task": "尝试定义一个非法名字的子类触发 __init_subclass__ 的 TypeError，并对比 .pyi 中额外的 _256Bit/_80Bit，思考桩与实现不一致的意义。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "平台精度 _nbit 与标量协变别名 _scalars",
+          "order": 2,
+          "filename": "u4-l2-nbit-platform-and-scalars-co.md",
+          "level": "intermediate",
+          "topic": "_nbit.py 把平台相关标量映射到 bit 精度（如 _NBitIntP = _32Bit | _64Bit），_scalars.py 的 _XLike_co 协变别名与 same_kind casting。",
+          "learning_goals": [
+            "理解平台相关精度用联合类型表达",
+            "理解 _co（coercible）后缀的协变语义",
+            "读懂 _scalars.py 中各 _XLike_co 别名"
+          ],
+          "source_files": [
+            "numpy/_typing/_nbit.py",
+            "numpy/_typing/_scalars.py",
+            "numpy/_typing/_array_like.py"
+          ],
+          "minimal_modules": [
+            "_nbit 平台别名",
+            "_scalars _XLike_co",
+            "_ArrayLike*_co",
+            "casting same_kind"
+          ],
+          "practice_task": "追踪 np.int_ 的精度如何由 _NBitIntP 表达，并解释 _IntLike_co 为何同时包含 bool 与 np.bool。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "现代精度表达：TypeVar 与 @overload",
+          "order": 3,
+          "filename": "u4-l3-modern-typevar-overload.md",
+          "level": "intermediate",
+          "topic": "NBitBase 弃用后，如何用 bound TypeVar 或 @overload 表达精度关系（取自 __init__.py docstring 示例）。",
+          "learning_goals": [
+            "掌握用 bound TypeVar 替代 NBitBase 的写法",
+            "掌握用 @overload 表达不同输入精度→不同输出精度",
+            "理解官方不推荐 NBitBase 的理由"
+          ],
+          "source_files": [
+            "numpy/typing/__init__.py"
+          ],
+          "minimal_modules": [
+            "TypeVar bound",
+            "@typing.overload",
+            "精度关系建模"
+          ],
+          "practice_task": "用 @overload 重写 docstring 中的 phase(x) 示例，补全 complex64→float32 等三组重载，并用类型检查器验证。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "模块工程化与高级建模",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "运行时实现与桩文件双轨制（.py / .pyi / __init__.pyi）",
+          "order": 1,
+          "filename": "u5-l1-py-pyi-dual-track.md",
+          "level": "advanced",
+          "topic": "一个模块同时存在 .py（运行时）与 .pyi（类型检查）时，类型检查器优先读 .pyi；以 _ufunc.py vs _ufunc.pyi、__init__.py vs __init__.pyi 为例。",
+          "learning_goals": [
+            "理解 .pyi 相对 .py 的优先级与 type_check_only",
+            "理解 _ufunc.py 运行时为何只放占位而真实签名在 .pyi",
+            "理解 __init__.pyi 存在的意义"
+          ],
+          "source_files": [
+            "numpy/_typing/_ufunc.py",
+            "numpy/_typing/_ufunc.pyi",
+            "numpy/typing/__init__.py",
+            "numpy/typing/__init__.pyi"
+          ],
+          "minimal_modules": [
+            ".py / .pyi 双轨",
+            "type_check_only",
+            "__init__.pyi"
+          ],
+          "practice_task": "对比 _ufunc.py（3 行占位）与 _ufunc.pyi（数百行签名），解释运行时为何不需要这些类，并指出类型检查器读取哪一个。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "ufunc 的类型建模：_ufunc.pyi 详解",
+          "order": 2,
+          "filename": "u5-l2-ufunc-type-modeling.md",
+          "level": "advanced",
+          "topic": "_ufunc.pyi 如何用 @type_check_only 的 Protocol 子类 + 大量 @overload 给 ufunc 建模（_UFunc_Nin2_Nout1 等），以及 Never/NoReturn 表达‘不适用’。",
+          "learning_goals": [
+            "理解按 nin/nout 拆分 ufunc 子类的设计",
+            "理解 @overload 区分 (scalar,scalar)→scalar 与 (array,array)→array",
+            "理解用 NoReturn 表达 reduce 在多输出 ufunc 上不可用"
+          ],
+          "source_files": [
+            "numpy/_typing/_ufunc.pyi",
+            "numpy/_typing/_array_like.py",
+            "numpy/_typing/_scalars.py"
+          ],
+          "minimal_modules": [
+            "_UFunc_Nin2_Nout1/Nout2",
+            "@overload",
+            "Never/NoReturn",
+            "Unpack TypedDict kwargs"
+          ],
+          "practice_task": "阅读 _UFunc_Nin2_Nout1.__call__ 的多个重载，画出‘输入标量还是数组 / 是否提供 out’对应的返回类型决策树。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "类型别名的文档生成：_add_docstring",
+          "order": 3,
+          "filename": "u5-l3-add-docstring-generation.md",
+          "level": "advanced",
+          "topic": "PEP 695 type 语句没有 __doc__，numpy 用 _add_docstring 把 ArrayLike/DTypeLike/NDArray 的文档拼成 sphinx data 域文本并追加到模块 docstring。",
+          "learning_goals": [
+            "理解 type 别名无法直接挂 docstring 的问题",
+            "读懂 add_newdoc 与 _parse_docstrings 的处理逻辑",
+            "理解 __init__.py 末尾 __doc__ += _docstrings 的拼接"
+          ],
+          "source_files": [
+            "numpy/_typing/_add_docstring.py",
+            "numpy/typing/__init__.py"
+          ],
+          "minimal_modules": [
+            "_add_docstring",
+            "add_newdoc",
+            "_parse_docstrings",
+            "sphinx data 域"
+          ],
+          "practice_task": "运行 _parse_docstrings() 观察生成的 reStructuredText 片段，并解释为何 ArrayLike 文档要‘手动’生成而非写在 type 语句上。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "模块级 __getattr__ 与延迟弃用",
+          "order": 4,
+          "filename": "u5-l4-module-getattr-lazy-deprecation.md",
+          "level": "advanced",
+          "topic": "numpy.typing.__init__.py 用模块级 __getattr__/__dir__（PEP 562）实现 NBitBase 的延迟 DeprecationWarning 与懒加载。",
+          "learning_goals": [
+            "理解 PEP 562 模块级 __getattr__/__dir__",
+            "理解延迟导入与惰性弃用警告的动机",
+            "读懂 __DIR_SET 白名单逻辑"
+          ],
+          "source_files": [
+            "numpy/typing/__init__.py"
+          ],
+          "minimal_modules": [
+            "模块级 __getattr__",
+            "__dir__",
+            "PEP 562",
+            "DeprecationWarning",
+            "lazy import"
+          ],
+          "practice_task": "触发 npt.NBitBase 访问，用 warnings.catch_warnings 捕获 DeprecationWarning，并验证未访问其它名字时不触发警告。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "测试体系与综合实战",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "静态类型测试方法论：mypy reveal/pass/fail",
+          "order": 1,
+          "filename": "u6-l1-static-typing-test-methodology.md",
+          "level": "advanced",
+          "topic": "test_typing.py 用 mypy api 在 data/pass、fail、reveal、misc 上跑检查，test_pass/test_reveal/test_code_runs 三类断言如何编码期望行为。",
+          "learning_goals": [
+            "理解 pass/fail/reveal/misc 四类 fixture 的含义",
+            "读懂 run_mypy fixture 的缓存机制",
+            "理解 NPY_RUN_MYPY_IN_TESTSUITE 门控与 test_code_runs 的运行时回测"
+          ],
+          "source_files": [
+            "numpy/typing/tests/test_typing.py",
+            "numpy/typing/tests/data/pass/array_like.py",
+            "numpy/typing/tests/data/reveal/arithmetic.pyi"
+          ],
+          "minimal_modules": [
+            "mypy api",
+            "reveal_type",
+            "pass/fail/reveal fixture",
+            "pytest parametrize"
+          ],
+          "practice_task": "在 data/reveal 风格下仿写一个 .pyi，用 reveal_type/assert_type 表达某表达式的期望类型，并说明如何被 test_reveal 校验。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "运行时类型测试与打包完整性测试",
+          "order": 2,
+          "filename": "u6-l2-runtime-and-packaging-tests.md",
+          "level": "advanced",
+          "topic": "test_runtime.py 验证 PEP 695 别名在运行时 get_args/get_origin/get_type_hints 的可内省性与协议 isinstance；test_isfile.py 验证桩文件随包安装。",
+          "learning_goals": [
+            "理解 PEP 695 TypeAliasType.__value__ 在运行时的可内省性",
+            "理解 test_keys 保证 __all__ 与 TYPES 同步",
+            "理解 runtime_checkable 协议的 isinstance 行为"
+          ],
+          "source_files": [
+            "numpy/typing/tests/test_runtime.py",
+            "numpy/typing/tests/test_isfile.py"
+          ],
+          "minimal_modules": [
+            "get_args/get_origin/get_type_hints",
+            "TypeAliasType",
+            "runtime_checkable isinstance",
+            "PEP 561 安装验证"
+          ],
+          "practice_task": "复刻 test_runtime 的 TypeTup.from_type_alias，对 npt.ArrayLike 调用 get_args/get_origin，记录结果并解释。",
+          "depends_on": [
+            "u5-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "综合实战：为自定义数组函数编写并测试类型注解",
+          "order": 3,
+          "filename": "u6-l3-capstone-typing-practice.md",
+          "level": "advanced",
+          "topic": "综合运用 ArrayLike/DTypeLike/NDArray/协议/overload，为一个真实的数组处理函数编写完整类型注解，并补一个 reveal fixture。",
+          "learning_goals": [
+            "综合运用三大别名与协议设计函数签名",
+            "能写出带 @overload 的精度安全函数",
+            "能为自己的函数补一个 mypy reveal 测试用例"
+          ],
+          "source_files": [
+            "numpy/typing/__init__.py",
+            "numpy/_typing/_array_like.py",
+            "numpy/_typing/_dtype_like.py",
+            "numpy/_typing/_scalars.py",
+            "numpy/typing/tests/data/reveal/arithmetic.pyi"
+          ],
+          "minimal_modules": [
+            "ArrayLike",
+            "DTypeLike",
+            "NDArray",
+            "@overload",
+            "reveal fixture"
+          ],
+          "practice_task": "实现一个带 @overload 的函数（如按输入精度返回对应浮点数组），写出 2-3 个重载，再在 reveal 风格的 .pyi 里用 assert_type 验证返回类型。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3",
+            "u4-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

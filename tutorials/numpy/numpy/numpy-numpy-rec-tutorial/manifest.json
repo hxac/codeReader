@@ -1,0 +1,474 @@
+{
+  "project": "numpy-numpy-rec",
+  "head": "9559a6b1ac93610711d8f1243f8c949fca4420bb",
+  "rationale": "本手册聚焦于 NumPy 的 record array（recarray）子包 numpy.rec。该子包本身只是一个薄薄的再导出垫片（numpy/rec/__init__.py 直接 from numpy._core.records import *），真正的实现全部集中在 numpy/_core/records.py（约 1090 行），因此讲义必须把读者引导到 _core/records.py 这个真实实现文件。设计上分为五层：第一层（入门）让读者理解 recarray 是什么、与普通结构化数组的区别、如何快速创建；第二层（进阶）聚焦 dtype 的描述方式——format_parser 与字段名/标题/重复检测，以及列式构建 fromarrays；第三层（进阶）深入 recarray 与 record 两个核心类，理解属性访问背后的 __getattribute__/__setattr__ 魔法方法与 getfield/setfield 机制；第四层（专家）覆盖三种数据来源的构建函数 fromrecords（行式）、fromstring（二进制缓冲）、fromfile（文件读取）以及统一调度入口 array；第五层（专家）讨论视图/拷贝/dtype 转换、__repr__ 打印格式、测试与常见陷阱。讲义依赖关系按\"先概念后实现、先类后函数、先单点后总调度\"的顺序组织，确保每篇只讲一个相对独立的主题，且每篇都有可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 numpy.rec 与 record array",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "numpy.rec 模块定位与目录结构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 numpy.rec 子包的定位、它只是 numpy._core.records 的再导出垫片，以及真实实现文件所在位置和公开 API 清单。",
+          "learning_goals": [
+            "理解 numpy.rec 子包在 NumPy 中的定位和作用",
+            "知道 numpy/rec/__init__.py 只是再导出垫片，真正实现在 numpy/_core/records.py",
+            "列出 numpy.rec 公开的 9 个 API（record、recarray、format_parser 等）"
+          ],
+          "source_files": [
+            "numpy/rec/__init__.py",
+            "numpy/rec/__init__.pyi",
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "__all__ 导出列表",
+            "from ... import * 再导出机制",
+            "set_module 装饰器与 numpy.rec 命名空间"
+          ],
+          "practice_task": "在本机导入 numpy 后，打印 numpy.rec.__all__，并定位到 numpy._core.records.py，确认 fromarrays、recarray、format_parser 等符号确实定义在该文件中。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "结构化数组与 record array 的区别",
+          "order": 2,
+          "filename": "u1-l2-recarray-vs-structured-array.md",
+          "level": "beginner",
+          "topic": "讲解普通结构化数组（字典式 arr['x'] 访问）与 record array（属性式 arr.x 访问）的区别，以及 record 标量类型的作用。",
+          "learning_goals": [
+            "理解结构化 dtype 与字段（fields）的概念",
+            "区分 arr['x'] 字典访问与 arr.x 属性访问",
+            "认识 numpy.record 标量类型与 nt.void 的关系"
+          ],
+          "source_files": [
+            "numpy/_core/records.py",
+            "numpy/_core/numerictypes.py"
+          ],
+          "minimal_modules": [
+            "structured dtype fields",
+            "record(nt.void) 标量",
+            "recarray(ndarray) 子类"
+          ],
+          "practice_task": "创建一个 dtype=[('x','f8'),('y','i4')] 的普通 ndarray，先用 arr['x'] 访问字段；再用 arr.view(np.recarray) 转成 record array，对比 arr.x 的属性访问方式。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "五分钟创建你的第一个 record array",
+          "order": 3,
+          "filename": "u1-l3-first-recarray.md",
+          "level": "beginner",
+          "topic": "用最常用的 np.rec.array 与 np.rec.fromrecords 快速创建 record array，理解 dtype/formats/names 参数的最基本用法。",
+          "learning_goals": [
+            "使用 np.rec.fromrecords 从行数据创建 record array",
+            "使用 np.rec.array 通用构造函数",
+            "通过 names 参数给字段命名并用属性访问"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "fromrecords 函数",
+            "array 函数",
+            "names 参数与字段属性"
+          ],
+          "practice_task": "用 np.rec.fromrecords([(1,'a',1.1),(2,'b',2.2)], names='id,name,val') 创建 record array，然后分别打印 r.id、r.name、r.val 三个字段数组。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：dtype 描述与 format_parser",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "format_parser：把 formats/names/titles 转成 dtype",
+          "order": 1,
+          "filename": "u2-l1-format-parser.md",
+          "level": "intermediate",
+          "topic": "深入 format_parser 类的构造与 _parseFormats/_setfieldnames/_createdto 三个内部方法，理解如何把格式字符串描述转成结构化 dtype。",
+          "learning_goals": [
+            "理解 format_parser 的 formats/names/titles/aligned/byteorder 五个参数",
+            "掌握 _parseFormats 如何用 sb.dtype 解析格式列表或字符串",
+            "理解 _createdto 如何组装成带 names/formats/offsets/titles 的 dtype"
+          ],
+          "source_files": [
+            "numpy/_core/records.py",
+            "numpy/_core/numeric.py"
+          ],
+          "minimal_modules": [
+            "format_parser 类",
+            "sb.dtype 解析格式",
+            "dtype.fields/names/offsets"
+          ],
+          "practice_task": "用 format_parser(['f8','i4','S5'],['col1','col2','col3'],['T1','T2','T3']) 构造对象，打印 .dtype，观察 titles 如何与 names 一起出现在 dtype 定义中。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "字段命名、标题、默认名与重复检测",
+          "order": 2,
+          "filename": "u2-l2-field-names-titles-duplicates.md",
+          "level": "intermediate",
+          "topic": "讲解字段名的逗号分割、默认 f0/f1 命名、titles 别名机制、find_duplicate 重复检测，以及 _byteorderconv 字节序映射表。",
+          "learning_goals": [
+            "理解 names 既可传字符串（逗号分割）也可传列表的处理逻辑",
+            "掌握未指定 names 时默认 f0/f1/f2 命名规则与补齐逻辑",
+            "理解 find_duplicate 检测重名字段并抛 ValueError，以及 byteorder 映射"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "format_parser._setfieldnames",
+            "find_duplicate 函数",
+            "_byteorderconv 映射表"
+          ],
+          "practice_task": "故意用重复字段名 format_parser(['f8','i4'],['x','x']) 构造，观察抛出的 ValueError；再用空 names 构造，确认字段名变为 f0、f1。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "fromarrays：按列从数组列表构建",
+          "order": 3,
+          "filename": "u2-l3-fromarrays.md",
+          "level": "intermediate",
+          "topic": "讲解 fromarrays 如何把一个",
+          "learning_goals": [
+            "理解 fromarrays 接收的是列方向数组列表（每个数组对应一个字段）",
+            "掌握 shape 从 arrayList[0] 推断、以及多维字段 subarray 形状裁剪逻辑",
+            "理解字段数与数组数不匹配时抛 ValueError 的校验"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "fromarrays 函数",
+            "sb.asarray 转换",
+            "recarray 赋值与 shape 推断"
+          ],
+          "practice_task": "用 x1=np.array([1,2,3,4])、x2=np.array(['a','bb','ccc','dddd']) 通过 np.rec.fromarrays([x1,x2], names='num,txt') 构建，验证 r.num 与 r.txt 的 dtype 由源数组自动推导。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：recarray 与 record 两个核心类",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "recarray 类的 __new__ 构造与 __array_finalize__",
+          "order": 1,
+          "filename": "u3-l1-recarray-class-constructor.md",
+          "level": "intermediate",
+          "topic": "深入 recarray.__new__ 如何用 dtype 或 format_parser 构造、buf/offset/strides 参数、以及 __array_finalize__ 如何把 void dtype 自动转成 record dtype。",
+          "learning_goals": [
+            "理解 recarray 继承自 ndarray 并以 (record, descr) 作为 dtype.type",
+            "掌握 __new__ 中 buf 为空时调用 ndarray.__new__ 的两条路径",
+            "理解 __array_finalize__ 把 void 结构化类型自动提升为 record 类型的逻辑"
+          ],
+          "source_files": [
+            "numpy/_core/records.py",
+            "numpy/_core/numerictypes.py"
+          ],
+          "minimal_modules": [
+            "recarray(ndarray) 子类",
+            "__new__ 构造",
+            "__array_finalize__ 钩子"
+          ],
+          "practice_task": "直接用 np.recarray(3, dtype=[('x','f8'),('y','i4')]) 构造一个空 record array，逐元素赋值后打印 r.dtype.type，确认它是 numpy.record。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "属性访问魔法：__getattribute__ 与 __setattr__",
+          "order": 2,
+          "filename": "u3-l2-attribute-access-magic.md",
+          "level": "intermediate",
+          "topic": "讲解 recarray 如何通过 __getattribute__/__setattr__ 把属性访问映射到 dtype.fields 与 getfield/setfield，以及与 ndarray 内置属性名冲突的处理。",
+          "learning_goals": [
+            "理解 __getattribute__ 先查 object 属性、失败再查 dtype.fields 的回退逻辑",
+            "掌握字段名与 ndarray 内置属性同名时属性优先的行为",
+            "理解 __setattr__ 中字段名赋值走 setfield、且不允许动态创建与字段同名的实例属性"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "recarray.__getattribute__",
+            "recarray.__setattr__",
+            "getfield/setfield 与 dtype.fields"
+          ],
+          "practice_task": "构造一个含字段 'shape' 的 record array，尝试访问 r.shape，观察返回的是 ndarray.shape 还是字段，并解释原因；再用 r.field('shape') 显式访问该字段。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "record 标量类型与字段属性访问",
+          "order": 3,
+          "filename": "u3-l3-record-scalar.md",
+          "level": "intermediate",
+          "topic": "讲解 record(nt.void) 标量类型如何支持属性式字段访问、__getitem__、pprint 美化打印，以及与 setfield/getfield 的协作。",
+          "learning_goals": [
+            "理解 record 继承 nt.void 并通过 __getattribute__ 实现标量级属性字段访问",
+            "掌握 record.__getitem__ 对嵌套结构化字段的视图处理",
+            "理解 pprint 方法按字段名右对齐美化输出"
+          ],
+          "source_files": [
+            "numpy/_core/records.py",
+            "numpy/_core/numerictypes.py"
+          ],
+          "minimal_modules": [
+            "record(nt.void)",
+            "__getattribute__/__getitem__",
+            "pprint 与 getfield"
+          ],
+          "practice_task": "从 u1-l3 的 record array 取出单条 r[0]，用 r[0].id、r[0].name 访问标量字段，再调用 r[0].pprint() 观察美化输出格式。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：三种数据来源的构建函数与统一调度",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "fromrecords：行式构建与自动格式探测",
+          "order": 1,
+          "filename": "u4-l1-fromrecords.md",
+          "level": "advanced",
+          "topic": "深入 fromrecords 的两条路径：无 dtype/formats 时的慢速 object 数组逐列探测，以及直接 array 构造，并讲解 list-of-lists 的 FutureWarning 降级。",
+          "learning_goals": [
+            "理解 fromrecords 接收的是行（每行一个 tuple/list）方向的数据",
+            "掌握无 dtype 时用 sb.array(recList, dtype=object) 逐列提升类型的慢速路径",
+            "理解 list-of-lists 触发 FutureWarning 的兼容性降级与 _deprecate_shape_0_as_None"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "fromrecords 函数",
+            "sb.array dtype=object 逐列探测",
+            "_deprecate_shape_0_as_None"
+          ],
+          "practice_task": "分别用 list of tuple 和 list of list 调用 np.rec.fromrecords（不指定 dtype），对比后者是否会触发 FutureWarning，并思考自动类型提升的结果。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "fromstring：从二进制缓冲区构建",
+          "order": 2,
+          "filename": "u4-l2-fromstring-binary-buffer.md",
+          "level": "advanced",
+          "topic": "讲解 fromstring 如何从 bytes 缓冲按 itemsize 推断 shape、用 buf 参数构造 recarray，以及为何拒绝 str 输入。",
+          "learning_goals": [
+            "理解 fromstring 处理的是 bytes 而非 str，str 会抛 TypeError",
+            "掌握 shape 缺省时按 (len(datastring)-offset)//itemsize 推断",
+            "理解通过 recarray(shape, descr, buf=datastring, offset) 复用底层缓冲（可能只读）"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "fromstring 函数",
+            "descr.itemsize 与 shape 推断",
+            "recarray buf/offset 参数"
+          ],
+          "practice_task": "构造 a=b'\\x01\\x02\\x03abc'，用 np.rec.fromstring(a, dtype='u1,u1,u1,S3') 解析，打印结果与字段；再尝试传入 str 观察报错。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "fromfile：从二进制文件读取",
+          "order": 3,
+          "filename": "u4-l3-fromfile-binary-file.md",
+          "level": "advanced",
+          "topic": "讲解 fromfile 如何处理文件对象与路径、offset 跳过、get_remaining_size 计算剩余字节、shape 中 -1 的自动推断，以及字节数不足的校验。",
+          "learning_goals": [
+            "理解 fromfile 通过 hasattr(fd,'readinto') 区分已打开文件对象与路径",
+            "掌握 get_remaining_size 用 seek/tell 计算剩余字节数",
+            "理解 shape 含 -1 时按 size//itemsize 自动推断并校验 nbytes<=size"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "fromfile 函数",
+            "get_remaining_size 辅助函数",
+            "readinto 与 nullcontext 上下文"
+          ],
+          "practice_task": "用 tempfile 创建文件，写入 np.empty(10,dtype='f8,i4,S5') 的二进制数据，再用 np.rec.fromfile(fd, formats='f8,i4,S5', shape=10) 读回，验证第 0 条记录的三个字段值。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "array：统一调度构造函数",
+          "order": 4,
+          "filename": "u4-l4-array-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 array 如何根据 obj 类型（None/bytes/list/tuple/recarray/file/ndarray/其它）分发到 recarray/fromstring/fromrecords/fromarrays/fromfile 等具体函数，以及 copy 语义。",
+          "learning_goals": [
+            "理解 array 作为总调度入口按 obj 类型分支的完整判定顺序",
+            "掌握 list/tuple 时按首元素是 tuple/list 还是 ndarray 区分 fromrecords 与 fromarrays",
+            "理解 recarray/ndarray 输入时 view + copy 的处理逻辑"
+          ],
+          "source_files": [
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "array 调度函数",
+            "obj 类型分支判定",
+            "dtype/formats 预解析与 kwds 透传"
+          ],
+          "practice_task": "用同一个 np.rec.array 分别传入 list of tuple、二维 ndarray、bytes、已打开的文件对象，对照源码的 if-elif 分支，说明每种输入分别走了哪条构造路径。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：视图/拷贝机制、打印与测试陷阱",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "视图、拷贝与 record/void dtype 转换",
+          "order": 1,
+          "filename": "u5-l1-view-copy-dtype-conversion.md",
+          "level": "advanced",
+          "topic": "讲解 view(recarray)、copy 语义、(record, void_dtype) 这种二元 dtype 的构造，以及 __array_finalize__ 与 __setattr__ 如何协作保证 dtype.type 始终是 record。",
+          "learning_goals": [
+            "理解 view(recarray) 不拷贝数据只改视图类型",
+            "掌握二元 dtype (record, void_dtype) 如何把 void 标量类型替换为 record",
+            "理解 __array_finalize__ 与 __setattr__ 在视图/赋值时自动转换 void→record 的协作"
+          ],
+          "source_files": [
+            "numpy/_core/records.py",
+            "numpy/_core/numerictypes.py"
+          ],
+          "minimal_modules": [
+            "view(recarray)",
+            "copy 语义",
+            "(record, dtype) 二元 dtype 与 __array_finalize__"
+          ],
+          "practice_task": "创建普通结构化 ndarray 后 view(recarray)，检查 r.dtype.type 是否变为 numpy.record；再用 r.view(np.ndarray) 转回，观察 dtype.type 是否变回 np.void。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "__repr__ 打印格式与 legacy 打印模式",
+          "order": 2,
+          "filename": "u5-l2-repr-printing.md",
+          "level": "advanced",
+          "topic": "讲解 recarray.__repr__ 如何根据 dtype.type 选择 rec.array(...) 还是 array(...).view(numpy.recarray) 前缀、array2string 拼接，以及 _get_legacy_print_mode 对 record.__repr__/__str__ 的影响。",
+          "learning_goals": [
+            "理解 rec.array(...) 前缀与 array(...).view(numpy.recarray) 前缀的判定条件",
+            "掌握空数组时 '[], shape=...' 的特殊打印分支",
+            "理解 _get_legacy_print_mode()<=113 时 record 标量走 __str__ 的旧行为"
+          ],
+          "source_files": [
+            "numpy/_core/records.py",
+            "numpy/_core/arrayprint.py"
+          ],
+          "minimal_modules": [
+            "recarray.__repr__",
+            "sb.array2string 拼接",
+            "_get_legacy_print_mode 与 record.__repr__/__str__"
+          ],
+          "practice_task": "分别构造全 record dtype 和",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "测试套件与常见陷阱",
+          "order": 3,
+          "filename": "u5-l3-testing-pitfalls.md",
+          "level": "advanced",
+          "topic": "结合 numpy/_core/tests/test_records.py 的 TestFromrecords/TestRecord/TestPatternMatching/TestPathUsage 四组测试，讲解字段名与 ndarray 属性冲突、只读缓冲、2D fromrecords、pickle 往返等常见陷阱。",
+          "learning_goals": [
+            "理解 test_records.py 的测试组织与典型用例（fromrecords/fromstring/fromfile/record 属性）",
+            "掌握字段名与 ndarray 内置属性冲突时的访问优先级与规避方法",
+            "理解 fromstring 只读缓冲、fromrecords 2D 数据、pickle 往返等实际使用陷阱"
+          ],
+          "source_files": [
+            "numpy/_core/tests/test_records.py",
+            "numpy/_core/records.py"
+          ],
+          "minimal_modules": [
+            "TestFromrecords/TestRecord 测试类",
+            "字段名冲突用例",
+            "pickle 往返与只读缓冲用例"
+          ],
+          "practice_task": "运行 numpy/_core/tests/test_records.py，挑选 test_fromrecords_2d 与一个 record 属性访问用例，阅读断言并自己写一段等价的非测试代码复现该行为。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

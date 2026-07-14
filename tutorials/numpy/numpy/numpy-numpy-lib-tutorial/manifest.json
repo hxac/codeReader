@@ -1,7 +1,4 @@
 {
-  "project": "numpy-numpy-lib",
-  "head": "b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b",
-  "rationale": "numpy/lib 是一个体量很大的\"杂项函数库\"（约 27 个源文件、近 1MB 代码），收纳了不属于 core 或其它有明确用途子包（random/fft/linalg/ma）的函数。它的架构特征鲜明：公开 API 由\"薄再导出模块\"（npyio.py/format.py/stride_tricks.py 等）对外暴露，真正的实现集中在私有的 _*_impl.py 中，且几乎每个公开函数都采用 array_function_dispatch 的\"dispatcher + impl 双函数\"写法。因此学习路线从\"认识模块组织与导入机制\"起步（单元 1-2），让读者先建立\"再导出层 vs 实现层\"与\"dispatcher 模式\"的认知框架，再进入具体功能。功能层按\"数组结构操作→索引/步长/广播→数值与统计→集合/填充/NaN→类型/多项式/scimath→二进制与文本 IO→结构化数组\"的由浅入深顺序展开（单元 3-11 为 intermediate，单元 12-14 为 advanced）。IO 与 npy 二进制格式放在 advanced，因为它们涉及字节级序列化、内存映射与 pickle 安全权衡；结构化数组（recfunctions）放在最后，因为它最依赖对 dtype 内部结构的理解。每个单元尽量按单一源文件或单一功能域聚合，使讲义与源码可一一对应，便于 worker 生成讲义时引用真实代码。全量生成，所有讲义 action 均为 new。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +29,7 @@
           ],
           "practice_task": "写脚本遍历 numpy.lib.__all__，对每个成员打印其名称与 __module__，统计公开成员总数。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +58,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -89,7 +86,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -122,7 +119,7 @@
           ],
           "practice_task": "用 NumpyVersion 比较 '2.0.0' 与 '2.0.0rc1'，并验证同一预发布的不同 dev 版本比较相等。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -149,7 +146,7 @@
           ],
           "practice_task": "调用 numpy.lib._utils_impl.info(np.add) 查看输出，并用 drop_metadata 处理一个带 metadata 的 dtype。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -177,7 +174,7 @@
           ],
           "practice_task": "子类化 NDArrayOperatorsMixin 实现一个包装 ndarray 的 ArrayLike 类，验证 a+1 的结果仍是该类。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -214,7 +211,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -245,7 +242,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -281,7 +278,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -316,7 +313,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -342,7 +339,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -373,7 +370,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -410,7 +407,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -438,7 +435,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -472,7 +469,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -497,7 +494,7 @@
           ],
           "practice_task": "用 interp 在非均匀节点上插值，并用 unwrap 还原一个发生 2π 跳变的相位序列。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -534,7 +531,7 @@
           ],
           "practice_task": "用 select 实现一个分段函数，并用 place 按布尔掩码批量改写数组中的部分元素。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -570,7 +567,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -602,7 +599,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -633,7 +630,7 @@
           ],
           "practice_task": "用 density=True 对比 'fd' 与 'auto' 两种自动分箱在同一数据上的箱数差异。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -673,7 +670,7 @@
           ],
           "practice_task": "求两个数组的交集与并集，并用 isin 构造一个成员资格布尔掩码。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -703,7 +700,7 @@
           ],
           "practice_task": "对同一数组用 reflect 与 symmetric 两种模式各填充 3 个元素，对比边缘差异。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -743,7 +740,7 @@
           ],
           "practice_task": "对含 NaN 的数组分别用 nansum 与 sum 求和，并验证 nancumsum 的累积结果。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -776,7 +773,7 @@
             "u9-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -820,7 +817,7 @@
           ],
           "practice_task": "用 nan_to_num 清洗含 inf/nan 的数组，并用 common_type 推断一组不同类型数组的公共类型。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -852,7 +849,7 @@
           ],
           "practice_task": "用 polyfit 对带噪数据做 3 次拟合，再用 polyval 生成拟合曲线点。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -894,7 +891,7 @@
           ],
           "practice_task": "用 numpy.lib.scimath.sqrt 对负数求平方根，对比 np.sqrt 的 nan 结果。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -922,7 +919,7 @@
           ],
           "practice_task": "用 vectorize 把一个接受 1D 向量的标量函数包装为按行处理，并带 '(n)->()' 签名验证。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -958,7 +955,7 @@
           ],
           "practice_task": "用 struct 手写一段魔数+版本字节，再用 read_magic 解析校验版本号。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -991,7 +988,7 @@
           "depends_on": [
             "u12-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -1019,7 +1016,7 @@
           "depends_on": [
             "u12-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1059,7 +1056,7 @@
           "depends_on": [
             "u12-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l2",
@@ -1092,7 +1089,7 @@
           ],
           "practice_task": "用 genfromtxt 读取一个含缺失值与表头的 CSV，并用 converters 解析其中一列日期。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u13-l3",
@@ -1118,7 +1115,7 @@
           ],
           "practice_task": "用 DataSource 打开一个本地 .gz 文件并读取内容，观察其是否解压到缓存目录。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1155,7 +1152,7 @@
           ],
           "practice_task": "构造一个嵌套结构化 dtype，用 get_names 与 get_fieldstructure 打印字段树。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l2",
@@ -1185,7 +1182,7 @@
           "depends_on": [
             "u14-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u14-l3",
@@ -1218,9 +1215,12 @@
           "depends_on": [
             "u14-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
-  ]
+  ],
+  "project": "numpy-numpy-lib",
+  "head": "9559a6b1ac93610711d8f1243f8c949fca4420bb",
+  "rationale": "增量分析：上次 HEAD (b21650c4) 到当前 HEAD (9559a6b1) 之间仅有两个提交，均为类型标注相关（TYP: specialized gcd/lcm and binary bitwise ufuncs），只改动 numpy/__init__.pyi、numpy/_core/umath.pyi 与 numpy/typing/tests/data/reveal/ufuncs.pyi 三个文件——这些 ufunc 的实现与类型存根位于 numpy/_core，不在 numpy/lib 子包内。git diff --name-only 针对 numpy/lib 的变更数为 0，且现有讲义引用的源码文件无一被触碰。因此本单元/讲义结构与内容完全不受影响，全部 37 篇讲义 action 保持为 keep，无需任何 update/rebuild/new。学习路线与单元划分沿用上一版（再导出层 vs 实现层 → 数组结构/索引/广播 → 数值统计 → 集合/填充/NaN → 类型/多项式/scimath → 二进制与文本 IO → 结构化数组）保持不变。"
 }
