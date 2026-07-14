@@ -1,0 +1,1299 @@
+{
+  "project": "open-logic",
+  "head": "ecca8af95295e798b8a3bc6610cb52be9688ae01",
+  "rationale": "Open Logic 是一个纯 VHDL-2008 的 FPGA 标准库，分为 base/axi/intf/fix 四大区域，并配套 VUnit 仿真、Python 代码生成、VSG 代码检查、综合测试自动化与多工具 CI。学习路线按“先整体后局部、先基础后高级”的顺序设计：第 1 单元帮助读者从零认识项目定位、目录、运行方式与编码规范；第 2–7 单元按依赖关系逐区讲解——先 base 的包/流水线/RAM/FIFO（被所有其他区域依赖），再跨时钟域、时序与仲裁、AXI、外部接口 intf；第 8 单元引入 fix 定点基础（依赖 en_cl_fix），第 9 单元进入高级 DSP（CORDIC/CIC/FIR）；最后第 10 单元回到工程化主题：VUnit 测试台与验证组件、仿真运行器、覆盖率/徽章、代码检查与综合自动化、厂商集成与 CI。每个讲义只聚焦一个独立主题，引用真实源码文件并配一个可操作的代码实践任务，讲义之间通过 depends_on 明确依赖，使读者可以按拓扑顺序循序渐进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目导览与从零上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Open Logic 是什么：定位、哲学与许可证",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Open Logic 作为 VHDL 标准库的定位、Trustable Code/Ease of Use/Pure VHDL 三大设计哲学，以及 LGPL 许可证对商用 FPGA 项目的意义。",
+          "learning_goals": [
+            "理解 Open Logic 在 HDL 项目中的角色与价值",
+            "掌握项目三大设计哲学及其对代码风格的影响",
+            "了解许可证与商用使用的边界"
+          ],
+          "source_files": [
+            "Readme.md",
+            "License.txt",
+            "doc/EntityList.md"
+          ],
+          "minimal_modules": [
+            "项目定位与目标用户",
+            "三大设计哲学",
+            "许可证与商用例外"
+          ],
+          "practice_task": "阅读 Readme.md 与 License.txt，用一段话说明为什么 Open Logic 选择纯 VHDL 且不依赖厂商原语，并列举 LGPL 对 FPGA 商用项目的关键例外条款。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与目录布局",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库的整体目录结构：src 按区域拆分、test 镜像 src 并含 tb 验证组件、doc 提供实体文档与原则文档、sim/lint/tools 支撑工程化流程，以及 compile_order.txt 与 en_cl_fix 子模块的作用。",
+          "learning_goals": [
+            "掌握 src/test/doc/tools/sim/lint 各目录的职责",
+            "理解实体命名 olo_<area>_<function> 与目录的对应关系",
+            "了解 compile_order.txt 与 3rdParty 子模块的作用"
+          ],
+          "source_files": [
+            "Readme.md",
+            "compile_order.txt",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "src 区域划分",
+            "test 与 tb 验证组件",
+            "doc/sim/lint/tools 工程化目录",
+            "compile_order 与子模块"
+          ],
+          "practice_task": "依据 compile_order.txt 统计 base/axi/intf/fix 四个区域各自的源文件数量，并画出 src 与 test 目录的镜像对应关系示意图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "获取、编译与集成到厂商工具",
+          "order": 3,
+          "filename": "u1-l3-get-and-integrate.md",
+          "level": "beginner",
+          "topic": "讲解如何用 --recursive 克隆含子模块的仓库，如何按 compile_order 编译到一个名为 olo 的 VHDL 库，以及如何用各厂商 import_sources 脚本把源码导入 Vivado/Quartus 等工程。",
+          "learning_goals": [
+            "掌握含子模块仓库的正确获取方式",
+            "理解单库编译策略与库名选择",
+            "学会用 import_sources 脚本集成到厂商工具"
+          ],
+          "source_files": [
+            "doc/HowTo.md",
+            "compile_order.txt",
+            "tools/vivado/import_sources.tcl",
+            "tools/quartus/import_sources.tcl"
+          ],
+          "minimal_modules": [
+            "子模块获取",
+            "单库编译策略",
+            "厂商导入脚本",
+            "跨语言实例化注意事项"
+          ],
+          "practice_task": "阅读 tools/vivado/import_sources.tcl，描述它如何收集源文件并设置库 olo，然后在自己选择的工具中执行一次导入并把结果截图说明。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "运行第一个仿真（VUnit + GHDL）",
+          "order": 4,
+          "filename": "u1-l4-run-first-simulation.md",
+          "level": "beginner",
+          "topic": "讲解 sim/run.py 如何基于 VUnit 搭建仿真流程，默认使用 GHDL 并支持 NVC/Questa/Riviera，以及 test_configs 如何按区域组织测试用例与不同 generic 组合。",
+          "learning_goals": [
+            "掌握 sim/run.py 的命令行参数与仿真器选择",
+            "理解 test_configs 按区域组织测试的方式",
+            "学会运行单个实体的仿真并查看结果"
+          ],
+          "source_files": [
+            "sim/run.py",
+            "sim/test_configs/olo_base.py",
+            "sim/test_configs/utils.py"
+          ],
+          "minimal_modules": [
+            "VUnit 运行器",
+            "仿真器选择",
+            "test_configs 区域组织",
+            "代码生成前置步骤"
+          ],
+          "practice_task": "在 sim 目录运行 run.py 执行 olo_base 区域的一个测试用例（如 olo_base_fifo_sync），记录命令与通过/失败结果，并说明 --ghdl/--nvc 切换仿真器的方式。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "编码规范与阅读一个实体",
+          "order": 5,
+          "filename": "u1-l5-conventions-and-anatomy.md",
+          "level": "beginner",
+          "topic": "结合 olo_base_pl_stage.vhd 实例讲解 Open Logic 的编码规范：实体/端口/泛型/常量/类型命名后缀、AXI-S 握手、同步高有效复位作为进程末尾覆盖、可选端口默认值等。",
+          "learning_goals": [
+            "掌握命名规范与各类后缀含义",
+            "理解 AXI-S Valid/Ready 握手与同步复位写法",
+            "能读懂一个标准 Open Logic 实体的结构"
+          ],
+          "source_files": [
+            "doc/Conventions.md",
+            "src/base/vhdl/olo_base_pl_stage.vhd"
+          ],
+          "minimal_modules": [
+            "命名规范",
+            "握手与复位约定",
+            "默认值与可选端口",
+            "实体文件结构"
+          ],
+          "practice_task": "对照 Conventions.md 在 olo_base_pl_stage.vhd 中找出泛型后缀 _g、常量后缀 _c、复位覆盖写法的具体行，并说明两进程法（two-process）中 shadow 寄存器的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "base 基础构件：包、流水线、RAM 与同步 FIFO",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "base 包体系：math/logic/array/string/attribute",
+          "order": 1,
+          "filename": "u2-l1-base-packages.md",
+          "level": "beginner",
+          "topic": "讲解 base 区域五个公共包的作用：数学函数、逻辑函数、数组类型、字符串处理与跨工具综合属性定义，这些包是其他实体的基础依赖。",
+          "learning_goals": [
+            "了解各 pkg 提供的常用函数与类型",
+            "理解 pkg_attribute 如何封装跨工具综合属性",
+            "学会在设计中 use 这些包"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_pkg_math.vhd",
+            "src/base/vhdl/olo_base_pkg_logic.vhd",
+            "src/base/vhdl/olo_base_pkg_array.vhd",
+            "src/base/vhdl/olo_base_pkg_string.vhd",
+            "src/base/vhdl/olo_base_pkg_attribute.vhd"
+          ],
+          "minimal_modules": [
+            "pkg_math/logic",
+            "pkg_array",
+            "pkg_string",
+            "pkg_attribute 综合属性"
+          ],
+          "practice_task": "在 pkg_math 与 pkg_logic 中各找两个实用函数（如 log2、binaryToGray），写一个小的 VHDL 测试打印其返回值并仿真验证。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "流水线阶段与 AXI-S 握手（olo_base_pl_stage）",
+          "order": 2,
+          "filename": "u2-l2-pipeline-stage-handshake.md",
+          "level": "intermediate",
+          "topic": "深入讲解 olo_base_pl_stage 如何用两进程法实现带 Ready 反压的流水线寄存器，以及 Stages_g/UseReady_g 泛型与零级直通、shadow 寄存器避免数据丢失的机制。",
+          "learning_goals": [
+            "掌握两进程法与 record 的 RTL 写法",
+            "理解 Ready 反压与 shadow 寄存器协作原理",
+            "学会用 pl_stage 打断长组合逻辑路径"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_pl_stage.vhd",
+            "doc/base/olo_base_pl_stage.md"
+          ],
+          "minimal_modules": [
+            "两进程法 record",
+            "Ready 反压与 shadow 寄存器",
+            "Stages_g 多级展开",
+            "UseReady_g 无反压模式"
+          ],
+          "practice_task": "实例化一个 Stages_g=2、Width_g=16 的 olo_base_pl_stage，编写测试验证在 Out_Ready 拉低时数据不丢失，并用仿真波形展示 shadow 寄存器生效的时刻。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "RAM 实现：单端口/简单双端口/真双端口",
+          "order": 3,
+          "filename": "u2-l3-ram-implementations.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_base_ram_sp/sdp/tdp 三种 RAM 的接口与 RamBehavior_g（RBW 读前写 / WBR 写前读）如何适配不同 FPGA 的块 RAM 行为。",
+          "learning_goals": [
+            "理解三种 RAM 拓扑的端口差异",
+            "掌握 RamBehavior_g 对推断块 RAM 的影响",
+            "学会根据器件选择合适的读写行为"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_ram_sp.vhd",
+            "src/base/vhdl/olo_base_ram_sdp.vhd",
+            "src/base/vhdl/olo_base_ram_tdp.vhd"
+          ],
+          "minimal_modules": [
+            "单端口 RAM",
+            "简单双端口 RAM",
+            "真双端口 RAM",
+            "RBW/WBR 行为切换"
+          ],
+          "practice_task": "实例化 olo_base_ram_sdp 并分别在 RamBehavior_g=RBW 与 WBR 下仿真同地址读写，对比输出差异并解释为何要提供两种行为。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "同步 FIFO（olo_base_fifo_sync）",
+          "order": 4,
+          "filename": "u2-l4-sync-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解同步 FIFO 的接口、深度/几乎满几乎空等级、ReadyRstState_g 以及其 testbench 如何用 VUnit 覆盖多种 generic 组合。",
+          "learning_goals": [
+            "掌握同步 FIFO 的端口与状态信号",
+            "理解几乎满/几乎空等级的用途",
+            "学会阅读并运行该实体的 VUnit 测试台"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_fifo_sync.vhd",
+            "doc/base/olo_base_fifo_sync.md",
+            "test/base/olo_base_fifo_sync/olo_base_fifo_sync_tb.vhd"
+          ],
+          "minimal_modules": [
+            "FIFO 接口与状态",
+            "几乎满/几乎空",
+            "ReadyRstState_g",
+            "VUnit 测试台结构"
+          ],
+          "practice_task": "运行 olo_base_fifo_sync 的测试台，修改 Depth_g 与 AlmFullLevel_g 各跑一次，记录几乎满信号拉起的时刻并验证与等级设置一致。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "FIFO 进阶与位宽转换/TDM",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "异步 FIFO（olo_base_fifo_async）",
+          "order": 1,
+          "filename": "u3-l1-async-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解异步 FIFO 如何用独立读写时钟与格雷码指针实现安全的跨时钟域数据传输，以及它作为通用时钟跨越实体的定位。",
+          "learning_goals": [
+            "理解异步 FIFO 双时钟域指针同步原理",
+            "掌握其作为时钟跨越实体的使用场景",
+            "了解与 olo_base_cc_handshake 的取舍"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_fifo_async.vhd",
+            "doc/base/olo_base_fifo_async.md"
+          ],
+          "minimal_modules": [
+            "双时钟域指针同步",
+            "格雷码计数器",
+            "作为时钟跨越使用",
+            "与 cc_handshake 取舍"
+          ],
+          "practice_task": "实例化 olo_base_fifo_async 连接两个不同频率时钟，仿真验证写快读慢场景下 Full 信号正确拉起且无数据丢失。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "包 FIFO（olo_base_fifo_packet）",
+          "order": 2,
+          "filename": "u3-l2-packet-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解包 FIFO 的存储转发机制，包括写侧丢包、读侧跳过/重复整包，以及 Last/Be 信号如何界定包边界。",
+          "learning_goals": [
+            "掌握包 FIFO 的存储转发与包边界界定",
+            "理解写侧丢包与读侧跳过/重复机制",
+            "学会在 AXI-S 包流中使用该实体"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_fifo_packet.vhd",
+            "doc/base/olo_base_fifo_packet.md"
+          ],
+          "minimal_modules": [
+            "存储转发机制",
+            "包边界 Last/Be",
+            "写侧丢包",
+            "读侧跳过/重复"
+          ],
+          "practice_task": "向 olo_base_fifo_packet 写入若干包后在写侧触发一次丢包，仿真验证读侧只输出完整包且被丢弃的包不出现。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "位宽转换与 TDM（wconv/tdm_mux）",
+          "order": 3,
+          "filename": "u3-l3-width-conversion-tdm.md",
+          "level": "intermediate",
+          "topic": "讲解 n2xn/xn2n 整数倍位宽转换与 TDM 之间的转换关系，n2m 任意位宽转换，以及 tdm_mux 选取特定通道，结合 TDM 约定理解 Last 标记。",
+          "learning_goals": [
+            "理解 TDM 约定与并行/TDM 转换",
+            "掌握整数倍与任意位宽转换的接口",
+            "学会用 Last 标记重建通道映射"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_wconv_n2xn.vhd",
+            "src/base/vhdl/olo_base_wconv_xn2n.vhd",
+            "src/base/vhdl/olo_base_wconv_n2m.vhd",
+            "src/base/vhdl/olo_base_tdm_mux.vhd",
+            "doc/Conventions.md"
+          ],
+          "minimal_modules": [
+            "TDM 约定",
+            "n2xn/xn2n 转换",
+            "n2m 任意位宽",
+            "tdm_mux 通道选取"
+          ],
+          "practice_task": "用 olo_base_wconv_xn2n 把 4 个并行通道转为 TDM，再用 olo_base_tdm_mux 选出第 2 通道，仿真验证输出顺序与 Last 标记一致。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "跨时钟域（Clock Crossings）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "跨时钟域原理与约束、复位穿越",
+          "order": 1,
+          "filename": "u4-l1-clock-crossing-principles.md",
+          "level": "intermediate",
+          "topic": "讲解 clock_crossing_principles.md：手动 set_max_delay 约束、AMD 自动 scoped 约束、复位双向穿越与 RstOut 的使用，以及 cc_reset 的实现。",
+          "learning_goals": [
+            "掌握跨时钟域的约束方法与工具差异",
+            "理解复位穿越与 RstIn/RstOut 的连接",
+            "学会用选择表挑选合适的时钟跨越实体"
+          ],
+          "source_files": [
+            "doc/base/clock_crossing_principles.md",
+            "src/base/vhdl/olo_base_cc_reset.vhd",
+            "src/base/vhdl/olo_base_cc_bits.vhd"
+          ],
+          "minimal_modules": [
+            "手动/自动约束",
+            "复位穿越",
+            "cc_reset 实现",
+            "选择表"
+          ],
+          "practice_task": "依据选择表为“多 bit 状态低更新率”和“单周期脉冲”两种需求各选定一个实体，并写出对应的 set_max_delay 约束 TCL。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "简单跨时钟域：pulse/simple/status",
+          "order": 2,
+          "filename": "u4-l2-simple-clock-crossings.md",
+          "level": "intermediate",
+          "topic": "讲解 cc_pulse 传单周期脉冲、cc_simple 传有效数据、cc_status 传低更新率状态/配置的实现差异与适用场景。",
+          "learning_goals": [
+            "理解脉冲与数据跨越的握手差异",
+            "掌握 status 跨越的一致性保证机制",
+            "学会按数据特性选择简单跨越实体"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_cc_pulse.vhd",
+            "src/base/vhdl/olo_base_cc_simple.vhd",
+            "src/base/vhdl/olo_base_cc_status.vhd"
+          ],
+          "minimal_modules": [
+            "cc_pulse 脉冲跨越",
+            "cc_simple 数据/有效跨越",
+            "cc_status 状态跨越",
+            "适用场景对比"
+          ],
+          "practice_task": "用 cc_pulse 在两个异步时钟域间传递一个高频脉冲，仿真验证目的域每源脉冲恰好产生一个脉冲，无重复无丢失。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "握手与相位对齐跨时钟域",
+          "order": 3,
+          "filename": "u4-l3-handshake-phase-aligned-crossings.md",
+          "level": "intermediate",
+          "topic": "讲解 cc_handshake 用标准 Valid/Ready 跨异步时钟域，以及 cc_n2xn/cc_xn2n 在相位对齐整数倍时钟间的低成本跨越。",
+          "learning_goals": [
+            "理解 Valid/Ready 跨域握手的实现",
+            "掌握相位对齐整数倍时钟的特殊优化",
+            "学会在相位对齐场景下避免使用异步 FIFO"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_cc_handshake.vhd",
+            "src/base/vhdl/olo_base_cc_n2xn.vhd",
+            "src/base/vhdl/olo_base_cc_xn2n.vhd"
+          ],
+          "minimal_modules": [
+            "cc_handshake 握手跨越",
+            "cc_n2xn 慢到快",
+            "cc_xn2n 快到慢",
+            "相位对齐前提"
+          ],
+          "practice_task": "在两个相位对齐、频率比 1:4 的时钟间用 cc_xn2n 传输数据流，仿真验证无需异步 FIFO 即可正确跨域，并说明其前提条件。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "时序、仲裁、CRC 与杂项 base",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "时序相关实体：delay/strobe/rate_limit/latency_comp",
+          "order": 1,
+          "filename": "u5-l1-timing-entities.md",
+          "level": "intermediate",
+          "topic": "讲解固定/可配延迟、strobe 生成与分频、速率限制与延迟补偿等时序实体的接口与典型用途。",
+          "learning_goals": [
+            "掌握 delay/delay_cfg 的固定与运行时可配延迟",
+            "理解 strobe_gen/strobe_div 的事件生成与分频",
+            "学会用 rate_limit/latency_comp 控制流式数据速率与对齐延迟"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_delay.vhd",
+            "src/base/vhdl/olo_base_delay_cfg.vhd",
+            "src/base/vhdl/olo_base_strobe_gen.vhd",
+            "src/base/vhdl/olo_base_strobe_div.vhd",
+            "src/base/vhdl/olo_base_rate_limit.vhd",
+            "src/base/vhdl/olo_base_latency_comp.vhd"
+          ],
+          "minimal_modules": [
+            "固定/可配延迟",
+            "strobe 生成与分频",
+            "速率限制",
+            "延迟补偿"
+          ],
+          "practice_task": "用 strobe_gen 产生 1ms 周期脉冲驱动 strobe_div 做 1/10 分频，并用 delay_cfg 对一路 AXI-S 数据延迟若干拍，仿真验证三者时序对齐。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "仲裁器：优先级/轮询/加权轮询",
+          "order": 2,
+          "filename": "u5-l2-arbiters.md",
+          "level": "intermediate",
+          "topic": "讲解 arb_prio 固定优先级、arb_rr 轮询、arb_wrr 加权轮询三种仲裁器的实现差异与公平性取舍。",
+          "learning_goals": [
+            "理解三种仲裁策略的公平性与延迟特性",
+            "掌握加权轮询的权重配置方式",
+            "学会按带宽分配需求选择仲裁器"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_arb_prio.vhd",
+            "src/base/vhdl/olo_base_arb_rr.vhd",
+            "src/base/vhdl/olo_base_arb_wrr.vhd"
+          ],
+          "minimal_modules": [
+            "优先级仲裁",
+            "轮询仲裁",
+            "加权轮询",
+            "公平性对比"
+          ],
+          "practice_task": "用 arb_wrr 为三个请求者配置 4:2:1 权重，持续请求下统计各通道获得授权次数比，验证接近 4:2:1。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "CRC 引擎与包校验",
+          "order": 3,
+          "filename": "u5-l3-crc-engine.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_base_crc 的 CRC 计算、crc_append 在写侧追加 CRC、crc_check 在读侧校验并丢弃错误包的协作链路。",
+          "learning_goals": [
+            "掌握 CRC 计算引擎的配置与多项式",
+            "理解追加/校验构成的包保护链路",
+            "学会在 AXI-S 包流上启用 CRC 校验"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_crc.vhd",
+            "src/base/vhdl/olo_base_crc_append.vhd",
+            "src/base/vhdl/olo_base_crc_check.vhd"
+          ],
+          "minimal_modules": [
+            "CRC 计算引擎",
+            "crc_append 追加",
+            "crc_check 校验丢弃",
+            "包保护链路"
+          ],
+          "practice_task": "用 crc_append 与 crc_check 串接一个包通路，人为注入一个错误包，仿真验证 crc_check 正确丢弃该包而放过正确包。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "杂项 base：CAM/PRBS/复位生成/动态移位等",
+          "order": 4,
+          "filename": "u5-l4-misc-base.md",
+          "level": "intermediate",
+          "topic": "讲解内容寻址存储 CAM、PRBS 伪随机序列、复位生成器、动态桶形移位、首位解码器、流控处理器等杂项实体的用途与实现要点。",
+          "learning_goals": [
+            "理解 CAM 的查找与匹配机制",
+            "掌握 PRBS 的 LFSR 实现与复位生成器用途",
+            "学会用 flowctrl_handler 为无反压模块补全流控"
+          ],
+          "source_files": [
+            "src/base/vhdl/olo_base_cam.vhd",
+            "src/base/vhdl/olo_base_prbs.vhd",
+            "src/base/vhdl/olo_base_reset_gen.vhd",
+            "src/base/vhdl/olo_base_dyn_sft.vhd",
+            "src/base/vhdl/olo_base_flowctrl_handler.vhd",
+            "src/base/vhdl/olo_base_decode_firstbit.vhd"
+          ],
+          "minimal_modules": [
+            "CAM 内容寻址",
+            "PRBS 与复位生成",
+            "动态移位与首位解码",
+            "流控处理器"
+          ],
+          "practice_task": "用 olo_base_cam 实现一个 4 项查找表，写入若干键后查询命中与未命中情形，并用 reset_gen 产生上电复位脉冲驱动它。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "AXI 区域：流水线、从机与主机",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "AXI 流水线阶段（olo_axi_pl_stage）",
+          "order": 1,
+          "filename": "u6-l1-axi-pipeline-stage.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_axi_pl_stage 如何寄存完整 AXI4（含 AXI4-Lite）接口的所有信号以打断时序路径，及其与 base pl_stage 的关系。",
+          "learning_goals": [
+            "理解 AXI4 全接口信号分组寄存的方法",
+            "掌握 pl_stage 在 AXI 时序优化中的作用",
+            "学会在 AXI 与 AXI-Lite 间复用该实体"
+          ],
+          "source_files": [
+            "src/axi/vhdl/olo_axi_pl_stage.vhd",
+            "doc/axi/olo_axi_pl_stage.md"
+          ],
+          "minimal_modules": [
+            "AXI4 信号分组寄存",
+            "AXI-Lite 复用",
+            "时序优化用途",
+            "与 base pl_stage 关系"
+          ],
+          "practice_task": "实例化 olo_axi_pl_stage 寄存一段 AXI4-Lite 接口，仿真验证读写经过寄存后功能不变且延迟增加一拍。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "AXI4-Lite 从机与寄存器接口",
+          "order": 2,
+          "filename": "u6-l2-axi-lite-slave.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_axi_lite_slave 如何把用户寄存器组与存储挂到 AXI4-Lite 总线，结合 RbExample.vhd 展示典型寄存器组接入方式。",
+          "learning_goals": [
+            "掌握 AXI4-Lite 从机的寄存器映射机制",
+            "理解读/写寄存器与存储的接入方式",
+            "学会参照 RbExample 构建自己的寄存器组"
+          ],
+          "source_files": [
+            "src/axi/vhdl/olo_axi_lite_slave.vhd",
+            "doc/axi/olo_axi_lite_slave.md",
+            "doc/axi/slave/RbExample.vhd"
+          ],
+          "minimal_modules": [
+            "寄存器映射",
+            "读写寄存器接入",
+            "存储接入",
+            "RbExample 示例"
+          ],
+          "practice_task": "参照 RbExample.vhd 设计一个含 2 个可读写寄存器的寄存器组，挂到 olo_axi_lite_slave，用 AXI 主机 VC 仿真验证读写正确。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "AXI4 简单主机（olo_axi_master_simple）",
+          "order": 3,
+          "filename": "u6-l3-axi-master-simple.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_axi_master_simple 如何执行任意长度但字对齐的 AXI4 传输，以及 olo_axi_pkg_protocol 提供的协议辅助定义。",
+          "learning_goals": [
+            "掌握简单主机的命令接口与字对齐限制",
+            "理解协议包 olo_axi_pkg_protocol 的作用",
+            "学会用简单主机发起突发读写"
+          ],
+          "source_files": [
+            "src/axi/vhdl/olo_axi_master_simple.vhd",
+            "src/axi/vhdl/olo_axi_pkg_protocol.vhd",
+            "doc/axi/olo_axi_master_simple.md"
+          ],
+          "minimal_modules": [
+            "命令接口",
+            "字对齐限制",
+            "协议包辅助",
+            "突发读写"
+          ],
+          "practice_task": "用 olo_axi_master_simple 对一片内存发起一次长度 8 的突发写再读回，仿真验证数据一致并说明其对齐约束。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "AXI4 全功能主机（olo_axi_master_full）",
+          "order": 4,
+          "filename": "u6-l4-axi-master-full.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_axi_master_full 在简单主机基础上支持非字对齐的起始地址与长度访问，以及其与简单主机的取舍。",
+          "learning_goals": [
+            "理解非对齐访问的实现与额外开销",
+            "掌握 full 与 simple 的能力边界",
+            "学会按对齐需求选择主机版本"
+          ],
+          "source_files": [
+            "src/axi/vhdl/olo_axi_master_full.vhd",
+            "doc/axi/olo_axi_master_full.md"
+          ],
+          "minimal_modules": [
+            "非对齐访问",
+            "与 simple 的差异",
+            "能力边界",
+            "选型取舍"
+          ],
+          "practice_task": "分别用 simple 与 full 主机发起一个非字对齐读取，对比行为差异，并说明 full 主机如何处理跨字节的访问。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "intf 区域：外部接口",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "同步、消抖与时钟测量",
+          "order": 1,
+          "filename": "u7-l1-sync-debounce-clkmeas.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_intf_sync 双级同步器、olo_intf_debounce 含同步的消抖器、olo_intf_clk_meas 时钟频率测量器的实现与典型用途。",
+          "learning_goals": [
+            "掌握双级同步器与消抖的级联使用",
+            "理解时钟频率测量的原理",
+            "学会为外部按钮/开关选择合适的消抖配置"
+          ],
+          "source_files": [
+            "src/intf/vhdl/olo_intf_sync.vhd",
+            "src/intf/vhdl/olo_intf_debounce.vhd",
+            "src/intf/vhdl/olo_intf_clk_meas.vhd"
+          ],
+          "minimal_modules": [
+            "双级同步器",
+            "消抖器",
+            "时钟测量",
+            "外部信号处理"
+          ],
+          "practice_task": "用 olo_intf_debounce 处理一个模拟抖动的按钮信号，并用 olo_intf_clk_meas 测量一个已知频率时钟，仿真验证测量结果误差在允许范围内。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "UART（olo_intf_uart）",
+          "order": 2,
+          "filename": "u7-l2-uart.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_intf_uart 的发送/接收通路、波特率与帧格式配置及其 AXI-S 风格的数据接口。",
+          "learning_goals": [
+            "掌握 UART 的波特率与帧格式配置",
+            "理解收发通路与 AXI-S 接口的对接",
+            "学会用 UART 收发一个字节流"
+          ],
+          "source_files": [
+            "src/intf/vhdl/olo_intf_uart.vhd",
+            "doc/intf/olo_intf_uart.md"
+          ],
+          "minimal_modules": [
+            "波特率与帧格式",
+            "发送通路",
+            "接收通路",
+            "AXI-S 数据接口"
+          ],
+          "practice_task": "实例化 olo_intf_uart 配置常用波特率，回环连接发送与接收，仿真发送一段字符并验证接收端还原一致。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "SPI 主机与从机",
+          "order": 3,
+          "filename": "u7-l3-spi-master-slave.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_intf_spi_master（多从机、可变位宽、CPOL/CPHA、LSB/MSB）与 olo_intf_spi_slave 的接口与配置。",
+          "learning_goals": [
+            "掌握 SPI 主机的多从机与可变位宽配置",
+            "理解 CPOL/CPHA 与 LSB/MSB 的设置",
+            "学会主从对接完成一次传输"
+          ],
+          "source_files": [
+            "src/intf/vhdl/olo_intf_spi_master.vhd",
+            "src/intf/vhdl/olo_intf_spi_slave.vhd"
+          ],
+          "minimal_modules": [
+            "SPI 主机配置",
+            "SPI 从机配置",
+            "CPOL/CPHA 相位",
+            "LSB/MSB 顺序"
+          ],
+          "practice_task": "将 spi_master 与 spi_slave 对接，配置相同的 CPOL/CPHA 与位宽，仿真完成一次全双工传输并验证交换的数据正确。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "I2C 主机（olo_intf_i2c_master）",
+          "order": 4,
+          "filename": "u7-l4-i2c-master.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_intf_i2c_master 对完整 I2C 标准的支持，包括多主仲裁与时钟拉伸，以及其命令式接口。",
+          "learning_goals": [
+            "掌握 I2C 主机的命令接口与 START/STOP/ACK 处理",
+            "理解多主仲裁与时钟拉伸机制",
+            "学会完成一次寄存器读写事务"
+          ],
+          "source_files": [
+            "src/intf/vhdl/olo_intf_i2c_master.vhd",
+            "doc/intf/olo_intf_i2c_master.md"
+          ],
+          "minimal_modules": [
+            "命令式接口",
+            "START/STOP/ACK",
+            "多主仲裁",
+            "时钟拉伸"
+          ],
+          "practice_task": "用 olo_intf_i2c_master 模拟对一个从机寄存器的写后读事务，仿真验证 START/地址/数据/ACK/STOP 序列正确。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "fix 定点基础",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "定点原理与 en_cl_fix 基础",
+          "order": 1,
+          "filename": "u8-l1-fix-principles-enclfix.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_fix_principles.md：Open Logic 定点功能基于 en_cl_fix，FixFormat/FixRound/FixSaturate 类型，以及为支持 Verilog 而把实体包装函数并用字符串泛型的设计。",
+          "learning_goals": [
+            "理解 en_cl_fix 的定点格式与舍入/饱和类型",
+            "掌握组件包装函数以支持 Verilog 的动机",
+            "了解字符串泛型表达自定义类型的模式"
+          ],
+          "source_files": [
+            "doc/fix/olo_fix_principles.md",
+            "3rdParty/en_cl_fix/hdl/en_cl_fix_pkg.vhd",
+            "compile_order.txt"
+          ],
+          "minimal_modules": [
+            "en_cl_fix 格式类型",
+            "组件 vs 函数",
+            "字符串泛型模式",
+            "VHDL/Verilog 互操作"
+          ],
+          "practice_task": "阅读 olo_fix_principles.md，用字符串形式写出 (1,8,23) 格式、Trunc_s 舍入、Sat_s 饱和三个泛型值，并解释为何不在接口使用 VHDL 自定义类型。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "olo_fix_pkg 与字符串泛型模式",
+          "order": 2,
+          "filename": "u8-l2-olo-fix-pkg.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_fix_pkg 提供的 Open Logic 专用定义（如字符串型泛型公共选项），以及字符串泛型在实体实例化中的解析模式。",
+          "learning_goals": [
+            "掌握 olo_fix_pkg 提供的公共选项",
+            "理解字符串泛型的解析与默认值",
+            "学会在实例化时正确传递定点格式字符串"
+          ],
+          "source_files": [
+            "src/fix/vhdl/olo_fix_pkg.vhd",
+            "doc/fix/olo_fix_pkg.md",
+            "doc/fix/olo_fix_principles.md"
+          ],
+          "minimal_modules": [
+            "公共字符串选项",
+            "泛型解析",
+            "默认值约定",
+            "实例化传递"
+          ],
+          "practice_task": "阅读 olo_fix_pkg.vhd 列出它定义的公共字符串选项，并写出一个 olo_fix 实体的实例化片段用字符串传递格式与舍入模式。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "基本定点运算：resize/add/mult/round/saturate 等",
+          "order": 3,
+          "filename": "u8-l3-basic-fix-operations.md",
+          "level": "intermediate",
+          "topic": "讲解 round/saturate/resize/from_real/to_real/add/sub/mult/neg/abs/compare 等基本运算实体的接口、流水线寄存器与和 en_cl_fix 函数的等价关系。",
+          "learning_goals": [
+            "掌握各基本运算实体的格式输入输出与延迟",
+            "理解实体与 en_cl_fix 函数的等价与取舍",
+            "学会组合基本运算构建定点数据通路"
+          ],
+          "source_files": [
+            "src/fix/vhdl/olo_fix_resize.vhd",
+            "src/fix/vhdl/olo_fix_add.vhd",
+            "src/fix/vhdl/olo_fix_mult.vhd",
+            "src/fix/vhdl/olo_fix_round.vhd",
+            "src/fix/vhdl/olo_fix_saturate.vhd",
+            "src/fix/vhdl/olo_fix_compare.vhd"
+          ],
+          "minimal_modules": [
+            "resize/round/saturate",
+            "add/sub/mult",
+            "from_real/to_real",
+            "neg/abs/compare"
+          ],
+          "practice_task": "用 olo_fix_mult 与 olo_fix_resize 串联实现 a*b 再截断到目标格式，仿真并与 en_cl_fix 函数计算结果对比验证位真一致。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Python 代码生成：olo_fix_pkg_writer",
+          "order": 4,
+          "filename": "u8-l4-python-codegen-pkg-writer.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_fix_pkg_writer 如何从 Python 定义生成 VHDL/Verilog 定点常量包，以及 sim/codegen.py 如何在仿真前调用它生成代码。",
+          "learning_goals": [
+            "掌握用 Python 定义定点常量并生成 HDL 包",
+            "理解 codegen 在 VUnit 文件检测前的执行时机",
+            "学会为设计维护一份 Python 单一真相源"
+          ],
+          "source_files": [
+            "src/fix/python/olo_fix/olo_fix_pkg_writer.py",
+            "sim/codegen.py",
+            "doc/fix/olo_fix_pkg_writer.md"
+          ],
+          "minimal_modules": [
+            "pkg_writer API",
+            "VHDL/Verilog 模板",
+            "codegen 调用时机",
+            "常量与向量定义"
+          ],
+          "practice_task": "用 olo_fix_pkg_writer 添加一个 FixFormat 常量与一个整数向量，生成 VHDL 包并在仿真中实例化引用其中一个常量验证值正确。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "协同仿真：olo_fix_cosim 与 sim_stimuli/checker",
+          "order": 5,
+          "filename": "u8-l5-cosimulation.md",
+          "level": "intermediate",
+          "topic": "讲解 olo_fix_cosim Python 工具生成协仿真文件，olo_fix_sim_stimuli 在 HDL 中施加激励、olo_fix_sim_checker 比对输出，实现 Python 位真模型与 HDL 的协同验证。",
+          "learning_goals": [
+            "掌握 Python 位真模型与 HDL 协仿真的流程",
+            "理解 sim_stimuli/sim_checker 读写协仿真文件的方式",
+            "学会用协仿真验证一个定点实体"
+          ],
+          "source_files": [
+            "src/fix/python/olo_fix/olo_fix_cosim.py",
+            "src/fix/vhdl/olo_fix_sim_stimuli.vhd",
+            "src/fix/vhdl/olo_fix_sim_checker.vhd",
+            "doc/fix/olo_fix_cosim.md"
+          ],
+          "minimal_modules": [
+            "cosim 文件生成",
+            "sim_stimuli 施加激励",
+            "sim_checker 比对",
+            "位真协仿真流程"
+          ],
+          "practice_task": "用 olo_fix_cosim 生成一组激励与期望，在仿真中用 sim_stimuli 驱动 olo_fix_mult 并用 sim_checker 比对，验证全部通过。",
+          "depends_on": [
+            "u8-l4",
+            "u8-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "高级 fix：DSP 运算与滤波器",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "复数运算、MAC 与除法/限幅",
+          "order": 1,
+          "filename": "u9-l1-complex-mac-div-limit.md",
+          "level": "advanced",
+          "topic": "讲解 cplx_mult（含混频模式）、cplx_addsub、madd 乘累加、bin_div 二进制除法、limit 限幅等高级定点运算的实现与用途。",
+          "learning_goals": [
+            "掌握复数乘法与混频模式的接口",
+            "理解 madd 构建 MACC 链的方式",
+            "学会用 bin_div/limit 实现除法与限幅"
+          ],
+          "source_files": [
+            "src/fix/vhdl/olo_fix_cplx_mult.vhd",
+            "src/fix/vhdl/olo_fix_cplx_addsub.vhd",
+            "src/fix/vhdl/olo_fix_madd.vhd",
+            "src/fix/vhdl/olo_fix_bin_div.vhd",
+            "src/fix/vhdl/olo_fix_limit.vhd"
+          ],
+          "minimal_modules": [
+            "复数乘法/混频",
+            "复数加减",
+            "乘累加 MACC",
+            "除法与限幅"
+          ],
+          "practice_task": "用 olo_fix_madd 构建一个 4 报累加链，输入若干样本后验证累加结果，并用 olo_fix_limit 对输出限幅观察截断行为。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "混频器与 CORDIC",
+          "order": 2,
+          "filename": "u9-l2-mixers-cordic.md",
+          "level": "advanced",
+          "topic": "讲解 mix_r2c 实到复数混频、mix_c2r 复到实混频，以及 cordic_rot 极坐标到直角、cordic_vect 直角到极角的 CORDIC 实现。",
+          "learning_goals": [
+            "掌握实/复混频器的接口与本地振荡器接入",
+            "理解 CORDIC 旋转与向量模式的迭代原理",
+            "学会用 CORDIC 实现三角/幅相转换"
+          ],
+          "source_files": [
+            "src/fix/vhdl/olo_fix_mix_r2c.vhd",
+            "src/fix/vhdl/olo_fix_mix_c2r.vhd",
+            "src/fix/vhdl/olo_fix_cordic_rot.vhd",
+            "src/fix/vhdl/olo_fix_cordic_vect.vhd"
+          ],
+          "minimal_modules": [
+            "实到复混频",
+            "复到实混频",
+            "CORDIC 旋转模式",
+            "CORDIC 向量模式"
+          ],
+          "practice_task": "用 olo_fix_cordic_vect 将一组 (x,y) 转为幅相，仿真并与 Python 位真模型比对幅度与相位误差随迭代次数的变化。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "CIC 抽取滤波器",
+          "order": 3,
+          "filename": "u9-l3-cic-filters.md",
+          "level": "advanced",
+          "topic": "讲解 cic_dec_tdm（TDM 输入输出）与 cic_dec_par_tdm（并行输入 TDM 输出）CIC 抽取滤波器的单/多通道、抽取比固定或运行时可配的实现。",
+          "learning_goals": [
+            "掌握 CIC 抽取滤波器的级联积分-梳状结构",
+            "理解 TDM 与并行通道处理的差异",
+            "学会配置抽取比与通道数"
+          ],
+          "source_files": [
+            "src/fix/vhdl/olo_fix_cic_dec_tdm.vhd",
+            "src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd"
+          ],
+          "minimal_modules": [
+            "积分-梳状结构",
+            "TDM 通道处理",
+            "并行输入 TDM 输出",
+            "抽取比配置"
+          ],
+          "practice_task": "用 olo_fix_cic_dec_tdm 对一个多通道 TDM 信号做抽取比 4 的抽取，仿真验证输出采样率与通道顺序正确。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "FIR 滤波器、系数存储与滑动平均",
+          "order": 4,
+          "filename": "u9-l4-fir-coef-movavg.md",
+          "level": "advanced",
+          "topic": "讲解 FIR 命名约定（dec/int、ser/par/semi、chtdm/chpar），fir_dec_ser_chtdm/chpar 串行抽头计算的多通道抽取 FIR，coef_storage 系数存储与 mov_avg 滑动平均。",
+          "learning_goals": [
+            "掌握 FIR 命名约定与各实体适用场景",
+            "理解串行抽头计算与运行时可配系数",
+            "学会用 coef_storage 管理系数并用 mov_avg 做简单滤波"
+          ],
+          "source_files": [
+            "src/fix/vhdl/olo_fix_fir_dec_ser_chtdm.vhd",
+            "src/fix/vhdl/olo_fix_fir_dec_ser_chpar.vhd",
+            "src/fix/vhdl/olo_fix_coef_storage.vhd",
+            "src/fix/vhdl/olo_fix_mov_avg.vhd"
+          ],
+          "minimal_modules": [
+            "FIR 命名约定",
+            "串行抽头 chpar",
+            "串行抽头 chtdm",
+            "系数存储与滑动平均"
+          ],
+          "practice_task": "用 olo_fix_fir_dec_ser_chpar 实现一个低通 FIR，系数由 coef_storage 提供，仿真验证对带外信号的衰减并对比 mov_avg 输出。",
+          "depends_on": [
+            "u9-l1",
+            "u8-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "验证、工程化与 CI",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "VUnit 测试台结构与验证组件",
+          "order": 1,
+          "filename": "u10-l1-vunit-tb-and-vcs.md",
+          "level": "advanced",
+          "topic": "讲解 VUnit 测试台的 runner_cfg、run_all_in_same_sim、generic 参数化测试用例，以及 test/tb 中 axi/fix/spi/i2c 等验证组件（VC）的命名约定与用法。",
+          "learning_goals": [
+            "掌握 VUnit 测试台的标准结构与测试用例分离",
+            "理解验证组件 VC 的 snail_case 命名与混用方式",
+            "学会用 VC 编写可复用的激励与检查"
+          ],
+          "source_files": [
+            "test/base/olo_base_fifo_sync/olo_base_fifo_sync_tb.vhd",
+            "test/tb/olo_test_axi_master_vc.vhd",
+            "test/tb/olo_test_fix_checker_vc.vhd",
+            "test/tb/olo_test_activity_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "VUnit 测试台结构",
+            "generic 参数化用例",
+            "验证组件 VC",
+            "VC 命名约定"
+          ],
+          "practice_task": "参照 fifo_sync 测试台为一个简单实体编写 VUnit 测试台，包含至少两个 generic 参数化用例并使用一个 VC 做检查。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "仿真运行器、代码生成与测试配置",
+          "order": 2,
+          "filename": "u10-l2-sim-runner-codegen-config.md",
+          "level": "advanced",
+          "topic": "深入讲解 sim/run.py 的 VUnit 集成、仿真器选择、--coverage/--compile_list 等选项，sim/codegen.py 的前置代码生成，以及 test_configs 按区域组织 generic 组合的方式。",
+          "learning_goals": [
+            "掌握 run.py 的运行选项与仿真器切换",
+            "理解 codegen 在 VUnit 检测文件前的执行时机",
+            "学会在 test_configs 中为实体添加 generic 组合"
+          ],
+          "source_files": [
+            "sim/run.py",
+            "sim/codegen.py",
+            "sim/test_configs/olo_base.py"
+          ],
+          "minimal_modules": [
+            "VUnit 集成与选项",
+            "仿真器选择",
+            "前置代码生成",
+            "test_configs 组织"
+          ],
+          "practice_task": "在 test_configs 中为一个实体新增一组 generic 配置，运行 run.py 验证新用例被发现并执行，再用 --compile_list 导出编译顺序。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "覆盖率分析、问题分析与质量徽章",
+          "order": 3,
+          "filename": "u10-l3-coverage-issues-badges.md",
+          "level": "advanced",
+          "topic": "讲解 AnalyzeCoverage.py 解析仿真覆盖率并按文件判断是否达 95% 阈值、AnalyzeIssues.py 统计 GitHub issue 与实体关联、Badge.py 生成各类质量徽章的流程。",
+          "learning_goals": [
+            "掌握覆盖率收集与 95% 阈值检查流程",
+            "理解 issue 与实体的关联及潜在/确认 bug 颜色",
+            "学会生成与更新质量徽章"
+          ],
+          "source_files": [
+            "sim/AnalyzeCoverage.py",
+            "sim/AnalyzeIssues.py",
+            "sim/Badge.py"
+          ],
+          "minimal_modules": [
+            "覆盖率解析与阈值",
+            "issue 关联分析",
+            "徽章生成",
+            "CI 质量闭环"
+          ],
+          "practice_task": "运行 AnalyzeCoverage.py 解析一次带覆盖率的仿真结果，找出覆盖率最低的文件并说明 PR 到 main 时 95% 阈值如何阻止合并。",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "代码检查与综合测试自动化",
+          "order": 4,
+          "filename": "u10-l4-lint-and-synthesis-test.md",
+          "level": "advanced",
+          "topic": "讲解 lint/script 用 VSG 检查所有 VHDL 文件并区分 VC 与生产代码的配置，以及 tools/inference_test 基于 YAML 的多工具综合资源评估自动化。",
+          "learning_goals": [
+            "掌握 VSG 检查的运行方式与配置覆盖",
+            "理解 VC 与生产代码的 lint 差异",
+            "学会用 inference_test 的 YAML 为新实体添加综合测试"
+          ],
+          "source_files": [
+            "lint/script/script.py",
+            "lint/config/vsg_config.yml",
+            "tools/inference_test/InferenceTest.py",
+            "tools/inference_test/yaml/base.yml"
+          ],
+          "minimal_modules": [
+            "VSG 检查与配置",
+            "VC/生产代码区分",
+            "inference_test 框架",
+            "YAML 综合配置"
+          ],
+          "practice_task": "为一个新实体在 yaml/base.yml 添加综合测试条目，运行 VSG 检查该实体源码并修复所有 warning 直到通过。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l5",
+          "title": "厂商集成、FuseSoC 与 CI/发布流程",
+          "order": 5,
+          "filename": "u10-l5-fusesoc-ci-release.md",
+          "level": "advanced",
+          "topic": "讲解各厂商 import 脚本与约束自动应用、tools/fusesoc 的 core 文件与 UpdateCoreFiles.py 维护脚本、CI-Workflows.md 描述的 HDL-Check/覆盖/综合等工作流，以及 Contributing 与发布流程。",
+          "learning_goals": [
+            "掌握厂商导入与自动约束（尤其 AMD scoped 约束）",
+            "理解 FuseSoC core 文件结构与维护脚本",
+            "了解 CI 工作流触发时机与发布流程"
+          ],
+          "source_files": [
+            "tools/fusesoc/UpdateCoreFiles.py",
+            "tools/fusesoc/stable/olo_base.core",
+            "doc/CI-Workflows.md",
+            "Contributing.md",
+            ".github/workflows/hdl_check.yml"
+          ],
+          "minimal_modules": [
+            "厂商导入与约束",
+            "FuseSoC core 维护",
+            "CI 工作流矩阵",
+            "贡献与发布流程"
+          ],
+          "practice_task": "阅读 CI-Workflows.md 与 hdl_check.yml，画出各工作流的触发事件与运行环境（GitHub/AWS）对照表，并说明 PR 到 main 前必须通过哪些免费检查。",
+          "depends_on": [
+            "u1-l3",
+            "u10-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

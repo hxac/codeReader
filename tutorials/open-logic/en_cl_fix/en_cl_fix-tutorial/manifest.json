@@ -1,0 +1,788 @@
+{
+  "project": "en_cl_fix",
+  "head": "e9123a9ca65d0966f0c1a567e2afbfa8443b38c6",
+  "rationale": "en_cl_fix 的核心特点是「同一套定点语义在 VHDL / Python / MATLAB 三种语言中镜像实现」，因此学习路线先建立全局认知，再深入数据模型，最后落到具体实现与验证流程。入门层（U1）帮助读者从零理解项目定位、目录结构与运行方式；随后用 U2 讲清楚 [S,I,F] 格式以及舍入/饱和/位宽等基础概念——这是理解后续一切的前提。进阶层按「格式预测（U3）→ Python 参考实现（U4）→ VHDL 综合实现（U5）→ 可流水线化的 VHDL 组件（U6）」的顺序展开，体现项目「先算结果格式、再用全精度中间值+resize 收敛到输出格式」的核心设计范式。专家层（U7、U8）聚焦项目最具特色的部分：基于 VUnit 的 Python/HDL 协同仿真验证流程、多仿真器适配、MATLAB 薄封装、以及针对各 EDA 工具链 bug 的工程化规避。讲义之间存在明确的依赖链：概念→实现→验证，且每篇都绑定真实源码并配有动手实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 en_cl_fix 与项目全貌",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：什么是 en_cl_fix 定点库",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 en_cl_fix 作为面向 FPGA/ASIC 的多语言定点数学库的定位、用途、支持的算术与格式转换能力，以及 MIT 许可与维护方。",
+          "learning_goals": [
+            "理解定点数学库在数字电路设计中的作用",
+            "了解 en_cl_fix 提供的功能范围（算术与格式转换）",
+            "掌握项目的许可、维护者与典型使用场景（如 psi_fix）"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "General Information 段落",
+            "Supported Languages 列表",
+            "License 与 Maintainers",
+            "Changelog 版本演进（2.0 重构、2.2 组件、2.3 NVC/宽度检查）"
+          ],
+          "practice_task": "阅读 README 与 Changelog，列出 en_cl_fix 支持的三种语言、它解决的两类核心问题（算术与格式转换），并写一段话说明为什么 FPGA 设计需要专门的定点库。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与三语言镜像架构",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-three-languages.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录组织（hdl、bittrue/models、tb、sim、lib/en_tb）以及 VHDL/Python/MATLAB 三套实现如何彼此镜像对应。",
+          "learning_goals": [
+            "看懂仓库的顶层目录划分及其职责",
+            "理解 VHDL、Python、MATLAB 三套实现一一对应的关系",
+            "定位每种语言对应的核心入口文件"
+          ],
+          "source_files": [
+            "README.md",
+            "hdl/en_cl_fix_pkg.vhd",
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix.py",
+            "bittrue/models/matlab/cl_fix_round.m"
+          ],
+          "minimal_modules": [
+            "hdl/ RTL 包与组件",
+            "bittrue/models/python 与 matlab 目录",
+            "tb/ 与 sim/ 目录",
+            "lib/en_tb 子库"
+          ],
+          "practice_task": "对照仓库结构，画一张「同一个 cl_fix_round 操作在 VHDL、Python、MATLAB 三处分别对应哪个文件」的映射表，并在仓库中找到每个文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "依赖、安装与运行测试",
+          "order": 3,
+          "filename": "u1-l3-dependencies-run-tests.md",
+          "level": "beginner",
+          "topic": "讲解 Python 依赖（numpy、vunit-hdl）、MATLAB 与 VHDL 仿真器依赖，以及如何运行 Python 测试与 VUnit 仿真测试。",
+          "learning_goals": [
+            "安装 Python 依赖并运行 Python 单元测试",
+            "了解支持的仿真器（GHDL/NVC/Modelsim/Questa）",
+            "掌握 run.py 的基本调用方式"
+          ],
+          "source_files": [
+            "requirements.txt",
+            "README.md",
+            "sim/run.py",
+            "sim/common.py"
+          ],
+          "minimal_modules": [
+            "requirements.txt 内容",
+            "README Running Tests 章节",
+            "run.py 中的仿真器与路径参数",
+            "common.py 中的自定义命令行参数"
+          ],
+          "practice_task": "安装 requirements.txt 中的依赖，运行 bittrue/tests/python/cl_fix_round_test.py 观察输出；并（在可选时）尝试用 python sim/run.py --simulator=ghdl 指定仿真器参数启动仿真流程。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基础：定点数据模型 [S,I,F]",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "FixFormat [S,I,F] 定点表示",
+          "order": 1,
+          "filename": "u2-l1-fixformat-representation.md",
+          "level": "beginner",
+          "topic": "讲解定点格式 [S,I,F] 的含义、各位权重、总位宽计算，以及带符号位与负 I/F 的边界情况。",
+          "learning_goals": [
+            "理解 S（符号位）、I（整数位）、F（小数位）的含义与权重",
+            "会计算格式位宽与表示范围",
+            "理解负 I、负 F 等特殊格式的含义"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "README.md",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "FixFormat 类与断言约束",
+            "FixFormat.width 属性",
+            "README Fixed-Point Number Format 章节",
+            "VHDL FixFormat_t record 与 NullFixFormat_c"
+          ],
+          "practice_task": "手动计算几个格式的位宽与表示范围（如 [1,4,-2]、[0,4,2]），并用 Python 创建对应 FixFormat 对象验证 .width 属性；对照 README 的 BitWeights 图确认各位权重。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "舍入模式 FixRound",
+          "order": 2,
+          "filename": "u2-l2-rounding-modes.md",
+          "level": "beginner",
+          "topic": "讲解减小 F 时采用的七种舍入模式（Trunc、NonSymPos、NonSymNeg、SymInf、SymZero、ConvEven、ConvOdd）及其语义与误差特性。",
+          "learning_goals": [
+            "区分七种舍入模式在「平局（tie）」上的处理差异",
+            "理解 NonSymPos 为最常用模式及其统计偏差",
+            "了解收敛舍入（Convergent）用于无偏场景"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "README.md",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "FixRound 枚举定义",
+            "README Rounding Modes 表格",
+            "VHDL cl_fix_round 中各模式的 offset 加法实现"
+          ],
+          "practice_task": "用 README 的舍入示例表，把 2.2、2.7、-1.5、-0.5、0.5、1.5 在七种模式下舍入到 [1,2,0] 的结果手工推算一遍，并与 VHDL cl_fix_round 中各 case 分支对照。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "饱和模式 FixSaturate",
+          "order": 3,
+          "filename": "u2-l3-saturation-modes.md",
+          "level": "beginner",
+          "topic": "讲解减小 I/S 位时的四种饱和模式（None/Warn/Sat/SatWarn）：是否饱和、是否告警、以及不饱和时的回绕（wrap）行为。",
+          "learning_goals": [
+            "理解饱和与告警是两个独立开关",
+            "区分 Sat/Warn/SatWarn/None 四种模式的输出行为",
+            "了解不饱和时高位被丢弃导致回绕"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "README.md",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "FixSaturate 枚举定义",
+            "README Saturation Modes 表格",
+            "VHDL cl_fix_saturate 中的告警与钳位逻辑"
+          ],
+          "practice_task": "对照 README 表格，描述当把 [1,8,0] 的值压缩到 [1,4,0] 时，四种饱和模式下越界值分别会发生什么；并在 cl_fix_saturate 源码中定位触发告警的 assert。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "位宽、极值与格式工具函数",
+          "order": 4,
+          "filename": "u2-l4-width-minmax-union-helpers.md",
+          "level": "beginner",
+          "topic": "讲解 cl_fix_width、cl_fix_max_value、cl_fix_min_value、union 等格式工具函数及其实现原理。",
+          "learning_goals": [
+            "计算任意格式的最大/最小可表示值",
+            "理解 union 如何取多个格式的最小公共超集",
+            "掌握这些工具函数在 Python 与 VHDL 中的对应关系"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix.py",
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "cl_fix_width / max_value / min_value",
+            "FixFormat.union 静态方法",
+            "VHDL 中对应实现与 NullFixFormat_c"
+          ],
+          "practice_task": "用 Python 调用 cl_fix_max_value / cl_fix_min_value 计算 [1,2,1] 的范围，再用 cl_fix_to_real 转成浮点验证；并测试 union 合并两个不同格式的结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：结果格式预测 cl_fix_*_fmt",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "为什么需要预测结果格式：add/sub",
+          "order": 1,
+          "filename": "u3-l1-format-prediction-add-sub.md",
+          "level": "intermediate",
+          "topic": "讲解 cl_fix_add_fmt / cl_fix_sub_fmt / cl_fix_addsub_fmt 的设计动机，以及基于最坏情况保守推导结果位宽增长的方法。",
+          "learning_goals": [
+            "理解「结果格式预测」的保守最坏情况原则",
+            "掌握加法/减法何时产生 1 位整数增长",
+            "理解 addsub 取 add 与 sub 的并集"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "FixFormat.for_add 的 rmax/rmin 增长推导",
+            "FixFormat.for_sub 的有符号/无符号分支",
+            "VHDL cl_fix_add_fmt/cl_fix_sub_fmt 实现"
+          ],
+          "practice_task": "选取两个格式（如 a=[1,1,1]、b=[0,7,0]）手算 add 与 sub 的结果格式，再调用 FixFormat.for_add / for_sub 验证，并解释 sub 在无符号减有符号时的特殊处理。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "mult / neg / abs / shift 的格式推导与特殊情况",
+          "order": 2,
+          "filename": "u3-l2-mult-neg-abs-shift-fmt.md",
+          "level": "intermediate",
+          "topic": "讲解乘法结果格式中整数位与符号位的推导（含两个负数相乘、1 位有符号相乘得无符号等特殊情形），以及 neg/abs/shift 的格式计算。",
+          "learning_goals": [
+            "掌握乘法整数位增长的几种情形与 -1 位的特殊条件",
+            "理解 neg 为何对 1 位无符号输入特殊处理",
+            "理解 shift 通过调整 I/F 实现无损移位"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "FixFormat.for_mult 的 rmax/rmin 推导",
+            "FixFormat.for_neg / for_abs / for_shift",
+            "VHDL cl_fix_mult_fmt 中的符号位特殊判断"
+          ],
+          "practice_task": "对几个边界情形（1 位有符号乘 1 位有符号、有符号乘无符号）调用 for_mult 验证结果符号位，并用 for_shift 计算 a=[0,7,0] 左移 4 位的格式。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "round_fmt 与 cl_fix_in_range",
+          "order": 3,
+          "filename": "u3-l3-round-fmt-in-range.md",
+          "level": "intermediate",
+          "topic": "讲解 cl_fix_round_fmt 如何根据舍入模式预测结果格式（非 Trunc 模式可能 +1 整数位），以及 cl_fix_in_range 如何判断是否会越界。",
+          "learning_goals": [
+            "理解舍入可能导致的整数位溢出（+1）",
+            "掌握 round_fmt 对 Trunc 与其他模式的差异",
+            "理解 in_range 结合舍入后再判断范围的逻辑"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix_types.py",
+            "hdl/en_cl_fix_pkg.vhd",
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix.py"
+          ],
+          "minimal_modules": [
+            "FixFormat.for_round 的 +1 整数位逻辑",
+            "VHDL cl_fix_round_fmt 实现",
+            "cl_fix_in_range 的舍入+范围判断"
+          ],
+          "practice_task": "选取一个格式与一种非 Trunc 舍入模式，调用 for_round 验证整数位是否增长；再构造一个刚好处于饱和边界的值，用 cl_fix_in_range 判断它在不同舍入模式下是否越界。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：Python 参考实现与 Narrow/Wide 设计",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Python 主接口：镜像 HDL 的 cl_fix_* 函数",
+          "order": 1,
+          "filename": "u4-l1-python-main-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 en_cl_fix.py 如何以与 HDL 一致的函数签名提供算术与转换接口，以及「全精度中间格式 + resize」的核心计算范式。",
+          "learning_goals": [
+            "理解 en_cl_fix.py 函数与 VHDL 接口的镜像关系",
+            "掌握 mid_fmt（全精度）→ resize 收敛到结果格式的范式",
+            "理解 result_fmt 默认值与显式指定的区别"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix.py",
+            "bittrue/models/python/en_cl_fix_pkg/__init__.py"
+          ],
+          "minimal_modules": [
+            "函数别名（cl_fix_add_fmt=FixFormat.for_add 等）",
+            "cl_fix_add/mult 中的 mid_fmt + cl_fix_resize 模式",
+            "cl_fix_resize = round 后 saturate",
+            "cl_fix_is_wide 分发"
+          ],
+          "practice_task": "用 Python 完成 a=[1,7,8] 与 b=[0,7,8] 的乘法，先不指定 result_fmt 观察全精度中间格式，再指定一个更窄的 result_fmt 观察舍入与饱和效果。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "NarrowFix：基于双精度浮点的 ≤53 位实现",
+          "order": 2,
+          "filename": "u4-l2-narrowfix-class.md",
+          "level": "intermediate",
+          "topic": "讲解 NarrowFix 类如何用 IEEE754 双精度浮点存储归一化定点数，实现快速但限宽 53 位的舍入、饱和与算术运算。",
+          "learning_goals": [
+            "理解为何以 53 位作为 narrow/wide 分界",
+            "掌握浮点实现舍入（加偏移再截断）的技巧",
+            "理解 saturate 中 wrap 计算可能需切换到 WideFix 保精度"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/narrow_fix.py"
+          ],
+          "minimal_modules": [
+            "MAX_WIDTH=53 的由来",
+            "round 各模式的浮点偏移实现",
+            "saturate 中 wrap 的模运算与 wide 降级判断",
+            "运算符重载(__add__/__mul__ 等)"
+          ],
+          "practice_task": "阅读 NarrowFix.round，对比它与 VHDL cl_fix_round 的偏移实现是否等价；并用 NarrowFix 构造一个接近 53 位上限的格式，测试 saturate 在 wrap 模式下是否触发到 WideFix 的降级路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "WideFix：任意精度整数实现",
+          "order": 3,
+          "filename": "u4-l3-widefix-class.md",
+          "level": "intermediate",
+          "topic": "讲解 WideFix 类如何用 Python 任意精度整数存储未归一化定点数，实现 >53 位的精确运算，以及 narrow/wide 之间的互转。",
+          "learning_goals": [
+            "理解 WideFix 用整数存储未归一化数据的表示方式",
+            "掌握 from_narrowfix / to_real 的 narrow↔wide 转换",
+            "理解 cl_fix_is_wide 在主接口中如何决定内部表示"
+          ],
+          "source_files": [
+            "bittrue/models/python/en_cl_fix_pkg/wide_fix.py",
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix.py"
+          ],
+          "minimal_modules": [
+            "WideFix 构造与整数内部表示",
+            "from_real/from_narrowfix 转换",
+            "主接口中 a_wide or r_wide 的分发逻辑",
+            "cl_fix_random 对 wide 的处理"
+          ],
+          "practice_task": "构造一个 65 位有符号格式，用 cl_fix_from_real 写入几个值，再 cl_fix_to_real 读回验证精度无损；并跟踪 cl_fix_round 内部何时将 narrow 输入转成 WideFix 计算。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：VHDL 包内部实现",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "VHDL 包头：类型与公共 API",
+          "order": 1,
+          "filename": "u5-l1-vhdl-package-types-api.md",
+          "level": "intermediate",
+          "topic": "讲解 en_cl_fix_pkg.vhd 的包结构：FixFormat_t/FixRound_t/FixSaturate_t/RegisterMode_t 类型定义，以及完整的公共函数目录。",
+          "learning_goals": [
+            "理解 VHDL 包的类型体系与 VHDL-93 合规要求",
+            "掌握公共 API 的分类（格式函数/转换/舍入饱和/数学）",
+            "理解 NullFixFormat_c 默认 result_fmt 的约定"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "类型定义（record、enum）",
+            "RegisterMode_t（Auto/Yes/No）",
+            "公共函数分组与默认参数",
+            "NullFixFormat_c 约定"
+          ],
+          "practice_task": "通读包头的公共函数，按「格式函数/字符串转换/类型转换/舍入饱和/数学函数」分类列出每个函数的签名；并说明 result_fmt 默认 NullFixFormat_c 的含义。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "核心转换：round / saturate / resize 实现",
+          "order": 2,
+          "filename": "u5-l2-round-saturate-resize-impl.md",
+          "level": "intermediate",
+          "topic": "深入讲解 cl_fix_round（mid 格式 + 偏移截断）、cl_fix_saturate（告警 + 钳位）、cl_fix_resize（先舍入后饱和）的 VHDL 实现及关键内部函数。",
+          "learning_goals": [
+            "理解 cl_fix_round 的 mid_fmt 与 get_half/get_unit_bit 机制",
+            "掌握 convert() 的二进制小数点对齐与符号扩展",
+            "理解 resize = round_fmt + round + saturate 的组合"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "convert() 内部函数",
+            "get_half / get_unit_bit / resize_sensible",
+            "cl_fix_round 的 case 分支",
+            "cl_fix_saturate 的 compare+钳位",
+            "cl_fix_resize 组合"
+          ],
+          "practice_task": "在 cl_fix_round 中跟踪一个具体舍入（如 NonSymPos_s 从 [0,4,4] 到 [0,4,1]）的 mid_fmt、half_c 偏移与最终截断过程；并解释 convert 如何处理 rFmt.F > aFmt.F 的低位补零。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "VHDL 数学函数：add/sub/mult 与符号运算",
+          "order": 3,
+          "filename": "u5-l3-vhdl-math-functions.md",
+          "level": "intermediate",
+          "topic": "讲解 cl_fix_add/sub/addsub/mult/shift/abs/neg/compare/sign 的实现，以及为何统一使用 signed 类型运算的设计权衡。",
+          "learning_goals": [
+            "掌握全精度中间格式 + resize 的 VHDL 数学模板",
+            "理解 cl_fix_mult 中混合 signed/unsigned 乘法的局部重载",
+            "理解 cl_fix_compare 的对齐比较与 cl_fix_shift 的无损移位"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "cl_fix_add/sub 模板与 signed 统一运算",
+            "cl_fix_mult 的局部 \"*\" 重载与 resize_sensible",
+            "cl_fix_shift 借 dummy_fmt 实现",
+            "cl_fix_compare/cl_fix_sign"
+          ],
+          "practice_task": "对照 cl_fix_add 与 cl_fix_mult 的实现模板，总结它们共享的「convert 到 mid_fmt → 运算 → resize」三段式结构；并解释 cl_fix_mult 为何要在包体内局部定义 signed*unsigned 的乘法。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "私有包与字符串解析",
+          "order": 4,
+          "filename": "u5-l4-private-pkg-string-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 en_cl_fix_private_pkg.vhd 提供的工具函数（choose/to01/maximum/minimum/toLower），以及字符串与格式/枚举之间的互转。",
+          "learning_goals": [
+            "理解私有工具函数的作用与为何要自行实现 maximum/minimum",
+            "掌握 to_string 显式实现的原因（综合工具不支持 'image）",
+            "理解 from_string 解析格式串的流程"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_private_pkg.vhd",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "choose/to01/toInteger/maximum/minimum",
+            "toLower/string_find_next_match/string_parse_int",
+            "to_string(fmt/rnd/sat) 显式实现",
+            "cl_fix_format_from_string 解析"
+          ],
+          "practice_task": "阅读 to_string(FixRound_t) 的显式 case 实现，解释为何不直接用 VHDL 'image 属性；并用 cl_fix_format_from_string 的逻辑手工解析字符串 \"(1,4,-2)\" 的各步骤。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：可流水线化的 VHDL 组件",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "round/saturate/resize 组件与 RegisterMode",
+          "order": 1,
+          "filename": "u6-l1-pipelined-components-registermode.md",
+          "level": "intermediate",
+          "topic": "讲解 en_cl_fix_round/saturate/resize 三个可实例化组件的实体、generics、以及基于 cl_fix_recommended_pipelining 的寄存器插入策略。",
+          "learning_goals": [
+            "理解三个组件统一的 clk/rst/valid/meta/data 接口约定",
+            "掌握 RegisterMode_t（Auto/Yes/No）与 recommended_pipelining 的关系",
+            "理解 g_register/g_no_register 的 generate 选择"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_round.vhd",
+            "hdl/en_cl_fix_saturate.vhd",
+            "hdl/en_cl_fix_resize.vhd",
+            "hdl/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "组件实体 generics（in_fmt_g/out_fmt_g/round_g/reg_mode_g/meta_width_g）",
+            "use_reg_c 判断逻辑",
+            "三种 cl_fix_recommended_pipelining 重载",
+            "寄存器进程与组合逻辑分支"
+          ],
+          "practice_task": "对照三个组件，说明它们的结构几乎一致；并解释当 reg_mode_g=Auto_s 且舍入实际无需寄存器时，组件如何自动选择 0 拍延迟。",
+          "depends_on": [
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "搭建流水线数据通路：meta 与延迟一致性",
+          "order": 2,
+          "filename": "u6-l2-building-pipelined-datapath.md",
+          "level": "intermediate",
+          "topic": "讲解如何用这些组件级联搭建数据通路，利用 meta_width_g 传递边带信息，并用 Yes_s 保证跨配置的固定延迟。",
+          "learning_goals": [
+            "理解 meta 旁路信号在流水线中的透传作用",
+            "掌握用 Yes_s 保证延迟恒定的场景",
+            "能够组合多个组件构成完整定点数据通路"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_round.vhd",
+            "hdl/en_cl_fix_resize.vhd",
+            "tb/cl_fix_round_tb.vhd"
+          ],
+          "minimal_modules": [
+            "meta_width_g 透传机制",
+            "Auto_s vs Yes_s 的延迟权衡",
+            "testbench 中 UUT 的例化方式"
+          ],
+          "practice_task": "设计一个由「乘法 → 舍入 → 饱和」级联的定点通路草图，标注每级用到的格式函数（cl_fix_mult_fmt / cl_fix_round_fmt）与寄存器模式选择，并说明 meta 信号如何贯穿各级。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：Python↔HDL 协同仿真验证流程",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "协同仿真概念与 cosim 脚本",
+          "order": 1,
+          "filename": "u7-l1-cosim-concept-scripts.md",
+          "level": "advanced",
+          "topic": "讲解 bittrue/cosim 下每个操作的 cosim.py 如何用 Python 参考模型生成穷举输入与期望输出数据文件，作为 HDL 验证黄金参考。",
+          "learning_goals": [
+            "理解「Python 参考模型生成黄金数据 + HDL 比对」的验证思想",
+            "掌握 cosim.py 中遍历格式参数并保存输出/格式文件的流程",
+            "理解 cosim_utils 的 get_data（穷举所有取值）与进度上报"
+          ],
+          "source_files": [
+            "bittrue/cosim/cl_fix_round/cosim.py",
+            "bittrue/cosim/cosim_utils.py",
+            "bittrue/models/python/en_cl_fix_pkg/en_cl_fix.py"
+          ],
+          "minimal_modules": [
+            "run() 中格式参数遍历与 cl_fix_*_fmt 构造",
+            "cl_fix_to_integer 保存整数期望输出",
+            "cl_fix_write_formats 写格式文件",
+            "cosim_utils 的 get_data/ProgressReporter/clear_directory"
+          ],
+          "practice_task": "单独运行 bittrue/cosim/cl_fix_round/cosim.py，观察它在 data/ 下生成了哪些文件（a_fmt.txt、r_fmt.txt、rnd.txt、test*_output.txt），并解释每个文件的作用。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "VUnit 测试台与文件 I/O",
+          "order": 2,
+          "filename": "u7-l2-vunit-testbench-fileio.md",
+          "level": "advanced",
+          "topic": "讲解 tb/ 下测试台如何用 VUnit + OSVVM 读取 cosim 数据、驱动 UUT、逐拍比对期望输出，以及 en_cl_fix_fileio_pkg 对 en_tb 的封装。",
+          "learning_goals": [
+            "理解 VUnit test_runner 流程与 generate 展开多测试用例",
+            "掌握 cl_fix_read_format_file/cl_fix_read_file 读取黄金数据",
+            "理解 checker 进程的逐拍比对与错误定位"
+          ],
+          "source_files": [
+            "tb/cl_fix_round_tb.vhd",
+            "tb/util/en_cl_fix_fileio_pkg.vhd",
+            "tb/en_cl_fix_pkg_tb.vhd"
+          ],
+          "minimal_modules": [
+            "test_runner_setup/watchdog/cleanup",
+            "FixFormatArray_t 从文件读取",
+            "g_test_case generate 与输入/检查进程",
+            "en_cl_fix_fileio_pkg 的 read/write 封装"
+          ],
+          "practice_task": "对照 cl_fix_round_tb.vhd，画出「输入进程 → UUT → 检查进程」的数据流，并指出它从哪些文件读取格式、舍入模式与期望输出，以及比对失败时打印哪些诊断信息。",
+          "depends_on": [
+            "u7-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "run.py 装配：库、配置与多仿真器适配",
+          "order": 3,
+          "filename": "u7-l3-runpy-simulator-wiring.md",
+          "level": "advanced",
+          "topic": "讲解 sim/run.py 如何装配 VUnit 工程（添加库/源文件、为每个 TB 绑定 cosim pre_config、配置 meta_width、设置各仿真器编译/仿真选项）。",
+          "learning_goals": [
+            "理解 run.py 的库与源文件组织（en_tb、lib、RTL、tb）",
+            "掌握 pre_config=cosim.run 的回调机制与线程安全执行",
+            "理解 meta_width 多配置与各仿真器选项差异（GHDL/NVC/Modelsim）"
+          ],
+          "source_files": [
+            "sim/run.py",
+            "sim/cosim_runner.py",
+            "sim/common.py"
+          ],
+          "minimal_modules": [
+            "create_test_suite 的库/源文件添加",
+            "每个 TB 的 add_config + pre_config 绑定",
+            "cosim_runner 的线程锁与单次执行保证",
+            "common.py 的命令行参数与 VHDL 标准选择"
+          ],
+          "practice_task": "在 run.py 中找到一个 TB 的配置块（如 cl_fix_round），说明它如何把 cosim 脚本路径、generics（meta_width_g）与 pre_config 回调串联起来；并解释 cosim_runner 如何保证 cosim 脚本只执行一次。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：MATLAB 集成、工程规避与单元测试",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "MATLAB 薄封装与 Python 互操作",
+          "order": 1,
+          "filename": "u8-l1-matlab-wrappers-python.md",
+          "level": "advanced",
+          "topic": "讲解 bittrue/models/matlab 下的 .m 文件如何作为薄封装调用 Python 实现，以及 wide 定点数据在 MATLAB↔Python 之间的打包/解包（uint64）。",
+          "learning_goals": [
+            "理解 MATLAB 函数经 py.en_cl_fix_pkg.* 调用 Python 的模式",
+            "掌握 mat2py/py2mat 的数据归一化转换",
+            "理解 wide 定点用 uint64 数组跨语言传递的机制"
+          ],
+          "source_files": [
+            "bittrue/models/matlab/cl_fix_round.m",
+            "bittrue/tests/matlab/matlab_example.m",
+            "bittrue/models/python/en_cl_fix_pkg/matlab_interface.py"
+          ],
+          "minimal_modules": [
+            "cl_fix_round.m 的 mat2py → py 调用 → py2mat 三段式",
+            "matlab_example.m 的 pyenv 与路径设置",
+            "matlab_interface 的 to_uint64_array/from_uint64_array"
+          ],
+          "practice_task": "阅读 cl_fix_round.m，写出它调用 Python 前后所做的两次数据转换；并解释 matlab_interface.to_uint64_array 为何要把符号整数重解释为无符号再按 64 位切片。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "工具链 bug 规避与综合友好性",
+          "order": 2,
+          "filename": "u8-l2-toolchain-workarounds-synthesis.md",
+          "level": "advanced",
+          "topic": "梳理源码中针对各 EDA 工具链（Vivado DSP、Efinity/Gowin 的 mod、Quartus 命名冲突、Modelsim 警告等）的工程化规避与综合友好设计。",
+          "learning_goals": [
+            "识别源码中针对特定工具链的 workaround 注释与实现",
+            "理解 cl_fix_add/sub 统一用 signed 规避 Vivado DSP bug 的原因",
+            "理解自定义 maximum/minimum、显式 to_string、real_mod 等规避手段"
+          ],
+          "source_files": [
+            "hdl/en_cl_fix_pkg.vhd",
+            "hdl/en_cl_fix_private_pkg.vhd",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "cl_fix_from_real 中 real_mod 规避 math_real \"mod\" bug",
+            "cl_fix_add/sub 的 signed 统一运算注释",
+            "自实现 maximum/minimum/to_string 的综合原因",
+            "Changelog 中相关 bugfix 条目"
+          ],
+          "practice_task": "在源码中搜索并汇总至少三处「针对工具链 bug」的代码与注释（如 real_mod、signed 加法、to_string 显式实现），分别说明它们规避的是哪个工具的什么问题。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Python 单元测试与格式最优性验证",
+          "order": 3,
+          "filename": "u8-l3-python-unit-tests.md",
+          "level": "advanced",
+          "topic": "讲解 bittrue/tests/python 下的测试如何对照标准 Python 实现验证舍入/饱和正确性，以及 format_tests 如何检验 FixFormat.For* 的最优（充分且必要）性。",
+          "learning_goals": [
+            "理解 cl_fix_round_test 用 numpy 参考实现逐模式比对的方法",
+            "掌握 format_tests 验证格式预测充分且必要的思路",
+            "了解 en_cl_fix_pkg_test 的整体覆盖范围"
+          ],
+          "source_files": [
+            "bittrue/tests/python/cl_fix_round_test.py",
+            "bittrue/tests/python/format_tests.py",
+            "bittrue/tests/python/cl_fix_saturate_test.py"
+          ],
+          "minimal_modules": [
+            "round_check 各模式的 numpy 参考实现",
+            "format_tests 的格式参数遍历与最优性断言",
+            "测试中 get_data 穷举所有取值"
+          ],
+          "practice_task": "阅读 format_tests.py 的结构，说明它如何遍历格式参数并验证 for_add/for_mult 等给出的格式既充分（能容纳结果）又必要（不过宽）；并为其增加一个针对 for_shift 的测试用例思路。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
