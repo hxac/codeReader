@@ -1,0 +1,488 @@
+{
+  "project": "numpy-numpy-strings",
+  "head": "9559a6b1ac93610711d8f1243f8c949fca4420bb",
+  "rationale": "numpy.strings 本身只是 numpy/_core/strings.py 的一个「门面（facade）」：__init__.py 通过 import * 转发全部公共符号，真正的实现是 Python 层的包装函数，再向下委托到 C/C++ 的 ufunc 循环（string_ufuncs.cpp 处理定长 bytes_/str_，stringdtype_ufuncs.cpp 处理变长 StringDType）和 _vec_string 机制。因此学习顺序按「由外到内、由 Python 到 C」设计：第 1 单元先让读者看清门面与三种字符串 dtype 的定位；第 2 单元逐类拆解 Python 包装函数（比较/查找/大小写/对齐/裁剪/切分），重点是「T 分支 vs 定长分支」「缓冲区预计算 + out 分配」「_vec_string 委托」这三套反复出现的套路；第 3 单元再下探到 C++ ufunc 循环注册、string_buffer/fastsearch、StringDType 专用循环与 _vec_string 的 C 实现，并以测试与「新增一个字符串 ufunc」的端到端实践收尾。共 16 篇，符合该子系统的规模（小型门面 + 中型底层），每篇只解决一类问题且引用 1–6 个真实源码文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 numpy.strings 子系统",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与门面架构",
+          "order": 1,
+          "filename": "u1-l1-overview-and-facade.md",
+          "level": "beginner",
+          "topic": "讲清楚 numpy.strings 是什么、它和 numpy._core.strings、numpy.char 的关系，以及它如何通过一个极薄的 __init__.py 转发全部符号。",
+          "learning_goals": [
+            "理解 numpy.strings 是 NumPy 向量化字符串运算的官方命名空间",
+            "看懂门面（facade）模式：strings/__init__.py 如何用 import * 转发 _core.strings 的符号",
+            "了解 numpy.strings 与遗留模块 numpy.char 的分工"
+          ],
+          "source_files": [
+            "numpy/strings/__init__.py",
+            "numpy/strings/__init__.pyi",
+            "numpy/_core/strings.py",
+            "numpy/__init__.py"
+          ],
+          "minimal_modules": [
+            "numpy/strings/__init__.py",
+            "numpy/strings/__init__.pyi",
+            "numpy.__init__ 的 __getattr__ 懒加载"
+          ],
+          "practice_task": "在本机导入 numpy.strings，打印 dir(np.strings)，并与 numpy/strings/__init__.pyi 中列出的 45 个名字逐一对照，写一个脚本验证「门面文件确实只是转发、没有任何自有实现」。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "三种字符串 dtype 与字符计数",
+          "order": 2,
+          "filename": "u1-l2-three-string-dtypes.md",
+          "level": "beginner",
+          "topic": "讲清楚 numpy.strings 操作的三种输入 dtype：变长 StringDType（char=='T'）、定长 bytes_（'S'）、定长 str_（'U'），以及为什么 str_ 的「字符数」要除以 4。",
+          "learning_goals": [
+            "区分 StringDType(T)、bytes_(S)、str_(U) 三种 dtype 及其 dtype.char 标识",
+            "理解 _get_num_chars 对 unicode 数组用 itemsize//4 的原因",
+            "能够用 np.array 构造三种字符串数组并查看 dtype 与 itemsize"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "_get_num_chars",
+            "str_len"
+          ],
+          "practice_task": "构造 str_、bytes_、StringDType 三种数组各一个，调用 np.strings.str_len 查看长度，并对比各数组的 itemsize 与 _get_num_chars 语义（可手动 import 该私有函数验证）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "numpy.strings 与 numpy.char 的关系",
+          "order": 3,
+          "filename": "u1-l3-strings-vs-char.md",
+          "level": "beginner",
+          "topic": "讲清楚 numpy.char（defchararray.py）如何复用 numpy.strings 的实现，又额外提供 join/split/rsplit/splitlines、chararray 类与「比较前 strip 尾部空白」的 numarray 兼容行为。",
+          "learning_goals": [
+            "理解 defchararray.py 通过 from numpy.strings import * 复用实现",
+            "掌握 numpy.char 额外提供的 join/split/rsplit/splitlines 与 chararray、compare_chararrays",
+            "明白为什么 numpy.strings 推荐用于新代码而 numpy.char 仅为兼容保留"
+          ],
+          "source_files": [
+            "numpy/_core/defchararray.py",
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "defchararray 的 __all__",
+            "_join/_split/_rsplit/_splitlines 私有函数"
+          ],
+          "practice_task": "对比 np.strings 与 np.char 的 __all__，列出 char 多出的成员；再写示例证明 np.char.equal 会先 strip 尾部空白而 np.strings.equal 不会。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：Python 包装层与各类字符串函数",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l4",
+          "title": "装饰器与分发机制：set_module 与 array_function_dispatch",
+          "order": 1,
+          "filename": "u2-l4-decorators-and-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲清楚每个 numpy.strings 函数如何用 @set_module 与 @array_function_dispatch 包装，dispatcher 函数的作用，以及 _override___module__ 为何要把 ufunc 的 __module__ 改写成 numpy.strings。",
+          "learning_goals": [
+            "理解 @set_module('numpy.strings') 让函数对外归属正确模块",
+            "掌握 array_function_dispatch + dispatcher 实现 NEP-18 __array_function__ 协议",
+            "理解 _override___module__ 统一 ufunc 显示模块名的原因"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py",
+            "numpy/_core/overrides.py"
+          ],
+          "minimal_modules": [
+            "set_module",
+            "array_function_dispatch",
+            "_override___module__",
+            "各 *_dispatcher 函数"
+          ],
+          "practice_task": "挑选 np.strings.multiply，打印其 __module__、._implementation、以及内部 multiply 依赖的 dispatcher，验证 array_function_dispatch 把哪些参数视为「相关参数」。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "通用辅助函数与 dtype 分发套路",
+          "order": 2,
+          "filename": "u2-l5-helpers-and-dtype-dispatch.md",
+          "level": "intermediate",
+          "options": {},
+          "topic": "待确认",
+          "learning_goals": [
+            "理解 _get_num_chars、_to_bytes_or_str_array、_clean_args 三个辅助函数"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "_get_num_chars",
+            "_to_bytes_or_str_array",
+            "_clean_args"
+          ],
+          "practice_task": "待确认",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "比较与拼接类 ufunc：equal/add/multiply",
+          "order": 3,
+          "filename": "u2-l6-compare-and-concat.md",
+          "level": "intermediate",
+          "topic": "讲清楚比较类 ufunc（equal/not_equal/less/greater 等）、add 与 multiply 的实现，重点看 multiply 的 StringDType 快速路径与整数溢出保护。",
+          "learning_goals": [
+            "理解比较与 add 直接复用 numpy 顶层 ufunc 并改写 __module__",
+            "掌握 multiply 如何预计算缓冲区大小并做溢出检查（sys.maxsize）",
+            "看懂 a.dtype.char=='T' 时委托给原生 a*i 的快速路径"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "multiply",
+            "_multiply_dispatcher",
+            "_multiply_ufunc",
+            "str_len"
+          ],
+          "practice_task": "实现一个练习：对大重复次数调用 np.strings.multiply 触发 OverflowError 的边界，并对比 StringDType 输入与 str_ 输入下 multiply 走的是不同分支。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "查找类函数：find/index/count/startswith/endswith",
+          "order": 4,
+          "filename": "u2-l7-search-functions.md",
+          "level": "intermediate",
+          "topic": "讲清楚 find/rfind/index/rindex/count/startswith/endswith 这一组查找函数共享的「end 默认值用 MAX 哨兵」套路，以及它们如何委托到底层 *_ufunc。",
+          "learning_goals": [
+            "理解 MAX=np.iinfo(int64).max 作为 end 默认值的哨兵用法",
+            "掌握 find 与 index 的区别（index 在未找到时抛 ValueError）",
+            "看懂 start/end 区间如何透传给 C 层 ufunc"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "find",
+            "rfind",
+            "index",
+            "rindex",
+            "count",
+            "startswith",
+            "endswith",
+            "MAX"
+          ],
+          "practice_task": "写示例对比 np.strings.find 返回 -1 与 np.strings.index 抛异常的行为，并用 start/end 参数限制查找区间，验证结果与 Python str 方法一致。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "大小写转换与 _vec_string 委托：upper/mod/decode/encode/translate",
+          "order": 5,
+          "filename": "u2-l8-case-and-vecstring.md",
+          "level": "intermediate",
+          "topic": "讲清楚 upper/lower/swapcase/capitalize/title 以及 mod/decode/encode/translate 为何不走 ufunc，而是通过 _vec_string 逐元素调用 Python 字符串方法。",
+          "learning_goals": [
+            "理解 _vec_string 是逐元素调用 Python 字符串方法的通用桥",
+            "掌握 mod/decode/encode/translate 使用 _to_bytes_or_str_array 还原 dtype 的原因",
+            "明白哪些函数「将来可能变成 ufunc」、哪些「几乎不会」（见 __all__ 注释）"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py",
+            "numpy/_core/src/multiarray/multiarraymodule.c"
+          ],
+          "minimal_modules": [
+            "upper",
+            "lower",
+            "swapcase",
+            "capitalize",
+            "title",
+            "mod",
+            "decode",
+            "encode",
+            "translate",
+            "_vec_string"
+          ],
+          "practice_task": "用 _vec_string 的思路，手动对 np.array(['a','B']) 逐元素调用 'swapcase' 复现 np.strings.swapcase 的结果，并解释为何 translate 对 str_ 与 bytes_ 走不同分支。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l9",
+          "title": "对齐与填充类：center/ljust/rjust/zfill/expandtabs",
+          "order": 6,
+          "filename": "u2-l9-justify-and-pad.md",
+          "level": "intermediate",
+          "topic": "讲清楚 center/ljust/rjust/zfill/expandtabs 共享的实现套路：校验参数类型、用 str_len 预计算最大宽度、构造定长 out_dtype、最后调用 C 层 ufunc 写入。",
+          "learning_goals": [
+            "掌握「预计算缓冲区最大宽度 + 构造 out + 写入」这套固定模式",
+            "理解 fillchar 必须恰好一个字符的校验与广播 shape 计算",
+            "看懂 expandtabs 用 _expandtabs_length 先算长度再 _expandtabs 填充"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "center",
+            "ljust",
+            "rjust",
+            "zfill",
+            "expandtabs",
+            "_just_dispatcher",
+            "str_len"
+          ],
+          "practice_task": "对比 center/ljust/rjust 三者的源码结构，找出它们只有「填充分支不同」的证据；再用 zfill 验证符号前缀（+/-）后插入填充的规则。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l10",
+          "title": "裁剪类：strip/lstrip/rstrip 的双分支",
+          "order": 7,
+          "filename": "u2-l10-strip-functions.md",
+          "level": "intermediate",
+          "topic": "讲清楚 strip/lstrip/rstrip 如何根据 chars 是否为 None，分别走 _strip_whitespace（去空白）或 _strip_chars（去指定字符集）两条 C ufunc 路径。",
+          "learning_goals": [
+            "理解 chars=None 走 whitespace 分支、否则走 chars 分支",
+            "掌握 strip/lstrip/rstrip 的对称结构与对应 C 函数命名",
+            "明白 strip 是「去除所有组合」而非前缀/后缀"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "strip",
+            "lstrip",
+            "rstrip",
+            "_strip_whitespace",
+            "_strip_chars"
+          ],
+          "practice_task": "用 np.array(['  aA  ']) 演示 lstrip(' ')、strip('a')、strip() 三种结果，并解释为何 strip('a') 不会去掉被空白包围的 a。",
+          "depends_on": [
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l11",
+          "title": "切分与切片：partition/rpartition/slice",
+          "order": 8,
+          "filename": "u2-l11-partition-and-slice.md",
+          "level": "intermediate",
+          "topic": "讲清楚 partition/rpartition 如何用结构化 dtype（逗号分隔的字段）一次产出三段，以及 slice 如何模拟 Python slice 对象的 start/stop/step 语义（含 np._NoValue 哨兵与负步长）。",
+          "learning_goals": [
+            "理解 partition 用结构化 dtype 的 f0/f1/f2 字段承载三段输出",
+            "掌握 slice 里 np._NoValue 哨兵实现「只给一个参数当作 stop」的语义",
+            "看懂 slice 如何把 None 起止转换为步长相关的整数边界"
+          ],
+          "source_files": [
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "partition",
+            "rpartition",
+            "slice",
+            "_partition_dispatcher",
+            "np._NoValue"
+          ],
+          "practice_task": "手工构造 partition 的 out_dtype 字符串（形如 'U5,U1,U8'）理解三段输出，再用负步长 np.strings.slice(a,None,None,-1) 验证字符串反转行为。",
+          "depends_on": [
+            "u2-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：C/C++ 底层、StringDType 与扩展实践",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l12",
+          "title": "C++ ufunc 循环注册：string_ufuncs.cpp",
+          "order": 1,
+          "filename": "u3-l12-cpp-ufunc-registration.md",
+          "level": "advanced",
+          "topic": "讲清楚定长字符串（bytes_/str_）的 ufunc 循环如何在 init_string_ufuncs 中通过 add_loop 注册，以及 ENCODING(ASCII/UTF32) 模板与 resolve_descriptors 的作用。",
+          "learning_goals": [
+            "理解 init_string_ufuncs 把 C 循环挂载到 umath 模块的私有 ufunc 上",
+            "掌握 add_loop 与 add_loops 模板如何按 ENCODING 批量注册循环",
+            "看懂 resolve_descriptors 决定输出 dtype 的机制"
+          ],
+          "source_files": [
+            "numpy/_core/src/umath/string_ufuncs.cpp",
+            "numpy/_core/src/umath/string_ufuncs.h",
+            "numpy/_core/src/umath/ufunc_object.c"
+          ],
+          "minimal_modules": [
+            "init_string_ufuncs",
+            "add_loop",
+            "add_loops",
+            "string_center_ljust_rjust_loop",
+            "string_strip_whitespace_resolve_descriptors"
+          ],
+          "practice_task": "在源码中定位 _center/_ljust/_rjust 共用同一个 loop 函数的证据，画出 ENCODING 与字符集组合下的循环注册表，说明为何 center 能支持 ASCII fillchar 配 UTF32 输入。",
+          "depends_on": [
+            "u2-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l13",
+          "title": "string_buffer 与 string_fastsearch：字符处理原语",
+          "order": 2,
+          "filename": "u3-l13-buffer-and-fastsearch.md",
+          "level": "advanced",
+          "topic": "讲清楚 string_buffer.h 提供的 getchar 模板与字符分类（isalpha 等）原语，以及 string_fastsearch.h 如何加速 find/index/count 的子串搜索。",
+          "learning_goals": [
+            "理解 getchar<ASCII/UTF32/UTF8> 三种特化如何按字节读取一个码点",
+            "掌握 ENCODING 枚举与 IMPLEMENTED_UNARY_FUNCTIONS 枚举的用途",
+            "了解 fastsearch 算法如何支撑查找类 ufunc 的高性能"
+          ],
+          "source_files": [
+            "numpy/_core/src/umath/string_buffer.h",
+            "numpy/_core/src/umath/string_fastsearch.h"
+          ],
+          "minimal_modules": [
+            "getchar",
+            "ENCODING",
+            "IMPLEMENTED_UNARY_FUNCTIONS",
+            "codepoint_isalpha"
+          ],
+          "practice_task": "阅读 getchar 的三个模板特化，解释 ASCII（1 字节）、UTF32（4 字节）、UTF8（变长）下读取一个字符的字节数差异，并指出定长 ufunc 当前用的是哪两种编码。",
+          "depends_on": [
+            "u3-l12"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l14",
+          "title": "StringDType（'T'）专用 ufunc 循环",
+          "order": 3,
+          "filename": "u3-l14-stringdtype-ufuncs.md",
+          "level": "advanced",
+          "topic": "讲清楚变长 StringDType 为何需要独立的 ufunc 循环（stringdtype_ufuncs.cpp），以及 Python 层 char=='T' 分支如何直接委托给它，并简述 dtype/casts/utf8_utils 的支撑作用。",
+          "learning_goals": [
+            "理解 StringDType 变长存储为何不能复用定长缓冲区套路",
+            "掌握 Python 层 char=='T' 快速路径与 C 层 stringdtype 循环的对应",
+            "了解 dtype.c、casts.cpp、utf8_utils.c 在 StringDType 中的分工"
+          ],
+          "source_files": [
+            "numpy/_core/src/umath/stringdtype_ufuncs.cpp",
+            "numpy/_core/src/umath/stringdtype_ufuncs.h",
+            "numpy/_core/src/multiarray/stringdtype/dtype.c",
+            "numpy/_core/src/multiarray/stringdtype/casts.cpp",
+            "numpy/_core/src/multiarray/stringdtype/utf8_utils.c"
+          ],
+          "minimal_modules": [
+            "stringdtype_ufuncs 的循环注册",
+            "dtype.c 的 StringDType 实现",
+            "utf8_utils",
+            "casts.cpp"
+          ],
+          "practice_task": "挑选一个函数（如 multiply 或 center），对比它在 StringDType 输入与 str_ 输入下分别走了 Python 哪个分支、C 哪个循环文件，写出两条调用链的对照表。",
+          "depends_on": [
+            "u3-l12",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l15",
+          "title": "_vec_string 的 C 实现：逐元素调用 Python 方法",
+          "order": 4,
+          "filename": "u3-l15-vecstring-c-impl.md",
+          "level": "advanced",
+          "topic": "讲清楚 multiarraymodule.c 中 _vec_string / _vec_string_with_args / _vec_string_no_args 如何用广播迭代器对每个元素调用 Python 字符串方法，以及它在 numpy.strings 中的定位。",
+          "learning_goals": [
+            "理解 _vec_string 是连接「Python 字符串方法」与「NumPy 数组」的通用桥",
+            "掌握无参快路径 _vec_string_no_args 与带参 _vec_string_with_args 的区别",
+            "明白为何 upper/lower/mod/decode 等仍依赖它而非 ufunc"
+          ],
+          "source_files": [
+            "numpy/_core/src/multiarray/multiarraymodule.c",
+            "numpy/_core/strings.py"
+          ],
+          "minimal_modules": [
+            "_vec_string",
+            "_vec_string_with_args",
+            "_vec_string_no_args"
+          ],
+          "practice_task": "在 multiarraymodule.c 中定位 _vec_string 的注册项与方法分发逻辑，解释它如何根据有无参数选择快慢两条路径，并估算其对性能的影响。",
+          "depends_on": [
+            "u2-l8",
+            "u3-l12"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l16",
+          "title": "测试体系与新增字符串 ufunc 的端到端实践",
+          "order": 5,
+          "filename": "u3-l16-tests-and-extension.md",
+          "level": "advanced",
+          "topic": "讲清楚 test_strings.py 与 test_stringdtype.py 如何覆盖各函数的三种 dtype，并以「新增一个字符串 ufunc」为线索串联 Python 包装、C 循环注册、__all__ 维护与测试补充。",
+          "learning_goals": [
+            "理解 numpy.strings 的测试组织与对三种 dtype 的覆盖策略",
+            "掌握新增一个字符串函数需要改动的全链路（Python/C/__all__/测试）",
+            "学会阅读 __all__ 注释判断某函数的演进方向"
+          ],
+          "source_files": [
+            "numpy/_core/tests/test_strings.py",
+            "numpy/_core/tests/test_stringdtype.py",
+            "numpy/_core/strings.py",
+            "numpy/strings/__init__.pyi"
+          ],
+          "minimal_modules": [
+            "test_strings.py 的用例分组",
+            "test_stringdtype.py",
+            "__all__ 与注释"
+          ],
+          "practice_task": "以 split 为例（当前仍在 numpy.char 而非 numpy.strings），梳理若要把一个 _vec_string 函数迁移成真正的 ufunc 需要改动哪些文件、哪些步骤，输出一份迁移清单。",
+          "depends_on": [
+            "u3-l14",
+            "u3-l15"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
