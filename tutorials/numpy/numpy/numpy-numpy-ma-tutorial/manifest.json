@@ -1,0 +1,556 @@
+{
+  "project": "numpy-numpy-ma",
+  "head": "b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b",
+  "rationale": "numpy.ma 是 NumPy 中处理缺失/无效值的掩码数组子包，核心代码集中在 core.py（约 7000 行，含 MaskedArray 类、掩码/填充值机制与掩码 ufunc 包装）、extras.py（统计与集合工具）、mrecords.py（字段级屏蔽记录）和 testutils.py（测试断言）。学习路线按\"由浅入深、逻辑优先\"分三层：入门层（u1，4 讲）先让读者理解掩码数组动机、导入方式与目录结构，掌握创建与基本 data/mask/fill_value 访问；进阶层（u2，8 讲）深入掩码内部表示、MaskedArray 作为 ndarray 子类的 __new__/__array_finalize__/__array_wrap__ 钩子、填充值系统、一元/二元掩码 ufunc 与 domain 机制、索引赋值、归约统计排序以及 extras 工具集；专家层（u3，7 讲）覆盖硬/软/共享掩码、子类化与 mvoid、masked 单例与打印、pickle 重建、mrecords 字段屏蔽、测试体系与性能/错误处理取舍。依赖关系上，先建立 data/mask/fill_value 三件套概念（u1-l4）再进入各核心机制；掩码 ufunc 先讲一元（u2-l4）再讲二元/除法域（u2-l5）；子类化钩子（u2-l2）是多个专家层讲义（mvoid、单例打印、pickle、mrecords）的共同前置。讲义拆分遵循\"一讲一主题、2-5 个最小模块、结合真实源码并配实践任务\"，避免为凑数量硬拆。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识掩码数组与 numpy.ma",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "认识 numpy.ma：为什么需要掩码数组",
+          "order": 1,
+          "filename": "u1-l1-numpy-ma-overview.md",
+          "level": "beginner",
+          "topic": "介绍 numpy.ma 子包的定位、掩码数组解决缺失/无效值问题的核心思想，以及它的历史背景与设计目标。",
+          "learning_goals": [
+            "理解掩码数组(data+mask+fill_value)的概念与典型使用场景",
+            "知道 numpy.ma 在 numpy 中的定位与由来",
+            "能复述 README 中描述的新 MaskedArray 与旧实现的主要差异"
+          ],
+          "source_files": [
+            "README.rst",
+            "__init__.py",
+            "core.py"
+          ],
+          "minimal_modules": [
+            "掩码数组三件套概念",
+            "缺失/无效值处理动机",
+            "numpy.ma 的历史与重写背景",
+            "新 MaskedArray 与旧实现的差异"
+          ],
+          "practice_task": "用纯 numpy 创建一个含 nan 的数组，计算其 mean 观察得到 nan；再用 numpy.ma.masked_invalid 屏蔽 nan，重新计算 mean，对比并记录两次结果，体会掩码数组的作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "导入、命名空间与目录结构",
+          "order": 2,
+          "filename": "u1-l2-import-namespace-structure.md",
+          "level": "beginner",
+          "topic": "讲解如何 import numpy.ma、__init__.py 如何 re-export core 和 extras、目录中各文件(core/extras/mrecords/testutils/tests)的职责，以及 .pyi 类型桩的作用。",
+          "learning_goals": [
+            "掌握 numpy.ma 的导入方式与 __all__ 的来源",
+            "理解 core.py / extras.py / mrecords.py / testutils.py 的分工",
+            "了解 .pyi 类型桩文件的作用"
+          ],
+          "source_files": [
+            "__init__.py",
+            "core.py",
+            "extras.py",
+            "mrecords.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的 re-export 机制",
+            "core/extras/mrecords 分工",
+            "tests 目录组织",
+            ".pyi 类型桩"
+          ],
+          "practice_task": "在解释器中 import numpy.ma，遍历 np.ma.__all__（或命名空间），找到 array、masked_where、average 分别来自 core 还是 extras 模块，并写出它们各自所属的模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "创建掩码数组的多种方式",
+          "order": 3,
+          "filename": "u1-l3-creating-masked-arrays.md",
+          "level": "beginner",
+          "topic": "讲解 MaskedArray/array/masked_array 构造，以及按条件创建的 masked_where、masked_values、masked_equal、masked_invalid、masked_inside/outside 等便捷函数。",
+          "learning_goals": [
+            "会用 array/masked_array 构造掩码数组",
+            "会用 masked_where 等函数按条件屏蔽元素",
+            "理解各 masked_xxx 函数的适用场景与区别"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "MaskedArray/array 构造",
+            "masked_where 条件屏蔽",
+            "masked_values/equal/object",
+            "masked_invalid"
+          ],
+          "practice_task": "对同一个数组，分别用 masked_where、masked_equal、masked_values 三种方式屏蔽掉指定值，打印结果并验证三者掩码一致。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "读取与提取：data、mask、fill_value",
+          "order": 4,
+          "filename": "u1-l4-data-mask-fill-value.md",
+          "level": "beginner",
+          "topic": "讲解掩码数组三大组成部分(data/mask/fill_value)的访问方式，以及 filled、compressed、getdata、getmask 等数据提取手段。",
+          "learning_goals": [
+            "会访问 .data、.mask、.fill_value 三个属性",
+            "会用 filled 用填充值得到普通数组",
+            "会用 compressed 去除被屏蔽元素"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "data/mask/fill_value 属性",
+            "filled 方法",
+            "compressed 方法",
+            "getdata/getmask 函数"
+          ],
+          "practice_task": "构造一个掩码数组，分别用 filled(fill_value) 和 compressed 两种方式得到不带屏蔽标记的数据，比较二者输出形状与内容差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：理解核心机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "掩码的内部表示与构造",
+          "order": 1,
+          "filename": "u2-l1-mask-internal-representation.md",
+          "level": "intermediate",
+          "topic": "深入讲解 nomask 单例、MaskType、make_mask_descr(结构化 dtype 的掩码描述)、getmask 与 getmaskarray 的区别、make_mask/mask_or 等掩码构造与合并函数。",
+          "learning_goals": [
+            "理解 nomask 的含义与优化意义",
+            "区分 getmask 与 getmaskarray 的返回",
+            "掌握结构化 dtype 的掩码描述 make_mask_descr",
+            "会用 mask_or 合并两个掩码"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "nomask 与 MaskType",
+            "make_mask_descr 结构化掩码",
+            "getmask vs getmaskarray",
+            "make_mask / mask_or"
+          ],
+          "practice_task": "构造一个结构化 dtype 的掩码数组，打印其 mask 的 dtype（make_mask_descr 产物）；再写代码验证 getmask 在 nomask 时返回 False，而 getmaskarray 返回全 False 数组。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "MaskedArray 类与 ndarray 子类化机制",
+          "order": 2,
+          "filename": "u2-l2-maskedarray-ndarray-subclass.md",
+          "level": "intermediate",
+          "topic": "讲解 MaskedArray 继承自 ndarray 的关键钩子：__new__ 如何构造、_update_from 复制属性、__array_finalize__ 在切片/视图/ufunc 时如何传播 mask、__array_wrap__ 在 ufunc 后如何设置 mask。",
+          "learning_goals": [
+            "理解 MaskedArray 是 ndarray 子类",
+            "掌握 __new__/__array_finalize__/__array_wrap__ 的职责与触发时机",
+            "理解 mask 在视图与运算中如何传播"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "__new__ 构造流程",
+            "_update_from 属性复制",
+            "__array_finalize__ mask 传播启发式",
+            "__array_wrap__ ufunc 钩子"
+          ],
+          "practice_task": "对一个掩码数组做切片 a[1:] 和一次加法 a+1，分别在运算前后打印 .mask，结合 __array_finalize__ 源码注释解释 mask 为何这样传播。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "填充值(fill_value)系统",
+          "order": 3,
+          "filename": "u2-l3-fill-value-system.md",
+          "level": "intermediate",
+          "topic": "讲解 fill_value 的默认值生成(default_fill_value/_recursive_fill_value)、设置与读取(set_fill_value/get_fill_value)、极值填充值(minimum/maximum_fill_value)、校验(_check_fill_value)与公共填充值(common_fill_value)。",
+          "learning_goals": [
+            "理解 fill_value 默认规则与数据类型相关",
+            "会设置/读取 fill_value",
+            "知道极值填充值在 min/max 运算中的作用"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "default_fill_value 递归生成",
+            "set/get_fill_value",
+            "minimum/maximum_fill_value",
+            "_check_fill_value 校验"
+          ],
+          "practice_task": "对整数、浮点、复数三种 dtype 的掩码数组，分别打印 default_fill_value；再调用 maximum_fill_value 并解释它在 masked max 运算里如何决定屏蔽值的取舍。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "掩码一元运算与域(domain)",
+          "order": 4,
+          "filename": "u2-l4-unary-ufunc-domain.md",
+          "level": "intermediate",
+          "topic": "讲解 _MaskedUnaryOperation 如何包装 umath 一元函数、域(_DomainCheckInterval/_DomainTan/_DomainSafeDivide 等)如何把超出定义域的结果自动屏蔽，以 sqrt/log/arctan 为例。",
+          "learning_goals": [
+            "理解 _MaskedUnaryOperation 的 __call__ 流程",
+            "理解 domain 把非法结果转为 mask 的机制",
+            "能解释为什么 sqrt(负数) 在 ma 中被屏蔽而非产生 nan"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "_MaskedUnaryOperation.__call__",
+            "_Domain* 域检查类",
+            "umath 包装(sqrt/log/arctan)",
+            "errstate 警告抑制"
+          ],
+          "practice_task": "用 numpy 与 numpy.ma 分别对 [-1, 0, 1] 求 sqrt，对比结果；阅读 sqrt = _MaskedUnaryOperation(umath.sqrt, 0.0, ...) 一行，解释其 fill 参数(0.0)的用途。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "掩码二元运算与除法域",
+          "order": 5,
+          "filename": "u2-l5-binary-ufunc-divide-domain.md",
+          "level": "intermediate",
+          "topic": "讲解 _MaskedBinaryOperation 如何合并两侧 mask、用 fillx/filly 填充后运算；_DomainedBinaryOperation 在此基础上增加域(以 divide + _DomainSafeDivide 屏蔽除零为例)；以及 reduce/accumulate/outer。",
+          "learning_goals": [
+            "理解二元运算中 mask 的 logical_or 合并",
+            "理解 _DomainedBinaryOperation 的 domain 与填充",
+            "会用 reduce/outer 做掩码归约"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "_MaskedBinaryOperation mask 合并",
+            "fillx/filly 填充",
+            "_DomainedBinaryOperation + _DomainSafeDivide",
+            "reduce/accumulate/outer"
+          ],
+          "practice_task": "用 ma.divide 对两个掩码数组做除法，其中含除零位置，验证除零处被屏蔽；再用 ma.add.reduce 演示掩码归约。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "索引、切片与赋值语义",
+          "order": 6,
+          "filename": "u2-l6-indexing-assignment.md",
+          "level": "intermediate",
+          "topic": "讲解 MaskedArray.__getitem__/__setitem__ 如何同时处理 data 与 mask、put/putmask 如何更新 mask、以及 take/choose/where 的掩码版本。",
+          "learning_goals": [
+            "理解索引/切片时 mask 的同步",
+            "掌握 put/putmask 对 mask 的副作用",
+            "会用 take/where 的掩码版本"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "__getitem__/__setitem__",
+            "put/putmask 更新 mask",
+            "take",
+            "where/choose"
+          ],
+          "practice_task": "构造掩码数组，用 a[i] = v 赋值并同时观察 mask 变化；再用 put 修改若干位置，验证对应 mask 被正确更新或保持。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "归约、统计与排序",
+          "order": 7,
+          "filename": "u2-l7-reductions-stats-sort.md",
+          "level": "intermediate",
+          "topic": "讲解 core 中的 sum/mean/var/std/cumsum/cumprod、min/max/ptp/argmin/argmax(结合 fill_value)、sort/argsort(endwith) 等方法，以及 extras 中的 average/median/cov/corrcoef。",
+          "learning_goals": [
+            "掌握掩码归约会跳过被屏蔽元素",
+            "理解排序中 endwith 与 fill_value 的作用",
+            "会用 extras 的统计函数"
+          ],
+          "source_files": [
+            "core.py",
+            "extras.py"
+          ],
+          "minimal_modules": [
+            "sum/mean/var 归约",
+            "min/max/argmin/argmax + fill_value",
+            "sort/argsort endwith",
+            "average/median/cov/corrcoef(extras)"
+          ],
+          "practice_task": "对含屏蔽值的数组计算 mean 与 extras.average；再排序并切换 endwith=True/False，观察屏蔽元素落在首尾的差异。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "extras 实用工具函数集",
+          "order": 8,
+          "filename": "u2-l8-extras-utilities.md",
+          "level": "intermediate",
+          "topic": "讲解 extras.py 中的 apply_along_axis/apply_over_axes、集合运算(union1d/intersect1d/setdiff1d/in1d)、compress_rowcols/mask_rowcols、ndenumerate、clump_masked/clump_unmasked、mr_ 拼接等。",
+          "learning_goals": [
+            "会用 apply_along_axis 沿轴应用任意函数",
+            "掌握掩码集合运算",
+            "会用 clump_* 找到连续屏蔽/非屏蔽区段"
+          ],
+          "source_files": [
+            "extras.py"
+          ],
+          "minimal_modules": [
+            "apply_along_axis/apply_over_axes",
+            "集合运算(union1d/intersect1d/...)",
+            "compress_rowcols/mask_rowcols",
+            "clump_masked/clump_unmasked / ndenumerate"
+          ],
+          "practice_task": "用 apply_along_axis 对二维掩码数组每行求和；再用 clump_masked 找出一维数组中所有连续被屏蔽的区段索引。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：扩展点、持久化与架构取舍",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "硬掩码、软掩码与共享掩码",
+          "order": 1,
+          "filename": "u3-l1-hard-soft-shared-mask.md",
+          "level": "advanced",
+          "topic": "讲解 hardmask 模式下被屏蔽值无法被赋值还原、harden_mask/soften_mask 切换、shrink_mask 把全 False 掩码压缩为 nomask、unshare_mask/sharedmask 控制多个数组是否共享同一 mask 对象。",
+          "learning_goals": [
+            "理解硬掩码的不可还原语义",
+            "掌握 harden/soften/shrink 的作用",
+            "理解 _sharedmask 共享与解绑"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "hardmask 硬掩码语义",
+            "harden_mask/soften_mask",
+            "shrink_mask 压缩为 nomask",
+            "unshare_mask/sharedmask/_sharedmask"
+          ],
+          "practice_task": "构造掩码数组并 harden_mask，尝试给被屏蔽位置赋值，观察 data 与 mask 的变化；再 soften_mask 后重复，对比差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "子类化 MaskedArray 与 mvoid",
+          "order": 2,
+          "filename": "u3-l2-subclassing-mvoid.md",
+          "level": "advanced",
+          "topic": "讲解如何子类化 MaskedArray、subok 与 get_masked_subclass 的作用、用于结构化标量的 mvoid 类(__new__/__getitem__/filled/tolist)，并结合 test_subclassing.py 的范例。",
+          "learning_goals": [
+            "理解 subok/get_masked_subclass 如何决定运算返回类型",
+            "理解 mvoid 表示结构化 dtype 的单个屏蔽记录",
+            "知道子类化时应重写哪些钩子"
+          ],
+          "source_files": [
+            "core.py",
+            "tests/test_subclassing.py"
+          ],
+          "minimal_modules": [
+            "subok 与 get_masked_subclass",
+            "mvoid 结构化标量",
+            "__array_finalize__ 在子类中的传递",
+            "子类化测试范例"
+          ],
+          "practice_task": "编写一个 MaskedArray 的子类 MyMA，重写 __array_finalize__ 保留自定义属性，验证切片和运算后属性是否保留（参考 test_subclassing.py 的风格）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "masked 单例与掩码数组打印",
+          "order": 3,
+          "filename": "u3-l3-masked-constant-printing.md",
+          "level": "advanced",
+          "topic": "讲解 MaskedConstant 单例(masked)为何不可复制、其 __new__/__setattr__ 限制；以及 _MaskedPrintOption/masked_print_option 如何把被屏蔽元素显示为 '--'，__str__/__repr__/_insert_masked_print 的实现。",
+          "learning_goals": [
+            "理解 masked 是全局单例且不可变",
+            "掌握 masked_print_option 自定义显示符号",
+            "理解大数组打印时的截断逻辑"
+          ],
+          "source_files": [
+            "core.py"
+          ],
+          "minimal_modules": [
+            "MaskedConstant 单例与不可变保护",
+            "masked 单例的运算传播",
+            "_MaskedPrintOption / masked_print_option",
+            "__str__/__repr__ 打印与截断"
+          ],
+          "practice_task": "用 masked_print_option.set_display 把屏蔽符号改成 'X'，打印一个掩码数组观察效果；再用 ma.masked 参与 add 运算，确认它仍返回 masked。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "持久化：pickle、重建与深拷贝",
+          "order": 4,
+          "filename": "u3-l4-pickle-reconstruct-deepcopy.md",
+          "level": "advanced",
+          "topic": "讲解 __reduce__/__getstate__/__setstate__ 如何序列化掩码数组、_mareconstruct 在反序列化时重建子类与 baseclass、__deepcopy__ 的实现，以及 mrecords 的 _mrreconstruct。",
+          "learning_goals": [
+            "理解掩码数组 pickle 的状态组成",
+            "理解 _mareconstruct 如何还原子类",
+            "会用 copy.deepcopy 正确复制掩码数组"
+          ],
+          "source_files": [
+            "core.py",
+            "mrecords.py"
+          ],
+          "minimal_modules": [
+            "__reduce__/__getstate__/__setstate__",
+            "_mareconstruct 重建子类",
+            "__deepcopy__",
+            "反序列化时 mask 的恢复"
+          ],
+          "practice_task": "pickle 一个掩码数组再 loads，验证 data/mask/fill_value 全部保留且类型不变；对一个 MaskedArray 子类实例做同样操作，确认 _mareconstruct 还原了子类。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "掩码记录：mrecords 与字段级屏蔽",
+          "order": 5,
+          "filename": "u3-l5-mrecords-fieldmask.md",
+          "level": "advanced",
+          "topic": "讲解 MaskedRecords(mrecarray)如何支持字段级屏蔽(_fieldmask/recordmask)、_get_fieldmask 生成字段掩码、fromarrays/fromrecords/fromtextfile 构造、addfield 增加字段、保留字段名检查(_checknames/reserved_fields)。",
+          "learning_goals": [
+            "理解字段级屏蔽与整体屏蔽的区别",
+            "掌握 mrecarray 的构造方式",
+            "理解 reserved_fields 与字段名校验"
+          ],
+          "source_files": [
+            "mrecords.py"
+          ],
+          "minimal_modules": [
+            "MaskedRecords/mrecarray",
+            "_fieldmask/recordmask",
+            "fromarrays/fromrecords/fromtextfile",
+            "_checknames/reserved_fields/addfield"
+          ],
+          "practice_task": "用 fromarrays 构造一个 mrecarray，对其中某个字段单独屏蔽（其它字段不屏蔽），打印 _fieldmask 与 recordmask 观察差异。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "测试体系与 testutils 工具",
+          "order": 6,
+          "filename": "u3-l6-testutils-testing.md",
+          "level": "advanced",
+          "topic": "讲解 testutils.py 提供的断言工具(assert_equal/assert_array_equal 处理 mask、assert_mask_equal、approx/almost)，以及 tests/ 目录的组织(test_core/test_extras/test_mrecords/test_subclassing/test_regression)。",
+          "learning_goals": [
+            "会用 testutils 的掩码感知断言",
+            "理解 assert_mask_equal 的比较方式",
+            "了解 numpy.ma 测试的组织方式并能编写测试"
+          ],
+          "source_files": [
+            "testutils.py",
+            "tests/test_core.py"
+          ],
+          "minimal_modules": [
+            "assert_equal/assert_array_equal(mask 感知)",
+            "assert_mask_equal",
+            "approx/almost 容差比较",
+            "tests 目录组织"
+          ],
+          "practice_task": "为自己写的一个掩码数组操作编写 pytest，使用 assert_mask_equal 验证两个数组 mask 完全一致（参考 test_core.py 的风格）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "性能权衡、错误处理与架构取舍",
+          "order": 7,
+          "filename": "u3-l7-performance-error-handling.md",
+          "level": "advanced",
+          "topic": "结合 README 的 Optimizing maskedarray 讨论 filled vs 不 filled 的取舍，讲解 errstate 抑制浮点警告、MAError/MaskError 异常体系、_arraymethod 工厂、MaskedIterator 迭代器，并对整体架构取舍做总结。",
+          "learning_goals": [
+            "理解先填充再运算 vs 不填充的速度/正确性取舍",
+            "掌握异常体系与 _arraymethod 工厂",
+            "能评价 MaskedArray 作为 ndarray 子类的架构优劣"
+          ],
+          "source_files": [
+            "README.rst",
+            "core.py"
+          ],
+          "minimal_modules": [
+            "filled vs 不 filled 的性能取舍(README)",
+            "errstate 浮点警告抑制",
+            "MAError/MaskError 异常",
+            "_arraymethod 与 MaskedIterator"
+          ],
+          "practice_task": "实现并计时两种除法（先 filled 再除 vs 直接对 _data 相除），复现 README 的 benchmark 思路；记录速度差异并解释为何不填充更快但可能产生 inf/nan。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
