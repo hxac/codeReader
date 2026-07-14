@@ -1,0 +1,1533 @@
+{
+  "project": "NyuziProcessor",
+  "head": "ed5c1a50b77af80e54800e21bd8b62822c3f496a",
+  "rationale": "Nyuzi 是一个完整的实验性 GPGPU 处理器项目，跨越 SystemVerilog 硬件、C 指令集模拟器、LLVM 工具链、C/C++ 软件栈（libc/libos/librender）、内核、应用、FPGA SoC 和多层次测试体系，因此学习路线按「由外到内、由数据流到横切关注点」组织。入门层先让读者建立全局认知：项目定位与整体架构、构建运行、目录地图、跑通第一个程序，再补齐 ISA 基础（寄存器/向量 SIMD/算术/访存/分支控制寄存器）与硬件顶层及单核流水线全景，确保零基础读者先有「整体骨架」。进阶层沿真实数据流深入：取指→解码→线程选择→操作数→整数/浮点执行→L1 数据缓存→L1-L2 接口→L2 缓存→AXI/IO 总线→TLB/虚拟内存/控制寄存器/异常，随后转向 C 模拟器与协同仿真验证机制，以及软件栈（libc 裸机启动、libos 调度并行、librender 渲染基础）。专家层处理横切与二次开发难点：同步与多核并发、片上调试与 JTAG、性能计数与 profiling、内核与虚拟内存系统、图形渲染管线、FPGA SoC 与外设、以及完整验证体系（测试框架/随机测试/单元与整机测试）。讲义依赖严格跟随数据流与抽象层次：顶层→流水线→各级→内存层次→虚拟内存→模拟器→软件栈→高级横切主题，每篇聚焦单一主题、引用 1-6 个真实源码文件并配套可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Nyuzi 是什么：一个面向计算密集任务的实验性 GPGPU 处理器，包含可综合的 SystemVerilog 硬件、指令集模拟器、LLVM 编译器、软件库与测试。",
+          "learning_goals": [
+            "理解 Nyuzi 的定位、设计目标和五大组成部分",
+            "区分硬件核心、模拟器、工具链、软件栈、测试各自的职责",
+            "建立后续学习所需的总体心智模型"
+          ],
+          "source_files": [
+            "README.md",
+            "hardware/core/defines.svh",
+            "hardware/core/config.svh"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "组件构成",
+            "技术栈"
+          ],
+          "practice_task": "阅读 README 与 config.svh，用一段话说明 Nyuzi 由哪几部分组成，并指出默认配置下每核线程数、向量通道数与缓存容量各是多少。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行环境搭建",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何搭建 Nyuzi 开发环境：安装依赖、用 setup_tools.sh 安装工具链与 Verilator、用 cmake/make 构建并运行测试。",
+          "learning_goals": [
+            "掌握 setup_tools.sh 的作用与工具链安装流程",
+            "理解根 CMakeLists 如何组织 tools/software/hardware/tests 四个子项目",
+            "能用 cmake/make 构建并用 make tests 验证"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt",
+            "scripts/setup_tools.sh",
+            "hardware/README.md"
+          ],
+          "minimal_modules": [
+            "依赖安装",
+            "工具链脚本",
+            "CMake 构建"
+          ],
+          "practice_task": "在本地或容器中执行 setup_tools.sh 与 cmake . && make，记录构建产物中 nyuzi_vsim 与 nyuzi_emulator 的路径，并说明两者区别。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码地图",
+          "order": 3,
+          "filename": "u1-l3-directory-map.md",
+          "level": "beginner",
+          "topic": "梳理 Nyuzi 仓库目录结构：hardware(core/fpga/testbench)、tools(emulator 等)、software(libs/apps/benchmarks/kernel)、tests 各自的内容与导航方法。",
+          "learning_goals": [
+            "建立仓库目录到功能模块的映射",
+            "知道硬件核心、FPGA、模拟器、软件库、测试代码分别在哪里",
+            "能快速定位某个功能对应的源码目录"
+          ],
+          "source_files": [
+            "hardware/README.md",
+            "software/README.md",
+            "tests/README.md",
+            "tools/emulator/README.md"
+          ],
+          "minimal_modules": [
+            "硬件目录",
+            "软件目录",
+            "测试目录",
+            "工具目录"
+          ],
+          "practice_task": "绘制一张仓库目录树，标注每个一级目录的职责，并指出 L2 缓存、模拟器主程序、libc、渲染库、测试框架分别位于哪个具体路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "运行第一个程序",
+          "order": 4,
+          "filename": "u1-l4-first-program.md",
+          "level": "beginner",
+          "topic": "演示如何在模拟器中运行一个 Nyuzi 程序：hex 内存镜像格式、run_emulator/run_verilator 脚本、程序如何通过控制寄存器停机。",
+          "learning_goals": [
+            "理解 ELF 到 hex 镜像的转换与加载流程",
+            "能用 run_emulator 跑通 hello_world 或 sceneview",
+            "理解程序从地址 0 启动并写控制寄存器停机的机制"
+          ],
+          "source_files": [
+            "software/README.md",
+            "software/apps/hello_world/hello_world.c",
+            "software/apps/hello_world/CMakeLists.txt",
+            "tools/emulator/README.md"
+          ],
+          "minimal_modules": [
+            "程序入口",
+            "镜像加载",
+            "运行脚本",
+            "停机机制"
+          ],
+          "practice_task": "构建并运行 hello_world，截取模拟器输出；再阅读其源码，说明程序如何向宿主输出文本并通过何种方式结束运行。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "指令集架构入门",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ISA 总览：寄存器组与向量 SIMD",
+          "order": 1,
+          "filename": "u2-l1-isa-overview.md",
+          "level": "beginner",
+          "topic": "总览 Nyuzi 指令集：32 位定长指令、32 个标量寄存器与 32 个向量寄存器、16 通道 SIMD 向量、子周期与掩码等核心概念。",
+          "learning_goals": [
+            "理解标量/向量寄存器组与 16 通道 SIMD 数据模型",
+            "掌握指令格式大类（寄存器算术/立即数算术/访存/分支/缓存控制）",
+            "理解 subcycle、vector mask 在向量指令中的作用"
+          ],
+          "source_files": [
+            "hardware/core/defines.svh",
+            "tools/emulator/instruction-set.h",
+            "hardware/core/instruction_decode_stage.sv"
+          ],
+          "minimal_modules": [
+            "寄存器模型",
+            "向量 SIMD",
+            "指令格式分类"
+          ],
+          "practice_task": "对照 defines.svh 与 instruction-set.h，列出向量类型 vector_t 的位宽构成，并解释一条向量指令如何通过 subcycle 逐通道执行。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "算术与比较指令",
+          "order": 2,
+          "filename": "u2-l2-arithmetic-instructions.md",
+          "level": "beginner",
+          "topic": "讲解 ALU 操作编码 alu_op_t：整数算术、逻辑、移位、乘法、CLZ/CTZ、比较以及浮点算术与比较指令的语义。",
+          "learning_goals": [
+            "掌握 alu_op_t 编码中各类整数与浮点操作",
+            "区分有符号/无符号比较与浮点比较",
+            "理解整数与浮点指令走不同执行流水线"
+          ],
+          "source_files": [
+            "hardware/core/defines.svh",
+            "tools/emulator/instruction-set.h",
+            "hardware/core/int_execute_stage.sv"
+          ],
+          "minimal_modules": [
+            "整数算术",
+            "逻辑移位",
+            "比较操作",
+            "浮点算术"
+          ],
+          "practice_task": "写一段汇编或 C 代码，用 setne_i/setgt_u 和 add_f 指令完成一个条件计算，用模拟器 -v 跟踪并解释每条指令的寄存器写回。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "内存访问与加载存储",
+          "order": 3,
+          "filename": "u2-l3-memory-instructions.md",
+          "level": "beginner",
+          "topic": "讲解 memory_op_t 访存指令：字节/半字/字加载存储、符号扩展、向量块访存、scatter/gather、同步访存与控制寄存器访问。",
+          "learning_goals": [
+            "掌握各类标量与向量访存指令的语义与位宽",
+            "理解 block vector 与 scatter/gather 的数据布局",
+            "区分普通访存、同步访存与控制寄存器访问"
+          ],
+          "source_files": [
+            "hardware/core/defines.svh",
+            "hardware/core/instruction_decode_stage.sv",
+            "tools/emulator/instruction-set.h"
+          ],
+          "minimal_modules": [
+            "标量访存",
+            "向量块访存",
+            "scatter/gather",
+            "同步访存"
+          ],
+          "practice_task": "编写一段代码用 load_32/store_32 与向量 block 访存搬运一段内存，对比标量与向量两种实现的指令数差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "分支调用与控制寄存器",
+          "order": 4,
+          "filename": "u2-l4-branch-control-registers.md",
+          "level": "beginner",
+          "topic": "讲解分支与调用指令 branch_type_t，以及 control_register_t 控制寄存器组：线程号、trap 处理、标志、ASID、页目录、中断与性能计数等。",
+          "learning_goals": [
+            "掌握各类分支/调用/eret 指令的语义",
+            "理解控制寄存器的编址与典型用途",
+            "建立对线程、中断、MMU、性能计数控制寄存器的初步认识"
+          ],
+          "source_files": [
+            "hardware/core/defines.svh",
+            "tools/emulator/instruction-set.h",
+            "hardware/core/control_registers.sv"
+          ],
+          "minimal_modules": [
+            "分支调用",
+            "控制寄存器",
+            "中断相关寄存器"
+          ],
+          "practice_task": "列出所有控制寄存器编号与用途，写一段汇编用 getcr/setcr 读取线程号并写回，验证在 4 线程配置下不同线程得到不同值。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "硬件顶层与流水线全景",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "顶层 nyuzi 与系统连接",
+          "order": 1,
+          "filename": "u3-l1-top-level-nyuzi.md",
+          "level": "beginner",
+          "topic": "讲解顶层模块 nyuzi.sv：多核实例化、L2 缓存、IO 互连、片上调试器，以及 AXI/io_bus/jtag 三类外部接口与线程使能逻辑。",
+          "learning_goals": [
+            "理解 nyuzi 顶层如何组合多核、L2、IO 互连与调试器",
+            "掌握 AXI4、io_bus、jtag 三类接口的用途",
+            "理解线程挂起/恢复掩码的聚合方式"
+          ],
+          "source_files": [
+            "hardware/core/nyuzi.sv",
+            "hardware/core/defines.svh"
+          ],
+          "minimal_modules": [
+            "顶层结构",
+            "外部接口",
+            "线程使能"
+          ],
+          "practice_task": "画出 nyuzi 顶层的模块连接图，标出 core、l2_cache、io_interconnect、on_chip_debugger 之间的请求/响应信号流向。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "单核流水线总览",
+          "order": 2,
+          "filename": "u3-l2-core-pipeline.md",
+          "level": "beginner",
+          "topic": "讲解 core.sv 单核流水线：取指、解码、线程选择、操作数 fetch、数据缓存、整数/浮点执行、写回各级模块及其相互连接。",
+          "learning_goals": [
+            "掌握单核流水线各级模块的名称与顺序",
+            "理解整数与浮点两条执行路径的分流",
+            "建立控制寄存器、L1-L2 接口、IO 请求队列与流水线的关系"
+          ],
+          "source_files": [
+            "hardware/core/core.sv"
+          ],
+          "minimal_modules": [
+            "流水线各级",
+            "执行路径分流",
+            "辅助模块"
+          ],
+          "practice_task": "依据 core.sv 的实例化列表，绘制流水线数据流图，标出指令从 ifetch_tag 到 writeback 经过的所有阶段与三条执行路径。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "配置参数与可综合性",
+          "order": 3,
+          "filename": "u3-l3-config-synthesis.md",
+          "level": "beginner",
+          "topic": "讲解 config.svh 可配置参数（核数、线程数、缓存路数/组数、TLB 项数）的约束规则，以及 SRAM 宏模块、SIMULATION 宏与厂商可综合性问题。",
+          "learning_goals": [
+            "掌握各配置参数的含义与取值约束",
+            "理解参数化 SRAM/FIFO 与厂商宏的切换机制",
+            "了解 SIMULATION 宏与可综合性的关系"
+          ],
+          "source_files": [
+            "hardware/core/config.svh",
+            "hardware/README.md",
+            "hardware/core/sram_1r1w.sv",
+            "hardware/core/sram_2r1w.sv"
+          ],
+          "minimal_modules": [
+            "配置参数",
+            "参数约束",
+            "SRAM 宏与可综合性"
+          ],
+          "practice_task": "修改 config.svh 将 THREADS_PER_CORE 调整为另一合法值并解释为何 L1D_WAYS 必须 >= THREADS_PER_CORE，尝试重新构建并记录结果。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "取指、解码与发射",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "指令取指与 I-Cache",
+          "order": 1,
+          "filename": "u4-l1-instruction-fetch.md",
+          "level": "intermediate",
+          "topic": "讲解 ifetch_tag_stage 与 ifetch_data_stage：PC 生成、ITLB 查询、I-Cache 标签/数据读出、命中/缺失与缺失唤醒机制。",
+          "learning_goals": [
+            "理解取指阶段的 PC 计算与 ITLB 查询流程",
+            "掌握 I-Cache 标签与数据两级的命中判定",
+            "理解指令缓存缺失后如何挂起线程并等待填充唤醒"
+          ],
+          "source_files": [
+            "hardware/core/ifetch_tag_stage.sv",
+            "hardware/core/ifetch_data_stage.sv"
+          ],
+          "minimal_modules": [
+            "PC 生成",
+            "ITLB 查询",
+            "I-Cache 命中判定",
+            "缺失唤醒"
+          ],
+          "practice_task": "跟踪一次 I-Cache 缺失：在 ifetch_tag_stage/ifetch_data_stage 中找到缺失信号与 cache miss 地址的产生位置，说明线程如何被挂起并在填充后恢复。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "指令解码",
+          "order": 2,
+          "filename": "u4-l2-instruction-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 instruction_decode_stage 如何将 32 位指令填充为 decoded_instruction_t，包括格式到操作数/掩码/存储值的映射表与中断替换机制。",
+          "learning_goals": [
+            "掌握指令各字段到 decoded_instruction_t 的映射",
+            "理解不同指令格式的操作数与掩码来源",
+            "了解中断通过替换指令实现精确中断的机制"
+          ],
+          "source_files": [
+            "hardware/core/instruction_decode_stage.sv",
+            "hardware/core/defines.svh"
+          ],
+          "minimal_modules": [
+            "解码结构",
+            "格式映射",
+            "中断替换"
+          ],
+          "practice_task": "对照解码映射表，为寄存器/寄存器、立即数、访存 block、scatter/gather 四种格式各写一条指令，标出 op1/op2/mask/store_value 的来源寄存器。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "线程选择与记分牌",
+          "order": 3,
+          "filename": "u4-l3-thread-select.md",
+          "level": "intermediate",
+          "topic": "讲解 thread_select_stage：每线程指令 FIFO、轮询调度、用记分牌规避 RAW/WAW/WAR 冒险、跨不同长度流水线的写回冒险、缓存缺失挂起。",
+          "learning_goals": [
+            "理解多线程轮询发射的调度策略",
+            "掌握记分牌如何跟踪寄存器依赖并阻止冒险",
+            "理解写回冒险移位寄存器与缓存缺失挂起机制"
+          ],
+          "source_files": [
+            "hardware/core/thread_select_stage.sv",
+            "hardware/core/scoreboard.sv"
+          ],
+          "minimal_modules": [
+            "指令 FIFO",
+            "轮询调度",
+            "记分牌冒险",
+            "写回冒险"
+          ],
+          "practice_task": "构造一段存在 RAW 依赖的指令序列，分析 thread_select_stage 如何利用记分牌推迟第二条指令的发射，并说明这种推迟不会浪费周期（因为可切换到其他线程）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "执行单元",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "操作数 fetch 与寄存器文件",
+          "order": 1,
+          "filename": "u5-l1-operand-fetch.md",
+          "level": "intermediate",
+          "topic": "讲解 operand_fetch_stage：根据解码结果读取标量/向量寄存器、选择立即数、计算掩码与存储值，并处理向量子周期。",
+          "learning_goals": [
+            "理解操作数 fetch 如何根据 op1_src/op2_src 选择源",
+            "掌握掩码生成与向量子周期的处理",
+            "了解寄存器文件读端口与写回的配合"
+          ],
+          "source_files": [
+            "hardware/core/operand_fetch_stage.sv",
+            "hardware/core/scoreboard.sv"
+          ],
+          "minimal_modules": [
+            "操作数选择",
+            "掩码生成",
+            "子周期处理"
+          ],
+          "practice_task": "追踪一条向量加法指令在 operand_fetch_stage 中 op1/op2/mask 的来源，说明当 op1_src 为标量时如何广播到所有通道。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "整数执行单元",
+          "order": 2,
+          "filename": "u5-l2-integer-execute.md",
+          "level": "intermediate",
+          "topic": "讲解 int_execute_stage：整数 ALU 运算、分支解析与回滚、比较结果、特权操作检测与性能事件统计。",
+          "learning_goals": [
+            "掌握整数 ALU 各操作的执行与结果生成",
+            "理解分支在执行阶段解析并触发回滚的机制",
+            "了解特权指令违规如何产生异常"
+          ],
+          "source_files": [
+            "hardware/core/int_execute_stage.sv"
+          ],
+          "minimal_modules": [
+            "整数 ALU",
+            "分支解析与回滚",
+            "特权检测",
+            "性能事件"
+          ],
+          "practice_task": "分析一条条件分支在 int_execute_stage 中如何解析并产生 rollback_pc，说明回滚信号如何回到取指阶段刷新流水线。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "浮点五级流水线",
+          "order": 3,
+          "filename": "u5-l3-float-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 fp_execute_stage1-5 五级浮点流水线：符号/指数/尾数分离、乘积计算、对阶与规整、舍入与特殊值，以及 reciprocal_rom 倒数查表。",
+          "learning_goals": [
+            "掌握 IEEE754 binary32 在五级流水线中的分解与重组",
+            "理解浮点加法对阶、规整与舍入的实现",
+            "了解倒数估计 ROM 与非完全 IEEE 兼容的取舍"
+          ],
+          "source_files": [
+            "hardware/core/fp_execute_stage1.sv",
+            "hardware/core/fp_execute_stage2.sv",
+            "hardware/core/fp_execute_stage3.sv",
+            "hardware/core/fp_execute_stage4.sv",
+            "hardware/core/fp_execute_stage5.sv",
+            "hardware/core/reciprocal_rom.sv"
+          ],
+          "minimal_modules": [
+            "尾数乘积",
+            "对阶规整",
+            "舍入与特殊值",
+            "倒数 ROM"
+          ],
+          "practice_task": "沿五级流水线跟踪一次浮点乘加，标出每一级传递的关键中间量（乘积、指数、符号、guard/round/sticky），并解释为何该实现非完全 IEEE 兼容。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "缓存与内存层次",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "L1 数据缓存",
+          "order": 1,
+          "filename": "u6-l1-l1-dcache.md",
+          "level": "intermediate",
+          "topic": "讲解 dcache_data_stage 与 dcache_tag_stage：虚拟索引/物理标签的 L1D、DTLB 查询、命中/缺失、LRU 与 store 合并、snoop。",
+          "learning_goals": [
+            "理解 L1D 虚拟索引/物理标签的组织与别名规避",
+            "掌握标签级与数据级两阶段的职责划分",
+            "理解 LRU 更新、store 写入与 snoop 一致性"
+          ],
+          "source_files": [
+            "hardware/core/dcache_data_stage.sv",
+            "hardware/core/dcache_tag_stage.sv",
+            "hardware/core/cache_lru.sv"
+          ],
+          "minimal_modules": [
+            "VI/PT 组织",
+            "标签与数据级",
+            "LRU 与 store",
+            "snoop 一致性"
+          ],
+          "practice_task": "解释为何 L1D_SETS 必须 <= 64（页大小/缓存行大小），并用 dcache_tag_stage 中的逻辑说明虚拟索引/物理标签如何避免别名。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "L1-L2 接口与队列",
+          "order": 2,
+          "filename": "u6-l2-l1-l2-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 l1_l2_interface 以及 l1_load_miss_queue、l1_store_queue：缺失请求入队、store 缓冲与旁路、L2 响应分发与线程唤醒。",
+          "learning_goals": [
+            "理解 L1 缺失如何进入 miss 队列并等待 L2 响应",
+            "掌握 store 队列的缓冲、合并与旁路机制",
+            "了解 L2 响应如何更新 L1 标签/数据并唤醒线程"
+          ],
+          "source_files": [
+            "hardware/core/l1_l2_interface.sv",
+            "hardware/core/l1_load_miss_queue.sv",
+            "hardware/core/l1_store_queue.sv"
+          ],
+          "minimal_modules": [
+            "缺失队列",
+            "store 队列与旁路",
+            "响应分发与唤醒"
+          ],
+          "practice_task": "跟踪一次 L1D 缺失：说明请求如何进入 l1_load_miss_queue、经 l1_l2_interface 发往 L2，并在 L2 响应回来后如何更新 L1 并唤醒被挂起的线程。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "L2 缓存四阶段流水线",
+          "order": 3,
+          "filename": "u6-l3-l2-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 l2_cache 物理索引/物理标签的四阶段流水线（仲裁/标签/读/更新）：多核请求仲裁、命中判定、缺失填充与脏行写回。",
+          "learning_goals": [
+            "掌握 L2 四阶段流水线各阶段职责",
+            "理解物理索引/物理标签与 L1 翻译的分工",
+            "了解缺失填充队列与脏行写回队列的协作"
+          ],
+          "source_files": [
+            "hardware/core/l2_cache.sv",
+            "hardware/core/l2_cache_arb_stage.sv",
+            "hardware/core/l2_cache_read_stage.sv",
+            "hardware/core/l2_cache_tag_stage.sv",
+            "hardware/core/l2_cache_update_stage.sv"
+          ],
+          "minimal_modules": [
+            "仲裁阶段",
+            "标签阶段",
+            "读阶段",
+            "更新阶段",
+            "缺失与写回"
+          ],
+          "practice_task": "绘制 L2 四阶段流水线图，标出一次缺失如何被放入 fill 请求队列、从系统内存取回数据后重新进入流水线，以及脏行如何进入写回队列。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "AXI 总线与 IO 互连",
+          "order": 4,
+          "filename": "u6-l4-axi-io-bus.md",
+          "level": "intermediate",
+          "topic": "讲解 l2_axi_bus_interface 如何将 L2 接到 AXI4 系统总线，以及 io_interconnect/io_request_queue 处理非缓存外设寄存器访问。",
+          "learning_goals": [
+            "理解 AXI4 主接口的读写通道与突发传输",
+            "掌握 IO 总线与内存总线的分离及路由",
+            "理解 IO 请求队列的挂起/唤醒与回滚机制"
+          ],
+          "source_files": [
+            "hardware/core/l2_axi_bus_interface.sv",
+            "hardware/core/io_interconnect.sv",
+            "hardware/core/io_request_queue.sv",
+            "hardware/core/defines.svh"
+          ],
+          "minimal_modules": [
+            "AXI4 接口",
+            "IO 互连",
+            "IO 请求队列"
+          ],
+          "practice_task": "说明一次外设寄存器写如何被 dcache 识别为 IO 访问、经 io_request_queue 发往 io_interconnect，并解释为何 IO 访问需要让线程挂起等待响应。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "虚拟内存、TLB 与异常",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "软件管理 TLB 与地址翻译",
+          "order": 1,
+          "filename": "u7-l1-tlb-translation.md",
+          "level": "intermediate",
+          "topic": "讲解 tlb.sv 与软件管理 TLB 模型：TLB 表项结构、ITLB/DTLB 查询、缺失触发 trap 由软件填充、ASID 与全局映射。",
+          "learning_goals": [
+            "理解 tlb_entry_t 表项各标志位的含义",
+            "掌握软件管理 TLB 的查询与缺失处理流程",
+            "理解 ASID、全局映射与页目录的配合"
+          ],
+          "source_files": [
+            "hardware/core/tlb.sv",
+            "hardware/core/defines.svh",
+            "hardware/core/dcache_tag_stage.sv"
+          ],
+          "minimal_modules": [
+            "TLB 表项",
+            "查询与缺失",
+            "ASID 与全局映射"
+          ],
+          "practice_task": "说明一次 DTLB 缺失如何产生 TT_TLB_MISS trap、跳到 TLB miss handler，软件用 CACHE_DTLB_INSERT 插入表项后返回重试访问的全过程。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "控制寄存器与中断",
+          "order": 2,
+          "filename": "u7-l2-control-registers-interrupt.md",
+          "level": "intermediate",
+          "topic": "讲解 control_registers：控制寄存器存储、中断挂起/使能/确认、trap 级别嵌套、supervisor/MMU/ASID 状态与线程挂起恢复。",
+          "learning_goals": [
+            "掌握控制寄存器的读写与陷阱级别嵌套",
+            "理解中断挂起、使能与确认的时序",
+            "了解 supervisor/MMU/ASID 状态如何按线程维护"
+          ],
+          "source_files": [
+            "hardware/core/control_registers.sv",
+            "hardware/core/defines.svh"
+          ],
+          "minimal_modules": [
+            "控制寄存器存储",
+            "中断处理",
+            "trap 嵌套",
+            "线程状态"
+          ],
+          "practice_task": "分析中断从 interrupt_req 到 instruction_decode 替换指令的完整路径，说明 CR_INTERRUPT_ENABLE/ACK/PENDING 如何配合实现精确中断。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Trap 处理与回滚",
+          "order": 3,
+          "filename": "u7-l3-trap-rollback.md",
+          "level": "intermediate",
+          "topic": "讲解 writeback_stage 中的 trap 处理与回滚机制：trap 类型、精确异常、流水线回滚与 eret 返回、syscall 派发。",
+          "learning_goals": [
+            "掌握 trap_cause_t 各异常类型与产生条件",
+            "理解写回阶段如何实现精确异常与回滚",
+            "了解 syscall 如何在写回阶段被捕获并派发"
+          ],
+          "source_files": [
+            "hardware/core/writeback_stage.sv",
+            "hardware/core/control_registers.sv",
+            "hardware/core/defines.svh"
+          ],
+          "minimal_modules": [
+            "异常类型",
+            "精确异常",
+            "回滚机制",
+            "syscall 派发"
+          ],
+          "practice_task": "构造一条非法访问触发 TT_PAGE_FAULT 的场景，跟踪 trap 信号如何从 dcache 传到 writeback，再回滚取指到 trap handler，最后经 eret 返回。",
+          "depends_on": [
+            "u7-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "指令集模拟器与协同仿真",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "模拟器架构与指令执行",
+          "order": 1,
+          "filename": "u8-l1-emulator-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 tools/emulator 的整体架构：main.c 入口与命令行、processor.c 的线程调度与指令执行、与硬件一致的 ISA 定义。",
+          "learning_goals": [
+            "理解模拟器的非周期精确模型与适用场景",
+            "掌握处理器结构、线程调度与指令派发流程",
+            "了解模拟器与硬件共享的 ISA 定义"
+          ],
+          "source_files": [
+            "tools/emulator/main.c",
+            "tools/emulator/processor.c",
+            "tools/emulator/processor.h",
+            "tools/emulator/instruction-set.h"
+          ],
+          "minimal_modules": [
+            "入口与命令行",
+            "线程调度",
+            "指令执行",
+            "ISA 定义"
+          ],
+          "practice_task": "用 -v 模式运行一个程序并解读跟踪输出格式（pc、线程、寄存器写回、内存写），对照 instruction-set.h 解释一条指令的执行。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "模拟器设备与外设仿真",
+          "order": 2,
+          "filename": "u8-l2-emulator-devices.md",
+          "level": "intermediate",
+          "topic": "讲解 emulator 如何仿真 FPGA/Verilog 环境的外设：device.c 设备寄存器分发、fbwindow 帧缓冲、sdmmc 虚拟块设备、UART 输出。",
+          "learning_goals": [
+            "理解模拟器如何路由外设寄存器访问",
+            "掌握帧缓冲窗口与虚拟 SD/MMC 设备的仿真",
+            "了解 UART printf 输出到宿主stdout 的机制"
+          ],
+          "source_files": [
+            "tools/emulator/device.c",
+            "tools/emulator/device.h",
+            "tools/emulator/fbwindow.c",
+            "tools/emulator/sdmmc.c"
+          ],
+          "minimal_modules": [
+            "设备分发",
+            "帧缓冲",
+            "虚拟块设备",
+            "UART"
+          ],
+          "practice_task": "运行一个有图形输出的应用（如 sceneview/colorbars），说明帧缓冲地址如何映射到 fbwindow 窗口，并用 -b 挂载一个虚拟块设备验证 sdmmc 仿真。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "协同仿真验证机制",
+          "order": 3,
+          "filename": "u8-l3-cosimulation.md",
+          "level": "intermediate",
+          "topic": "讲解 cosimulation 模式：硬件 +trace 输出与模拟器锁步比对指令副作用、runtest.py 流程、generate_random.py 约束随机生成。",
+          "learning_goals": [
+            "理解协同仿真锁步比对的工作原理",
+            "掌握 +trace 输出格式与副作用比对方法",
+            "了解约束随机生成的目的与限制"
+          ],
+          "source_files": [
+            "tools/emulator/cosimulation.c",
+            "tests/cosimulation/runtest.py",
+            "tests/cosimulation/generate_random.py",
+            "tests/cosimulation/README.md"
+          ],
+          "minimal_modules": [
+            "锁步比对",
+            "trace 格式",
+            "随机生成",
+            "已知限制"
+          ],
+          "practice_task": "运行一个 cosimulation 随机测试，用 --debug 观察硬件与模拟器两侧的 writeback/store 事件比对，并解释为何浮点与 store buffer 不在覆盖范围内。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "软件栈与裸机运行时",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "libc 与裸机启动",
+          "order": 1,
+          "filename": "u9-l1-libc-bare-metal-startup.md",
+          "level": "intermediate",
+          "topic": "讲解 libc（stdio/vfprintf/string/dlmalloc）与裸机启动 crt0.S、sbrk 堆分配，以及程序如何链接到地址 0 并进入 main。",
+          "learning_goals": [
+            "理解裸机程序的链接地址与启动流程",
+            "掌握 printf 经 vfprintf 到 UART 的实现路径",
+            "了解 dlmalloc 与 sbrk 的堆管理配合"
+          ],
+          "source_files": [
+            "software/libs/libc/src/stdio.c",
+            "software/libs/libc/src/vfprintf.c",
+            "software/libs/libos/bare-metal/crt0.S",
+            "software/libs/libos/bare-metal/sbrk.c"
+          ],
+          "minimal_modules": [
+            "crt0 启动",
+            "stdio/printf",
+            "堆分配"
+          ],
+          "practice_task": "跟踪一次 printf 调用从 vfprintf 到 UART 控制寄存器输出的完整路径，并说明 crt0 如何设置栈和堆后跳转到 main。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "libos 调度与并行执行",
+          "order": 2,
+          "filename": "u9-l2-libos-schedule-parallel.md",
+          "level": "intermediate",
+          "topic": "讲解 libos 的 schedule.c 与 parallelExecute：如何唤醒其余硬件线程并行执行任务、线程同步与等待、bare-metal 与 kernel 两种变体。",
+          "learning_goals": [
+            "理解 parallelExecute 如何启动并等待工作线程",
+            "掌握线程挂起/恢复控制寄存器在软件调度中的使用",
+            "了解 bare-metal 与 kernel 两种 libos 变体的差异"
+          ],
+          "source_files": [
+            "software/libs/libos/bare-metal/schedule.c",
+            "software/libs/libos/schedule.h",
+            "software/libs/libos/bare-metal/crt0.S"
+          ],
+          "minimal_modules": [
+            "并行执行",
+            "线程同步",
+            "两种变体"
+          ],
+          "practice_task": "用 parallelExecute 编写一个多线程并行计算任务，说明主线程如何唤醒其余线程、各线程如何领取工作并在完成后让主线程汇合。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "librender 渲染库基础",
+          "order": 3,
+          "filename": "u9-l3-librender-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 librender 的基础：Surface 帧缓冲抽象、Texture 纹理与 mipmap、RenderContext 命令提交与 finish 触发多线程渲染。",
+          "learning_goals": [
+            "理解 Surface 作为渲染目标的抽象",
+            "掌握 Texture 与 mipmap 的数据组织",
+            "了解 RenderContext 提交命令并触发渲染的流程"
+          ],
+          "source_files": [
+            "software/libs/librender/Surface.cpp",
+            "software/libs/librender/Texture.cpp",
+            "software/libs/librender/RenderContext.cpp",
+            "software/libs/librender/README.md"
+          ],
+          "minimal_modules": [
+            "Surface",
+            "Texture/mipmap",
+            "RenderContext"
+          ],
+          "practice_task": "阅读 RenderContext::finish，说明它如何通过 libos 的 parallelExecute 启动所有工作线程进入渲染，并区分几何阶段与像素阶段。",
+          "depends_on": [
+            "u9-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "并发、同步与多核",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "同步内存操作 LL/SC 与 membar",
+          "order": 1,
+          "filename": "u10-l1-sync-load-store.md",
+          "level": "advanced",
+          "topic": "讲解 MEM_SYNC 同步 load/store（LL/SC）与 membar 的硬件实现：l1_store_queue 中的同步状态、成功/失败、回滚与内存排序保证。",
+          "learning_goals": [
+            "理解 load_sync/store_sync 的 LL/SC 语义",
+            "掌握 store 队列中同步状态的成功失败与回滚",
+            "了解 membar 如何保证内存操作可见性顺序"
+          ],
+          "source_files": [
+            "hardware/core/defines.svh",
+            "hardware/core/dcache_data_stage.sv",
+            "hardware/core/l1_store_queue.sv",
+            "tests/stress/atomic/runtest.py"
+          ],
+          "minimal_modules": [
+            "LL/SC 语义",
+            "同步状态",
+            "membar 排序"
+          ],
+          "practice_task": "用 load_sync/store_sync 实现一个自旋锁，分析在竞争下 store_sync 失败如何回滚，并解释 stress/atomic 测试如何验证原子性。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "多线程调度与挂起恢复",
+          "order": 2,
+          "filename": "u10-l2-thread-scheduling.md",
+          "level": "advanced",
+          "topic": "深入多线程调度：thread_select 的轮询与冒险规避、control_registers 的 suspend/resume、nyuzi 顶层 thread_en 聚合与缓存缺失挂起唤醒。",
+          "learning_goals": [
+            "深入理解轮询调度在隐藏延迟中的作用",
+            "掌握软件 suspend/resume 与硬件 thread_en 的交互",
+            "理解缓存缺失挂起与 L2 响应唤醒的位图机制"
+          ],
+          "source_files": [
+            "hardware/core/thread_select_stage.sv",
+            "hardware/core/scoreboard.sv",
+            "hardware/core/control_registers.sv",
+            "hardware/core/nyuzi.sv"
+          ],
+          "minimal_modules": [
+            "轮询调度",
+            "suspend/resume",
+            "挂起唤醒位图"
+          ],
+          "practice_task": "分析一个线程因 D-Cache 缺失被挂起后，L2 响应如何通过 wake_bitmap 恢复该线程，并说明这种机制如何让其他线程继续利用流水线。",
+          "depends_on": [
+            "u4-l3",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "多核与 L2 仲裁",
+          "order": 3,
+          "filename": "u10-l3-multicore-l2-arb.md",
+          "level": "advanced",
+          "topic": "讲解多核配置：nyuzi 顶层多核实例化、l2_cache_arb_stage 与 rr_arbiter 的多核请求仲裁、L2 对多核的响应广播与 multicore 测试。",
+          "learning_goals": [
+            "理解多核共享 L2 的仲裁机制",
+            "掌握 rr_arbiter 轮询仲裁的实现",
+            "了解多核配置的构建与测试约束"
+          ],
+          "source_files": [
+            "hardware/core/nyuzi.sv",
+            "hardware/core/l2_cache_arb_stage.sv",
+            "hardware/core/rr_arbiter.sv",
+            "tests/core/multicore/runtest.py"
+          ],
+          "minimal_modules": [
+            "多核实例化",
+            "L2 仲裁",
+            "响应广播"
+          ],
+          "practice_task": "说明将 NUM_CORES 改为多核需要哪些配套修改，分析 l2_cache_arb_stage 如何在多个核同时请求时公平仲裁，并解释 multicore 测试为何需要重建硬件模型。",
+          "depends_on": [
+            "u3-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "调试与性能",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "片上调试器与 JTAG",
+          "order": 1,
+          "filename": "u11-l1-on-chip-debugger-jtag.md",
+          "level": "advanced",
+          "topic": "讲解 on_chip_debugger 与 jtag_tap_controller：通过 JTAG 注入指令读写寄存器/内存、halt 机制、CR_JTAG_DATA 数据通道及已知限制。",
+          "learning_goals": [
+            "理解 JTAG TAP 控制器的指令/数据寄存器机制",
+            "掌握指令注入实现寄存器/内存读写的原理",
+            "了解调试器的 halt 语义与已知限制"
+          ],
+          "source_files": [
+            "hardware/core/on_chip_debugger.sv",
+            "hardware/core/jtag_tap_controller.sv",
+            "tests/jtag-debug/runtest.py"
+          ],
+          "minimal_modules": [
+            "JTAG TAP",
+            "指令注入",
+            "halt 机制",
+            "已知限制"
+          ],
+          "practice_task": "分析 on_chip_debugger 如何通过注入一条 load/store 指令并经 CR_JTAG_DATA 取回结果来读取目标内存，并指出其在多周期指令和 sync 操作上的限制。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "性能计数器与 profiling",
+          "order": 2,
+          "filename": "u11-l2-performance-counters.md",
+          "level": "advanced",
+          "topic": "讲解性能计数体系：performance_counters、core.sv 中聚合的 perf_events、控制寄存器选择事件、profile.py 与 libos performance_counters 接口。",
+          "learning_goals": [
+            "理解硬件性能事件的来源与聚合方式",
+            "掌握用控制寄存器选择并读取性能计数",
+            "了解 +profile 与 profile.py 的采样剖析流程"
+          ],
+          "source_files": [
+            "hardware/core/performance_counters.sv",
+            "hardware/core/control_registers.sv",
+            "tools/misc/profile.py",
+            "software/libs/libos/bare-metal/performance_counters.c"
+          ],
+          "minimal_modules": [
+            "性能事件聚合",
+            "事件选择",
+            "profile 剖析"
+          ],
+          "practice_task": "用 +profile 运行一个程序并用 profile.py 生成热点报告，再用 performance_counters.c 接口编程统计 icache/dcache 缺失并解读结果。",
+          "depends_on": [
+            "u7-l2",
+            "u9-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "GDB 远程调试与 LLDB",
+          "order": 3,
+          "filename": "u11-l3-remote-gdb-lldb.md",
+          "level": "advanced",
+          "topic": "讲解 remote-gdb.c 实现 GDB 远程串行协议、模拟器 gdb 模式、与 LLDB 配合进行源码级调试、断点与单步。",
+          "learning_goals": [
+            "理解 GDB 远程协议在模拟器中的实现",
+            "掌握用 -m gdb 启动并attach LLDB 的流程",
+            "了解断点、单步、寄存器/内存读写的实现与限制"
+          ],
+          "source_files": [
+            "tools/emulator/remote-gdb.c",
+            "tools/emulator/main.c",
+            "tools/emulator/README.md"
+          ],
+          "minimal_modules": [
+            "远程协议",
+            "gdb 模式",
+            "断点单步"
+          ],
+          "practice_task": "用 -m gdb 启动模拟器并用 LLDB attach，在一个程序中设置断点、单步执行并查看寄存器，记录哪些调试功能在虚拟内存启用时不可用。",
+          "depends_on": [
+            "u8-l1",
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "内核与虚拟内存系统",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "内核启动与陷阱/系统调用",
+          "order": 1,
+          "filename": "u12-l1-kernel-startup-trap.md",
+          "level": "advanced",
+          "topic": "讲解 software/kernel 的启动流程：start.S/main.c 加载 program.elf、trap_entry.S/trap.c 陷阱入口、syscall.c 系统调用派发。",
+          "learning_goals": [
+            "理解内核启动与用户程序加载流程",
+            "掌握陷阱入口的保存/恢复与派发机制",
+            "了解系统调用号的分发与处理"
+          ],
+          "source_files": [
+            "software/kernel/main.c",
+            "software/kernel/trap.c",
+            "software/kernel/trap_entry.S",
+            "software/kernel/syscall.c",
+            "software/kernel/syscalls.h"
+          ],
+          "minimal_modules": [
+            "启动加载",
+            "陷阱入口",
+            "系统调用派发"
+          ],
+          "practice_task": "跟踪一次用户态 syscall 从 trap_entry 保存现场、进入 trap.c 派发到 syscall.c 处理、再经 eret 返回的完整路径。",
+          "depends_on": [
+            "u7-l3",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "虚拟内存管理",
+          "order": 2,
+          "filename": "u12-l2-kernel-vm.md",
+          "level": "advanced",
+          "topic": "讲解内核虚拟内存子系统：vm_address_space/vm_translation_map 管理 ASID 与页表、vm_page/vm_cache 物理页与页缓存、slab 分配。",
+          "learning_goals": [
+            "理解内核如何管理地址空间与页表翻译",
+            "掌握物理页分配与页缓存机制",
+            "了解 slab 分配器在内核对象分配中的作用"
+          ],
+          "source_files": [
+            "software/kernel/vm_address_space.c",
+            "software/kernel/vm_translation_map.c",
+            "software/kernel/vm_page.c",
+            "software/kernel/vm_cache.c",
+            "software/kernel/slab.c"
+          ],
+          "minimal_modules": [
+            "地址空间",
+            "页表翻译",
+            "物理页与页缓存",
+            "slab 分配"
+          ],
+          "practice_task": "分析一次缺页如何从 trap 进入内核、由 vm 子系统分配物理页、建立页表项并用 CACHE_DTLB_INSERT 插入 TLB 后返回用户态重试。",
+          "depends_on": [
+            "u12-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "线程、上下文切换与同步原语",
+          "order": 3,
+          "filename": "u12-l3-kernel-threads-sync.md",
+          "level": "advanced",
+          "topic": "讲解内核线程与调度：thread.c 线程结构、context_switch.S 上下文切换、rwlock.c/spinlock.h 同步原语。",
+          "learning_goals": [
+            "理解内核线程结构与调度切换",
+            "掌握上下文切换的寄存器保存/恢复",
+            "了解自旋锁与读写锁在内核中的实现与适用场景"
+          ],
+          "source_files": [
+            "software/kernel/thread.c",
+            "software/kernel/context_switch.S",
+            "software/kernel/rwlock.c",
+            "software/kernel/spinlock.h"
+          ],
+          "minimal_modules": [
+            "线程结构",
+            "上下文切换",
+            "同步原语"
+          ],
+          "practice_task": "分析 context_switch.S 如何保存/恢复寄存器并切换栈，说明内核如何用 spinlock 保护临界区、用 rwlock 提升读多写少场景的并发度。",
+          "depends_on": [
+            "u12-l1",
+            "u10-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "图形渲染管线",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "tile-based 渲染架构",
+          "order": 1,
+          "filename": "u13-l1-render-architecture.md",
+          "level": "advanced",
+          "topic": "深入 librender 的 sort-middle tile 架构：RenderContext 命令流、几何阶段（顶点着色+三角形 setup）、像素阶段（分 tile 渲染）的两阶段流水。",
+          "learning_goals": [
+            "理解 sort-middle/tile-based 架构的优势",
+            "掌握几何阶段与像素阶段的分工",
+            "了解 tile 队列与 L2 缓存友好的渲染策略"
+          ],
+          "source_files": [
+            "software/libs/librender/RenderContext.cpp",
+            "software/libs/librender/README.md"
+          ],
+          "minimal_modules": [
+            "tile 架构",
+            "几何阶段",
+            "像素阶段",
+            "tile 队列"
+          ],
+          "practice_task": "说明为何按 tile 渲染可减少外部内存带宽并避免像素顺序锁，分析三角形如何按包围盒分配到 tile 队列并在像素阶段排序重放。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l2",
+          "title": "光栅化与三角形填充",
+          "order": 2,
+          "filename": "u13-l2-rasterization.md",
+          "level": "advanced",
+          "topic": "讲解 Rasterizer 与 TriangleFiller：递归细分三角形到 4x4 像素块、利用 16 通道 SIMD 并行覆盖测试、Z-buffer 早期剔除。",
+          "learning_goals": [
+            "理解递归细分光栅化算法",
+            "掌握 4x4 像素块与 16 通道 SIMD 的映射",
+            "了解 Z-buffer 早期剔除与像素级并行"
+          ],
+          "source_files": [
+            "software/libs/librender/Rasterizer.cpp",
+            "software/libs/librender/TriangleFiller.cpp"
+          ],
+          "minimal_modules": [
+            "递归细分",
+            "SIMD 覆盖测试",
+            "Z-buffer 剔除"
+          ],
+          "practice_task": "分析 TriangleFiller 如何把一个 4x4 像素块映射到 16 个向量通道并行计算覆盖与深度，说明递归细分到何时停止并交由像素着色。",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u13-l3",
+          "title": "着色器与纹理采样",
+          "order": 3,
+          "filename": "u13-l3-shaders-textures.md",
+          "level": "advanced",
+          "topic": "讲解顶点/像素着色器接口、透视正确参数插值、纹理采样与 mipmap 选择，以 sceneview 的 DepthShader/TextureShader 为例。",
+          "learning_goals": [
+            "理解顶点/像素着色器的回调接口",
+            "掌握透视正确参数插值的实现",
+            "了解纹理采样、mipmap 选择与混合写回"
+          ],
+          "source_files": [
+            "software/libs/librender/Texture.cpp",
+            "software/apps/sceneview/sceneview.cpp",
+            "software/apps/sceneview/TextureShader.h",
+            "software/apps/sceneview/DepthShader.h"
+          ],
+          "minimal_modules": [
+            "着色器接口",
+            "透视插值",
+            "纹理采样",
+            "混合写回"
+          ],
+          "practice_task": "阅读 sceneview 的 TextureShader，说明像素着色器如何接收插值参数、采样纹理并返回颜色，再经混合写回帧缓冲。",
+          "depends_on": [
+            "u13-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "FPGA SoC 与外设",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "FPGA 测试环境与 AXI 互连",
+          "order": 1,
+          "filename": "u14-l1-fpga-soc-axi.md",
+          "level": "advanced",
+          "topic": "讲解 de2-115 FPGA 顶层 de2_115_top.sv 与 fpga/common 的 AXI 互连：如何把 Nyuzi 核、SDRAM、外设挂在 AXI 总线上构成 SoC。",
+          "learning_goals": [
+            "理解 DE2-115 顶层如何集成 Nyuzi 与外设",
+            "掌握 AXI 互连的总线地址映射",
+            "了解 FPGA 测试环境与仿真环境的对应关系"
+          ],
+          "source_files": [
+            "hardware/fpga/de2-115/de2_115_top.sv",
+            "hardware/fpga/common/axi_interconnect.sv",
+            "hardware/fpga/de2-115/README.md"
+          ],
+          "minimal_modules": [
+            "FPGA 顶层",
+            "AXI 互连",
+            "地址映射"
+          ],
+          "practice_task": "绘制 de2_115_top 的 SoC 框图，标出 Nyuzi、AXI 互连、SDRAM 控制器与各外设的连接及地址空间划分。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "外设控制器",
+          "order": 2,
+          "filename": "u14-l2-peripheral-controllers.md",
+          "level": "advanced",
+          "topic": "讲解 fpga/common 各外设控制器：UART、SPI、SDRAM 控制器、VGA 控制器与定序器、PS2，及其寄存器接口与中断。",
+          "learning_goals": [
+            "理解各外设控制器的寄存器接口与数据通路",
+            "掌握 SDRAM 控制器与 VGA 时序的基本原理",
+            "了解外设如何向核心产生中断"
+          ],
+          "source_files": [
+            "hardware/fpga/common/uart.sv",
+            "hardware/fpga/common/spi_controller.sv",
+            "hardware/fpga/common/sdram_controller.sv",
+            "hardware/fpga/common/vga_controller.sv",
+            "hardware/fpga/common/ps2_controller.sv"
+          ],
+          "minimal_modules": [
+            "UART",
+            "SPI",
+            "SDRAM",
+            "VGA",
+            "PS2"
+          ],
+          "practice_task": "选择 UART 与 VGA 两个控制器，说明软件如何通过 IO 寄存器与之交互，并解释 VGA 控制器如何从帧缓冲产生视频时序。",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l3",
+          "title": "串口启动与上板流程",
+          "order": 3,
+          "filename": "u14-l3-serial-boot-fpga.md",
+          "level": "advanced",
+          "topic": "讲解 serial_boot 工具如何经串口把程序下载到 FPGA 并启动、run_fpga 流程、与仿真运行方式的差异。",
+          "learning_goals": [
+            "理解 serial_boot 的下载与启动协议",
+            "掌握 run_fpga 脚本的上板流程",
+            "了解 FPGA 运行与仿真/模拟器运行的区别"
+          ],
+          "source_files": [
+            "tools/serial_boot/serial_boot.c",
+            "hardware/fpga/de2-115/README.md",
+            "hardware/README.md"
+          ],
+          "minimal_modules": [
+            "串口下载",
+            "启动流程",
+            "上板与仿真差异"
+          ],
+          "practice_task": "说明 serial_boot 如何把 ELF/hex 经 UART 传输到 FPGA 内存并跳转执行，对比 run_fpga 与 run_emulator/run_verilator 在环境上的差异。",
+          "depends_on": [
+            "u14-l2",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u15",
+      "title": "验证体系与测试方法",
+      "level": "advanced",
+      "order": 15,
+      "lectures": [
+        {
+          "id": "u15-l1",
+          "title": "测试框架与 CHECK 机制",
+          "order": 1,
+          "filename": "u15-l1-test-harness.md",
+          "level": "advanced",
+          "topic": "讲解 tests/test_harness.py：build_program 编译链接、verilator/emulator 双目标、CHECK/CHECKN 输出校验、测试装饰器与注册机制。",
+          "learning_goals": [
+            "掌握测试框架的编译链接与目标选择",
+            "理解 CHECK/CHECKN 自校验机制",
+            "了解测试注册与执行流程"
+          ],
+          "source_files": [
+            "tests/test_harness.py",
+            "tests/README.md"
+          ],
+          "minimal_modules": [
+            "编译链接",
+            "双目标",
+            "CHECK 校验",
+            "注册机制"
+          ],
+          "practice_task": "参考现有测试，用 @test_harness.test 装饰器与 CHECK 注释编写一个新测试，使其在 emulator 与 verilator 两个目标上运行并自校验输出。",
+          "depends_on": [
+            "u1-l4",
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l2",
+          "title": "随机测试生成与约束",
+          "order": 2,
+          "filename": "u15-l2-random-test-generation.md",
+          "level": "advanced",
+          "topic": "讲解约束随机测试：cosimulation/generate_random.py 的分支/内存/寄存器约束、csmith 整程序随机测试及其在跨字宽上的限制。",
+          "learning_goals": [
+            "理解约束随机生成的覆盖目标与约束策略",
+            "掌握分支/内存指针/寄存器复用的约束设计",
+            "了解 csmith 测试的作用与已知限制"
+          ],
+          "source_files": [
+            "tests/cosimulation/generate_random.py",
+            "tests/cosimulation/README.md",
+            "tests/csmith/runtest.py"
+          ],
+          "minimal_modules": [
+            "约束随机",
+            "分支约束",
+            "内存指针约束",
+            "csmith"
+          ],
+          "practice_task": "分析 generate_random.py 为何只用前向短分支、固定内存指针寄存器并限制寄存器编号，说明这些约束如何提升 RAW 与缓存覆盖。",
+          "depends_on": [
+            "u8-l3",
+            "u15-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u15-l3",
+          "title": "单元测试与整机测试策略",
+          "order": 3,
+          "filename": "u15-l3-unit-wholeprogram-tests.md",
+          "level": "advanced",
+          "topic": "讲解多层次测试策略：unit 模块级硬件测试与 stub、core/isa 定向功能测试、whole-program 与 render 整机程序测试的各自定位与互补。",
+          "learning_goals": [
+            "理解五类测试（单元/定向/随机/压力/整机）的互补关系",
+            "掌握 unit 测试的周期精确与内部信号可见性优势",
+            "了解整机测试的输出比对验证方式"
+          ],
+          "source_files": [
+            "tests/unit/runtest.py",
+            "tests/unit/make_unit_test_stub.py",
+            "tests/whole-program/runtest.py",
+            "tests/render/triangle/runtest.py",
+            "tests/core/isa/runtest.py"
+          ],
+          "minimal_modules": [
+            "单元测试",
+            "ISA 定向测试",
+            "整机程序测试",
+            "渲染测试"
+          ],
+          "practice_task": "对比 unit、core/isa、whole-program 三类测试在覆盖目标、可见信号与验证方式上的差异，说明为何需要多层次的互补验证策略。",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
