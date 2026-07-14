@@ -2,466 +2,620 @@
 
 ## 1. 本讲目标
 
-本讲是 numpy.ma 专家层的第一讲，聚焦 `MaskedArray` 内部三个相互关联但常被混淆的「掩码状态开关」：
+本讲是「专家层」的第一讲，深入 `MaskedArray` 的三个「隐藏开关」：
 
-- **硬掩码（hardmask）**：一旦某位置被屏蔽，赋值还能不能把它「救回来」？
-- **shrink_mask**：全 `False` 的掩码该不该继续占一整块布尔数组的内存？
-- **共享掩码（sharedmask）**：切片得到的子数组，改它的掩码会不会反过来污染原数组？
+- `hardmask`（硬/软掩码）——决定**赋值能否解除屏蔽**；
+- `shrink_mask`——决定全为 `False` 的掩码**是否压缩为单例 `nomask`**；
+- `sharedmask`（共享掩码）——决定两个掩码数组是否**共用同一个 `_mask` 对象**。
 
-学完后你应该能够：
+学完本讲，你应当能够：
 
-1. 说清「软掩码」与「硬掩码」在赋值语义上的本质区别，并能用源码解释为何硬掩码不可还原。
-2. 熟练使用 `harden_mask` / `soften_mask` / `shrink_mask` 三个方法，并知道它们各自只改一个布尔位或一个引用。
-3. 理解 `_sharedmask` 标志与 `unshare_mask` 的关系，能预测「切片后改 mask」会不会回传到原数组。
-4. 在阅读 `__new__` / `__array_finalize__` / `__getitem__` 时，一眼看出某次操作产生的数组是「共享 mask」还是「独占 mask」。
+1. 说清「硬掩码下被屏蔽的值无法被赋值还原」这一语义，并用源码解释其实现；
+2. 熟练使用 `harden_mask` / `soften_mask` / `shrink_mask` 三个方法及其对应的模块级函数；
+3. 理解 `_sharedmask` 标志的「身份」含义，知道何时两个数组的 `.mask` 指向同一块内存，以及如何用 `unshare_mask` 解绑。
+
+本讲承接 u2-l1（掩码内部表示与 `nomask` 单例）与 u2-l2（`MaskedArray` 子类化钩子），如果你对 `_data` / `_mask` 双副本、`nomask` 身份判断还不熟悉，建议先复习这两讲。
 
 ## 2. 前置知识
 
-本讲建立在前几讲的概念之上，建议你先确认以下知识点：
+在进入正题前，先回顾三个关键术语（前几讲已建立，这里只做一句话复习）：
 
-- **三件套**：一个 `MaskedArray` 由 `_data`（全部原始值）、`_mask`（同形布尔，`True` 表屏蔽）、`_fill_value`（对外填充值）组成（见 u1-l4）。
-- **`nomask` 单例**：代表「无屏蔽」的省内存标志，其实就是 `np.False_`，全库用 `is nomask` 做身份判断（见 u2-l1）。
-- **ndarray 子类化钩子**：`__new__` 负责构造、`__array_finalize__` 负责默认传播、`__array_wrap__` 负责 ufunc 收尾（见 u2-l2）。
-- **视图（view）**：`a[1:]` 这类基础索引返回的是指向同一块内存的视图，不是拷贝；改视图会改原数组。本讲的「共享掩码」正是这一性质在 `_mask` 上的体现。
-- **`__setitem__` 双副本同步**：所有索引赋值都同时作用于 `_data` 与 `_mask`（见 u2-l6）。
+- **三件套**：每个 `MaskedArray` 由 `_data`（含坏值）、`_mask`（同形布尔，`True` 表示屏蔽）、`_fill_value`（对外填充值）组成。
+- **`nomask`**：代表「无屏蔽」的单例，实质是 `MaskType(0)`（即布尔 `False`）。全库用 `is nomask` 做 O(1) 身份判断，省下「分配一个全 `False` 数组」的内存与时间。
+- **`_update_from` / `__array_finalize__`**：子类化钩子。切片、视图、`ufunc` 时，NumPy 会创建新的 `MaskedArray` 实例，并通过这些钩子决定新实例的 `_mask` 该如何继承。
 
-> 通俗类比：把掩码想象成在数据上贴标签。
-> - **软掩码**像贴的可擦便利贴——你重新填一个数，就把那一张揭掉。
-> - **硬掩码**像盖了钢印——你填的数能写进底层 `_data`，但钢印（屏蔽标记）擦不掉。
-> - **共享掩码**像两个人看同一张标签表——任何一方在上面涂改，另一方立刻看到。
+本讲要回答的核心问题是：
+
+> 当我们对一个 `MaskedArray` 做 `x[i] = v` 时，`_data` 和 `_mask` 会怎样改变？答案并不是唯一的——它取决于一个布尔标志 `_hardmask`。而当我们对一个视图 `y = x.view()` 写入时，改动会不会「漏」回原数组 `x`？这取决于另一个标志 `_sharedmask`。
 
 ## 3. 本讲源码地图
 
-本讲全部源码集中在 **`numpy/ma/core.py`** 一个文件内，涉及的关键位置如下：
+本讲全部内容集中在 `numpy/ma/core.py` 这一个文件，涉及的关键位置如下：
 
-| 关注点 | 大致位置 | 作用 |
-|---|---|---|
-| 类默认 `_defaulthardmask` | `__new__` 之前的类属性 | 给出硬掩码默认值 `False` |
-| `_shrink_mask` 函数 | 模块级工具函数 | 把全 `False` 掩码压成 `nomask` |
-| `__new__` 中的 mask/hardmask 处理 | 构造主干 | 决定初始 `_mask`、`_sharedmask`、`_hardmask` |
-| `_update_from` | 属性搬运工 | 在视图/切片时复制 `_hardmask`、`_sharedmask` 等簿记属性 |
-| `__array_finalize__` | 子类化兜底钩子 | 用「基址是否相同」启发式决定 mask 共享或复制 |
-| `__getitem__` | 读取/切片 | 切片时让结果与原数组共享同一 mask 视图 |
-| `__setitem__` / `__setmask__` | 赋值主干 | 软/硬掩码的分叉点 |
-| `harden_mask` / `soften_mask` / `shrink_mask` / `unshare_mask` | 四个实例方法 | 本讲的四大主角 |
-| `hardmask` / `sharedmask` property | 只读属性 | 读取当前状态 |
-| `put` 方法 | 批量改写 | 硬掩码下自动跳过被屏蔽下标 |
+| 位置（行号） | 作用 |
+|---|---|
+| `core.py:2874` | 类属性 `_defaulthardmask = False`，硬掩码默认关闭 |
+| `core.py:2882-3023` | `MaskedArray.__new__`，构造时设置 `_hardmask` 与 `_sharedmask` |
+| `core.py:3025-3048` | `_update_from`，把 `_hardmask`/`_sharedmask` 等簿记属性搬运到新实例 |
+| `core.py:3050-3142` | `__array_finalize__`，视图/切片/ufunc 后的 mask 继承启发式 |
+| `core.py:3143-3160` | `__array_wrap__`，ufunc 后强制 `result._mask.copy()`（解绑共享） |
+| `core.py:3406-3473` | `__setitem__`，按 `nomask`/软/硬三路分支写 data 与 mask |
+| `core.py:3511-3573` | `__setmask__`，设置掩码时的软/硬差异 |
+| `core.py:3620-3636` | `harden_mask` 方法 |
+| `core.py:3638-3654` | `soften_mask` 方法 |
+| `core.py:3656-3699` | `hardmask` 只读属性 |
+| `core.py:3701-3717` | `unshare_mask` 方法 |
+| `core.py:3719-3722` | `sharedmask` 只读属性 |
+| `core.py:3724-3755` | `shrink_mask` 方法 |
+| `core.py:1597-1604` | 模块级 `_shrink_mask`，压缩为 `nomask` 的真正实现 |
+| `core.py:4899` | `put` 在硬掩码下的特殊处理 |
+| `core.py:7106`、`7117` | 模块级函数 `harden_mask` / `soften_mask`（`_frommethod` 包装） |
+
+测试用例位于 `numpy/ma/tests/test_core.py` 的 `test_hardmask`、`test_shrink_mask`、`test_hardmask_oncemore_yay` 等方法，本讲多处引用它们作为「权威行为」。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 软掩码与硬掩码：hardmask 语义
+### 4.1 hardmask 硬掩码语义
 
 #### 4.1.1 概念说明
 
-默认情况下，`MaskedArray` 使用**软掩码（soft mask）**：当你给一个被屏蔽的位置赋一个确定值时，该位置的屏蔽会被**自动解除**。这符合直觉——你既然给了新值，就表示这个位置现在可信了。
+默认情况下（**软掩码 soft mask**），`MaskedArray` 的「屏蔽」只是一种**临时标签**：只要给被屏蔽的位置赋一个确定值，该位置的 mask 就会被改写为 `False`，元素随之「解除屏蔽」（unmask）。
 
-但有些场景下，屏蔽代表的是「这里的数据无论如何都不能信任」（例如传感器永久故障、字段缺失不可恢复）。此时你希望赋值**不能**解除屏蔽，只能往屏蔽集合里**追加**，绝不能减少。这就是**硬掩码（hard mask）**。
+但在某些场景下我们不希望被屏蔽的值被「复活」——例如传感器一旦判定为失效就不应再被人工数据覆盖。`numpy.ma` 用 `hardmask`（硬掩码）满足这种需求：
 
-一句话区分：
+- **软掩码**（默认）：`x[i] = v` 会同时改写 `_data[i]` 和 `_mask[i]`，赋一个确定值就解除屏蔽。
+- **硬掩码**：`_mask[i]` 一旦为 `True` 就「锁死」，赋值**只能加屏蔽，不能减屏蔽**；已屏蔽位置的 `_data` 也不被新值覆盖。
 
-- **软掩码**：赋值既改 `_data`，也**覆盖** `_mask`（可解除屏蔽）。
-- **硬掩码**：赋值只改 `_data` 中**未被屏蔽**的位置，`_mask` 只增不减（不可还原）。
+`hardmask` 是**数组级的整体标志**（一个布尔值），不是逐元素的——整个数组要么硬、要么软。
 
 #### 4.1.2 核心流程
 
-赋值语义的分叉点在 `__setitem__`，它按当前 mask 状态分成四条路径：
+赋值 `x[i] = v` 进入 `__setitem__` 后，按 `_mask` 是否为 `nomask` 与 `_hardmask` 取值分四路（见 4.1.3 源码）。硬掩码的语义可以用伪代码概括：
 
-```text
-__setitem__(indx, value):
-├─ _mask is nomask         → 无屏蔽：直接写 _data[indx]，按需新建 mask
-├─ not self._hardmask      → 软掩码：_data[indx]=dval 且 _mask[indx]=mval（覆盖）
-├─ indx 是布尔数组 + 硬掩码  → indx &= ~_mask，只在「 indx 为真 且 原未屏蔽」处写
-└─ 其它（硬掩码 + 普通索引） → mindx = mask_or(_mask[indx], mval)
-                             copyto(_data[indx], dval, where=~mindx)  # 只写未屏蔽位
-                             _mask[indx] = mindx                       # mask 取或，只增不减
+```
+软掩码分支：
+    _data[indx] = dval          # 直接覆盖数据
+    _mask[indx] = mval          # 直接覆盖 mask（mval 为 False 即解除屏蔽）
+
+硬掩码分支：
+    mindx = _mask[indx] | mval  # 只能 OR，永远只增不减
+    copyto(_data[indx], dval, where=~mindx)  # 仅写入「尚未屏蔽」的位置
+    _mask[indx] = mindx
 ```
 
-软硬之差的**全部秘密**就在最后两支：硬掩码用 `where=~mindx` 把被屏蔽位置挡在写入之外，并用 `mask_or`（逻辑或）合并掩码——原来为 `True` 的位永远还是 `True`。
+关键差别有两点：
 
-对 `__setmask__`（直接设置整片掩码）也是同理：硬掩码走 `current_mask |= mask`（只增），软掩码走 `current_mask[...] = mask`（覆盖）。
+1. **mask 的合并方式**：软用「赋值覆盖」（可改 `False`），硬用「`mask_or`」（只能改 `True`）。
+2. **data 的写入范围**：软全量覆盖，硬用 `copyto(..., where=~mindx)` 跳过屏蔽位。
 
 #### 4.1.3 源码精读
 
-先看状态读取入口 `hardmask` property，它的 docstring 用一个完整例子讲清了软硬之别：
-
-[core.py:3656-3699](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3656-L3699) —— `hardmask` 只读属性。注意 docstring 中的演示：软掩码下 `m[8] = 42` 会把第 8 位的屏蔽解除；调用 `harden_mask` 后 `m[:] = 23` 写遍了未屏蔽位，但原来屏蔽的 6、7、9 三位依旧显示 `--`。
-
-[core.py:3444-3472](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3444-L3472) —— `__setitem__` 的四条路径。重点看 3450 行的 `elif not self._hardmask`（软：直接覆盖 mask）与 3458 行起的硬掩码三分支；尤其 3465-3468 行：
+先看软掩码分支（[core.py:3450-3457](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3450-L3457)），这是最直接的一路——data 与 mask 都被原样覆盖：
 
 ```python
-mindx = mask_or(_mask[indx], mval, copy=True)   # 旧屏蔽 | 新屏蔽，只增不减
-dindx = self._data[indx]
-if dindx.size > 1:
-    np.copyto(dindx, dval, where=~mindx)         # 只在未屏蔽处写入新值
+elif not self._hardmask:
+    # Set the data, then the mask
+    if (isinstance(indx, masked_array) and
+            not isinstance(value, masked_array)):
+        _data[indx.data] = dval
+    else:
+        _data[indx] = dval
+        _mask[indx] = mval        # ← mval 为 False 时直接解除屏蔽
 ```
 
-`where=~mindx` 是硬掩码「不可还原」的物理根源——被屏蔽位置的 `_data` 拿不到新值，`_mask` 又因为 `mask_or` 而保留 `True`。
+再看硬掩码分支（[core.py:3458-3473](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3458-L3473)），这是本模块的灵魂：
 
-[core.py:3531-3532](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3531-L3532) —— `__setmask__` 中硬掩码分支 `current_mask |= mask`（与软掩码的 `current_mask[...] = mask` 形成对照）。
+```python
+else:
+    if _dtype.names is not None:
+        err_msg = "Flexible 'hard' masks are not yet supported."
+        raise NotImplementedError(err_msg)      # ← 结构化 dtype 暂不支持硬掩码
+    mindx = mask_or(_mask[indx], mval, copy=True)  # ← 只 OR，永不解除
+    dindx = self._data[indx]
+    if dindx.size > 1:
+        np.copyto(dindx, dval, where=~mindx)    # ← 仅写入未屏蔽位
+    elif mindx is nomask:
+        dindx = dval
+    _data[indx] = dindx
+    _mask[indx] = mindx
+```
 
-[core.py:4899-4905](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L4899-L4905) —— `put` 方法在硬掩码下的处理：先把落在已屏蔽下标上的 `(indices, values)` 用 `indices[~mask]` 过滤掉，再写入。这就是为何硬掩码数组上 `put` 无法解除屏蔽。
+注意 `mask_or` 在 u2-l1 已介绍：它用 `logical_or` 合并两掩码，**任何一侧为 `True` 结果即为 `True`**，所以硬掩码下的赋值永远无法把 `True` 改回 `False`。`copyto(..., where=~mindx)` 则保证屏蔽位的数据「原封不动」。
+
+同样的软/硬差异也体现在 `__setmask__` 中（[core.py:3530-3532](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3530-L3532)）：
+
+```python
+# Hardmask: don't unmask the data
+if self._hardmask:
+    current_mask |= mask          # ← 硬掩码：OR
+# Softmask: set everything to False
+elif isinstance(mask, (int, float, np.bool, np.number)):
+    current_mask[...] = mask      # ← 软掩码：覆盖
+```
+
+`put` 方法在硬掩码下也有特殊处理（[core.py:4898-4905](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L4898-L4905)）：先把落在屏蔽数据上的下标/值过滤掉，再交给底层 `ndarray.put`，保证「硬掩码下的 put 不会复活屏蔽位」。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲眼看到硬掩码下赋值无法解除屏蔽，而软掩码可以。
+源码阅读型实践：用 `test_core.py` 的 `test_hardmask` 验证软/硬差异。
 
-**操作步骤**（在 Python 解释器中）：
+**实践目标**：亲眼看到「硬掩码下 `xh[:] = 1` 不改变被屏蔽位的数据与 mask，软掩码下 `xs[:] = 1` 把所有 mask 清零」。
+
+**操作步骤**（在 Python 解释器中执行）：
 
 ```python
 import numpy as np
+from numpy.ma import arange, array, make_mask, filled
 
-# 1. 构造一个软掩码数组（默认），屏蔽 >=5 的位置
-m = np.ma.masked_array(np.arange(10), np.arange(10) > 5)
-print("初始:", m)
-# masked_array(data=[0, 1, 2, 3, 4, 5, --, --, --, --], ...)
+d = np.arange(5)
+m = make_mask([0, 0, 0, 1, 1])          # 第 3、4 位屏蔽
+xh = array(d, mask=m, hard_mask=True)   # 硬掩码
+xs = array(d, mask=m, hard_mask=False, copy=True)  # 软掩码
 
-# 2. 软掩码：给一个被屏蔽位置赋值，观察屏蔽是否解除
-m[8] = 42
-print("软掩码 m[8]=42 后:", m)
-# 第 8 位恢复成 42，mask[8] 变 False
-
-# 3. 切一片新的做硬掩码实验，避免互相干扰
-h = np.ma.masked_array(np.arange(10), np.arange(10) > 5)
-h.harden_mask()
-print("hardmask?", h.hardmask)   # True
-
-# 4. 硬掩码：尝试给被屏蔽位置赋值
-h[8] = 42
-print("硬掩码 h[8]=42 后:", h)
-print("h._data[8] =", h._data[8], " h._mask[8] =", h._mask[8])
+xh[:] = 1
+xs[:] = 1
+print("xh._data =", xh._data)          # 预期 [0 1 1 3 4]，屏蔽位未被覆盖
+print("xh._mask =", xh._mask)          # 预期 [1 0 0 1 1]，mask 只增不减
+print("xs._data =", xs._data)          # 预期 [1 1 1 1 1]，全量覆盖
+print("xs._mask =", xs._mask)          # 预期 nomask（即 False），全部解除
 ```
 
-**需要观察的现象**：
+**预期结果**：
 
-- 软掩码那组：`m[8]` 显示为 `42`，`m._mask[8]` 为 `False`——屏蔽被解除。
-- 硬掩码那组：`h[8]` 仍显示 `--`，但 `h._data[8]` 可能仍是原值（因为 `where=~mindx` 挡住了写入），`h._mask[8]` 仍为 `True`——屏蔽未被解除。
+- `xh._data == [0, 1, 1, 3, 4]`，`xh._mask == [1, 0, 0, 1, 1]`（与 `test_core.py:2132-2136` 一致）；
+- `xs._data == [1, 1, 1, 1, 1]`，`xs._mask is nomask`（与 `test_core.py:2134-2137` 一致）。
 
-**预期结果**：硬掩码下 `_data[8]` 不变（仍为 8），`_mask[8]` 仍为 `True`；软掩码下 `_data[8]` 变为 42、`_mask[8]` 变为 `False`。这一对比正是「钢印擦不掉」的体现。
+**需要观察的现象**：注意第 0 位 `xh` 原本未屏蔽（mask 为 0），但在前一步 `xh[0] = masked` 后才变为 1；赋值 `xh[:] = 1` 之后第 0 位 mask 仍是 1，且 `_data[0]` 仍是 0——这正说明「屏蔽一旦建立就锁死」。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：硬掩码数组上执行 `h[:] = 23`（整体赋值）后，哪些位置的 `_data` 会变成 23？哪些不会？
+**练习 1**：在硬掩码数组 `xh` 上执行 `xh[[1, 4]] = [10, 40]`（其中第 4 位是屏蔽位），`xh._data[4]` 会变成 40 还是保持原值？为什么？
 
-> **答案**：只有原本**未屏蔽**的位置（`_mask` 为 `False`）的 `_data` 会变成 23；被屏蔽位置的 `_data` 因 `where=~mindx` 被挡住，保持原值，且 `_mask` 全部维持 `True`。
+**参考答案**：保持原值 4，不会变成 40。因为硬掩码分支用 `copyto(dindx, dval, where=~mindx)` 写入，第 4 位的 `mindx` 为 `True`，`~mindx` 为 `False`，故该位被跳过。这正是 `test_core.py:2116-2118` 断言 `xh._data == [0, 10, 2, 3, 4]` 的原因——索引 1 未屏蔽故更新为 10，索引 4 屏蔽故不变。
 
-**练习 2**：为什么 `put` 方法在硬掩码下用 `indices[~mask]` 过滤，而不是像 `__setitem__` 那样用 `copyto(where=...)`？
+**练习 2**：为什么硬掩码分支遇到结构化 dtype（`_dtype.names is not None`）直接抛 `NotImplementedError`？
 
-> **答案**：`put` 是按「扁平下标列表」批量写入，过滤掉落在屏蔽位的下标后，剩余下标直接走普通 `ndarray.put`，实现更简洁；`__setitem__` 面对的是任意索引表达式，用 `copyto(where=...)` 更通用。两者效果一致：硬掩码下都不触碰被屏蔽位置。
+**参考答案**：因为 `copyto(..., where=...)` 的 `where` 参数对结构化 dtype 的逐字段掩码难以正确表达——结构化数组需要「同位置不同字段独立屏蔽」，简单的 `~mindx` 布尔掩码无法刻画。源码注释 `Flexible 'hard' masks are not yet supported.`（[core.py:3463](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3463)）明确这是未实现功能，而非刻意设计。
 
 ---
 
-### 4.2 harden_mask / soften_mask：翻转一个布尔位
+### 4.2 harden_mask / soften_mask / hardmask 属性
 
 #### 4.2.1 概念说明
 
-`harden_mask` 和 `soften_mask` 看起来像「大动作」，但源码极其朴素——它们各只做一件事：把内部标志 `self._hardmask` 置为 `True` 或 `False`，然后 `return self`。返回 `self` 是为了支持**链式调用**，例如 `a.harden_mask().__iadd__(1)`。
+`_hardmask` 是一个普通布尔属性，存在每个 `MaskedArray` 实例上。提供三套与之相关的对外接口：
 
-关键认知：**它们不改 `_data`，也不改 `_mask`，只拨动一个布尔开关。**真正「生效」是在下一次 `__setitem__` / `__setmask__` / `put` 被调用时，由那些方法去读 `_hardmask` 决定走哪条分支。
+| 名称 | 类型 | 作用 |
+|---|---|---|
+| `hardmask` | 只读 property | 读取当前是否为硬掩码 |
+| `harden_mask()` | 方法 | 设 `_hardmask = True`，返回 `self` |
+| `soften_mask()` | 方法 | 设 `_hardmask = False`，返回 `self` |
+| `np.ma.harden_mask(x)` | 模块级函数 | 转发到方法 |
+| `np.ma.soften_mask(x)` | 模块级函数 | 转发到方法 |
+
+注意 `harden_mask` / `soften_mask` 是**就地修改并返回自身**的方法（不是返回新数组），因此可以链式调用：`x.harden_mask()[i] = v`。
 
 #### 4.2.2 核心流程
 
-```text
-创建阶段:
-  __new__(..., hard_mask=None)
-    └─ hard_mask is None ? 继承 data._hardmask : 直接用 hard_mask
-       → 写入 _data._hardmask
+三个接口的实现都极其简单：
 
-传播阶段（视图/切片/ufunc）:
-  _update_from(obj) 把 obj._hardmask 复制给 self._hardmask
-
-显式切换阶段:
-  harden_mask()  → _hardmask = True ; return self
-  soften_mask()  → _hardmask = False; return self
+```
+hardmask (getter):       return self._hardmask
+harden_mask():           self._hardmask = True;  return self
+soften_mask():           self._hardmask = False; return self
 ```
 
-类属性 `_defaulthardmask = False` 给出了「不显式指定时的默认值」——即默认软掩码。
+真正「起作用」的是 `_hardmask` 在 `__setitem__` / `__setmask__` / `put` 等写操作中被读取（见 4.1.3）。切换标志本身不改变现有 `_data` 与 `_mask`，只影响**之后**的写操作语义。
+
+默认值由类属性 `_defaulthardmask = False` 决定（[core.py:2874](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2874)），构造时若未指定 `hard_mask` 参数，则从源数据继承（见 4.2.3）。
 
 #### 4.2.3 源码精读
 
-[core.py:2874](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2874) —— 类属性 `_defaulthardmask = False`，说明默认是软掩码。
+`harden_mask` 与 `soften_mask` 方法体（[core.py:3620-3654](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3620-L3654)）各只有两行：
 
-[core.py:3018-3021](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3018-L3021) —— `__new__` 末尾对 `hard_mask` 参数的处理：未传则从 `data` 继承，传了就直接用。这就是 `np.ma.array(data, hard_mask=True)` 能一步得到硬掩码数组的入口。
+```python
+def harden_mask(self):
+    """Force the mask to hard, preventing unmasking by assignment. ..."""
+    self._hardmask = True
+    return self
 
-[core.py:3620-3636](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3620-L3636) —— `harden_mask`，全部实质逻辑只有 `self._hardmask = True` 与 `return self`。
+def soften_mask(self):
+    """Force the mask to soft (default), allowing unmasking by assignment."""
+    self._hardmask = False
+    return self
+```
 
-[core.py:3638-3654](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3638-L3654) —— `soften_mask`，对称地置 `False`。
+`hardmask` 是只读 property（[core.py:3656-3699](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3656-L3699)），其 docstring 自带一个完整对比示例，清楚地展示了「软掩码下 `m[8] = 42` 解除屏蔽；硬掩码后 `m[:] = 23` 不动屏蔽位」。
 
-[core.py:3040-3042](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3040-L3042) —— `_update_from` 把 `_hardmask`（连同 `_sharedmask`、`_fill_value` 等）从模板对象搬到新对象，保证切片/视图后的子数组继承硬掩码状态。
+构造时 `_hardmask` 的来源在 `__new__`（[core.py:3018-3021](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3018-L3021)）：
 
-[core.py:7106](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L7106) 与 [core.py:7117](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L7117) —— 模块级 `ma.harden_mask` / `ma.soften_mask` 由 `_frommethod` 工厂生成，是对实例方法的函数式封装（`np.ma.harden_mask(a)` 等价于 `a.harden_mask()`）。
+```python
+if hard_mask is None:
+    _data._hardmask = getattr(data, '_hardmask', False)   # ← 从源数据继承
+else:
+    _data._hardmask = hard_mask                            # ← 显式指定优先
+```
+
+所以从已有硬掩码数组派生的新数组默认仍是硬掩码；同理 `_update_from`（[core.py:3041](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3041)）在视图/ufunc 时也搬运此属性：
+
+```python
+_dict = {'_fill_value': getattr(obj, '_fill_value', None),
+             '_hardmask': getattr(obj, '_hardmask', False),   # ← 继承
+             ...
+```
+
+模块级函数是 `_frommethod` 包装（[core.py:7106](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L7106) 与 [core.py:7117](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L7117)），等价于「取数组 → 调方法 → 返回」：
+
+```python
+harden_mask = _frommethod('harden_mask')
+soften_mask = _frommethod('soften_mask')
+```
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证 `harden_mask` 返回的是 `self`（可链式），且「切换」本身不触碰数据。
+这是本讲的**主实践任务**（对应大纲 practice_task）。
+
+**实践目标**：构造掩码数组并 `harden_mask`，尝试给被屏蔽位置赋值，观察 data 与 mask 的变化；再 `soften_mask` 后重复，对比差异。
 
 **操作步骤**：
 
 ```python
 import numpy as np
 
-a = np.ma.array([1, 2, 3], mask=[0, 1, 0])
-before_data = a._data.copy()
-before_mask = a._mask.copy()
+a = np.ma.array([1, 2, 3, 4, 5], mask=[0, 0, 1, 0, 1])
 
-ret = a.harden_mask()
-print("返回的是 self 吗?", ret is a)        # True（链式可用）
-print("hardmask 现在是?", a.hardmask)        # True
+# —— 硬掩码 ——
+a.harden_mask()
+print("hardmask?", a.hardmask)          # True
+a[2] = 99                               # 试图给屏蔽位赋值
+print("硬掩码下 a._data =", a._data)    # 看 [2] 是否变 99
+print("硬掩码下 a._mask =", a._mask)    # 看 [2] 的 mask 是否还是 True
 
-# 切换动作本身不应改动 _data / _mask
-print("data 未变?", np.array_equal(a._data, before_data))   # True
-print("mask 未变?", np.array_equal(a._mask, before_mask))   # True
-
-# 用构造参数一步到位
-b = np.ma.array([1, 2, 3], mask=[0, 1, 0], hard_mask=True)
-print("构造即硬掩码?", b.hardmask)           # True
+# —— 软掩码 ——
+a.soften_mask()
+print("hardmask?", a.hardmask)          # False
+a[2] = 99                               # 再次给屏蔽位赋值
+print("软掩码下 a._data =", a._data)    # 看 [2] 是否变 99
+print("软掩码下 a._mask =", a._mask)    # 看 [2] 的 mask 是否变 False
 ```
 
-**需要观察的现象**：`harden_mask()` 返回 `self`；调用前后 `_data`、`_mask` 逐位不变；`hard_mask=True` 构造参数直接产出硬掩码数组。
+**预期结果**：
 
-**预期结果**：三处打印依次为 `True`、`True`、`True`、`True`、`True`。
+- 硬掩码下：`a._data` 仍为 `[1, 2, 3, 4, 5]`（第 2 位未被覆盖），`a._mask` 仍为 `[False, False, True, False, True]`（未解除）。
+- 软掩码下：`a._data` 变为 `[1, 2, 99, 4, 5]`，`a._mask` 变为 `[False, False, False, False, True]`（第 2 位被解除屏蔽，第 4 位因未操作仍屏蔽）。
+
+**需要观察的现象**：`harden_mask()` 与 `soften_mask()` 的返回值就是 `a` 本身（`b = a.harden_mask()` 后 `b is a` 为 `True`，参见 `test_core.py:2173-2185` 的 `test_hardmask_oncemore_yay`）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：对一个数组先 `harden_mask()` 再 `soften_mask()`，随后给被屏蔽位赋值，会发生什么？
+**练习 1**：执行 `b = np.ma.harden_mask(a)` 后，`b` 与 `a` 是同一个对象吗？修改 `b[0]` 会影响 `a` 吗？
 
-> **答案**：`soften_mask()` 把 `_hardmask` 拨回 `False`，此后的赋值走软掩码分支，可以解除屏蔽。状态由**最后一次切换**决定，与历史无关。
+**参考答案**：是同一个对象。`harden_mask` 就地修改 `self._hardmask` 并 `return self`，模块级 `np.ma.harden_mask(a)` 只是把数组传给方法，因此 `b is a`。修改 `b[0]` 必然影响 `a`。`test_core.py:2177-2181` 正是用 `assert_equal(a, b)` 与 `b[0] = 0` 后再比较来验证这一点。
 
-**练习 2**：为什么 `harden_mask` 要 `return self` 而不是 `return None`？
+**练习 2**：若希望得到一个**硬掩码的副本**而不影响原数组，应该怎么写？
 
-> **答案**：为了支持链式调用与函数式写法，例如 `np.ma.harden_mask(a).__str__()`。`_frommethod` 封装的模块级版本也依赖这个返回值把结果透传给调用者。
+**参考答案**：先复制再硬化：`b = a.copy().harden_mask()`。直接 `b = a.harden_mask()` 只会返回 `a` 本身，不会产生副本。
 
 ---
 
-### 4.3 shrink_mask：把全 False 掩码压缩为 nomask
+### 4.3 shrink_mask 与 nomask
 
 #### 4.3.1 概念说明
 
-回顾 u2-l1：`nomask`（即 `np.False_`）是「无屏蔽」的省内存单例。一个 100 万元素的布尔 mask 要占 1MB；如果它全 `False`，用一个标量 `False` 就能表达同样的信息。
+回顾 u2-l1：`nomask` 是省内存的「无屏蔽」单例。但当用户对一个 `nomask` 数组执行 `x[1] = masked` 后又 `x[1] = 5`（解除屏蔽），`_mask` 会被实例化为一个全 `False` 的真实数组——此时它**逻辑上等价于 `nomask`**，却白白占用内存。
 
-`shrink_mask` 就是主动检查「当前 mask 是否全 `False`」，若是，则把整个布尔数组**替换**为 `nomask` 单例，释放内存。这个动作在很多内部路径（如 `make_mask(..., shrink=True)`、归约后重算掩码）会自动发生，`shrink_mask` 方法让你能手动触发。
+`shrink_mask()` 的作用就是「凡能压缩回 `nomask` 就压缩」：检查 `_mask` 是否全为 `False`，若是则替换为 `nomask`。它对结果没有语义影响，纯粹是**空间优化**。
+
+注意一个限制：结构化 dtype 的掩码**不能** shrink（见 4.3.4），因为其 `_mask` 是复合 dtype，`.any()` 的语义不直观。
 
 #### 4.3.2 核心流程
 
-压缩判定由模块级函数 `_shrink_mask` 完成，逻辑极简：
-
-```text
+```
 _shrink_mask(m):
-  if m 没有命名字段  and  not m.any():   # 纯布尔且全 False
-      return nomask
-  else:
-      return m                          # 否则原样返回
+    if (m 是普通 dtype) and (not m.any()):   # 全 False
+        return nomask
+    else:
+        return m                              # 结构化或含 True，原样返回
 ```
 
-注意一个细节：`m.dtype.names is None` 这个前提意味着——**结构化（带字段）dtype 的掩码即使全 `False` 也不会被压缩**。因为对结构化数组调 `.any()` 的语义与纯布尔不同，库作者选择保守地不压缩。
+判定「能否压缩」只看两点：dtype 无字段名（`m.dtype.names is None`）且 `m.any()` 为 `False`（没有任何元素为 `True`）。
 
 #### 4.3.3 源码精读
 
-[core.py:1597-1604](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1597-L1604) —— `_shrink_mask` 工具函数。`m.dtype.names is None` 限定纯布尔；`not m.any()` 判定全 `False`；二者皆满足才返回 `nomask`。
+真正的实现在模块级私有函数 `_shrink_mask`（[core.py:1597-1604](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1597-L1604)）：
 
-[core.py:3724-3755](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3724-L3755) —— 实例方法 `shrink_mask`，实质只有 `self._mask = _shrink_mask(self._mask); return self`。docstring 演示了 `mask=False`（即 `nomask`）取代二维全 `False` 数组的过程。
+```python
+def _shrink_mask(m):
+    """
+    Shrink a mask to nomask if possible
+    """
+    if m.dtype.names is None and not m.any():
+        return nomask
+    else:
+        return m
+```
 
-[core.py:7116](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L7116) —— 模块级 `ma.shrink_mask`，同样由 `_frommethod` 生成。
+方法 `shrink_mask`（[core.py:3724-3755](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3724-L3755)）只是转发并返回 `self`：
 
-> 旁证：`_shrink_mask` 在构造路径（[core.py:1597](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1597) 起的 `make_mask`）和归约重算掩码处被反复调用，说明「能压就压」是全库一致的设计取向。
+```python
+def shrink_mask(self):
+    """Reduce a mask to nomask when possible. ..."""
+    self._mask = _shrink_mask(self._mask)
+    return self
+```
+
+`_shrink_mask` 在库内多处被复用，例如 `make_mask`（[core.py:1804](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1804)）和 `masked_where`（[core.py:2000](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2000) `result.mask = _shrink_mask(cond)`）在构造掩码后会尝试压缩，可见「能 shrink 就 shrink」是一条贯穿全库的内存策略。
 
 #### 4.3.4 代码实践
 
-**实践目标**：观察 `shrink_mask` 前后 `_mask` 的类型与身份变化。
+**实践目标**：验证 `shrink_mask` 把全 `False` 掩码压缩为 `nomask`，且对结构化 dtype 是 no-op。
 
 **操作步骤**：
 
 ```python
 import numpy as np
 
-# 1. 强制构造一个「全 False 但非 nomask」的掩码数组（用 shrink=False）
-a = np.ma.array([1, 2, 3], mask=[0, 0, 0], hard_mask=False)  # 通常会被自动压缩
-# 想拿到显式的全 False 布尔数组，借助 masked_where 的内部路径或直接：
-a = np.ma.array([1, 2, 3])
-a._mask = np.zeros(3, dtype=bool)   # 人为塞一个全 False 布尔数组
-print("压缩前 a._mask 是:", repr(a._mask), " 是否 nomask?", a._mask is np.ma.nomask)
+# 普通 dtype：先制造一个全 False 的真实掩码，再压缩
+a = np.ma.array([1, 2, 3], mask=[0, 0, 0])
+print("压缩前 a.mask =", a.mask)        # array([False, False, False])
+b = a.shrink_mask()
+print("b is a?", b is a)                 # True
+print("压缩后 a.mask =", a.mask)         # False（即 nomask）
+print("a.mask is np.ma.nomask?", a.mask is np.ma.nomask)  # True
 
-a.shrink_mask()
-print("压缩后 a._mask 是:", repr(a._mask), " 是否 nomask?", a._mask is np.ma.nomask)
+# 结构化 dtype：shrink 是 no-op
+c = np.ma.array([(1, 2.0)], dtype=[('a', int), ('b', float)])
+before = c.mask
+c.shrink_mask()
+print("结构化 shrink 后 mask 不变?", np.ma.testutils.assert_equal(c.mask, before) or True)
 ```
 
-**需要观察的现象**：压缩前 `_mask` 是一个 `array([False, False, False])`，`is nomask` 为 `False`；压缩后 `_mask` 变成 `False`（即 `nomask`），`is nomask` 为 `True`。
+**预期结果**：普通 dtype 压缩后 `a.mask is nomask` 为 `True`；结构化 dtype 的 mask 前后不变（与 `test_core.py:2199-2210` 的 `test_shrink_mask` 一致，注释明确写 `# Mask cannot be shrunk on structured types, so is a no-op`）。
 
-**预期结果**：第一次 `is nomask` 为 `False`，第二次为 `True`。注意日常用 `np.ma.array([1,2,3])` 构造时，库已在 `__new__` 里（经 `shrink=True`）自动压缩过，所以通常拿不到「全 False 布尔数组」状态，本实践用 `a._mask = np.zeros(...)` 人为构造以观察 `shrink_mask` 的效果。**待本地验证**：不同 NumPy 版本对 `a._mask = ...` 直接赋值的接受度一致，但行为符合上述描述。
+**需要观察的现象**：注意 `shrink_mask()` 同样返回 `self`（`b is a` 为 `True`）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：一个结构化 dtype 的掩码数组，即使所有字段所有位置都未屏蔽，`shrink_mask()` 能把它压成 `nomask` 吗？为什么？
+**练习 1**：为什么 `_shrink_mask` 要用 `m.dtype.names is None` 作为前提条件，而不是直接 `not m.any()`？
 
-> **答案**：不能。`_shrink_mask` 要求 `m.dtype.names is None`，结构化掩码有字段名，不满足该前提，故直接返回原 `m`。这是有意为之的保守策略。
+**参考答案**：对结构化 dtype，`_mask` 是复合 dtype（如 `[('a','?'),('b','?')]`），其 `.any()` 会对所有字段的所有元素求「任一为 True」，语义是把整条记录当屏蔽判断——这并非「无屏蔽」的正确判据（字段级屏蔽的细节见 u3-l5 mrecords）。为了避免误把字段级屏蔽压缩掉，源码直接禁止结构化掩码 shrink。
 
-**练习 2**：`shrink_mask` 与 `make_mask(..., shrink=True)` 的关系是什么？
+**练习 2**：下面代码两次打印 `a.mask`，分别是 `nomask` 还是数组？
 
-> **答案**：二者底层都调用 `_shrink_mask`。`shrink_mask` 是面向已存在数组的实例方法；`make_mask` 在构造掩码时按 `shrink` 参数决定是否压缩。它们共享同一段「能压就压」逻辑。
+```python
+a = np.ma.arange(10)
+a[1] = np.ma.masked      # 制造屏蔽
+a[1] = 1                 # 解除屏蔽
+print(a.mask)            # (1)
+a.shrink_mask()
+print(a.mask)            # (2)
+```
+
+**参考答案**：(1) 是一个全 `False` 的真实数组 `array([False, False, ...])`——因为赋屏蔽操作把 `nomask` 实例化成了数组，解除屏蔽只是把对应位改回 `False`，不会自动 shrink；(2) 是 `nomask`（即 `False`），`shrink_mask` 检测到全 `False` 后压缩回单例。这正是 `test_core.py:2187-2197` 的 `test_smallmask` 探讨的行为。
 
 ---
 
-### 4.4 共享掩码：sharedmask / unshare_mask / _sharedmask
+### 4.4 sharedmask / unshare_mask / _sharedmask
 
 #### 4.4.1 概念说明
 
-当你对一个 `MaskedArray` 做切片 `b = a[1:]` 时，`b._data` 是 `a._data` 的**视图**（同一块内存）。问题是：`b._mask` 呢？
+`MaskedArray` 的 `_mask` 是一个普通的 ndarray 对象，多个 `MaskedArray` **完全可以指向同一个 `_mask` 对象**——就像两个 ndarray 视图共享同一块数据内存。当共享发生时，改一个数组的 mask 会「漏」到另一个数组。
 
-答案是：默认情况下 `b._mask` 也是 `a._mask` 的视图——**两个数组共享同一个 mask 对象**。这意味着如果你修改 `b` 的掩码（例如给 `b` 的某个位置解除屏蔽），改动会**回传（back-propagate）**到 `a`。这有时是 desired（视图本就该同步），有时是 footgun（你只想改局部）。
+`_sharedmask` 标志记录「当前数组的 `_mask` 是否可能被他人共享」。它是一个**性能提示/安全提示**，而非严格的共享计数器：
 
-为了让你能掌控这件事，库维护了一个布尔标志 `_sharedmask`：
+- `_sharedmask = True`：表示「我的 `_mask` 可能被别的数组引用着，**别就地改我**，要改就先 `copy()`」；
+- `_sharedmask = False`：表示「我的 `_mask` 是我私有的，可以放心就地修改」。
 
-- `_sharedmask = True`：我的 `_mask` 与某个上游数组共享同一内存，原地改 `_mask` 会影响对方。
-- `_sharedmask = False`：我的 `_mask` 是独占的，怎么改都不影响别人。
-
-`unshare_mask()` 就是「我想独占」的开关：若当前共享，它**拷贝**一份 mask 再把标志置 `False`；若已独占，则什么都不做。
+`unshare_mask()` 的职责就是：若当前是共享状态，就复制一份独立 `_mask` 并把标志置 `False`，从而安全地独占这份掩码。
 
 #### 4.4.2 核心流程
 
-`_sharedmask` 在多个生命周期点被设定，理解这些点就能预测任何数组的共享状态：
+构造与视图阶段，`_sharedmask` 被这样设置：
 
-```text
-__new__（构造）:
-  copy=False 且 mask 来自 data        → _sharedmask = not copy = True   # 与源共享
-  copy=True                           → _sharedmask = not copy = False  # 拷贝，独占
-  mask 经 logical_or 合并              → _sharedmask = False             # 新数组，独占
-
-__getitem__（切片 b = a[idx]）:
-  b._mask = a._mask[idx]              # 基础索引返回视图！
-  b._sharedmask = True                # 子切片默认与父共享
-
-__array_finalize__（视图/astype 等兜底）:
-  if 基址相同（同一块数据内存）:        → 取 _mask.view()（共享）
-  else:                                → _mask.astype(...)（拷贝，独占）
-
-__array_wrap__（ufunc 结果）:
-  result._sharedmask = False           # ufunc 结果总是独占
-
-显式解绑:
-  unshare_mask(): if _sharedmask: _mask = _mask.copy(); _sharedmask = False
+```
+__new__ (无新 mask, copy=False):  _sharedmask = True   # 与源数据共享视图
+__new__ (有新 mask 或 copy=True): _sharedmask = False  # mask 是新建/复制的
+__getitem__ 取结构化字段:          _sharedmask = True   # 子视图与父共享
+__array_wrap__ (ufunc):           result._mask.copy()  # 强制解绑，独立
 ```
 
-一句话：**切片产生共享，ufunc 与拷贝产生独占，`unshare_mask` 把共享强制变独占。**
+需要修改 mask 时（如 `__setitem__` 的若干分支），代码会先用 `unshare_mask()` 思路确保独立。`unshare_mask` 本身的逻辑：
+
+```
+unshare_mask():
+    if self._sharedmask:
+        self._mask = self._mask.copy()   # 复制一份
+        self._sharedmask = False          # 标记为私有
+    return self
+```
+
+注意 `unshare_mask` **仅在确实共享时才复制**，避免无谓拷贝（文档原话：*A copy of the mask is only made if it was shared.*）。
 
 #### 4.4.3 源码精读
 
-[core.py:3701-3717](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3701-L3717) —— `unshare_mask`：仅当 `_sharedmask` 为真时拷贝 mask 并置 `False`，否则零成本返回。这是「按需拷贝（copy-on-write 的手动版）」思想。
+`unshare_mask` 方法（[core.py:3701-3717](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3701-L3717)）：
 
-[core.py:3719-3722](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3719-L3722) —— `sharedmask` 只读 property，返回 `_sharedmask`。
+```python
+def unshare_mask(self):
+    """Copy the mask and set the `sharedmask` flag to ``False``. ..."""
+    if self._sharedmask:
+        self._mask = self._mask.copy()
+        self._sharedmask = False
+    return self
+```
 
-[core.py:2943](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2943) 与 [core.py:2991-3009](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2991-L3009) —— `__new__` 中 `_sharedmask = not copy` 的赋值点。`copy=False` 时为 `True`（与源共享），`copy=True` 时为 `False`；一旦 mask 经过 `logical_or` 合并（2996-3009 行），结果必然是新数组，故直接置 `False`。
+`sharedmask` 只读 property（[core.py:3719-3722](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3719-L3722)）：
 
-[core.py:3395-3398](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3395-L3398) —— `__getitem__` 切片分支：`dout._mask = reshape(mout, dout.shape)`（`mout = _mask[indx]` 是视图），随后 `dout._sharedmask = True`。这是「切片共享掩码」的直接证据。
+```python
+@property
+def sharedmask(self):
+    """ Share status of the mask (read-only). """
+    return self._sharedmask
+```
 
-[core.py:3099-3121](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3099-L3121) —— `__array_finalize__` 的启发式：用 `obj.__array_interface__["data"][0] != self.__array_interface__["data"][0]`（数据基址是否不同）决定——基址相同（典型视图）则 `_mask.view()`（共享），基址不同（如 `astype`）则 `_mask.astype(...)`（拷贝）。源码注释坦承这是 guesswork and heuristics，并不 100% 可靠。
+`_sharedmask` 在 `__new__` 中多处被设置。无新掩码且 `copy=False` 时设为 `True`（共享源数据的 mask 视图，[core.py:2943](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2943)）：
 
-[core.py:3199](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3199) —— `__array_wrap__`（ufunc 收尾）把 `result._sharedmask = False`，保证 ufunc 结果的 mask 独占、可安全原地修改。
+```python
+else:
+    _data._sharedmask = not copy        # copy=False → True（共享）
+    if copy:
+        _data._mask = _data._mask.copy()
+```
 
-[core.py:3042](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3042) —— `_update_from` 在搬运簿记属性时把 `_sharedmask` 一并复制，这就是切片/视图能继承父数组共享状态的管道。
+有新掩码传入时，合并路径下设为 `False`（[core.py:3006-3009](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3006-L3009)），因为 `logical_or` 产生了全新数组：
+
+```python
+else:
+    ...
+    _data._mask = np.logical_or(mask, _data._mask)
+    _data._sharedmask = False
+```
+
+`_update_from` 在视图/ufunc 派生新实例时搬运此标志（[core.py:3042](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3042)），**默认取 `False`**（保守策略）：
+
+```python
+'_sharedmask': getattr(obj, '_sharedmask', False),
+```
+
+`__getitem__` 取结构化字段时，子视图与父数组共享 mask（[core.py:3394-3398](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3394-L3398)）：
+
+```python
+# Update the mask if needed
+if mout is not nomask:
+    # set shape to match that of data; this is needed for matrices
+    dout._mask = reshape(mout, dout.shape)
+    dout._sharedmask = True             # ← 字段子视图共享父 mask
+```
+
+而 ufunc 后的 `__array_wrap__` 则**强制解绑**（[core.py:3156-3157](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3156-L3157)），用 `result._mask.copy()` 切断与输入 mask 的引用关系，保证运算结果可安全修改：
+
+```python
+if context is not None:
+    result._mask = result._mask.copy()  # ← ufunc 结果 mask 必然独立
+```
+
+理解 `_sharedmask` 的钥匙：它**不保证**「`True` 一定有人在共享」，只是提醒「可能有人在共享，修改前先 copy」；而 `False` **保证**「此刻可安全就地修改」。
 
 #### 4.4.4 代码实践
 
-**实践目标**：复现「切片共享 → 改子数组 mask 回传到父数组」，再用 `unshare_mask` 切断回传。
+源码阅读型实践（无法纯靠运行验证「内存共享」，但可验证行为与 `unshare_mask` 效果）。
+
+**实践目标**：体会 `_sharedmask` 标志在 `.copy()` 与 `unshare_mask()` 前后的变化。
 
 **操作步骤**：
 
 ```python
 import numpy as np
 
-a = np.ma.masked_array([10, 20, 30, 40], mask=[0, 1, 0, 1])
-print("原始 a:", a)
+a = np.ma.array([1, 2, 3], mask=[1, 0, 0])
+print("a._sharedmask =", a._sharedmask)   # 构造时有 mask，需观察实际值
 
-# 1. 切片得到 b，b 与 a 共享 mask
-b = a[1:3]                      # 取 [20(--), 30]
-print("b.sharedmask?", b.sharedmask)   # True
+# 取视图：通过切片产生的新 MaskedArray 会走 __array_finalize__
+b = a[:]                                   # 整体切片视图
+print("b._sharedmask =", b._sharedmask)
 
-# 2. 在 b 上解除某位屏蔽（软掩码赋值），观察 a 是否被牵连
-b[0] = 999                      # b 的第 0 位对应 a 的第 1 位
-print("改 b 后的 a:", a)         # 关注 a[1] 是否跟着变了
+# 做一次 ufunc：__array_wrap__ 强制 copy
+c = a + 0
+print("c._sharedmask =", c._sharedmask)   # ufunc 结果 mask 独立
 
-# 3. 重新构造，先 unshare 再改，观察隔离效果
-a2 = np.ma.masked_array([10, 20, 30, 40], mask=[0, 1, 0, 1])
-c = a2[1:3]
-c.unshare_mask()                # 先解绑：拷贝 mask，_sharedmask=False
-print("c.sharedmask?", c.sharedmask)   # False
-c[0] = 999
-print("unshare 后改 c，a2:", a2)        # a2 应保持不变
+# 演示 unshare_mask
+d = a.copy()
+d.unshare_mask()
+print("d._sharedmask =", d._sharedmask)   # False
+print("a 与 a.copy() 的 _mask 地址不同?", id(a._mask) != id(d._mask))
 ```
 
 **需要观察的现象**：
 
-- 第 2 步：`b.sharedmask` 为 `True`；改 `b[0]` 后，`a[1]` 的掩码也被解除、数据显示出来——回传发生。
-- 第 3 步：`c.sharedmask` 为 `False`；改 `c[0]` 后 `a2` 不受影响——隔离成功。
-
-**预期结果**：共享组中 `a` 会随 `b` 改变（`a[1]` 由 `--` 变为可见的 `999`）；解绑组中 `a2` 保持原样。这一对比直接验证了 `_sharedmask` 的作用。**待本地验证**：回传是否触发取决于 NumPy 是否在 `__setitem__` 路径上对共享 mask 做了隐式 unshare；若你的版本上 `a[1]` 未变，说明该版本在该路径增加了自动 unshare，请结合你本地的 `__setitem__` 源码（3450-3457 行）核对。
+- `a._sharedmask`：构造时显式传入 `mask` 数组，按 [core.py:2991](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2991) `_data._sharedmask = not copy`，`copy` 默认 `False`（`None`），故结果与是否复制有关；记录你机器上的实际值。
+- `c._sharedmask`：ufunc 结果因 `__array_wrap__` 调用了 `result._mask.copy()`，但 `_update_from` 默认从 `self` 继承（`getattr(obj,'_sharedmask',False)`）——记录实际值并对照源码解释。**待本地验证**：不同 NumPy 版本下 `_sharedmask` 的精确传播可能略有差异，关键是理解「`copy()` 切断共享」这一设计意图。
+- 调用 `unshare_mask()` 后 `_sharedmask` 一定变为 `False`，且若之前共享则 `_mask` 的内存地址会改变（`id(d._mask)` 前后对比）。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`b = a + 1`（ufunc 加法）得到的 `b`，其 `sharedmask` 是 `True` 还是 `False`？为什么？
+**练习 1**：为什么 `__array_wrap__`（ufunc 钩子）要无条件执行 `result._mask.copy()`？
 
-> **答案**：`False`。加法走 `__array_wrap__`，它在 [core.py:3199](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3199) 显式置 `result._sharedmask = False`。ufunc 结果是新数组，mask 自然独占，安全可改。
+**参考答案**：ufunc 的结果是一个全新数组，其 mask 由 `mask_or` 合并所有输入 mask 得到。若不 copy，结果的 `_mask` 可能仍是某个输入数组的 mask 视图，之后对结果 mask 的就地修改会反向污染输入数组。`result._mask.copy()` 切断引用，保证「运算结果可安全修改」这一基本契约。
 
-**练习 2**：`unshare_mask()` 在 `_sharedmask` 已经是 `False` 时会有什么开销？
+**练习 2**：`unshare_mask()` 的文档说 *A copy of the mask is only made if it was shared.*。若 `_sharedmask` 已经是 `False`，再次调用 `unshare_mask()` 会发生什么？
 
-> **答案**：零拷贝开销。方法体先判断 `if self._sharedmask:`，已为 `False` 时直接 `return self`，不做任何拷贝。这是「按需付费」设计。
-
-**练习 3**：`__array_finalize__` 用「数据基址是否相同」来决定 mask 共享还是拷贝，为什么说这只是启发式、不可靠？
-
-> **答案**：基址相同通常意味着 `self` 是 `obj` 的简单视图（如 `obj[...]`），此时共享 mask 合理；但存在反例，例如 `self` 是 `obj` 的某一行或有奇特 strides，基址相同却并非整片对应。源码注释（[core.py:3092-3098](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3092-L3098)）明说这只是「not bad」的猜测，并非精确判定。
+**参考答案**：什么都不做——`if self._sharedmask:` 为假，直接 `return self`，不产生拷贝。这是一个避免无谓复制的优化：在已经私有的数组上调用 `unshare_mask()` 是零开销的，因此调用方可以「无脑先 unshare 再改 mask」而不必担心性能损失。
 
 ---
 
 ## 5. 综合实践
 
-把本讲四个模块串成一条完整链路。**目标**：模拟「读取一批带永久故障传感器的数据」——故障位必须永久屏蔽（硬掩码），中途切片分析时不能污染原始数据（unshare），最后把全好的辅助数组压缩存储（shrink）。
+把本讲三个机制串起来，完成下面这个「带保护的数据修正」小任务。
+
+**任务背景**：你有一组传感器读数，其中 `-999` 表示「传感器故障，不可信」。要求：
+
+1. 用 `masked_equal` 把 `-999` 屏蔽；
+2. **冻结**这些故障位——即便后续误操作赋值，故障位也不应被覆盖或解除；
+3. 给出一份「未屏蔽的干净数据」给下游；
+4. 验证经过一系列写操作后，掩码内存被合理压缩（`nomask`）或合理共享。
+
+**参考实现骨架**（请在本地补全并运行）：
 
 ```python
 import numpy as np
 
-# 原始读数：第 1、4 号传感器永久故障，用硬掩码锁定
-raw = np.ma.array([12.0, 99.0, 15.0, 13.0, 99.0, 14.0],
-                  mask=[0, 1, 0, 0, 1, 0],
-                  hard_mask=True)          # ← 模块 4.2：构造即硬掩码
-print("raw.hardmask?", raw.hardmask)       # True
+raw = np.array([10, -999, 30, -999, 50])
 
-# 误操作尝试：给故障位赋“好值”，应被拒绝（屏蔽不解除）
-raw[1] = 7.0
-print("硬掩码下 raw[1] 仍屏蔽?", raw._mask[1])   # True（模块 4.1）
+# 步骤 1：屏蔽故障值
+x = np.ma.masked_equal(raw, -999)
+print("初始:", x)
 
-# 取一段做独立分析：先 unshare，避免回传污染 raw
-segment = raw[0:3]
-print("切片 segment.sharedmask?", segment.sharedmask)  # True
-segment.unshare_mask()                     # ← 模块 4.4：切断共享
-print("unshare 后?", segment.sharedmask)   # False
-# 现在 segment 上做软掩码修正不会影响 raw
-segment.soften_mask()                      # ← 模块 4.2：切回软掩码
-segment._data[0] = 12.5                    # 仅改数据演示
-print("raw[0] 是否被牵连?", raw._data[0])   # 应仍为 12.0（已 unshare）
+# 步骤 2：冻结故障位（硬掩码）
+x.harden_mask()
+print("hardmask?", x.hardmask)
 
-# 另有一份“全好”的辅助数组，压缩其掩码省内存
-aux = np.ma.array([1.0, 2.0, 3.0])
-aux._mask = np.zeros(3, dtype=bool)        # 人为造一个全 False 布尔 mask
-print("压缩前 aux._mask 类型:", type(aux._mask).__name__)   # ndarray
-aux.shrink_mask()                          # ← 模块 4.3：压成 nomask
-print("压缩后 aux._mask is nomask?", aux._mask is np.ma.nomask)  # True
+# 步骤 3：尝试用一个修正数组覆盖（其中含故障位）
+correction = np.array([10, 999, 30, 777, 50])
+x[:] = correction              # 硬掩码下，故障位不应被改写
+print("覆盖后 _data:", x._data)   # 预期 [10, -999, 30, -999, 50]
+print("覆盖后 _mask:", x._mask)   # 预期 [F, T, F, T, F]
+
+# 步骤 4：取出干净数据
+clean = x.compressed()
+print("clean:", clean)            # 预期 [10, 30, 50]
+
+# 步骤 5：另造一个全未屏蔽的数组，验证 shrink_mask
+y = np.ma.array([1, 2, 3], mask=[0, 0, 0])
+print("shrink 前 y.mask:", y.mask)
+y.shrink_mask()
+print("shrink 后 y.mask is nomask?", y.mask is np.ma.nomask)
+
+# 步骤 6：观察 ufunc 结果的 mask 是否独立
+z = x + 0
+z[0] = np.ma.masked              # 修改 z 的 mask
+# 观察 x 的 mask 是否被波及（应不受影响，因 __array_wrap__ 已 copy）
+print("修改 z 后 x.mask 不变:", np.ma.testutils.assert_mask_equal(
+    x.mask, [False, True, False, True, False]) or True)
 ```
 
-**完成标志**：你能口头解释每一行注释对应的源码位置（`__new__` 的 `hard_mask` 参数、`__setitem__` 的 `where=~mindx`、`unshare_mask` 的 `if self._sharedmask`、`_shrink_mask` 的 `not m.any()`），并且运行结果与注释中的预期一致。**待本地验证**：综合实践中涉及直接赋值 `segment._data` / `aux._mask`，仅为演示内部机制；生产代码应使用公开 API（如 `filled`、`mask` setter）。
+**需要观察的现象与思考题**：
+
+- 步骤 3 中，`x._data` 的故障位为何仍是 `-999` 而非 `999`/`777`？（提示：`copyto(where=~mindx)`）
+- 步骤 6 中，若 NumPy 没有在 `__array_wrap__` 里做 `result._mask.copy()`，给 `z[0]` 屏蔽会怎样波及 `x`？这正是 `_sharedmask` 机制要防范的副作用。
+
+若步骤 6 的断言失败（`x.mask` 被波及），说明你观察到了共享 mask 的「漏改」现象——请回头检查是否在某处遗漏了 `copy()` 或 `unshare_mask()`。
 
 ## 6. 本讲小结
 
-- **软 vs 硬**：软掩码下赋值覆盖 `_mask`、可解除屏蔽；硬掩码下赋值用 `copyto(where=~mindx)` 只写未屏蔽位，`_mask` 经 `mask_or` 只增不减，故不可还原。
-- **harden/soften 极简**：二者只拨动 `_hardmask` 布尔位并 `return self`，不改数据；默认值由 `_defaulthardmask = False` 与 `__new__` 的 `hard_mask` 参数控制。
-- **shrink 省内存**：`_shrink_mask` 把「纯布尔且全 `False`」的 mask 替换为 `nomask` 单例；结构化掩码不压缩。
-- **共享是视图的副产物**：切片的 `_mask` 是父数组 mask 的视图，`_sharedmask=True`，改子掩码会回传；ufunc 结果与拷贝则 `_sharedmask=False`。
-- **unshare 按需拷贝**：`unshare_mask()` 仅在共享时拷贝 mask 并置 `False`，是切断回传、获得独占 mask 的官方手段。
-- **`__array_finalize__` 不可全信**：它用「数据基址是否相同」猜测 mask 共享与否，源码自承为 heuristics，精确控制仍需 `unshare_mask`。
+- **硬掩码锁死屏蔽**：`_hardmask = True` 时，`__setitem__` 用 `mask_or`（只增不减）合并掩码、用 `copyto(where=~mindx)` 跳过屏蔽位写数据，被屏蔽值无法被赋值还原；软掩码（默认）则直接覆盖 data 与 mask，赋确定值即解除屏蔽。
+- **三个就地开关方法**：`harden_mask()` / `soften_mask()` / `shrink_mask()` 都就地修改 `_hardmask` / `_mask` 并 `return self`，可链式调用；`hardmask` 与 `sharedmask` 是只读 property。
+- **`shrink_mask` 是内存优化**：把全 `False` 的真实掩码压缩回 `nomask` 单例，纯空间优化、无语义影响；结构化 dtype 因字段级屏蔽语义不能 shrink（no-op）。
+- **`_sharedmask` 是共享提示**：`True` 表示「mask 可能被他人引用，改前先 copy」，`False` 表示「私有可就地改」；`unshare_mask()` 仅在共享时才复制，零开销可放心调用。
+- **ufunc 结果必然独立**：`__array_wrap__` 无条件 `result._mask.copy()`，切断与输入 mask 的引用，是防止「运算结果污染输入」的安全网。
+- **构造时即决定共享**：`__new__` 中 `copy=False` 且无新 mask 时设 `_sharedmask = True`（共享源视图），有新 mask 或 `copy=True` 时设 `False`（独立）。
 
 ## 7. 下一步学习建议
 
-本讲弄清了 `_hardmask` 与 `_sharedmask` 两个内部标志，它们在后续讲义中会反复出现：
+本讲建立了「写操作如何作用于 `_data` 与 `_mask`」的完整图景。建议接下来：
 
-- **u3-l2 子类化 MaskedArray 与 mvoid**：子类化时若重写 `__array_finalize__`，必须正确传播 `_hardmask` / `_sharedmask`，否则切片后的子类实例会丢失硬掩码语义。
-- **u3-l4 持久化：pickle、重建与深拷贝**：`__getstate__` / `__setstate__` 需要序列化 `_hardmask`，反序列化后 `_sharedmask` 的重置策略值得对照阅读。
-- **u3-l5 mrecords 与字段级屏蔽**：`MaskedRecords` 在结构化 dtype 下如何继承硬掩码、`_fieldmask` 与整体 `recordmask` 的关系，是本讲 4.3 节「结构化掩码不 shrink」的延伸。
-
-建议接下来精读 `_update_from`（[core.py:3025-3048](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3025-L3048)）与 `__array_finalize__`（[core.py:3050-3135](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3050-L3135)），把「簿记属性的搬运链」彻底打通，这是理解所有掩码状态如何在视图与运算中传播的总钥匙。
+1. **u3-l2 子类化 MaskedArray 与 mvoid**：`_hardmask`、`_sharedmask` 都通过 `_update_from` / `__array_finalize__` 在子类实例间传播，理解子类化时如何正确保留这些标志是进阶关键。
+2. **u3-l5 掩码记录 mrecords 与字段级屏蔽**：本讲提到「结构化 dtype 的硬掩码未实现」「结构化掩码不能 shrink」，其背后的字段级屏蔽机制在 mrecords 中有专门设计（`_fieldmask`），值得对照学习。
+3. **u3-l3 masked 单例与打印**：本讲的硬/软掩码实践多次用到 `masked` 单例（如 `x[0] = masked`），下一讲将深入这个不可变单例的实现细节。
+4. **延伸阅读**：直接对照 `numpy/ma/tests/test_core.py` 的 `test_hardmask`（[test_core.py:2108](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/tests/test_core.py#L2108)）、`test_shrink_mask`（[test_core.py:2199](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/tests/test_core.py#L2199)）、`test_put_hardmask`（[test_core.py:3619](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/tests/test_core.py#L3619)）三组测试，它们是本讲所有行为的权威规约。

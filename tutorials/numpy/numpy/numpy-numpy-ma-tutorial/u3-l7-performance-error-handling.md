@@ -1,0 +1,661 @@
+# 性能权衡、错误处理与架构取舍
+
+## 1. 本讲目标
+
+本讲是专家层的收官篇，也是整本 `numpy.ma` 手册的「复盘」。前面二十二讲我们一直在追问「某段源码做了什么」，本讲换个角度，追问「为什么这么做、代价是什么」。读完后你应该能够：
+
+- 复现 README 里那个经典的 `divide` 基准对比，说清楚「先 `filled` 再算」「不填充直接算」「原版 `numpy.ma.divide`」三种路线在速度与正确性上的取舍。
+- 解释为什么 `numpy.ma` 的源码里到处都是 `with np.errstate(...)`，并指出它在「域检查类」「掩码 ufunc 包装器」「`__array_wrap__`」「`__setitem__`」四个位置各自要静音哪一类浮点警告。
+- 说出 `MAError` 与 `MaskError` 的继承关系，并列举三处真实 `raise MaskError` 的触发场景。
+- 读懂 `_arraymethod` 这个「一行生成一个掩码版方法」的工厂，以及 `MaskedIterator` 如何在迭代时同步吐出 `data` 与 `mask`。
+- 能站在架构层面评价「把 `MaskedArray` 做成 `ndarray` 子类」这个决定的优势与代价。
+
+本讲承接 u2-l5（掩码二元运算与除法域）。如果你对 `_MaskedBinaryOperation` / `_DomainedBinaryOperation` / `_DomainSafeDivide` / `ufunc_domain` / `ufunc_fills` 这几个词还生疏，请先回去看 u2-l5，本讲会直接复用它们。
+
+## 2. 前置知识
+
+进入本讲前，先在脑海里固定四件已经讲过的事：
+
+1. **掩码运算的通用范式是「填充 + 普通 ndarray 运算 + 重算掩码」**。以除法为例：先把两个输入填成 `d1`、`d2`，再做 `d1 / d2`，最后用 `mask_or` 与域掩码拼出结果的 `_mask`。这是 u2-l5、u2-l7 反复出现的套路。
+2. **屏蔽位的「垃圾值」是常态**。被屏蔽的位置上 `_data` 里可能躺着任何东西——`inf`、`nan`、上一次运算的残留。屏蔽的意义就是「约定不看这些位置」，所以运算器必须在算完后用 `np.copyto(result, da, where=m)` 之类把垃圾值回填成「看得过去」的输入值。
+3. **两条调用路径共享同一份域表**。`ma.divide(...)` 走 `_DomainedBinaryOperation.__call__`；`np.divide(掩码数组, ...)` 走 `MaskedArray.__array_wrap__`。两条路径都从全局字典 `ufunc_domain` / `ufunc_fills` 取域与填充值（见 u2-l4、u2-l5）。
+4. **`MaskedArray` 是 `ndarray` 的子类**（`class MaskedArray(ndarray)`），靠 `__new__` / `__array_finalize__` / `__array_wrap__` 三个钩子维持类型与属性传播（见 u2-l2）。本讲的很多「代价」正是子类化带来的。
+
+一个贯穿全讲的直觉：**屏蔽标记是「逻辑正确性」的承诺，而 `_data` 里屏蔽位的真实数值是「物理上无法保证」的**。性能优化（不填充）会放大这种物理污染，警告抑制（`errstate`）是为了不让这种污染在日志里刷屏，异常体系（`MaskError`）是为了把「逻辑上不允许」的操作显式拦下。三者是同一枚硬币的三个面。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲关心什么 |
+|---|---|---|
+| `numpy/ma/README.rst` | 子包历史与设计说明 | 第 153–219 行的 `Optimizing maskedarray` 一节：`filled` vs 不 `filled` 的取舍与基准 |
+| `numpy/ma/core.py` | 掩码数组主体（约 7000 行） | 异常类、`_Domain*` 域检查器、三类掩码 ufunc 包装器、`_arraymethod` 工厂、`MaskedIterator`、`filled`、`__array_wrap__`、`__setitem__` |
+
+本讲不引入新文件，全部结论都能在这两个文件里找到落点。引用行号均对应当前 HEAD `b21650c4f6`。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 filled vs 不 filled 的性能取舍（README）
+
+#### 4.1.1 概念说明
+
+掩码数组最频繁的操作是算术。`numpy.ma` 在算术上有一种「反复纠结」的设计空间：**在把两个数组喂给底层 ufunc 之前，到底要不要先用填充值把屏蔽位补上？**
+
+这个选择直接影响两件事：
+
+- **速度**：`filled()` 内部要做一次 `copy`（README 明确写道 `The .filled() method also involves a .copy()`），多一次拷贝就多一份内存往返；而「不填充」直接拿 `_data` 算，省掉这次拷贝。
+- **正确性 / 干净度**：如果屏蔽位的 `_data` 是垃圾值（比如未初始化、或前一步的 `inf`），不填充就拿去算，这些垃圾会真实地参与浮点运算，产生 `inf` / `nan`，并在未屏蔽的位置上「溅射」开来（比如 `0 * inf = nan`）。先填充则把这些位置替换成「安全」的值（除法里把除数填成 `1`），物理上杜绝异常运算。
+
+注意「正确性」在这里是个微妙词：**只要 mask 算对了，屏蔽位的 `_data` 是什么都无所谓**——反正最终会被屏蔽、被回填。所以这里说的「正确性」指的是「不产生 `inf`/`nan` 污染未屏蔽位置」「不触发 `RuntimeWarning`」这种工程意义上的干净，而不是「最终结果对不对」。
+
+#### 4.1.2 核心流程
+
+README 用一个除法例子展示三种实现路线。设：
+
+```python
+x = ma.array([1,2,3,4], mask=[1,0,0,0], dtype=float)
+y = ma.array([-1,0,1,2], mask=[0,0,0,1], dtype=float)
+```
+
+**路线 A（当前实现：先填充）**：
+
+1. `d1 = x.filled(0)`，`d2 = y.filled(1)` —— 屏蔽位填成「安全值」（除数填 `1` 避免除零）。
+2. `dm = ma.divide.domain(d1, d2)` —— 用域（`_DomainSafeDivide`）算出哪些位置非法。
+3. `result = (d1/d2).view(MaskedArray)` —— 真正的除法，因为已填充，不会除零。
+4. `result._mask = logical_or(m, dm)` —— 输入掩码 `m` 与域掩码 `dm` 合并。
+
+**路线 B（不填充直接算）**：
+
+1. `d1 = x._data`，`d2 = y._data` —— 直接拿原始 `_data`，不拷贝。
+2. 算 `dm`、`m`，与 A 相同。
+3. `result = (d1/d2).view(MaskedArray)` —— **这里发生了除以零**（`y` 的第二个元素是 `0`），结果里出现 `inf`。
+4. 合并掩码与 A 相同。
+
+二者的 `_mask` 完全一致，差别只在屏蔽位的 `_data` 取值（一个是回填的安全值，一个是 `inf`）。README 给出的基准（见 4.1.3）显示，路线 B 比路线 A 快约 30%–40%。
+
+#### 4.1.3 源码精读
+
+`Optimizing maskedarray` 一节的开场白把「当前实现」的三步流程写得清清楚楚（[README.rst:L159-L164](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/README.rst#L159-L164)）：
+
+> the input arrays are filled
+> the operation is performed on the filled arrays
+> the mask is set for the results, from the combination of the input masks and the mask corresponding to the domain of the operation.
+
+随后 README 用除法演示了「先填充」会除零（`d2` 第二个位置是 `0`），并给出去掉填充的写法——注意它特意强调 `d1 = x._data.copy()` 里的 `.copy()` 是必须的，因为后面要用 `numpy.putmask` 改 `d2`，不拷贝会污染原数组（[README.rst:L195-L196](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/README.rst#L195-L196)）。
+
+三种路线的基准数据（[README.rst:L210-L215](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/README.rst#L210-L215)）：
+
+| 实现 | 每次循环耗时 |
+|---|---|
+| `numpy.ma.divide`（先填充） | 2.69 ms |
+| classical division（普通 `d1/d2`） | 2.21 ms |
+| division w/ prefilling（手动先填再除） | 2.34 ms |
+| division w/o filling（不填充） | **1.55 ms** |
+
+README 最后的结论一锤定音（[README.rst:L217-L219](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/README.rst#L217-L219)）：要避免 `inf`/`nan` 就填充，只在乎速度就不填充。
+
+这个取舍在源码里的直接体现就是当前实现选择了「先填充」的 `_DomainedBinaryOperation`。我们看除法的构造（[core.py:L1317](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1317)）：
+
+```python
+divide = _DomainedBinaryOperation(umath.divide, _DomainSafeDivide(), 0, 1)
+```
+
+最后两个参数 `0, 1` 正是 `fillx=0`、`filly=1`——除数的填充值取 `1`，物理上杜绝除零。而 `_DomainedBinaryOperation.__call__` 真正算 `result = self.f(da, db, ...)` 时，`da`/`db` 仍是原始 `_data`（没有先 `filled`），算完才回填（见 4.2.3）——所以**当前实现其实是路线 A 与 B 之间的折中**：域检查保证了 mask 正确，但屏蔽位 `_data` 在运算瞬间确实会冒出 `inf`，靠 `errstate` 静音。
+
+对照看 `filled` 的「无屏蔽零拷贝快路径」——这正是 README 说 `filled` 涉及 `.copy()` 的前提条件（[core.py:L3903-L3905](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3903-L3905)）：
+
+```python
+m = self._mask
+if m is nomask:
+    return self._data
+```
+
+没有屏蔽位时直接返回 `_data`，连拷贝都省了；只有真的有屏蔽位时，`filled` 才走 `copyto` 的填充路径——也就是说，「先填充」路线的额外开销只在「确实存在屏蔽位」时才发生。
+
+#### 4.1.4 代码实践
+
+**实践目标**：复现 README 的基准思路，亲手量出「先填充再除」与「直接对 `_data` 相除」的速度差，并观察不填充路线产生的 `inf`。
+
+**操作步骤**：
+
+```python
+import numpy as np
+import numpy.ma as ma
+import timeit
+
+x = ma.array([1., 2., 3., 4.], mask=[1, 0, 0, 0])
+y = ma.array([-1., 0., 1., 2.], mask=[0, 0, 0, 1])
+
+# 路线 A：先 filled 再除（安全）
+def divide_prefill():
+    d1 = x.filled(0)
+    d2 = y.filled(1)
+    return d1 / d2
+
+# 路线 B：直接对 _data 相除（快，但有 inf）
+def divide_nofill():
+    d1 = x._data
+    d2 = y._data
+    return d1 / d2
+
+n = 200_000
+t_a = timeit.timeit(divide_prefill, number=n) / n * 1e6
+t_b = timeit.timeit(divide_nofill, number=n) / n * 1e6
+print(f"prefill : {t_a:.3f} us/loop")
+print(f"nofill  : {t_b:.3f} us/loop")
+
+print("prefill result:", divide_prefill())
+print("nofill  result:", divide_nofill())
+```
+
+**需要观察的现象**：
+
+1. `divide_prefill()` 的结果是 `[-0. 0. 3. 0.]`（屏蔽位被填成 `0`，所以算出有限值）。
+2. `divide_nofill()` 的结果是 `[-1. inf 3. 0.]`——第二个位置 `2/0` 产生 `inf`。
+3. 计时上 `nofill` 应明显快于 `prefill`（差距取决于机器，量级通常在 20%–50%）。把循环数 `n` 调大可以稳定读数。
+
+**预期结果**：两种结果若各包成 `MaskedArray` 并赋相同的 `_mask`，对外的「有效值」完全一致；差别只在屏蔽位的 `_data`——这正是「屏蔽标记管正确性，填充策略管干净度」的体现。
+
+> 待本地验证：具体微秒数因 CPU 与 numpy 编译选项而异，请以你本机实测为准；只要 `nofill` 比 `prefill` 快、且 `nofill` 结果含 `inf` 即达成实践目标。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：README 的四组基准里，为什么 `classical division`（2.21 ms）比 `division w/ prefilling`（2.34 ms）还快一点，却比 `division w/o filling`（1.55 ms）慢？
+
+**答案**：`classical division` 指 `d1/d2`（`d1`、`d2` 是普通 ndarray，无任何掩码开销），它省掉了掩码合并（`mask_or`）与域检查（`_DomainSafeDivide`），所以比「带掩码但预填充」快；但它仍然要真的算一遍除法（含除零产生 `inf` 的开销），而不填充路线除了省掩码，还因为没有 `filled()` 的 `.copy()` 而更快。差距的本质是「有没有 `filled` 的拷贝」和「有没有掩码/域的额外计算」两笔账。
+
+**练习 2**：如果把 `divide` 的 `filly` 从 `1` 改成 `0`（即 `divide = _DomainedBinaryOperation(umath.divide, _DomainSafeDivide(), 0, 0)`），会在 `reduce` 场景下出什么问题？提示：看 u2-l5 讲过的「`fillx`/`filly` 兼作 reduce 的幺元」。
+
+**答案**：`reduce` 先用 `filly` 把整列填一遍再做 `umath.divide.reduce`。`filly=1` 时 `x/1 = x`，是除法的幺元，归约正确；改成 `filly=0` 后，被屏蔽位置变成 `x/0`，会把 `inf`/`nan` 卷进归约结果，破坏 `reduce` 的正确性。这正是为什么除法族四个 op（`divide`/`floor_divide`/`remainder`/`fmod`）的 `filly` 都精心选成 `1` 而非 `0`。
+
+---
+
+### 4.2 errstate：浮点警告的系统性抑制
+
+#### 4.2.1 概念说明
+
+`np.errstate` 是 numpy 的浮点错误状态上下文管理器/装饰器，用来临时改变 `divide-by-zero`、`overflow`、`invalid`（`nan` 参与）等浮点异常的处理方式（`ignore` / `warn` / `raise` / `call` / `print` / `log`）。
+
+掩码数组为什么特别需要它？因为 **屏蔽位上的 `_data` 经常是垃圾值**，而这些垃圾值会真实地参与 ufunc 运算。比如一个被屏蔽的位置上 `_data` 是 `nan`，那么 `umath.greater(nan, b)` 会触发 `invalid` 警告——可这个位置反正要被屏蔽，警告纯属噪音。`numpy.ma` 的策略是：**在所有「明知道会产生无害垃圾值」的地方，用 `errstate` 把警告静音**。
+
+这不是为了掩盖 bug，而是为了让 `np.seterr` 处于 `warn` 严格模式的用户，不会因为「正常的掩码运算」而被警告刷屏。
+
+#### 4.2.2 核心流程
+
+`errstate` 在 `core.py` 里有四种用法：
+
+1. **域检查器内部**（`_Domain*.__call__`）：算 `greater`/`less`/`absolute` 时静音 `invalid`（`nan` 比较）。
+2. **掩码 ufunc 包装器内部**（`_MaskedUnaryOperation` / `_MaskedBinaryOperation` / `_DomainedBinaryOperation` 的 `__call__`）：真正调用 `self.f(...)` 时静音 `divide` 与 `invalid`。
+3. **`__array_wrap__` 里算域时**：`np.op(掩码数组)` 走的路径，算 `domain(*input_args)` 时静音。
+4. **作为 `__setitem__` 的装饰器**：给整数数组写入可能溢出或产生 `nan` 的值时静音 `over` 与 `invalid`。
+
+四处的共同模式：**「屏蔽位/越界位的垃圾值会触发警告，但我们知道它是无害的，所以静音」**。
+
+#### 4.2.3 源码精读
+
+**(1) 域检查器**。`_DomainCheckInterval` 用 `greater`/`less` 判断是否越界，若输入含 `nan` 会触发 `invalid`，故静音（[core.py:L864-L870](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L864-L870)）：
+
+```python
+def __call__(self, x):
+    # nans at masked positions cause RuntimeWarnings, even though
+    # they are masked. To avoid this we suppress warnings.
+    with np.errstate(invalid='ignore'):
+        return umath.logical_or(umath.greater(x, self.b),
+                                umath.less(x, self.a))
+```
+
+注意那段注释，它把设计意图写得很直白：屏蔽位的 `nan` 会触发 `RuntimeWarning`，哪怕它们注定被屏蔽。`_DomainSafeDivide` 更激进，用 `all='ignore'` 一次性静音所有浮点异常（[core.py:L900-L909](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L900-L909)）：
+
+```python
+def __call__(self, a, b):
+    if self.tolerance is None:
+        self.tolerance = np.finfo(float).tiny
+    a, b = np.asarray(a), np.asarray(b)
+    with np.errstate(all='ignore'):
+        return umath.absolute(a) * self.tolerance >= umath.absolute(b)
+```
+
+这里判定「是否除以近零」用的判据是 `|a|*tiny >= |b|`（见 u2-l5），本身就会在 `b=0` 时算出合理结果，但中途的乘除仍可能触发警告，故全静音。
+
+**(2) 掩码 ufunc 包装器**。一元包装器在调用真正的 `self.f(d)` 前后包一层 `errstate`，无论有没有域都静音 `divide`/`invalid`（[core.py:L991-L992](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L991-L992)）：
+
+```python
+with np.errstate(divide='ignore', invalid='ignore'):
+    result = self.f(d, *args, **kwargs)
+```
+
+二元包装器 `_MaskedBinaryOperation.__call__` 用了一个稍特别的写法——`with np.errstate():` 进入上下文后再 `np.seterr(...)` 手动改状态（[core.py:L1070-L1072](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1070-L1072)）：
+
+```python
+with np.errstate():
+    np.seterr(divide='ignore', invalid='ignore')
+    result = self.f(da, db, *args, **kwargs)
+```
+
+这里的精妙之处在于 `with np.errstate():`（无参数）会**在退出时恢复进入前的全局 `seterr` 状态**，而内部的 `np.seterr(...)` 才是真正改成 `ignore`——等价于「临时静音，离开块自动还原」。带域的二元包装器 `_DomainedBinaryOperation.__call__` 则用更直接的写法（[core.py:L1212-L1213](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L1212-L1213)）：
+
+```python
+with np.errstate(divide='ignore', invalid='ignore'):
+    result = self.f(da, db, *args, **kwargs)
+```
+
+**(3) `__array_wrap__`**。`np.op(掩码数组)` 这条路径算域时同样静音（[core.py:L3166-L3170](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3166-L3170)）：
+
+```python
+with np.errstate(divide='ignore', invalid='ignore'):
+    d = domain(*input_args).astype(bool, copy=False)
+    d = filled(d, True)
+```
+
+**(4) `__setitem__` 装饰器**。这是唯一一个用「装饰器形式」而非「with 形式」的地方（[core.py:L3405-L3406](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3405-L3406)）：
+
+```python
+# setitem may put NaNs into integer arrays or occasionally overflow a
+# float.  But this may happen in masked values, so avoid otherwise
+# correct warnings (as is typical also in masked calculations).
+@np.errstate(over='ignore', invalid='ignore')
+def __setitem__(self, indx, value):
+```
+
+注释解释了为什么是 `over` + `invalid`：往整数数组里塞值可能溢出（`over`），往浮点里塞 `nan` 会触发 `invalid`，而这些往往发生在「反正要被屏蔽」的值上。
+
+#### 4.2.4 代码实践
+
+**实践目标**：亲眼看到「没有 `errstate` 时屏蔽位的 `nan` 会刷警告，加了就不刷」，从而理解 `errstate` 不是装饰而是必需。
+
+**操作步骤**：
+
+```python
+import numpy as np
+import numpy.ma as ma
+import warnings
+
+a = ma.array([1., 2., 3.], mask=[0, 1, 0])
+# 故意把屏蔽位写成 nan，模拟「垃圾值」
+a._data[1] = np.nan
+
+# 场景 1：把全局 seterr 调到 warn，做一次比较
+np.seterr(invalid='warn')
+print("--- 没有 errstate 包裹 ---")
+with warnings.catch_warnings(record=True) as w:
+    warnings.simplefilter("always")
+    _ = (a._data > 0)   # nan > 0 会触发 invalid
+    print(f"警告数: {len(w)}；前几条: {[str(x.message) for x in w[:2]]}")
+
+print("--- 用 errstate 静音 ---")
+with np.errstate(invalid='ignore'):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _ = (a._data > 0)
+        print(f"警告数: {len(w)}")
+
+# 还原默认
+np.seterr(invalid='warn')
+```
+
+**需要观察的现象**：
+
+1. 场景 1 里 `nan > 0` 触发了 `invalid value encountered in greater` 警告（`len(w) >= 1`）。
+2. 场景 2 包了 `errstate(invalid='ignore')` 后，`len(w) == 0`。
+
+**预期结果**：这恰好复现了 `_DomainCheckInterval.__call__` 注释里描述的处境——屏蔽位的 `nan` 会触发警告。`numpy.ma` 用 `errstate` 把它静音，于是用户在 `np.seterr(all='warn')` 的严格模式下也不会被掩码运算刷屏。
+
+> 待本地验证：不同 numpy 版本对 `seterr('warn')` 的实际行为略有差异；若场景 1 没有冒警告，可改用 `np.seterr(all='raise')` 配合 `try/except FloatingPointError` 来确认异常确实发生。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`_MaskedBinaryOperation.__call__` 写成 `with np.errstate(): np.seterr(...)`，而 `_DomainedBinaryOperation.__call__` 写成 `with np.errstate(divide='ignore', invalid='ignore')`。两者效果上有什么本质区别吗？
+
+**答案**：没有本质区别，都实现了「进入块静音 `divide`/`invalid`、离开块恢复原状」。前者用「无参 `errstate()` 保当前状态 + `seterr` 改状态」的拆分写法，后者用「带参 `errstate(...)`」的一体化写法。带参形式更简洁可读，是更推荐的写法；前者的历史写法可能是为了在某些边界下更精细地控制恢复点。
+
+**练习 2**：为什么 `__setitem__` 静音的是 `over` 和 `invalid`，而掩码 ufunc 静音的是 `divide` 和 `invalid`？
+
+**答案**：因为它们害怕的浮点异常不同。`__setitem__` 害怕「赋值溢出」（往 `int8` 写 `1000`，触发 `over`）和「写 `nan`」（触发 `invalid`）；掩码 ufunc 害怕「除零」（`divide`）和「`nan` 参与运算」（`invalid`）。静音的种类是对各自可能产生的无害垃圾值「对症下药」。
+
+---
+
+### 4.3 MAError / MaskError 异常体系
+
+#### 4.3.1 概念说明
+
+`numpy.ma` 自己定义了一套异常，用来表达「掩码数组专属的非法操作」。它们和 numpy 内置的 `ValueError`/`TypeError` 并行存在，调用方可以用 `except MaskError` 精确捕获掩码相关的错误。
+
+两个类的定义极简（[core.py:L142-L155](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L142-L155)）：
+
+```python
+class MAError(Exception):
+    """
+    Class for masked array related errors.
+    """
+    pass
+
+
+class MaskError(MAError):
+    """
+    Class for mask related errors.
+    """
+    pass
+```
+
+`MAError` 是所有掩码数组相关错误的基类（继承自 `Exception`），`MaskError` 是它的子类，专指「与 mask 直接相关」的错误（比如试图改 `masked` 单例、把屏蔽元素转 int、掩码与数据形状不兼容）。实际代码里抛出的几乎全是 `MaskError`，`MAError` 主要作为「兜底基类」存在。
+
+#### 4.3.2 核心流程
+
+`MaskError` 在 `core.py` 里有 7 处 `raise`，可以归成三类语义：
+
+1. **形状不兼容**：构造/赋值时掩码与数据形状对不上。
+2. **逻辑上不允许的操作**：试图改 `masked` 单例、把被屏蔽标量转成 `int`。
+3. **运算约束**：3 参数 `power`、特定 `put`/`take` 场景。
+
+这些 `raise` 都发生在「掩码语义被违反」的瞬间，是保护不变量的最后一道闸。
+
+#### 4.3.3 源码精读
+
+**(1) 形状不兼容**。`__new__` 构造时若 `mask.size` 与 `data.size` 都不是 1 也不相等，直接抛错（[core.py:L2984-L2986](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2984-L2986)）：
+
+```python
+msg = (f"Mask and data not compatible:"
+       f" data size is {nd}, mask size is {nm}.")
+raise MaskError(msg)
+```
+
+注意在抛错之前，函数已经对「`mask.size == 1`（广播）」和「`mask.size == data.size`（reshape）」两种合法情形做了放行；只有这两种都不满足时才认为真的不兼容。
+
+**(2) 改 `masked` 单例**。`__setitem__` 开头第一件事就是拦下「对 `masked` 单例本身赋值」（[core.py:L3414-L3415](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L3414-L3415)）：
+
+```python
+if self is masked:
+    raise MaskError('Cannot alter the masked element.')
+```
+
+这呼应了 u3-l3 讲过的 `masked` 单例不可变保护——单例必须全局唯一且不可变，任何写入尝试都在这里被拦死。
+
+**(3) 屏蔽标量转 `int`**。`__int__` 在发现「这一个元素恰好被屏蔽」时拒绝转换（[core.py:L4531-L4535](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L4531-L4535)）：
+
+```python
+if self.size > 1:
+    raise TypeError("Only length-1 arrays can be converted "
+                    "to Python scalars")
+elif self._mask:
+    raise MaskError('Cannot convert masked element to a Python int.')
+return int(self.item())
+```
+
+这里有个对照教学：`size > 1` 抛的是 numpy 通用的 `TypeError`（多元素数组不能转标量，这不是掩码特有）；而「单个元素但被屏蔽」抛的是 `MaskError`——因为它专属掩码语义（屏蔽元素没有有效值可转）。同样的 `raise MaskError('Cannot convert masked element to a Python float.')` 在 `__float__` 里也有一份（同区段附近，读者可自行 `grep` 确认）。
+
+#### 4.3.4 代码实践
+
+**实践目标**：触发三种 `MaskError`，用 `except MaskError` 精确捕获，验证异常体系可被分流。
+
+**操作步骤**：
+
+```python
+import numpy as np
+import numpy.ma as ma
+from numpy.ma.core import MAError, MaskError
+
+# 场景 1：掩码与数据形状不兼容
+try:
+    ma.array([1, 2, 3, 4, 5], mask=[0, 1, 0])   # data.size=5, mask.size=3
+except MaskError as e:
+    print("场景1 捕获 MaskError:", e)
+
+# 场景 2：试图改 masked 单例
+try:
+    ma.masked[0] = 999
+except MaskError as e:
+    print("场景2 捕获 MaskError:", e)
+
+# 场景 3：把被屏蔽标量转 int
+a = ma.array([5], mask=[1])
+try:
+    int(a)
+except MaskError as e:
+    print("场景3 捕获 MaskError:", e)
+
+# 验证继承关系：MaskError 也是 MAError，也是 Exception
+print("MaskError 是 MAError 吗？", issubclass(MaskError, MAError))
+print("MaskError 是 ValueError 吗？", issubclass(MaskError, ValueError))
+```
+
+**需要观察的现象**：
+
+1. 三个场景都打印出对应的 `MaskError` 信息。
+2. `issubclass(MaskError, MAError)` 为 `True`，`issubclass(MaskError, ValueError)` 为 `False`——说明掩码异常是独立分支，不会被 `except ValueError` 捕获。
+
+**预期结果**：这证明 `MaskError` 是「掩码专属」异常，业务代码若想统一处理掩码错误，应该 `except (MAError, MaskError)`，而不是 `except ValueError`。
+
+> 待本地验证：场景 1 的具体报错文案以你本机 numpy 版本为准；只要抛出的是 `MaskError` 即达成目标。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`__int__` 里 `size > 1` 抛 `TypeError`、`self._mask` 真抛 `MaskError`。为什么前者不用 `MaskError`？
+
+**答案**：因为「多元素数组不能转 Python 标量」是 ndarray 的通用规则，与掩码无关——普通 `np.array([1,2]).__int__()` 也抛 `TypeError`。掩码数组在这里只是沿用基类语义，所以保持 `TypeError` 以和 ndarray 行为一致。只有「单个元素被屏蔽」才是掩码特有的情形，才值得用 `MaskError` 区分。
+
+**练习 2**：如果调用方写了 `try: ... except Exception:`，能捕获到 `MaskError` 吗？这样写有什么隐患？
+
+**答案**：能，因为 `MaskError → MAError → Exception`。隐患是「捕获过宽」——同一个 `except Exception` 会把 `KeyboardInterrupt` 之外的所有异常一网打尽，掩盖真正的 bug。建议针对掩码操作精确 `except MaskError`，把「业务逻辑错误」和「掩码语义错误」分开处理。
+
+---
+
+### 4.4 _arraymethod 工厂与 MaskedIterator
+
+#### 4.4.1 概念说明
+
+`MaskedArray` 作为 `ndarray` 子类，要把基类几十个数组方法（`copy` / `flatten` / `transpose` / `diagonal` / `squeeze` / `repeat` / `swapaxes`）都「掩码化」。如果逐个手写，每个方法都得重复「对 `_data` 调原方法 → 包成子类 → 同步 `_mask`」的样板。`_arraymethod` 就是消灭这种重复的**工厂函数**：传一个方法名字符串，返回一个写好的类方法。
+
+`MaskedIterator` 则是另一个「配套基础设施」：它实现了 `x.flat` 返回的迭代器，让 `for item in x.flat:` 能逐个吐出元素，且每个元素都带着正确的掩码状态（屏蔽元素吐出 `masked` 单例，结构化记录吐出 `mvoid`，普通元素吐出标量）。
+
+两者都不是「热门 API」，但它们是理解 `MaskedArray` 如何「以最小代码量覆盖整个 ndarray 方法表」的关键。
+
+#### 4.4.2 核心流程
+
+**`_arraymethod(funcname, onmask=True)` 的执行流程**（返回一个 `wrapped_method`）：
+
+1. `result = getattr(self._data, funcname)(*args)` —— 对 `_data` 调同名 ndarray 方法。
+2. `result = result.view(type(self))` —— 把结果原地升级回（子类）`MaskedArray`。
+3. `result._update_from(self)` —— 搬运 `_fill_value` 等簿记属性（见 u2-l2）。
+4. 处理 mask：
+   - `onmask=False`：`result.__setmask__(self._mask)`，mask 原样搬过去（会 copy）。
+   - `onmask=True` 且 `mask is not nomask`：`result._mask = getattr(mask, funcname)(*args)`，对 mask 也调同名方法（比如 `transpose` 时 mask 也跟着转置）。
+5. 返回 `result`。
+
+`onmask` 的语义是「mask 是否要跟着走一遍同一方法」。大部分方法（`transpose`、`swapaxes`、`diagonal`）需要 mask 同步变换，用默认 `onmask=True`；少数（如 `flatten`、`copy`）mask 只需原样搬运，会显式传 `onmask=False`——但实际注册处（4.4.3）可见当前都用默认值。
+
+**`MaskedIterator` 的执行流程**：
+
+1. `__init__`：保存宿主 `ma`，对 `ma._data.flat` 建一个普通迭代器 `dataiter`；若 `_mask is nomask` 则 `maskiter=None`，否则对 `ma._mask.flat` 也建一个。
+2. `__next__`：从 `dataiter` 取下一个 `d`；若 `maskiter` 非空则取下一个 `m`，按 `m` 的类型分派：`np.void`（结构化）→ 返回 `mvoid`，标量 `m` 为真 → 返回 `masked` 单例，否则返回 `d`。
+3. `__getitem__`/`__setitem__`：支持切片索引，取多元素返回 `MaskedArray`，取单屏蔽元素返回 `masked`。
+
+#### 4.4.3 源码精读
+
+**`_arraymethod` 工厂本体**（[core.py:L2615-L2657](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2615-L2657)）：
+
+```python
+def _arraymethod(funcname, onmask=True):
+    def wrapped_method(self, *args, **params):
+        result = getattr(self._data, funcname)(*args, **params)
+        result = result.view(type(self))
+        result._update_from(self)
+        mask = self._mask
+        if not onmask:
+            result.__setmask__(mask)
+        elif mask is not nomask:
+            # __setmask__ makes a copy, which we don't want
+            result._mask = getattr(mask, funcname)(*args, **params)
+        return result
+    ...
+    return wrapped_method
+```
+
+注意那条注释 `__setmask__ makes a copy, which we don't want`：当 `onmask=True` 时直接给 `result._mask` 赋值（对 mask 调同名方法得到的新数组），绕开 `__setmask__` 的拷贝，省一次内存分配。这是「性能取舍」精神在工具函数层面的延续。
+
+工厂生产出来的方法注册在类体里，一行一个（[core.py:L6272-L6279](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L6272-L6279)）：
+
+```python
+# Array methods
+copy = _arraymethod('copy')
+diagonal = _arraymethod('diagonal')
+flatten = _arraymethod('flatten')
+repeat = _arraymethod('repeat')
+squeeze = _arraymethod('squeeze')
+swapaxes = _arraymethod('swapaxes')
+T = property(fget=lambda self: self.transpose())
+transpose = _arraymethod('transpose')
+```
+
+七行就覆盖了七个方法，每个方法自动获得「对 `_data` 与 `_mask` 各跑一次同名 ndarray 方法」的行为。对比之下，`__getitem__`、`__setitem__`、`filled` 这类语义复杂、不能简单「数据与掩码各跑一次」的方法，才必须手写。
+
+**`MaskedIterator` 本体**（[core.py:L2660-L2766](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2660-L2766)）。它的 `__next__` 最能体现「按 mask 分派返回值」的设计（[core.py:L2740-L2766](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2740-L2766)）：
+
+```python
+def __next__(self):
+    d = next(self.dataiter)
+    if self.maskiter is not None:
+        m = next(self.maskiter)
+        if isinstance(m, np.void):
+            return mvoid(d, mask=m, hardmask=self.ma._hardmask)
+        elif m:  # Just a scalar, masked
+            return masked
+    return d
+```
+
+三档分派：结构化记录（`np.void`，逐字段掩码）→ 包成 `mvoid`（见 u3-l2）；标量屏蔽 → 返回全局 `masked` 单例（见 u3-l3）；未屏蔽 → 返回原始标量 `d`。`__getitem__` 里也是同样的三档逻辑（[core.py:L2721-L2732](https://github.com/numpy/numpy/blob/b21650c4f6eb53c30eef3508c0c27ce5c51ccd6b/numpy/ma/core.py#L2721-L2732)），只是对数组切片会保留 `MaskedArray` 类型。
+
+`MaskedIterator` 不被 `ma` 模块导出（docstring 明确写 `MaskedIterator is not exported by the ma module`），用户唯一入口是 `x.flat`，对应的 `flat` property 在 `MaskedArray` 上返回 `MaskedIterator(self)`。
+
+#### 4.4.4 代码实践
+
+**实践目标**：验证 `_arraymethod` 生产的 `transpose` 确实让 `_data` 与 `_mask` 同步转置，并观察 `MaskedIterator` 在迭代屏蔽元素时吐出 `masked` 单例。
+
+**操作步骤**：
+
+```python
+import numpy as np
+import numpy.ma as ma
+
+# (1) 验证 _arraymethod：transpose 应同步转置 data 与 mask
+a = ma.array([[1, 2], [3, 4]], mask=[[0, 1], [0, 0]])
+print("原数组 mask:\n", a.mask)
+at = a.transpose()
+print("转置后 mask:\n", at.mask)
+print("转置后 data:\n", at.data)
+# mask[0,1] 原本是 True，转置后应在 [1,0]
+print("mask 同步转置？", at.mask[1, 0] == True and at.mask[0, 1] == False)
+
+# 同样验证 diagonal（_arraymethod 生产）走的是同一套逻辑
+print("diagonal:", a.diagonal(), "mask:", a.diagonal().mask)
+
+# (2) 验证 MaskedIterator：x.flat 迭代屏蔽元素吐 masked
+b = ma.array([10, 20, 30], mask=[0, 1, 0])
+print("--- 迭代 x.flat ---")
+for item in b.flat:
+    print(item, type(item).__name__)
+
+print("--- next() 取值 ---")
+fl = ma.array([3, 2], mask=[0, 1]).flat
+print(next(fl))        # 3
+print(next(fl))        # masked
+```
+
+**需要观察的现象**：
+
+1. `a.transpose().mask` 是原 `mask` 的转置，屏蔽位从 `[0,1]` 跑到 `[1,0]`，证明 `_arraymethod('transpose')` 对 `_data` 与 `_mask` 各跑了一次 `transpose`。
+2. 迭代 `b.flat` 时，第二个（被屏蔽）元素打印为 `masked`，其类型是 `MaskedConstant`；其余是普通 `numpy` 标量。
+3. `next(fl)` 第二次返回的正是 `np.ma.masked` 单例（可用 `next(fl) is np.ma.masked` 验证为 `True`）。
+
+**预期结果**：这把 4.4 讲的两件事都落到了可观察行为上——`_arraymethod` 让「方法表」自动掩码化，`MaskedIterator` 让「迭代」自动屏蔽化。
+
+> 待本地验证：`MaskedConstant` 的 `repr` 在不同版本可能是 `masked` 或 `--`；只要被屏蔽位置返回的是 `np.ma.masked` 单例即达成目标（用 `is` 判断）。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`_arraymethod` 里 `onmask=True` 时直接写 `result._mask = getattr(mask, funcname)(...)`，注释说「绕开 `__setmask__` 的拷贝」。如果改成 `result.__setmask__(getattr(mask, funcname)(...))`，行为会变吗？性能会变吗？
+
+**答案**：行为基本不变（最终 `result._mask` 都是转置后的 mask），但性能变差——`__setmask__` 内部会对传入的 mask 再做一次 `make_mask` 规整（可能 copy）。对 `transpose` 这种「mask 本身就是合法布尔数组」的场景，这第二次规整是纯浪费。注释正是为了说明「我们故意绕开它」。
+
+**练习 2**：`MaskedIterator.__next__` 遇到结构化记录（`isinstance(m, np.void)`）返回 `mvoid`，遇到标量屏蔽返回 `masked`。为什么不能统一返回 `masked`？
+
+**答案**：因为结构化记录的屏蔽是「逐字段」的——一条记录可能某些字段屏蔽、某些未屏蔽（见 u3-l5 的字段级屏蔽）。返回 `mvoid` 能保留这种字段粒度；若一刀切返回 `masked`，就把「部分字段屏蔽」误当成「整条记录屏蔽」，丢失信息。这正是 `mvoid` 存在的理由（见 u3-l2）。
+
+---
+
+## 5. 综合实践
+
+把本讲四块知识串起来，完成一个小调研：**写一份「掩码除法实现对比报告」**。
+
+要求：
+
+1. **复现三种除法**：参照 README，分别实现 (A) 先 `filled` 再除、(B) 不填充直接对 `_data` 除、(C) 直接调 `ma.divide`。三者输入相同（含屏蔽位与一个除零位）。
+2. **计时**：用 `timeit` 量出三者的单次耗时，按快慢排序，与 README 的 2.69 / 2.34 / 1.55 ms 趋势对照。
+3. **验证掩码一致**：打印三种结果的 `_mask`，确认三者完全相同（证明「掩码正确性独立于填充策略」）。
+4. **验证 `_data` 差异**：打印三种结果屏蔽位的 `_data`，确认 (B)、(C) 含 `inf` 而 (A) 不含，呼应「不填充更快但产生 `inf`/`nan`」。
+5. **验证 `errstate` 作用**：把 `np.seterr(divide='raise')` 打开，分别跑 (B) 与 (C)，观察 (B) 会抛 `FloatingPointError` 而 (C) 因 `_DomainedBinaryOperation.__call__` 里的 `errstate(divide='ignore')` 不抛。
+6. **写异常测试**：构造一个「掩码与数据形状不兼容」的输入，用 `pytest.raises(MaskError)` 断言抛错；再构造「对 `masked` 单例赋值」，同样断言。
+7. **报告结论**：用一段话总结「什么场景该用哪条路线」（提示：需要对外暴露 `_data` 且不容忍 `inf` → 填充；纯内部计算且只看未屏蔽位 → 不填充；要「既安全又省心」 → 直接用 `ma.divide`）。
+
+参考骨架（**示例代码，非项目原有**）：
+
+```python
+# 示例代码：综合实践骨架
+import numpy as np, numpy.ma as ma, timeit
+from numpy.ma.core import MaskError
+
+x = ma.array([1., 2., 3., 4.], mask=[1, 0, 0, 0])
+y = ma.array([-1., 0., 1., 2.], mask=[0, 0, 0, 1])
+
+def A():  # 先填充
+    return x.filled(0) / y.filled(1)
+def B():  # 不填充
+    return x._data / y._data
+def C():  # ma.divide
+    return ma.divide(x, y)
+
+for name, f in [("A prefill", A), ("B nofill", B), ("C ma.divide", C)]:
+    t = timeit.timeit(f, number=100000) / 100000 * 1e6
+    r = f()
+    if hasattr(r, "mask"):
+        print(f"{name}: {t:.2f}us  mask={r.mask}")
+    else:
+        print(f"{name}: {t:.2f}us  (raw ndarray, 无 mask)  data={r}")
+
+# errstate 对比
+np.seterr(divide='raise')
+try:
+    B()
+except FloatingPointError:
+    print("B 在 seterr('raise') 下抛 FloatingPointError")
+C()  # 不抛，因为内部 errstate 静音
+np.seterr(divide='warn')
+
+# 异常测试
+import pytest
+def test_shape():
+    with pytest.raises(MaskError):
+        ma.array([1,2,3,4,5], mask=[0,1,0])
+def test_masked_singleton():
+    with pytest.raises(MaskError):
+        ma.masked[0] = 1
+```
+
+> 待本地验证：具体微秒数与异常文案以本机为准；报告里只要趋势（B 最快、C 次之、A 最慢但最干净）成立即可。
+
+## 6. 本讲小结
+
+- **填充 vs 不填充是速度与干净度的取舍**：`filled()` 有拷贝开销，不填充更快但会让屏蔽位冒出 `inf`/`nan`；当前 `numpy.ma` 选择「域检查 + 运算瞬间静音 + 事后回填」的折中路线，README 的 2.69 / 1.55 ms 基准量化了这个差距。
+- **`errstate` 是为屏蔽位垃圾值「消音」的系统性手段**，出现在域检查器、三类掩码 ufunc 包装器、`__array_wrap__`、`__setitem__` 四个位置，各自静音 `divide`/`invalid`/`over` 等无害异常，让严格 `seterr('warn')` 用户不被刷屏。
+- **`MAError`（基类）与 `MaskError`（mask 专属）构成独立异常分支**，不继承 `ValueError`；典型触发点有掩码/数据形状不兼容、改 `masked` 单例、屏蔽标量转 `int`。
+- **`_arraymethod` 是消灭方法表样板代码的工厂**，传方法名即可生成「对 `_data` 与 `_mask` 各跑一次同名 ndarray 方法」的类方法，七行覆盖 `copy`/`transpose`/`diagonal` 等。
+- **`MaskedIterator` 实现 `x.flat`**，按 mask 三档分派返回值：结构化 → `mvoid`、标量屏蔽 → `masked` 单例、未屏蔽 → 原值，把字段级屏蔽与单例语义统一进迭代。
+- **架构层面的总评**：`MaskedArray` 作为 `ndarray` 子类，以 `__new__`/`__array_finalize__`/`__array_wrap__` 三钩子换取了「子类化友好、与 ndarray 生态无缝」，代价是 `__array_finalize__` 的 mask 传播只能靠「guesswork and heuristics」、以及屏蔽位 `_data` 的物理污染需要 `errstate` 与回填来兜底——这是 u2-l2 早已点破、本讲用性能与异常视角再次印证的核心取舍。
+
+## 7. 下一步学习建议
+
+本讲是 `numpy.ma` 手册的最后一篇，至此入门、进阶、专家三层 23 讲已全部完成。建议的后续动作：
+
+1. **横向对照「上游设计文档」**：重读 `numpy/ma/README.rst` 的 `History` 与 `Main differences` 两节，现在你应该能逐条对应到具体讲义——比如 `cumsum` 用 0 填、`bool(a)` 抛 `ValueError`、`filled` 返回同子类，分别对应 u2-l7、u2-l6、u1-l4。
+2. **跑一遍官方测试套件**：执行 `np.ma.test()`，对照 `numpy/ma/tests/test_core.py` 看每个测试类对应哪一讲，用测试反向校验你对源码的理解。
+3. **动手扩展**：试着自己实现一个 `_arraymethod` 无法覆盖的方法（比如带额外参数的 `reshape`），体会「简单方法工厂化、复杂方法手写」的分界线。
+4. **跨子包迁移**：把本套手册建立的「data/mask/fill_value 三件套 + 子类化钩子 + 域/填充注册表」心智模型，迁移到阅读 `numpy.ma.mrecords`（u3-l5）之外的其它 ndarray 子类（如 `matrix`、`recarray`），验证这套模型的普适性。
+5. **关注性能前沿**：README 提到「work is underway to speed it up」。可关注 numpy 后续版本对掩码 ufunc 的优化（如减少 `filled` 的拷贝、把域检查下沉到 C 层），把本讲的基准作为观察基线。
