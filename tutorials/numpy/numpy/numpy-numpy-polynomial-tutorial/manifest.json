@@ -1,0 +1,668 @@
+{
+  "project": "numpy-numpy-polynomial",
+  "head": "9559a6b1ac93610711d8f1243f8c949fca4420bb",
+  "rationale": "本次为增量更新：previous_head..current_head 的差异仅涉及 numpy/__init__.pyi、numpy/_core/umath.pyi、numpy/typing/tests/data/reveal/ufuncs.pyi 三个 ufunc 类型存根文件（gcd/lcm 与二元位运算 ufunc 的 typing 特化），未触及 numpy/polynomial/ 下任何源码，故全部讲义 action 标为 keep，结构与依赖关系保持不变。原手册仍遵循\"使用 → 抽象 → 实现 → 正交族 → 工程深入\"的认知递进：第 1 单元（入门）让读者掌握统一系数表示约定、六大便捷类与函数式 API；第 2 单元进入核心抽象 ABCPolyBase，讲清虚函数委托模式与 domain/window 线性映射两大设计支柱及算术重载与打印管线；第 3 单元以幂级数为主线、配合 polyutils 通用辅助函数，逐层拆解创建/算术、Horner 求值、微积分、Vandermonde 最小二乘拟合、伴随矩阵求根等核心链路；第 4 单元进入正交多项式族，突破 Chebyshev 独特的 z-series 机制及插值/高斯积分工具，再横向对比 Legendre/Laguerre/Hermite/HermiteE 与基转换；第 5 单元（专家）讨论数值稳定性取舍、打印管线与 symbol 自定义、多维张量广播、测试体系与二次开发。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 numpy.polynomial",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与多项式表示约定",
+          "order": 1,
+          "filename": "u1-l1-package-overview.md",
+          "level": "beginner",
+          "topic": "介绍 numpy.polynomial 子包的整体定位、它要解决的'高效处理多项式'问题，以及全包统一的系数表示约定（1-D 数组、从低次到高次）。",
+          "learning_goals": [
+            "理解 numpy.polynomial 是什么、为何独立于旧版 numpy.poly1d",
+            "掌握系数数组表示约定：c[0] + c[1]*P_1(x) + ...，从低次到高次",
+            "认识六大便捷类 Polynomial/Chebyshev/Legendre/Laguerre/Hermite/HermiteE"
+          ],
+          "source_files": [
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "包定位与设计目标",
+            "系数表示约定",
+            "六大便捷类一览"
+          ],
+          "practice_task": "阅读 __init__.py 的模块文档字符串，写出 array([1,2,3]) 在标准基和 Chebyshev 基下分别代表的表达式，并用 np.polynomial.Polynomial([1,2,3]) 创建对象验证打印结果。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、模块组成与导入方式",
+          "order": 2,
+          "filename": "u1-l2-directory-and-imports.md",
+          "level": "beginner",
+          "topic": "介绍 numpy/polynomial/ 目录下的文件布局、各模块职责，以及便捷类的推荐导入路径与 PytestTester 测试入口。",
+          "learning_goals": [
+            "说出每个源文件（_polybase.py、polyutils.py、polynomial.py、chebyshev.py 等）的职责",
+            "区分便捷类 API 与函数式 API 的导入路径",
+            "知道如何运行包内置测试 np.polynomial.test()"
+          ],
+          "source_files": [
+            "__init__.py",
+            "_polybase.py",
+            "polynomial.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "目录与文件职责",
+            "两种 API 的导入路径",
+            "set_default_printstyle 与 test 入口"
+          ],
+          "practice_task": "分别用 np.polynomial.Polynomial 与 np.polynomial.polynomial.Polynomial 两条路径创建同一个多项式，对照 __init__.py 的 __all__ 导出，解释为何推荐前者。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Polynomial 便捷类快速上手",
+          "order": 3,
+          "filename": "u1-l3-polynomial-class-quickstart.md",
+          "level": "beginner",
+          "topic": "通过最常用的 Polynomial 类演示便捷类的典型用法：创建、求值、算术、拟合、微积分。",
+          "learning_goals": [
+            "会用 Polynomial 创建、求值（调用 p(x)）和做加减乘除",
+            "会用 Polynomial.fit 做最小二乘拟合",
+            "会用 deriv/integ/roots 完成微积分与求根"
+          ],
+          "source_files": [
+            "polynomial.py",
+            "_polybase.py"
+          ],
+          "minimal_modules": [
+            "创建与求值",
+            "算术与幂运算",
+            "fit 拟合",
+            "deriv/integ/roots"
+          ],
+          "practice_task": "用 Polynomial.fit 对 sin 在 [0,2π] 上的带噪声采样点做 5 阶拟合，画出原图与拟合曲线，并对结果调用 deriv 求一阶导数。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "函数式 API 与内置常数",
+          "order": 4,
+          "filename": "u1-l4-functional-api-and-constants.md",
+          "level": "beginner",
+          "topic": "介绍 polynomial.py 中函数式 API 的命名规律（polyadd/polymul/polyval/polyfit 等）以及 polyzero/polyone/polyx/polydomain 常量，理解它与便捷类的关系。",
+          "learning_goals": [
+            "掌握 poly* 函数族的命名前缀规律和典型用途",
+            "知道 polyzero/polyone/polyx/polydomain 四个常量的含义",
+            "理解函数式 API 与便捷类内部 _add/_val 等委托关系"
+          ],
+          "source_files": [
+            "polynomial.py"
+          ],
+          "minimal_modules": [
+            "poly* 命名规律与 __all__",
+            "内置常数",
+            "polytrim = pu.trimcoef 别名"
+          ],
+          "practice_task": "仅用 polynomial.py 的函数式 API（polyfromroots + polyval + polyder）实现：给定根 [1,2,3]，构造多项式、在 [-1,1] 上求值并求导，对比用 Polynomial 类的等价写法。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心抽象 ABCPolyBase",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "ABCPolyBase 抽象基类与虚函数模式",
+          "order": 1,
+          "filename": "u2-l1-abcpolybase-virtual-methods.md",
+          "level": "intermediate",
+          "topic": "解析 _polybase.py 的 ABCPolyBase 如何用 abc 抽象静态方法（_add/_mul/_val/_fit/_roots 等）定义统一接口，子类通过赋值'虚函数'实现多态。",
+          "learning_goals": [
+            "理解 ABCPolyBase 作为 mixin + abc.ABC 的设计",
+            "说出 12 个抽象静态方法的职责与命名约定",
+            "理解 Polynomial._add = staticmethod(polyadd) 的委托模式"
+          ],
+          "source_files": [
+            "_polybase.py",
+            "polynomial.py"
+          ],
+          "minimal_modules": [
+            "abc 抽象方法契约",
+            "12 个虚函数清单",
+            "子类赋值委托",
+            "__array_ufunc__/__hash__ 退出机制"
+          ],
+          "practice_task": "列出 ABCPolyBase 中全部 @abstractmethod 静态方法，并对照 Polynomial 类体写出每个虚函数对应的具体实现函数名；解释若子类忘记实现 _roots 会发生什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "域 domain、窗口 window 与线性映射",
+          "order": 2,
+          "filename": "u2-l2-domain-window-mapping.md",
+          "level": "intermediate",
+          "topic": "讲解 domain/window 双区间概念、pu.mapparms 计算的线性映射，以及 __call__、fit、roots 如何在两个区间之间换算坐标。",
+          "learning_goals": [
+            "理解 domain 到 window 的线性映射 off + scl*x 及其用途",
+            "掌握 mapparms、mapdomain 的计算与使用",
+            "解释为何求值/拟合要先做坐标映射，根要从 window 映射回 domain"
+          ],
+          "source_files": [
+            "_polybase.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "domain/window 概念",
+            "mapparms 线性映射",
+            "__call__ 与 roots 中的坐标换算",
+            "Laguerre domain=[0,1] 的特殊性"
+          ],
+          "practice_task": "构造一个 domain=[0,10] 的 Polynomial，用 mapparms() 读出 off/scl，手动验证 p(0) 与 p(10) 的取值；再确认 roots() 返回值是否落在 [0,10] 内。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "算术运算符重载与类型校验",
+          "order": 3,
+          "filename": "u2-l3-operator-overloading.md",
+          "level": "intermediate",
+          "topic": "解析 ABCPolyBase 如何重载 + - * // % ** 与 ()，以及 _get_coefficients/has_same* 如何保证运算对象的类型、域、窗口、symbol 兼容。",
+          "learning_goals": [
+            "理解 __add__/__mul__/__divmod__/__pow__ 如何委托 _add/_mul/_div/_pow",
+            "掌握 _get_coefficients 的兼容性判定与 TypeError 分支",
+            "理解 maxpower 限制与幂运算防失控"
+          ],
+          "source_files": [
+            "_polybase.py"
+          ],
+          "minimal_modules": [
+            "二元算术与反向算术",
+            "_get_coefficients 兼容校验",
+            "divmod/floordiv/mod",
+            "__pow__ 与 maxpower"
+          ],
+          "practice_task": "设计实验：让 Polynomial 和 Chebyshev 相加，观察抛出的 TypeError；再测试 p ** 101 触发 maxpower，阅读源码定位检查点。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "字符串、格式化与 LaTeX 表示",
+          "order": 4,
+          "filename": "u2-l4-string-formatting-latex.md",
+          "level": "intermediate",
+          "topic": "解析 __str__/__repr__/__format__/_repr_latex_ 打印管线，unicode 与 ascii 两种风格，以及 set_default_printstyle 全局开关。",
+          "learning_goals": [
+            "理解 _generate_string 的逐项拼接与换行逻辑",
+            "掌握 _str_term_unicode/_str_term_ascii 与上下标映射表",
+            "理解 _repr_latex_ 在 Jupyter 中的渲染"
+          ],
+          "source_files": [
+            "_polybase.py",
+            "polynomial.py",
+            "__init__.py"
+          ],
+          "minimal_modules": [
+            "__str__/__repr__/__format__",
+            "上下标映射与 ascii/unicode",
+            "_repr_latex_ 渲染",
+            "set_default_printstyle"
+          ],
+          "practice_task": "用 set_default_printstyle 分别切换 unicode/ascii 打印同一个 Chebyshev 多项式；再用 f\"{p:ascii}\" 格式化语法在不修改全局开关的情况下临时输出 ascii 字符串。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "幂级数实现细节",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "polyutils 工具函数基石",
+          "order": 1,
+          "filename": "u3-l1-polyutils-foundations.md",
+          "level": "intermediate",
+          "topic": "讲解 polyutils.py 中贯穿全包的通用工具：as_series、trimseq、trimcoef、getdomain、mapdomain、mapparms、format_float。",
+          "learning_goals": [
+            "理解 as_series 如何把任意输入规整为统一 dtype 的 1-D 数组列表",
+            "掌握 trimseq/trimcoef 去除尾部零的约定",
+            "理解 getdomain/mapdomain 在拟合与坐标映射中的作用"
+          ],
+          "source_files": [
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "as_series 规整与公共 dtype",
+            "trimseq/trimcoef",
+            "getdomain/mapdomain/mapparms",
+            "format_float"
+          ],
+          "practice_task": "用 pu.as_series 处理 [2, [1.1,0.0]] 等混合输入，观察 trim=True/False 的差别；用 pu.getdomain 对一组随机点求合适 domain，再用 mapdomain 把它映射到 [-1,1]。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "幂级数的创建与算术运算",
+          "order": 2,
+          "filename": "u3-l2-power-series-creation-arithmetic.md",
+          "level": "intermediate",
+          "topic": "讲解 polyline/polyfromroots 创建、polyadd/sub/mulx/mul/div/pow 算术，以及它们如何复用 polyutils 的 _add/_sub/_div/_pow/_fromroots 通用实现。",
+          "learning_goals": [
+            "理解 polyfromroots 用分治乘法（_fromroots）构造首一多项式",
+            "掌握 polydiv 的长除法实现（_div 逐次消元）",
+            "理解 polymulx 乘以 x 的边界处理"
+          ],
+          "source_files": [
+            "polynomial.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "polyline/polyfromroots",
+            "polyadd/sub 与 _add/_sub",
+            "polydiv 长除法 _div",
+            "polypow 与 _pow 分治"
+          ],
+          "practice_task": "用 polyfromroots 构造 (x-1)(x-2)(x-3)，再用 polydiv 验证除以 (x-1) 得到商与余数；手算对比 _div 的逐次消元过程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "多项式求值与 Horner 法",
+          "order": 3,
+          "filename": "u3-l3-evaluation-horner.md",
+          "level": "intermediate",
+          "topic": "解析 polyval 用 Horner 法高效求值的实现，以及 tensor 参数、polyvalfromroots，和 2D/3D/nd/grid 求值对 _valnd/_gridnd 的复用。",
+          "learning_goals": [
+            "理解 polyval 的 Horner 展开循环与多维系数广播",
+            "掌握 tensor=True/False 对输出形状的影响",
+            "理解 polyval2d/3d/nd 与 polygrid2d/3d 的差异及 _valnd/_gridnd 实现"
+          ],
+          "source_files": [
+            "polynomial.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "Horner 法 polyval",
+            "tensor 广播",
+            "polyvalfromroots",
+            "_valnd/_gridnd 多维"
+          ],
+          "practice_task": "对比 polyval(x, c) 与 np.dot(polyvander(x, n), c) 在同一组系数下的结果是否一致（应在舍入误差内相等）；再实验 tensor=True/False 对二维系数数组的形状影响。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "求导与积分",
+          "order": 4,
+          "filename": "u3-l4-derivative-integral.md",
+          "level": "intermediate",
+          "topic": "解析 polyder 的逐项求导与 polyint 的逐项积分（含积分常数 k、下界 lbnd、缩放 scl），以及 axis 参数对多维系数的支持。",
+          "learning_goals": [
+            "理解 polyder 的系数移位与阶乘乘法",
+            "掌握 polyint 中积分常数与 lbnd 的代入逻辑",
+            "理解 scl 在变量替换 u=ax+b 下的取值（1/a）"
+          ],
+          "source_files": [
+            "polynomial.py"
+          ],
+          "minimal_modules": [
+            "polyder 系数移位",
+            "polyint 积分常数 k",
+            "lbnd 下界与 polyval 回代",
+            "axis 与多维系数"
+          ],
+          "practice_task": "对 c=[1,2,3] 调用 polyint 再 polyder，验证回到原系数；实验 polyint(c, lbnd=-2) 与 polyint(c, k=6) 的关系，结合源码解释为何相等。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Vandermonde 矩阵与最小二乘拟合",
+          "order": 5,
+          "filename": "u3-l5-vandermonde-leastsquares-fit.md",
+          "level": "intermediate",
+          "topic": "解析 polyvander 构造范德蒙矩阵、polyvander2d/3d 通过 _vander_nd 拼接，以及 polyfit/_fit 如何用缩放后的 Vandermonde + np.linalg.lstsq 求解。",
+          "learning_goals": [
+            "理解范德蒙矩阵 V[...,i]=x^i 及 np.dot(V,c)==polyval 的等价关系",
+            "掌握 _fit 中按列归一化改善条件数、rcond 截断奇异值",
+            "理解 deg 可为整数或度数列表的含义"
+          ],
+          "source_files": [
+            "polynomial.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "polyvander 构造",
+            "_vander_nd/_vander_nd_flat 多维",
+            "polyfit 与 _fit 流程",
+            "列归一化与 lstsq"
+          ],
+          "practice_task": "自己用 polyvander + np.linalg.lstsq 复现一次 polyfit 的结果，对比系数；再对比未做列归一化时的拟合残差差异。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "伴随矩阵与多项式求根",
+          "order": 6,
+          "filename": "u3-l6-companion-matrix-roots.md",
+          "level": "intermediate",
+          "topic": "解析 polycompanion 构造友矩阵、polyroots 用 np.linalg.eigvals 求特征值作为根，以及幂级数求根的数值局限。",
+          "learning_goals": [
+            "理解友矩阵的构造方式与最后一列填入规则",
+            "掌握 polyroots 用特征值求根并排序、实部化简",
+            "理解远离原点或重根时误差增大的原因"
+          ],
+          "source_files": [
+            "polynomial.py"
+          ],
+          "minimal_modules": [
+            "polycompanion 友矩阵",
+            "polyroots 特征值求根",
+            "_to_real_if_imag_zero 实部化简",
+            "数值局限与 Newton 改进"
+          ],
+          "practice_task": "用 polyfromroots([-1,0,1]) 构造多项式再用 polyroots 求回根，观察误差；对 degree 较高的多项式实验根的精度下降现象。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "正交多项式族",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Chebyshev 级数与 z-series 机制",
+          "order": 1,
+          "filename": "u4-l1-chebyshev-zseries.md",
+          "level": "intermediate",
+          "topic": "解析 chebyshev.py 的 z-series（对称 Laurent 级数）技巧如何用卷积实现 chebmul/chebdiv/chebder/chebint，以及 chebval/chebvander 的前向递推。",
+          "learning_goals": [
+            "理解 T_n(x)=(z^n+z^-n)/2 恒等式与 z-series 表示",
+            "掌握 _cseries_to_zseries/_zseries_to_cseries 的对称构造",
+            "理解 chebvander 用 T_n=2xT_{n-1}-T_{n-2} 递推"
+          ],
+          "source_files": [
+            "chebyshev.py"
+          ],
+          "minimal_modules": [
+            "z-series 数学恒等式",
+            "c↔z 互转",
+            "_zseries_mul/div 卷积",
+            "chebval/chebvander 递推"
+          ],
+          "practice_task": "阅读模块文档字符串的 Notes，用 chebmul 与 polymul 分别表示同一个二次多项式并对比；尝试手算一个低阶 z-series 的乘法结果。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Chebyshev 专用工具：插值、采样点与高斯积分",
+          "order": 2,
+          "filename": "u4-l2-chebyshev-interpolation-gauss.md",
+          "level": "intermediate",
+          "topic": "讲解 chebyshev.py 独有的 chebinterpolate（在第一类 Chebyshev 点插值逼近 minmax）、chebpts1/chebpts2 采样点、chebgauss 高斯积分与 chebweight 权函数。",
+          "learning_goals": [
+            "理解 chebinterpolate 用正交采样点得到近似 minmax 逼近",
+            "掌握 chebpts1/chebpts2 两类采样点的公式",
+            "理解 chebgauss 闭式积分点权与 chebweight 权函数 1/sqrt(1-x^2)"
+          ],
+          "source_files": [
+            "chebyshev.py"
+          ],
+          "minimal_modules": [
+            "chebinterpolate 插值逼近",
+            "chebpts1/chebpts2",
+            "chebgauss 高斯积分",
+            "chebweight 权函数"
+          ],
+          "practice_task": "用 chebinterpolate 对 np.sin 在 [-1,1] 上做 10 阶插值，对比与等距采样多项式插值的振荡（Runge 现象）差异。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Legendre、Laguerre、Hermite、HermiteE 四族纵览",
+          "order": 3,
+          "filename": "u4-l3-orthogonal-families-overview.md",
+          "level": "intermediate",
+          "topic": "横向对比 legendre.py、laguerre.py、hermite.py、hermite_e.py 四个正交多项式模块的统一结构、各自 domain/权重/高斯积分，以及 Hermite 物理型与 HermiteE 概率型的区别。",
+          "learning_goals": [
+            "认识四族模块与 polynomial.py/chebyshev.py 同构的函数布局",
+            "理解 Laguerre domain=[0,1] 与其他族 [-1,1] 的不同",
+            "区分物理学家 Hermite(H, 权 e^-x^2) 与概率论 HermiteE(He, 权 e^-x^2/2)"
+          ],
+          "source_files": [
+            "legendre.py",
+            "laguerre.py",
+            "hermite.py",
+            "hermite_e.py"
+          ],
+          "minimal_modules": [
+            "四族统一函数布局",
+            "domain 与权重对比",
+            "Hermite vs HermiteE",
+            "leggauss/laggauss/hermgauss"
+          ],
+          "practice_task": "列表对比六大多项式类的 domain、window、basis_name 与权函数；用 hermgauss 与 leggauss 分别对同一个多项式在各自区间做数值积分并对比。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "不同基之间的相互转换",
+          "order": 4,
+          "filename": "u4-l4-basis-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 poly2cheb/cheb2poly 等基转换函数，以及 ABCPolyBase 的 convert/cast/identity 如何通过在目标类上'求值'实现基切换。",
+          "learning_goals": [
+            "理解 poly2cheb 用 Horner 式累加 chebmulx 完成基转换",
+            "掌握 convert(kind=...) 借助 identity 的'求值重表达'思想",
+            "理解 cast 与 convert 的区别"
+          ],
+          "source_files": [
+            "chebyshev.py",
+            "_polybase.py"
+          ],
+          "minimal_modules": [
+            "poly2cheb/cheb2poly 显式转换",
+            "convert/identity 求值重表达",
+            "cast 类方法",
+            "转换的数值病态"
+          ],
+          "practice_task": "用 p.convert(kind=Chebyshev) 和 chebyshev.poly2cheb 两条路径把同一个 Polynomial 转成 Chebyshev 系数，对比结果；再阅读 convert 源码理解 self(kind.identity(...)) 的求值过程。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "高级主题与工程实践",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "数值稳定性与架构取舍",
+          "order": 1,
+          "filename": "u5-l1-numerical-stability-tradeoffs.md",
+          "level": "advanced",
+          "topic": "在专家层讨论幂级数在远离原点处的不稳定、domain/window 如何改善拟合条件数、友矩阵求根的局限、maxpower 与 trim 的工程防护，以及 z-series 这类架构取舍。",
+          "learning_goals": [
+            "理解幂基在远离原点/高阶时的病态与正交基的优势",
+            "掌握 fit 中自动 getdomain + 映射到 window 改善条件数的动机",
+            "理解 maxpower、trimseq/trimcoef、rcond 等防护机制"
+          ],
+          "source_files": [
+            "_polybase.py",
+            "polynomial.py",
+            "polyutils.py",
+            "chebyshev.py"
+          ],
+          "minimal_modules": [
+            "幂基病态与正交基优势",
+            "fit 自动 domain 改善条件数",
+            "maxpower/trim 防护",
+            "友矩阵求根局限"
+          ],
+          "practice_task": "对在 [100,110] 上采样的数据分别用 Polynomial.fit（自动 domain）与手动固定 domain=[-1,1] 拟合，比较残差与系数量级，解释自动 domain 为何更稳。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l5",
+            "u3-l6"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "打印系统深入与 symbol 自定义",
+          "order": 2,
+          "filename": "u5-l2-printing-system-symbol.md",
+          "level": "advanced",
+          "topic": "深入 _generate_string 的逐项构造、按 mapparms 缩放自变量（off+scale·x 的括号处理）、linewidth 换行、format_float，以及 1.24 引入的 symbol 自定义标识符校验。",
+          "learning_goals": [
+            "理解打印时如何把 domain→window 的线性变换体现在自变量符号上",
+            "掌握 linewidth 触发的逐项换行算法",
+            "理解 symbol 必须是合法 Python 标识符的校验与版本背景"
+          ],
+          "source_files": [
+            "_polybase.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "mapparms 缩放与括号",
+            "linewidth 换行",
+            "format_float 系数格式",
+            "symbol 标识符校验"
+          ],
+          "practice_task": "构造 domain≠window 的多项式，观察打印串中自变量如何变成 (off+scale·x)；再用 symbol='t' 创建多项式并测试非法 symbol（如 '3'、''）抛出的异常类型。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "多维多项式与张量广播机制",
+          "order": 3,
+          "filename": "u5-l3-multidimensional-tensor.md",
+          "level": "advanced",
+          "topic": "集中讲解 val2d/3d/nd、grid2d/3d、vander2d/3d 的多维推广，以及 _vander_nd 的张量积构造、_valnd/_gridnd 在 tensor 参数下的广播差异。",
+          "learning_goals": [
+            "理解多维伪范德蒙矩阵的张量积列编排",
+            "掌握 val vs grid 在多维下输出形状的本质区别",
+            "理解 _valnd 中'仅首维用 tensor'的设计"
+          ],
+          "source_files": [
+            "polynomial.py",
+            "polyutils.py"
+          ],
+          "minimal_modules": [
+            "_vander_nd 张量积",
+            "val2d/3d/nd vs grid2d/3d",
+            "_valnd/_gridnd 广播策略",
+            "列编排与 c.flat 对应"
+          ],
+          "practice_task": "构造一个二维系数 c，分别用 polyval2d 与 polygrid2d 在两组点上求值，打印输出形状并解释为何不同；验证 np.dot(polyvander2d(...), c.flat) 与 polyval2d 相等。",
+          "depends_on": [
+            "u3-l3",
+            "u3-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "测试体系与基于 ABCPolyBase 的二次开发",
+          "order": 4,
+          "filename": "u5-l4-testing-and-extending.md",
+          "level": "advanced",
+          "topic": "介绍 tests/ 的组织（每族一个测试文件 + test_classes/test_printing/test_symbol 跨类测试），并讲解如何通过继承 ABCPolyBase、实现 12 个虚函数来自定义一种新的多项式基。",
+          "learning_goals": [
+            "理解测试文件分工与 test_classes/printing/symbol 的覆盖重点",
+            "掌握自定义多项式类需实现的抽象方法契约",
+            "理解 _str_term_* / basis_name 等可覆盖的展示钩子"
+          ],
+          "source_files": [
+            "_polybase.py",
+            "tests/test_classes.py",
+            "tests/test_printing.py",
+            "tests/test_symbol.py"
+          ],
+          "minimal_modules": [
+            "测试组织与覆盖",
+            "ABCPolyBase 契约清单",
+            "自定义基的二次开发步骤",
+            "展示钩子覆盖"
+          ],
+          "practice_task": "自定义一个继承 ABCPolyBase 的新类（如用 1, x, x^2-x 的简单基），实现必要的 _add/_mul/_val/_line/_fromroots 等虚函数，构造实例并验证 __str__ 与求值；列出哪些方法可暂不实现、哪些必须实现。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
