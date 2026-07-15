@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-15T15:49:59Z"
+      "last_run_at": "2026-07-15T18:01:52Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -16270,7 +16270,7 @@
     "jbush001/NyuziProcessor": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-15T15:49:59Z",
+      "last_run_at": "2026-07-15T18:01:52Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -16331,9 +16331,9 @@
         "u3-l1": {
           "status": "failed",
           "action": "new",
-          "retries": 1,
+          "retries": 2,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193622,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":400,\"duration_ms\":10271,\"duration_api_ms\":5428,\"num_turns\":3,\"result\":\"API Error: 400 [1301][系统检测到输入或生成内容可能包含不安全或"
         },
         "u3-l2": {
           "status": "done",
@@ -16392,76 +16392,102 @@
           "error": null
         },
         "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9091360000000002,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.118552,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.9307860000000001,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.046417,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.287288,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.187808,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2971020000000002,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.328173,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4232289999999999,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.247812,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.106918,
+          "error": null
+        },
+        "u9-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.093939,
+          "error": null
+        },
+        "u9-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5145379999999997,
+          "error": null
+        },
+        "u10-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":191952,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189770,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u10-l2": {
           "status": "pending",
@@ -16679,81 +16705,109 @@
           "error": null
         },
         "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.365279,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0859820000000002,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.123971,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1570220000000002,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.028943,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.053959,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.8545900000000004,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.964013,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.318224,
+          "error": null
+        },
+        "u7-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1756060000000002,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.018444,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.121039,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.463358,
+          "error": null
+        },
+        "u8-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3374400000000002,
+          "error": null
+        },
+        "u8-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":198534,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189623,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u9-l1": {
           "status": "pending",
@@ -16807,7 +16861,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/open-logic/open-logic/open-logic-tutorial",
       "last_head": "ecca8af95295e798b8a3bc6610cb52be9688ae01",
-      "last_run_at": "2026-07-15T15:49:59Z",
+      "last_run_at": "2026-07-15T18:01:52Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "open-logic/en_cl_fix": {
@@ -16926,13 +16980,186 @@
           "error": null
         },
         "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.382112,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.823699,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.975809,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.167953,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.066048,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.201076,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.06979,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.393852,
+          "error": null
+        }
+      },
+      "manifest_head": "e9123a9ca65d0966f0c1a567e2afbfa8443b38c6",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/open-logic/en_cl_fix/en_cl_fix-tutorial",
+      "last_head": "e9123a9ca65d0966f0c1a567e2afbfa8443b38c6",
+      "last_run_at": "2026-07-15T18:01:52Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "huggingface/open-r1": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.655268,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7927029999999999,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.5501440000000001,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9133789999999999,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.771413,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.665722,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6338599999999999,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9399759999999999,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.02328,
+          "error": null
+        },
+        "u3-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192896,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":177700,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
@@ -16961,23 +17188,17 @@
           "status": "pending",
           "action": "new",
           "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
         }
       },
-      "manifest_head": "e9123a9ca65d0966f0c1a567e2afbfa8443b38c6",
+      "manifest_head": "1416fa0cf21595d2083b399a2a0bbddd7f6e9563",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/open-logic/en_cl_fix/en_cl_fix-tutorial",
-      "last_head": "e9123a9ca65d0966f0c1a567e2afbfa8443b38c6",
-      "last_run_at": "2026-07-15T15:49:59Z",
+      "tutorial_path": "tutorials/huggingface/open-r1/open-r1-tutorial",
+      "last_head": "1416fa0cf21595d2083b399a2a0bbddd7f6e9563",
+      "last_run_at": "2026-07-15T18:01:52Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "huggingface/open-r1": {},
     "lnis-uofu/OpenFPGA": {},
     "verilog-to-routing/vtr-verilog-to-routing": {},
     "YosysHQ/yosys": {},
