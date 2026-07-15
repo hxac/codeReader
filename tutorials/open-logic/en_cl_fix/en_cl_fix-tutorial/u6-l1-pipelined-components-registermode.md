@@ -1,388 +1,453 @@
-# round / saturate / resize 组件与 RegisterMode
+# round/saturate/resize 组件与 RegisterMode
 
 ## 1. 本讲目标
 
 学完本讲后，你应该能够：
 
-- 说出 `hdl/` 下三个可实例化组件 `en_cl_fix_round` / `en_cl_fix_saturate` / `en_cl_fix_resize` 与 u5 讲过的纯组合函数 `cl_fix_round` / `cl_fix_saturate` / `cl_fix_resize` 之间的封装关系。
-- 看懂三个组件统一的 `clk / rst / in_valid / in_meta / in_data / out_valid / out_meta / out_data` 端口约定，以及它们各自的 `generics`。
-- 解释 `RegisterMode_t` 的 `Auto_s / Yes_s / No_s` 三态分别对应什么样的延迟与寄存器插入策略。
-- 理解 `cl_fix_recommended_pipelining` 三个重载如何「预测」一组配置到底需不需要寄存器，从而让 `Auto_s` 能自动选出 0 拍或 1 拍延迟。
-- 读懂 `use_reg_c` 这个编译期布尔常量如何通过 `generate` 在「时钟进程」与「连续赋值」两条分支之间二选一。
+- 说出 `en_cl_fix_round`、`en_cl_fix_saturate`、`en_cl_fix_resize` 三个可实例化组件的**统一接口约定**（`clk/rst/valid/meta/data`）。
+- 解释 `RegisterMode_t` 三种取值（`Auto_s / Yes_s / No_s`）各自代表的寄存器意愿与对应延迟。
+- 读懂 `cl_fix_recommended_pipelining` 的**三个重载**，理解库如何判断「这个运算到底需不需要一拍寄存器」。
+- 跟踪 `use_reg_c` 布尔常量如何驱动 `g_register / g_no_register` 两条 `generate` 分支，在综合期二选一。
+- 说明 `resize` 组件如何通过**级联一个 round 子组件和一个 saturate 子组件**实现「先 round 后 saturate」，并把延迟上限抬到 2。
 
 ## 2. 前置知识
 
-本讲承接 u5-l2 与 u5-l3。在 u5 里我们已经知道：
+本讲是 U6（可流水线化组件）的第一篇，承接你已经掌握的两条线索：
 
-- `cl_fix_round` / `cl_fix_saturate` / `cl_fix_resize` 是 `en_cl_fix_pkg` 里的**纯组合函数**，输入一个 `std_logic_vector` 和格式参数，立即输出结果，**不包含任何时钟、不占任何时钟周期**（0 拍延迟）。
-- `cl_fix_resize = 先 round 后 saturate`，顺序不可交换。
-- 这些函数是真正的「数学」，可以被任何调用方直接使用。
+1. **纯函数层的 round/saturate/resize**（u5-l2）：你知道 `cl_fix_round` 走「构造 mid_fmt → 加偏移 → 截断」，`cl_fix_saturate` 走「convert 回绕 → 按需 assert 告警 → 按需钳位」，而 `cl_fix_resize` 固定「先 round 后 saturate」且顺序不可交换。这些是**组合逻辑纯函数**，调用即返回，没有时钟。
+2. **数学函数的三段式模板**（u5-l3）：综合期用 `cl_fix_*_fmt` 算格式、运行期 `convert` 对齐、最后 `resize` 收敛。
 
-但在真实的 FPGA 数据通路里，把一长串组合逻辑（乘法、舍入、饱和……）首尾相连，会在两个寄存器之间形成一条很长的组合路径，导致时序无法收敛（时钟跑不高）。解决办法很简单：**在关键算子的输出端插一级寄存器**，把长路径切断。
+本讲要回答的新问题是：**这些纯函数组合逻辑，怎么变成 FPGA 上可实例化、可流水线、延迟可预期的实体？** 关键在于两点——一是把组合逻辑包一层带 `clk/rst/valid` 的时序外壳，二是让库自己判断「这一拍到底要不要插寄存器」。
 
-问题是：插寄存器意味着多 1 拍延迟。有些算子本身就是「零逻辑」（比如纯截断 `Trunc_s`，连一个加法器都不需要），给它强行插寄存器纯属浪费延迟。于是 en_cl_fix 给了一套机制，让综合器**按需**插寄存器——这就是本讲的主角：三个**可流水线化（pipelined）组件**和 `RegisterMode_t`。
-
-> 术语提示：本讲的「组件」指 `entity ... end entity` 这种可被 `entity work.xxx` 例化的 RTL 模块；「纯函数」指 `en_cl_fix_pkg` 里的 `function`。组件在内部调用纯函数完成数值计算，再决定要不要套一层寄存器。
+> 名词速查
+> - **流水线寄存器（pipeline register）**：在组合逻辑输出端打一拍触发器，把长组合路径切成两段，改善时序（timing），代价是多一拍延迟（latency）。
+> - **valid/meta 旁路**：数据通路上常带一个 `valid`（数据是否有效）和一段 `meta`（边带信息，如通道号、时间戳），它们必须与数据**同拍**穿过每一级寄存器，否则错位。
+> - **generate 二选一**：VHDL 的 `if ... generate` 在 elaboration 期求值，只有条件成立的分支会被综合，等价于编译期的 `if`。
 
 ## 3. 本讲源码地图
 
-| 文件 | 角色 | 本讲关注点 |
-| --- | --- | --- |
-| [hdl/en_cl_fix_round.vhd](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd) | 可流水线化的舍入组件 | 实体 generics、`use_reg_c`、`g_register`/`g_no_register` 双分支 |
-| [hdl/en_cl_fix_saturate.vhd](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_saturate.vhd) | 可流水线化的饱和组件 | 与 round 组件几乎逐字一致的结构 |
-| [hdl/en_cl_fix_resize.vhd](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd) | 可流水线化的 resize 组件（round + saturate） | 不自带寄存器分支，而是**级联例化**前两个组件 |
-| [hdl/en_cl_fix_pkg.vhd](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd) | VHDL 包 | `RegisterMode_t` 定义、`cl_fix_recommended_pipelining` 三个重载、被组件调用的纯函数 |
-| [tb/cl_fix_round_tb.vhd](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/tb/cl_fix_round_tb.vhd) | round 组件的测试台 | 真实例化方式、用 `RegisterMode_t'val` 轮换三种寄存器模式 |
+| 文件 | 作用 |
+| --- | --- |
+| `hdl/en_cl_fix_round.vhd` | 可实例化的**舍入组件**：纯函数 `cl_fix_round` + 可选流水线寄存器 + valid/meta 旁路。 |
+| `hdl/en_cl_fix_saturate.vhd` | 可实例化的**饱和组件**：结构与 round 组件几乎完全一致，仅替换内部纯函数与 generic。 |
+| `hdl/en_cl_fix_resize.vhd` | 可实例化的**resize 组件**：内部级联一个 round 子组件 + 一个 saturate 子组件，不重复实现逻辑。 |
+| `hdl/en_cl_fix_pkg.vhd` | 定义 `RegisterMode_t` 枚举、`cl_fix_recommended_pipelining` 的三个重载，以及组件所依赖的 `cl_fix_round / cl_fix_saturate / cl_fix_round_fmt` 纯函数。 |
+| `tb/cl_fix_round_tb.vhd` | 组件的仿真验证台，例化 `en_cl_fix_round` 并在不同测试用例间轮换 `reg_mode_g`。 |
+
+三个组件体都非常短（各 110 行左右），是本讲的主角；包里的 `cl_fix_recommended_pipelining` 是它们「智能插寄存器」的大脑。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 从纯函数到可流水线组件：实体、generics 与统一端口
+### 4.1 组件实体：统一的 generics 与端口接口
 
 #### 4.1.1 概念说明
 
-u5 讲的 `cl_fix_round` 是一个函数，没有时钟。本讲的 `en_cl_fix_round` 是一个 **entity**，有 `clk` 和 `rst`，内部第一行就调用同名函数算出结果，然后决定要不要把它锁进寄存器。可以这样理解二者关系：
+U5 讲的 `cl_fix_round` 等都是**纯函数**——给输入位串立刻返回输出位串，没有时钟、没有寄存器。但在真实 FPGA 设计里，你很少会直接调纯函数做一长串组合逻辑，因为：
 
-```
-纯函数 cl_fix_round(...)        →  立即出结果，0 拍，组合逻辑
-组件  en_cl_fix_round(...)      →  内部调用上面的函数，可选地套 1 拍寄存器
-```
+- 一条贯穿「乘法 → 舍入 → 饱和」的纯组合路径可能太长，**时序跑不到目标频率**。
+- 你需要标准的 **valid 流接口**来对接前后级流水线。
+- 你希望**延迟是确定的、可推导的**，而不是「看综合工具心情」。
 
-三个组件 `en_cl_fix_round` / `en_cl_fix_saturate` / `en_cl_fix_resize` 的设计哲学完全一致：**把 u5 的纯函数包一层，外加一个统一的「可选寄存器」外壳**。其中 `en_cl_fix_resize` 还更进一步——它内部不是再写一遍 round+saturate，而是直接**例化**前两个组件，天然复用了它们的寄存器机制。
+于是库提供了三个**可实例化实体**（`en_cl_fix_round / saturate / resize`），把组合逻辑包进带 `clk/rst` 的外壳，并按需插入寄存器。三个组件刻意采用了**完全一致的接口形状**，这样你可以在数据通路里把它们像积木一样替换、级联。
 
 #### 4.1.2 核心流程
 
-三个组件对外的接口约定是统一的，可以画成一条「带 valid/meta 旁路的数据流水段」：
+一个组件实例的生命周期：
+
+1. **综合期**：根据 generics（输入/输出格式、舍入/饱和模式、寄存器模式）求出 `use_reg_c`（要不要插寄存器）。
+2. **elaboration**：`g_register` 与 `g_no_register` 两条 `generate` 二选一，只保留一条。
+3. **运行期**：
+   - 组合分支：`out_*` 直接等于计算结果，延迟 0 拍。
+   - 寄存器分支：每个 `rising_edge(clk)` 把 `result / in_valid / in_meta` 打一拍输出，延迟 1 拍。
+
+数据流（寄存器分支）：
 
 ```
-          ┌─────────────────────────────────────┐
-clk,rst → │                                     │
-in_valid→ │  ┌──────────┐    ┌───────────────┐  │ → out_valid
-in_meta → │  │ 纯函数计算 │ → │ (可选) 寄存器  │  │ → out_meta
-in_data → │  │ result   │    │  clk 锁存      │  │ → out_data
-          │  └──────────┘    └───────────────┘  │
-          └─────────────────────────────────────┘
+in_data ──► cl_fix_round(组合) ──► result ──►[reg]──► out_data
+in_valid ───────────────────────────────────►[reg]──► out_valid   (and not rst)
+in_meta  ───────────────────────────────────►[reg]──► out_meta
 ```
-
-- `in_valid` / `out_valid`：数据有效标志，与数据同步流过（寄存器模式下延迟 1 拍）。
-- `in_meta` / `out_meta`：边带元数据（sideband metadata），例如「这一拍属于哪个通道」「这是帧的第几个采样」等。它**不参与数值计算**，只跟随数据一起被寄存器锁存，保证数据与 meta 在时间上对齐。
-- `in_data` / `out_data`：定点数据本身，位宽由 `in_fmt_g` / `out_fmt_g` 经 `cl_fix_width` 计算得到。
 
 #### 4.1.3 源码精读
 
-先看 round 组件的实体 generics，它有 5 个参数：[hdl/en_cl_fix_round.vhd:L50-L58](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L50-L58) 定义了 `in_fmt_g / out_fmt_g / round_g / reg_mode_g / meta_width_g / fmt_check_g`。其中：
+先看 round 组件的实体 generics 与端口，这是三个组件共用的接口范型：
 
-- `in_fmt_g` / `out_fmt_g`：输入输出格式，直接传给内部纯函数。
-- `round_g`：舍入模式（u2-l2 的七种之一）。
-- `reg_mode_g`：寄存器策略（本讲主角，4.2 详解）。
-- `meta_width_g`：边带位宽，缺省 `0`（即不用 meta）。
-- `fmt_check_g`：是否在仿真期检查 `out_fmt_g` 是否等于 `cl_fix_round_fmt(...)` 的合法预测值，缺省 `true`。
+[hdl/en_cl_fix_round.vhd:50-78](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L50-L78) — 定义 `en_cl_fix_round` 实体。generics 里 `in_fmt_g / out_fmt_g` 是输入输出定点格式，`round_g` 是舍入模式，`reg_mode_g` 是寄存器策略，`meta_width_g` 默认 0（不使用边带），`fmt_check_g` 默认 true（开启格式契约检查）。
 
-端口定义在 [hdl/en_cl_fix_round.vhd:L59-L77](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L59-L77)，注意两个细节：
+注意端口里位宽是用纯函数**在综合期算出来**的：
 
-1. `in_data` 的位宽是 `cl_fix_width(in_fmt_g)-1 downto 0`，`out_data` 是 `cl_fix_width(out_fmt_g)-1 downto 0`——位宽在**综合期**就由格式参数钉死。
-2. `in_meta` 用了 `:= (others => 'X')` 作为默认值。当 `meta_width_g = 0` 时，这个 `std_logic_vector(-1 downto 0)` 是空范围，`(others => 'X')` 让它合法存在而不报错。
+```vhdl
+in_data  : in  std_logic_vector(cl_fix_width(in_fmt_g)-1  downto 0);
+out_data : out std_logic_vector(cl_fix_width(out_fmt_g)-1 downto 0);
+```
 
-saturate 组件的实体几乎一模一样：[hdl/en_cl_fix_saturate.vhd:L50-L77](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_saturate.vhd#L50-L77)。唯一差别是它用 `saturate_g : FixSaturate_t` 取代了 `round_g`，并且**没有** `fmt_check_g`（饱和不改变小数位，无需该项检查）。
+也就是说，实体声明本身就把格式 → 位宽的推导做完了，使用者只需给格式，不必手算位宽。`in_meta` 的范围是 `meta_width_g-1 downto 0`，当 `meta_width_g = 0` 时这是 **null range**（空向量），自然「不用 meta」。
 
-resize 组件最特殊：[hdl/en_cl_fix_resize.vhd:L50-L58](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L50-L58) 同时带 `round_g` 和 `saturate_g`（因为 resize = 先 round 后 saturate），端口约定与前两者相同。
+saturate 组件的实体几乎一字不差，只把 `round_g` 换成 `saturate_g`、去掉 `fmt_check_g`：
 
-#### 4.1.4 代码实践（源码阅读型）
+[hdl/en_cl_fix_saturate.vhd:50-57](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_saturate.vhd#L50-L57) — saturate 组件的 generics，形状与 round 组件一致。
 
-**目标**：用一张表把三个组件的 generics 对齐，确认它们的「同构性」。
+resize 组件的实体则同时需要 `round_g` 和 `saturate_g`（因为它内部要做两件事）：
 
-**步骤**：
+[hdl/en_cl_fix_resize.vhd:50-58](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L50-L58) — resize 组件的 generics，多了 `saturate_g`。
 
-1. 打开三个 `.vhd` 的 entity 段。
-2. 按下表逐格填写每个组件是否有该 generic：
+三个实体的**端口部分完全相同**（都是 `clk/rst/in_valid/in_meta/in_data/out_valid/out_meta/out_data`），这是「积木化」的关键。
 
-   | generic | en_cl_fix_round | en_cl_fix_saturate | en_cl_fix_resize |
-   | --- | --- | --- | --- |
-   | `in_fmt_g` | ? | ? | ? |
-   | `out_fmt_g` | ? | ? | ? |
-   | `round_g` | ? | ? | ? |
-   | `saturate_g` | ? | ? | ? |
-   | `reg_mode_g` | ? | ? | ? |
-   | `meta_width_g` | ? | ? | ? |
-   | `fmt_check_g` | ? | ? | ? |
+#### 4.1.4 代码实践
 
-**预期结果**：前 5 项三者全有；`round_g` 仅 round/resize 有；`saturate_g` 仅 saturate/resize 有；`fmt_check_g` **只有 round 有**。这张表正好解释了为什么 resize 是「round + saturate 的并集」。
+**实践目标**：确认三个组件的端口签名是否真的逐字一致。
+
+**操作步骤**：
+
+1. 打开 `hdl/en_cl_fix_round.vhd`、`hdl/en_cl_fix_saturate.vhd`、`hdl/en_cl_fix_resize.vhd` 三个文件的 `port(...)` 段。
+2. 逐行对照 `clk / rst / in_valid / in_meta / in_data / out_valid / out_meta / out_data` 八个端口的方向、类型、位宽表达式。
+3. 单独记录 generics 的差异：哪个组件有 `fmt_check_g`？哪个同时有 `round_g` 和 `saturate_g`？
+
+**需要观察的现象**：端口段三者一致；差异只出现在 generics——round 有 `round_g + fmt_check_g`，saturate 有 `saturate_g`，resize 有 `round_g + saturate_g`。
+
+**预期结果**：你会得到一张「同接口、不同 generic」的对照表，这正是后面 `resize` 能直接复用 `round`/`saturate` 子组件的前提。
 
 #### 4.1.5 小练习与答案
 
-**练习**：`in_meta` 端口的默认值为什么写成 `:= (others => 'X')` 而不是 `:= (others => '0')`？当 `meta_width_g = 0` 时它到底是什么？
+**练习 1**：如果把 `meta_width_g` 设为 0，`in_meta` 这根线会发生什么？
+**答案**：其范围 `(meta_width_g-1 downto 0)` 即 `(-1 downto 0)`，是 VHDL 的 null range（空数组），等价于这根线不存在；`out_meta` 同理，因此「不用 meta」时无需特殊处理。
 
-**参考答案**：`'X'`（未知态）表示「调用方若不接这根线，就是没定义」，仿真里更易暴露「忘了接 meta」的错误；用 `'0'` 会掩盖问题。当 `meta_width_g = 0` 时，范围是 `-1 downto 0`，是一个**空数组**（null range），无论填什么都合法、且不占任何比特。
+**练习 2**：为什么 `in_data` 的位宽写成 `cl_fix_width(in_fmt_g)-1 downto 0` 而不是写死一个数字？
+**答案**：因为位宽由格式 `[S,I,F]` 决定（`S+I+F`），用纯函数在综合期计算，使用者只需给格式即可，避免手算出错，也保证 `in_data` 与 `in_fmt_g` 永远一致。
 
 ---
 
-### 4.2 RegisterMode_t：三态寄存器策略与延迟语义
+### 4.2 RegisterMode_t：用户如何表达寄存器意愿
 
 #### 4.2.1 概念说明
 
-`reg_mode_g` 的类型是 `RegisterMode_t`，这是 u5-l1 提到过的三个枚举之一。它**只控制流水线组件是否插寄存器**，不参与任何数值计算。三个值的语义是：
+组件知道「要不要插寄存器」由 generic `reg_mode_g` 决定，它的类型是 `RegisterMode_t`——一个三值枚举。这个类型**只控制流水线组件是否插寄存器，不参与任何数值计算**（和 `FixRound_t`、`FixSaturate_t` 是完全不同的维度）。
 
-- `Auto_s`：**按需**插寄存器。需要时插 1 级，不需要时插 0 级。延迟随其他 generics 变化。
-- `Yes_s`：**强制**插寄存器。无论是否需要，都插。延迟恒定，便于跨配置保持一致的流水线深度。
-- `No_s`：**从不**插寄存器。纯组合，0 拍。注释明确警告「通常会让时序变差，慎用」。
+三种模式代表三种不同的设计取舍：
 
-这三个值回答的是一个工程权衡问题：你更在意「最小延迟」还是「恒定延迟」还是「最快编译」。
+| 模式 | 含义 | 延迟 | 典型用途 |
+| --- | --- | --- | --- |
+| `Auto_s` | 只在「需要」时插寄存器（按推荐值） | 0 或 1（resize 最多 2） | 接受延迟随 generic 变化、追求最小面积 |
+| `Yes_s` | 永远插寄存器 | 1（resize 为 2） | 需要延迟恒定、不随其它 generic 改变 |
+| `No_s` | 永远不插寄存器 | 0 | 极少用，会恶化时序 |
 
 #### 4.2.2 核心流程
 
-把延迟（latency，单位为时钟周期）列成表：
+三者关系可以画成一张决策图：
 
-| `reg_mode_g` | round 组件延迟 | saturate 组件延迟 | resize 组件延迟 |
-| --- | --- | --- | --- |
-| `No_s` | 0 | 0 | 0 |
-| `Auto_s` | `cl_fix_recommended_pipelining(...)` ∈ {0, 1} | ∈ {0, 1} | ∈ {0, 1, 2} |
-| `Yes_s` | 1 | 1 | 2 |
-
-注意 resize 的 `Yes_s` 是 **2**，而不是 1。因为 resize 内部级联了 round 与 saturate 两个子组件（4.4 详解），每个最多贡献 1 拍，`Yes_s` 下两者都插寄存器，共 2 拍。这正是 resize 组件头注释里写的 `Latency = 2`：[hdl/en_cl_fix_resize.vhd:L31-L35](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L31-L35)。
-
-定义见 [hdl/en_cl_fix_pkg.vhd:L68-L73](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L68-L73)：
-
-```vhdl
-type RegisterMode_t is
-(
-    Auto_s,         -- Inserts the recommended registering. See cl_fix_recommended_pipelining.
-    Yes_s,          -- Inserts all registering. Can be useful for consistent latency.
-    No_s            -- Inserts no registering. Use with caution (poor timing performance).
-);
 ```
+                reg_mode_g
+              ┌─────┼─────┐
+           Auto_s  Yes_s  No_s
+              │     │     │
+        看 recommended_c  │
+         (>0 则插)        │
+              │     │     │
+        0 或 1 拍       1 拍   0 拍（组合）
+```
+
+关键直觉：`Auto_s` 是「聪明模式」——它问库「这个具体配置下，组合逻辑到底有没有实质运算？」；`Yes_s` 是「保险模式」——不管有没有运算，都打一拍，换来**延迟恒定**；`No_s` 几乎是个陷阱——看似省了一拍，实则把长组合路径暴露给时序分析。
 
 #### 4.2.3 源码精读
 
-三个组件的文件头注释用一致的三段式说明了这三种模式的延迟，例如 round 组件：[hdl/en_cl_fix_round.vhd:L27-L35](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L27-L35)。注释里有一句关键提示：
+类型定义在包里，注释把三种模式的意图说得非常清楚：
 
-> If unsure, set to `Yes_s`.
+[hdl/en_cl_fix_pkg.vhd:68-73](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L68-L73) — `RegisterMode_t` 枚举：`Auto_s`（插入推荐寄存器）、`Yes_s`（全插，利于延迟一致）、`No_s`（不插，慎用）。
 
-也就是「不知道选哪个就用 `Yes_s`」。原因是 `Yes_s` 延迟恒定、一定有寄存器切断路径，是最安全的默认；`Auto_s` 虽然延迟更优，但延迟会随格式变化，需要调用方自己清楚这一点。
+三个组件文件头部的描述块也复述了同样的延迟约定，例如 round 组件：
 
-`RegisterMode_t` 只在这三个流水线组件里被消费，纯函数（`cl_fix_round` 等）完全不认识它——这印证了 u5-l1 的结论：`RegisterMode_t` 是「组件层」的概念，与「数学层」无关。
+[hdl/en_cl_fix_round.vhd:27-35](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L27-L35) — 描述 `Auto_s / Yes_s / No_s` 三种模式下 round 组件的延迟（分别为 recommended、1、0）。
 
-#### 4.2.4 代码实践（源码阅读型）
+注意 resize 组件的描述里 `Yes_s` 对应 **Latency = 2**（不是 1），因为它内部级联了两个子组件：
 
-**目标**：从源码注释中提取三种模式的确切延迟承诺。
+[hdl/en_cl_fix_resize.vhd:27-35](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L27-L35) — resize 组件 `Yes_s` 延迟为 2，因为 `cl_fix_recommended_pipelining(in_fmt_g, out_fmt_g, round_g, saturate_g)` 上限是 2。
 
-**步骤**：
+#### 4.2.4 代码实践
 
-1. 分别打开三个组件文件，阅读 `-- Description:` 注释块中关于 `reg_mode_g` 的三段说明。
-2. 记下每个组件在 `Auto_s` 下引用的 `cl_fix_recommended_pipelining(...)` 签名（参数列表不同）。
-3. 对照 4.2.2 的延迟表，确认 `Yes_s` 下 round=1、saturate=1、resize=2。
+**实践目标**：在测试台里观察 `reg_mode_g` 是如何被穷举覆盖的。
 
-**预期结果**：三个文件的注释措辞几乎一致，唯独 resize 把 `Latency = 1` 换成了 `Latency = 2`，且 `Auto_s` 行引用的 `cl_fix_recommended_pipelining` 多带了 `round_g, saturate_g` 两个参数。
+**操作步骤**：
+
+1. 打开 `tb/cl_fix_round_tb.vhd`，定位 UUT 例化处。
+
+[tb/cl_fix_round_tb.vhd:152-159](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/tb/cl_fix_round_tb.vhd#L152-L159) — 测试台例化 `en_cl_fix_round`，其中 `reg_mode_g => RegisterMode_t'val(i mod reg_mode_count_c)`。
+
+2. 注意 `reg_mode_count_c` 的定义在 [tb/cl_fix_round_tb.vhd:66](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/tb/cl_fix_round_tb.vhd#L66)（用 `RegisterMode_t'pos(high)` 算出枚举元素个数）。
+3. 理解 `'val(i mod N)` 让不同测试用例轮流取 `Auto_s / Yes_s / No_s`。
+
+**需要观察的现象**：测试台并不为三种寄存器模式写三份代码，而是用 `mod` 运算在 `generate` 循环里自动轮换。
+
+**预期结果**：你应能解释「为什么一套 testbench 就能覆盖三种 `reg_mode_g`」——因为枚举的 `'val/'pos` 属性让模式可以像整数一样轮转。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么组件注释建议「不确定时用 `Yes_s`」而不是 `Auto_s`？
+**练习 1**：为什么注释说 `No_s`「通常是个坏选择」？
+**答案**：因为不插寄存器意味着把组件内部的组合逻辑直接暴露给上一级/下一级，组合路径变长，时序性能（最高时钟频率）通常变差；只有在你能保证整体路径仍然满足时序、且确实需要 0 延迟时才用。
 
-**参考答案**：`Yes_s` 保证延迟恒定且必有寄存器，时序和功能行为最可预测；`Auto_s` 延迟会随 `in_fmt_g/out_fmt_g/round_g` 变化，若调用方没意识到这一点，可能在级联多个组件时出现数据与 meta 错拍。
-
-**练习 2**：`No_s` 在什么场景下才合理？
-
-**参考答案**：当该组件前后已经紧邻其他寄存器（例如前面是一个 DSP 块的输出寄存器，后面立刻进另一级寄存器），中间这级组合逻辑很短、不会再恶化时序，此时 `No_s` 可省一拍延迟。属于「确知路径很短」的精细优化，故名注释警告慎用。
+**练习 2**：`RegisterMode_t` 会影响 `out_data` 的**数值**吗？
+**答案**：不会。它只影响是否在输出端打一拍寄存器（时序/延迟），数值结果由 `round_g / saturate_g / in_fmt_g / out_fmt_g` 决定，与 `reg_mode_g` 无关。
 
 ---
 
-### 4.3 cl_fix_recommended_pipelining：三个重载如何预测「需不需要寄存器」
+### 4.3 cl_fix_recommended_pipelining：库如何判断「需不需要一拍」
 
 #### 4.3.1 概念说明
 
-`Auto_s` 之所以能「按需」插寄存器，靠的是一个纯函数 `cl_fix_recommended_pipelining`。它回答一个问题：**给定一组格式与模式参数，这一级算子到底要不要寄存器？** 返回值是「推荐的流水线级数」，对 round/saturate 是 0 或 1，对 resize 是 0/1/2。
+`Auto_s` 模式的「聪明」来自一个纯函数：`cl_fix_recommended_pipelining`。它回答一个问题——**在给定的格式与模式下，组合逻辑里到底有没有「实质运算」？** 如果没有（比如纯截断、或根本没丢小数位），就返回 0，组件就不插寄存器；如果有（需要加偏移、需要比较钳位），就返回 1。
 
-它的判定原则非常朴素——**「零逻辑」就不需要寄存器**。所谓零逻辑，是指这级算子实际上不产生任何有意义的组合电路（或电路简单到可以忽略）。比如纯截断 `Trunc_s` 连一个加法器都没有，只是丢低位，给它套寄存器纯属浪费。
-
-为了适配 round / saturate / resize 三种算子，这个函数名有三个**重载**（VHDL 允许同名函数按参数列表区分），声明见 [hdl/en_cl_fix_pkg.vhd:L164-L185](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L164-L185)。
+这个函数有**三个重载**，分别对应 round、saturate、resize 三类操作。它们的返回类型都是 `natural`，且取值只有 0 或 1（resize 重载是两个 0/1 相加，所以是 0/1/2）。
 
 #### 4.3.2 核心流程
 
-三个重载各自的「零逻辑」判定条件：
+三个重载的判定逻辑可以归纳为「**两种零逻辑情形**」：
 
-**round 重载**（参数 `a_fmt, result_fmt, round`）返回 0 的两种情况：
+**round 重载**——以下两种情况返回 0（不需要寄存器）：
+1. 模式是 `Trunc_s`（纯截断，不加偏移，没有任何额外逻辑）。
+2. `result_fmt.F >= a_fmt.F`（没有减少小数位，即没有舍入发生，只是低位补零）。
+其余情况返回 1。
 
-1. `round = Trunc_s`——截断不产生加法器；
-2. `result_fmt.F >= a_fmt.F`——没有丢小数位，舍入无从发生。
+**saturate 重载**——以下两种情况返回 0：
+1. 模式是 `None_s` 或 `Warn_s`（只回绕/只告警，不做钳位比较）。
+2. `result_fmt.I >= a_fmt.I` 且 `result_fmt.S = a_fmt.S`（没有减少整数位也没有改变符号位，不可能越界，钳位逻辑退化）。
+其余情况返回 1。
 
-否则返回 1。用一个表达式概括：
-
-\[
-\text{pipelining}_{\text{round}} =
-\begin{cases}
-0 & \text{若 } \text{round} = \text{Trunc\_s} \text{ 或 } \text{result\_fmt}.F \geq \text{a\_fmt}.F \\
-1 & \text{其他}
-\end{cases}
-\]
-
-**saturate 重载**（参数 `a_fmt, result_fmt, saturate`）返回 0 的两种情况：
-
-1. `saturate ∈ {None_s, Warn_s}`——只回绕不钳位，钳位比较器不存在；
-2. `result_fmt.I >= a_fmt.I 且 result_fmt.S = a_fmt.S`——整数位没被压缩、符号位没变，根本不会越界，钳位逻辑虽然存在但永不被触发。
-
-否则返回 1。注意该重载一开始就 `assert result_fmt.F = a_fmt.F`，因为饱和不允许改变小数位（u2-l3 / u5-l2 已述）。
-
-**resize 重载**（参数 `a_fmt, result_fmt, round, saturate`）：不自己判断，而是**先算出舍入后的中间格式 `round_fmt_c`，再把前两个重载的返回值相加**：
+**resize 重载**——把 resize 拆成「round 步 + saturate 步」，分别调用上面两个重载再相加：
 
 \[
-\text{pipelining}_{\text{resize}} =
-\text{pipelining}_{\text{round}}(\text{a\_fmt} \to \text{round\_fmt}) +
-\text{pipelining}_{\text{sat}}(\text{round\_fmt} \to \text{result\_fmt})
+\text{recommended}_{\text{resize}} = \text{recommended}_{\text{round}}(a \to r_{\text{fmt}}) + \text{recommended}_{\text{sat}}(r_{\text{fmt}} \to \text{result})
 \]
 
-这正是 resize 内部「先 round 后 saturate」结构在寄存器层面的镜像。
+其中 \( r_{\text{fmt}} = \text{cl\_fix\_round\_fmt}(a, \text{result}.F, \text{round}) \) 是舍入后的中间格式（可能比 result 多 1 个整数位，见 u3-l3）。
 
 #### 4.3.3 源码精读
 
-round 重载实现：[hdl/en_cl_fix_pkg.vhd:L1041-L1069](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1041-L1069)。注意它先做 `fmt_check` 断言，要求 `result_fmt` 必须等于 `cl_fix_round_fmt(a_fmt, result_fmt.F, round)`（u3-l3 讲过的格式契约）；随后两个 `if` 分别对应上面两种「零逻辑」情形。
+三个重载的声明（按 round/saturate/resize 顺序）在包头：
 
-saturate 重载实现：[hdl/en_cl_fix_pkg.vhd:L1071-L1097](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1071-L1097)。开头强制 `result_fmt.F = a_fmt.F`，随后判定回绕模式与「整数位/符号位未变」。
+[hdl/en_cl_fix_pkg.vhd:164-185](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L164-L185) — 三个 `cl_fix_recommended_pipelining` 重载声明，分别针对 round、saturate、resize。
 
-resize 重载实现：[hdl/en_cl_fix_pkg.vhd:L1099-L1109](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1099-L1109)，核心两行：
+round 重载的实现，逻辑非常直白：
 
 ```vhdl
-constant round_fmt_c : FixFormat_t := cl_fix_round_fmt(a_fmt, result_fmt.F, round);
-return cl_fix_recommended_pipelining(a_fmt, round_fmt_c, round)
-     + cl_fix_recommended_pipelining(round_fmt_c, result_fmt, saturate);
+if round = Trunc_s then
+    return 0;                       -- (1) 截断无需逻辑
+else
+    assert ... 非截断模式 ...;
+end if;
+if result_fmt.F >= a_fmt.F then
+    return 0;                       -- (2) 没减少小数位
+end if;
+return 1;
 ```
 
-这正是 4.3.2 公式的直译。
+[hdl/en_cl_fix_pkg.vhd:1041-1069](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1041-L1069) — round 重载实现。注意开头的 `assert result_fmt = cl_fix_round_fmt(...)` 是「格式契约」：它强制 `result_fmt` 必须是合法的舍入结果格式（否则让你改用 `cl_fix_round_fmt()`）。`fmt_check` 参数允许谨慎地关掉这个检查。
 
-> 一个微妙点：round 组件在计算 `recommended_c` 时**把 `fmt_check_g` 一并传入**（见 [hdl/en_cl_fix_round.vhd:L85](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L85)），saturate/resize 组件则没有对应的 `fmt_check`。所以 round 重载是唯一带 `fmt_check : boolean := true` 参数的重载。
+saturate 重载实现结构对称：
 
-#### 4.3.4 代码实践（手算型）
+[hdl/en_cl_fix_pkg.vhd:1071-1097](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1071-L1097) — saturate 重载实现。开头 `assert result_fmt.F = a_fmt.F`（饱和期小数位不许变，呼应 u5-l2 的「饱和要求 F 不变」），然后按「回绕模式 → 0」「整数位/符号位没减少 → 0」「否则 → 1」判定。
 
-**目标**：手算几组配置的推荐流水线级数，再与函数语义对照。
+resize 重载实现只有三行，却把 u5-l2「resize = round 后 saturate」的核心体现了出来：
 
-**步骤**：对下列每组 `(a_fmt, result_fmt, 模式)`，先用 4.3.2 的规则手算 `cl_fix_recommended_pipelining` 的返回值，然后说明理由。
+[hdl/en_cl_fix_pkg.vhd:1099-1109](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1099-L1109) — resize 重载实现：算出中间舍入格式 `round_fmt_c`，再返回「round 段推荐值 + saturate 段推荐值」。这正是 resize 组件延迟上限为 2 的来源。
 
-1. round：`a_fmt = [0,4,4]`，`result_fmt = [0,4,4]`，`round = NonSymPos_s`
-2. round：`a_fmt = [0,4,4]`，`result_fmt = [0,4,2]`，`round = Trunc_s`
-3. round：`a_fmt = [0,4,4]`，`result_fmt = [0,4,2]`，`round = NonSymPos_s`
-4. saturate：`a_fmt = [1,8,0]`，`result_fmt = [1,4,0]`，`saturate = Sat_s`
-5. saturate：`a_fmt = [1,8,0]`，`result_fmt = [1,8,0]`，`saturate = Sat_s`
+#### 4.3.4 代码实践
 
-**预期结果**：
+**实践目标**：手工推演几组配置下 `cl_fix_recommended_pipelining` 的返回值。
 
-1. `0`（`result_fmt.F(4) >= a_fmt.F(4)`，没丢小数位）
-2. `0`（`Trunc_s`）
-3. `1`（非 Trunc 且丢了 2 位小数）
-4. `1`（Sat 模式且整数位从 8 压到 4）
-5. `0`（整数位未压缩、符号位未变，即使 Sat 也永不触发）
+**操作步骤**：对 round 重载，填写下表（`a_fmt → result_fmt`，模式 `round`）：
 
-> 待本地验证：若已装好 VUnit/GHDL，可写一个最小 testbench 打印这些函数返回值确认。
+| 配置 | 是否 Trunc? | result.F ≥ a.F? | 推荐值 |
+| --- | --- | --- | --- |
+| `[0,4,4] → [0,4,1]`, NonSymPos_s | 否 | 否（1<4） | ? |
+| `[0,4,4] → [0,4,8]`, NonSymPos_s | 否 | 是（8≥4） | ? |
+| `[0,4,4] → [0,4,1]`, Trunc_s | 是 | — | ? |
+
+**需要观察的现象**：对照 [hdl/en_cl_fix_pkg.vhd:1056-1068](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1056-L1068) 的两个判定，逐行验证你的推断。
+
+**预期结果**：三行的推荐值分别为 **1、0、0**。第一行「真舍入」需要一拍；第二行「只补零不丢位」不需要；第三行「纯截断」不需要。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 saturate 重载里即使 `saturate = Sat_s`，只要「整数位和符号位都没变」就返回 0？
+**练习 1**：saturate 重载里，为什么「`result_fmt.I >= a_fmt.I` 且 `result_fmt.S = a_fmt.S`」时返回 0？
+**答案**：因为饱和只在「整数位或符号位被减少」时才可能越界。如果两者都没变（或整数位还变多了），输入值天然落在输出范围内，钳位比较逻辑不会触发，等价于没有实质运算，故不需要寄存器。
 
-**参考答案**：因为不压缩整数位、不改符号位时，输入值永远落在输出格式范围内，钳位比较器虽然综合出来但**恒为假**，会被综合工具优化掉，等价于零逻辑，故无需寄存器。
-
-**练习 2**：resize 重载返回值的上限为什么是 2 而不是更高？
-
-**参考答案**：它等于 round 部分与 saturate 部分之和，而这两部分各自上限为 1，所以 resize 上限为 2。这正好对应 `Yes_s` 下 resize 的 2 拍延迟。
+**练习 2**：resize 重载的返回值可能是 2，这要求 round 段和 saturate 段都返回 1。请举一个这样的例子。
+**答案**：例如 `[1,8,8] → [1,4,2]`，`round=NonSymPos_s`，`saturate=SatWarn_s`。round 段减少小数位（8→2，且非 Trunc）→ 1；中间舍入格式到 result 减少了整数位（且 SatWarn 钳位）→ 1；合计 2。
 
 ---
 
-### 4.4 use_reg_c 与 generate 双分支：自动选 0 拍 / 1 拍延迟
+### 4.4 use_reg_c 与 g_register / g_no_register：编译期二选一
 
 #### 4.4.1 概念说明
 
-知道了「推荐级数」之后，组件要把它翻译成实际的硬件。做法极简：在 architecture 里定义一个**编译期布尔常量** `use_reg_c`，再用 `generate` 语句在两条互斥的硬件描述里二选一。因为 `use_reg_c` 依赖的 `reg_mode_g`、`recommended_c` 在综合期都是常量，所以综合器只会留下其中一条分支，另一条被完全丢弃——没有任何面积浪费。
+`cl_fix_recommended_pipelining` 只给出「推荐值」（0 或 1），真正决定「插不插寄存器」的是组件体里的布尔常量 `use_reg_c`。它把用户的 `reg_mode_g` 和库的推荐值**合并**成一个布尔决策：
+
+\[
+\text{use\_reg} = (\text{reg\_mode} = \text{Yes}) \;\lor\; \big(\text{reg\_mode} = \text{Auto} \;\land\; \text{recommended} > 0\big)
+\]
+
+也就是说：`Yes_s` 无条件插；`Auto_s` 看推荐值；`No_s` 既不满足 `Yes` 也不满足 `Auto`，结果为假，不插。
+
+这个布尔值喂给两条互斥的 `generate` 分支，在 elaboration 期只活下来一条——这就是「综合期二选一」。
 
 #### 4.4.2 核心流程
 
-`use_reg_c` 的定义（round 组件，saturate 同理）：
-
 ```
-use_reg_c = (reg_mode_g = Yes_s)
-         or (reg_mode_g = Auto_s and recommended_c > 0)
+recommended_c = cl_fix_recommended_pipelining(...)      -- 0 或 1
+use_reg_c      = (reg_mode_g=Yes_s) or (Auto_s and recommended_c>0)
+                                                          │
+                       ┌──────────────────────────────────┤
+                   use_reg_c                              not use_reg_c
+                       │                                     │
+                g_register                             g_no_register
+            (process(clk) 打一拍)                      (纯组合直连)
+            延迟 1 拍                                  延迟 0 拍
 ```
 
-- `Yes_s` → 恒为真，强制寄存器。
-- `Auto_s` → 仅当推荐级数 > 0 才插。
-- `No_s` → 两个条件都不满足，恒为假，纯组合。
-
-两条分支：
-
-- `g_register`（`use_reg_c` 为真）：一个 `process(clk)`，在 `rising_edge(clk)` 把 `result / in_meta / in_valid` 锁进寄存器。`out_valid <= in_valid and not rst` 实现「复位时拉低有效」。
-- `g_no_register`（`use_reg_c` 为假）：三句连续赋值 `out_data <= result`、`out_meta <= in_meta`、`out_valid <= in_valid`，0 拍直通。
+**回答规格里的核心问题**：当 `reg_mode_g = Auto_s` 且舍入实际无需寄存器（`recommended_c = 0`，比如 `Trunc_s` 或没减少小数位），`use_reg_c = (No) or (Yes and False) = False`，于是 `g_no_register` 分支胜出，组件是**纯组合、0 拍延迟**。这就是 `Auto_s`「自动选择 0 拍」的完整链路。
 
 #### 4.4.3 源码精读
 
-round 组件的常量定义与双分支：[hdl/en_cl_fix_round.vhd:L85-L111](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L85-L111)。关键三行：
+round 组件体里的两个常量定义：
 
-```vhdl
-constant recommended_c : natural range 0 to 1 := cl_fix_recommended_pipelining(in_fmt_g, out_fmt_g, round_g, fmt_check_g);
-constant use_reg_c     : boolean := (reg_mode_g = Yes_s) or (reg_mode_g = Auto_s and recommended_c > 0);
-signal result          : std_logic_vector(cl_fix_width(out_fmt_g)-1 downto 0);
-```
+[hdl/en_cl_fix_round.vhd:85-86](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L85-L86) — `recommended_c`（推荐寄存器数，`natural range 0 to 1`）与 `use_reg_c`（最终布尔决策）。注意 `recommended_c` 的子类型约束 `range 0 to 1` 是编译期护栏。
 
-注意 `recommended_c` 的子类型是 `natural range 0 to 1`——编译器在类型层面就保证 round/saturate 的推荐级数只能是 0 或 1。随后 [hdl/en_cl_fix_round.vhd:L95-L104](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L95-L104) 是寄存器进程，[hdl/en_cl_fix_round.vhd:L107-L111](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L107-L111) 是组合直通。
+组合结果先算出来，再由两条分支决定是否打拍：
 
-saturate 组件的对应代码完全同构：[hdl/en_cl_fix_saturate.vhd:L84-L110](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_saturate.vhd#L84-L110)，差别仅在 `recommended_c` 调用的是 saturate 重载、且 `result <= cl_fix_saturate(...)`。
+[hdl/en_cl_fix_round.vhd:92-111](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L92-L111) — `result <= cl_fix_round(...)` 是共用计算；`g_register` 分支用 `process(clk)` 把 `result/in_valid/in_meta` 打一拍；`g_no_register` 分支把它们直接连到输出。
 
-**resize 组件不重复这套模式**，而是用级联例化代替：[hdl/en_cl_fix_resize.vhd:L91-L141](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L91-L141)。它先算出中间格式 `round_fmt_c`（[hdl/en_cl_fix_resize.vhd:L85](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L85)），然后例化 `i_round`（round 到 `round_fmt_c`）和 `i_saturate`（`round_fmt_c` 到 `out_fmt_g`），把前者的输出直连后者的输入。`reg_mode_g` 被原样透传给两个子组件，于是寄存器决策被**下放**给它们各自用 `use_reg_c` 判断。这就是 resize `Yes_s` 延迟为 2 的根本原因：两个子组件各自插 1 拍。
+注意 `out_valid <= in_valid and not rst;`——寄存器分支里，valid 被 `rst` 同步清零（复位期间输出无效），这是标准的同步复位 valid 处理。saturate 组件体逐字相同：
 
-#### 4.4.4 代码实践（跟踪型，对应本讲核心任务）
+[hdl/en_cl_fix_saturate.vhd:84-110](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_saturate.vhd#L84-L110) — saturate 组件体的常量与两条 generate 分支，与 round 组件几乎一字不差，只换内部纯函数与 generic。
 
-**目标**：跟踪「`reg_mode_g = Auto_s` 且舍入实际无需寄存器」时，组件如何自动得到 0 拍延迟。
+#### 4.4.4 代码实践
 
-**步骤**：
+**实践目标**：对照三个组件，确认它们的结构几乎一致；并验证 `Auto_s` 在无需寄存器时如何落到 0 拍。
 
-1. 取一个零逻辑场景：`in_fmt_g = [0,4,4]`、`out_fmt_g = [0,4,2]`、`round_g = Trunc_s`、`reg_mode_g = Auto_s`。
-2. 在 [hdl/en_cl_fix_pkg.vhd:L1041-L1069](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_pkg.vhd#L1041-L1069) 求 `recommended_c`：因为 `round = Trunc_s`，函数在第 1056 行直接 `return 0`。
-3. 代入 [hdl/en_cl_fix_round.vhd:L86](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L86) 的 `use_reg_c`：`reg_mode_g = Yes_s` 为假；`reg_mode_g = Auto_s` 为真但 `recommended_c > 0` 为假（`0 > 0` 假）；故 `use_reg_c = false`。
-4. 于是 `g_register` 分支被丢弃，只有 [hdl/en_cl_fix_round.vhd:L107-L111](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_round.vhd#L107-L111) 的 `g_no_register` 生效，`out_data <= result` 直通，**0 拍延迟**。
-5. 对比：若把 `round_g` 改成 `NonSymPos_s`（其余不变），步骤 2 的函数走到 `result_fmt.F(2) >= a_fmt.F(4)` 为假，返回 1；步骤 3 `use_reg_c` 变真；组件变为 1 拍延迟。
+**操作步骤**：
 
-**需要观察的现象**：同一份组件代码、同一个 `reg_mode_g = Auto_s`，只因 `round_g` 不同就产生 0 拍或 1 拍两种硬件——这正是「Auto 按需」的体现，且决策完全发生在综合期。
+1. 打开 `en_cl_fix_round.vhd` 与 `en_cl_fix_saturate.vhd` 的 architecture 体，逐行比对第 83–112 行。
+2. 你会发现除了 `recommended_c` 调用的重载不同（一个传 `round_g`，一个传 `saturate_g`）、`result <=` 调用的纯函数不同（`cl_fix_round` vs `cl_fix_saturate`），**其余完全相同**。
+3. 构造一个 `Auto_s` + 无需寄存器的场景：`in_fmt_g = out_fmt_g = (0,4,4)`，`round_g = Trunc_s`。手工代入：`recommended_c` = ?，`use_reg_c` = ?，哪条 `generate` 胜出？
 
-**预期结果**：`Trunc_s` → 0 拍；`NonSymPos_s` → 1 拍。无需改任何 RTL，仅靠 generics 切换。
+**需要观察的现象**：两个组件体是「同构」的；在上述场景里 `recommended_c = 0`（Trunc_s），`use_reg_c = (Yes_s?) 否 or (Auto_s and 0>0) = 假`，`g_no_register` 胜出，延迟 0。
+
+**预期结果**：你应能得出——「`Auto_s` + 截断/不丢位 → 自动 0 拍」，这正是「自动选择 0 拍延迟」的完整解释。若把同一实例的 `reg_mode_g` 改成 `Yes_s`，则 `use_reg_c = 真`，强制 1 拍——这是 `Auto_s` 与 `Yes_s` 的本质差别。
+
+> 待本地验证：如需眼见为实，可在仿真器里跑 `tb/cl_fix_round_tb`，观察 `reg_mode_g` 取 `Auto_s`（截断用例）时输出与输入**同拍**出现（0 延迟），而取 `Yes_s` 时输出**滞后一拍**。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`use_reg_c` 为什么必须用 `generate if` 而不是运行期 `if`？
+**练习 1**：`use_reg_c` 是 `constant ... boolean`，为什么用常量而不是信号？
+**答案**：因为它在 elaboration 期就完全确定（只依赖 generics 与纯函数），用常量可以让 `if use_reg_c generate` 在综合前就被求值，确保只有一条分支被综合进网表，避免生成死逻辑。
 
-**参考答案**：因为 `use_reg_c` 依赖的全是综合期常量（generics 与由它们算出的 `recommended_c`），`generate if` 让综合器只编译命中的一条分支，省掉另一条的硬件；运行期 `if` 则会同时综合两条分支并用选择器切换，既浪费面积又引入多路器延迟。
+**练习 2**：`out_meta` 在寄存器分支里为什么也要进 `process(clk)`？
+**答案**：因为 meta 是数据的边带信息（如通道号、标签），必须与数据**同拍**到达输出。如果数据打了一拍而 meta 没打，meta 就会和错位的数据对不上，所以 meta 必须和数据一起穿过同一级寄存器。
 
-**练习 2**：resize 组件为什么没有自己的 `use_reg_c`？
+---
 
-**参考答案**：resize 通过级联例化 round + saturate 子组件实现，寄存器决策被下放给两个子组件各自的 `use_reg_c`。resize 自身只负责把它们的数据/valid/meta 口对接起来，所以不需要再判一次。
+### 4.5 resize 组件：级联 round + saturate
+
+#### 4.5.1 概念说明
+
+`resize` 在纯函数层就是「先 round 后 saturate」（u5-l2）。到了组件层，库**没有重写一遍**这个组合，而是直接**例化一个 `en_cl_fix_round` 子组件 + 一个 `en_cl_fix_saturate` 子组件**，把它们串起来。这是很好的工程复用：三个组件里 round 和 saturate 是「叶子」，resize 是「组合」，逻辑只维护两份。
+
+这种级联也决定了 resize 的延迟模型：每个子组件最多 1 拍，所以 resize 最多 2 拍。
+
+#### 4.5.2 核心流程
+
+```
+            ┌─────────────┐        ┌─────────────────┐
+in_data ──► │ en_cl_fix_  │ round_ │  en_cl_fix_     │ ──► out_data
+in_meta ──► │ round       │ data/  │  saturate       │ ──► out_meta
+in_valid─►► │ (in→round   │ meta/  │  (round→out     │ ──► out_valid
+            │  fmt)       │ valid ─►   fmt)          │
+            └─────────────┘        └─────────────────┘
+              延迟 0/1                 延迟 0/1
+```
+
+关键细节：round 子组件的 `out_fmt_g` **不是** resize 的 `out_fmt_g`，而是中间舍入格式 `round_fmt_c = cl_fix_round_fmt(in_fmt_g, out_fmt_g.F, round_g)`。这是因为舍入后格式可能比目标格式多 1 个整数位（u3-l3 讲过的 +1 进位），饱和必须在「舍入后的真实格式」上做，否则会错。这与 u5-l2「resize 内部自动推导 round_fmt 并处理 +1」完全对应。
+
+#### 4.5.3 源码精读
+
+resize 组件体先算出中间格式常量，再例化两个子组件：
+
+[hdl/en_cl_fix_resize.vhd:85-89](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L85-L89) — 定义中间舍入格式 `round_fmt_c` 及级联用的内部信号（`round_valid/round_meta/round_data`），`round_data` 的位宽按 `round_fmt_c` 计算。
+
+round 子组件的例化，注意 `out_fmt_g => round_fmt_c` 和 `reg_mode_g => reg_mode_g`（透传）：
+
+[hdl/en_cl_fix_resize.vhd:96-116](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L96-L116) — 例化 `en_cl_fix_round`，把 `in_fmt_g → round_fmt_c`，并把 `reg_mode_g` 原样传给子组件。
+
+saturate 子组件的例化，输入是 round 子组件的输出，输出是 resize 的最终输出：
+
+[hdl/en_cl_fix_resize.vhd:121-141](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/hdl/en_cl_fix_resize.vhd#L121-L141) — 例化 `en_cl_fix_saturate`，把 `round_fmt_c → out_fmt_g`，同样透传 `reg_mode_g`。
+
+这里有一个微妙之处值得强调：resize 把 `reg_mode_g` **同时**透传给两个子组件。所以：
+
+- `reg_mode_g = Yes_s`：两个子组件各插一拍 → resize 延迟 = 2（与文件头注释一致）。
+- `reg_mode_g = Auto_s`：每个子组件各自按推荐值决定 → resize 延迟 = recommended_round + recommended_sat（0、1 或 2）。
+- `reg_mode_g = No_s`：两个都不插 → 延迟 0。
+
+#### 4.5.4 代码实践
+
+**实践目标**：跟踪一个 resize 实例的「格式与延迟」全过程。
+
+**操作步骤**：
+
+1. 设想实例 `in_fmt_g = (1,8,8)`，`out_fmt_g = (1,4,2)`，`round_g = NonSymPos_s`，`saturate_g = SatWarn_s`，`reg_mode_g = Auto_s`。
+2. 手算 `round_fmt_c = cl_fix_round_fmt((1,8,8), 2, NonSymPos_s)`：F=2，非 Trunc 故整数位 +1 → `I = 8+1 = 9`，符号位仍 1 → `(1,9,2)`（**待本地验证**：可用 Python `FixFormat.for_round` 对照）。
+3. round 子组件：`(1,8,8) → (1,9,2)`，NonSymPos 且减少小数位 → recommended = 1。
+4. saturate 子组件：`(1,9,2) → (1,4,2)`，SatWarn 且整数位减少 → recommended = 1。
+5. 因此 `Auto_s` 下 resize 总延迟 = 1 + 1 = 2。
+
+**需要观察的现象**：round 子组件的输出格式比 `out_fmt_g` 多了 1 个整数位（`(1,9,2)` vs `(1,4,2)`），这正是 saturate 子组件输入格式的来源——验证了「饱和必须基于舍入后的格式」。
+
+**预期结果**：你得到一条「`(1,8,8)` → round → `(1,9,2)` → saturate → `(1,4,2)`」的两级流水线，`Auto_s` 下延迟为 2，`Yes_s` 下也是 2，`No_s` 下为 0。若把 `round_g` 改成 `Trunc_s`，round 段 recommended 变 0，`Auto_s` 下总延迟降为 1。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：为什么 resize 组件不直接写一个大的 `process(clk)` 把 round 和 saturate 都打一拍，而要例化两个子组件？
+**答案**：为了复用——round 和 saturate 子组件已经各自封装了「组合逻辑 + 可选寄存器 + valid/meta 旁路」的全部细节，resize 直接级联它们即可，不必重写；同时也让延迟模型清晰（每段独立 0/1 拍），并保证 meta/valid 在两级之间正确穿透。
+
+**练习 2**：若 `reg_mode_g = Auto_s` 且 round 段需要寄存器、saturate 段不需要，resize 的总延迟是多少？meta 会在哪一级被打拍？
+**答案**：总延迟 = 1 + 0 = 1。round 子组件插了寄存器（meta 在这一级被打拍），saturate 子组件走组合直连（meta 直接透传），所以 meta 只在 round 这一级被延迟一拍，与数据保持同步。
 
 ---
 
 ## 5. 综合实践
 
-**任务**：用本讲的三个组件搭一条「乘法结果 → 舍入 → 饱和」的定点流水线草图，并标注每级的格式与寄存器策略。这是一个贯穿本讲全部知识的小设计。
+**任务**：为「乘法 → 舍入 → 饱和」定点通路画一份组件级设计草图，并推导各级格式与 `Auto_s` 下的延迟。
 
-**步骤**：
+背景：假设乘法器已用 `cl_fix_mult`（纯函数，见 u5-l3）实现，输出格式 `mult_fmt = cl_fix_mult_fmt(a_fmt, b_fmt)`。现在你要把它的结果舍入并饱和到最终输出格式 `out_fmt`。
 
-1. 假设乘法器输出全精度格式 `mid_fmt = cl_fix_mult_fmt(a_fmt, b_fmt)`（u3-l2），例如 `a_fmt = b_fmt = [1,4,4]` 时 `mid_fmt` 整数位会增长。
-2. 设计目标输出格式 `out_fmt = [1,8,4]`（更窄的整数位）。
-3. 选择 `round_g = NonSymPos_s`、`saturate_g = SatWarn_s`。
-4. 在草图上画出：
-   - 第一级：用 `en_cl_fix_resize`（或先 `en_cl_fix_round` 再 `en_cl_fix_saturate`）把 `mid_fmt` 收敛到 `out_fmt`。
-   - 标注每级的 `in_fmt_g` / `out_fmt_g`，确认 saturate 一级的 `in_fmt_g.F == out_fmt_g.F`（饱和不改小数位的硬约束）。
-   - 标注 `meta_width_g`，说明 meta 信号如何贯穿各级、与数据保持同拍。
-5. 选择 `reg_mode_g`：
-   - 若希望「无论格式怎么变，总延迟恒定」→ 选 `Yes_s`，总延迟 = resize 的 2 拍。
-   - 若希望「按需，能省则省」→ 选 `Auto_s`，并用手算（4.3.4）估算实际延迟。
-6. 验证用真实例化模板：参考测试台 [tb/cl_fix_round_tb.vhd:L152-L172](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/tb/cl_fix_round_tb.vhd#L152-L172) 中 `i_uut` 的写法，把你草图里的 resize 组件按同样的 `generic map / port map` 风格写成 VHDL 片段。
+要求：
 
-**进阶观察**：测试台在 [tb/cl_fix_round_tb.vhd:L66](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/tb/cl_fix_round_tb.vhd#L66) 与 [tb/cl_fix_round_tb.vhd:L157](https://github.com/open-logic/en_cl_fix/blob/e9123a9ca65d0966f0c1a567e2afbfa8443b38c6/tb/cl_fix_round_tb.vhd#L157) 用 `RegisterMode_t'val(i mod reg_mode_count_c)` 让不同测试用例自动轮换 `Auto_s/Yes_s/No_s` 三种模式，且都通过同一份 checker 比对。这说明：**三种寄存器模式下的功能输出完全一致，只有延迟不同**——这也是为什么调用方可以放心地按延迟需求而非功能需求来选模式。
+1. **画出数据通路**：`mult 结果 → en_cl_fix_round → en_cl_fix_saturate`（或直接用 `en_cl_fix_resize`）。标注 `clk/rst`、`valid` 与 `meta` 如何贯穿各级。
+2. **推导格式**：设 `a_fmt = (1,4,4)`、`b_fmt = (1,4,4)`、`out_fmt = (1,5,2)`、`round = NonSymPos_s`、`saturate = SatWarn_s`。
+   - 用 `cl_fix_mult_fmt` 算 `mult_fmt`（提示：两个 `[1,4,4]` 相乘，F=8，整数位与符号位见 u3-l2）。
+   - 若用 `en_cl_fix_resize`，写出它内部 round 子组件的 `out_fmt_g`（即 `round_fmt_c`）与 saturate 子组件的 `in_fmt_g`。
+3. **推导延迟**：在 `reg_mode_g = Auto_s` 下，分别用「round 组件 + saturate 组件」与「单个 resize 组件」两种方案，计算总延迟，并说明它们是否相等。
+4. **决策**：如果你的系统要求**延迟恒定**（不随 `round_g/saturate_g` 变化），应该选 `Auto_s` 还是 `Yes_s`？分别给出两种方案下的恒定延迟值。
 
-> 待本地验证：若已配置好仿真器，可运行 `python sim/run.py`（u1-l3）触发 `cl_fix_round_tb`，观察它在不同 `reg_mode_g` 下都报告 `SUCCESS! All tests passed.`。
+**参考思路**：
+
+- 两个 `[1,4,4]` 相乘：F = 4+4 = 8；两个有符号数相乘，最负值 × 最负值 = 2 的幂，整数位 +1，符号位按「1 位有符号 × 1 位有符号」特例——此处非 1 位，结果仍为有符号。综合得 `mult_fmt` 大致为 `(1,9,8)`（**待本地验证**，可用 Python `FixFormat.for_mult` 对照）。
+- resize 内部 `round_fmt_c = cl_fix_round_fmt(mult_fmt, out_fmt.F=2, NonSymPos_s)` → F=2、整数位 +1。
+- 「round 组件 + saturate 组件」与「单个 resize 组件」在 `Auto_s` 下延迟**相等**（resize 就是前者的封装）；但若你手动控制，round 组件可单独设 `Yes_s`、saturate 设 `Auto_s`，从而得到不同于「全 Auto」的延迟组合——这是拆分方案带来的额外灵活性。
+- 要求恒定延迟 → 选 `Yes_s`：拆分方案恒为 2（各 1 拍），resize 方案恒为 2。
+
+> 待本地验证：格式推导建议用 Python 参考模型 `FixFormat.for_mult / for_round`（u3-l2、u3-l3）核对，避免手算「2 的幂边界」出错。
 
 ## 6. 本讲小结
 
-- 三个组件 `en_cl_fix_round` / `en_cl_fix_saturate` / `en_cl_fix_resize` 把 u5 的纯组合函数包了一层「可选寄存器」外壳，提供统一的 `clk/rst/valid/meta/data` 流水线接口。
-- `RegisterMode_t` 的 `Auto_s`（按需）/ `Yes_s`（恒定 1 拍，resize 为 2 拍）/ `No_s`（0 拍）只控制寄存器插入，不参与数值计算；不确定时官方建议用 `Yes_s`。
-- `cl_fix_recommended_pipelining` 用三个重载分别预测 round / saturate / resize 的「推荐级数」，原则是「零逻辑则返回 0」；resize 重载 = round 部分 + saturate 部分，上限 2。
-- 编译期常量 `use_reg_c = (Yes_s) or (Auto_s and recommended_c>0)` 通过 `g_register` / `g_no_register` 两个互斥 `generate` 分支二选一，综合后只保留一条，无面积浪费。
-- resize 组件不重复寄存器逻辑，而是级联例化 round + saturate 子组件，把寄存器决策下放，因此其 `Yes_s` 延迟天然为 2。
-- `Auto_s` 能自动选 0 拍：当 `recommended_c = 0`（如 `Trunc_s` 或不丢小数位）时 `use_reg_c` 为假，走纯组合直通分支。
+- 三个组件 `en_cl_fix_round / saturate / resize` 共享**完全相同的端口接口**（`clk/rst/valid/meta/data`），差异只在 generics，因此可以像积木一样替换、级联。
+- `RegisterMode_t`（`Auto_s / Yes_s / No_s`）是**纯时序控制**，不影响数值，只决定是否插寄存器；`Yes_s` 换恒定延迟，`Auto_s` 换最小面积，`No_s` 几乎不用。
+- `cl_fix_recommended_pipelining` 的**三个重载**是 `Auto_s` 的大脑：round 段看「非 Trunc 且减少小数位」、saturate 段看「钳位模式且减少整数/符号位」，resize 段是两者之和。
+- 布尔常量 `use_reg_c = (Yes_s) or (Auto_s and recommended>0)` 驱动 `g_register / g_no_register` 两条 `generate` 在综合期二选一；`Auto_s` 且无需寄存器时自动落到 0 拍组合逻辑。
+- `resize` 组件不重写逻辑，而是**级联**一个 round 子组件和一个 saturate 子组件，中间格式用 `cl_fix_round_fmt` 推导，延迟上限为 2。
+- valid 与 meta 必须与数据**同拍**穿过每一级寄存器（`out_valid <= in_valid and not rst`），保证边带信息不错位。
 
 ## 7. 下一步学习建议
 
-- 下一讲 **u6-l2（搭建流水线数据通路：meta 与延迟一致性）** 会把本讲的单个组件扩展成多级级联的完整数据通路，重点讲 `meta_width_g` 旁路透传与用 `Yes_s` 保证跨配置延迟恒定的工程技巧。
-- 建议回头对照阅读 u5-l2（`cl_fix_round/saturate/resize` 的纯函数实现）与 u3-l3（`cl_fix_round_fmt` 的格式预测），确认本讲组件里 `recommended_c` 与 `round_fmt_c` 的来源都已在前面讲义中讲透。
-- 若想看这些组件如何被批量验证，可预习 u7-l2（VUnit 测试台与文件 I/O），那里的 `cl_fix_round_tb.vhd` 正是本讲引用的测试台，它会用 cosim 黄金数据逐拍比对 UUT 输出。
+- **下一步本单元**：进入 u6-l2「搭建流水线数据通路」，学习如何把本讲的三个组件与乘法器级联成完整定点通路，用 `meta_width_g` 透传边带、用 `Yes_s` 保证跨配置的固定延迟。
+- **验证视角**：本讲反复出现「延迟可推导」，下一篇可回到 u7（Python↔HDL 协同仿真），看 cosim 如何在不同 `reg_mode_g` 与格式组合下逐拍比对 UUT 输出，验证这些延迟与数值结论。
+- **源码延伸阅读**：通读 `hdl/en_cl_fix_pkg.vhd` 中 `cl_fix_recommended_pipelining` 的三个重载（1041–1109 行），并对照 `cl_fix_round_fmt`（99 行声明）理解「舍入后中间格式」如何在 resize 组件里被推导与使用。
