@@ -7,7 +7,7 @@
 - 说清一个「任务（task）」在文件系统里长什么样，`task.conf` 的每一段各管什么。
 - 解释 `run_fpga_task.py` 如何用「架构 × 基准 × 脚本参数」的笛卡尔积把一个任务拆成多个 job，并并行调度它们。
 - 定位基准 Verilog 设计所在的目录，看懂一个最简基准（`and2`）的结构。
-- 理解 OpenFPGA 的回归测试体系：`basic_tests/` 各子目录覆盖了哪些特性，`.github/workflows/build.yml` 如何批量跑这些回归脚本。
+- 理解 OpenFPGA 的回归测试体系：`basic_tests/` 各子目录覆盖了哪些特性（`full_testbench`、`fabric_key`、`clock_network`、`k4_series` 下的 `busmux` 等），`.github/workflows/build.yml` 如何批量跑这些回归脚本，以及本次「Bus Based MUX」特性是如何落地成回归任务的。
 - 能够照着一个现成 `task.conf` 复制、改一个参数（换一份 `openfpga_arch`），跑出一个属于自己的小任务。
 
 ## 2. 前置知识
@@ -31,6 +31,8 @@
 | `openfpga_flow/scripts/run_fpga_task.py` | 批量任务调度器：读 `task.conf`、切 job、并行跑、汇总结果。本讲的主角。 |
 | `openfpga_flow/scripts/run_fpga_task.conf` | 调度器自己的全局配置（任务根目录、默认脚本路径等）。 |
 | `openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf` | 一个真实的任务配置，本讲拿它当样板逐段拆解。 |
+| `openfpga_flow/tasks/basic_tests/k4_series/k4n4_frac_mult_busmux/config/task.conf` | 本次更新新增的「总线型 mux」任务，演示如何用一个 task 把新特性纳入回归。 |
+| `openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/config/task.conf` | 配套的「黄金比特流分布」任务：把 busmux 的共享配置位锁定为黄金产出，靠 `git diff` 守护。 |
 | `openfpga_flow/benchmarks/micro_benchmark/and2/and2.v` | 最简基准设计：一个 2 输入与门。 |
 | `openfpga.sh` | 定义 `run-task`、`create-task`、`goto-task`、`run-regression-local` 等快捷函数。 |
 | `openfpga_flow/regression_test_scripts/basic_reg_test.sh` | 一份真实的回归脚本，串起几十个 `run-task` 调用。 |
@@ -73,23 +75,23 @@ N_{\text{job}} = N_{\text{arch}} \times N_{\text{bench}} \times N_{\text{script\
 
 先看样板任务 `configuration_chain/config/task.conf` 的各段。`[GENERAL]` 段确定流程基调：`fpga_flow=yosys_vpr` 表示「先用 yosys 综合、再用 VPR 布局布线」，`timeout_each_job = 20*60` 是每个 job 的超时秒数（这里是 1200 秒）：
 
-[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L9-L16](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L9-L16) — `[GENERAL]` 段：流程类型 `yosys_vpr`、功耗分析开启、Verilog 输出开启、每个 job 超时。
+[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L9-L16](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L9-L16) — `[GENERAL]` 段：流程类型 `yosys_vpr`、功耗分析开启、Verilog 输出开启、每个 job 超时。
 
 `[OpenFPGA_SHELL]` 段最有信息量：它通过 `openfpga_arch_file` 指向 `k4_N4_40nm_cc_openfpga.xml`（注意文件名里的 `cc` = configuration chain），并通过 `openfpga_shell_template` 指定要执行的 `.openfpga` 模板脚本：
 
-[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L18-L23](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L18-L23) — `[OpenFPGA_SHELL]` 段：选定 cc 版 `openfpga_arch` 与 `write_full_testbench_example_script.openfega` 模板。
+[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L18-L23](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L18-L23) — `[OpenFPGA_SHELL]` 段：选定 cc 版 `openfpga_arch` 与 `write_full_testbench_example_script.openfega` 模板。
 
 `[ARCHITECTURES]` 与 `[BENCHMARKS]` 各列出一个（这里各一个/三个），是笛卡尔积的两个维度：
 
-[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L25-L31](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L25-L31) — 一份 VPR 架构 `arch0`，三个基准 `bench0`/`bench1`/`bench2`。
+[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L25-L31](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L25-L31) — 一份 VPR 架构 `arch0`，三个基准 `bench0`/`bench1`/`bench2`。
 
 `[SYNTHESIS_PARAM]` 段把基准与综合参数对齐：`bench0_top = and2` 表示 `bench0` 的顶层模块是 `and2`，`bench0_chan_width = 300` 给它指定布线通道宽度。前缀 `bench0_` 与 `[BENCHMARKS]` 里的键 `bench0` 严格对应：
 
-[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L33-L42](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L33-L42) — 每个基准的顶层模块名与通道宽度，靠 `benchN_` 前缀与基准对齐。
+[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L33-L42](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L33-L42) — 每个基准的顶层模块名与通道宽度，靠 `benchN_` 前缀与基准对齐。
 
 最后是 `[SCRIPT_PARAM_MIN_ROUTE_CHAN_WIDTH]`。注意它的段名以 `SCRIPT_PARAM` 开头——调度器正是靠「段名里含不含 `SCRIPT_PARAM`」来识别它是一个脚本参数集（详见 4.2.3）。这里的 `end_flow_with_test=` 是一个空值参数，会被当作 `--end_flow_with_test` 开关传下去：
 
-[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L44-L45](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L44-L45) — 一个名为 `MIN_ROUTE_CHAN_WIDTH` 的脚本参数集。
+[openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf:L44-L45](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf#L44-L45) — 一个名为 `MIN_ROUTE_CHAN_WIDTH` 的脚本参数集。
 
 按上面的公式，这个任务的 job 总数 = 1 架构 × 3 基准 × 1 脚本参数集 = **3 个 job**。
 
@@ -153,43 +155,43 @@ main():
 
 **入口与命令行参数**。`--maxthreads` 默认值是 2，注释提示它「通常 ≤ 机器 CPU 核数」：
 
-[openfpga_flow/scripts/run_fpga_task.py:L60-L94](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L60-L94) — 定义 `tasks`（必填，可多个）与 `--maxthreads`（默认 2）、`--remove_run_dir`、`--test_run`、`--debug`、`--continue_on_fail` 等开关。
+[openfpga_flow/scripts/run_fpga_task.py:L60-L94](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L60-L94) — 定义 `tasks`（必填，可多个）与 `--maxthreads`（默认 2）、`--remove_run_dir`、`--test_run`、`--debug`、`--continue_on_fail` 等开关。
 
 **run 目录编号**。下面这段是 `run001`/`latest` 机制的来源：用列表推导取出所有 `run*[0-9]` 目录的末三位编号，取最大值 +1，再建新目录和软链接：
 
-[openfpga_flow/scripts/run_fpga_task.py:L226-L246](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L226-L246) — 扫描已有 run 目录、新建 `run%03d`、把 `latest` 软链接重指向新目录。
+[openfpga_flow/scripts/run_fpga_task.py:L226-L246](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L226-L246) — 扫描已有 run 目录、新建 `run%03d`、把 `latest` 软链接重指向新目录。
 
 这就是为什么你每次重跑一个任务，结果都落在递增编号的 `run001`/`run002`/… 里，而 `latest` 永远指向最近一次——便于用 `goto-task` 直接跳到最新结果。
 
 **必需段校验**：
 
-[openfpga_flow/scripts/run_fpga_task.py:L255-L260](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L255-L260) — `required_sec = ["GENERAL", "BENCHMARKS", "ARCHITECTURES"]`，缺任一段就 `clean_up_and_exit`。
+[openfpga_flow/scripts/run_fpga_task.py:L255-L260](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L255-L260) — `required_sec = ["GENERAL", "BENCHMARKS", "ARCHITECTURES"]`，缺任一段就 `clean_up_and_exit`。
 
 **笛卡尔积切 job**。这是本讲最核心的一段：三重循环把基准、架构、脚本参数集组合起来，每份组合构造一条命令并放进 `flow_run_cmd_list`：
 
-[openfpga_flow/scripts/run_fpga_task.py:L404-L438](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L404-L438) — `for bench / for arch / for script_param` 三重循环；每份组合的 job 名形如 `00_and2_MIN_ROUTE_CHAN_WIDTH`，并记录 `run_dir`、`commands`、`finished`、`status` 等字段。
+[openfpga_flow/scripts/run_fpga_task.py:L404-L438](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L404-L438) — `for bench / for arch / for script_param` 三重循环；每份组合的 job 名形如 `00_and2_MIN_ROUTE_CHAN_WIDTH`，并记录 `run_dir`、`commands`、`finished`、`status` 等字段。
 
 每个 job 的 `run_dir` 由 `get_flow_rundir` 决定，路径分三层：架构名 / 顶层模块名 / 脚本参数标签：
 
-[openfpga_flow/scripts/run_fpga_task.py:L453-L459](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L453-L459) — `run_dir = <arch名>/<top_module>/<script_param标签>/`，例如 `k4_N4_tileable_40nm/and2/MIN_ROUTE_CHAN_WIDTH/`。
+[openfpga_flow/scripts/run_fpga_task.py:L453-L459](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L453-L459) — `run_dir = <arch名>/<top_module>/<script_param标签>/`，例如 `k4_N4_tileable_40nm/and2/MIN_ROUTE_CHAN_WIDTH/`。
 
 所以一个 job 的完整输出路径长这样：`<task目录>/run001/k4_N4_tileable_40nm/and2/MIN_ROUTE_CHAN_WIDTH/`。记住这个结构，找产出文件就不会迷路。
 
 **构造单条命令**。`create_run_command` 把 `[OpenFPGA_SHELL]` 段的每个键值对都转成 `--<key> <value>` 传给 `run_fpga_flow.py`——这就是 `task.conf` 的 `[OpenFPGA_SHELL]` 段如何「穿透」到实际流程的：
 
-[openfpga_flow/scripts/run_fpga_task.py:L498-L500](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L498-L500) — 当 `run_engine=openfpga_shell` 时，遍历 `[OpenFPGA_SHELL]` 的所有键，拼成 `--openfpga_arch_file ...`、`--openfpga_shell_template ...` 等参数。
+[openfpga_flow/scripts/run_fpga_task.py:L498-L500](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L498-L500) — 当 `run_engine=openfpga_shell` 时，遍历 `[OpenFPGA_SHELL]` 的所有键，拼成 `--openfpga_arch_file ...`、`--openfpga_shell_template ...` 等参数。
 
 **并行调度**。`run_actions` 用信号量限流，每个 job 起一个线程跑 `run_single_script`：
 
-[openfpga_flow/scripts/run_fpga_task.py:L603-L615](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L603-L615) — `threading.Semaphore(args.maxthreads)` 限流；逐个 job 起线程，最后 `join` 等全部完成。
+[openfpga_flow/scripts/run_fpga_task.py:L603-L615](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L603-L615) — `threading.Semaphore(args.maxthreads)` 限流；逐个 job 起线程，最后 `join` 等全部完成。
 
 每个线程内部用 `subprocess.Popen` 启动 `run_fpga_flow.py`，把输出写到以线程名命名的日志，并根据返回码标记 job 成败。注意一个细节：默认情况下（未加 `--continue_on_fail`）任意 job 失败会直接 `os._exit(1)` 整个进程：
 
-[openfpga_flow/scripts/run_fpga_task.py:L554-L600](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L554-L600) — `run_single_script`：启动子进程、流式写日志、按返回码置 `status`、失败时按 `--continue_on_fail` 决定是否立即退出。
+[openfpga_flow/scripts/run_fpga_task.py:L554-L600](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L554-L600) — `run_single_script`：启动子进程、流式写日志、按返回码置 `status`、失败时按 `--continue_on_fail` 决定是否立即退出。
 
 **结果汇总**。`collect_results` 读取每个 job 的 `vpr_stat.result`（VPR 写出的统计文件），合并写进 `task_result.csv`。需要留意一个条件：仅当 `fpga_flow` 不是纯 `"yosys"` 时才汇总；并且若某 job 目录下没有 `*.result` 文件，就跳过它：
 
-[openfpga_flow/scripts/run_fpga_task.py:L618-L656](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L618-L656) — `collect_results`：逐 job 读 `vpr_stat.result`，汇总运行时间与各项指标到 `task_result.csv`。
+[openfpga_flow/scripts/run_fpga_task.py:L618-L656](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L618-L656) — `collect_results`：逐 job 读 `vpr_stat.result`，汇总运行时间与各项指标到 `task_result.csv`。
 
 > 小贴士：本讲的样板任务 `fpga_flow=yosys_vpr`（不是纯 `yosys`），所以 `collect_results` 会被调用；但能否真的写出 `task_result.csv`，取决于流程是否产出了 `vpr_stat.result`。`--test_run` 是个很有用的开关：它只切 job、打印命令而不真正执行，适合先看清楚调度器到底要跑什么。
 
@@ -253,13 +255,13 @@ main():
 
 来看最简基准 `and2/and2.v`——一个 2 输入与门。整个文件就是一个 `module and2`，两个输入 `a`/`b`，一个输出 `c = a & b`：
 
-[openfpga_flow/benchmarks/micro_benchmark/and2/and2.v:L7-L18](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/benchmarks/micro_benchmark/and2/and2.v#L7-L18) — `module and2(a,b,c)`，`assign c = a & b;`。这就是一个完整的、能被 OpenFPGA 流程吃下去的设计。
+[openfpga_flow/benchmarks/micro_benchmark/and2/and2.v:L7-L18](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/benchmarks/micro_benchmark/and2/and2.v#L7-L18) — `module and2(a,b,c)`，`assign c = a & b;`。这就是一个完整的、能被 OpenFPGA 流程吃下去的设计。
 
 注意模块名 `and2` 与 `task.conf` 里 `bench0_top = and2`、`bench0=.../and2.v` 三处必须一致：文件名只是路径，yosys 真正找的是顶层模块名。`timescale` 行是仿真用的，对综合本身无影响。
 
 调度器侧，基准文件在 `generate_each_task_actions` 里被解析：支持逗号分隔的多文件、支持 `glob` 通配符，找不到任何匹配文件就报错：
 
-[openfpga_flow/scripts/run_fpga_task.py:L284-L296](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/scripts/run_fpga_task.py#L284-L296) — 遍历 `[BENCHMARKS]`，对每个基准路径做 `glob.glob`，无匹配则 `clean_up_and_exit`。
+[openfpga_flow/scripts/run_fpga_task.py:L284-L296](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/scripts/run_fpga_task.py#L284-L296) — 遍历 `[BENCHMARKS]`，对每个基准路径做 `glob.glob`，无匹配则 `clean_up_and_exit`。
 
 #### 4.3.4 代码实践
 
@@ -349,27 +351,53 @@ basic_tests/
 
 来看一份真实回归脚本 `basic_reg_test.sh` 的开头与典型段落。它先 `source openfpga.sh`，再用 `run-task` 把一组任务串起来：
 
-[openfpga_flow/regression_test_scripts/basic_reg_test.sh:L1-L18](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/regression_test_scripts/basic_reg_test.sh#L1-L18) — `set -e` + `source openfpga.sh`，然后逐个 `run-task basic_tests/... $@`。
+[openfpga_flow/regression_test_scripts/basic_reg_test.sh:L1-L18](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/regression_test_scripts/basic_reg_test.sh#L1-L18) — `set -e` + `source openfpga.sh`，然后逐个 `run-task basic_tests/... $@`。
 
-注意第 11 行 `${OPENFPGA_PATH}/build/openfpga/openfpga -x "version; exit;"` 是一个冒烟测试：直接调 openfpga 二进制跑 `version`，确认可执行文件本身没坏，再开始跑任务。脚本末尾还有一段对「黄金网表（golden netlists）」做 `git diff` 的校验——确保 `no_time_stamp` 类任务的输出与仓库里保存的基准输出逐字一致：
+注意第 11 行 `${OPENFPGA_PATH}/build/openfpga/openfpga -x "version; exit;"` 是一个冒烟测试：直接调 openfpga 二进制跑 `version`，确认可执行文件本身没坏，再开始跑任务。脚本末尾还有一段对「黄金网表（golden netlists）」做 `git diff` 的校验——确保 `no_time_stamp` 类任务下 `golden_outputs_no_time_stamp/` 里的黄金产出与仓库保存的基准逐字一致：
 
-[openfpga_flow/regression_test_scripts/basic_reg_test.sh:L372-L384](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/regression_test_scripts/basic_reg_test.sh#L372-L384) — `git diff` 检查 `golden_outputs_no_time_stamp/` 下文件未被改动，变了就 `exit 1`。这是一种「输出锁定的回归测试」。
+[openfpga_flow/regression_test_scripts/basic_reg_test.sh:L376-L389](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/regression_test_scripts/basic_reg_test.sh#L376-L389) — `git diff` 用通配路径 `no_time_stamp/*/golden_outputs_no_time_stamp/**` 检查所有 `no_time_stamp` 任务的黄金产出未被改动，变了就 `exit 1`。这是一种「输出锁定的回归测试」。
 
 再来看 CI 如何触发这些脚本。`.github/workflows/build.yml` 的 `linux_regression_tests` job 用矩阵列出回归脚本名，关键执行步是 `source openfpga_flow/regression_test_scripts/${{matrix.config.name}}.sh`：
 
-[.github/workflows/build.yml:L1095-L1144](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/.github/workflows/build.yml#L1095-L1144) — `linux_regression_tests` job：矩阵列出 11 个回归脚本，每个在独立容器里 `source` 对应 `.sh` 跑，失败时上传 `openfpga_flow/**/*.log`。
+[.github/workflows/build.yml:L1095-L1144](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/.github/workflows/build.yml#L1095-L1144) — `linux_regression_tests` job：矩阵列出 11 个回归脚本，每个在独立容器里 `source` 对应 `.sh` 跑，失败时上传 `openfpga_flow/**/*.log`。
 
 最后看 `openfpga.sh` 提供的两个回归相关函数。`run-task` 就是 `run_fpga_task.py` 的薄封装；`run-regression-local` 则是从仓库根目录触发本地回归（注意它指向 `.github/workflows/*reg_test.sh`，但本仓库实际的回归脚本集合在 `openfpga_flow/regression_test_scripts/` 下，CI 用的就是后者）：
 
-[openfpga.sh:L66-L68](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga.sh#L66-L68) — `run-task` 函数：直接转发给 `run_fpga_task.py`。
+[openfpga.sh:L66-L68](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga.sh#L66-L68) — `run-task` 函数：直接转发给 `run_fpga_task.py`。
 
-[openfpga.sh:L99-L103](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga.sh#L99-L103) — `run-regression-local`：切到 `OPENFPGA_PATH` 后执行 `.github/workflows/*reg_test.sh`。
+[openfpga.sh:L99-L103](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga.sh#L99-L103) — `run-regression-local`：切到 `OPENFPGA_PATH` 后执行 `.github/workflows/*reg_test.sh`。
 
 > 提醒：本仓库 `.github/workflows/` 下并没有 `*reg_test.sh` 文件（那里只有构建依赖安装脚本和 `.yml`），权威的回归脚本在 `openfpga_flow/regression_test_scripts/*.sh`。若要在本地完整复现 CI 的回归，直接 `source openfpga_flow/regression_test_scripts/basic_reg_test.sh --debug --show_thread_logs` 即可，这正是 CI 容器里跑的命令。
 
 `create-task` 函数也值得一提——它能从一个模板任务复制出新任务，是本讲综合实践会用到的工具：
 
-[openfpga.sh:L34-L59](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga.sh#L34-L59) — `create-task <名字> [模板]`：从 `template_tasks/` 或指定模板目录复制出一份新任务骨架。
+[openfpga.sh:L34-L59](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga.sh#L34-L59) — `create-task <名字> [模板]`：从 `template_tasks/` 或指定模板目录复制出一份新任务骨架。
+
+**实战案例：一个新特性（Bus Based MUX）是如何落地成回归任务的。** 本次 HEAD（`97c06e27`，提交「Bus Based MUX (#2602)」）引入了对「总线型多路选择器」的支持：当 VPR 架构里某条 interconnect 标了 `<mux bus="true"/>` 时，OpenFPGA 不再为展开后的每一位单比特 mux 各配一个配置位，而是让整条 bus 共享**同一个配置存储器（一个共享 config bit）**。这个特性被设计成**两个**回归任务，正好是「新特性→回归覆盖」的标准范本，值得逐行看：
+
+第一个任务 `basic_tests/k4_series/k4n4_frac_mult_busmux` 是「能跑通」的功能性回归——它复用 32 位可分数乘法器（frac_mult）那套架构，只把 `mult_32x32_slice` 的 `a2a` 互连换成 32 位宽的 bus mux，配上最小的 `and2` 基准，确认 fabric 能正确构建、比特流能正常生成。它在 `basic_reg_test.sh` 里紧贴在原 `k4n4_frac_mult` 之后，只多两行：
+
+[openfpga_flow/regression_test_scripts/basic_reg_test.sh:L193-L196](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/regression_test_scripts/basic_reg_test.sh#L193-L196) — 一句 `echo -e` 说明 + 一行 `run-task basic_tests/k4_series/k4n4_frac_mult_busmux $@`，把新任务挂进回归链。
+
+[openfpga_flow/tasks/basic_tests/k4_series/k4n4_frac_mult_busmux/config/task.conf:L1-L9](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/k4_series/k4n4_frac_mult_busmux/config/task.conf#L1-L9) — 文件头注释直接讲清了这个任务在测什么：32 个单比特 mux 必须共享一个配置位，而不是 32 个独立配置位。注意它的 `[ARCHITECTURES]` 指向带 `busmux` 后缀的 VPR 架构 `k4_frac_N4_tileable_adder_chain_mem1K_frac_dsp32_busmux_40nm.xml`，`[OpenFPGA_SHELL]` 则复用 `frame` 版 `openfpga_arch`——这正是 u3-l1 讲过的「同名绑定」：bus 属性在 VPR arch 侧，共享存储器电路在 openfpga_arch 侧。
+
+第二个任务 `basic_tests/no_time_stamp/frac_dsp_busmux` 是更严格的「输出锁定」回归——它不满足于「跑通」，而是把「共享配置位」这个关键事实**固化成黄金产出**并用 `git diff` 守护。它的文件头注释把这个策略写得非常清楚：
+
+[openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/config/task.conf:L1-L12](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/config/task.conf#L1-L12) — 注释说明：`bitstream_distribution.xml` 记录每个块的配置位数，一旦代码退回「32 个独立配置位」，DSP 网格块的位数就会改变，CI 的 `git diff` 立刻捕获并失败。
+
+它的关键一行是 `[OpenFPGA_SHELL]` 段里的 `openfpga_output_dir` 指向任务目录下的 `golden_outputs_no_time_stamp`：
+
+[openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/config/task.conf:L23-L28](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/config/task.conf#L23-L28) — 用 `report_bitstream_distribution_no_time_stamp_example_script.openfpga` 模板（禁用时间戳，使输出可复现），并把输出重定向到 `golden_outputs_no_time_stamp`，使黄金文件就落在会被 `git diff` 扫描的路径上。
+
+这个任务在 `basic_reg_test.sh` 的 `no_time_stamp` 段里同样只占两行：
+
+[openfpga_flow/regression_test_scripts/basic_reg_test.sh:L365-L366](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/regression_test_scripts/basic_reg_test.sh#L365-L366) — `run-task basic_tests/no_time_stamp/frac_dsp_busmux $@`，紧接着就会被脚本末尾那段 `git diff`（见上面 4.4.3 的黄金网表校验）覆盖。
+
+**值得偷师的 `.gitignore` 技巧**：`golden_outputs_no_time_stamp/` 目录会被 `write_fabric_verilog` 写入大量网表文件，但只有三个文件是「黄金基准」，其余都该忽略。该目录下的 `.gitignore` 用「先全忽略、再白名单」的手法精确锁定这三个文件：
+
+[openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/golden_outputs_no_time_stamp/.gitignore:L1-L17](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/tasks/basic_tests/no_time_stamp/frac_dsp_busmux/golden_outputs_no_time_stamp/.gitignore#L1-L17) — `/*` 先忽略目录下一切，再用 `!/bitstream_distribution.xml`、`!/fabric_bitstream.xml`、`!/lb/.../mult_32x32_slice.v` 三条白名单放行。`fabric_bitstream.xml` 用 `--path_only`（只存路径不存数值），使共享存储器「出现一次、被 32 条 mux 路径引用」这一结构在 diff 中稳定可见。
+
+> 小结：一个新特性落地成回归的标准动作是「**一个能跑通的功能任务 + 一个锁定关键产出的 no_time_stamp 任务 + 回归脚本里各加一行 `run-task`**」。busmux 正是这套范式的最新实例，也是本讲「回归测试」模块最值得照着抄的模板。
 
 #### 4.4.4 代码实践（源码阅读型）
 
@@ -383,9 +411,9 @@ basic_tests/
 
 **预期结果**：会发现 `configuration_frame/config/task.conf` 与 `configuration_chain/config/task.conf` 几乎逐字相同，唯一实质区别在第 20 行——`openfpga_arch_file` 从 `k4_N4_40nm_cc_openfpga.xml` 换成了 `k4_N4_40nm_frame_openfpga.xml`。对应地，这两份 arch 的 `configuration_protocol` 一份是 `scan_chain`+`DFF`，一份是 `frame_based`+`LATCH`：
 
-[openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml:L162-L164](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml#L162-L164) — cc 版：`<organization type="scan_chain" circuit_model_name="DFF"/>`。
+[openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml:L162-L164](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml#L162-L164) — cc 版：`<organization type="scan_chain" circuit_model_name="DFF"/>`。
 
-[openfpga_flow/openfpga_arch/k4_N4_40nm_frame_openfpga.xml:L171-L173](https://github.com/lnis-uofu/OpenFPGA/blob/a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a/openfpga_flow/openfpga_arch/k4_N4_40nm_frame_openfpga.xml#L171-L173) — frame 版：`<organization type="frame_based" circuit_model_name="LATCH"/>`。
+[openfpga_flow/openfpga_arch/k4_N4_40nm_frame_openfpga.xml:L171-L173](https://github.com/lnis-uofu/OpenFPGA/blob/97c06e27a112c255112c48d4007b2b3a16267371/openfpga_flow/openfpga_arch/k4_N4_40nm_frame_openfpga.xml#L171-L173) — frame 版：`<organization type="frame_based" circuit_model_name="LATCH"/>`。
 
 这正是下一节综合实践的切入点。
 
@@ -396,6 +424,9 @@ basic_tests/
 
 **练习 2**：为什么 `basic_reg_test.sh` 末尾要 `git diff` 黄金网表？
 **答案**：`no_time_stamp` 类任务刻意禁用输出里的时间戳，使输出可复现。仓库里保存了一份「黄金输出」，回归时若生成内容与黄金输出有差异，`git diff` 就会捕获并 `exit 1`，从而发现「代码改动悄悄改变了网表」这类回归。这是一种比「流程能否跑通」更严格的正确性校验。
+
+**练习 3**：本次新增的 `frac_dsp_busmux` 任务为什么放在 `no_time_stamp/` 下、并且只把 `bitstream_distribution.xml` 等三个文件作为黄金产出，而不是整个 fabric 网表？
+**答案**：bus mux 的核心不变量是「32 个单比特 mux 共享一个配置位」，这个事实最直接、最稳定地反映在 `bitstream_distribution.xml` 里 DSP 块的配置位**计数**上——若代码退回 32 个独立配置位，这个计数立刻变化。锁定这一个计数（外加 `fabric_bitstream.xml` 的路径结构与 DSP tile 网表）就足以守住不变量，又不会被无关的网表细节（每次都可能微调）误伤。把整个 fabric 网表都当黄金会过于脆弱（任何无关改动都触发 diff），所以用 `.gitignore` 白名单只锁关键产物——这是「精准锁定」回归的权衡。
 
 ---
 
@@ -458,6 +489,8 @@ basic_tests/
 
 **待本地验证**：比特流文件的具体格式与文件名取决于本地实际生成的产物；若运行失败，先看 `run001` 下各线程日志（`*_out.log`）与 `--show_thread_logs` 的输出定位原因。
 
+**可选变体（照搬 busmux 任务）**：如果你想体验「换 VPR 架构」而非「换 openfpga_arch」的那条路，可以直接复刻 4.4.3 案例里的 `k4n4_frac_mult_busmux`——它的 `[ARCHITECTURES]` 指向带 `busmux` 后缀的 VPR 架构（`k4_frac_N4_tileable_adder_chain_mem1K_frac_dsp32_busmux_40nm.xml`），基准同样是 `and2`。`create-task my_busmux basic_tests/k4_series/k4n4_frac_mult_busmux` 复制一份后干跑，预期仍是 1 个 job，产出路径形如 `my_busmux/run001/k4_frac_N4_tileable_adder_chain_mem1K_frac_dsp32_busmux_40nm/and2/MIN_ROUTE_CHAN_WIDTH/`。这一变体把本讲四个模块换了一个维度（架构侧而非电路协议侧）再串一遍。
+
 ## 6. 本讲小结
 
 - 一个**任务**就是一个含 `config/task.conf` 的目录；`task.conf` 分 `GENERAL`/`OpenFPGA_SHELL`/`ARCHITECTURES`/`BENCHMARKS`/`SYNTHESIS_PARAM`/`SCRIPT_PARAM_*` 等段，其中前三段（`GENERAL`/`BENCHMARKS`/`ARCHITECTURES`）必需。
@@ -466,10 +499,11 @@ basic_tests/
 - 并行由 `--maxthreads`（默认 2）配 `threading.Semaphore` 限流；默认任一 job 失败即整批退出，加 `--continue_on_fail` 可放宽；`--test_run` 可只切 job 不执行。
 - **基准**位于 `openfpga_flow/benchmarks/`，`micro_benchmark/` 下是最小的微基准（如 `and2`），是回归与教学主力；基准靠 `benchN_` 前缀在 `[BENCHMARKS]` 与 `[SYNTHESIS_PARAM]` 间对齐。
 - **回归测试**分两层：`basic_tests/` 按特性分任务，`regression_test_scripts/*.sh` 串成脚本，CI（`build.yml`）矩阵式批量触发；`basic_reg_test.sh` 末尾还用 `git diff` 黄金网表做输出锁定校验。
+- **新特性落地回归的标准范式**（本次「Bus Based MUX」的实例）：一个能跑通的功能任务（`k4_series/k4n4_frac_mult_busmux`）+ 一个锁定关键产出的 `no_time_stamp` 任务（`frac_dsp_busmux`，用 `.gitignore` 白名单只锁 `bitstream_distribution.xml` 等三个文件）+ 回归脚本里各加一行 `run-task`。
 
 ## 7. 下一步学习建议
 
 - **向深处走（任务编排）**：本讲只到 `run_fpga_task.py`。它最终调用的是 `run_fpga_flow.py`，后者负责 yosys 综合、`.openfpga` 模板的 `${}` 变量替换（`safe_substitute`）与编排。读 `openfpga_flow/scripts/run_fpga_flow.py` 能补全「任务 → 单次流程」的最后一环。
 - **向宽处走（特性覆盖面）**：`basic_tests/` 的子目录名就是一份特性清单。建议挑一两个你感兴趣的目录（如 `clock_network/`、`fabric_key/`、`tile_organization/`），对照各自 `task.conf` 与对应回归脚本段落，理解每项特性在测什么——这也是后续专家层讲义（u9 时钟网络、u9 fabric key/tile、u9 GSB）的实景地图。
 - **承接配置协议**：本讲综合实践把 cc 换成了 frame，触及了 `configuration_protocol`。若想彻底搞懂 scan_chain / frame_based / memory_bank 的区别与下游影响，接着学 u3-l4（配置协议）与 u7（比特流生成）。
-- **动手贡献**：当你给 OpenFPGA 加了新功能，按本讲的模式在 `basic_tests/` 下加一个任务、在对应 `*_reg_test.sh` 里加一行 `run-task`，就完成了一次回归测试覆盖。贡献规范与格式化细节见 u10-l5。
+- **动手贡献**：当你给 OpenFPGA 加了新功能，按本讲的模式在 `basic_tests/` 下加一个任务、在对应 `*_reg_test.sh` 里加一行 `run-task`，就完成了一次回归测试覆盖。本次「Bus Based MUX」就是最佳范本——它同时加了功能性任务 `k4_series/k4n4_frac_mult_busmux` 和黄金锁定任务 `no_time_stamp/frac_dsp_busmux`，你可以直接照抄这套「双任务 + `.gitignore` 白名单」结构。贡献规范与格式化细节见 u10-l5。

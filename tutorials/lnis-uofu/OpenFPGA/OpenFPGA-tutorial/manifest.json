@@ -1,7 +1,7 @@
 {
   "project": "OpenFPGA",
-  "head": "a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a",
-  "rationale": "OpenFPGA 是一个用 C++ 编写、经过流片验证的开源 FPGA IP 生成框架，代码量大（仅 openfpga/src 下就有 200+ 个源文件，外加 13 个独立支撑库）。因此学习手册按「先会用、再懂原理、最后能扩展」的三层渐进设计。\n\n入门层（u1–u3）让读者从零开始：先认识项目定位与目录结构，学会用 CMake/Makefile 编译并用 Python 脚本跑通第一个设计流；再理解 openfpga 可执行程序的 shell 入口、命令分组与 OpenfpgaContext 全局数据中枢；最后搞清楚驱动整个流程的两套输入文件（VPR 架构 XML 与 openfpga_arch.xml），重点是电路库与配置协议。这一层遵循「定位→编译→运行→理解输入」的真实上手顺序。\n\n进阶层（u4–u8）沿着 canonical example_script.openfpga 的真实命令链展开：架构加载与 VPR 标注 → build_fabric 构建 ModuleManager 模块图 → 两级比特流模型与生成 → Verilog/SPICE/SDC 网表与约束输出。每个单元对应一条主链路上的核心子系统，讲义之间存在严格的上下游依赖（例如 fabric 比特流依赖模块图与 architecture 比特流），保证读者按顺序学习时不会出现知识断层。\n\n专家层（u9–u10）面向二次开发与架构取舍：存储器组/移位寄存器 bank、时钟网络、repack、tile 直连、GSB 压缩等高级机制，以及支撑库（util/mux/decoder/pcf/bus_group/mif 等）的内部实现，最后落到如何用 Shell<T> 框架新增命令、如何用回归测试与 CI 参与贡献。讲义数量（41 篇）与项目规模匹配，所有源码引用均经过实际核对，不依赖硬拆。",
+  "head": "97c06e27a112c255112c48d4007b2b3a16267371",
+  "rationale": "OpenFPGA 是一个用 C++ 编写、经过流片验证的开源 FPGA IP 生成框架，代码量大（仅 openfpga/src 下就有 200+ 个源文件，外加 13 个独立支撑库）。因此学习手册按「先会用、再懂原理、最后能扩展」的三层渐进设计。\n\n入门层（u1–u3）让读者从零开始：先认识项目定位与目录结构，学会用 CMake/Makefile 编译并用 Python 脚本跑通第一个设计流；再理解 openfpga 可执行程序的 shell 入口、命令分组与 OpenfpgaContext 全局数据中枢；最后搞清楚驱动整个流程的两套输入文件（VPR 架构 XML 与 openfpga_arch.xml），重点是电路库与配置协议。这一层遵循「定位→编译→运行→理解输入」的真实上手顺序。\n\n进阶层（u4–u8）沿着 canonical example_script.openfpga 的真实命令链展开：架构加载与 VPR 标注 → build_fabric 构建 ModuleManager 模块图 → 两级比特流模型与生成 → Verilog/SPICE/SDC 网表与约束输出。每个单元对应一条主链路上的核心子系统，讲义之间存在严格的上下游依赖（例如 fabric 比特流依赖模块图与 architecture 比特流），保证读者按顺序学习时不会出现知识断层。\n\n专家层（u9–u10）面向二次开发与架构取舍：存储器组/移位寄存器 bank、时钟网络、repack、tile 直连、GSB 压缩等高级机制，以及支撑库（util/mux/decoder/pcf/bus_group/mif 等）的内部实现，最后落到如何用 Shell<T> 框架新增命令、如何用回归测试与 CI 参与贡献。讲义数量（41 篇）与项目规模匹配，所有源码引用均经过实际核对，不依赖硬拆。\n\n本次增量（HEAD a1e5133 → 97c06e27）仅引入一个特性提交「Bus Based MUX (#2602)」：它让 OpenFPGA 支持把 VPR arch 中带 bus 属性的 interconnect 实现为「多个逻辑实例共享同一存储器/选择器」的总线型多路选择器。该特性是 grid 模块构建（add_module_pb_bus_mux_interc）与 grid 比特流生成（共享选择位、要求整条 bus 选择同一输入）的扩展，并伴随 module_manager_utils 的新增共享存储器连线函数、pb_graph_utils 的新增总线互连判断辅助函数，以及 gsb_version 改为从 VPR device context 读取（带 gsb_version_set_ 守卫）。因此无需新增讲义：在 u6-l1/u6-l3/u7-l2 讲解模块构建与比特流时补充总线型 mux 内容，在 u5-l3/u5-l4/u9-l5 补充 gsb 版本来源变化，在 u4-l2/u10-l5 补充新增的 busmux 回归任务与测试。未受影响的讲义保持 keep。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "阅读 README 与引用论文摘要，用一段话写出 OpenFPGA 解决了什么问题、它的输入和输出分别是什么，并画出 Verilog→Bitstream 的粗粒度流程框图。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -91,7 +91,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -121,7 +121,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -159,7 +159,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -191,7 +191,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -219,7 +219,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -255,7 +255,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -283,7 +283,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -312,7 +312,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -341,7 +341,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -381,7 +381,7 @@
             "u2-l2",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -389,15 +389,16 @@
           "order": 2,
           "filename": "u4-l2-tasks-benchmarks-regression.md",
           "level": "intermediate",
-          "topic": "讲解 openfpga_flow/tasks 的组织方式、task.conf 的各段（ARCHITECTURES × BENCHMARKS × SYNTHESIS_PARAM 笛卡尔积）、benchmarks 目录，以及 .github/workflows 回归测试如何批量验证特性。",
+          "topic": "讲解 openfpga_flow/tasks 的组织方式、task.conf 的各段（ARCHITECTURES × BENCHMARKS × SYNTHESIS_PARAM 笛卡尔积）、benchmarks 目录，以及 .github/workflows 回归测试如何批量验证特性。本次更新补充新增的 busmux（总线型 mux）回归任务示例。",
           "learning_goals": [
             "理解 task.conf 如何通过架构×基准组合生成多个 job",
             "掌握 run_fpga_task.py 的 --maxthreads 并行调度与 run 目录编号",
-            "认识回归测试脚本与 basic_tests 各子目录覆盖的特性（full_testbench、fabric_key、clock_network 等）"
+            "认识回归测试脚本与 basic_tests 各子目录覆盖的特性（full_testbench、fabric_key、clock_network、busmux 等）"
           ],
           "source_files": [
             "openfpga_flow/scripts/run_fpga_task.py",
             "openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf",
+            "openfpga_flow/tasks/basic_tests/k4_series/k4n4_frac_mult_busmux/config/task.conf",
             "openfpga_flow/benchmarks/micro_benchmark/and2/and2.v"
           ],
           "minimal_modules": [
@@ -406,11 +407,11 @@
             "benchmarks 基准",
             "回归测试"
           ],
-          "practice_task": "参照一个现有 task.conf，复制并修改出一个小任务：换用一个不同的 openfpga_arch（如 frame 版）配合同一组 and2/or2 基准，跑通后检查产出是否符合预期。",
+          "practice_task": "参照一个现有 task.conf，复制并修改出一个小任务：换用一个不同的 openfpga_arch（如 frame 版或 busmux 版 VPR arch）配合同一组 and2/or2 基准，跑通后检查产出是否符合预期。",
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l3",
@@ -438,7 +439,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -476,7 +477,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -507,7 +508,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -515,11 +516,11 @@
           "order": 3,
           "filename": "u5-l3-link-arch.md",
           "level": "intermediate",
-          "topic": "讲解 link_openfpga_arch 命令如何把 OpenFPGAArch 与 VPR 跑完后的 device context 关联起来，建立 circuit model 与 pb graph、rr graph switch/segment 的映射，并读入 activity 文件。",
+          "topic": "讲解 link_openfpga_arch 命令如何把 OpenFPGAArch 与 VPR 跑完后的 device context 关联起来，建立 circuit model 与 pb graph、rr graph switch/segment 的映射，并读入 activity 文件。本次更新说明：GSB 版本（GSB_V1/V2）不再是命令选项，而是直接从 VPR device context（RR graph 生成阶段写入）中读取，以避免与 VPR 选项不一致。",
           "learning_goals": [
             "理解 link 阶段在 vpr 与 build_fabric 之间的桥梁作用",
-            "掌握 activity file、sort_gsb_chan_node_in_edges 等选项含义",
-            "认识链接结果存入 vpr_device_annotation 等标注结构"
+            "掌握 activity file、sort_gsb_chan_node_in_edges、allow_gsb_dangling_opin 等选项含义",
+            "认识 GSB 版本由 VPR device context 决定（非 link 命令选项），链接结果存入 vpr_device_annotation 等标注结构"
           ],
           "source_files": [
             "openfpga/src/base/openfpga_link_arch_template.h",
@@ -531,12 +532,12 @@
             "VprDeviceAnnotation",
             "pb_type 标注"
           ],
-          "practice_task": "在 example_script.openfpga 中分别注释掉 link_openfpga_arch 前后的命令，观察 build_fabric 是否仍能成功，据此总结 link 阶段提供的关键数据。",
+          "practice_task": "在 example_script.openfpga 中分别注释掉 link_openfpga_arch 前后的命令，观察 build_fabric 是否仍能成功，据此总结 link 阶段提供的关键数据；并说明为何 gsb 版本要从 VPR context 而非命令行获取。",
           "depends_on": [
             "u5-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l4",
@@ -544,11 +545,11 @@
           "order": 4,
           "filename": "u5-l4-vpr-annotation.md",
           "level": "intermediate",
-          "topic": "系统讲解 openfpga/src/annotation 目录：它如何在不修改 VPR 源码的前提下，用一系列 Vpr*Annotation 结构补充 VPR 的 device/netlist/clustering/placement/routing/bitstream 信息，以及 device_rr_gsb、fabric_tile 等设备级标注。",
+          "topic": "系统讲解 openfpga/src/annotation 目录：它如何在不修改 VPR 源码的前提下，用一系列 Vpr*Annotation 结构补充 VPR 的 device/netlist/clustering/placement/routing/bitstream 信息，以及 device_rr_gsb、fabric_tile 等设备级标注。本次更新说明 DeviceRRGSB 的 gsb_version 现由 VPR device context 在 link 阶段设置，并用 gsb_version_set_ 守卫防止未设置即读取。",
           "learning_goals": [
             "理解 annotation 模式如何在不侵入 VPR 的前提下扩展其数据",
             "识别各类 Vpr*Annotation 的职责（device/netlist/clustering/placement/routing/bitstream）",
-            "认识 DeviceRRGSB 与 FabricTile 等设备级标注结构"
+            "认识 DeviceRRGSB（含 gsb_version 守卫）与 FabricTile 等设备级标注结构"
           ],
           "source_files": [
             "openfpga/src/annotation/vpr_device_annotation.h",
@@ -563,11 +564,11 @@
             "FabricTile",
             "netlist 命名冲突检查"
           ],
-          "practice_task": "在 annotation/ 目录中归类：哪些是「标注 VPR 结果」、哪些是「构建 OpenFPGA 自有设备结构」，并用一句话写出 check_netlist_naming_conflict --fix 解决了什么问题。",
+          "practice_task": "在 annotation/ 目录中归类：哪些是「标注 VPR 结果」、哪些是「构建 OpenFPGA 自有设备结构」；并用一句话写出 check_netlist_naming_conflict --fix 解决了什么问题，以及 DeviceRRGSB 的 gsb_version 从哪里获得。",
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -583,28 +584,30 @@
           "order": 1,
           "filename": "u6-l1-module-manager.md",
           "level": "intermediate",
-          "topic": "深入 ModuleManager：模块（ModuleId）、端口（ModulePortId）、子模块实例（child/instance）、网（ModuleNet）的概念，以及可配置子模块、配置区域、IO 子模块等扩展。",
+          "topic": "深入 ModuleManager：模块（ModuleId）、端口（ModulePortId）、子模块实例（child/instance）、网（ModuleNet）的概念，以及可配置子模块、配置区域、IO 子模块等扩展。本次更新补充模块工具函数 module_manager_utils 中新增的「多个逻辑实例共享同一存储器 SRAM 总线」连线函数 add_module_nets_between_logics_and_shared_memory_sram_bus（服务于总线型 mux）。",
           "learning_goals": [
             "掌握 ModuleManager 的核心抽象：模块、端口、实例、网",
             "理解模块的 usage 类型（TOP/GRID/SB/CB/LUT/MUX/MEMORY 等）",
-            "认识 logical vs physical 可配置子模块与配置区域"
+            "认识 logical vs physical 可配置子模块、配置区域，以及为多个逻辑实例共享单个存储器的连线工具"
           ],
           "source_files": [
             "openfpga/src/fabric/module_manager.h",
             "openfpga/src/fabric/module_manager.cpp",
-            "openfpga/src/utils/module_manager_utils.cpp"
+            "openfpga/src/utils/module_manager_utils.cpp",
+            "openfpga/src/utils/module_manager_utils.h"
           ],
           "minimal_modules": [
             "ModuleManager 模块图",
             "端口与实例",
             "ModuleNet 连接",
-            "可配置子模块"
+            "可配置子模块",
+            "共享存储器连线工具"
           ],
-          "practice_task": "阅读 module_manager.h，列出 ModuleManager 提供的「增加模块/端口/子模块实例/网」的关键 API，并解释一个 LUT 模块如何作为子模块被实例化进 grid 模块。",
+          "practice_task": "阅读 module_manager.h 与 module_manager_utils.h，列出 ModuleManager 提供的「增加模块/端口/子模块实例/网」的关键 API，并对比 add_module_nets_between_logic_and_memory_sram_bus（单逻辑实例）与新增的 add_module_nets_between_logics_and_shared_memory_sram_bus（多逻辑实例共享存储器）的差异。",
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l2",
@@ -633,7 +636,7 @@
             "u6-l1",
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -641,11 +644,12 @@
           "order": 3,
           "filename": "u6-l3-build-submodules.md",
           "level": "intermediate",
-          "topic": "讲解各类模块的构建细节：build_grid_modules（CLB/IO）、build_routing_modules（SB/CB，含 unique 与 flatten 两种）、build_memory_modules（配置存储器）、build_mux_modules、build_lut_modules、build_decoder_modules。",
+          "topic": "讲解各类模块的构建细节：build_grid_modules（CLB/IO）、build_routing_modules（SB/CB，含 unique 与 flatten 两种）、build_memory_modules、build_mux_modules、build_lut_modules、build_decoder_modules。本次更新补充 build_grid_modules 中新增的总线型 mux 互连构建（add_module_pb_bus_mux_interc）：当 VPR pb graph interconnect 带 bus 属性时，多个逻辑实例的输出共享一个存储器/选择器，并用 pb_graph_utils 的 is_pb_graph_pin_bus_interc / pb_graph_interc_sink_pins 辅助判定与收集 sink 引脚。",
           "learning_goals": [
             "理解 grid 模块如何从 pb graph 电路模型实例化而来",
             "掌握 routing 模块的 unique（压缩）与 flatten 两种生成方式",
-            "认识 memory/mux/lut/decoder 模块的构建与电路模型绑定"
+            "认识 memory/mux/lut/decoder 模块的构建与电路模型绑定",
+            "理解总线型 mux 互连如何让多个逻辑实例共享同一存储器选择器"
           ],
           "source_files": [
             "openfpga/src/fabric/build_grid_modules.cpp",
@@ -653,19 +657,21 @@
             "openfpga/src/fabric/build_memory_modules.cpp",
             "openfpga/src/fabric/build_mux_modules.cpp",
             "openfpga/src/fabric/build_lut_modules.cpp",
-            "openfpga/src/fabric/build_decoder_modules.cpp"
+            "openfpga/src/fabric/build_decoder_modules.cpp",
+            "openfpga/src/utils/pb_graph_utils.h"
           ],
           "minimal_modules": [
             "grid 模块构建",
             "routing 模块构建",
             "memory 模块",
-            "mux/lut/decoder 模块"
+            "mux/lut/decoder 模块",
+            "总线型 mux 互连"
           ],
-          "practice_task": "选择 build_grid_modules.cpp 与 build_routing_modules.cpp，分别说明它们如何利用 circuit_library 与 device_rr_gsb 来决定要实例化哪些子模块。",
+          "practice_task": "选择 build_grid_modules.cpp 与 build_routing_modules.cpp，分别说明它们如何利用 circuit_library 与 device_rr_gsb 来决定要实例化哪些子模块；并跟踪 add_module_pb_bus_mux_interc 如何用 pb_graph_utils 判定 bus 互连并连接共享存储器。",
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l4",
@@ -695,7 +701,7 @@
           "depends_on": [
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -723,9 +729,9 @@
           ],
           "practice_task": "运行 generate_fabric_example_script.openfpga，检查输出的 fabric_key.xml 与 fabric_hierarchy.txt，解释 hierarchy 文件如何服务于层次化后端流程。",
           "depends_on": [
-            "u6-4"
+            "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -760,9 +766,9 @@
           ],
           "practice_task": "阅读 bitstream_manager.h 与 fabric_bitstream.h，对比两者的数据组织方式，说明为什么需要两级表示而不是直接生成最终比特流。",
           "depends_on": [
-            "u6-4"
+            "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -770,11 +776,12 @@
           "order": 2,
           "filename": "u7-l2-architecture-bitstream.md",
           "level": "intermediate",
-          "topic": "讲解 build_architecture_bitstream 如何遍历布局布线结果生成 device 级比特流：build_grid_bitstream（查找表/IO 配置位）、build_routing_bitstream（布线 mux 选择位）、build_mux_bitstream。",
+          "topic": "讲解 build_architecture_bitstream 如何遍历布局布线结果生成 device 级比特流：build_grid_bitstream（查找表/IO 配置位）、build_routing_bitstream（布线 mux 选择位）、build_mux_bitstream。本次更新补充 build_grid_bitstream 中新增的总线型 mux（bus-based mux）支持：当 interconnect 带 bus 属性时，整条输出 bus 共享同一个选择器，因此要求 bus 的所有位选择同一输入端口，否则报错；并新增 find_physical_block_pin_mux_path_id 用于定位 mux 选择位。",
           "learning_goals": [
             "理解 device 比特流的生成入口与遍历对象（grid/routing 结果）",
             "掌握 grid 比特流如何从 LUT truth table 与 pb 标注解码",
-            "认识 routing 比特流如何决定每个布线 mux 的选择位"
+            "认识 routing 比特流如何决定每个布线 mux 的选择位",
+            "理解总线型 mux 比特流的「共享选择器、bus 各位须同选一输入」约束"
           ],
           "source_files": [
             "openfpga/src/fpga_bitstream/build_device_bitstream.cpp",
@@ -787,14 +794,15 @@
             "build_device_bitstream",
             "grid 比特流",
             "routing 比特流",
-            "mux 比特流"
+            "mux 比特流",
+            "总线型 mux 比特流"
           ],
-          "practice_task": "跟踪 build_architecture_bitstream --write_file 输出的 fabric_independent_bitstream.xml，找出其中对应某个 LUT 与某个布线 mux 的配置位是如何解码出来的。",
+          "practice_task": "跟踪 build_architecture_bitstream --write_file 输出的 fabric_independent_bitstream.xml，找出其中对应某个 LUT 与某个布线 mux 的配置位是如何解码出来的；并对照 k4n4_frac_mult_busmux 任务说明总线型 mux 的选择位如何被共享。",
           "depends_on": [
             "u7-l1",
-            "u4-3"
+            "u4-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u7-l3",
@@ -821,9 +829,9 @@
           ],
           "practice_task": "对同一设计分别用 cc 与 bank 配置协议生成 fabric 比特流，对比 write_fabric_bitstream 输出，说明 bank 版如何体现 BL/WL 寻址。",
           "depends_on": [
-            "u7-2"
+            "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -851,9 +859,9 @@
           ],
           "practice_task": "运行 fast_configuration_example_script.openfpga，对比开启与关闭 fast_configuration 时输出的比特流长度，并解释为什么能省掉大量位。",
           "depends_on": [
-            "u7-3"
+            "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -890,9 +898,9 @@
           ],
           "practice_task": "运行 write_fabric_verilog，检查 SRC 目录下生成的子模块网表，对照 ModuleManager 中的模块清单确认二者对应关系。",
           "depends_on": [
-            "u6-4"
+            "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -921,10 +929,10 @@
           ],
           "practice_task": "对同一设计分别生成 full 与 preconfigured testbench，用 iverilog 跑一遍（参考 iverilog_example_script.openfpga），比较两者仿真时间与覆盖范围。",
           "depends_on": [
-            "u8-1",
-            "u7-4"
+            "u8-l1",
+            "u7-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -951,9 +959,9 @@
           ],
           "practice_task": "运行 generate_spice_example_script.openfpga，检查生成的 SPICE 网表，找出其中引用 technology_library 里器件模型的位置。",
           "depends_on": [
-            "u6-4"
+            "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -982,9 +990,9 @@
           ],
           "practice_task": "运行 example_script.openfpga 末尾的 write_pnr_sdc/write_analysis_sdc/write_sdc_disable_timing_configure_ports，检查 SDC 目录，说明每类 SDC 服务于哪个后端阶段。",
           "depends_on": [
-            "u8-1"
+            "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1019,10 +1027,10 @@
           ],
           "practice_task": "对比 qlbank（decoder）、qlbankflatten、qlbanksr（shift register）三类 arch 的 fabric key 与比特流输出，总结移位寄存器 bank 带来的结构差异。",
           "depends_on": [
-            "u7-3",
-            "u6-4"
+            "u7-l3",
+            "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1050,9 +1058,9 @@
           ],
           "practice_task": "阅读 example_clkntwk_script.openfpga 与一个 clock_network arch，画出时钟树的 spine/tap 结构，并解释它如何替代传统全局时钟布线。",
           "depends_on": [
-            "u5-3"
+            "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1082,10 +1090,10 @@
           ],
           "practice_task": "在 example_script.openfpga 中把 repack 移到 build_architecture_bitstream 之后运行，观察报错或比特流差异，据此解释 repack 为何必须在比特流生成之前。",
           "depends_on": [
-            "u4-3",
-            "u7-2"
+            "u4-l3",
+            "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1114,9 +1122,9 @@
           ],
           "practice_task": "对比 group_tile_* 与普通 example 脚本的输出，说明 fabric_tile 如何把重复的 grid+sb+cb 组合压缩成单一可复用模块。",
           "depends_on": [
-            "u6-4"
+            "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l5",
@@ -1124,14 +1132,15 @@
           "order": 5,
           "filename": "u9-l5-gsb-unique-blocks.md",
           "level": "advanced",
-          "topic": "讲解 DeviceRRGSB（设备级通用开关块标注）如何识别并压缩重复的 GSB/模块，以及 read/write_unique_blocks（XML 与二进制）如何缓存这些唯一块以加速大阵列构建。",
+          "topic": "讲解 DeviceRRGSB（设备级通用开关块标注）如何识别并压缩重复的 GSB/模块，以及 read/write_unique_blocks（XML 与二进制）如何缓存这些唯一块以加速大阵列构建。本次更新说明 GSB 版本（V1/V2）现由 VPR device context 在 link 阶段注入，并用 gsb_version_set_ 守卫防止未设置即读取，annotate_device_rr_gsb 据此选择 GSB_V2 的 side-agnostic 构建路径。",
           "learning_goals": [
             "理解 DeviceRRGSB 的 unique block 压缩思想",
             "掌握 --compress_routing 如何减少模块与网表数量",
-            "认识 unique blocks 的 XML/二进制读写与 GSB V2"
+            "认识 unique blocks 的 XML/二进制读写与 GSB V2 及其版本来源（VPR device context）"
           ],
           "source_files": [
             "openfpga/src/annotation/device_rr_gsb.h",
+            "openfpga/src/annotation/annotate_rr_graph.cpp",
             "openfpga/src/annotation/read_unique_blocks_xml.h",
             "openfpga/src/annotation/write_unique_blocks_xml.h",
             "openfpga/src/utils/device_rr_gsb_utils.cpp",
@@ -1141,14 +1150,14 @@
             "DeviceRRGSB",
             "unique block 压缩",
             "unique blocks 读写",
-            "GSB 写出"
+            "GSB 版本来源"
           ],
-          "practice_task": "运行 read_write_unique_blocks_full_flow_example_script.openfpga，对比压缩前后生成网表的数量，并解释 unique blocks 缓存如何加速重复构建。",
+          "practice_task": "运行 read_write_unique_blocks_full_flow_example_script.openfpga，对比压缩前后生成网表的数量，并解释 unique blocks 缓存如何加速重复构建；同时说明 GSB 版本为何从 VPR device context 获取而非命令行。",
           "depends_on": [
-            "u5-4",
-            "u6-3"
+            "u5-l4",
+            "u6-l3"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -1185,9 +1194,9 @@
           ],
           "practice_task": "在 fabric/ 与 fpga_bitstream/ 中搜索 openfpga_decode 与 openfpga_port 的使用点，说明它们在地址生成与端口处理中各起什么作用。",
           "depends_on": [
-            "u5-1"
+            "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1216,9 +1225,9 @@
           ],
           "practice_task": "阅读 mux_library_builder.cpp，说明它如何从 device_rr_gsb 与 grid 中统计出所有不同尺寸的 mux，并解释去重对模块数量的影响。",
           "depends_on": [
-            "u6-3"
+            "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1249,9 +1258,9 @@
           ],
           "practice_task": "运行 pin_constrain_example_script.openfpga 与 auto_bus_group_example_script.openfpga，说明 PCF 与 bus group 如何改变 IO 引脚映射与网表端口组织。",
           "depends_on": [
-            "u8-2"
+            "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1270,7 +1279,7 @@
             "libs/libopenfpgashell/src/base/command.h",
             "libs/libopenfpgashell/src/base/command_context.h",
             "libs/libopenfpgashell/src/base/command_parser.h",
-            "libs/libopenfpgashell/src/base/command_exit_codes.h",
+            "libs/libopenfpgashell/src/base/command_exit_code.h",
             "openfpga/src/base/openfpga_setup_command_template.h"
           ],
           "minimal_modules": [
@@ -1282,9 +1291,9 @@
           ],
           "practice_task": "仿照 openfpga_setup_command_template.h 中某个简单命令，新增一条只读命令（如打印当前 module_graph 的模块数量），注册到 shell 并验证可调用。",
           "depends_on": [
-            "u2-2"
+            "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l5",
@@ -1292,18 +1301,19 @@
           "order": 5,
           "filename": "u10-l5-testing-ci-contributing.md",
           "level": "advanced",
-          "topic": "讲解回归测试体系（.github/workflows、regression_test_scripts、openfpga.sh 的 run-regression-local）、VPR wrapper 集成方式、代码格式化（clang-format/xml/py），以及 dev/ 目录的开发者工具与贡献流程。",
+          "topic": "讲解回归测试体系（.github/workflows、regression_test_scripts/basic_reg_test.sh、openfpga.sh 的 run-regression-local）、VPR wrapper 集成方式、代码格式化（clang-format/xml/py），以及 dev/ 目录的开发者工具与贡献流程。本次更新补充 basic_reg_test.sh 中新增的 busmux（总线型 mux）回归用例。",
           "learning_goals": [
             "掌握如何用 run-task 与回归脚本本地验证改动",
             "理解 vpr_wrapper 如何以 MACRO 方式集成 VPR",
-            "认识项目的代码风格工具与贡献规范"
+            "认识项目的代码风格工具、贡献规范与 basic_reg_test 覆盖的特性集（含 busmux）"
           ],
           "source_files": [
             "openfpga/src/vpr_wrapper/vpr_main.cpp",
             "openfpga/src/vpr_wrapper/vpr_command.cpp",
             "Makefile",
             ".github/workflows/build.yml",
-            "openfpga_flow/scripts/run_fpga_task.py"
+            "openfpga_flow/scripts/run_fpga_task.py",
+            "openfpga_flow/regression_test_scripts/basic_reg_test.sh"
           ],
           "minimal_modules": [
             "回归测试与 CI",
@@ -1311,11 +1321,11 @@
             "格式化工具",
             "贡献规范"
           ],
-          "practice_task": "在本地运行 run-regression-local 或挑选一个 basic_tests 子集跑通，然后对一处源码做小改动，运行 make format-cpp 验证风格，并描述如何为新增功能补一个回归 task。",
+          "practice_task": "在本地运行 run-regression-local 或挑选一个 basic_tests 子集（如新增的 busmux 任务）跑通，然后对一处源码做小改动，运行 make format-cpp 验证风格，并描述如何为新增功能补一个回归 task。",
           "depends_on": [
-            "u4-2"
+            "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     }
