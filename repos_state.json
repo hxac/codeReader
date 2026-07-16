@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-16T11:01:49Z"
+      "last_run_at": "2026-07-16T15:37:14Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -16269,8 +16269,8 @@
     },
     "jbush001/NyuziProcessor": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "1 篇未完成: ['u3-l1']",
-      "last_run_at": "2026-07-16T11:01:49Z",
+      "last_error": "quota exhausted; will resume next window",
+      "last_run_at": "2026-07-16T15:37:14Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -16333,7 +16333,7 @@
           "action": "new",
           "retries": 4,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":400,\"duration_ms\":11143,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: 400 [1301][系统检测到输入或生成内容可能包含不安全或敏感内"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192891,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u3-l2": {
           "status": "done",
@@ -17458,7 +17458,7 @@
           "action": "new",
           "retries": 1,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":479533,\"duration_api_ms\":201090,\"num_turns\":24,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":188476,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u7-l3": {
           "status": "done",
@@ -17555,13 +17555,13 @@
       "mode": "full",
       "tutorial_path": "tutorials/lnis-uofu/OpenFPGA/OpenFPGA-tutorial",
       "last_head": "a1e51333d2dd85cc4a640b6e384f0c9f5d97aa4a",
-      "last_run_at": "2026-07-16T11:01:49Z",
+      "last_run_at": "2026-07-16T15:37:14Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "verilog-to-routing/vtr-verilog-to-routing": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-16T11:01:49Z",
+      "last_run_at": "2026-07-16T15:37:14Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -17722,7 +17722,7 @@
           "action": "new",
           "retries": 1,
           "cost": null,
-          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":479584,\"duration_api_ms\":226875,\"num_turns\":21,\"result\":\"API Error: The operation timed out.\","
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":202444,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u6-l4": {
           "status": "done",
