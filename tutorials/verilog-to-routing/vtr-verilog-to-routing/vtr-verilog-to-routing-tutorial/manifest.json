@@ -1,0 +1,1043 @@
+{
+  "project": "vtr-verilog-to-routing",
+  "head": "c3ad1ec64818c9db312e24967de9d6283410ab19",
+  "rationale": "VTR 是一个大型 FPGA CAD 框架，核心是 VPR（打包/布局/布线/时序），其设计灵魂是「架构驱动」——目标 FPGA 以 XML 描述、在启动时解析为 libarchfpga 数据结构。因此学习路线必须先让读者建立全局观，再深入架构解析，然后才是核心数据结构与三大 CAD 阶段。本手册分为 9 个单元、34 篇讲义：第 1 单元（入门）从零开始建立项目定位、构建运行、目录地图与全流程跑通；第 2 单元专攻架构 XML 与物理类型/器件网格；第 3 单元讲透 Netlist 家族与 VprContext 全局状态、以及 vpr_api 主流程编排；第 4–7 单元按真实数据流 AtomNetlist→Prepack→Packer→ClusteredNetlist→Placer→Router→Timing 顺序逐阶段深入；第 8 单元覆盖分析式布局、NoC、功耗、图形、Server/并行等高级扩展；第 9 单元收尾于共享库、测试与回归评估。讲义依赖按数据流自底向上编排，保证读者每篇都站在前序知识之上；每篇只解决一个主题、引用 1–6 个经确认的真实源码文件，并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 VTR：定位、构建与全流程运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "VTR 是什么：项目定位与设计理念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 VTR 作为开源 FPGA CAD 框架的整体定位、PARMYS→ABC→VPR 三段式流程，以及「架构驱动、不硬编码架构假设」这一核心设计理念。",
+          "learning_goals": [
+            "理解 VTR 解决什么问题、输入输出是什么",
+            "掌握 PARMYS、ABC、VPR 三段流程各自职责",
+            "理解架构 XML 在运行时才确定目标 FPGA 的设计哲学"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "doc/agents/codebase.md"
+          ],
+          "minimal_modules": [
+            "VTR 项目背景与价值",
+            "三段式 CAD 流程总览",
+            "架构驱动设计理念"
+          ],
+          "practice_task": "阅读 README.md 与 AGENTS.md，用一段话写出 VTR 的输入、三段流程与最终产物；并列出 VTR 支持的两到三个目标 FPGA 架构文件来源。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与运行 VTR",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用根目录 Makefile 包装的 CMake 构建系统编译 VTR，包括构建类型、并行编译、常见编译选项。",
+          "learning_goals": [
+            "掌握 make / make vpr 的标准构建命令",
+            "理解 Makefile 如何包装 CMake 以及构建产物位置",
+            "知道 release/debug/strict/pgo 等构建类型区别"
+          ],
+          "source_files": [
+            "Makefile",
+            "BUILDING.md",
+            "CMakeLists.txt",
+            "doc/agents/build.md"
+          ],
+          "minimal_modules": [
+            "Makefile 包装层的工作原理",
+            "构建类型与 CMAKE_PARAMS",
+            "构建加速技巧"
+          ],
+          "practice_task": "在本地克隆后运行 make -j8 vpr 完成最小构建，记录构建产物所在的 build/ 目录路径，并尝试用 BUILD_TYPE=debug 重新构建一次。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与组件地图",
+          "order": 3,
+          "filename": "u1-l3-repository-structure.md",
+          "level": "beginner",
+          "topic": "梳理 VTR 顶层目录（vpr、parmys、odin_ii、abc、ace2、libs、vtr_flow、utils、doc）与 VPR 内部子目录（base、pack、place、route、timing 等）的职责。",
+          "learning_goals": [
+            "看懂顶层每个目录的用途",
+            "掌握 VPR/src 各子目录的责任划分",
+            "能根据要解决的问题快速定位目录"
+          ],
+          "source_files": [
+            "doc/agents/codebase.md",
+            "README.md",
+            "libs/README.md"
+          ],
+          "minimal_modules": [
+            "顶层组件地图",
+            "VPR 内部子目录职责",
+            "外部子树 libs/EXTERNAL 规则"
+          ],
+          "practice_task": "参照 doc/agents/codebase.md 绘制一张 VTR 顶层与 vpr/src 的目录职责速查表，并标注哪些目录属于外部不可直接修改的代码。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "一键跑通 VTR 全流程",
+          "order": 4,
+          "filename": "u1-l4-run-full-flow.md",
+          "level": "beginner",
+          "topic": "使用 vtr_flow/scripts/run_vtr_flow.py 把一个电路与架构跑通完整流程，理解 VTR_STAGES 与 Verilog 到布线结果的端到端链路。",
+          "learning_goals": [
+            "会用 run_vtr_flow.py 跑通一个完整设计",
+            "理解 odin/parmys/abc/vpr 各阶段产物",
+            "知道如何在指定阶段开始或结束"
+          ],
+          "source_files": [
+            "vtr_flow/scripts/run_vtr_flow.py",
+            "vtr_flow/README.md",
+            "doc/src/quickstart/index.rst"
+          ],
+          "minimal_modules": [
+            "run_vtr_flow.py 命令行参数",
+            "VTR_STAGES 阶段流转",
+            "中间产物文件"
+          ],
+          "practice_task": "用 doc/src/quickstart 中的 blink.v 与一个示例架构文件运行 run_vtr_flow.py，观察并记录每一阶段生成的中间文件名。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "VPR 命令行与参数体系",
+          "order": 5,
+          "filename": "u1-l5-vpr-command-line.md",
+          "level": "beginner",
+          "topic": "通过 read_options.h 与 main.cpp 理解 VPR 如何用 libargparse 解析命令行，建立对文件名、阶段动作（stage action）、各类选项结构体的整体认识。",
+          "learning_goals": [
+            "理解 t_options 与 e_stage_action 的设计",
+            "掌握 VPR 常用命令行参数",
+            "了解 argparse 选项的注册方式"
+          ],
+          "source_files": [
+            "vpr/src/base/read_options.h",
+            "vpr/src/main.cpp",
+            "vpr/src/base/vpr_types.h"
+          ],
+          "minimal_modules": [
+            "main.cpp 顶层流程",
+            "t_options 字段分类",
+            "阶段动作枚举"
+          ],
+          "practice_task": "运行 vpr --help（或查看 read_options 实现）列出与打包、布局、布线相关的三组关键参数，并说明每组的默认值来源。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "FPGA 架构描述与解析",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "FPGA 架构 XML 格式与解析入口",
+          "order": 1,
+          "filename": "u2-l1-architecture-xml-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 VTR 如何用 xml_read_arch 把架构 XML 解析为 t_arch 与物理/逻辑块类型集合，理解架构文件对布局布线行为的决定性影响。",
+          "learning_goals": [
+            "理解架构 XML 的整体结构",
+            "掌握 xml_read_arch 的输入输出",
+            "了解解析与校验的关系"
+          ],
+          "source_files": [
+            "libs/libarchfpga/src/read_xml_arch_file.h",
+            "libs/libarchfpga/src/arch_types.h",
+            "libs/libarchfpga/src/read_xml_util.h"
+          ],
+          "minimal_modules": [
+            "架构 XML 顶层元素",
+            "xml_read_arch 函数签名与产物",
+            "pugixml 封装与错误处理"
+          ],
+          "practice_task": "阅读一个示例架构 XML（如 vtr_flow/arch 下任意文件）并对照 read_xml_arch_file 实现，列出该架构定义的器件类型、开关盒与线段。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "物理类型数据结构 physical_types",
+          "order": 2,
+          "filename": "u2-l2-physical-types.md",
+          "level": "intermediate",
+          "topic": "深入 physical_types.h 中的 t_physical_tile_type、t_logical_block_type、t_pb_type、t_arch、t_arch_switch_inf 等核心结构，建立对 FPGA 物理与逻辑建模的认识。",
+          "learning_goals": [
+            "区分物理块类型与逻辑块类型",
+            "理解 t_pb_type 描述的层次化逻辑块",
+            "掌握 t_arch 顶层结构"
+          ],
+          "source_files": [
+            "libs/libarchfpga/src/physical_types.h",
+            "libs/libarchfpga/src/arch_types.h"
+          ],
+          "minimal_modules": [
+            "物理块与逻辑块类型",
+            "t_pb_type 层次模型",
+            "t_arch 与开关信息"
+          ],
+          "practice_task": "在 physical_types.h 中定位 t_physical_tile_type 与 t_logical_block_type，画出二者通过 equivalent_sites 关联的关系图。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "器件网格 DeviceGrid 的生成",
+          "order": 3,
+          "filename": "u2-l3-device-grid.md",
+          "level": "intermediate",
+          "topic": "讲解 DeviceGrid（device_grid.h）如何表示二维 FPGA 网格，以及 setup_grid.h 如何根据资源需求与 auto_layout 决定器件尺寸。",
+          "learning_goals": [
+            "理解 t_grid_tile 与 DeviceGrid 的表示",
+            "掌握 create_device_grid 的多种重载",
+            "了解 auto_layout 宽高比与目标利用率"
+          ],
+          "source_files": [
+            "libs/libarchfpga/src/device_grid.h",
+            "vpr/src/base/setup_grid.h",
+            "vpr/src/base/vpr_api.cpp"
+          ],
+          "minimal_modules": [
+            "DeviceGrid 数据结构",
+            "create_device_grid 决策逻辑",
+            "器件尺寸估算"
+          ],
+          "practice_task": "阅读 vpr_create_device_grid（vpr_api.cpp）并跟踪它如何调用 setup_grid 的 create_device_grid，写出网格生成的调用链。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心数据结构与上下文体系",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Netlist 泛型基类",
+          "order": 1,
+          "filename": "u3-l1-netlist-base.md",
+          "level": "intermediate",
+          "topic": "讲解 netlist.h 的 Netlist<BlockId,PortId,PinId,NetId> 模板基类，它是 AtomNetlist 与 ClusteredNetlist 的共同抽象。",
+          "learning_goals": [
+            "理解 Netlist 模板的块/端口/引脚/线网四元模型",
+            "掌握 StrongId 类型安全 ID 设计",
+            "了解 netlist 的增删查改接口"
+          ],
+          "source_files": [
+            "vpr/src/base/netlist.h",
+            "vpr/src/base/netlist_fwd.h",
+            "libs/libvtrutil/src/vtr_vector_map.h"
+          ],
+          "minimal_modules": [
+            "四元 ID 模型",
+            "StrongId 类型安全",
+            "容器与查找接口"
+          ],
+          "practice_task": "在 netlist.h 中找出 block/port/pin/net 四类实体各自的 ID 别名与主容器，并写一段伪代码说明如何由一个 pin 找到其所属 net。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "AtomNetlist 原子级网表",
+          "order": 2,
+          "filename": "u3-l2-atom-netlist.md",
+          "level": "intermediate",
+          "topic": "讲解 AtomNetlist（atom_netlist.h）如何表示技术映射后的原子级电路（LUT/FF 等原语），以及如何从 BLIF 读入。",
+          "learning_goals": [
+            "理解 AtomNetlist 的原语模型与真值表",
+            "掌握从 BLIF 读入网表的入口",
+            "了解 LogicalModel 与原语的绑定"
+          ],
+          "source_files": [
+            "vpr/src/base/atom_netlist.h",
+            "vpr/src/base/read_blif.h",
+            "vpr/src/base/atom_lookup.h"
+          ],
+          "minimal_modules": [
+            "原子块与真值表",
+            "BLIF 读入流程",
+            "AtomLookup 映射"
+          ],
+          "practice_task": "跟踪 read_blif 相关代码，写出从 .blif 文件到 AtomNetlist 构造的主要步骤，并指出真值表存储在哪个数据结构中。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "ClusteredNetlist 聚簇网表",
+          "order": 3,
+          "filename": "u3-l3-clustered-netlist.md",
+          "level": "intermediate",
+          "topic": "讲解 ClusteredNetlist（clustered_netlist.h）如何表示打包后的逻辑块级网表，它是布局布线阶段的输入。",
+          "learning_goals": [
+            "理解聚簇网表与原子网表的区别",
+            "掌握逻辑块与物理块的对应关系",
+            "了解打包产物的结构"
+          ],
+          "source_files": [
+            "vpr/src/base/clustered_netlist.h",
+            "vpr/src/base/clustered_netlist_utils.h",
+            "vpr/src/base/netlist.h"
+          ],
+          "minimal_modules": [
+            "聚簇块模型",
+            "逻辑块↔物理类型映射",
+            "聚簇网表与布局接口"
+          ],
+          "practice_task": "对比 AtomNetlist 与 ClusteredNetlist 的主要差异，说明打包阶段把哪些信息从原子层提升到了逻辑块层。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "VprContext 与全局状态管理",
+          "order": 4,
+          "filename": "u3-l4-vpr-context.md",
+          "level": "intermediate",
+          "topic": "讲解 vpr_context.h 定义的各 Context（Atom/Device/Clustering/Placement/Routing/Timing）以及全局访问器 g_vpr_ctx，这是理解 VPR 所有阶段共享状态的关键。",
+          "learning_goals": [
+            "掌握 VprContext 聚合的子上下文",
+            "理解不可拷贝 Context 的 mutable/immutable 访问模式",
+            "了解 g_vpr_ctx 全局访问约定"
+          ],
+          "source_files": [
+            "vpr/src/base/vpr_context.h",
+            "vpr/src/base/globals.h",
+            "vpr/src/base/vpr_types.h"
+          ],
+          "minimal_modules": [
+            "子上下文职责划分",
+            "mutable/immutable getter",
+            "全局访问器"
+          ],
+          "practice_task": "在 vpr_context.h 中列出 DeviceContext、AtomContext、TimingContext 各自持有哪些关键成员，并说明为何 Context 禁止拷贝。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "主流程编排 vpr_api",
+          "order": 5,
+          "filename": "u3-l5-vpr-api-orchestration.md",
+          "level": "intermediate",
+          "topic": "讲解 vpr_api.h/.cpp 如何编排初始化、打包、布局布线、分析、释放的完整生命周期，是连接所有阶段的主动脉。",
+          "learning_goals": [
+            "掌握 vpr_init/vpr_flow/vpr_free_all 的职责",
+            "理解 vpr_pack_flow/vpr_place_flow/vpr_route_flow/vpr_analysis_flow 的分派",
+            "了解 t_vpr_setup 配置对象的作用"
+          ],
+          "source_files": [
+            "vpr/src/base/vpr_api.h",
+            "vpr/src/base/vpr_api.cpp",
+            "vpr/src/main.cpp"
+          ],
+          "minimal_modules": [
+            "初始化与选项加载",
+            "vpr_flow 主流程分派",
+            "阶段间数据传递"
+          ],
+          "practice_task": "在 vpr_api.cpp 中跟踪 vpr_flow 的实现，画出从 init 到 analysis 的阶段调用顺序图，并标注每个阶段读写哪个 Context。",
+          "depends_on": [
+            "u3-4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "打包 Packing",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Packing 总览与 PB 类型图",
+          "order": 1,
+          "filename": "u4-l1-packing-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 try_pack（pack.h）的整体流程，以及 pb_type_graph.h 如何把架构中的 t_pb_type 层次展开为可布线的 PB 图，为聚类提供合法化依据。",
+          "learning_goals": [
+            "理解打包要解决的问题与输入输出",
+            "掌握 PB 图的层次化结构",
+            "了解 try_pack 的主要步骤"
+          ],
+          "source_files": [
+            "vpr/src/pack/pack.h",
+            "vpr/src/pack/pb_type_graph.h",
+            "vpr/src/base/vpr_api.cpp"
+          ],
+          "minimal_modules": [
+            "打包目标与流程",
+            "PB 类型图构建",
+            "入口函数 try_pack"
+          ],
+          "practice_task": "阅读 vpr_pack（vpr_api.cpp）与 try_pack 的签名，列出打包前需要预先准备好的输入对象（如 Prepacker、PreClusterTimingManager 等）。",
+          "depends_on": [
+            "u3-5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Prepacker 与打包分子",
+          "order": 2,
+          "filename": "u4-l2-prepacker-molecules.md",
+          "level": "intermediate",
+          "topic": "讲解 Prepacker（prepack.h）如何根据 pack pattern（如进位链）把原子组合成「打包分子」，作为聚簇的基本单元。",
+          "learning_goals": [
+            "理解 pack pattern 与分子的概念",
+            "掌握 Prepacker 的输入输出",
+            "了解分子对聚类合法性的影响"
+          ],
+          "source_files": [
+            "vpr/src/pack/prepack.h",
+            "vpr/src/pack/pb_type_graph.h",
+            "vpr/src/pack/atom_pb_bimap.h"
+          ],
+          "minimal_modules": [
+            "pack pattern 识别",
+            "分子构建",
+            "原子与 PB 双射"
+          ],
+          "practice_task": "在 prepack.cpp 中找到构建分子的核心函数，说明进位链类 pack pattern 如何把多个原子绑定为一个分子。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "贪心聚簇器 GreedyClusterer",
+          "order": 3,
+          "filename": "u4-l3-greedy-clusterer.md",
+          "level": "intermediate",
+          "topic": "讲解 GreedyClusterer 如何通过种子选择与候选增益评估，一次生成一个合法簇，把分子聚类成逻辑块。",
+          "learning_goals": [
+            "理解贪心聚簇的增益评估",
+            "掌握种子选择与候选选择分工",
+            "了解 APPack/吸引力组对聚类质量的提升"
+          ],
+          "source_files": [
+            "vpr/src/pack/greedy_clusterer.h",
+            "vpr/src/pack/greedy_seed_selector.h",
+            "vpr/src/pack/greedy_candidate_selector.h",
+            "vpr/src/pack/attraction_groups.h"
+          ],
+          "minimal_modules": [
+            "贪心聚簇主循环",
+            "种子与候选选择",
+            "吸引力与增益"
+          ],
+          "practice_task": "对比 greedy_seed_selector 与 greedy_candidate_selector 的职责，写出一次聚簇迭代中二者的协作顺序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "聚簇合法化与簇内布线",
+          "order": 4,
+          "filename": "u4-l4-cluster-legalization.md",
+          "level": "intermediate",
+          "topic": "讲解 cluster_legalizer 与 cluster_router 如何验证簇内连线的可布线性，并基于 lb_type_rr_graph 进行簇内布线。",
+          "learning_goals": [
+            "理解簇内布线合法性的判定",
+            "掌握 lb_type_rr_graph 的作用",
+            "了解聚簇合法化失败的处理"
+          ],
+          "source_files": [
+            "vpr/src/pack/cluster_legalizer.h",
+            "vpr/src/pack/cluster_router.h",
+            "vpr/src/pack/lb_type_rr_graph.h"
+          ],
+          "minimal_modules": [
+            "簇内布线图",
+            "合法化流程",
+            "可行性过滤"
+          ],
+          "practice_task": "阅读 cluster_router 与 lb_type_rr_graph，说明簇内布线使用的是什么图结构，并指出合法化失败时聚簇器如何回退。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "布局 Placement",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "布局总览与模拟退火框架",
+          "order": 1,
+          "filename": "u5-l1-placement-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 try_place（place.h）、Placer 与 annealer 构成的模拟退火布局框架，理解退火温度、代价函数与接受准则。",
+          "learning_goals": [
+            "理解模拟退火布局的目标",
+            "掌握 Placer 与 annealer 的分工",
+            "了解退火调度与终止条件"
+          ],
+          "source_files": [
+            "vpr/src/place/place.h",
+            "vpr/src/place/placer.h",
+            "vpr/src/place/annealer.h",
+            "vpr/src/place/placer_state.h"
+          ],
+          "minimal_modules": [
+            "模拟退火原理",
+            "Placer 主循环",
+            "退火调度"
+          ],
+          "practice_task": "在 placer.h/annealer.h 中找到退火主循环，记录每一次尝试需要评估的代价项，并说明温度如何影响接受概率。",
+          "depends_on": [
+            "u3-5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "移动生成器",
+          "order": 2,
+          "filename": "u5-l2-move-generators.md",
+          "level": "intermediate",
+          "topic": "讲解 move_generators 如何产生不同类型的布局移动（均匀、关键路径优先、RL、质心等），决定退火每一步如何改变布局。",
+          "learning_goals": [
+            "理解移动生成器在退火中的角色",
+            "掌握不同移动类型的策略",
+            "了解 RL 移动生成器的学习机制"
+          ],
+          "source_files": [
+            "vpr/src/place/move_generators/move_generator.h",
+            "vpr/src/place/move_generators/simpleRL_move_generator.h",
+            "vpr/src/place/RL_agent_util.h"
+          ],
+          "minimal_modules": [
+            "移动生成器接口",
+            "移动类型策略",
+            "强化学习移动"
+          ],
+          "practice_task": "列出 move_generators 目录下所有移动生成器类型，比较 simpleRL 与 critical_uniform 两种策略的选择依据。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "布局代价与延迟模型",
+          "order": 3,
+          "filename": "u5-l3-delay-model.md",
+          "level": "intermediate",
+          "topic": "讲解布局延迟模型（delta/simple/override）如何估算布局代价，以及 move_transactions 与 compressed_grid 如何支持增量代价计算。",
+          "learning_goals": [
+            "理解布局代价中的线长与时序项",
+            "掌握延迟模型的层次与切换",
+            "了解增量代价与事务回滚"
+          ],
+          "source_files": [
+            "vpr/src/place/delay_model/place_delay_model.h",
+            "vpr/src/place/delay_model/delta_delay_model.h",
+            "vpr/src/place/move_transactions.h",
+            "vpr/src/place/compressed_grid.h"
+          ],
+          "minimal_modules": [
+            "延迟模型类型",
+            "增量代价计算",
+            "事务与回滚"
+          ],
+          "practice_task": "对比 simple_delay_model 与 delta_delay_model 的精度与开销，说明 move_transactions 如何在一次退火移动中提交或回滚代价。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "布线 Routing",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "路由资源图 RR Graph",
+          "order": 1,
+          "filename": "u6-l1-rr-graph.md",
+          "level": "intermediate",
+          "topic": "讲解路由资源图（RR Graph）如何描述器件上所有可布线的节点与边，以及 rr_graph_generation 如何在给定通道宽度下构建该图。",
+          "learning_goals": [
+            "理解 RR 节点/边的类型与含义",
+            "掌握 rr_graph_view 的只读访问",
+            "了解通道宽度与图构建的关系"
+          ],
+          "source_files": [
+            "vpr/src/route/rr_graph_generation/rr_graph.h",
+            "libs/librrgraph/src/base/rr_graph_view.h",
+            "libs/librrgraph/src/base/rr_node.h",
+            "vpr/src/base/vpr_api.cpp"
+          ],
+          "minimal_modules": [
+            "RR 图节点与边",
+            "只读视图 rr_graph_view",
+            "通道宽度与建图"
+          ],
+          "practice_task": "在 rr_types.h 或 rr_node.h 中列出 RR 节点的所有类型，并跟踪 vpr_create_rr_graph 说明通道宽度如何影响图的规模。",
+          "depends_on": [
+            "u2-3",
+            "u3-5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "连接路由器与堆结构",
+          "order": 2,
+          "filename": "u6-l2-connection-router.md",
+          "level": "intermediate",
+          "topic": "讲解 Connection Router 如何用基于堆的 Dijkstra/maze 搜索为每个连接寻找最低代价路径，以及 d_ary_heap 等堆实现。",
+          "learning_goals": [
+            "理解迷宫布线与堆的关系",
+            "掌握代价函数的现时与前瞻项",
+            "了解不同堆实现对性能的影响"
+          ],
+          "source_files": [
+            "vpr/src/route/connection_router.h",
+            "vpr/src/route/connection_router_interface.h",
+            "vpr/src/route/d_ary_heap.h",
+            "vpr/src/route/heap_type.h"
+          ],
+          "minimal_modules": [
+            "迷宫布线搜索",
+            "代价函数",
+            "堆数据结构"
+          ],
+          "practice_task": "在 connection_router.h 中找到主搜索循环，说明每个 RR 节点入堆时考虑的代价由哪几部分组成，并比较不同堆类型的选择入口（heap_type.h）。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "基于连接的路由与路由树",
+          "order": 3,
+          "filename": "u6-l3-connection-based-routing.md",
+          "level": "intermediate",
+          "topic": "讲解 route()（route.h）如何迭代布线、Connection_based_routing 如何做增量重布线，以及 route_tree 如何复用已布线段（AIR 算法）。",
+          "learning_goals": [
+            "理解迭代布线与拥塞化解",
+            "掌握连接级增量重布线机制",
+            "了解路由树剪枝与复用"
+          ],
+          "source_files": [
+            "vpr/src/route/route.h",
+            "vpr/src/route/connection_based_routing.h",
+            "vpr/src/route/route_tree.h",
+            "vpr/src/route/route_net.h"
+          ],
+          "minimal_modules": [
+            "迭代布线主循环",
+            "连接级重布线",
+            "路由树复用"
+          ],
+          "practice_task": "阅读 connection_based_routing.h 中关于 forcible_reroute 与 lower_bound_connection_delay 的注释，说明何时会触发对某连接的强制重布线。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "路由器前瞻 Router Lookahead",
+          "order": 4,
+          "filename": "u6-l4-router-lookahead.md",
+          "level": "intermediate",
+          "topic": "讲解 router_lookahead 如何提供「到达目标还剩多少代价」的估算，使迷宫搜索朝目标定向扩展，提升布线速度与质量。",
+          "learning_goals": [
+            "理解前瞻代价的作用",
+            "掌握 cost_map 等前瞻类型",
+            "了解前瞻的预计算与序列化"
+          ],
+          "source_files": [
+            "vpr/src/route/router_lookahead/router_lookahead.h",
+            "vpr/src/route/router_lookahead/router_lookahead_cost_map.h",
+            "vpr/src/route/router_lookahead/router_lookahead_map.h"
+          ],
+          "minimal_modules": [
+            "前瞻代价原理",
+            "代价地图类型",
+            "预计算与序列化"
+          ],
+          "practice_task": "在 router_lookahead.h 中列出可选的前瞻类型枚举（e_router_lookahead），并说明 cost_map 类前瞻相比 simple 类的精度与开销权衡。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "时序分析与布线后评估",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "时序图构建与 Tatum 集成",
+          "order": 1,
+          "filename": "u7-l1-timing-graph-tatum.md",
+          "level": "intermediate",
+          "topic": "讲解 VPR 如何把网表与延迟构建为 Tatum 时序图，TimingContext 如何持有图与约束，以及时序分析的触发时机。",
+          "learning_goals": [
+            "理解时序图的节点与边",
+            "掌握 Tatum 库的集成方式",
+            "了解 TimingContext 的组成"
+          ],
+          "source_files": [
+            "vpr/src/timing/timing_graph_builder.h",
+            "vpr/src/base/vpr_context.h",
+            "libs/EXTERNAL/libtatum/README.md"
+          ],
+          "minimal_modules": [
+            "时序图构建",
+            "Tatum 集成",
+            "TimingContext 状态"
+          ],
+          "practice_task": "在 timing_graph_builder.h 中找出构建时序图所需输入，并说明 TimingContext 中的 graph 与 constraints 何时被赋值。",
+          "depends_on": [
+            "u3-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "时序约束、延迟计算与布线后报告",
+          "order": 2,
+          "filename": "u7-l2-delay-calc-and-reports.md",
+          "level": "intermediate",
+          "topic": "讲解 SDC 约束读入、各阶段延迟计算器（PreCluster/Placement/Routing）、net_delay，以及布线后分析与时序报告。",
+          "learning_goals": [
+            "理解 SDC 约束如何影响时序",
+            "掌握不同阶段延迟计算器分工",
+            "了解布线后分析与关键路径报告"
+          ],
+          "source_files": [
+            "vpr/src/timing/read_sdc.h",
+            "vpr/src/timing/timing_info.h",
+            "vpr/src/timing/RoutingDelayCalculator.h",
+            "vpr/src/timing/net_delay.h",
+            "vpr/src/analysis/timing_reports.h"
+          ],
+          "minimal_modules": [
+            "SDC 约束读入",
+            "延迟计算器层次",
+            "布线后分析报告"
+          ],
+          "practice_task": "比较 PreClusterDelayCalculator 与 RoutingDelayCalculator 的输入来源，说明 net_delay 在二者之间的传递方式，并指出关键路径报告由哪个文件生成。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "高级特性与扩展机制",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "分析式布局引擎",
+          "order": 1,
+          "filename": "u8-l1-analytical-placement.md",
+          "level": "advanced",
+          "topic": "讲解 analytical_place 如何用解析求解器在合法化之前先做全局布局（APNetlist→全局布局→合法化→详细布局），作为传统打包布局的替代路径。",
+          "learning_goals": [
+            "理解分析式布局的三阶段流程",
+            "掌握 APNetlist 与 PartialPlacement 结构",
+            "了解与传统打包流程的关系"
+          ],
+          "source_files": [
+            "vpr/src/analytical_place/analytical_placement_flow.h",
+            "vpr/src/analytical_place/ap_flow_enums.h",
+            "vpr/src/base/vpr_api.cpp"
+          ],
+          "minimal_modules": [
+            "AP 三阶段总览",
+            "APNetlist 建模",
+            "与传统流程衔接"
+          ],
+          "practice_task": "在 vpr_api.cpp 中找到分析式布局的入口分派，列出其三个子阶段对应的目录与职责。",
+          "depends_on": [
+            "u5-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "NoC 布局与路由",
+          "order": 2,
+          "filename": "u8-l2-noc.md",
+          "level": "advanced",
+          "topic": "讲解 VPR 对片上网络（NoC）的支持：noc_storage 建模 NoC 拓扑、noc_traffic_flows 描述流量、noc_routing 选择路由算法。",
+          "learning_goals": [
+            "理解 NoC 在 FPGA 中的建模",
+            "掌握流量与路由的表示",
+            "了解 NoC 对布局布线的影响"
+          ],
+          "source_files": [
+            "vpr/src/noc/noc_storage.h",
+            "vpr/src/noc/noc_traffic_flows.h",
+            "vpr/src/noc/noc_routing.h",
+            "vpr/src/noc/bfs_routing.h"
+          ],
+          "minimal_modules": [
+            "NoC 存储模型",
+            "流量描述",
+            "NoC 路由算法"
+          ],
+          "practice_task": "列出 noc 目录下支持的路由算法，并说明 noc_traffic_flows 描述的流量如何驱动 NoC 路由决策。",
+          "depends_on": [
+            "u5-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "功耗分析",
+          "order": 3,
+          "filename": "u8-l3-power.md",
+          "level": "advanced",
+          "topic": "讲解 VPR 的功耗估算流程：power.h 顶层接口、power_components 组件分解、与 ace2 活动性估计的配合。",
+          "learning_goals": [
+            "理解功耗估算的输入（活动性、CMOS 工艺）",
+            "掌握功耗组件分解结构",
+            "了解 ace2 的角色"
+          ],
+          "source_files": [
+            "vpr/src/power/power.h",
+            "vpr/src/power/power_components.h",
+            "vpr/src/power/power_cmos_tech.h",
+            "vpr/src/base/vpr_api.cpp"
+          ],
+          "minimal_modules": [
+            "功耗估算总流程",
+            "组件功耗分解",
+            "活动性与工艺数据"
+          ],
+          "practice_task": "在 vpr_api.cpp 中找到 vpr_power_estimation 的调用点，列出功耗估算所需的输入数据来源（活动性文件、CMOS 工艺文件）。",
+          "depends_on": [
+            "u7-2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "图形可视化",
+          "order": 4,
+          "filename": "u8-l4-graphics.md",
+          "level": "advanced",
+          "topic": "讲解 VPR 基于 EZGL/OpenGL 的图形界面（draw/），如何在布局布线过程中实时观察器件、网表与布线结果。",
+          "learning_goals": [
+            "理解图形界面的启用条件与构建开关",
+            "掌握可可视化的对象层次",
+            "了解断点与交互调试"
+          ],
+          "source_files": [
+            "vpr/src/draw/draw.h",
+            "vpr/src/draw/breakpoint.h",
+            "doc/src/vpr/graphics.rst"
+          ],
+          "minimal_modules": [
+            "图形开关与构建",
+            "可视化对象",
+            "断点调试"
+          ],
+          "practice_task": "阅读 doc/src/vpr/graphics.rst 与 draw.h，说明如何启用图形（make ensure-gui），并列出可高亮显示的三类对象。",
+          "depends_on": [
+            "u5-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "Server 模式与并行布线",
+          "order": 5,
+          "filename": "u8-l5-server-and-parallel.md",
+          "level": "advanced",
+          "topic": "讲解 VPR 的 server 模式（供外部工具集成）与多线程并行布线（ParallelNetlistRouter + multi_queue_d_ary_heap）。",
+          "learning_goals": [
+            "理解 server 模式的通信模型",
+            "掌握并行布线的任务划分",
+            "了解多队列堆对并发的支持"
+          ],
+          "source_files": [
+            "vpr/src/server/gateio.h",
+            "vpr/src/route/ParallelNetlistRouter.h",
+            "vpr/src/route/multi_queue_d_ary_heap.h",
+            "vpr/src/route/netlist_routers.h"
+          ],
+          "minimal_modules": [
+            "Server 通信接口",
+            "并行网表路由器",
+            "并发堆结构"
+          ],
+          "practice_task": "比较 SerialNetlistRouter 与 ParallelNetlistRouter 的差异，说明 multi_queue_d_ary_heap 如何让多线程并行扩展堆搜索。",
+          "depends_on": [
+            "u6-3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "共享库、测试与工程实践",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "共享库 libvtrutil 与 VPR 工具",
+          "order": 1,
+          "filename": "u9-l1-shared-libs.md",
+          "level": "advanced",
+          "topic": "讲解 libvtrutil 提供的通用数据结构（vtr_vector、vtr_ndmatrix、vtr_cache、日志/错误）以及 vpr_utils 如何在多阶段间共享辅助逻辑。",
+          "learning_goals": [
+            "掌握 libvtrutil 的核心容器与工具",
+            "理解 StrongId 索引容器的设计",
+            "了解 vpr_utils 的跨阶段用途"
+          ],
+          "source_files": [
+            "libs/libvtrutil/src/vtr_vector.h",
+            "libs/libvtrutil/src/vtr_cache.h",
+            "libs/libvtrutil/src/vtr_log.h",
+            "vpr/src/util/vpr_utils.h"
+          ],
+          "minimal_modules": [
+            "通用容器与 ID 容器",
+            "日志与错误处理",
+            "VPR 跨阶段工具"
+          ],
+          "practice_task": "在 libvtrutil/src 中挑出 vtr_vector 与 vtr_ndmatrix，说明它们如何用 StrongId 作下标，并写出 vpr_utils 中一个被多处调用的辅助函数。",
+          "depends_on": [
+            "u3-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "单元测试体系 Catch2",
+          "order": 2,
+          "filename": "u9-l2-unit-tests.md",
+          "level": "advanced",
+          "topic": "讲解 VPR/libarchfpga/libvtrutil 的 Catch2 单元测试组织方式，以及如何构建运行单个测试用例。",
+          "learning_goals": [
+            "掌握各模块测试二进制的源到目标映射",
+            "理解 Catch2 测试的组织与命名",
+            "了解如何新增单元测试"
+          ],
+          "source_files": [
+            "vpr/test/main.cpp",
+            "doc/agents/testing.md",
+            "doc/agents/coding.md"
+          ],
+          "minimal_modules": [
+            "测试目录与二进制映射",
+            "Catch2 用法",
+            "新增测试流程"
+          ],
+          "practice_task": "运行 make && make test，并执行 build/vpr/test_vpr --list-tests 列出连接路由相关的测试用例，挑选一个读懂其断言逻辑。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "回归测试与 QoR 评估",
+          "order": 3,
+          "filename": "u9-l3-regression-and-qor.md",
+          "level": "advanced",
+          "topic": "讲解 vtr_flow 的回归任务体系（run_vtr_task.py）、黄金结果比对、以及如何用 parse_vtr_task 与 qor_compare 评估质量结果（QoR）。",
+          "learning_goals": [
+            "掌握回归任务的配置与运行",
+            "理解黄金结果的生成与校验",
+            "了解 QoR 对比与 PR 流程"
+          ],
+          "source_files": [
+            "vtr_flow/scripts/run_vtr_task.py",
+            "vtr_flow/scripts/qor_compare.py",
+            "doc/agents/testing.md",
+            "run_reg_test.py"
+          ],
+          "minimal_modules": [
+            "回归任务配置",
+            "黄金结果校验",
+            "QoR 对比"
+          ],
+          "practice_task": "按 testing.md 步骤复制一个 vtr_reg_strong 任务配置，运行并生成黄金结果，再用 qor_compare 对比两次运行的 QoR。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
