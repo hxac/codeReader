@@ -1,0 +1,466 @@
+# CIC 抽取滤波器
+
+## 1. 本讲目标
+
+本讲进入 `fix` 区域「信号处理」专题的采样率转换部分，讲解 Open Logic 提供的两个 **CIC 抽取滤波器（Cascaded Integrator-Comb Decimator）**：
+
+- `olo_fix_cic_dec_tdm`：输入、输出都是 **TDM（时分复用）** 流，可处理一个或多个通道。
+- `olo_fix_cic_dec_par_tdm`：输入是**并行**的（每个通道每拍各一个采样），输出是 **TDM** 流。
+
+两者共享同一套滤波数学与同一个 Python 位真模型，差别只在「多通道在硬件里怎么摆」。学完后你应当能够：
+
+- 说清 CIC 抽取滤波器的「级联积分–梳状」结构，以及它为什么不需要乘法器、却会出现「位增长（bit growth）」。
+- 推导 CIC 的固有增益，并解释 Open Logic 用「移位粗校 + 乘法细校」把增益归一到 1.0 的两级策略。
+- 读懂 `olo_fix_cic_dec_tdm` 如何用**共享累加器 + 延迟线**在时分复用的数据上实现多通道积分，以及梳状差分延迟为什么是 `Channels_g * DiffDelay_g` 拍。
+- 区分**固定抽取比**（移位是纯连线）与**运行时可配抽取比**（需要 `olo_base_dyn_sft` 动态移位器）两种模式的资源差异。
+- 读懂 `olo_fix_cic_dec_par_tdm` 为什么把「抽取」放在「并行转 TDM」**之前**，从而只需一个移位器服务所有通道。
+- 用配套的 VUnit 协仿真测试台跑通一个多通道、抽取比为 4 的抽取，验证输出采样率与通道顺序。
+
+## 2. 前置知识
+
+本讲默认你已经掌握 u8 系列与 u9-l1 的内容，尤其是：
+
+- **定点三元组 \((S,I,F)\)** 与 `en_cl_fix` 的 `FixFormat_t` / `FixRound_t` / `FixSaturate_t`（u8-l1、u8-l2）。
+- **字符串泛型模式**：接口用 `string` 传格式，实体内用 `cl_fix_format_from_string` 还原、用 `fixFmtWidthFromString` 推端口位宽（u8-l2）。
+- **基本运算实体**：`olo_fix_resize`、`olo_fix_mult`，以及 Open Logic 全库的「operation → round → saturate」三段式与寄存器三态 `"YES"/"NO"/"AUTO"`（u8-l3）。
+- **两进程法 / AXI-S 握手 / 同步高有效复位**（u1-l5、u2-l2），以及 **TDM 约定与 `Last` 标记**（u3-l3）。
+- **延迟线实体 `olo_base_delay`**（固定/可配延迟，u5-l1）与 **位宽转换实体 `olo_base_wconv_xn2n`**（并行→TDM，u3-l3）。
+- **Python 位真协仿真链路** `olo_fix_cosim` / `olo_fix_sim_stimuli` / `olo_fix_sim_checker`（u8-l5）。
+
+补充几个本讲用到、但前面讲得较少的概念：
+
+- **抽取（decimation）**：把信号的采样率降低。最朴素的做法是「低通滤波 + 丢点」。把采样率从 \(f_\text{in}\) 降到 \(f_\text{in}/R\)（\(R\) 为抽取比）之前必须先抗混叠滤波，否则高频会折叠进基带。
+- **CIC 滤波器**（Hogenauer, 1981）：一种**只用加/减法和寄存器、不用乘法器**的特殊 FIR，因此可以跑在很高的速率上，常用作「多级抽取链」的**第一级**（把速率大幅降下来），后面再接一个低速率的 FIR「补偿滤波器」修平 CIC 的通带滚降。CIC 由两类基本节级联而成：
+  - **积分器（integrator）**：\(y[n]=y[n-1]+x[n]\)，就是一个累加器。
+  - **梳状器/差分器（comb / differentiator）**：\(y[n]=x[n]-x[n-M]\)，就是减去 \(M\) 拍前的值（\(M\) 叫**差分延迟**，通常取 1 或 2）。
+- **位增长（bit growth）**：积分器不断累加，输出会增长很多位。CIC 的一个关键性质是「积分在前、差分在后」可以**把抽取下采样夹在两组节之间**：积分节跑在高速 \(f_\text{in}\)，抽取后差分节跑在低速 \(f_\text{in}/R\)，从而省资源；但累加器必须按「最坏情况位增长」开足位宽，这正是 CIC 设计的核心权衡。
+- **TDM（时分复用）**：多路同采样率信号共用一条接口，按 \(0,1,\dots,N-1\) 隐式循环，用 `Last` 标记每帧的最后一个通道（详见 `doc/Conventions.md` 的 TDM 小节）。在 CIC 里，TDM 意味着「每个通道每 \(N\) 拍才出现一次」，这会改变延迟线的拍数。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| :--- | :--- |
+| [src/fix/vhdl/olo_fix_cic_dec_tdm.vhd](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd) | TDM 输入 / TDM 输出的 CIC 抽取滤波器（共享累加器 + 延迟线做多通道） |
+| [src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd) | 并行输入 / TDM 输出的 CIC 抽取滤波器（每通道独立累加器，抽取后再转 TDM） |
+| [src/fix/python/olo_fix/olo_fix_cic_dec.py](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/python/olo_fix/olo_fix_cic_dec.py) | 两个实体共用的 Python 位真模型（单通道，多通道时实例化多份） |
+| [doc/fix/olo_fix_cic_dec_tdm.md](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/doc/fix/olo_fix_cic_dec_tdm.md) | tdm 版本的用户文档（含结构图与增益公式图） |
+| [doc/fix/olo_fix_cic_dec_par_tdm.md](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/doc/fix/olo_fix_cic_dec_par_tdm.md) | par_tdm 版本的用户文档（含带宽约束公式图） |
+| [test/fix/olo_fix_cic_dec_tdm/olo_fix_cic_dec_tdm_tb.vhd](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/olo_fix_cic_dec_tdm_tb.vhd) | tdm 版本的 VUnit 协仿真测试台（stimuli/checker VC，TDM 模式） |
+| [test/fix/olo_fix_cic_dec_tdm/cosim.py](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/cosim.py) | 生成协仿真激励/期望文件（含交织与逐通道两种写法） |
+| [test/fix/olo_fix_cic_dec_par_tdm/olo_fix_cic_dec_par_tdm_tb.vhd](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_par_tdm/olo_fix_cic_dec_par_tdm_tb.vhd) | par_tdm 版本的 VUnit 协仿真测试台（每通道一个 stimuli VC） |
+| [sim/test_configs/olo_fix.py](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/sim/test_configs/olo_fix.py) | 为两个实体注册不同 generic 组合的测试用例（通道数、抽取比、固定/可配、增益校准开关等） |
+
+> 编译顺序：`olo_fix_cic_dec_tdm.vhd` 与 `olo_fix_cic_dec_par_tdm.vhd` 排在 [compile_order.txt:84-85](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/compile_order.txt#L84-L85)，位于 `olo_fix_madd`、`olo_fix_resize`、`olo_fix_mult`、`olo_base_delay`、`olo_base_dyn_sft`、`olo_base_wconv_xn2n` 等被依赖实体之后，符合 fix 区域「先基础积木后组合实体」的顺序（u1-l2、u9-l1）。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 积分-梳状结构与 CIC 增益
+
+#### 4.1.1 概念说明
+
+一个 \(N\) 阶 CIC 抽取滤波器由三段串联而成（这是 Hogenauer 经典结构，也是 Open Logic 两个实体共同遵循的「pretty standard architecture」）：
+
+1. **\(N\) 级积分器**（跑在输入高速率 \(f_\text{in}\)）：每级是一个累加器，\(y[n]=y[n-1]+x[n]\)。
+2. **抽取**（降速到 \(f_\text{in}/R\)）：每 \(R\) 个采样保留一个。
+3. **\(N\) 级梳状/差分器**（跑在低速 \(f_\text{in}/R\)）：每级 \(y[n]=x[n]-x[n-M]\)，\(M\) 为差分延迟。
+
+为什么这样能等价于一个 FIR？因为「先积分再差分」中，差分会把积分引入的累加恰好抵消，最终系统函数是一个滑动求和的 FIR，但**乘法被替换成了延迟与加减**——这正是 CIC 不需要乘法器、能跑高速的原因。把抽取夹在中间还带来一个额外好处：差分级跑在低速，省资源。
+
+但积分器会**累加增长**，必须按最坏情况开够位宽。CIC 的**固有增益**（也就是位增长所对应的放大倍数）由抽取比 \(R\)、差分延迟 \(M\)、阶数 \(N\) 决定：
+
+\[ G_{\text{CIC}} = (R\cdot M)^{N} \]
+
+对应的**位增长**（累加器要比输入多开的整数位）为：
+
+\[ b = \lceil \log_2 G_{\text{CIC}} \rceil \]
+
+例如 \(R=4, M=1, N=3\)：\(G=(4\cdot1)^3=64\)，\(b=\lceil\log_2 64\rceil=6\)，累加器要多 6 个整数位。
+
+#### 4.1.2 核心流程
+
+Open Logic 在源码里用一组编译期常量把上面的公式落地，并据此推导出各级中间格式。两个实体的常量定义**几乎逐字相同**，以 tdm 版为例：
+
+```
+MaxCicGain   = (Ratio * DiffDelay) ** Order        -- 固有增益 G
+MaxCicAddBits = log2ceil(G - 0.1)                  -- 位增长 b（-0.1 是 Vivado 实数精度补丁）
+AccuFmt      = (InFmt.S, InFmt.I + b, InFmt.F)     -- 积分级格式：整数位 +b
+MaxShift     = b                                   -- 右移 b 位做粗校
+RealGc       = 2**b / G                            -- 细校系数，落在 [0.5, 1.0]
+```
+
+增益校准分两步（文档 `olo_fix_cic_dec_tdm.md` 的 *CIC Gain Handling* 小节有公式图）：
+
+1. **粗校（移位）**：把累加结果右移 \(b\) 位，把增益从 \(G\) 压到 \([0.5,\,1.0]\) 范围（\(2^{-b}\cdot G\in[0.5,1]\)）。
+2. **细校（乘法）**：再乘以细校系数 \(k_\text{fine}=2^{b}/G\)，把增益精确归一到 1.0。当 \(G\) 本身是 2 的幂（如上例 \(G=64\)）时 \(k_\text{fine}=1.0\)，乘法可省略——这正是 `GainCorrCoefFmt_g="NONE"` 的适用场景。
+
+这两步对应两种实现选择：`GainCorrCoefFmt_g \neq` `"NONE"` 时走「resize + mult」链；等于 `"NONE"` 时跳过乘法器、只做一次 resize。粗校移位本身又有「固定（纯连线）」与「可配（动态移位器）」两种实现，详见 4.3。
+
+#### 4.1.3 源码精读
+
+增益相关常量定义在 [olo_fix_cic_dec_tdm.vhd:88-99](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L88-L99)：
+
+```vhdl
+constant MaxCicGain_c    : real    := (real(Ratio_g) * real(DiffDelay_g))**real(Order_g);
+constant MaxCicAddBits_c : natural := log2ceil(MaxCicGain_c - 0.1);
+-- ... WORKAROUND: Vivado does real calculations imprecisely. With the -0.1, wrong results are avoided.
+constant MaxShift_c      : natural     := MaxCicAddBits_c;
+constant AccuFmt_c       : FixFormat_t := (InFmt_c.S, InFmt_c.I + MaxCicAddBits_c, InFmt_c.F);
+constant DiffFmt_c       : FixFormat_t := (OutFmt_c.S, InFmt_c.I, OutFmt_c.F + Order_g + 1);
+...
+constant RealGc_c        : real        := 2.0**real(MaxCicAddBits_c)/MaxCicGain_c;
+
+constant FixedGc_c : std_logic_vector(...) := cl_fix_from_real(RealGc_c, GainCorrCoefFmt_c);
+```
+
+注意 `log2ceil(MaxCicGain_c - 0.1)` 里的 `-0.1`：注释解释 Vivado 的 `real` 运算有精度误差，减 0.1 是为了让 `log2ceil` 在「正好整次幂」时不因舍入误差多算一位。差分级格式 `DiffFmt_c` 多预留了 `Order_g + 1` 个小数位，作为差分链的精度余量，最终再 round/saturate 回 `OutFmt`。
+
+Python 位真模型对同一组常量的计算在 [olo_fix_cic_dec.py:70-74](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/python/olo_fix/olo_fix_cic_dec.py#L70-L74)，可作为「单一真相源」对照：
+
+```python
+self.cic_gain = (ratio*diff_delay)**order
+self.cic_add_bits = ceil(log2(self.cic_gain))
+self.shift = self.cic_add_bits
+self.accu_fmt = FixFormat(in_fmt.S, in_fmt.I+self.cic_add_bits, in_fmt.F)
+self.diff_fmt = FixFormat(out_fmt.S, in_fmt.I, out_fmt.F+order+1)
+```
+
+细校乘法链（`GainCorrCoefFmt_g \neq "NONE"`）在 [olo_fix_cic_dec_tdm.vhd:329-378](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L329-L378)：先实例化 `olo_fix_resize` 把差分输出截到增益校准输入格式 `GcInFmt_c`（恰好比 `OutFmt` 多 2 位小数，便于整块映射进一个硬件乘法器），再实例化 `olo_fix_mult` 乘以 `GcCoef_0`。`GcCoef_0` 在固定抽取比下取编译期常量 `FixedGc_c`，否则取寄存存下来的 `r.GcCoef`：
+
+```vhdl
+GcCoef_0 <= FixedGc_c when FixedRatio_g else r.GcCoef;
+```
+
+增益校准关闭（`"NONE"`）的旁路分支在 [olo_fix_cic_dec_tdm.vhd:380-400](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L380-L400)，只留一个 `olo_fix_resize` 直接收敛到 `OutFmt`。两个 `generate` 分支互斥，由 `compareNoCase(GainCorrCoefFmt_g, "NONE")` 选择（字符串泛型 + 大小写不敏感比较，见 u8-l2）。
+
+#### 4.1.4 代码实践（手算增益与位增长）
+
+1. **目标**：用一个具体配置验证你对增益/位增长公式的理解，并对照源码常量。
+2. **操作步骤**：
+   - 取配置 \(R=4,\ M=1,\ N=3\)（即测试台默认的 `Ratio_g=4, DiffDelay_g=1, Order_g=3`）。
+   - 手算 \(G=(R\cdot M)^N\) 与 \(b=\lceil\log_2 G\rceil\)。
+   - 判断 \(G\) 是否为 2 的幂，决定 `GainCorrCoefFmt_g` 能否设 `"NONE"`。
+   - 再取一个非整次幂的例子，例如 \(R=3,\ M=1,\ N=6\)，算 \(b\) 与 \(k_\text{fine}\)。
+3. **需要观察的现象**：第二个例子 \(G=3^6=729\)，\(b=\lceil\log_2 729\rceil=10\)，\(k_\text{fine}=2^{10}/729\approx 1.403\) —— 等等，这超出了 \([0.5,1.0]\)？请思考为何（提示：移位已经把增益压进 \([0.5,1]\)，细校系数应落在该区间，检查你的 \(b\) 与移位方向）。
+4. **预期结果**：\(R=4,M=1,N=3\) 时 \(G=64\)、\(b=6\)、\(k_\text{fine}=1.0\)，可关闭乘法器。非整次幂时 \(k_\text{fine}\in[0.5,1]\)，乘法器保留。
+5. 本步骤为纯手算/源码对照，无需运行仿真；若要核验，可对照 Python 模型 [olo_fix_cic_dec.py:70-74](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/python/olo_fix/olo_fix_cic_dec.py#L70-L74) 打印的 `cic_gain/cic_add_bits`。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 CIC 适合做多级抽取链的「第一级」，而不是最后一级？
+> 答案：CIC 无乘法器、能跑高速，适合先把采样率大幅降下来；但它的通带滚降明显（高频衰减），不适合做精细的通带整形，所以后面通常再接一个低速率 FIR「补偿滤波器」修平通带。
+
+**练习 2**：把 `Order_g` 从 3 加到 6，`AccuFmt` 的整数位会怎么变？这对资源意味着什么？
+> 答案：\(b=\lceil\log_2(R\cdot M)^N\rceil\) 随阶数线性增长（近似 \(N\log_2(RM)\)），累加器位宽变宽，积分器加法器与延迟线资源都随之增大——这是 CIC「高阶=高滚降但更贵」的核心权衡。
+
+---
+
+### 4.2 TDM 通道处理（olo_fix_cic_dec_tdm）
+
+#### 4.2.1 概念说明
+
+`olo_fix_cic_dec_tdm` 的输入输出都是 TDM 流：\(N\) 个通道按 \(0,1,\dots,N-1\) 循环共享一条数据线，每拍只到一个通道的采样。难点在于——**积分器是一个有状态的累加器**，而硬件里只有一套积分器，每个通道必须各自维护一份累加状态。Open Logic 的解法是「**共享硬件 + 延迟线回收状态**」：
+
+- 单通道（`Channels_g=1`）：每拍都处理同一个通道，累加器直接反馈上一拍的值即可（`AccuIn_v := r.Accu`），无需延迟线。
+- 多通道（`Channels_g>1`）：每拍处理一个不同通道，但累加需要「**同一通道**上一拍的累加值」。因为同一通道每 \(N\) 拍才出现一次，所以把当前累加输出延迟 \(N-1\) 拍，就能在下一次轮到该通道时取回它的历史值。
+
+梳状/差分级同样在 TDM 数据上工作，且它处在**抽取之后**——抽取后每个通道的采样仍然时分交织，因此差分延迟必须按「同通道的 \(M\) 个采样」折算成 \(N\cdot M\) 拍。
+
+#### 4.2.2 核心流程
+
+整体数据通路（详见文档结构图 `olo_fix_cic_dec_tdm.md` 的 *General Architecture*）：
+
+```
+In_Data ──► [N 级积分器(高速, 共享+延迟线)] ──► [右移粗校] ──► [抽取: 每 R 帧/通道保留 1]
+                                                                 │
+                                                                 ▼
+                              [N 级差分器(低速, 延迟=N·M)] ──► [细校 resize/mult] ──► Out_Data
+```
+
+关键计数器有两个（见 [olo_fix_cic_dec_tdm.vhd:113-114](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L113-L114) 的 `Rcnt` 与 `Chcnt`）：
+
+- `Chcnt`：通道计数，每来一个有效采样递减，到 0 回绕到 `Channels_g-1`，用于跟踪当前处于帧内第几个通道。
+- `Rcnt`：抽取计数，**只在 `Chcnt=0`（一个完整帧的通道 0）时**才递减/重载；当 `Rcnt=0` 时，本帧所有通道的差分输入都被使能输出。也就是说「每 \(R\) 个完整 TDM 帧放行一帧」，所有通道按同一抽取比一起降速。
+
+`Out_Last` 由输出侧的 `OutChCnt` 生成（[olo_fix_cic_dec_tdm.vhd:252-261](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L252-L261)）：每输出 `Channels_g-1` 个通道就拉一次 `Last`，标记一帧的末通道，遵循 u3-l3 的 TDM `Last` 约定。
+
+#### 4.2.3 源码精读
+
+**积分器共享与延迟线回收**——单/多通道的分支在 [olo_fix_cic_dec_tdm.vhd:178-199](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L178-L199)：
+
+```vhdl
+-- Select accumulator input (register for single channel, delay line other wise)
+if Channels_g = 1 then
+    AccuIn_v := r.Accu;          -- 单通道：直接用上一拍累加值
+else
+    AccuIn_v := IntDel;          -- 多通道：用延迟线回收「同通道上一拍」的累加值
+end if;
+...
+-- First accumulator
+if r.VldAccu(0) = '1' then
+    v.Accu(1) := cl_fix_add(AccuIn_v(1), AccuFmt_c, r.Input_0, InFmt_c, AccuFmt_c, Trunc_s, None_s);
+end if;
+```
+
+`IntDel` 由一组 `olo_base_delay` 实现，延迟深度恰为 `Channels_g - 1` 拍（[olo_fix_cic_dec_tdm.vhd:468-493](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L468-L493)）。注意它**只在 `Channels_g > 1` 时才生成**：
+
+```vhdl
+g_intdel_yes : if Channels_g > 1 generate
+    g_intdel : for stage in 0 to Order_g - 1 generate
+        i_del : entity work.olo_base_delay
+            generic map ( Width_g => ..., Delay_g => Channels_g - 1, RstState_g => true, ... )
+            port map ( ..., Out_Data => IntDel(stage + 1) );
+```
+
+为什么是 `Channels_g - 1` 而不是 `Channels_g`？因为寄存器 `r.Accu` 本身已经寄存了一拍，再延迟 \(N-1\) 拍，合计 \(N\) 拍，正好回到同一通道上一次被处理时刻。
+
+**抽取与差分**——抽取逻辑在 [olo_fix_cic_dec_tdm.vhd:203-221](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L203-L221)：`Chcnt`/`Rcnt` 协作决定何时把移位后的累加值 `ShiftDataOut` 推进差分级（`v.VldDiff(0):='1'`、`v.DiffIn_0:=...`）。第一级差分与后续级在 [olo_fix_cic_dec_tdm.vhd:225-241](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L225-L241)，都是 `cl_fix_sub(当前, 延迟值)`：
+
+```vhdl
+v.DiffVal(1) := cl_fix_sub(r.DiffIn_0, DiffFmt_c, DiffDel(0), DiffFmt_c, DiffFmt_c, Trunc_s, None_s);
+```
+
+**差分延迟线**——`DiffDel` 由 `olo_base_delay` 实现，延迟深度是 `Channels_g * DiffDelay_g`（[olo_fix_cic_dec_tdm.vhd:439-465](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L439-L465)）。这是 TDM 通道处理的核心细节：
+
+```vhdl
+i_del : entity work.olo_base_delay
+    generic map ( Width_g => ..., Delay_g => Channels_g * DiffDelay_g, RstState_g => true,
+                  Resource_g => Resource_g, RamBehavior_g => RamBehavior_g, RamStyle_g => RamStyle_g )
+```
+
+单通道时 `Channels_g=1`，退化为标准 `Delay_g => DiffDelay_g`；多通道时，要回到「同通道 \(M\) 个采样前」的值，就必须延迟 \(N\cdot M\) 拍。差分级处在抽取后的低速域，所以这里的延迟是按低速时钟拍数计的。
+
+**输入 TDM 帧边界自检**——一段被 `synthesis translate_off` 包裹的仿真专用进程 [olo_fix_cic_dec_tdm.vhd:298-323](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L298-L323) 会跟踪 `In_Last`，若用户在非末通道拉起 `In_Last` 就报错。这对应文档里 `In_Last`「可选、仅用于帧边界检查」的说明。
+
+#### 4.2.4 代码实践（源码阅读：解释两条延迟深度）
+
+1. **目标**：理解为什么积分延迟线是 `Channels_g-1`、差分延迟线是 `Channels_g*DiffDelay_g`。
+2. **操作步骤**：
+   - 打开 [olo_fix_cic_dec_tdm.vhd:468-493](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L468-L493)（积分延迟 `IntDel`）与 [olo_fix_cic_dec_tdm.vhd:439-465](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L439-L465)（差分延迟 `DiffDel`）。
+   - 设 `Channels_g=4, DiffDelay_g=1`，分别算出两条延迟线的深度。
+   - 解释为何积分延迟只在 `Channels_g>1` 时才生成，而差分延迟对任意通道数都生成。
+3. **需要观察的现象**：积分延迟深度 = 3（=`Channels_g-1`），差分延迟深度 = 4（=`Channels_g*DiffDelay_g`）。
+4. **预期结果**：你能用自己的话说清「寄存器本身已占 1 拍，故积分再补 \(N-1\) 拍；差分要回到同通道 \(M\) 个采样前，故补 \(N\cdot M\) 拍」。
+5. 本实践为源码阅读型，无需运行仿真。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：若把 `Channels_g` 从 4 改为 1，`g_intdel_yes` 分支会被综合成什么？
+> 答案：`Channels_g>1` 条件不成立，整个 `g_intdel_yes` generate 被省略，积分器退化为 `AccuIn_v := r.Accu` 的直接反馈单通道累加器，无延迟线、最省资源。
+
+**练习 2**：`Resource_g` / `RamBehavior_g` / `RamStyle_g` 这三个泛型被转发给了哪些实体？什么时候才有意义？
+> 答案：转发给所有 `olo_base_delay` 实例（积分延迟与差分延迟）。文档明确它们「only for cases with enough channels to make usage of RAM attractive」——即通道数大到延迟线值得用块 RAM/分布式 RAM 实现时才需要调，小通道数下默认即最优。
+
+---
+
+### 4.3 抽取比配置：固定 vs 运行时可配
+
+#### 4.3.1 概念说明
+
+两个实体都通过同一个布尔泛型 `FixedRatio_g` 提供两种抽取比配置方式（文档 *Description* 与 *Runtime Ratio Configuration* 小节）：
+
+- **固定抽取比**（`FixedRatio_g=true`，默认）：抽取比在编译期由 `Ratio_g` 决定。实体内部自动算好移位量与细校系数（`FixedGc_c`），所有 `Cfg_*` 配置端口被忽略、可不连。**关键好处**：右移 \(b\) 位是编译期常数，综合后就是纯连线（重命名接线），**不占任何逻辑**。
+- **运行时可配抽取比**（`FixedRatio_g=false`）：`Ratio_g` 退化为「最大抽取比」，实际抽取比由端口 `Cfg_Ratio`（= 实际比 − 1）在运行时指定。相应地，移位量与细校系数也要用户在端口 `Cfg_Shift` / `Cfg_GainCorr` 上提供。因为移位量运行时可变，必须用 `olo_base_dyn_sft` **动态移位器**，资源更贵。
+
+无论哪种模式，文档都要求：**抽取比只能在复位期间（`Rst=1`）修改**。
+
+#### 4.3.2 核心流程
+
+`Cfg_*` 三个配置端口的含义（文档 *Runtime Ratio Configuration* 表）：
+
+| 端口 | 宽度 | 含义（仅 `FixedRatio_g=false` 时用） |
+| :--- | :--- | :--- |
+| `Cfg_Ratio` | `log2ceil(Ratio_g)` | 实际抽取比 − 1（例：`Cfg_Ratio=3` → 比为 4） |
+| `Cfg_Shift` | 8 | 右移位数（= 该比下的位增长 \(b\)）；固定 8 位足以覆盖任何 sane CIC |
+| `Cfg_GainCorr` | `width(GainCorrCoefFmt_g)` | 细校系数（仅 `GainCorrCoefFmt_g \neq "NONE"` 时用） |
+
+用户须按下式在复位期写好这三个值（测试台 [olo_fix_cic_dec_tdm_tb.vhd:107-114](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/olo_fix_cic_dec_tdm_tb.vhd#L107-L114) 给出了等价 VHDL 写法）：
+
+\[
+\text{Cfg\_Shift} = \lceil \log_2 (R\cdot M)^N \rceil = b,\qquad
+\text{Cfg\_GainCorr} = \frac{2^{b}}{(R\cdot M)^N},\qquad
+\text{Cfg\_Ratio} = R-1
+\]
+
+固定模式下，组合进程把 `Ratio_v` 直接置为 `toUslv(Ratio_g-1, ...)`（[olo_fix_cic_dec_tdm.vhd:162-166](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L162-L166)），即读端口或读常量二选一：
+
+```vhdl
+if FixedRatio_g then
+    Ratio_v := toUslv(Ratio_g - 1, Cfg_Ratio'length);
+else
+    Ratio_v := Cfg_Ratio;
+end if;
+```
+
+#### 4.3.3 源码精读
+
+**固定移位 = 纯连线**——[olo_fix_cic_dec_tdm.vhd:432-436](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L432-L436)：
+
+```vhdl
+g_shift_fixed : if FixedRatio_g generate
+    -- Shift is combinatorial because it is pure wiring
+    ShiftVld     <= r.VldAccu(Order_g);
+    ShiftDataOut <= cl_fix_shift(r.Accu(Order_g), AccuFmt_c, -MaxShift_c, SftFmt_c, Trunc_s, None_s);
+end generate;
+```
+
+`-MaxShift_c` 是编译期常量右移，综合后等价于把位向量重新切片接线，零逻辑开销。注释明确指出「it is pure wiring」。
+
+**可配移位 = 动态移位器**——[olo_fix_cic_dec_tdm.vhd:404-430](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L404-L430) 实例化 `olo_base_dyn_sft`（u5-l4 讲过的桶形移位器），按 `Cfg_Shift` 选中的位数做右移，每 4 位一级流水化：
+
+```vhdl
+i_sft : entity work.olo_base_dyn_sft
+    generic map ( Direction_g => "RIGHT", SelBitsPerStage_g => 4, MaxShift_g => MaxShift_c,
+                  Width_g => cl_fix_width(SftFmt_c), SignExtend_g => true )
+    port map ( ..., In_Shift => ShiftSel, In_Data => ShiftDataIn, Out_Data => ShiftDataOut );
+```
+
+两个 `generate` 互斥，保证两种模式不会同时存在。文档 *General Architecture* 的颜色标注里：蓝色=固定比、紫色=可配比，并提示「a dynamic shifter is required, which consumes more resources」。
+
+测试台用例 `RatioChange`（[olo_fix_cic_dec_tdm_tb.vhd:138-161](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/olo_fix_cic_dec_tdm_tb.vhd#L138-L161)）专门验证可配模式：先按 `Ratio_g` 跑一遍，再在复位期把比改为 `Ratio_g-1`、重算 `Cfg_Shift/Cfg_GainCorr/Cfg_Ratio`，跑第二遍并比对另一份期望文件 `Out_Rminus1_Interleaved.fix`（该文件由 `cosim.py` 用 `ratio=Ratio_g-1` 的模型预生成）。
+
+#### 4.3.4 代码实践（改一个配置，观察资源）
+
+1. **目标**：直观体会「固定移位是连线、可配移位要逻辑」的资源差异。
+2. **操作步骤**：
+   - 在 [sim/test_configs/olo_fix.py:435-455](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/sim/test_configs/olo_fix.py#L435-L455) 找到 `olo_fix_cic_dec_tdm` 的配置循环，它对 `Channels∈{1,4}` × `FixedRatio∈{False,True}` 各注册了一组用例。
+   - 选两组对照：`...FixedRatio=True-Default` 与 `...FixedRatio=False-Default`（其余 generic 相同）。
+   - 用厂商工具分别综合这两份配置（或阅读 `olo_base_dyn_sft` 的实现 [src/base/vhdl/olo_base_dyn_sft.vhd](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/base/vhdl/olo_base_dyn_sft.vhd)），对比是否出现动态移位器实例。
+3. **需要观察的现象**：`FixedRatio=True` 时 `g_shift_conf` 分支不存在、无 `olo_base_dyn_sft`；`FixedRatio=False` 时出现动态移位器。
+4. **预期结果**：固定模式省下一个动态移位器；这与文档「dynamic shifter consumes more resources」一致。
+5. 综合结果与具体器件/工具相关，确切资源数「待本地验证」；但「是否实例化 `olo_base_dyn_sft`」可由源码静态判定。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `Cfg_Shift` 固定 8 位就够？
+> 答案：文档指出，CIC 位增长超过 255 位在实践中不可行（资源与时序都受不了），所以 8 位足以覆盖任何 sane 配置；固定宽度还简化了端口接线。
+
+**练习 2**：如果抽取比 \(R\) 恰好使 \(G=(R\cdot M)^N\) 为 2 的幂，可配模式还需要 `Cfg_GainCorr` 吗？
+> 答案：不需要。此时 \(k_\text{fine}=1.0\)，可把 `GainCorrCoefFmt_g` 设 `"NONE"` 跳过乘法器；但 `Cfg_Shift` 仍需提供（移位量 \(b\) 随 \(R\) 变）。
+
+---
+
+### 4.4 并行输入 TDM 输出（olo_fix_cic_dec_par_tdm）
+
+#### 4.4.1 概念说明
+
+`olo_fix_cic_dec_par_tdm` 解决另一种常见场景：**输入端每个通道每拍都能给一个采样**（并行），但输出端希望复用一条 TDM 流。因为输入是并行的，每个通道可以拥有**独立的累加器**，不必像 tdm 版那样用延迟线时分共享——这是它与 tdm 版最根本的结构差异。
+
+文档（*Description* 与 *General Architecture*）强调一个**效率关键**：处理顺序必须是「**先抽取、再并行转 TDM、最后移位**」。原因有二：
+
+1. **先抽取**：抽取后每 \(R\) 拍才产生一组通道结果，并行转 TDM 转换器（`olo_base_wconv_xn2n`）只需处理降速后的数据，输出侧带宽最低。
+2. **移位放在 TDM 侧**：因为所有通道已被串成一条 TDM 流，只需**一个移位器**就能服务全部通道；若在并行侧移位，则每个通道各需一个移位器，贵得多。
+
+#### 4.4.2 核心流程
+
+```
+In_Data(并) ──► [每通道独立 N 级积分器] ──► [抽取: 每 R 拍取一组]
+                                                 │ (此时仍是并行的一组通道)
+                                                 ▼
+                              [olo_base_wconv_xn2n: 并行→TDM] ──► [右移粗校(单个)] ──► [N 级差分 + 细校] ──► Out_Data(TDM)
+```
+
+由于输入并行，累加器是一个**二维数组** `Accu(stage)(channel)`（[olo_fix_cic_dec_par_tdm.vhd:109-110](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L109-L110)），每拍同时对所有通道做加法，没有延迟线回收。
+
+抽取在 [olo_fix_cic_dec_par_tdm.vhd:218-226](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L218-L226)：`Rcnt` 计到 0 时拉 `VldParTdm`，把这一拍所有通道的 `Accu(Order_g)(*)` 打包送进转换器。
+
+注意一个带宽约束（文档 *Description* 的公式图 `fs_par_tdm.png`）：输出是 TDM，每拍只出一个通道采样，故每通道输出率上限为 \(f_\text{clk}/N\)；这必须不低于抽取后的输入率 \(f_\text{in}/R\)。即用户须保证：
+
+\[ \frac{f_\text{clk}}{\text{Channels\_g}} \;\geq\; \frac{f_\text{in}}{R} \]
+
+（精确形式以文档公式图为准；当输入也接近 \(f_\text{clk}\) 时，需保证 \(R \geq \text{Channels\_g}\)。）
+
+#### 4.4.3 源码精读
+
+**每通道独立累加**——输入解包与积分在 [olo_fix_cic_dec_par_tdm.vhd:184-214](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L184-L214)，用 `for ch in 0 to Channels_g-1 loop` 对每个通道独立累加：
+
+```vhdl
+for ch in 0 to Channels_g-1 loop
+    v.Accu(1)(ch) := cl_fix_add(r.Accu(1)(ch), AccuFmt_c, r.Input_0(ch), InFmt_c, AccuFmt_c, Trunc_s, None_s);
+end loop;
+```
+
+对比 tdm 版的 `Accu(1)`（单条）与这里的 `Accu(1)(ch)`（每通道一条），就能看出「并行=每通道独立硬件、无需延迟线」。
+
+**并行转 TDM**——[olo_fix_cic_dec_par_tdm.vhd:380-396](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L380-L396)，先 `for ch` 把所有通道的 `Accu(Order_g)(ch)` 拼成宽向量 `ParTdmIn`，再实例化 `olo_base_wconv_xn2n`（u3-l3）把 \(N\) 个通道宽的一拍串成 \(N\) 拍单通道宽：
+
+```vhdl
+i_partdm : entity work.olo_base_wconv_xn2n
+    generic map ( InWidth_g => Channels_g * cl_fix_width(AccuFmt_c), OutWidth_g => cl_fix_width(AccuFmt_c) )
+    port map ( ..., In_Valid => r.VldParTdm, In_Data => ParTdmIn, Out_Valid => ParTdmOut_Valid, Out_Data => ParTdmOut );
+```
+
+**移位在 TDM 侧**——抽取+转换之后，`ParTdmOut` 已是单通道宽的 TDM 流，此时再做移位：固定模式用 `cl_fix_shift(..., -MaxShift_c, ...)` 纯连线（[olo_fix_cic_dec_par_tdm.vhd:428-432](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L428-L432)），可配模式用一个 `olo_base_dyn_sft`（[olo_fix_cic_dec_par_tdm.vhd:400-426](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L400-L426)）。**无论几个通道，移位器只有一个**——这就是「移位放 TDM 侧」的收益。
+
+差分级与增益校准链与 tdm 版几乎逐字相同（差分延迟仍是 `Channels_g * DiffDelay_g`，因为 TDM 侧同样要回到同通道 \(M\) 个采样前），见 [olo_fix_cic_dec_par_tdm.vhd:438-464](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L438-L464) 与 [olo_fix_cic_dec_par_tdm.vhd:306-377](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L306-L377)。Python 位真模型 `olo_fix_cic_dec.py` 对两种实体完全通用（它只建模单通道数学，多通道时由 `cosim.py` 实例化多份，见 [olo_fix_cic_dec.py:22-25](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/python/olo_fix/olo_fix_cic_dec.py#L22-L25) 与 [cosim.py:47-79](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/cosim.py#L47-L79)）。
+
+#### 4.4.4 代码实践（对照两个实体的累加器结构）
+
+1. **目标**：用源码对照，说清 tdm 与 par_tdm 在「多通道积分」上的实现差异。
+2. **操作步骤**：
+   - 打开 [olo_fix_cic_dec_par_tdm.vhd:108-114](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_par_tdm.vhd#L108-L114)，看清 `Accus_t` 是「stage → channel」的二维数组。
+   - 与 [olo_fix_cic_dec_tdm.vhd:102-103](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L102-L103) 的一维 `Accus_t` 对比。
+   - 确认 par_tdm 里**没有** `g_intdel_yes`（积分延迟线）这种结构。
+3. **需要观察的现象**：par_tdm 的积分是「每通道一套加法器」并行进行；tdm 是「一套加法器 + 延迟线」时分复用。
+4. **预期结果**：你能总结出选型口诀——输入已经是并行多通道且每通道都要满采样率时用 par_tdm（多花加法器换吞吐）；输入本就是 TDM 流时用 tdm（省硬件）。
+5. 本实践为源码阅读型，无需运行仿真。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：par_tdm 为什么没有积分延迟线（`IntDel`）？
+> 答案：输入并行，每个通道每拍都出现，各自有独立累加器 `Accu(stage)(ch)`，反馈就是本通道上一拍的值，无需跨通道时分回收，故不需要延迟线。
+
+**练习 2**：把「移位」从 TDM 侧搬到并行侧（每个通道各移一次）会带来什么后果？
+> 答案：需要 `Channels_g` 个移位器而非 1 个，资源随通道数线性增长；这正是文档强调「shift happening on the TDM side, only one shifter is required for all channels」的原因。
+
+---
+
+## 5. 综合实践
+
+把本讲四条线索（积分-梳状结构、TDM 通道处理、抽取比配置、并行/TDM 差异）串起来，做一个**多通道、抽取比为 4 的 TDM 抽取**端到端验证。Open Logic 已经为 `olo_fix_cic_dec_tdm` 准备好了配套的 VUnit 协仿真测试台与 Python 位真模型，我们直接复用。
+
+**实践目标**：对 `Channels_g=4, Ratio_g=4`（其余用默认/典型值）跑通协仿真，验证两点——(1) 输出采样率正确降为输入的 \(1/4\)；(2) 输出通道顺序仍为 \(0,1,2,3,\text{Last}\) 循环。
+
+**操作步骤**：
+
+1. 确认前置条件（u1-l3、u1-l4）：仓库用 `--recursive` 克隆（含 `en_cl_fix` 子模块），仿真器为 GHDL（默认），VUnit 已安装。
+2. 进入 `sim/` 目录，运行 `run.py` 并用测试名过滤只跑 `olo_fix_cic_dec_tdm` 的多通道、固定抽取比用例。`run.py` 基于标准 VUnit CLI（[sim/run.py:28-73](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/sim/run.py#L28-L73)），位置参数即 VUnit 测试名 glob 过滤模式：
+
+   ```bash
+   cd sim
+   python run.py --ghdl "*olo_fix_cic_dec_tdm*CH4*FixedRatio=True-Default*"
+   ```
+
+   > 该用例由 [sim/test_configs/olo_fix.py:435-440](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/sim/test_configs/olo_fix.py#L435-L440) 注册，配置名为 `CH4-FixedRatio=True-Default`，全路径形如 `olo_tb.olo_fix_cic_dec_tdm_tb.CH4-FixedRatio=True-Default`。过滤串需与本地生成的测试名匹配，**确切 glob 形式待本地确认**；若不确定，可先不加过滤跑全部 `olo_fix_cic_dec_tdm` 用例：`python run.py --ghdl "*olo_fix_cic_dec_tdm*"`。
+
+3. 协仿真会在每个用例仿真前由 VUnit `pre_config` 自动执行 [cosim.py](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/cosim.py)：先用 `olo_fix_cic_dec` 模型算出每通道期望，再写成交织的 `In_Interleaved.fix`（输入）与 `Out_Interleaved.fix`（期望输出）（[cosim.py:88-102](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/cosim.py#L88-L102)）。这一步无需手动操作（u8-l5）。
+4. 测试台 [olo_fix_cic_dec_tdm_tb.vhd](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/olo_fix_cic_dec_tdm_tb.vhd) 用 stimuli VC 按 TDM 模式（`Tdm_Slots => Channels_g`）回放输入，用 checker VC 按 TDM 模式逐拍比对输出与期望文件（[olo_fix_cic_dec_tdm_tb.vhd:121-124](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/olo_fix_cic_dec_tdm_tb.vhd#L121-L124)）。
+
+**需要观察的现象**：
+
+- 仿真**通过**（checker VC 未报 assert 错误、`test_runner_cleanup` 正常结束），说明 DUT 输出与 Python 位真模型逐拍位真一致——这同时证明了**采样率正确**（否则采样数对不上）与**通道顺序正确**（否则交织位置错位、数值对不上）。
+- 若想人工确认采样率：在波形里数 `In_Valid` 与 `Out_Valid` 的脉冲数。对 `Channels_g=4, Ratio_g=4`，每 4 个完整输入帧（=16 个交织采样）应产生 1 个输出帧（4 个交织采样 + 1 个 `Out_Last`），即每通道输出率 = 输入率 / 4。
+- `Out_Last` 应每 4 个 `Out_Valid` 拉一次，标记通道 3（末通道）。
+
+**预期结果**：`FullSpeed` 与 `Throttled`（带随机停顿）两个子用例均通过；说明即便输入有反压/停顿，抽取与通道顺序依然正确。
+
+**说明**：本实践依赖本地具备 GHDL + VUnit + `en_cl_fix` 的完整环境，能否跑通「待本地验证」；若无仿真环境，可退化为「源码阅读型」：跟踪 [olo_fix_cic_dec_tdm.vhd:203-261](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/vhdl/olo_fix_cic_dec_tdm.vhd#L203-L261) 的 `Chcnt`/`Rcnt`/`OutChCnt` 三个计数器，论证「每 4 帧放行 1 帧、帧内通道顺序 0→3」并由 `Out_Last` 收尾。
+
+---
+
+## 6. 本讲小结
+
+- CIC 抽取滤波器 = **\(N\) 级积分（高速）→ 抽取 → \(N\) 级差分（低速）**，不用乘法器、能跑高速，固有增益 \(G=(R\cdot M)^N\)、位增长 \(b=\lceil\log_2 G\rceil\)。
+- Open Logic 用**两级增益校准**：右移 \(b\) 位粗校到 \([0.5,1]\)、再乘 \(k_\text{fine}=2^b/G\) 细校到 1.0；\(G\) 为 2 的幂时可关乘法器（`GainCorrCoefFmt_g="NONE"`）。
+- `olo_fix_cic_dec_tdm` 用**共享累加器 + 延迟线**在 TDM 流上做多通道积分（积分延迟 `Channels_g-1` 拍），差分延迟为 `Channels_g*DiffDelay_g` 拍以回到同通道 \(M\) 个采样前。
+- `FixedRatio_g` 决定移位实现：**固定=纯连线**（`cl_fix_shift` 编译期常量），**可配=`olo_base_dyn_sft` 动态移位器**（更贵，且抽取比只能在复位期改）。
+- `olo_fix_cic_dec_par_tdm` 用**每通道独立累加器**（二维数组，无积分延迟线），并坚持**先抽取→再并行转 TDM→最后移位**，从而全通道共用一个移位器。
+- 两个实体共享同一个 Python 位真模型 `olo_fix_cic_dec.py`，由 VUnit `pre_config` 自动跑模型、生成 `.fix` 文件，再用 stimuli/checker VC 做位真协仿真——验证通过即同时证明了采样率与通道顺序正确。
+
+## 7. 下一步学习建议
+
+- **下一讲 u9-l4（FIR 滤波器、系数存储与滑动平均）**：CIC 的通带滚降需要后续补偿，建议接着学 `olo_fix_fir_dec_ser_chtdm` / `olo_fix_fir_dec_ser_chpar`，看 FIR 如何作为 CIC 之后的「补偿/整形」级，以及 `olo_fix_coef_storage` 如何管理运行时可更新的系数。
+- **横向对照位宽转换**：重读 u3-l3 的 `olo_base_wconv_xn2n`，对照本讲 par_tdm 里「并行→TDM」的用法，加深对 TDM 约定与 `Last` 标记的理解。
+- **深入延迟线资源**：当通道数很大、延迟线要映射进块 RAM 时，回顾 u5-l1 的 `olo_base_delay`（`Resource_g`/`RamBehavior_g`/`RamStyle_g`），理解本讲那三个资源泛型何时才值得调。
+- **建议阅读源码**：[olo_fix_cic_dec.py](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/python/olo_fix/olo_fix_cic_dec.py)（积分用整数 `cumsum mod 2^width` 避免浮点误差，[olo_fix_cic_dec.py:130-142](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/src/fix/python/olo_fix/olo_fix_cic_dec.py#L130-L142)）与 [cosim.py](https://github.com/open-logic/open-logic/blob/ecca8af95295e798b8a3bc6610cb52be9688ae01/test/fix/olo_fix_cic_dec_tdm/cosim.py)，把「Python 黄金模型 → `.fix` 文件 → HDL 位真比对」的协仿真闭环彻底走通。
