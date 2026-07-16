@@ -1,0 +1,1333 @@
+{
+  "project": "OpenFPGA",
+  "head": "97c06e27a112c255112c48d4007b2b3a16267371",
+  "rationale": "OpenFPGA 是一个用 C++ 编写、经过流片验证的开源 FPGA IP 生成框架，代码量大（仅 openfpga/src 下就有 200+ 个源文件，外加 13 个独立支撑库）。因此学习手册按「先会用、再懂原理、最后能扩展」的三层渐进设计。\n\n入门层（u1–u3）让读者从零开始：先认识项目定位与目录结构，学会用 CMake/Makefile 编译并用 Python 脚本跑通第一个设计流；再理解 openfpga 可执行程序的 shell 入口、命令分组与 OpenfpgaContext 全局数据中枢；最后搞清楚驱动整个流程的两套输入文件（VPR 架构 XML 与 openfpga_arch.xml），重点是电路库与配置协议。这一层遵循「定位→编译→运行→理解输入」的真实上手顺序。\n\n进阶层（u4–u8）沿着 canonical example_script.openfpga 的真实命令链展开：架构加载与 VPR 标注 → build_fabric 构建 ModuleManager 模块图 → 两级比特流模型与生成 → Verilog/SPICE/SDC 网表与约束输出。每个单元对应一条主链路上的核心子系统，讲义之间存在严格的上下游依赖（例如 fabric 比特流依赖模块图与 architecture 比特流），保证读者按顺序学习时不会出现知识断层。\n\n专家层（u9–u10）面向二次开发与架构取舍：存储器组/移位寄存器 bank、时钟网络、repack、tile 直连、GSB 压缩等高级机制，以及支撑库（util/mux/decoder/pcf/bus_group/mif 等）的内部实现，最后落到如何用 Shell<T> 框架新增命令、如何用回归测试与 CI 参与贡献。讲义数量（41 篇）与项目规模匹配，所有源码引用均经过实际核对，不依赖硬拆。\n\n本次增量（HEAD a1e5133 → 97c06e27）仅引入一个特性提交「Bus Based MUX (#2602)」：它让 OpenFPGA 支持把 VPR arch 中带 bus 属性的 interconnect 实现为「多个逻辑实例共享同一存储器/选择器」的总线型多路选择器。该特性是 grid 模块构建（add_module_pb_bus_mux_interc）与 grid 比特流生成（共享选择位、要求整条 bus 选择同一输入）的扩展，并伴随 module_manager_utils 的新增共享存储器连线函数、pb_graph_utils 的新增总线互连判断辅助函数，以及 gsb_version 改为从 VPR device context 读取（带 gsb_version_set_ 守卫）。因此无需新增讲义：在 u6-l1/u6-l3/u7-l2 讲解模块构建与比特流时补充总线型 mux 内容，在 u5-l3/u5-l4/u9-l5 补充 gsb 版本来源变化，在 u4-l2/u10-l5 补充新增的 busmux 回归任务与测试。未受影响的讲义保持 keep。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 OpenFPGA：项目定位、编译与首次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "OpenFPGA 是什么：FPGA IP 生成与完整 EDA 流程",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 OpenFPGA 作为开源 FPGA IP 生成器的定位、它覆盖的 Verilog-to-Bitstream 全流程，以及它在 EDA 生态（VPR、Yosys）中的角色。",
+          "learning_goals": [
+            "理解 FPGA IP 生成的含义与 OpenFPGA 的核心价值",
+            "说出 OpenFPGA 端到端流程的主要阶段：综合、布局布线、fabric 构建、比特流/网表生成",
+            "了解 OpenFPGA 与 VPR、Yosys 等子模块的协作关系"
+          ],
+          "source_files": [
+            "README.md",
+            "VERSION.md",
+            "docs/source/overview/figures/OpenFPGA_logo.png"
+          ],
+          "minimal_modules": [
+            "项目说明 README",
+            "版本信息"
+          ],
+          "practice_task": "阅读 README 与引用论文摘要，用一段话写出 OpenFPGA 解决了什么问题、它的输入和输出分别是什么，并画出 Verilog→Bitstream 的粗粒度流程框图。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构解析",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录布局：openfpga/ 核心引擎、libs/ 支撑库、openfpga_flow/ 流程脚本与数据、子模块（vtr-verilog-to-routing、yosys）、docs 与 dev。",
+          "learning_goals": [
+            "掌握仓库顶层各目录的职责划分",
+            "区分核心引擎源码（openfpga/src）与可复用库（libs/）",
+            "定位流程脚本、架构文件、任务与基准测试所在位置"
+          ],
+          "source_files": [
+            "README.md",
+            "CMakeLists.txt",
+            "openfpga.sh"
+          ],
+          "minimal_modules": [
+            "仓库布局",
+            "openfpga/ 引擎",
+            "libs/ 库",
+            "openfpga_flow/ 流程"
+          ],
+          "practice_task": "在仓库根目录下制作一张目录树速查表，标注 openfpga/src、libs、openfpga_flow/scripts、openfpga_flow/openfpga_arch、openfpga_flow/vpr_arch、openfpga_flow/tasks 各自存放什么。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "从源码编译与运行环境搭建",
+          "order": 3,
+          "filename": "u1-l3-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Makefile + CMake 编译 OpenFPGA，子模块初始化（checkout），构建类型与目标（make compile / cmake_goals=openfpga），以及 openfpga.sh 环境变量脚本的作用。",
+          "learning_goals": [
+            "掌握 make checkout 与 make compile 的完整构建流程",
+            "理解 BUILD_TYPE、CMAKE_FLAGS、OPENFPGA_WITH_INSTALLER 等构建选项",
+            "学会 source openfpga.sh 配置 OPENFPGA_PATH 等环境变量"
+          ],
+          "source_files": [
+            "Makefile",
+            "CMakeLists.txt",
+            "openfpga.sh",
+            "Dockerfile"
+          ],
+          "minimal_modules": [
+            "Makefile 构建系统",
+            "CMake 配置",
+            "子模块 checkout",
+            "openfpga.sh 环境脚本"
+          ],
+          "practice_task": "执行 make checkout 初始化子模块，再用 make compile 构建 openfpga 可执行文件，确认 build 目录下生成了 openfpga 二进制，并运行 openfpga --version。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "运行第一个 FPGA 设计流",
+          "order": 4,
+          "filename": "u1-l4-first-fpga-flow.md",
+          "level": "beginner",
+          "topic": "用 openfpga_flow 提供的 Python 脚本与任务配置跑通一个最小示例（如 and2），理解 run_fpga_flow.py 单次流程与 run_fpga_task.py 批量任务的区别，以及 task.conf 的结构。",
+          "learning_goals": [
+            "区分 run-task / run-flow / rerun-task 等 openfpga.sh 快捷命令",
+            "读懂 task.conf 的 [GENERAL]/[OpenFPGA_SHELL]/[ARCHITECTURES]/[BENCHMARKS] 等段落",
+            "成功跑通一个 micro_benchmark 并定位输出目录"
+          ],
+          "source_files": [
+            "openfpga.sh",
+            "openfpga_flow/scripts/run_fpga_flow.py",
+            "openfpga_flow/scripts/run_fpga_task.py",
+            "openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf"
+          ],
+          "minimal_modules": [
+            "run_fpga_task.py 任务调度",
+            "run_fpga_flow.py 单次流程",
+            "task.conf 配置",
+            "openfpga.sh 快捷函数"
+          ],
+          "practice_task": "source openfpga.sh 后运行 run-task basic_tests/full_testbench/configuration_chain，观察 run 目录产出，并用 goto-task 进入结果目录查看生成的 fabric 网表与比特流。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "OpenFPGA Shell 入门：入口、命令与全局数据",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "openfpga 程序入口与三种运行模式",
+          "order": 1,
+          "filename": "u2-l1-shell-entrypoint.md",
+          "level": "beginner",
+          "topic": "从 main.cpp 出发，跟踪 OpenfpgaShell::start() 如何解析命令行参数并进入交互模式、脚本模式或 execute 模式。",
+          "learning_goals": [
+            "理解 main.cpp → OpenfpgaShell::start() 的启动链路",
+            "区分 interactive / script (-f) / execute (-x) / batch 四种运行模式",
+            "掌握 --file、--execute、--version、--help 等启动选项"
+          ],
+          "source_files": [
+            "openfpga/src/main.cpp",
+            "openfpga/src/base/openfpga_shell.cpp",
+            "openfpga/src/base/openfpga_shell.h",
+            "openfpga/src/base/openfpga_title.cpp"
+          ],
+          "minimal_modules": [
+            "main 入口",
+            "OpenfpgaShell::start",
+            "shell 运行模式",
+            "标题与版本输出"
+          ],
+          "practice_task": "分别用 openfpga（交互，输入 help 再 exit）、openfpga -f example_script.openfpga（脚本）、openfpga -x 'version; exit'（execute）三种方式启动，对比输出差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "命令分组与注册机制",
+          "order": 2,
+          "filename": "u2-l2-command-registration.md",
+          "level": "beginner",
+          "topic": "讲解 OpenFPGA 的七大命令类别（VPR、setup、verilog、bitstream、spice、sdc、basic）及其在 openfpga_shell.cpp 中通过 add_*_commands() 的注册顺序，列出最常用的用户命令。",
+          "learning_goals": [
+            "说出七大命令类别及其职责（如 FPGA-Verilog 负责网表生成）",
+            "识别 read_openfpga_arch、link_openfpga_arch、build_fabric、repack、build_fabric_bitstream、write_fabric_verilog 等核心命令",
+            "理解命令注册顺序与类别归属的来源（*_command_template.h）"
+          ],
+          "source_files": [
+            "openfpga/src/base/openfpga_shell.cpp",
+            "openfpga/src/base/openfpga_setup_command_template.h",
+            "openfpga/src/base/openfpga_bitstream_command_template.h",
+            "openfpga/src/base/openfpga_verilog_command_template.h",
+            "openfpga/src/vpr_wrapper/vpr_command.cpp"
+          ],
+          "minimal_modules": [
+            "命令类别注册",
+            "setup 命令组",
+            "bitstream 命令组",
+            "verilog/sdc/spice 命令组",
+            "vpr 命令"
+          ],
+          "practice_task": "在交互式 shell 中运行 help，把列出的命令按七大类别归类整理成一张表，并为每个类别各挑一个命令用 --help 查看其选项。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "OpenfpgaContext：贯穿全流程的全局数据中枢",
+          "order": 3,
+          "filename": "u2-l3-openfpga-context.md",
+          "level": "beginner",
+          "topic": "讲解 OpenfpgaContext 作为命令间数据交换的唯一枢纽，它继承自 VPR Context，聚合了 arch、module_graph、bitstream、mux_lib 等所有核心数据，并通过 const 访问器与 mutable 访问器控制读写。",
+          "learning_goals": [
+            "理解 OpenfpgaContext 为何只创建一次、不可拷贝",
+            "识别 context 中的关键数据成员（arch_、module_graph_、bitstream_manager_、device_rr_gsb_ 等）",
+            "掌握 const 访问器（只读）与 mutable 访问器（可写）的使用约定"
+          ],
+          "source_files": [
+            "openfpga/src/base/openfpga_context.h",
+            "openfpga/src/base/openfpga_flow_manager.h",
+            "openfpga/src/base/openfpga_shell.h"
+          ],
+          "minimal_modules": [
+            "OpenfpgaContext 数据聚合",
+            "访问器设计模式",
+            "FlowManager 流程状态"
+          ],
+          "practice_task": "在 openfpga_context.h 中找出与「架构、模块图、比特流、多路选择器库」对应的成员与访问器，画出命令之间通过 context 传递数据的示意图（如 read_openfpga_arch 写 arch_，build_fabric 读 arch_ 写 module_graph_）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "架构描述与输入文件",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "两套架构文件：VPR arch 与 openfpga_arch",
+          "order": 1,
+          "filename": "u3-l1-two-arch-files.md",
+          "level": "beginner",
+          "topic": "讲清 OpenFPGA 需要两套互补的架构描述：VPR 架构 XML 描述器件结构（tileable、逻辑块、布线），openfpga_arch.xml 描述电路级物理实现（电路模型、配置协议）。",
+          "learning_goals": [
+            "区分 VPR 架构 XML 与 openfpga_arch.xml 的职责边界",
+            "理解 task.conf 中 arch0 与 openfpga_arch_file 两个配置项分别指向哪种文件",
+            "认识 openfpga_flow/vpr_arch 与 openfpga_flow/openfpga_arch 目录的内容"
+          ],
+          "source_files": [
+            "openfpga_flow/vpr_arch/k4_N4_tileable_40nm.xml",
+            "openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml",
+            "openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf"
+          ],
+          "minimal_modules": [
+            "VPR 架构 XML",
+            "openfpga_arch.xml",
+            "架构文件命名约定"
+          ],
+          "practice_task": "对比 k4_N4_tileable_40nm.xml 与 k4_N4_40nm_cc_openfpga.xml 的顶层标签，列出 VPR arch 描述了什么、openfpga_arch 补充描述了什么，并解释文件名中 k4/N4/cc 的含义。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "openfpga_arch.xml 总体结构",
+          "order": 2,
+          "filename": "u3-l2-openfpga-arch-xml.md",
+          "level": "beginner",
+          "topic": "逐段讲解 openfpga_architecture 根标签下的主要子节点：technology_library、circuit_library、configuration_protocol、connection_block、switch_block、routing_segment、pb_type_annotations。",
+          "learning_goals": [
+            "掌握 openfpga_arch.xml 的顶层结构与各段作用",
+            "理解电路模型如何通过 connection_block/switch_block/routing_segment 绑定到 VPR 布线结构",
+            "认识 pb_type_annotations 如何把 VPR 的 pb_type 映射到物理电路模型"
+          ],
+          "source_files": [
+            "openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml",
+            "libs/libarchopenfpga/src/openfpga_arch.h",
+            "libs/libarchopenfpga/src/openfpga_arch_linker.h"
+          ],
+          "minimal_modules": [
+            "openfpga_architecture 根结构",
+            "电路库与布线绑定",
+            "pb_type 注解"
+          ],
+          "practice_task": "以 k4_N4_40nm_cc_openfpga.xml 为例，画出 openfpga_arch.xml 的结构树，标注每个顶层节点的作用，并指出配置链（scan_chain）是在哪个节点声明的。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "电路库 circuit_library 与电路模型",
+          "order": 3,
+          "filename": "u3-l3-circuit-library.md",
+          "level": "intermediate",
+          "topic": "深入 circuit_library：它如何用 circuit_model 描述 inv_buf、pass_gate、mux、lut、ff、ccff、iopad、chan_wire、wire 等各类电路，以及端口、设计技术、缓冲、pass_gate_logic 的引用关系。",
+          "learning_goals": [
+            "识别 circuit_model 的常见 type（mux/lut/ff/ccff/iopad/inv_buf/pass_gate/wire/chan_wire）",
+            "理解端口类型（input/output/clock/sram/inout）与全局/复位/置位标志",
+            "掌握电路模型之间通过 circuit_model_name 的相互引用（如 mux 引用 INVTX1 与 TGATE）"
+          ],
+          "source_files": [
+            "libs/libarchopenfpga/src/circuit_library.h",
+            "libs/libarchopenfpga/src/circuit_types.h",
+            "openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml",
+            "openfpga/src/utils/circuit_library_utils.cpp"
+          ],
+          "minimal_modules": [
+            "CircuitLibrary 数据结构",
+            "CircuitModelId 与端口模型",
+            "电路模型间引用"
+          ],
+          "practice_task": "在 k4_N4_40nm_cc_openfpga.xml 的 circuit_library 中追踪 mux_tree_tapbuf 模型：它引用了哪些其他电路模型（输入/输出 buffer、pass_gate）？写出这条引用链。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "配置协议 configuration_protocol",
+          "order": 4,
+          "filename": "u3-l4-configuration-protocol.md",
+          "level": "intermediate",
+          "topic": "讲解 configuration_protocol 如何决定可编程存储器的组织方式：standalone、scan_chain、memory_bank、ql_memory_bank、frame_based 等类型，以及 memory_bank 下的 BL/WL 子协议（flatten/decoder/shift_register）。",
+          "learning_goals": [
+            "区分各类配置协议及其适用场景（scan_chain 串行、memory_bank 矩阵寻址、frame_based 帧寻址）",
+            "理解 configuration_protocol 节点中 type 与 circuit_model_name 的含义",
+            "认识不同协议对应的 arch 文件命名（cc/bank/frame/qlbank/qlbanksr）"
+          ],
+          "source_files": [
+            "libs/libarchopenfpga/src/config_protocol.h",
+            "openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml",
+            "openfpga_flow/openfpga_arch/k4_N4_40nm_bank_openfpga.xml",
+            "openfpga/src/utils/check_config_protocol.cpp"
+          ],
+          "minimal_modules": [
+            "ConfigProtocol 数据结构",
+            "配置协议类型",
+            "BL/WL 子协议"
+          ],
+          "practice_task": "对比 cc（scan_chain）与 bank（memory_bank）两个 openfpga_arch 文件的 configuration_protocol 段，写出它们的组织类型差异，并说明各自使用的配置存储电路模型。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "完整设计流与 Shell 脚本",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "canonical 流程脚本 example_script.openfpga 全解析",
+          "order": 1,
+          "filename": "u4-l1-example-script-walkthrough.md",
+          "level": "intermediate",
+          "topic": "逐行解析 example_script.openfpga：从 vpr 到 read_openfpga_arch、link_openfpga_arch、check_netlist、lut_truth_table_fixup、build_fabric、repack、build bitstream、write_fabric_verilog、write testbench、write SDC，理清命令的上下游顺序与依赖。",
+          "learning_goals": [
+            "掌握一条完整 OpenFPGA 流程的标准命令序列与先后约束",
+            "理解每一步在 context 中读写哪些数据（如 repack 必须在 bitstream 生成之前）",
+            "区分 write_full_testbench、write_preconfigured_fabric_wrapper、write_preconfigured_testbench 三种验证产物"
+          ],
+          "source_files": [
+            "openfpga_flow/openfpga_shell_scripts/example_script.openfpga",
+            "openfpga_flow/openfpga_shell_scripts/generate_fabric_example_script.openfpga",
+            "openfpga_flow/openfpga_shell_scripts/full_testbench_example_script.openfpga"
+          ],
+          "minimal_modules": [
+            "vpr 调用",
+            "架构读取与链接",
+            "fabric 构建",
+            "repack",
+            "比特流生成",
+            "网表与 SDC 输出"
+          ],
+          "practice_task": "把 example_script.openfpga 的命令按「输入→处理→输出」三阶段重新分组，标注哪些命令之间存在硬性顺序约束（例如为什么 repack 要在 build_architecture_bitstream 之前）。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "任务、基准测试与回归测试体系",
+          "order": 2,
+          "filename": "u4-l2-tasks-benchmarks-regression.md",
+          "level": "intermediate",
+          "topic": "讲解 openfpga_flow/tasks 的组织方式、task.conf 的各段（ARCHITECTURES × BENCHMARKS × SYNTHESIS_PARAM 笛卡尔积）、benchmarks 目录，以及 .github/workflows 回归测试如何批量验证特性。本次更新补充新增的 busmux（总线型 mux）回归任务示例。",
+          "learning_goals": [
+            "理解 task.conf 如何通过架构×基准组合生成多个 job",
+            "掌握 run_fpga_task.py 的 --maxthreads 并行调度与 run 目录编号",
+            "认识回归测试脚本与 basic_tests 各子目录覆盖的特性（full_testbench、fabric_key、clock_network、busmux 等）"
+          ],
+          "source_files": [
+            "openfpga_flow/scripts/run_fpga_task.py",
+            "openfpga_flow/tasks/basic_tests/full_testbench/configuration_chain/config/task.conf",
+            "openfpga_flow/tasks/basic_tests/k4_series/k4n4_frac_mult_busmux/config/task.conf",
+            "openfpga_flow/benchmarks/micro_benchmark/and2/and2.v"
+          ],
+          "minimal_modules": [
+            "task.conf 任务模型",
+            "run_fpga_task.py 调度",
+            "benchmarks 基准",
+            "回归测试"
+          ],
+          "practice_task": "参照一个现有 task.conf，复制并修改出一个小任务：换用一个不同的 openfpga_arch（如 frame 版或 busmux 版 VPR arch）配合同一组 and2/or2 基准，跑通后检查产出是否符合预期。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u4-l3",
+          "title": "pb_type 注解：把 VPR 结构绑定到物理电路",
+          "order": 3,
+          "filename": "u4-l3-pb-type-annotation.md",
+          "level": "intermediate",
+          "topic": "讲解 pb_type_annotations 如何把 VPR 架构里的逻辑块（clb/io/lut/ff）映射到 openfpga_arch 的物理电路模型，包括 physical_mode_name、mode_bits、interconnect 绑定等概念。",
+          "learning_goals": [
+            "理解 operating pb_type 与 physical pb_type 的区别与映射",
+            "掌握 pb_type 路径语法（如 clb.fle[n1_lut4].ble4.lut4）与 circuit_model_name 绑定",
+            "认识 mode_bits 如何决定多模式 pb 的配置位"
+          ],
+          "source_files": [
+            "libs/libarchopenfpga/src/pb_type_annotation.h",
+            "openfpga_flow/openfpga_arch/k4_N4_40nm_cc_openfpga.xml",
+            "libs/libarchopenfpga/src/read_xml_pb_type_annotation.h"
+          ],
+          "minimal_modules": [
+            "PbTypeAnnotation 数据结构",
+            "物理模式映射",
+            "mode_bits"
+          ],
+          "practice_task": "在 k4_N4_40nm_cc_openfpga.xml 中找到 io 与 clb 的 pb_type_annotations，画出从 VPR pb_type 到 circuit_model 的绑定关系图，并解释 io 的 inpad/outpad 为何都映射到同一个 GPIO 模型但 mode_bits 不同。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "架构加载、解析与 VPR 标注",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "OpenFPGAArch 数据模型",
+          "order": 1,
+          "filename": "u5-l1-arch-data-model.md",
+          "level": "intermediate",
+          "topic": "深入 libarchopenfpga 中的 openfpga::Arch 结构：它聚合了 circuit_library、technology_library、config_protocol、simulation_setting、arch_direct、pb_type/tile/bitstream 注解等，是架构解析后只读的核心数据。",
+          "learning_goals": [
+            "掌握 Arch 结构的组成与各子模型的职责",
+            "理解 architecture 解析后只读、保证模块化的设计原则",
+            "认识 simulation_setting、arch_direct、tile_annotation、bitstream_setting 等辅助模型"
+          ],
+          "source_files": [
+            "libs/libarchopenfpga/src/openfpga_arch.h",
+            "libs/libarchopenfpga/src/technology_library.h",
+            "libs/libarchopenfpga/src/simulation_setting.h",
+            "libs/libarchopenfpga/src/arch_direct.h"
+          ],
+          "minimal_modules": [
+            "openfpga::Arch 聚合结构",
+            "TechnologyLibrary",
+            "SimulationSetting",
+            "ArchDirect"
+          ],
+          "practice_task": "阅读 openfpga_arch.h，列出 Arch 包含的所有子对象，并对照一个真实 openfpga_arch.xml 标注每种子对象由 XML 的哪一段填充。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "openfpga_arch XML 解析",
+          "order": 2,
+          "filename": "u5-l2-arch-xml-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解 read_openfpga_arch 命令背后 read_xml_openfpga_arch() 如何把 XML 解析成 Arch 对象，包括各 read_xml_* 辅助函数与 XML 常量定义。",
+          "learning_goals": [
+            "理解 read_xml_openfpga_arch 的解析入口与各子解析器分工",
+            "掌握 XML 常量文件（*_xml_constants.h）的作用",
+            "认识解析过程中的一致性检查（如 check_circuit_library）"
+          ],
+          "source_files": [
+            "libs/libarchopenfpga/src/read_xml_openfpga_arch.h",
+            "libs/libarchopenfpga/src/read_xml_circuit_library.h",
+            "libs/libarchopenfpga/src/read_xml_config_protocol.h",
+            "libs/libarchopenfpga/src/check_circuit_library.h",
+            "openfpga/src/base/openfpga_read_arch_template.h"
+          ],
+          "minimal_modules": [
+            "read_xml_openfpga_arch 入口",
+            "子解析器",
+            "XML 常量",
+            "一致性检查"
+          ],
+          "practice_task": "跟踪 read_openfpga_arch -f 一个真实 arch 文件的调用，定位解析 circuit_library 与 configuration_protocol 分别用了哪些 read_xml_* 函数，并找到对应的 *_xml_constants.h。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "link_openfpga_arch：把架构绑定到 VPR 数据库",
+          "order": 3,
+          "filename": "u5-l3-link-arch.md",
+          "level": "intermediate",
+          "topic": "讲解 link_openfpga_arch 命令如何把 OpenFPGAArch 与 VPR 跑完后的 device context 关联起来，建立 circuit model 与 pb graph、rr graph switch/segment 的映射，并读入 activity 文件。本次更新说明：GSB 版本（GSB_V1/V2）不再是命令选项，而是直接从 VPR device context（RR graph 生成阶段写入）中读取，以避免与 VPR 选项不一致。",
+          "learning_goals": [
+            "理解 link 阶段在 vpr 与 build_fabric 之间的桥梁作用",
+            "掌握 activity file、sort_gsb_chan_node_in_edges、allow_gsb_dangling_opin 等选项含义",
+            "认识 GSB 版本由 VPR device context 决定（非 link 命令选项），链接结果存入 vpr_device_annotation 等标注结构"
+          ],
+          "source_files": [
+            "openfpga/src/base/openfpga_link_arch_template.h",
+            "openfpga/src/annotation/vpr_device_annotation.h",
+            "openfpga/src/annotation/annotate_pb_types.h"
+          ],
+          "minimal_modules": [
+            "link_openfpga_arch 模板",
+            "VprDeviceAnnotation",
+            "pb_type 标注"
+          ],
+          "practice_task": "在 example_script.openfpga 中分别注释掉 link_openfpga_arch 前后的命令，观察 build_fabric 是否仍能成功，据此总结 link 阶段提供的关键数据；并说明为何 gsb 版本要从 VPR context 而非命令行获取。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l3"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u5-l4",
+          "title": "VPR 标注子系统（annotation）",
+          "order": 4,
+          "filename": "u5-l4-vpr-annotation.md",
+          "level": "intermediate",
+          "topic": "系统讲解 openfpga/src/annotation 目录：它如何在不修改 VPR 源码的前提下，用一系列 Vpr*Annotation 结构补充 VPR 的 device/netlist/clustering/placement/routing/bitstream 信息，以及 device_rr_gsb、fabric_tile 等设备级标注。本次更新说明 DeviceRRGSB 的 gsb_version 现由 VPR device context 在 link 阶段设置，并用 gsb_version_set_ 守卫防止未设置即读取。",
+          "learning_goals": [
+            "理解 annotation 模式如何在不侵入 VPR 的前提下扩展其数据",
+            "识别各类 Vpr*Annotation 的职责（device/netlist/clustering/placement/routing/bitstream）",
+            "认识 DeviceRRGSB（含 gsb_version 守卫）与 FabricTile 等设备级标注结构"
+          ],
+          "source_files": [
+            "openfpga/src/annotation/vpr_device_annotation.h",
+            "openfpga/src/annotation/device_rr_gsb.h",
+            "openfpga/src/annotation/fabric_tile.h",
+            "openfpga/src/annotation/annotate_rr_graph.h",
+            "openfpga/src/annotation/check_netlist_naming_conflict.h"
+          ],
+          "minimal_modules": [
+            "Vpr*Annotation 系列",
+            "DeviceRRGSB",
+            "FabricTile",
+            "netlist 命名冲突检查"
+          ],
+          "practice_task": "在 annotation/ 目录中归类：哪些是「标注 VPR 结果」、哪些是「构建 OpenFPGA 自有设备结构」；并用一句话写出 check_netlist_naming_conflict --fix 解决了什么问题，以及 DeviceRRGSB 的 gsb_version 从哪里获得。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Fabric 构建与模块图（ModuleManager）",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ModuleManager 核心数据结构",
+          "order": 1,
+          "filename": "u6-l1-module-manager.md",
+          "level": "intermediate",
+          "topic": "深入 ModuleManager：模块（ModuleId）、端口（ModulePortId）、子模块实例（child/instance）、网（ModuleNet）的概念，以及可配置子模块、配置区域、IO 子模块等扩展。本次更新补充模块工具函数 module_manager_utils 中新增的「多个逻辑实例共享同一存储器 SRAM 总线」连线函数 add_module_nets_between_logics_and_shared_memory_sram_bus（服务于总线型 mux）。",
+          "learning_goals": [
+            "掌握 ModuleManager 的核心抽象：模块、端口、实例、网",
+            "理解模块的 usage 类型（TOP/GRID/SB/CB/LUT/MUX/MEMORY 等）",
+            "认识 logical vs physical 可配置子模块、配置区域，以及为多个逻辑实例共享单个存储器的连线工具"
+          ],
+          "source_files": [
+            "openfpga/src/fabric/module_manager.h",
+            "openfpga/src/fabric/module_manager.cpp",
+            "openfpga/src/utils/module_manager_utils.cpp",
+            "openfpga/src/utils/module_manager_utils.h"
+          ],
+          "minimal_modules": [
+            "ModuleManager 模块图",
+            "端口与实例",
+            "ModuleNet 连接",
+            "可配置子模块",
+            "共享存储器连线工具"
+          ],
+          "practice_task": "阅读 module_manager.h 与 module_manager_utils.h，列出 ModuleManager 提供的「增加模块/端口/子模块实例/网」的关键 API，并对比 add_module_nets_between_logic_and_memory_sram_bus（单逻辑实例）与新增的 add_module_nets_between_logics_and_shared_memory_sram_bus（多逻辑实例共享存储器）的差异。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u6-l2",
+          "title": "build_fabric 调用链",
+          "order": 2,
+          "filename": "u6-l2-build-fabric-chain.md",
+          "level": "intermediate",
+          "topic": "从 build_device_module_graph() 出发，讲解 build_fabric 命令自下而上的构建顺序：essential → mux decoder → mux → lut → wire → memory → grid → routing → tile → top，以及 --compress_routing 等选项。",
+          "learning_goals": [
+            "掌握 build_fabric 的完整自下而上调用链",
+            "理解模块构建的依赖顺序（子模块必须先于父模块构建）",
+            "认识 --compress_routing、--duplicate_grid_pin 等常用选项"
+          ],
+          "source_files": [
+            "openfpga/src/fabric/build_device_module.cpp",
+            "openfpga/src/base/openfpga_build_fabric_template.h",
+            "openfpga/src/fabric/build_top_module.cpp"
+          ],
+          "minimal_modules": [
+            "build_device_module_graph 入口",
+            "自下而上构建顺序",
+            "build_fabric 选项"
+          ],
+          "practice_task": "在 build_device_module.cpp 中把各个 build_* 调用按顺序列出，解释为什么 memory/mux/lut 模块必须在 grid/routing 之前构建。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "构建 grid / routing / memory / mux / lut 子模块",
+          "order": 3,
+          "filename": "u6-l3-build-submodules.md",
+          "level": "intermediate",
+          "topic": "讲解各类模块的构建细节：build_grid_modules（CLB/IO）、build_routing_modules（SB/CB，含 unique 与 flatten 两种）、build_memory_modules、build_mux_modules、build_lut_modules、build_decoder_modules。本次更新补充 build_grid_modules 中新增的总线型 mux 互连构建（add_module_pb_bus_mux_interc）：当 VPR pb graph interconnect 带 bus 属性时，多个逻辑实例的输出共享一个存储器/选择器，并用 pb_graph_utils 的 is_pb_graph_pin_bus_interc / pb_graph_interc_sink_pins 辅助判定与收集 sink 引脚。",
+          "learning_goals": [
+            "理解 grid 模块如何从 pb graph 电路模型实例化而来",
+            "掌握 routing 模块的 unique（压缩）与 flatten 两种生成方式",
+            "认识 memory/mux/lut/decoder 模块的构建与电路模型绑定",
+            "理解总线型 mux 互连如何让多个逻辑实例共享同一存储器选择器"
+          ],
+          "source_files": [
+            "openfpga/src/fabric/build_grid_modules.cpp",
+            "openfpga/src/fabric/build_routing_modules.cpp",
+            "openfpga/src/fabric/build_memory_modules.cpp",
+            "openfpga/src/fabric/build_mux_modules.cpp",
+            "openfpga/src/fabric/build_lut_modules.cpp",
+            "openfpga/src/fabric/build_decoder_modules.cpp",
+            "openfpga/src/utils/pb_graph_utils.h"
+          ],
+          "minimal_modules": [
+            "grid 模块构建",
+            "routing 模块构建",
+            "memory 模块",
+            "mux/lut/decoder 模块",
+            "总线型 mux 互连"
+          ],
+          "practice_task": "选择 build_grid_modules.cpp 与 build_routing_modules.cpp，分别说明它们如何利用 circuit_library 与 device_rr_gsb 来决定要实例化哪些子模块；并跟踪 add_module_pb_bus_mux_interc 如何用 pb_graph_utils 判定 bus 互连并连接共享存储器。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u6-l4",
+          "title": "顶层模块与存储器配置总线",
+          "order": 4,
+          "filename": "u6-l4-top-module-memory.md",
+          "level": "intermediate",
+          "topic": "讲解 build_top_module 如何组装顶层模块：实例化所有子模块、添加 SRAM 端口、连接配置总线（add_top_module_nets_memory_config_bus），以及不同配置协议下存储器的组织（chain/frame/memory_bank）。",
+          "learning_goals": [
+            "理解顶层模块的组装流程与子模块实例化",
+            "掌握配置总线如何根据 config_protocol 连接所有配置存储器",
+            "认识 build_top_module_memory_bank 与配置区域（config regions）"
+          ],
+          "source_files": [
+            "openfpga/src/fabric/build_top_module.cpp",
+            "openfpga/src/fabric/build_top_module_memory.cpp",
+            "openfpga/src/fabric/build_top_module_memory_bank.cpp",
+            "openfpga/src/utils/module_manager_memory_utils.cpp"
+          ],
+          "minimal_modules": [
+            "build_top_module",
+            "配置总线连接",
+            "memory bank 顶层组织",
+            "配置区域"
+          ],
+          "practice_task": "对比 scan_chain 与 memory_bank 两种协议在顶层模块配置总线连接上的差异（参考 build_top_module_memory.cpp 与 build_top_module_memory_bank.cpp）。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "Fabric Key 与 Fabric 层级输出",
+          "order": 5,
+          "filename": "u6-l5-fabric-key-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 fabric key（用于安全/打乱存储器布局与可复现 fabric）、fabric hierarchy（供层次化 PnR）与 IO location map、module name map 等附属产物的生成与作用。",
+          "learning_goals": [
+            "理解 fabric key 的作用（load external key、generate random key）",
+            "掌握 write_fabric_hierarchy 的输出格式与用途",
+            "认识 io_location_map、module_name_map、fabric_global_port_info 等附属信息"
+          ],
+          "source_files": [
+            "openfpga/src/fabric/fabric_key_writer.cpp",
+            "openfpga/src/fabric/fabric_hierarchy_writer.cpp",
+            "openfpga/src/fabric/build_fabric_io_location_map.cpp",
+            "openfpga/src/fabric/fabric_global_port_info.cpp"
+          ],
+          "minimal_modules": [
+            "fabric key 写入",
+            "fabric hierarchy",
+            "io location map",
+            "global port info"
+          ],
+          "practice_task": "运行 generate_fabric_example_script.openfpga，检查输出的 fabric_key.xml 与 fabric_hierarchy.txt，解释 hierarchy 文件如何服务于层次化后端流程。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "比特流（Bitstream）生成",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "两级比特流模型：device 与 fabric",
+          "order": 1,
+          "filename": "u7-l1-bitstream-model.md",
+          "level": "intermediate",
+          "topic": "讲解 OpenFPGA 的两级比特流抽象：与 fabric 无关的 BitstreamManager（层级块 + 配置位）和与 fabric/协议相关的 FabricBitstream（含 BL/WL 地址等协议数据）。",
+          "learning_goals": [
+            "区分 BitstreamManager（device 级）与 FabricBitstream（fabric 级）",
+            "理解配置块如何镜像模块层级、配置位如何附着",
+            "认识 fabric 比特流为何要带协议相关的寻址信息"
+          ],
+          "source_files": [
+            "libs/libfpgabitstream/src/bitstream_manager.h",
+            "openfpga/src/fpga_bitstream/fabric_bitstream.h",
+            "openfpga/src/fpga_bitstream/build_device_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/build_fabric_bitstream.cpp"
+          ],
+          "minimal_modules": [
+            "BitstreamManager",
+            "FabricBitstream",
+            "device→fabric 转换"
+          ],
+          "practice_task": "阅读 bitstream_manager.h 与 fabric_bitstream.h，对比两者的数据组织方式，说明为什么需要两级表示而不是直接生成最终比特流。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "build_architecture_bitstream：grid/routing/mux 位生成",
+          "order": 2,
+          "filename": "u7-l2-architecture-bitstream.md",
+          "level": "intermediate",
+          "topic": "讲解 build_architecture_bitstream 如何遍历布局布线结果生成 device 级比特流：build_grid_bitstream（查找表/IO 配置位）、build_routing_bitstream（布线 mux 选择位）、build_mux_bitstream。本次更新补充 build_grid_bitstream 中新增的总线型 mux（bus-based mux）支持：当 interconnect 带 bus 属性时，整条输出 bus 共享同一个选择器，因此要求 bus 的所有位选择同一输入端口，否则报错；并新增 find_physical_block_pin_mux_path_id 用于定位 mux 选择位。",
+          "learning_goals": [
+            "理解 device 比特流的生成入口与遍历对象（grid/routing 结果）",
+            "掌握 grid 比特流如何从 LUT truth table 与 pb 标注解码",
+            "认识 routing 比特流如何决定每个布线 mux 的选择位",
+            "理解总线型 mux 比特流的「共享选择器、bus 各位须同选一输入」约束"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_bitstream/build_device_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/build_grid_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/build_routing_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/build_mux_bitstream.cpp",
+            "openfpga/src/base/openfpga_bitstream_template.h"
+          ],
+          "minimal_modules": [
+            "build_device_bitstream",
+            "grid 比特流",
+            "routing 比特流",
+            "mux 比特流",
+            "总线型 mux 比特流"
+          ],
+          "practice_task": "跟踪 build_architecture_bitstream --write_file 输出的 fabric_independent_bitstream.xml，找出其中对应某个 LUT 与某个布线 mux 的配置位是如何解码出来的；并对照 k4n4_frac_mult_busmux 任务说明总线型 mux 的选择位如何被共享。",
+          "depends_on": [
+            "u7-l1",
+            "u4-l3"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u7-l3",
+          "title": "build_fabric_bitstream 与协议相关组织",
+          "order": 3,
+          "filename": "u7-l3-fabric-bitstream.md",
+          "level": "intermediate",
+          "topic": "讲解 build_fabric_bitstream 如何把 device 比特流按 fabric 模块层级与配置协议重组，特别是 memory_bank 下的 FabricBitstreamMemoryBank 紧凑表示与 flatten/shift_register 变体。",
+          "learning_goals": [
+            "理解 device→fabric 比特流的重组过程",
+            "掌握 memory_bank 下 datas/masks 紧凑表示的含义",
+            "认识 memory_bank_flatten 与 memory_bank_shift_register 两种组织变体"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_bitstream/build_fabric_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/build_fabric_bitstream_memory_bank.cpp",
+            "openfpga/src/fpga_bitstream/memory_bank_flatten_fabric_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/memory_bank_shift_register_fabric_bitstream.cpp"
+          ],
+          "minimal_modules": [
+            "build_fabric_bitstream",
+            "memory bank 紧凑表示",
+            "flatten/shift_register 变体"
+          ],
+          "practice_task": "对同一设计分别用 cc 与 bank 配置协议生成 fabric 比特流，对比 write_fabric_bitstream 输出，说明 bank 版如何体现 BL/WL 寻址。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "write_fabric_bitstream 与 fast_configuration",
+          "order": 4,
+          "filename": "u7-l4-write-bitstream-fast-config.md",
+          "level": "intermediate",
+          "topic": "讲解 write_fabric_bitstream 的输出格式（plain_text/xml 等），以及 fast_configuration 如何利用全局 set/reset 跳过大量相同位以加速配置。",
+          "learning_goals": [
+            "掌握 write_fabric_bitstream 的 --format 选项与各格式差异",
+            "理解 fast_configuration 选择 reset/set 跳过更多位的策略",
+            "认识 bitstream 分布报告 report_bitstream_distribution 的用途"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_bitstream/write_text_fabric_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/write_xml_fabric_bitstream.cpp",
+            "openfpga/src/fpga_bitstream/fast_configuration.cpp",
+            "openfpga/src/fpga_bitstream/bitstream_writer_options.cpp",
+            "openfpga/src/fpga_bitstream/report_bitstream_distribution.cpp"
+          ],
+          "minimal_modules": [
+            "比特流写出格式",
+            "fast_configuration",
+            "比特流分布报告"
+          ],
+          "practice_task": "运行 fast_configuration_example_script.openfpga，对比开启与关闭 fast_configuration 时输出的比特流长度，并解释为什么能省掉大量位。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "网表与时序约束输出",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "FPGA-Verilog：fabric Verilog 网表生成",
+          "order": 1,
+          "filename": "u8-l1-fabric-verilog.md",
+          "level": "intermediate",
+          "topic": "讲解 write_fabric_verilog 命令与 verilog_api：如何遍历 ModuleManager 生成子模块、grid、routing、顶层网表，以及 --explicit_port_mapping、--include_timing、--print_user_defined_template 等选项。",
+          "learning_goals": [
+            "理解 fabric Verilog 的生成入口与遍历 ModuleManager 的方式",
+            "掌握各 verilog_*_writer（submodule/grid/routing/top）的分工",
+            "认识 NetlistManager 如何管理生成的网表文件集合"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_verilog/verilog_api.cpp",
+            "openfpga/src/fpga_verilog/verilog_module_writer.cpp",
+            "openfpga/src/fpga_verilog/verilog_top_module.cpp",
+            "openfpga/src/fpga_verilog/fabric_verilog_options.cpp",
+            "openfpga/src/base/netlist_manager.h"
+          ],
+          "minimal_modules": [
+            "verilog_api 入口",
+            "模块网表写出",
+            "fabric verilog 选项",
+            "NetlistManager"
+          ],
+          "practice_task": "运行 write_fabric_verilog，检查 SRC 目录下生成的子模块网表，对照 ModuleManager 中的模块清单确认二者对应关系。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Testbench 生成：full 与 preconfigured",
+          "order": 2,
+          "filename": "u8-l2-testbench-generation.md",
+          "level": "intermediate",
+          "topic": "讲解 write_full_testbench（含编程相机的完整验证）、write_preconfigured_fabric_wrapper 与 write_preconfigured_testbench（跳过编程阶段的快速验证）的差异与生成逻辑。",
+          "learning_goals": [
+            "区分 full testbench 与 preconfigured testbench 的验证策略",
+            "理解 preconfigured wrapper 如何通过 embed_bitstream 内嵌比特流跳过编程",
+            "认识 reference_benchmark_file_path 在自检中的作用"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_verilog/verilog_top_testbench.cpp",
+            "openfpga/src/fpga_verilog/verilog_preconfig_top_module.cpp",
+            "openfpga/src/fpga_verilog/verilog_template_testbench.cpp",
+            "openfpga/src/fpga_verilog/verilog_testbench_utils.cpp",
+            "openfpga/src/fpga_verilog/verilog_testbench_options.cpp"
+          ],
+          "minimal_modules": [
+            "full testbench",
+            "preconfigured wrapper",
+            "preconfigured testbench",
+            "testbench 选项"
+          ],
+          "practice_task": "对同一设计分别生成 full 与 preconfigured testbench，用 iverilog 跑一遍（参考 iverilog_example_script.openfpga），比较两者仿真时间与覆盖范围。",
+          "depends_on": [
+            "u8-l1",
+            "u7-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "FPGA-SPICE：SPICE 网表生成",
+          "order": 3,
+          "filename": "u8-l3-fabric-spice.md",
+          "level": "intermediate",
+          "topic": "讲解 write_fabric_spice 与 spice_api：如何把 ModuleManager 与 technology_library/circuit_library 结合，生成晶体管级 SPICE 子电路与顶层网表，用于功耗/时序仿真。",
+          "learning_goals": [
+            "理解 SPICE 网表生成如何依赖 technology_library 的器件模型",
+            "掌握各 spice_*_writer（submodule/grid/routing/mux/lut/memory/top）分工",
+            "认识 SPICE 输出与 Verilog 输出在数据来源上的异同"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_spice/spice_api.cpp",
+            "openfpga/src/fpga_spice/spice_top_module.cpp",
+            "openfpga/src/fpga_spice/spice_transistor_wrapper.cpp",
+            "openfpga/src/fpga_spice/fabric_spice_options.cpp"
+          ],
+          "minimal_modules": [
+            "spice_api 入口",
+            "晶体管级子电路",
+            "spice 选项"
+          ],
+          "practice_task": "运行 generate_spice_example_script.openfpga，检查生成的 SPICE 网表，找出其中引用 technology_library 里器件模型的位置。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "FPGA-SDC：时序约束生成",
+          "order": 4,
+          "filename": "u8-l4-fabric-sdc.md",
+          "level": "intermediate",
+          "topic": "讲解 write_pnr_sdc、write_analysis_sdc、write_sdc_disable_timing_configure_ports 等命令：如何为后端 PnR 与静态时序分析生成 SDC 约束，并禁用配置端口的时序路径。",
+          "learning_goals": [
+            "区分 pnr_sdc（布局布线约束）与 analysis_sdc（时序分析约束）",
+            "理解为何要 disable configure ports 的时序",
+            "认识 configuration_chain_sdc_writer 等协议相关 SDC 生成"
+          ],
+          "source_files": [
+            "openfpga/src/fpga_sdc/pnr_sdc_writer.cpp",
+            "openfpga/src/fpga_sdc/analysis_sdc_writer.cpp",
+            "openfpga/src/fpga_sdc/configuration_chain_sdc_writer.cpp",
+            "openfpga/src/fpga_sdc/sdc_hierarchy_writer.cpp",
+            "openfpga/src/base/openfpga_sdc_template.h"
+          ],
+          "minimal_modules": [
+            "pnr_sdc",
+            "analysis_sdc",
+            "configure ports 时序禁用",
+            "sdc 层级写出"
+          ],
+          "practice_task": "运行 example_script.openfpga 末尾的 write_pnr_sdc/write_analysis_sdc/write_sdc_disable_timing_configure_ports，检查 SDC 目录，说明每类 SDC 服务于哪个后端阶段。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "高级配置机制与核心扩展点",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "存储器组与移位寄存器 Bank（BL/WL）",
+          "order": 1,
+          "filename": "u9-l1-memory-bank-shift-register.md",
+          "level": "advanced",
+          "topic": "深入 memory_bank 配置协议下的移位寄存器 bank 机制：MemoryBankShiftRegisterBanks 如何组织每区域的 BL/WL bank、列共享/行共享优化，及其与 fabric key 的关系。",
+          "learning_goals": [
+            "理解 memory_bank 下 BL/WL 移位寄存器 bank 的数据结构",
+            "掌握 shift_register 子协议相比 flatten/decoder 的优势",
+            "认识 bank 组织如何影响 fabric key 与比特流排布"
+          ],
+          "source_files": [
+            "openfpga/src/fabric/memory_bank_shift_register_banks.cpp",
+            "openfpga/src/fabric/memory_bank_shift_register_banks.h",
+            "openfpga/src/fpga_bitstream/memory_bank_shift_register_fabric_bitstream.cpp",
+            "openfpga/src/utils/memory_bank_utils.cpp"
+          ],
+          "minimal_modules": [
+            "MemoryBankShiftRegisterBanks",
+            "BL/WL bank 组织",
+            "shift register 比特流"
+          ],
+          "practice_task": "对比 qlbank（decoder）、qlbankflatten、qlbanksr（shift register）三类 arch 的 fabric key 与比特流输出，总结移位寄存器 bank 带来的结构差异。",
+          "depends_on": [
+            "u7-l3",
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "时钟网络架构（Clock Network）",
+          "order": 2,
+          "filename": "u9-l2-clock-network.md",
+          "level": "advanced",
+          "topic": "讲解 libclkarchopenfpga 的 clock_network：spine、switch、tap、多层时钟树、中间驱动器等概念，以及 append_clock_rr_graph / route_clock_rr_graph 如何把时钟网络注入并布线到 rr graph。",
+          "learning_goals": [
+            "理解 clock network 架构的层次化组织（spine/rtap/ctap/driver）",
+            "掌握时钟网络如何作为特殊 rr graph 资源被追加与布线",
+            "认识时钟网络对 pb_pin_fixup 与 bitstream_setting 的影响"
+          ],
+          "source_files": [
+            "libs/libclkarchopenfpga/src/base/clock_network.h",
+            "openfpga/src/annotation/append_clock_rr_graph.h",
+            "openfpga/src/annotation/route_clock_rr_graph.h",
+            "libs/libclkarchopenfpga/src/base/rr_clock_spatial_lookup.h"
+          ],
+          "minimal_modules": [
+            "ClockNetwork 数据结构",
+            "时钟 rr graph 追加",
+            "时钟布线",
+            "空间查找表"
+          ],
+          "practice_task": "阅读 example_clkntwk_script.openfpga 与一个 clock_network arch，画出时钟树的 spine/tap 结构，并解释它如何替代传统全局时钟布线。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Repack 内部机制：逻辑到物理 pb 的重打包",
+          "order": 3,
+          "filename": "u9-l3-repack-internals.md",
+          "level": "advanced",
+          "topic": "深入 repack 命令背后的物理逻辑块布线器：build_physical_lb_rr_graph 构建物理 lb rr graph，lb_router 在物理 pb 上重打包 netlist，physical_pb 表达重打包结果，并在打包后修正 truth table。",
+          "learning_goals": [
+            "理解 repack 为何需要在物理 pb 上重做局部布线",
+            "掌握 logical→physical pb 映射与 physical_pb 数据结构",
+            "认识 build_physical_truth_table 如何修正打包后的 LUT 真值表"
+          ],
+          "source_files": [
+            "openfpga/src/repack/repack.cpp",
+            "openfpga/src/repack/lb_router.cpp",
+            "openfpga/src/repack/physical_pb.h",
+            "openfpga/src/repack/build_physical_lb_rr_graph.cpp",
+            "openfpga/src/repack/build_physical_truth_table.cpp"
+          ],
+          "minimal_modules": [
+            "repack 入口",
+            "lb_router 物理布线",
+            "physical_pb",
+            "物理 lb rr graph",
+            "真值表修正"
+          ],
+          "practice_task": "在 example_script.openfpga 中把 repack 移到 build_architecture_bitstream 之后运行，观察报错或比特流差异，据此解释 repack 为何必须在比特流生成之前。",
+          "depends_on": [
+            "u4-l3",
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "Tile 直连与 Fabric Tile",
+          "order": 4,
+          "filename": "u9-l4-tile-direct-fabric-tile.md",
+          "level": "advanced",
+          "topic": "讲解 tile_direct（tile 间点对点直连，如 arch_direct 的 column/row 连接）与 fabric_tile（把 grid+sb+cb 打包成可复用的 tile 模块，用于层次化与压缩）机制。",
+          "learning_goals": [
+            "理解 tile direct 连接的类型与构建",
+            "掌握 fabric_tile 如何把多个模块聚合成可复用 tile",
+            "认识 tile 化对 fabric 大小与可布线性能的影响"
+          ],
+          "source_files": [
+            "openfpga/src/tile_direct/tile_direct.h",
+            "openfpga/src/tile_direct/build_tile_direct.cpp",
+            "openfpga/src/annotation/fabric_tile.h",
+            "openfpga/src/fabric/build_fabric_tile.cpp",
+            "openfpga/src/fabric/build_tile_modules.cpp"
+          ],
+          "minimal_modules": [
+            "TileDirect",
+            "tile direct 构建",
+            "FabricTile",
+            "tile 模块构建"
+          ],
+          "practice_task": "对比 group_tile_* 与普通 example 脚本的输出，说明 fabric_tile 如何把重复的 grid+sb+cb 组合压缩成单一可复用模块。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l5",
+          "title": "GSB 压缩与 Unique Blocks",
+          "order": 5,
+          "filename": "u9-l5-gsb-unique-blocks.md",
+          "level": "advanced",
+          "topic": "讲解 DeviceRRGSB（设备级通用开关块标注）如何识别并压缩重复的 GSB/模块，以及 read/write_unique_blocks（XML 与二进制）如何缓存这些唯一块以加速大阵列构建。本次更新说明 GSB 版本（V1/V2）现由 VPR device context 在 link 阶段注入，并用 gsb_version_set_ 守卫防止未设置即读取，annotate_device_rr_gsb 据此选择 GSB_V2 的 side-agnostic 构建路径。",
+          "learning_goals": [
+            "理解 DeviceRRGSB 的 unique block 压缩思想",
+            "掌握 --compress_routing 如何减少模块与网表数量",
+            "认识 unique blocks 的 XML/二进制读写与 GSB V2 及其版本来源（VPR device context）"
+          ],
+          "source_files": [
+            "openfpga/src/annotation/device_rr_gsb.h",
+            "openfpga/src/annotation/annotate_rr_graph.cpp",
+            "openfpga/src/annotation/read_unique_blocks_xml.h",
+            "openfpga/src/annotation/write_unique_blocks_xml.h",
+            "openfpga/src/utils/device_rr_gsb_utils.cpp",
+            "openfpga/src/annotation/write_xml_device_rr_gsb.h"
+          ],
+          "minimal_modules": [
+            "DeviceRRGSB",
+            "unique block 压缩",
+            "unique blocks 读写",
+            "GSB 版本来源"
+          ],
+          "practice_task": "运行 read_write_unique_blocks_full_flow_example_script.openfpga，对比压缩前后生成网表的数量，并解释 unique blocks 缓存如何加速重复构建；同时说明 GSB 版本为何从 VPR device context 获取而非命令行。",
+          "depends_on": [
+            "u5-l4",
+            "u6-l3"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "支撑库、二次开发与工程实践",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "libopenfpgautil 工具库",
+          "order": 1,
+          "filename": "u10-l1-openfpga-util.md",
+          "level": "advanced",
+          "topic": "系统介绍 libopenfpgautil：BasicPort 端口表示、openfpga_decode 二进制/one-hot 解码、openfpga_pb_parser 层次名解析、通配符、分词、摘要等贯穿全项目的工具。",
+          "learning_goals": [
+            "掌握 BasicPort 与端口解析在 OpenFPGA 中的基础地位",
+            "理解 decode 工具在比特流/地址生成中的作用",
+            "认识 pb_parser 如何解析 clb.fle[n1_lut4].ble4.lut4 这类路径"
+          ],
+          "source_files": [
+            "libs/libopenfpgautil/src/openfpga_port.h",
+            "libs/libopenfpgautil/src/openfpga_decode.h",
+            "libs/libopenfpgautil/src/openfpga_pb_parser.h",
+            "libs/libopenfpgautil/src/openfpga_wildcard_string.h",
+            "libs/libopenfpgautil/src/openfpga_tokenizer.h"
+          ],
+          "minimal_modules": [
+            "BasicPort 端口",
+            "decode 解码",
+            "pb_parser",
+            "通配符与分词"
+          ],
+          "practice_task": "在 fabric/ 与 fpga_bitstream/ 中搜索 openfpga_decode 与 openfpga_port 的使用点，说明它们在地址生成与端口处理中各起什么作用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "多路选择器库与译码器库",
+          "order": 2,
+          "filename": "u10-l2-mux-decoder-library.md",
+          "level": "advanced",
+          "topic": "讲解 mux_lib（MuxGraph 表达多路选择器拓扑、MuxLibrary 收集器件中所有 mux、构建器从 rr graph 提取 mux）与 decoder_library（配置译码器），以及它们如何驱动 mux/decoder 模块构建。",
+          "learning_goals": [
+            "理解 MuxGraph 如何抽象 mux 的输入/输出/层级",
+            "掌握 MuxLibrary 如何从布线结果收集去重后的 mux",
+            "认识 decoder_library 在 memory_bank/frame 配置中的作用"
+          ],
+          "source_files": [
+            "openfpga/src/mux_lib/mux_graph.h",
+            "openfpga/src/mux_lib/mux_library.h",
+            "openfpga/src/mux_lib/mux_library_builder.cpp",
+            "openfpga/src/mux_lib/decoder_library.cpp",
+            "openfpga/src/utils/decoder_library_utils.cpp"
+          ],
+          "minimal_modules": [
+            "MuxGraph",
+            "MuxLibrary",
+            "mux 构建器",
+            "DecoderLibrary"
+          ],
+          "practice_task": "阅读 mux_library_builder.cpp，说明它如何从 device_rr_gsb 与 grid 中统计出所有不同尺寸的 mux，并解释去重对模块数量的影响。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "约束与映射库：PCF / Bus Group / MIF / Name Map",
+          "order": 3,
+          "filename": "u10-l3-constraint-mapping-libs.md",
+          "level": "advanced",
+          "topic": "讲解一组支撑物理约束与命名映射的库：libpcf（pin constraints、io pin table、io location map、repack design constraints）、libbusgroup（总线到引脚映射）、libmif（存储器初始化文件）、libnamemanager（模块名与 IO 名映射）。",
+          "learning_goals": [
+            "理解 PCF 体系如何约束 IO 引脚并驱动 pcf2place",
+            "掌握 bus group 的大/小端总线映射",
+            "认识 module_name_map / io_name_map 如何支持自定义命名与 fpga_core wrapper"
+          ],
+          "source_files": [
+            "libs/libpcf/src/base/pcf_data.h",
+            "libs/libpcf/src/base/pin_constraints.h",
+            "libs/libpcf/src/base/io_pin_table.h",
+            "libs/libbusgroup/src/bus_group.h",
+            "libs/libmif/src/base/mif_storage.h",
+            "libs/libnamemanager/src/base/module_name_map.h"
+          ],
+          "minimal_modules": [
+            "PCF 与 pin constraints",
+            "io pin table/location map",
+            "bus group",
+            "MIF",
+            "name map"
+          ],
+          "practice_task": "运行 pin_constrain_example_script.openfpga 与 auto_bus_group_example_script.openfpga，说明 PCF 与 bus group 如何改变 IO 引脚映射与网表端口组织。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l4",
+          "title": "扩展 Shell：用 Shell<T> 框架新增命令",
+          "order": 4,
+          "filename": "u10-l4-add-new-command.md",
+          "level": "advanced",
+          "topic": "讲解 libopenfpgashell 的 Shell<T> 模板框架：Command 选项定义、CommandContext 解析、执行函数类型（STANDARD/SHORT/BUILTIN/FLOATING/MACRO/PLUGIN）、退出码，以及如何仿照现有 *_command_template.h 注册一条新命令。",
+          "learning_goals": [
+            "掌握 Shell<T> 模板的命令注册与执行模型",
+            "理解 Command/CommandContext/parse_command 的协作",
+            "能够仿照现有命令新增一条带选项的自定义命令并处理退出码"
+          ],
+          "source_files": [
+            "libs/libopenfpgashell/src/base/shell.h",
+            "libs/libopenfpgashell/src/base/command.h",
+            "libs/libopenfpgashell/src/base/command_context.h",
+            "libs/libopenfpgashell/src/base/command_parser.h",
+            "libs/libopenfpgashell/src/base/command_exit_code.h",
+            "openfpga/src/base/openfpga_setup_command_template.h"
+          ],
+          "minimal_modules": [
+            "Shell<T> 模板",
+            "Command 选项",
+            "执行函数类型",
+            "退出码",
+            "命令注册模板"
+          ],
+          "practice_task": "仿照 openfpga_setup_command_template.h 中某个简单命令，新增一条只读命令（如打印当前 module_graph 的模块数量），注册到 shell 并验证可调用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l5",
+          "title": "测试、CI 与贡献规范",
+          "order": 5,
+          "filename": "u10-l5-testing-ci-contributing.md",
+          "level": "advanced",
+          "topic": "讲解回归测试体系（.github/workflows、regression_test_scripts/basic_reg_test.sh、openfpga.sh 的 run-regression-local）、VPR wrapper 集成方式、代码格式化（clang-format/xml/py），以及 dev/ 目录的开发者工具与贡献流程。本次更新补充 basic_reg_test.sh 中新增的 busmux（总线型 mux）回归用例。",
+          "learning_goals": [
+            "掌握如何用 run-task 与回归脚本本地验证改动",
+            "理解 vpr_wrapper 如何以 MACRO 方式集成 VPR",
+            "认识项目的代码风格工具、贡献规范与 basic_reg_test 覆盖的特性集（含 busmux）"
+          ],
+          "source_files": [
+            "openfpga/src/vpr_wrapper/vpr_main.cpp",
+            "openfpga/src/vpr_wrapper/vpr_command.cpp",
+            "Makefile",
+            ".github/workflows/build.yml",
+            "openfpga_flow/scripts/run_fpga_task.py",
+            "openfpga_flow/regression_test_scripts/basic_reg_test.sh"
+          ],
+          "minimal_modules": [
+            "回归测试与 CI",
+            "vpr_wrapper 集成",
+            "格式化工具",
+            "贡献规范"
+          ],
+          "practice_task": "在本地运行 run-regression-local 或挑选一个 basic_tests 子集（如新增的 busmux 任务）跑通，然后对一处源码做小改动，运行 make format-cpp 验证风格，并描述如何为新增功能补一个回归 task。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "update"
+        }
+      ]
+    }
+  ]
+}
