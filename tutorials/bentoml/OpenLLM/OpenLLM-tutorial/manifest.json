@@ -1,0 +1,446 @@
+{
+  "project": "OpenLLM",
+  "head": "ec2355ce1a75176164c451cbb7592b3046531540",
+  "rationale": "OpenLLM 是一个体量集中（src/openllm 下约 2097 行、9 个职责清晰的模块）的 CLI 工具，核心是把「开源大模型 → OpenAI 兼容服务」这条链路封装成 `openllm serve/run/deploy` 等命令。因此学习顺序按「先认识再读链路最后讲扩展」三层推进：入门层(u1)从项目定位、安装目录、CLI 入口到交互式 hello，帮读者从零跑起来；进阶层(u2)沿真实调用链拆解公共基础设施(common.py 分成配置输出与子进程两讲)、模型仓库(repo.py)、模型/Bento 解析(model.py)、加速器可运行性判定(accelerator_spec.py)、虚拟环境依赖管理(venv.py)，使读者理解一条 `serve` 命令背后的解析-发现-准备-判定全过程；专家层(u3)聚焦 local.py 完整运行链路、cloud.py 云端部署、analytic.py 的命令装饰与埋点、clean.py 磁盘清理，并以「自定义仓库与 Bento」作为二次开发综合实践收尾。讲义依赖构成有向无环图，每篇对应一个真实源码文件、配一个可操作的代码实践任务，避免为凑数量硬拆。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：从零认识并运行 OpenLLM",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位、技术栈与设计理念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清楚 OpenLLM 是什么：一个把任意开源 LLM 一键变成 OpenAI 兼容 API 的 CLI 工具，以及它与 BentoML、vLLM、OpenAI 客户端、uv 的关系。",
+          "learning_goals": [
+            "理解 OpenLLM 解决的核心问题和它提供的能力（serve/run/deploy、Chat UI、模型仓库）",
+            "厘清 OpenLLM 与 BentoML（服务框架）、vLLM（推理后端）、OpenAI SDK（客户端协议）的分工",
+            "知道支持哪些模型、为什么需要 HF_TOKEN"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "项目简介与能力边界",
+            "依赖与技术栈（bentoml/typer/uv/openai 等）",
+            "支持的模型与鉴权要求"
+          ],
+          "practice_task": "阅读 README 与 pyproject.toml，用一段话写明 `openllm serve llama3.2:1b` 这条命令分别依赖了哪几个开源项目，并解释为什么 gated 模型需要 HF_TOKEN。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、目录结构与运行方式",
+          "order": 2,
+          "filename": "u1-l2-install-and-layout.md",
+          "level": "beginner",
+          "topic": "讲清楚如何安装 openllm、源码包结构（src/openllm 布局）、控制台脚本入口定义，以及运行时在用户主目录下创建的 OPENLLM_HOME 各子目录。",
+          "learning_goals": [
+            "掌握通过 pip/uv 安装 openllm 与从源码开发安装的方式",
+            "看懂 pyproject.toml 中的 [project.scripts] 与 hatch 构建配置如何生成 `openllm` 命令",
+            "理解 OPENLLM_HOME、repos/temp/venv/config.json 的用途"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "src/openllm/__init__.py",
+            "src/openllm/common.py",
+            "DEVELOPMENT.md"
+          ],
+          "minimal_modules": [
+            "安装与开发环境搭建",
+            "src/openllm 模块布局",
+            "OPENLLM_HOME 运行时目录"
+          ],
+          "practice_task": "克隆仓库并按 DEVELOPMENT.md 配置开发环境，运行 `openllm --version`；然后查看 ~/.openllm 目录结构，记录 repos、venv、temp、config.json 各自何时被创建。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "CLI 入口与命令体系",
+          "order": 3,
+          "filename": "u1-l3-cli-entry-and-commands.md",
+          "level": "beginner",
+          "topic": "以 __main__.py 为主线，讲清楚 OpenLLM 的 Typer 应用结构：顶层命令 hello/serve/run/deploy、子命令组 repo/model/clean，以及全局回调（verbose/version/do-not-track）。",
+          "learning_goals": [
+            "理解 __main__.py 中 app 的组装方式与 add_typer 子命令注册",
+            "识别 hello/serve/run/deploy 四个顶层命令的参数与职责",
+            "看懂 typer_callback 全局选项如何控制 VERBOSE_LEVEL 与使用追踪开关"
+          ],
+          "source_files": [
+            "src/openllm/__main__.py",
+            "src/openllm/analytic.py"
+          ],
+          "minimal_modules": [
+            "Typer 应用与子命令注册",
+            "顶层命令签名与含义",
+            "全局回调与公共选项"
+          ],
+          "practice_task": "运行 `openllm --help`、`openllm serve --help`、`openllm repo --help`，对照 __main__.py 把每条命令映射到对应的函数与参数，画出命令树。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "交互式上手：hello 命令引导流程",
+          "order": 4,
+          "filename": "u1-l4-hello-interactive-flow.md",
+          "level": "beginner",
+          "topic": "逐段拆解 hello 命令及其 _select_bento_name/_select_bento_version/_select_target/_select_action 四个交互式选择函数，理解 questionary + tabulate 构成的引导式体验。",
+          "learning_goals": [
+            "理解 hello 命令的整体编排：探测硬件→列模型→选版本→选动作",
+            "看懂 can_run 分数如何驱动「本地可运行」勾选标记与排序",
+            "掌握 questionary.select/confirm 与 tabulate 表格化展示的用法"
+          ],
+          "source_files": [
+            "src/openllm/__main__.py",
+            "src/openllm/accelerator_spec.py",
+            "src/openllm/model.py"
+          ],
+          "minimal_modules": [
+            "hello 命令主流程",
+            "模型与版本交互选择",
+            "动作选择(run/serve/deploy)"
+          ],
+          "practice_task": "在本地运行 `openllm hello`（无 GPU 也可走到选择步骤），观察交互流程；然后修改一份本地副本，在选择动作前额外打印当前选中 Bento 的 tag 与所需 GPU 信息。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心模块与调用链",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "公共基础设施（一）：配置、输出与上下文变量",
+          "order": 1,
+          "filename": "u2-l1-common-config-output.md",
+          "level": "intermediate",
+          "topic": "讲解 common.py 中的基础设施数据模型与工具：Config/load_config/save_config、ContextVar（VERBOSE_LEVEL/INTERACTIVE）、output 打印、OPENLLM_HOME 路径常量。",
+          "learning_goals": [
+            "理解 config.json 的结构（repos/default_repo）与读写流程",
+            "掌握 ContextVar 栈式上下文如何控制 verbose/interactive 行为",
+            "看懂 output 函数如何按 VERBOSE_LEVEL 过滤并支持 YAML 美化输出"
+          ],
+          "source_files": [
+            "src/openllm/common.py"
+          ],
+          "minimal_modules": [
+            "Config 与配置文件读写",
+            "ContextVar 上下文变量",
+            "output 输出与详细度控制"
+          ],
+          "practice_task": "在 Python 中 import openllm.common，编写脚本：load_config() 打印当前 repos，再用 ContextVar.patch 临时把 VERBOSE_LEVEL 设为 20 并观察 output 行为变化。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "公共基础设施（二）：子进程与命令执行",
+          "order": 2,
+          "filename": "u2-l2-common-subprocess.md",
+          "level": "intermediate",
+          "topic": "讲解 common.py 中的命令执行机制：run_command 同步执行、async_run_command 异步上下文管理、stream_command_output 流式输出，以及 EnvVars、bentoml/python 命令重写、venv 激活。",
+          "learning_goals": [
+            "理解 run_command 如何拼接环境变量、venv、cwd 并把 bentoml/python 重写为模块调用",
+            "掌握 async_run_command 作为异步上下文管理器的生命周期与信号清理",
+            "看懂 EnvVars 排序去空的设计与 stream_command_output 的流式输出"
+          ],
+          "source_files": [
+            "src/openllm/common.py"
+          ],
+          "minimal_modules": [
+            "run_command 同步执行",
+            "async_run_command 异步上下文",
+            "EnvVars 与命令重写"
+          ],
+          "practice_task": "用 run_command 执行一条 `bentoml --version` 命令（会被重写为 `python -m bentoml`），再用 async_run_command 跑一个长输出命令并通过 stream_command_output 实时打印，对比两种执行方式。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "模型仓库管理 repo.py",
+          "order": 3,
+          "filename": "u2-l3-repo-management.md",
+          "level": "intermediate",
+          "topic": "讲解模型仓库（model repository）机制：RepoInfo、parse_repo_url 解析 git URL、list_repo/cmd_add/cmd_remove/cmd_update/default，以及 _clone_repo 与 ensure_repo_updated 的缓存更新策略。",
+          "learning_goals": [
+            "理解 OpenLLM 用 git 仓库作为模型目录的设计与 REPO_DIR 缓存结构",
+            "看懂 parse_repo_url 用正则把 URL 拆成 server/owner/repo/branch 并生成本地路径",
+            "掌握仓库的添加/删除/更新/默认、UPDATE_INTERVAL 过期更新与 dulwich 回退克隆"
+          ],
+          "source_files": [
+            "src/openllm/repo.py",
+            "src/openllm/common.py"
+          ],
+          "minimal_modules": [
+            "RepoInfo 与 URL 解析",
+            "仓库增删改查与克隆",
+            "缓存更新策略与别名补全"
+          ],
+          "practice_task": "运行 `openllm repo list` 与 `openllm repo default`，对照 parse_repo_url 验证默认仓库 URL 解析结果；再尝试 `openllm repo add myrepo <一个公开 git url>` 并观察 config.json 与 REPO_DIR 变化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "模型发现与 Bento 解析 model.py",
+          "order": 4,
+          "filename": "u2-l4-model-discovery.md",
+          "level": "intermediate",
+          "topic": "讲解如何把一个模型名解析为可运行的 Bento：list_bento 的 glob 扫描与别名机制、BentoInfo 读取 bento.yaml、ensure_bento 的匹配与资源提示，以及 model get/list 命令。",
+          "learning_goals": [
+            "理解 list_bento 如何按 bentoml/bentos/*/* glob 扫描并去重、处理别名文件",
+            "看懂 BentoInfo 的 tag/bentoml_tag/labels/envs/pretty_yaml/pretty_gpu 等属性如何从 bento.yaml 派生",
+            "掌握 ensure_bento 在 0/1/多个匹配时的处理与 can_run 资源不足提示"
+          ],
+          "source_files": [
+            "src/openllm/model.py",
+            "src/openllm/common.py",
+            "src/openllm/repo.py"
+          ],
+          "minimal_modules": [
+            "list_bento 扫描与去重",
+            "BentoInfo 与 bento.yaml 解析",
+            "ensure_bento 匹配逻辑"
+          ],
+          "practice_task": "运行 `openllm model list` 与 `openllm model get llama3.2:1b`，对照源码解释输出中 model/version/repo/required GPU RAM 各列分别来自 BentoInfo 的哪个属性。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "加速器规格与可运行性判定 accelerator_spec.py",
+          "order": 5,
+          "filename": "u2-l5-accelerator-spec.md",
+          "level": "intermediate",
+          "topic": "讲解硬件探测与可运行性打分：ACCELERATOR_SPECS 字典、Resource 解析、get_local_machine_spec 用 pynvml 探测本地 GPU、can_run 计算 Bento 在目标上的得分。",
+          "learning_goals": [
+            "理解 ACCELERATOR_SPECS 如何把 gpu_type 映射到显存规格",
+            "看懂 get_local_machine_spec 如何用 NVML 枚举 GPU、处理平台差异与计算能力告警",
+            "掌握 can_run 的打分公式：平台匹配、GPU 数量与显存加权"
+          ],
+          "source_files": [
+            "src/openllm/accelerator_spec.py",
+            "src/openllm/common.py"
+          ],
+          "minimal_modules": [
+            "加速器规格表与 Resource",
+            "本地机器规格探测",
+            "can_run 打分算法"
+          ],
+          "practice_task": "在 Python 中调用 get_local_machine_spec() 打印本机探测结果（无 GPU 时观察回退分支）；手动构造一个 BentoInfo 与 DeploymentTarget，验证 can_run 返回值的含义。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "虚拟环境与依赖管理 venv.py",
+          "order": 6,
+          "filename": "u2-l6-venv-management.md",
+          "level": "intermediate",
+          "topic": "讲解 OpenLLM 如何为每个 Bento 准备独立虚拟环境：VenvSpec 规格与归一化哈希、_resolve_bento_venv_spec 读取 lock/requirements、_ensure_venv 用 uv 创建并安装依赖、DONE 标记与失败清理。",
+          "learning_goals": [
+            "理解 VenvSpec 如何把 python_version/requirements/envs 归一化并用哈希作为 venv 目录",
+            "看懂 _ensure_venv 使用 `uv venv` + `uv pip install` 安装 bentoml 与依赖的流程",
+            "掌握 DONE 标记的缓存复用语义与异常时的清理逻辑"
+          ],
+          "source_files": [
+            "src/openllm/venv.py",
+            "src/openllm/common.py"
+          ],
+          "minimal_modules": [
+            "VenvSpec 规格与哈希",
+            "uv 创建与安装依赖",
+            "缓存复用与失败清理"
+          ],
+          "practice_task": "阅读 _ensure_venv，解释为什么用 `hash(venv_spec)` 作为目录名能实现依赖缓存复用；模拟一次安装失败，观察 venv 是否被正确清理（可借助 VERBOSE_LEVEL=20 查看错误）。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：运行链路、部署与扩展实践",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "本地 serve 与 run 的完整链路 local.py",
+          "order": 1,
+          "filename": "u3-l1-local-serve-run.md",
+          "level": "advanced",
+          "topic": "讲解本地运行的全链路：serve 构造 `bentoml serve` 命令、prep_env_vars 注入环境、ensure_venv 准备环境；run 的异步 _run_model 轮询 /readyz 并用 OpenAI 客户端做终端多轮对话。",
+          "learning_goals": [
+            "理解 _get_serve_cmd 如何拼装 bentoml serve 命令与 BENTOML_HOME 指向",
+            "掌握 _run_model 中 /readyz 轮询、超时流式日志、信号清理的异步控制",
+            "看懂 run 如何用 openai.AsyncOpenAI 客户端在终端进行流式多轮对话"
+          ],
+          "source_files": [
+            "src/openllm/local.py",
+            "src/openllm/common.py",
+            "src/openllm/venv.py"
+          ],
+          "minimal_modules": [
+            "serve 命令拼装与环境注入",
+            "_run_model 异步就绪轮询",
+            "OpenAI 客户端终端对话"
+          ],
+          "practice_task": "跟踪一次 `openllm serve <小模型>` 的执行：画出从 __main__.serve → ensure_bento → local_serve → ensure_venv → run_command 的调用时序，并解释 /readyz 在 run 模式下的作用。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "云端部署 cloud.py",
+          "order": 2,
+          "filename": "u3-l2-cloud-deploy.md",
+          "level": "advanced",
+          "topic": "讲解部署到 BentoCloud 的机制：_get_deploy_cmd 拼装 `bentoml deploy` 并处理 bento.yaml/CLI/os.environ 三层环境变量、ensure_cloud_context 登录引导、get_cloud_machine_spec 拉取实例类型、yatai 配置拷贝。",
+          "learning_goals": [
+            "理解 _get_deploy_cmd 中显式 --env、bento.yaml 必需变量、os.environ 三类环境变量的优先级与交互补全",
+            "掌握 ensure_cloud_context 的登录状态检测与交互式引导",
+            "看懂 get_cloud_machine_spec 如何把云端实例类型转成 DeploymentTarget 列表"
+          ],
+          "source_files": [
+            "src/openllm/cloud.py",
+            "src/openllm/common.py",
+            "src/openllm/accelerator_spec.py"
+          ],
+          "minimal_modules": [
+            "部署命令拼装与环境变量处理",
+            "BentoCloud 登录与上下文",
+            "实例类型获取与配置拷贝"
+          ],
+          "practice_task": "阅读 _get_deploy_cmd，写明当某环境变量同时出现在 bento.yaml、--env 和 os.environ 中时的最终取值优先级；并解释 .yatai.yaml 为何要拷贝到 bento.repo.path/bentoml 下。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "CLI 命令装饰器与使用分析 analytic.py",
+          "order": 3,
+          "filename": "u3-l3-cli-analytics.md",
+          "level": "advanced",
+          "topic": "讲解 OpenLLMTyper 如何通过重写 command 装饰器为每条命令包一层使用埋点：EventMeta 自动事件名、CliEvent/OpenllmCliEvent、调用 bentoml analytics track 记录命令耗时与错误，以及 DO_NOT_TRACK 开关。",
+          "learning_goals": [
+            "理解 OpenLLMTyper 继承 typer.Typer 并重写 command 的装饰器劫持技巧",
+            "看懂 EventMeta 如何把类名转换成 snake_case 事件名并去掉 _event 后缀",
+            "掌握 track 埋点记录的字段（cmd_group/cmd_name/duration/error_type/return_code）与禁用追踪的方式"
+          ],
+          "source_files": [
+            "src/openllm/analytic.py",
+            "src/openllm/__main__.py"
+          ],
+          "minimal_modules": [
+            "OpenLLMTyper 与 command 装饰器",
+            "事件元类与事件模型",
+            "使用埋点与隐私开关"
+          ],
+          "practice_task": "设置 BENTOML_DO_NOT_TRACK=true 运行任意命令，对照源码解释为何此时不再触发 track；再为一个自定义命令加上 @app.command，验证它是否自动获得埋点。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "磁盘清理与缓存管理 clean.py",
+          "order": 4,
+          "filename": "u3-l4-disk-cleanup.md",
+          "level": "advanced",
+          "topic": "讲解 clean 子命令如何释放磁盘：model_cache 清 HuggingFace 缓存、venvs 清 OpenLLM 创建的虚拟环境、repos 清仓库缓存、configs 重置配置、all 一键重置，以及 _du 用 inode 去重统计真实占用。",
+          "learning_goals": [
+            "理解 OpenLLM 三类缓存（HF 模型缓存、venv、repos）与 config.json 的位置",
+            "看懂 _du 如何跨平台、用 inode 避免硬链接重复计数地统计目录占用",
+            "掌握各 clean 子命令的交互确认与 ignore_errors 安全删除策略"
+          ],
+          "source_files": [
+            "src/openllm/clean.py",
+            "src/openllm/common.py"
+          ],
+          "minimal_modules": [
+            "三类缓存与配置定位",
+            "_du 真实占用统计",
+            "清理子命令与一键重置"
+          ],
+          "practice_task": "运行 `openllm clean venvs --verbose`（或在不删除的前提下阅读 _du），对照源码解释为何在 Linux 上要用 st_ino 去重；估算并记录你机器上三类缓存各自占用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "二次开发：自定义模型仓库与 Bento 实践",
+          "order": 5,
+          "filename": "u3-l5-custom-repo-and-bento.md",
+          "level": "advanced",
+          "topic": "综合 repo.py、model.py、common.py 与 DEVELOPMENT.md，讲解如何搭建自定义模型仓库、按 bentos 目录约定提交 Bento，使 `openllm` 能发现并运行自有模型。",
+          "learning_goals": [
+            "理解自定义仓库的目录约定（bentos 目录、bento.yaml、别名文件）与 repo add 注册流程",
+            "看懂 list_bento/parse_repo_url/_complete_alias 如何协同让自定义模型可被列出与别名解析",
+            "掌握结合 BentoML 构建 Bento 并提交到自有仓库的端到端流程"
+          ],
+          "source_files": [
+            "src/openllm/repo.py",
+            "src/openllm/model.py",
+            "src/openllm/common.py",
+            "DEVELOPMENT.md"
+          ],
+          "minimal_modules": [
+            "自定义仓库目录约定",
+            "仓库注册与模型发现联动",
+            "Bento 构建与提交流程"
+          ],
+          "practice_task": "按 DEVELOPMENT.md 与默认仓库结构，创建一个包含 bentos 目录的自定义公开 git 仓库，用 `openllm repo add` 注册后，通过 `openllm model list --repo <你的仓库>` 验证自定义模型能被发现（无 GPU 环境下验证到发现阶段即可）。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
