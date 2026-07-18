@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-18T15:27:01Z"
+      "last_run_at": "2026-07-18T18:01:52Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -19301,76 +19301,102 @@
           "error": null
         },
         "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1702689999999998,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1500729999999997,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.043089,
+          "error": null
+        },
+        "u10-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.186431,
+          "error": null
+        },
+        "u10-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.260526,
+          "error": null
+        },
+        "u11-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 4.767323,
+          "error": null
+        },
+        "u11-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3412899999999999,
+          "error": null
+        },
+        "u11-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.695281,
+          "error": null
+        },
+        "u11-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.252156,
+          "error": null
+        },
+        "u12-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.086488,
+          "error": null
+        },
+        "u12-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 2.111195,
+          "error": null
+        },
+        "u13-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.888447,
+          "error": null
+        },
+        "u14-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.126229,
+          "error": null
+        },
+        "u14-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196719,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u12-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u13-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u14-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u14-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":185831,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         }
       },
       "manifest_head": "749bd0f86a07a28a86347d8ce9c141e601057c40",
@@ -19379,7 +19405,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/NawfalMotii79/PLFM_RADAR/PLFM_RADAR-tutorial",
       "last_head": "749bd0f86a07a28a86347d8ce9c141e601057c40",
-      "last_run_at": "2026-07-18T15:27:01Z",
+      "last_run_at": "2026-07-18T18:01:52Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "VLSI-EDA/PoC": {
@@ -19526,51 +19552,64 @@
           "error": null
         },
         "u4-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192360,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.065372,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2657429999999998,
+          "error": null
         },
         "u5-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.1537740000000003,
+          "error": null
         },
         "u5-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2486279999999998,
+          "error": null
         },
         "u5-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.148837,
+          "error": null
         },
         "u5-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.328424,
+          "error": null
         },
         "u5-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.950331,
+          "error": null
         }
       },
       "manifest_head": "8c39b2407a97ec81b8601c4b64e4d2e2141ab9cf",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/VLSI-EDA/PoC/PoC-tutorial",
       "last_head": "8c39b2407a97ec81b8601c4b64e4d2e2141ab9cf",
-      "last_run_at": "2026-07-18T15:27:01Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-18T18:01:52Z",
+      "last_error": null,
+      "abandoned": []
     },
     "paulscherrerinstitute/psi_fpga_all": {
       "prompt_hash": "b21aef51792b02df",
@@ -19703,60 +19742,305 @@
           "error": null
         },
         "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.656824,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.871881,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6188480000000001,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7343599999999999,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.012018,
+          "error": null
+        },
+        "u3-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.764151,
+          "error": null
+        },
+        "u3-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1177010000000003,
+          "error": null
+        },
+        "u3-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6044590000000001,
+          "error": null
+        }
+      },
+      "manifest_head": "d78d525150281c6bef3fd0dec5848baac4b62af5",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/paulscherrerinstitute/PsiFpgaLibDependencies/PsiFpgaLibDependencies-tutorial",
+      "last_head": "d78d525150281c6bef3fd0dec5848baac4b62af5",
+      "last_run_at": "2026-07-18T18:01:52Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "paulscherrerinstitute/PsiPyUtils": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.423612,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9650929999999999,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.784502,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.487919,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8018190000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7015020000000001,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7432669999999999,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.5285289999999999,
+          "error": null
+        },
+        "u3-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.592064,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.762142,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.806352,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8606940000000001,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.827202,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.973166,
+          "error": null
+        }
+      },
+      "manifest_head": "6adbdb1a446754028d294102ca9d17753e84d944",
+      "prev_head": null,
+      "phase": "done",
+      "mode": "full",
+      "tutorial_path": "tutorials/paulscherrerinstitute/PsiPyUtils/PsiPyUtils-tutorial",
+      "last_head": "6adbdb1a446754028d294102ca9d17753e84d944",
+      "last_run_at": "2026-07-18T18:01:52Z",
+      "abandoned": [],
+      "version": 1,
+      "last_error": null
+    },
+    "paulscherrerinstitute/TbGenerator": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.407218,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.533584,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.863619,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.911,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.550948,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.840856,
+          "error": null
+        },
+        "u3-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6273470000000001,
+          "error": null
+        },
+        "u3-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1005660000000002,
+          "error": null
+        },
+        "u4-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6932900000000001,
+          "error": null
+        },
+        "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1182860000000001,
+          "error": null
+        },
+        "u4-l3": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192523,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193948,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
-        "u2-l5": {
+        "u5-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u3-l1": {
+        "u5-l2": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u3-l2": {
+        "u6-l1": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u3-l3": {
+        "u6-l2": {
           "status": "pending",
           "action": "new",
           "retries": 0
         },
-        "u3-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u3-l6": {
+        "u6-l3": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "d78d525150281c6bef3fd0dec5848baac4b62af5",
+      "manifest_head": "5bcf59e8370c12117054b0585a2ae0fc4df4e9f4",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/paulscherrerinstitute/PsiFpgaLibDependencies/PsiFpgaLibDependencies-tutorial",
-      "last_head": "d78d525150281c6bef3fd0dec5848baac4b62af5",
-      "last_run_at": "2026-07-18T15:27:01Z",
+      "tutorial_path": "tutorials/paulscherrerinstitute/TbGenerator/TbGenerator-tutorial",
+      "last_head": "5bcf59e8370c12117054b0585a2ae0fc4df4e9f4",
+      "last_run_at": "2026-07-18T18:01:52Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "paulscherrerinstitute/PsiPyUtils": {},
-    "paulscherrerinstitute/TbGenerator": {},
-    "paulscherrerinstitute/PsiSim": {},
+    "paulscherrerinstitute/PsiSim": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":190636,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-07-19 07:00:45 重置。][202607190402396efe29636afc4e44]\",\"stop_reason\":\"stop_seq",
+      "last_run_at": "2026-07-18T18:01:52Z"
+    },
     "paulscherrerinstitute/en_cl_fix": {},
     "paulscherrerinstitute/psi_common": {},
     "paulscherrerinstitute/psi_fix": {},

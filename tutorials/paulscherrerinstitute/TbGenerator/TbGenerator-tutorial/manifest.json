@@ -1,0 +1,518 @@
+{
+  "project": "TbGenerator",
+  "head": "5bcf59e8370c12117054b0585a2ae0fc4df4e9f4",
+  "rationale": "本项目是一个体量较小但层次清晰的代码生成工具：输入是带 $$ 标签 $$ 注解的 VHDL DUT 文件，输出是可直接使用的 testbench 骨架。因此学习路线从「认识工具并跑通第一个示例」开始（u1），随后把用户最常接触的「标签注解系统」作为独立单元讲透（u2），因为标签是整个工具的输入契约；之后进入实现层，先讲 VHDL 解析（u3 的 pyparsing 框架），再讲 DutInfo/TbInfo 数据模型与 Generate 主流程（u4），这是理解任何生成行为的关键链路；在主流程之上再讲多用例多文件 TB（u5）这一进阶特性；最后用 GUI/CLI/扩展实践（u6）收尾，让读者具备二次开发能力。单元顺序严格遵循「先接口后实现、先单文件再多文件、先使用后扩展」的认知阶梯，依赖关系沿此铺开。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 TbGenerator 与首次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位、依赖与许可",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 TbGenerator 是什么——从 VHDL DUT 文件自动生成 testbench 骨架的工具，说明其两种生成形态、外部依赖与版本许可。",
+          "learning_goals": [
+            "理解工具用途与单文件/多文件两种 testbench 形态",
+            "了解外部依赖 PsiPyUtils、PyQt5、pyparsing",
+            "了解版本演进与 PSI HDL Library License"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "doc/TbGenerator.pdf"
+          ],
+          "minimal_modules": [
+            "README 依赖与目录结构说明",
+            "Changelog 版本史",
+            "License.txt 许可说明"
+          ],
+          "practice_task": "阅读 README 与 Changelog，列出当前版本（3.0.x）相对旧版的关键变化（如 PyQt5 迁移、PsiPyUtils 3.0.0 要求），并在本机确认 pyparsing 与 PyQt5 是否已安装。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与入口文件",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-and-entry-points.md",
+          "level": "beginner",
+          "topic": "梳理仓库的 Python 模块布局，区分 CLI 入口 TbGen.py 的 __main__ 与 GUI 入口 TbGenGui.pyw。",
+          "learning_goals": [
+            "掌握仓库文件与模块划分",
+            "区分 CLI 与 GUI 两种入口及其调用方式",
+            "初步认识 TbGenerator 类的位置"
+          ],
+          "source_files": [
+            "TbGen.py",
+            "TbGenGui.pyw"
+          ],
+          "minimal_modules": [
+            "TbGenerator 类",
+            "argparse CLI",
+            "TbGenGui(QDialog) GUI"
+          ],
+          "practice_task": "列出全部 Python 模块并各用一句话写出其职责；尝试运行 `py TbGen.py -h`（或 `python TbGen.py -h`）查看 CLI 参数帮助。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "首次运行：生成第一个 testbench",
+          "order": 3,
+          "filename": "u1-l3-first-run-generate-tb.md",
+          "level": "beginner",
+          "topic": "用 simpleTb 示例实际跑通一次生成，观察产出的 *_tb.vhd 文件结构与 DUT 实例化、时钟进程等段落。",
+          "learning_goals": [
+            "学会运行 -src/-dst/-clear/-force 参数组合",
+            "认识生成的 testbench 文件命名与目录",
+            "能在生成的 TB 中定位 DUT 实例化与进程"
+          ],
+          "source_files": [
+            "example/simpleTb/run.bat",
+            "example/simpleTb/psi_common_async_fifo.vhd",
+            "TbGen.py"
+          ],
+          "minimal_modules": [
+            "TbGenerator.ReadHdl",
+            "TbGenerator.Generate",
+            "CLI -src/-dst/-clear/-force"
+          ],
+          "practice_task": "将 simpleTb 示例复制到本地并运行 run.bat（或等价 python 命令），打开生成的 tb 目录中的 testbench 文件，对照 DUT 找到 i_dut 实例化、时钟进程 p_clock_* 与 Stimuli 进程。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "VHDL 注解标签系统",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "标签语法与解析原理",
+          "order": 1,
+          "filename": "u2-l1-tag-syntax-and-parsing.md",
+          "level": "beginner",
+          "topic": "讲解 `$$ TAG=val; LIST=a,b $$` 注解标签的语法，以及 DutInfo._ParseTags 如何用 pyparsing 把注释解析成字典。",
+          "learning_goals": [
+            "掌握标签的单值与列表两种写法及大小写不敏感特性",
+            "理解 _ParseTags 的 pyparsing 文法 TAGS",
+            "理解 HasTag/GetTag/FilterForTag 等工具方法"
+          ],
+          "source_files": [
+            "DutInfo.py",
+            "example/simpleTb/psi_common_async_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "Tags 常量类",
+            "_ParseTags",
+            "HasTag/GetTag/HastTagValue/FilterForTag"
+          ],
+          "practice_task": "在示例 VHDL 中找 5 处 `$$ ... $$` 标签，手写出它们解析后的 key/value；再用 Python 直接调用 DutInfo._ParseTags 验证你的判断。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "端口与 generic 标签详解",
+          "order": 2,
+          "filename": "u2-l2-port-and-generic-tags.md",
+          "level": "beginner",
+          "topic": "逐个讲解端口标签 TYPE(CLK/RST/SIG)、FREQ、CLK、PROC、LOWACTIVE，以及 generic 标签 EXPORT、CONSTANT，并说明它们如何影响生成结果。",
+          "learning_goals": [
+            "理解 TYPE=FREQ/CLK 标签如何驱动时钟进程与复位归属",
+            "理解 PROC 标签如何把端口绑定到某个测试过程",
+            "理解 EXPORT 与 CONSTANT 如何决定 generic 在 TB 中的处理方式"
+          ],
+          "source_files": [
+            "DutInfo.py",
+            "TbGen.py",
+            "example/simpleTb/psi_common_async_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "GetPortValue",
+            "_Clocks",
+            "_Resets",
+            "_GenericConstants",
+            "_DutSignals"
+          ],
+          "practice_task": "在示例 DUT 中给某 std_logic 端口加 LOWACTIVE=true，或给某 generic 改 EXPORT/CONSTANT，重新生成 TB 并 diff 输出，解释变化来源。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "文件级标签与 TbInfo 建模",
+          "order": 3,
+          "filename": "u2-l3-file-scope-tags.md",
+          "level": "beginner",
+          "topic": "讲解文件级标签 PROCESSES、TESTCASES、DUTLIB、TBPKG 的作用，以及 TbInfo 如何据此建模测试台名称、过程、用例与用户包。",
+          "learning_goals": [
+            "理解 PROCESSES 定义 TB 过程名、TESTCASES 切换多用例模式",
+            "理解 DUTLIB 改变实例化库名、TBPKG 注入额外 use 包",
+            "理解 TbInfo 如何把文件级标签转化为生成参数"
+          ],
+          "source_files": [
+            "DutInfo.py",
+            "TbInfo.py",
+            "example/multiCaseTb/psi_common_async_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "fileScopeTags",
+            "dutLibrary",
+            "TbInfo.__init__",
+            "tbUserPackages"
+          ],
+          "practice_task": "在示例 VHDL 的文件级注释中增删 PROCESSES 与 TESTCASES 标签，重新生成，观察 isMultiCaseTb、tbProcesses 取值与生成文件数量的变化。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "VHDL 源码解析（VhdlParse）",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "pyparsing 基础与 VhdlConstruct 框架",
+          "order": 1,
+          "filename": "u3-l1-pyparsing-and-vhdl-construct.md",
+          "level": "intermediate",
+          "topic": "讲解 VhdlParse.py 顶部的 pyparsing 基础构件（PP_KEYWORDS、PP_EXPRESSION、PP_BRACED_EXPR 等）与 VhdlConstruct 基类的 PP_DEFINITION/_Parse/PP 设计模式。",
+          "learning_goals": [
+            "理解 pyparsing 的 Word/Literal/Combine/Forward/scanString 等基本构件",
+            "理解 VhdlConstruct 用 PP_DEFINITION + _Parse 的统一解析模式",
+            "理解 PrToStr 把 ParseResults 还原成字符串的用途"
+          ],
+          "source_files": [
+            "VhdlParse.py"
+          ],
+          "minimal_modules": [
+            "PP_* 基础构件",
+            "VhdlConstruct 基类",
+            "PrToStr"
+          ],
+          "practice_task": "用 pyparsing 写一个小解析器识别 `use lib.elem.obj;` 这类 use 语句，体会 PP_DEFINITION 定义文法与 _Parse 提取字段的协作方式。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "解析 entity/generic/port 与 VhdlFile 读取",
+          "order": 2,
+          "filename": "u3-l2-parse-entity-generic-port.md",
+          "level": "intermediate",
+          "topic": "讲解 VhdlType/VhdlRange、VhdlGenericDeclaration、VhdlPortDeclaration、VhdlEntityDeclaration 的文法，以及 VhdlFile 如何用 scanString 读出 entity、use 语句和注释行。",
+          "learning_goals": [
+            "理解 VHDL 类型与范围（to/downto）的解析",
+            "理解 generic/port 声明文法与默认值/注释提取",
+            "理解 VhdlFile 读取主流程：entity → usestatements → commentLines"
+          ],
+          "source_files": [
+            "VhdlParse.py"
+          ],
+          "minimal_modules": [
+            "VhdlType/VhdlRange",
+            "VhdlGenericDeclaration",
+            "VhdlPortDeclaration",
+            "VhdlEntityDeclaration",
+            "VhdlFile"
+          ],
+          "practice_task": "对 simpleTb 的 VHDL 文件实例化 VhdlFile，打印 entity.name、所有 generics（含类型与默认值）、所有 ports（含方向）与全部 use 语句。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数据模型与 testbench 生成主流程",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "数据模型：DutInfo 与 TbInfo",
+          "order": 1,
+          "filename": "u4-l1-data-model-dutinfo-tbinfo.md",
+          "level": "intermediate",
+          "topic": "讲解 DutInfo 如何封装 VhdlFile、归类 libraries、解析文件级标签并提供标签工具方法，以及 TbInfo 如何据 DutInfo 建模测试台名称、过程、用例与包声明。",
+          "learning_goals": [
+            "理解 DutInfo 与 TbInfo 的职责划分与数据流",
+            "理解 GetPortValue、LibraryDeclarations、dutLibrary 的实现",
+            "理解 TbInfo 的 UserPkg/TbPkg/TbCase 包声明方法"
+          ],
+          "source_files": [
+            "DutInfo.py",
+            "TbInfo.py"
+          ],
+          "minimal_modules": [
+            "DutInfo",
+            "TbInfo",
+            "LibraryDeclarations",
+            "GetPortValue",
+            "TbPkgDeclaration/TbCaseDeclaration/UserPkgDelcaration"
+          ],
+          "practice_task": "构造 DutInfo 与 TbInfo 实例，打印 dutLibrary、tbName、tbProcesses、isMultiCaseTb，并调用 LibraryDeclarations 把库声明写入一个文件查看输出。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Generate 主流程与单文件 TB 骨架",
+          "order": 2,
+          "filename": "u4-l2-generate-flow-and-single-tb.md",
+          "level": "intermediate",
+          "topic": "讲解 TbGenerator.Generate 的整体写作顺序：Header→库声明→实体→架构（常量/控制信号/DUT 信号）→DUT 实例化→TB 控制→时钟→复位→进程，以及 FileWriter 与 UtilFunc 的格式化协作。",
+          "learning_goals": [
+            "掌握 Generate 的完整调用链与各 _Xxx() 方法的输出位置",
+            "理解单文件 testbench 的整体 VHDL 结构",
+            "理解 VhdlTitle/CopyrightNotice 与 FileWriter 缩进机制对输出的影响"
+          ],
+          "source_files": [
+            "TbGen.py",
+            "UtilFunc.py"
+          ],
+          "minimal_modules": [
+            "Generate",
+            "_Header",
+            "_EntityDeclaration",
+            "_GenericConstants",
+            "_TbControlSignals",
+            "_DutSignals",
+            "VhdlTitle/CopyrightNotice"
+          ],
+          "practice_task": "在生成的 *_tb.vhd 中按 Generate 的调用顺序，为每个段落（Libraries、Entity、Architecture、DUT Instantiation 等）标注它由哪个 _Xxx() 方法生成。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "时钟、复位、进程与控制信号生成",
+          "order": 3,
+          "filename": "u4-l3-clocks-resets-processes-signals.md",
+          "level": "intermediate",
+          "topic": "深入 _Clocks、_Resets、_Processes、_TbControl、_TbControlSignals、_DutInstantiation 的实现细节，理解标签如何驱动这些段落的生成。",
+          "learning_goals": [
+            "理解时钟进程如何用 FREQ 标签计算半周期",
+            "理解复位如何依据 CLK 标签归属到对应时钟",
+            "理解进程如何用 PROC 标签绑定端口，以及 TbRunning/NextCase/ProcessDone 控制信号如何协作结束仿真"
+          ],
+          "source_files": [
+            "TbGen.py",
+            "DutInfo.py"
+          ],
+          "minimal_modules": [
+            "_Clocks",
+            "_Resets",
+            "_Processes",
+            "_TbControl",
+            "_TbControlSignals",
+            "_DutInstantiation",
+            "FilterForTag"
+          ],
+          "practice_task": "追踪一个带 TYPE=CLK;FREQ=100e6 的端口，说明它从标签到生成的 p_clock_* 进程的完整路径；并解释 ProcessDone=AllProcessesDone_c 如何让仿真结束。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "多文件多用例 testbench",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "多用例 TB 的触发与生成流程",
+          "order": 1,
+          "filename": "u5-l1-multicase-tb-trigger-and-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 TESTCASES 标签如何触发 isMultiCaseTb，Generate 在该模式下额外生成 TB 包与每个 case 包，且进程改为按 NextCase 调度各用例。",
+          "learning_goals": [
+            "理解多用例模式与单文件模式在输出上的差异",
+            "理解 NextCase/ProcessDone 调度多个用例的机制",
+            "认识 multiCaseTb 示例生成的全部文件"
+          ],
+          "source_files": [
+            "TbGen.py",
+            "TbInfo.py",
+            "example/multiCaseTb/psi_common_async_fifo.vhd",
+            "example/multiCaseTb/run.bat"
+          ],
+          "minimal_modules": [
+            "isMultiCaseTb",
+            "_Processes 多用例分支",
+            "_TbControl 多用例分支",
+            "TbPkgDeclaration/TbCaseDeclaration"
+          ],
+          "practice_task": "运行 multiCaseTb 示例，列出全部生成文件，并在 *_tb.vhd 中解释 NextCase 递增与各 case 包过程被调用的顺序关系。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "WriteTbPkg / WriteCasePkg 与过程方向",
+          "order": 2,
+          "filename": "u5-l2-write-tbpkg-and-casepkg.md",
+          "level": "intermediate",
+          "topic": "讲解 MultiFileTb.WriteTbPkg 如何生成 Generics_t 记录与常量，WriteCasePkg 如何为每个用例生成过程声明与空实现，以及 PortDirectionForProcedure 如何推断过程参数方向。",
+          "learning_goals": [
+            "理解 TB 包中 Generics_t 记录与未导出常量的生成",
+            "理解 case 包中 procedure 的签名与默认空实现",
+            "理解 PortDirectionForProcedure 依据 PROC/TYPE 推断 in/inout 的规则"
+          ],
+          "source_files": [
+            "MultiFileTb.py",
+            "TbInfo.py",
+            "DutInfo.py"
+          ],
+          "minimal_modules": [
+            "WriteTbPkg",
+            "WriteCasePkg",
+            "PortDirectionForProcedure",
+            "GetPortsForProcess"
+          ],
+          "practice_task": "对照生成的某个 case 包，解释 OutRdy（PROC=Output,Input）在其过程里为何是 inout 还是 in；并为该 case 的 Stimuli 过程填入一行真实的测试激励代码。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "用户接口、输出与二次开发",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "PyQt5 GUI 实现",
+          "order": 1,
+          "filename": "u6-l1-pyqt5-gui.md",
+          "level": "advanced",
+          "topic": "讲解 TbGenGui.pyw 如何用 PyQt5 构建 QDialog：源/目标选择、Clear/Merge 复选框、Generate 按钮的信号槽连接与错误提示。",
+          "learning_goals": [
+            "理解 GUI 的布局组件与信号槽机制",
+            "理解 LoadSrc/LoadDst 的目录记忆与上级目录跳转逻辑",
+            "理解 GUI.Generate 如何复用 TbGenerator 并用 QErrorMessage 报错"
+          ],
+          "source_files": [
+            "TbGenGui.pyw",
+            "TbGen.py"
+          ],
+          "minimal_modules": [
+            "TbGenGui(QDialog)",
+            "LoadSrc/LoadDst",
+            "Generate",
+            "QErrorMessage"
+          ],
+          "practice_task": "运行 GUI 跑通一次生成；然后尝试新增一个复选框（例如“强制覆盖”）并将其状态接入 TbGenerator.Generate 的 overwrite 参数。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "CLI 参数、目录清理与合并文件机制",
+          "order": 2,
+          "filename": "u6-l2-cli-args-clear-merge.md",
+          "level": "advanced",
+          "topic": "讲解 TbGen.py 的 argparse 全部参数（-src/-dst/-clear/-mrg/-force）、目录清理与用户确认逻辑、.mrg 合并文件与 overwrite 的关系，以及 FileWriter/UtilFunc 的输出格式化。",
+          "learning_goals": [
+            "掌握 CLI 全部参数及其交互（尤其 -clear 与 -force）",
+            "理解 -mrg 产生 .mrg 文件并覆盖既有的语义",
+            "理解 FileWriter 的 IncIndent/DecIndent/RemoveFromLastLine 如何格式化 VHDL 输出"
+          ],
+          "source_files": [
+            "TbGen.py",
+            "UtilFunc.py"
+          ],
+          "minimal_modules": [
+            "argparse 参数定义",
+            "clear/force 清理逻辑",
+            "mrg/overwrite 分支",
+            "FileWriter(外部 PsiPyUtils)",
+            "VhdlTitle/CopyrightNotice"
+          ],
+          "practice_task": "分别用 `-clear -force` 与 `-mrg` 运行生成，对比 .vhd 与 .mrg 输出差异；并解释 FileWriter 的 IncIndent/DecIndent/RemoveFromLastLine 在某一段输出中的具体作用。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "扩展实践：添加新标签与新 VHDL 类型",
+          "order": 3,
+          "filename": "u6-l3-extension-new-tag-and-type.md",
+          "level": "advanced",
+          "topic": "综合实践：为 TbGenerator 增加一个自定义端口标签或支持一个新 VHDL 类型，贯通 DutInfo→VhdlParse→TbGen 的完整链路。",
+          "learning_goals": [
+            "能定位标签解析、数据模型与生成器三类扩展点",
+            "理解一个新特性如何从标签贯穿到最终 VHDL 输出",
+            "能安全地扩展 pyparsing 文法与生成方法而不破坏既有行为"
+          ],
+          "source_files": [
+            "DutInfo.py",
+            "VhdlParse.py",
+            "TbGen.py",
+            "example/simpleTb/psi_common_async_fifo.vhd"
+          ],
+          "minimal_modules": [
+            "Tags 常量",
+            "VhdlType",
+            "GetPortValue",
+            "_DutSignals"
+          ],
+          "practice_task": "实现一个新端口标签（例如 `$$ INITVAL=1 $$`），让 std_logic 端口在生成的 DUT 信号声明中使用该指定初始值；或者扩展 GetPortValue 支持一个新的 VHDL 类型；用 simpleTb 示例验证生成结果正确。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
