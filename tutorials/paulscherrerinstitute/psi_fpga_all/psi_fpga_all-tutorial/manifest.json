@@ -1,0 +1,312 @@
+{
+  "project": "psi_fpga_all",
+  "head": "6b51b7c87a5bcb377a56fc05a275dcf757d03692",
+  "rationale": "psi_fpga_all 本身不是普通的应用项目，而是一个\"集合仓库\"（collection-repo）：它通过 git submodule 把 PSI 全部 FPGA 相关库（VHDL 核心库、TCL 工具、Python 脚本工具、VivadoIP 封装好的 IP 核，共 24 个子模块）按固定的目录结构聚合在一起，因为各库之间用相对路径互相引用，目录结构本身就是\"接口\"。本仓库自身可读的真实代码非常薄，只有 README.md、Changelog.md、.gitmodules 和 scripts/ 下的 4 个 TCL 驱动脚本（批量仿真与批量 IP 打包）。因此学习路线分三层：入门层先让读者理解\"什么是集合仓库、为什么要用 submodule、目录为什么不能乱动\"；进阶层深入到唯一的真实代码——scripts/ 下 PsiSim 仿真流程（init→configure→compile→run→check）、三种仿真器（GHDL/ModelSim/Vivado）的兼容性差异（脚本注释明确标注哪些 TB 不兼容）以及批量 IP 打包流程；专家层讲发布与版本固定（Changelog 按 release 固定每个子模块的 tag）、维护与扩展（新增 submodule、SSH/HTTPS 权限、ignore-all-except 的 .gitignore 策略），最后用一个端到端工作流把克隆→仿真→打包串起来。每个单元只解决一类问题，讲义之间依赖关系清晰，且全部基于真实可读的 8 个文件，对仅被脚本引用而当前未检出的 submodule 内部文件在 topic 中标注\"待确认\"，避免编造。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 psi_fpga_all 集合仓库",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：PSI FPGA 集合仓库是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲解 psi_fpga_all 的定位：它是一个 collection-repo，本身几乎不含代码，而是用 git submodule 把 Paul Scherrer Institute 的全部 FPGA 库按固定目录结构聚合起来，并介绍维护者与更新节奏。",
+          "learning_goals": [
+            "理解 collection-repo 的概念以及它为什么不直接存放库源码",
+            "能够说清楚本仓库的用途、维护者和大致更新节奏",
+            "建立'目录结构即接口'的直觉，理解为什么各库之间用相对路径互相引用"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "仓库定位与 Purpose 章节",
+            "Maintainer/Authors/Changelog 指引",
+            "更新策略（约每 3 个月）"
+          ],
+          "practice_task": "阅读 README.md 的 'Purpose of the Repository' 一节，用自己的话写出 3 句话解释：本仓库是什么、为什么不直接放源码、谁在维护；并列出 README 中提到的四大类库（TCL/VHDL/Python/VivadoIP）各自包含哪些库。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "git submodule 机制与克隆方式",
+          "order": 2,
+          "filename": "u1-l2-submodules-and-cloning.md",
+          "level": "beginner",
+          "topic": "讲解 .gitmodules 如何用相对 URL（../../paulscherrerinstitute/...）定义 24 个子模块，为什么必须用 git clone --recurse-submodules 克隆，以及 SSH 与 HTTPS 两种方式的区别（最近一次提交让子模块同时兼容两者）。",
+          "learning_goals": [
+            "看懂 .gitmodules 中 path 与相对 url 的含义",
+            "理解 --recurse-submodules 的必要性以及子模块为空目录时的现象",
+            "掌握 SSH 与 HTTPS 克隆方式的选择与切换"
+          ],
+          "source_files": [
+            ".gitmodules",
+            "README.md"
+          ],
+          "minimal_modules": [
+            ".gitmodules 的 path/url 字段",
+            "相对 URL（../../）的解析",
+            "README 中 Cloning 一节的两种克隆命令"
+          ],
+          "practice_task": "在 .gitmodules 中任选 3 个 submodule 条目，说明其 path 与 url 的对应关系；再解释为什么直接 git clone（不带 --recurse-submodules）后会看到 VHDL/、Python/ 等目录是空的；最后把 README 里 SSH 与 HTTPS 两条克隆命令的区别写成一句话总结。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与四大类库",
+          "order": 3,
+          "filename": "u1-l3-directory-and-library-categories.md",
+          "level": "beginner",
+          "topic": "讲解 VHDL/、TCL/、Python/、VivadoIp/ 四大目录分别聚合哪一类库，以及每类库的职责（VHDL 核心库、TCL 工具、Python 脚本、封装好的 Vivado IP 核），并说明目录结构为何不能随意改动。",
+          "learning_goals": [
+            "建立四大类库（VHDL/TCL/Python/VivadoIp）的全景认知",
+            "理解每类库的大致职责与代表模块",
+            "理解'固定目录结构 + 相对路径引用'带来的约束"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitmodules",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "VHDL 类（en_cl_fix/psi_common/psi_fix/psi_tb/psi_multi_stream_daq）",
+            "TCL 类（PsiSim/PsiIpPackage）",
+            "Python 类（PsiPyUtils/VivadoScripting/IseScripting/TbGenerator/PsiFpgaLibDependencies）",
+            "VivadoIp 类（11 个 vivadoIP_*）"
+          ],
+          "practice_task": "综合 .gitmodules 与 Changelog.md，制作一张表：把全部 24 个子模块按四大类分组，每行写明 submodule 名、所在目录、一句话职责（职责可结合名字与 README 推断，不确定处标注'待确认'）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "脚本驱动的仿真、编译与 IP 打包",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "scripts 目录与驱动脚本总览",
+          "order": 1,
+          "filename": "u2-l1-scripts-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/ 下 4 个 TCL 驱动脚本（runModelsim/runGhdl/runVivado/packageAllIp）的共同结构：版权头、set myPath [pwd] 保存路径、再 cd 到各子模块目录 source 其内部脚本，最后 cd 回去；以及 .gitignore 用'全忽略除 *.tcl'策略只保留脚本本身。",
+          "learning_goals": [
+            "理解 4 个驱动脚本共有的 myPath/cd/source/cd-back 编排模式",
+            "看懂 scripts/.gitignore 的 ignore-all-except 策略",
+            "区分'驱动脚本'与它们 source 的子模块内部脚本"
+          ],
+          "source_files": [
+            "scripts/runModelsim.tcl",
+            "scripts/runGhdl.tcl",
+            "scripts/runVivado.tcl",
+            "scripts/packageAllIp.tcl",
+            "scripts/.gitignore"
+          ],
+          "minimal_modules": [
+            "版权头与 set myPath [pwd]",
+            "cd 到各子模块后 source 内部脚本的模式",
+            ".gitignore 的 * + !*.tcl + !.gitignore 规则"
+          ],
+          "practice_task": "对比 4 个脚本，提炼出它们共同的'保存路径→遍历子模块→source 内部脚本→回到原目录'模板，写成一段伪代码；再解释 scripts/.gitignore 为什么用'先忽略全部再放行 *.tcl'的方式（提示：忽略仿真/打包产生的临时产物）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "仿真驱动脚本与 PsiSim 流程",
+          "order": 2,
+          "filename": "u2-l2-simulation-psisim-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 runModelsim.tcl/runGhdl.tcl/runVivado.tcl 如何加载 PsiSim 框架（source TCL/PsiSim/PsiSim.tcl，namespace import psi::sim::*），再走 init→逐库 source config.tcl→compile_files→run_tb→run_check_errors 的标准仿真流水线。",
+          "learning_goals": [
+            "掌握 PsiSim 仿真的五步流水线：init/configure/compile/run/check",
+            "理解 namespace import psi::sim::* 的作用",
+            "看懂三个仿真脚本在结构上的细微差异（如 init -ghdl / -vivado / 默认）"
+          ],
+          "source_files": [
+            "scripts/runModelsim.tcl",
+            "scripts/runGhdl.tcl",
+            "scripts/runVivado.tcl"
+          ],
+          "minimal_modules": [
+            "PsiSim 框架加载（source + namespace import）",
+            "init 初始化与各库 config.tcl 配置",
+            "compile_files -all -clean / run_tb -all / run_check_errors 三段执行"
+          ],
+          "practice_task": "以 runModelsim.tcl 为例，把整段脚本按 init→configure→compile→run→check 拆成五段并逐段注释其作用；然后仿照其结构写一个新的 runXxx.tcl，在 configure 阶段额外加入一个当前未列出的库的 config.tcl（路径参照已有写法），其余保持一致。注：PsiSim.tcl 与各 config.tcl 位于对应 submodule 内，本仓库未直接包含，具体内容'待确认'。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "仿真器兼容性矩阵",
+          "order": 3,
+          "filename": "u2-l3-simulator-compatibility.md",
+          "level": "intermediate",
+          "topic": "通过脚本里的注释（如 '#TB not GHDL compatible!'、'#TB not Vivado compatible!'、power_sink 没有 self-checking TB）梳理出每个库的 testbench 在 GHDL/ModelSim/Vivado 三种仿真器下的兼容情况。",
+          "learning_goals": [
+            "能从脚本注释中读出哪些 TB 对哪种仿真器不兼容",
+            "理解 power_sink 为何不参与仿真（功耗无法仿真）",
+            "建立'库 × 仿真器'的兼容性矩阵概念"
+          ],
+          "source_files": [
+            "scripts/runGhdl.tcl",
+            "scripts/runVivado.tcl",
+            "scripts/runModelsim.tcl"
+          ],
+          "minimal_modules": [
+            "runGhdl.tcl 中被注释掉的 config.tcl（GHDL 不兼容）",
+            "runVivado.tcl 中被注释掉的 config.tcl（Vivado 不兼容）",
+            "power_sink 的注释说明（无 self-checking TB）"
+          ],
+          "practice_task": "对比 runGhdl.tcl、runVivado.tcl、runModelsim.tcl，把每个库在三种仿真器下是否被启用（即对应 config.tcl 是否被注释掉）整理成一张矩阵表，并在表下用一句话解释 power_sink 为什么三种仿真器都不跑。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Vivado IP 批量打包脚本",
+          "order": 4,
+          "filename": "u2-l4-ip-packaging.md",
+          "level": "intermediate",
+          "topic": "讲解 packageAllIp.tcl 如何遍历各 VivadoIp 子模块的 scripts/ 目录并 source 其 package.tcl，从而批量把 HDL 库封装成可被 Vivado 调用的 IP 核。",
+          "learning_goals": [
+            "理解 IP 打包的目的与 package.tcl 的角色",
+            "看懂 packageAllIp.tcl 的遍历与 source 模式",
+            "对比 IP 打包流程与仿真流程的异同"
+          ],
+          "source_files": [
+            "scripts/packageAllIp.tcl"
+          ],
+          "minimal_modules": [
+            "set myPath 与 cd 到各 vivadoIP_*/scripts",
+            "source package.tcl 逐个打包",
+            "回到初始目录收尾"
+          ],
+          "practice_task": "阅读 packageAllIp.tcl，列出它当前打包了哪些 IP（即 source 了哪些 package.tcl）；然后对比 VivadoIp/ 目录下的全部子模块（见 .gitmodules），找出哪些 IP 当前没有被该脚本打包，并修改脚本把其中漏掉的一个（例如 vivadoIP_axi_mm_reader 或 vivadoIP_fpga_base）按相同模式补充进去。注：各 package.tcl 位于对应 submodule 内，本仓库未直接包含，具体内容'待确认'。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "版本管理与仓库维护",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "发布管理与 submodule 版本固定",
+          "order": 1,
+          "filename": "u3-l1-release-and-version-pinning.md",
+          "level": "advanced",
+          "topic": "讲解 Changelog.md 如何按发布版本（2018.1~2021.1）记录每个子模块所固定到的具体 tag，以及'约每 3 个月更新一次、中间可能不是各子模块最新状态'的发布策略和单独更新子模块的做法。",
+          "learning_goals": [
+            "能从 Changelog 读出某次 release 固定了哪些子模块及其版本",
+            "理解集合仓库'整体快照 + 个别更新'的版本管理思路",
+            "掌握对比两次 release 子模块版本差异的方法"
+          ],
+          "source_files": [
+            "Changelog.md",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "Changelog 各 release 的分组结构（TCL/VHDL/Python/VivadoIP）",
+            "每个子模块后跟的具体版本号/tag",
+            "release 节奏与单独更新子模块的策略"
+          ],
+          "practice_task": "从 Changelog.md 中选取 2020.2 与 2019.4 两次 release，分别提取 psi_common、psi_fix、PsiSim 三个子模块的版本号，做成对比表，指出哪些子模块在两次发布之间发生了版本升级；再用一句话说明集合仓库为什么不保证各子模块始终处于最新状态。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "维护与扩展集合仓库",
+          "order": 2,
+          "filename": "u3-l2-maintaining-and-extending.md",
+          "level": "advanced",
+          "topic": "讲解如何向本仓库新增一个 submodule（遵循 ../../paulscherrerinstitute/... 相对 URL 约定）、SSH/HTTPS 双兼容的权限处理（最近提交 774a090），以及 scripts/.gitignore 的'全忽略除 *.tcl'策略如何保护仓库整洁。",
+          "learning_goals": [
+            "掌握按相对 URL 约定新增 submodule 的方法",
+            "理解 SSH/HTTPS 同时兼容的意义与相对 URL 在其中的作用",
+            "看懂 scripts/.gitignore 的忽略策略对维护的意义"
+          ],
+          "source_files": [
+            ".gitmodules",
+            "README.md",
+            "scripts/.gitignore"
+          ],
+          "minimal_modules": [
+            ".gitmodules 相对 URL 约定",
+            "SSH/HTTPS 双兼容（提交 774a090）",
+            ".gitignore 的 ignore-all-except 策略"
+          ],
+          "practice_task": "参照 .gitmodules 现有条目的格式，为'一个假设的新 VHDL 库 psi_new_lib'写出一条新增 submodule 配置（path 与相对 url 都要符合现有约定）；再结合最近提交 774a090（Submodules usable with either SSH or HTTPS）写一段话说明相对 URL（../../）相比绝对 SSH/HTTPS URL 的好处。",
+          "depends_on": [
+            "u1-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "端到端工作流：克隆→仿真→打包",
+          "order": 3,
+          "filename": "u3-l3-end-to-end-workflow.md",
+          "level": "advanced",
+          "topic": "把前面所有讲义串起来，给出一条端到端工作流：用 --recurse-submodules 克隆得到完整目录结构，然后用 scripts/runModelsim.tcl（或 runGhdl/runVivado）跑全部库的仿真自检，再用 scripts/packageAllIp.tcl 批量打包 Vivado IP。",
+          "learning_goals": [
+            "把克隆、仿真、IP 打包三步串成一条完整工作流",
+            "理解 scripts/ 各脚本在整体流程中的角色",
+            "能在真实环境里按顺序驱动整个集合仓库"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/runModelsim.tcl",
+            "scripts/packageAllIp.tcl",
+            "scripts/runGhdl.tcl",
+            "scripts/runVivado.tcl"
+          ],
+          "minimal_modules": [
+            "克隆得到完整目录",
+            "用 run*.tcl 跑仿真并检查错误",
+            "用 packageAllIp.tcl 打包 IP"
+          ],
+          "practice_task": "写一份'操作手册'：按顺序列出 (1) 克隆命令、(2) 在 Vivado/ModelSim/GHDL 的 Tcl 控制台中 source 哪个脚本来跑全部库仿真自检、(3) source 哪个脚本来批量打包 IP，并说明每一步成功/失败的判断依据（例如 run_check_errors 的错误标志 ###ERROR###）。注：完整运行需要在已克隆全部 submodule 的环境中进行。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
