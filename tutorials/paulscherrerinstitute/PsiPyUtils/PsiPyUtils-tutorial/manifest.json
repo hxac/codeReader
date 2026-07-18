@@ -1,0 +1,427 @@
+{
+  "project": "PsiPyUtils",
+  "head": "6adbdb1a446754028d294102ca9d17753e84d944",
+  "rationale": "PsiPyUtils 是一个体量较小的通用 Python 工具库（8 个模块，扁平布局，无 src 子目录），核心设计思想几乎全部围绕「上下文管理器」与「跨平台可靠的文件/进程通信」展开。因此学习路线先打基础（项目定位、包结构、运行测试），再集中讲三类上下文管理器（TempWorkDir、TempFile、FileWriter）这一贯穿全库的统一范式，随后进入文件/文本操作（通配符查找、跨平台路径、标签替换），再到稍复杂的外部进程执行 ExtAppCall（它内部复用了 TempWorkDir，体现模块复用关系），最后进入专家层：XML 工具、打包与版本发布策略、测试组织与「批判性读源码」实践（其中包含一个可被发现的 get_attr_value 真实缺陷，用于训练源码阅读审慎度）。依赖链按「先建模块认知、再讲复用与扩展」安排，每篇讲义只解决一个独立问题并配一个可操作实践任务。共 5 单元 13 篇讲义，匹配小型项目 8–15 篇的规模要求，未为凑数量硬拆。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "PsiPyUtils 是什么：定位、用途与版本策略",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 PsiPyUtils 的定位——PSI 出品、面向日常 Python 编程的通用工具库（非业务专用），讲解它应包含/不应包含的代码范围、LGPL+PSI 例外许可证，以及 major.minor.bugfix 的打标签与版本演进策略。",
+          "learning_goals": [
+            "理解 PsiPyUtils 解决的问题与边界（通用工具，非业务专用）",
+            "了解许可证与版本号语义（major/minor/bugfix 何时递增）",
+            "能从 README 与 Changelog 中读出版本演进与破坏性变更"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "README 定位说明",
+            "Changelog 版本历史",
+            "setup.py 元信息"
+          ],
+          "practice_task": "阅读 Changelog.md，写一段 3-5 行的总结：3.0.0 相对 2.x 有哪些不向后兼容的变更，以及 3.0.1 修复了什么；并指出从 2.2.0 升级到 3.0.1 时使用者代码需要做哪些 import 调整。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "包结构与导入方式：扁平布局与 __init__ 重导出",
+          "order": 2,
+          "filename": "u1-l2-package-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库的扁平布局（所有模块直接在根目录），setup.py 如何用 package_dir={\"PsiPyUtils\":\".\"} 把当前目录映射成 PsiPyUtils 包，以及 __init__.py 如何统一重导出各模块，使外部可用 from PsiPyUtils import FileWriter 的新式写法。",
+          "learning_goals": [
+            "理解扁平布局与 package_dir 映射的关系",
+            "掌握 __init__.py 统一重导出带来的新旧两种 import 写法差异",
+            "能解释 pip 包与 git submodule 两种使用方式各自的特点"
+          ],
+          "source_files": [
+            "__init__.py",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 重导出",
+            "setup.py 的 package_dir/packages 配置"
+          ],
+          "practice_task": "在本机用 python3 setup.py sdist 打包（或直接以源码方式）安装，然后写一个 5 行脚本：分别用旧式 from PsiPyUtils.FileWriter import FileWriter 与新式 from PsiPyUtils import FileWriter 两种写法各导入一次，验证两者都能工作并思考 3.0.0 为何要做这次改动。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "运行测试套件：unittest 组织与 sys.path 技巧",
+          "order": 3,
+          "filename": "u1-l3-running-tests.md",
+          "level": "beginner",
+          "topic": "讲解 Tests/ 目录的组织，RunAll.py 如何用 unittest 聚合各 TestXxx 模块，以及测试文件用 sys.path.append('..') 把上级目录（包源码）加入路径从而直接 from FileWriter import FileWriter 的技巧。",
+          "learning_goals": [
+            "掌握用 RunAll.py 运行整套测试的方法",
+            "理解 sys.path.append('..') 让测试直接导入根目录模块的原理",
+            "认识 setUp/tearDown 在文件类测试中的资源清理作用"
+          ],
+          "source_files": [
+            "Tests/RunAll.py",
+            "Tests/TestFileWriter.py"
+          ],
+          "minimal_modules": [
+            "unittest 测试聚合",
+            "sys.path 路径注入",
+            "setUp/tearDown 清理"
+          ],
+          "practice_task": "在 Tests/ 目录下执行 python3 RunAll.py（或在仓库根目录 python3 -m unittest discover），记录通过/失败的用例数；再为 FileWriter 额外写一个测试用例：连续 IncIndent 两次后 WriteLn，断言行首是两个缩进字符。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "上下文管理器三剑客：库的核心范式",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "TempWorkDir：临时切换工作目录",
+          "order": 1,
+          "filename": "u2-l1-tempworkdir.md",
+          "level": "beginner",
+          "topic": "讲解 TempWorkDir 如何用 with 语法临时切换工作目录、退出时自动还原；剖析 __enter__ 记录 os.curdir 并 os.chdir、__exit__ 还原的实现，这是贯穿全库的上下文管理器范式的起点。",
+          "learning_goals": [
+            "掌握 with 协议（__enter__/__exit__）在资源管理中的作用",
+            "理解 TempWorkDir 记录-切换-还原的三步实现",
+            "认识 with 块即使抛异常也会执行 __exit__ 的健壮性"
+          ],
+          "source_files": [
+            "TempWorkDir.py",
+            "Tests/TestTempWorkDir.py"
+          ],
+          "minimal_modules": [
+            "__enter__/__exit__ 上下文协议",
+            "os.chdir/os.curdir/os.path.abspath"
+          ],
+          "practice_task": "参考 TestTempWorkDir.py，写一个脚本：进入一个 TempWorkDir('某子目录') 后断言 os.getcwd() 已切换、在 with 内手动 raise ValueError，验证退出 with 后工作目录仍被还原（即 __exit__ 在异常下也执行）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "TempFile：用完即删的临时文件",
+          "order": 2,
+          "filename": "u2-l2-tempfile.md",
+          "level": "beginner",
+          "topic": "讲解 TempFile 上下文管理器：__enter__ 创建并打开文件返回文件对象，__exit__ 关闭并 os.remove 删除；结合 TestTempFile 的「写内容、flush、复制到外部、退出后源文件已删」用例说明其典型用法。",
+          "learning_goals": [
+            "掌握 TempFile 自动清理文件的生命周期",
+            "理解为何要先 flush 才能让外部进程读到完整内容",
+            "对比 TempFile 与标准库 tempfile 的定位差异"
+          ],
+          "source_files": [
+            "TempFile.py",
+            "Tests/TestTempFile.py"
+          ],
+          "minimal_modules": [
+            "上下文协议复用",
+            "open/close/os.remove",
+            "flush 与外部读取"
+          ],
+          "practice_task": "仿照 TestTempFile.py：用 TempFile 创建文件并写入一段文本，flush 后用 shutil.copy 复制到另一个持久文件，验证 with 退出后临时文件已删除而副本保留，并断言副本内容正确。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "FileWriter：缩进式文本生成",
+          "order": 3,
+          "filename": "u2-l3-filewriter.md",
+          "level": "beginner",
+          "topic": "讲解 FileWriter 这个用于代码生成的上下文管理器：内容先缓存到列表，__exit__ 时 WriteAll 一次性落盘；WriteLn 自动加当前缩进与换行，IncIndent/DecIndent 调整缩进，RemoveFromLastLine 可回退字符，overwrite=False 时不覆盖已存在文件。",
+          "learning_goals": [
+            "掌握 FileWriter 缓存-落盘的生成式工作流",
+            "理解缩进栈与 WriteLn/IncIndent/DecIndent 的协作",
+            "学会用 RemoveFromLastLine 做行尾回退与追加"
+          ],
+          "source_files": [
+            "FileWriter.py",
+            "Tests/TestFileWriter.py"
+          ],
+          "minimal_modules": [
+            "上下文协议",
+            "缩进栈 _indent 与 _indentChar",
+            "内容列表缓存与 WriteAll"
+          ],
+          "practice_task": "用 FileWriter 生成一段缩进的伪代码文件：用 IncIndent/DecIndent 制造两层缩进，写出函数体；再调用 RemoveFromLastLine 去掉上一行末尾的一个字符并 append 一个分号，最后读回文件验证缩进与修改都正确。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "文件查找与文本替换",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FileOperations：正则通配符文件操作",
+          "order": 1,
+          "filename": "u3-l1-file-operations.md",
+          "level": "intermediate",
+          "topic": "讲解 FileOperations 三个基于正则的函数 RemoveWithWildcard/FindWithWildcard/OpenWithWildcard：它们对目录（不递归子目录）用 re.search 匹配文件名，OpenWithWildcard 在匹配多于一个或零个时抛异常；以及 AbsPathLinuxStyle 把任意路径转成 Linux 风格绝对路径。",
+          "learning_goals": [
+            "掌握用正则而非 glob 匹配文件名的差异（. * 等元字符）",
+            "理解 OpenWithWildcard 唯一匹配约束与异常分支",
+            "认识非递归扫描子目录的边界"
+          ],
+          "source_files": [
+            "FileOperations.py",
+            "Tests/TestFileOperations.py"
+          ],
+          "minimal_modules": [
+            "re.search 文件名匹配",
+            "os.listdir/os.remove/open",
+            "AbsPathLinuxStyle"
+          ],
+          "practice_task": "新建含 3 个文件的测试目录，练习 FindWithWildcard 返回特定子集、RemoveWithWildcard 删除一组、OpenWithWildcard 以 append 模式追加内容；并构造一个匹配多个文件的情形验证 OpenWithWildcard 抛异常。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "跨平台路径处理：AbsPathLinuxStyle 与环境变量",
+          "order": 2,
+          "filename": "u3-l2-cross-platform-paths.md",
+          "level": "intermediate",
+          "topic": "集中讨论库的跨平台路径策略：FileOperations.AbsPathLinuxStyle 统一输出正斜杠绝对路径（便于 SDK/Vivado 等 Linux 风格工具），EnvVariables.AddToPathVariable 按操作系统选择分隔符（;/:）与斜杠方向，把路径加入 PATH 类变量且避免重复。",
+          "learning_goals": [
+            "理解 Linux/Windows 路径分隔符与斜杠方向的差异处理",
+            "掌握 AddToPathVariable 去重、缺失则创建的逻辑",
+            "认识 sys.platform 分支判断的跨平台写法"
+          ],
+          "source_files": [
+            "FileOperations.py",
+            "EnvVariables.py"
+          ],
+          "minimal_modules": [
+            "AbsPathLinuxStyle",
+            "AddToPathVariable",
+            "sys.platform 分支"
+          ],
+          "practice_task": "写脚本调用 AddToPathVariable 向一个自定义环境变量加入两个路径，验证第二次加入相同路径时不会重复；再用 AbsPathLinuxStyle 把一个反斜杠相对路径转成正斜杠绝对路径并打印结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "TextReplace.TaggedReplace：标签间文本替换与代码生成",
+          "order": 3,
+          "filename": "u3-l3-text-replace.md",
+          "level": "intermediate",
+          "topic": "讲解 TaggedReplace 用非贪婪正则 (startTag.*?endTag 配合 re.DOTALL) 替换两个标签之间的内容（标签本身保留），找不到标签时抛 TagsNotFoundError；结合 3.0.1 的两处修复（非贪婪、行尾不敏感）说明它为何适合代码生成场景。",
+          "learning_goals": [
+            "理解非贪婪 .*? 与 re.DOTALL 在多标签文件中的正确行为",
+            "掌握 TagsNotFoundError 与 FileNotFoundError 两种异常",
+            "认识 3.0.1 修复为何让同文件多标签实例工作正确"
+          ],
+          "source_files": [
+            "TextReplace.py",
+            "Tests/TestTextReplace.py",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "非贪婪正则",
+            "re.DOTALL/re.sub",
+            "自定义异常 TagsNotFoundError"
+          ],
+          "practice_task": "创建一个含两对相同标签的文本文件，调用 TaggedReplace 替换其中内容，验证两处都被正确替换（即 3.0.1 非贪婪修复后的行为）；再构造缺失标签的场景捕获 TagsNotFoundError。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "外部进程执行与环境",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "ExtAppCall 基本用法：执行外部程序并捕获输出",
+          "order": 1,
+          "filename": "u4-l1-extappcall-basics.md",
+          "level": "intermediate",
+          "topic": "讲解 ExtAppCall 类的对外 API：构造（work_dir、command）、run_sync/run_async/wait 三种执行模式、超时参数、以及 get_stdout/get_stderr/get_exit_code 三个取结果方法；它内部会进入指定 work_dir 执行命令。",
+          "learning_goals": [
+            "掌握 run_sync 与 run_async+wait 两种执行模型的区别",
+            "理解 timeout_sec 超时触发 terminate 并抛 TimeoutExpired 的行为",
+            "学会用 get_stdout/get_stderr/get_exit_code 读取结果"
+          ],
+          "source_files": [
+            "ExtAppCall.py"
+          ],
+          "minimal_modules": [
+            "ExtAppCall 构造与状态字段",
+            "run_async/run_sync/wait",
+            "结果获取方法"
+          ],
+          "practice_task": "用 ExtAppCall 同步执行一个简单命令（如 echo 或 dir/ls），打印其 stdout、stderr 与 exit_code；再用一个会失败（非零退出码）的命令验证 get_exit_code 能反映失败状态，最后用 run_async+wait+timeout 跑一个 sleep 类命令并故意设较短超时观察异常。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ExtAppCall 内部机制：文件通信、超时与跨平台",
+          "order": 2,
+          "filename": "u4-l2-extappcall-internals.md",
+          "level": "intermediate",
+          "topic": "深入 ExtAppCall 源码：为何用临时文件而非 PIPE 接收 stdout/stderr（OS 间唯一可靠的通信方式，对应 1.1.1 的修复），为何 Linux 用 shell=True 而 Windows 用 shell=False，wait 中关闭文件、读取结果、最多重试 5 次删除临时文件（应对 Windows 句柄滞留）的实现细节，以及它对 TempWorkDir 的复用。",
+          "learning_goals": [
+            "理解用文件而非管道捕获子进程输出的可靠性权衡",
+            "掌握按 sys.platform 切换 shell 参数的跨平台技巧",
+            "认识 Windows 句柄滞留导致删除重试循环的工程处理"
+          ],
+          "source_files": [
+            "ExtAppCall.py",
+            "TempWorkDir.py",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "subprocess.Popen 文件重定向",
+            "shell 参数的跨平台分支",
+            "临时文件删除重试循环"
+          ],
+          "practice_task": "阅读 run_async 与 wait 的源码，画一张时序图说明「创建 out/err 文件 → Popen 启动 → wait 等待 → 关闭并读取文件 → 重试删除」的流程；并写一段说明：如果把文件通信改回 PIPE，在何种场景可能再次出现 1.1.1 描述的阻塞问题。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "XML 工具与进阶主题",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "XmlToolbox：读取 XML 与属性查找",
+          "order": 1,
+          "filename": "u5-l1-xml-toolbox.md",
+          "level": "advanced",
+          "topic": "讲解 XmlToolbox 基于 xml.etree.ElementTree 的封装：构造时校验文件存在并 ET.parse，get_attr_value_by_other_attr 用「路径+[@属性='值']」式查找返回另一属性值，get_tag_value 返回标签文本，未命中返回空串；结合 TestXmlToolbox.xml 大文件用例演示 XPath 用法。",
+          "learning_goals": [
+            "掌握 ElementTree 的 find 与 [@attr='val'] 路径语法",
+            "理解「按某属性定位、取另一属性」的查找模式",
+            "认识未命中返回空串而非异常的 API 约定"
+          ],
+          "source_files": [
+            "XmlToolbox.py",
+            "Tests/TestXmlToolbox.py",
+            "Tests/TestXmlToolbox.xml"
+          ],
+          "minimal_modules": [
+            "xml.etree.ElementTree.parse/find",
+            "属性路径表达式",
+            "attrib/text 取值"
+          ],
+          "practice_task": "用 TestXmlToolbox.xml 作为输入，调用 get_attr_value_by_other_attr 与 get_tag_value 各取一个真实值并断言正确；再写一个查找不存在属性/标签的用例，验证返回空串而非抛异常。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "打包、发布与版本管理",
+          "order": 2,
+          "filename": "u5-l2-packaging-and-release.md",
+          "level": "advanced",
+          "topic": "讲解 setup.py 的打包机制：CustomSdist 在 sdist 前清理 dist/ 与 egg-info/ 再从上级目录构建，install_requires 声明 lxml 依赖（注意 XmlToolbox 实际用的是标准库 ElementTree，存在依赖与实现的偏差），以及 pip 包与 git submodule 两种分发方式的取舍。",
+          "learning_goals": [
+            "掌握 CustomSdist 自定义清理-构建流程的写法",
+            "理解 package_dir 把根目录映射为包名的机制",
+            "认识 install_requires 与实际 import 之间可能不一致需核对"
+          ],
+          "source_files": [
+            "setup.py",
+            "README.md",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "setuptools.setup",
+            "CustomSdist(cmdclass)",
+            "package_dir 映射"
+          ],
+          "practice_task": "执行 python3 setup.py sdist 生成 dist/PsiPyUtils-3.0.1.tar.gz，解压查看其内容结构；再核对 install_requires 声明的 lxml 是否真的被任何模块 import（可用 grep 检查），写一句话结论说明该依赖声明是否冗余。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "测试组织与批判性读源码",
+          "order": 3,
+          "filename": "u5-l3-testing-and-source-reading.md",
+          "level": "advanced",
+          "topic": "从整体回顾测试覆盖：哪些模块有测试（FileOperations、FileWriter、TempFile、TempWorkDir、XmlToolbox、TextReplace）、哪些没有（ExtAppCall、EnvVariables），讨论补测策略；并以 XmlToolbox.get_attr_value 中引用了未定义变量 attr_search_value/attr_get_name 这一真实缺陷为例，训练读源码时保持审慎、不被文档/接口签名误导的能力。",
+          "learning_goals": [
+            "盘点各模块测试覆盖情况并识别缺口（ExtAppCall、EnvVariables 无测试）",
+            "学会用 grep/调用追踪验证「文档/签名」与「实现」是否一致",
+            "通过一个真实缺陷案例建立批判性读源码的习惯"
+          ],
+          "source_files": [
+            "Tests/RunAll.py",
+            "XmlToolbox.py",
+            "ExtAppCall.py",
+            "EnvVariables.py"
+          ],
+          "minimal_modules": [
+            "测试覆盖盘点",
+            "未测试模块识别",
+            "接口签名与实现一致性核对"
+          ],
+          "practice_task": "列出每个模块对应的测试文件（或标注「无测试」）；为 EnvVariables.AddToPathVariable 补写 2-3 个 unittest 用例（去重、新建变量、跨平台分隔符）；并实际调用 XmlToolbox.get_attr_value 观察其因未定义变量而抛 NameError，确认该缺陷真实存在，再写一句修复建议。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
