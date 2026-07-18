@@ -1,0 +1,1174 @@
+{
+  "project": "yosys",
+  "head": "45ea2b8d6c6e94b06ff39b0117f0961ae5c16561",
+  "rationale": "Yosys 是一个大型 C++ RTL 综合框架，核心是「前端(HDL→RTLIL) → 多个 Pass 变换 → 后端(RTLIL→目标格式)」的流水线，全部围绕 RTLIL 这一套内部表示展开。因此学习顺序这样设计：先用 2 个单元（u1-u2）从零带读者认识项目定位、构建运行方式、目录结构和第一次综合，并初步建立 RTLIL 表示的直觉；再在进阶层（u3-u7）按「数据结构 → Pass 系统 → 前端 → 核心综合流程 → 后端」的顺序层层深入，这是 yosys 最核心、读者最需要掌握的部分；最后专家层（u8-u10）覆盖工艺库/目标平台、二次开发扩展（自定义 Pass、C++/Python API）以及 SAT 形式验证、functional IR/AIG、pmgen 模式匹配、FSM、线程与测试等高级机制。单元内部和单元之间都设置了明确的依赖（例如所有 Pass 讲义依赖 pass-registration，前端讲义依赖 AST 节点，核心综合流程逐级依赖 proc→opt→memory→techmap→abc9），保证读者可以按线性路径阅读，也可按依赖图跳跃。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 Yosys：从零认识与运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Yosys 是什么：项目定位与能力总览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Yosys 作为 RTL 综合框架的定位、它能做什么（Verilog/SystemVerilog 综合、工艺映射、形式验证前端），以及它如何通过组合 pass 来完成任意综合任务。",
+          "learning_goals": [
+            "理解 RTL 综合与 Yosys 在数字设计流程中的位置",
+            "了解 Yosys 的主要能力：前端、综合 pass、后端、工艺库",
+            "知道如何查阅官方文档与社区资源"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/index.rst",
+            "docs/source/introduction.rst"
+          ],
+          "minimal_modules": [
+            "README 概述",
+            "文档站点结构",
+            "许可证与依赖（sv-elab/slang）"
+          ],
+          "practice_task": "阅读 README，写一段话说明 Yosys 与 Verilator/iverilog 的区别；在本地访问 docs/source/index.rst 找到“综合”相关章节。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建 Yosys：CMake 构建与可执行入口",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 CMake 从源码构建 yosys，以及可执行程序的入口 main() 如何完成初始化（yosys_setup）并进入命令调度。",
+          "learning_goals": [
+            "掌握 CMake 的构建命令与关键选项（ABC/Python/TCL/zlib 等开关）",
+            "理解 driver.cc 中 main() 的初始化与执行流程",
+            "了解 yosys_setup()/yosys_shutdown() 的作用"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "kernel/driver.cc",
+            "kernel/yosys.cc",
+            "docs/source/getting_started/installation.rst"
+          ],
+          "minimal_modules": [
+            "CMake 选项与组件",
+            "driver.cc main 流程",
+            "yosys_setup 初始化"
+          ],
+          "practice_task": "用 cmake -B build . 与 cmake --build build 完成 Release 构建，运行 ./build/yosys -V 打印版本号，并对照 driver.cc 说明命令行参数如何被解析。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层目录结构地图",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 yosys 顶层目录的职责划分：kernel（核心 IR 与运行时）、frontends、passes、backends、techlibs、libs、tests、docs、examples，建立全局地图。",
+          "learning_goals": [
+            "记住核心目录的职责对应关系",
+            "理解 IR(kernel) 与 前端/后端/Pass 的分层关系",
+            "能快速定位某个功能对应的源码目录"
+          ],
+          "source_files": [
+            "README.md",
+            "kernel/CMakeLists.txt",
+            "frontends/CMakeLists.txt",
+            "passes/CMakeLists.txt",
+            "backends/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "kernel 核心层",
+            "前端/后端/Pass 层",
+            "techlibs/libs 资源层"
+          ],
+          "practice_task": "画出一张目录关系图，标注“读 Verilog”→哪个目录、“优化”→哪个目录、“写网表”→哪个目录，并在源码中各挑一个代表文件确认。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一次综合：交互式 shell 与 cmos 计数器示例",
+          "order": 4,
+          "filename": "u1-l4-first-synthesis.md",
+          "level": "beginner",
+          "topic": "通过 examples/cmos 的计数器例子，动手体验 read、hierarchy、proc、opt、techmap、write_verilog 等命令，建立端到端综合流程的感性认识。",
+          "learning_goals": [
+            "能在交互式 yosys> shell 中读入并综合一个 Verilog 设计",
+            "理解 read/pro/opt/techmap/write_verilog 的协作",
+            "会使用 help <command> 查看命令用法"
+          ],
+          "source_files": [
+            "kernel/driver.cc",
+            "examples/cmos/counter.ys",
+            "examples/cmos/counter.v",
+            "examples/cmos/cmos_cells.lib",
+            "docs/source/getting_started/scripting_intro.rst"
+          ],
+          "minimal_modules": [
+            "shell 与命令",
+            "示例工程",
+            "help 系统"
+          ],
+          "practice_task": "运行 examples/cmos 中的 counter.ys 脚本，用 write_verilog 输出综合后网表，再用 stat 命令统计单元数量，记录每个阶段单元数的变化。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "RTLIL 内部表示入门",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "RTLIL 文本格式：Yosys 的通用语言",
+          "order": 1,
+          "filename": "u2-l1-rtlil-format.md",
+          "level": "beginner",
+          "topic": "介绍 RTLIL 是 Yosys 所有前端与后端之间交换的中间表示，通过 write_rtlil / read_rtlil 体验其人类可读文本格式。",
+          "learning_goals": [
+            "理解 RTLIL 作为统一中间表示的意义",
+            "能读懂一段 RTLIL 文本（module/wire/cell/process）",
+            "掌握 read_rtlil 与 write_rtlil 的用法"
+          ],
+          "source_files": [
+            "frontends/rtlil/rtlil_frontend.cc",
+            "backends/rtlil/rtlil_backend.cc",
+            "docs/source/yosys_internals/formats/rtlil_rep.rst"
+          ],
+          "minimal_modules": [
+            "RTLIL 文本结构",
+            "读写命令",
+            "RTLIL 词汇表"
+          ],
+          "practice_task": "读入 examples/cmos/counter.v 后执行 write_rtlil，把输出保存为文件，逐行注释 module/wire/cell 的含义，再 read_rtlil 重新加载它。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Design 与 Module：设计的顶层容器",
+          "order": 2,
+          "filename": "u2-l2-design-module.md",
+          "level": "beginner",
+          "topic": "讲解 RTLIL::Design 包含若干 RTLIL::Module 的层级关系，以及 Design 上的选择栈、scratchpad、verilog_defines 等全局状态。",
+          "learning_goals": [
+            "理解 Design↔Module 的包含关系",
+            "知道 design 如何存储模块、如何查找 top module",
+            "了解选择栈与 scratchpad 的存在"
+          ],
+          "source_files": [
+            "kernel/rtlil.h",
+            "kernel/rtlil.cc"
+          ],
+          "minimal_modules": [
+            "RTLIL::Design",
+            "RTLIL::Module",
+            "Design 全局状态"
+          ],
+          "practice_task": "在 rtlil.h 中找到 RTLIL::Design 与 RTLIL::Module 的定义，编写一段说明：design->module(name)、top_module()、selection() 分别返回什么。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Wire、Cell 与 SigSpec 初识",
+          "order": 3,
+          "filename": "u2-l3-wire-cell-sigspec.md",
+          "level": "beginner",
+          "topic": "介绍 Module 内部的两大组成——连线 Wire 与实例 Cell，以及描述信号连接的 SigSpec，建立网表的最小心智模型。",
+          "learning_goals": [
+            "理解 Wire 表示线网、Cell 表示实例化单元",
+            "理解 SigSpec 表示一段信号（可跨多根线/常数）",
+            "知道 cell 通过 port 连接 SigSpec"
+          ],
+          "source_files": [
+            "kernel/rtlil.h",
+            "kernel/rtlil.cc"
+          ],
+          "minimal_modules": [
+            "RTLIL::Wire",
+            "RTLIL::Cell",
+            "RTLIL::SigSpec"
+          ],
+          "practice_task": "对综合后的 counter 用 write_rtlil 输出，找到一个 $cell（如 $adff/$and），指出它的端口 A/B/Y 分别连到哪些 wire/SigSpec。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "RTLIL 核心数据结构深入",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Module / Cell / Wire 的完整接口",
+          "order": 1,
+          "filename": "u3-l1-module-cell-wire-deep.md",
+          "level": "intermediate",
+          "topic": "深入 Module 的 addWire/addCell/connect/fixup_ports、Cell 的 setPort/parameters、属性 AttrObject 等编程接口，为编写 Pass 打基础。",
+          "learning_goals": [
+            "掌握用 module->addCell/addWire/connect 构造 RTLIL 的方法",
+            "理解 Cell 的端口、类型与参数（parameters）",
+            "了解属性（attributes）系统 AttrObject"
+          ],
+          "source_files": [
+            "kernel/rtlil.h",
+            "kernel/rtlil.cc"
+          ],
+          "minimal_modules": [
+            "Module 构造接口",
+            "Cell 端口与参数",
+            "属性系统"
+          ],
+          "practice_task": "阅读 rtlil.h 中 RTLIL::Module 与 RTLIL::Cell 的成员函数，列出创建一个 $and 门并连接端口所需的全部调用序列。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SigSpec / SigBit / SigChunk 与 sigtools",
+          "order": 2,
+          "filename": "u3-l2-sigspec-sigtools.md",
+          "level": "intermediate",
+          "topic": "详解信号表示体系 SigSpec↔SigBit↔SigChunk，以及 kernel/sigtools.h 提供的 SigMap、SigPool 等用于信号分析的工具。",
+          "learning_goals": [
+            "理解 SigSpec 的 chunk/bit 两层结构与归并",
+            "掌握 SigMap 解决同一信号多重驱动表示的问题",
+            "会用 sigtools 进行信号查找与替换"
+          ],
+          "source_files": [
+            "kernel/rtlil.h",
+            "kernel/sigtools.h"
+          ],
+          "minimal_modules": [
+            "SigSpec 结构",
+            "SigMap 归一化",
+            "sigtools 辅助类"
+          ],
+          "practice_task": "用 sigtools.h 中的 SigMap，编写思路：给定一个 cell 输出，找到它在 module 中所有被驱动的下游 cell（描述算法即可，可对照 RTLIL::Module::connections_）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "IdString、Const 与 hashlib",
+          "order": 3,
+          "filename": "u3-l3-idstring-const-hashlib.md",
+          "level": "intermediate",
+          "topic": "讲解 RTLIL 的命名系统 IdString（带前缀 \\ 或 $ 的标识符）、常数 Const，以及 yosys 自研的 hashlib（idict/pool/dict）如何支撑高性能容器。",
+          "learning_goals": [
+            "理解 IdString 的前缀约定（\\name 公有、$name 内部）与内部化",
+            "掌握 Const 表示位向量常数与枚举状态（0/1/x/z）",
+            "了解 hashlib 的 pool/dict/idict 用法"
+          ],
+          "source_files": [
+            "kernel/rtlil.h",
+            "kernel/hashlib.h"
+          ],
+          "minimal_modules": [
+            "IdString",
+            "RTLIL::Const",
+            "hashlib 容器"
+          ],
+          "practice_task": "在 rtlil.h 找到 RTLIL::Const 的字段，说明它如何同时表示普通二进制常数与含 x/z 的值；列举 hashlib.h 中 pool 与 dict 的典型用法。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Yosys 内部单元库：celltypes、constids、newcelltypes",
+          "order": 4,
+          "filename": "u3-l4-internal-cell-library.md",
+          "level": "intermediate",
+          "topic": "介绍 Yosys 内置的“门级单元库”（如 $and/$or/$not/$mux/$adff/$mem 等以 $ 开头的细胞），以及 constids.inc、celltypes.h、newcelltypes.h 如何集中登记它们。",
+          "learning_goals": [
+            "认识常见内部单元 $and/$or/$mux/$dff/$adff/$mem 等及其端口",
+            "理解 constids.inc 与 ID() 宏的作用",
+            "知道如何在源码中查找某单元的端口定义"
+          ],
+          "source_files": [
+            "kernel/celltypes.h",
+            "kernel/constids.inc",
+            "kernel/newcelltypes.h"
+          ],
+          "minimal_modules": [
+            "内部单元命名",
+            "constids 与 ID 宏",
+            "单元类型登记"
+          ],
+          "practice_task": "在 celltypes.h 中查找 $mux、$adff 的端口定义，并用 write_rtlil 在一个含 if/case 的设计里找出综合后实际生成了哪些 $ 单元。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Pass 系统与命令调度",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Pass / Frontend / Backend 注册机制",
+          "order": 1,
+          "filename": "u4-l1-pass-registration.md",
+          "level": "intermediate",
+          "topic": "讲解 Yosys 命令体系的核心抽象：Pass 基类及其子类 Frontend/Backend，全局 pass_register/frontend_register/backend_register，以及 init_register 的注册时机。",
+          "learning_goals": [
+            "理解 Pass::execute 是所有命令的入口",
+            "掌握 Frontend/Backend 与普通 Pass 的区别",
+            "了解 pass_register 的注册与查找机制"
+          ],
+          "source_files": [
+            "kernel/register.h",
+            "kernel/register.cc",
+            "kernel/yosys.cc"
+          ],
+          "minimal_modules": [
+            "Pass 基类",
+            "Frontend/Backend",
+            "注册表与 init_register"
+          ],
+          "practice_task": "在 register.cc 中追踪一条命令（如 opt）从 Pass::call 到 execute 的调用路径；说明 frontend_register/backend_register 是如何被填充的。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "ScriptPass 与 synth / prep 合成脚本",
+          "order": 2,
+          "filename": "u4-l2-script-pass-synth-prep.md",
+          "level": "intermediate",
+          "topic": "讲解 ScriptPass 如何用一个 C++ pass 编排一长串子 pass，以 techlibs/common/synth.cc（通用综合）和 prep.cc（用于形式验证的字级综合）为典型案例。",
+          "learning_goals": [
+            "理解 ScriptPass 的 script()/check_label()/run() 模式",
+            "掌握 synth 的完整阶段：begin/coarse/fine/map",
+            "了解 prep 与 synth 的区别与各自用途"
+          ],
+          "source_files": [
+            "techlibs/common/synth.cc",
+            "techlibs/common/prep.cc",
+            "docs/source/using_yosys/synthesis/synth.rst"
+          ],
+          "minimal_modules": [
+            "ScriptPass 框架",
+            "synth 阶段",
+            "prep 阶段"
+          ],
+          "practice_task": "对照 synth.cc 的 check_label 分组，把 synth 命令调用的子 pass 按阶段列成一张表；再用 prep 综合同一设计并比较输出差异。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "选择机制 select 与作用域",
+          "order": 3,
+          "filename": "u4-l3-select-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 Yosys 的选择（selection）机制：RTLIL::Selection、选择栈、通配模式，以及 select 命令如何限定后续 pass 的作用对象。",
+          "learning_goals": [
+            "理解 design 的选择栈与全选/部分选",
+            "掌握选择表达式语法（模块/对象通配、属性过滤）",
+            "会用 select 限定 pass 的作用范围"
+          ],
+          "source_files": [
+            "passes/cmds/select.cc",
+            "kernel/rtlil.h",
+            "docs/source/using_yosys/more_scripting/selections.rst"
+          ],
+          "minimal_modules": [
+            "RTLIL::Selection",
+            "选择栈",
+            "select 命令语法"
+          ],
+          "practice_task": "对综合后的设计执行 select 列出所有 $dff 单元，再用 stat 结合选择统计其数量；尝试用属性过滤器选出带特定 attribute 的 wire。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "日志、帮助系统与 driver 调度",
+          "order": 4,
+          "filename": "u4-l4-log-help-driver.md",
+          "level": "intermediate",
+          "topic": "讲解 Yosys 的日志系统（log.cc/log.h）、自动生成的帮助（log_help.cc、PrettyHelp）以及 driver.cc 中 run_pass/run_frontend/run_backend/shell 如何串起整个命令执行。",
+          "learning_goals": [
+            "理解 log() 系列函数、日志压栈与 tee",
+            "了解 help 文档是如何从 pass 元数据生成的",
+            "掌握 driver 中 frontend→pass→backend 的总调度"
+          ],
+          "source_files": [
+            "kernel/driver.cc",
+            "kernel/log.h",
+            "kernel/log.cc",
+            "kernel/log_help.cc"
+          ],
+          "minimal_modules": [
+            "日志系统",
+            "帮助生成",
+            "driver 调度"
+          ],
+          "practice_task": "阅读 driver.cc，画出“读取脚本文件 → 逐条 run_pass → 输出 backend”的调度流程图；并说明 help <command> 的文本是如何从 Pass::help() 产生的。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "前端：HDL 如何变成 RTLIL",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Verilog 前端：词法与语法分析",
+          "order": 1,
+          "filename": "u5-l1-verilog-lexer-parser.md",
+          "level": "intermediate",
+          "topic": "讲解经典 Verilog 前端的实现：用 flex 写的 verilog_lexer.l 词法分析、用 bison 写的 verilog_parser.y 语法分析，以及 verilog_frontend.cc 注册 read_verilog 命令。",
+          "learning_goals": [
+            "理解 flex/bison 在 Verilog 前端中的分工",
+            "掌握 read_verilog 命令的执行流程",
+            "了解词法 token 与语法产生式如何构造 AST"
+          ],
+          "source_files": [
+            "frontends/verilog/verilog_frontend.cc",
+            "frontends/verilog/verilog_lexer.l",
+            "frontends/verilog/verilog_parser.y",
+            "docs/source/yosys_internals/flow/verilog_frontend.rst"
+          ],
+          "minimal_modules": [
+            "verilog_frontend.cc 注册",
+            "verilog_lexer.l",
+            "verilog_parser.y"
+          ],
+          "practice_task": "在 verilog_parser.y 中找出 module/always/if 的产生式，说明它们分别构造了哪种 AST 节点；用 read_verilog 读入一个小设计并加 -dump_ast 观察输出。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Verilog 预处理器与常数表达式",
+          "order": 2,
+          "filename": "u5-l2-verilog-preproc.md",
+          "level": "intermediate",
+          "topic": "讲解 Verilog 预处理器 preproc.cc（处理 `define/`include/`ifdef 等）以及 const2ast.cc 如何把参数常数表达式解析为 AST 常数节点。",
+          "learning_goals": [
+            "理解宏定义、文件包含、条件编译的处理流程",
+            "掌握常数表达式到 AST_CONSTANT 的转换",
+            "了解 verilog_defaults 与 define 机制"
+          ],
+          "source_files": [
+            "frontends/verilog/preproc.cc",
+            "frontends/verilog/preproc.h",
+            "frontends/verilog/const2ast.cc"
+          ],
+          "minimal_modules": [
+            "preproc 宏处理",
+            "include 与 ifdef",
+            "const2ast 常数求值"
+          ],
+          "practice_task": "编写一个含 `define/`ifdef 的 Verilog 文件，用 read_verilog -pp 观察预处理后输出；说明 const2ast 如何处理 `parameter W = 8`。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "AST 节点模型与 AstModule",
+          "order": 3,
+          "filename": "u5-l3-ast-nodes.md",
+          "level": "intermediate",
+          "topic": "讲解 frontends/ast 的 AST 节点体系：ast.h 中的 AstNodeType 枚举、AstNode 类，以及承载未决参数的 AstModule。",
+          "learning_goals": [
+            "认识主要 AST 节点类型（模块/线网/always/运算符等）",
+            "理解 AstNode 的 children/attributes 结构",
+            "了解 AstModule 如何延迟到参数确定时再生成 RTLIL"
+          ],
+          "source_files": [
+            "frontends/ast/ast.h",
+            "frontends/ast/ast.cc"
+          ],
+          "minimal_modules": [
+            "AstNodeType 枚举",
+            "AstNode 结构",
+            "AstModule"
+          ],
+          "practice_task": "在 ast.h 中列出 AST_BIT_AND/AST_ADD/AST_TERNARY 等节点；对照一个综合后的设计说明运算符如何映射到内部 $ 单元。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "AST 简化与 genrtlil：AST 到 RTLIL 的生成",
+          "order": 4,
+          "filename": "u5-l4-ast-genrtlil-simplify.md",
+          "level": "intermediate",
+          "topic": "讲解 simplify.cc 对 AST 做的简化（类型推导、参数替换、展开 generate 等）和 genrtlil.cc 把 AST 节点真正翻译成 RTLIL Wire/Cell/Process 的过程。",
+          "learning_goals": [
+            "理解 AST simplify 的主要工作（常量折叠、宽度推导）",
+            "掌握 genrtlil 如何为表达式生成 $ 单元与中间线",
+            "了解 process() 作为前端最终入口"
+          ],
+          "source_files": [
+            "frontends/ast/simplify.cc",
+            "frontends/ast/genrtlil.cc",
+            "frontends/ast/ast.h"
+          ],
+          "minimal_modules": [
+            "simplify 简化",
+            "genrtlil 生成",
+            "process() 入口"
+          ],
+          "practice_task": "用 read_verilog -dump_ast2 与 write_rtlil 对比，观察一个含 `assign y = a & b | c;` 的设计从 AST 到 RTLIL 的对应关系。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "其他前端：RTLIL/JSON/BLIF/Liberty 与 SystemVerilog",
+          "order": 5,
+          "filename": "u5-l5-other-frontends.md",
+          "level": "intermediate",
+          "topic": "概览除 Verilog 外的其他前端：read_rtlil、read_json、read_blif、read_liberty，以及基于 sv-elab/slang 的 SystemVerilog 支持现状。",
+          "learning_goals": [
+            "了解 JSON/BLIF/Liberty 等格式的读入路径",
+            "理解各前端最终都产出到同一个 RTLIL",
+            "知道 SystemVerilog 支持由 slang/sv-elab 提供（待确认细节）"
+          ],
+          "source_files": [
+            "frontends/rtlil/rtlil_frontend.cc",
+            "frontends/json/jsonparse.cc",
+            "frontends/blif/blifparse.cc",
+            "frontends/liberty/liberty.cc",
+            "frontends/slang/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "RTLIL/JSON/BLIF 前端",
+            "Liberty 前端",
+            "SystemVerilog(slang) 现状"
+          ],
+          "practice_task": "用 write_json 输出一个设计的 JSON，再 read_json 重新加载并 write_rtlil 验证等价；阅读 liberty.cc 了解单元库如何被解析为 RTLIL blackbox。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "核心综合流程",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "层次管理与展平：hierarchy / flatten",
+          "order": 1,
+          "filename": "u6-l1-hierarchy-flatten.md",
+          "level": "intermediate",
+          "topic": "讲解 passes/hierarchy 的层次处理：hierarchy 解析实例化、确定 top、参数化派生；flatten 把层次展平；submod 拆分模块。",
+          "learning_goals": [
+            "理解 hierarchy -top 如何确定顶层并实例化子模块",
+            "掌握 flatten 展平与参数派生（derive）的关系",
+            "了解 uniquify/submod 的作用"
+          ],
+          "source_files": [
+            "passes/hierarchy/hierarchy.cc",
+            "passes/hierarchy/flatten.cc",
+            "passes/hierarchy/submod.cc"
+          ],
+          "minimal_modules": [
+            "hierarchy",
+            "flatten",
+            "submod/uniquify"
+          ],
+          "practice_task": "对一个含两级例化的设计，分别执行 hierarchy -top 与 flatten，用 stat 对比展平前后模块数与单元数的变化。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "proc：行为级 always 到门级网表",
+          "order": 2,
+          "filename": "u6-l2-proc.md",
+          "level": "intermediate",
+          "topic": "讲解 passes/proc 如何把 Verilog 的 always/process（RTLIL::Process）翻译为多路选择器、触发器与锁存器，涵盖 proc_mux/proc_dff/proc_dlatch/proc_clean 等子 pass。",
+          "learning_goals": [
+            "理解 RTLIL::Process 的语义与 proc 的总体目标",
+            "掌握 proc_mux 把敏感列表/条件转成 $mux/$pmux",
+            "了解 proc_dff/proc_dlatch 推断时序元件"
+          ],
+          "source_files": [
+            "passes/proc/proc.cc",
+            "passes/proc/proc_mux.cc",
+            "passes/proc/proc_dff.cc",
+            "passes/proc/proc_dlatch.cc",
+            "passes/proc/proc_clean.cc"
+          ],
+          "minimal_modules": [
+            "proc 总流程",
+            "proc_mux",
+            "proc_dff/proc_dlatch"
+          ],
+          "practice_task": "对含 always @(posedge clk) 的设计先不执行 proc 用 write_rtlil 观察 process，再执行 proc 观察 process 消失、被 $mux/$dff 取代的过程。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "opt：网表优化大流程",
+          "order": 3,
+          "filename": "u6-l3-opt.md",
+          "level": "intermediate",
+          "topic": "讲解 passes/opt 优化大流程：opt.cc 编排 opt_expr/opt_merge/opt_dff/opt_clean/opt_share 等子 pass，做常量传播、单元合并、死代码消除。",
+          "learning_goals": [
+            "理解 opt 各子 pass 的职责与迭代顺序",
+            "掌握 opt_expr 的常量折叠与 opt_merge 的结构合并",
+            "了解 opt_clean 如何删除悬空线与无用单元"
+          ],
+          "source_files": [
+            "passes/opt/opt.cc",
+            "passes/opt/opt_expr.cc",
+            "passes/opt/opt_merge.cc",
+            "passes/opt/opt_dff.cc"
+          ],
+          "minimal_modules": [
+            "opt 编排",
+            "opt_expr/opt_merge",
+            "opt_clean/opt_dff"
+          ],
+          "practice_task": "对综合后设计反复执行 opt 直到单元数不再减少，记录每轮 opt_expr/opt_merge 各减少了多少单元，并解释原因。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "memory：存储器推断与映射",
+          "order": 4,
+          "filename": "u6-l4-memory.md",
+          "level": "intermediate",
+          "topic": "讲解 passes/memory 如何把 RTLIL::Memory（数组式存储）收集、共享、分块，最终映射成地址译码 $mux 与触发器阵列（memory_map）。",
+          "learning_goals": [
+            "理解 RTLIL::Memory 模型与 read/write 端口",
+            "掌握 memory_collect/memory_share/memory_narrow 的作用",
+            "了解 memory_map 把存储器拆成触发器与多路器"
+          ],
+          "source_files": [
+            "passes/memory/memory.cc",
+            "passes/memory/memory_collect.cc",
+            "passes/memory/memory_share.cc",
+            "passes/memory/memory_map.cc"
+          ],
+          "minimal_modules": [
+            "memory 编排",
+            "collect/share/narrow",
+            "memory_map"
+          ],
+          "practice_task": "对一个含 reg [7:0] mem [0:255] 的设计，先用 write_rtlil 观察 $mem 单元，执行 memory 后观察它如何变成 $dff 与 $mux 组合。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "techmap 与 simplemap：工艺映射基础",
+          "order": 5,
+          "filename": "u6-l5-techmap-simplemap.md",
+          "level": "intermediate",
+          "topic": "讲解 passes/techmap 的核心工艺映射机制：用 techmap.v 等 RTLIL 模板把高层 $ 单元替换为底层单元，以及 simplemap 做最简单的门级展开。",
+          "learning_goals": [
+            "理解 techmap 用“模板模块”做单元替换的原理",
+            "掌握 techmap.v/simlib.v/simcells.v 的角色",
+            "了解 simplemap 与 techmap 的区别"
+          ],
+          "source_files": [
+            "passes/techmap/techmap.cc",
+            "passes/techmap/simplemap.cc",
+            "techlibs/common/techmap.v",
+            "techlibs/common/simlib.v"
+          ],
+          "minimal_modules": [
+            "techmap 映射原理",
+            "映射模板文件",
+            "simplemap"
+          ],
+          "practice_task": "对综合后含 $mul/$add 的设计执行 techmap，观察高层算术单元如何被替换为 $and/$or/$mux 组合，并对比 simplemap 的输出。",
+          "depends_on": [
+            "u6-l4",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "abc9 与 liberty：逻辑优化与标准单元映射",
+          "order": 6,
+          "filename": "u6-l6-abc9-liberty.md",
+          "level": "intermediate",
+          "topic": "讲解如何借助 ABC（abc9）做布尔网络优化与 LUT/标准单元映射，dfflibmap 把触发器映射到 liberty 单元库，以及 libparse.cc 如何解析 liberty 文件。",
+          "learning_goals": [
+            "理解 abc9 调用 ABC 做逻辑优化与映射的流程",
+            "掌握 dfflibmap 把 $dff 映射到库 DFF",
+            "了解 liberty 文件的解析与缓存"
+          ],
+          "source_files": [
+            "passes/techmap/abc9.cc",
+            "passes/techmap/dfflibmap.cc",
+            "passes/techmap/libparse.cc",
+            "techlibs/common/abc9_map.v"
+          ],
+          "minimal_modules": [
+            "abc9 流程",
+            "dfflibmap",
+            "libparse liberty"
+          ],
+          "practice_task": "用 examples/cmos/cmos_cells.lib 作为单元库，对设计执行 abc9 -liberty 与 dfflibmap -liberty，用 stat 查看综合后是否变成库内具体单元名。",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "后端：把 RTLIL 写成目标格式",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "write_verilog / write_rtlil / write_json",
+          "order": 1,
+          "filename": "u7-l1-write-verilog-rtlil-json.md",
+          "level": "intermediate",
+          "topic": "讲解最常见的三个文本后端：write_verilog 生成可读 Verilog 网表、write_rtlil 生成 RTLIL 文本、write_json 生成下游工具可消费的 JSON。",
+          "learning_goals": [
+            "理解 Backend 基类与 execute(ostream) 的写法",
+            "掌握三个后端的输出特点与适用场景",
+            "了解它们如何遍历 Design/Module/Cell"
+          ],
+          "source_files": [
+            "backends/verilog/verilog_backend.cc",
+            "backends/rtlil/rtlil_backend.cc",
+            "backends/json/json.cc"
+          ],
+          "minimal_modules": [
+            "write_verilog",
+            "write_rtlil",
+            "write_json"
+          ],
+          "practice_task": "对同一设计分别用三个后端输出，对比它们对同一个 $and/$dff 单元的表示差异，并说明 JSON 后端常被哪些下游工具使用。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "cxxrtl：C++ 仿真后端",
+          "order": 2,
+          "filename": "u7-l2-cxxrtl-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 cxxrtl 后端如何把 RTLIL 设计生成为可编译的 C++ 仿真模型（header + runtime），用于快速软件协同仿真。",
+          "learning_goals": [
+            "理解 cxxrtl 生成 C++ 代码的整体思路",
+            "掌握 write_cxxrtl 的用法与生成的文件结构",
+            "了解 cxxrtl runtime 的作用"
+          ],
+          "source_files": [
+            "backends/cxxrtl/cxxrtl_backend.cc",
+            "backends/cxxrtl/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "cxxrtl 代码生成",
+            "write_cxxrtl 用法",
+            "runtime 目录"
+          ],
+          "practice_task": "用 write_cxxrtl 把 counter 生成为 C++，编写一个 main 调用其 step() 并打印计数值，编译运行验证功能。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "形式验证后端：smt2 / aiger / btor",
+          "order": 3,
+          "filename": "u7-l3-formal-backends.md",
+          "level": "intermediate",
+          "topic": "讲解面向形式验证与等价检查的后端：smt2（SMT-LIB2，配合 smtbmc 做有界模型检查）、aiger（AIG）、btor（BTOR 词级）。",
+          "learning_goals": [
+            "理解三种形式化后端的输出与用途",
+            "掌握 smt2 与 smtbmc.py 的配合方式",
+            "了解 AIG/BTOR 在等价检查中的角色"
+          ],
+          "source_files": [
+            "backends/smt2/smt2.cc",
+            "backends/aiger/aiger.cc",
+            "backends/btor/btor.cc"
+          ],
+          "minimal_modules": [
+            "smt2 后端",
+            "aiger 后端",
+            "btor 后端"
+          ],
+          "practice_task": "对一个简单设计执行 prep 后 write_smt2，查看生成的 SMT-LIB2 片段，说明它如何把 $dff/$and 表达为 SMT 公式（可结合 examples/smtbmc）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "工艺库与目标平台",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "techlibs 工艺映射库的结构",
+          "order": 1,
+          "filename": "u8-l1-techlibs-structure.md",
+          "level": "advanced",
+          "topic": "讲解 techlibs 目录如何为各厂商 FPGA/ASIC 提供单元库（cells_sim.v/cells_map.v）与映射脚本，以及 common 公共库（simlib/simcells/techmap.v）的作用。",
+          "learning_goals": [
+            "理解 cells_sim.v 与 cells_map.v 的分工",
+            "掌握 common 公共库提供的基础单元仿真/映射",
+            "了解 techlibs 与 techmap pass 的协作"
+          ],
+          "source_files": [
+            "techlibs/common/simlib.v",
+            "techlibs/common/simcells.v",
+            "techlibs/common/techmap.v",
+            "techlibs/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "cells_sim/cells_map",
+            "common 公共库",
+            "techlibs 组织"
+          ],
+          "practice_task": "对比 techlibs/common/simcells.v 与 techlibs/xilinx/cells_sim.v，说明各自定义了哪些单元，并解释 _sim 与 _map 后缀的含义。",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "目标平台综合流程：synth_xilinx / synth_ice40",
+          "order": 2,
+          "filename": "u8-l2-vendor-synth-flows.md",
+          "level": "advanced",
+          "topic": "以 synth_xilinx 与 synth_ice40 为例，讲解厂商专属 ScriptPass 如何在通用 synth 基础上加入 LUT/BRAM/DSP 映射等平台相关阶段。",
+          "learning_goals": [
+            "理解厂商 ScriptPass 相对通用 synth 的扩展点",
+            "掌握 Xilinx/iCE40 的 LUT、BRAM、DSP 映射阶段",
+            "了解 cells_map.v 在平台流程中的位置"
+          ],
+          "source_files": [
+            "techlibs/xilinx/synth_xilinx.cc",
+            "techlibs/ice40/synth_ice40.cc",
+            "techlibs/xilinx/cells_map.v",
+            "techlibs/ice40/cells_map.v"
+          ],
+          "minimal_modules": [
+            "synth_xilinx",
+            "synth_ice40",
+            "平台映射脚本"
+          ],
+          "practice_task": "用 synth_ice40 综合一个含 BRAM 的设计，对照 synth_ice40.cc 找出它调用的 LUT/BRAM 映射子 pass，并解释它们调用的顺序原因。",
+          "depends_on": [
+            "u8-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "扩展 Yosys：二次开发",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "编写你的第一个自定义 Pass",
+          "order": 1,
+          "filename": "u9-l1-write-custom-pass.md",
+          "level": "advanced",
+          "topic": "讲解如何从 Pass 派生、实现 execute()、用 extra_args 处理选择，编写一个遍历 Design/Module/Cell 的自定义 pass，并用 yosys-config 编译为可加载插件。",
+          "learning_goals": [
+            "掌握 Pass 子类的最小骨架（构造、help、execute）",
+            "学会遍历 module 的 wires/cells 并用 log 输出",
+            "了解 yosys-config 与 plugin 加载流程"
+          ],
+          "source_files": [
+            "kernel/register.h",
+            "passes/cmds/plugin.cc",
+            "misc/yosys-config.in",
+            "docs/source/yosys_internals/extending_yosys/extensions.rst"
+          ],
+          "minimal_modules": [
+            "Pass 骨架",
+            "遍历 RTLIL",
+            "编译与加载插件"
+          ],
+          "practice_task": "编写一个名为 cellstats 的 pass，统计当前设计中每种 $ 单元的数量，编译成 .so 后用 yosys -m cellstats.so 加载并运行。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "C++ API：把 Yosys 作为库嵌入",
+          "order": 2,
+          "filename": "u9-l2-cpp-api-plugin.md",
+          "level": "advanced",
+          "topic": "讲解 libyosys 作为共享库的 C++ API：用 yosys_setup()/run_pass() 在自己的程序中驱动综合，参考 examples/cxx-api 的三个示例。",
+          "learning_goals": [
+            "掌握在独立 C++ 程序中初始化并调用 yosys 的方法",
+            "理解 yosys_setup/run_pass/run_frontend/run_backend 的库接口",
+            "了解 libyosys 的链接与 scopeinfo 等高级用法"
+          ],
+          "source_files": [
+            "examples/cxx-api/demomain.cc",
+            "examples/cxx-api/evaldemo.cc",
+            "examples/cxx-api/scopeinfo_example.cc",
+            "kernel/yosys.h"
+          ],
+          "minimal_modules": [
+            "demomain 入口",
+            "run_pass 库接口",
+            "链接 libyosys"
+          ],
+          "practice_task": "参照 demomain.cc，写一个最小 C++ 程序：调用 yosys_setup()、read 一个 Verilog 文件、执行 synth、write_verilog 输出，再 yosys_shutdown()。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Python 绑定：pyosys",
+          "order": 3,
+          "filename": "u9-l3-python-pyosys.md",
+          "level": "advanced",
+          "topic": "讲解基于 pybind11 的 pyosys 绑定：如何在 Python 中加载设计、调用 pass、遍历 RTLIL 对象，参考 examples/python-api 的 pass.py 与 script.py。",
+          "learning_goals": [
+            "理解 pyosys 暴露的 Python 对象模型",
+            "掌握用 Python 脚本驱动 yosys 的流程",
+            "了解用 Python 自定义 pass 的可行性"
+          ],
+          "source_files": [
+            "examples/python-api/script.py",
+            "examples/python-api/pass.py",
+            "pyproject.toml",
+            "pyosys/generator.py"
+          ],
+          "minimal_modules": [
+            "Python 脚本驱动",
+            "遍历 RTLIL",
+            "Python pass"
+          ],
+          "practice_task": "用 script.py 的方式写一段 Python：加载 counter.v、综合、遍历 module 的 cells 打印每个 cell 的 type 与 port 连接。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "高级内部机制",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "SAT 与形式验证机制",
+          "order": 1,
+          "filename": "u10-l1-sat-formal-verification.md",
+          "level": "advanced",
+          "topic": "讲解 Yosys 的 SAT 基础设施：kernel/satgen.cc 把 RTLIL 编码为 SAT 问题、passes/sat（sat/eval/async2sync）与 passes/equiv 的等价检查流程。",
+          "learning_goals": [
+            "理解 satgen 如何把门级网表翻译为 CNF",
+            "掌握 equiv_make/equiv_simple/equiv_status 的等价检查链",
+            "了解 SAT 在形式验证中的作用"
+          ],
+          "source_files": [
+            "kernel/satgen.h",
+            "kernel/satgen.cc",
+            "passes/sat/sat.cc",
+            "passes/equiv/equiv_opt.cc",
+            "passes/equiv/equiv_simple.cc"
+          ],
+          "minimal_modules": [
+            "satgen 编码",
+            "passes/sat",
+            "passes/equiv"
+          ],
+          "practice_task": "对同一设计的两个版本用 equiv_make + equiv_simple + equiv_status 做等价检查，并对照 satgen.cc 说明一个 $and/$dff 是如何被编码进 SAT 的。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "functional IR 与 AIG 表示",
+          "order": 2,
+          "filename": "u10-l2-functional-ir-aig.md",
+          "level": "advanced",
+          "topic": "讲解 Yosys 中的两种内部高级表示：functional IR（kernel/functional，面向符号化验证的后端）与 AIG（kernel/cellaigs，与门/反相器图，供 abc/sat 使用）。",
+          "learning_goals": [
+            "理解 functional IR 的设计动机与基本结构",
+            "掌握 cellaigs 如何把单元网表转为 AIG",
+            "了解 AIG 在 abc9 与 sat 中的复用"
+          ],
+          "source_files": [
+            "kernel/functional.h",
+            "kernel/functional.cc",
+            "kernel/cellaigs.h",
+            "kernel/cellaigs.cc"
+          ],
+          "minimal_modules": [
+            "functional IR",
+            "AIG(cellaigs)",
+            "与 abc/sat 的衔接"
+          ],
+          "practice_task": "在 cellaigs.cc 中找到把 $and/$or/$not/$mux 转为 AIG 节点的逻辑，说明 AIG 如何统一表示这些门；并简述 functional IR 与 RTLIL 的区别。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "pmgen 模式匹配与 peepopt 窥孔优化",
+          "order": 3,
+          "filename": "u10-l3-pmgen-peepopt.md",
+          "level": "advanced",
+          "topic": "讲解 passes/pmgen 模式匹配生成器（读取 .pmg 生成 C++ 匹配器）以及它如何被 peepopt 等优化 pass 用于子图替换式窥孔优化。",
+          "learning_goals": [
+            "理解 .pmg 描述子图模式的语法与生成流程",
+            "掌握 peepopt 如何用生成的匹配器做局部重写",
+            "了解其他基于 pmgen 的优化（如 alumacc/shiftadd）"
+          ],
+          "source_files": [
+            "passes/pmgen/pmgen.py",
+            "passes/pmgen/README.md",
+            "passes/opt/peepopt.cc",
+            "passes/opt/peepopt_muldiv.pmg"
+          ],
+          "minimal_modules": [
+            "pmgen 生成器",
+            ".pmg 模式",
+            "peepopt 应用"
+          ],
+          "practice_task": "阅读 peepopt_muldiv.pmg，说明它匹配的乘除子图模式，并描述 pmgen.py 如何把它编译成 C++ 匹配代码（生成产物可待确认）。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "FSM 提取优化、线程模型与测试体系",
+          "order": 4,
+          "filename": "u10-l4-fsm-threading-testing.md",
+          "level": "advanced",
+          "topic": "综合讲解三个工程化主题：FSM 提取与优化（passes/fsm）、Yosys 的线程/并行支持（kernel/threading），以及 tests 目录与单测/功能测试的组织方式。",
+          "learning_goals": [
+            "理解 fsm 提取/优化/recode 的流程与适用场景",
+            "了解 threading 的并行模型与 YOSYS_DISABLE_THREADS",
+            "掌握 tests 目录结构，能运行单元测试与功能测试"
+          ],
+          "source_files": [
+            "passes/fsm/fsm.cc",
+            "passes/fsm/fsm_extract.cc",
+            "passes/fsm/fsm_opt.cc",
+            "kernel/threading.cc",
+            "tests/simple/always01.v"
+          ],
+          "minimal_modules": [
+            "FSM 流程",
+            "threading",
+            "测试体系"
+          ],
+          "practice_task": "对一个含状态机的设计执行 fsm（fsm_extract→fsm_opt→fsm_recode→fsm_map），用 write_rtlil 观察状态编码变化；并运行 cmake --build build --target test-unit 跑一遍单元测试。",
+          "depends_on": [
+            "u6-l3",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
