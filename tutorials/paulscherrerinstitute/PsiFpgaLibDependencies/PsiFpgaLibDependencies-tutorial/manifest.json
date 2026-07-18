@@ -1,0 +1,407 @@
+{
+  "project": "PsiFpgaLibDependencies",
+  "head": "d78d525150281c6bef3fd0dec5848baac4b62af5",
+  "rationale": "本项目是一个体量较小的 Python 工具库（5 个核心源码文件：__init__.py、Dependency.py、VersionNr.py、Parse.py、Actions.py），用于解析 PSI FPGA 库 README 中的依赖并执行列出/检查/检出。大纲按三层设计：第一单元（入门）先让读者搞清项目定位、安装打包，以及「库式调用、无独立 main」的集成方式，避免初学者找不到入口；第二单元（进阶）从数据模型 Dependency/VersionNr 出发，再深入全项目最复杂的 Parse 解析机制（README 依赖格式、基于缩进的文件夹树构建、相对路径解析与依赖列表组装），按「先数据后解析」的顺序递进；第三单元（专家）覆盖三类动作（列出/检查/检出）、检出版本兼容性校验 CheckCompatibility（2.1.0 的核心新特性）、URL 替换扩展点、ExecMain 的 argparse 命令行接口与 setup.py 打包发布流程，帮助读者完成二次开发与发布。讲义之间通过 depends_on 形成清晰链路，每篇都只引用真实存在的源码文件并配有可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：PSI FPGA 库依赖管理工具",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 PsiFpgaLibDependencies 是什么：它解析 PSI FPGA 库标准 README.md 中声明的依赖，并对依赖执行列出、检查、检出三类动作，解决多库之间的依赖管理问题。",
+          "learning_goals": [
+            "理解项目要解决的依赖管理问题",
+            "了解 PSI README 依赖声明的标准格式",
+            "知道依赖可执行的三类动作：列出(list)、检查(check)、检出(checkout)"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "项目描述与定位",
+            "依赖声明格式",
+            "三类动作"
+          ],
+          "practice_task": "阅读项目 README，写一段符合 PSI 标准的依赖声明 Markdown 片段：包含一个文件夹、一个子模块依赖（[name](url)(1.0.0) 形式）以及用 **[lib]** 标记的当前库，并逐字段说明其含义。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、打包与目录结构",
+          "order": 2,
+          "filename": "u1-l2-install-package-structure.md",
+          "level": "beginner",
+          "topic": "介绍如何用 pip 安装该包、如何用 setup.py 打包发布，以及整个仓库的目录与各文件职责。",
+          "learning_goals": [
+            "掌握 pip3 install 安装归档的方式",
+            "理解 setup.py 的打包配置与版本号位置",
+            "理清仓库根目录各文件（源码、文档、许可、dist）的职责"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py",
+            "Changelog.md",
+            ".gitignore"
+          ],
+          "minimal_modules": [
+            "安装方式",
+            "setup.py 打包配置",
+            "目录结构"
+          ],
+          "practice_task": "修改 setup.py 中的 version 字段，运行 python3 setup.py sdist 生成归档，检查 dist 目录产物，确认归档名与版本号一致。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "包入口与客户端集成方式",
+          "order": 3,
+          "filename": "u1-l3-entry-integration.md",
+          "level": "beginner",
+          "topic": "说明本包没有独立的 main 文件，而是作为库被客户端调用：__init__.py 导出 Actions/Dependency/Parse 三个模块，命令行入口由 Actions.ExecMain 承载，由客户端（如 psi_common）在自己的脚本中调用。",
+          "learning_goals": [
+            "理解 __init__.py 的导出结构（Actions、Dependency、Parse）",
+            "知道 ExecMain 是真正的命令行入口所在",
+            "理解客户端库如何集成并调用本包"
+          ],
+          "source_files": [
+            "__init__.py",
+            "Actions.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "__init__.py 导出",
+            "ExecMain 入口",
+            "客户端集成模式"
+          ],
+          "practice_task": "编写一个最小 Python 脚本：导入 PsiFpgaLibDependencies，构造一个 Dependency 列表并调用 Actions.ListDependencies 打印，体验「库式调用」而非「命令行直接运行」。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心数据模型与 README 解析",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "依赖数据模型 Dependency",
+          "order": 1,
+          "filename": "u2-l1-dependency-model.md",
+          "level": "intermediate",
+          "topic": "讲解 Dependency 类如何用 libraryName、url、relativePath、minVersion 四个字段描述一条依赖，以及 minVersion 如何转为 VersionNr、GetParentDir 如何返回相对父目录。",
+          "learning_goals": [
+            "掌握 Dependency 四个字段的含义",
+            "理解构造函数中 minVersion 字符串被包装为 VersionNr",
+            "会使用 GetParentDir 获取依赖的父目录"
+          ],
+          "source_files": [
+            "Dependency.py"
+          ],
+          "minimal_modules": [
+            "构造函数与字段",
+            "minVersion 转 VersionNr",
+            "GetParentDir"
+          ],
+          "practice_task": "手动构造 3 个 Dependency 对象（不同 relativePath 深度），打印其 libraryName/url/relativePath/minVersion 以及 GetParentDir 结果，验证父目录推导正确。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "语义版本号 VersionNr",
+          "order": 2,
+          "filename": "u2-l2-versionnr.md",
+          "level": "intermediate",
+          "topic": "讲解 VersionNr 类如何解析 major.minor.bugfix 三段版本号，如何实现 __eq__ 与 __gt__ 比较运算符，以及 __str__ 的输出格式，为后续版本兼容性校验打基础。",
+          "learning_goals": [
+            "理解版本号字符串解析与非法输入抛异常的逻辑",
+            "掌握 __eq__ 与 __gt__ 的逐段比较方式",
+            "知道版本号的字符串输出格式"
+          ],
+          "source_files": [
+            "VersionNr.py"
+          ],
+          "minimal_modules": [
+            "解析与异常",
+            "__eq__/__gt__ 比较",
+            "__str__ 格式"
+          ],
+          "practice_task": "在 VersionNr 现有 __eq__ 和 __gt__ 基础上，补充实现 __lt__、__ge__、__le__ 三个运算符，并写若干断言验证一组版本号的排序与大小关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "README 依赖格式与 Parse.FromReadme 入口",
+          "order": 3,
+          "filename": "u2-l3-readme-format-parse.md",
+          "level": "intermediate",
+          "topic": "讲解 PSI README 中 # Dependencies 段落的写法，以及 Parse.FromReadme 如何读取文件、定位依赖段落、识别用 **[repo]** 标记的当前库（thisRepo）。",
+          "learning_goals": [
+            "掌握 README 依赖段的标准格式",
+            "理解 FromReadme 读取文件并按 #dependencies 定位段落的逻辑",
+            "理解 thisRepo（** 标记）的作用及缺失时的异常"
+          ],
+          "source_files": [
+            "Parse.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "依赖段格式",
+            "段落定位",
+            "thisRepo 标记"
+          ],
+          "practice_task": "编写一个符合 PSI 标准的 README.md（含 # Dependencies 段），运行 Parse.FromReadme 解析并打印每条依赖；再故意去掉 **[lib]** 标记，观察抛出的「Active repository not marked」异常。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "基于缩进的文件夹树构建",
+          "order": 4,
+          "filename": "u2-l4-folder-tree.md",
+          "level": "intermediate",
+          "topic": "讲解 Parse 内部 Folder/Repo 类如何根据 bullet 列表的缩进层级构建目录树，并把每个 repo 归属到正确的 folder（同级、降级、升级三种分支）。",
+          "learning_goals": [
+            "理解 Folder/Repo 内部数据模型",
+            "掌握 indent（line.find('*')）的计算方式",
+            "会用 GetParentByChildIndent 处理同级/降级/升级三种层级关系"
+          ],
+          "source_files": [
+            "Parse.py"
+          ],
+          "minimal_modules": [
+            "Folder/Repo 内部类",
+            "indent 计算",
+            "GetParentByChildIndent 与三种层级分支"
+          ],
+          "practice_task": "给定一段多层嵌套的依赖声明，画出对应的 Folder/Repo 树形结构（纸笔推演），标注每个 repo 最终归属到哪个 folder，并说明 indent 与 lastFolder.indent 的比较如何决定归属。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "相对路径解析与依赖列表组装",
+          "order": 5,
+          "filename": "u2-l5-path-resolution.md",
+          "level": "intermediate",
+          "topic": "讲解 FromReadme 末尾如何根据 thisRepo 到 ROOT 的层数（levelsToRoot）计算 '../../' 前缀（pathPrefix），并把除自身外的所有 repo 组装成最终的 Dependency 列表。",
+          "learning_goals": [
+            "理解 levelsToRoot 的计算过程",
+            "掌握 pathPrefix（'..' 重复 levelsToRoot 次）与前缀拼接",
+            "理解最终依赖列表如何排除 thisRepo 自身"
+          ],
+          "source_files": [
+            "Parse.py",
+            "Dependency.py"
+          ],
+          "minimal_modules": [
+            "levelsToRoot 计算",
+            "pathPrefix 前缀",
+            "依赖列表组装"
+          ],
+          "practice_task": "对一个多层嵌套的 README 依赖段，先手算 thisRepo 的 levelsToRoot 与某条依赖的 relativePath，再用代码运行 FromReadme 验证二者一致。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "动作执行、版本校验与扩展",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "列出与检查依赖（ListDependencies / CheckDependency）",
+          "order": 1,
+          "filename": "u3-l1-list-check.md",
+          "level": "advanced",
+          "topic": "讲解 ListDependencies 如何格式化打印依赖，CheckDependency 如何切换到 rootdir、逐条判断依赖目录是否存在并触发兼容性检查，以及 try/finally 如何保证工作目录恢复。",
+          "learning_goals": [
+            "掌握 ListDependencies 的输出格式",
+            "理解 CheckDependency 的目录切换与依赖存在性判断",
+            "理解 os.chdir 配合 try/finally 恢复工作目录的模式"
+          ],
+          "source_files": [
+            "Actions.py"
+          ],
+          "minimal_modules": [
+            "ListDependencies 输出",
+            "CheckDependency 存在性判断",
+            "try/finally 目录恢复"
+          ],
+          "practice_task": "构造一个依赖列表并模拟某依赖目录缺失的场景，运行 CheckDependency 捕获输出中的 ERROR 行；再分析 try/finally 如何在异常情况下保证 os.chdir(oldDir) 恢复原目录。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "检出依赖与检出模式（Checkout / CHECKOUT_MODE）",
+          "order": 2,
+          "filename": "u3-l2-checkout-modes.md",
+          "level": "advanced",
+          "topic": "讲解 Checkout 如何克隆（git clone --recurse-submodules）或添加子模块（git submodule add），以及 master/latest_release/specified_version 三种 CHECKOUT_MODE 的差异，重点说明 latest_release 如何用 git tag 配合 VersionNr 取最大版本。",
+          "learning_goals": [
+            "掌握普通 clone 与 as_submodule 两条分支",
+            "理解 CHECKOUT_MODE 三种模式",
+            "理解 latest_release 模式下用 git tag + VersionNr 取 max 的逻辑"
+          ],
+          "source_files": [
+            "Actions.py"
+          ],
+          "minimal_modules": [
+            "CHECKOUT_MODE 枚举",
+            "clone/submodule 分支",
+            "latest_release 取最大 tag"
+          ],
+          "practice_task": "在临时目录中用本地 file:// 仓库构造一条依赖，分别以 master 和 latest_release 模式调用 Checkout，对比两种模式下检出的内容差异，并核对 latest_release 选中的 tag。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "语义版本兼容性校验（CheckCompatibility）",
+          "order": 3,
+          "filename": "u3-l3-version-compatibility.md",
+          "level": "advanced",
+          "topic": "讲解 CheckCompatibility 如何用 git describe --tags 取已检出依赖的实际版本并与 minVersion 比较：major 越界给出 WARNING，版本低于下限给出 ERROR，否则输出 OK——这是 2.1.0 的核心新增特性。",
+          "learning_goals": [
+            "理解用 git describe --tags 获取已检出版本并截取 tag 前缀",
+            "掌握 major 越界 WARNING 与版本过低 ERROR 的判断逻辑",
+            "理解 CheckCompatibility 与 VersionNr 比较运算的配合"
+          ],
+          "source_files": [
+            "Actions.py",
+            "VersionNr.py"
+          ],
+          "minimal_modules": [
+            "git describe 取版本",
+            "major 越界校验",
+            "版本下限校验"
+          ],
+          "practice_task": "准备一个本地 git 仓库并打上若干 tag，分别构造 minVersion 高于、低于、仅 major 不同的依赖，运行 CheckCompatibility，核对输出分别为 ERROR、OK、WARNING 三种情况。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "URL 替换机制与扩展点",
+          "order": 4,
+          "filename": "u3-l4-url-replacement.md",
+          "level": "advanced",
+          "topic": "讲解 PSI_GFA_HTTPS_TO_SSH 如何把 PSI 内网 HTTPS URL 转为 SSH URL，URL_REPLACEMENTS 列表如何在克隆时链式应用这些替换，以及如何新增自定义的 URL 替换规则。",
+          "learning_goals": [
+            "理解 URL 替换的目的与转换规则",
+            "掌握 URL_REPLACEMENTS 在普通 clone 时的链式应用",
+            "学会新增一个 URL 替换函数并注册"
+          ],
+          "source_files": [
+            "Actions.py"
+          ],
+          "minimal_modules": [
+            "PSI_GFA_HTTPS_TO_SSH",
+            "URL_REPLACEMENTS 链式替换",
+            "新增替换规则"
+          ],
+          "practice_task": "新增一个 URL 替换函数（例如把某个 GitHub HTTPS URL 转换为 SSH 形式），加入 URL_REPLACEMENTS 列表，并写断言验证输入输出转换正确。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "命令行接口 ExecMain 与 argparse",
+          "order": 5,
+          "filename": "u3-l5-execmain-cli.md",
+          "level": "advanced",
+          "topic": "讲解 ExecMain 如何用 argparse 定义 -list/-check/-checkout/-as_submodule/-mode 等参数（store_true 开关与 choices 限定），并将 mode 字符串映射为 CHECKOUT_MODE 分发到对应动作。",
+          "learning_goals": [
+            "掌握 ArgumentParser 的参数定义方式",
+            "理解 store_true 开关与 choices 取值约束",
+            "理解 mode 字符串到 CHECKOUT_MODE 的映射与非法值异常"
+          ],
+          "source_files": [
+            "Actions.py"
+          ],
+          "minimal_modules": [
+            "ArgumentParser 参数定义",
+            "参数分发",
+            "mode 映射"
+          ],
+          "practice_task": "为 ExecMain 新增一个 -version 开关参数，使其打印当前版本号（可来自 setup.py 或常量），并验证 argparse 自动生成的帮助文本与分发逻辑。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "打包、版本与发布流程",
+          "order": 6,
+          "filename": "u3-l6-packaging-release.md",
+          "level": "advanced",
+          "topic": "讲解 setup.py 的 CustomSdist 如何在打包前自动清理 dist 与 egg-info 产物，sdist 如何生成归档，以及 PSI 的语义化版本号与 Tagging 策略（major/minor/bugfix 何时递增）。",
+          "learning_goals": [
+            "理解 CustomSdist.run 的打包前清理逻辑",
+            "掌握 sdist 打包流程与产物位置",
+            "理解 README 中 major/minor/bugfix 的 Tagging 策略"
+          ],
+          "source_files": [
+            "setup.py",
+            "Changelog.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "CustomSdist 清理",
+            "sdist 打包",
+            "版本号策略"
+          ],
+          "practice_task": "模拟一次发布：在 Changelog.md 新增一条带 Features/Bugfix 的记录，按 Tagging 策略判断应递增 major/minor/bugfix 中的哪一位，更新 setup.py 版本号后重新 sdist 打包。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
