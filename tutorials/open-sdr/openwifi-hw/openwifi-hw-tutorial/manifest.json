@@ -1,0 +1,793 @@
+{
+  "project": "openwifi-hw",
+  "head": "d047d794195beb72e12d2a9a6c205c16399cf288",
+  "rationale": "openwifi-hw 是一个基于 Xilinx Zynq SoC + Analog Devices AD9361/9364 射频前端的 IEEE 802.11 a/b/g/n 全栈 SDR Wi-Fi FPGA 设计，构建在 ADI HDL 参考设计之上。学习顺序按“先看清全貌、再沿数据链路深入、最后做二次开发”设计：u1 让读者从零建立项目定位、目录、板卡与构建流程的整体认知；u2 进入顶层 block design 与 PS-PL 互连，理解 6 个自定义 IP（xpu/tx_intf/rx_intf/openofdm_tx/openofdm_rx/side_ch）如何拼接成 openwifi_ip 层级并与 PS 通信；u3-u4 沿接收与发射两条物理层数据链路逐模块读源码；u5 聚焦控制核心 xpu 与低层 MAC（CSMA/CA、重传/ACK、TSF、包解析过滤、CCA/RSSI/SPI）；u6 讲可观测性的 side_ch；u7 面向专家层的二次开发（寄存器映射、条件编译宏、仿真 testbench、自定义 IP 打包、板卡移植、GPIO/ILA 调试）。每篇讲义只解决一个主题并绑定真实源码与实践任务，依赖关系沿“总览→链路→控制→开发”递进。所有讲义均为新增（action=new）。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "从零认识 openwifi-hw",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：什么是 openwifi 与 SDR Wi-Fi",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 openwifi 项目定位：Linux mac80211 兼容的 SDR 全栈 Wi-Fi 设计，说明 openwifi-hw（FPGA 硬件）与 openwifi（驱动/软件）仓库的关系，以及 AGPLv3 与订阅双授权模式。",
+          "learning_goals": [
+            "理解 openwifi 是基于 SDR 的 IEEE 802.11 全栈实现",
+            "区分 openwifi-hw 硬件仓库与 openwifi 软件仓库的职责",
+            "了解项目授权与第三方模块（ADI HDL、openofdm）来源"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "项目定位与授权"
+          ],
+          "practice_task": "阅读 README.md，用自己的话写出 openwifi-hw 在整套 openwifi 系统中承担的角色，并列举它依赖的两个第三方模块（adi-hdl、openofdm）的作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构、子模块与软硬件边界",
+          "order": 2,
+          "filename": "u1-l2-directory-and-submodules.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录布局：ip/（自定义 WiFi IP 核心）、boards/（板卡工程）、adi-hdl（ADI 参考设计子模块）、ip/openofdm_rx（openofdm 子模块），以及 .gitmodules 子模块配置。",
+          "learning_goals": [
+            "掌握仓库主要目录的功能划分",
+            "理解 adi-hdl 与 openofdm_rx 两个 git 子模块的作用",
+            "区分 FPGA 侧（PL）与 ARM 侧（PS）的代码边界"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitmodules",
+            "ip/board_def.v"
+          ],
+          "minimal_modules": [
+            "目录结构",
+            "git 子模块"
+          ],
+          "practice_task": "画出仓库的目录树，标注 ip/ 下 6 个自定义 IP 核心目录，并用 git submodule status（或阅读 .gitmodules）确认 adi-hdl 与 openofdm_rx 两个子模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "支持的板卡与开发运行环境",
+          "order": 3,
+          "filename": "u1-l3-boards-and-environment.md",
+          "level": "beginner",
+          "topic": "介绍 README 中列出的全部 BOARD_NAME 板卡（zc706/zed/zc702/adrv9361z7035/adrv9364z7020/zcu102/antsdr/e310v2/sdrpi 等）及其 Vivado 许可需求，以及 Vivado 2022.2 + Vitis、libtinfo5 等运行前置条件。",
+          "learning_goals": [
+            "了解 openwifi-hw 支持的硬件板卡与射频前端组合",
+            "理解 BOARD_NAME 环境变量如何驱动构建",
+            "掌握 Vivado/Vitis 版本与系统依赖要求"
+          ],
+          "source_files": [
+            "README.md",
+            "prepare_adi_board_ip.sh"
+          ],
+          "minimal_modules": [
+            "板卡清单",
+            "运行环境"
+          ],
+          "practice_task": "在 README 的板卡表中任选一块板卡，整理出它对应的 FPGA 芯片、射频前端、是否需要 Vivado 许可，并列出构建该板卡所需的环境变量。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "FPGA 构建全流程实战（脚本链路）",
+          "order": 4,
+          "filename": "u1-l4-fpga-build-flow.md",
+          "level": "beginner",
+          "topic": "从 prepare_adi_lib.sh、prepare_adi_board_ip.sh、get_ip_openofdm_rx.sh，到 boards/create_ip_repo.sh → ip_repo_gen.tcl → openwifi.tcl，再到 sdk_update.sh，梳理完整的“准备依赖-生成 IP 仓-建顶层工程-导出镜像”脚本链路。",
+          "learning_goals": [
+            "掌握 openwifi-hw 从零到 bitstream 的完整脚本流程",
+            "理解 create_ip_repo.sh 与 openwifi.tcl 各自的职责",
+            "了解 .xsa/.ltx 镜像如何导出供软件仓库使用"
+          ],
+          "source_files": [
+            "README.md",
+            "prepare_adi_lib.sh",
+            "prepare_adi_board_ip.sh",
+            "get_ip_openofdm_rx.sh",
+            "boards/create_ip_repo.sh",
+            "boards/sdk_update.sh"
+          ],
+          "minimal_modules": [
+            "构建脚本链路"
+          ],
+          "practice_task": "按照 README 的 Build FPGA 小节，列出从克隆仓库到得到 system_top.xsa 所需依次执行的命令，并说明每条命令产出的中间产物。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "顶层设计与系统集成",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "顶层 system_top 与 block design",
+          "order": 1,
+          "filename": "u2-l1-system-top-block-design.md",
+          "level": "beginner",
+          "topic": "以 zc706_fmcs2 为例，讲解 system_top.v 顶层 wrapper、system.bd block design 与 openwifi.tcl 顶层工程脚本如何组织整个 SoC 设计（DDR、PS、射频数据通路）。",
+          "learning_goals": [
+            "理解 system_top.v 作为 FPGA 顶层 wrapper 的结构",
+            "了解 system.bd block design 在 Vivado IP Integrator 中的角色",
+            "看懂 openwifi.tcl 如何创建并配置顶层工程"
+          ],
+          "source_files": [
+            "boards/zc706_fmcs2/src/system_top.v",
+            "boards/zc706_fmcs2/src/system_wrapper.v",
+            "boards/zc706_fmcs2/src/system.xdc",
+            "boards/openwifi.tcl"
+          ],
+          "minimal_modules": [
+            "顶层 wrapper",
+            "block design"
+          ],
+          "practice_task": "阅读 system_top.v 与 openwifi.tcl，列出顶层工程的顶层模块名、目标器件（part）来源，并指出约束文件 system.xdc 的作用。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "openwifi_ip 层级：六大 IP 如何拼接",
+          "order": 2,
+          "filename": "u2-l2-openwifi-ip-hierarchy.md",
+          "level": "intermediate",
+          "topic": "讲解 ip/openwifi_ip.tcl 如何把 xpu、tx_intf、rx_intf、openofdm_tx、openofdm_rx、side_ch 六个 IP 实例化为一个 openwifi_ip 层级子设计，并说明它们之间 I/Q、控制与状态信号的互连关系。",
+          "learning_goals": [
+            "理解 openwifi_ip 层级包含的六个核心 IP",
+            "看清各 IP 之间 I/Q、PHY 控制、CSI 等信号的流向",
+            "掌握 block design 层级复用（write_bd_tcl/source）思路"
+          ],
+          "source_files": [
+            "ip/openwifi_ip.tcl",
+            "ip/openwifi_ip_ultra_scale.tcl",
+            "ip/board_def.v"
+          ],
+          "minimal_modules": [
+            "openwifi_ip 层级",
+            "IP 互连"
+          ],
+          "practice_task": "依据 openwifi_ip.tcl 绘制六个 IP 之间的连接示意图，标出发射链路（tx_intf→openofdm_tx→DAC）与接收链路（ADC→rx_intf→openofdm_rx）的数据方向。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "PS-PL 互连：AXI、DMA 与中断",
+          "order": 3,
+          "filename": "u2-l3-ps-pl-axi-dma-intr.md",
+          "level": "intermediate",
+          "topic": "讲解 connect_openwifi_ip.tcl 如何把 openwifi_ip 接入 Zynq PS：AXI4-Lite 寄存器（S00_AXI/M_AXI_GP1）、AXI DMA（S_AXI_ACP/S_AXI_HP3 收发数据）、以及 tx_itrpt/rx_pkt_intr 等中断信号接到 sys_concat_intc。",
+          "learning_goals": [
+            "理解 PS 与 PL 之间三类通路：寄存器、DMA 数据、中断",
+            "看懂 AXI ACP/HP 端口在收发包 DMA 中的作用",
+            "掌握中断拼接器 sys_concat_intc 的接线方式"
+          ],
+          "source_files": [
+            "ip/connect_openwifi_ip.tcl",
+            "ip/connect_openwifi_ip_ultra_scale.tcl"
+          ],
+          "minimal_modules": [
+            "AXI 互连",
+            "DMA 与中断"
+          ],
+          "practice_task": "阅读 connect_openwifi_ip.tcl，列出 openwifi_ip 暴露给 PS 的 AXI 接口与中断输出，并说明收发数据分别走哪个 PS 端口（ACP/HP3）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "板级配置与时钟体系",
+          "order": 4,
+          "filename": "u2-l4-board-config-clock.md",
+          "level": "intermediate",
+          "topic": "讲解 board_def.v 与构建期生成的 clock_speed.v 中的关键宏：NUM_CLK_PER_US、SAMPLING_RATE_MHZ(20)、NUM_CLK_PER_SAMPLE、COUNT_SCALE，以及 SMALL_FPGA 等板级规模开关如何影响参数化。",
+          "learning_goals": [
+            "理解基带时钟频率 NUM_CLK_PER_US 的含义与可选值",
+            "掌握采样率与每采样时钟数的换算关系",
+            "了解 SMALL_FPGA 等宏如何缩小缓冲深度以适配小容量器件"
+          ],
+          "source_files": [
+            "ip/board_def.v",
+            "boards/ip_repo_gen.tcl",
+            "boards/openwifi.tcl"
+          ],
+          "minimal_modules": [
+            "时钟与采样率宏"
+          ],
+          "practice_task": "在 board_def.v 与 ip_repo_gen.tcl 中找到 NUM_CLK_PER_US、SAMPLING_RATE_MHZ 的定义，计算 NUM_CLK_PER_SAMPLE 的值，并解释切换到 240MHz(zcu102) 时需改动哪里。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "接收链路源码",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "rx_intf 接收接口总览",
+          "order": 1,
+          "filename": "u3-l1-rx-intf-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 rx_intf.v 顶层模块：从 AD9361 ADC 读取 I/Q 样点，与 openofdm_rx 交互包/字节流，做 FCS 校验，并通过 AXI-Stream/AXI DMA 把有效帧送到 PS，同时支持发射时静音自收。",
+          "learning_goals": [
+            "理解 rx_intf 在接收链路中的位置与职责",
+            "看懂 ADC 样点输入与到 openofdm_rx 的 sample 接口",
+            "了解 mute_adc_out_to_bb、block_rx_dma_to_ps 等控制信号作用"
+          ],
+          "source_files": [
+            "ip/rx_intf/src/rx_intf.v"
+          ],
+          "minimal_modules": [
+            "rx_intf 顶层"
+          ],
+          "practice_task": "阅读 rx_intf.v 的端口列表，整理出三类接口：ADC 数据输入、与 openofdm_rx 的样点/包信号、与 xpu 的控制信号，并说明 rx_pkt_intr 何时触发。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "rx_intf 关键子模块",
+          "order": 2,
+          "filename": "u3-l2-rx-intf-submodules.md",
+          "level": "intermediate",
+          "topic": "深入 rx_intf 的子模块：adc_intf（ADC 接口/重采样）、rx_iq_intf（I/Q 通路与增益）、rx_intf_m_axis/rx_intf_pl_to_m_axis（向 DMA 输出 AXI-Stream）、byte_to_word_fcs_sn_insert（字节拼字与 FCS/序号插入）。",
+          "learning_goals": [
+            "理解 ADC 接口与 I/Q 接口子模块的职责",
+            "看懂接收数据如何被打包成 AXI-Stream 送往 DMA",
+            "了解 FCS 校验结果与序号如何插入接收帧"
+          ],
+          "source_files": [
+            "ip/rx_intf/src/adc_intf.v",
+            "ip/rx_intf/src/rx_iq_intf.v",
+            "ip/rx_intf/src/rx_intf_m_axis.v",
+            "ip/rx_intf/src/rx_intf_pl_to_m_axis.v",
+            "ip/rx_intf/src/byte_to_word_fcs_sn_insert.v"
+          ],
+          "minimal_modules": [
+            "ADC/IQ 接口",
+            "m_axis DMA 输出",
+            "FCS 拼字"
+          ],
+          "practice_task": "选择 byte_to_word_fcs_sn_insert.v，说明它如何把 openofdm_rx 输出的字节流拼成 64bit AXI-Stream 字，并如何附加 FCS 结果与序号到 DMA 头部。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "openofdm_rx：OFDM 接收机（外部子模块）",
+          "order": 3,
+          "filename": "u3-l3-openofdm-rx.md",
+          "level": "intermediate",
+          "topic": "介绍作为 git 子模块引入的 openofdm_rx（来自 openofdm 项目 dot11zynq 分支），它完成包检测、同步、FFT、信道均衡与 Viterbi 译码；说明 get_ip_openofdm_rx.sh 如何把它放入 ip/openofdm_rx 并参与打包。",
+          "learning_goals": [
+            "理解 openofdm_rx 在接收链路完成的物理层处理",
+            "了解 openofdm_rx 作为子模块的引入与集成方式",
+            "认识包检测、同步、均衡、Viterbi 等关键步骤的分工"
+          ],
+          "source_files": [
+            "README.md",
+            "get_ip_openofdm_rx.sh",
+            "boards/ip_repo_gen.tcl"
+          ],
+          "minimal_modules": [
+            "openofdm_rx 子模块"
+          ],
+          "practice_task": "运行/阅读 get_ip_openofdm_rx.sh，说明 openofdm_rx 的来源仓库与分支，并解释 ip_repo_gen.tcl 在打包 openofdm_rx 时与其余 IP 的差异（pre_def 追加方式）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "发射链路源码",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "openofdm_tx OFDM 发射机总览",
+          "order": 1,
+          "filename": "u4-l1-openofdm-tx-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 openofdm_tx.v 顶层与 dot11_tx.v：接收 phy_tx_start，从 BRAM 读取待发字节，按 802.11 a/g/n 各 MCS 生成基带 I/Q（result_i/result_q），完成后给出 phy_tx_done/phy_tx_started。",
+          "learning_goals": [
+            "理解 openofdm_tx 在发射链路中的位置与触发流程",
+            "看懂 BRAM 输入与 I/Q 输出接口",
+            "了解 phy_tx_start/started/done 的握手时序"
+          ],
+          "source_files": [
+            "ip/openofdm_tx/src/openofdm_tx.v",
+            "ip/openofdm_tx/src/dot11_tx.v"
+          ],
+          "minimal_modules": [
+            "openofdm_tx 顶层",
+            "dot11_tx 核"
+          ],
+          "practice_task": "阅读 openofdm_tx.v 与 dot11_tx.v 的端口，画出从 phy_tx_start 到 result_iq_valid 的处理时序，并说明 bram_din/bram_addr 如何被驱动。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "发射信号处理子模块（编码/交织/IFFT/调制/前导）",
+          "order": 2,
+          "filename": "u4-l2-openofdm-tx-signal-processing.md",
+          "level": "intermediate",
+          "topic": "深入 dot11_tx 的内部信号处理链：卷积编码(convenc)、打孔与交织查表(punc_interlv_lut)、调制映射(modulation)、IFFT(ifftmain 及 butterfly/ifftstage)、前导与训练序列 ROM(l_stf/l_ltf/ht_stf/ht_ltf_rom)、加扰与 CRC32。",
+          "learning_goals": [
+            "理解 802.11 发射基带各处理阶段的顺序",
+            "看懂卷积编码/打孔/交织的实现与查表",
+            "了解 IFFT 与前导 ROM 如何生成 OFDM 符号"
+          ],
+          "source_files": [
+            "ip/openofdm_tx/src/dot11_tx.v",
+            "ip/openofdm_tx/src/convenc.v",
+            "ip/openofdm_tx/src/punc_interlv_lut.v",
+            "ip/openofdm_tx/src/modulation.v",
+            "ip/openofdm_tx/src/ifftmain.v",
+            "ip/openofdm_tx/src/l_stf_rom.v",
+            "ip/openofdm_tx/src/crc32_tx.v"
+          ],
+          "minimal_modules": [
+            "卷积编码与打孔交织",
+            "调制与IFFT",
+            "前导ROM",
+            "CRC32"
+          ],
+          "practice_task": "在 dot11_tx.v 中追踪一个待发字节到 I/Q 样点的处理路径，列出依次经过的子模块（编码→打孔/交织→调制→IFFT→前导拼接）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "tx_intf 发射接口与 BRAM 缓存",
+          "order": 3,
+          "filename": "u4-l3-tx-intf.md",
+          "level": "intermediate",
+          "topic": "讲解 tx_intf.v：从 AXI DMA 接收待发数据写入 BRAM，触发 openofdm_tx 生成 I/Q，再经 tx_iq_intf/tx_bit_intf 与 dac_intf 送往 AD9361 DAC；并介绍 tx_status_fifo、ht_sig_crc_calc、csi_fuzzer 等子模块。",
+          "learning_goals": [
+            "理解 tx_intf 在发射链路的缓存与调度职责",
+            "看懂 DMA→BRAM→openofdm_tx→DAC 的数据流",
+            "了解 HT-SIG CRC、TX 状态 FIFO、CSI fuzzer 的作用"
+          ],
+          "source_files": [
+            "ip/tx_intf/src/tx_intf.v",
+            "ip/tx_intf/src/tx_bit_intf.v",
+            "ip/tx_intf/src/tx_iq_intf.v",
+            "ip/tx_intf/src/dac_intf.v",
+            "ip/tx_intf/src/tx_status_fifo.v",
+            "ip/tx_intf/src/ht_sig_crc_calc.v",
+            "ip/tx_intf/src/csi_fuzzer.v"
+          ],
+          "minimal_modules": [
+            "tx_intf 顶层",
+            "BRAM 与 DAC 接口",
+            "状态FIFO与CSI"
+          ],
+          "practice_task": "阅读 tx_intf.v，说明一份待发数据如何从 AXI-Stream DMA 进入 BRAM、再被 openofdm_tx 消费并最终送到 dac_data，并指出 tx_status 的用途。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "控制核心 xpu 与低层 MAC",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "xpu 控制核心总览",
+          "order": 1,
+          "filename": "u5-l1-xpu-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 xpu.v（eXternal Processing Unit）作为整个 WiFi 低层 MAC 与控制中枢：协调 CSMA/CA、TX 控制/重传、TSF 定时、接收包解析与地址过滤、RSSI/CCA、对 AD9361 的 SPI 控制以及队列 slice_en。",
+          "learning_goals": [
+            "理解 xpu 作为低层 MAC 控制中枢的职责",
+            "看懂 xpu 与 rx_intf/openofdm_rx/tx_intf/side_ch 之间的信号",
+            "了解 slice_en 队列门控与各类 LED/GPIO 状态输出"
+          ],
+          "source_files": [
+            "ip/xpu/src/xpu.v"
+          ],
+          "minimal_modules": [
+            "xpu 顶层"
+          ],
+          "practice_task": "阅读 xpu.v 的端口，按“到 rx_intf / 到 openofdm_rx / 到 tx_intf / 到 side_ch / 到 PS”分组整理其对外信号，并说明 retrans_in_progress、backoff_done 的含义。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "CSMA/CA 信道接入",
+          "order": 2,
+          "filename": "u5-l2-csma-ca.md",
+          "level": "intermediate",
+          "topic": "深入 csma_ca.v：基于 TSF 1us 脉冲实现 DIFS/EIFS/SIFS/Slot 计时、随机退避（CW/slot）、NAV 虚拟载波监听，结合 tx_status 与 RSSI 决定何时允许发射。",
+          "learning_goals": [
+            "理解 802.11 DCF 的 DIFS/SIFS/Slot/退避机制",
+            "看懂 csma_ca 如何用 TSF 脉冲实现亚微秒级计时",
+            "了解 NAV、CW、退避计数器在源码中的实现"
+          ],
+          "source_files": [
+            "ip/xpu/src/csma_ca.v",
+            "ip/xpu/src/xpu.v",
+            "ip/xpu/src/tsf_timer.v"
+          ],
+          "minimal_modules": [
+            "CSMA/CA 退避",
+            "DIFS/EIFS/SIFS 计时"
+          ],
+          "practice_task": "在 csma_ca.v 中定位 DIFS/SIFS/slot_time 等参数的来源，并追踪随机退避计数器 num_slot_random/cw 如何影响 backoff_done 的产生。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "TX 控制、重传与 ACK",
+          "order": 3,
+          "filename": "u5-l3-tx-control-retrans-ack.md",
+          "level": "intermediate",
+          "topic": "深入 tx_control.v：管理发射状态机（tx_control_state），处理 SIFS 后的 ACK 发送、ACK 超时、重传计数（max_num_retrans/tx_pkt_retrans_limit）、聚合(tx_ht_aggr)与 quit_retrans/reset_backoff。",
+          "learning_goals": [
+            "理解 TX 发射状态机的状态与跳转",
+            "看懂 ACK 等待、超时与重传次数控制",
+            "了解聚合帧与重传终止条件的处理"
+          ],
+          "source_files": [
+            "ip/xpu/src/tx_control.v",
+            "ip/xpu/src/xpu.v"
+          ],
+          "minimal_modules": [
+            "TX 状态机",
+            "重传与ACK"
+          ],
+          "practice_task": "阅读 tx_control.v，列出 tx_control_state 的关键状态及其含义，并说明收到 ACK 与 ACK 超时两种情况下状态机如何分别处理。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "TSF 定时器与接收包解析/过滤",
+          "order": 4,
+          "filename": "u5-l4-tsf-rx-parse-filter.md",
+          "level": "intermediate",
+          "topic": "讲解 tsf_timer.v（802.11 64bit 同步定时器与 1us 脉冲）、phy_rx_parse.v（解析接收帧的 FC/addr1/addr2/addr3/SC）与 pkt_filter_ctl.v（地址过滤、控制 block_rx_dma_to_ps），实现按地址过滤与 ACK/重传所需的信息提取。",
+          "learning_goals": [
+            "理解 64bit TSF 定时器的实现与 1us 脉冲的作用",
+            "看懂接收帧 MAC 头部字段（FC/地址/序号）的解析",
+            "了解地址过滤如何控制 RX DMA 是否上报 PS"
+          ],
+          "source_files": [
+            "ip/xpu/src/tsf_timer.v",
+            "ip/xpu/src/phy_rx_parse.v",
+            "ip/xpu/src/pkt_filter_ctl.v",
+            "ip/xpu/src/xpu.v"
+          ],
+          "minimal_modules": [
+            "TSF 定时器",
+            "MAC 头解析",
+            "地址过滤"
+          ],
+          "practice_task": "依据 phy_rx_parse.v 说明它从 ofdm_byte 流中提取哪些 MAC 字段，并结合 pkt_filter_ctl.v 解释地址过滤如何决定 block_rx_dma_to_ps 的取值。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "CCA、RSSI 与 AD9361 SPI 控制",
+          "order": 5,
+          "filename": "u5-l5-cca-rssi-spi.md",
+          "level": "intermediate",
+          "topic": "讲解 xpu 内的能量/信道检测链：rssi.v、iq_abs_avg.v、iq_rssi_to_db.v、mv_avg.v/mv_avg_dual_ch.v、dc_rm.v，以及 cca.v 信道空闲评估；并介绍 spi.v 如何经 side/SPI 控制寄存器配置 AD9361。",
+          "learning_goals": [
+            "理解 RSSI 从 I/Q 到 dB 的计算与平滑链路",
+            "看懂 CCA 信道空闲评估的实现",
+            "了解 xpu 如何通过 SPI 控制射频前端 AD9361"
+          ],
+          "source_files": [
+            "ip/xpu/src/cca.v",
+            "ip/xpu/src/rssi.v",
+            "ip/xpu/src/iq_abs_avg.v",
+            "ip/xpu/src/iq_rssi_to_db.v",
+            "ip/xpu/src/mv_avg.v",
+            "ip/xpu/src/spi.v"
+          ],
+          "minimal_modules": [
+            "RSSI 计算链",
+            "CCA",
+            "SPI 控制"
+          ],
+          "practice_task": "追踪 RSSI 的计算路径：从 ddc_i/ddc_q 经 mv_avg/iq_abs_avg/iq_rssi_to_db 到 rssi_half_db，并说明 cca.v 如何利用能量判断信道空闲。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "侧信道与可观测性",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "side_ch 侧信道监控（CSI/RSSI/IQ 捕获与计数）",
+          "order": 1,
+          "filename": "u6-l1-side-channel.md",
+          "level": "intermediate",
+          "topic": "讲解 side_ch.v：作为研究/调试用侧信道，捕获发射/接收 I/Q、CSI（ofdm_symbol_eq_out）、RSSI、前导检测、demod 状态等，经 side_ch_counter_event_cfg 触发计数，由 side_ch_m_axis 经 DMA 上报 PS。",
+          "learning_goals": [
+            "理解 side_ch 用于可观测性与 CSI 采集的定位",
+            "看懂侧信道捕获的各类信号来源（TX/RX IQ、CSI、RSSI）",
+            "了解计数事件配置与经 DMA 上报的通路"
+          ],
+          "source_files": [
+            "ip/side_ch/src/side_ch.v",
+            "ip/side_ch/src/side_ch_control.v",
+            "ip/side_ch/src/side_ch_counter.v",
+            "ip/side_ch/src/side_ch_counter_event_cfg.v",
+            "ip/side_ch/src/side_ch_m_axis.v"
+          ],
+          "minimal_modules": [
+            "side_ch 顶层",
+            "事件计数",
+            "m_axis 上报"
+          ],
+          "practice_task": "阅读 side_ch.v，列出它能捕获的信号来源，并说明 side_ch_counter_event_cfg.v 如何配置触发计数、side_ch_m_axis.v 如何把结果送到 DMA。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "进阶开发与二次开发实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "AXI 寄存器映射与软件交互",
+          "order": 1,
+          "filename": "u7-l1-axi-register-map.md",
+          "level": "advanced",
+          "topic": "讲解各 IP 的 *_s_axi.v（以 xpu_s_axi.v 为例）实现的 AXI4-Lite 寄存器组：slv_reg0..N 的读写地址映射，软件（openwifi 驱动）如何经这些寄存器配置参数、读取状态并控制 IP 行为。",
+          "learning_goals": [
+            "理解 AXI4-Lite 从设备寄存器组的实现模式",
+            "看懂寄存器地址到 slv_reg 的映射",
+            "了解驱动软件如何通过寄存器与 FPGA IP 交互"
+          ],
+          "source_files": [
+            "ip/xpu/src/xpu_s_axi.v",
+            "ip/tx_intf/src/tx_intf_s_axi.v",
+            "ip/rx_intf/src/rx_intf_s_axi.v",
+            "ip/openofdm_tx/src/openofdm_tx_s_axi.v",
+            "ip/side_ch/src/side_ch_s_axi.v"
+          ],
+          "minimal_modules": [
+            "AXI4-Lite 寄存器组",
+            "寄存器映射"
+          ],
+          "practice_task": "以 xpu_s_axi.v 为例，列出其 slv_reg 的数量与各自地址偏移，并说明软件读写某个配置寄存器时对应的 AXI 握手过程。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "条件编译与 Verilog 宏体系",
+          "order": 2,
+          "filename": "u7-l2-conditional-compile-macros.md",
+          "level": "advanced",
+          "topic": "讲解 _pre_def.v 条件编译机制：create_ip_repo.sh / create_vivado_proj.sh 把 BOARD_NAME、NUM_CLK_PER_US 及用户 DEF 转成 `define IP_NAME_DEF，以及 SMALL_FPGA、HAS_SIDE_CH、SIDE_CH_LESS_BRAM、ENABLE_DBG 等宏如何启用/裁剪代码块。",
+          "learning_goals": [
+            "理解 _pre_def.v 的生成与条件编译机制",
+            "掌握通过命令行参数向 Verilog 注入宏的方法",
+            "了解各类功能裁剪/调试宏的作用"
+          ],
+          "source_files": [
+            "boards/create_ip_repo.sh",
+            "ip/create_vivado_proj.sh",
+            "boards/ip_repo_gen.tcl",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "_pre_def.v 生成",
+            "条件编译宏"
+          ],
+          "practice_task": "依据 README 与脚本，写出一条为所有 IP 启用 ILA/DEBUG 宏的 create_ip_repo.sh 命令，并说明对应 `define 会写入哪个文件。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "IP 仿真与 testbench 实践",
+          "order": 3,
+          "filename": "u7-l3-ip-simulation-testbench.md",
+          "level": "advanced",
+          "topic": "讲解如何用 create_vivado_proj.sh 创建单 IP 工程并在 XSim 中跑 testbench：以 mv_avg_tb.v、fifo_sample_delay_tb.v、adc_intf_tb.v、dot11_tx_tb.v 为例，介绍 $fopen/$fscanf/$fwrite 读写测试向量、*_tb.tcl 配置与波形观测。",
+          "learning_goals": [
+            "掌握创建单 IP 工程并运行仿真的流程",
+            "看懂 testbench 用文件 IO 读写测试向量的方法",
+            "了解各 IP 提供的 testbench 与测试向量组织"
+          ],
+          "source_files": [
+            "ip/xpu/unit_test/mv_avg/mv_avg_tb.v",
+            "ip/xpu/unit_test/mv_avg/mv_avg_tb.tcl",
+            "ip/xpu/unit_test/fifo_sample_delay/fifo_sample_delay_tb.v",
+            "ip/rx_intf/unit_test/adc_intf/adc_intf_tb.v",
+            "ip/openofdm_tx/src/dot11_tx_tb.v"
+          ],
+          "minimal_modules": [
+            "单IP仿真",
+            "文件IO测试向量"
+          ],
+          "practice_task": "选择 mv_avg_tb.v（或 dot11_tx_tb.v），说明它如何从 test_vec 读取输入、驱动 DUT 并写回结果，并描述在 Vivado 中启动行为级仿真的步骤。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "修改并打包自定义 IP",
+          "order": 4,
+          "filename": "u7-l4-modify-package-custom-ip.md",
+          "level": "advanced",
+          "topic": "讲解“修改 IP 核心”工作流：在 ip/<ip_name> 下用 create_vivado_proj.sh 创建/编辑 IP 工程，再通过 package_ip.tcl / package_ip_complex.tcl 打包，最后用 create_ip_repo.sh 重新集成进顶层 openwifi 工程。",
+          "learning_goals": [
+            "掌握从修改单个 IP 到重新集成顶层的完整流程",
+            "看懂 package_ip.tcl / package_ip_complex.tcl 的打包逻辑",
+            "了解 ip_repo_gen.tcl 如何把各 IP 组装进 ip_repo"
+          ],
+          "source_files": [
+            "README.md",
+            "ip/create_vivado_proj.sh",
+            "boards/package_ip.tcl",
+            "boards/package_ip_complex.tcl",
+            "boards/ip_repo_gen.tcl"
+          ],
+          "minimal_modules": [
+            "IP 打包",
+            "集成回顶层"
+          ],
+          "practice_task": "选择一个 IP（如 tx_intf），描述修改其源码后需要依次运行的脚本，并说明 package_ip_complex.tcl 与 package_ip.tcl 在打包参数上的差异。",
+          "depends_on": [
+            "u1-l4",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "板卡移植与 ADI/Vivado 升级",
+          "order": 5,
+          "filename": "u7-l5-board-porting-adi-upgrade.md",
+          "level": "advanced",
+          "topic": "讲解把 openwifi 迁移到新板卡或新 ADI/Vivado 版本的两种方法（Vivado 自动升级导出 .tcl 对比；write_bd_tcl 导出 openwifi_ip 层级再 source 进新 ADI 参考），并介绍 parse_board_name.tcl、ultra_scale_tcl_gen.sh、openwifi_ip_ultra_scale.tcl 的板级/器件适配作用。",
+          "learning_goals": [
+            "掌握把 openwifi_ip 层级迁移到新设计的思路",
+            "看懂 parse_board_name.tcl 的板名解析与 fpga_size_flag 作用",
+            "了解 UltraScale+ 与普通 Zynq 两套 tcl 的差异"
+          ],
+          "source_files": [
+            "README.md",
+            "ip/parse_board_name.tcl",
+            "ip/openwifi_ip_ultra_scale.tcl",
+            "ip/ultra_scale_tcl_gen.sh",
+            "ip/connect_openwifi_ip_ultra_scale.tcl"
+          ],
+          "minimal_modules": [
+            "板名解析",
+            "层级迁移",
+            "UltraScale 适配"
+          ],
+          "practice_task": "依据 README 的 Migrate 小节与 parse_board_name.tcl，说明如何把 openwifi_ip 层级迁移到新的 ADI 参考设计，并指出 fpga_size_flag 如何影响 SMALL_FPGA 与 IP 列表。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l6",
+          "title": "GPIO/LED 调试、ILA 与 ENABLE_DBG",
+          "order": 6,
+          "filename": "u7-l6-gpio-led-ila-debug.md",
+          "level": "advanced",
+          "topic": "讲解硬件级调试手段：gpio_led.md 中各板卡 LED/GPIO 到 FPGA 信号（cycle_start/sig_valid/phy_tx_started/fcs_ok 等）的映射、flip/raw 两种风格，以及通过 ENABLE_DBG 宏插入 mark_debug、配合 ILA(.ltx) 抓波形的方法。",
+          "learning_goals": [
+            "理解 LED/GPIO 如何映射到关键 FPGA 状态信号",
+            "掌握 flip/raw 两种指示风格",
+            "学会用 ENABLE_DBG + ILA 进行片上波形调试"
+          ],
+          "source_files": [
+            "gpio_led.md",
+            "README.md",
+            "ip/xpu/src/xpu.v",
+            "boards/sdk_update.sh"
+          ],
+          "minimal_modules": [
+            "LED/GPIO 映射",
+            "ILA 调试"
+          ],
+          "practice_task": "依据 gpio_led.md 选定一块板卡，列出至少 3 个 LED/GPIO 对应的 FPGA 信号及其含义，并说明如何用 ENABLE_DBG 宏在 openwifi.tcl/create_ip_repo.sh 中启用 ILA 抓取这些信号。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,375 @@
+# 修改并打包自定义 IP
+
+## 1. 本讲目标
+
+本讲面向「想动 openwifi 硬件」的二次开发者。openwifi-hw 的六个自研 IP（`xpu`/`tx_intf`/`rx_intf`/`openofdm_tx`/`openofdm_rx`/`side_ch`）并不是直接被顶层工程引用的散装 `.v` 文件，而是先各自打包成 Vivado IP 核（带 `component.xml` 的标准 IP），再被 `openwifi_ip` 层级（见 u2-l2）实例化。因此「改一行 Verilog」并不会自动生效——你必须走一条「编辑单 IP → 重新打包成 IP 核 → 集成回顶层工程」的流水线。
+
+学完本讲，你应当能够：
+
+- 说清 `create_vivado_proj.sh` 如何在 `ip/<ip_name>` 目录下打开/重建单个 IP 的独立工程，用于编辑与仿真。
+- 区分 `package_ip.tcl`（简单打包）与 `package_ip_complex.tcl`（带工程重建的打包）在参数和职责上的差异。
+- 解释 `create_ip_repo.sh` → `ip_repo_gen.tcl` → `openwifi.tcl` 三段接力，如何把修改后的 IP 重新组装进 `ip_repo` 并生成顶层 `openwifi` 工程。
+- 独立完成「修改某个 IP 源码 → 重新集成到板级工程」的完整实操。
+
+## 2. 前置知识
+
+在动手前，请确认你已经建立以下认知（它们来自前置讲义，本讲不再重复展开）：
+
+- **六个自研 IP 与共享文件**（[u1-l2](u1-l2-directory-and-submodules.md)）：`ip/` 下只有 6 个 IP，跨 IP 共享的板级常量在 `ip/board_def.v`；每个 IP 目录结构为 `ip/<name>/src/`（源码）+ `ip/<name>/<name>.tcl`（工程重建脚本）。
+- **构建脚本总链路**（[u1-l4](u1-l4-fpga-build-flow.md)）：`create_ip_repo.sh` 由当前目录名反推 `BOARD_NAME`，触发 `ip_repo_gen.tcl` 把六个 IP 打包进 `ip_repo/`，最后 `source openwifi.tcl` 建顶层工程。
+- **条件编译宏体系**（[u7-l2](u7-l2-conditional-compile-macros.md)）：构建期生成的 `*_pre_def.v` 把命令行参数翻译成 `` `define ``，用 `` `ifdef `` 裁剪代码；顶层 `create_ip_repo.sh` 与单 IP `create_vivado_proj.sh` 是两条对齐的注入路径。
+- **板级规模开关**（[u2-l4](u2-l4-board-config-clock.md)）：`NUM_CLK_PER_US`、`SMALL_FPGA`、`SIDE_CH_LESS_BRAM` 由 `parse_board_name.tcl` 的 `fpga_size_flag` 与 `clock_speed.v` 驱动。
+
+还需要两个 Xilinx/Vivado 概念：
+
+- **IP 核（IP catalog component）**：Vivado 把一组源文件封装成一个「可复用核」，产出一份 `component.xml` 描述端口/参数/文件清单，供 IP Integrator（block design）像搭积木一样调用。`ipx::package_project` 就是「把当前工程封装成核」的命令。
+- **VLNV**：每个核由 `Vendor : Library : Name : Version` 四元组唯一标识。openwifi 自研核统一用 `user.org : user : <ip_name>` 前缀（见 [package_ip.tcl:25](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip.tcl#L24-L25) 的 `-vendor user.org -library user`），区别于 Xilinx 自带的 `xilinx.com:ip:` 标准件。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲角色 |
+|------|------|---------|
+| `ip/create_vivado_proj.sh` | 通用启动器：source Vivado 环境 + `vivado -source <ip>.tcl`，最多透传 7 个参数 | 「编辑单 IP」入口 |
+| `ip/tx_intf/tx_intf.tcl` | 某个 IP 的工程重建脚本（Vivado 自动生成），负责建工程、生成 `clock_speed.v`/`pre_def.v` | 单 IP 工程的真正内容 |
+| `boards/package_ip.tcl` | **简单打包**：3 个参数，`glob` 目录全部文件后封装成核 | 打包路径之一 |
+| `boards/package_ip_complex.tcl` | **带重建的打包**：4 个参数，先 `source` 单 IP 的 `.tcl` 再封装 | 打包路径之二，被 `ip_repo_gen.tcl` 使用 |
+| `boards/ip_repo_gen.tcl` | 编排器：生成共享文件 → 循环打包六 IP → `source openwifi.tcl` | 「集成回顶层」主干 |
+| `boards/create_ip_repo.sh` | 顶层 shell：解析命令行宏 → 写 `ip_config/*_pre_def.v` → 调 `ip_repo_gen.tcl` | 「集成回顶层」入口 |
+| `README.md` | 「Modify IP cores」「Conditional compile」两节是官方工作流说明 | 权威依据 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 单 IP 开发循环与 IP 打包
+
+#### 4.1.1 概念说明
+
+openwifi 的每个自研 IP 都有一个**独立的 Vivado 工程**，存放在 `ip/<ip_name>/` 下。这个工程既是你「改代码、跑仿真」的工作区，也是「打包成 IP 核」的素材来源。关键在于理解一个反直觉的事实：
+
+> 顶层 `openwifi` 工程并不直接编译 `ip/tx_intf/src/*.v`，而是引用 `boards/$BOARD_NAME/ip_repo/tx_intf/` 里那个**已打包好的核**。
+
+所以「修改 IP」本质上有两步：(1) 在 `ip/<name>/` 改源码并验证；(2) 把改好的源码**重新打包**成核，更新到 `ip_repo/`。本节聚焦这两步，下一节（4.2）讲如何把 `ip_repo/` 接回顶层。
+
+打包成核有两种脚本可选，它们的「复杂度」差异正是本节的核心知识点：
+
+- **`package_ip.tcl`（简单版）**：假设源码目录已经准备好了所有需要的文件，它只是「`glob` 目录里所有 `.v` 文件 → 封装」，不运行任何文件生成逻辑。
+- **`package_ip_complex.tcl`（带重建版）**：在打包前先 `source` 单 IP 的 `.tcl`，让该 IP 自己生成 `clock_speed.v`、复制 `board_def.v`、追加 `*_pre_def.v`，然后再封装。
+
+「complex」并非指打包逻辑更复杂，而是指它**额外承担了「用 IP 自己的脚本重建工程并生成板级文件」这一步**。
+
+#### 4.1.2 核心流程
+
+修改并打包单个 IP 的完整循环：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ ① cd ip/tx_intf/                                            │
+│    用编辑器修改 src/ 下的 .v 源码                            │
+├─────────────────────────────────────────────────────────────┤
+│ ② ../create_vivado_proj.sh $XILINX_DIR tx_intf.tcl [参数…]   │
+│    → source Vivado 2022.2 环境                               │
+│    → vivado -source tx_intf.tcl -tclargs BOARD_NAME ...      │
+│    → tx_intf.tcl 重建工程、生成 clock_speed.v/pre_def.v      │
+│    → 在 GUI 里综合/仿真，确认改对了                          │
+├─────────────────────────────────────────────────────────────┤
+│ ③（打包到 ip_repo/ 的工作交给 4.2 的 create_ip_repo.sh）     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+注意第 ③ 步：openwifi 的官方流程里，**单 IP 的「重新打包」并不单独执行**，而是被合并进顶层 `create_ip_repo.sh`（它会循环重新打包全部六个 IP）。如果你只想单独打包一个 IP，需要手动调用 `package_ip.tcl`/`package_ip_complex.tcl`——`ip_repo_gen.tcl` 里恰好保留了这种用法的注释模板（见 4.1.3）。
+
+#### 4.1.3 源码精读
+
+**(a) `create_vivado_proj.sh`：单 IP 工程的通用启动器**
+
+这个脚本本身**不含任何 IP 特定知识**，它只是一个「source 环境 + 调 vivado」的壳，把命令行参数透传给指定的 `.tcl`：
+
+[ip/create_vivado_proj.sh:7-16](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/create_vivado_proj.sh#L7-L16) — 打印用法，说明至少要给 `$XILINX_DIR` 和 `$TCL_FILENAME` 两个参数，后续最多 5 个参数会变成条件编译宏。第 3 个参数对 `openofdm_rx` 是特例（指仿真用的 `SAMPLE_FILE`）。
+
+[ip/create_vivado_proj.sh:20-28](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/create_vivado_proj.sh#L20-L28) — 校验参数个数与 `$XILINX_DIR` 合法性，取出前两个固定参数。
+
+[ip/create_vivado_proj.sh:44](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/create_vivado_proj.sh#L44) — source Vivado 2022.2 的 `settings64.sh`（注意版本写死，且是 `Vivado/` 而非 `Vitis/`，与 `create_ip_repo.sh` 用 `Vitis/` 不同）。
+
+[ip/create_vivado_proj.sh:46-78](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/create_vivado_proj.sh#L46-L78) — 把第 3~9 个位置参数装进 `ARG1..ARG7`，最终用 `vivado -source $TCL_FILENAME -tclargs $ARG1 ... $ARG7` 启动。即：命令行第 1 个用户参数 = `BOARD_NAME`，第 2 个 = `NUM_CLK_PER_US`，第 3~5 个 = 用户 DEF。
+
+**(b) 单 IP 的 `.tcl`（以 `tx_intf.tcl` 为例）做了什么**
+
+`create_vivado_proj.sh` 启动后真正执行的是各 IP 自己的 `.tcl`。它是 Vivado「Save Project As Tcl」自动生成的工程重建脚本，但在头部被 openwifi 加了「参数处理 + 板级文件生成」段：
+
+[ip/tx_intf/tx_intf.tcl:28-46](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L28-L46) — 解析 `argv`：`ARGUMENT1` 默认 `zed_fmcs2`、`ARGUMENT2` 默认 `100`（即 100MHz）。
+
+[ip/tx_intf/tx_intf.tcl:50-78](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L50-L78) — **以追加模式 `a` 打开 `./src/tx_intf_pre_def.v`**，把每个非空用户参数写成 `` `define TX_INTF_<ARG> ``，最后追加 `` `define <BOARD_NAME> ``。注意是 `a`（append）！这正是 [u7-l2](u7-l2-conditional-compile-macros.md) 强调的陷阱：反复运行会让宏累积，迭代前要先删掉旧的 `pre_def.v`。
+
+[ip/tx_intf/tx_intf.tcl:92-100](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L92-L100) — **以覆盖模式 `w` 生成 `./src/clock_speed.v`**（写 `NUM_CLK_PER_US` 与可选的 `SMALL_FPGA`），并把 `../board_def.v` 复制成 `./src/board_def.v`。`fpga_size_flag` 来自第 48 行 `source ../parse_board_name.tcl`。
+
+[ip/tx_intf/tx_intf.tcl:170-171](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L170-L171) — `create_project ... -part $part_string`，用 `parse_board_name.tcl` 解析出的器件型号建工程；第 227-241 行 `add_files` 把 `src/` 下的 12 个 `.v` 逐个加入（这里不使用 `glob`，文件清单是写死的，因此**新增源文件时必须手动改这个 `.tcl` 的文件列表**）。
+
+> 小结：`<ip>.tcl` 同时干三件事——生成板级文件、追加条件编译宏、重建工程。`package_ip_complex.tcl` 之所以叫 complex，正是因为它要把这段 `.tcl` 也跑一遍。
+
+**(c) `package_ip.tcl`：简单打包**
+
+[boards/package_ip.tcl:5-13](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip.tcl#L5-L13) — 只吃 **3 个参数**：`part_string`、`src_dir`、`ip_dir`。清空旧产物后用 `part_string` 建工程。
+
+[boards/package_ip.tcl:16-21](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip.tcl#L16-L21) — **`set files [glob $src_dir/*]; add_files $files`**：用通配抓取 `src_dir` 下的**全部文件**加入工程。这意味着调用方必须先把 `board_def.v`、`clock_speed.v`、`*_pre_def.v` 等生成文件事先复制进 `src_dir`，否则要么漏文件、要么抓到旧文件。
+
+[boards/package_ip.tcl:24-38](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip.tcl#L24-L38) — 标准 `ipx::` 打包三连：`package_project`（封装）→ `unload_core`/`edit_ip_in_project`（重新打开以便刷新）→ `update_source_project_archive`/`create_xgui_files`/`save_core`/`move_temp_component_back`（归档、生成参数 GUI、保存、把临时核移回 `ip_dir`）。`-vendor user.org -library user -taxonomy /UserIP` 统一了自研核的 VLNV 前缀。
+
+**(d) `package_ip_complex.tcl`：带工程重建的打包**
+
+[boards/package_ip_complex.tcl:5-8](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip_complex.tcl#L5-L8) — 吃 **4 个参数**：`ip_tcl_filename`、`src_dir`、`ip_dir`、`BOARD_NAME`。比简单版多出 `ip_tcl_filename` 与 `BOARD_NAME`。
+
+[boards/package_ip_complex.tcl:13-18](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip_complex.tcl#L13-L18) — **关键差异**：`cd $src_dir/` 后，把 `argc` 设为 1、`argv` 设为 `[list $BOARD_NAME]`，再 `source ./$ip_tcl_filename`。这一步实际执行了例如 `tx_intf.tcl`，于是 `clock_speed.v`/`board_def.v`/`pre_def.v` 被**当场生成**，工程也被当场建好。
+
+[boards/package_ip_complex.tcl:23-38](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip_complex.tcl#L23-L38) — 随后是与 `package_ip.tcl` **完全相同**的 `ipx::` 打包序列。
+
+> 两脚本打包部分逐行一致，**唯一区别在第 13-18 行**：complex 版会先跑 IP 自己的 `.tcl` 重建工程并生成板级文件，simple 版假设文件已就位、直接 `glob`。下表归纳差异：
+
+| 维度 | `package_ip.tcl`（简单） | `package_ip_complex.tcl`（带重建） |
+|------|------------------------|-----------------------------------|
+| 参数个数 | 3：`part_string`、`src_dir`、`ip_dir` | 4：`ip_tcl_filename`、`src_dir`、`ip_dir`、`BOARD_NAME` |
+| 是否运行 IP 的 `.tcl` | 否 | 是（`source ./$ip_tcl_filename`） |
+| 板级文件来源 | 调用方预先复制进 `src_dir` | `.tcl` 当场生成（`clock_speed.v` 等） |
+| 加源方式 | `glob $src_dir/*`（抓全部） | 由 `.tcl` 的写死文件清单 `add_files` |
+| 谁在用 | `ip_repo_gen.tcl` 注释模板（手动单 IP） | `ip_repo_gen.tcl` 主循环（全部六 IP） |
+
+**(e) `ip_repo_gen.tcl` 里保留的「单 IP 打包」注释模板**
+
+主循环（见 4.2.3）用的是 complex 版。但脚本末尾留了一段被注释掉的模板，演示如何用**简单版** `package_ip.tcl` 单独打包一个 IP，例如 `tx_intf`：
+
+[boards/ip_repo_gen.tcl:135-143](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L135-L143) — 注释模板：先确保 `ip_config/tx_intf_pre_def.v` 存在，**手动 `cp board_def.v`、`clock_speed.v`、`pre_def.v` 进 `src/`**，再用 `set argv [list $part_string ../../ip/tx_intf/src/ ./ip_repo/tx_intf $BOARD_NAME]; source ../package_ip.tcl` 打包。注意 `argv` 传了 4 个元素，但 `package_ip.tcl` 只读前 3 个，`BOARD_NAME` 被忽略——这正印证了「简单版需要调用方预先把板级文件备齐」。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲手打开 `tx_intf` 的独立工程，观察 `create_vivado_proj.sh` 如何把命令行参数变成 `pre_def.v` 里的宏，从而理解「编辑单 IP」循环。
+
+**操作步骤**（本实践为源码阅读 + 本地验证型，需安装 Vivado 2022.2）：
+
+1. 进入 IP 目录：
+   ```bash
+   cd ip/tx_intf
+   ```
+2. 阅读并运行（参数含义：`BOARD_NAME=zc706_fmcs2`、`NUM_CLK_PER_US=100`、用户 DEF=`ENABLE_DBG`）：
+   ```bash
+   ../create_vivado_proj.sh $XILINX_DIR tx_intf.tcl zc706_fmcs2 100 ENABLE_DBG
+   ```
+3. 脚本启动后会在 GUI 打开 `tx_intf` 工程。同时用编辑器查看 `ip/tx_intf/src/tx_intf_pre_def.v` 与 `ip/tx_intf/src/clock_speed.v` 这两个**新生成**的文件。
+4. 在 Vivado 里 `Sources → Simulation Sources`（或直接看综合）确认工程顶层是 `tx_intf`。
+
+**需要观察的现象**：
+
+- `tx_intf_pre_def.v` 末尾应出现 `` `define TX_INTF_ENABLE_DBG `` 与 `` `define zc706_fmcs2 ``（由 [tx_intf.tcl:55-77](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L52-L78) 追加写入）。
+- `clock_speed.v` 内容应为 `` `define NUM_CLK_PER_US 100 ``，且因 `zc706_fmcs2` 的 `fpga_size_flag==1`（见 [parse_board_name.tcl:19-24](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/parse_board_name.tcl#L19-L24)）**不**含 `SMALL_FPGA`。
+
+**预期结果**：工程成功打开，两份生成文件内容与上述一致。
+
+**重要提醒**：若你**再次**运行同一条命令，`pre_def.v` 会因为追加模式而出现**两份** `TX_INTF_ENABLE_DBG`。二次运行前应手动删除 `ip/tx_intf/src/tx_intf_pre_def.v`（这是 [u7-l2](u7-l2-conditional-compile-macros.md) 讲过的 append 陷阱，单 IP 路径尤其容易踩到）。
+
+> 若本地无 Vivado 环境，可改为**纯阅读型实践**：对照 [tx_intf.tcl:50-78](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L50-L78) 与 [tx_intf.tcl:92-100](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/ip/tx_intf/tx_intf.tcl#L92-L100)，在纸上推演「命令行 `ENABLE_DBG` → `ARGUMENT3` → `` `define TX_INTF_ENABLE_DBG ``」的转换链，并标注每个文件用 `a` 还是 `w` 模式打开。结果标注为「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `package_ip_complex.tcl` 在 `source ./$ip_tcl_filename` 之前要 `cd $src_dir/`、之后又要 `cd $current_dir/` 回去？
+
+**参考答案**：因为 `<ip>.tcl` 内部所有相对路径（`./src/tx_intf_pre_def.v`、`./src/clock_speed.v`、`../board_def.v`、`../parse_board_name.tcl`）都以「IP 目录」为基准。不 `cd` 进去这些路径会解析到调用方（`boards/$BOARD_NAME/`）目录而失败；打包完 `cd` 回去则保证后续脚本（如 `ip_repo_gen.tcl` 的循环、`source openwifi.tcl`）仍在板级目录运行。见 [package_ip_complex.tcl:13-18](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip_complex.tcl#L13-L18) 与 [package_ip_complex.tcl:45](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip_complex.tcl#L44-L45)。
+
+**练习 2**：假设你给 `tx_intf` 新增了一个源文件 `src/tx_new.v`，分别用 simple 版和 complex 版打包时，各需要额外做什么？
+
+**参考答案**：
+- **complex 版**：必须编辑 `ip/tx_intf/tx_intf.tcl` 第 227-241 行的 `add_files` 清单，把 `tx_new.v` 加进去——因为 complex 版跑的是 `.tcl`，而 `.tcl` 用写死清单（非 `glob`）加源。
+- **simple 版**：无需改 `.tcl`，因为 [package_ip.tcl:17-18](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/package_ip.tcl#L16-L18) 用 `glob $src_dir/*` 自动抓取目录下全部文件，`tx_new.v` 会被自动包含。这也是 README「Modify IP cores」末尾提示「遇到错误要改 `create_ip_repo.sh`/`ip_repo_gen.tcl` 等，例如加入新增文件」的由来。
+
+**练习 3**：`package_ip.tcl` 的 `argv` 传了 4 个元素（含 `BOARD_NAME`），但脚本只读前 3 个。这种「多余参数」会不会报错？
+
+**参考答案**：不会。Tcl 的 `[lindex $argv N]` 越界返回空串，`package_ip.tcl` 根本不读 `argv[3]`，所以 `BOARD_NAME` 被静默忽略。这也说明 simple 版对 `BOARD_NAME` 无感——它需要的板级信息（`part_string`）必须由调用方在第 1 个参数显式给出。
+
+---
+
+### 4.2 把修改集成回顶层工程
+
+#### 4.2.1 概念说明
+
+上节你只改了一个 IP 并在它的独立工程里验证。但顶层 `openwifi_$BOARD_NAME` 工程引用的是 `boards/$BOARD_NAME/ip_repo/<name>/` 里**已打包好的核**。要让修改真正进入最终的 bitstream，必须刷新整个 `ip_repo/`。
+
+openwifi 的设计选择是：**不提供「只重打一个 IP」的一键命令**，而是用 `create_ip_repo.sh` 每次从头重新打包全部六个 IP。理由有二：
+
+1. 六个 IP 共享同一组板级文件（`board_def.v`、`clock_speed.v`、`spi_command.v`、`fpga_scale.v`、`has_side_ch_flag.v`、`openwifi_hw_git_rev.v`），这些文件由 `ip_repo_gen.tcl` 统一生成并分发，必须保持一致；单独打包容易让各 IP 拿到不一致的版本。
+2. 条件编译宏（如 `ENABLE_DBG`）往往要同时对多个 IP 生效，统一入口更不易漏。
+
+因此集成流程是一条三段接力：
+
+- **`create_ip_repo.sh`**（shell 入口）：解析命令行宏，为每个 IP 写一份 `ip_config/<name>_pre_def.v`，然后调 Vivado 跑 `ip_repo_gen.tcl`。
+- **`ip_repo_gen.tcl`**（编排器）：生成共享文件 → 循环对六个 IP 调 `package_ip_complex.tcl` 打包到 `ip_repo/` → 最后 `source openwifi.tcl` 建顶层工程。
+- **`openwifi.tcl`**（顶层工程）：实例化 `ip_repo/` 里的核，搭出完整 SoC（承接 [u2-l1](u2-l1-system-top-block-design.md)）。
+
+#### 4.2.2 核心流程
+
+```
+ boards/$BOARD_NAME/  （你在此目录运行命令）
+        │
+        │  ../create_ip_repo.sh $XILINX_DIR [IP DEF…] [IP DEF…]
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ create_ip_repo.sh                                        │
+ │  ① BOARD_NAME = ${PWD##*/}         （从目录名反推）      │
+ │  ② 为 6 个 IP 各写 ip_config/<name>_pre_def.v            │
+ │      （写入 `define <BOARD_NAME> 与各 `define IP_DEF）   │
+ │  ③ source Vitis 环境 → vivado -source ../ip_repo_gen.tcl │
+ └──────────────────────────────────────────────────────────┘
+        │
+        ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ ip_repo_gen.tcl                                          │
+ │  ① source parse_board_name.tcl → part_string/fpga_size…  │
+ │  ② 生成 ip_repo/{board_def, clock_speed, spi_command,    │
+ │      fpga_scale, has_side_ch_flag, openwifi_hw_git_rev}.v│
+ │  ③ for ip_name in {openofdm_rx openofdm_tx rx_intf       │
+ │       tx_intf xpu side_ch}:                              │
+ │       - 复制共享文件到 ip/<name>/src/（openofdm_rx 跳过） │
+ │       - source package_ip_complex.tcl → 打包进 ip_repo/  │
+ │       - openofdm_rx：追加 pre_def.v（保自带定义）        │
+ │  ④ source openwifi.tcl → 建顶层 openwifi_$BOARD_NAME     │
+ └──────────────────────────────────────────────────────────┘
+        │
+        ▼
+  Vivado GUI: Generate Bitstream → Export Hardware(.xsa/.ltx)
+        │
+        ▼
+  cd .. && ./sdk_update.sh $BOARD_NAME $IMG_DIR   （交付镜像）
+```
+
+一个关键细节：`openofdm_rx` 因是外部 git 子模块（见 u3-l3），其打包流程与其他五个自研 IP 不同——**不预先复制共享文件**（避免覆盖子模块自带定义），改为打包后用 `cat >>` 追加 `pre_def.v`。
+
+#### 4.2.3 源码精读
+
+**(a) `create_ip_repo.sh`：命令行宏 → `ip_config/*_pre_def.v`**
+
+[boards/create_ip_repo.sh:7-15](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L7-L15) — 用法说明：第 1 参数是 `$XILINX_DIR`，其后可跟成对的 `$IP_NAME $DEF1 $DEF2 ...`，`DEF` 会变成 `` `define IP_NAME_DEF ``。
+
+[boards/create_ip_repo.sh:29](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L29) — **`BOARD_NAME=${PWD##*/}`**：从当前目录名取最后一段作为 `BOARD_NAME`。所以必须在 `boards/$BOARD_NAME/` 目录里运行。
+
+[boards/create_ip_repo.sh:42-49](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L42-L49) — 先为每个 IP 初始化 `ip_config/<name>_pre_def.v`，写入 `` `define $BOARD_NAME ``，并加注释说明「不同 IP 的 pre_def.v 内容必须不同」（因为最终六 IP 会进同一个 Vivado 工程，同名 `pre_def.v` 不能有冲突定义）。
+
+[boards/create_ip_repo.sh:51-73](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L51-L73) — 解析 `$@`：遇到合法 IP 名（`xpu`/`tx_intf`/...）就切换「当前 IP」，其后的每个 token 写成 `` `define ${MODULE_NAME}_${ARGUMENT} ``（`MODULE_NAME` 是 IP 名大写，如 `TX_INTF`）追加进对应 `pre_def.v`。例如命令行 `tx_intf ENABLE_DBG` 会写入 `` `define TX_INTF_ENABLE_DBG `` 到 `ip_config/tx_intf_pre_def.v`。
+
+[boards/create_ip_repo.sh:32-40](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L32-L40) 与 [75-79](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L75-L79) — 校验 `Vitis/2022.2/settings64.sh` 存在（注意是 **Vitis** 不是 Vivado，因为顶层流程含 SDK/导出环节），source 后 `vivado -source ../ip_repo_gen.tcl`。
+
+**(b) `ip_repo_gen.tcl`：生成共享文件 + 循环打包**
+
+[boards/ip_repo_gen.tcl:8-11](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L8-L11) — 从 `pwd` 再取一次 `BOARD_NAME`（与 shell 端一致），`source ../../ip/parse_board_name.tcl` 得到 `part_string`、`fpga_size_flag`、`ultra_scale_flag`。
+
+[boards/ip_repo_gen.tcl:13-69](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L13-L69) — 建 `ip_repo/` 并生成六份共享文件：
+- [L16](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L16) 复制 `board_def.v`；
+- [L18-23](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L18-L23) 用 `get_git_rev.sh` 生成 `openwifi_hw_git_rev.v`；
+- [L25-35](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L25-L35) 由 `has_side_ch` 开关生成 `HAS_SIDE_CH`/`NO_SIDE_CH`；
+- [L37-43](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L37-L43) 由 `fpga_size_flag==0` 生成 `SIDE_CH_LESS_BRAM`；
+- [L45-53](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L45-L53) 生成 `clock_speed.v`（`NUM_CLK_PER_US=100` + 可选 `SMALL_FPGA`，注意这是第一版，会被 `openwifi.tcl` 覆盖，见 [u2-l4](u2-l4-board-config-clock.md)）；
+- [L55-67](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L55-L67) 生成 `spi_command.v`（`SPI_HIGH`/`SPI_LOW`）。
+
+[boards/ip_repo_gen.tcl:71-99](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L71-L99) — **核心循环**：
+- [L72](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L72) 打包顺序为 `openofdm_rx openofdm_tx rx_intf tx_intf xpu side_ch`；
+- [L79](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L79) 确保 `ip_config/<name>_pre_def.v` 存在（空则建空文件）；
+- [L81-89](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L81-L89) **非 openofdm_rx**：把六份共享文件 + `pre_def.v` 复制进 `ip/<name>/src/`（这正是 `package_ip_complex.tcl` 跑 `.tcl` 前的「预置」，与 4.1 注释模板的手动 cp 对应）；
+- [L90-92](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L90-L92) 组 `argv` 并 `source ../package_ip_complex.tcl`；
+- [L93-95](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L93-L95) **openofdm_rx 特例**：打包后 `exec cat ./ip_config/openofdm_rx_pre_def.v >> ./ip_repo/openofdm_rx/src/openofdm_rx_pre_def.v`，以追加而非覆盖保留子模块自带定义（提交 `b6a3231` 修复的正是这一点）；
+- [L96](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L96) 删 `xgui`（参数 GUI 临时目录）。
+
+[boards/ip_repo_gen.tcl:104-105](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L104-L105) — 循环结束后 `source ../openwifi.tcl`，建顶层工程并跑到 `write_bitstream` 前置阶段。**至此 `ip_repo/` 里的核已被顶层工程引用，你的修改进入了顶层。**
+
+**(c) README 的官方表述**
+
+[README.md:97-105](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/README.md#L97-L105) — 「Modify IP cores」一节明确两步：先 `cd ip/ip_name && ../create_vivado_proj.sh $XILINX_DIR ip_name.tcl` 改 IP；再回板级目录跑 `../create_ip_repo.sh $XILINX_DIR` 集成。并提示：若改动复杂导致 `create_ip_repo.sh` 报错，应检查并修改 `create_ip_repo.sh`/`ip_repo_gen.tcl` 等（例如加入新增文件）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：把「修改 `tx_intf`」的完整链路走一遍——从改源码到重新集成进顶层工程，并说明 `package_ip_complex.tcl` 与 `package_ip.tcl` 在打包参数上的差异。
+
+**操作步骤**（需 Vivado 2022.2 + Vitis；纯阅读型可只做步骤 1-3）：
+
+1. **改源码**：编辑 `ip/tx_intf/src/tx_intf.v`，例如在某根线上加一句调试输出或调整一个本地参数（本实践不要求功能性修改，重点是流程）。
+2. **单 IP 验证**（承接 4.1.4）：
+   ```bash
+   cd ip/tx_intf
+   ../create_vivado_proj.sh $XILINX_DIR tx_intf.tcl $BOARD_NAME 100
+   # 在 Vivado 里 Run Synthesis 确认无语法错误后关闭
+   ```
+3. **回板级目录集成**：
+   ```bash
+   cd ../../boards/$BOARD_NAME      # 例如 boards/zc706_fmcs2
+   ../create_ip_repo.sh $XILINX_DIR
+   ```
+   这一步会重新打包全部六个 IP 到 `ip_repo/`，并 `source openwifi.tcl` 建顶层工程。
+4. （可选）若想给 `tx_intf` 单独开调试宏，同时保持其余 IP 不变：
+   ```bash
+   ../create_ip_repo.sh $XILINX_DIR tx_intf ENABLE_DBG
+   ```
+5. 在 Vivado GUI 点 **Generate Bitstream**，再 **File → Export → Export Hardware → Include bitstream** 得到 `system_top.xsa`/`.ltx`。
+6. 交付镜像：`cd .. && ./sdk_update.sh $BOARD_NAME $OPENWIFI_HW_IMG_DIR`。
+
+**需要观察的现象 / 预期结果**：
+
+- 步骤 3 完成后，`boards/$BOARD_NAME/ip_repo/tx_intf/` 里应出现刷新后的 `component.xml` 与 `src/`（内含你改过的 `tx_intf.v`）。
+- `ip_config/tx_intf_pre_def.v` 应只含 `` `define <BOARD_NAME> ``（步骤 3）或额外含 `` `define TX_INTF_ENABLE_DBG ``（步骤 4）。
+- 顶层工程 `openwifi_$BOARD_NAME` 能在 Vivado 打开，且 `openwifi_ip` 层级里的 `tx_intf` 实例已是新版本。
+
+**关于 `package_ip_complex.tcl` 与 `package_ip.tcl` 的参数差异（实践任务的核心问答题）**：
+
+- **`package_ip.tcl` 接收 3 个参数**：`part_string`、`src_dir`、`ip_dir`。它**不运行 IP 的 `.tcl`**，直接 `glob $src_dir/*` 抓全部文件打包，因此**调用方必须先把 `board_def.v`/`clock_speed.v`/`*_pre_def.v` 等生成文件复制进 `src_dir`**（见 [ip_repo_gen.tcl:135-143](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L135-L143) 注释模板里的手动 `cp`）。
+- **`package_ip_complex.tcl` 接收 4 个参数**：多出 `ip_tcl_filename`（放第 1 位）与 `BOARD_NAME`（放第 4 位）。它会 `cd $src_dir && source ./$ip_tcl_filename`，**由 IP 自己的 `.tcl` 当场生成 `clock_speed.v`/`board_def.v` 并追加 `pre_def.v`**，所以对调用方的「预置文件」要求更低。
+- 实际 `ip_repo_gen.tcl` 主循环统一用 **complex 版**（[L90-92](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L90-L92)），simple 版仅作为注释模板存在。
+
+> 若本地无 Vivado：把步骤 1-3 当作「源码跟踪型实践」——对照 4.2.3 的源码精读，在纸上画出 `tx_intf.v`（被你修改）→ 经 `package_ip_complex.tcl` 打包进 `ip_repo/tx_intf/` → 被 `openwifi.tcl` 实例化的数据流，并标注每一步对应的脚本行号。运行结果标注「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么必须在 `boards/$BOARD_NAME/` 目录下运行 `create_ip_repo.sh`，而不能在仓库根目录运行？
+
+**参考答案**：因为 [create_ip_repo.sh:29](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L29) 用 `BOARD_NAME=${PWD##*/}` 从当前目录名取 `BOARD_NAME`，且脚本内 `vivado -source ../ip_repo_gen.tcl`（[L78](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L75-L79)）依赖「上一级是 `boards/`」的相对路径。在根目录运行会让 `BOARD_NAME` 变成 `openwifi-hw`、且找不到 `ip_repo_gen.tcl`。
+
+**练习 2**：`ip_repo_gen.tcl` 对 `openofdm_rx` 与其余五个 IP 的处理有何不同？为什么？
+
+**参考答案**：其余五 IP 在打包前把六份共享文件「覆盖式」复制进 `ip/<name>/src/`（[L81-89](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L81-L89)）；`openofdm_rx` 跳过这一步，改为打包后用 `cat >>` **追加** `pre_def.v`（[L93-95](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L93-L95)）。原因是 `openofdm_rx` 是外部 git 子模块，自带 `pre_def.v` 等定义，覆盖会破坏其原生配置；追加则既注入 openwifi 的 `BOARD_NAME`/宏，又保留子模块自带定义（详见 u3-l3 与提交 `b6a3231`）。
+
+**练习 3**：你改完 `tx_intf` 只跑了 `create_vivado_proj.sh` 验证，没跑 `create_ip_repo.sh`，就直接在旧的顶层工程里 Generate Bitstream。结果会怎样？
+
+**参考答案**：bitstream 里**不会**包含你的修改。因为顶层工程引用的是 `ip_repo/tx_intf/` 里**旧的**打包核，而你只改了 `ip/tx_intf/src/` 的源码却没重新打包到 `ip_repo/`。必须运行 `create_ip_repo.sh`（或手动 `package_ip_complex.tcl`）刷新 `ip_repo/tx_intf/` 后，顶层工程重新综合才会 pick up 修改。这正是「编辑单 IP」与「集成回顶层」必须成对出现的原因。
+
+## 5. 综合实践
+
+**任务**：给 `tx_intf` IP 增加一个调试宏 `TX_INTF_ENABLE_DBG`（用于打开 ILA 调试，相关源码约定见 [u7-l2](u7-l2-conditional-compile-macros.md) 与 u7-l6），并在顶层工程中使其对 `tx_intf` 单独生效。
+
+**要求串联本讲全部知识点**：
+
+1. **单 IP 验证**（用 `create_vivado_proj.sh`）：
+   ```bash
+   cd ip/tx_intf
+   rm -f src/tx_intf_pre_def.v   # 清掉旧的，避免 append 累积
+   ../create_vivado_proj.sh $XILINX_DIR tx_intf.tcl $BOARD_NAME 100 ENABLE_DBG
+   ```
+   打开工程，确认 `src/tx_intf_pre_def.v` 含 `` `define TX_INTF_ENABLE_DBG ``，综合通过。
+
+2. **集成回顶层**（用 `create_ip_repo.sh`，只对 `tx_intf` 传宏）：
+   ```bash
+   cd ../../boards/$BOARD_NAME
+   ../create_ip_repo.sh $XILINX_DIR tx_intf ENABLE_DBG
+   ```
+   对照 [create_ip_repo.sh:51-73](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/create_ip_repo.sh#L51-L73) 解释：为什么这条命令只影响 `tx_intf`，其余五个 IP 的 `pre_def.v` 只含 `` `define <BOARD_NAME> `` 而不含 `ENABLE_DBG`。
+
+3. **验证打包差异**：阅读 [ip_repo_gen.tcl:90-92](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L90-L92)，说明这一步用的是 `package_ip_complex.tcl` 还是 `package_ip.tcl`，并解释若改用另一个脚本会发生什么（提示：板级文件谁来生成）。
+
+4. **交付**：在 Vivado 跑 Generate Bitstream + Export Hardware，得到 `system_top.xsa`。
+
+**验收标准**：能在 `ip_repo/tx_intf/src/tx_intf_pre_def.v` 看到该宏；顶层工程综合通过；能口述 simple/complex 两种打包脚本的参数差异（3 参 vs 4 参、是否 `source` IP 的 `.tcl`、板级文件来源）。
+
+## 6. 本讲小结
+
+- openwifi 的六个自研 IP 不是散装 `.v`，而是先各自打包成带 `component.xml` 的 Vivado IP 核，再被 `openwifi_ip` 层级实例化；改源码后必须「重新打包 + 重新集成」才能进 bitstream。
+- 「编辑单 IP」入口是 `ip/create_vivado_proj.sh`：它是「source 环境 + 调 vivado 跑 `<ip>.tcl`」的通用壳，最多透传 7 个参数；真正建工程、生成 `clock_speed.v`、追加 `*_pre_def.v` 的是各 IP 自己的 `<ip>.tcl`。
+- `package_ip.tcl`（简单）与 `package_ip_complex.tcl`（带重建）打包序列逐行相同，唯一区别是后者会先 `source` IP 的 `.tcl` 生成板级文件：前者 3 参 `part_string/src_dir/ip_dir` + `glob` 全文件，后者 4 参多出 `ip_tcl_filename/BOARD_NAME`。
+- 「集成回顶层」是三段接力：`create_ip_repo.sh`（命令行宏 → `ip_config/*_pre_def.v`，`BOARD_NAME` 取自目录名）→ `ip_repo_gen.tcl`（生成六份共享文件 + 循环 `package_ip_complex.tcl` 打包 + openofdm_rx 用 `cat >>` 追加）→ `openwifi.tcl`（建顶层工程）。
+- openofdm_rx 作为外部子模块是特例：不预复制共享文件、改用追加 `pre_def.v` 以保留自带定义（提交 `b6a3231`）。
+- 给 IP 新增源文件时，complex 路径需要手改 `<ip>.tcl` 的 `add_files` 清单（写死、非 glob），simple 路径则因 `glob` 自动包含——这是 README 提示「遇到打包报错就改 `ip_repo_gen.tcl` 等」的根因。
+
+## 7. 下一步学习建议
+
+- **板卡移植与 ADI/Vivado 升级**（[u7-l5](u7-l5-board-porting-adi-upgrade.md)）：本讲的打包/集成流程是「换板卡」的基础——迁移到新板卡或新 Vivado 时，`parse_board_name.tcl`、`openwifi_ip_ultra_scale.tcl` 与本讲的 `ip_repo_gen.tcl` 紧密配合。
+- **GPIO/LED 调试与 ILA**（[u7-l6](u7-l6-gpio-led-ila-debug.md)）：本讲综合实践里用到的 `ENABLE_DBG` 宏如何接 ILA 抓波形，是修改 IP 后验证行为的下一步。
+- **继续阅读源码**：精读 `boards/ip_repo_gen.tcl` 末尾被注释的「单 IP 打包模板」（[L107-165](https://github.com/open-sdr/openwifi-hw/blob/d047d794195beb72e12d2a9a6c205c16399cf288/boards/ip_repo_gen.tcl#L107-L165)），对比五种 IP 各自需要预复制哪些共享文件，理解 `spi_command.v`/`fpga_scale.v` 为何只被部分 IP 消费。
