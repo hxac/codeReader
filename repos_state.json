@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-18T11:01:56Z"
+      "last_run_at": "2026-07-18T15:27:01Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -19305,7 +19305,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":184813,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":196719,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u8-l3": {
           "status": "pending",
@@ -19379,7 +19379,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/NawfalMotii79/PLFM_RADAR/PLFM_RADAR-tutorial",
       "last_head": "749bd0f86a07a28a86347d8ce9c141e601057c40",
-      "last_run_at": "2026-07-18T11:01:56Z",
+      "last_run_at": "2026-07-18T15:27:01Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "VLSI-EDA/PoC": {
@@ -19530,7 +19530,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":185226,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192360,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u5-l1": {
           "status": "pending",
@@ -19569,7 +19569,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/VLSI-EDA/PoC/PoC-tutorial",
       "last_head": "8c39b2407a97ec81b8601c4b64e4d2e2141ab9cf",
-      "last_run_at": "2026-07-18T11:01:56Z",
+      "last_run_at": "2026-07-18T15:27:01Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "paulscherrerinstitute/psi_fpga_all": {
@@ -19707,7 +19707,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":194070,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":192523,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u2-l5": {
           "status": "pending",
@@ -19751,7 +19751,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/paulscherrerinstitute/PsiFpgaLibDependencies/PsiFpgaLibDependencies-tutorial",
       "last_head": "d78d525150281c6bef3fd0dec5848baac4b62af5",
-      "last_run_at": "2026-07-18T11:01:56Z",
+      "last_run_at": "2026-07-18T15:27:01Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "paulscherrerinstitute/PsiPyUtils": {},
