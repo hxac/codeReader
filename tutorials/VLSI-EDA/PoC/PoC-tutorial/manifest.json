@@ -1,0 +1,857 @@
+{
+  "project": "PoC",
+  "head": "8c39b2407a97ec81b8601c4b64e4d2e2141ab9cf",
+  "rationale": "PoC（Pile of Cores）是一个大型 VHDL/Verilog IP 核库，学习的关键不在于逐个记忆数百个核，而在于掌握贯穿全库的少数核心机制：命名空间分包模式、my_config/DEVICE_INFO 配置机制、基于 generate 的厂商可移植选择、公共包体系、仿真辅助包，以及 pyIPCMI 命令行基础设施。因此大纲分三层五单元：第 1 单元（入门）让读者从零认识项目定位、目录结构、运行配置与编码规范；第 2 单元（进阶）拆解 src/common 公共包与配置机制，这是理解一切后续核的基础；第 3 单元（进阶）讲解 IP 核的通用编写与组织模式，重点落在厂商选择、ocram/FIFO/arith/sync/io 等代表性家族；第 4 单元（进阶）覆盖仿真辅助包、测试台写法、VHDL 版本处理、综合流程与板级约束；第 5 单元（专家）深入 pyIPCMI 基础设施、第三方验证库集成，以及 cache/bus/net 复杂子系统，最后落到如何扩展 PoC。依赖关系呈清晰的有向无环图，每个讲义只解决一个主题并绑定真实源码与一个动手任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识与上手 PoC",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "PoC 项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 PoC（Pile of Cores）是什么、解决什么问题、由谁维护，以及它已迁移到 VHDL/PoC 仓库的现状。",
+          "learning_goals": [
+            "理解 PoC 是一个可复用的 VHDL/Verilog 硬件 IP 核库",
+            "知道 PoC 提供的核心能力（算术、缓存、CDC、FIFO、RAM、IO 控制器等）",
+            "了解项目的维护方与迁移到 VHDL/PoC 的现状"
+          ],
+          "source_files": [
+            "README.md",
+            "README.tpl",
+            "LICENSE.md",
+            "CHANGES.md",
+            "AUTHORS.md"
+          ],
+          "minimal_modules": [
+            "项目定位与历史",
+            "许可证与贡献者"
+          ],
+          "practice_task": "阅读 README 的 Overview 部分，用自己的话写出 PoC 提供的三类硬件功能，并指出当前仓库与 VHDL/PoC 的关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构解析",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "逐个解释 src、tb、lib、netlist、ucf、xst、py、sim、temp、tools 等顶层目录的用途，建立空间地图。",
+          "learning_goals": [
+            "记住 PoC 根目录的主要子目录及其职责",
+            "理解 src 按子命名空间分组、tb 镜像 src 的组织方式",
+            "区分源码、测试台、第三方库、约束、综合输出的位置"
+          ],
+          "source_files": [
+            "README.md",
+            "src/README.md",
+            "src/common/README.md",
+            "lib/README.md",
+            "netlist/README.md",
+            "ucf/README.md",
+            "xst/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录用途",
+            "命名空间子目录树"
+          ],
+          "practice_task": "在本地克隆后画出 src/ 下各命名空间目录的树状图，并标注每个目录代表的功能类别（如 arith=算术、fifo=先入先出）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "获取、运行与配置 PoC",
+          "order": 3,
+          "filename": "u1-l3-getting-started-configure.md",
+          "level": "beginner",
+          "topic": "讲解如何下载、用 poc.sh/poc.ps1 启动配置流程，以及 my_config.vhdl / my_project.vhdl 两个模板的作用。",
+          "learning_goals": [
+            "掌握 git clone --recursive 获取含子模块的 PoC",
+            "理解 poc.sh / poc.ps1 是调用 Python 基础设施的入口包装脚本",
+            "知道 my_config.vhdl 与 my_project.vhdl 的用途及如何从模板创建"
+          ],
+          "source_files": [
+            "README.md",
+            "poc.sh",
+            "poc.ps1",
+            "requirements.txt",
+            "src/common/my_config.vhdl.template",
+            "src/common/my_project.vhdl.template",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "下载与子模块",
+            "入口脚本",
+            "配置模板"
+          ],
+          "practice_task": "从模板复制并填写 my_config.vhdl，把 MY_BOARD 设为 Custom、MY_DEVICE 设为 None，并说明这两个常量后续会被谁读取。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "VHDL 编码规范与命名约定",
+          "order": 4,
+          "filename": "u1-l4-coding-conventions.md",
+          "level": "beginner",
+          "topic": "通过 vhdl_coding.md 讲解 PoC 的命名、文件后缀、rtl/tb 架构名、文档头与代码风格约定。",
+          "learning_goals": [
+            "掌握 <namespace>_<entity> 的蛇形命名与单实体单文件约定",
+            "理解综合实现用 rtl 架构、测试台用 _tb 后缀和 tb 架构",
+            "了解文档头、缩进与大小写规范"
+          ],
+          "source_files": [
+            "vhdl_coding.md",
+            "src/arith/arith_addw.vhdl",
+            "docs/Entity.template"
+          ],
+          "minimal_modules": [
+            "命名与文件约定",
+            "架构命名",
+            "文档头与风格"
+          ],
+          "practice_task": "参照 Entity.template 与 arith_addw.vhdl，为一个虚拟核 mylib_echo 写出符合规范的文件头、entity 声明与 rtl 架构骨架。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：公共包与配置机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "公共包总览与 Common 上下文",
+          "order": 1,
+          "filename": "u2-l1-common-packages-overview.md",
+          "level": "intermediate",
+          "topic": "介绍 src/common 下各公共包的职责，以及 common.vhdl 上下文如何一次性引用它们，并讲解 .files 编译顺序文件。",
+          "learning_goals": [
+            "了解 utils/config/math/strings/vectors/physical/components 等公共包的作用",
+            "理解 VHDL context Common 的批量引用机制",
+            "掌握 .files 文件如何描述带条件的编译顺序"
+          ],
+          "source_files": [
+            "src/common/common.vhdl",
+            "src/common/common.files",
+            "src/common/README.md"
+          ],
+          "minimal_modules": [
+            "公共包清单",
+            "Common context",
+            ".files 编译清单"
+          ],
+          "practice_task": "在 common.files 中找到按条件包含 fileio 包的分支，解释为何不同 VHDL 版本会编译不同文件。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "utils 包：通用类型与辅助函数",
+          "order": 2,
+          "filename": "u2-l2-utils-package.md",
+          "level": "intermediate",
+          "topic": "深入 utils.vhdl，讲解 T_BOOLVEC/T_INTVEC 等向量类型、整数子类型、枚举类型以及 ite/imin/imax/log2ceil 等常用函数。",
+          "learning_goals": [
+            "掌握 PoC 自定义的数组和子类型定义",
+            "学会使用 ite、imin、imax、log2ceil 等辅助函数",
+            "理解 SIMULATION 延迟常量的用途"
+          ],
+          "source_files": [
+            "src/common/utils.vhdl"
+          ],
+          "minimal_modules": [
+            "数组与子类型",
+            "枚举类型",
+            "辅助函数"
+          ],
+          "practice_task": "在 utils.vhdl 中找到 log2ceil 的定义，写一段测试用例说明它如何把深度 30 映射到地址位宽 5。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "配置机制：my_config 与 config 包",
+          "order": 3,
+          "filename": "u2-l3-config-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 my_config.vhdl 中的 MY_BOARD/MY_DEVICE 如何被 config.vhdl 解析，最终生成 DEVICE_INFO 与 VENDOR 枚举（VENDOR_ALTERA/XILINX/LATTICE 等）。",
+          "learning_goals": [
+            "理解 my_config 到 DEVICE_INFO 的解析链路",
+            "掌握 T_BOARD_INFO、T_DEVICE_INFO 与厂商枚举的作用",
+            "明白为什么后续核能根据厂商自动选择实现"
+          ],
+          "source_files": [
+            "src/common/my_config.vhdl.template",
+            "src/common/config.vhdl",
+            "src/common/my_project.vhdl.template"
+          ],
+          "minimal_modules": [
+            "my_config/my_project 模板",
+            "config 解析",
+            "DEVICE_INFO 与 VENDOR 枚举"
+          ],
+          "practice_task": "把 MY_DEVICE 改成一个 Xilinx 型号，在 config.vhdl 中追踪它如何被识别为 VENDOR_XILINX，并描述 DEVICE_INFO 记录里包含哪些字段。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "physical / strings / vectors / math 包",
+          "order": 4,
+          "filename": "u2-l4-physical-strings-vectors-math.md",
+          "level": "intermediate",
+          "topic": "讲解物理类型包（如 FREQ，可在测试台写 100 MHz）、字符串处理、向量类型与数学扩展函数。",
+          "learning_goals": [
+            "掌握 FREQ/TIME 等物理类型及其字面量写法",
+            "了解字符串与向量（如 T_SLM）辅助函数",
+            "理解 math 包提供的扩展数学运算"
+          ],
+          "source_files": [
+            "src/common/physical.vhdl",
+            "src/common/strings.vhdl",
+            "src/common/vectors.vhdl",
+            "src/common/math.vhdl"
+          ],
+          "minimal_modules": [
+            "物理类型",
+            "字符串与向量",
+            "数学扩展"
+          ],
+          "practice_task": "利用 physical.vhdl 的 FREQ 类型，写出表示 50 MHz 与 10 ns 的常量，并计算二者一个周期的关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "components 包：用函数描述原语",
+          "order": 5,
+          "filename": "u2-l5-components-primitives.md",
+          "level": "intermediate",
+          "topic": "讲解 components.vhdl 如何把触发器（ffdre/ffse）、多路选择器等常用原语以函数形式提供，便于一行调用。",
+          "learning_goals": [
+            "理解把触发器写成函数的设计思路",
+            "掌握 ffdre/ffse/rs 触发器等函数的参数",
+            "了解 INIT 参数表示复位值而非上电初值的注意事项"
+          ],
+          "source_files": [
+            "src/common/components.vhdl"
+          ],
+          "minimal_modules": [
+            "触发器函数",
+            "多路选择器",
+            "INIT 语义"
+          ],
+          "practice_task": "用 components.vhdl 中的 ffdre 函数实现一个带使能与复位的单比特寄存器进程，并说明 INIT 的真实含义。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：IP 核模式与命名空间",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "命名空间包模式",
+          "order": 1,
+          "filename": "u3-l1-namespace-package-pattern.md",
+          "level": "intermediate",
+          "topic": "讲解每个命名空间的 <ns>.pkg.vhdl 如何集中声明组件、类型与函数（以 arith.pkg、fifo.pkg、mem.pkg 为例）。",
+          "learning_goals": [
+            "掌握命名空间包作为组件声明清单的作用",
+            "理解 generic/port 在包中集中声明的复用价值",
+            "能够阅读一个新命名空间的 pkg 文件快速了解其核"
+          ],
+          "source_files": [
+            "src/arith/arith.pkg.vhdl",
+            "src/fifo/fifo.pkg.vhdl",
+            "src/mem/mem.pkg.vhdl"
+          ],
+          "minimal_modules": [
+            "命名空间包结构",
+            "组件声明",
+            "类型与函数"
+          ],
+          "practice_task": "阅读 fifo.pkg.vhdl，列出它声明的全部 FIFO 组件名，并标注每个组件的使用场景（如 cc=同钟、ic=跨钟）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "厂商选择与可移植机制",
+          "order": 2,
+          "filename": "u3-l2-vendor-selection-portability.md",
+          "level": "intermediate",
+          "topic": "讲解 PoC 如何用 generate 语句依据 DEVICE_INFO.Vendor 在通用实现与厂商专用实现（如 sync_Bits_Xilinx / _Altera）间选择。",
+          "learning_goals": [
+            "理解可移植实体 + 厂商专用子实体的分层结构",
+            "掌握 if generate 选择 VENDOR_ALTERA/XILINX 的写法",
+            "了解 ASYNC_REG/SHREG_EXTRACT 等综合属性的作用"
+          ],
+          "source_files": [
+            "src/misc/sync/sync_Bits.vhdl",
+            "src/misc/sync/sync_Bits_Xilinx.vhdl",
+            "src/misc/sync/sync_Bits_Altera.vhdl",
+            "src/mem/ocram/ocram_sp.vhdl",
+            "src/common/config.vhdl"
+          ],
+          "minimal_modules": [
+            "通用包装实体",
+            "厂商专用子实体",
+            "generate 选择"
+          ],
+          "practice_task": "在 sync_Bits.vhdl 中定位 vendor 选择逻辑，画出让一个 Generic 设备走入哪条分支的流程图。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "片上 RAM 抽象：ocram 家族",
+          "order": 3,
+          "filename": "u3-l3-ocram-memory-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 ocram（on-chip RAM）命名空间如何抽象单端口、简单双端口、真双端口等存储器并对接厂商原语。",
+          "learning_goals": [
+            "区分 ocram_sp/sdp/tdp/esdp/wf 等存储器配置",
+            "理解 ocram 如何根据厂商实例化 altera 版本",
+            "掌握读优先/写优先等存储行为差异"
+          ],
+          "source_files": [
+            "src/mem/ocram/ocram.pkg.vhdl",
+            "src/mem/ocram/ocram_sp.vhdl",
+            "src/mem/ocram/ocram_sdp.vhdl",
+            "src/mem/ocram/ocram_tdp.vhdl",
+            "src/mem/ocram/altera/ocram_sp_altera.vhdl"
+          ],
+          "minimal_modules": [
+            "存储器配置类型",
+            "通用 ocram 实体",
+            "厂商实例化"
+          ],
+          "practice_task": "比较 ocram_sp.vhdl 的通用实现与 ocram_sp_altera.vhdl，说明 Altera 分支调用了哪个底层原语。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "FIFO 家族",
+          "order": 4,
+          "filename": "u3-l4-fifo-family.md",
+          "level": "intermediate",
+          "topic": "讲解 PoC 的 FIFO 矩阵：fifo_glue/fifo_shift/fifo_cc_got/fifo_ic_got 等覆盖同钟、跨钟、暂存回滚等场景。",
+          "learning_goals": [
+            "区分 cc（同钟）与 ic（独立钟）FIFO",
+            "理解 put/got/valid/full 流水线接口语义",
+            "掌握 DATA_REG/OUTPUT_REG/STATE_BITS 等关键 generic"
+          ],
+          "source_files": [
+            "src/fifo/fifo.pkg.vhdl",
+            "src/fifo/fifo_cc_got.vhdl",
+            "src/fifo/fifo_ic_got.vhdl",
+            "src/fifo/fifo_glue.vhdl",
+            "src/fifo/fifo_shift.vhdl"
+          ],
+          "minimal_modules": [
+            "FIFO 分类",
+            "流水线接口",
+            "关键 generic"
+          ],
+          "practice_task": "实例化一个 fifo_cc_got，配置 D_BITS=8、MIN_DEPTH=30，并解释 estate_wr/fstate_rd 填充指示器的含义。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "算术单元：arith 命名空间",
+          "order": 5,
+          "filename": "u3-l5-arith-cores.md",
+          "level": "intermediate",
+          "topic": "讲解 arith 命名空间下的计数器、宽加法、伪随机数、优先编码、开方与除法等算术核。",
+          "learning_goals": [
+            "掌握 free/gray/bcd/ring 等各类计数器",
+            "理解 arith_firstone 优先编码与令牌传递",
+            "了解 arith_prng 伪随机与 arith_sqrt 除法实现"
+          ],
+          "source_files": [
+            "src/arith/arith.pkg.vhdl",
+            "src/arith/arith_counter_free.vhdl",
+            "src/arith/arith_addw.vhdl",
+            "src/arith/arith_prng.vhdl",
+            "src/arith/arith_firstone.vhdl",
+            "src/arith/arith_sqrt.vhdl"
+          ],
+          "minimal_modules": [
+            "计数器族",
+            "优先编码",
+            "随机与运算"
+          ],
+          "practice_task": "实例化 arith_counter_free 实现一个 8 位自由计数器，并说明它和 gray 计数器在跨时钟域读取时的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "时钟域穿越：misc/sync",
+          "order": 6,
+          "filename": "u3-l6-clock-domain-crossing.md",
+          "level": "intermediate",
+          "topic": "讲解 sync 子命名空间的 Bits/Reset/Pulse/Strobe/Vector 同步器，以及各自适用的信号类型与约束。",
+          "learning_goals": [
+            "区分 flag/reset/pulse/strobe/vector 同步器的适用场景",
+            "理解两级 D-FF 同步与 SYNC_DEPTH 参数",
+            "掌握 _meta/_async 信号的约束要求"
+          ],
+          "source_files": [
+            "src/misc/sync/sync.pkg.vhdl",
+            "src/misc/sync/sync_Bits.vhdl",
+            "src/misc/sync/sync_Reset.vhdl",
+            "src/misc/sync/sync_Pulse.vhdl",
+            "src/misc/sync/sync_Strobe.vhdl",
+            "src/misc/sync/sync_Vector.vhdl"
+          ],
+          "minimal_modules": [
+            "同步器分类",
+            "SYNC_DEPTH",
+            "时序约束"
+          ],
+          "practice_task": "为一个异步复位信号选择合适的 sync 核，并写出需要为 _meta/_async 信号添加的约束类型。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "外设与 IO：io 命名空间",
+          "order": 7,
+          "filename": "u3-l7-io-peripherals.md",
+          "level": "intermediate",
+          "topic": "讲解 io 命名空间下的 UART、DDR IO、IIC、消抖、七段显示、频率计数等外设控制器。",
+          "learning_goals": [
+            "了解 uart_tx/uart_rx 等 UART 收发结构",
+            "理解 ddrio_in/out/inout 的厂商专用 DDR 寄存器封装",
+            "掌握 io_Debounce 等慢速 IO 处理核"
+          ],
+          "source_files": [
+            "src/io/io.pkg.vhdl",
+            "src/io/io_Debounce.vhdl",
+            "src/io/uart/uart.pkg.vhdl",
+            "src/io/uart/uart_tx.vhdl",
+            "src/io/ddrio/ddrio_out.vhdl",
+            "src/io/io_7SegmentMux_BCD.vhdl"
+          ],
+          "minimal_modules": [
+            "UART 收发",
+            "DDR IO 封装",
+            "慢速 IO 处理"
+          ],
+          "practice_task": "阅读 uart_tx.vhdl，列出它的 generic（如波特率分频）与端口，并画出一次起始位+数据位+停止位的发送时序。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：仿真、综合与目标平台",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "仿真辅助包：sim 命名空间",
+          "order": 1,
+          "filename": "u4-l1-simulation-helper-packages.md",
+          "level": "intermediate",
+          "topic": "讲解 src/sim 下的 sim_types/sim_global/sim_simulation/sim_random/sim_waveform 等仿真专用辅助包。",
+          "learning_goals": [
+            "掌握 simInitialize、simGenerateClock、simGenerateWaveform 等测试台入口",
+            "理解全局仿真状态与受保护类型的实现",
+            "了解随机数与波形生成的辅助接口"
+          ],
+          "source_files": [
+            "src/sim/sim_types.vhdl",
+            "src/sim/sim_global.v08.vhdl",
+            "src/sim/sim_simulation.v08.vhdl",
+            "src/sim/sim_random.v08.vhdl",
+            "src/sim/sim_waveform.vhdl"
+          ],
+          "minimal_modules": [
+            "全局仿真状态",
+            "时钟与波形生成",
+            "随机数"
+          ],
+          "practice_task": "写一个最小测试台，调用 simInitialize 与 simGenerateClock 产生 100 MHz 时钟，并用 simGenerateWaveform 生成复位脉冲。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "测试台结构与编写",
+          "order": 2,
+          "filename": "u4-l2-writing-testbenches.md",
+          "level": "intermediate",
+          "topic": "以 fifo_cc_got_tb 为例讲解 PoC 测试台的骨架、DUT 例化、generate 批量验证与板级 my_config 变体。",
+          "learning_goals": [
+            "掌握 _tb 实体 + tb 架构的标准写法",
+            "理解用 for generate 遍历多组 generic 的批量验证技巧",
+            "了解 tb/common 下各 my_config_<board> 变体的用途"
+          ],
+          "source_files": [
+            "tb/fifo/fifo_cc_got_tb.vhdl",
+            "tb/common/config_tb.vhdl",
+            "tb/common/my_config_GENERIC.vhdl",
+            "src/sim/sim_simulation.v08.vhdl"
+          ],
+          "minimal_modules": [
+            "测试台骨架",
+            "DUT 例化与批量验证",
+            "板级配置变体"
+          ],
+          "practice_task": "仿照 fifo_cc_got_tb，为一个简单核（如 io_Debounce）搭建测试台骨架，包含时钟、复位生成与 DUT 例化。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "VHDL 版本处理：v93 与 v08",
+          "order": 3,
+          "filename": "u4-l3-vhdl-version-handling.md",
+          "level": "intermediate",
+          "topic": "讲解 PoC 如何用 .v93.vhdl / .v08.vhdl 后缀区分 VHDL 版本，以及受保护类型与 fileio 的版本差异实现。",
+          "learning_goals": [
+            "理解文件名后缀编码的 VHDL 版本约定",
+            "掌握 protected 类型在 v08 与 v93 的不同实现",
+            "了解 common.files 如何按版本条件选择文件"
+          ],
+          "source_files": [
+            "src/common/fileio.v93.vhdl",
+            "src/common/fileio.v08.vhdl",
+            "src/common/protected.v08.vhdl",
+            "src/common/common.files"
+          ],
+          "minimal_modules": [
+            "版本后缀约定",
+            "受保护类型",
+            "条件编译"
+          ],
+          "practice_task": "在 common.files 中找到依据 VHDLVersion 选择 fileio.v93/v08 的分支，并说明 protected.v08 为何只在 2008 版编译。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "上下文外综合与 netlist 流程",
+          "order": 4,
+          "filename": "u4-l4-synthesis-netlist-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 netlist/ 与 xst/ 目录如何支持把 PoC 核或厂商 IP 综合成网表，以及 .files 与模板配置文件的作用。",
+          "learning_goals": [
+            "理解 out-of-context 综合的目的",
+            "了解 xst 目录下按器件系列的 XST 配置",
+            "掌握 netlist/template.cgc 等模板的用途"
+          ],
+          "source_files": [
+            "netlist/README.md",
+            "netlist/template.cgc",
+            "xst/README.md",
+            "xst/Series-7.xst",
+            "src/common/common.files"
+          ],
+          "minimal_modules": [
+            "网表综合流程",
+            "XST 配置",
+            "模板文件"
+          ],
+          "practice_task": "阅读 xst/README.md 与 Series-7.xst，描述把一个 PoC 核综合成网表需要哪些配置输入。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "板级约束与 FPGA 目标",
+          "order": 5,
+          "filename": "u4-l5-board-constraints.md",
+          "level": "intermediate",
+          "topic": "讲解 ucf/ 目录下各开发板（KC705、Atlys、ML505 等）的约束文件，以及 MetaStability 约束与板级 my_config 的配合。",
+          "learning_goals": [
+            "了解 ucf/xdc/sdc 约束文件的组织方式",
+            "理解 MetaStability.ucf 与同步器约束的关系",
+            "掌握板级 my_config 如何与约束文件配套"
+          ],
+          "source_files": [
+            "ucf/README.md",
+            "ucf/MetaStability.ucf",
+            "src/common/my_config.vhdl.template"
+          ],
+          "minimal_modules": [
+            "约束文件组织",
+            "亚稳态约束",
+            "板级配置配套"
+          ],
+          "practice_task": "为 sync_Bits 核写出需要在 MetaStability.ucf 中添加的 _meta/_async 约束思路，并说明为何要 timing ignore 异步信号。",
+          "depends_on": [
+            "u2-l3",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：基础设施、子系统与二次开发",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "pyIPCMI 基础设施与命令行前端",
+          "order": 1,
+          "filename": "u5-l1-pyipcmi-infrastructure.md",
+          "level": "advanced",
+          "topic": "讲解 poc.sh/poc.ps1 如何委托给 lib/pyIPCMI 这个 Python 子模块，统一驱动仿真、综合与 IP 生成流程。",
+          "learning_goals": [
+            "理解入口包装脚本到 pyIPCMI 的委托链",
+            "掌握 .files 文件被 pyIPCMI 消费的编译模型",
+            "了解 pyIPCMI 对多厂商工具链的抽象"
+          ],
+          "source_files": [
+            "poc.sh",
+            "poc.ps1",
+            "lib/README.md",
+            ".gitmodules",
+            "src/common/common.files"
+          ],
+          "minimal_modules": [
+            "入口委托链",
+            "pyIPCMI 子模块",
+            "工具链抽象"
+          ],
+          "practice_task": "追踪 poc.sh 的执行路径，描述从命令行参数到 lib/pyIPCMI 被加载的全过程，并解释 .files 在其中的角色。",
+          "depends_on": [
+            "u1-l3",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "第三方验证库集成",
+          "order": 2,
+          "filename": "u5-l2-third-party-verification-libs.md",
+          "level": "advanced",
+          "topic": "讲解 lib/ 下 cocotb、OSVVM、UVVM、VUnit 四个子模块的定位，以及对应的 .files 集成清单。",
+          "learning_goals": [
+            "区分 cocotb/OSVVM/UVVM/VUnit 四种验证方法学",
+            "理解它们以 git submodule 形式集成的机制",
+            "掌握各 *.files 清单如何把第三方库接入编译"
+          ],
+          "source_files": [
+            "lib/README.md",
+            "lib/Altera.files",
+            "lib/OSVVM.files",
+            "lib/UVVM.files",
+            "lib/Xilinx.files",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "验证方法学对比",
+            "子模块集成",
+            "files 清单"
+          ],
+          "practice_task": "比较 OSVVM 与 UVVM 的定位，并说明在 .gitmodules 中它们各自指向哪个上游仓库。",
+          "depends_on": [
+            "u1-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "cache 子系统深入",
+          "order": 3,
+          "filename": "u5-l3-cache-subsystem.md",
+          "level": "advanced",
+          "topic": "深入 cache 命名空间：cache_par/cache_cpu/cache_mem、标签单元与替换策略如何组成完整缓存。",
+          "learning_goals": [
+            "理解 cache_par 并行缓存的顶层结构",
+            "掌握 CPU 侧、存储侧与标签单元的分工",
+            "了解替换策略（如 LRU）的实现"
+          ],
+          "source_files": [
+            "src/cache/cache.pkg.vhdl",
+            "src/cache/cache_par.vhdl",
+            "src/cache/cache_cpu.vhdl",
+            "src/cache/cache_mem.vhdl",
+            "src/cache/cache_tagunit_seq.vhdl",
+            "src/cache/cache_replacement_policy.vhdl"
+          ],
+          "minimal_modules": [
+            "缓存顶层结构",
+            "CPU/存储/标签接口",
+            "替换策略"
+          ],
+          "practice_task": "在 cache_par.vhdl 中追踪一次命中读请求的数据通路，画出 cache_cpu→cache_tagunit→cache_mem 的交互时序。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "总线与流式协议",
+          "order": 4,
+          "filename": "u5-l4-bus-stream-protocols.md",
+          "level": "advanced",
+          "topic": "讲解 bus 命名空间的仲裁器与 stream（AXI-Stream 风格）数据流组件、Wishbone 适配。",
+          "learning_goals": [
+            "理解 bus_Arbiter 的仲裁机制",
+            "掌握 stream_Source/Sink/Mux/DeMux/Buffer 的流式接口",
+            "了解 Wishbone 总线适配器的接入方式"
+          ],
+          "source_files": [
+            "src/bus/bus_Arbiter.vhdl",
+            "src/bus/stream/stream.pkg.vhdl",
+            "src/bus/stream/stream_Mux.vhdl",
+            "src/bus/stream/stream_Source.vhdl"
+          ],
+          "minimal_modules": [
+            "总线仲裁",
+            "流式组件",
+            "Wishbone 适配"
+          ],
+          "practice_task": "用 stream_Source 与 stream_Sink 搭建一个数据回环，并说明 valid/ready 握手协议的时序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "网络协议栈：net 命名空间",
+          "order": 5,
+          "filename": "u5-l5-network-stack.md",
+          "level": "advanced",
+          "topic": "讲解 net 下从 MAC、ARP、IPv4/IPv6 到 UDP、ICMP 的分层网络协议实现与 Wrapper 组装方式。",
+          "learning_goals": [
+            "理解 net 协议栈的分层与各 Wrapper 的封装职责",
+            "掌握 MAC 帧校验与 ARP 缓存机制",
+            "了解 IPv4/IPv6/UDP 收发通路的组成"
+          ],
+          "source_files": [
+            "src/net/net.pkg.vhdl",
+            "src/net/net_FrameChecksum.vhdl",
+            "src/net/mac/mac_Wrapper.vhdl",
+            "src/net/arp/arp_Wrapper.vhdl",
+            "src/net/ipv4/ipv4_Wrapper.vhdl",
+            "src/net/udp/udp_Wrapper.vhdl"
+          ],
+          "minimal_modules": [
+            "协议分层",
+            "Wrapper 封装",
+            "帧校验与缓存"
+          ],
+          "practice_task": "梳理一个 UDP 包从 mac_Wrapper 进入到 udp_Wrapper 输出的逐层处理路径，并标注每层完成的工作。",
+          "depends_on": [
+            "u5-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "扩展 PoC：添加自己的 IP 核与命名空间",
+          "order": 6,
+          "filename": "u5-l6-extending-poc.md",
+          "level": "advanced",
+          "topic": "综合编码规范与命名空间模式，讲解如何为 PoC 贡献一个新核或新命名空间，包括文件、pkg、.files 与测试台。",
+          "learning_goals": [
+            "掌握新增一个 IP 核所需的完整文件清单",
+            "理解如何在命名空间 pkg 中声明新组件",
+            "了解配套测试台与 .files 更新的规范"
+          ],
+          "source_files": [
+            "vhdl_coding.md",
+            "docs/Entity.template",
+            "src/arith/arith_addw.vhdl",
+            "src/arith/arith.pkg.vhdl"
+          ],
+          "minimal_modules": [
+            "新核文件结构",
+            "pkg 声明",
+            "测试台与 files 更新"
+          ],
+          "practice_task": "在一个新命名空间 mylib 下创建一个简单核 mylib_echo，包含 entity/rtl 架构、pkg 组件声明与对应 _tb 测试台骨架。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
