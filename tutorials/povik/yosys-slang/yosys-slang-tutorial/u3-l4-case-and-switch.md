@@ -1,0 +1,435 @@
+# Case 与 Switch：HDL 意图的过程块 case 树
+
+## 1. 本讲目标
+
+学完本讲，你应当能够：
+
+- 说清楚 sv-elab 为什么不直接生成 RTLIL 的 `SwitchRule`/`CaseRule`，而是先建一棵自己的 `Case`/`Switch` 树。
+- 解释 `Case::Action` 里 `lvalue` / `mask` / `unmasked_rvalue` 三个字段各自的含义，以及 `actions` 与 `aux_actions` 两种「动作」的本质区别。
+- 跟踪 `Switch::lower`、`Case::copy_into`、`Switch::trivial` 如何把这棵 HDL 意图树降级成 RTLIL 的 `SwitchRule`/`CaseRule`，并理解其中的「拍平」优化。
+- 描述 `insert_latch_signaling` 在锁存器推断时如何改写 case 树、注入 enable/staging 信号。
+
+本讲是单元 3 的最后一篇，承接 [u3-l3 Variable 与 VariableBits](u3-l3-variable-and-variablebits.md)：那里讲过的 `VariableBits` 正是本讲 `Case::Action` 左值的类型。
+
+## 2. 前置知识
+
+在进入源码前，先建立三个直觉。
+
+**直觉一：综合器需要「分支结构」来表达过程块。**
+一段 `always` 块里的 `if`/`case`/`for` 本质上是「在不同条件下给变量赋不同的值」。综合器要把这种条件语义落到电路上。Yosys 的 RTLIL 用 `Process` → `CaseRule`/`SwitchRule` 这套结构来表达「在某个 switch 信号取某些值时，执行一组连线动作」，后续的 `proc_*` 系列 pass 再把它拍成 `$mux`、触发器等。
+
+**直觉二：RTLIL 的 CaseRule「动作」必须是真实的网表信号。**
+RTLIL 里 `CaseRule::actions` 是 `vector<SigSig>`，即「左信号 = 右信号」的连线，左右两侧都已经是 `RTLIL::SigSpec`（真实存在的线）。但 sv-elab 在翻译 `always` 块时，还远远没有到「线已经存在」的阶段——它还不知道哪些变量要变成触发器、哪些要变成锁存器、哪些位只在部分条件下被赋值。这时如果硬要把左值物化成 `SigSpec`，就会过早固化、丢失 HDL 意图。
+
+**直觉三：所以 sv-elab 先建一棵「HDL 意图」的中间 case 树，最后再降级。**
+这棵树的左值用 `VariableBits`（描述「某个变量的某些位」，见 u3-l3）而不是 `SigSpec`；它保留 slang 的源码位置和符号信息；它在最后被 `lower` / `copy_into` 翻译成 RTLIL。这就是本讲的主角。
+
+> 名词速查：`VariableBits` 是「某变量的某些位」的轻量抽象键（u3-l3）；`RTLIL::SigSpec` 是「网表里真实的信号位」；`RTLIL::SigSig` 是一对 `SigSpec`，表示一条连线 `{左, 右}`。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|------|------|
+| [src/cases.h](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h) | 定义 `Case`/`Switch` 结构、`Case::Action`、`copy_into`、`lower`、`insert_latch_signaling`。本讲的主战场。 |
+| [src/cases.cc](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.cc) | `Switch` 的析构、`add_case`、`lower`、`trivial` 实现。 |
+| [src/procedural.cc](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc) | `ProceduralContext` 持有 `root_case`，`update_variable_state` 在这里把赋值压成 `Case::Action`，`copy_case_tree_into` 触发降级。 |
+| [src/statements.h](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/statements.h) | `SwitchHelper` 与 `StatementExecutor`：把 `if`/`case` 等语句翻译进 case 树，是 case 树的「建造者」。 |
+| [src/slang_frontend.cc](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc) | `detect_possibly_unassigned_subset` 读 `actions` 做锁存器检测；`handle_comb_like_process` 调 `insert_latch_signaling` 与 `copy_case_tree_into`。 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 Case 与 Switch：仿 RTLIL 但保留 HDL 意图的 case 树
+
+#### 4.1.1 概念说明
+
+`Case` 和 `Switch` 是一对互相引用的结构，对应 RTLIL 的 `CaseRule` 和 `SwitchRule`，但「刻意不一样」。源码顶部的注释把设计意图说得很直白：
+
+> [src/cases.h:L19-L30](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L19-L30) —— 这些结构仿照 RTLIL 的 `SwitchRule`/`CaseRule`，最终也会降级成它们。两个关键区别：(1) 保留 slang 的源码位置和符号信息；(2) 动作的左值表达「HDL 意图」而非真实网表信号，因为我们要插入触发器或锁存器，还要对单个赋值做动态掩码。
+
+也就是说，引入这层中间结构的三个理由是：
+
+1. **保留源码信息**：诊断信息和 `(* src *)` 属性要能追溯到 SV 源码行。
+2. **左值延后物化**：用 `VariableBits` 当左值，等明确了「这个变量是寄存器/锁存器/组合」之后再去连真实的线。
+3. **支持按位掩码**：部分位赋值（如 `a[3:1] = x`）需要记录「哪些位真的被写了」。
+
+#### 4.1.2 核心流程
+
+一棵 case 树的形状是：
+
+```
+Case (root_case)                        对应一个 CaseRule
+├─ actions[]      : HDL 意图赋值（左值是 VariableBits）
+├─ aux_actions[]  : 网表级连线 {SigSpec, SigSpec}
+└─ switches[]     : 子 Switch 列表
+     Switch                              对应一个 SwitchRule
+     ├─ signal      : 判断信号（if 的条件、case 的表达式）
+     ├─ full_case / parallel_case : 属性
+     └─ cases[]     : 本 Switch 下的各分支
+          Case (分支)                    又是一个 CaseRule，可递归
+```
+
+建造过程（由 `StatementExecutor` + `SwitchHelper` 驱动，详见 4.3 与 u5-l2）：
+
+1. `ProceduralContext` 构造时建一个空的 `root_case`，并立即在它下面挂一个「平凡」Switch 与一个空分支作为起点。
+2. 遇到 `if`/`case`/循环时，`SwitchHelper` 在当前分支下 `add_switch(signal)`，再为每个分支 `add_case(compare)`。
+3. 遇到赋值时，`update_variable_state` 把一条 `Case::Action` 压进 `current_case->actions`，同时更新变量状态。
+4. 过程块结束时，`copy_case_tree_into` 把整棵树降级成 `RTLIL::CaseRule`。
+
+#### 4.1.3 源码精读
+
+`Switch` 与 `Case` 的成员定义在这里：
+
+> [src/cases.h:L31-L49](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L31-L49) —— `Switch` 持有 `signal`（判断信号）、`cases`（分支列表）、`full_case`/`parallel_case` 两个属性，以及指向 slang `Statement` 的指针（保留源码信息）。`level` 用于调试/缩进。
+
+> [src/cases.h:L51-L67](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L51-L67) —— `Case` 持有 `compare`（本分支匹配的常量，对应 RTLIL `CaseRule::compare`）、`actions`（HDL 意图动作）、`switches`（子 Switch）、`aux_actions`（网表级连线）。
+
+`Switch` 拥有它的 `Case`，`Case` 拥有它的 `Switch`，形成树状所有权，析构时递归 `delete`：
+
+> [src/cases.cc:L13-L26](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.cc#L13-L26) —— `Switch::~Switch` 删除所有分支；`Switch::add_case` 新建一个 `Case`，把传入的 `compare` 存进去，并让它继承自己的 `level`。
+
+> [src/cases.h:L69-L82](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L69-L82) —— `Case::~Case` 删除所有子 Switch；`Case::add_switch` 在本分支下新建子 Switch，`level = level + 1`。
+
+`ProceduralContext` 的构造展示了树的起点：
+
+> [src/procedural.cc:L112-L118](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L112-L118) —— 新建 `root_case`，然后 `current_case = root_case->add_switch({})->add_case({})`：先挂一个 `signal={}` 的平凡 Switch，再挂一个 `compare={}` 的空分支。这个「平凡外壳」让后续所有语句都有一个统一的落脚点。
+
+#### 4.1.4 代码实践
+
+实践目标：确认 case 树的「起点」结构。
+
+1. 打开 [src/procedural.cc:L112-L118](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L112-L118)。
+2. 在纸上画出 `ProceduralContext` 刚构造完时的树：`root_case` 下挂一个 `signal={}` 的 `Switch`，该 `Switch` 下挂一个 `compare={}` 的 `Case`，`current_case` 指向那个空 `Case`。
+3. 观察：为什么一开始就要套一层「平凡 Switch + 空 Case」，而不是直接把 `current_case` 设成 `root_case`？
+
+预期结果：你会得到一个两层结构 `root_case → Switch({}) → Case({})`。这层外壳是「统一入口」——无论过程块里有没有条件语句，后续代码都能假设「当前在一个分支里」，降低特判。这个平凡 Switch 在降级时会被 4.3 的优化拍平，不会进入最终网表。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`Switch` 里的 `statement` 字段（指向 slang `ast::Statement`）有什么用？如果删掉会丢失什么？
+
+**参考答案**：它用于在降级时通过 `transfer_attrs` 把源码位置（`src` 属性）和用户写的 `(* attr *)` 属性转移到对应的 RTLIL `SwitchRule` 上（见 [src/cases.cc:L39-L40](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.cc#L39-L40)）。删掉后，RTLIL 里的 switch 将失去源码定位，诊断与属性回溯都会失效。
+
+**练习 2**：`Switch` 与 `Case` 谁拥有谁？为什么用裸指针 `Case *` / `Switch *` 而不是 `unique_ptr`？
+
+**参考答案**：`Switch` 拥有它的 `Case` 列表，`Case` 拥有它的子 `Switch` 列表，形成严格的双向树状所有权，各自析构递归 `delete` 子节点（[cases.cc:L13-L17](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.cc#L13-L17) 与 [cases.h:L69-L73](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L69-L73)）。用裸指针是因为父子之间需要互相回指（`Case` 要能访问自己的 `Switch`，`Switch` 要访问自己的 `Case`），且生命周期完全由树根管理；这是 Yosys 代码库的常见风格。
+
+### 4.2 Case::Action：lvalue / mask / unmasked_rvalue 三件套
+
+#### 4.2.1 概念说明
+
+`Case` 里有两类「动作」，这是本讲最容易混淆、也最关键的设计点：
+
+- `actions`：元素类型是 `Case::Action`，**左值是 `VariableBits`（HDL 意图）**。它记录「在这个分支里，把某些变量的某些位，按某个掩码，赋成某个值」。它**不会**被原样复制进 RTLIL，而是被分析消费（锁存器检测、锁存器信号改写）。
+- `aux_actions`：元素类型是 `RTLIL::SigSig`，**左右都是真实 `SigSpec`**。它**会**被原样复制进 RTLIL 的 `CaseRule::actions`。
+
+`Case::Action` 的三个字段：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `lvalue` | `VariableBits` | 要被赋值的「变量位」（HDL 意图，不是线） |
+| `mask` | `RTLIL::SigSpec` | 逐位掩码：`S1` 表示这一位真的要写，`S0` 表示跳过这一位 |
+| `unmasked_rvalue` | `RTLIL::SigSpec` | 要写入的值（尚未应用掩码） |
+
+为什么需要 `mask`？考虑 `a[3:1] = x`：只有 `a` 的第 1、2、3 位被写，第 0 位不动。sv-elab 用一个全宽的 `mask`（如 `1110`）记录「哪些位活跃」，再用 `crop_zero_mask` 把 `S0` 位剔除。这样一条部分位赋值就能统一进同一个数据结构。
+
+按位语义可以用一个式子概括（最终落到变量上时）：
+
+\[
+\text{result}_i = \begin{cases} \text{unmasked\_rvalue}_i & \text{若 } \text{mask}_i = 1 \\ \text{background}_i & \text{若 } \text{mask}_i = 0 \end{cases}
+\]
+
+这正是 `RTLILBuilder::Bwmux`（`$bwmux` 单元，见 u3-l2）实现的「按位选择」。
+
+#### 4.2.2 核心流程
+
+一条赋值进入 case 树的流程（在 `update_variable_state` 中）：
+
+1. 校验三者位宽一致：`lvalue.bitwidth() == unmasked_rvalue.size() == mask.size()`。
+2. `crop_zero_mask`：把 `mask` 中为 `S0` 的位从 `lvalue`、`unmasked_rvalue`、`mask` 三者中同步剔除（它们不影响结果，删掉以减小体积）。
+3. 做一系列 blocking/nonblocking 合法性检查（这部分是 u5-l3 的内容）。
+4. **压一条 `Case::Action` 到 `current_case->actions`**。
+5. 更新变量状态 `vstate`：若 `mask` 全 1，直接 `vstate.set(lvalue, rvalue)`；否则用 `Bwmux` 把「背景值」和「新值」按掩码混合后再 set。
+
+注意第 4 步：`actions` 只是被「记录」下来，真正驱动条件逻辑落到网表上的，是变量状态 `vstate` 和后续由 `SwitchHelper::finish` 生成的 `aux_actions`。
+
+#### 4.2.3 源码精读
+
+`Case::Action` 的定义：
+
+> [src/cases.h:L56-L63](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L56-L63) —— `Action` 持有 `loc`（源码位置）、`lvalue`（`VariableBits`）、`mask`、`unmasked_rvalue`。注意左值类型是 `VariableBits` 而非 `SigSpec`，这正是「HDL 意图」的体现。
+
+`actions` 与 `aux_actions` 并列声明：
+
+> [src/cases.h:L64-L67](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L64-L67) —— `compare` 是分支匹配常量；`actions` 是 HDL 意图动作（`Case::Action`）；`switches` 是子 Switch；`aux_actions` 是网表级 `SigSig` 连线。
+
+赋值被压成 `Action` 的那一行：
+
+> [src/procedural.cc:L293-L304](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L293-L304) —— `current_case->actions.push_back(Case::Action{loc, lvalue, mask, unmasked_rvalue})`；随后若 `mask` 全 1，走捷径直接 `vstate.set`，否则用 `Bwmux(rvalue_background, unmasked_rvalue, mask)` 混合后再 set。
+
+`crop_zero_mask` 的实现，体现了「掩码剔除」的细节：
+
+> [src/procedural.cc:L170-L184](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L170-L184) —— 从高位往低位扫描，凡 `mask[i] == S0` 就把 `lvalue`/`target` 的对应位删掉，保证三者位宽同步缩减。
+
+#### 4.2.4 代码实践
+
+实践目标：看清「一条简单赋值」如何同时产生 `actions` 记录与变量状态更新。
+
+1. 阅读 [src/procedural.cc:L202-L305](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L202-L305) 的 `update_variable_state` 全貌。
+2. 假设过程块里执行 `do_simple_assign(loc, a, x, blocking=true)`（见 [src/procedural.cc:L307-L311](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L307-L311)，它会用「全 1 掩码」调用 `update_variable_state`）。
+3. 回答：这次调用会向 `current_case->actions` 压入什么？`mask` 是什么？为什么这条路径走的是 `vstate.set` 直通分支而不是 `Bwmux` 分支？
+
+预期结果：压入 `Case::Action{loc, lvalue=a 的位, mask=全 1, unmasked_rvalue=x}`；因为 `mask.is_fully_ones()` 为真，走直通 `vstate.set(a, x)`，不建 `$bwmux`。这是一条「完整赋值」的最廉价路径。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`actions` 和 `aux_actions` 哪一个会进入最终 RTLIL？为什么需要两个？
+
+**参考答案**：`aux_actions`（`SigSig`）会被原样复制进 RTLIL `CaseRule::actions`（见 4.3 的 `copy_into`）；`actions`（`Case::Action`，左值是 `VariableBits`）不会直接进 RTLIL，它被 `detect_possibly_unassigned_subset` 用来做锁存器检测、被 `insert_latch_signaling` 用来改写锁存器信号。需要两个是因为：翻译期还没有真实线（要等确定寄存器/锁存器/组合之后），所以先用 `VariableBits` 记意图；而条件分支里「临时变量 wire = 分支值」这类已经物化的连线，则用 `aux_actions` 直接表达。
+
+**练习 2**：如果一条赋值的 `mask` 是 `1010`（4 位中只有第 1、3 位活跃），`crop_zero_mask` 之后 `lvalue`、`mask`、`unmasked_rvalue` 各剩几位？
+
+**参考答案**：`crop_zero_mask` 删掉 `S0` 位（第 0、2 位），三者都从 4 位缩减为 2 位，对应原来的第 1、3 位。之后 `mask` 变成 `11`（全 1），从而可以走 `vstate.set` 直通分支——这正是 `crop_zero_mask` 的附带收益：把部分位赋值「归一化」成全位赋值。
+
+### 4.3 降级与优化：lower / copy_into / trivial
+
+#### 4.3.1 概念说明
+
+过程块翻译完毕后，整棵 HDL 意图树要「降级（lower）」成 RTLIL 的 `SwitchRule`/`CaseRule`。这套降级逻辑全部在 `cases.h`/`cases.cc` 里，分三个函数：
+
+- `Switch::lower`：把一个 `Switch` 变成 `RTLIL::SwitchRule`（设置 `signal`、`full_case`/`parallel_case` 属性、转移源码属性，再逐个 lower 子分支）。
+- `Case::copy_into`：把一个 `Case` 的内容「灌进」一个**已存在**的 `RTLIL::CaseRule`（复制 `compare`、复制 `aux_actions`、lower 子 Switch），并做「平凡 Switch 拍平」优化。
+- `Case::lower`：`new` 一个新 `RTLIL::CaseRule` 再调 `copy_into`，是个便捷封装。
+
+入口在 `ProceduralContext::copy_case_tree_into`：
+
+> [src/procedural.cc:L136-L139](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/procedural.cc#L136-L139) —— 把 `root_case` 灌进一个外部传进来的 `RTLIL::CaseRule`（通常是新建 `Process` 的 `root_case`）。
+
+注意一个关键事实：**降级时只复制 `aux_actions`，不复制 `actions`**。因为 `actions`（HDL 意图）到此时已经被「编译」掉了——条件逻辑通过变量状态 + `aux_actions`（由 `SwitchHelper::finish` 生成）表达，静态变量则通过 `add_continuous_driver` 在 process 之外连线。
+
+#### 4.3.2 核心流程
+
+`Switch::lower` 的步骤：
+
+```
+new RTLIL::SwitchRule
+  rule->signal = signal
+  若 full_case  → rule->attributes[full_case] = true
+  若 parallel_case → rule->attributes[parallel_case] = true
+  若有 statement → transfer_attrs(...) 转移源码/属性
+  for 每个 case_: rule->cases.push_back(case_->lower(...))
+```
+
+`Case::copy_into` 的步骤（含优化）：
+
+```
+若有 statement → transfer_attrs 到 rule
+rule->compare = compare
+rule->actions += aux_actions        ← 注意：只复制 aux_actions
+遍历 switches：
+  【优化】若当前是「最后一个、平凡、且无源码语句」的 Switch，
+         就把它的唯一分支的子 Switch 直接提升到当前层级（拍平，减小树深）
+  否则 rule->switches.push_back(sw->lower(...))
+```
+
+「平凡 Switch」由 `Switch::trivial()` 判定：`signal` 为空、无 `statement`、无 `full_case`/`parallel_case`、只有一个 `compare` 也为空的分支。`ProceduralContext` 构造时挂的那个外壳 Switch，以及 `StatementExecutor` 在 `if`/`case`/循环末尾为了「强制后续语句优先级」而插入的空 Switch（见 [src/statements.h:L407](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/statements.h#L407)），都是平凡 Switch，会在降级时被拍平。
+
+#### 4.3.3 源码精读
+
+`Switch::lower`：
+
+> [src/cases.cc:L28-L46](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.cc#L28-L46) —— 新建 `SwitchRule`，设置 `signal`，按需打 `full_case`/`parallel_case` 属性，转移源码属性，再逐个 `case_->lower` 挂到 `rule->cases`。
+
+`Switch::trivial`：
+
+> [src/cases.cc:L48-L55](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.cc#L48-L55) —— `signal` 空、无 `statement`、无 `full_case`/`parallel_case`、恰好一个 `compare` 也空的分支，才算 trivial。
+
+`Case::copy_into`（含拍平优化，本讲最精巧的一段）：
+
+> [src/cases.h:L84-L113](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L84-L113) —— 先 `transfer_attrs`，复制 `compare`，把 `aux_actions` 追加进 `rule->actions`；然后遍历子 Switch，期间用一个 `while` 循环把「末尾的平凡 Switch」拍平：只要当前 Switch 是最后一个、平凡、且其唯一分支没有 `statement`，就把指针下沉到它唯一分支的子 Switch 列表里继续处理。注释点明这是「机会主义优化，降低树深，改善 `proc_prune` 的运行时」。注意：若被拍平的平凡分支自身带 `aux_actions`，则要先建一个 `signal={}` 的空 `SwitchRule` 把这些动作保留下来，再继续拍平。
+
+`Case::lower` 的便捷封装：
+
+> [src/cases.h:L115-L120](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L115-L120) —— `new RTLIL::CaseRule` + `copy_into`。
+
+#### 4.3.4 代码实践
+
+实践目标：追踪一个简单 `if` 语句，画出它生成的 `Case`/`Switch` 树，再描述它降级后的 `RTLIL::CaseRule`/`SwitchRule`。这是本讲的核心实践。
+
+考虑这段 SV（组合逻辑）：
+
+```systemverilog
+// 示例代码：仅用于讲解，非仓库自带文件
+module demo(input s, input [1:0] d, output reg [1:0] q);
+    always @(*) begin
+        if (s) q = d;
+        else   q = 2'b0;
+    end
+endmodule
+```
+
+操作步骤：
+
+1. 打开 `StatementExecutor::handle(const ast::ConditionalStatement&)`：[src/statements.h:L371-L408](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/statements.h#L371-L408)。
+2. 跟踪 `SwitchHelper b(context, condition=s)` 建的 Switch；`b.branch({S1}, …)` 建分支 `compare={S1}` 并访问 `ifTrue`（产生 `q=d` 的 `Action`）；`b.branch({}, …)` 建默认分支并访问 `ifFalse`（产生 `q=0` 的 `Action`）；`b.finish` 为 `q` 生成临时 wire `w`，并在两个分支里各加一条 `aux_actions`（`{w, d}` 与 `{w, 0}`）。
+3. 结合 4.1.4 的「平凡外壳」，画出完整树。
+
+预期结果（HDL 意图树）：
+
+```
+root_case
+└─ Switch signal={}              ← 构造时的平凡外壳
+   └─ Case compare={}
+      ├─ aux_actions: {w, w_default}      ← finish 给 q 的临时线赋默认值
+      └─ Switch signal=s            ← if 的条件
+         ├─ Case compare={S1}       ← if-true
+         │  ├─ actions: [Action{q, mask=11, d}]
+         │  └─ aux_actions: {w, d}
+         └─ Case compare={}         ← else（默认分支）
+            ├─ actions: [Action{q, mask=11, 0}]
+            └─ aux_actions: {w, 0}
+```
+
+降级后（`copy_case_tree_into` → `proc->root_case`）：平凡外壳被 `copy_into` 的 `while` 拍平，只剩 `signal=s` 的 `SwitchRule`，其下两个 `CaseRule` 分别带动作 `w = d` 与 `w = 0`。组合逻辑里 `q` 在所有分支都被完整赋值（无悬空位），所以 `q` 经 `add_continuous_driver` 连到 `w`：
+
+```
+RTLIL::Process
+  root_case (CaseRule)
+    SwitchRule signal=s
+      CaseRule compare=S1:   actions = {w, d}
+      CaseRule compare=():   actions = {w, 0}     ← 空比较即 default
+连续赋值: q = w
+```
+
+随后的 Yosys `proc_*` pass 会把这个 switch 进一步拍成 `$mux`，但那已不属于 sv-elab 的职责。
+
+> 若本地已构建 `slang.so`，可用 `read_slang` 读入上例，再 `prep` + `show` 或 `dump` 观察；若不具备运行环境，以上为「源码阅读型实践」，结论待本地验证。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：降级时 `copy_into` 为什么只复制 `aux_actions` 而不复制 `actions`？`actions` 里的信息去哪了？
+
+**参考答案**：`actions` 的左值是 `VariableBits`，不是真实线，无法直接进 RTLIL。它的语义已经被「编译」进两处：(1) 条件分支里临时变量的取值，由 `SwitchHelper::finish` 转成 `aux_actions`（`{wire, 分支值}`）；(2) 静态变量的最终驱动，由 `add_continuous_driver` 在 process 外连线。所以到降级时，`actions` 已无未表达的信息，自然不需要复制。（`actions` 仍被保留下来供锁存器分析使用，见 4.4。）
+
+**练习 2**：`copy_into` 里那个 `while` 拍平循环，如果删掉会怎样？
+
+**参考答案**：树会保留大量「平凡 Switch 中转节点」（构造外壳、每个 `if`/`case`/循环末尾插入的空 Switch 都会留下），导致 `RTLIL::CaseRule`/`SwitchRule` 嵌套极深。注释明确说这会拖慢下游 `proc_prune` 的运行时，所以这个优化主要是为下游 pass 减负，而非改变语义。
+
+### 4.4 锁存器信号注入：insert_latch_signaling
+
+#### 4.4.1 概念说明
+
+组合 `always` 块里，如果某个变量在某些分支被赋值、在另一些分支没被赋值，硬件语义是「保持原值」——即推断出锁存器（latch）。sv-elab 的处理分两步（锁存器推断的完整流程见 u6-l3，本讲只聚焦 case 树这一侧）：
+
+1. **检测**：`detect_possibly_unassigned_subset` 遍历 case 树的 `actions`，找出在「所有可达分支」里没有被完整赋值的位（即悬空位 dangling）。
+2. **注入信号**：对每个悬空位，sv-elab 预先建好一对 enable/staging 信号和一个 `$dlatch` 单元；然后调 `Case::insert_latch_signaling` **改写** case 树里所有触及这些位的 `Action`，让它们去驱动 staging/enable，而不是直接驱动变量本身。
+
+`insert_latch_signaling` 收到的 `map` 是 `VariableBit → {enable, staging}`（一对 `SigSpec`），由调用方在 [src/slang_frontend.cc:L1819-L1837](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L1819-L1837) 逐位建好。
+
+#### 4.4.2 核心流程
+
+对当前 `Case` 的每个 `action`，逐位检查 `lvalue` 的每一位 `lbit`：
+
+- 若 `lbit` 在 latch map 里：
+  - 若该位 `mask == S1`（确定要写）且还没为它建过 mask-switch：把 `lbit`、对应的 `staging`、`enable`、`unmasked_rvalue` 累积进「直连缓冲」。处理完整个 action 后，把缓冲作为两条 `aux_actions` 加到**当前 Case**：`{staging, rvalue}` 与 `{enable, 全 1}`。
+  - 否则（mask 是动态的）：新建一个以 `mask` 为 signal 的子 Switch，挂在当前 Case 前；在该 Switch 的 `compare={S1}` 分支里加 `aux_actions`：`{staging, rvalue位}` 与 `{enable, S1}`。这表达「仅当 mask 为 1 时才让锁存器捕获新值」。
+- 处理完本层 action 后，递归对所有子 Switch 的所有分支调 `insert_latch_signaling`。
+- 最后把新建的 mask-switch 插到 `switches` 最前面。
+
+配合调用方在 `root_case` 上预设的两条 `aux_actions`（[src/slang_frontend.cc:L1839-L1842](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L1839-L1842)）：`{enables, 全 0}`（默认不使能）与 `{all_staging, 全 x}`（默认值未知），锁存器的 enable/staging 就被完整建模：分支命中时 enable 拉高、staging 载入新值，否则 enable 为 0、锁存器保持。
+
+#### 4.4.3 源码精读
+
+锁存器检测如何消费 `actions`：
+
+> [src/slang_frontend.cc:L340-L404](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L340-L404) —— `detect_possibly_unassigned_subset`：对每个 `action`，若 `mask.is_fully_ones()`，就把 `lvalue` 各位从「待定集合 remaining」里 erase（这些位在本分支被完整赋值）；再用 `Yosys::BitPatternPool` 推理 switch 的哪些分支可达，递归处理。最终 `remaining` 里剩下的位就是「可能未被赋值」的悬空位。
+
+锁存器 enable/staging 的创建与 `insert_latch_signaling` 的调用：
+
+> [src/slang_frontend.cc:L1816-L1844](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L1816-L1844) —— 对每个悬空 chunk 建 `en`/`staging` 占位信号，逐位建 `addDlatch(en[i], staging[i], convert_static(chunk[i]), true)`，登记进 `signaling` map；在 `root_case` 预置 `{enables, 0}` 与 `{all_staging, x}` 两条 `aux_actions`；最后 `root_case->insert_latch_signaling(netlist, signaling)`。
+
+`insert_latch_signaling` 本体：
+
+> [src/cases.h:L122-L169](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L122-L169) —— 遍历 `actions`，对落在 map 里的位按 `mask==S1` 与否分两条路径（直连 vs. 新建 mask-switch）；累积出的 `aux_actions` 加到当前 Case；随后递归子分支；最后把新建的 mask-switch 插到 `switches` 最前。`has_mask_switches` 集合保证同一个位不会被重复建 mask-switch。
+
+#### 4.4.4 代码实践
+
+实践目标：追踪一个「不完整的 if」如何触发锁存器，并描述 `insert_latch_signaling` 改写后的动作。
+
+考虑（删掉上例的 else）：
+
+```systemverilog
+// 示例代码：仅用于讲解
+module lat(input s, input [1:0] d, output reg [1:0] q);
+    always @(*) begin
+        if (s) q = d;   // 没有 else → s=0 时 q 保持 → 锁存器
+    end
+endmodule
+```
+
+操作步骤：
+
+1. 跟踪 [src/slang_frontend.cc:L1787-L1807](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L1787-L1807)：`all_driven` 含 `q` 的两位；因为没有默认分支覆盖 `s=0`，`detect_possibly_unassigned_subset` 把 `q` 的两位留在 `dangling` 里。
+2. 跟踪 [src/slang_frontend.cc:L1816-L1844](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L1816-L1844)：为 `q[0]`、`q[1]` 各建 `en`/`staging` 与一个 `$dlatch`，填进 `signaling`；`root_case` 预置 `{en, 0}`、`{staging, x}`。
+3. 进入 [src/cases.h:L122-L169](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L122-L169)：在 `compare={S1}` 分支里，action `{lvalue=q, mask=11, rvalue=d}` 的两位都满足 `mask==S1`，于是累积出 `aux_actions {staging, d}` 与 `{en, 11}` 加到该分支。
+
+需要观察的现象：改写后，`compare={S1}` 分支不再直接写 `q`，而是写 `staging` 并把 `en` 拉高；`q` 由 `$dlatch(en, staging, q_old)` 驱动。
+
+预期结果：当 `s=1` 时 `en=1`、`staging=d`，锁存器捕获 `d`；当 `s=0` 时 `en=0`，锁存器保持上一次的值——这正是「不完整赋值产生锁存器」的电路实现。
+
+> 说明：`detect_possibly_unassigned_subset` 用 `BitPatternPool` 推理分支可达性，细节偏多；本实践只要求你理解「悬空位 → enable/staging → `$dlatch`」这条主线，池推理的深入讲解留到 u6-l3。运行验证待本地构建后进行。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`insert_latch_signaling` 为什么要在 `mask` 不是常量 `S1` 时新建一个以 `mask` 为 signal 的子 Switch？
+
+**参考答案**：动态掩码意味着「这一位是否被写取决于运行时的 mask 值」。锁存器的 enable 必须精确反映「本次真的要写」，所以要用一个 `signal=mask` 的 Switch，仅在 `mask==1` 时才把 `enable` 拉高、把新值送进 `staging`。`mask==S1` 是常见特例（确定写），可以直接连，不必建 Switch。
+
+**练习 2**：`root_case` 上预置的 `{enables, 全 0}` 和 `{all_staging, 全 x}` 两条 `aux_actions` 各起什么作用？
+
+**参考答案**：`{enables, 全 0}` 给所有 enable 一个「默认不使能」的初值，只有命中赋值分支时才被对应分支的 `{enable, 1}` 覆盖；`{all_staging, 全 x}` 给 staging 一个默认未知值，被命中分支的 `{staging, rvalue}` 覆盖。两者共同保证：没有分支命中时锁存器不捕获（保持），有分支命中时捕获正确的新值。
+
+## 5. 综合实践
+
+把本讲的三条主线（case 树建造、`Action` 三件套、降级与锁存器注入）串起来。
+
+任务：阅读下面这段 SV，纯靠源码追踪（不运行）画出它的 HDL 意图 case 树，并预测降级后的 RTLIL 结构。
+
+```systemverilog
+// 示例代码：仅用于讲解
+module mix(input clk, input rst, input [1:0] a, output reg [1:0] y, output reg z);
+    always @(*) begin
+        y = 2'b00;            // 默认值
+        if (a == 2'b11) begin
+            y = a;
+            z = 1'b1;
+        end
+        // z 在 else 分支未赋值 → z 推断为锁存器
+    end
+endmodule
+```
+
+要求：
+
+1. 标出 `ProceduralContext` 构造的平凡外壳。
+2. 标出 `if` 对应的 `Switch`（signal 是 `ReduceBool(a==2'b11)`）、它的两个分支（`compare={S1}` 与默认 `compare={}`），以及每个分支里的 `Case::Action`（注意 `mask`、`unmasked_rvalue`）。
+3. 指出哪些位是悬空位（`z` 的唯一位），描述 `insert_latch_signaling` 会为 `z` 注入什么。
+4. 描述 `y` 为何不会产生锁存器（先赋默认值 `00`，再在 `if` 里覆盖——`y` 在所有路径都被赋值）。
+5. 画出降级后的 `RTLIL::Process`（`SwitchRule` + 两个 `CaseRule` 的动作），以及 `y` 的连续赋值、`z` 的 `$dlatch`。
+
+完成后，可以对照 [src/cases.h:L84-L113](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L84-L113) 的 `copy_into` 与 [src/slang_frontend.cc:L1816-L1844](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/slang_frontend.cc#L1816-L1844) 的锁存器注入，检查你的预测是否与源码行为一致。运行验证待本地构建后进行。
+
+## 6. 本讲小结
+
+- `Case`/`Switch` 是仿 RTLIL `CaseRule`/`SwitchRule` 的中间结构，刻意保留 slang 源码信息、用 `VariableBits` 当左值，以表达「HDL 意图」（[cases.h:L19-L30](https://github.com/povik/yosys-slang/blob/3dddccd478618d68f8a5e160fb4b5783c4da35d4/src/cases.h#L19-L30)）。
+- `Case` 同时维护 `actions`（HDL 意图，左值 `VariableBits`，含 `mask`/`unmasked_rvalue`）和 `aux_actions`（网表级 `SigSig`）；前者用于锁存器分析与改写，后者才直接进 RTLIL。
+- `Switch::lower` / `Case::copy_into` 负责降级；`copy_into` 里有个「拍平凡 Switch」的优化，降低树深以加速下游 `proc_prune`。
+- 降级时只复制 `aux_actions`，`actions` 的语义已在变量状态 + `SwitchHelper::finish` + `add_continuous_driver` 中被编译掉。
+- `detect_possibly_unassigned_subset` 读 `actions` 找悬空位；`insert_latch_signaling` 据此为锁存器位注入 enable/staging 信号并改写 case 树。
+- 一条 `if` 会变成一个 `signal=条件` 的 Switch、两个分支 Case，平凡外壳与末尾的空 Switch 都会在降级时被拍平。
+
+## 7. 下一步学习建议
+
+- 进入 **u5-l1 ProceduralContext 与 VariableState**：看 `ProceduralContext` 如何持有 `root_case` 与变量状态，以及 `VariableState` 的 save/restore 如何与 `SwitchHelper` 配合，把分支合并回单一 RTLIL Process。本讲的 case 树在那里被「驱动建造」。
+- 阅读 **u5-l2 StatementExecutor**：看 `SwitchHelper` 的 `enter_branch`/`exit_branch`/`finish` 如何把 `if`/`case`/循环翻译进 case 树，补全 4.3.4 实践里 `finish` 生成 `aux_actions` 的细节。
+- 阅读 **u6-l3 锁存器推断**：深入 `detect_possibly_unassigned_subset` 的 `BitPatternPool` 可达性推理与 `handle_comb_like_process` 的全流程，把本讲 4.4 的锁存器主线补完整。
+- 想验证本讲结论，可阅读 **u8-l1 测试体系**，学着用 `tests/` 下的 `.ys` 等价性测试写一个最小用例，本地构建后跑 `read_slang` + `dump` 对照你画的 case 树。

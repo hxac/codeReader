@@ -1,0 +1,840 @@
+{
+  "project": "yosys-slang",
+  "head": "3dddccd478618d68f8a5e160fb4b5783c4da35d4",
+  "rationale": "本项目（sv-elab，原名 yosys-slang）是一个 SystemVerilog 综合器前端：它借助内嵌的 slang 库完成词法/语法/语义分析得到 AST，再遍历 slang AST 把设计精化（elaborate）成 Yosys RTLIL 字级网表，最终以 Yosys 插件（slang.so / read_slang 命令）形式集成。源码规模约 1 万行 C++、约 25 个文件，属于中大型且内部抽象层次极丰富的项目，因此规划为 8 个单元共 30 篇讲义。\n\n学习顺序按「先认识项目与运行方式 → 再看入口与整体流水线 → 然后下沉到核心数据模型 → 表达式求值 → 过程块建模 → 时序与寄存器/锁存器 → 存储器、层次、黑盒、断言等高级主题 → 测试与构建、二次开发」的螺旋式推进。前三个单元为入门层，帮助读者建立「slang 负责 AST、本仓库负责把 AST 翻译成 RTLIL」这条主线；第四到六单元为进阶层，覆盖 EvalContext/ProceduralContext/VariableBits/Case 树等关键抽象；第七、八单元为专家层，深入时序识别、存储器推断、层次展平、断言、构建系统与扩展实践。每篇讲义只聚焦一个相对独立的主题，源码引用控制在 1–6 个真实文件，并配一个可操作的实践任务，讲义之间通过 depends_on 形成清晰的依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 sv-elab 与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：sv-elab 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 sv-elab（原 yosys-slang）的定位：把 SystemVerilog 精化为字级网表的 Yosys 前端，以及它与 slang、Yosys、OpenROAD 的关系。",
+          "learning_goals": [
+            "理解 sv-elab 在 SystemVerilog 综合工具链中的角色",
+            "区分 slang（解析/语义分析）与本仓库（AST→RTLIL 翻译）的职责边界",
+            "了解项目支持的 SystemVerilog 子集与典型用户"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目背景",
+            "slang 依赖",
+            "Yosys/OpenROAD 集成"
+          ],
+          "practice_task": "阅读 README，列出 sv-elab 的三个下游用户，并用一句话说明 slang 与 sv-elab 各自负责的工作。",
+          "depends_on": [],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "入口与整体流水线",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Yosys 前端注册与 read_slang 命令",
+          "order": 1,
+          "filename": "u2-l1-frontend-registration.md",
+          "level": "intermediate",
+          "topic": "讲解 SlangFrontend 如何作为 Yosys Frontend 注册，以及 execute() 的整体流程骨架。",
+          "learning_goals": [
+            "理解 Yosys Frontend/Pass 插件机制",
+            "掌握 read_slang 命令从参数解析到调用 proc 的端到端流程",
+            "定位 SlangFrontend::execute 中的各个阶段"
+          ],
+          "source_files": [
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "SlangFrontend",
+            "execute()",
+            "SlangVersionPass/SlangDefaultsPass"
+          ],
+          "practice_task": "在 execute() 中标注出『解析源码』『创建 Compilation』『遍历 PopulateNetlist』『调用 proc』四个阶段对应的代码行，并解释每个阶段失败时的行为。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "slang 驱动流水线：解析、编译与精化",
+          "order": 2,
+          "filename": "u2-l2-slang-driver-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 slang::driver::Driver 如何解析命令行、读入源码、创建 Compilation 并取顶层实例。",
+          "learning_goals": [
+            "理解 slang driver 的标准参数与处理流程",
+            "掌握 parseAllSources/createCompilation/reportCompilation 的作用",
+            "了解 topInstances 与 get_instance_body 如何进入精化"
+          ],
+          "source_files": [
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "slang::driver::Driver",
+            "ast::Compilation",
+            "topInstances"
+          ],
+          "practice_task": "跟踪 execute() 中从 driver.parseAllSources 到 compilation->getRoot().topInstances 的调用链，画出 slang 侧产出、sv-elab 侧消费的数据流。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "SynthesisSettings：read_slang 的全部选项",
+          "order": 3,
+          "filename": "u2-l3-synthesis-settings.md",
+          "level": "intermediate",
+          "topic": "讲解 SynthesisSettings 结构体与 addOptions，以及 dump_ast、no_proc、keep_hierarchy、unroll_limit 等关键开关。",
+          "learning_goals": [
+            "掌握 SynthesisSettings 各字段的含义与默认值",
+            "理解 hierarchy_mode()/unroll_limit() 等派生方法",
+            "学会通过命令行控制综合行为"
+          ],
+          "source_files": [
+            "src/slang_frontend.h",
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "SynthesisSettings",
+            "addOptions",
+            "fixup_options"
+          ],
+          "practice_task": "编写一段 read_slang 调用，分别启用 dump_ast 与 keep_hierarchy，并说明每个选项对最终网表的影响。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "诊断系统：从 slang Diagnostic 到 Yosys 日志",
+          "order": 4,
+          "filename": "u2-l4-diagnostics.md",
+          "level": "intermediate",
+          "topic": "讲解 DiagnosticIssuer、diag::setup_messages 与 check_diagnostics，理解自定义诊断如何注册与上报。",
+          "learning_goals": [
+            "理解 DiagnosticIssuer 如何累积并上报诊断",
+            "掌握 diag 命名空间里各类诊断码的注册",
+            "了解测试模式下 expected_diagnostic 的用法"
+          ],
+          "source_files": [
+            "src/diag.h",
+            "src/diag.cc",
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "DiagnosticIssuer",
+            "diag::setup_messages",
+            "check_diagnostics"
+          ],
+          "practice_task": "在 diag.h 中挑选三个诊断码，分别在 diag.cc 与 slang_frontend.cc 中找到它们的注册与触发位置，描述触发场景。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心数据模型：网表上下文与 HDL 意图",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "NetlistContext：网表构建的中枢",
+          "order": 1,
+          "filename": "u3-l1-netlist-context.md",
+          "level": "intermediate",
+          "topic": "讲解 NetlistContext 如何同时继承 RTLILBuilder 与 DiagnosticIssuer，持有 module 画布、线网缓存、被驱动变量等状态。",
+          "learning_goals": [
+            "理解 NetlistContext 的多重继承与职责聚合",
+            "掌握 canvas/wire_cache/driven_variables 等关键成员",
+            "了解 realm（实例体）与 NetlistContext 的对应关系"
+          ],
+          "source_files": [
+            "src/slang_frontend.h",
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "NetlistContext",
+            "RTLILBuilder",
+            "DiagnosticIssuer"
+          ],
+          "practice_task": "画出 NetlistContext 的成员关系图，标出哪些成员用于『记录 HDL 意图』、哪些用于『生成 RTLIL』。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "RTLILBuilder：RTLIL 单元动物园",
+          "order": 2,
+          "filename": "u3-l2-rtlil-builder-cells.md",
+          "level": "intermediate",
+          "topic": "讲解 builder.cc 中 RTLILBuilder 如何发出 $add/$mux/$dff/$dffe/$aldff 等单元与线网。",
+          "learning_goals": [
+            "掌握 Biop/Unop/Mux/Bwmux 等组合单元的封装",
+            "理解 add_dff/add_dffe/add_aldff 系列触发器单元",
+            "了解 bless_cell、AttributeGuard 与 staged_attributes 的属性暂存机制"
+          ],
+          "source_files": [
+            "src/builder.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "RTLILBuilder",
+            "Biop/Unop",
+            "add_dff/add_dffe/add_aldff",
+            "AttributeGuard"
+          ],
+          "practice_task": "选择 Mux 与 add_dffe 两个方法，说明它们分别创建的 RTLIL 单元及其端口连接，并解释 bless_cell 的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Variable 与 VariableBits：HDL 意图的位级表示",
+          "order": 3,
+          "filename": "u3-l3-variable-and-variablebits.md",
+          "level": "intermediate",
+          "topic": "讲解 Variable、VariableBit、VariableChunk、VariableBits 这一组『HDL 意图』位级抽象，以及它们与 RTLIL::SigSpec 的区别。",
+          "learning_goals": [
+            "理解 Variable 的 Kind 分类与 from_symbol 构造",
+            "掌握 VariableBits 的 chunk/bits 双态存储与迭代器",
+            "区分『HDL 意图 LHS』与最终网表信号"
+          ],
+          "source_files": [
+            "src/variables.h",
+            "src/variables.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "Variable",
+            "VariableBit/VariableChunk/VariableBits",
+            "EvalContext::variable"
+          ],
+          "practice_task": "解释为什么 sv-elab 不直接用 RTLIL::SigSpec 表示过程块里的左值，而要引入 VariableBits；并说明 VariableBits 何时被解析成真实信号。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Case 与 Switch：HDL 意图的过程块 case 树",
+          "order": 4,
+          "filename": "u3-l4-case-and-switch.md",
+          "level": "intermediate",
+          "topic": "讲解 cases.h 中模仿 RTLIL SwitchRule/CaseRule 但保留 HDL 意图的 Case/Switch 结构，以及如何 lower 成 RTLIL。",
+          "learning_goals": [
+            "理解 Case::Action 中 lvalue/mask/unmasked_rvalue 的设计",
+            "掌握 Switch::lower/copy_into 的降级与优化",
+            "了解 insert_latch_signaling 的用途"
+          ],
+          "source_files": [
+            "src/cases.h",
+            "src/cases.cc"
+          ],
+          "minimal_modules": [
+            "Case",
+            "Switch",
+            "copy_into/lower"
+          ],
+          "practice_task": "追踪一个简单 if 语句生成的 Case/Switch 树结构，并描述它最终 lower 成的 RTLIL::CaseRule/SwitchRule。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "表达式求值与左值",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "EvalContext：把 SystemVerilog 表达式求值为 RTLIL SigSpec",
+          "order": 1,
+          "filename": "u4-l1-expression-evaluation.md",
+          "level": "intermediate",
+          "topic": "讲解 EvalContext::operator() 如何分派各类 slang 表达式，输出 RTLIL::SigSpec。",
+          "learning_goals": [
+            "掌握 EvalContext 的核心求值入口与分派",
+            "理解 apply_conversion/apply_nested_conversion 的类型转换处理",
+            "了解 streaming（流拼接）等特殊表达式"
+          ],
+          "source_files": [
+            "src/slang_frontend.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "EvalContext",
+            "operator()",
+            "apply_conversion",
+            "streaming"
+          ],
+          "practice_task": "为一个二元加法表达式和一个位选择表达式，分别写出 EvalContext 的求值路径与产生的 RTLIL 单元。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "LValue：左值的结构化分析",
+          "order": 2,
+          "filename": "u4-l2-lvalue-analysis.md",
+          "level": "intermediate",
+          "topic": "讲解 lvalue.cc 中 LValue 的 variant 描述（变量、拼接、范围选择、成员访问、存储器写）及其分析方法。",
+          "learning_goals": [
+            "掌握 LValue::analyze 的五种 descriptor",
+            "理解 is_static/is_contiguous_slice 的判定",
+            "了解 LValue 与 VariableBits 的衔接"
+          ],
+          "source_files": [
+            "src/lvalue.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "LValue",
+            "analyze",
+            "descriptor variants"
+          ],
+          "practice_task": "为一个含拼接与成员访问的左值，画出 LValue 的 descriptor 树，并说明它是否为静态/连续切片。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "AddressingResolver：动态位/数组寻址",
+          "order": 3,
+          "filename": "u4-l3-addressing-resolver.md",
+          "level": "intermediate",
+          "topic": "讲解 addressing.cc 中 AddressingResolver 如何用 mux/demux/shift 处理动态索引与范围选择。",
+          "learning_goals": [
+            "理解 ElementSelect/RangeSelect 的地址解析",
+            "掌握 shift_up/shift_down/demux/mux 的电路含义",
+            "了解 is_static 判定与静态路径优化"
+          ],
+          "source_files": [
+            "src/addressing.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "AddressingResolver",
+            "demux/mux",
+            "shift_up/shift_down"
+          ],
+          "practice_task": "对一个动态索引的数组读取 a[i]，说明 AddressingResolver 生成的 demux/mux 电路，并对比静态索引的优化路径。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "过程块建模：always/initial 到 RTLIL Process",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "ProceduralContext 与 VariableState",
+          "order": 1,
+          "filename": "u5-l1-procedural-context.md",
+          "level": "intermediate",
+          "topic": "讲解 ProceduralContext 如何建模一个过程块，以及 VariableState 如何跟踪变量赋值。",
+          "learning_goals": [
+            "理解 ProceduralContext 的 case 树与 timing",
+            "掌握 VariableState 的 set/evaluate/save/restore",
+            "了解 effects_priority 与 initial_locals_state"
+          ],
+          "source_files": [
+            "src/slang_frontend.h",
+            "src/procedural.cc"
+          ],
+          "minimal_modules": [
+            "ProceduralContext",
+            "VariableState",
+            "all_driven",
+            "copy_case_tree_into"
+          ],
+          "practice_task": "解释 VariableState 如何在 if 分支里 save/restore 赋值，最终如何合并回单一 RTLIL::Process。",
+          "depends_on": [
+            "u3-l4",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "StatementExecutor：遍历过程块语句",
+          "order": 2,
+          "filename": "u5-l2-statement-executor.md",
+          "level": "intermediate",
+          "topic": "讲解 statements.h 中 StatementExecutor 与 SwitchHelper 如何把 if/for/case 等语句翻译进 case 树。",
+          "learning_goals": [
+            "掌握 StatementExecutor 对各类语句的 handle",
+            "理解 SwitchHelper 的分支进入/退出与变量状态保存",
+            "了解死分支检测等小优化"
+          ],
+          "source_files": [
+            "src/statements.h"
+          ],
+          "minimal_modules": [
+            "StatementExecutor",
+            "SwitchHelper",
+            "branch/finish"
+          ],
+          "practice_task": "追踪一个 if-else 语句经过 SwitchHelper 后生成的 Case/Switch 结构与 VariableState 变化。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "赋值处理与位掩码",
+          "order": 3,
+          "filename": "u5-l3-assignment-handling.md",
+          "level": "intermediate",
+          "topic": "讲解 procedural.cc 中 assign_rvalue、assign_to_lvalue_with_masking 与 update_variable_state 如何处理阻塞/非阻塞赋值。",
+          "learning_goals": [
+            "掌握阻塞与非阻塞赋值的差异处理",
+            "理解 mask 在部分位赋值中的作用",
+            "了解 blocking/nonblocking 顺序检测诊断"
+          ],
+          "source_files": [
+            "src/procedural.cc",
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "assign_rvalue",
+            "assign_to_lvalue_with_masking",
+            "update_variable_state"
+          ],
+          "practice_task": "对一个含掩码的部分位赋值（如 a[1] = x），说明 mask 与 unmasked_rvalue 如何组合进 Case::Action。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "逃逸构造：break/continue/return 与循环展开",
+          "order": 4,
+          "filename": "u5-l4-escape-constructs-and-loops.md",
+          "level": "intermediate",
+          "topic": "讲解 EscapeFrame、RegisterEscapeConstructGuard、UnrollLimitTracking 如何实现循环与函数返回。",
+          "learning_goals": [
+            "理解 escape_stack 与逃逸标志变量的建模",
+            "掌握循环展开与 UnrollLimitTracking 的限额机制",
+            "了解函数（SubroutineSymbol）作用域的处理"
+          ],
+          "source_files": [
+            "src/slang_frontend.h",
+            "src/procedural.cc"
+          ],
+          "minimal_modules": [
+            "EscapeFrame",
+            "RegisterEscapeConstructGuard",
+            "UnrollLimitTracking",
+            "EnterAutomaticScopeGuard"
+          ],
+          "practice_task": "为一个含 break 的 for 循环，说明逃逸标志变量如何控制退出，并解释展开限额耗尽时的诊断。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "时序逻辑：寄存器、复位与锁存器",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "TimingPatternInterpretor：识别 always 块的时序模式",
+          "order": 1,
+          "filename": "u6-l1-timing-pattern-interpretor.md",
+          "level": "advanced",
+          "topic": "讲解 async_pattern 中如何把 always 块归类为组合型、触发器型或 initial 型，并提取异步复位模式。",
+          "learning_goals": [
+            "理解 interpret/handle_always 的分类逻辑",
+            "掌握 interpret_async_pattern 的异步分支提取",
+            "了解 ProcessTiming 的 triggers 与 background_enable"
+          ],
+          "source_files": [
+            "src/async_pattern.h",
+            "src/async_pattern.cc"
+          ],
+          "minimal_modules": [
+            "TimingPatternInterpretor",
+            "interpret",
+            "AsyncBranch"
+          ],
+          "practice_task": "对一个 always_ff @(posedge clk or posedge rst)，说明 interpret 如何拆出 clock 与 async 分支。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "触发器发射与异步复位",
+          "order": 2,
+          "filename": "u6-l2-flipflop-and-async-reset.md",
+          "level": "advanced",
+          "topic": "讲解 PopulateNetlist::handle_ff_process 如何用 dffe/aldff/aldffe/dual_edge_aldff 发射寄存器。",
+          "learning_goals": [
+            "掌握同步/异步复位寄存器的单元选择",
+            "理解 aload 分支与 prior_branch_taken 的处理",
+            "了解双沿触发与 iff 条件的支持限制"
+          ],
+          "source_files": [
+            "src/slang_frontend.cc",
+            "src/builder.cc"
+          ],
+          "minimal_modules": [
+            "handle_ff_process",
+            "add_dffe/add_aldff/add_dual_edge_aldff"
+          ],
+          "practice_task": "对照 tests/unit/dff.ys，解释含异步复位的 always_ff 最终生成哪些 RTLIL 单元，并与 gold 网表比对。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "锁存器推断",
+          "order": 3,
+          "filename": "u6-l3-latch-inference.md",
+          "level": "advanced",
+          "topic": "讲解 handle_comb_like_process 如何识别 latch，并用 addDlatch 与 staging/en 信号建模。",
+          "learning_goals": [
+            "掌握 detect_possibly_unassigned_subset 的悬空判定",
+            "理解 latch 的 enable/staging 信号机制",
+            "了解 insert_latch_signaling 与 LatchNotInferred 诊断"
+          ],
+          "source_files": [
+            "src/slang_frontend.cc",
+            "src/cases.h"
+          ],
+          "minimal_modules": [
+            "handle_comb_like_process",
+            "detect_possibly_unassigned_subset",
+            "insert_latch_signaling"
+          ],
+          "practice_task": "对一个不完整的 if 赋值，追踪哪些位被判定为 latch，并描述生成的 addDlatch 与 staging 信号。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高级主题：存储器、层次、黑盒与断言",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "存储器推断与初始化",
+          "order": 1,
+          "filename": "u7-l1-memory-inference.md",
+          "level": "advanced",
+          "topic": "讲解 InferredMemoryDetector 如何挑选存储器候选，以及 readmem/meminit 的处理。",
+          "learning_goals": [
+            "掌握 memory_candidates 的筛选与 disqualify 规则",
+            "理解 ram_style/rom_style 等用户提示属性",
+            "了解 add_memory_init/emit_meminit_cell 与 $readmem 任务"
+          ],
+          "source_files": [
+            "src/memory.h",
+            "src/slang_frontend.cc",
+            "src/builder.cc"
+          ],
+          "minimal_modules": [
+            "InferredMemoryDetector",
+            "handle_readmem",
+            "add_memory_init"
+          ],
+          "practice_task": "对一个非阻塞写入的数组，说明它为何被识别为存储器，并对照 tests/various/mem_inference.ys 验证。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "层次处理：展平、黑盒与 hierarchy 模式",
+          "order": 2,
+          "filename": "u7-l2-hierarchy-and-dissolve.md",
+          "level": "advanced",
+          "topic": "讲解 should_dissolve/is_blackbox、hierarchy_mode 与 HierarchyQueue 如何决定模块边界。",
+          "learning_goals": [
+            "掌握 should_dissolve 的展平判定",
+            "理解 keep_hierarchy/best_effort_hierarchy 三种模式",
+            "了解 HierarchyQueue 的延迟模块生成与 realm 概念"
+          ],
+          "source_files": [
+            "src/slang_frontend.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "should_dissolve",
+            "is_blackbox",
+            "HierarchyQueue",
+            "find_symbol_realm"
+          ],
+          "practice_task": "对一个含子模块的设计，分别用默认与 keep_hierarchy 模式运行 read_slang，比较生成的模块数量与边界。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "黑盒的导入与导出",
+          "order": 3,
+          "filename": "u7-l3-blackbox-import-export.md",
+          "level": "advanced",
+          "topic": "讲解 blackboxes.cc 中如何把已有 RTLIL 模块作为黑盒导入 slang，以及把黑盒实例导出回 RTLIL。",
+          "learning_goals": [
+            "掌握 import_blackboxes_from_rtlil 的桥接逻辑",
+            "理解 is_decl_empty_module 与空模块黑盒化",
+            "了解 export_blackbox_to_rtlil 的端口宽度与参数限制诊断"
+          ],
+          "source_files": [
+            "src/blackboxes.cc",
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "import_blackboxes_from_rtlil",
+            "is_decl_empty_module",
+            "export_blackbox_to_rtlil"
+          ],
+          "practice_task": "说明当 read_slang 遇到一个未定义模块时，extern_modules 如何从已有 RTLIL 设计中补全黑盒。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "SystemVerilog 断言（SVA）",
+          "order": 4,
+          "filename": "u7-l4-systemverilog-assertions.md",
+          "level": "advanced",
+          "topic": "讲解 sva.cc 中如何把并发断言属性处理成可综合的检查逻辑，以及相关支持限制。",
+          "learning_goals": [
+            "掌握 process_sva_property/process_freestanding_sva_property",
+            "理解 EvalContext::sva 的特殊求值规则",
+            "了解 ignore_assertions 选项与 SVA 支持边界"
+          ],
+          "source_files": [
+            "src/sva.cc",
+            "src/slang_frontend.cc",
+            "src/slang_frontend.h"
+          ],
+          "minimal_modules": [
+            "process_sva_property",
+            "EvalContext::sva",
+            "handle_past"
+          ],
+          "practice_task": "对照 tests/various/concurrent_assert.ys，说明一个并发断言如何被翻译成 RTLIL 检查单元，以及哪些 SVA 特性会触发诊断。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "变量初始化与命名生成",
+          "order": 5,
+          "filename": "u7-l5-initialization-and-naming.md",
+          "level": "advanced",
+          "topic": "讲解 initialization.cc 的声明初值求值与 finalization，以及 naming.cc 的子字段命名生成。",
+          "learning_goals": [
+            "掌握 evaluate_decl_initializers/finalize_variable_initialization",
+            "理解 generate_subfield_names 对结构体/字段的命名",
+            "了解 NetlistContext::id/hdlname 的转义规则"
+          ],
+          "source_files": [
+            "src/initialization.cc",
+            "src/naming.cc",
+            "src/slang_frontend.cc"
+          ],
+          "minimal_modules": [
+            "evaluate_decl_initializers",
+            "finalize_variable_initialization",
+            "generate_subfield_names",
+            "NetlistContext::id"
+          ],
+          "practice_task": "解释一个含初值的 reg 如何在初始化阶段与触发器驱动阶段分别处理，并追踪其最终网表命名来源。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "测试、构建与二次开发",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "测试体系：等价性检查与自测",
+          "order": 1,
+          "filename": "u8-l1-test-infrastructure.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 目录下的 .ys 等价性测试、CTest 集成与 run.sh 脚本。",
+          "learning_goals": [
+            "掌握 read_slang + equiv_make/equiv_induct 的等价性测试范式",
+            "理解 tests/CMakeLists.txt 的测试注册",
+            "了解 selftests.tcl 与 TestSlangDiagPass/TestSlangExprPass 自测命令"
+          ],
+          "source_files": [
+            "tests/CMakeLists.txt",
+            "tests/run.sh",
+            "tests/unit/dff.ys"
+          ],
+          "minimal_modules": [
+            "等价性测试",
+            "CTest",
+            "TestSlangDiagPass/TestSlangExprPass"
+          ],
+          "practice_task": "阅读 tests/unit/dff.ys，写出它如何用 gold 网表与 gate 网表做等价性证明，并尝试新增一个最小的等价性用例。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "集成测试：croc_boot RISC-V 内核",
+          "order": 2,
+          "filename": "u8-l2-croc-boot-integration.md",
+          "level": "advanced",
+          "topic": "讲解 tests/croc_boot 如何用真实的 croc RISC-V 内核做端到端启动测试。",
+          "learning_goals": [
+            "理解 croc_boot 的 main.cc/run.sh/prepare.ys 流程",
+            "掌握真实 IP 综合与启动验证的意义",
+            "了解外部兼容套件的作用"
+          ],
+          "source_files": [
+            "tests/croc_boot/main.cc",
+            "tests/croc_boot/run.sh",
+            "tests/croc_boot/prepare.ys_"
+          ],
+          "minimal_modules": [
+            "croc 启动测试",
+            "综合-仿真流程",
+            "兼容套件"
+          ],
+          "practice_task": "梳理 croc_boot 从 prepare 到启动 helloworld.ihex 的步骤，说明它在 CI 中验证了 sv-elab 的哪些能力。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "构建系统深入：CMake 与 Bazel",
+          "order": 3,
+          "filename": "u8-l3-build-systems.md",
+          "level": "advanced",
+          "topic": "讲解顶层 CMakeLists、src/CMakeLists 的插件/静态库构建，以及 Bazel 与依赖支持。",
+          "learning_goals": [
+            "掌握 BUILD_AS_PLUGIN 的两种产物差异",
+            "理解 FindYosys/GitRevision/version.h.in 的配置生成",
+            "了解 Bazel MODULE/dependency_support 的第三方依赖管理"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "src/CMakeLists.txt",
+            "cmake/FindYosys.cmake",
+            "BUILD.bazel",
+            "MODULE.bazel"
+          ],
+          "minimal_modules": [
+            "CMake 插件构建",
+            "FindYosys/GitRevision",
+            "Bazel 依赖"
+          ],
+          "practice_task": "分别说明 cmake 生成 slang.so 与静态库时的 target 属性差异，并解释 slang 与 fmt 为何需要以 PIC 方式构建。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "扩展开发：添加对新 SV 构造的支持",
+          "order": 4,
+          "filename": "u8-l4-extending-and-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 require/unimplemented 宏、PopulateNetlist/StatementExecutor 的扩展点，以及如何为新 SV 构造添加翻译。",
+          "learning_goals": [
+            "掌握 require/unimplemented/ast_invariant 的防御式编程",
+            "理解在 EvalContext/StatementExecutor 中新增 handle 的位置",
+            "了解 MAINTAINERS.md 的贡献流程与 AI 政策"
+          ],
+          "source_files": [
+            "src/abort_helpers.cc",
+            "src/slang_frontend.h",
+            "docs/MAINTAINERS.md"
+          ],
+          "minimal_modules": [
+            "abort_helpers",
+            "扩展点",
+            "贡献流程"
+          ],
+          "practice_task": "为一个当前会触发 unimplemented 的 SV 构造，设计一个最小改动方案：定位触发点、新增 handle、补一个等价性测试。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
