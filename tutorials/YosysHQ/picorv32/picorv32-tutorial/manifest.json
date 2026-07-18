@@ -1,0 +1,601 @@
+{
+  "head": "87c89acc18994c8cf9a2311e871818e87d304568",
+  "project": "picorv32",
+  "rationale": "PicoRV32 的学习难点在于：核心逻辑集中在一个约 3000 行的单文件 picorv32.v 中，但同时横跨 CPU 微架构、RISC-V 译码、多种总线接口、协处理器扩展、自定义中断指令和完整 SoC 集成多个层面。因此大纲采用\"先跑起来再读源码、由外到内、由数据通路到扩展机制、最后落到 SoC 与验证\"的顺序。第 1-2 单元面向初学者，先建立项目定位、仓库结构、工具链与最小可运行固件；第 3-5 单元进入进阶层，按\"端口配置 → 指令译码 → 主状态机 → 寄存器堆/ALU/移位 → 内存接口\"的微架构自顶向下顺序拆解核心；第 6-8 单元为专家层，覆盖 PCPI、自定义 IRQ 指令、AXI/Wishbone 适配、压缩指令集、PicoSoC 集成以及仿真/形式化/综合评估等扩展与工程化主题。每个单元聚焦 2-3 篇相对独立的讲义，讲义间通过 depends_on 形成清晰依赖链，且每篇都结合真实源码并给出可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "认识 PicoRV32：项目定位与首次运行",
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "learning_goals": [
+            "理解 PicoRV32 作为尺寸优化 RISC-V CPU 的核心定位与设计取舍",
+            "掌握 RV32I/E/C/M 各变体及三种核心版本 picorv32/picorv32_axi/picorv32_wb 的区别",
+            "能说明为什么 PicoRV32 适合作为辅助处理器而非主处理器"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目特性与典型应用",
+            "核心变体与 ISA 配置",
+            "尺寸/频率评估概览"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README 的 Features、Cycles per Instruction 和 Evaluation 三节，用自己的话写出 PicoRV32 的三条核心卖点，并解释它为什么适合作为辅助处理器嵌入既有 FPGA/ASIC 设计。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "PicoRV32 是什么：项目总览与 RISC-V 背景",
+          "topic": "介绍 PicoRV32 的定位、特性（小尺寸、高 fmax、可选 AXI4/Wishbone/IRQ/PCPI）、RV32IMC/E 配置以及它作为 FPGA/ASIC 辅助处理器的典型应用场景。"
+        },
+        {
+          "id": "u1-l2",
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-and-build.md",
+          "learning_goals": [
+            "看懂 picorv32 仓库的目录组织与各目录职责",
+            "理解 Makefile 中 test/test_ez/test_wb/test_axi 等目标与对应测试台的映射",
+            "了解 picorv32.core 等 FuseSoC core 文件如何打包 IP 与参数"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录结构总览",
+            "Makefile 测试目标族",
+            "FuseSoC core 打包"
+          ],
+          "order": 2,
+          "practice_task": "通读根 Makefile，列出 make test、test_ez、test_wb、test_axi 各自使用的测试台 Verilog 文件、生成的 .vvp 以及依赖的 picorv32 模块，画一张目标→测试台→vvp 的依赖图。",
+          "source_files": [
+            "Makefile",
+            "README.md",
+            "picorv32.core"
+          ],
+          "title": "仓库结构与构建系统",
+          "topic": "讲解仓库目录布局、Makefile 的 test_* 目标族、文件清单（picorv32.v、testbench*、firmware/、tests/、picosoc/、scripts/）以及 FuseSoC 的 .core 打包文件。"
+        },
+        {
+          "id": "u1-l3",
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-run-first-testbench.md",
+          "learning_goals": [
+            "安装并使用 Icarus Verilog 运行 make test_ez",
+            "理解 testbench_ez.v 的时钟、复位、内置 memory[] 指令与 mem_valid/ready 握手",
+            "能手动追踪 memory[] 中几条 RV32I 指令的执行循环"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "时钟与复位",
+            "内建内存模型与字节写使能",
+            "取指/访存打印"
+          ],
+          "order": 3,
+          "practice_task": "运行 make test_ez 观察输出，然后对照 testbench_ez.v 中 memory[0..5] 的六条指令（li/sw/lw/addi/sw/j），手动推演前三次循环写入的值，预测打印结果并与实际输出对比。",
+          "source_files": [
+            "testbench_ez.v",
+            "picorv32.v",
+            "Makefile"
+          ],
+          "title": "跑起来：最小测试台 testbench_ez",
+          "topic": "用 testbench_ez.v 这个不依赖工具链的最小测试台，让读者第一次运行 picorv32，理解时序、复位、内存模型与取指/访存打印。"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "order": 2,
+      "title": "工具链与固件构建",
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-toolchain-and-hex.md",
+          "learning_goals": [
+            "理解 build-riscv32i[m][c]-tools 目标与 TOOLCHAIN_PREFIX 的作用",
+            "掌握 firmware.elf→firmware.bin→firmware.hex 的构建链与 sections.lds 的内存布局",
+            "看懂 makehex.py 如何做小端二进制到 Verilog $readmemh 格式的转换"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "工具链构建目标",
+            "链接脚本与内存布局",
+            "二进制转 hex"
+          ],
+          "order": 1,
+          "practice_task": "写一个最小 .S 文件（仅含若干 addi/li 与一个死循环），用 riscv32 工具链按 firmware/sections.lds 编译为 .elf/.bin，再用 makehex.py 生成 .hex，并用 readelf/objdump 核对入口地址与节布局。",
+          "source_files": [
+            "Makefile",
+            "firmware/sections.lds",
+            "firmware/makehex.py",
+            "README.md"
+          ],
+          "title": "RISC-V 工具链与从源码到 hex",
+          "topic": "讲解如何构建/安装 RV32I[M][C] 工具链，firmware 如何从 .c/.S 编译为 .elf/.bin，再经 makehex.py 转成仿真可加载的 .hex，以及 sections.lds 控制的内存布局。"
+        },
+        {
+          "id": "u2-l2",
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-hello-and-mmio.md",
+          "learning_goals": [
+            "理解内存映射 I/O 的概念与 0x10000000 UART 约定",
+            "掌握 print_chr/print_str/print_dec/print_hex 的实现与整型转字符串技巧",
+            "能编写并调用一个简单的裸机 C 输出函数"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "内存映射 UART",
+            "整型转字符串",
+            "裸机 C 入口"
+          ],
+          "order": 2,
+          "practice_task": "仿照 print.c，新增一个 print_bin(uint32_t) 函数把 32 位整数按二进制打印到 0x10000000，并在 hello() 中调用打印若干测试值，用 make test 验证输出。",
+          "source_files": [
+            "firmware/hello.c",
+            "firmware/print.c",
+            "firmware/firmware.h",
+            "firmware/sections.lds"
+          ],
+          "title": "第一个固件：Hello World 与内存映射 I/O",
+          "topic": "通过 firmware/hello.c 与 print.c 讲解裸机 C 程序如何通过 0x10000000 的内存映射 UART 输出字符，以及 firmware.h 的接口约定。"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "CPU 核心的外观：参数与接口",
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u3-l1-parameters-config.md",
+          "learning_goals": [
+            "掌握各 ENABLE_* 参数开关的功能（计数器、寄存器、PCPI、MUL/DIV、IRQ、TRACE 等）",
+            "理解 TWO_STAGE_SHIFT/BARREL_SHIFTER/TWO_CYCLE_ALU/TWO_CYCLE_COMPARE 的面积-时序取舍",
+            "看懂 MASKED_IRQ/LATCHED_IRQ/PROGADDR_RESET/PROGADDR_IRQ/STACKADDR 等系统级配置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "功能开关参数",
+            "时序/面积取舍参数",
+            "中断与复位地址参数"
+          ],
+          "order": 1,
+          "practice_task": "以最小化 LUT 为目标，为 picorv32 选择一组参数（ENABLE_COUNTERS、ENABLE_REGS_16_31、ENABLE_REGS_DUALPORT、TWO_STAGE_SHIFT、CATCH_MISALIGN 等），逐项说明每个选择对面积和性能的影响，并与 README 的 small/regular/large 三种配置对照。",
+          "source_files": [
+            "picorv32.v",
+            "README.md"
+          ],
+          "title": "模块参数：用 Verilog parameter 配置 CPU",
+          "topic": "系统讲解 picorv32 模块开头的 20 多个 parameter（ENABLE_*、TWO_*、COMPRESSED_ISA、MASKED_IRQ、PROGADDR_* 等）及其对面积、性能、功能的影响。"
+        },
+        {
+          "id": "u3-l2",
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-ports-and-interfaces.md",
+          "learning_goals": [
+            "看懂 picorv32 的时钟/复位/trap 与内存、look-ahead、PCPI、IRQ、trace 端口清单",
+            "理解原生内存接口 mem_valid/mem_ready/mem_wstrb/mem_rdata 的方向与含义",
+            "能画出 CPU 的外部接口方框图并标注每根信号方向"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "时钟复位与 trap",
+            "原生内存端口",
+            "PCPI/IRQ/trace 端口"
+          ],
+          "order": 2,
+          "practice_task": "阅读 picorv32 模块端口列表，按内存/look-ahead/PCPI/IRQ/trace 五类整理出 input/output 方向表，并绘制一张 CPU 方框图，标出每根外部信号的方向与作用。",
+          "source_files": [
+            "picorv32.v",
+            "README.md"
+          ],
+          "title": "端口与四大接口",
+          "topic": "逐组讲解 picorv32 的端口：时钟复位与 trap、原生内存接口、Look-Ahead 接口、PCPI 协处理器接口、IRQ 接口、trace 接口，以及 RISCV_FORMAL 下的 rvfi 接口。"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "order": 4,
+      "title": "译码器与主状态机",
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l1-instruction-decoder.md",
+          "learning_goals": [
+            "理解 instr_lui/instr_jal/instr_addi 等一位译码信号如何由 mem_rdata 的 opcode/funct 产生",
+            "掌握各类立即数（I/S/B/U/J）在 decoded_imm/decoded_imm_j 中的拼装方式",
+            "看懂 decoder_trigger/decoder_pseudo_trigger 触发译码的时序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "指令译码一位信号",
+            "立即数生成",
+            "译码触发时序"
+          ],
+          "order": 1,
+          "practice_task": "取一条具体指令 addi x2,x2,1（编码 0x00110113），在 picorv32.v 译码器代码里追踪它如何产生 instr_addi 与 decoded_imm=1，画出 32 位字段到译码信号的映射表。",
+          "source_files": [
+            "picorv32.v"
+          ],
+          "title": "指令译码器：从 32 位字到控制信号",
+          "topic": "讲解 picorv32 的指令译码器：如何从 mem_rdata 解析 opcode/funct3/funct7 生成 instr_* 一位信号、解码 rd/rs1/rs2 与各类立即数，以及 decoder_trigger 的触发机制。"
+        },
+        {
+          "id": "u4-l2",
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-main-fsm.md",
+          "learning_goals": [
+            "掌握 fetch/ld_rs1/ld_rs2/exec/shift/stmem/ldmem/trap 八个状态的职责",
+            "理解 decoder_trigger、launch_next_insn 与各状态间的转移条件",
+            "看懂复位时 reg_pc、irq_mask、STACKADDR 等的初始化"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "八状态 FSM",
+            "状态转移条件",
+            "复位初始化"
+          ],
+          "order": 2,
+          "practice_task": "追踪一条 lw 指令在 cpu_state 各状态间的完整流转（fetch→ld_rs1→ld_rs2→exec→ldmem→fetch），绘制状态图并标注每个状态做的事和触发转移的条件。",
+          "source_files": [
+            "picorv32.v"
+          ],
+          "title": "主状态机 cpu_state：取指到执行的全流程",
+          "topic": "讲解 picorv32 的主状态机：cpu_state_fetch/ld_rs1/ld_rs2/exec/shift/stmem/ldmem/trap 各状态做什么、如何转移，以及复位与取指阶段的初始化逻辑。"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "order": 5,
+      "title": "数据通路：寄存器堆、ALU 与内存接口",
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l1-regfile-and-alu.md",
+          "learning_goals": [
+            "理解 cpuregs 寄存器堆与可选 picorv32_regs 模块的读写端口结构",
+            "掌握双端口与单端口寄存器堆实现差异及其对 ld_rs2 状态的影响",
+            "看懂 alu_out 组合逻辑如何根据 alu_op 完成 add/sub/比较/逻辑运算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "寄存器堆读写",
+            "单/双端口差异",
+            "ALU 运算选择"
+          ],
+          "order": 1,
+          "practice_task": "对比 ENABLE_REGS_DUALPORT=1 与 0 两种实现，解释为什么单端口需要额外的 cpu_state_ld_rs2 状态；并追踪 alu_out 的 case 如何根据指令选择加减/比较/与或异或结果。",
+          "source_files": [
+            "picorv32.v"
+          ],
+          "title": "寄存器堆与 ALU",
+          "topic": "讲解 cpuregs/picorv32_regs 寄存器堆的双端口与单端口实现、cpuregs_rs1/rs2 的读出逻辑，以及 alu_out/alu_out_0 组合 ALU 如何实现加减、比较与逻辑运算。"
+        },
+        {
+          "id": "u5-l2",
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-shift-operations.md",
+          "learning_goals": [
+            "理解 TWO_STAGE_SHIFT 两级移位（先 4 位再 1 位）的工作原理",
+            "掌握 BARREL_SHIFTER 桶形移位器如何把移位并入 ALU 单周期完成",
+            "看懂 cpu_state_shift 状态如何循环迭代完成多次小移位"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "两级移位算法",
+            "桶形移位器",
+            "移位状态机"
+          ],
+          "order": 2,
+          "practice_task": "对比 TWO_STAGE_SHIFT=1/0 与 BARREL_SHIFTER=1 三种配置下 slli 指令的执行周期数与所需硬件，画出 cpu_state_shift 的迭代流程并标注 reg_sh 的变化。",
+          "source_files": [
+            "picorv32.v",
+            "README.md"
+          ],
+          "title": "移位运算：两阶段移位与桶形移位器",
+          "topic": "讲解 picorv32 的移位实现：默认的 TWO_STAGE_SHIFT 两阶段移位、可选的 BARREL_SHIFTER 桶形移位器，以及 cpu_state_shift 状态如何迭代完成多位移位。"
+        },
+        {
+          "id": "u5-l3",
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l3-memory-interface.md",
+          "learning_goals": [
+            "理解 mem_valid/mem_ready 握手与 mem_wstrb 字节写使能的取值含义",
+            "掌握 mem_state 0/1/2/3 四状态如何驱动一次读/写传输",
+            "看懂 look-ahead 接口 mem_la_read/write/addr/wstrb 如何提前一拍给出事务信息"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "valid-ready 握手",
+            "mem_state 传输状态机",
+            "look-ahead 接口"
+          ],
+          "order": 3,
+          "practice_task": "依据原生内存接口时序，写一段 Verilog 把 picorv32 的 mem_* 接到一个简单双口 RAM 上，并解释 look-ahead 接口相对普通接口提前一拍给出地址/读写的意义与代价。",
+          "source_files": [
+            "picorv32.v",
+            "README.md"
+          ],
+          "title": "原生内存接口与传输状态机",
+          "topic": "讲解 picorv32 原生内存接口的 valid-ready 时序、mem_wstrb 字节写使能、内部 mem_state 状态机，以及 look-ahead 接口如何提前一拍给出下一次事务信息。"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "order": 6,
+      "title": "扩展机制：协处理器与中断",
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u3-l2"
+          ],
+          "filename": "u6-l1-pcpi-coprocessor.md",
+          "learning_goals": [
+            "理解 PCPI 的 pcpi_valid/pcpi_insn/pcpi_rs1/pcpi_rs2/pcpi_wr/pcpi_rd/pcpi_wait/pcpi_ready 握手",
+            "掌握 picorv32_pcpi_mul/fast_mul/div 三个内置协处理器如何实现 M 扩展",
+            "看懂核心遇到未识别指令时如何派发到 PCPI 并在 16 周期后超时陷入"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PCPI 握手协议",
+            "内置 MUL/DIV 协处理器",
+            "超时与非法指令陷入"
+          ],
+          "order": 1,
+          "practice_task": "参考 picorv32_pcpi_mul，用 Verilog 写一个最小 PCPI 协处理器实现一条自定义指令（例如 popcount），正确驱动 pcpi_valid 检测、pcpi_wait 保持与 pcpi_ready/pcpi_wr 返回，并说明 16 周期超时机制。",
+          "source_files": [
+            "picorv32.v"
+          ],
+          "title": "PCPI 协处理器接口",
+          "topic": "讲解 Pico Co-Processor Interface (PCPI) 协议、core 如何在 ld_rs1/ld_rs2 状态派发未识别指令、pcpi_timeout 计数，以及 picorv32_pcpi_mul/picorv32_pcpi_fast_mul/picorv32_pcpi_div 三个内置协处理器。"
+        },
+        {
+          "id": "u6-l2",
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u4-l1"
+          ],
+          "filename": "u6-l2-irq-custom-instructions.md",
+          "learning_goals": [
+            "掌握 getq/setq/retirq/maskirq/waitirq/timer 六条自定义指令的编码与语义",
+            "理解 q0..q3 寄存器、irq_mask、irq_pending、timer 与 eoi 的协作",
+            "看懂 firmware 中 irq_vec 上下文保存与 irq.c 处理流程"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "自定义 IRQ 指令编码",
+            "中断控制器与 q 寄存器",
+            "中断处理软件栈"
+          ],
+          "order": 2,
+          "practice_task": "用 firmware/custom_ops.S 的宏编写一段最小中断示例：用 timer 设定周期性中断，在中断处理里翻转一个内存标志位，结合 start.S 的 irq_vec 与 irq.c 理解寄存器保存/恢复与返回流程。",
+          "source_files": [
+            "picorv32.v",
+            "firmware/custom_ops.S",
+            "firmware/start.S",
+            "firmware/irq.c",
+            "README.md"
+          ],
+          "title": "IRQ 与自定义中断指令",
+          "topic": "讲解 picorv32 的中断机制与 custom0 下的 getq/setq/retirq/maskirq/waitirq/timer 自定义指令、q 寄存器、内置中断源（timer/ebreak/buserror），以及 firmware/start.S 与 irq.c 的中断处理实现。"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "order": 7,
+      "title": "总线适配与压缩指令集",
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u7-l1-axi-wishbone-adapters.md",
+          "learning_goals": [
+            "理解 picorv32_axi 如何用 picorv32_axi_adapter 把原生接口桥接到 AXI4-Lite 五通道",
+            "掌握 picorv32_wb 如何适配 Wishbone 主接口",
+            "看懂 AXI4-Lite 与 Wishbone 握手时序的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AXI4-Lite 适配器",
+            "Wishbone 适配",
+            "两种总线握手对比"
+          ],
+          "order": 1,
+          "practice_task": "阅读 picorv32_axi_adapter，画出原生 mem_* 接口到 AXI4-Lite AW/W/B/AR/R 五通道的时序对应图，并对照 testbench_wb.v 说明 Wishbone 握手与 AXI 的关键差异。",
+          "source_files": [
+            "picorv32.v",
+            "testbench_wb.v"
+          ],
+          "title": "AXI4-Lite 与 Wishbone 适配",
+          "topic": "讲解 picorv32_axi/picorv32_axi_adapter 与 picorv32_wb 三种总线变体如何把原生内存接口桥接到 AXI4-Lite 与 Wishbone B4。"
+        },
+        {
+          "id": "u7-l2",
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u5-l3"
+          ],
+          "filename": "u7-l2-compressed-isa.md",
+          "learning_goals": [
+            "理解 COMPRESSED_ISA 参数如何开启 16 位压缩指令支持",
+            "掌握 mem_rdata_q 如何把 16 位 C 扩展指令展开成等价 32 位指令",
+            "看懂压缩指令下的取指预取高字、PC 对齐与 latched_compr 处理"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "C 扩展开关",
+            "压缩到 32 位展开",
+            "压缩取指与对齐"
+          ],
+          "order": 2,
+          "practice_task": "在 testbench_ez.v 中把一条 16 位压缩指令放入 memory，追踪 mem_rdata_q 如何将其展开为等价 32 位指令，并验证 CPU 行为与对应 32 位指令一致；说明 next_pc[1] 与 mem_la_firstword 如何处理半字对齐取指。",
+          "source_files": [
+            "picorv32.v",
+            "testbench_ez.v"
+          ],
+          "title": "RISC-V 压缩指令集支持",
+          "topic": "讲解 picorv32 对 RISC-V Compressed (C) 扩展的支持：如何识别 16 位指令、在 mem_rdata_q 中展开为 32 位等价指令、半字对齐取指与 prefetched_high_word 预取机制。"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "order": 8,
+      "title": "SoC 集成、测试与评估",
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u5-l3",
+            "u6-l1"
+          ],
+          "filename": "u8-l1-picosoc-soc.md",
+          "learning_goals": [
+            "理解 picosoc.v 如何把 picorv32 与 SRAM、spimemio、simpleuart 集成为完整 SoC",
+            "掌握 PicoSoC 的内存映射与从 SPI flash 复位启动的流程",
+            "看懂 hx8kdemo.v/icebreaker.v 两块 FPGA 板级封装的差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SoC 顶层集成",
+            "内存映射与 SPI 启动",
+            "FPGA 板级封装"
+          ],
+          "order": 1,
+          "practice_task": "以 picosoc.v 为蓝本绘制一张 SoC 框图（CPU/SRAM/SPI 控制器/UART/iomem 用户外设），并写一段说明：复位后 CPU 如何从 0x00100000 的 SPI flash 取到第一条指令并执行。",
+          "source_files": [
+            "picosoc/picosoc.v",
+            "picosoc/README.md",
+            "picosoc/spimemio.v",
+            "picosoc/simpleuart.v",
+            "picosoc/hx8kdemo.v",
+            "picosoc/icebreaker.v"
+          ],
+          "title": "PicoSoC：一个完整的示例 SoC",
+          "topic": "讲解 PicoSoC 示例系统：picosoc.v 顶层如何集成 picorv32、SRAM、spimemio SPI flash 控制器与 simpleuart，内存映射与从 SPI flash 直接执行代码的启动流程，以及 hx8kdemo/icebreaker 两块开发板的封装。"
+        },
+        {
+          "id": "u8-l2",
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u4-l2"
+          ],
+          "filename": "u8-l2-simulation-and-tracing.md",
+          "learning_goals": [
+            "理解 testbench.v 中 picorv32_wrapper 与 axi4_memory 的自检测试台结构",
+            "掌握 Verilator (testbench.cc) 仿真流程与 +vcd/+trace 参数",
+            "看懂 showtrace.py 如何解码 trace 文件并与 objdump 对照"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "AXI4 自检测试台",
+            "Verilator 流程",
+            "trace 解码"
+          ],
+          "order": 2,
+          "practice_task": "运行 make test_vcd 生成 trace，用 python3 showtrace.py testbench.trace firmware/firmware.elf 解码，再阅读 testbench.v 的 axi4_memory，说明 +axi_test 引入的随机延迟如何验证总线接口的健壮性。",
+          "source_files": [
+            "testbench.v",
+            "testbench.cc",
+            "testbench_wb.v",
+            "showtrace.py",
+            "Makefile"
+          ],
+          "title": "仿真测试台与执行追踪",
+          "topic": "讲解 picorv32 的仿真基础设施：testbench.v（picorv32_wrapper + axi4_memory 自检台）、testbench_wb.v（Wishbone 版）、testbench.cc（Verilator C++ 测试台）以及 showtrace.py 的 trace 解码。"
+        },
+        {
+          "id": "u8-l3",
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u8-l2"
+          ],
+          "filename": "u8-l3-formal-and-synthesis.md",
+          "learning_goals": [
+            "理解 make check 用 yosys-smtbmc 对 picorv32 做形式化验证的流程",
+            "掌握 scripts/smtbmc 下 tracecmp/axicheck/mulcmp 等检查器的作用",
+            "看懂 scripts/vivado 的 area/speed 综合评估方法与三种核配置的资源差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SMTBMC 形式化验证",
+            "AXI/MUL/trace 检查器",
+            "Vivado 面积/时序评估"
+          ],
+          "order": 3,
+          "practice_task": "运行 make check（或 yosys-smtbmc）对 picorv32 做一次形式化验证并记录结果；再阅读 scripts/vivado 的 Makefile，解释 small/regular/large 三种核配置在 Slice LUT 与寄存器上的差异来源。",
+          "source_files": [
+            "Makefile",
+            "README.md",
+            "picorv32.v"
+          ],
+          "title": "形式化验证与综合评估",
+          "topic": "讲解 picorv32 的形式化验证（make check、yosys-smtbmc、scripts/smtbmc 的 tracecmp/axicheck/mulcmp）与 Xilinx Vivado 综合/面积/时序评估（scripts/vivado）以及 yosys 综合脚本。"
+        }
+      ]
+    }
+  ]
+}

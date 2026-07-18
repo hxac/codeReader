@@ -1,0 +1,958 @@
+{
+  "project": "openofdm",
+  "head": "2f0e0ba95385affa426dc11eba6effab37b8778b",
+  "rationale": "OpenOFDM 是一个可综合的 802.11 OFDM PHY 解码器 Verilog 实现，整体是严格的数据流水线（检测→频偏校正→FFT→信道估计→解调→解交织→卷积解码→解扰），同时配套一套用于交叉验证的 Python 参考解码器和样本数据。学习路线遵循“先看全貌、再走主链路、最后攻验证与架构”的原则：第 1 单元从零开始，让读者跑通仿真并理解顶层 dot11.v 的接口与 8 步解码流水线；第 2、3 单元按数据流向逐一拆解前端同步、信道估计、解调解码等核心模块，这是理解项目的主体；第 4 单元聚焦控制平面（状态机、SIGNAL/HT-SIG 字段解析、配置寄存器、CRC/FCS 校验），属于把硬件“串起来”的关键；第 5 单元讲解 Python 参考解码器、交叉验证框架、仿真测试台和样本/查找表工具链，让读者掌握“如何确认 Verilog 是对的”；第 6 单元上升到架构取舍——定点缩放约定、模块复用与资源优化、Xilinx IP/coregen 依赖、USRP N210 集成以及二次开发扩展点。讲义之间通过 depends_on 显式标注依赖，确保读者能按拓扑顺序循序渐进，每篇都包含一个结合真实源码的可操作实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：认识并跑通 OpenOFDM",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "OpenOFDM 项目概览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 OpenOFDM 是什么——一个可综合的 802.11 OFDM PHY 解码器 Verilog 实现，它的定位、支持的速率（802.11a/g 全速率、802.11n MCS 0-7）和关键特性。",
+          "learning_goals": [
+            "理解 802.11 OFDM PHY 解码器在 Wi-Fi 接收链路中的位置与作用",
+            "说出 OpenOFDM 的功能边界：支持哪些标准、速率、带宽",
+            "区分硬件解码器（FPGA）与 Python 参考解码器两种实现"
+          ],
+          "source_files": [
+            "Readme.rst",
+            "docs/source/index.rst",
+            "docs/source/overview.rst"
+          ],
+          "minimal_modules": [
+            "Readme.rst 项目说明",
+            "docs/source/index.rst 文档首页",
+            "docs/source/overview.rst 解码流水线概述"
+          ],
+          "practice_task": "阅读 Readme.rst 与 overview.rst，用自己的话画出“射频信号 → 字节输出”的整体数据流框图，并标注 OpenOFDM 支持/不支持的速率，提交一段 200 字以内的项目定位说明。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "开发环境搭建与仿真运行",
+          "order": 2,
+          "filename": "u1-l2-environment-and-simulation.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 Icarus Verilog，并通过 verilog/Makefile 编译、仿真、查看波形，跑通 dot11_tb 测试台。",
+          "learning_goals": [
+            "安装并验证 iverilog、vvp、gtkwave 工具链",
+            "理解 Makefile 中 check/simulate/display 三个目标的作用",
+            "成功运行 dot11_tb 并在 sim_out 下看到输出文件"
+          ],
+          "source_files": [
+            "verilog/Makefile",
+            "verilog/dot11_modules.list",
+            "requirements.txt"
+          ],
+          "minimal_modules": [
+            "verilog/Makefile 构建脚本",
+            "verilog/dot11_modules.list 文件清单",
+            "requirements.txt Python 依赖"
+          ],
+          "practice_task": "在 verilog 目录执行 make compile 与 make simulate，使用 testing_inputs/conducted 下的 dot11a 24Mbps 样本跑通一次仿真，记录 dot11.vcd 的生成过程，并用 gtkwave 打开波形定位到 short_preamble_detected 跳变的时刻。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构全景",
+          "order": 3,
+          "filename": "u1-l3-repository-structure.md",
+          "level": "beginner",
+          "topic": "梳理 verilog/、scripts/、docs/、testing_inputs/、coregen/、usrp2/、Xilinx/ 各目录的职责与相互关系。",
+          "learning_goals": [
+            "区分手写 RTL、Xilinx IP、USRP 平台代码三类源文件",
+            "理解 scripts 下 Python 脚本（生成 LUT、转换样本、交叉验证）的分工",
+            "认识 testing_inputs 中 conducted 与 radiated 两类样本的区别"
+          ],
+          "source_files": [
+            "docs/source/overview.rst",
+            "verilog/dot11_modules.list",
+            "testing_inputs/conducted/readme.txt"
+          ],
+          "minimal_modules": [
+            "verilog/dot11_modules.list 编译文件清单",
+            "docs/source/overview.rst 项目结构说明",
+            "testing_inputs/conducted/readme.txt 样本说明"
+          ],
+          "practice_task": "遍历仓库目录，制作一张目录职责表（目录 → 包含内容 → 在项目中的角色），并标注哪些目录是仿真必需、哪些是综合/上板专用（如 coregen、usrp2、Xilinx）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "顶层模块 dot11.v 的接口与时序约定",
+          "order": 4,
+          "filename": "u1-l4-dot11-toplevel-interface.md",
+          "level": "beginner",
+          "topic": "逐组讲解 dot11 模块的端口：时钟/复位/使能、设置寄存器接口、32 位 I/Q 输入与字节输出，以及 100MHz 时钟与 20MSPS 采样的 5:1 关系。",
+          "learning_goals": [
+            "读懂 dot11.v 的端口声明分组（控制、配置、I/Q 输入、字节输出、调试端口）",
+            "理解 sample_in_strobe 每 5 个时钟有效一次的采样约定",
+            "解释 byte_out/byte_out_strobe 与 fcs_ok 输出的含义"
+          ],
+          "source_files": [
+            "verilog/dot11.v",
+            "verilog/common_defs.v",
+            "docs/source/overview.rst"
+          ],
+          "minimal_modules": [
+            "verilog/dot11.v 顶层模块端口",
+            "verilog/common_defs.v 全局 define",
+            "docs/source/overview.rst 端口表"
+          ],
+          "practice_task": "对照 overview.rst 的 Dot11 Module Pinout 表，在 dot11.v 中为每个端口补充一行中文注释说明其方向与作用，并计算在 100MHz 时钟下 20MSPS 采样为什么是“每 5 拍一个样本”。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "OFDM 解码流水线总览",
+          "order": 5,
+          "filename": "u1-l5-decode-pipeline-overview.md",
+          "level": "beginner",
+          "topic": "以 overview.rst 的 8 步解码流水线为主线，把每一步映射到 dot11.v 中对应的子模块实例，建立全局数据流地图。",
+          "learning_goals": [
+            "记住 8 步解码流水线的顺序：检测→频偏→FFT→信道估计→解调→解交织→卷积解码→解扰",
+            "在 dot11.v 中定位 power_trigger/sync_short/sync_long/equalizer/ofdm_decoder 的实例化位置",
+            "理解各模块之间通过 strobe 信号传递数据的握手风格"
+          ],
+          "source_files": [
+            "verilog/dot11.v",
+            "docs/source/overview.rst",
+            "verilog/ofdm_decoder.v"
+          ],
+          "minimal_modules": [
+            "verilog/dot11.v 顶层例化",
+            "docs/source/overview.rst 流水线步骤",
+            "verilog/ofdm_decoder.v 解码子流水线"
+          ],
+          "practice_task": "依据 dot11.v 的实例化关系，画出从 sample_in 到 byte_out 的模块级框图，标注每一步对应的源文件名和关键 strobe 信号，作为后续学习的导航图。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "前端检测与同步",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "包检测 power_trigger.v",
+          "order": 1,
+          "filename": "u2-l1-power-trigger.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 I 路绝对值功率门限触发包到达，解析 S_SKIP/S_IDLE/S_PACKET 三态机与防误触窗口。",
+          "learning_goals": [
+            "理解 power_trigger 基于功率门限的检测原理及其三态状态机",
+            "掌握 SR_POWER_THRES/SR_POWER_WINDOW/SR_SKIP_SAMPLE 三个设置寄存器的含义",
+            "分析为何需要连续 N 个低功率样本才解除触发"
+          ],
+          "source_files": [
+            "verilog/power_trigger.v",
+            "verilog/common_params.v",
+            "verilog/usrp2/setting_reg.v",
+            "docs/source/detection.rst"
+          ],
+          "minimal_modules": [
+            "power_trigger 模块",
+            "setting_reg 设置寄存器原语",
+            "detection.rst 检测原理文档"
+          ],
+          "practice_task": "修改 SR_POWER_THRES 的 at_reset 默认值并重新仿真，观察 trigger 信号提前/延后出现的变化；在 dot11_tb 波形中测量从样本输入到 power_trigger 置位的延迟拍数。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "短训练序列同步 sync_short.v",
+          "order": 2,
+          "filename": "u2-l2-sync-short.md",
+          "level": "intermediate",
+          "topic": "讲解利用短训练序列（STS）周期性做延迟自相关，通过 plateau 计数和正负样本计数确认短前导，并初步估计相位偏移。",
+          "learning_goals": [
+            "理解延迟自相关（sample_in × sample_delayed 的共轭）如何检出 STS",
+            "掌握 plateau_count、min_plateau 与正负样本计数防误检的机制",
+            "看清 phase_offset 的产生与下采样（除以 16）"
+          ],
+          "source_files": [
+            "verilog/sync_short.v",
+            "verilog/complex_to_mag_sq.v",
+            "verilog/complex_mult.v",
+            "verilog/moving_avg.v",
+            "verilog/complex_to_mag.v"
+          ],
+          "minimal_modules": [
+            "sync_short 模块",
+            "complex_to_mag_sq/complex_mult 复数运算",
+            "moving_avg 滑动平均"
+          ],
+          "practice_task": "对照 sync_short.v 追踪从 sample_in 到 short_preamble_detected 的组合/时序逻辑链路，写一段说明：prod_thres 为何取 mag_sq_avg 的 1/2+1/4，并解释 has_pos & has_neg 这一与条件的作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "中心频偏估计与相位/旋转校正",
+          "order": 3,
+          "filename": "u2-l3-frequency-offset-correction.md",
+          "level": "intermediate",
+          "topic": "讲解 CFO 概念，以及 phase.v（atan 查表求相位）和 rotate.v（按相位旋转复数样本）如何配合 rot_lut 完成频偏校正。",
+          "learning_goals": [
+            "理解中心频偏对 OFDM 子载波造成的 ICI 影响",
+            "读懂 phase.v 用 atan_lut 把复数映射到相位的流程",
+            "理解 rotate.v 按象限查 rot_lut 并做复数旋转的实现"
+          ],
+          "source_files": [
+            "verilog/phase.v",
+            "verilog/rotate.v",
+            "verilog/coregen/rot_lut.v",
+            "verilog/common_defs.v",
+            "docs/source/freq_offset.rst"
+          ],
+          "minimal_modules": [
+            "phase 相位提取模块",
+            "rotate 复数旋转模块",
+            "freq_offset.rst 频偏文档"
+          ],
+          "practice_task": "梳理 dot11.v 中 phase 模块如何在 sync_short 与 equalizer 之间分时复用，并说明 phase_offset 从 sync_short 传到 sync_long 后如何驱动 rotate 校正样本；给出一条数据从含频偏到校正后的路径说明。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "长训练序列同步与符号定时 sync_long.v",
+          "order": 4,
+          "filename": "u2-l4-sync-long.md",
+          "level": "intermediate",
+          "topic": "讲解用 LTS 与输入做互相关寻找最佳 FFT 起始点，stage_mult 多级乘加实现大窗口相关，并输出对齐后的样本。",
+          "learning_goals": [
+            "理解 LTS 互相关 metric 如何确定 OFDM 符号的精确起始位置",
+            "掌握 sync_long 的输入缓冲、metric 取峰、GI 跳过（short_gi）逻辑",
+            "了解 stage_mult 多级流水乘加在大窗口相关中的作用"
+          ],
+          "source_files": [
+            "verilog/sync_long.v",
+            "verilog/stage_mult.v",
+            "verilog/complex_to_mag.v",
+            "verilog/delay_sample.v",
+            "docs/source/sync_long.rst"
+          ],
+          "minimal_modules": [
+            "sync_long 模块",
+            "stage_mult 多级乘加",
+            "sync_long.rst 文档"
+          ],
+          "practice_task": "在 sync_long.v 中定位 gi_skip 如何根据 short_gi 在 9/17 之间切换，并解释 metric_max/metric 取峰定位 FFT 窗口的判定思路；用波形验证 long_preamble_detected 与对齐 sample_out 的时序关系。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "信道估计、解调与解码",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "信道均衡 equalizer.v",
+          "order": 1,
+          "filename": "u3-l1-equalizer.md",
+          "level": "intermediate",
+          "topic": "讲解用 LTS 估计每个子载波的信道复增益并做除法均衡，区分 legacy 与 HT 的子载波掩码和导频。",
+          "learning_goals": [
+            "理解 LTS 参考序列与子载波掩码（SUBCARRIER_MASK/PILOT_MASK）的作用",
+            "掌握信道估计 = 接收 LTS / 参考 LTS，再逐子载波相除均衡",
+            "看清 equalizer 与 rotate/phase 协作完成细频偏与相位跟踪"
+          ],
+          "source_files": [
+            "verilog/equalizer.v",
+            "verilog/divider.v",
+            "verilog/coregen/div_gen_v3_0.v",
+            "verilog/common_defs.v",
+            "docs/source/eq.rst"
+          ],
+          "minimal_modules": [
+            "equalizer 模块",
+            "divider/div_gen 除法器",
+            "eq.rst 信道均衡文档"
+          ],
+          "practice_task": "对照 eq.rst，在 equalizer.v 中找出 LTS_REF 与 SUBCARRIER_MASK 的定义，计算 legacy 模式下数据子载波的数量（DATA_SUBCARRIER_MASK 置位个数），并说明导频子载波的位置。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "复数运算与流水线辅助原语",
+          "order": 2,
+          "filename": "u3-l2-complex-primitives.md",
+          "level": "intermediate",
+          "topic": "集中讲解复数乘法、幅值/幅值平方估计、滑动平均、延时线等通用原语的设计与握手时序。",
+          "learning_goals": [
+            "掌握 complex_mult/complex_to_mag/complex_to_mag_sq 的握手接口风格",
+            "理解 complex_to_mag 用 alpha=1,beta=1/4 的幅值近似算法",
+            "区分 delayT（固定延时寄存器链）与 moving_avg/calc_mean 的用途"
+          ],
+          "source_files": [
+            "verilog/complex_mult.v",
+            "verilog/complex_to_mag.v",
+            "verilog/complex_to_mag_sq.v",
+            "verilog/delayT.v",
+            "verilog/moving_avg.v",
+            "verilog/calc_mean.v"
+          ],
+          "minimal_modules": [
+            "complex_mult 复数乘法",
+            "complex_to_mag 幅值近似",
+            "delayT/moving_avg 延时与平均"
+          ],
+          "practice_task": "为 complex_to_mag.v 补充注释说明 max+min>>2 的幅值近似误差来源，并用 delayT 的参数化思想写一个 DATA_WIDTH=8、DELAY=4 的小测试台验证其移位寄存器行为。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "子载波解调 demodulate.v",
+          "order": 3,
+          "filename": "u3-l3-demodulate.md",
+          "level": "intermediate",
+          "topic": "讲解根据 rate 选择 BPSK/QPSK/16-QAM/64-QAM 星座，用象限与门限判决把均衡后的复数映射为比特。",
+          "learning_goals": [
+            "理解 rate 到调制方式（BPSK/QPSK/QAM_16/QAM_64）的映射表",
+            "掌握 QAM_16/QAM_64 用幅值门限（DIV）判决多级星座的方法",
+            "看清 CONS_SCALE_SHIFT 决定的归一化门限常数"
+          ],
+          "source_files": [
+            "verilog/demodulate.v",
+            "verilog/common_defs.v",
+            "verilog/rate_to_idx.v",
+            "docs/source/decode.rst"
+          ],
+          "minimal_modules": [
+            "demodulate 模块",
+            "common_defs.v CONS_SCALE_SHIFT",
+            "decode.rst 解调文档"
+          ],
+          "practice_task": "对照 demodulate.v 的 case 表，列出 802.11a 与 802.11n 各 rate 对应的调制方式；针对 16-QAM 计算 QAM_16_DIV 在 CONS_SCALE_SHIFT=10 下的具体数值并解释其判决边界。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "解交织 deinterleave.v",
+          "order": 4,
+          "filename": "u3-l4-deinterleave.md",
+          "level": "intermediate",
+          "topic": "讲解 OFDM 比特交织的逆过程：用 deinter_lut 查表索引 + ram_2port 重排，并区分 legacy/HT 的 Ncbps。",
+          "learning_goals": [
+            "理解 deinter_lut 把交织后位置映射回原始比特位置的查表机制",
+            "掌握 ram_2port 双口 RAM 边写边读的重排实现",
+            "区分 legacy（48）与 HT（52）数据子载波数对交织参数的影响"
+          ],
+          "source_files": [
+            "verilog/deinterleave.v",
+            "verilog/usrp2/ram_2port.v",
+            "verilog/coregen/deinter_lut.v",
+            "docs/source/decode.rst"
+          ],
+          "minimal_modules": [
+            "deinterleave 模块",
+            "ram_2port 双口 RAM",
+            "deinter_lut 交织查表"
+          ],
+          "practice_task": "追踪 deinterleave 的 S_INPUT→S_GET_BASE→S_OUTPUT 状态机，说明 lut_key 如何由 {ht, rate[3:0]} 构成、erase 信号在什么情况下被置位，并解释为何解交织需要 RAM 缓存一个完整符号。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "ofdm_decoder 子流水线与卷积解码",
+          "order": 5,
+          "filename": "u3-l5-ofdm-decoder-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 ofdm_decoder.v 把解调→解交织→viterbi→解扰→成字节串起来，重点在 3bit 软判决、erase 与 flush 逻辑。",
+          "learning_goals": [
+            "理解 ofdm_decoder 如何把 2bit 解交织输出映射成 3bit 软判决喂给 viterbi",
+            "掌握 num_bits_to_decode、do_descramble、flush 的控制作用",
+            "了解 viterbi.v 作为 Xilinx viterbi_v7_0 IP 封装加了 strobe"
+          ],
+          "source_files": [
+            "verilog/ofdm_decoder.v",
+            "verilog/viterbi.v",
+            "verilog/coregen/viterbi_v7_0.v",
+            "verilog/common_defs.v"
+          ],
+          "minimal_modules": [
+            "ofdm_decoder 子流水线",
+            "viterbi IP 封装",
+            "软判决与 erase"
+          ],
+          "practice_task": "在 ofdm_decoder.v 中解释 conv_in0/conv_in1 为何用 3'b111/3'b011 表示软判决比特，并说明 do_descramble=0（SIGNAL/HT-SIG 场景）时 flush 如何补 0 让 viterbi 输出剩余比特。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "解扰与串并转换",
+          "order": 6,
+          "filename": "u3-l6-descramble-and-bits-to-bytes.md",
+          "level": "intermediate",
+          "topic": "讲解 802.11 扰码器的逆运算（descramble.v 用前 7 bit 初始化 LFSR）与把比特流组装成字节的 bits_to_bytes.v。",
+          "learning_goals": [
+            "理解 descramble 用接收前 7 bit 作为种子初始化 7 级 LFSR",
+            "掌握 feedback = state[6]^state[3] 的生成多项式",
+            "看清 bits_to_bytes 按位组装成 byte 并每 8 位置一次 strobe"
+          ],
+          "source_files": [
+            "verilog/descramble.v",
+            "verilog/bits_to_bytes.v",
+            "verilog/ofdm_decoder.v",
+            "docs/source/decode.rst"
+          ],
+          "minimal_modules": [
+            "descramble 解扰器",
+            "bits_to_bytes 串并转换",
+            "service 比特跳过逻辑"
+          ],
+          "practice_task": "对照 descramble.v 验证 802.11 扰码生成多项式 S(x)=x^7+x^4+1，并解释 ofdm_decoder 中 skip_bit=9 为何要跳过 service 字段的前 9 个比特再开始成字节。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "控制平面、字段解析与校验",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "dot11 顶层状态机",
+          "order": 1,
+          "filename": "u4-l1-dot11-statemachine.md",
+          "level": "intermediate",
+          "topic": "系统讲解 dot11.v 的 15 个状态及转移条件，重点在 legacy 与 HT 两条解码分支的分叉与汇合。",
+          "learning_goals": [
+            "记住 S_WAIT_POWER_TRIGGER→S_SYNC_SHORT→S_SYNC_LONG→S_DECODE_SIGNAL 主流程",
+            "理解 S_CHECK_SIGNAL 处 rate=1011 时分流到 HT 分支（S_DETECT_HT）",
+            "掌握各状态对子模块 reset/enable 的调度方式"
+          ],
+          "source_files": [
+            "verilog/dot11.v",
+            "verilog/common_params.v",
+            "docs/source/sig.rst"
+          ],
+          "minimal_modules": [
+            "dot11.v 主状态机",
+            "common_params.v 状态码定义",
+            "sig.rst 信号字段文档"
+          ],
+          "practice_task": "依据 common_params.v 的状态定义，绘制 dot11 顶层完整状态转移图，标注 legacy 与 HT 两条路径上的关键判定（parity、rate==1011、rot_eq_count、crc_ok）及各错误状态（E_*）。",
+          "depends_on": [
+            "u1-l5",
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "legacy SIGNAL 字段解析与校验",
+          "order": 2,
+          "filename": "u4-l2-legacy-signal-field.md",
+          "level": "intermediate",
+          "topic": "讲解 S_DECODE_SIGNAL/S_CHECK_SIGNAL 如何从解码字节拼出 rate/length/parity/tail 并做合法性校验。",
+          "learning_goals": [
+            "理解 signal_bits 移位寄存器如何拼装 3 字节 SIGNAL",
+            "掌握 parity 校验、rsvd/tail 校验的判定逻辑",
+            "看清 num_bits_to_decode = (legacy_len+3)<<4 的长度计算"
+          ],
+          "source_files": [
+            "verilog/dot11.v",
+            "verilog/common_params.v",
+            "docs/source/sig.rst"
+          ],
+          "minimal_modules": [
+            "dot11.v SIGNAL 解析段",
+            "legacy_rate/legacy_len 位域",
+            "信号错误状态 E_PARITY_FAIL 等"
+          ],
+          "practice_task": "用一个 802.11a 24Mbps 样本仿真，从 signal_out.txt 读取 rate/length/parity/tail，手算 parity 是否 OK，并验证 (legacy_len+3)*16 是否等于实际需要解码的数据比特数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "HT-SIG 解析、CRC 与格式检测",
+          "order": 3,
+          "filename": "u4-l3-ht-sig-and-crc.md",
+          "level": "intermediate",
+          "topic": "讲解 HT-SIG 两字节字段的拼装、ht_sig_crc.v 的 CRC-8 计算、以及 S_DETECT_HT 用 90°旋转检测区分 HT-SIG 与 legacy 数据。",
+          "learning_goals": [
+            "理解 ht_sig1/ht_sig2 各字段（MCS/CBW/length/STBC/FEC/SGI 等）的位定义",
+            "掌握 ht_sig_crc.v 的 CRC-8 反向输出与逐位更新",
+            "理解 S_DETECT_HT 用 abs_eq_q>abs_eq_i 计数判定 HT-SIG 的技巧"
+          ],
+          "source_files": [
+            "verilog/dot11.v",
+            "verilog/ht_sig_crc.v",
+            "docs/source/sig.rst"
+          ],
+          "minimal_modules": [
+            "dot11.v HT-SIG 解析段",
+            "ht_sig_crc CRC-8",
+            "HT 格式检测逻辑"
+          ],
+          "practice_task": "对照 ht_sig_crc.v 写出 CRC 多项式并解释 crc[i]=~C[7-i] 反向输出的原因；在 dot11.v 中追踪 S_CHECK_HT_SIG_CRC 到 S_CHECK_HT_SIG 的 36 拍 CRC 计算时序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "配置寄存器机制 setting_reg.v",
+          "order": 4,
+          "filename": "u4-l4-setting-registers.md",
+          "level": "intermediate",
+          "topic": "讲解 USRP 的 set_stb/set_addr/set_data 配置总线，以及 setting_reg 原语如何按地址匹配写入参数。",
+          "learning_goals": [
+            "理解 set_stb/set_addr/set_data 三信号组成的配置总线时序",
+            "掌握 setting_reg 用 my_addr 匹配、at_reset 设默认值的工作方式",
+            "在 common_params.v 中定位 SR_* 寄存器地址并对应到各模块"
+          ],
+          "source_files": [
+            "verilog/usrp2/setting_reg.v",
+            "verilog/common_params.v",
+            "verilog/power_trigger.v",
+            "docs/source/setting.rst"
+          ],
+          "minimal_modules": [
+            "setting_reg 配置寄存器原语",
+            "common_params.v SR_* 地址",
+            "setting.rst 文档"
+          ],
+          "practice_task": "整理一张“寄存器地址 → 名称 → 所属模块 → at_reset 默认值”的表格（SR_POWER_THRES/SR_POWER_WINDOW/SR_SKIP_SAMPLE/SR_MIN_PLATEAU），并说明 host 端如何用 set_user_reg 改这些参数。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "FCS 校验与 CRC32",
+          "order": 5,
+          "filename": "u4-l5-fcs-and-crc32.md",
+          "level": "intermediate",
+          "topic": "讲解 crc32.v 对解码字节做 FCS 计算，并与 EXPECTED_FCS 比较给出 fcs_ok，完成整包完整性校验。",
+          "learning_goals": [
+            "理解 CRC-32 生成多项式及其组合逻辑并行计算",
+            "掌握 byte_reversed 位反转与 fcs_enable/fcs_reset 的使能时机",
+            "看清 S_DECODE_DATA 中 byte_count>=pkt_len 触发 FCS 比对的流程"
+          ],
+          "source_files": [
+            "verilog/crc32.v",
+            "verilog/dot11.v",
+            "verilog/common_params.v"
+          ],
+          "minimal_modules": [
+            "crc32 模块",
+            "dot11.v FCS 比对段",
+            "EXPECTED_FCS 常数"
+          ],
+          "practice_task": "在 dot11.v 中追踪每个 byte_out 如何经过位反转喂给 crc32，并解释为何 fcs_reset 在进入 S_DECODE_DATA 时拉高、fcs_enable 仅在 byte_out_strobe 时有效；仿真确认 fcs_ok 的正确包。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "验证、工具链与样本数据",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Python 参考解码器 decode.py",
+          "order": 1,
+          "filename": "u5-l1-python-reference-decoder.md",
+          "level": "advanced",
+          "topic": "讲解 scripts/decode.py 作为浮点参考实现，如何完整解码一个 802.11 包并输出每一步期望结果。",
+          "learning_goals": [
+            "理解 decode.Decoder.decode_next() 产出的各阶段期望输出",
+            "掌握参考解码器对 LTS/信道/解调/卷积码的处理与 commpy 的关系",
+            "看清 LONG_PREAMBLE_TXT 等参考数据的作用"
+          ],
+          "source_files": [
+            "scripts/decode.py",
+            "scripts/commpy/channelcoding/convcode.py",
+            "scripts/commpy/modulation.py"
+          ],
+          "minimal_modules": [
+            "decode.py 参考解码器",
+            "commpy 卷积码/调制",
+            "期望输出结构"
+          ],
+          "practice_task": "运行 decode.py 对一个 conducted 24Mbps 样本解码，打印每一步（signal/demod/deinterleave/conv/descramble/byte）的期望输出长度与首若干项，作为后续交叉验证的基准。",
+          "depends_on": [
+            "u3-l5",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "交叉验证框架 test.py",
+          "order": 2,
+          "filename": "u5-l2-cross-validation.md",
+          "level": "advanced",
+          "topic": "讲解 test.py 如何先跑 Python 期望、再跑 Verilog 仿真，逐阶段比对 sim_out 与期望输出。",
+          "learning_goals": [
+            "理解 test.py 调用 decode.py 生成期望、调用 vvp 仿真、再逐文件比对",
+            "掌握 stop/num_sample 的计算与 --no_sim 调试方式",
+            "学会根据比对失败定位是哪个解码阶段出错"
+          ],
+          "source_files": [
+            "scripts/test.py",
+            "scripts/decode.py",
+            "verilog/dot11_tb.v"
+          ],
+          "minimal_modules": [
+            "test.py 验证驱动",
+            "decode.py 期望生成",
+            "dot11_tb.v 仿真输出"
+          ],
+          "practice_task": "用 test.py 跑一个 dot11n 样本，若某阶段比对失败，定位失败发生在 demod/deinterleave/conv 哪一步，并简述如何借助 sim_out/*.txt 与 Python 期望对照排查。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "仿真测试台 dot11_tb.v",
+          "order": 3,
+          "filename": "u5-l3-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 dot11_tb 如何用 readmemh 加载样本、按 5:1 节拍喂样本、用 $dumpvars 生成波形并把各阶段信号写入 sim_out。",
+          "learning_goals": [
+            "理解 $readmemh 从 .txt 内存文件加载样本到 ram 数组",
+            "掌握 clk_count==4 实现 100MHz/20MSPS 的 5:1 喂样节拍",
+            "看清各 $fwrite 把 strobe 信号落盘供交叉验证"
+          ],
+          "source_files": [
+            "verilog/dot11_tb.v",
+            "verilog/Makefile",
+            "verilog/common_params.v"
+          ],
+          "minimal_modules": [
+            "dot11_tb 测试台",
+            "样本加载与节拍",
+            "信号落盘"
+          ],
+          "practice_task": "在 dot11_tb.v 中添加一个新的 $fwrite 把 S_DECODE_DATA 期间的 byte_out_strobe 总数写入一个文件，重新仿真并用 test.py 比对，验证你新增的探针与既有 byte_out.txt 一致。",
+          "depends_on": [
+            "u1-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "查找表生成脚本",
+          "order": 4,
+          "filename": "u5-l4-lut-generators.md",
+          "level": "advanced",
+          "topic": "讲解 gen_atan_lut.py / gen_rot_lut.py / gen_deinter_lut.py 如何离线生成 .mif/.coe 查找表供 Verilog 使用。",
+          "learning_goals": [
+            "理解 atan LUT 用 key=tan(phase)、value=atan(phase) 的构造原理",
+            "掌握 rotate LUT 存放 sin/cos 旋转因子的方法",
+            "看清 deinter_lut 如何按 (ht, rate) 索引输出交织逆映射"
+          ],
+          "source_files": [
+            "scripts/gen_atan_lut.py",
+            "scripts/gen_rot_lut.py",
+            "scripts/gen_deinter_lut.py",
+            "verilog/common_defs.v"
+          ],
+          "minimal_modules": [
+            "gen_atan_lut 相位查表",
+            "gen_rot_lut 旋转因子",
+            "gen_deinter_lut 交织表"
+          ],
+          "practice_task": "运行 gen_atan_lut.py 重新生成 atan_lut.mif，确认 SIZE=2^8、SCALE=512 与 common_defs.v 的 ATAN_LUT_LEN_SHIFT/ATAN_LUT_SCALE_SHIFT 一致，并说明若改 SIZE 必须同步改哪些 Verilog define 与 PI 定义。",
+          "depends_on": [
+            "u2-l3",
+            "u3-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "样本数据处理与测试样本集",
+          "order": 5,
+          "filename": "u5-l5-sample-data-tooling.md",
+          "level": "advanced",
+          "topic": "讲解 bin_to_mem.py 把二进制 I/Q 转成 readmemh 文本、condense.py 去除静默段，以及 testing_inputs 样本集覆盖情况。",
+          "learning_goals": [
+            "理解 bin_to_mem 把 int16 I/Q 转为 32 位 hex 内存行的格式",
+            "掌握 condense 去除前后静默、缩短仿真时间的用途",
+            "认识 conducted 与 radiated 样本覆盖的速率集合"
+          ],
+          "source_files": [
+            "scripts/bin_to_mem.py",
+            "scripts/condense.py",
+            "testing_inputs/conducted/readme.txt"
+          ],
+          "minimal_modules": [
+            "bin_to_mem 样本转换",
+            "condense 静默裁剪",
+            "测试样本集"
+          ],
+          "practice_task": "对一个 .dat 样本运行 bin_to_mem 生成 .txt，再用 condense 裁剪静默段，比较裁剪前后样本数与仿真耗时；确认 testing_inputs 覆盖了你所关心的所有 legacy/HT 速率。",
+          "depends_on": [
+            "u1-l3",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "架构取舍、综合与扩展",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "定点数与缩放约定",
+          "order": 1,
+          "filename": "u6-l1-fixed-point-scaling.md",
+          "level": "advanced",
+          "topic": "讲解 common_defs.v/common_params.v 中的定点缩放约定：ATAN/ROTATE/CONS 的 scale shift 与 PI 的整数表示。",
+          "learning_goals": [
+            "理解 ATAN_LUT_SCALE_SHIFT、ROTATE_LUT_SCALE_SHIFT、CONS_SCALE_SHIFT 的含义与相互依赖",
+            "掌握 PI=1608 等整数定点表示与“改 shift 必改 PI”的约束",
+            "看清各模块间定点小数位对齐的方式"
+          ],
+          "source_files": [
+            "verilog/common_defs.v",
+            "verilog/common_params.v",
+            "verilog/phase.v",
+            "verilog/demodulate.v"
+          ],
+          "minimal_modules": [
+            "common_defs.v 缩放定义",
+            "common_params.v PI 定点",
+            "缩放对齐约定"
+          ],
+          "practice_task": "推导 PI=1608 对应 ATAN_LUT_SCALE_SHIFT=9 的关系，并写一份说明：若想把 CONS_SCALE_SHIFT 从 10 改为 11，需要同步修改 demodulate.v 里哪些门限常数。",
+          "depends_on": [
+            "u3-l3",
+            "u4-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "模块复用与资源优化",
+          "order": 2,
+          "filename": "u6-l2-resource-reuse.md",
+          "level": "advanced",
+          "topic": "讲解 dot11.v 如何在 sync_long/equalizer 间共享 rot_lut、在 sync_short/equalizer 间分时复用 phase 模块以节省 FPGA 资源。",
+          "learning_goals": [
+            "理解 rot_lut 用双口 RAM 同时服务两个模块的共享策略",
+            "掌握 phase 模块用 state==S_SYNC_SHORT 多路选择输入的分时复用",
+            "评估这类共享对时序与吞吐的影响"
+          ],
+          "source_files": [
+            "verilog/dot11.v",
+            "verilog/coregen/rot_lut.v",
+            "verilog/phase.v",
+            "verilog/usrp2/ram_2port.v"
+          ],
+          "minimal_modules": [
+            "rot_lut 双口共享",
+            "phase 分时复用",
+            "delayT 错相位"
+          ],
+          "practice_task": "在 dot11.v 中统计哪些子模块/存储是“被多模块共享”的，画一张共享关系图，并分析若取消 phase 的分时复用（改用两个实例）会增加多少乘法器资源。",
+          "depends_on": [
+            "u2-l3",
+            "u4-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Xilinx IP core 与 coregen 依赖",
+          "order": 3,
+          "filename": "u6-l3-xilinx-ip-coregen.md",
+          "level": "advanced",
+          "topic": "讲解 coregen 目录下的 IP（viterbi/xfft/div_gen/complex_multiplier/各种 LUT）及其 .xco/.ngc/.vho 封装对综合与仿真的影响。",
+          "learning_goals": [
+            "区分 .v（仿真模型）、.vho/.veo（实例化模板）、.ngc（网表）、.xco（IP 配置）",
+            "理解 viterbi_v7_0、xfft_v7_1、div_gen_v3_0 在解码链路中的角色",
+            "看清 dot11_modules.list 如何把这些 IP 纳入编译"
+          ],
+          "source_files": [
+            "verilog/dot11_modules.list",
+            "verilog/coregen/viterbi_v7_0.v",
+            "verilog/coregen/xfft_v7_1.v",
+            "verilog/coregen/div_gen_v3_0.v",
+            "docs/source/verilog.rst"
+          ],
+          "minimal_modules": [
+            "dot11_modules.list 编译清单",
+            "coregen IP 封装",
+            "verilog.rst 文档"
+          ],
+          "practice_task": "在 dot11_modules.list 中标记哪些是 coregen IP、哪些是 Xilinx 库，说明在没有 Xilinx 工具链时 iverilog 如何依赖 .v 行为模型完成仿真，并指出 FFT 实际由哪个 IP 承担。",
+          "depends_on": [
+            "u3-l5",
+            "u1-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "USRP N210 集成与 usrp2 模块",
+          "order": 4,
+          "filename": "u6-l4-usrp-integration.md",
+          "level": "advanced",
+          "topic": "讲解 OpenOFDM 如何作为 USRP N210（Spartan 3A-DSP）接收链的一个模块集成，以及 usrp2 目录的 setting_reg/ram_2port 等平台依赖。",
+          "learning_goals": [
+            "理解 dot11 模块应放在 custom_dsp_rx 等接收链中的位置",
+            "掌握通过 set_user_reg 配置 OpenOFDM 的 host 交互方式",
+            "看清 usrp2/setting_reg、ram_2port 与 UHD 通信机制的关系"
+          ],
+          "source_files": [
+            "docs/source/usrp.rst",
+            "verilog/usrp2/setting_reg.v",
+            "verilog/usrp2/ram_2port.v",
+            "Readme.rst"
+          ],
+          "minimal_modules": [
+            "usrp.rst 集成文档",
+            "setting_reg/ram_2port 平台模块",
+            "UHD 通信机制"
+          ],
+          "practice_task": "阅读 usrp.rst 与 Readme.rst FAQ，写一份“OpenOFDM 上板清单”：列出需要修改的 USRP 接收链文件、ZPU 固件是否需改动、host 端如何读写寄存器，并解释 rx_samples_to_file 为何不再适用。",
+          "depends_on": [
+            "u4-4",
+            "u6-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "扩展实践：新增调制/MCS/带宽支持",
+          "order": 5,
+          "filename": "u6-l5-extend-rates.md",
+          "level": "advanced",
+          "topic": "以支持更高 MCS 或 40MHz 带宽为目标，盘点需要改动哪些模块（demodulate/deinterleave/equalizer/状态机/CRC）。",
+          "learning_goals": [
+            "理清增加一种调制方式或 MCS 需要同步改动的模块清单",
+            "掌握 40MHz 带宽对子载波掩码、FFT 点数、LUT 的影响",
+            "学会评估扩展点的依赖与风险（与 Python 参考同步更新）"
+          ],
+          "source_files": [
+            "verilog/demodulate.v",
+            "verilog/deinterleave.v",
+            "verilog/equalizer.v",
+            "verilog/dot11.v",
+            "verilog/common_params.v"
+          ],
+          "minimal_modules": [
+            "demodulate 星座扩展",
+            "deinterleave/equalizer 子载波",
+            "状态机与校验扩展"
+          ],
+          "practice_task": "设计一个“支持 802.11n MCS 8/9（256-QAM）”的改造方案：列出需要新增/修改的源文件与 LUT、状态机要放开哪些校验（S_CHECK_HT_SIG）、以及 Python 参考需如何同步，给出改动影响清单（不要求实现）。",
+          "depends_on": [
+            "u3-3",
+            "u4-3",
+            "u6-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "随机序列生成与自检 rand_gen.v",
+          "order": 6,
+          "filename": "u6-l6-random-generator-selftest.md",
+          "level": "advanced",
+          "topic": "讲解 rand_gen.v/rand_gen_tb.v 如何生成伪随机激励用于自检与扰码器验证，作为编写测试激励的范例。",
+          "learning_goals": [
+            "理解 rand_gen 用 LFSR 产生伪随机比特/样本的方法",
+            "掌握 rand_gen_tb 如何驱动并检查随机序列性质",
+            "把随机激励思路应用到扰码器/解码器的边界测试"
+          ],
+          "source_files": [
+            "verilog/rand_gen.v",
+            "verilog/rand_gen_tb.v",
+            "verilog/descramble.v"
+          ],
+          "minimal_modules": [
+            "rand_gen 随机序列",
+            "rand_gen_tb 自检",
+            "LFSR 原理"
+          ],
+          "practice_task": "参考 rand_gen.v 写一个产生伪随机 16 位 I/Q 样本的小生成器，并把它接到 descramble 的输入端做一个最小自检测试台，验证 LFSR 种子初始化与 feedback 的正确性。",
+          "depends_on": [
+            "u3-6",
+            "u5-3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
