@@ -1,0 +1,727 @@
+{
+  "project": "pcileech-fpga",
+  "head": "c538c4170678c13f723dc921905fb81ff3c71d8e",
+  "rationale": "pcileech-fpga 是一套基于 Xilinx Artix-7 的 FPGA HDL（SystemVerilog）工程，用于配合 PCILeech/MemProcFS 进行 PCIe DMA 内存访问，通过 USB3（FT601）/以太网/Thunderbolt 与主机交互。学习路线遵循“从整体到局部、从数据通路到协议细节、从使用到二次开发”的原则：第 1 单元让读者建立项目定位、仓库结构、构建烧录流程和顶层三大子系统（com/fifo/pcie）的整体认知；第 2 单元深入系统级通信与控制中枢，按“主机→USB→FIFO 路由→多路复用→命令寄存器”的真实数据流逐层拆解；第 3 单元进入 PCIe 核心，从 7 系列 IP 封装到配置空间管理，再到 TLP（事务层包）的过滤、FIFO 桥接与多路复用；第 4 单元聚焦较新的“自定义配置空间影子”与“BAR PIO 控制器”这两个设备仿真扩展点；第 5 单元覆盖工程实践中的难点——跨时钟域、约束文件、Xilinx IP 核与 DRP 动态重配置；第 6 单元对比各种设备变种（ZDMA x4、NeTV2 以太网、acorn FT2232、CaptainDMA 家族）并讲解移植与高级调试。整体采用推荐的 PCIeSquirrel 工程作为主参考（资料最全），在涉及变种时再切换到对应设备目录。依赖关系严格按照“先整体架构、再数据通路、再协议细节、最后变种与扩展”的顺序，确保每篇讲义都建立在已讲概念之上。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 pcileech-fpga",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：什么是 pcileech-fpga 与 PCIe DMA",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 pcileech-fpga 的定位：基于 FPGA 的 PCIe DMA 硬件，配合 PCILeech 工具包和 MemProcFS 实现目标系统内存的读写与原始 TLP 收发。",
+          "learning_goals": [
+            "理解 DMA 攻击的基本概念以及 FPGA 硬件在其中的角色",
+            "了解 pcileech-fpga 与 PCILeech、MemProcFS、LeechCore 的生态关系",
+            "认识项目支持的主要设备及其连接方式（USB3/以太网/Thunderbolt）与传输速率"
+          ],
+          "source_files": [
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "readme.md"
+          ],
+          "practice_task": "阅读根目录 readme.md，整理出一张「设备—FPGA 型号—连接方式—传输速率」对照表，并用自己的话写一段 100 字以内的项目定位说明。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与设备目录组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库的整体目录布局：每个设备一个目录，内部含 src（SystemVerilog）、ip（Xilinx IP 定义）、约束文件和 Vivado TCL 脚本，以及跨设备共享的公共源文件。",
+          "learning_goals": [
+            "掌握仓库顶层目录与单设备子目录（src/ip/xdc/tcl）的职责划分",
+            "识别跨设备复用的公共 HDL 文件（如 pcileech_fifo.sv、pcileech_pcie_tlp_a7.sv）与设备特定文件（如 *_top.sv、*.xdc）",
+            "区分「较新设备带 bar_controller + cfgspace_shadow」与「较老设备使用旧版 cfgspace_shadow」的源码差异"
+          ],
+          "source_files": [
+            "readme.md",
+            "PCIeSquirrel/src/pcileech_squirrel_top.sv",
+            "CaptainDMA/readme.md"
+          ],
+          "minimal_modules": [
+            "仓库目录浏览",
+            "src/ip 约束文件对比"
+          ],
+          "practice_task": "选择 PCIeSquirrel 和 NeTV2 两个设备目录，列出它们 src 目录下文件的异同，指出 NeTV2 多出和缺少哪些文件（提示：关注通信核心 eth 与 ft601）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建与烧录流程：Vivado 工程从生成到 bitstream",
+          "order": 3,
+          "filename": "u1-l3-build-and-flash.md",
+          "level": "beginner",
+          "topic": "讲解使用 Xilinx Vivado WebPACK 生成工程、综合实现并产出 bitstream 的完整流程，以及不同设备的烧录方式。",
+          "learning_goals": [
+            "掌握 vivado_generate_project.tcl 与 vivado_build.tcl 两个脚本的调用顺序与作用",
+            "理解工程生成（synth_1/impl_1）与最终 .bin 产物的关系",
+            "了解 PCIeSquirrel（OpenOCD）、CaptainDMA（CH347）等不同设备的烧录途径"
+          ],
+          "source_files": [
+            "PCIeSquirrel/readme.md",
+            "PCIeSquirrel/build.md",
+            "PCIeSquirrel/vivado_build.tcl",
+            "PCIeSquirrel/vivado_generate_project.tcl",
+            "CaptainDMA/readme.md"
+          ],
+          "minimal_modules": [
+            "vivado_build.tcl",
+            "vivado_generate_project.tcl"
+          ],
+          "practice_task": "在 PCIeSquirrel 目录下走读 vivado_build.tcl，按顺序写下每条命令（launch_runs/wait_on_run/file copy）的作用；并说明为何 build.md 提示路径过长会导致构建失败。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "顶层模块架构：三大子系统的连接关系",
+          "order": 4,
+          "filename": "u1-l4-top-module-architecture.md",
+          "level": "beginner",
+          "topic": "以 pcileech_squirrel_top.sv 为例，剖析顶层如何例化通信核心（com）、FIFO 控制中枢（fifo）和 PCIe 核心（pcie_a7）三大子系统，以及它们之间通过接口（interface）相连的方式。",
+          "learning_goals": [
+            "读懂 pcileech_squirrel_top.sv 中三大模块的例化与端口连接",
+            "理解 com/fifo/pcie 三者之间的数据流向（dcom_fifo、dcfg、dtlp、dpcie、dshadow2fifo）",
+            "认识顶层的时钟、复位、LED/按键和 PCIe 物理引脚"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_squirrel_top.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_squirrel_top.sv"
+          ],
+          "practice_task": "画出 pcileech_squirrel_top.sv 的模块框图，标注 com、fifo、pcie_a7 三个模块以及连接它们的 5 个 interface 实例（dcom_fifo/dcfg/dtlp/dpcie/dshadow2fifo）的方向。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "系统级通信与控制中枢",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "接口与 modport：模块间的契约层",
+          "order": 1,
+          "filename": "u2-l1-interfaces-and-modports.md",
+          "level": "intermediate",
+          "topic": "精读 pcileech_header.svh，讲解 SystemVerilog interface/modport 如何定义模块间的连接契约，重点剖析 IfComToFifo、IfPCIeFifoCfg/Tlp/Core、IfShadow2Fifo、IfAXIS128 等核心接口。",
+          "learning_goals": [
+            "理解 SystemVerilog interface 与 modport 的语法与作用",
+            "掌握各核心接口的信号方向（mp_com/mp_fifo、source/sink 等）",
+            "看懂 IfAXIS128 中 tuser 字段（first/last/BAR）的含义"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_header.svh"
+          ],
+          "minimal_modules": [
+            "IfComToFifo",
+            "IfPCIeFifoTlp",
+            "IfAXIS128",
+            "IfShadow2Fifo"
+          ],
+          "practice_task": "为 IfAXIS128 接口写一份信号说明表，标注 tdata/tkeepdw/tvalid/tlast/tuser/tready 的位宽与方向，并解释 source 与 sink modport 的区别。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "FT601 USB3 通信核心",
+          "order": 2,
+          "filename": "u2-l2-ft601-usb3-com-core.md",
+          "level": "intermediate",
+          "topic": "讲解 pcileech_ft601.sv 的状态机驱动与 pcileech_com.sv 的 32→64 位转换、初始上电动作和时钟域跨越，理解主机与 FPGA 之间如何通过 FT601 收发数据。",
+          "learning_goals": [
+            "理解 FT601 物理时序与状态机（IDLE/RX/TX/COOLDOWN）的 RX 优先策略",
+            "掌握 pcileech_com.sv 中 32→64 位拼装与 0x66665555 重同步逻辑",
+            "了解 com 模块的 initial_rx 初始动作（如上线 PCIe 核）与上电默认行为"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_ft601.sv",
+            "PCIeSquirrel/src/pcileech_com.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_ft601",
+            "pcileech_com"
+          ],
+          "practice_task": "在 pcileech_com.sv 的 initial_rx 数组中找到使 PCIe 核上线的控制字，解释 64'h00000003_80182377 中各字段含义（参考 device_fpga.c 与 fifo 寄存器布局）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "FIFO 控制中心与 MAGIC 路由",
+          "order": 3,
+          "filename": "u2-l3-fifo-control-and-magic-routing.md",
+          "level": "intermediate",
+          "topic": "精读 pcileech_fifo.sv，讲解从 FT601 收到的 64 位数据如何根据 MAGIC 字节路由到 TLP/CFG/Loopback/Command 四类接收端，以及输出方向的优先级。",
+          "learning_goals": [
+            "理解 CHECK_MAGIC/CHECK_TYPE_* 宏如何将数据分流到 dtlp/dcfg/loopback/cmd",
+            "掌握接收与发送方向的数据通路与 FIFO 缓冲结构",
+            "认识 pcileech_fifo 作为系统控制中枢的职责（路由 + 寄存器 + 复位）"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_fifo.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_fifo"
+          ],
+          "practice_task": "写出 MAGIC=0x77 时，type 字段（dcom.com_dout[9:8]）取 00/01/10/11 分别对应哪条接收通路，并用一张示意图表示 FT601→四路 FIFO 的分流关系。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "输出多路复用器与 256 位打包",
+          "order": 4,
+          "filename": "u2-l4-output-mux-256bit.md",
+          "level": "intermediate",
+          "topic": "讲解 pcileech_mux.sv 如何把多个 32 位来源（loopback/command/cfg/tlp×4）按优先级合并成「1 个状态字 + 7 个数据字」的 256 位包，以高效通过 FT601 传输。",
+          "learning_goals": [
+            "理解 mux 的 8 个输入端口优先级与 p0..p8_idx 索引推进逻辑",
+            "掌握 256 位包（1 状态 + 7 数据）的打包格式与 tag/ctx 含义",
+            "认识空闲端口（p8）与输出缓冲（dout_buf）的作用"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_mux.sv",
+            "PCIeSquirrel/src/pcileech_fifo.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_mux"
+          ],
+          "practice_task": "对照 pcileech_fifo.sv 中 i_pcileech_mux 的例化，说明 loopback/command/cfg/tlp 各接到 mux 的哪个端口（p0..p6）、对应的 tag 值，以及为什么 TLP 优先级最高（p3-p6）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "命令/控制寄存器文件与读写协议",
+          "order": 5,
+          "filename": "u2-l5-command-register-file.md",
+          "level": "intermediate",
+          "topic": "讲解 pcileech_fifo.sv 中 ro（只读）/rw（读写）寄存器文件的布局，以及命令包的地址/数值/掩码解析、读回写回与 DRP 触发逻辑。",
+          "learning_goals": [
+            "掌握 ro/rw 寄存器文件的字段布局（MAGIC/VERSION/DEVICE_ID/UPTIME/DRP/PCIE 状态等）",
+            "理解 in_cmd_address_byte/value/mask 的解析与位寻址读写机制",
+            "认识 _pcie_core_config 寄存器如何驱动 cfgtlp_en/bar_en/drp 等控制信号"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_fifo.sv"
+          ],
+          "minimal_modules": [
+            "寄存器文件 ro/rw",
+            "命令解析状态机"
+          ],
+          "practice_task": "列出 rw 寄存器中 +019/+01A 一段的控制位（PCIE CORE RESET/CFGTLP PROCESSING/BAR PIO 等），说明它们各自通过 _pcie_core_config 影响哪个输出信号。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "PCIe 核心与 TLP 处理",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "PCIe 核心封装与 pcie_7x_0 IP",
+          "order": 1,
+          "filename": "u3-l1-pcie-core-wrapper.md",
+          "level": "intermediate",
+          "topic": "精读 pcileech_pcie_a7.sv，讲解它如何封装 Xilinx 7 系列 PCIe IP（pcie_7x_0），管理复位/时钟/LED，并连接 cfg、tlp 子模块与物理 GTP 收发器。",
+          "learning_goals": [
+            "理解 pcileech_pcie_a7 的复位层级（rst/rst_subsys/rst_pcie）与 IBUFDS_GTE2 参考时钟",
+            "掌握 pcie_7x_0 IP 的关键端口分组（s_axis_tx/m_axis_rx/cfg_mgmt/cfg_status/DRP/PHY）",
+            "认识 user_clk_out/user_lnk_up 等 PCIe 用户接口信号"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_pcie_a7.sv",
+            "PCIeSquirrel/src/pcileech_header.svh"
+          ],
+          "minimal_modules": [
+            "pcileech_pcie_a7",
+            "pcie_7x_0"
+          ],
+          "practice_task": "在 pcileech_pcie_a7.sv 中追踪 tlp_rx/tlp_rx 流如何从 pcie_7x_0 的 m_axis_rx 经 tlps128_src64 转换为 128 位 AXIS 流；并说明 rst_pcie 与 rst_subsys 的区别。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "PCIe 配置空间管理",
+          "order": 2,
+          "filename": "u3-l2-pcie-config-management.md",
+          "level": "intermediate",
+          "topic": "精读 pcileech_pcie_cfg_a7.sv，讲解 PCIe 配置空间的读写管理（cfg_mgmt）、状态/中断寄存器映射、DSN 以及静态 TLP 发送。",
+          "learning_goals": [
+            "理解 cfg_mgmt 读写时序与 FIFO 时钟域跨越（clk_sys↔clk_pcie）",
+            "掌握 ro/rw 配置寄存器如何映射 PCIe 状态（bus/device/ltssm/link 等）",
+            "认识 DSN、中断（cfg_interrupt_*）与静态 TLP 的处理"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_pcie_cfg_a7.sv",
+            "PCIeSquirrel/src/pcileech_header.svh"
+          ],
+          "minimal_modules": [
+            "pcileech_pcie_cfg_a7",
+            "IfPCIeSignals"
+          ],
+          "practice_task": "找到 cfg_dsn（设备序列号）相关赋值，说明为何 build.md 建议修改它来改变设备特征；并指出 cfg_mgmt 读写完成的握手信号。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "TLP 处理总览与 128 位流",
+          "order": 3,
+          "filename": "u3-l3-tlp-handling-overview.md",
+          "level": "intermediate",
+          "topic": "精读 pcileech_pcie_tlp_a7.sv，讲解 PCIe 事务层包（TLP）在接收和发送方向的处理总览：bar 响应、配置影子响应、过滤、FIFO 桥接与多路复用。",
+          "learning_goals": [
+            "理解 pcileech_pcie_tlp_a7 内 5 个子模块（bar_controller/cfgspace_shadow/filter/dst_fifo/src_fifo/sink_mux1）的协作",
+            "掌握接收方向（tlps_rx→过滤→dst_fifo）与发送方向（src_fifo→mux→tlps_tx）的数据流",
+            "认识静态 TLP（tlps_static）来自 cfg 模块的用途"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_pcie_tlp_a7.sv",
+            "PCIeSquirrel/src/pcileech_header.svh"
+          ],
+          "minimal_modules": [
+            "pcileech_pcie_tlp_a7",
+            "IfAXIS128"
+          ],
+          "practice_task": "画出 pcileech_pcie_tlp_a7 内部 4 路输入（cfg_rsp/bar_rsp/rx_fifo/static）汇入 sink_mux1 再到 tlps_tx 的发送框图，并标注每路来源模块。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "TLP 过滤与 FIFO 桥接",
+          "order": 4,
+          "filename": "u3-l4-tlp-filter-and-fifo-bridge.md",
+          "level": "intermediate",
+          "topic": "深入 pcileech_tlps128_filter、pcileech_tlps128_dst_fifo、pcileech_tlps128_src_fifo 三个子模块，讲解如何按 Fmt/Type 识别并过滤 Cfg/Cpl/CplD 包，以及 PCIe 时钟域与系统时钟域之间的 FIFO 桥接。",
+          "learning_goals": [
+            "掌握通过 tdata[31:25] 的 Fmt/Type 位识别 Cpl/CplD/CfgRd/CfgWr 的方法",
+            "理解 alltlp_filter/cfgtlp_filter 控制位如何决定丢弃策略",
+            "认识 dst_fifo/src_fifo 的 128↔32 位转换与跨时钟 FIFO（fifo_134_134_clk2 等）"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_pcie_tlp_a7.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_tlps128_filter",
+            "pcileech_tlps128_dst_fifo",
+            "pcileech_tlps128_src_fifo"
+          ],
+          "practice_task": "在 filter 模块中追踪 is_tlphdr_cpl/is_tlphdr_cfg 的判定条件，写出 CplD（Fmt=010,Type=0101x）和 CfgWr（Fmt=010,Type=0010x）各自的 7 位匹配值。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "TLP 多路复用与 64/128 位流转换",
+          "order": 5,
+          "filename": "u3-l5-tlp-mux-and-width-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 pcileech_tlps128_sink_mux1 的优先级仲裁，以及 pcie_a7.sv 中 tlps128_src64（64→128）与 tlps128_dst64（128→64）的位宽转换逻辑。",
+          "learning_goals": [
+            "理解 sink_mux1 按固定优先级（cfg_rsp>bar_rsp>rx_fifo>static）选择整包发送的仲裁机制",
+            "掌握 64 位 PCIe 核流与 128 位 AXIS 流之间双向转换的状态机",
+            "认识 tkeepdw/tlast 与 packet_count 低延迟包 FIFO 的设计"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_pcie_tlp_a7.sv",
+            "PCIeSquirrel/src/pcileech_pcie_a7.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_tlps128_sink_mux1",
+            "pcileech_tlps128_src64",
+            "pcileech_tlps128_dst64"
+          ],
+          "practice_task": "解释 sink_mux1 中 id_next 在「当前无选择(id==0)」或「当前包发完(tvalid&&tlast)」时重新选择最高优先级源的逻辑；并说明 dst64 如何用 d1_tvalid 处理 128 位包的后半段。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "配置空间影子与 BAR 设备仿真",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "自定义配置空间影子（cfgspace_shadow）",
+          "order": 1,
+          "filename": "u4-l1-custom-cfgspace-shadow.md",
+          "level": "advanced",
+          "topic": "精读 pcileech_tlps128_cfgspace_shadow.sv，讲解如何用 BRAM 实现自定义 PCIe 配置空间影子，响应 CfgRd/CfgWr，并支持主机经 USB 改写。",
+          "learning_goals": [
+            "理解 CfgRd/CfgWr TLP 的解析（地址/数据/tag/be/reqid）与 CplD 响应生成",
+            "掌握 PCIe/USB/内部三路写源的优先级复用与冲突丢弃策略",
+            "认识 dshadow2fifo 接口如何把主机命令桥接到配置空间 BRAM"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_tlps128_cfgspace_shadow.sv",
+            "PCIeSquirrel/src/pcileech_header.svh"
+          ],
+          "minimal_modules": [
+            "pcileech_tlps128_cfgspace_shadow",
+            "IfShadow2Fifo"
+          ],
+          "practice_task": "结合 build.md，说明把 pcileech_fifo.sv 中 rw[203]（CFGTLP ZERO DATA）从 1 改为 0 后，配置空间影子模块的行为会发生什么变化，以及如何在 Linux 用 lspci 验证。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "BAR PIO 控制器：读写引擎",
+          "order": 2,
+          "filename": "u4-l2-bar-controller-engines.md",
+          "level": "advanced",
+          "topic": "精读 pcileech_tlps128_bar_controller.sv 的读/写引擎，讲解如何从 TLP 流中识别 BAR 读/写请求、拆分到 rdengine/wrengine，并拼装 CplD 读响应。",
+          "learning_goals": [
+            "理解 BAR 读/写请求的识别（in_is_rd/in_is_wr 与 Fmt/Type 判定）",
+            "掌握读引擎请求/响应上下文（rd_req_ctx/rd_rsp_ctx）与写引擎字节使能",
+            "认识「每 CLK 1 DWORD 读 + 1 DWORD 写」的吞吐约束与潜在丢包风险"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_tlps128_bar_controller.sv"
+          ],
+          "minimal_modules": [
+            "pcileech_tlps128_bar_controller",
+            "pcileech_tlps128_bar_rdengine",
+            "pcileech_tlps128_bar_wrengine"
+          ],
+          "practice_task": "阅读 bar_controller 文件头注释，列出三类示例 BAR 实现（zerowrite4k/loopaddr/none）的特点，并说明为何所有用户实现核心必须具有相同的读返回延迟。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "BAR 示例实现与 .coe 初始化",
+          "order": 3,
+          "filename": "u4-l3-bar-impls-and-coe.md",
+          "level": "advanced",
+          "topic": "讲解 bar_controller 文件底部的可插拔 BAR 实现（zerowrite4k/loopaddr/none），以及 .coe 文件如何初始化 BRAM（如 pcileech_cfgspace.coe、pcileech_bar_zero4k.coe）。",
+          "learning_goals": [
+            "掌握 zerowrite4k（可改写的零初始化 BAR）与 loopaddr（回环地址）实现思路",
+            "理解如何替换/扩展用户自定义 BAR 实现核心",
+            "认识 .coe 内存初始化文件的格式与在 BRAM IP 中的作用"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_tlps128_bar_controller.sv",
+            "PCIeSquirrel/ip/pcileech_cfgspace.coe",
+            "PCIeSquirrel/ip/pcileech_bar_zero4k.coe"
+          ],
+          "minimal_modules": [
+            "pcileech_bar_impl_zerowrite4k",
+            "pcileech_bar_impl_loopaddr",
+            ".coe 文件"
+          ],
+          "practice_task": "实现一个最小自定义 BAR 核心：对读取返回固定 32 位常量（如 0xDEADBEEF），写入忽略；说明应修改文件中哪一处来挂载你的实现。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "设备身份定制：VID/PID/DSN/Class Code",
+          "order": 4,
+          "filename": "u4-l4-device-identity-customization.md",
+          "level": "advanced",
+          "topic": "汇总定制 PCIe 设备身份的多种途径：Vivado PCIe 核 GUI 改 ID/Class、修改 cfg_dsn、改写 .coe 配置空间与 BAR PIO，以及它们各自的可见性与限制。",
+          "learning_goals": [
+            "掌握在 Vivado PCIe 核 GUI 的 IDs/BARs 标签页修改 Vendor/Device/Subsys/Class 的方法",
+            "理解 cfg_dsn（DSN）修改与配置空间影子的可见性差异",
+            "认识「改 ID 并不足以隐藏 DMA 设备」的安全含义"
+          ],
+          "source_files": [
+            "PCIeSquirrel/build.md",
+            "PCIeSquirrel/src/pcileech_pcie_cfg_a7.sv",
+            "PCIeSquirrel/src/pcileech_fifo.sv",
+            "PCIeSquirrel/src/pcileech_tlps128_cfgspace_shadow.sv"
+          ],
+          "minimal_modules": [
+            "PCIe 核 IDs 配置",
+            "cfg_dsn",
+            "cfgspace.coe"
+          ],
+          "practice_task": "按 build.md 步骤规划一次「把默认 10ee:0666 改为自定义 VID/PID 并同步修改 DSN」的操作清单，指出每个改动分别影响 lspci 输出的哪一部分。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "时序、约束与 Xilinx IP",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "跨时钟域设计与双时钟 FIFO",
+          "order": 1,
+          "filename": "u5-l1-clock-domain-crossing.md",
+          "level": "advanced",
+          "topic": "梳理工程中的多个时钟域（clk 100MHz 系统时钟、clk_pcie 用户时钟、clk_com/ft601_clk 通信时钟），以及它们之间用双时钟 FIFO 安全跨越的设计。",
+          "learning_goals": [
+            "识别工程中的主要时钟域及其来源（SYSCLK、FT601_CLK、PCIe user_clk）",
+            "理解双时钟 FIFO（fifo_*_clk2 系列）在跨域数据传输中的作用",
+            "认识 com 模块中「2*clk_com < clk」等设计前提与重同步机制"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_squirrel_top.sv",
+            "PCIeSquirrel/src/pcileech_com.sv",
+            "PCIeSquirrel/src/pcileech_pcie_cfg_a7.sv"
+          ],
+          "minimal_modules": [
+            "顶层时钟与复位",
+            "双时钟 FIFO 例化"
+          ],
+          "practice_task": "在工程中找出 3 处双时钟 FIFO（如 fifo_64_64_clk2_comrx、fifo_134_134_clk2、fifo_49_49_clk2），分别列出它们的 wr_clk 与 rd_clk，说明跨越了哪两个时钟域。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "约束文件：引脚映射与时序约束",
+          "order": 2,
+          "filename": "u5-l2-constraints-xdc.md",
+          "level": "advanced",
+          "topic": "精读 pcileech_squirrel.xdc，讲解引脚分配（PACKAGE_PIN/IOSTANDARD）、FT601 输入输出延迟、IOB 寄存器打包、false/multicycle 路径，以及 PCIe GTP 通道定位。",
+          "learning_goals": [
+            "掌握 FT601 数据/控制引脚的 PACKAGE_PIN/IOSTANDARD/SLEW 分配",
+            "理解 set_input_delay/set_output_delay 与 IOB TRUE 的时序优化目的",
+            "认识 set_false_path/set_multicycle_path 对 tickcount64、PCIE 配置等异步/慢速路径的处理"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_squirrel.xdc"
+          ],
+          "minimal_modules": [
+            "引脚约束",
+            "时序约束",
+            "GTP 定位"
+          ],
+          "practice_task": "在 xdc 中找到 PCIe 收发器引脚（pcie_rx_p/n、pcie_tx_p/n、pcie_clk_p/n）与 GTPE2_CHANNEL 的 LOC 约束，说明这些约束与板卡硬件走线的对应关系。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Xilinx IP 核与工程生成脚本",
+          "order": 3,
+          "filename": "u5-l3-xilinx-ip-and-project-gen.md",
+          "level": "advanced",
+          "topic": "讲解 ip 目录下的 .xci IP 定义（FIFO Generator、BRAM、分布式 ROM、PCIe 7x）、.coe 初始化文件，以及 vivado_generate_project.tcl 如何把它们组织成可综合工程。",
+          "learning_goals": [
+            "识别 ip 目录中各类 IP（fifo_*/bram_*/drom_*/pcie_7x_0）的命名约定与用途",
+            "理解 .coe/.xci 文件在 IP 重生成中的角色与 Xilinx 专有 IP 的授权限制",
+            "掌握 vivado_generate_project.tcl 中添加源文件、约束与 IP 的关键步骤"
+          ],
+          "source_files": [
+            "PCIeSquirrel/vivado_generate_project.tcl",
+            "PCIeSquirrel/readme.md",
+            "PCIeSquirrel/ip/pcileech_cfgspace.coe"
+          ],
+          "minimal_modules": [
+            "IP 目录",
+            "vivado_generate_project.tcl"
+          ],
+          "practice_task": "统计 PCIeSquirrel/ip 目录下 FIFO 类 IP 的数量并按「宽度_clk域」命名规律分类；说明为何 readme 强调发布版不含 Xilinx 专有 IP 而需用户自行重生成。",
+          "depends_on": [
+            "u1-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "DRP 动态重配置端口",
+          "order": 4,
+          "filename": "u5-l4-drp-dynamic-reconfiguration.md",
+          "level": "advanced",
+          "topic": "讲解 PCIe 核的 DRP（Dynamic Reconfiguration Port）如何被主机经命令寄存器间接驱动，实现运行时对 PCIe 核内部寄存器的读写调优。",
+          "learning_goals": [
+            "理解 DRP 端口（drp_en/drp_we/drp_addr/drp_di/drp_do/drp_rdy）的时序",
+            "掌握 pcileech_fifo 中 RWPOS_DRP_RD_EN/WR_EN/WAIT_COMPLETE 与 DRP 完成握手",
+            "认识 com 模块 initial_rx 在核上线前做 DRP 配置的典型用法"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_fifo.sv",
+            "PCIeSquirrel/src/pcileech_pcie_a7.sv",
+            "PCIeSquirrel/src/pcileech_com.sv"
+          ],
+          "minimal_modules": [
+            "DRP 寄存器映射",
+            "DRP 状态机"
+          ],
+          "practice_task": "追踪一次主机发起的 DRP 写操作：从命令包写入 rw[208+:16](di)/rw[224+:9](addr) 到 dpcie.drp_en/drp_we，再到 dpcie.drp_rdy 回读完成的完整路径。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "设备变种与二次开发",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "设备变种对比：x4、以太网、FT2232 与 CaptainDMA 家族",
+          "order": 1,
+          "filename": "u6-l1-device-variants.md",
+          "level": "advanced",
+          "topic": "横向对比各设备变种：ZDMA/GBOX 的 x4 PCIe（pcileech_pcie_a7x4）、NeTV2 的以太网（pcileech_eth）、acorn 的 FT2232H，以及 CaptainDMA 多 FPGA 多 lane 的工程组织。",
+          "learning_goals": [
+            "理解 x1 与 x4 PCIe 工程在顶层与核心封装上的差异（a7 vs a7x4）",
+            "掌握 FT601、以太网（RMII/UDP）、FT2232H 三类通信核心的可替换性",
+            "认识 CaptainDMA 按 FPGA 型号（35t/75t/100t）与 lane（x1/x4）划分子目录的组织方式"
+          ],
+          "source_files": [
+            "ZDMA/100T/src/pcileech_tbx4_100t_top.sv",
+            "NeTV2/src/pcileech_com.sv",
+            "CaptainDMA/readme.md",
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "pcileech_pcie_a7x4",
+            "pcileech_eth",
+            "CaptainDMA 子目录"
+          ],
+          "practice_task": "比较 pcileech_squirrel_top.sv（x1+FT601）与 pcileech_tbx4_100t_top.sv（x4+Thunderbolt 桥）的端口差异，列出 x4 版本多出的 PCIe lane 引脚与 BUS_DO/BUS_DI 桥接接口。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "移植到新板卡：适配流程指南",
+          "order": 2,
+          "filename": "u6-l2-porting-to-new-board.md",
+          "level": "advanced",
+          "topic": "讲解把现有工程移植到一块新 Artix-7 板卡的步骤：选择最接近的基准工程、改写约束引脚、调整 PCIe IP 与通信核心、处理 FPGA 型号/封装差异。",
+          "learning_goals": [
+            "掌握移植时需要修改的文件清单（xdc、top、PCIe IP、生成脚本）",
+            "理解引脚重映射（FT601/系统时钟/PCIe/LED/按键）与电气标准一致性要求",
+            "认识 PCIe GTP 通道、参考时钟与 PERST/PRSNT 等关键硬件依赖"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_squirrel.xdc",
+            "PCIeSquirrel/src/pcileech_squirrel_top.sv",
+            "PCIeSquirrel/vivado_generate_project.tcl",
+            "PCIeSquirrel/build.md"
+          ],
+          "minimal_modules": [
+            "xdc 引脚",
+            "顶层模块",
+            "工程生成脚本"
+          ],
+          "practice_task": "为一块假设的新板卡起草一份移植 checklist：至少包含「系统时钟引脚」「FT601 数据/控制引脚」「PCIe 收发器与参考时钟」「复位与 LED」四类需要重新核对的约束项。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "高级主题：LTSSM、链路状态、性能与调试",
+          "order": 3,
+          "filename": "u6-l3-advanced-ltssm-perf-debug.md",
+          "level": "advanced",
+          "topic": "讲解 PCIe 链路训练状态机（LTSSM）、链路状态寄存器、性能瓶颈分析（USB/PCIe 速率匹配）、LED 诊断与不活动计时器等调试手段。",
+          "learning_goals": [
+            "理解 pl_ltssm_state/pl_sel_lnk_width/pl_phy_lnk_up 等链路状态信号的含义",
+            "认识性能瓶颈：为何 x4 与 x1 速度接近（受 USB 限制）以及 190MB/s 的来源",
+            "掌握 LED（led_pcie/led_com）诊断、tickcount64 不活动计时与全局复位（STARTUPE2）等调试机制"
+          ],
+          "source_files": [
+            "PCIeSquirrel/src/pcileech_pcie_cfg_a7.sv",
+            "PCIeSquirrel/src/pcileech_squirrel_top.sv",
+            "PCIeSquirrel/src/pcileech_fifo.sv",
+            "PCIeSquirrel/src/pcileech_pcie_a7.sv",
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "LTSSM/链路状态",
+            "性能与瓶颈",
+            "LED/计时器调试"
+          ],
+          "practice_task": "结合 cfg_a7 的 ro 寄存器布局，设计一个「通过命令寄存器读回 LTSSM 状态与链路速率」的调试流程，并解释 top 模块中 led_pcie 如何反映 user_lnk_up。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
