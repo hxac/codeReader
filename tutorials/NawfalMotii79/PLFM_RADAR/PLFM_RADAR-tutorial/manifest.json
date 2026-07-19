@@ -1,0 +1,1156 @@
+{
+  "project": "PLFM_RADAR",
+  "head": "749bd0f86a07a28a86347d8ce9c141e601057c40",
+  "rationale": "PLFM_RADAR（AERIS-10）是一个跨硬件、固件、软件的大型开源相控阵雷达项目，单一的学习路径无法覆盖其全部复杂度，因此手册按「先认知、再读链路、最后攻扩展与验证」三段式组织。入门层（U1–U2）先让读者建立项目定位、目录结构、运行方式与端到端数据流的整体地图，这是后续深入任何模块的前提。进阶层（U3–U8）按真实信号流动方向拆解：FPGA 顶层与时钟域（U3）→ FPGA 接收信号处理链 DDC/匹配滤波/抽取+MTI/Doppler/CFAR（U4）→ 发射与扫描控制（U5）→ USB 接口与主机命令协议（U6）→ STM32 固件（U7）→ Python GUI V7（U8），让读者顺着「微波→数字→上位机」的主链路逐层深入，且讲义间依赖关系与数据流方向一致。专家层（U9–U14）处理跨层与工程化议题：跨层 AGC 环路、板级 bring-up 与自测试、四套测试体系（FPGA 回归/cosim、MCU、跨层契约、Python lint）、天线与 RF 仿真、硬件设计文件、形式化验证与二次开发扩展点。每篇讲义都绑定真实存在的源码文件并给出可操作实践任务，规模（36 篇）与项目体量相称，逻辑优先于数量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步：项目认知、仓库与本地运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 AERIS-10 雷达系统概览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 AERIS-10 是什么：开源 10.5 GHz 脉冲线性调频（PLFM）相控阵雷达，包含 3km 的 Nexus 版与 20km 的 Extended 版，以及硬件 CERN-OHL-P / 软件 MIT 的双许可证模型。",
+          "learning_goals": [
+            "理解 PLFM/LFM 调制与相控阵雷达的基本概念和 AERIS-10 的两种变体",
+            "掌握项目的硬件/软件双许可证与开源定位",
+            "能从 README 中提取系统主要子系统和关键规格"
+          ],
+          "source_files": [
+            "README.md",
+            "1_Project_Description/Project_Description.docx",
+            "Licence"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "雷达基础概念",
+            "许可证"
+          ],
+          "practice_task": "阅读 README.md，用一段话写出 AERIS-10N 与 AERIS-10E 在频率、最大距离、天线、发射功率上的差异，并解释为什么硬件用 CERN-OHL-P 而软件用 MIT。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与文件放置策略",
+          "order": 2,
+          "filename": "u1-l2-repository-layout.md",
+          "level": "beginner",
+          "topic": "讲解仓库的编号目录约定（1_项目说明、2_功能框图、3_电源、4_原理图与 PCB、5_仿真、9_固件、docs 等），以及 README 中的「文件放置策略」，说明哪些产物应入库、哪些应被 gitignore。",
+          "learning_goals": [
+            "记住仓库顶层各编号目录的职责",
+            "理解生成产物（reports/gerbers/cosim 输出）应放在哪里",
+            "能定位硬件、固件、GUI、文档、仿真各自所在的目录"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitignore",
+            "docs/index.html"
+          ],
+          "minimal_modules": [
+            "目录约定",
+            "文件放置策略",
+            "docs 站点"
+          ],
+          "practice_task": "画出仓库前两级目录树，并为每个顶层目录写一句话用途说明；列出三类「应被 gitignore 而非入库」的生成产物及其正确存放路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "关键入口文件：从哪里开始读源码",
+          "order": 3,
+          "filename": "u1-l3-entry-points.md",
+          "level": "beginner",
+          "topic": "为读者指出三大子系统的入口：FPGA 的 radar_system_top.v、STM32 的 main.cpp、Python GUI 的 GUI_V7_PyQt.py 与 v7/dashboard.py，并说明它们如何对应到 README 的处理流水线。",
+          "learning_goals": [
+            "识别 FPGA、MCU、GUI 三层的入口文件",
+            "理解每个入口文件在端到端流水线中的角色",
+            "能根据要研究的问题选择正确的入口开始阅读"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_1_Microcontroller/9_1_3_C_Cpp_Code/main.cpp",
+            "9_Firmware/9_3_GUI/GUI_V7_PyQt.py",
+            "9_Firmware/9_3_GUI/v7/dashboard.py"
+          ],
+          "minimal_modules": [
+            "FPGA 顶层",
+            "MCU main",
+            "GUI 入口"
+          ],
+          "practice_task": "打开三个入口文件的开头注释，分别写出一句话说明它们各自负责什么；并指出如果你想研究「雷达数据如何变成屏幕上的目标点」，应从哪个入口开始追踪。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "工具链与本地运行方式",
+          "order": 4,
+          "filename": "u1-l4-toolchain-and-running.md",
+          "level": "beginner",
+          "topic": "讲解项目用 Python 3.12 + uv 管理依赖、用 ruff 做 lint、用 pytest 跑测试、用 iverilog 跑 FPGA 回归；介绍 pyproject.toml 与 GitHub Actions CI 的四类 job。",
+          "learning_goals": [
+            "会用 uv sync 安装开发依赖并用 ruff/pytest 跑 Python 检查",
+            "理解 CI 中 python-tests / mcu-tests / fpga-regression / cross-layer-tests 四个 job",
+            "知道 FPGA 用 iverilog、MCU 用 make test 的本地运行方式"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            ".github/workflows/ci-tests.yml",
+            "9_Firmware/9_3_GUI/requirements_v7.txt",
+            "9_Firmware/9_1_Microcontroller/tests/Makefile"
+          ],
+          "minimal_modules": [
+            "uv 依赖管理",
+            "ruff/pytest",
+            "CI 矩阵"
+          ],
+          "practice_task": "运行 uv sync --group dev 后执行 uv run ruff check . 与 GUI 的 pytest 测试，记录通过/失败情况；再列出 CI 中每个 job 触发的命令。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "系统架构与端到端数据流",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "整体架构与功能框图",
+          "order": 1,
+          "filename": "u2-l1-system-architecture.md",
+          "level": "beginner",
+          "topic": "结合 docs/architecture.html 与 RADAR_V6 功能框图，讲解电源板、频率合成板、主板（DAC/混频器/ADAR1000/ADTR1107/FPGA/STM32）、功放板、天线阵列等子系统的关系。",
+          "learning_goals": [
+            "识别 AERIS-10 的主要硬件子系统及其相互连接",
+            "理解主板内 DAC、混频器、相移器、FPGA、STM32 各自的职责",
+            "能看懂功能框图与互联矩阵表达的信息"
+          ],
+          "source_files": [
+            "docs/architecture.html",
+            "2_Functional Diagram & Interconnection Matrices/RADAR_V6.drawio",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "子系统划分",
+            "主板器件",
+            "功能框图"
+          ],
+          "practice_task": "对照架构文档画出一张简化的系统框图，标注从波形生成到数据显示的信号路径，并用一句话说明 ADAR1000 相移器在其中的作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "雷达信号处理流水线",
+          "order": 2,
+          "filename": "u2-l2-signal-processing-pipeline.md",
+          "level": "beginner",
+          "topic": "串讲端到端流水线：DAC 生成 LFM chirp → 混频器上下变频 → ADAR1000 波束扫描 → ADC 采样 → FPGA 做 DDC/抽取/匹配滤波（脉冲压缩）/Doppler/MTI/CFAR → USB 上传 → GUI 显示。",
+          "learning_goals": [
+            "掌握脉冲压缩、Doppler、MTI、CFAR 在流水线中的顺序与目的",
+            "理解发射与接收两条链路的对称关系",
+            "能把 README 的处理步骤映射到具体 FPGA 模块名"
+          ],
+          "source_files": [
+            "README.md",
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_2_FPGA/radar_receiver_final.v"
+          ],
+          "minimal_modules": [
+            "发射链路",
+            "接收 DSP 链路",
+            "处理阶段"
+          ],
+          "practice_task": "把流水线的每个阶段（DAC→混频→波束→ADC→DDC→匹配滤波→Doppler→CFAR→USB）列成表，每行写出该阶段对应的源码文件名和它解决的问题。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "三层固件分工：FPGA / STM32 / GUI",
+          "order": 3,
+          "filename": "u2-l3-firmware-layer-division.md",
+          "level": "beginner",
+          "topic": "明确三层各自负责什么：FPGA 做高速信号处理与 USB；STM32 做电源时序、时钟/频综配置、ADAR1000 波束与 Idq 校准、GPS/IMU/温度；GUI 做可视化、目标跟踪与寄存器控制。",
+          "learning_goals": [
+            "区分 FPGA、STM32、GUI 各自的实时性要求与职责边界",
+            "理解三层之间通过 USB 命令、GPIO、SPI/I2C 如何协作",
+            "能判断一个新功能应该放在哪一层"
+          ],
+          "source_files": [
+            "README.md",
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_1_Microcontroller/9_1_3_C_Cpp_Code/main.cpp",
+            "9_Firmware/9_3_GUI/v7/dashboard.py"
+          ],
+          "minimal_modules": [
+            "FPGA 职责",
+            "STM32 职责",
+            "GUI 职责"
+          ],
+          "practice_task": "针对「自动增益控制」「GPS 定位」「CFAR 阈值设置」三个功能，分别说明哪一层主导、哪一层配合，以及它们之间通过什么接口通信。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "FPGA 顶层与时钟域交叉",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FPGA 顶层模块 radar_system_top 全景",
+          "order": 1,
+          "filename": "u3-l1-fpga-top-module.md",
+          "level": "intermediate",
+          "topic": "精读 radar_system_top.v：三个时钟域（100M 系统/120M DAC/FT601 或 FT2232H USB）、USB_MODE 参数化 generate 选择 FT601 或 FT2232H、收发机与 USB 子模块的例化，以及主机命令解码 case 表。",
+          "learning_goals": [
+            "理解顶层如何把发射机、接收机、CFAR、自测试、USB 接口连成整体",
+            "掌握 USB_MODE 参数化在 FT601/FT2232H 之间的切换机制",
+            "能读懂主机命令（opcode）到 host_* 寄存器的解码逻辑"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_2_FPGA/radar_system_top_50t.v"
+          ],
+          "minimal_modules": [
+            "顶层例化",
+            "USB_MODE generate",
+            "命令解码"
+          ],
+          "practice_task": "在 radar_system_top.v 中找出 FT601 与 FT2232H 两个 generate 分支，列出它们各自例化的模块名和未用引脚的 tie-off 方式；再写出 opcode 0x03、0x21、0x30 各自写入哪个寄存器。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "时钟域、复位同步与 CDC 基础",
+          "order": 2,
+          "filename": "u3-l2-clock-domains-and-cdc.md",
+          "level": "intermediate",
+          "topic": "讲解 BUFG 缓冲、多级复位同步（ASYNC_REG）、toggle-CDC 把脉冲安全搬到另一时钟域、以及 cdc_modules.v 提供的单比特/多比特（Gray 码）同步器在顶层的使用场景。",
+          "learning_goals": [
+            "理解为什么 120M→100M、ft_clk→100M 的脉冲必须用 toggle CDC",
+            "掌握复位同步与 ASYNC_REG 的写法及其作用",
+            "能区分单比特同步、Gray 码多比特同步与握手 CDC 的适用场景"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_2_FPGA/cdc_modules.v",
+            "9_Firmware/9_2_FPGA/adc_clk_mmcm.v"
+          ],
+          "minimal_modules": [
+            "时钟缓冲",
+            "复位同步",
+            "CDC 同步器"
+          ],
+          "practice_task": "在顶层找出 new_chirp_frame 和 cmd_valid 两条跨时钟域路径，画出它们各自采用的 CDC 方式（toggle/同步器级数），并解释为什么不能用普通电平同步。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "FPGA 接收信号处理链",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "数字下变频 DDC：ADC→NCO→CIC→FIR",
+          "order": 1,
+          "filename": "u4-l1-ddc-digital-downconversion.md",
+          "level": "intermediate",
+          "topic": "讲解 AD9484 400MHz ADC 接口、ddc_400m 把实信号混频到 I/Q 基带、NCO 产生正交本振、CIC 4 倍抽取与 FIR 低通补偿滤波，以及 400M→100M 的真实 CDC 由 CIC+CDC_FIR 完成。",
+          "learning_goals": [
+            "理解数字下变频把 400MHz 实 ADC 数据变成 100MHz I/Q 基带的过程",
+            "掌握 CIC 抽取与 FIR 补偿滤波的作用与级联关系",
+            "明白为什么 ADC 数据不能用同频域 Gray CDC 跨域"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/ad9484_interface_400m.v",
+            "9_Firmware/9_2_FPGA/ddc_400m.v",
+            "9_Firmware/9_2_FPGA/nco_400m_enhanced.v",
+            "9_Firmware/9_2_FPGA/cic_decimator_4x_enhanced.v",
+            "9_Firmware/9_2_FPGA/fir_lowpass.v"
+          ],
+          "minimal_modules": [
+            "ADC 接口",
+            "NCO 混频",
+            "CIC 抽取",
+            "FIR 滤波"
+          ],
+          "practice_task": "在 ddc_400m.v 中追踪一个 ADC 样本从输入到 baseband_i/q 输出的数据通路，标出每一段的工作时钟，并解释 CIC 抽取比 4 如何把 400MHz 降到 100MHz。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "匹配滤波与脉冲压缩",
+          "order": 2,
+          "filename": "u4-l2-matched-filter-pulse-compression.md",
+          "level": "intermediate",
+          "topic": "讲解脉冲压缩原理：用 chirp_memory_loader_param 加载参考 chirp、latency_buffer 对齐参考与回波、matched_filter_multi_segment 做频域匹配滤波得到距离像（range profile）。",
+          "learning_goals": [
+            "理解脉冲压缩如何用匹配滤波提升距离分辨率",
+            "掌握参考 chirp 的存储、加载与时延对齐机制",
+            "能解释为什么需要 latency_buffer 对齐参考信号"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/chirp_memory_loader_param.v",
+            "9_Firmware/9_2_FPGA/latency_buffer.v",
+            "9_Firmware/9_2_FPGA/matched_filter_multi_segment.v",
+            "9_Firmware/9_2_FPGA/matched_filter_processing_chain.v"
+          ],
+          "minimal_modules": [
+            "参考 chirp 存储",
+            "时延对齐",
+            "频域匹配滤波"
+          ],
+          "practice_task": "解释 matched_filter_multi_segment 为什么是「多段」的（结合 long/short chirp 与分段 mem 文件），并算出 latency_buffer LATENCY=3187 在 100MHz 下对应多少微秒的时延。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "距离抽取与 MTI 杂波对消",
+          "order": 3,
+          "filename": "u4-l3-range-decimation-and-mti.md",
+          "level": "intermediate",
+          "topic": "讲解 range_bin_decimator 把 1024 个距离门用峰值检测压成 64 个；mti_canceller 作为二脉冲对消器 H(z)=1-z^-1 抑制静止地杂波，可由主机使能。",
+          "learning_goals": [
+            "理解距离门抽取的峰值检测模式及其对 Doppler 处理的意义",
+            "掌握 MTI 二脉冲对消器去除静止杂波的原理",
+            "能解释 MTI 的使能/透传切换对后续 Doppler 的影响"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/range_bin_decimator.v",
+            "9_Firmware/9_2_FPGA/mti_canceller.v",
+            "9_Firmware/9_2_FPGA/radar_receiver_final.v"
+          ],
+          "minimal_modules": [
+            "距离抽取",
+            "MTI 对消",
+            "使能控制"
+          ],
+          "practice_task": "在 radar_receiver_final.v 中确认 range_bin_decimator 的 INPUT_BINS/OUTPUT_BINS/DECIMATION_FACTOR 与 peak 模式设置；再说明 mti_canceller 关闭时数据如何透传到 Doppler 处理器。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Doppler 处理与 FFT 引擎",
+          "order": 4,
+          "filename": "u4-l4-doppler-processing.md",
+          "level": "intermediate",
+          "topic": "讲解 doppler_processor 的双 16 点 FFT（staggered PRI，16 长+16 短 chirp）架构、xfft_16 与 fft_engine 的关系、frame_complete 信号如何驱动后续 CFAR。",
+          "learning_goals": [
+            "理解对慢时间（chirp 间）做 FFT 得到速度谱的原理",
+            "掌握双 16 点子帧 FFT 架构与 CHIRPS_PER_FRAME=32 的关系",
+            "能解释 doppler_bin/range_bin 的含义与打包格式"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/doppler_processor.v",
+            "9_Firmware/9_2_FPGA/xfft_16.v",
+            "9_Firmware/9_2_FPGA/fft_engine.v",
+            "9_Firmware/9_2_FPGA/fft_twiddle_16.mem"
+          ],
+          "minimal_modules": [
+            "慢时间 FFT",
+            "双 16 点子帧",
+            "帧完成信号"
+          ],
+          "practice_task": "解释为什么 Doppler 用「双 16 点」而不是单个 32 点 FFT（结合 long/short chirp 的 staggered PRI），并说明 doppler_frame_done 脉冲如何告诉 CFAR 一帧数据已就绪。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "CFAR 目标检测",
+          "order": 5,
+          "filename": "u4-l5-cfar-detection.md",
+          "level": "intermediate",
+          "topic": "讲解 cfar_ca 的单元平均 CFAR（CA/GO/SO 三种模式）、guard/train 单元、alpha 门限、以及 enable=0 时回退为简单门限的兼容设计；还包括 DC notch 抑制零多普勒杂波。",
+          "learning_goals": [
+            "理解 CA-CFAR 的保护单元/训练单元/门限系数的作用",
+            "掌握 CFAR 与简单门限的兼容回退机制",
+            "能解释 DC notch 如何在 CFAR 前清除零多普勒杂波"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/cfar_ca.v",
+            "9_Firmware/9_2_FPGA/radar_system_top.v"
+          ],
+          "minimal_modules": [
+            "CA/GO/SO 模式",
+            "门限计算",
+            "DC notch"
+          ],
+          "practice_task": "在顶层找出 DC notch 的实现逻辑，说明 host_dc_notch_width 如何在两个 16 点子帧里同时清除 DC 附近的 bin；再列出 CFAR 的五个主机可配置参数（guard/train/alpha/mode/enable）及其默认值。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "FPGA 发射链与扫描控制",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "PLFM Chirp 生成与发射机",
+          "order": 1,
+          "filename": "u5-l1-plfm-chirp-and-transmitter.md",
+          "level": "intermediate",
+          "topic": "讲解 plfm_chirp_controller 的状态机（长 chirp→监听→保护→短 chirp→监听）、DAC 接口 dac_interface_single、radar_transmitter 如何驱动混频器使能与 ADAR1000 load 信号、以及 chirp LUT 内存文件。",
+          "learning_goals": [
+            "理解 PLFM chirp 的长/短两段波形与定时参数",
+            "掌握发射机如何与 DAC、混频器、ADAR1000 协同",
+            "能看懂 chirp_counter/elevation/azimuth 计数器如何组织扫描"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/plfm_chirp_controller.v",
+            "9_Firmware/9_2_FPGA/radar_transmitter.v",
+            "9_Firmware/9_2_FPGA/dac_interface_single.v",
+            "9_Firmware/9_2_FPGA/short_chirp_i.mem"
+          ],
+          "minimal_modules": [
+            "chirp 状态机",
+            "DAC 接口",
+            "ADAR1000 load 控制"
+          ],
+          "practice_task": "根据 plfm_chirp_controller 的 T1_SAMPLES=3600、FS=120MHz 算出长 chirp 持续时间，并对照状态机写出一次完整 chirp 周期（长→监听→保护→短→监听）的状态序列。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "雷达模式控制器与扫描时序",
+          "order": 2,
+          "filename": "u5-l2-radar-mode-controller.md",
+          "level": "intermediate",
+          "topic": "精读 radar_mode_controller：四种模式（STM32 直通/自动扫描/单 chirp/保留）、32 chirp×31 仰角×50 方位的扫描结构、以及 Gap2 引入的运行时可配置时序输入。",
+          "learning_goals": [
+            "掌握三种工作模式的区别与适用场景",
+            "理解 chirp/elevation/azimuth 三级计数器构成的完整扫描",
+            "能解释运行时 cfg_* 输入如何覆盖编译期参数且保持向后兼容"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/radar_mode_controller.v",
+            "9_Firmware/9_2_FPGA/radar_system_top.v"
+          ],
+          "minimal_modules": [
+            "模式选择",
+            "扫描计数",
+            "运行时配置"
+          ],
+          "practice_task": "画出自动扫描模式（mode 2'b01）从 S_IDLE 到一帧扫描完成的状态转移图；再说明当主机用 opcode 0x15 修改 chirps_per_elev 时，为什么会被钳制到 DOPPLER_FRAME_CHIRPS。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "USB 数据接口与主机命令协议",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "USB 数据接口（FT2232H / FT601）",
+          "order": 1,
+          "filename": "u6-l1-usb-data-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 usb_data_interface_ft2232h（8 位 245 同步 FIFO）与 usb_data_interface（FT601 32 位）共有的内部接口、11 字节数据包与 26 字节状态包格式、主机读路径（命令解析）以及 USB 断线看门狗复位。",
+          "learning_goals": [
+            "掌握数据包与状态包的字节布局",
+            "理解两个 USB 模块如何通过 generate 互换且共用接口",
+            "能解释 USB 断线检测与时钟丢失复位的机制"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/usb_data_interface_ft2232h.v",
+            "9_Firmware/9_2_FPGA/usb_data_interface.v"
+          ],
+          "minimal_modules": [
+            "数据/状态包格式",
+            "主机读路径",
+            "断线看门狗"
+          ],
+          "practice_task": "写出 11 字节数据包每个字节字段的含义（含 range_q/range_i/doppler/detection），并解释 detection 字节的 bit7（frame_start）与 bit0（detection）如何被上位机使用。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "主机命令协议与 Opcode 映射",
+          "order": 2,
+          "filename": "u6-l2-host-command-protocol.md",
+          "level": "intermediate",
+          "topic": "结合 radar_protocol.py 的 Opcode 枚举与 radar_system_top.v 的 case 表，讲解 4 字节命令 {opcode,addr,value}、状态回读的 6 个 32 位字布局，以及 opcode 到 FPGA 寄存器的精确映射。",
+          "learning_goals": [
+            "掌握 build_command 的 32 位字拼装与 parse_status_packet 的 6 字段解析",
+            "能把 Python Opcode 与 Verilog case 分支一一对应",
+            "理解状态包中 AGC/自测试字段的位布局"
+          ],
+          "source_files": [
+            "9_Firmware/9_3_GUI/radar_protocol.py",
+            "9_Firmware/9_2_FPGA/radar_system_top.v"
+          ],
+          "minimal_modules": [
+            "命令构造",
+            "状态解析",
+            "opcode 映射"
+          ],
+          "practice_task": "用 RadarProtocol.build_command 构造一条「设置 CFAR alpha 为 0x30」的命令字节序列，并写出对应 status 包 word 4 中 agc_saturation_count 占据的比特位。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "STM32 微控制器固件",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "STM32 main 与外设初始化",
+          "order": 1,
+          "filename": "u7-l1-stm32-main-and-peripherals.md",
+          "level": "intermediate",
+          "topic": "讲解 main.cpp 的 HAL 初始化（I2C/SPI/定时器）、电源上下电时序、与 FPGA 的通信、以及 USBHandler；强调 STM32 作为系统管理者的角色（非实时信号处理）。",
+          "learning_goals": [
+            "理解 STM32 上电后的初始化顺序与电源时序",
+            "掌握 STM32 与 FPGA、各 I2C/SPI 外设的交互方式",
+            "能识别 no-OS 抽象层在移植中的作用"
+          ],
+          "source_files": [
+            "9_Firmware/9_1_Microcontroller/9_1_3_C_Cpp_Code/main.cpp",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/USBHandler.cpp",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/RadarSettings.cpp"
+          ],
+          "minimal_modules": [
+            "HAL 初始化",
+            "电源时序",
+            "FPGA 通信"
+          ],
+          "practice_task": "在 main.cpp 中找出 STM32 配置的所有 I2C/SPI 外设句柄（hi2c1/2/3、hspi1/4），列出每个总线大致挂载哪些器件；并说明电源时序为何由 STM32 而非 FPGA 控制。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "时钟树与频率合成",
+          "order": 2,
+          "filename": "u7-l2-clock-and-frequency-synthesis.md",
+          "level": "intermediate",
+          "topic": "讲解 AD9523-1 低抖动时钟发生器为 RX/TX 频综（ADF4382）、DAC、ADC、FPGA 提供相位对齐参考；介绍 ad9523、adf4382 与 adf4382a_manager 的驱动结构。",
+          "learning_goals": [
+            "理解时钟发生器与频综如何为整系统提供相位对齐参考",
+            "掌握 AD9523 / ADF4382 的寄存器配置流程",
+            "能解释为什么雷达对时钟抖动极其敏感"
+          ],
+          "source_files": [
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/ad9523.c",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/adf4382.c",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/adf4382a_manager.c"
+          ],
+          "minimal_modules": [
+            "时钟发生器",
+            "频综驱动",
+            "相位对齐"
+          ],
+          "practice_task": "画出从 AD9523-1 到 ADF4382(RX/TX)、DAC、ADC、FPGA 的时钟分配树；并说明 STM32 通过什么总线（SPI/I2C）配置这些芯片。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "ADAR1000 波束赋形与 Idq 校准",
+          "order": 3,
+          "filename": "u7-l3-adar1000-beamforming.md",
+          "level": "intermediate",
+          "topic": "讲解 ADAR1000_Manager 管理 4 片 4 通道相移器实现 RX/TX 波束赋形；ADAR1000_AGC 做增益控制；DAC5578 设置 16 路 Vg、ADS7830 经 INA241A3 读 16 路 Idq，开机闭环校准到目标 Idq。",
+          "learning_goals": [
+            "理解 ADAR1000 相移器如何实现电子波束扫描",
+            "掌握 PA 偏置（Vg/Idq）的闭环校准原理",
+            "能解释 ADS7830+INA241A3+5mΩ shunt 的电流检测链路"
+          ],
+          "source_files": [
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/ADAR1000_Manager.cpp",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/ADAR1000_AGC.cpp",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/DAC5578.H",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/ADS7830.c"
+          ],
+          "minimal_modules": [
+            "相移器管理",
+            "PA 增益控制",
+            "Idq 闭环校准"
+          ],
+          "practice_task": "说明 16 路 PA 通道如何用 2 片 DAC5578（U7/U69）设 Vg、2 片 ADS7830（U88/U89）读 Idq，并描述开机时把 Idq 闭环到目标值的大致流程。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Python GUI V7 架构与数据流",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "GUI V7 架构与启动",
+          "order": 1,
+          "filename": "u8-l1-gui-v7-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 v7 包的模块拆分（dashboard/models/hardware/processing/workers/map_widget/replay/software_fpga/agc_sim）、PyQt6 六标签页主窗口结构、以及可选依赖（pyusb/pyftdi/scipy/sklearn/filterpy）的优雅降级。",
+          "learning_goals": [
+            "掌握 V7 GUI 的包结构与六标签页职责",
+            "理解 models.py 中数据类、枚举与可选依赖标志的作用",
+            "能解释 GUI 在缺少 scipy/sklearn 时如何优雅降级"
+          ],
+          "source_files": [
+            "9_Firmware/9_3_GUI/v7/dashboard.py",
+            "9_Firmware/9_3_GUI/v7/models.py",
+            "9_Firmware/9_3_GUI/v7/hardware.py",
+            "9_Firmware/9_3_GUI/requirements_v7.txt"
+          ],
+          "minimal_modules": [
+            "包结构",
+            "六标签页",
+            "优雅降级"
+          ],
+          "practice_task": "列出 v7 包的 9 个模块各自的一句话职责，并说明当 sklearn 未安装时聚类功能如何被禁用而不崩溃。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "数据采集线程与帧组装",
+          "order": 2,
+          "filename": "u8-l2-acquisition-and-frame-assembly.md",
+          "level": "intermediate",
+          "topic": "讲解 RadarAcquisition 后台线程如何从 USB 读字节流、find_packet_boundaries 定位包、解析 11 字节数据包、把样本按 range×doppler 写入 RadarFrame，凑齐 2048 单元后整帧入队。",
+          "learning_goals": [
+            "掌握后台线程 + 队列的采集/显示解耦模式",
+            "理解残差（residual）字节如何跨读取拼接以避免丢包",
+            "能解释 _ingest_sample 如何把样本索引映射到 range/doppler bin"
+          ],
+          "source_files": [
+            "9_Firmware/9_3_GUI/radar_protocol.py",
+            "9_Firmware/9_3_GUI/v7/workers.py"
+          ],
+          "minimal_modules": [
+            "采集线程",
+            "包边界扫描",
+            "帧组装"
+          ],
+          "practice_task": "追踪一个 11 字节数据包从 read() 到写入 RadarFrame.range_doppler_i[rbin,dbin] 的全过程，并说明 _sample_idx 如何在达到 NUM_CELLS 时触发整帧入队。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "信号处理、聚类与目标跟踪",
+          "order": 3,
+          "filename": "u8-l3-processing-and-tracking.md",
+          "level": "intermediate",
+          "topic": "讲解 v7/processing.py 的 RadarProcessor：双 CPI 融合、多 PRF 解模糊、DBSCAN 聚类、关联与 Kalman 跟踪，以及 GPS/IMU 的俯仰修正用于目标坐标。",
+          "learning_goals": [
+            "掌握上位机端从 Range-Doppler 图到目标航迹的处理链",
+            "理解 DBSCAN 聚类与 Kalman 跟踪在目标形成中的作用",
+            "能解释 GPS/IMU 如何修正目标的空间坐标"
+          ],
+          "source_files": [
+            "9_Firmware/9_3_GUI/v7/processing.py",
+            "9_Firmware/9_3_GUI/v7/models.py",
+            "9_Firmware/9_3_GUI/v7/map_widget.py"
+          ],
+          "minimal_modules": [
+            "双 CPI 融合",
+            "DBSCAN 聚类",
+            "Kalman 跟踪",
+            "姿态修正"
+          ],
+          "practice_task": "画出 RadarProcessor 从 Range-Doppler 图到带航迹的目标列表的处理步骤；并说明 apply_pitch_correction 如何用 IMU 俯仰角修正目标仰角。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "跨层混合 AGC 环路",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Hybrid AGC：FPGA + STM32 + GUI 联动",
+          "order": 1,
+          "filename": "u9-l1-hybrid-agc-loop.md",
+          "level": "advanced",
+          "topic": "讲解混合自动增益控制：FPGA 内 rx_gain_control 按帧根据饱和/峰值自动调增益，顶层把饱和标志通过 DIG_5/DIG_6 GPIO 送给 STM32 外环，GUI 的 AGC Monitor 实时显示增益/峰值/饱和。",
+          "learning_goals": [
+            "理解 FPGA 内环 AGC 的 attack/decay/holdoff 参数与每帧调整逻辑",
+            "掌握 FPGA→STM32 GPIO（DIG_5/DIG_6）传递饱和/使能标志的外环机制",
+            "能解释 GUI 如何经状态包读取并展示 AGC 指标"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/rx_gain_control.v",
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_1_Microcontroller/9_1_1_C_Cpp_Libraries/ADAR1000_AGC.cpp",
+            "9_Firmware/9_3_GUI/v7/agc_sim.py"
+          ],
+          "minimal_modules": [
+            "FPGA 内环 AGC",
+            "GPIO 外环",
+            "GUI 监控"
+          ],
+          "practice_task": "说明当某帧出现饱和时，FPGA 内环如何降增益、如何经 DIG_5 通知 STM32、以及 STM32 外环可进一步调整什么；并指出 GUI 从状态包哪个字段读到 current_gain。",
+          "depends_on": [
+            "u4-l5",
+            "u7-l3",
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "板级 Bring-up 与 FPGA 自测试",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "FPGA 板级自测试 fpga_self_test",
+          "order": 1,
+          "filename": "u10-l1-fpga-self-test.md",
+          "level": "advanced",
+          "topic": "讲解 fpga_self_test 模块：上电后逐个测试关键子系统、5 位结果 flags + 8 位 detail、opcode 0x30 触发与 0x31/0xFF 回读、ADC 数据 tap 接入。",
+          "learning_goals": [
+            "掌握自测试的触发/锁存/回读流程",
+            "理解 5 位 flags 与 8 位 detail 的含义",
+            "能解释自测试如何复用 ADC debug tap"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/fpga_self_test.v",
+            "9_Firmware/9_2_FPGA/radar_system_top.v"
+          ],
+          "minimal_modules": [
+            "自测试 FSM",
+            "结果锁存",
+            "状态回读"
+          ],
+          "practice_task": "用 opcode 0x30 触发自测试并通过 0xFF 状态包读取 self_test_flags/detail/busy，写出一套判定各子系统是否通过的检查脚本伪代码。",
+          "depends_on": [
+            "u3-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "硬件 Bring-up 流程与构建产物",
+          "order": 2,
+          "filename": "u10-l2-board-bringup.md",
+          "level": "advanced",
+          "topic": "结合 docs/bring-up.html、board-day-worksheet.html 与 docs/artifacts 下的 .bit/.rpt 文件，讲解首次上电的检查清单、TE0713/TE0701 开发板构建流程、adc_clk_mmcm 时钟管理与 ILA 调试。",
+          "learning_goals": [
+            "掌握雷达板首次上电的分阶段验证步骤",
+            "理解 TE0713/TE0701 + UMFT601x 开发构建产物与心跳版本",
+            "能定位 .bit 流文件、时序报告与 ILA 抓取脚本"
+          ],
+          "source_files": [
+            "docs/bring-up.html",
+            "docs/board-day-worksheet.html",
+            "docs/artifacts/te0713-te0701-heartbeat-2026-03-21.md",
+            "9_Firmware/9_2_FPGA/adc_clk_mmcm.v",
+            "9_Firmware/9_2_FPGA/scripts/utils/ila_capture.tcl"
+          ],
+          "minimal_modules": [
+            "上电检查清单",
+            "开发板构建",
+            "时钟/MMCM 与 ILA"
+          ],
+          "practice_task": "按照 board-day-worksheet 列出板日测试要验证的子系统顺序；并说明 heartbeat .bit 与 umft601x dev .bit 分别用于验证什么。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "测试与验证体系",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "FPGA 回归测试与协同仿真",
+          "order": 1,
+          "filename": "u11-l1-fpga-regression-and-cosim.md",
+          "level": "advanced",
+          "topic": "讲解 run_regression.sh 的四阶段（lint/单元/集成/信号处理）、iverilog -Wall 模拟 Vivado 错误、tb/cosim 用真实数据 hex 做 exact-match 黄金比对、gen_mf_golden_ref.py 与 validate_mem_files.py 的作用。",
+          "learning_goals": [
+            "掌握回归脚本的阶段划分与 PASS/FAIL 判定",
+            "理解 iverilog lint 如何映射到 Vivado 级错误",
+            "能解释真实数据 exact-match 比对相比自生成黄金值的优势"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/run_regression.sh",
+            "9_Firmware/9_2_FPGA/tb/cosim/validate_mem_files.py",
+            "9_Firmware/9_2_FPGA/tb/gen_mf_golden_ref.py",
+            "9_Firmware/9_2_FPGA/tb/tb_fullchain_realdata.v"
+          ],
+          "minimal_modules": [
+            "回归阶段",
+            "Vivado 级 lint",
+            "真实数据 cosim"
+          ],
+          "practice_task": "运行 ./run_regression.sh --quick 记录各阶段通过情况；再说明为什么「真实数据 exact-match」能抓到自生成黄金比对抓不到的架构错误。",
+          "depends_on": [
+            "u4-l4",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "STM32 单元测试与 bug 回归",
+          "order": 2,
+          "filename": "u11-l2-mcu-unit-tests.md",
+          "level": "advanced",
+          "topic": "讲解 tests/Makefile 如何用 shims（adf4382.h/no_os_*.h 等）和 mocks（ad_driver_mock/stm32_hal_mock）在主机上跑 test_bug1..15 回归与 test_gap3_* 安全测试。",
+          "learning_goals": [
+            "掌握用 shim/mock 在 PC 上测试嵌入式代码的方法",
+            "理解 test_bug1..15 与 gap3 安全测试覆盖的问题类型",
+            "能识别哪些 no-OS 接口需要被桩替换"
+          ],
+          "source_files": [
+            "9_Firmware/9_1_Microcontroller/tests/Makefile",
+            "9_Firmware/9_1_Microcontroller/tests/stm32_hal_mock.c",
+            "9_Firmware/9_1_Microcontroller/tests/test_bug4_phase_shift_before_check.c",
+            "9_Firmware/9_1_Microcontroller/tests/test_gap3_overtemp_emergency_stop.c"
+          ],
+          "minimal_modules": [
+            "shim/mock 测试",
+            "bug 回归",
+            "安全测试"
+          ],
+          "practice_task": "运行 make test 并统计 bug 回归与 gap3 测试数量；任选一个 test_bug* 说明它防止了什么具体缺陷。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "跨层契约测试（Python↔Verilog↔C）",
+          "order": 3,
+          "filename": "u11-l3-cross-layer-contract-tests.md",
+          "level": "advanced",
+          "topic": "讲解 test_cross_layer_contract.py 的三层验证：静态契约解析（opcode/位宽/包布局）、iverilog 协同仿真回读、C stub 执行；以及 contract_parser.py 如何从三套源码各自推导真值。",
+          "learning_goals": [
+            "理解跨层契约测试为何能发现「两层都错」的隐性 bug",
+            "掌握三层验证（静态/仿真/执行）各自的覆盖面",
+            "能解释 contract_parser 如何独立推导每层的真值"
+          ],
+          "source_files": [
+            "9_Firmware/tests/cross_layer/test_cross_layer_contract.py",
+            "9_Firmware/tests/cross_layer/contract_parser.py",
+            "9_Firmware/tests/cross_layer/tb_cross_layer_ft2232h.v",
+            "9_Firmware/tests/cross_layer/adar1000_vm_reference.py"
+          ],
+          "minimal_modules": [
+            "三层验证",
+            "独立真值推导",
+            "回环正确性"
+          ],
+          "practice_task": "说明三层验证分别用什么工具/语言、各自能抓哪类错误；并举一个「两层一致但都错」的例子说明为何需要第三层独立真值。",
+          "depends_on": [
+            "u6-l2",
+            "u7-l1",
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "Python 测试、lint 与代码质量",
+          "order": 4,
+          "filename": "u11-l4-python-tests-and-lint.md",
+          "level": "advanced",
+          "topic": "讲解 pyproject.toml 中 ruff 的规则集（F/B/RUF/T20/ERA/A 等针对 LLM 遗留问题）、py_compile 全仓语法检查、GUI 的 pytest 测试（test_v7.py/test_GUI_V65_Tk.py）与 smoke_test.py。",
+          "learning_goals": [
+            "掌握 ruff 规则集要消除的代码异味",
+            "理解 py_compile 全仓扫描与 per-file-ignores 的作用",
+            "能运行 GUI 测试并理解其覆盖范围"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "9_Firmware/9_3_GUI/test_v7.py",
+            "9_Firmware/9_3_GUI/smoke_test.py",
+            "9_Firmware/9_3_GUI/test_GUI_V65_Tk.py"
+          ],
+          "minimal_modules": [
+            "ruff 规则",
+            "全仓语法检查",
+            "GUI pytest"
+          ],
+          "practice_task": "运行 uv run ruff check . 与两个 GUI pytest 文件，修复或记录发现的问题；并解释为什么 T20（print）和 ERA（注释代码）规则对维护质量重要。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "仿真与设计验证",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "天线电磁仿真",
+          "order": 1,
+          "filename": "u12-l1-antenna-simulation.md",
+          "level": "advanced",
+          "topic": "讲解 openEMS 仿真石英填充缝隙波导天线（10.5GHz）、sanity/balanced/full 三档配置、S 参数与远场增益；以及 Matlab 脚本做 16x8/32x16 阵列方向图综合。",
+          "learning_goals": [
+            "理解缝隙波导与贴片阵列天线的仿真目标",
+            "掌握 openEMS 配置档（mesh/pml/freq_pts）如何权衡精度与时间",
+            "能解释阵列方向图综合在波束扫描中的作用"
+          ],
+          "source_files": [
+            "5_Simulations/Antenna/openems_quartz_slotted_wg_10p5GHz.py",
+            "5_Simulations/Antenna/Quartz_Waveguide.py",
+            "5_Simulations/Matlab/Antenna16_8.m",
+            "docs/AERIS_Antenna_Report.pdf"
+          ],
+          "minimal_modules": [
+            "openEMS FDTD",
+            "波导/贴片天线",
+            "阵列方向图"
+          ],
+          "practice_task": "把 PROFILE 从 sanity 切换到 balanced，说明各参数如何变化并估算计算量增长倍数；再解释为什么先 sanity 再 full。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "RF 链路与滤波器仿真",
+          "order": 2,
+          "filename": "u12-l2-rf-and-filter-simulation.md",
+          "level": "advanced",
+          "topic": "讲解 LTspice 仿真 IF 带通滤波器（IF_BPF/IF_BPF_Balanced）、DAC 重建滤波与 chirp 生成（Generate_ChirpcsvFile.py）、QPA2962 GaN 功放、RF 开关 S 参数、以及 via fencing 隔离仿真。",
+          "learning_goals": [
+            "掌握 IF 带通与 DAC 重建滤波器的仿真方法",
+            "理解 QPA2962 GaN 功放在 Extended 版中的作用",
+            "能解释 via fencing 对 RF 隔离的意义"
+          ],
+          "source_files": [
+            "5_Simulations/IF_BPF/IF_BPF.sch",
+            "5_Simulations/DAC_ReconstructionFilter/Generate_ChirpcsvFile.py",
+            "5_Simulations/QPA2962.sch",
+            "5_Simulations/Fencing/Via_fencing.py",
+            "5_Simulations/RF switch/Impedance.sch"
+          ],
+          "minimal_modules": [
+            "IF 带通滤波",
+            "DAC 重建/chirp",
+            "GaN 功放",
+            "via 隔离"
+          ],
+          "practice_task": "用 Generate_ChirpcsvFile.py 生成一段 chirp CSV，说明它如何被 DAC 与 FPGA chirp LUT 对应；并指出 QPA2962 仿真结果如何指导 Extended 版的功放设计。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u13",
+      "title": "硬件设计文件导览",
+      "level": "advanced",
+      "order": 13,
+      "lectures": [
+        {
+          "id": "u13-l1",
+          "title": "原理图、PCB 叠层与生产文件",
+          "order": 1,
+          "filename": "u13-l1-hardware-design-files.md",
+          "level": "advanced",
+          "topic": "讲解 4_6_Schematics 下各板（MainBoard/PowerBoard/FreqSynth/PA/Patch 天线）的 .sch/.brd、4_4 Board Stack-up 叠层、4_7 Production Files 的 Gerber/BOM/CPL，以及电源管理 Excel 的时序。",
+          "learning_goals": [
+            "识别各功能板的原理图与 PCB 文件",
+            "理解多层板叠层与阻抗控制对 RF 的意义",
+            "能定位 Gerber/BOM/CPL 等可制造文件"
+          ],
+          "source_files": [
+            "4_Schematics and Boards Layout/4_4_Board Stack-up/Stack_Hybrid.png",
+            "4_Schematics and Boards Layout/4_6_Schematics/MainBoard/RADAR_Main_Board.sch",
+            "4_Schematics and Boards Layout/4_7_Production Files/Gerber_Main_Board/BOM_Main_Board.xlsx",
+            "3_Power Management/Power Management V6.xlsx"
+          ],
+          "minimal_modules": [
+            "各板原理图",
+            "板叠层",
+            "生产文件"
+          ],
+          "practice_task": "列出 4_7_Production Files 下的各 Gerber 子目录对应哪块板；并说明 Power Management Excel 如何描述电源轨的上电时序。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u14",
+      "title": "形式化验证与二次开发",
+      "level": "advanced",
+      "order": 14,
+      "lectures": [
+        {
+          "id": "u14-l1",
+          "title": "形式化验证（SymbiYosys）",
+          "order": 1,
+          "filename": "u14-l1-formal-verification.md",
+          "level": "advanced",
+          "topic": "讲解 formal/ 下用 .sby + fv_*.v 对 CDC、doppler_processor、radar_mode_controller、range_bin_decimator 做形式化验证，证明状态机与跨时钟域的某些性质恒成立。",
+          "learning_goals": [
+            "理解形式化验证相比仿真能证明的性质类型",
+            "掌握 .sby 配置与 fv_ 包装模块的关系",
+            "能识别哪些模块最值得做形式化验证"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/formal/fv_radar_mode_controller.sby",
+            "9_Firmware/9_2_FPGA/formal/fv_radar_mode_controller.v",
+            "9_Firmware/9_2_FPGA/formal/fv_cdc_handshake.sby",
+            "9_Firmware/9_2_FPGA/formal/fv_doppler_processor.sby"
+          ],
+          "minimal_modules": [
+            ".sby 配置",
+            "性质断言",
+            "适用模块"
+          ],
+          "practice_task": "阅读 fv_radar_mode_controller.v，写出它验证的状态机性质；并说明形式化验证如何补充 run_regression.sh 的仿真覆盖。",
+          "depends_on": [
+            "u3-l2",
+            "u4-l4",
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u14-l2",
+          "title": "二次开发扩展点与 Vivado 构建流",
+          "order": 2,
+          "filename": "u14-l2-extension-points.md",
+          "level": "advanced",
+          "topic": "讲解如何扩展系统：在顶层 case 表与 radar_protocol.py 同步新增 opcode、为新板卡添加 radar_system_top_* 顶层与 constraints/*.xdc、用 scripts/*/build_*.tcl 跑 Vivado 流程、以及如何更新 docs。",
+          "learning_goals": [
+            "掌握新增主机命令时 FPGA/Python 必须同步修改的点",
+            "理解多板卡顶层、约束文件与 TCL 构建脚本的关系",
+            "能规划一个端到端的功能扩展（RTL+协议+GUI+测试）"
+          ],
+          "source_files": [
+            "9_Firmware/9_2_FPGA/radar_system_top.v",
+            "9_Firmware/9_3_GUI/radar_protocol.py",
+            "9_Firmware/9_2_FPGA/constraints/te0713_te0701_umft601x.xdc",
+            "9_Firmware/9_2_FPGA/scripts/te0713/build_te0713_umft601x_dev.tcl",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "新增 opcode",
+            "多板卡顶层/XDC",
+            "TCL 构建流"
+          ],
+          "practice_task": "设计一个新功能「主机可配置 MTI 滤波器阶数」：列出需要在 radar_system_top.v、radar_protocol.py、dashboard.py、以及哪个测试里同步改动的位置清单。",
+          "depends_on": [
+            "u3-l1",
+            "u6-l2",
+            "u8-l1",
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
