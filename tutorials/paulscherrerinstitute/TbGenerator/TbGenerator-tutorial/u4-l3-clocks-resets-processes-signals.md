@@ -2,725 +2,568 @@
 
 ## 1. 本讲目标
 
-本讲是「数据模型与 testbench 生成主流程」单元的第三讲。在 u4-l2 里我们已经看到 `Generate` 是一台**线性写作器**：它不计算、不决策，只按 VHDL 语法顺序自上而下誊抄，内容由标签系统预先决定。本讲要回答的问题是：**这些被誊抄的「动态段落」——时钟、复位、测试进程、仿真控制——内部到底是怎么写出来的？标签是如何一字一句地变成 VHDL 代码的？**
+学完本讲后，你应该能够：
 
-学完本讲你应当能够：
+- 逐行说清 `_Clocks` 如何把一个带 `TYPE=CLK; FREQ=100e6` 的端口变成 `p_clock_<name>` 进程，并解释半周期公式 \( T_{\text{half}} = 0.5 \cdot \dfrac{1\,\text{sec}}{f} \) 的来历。
+- 说清 `_Resets` 如何用 `CLK` 标签把复位「挂」到归属时钟，并解释「等两个上升沿再释放」的用意。
+- 默写出 `_TbControlSignals` 声明的五类脚手架（`TbRunning` / `NextCase` / `ProcessDone` / `AllProcessesDone_c` / `TbProcNr_<p>_c`），并说清它们的位宽从哪里来。
+- 画出 `ProcessDone = AllProcessesDone_c` 这一条件如何把所有测试进程「汇合」到 `p_tb_control`，再由它把 `TbRunning` 置 `false`，最终让时钟进程跳出 `while TbRunning loop` 结束仿真。
+- 理解 `FilterForTag` 这个「三连招原语」（筛选 → 检查 → 取值）如何被 `_Clocks` / `_Resets` / `_Processes` / `_TbControl` / `_DutInstantiation` 反复复用。
+- 区分单用例 TB 与多用例 TB 在 `_Processes` / `_TbControl` 里的代码分支差异。
 
-- 看懂 `_Clocks` 如何把 `FREQ` 标签换算成时钟半周期，并手算出任意频率的半周期值。
-- 看懂 `_Resets` 如何用 `CLK` 标签把复位「归属」到正确的时钟域，并解释「等两个上升沿」的安全意义。
-- 解释 `_TbControlSignals` 与 `_TbControl` 之间「声明—消费」的契约，以及 `ProcessDone = AllProcessesDone_c` 如何让仿真自动结束。
-- 理解 `_Processes` 在单用例与多用例两种模式下的分支差异，以及 `PROC` 标签如何绑定端口到过程。
-- 理解 `_DutInstantiation` 如何用 `FilterForTag` 汇聚 `EXPORT`/`CONSTANT` 两类 generic 拼出 `generic map`。
-- 把 `FilterForTag` 当作贯穿所有生成方法的「统一筛选器」来使用。
-
----
+本讲是 u4 的「实现深潜」：u4-l2 讲了 `Generate` 的**整体写作顺序**，把 `_Clocks` / `_Resets` / `_Processes` / `_TbControl` 的内部细节留到了本讲；u2-l2 讲了标签如何**影响**这些段落的生成，本讲则逐行打开这些段落本身的生成代码，把「标签」与「最终 VHDL」之间的最后一段实现补齐。
 
 ## 2. 前置知识
 
-本讲假设你已经掌握以下概念（在前序讲义中已建立，这里只做一句话回顾）：
+本讲承接 u4-l2 建立的「线性写作器」心智模型：
 
-- **标签系统**：`$$ TYPE=CLK; FREQ=100e6 $$` 这类注释标签是工具的输入契约（见 u2-l1、u2-l2）。
-- **GetPortValue(port, active)**：端口初值的单一真相源。`active=True` 返回「有效」电平，`active=False` 返回「无效」电平；`LOWACTIVE` 标签会成对翻转极性，向量类型自动包成 `(others => ...)`（见 u2-l2、u4-l1）。
-- **Generate 是线性写作器**：各 `_Xxx()` 方法接收并返回同一个 `FileWriter`，靠 `WriteLn/IncIndent/DecIndent/RemoveFromLastLine` 自管理缩进，链式拼出 VHDL（见 u4-l2）。
-- **DutInfo / TbInfo 数据模型**：`dutInfo.ports`、`dutInfo.generics`、`tbInfo.tbProcesses`、`tbInfo.isMultiCaseTb` 等字段是本讲所有方法的「原料」（见 u4-l1）。
+> `Generate` 不做计算决策，只按 VHDL 物理顺序自上而下誊抄；每个 `_Xxx()` 方法接收并返回同一个 `FileWriter`，借 `WriteLn` / `IncIndent` / `DecIndent` / `RemoveFromLastLine` 拼出格式化 VHDL。
 
-> 一个贯穿全讲的**调用骨架**先放在这里。`Generate` 在并发语句区按如下顺序调用本讲涉及的方法（见 [TbGen.py:248-252](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L248-L252)，这段代码展示了 `architecture ... begin` 之后五个并发段落的写出顺序）：
+进入本讲前，请确认你已掌握（来自前置讲义）：
 
-```
-self._DutInstantiation(f)   # 1. DUT 实例化
-self._TbControl(f)          # 2. 仿真主控进程（负责结束仿真）
-self._Clocks(f)             # 3. 每个时钟一个 p_clock_* 进程
-self._Resets(f)             # 4. 每个复位一个 p_rst_* 进程
-self._Processes(f)          # 5. 每个测试过程一个 p_<name> 进程
-```
+- **标签语义**（u2-l2）：`TYPE=CLK` 配 `FREQ` 驱动时钟；`TYPE=RST` 配 `CLK`（引用另一个端口名）驱动复位；`PROC=<name>` 把端口绑定到测试过程；`LOWACTIVE` 翻转有效/无效极性。
+- **`GetPortValue(port, active)`**（u4-l1 / u2-l2）：端口初值的单一真相源，`active=True` 返回有效值、`active=False` 返回无效值，未知类型抛 `UnknownVhdlType`。
+- **`FilterForTag(list, tag, value=None, casesensitive=False)`**（u2-l1）：从一个端口/generic 列表里筛出「带某标签（且值匹配）」的子集。
+- **`TbInfo` 模型**（u2-l3 / u4-l1）：`tbProcesses`（缺省 `["Stimuli"]`）、`isMultiCaseTb`（仅判 `TESTCASES` 键是否存在）、`testCases`、`tbName`、`GetPortsForProcess(p)`。
+- **`Generate` 的并发语句段顺序**（u4-l2）：
 
-注意输出顺序（`_TbControl` 在 `_Clocks` 之前）与**概念依赖顺序**（`_TbControl` 要等 `_Processes` 置位 `ProcessDone`）是相反的——这正是「线性誊抄器」的特点：写在前面的代码，运行时可能等在后面。
+  ```
+  _DutInstantiation → _TbControl → _Clocks → _Resets → _Processes
+  ```
 
----
+一个贯穿全讲的直觉：**这一讲的每个方法，本质都是「遍历一个 `FilterForTag` 的结果列表，逐个写一段 VHDL」**。掌握了 `FilterForTag`，这五个方法的骨架就都透明了；剩下的只是「每一段具体写什么」。
 
 ## 3. 本讲源码地图
 
-| 文件 | 本讲关注的内容 |
-| --- | --- |
-| [TbGen.py](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py) | `TbGenerator` 类的六个生成方法：`_DutInstantiation`、`_Clocks`、`_Resets`、`_Processes`、`_TbControl`、`_TbControlSignals`，以及 `Generate` 的调用顺序。 |
-| [DutInfo.py](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py) | `FilterForTag`（以及配套的 `HasTag`/`GetTag`/`HastTagValue`）——所有生成方法共用的标签筛选器；`GetPortValue`、`Tags` 常量类。 |
-| [TbInfo.py](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbInfo.py) | `GetPortsForProcess`——`_Processes` 在多用例模式下用来收集过程参数列表。 |
-| [example/simpleTb/psi_common_async_fifo.vhd](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd) | 异步 FIFO 示例 DUT，含两个时钟域、两个复位、`PROCESSES=Input,Output`，是本讲所有实践的靶子。 |
+| 文件 | 作用 | 本讲关注点 |
+| --- | --- | --- |
+| `TbGen.py` | 引擎核心，定义 `TbGenerator` 类 | `_DutInstantiation` / `_Clocks` / `_Resets` / `_Processes` / `_TbControl` / `_TbControlSignals` 六个写作方法，以及 `Generate` 里它们的调用顺序 |
+| `DutInfo.py` | DUT 数据模型 | `FilterForTag`（本讲反复复用的筛选原语）、`GetPortValue`（初值真相源）、`HasTag` / `GetTag` / `HastTagValue`（存在性检查与取值）、`Tags` 常量类 |
+| `TbInfo.py` | TB 数据模型 | `isMultiCaseTb` / `tbProcesses` / `testCases` / `GetPortsForProcess`（多用例进程参数来源） |
+| `example/simpleTb/psi_common_async_fifo.vhd` | 单用例示例 DUT | 两个时钟（`InClk` 100 MHz、`OutClk` 125 MHz）、两个复位（`InRst`、`OutRst`）、`PROCESSES=Input,Output` |
+| `example/multiCaseTb/psi_common_async_fifo.vhd` | 多用例示例 DUT | 在 simpleTb 基础上多了 `$$ TESTCASES=Full,Empty $$`，用来对照多用例分支 |
 
----
+> 说明：`FileWriter` 来自外部依赖 `PsiPyUtils`（不在本仓库内），其精确实现不在本讲范围。我们只从它在 `TbGen.py` 中的链式调用方式推断其「对外契约」：写一行、增减缩进、回改上一行字符。
 
 ## 4. 核心概念与源码讲解
 
-本讲按「**先讲筛选器地基，再讲六个生成方法**」的顺序展开。六个方法之间并非孤立，它们共享同一套「**筛选 → 检查 → 取值 → 誊抄**」的四步套路，所以我们先把这套套路的引擎 `FilterForTag` 讲透。
-
-### 4.1 FilterForTag —— 标签驱动的统一筛选器
+### 4.1 FilterForTag：贯穿全讲的「筛选」原语
 
 #### 4.1.1 概念说明
 
-u2-l1 已经介绍过 `FilterForTag` 的**用途**（按标签从一堆端口/generic 里筛出符合条件的子集）。本讲从**实现**角度再深挖一层，因为本讲后面每个生成方法的第一行几乎都是它。
+本讲六个写作方法里，有五个的开头都是同一句话：「先用 `FilterForTag` 把目标端口/generic 筛出来」。所以正式进入各方法前，先把这块「公共地砖」铺平。
 
-设计意图：端口和 generic 在数据模型里是**无序集合**（一个 list），而生成器需要的是「所有时钟端口」「所有复位端口」「所有需要导出的 generic」这样的**子集**。`FilterForTag` 就是这个「按标签切片」的操作。它的关键能力有三：
+`FilterForTag` 是 `DutInfo` 的类方法，语义是：
 
-1. **标签存在性筛选**：只传 `tag` 不传 `value` 时，筛出「带这个标签」的全部对象。
-2. **标签值匹配筛选**：同时传 `tag` 和 `value` 时，进一步要求标签值等于给定值。
-3. **值类型归一**：标签值在解析层可能是 `str`（单值）也可能是 `list`（列表），匹配时统一当成列表处理，所以 `PROC=Output,Input` 这种列表也能命中 `value="input"`。
+> 给我一个对象列表（通常是 `self.dutInfo.ports` 或 `self.dutInfo.generics`），一个标签名，以及可选的标签值；我把列表里**注释中带这个标签（且值匹配）**的对象挑出来，返回一个新列表。
+
+它的两个关键设计点：
+
+1. **`value=None` 时只判存在性**：只关心「有没有这个标签」，不看值。`_Clocks` 筛 `TYPE=clk` 用的是「带值」模式；`_DutInstantiation` 筛 `CONSTANT` 用的是「无值」模式（只要 generic 标了 `CONSTANT` 就要进 `generic map`，不管值是多少）。
+2. **值匹配默认大小写不敏感**：这与整个标签系统一致（标签名统一小写、`HastTagValue` 默认 `casesensitive=False`）。所以示例里 `PROC=INPUT`、`PROC=Input`、`PROC=input` 都能被筛到同一个进程。
 
 #### 4.1.2 核心流程
 
 ```
-输入: list（端口或 generic 的可迭代对象）, tag, value=None
-对 list 中每个元素 e:
-    1. 解析 e.comment 里的 $$ ... $$ 标签 → tags 字典
-    2. 若 tag 不在 tags 中            → 跳过
-    3. 若 value is None               → 直接收下 e（存在性筛选）
-    4. 否则把 tags[tag] 归一成 list:
-         - 若是 str → 包成 [str]
-         - 若是 list → 原样
-    5. 大小写不敏感地比较 value 是否在归一列表中 → 命中则收下 e
-输出: 收下的元素组成的新 list
+FilterForTag(list, tag, value=None, casesensitive=False):
+  结果 = []
+  tag = tag.lower()
+  for e in list:                          # e 是端口或 generic 对象
+      tags = _ParseTags(e.comment)        # 解析该对象的 $$..$$ 注释
+      if tag in tags:
+          if value is None:               # 无值模式：存在即可
+              结果.append(e)
+          else:                           # 带值模式：值要匹配
+              把 tags[tag] 归一成 list（单值也包成单元素 list）
+              若 value（按大小写策略）命中该 list，则 结果.append(e)
+  return 结果
 ```
 
-注意第 4 步的归一：`casesensitive=False`（默认）时，会把列表里每个值 `.lower()` 后再与 `value.lower()` 比较，这就是「标签名和值都大小写不敏感」的来源。
+注意一个细节：值匹配时，标签值会先被**归一成列表**再判断 `in`。这解释了为什么 `PROC=Output,Input`（列表值）这种「一个端口属于多个进程」的写法能正确命中 `Output` 或 `Input` 任一进程。
 
 #### 4.1.3 源码精读
 
-`FilterForTag` 的完整实现（[DutInfo.py:147-166](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L147-L166)，这段代码展示了「存在性筛选」与「值匹配筛选」两条分支，以及值类型归一与大小写归一）：
+`FilterForTag` 的完整实现（注意它把单值 `str` 与列表 `list` 两种形态都归一成列表再匹配）：
 
-```python
-@classmethod
-def FilterForTag(cls, list : Iterable, tag : str, value : str = None, casesensitive : bool = False) -> List:
-    l = []
-    tag = tag.lower()
-    for e in list:
-        tags = cls._ParseTags(e.comment)
-        if tag in tags:
-            if value is None:
-                l.append(e)
-            else:
-                tagValue = tags[tag]
-                tagValueList = [tagValue] if type(tagValue) is str else tagValue
-                tagValueListLower = [x.lower() for x in tagValueList]
-                if casesensitive:
-                    if value in tagValueList:
-                        l.append(e)
-                else:
-                    if value.lower() in tagValueListLower:
-                        l.append(e)
-    return l
-```
+[DutInfo.py:147-166](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L147-L166) —— 遍历列表，逐个解析注释；`value is None` 分支只判标签存在，带值分支把标签值归一成列表后做大小写不敏感的 `in` 匹配。
 
-它的三个常用搭档（[DutInfo.py:114-138](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L114-L138)，依次为 `HastTagValue`、`HasTag`、`GetTag`）构成「检查—取值」的另一半：
+配合使用的三个工具方法（本讲各处都会用到）：
 
-- `HasTag(obj, tag)`：obj 是否带某标签。
-- `HastTagValue(obj, tag, value)`：obj 的某标签值是否等于 value（默认大小写不敏感）。
-- `GetTag(obj, tag)`：取出 obj 的某标签值（不存在则抛异常）。
+- [DutInfo.py:125-131](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L125-L131) `HasTag` —— 判存在性，用于 `_Clocks` 检查 `FREQ`、`_Resets` 检查 `CLK`。
+- [DutInfo.py:133-138](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L133-L138) `GetTag` —— 取值，缺失时抛异常；用于取 `FREQ` 数值、取 `CLK` 引用的时钟名。
+- [DutInfo.py:114-123](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L114-L123) `HastTagValue` —— 判「标签是否等于某值」，`_DutSignals` 用它区分 clk/rst/普通端口。
 
-本讲后续会反复出现这个「三连招」：先 `FilterForTag` 切片，再 `HasTag` 检查必填项，最后 `GetTag` 取具体值。
+标签名常量集中声明在 `Tags` 类，本讲主要用到这几个：
 
-#### 4.1.4 代码实践
+[DutInfo.py:16-32](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L16-L32) —— `TYPE`（CLK/RST/SIG）、`FREQ`、`CLK`、`PROC`（端口级），以及 `EXPORT` / `CONSTANT`（generic 级，`_DutInstantiation` 会用到）。
 
-**目标**：亲手验证 `FilterForTag` 的值匹配与大小写不敏感行为。
+#### 4.1.4 代码实践（源码阅读型）
 
-**步骤**（源码阅读型 + 可选运行）：
+**目标**：亲手验证 `FilterForTag` 的「带值 / 无值」两种模式与大小写不敏感特性。
 
-1. 打开示例 DUT，找到这几个端口的标签：
-   - `InClk`：`$$ TYPE=CLK; FREQ=100e6; PROC=Input $$`
-   - `OutClk`：`$$ TYPE=CLK; FREQ=125e6; Proc=Output $$`（注意 `Proc` 大写首字母）
-   - `OutRdy`：`$$ PROC=Output,Input $$`
-2. 预测 `DutInfo.FilterForTag(ports, Tags.PROC, "input")` 会返回哪几个端口。注意 `OutClk` 的 `Proc=Output`（不是 `input`），`OutRdy` 的列表含 `Input`。
-3. 若本机已装好 `PsiPyUtils`/`pyparsing`，可在项目根目录写一个临时脚本（**示例代码，非项目原有文件**）：
+1. 打开 `example/simpleTb/psi_common_async_fifo.vhd`，找到四个控制端口 [example/simpleTb/psi_common_async_fifo.vhd:39-42](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L39-L42)。
+2. 用脑子「跑」一遍：对 `self.dutInfo.ports` 调 `FilterForTag(..., Tags.TYPE, "clk")`，结果应是 `[InClk, OutClk]`；调 `FilterForTag(..., Tags.TYPE, "rst")` 应是 `[InRst, OutRst]`。
+3.（可选）在仓库根目录写一个临时脚本，`from DutInfo import DutInfo, Tags`，构造 `DutInfo("example/simpleTb/psi_common_async_fifo.vhd")`，打印上述两个筛选结果，对照你的预测。
 
-```python
-from DutInfo import DutInfo
-d = DutInfo("example/simpleTb/psi_common_async_fifo.vhd")
-hit = DutInfo.FilterForTag(d.ports, "proc", "input")
-print([p.name for p in hit])
-```
-
-**需要观察的现象**：返回结果应包含 `InClk`、`InData`、`InVld`、`InRdy`、`OutRdy`，且**不包含** `OutClk`（它是 `Proc=Output`）。
-
-**预期结果**：列表里同时出现 `OutRdy`（`PROC=Output,Input`，列表归一后命中 `input`），证明列表值与大小写不敏感都生效。若环境不可用，按上面逻辑手推即可，结果标注「待本地验证」。
+**预期结果**：时钟两个、复位两个，顺序与端口声明顺序一致（`FilterForTag` 保持原列表顺序）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`FilterForTag(ports, Tags.TYPE, "clk")` 与 `FilterForTag(ports, Tags.TYPE)`（不传 value）有何区别？
+**Q1**：`_DutInstantiation` 里筛 generic 用的是 `FilterForTag(generics, Tags.CONSTANT)`（没传 `value`），而筛导出 generic 用的是 `FilterForTag(generics, Tags.EXPORT, "true")`（传了 `value`）。为什么 `CONSTANT` 不传值？
 
-**答案**：前者只收 `TYPE` 值为 `clk` 的端口（值匹配筛选）；后者收**所有带 `TYPE` 标签**的端口，不论值是 `clk`、`rst` 还是 `sig`（存在性筛选）。
+**答**：`CONSTANT` 标签的语义是「这个 generic 用标签里写的值固定下来」，只要标了 `CONSTANT` 就要进 `generic map`，具体值由 `GetTag(g, Tags.CONSTANT)` 另取，所以筛选阶段只需判存在性（`value=None`）；而 `EXPORT` 的值可能是 `true` / `false`，只有 `true` 才导出，所以必须带值 `"true"` 精确匹配。
 
-**练习 2**：为什么 `OutRdy` 的标签写成 `PROC=Output,Input`，用 `FilterForTag(..., "proc", "output")` 和 `...("proc", "input")` 都能命中它？
+**Q2**：示例里 `OutRdy` 的注释是 `$$ PROC=Output,Input $$`。`FilterForTag(ports, Tags.PROC, "Input")` 会把它筛进 `Input` 进程吗？
 
-**答案**：因为 `_ParseTags` 把逗号分隔的值解析成 list `["Output", "Input"]`，`FilterForTag` 第 158 行把它归一成列表后逐元素比较，两个值都能命中。
+**答**：会。值匹配阶段会把列表值 `["Output", "Input"]` 归一后做 `in` 判断，`"input"` 命中，所以 `OutRdy` 同时属于 `Input` 和 `Output` 两个进程。
 
 ---
 
-### 4.2 _DutInstantiation —— EXPORT 与 CONSTANT 的汇聚点
-
-> 我们先讲 `_DutInstantiation`，因为它最直接地展示了 `FilterForTag` 如何驱动生成，且它产出的 `generic map` 是理解 generic 三分类（u4-l2）的落点。
+### 4.2 _Clocks：FREQ 标签如何变成时钟进程
 
 #### 4.2.1 概念说明
 
-`_DutInstantiation` 生成一段「直接实体实例化」（VHDL 的 `i_dut : entity <lib>.<name>` 语法），把 TB 顶层的信号连到 DUT 端口，并把该传的 generic 传进去。它的关键决策只有一个：**哪些 generic 要进 `generic map`？**
+`_Clocks` 负责为每一个标了 `TYPE=CLK` 的端口生成一个独立的、**自运行**的时钟进程 `p_clock_<端口名>`。它的全部输入就是 `FilterForTag` 筛出的时钟端口列表，外加每个端口的 `FREQ` 标签。
 
-答案是 u4-l2 讲过的 generic 三分类中的前两类：
-
-- `EXPORT=true`：从 TB 实体 generic 传入（对外可配）。
-- `CONSTANT=值`：在 TB 内部固定为常量。
-
-两者**都要**出现在 `generic map` 里（因为它们都是「TB 显式驱动」的 generic）。第三类（两者皆无）则**不进** `generic map`，让 DUT 用自己的默认值。端口则无差别地全部进 `port map`，名字一一对应（TB 信号与 DUT 端口同名）。
+这里有一个强约束（在代码里以异常形式表达）：**时钟端口必须带 `FREQ` 标签，否则报错**。没有频率就没法算半周期，时钟进程就写不出来。
 
 #### 4.2.2 核心流程
 
+对每个时钟端口 `clk`：
+
 ```
-1. 写标题 "DUT Instantiation"
-2. 写 "i_dut : entity <dutLibrary>.<name>" 并缩进
-3. 收集要进 generic map 的 generic:
-     eg = FilterForTag(generics, EXPORT, "true") + FilterForTag(generics, CONSTANT)
-4. 若 eg 非空:
-     写 "generic map ("，对每个 g 写 "g.name => g.name,"，删最后一行尾逗号，写 ")"
-5. 写 "port map ("，对每个端口写 "p.name => p.name,"，删尾逗号，写 ");"
+1. 筛选：FilterForTag(ports, TYPE, "clk")  →  [InClk, OutClk, ...]
+2. 检查：每个 clk 必须有 FREQ 标签，否则 raise
+3. 写一个进程：
+   p_clock_<name> : process
+       constant Frequency_c : real := real(<FREQ>);
+   begin
+       while TbRunning loop           -- 关键：受 TbRunning 控制
+           wait for 0.5*(1 sec)/Frequency_c;
+           <name> <= not <name>;       -- 每过半周期翻转一次
+       end loop;
+       wait;                           -- TbRunning 变 false 后永久挂起
+   end process;
 ```
 
-注意 `g.name => g.name`：左右同名，意味着 TB 里有一个与 generic 同名的常量/实体 generic 喂给 DUT。`RemoveFromLastLine(1)` 用来回改最后一个多余的分号/逗号——这是 `FileWriter` 的尾标点回改手法（见 u4-l2）。
+半周期由频率换算而来。若频率为 \( f \)（Hz），则周期 \( T = 1/f \) 秒，半周期：
+
+\[
+T_{\text{half}} = \frac{T}{2} = \frac{0.5 \cdot 1\,\text{sec}}{f}
+\]
+
+例如 `FREQ=100e6`：\( T_{\text{half}} = 0.5 / 10^{8}\,\text{sec} = 5\,\text{ns} \)，对应周期 10 ns、100 MHz。`FREQ=125e6` 则得 4 ns 半周期。
+
+`while TbRunning loop` 是整段仿真收尾机制的「一半」：时钟是否继续翻转，取决于 `TbRunning` 这个 boolean 信号；它由 `_TbControl`（4.7 节）在所有测试进程结束时置 `false`。
 
 #### 4.2.3 源码精读
 
-完整方法（[TbGen.py:33-49](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L33-L49)，这段代码展示了 generic map 由 EXPORT 与 CONSTANT 两类 generic 拼接、port map 全量端口直连）：
+[TbGen.py:51-66](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L51-L66) —— `_Clocks` 全貌：
 
-```python
-def _DutInstantiation(self, f : FileWriter) -> FileWriter:
-    VhdlTitle("DUT Instantiation", f)
-    f.WriteLn("i_dut : entity {}.{}".format(self.dutInfo.dutLibrary, self.dutInfo.name)).IncIndent()
-    generics = self.dutInfo.generics
-    eg = (DutInfo.FilterForTag(generics, Tags.EXPORT, "true") + DutInfo.FilterForTag(generics, Tags.CONSTANT))
-    if len(eg) > 0:
-        f.WriteLn("generic map (").IncIndent()
-        for g in eg:
-            f.WriteLn("{} => {},".format(g.name, g.name))
-        f.RemoveFromLastLine(1)
-        f.DecIndent().WriteLn(")")
-    f.WriteLn("port map (").IncIndent()
-    for p in self.dutInfo.ports:
-        f.WriteLn("{} => {},".format(p.name, p.name))
-    f.RemoveFromLastLine(1)
-    f.DecIndent().WriteLn(");").DecIndent()
-    return f
-```
+- **L53** 用 `FilterForTag(..., Tags.TYPE, "clk")` 筛出所有时钟端口。
+- **L54-55** `if not HasTag(clk, FREQ): raise` —— 缺 `FREQ` 直接报错。
+- **L56-57** 写进程头与局部常量 `Frequency_c : real := real(<FREQ>)`（`GetTag` 取到的是字符串如 `"100e6"`，拼进 `real(...)` 由 VHDL 在仿真时求值）。
+- **L59-61** `while TbRunning loop` → `wait for 0.5*(1 sec)/Frequency_c;` → `<name> <= not <name>;` —— 半周期翻转。
+- **L62-63** `end loop;` 之后一句 `wait;` —— `TbRunning` 变 `false` 后跳出循环，进程在此永久挂起。
 
-第 37 行的 `+` 是 Python 列表拼接：把「导出类」和「固定常量类」两个子集首尾相接，合成一个 `generic map` 顺序。对照 simpleTb 的 generic（[example/simpleTb/psi_common_async_fifo.vhd:30-35](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L30-L35)，这段 VHDL 标注了每个 generic 的 `EXPORT`/`CONSTANT` 标签）：
-
-| generic | 标签 | 是否进 generic map | 理由 |
-| --- | --- | --- | --- |
-| `Width_g` | `EXPORT=true` | 是 | 导出类 |
-| `Depth_g` | `EXPORT=true; funky=bla` | 是 | 导出类（`funky` 是无关标签，不影响） |
-| `AlmFullOn_g` | `EXPORT=false,funky=blubb` | 否 | 值不是字符串 `"true"` |
-| `AlmFullLevel_g` | `CONSTANT=12` | 是 | 固定常量类 |
-| `AlmEmptyOn_g` | 无 | 否 | 第三类，用 DUT 默认值 |
-| `AlmEmptyLevel_g` | 无 | 否 | 第三类，用 DUT 默认值 |
-
-所以最终 `generic map` 里会出现 `Width_g`、`Depth_g`、`AlmFullLevel_g` 三项。
-
-> 关键细节：第 37 行对 `EXPORT` 的匹配用了**精确字符串 `"true"`**，而 `AlmFullOn_g` 的值是 `EXPORT=false,funky=blubb`——经过 `_ParseTags` 它会被切成列表 `["false", "blubb"]`，其中没有 `"true"`，故被排除。这就是为什么 `EXPORT=false` 等同于「不导出」。
+注意 `_DutSignals`（u4-l2）已把时钟信号初值设为「有效」（`GetPortValue(sig, True)`，默认 `'1'`），注释里写明原因：**clocks start active so they are rising edge aligned**（时钟从有效电平起步，保证第一个翻转产生的是上升沿），见 [TbGen.py:183-184](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L183-L184)。
 
 #### 4.2.4 代码实践
 
-**目标**：在不运行的情况下，预测 simpleTb 生成的 `generic map` 内容，再对照真实生成结果。
+**目标**：追踪 `InClk`（`TYPE=CLK; FREQ=100e6; PROC=Input`）从标签到 `p_clock_InClk` 进程的完整路径。
 
-**步骤**：
+1. 在 [example/simpleTb/psi_common_async_fifo.vhd:39](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L39) 确认 `InClk` 的标签。
+2. 追踪调用链：`Generate` → `_Clocks(f)`（见 [TbGen.py:250](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L250)）→ `FilterForTag` 命中 `InClk` → `HasTag(FREQ)` 为真 → 写出进程。
+3. 在生成的 `tb/psi_common_async_fifo_tb.vhd` 里找到 `p_clock_InClk`，确认 `Frequency_c` 值为 `real(100e6)`、`wait for` 行为 `0.5*(1 sec)/Frequency_c`。
+4. 手算半周期，确认是 5 ns。
 
-1. 按 4.2.3 的表格，手写出你预期的 `generic map` 三行。
-2. 如果环境可用，运行 `py TbGen.py -src example/simpleTb/psi_common_async_fifo.vhd -dst tb -clear -force`，打开 `tb/psi_common_async_fifo_tb.vhd`，定位 `DUT Instantiation` 段。
-3. 用 diff 工具或肉眼对比你的预测与实际输出。
-
-**需要观察的现象**：`generic map` 仅含 `Width_g`、`Depth_g`、`AlmFullLevel_g`；`port map` 含全部端口（含 `InData`、`OutRdy` 等）。
-
-**预期结果**：与表格一致。若 `AlmFullLevel_g` 的值是 `12`（来自 `CONSTANT=12`），证明固定常量类确实进了 map。环境不可用时标注「待本地验证」。
+**预期结果**：生成的进程与上面伪代码一一对应；`p_clock_OutClk` 同理，`Frequency_c` 为 `real(125e6)`，半周期 4 ns。**若你无法本地运行生成，相关输出数值标注「待本地验证」。**
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果把 `AlmFullOn_g` 的标签改成 `EXPORT=true`，`generic map` 会如何变化？
+**Q1**：如果把 `InClk` 的 `FREQ` 标签删掉再生成，会发生什么？
 
-**答案**：`AlmFullOn_g` 会被 `FilterForTag(generics, EXPORT, "true")` 命中，加入 `eg`，于是 `generic map` 多出一行 `AlmFullOn_g => AlmFullOn_g,`，同时它也会出现在 TB 实体的 `generic` 子句里（由 `_EntityDeclaration` 处理）。
+**答**：`_Clocks` 在 L54-55 抛出 `Exception("Clock InClk has not FREQ tag!")`，`Generate` 失败，CLI 打印 `ERROR: ...` 并 `exit(-1)`（见 [TbGen.py:312-314](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L312-L314)）。
 
-**练习 2**：为什么 `port map` 里所有端口都写 `p.name => p.name`，而不需要像 generic 那样分类？
+**Q2**：时钟进程为什么用 `while TbRunning loop` 而不是无限循环？
 
-**答案**：因为 TB 为每个 DUT 端口都生成了一个同名 signal（见 4.6 与 u4-l2 的 `_DutSignals`），端口可以无差别地一一对接；generic 才有「是否由 TB 驱动」的三分类问题。
+**答**：为了能受控停止。当所有测试进程完成、`p_tb_control` 把 `TbRunning` 置 `false` 时，时钟进程跳出循环、执行 `wait;` 永久挂起，仿真不再有事件，从而自然结束。若用无限循环，仿真将永远跑下去。
 
 ---
 
-### 4.3 _Clocks —— FREQ 标签如何变成时钟半周期
+### 4.3 _Resets：CLK 标签如何把复位挂到归属时钟
 
 #### 4.3.1 概念说明
 
-`_Clocks` 为每个 `TYPE=CLK` 的端口生成一个 `p_clock_<name>` 进程，该进程在仿真期间持续翻转信号、产生方波时钟。它**强制要求**每个时钟端口必须带 `FREQ` 标签（缺了直接抛异常），因为半周期必须由频率算出来。
+`_Resets` 为每个标了 `TYPE=RST` 的端口生成一个复位进程 `p_rst_<端口名>`，负责「上电时保持复位有效，过一会儿再释放」。
 
-这里有一个关键的设计约束：时钟进程**不是无限运行**的，它受 `TbRunning` 信号控制——`while TbRunning loop`。当仿真主控进程把 `TbRunning` 拉低（见 4.5），所有时钟进程的循环退出，执行 `wait;` 永久挂起，仿真才得以结束。这是 TbGenerator 让仿真「自动收尾」的第一条线索。
+与时钟类似，复位也有一个强约束：**复位端口必须带 `CLK` 标签**，且这个 `CLK` 的值是**另一个端口的名字**（即这个复位归属哪个时钟域）。这是异步 FIFO 这类多时钟设计的必然要求：复位的释放必须与某个具体时钟的边沿对齐，才能被该时钟域可靠采样。
 
 #### 4.3.2 核心流程
 
-每个时钟端口的生成步骤：
+对每个复位端口 `rst`：
 
 ```
-1. 标题 "Clocks !DO NOT EDIT!"
-2. 对每个 clk in FilterForTag(ports, TYPE, "clk"):
-     a. 若 clk 无 FREQ 标签 → 抛 "Clock <name> has not FREQ tag!"
-     b. 写 "p_clock_<name> : process"
-     c. 写 "constant Frequency_c : real := real(<FREQ 值>);"
-     d. 写 "begin"
-     e. 写 "while TbRunning loop"
-     f. 写 "wait for 0.5*(1 sec)/Frequency_c;"   ← 半周期
-     g. 写 "<name> <= not <name>;"               ← 翻转
-     h. 写 "end loop;"
-     i. 写 "wait;"                                ← TbRunning 变 false 后挂起
-     j. 写 "end process;"
+1. 筛选：FilterForTag(ports, TYPE, "rst")  →  [InRst, OutRst, ...]
+2. 检查：每个 rst 必须有 CLK 标签，否则 raise
+3. 取值：clkName = GetTag(rst, CLK)        -- 例如 "InClk"
+4. 写一个进程：
+   p_rst_<name> : process
+   begin
+       wait for 1 us;                      -- 先保持复位有效一段时间
+       -- Wait for two clk edges to ensure reset is active for at least one edge
+       wait until rising_edge(<clkName>);   -- 等第 1 个上升沿
+       wait until rising_edge(<clkName>);   -- 等第 2 个上升沿
+       <name> <= <无效值>;                   -- 释放复位（置为 inactive）
+       wait;
+   end process;
 ```
 
-**半周期数学**：设频率为 \(f\)（Hz），则周期 \(T = 1/f\)，半周期为：
-
-\[
-t_{\text{half}} = \frac{T}{2} = \frac{1}{2f}
-\]
-
-代码里把 `1 sec`（VHDL 的字面时间量）作为分子，避免手写单位换算：
-
-\[
-t_{\text{half}} = \frac{0.5 \times 1\,\text{s}}{f}
-\]
-
-以 simpleTb 的两个时钟为例：
-
-| 端口 | FREQ | 代入公式 | 半周期 |
-| --- | --- | --- | --- |
-| `InClk` | \(100\times10^{6}\) | \(0.5 / 10^{8}\,\text{s}\) | \(5\,\text{ns}\) |
-| `OutClk` | \(125\times10^{6}\) | \(0.5 / (1.25\times10^{8})\,\text{s}\) | \(4\,\text{ns}\) |
-
-`real(...)` 把 `FREQ` 标签里的原始字符串（如 `100e6`）转成浮点数 `100000000.0`，VHDL 用 `1 sec / real` 得到正确的时间量纲。
+为什么是「两个上升沿」？注释说得直白：**保证复位至少被采样到一个边沿**。复位信号在仿真开始时由 `_DutSignals` 初始化为「有效值」（`GetPortValue(rst, True)`），释放前先等两个归属时钟的上升沿，确保 DUT 内部寄存器在复位有效期间至少经历一次完整的时钟采样，然后再释放到无效值 `GetPortValue(rst, False)`。
 
 #### 4.3.3 源码精读
 
-完整方法（[TbGen.py:51-66](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L51-L66)，这段代码展示了 FREQ 必填检查、Frequency_c 常量声明、`while TbRunning` 受控翻转与半周期等待）：
+[TbGen.py:68-84](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L68-L84) —— `_Resets` 全貌：
 
-```python
-def _Clocks(self, f : FileWriter) -> FileWriter:
-    VhdlTitle("Clocks !DO NOT EDIT!", f)
-    for clk in DutInfo.FilterForTag(self.dutInfo.ports, Tags.TYPE, "clk"):
-        if not DutInfo.HasTag(clk, Tags.FREQ):
-            raise Exception("Clock {} has not FREQ tag!".format(clk.name))
-        f.WriteLn("p_clock_{} : process".format(clk.name)).IncIndent()
-        f.WriteLn("constant Frequency_c : real := real({});".format(DutInfo.GetTag(clk, Tags.FREQ))).DecIndent()
-        f.WriteLn("begin").IncIndent()
-        f.WriteLn("while TbRunning loop").IncIndent()
-        f.WriteLn("wait for 0.5*(1 sec)/Frequency_c;")
-        f.WriteLn("{name} <= not {name};".format(name=clk.name))
-        f.DecIndent().WriteLn("end loop;")
-        f.WriteLn("wait;").DecIndent()
-        f.WriteLn("end process;")
-        f.WriteLn()
-    return f
-```
+- **L70** `FilterForTag(..., Tags.TYPE, "rst")` 筛出复位端口。
+- **L71-72** `if not HasTag(rst, CLK): raise` —— 缺 `CLK` 报错。
+- **L73** `clkName = GetTag(rst, Tags.CLK)` —— 取归属时钟名（字符串，直接当 VHDL 信号名用）。
+- **L76** `wait for 1 us;` —— 先维持有效 1 µs。
+- **L77-79** 注释 + 两次 `wait until rising_edge(<clkName>);`。
+- **L80** `<name> <= <GetPortValue(rst, False)>;` —— 释放到无效值（普通高有效复位 → `'0'`；`LOWACTIVE=true` 的复位 → `'1'`）。
+- **L81** `wait;` —— 一次性进程，释放后永久挂起（复位只释放一次，不像时钟那样循环）。
 
-这正是 4.1 提到的「三连招」范本：
-
-- `FilterForTag(..., TYPE, "clk")`：切片，拿到所有时钟端口。
-- `HasTag(clk, FREQ)`：检查必填项。
-- `GetTag(clk, FREQ)`：取出频率值。
-
-第 56-57 行有个缩进细节值得注意：先 `IncIndent()` 写进程头，再 `DecIndent()` 写 `Frequency_c`（让常量声明比进程头少一级缩进，对齐 VHDL 声明区），这体现了「誊抄器」对格式精度的控制。
+注意：`GetPortValue(rst, False)` 在这里被复用——它正是 u4-l1 / u2-l2 强调的「初值单一真相源」。改 `LOWACTIVE` 标签，这里的释放值、`_DutSignals` 的初始值、`_Processes`/`_TbControl` 里等复位失效的表达式会**一起**翻转。
 
 #### 4.3.4 代码实践
 
-**目标**：追踪 `InClk`（`TYPE=CLK; FREQ=100e6; PROC=Input`）从标签到 `p_clock_InClk` 进程的完整路径，并手算半周期。
+**目标**：追踪 `InRst`（`TYPE=RST; CLK=InClk`）的复位释放过程。
 
-**步骤**：
+1. 在 [example/simpleTb/psi_common_async_fifo.vhd:40](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L40) 确认 `InRst` 的标签，注意 `CLK=InClk` 引用的是另一个端口。
+2. 在生成结果中找到 `p_rst_InRst`，确认它 `wait until rising_edge(InClk)` 两次后执行 `InRst <= '0';`。
+3. 回溯 `InRst` 没有标 `LOWACTIVE`，所以 `GetPortValue(InRst, False)='0'`（无效），`GetPortValue(InRst, True)='1'`（有效）；对照 `_DutSignals` 里 `InRst` 的初值应为 `'1'`（复位上电即有效）。
 
-1. **解析层**：`InClk` 的 `.comment` 是 `-- $$ TYPE=CLK; FREQ=100e6; PROC=Input $$`，经 `_ParseTags` 得到 `{"type":"clk", "freq":"100e6", "proc":"Input"}`。
-2. **筛选层**：`FilterForTag(ports, TYPE, "clk")` 因 `type=="clk"` 命中，`InClk` 进入循环。
-3. **检查层**：`HasTag(InClk, FREQ)` 为真，不抛异常。
-4. **取值层**：`GetTag(InClk, FREQ)` 返回字符串 `"100e6"`。
-5. **誊抄层**：`real(100e6)` → `100000000.0`，写出 `wait for 0.5*(1 sec)/Frequency_c;`。
-6. **数学层**：\(0.5 / 10^{8}\,\text{s} = 5\,\text{ns}\)。
-7. 若环境可用，生成 TB 后在 `p_clock_InClk` 进程里确认 `Frequency_c` 与半周期语句。
-
-**需要观察的现象**：生成的 `p_clock_InClk` 与 `p_clock_OutClk` 各自的 `Frequency_c` 分别是 `1.0e8` 与 `1.25e8`；`InClk` 每 5 ns 翻转一次，`OutClk` 每 4 ns 翻转一次。
-
-**预期结果**：两个时钟进程都在 `while TbRunning loop` 内翻转。环境不可用时，步骤 1-6 的手推结果即答案（标注「待本地验证」生成部分）。
+**预期结果**：`InRst` 初值 `'1'` → 1 µs 后等 `InClk` 两个上升沿 → 释放为 `'0'`。**若无法本地运行，标注「待本地验证」。**
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：如果把 `InClk` 的 `FREQ` 标签删掉只留 `TYPE=CLK`，运行 `Generate` 会发生什么？
+**Q1**：为什么 `CLK` 标签的值是一个**端口名**而不是一个频率数值？
 
-**答案**：第 54-55 行的 `HasTag` 返回 False，抛出 `Exception("Clock InClk has not FREQ tag!")`，CLI 捕获后打印 `ERROR: ...` 并 `exit(-1)`（见 [TbGen.py:312-314](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L312-L314)）。
+**答**：因为复位释放需要与「某个已有时钟信号」的边沿同步（`wait until rising_edge(<信号>)` 要求参数是信号名）。时钟信号由 `_Clocks` 以端口名命名并驱动，所以复位只要引用对应时钟端口名即可对齐到该时钟域。
 
-**练习 2**：为什么用 `wait for 0.5*(1 sec)/Frequency_c` 而不是直接写 `wait for 5 ns`？
+**Q2**：若把 `InRst` 的 `CLK` 标签删掉，生成会怎样？
 
-**答案**：因为频率由标签驱动、在生成时才确定，写死 `5 ns` 就失去了「频率可配」的灵活性；用公式让任意 `FREQ` 都能自动换算出正确半周期，且 `1 sec` 保证了 VHDL 时间量纲正确。
+**答**：`_Resets` 在 L71-72 抛 `Exception("Reset InRst has not CLK tag!")`，生成失败。
 
 ---
 
-### 4.4 _Resets —— CLK 标签如何把复位归属到正确时钟域
+### 4.4 _TbControlSignals：仿真脚手架信号
 
 #### 4.4.1 概念说明
 
-`_Resets` 为每个 `TYPE=RST` 的端口生成一个 `p_rst_<name>` 进程。复位的核心问题是**归属**：异步 FIFO 有两个独立的时钟域（`InClk`/`OutClk`），每个复位必须等到「它所属的那个时钟」采样到它，复位才有意义。这个归属关系由 `CLK` 标签显式声明（如 `InRst` 标 `CLK=InClk`，`OutRst` 标 `CLK=OutClk`）。
-
-复位信号的**初始值**不在 `_Resets` 里设，而是在 `_DutSignals` 里设为**有效**电平（见 u4-l2 与 4.6）。`_Resets` 只负责「在合适时机把复位释放为无效」。
+前面两节生成了「会自己跑」的时钟和「一次性」的复位，但仿真要**有序地开始**（等复位释放）、**有序地结束**（所有测试进程完成），还需要一组「脚手架」信号。`_TbControlSignals` 就是声明这组信号的地方。它写在架构的声明区（u4-l2 已点明它在 `_GenericConstants` 之后、`_DutSignals` 之前），本身不产生并发语句，只是把后面 `_TbControl` / `_Processes` / `_Clocks` 要用到的控制信号先声明好。
 
 #### 4.4.2 核心流程
 
+固定写出五行（最后一行按进程数量循环）：
+
 ```
-1. 标题 "Resets"
-2. 对每个 rst in FilterForTag(ports, TYPE, "rst"):
-     a. 若 rst 无 CLK 标签 → 抛 "Reset <name> has not CLK tag!"
-     b. clkName = GetTag(rst, CLK)
-     c. 写 "p_rst_<name> : process" / "begin"
-     d. 写 "wait for 1 us;"                          ← 复位保持一段时间
-     e. 写注释 "-- Wait for two clk edges ..."
-     f. 写 "wait until rising_edge(<clkName>);"（两遍）← 等两个上升沿
-     g. 写 "<rst> <= <GetPortValue(rst, False)>;"     ← 释放为无效
-     h. 写 "wait;" / "end process;"
+signal TbRunning : boolean := True;                                    -- 仿真是否继续
+signal NextCase : integer := -1;                                       -- 多用例：当前用例编号
+signal ProcessDone : std_logic_vector(0 to N-1) := (others => '0');    -- 每进程一比特，完成置 1
+constant AllProcessesDone_c : std_logic_vector(0 to N-1) := (others => '1');  -- 全完成的掩码
+constant TbProcNr_<p0>_c : integer := 0;                               -- 每个进程的比特序号
+constant TbProcNr_<p1>_c : integer := 1;
+...
 ```
 
-**为什么要等两个上升沿？** 复位信号初始为有效（在 `_DutSignals` 中设）。`wait for 1 us` 保证复位在仿真启动初期就有效；随后**连续等两个** `rising_edge(<clkName>)`，再释放为无效。两个沿（而非一个）给采样留出余量：即便第一个沿恰好与复位释放竞争，第二个沿也能确保 DUT 的时序逻辑至少完整采样到一次「复位有效」。这是 testbench 复位的经典稳妥写法。
-
-**释放值**：`GetPortValue(rst, False)` 返回**无效**电平。对于高有效的 `InRst`（无 `LOWACTIVE` 标签），无效值是 `'0'`；若标了 `LOWACTIVE=true`，无效值翻转为 `'1'`（见 [DutInfo.py:68-79](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L68-L79)，`GetPortValue` 据 `LOWACTIVE` 与 `active` 参数决定电平）。
+其中 \( N = \text{len(tbProcesses)} \)，即测试进程的数量。`ProcessDone` 与 `AllProcessesDone_c` 是**等宽**向量，前者初值全 `'0'`、后者常量全 `'1'`。
 
 #### 4.4.3 源码精读
 
-完整方法（[TbGen.py:68-84](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L68-L84)，这段代码展示了 CLK 必填检查、归属时钟名取出、`wait for 1 us` 与两个 `rising_edge` 的释放时序）：
+[TbGen.py:166-174](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L166-L174) —— `_TbControlSignals` 全貌：
 
-```python
-def _Resets(self, f : FileWriter) -> FileWriter:
-    VhdlTitle("Resets", f)
-    for rst in DutInfo.FilterForTag(self.dutInfo.ports, Tags.TYPE, "rst"):
-        if not DutInfo.HasTag(rst, Tags.CLK):
-            raise Exception("Reset {} has not CLK tag!".format(rst.name))
-        clkName = DutInfo.GetTag(rst, Tags.CLK)
-        f.WriteLn("p_rst_{} : process".format(rst.name))
-        f.WriteLn("begin").IncIndent()
-        f.WriteLn("wait for 1 us;")
-        f.WriteLn("-- Wait for two clk edges to ensure reset is active for at least one edge")
-        f.WriteLn("wait until rising_edge({});".format(clkName))
-        f.WriteLn("wait until rising_edge({});".format(clkName))
-        f.WriteLn("{} <= {};".format(rst.name, self.dutInfo.GetPortValue(rst, False)))
-        f.WriteLn("wait;").DecIndent()
-        f.WriteLn("end process;")
-        f.WriteLn()
-    return f
-```
+- **L168** `TbRunning : boolean := True` —— 一开始为真，时钟进程的 `while TbRunning loop` 因此能转起来。
+- **L169** `NextCase : integer := -1` —— 初值 `-1`，多用例时 `p_tb_control` 会把它依次置 `0, 1, ...` 触发各用例；单用例下它虽然声明了但无人写、也无人读。
+- **L170** `ProcessDone` 向量宽度 `0 to len(tbProcesses)-1` —— simpleTb 里 `tbProcesses=["Input","Output"]`，宽度即 `0 to 1`。
+- **L171** `AllProcessesDone_c` 同宽、全 `'1'` —— 这就是 4.7 节「仿真结束」判据的右值。
+- **L172-173** 循环为每个进程发一个 `TbProcNr_<p>_c : integer := <i>` 常量，把进程名映射到 `ProcessDone` 向量里的比特位。simpleTb 会得到 `TbProcNr_Input_c := 0`、`TbProcNr_Output_c := 1`。
 
-注意 `clkName` 是一个**字符串**（`"InClk"`），它直接被插进 `rising_edge(...)`——这要求 `CLK` 标签引用的端口名必须与实际时钟信号名一致。这是 TbGenerator 的一个隐含契约：**复位的 `CLK` 标签值必须是另一个端口的 `name`**。
-
-对照 simpleTb：`InRst` 标 `CLK=InClk`（[example/simpleTb/psi_common_async_fifo.vhd:40](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L40)，`InRst` 声明及其 `TYPE=RST; CLK=InClk` 标签），故生成 `wait until rising_edge(InClk);` 两次，然后 `InRst <= '0';`。
+关键点：**脚手架的「规模」完全由 `tbProcesses` 决定**。这意味着「进程数」是整个 TB 控制机制的「模数」——`PROCESSES` 文件级标签改变进程数，`ProcessDone` 宽度与所有 `TbProcNr_*_c` 常量都会跟着变。
 
 #### 4.4.4 代码实践
 
-**目标**：验证复位「归属」与「释放值」都正确。
+**目标**：验证脚手架位宽随 `PROCESSES` 标签变化。
 
-**步骤**：
+1. 看 simpleTb：`PROCESSES=Input,Output` → `ProcessDone` 宽度 `0 to 1`，两个 `TbProcNr_*_c`。
+2. 假想把文件级标签改成 `PROCESSES=Stimuli`（或删掉该标签走缺省 `["Stimuli"]`）：预测 `ProcessDone` 宽度变为 `0 to 0`，只剩 `TbProcNr_Stimuli_c := 0`。
+3. 在 [TbInfo.py:26-30](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbInfo.py#L26-L30) 确认 `tbProcesses` 的来源（`PROCESSES` 标签，缺省 `["Stimuli"]`）。
 
-1. 对 `InRst`（`TYPE=RST; CLK=InClk`，无 `LOWACTIVE`）手写出生成的 `p_rst_InRst` 进程体，重点写对 `rising_edge(InClk)` 与 `InRst <= '0';`。
-2. 对 `OutRst`（`TYPE=RST; CLK=OutClk`）同样手写，确认归属到 `OutClk`。
-3. 思考实验：如果把 `InRst` 加上 `LOWACTIVE=true`，释放行会变成什么？
-
-**需要观察的现象**：`p_rst_InRst` 与 `p_rst_OutClk` 分别等待不同时钟的上升沿；释放值都是 `'0'`（高有效复位）。
-
-**预期结果**：第 3 步中，`GetPortValue(InRst, False)` 因 `LOWACTIVE=true` 返回 `'1'`（低有效复位的「无效」是高电平），故释放行变为 `InRst <= '1';`，同时 `_DutSignals` 里 `InRst` 的初始值也会翻转为 `'0'`（有效）。环境不可用时标注「待本地验证」。
+**预期结果**：脚手架规模 = 进程数；预测与生成结果一致。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `_Resets` 用 `GetPortValue(rst, False)`（无效）而不是 `True`（有效）？
+**Q1**：`NextCase` 在单用例 TB 里有用吗？为什么还是声明了它？
 
-**答案**：因为复位的**有效**初值已由 `_DutSignals` 设定（`active=True`），`_Resets` 的职责是在两个上升沿后**释放**复位，所以写的是无效电平（`active=False`）。
+**答**：没有用——单用例下既没人写它也没人读它（`_TbControl` 单用例分支直接 `wait until ProcessDone = AllProcessesDone_c`）。它被无条件声明，是因为 `_TbControlSignals` 不区分单/多用例；多用例才用得上。这是一种「声明统一、使用分流」的取舍。
 
-**练习 2**：若一个 `TYPE=RST` 端口漏写了 `CLK` 标签，会怎样？
+**Q2**：`ProcessDone` 与 `AllProcessesDone_c` 为什么必须等宽？
 
-**答案**：第 71-72 行 `HasTag` 返回 False，抛 `Exception("Reset <name> has not CLK tag!")`，生成中止。这说明 `CLK` 是复位端口的必填标签，正如 `FREQ` 是时钟端口的必填标签。
+**答**：因为 `p_tb_control` 用 `wait until ProcessDone = AllProcessesDone_c` 判断「所有进程完成」，这要求两边是同维向量才能逐比特比较；等宽由两者都用 `len(tbProcesses)-1` 作上界保证。
 
 ---
 
-### 4.5 _TbControlSignals 与 _TbControl —— 仿真终止的契约
-
-> 这两个方法是一对：`_TbControlSignals` 在声明区**声明**一组控制信号，`_TbControl` 在并发区**消费**它们。它们共同回答「仿真什么时候、怎么结束」。
+### 4.5 _DutInstantiation：把 DUT 接进 testbench
 
 #### 4.5.1 概念说明
 
-一个 testbench 必须有明确的终止条件，否则仿真不会停。TbGenerator 用一个简单的**握手协议**实现自动收尾：
+`_DutInstantiation` 生成 DUT 的实例化语句 `i_dut : entity <lib>.<name>`，并补上 `generic map` 与 `port map`。本讲把它放在这里讲，是因为它的 `generic map` 同样是 `FilterForTag` 的典型用例，且它和 `_DutSignals` 一起构成了「端口接线」的全貌。
 
-- 每个**测试进程**（`p_Input`、`p_Output` 等）跑完自己的任务后，把自己在 `ProcessDone` 向量里的那一比特置 `'1'`。
-- 一个**主控进程** `p_tb_control` 等待 `ProcessDone = AllProcessesDone_c`（即所有比特全 `'1'`），然后把 `TbRunning` 拉低。
-- `TbRunning` 拉低后，所有 `while TbRunning loop` 的时钟进程退出循环、执行 `wait;` 挂起，仿真再无事件，即告结束。
+`generic map` 里出现哪些 generic，由两条规则合并：
 
-这套协议需要五个控制信号/常量来支撑，全部由 `_TbControlSignals` 声明。
+- `EXPORT=true` 的 generic（导出给 TB 实体）；
+- 带 `CONSTANT` 标签的 generic（在 TB 内部固定）。
+
+其余 generic（既没导出也没固定、用 DUT 默认值的）**不进 `generic map`**，它们以内部常量形式由 `_GenericConstants` 声明。
+
+`port map` 则简单粗暴：**所有端口一一接上同名信号**（信号由 `_DutSignals` 声明，名字与端口一致）。
 
 #### 4.5.2 核心流程
 
-**`_TbControlSignals`**（声明区）：
-
 ```
-1. 标题 "TB Control"
-2. 写 "signal TbRunning : boolean := True;"        ← 仿真运行标志，初值 True
-3. 写 "signal NextCase : integer := -1;"           ← 多用例调度指针，初值 -1
-4. 写 "signal ProcessDone : std_logic_vector(0 to N-1) := (others => '0');"   ← N = 进程数
-5. 写 "constant AllProcessesDone_c : std_logic_vector(0 to N-1) := (others => '1');"
-6. 对每个进程 p（带下标 i）写 "constant TbProcNr_<p>_c : integer := i;"
+1. 写 "DUT Instantiation" 标题
+2. i_dut : entity <dutLibrary>.<name>
+3. eg = FilterForTag(generics, EXPORT, "true") + FilterForTag(generics, CONSTANT)
+4. if eg 非空:
+       generic map (
+           <g0> => <g0>,   -- 每个导出/固定 generic 一行，末尾逗号
+           ...
+       )                   -- 回改去掉最后一行尾逗号
+5. port map (
+       <p0> => <p0>,       -- 每个端口一行，接同名信号
+       ...
+   );                      -- 回改去尾逗号，闭合
 ```
-
-**`_TbControl`**（并发区）：
-
-```
-1. 标题 "Testbench Control !DO NOT EDIT!"
-2. 写 "p_tb_control : process" / "begin"
-3. 若有复位端口: wait until <所有复位同时为无效>      ← 等复位释放再开始计时
-4. 若 isMultiCaseTb:
-     对每个用例 i: NextCase <= i; wait until ProcessDone = AllProcessesDone_c;
-   否则:
-     wait until ProcessDone = AllProcessesDone_c;
-5. 写 "TbRunning <= false;"                          ← 结束仿真
-6. 写 "wait;" / "end process;"
-```
-
-**向量的宽度**由 `len(self.tbInfo.tbProcesses)` 决定。simpleTb 的 `PROCESSES=Input,Output` → `tbProcesses = ["Input", "Output"]` → `N = 2`（见 [TbInfo.py:26-30](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbInfo.py#L26-L30)，`tbProcesses` 的缺省值与赋值）。于是：
-
-- `ProcessDone : std_logic_vector(0 to 1)`
-- `AllProcessesDone_c : std_logic_vector(0 to 1) := (others => '1')`（即 `"11"`）
-- `TbProcNr_Input_c : integer := 0`、`TbProcNr_Output_c : integer := 1`
-
-**终止条件**：当 `p_Input` 置 `ProcessDone(0) <= '1'` **且** `p_Output` 置 `ProcessDone(1) <= '1'` 后，`ProcessDone = "11" = AllProcessesDone_c` 成立，`p_tb_control` 解除等待，`TbRunning <= false`。
-
-> 第 3 步的 `wait until <所有复位无效>` 是个小细节：主控进程也要先等复位释放（与每个测试进程开头的等待逻辑一致），避免在复位仍有效时就开始统计 `ProcessDone`。其 `rstLogic` 拼法见 4.6 的 `_Processes`，二者用同一段代码。
 
 #### 4.5.3 源码精读
 
-**`_TbControlSignals`**（[TbGen.py:166-174](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L166-L174)，这段代码声明了 TbRunning/NextCase/ProcessDone/AllProcessesDone_c 四个信号，并按 `tbProcesses` 顺序为每个进程生成 `TbProcNr_<p>_c` 常量）：
+[TbGen.py:33-49](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L33-L49) —— `_DutInstantiation` 全貌：
 
-```python
-def _TbControlSignals(self, f : FileWriter) -> FileWriter:
-    VhdlTitle("TB Control", f, 2)
-    f.WriteLn("signal TbRunning : boolean := True;")
-    f.WriteLn("signal NextCase : integer := -1;")
-    f.WriteLn("signal ProcessDone : std_logic_vector(0 to {}) := (others => '0');".format(len(self.tbInfo.tbProcesses)-1))
-    f.WriteLn("constant AllProcessesDone_c : std_logic_vector(0 to {}) := (others => '1');".format(len(self.tbInfo.tbProcesses)-1))
-    for i, p in enumerate(self.tbInfo.tbProcesses):
-        f.WriteLn("constant TbProcNr_{}_c : integer := {};".format(p, i))
-    return f
-```
+- **L35** 实例化行用 `dutInfo.dutLibrary`（`DUTLIB` 标签的带默认值 `"work"` 视图，见 [DutInfo.py:61-66](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L61-L66)）。
+- **L37** `eg = FilterForTag(..., EXPORT, "true") + FilterForTag(..., CONSTANT)` —— 这正是 4.1.5 Q1 讨论的「带值 + 无值」两种模式拼接：导出的要值 `true`，固定的只要存在。
+- **L39-43** `generic map` 段；**L42** `RemoveFromLastLine(1)` 去掉最后一个 generic 行尾的逗号（VHDL 语法不允许末尾逗号）。
+- **L44-48** `port map` 段同理：遍历**所有**端口（`self.dutInfo.ports`，无筛选），每个接同名信号；末尾 `RemoveFromLastLine(1)` 去尾逗号后闭合 `);`。
 
-注意第 170-171 行用 `len(...)-1` 作为向量上界：长度为 2 时上界为 1，即 `0 to 1`，这是 VHDL `to` 范围的标准写法。
-
-**`_TbControl`**（[TbGen.py:122-141](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L122-L141)，这段代码展示了复位等待、单/多用例分支、`ProcessDone = AllProcessesDone_c` 收尾条件与 `TbRunning <= false`）：
-
-```python
-def _TbControl(self, f : FileWriter) -> FileWriter:
-    VhdlTitle("Testbench Control !DO NOT EDIT!", f)
-    f.WriteLn("p_tb_control : process")
-    f.WriteLn("begin").IncIndent()
-    rsts = DutInfo.FilterForTag(self.dutInfo.ports, Tags.TYPE, "rst")
-    if len(rsts) > 0:
-        rstLogic = " and ".join([r.name + " = " + self.dutInfo.GetPortValue(r, False) for r in rsts])
-        f.WriteLn("wait until {};".format(rstLogic))
-    if self.tbInfo.isMultiCaseTb:
-        for i, c in enumerate(self.tbInfo.testCases):
-            f.WriteLn("-- {}".format(c))
-            f.WriteLn("NextCase <= {};".format(i))
-            f.WriteLn("wait until ProcessDone = AllProcessesDone_c;")
-    else:
-        f.WriteLn("wait until ProcessDone = AllProcessesDone_c;")
-    #end of TB
-    f.WriteLn("TbRunning <= false;")
-    f.WriteLn("wait;")
-    f.DecIndent().WriteLn("end process;")
-    return f
-```
-
-第 128 行的 `rstLogic` 是一个 Python 字符串拼接：把每个复位端口拼成 `名 = '0'`，再用 ` and ` 连起来。对 simpleTb 得到 `InRst = '0' and OutRst = '0'`，即「两个复位都释放」才继续。
-
-多用例分支（第 130-134 行）会在 u5 详细展开，这里只需理解：它把 `NextCase` 依次置为 `0,1,2,...`，每置一次就等所有进程处理完该用例（`ProcessDone = AllProcessesDone_c`），再进入下一用例。
+`RemoveFromLastLine` 是 `FileWriter` 的「回改」能力：先无脑每行写尾逗号，最后把最后一行的逗号抹掉，比单独判断「是不是最后一个」更简洁。这是整套写作器里反复出现的手法。
 
 #### 4.5.4 代码实践
 
-**目标**：解释 `ProcessDone = AllProcessesDone_c` 如何让仿真结束。
+**目标**：对照 simpleTb 的 generic 标签，预测 `generic map` 的内容。
 
-**步骤**：
+1. 看 [example/simpleTb/psi_common_async_fifo.vhd:30-35](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L30-L35)：
+   - `Width_g`：`EXPORT=true` → 进 `generic map`
+   - `Depth_g`：`EXPORT=true; funky=bla` → 进 `generic map`（带值匹配 `true` 命中）
+   - `AlmFullOn_g`：`EXPORT=false,...` → **不进**（值是 `false`）
+   - `AlmFullLevel_g`：`CONSTANT=12` → 进 `generic map`（无值筛选命中）
+   - `AlmEmptyOn_g` / `AlmEmptyLevel_g`：无标签 → **不进**（用默认值，由 `_GenericConstants` 声明为内部常量）
+2. 预测 `generic map` 含三行：`Width_g => Width_g, Depth_g => Depth_g, AlmFullLevel_g => AlmFullLevel_g`。
+3. 在生成结果中验证，并确认 `port map` 把全部端口都接上了同名信号。
 
-1. 在生成的 TB 中找到 `ProcessDone`、`AllProcessesDone_c`、`TbProcNr_Input_c`、`TbProcNr_Output_c` 四处声明，确认向量宽度是 `0 to 1`。
-2. 找到 `p_Input` 与 `p_Output` 进程末尾的 `ProcessDone(TbProcNr_Input_c) <= '1';` 与 `... <= '1';`（这两行由 `_Processes` 生成，见 4.6）。
-3. 找到 `p_tb_control` 中的 `wait until ProcessDone = AllProcessesDone_c;` 与 `TbRunning <= false;`。
-4. 画出时序：两个测试进程先后置位 → `ProcessDone` 变 `"11"` → 主控进程解除等待 → `TbRunning` 变 false → 时钟进程退出 `while TbRunning loop` → 仿真无事件，结束。
-
-**需要观察的现象**：只有**两个**测试进程都置位后，仿真才会结束；只要还有一个没跑完，`ProcessDone` 就不全 `'1'`，主控进程一直等待。
-
-**预期结果**：手动模拟 `ProcessDone` 从 `"00"` → `"01"`（`p_Input` 先完成）→ `"11"`（`p_Output` 也完成）→ `TbRunning <= false`。环境不可用时标注「待本地验证」。
+**预期结果**：`generic map` 三项，`port map` 全端口。**若无法本地运行，标注「待本地验证」。**
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：如果 `PROCESSES` 标签声明了 3 个进程，`ProcessDone` 的宽度是多少？`AllProcessesDone_c` 的值是什么？
+**Q1**：为什么 `port map` 不做任何筛选，而 `generic map` 要筛选？
 
-**答案**：`len(tbProcesses)-1 = 2`，所以 `ProcessDone : std_logic_vector(0 to 2)`，宽度 3；`AllProcessesDone_c := (others => '1')` 即 `"111"`。
+**答**：DUT 的每个端口都必须在实例化时连到一个信号，否则 VHDL 编译不过，所以 `port map` 全连接。generic 则有三类不同处理（导出 / 固定 / 用默认值），只有前两类需要出现在 `generic map` 里，用默认值的 generic 不写 `generic map` 项即等于取其默认值。
 
-**练习 2**：为什么 `p_tb_control` 开头也要 `wait until <复位无效>`？
+**Q2**：`RemoveFromLastLine(1)` 在这里解决什么问题？
 
-**答案**：确保仿真「计时」从复位释放后才开始，避免在复位仍有效、测试进程尚未真正运行时就误判 `ProcessDone`，保证收尾握手发生在正确的仿真阶段。
+**答**：循环里每行都写 `name => name,`（带尾逗号），但 VHDL 不允许最后一项后还有逗号。`RemoveFromLastLine(1)` 在循环结束后抹掉最后一个字符（逗号），避免单独写「是否最后一项」的分支判断。
 
 ---
 
-### 4.6 _Processes —— PROC 标签绑定与 ProcessDone 信令
+### 4.6 _Processes：PROC 标签绑定与单/多用例分支
 
 #### 4.6.1 概念说明
 
-`_Processes` 为 `tbInfo.tbProcesses` 里的每个名字生成一个 `p_<name>` 进程。这是用户写测试激励的地方——生成器只搭好骨架（含 `begin`/`end process`、复位等待、`ProcessDone` 信令），中间留一段 `-- User Code` 让用户填。
+`_Processes` 为 `tbProcesses` 里的每个进程名生成一个测试进程 `p_<name>`。这是整个 TB 里**唯一由用户填写激励代码**的地方（单用例下会留 `assert ... "Insert your code here!"` 占位）。
 
-它有两条分支：
+`_Processes` 最大的特点是**单用例与多用例走完全不同的两套分支**：
 
-- **单用例**（`isMultiCaseTb == False`，本讲重点）：每个进程先等复位释放，再留 User Code 占位，最后置 `ProcessDone` 比特。
-- **多用例**（`isMultiCaseTb == True`，详见 u5）：每个进程按 `NextCase` 调度多个用例，每个用例调用对应 case 包里的 procedure，调用完置 `ProcessDone`。
+- **单用例**（`isMultiCaseTb == False`）：每个进程在等复位释放后，留一段用户代码占位，结束时把自己的 `ProcessDone` 比特置 1。
+- **多用例**（`isMultiCaseTb == True`）：每个进程不再含用户代码，而是**按 `NextCase` 调度**，依次调用各用例 package 里同名 procedure，每跑完一个用例就把自己的 `ProcessDone` 比特回置 1。
 
-本讲聚焦单用例分支，但会指出多用例分支如何用 `PROC` 标签收集 procedure 参数。
+注意一个在 u2-l2 已点明、这里再次印证的事实：**`PROC` 标签只在多用例分支里被消费**（通过 `GetPortsForProcess` 决定 procedure 的参数列表）。单用例分支里 `PROC` 完全不被读取——所有进程都长一个样（占位 + 置完成位）。务必把端口级单数 `PROC` 与文件级复数 `PROCESSES` 区分开：前者绑端口到进程，后者定义进程名清单。
 
 #### 4.6.2 核心流程
 
-**单用例分支**（每个进程 `p`）：
-
 ```
-1. 子标题 p（level 2）
-2. 写 "p_<p> : process" / "begin"
-3. 若有复位端口:
-     写注释 "-- start of process !DO NOT EDIT"
-     rstLogic = 每个复位拼 "名 = 无效值"，用 " and " 连接
-     写 "wait until <rstLogic>;"            ← 等复位释放
-4. 写 "-- User Code" 占位（含 assert 提示）
-5. 写 "ProcessDone(TbProcNr_<p>_c) <= '1';"  ← 本进程完成信令
-6. 写 "wait;" / "end process;"
+for p in tbProcesses:                       # 例如 ["Input", "Output"]
+    写 "p_<p> : process / begin"
+    if 多用例:
+        for i, c in enumerate(testCases):    # 例如 ["Full", "Empty"]
+            wait until NextCase = i;
+            ProcessDone(TbProcNr_<p>_c) <= '0';     # 开始本用例：清完成位
+            args = GetPortsForProcess(p) 的端口名 join ", "
+            work.<tb>_case_<c>.<p>(<args>, Generics_c);   # 调用本用例 procedure
+            wait for 1 ps;
+            ProcessDone(TbProcNr_<p>_c) <= '1';     # 本用例完成：置完成位
+    else (单用例):
+        rsts = FilterForTag(ports, TYPE, "rst")
+        if rsts 非空:
+            wait until (<rst0> = <inactive> and <rst1> = <inactive> ...);   # 等复位释放
+        -- User Code
+        assert False report "Insert your code here!" severity note;          # 占位
+        ProcessDone(TbProcNr_<p>_c) <= '1';            # 本进程完成
+    wait;
+    end process;
 ```
-
-**多用例分支**（每个进程 `p`，遍历每个用例 `c`）：
-
-```
-对每个用例 c（带下标 i）:
-     写 "wait until NextCase = i;"
-     写 "ProcessDone(TbProcNr_<p>_c) <= '0';"            ← 开始前清零
-     args = GetPortsForProcess(p) 里所有端口名逗号连接
-     写 "work.<tb>_case_<c>.<p>(<args>, Generics_c);"   ← 调用 case 包的 procedure
-     写 "wait for 1 ps;"
-     写 "ProcessDone(TbProcNr_<p>_c) <= '1';"            ← 用例完成信令
-```
-
-`GetPortsForProcess(p)` 就是 `FilterForTag(ports, PROC, p)`（见 [TbInfo.py:47-48](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbInfo.py#L47-L48)，它直接转发给 `DutInfo.FilterForTag`），即「所有 `PROC=<p>` 的端口」。所以在多用例 TB 里，`PROC` 标签决定了一个端口出现在哪些过程的 procedure 参数列表里。这正是 u2-l2 提到的「`PROC` 仅在多用例 TB 中决定 procedure 参数」的落点。
 
 #### 4.6.3 源码精读
 
-完整方法（[TbGen.py:86-120](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L86-L120)，这段代码展示了单/多用例分支、复位等待、User Code 占位与 `ProcessDone` 信令）：
+[TbGen.py:86-120](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L86-L120) —— `_Processes` 全貌：
 
-```python
-def _Processes(self, f : FileWriter) -> FileWriter:
-    if self.tbInfo.isMultiCaseTb:
-        VhdlTitle("Processes !DO NOT EDIT!", f)
-    else:
-        VhdlTitle("Processes", f)
-    #Generate processes
-    for p in self.tbInfo.tbProcesses:
-        VhdlTitle(p, f, 2)
-        f.WriteLn("p_{} : process".format(p))
-        f.WriteLn("begin").IncIndent()
-        if self.tbInfo.isMultiCaseTb:
-            for i, c in enumerate(self.tbInfo.testCases):
-                f.WriteLn("-- {}".format(c))
-                f.WriteLn("wait until NextCase = {};".format(i))
-                f.WriteLn("ProcessDone(TbProcNr_{}_c) <= '0';".format(p))
-                args = ", ".join(port.name for port in self.tbInfo.GetPortsForProcess(p))
-                f.WriteLn("work.{tb}_case_{case}.{proc}({args}, Generics_c);".format(tb=self.tbInfo.tbName, case=c, proc=p, args=args))
-                f.WriteLn("wait for 1 ps;")
-                f.WriteLn("ProcessDone(TbProcNr_{}_c) <= '1';".format(p))
-        else:
-            rsts = DutInfo.FilterForTag(self.dutInfo.ports, Tags.TYPE, "rst")
-            if len(rsts) > 0:
-                f.WriteLn("-- start of process !DO NOT EDIT")
-                rstLogic = " and ".join([r.name + " = " + self.dutInfo.GetPortValue(r, False) for r in rsts])
-                f.WriteLn("wait until {};".format(rstLogic))
-            f.WriteLn()
-            f.WriteLn("-- User Code")
-            f.WriteLn("assert False report \"Insert your code here!\" severity note;")
-            f.WriteLn()
-            f.WriteLn("-- end of process !DO NOT EDIT!")
-            f.WriteLn("ProcessDone(TbProcNr_{}_c) <= '1';".format(p))
-        f.WriteLn("wait;")
-        f.DecIndent().WriteLn("end process;")
-        f.WriteLn()
-    return f
-```
+- **L87-90** 标题在多用例下加 `!DO NOT EDIT!`（因为进程体由工具全权管理，用户改的是 case 包里的 procedure），单用例则不带（用户要在进程里填代码）。
+- **L92-94** 遍历 `tbProcesses`，每个进程先写 level-2 标题再写进程头。
+- **L96-104** 多用例分支：`wait until NextCase = i` 同步起步 → 清完成位 → 拼 `args`（**L101** `GetPortsForProcess(p)`，即 `FilterForTag(ports, PROC, p)`，见 [TbInfo.py:47-48](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbInfo.py#L47-L48)）→ 调 `work.<tb>_case_<c>.<p>(args, Generics_c)` → `wait for 1 ps`（给信号传递一个 δ 周期）→ 置完成位。
+- **L105-116** 单用例分支：**L106** `FilterForTag(ports, TYPE, "rst")` 取复位端口；**L108-110** 若有复位，`wait until` 所有复位都等于其 `GetPortValue(r, False)`（无效值）——即等复位释放；**L113** 占位 `assert`；**L116** 置完成位。
+- **L117-118** 每个进程末尾 `wait;` 后 `end process;`。
 
-注意第 109 行的 `rstLogic` 拼法与 4.5 中 `_TbControl` 第 128 行**完全相同**——同一段 `r.name + " = " + GetPortValue(r, False)` 用 ` and ` 连接。这是工具内的一致约定：凡是要等「复位释放」的地方，都要求所有复位同时为无效电平。
-
-第 113 行的 `assert False report "Insert your code here!" severity note;` 是一个温和的占位符：仿真时会打印一条 note 提醒用户这里还没填代码，但**不阻断**仿真（`severity note` 不是 `error`）。
+注意单用例分支里那段「等复位释放」的 `rstLogic` 拼接：`" and ".join([r.name + " = " + GetPortValue(r, False) for r in rsts])`。对 simpleTb 会得到 `InRst = '0' and OutRst = '0'`，于是进程在两个复位都释放后才开始跑用户代码。这套「等复位」逻辑在 `_TbControl`（4.7）里还有一份。
 
 #### 4.6.4 代码实践
 
-**目标**：把 `_Processes` 与 `_TbControl` 串起来，确认二者通过 `ProcessDone` 握手。
+**目标**：对照 simpleTb（单用例）与 multiCaseTb（多用例）的 `_Processes` 输出差异。
 
-**步骤**：
+1. 单用例 simpleTb：`PROCESSES=Input,Output`、无 `TESTCASES` → 生成 `p_Input` / `p_Output` 两个进程，各自含「等复位释放 + 占位 assert + 置 `ProcessDone(TbProcNr_Input_c/Output_c)`」。
+2. 多用例 multiCaseTb：多了 [example/multiCaseTb/psi_common_async_fifo.vhd:25](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/multiCaseTb/psi_common_async_fifo.vhd#L25) 的 `TESTCASES=Full,Empty` → 同样的两个进程名，但进程体变成「等 `NextCase=0` 调 `..._case_Full.Input(...)`、再等 `NextCase=1` 调 `..._case_Empty.Input(...)`」。
+3. 在 multiCaseTb 的生成结果里确认 `p_Input` 的 `args` 来自 `GetPortsForProcess("Input")`，即所有标了 `PROC=Input`（含 `PROC=Output,Input` 的 `OutRdy`）的端口名。
 
-1. 在生成的 TB 中找到 `p_Input` 与 `p_Output` 两个进程（来自 `PROCESSES=Input,Output`）。
-2. 在每个进程末尾确认有 `ProcessDone(TbProcNr_Input_c) <= '1';` 与 `ProcessDone(TbProcNr_Output_c) <= '1';`。
-3. 回到 `p_tb_control`，确认它 `wait until ProcessDone = AllProcessesDone_c;` 后才 `TbRunning <= false;`。
-4. 把这两段联起来读：测试进程是「生产者」（置位），主控进程是「消费者」（等全 1）。
-
-**需要观察的现象**：`p_Input` 与 `p_Output` 进程开头都先 `wait until InRst = '0' and OutRst = '0';`（复位等待），中间是 User Code 占位，末尾是 `ProcessDone` 置位。
-
-**预期结果**：两个进程的结构完全对称，仅 `TbProcNr_*_c` 的下标不同（0 与 1）。环境不可用时标注「待本地验证」。
+**预期结果**：单用例进程含用户占位、多用例进程含 case 调度；多用例的 `args` 与 `PROC` 标签一致。**详细 procedure 签名留待 u5，本讲只需确认 `args` 来源。** 若无法本地运行，标注「待本地验证」。
 
 #### 4.6.5 小练习与答案
 
-**练习 1**：单用例 TB 里，如果一个端口标了 `PROC=Input`，它会影响生成结果吗？
+**Q1**：单用例 TB 里，给某端口加 `PROC=Foo` 标签会影响生成的 `p_Stimuli` 进程吗？
 
-**答案**：在单用例 TB 里基本不影响——`PROC` 标签只在多用例分支（第 96-104 行）被 `GetPortsForProcess` 消费，用来拼 procedure 参数；单用例分支（第 105 行起）完全不读 `PROC`。所以 simpleTb 虽然端口标了各种 `PROC`，但生成的 `p_Input`/`p_Output` 进程体里并不出现这些端口（它们只是普通 DUT 信号）。
+**答**：不会。单用例分支（L105-116）根本不调用 `GetPortsForProcess`，`PROC` 标签被完全忽略；所有进程都长成「等复位 + 占位 + 置完成位」的同一个模样。`PROC` 只在多用例分支决定 procedure 参数。
 
-**练习 2**：为什么 User Code 占位用 `assert ... severity note` 而不是 `severity error`？
+**Q2**：多用例分支里 `ProcessDone(TbProcNr_<p>_c) <= '0'` 之后为何要 `wait for 1 ps` 再置 `'1'`？
 
-**答案**：`note` 级别只打印提示、不中断仿真，让用户能先把骨架跑通再逐步填代码；若用 `error`，骨架一启动就会被 assert 拦住，无法验证基础设施（时钟、复位、握手）是否正常。
+**答**：先清零表示「本用例开始」，跑完 procedure 后给一个微小延迟（1 ps，一个 δ 量级的仿真时间）让信号稳定传播，再置 1 表示「本用例完成」。配合 `p_tb_control` 的 `wait until ProcessDone = AllProcessesDone_c`，构成「所有进程都跑完当前用例 → 推进到下一用例」的握手。
+
+---
+
+### 4.7 _TbControl：让仿真有序结束的总控进程
+
+#### 4.7.1 概念说明
+
+`_TbControl` 生成唯一的总控进程 `p_tb_control`，它是整个仿真的「指挥」：负责决定**何时开始等待结束**、**何时宣告结束**。它把 `_TbControlSignals` 声明的脚手架与各测试进程的 `ProcessDone` 比特串成一个闭环：
+
+> 各进程完成 → 把自己的 `ProcessDone` 比特置 1 → `p_tb_control` 检测到 `ProcessDone = AllProcessesDone_c`（全 1）→ 把 `TbRunning` 置 `false` → 时钟进程跳出 `while TbRunning loop` → 仿真无事件 → 结束。
+
+这就是本讲核心问题「`ProcessDone = AllProcessesDone_c` 如何让仿真结束」的完整答案。
+
+#### 4.7.2 核心流程
+
+单用例：
+
+```
+p_tb_control : process
+begin
+    -- (若有复位) wait until 所有复位 = 无效值;     # 等复位释放再开始计时
+    wait until ProcessDone = AllProcessesDone_c;    # 等所有测试进程完成
+    TbRunning <= false;                              # 关掉时钟
+    wait;
+end process;
+```
+
+多用例：
+
+```
+p_tb_control : process
+begin
+    -- (若有复位) wait until 所有复位 = 无效值;
+    for i, c in enumerate(testCases):
+        NextCase <= i;                               # 通知所有进程：跑第 i 个用例
+        wait until ProcessDone = AllProcessesDone_c; # 等所有进程跑完该用例
+    TbRunning <= false;                              # 全部用例跑完，关时钟
+    wait;
+end process;
+```
+
+两条路径最后都收敛到 `TbRunning <= false; wait;`。多用例只是把「等一次全完成」换成「每个用例等一次全完成，期间用 `NextCase` 推进」。
+
+#### 4.7.3 源码精读
+
+[TbGen.py:122-141](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L122-L141) —— `_TbControl` 全貌：
+
+- **L124-125** 进程头 `p_tb_control : process / begin`。
+- **L126-129** 复位等待（与 `_Processes` 单用例分支同款 `rstLogic` 拼接）：若有复位端口，先 `wait until` 它们都到无效值。这保证「计时」从复位释放后才开始。
+- **L130-134** 多用例分支：遍历 `testCases`，每个用例 `NextCase <= i` 后 `wait until ProcessDone = AllProcessesDone_c`。
+- **L135-136** 单用例分支：直接 `wait until ProcessDone = AllProcessesDone_c`。
+- **L138-139** `TbRunning <= false;` 然后 `wait;` —— 这一行是仿真结束的「总闸」。
+
+把 4.4 / 4.6 / 4.7 三节合起来看，闭环是这样的（以单用例、两进程为例）：
+
+1. 上电：`TbRunning=True`，`ProcessDone="00"`，各复位信号为有效值。
+2. 复位进程 `p_rst_*` 在 1 µs 后等两个时钟沿，把复位释放到无效值。
+3. 各测试进程 `p_Input` / `p_Output` 与 `p_tb_control` 都在 `wait until 复位=无效` 处解除阻塞。
+4. 测试进程跑完用户代码，分别置 `ProcessDone(0)<='1'`、`ProcessDone(1)<='1'`，`ProcessDone` 变 `"11"`。
+5. `p_tb_control` 的 `wait until ProcessDone = AllProcessesDone_c`（`"11" = "11"`）解除，执行 `TbRunning <= false`。
+6. 两个时钟进程的 `while TbRunning loop` 条件失效，跳出循环，执行 `wait;` 永久挂起。
+7. 全部进程挂起、无事件，仿真器结束仿真。
+
+#### 4.7.4 代码实践
+
+**目标**：在生成的 simpleTb TB 里，按上述 7 步把「结束链」走一遍。
+
+1. 在生成结果里定位：`signal TbRunning`（4.4）、`p_clock_InClk` / `p_clock_OutClk` 的 `while TbRunning loop`（4.2）、`p_Input` / `p_Output` 末尾的 `ProcessDone(TbProcNr_*_c) <= '1'`（4.6）、`p_tb_control` 的 `wait until ProcessDone = AllProcessesDone_c` 与 `TbRunning <= false`（4.7）。
+2. 用笔在 `ProcessDone` 的位宽（`0 to 1`）与两个 `TbProcNr_*_c`（`Input=0`、`Output=1`）之间对齐：两进程都置位后 `ProcessDone = "11" = AllProcessesDone_c`。
+3. 解释：若用户在 `p_Input` 里删掉最后的 `ProcessDone(TbProcNr_Input_c) <= '1';`，仿真会怎样？
+
+**预期结果**：能画出「测试进程置位 → `p_tb_control` 检测全 1 → 关 `TbRunning` → 时钟停 → 仿真结束」的因果链；第 3 问的结论是 `ProcessDone` 永远到不了 `"11"`，仿真会**卡死不结束**（时钟一直转、`p_tb_control` 一直等）。
+
+#### 4.7.5 小练习与答案
+
+**Q1**：`AllProcessesDone_c` 是常量、`ProcessDone` 是信号，二者比较的物理含义是什么？
+
+**答**：`ProcessDone` 第 *i* 位为 `'1'` 表示第 *i* 个测试进程已完成；`AllProcessesDone_c` 是全 `'1'` 掩码。两者相等当且仅当**所有**进程的完成位都为 `'1'`，即「全部完成」。这是一个用向量按位相等实现的「与汇集」。
+
+**Q2**：为什么 `p_tb_control` 最后要跟一句 `wait;`？
+
+**答**：`TbRunning <= false` 之后，`p_tb_control` 自身的使命已结束。`wait;` 让这个进程永久挂起，否则进程会从头重新执行（process 在末尾会回到 `begin`），反复写 `TbRunning`。`wait;` 把它「冻结」在一次执行上。
 
 ---
 
 ## 5. 综合实践
 
-把本讲六个模块串成一个完整的「**生成前预测 + 生成后核对**」任务，靶子仍是 simpleTb 的异步 FIFO。
+**任务**：端到端追踪一个 `TYPE=CLK; FREQ=100e6; PROC=Input` 的端口（simpleTb 的 `InClk`），画出它「从标签到仿真结束」的完整生命线，并解释 `ProcessDone = AllProcessesDone_c` 如何收尾。
 
-**任务**：在**不运行**生成器的前提下，先在纸上写出以下五项预测，然后（如环境可用）运行生成并逐项核对。
+请按以下步骤完成（可本地运行，也可纯源码阅读）：
 
-1. **`_DutInstantiation`**：列出 `generic map` 里会出现的所有 generic 名（提示：用 4.2.3 的表格）。
-2. **`_Clocks`**：写出 `p_clock_InClk` 与 `p_clock_OutClk` 的 `Frequency_c` 值，并算出各自的时钟半周期。
-3. **`_Resets`**：写出 `p_rst_InRst` 进程体里两处 `rising_edge(...)` 的参数，以及释放行的完整 VHDL。
-4. **`_TbControlSignals`**：写出 `ProcessDone` 的向量范围、`AllProcessesDone_c` 的值、两个 `TbProcNr_*_c` 常量的值。
-5. **`_Processes` 与 `_TbControl` 联动**：用一段话说明从「两个测试进程跑完」到「仿真结束」之间发生的全部事件顺序。
+1. **起点（标签）**：在 [example/simpleTb/psi_common_async_fifo.vhd:39](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/example/simpleTb/psi_common_async_fifo.vhd#L39) 确认 `InClk` 的三条标签 `TYPE=CLK; FREQ=100e6; PROC=Input`。
+2. **筛选**：追踪 `_Clocks`（[TbGen.py:51-66](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L51-L66)）如何用 `FilterForTag(ports, TYPE, "clk")` 把 `InClk` 选出来。
+3. **检查与取值**：`HasTag(InClk, FREQ)` 通过 → `GetTag(InClk, FREQ)` 得 `"100e6"` → 拼进 `constant Frequency_c : real := real(100e6);`。
+4. **进程生成**：写出 `p_clock_InClk`，含 `while TbRunning loop` / `wait for 0.5*(1 sec)/Frequency_c;` / `InClk <= not InClk;`。手算半周期 = 5 ns。
+5. **脚手架**：因为 `PROCESSES=Input,Output`，`_TbControlSignals`（[TbGen.py:166-174](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L166-L174)）声明 `ProcessDone(0 to 1)`、`AllProcessesDone_c`、`TbProcNr_Input_c:=0`、`TbProcNr_Output_c:=1`。
+6. **收尾链**：`p_Input` / `p_Output` 跑完各自置 `ProcessDone(0/1) <= '1'` → `p_tb_control`（[TbGen.py:122-141](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L122-L141)）检测 `ProcessDone = AllProcessesDone_c`（`"11"="11"`）→ `TbRunning <= false` → `p_clock_InClk` 跳出 `while TbRunning loop` → 仿真结束。
 
-**参考答案**（用于自检）：
+**交付物**：一张标注了「标签 → 筛选 → 检查 → 取值 → 进程体 → 脚手架 → 收尾」的流程图（手绘或文字版均可），并写出对「`ProcessDone = AllProcessesDone_c` 如何让仿真结束」的一句话解释。
 
-1. `Width_g`、`Depth_g`、`AlmFullLevel_g`。
-2. `Frequency_c` 分别为 `real(100e6)`=`1.0e8`、`real(125e6)`=`1.25e8`；半周期分别为 \(5\,\text{ns}\)、\(4\,\text{ns}\)。
-3. 两处均为 `rising_edge(InClk)`；释放行 `InRst <= '0';`。
-4. `ProcessDone : std_logic_vector(0 to 1)`；`AllProcessesDone_c := (others => '1')`（即 `"11"`）；`TbProcNr_Input_c := 0`、`TbProcNr_Output_c := 1`。
-5. `p_Input` 与 `p_Output` 各自末尾置 `ProcessDone(0/1) <= '1'` → 当二者皆 `'1'`，`ProcessDone = "11" = AllProcessesDone_c` → `p_tb_control` 解除 `wait until` → `TbRunning <= false` → 所有 `p_clock_*` 退出 `while TbRunning loop` 并 `wait;` → 仿真无事件，结束。
-
-如果环境可用，运行：
-
-```bash
-py TbGen.py -src example/simpleTb/psi_common_async_fifo.vhd -dst tb -clear -force
-```
-
-打开 `tb/psi_common_async_fifo_tb.vhd`，按 `DUT Instantiation` → `Testbench Control` → `Clocks` → `Resets` → `Processes` 的段落顺序逐项核对。任何与预测不符之处，回到对应模块的源码精读段查原因。若环境不可用，上述「纸面预测」本身就是一次完整的源码阅读型实践（生成部分标注「待本地验证」）。
-
----
+> 若本机已装 `pyparsing` / `PyQt5` 且能定位 `PsiPyUtils`，可实际运行 `py TbGen.py -src example/simpleTb/psi_common_async_fifo.vhd -dst ./tb -clear -force` 生成 `tb/psi_common_async_fifo_tb.vhd`，再在产物上验证上述每一步。**若无法运行，所有「生成产物中的具体内容」标注「待本地验证」，但流程图与因果链可基于源码独立完成。**
 
 ## 6. 本讲小结
 
-- **`FilterForTag` 是所有生成方法的统一筛选器**：支持「存在性筛选」与「值匹配筛选」，并对单值/列表、大小写做归一，是「筛选 → 检查 → 取值」三连招的第一步。
-- **`_DutInstantiation`** 用 `FilterForTag` 把 `EXPORT=true` 与 `CONSTANT=值` 两类 generic 拼进 `generic map`，第三类（两者皆无）不进 map；端口则全部同名直连。
-- **`_Clocks`** 强制每个 `TYPE=CLK` 端口带 `FREQ`，用 \( t_{\text{half}} = 0.5/f \) 算半周期，进程受 `while TbRunning` 控制。
-- **`_Resets`** 强制每个 `TYPE=RST` 端口带 `CLK`，靠 `CLK` 标签把复位归属到正确时钟域，「等两个上升沿」保证复位至少被采样一次，释放值取 `GetPortValue(rst, False)`（无效）。
-- **`_TbControlSignals` 与 `_TbControl` 是一对契约**：前者声明 `TbRunning`/`NextCase`/`ProcessDone`/`AllProcessesDone_c`/`TbProcNr_*_c`，后者等 `ProcessDone = AllProcessesDone_c` 后拉低 `TbRunning` 结束仿真。
-- **`_Processes`** 在单用例下生成带复位等待与 `ProcessDone` 信令的进程骨架（中间留 User Code），在多用例下按 `NextCase` 调度并用 `PROC` 标签（经 `GetPortsForProcess`）收集 procedure 参数。
-
----
+- `_Clocks` / `_Resets` / `_Processes` / `_TbControl` / `_DutInstantiation` 的开头都是同一个动作：**用 `FilterForTag` 把目标端口/generic 筛出来**——筛选是这一层的公共地砖。
+- 时钟进程靠 `FREQ` 算半周期 \( T_{\text{half}} = 0.5/f \)，并用 `while TbRunning loop` 受控翻转；缺 `FREQ` 直接报错。
+- 复位进程靠 `CLK`（引用另一端口名）归属到具体时钟域，等**两个上升沿**再释放到无效值，保证至少被采样一次；缺 `CLK` 直接报错。
+- `_TbControlSignals` 声明五类脚手架，规模由 `tbProcesses` 决定；`ProcessDone` 与 `AllProcessesDone_c` 等宽，是仿真收尾的判据。
+- `_Processes` 单用例走「等复位 + 占位 + 置完成位」，多用例走「按 `NextCase` 调度各 case procedure」；`PROC` 标签**只在多用例**经 `GetPortsForProcess` 决定 procedure 参数。
+- 仿真收尾闭环：各进程置 `ProcessDone` 比特 → `p_tb_control` 检测全 1 → `TbRunning <= false` → 时钟停 → 仿真结束。
 
 ## 7. 下一步学习建议
 
-- **进入 u5（多文件多用例 testbench）**：本讲多次提到 `_Processes` 与 `_TbControl` 的多用例分支被「留到 u5」。下一讲会讲清 `TESTCASES` 如何触发 `isMultiCaseTb`、`NextCase` 如何调度各用例、以及 `WriteTbPkg`/`WriteCasePkg` 如何生成 TB 包与 case 包。
-- **动手做 u6-l3 的扩展实践**：如果你想自己加一个标签（比如让复位可配「保持时长」），现在的你已经具备了完整的链路视角——从 `Tags` 常量（[DutInfo.py:16-32](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/DutInfo.py#L16-L32)）到 `_Resets` 的生成逻辑都能改。
-- **重读 u4-l2 的 `Generate`**：带着本讲对六个方法内部细节的理解，再回看 `Generate` 的调用顺序（[TbGen.py:221-260](https://github.com/paulscherrerinstitute/TbGenerator/blob/5bcf59e8370c12117054b0585a2ae0fc4df4e9f4/TbGen.py#L221-L260)），你会对「线性誊抄器」如何把数据模型变成完整 VHDL 有更立体的认识。
+- **进入 u5（多文件多用例 TB）**：本讲多次提到「多用例分支的 procedure 细节留待 u5」。u5-l1 会讲 `TESTCASES` 如何触发 `isMultiCaseTb`、`NextCase` 如何调度多个用例；u5-l2 会逐行打开 `WriteTbPkg` / `WriteCasePkg`，讲清 `Generics_t` 记录、case 包 procedure 签名，以及 `PortDirectionForProcedure` 如何依据 `PROC`/`TYPE` 推断过程参数方向（本讲里 `args` 只是端口名列表，方向问题在 u5-l2 解决）。
+- **回顾 u2-l2**：如果你对本讲的 `GetPortValue`、`LOWACTIVE`、generic 三分类仍觉含糊，回到 u2-l2 把「标签如何影响生成」对照着看，本讲是它的实现侧补充。
+- **尝试扩展**：在读懂 `_Clocks` 后，可以构思「如果要支持差分时钟（两个端口一对）标签该怎么设计、`_Clocks` 该怎么改」——这是 u6-l3「添加新标签与新 VHDL 类型」要做的练习的预热。

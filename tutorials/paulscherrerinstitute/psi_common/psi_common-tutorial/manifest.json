@@ -1,0 +1,1189 @@
+{
+  "project": "psi_common",
+  "head": "98c2fcc75fa11edfe837cf0de885da95d94c871f",
+  "rationale": "psi_common 是 Paul Scherrer Institute 维护的大型通用可复用 VHDL 库（60+ 组件），因此手册按\"先上手、再打基础、后分领域、最后工程化\"的顺序分为 11 个单元。U1 帮助读者从零认识项目定位、目录结构、依赖与仿真方式以及贯穿全库的编码规范/AXI-S 握手/TDM 约定；U2 集中讲解被所有组件复用的四个基础包（math/logic/array/axi）；U3-U4 从底层存储 RAM 一路向上到同步/异步 FIFO，建立\"存储→缓冲\"的依赖链；U5-U6 讲解 CDC 跨时钟域与时序节拍生成，它们是后续数据通路组件的前置；U7 讲解以二进程 record 法为核心的流水线/延迟/乒乓缓冲；U8 在流水线基础上展开宽度转换、TDM 与并串转换；U9 进入较复杂的总线接口（SPI/I2C/AXI），依赖 axi_pkg 与流水线；U10 汇总仲裁器、脉冲/斜坡生成、实用小组件与统计/信号源等杂项组件；U11 收尾于工程化主题——自检测试平台、Python 代码生成器、重构迁移脚本与贡献/发布流程。讲义依赖关系严格按\"基础包→存储→FIFO→CDC→时序→流水线→数据通路→接口→杂项→工程化\"递进，确保每篇只讲一个独立主题、引用 1-6 个真实源码文件，并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识与上手 psi_common",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 psi_common 是 Paul Scherrer Institute 维护的通用可复用 VHDL 库，说明它解决什么问题、许可方式、维护者与适用场景，帮助读者建立整体认知。",
+          "learning_goals": [
+            "理解 psi_common 的定位与价值",
+            "了解库的许可（PSI HDL License / LGPL）与维护者",
+            "知道库中包含哪些类别的可复用组件"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/README.md",
+            "License.txt",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "项目定位与价值",
+            "许可与维护者",
+            "组件分类总览",
+            "版本与变更记录"
+          ],
+          "practice_task": "浏览 README 与 doc/README 的组件表，列出你最可能用到的 5 个组件并各写一句用途。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与目录组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录划分（hdl/testbench/sim/doc/scripts/generators/sigasi），说明每个目录存放什么、源码与测试如何一一对应。",
+          "learning_goals": [
+            "掌握仓库目录布局",
+            "理解 hdl 源码与 testbench 的命名对应关系",
+            "知道文档、脚本、生成器的所在位置"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/README.md",
+            "doc/old/ch1_introduction/ch1_introduction.md"
+          ],
+          "minimal_modules": [
+            "顶层目录",
+            "hdl 源码目录",
+            "testbench 目录",
+            "doc/scripts/generators 辅助目录"
+          ],
+          "practice_task": "统计 hdl/ 下源文件数量，并为其中 3 个组件找到对应的 testbench 目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "依赖管理与仿真运行",
+          "order": 3,
+          "filename": "u1-l3-dependencies-and-simulation.md",
+          "level": "beginner",
+          "topic": "说明 psi_common 对 PsiSim/psi_tb 的依赖与目录结构要求，讲解如何用 Modelsim 或 GHDL 运行回归测试与交互仿真。",
+          "learning_goals": [
+            "理解库的依赖关系与目录结构要求",
+            "学会运行 Modelsim/GHDL 回归测试",
+            "掌握交互仿真命令"
+          ],
+          "source_files": [
+            "README.md",
+            "sim/config.tcl",
+            "sim/run.tcl",
+            "sim/runGhdl.tcl",
+            "doc/old/ch1_introduction/ch1_introduction.md"
+          ],
+          "minimal_modules": [
+            "依赖与目录结构",
+            "回归测试脚本 config.tcl",
+            "Modelsim 运行",
+            "GHDL 运行"
+          ],
+          "practice_task": "阅读 sim/config.tcl，找到 pl_stage 组件的 testbench 注册条目并说明其 generic 参数。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "编码规范、AXI-S 握手与 TDM 约定",
+          "order": 4,
+          "filename": "u1-l4-coding-conventions-handshaking.md",
+          "level": "beginner",
+          "topic": "讲解库的代码规范（snake_case、_i/_o/_io 后缀、架构命名）、AXI4-Stream 握手（VLD/RDY）语义以及 TDM 数据流的隐式通道循环约定。",
+          "learning_goals": [
+            "掌握库的命名与编码规范",
+            "理解 AXI-S VLD/RDY 握手规则",
+            "理解 TDM 通道隐式循环约定"
+          ],
+          "source_files": [
+            "doc/README.md",
+            "doc/old/ch1_introduction/ch1_introduction.md",
+            "hdl/psi_common_pl_stage.vhd"
+          ],
+          "minimal_modules": [
+            "命名规范",
+            "AXI-S 握手语义",
+            "TDM 约定",
+            "规范在 pl_stage 中的体现"
+          ],
+          "practice_task": "在 pl_stage.vhd 中找出符合规范的端口命名，并解释 use_rdy_g 如何影响握手行为。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基础包 Packages",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "psi_common_math_pkg 数学工具函数",
+          "order": 1,
+          "filename": "u2-l1-math-pkg.md",
+          "level": "beginner",
+          "topic": "讲解数学包中的编译期函数（log2/log2ceil、max/min、choose、ratio、to_uslv、nearest_pow2 等），这些函数广泛用于推导端口宽度与常量。",
+          "learning_goals": [
+            "掌握 log2/log2ceil 推导位宽的方法",
+            "理解 choose 的多态重载",
+            "学会整数与 std_logic_vector 的相互转换"
+          ],
+          "source_files": [
+            "hdl/psi_common_math_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "对数与位宽函数",
+            "min/max 与 choose",
+            "数值转换函数",
+            "ratio/nearest_pow2"
+          ],
+          "practice_task": "用 log2ceil 计算深度 1024 的 RAM 地址位宽，并用 to_uslv 将一个整数转为 std_logic_vector。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "psi_common_logic_pkg 逻辑向量工具",
+          "order": 2,
+          "filename": "u2-l2-logic-pkg.md",
+          "level": "beginner",
+          "topic": "讲解逻辑包中的向量生成、移位、格雷码转换、并行前缀或（ppc_or）与归约函数，它们在 CDC 与 FIFO 中经常被复用。",
+          "learning_goals": [
+            "掌握 zeros/ones/shift 向量工具",
+            "理解二进制-格雷码转换",
+            "学会 reduce_or/reduce_and 归约"
+          ],
+          "source_files": [
+            "hdl/psi_common_logic_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "向量生成与移位",
+            "格雷码转换",
+            "并行前缀 ppc_or",
+            "归约与 to_01X"
+          ],
+          "practice_task": "用 binary_to_gray/gray_to_binary 实现地址的格雷编解码并验证可逆性。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "psi_common_array_pkg 数组类型",
+          "order": 3,
+          "filename": "u2-l3-array-pkg.md",
+          "level": "beginner",
+          "topic": "讲解数组包中预定义的 t_aslvN/t_ainteger/t_areal/t_abool 等类型，说明它们为何在 VHDL-2008 全面可综合前仍然必要。",
+          "learning_goals": [
+            "了解预定义数组类型的命名规律",
+            "理解 t_aslv 无约束数组与约束数组的区别",
+            "知道在何处使用这些类型"
+          ],
+          "source_files": [
+            "hdl/psi_common_array_pkg.vhd",
+            "hdl/psi_common_math_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "t_aslvN 固定宽度数组",
+            "t_ainteger/areal/abool",
+            "无约束 t_aslv",
+            "与 math_pkg 的协作"
+          ],
+          "practice_task": "声明一个 t_aslv16 数组存放 4 个 16 位常数，并用 math_pkg 的 count 统计某比特出现次数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "psi_common_axi_pkg AXI 记录类型",
+          "order": 4,
+          "filename": "u2-l4-axi-pkg.md",
+          "level": "intermediate",
+          "topic": "讲解 AXI 包如何用 record 把完整 AXI 接口收敛为两个方向的记录（rec_axi_ms/rec_axi_sm），提升带 AXI 接口实体的可读性。",
+          "learning_goals": [
+            "理解 AXI 五通道的 record 建模",
+            "掌握 ms/sm 方向命名约定",
+            "知道默认常量与遗留 subtype"
+          ],
+          "source_files": [
+            "hdl/psi_common_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "AXI 五通道 record",
+            "rec_axi_ms/sm 聚合",
+            "默认常量与数组类型",
+            "遗留 subtype"
+          ],
+          "practice_task": "参照包中用法，声明一个 AXI 从机端口的 ms/sm 记录对并赋默认常量。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "存储组件 Memory",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "简单双口 RAM：sdp_ram 与 sp_ram_be",
+          "order": 1,
+          "filename": "u3-l1-sdp-sp-ram.md",
+          "level": "intermediate",
+          "topic": "讲解简单双口 RAM 的纯 VHDL 实现，包括 ram_style 综合属性、读前写/写前读（RBW/WBR）行为以及字节使能变体。",
+          "learning_goals": [
+            "理解 depth/width 与地址位宽关系",
+            "掌握 ram_style 与 RBW/WBR 行为差异",
+            "了解 shared variable 存储建模"
+          ],
+          "source_files": [
+            "hdl/psi_common_sdp_ram.vhd",
+            "hdl/psi_common_sp_ram_be.vhd",
+            "hdl/psi_common_math_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "端口与 generic",
+            "同步/异步读时钟",
+            "ram_behavior 行为",
+            "ram_style 属性"
+          ],
+          "practice_task": "实例化一个 512x16 的 sdp_ram，用 log2ceil 推导地址位宽，并说明 RBW 与 WBR 的输出差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "真双口 RAM：tdp_ram 与 tdp_ram_be",
+          "order": 2,
+          "filename": "u3-l2-tdp-ram.md",
+          "level": "intermediate",
+          "topic": "讲解真双口 RAM 的两个独立读写端口及其字节使能变体，说明它如何作为异步 FIFO 与乒乓缓冲的底层存储。",
+          "learning_goals": [
+            "理解真双口 RAM 的双端口模型",
+            "掌握字节使能写入",
+            "了解其作为跨时钟存储介质的作用"
+          ],
+          "source_files": [
+            "hdl/psi_common_tdp_ram.vhd",
+            "hdl/psi_common_tdp_ram_be.vhd"
+          ],
+          "minimal_modules": [
+            "双端口端口模型",
+            "字节使能",
+            "综合属性",
+            "在 FIFO 中的角色"
+          ],
+          "practice_task": "比较 sdp_ram 与 tdp_ram 的端口，说明跨时钟场景下为何应选 tdp_ram。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "FIFO 缓冲",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "同步 FIFO：sync_fifo",
+          "order": 1,
+          "filename": "u4-l1-sync-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解同步 FIFO 的读写指针、满/空与几乎满/空标志、电平输出，以及它在单时钟域数据缓冲中的应用。",
+          "learning_goals": [
+            "理解 FIFO 满空判断原理",
+            "掌握 alm_full/alm_empty 与 level 输出",
+            "学会 AXI-S 接口的 FIFO 用法"
+          ],
+          "source_files": [
+            "hdl/psi_common_sync_fifo.vhd",
+            "hdl/psi_common_sdp_ram.vhd"
+          ],
+          "minimal_modules": [
+            "指针与满空标志",
+            "几乎满空与电平",
+            "AXI-S 接口",
+            "rdy_rst_state 含义"
+          ],
+          "practice_task": "实例化 sync_fifo，设计小场景观察 alm_full 在 depth=32 时的触发时刻。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "异步 FIFO：async_fifo 与格雷码指针",
+          "order": 2,
+          "filename": "u4-l2-async-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解异步 FIFO 如何用格雷码指针跨时钟域传递、如何区分满与空，以及多级寄存器同步与二进程 record 设计法。",
+          "learning_goals": [
+            "理解格雷码指针的 CDC 作用",
+            "掌握满/空判别（多一位指针）",
+            "了解二进程 record 架构"
+          ],
+          "source_files": [
+            "hdl/psi_common_async_fifo.vhd",
+            "hdl/psi_common_logic_pkg.vhd",
+            "hdl/psi_common_tdp_ram.vhd"
+          ],
+          "minimal_modules": [
+            "双时钟与指针同步",
+            "格雷码满空判别",
+            "两进程 record 架构",
+            "与 sync_fifo 对比"
+          ],
+          "practice_task": "跟踪 async_fifo 中 WrAddrGray 到 RdAddrGraySync 的同步路径，解释为何需要格雷码。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "时钟域跨越 CDC",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "脉冲跨越 pulse_cc 与复位同步",
+          "order": 1,
+          "filename": "u5-l1-pulse-cc.md",
+          "level": "intermediate",
+          "topic": "讲解脉冲跨时钟域的"
+        },
+        {
+          "id": "u5-l2",
+          "title": "数据/状态/位跨越 simple_cc/status_cc/bit_cc",
+          "order": 2,
+          "filename": "u5-l2-simple-status-bit-cc.md",
+          "level": "intermediate",
+          "topic": "讲解在 pulse_cc 之上构建的数据值跨越（simple_cc）、慢变状态跨越（status_cc）与单 bit 跨越（bit_cc）的设计与取舍。",
+          "learning_goals": [
+            "理解 simple_cc 复用 pulse_cc 的设计",
+            "区分脉冲/状态/位跨越的适用场景",
+            "学会复位输出传递"
+          ],
+          "source_files": [
+            "hdl/psi_common_simple_cc.vhd",
+            "hdl/psi_common_status_cc.vhd",
+            "hdl/psi_common_bit_cc.vhd",
+            "hdl/psi_common_pulse_cc.vhd"
+          ],
+          "minimal_modules": [
+            "simple_cc 数据锁存",
+            "status_cc 慢变值",
+            "bit_cc 单 bit",
+            "三者选型"
+          ],
+          "practice_task": "为"
+        },
+        {
+          "id": "u5-l3",
+          "title": "同步整数比跨越 sync_cc_n2xn / sync_cc_xn2n",
+          "order": 3,
+          "filename": "u5-l3-sync-ratio-cc.md",
+          "level": "intermediate",
+          "topic": "讲解两个同步（整数倍频）时钟域之间、带 AXI-S 握手的跨越，包括低到高（n2xn）与高到低（xn2n）两种方向。",
+          "learning_goals": [
+            "理解整数比时钟的同步跨越原理",
+            "掌握 n2xn/xn2n 的方向差异",
+            "了解 ratio 参数与节拍关系"
+          ],
+          "source_files": [
+            "hdl/psi_common_sync_cc_n2xn.vhd",
+            "hdl/psi_common_sync_cc_xn2n.vhd"
+          ],
+          "minimal_modules": [
+            "同步时钟前提",
+            "低到高聚合",
+            "高到低分发",
+            "ratio 与握手"
+          ],
+          "practice_task": "给定 100MHz 与 25MHz 两个同步时钟，选择正确组件并预测数据聚合/分发行为。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "时序与节拍生成",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "选通与节拍生成",
+          "order": 1,
+          "filename": "u6-l1-strobe-tick-generator.md",
+          "level": "intermediate",
+          "topic": "讲解按频率生成单周期选通的 strobe_generator、按周期数可配置的 strobe_generator_cfg、节拍 tickgenerator 以及选通分频 strobe_divider。",
+          "learning_goals": [
+            "理解频率到计数比的换算",
+            "掌握 sync 同步输入",
+            "区分固定频率与可配置周期生成",
+            "理解选通分频"
+          ],
+          "source_files": [
+            "hdl/psi_common_strobe_generator.vhd",
+            "hdl/psi_common_strobe_generator_cfg.vhd",
+            "hdl/psi_common_tickgenerator.vhd",
+            "hdl/psi_common_strobe_divider.vhd",
+            "hdl/psi_common_math_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "strobe_generator 频率法",
+            "strobe_generator_cfg 周期法",
+            "tickgenerator",
+            "strobe_divider"
+          ],
+          "practice_task": "在 100MHz 时钟下用 strobe_generator 生成 1kHz 选通，再用 strobe_divider 分频 10 倍。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "时钟测量 clk_meas",
+          "order": 2,
+          "filename": "u6-l2-clk-meas.md",
+          "level": "intermediate",
+          "topic": "讲解如何用已知参考时钟测量另一时钟（或选通）的频率，输出可读的频率/周期值。",
+          "learning_goals": [
+            "理解参考时钟计数测频原理",
+            "掌握 clk_meas 的接口与输出",
+            "了解其在系统自检中的用途"
+          ],
+          "source_files": [
+            "hdl/psi_common_clk_meas.vhd",
+            "hdl/psi_common_strobe_generator.vhd"
+          ],
+          "minimal_modules": [
+            "测频计数原理",
+            "接口与 generic",
+            "输出格式",
+            "应用场景"
+          ],
+          "practice_task": "设计用 100MHz 参考测量一个未知时钟，并估算测量精度。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "流水线与延迟缓冲",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "流水线级 pl_stage 与二进程设计法",
+          "order": 1,
+          "filename": "u7-l1-pl-stage.md",
+          "level": "intermediate",
+          "topic": "以 pl_stage 为例讲解带 AXI-S 握手的流水线级、影子寄存器处理反压，以及 PSI 库常用的二进程（record r/r_next）设计法。",
+          "learning_goals": [
+            "掌握二进程 record 设计法",
+            "理解影子寄存器如何处理反压",
+            "学会 use_rdy_g 的两种实现"
+          ],
+          "source_files": [
+            "hdl/psi_common_pl_stage.vhd",
+            "doc/files/psi_common_pl_stage.md"
+          ],
+          "minimal_modules": [
+            "二进程 record 方法",
+            "主/影寄存器与反压",
+            "use_rdy 分支 generate",
+            "端口与 generic"
+          ],
+          "practice_task": "在 pl_stage 中跟踪一次下游反压的数据流动，画出主/影寄存器状态。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "多级流水线 multi_pl_stage",
+          "order": 2,
+          "filename": "u7-l2-multi-pl-stage.md",
+          "level": "intermediate",
+          "topic": "讲解 multi_pl_stage 如何把多个 pl_stage 串联以打更深流水线，并统一处理握手与反压。",
+          "learning_goals": [
+            "理解多级流水线的级联结构",
+            "掌握 stages generic",
+            "了解反压在多级中的传递"
+          ],
+          "source_files": [
+            "hdl/psi_common_multi_pl_stage.vhd",
+            "hdl/psi_common_pl_stage.vhd"
+          ],
+          "minimal_modules": [
+            "级联架构",
+            "stages 参数",
+            "握手传递",
+            "资源权衡"
+          ],
+          "practice_task": "实例化一个 4 级 multi_pl_stage，预测连续数据下的延迟周期数。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "可配置延迟 delay / delay_cfg",
+          "order": 3,
+          "filename": "u7-l3-delay.md",
+          "level": "intermediate",
+          "topic": "讲解固定延迟（delay，支持 BRAM/SRL/AUTO）与运行时可配置延迟（delay_cfg）的实现与资源选择。",
+          "learning_goals": [
+            "理解延迟线的存储实现",
+            "掌握 BRAM/SRL 资源选择",
+            "了解可配置延迟的寄存器接口"
+          ],
+          "source_files": [
+            "hdl/psi_common_delay.vhd",
+            "hdl/psi_common_delay_cfg.vhd",
+            "hdl/psi_common_sdp_ram.vhd"
+          ],
+          "minimal_modules": [
+            "delay 固定延迟",
+            "resource 选择",
+            "delay_cfg 可配置",
+            "RAM 复用"
+          ],
+          "practice_task": "比较 delay 在 BRAM 与 SRL 两种 resource_g 下、不同 delay_g 的资源占用思路。",
+          "depends_on": [
+            "u3-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "乒乓缓冲 ping_pong",
+          "order": 4,
+          "filename": "u7-l4-ping-pong.md",
+          "level": "intermediate",
+          "topic": "讲解乒乓缓冲如何用双 RAM 交替写入/读出实现连续数据流缓冲，及其 TDM 突发变体。",
+          "learning_goals": [
+            "理解乒乓双缓冲原理",
+            "掌握写/读切换逻辑",
+            "了解 TDM 突发应用"
+          ],
+          "source_files": [
+            "hdl/psi_common_ping_pong.vhd",
+            "hdl/psi_common_tdp_ram.vhd"
+          ],
+          "minimal_modules": [
+            "双 RAM 交替",
+            "写读切换",
+            "AXI-S 接口",
+            "TDM 突发变体"
+          ],
+          "practice_task": "描述 ping_pong 在"
+        },
+        {
+          "id": "u8-l1",
+          "title": "数据宽度转换 wconv_n2xn / wconv_xn2n",
+          "order": 1,
+          "filename": "u8-l1-wconv.md",
+          "level": "intermediate",
+          "topic": "讲解 N 位与整数倍 N 位之间的数据宽度转换，包括低到高聚合与高到低分发。",
+          "learning_goals": [
+            "理解宽度聚合/分发的握手时序",
+            "掌握 ratio 参数",
+            "了解与 sync_cc 的区别"
+          ],
+          "source_files": [
+            "hdl/psi_common_wconv_n2xn.vhd",
+            "hdl/psi_common_wconv_xn2n.vhd"
+          ],
+          "minimal_modules": [
+            "n2xn 聚合",
+            "xn2n 分发",
+            "计数与握手",
+            "应用场景"
+          ],
+          "practice_task": "把 8 位流聚合成 32 位流，预测输出 valid 的频率变化。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "并-TDM 与 TDM-并 par_tdm / tdm_par",
+          "order": 2,
+          "filename": "u8-l2-par-tdm.md",
+          "level": "intermediate",
+          "topic": "讲解并行数据与时分复用（TDM）串行流之间的相互转换，以及隐式通道循环约定。",
+          "learning_goals": [
+            "理解 TDM 通道隐式循环",
+            "掌握 par_tdm/tdm_par 转换时序",
+            "了解 strobe 驱动"
+          ],
+          "source_files": [
+            "hdl/psi_common_par_tdm.vhd",
+            "hdl/psi_common_tdm_par.vhd",
+            "hdl/psi_common_strobe_generator.vhd"
+          ],
+          "minimal_modules": [
+            "并到 TDM",
+            "TDM 到并",
+            "通道循环",
+            "strobe 同步"
+          ],
+          "practice_task": "将 4 路并行 16 位数据转为 TDM 流并说明通道顺序。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "可配置 TDM 与多路复用 cfg/tdm_mux",
+          "order": 3,
+          "filename": "u8-l3-tdm-cfg-mux.md",
+          "level": "intermediate",
+          "topic": "讲解可配置有效通道数的 par_tdm_cfg/tdm_par_cfg，以及 TDM 多路复用器 tdm_mux。",
+          "learning_goals": [
+            "理解可配置通道数的 TDM 转换",
+            "掌握 tdm_mux 的复用与 str_del",
+            "了解代码生成器辅助"
+          ],
+          "source_files": [
+            "hdl/psi_common_par_tdm_cfg.vhd",
+            "hdl/psi_common_tdm_par_cfg.vhd",
+            "hdl/psi_common_tdm_mux.vhd",
+            "generators/psi_common_par_tdm_wX.py"
+          ],
+          "minimal_modules": [
+            "cfg 变体通道配置",
+            "tdm_mux 复用",
+            "str_del 延迟",
+            "生成器角色"
+          ],
+          "practice_task": "用 tdm_mux 把两路 TDM 流合并，并解释 str_del_g 的作用。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "并串/串并转换 par_ser / ser_par",
+          "order": 4,
+          "filename": "u8-l4-par-ser.md",
+          "level": "intermediate",
+          "topic": "讲解并行到串行与串行到并行的移位转换，包括 MSB/LSB 优先与速率比参数。",
+          "learning_goals": [
+            "理解并串/串并移位原理",
+            "掌握 msb/ratio 参数",
+            "了解与 strobe 的配合"
+          ],
+          "source_files": [
+            "hdl/psi_common_par_ser.vhd",
+            "hdl/psi_common_ser_par.vhd"
+          ],
+          "minimal_modules": [
+            "par_ser 并转串",
+            "ser_par 串转并",
+            "msb/lsb 与 ratio",
+            "时序对齐"
+          ],
+          "practice_task": "用 par_ser 把 16 位并行数据按 MSB 优先、ratio=4 串行化。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "总线接口 Interfaces",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "SPI 主机 spi_master 与 spi_master_cfg",
+          "order": 1,
+          "filename": "u9-l1-spi-master.md",
+          "level": "intermediate",
+          "topic": "讲解 SPI 主机的时序（CPOL/CPHA）、位序与可配置位宽变体，以及三线 SPI 接口（spi_tri_o）。",
+          "learning_goals": [
+            "理解 CPOL/CPHA 四种模式",
+            "掌握 lsb_first 与位宽配置",
+            "了解三线 SPI 端口"
+          ],
+          "source_files": [
+            "hdl/psi_common_spi_master.vhd",
+            "hdl/psi_common_spi_master_cfg.vhd"
+          ],
+          "minimal_modules": [
+            "SPI 时序模式",
+            "位序与握手",
+            "可配置位宽",
+            "三线 SPI"
+          ],
+          "practice_task": "配置 spi_master 为模式 1、MSB 优先，说明 SCLK 与片选时序。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "I2C 主机 i2c_master",
+          "order": 2,
+          "filename": "u9-l2-i2c-master.md",
+          "level": "intermediate",
+          "topic": "讲解 I2C 主机的 START/STOP/ACK 时序、时钟分频与内部三态选项。",
+          "learning_goals": [
+            "理解 I2C 协议帧时序",
+            "掌握时钟分频配置",
+            "了解 internal_tri_state 选项"
+          ],
+          "source_files": [
+            "hdl/psi_common_i2c_master.vhd"
+          ],
+          "minimal_modules": [
+            "I2C 帧时序",
+            "时钟分频",
+            "三态驱动",
+            "握手接口"
+          ],
+          "practice_task": "描述一次 I2C 单字节写传输的 SDA/SCL 波形。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "AXI 简化主机 axi_master_simple",
+          "order": 3,
+          "filename": "u9-l3-axi-master-simple.md",
+          "level": "advanced",
+          "topic": "讲解简化版 AXI4 主机如何把用户侧简单的命令/数据接口映射到 AXI 四通道握手。",
+          "learning_goals": [
+            "理解 AXI 四通道时序",
+            "掌握 simple 主机的命令接口",
+            "了解突发与 throttling"
+          ],
+          "source_files": [
+            "hdl/psi_common_axi_master_simple.vhd",
+            "hdl/psi_common_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "AXI 四通道",
+            "命令/数据接口",
+            "突发传输",
+            "throttling"
+          ],
+          "practice_task": "用 axi_master_simple 发起一次 4 拍突发读，画出握手时序。",
+          "depends_on": [
+            "u2-l4",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "AXI 完整主机 axi_master_full 与 axi_multi_pl_stage",
+          "order": 4,
+          "filename": "u9-l4-axi-master-full.md",
+          "level": "advanced",
+          "topic": "讲解完整版 AXI 主机（支持完整特性）以及用于在 AXI 路径上插入多级流水线的 axi_multi_pl_stage。",
+          "learning_goals": [
+            "理解 full 与 simple 主机的差异",
+            "掌握 multi_pl_stage 对 AXI 的时序优化",
+            "了解 record 端口用法"
+          ],
+          "source_files": [
+            "hdl/psi_common_axi_master_full.vhd",
+            "hdl/psi_common_axi_multi_pl_stage.vhd",
+            "hdl/psi_common_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "full 主机特性",
+            "AXI 流水线插入",
+            "record 端口",
+            "时序收敛"
+          ],
+          "practice_task": "说明在长布线 AXI 路径上插入 axi_multi_pl_stage 的收益。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "AXI 从机 axi_slave_ipif 与 axilite_slave_ipif",
+          "order": 5,
+          "filename": "u9-l5-axi-slave.md",
+          "level": "advanced",
+          "topic": "讲解 AXI4/AXI-Lite 从机 IP 接口（IPIF）如何把寄存器/存储映射到 AXI，包括 32/64 位与 throttling。",
+          "learning_goals": [
+            "理解 IPIF 寄存器/存储映射",
+            "掌握 num_reg/use_mem 配置",
+            "了解 axi_throttling"
+          ],
+          "source_files": [
+            "hdl/psi_common_axi_slave_ipif.vhd",
+            "hdl/psi_common_axi_slave_ipif64.vhd",
+            "hdl/psi_common_axilite_slave_ipif.vhd",
+            "hdl/psi_common_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "IPIF 映射模型",
+            "寄存器/存储接口",
+            "32/64 位变体",
+            "throttling"
+          ],
+          "practice_task": "用 axilite_slave_ipif 暴露 4 个寄存器，说明读写时序。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "仲裁与杂项组件",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "仲裁器 arb_priority / arb_round_robin",
+          "order": 1,
+          "filename": "u10-l1-arbiters.md",
+          "level": "intermediate",
+          "topic": "讲解优先级仲裁与轮询（round robin）仲裁的请求/许可逻辑及其在多请求者总线中的应用。",
+          "learning_goals": [
+            "理解优先级与轮询仲裁算法",
+            "掌握请求/许可握手",
+            "了解公平性与延迟权衡"
+          ],
+          "source_files": [
+            "hdl/psi_common_arb_priority.vhd",
+            "hdl/psi_common_arb_round_robin.vhd"
+          ],
+          "minimal_modules": [
+            "优先级仲裁",
+            "轮询仲裁",
+            "请求/许可接口",
+            "选型权衡"
+          ],
+          "practice_task": "对 4 路同时请求，分别用两种仲裁器预测许可顺序。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "脉冲/斜坡生成与整形",
+          "order": 2,
+          "filename": "u10-l2-ramp-pulse-shaper.md",
+          "level": "intermediate",
+          "topic": "讲解斜坡/脉冲发生器（ramp_gene、pulse_generator_ctrl_static）与脉冲整形器（pulse_shaper/cfg）的步进与定时参数。",
+          "learning_goals": [
+            "理解斜坡/脉冲步进参数",
+            "掌握整形器的 hold/hold-off",
+            "了解 strobe 驱动"
+          ],
+          "source_files": [
+            "hdl/psi_common_ramp_gene.vhd",
+            "hdl/psi_common_pulse_generator_ctrl_static.vhd",
+            "hdl/psi_common_pulse_shaper.vhd",
+            "hdl/psi_common_pulse_shaper_cfg.vhd"
+          ],
+          "minimal_modules": [
+            "ramp_gene 斜坡",
+            "pulse_generator_ctrl_static",
+            "pulse_shaper 整形",
+            "cfg 可配置"
+          ],
+          "practice_task": "用 ramp_gene 生成周期斜坡并说明步进参数含义。",
+          "depends_on": [
+            "u6-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "实用组件：看门狗/消抖/防优化/触发器/动态移位",
+          "order": 3,
+          "filename": "u10-l3-utility-components.md",
+          "level": "intermediate",
+          "topic": "讲解看门狗（watchdog）、消抖器（debouncer）、防综合优化（dont_opt）、模拟/数字触发生成（trigger_analog/digital）与动态移位器（dyn_sft）。",
+          "learning_goals": [
+            "理解看门狗与消抖原理",
+            "掌握 dont_opt 的综合用途",
+            "了解触发生成与动态移位"
+          ],
+          "source_files": [
+            "hdl/psi_common_watchdog.vhd",
+            "hdl/psi_common_debouncer.vhd",
+            "hdl/psi_common_dont_opt.vhd",
+            "hdl/psi_common_trigger_analog.vhd",
+            "hdl/psi_common_trigger_digital.vhd",
+            "hdl/psi_common_dyn_sft.vhd"
+          ],
+          "minimal_modules": [
+            "watchdog/debouncer",
+            "dont_opt 防优化",
+            "trigger 模拟/数字",
+            "dyn_sft 动态移位"
+          ],
+          "practice_task": "用 debouncer 处理一个按键输入，并选择合适的消抖周期。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "统计与信号源：min_max/prbs/pwm/sample_rate_converter",
+          "order": 4,
+          "filename": "u10-l4-stats-and-sources.md",
+          "level": "advanced",
+          "topic": "讲解 find_min_max/min_max_sum 流式统计、PRBS 伪随机序列、PWM 以及无滤波采样率转换器（sample_rate_converter）。",
+          "learning_goals": [
+            "理解流式最小/最大/求和",
+            "掌握 LFSR-PRBS 与 PWM",
+            "了解无滤波采样率转换原理"
+          ],
+          "source_files": [
+            "hdl/psi_common_find_min_max.vhd",
+            "hdl/psi_common_min_max_sum.vhd",
+            "hdl/psi_common_prbs.vhd",
+            "hdl/psi_common_pwm.vhd",
+            "hdl/psi_common_sample_rate_converter.vhd"
+          ],
+          "minimal_modules": [
+            "min_max 统计",
+            "PRBS",
+            "PWM",
+            "sample_rate_converter"
+          ],
+          "practice_task": "用 prbs 生成测试激励，并用 find_min_max 统计一段流的极值。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "贡献与工具链",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "编写自校验测试平台（psi_tb 用法）",
+          "order": 1,
+          "filename": "u11-l1-self-checking-testbench.md",
+          "level": "advanced",
+          "topic": "以 pl_stage 测试平台为例，讲解 PSI 库自校验 TB 的结构、多进程协调、###ERROR### 约定与 psi_tb 工具包用法。",
+          "learning_goals": [
+            "掌握自校验 TB 结构",
+            "理解多进程 TbRunning/ProcessDone 协调",
+            "学会 psi_tb compare/txt_util 用法"
+          ],
+          "source_files": [
+            "testbench/psi_common_pl_stage_tb/psi_common_pl_stage_tb.vhd",
+            "sim/config.tcl",
+            "doc/old/ch1_introduction/ch1_introduction.md"
+          ],
+          "minimal_modules": [
+            "TB 总体结构",
+            "多进程协调",
+            "自检与报告约定",
+            "psi_tb 工具包"
+          ],
+          "practice_task": "仿照 pl_stage_tb 为一个简单组件搭建自校验 TB 框架。",
+          "depends_on": [
+            "u1-l3",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "Python 代码生成器 generators",
+          "order": 2,
+          "filename": "u11-l2-code-generators.md",
+          "level": "advanced",
+          "topic": "讲解 generators 目录下用 Python 为 simple_cc/status_cc/par_tdm/tdm_par 生成特定位宽实例的脚本与 snippet 模板机制。",
+          "learning_goals": [
+            "理解代码生成器的用途",
+            "掌握 python 脚本 + snippet 模板",
+            "了解生成的 .vhd/.bat 用法"
+          ],
+          "source_files": [
+            "generators/psi_common_simple_cc_X.py",
+            "generators/snippets/psi_common_simple_cc_X.vhd",
+            "generators/examples/psi_common_simple_cc.bat",
+            "generators/psi_common_tdm_par_wX.py"
+          ],
+          "minimal_modules": [
+            "生成器整体流程",
+            "snippet 模板",
+            "python 脚本",
+            "bat 示例"
+          ],
+          "practice_task": "运行 simple_cc 生成器为一个指定位宽生成实例，并解释模板替换过程。",
+          "depends_on": [
+            "u5-l2",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "重构与迁移脚本 scripts/refactoring",
+          "order": 3,
+          "filename": "u11-l3-refactoring-scripts.md",
+          "level": "advanced",
+          "topic": "讲解 scripts/refactoring 下用于库统一重构与 v2 到 v3 迁移的 Python 工具（parse_library/hdlrefactor 及 JSON 映射库）。",
+          "learning_goals": [
+            "理解库级重构工具的思路",
+            "掌握 parse_library/hdlrefactor 流程",
+            "了解 JSON 迁移映射"
+          ],
+          "source_files": [
+            "scripts/refactoring/hdlrefactor.py",
+            "scripts/refactoring/parse_library.py",
+            "scripts/refactoring/migration_from_v2_to_v3_db.json"
+          ],
+          "minimal_modules": [
+            "解析库结构",
+            "重构规则",
+            "v2 到 v3 迁移映射",
+            "JSON 规则库"
+          ],
+          "practice_task": "阅读 migration_from_v2_to_v3_db.json，归纳几条命名迁移规则。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "贡献流程与发布管理",
+          "order": 4,
+          "filename": "u11-l4-contributing-and-release.md",
+          "level": "advanced",
+          "topic": "讲解向 PSI VHDL 库贡献代码的规范（代码质量、generic 化、自检 TB、文档）、git 分支策略、commit 注释约定与版本/标签管理。",
+          "learning_goals": [
+            "掌握贡献规范与检查清单",
+            "理解 develop/master 分支与 PR 流程",
+            "了解版本号与标签策略"
+          ],
+          "source_files": [
+            "doc/old/ch1_introduction/ch1_introduction.md",
+            "README.md",
+            "Changelog.md",
+            "scripts/dependencies.py"
+          ],
+          "minimal_modules": [
+            "贡献规范",
+            "分支与 PR 流程",
+            "commit 注释约定",
+            "版本与标签"
+          ],
+          "practice_task": "按 commit 约定为一次"
+        },
+        {
+          "id": "u5-l1",
+          "title": "脉冲跨越 pulse_cc 与复位同步",
+          "order": 1,
+          "filename": "u5-l1-pulse-cc.md",
+          "level": "intermediate",
+          "topic": "讲解脉冲跨时钟域的翻转-同步-异或手法、复位双向同步，以及 ASYNC_REG/syn_srlstyle 等综合约束。",
+          "learning_goals": [
+            "理解 toggle + 双 FF 同步的脉冲传递",
+            "掌握复位同步与极性处理",
+            "了解 CDC 综合属性"
+          ],
+          "source_files": [
+            "hdl/psi_common_pulse_cc.vhd"
+          ],
+          "minimal_modules": [
+            "翻转-同步-异或机制",
+            "复位同步链",
+            "极性 generic",
+            "综合属性约束"
+          ],
+          "practice_task": "在 pulse_cc 中标注 a 到 b 与 b 到 a 两条同步路径，并说明 num_pulses 的作用。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

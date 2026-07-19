@@ -1,0 +1,933 @@
+{
+  "project": "psi_fix",
+  "head": "821049e0375cb950a74f0ccec4b4993d5d960899",
+  "rationale": "psi_fix 是一个面向 FPGA 的定点 DSP VHDL 库，其最核心特征是「VHDL + Python 位真模型 + 自检测试台」三位一体的方法论。因此学习路线先从项目定位、目录结构、仿真回归框架和定点格式/握手约定入手（单元1），让读者能把库跑起来；随后深入整个库赖以运作的基础——psi_fix_pkg 定点包，VHDL 与 Python 两侧对照（单元2）；再用一个单元讲透位真双模型的设计流程、协同仿真测试方法与两段式编码风格（单元3），这是理解所有组件的共同语言。掌握了通用机制后，按从简到繁的组件族推进：简单处理与存储（单元4）、复数与 CORDIC（单元5）、CIC 滤波器（单元6）、FIR 滤波器（单元7）、函数近似与代码生成（单元8）、DDS/调制解调/噪声等应用组件（单元9）。最后以「如何贡献一个新组件」和「CI/文档/依赖自动化」收尾（单元10），形成从使用到二次开发的闭环。单元内的讲义都遵循「单一主题 + 真实源码 + 可操作实践任务」原则，并显式声明依赖关系以保证学习顺序；CIC 与 FIR 两个大家族分别单独成单元，并先用命名规则讲义建立全景图再逐个深入，避免读者在大量相似组件中迷失。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 psi_fix 与把库跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 psi_fix 是什么——PSI 提供的 FPGA 定点位真 DSP VHDL/Python 库，其设计哲学、依赖关系与许可证。",
+          "learning_goals": [
+            "理解 psi_fix 的定位与「位真双模型」核心理念",
+            "说出库依赖的 en_cl_fix/psi_common/psi_tb 三件套及版本要求",
+            "了解许可证与 major.minor.bugfix 版本号策略"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/files/introduction.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "项目定位与位真理念",
+            "依赖关系（en_cl_fix/psi_common/psi_tb）",
+            "许可证与版本策略"
+          ],
+          "practice_task": "阅读 README 与 introduction，用自己的话写一段说明 psi_fix 为何要求「VHDL 组件必须配套位真 Python 模型」，并列出运行 Python 模型所需的 SciPy/NumPy 等包。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与源码组织",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "解析 hdl/model/testbench/sim/unittest/scripts/doc 各顶层目录的职责，以及「一个 .vhd 文件对应一个实体」的组织方式。",
+          "learning_goals": [
+            "说清每个顶层目录的职责",
+            "理解 VHDL 源、Python 模型、测试台、仿真脚本四者如何一一对应",
+            "了解 model/snippets 与 model/matlab 的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/files/introduction.md",
+            "doc/README.md"
+          ],
+          "minimal_modules": [
+            "hdl 源码目录",
+            "model/python 模型目录",
+            "testbench 与 sim 目录",
+            "scripts/doc 工具目录"
+          ],
+          "practice_task": "为仓库绘制一份目录职责思维导图，并为 psi_fix_mov_avg 组件标注其 VHDL、Python 模型、测试台、文档分别位于哪个文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仿真与回归测试框架",
+          "order": 3,
+          "filename": "u1-l3-simulation-regression.md",
+          "level": "beginner",
+          "topic": "讲 PsiSim TCL 回归框架：sim/config.tcl 如何声明源码与测试台、run.tcl/runGhdl.tcl 如何编译运行、如何用 ###ERROR### 字符串判定失败。",
+          "learning_goals": [
+            "理解 config.tcl 中 add_sources/create_tb_run/tb_run_add_arguments 的用法",
+            "掌握 Modelsim 与 GHDL 两种运行方式",
+            "理解 pre_script 在编译前生成测试数据的机制"
+          ],
+          "source_files": [
+            "sim/config.tcl",
+            "sim/run.tcl",
+            "sim/runGhdl.tcl",
+            "doc/files/introduction.md"
+          ],
+          "minimal_modules": [
+            "PsiSim 框架",
+            "config.tcl 配置",
+            "回归判定与 pre_script"
+          ],
+          "practice_task": "在 sim 目录下执行 source ./run.tcl（或 runGhdl.tcl）跑一次完整回归，记录哪些测试台被执行，并解释为何 FIR 测试需要 pre_script。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "定点数格式与握手约定",
+          "order": 4,
+          "filename": "u1-l4-fixpoint-format-handshaking.md",
+          "level": "beginner",
+          "topic": "讲 [s,i,f] 定点格式、位增长规则与 AXI4-Stream 风格的 vld/rdy 握手及 _i/_o/_g 命名后缀。",
+          "learning_goals": [
+            "掌握 [s,i,f] 三元组含义与总位宽计算",
+            "理解加减乘带来的位增长规则",
+            "掌握 vld/rdy 握手时序与 PSI 命名约定"
+          ],
+          "source_files": [
+            "doc/files/introduction.md",
+            "doc/files/tips.md"
+          ],
+          "minimal_modules": [
+            "定点格式 [s,i,f]",
+            "位增长规则",
+            "AXI-S 握手与命名约定"
+          ],
+          "practice_task": "给定输入格式 [1,0,17]，计算两个这样的数相乘后的理论最大格式，并说明为何 [1,a,b]×[1,c,d] 会多出一个整数位。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心基础：psi_fix_pkg 定点包",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "psi_fix_pkg 类型与格式定义",
+          "order": 1,
+          "filename": "u2-l1-pkg-types-formats.md",
+          "level": "intermediate",
+          "topic": "解析 psi_fix_pkg.vhd 中的 psi_fix_fmt_t/rnd_t/sat_t 类型定义，以及与 en_cl_fix 之间的双向转换函数。",
+          "learning_goals": [
+            "掌握核心类型定义",
+            "理解 psi_fix 与 en_cl_fix 的转换桥接设计",
+            "了解 size/from_real/get_bits_as_int 等基础函数"
+          ],
+          "source_files": [
+            "hdl/psi_fix_pkg.vhd",
+            "doc/files/psi_fix_pkg.md"
+          ],
+          "minimal_modules": [
+            "类型定义",
+            "en_cl_fix 转换桥",
+            "基础查询函数"
+          ],
+          "practice_task": "阅读 psi_fix_pkg.vhd，列出 psi_fix2_cl_fix/cl_fix2_psi_fix 各自的函数重载，并解释 round→NonSymPos_s、sat→Sat_s 的映射含义。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "定点运算函数",
+          "order": 2,
+          "filename": "u2-l2-fixpoint-arithmetic-functions.md",
+          "level": "intermediate",
+          "topic": "讲 resize/add/sub/mult/abs/neg/shift_left/shift_right/compare/in_range/upper_bound 等组合可综合运算函数的签名与使用。",
+          "learning_goals": [
+            "掌握主要运算函数的参数与默认 round/sat 行为",
+            "理解 shift 函数为 Vivado 动态移位可综合性所做的特殊实现",
+            "学会用这些函数组合出数据处理流水线"
+          ],
+          "source_files": [
+            "hdl/psi_fix_pkg.vhd",
+            "doc/files/tips.md"
+          ],
+          "minimal_modules": [
+            "基本运算函数",
+            "移位函数",
+            "比较/范围/边界函数"
+          ],
+          "practice_task": "用 psi_fix_add 与 psi_fix_resize 手写一段「先加法、再舍入、再饱和」的三级流水（参考 tips.md 的 Manual Splitting），并说明中间格式如何选取。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Python 位真模型包",
+          "order": 3,
+          "filename": "u2-l3-python-bittrue-model-pkg.md",
+          "level": "intermediate",
+          "topic": "讲 model/psi_fix_pkg.py：psi_fix_fmt_t/psi_fix_rnd_t/psi_fix_sat_t 的 Python 实现，与 VHDL 一一对应的运算函数，以及 53 位双精度限制。",
+          "learning_goals": [
+            "理解 Python 包如何镜像 VHDL API",
+            "掌握 enable_range_check/with_range_check_disabled 的用途",
+            "理解位真模型对中间结果精度的要求"
+          ],
+          "source_files": [
+            "model/psi_fix_pkg.py",
+            "doc/files/tips.md"
+          ],
+          "minimal_modules": [
+            "Python 类型与 API 镜像",
+            "位真与精度限制",
+            "与 en_cl_fix 的复用"
+          ],
+          "practice_task": "用 model/psi_fix_pkg.py 实现一个简单定点乘法，对比 psi_fix_from_real→psi_fix_mult→psi_fix_get_bits_as_int 的输出与手算结果是否一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "位真双模型与测试方法论",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "位真双模型设计流程",
+          "order": 1,
+          "filename": "u3-l1-bittrue-design-flow.md",
+          "level": "intermediate",
+          "topic": "讲 design_flow.md 的七阶段流程：算法可行性→设计文档→Python 模型→Python 协同仿真→VHDL+协同仿真→硬件验证→维护，以及为何强调先设计后编码。",
+          "learning_goals": [
+            "掌握七阶段设计流程",
+            "理解「先 Python 后 VHDL」的位真验证思想",
+            "理解刺激选择（dirac/最坏情况）对验证有效性的影响"
+          ],
+          "source_files": [
+            "doc/files/design_flow.md",
+            "doc/files/tips.md"
+          ],
+          "minimal_modules": [
+            "七阶段流程",
+            "位真验证思想",
+            "刺激设计"
+          ],
+          "practice_task": "为一个假想的 4 抽头 FIR 列出最坏情况刺激（符号匹配系数），并解释为何白噪声不足以覆盖饱和边界。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "测试台与协同仿真流程",
+          "order": 2,
+          "filename": "u3-l2-testbench-cosimulation.md",
+          "level": "intermediate",
+          "topic": "以 mov_avg 为例讲 VHDL 测试台结构：DUT 例化、stim/check 双进程、preScript.py 用 Python 模型生成输入输出文本、测试台读取文本比对位真。",
+          "learning_goals": [
+            "理解自检测试台的 stim/check 进程分工",
+            "掌握 preScript.py 生成 Data/*.txt 的协同仿真机制",
+            "理解测试台如何调用 Python 模型做位真比对"
+          ],
+          "source_files": [
+            "testbench/psi_fix_mov_avg_tb/psi_fix_mov_avg_tb.vhd",
+            "testbench/psi_fix_mov_avg_tb/Scripts/preScript.py",
+            "model/psi_fix_mov_avg.py",
+            "sim/config.tcl"
+          ],
+          "minimal_modules": [
+            "测试台结构",
+            "preScript 协同仿真",
+            "文本比对与 ###ERROR###"
+          ],
+          "practice_task": "阅读 mov_avg 的 preScript.py，说明它如何用 psi_fix_get_bits_as_int 把浮点结果写成整数文本，并跟踪这些文本在测试台里被读回比对的路径。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "两段式编码风格与命名约定",
+          "order": 3,
+          "filename": "u3-l3-two-process-coding-style.md",
+          "level": "intermediate",
+          "topic": "以 psi_fix_mov_avg.vhd 为样板讲 two-process 方法（组合进程 r_next + 时序进程 r）、record 封装寄存器、valid 流水与命名约定。",
+          "learning_goals": [
+            "掌握两段式 (two-process) 编码模式",
+            "理解用 record 封装流水线寄存器与 valid 信号",
+            "掌握 _i/_o/_g 命名与 snake_case 约定"
+          ],
+          "source_files": [
+            "hdl/psi_fix_mov_avg.vhd",
+            "doc/files/introduction.md"
+          ],
+          "minimal_modules": [
+            "两段式方法",
+            "record 流水封装",
+            "命名约定"
+          ],
+          "practice_task": "在 psi_fix_mov_avg.vhd 中分别标注组合进程与时序进程的职责，并解释 valid 信号链 v.Vld 如何随数据逐级传递。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "简单处理组件实战",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "resize_pipe 与 moving average",
+          "order": 1,
+          "filename": "u4-l1-resize-pipe-mov-avg.md",
+          "level": "intermediate",
+          "topic": "把 mov_avg 作为第一个完整组件走通：差分-累加-增益校正（NONE/ROUGH/EXACT）三级流水，以及 resize_pipe 的纯流水位宽变换。",
+          "learning_goals": [
+            "完整理解一个端到端组件的设计",
+            "掌握三种增益校正模式（不移位/粗移位/移位+乘法）的资源-精度权衡",
+            "理解 out_regs_g 输出寄存器可配"
+          ],
+          "source_files": [
+            "hdl/psi_fix_mov_avg.vhd",
+            "model/psi_fix_mov_avg.py",
+            "hdl/psi_fix_resize_pipe.vhd"
+          ],
+          "minimal_modules": [
+            "差分-累加结构",
+            "增益校正三模式",
+            "输出寄存器配置"
+          ],
+          "practice_task": "对照 VHDL 与 Python 模型，说明 ROUGH 与 EXACT 两种增益校正的中间格式 GcInFmt/GcCoefFmt 是如何在两侧一致地推导出来的。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "param_ram 双口参数 RAM",
+          "order": 2,
+          "filename": "u4-l2-param-ram-dual-port.md",
+          "level": "intermediate",
+          "topic": "讲 psi_fix_param_ram：纯 VHDL 真双口 RAM、RBW/WBR 行为、通过 init_g 初始化前 N 个定点参数。",
+          "learning_goals": [
+            "理解真双口 RAM 的 RBW/WBR 两种读写行为",
+            "掌握用 t_areal 与 psi_fix_from_real 做定点初始化",
+            "理解该 RAM 在可配置滤波器中存放系数的用途"
+          ],
+          "source_files": [
+            "hdl/psi_fix_param_ram.vhd",
+            "hdl/psi_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "双口 RAM 结构",
+            "RBW/WBR 行为",
+            "定点初始化"
+          ],
+          "practice_task": "给 param_ram 写一段说明：当 behavior_g=RBW 且同一地址先读后写时输出如何表现，并说明它如何被 FIR 等组件用来在运行时更新系数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "比较器与二进制除法",
+          "order": 3,
+          "filename": "u4-l3-comparator-binary-division.md",
+          "level": "intermediate",
+          "topic": "讲 psi_fix_comparator 的独立定点比较，以及 psi_fix_bin_div 的迭代二进制除法实现与协同仿真测试。",
+          "learning_goals": [
+            "理解比较器的定点格式处理",
+            "掌握二进制除法的迭代算法与位真验证",
+            "学会套用通用测试台模板验证算术组件"
+          ],
+          "source_files": [
+            "hdl/psi_fix_comparator.vhd",
+            "hdl/psi_fix_bin_div.vhd",
+            "model/psi_fix_pkg.py"
+          ],
+          "minimal_modules": [
+            "定点比较器",
+            "二进制迭代除法",
+            "算术组件测试"
+          ],
+          "practice_task": "跟踪 bin_div 测试台的 preScript 流程，说明除法结果如何由 Python 模型生成并与 VHDL 输出逐位比对。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "复数运算与 CORDIC",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "复数运算族",
+          "order": 1,
+          "filename": "u5-l1-complex-arithmetic.md",
+          "level": "intermediate",
+          "topic": "讲 complex_addsub/complex_mult/complex_abs：复数加减乘与求模（非 cordic），及 Complex×Real 资源优化选项。",
+          "learning_goals": [
+            "掌握复数运算的定点实现与格式推导",
+            "理解复数乘法需要的实部/虚部乘加结构",
+            "了解 Complex×Real 的资源节省"
+          ],
+          "source_files": [
+            "hdl/psi_fix_complex_mult.vhd",
+            "hdl/psi_fix_complex_addsub.vhd",
+            "hdl/psi_fix_complex_abs.vhd",
+            "model/psi_fix_complex_mult.py"
+          ],
+          "minimal_modules": [
+            "复数加减",
+            "复数乘法",
+            "复数求模"
+          ],
+          "practice_task": "推导两个 [1,0,15] 复数相乘后实部/虚部的理论格式，并对照 complex_mult 的 VHDL 确认中间位宽。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "CORDIC 旋转模式",
+          "order": 2,
+          "filename": "u5-l2-cordic-rotation.md",
+          "level": "intermediate",
+          "topic": "讲 cordic_rot（极坐标→直角坐标）：SERIAL 与 PIPELINED 两种模式、增益补偿、迭代角度表、pl_stg_per_iter 流水粒度。",
+          "learning_goals": [
+            "理解 CORDIC 旋转模式的迭代算法",
+            "掌握串行与流水两种实现架构的权衡",
+            "理解增益补偿与 round/sat 配置"
+          ],
+          "source_files": [
+            "hdl/psi_fix_cordic_rot.vhd",
+            "model/psi_fix_cordic_rot.py"
+          ],
+          "minimal_modules": [
+            "CORDIC 旋转算法",
+            "串行/流水架构",
+            "增益补偿"
+          ],
+          "practice_task": "说明 mode_g=SERIAL 与 PIPELINED 下处理一个样本所需的时钟周期差异，以及 pl_stg_per_iter 如何影响吞吐-资源折中。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "CORDIC 矢量模式",
+          "order": 3,
+          "filename": "u5-l3-cordic-vector.md",
+          "level": "intermediate",
+          "topic": "讲 cordic_vect（直角坐标→极坐标，求模与相位），以及近期 rdy_i→rdy_o 的接口修正。",
+          "learning_goals": [
+            "理解 CORDIC 矢量模式求模/求相位的算法",
+            "掌握与旋转模式的对称性",
+            "了解握手接口命名修正（rdy_o）"
+          ],
+          "source_files": [
+            "hdl/psi_fix_cordic_vect.vhd",
+            "model/psi_fix_cordic_vect.py",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "CORDIC 矢量算法",
+            "模/相位输出",
+            "握手接口"
+          ],
+          "practice_task": "对照 Changelog 中「renamed rdy_i to rdy_o」的修正，在 cordic_vect.vhd 中定位该端口并解释为何它是输出（ready 由从设备给出）。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "滤波器族 I：CIC 滤波器",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "CIC 原理与命名规则",
+          "order": 1,
+          "filename": "u6-l1-cic-principles-naming.md",
+          "level": "intermediate",
+          "topic": "讲 CIC（级联积分梳状）滤波器原理、位增长与增益校正，以及 CicNaming 命名规则（int/dec、fix/cfg、nch/1ch、par/tdm）。",
+          "learning_goals": [
+            "理解 CIC 抽取/插值结构与 Hogenauer 位增长",
+            "掌握 CIC 命名规则各字段含义",
+            "理解 auto_gain_corr 的作用"
+          ],
+          "source_files": [
+            "hdl/CicNaming.txt",
+            "doc/files/CicNaming.md",
+            "model/psi_fix_cic_dec.py"
+          ],
+          "minimal_modules": [
+            "CIC 原理与位增长",
+            "命名规则",
+            "增益校正"
+          ],
+          "practice_task": "根据 CicNaming 规则解读 psi_fix_cic_dec_cfg_nch_tdm_tdm 名字的每个字段，并说出它相对 cic_dec_fix_1ch 多了哪些可配置维度。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "CIC 单通道抽取与插值",
+          "order": 2,
+          "filename": "u6-l2-cic-single-channel.md",
+          "level": "intermediate",
+          "topic": "讲 cic_dec_fix_1ch 与 cic_int_fix_1ch：固定比率单通道实现、积分-抽取-梳状的数据流与握手、ratio/order/diff_delay 参数。",
+          "learning_goals": [
+            "掌握单通道 CIC 抽取/插值的完整数据流",
+            "理解 order/ratio/diff_delay 参数",
+            "理解输入饥饿/输出阻塞等握手场景的测试覆盖"
+          ],
+          "source_files": [
+            "hdl/psi_fix_cic_dec_fix_1ch.vhd",
+            "hdl/psi_fix_cic_int_fix_1ch.vhd",
+            "model/psi_fix_cic_dec.py",
+            "model/psi_fix_cic_int.py"
+          ],
+          "minimal_modules": [
+            "抽取 CIC 数据流",
+            "插值 CIC 数据流",
+            "握手与参数"
+          ],
+          "practice_task": "阅读 config.tcl 中 cic_int_fix_1ch_tb 的多组参数，说明 gin_idle_cycles_g/gout_idle_cycles_g 分别模拟了哪种握手压力场景。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "CIC 多通道与可配置比率",
+          "order": 3,
+          "filename": "u6-l3-cic-multichannel-configurable.md",
+          "level": "advanced",
+          "topic": "讲多通道 CIC（par 输入/tdm 输入、tdm 输出）与 cfg（运行时配置比率）变体，以及 TDM 时分复用如何共享算子。",
+          "learning_goals": [
+            "理解多通道 CIC 的 par/tdm 输入输出组合",
+            "掌握 TDM 共享算子的时序",
+            "理解 cfg 变体运行时配置比率的设计"
+          ],
+          "source_files": [
+            "hdl/psi_fix_cic_dec_fix_nch_par_tdm.vhd",
+            "hdl/psi_fix_cic_dec_fix_nch_tdm_tdm.vhd",
+            "hdl/psi_fix_cic_dec_cfg_nch_tdm_tdm.vhd"
+          ],
+          "minimal_modules": [
+            "多通道 par/tdm 组合",
+            "TDM 共享算子",
+            "运行时配置比率"
+          ],
+          "practice_task": "对比 fix 与 cfg 两类 CIC 在比率参数上的差异，说明 cfg 变体需要新增哪些运行时接口来动态改变抽取比率。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "滤波器族 II：FIR 滤波器",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "FIR 命名规则与架构选择",
+          "order": 1,
+          "filename": "u7-l1-fir-naming-architecture.md",
+          "level": "advanced",
+          "topic": "讲 FirNaming 命名规则（decimation/calculation-handling/channels/channel-handling/coefficient-handling/architecture）与串行/并行/半并行架构的权衡。",
+          "learning_goals": [
+            "掌握 FIR 命名规则各字段含义",
+            "理解 ser/par/semi 三种计算结构的资源-吞吐权衡",
+            "理解 conf/fix 系数处理差异"
+          ],
+          "source_files": [
+            "hdl/FirNaming.txt",
+            "doc/files/FirNaming.md",
+            "model/psi_fix_fir.py"
+          ],
+          "minimal_modules": [
+            "FIR 命名规则",
+            "串行/并行/半并行架构",
+            "系数处理"
+          ],
+          "practice_task": "解读 psi_fix_fir_dec_semi_nch_chtdm_conf 名字，推断它的抽取、计算结构、通道与系数处理方式，并说明 semi 相比 ser/par 的折中点。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "FIR 多通道可配置滤波器",
+          "order": 2,
+          "filename": "u7-l2-fir-multichannel-configurable.md",
+          "level": "advanced",
+          "topic": "讲 fir_dec_ser/par/semi 三个多通道可配置 FIR：MAC/Direct 结构、系数通过 param_ram 配置、duty_cycle/clk_per_spl 与 multipliers_g 的资源调度。",
+          "learning_goals": [
+            "掌握三种 FIR 的实现差异与适用场景",
+            "理解系数 RAM 配置与 CalcOngoing/flushing 接口",
+            "理解 duty_cycle 与 multipliers_g 的吞吐调度"
+          ],
+          "source_files": [
+            "hdl/psi_fix_fir_dec_ser_nch_chtdm_conf.vhd",
+            "hdl/psi_fix_fir_par_nch_chtdm_conf.vhd",
+            "hdl/psi_fix_fir_dec_semi_nch_chtdm_conf.vhd",
+            "hdl/psi_fix_param_ram.vhd"
+          ],
+          "minimal_modules": [
+            "ser/par/semi FIR 实现",
+            "系数 RAM 配置",
+            "吞吐与资源调度"
+          ],
+          "practice_task": "阅读 config.tcl 中 fir_dec_semi_nch_chtdm_conf_tb 的多组参数，说明 multipliers_g、ratio_g、clk_per_spl_g 如何共同决定一个样本的处理周期数。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "半带 FIR 3tap",
+          "order": 3,
+          "filename": "u7-l3-fir-halfband-3tap.md",
+          "level": "advanced",
+          "topic": "讲 psi_fix_fir_3tap_hbw_dec2：0.25/0.5/0.25 半带抽头、抽取 2、不使用乘法器的资源优化实现与多通道 TDM。",
+          "learning_goals": [
+            "理解半带滤波器的对称性与抽头特性",
+            "掌握无乘法器（移位+加法）实现",
+            "理解 dec2 抽取与多通道处理"
+          ],
+          "source_files": [
+            "hdl/psi_fix_fir_3tap_hbw_dec2.vhd",
+            "model/psi_fix_fir.py"
+          ],
+          "minimal_modules": [
+            "半带滤波特性",
+            "无乘法器实现",
+            "抽取与多通道"
+          ],
+          "practice_task": "说明 0.25/0.5/0.25 抽头为何可用移位（×2 的幂）替代乘法器，并解释 dec2 后输出速率与输入速率的关系。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "函数近似与代码生成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "线性近似 lin_approx_calc 原理",
+          "order": 1,
+          "filename": "u8-l1-lin-approx-calc.md",
+          "level": "advanced",
+          "topic": "讲 psi_fix_lin_approx_calc：分段线性近似的表查找（addr_table_o/data_table_i）、索引与余数分解、offset+gradient×reminder 的计算流水。",
+          "learning_goals": [
+            "理解分段线性近似的数学原理",
+            "掌握索引位/余数位的分解与表接口",
+            "理解 offset+gradient 计算流水线"
+          ],
+          "source_files": [
+            "hdl/psi_fix_lin_approx_calc.vhd",
+            "model/psi_fix_lin_approx.py"
+          ],
+          "minimal_modules": [
+            "分段线性近似原理",
+            "索引/余数分解",
+            "计算流水线"
+          ],
+          "practice_task": "在 lin_approx_calc 中跟踪一个输入样本如何被拆成 table 索引与余数，并经过 gradient×reminder+offset 得到输出。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Python 代码生成器",
+          "order": 2,
+          "filename": "u8-l2-python-code-generator.md",
+          "level": "advanced",
+          "topic": "讲 model/psi_fix_lin_approx.py 的代码生成器：根据数学函数生成 offset/gradient 表、用 snippets 模板生成 sin/sqrt/inv/gaussify 等 .vhd 组件，以及 lut 代码生成。",
+          "learning_goals": [
+            "掌握 Python 代码生成器如何由数学函数生成定点表",
+            "理解 snippets 模板（lin_approx_tmpl/lut_tmpl）的占位替换",
+            "理解生成式组件的维护方式"
+          ],
+          "source_files": [
+            "model/psi_fix_lin_approx.py",
+            "model/snippets/psi_fix_lin_approx_tmpl.vhd",
+            "model/snippets/psi_fix_lut_tmpl.vhd",
+            "hdl/psi_fix_lin_approx_sin18b.vhd"
+          ],
+          "minimal_modules": [
+            "表生成算法",
+            "模板代码生成",
+            "生成式组件族"
+          ],
+          "practice_task": "说明 sin18b/sqrt18b/inv18b/gaussify20b 这些组件如何由同一个 calc 内核 + 不同生成表组合而成，并指出各自由哪个 CONFIGS 配置生成。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "sqrt / inv / pol2cart_approx 函数实现",
+          "order": 3,
+          "filename": "u8-l3-sqrt-inv-pol2cart.md",
+          "level": "advanced",
+          "topic": "讲 psi_fix_sqrt、psi_fix_inv（1/X）与 psi_fix_pol2cart_approx 的迭代/近似实现与位真模型。",
+          "learning_goals": [
+            "理解平方根与倒数运算的迭代/近似实现",
+            "掌握 pol2cart 近似与 CORDIC 的区别",
+            "理解这些非线性函数的位真验证"
+          ],
+          "source_files": [
+            "hdl/psi_fix_sqrt.vhd",
+            "hdl/psi_fix_inv.vhd",
+            "hdl/psi_fix_pol2cart_approx.vhd",
+            "model/psi_fix_sqrt.py"
+          ],
+          "minimal_modules": [
+            "平方根实现",
+            "倒数实现",
+            "极坐标到直角坐标近似"
+          ],
+          "practice_task": "对比 pol2cart_approx 与 cordic_rot 两种「极坐标→直角坐标」实现，说明近似法在资源/精度上的取舍。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "DDS、调制解调与噪声",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "DDS 与非整数比调制解调",
+          "order": 1,
+          "filename": "u9-l1-dds-modem.md",
+          "level": "advanced",
+          "topic": "讲 dds_18b（数控振荡器/相位累加器）、demod_real2cplx 与 mod_cplx2real 的非整数比（ratio_num/ratio_den）调制解调。",
+          "learning_goals": [
+            "理解 DDS 相位累加器与正余弦查表",
+            "掌握非整数比调制解调的相位补偿机制",
+            "理解 demod/mod 的对称结构"
+          ],
+          "source_files": [
+            "hdl/psi_fix_dds_18b.vhd",
+            "hdl/psi_fix_demod_real2cplx.vhd",
+            "hdl/psi_fix_mod_cplx2real.vhd",
+            "model/psi_fix_dds_18b.py"
+          ],
+          "minimal_modules": [
+            "DDS 相位累加",
+            "非整数比调制解调",
+            "demod/mod 对称结构"
+          ],
+          "practice_task": "说明 ratio_num_g/ratio_den_g 如何让 demod_real2cplx 支持非整数采样率比，并对照 config.tcl 的测试参数验证。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "噪声生成与 phase_unwrap",
+          "order": 2,
+          "filename": "u9-l2-noise-phase-unwrap.md",
+          "level": "advanced",
+          "topic": "讲 white_noise、noise_awgn（高斯白噪声）的随机序列生成与 phase_unwrap 的相位解卷绕。",
+          "learning_goals": [
+            "理解确定性噪声生成的种子机制",
+            "掌握 AWGN 的近似实现",
+            "理解相位解卷绕算法"
+          ],
+          "source_files": [
+            "hdl/psi_fix_white_noise.vhd",
+            "hdl/psi_fix_noise_awgn.vhd",
+            "hdl/psi_fix_phase_unwrap.vhd",
+            "model/psi_fix_noise_awgn.py"
+          ],
+          "minimal_modules": [
+            "白噪声生成",
+            "高斯噪声生成",
+            "相位解卷绕"
+          ],
+          "practice_task": "说明 white_noise 与 noise_awgn 如何在硬件上产生可复现的随机序列，并解释 phase_unwrap 为何需要 stimuli_set 区分有/无卷绕的测试场景。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "IIR 一阶低通与 mult_add_stage",
+          "order": 3,
+          "filename": "u9-l3-iir-mult-add-stage.md",
+          "level": "advanced",
+          "topic": "讲 lowpass_iir_order1 一阶 IIR 低通（含流水选项）与 mult_add_stage 乘加级，以及 IIR 内部量化的位真考量。",
+          "learning_goals": [
+            "掌握一阶 IIR 的差分方程与定点实现",
+            "理解 pipeline_g 流水选项的时序优化",
+            "理解 mult_add_stage 作为通用乘加构建块"
+          ],
+          "source_files": [
+            "hdl/psi_fix_lowpass_iir_order1.vhd",
+            "hdl/psi_fix_mult_add_stage.vhd",
+            "model/psi_fix_lowpass_iir_order1.py"
+          ],
+          "minimal_modules": [
+            "一阶 IIR 实现",
+            "流水选项",
+            "乘加构建块"
+          ],
+          "practice_task": "对照 Python 模型说明一阶 IIR 反馈支路为何需要内部量化，并说明 pipeline_g=true/false 对时序与延迟的影响。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "贡献、CI 与二次开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "贡献新组件的完整流程",
+          "order": 1,
+          "filename": "u10-l1-contributing-new-component.md",
+          "level": "advanced",
+          "topic": "讲如何按库规范贡献一个新组件：编写位真 Python 模型 → VHDL 实现（两段式）→ 自检测试台（preScript 协同仿真）→ 文档 → 注册到 sim/config.tcl。",
+          "learning_goals": [
+            "掌握贡献新组件的完整五件套流程",
+            "理解位真模型与自检测试台的强制要求",
+            "学会把新测试台加入回归脚本"
+          ],
+          "source_files": [
+            "doc/files/introduction.md",
+            "doc/files/design_flow.md",
+            "sim/config.tcl",
+            "testbench/psi_fix_mov_avg_tb/Scripts/preScript.py",
+            "model/psi_fix_lin_approx.py"
+          ],
+          "minimal_modules": [
+            "Python 模型",
+            "VHDL 与测试台",
+            "文档与回归注册"
+          ],
+          "practice_task": "为一个假想的「定点增益（纯乘常数）」组件列出贡献清单：Python 模型类、VHDL 实体、测试台 preScript、文档 md、config.tcl 需新增的行。",
+          "depends_on": [
+            "u3-l2",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "CI 流程与文档/依赖自动化",
+          "order": 2,
+          "filename": "u10-l2-ci-docs-dependencies.md",
+          "level": "advanced",
+          "topic": "讲 scripts/ciFlow.py 的 CI 流程（跑 Modelsim 回归 + Python 单测）、scripts/dependencies.py 的依赖检出、hdl2md 文档生成与 unittest。",
+          "learning_goals": [
+            "理解 CI 如何自动跑回归并据 ###ERROR### 与成功标志判定",
+            "掌握依赖检出脚本用法",
+            "了解 hdl2md 自动生成组件文档与 unittest/psi_fix_pkg_test.py"
+          ],
+          "source_files": [
+            "scripts/ciFlow.py",
+            "scripts/dependencies.py",
+            "scripts/hdl2md.py",
+            "unittest/psi_fix_pkg_test.py",
+            "sim/ci.do"
+          ],
+          "minimal_modules": [
+            "CI 回归流程",
+            "依赖检出",
+            "文档生成与单元测试"
+          ],
+          "practice_task": "阅读 ciFlow.py，说明它如何解析 Transcript.transcript 判定通过/失败，并指出 Python 单测（unittest）覆盖了库的哪一层。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

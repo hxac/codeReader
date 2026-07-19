@@ -1,0 +1,746 @@
+{
+  "project": "en_cl_fix",
+  "head": "7f7aa80f79caf9eefcbb9946feabc882b98bb4aa",
+  "rationale": "en_cl_fix 是一个跨语言（VHDL/MATLAB/Python）的位真定点运算库，学习曲线应先建立“格式-舍入-饱和”三大概念基础，再进入运行与测试流程，然后才深入核心的 resize 管线与运算函数，最后攻坚 Python wide_fxp 大位宽实现与 VHDL 架构取舍。因此单元划分遵循：Unit1（入门）讲清项目定位与 [S,I,F] 格式及舍入/饱和模式；Unit2 让读者在三种语言中真正跑通测试，体会“位真一致性”这一核心理念；Unit3 聚焦最核心的转换函数与 cl_fix_resize（舍入、饱和/回绕两讲拆开，因为它是整个库的心脏）；Unit4 覆盖加减乘、移位/均值/取反/绝对值及位操作，重点讲 ForAdd/ForSub/ForMult 等格式增长规则与“中间全精度 TempFmt 再 resize”统一模式；Unit5 讲文件 IO 与位真数据交换；Unit6 攻坚 Python 独有的 narrow(双精度浮点)/wide(任意精度整数) 双实现与 wide_fxp 类设计；Unit7 为专家层，剖析 VHDL 综合考量、s 变体资源优化、compare 偏移比较与 mean_angle 模运算、字符串解析与 generic 传参等架构级话题。讲义之间通过 depends_on 形成由浅入深的依赖链，每篇都绑定真实源码并给出可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门基础：项目与定点格式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与位真建模设计理念",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "介绍 en_cl_fix 是什么、为什么要用同一套算法的 VHDL/MATLAB/Python 位真实现来做协同仿真，以及仓库整体结构与版本策略。",
+          "learning_goals": [
+            "理解 en_cl_fix 的定位：在 VHDL/MATLAB/Python 三种语言中实现位真一致的定点运算",
+            "理解位真建模（bit-true co-simulation）的意义：在 MATLAB/Python 评估算法，再用 VHDL 实现并比对结果",
+            "掌握仓库目录结构：vhdl/python/matlab/sim/doc 各自职责",
+            "了解许可证、维护者、major.minor.bugfix 版本策略与 Changelog"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "General Information",
+            "Simulations and Testbenches",
+            "Tagging Policy",
+            "Changelog 版本历史"
+          ],
+          "practice_task": "克隆仓库后，列出 vhdl/src、python/src/en_cl_fix_pkg、matlab/src 三个目录中的源文件数量与命名规律，并在 README 中找到 Python 依赖与三种语言测试入口，写一段 100 字总结说明该库解决的核心问题。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "定点数格式 [S,I,F] 与 FixFormat 类型",
+          "order": 2,
+          "filename": "u1-l2-fixformat-type.md",
+          "level": "beginner",
+          "topic": "讲解 (Signed, IntBits, FracBits) 三元组如何定义定点格式，包括符号位、可负的整数位/小数位、位宽计算，并对比三种语言的类型定义。",
+          "learning_goals": [
+            "掌握 FixFormat(Signed, IntBits, FracBits) 三元组的含义及总位宽 = S+I+F",
+            "理解整数位、小数位均可为负的含义及其对位宽的影响",
+            "能在三种语言中识别 FixFormat_t(VHDL)/FixFormat(Python)/结构体(MATLAB)的定义",
+            "掌握 IntBits+FracBits 必须 ≥ 1 的约束"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py",
+            "matlab/src/cl_fix_format.m",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "FixFormat_t record 定义",
+            "FixFormat.__init__/width",
+            "cl_fix_format(MATLAB)",
+            "README Fixed Point Number Format"
+          ],
+          "practice_task": "在 Python 中构造 FixFormat(True,-2,3)、FixFormat(False,3,-1) 等边界格式，调用 width() 计算位宽，并手绘对应的二进制小数点位置图，验证 README 表格中的示例。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "格式查询、边界值与字符串转换函数",
+          "order": 3,
+          "filename": "u1-l3-format-helpers.md",
+          "level": "beginner",
+          "topic": "讲解围绕 FixFormat 的工具函数：位宽查询、零值/最大/最小值、最大/最小实数值，以及格式与字符串之间的互转。",
+          "learning_goals": [
+            "掌握 cl_fix_width 的实现（toInteger(Signed)+IntBits+FracBits）",
+            "理解 cl_fix_zero_value/max_value/min_value 返回的位模式（如有符号最大值最高位为 0）",
+            "掌握 cl_fix_max_real/min_real 的实数范围计算",
+            "了解 cl_fix_string_from_format 生成 (signed,int,frac) 字符串的用途"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "matlab/src/cl_fix_width.m",
+            "matlab/src/cl_fix_max_value.m",
+            "matlab/src/cl_fix_min_value.m",
+            "matlab/src/cl_fix_zero_value.m",
+            "matlab/src/cl_fix_string_from_format.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_width",
+            "cl_fix_zero_value/max_value/min_value",
+            "cl_fix_max_real/min_real",
+            "cl_fix_string_from_format"
+          ],
+          "practice_task": "用 Python 对 FixFormat(True,3,2) 计算 width、max_value、min_value，并打印 cl_fix_string_from_format 的结果；再在 VHDL 包体中找到对应实现并比对逻辑是否一致。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "舍入模式 FixRound",
+          "order": 4,
+          "filename": "u1-l4-rounding-modes.md",
+          "level": "beginner",
+          "topic": "系统讲解七种舍入模式（截断、非对称正/负、对称到无穷/零、收敛到偶/奇）及 Round_s 别名，结合 README 真值表理解差异。",
+          "learning_goals": [
+            "掌握 Trunc_s、NonSymPos_s、NonSymNeg_s、SymInf_s、SymZero_s、ConvEven_s、ConvOdd_s 的语义",
+            "理解 Round_s 是 NonSymPos_s 的别名（最常用）",
+            "能根据 README 真值表判断给定数值在 (true,2,0) 下各模式的舍入结果",
+            "了解资源使用建议：尽量用 Trunc_s，其次 NonSymPos_s"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py",
+            "matlab/src/cl_fix_constants.m",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "FixRound_t 枚举",
+            "Round_s 常量别名",
+            "FixRound(Python Enum)",
+            "Round.* 常量(MATLAB)",
+            "README Rounding 表"
+          ],
+          "practice_task": "对数值 2.2/2.7/-1.5/-0.5/0.5/1.5 分别写出七种舍入模式在 (true,2,0) 下的结果，与 README 表格逐项对照，并标注哪些模式会引入 1 LSB 的对称性差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "饱和模式 FixSaturate",
+          "order": 5,
+          "filename": "u1-l5-saturation-modes.md",
+          "level": "beginner",
+          "topic": "讲解四种饱和模式 None_s/Warn_s/Sat_s/SatWarn_s，区分回绕（wrap）与饱和（clip）行为及告警机制。",
+          "learning_goals": [
+            "掌握 None_s/Warn_s/Sat_s/SatWarn_s 四种模式的语义组合（是否饱和、是否告警）",
+            "理解饱和（clip 到最大/最小）与回绕（wrap，取模）的区别",
+            "了解 Python 中通过 warnings.warn、VHDL 中通过 assert severity warning 实现告警",
+            "理解 SatWarn_s 作为 cl_fix_from_real 等函数默认值的含义"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "matlab/src/cl_fix_constants.m"
+          ],
+          "minimal_modules": [
+            "FixSaturate_t 枚举",
+            "FixSaturate(Python Enum)",
+            "Sat.* 常量(MATLAB)",
+            "cl_fix_from_real 中的饱和告警逻辑"
+          ],
+          "practice_task": "在 Python 中对 FixFormat(False,2,2) 输入 4.2，分别用 None_s/Sat_s/SatWarn_s 调用 cl_fix_from_real，观察哪些情况产生 Warning、哪些把结果 clip 到 3.75，记录四种模式的输出差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "三种语言实现与测试流程",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Python 包结构与单元测试",
+          "order": 1,
+          "filename": "u2-l1-python-package-tests.md",
+          "level": "beginner",
+          "topic": "讲解 Python 实现的包结构、numpy 依赖、模块导出，以及如何运行 unittest 并读懂测试用例组织方式。",
+          "learning_goals": [
+            "掌握 python/src/en_cl_fix_pkg 的模块划分（types/pkg/wide_fxp）与 __init__ 的统一导出",
+            "理解 Python 实现依赖 numpy，且函数对数组做向量化运算",
+            "能运行 python/unittest/en_cl_fix_pkg_test.py 并理解按函数分组的 TestCase 结构",
+            "了解 cl_fix_random/cl_fix_write_formats 等仿真辅助函数（仅 Python 提供）"
+          ],
+          "source_files": [
+            "python/src/en_cl_fix_pkg/__init__.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/unittest/en_cl_fix_pkg_test.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "__init__.py 导出",
+            "numpy/warnings 导入",
+            "cl_fix_random",
+            "cl_fix_write_formats",
+            "unittest TestCase 分组"
+          ],
+          "practice_task": "在 python/unittest 目录运行 python3 en_cl_fix_pkg_test.py，确认全部通过；然后仿照现有用例为 cl_fix_width 新增一个针对 FixFormat(True,5,-3) 的测试方法并运行验证。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "VHDL 仿真流程与 testbench",
+          "order": 2,
+          "filename": "u2-l2-vhdl-sim-testbench.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 Modelsim 通过 sim/sim.tcl 编译并运行 VHDL testbench，理解 Check 系列过程与 ###ERROR### 检测机制。",
+          "learning_goals": [
+            "掌握 sim/sim.tcl 的工作流：vcom -2008 编译、vsim 运行、扫描 Transcript 判定成败",
+            "理解 testbench 中 CheckStdlv/CheckInt/CheckReal/CheckStdl/CheckBoolean 的断言式校验",
+            "了解 ###ERROR### 与 Fatal 关键字作为仿真失败标记的作用",
+            "理解 VHDL 包在 testbench 中通过 use work.en_cl_fix_pkg.all 引用"
+          ],
+          "source_files": [
+            "sim/sim.tcl",
+            "vhdl/tb/en_cl_fix_pkg_tb.vhd",
+            "vhdl/src/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "sim.tcl (vcom/vsim/regexp 检测)",
+            "CheckStdlv/CheckInt/CheckReal",
+            "p_control 进程",
+            "to_string 兼容函数"
+          ],
+          "practice_task": "阅读 sim.tcl 写出它判定“仿真成功/失败”的完整逻辑；然后在 testbench 的 cl_fix_width 测试段后，仿照格式新增一条对 cl_fix_width((true,4,4)) 的 CheckInt 断言，并说明若失败 transcript 会输出什么关键字。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "MATLAB 实现模型与使用方式",
+          "order": 3,
+          "filename": "u2-l3-matlab-model.md",
+          "level": "intermediate",
+          "topic": "讲解 MATLAB 实现的组织方式：单文件单函数、通过 cl_fix_constants 提供 Sat/Round 结构、help 文档注释，以及相对 VHDL 的功能子集。",
+          "learning_goals": [
+            "掌握 MATLAB 端必须先执行 cl_fix_constants 以建立 Sat.*/Round.* 结构的约定",
+            "理解 MATLAB 采用一个 .m 文件对应一个 cl_fix_ 函数的组织与 help 注释文档方式",
+            "了解 MATLAB 实现是功能子集（无 from_int/to_real/hex/bin 等），且当前无测试",
+            "能对照 cl_fix_from_real 理解 MATLAB 与 VHDL 的位真一致性来源（同样的 round 到无穷）"
+          ],
+          "source_files": [
+            "matlab/src/cl_fix_constants.m",
+            "matlab/src/cl_fix_format.m",
+            "matlab/src/cl_fix_resize.m",
+            "matlab/src/cl_fix_from_real.m",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "cl_fix_constants (Sat/Round)",
+            "cl_fix_format",
+            "cl_fix_from_real",
+            "cl_fix_resize 注释"
+          ],
+          "practice_task": "在 MATLAB 中先执行 cl_fix_constants，再用 cl_fix_format 和 cl_fix_from_real 将 -3.25 转入 (true,3,2) 格式；列出 MATLAB src 目录中相比 VHDL 缺失的函数名（如 to_real、from_hex 等），说明 MATLAB 是功能子集。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心转换与 resize 管线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "数值与字符串转换函数",
+          "order": 1,
+          "filename": "u3-l1-conversion-functions.md",
+          "level": "intermediate",
+          "topic": "讲解定点数与实数/整数/二进制/十六进制字符串/位整数之间的相互转换函数及其量化与饱和行为。",
+          "learning_goals": [
+            "掌握 cl_fix_from_real（half-up 量化+饱和）与 cl_fix_to_real 的实现",
+            "掌握 cl_fix_from_int/cl_fix_to_int 的整数转换与符号处理",
+            "理解 cl_fix_from_bin/to_bin、cl_fix_from_hex/to_hex 的字符串解析与长度校验",
+            "理解 cl_fix_from_bits_as_int/get_bits_as_int 用于高效文件读写的位整数表示"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "matlab/src/cl_fix_from_real.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_from_real/to_real",
+            "cl_fix_from_int/to_int",
+            "cl_fix_from_bin/to_bin",
+            "cl_fix_from_hex/to_hex",
+            "cl_fix_from_bits_as_int/get_bits_as_int"
+          ],
+          "practice_task": "用 Python 将实数 3.14 转入 (true,3,4)，再用 cl_fix_get_bits_as_int 取出位整数，再用 cl_fix_from_bits_as_int 还原，最后 cl_fix_to_real 验证往返一致性；记录每一步的值。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "cl_fix_resize 的舍入机制",
+          "order": 2,
+          "filename": "u3-l2-resize-rounding.md",
+          "level": "intermediate",
+          "topic": "深入 cl_fix_resize 的舍入实现：DropFracBits、NeedRound、HalfMinusDelta 常量以及各舍入模式如何通过加偏移再截断实现。",
+          "learning_goals": [
+            "理解 cl_fix_resize 是整个库最核心的函数，所有运算最终都落到它",
+            "掌握 DropFracBits、NeedRound、CarryBit 的含义与计算",
+            "理解 HalfMinusDelta（2^(DropFracBits-1)-1）常量的作用与 GetHalfMinusDelta 的实现",
+            "能对应七种舍入模式分别说明 VHDL 中加何种偏移（+1、+HalfMinusDelta、+符号修正等）"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/src/en_cl_fix_pkg/wide_fxp.py",
+            "matlab/src/cl_fix_resize.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_resize (VHDL)",
+            "GetHalfMinusDelta",
+            "NeedRound/CarryBit",
+            "cl_fix_resize(Python 舍入分支)",
+            "wide_fxp.resize 舍入分支"
+          ],
+          "practice_task": "对输入 (true,3,4) 的值 resize 到 (true,3,1)，分别用七种舍入模式在 Python 中运行，并在 VHDL 源码中定位每种模式对应的 temp_v 加偏移语句，写一张“模式→偏移表达式”对照表。",
+          "depends_on": [
+            "u1-l4",
+            "u1-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "cl_fix_resize 的饱和与回绕",
+          "order": 3,
+          "filename": "u3-l3-resize-saturation.md",
+          "level": "intermediate",
+          "topic": "深入 cl_fix_resize 的饱和/回绕实现：TempFmt 中间格式、CarryBit/AddSignBit、CutIntSignBits 检测，以及有/无符号输出的 clip 逻辑。",
+          "learning_goals": [
+            "理解 resize 先放入足够宽的 TempFmt（满足输入位宽与结果位宽并预留 carry/sign）再做舍入与饱和",
+            "掌握 CarryBit、AddSignBit 两个额外位的来源与作用",
+            "理解 CutIntSignBits_c 用来判定是否发生溢出（高位既非全 0 也非全 1）",
+            "掌握有符号/无符号输出的饱和 clip 实现（高位取反填充并设置饱和边界）"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/src/en_cl_fix_pkg/wide_fxp.py"
+          ],
+          "minimal_modules": [
+            "TempFmt_c 计算",
+            "CarryBit_c/AddSignBit_c",
+            "CutIntSignBits_c",
+            "饱和 clip 分支(有/无符号)",
+            "Python wrap 与 wide_fxp wrap"
+          ],
+          "practice_task": "构造一个会溢出的场景：把 (true,4,0) 的大正值 resize 到 (true,2,0) 并用 Sat_s，分别预测有符号饱和结果；再改成 None_s 观察回绕结果，对照 VHDL CutIntSignBits 分支解释为何 clip 到最大值。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "取整辅助、比较与范围检查",
+          "order": 4,
+          "filename": "u3-l4-helpers-compare-range.md",
+          "level": "intermediate",
+          "topic": "讲解基于 resize 的取整辅助函数 fix/floor/ceil/round、范围检查 cl_fix_in_range 与比较 cl_fix_compare。",
+          "learning_goals": [
+            "理解 cl_fix_fix/floor/ceil/round 都是把小数位置零并隐式使用特定舍入模式的 resize",
+            "掌握 cl_fix_in_range 通过先 resize 到带额外整数位的中间格式再比较上下界来判断可表示性",
+            "理解 cl_fix_compare 用统一 FullFmt 对齐后再比较，支持 a=b/<>/<=/>=/!= 六种运算",
+            "了解这些辅助函数与 Python/MATLAB 对应实现的一致性"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "matlab/src/cl_fix_fix.m",
+            "matlab/src/cl_fix_in_range.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_fix/floor/ceil/round",
+            "cl_fix_in_range",
+            "cl_fix_compare"
+          ],
+          "practice_task": "用 cl_fix_in_range 检查 (true,4,4) 的若干值是否能在不饱和下表示到 (true,3,2)；再用 cl_fix_compare 对两个不同格式的数做 a<b 比较，理解 FullFmt 对齐的必要性。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "定点运算与位操作",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "加减法与 addsub/saddsub",
+          "order": 1,
+          "filename": "u4-l1-add-sub.md",
+          "level": "intermediate",
+          "topic": "讲解加减法如何通过 ForAdd/ForSub 计算中间格式、在 TempFmt 上做无精度损失运算，再 resize 到结果，以及 addsub/saddsub 变体。",
+          "learning_goals": [
+            "掌握 FixFormat.ForAdd（IntBits+1, frac 取大, signed 取或）与 ForSub 的格式增长规则",
+            "理解 cl_fix_add/sub 先 resize 两操作数到 TempFmt 再用 signed/unsigned 做加减的统一模式",
+            "理解 cl_fix_addsub 通过 add 选择信号在加法/减法间切换",
+            "理解 cl_fix_saddsub 用按位取反 b 再加法的资源优化思路及其 1 LSB 误差代价"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py",
+            "matlab/src/cl_fix_add.m",
+            "matlab/src/cl_fix_sub.m"
+          ],
+          "minimal_modules": [
+            "FixFormat.ForAdd/ForSub",
+            "cl_fix_add/sub",
+            "cl_fix_addsub_internal",
+            "cl_fix_addsub/saddsub"
+          ],
+          "practice_task": "选定 aFmt=(true,3,5)、bFmt=(false,-2,8)，手算 ForAdd 与 ForSub 的中间格式；在 Python 中运行 cl_fix_add 与 cl_fix_saddsub 比较结果差异，验证 s 变体在减法时的 1 LSB 误差。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "乘法 cl_fix_mult",
+          "order": 2,
+          "filename": "u4-l2-multiply.md",
+          "level": "intermediate",
+          "topic": "讲解定点乘法的格式增长规则 ForMult、有符号/无符号四种组合的处理，以及先全精度相乘再 resize 的模式。",
+          "learning_goals": [
+            "掌握 FixFormat.ForMult（IntBits 相加+1 符号位、FracBits 相加、结果有符号）",
+            "理解 cl_fix_mult 根据 a/b 是否有符号选择 signed/unsigned 乘法及必要的 0 扩展",
+            "理解乘法结果在 TempFmt 上是精确的，误差只来自最终 resize 的舍入/饱和",
+            "了解资源建议：乘法后优先用 Trunc_s"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py",
+            "matlab/src/cl_fix_mult.m"
+          ],
+          "minimal_modules": [
+            "FixFormat.ForMult",
+            "cl_fix_mult (VHDL 四种符号组合)",
+            "cl_fix_mult (Python)"
+          ],
+          "practice_task": "用 VHDL 注释中的乘法示例（OpAFmt=(true,3,5), OpBFmt=(true,2,8)）手算 ForMult 的精确结果格式，在 Python 中用 cl_fix_mult 做该乘法并 cl_fix_to_real 打印结果，验证 IntBits/FracBits 增长。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "移位、均值、取反与绝对值",
+          "order": 3,
+          "filename": "u4-l3-shift-mean-abs-neg.md",
+          "level": "intermediate",
+          "topic": "讲解 cl_fix_shift（无损移位再 resize）、cl_fix_mean（相加后右移一位）、cl_fix_neg/abs 及其 sneg/sabs 资源优化变体。",
+          "learning_goals": [
+            "掌握 FixFormat.ForShift 与 cl_fix_shift 的无损移位语义（左移为正，改变格式而非截断）",
+            "理解 cl_fix_mean = cl_fix_add 后 shift(-1)，以及均值需要多一个整数位",
+            "掌握 cl_fix_neg/abs 需要额外整数位以容纳最负值的取反/绝对值",
+            "理解 sneg/sabs/saddsub 等 s 变体用按位取反换取资源/时序优化，代价是 1 LSB 误差"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py",
+            "matlab/src/cl_fix_shift.m",
+            "matlab/src/cl_fix_mean.m",
+            "matlab/src/cl_fix_abs.m",
+            "matlab/src/cl_fix_neg.m"
+          ],
+          "minimal_modules": [
+            "FixFormat.ForShift",
+            "cl_fix_shift",
+            "cl_fix_mean",
+            "cl_fix_neg/abs",
+            "cl_fix_sneg/sabs"
+          ],
+          "practice_task": "对一个 (true,3,4) 的负数分别用 cl_fix_abs 与 cl_fix_sabs 取绝对值到同一结果格式，比较结果是否相差 1 LSB；再用 cl_fix_shift 左移 2 位，验证 ForShift 格式变化但数值无损。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "位操作与字段提取组合",
+          "order": 4,
+          "filename": "u4-l4-bit-manipulation.md",
+          "level": "intermediate",
+          "topic": "讲解按 MSB/LSB 索引读写单个位的函数，以及符号位/整数位/小数位的提取与重新组合。",
+          "learning_goals": [
+            "掌握 cl_fix_get_msb/get_lsb/set_msb/set_lsb 的索引约定（MSB 从 0 起 vs LSB 从 0 起）",
+            "理解 cl_fix_sign/int/frac 提取字段时的边界与负整数位/小数位处理",
+            "掌握 cl_fix_combine 将 sign/int/frac 重新拼接为定点数的逻辑与无符号约束",
+            "了解 Python 端这些函数对 wide_fxp 与 ndarray 的两种实现路径"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "matlab/src/cl_fix_get_msb.m",
+            "matlab/src/cl_fix_combine.m",
+            "matlab/src/cl_fix_sign.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_get/set_msb/lsb",
+            "cl_fix_sign/int/frac",
+            "cl_fix_combine"
+          ],
+          "practice_task": "在 Python 中对一个 (true,3,4) 的值，依次用 cl_fix_sign、cl_fix_int、cl_fix_frac 提取三段，再用 cl_fix_combine 重组，验证重组结果与原值相等；然后尝试用 cl_fix_set_msb 翻转最高符号位观察数值变化。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "文件 IO 与位真数据交换",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "文件读写与位真数据交换",
+          "order": 1,
+          "filename": "u5-l1-file-io.md",
+          "level": "intermediate",
+          "topic": "讲解 VHDL/Python/MATLAB 中的文件读写函数（int/real/bin/hex）及 cl_fix_write_formats，用于 testbench 间的位真数据交换，并说明其已弃用趋势。",
+          "learning_goals": [
+            "掌握 cl_fix_read_int/real/bin/hex 与 cl_fix_write_int/real/bin/hex 的读写流程（基于 std.textio）",
+            "理解 write 函数先将数据 resize 到 f_fmt 再写出，1 对应 f_fmt 的一个 LSB",
+            "了解 cl_fix_write_formats 写出格式定义文件用于跨语言数据交换",
+            "理解这些函数标注 deprecated，官方推荐改用 en_cl_bittrue_pkg 进行位真数据交换"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "matlab/src/cl_fix_write_real.m",
+            "matlab/src/cl_fix_write_int.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_read/write_int/real/bin/hex",
+            "cl_fix_write_formats",
+            "std.textio",
+            "deprecated/en_cl_bittrue_pkg"
+          ],
+          "practice_task": "用 Python 的 cl_fix_write_formats 写出一个格式定义文件，并手写一个小型定点数据集；说明若用 VHDL 的 cl_fix_read_int 读取该数据需要怎样的文件格式与 f_fmt 约定，并解释为何官方推荐迁移到 en_cl_bittrue_pkg。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Python wide_fxp 与大位宽实现",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "narrow/wide 双实现与自动派发",
+          "order": 1,
+          "filename": "u6-l1-narrow-wide-dispatch.md",
+          "level": "advanced",
+          "topic": "讲解 Python 实现为何区分 narrow（双精度浮点）与 wide（任意精度整数）两条路径、53 位边界判定 cl_fix_is_wide，以及函数内部的自动派发。",
+          "learning_goals": [
+            "理解 IEEE754 双精度只能精确表示 53 位整数，故位宽 > 53 必须走 wide 路径",
+            "掌握 cl_fix_is_wide 的判定逻辑及其在 cl_fix_from_real/resize/运算中的派发作用",
+            "理解 wide_fxp 内部以未归一化的大整数存储（如 1.25 在 (0,2,4) 存为 20）",
+            "掌握 FromFxp/FromNarrowFxp/to_narrow_fxp 在两条路径间转换的方法"
+          ],
+          "source_files": [
+            "python/src/en_cl_fix_pkg/en_cl_fix_pkg.py",
+            "python/src/en_cl_fix_pkg/wide_fxp.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py"
+          ],
+          "minimal_modules": [
+            "cl_fix_is_wide",
+            "cl_fix_from_real/resize 中的 wide 分支",
+            "wide_fxp.FromFloat/FromNarrowFxp/FromFxp",
+            "to_narrow_fxp"
+          ],
+          "practice_task": "构造一个 60 位格式 FixFormat(False,40,20)，用 cl_fix_from_real 写入一个大数，观察函数如何经 cl_fix_is_wide 派发到 wide_fxp.FromFloat；打印内部 data（大整数）并与 to_narrow_fxp 的近似浮点值对比，说明精度差异。",
+          "depends_on": [
+            "u3-l2",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "wide_fxp 任意精度类设计",
+          "order": 2,
+          "filename": "u6-l2-wide-fxp-class.md",
+          "level": "advanced",
+          "topic": "深入 wide_fxp 类：内部整数存储、resize 的整数位运算实现、运算符重载与对齐小数点，以及 numpy 互操作（__array_function__、np.where）和 uint64 数组打包。",
+          "learning_goals": [
+            "理解 wide_fxp 用 dtype=object 的 numpy 数组存任意精度整数，resize 用 >>和+偏移实现舍入、用取模实现回绕",
+            "掌握 +、-、*、比较运算符通过 AlignBinaryPoints 对齐小数点后在整数上运算的设计",
+            "理解 __array_function__ 机制使 np.where/np.array_equal 能作用于 wide_fxp 对象",
+            "掌握 to_uint64_array/FromUint64Array 用于与 MATLAB 等交换大位宽数据的打包方式"
+          ],
+          "source_files": [
+            "python/src/en_cl_fix_pkg/wide_fxp.py",
+            "python/src/en_cl_fix_pkg/en_cl_fix_types.py"
+          ],
+          "minimal_modules": [
+            "wide_fxp.__init__/_data/_fmt",
+            "wide_fxp.resize (整数实现)",
+            "__add__/__sub__/__mul__",
+            "AlignBinaryPoints",
+            "__array_function__/np.where 实现",
+            "to_uint64_array/FromUint64Array"
+          ],
+          "practice_task": "创建两个不同格式的 wide_fxp 对象（均 > 53 位），用 + 运算符相加，单步推理 AlignBinaryPoints 如何对齐小数点、__add__ 如何在整数上完成加法；再用 to_uint64_array 打包结果并说明每行 uint64 的权重含义。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "架构深度与扩展",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "VHDL TempFmt 全精度中间格式与综合考量",
+          "order": 1,
+          "filename": "u7-l1-vhdl-tempfmt-synthesis.md",
+          "level": "advanced",
+          "topic": "从架构层面总结 VHDL 实现的统一模式：所有运算先 resize 到足够大的 TempFmt 做无精度损失计算，再 resize 到结果；并讲解综合导向的取舍。",
+          "learning_goals": [
+            "总结“中间全精度 TempFmt → 精确运算 → resize 舍入/饱和”这一贯穿全库的统一架构模式",
+            "理解 cl_fix_add/sub/mult/shift 中 TempFmt_c 的构造思路与各运算的位增长规则",
+            "理解 -- synthesis translate_off 注释包裹 Warn_s 分支以避免综合生成额外硬件的做法",
+            "掌握 s 变体（sneg/sabs/saddsub）用按位取反牺牲 1 LSB 精度换取面积/时序的设计取舍"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "TempFmt_c 构造模式",
+            "CarryBit_c/Saturate_c/Grow_c",
+            "synthesis translate_off",
+            "s 变体实现"
+          ],
+          "practice_task": "选取 cl_fix_add、cl_fix_sub、cl_fix_mult 三个函数，画出各自的 TempFmt_c → 运算 → cl_fix_resize 数据流图，并标注 synthesis translate_off 影响的范围；总结一句“为什么所有运算最终都汇聚到 cl_fix_resize”。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "cl_fix_compare 比较与 mean_angle 模运算",
+          "order": 2,
+          "filename": "u7-l2-compare-mean-angle.md",
+          "level": "advanced",
+          "topic": "剖析两个较精巧的算法：cl_fix_compare 用翻转符号位转无符号偏移比较，cl_fix_mean_angle 处理角度/模运算下的均值与跨象限修正。",
+          "learning_goals": [
+            "理解 cl_fix_compare 通过翻转最高符号位将有符号比较转化为无符号偏移比较的技巧",
+            "掌握 cl_fix_compare 先用 FullFmt 对齐两数再比较的流程与六种运算符",
+            "理解 cl_fix_mean_angle 在两数符号不同时的象限修正（precise 与非 precise 两种精度）",
+            "了解 mean_angle 对 a/b 格式一致性与最小 2 位宽的约束"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd",
+            "matlab/src/cl_fix_mean_angle.m"
+          ],
+          "minimal_modules": [
+            "cl_fix_compare (符号位翻转)",
+            "cl_fix_mean_angle (differentSigns 修正)",
+            "precise 分支"
+          ],
+          "practice_task": "构造两个接近 ±π 的角度定点数（同格式），分别用 cl_fix_mean 与 cl_fix_mean_angle(precise=true/false) 求平均，对比结果差异；并解释 cl_fix_compare 为何翻转符号位后用 unsigned 比较等价于有符号比较。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "字符串解析工具与 generic 传参",
+          "order": 3,
+          "filename": "u7-l3-string-parsing-generics.md",
+          "level": "advanced",
+          "topic": "讲解 VHDL 内部的字符串解析工具链（toLower、string_find_next_match、string_parse_boolean/int）及其用途：把格式以字符串 generic 传入仿真。",
+          "learning_goals": [
+            "掌握 cl_fix_format_from_string 如何从 (signed,int,frac) 字符串解析出 FixFormat_t",
+            "理解内部辅助函数 toLower/string_find_next_match/string_parse_boolean/string_parse_int 的协作",
+            "了解 Modelsim 只支持 integer/string/boolean generic，故需用字符串传递格式的工程背景",
+            "理解字符串解析的健壮性处理（空格、负号、大小写、缺失分隔符的 assert）"
+          ],
+          "source_files": [
+            "vhdl/src/en_cl_fix_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "cl_fix_format_from_string",
+            "string_parse_boolean/string_parse_int",
+            "toLower/string_find_next_match",
+            "assert 健壮性检查"
+          ],
+          "practice_task": "在 VHDL testbench 中用 cl_fix_format_from_string 解析字符串 \"(true,3,4)\" 得到 FixFormat_t，再用 cl_fix_string_from_format 反向输出验证往返一致；并追踪 string_parse_boolean 如何借助 toLower 实现大小写不敏感。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
