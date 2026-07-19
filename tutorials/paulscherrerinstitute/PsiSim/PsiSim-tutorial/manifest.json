@@ -1,0 +1,558 @@
+{
+  "project": "PsiSim",
+  "head": "434f6a9bd8c79c7d20522344996635516fc95392",
+  "rationale": "PsiSim 是一个单文件 TCL 框架（PsiSim.tcl，约 966 行），但概念密度高：它用 psi::sim 命名空间封装了一整套 VHDL 回归测试流程，内部由两层构成——面向用户的接口函数和屏蔽三种仿真器（Modelsim/GHDL/Vivado）差异的 SAL 抽象层，并维护 Sources 与 TbRuns 两个核心数据模型。因此学习路线按\"先用起来→理解配置与数据模型→深入 SAL 机制→扩展与实践\"四层递进设计。单元 1（入门）帮助读者从零建立认知：项目定位、仓库结构、两文件工作流（config.tcl + run.tcl）、命令全景。单元 2（进阶）拆解配置阶段的核心：命名空间与状态变量、Sources/TbRuns 两个 dict 数据模型、消息抑制、编译过滤、run_tb 遍历与脚本钩子、错误检查。单元 3（专家）专门讲 SAL 的 dispatch 模式，逐层剖析 transcript/日志/版本处理、编译抽象、仿真运行抽象和交互调试。单元 4（专家）面向二次开发与最佳实践：嵌套多库工程、GHDL/GTKWave 完整工作流、扩展新仿真器与架构取舍。讲义依赖形成无环 DAG，保证读者可按序逐篇阅读，每篇只解决一个独立问题并配有结合真实源码的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 PsiSim 并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "PsiSim 是什么——一个用 TCL 编写的 VHDL 回归测试框架，支持 Modelsim/GHDL/Vivado 三种仿真器，让仿真脚本对版本控制友好、易于合并。",
+          "learning_goals": [
+            "理解 PsiSim 解决的核心问题与适用场景",
+            "了解 PsiSim 支持的三种仿真器及其各自特点",
+            "认识 PsiSim 的作者、维护者、许可证与版本演进"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "PsiSim 的定位与解决的问题",
+            "三种仿真器对比 (Modelsim/GHDL/Vivado)",
+            "许可证与版本号策略"
+          ],
+          "practice_task": "阅读 README.md 与 Changelog.md，列出 PsiSim 当前支持的三种仿真器，并用一句话说明为什么 PsiSim 写出的脚本比 Modelsim/Vivado 工程文件更适合版本控制和合并。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与文件组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "PsiSim 仓库里有哪些文件，核心源码 PsiSim.tcl 的整体分区（namespace 变量、SAL 抽象层、接口函数），以及各文档文件的作用。",
+          "learning_goals": [
+            "看懂 PsiSim 仓库的目录与文件布局",
+            "理解 PsiSim.tcl 的三大分区：状态变量、SAL、接口函数",
+            "区分 README/CommandRef/Changelog 等文档的用途"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "README.md",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "仓库文件清单与用途",
+            "PsiSim.tcl 的分区结构总览",
+            "命令分类速览"
+          ],
+          "practice_task": "打开 PsiSim.tcl，定位三大分区（namespace variables / Simulator Abstraction Layer / Interface Functions）的起始行号，并画一张简单的文件结构示意图。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "两文件工作流与首次运行",
+          "order": 3,
+          "filename": "u1-l3-two-file-workflow.md",
+          "level": "beginner",
+          "topic": "PsiSim 的核心用法是把仿真拆成 config.tcl（描述文件/测试台/运行）和 run.tcl（初始化+编译+运行+检查）两个文件，借助 README 示例跑通第一个回归测试。",
+          "learning_goals": [
+            "理解 config.tcl 与 run.tcl 的职责划分",
+            "掌握一次完整回归测试的命令序列 (init/source/compile_files/run_tb/run_check_errors)",
+            "了解嵌套调用与可合并性的来源"
+          ],
+          "source_files": [
+            "README.md",
+            "PsiSim.tcl"
+          ],
+          "minimal_modules": [
+            "config.tcl 的职责",
+            "run.tcl 的标准命令序列",
+            "嵌套与多库调用"
+          ],
+          "practice_task": "参照 README 示例，为一段已有的 VHDL 工程（哪怕只有一两个文件）编写最小化的 config.tcl 和 run.tcl，并写出你在 Modelsim 控制台执行的命令顺序。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "命令参考地图",
+          "order": 4,
+          "filename": "u1-l4-command-reference-map.md",
+          "level": "beginner",
+          "topic": "CommandRef.md 如何组织 PsiSim 的全部命令（通用/配置/运行三类），以及如何在深入源码前先通过文档建立命令全景图。",
+          "learning_goals": [
+            "掌握 CommandRef.md 的命令分类结构",
+            "建立 psi::sim 命令的全景认知",
+            "学会通过文档快速定位某命令的用法与参数"
+          ],
+          "source_files": [
+            "CommandRef.md",
+            "PsiSim.tcl"
+          ],
+          "minimal_modules": [
+            "命令三大分类",
+            "命令与源码 proc 的对应关系",
+            "如何用文档驱动源码阅读"
+          ],
+          "practice_task": "浏览 CommandRef.md，把所有命令分成'配置阶段'和'运行阶段'两类填入一张表，并在 PsiSim.tcl 中找到每个命令对应 proc 的行号。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心数据模型与配置链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "命名空间、状态变量与 init",
+          "order": 1,
+          "filename": "u2-l1-namespace-state-init.md",
+          "level": "intermediate",
+          "topic": "深入 psi::sim 命名空间的实现：namespace eval/variable/export 机制、全部状态变量的含义，以及 init 命令如何选择仿真器并重置状态。",
+          "learning_goals": [
+            "理解 TCL namespace eval/variable/export 在 PsiSim 中的用法",
+            "掌握全部状态变量 (Libraries/Sources/TbRuns/CompileSuppress/RunSuppress/Simulator 等) 的作用",
+            "读懂 init 的参数解析 (-ghdl/-vivado) 与状态重置逻辑"
+          ],
+          "source_files": [
+            "PsiSim.tcl"
+          ],
+          "minimal_modules": [
+            "namespace 机制与导出",
+            "状态变量清单与用途",
+            "init 的参数解析与状态重置"
+          ],
+          "practice_task": "在 PsiSim.tcl 中为每个状态变量写一句注释说明它存储什么，然后解释为什么 init 必须是脚本里第一个被调用的命令。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "库与源文件管理（Sources 数据模型）",
+          "order": 2,
+          "filename": "u2-l2-library-and-sources.md",
+          "level": "intermediate",
+          "topic": "add_library 与 add_sources 如何构建 Sources 数据模型：每个源文件是一个 dict (PATH/LIBRARY/TAG/LANGUAGE/VERSION/OPTIONS)，以及 add_sources 的参数解析与 glob 通配符支持。",
+          "learning_goals": [
+            "掌握 Sources 列表中每个 dict 的结构",
+            "理解 add_sources 的 -lib/-tag/-language/-version/-options 参数解析",
+            "学会使用 glob 模式批量添加文件并理解文件去重警告"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "add_library 与 CurrentLib",
+            "Sources dict 数据模型",
+            "add_sources 参数解析与 glob"
+          ],
+          "practice_task": "写一段 add_sources 调用，用 glob 模式一次性把某目录下所有 .vhd 文件加到指定库并打上 -tag src；然后用 dict 的思路画出添加后 Sources 中一个元素的结构。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "测试运行定义（TbRuns 数据模型）",
+          "order": 3,
+          "filename": "u2-l3-tb-run-definition.md",
+          "level": "intermediate",
+          "topic": "create_tb_run/add_tb_run 及夹在中间的配置命令 (tb_run_add_arguments/pre_script/post_script/time_limit/skip) 如何构建 ThisTbRun 并最终落入 TbRuns。",
+          "learning_goals": [
+            "掌握 ThisTbRun 与 TbRuns 的 dict 字段结构",
+            "理解 create_tb_run → 配置命令 → add_tb_run 的两段式编程模型",
+            "学会用多组 generics、前后脚本和 skip 灵活定义测试运行"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "ThisTbRun dict 的字段",
+            "两段式配置命令",
+            "多组 generics 与脚本钩子"
+          ],
+          "practice_task": "为一个测试台定义两个 tb_run：一个带 pre_script，一个用 tb_run_add_arguments 传入三组不同 generics；再写出一个用 tb_run_skip 跳过 Vivado 的 run。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "消息抑制机制",
+          "order": 4,
+          "filename": "u2-l4-message-suppression.md",
+          "level": "intermediate",
+          "topic": "compile_suppress 与 run_suppress 如何把消息编号拼接到 CompileSuppress/RunSuppress 字符串中（含 regexp 去重），并在编译/运行阶段传给底层仿真器。",
+          "learning_goals": [
+            "理解 compile_suppress/run_suppress 的字符串拼接实现",
+            "掌握用 regexp 做去重的逻辑",
+            "了解抑制字符串如何衔接到编译/运行流程"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "消息编号的拼接与去重",
+            "CompileSuppress/RunSuppress 的用途",
+            "与 SAL 的衔接"
+          ],
+          "practice_task": "跟踪一次 compile_suppress 135,1236 调用，写出 CompileSuppress 变量在调用前后的字符串值变化，并解释去重 regexp 为什么加 -nocase。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "编译流程与过滤",
+          "order": 5,
+          "filename": "u2-l5-compile-pipeline.md",
+          "level": "intermediate",
+          "topic": "compile_files（内部 compile）与 clean_libraries 如何遍历 Sources，按 -all/-lib/-tag/-contains 过滤后调用 SAL 的 sal_compile_file。",
+          "learning_goals": [
+            "掌握 compile 命令的多维过滤逻辑",
+            "理解 compile_files 包装 compile 的原因（避免与 Modelsim 的 compile 命名冲突）",
+            "了解 clean_libraries 的清理机制"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "compile 的过滤参数",
+            "compile_files 包装与 eval",
+            "clean_libraries 清理"
+          ],
+          "practice_task": "解释 compile_files -all -tag src -contains fifo 会编译哪些文件，并说明为什么同时存在 compile 和 compile_files 两个名字。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "仿真运行与脚本钩子（run_tb）",
+          "order": 6,
+          "filename": "u2-l6-run-tb-and-hooks.md",
+          "level": "intermediate",
+          "topic": "run_tb 如何遍历 TbRuns，按 -all/-lib/-name/-contains 过滤、处理 skip、执行 pre/post script，并对每组 tb_args 调用 sal_run_tb。",
+          "learning_goals": [
+            "掌握 run_tb 的过滤与遍历逻辑",
+            "理解 pre/post script 的执行时机（对每组参数只跑一次脚本）",
+            "了解 tb_run_skip 在运行阶段如何生效"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "run_tb 的过滤与遍历",
+            "pre/post script 执行时机",
+            "skip 与多组参数"
+          ],
+          "practice_task": "给定一个含 3 个 run 的 TbRuns（其中一个 skip=GHDL，一个带 2 组 args），跟踪 run_tb -all 的执行顺序，画出每次 sal_run_tb 的调用次数与参数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "错误检查与 transcript",
+          "order": 7,
+          "filename": "u2-l7-error-checking.md",
+          "level": "intermediate",
+          "topic": "run_check_errors 如何读取 Transcript.transcript，用正则匹配错误字符串（含 Fatal:）判定回归是否通过，以及为什么推荐用 ###ERROR### 这种独特模式。",
+          "learning_goals": [
+            "理解 run_check_errors 的正则匹配逻辑",
+            "掌握错误模式选择原则以避免误报",
+            "了解 transcript 文件的作用与命令行过滤"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "transcript 读取与命令行过滤",
+            "正则匹配错误字符串",
+            "错误模式选择原则"
+          ],
+          "practice_task": "构造一段同时含 'Checking zero Position Error' 和 '###ERROR###' 的假 transcript，运行 run_check_errors '###ERROR###'，并解释为什么用 'Error' 作模式会误判。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：模拟器抽象层（SAL）",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SAL 设计与 dispatch 模式",
+          "order": 1,
+          "filename": "u3-l1-sal-overview.md",
+          "level": "advanced",
+          "topic": "模拟器抽象层（SAL）的设计思想：用 Simulator 变量在每个 sal_* proc 内 if/elseif dispatch 到 Modelsim/GHDL/Vivado 三套实现，统一接口屏蔽差异。",
+          "learning_goals": [
+            "理解 SAL 的抽象目的与边界",
+            "掌握 if/elseif dispatch 模式与 Simulator 变量",
+            "认识 SAL 中统一的错误处理范式（Unsupported Simulator）"
+          ],
+          "source_files": [
+            "PsiSim.tcl"
+          ],
+          "minimal_modules": [
+            "SAL 的设计目标",
+            "dispatch 模式与 Simulator 变量",
+            "统一错误处理"
+          ],
+          "practice_task": "列出所有 sal_* proc，按'仅 Modelsim / Modelsim+GHDL+Vivado 共用 / GHDL 独有'分类，并说明 dispatch 的判断依据。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "transcript、日志与版本处理",
+          "order": 2,
+          "filename": "u3-l2-transcript-log-version.md",
+          "level": "advanced",
+          "topic": "sal_print_log / transcript 系列（off/on/set_file/clean）如何统一日志输出，sal_init_simulator 如何探测 Modelsim 版本，sal_version_specific_flags 如何按版本返回 -novopt。",
+          "learning_goals": [
+            "掌握 transcript 文件机制与 batch_mode 处理",
+            "理解 Modelsim 版本探测的'文件中转'技巧",
+            "了解版本相关 flag 的返回逻辑"
+          ],
+          "source_files": [
+            "PsiSim.tcl"
+          ],
+          "minimal_modules": [
+            "日志与 transcript 抽象",
+            "Modelsim 版本探测",
+            "版本相关 flag"
+          ],
+          "practice_task": "解释 sal_clean_transcript 在 batch mode 下行为为何不同，并跟踪 sal_init_simulator 如何用正则从 vcom -version 的输出中提取版本号。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "编译抽象（sal_compile_file / sal_clean_lib）",
+          "order": 3,
+          "filename": "u3-l3-sal-compile.md",
+          "level": "advanced",
+          "topic": "sal_compile_file 如何把统一的 (lib/path/language/version/options) 映射到 Modelsim vcom/vlog、GHDL ghdl -a（含 2002/2008 双编译）、Vivado xvhdl；sal_clean_lib 如何清理库目录。",
+          "learning_goals": [
+            "掌握三种仿真器编译命令的差异",
+            "理解 GHDL 2002/2008 双编译与 --workdir 子目录机制",
+            "了解 Vivado xvhdl 的 --2008 与用 eval 处理空 langArg"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "Modelsim vcom/vlog",
+            "GHDL ghdl -a 双版本编译",
+            "Vivado xvhdl 与空 langArg"
+          ],
+          "practice_task": "对同一个 VHDL-2008 文件，写出 Modelsim/GHDL/Vivado 三种仿真器在 sal_compile_file 中实际执行的具体命令，并解释 GHDL 为何要同时编译 2002 和 2008。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "仿真运行抽象（sal_run_tb）",
+          "order": 4,
+          "filename": "u3-l4-sal-run-tb.md",
+          "level": "advanced",
+          "topic": "sal_run_tb 如何把统一的 TB 运行映射到 Modelsim vsim、GHDL --elab-run（含 --stop-time/--wave）、Vivado xelab+xsim（含 initfile workaround 与 generic 转换）。",
+          "learning_goals": [
+            "掌握三种仿真器的仿真运行命令",
+            "理解 Vivado 的 initfile workaround 与 -generic_top 转换",
+            "了解 GHDL 的 stop-time 与波形参数处理"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "Modelsim vsim 流程",
+            "GHDL --elab-run 与时间/波形",
+            "Vivado xelab/xsim 与 generic 转换"
+          ],
+          "practice_task": "跟踪一次带 generics (-gClockRatio_g=3) 和时间限制的 sal_run_tb，写出 Vivado 分支如何把 -g 参数转成 -generic_top，以及生成的 psi_sim_run.tcl 内容。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "交互调试（launch_tb / 波形）",
+          "order": 5,
+          "filename": "u3-l5-launch-tb-debug.md",
+          "level": "advanced",
+          "topic": "launch_tb 如何启动（但不执行）一个 TB 用于交互调试，参数解析 (-contains/-argidx/-wave/-show)，以及 Modelsim (sal_launch_tb) 与 GHDL (.ghw 波形 + sal_open_wave GTKWave) 的差异和推荐工作流。",
+          "learning_goals": [
+            "掌握 launch_tb 的参数解析与 -wave/-show 组合处理",
+            "理解 Modelsim 与 GHDL 调试路径的差异",
+            "学会 GHDL/GTKWave 的迭代调试工作流"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "launch_tb 参数解析",
+            "Modelsim 交互 vs GHDL 波形",
+            "GTKWave 迭代工作流"
+          ],
+          "practice_task": "描述 launch_tb -contains fifo -argidx 1 -wave -show 在 Modelsim 和 GHDL 下分别会发生什么，并复述 CommandRef 中的 GHDL/GTK 迭代调试步骤。",
+          "depends_on": [
+            "u3-l4",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：扩展、实践与架构取舍",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "嵌套配置与多库项目实践",
+          "order": 1,
+          "filename": "u4-l1-nesting-multilib.md",
+          "level": "advanced",
+          "topic": "如何利用 config.tcl/run.tcl 拆分实现库级与项目级嵌套回归，结合 add_library 多库、-tag 分组编译、-contains 局部编译，构建可维护的多库仿真工程。",
+          "learning_goals": [
+            "掌握 config.tcl/run.tcl 嵌套调用模式",
+            "学会多库工程的组织与 -tag 分组",
+            "理解 -contains 局部编译如何加速开发迭代"
+          ],
+          "source_files": [
+            "README.md",
+            "PsiSim.tcl",
+            "CommandRef.md"
+          ],
+          "minimal_modules": [
+            "库级与项目级嵌套",
+            "多库与 -tag 分组",
+            "-contains 局部迭代"
+          ],
+          "practice_task": "设计一个含两个子库 (psi_common, psi_tb) 的项目结构：每个子库有自己的 config.tcl/run.tcl，顶层 run.tcl 通过 source 它们的 config.tcl 汇总回归。写出关键文件内容草图。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "GHDL/GTKWave 工作流深度实践",
+          "order": 2,
+          "filename": "u4-l2-ghdl-gtkwave-workflow.md",
+          "level": "advanced",
+          "topic": "完整跑通 GHDL 仿真：用独立 tclsh（如 Active TCL）运行脚本、理解 GHDL 2002/2008 双编译与库产物子目录、.ghw 波形文件、GTKWave 迭代调试，以及 synopsys ieee 库的使用。",
+          "learning_goals": [
+            "掌握 GHDL 独立 tclsh 运行环境要求",
+            "理解 GHDL 双版本编译与库产物子目录机制",
+            "学会用 .ghw + GTKWave 完成迭代调试"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "CommandRef.md",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "GHDL 运行环境与 init -ghdl",
+            "双版本编译与库子目录产物",
+            "GTKWave 迭代调试"
+          ],
+          "practice_task": "写一份 GHDL 模式下的 run.tcl (init -ghdl)，说明它与 Modelsim 版 run.tcl 的唯一区别，并解释为什么 GHDL 用 .ghw 而非 .vcd（参见 Changelog 中 records 修复记录）。",
+          "depends_on": [
+            "u3-l5",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "扩展新模拟器与架构取舍",
+          "order": 3,
+          "filename": "u4-l3-extend-simulator.md",
+          "level": "advanced",
+          "topic": "如何为 PsiSim 增加一个全新仿真器支持（扩展 init 及所有 sal_* proc 的 dispatch 分支、sal_launch_tb/sal_open_wave），以及当前架构的取舍：全局可变状态、eval 字符串拼接、错误处理范式、测试缺失。",
+          "learning_goals": [
+            "掌握添加新仿真器需要改动的全部位置",
+            "理解 SAL dispatch 的扩展点与限制",
+            "认识架构层面的取舍与潜在改进方向"
+          ],
+          "source_files": [
+            "PsiSim.tcl",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "新仿真器扩展清单",
+            "dispatch 扩展点",
+            "架构取舍与改进方向"
+          ],
+          "practice_task": "假设要支持一个名为 'Icarus' 的仿真器，列出你需要修改的所有 proc 及各自要加的分支，并指出当前'全局可变状态 + eval 拼接命令'带来的至少两个风险。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
