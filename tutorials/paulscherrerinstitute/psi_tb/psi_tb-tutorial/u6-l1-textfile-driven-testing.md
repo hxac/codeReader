@@ -1,485 +1,645 @@
-# 位真仿真：用文本文件驱动激励与校验（ApplyTextfileContent / CheckTextfileContent / WriteTextfile）
+# ApplyTextfileContent / CheckTextfileContent / WriteTextfile
 
 ## 1. 本讲目标
 
-本讲讲解 psi_tb 中专门为「位真（bittrue）仿真」准备的文本文件驱动包 `psi_tb_textfile_pkg`。读完本讲你应当能够：
+学完本讲后，你应当能够：
 
-- 说清「每行一个采样、空格分列、整数取值」这一文件格式约定的由来与写法。
-- 用 `ApplyTextfileContent` 把一个文本文件按行施加为 DUT 的激励（带 valid/ready 握手）。
-- 用 `CheckTextfileContent` 把 DUT 输出逐行、逐列与期望文件比对，并读懂其 `###ERROR###` 报错信息。
-- 用 `WriteTextfile` 把仿真结果连同表头写回磁盘，供 Python/MATLAB 再处理。
-- 理解 `ClkPerSpl`、`MaxLines`、`IgnoreLines`、`Tolerance` 等关键参数的语义，以及 `PsiTextfile_SigOne` / `PsiTextfile_SigUnused` 等占位信号的用途。
-- 用 Apply + Check 构建一条端到端的「激励→DUT→校验→导出」回路。
-
-## 2. 前置知识
-
-本讲默认你已经学过：
-
-- **u2-l2 文件 I/O 与 print 重载**：std.textio 的 `TEXT` 文件类型、`line` 缓冲指针、`readline`/`writeline`/`read`/`write` 四个原语。本包不使用 `str_read`/`str_write`，而是直接调用 std.textio 的「泛型 `read`」读取整数，原因见 4.2。
-- **u2-l1 字符串与数值转换**：本包在错误消息里复用 `hstr`（十六进制）和 `to_string`（整数）。
-- **u3 / u4 的统一约定**：所有检查类过程都用 `assert ... report ... severity error`，错误消息以 `###ERROR###` 开头，被 CI 的 `run_check_errors "###ERROR###"` 捕获（见 u1-l3）。本讲的 `CheckTextfileContent` 沿用这一约定。
-
-补充两个本讲要用到的概念：
-
-- **位真仿真（bittrue simulation）**：指对 DSP/信号处理链路做「数值级精确」的仿真——激励和响应都用真实的整数样本（往往代表定点数解码后的整数值），逐采样比对，确保 RTL 与算法模型（Python/MATLAB）完全一致。
-- **valid/ready 握手**：与 AXI4-Stream 同源的生产者/消费者协议。生产者抬 `Vld` 表示「数据有效」，消费者抬 `Rdy` 表示「我准备好收」，二者在同一个时钟上升沿同时为 1 时完成一次数据交接。本包的三个过程都围绕这一握手组织。
-
-## 3. 本讲源码地图
-
-| 文件 | 作用 |
-| --- | --- |
-| [hdl/psi_tb_textfile_pkg.vhd](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd) | 本讲核心。定义整数列文本文件的格式约定、`TextfileData_t` 类型、占位信号，以及三个过程 `ApplyTextfileContent` / `CheckTextfileContent` / `WriteTextfile`。 |
-| [hdl/psi_tb_txt_util.vhd](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_txt_util.vhd) | 被引用的底座包，提供错误消息里用到的 `hstr`（[L312-L349](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_txt_util.vhd#L312-L349)）与 `to_string`（[L357-L360](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_txt_util.vhd#L357-L360)）。 |
-| [sim/config.tcl](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/sim/config.tcl) | PsiSim 编译清单。注意：`psi_tb_textfile_pkg.vhd` **不在**其中（见 [config.tcl:L28-L33](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/sim/config.tcl#L28-L33)），本仓库也没有它的 testbench，示例位于外部项目 `psi_fix`（见 Changelog）。 |
-
-> 重要提示：因为该包未进入 CI 编译清单，本仓库内**没有可直接运行的示例**。本讲给出的 testbench 均为「示例代码」，需你自行把它加入 `config.tcl` 的 `-tag src` 列表、注册一个 TB run 后再运行（见综合实践）。运行结果相关的结论一律标注「待本地验证」。
-
-## 4. 核心概念与源码讲解
-
-先看文件头对格式的约定，它是一切的基础：
-
-[hdl/psi_tb_textfile_pkg.vhd:L7-L21](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L7-L21) —— 文件头注释明确：信号值以**整数**表示，一列对应一个信号，列之间用**空格**分隔（**不是逗号**），并直接给出了 Python 生成示例 `np.savetxt("test.txt", np.column_stack((a, b)), fmt="%i")`。
-
-这一点会在 4.2 解释「为什么必须是空格」。
-
-### 4.1 数据类型与占位信号（TextfileData_t / PsiTextfile_SigOne / PsiTextfile_SigUnused）
-
-#### 4.1.1 概念说明
-
-文本文件里的一行有若干列，每一列对应一个信号。为了在过程参数里「一次传递一整行所有列的数据」，需要一个「整数数组」类型；又因为不同 testbench 的列数不同，这个数组必须是**未约束（unconstrained）**的，由调用方在声明信号时指定宽度。
-
-此外，VHDL 有一个语法限制：**过程声明里的 `signal` 形参不能被留空（open）**。但实际工程里，我们常常并不需要 ready 握手（DUT 永远 ready，或消费者永远接收）。为了在不使用握手时也能把过程调用「填满」，包里预定义了几个占位信号，让你传一个「无人关心」的信号进去。
-
-#### 4.1.2 核心流程
-
-类型与占位信号的声明见 [hdl/psi_tb_textfile_pkg.vhd:L41-L49](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L41-L49)：
-
-```text
-TextfileData_t          : array(natural range <>) of integer   -- 一行各列的整数值
-TextfileName_t          : array(natural range <>) of string    -- WriteTextfile 的列名
-PsiTextfile_SigOne      : std_logic := '1'                     -- 恒为 '1'，填给「输入侧不需要 Rdy」的 in 形参
-PsiTextfile_SigUnused   : std_logic                            -- 无人驱动的悬空信号，填给「输出侧不需要 Rdy」的 out 形参
-PsiTextfile_SigUnusedVec / PsiTextfile_SigUnusedData           -- 向量/数据版的占位信号
-```
-
-使用逻辑：
-
-1. 在 testbench 里声明 `signal myData : TextfileData_t(0 to N-1);`，`N` = 列数。
-2. 调用 `ApplyTextfileContent` 时，若 DUT 输入侧不回压（永远 ready），把 `Rdy` 形参填成 `PsiTextfile_SigOne`。
-3. 调用 `CheckTextfileContent` 时，若不需要把消费者的 ready 反馈给 DUT，把 `Rdy`（out 形参）填成 `PsiTextfile_SigUnused`。
-
-#### 4.1.3 源码精读
-
-[文件路径:L41-L49](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L41-L49) 声明了类型与四个占位信号。注意第 45 行的注释直接点明了设计动机：
-
-> `-- Signal definitions to pass for constant values or unused signals (signals are not allowed to be left open in procedure declarations)`
-
-即这些信号存在的唯一理由，就是绕开 VHDL「signal 形参不可留空」的语法限制。它们本身没有功能意义：`PsiTextfile_SigOne` 恒为 `'1'`，其余几个永远不被任何逻辑读取或驱动。
-
-#### 4.1.4 代码实践
-
-**目标**：掌握 `TextfileData_t` 的声明方式与占位信号的选用。
-
-**步骤**（源码阅读型，无需运行）：
-
-1. 在 [config.tcl:L28-L33](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/sim/config.tcl#L28-L33) 确认 `psi_tb_textfile_pkg.vhd` 不在编译清单里。
-2. 阅读声明 [L41-L49](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L41-L49)，记住四个占位信号各自的方向与默认值。
-3. 写一个示例声明（示例代码，非项目原有）：
-
-```vhdl
--- 一行有 2 列（两个信号）的激励
-signal stimData : TextfileData_t(0 to 1);
-```
-
-**需要观察的现象**：`TextfileData_t` 的下标范围由你自定义（`0 to 1` 或 `0 downto ...` 都可），过程内部用 `Data'length` 自适应列数（见 4.2.3 的 `for idx in 0 to Data'length - 1 loop`）。
-
-**预期结果**：能正确说出「输入侧不握手填 `PsiTextfile_SigOne`、输出侧不握手填 `PsiTextfile_SigUnused`」。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：为什么不能用一个普通的 `integer` 参数代替 `TextfileData_t`？
-**答案**：因为一行有多个列、对应多个信号；`integer` 是标量，无法一次承载一整行。`TextfileData_t` 是未约束数组，调用方按列数声明宽度，过程内用 `Data'length` 自适应。
-
-**练习 2**：`PsiTextfile_SigOne` 为什么初始化为 `'1'` 而不是 `'0'`？
-**答案**：它专用于填给 `ApplyTextfileContent` 的 `Rdy : in std_logic` 形参（DUT 输入侧的 ready）。填 `'1'` 表示「DUT 永远 ready」，于是过程里的 `wait until rising_edge(Clk) and Rdy='1'` 退化为「等到下一个上升沿」，握手立刻成立。若填 `'0'`，过程会永久挂死。
+- 说清「整数列文本文件」这一位真（bit-true）仿真约定的具体格式：每行一个采样、空格分列、值用整数表示。
+- 独立调用 `ApplyTextfileContent` 把一个文本文件逐行施加为时钟同步的激励（`Vld`/`Data`）。
+- 独立调用 `CheckTextfileContent` 把 DUT 输出与期望文件逐列比对，并理解 `Tolerance`、`IgnoreLines`、`ErrorPrefix` 的作用。
+- 用 `WriteTextfile` 把仿真结果连同表头写回文件，供 Python/MATLAB 后处理，并知道它默认输出为什么不能直接被 `Apply`/`Check` 读回。
+- 理解 `PsiTextfile_SigOne` / `PsiTextfile_SigUnused` 这两个辅助信号存在的根本原因（VHDL 过程的 `signal` 形参不能留空），并能正确选用。
 
 ---
 
-### 4.2 ApplyTextfileContent：把文本文件施加为激励
+## 2. 前置知识
+
+本讲假定你已经掌握：
+
+- **testbench 不可综合**（见 u1-l1）。因此本包大量使用 `file` I/O、`wait until rising_edge(Clk)`、动态数组等只能在仿真中用的语言特性，这些都不会进 FPGA。
+- **`std.textio` 的三件套**（见 u2-l2）：文件类型 `TEXT`、行缓冲指针 `line`、以及 `readline` / `writeline` / `read` / `write` 四个原语。本讲的所有文件读写都建立在它们之上。
+- **`###ERROR###` 前缀契约**（见 u1-l3、u3-l1）：所有自检失败都打印以 `###ERROR###` 开头的消息，CI 末尾用 `run_check_errors "###ERROR###"` 扫描它。`CheckTextfileContent` 的默认 `ErrorPrefix` 就是 `"###ERROR###"`。
+- **`hstr` 与 32 位十六进制显示**（见 u2-l1、u3-l1）：`CheckTextfileContent` 的错误消息会把整数经 `to_signed(x, 32)` 转成 32 位再 `hstr`，所以消息里的十六进制固定 8 位。
+- **valid/ready 握手**：本讲三个过程都是围绕一对 `Vld`/`Rdy` 握手信号建模的，理解「生产者驱动 Vld、消费者驱动 Rdy、二者同时为 1 才成交」是关键。
+
+> 名词速查：
+> - **位真仿真（bit-true simulation）**：激励和期望都用真实数值（这里是整数）描述，逐采样比对，常用于数字信号处理链路的回归测试。
+> - **采样（sample）**：文本文件中的一行，对应仿真时间上的一个数据点。
+> - **列（column）**：一行中空格分隔的一个整数，对应一个信号通道。
+
+---
+
+## 3. 本讲源码地图
+
+本讲只涉及一个核心源文件，外加它依赖的文本工具包：
+
+| 文件 | 作用 | 本讲用到的东西 |
+| --- | --- | --- |
+| `hdl/psi_tb_textfile_pkg.vhd` | 文本文件驱动的位真仿真包，全部内容只此一文件 | `TextfileData_t`、辅助信号、`ApplyTextfileContent`、`CheckTextfileContent`、`WriteTextfile` |
+| `hdl/psi_tb_txt_util.vhd` | 文本/数值转换底座（u2 已详解） | `hstr`（错误消息的十六进制显示）、`to_string(integer)`（写文件时的整数转字符串） |
+
+> 编译提示：`psi_tb_textfile_pkg.vhd` **目前并不在** `sim/config.tcl` 的 `add_sources -tag src` 编译清单里（该清单只有 `txt_util`、`compare`、`activity`、`i2c` 四个包）。因此本包没有进 CI，也没有配套 testbench。要实际运行本讲的代码实践，你必须先把它加进编译清单（见第 4.2 节实践步骤）。这一点与 u1-l2 所述「AXI 与 textfile 因无注册 testbench 而未进 CI」一致。
+
+永久链接基址（当前 HEAD `8ee9c06`）：
+
+```
+https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/
+```
+
+---
+
+## 4. 核心概念与源码讲解
+
+本讲拆成四个最小模块，按「先看公共约定与类型，再依次走激励施加 → 输出比对 → 结果写回」的顺序。
+
+### 4.1 文本文件整数格式约定、TextfileData_t 类型与辅助信号
+
+#### 4.1.1 概念说明
+
+很多 DSP 类的 DUT（滤波器、上下变频、控制环路……）需要用大量真实数值去做回归测试。手写 `wait` + 赋值的方式很快就会变得不可维护。`psi_tb_textfile_pkg` 给出一个极简约定：**把激励和期望都写成纯整数文本文件，一行一个采样，一列一个信号通道，列之间用空格分隔**。
+
+包头的注释把这一约定写得非常明确，并直接给出了 Python 生成示例：
+
+> [hdl/psi_tb_textfile_pkg.vhd:L7-L21](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L7-L21) — 文件头注释：约定「整数、每行一个采样、空格分列（**不是逗号**）」，并给出 `np.savetxt(..., fmt="%i")` 的生成范例。
+
+一个合法的输入文件长这样（两列信号）：
+
+```text
+117 124 -45
+111 -123 88
+```
+
+注意三点：
+
+1. **分隔符是空格，不是逗号**。原因在 4.1.2 解释。
+2. **允许负数**。因为下面用 `std.textio` 的整数 `read` 读取，它认负号。
+3. **值是整数**。所以一条列就是一个 `integer`，范围受 VHDL `integer`（32 位有符号）限制：\(-2^{31} \sim 2^{31}-1\)。定点/浮点数据必须先在 Python 里量化成整数再写入。
+
+#### 4.1.2 核心流程
+
+为什么必须用空格？因为读取靠的是 `std.textio` 的整数 `read`：
+
+- 整数 `read` 的行为是：跳过前导空白，读取可选正负号，再连续读数字，**遇到第一个非数字字符就停**。
+- 如果列之间是空格，下一次 `read` 会跳过空格继续读下一列，正确。
+- 如果列之间是逗号（如 `117,124`），第一次 `read` 读到 `117` 停在逗号前；第二次 `read` 一上来就是逗号（非空白、非数字），`is_string` 返回 `false`，读取失败、值未定义。
+
+所以「空格分列」不是风格偏好，而是与 `read` 语义匹配的硬性要求。这条约束在本讲第 4.4 节会再次出现——`WriteTextfile` 默认 `spacer` 是 `" , "`（带逗号），它的输出因此**不能**直接被 `Apply`/`Check` 读回。
+
+#### 4.1.3 源码精读
+
+公共类型定义在包头：
+
+> [hdl/psi_tb_textfile_pkg.vhd:L41-L43](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L41-L43) — `TextfileData_t` 是 `integer` 的非约束数组（一列一个元素）；`TextfileName_t` 是 `string` 的非约束数组，给 `WriteTextfile` 当列名。
+
+```vhdl
+type TextfileData_t  is array (natural range <>) of integer;
+type TextfileName_t  is array (natural range <>) of string;
+```
+
+调用方声明 `signal Data : TextfileData_t(0 to 1)` 就得到一个两列容器，宽度在调用端决定、过程内部用 `Data'length` 自适应——这和 u5-l1 里 AXI 记录「未约束字段、使用端定宽」的思路一致。
+
+接下来是本模块的关键：四个**包级辅助信号**。
+
+> [hdl/psi_tb_textfile_pkg.vhd:L45-L49](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L45-L49) — 辅助信号定义。注释一句话点明了它们的用途：「为常量值或不用信号提供的占位——过程声明里的 signal 形参不允许留空」。
+
+```vhdl
+signal PsiTextfile_SigOne       : std_logic := '1';        -- 恒为 '1'，给 Rdy 当「永远就绪」
+signal PsiTextfile_SigUnused    : std_logic;               -- 无初值，给 Rdy 当「丢弃」出口
+signal PsiTextfile_SigUnusedVec : std_logic_vector(0 downto 0);
+signal PsiTextfile_SigUnusedData: TextfileData_t(0 downto 0);
+```
+
+它们存在的根本原因是 **VHDL 语法**：在过程声明里，`signal xxx : in/out ...` 形参**不允许像普通 `in` 形参那样用默认值留空**，调用时也**不能省略**。可本包的三个过程为了通用性都带了 `Rdy` 这类握手形参——如果你根本不关心它，仍必须传「某个真实信号」进去。于是包里预先声明好这些占位信号：
+
+- 想让某个 `in` 握手信号恒为某电平 → 传 `PsiTextfile_SigOne`（恒 `'1'`）。
+- 想丢弃某个 `out` 信号 → 传 `PsiTextfile_SigUnused`（当垃圾桶）。
+
+具体到本包：
+- `ApplyTextfileContent` 的 `Rdy : in std_logic`（下游是否就绪）：DUT 输入永不反压时传 `PsiTextfile_SigOne`。
+- `CheckTextfileContent` 的 `Rdy : out std_logic`（本检查器是否就绪）：不想接回这个信号时传 `PsiTextfile_SigUnused`。
+
+> 注意：这些信号声明在**包**里（不是包体），所以你只要 `use work.psi_tb_textfile_pkg.all;` 就能直接引用它们。包级信号在 VHDL 里是静态、全局可见的，这正是「占位信号」这一惯用法的载体。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+**目标**：确认你对类型与辅助信号的用法已经清楚，无需运行仿真。
+
+1. 打开 [hdl/psi_tb_textfile_pkg.vhd:L41-L49](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L41-L49)。
+2. 对照三个过程的形参表（[L52-L60](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L52-L60)、[L63-L72](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L63-L72)、[L75-L82](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L75-L82)），逐个标出哪些形参是 `signal ... in`、哪些是 `signal ... out`。
+3. 在纸上画一张表：每个 `signal` 形参「不用时该传哪个辅助信号」。
+
+**预期结果**：你会得到一张形如「`Apply.Rdy(in) → PsiTextfile_SigOne`」「`Check.Rdy(out) → PsiTextfile_SigUnused`」的对照表，后续两节直接照填即可。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么 `PsiTextfile_SigOne` 要给初值 `'1'`，而 `PsiTextfile_SigUnused` 不给初值？
+
+**答案**：`SigOne` 的职责是「永远呈现就绪电平」，必须一上电就是 `'1'` 才能起到「`Apply` 的 `Rdy` 永远满足」的作用；而 `SigUnused` 是个垃圾桶，过程会把驱动值送进来、调用方根本不读，有没有初值无所谓，所以省略。
+
+**练习 2**：一份文本文件内容是 `3,7,11`（逗号分隔），用 `ApplyTextfileContent` 读取一列会发生什么？
+
+**答案**：第一次 `read` 跳过前导空白读到 `3`，停在逗号前；第二次 `read` 直接撞上逗号（非空白非数字），`is_string` 为 `false`，读取失败，对应列的值未定义（很可能是 `integer'left`）。这就是包注释强调「空格而非逗号」的原因。
+
+**练习 3**：`TextfileData_t(0 to 1)` 能装下多大范围的数？
+
+**答案**：它是 `array of integer`，每个元素都是 VHDL `integer`，即 32 位有符号，范围 \(-2^{31} \sim 2^{31}-1\)，约 ±21.4 亿。超出该范围的定点数据必须先在 Python 里拆分或缩放。
+
+---
+
+### 4.2 ApplyTextfileContent — 从文件施加激励
 
 #### 4.2.1 概念说明
 
-`ApplyTextfileContent` 是**生产者（producer）**：它逐行读入文本文件，把每一行的各列整数装进 `Data` 数组，并按 valid/ready 握手把数据「喂」给 DUT 输入。它负责 DUT **输入侧**的时序：何时给数据、何时抬 `Vld`、何时根据 `Rdy` 节流。
+`ApplyTextfileContent` 扮演的是**激励生产者**：它打开一个文本文件，逐行读出整数，按列填进 `Data` 数组，并在每个采样点抬一次 `Vld`，把数据「喂」给 DUT 输入。它和 DUT 之间通过一对握手信号交互：
 
-它是位真仿真的「激励源」——你只要用 Python/MATLAB 生成一份整数样本文件，就能驱动整个 RTL 仿真，而不必在 VHDL 里手写一长串 `wait` 和赋值。
+- `Vld : out std_logic`（过程驱动）：本采样有效。
+- `Data : out TextfileData_t`（过程驱动）：各列的整数激励。
+- `Rdy : in std_logic`（DUT 驱动）：下游是否准备好接收。若你不关心，传 `PsiTextfile_SigOne`。
 
 #### 4.2.2 核心流程
 
-过程体见 [hdl/psi_tb_textfile_pkg.vhd:L92-L137](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L92-L137)。伪代码如下：
+过程主体是一个「读一行 → 等握手 → 按节拍扩展」的循环，伪代码如下：
 
 ```text
 file_open(fp, Filepath, read_mode)
-wait until rising_edge(Clk)                       -- 先对齐到时钟
-while (未到文件尾) 且 (未超过 MaxLines 或 MaxLines<0):
+wait until rising_edge(Clk)                # 先对齐到时钟
+while not endfile(fp) 且 (MaxLines 未达上限):
     readline(fp, ln)
-    if lineNr > IgnoreLines:                      -- 跳过头部注释行
+    if lineNr > IgnoreLines:               # 跳过文件头若干行
         Vld <= '1'
-        for idx in 0 to Data'length-1:
-            read(ln, Spl)                         -- 用 std.textio 的整数 read
-            Data(idx) <= Spl
-        wait until rising_edge(Clk) and Rdy='1'   -- 握手
-        if ClkPerSpl > 1:                         -- 一个采样跨多个时钟周期
-            if DataOnlyOnVld: Data <= (others => 0)   -- Vld 拉低期间清零
+        for idx in 0..Data'length-1:       # 逐列读整数
+            read(ln, Spl); Data(idx) <= Spl
+        wait until rising_edge(Clk) and Rdy='1'   # 握手成交
+        if ClkPerSpl > 1:                  # 一个采样占多个时钟周期
+            if DataOnlyOnVld: Data <= 全 0
             Vld <= '0'
-            等待 ClkPerSpl-2 个上升沿             -- 制造采样间隙
-    lineNr := lineNr + 1
+            for i in 0..ClkPerSpl-2: wait until rising_edge(Clk)
+    lineNr += 1
 Vld <= '0'
 file_close(fp)
 ```
 
-握手时序（以一个采样为单位）：
+四个参数的语义：
 
-| ClkPerSpl | Vld 抬高周期数 | 间隙（Vld=0）周期数 | 每采样总周期数 |
-| --- | --- | --- | --- |
-| 1 | 每拍都为 1 | 0 | 1（每时钟一个采样） |
-| 3 | 1 | 2 | 3（每 3 拍一个采样） |
+- **`ClkPerSpl`**（默认 1）：一个采样持续多少个时钟周期。`=1` 时每个时钟吐一个采样；`>1` 时吐一个有效拍后 `Vld` 拉低 `ClkPerSpl-1` 拍，即降低采样率。
+- **`MaxLines`**（默认 -1）：最多读多少行；`-1` 表示读到文件尾。
+- **`IgnoreLines`**（默认 0）：跳过文件开头多少行（常用于跳过注释行/表头）。
+- **`DataOnlyOnVld`**（默认 false）：仅当 `ClkPerSpl>1` 时有意义。`true` 表示无效拍里把 `Data` 清零；`false` 表示无效拍里保持上一个采样值。对「连续采样的组合逻辑」型 DUT 用 `true` 更安全，避免残留值串扰。
 
-即 `ClkPerSpl` 就是「一个采样占据多少个时钟周期」，对应一个降采样/多周期处理的 DUT。
-
-**为什么列必须用空格分隔？** 因为过程用 std.textio 的泛型 `read`（[L117](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L117) `read(ln, Spl)`，`Spl: integer`）解析整数。std.textio 的整数 `read` 会跳过前导空白、读取可选符号与数字、在第一个非数字字符处停止——它**依赖空白作为列分隔符**。若是逗号分隔，逗号会残留在行缓冲里，导致后续列读取失败。这正是 u2-l2 里 `str_read`（逐字符读原始文本）与本处「读整数」的根本差异：本包不需要 `str_read`，因为它要的是数值而非字符串。
+握手时机要点：`wait until rising_edge(Clk) and Rdy='1'` 意味着**只有当下游就绪的那个上升沿**才视为成交；若 `Rdy` 为 0，过程会原地等待，不消耗文件行——这保证采样不会被丢。
 
 #### 4.2.3 源码精读
 
-- [L107](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L107) `file_open(fp, Filepath, read_mode)`：以只读方式打开激励文件。
-- [L111](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L111) 主循环条件：`(not endfile(fp)) and ((lineNr <= MaxLines) or (MaxLines < 0))`。`MaxLines` 默认 `-1` 表示「读到文件尾」；给正数则只读前若干行。
-- [L114-L119](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L114-L119) 抬高 `Vld`、逐列 `read` 并装入 `Data` 数组。
-- [L120](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L120) `wait until rising_edge(Clk) and Rdy = '1'`：valid/ready 握手点。DUT 通过 `Rdy` 回压时，这里会等待。
-- [L121-L129](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L121-L129) `ClkPerSpl > 1` 分支：拉低 `Vld` 并等待 `ClkPerSpl-2` 个上升沿补足采样周期；`DataOnlyOnVld = true` 时还会在 `Vld` 低期间把 `Data` 清零（避免 DUT 误用陈旧数据，对应 Changelog「added option to invalidate data when Vld low」）。
+声明（注意所有信号形参都不能留空，故有 4.1 节的辅助信号）：
 
-#### 4.2.4 代码实践
+> [hdl/psi_tb_textfile_pkg.vhd:L52-L60](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L52-L60) — `ApplyTextfileContent` 形参表：`Clk/Rdy` 输入、`Vld/Data` 输出，外加 4 个有默认值的普通 `in` 参数。
 
-**目标**：用 Python 生成一份两列激励文件，用 `ApplyTextfileContent` 施加，观察波形里 `Vld`/`Data` 的时序。
+实现里两段最关键。第一段：**逐列读取**：
 
-**步骤**：
-
-1. 用 Python 生成激励文件 `stim.txt`（示例代码）：
-
-```python
-import numpy as np
-a = np.linspace(100, 200, 10)      # 第 1 列
-b = np.linspace(-50, 40, 10)       # 第 2 列
-np.savetxt("stim.txt", np.column_stack((a, b)), fmt="%i")
-```
-
-生成的文件形如（空格分列、整数取值）：
-
-```text
-100 -50
-111 -40
-122 -30
-...
-```
-
-2. 在 testbench 里声明信号并调用过程（示例代码）：
+> [hdl/psi_tb_textfile_pkg.vhd:L114-L120](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L114-L120) — 抬 `Vld`，用 `for idx in 0 to Data'length-1` 按列 `read(ln, Spl)` 并赋给 `Data(idx)`，随后 `wait until rising_edge(Clk) and Rdy='1'` 完成握手。
 
 ```vhdl
-signal Clk      : std_logic := '0';
-signal inVld    : std_logic;
-signal inData   : TextfileData_t(0 to 1);   -- 两列
-...
--- DUT 输入侧不回压，Rdy 填 PsiTextfile_SigOne；每采样 1 拍
-ApplyTextfileContent(
-    Clk  => Clk,
-    Rdy  => PsiTextfile_SigOne,
-    Vld  => inVld,
-    Data => inData,
-    Filepath => "stim.txt",
-    ClkPerSpl => 1);
+if lineNr > IgnoreLines then
+   Vld <= '1';
+   for idx in 0 to Data'length - 1 loop
+      read(ln, Spl);
+      Data(idx) <= Spl;
+   end loop;
+   wait until rising_edge(Clk) and Rdy = '1';
 ```
 
-3. 把 `psi_tb_textfile_pkg.vhd` 加入 `config.tcl` 的 `-tag src` 列表后用 `run.tcl` 运行。
+第二段：**降采样时的节拍扩展**：
 
-**需要观察的现象**：`inVld` 在每个上升沿为 `1`，`inData(0)`/`inData(1)` 依次取 `100,-50`、`111,-40`、…；文件读完后 `inVld` 归零。
+> [hdl/psi_tb_textfile_pkg.vhd:L121-L129](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L121-L129) — `ClkPerSpl>1` 时，握手后按 `DataOnlyOnVld` 决定是否清零 `Data`，再拉低 `Vld` 并空等 `ClkPerSpl-2` 个上升沿（连同成交那一拍共 `ClkPerSpl` 拍）。
 
-**预期结果**：波形中 `inData` 随时间呈现与文件一致的整数序列。**待本地验证**（取决于仿真器对相对路径的解析，必要时用绝对路径）。
+```vhdl
+if ClkPerSpl > 1 then
+   if DataOnlyOnVld then
+      Data <= (Data'range => 0);
+   end if;
+   Vld <= '0';
+   for i in 0 to ClkPerSpl - 2 loop
+      wait until rising_edge(Clk);
+   end loop;
+end if;
+```
+
+注意循环计数：成交拍算第 1 拍，再额外等 `ClkPerSpl-2` 拍，下一轮循环开头的握手又算 1 拍，合计正好 `ClkPerSpl` 拍一个采样。
+
+循环出口后还有一句收尾：
+
+> [hdl/psi_tb_textfile_pkg.vhd:L133-L136](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L133-L136) — 文件读完（或达 `MaxLines`）后把 `Vld` 拉低并关闭文件，防止句柄泄漏。
+
+#### 4.2.4 代码实践（最小调用示例·源码阅读型）
+
+> 本节是「写出最小调用」的阅读型实践；完整的可运行 testbench 在第 5 节综合实践里给出。
+
+**目标**：为「两列激励、每采样 1 拍、下游永不反压」的场景写出 `ApplyTextfileContent` 的调用骨架。
+
+1. 假设 DUT 输入是两个整数 `a`、`b`。在 testbench 里声明：
+   ```vhdl
+   signal StimVld  : std_logic;
+   signal StimData : TextfileData_t(0 to 1);   -- 两列：a, b
+   ```
+2. 在一个 `stim : process` 里写一行调用（`Rdy` 不关心 → 传 `PsiTextfile_SigOne`）：
+   ```vhdl
+   ApplyTextfileContent(
+      Clk  => Clk,
+      Rdy  => PsiTextfile_SigOne,        -- 永远就绪
+      Vld  => StimVld,
+      Data => StimData,
+      Filepath => "stim.txt");
+   ```
+3. 把 `StimVld`/`StimData` 接到 DUT 输入；用一个时钟 `Clk`（例如 100 MHz）驱动。
+
+**需要观察的现象**：仿真波形上，每来一个 `rising_edge(Clk)`，`StimVld` 出现一个单周期高脉冲，`StimData(0)`、`StimData(1)` 依次等于文件每一行的第 1、2 列；文件读完后 `StimVld` 恒为 0。
+
+**预期结果**（待本地验证）：对一份 5 行的 `stim.txt`，应看到恰好 5 个 `StimVld` 脉冲。
+
+> ⚠️ 运行前必须先把本包加入 `sim/config.tcl` 的 `add_sources -tag src` 列表（追加 `psi_tb_textfile_pkg.vhd \`），否则编译找不到它。文件路径是相对仿真器工作目录的，ModelSim 里通常相对于启动 `vsim` 的目录。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：把 `ClkPerSpl` 从 1 改成 3，`inVld` 的波形会发生什么变化？
-**答案**：`inVld` 变成「每 3 个时钟周期里只有第 1 拍为 1，其余 2 拍为 0」，即每 3 拍送出一个采样；`inData` 每 3 拍更新一次（若 `DataOnlyOnVld=true`，则 `Vld=0` 期间 `inData` 被清零）。
+**练习 1**：把 `ClkPerSpl` 从 1 改成 4，`Vld` 波形会怎样变化？
 
-**练习 2**：如果误把 `stim.txt` 写成逗号分隔（`100,-50`），会发生什么？
-**答案**：第 1 列 `read(ln, Spl)` 读到 `100` 后停在逗号处；第 2 列再次 `read` 时，行缓冲下一个字符是逗号而非空白，整数 `read` 失败，`Spl` 保持上次值（或仿真器默认 0），导致第 2 列及之后全部错位。这就是格式必须是空格分隔的直接原因。
+**答案**：每个采样占 4 个时钟周期。第 1 拍 `Vld=1` 且 `Data` 为本行值并完成握手，随后 3 拍 `Vld=0`；第 5 拍再抬 `Vld` 给下一行。即有效脉冲之间的间隔从 1 拍变为 4 拍。
 
-**练习 3**：`IgnoreLines` 有什么用？
-**答案**：跳过文件头部的若干行（如注释行、列名行）。`lineNr <= IgnoreLines` 的行只 `readline` 丢弃、不施加，从 `lineNr > IgnoreLines` 起才作为有效采样输出。
+**练习 2**：若 DUT 输入端会在某些周期把 `Rdy` 拉低，`ApplyTextfileContent` 会丢采样吗？
+
+**答案**：不会。握手语句 `wait until rising_edge(Clk) and Rdy='1'` 在 `Rdy=0` 时会原地等待，不进入下一行读取；只有 `Rdy=1` 的那个上升沿才成交并推进到下一行。代价是吞吐被下游限制。
+
+**练习 3**：`DataOnlyOnVld => true` 与 `false` 在波形上的差别是什么？
+
+**答案**：仅当 `ClkPerSpl>1` 时有差别。`true`：`Vld=0` 的那些拍里 `Data` 被清成全 0；`false`：`Vld=0` 的拍里 `Data` 保持上一个有效采样的值。前者适合不希望 DUT 看到残留值的场景。
 
 ---
 
-### 4.3 CheckTextfileContent：逐列比对 DUT 输出
+### 4.3 CheckTextfileContent — 逐列比对 DUT 输出
 
 #### 4.3.1 概念说明
 
-`CheckTextfileContent` 是**消费者（consumer）兼校验者**：它在 DUT **输出侧**抬 `Rdy`，等待 DUT 抬 `Vld`，握手成功后把 DUT 送来的 `Data` 与期望文件里对应行列的整数比对，不匹配则打印 `###ERROR###` 诊断信息。
+`CheckTextfileContent` 是 `ApplyTextfileContent` 的镜像：它在**输出侧**扮演**消费者+裁判**。它打开一份「期望文件」，每当 DUT 输出一个有效采样（`Vld=1`），就读取期望文件同一行的各列、与 DUT 实际输出逐列比对，不一致就打印 `###ERROR###`。
 
-它与 `ApplyTextfileContent` 是镜像关系：一个驱动输入、一个校验输出，各自管理自己那一侧的握手。两者配合即可构成「激励→DUT→校验」的完整回路。
+方向值得强调（容易和 `Apply` 搞反）：
+
+- `Vld : in std_logic`（DUT 驱动）：DUT 输出有效。
+- `Data : in TextfileData_t`（DUT 驱动）：DUT 实际输出值。
+- `Rdy : out std_logic`（本过程驱动）：检查器是否就绪。可以用来给 DUT 反压。
+
+也就是说，`Apply` 的 `Rdy` 是 `in`，`Check` 的 `Rdy` 是 `out`——二者在握手里的角色正好互换。
 
 #### 4.3.2 核心流程
 
-过程体见 [hdl/psi_tb_textfile_pkg.vhd:L140-L199](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L140-L199)。伪代码：
-
 ```text
 file_open(fp, Filepath, read_mode)
-while (未到文件尾) 且 (未超过 MaxLines 或 MaxLines<0):
+while not endfile(fp) 且 (MaxLines 未达上限):
     readline(fp, ln)
     if lineNr > IgnoreLines:
         Rdy <= '1'
-        wait until rising_edge(Clk) and Vld='1'    -- 等待 DUT 给出有效样本
-        colNr := 0
-        for idx in 0 to Data'length-1:
-            read(ln, Spl_期望)
-            Sig_实际 := Data(idx)
-            assert abs(Sig_实际 - Spl_期望) <= Tolerance
-                report ErrorPrefix & ": Wrong Sample, line=.. column=.." & 期望 & 实际
-                severity error
-            colNr := colNr + 1
-        if ClkPerSpl > 1:
+        wait until rising_edge(Clk) and Vld='1'   # 等 DUT 给出有效输出
+        for idx in 0..Data'length-1:              # 逐列比对
+            read(ln, Spl)                         # 期望值
+            Sig := Data(idx)                      # 实际值
+            assert abs(Sig - Spl) <= Tolerance
+              report ErrorPrefix & ": Wrong Sample, line=.. column=.."
+                     & " --> Expected .. --> Received .."
+              severity error
+        if ClkPerSpl > 1:                         # 与 Apply 对称的降采样
             Rdy <= '0'
-            等待 ClkPerSpl-2 个上升沿
-    lineNr := lineNr + 1
+            for i in 0..ClkPerSpl-2: wait until rising_edge(Clk)
+    lineNr += 1
 Rdy <= '0'
 file_close(fp)
 ```
 
-容差判定为：
+参数语义（与 `Apply` 同名的含义一致，新增两个）：
+
+- **`ErrorPrefix`**（默认 `"###ERROR###"`）：失败消息前缀，直接对接 CI 的 `run_check_errors "###ERROR###"`。
+- **`Tolerance`**（默认 0，`natural` 即非负）：容差带。判定条件是 `abs(实际 - 期望) <= Tolerance`，即接受区间为：
 
 \[
-\text{Received} \in [\,\text{Expected}-T,\ \text{Expected}+T\,]
+\text{期望} - \text{Tolerance} \;\leq\; \text{实际} \;\leq\; \text{期望} + \text{Tolerance}
 \]
 
-即 `abs(Received - Expected) <= Tolerance` 才算通过。`Tolerance` 默认 0（精确相等）。
+`Tolerance=0` 即严格逐位相等。
 
 #### 4.3.3 源码精读
 
-- [L167-L168](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L167-L168) 抬高 `Rdy` 并在握手点 `wait until rising_edge(Clk) and Vld='1'` 等待 DUT 输出有效样本。
-- [L172-L181](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L172-L181) 逐列读取期望值 `Spl`、取实际值 `Sig := Data(idx)`，做容差比较。
-- [L175-L179](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L175-L179) 是关键断言：
+判定与消息拼接是本过程的灵魂：
+
+> [hdl/psi_tb_textfile_pkg.vhd:L171-L181](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L171-L181) — 逐列：`read` 取期望 `Spl`，读实际 `Sig := Data(idx)`，用 `abs(Sig-Spl) <= Tolerance` 判定；失败时拼出含 `line`/`column`/`Expected`/`Received` 的消息，`severity error`。
 
 ```vhdl
-assert abs(Sig - Spl) <= Tolerance
-report ErrorPrefix & ": Wrong Sample, line=" & integer'image(lineNr) &
-       " column=" & integer'image(colNr) & LF &
-       " --> Expected " & integer'image(Spl)  & " [0x" & hstr(std_logic_vector(to_signed(Spl, 32))) & "]" & LF &
-       " --> Received " & integer'image(Sig)  & " [0x" & hstr(std_logic_vector(to_signed(Sig, 32))) & "]"
-severity error;
+colNr := 0;
+for idx in 0 to Data'length - 1 loop
+   read(ln, Spl);
+   Sig := Data(idx);
+   assert abs(Sig - Spl) <= Tolerance
+   report ErrorPrefix & ": Wrong Sample, line=" & integer'image(lineNr) &
+        " column=" & integer'image(colNr) & LF &
+        " --> Expected " & integer'image(Spl) & " [0x" &
+        hstr(std_logic_vector(to_signed(Spl, 32))) & "]" & LF &
+        " --> Received " & integer'image(Sig) & " [0x" &
+        hstr(std_logic_vector(to_signed(Sig, 32))) & "]"
+   severity error;
+   colNr := colNr + 1;
+end loop;
 ```
 
-要点：
+读这段时请回忆 u3-l1 的结论：**比较判定与错误消息是两条独立路径**。这里判定用的是 `integer` 全范围运算（正确），消息里的十六进制却固定走 `to_signed(x, 32)` → `hstr`（固定 8 位）。由于 `TextfileData_t` 本身就是 `integer`，这里 32 位显示恰好与数据类型匹配，不会出现 u3-l2 那种「>32 位被截断」的坑——但负数会以补码十六进制呈现（如 `-1` 显示 `0xFFFFFFFF`）。
 
-1. `ErrorPrefix` 默认 `"###ERROR###"`（[L69](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L69) 声明处），与 CI 的 `run_check_errors "###ERROR###"` 契约一致——一次失配即自动判 CI 失败。
-2. 消息里同时给出十进制（`integer'image`）与 32 位十六进制（`hstr(std_logic_vector(to_signed(..., 32)))`），方便对照波形里的二进制电平。注意十六进制固定为 **32 位**（与 u3 讲到的 `integer` 32 位天花板同源），所以文本文件里的整数值不能超过 32 位有符号整数范围 `[-2^31, 2^31-1]`。
-3. `severity error` 只打印、不中断仿真，与 u3/u4 全库一致——一次跑完能看到所有失配点。
+`severity error` 的行为和 `compare_pkg` 完全一致（见 u3-l1）：**只打印，不中断仿真**，让一次跑完暴露所有不匹配，最终由 CI 扫 `###ERROR###` 子串判失败。`LF`（换行符）让消息分三行显示，便于人眼定位。
 
-#### 4.3.4 代码实践
+降采样节拍与 `Apply` 完全对称：
 
-**目标**：故意制造一次失配，观察 `CheckTextfileContent` 的报错格式。
+> [hdl/psi_tb_textfile_pkg.vhd:L183-L189](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L183-L189) — `ClkPerSpl>1` 时，比完一个采样后 `Rdy` 拉低 `ClkPerSpl-1` 拍，实现消费侧限速，与 `Apply` 的生产侧限速成对。
 
-**步骤**：
+这种对称设计意味着：若 DUT 输入侧用 `Apply(..., ClkPerSpl=>N)`、输出侧用 `Check(..., ClkPerSpl=>N)`，两端节拍天然对齐，不会因速率失配而误报。
 
-1. 准备一份「期望文件」`expected.txt`，内容与 DUT 实际输出**故意有 1 处不同**，例如 DUT 实际送 `122` 而期望文件写 `999`。
-2. 在 DUT 输出侧调用（示例代码）：
+#### 4.3.4 代码实践（断言触发型）
 
-```vhdl
-signal outVld  : std_logic;
-signal outData : TextfileData_t(0 to 1);
-...
-CheckTextfileContent(
-    Clk    => Clk,
-    Rdy    => PsiTextfile_SigUnused,   -- 不把消费者 ready 反馈给 DUT
-    Vld    => outVld,
-    Data   => outData,
-    Filepath => "expected.txt",
-    ClkPerSpl => 1,
-    Tolerance => 0);
-```
+**目标**：人为制造一次不匹配，观察错误消息格式。
 
-3. 运行仿真，查看 Transcript。
+1. 准备一份 `expected.txt`（单列）：
+   ```text
+   10
+   20
+   30
+   ```
+2. 让 DUT 输出故意偏离，例如直接用一个进程把 `DataOut(0)` 在三个有效拍里分别赋 `10`、`21`、`30`（第二拍差 1）。
+3. 用 `Tolerance => 0` 调用：
+   ```vhdl
+   CheckTextfileContent(
+      Clk  => Clk,
+      Rdy  => PsiTextfile_SigUnused,   -- 不接回 Rdy
+      Vld  => OutVld,
+      Data => OutData,
+      Filepath => "expected.txt",
+      Tolerance => 0);
+   ```
 
-**需要观察的现象**：Transcript 中出现以 `###ERROR###: Wrong Sample, line=N column=K` 开头的三行消息，给出 Expected/Received 的十进制与十六进制。
+**需要观察的现象**：Transcript 里应出现一条 `###ERROR###: Wrong Sample, line=3 column=0`（注意 `lineNr` 是文件行号、`column` 从 0 起），随后两行 `--> Expected 20 [0x00000014]`、`--> Received 21 [0x00000015]`。
 
-**预期结果**：`line`、`column` 指向失配位置；`Received` 反映 DUT 实际值（`122`），`Expected` 反映期望值（`999`）。**待本地验证**（具体行号列号取决于你设置失配的位置）。
+**预期结果**（待本地验证）：仅第 2 个采样报错一次；把 `Tolerance` 改成 `1` 后该错误消失（因为 \(|21-20|=1 \leq 1\)）。这也印证了 CI 会在 Transcript 中扫到 `###ERROR###` 而判失败。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：把 `Tolerance` 设为 10，期望值 `120`、实际值 `125`，会不会报错？
-**答案**：不会。`abs(125 - 120) = 5 <= 10`，落在容差带 \([110, 130]\) 内，断言通过、不打印。
+**练习 1**：错误消息里 `column=0` 为什么从 0 开始，而 `line=3` 看起来像「第 3 行」？
 
-**练习 2**：为什么说 `CheckTextfileContent` 与 `ApplyTextfileContent` 是「镜像」？
-**答案**：二者都按 valid/ready 握手推进，但驱动方向相反——Apply 是生产者，`Vld` 为 out、`Rdy` 为 in；Check 是消费者，`Rdy` 为 out、`Vld` 为 in。它们各自管理 DUT 一侧的握手，时序参数 `ClkPerSpl` 也须各自匹配该侧的实际采样率。
+**答案**：`colNr` 初值为 0、每列自增，所以列号从 0 起；`lineNr` 初值为 1、每读一行自增，所以行号是 1 基的文件行号。读消息时要注意这两个下标基底不同。
 
-**练习 3**：消息里的十六进制为什么固定 32 位？对一个超过 32 位的数据会怎样？
-**答案**：因为消息用 `to_signed(Value, 32)` 再 `hstr`。整数值本身受 VHDL `integer` 是 32 位有符号的约束（也是 v3.0.0 把数据格式改为 integer 以支持 GHDL 的副作用）；超过 32 位范围的值在文件里就无法正确表达，这是该包的固有限制。
+**练习 2**：期望值 `-1`、实际值 `-1`，`Tolerance=0`。消息里的十六进制会显示成什么？
+
+**答案**：`to_signed(-1, 32)` 的 32 位补码全 1，`hstr` 输出 `FFFFFFFF`，所以显示 `0xFFFFFFFF`。判定 `abs(-1 - (-1)) = 0 <= 0` 通过，不会真的打印这条消息——但若失败，负数期望/实际都会以补码十六进制呈现。
+
+**练习 3**：`Check` 的 `Rdy` 是 `out`，若我不想给 DUT 输出反压，该传什么？
+
+**答案**：传 `PsiTextfile_SigUnused`。过程内部仍会驱动它（在每个采样前后抬/拉），但驱动到这个「垃圾桶」信号上、调用方不读，等效于不反压；不过注意过程内部在 `ClkPerSpl>1` 时仍会按节拍把 `Rdy` 拉低，这会真实发生，只是无人在意。
 
 ---
 
-### 4.4 WriteTextfile：把仿真结果写回磁盘
+### 4.4 WriteTextfile — 把结果连同表头写回文件
 
 #### 4.4.1 概念说明
 
-`WriteTextfile` 把 DUT 输出（或仿真中任一 `TextfileData_t` 信号）连同列名表头写回磁盘文件，供 Python/MATLAB 离线分析或绘图。它是位真仿真的「出口」：与 Apply（入口）、Check（在线校验）互补，当你想保留全量样本做后处理时使用。
+`WriteTextfile` 完成闭环的最后一环：**把 DUT 输出（或中间信号）按采样写回一个新的文本文件**，方便你拿 Python/MATLAB 做频谱、误差、波形等后处理。它的输出与输入约定略有不同：
 
-源码注释（[L201-L206](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L201-L206)）说明了它的历史：早期版本依赖 `psi_fix`，会在第 2 行打印定点格式、并用 `PsiFixtoReal` 显示实数；为消除对 `psi_fix` 的强依赖，本包被改成「只写整数」的纯文本版本。
+- 第 1 行是**表头**：各列名字（来自 `Name` 数组），可选追加一列 `time_simulation`。
+- 之后每行一个采样：各列用 `to_string(Data(j))` 写成十进制整数，列间用 `spacer` 分隔（默认 `" , "`），可选追加一列当前仿真时间 `now`。
+
+它同样以 `Vld` 触发：每遇到一个 `rising_edge(Clk) and Vld='1'`，就写一行（第一行写表头，后续写数据）。
 
 #### 4.4.2 核心流程
 
-过程体见 [hdl/psi_tb_textfile_pkg.vhd:L208-L282](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L208-L282)。伪代码：
-
 ```text
 while lineNr <= nb_data + 2:
-    wait until rising_edge(Clk) and Vld='1'        -- 等 DUT 给出有效样本
-    if 文件未打开: file_open(fp, Filepath, WRITE_MODE)   -- 懒打开
-    if lineNr == 1:                                 -- 第 1 行：表头
-        写出 Name(0..N-1)，用 spacer 连接
-        若 time_sim=true: 末尾追加 "time_simulation"
-    else:                                            -- 数据行
-        写出 to_string(Data(0..N-1))，用 spacer 连接
-        若 time_sim=true: 末尾追加 now（仿真时刻）
-    lineNr := lineNr + 1
+    wait until rising_edge(Clk) and Vld='1'
+    if 文件尚未打开: file_open(fp, Filepath, WRITE_MODE)   # 懒打开
+    if lineNr == 1:                                         # 表头
+        if time_sim=false: 写 Name(0) .. Name(n-1)，spacer 分隔
+        else:              写 Name(0) .. Name(n-1) + "time_simulation"
+    else:                                                   # 数据行
+        if time_sim=false: 写 to_string(Data(0)) .. to_string(Data(n-1))
+        else:              写 to_string(Data(0)) .. + now（仿真时间）
+    writeline(fp, ln); lineNr += 1
 file_close(fp)
 ```
 
-三个要特别注意的细节：
+参数：
 
-1. **懒打开**：文件在第一个 `Vld='1'` 到来时才创建（[L226-L228](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L226-L228)），避免在 DUT 还未产出数据时就建空文件。
-2. **spacer 默认是 `" , "`（逗号）**（[L81](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L81)），与 Apply/Check 要求的「空格分隔」**不一致**。若你想把本过程写出的文件再喂回 `CheckTextfileContent`（做循环比对），**必须**把 `spacer` 显式覆盖为 `" "`（纯空格），否则逗号会让整数 `read` 解析失败（见 4.2.2）。
-3. **循环边界 `nb_data + 2`**（[L224](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L224)）：经源码追踪，实际写出 **1 行表头 + (nb_data+1) 行数据**（`nb_data+2` 是早期「表头 2 行」版本的遗留计数，第 2 行定点格式已被移除但计数未改）。若要精确控制数据行数，**待本地验证**后据此换算 `nb_data`。
-
-`time_sim` 参数：`true`（默认）时每行末尾追加仿真时刻 `now`、表头加一列 `time_simulation`；`false` 时只写数据列。`Name` 是 `TextfileName_t`（字符串数组），给每一列取名。
+- **`nb_data`**（常量）：意图上是「写多少个数据采样」。注意循环上界是 `nb_data + 2`（见 4.4.3 的边读边数提醒）。
+- **`time_sim`**（默认 `true`）：是否追加仿真时间列。`true` 时表头多一列 `time_simulation`、每行多一列 `now`。
+- **`Name`**：`TextfileName_t`，每列的名字。
+- **`spacer`**（默认 `" , "`）：列分隔符。
+- **`Filepath`**（默认 `/data/processing_data.txt`）：输出路径。
 
 #### 4.4.3 源码精读
 
-- [L217-L221](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L217-L221) 变量：`file_status` 初值 `MODE_ERROR`（用于懒打开判定），`time_simu` 常量字符串 `"time_simulation"`。
-- [L224-L228](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L224-L228) 循环与懒打开。
-- [L230-L253](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L230-L253) 表头行：根据 `time_sim` 决定是否追加 `time_simulation` 列。
-- [L254-L278](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L254-L278) 数据行：用 `to_string(Data(j))`（[txt_util:L357-L360](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_txt_util.vhd#L357-L360) 的整数重载）转成十进制字符串，`time_sim=true` 时末尾用 `write(ln, now)` 写仿真时刻。
-- [L281](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L281) 循环结束后 `file_close`。
+循环结构与懒打开：
 
-注意默认 `Filepath` 是 `"/data/processing_data.txt"`（[L82](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L82)）——一个 Linux 绝对路径，多数机器上不存在，实际使用时**务必显式传入**自己的路径。
-
-#### 4.4.4 代码实践
-
-**目标**：用 `WriteTextfile` 导出 DUT 输出，并对比不同 `spacer` 写出文件的差异。
-
-**步骤**：
-
-1. 在 DUT 输出侧（与 4.3 同一组 `outVld`/`outData`）调用（示例代码）：
+> [hdl/psi_tb_textfile_pkg.vhd:L224-L228](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L224-L228) — 主循环 `while lineNr <= nb_data + 2`，每次先 `wait until rising_edge(Clk) and Vld='1'`，再在「文件未打开」时用 `file_open` 打开（懒打开，确保文件创建在第一个有效拍、而非 0 时刻）。
 
 ```vhdl
--- 为支持「写出后再喂回 Check」，spacer 显式用空格
-WriteTextfile(
-    Clk      => Clk,
-    Vld      => outVld,
-    Data     => outData,
-    nb_data  => 9,
-    time_sim => false,
-    Name     => ("col0", "col1"),     -- TextfileName_t，与 Data 列数一致
-    spacer   => " ",
-    Filepath => "out.txt");
+while lineNr <= nb_data + 2 loop
+   wait until rising_edge(Clk) and Vld = '1';
+   if file_status /= OPEN_OK then
+      file_open(file_status, fp, Filepath, WRITE_MODE);
+   end if;
 ```
 
-2. 运行后用文本编辑器打开 `out.txt`。
-3. 把 `spacer` 改回默认 `" , "`、`time_sim` 改为 `true`，再跑一次，对比文件内容。
+表头分支（以 `time_sim=true` 为例）：
 
-**需要观察的现象**：
-- `spacer => " "`、`time_sim => false`：第 1 行是列名（空格分隔），其后是纯整数数据（空格分隔），可被 `CheckTextfileContent` 直接读取。
-- 默认 `spacer => " , "`、`time_sim => true`：每行末尾多一列仿真时刻，列间用逗号，适合人眼阅读或 Python `np.loadtxt(delimiter=',')` 处理。
+> [hdl/psi_tb_textfile_pkg.vhd:L242-L253](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L242-L253) — `time_sim=true` 时表头循环范围 `for j in 0 to Data'length`，比列数多迭代一次，最后那次（`j = Data'length`）写常量字符串 `"time_simulation"`，前面每次写 `Name(j)` 加 `spacer`。
 
-**预期结果**：两种 spacer 产出的文件结构如上。**待本地验证**数据行数（见 4.4.2 第 3 点关于 `nb_data+2` 的说明）。
+数据行分支（以 `time_sim=true` 为例）：
+
+> [hdl/psi_tb_textfile_pkg.vhd:L266-L277](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L266-L277) — 数据行同样多迭代一次，最后那次用 `write(ln, now)` 写当前仿真时间，前面每次写 `to_string(Data(j))` 加 `spacer`。
+
+```vhdl
+for j in 0 to Data'length loop
+   if j = Data'length then
+      write(ln, now);                 -- 仿真时间列
+   else
+      write(ln, to_string(Data(j)));  -- to_string(integer) -> 十进制字符串
+      write(ln, spacer);
+   end if;
+end loop;
+writeline(fp, ln);
+```
+
+这里的 `to_string(integer)` 来自 [hdl/psi_tb_txt_util.vhd:L357-L360](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_txt_util.vhd#L357-L360)，它内部就是 `str(int)`（十进制，见 u2-l1）。
+
+> **边读边数（待本地验证）**：循环上界是 `nb_data + 2`。从 `lineNr=1`（表头）开始推：每次迭代 `lineNr` 自增 1，循环在 `lineNr` 从 `nb_data+2` 变为 `nb_data+3` 时退出。也就是说它实际写出 **1 行表头 + (nb_data+1) 行数据**，比 `nb_data` 多一行数据。如果你的下游脚本按精确行数解析，请把这多出来的一行算进去，或自行调整 `nb_data`。这点源码里没有注释说明，建议本地跑一次确认实际行数。
+
+**另一个关键坑**：默认 `spacer => " , "` 带逗号，输出形如 `117 , 124 , 10 ns`。如 4.1.2 所述，逗号会让 `std.textio` 的整数 `read` 失败。所以**若你想让 `WriteTextfile` 的输出再次被 `Apply`/`Check` 读回（闭环自检），必须把 `spacer` 改成纯空格**，例如 `spacer => "   "`，并且 `time_sim => false`（去掉时间列，否则多出来的一列非整数也会破坏读取）。
+
+#### 4.4.4 代码实践（最小写文件）
+
+**目标**：把一段已知的 DUT 输出写成文件，肉眼核对格式。
+
+1. 准备一个最小 DUT 输出：每拍 `DataOut(0)` 依次为 `5, 6, 7`，`OutVld` 同步拉高 3 拍。
+2. 调用（关掉时间列、用纯空格 spacer，便于后续回读）：
+   ```vhdl
+   WriteTextfile(
+      Clk     => Clk,
+      Vld     => OutVld,
+      Data    => DataOut,
+      nb_data => 3,
+      time_sim=> false,
+      Name    => ("a"),                 -- TextfileName_t，单列
+      spacer  => "   ",                 -- 纯空格，可被 Apply/Check 读回
+      Filepath=> "out.txt");
+   ```
+
+**需要观察的现象**：仿真结束后工程目录下生成 `out.txt`。
+
+**预期结果**（待本地验证）：文件内容为
+```text
+a
+5
+6
+7
+8
+```
+（第一行表头 `a`；随后 4 行数据，对应前述「比 `nb_data` 多一行」的现象）。若改回默认 `spacer => " , "`、`time_sim => true`，则会得到带逗号与时间列、首行多一个 `time_simulation` 的版本——这种格式适合 Python `np.loadtxt(..., delimiter=',')`，但**不能**被本包的 `Apply`/`Check` 读回。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么说「把 `WriteTextfile` 的输出直接喂回 `CheckTextfileContent`」需要小心 spacer？
-**答案**：`WriteTextfile` 默认 `spacer=" , "`（逗号），而 `CheckTextfileContent` 用 std.textio 整数 `read` 解析、要求空格分隔。逗号会卡住整数解析。循环比对时必须把 `spacer` 覆盖为 `" "`。
+**练习 1**：为什么 `WriteTextfile` 用「懒打开」（在第一个 `Vld='1'` 才 `file_open`），而不是进过程就打开？
 
-**练习 2**：`file_status` 初值设为 `MODE_ERROR` 起什么作用？
-**答案**：它让 `if file_status /= OPEN_OK` 在第一次有效样本到来时为真，从而触发 `file_open(WRITE_MODE)`，实现「懒打开」——避免在 DUT 还没产出数据时就创建文件，也保证文件只在真正有数据时才落盘。
+**答案**：这样文件的「首行时间戳」与第一个有效采样对齐，且若 `Vld` 一直不来（DUT 没产出），就不会创建空文件、也不会在 0 时刻留下无意义输出。`file_status` 初值设为 `MODE_ERROR`（非 `OPEN_OK`）正是为了强制第一次进入循环时触发打开。
 
-**练习 3**：`time_sim=true` 时，每行末尾多出来的那一列是什么？
-**答案**：当前仿真时刻 `now`（VHDL 内建 `time` 类型，由 `write(ln, now)` 输出），表头对应列为 `"time_simulation"`。便于把仿真结果按时间轴绘图。
+**练习 2**：想把 `WriteTextfile` 输出再喂回 `CheckTextfileContent` 做闭环自检，至少要改哪两个参数？
+
+**答案**：`spacer` 改成纯空格（如 `"   "`），`time_sim` 改成 `false`。前者避免逗号破坏整数 `read`，后者避免多出一列非整数（仿真时间）同样破坏读取。另外还要忽略 `CheckTextfileContent` 的表头行（用 `IgnoreLines => 1`）。
+
+**练习 3**：`Name => ("a", "b")` 对应的 `Data` 应该是几列？
+
+**答案**：两列。`Name` 与 `Data` 的列数应一致（表头循环 `for j in 0 to Data'length-1` 用 `Name(j)`），所以 `Name` 给两个名字，`Data` 就应是 `TextfileData_t(0 to 1)`。
 
 ---
 
 ## 5. 综合实践
 
-把 4.2 ~ 4.4 串成一条端到端回路：用 Python 生成两列整数激励 → `ApplyTextfileContent` 施加 → 一个最小 DUT → `CheckTextfileContent` 校验 → `WriteTextfile` 导出 → 再把导出文件喂回 Check 做循环比对。
+把本讲四个模块串成一个端到端的位真回归测试。**DUT** 取一个极简的二元运算：输入两列 `a`、`b`，输出两列 `y0 = a + b`、`y1 = a - b`。
 
-**目标**：完整跑通「激励→DUT→校验→导出→再校验」，确认 Transcript 中无 `###ERROR###`。
-
-**步骤**：
-
-1. 用 Python 生成激励 `stim.txt`（示例代码）：
+**步骤 1：用 Python 生成激励与期望文件**
 
 ```python
 import numpy as np
-a = np.linspace(0, 90, 10)
-b = np.linspace(100, 10, 10)
-np.savetxt("stim.txt", np.column_stack((a, b)), fmt="%i")
+a = np.array([10, 20, 30, 40, 50])
+b = np.array([1, 2, 3, 4, 5])
+stim     = np.column_stack((a, b))          # 输入两列
+expected = np.column_stack((a + b, a - b))  # 期望输出两列
+np.savetxt("stim.txt",     stim,     fmt="%i")
+np.savetxt("expected.txt", expected, fmt="%i")
 ```
 
-2. 写一个最小「寄存一拍」的 passthrough DUT（示例代码），避免组合直通的 delta-cycle 时序歧义：
+两份文件都是空格分列、纯整数，满足本包约定。
+
+**步骤 2：写出 testbench 骨架**（示例代码，非项目原有代码）
 
 ```vhdl
-process(Clk) is
+-- 示例代码：最小位真 testbench
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.textio.all;
+use work.psi_tb_textfile_pkg.all;
+
+entity textfile_demo_tb is end;
+
+architecture sim of textfile_demo_tb is
+   signal Clk      : std_logic := '0';
+   signal InVld    : std_logic;
+   signal InData   : TextfileData_t(0 to 1);   -- a, b
+   signal OutVld   : std_logic;
+   signal OutData  : TextfileData_t(0 to 1);   -- a+b, a-b
 begin
-    if rising_edge(Clk) then
-        outVld  <= inVld;
-        outData <= inData;          -- 原样转发，便于用同一份文件做期望
-    end if;
-end process;
+   -- 时钟
+   Clk <= not Clk after 5 ns;
+
+   -- DUT：寄存输入后做 a+b / a-b
+   dut : block
+      signal a_r, b_r : integer := 0;
+   begin
+      process(Clk)
+      begin
+         if rising_edge(Clk) then
+            if InVld = '1' then
+               a_r <= InData(0);
+               b_r <= InData(1);
+            end if;
+         end if;
+      end process;
+      OutData(0) <= a_r + b_r;
+      OutData(1) <= a_r - b_r;
+      OutVld     <= InVld after 10 ns;          -- 简化：延迟一拍
+   end block;
+
+   -- 激励施加（生产者）
+   stim : process
+   begin
+      ApplyTextfileContent(
+         Clk => Clk, Rdy => PsiTextfile_SigOne,
+         Vld => InVld, Data => InData,
+         Filepath => "stim.txt");
+      wait;
+   end process;
+
+   -- 输出比对（消费者+裁判）
+   check : process
+   begin
+      CheckTextfileContent(
+         Clk => Clk, Rdy => PsiTextfile_SigUnused,
+         Vld => OutVld, Data => OutData,
+         Filepath => "expected.txt",
+         Tolerance => 0);
+      wait;
+   end process;
+
+   -- 结果写回（闭环导出）
+   wr : process
+   begin
+      WriteTextfile(
+         Clk => Clk, Vld => OutVld, Data => OutData,
+         nb_data => 5, time_sim => false,
+         Name => ("sum", "diff"), spacer => "   ",
+         Filepath => "out.txt");
+      wait;
+   end process;
+end architecture;
 ```
 
-3. 在 testbench 里用两个并发 process 分别施加与校验（示例代码）：
+**步骤 3：编译与运行**
 
-```vhdl
--- 激励侧（生产者）
-ApplyTextfileContent(Clk => Clk, Rdy => PsiTextfile_SigOne,
-    Vld => inVld, Data => inData, Filepath => "stim.txt", ClkPerSpl => 1);
+1. 把 `psi_tb_textfile_pkg.vhd` 加进 `sim/config.tcl` 的 `add_sources -tag src`，并为该 TB `create_tb_run`（参考 u1-l3、u8-l1）。
+2. 用 `sim/run.tcl`（ModelSim）或 `sim/runGhdl.tcl`（GHDL）跑仿真（见 u1-l3）。把 `stim.txt`、`expected.txt` 放在仿真器工作目录。
 
--- 校验侧（消费者）：用同一份 stim.txt 当期望，验证 passthrough
-CheckTextfileContent(Clk => Clk, Rdy => PsiTextfile_SigUnused,
-    Vld => outVld, Data => outData, Filepath => "stim.txt",
-    ClkPerSpl => 1, Tolerance => 0);
+**步骤 4：观察与闭环**
 
--- 导出侧：spacer 用空格，便于回喂
-WriteTextfile(Clk => Clk, Vld => outVld, Data => outData,
-    nb_data => 9, time_sim => false, Name => ("col0", "col1"),
-    spacer => " ", Filepath => "out.txt");
-```
+- Transcript 里**不应**出现 `###ERROR###`（因为 DUT 与期望完全一致）。
+- 工程目录下生成 `out.txt`，内容是 `sum`、`diff` 两列数据（首行表头）。
+- **闭环自检**：把 `out.txt` 的表头去掉后存为 `out_data.txt`，再写一个 `CheckTextfileContent(..., Filepath => "out_data.txt", IgnoreLines => 0)` 去比对 DUT 输出——应同样无报错，从而验证「写出去的能读回来」。
 
-4. 把 `psi_tb_textfile_pkg.vhd` 与本 TB 加入 `sim/config.tcl`（`-tag src` 加包、`-tag tb` 加 TB、`create_tb_run`/`add_tb_run` 注册运行），用 `sim/run.tcl`（ModelSim）或 `sim/runGhdl.tcl`（GHDL）跑仿真。
-5. 仿真结束后，把 `out.txt` 复制为 `roundtrip_expected.txt`，改写第二个 TB 用它做期望文件，再次 `CheckTextfileContent`，验证导出值与原始一致。
+> ⚠️ 注意 `dut` 块里 `OutVld <= InVld after 10 ns` 只是为演示把输出对齐到寄存后那一拍；真实 DUT 的流水延迟不同时，需要相应调整 `expected.txt` 的对齐（或给 `Apply`/`Check` 不同的 `ClkPerSpl`）。`after 10 ns` 这种写法在纯 RTL 里不可综合，但本讲是 testbench，允许使用（见 u1-l1）。
 
-**需要观察的现象**：
-
-- 第一次仿真 Transcript 中**不出现** `###ERROR###`（passthrough，期望=实际）。
-- `out.txt` 第 1 行为 `col0 col1`，其后为与 `stim.txt` 一致（因寄存一拍而整体延后一个采样）的整数行。
-- 第二次「回喂」仿真同样无 `###ERROR###`。
-
-**预期结果**：端到端回路成立，两轮仿真均无错误；`out.txt` 内容可被 `CheckTextfileContent` 正确解析（因为 `spacer => " "`）。**待本地验证**：寄存一拍带来的样本对齐、`nb_data+2` 实际写出的数据行数、以及你的仿真器对相对路径的处理（必要时改用绝对路径）。
-
-**排错提示**：若出现 `###ERROR###: Wrong Sample` 且整体偏移一个采样，多半是 passthrough 的寄存延迟导致期望与实际错位——可把期望文件也相应延迟一行，或改用组合直通 DUT 并接受 delta-cycle 风险；这类时序对齐属于本包使用时的常见调试点。
+---
 
 ## 6. 本讲小结
 
-- `psi_tb_textfile_pkg` 服务于位真仿真，约定文件为「每行一个采样、空格分列、整数取值」；这一格式由 std.textio 的整数 `read` 决定（空格是天然分隔符），Python 用 `np.savetxt(..., fmt="%i")` 即可生成。
-- `TextfileData_t`（未约束整数数组）承载一行的各列；`PsiTextfile_SigOne`/`PsiTextfile_SigUnused` 等占位信号用于绕开 VHDL「signal 形参不可留空」的限制，在不需要 ready 握手时填入。
-- `ApplyTextfileContent` 是输入侧生产者，按 valid/ready 握手把文件内容喂给 DUT，`ClkPerSpl` 控制每采样占多少时钟周期，`IgnoreLines`/`MaxLines` 控制读取范围。
-- `CheckTextfileContent` 是输出侧消费者兼校验者，握手后逐列做 `abs(Received-Expected) <= Tolerance` 容差比较，失配时打印带十进制与 32 位十六进制的 `###ERROR###` 消息，自动联动 CI 判定。
-- `WriteTextfile` 是出口，懒打开文件、写表头与数据行，支持 `time_sim` 追加仿真时刻；注意默认 spacer 是逗号、与输入侧空格约定不一致，循环比对时须覆盖为空格。
-- 该包未进入 `config.tcl` 的 CI 编译清单、本仓库内无示例 TB（示例在外部 `psi_fix` 项目），整数取值受 32 位有符号范围限制——这些是使用时必须知道的前提。
+- `psi_tb_textfile_pkg` 用一个极简约定驱动位真仿真：**文本文件、每行一个采样、空格分列、值为整数**；空格而非逗号是 `std.textio` 整数 `read` 的硬性要求。
+- `ApplyTextfileContent` 是**激励生产者**，逐行读文件、按列填 `Data`、每个采样抬一次 `Vld`，靠 `wait until rising_edge(Clk) and Rdy='1'` 与下游握手；`ClkPerSpl`/`MaxLines`/`IgnoreLines`/`DataOnlyOnVld` 控制节拍与范围。
+- `CheckTextfileContent` 是**输出侧消费者+裁判**，方向与 `Apply` 镜像（`Vld`/`Data` 为 `in`、`Rdy` 为 `out`），用 `abs(实际-期望) <= Tolerance` 判定，失败时打印带 `line`/`column`/`Expected`/`Received` 的 `###ERROR###` 消息、`severity error` 不中断。
+- `WriteTextfile` 把结果连同表头写回文件供 Python/MATLAB 处理；它默认 `spacer` 带逗号、可加仿真时间列，**因此输出默认不能直接被 `Apply`/`Check` 读回**——闭环自检需改用纯空格 `spacer` 并关时间列。
+- `PsiTextfile_SigOne`（恒 `'1'`）/`PsiTextfile_SigUnused`（垃圾桶）存在的根本原因是 **VHDL 过程的 `signal` 形参不能留空**，调用方必须传一个真实信号占位。
+- 本包**未注册进 `config.tcl` 的 CI 编译清单**，要实际运行必须先手动加入；它依赖 `psi_tb_txt_util`（`hstr`、`to_string`）。
+
+---
 
 ## 7. 下一步学习建议
 
-- **横向对比 AXI BFM**（u5）：本讲的 valid/ready 握手与 AXI4-Stream 同源；学完 u5 的 `axi_single_*`/`axi_apply_*` 后，可对比「文本文件驱动」与「过程调用驱动」两种施加激励方式的取舍。
-- **深入 I2C BFM 实战**（u7）：u7-l4 的 `psi_tb_i2c_pkg_tb` 是本仓库内唯一完整的多进程对拍 testbench 范例，可作为你为本包编写 testbench 时的结构参考（master/slave 双 process、`print` 分节、`###ERROR###` 自检）。
-- **二次开发**（u8-l2）：若你的数据超过 32 位或需要定点/实数格式，可仿照本包的约定（统一前缀、`assert ... severity error`、`TextfileData_t` 思路）扩展一个支持 `signed`/`real` 的文本驱动包；也可参考源码注释（[L201-L206](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L201-L206)）了解它从 `psi_fix` 依赖中解耦的历史，理解「为消除强依赖而简化数据格式」的设计动机。
+- **横向对照**：回到 u3（compare_pkg）和 u4（activity_pkg），体会「文本文件驱动」与「单点 `IntCompare`/`CheckNoActivity`」两类检查的分工——前者适合海量数值回归，后者适合握手时序与协议电平。
+- **看一个真实 testbench 的组织**：阅读 `testbench/psi_tb_i2c_pkg_tb.vhd`（u7-l4），观察 master/slave 双进程并发对拍的组织方式，本讲 `stim`/`check` 两个并发进程的结构是它的简化版。
+- **CI 接入**：进 u8-l1，学习如何把本讲新增的 testbench 正式注册进 `config.tcl`（`add_sources` + `create_tb_run`），让位真回归也纳入 CI 的 `###ERROR###` 双重检查。
+- **进阶扩展**：若你的数据是定点而非整数，可在 `psi_common` 的定点包基础上仿照本包写一个「定点列」版本（包注释里 `TextfileFormat_t` 的注释痕迹正是当年与 `PsiFix` 耦合、后又解耦的遗迹，见 [L42](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L42) 与 [L201-L207](https://github.com/paulscherrerinstitute/psi_tb/blob/8ee9c066e4a87b65865e184a966002e818dc7f65/hdl/psi_tb_textfile_pkg.vhd#L201-L207) 的 TAG/TODO 注释）。

@@ -1,0 +1,559 @@
+{
+  "project": "vivadoIP_psi_ms_daq",
+  "head": "c210e3ff7e1ea1066502a5cbc8be4f33e0fae3f7",
+  "rationale": "本项目本身只是一个\"Vivado IP 封装层\"：它把另一个仓库（psi_multi_stream_daq）的 VHDL 实现包装成可在 Vivado Block Design 中例化的 IP-Core，并附带 Linux/baremetal C 驱动和 ZCU102 参考设计。因此学习路线按\"先认清定位 → 再读 VHDL 封装 → 再读驱动与寄存器 → 再看数据采集/中断/窗口机制 → 最后端到端集成\"五段递进。单元 1（入门）让读者理解项目定位、目录结构、依赖关系与 IP 打包流程；单元 2（进阶）聚焦唯一的 RTL 文件 psi_ms_daq_vivado.vhd——它的泛型/端口、标量到数组的映射、对 psi_ms_daq_axi 的例化以及 BD 中 AXI ID 的传递；单元 3（进阶）进入 C 驱动，讲清寄存器映射、句柄数据模型、初始化与寄存器访问抽象、流配置流程；单元 4（专家）讲数据采集的核心机制——录制模式/窗口/环形缓冲、窗口式 vs 流式中断、窗口数据去环绕回拷贝、寄存器字段助手与返回码；单元 5（专家）用 ZCU102 参考设计把前面的 IP、驱动、中断、数据回读串成一条完整链路，并补充 IP-XACT(component.xml) 与驱动 BSP 集成。这样依赖关系清晰：RTL 封装依赖对项目结构的认知，驱动依赖寄存器映射，采集机制依赖驱动与流配置，参考设计是所有前置知识的综合验收。全仓库 41 个文件、规模偏小但横跨 VHDL/TCL/C/IP-XACT 多种语言，故拆为 18 讲，避免硬拆同时保证每个主题独立。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认识与目录结构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：psi_ms_daq 是什么、这个仓库做什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍多流数据采集 IP-Core 的功能（最多 16 路 AXI-Stream 输入、最多 32 个触发窗口、线性/环形缓冲、经 AXI 直接写内存），并说明本仓库只是 psi_multi_stream_daq VHDL 实现的 Vivado 封装层。",
+          "learning_goals": [
+            "理解 psi_ms_daq IP-Core 解决什么问题（多通道采集直写 DDR）",
+            "区分本仓库（Vivado IP 封装）与 psi_multi_stream_daq（功能实现）的职责边界",
+            "了解许可证（PSI HDL Library License / LGPL）与版本号约定"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "README 中的 Description 与 Important Note",
+            "Changelog 版本历史"
+          ],
+          "practice_task": "阅读 README 的 Description 和 Important Note 两节，用一段话写出：本仓库为何只是封装层、真正的功能逻辑放在哪里、并指出当前版本号（1.2.1）相对 1.2.0 修复了什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与关键文件导览",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "按目录讲解 hdl、scripts、xgui、bd、drivers、refdesign、doc、component.xml 各自的作用，建立整体地图。",
+          "learning_goals": [
+            "列出各顶层目录（hdl/scripts/xgui/bd/drivers/refdesign/doc）的职责",
+            "识别出 RTL 入口、IP 打包脚本、驱动源码、参考设计入口分别在哪",
+            "理解 component.xml 作为 IP-XACT 描述总入口的地位"
+          ],
+          "source_files": [
+            "README.md",
+            "hdl/psi_ms_daq_vivado.vhd",
+            "scripts/package.tcl",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "psi_ms_daq_vivado.vhd（仅看文件存在与位置）",
+            "package.tcl 与 component.xml 的关系"
+          ],
+          "practice_task": "画一张目录树，在每个目录旁标注一句话职责；再标注出 RTL 唯一文件、IP 打包脚本、C 驱动头文件、ZCU102 参考应用的 main.c 的完整路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "依赖关系与获取全部源码",
+          "order": 3,
+          "filename": "u1-l3-dependencies-and-sources.md",
+          "level": "beginner",
+          "topic": "讲解 README 中被自动解析的 Dependencies 段（psi_common、psi_multi_stream_daq、PsiIpPackage 等），以及 scripts/dependencies.py 如何解析 README 并拉取依赖。",
+          "learning_goals": [
+            "理解 psi_common 与 psi_multi_stream_daq 是运行时必需的 VHDL 依赖",
+            "区分运行依赖与开发依赖（PsiSim/PsiIpPackage/psi_tb）",
+            "掌握 dependencies.py 的工作方式（FromReadme + ExecMain）"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/dependencies.py",
+            "scripts/package.tcl"
+          ],
+          "minimal_modules": [
+            "README Dependencies 段（被解析标记包裹）",
+            "dependencies.py",
+            "package.tcl 中的 add_lib_relative 列表"
+          ],
+          "practice_task": "在 package.tcl 的 add_lib_relative 列表中，把每个文件归类到 psi_common、psi_multi_stream_daq 两类，并说明哪些属于运行时（被综合进 IP）、哪些仅是开发期依赖。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "IP 打包流程总览：从 RTL 到可例化 IP",
+          "order": 4,
+          "filename": "u1-l4-ip-packaging-overview.md",
+          "level": "beginner",
+          "topic": "以 scripts/package.tcl 为主线，讲解用 PsiIpPackage 把 VHDL 封装成 Vivado IP-Core 的整体步骤：命名/版本、添加源文件与库文件、定义 GUI 参数与端口使能、最后 package_ip。",
+          "learning_goals": [
+            "理解 IP_NAME/IP_VERSION/IP_LIBRARY 等元信息如何设定",
+            "掌握 add_sources_relative 与 add_lib_relative 的区别",
+            "了解 GUI 页面、参数控件、端口使能条件之间的协作",
+            "认识 package_ip 最终产物（目标器件 xczu9eg、是否综合）"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "xgui/psi_ms_daq_axi_v1_2.tcl",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "package.tcl 全文结构",
+            "xgui/psi_ms_daq_axi_v1_2.tcl 的 init_gui",
+            "component.xml 的存在（IP-XACT 产物）"
+          ],
+          "practice_task": "通读 package.tcl，按顺序写出打包一个 IP 需要的 5 个步骤（元信息→源文件→驱动→GUI 参数→端口使能→package_ip），并说明 xgui 下的 .tcl 文件是手工写的还是打包工具自动生成的。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "VHDL 封装层源码精读",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "封装实体：泛型与端口全景",
+          "order": 1,
+          "filename": "u2-l1-wrapper-entity-generics-ports.md",
+          "level": "intermediate",
+          "topic": "精读 hdl/psi_ms_daq_vivado.vhd 的 entity 声明：通用配置泛型（Streams_g/TsPerStream_g/UseLastAsTrigger_g）、录制泛型（IntDataWidth_g/MaxWindows_g/BurstSize）、AXI 泛型、每路流 Stream0..15 的 7 个泛型、以及 AXI Slave/Master/流输入/中断/触发端口。",
+          "learning_goals": [
+            "区分通用配置、录制、AXI、逐流四组泛型",
+            "理解为什么 16 路流要展开成 16 组泛型而不是数组（Vivado IP 接口要求）",
+            "识别 AXI Slave（寄存器）、AXI Master（写内存）、AXI-Stream 输入、IRQ、Trig 等端口分组",
+            "了解 Str00..Str15 每路流含 Clk/TData/Ts/TValid/TReady/TLast 六类信号"
+          ],
+          "source_files": [
+            "hdl/psi_ms_daq_vivado.vhd",
+            "scripts/package.tcl"
+          ],
+          "minimal_modules": [
+            "entity psi_ms_daq_vivado 的 generic 区",
+            "entity 的 port 区（AXI/流/中断）",
+            "package.tcl GUI 参数与泛型的对应"
+          ],
+          "practice_task": "从 entity 中列出三组泛型（通用/AXI/逐流），并解释 IntDataWidth_g 的约束『max(流宽) <= 内部宽度 <= AXI 主宽度』来自哪里（package.tcl 的提示文本）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "标量到数组的映射：generate 块与时间戳/触发选择",
+          "order": 2,
+          "filename": "u2-l2-stream-array-mapping-generate.md",
+          "level": "intermediate",
+          "topic": "讲解架构体如何用 All_Clk/All_Data/All_Ts/All_Vld/All_Rdy/All_Lst 等固定 16 路数组信号，逐行连接 Str00..Str15；再用 g_stream/g_tsstr/g_ntrig/g_trig/g_ntrig 等 generate 块按 Streams_g、TsPerStream_g、UseLastAsTrigger_g 动态裁剪出实际使用的 Str_* 数组与 trigger。",
+          "learning_goals": [
+            "理解为何先映射到固定 16 路的 All_* 信号再裁剪到 Streams_g 路",
+            "掌握 g_stream generate 把 All_* 投影到 Str_* 的写法",
+            "理解 TsPerStream_g 决定时间戳来自各流(All_Ts)还是共用 StrX_Ts",
+            "理解 UseLastAsTrigger_g 决定 trigger 取自 Str_Lst 还是外部 Trig 端口"
+          ],
+          "source_files": [
+            "hdl/psi_ms_daq_vivado.vhd"
+          ],
+          "minimal_modules": [
+            "All_* 信号声明（rtl 架构体）",
+            "Str00..Str15 到 All_* 的逐行赋值",
+            "g_stream / g_tsstr / g_ntsstr / g_trig / g_ntrig generate 块"
+          ],
+          "practice_task": "画出 TsPerStream_g=false、UseLastAsTrigger_g=true、Streams_g=3 三种开关下，Str_Ts 与 trigger 这两个信号分别连到了哪些源信号（StrX_Ts？All_Ts？Str_Lst？Trig？）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "例化 psi_ms_daq_axi 与配置转换",
+          "order": 3,
+          "filename": "u2-l3-instantiating-impl.md",
+          "level": "intermediate",
+          "topic": "讲解 i_impl : entity work.psi_ms_daq_axi 的例化：如何用 TimeoutUs_c/TimeoutsSec_c/FreqHz_c/FreqReal_c 常量与函数把逐流泛型聚合成数组型 generic（StreamWidth_g/StreamPrio_g/StreamBuffer_g/StreamTimeout_g/StreamClkFreq_g/StreamTsFifoDepth_g/StreamUseTs_g），并把 AXI Slave/Master、流数组、trigger、Irq 端口对应连接。",
+          "learning_goals": [
+            "理解逐流标量泛型如何聚合成实现端需要的数组型泛型",
+            "掌握 TimeoutUs_c→TimeoutsSec_c、FreqHz_c→FreqReal_c 的单位换算（微秒→秒、整数→实数）",
+            "理解 C_S_Axi_ID_WIDTH 如何透传为实现的 AxiSlaveIdWidth_g",
+            "看清 Str_Clk/Str_Data/Str_Ts/Str_Vld/Str_Rdy/Str_Trig/Irq 与实现端口的一一连接"
+          ],
+          "source_files": [
+            "hdl/psi_ms_daq_vivado.vhd",
+            "bd/bd.tcl"
+          ],
+          "minimal_modules": [
+            "TimeoutUs_c/TimeoutsSec_c/FreqHz_c/FreqReal_c 常量与函数",
+            "i_impl 的 generic map 与 port map",
+            "bd.tcl 中 AXI ID_WIDTH 的 init/pre_propagate/propagate"
+          ],
+          "practice_task": "对照 i_impl 的 generic map，写出 StreamTimeout_g 数组第一个元素的值是如何由 Stream0TimeoutUs_g 经过 TimeoutsSec_c→TimeoutsSec_c 计算得到的（注意除以 1.0e6）；并说明 bd.tcl 为什么要传播 ID_WIDTH。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "C 驱动架构与寄存器映射",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "寄存器映射全景",
+          "order": 1,
+          "filename": "u3-l1-register-map.md",
+          "level": "intermediate",
+          "topic": "精读 drivers/psi_ms_daq_axi/src/psi_ms_daq.h 的寄存器宏定义：通用寄存器（GCFG/GSTAT/IRQVEC/IRQENA/STRENA）、逐流寄存器（MAXLVL/POSTTRIG/MODE/LASTWIN，基址 0x200+0x10*n）、上下文寄存器（SCFG/BUFSTART/WINSIZE/PTR/WINEND，基址 0x1000+0x20*n）、窗口寄存器（WINCNT/LAST/TSLO/TSHI，基址 0x4000+so*n+0x10*w）及各比特字段。",
+          "learning_goals": [
+            "掌握四类地址空间：通用/逐流录制/逐流上下文/窗口的基址与步进公式",
+            "理解 IRQVEC/IRQENA/STRENA/GCFG_BIT_ENA 等关键使能位",
+            "看懂 WINCNT 寄存器中 CNT[30:0] 与 ISTRIG[31] 的含义",
+            "理解窗口地址偏移 strAddrOffs 的来源（取决于 maxWindows 的 2 的幂）"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c"
+          ],
+          "minimal_modules": [
+            "psi_ms_daq.h 的 PSI_MS_DAQ_REG_* / PSI_MS_DAQ_CTX_* / PSI_MS_DAQ_WIN_* 宏",
+            "psi_ms_daq.c 中 strAddrOffs 的计算"
+          ],
+          "practice_task": "写出 stream=2、window=5、maxWindows=16 时寄存器 PSI_MS_DAQ_WIN_WINCNT、TSLO、TSHI 的字节地址；并说明 strAddrOffs 的数值。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "驱动数据模型与句柄抽象",
+          "order": 2,
+          "filename": "u3-l2-driver-data-model-handles.md",
+          "level": "intermediate",
+          "topic": "讲解 psi_ms_daq.c 的核心类型 PsiMsDaq_Inst_t（IP 实例：baseAddr/maxStreams/maxWindows/strAddrOffs/streams 数组/三种访问函数指针）与 PsiMsDaq_StrInst_t（流实例：nr/isConfigured/widthBytes/windows/lastProcWin/irqCalledWin/回调与缓冲参数），以及 PsiMsDaq_IpHandle/PsiMsDaq_StrHandle 这两个 void* 句柄和栈上 WinInfo_t 的设计。",
+          "learning_goals": [
+            "理解 IP 句柄与流句柄实际上是结构体指针的 void* 别名",
+            "掌握流实例中记录的软件状态（isConfigured/lastProcWin/irqCalledWin/回调）",
+            "理解为何把访问函数（regWrite/regRead/dataCopy）做成可注入指针",
+            "区分句柄（堆/长生命周期）与 WinInfo_t（栈/瞬时）"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_Inst_t / PsiMsDaq_StrInst_t 结构体",
+            "PsiMsDaq_WinInfo_t、AccessFct_t、句柄 typedef"
+          ],
+          "practice_task": "画出一次 PsiMsDaq_GetStrHandle(ip, 2, &str) 调用后，ip 句柄与 str 句柄指向的内存关系；并说明 str->ipHandle 这个回指指针的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "初始化与寄存器访问抽象",
+          "order": 3,
+          "filename": "u3-l3-init-and-register-access.md",
+          "level": "intermediate",
+          "topic": "精读 PsiMsDaq_Init（malloc 实例、计算 strAddrOffs、注入或使用默认访问函数、禁用全部流/IRQ、清零 MaxLvl 与窗口计数、最后置 GCFG 使能位），以及 PsiMsDaq_RegWrite/RegRead 如何叠加 baseAddr 调用注入的访问函数，外加默认 PsiMsDaq_RegWrite_Standard/RegRead_Standard/DataCopy_Standard 的裸指针实现。",
+          "learning_goals": [
+            "掌握 Init 的完整复位序列与为何要在末尾置 GCFG_BIT_ENA|IRQENA",
+            "理解 strAddrOffs = Pow(2,Log2Ceil(maxWindows))*0x10 的含义",
+            "看懂默认访问函数如何用 volatile 指针直接读写物理地址",
+            "理解注入访问函数（AccessFct_t）带来的可移植性（裸机/带 MMU/仿真）"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_Init",
+            "PsiMsDaq_RegWrite/RegRead",
+            "PsiMsDaq_*_Standard 默认函数",
+            "Log2/Log2Ceil/Pow 辅助函数"
+          ],
+          "practice_task": "解释为什么默认 PsiMsDaq_RegRead_Standard 能直接用于 Zynq 裸机（提示：volatile + 物理地址）；并说明在 Linux 用户态或仿真环境下应该如何通过 accessFct_p 注入自定义读函数。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "流配置流程：从结构体到寄存器",
+          "order": 4,
+          "filename": "u3-l4-stream-configure-flow.md",
+          "level": "intermediate",
+          "topic": "精读 PsiMsDaq_Str_Configure：参数校验（宽度必须是 8 的倍数、winCnt<=maxWindows、winSize 必须是采样倍数、流必须先禁用），然后把 postTrigSamples/recMode/ringbuf/overwrite/bufStart/winSize/winCnt 写入对应寄存器，并更新流实例的软件缓存字段。",
+          "learning_goals": [
+            "掌握 StrConfig_t 各字段到寄存器的映射关系",
+            "理解为何配置前流必须处于禁用状态（CheckStrDisabled）",
+            "看清 winCnt 写入时减 1（winCnt-1）的寄存器编码约定",
+            "了解配置同时缓存 widthBytes/windows/bufStart/postTrig/winSize 供后续窗口读取使用"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_StrConfig_t",
+            "PsiMsDaq_Str_Configure",
+            "CheckStrDisabled/CheckStrNr 校验"
+          ],
+          "practice_task": "对照 main.c 中 cfg0（postTrig=5, ringbuf=true, overwrite=false, winCnt=3, bufStart=0x40000000, winSize=32, width=16）写出 PsiMsDaq_Str_Configure 内部对 stream0 各寄存器写入的（地址, 值）序列，并指出 winCnt 字段最终写入的值。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数据采集、窗口与中断机制",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "录制模式与窗口/环形缓冲概念",
+          "order": 1,
+          "filename": "u4-l1-recording-modes-and-windows.md",
+          "level": "advanced",
+          "topic": "讲解 PsiMsDaq_RecMode_t 四种录制模式（Continuous/TriggerMask/SingleShot/Manual）与 Arm 位的关系，以及窗口（Window）概念：每流多个窗口、线性 vs 环形缓冲（winAsRingbuf）、覆盖策略（winOverwrite）、触发前后采样数（pre/postTrig）。",
+          "learning_goals": [
+            "区分四种录制模式的触发行为与 Arm 位的作用时机",
+            "理解窗口作为独立录制单元的含义与 winCnt 的作用",
+            "掌握环形缓冲（ringbuf）与线性缓冲在数据布局上的差别",
+            "理解 pre/post trigger 与 ISTRIG 标志的关系"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_RecMode_t 枚举与注释",
+            "StrConfig_t 的 winAsRingbuf/winOverwrite/winCnt/winSize 字段",
+            "PSI_MS_DAQ_REG_MODE_BIT_ARM/REC、CTX_SCFG_BIT_RINGBUF/OVERWRITE"
+          ],
+          "practice_task": "为四种录制模式各举一个真实采集场景（如 Continuous 用于持续监控、SingleShot 用于捕获单次瞬态），并说明在 TriggerMask 模式下 Arm 被置位前后的行为差异。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "中断处理：窗口式 vs 流式两种方案",
+          "order": 2,
+          "filename": "u4-l2-irq-handling-schemes.md",
+          "level": "advanced",
+          "topic": "精读 PsiMsDaq_HandleIrq：读 IRQVEC 判断哪条流有中断并回写清除，对使用 irqFctStr 的流直接调用流回调；对使用 irqFctWin 的流，循环推进 lastProcWin→lastWrittenWin 之间的新窗口，用 irqCalledWin 位图防止对未释放窗口重复回调，逐个构造栈上 WinInfo_t 调用窗口回调。",
+          "learning_goals": [
+            "掌握两种 IRQ 方案（窗口式 vs 流式）的适用条件与互斥性",
+            "理解 IRQVEC 读改写清除的电平中断应答机制",
+            "看懂 irqCalledWin 位图如何保证每个窗口回调恰好一次且屏蔽伪中断",
+            "理解 PsiMsDaq_StrWin_MarkAsFree 清除 irqCalledWin 位的协作"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_HandleIrq",
+            "PsiMsDaq_Str_SetIrqCallbackWin/SetIrqCallbackStr 的互斥校验",
+            "头文件中 Window based IRQ / Stream based IRQ 说明"
+          ],
+          "practice_task": "描述一次连续到来 3 个新窗口（窗口 0/1/2）但用户尚未 MarkAsFree 任何窗口时，HandleIrq 会调用几次窗口回调、irqCalledWin 的值如何变化、以及下一次相同 IRQ 会发生什么（伪中断被屏蔽）。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "窗口数据回读与去环绕回拷贝",
+          "order": 3,
+          "filename": "u4-l3-window-data-unwrap.md",
+          "level": "advanced",
+          "topic": "精读 PsiMsDaq_StrWin_GetDataUnwrapped 与相关窗口读取函数：从 WINCNT 取采样数、从 ISTRIG 判断含触发并算 preTrig、由 LASTWIN/lastSplAddr 反推触发字节与末字节地址、判断是否跨越窗口边界，分别用单次或两次（首尾拼接）memcpy 把环形缓冲数据展开为线性顺序。",
+          "learning_goals": [
+            "掌握 GetNoOfSamples/GetPreTrigSamples/GetTimestamp/GetLastSplAddr 的寄存器来源",
+            "理解环形缓冲下触发字节地址可能需要 +winSize 回绕的修正",
+            "看懂当数据横跨窗口末尾与开头时为何要分两段拷贝",
+            "理解 buffer 大小、postTrig 上限、preTrig 上限三类校验的作用"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_StrWin_GetDataUnwrapped",
+            "PsiMsDaq_StrWin_GetPreTrigSamples/GetLastSplAddr/GetTimestamp",
+            "PSI_MS_DAQ_WIN_LAST/TSLO/TSHI/WINCNT 寄存器"
+          ],
+          "practice_task": "给定 winStart=0x40000000、winSize=32、postTrig=5、widthBytes=2、lastSplAddr=0x40000006，请手算触发字节地址 trigByteAddr 与末字节地址 lastByteAddr，并判断 GetDataUnwrapped(pre=5,post=5) 会走单次拷贝还是两段拼接分支。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "寄存器字段/比特助手、SAFE_CALL 与返回码",
+          "order": 4,
+          "filename": "u4-l4-field-helpers-safe-call-retcodes.md",
+          "level": "advanced",
+          "topic": "讲解驱动的底层工具：PsiMsDaq_RegSetField/RegGetField/RegSetBit/RegGetBit 的读改写（RMW）实现与掩码计算、SAFE_CALL 宏的错误短路传播、CheckStrNr/CheckWinNr/CheckStrDisabled 等守卫函数，以及完整的 PsiMsDaq_RetCode_t 返回码集合与每个码对应的出错场景。",
+          "learning_goals": [
+            "掌握 RMW 风格的字段/比特读改写实现与掩码边界处理",
+            "理解 SAFE_CALL 宏如何把任意返回非 Success 的调用短路返回上层",
+            "看清每个 RetCode 对应的非法输入/状态场景",
+            "了解高级调试函数 RegWrite/RegRead/RegSetField 的用途与风险"
+          ],
+          "source_files": [
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h"
+          ],
+          "minimal_modules": [
+            "PsiMsDaq_RegSetField/RegGetField/RegSetBit/RegGetBit",
+            "SAFE_CALL 宏",
+            "PsiMsDaq_RetCode_t 枚举",
+            "CheckStrNr/CheckWinNr/CheckStrDisabled"
+          ],
+          "practice_task": "写一个调用序列：对一条已使能的流调用 PsiMsDaq_Str_Configure，预期返回哪个 RetCode？再说明若传入 streamWidthBits=12 会返回哪个码、winSize 与采样数不对齐时返回哪个码。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "参考设计与端到端集成",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "参考设计：Vivado 工程与时钟域",
+          "order": 1,
+          "filename": "u5-l1-refdesign-vivado-project.md",
+          "level": "advanced",
+          "topic": "讲解 refdesign/ZCU102：project.tcl 如何重建 Vivado 工程、src/system_wrapper.vhd 作为 Block Design 顶层、constraints/timing.xdc 中针对 AXI 时钟与各流时钟之间 set_max_delay 的异步时钟域跨越约束（clk_pl_0/1/2）。",
+          "learning_goals": [
+            "理解 project.tcl 重建工程的流程与 origin_dir 机制",
+            "掌握 system_wrapper.vhd 作为 BD 顶层的角色",
+            "看懂 timing.xdc 中 set_max_delay -datapath_only 的 CDC 约束写法与 7ns/8ns 取值依据（最快时钟周期）",
+            "理解为何每条流可以有独立时钟（Str00_Clk..）而 IP 内部做跨时钟处理"
+          ],
+          "source_files": [
+            "refdesign/ZCU102/project.tcl",
+            "refdesign/ZCU102/src/system_wrapper.vhd",
+            "refdesign/ZCU102/constraints/timing.xdc",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "project.tcl 的目录/工程名设定",
+            "system_wrapper.vhd 顶层结构",
+            "timing.xdc 的 CDC 约束块"
+          ],
+          "practice_task": "根据 timing.xdc 的注释推算三条时钟（clk_axi/clk_stream0/clk_stream1）的大致频率，并解释为什么 set_max_delay 取值要用『更快时钟的 1 个周期』而不是某个固定纳秒。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "参考设计：端到端 C 应用主程序",
+          "order": 2,
+          "filename": "u5-l2-refdesign-main-app.md",
+          "level": "advanced",
+          "topic": "精读 refdesign/ZCU102/Sdk/app/src/main.c：用 axis_data_gen 产生两路测试数据 → PsiMsDaq_Init/GetStrHandle/Str_Configure/SetIrqCallbackWin/SetIrqEnable/SetEnable 完成初始化 → XScuGic 注册电平中断 → Str0Irq/Str1Irq 回调里做 DCache 失效、取时间戳、GetDataUnwrapped 回读并校验、MarkAsFree；主循环菜单触发 sporadic triggers。",
+          "learning_goals": [
+            "掌握一次完整的『初始化→使能→中断回读→释放窗口』调用链",
+            "理解为何读取 DDR 数据前必须 Xil_DCacheInvalidateRange",
+            "看清电平敏感 IRQ 的 GIC 配置（priority/trigger type/connect/enable）",
+            "理解 Str1Irq 中对回读数据做连续性校验的逻辑与 100000 回绕"
+          ],
+          "source_files": [
+            "refdesign/ZCU102/Sdk/app/src/main.c",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.h",
+            "drivers/psi_ms_daq_axi/src/psi_ms_daq.c"
+          ],
+          "minimal_modules": [
+            "Init() 初始化序列",
+            "Str0Irq/Str1Irq 回调",
+            "main() 的 GIC 配置与菜单触发循环"
+          ],
+          "practice_task": "把 main.c 的 Init() 改造要点列成清单：若把流 1 改为 winOverwrite=true，应改用哪种 IRQ 回调注册函数（SetIrqCallbackStr）？相应回调里还需要做哪些调整（提示：窗口式 IRQ 与 overwrite 不兼容）？",
+          "depends_on": [
+            "u4-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "IP-XACT 描述与驱动 BSP 集成",
+          "order": 3,
+          "filename": "u5-l3-ipxact-and-bsp-integration.md",
+          "level": "advanced",
+          "topic": "讲解 component.xml 作为 IP-XACT 产物：154 个参数、busType（aximm 主/从、axis 流、clock/reset/interrupt 信号）与文件组的组织；以及驱动如何被 Vitis/XSDK BSP 集成：data/psi_ms_daq_axi.mdd 声明 supported_peripherals、data/psi_ms_daq_axi.tcl 生成 xparameters.h、src/Makefile 把驱动编进 libxil.a。",
+          "learning_goals": [
+            "理解 component.xml 中 aximm/axis/clock/reset/interrupt 五类总线接口的来源（由 package.tcl 与 bd.tcl 共同生成）",
+            "掌握 16 路 AXI-Stream 接口与端口使能条件的对应",
+            "看清 .mdd 文件声明外设名 psi_ms_daq_axi 如何让 BSP 识别该驱动",
+            "理解 .tcl 的 generate 过程把 C_BASEADDR/C_HIGHADDR 写入 xparameters.h 的机制",
+            "了解 Makefile 如何把 *.c 编进 libxil.a 供应用链接"
+          ],
+          "source_files": [
+            "component.xml",
+            "drivers/psi_ms_daq_axi/data/psi_ms_daq_axi.mdd",
+            "drivers/psi_ms_daq_axi/data/psi_ms_daq_axi.tcl",
+            "drivers/psi_ms_daq_axi/src/Makefile",
+            "scripts/package.tcl"
+          ],
+          "minimal_modules": [
+            "component.xml 的 busInterfaces 与 parameters 概览",
+            "psi_ms_daq_axi.mdd",
+            "psi_ms_daq_axi.tcl 的 generate proc",
+            "src/Makefile"
+          ],
+          "practice_task": "解释从 package.tcl 打包到 Vitis 工程能 #include \"psi_ms_daq.h\" 并链接成功的完整链路：打包生成 component.xml → BSP 依据 .mdd 选中驱动 → .tcl 生成 xparameters.h（含 XPAR_PSI_MS_DAQ_BASEADDR）→ Makefile 编入 libxil.a。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

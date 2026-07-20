@@ -1,0 +1,457 @@
+{
+  "project": "vivadoIP_fpga_base",
+  "head": "9b249a7a48c9f50f411c936da435eb5438aeb097",
+  "rationale": "本项目是 PSI 的 Xilinx Vivado IP 核 fpga_base，体量小但机制多（VHDL RTL、AXI4 从机寄存器、用 FDPE 触发器 INIT 存编译时间的巧妙做法、TCL 综合钩子、Python 占位符式版本注入、PsiIpPackage 打包、BD 参数传播、裸机 C 驱动、Vitis 驱动元数据、JTAG 调试与 EPICS 集成），因此规划 5 个单元共 15 篇讲义。学习顺序遵循「先认识项目全貌与目录，再读 AXI 寄存器接口这一主干，然后进入最有特色的版本/编译时间机制，再理解 Vivado IP 打包与集成机制，最后上升到软件栈与系统集成」的由浅入深路线。依赖关系确保读者先掌握寄存器映射这一被驱动、调试、EPICS 共用的基础，再分支进入各应用方向。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 fpga_base IP 核",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：fpga_base 是什么、解决什么问题",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 fpga_base IP 核的定位：为 FPGA 设计提供版本号读出、固件/软件编译日期时间、LED、DIP 开关等基础功能，并说明它在 PSI HDL 库中的角色、许可证与外部依赖。",
+          "learning_goals": [
+            "理解 fpga_base 作为 Vivado IP 核要解决的核心问题",
+            "了解维护者、作者、PSI HDL 库许可证（LGPL 加固件例外）",
+            "知道项目依赖的 TCL/VHDL 库（psi_common、PsiIpPackage、PsiSim 等）及其用途"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "License.txt",
+            "doc/fpga_base.pdf"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "许可证与依赖",
+            "版本演进历史"
+          ],
+          "practice_task": "阅读 README.md 的 Dependencies 区块，画出 fpga_base 依赖的 TCL、VHDL、VivadoIp 三类库的依赖关系图，并写一段话说明如果缺少 psi_common 这个 IP 还能否正常打包。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与文件角色详解",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "逐目录讲解 hdl、scripts、bd、gui、xgui、drivers、epics、doc 各自承担的职责，以及根目录下 fpga_base.tcl、component.xml、.gitignore 等关键文件的作用。",
+          "learning_goals": [
+            "建立整个仓库的目录地图，知道每一类文件放在哪里",
+            "区分源码（hdl）、构建脚本（scripts）、IP 元数据（component.xml）与工具配置（.gitignore）",
+            "理解哪些文件是手写、哪些是工具自动生成的"
+          ],
+          "source_files": [
+            "README.md",
+            "component.xml",
+            ".gitignore"
+          ],
+          "minimal_modules": [
+            "目录职责划分",
+            "手写文件与生成文件",
+            "IP-XACT 元数据"
+          ],
+          "practice_task": "基于 .gitignore 与目录结构，列出 3 个被 Git 忽略的打包产物文件/目录，并解释它们为什么不应提交进版本库。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建与打包流程总览",
+          "order": 3,
+          "filename": "u1-l3-build-and-packaging-overview.md",
+          "level": "beginner",
+          "topic": "从高层俯瞰从 VHDL 源码到一个可分发 IP zip 包的完整流程：依赖解析、PsiIpPackage 打包、综合生成 component.xml，并介绍 dependencies.py 如何从 README 解析依赖。",
+          "learning_goals": [
+            "理解 Vivado IP 从源码到打包产物的高层流水线",
+            "掌握 dependencies.py 通过 README 受保护区块解析依赖的机制",
+            "了解 PsiIpPackage 作为 PSI 统一打包框架的位置"
+          ],
+          "source_files": [
+            "scripts/dependencies.py",
+            "scripts/package.tcl",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "依赖解析",
+            "IP 打包流水线",
+            "PsiIpPackage 框架"
+          ],
+          "practice_task": "运行 python scripts/dependencies.py -help（或阅读其源码）说明它如何定位 README 中的被解析区块，并写出依赖解析失败时最可能的原因之一。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "AXI4 从机寄存器接口",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "顶层实体：端口、泛型与外部接口",
+          "order": 1,
+          "filename": "u2-l1-top-entity-ports-generics.md",
+          "level": "intermediate",
+          "topic": "精读 fpga_base_v1_0.vhd 的 entity：AXI4 从机五通道信号、LED/DIP/blink 物理端口，以及 C_VERSION、时钟频率、ID 宽度等泛型参数的含义。",
+          "learning_goals": [
+            "读懂 AXI4 从机的读写地址/数据/响应五通道信号定义",
+            "理解各泛型参数（版本号、AXI 时钟频率、闪烁频率、ID 宽度）的作用",
+            "掌握物理端口 o_led/i_sw/o_blink 与寄存器的对应关系"
+          ],
+          "source_files": [
+            "hdl/fpga_base_v1_0.vhd"
+          ],
+          "minimal_modules": [
+            "AXI4 信号通道",
+            "泛型参数",
+            "物理 IO 端口"
+          ],
+          "practice_task": "在 fpga_base_v1_0.vhd 的 entity 中，标注出 AXI 读地址通道、读数据通道、写地址通道、写数据通道、写响应通道各包含哪些信号，并解释 s00_axi_aresetn 为什么是低有效。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "复用 psi_common 的 AXI 从机寄存器接口",
+          "order": 2,
+          "filename": "u2-l2-axi-slave-ipif-reuse.md",
+          "level": "intermediate",
+          "topic": "讲解顶层如何实例化 psi_common_axi_slave_ipif 把 AXI 事务转换为简单的寄存器读数据/写数据/写使能数组（reg_rdata/reg_wdata/reg_wr），以及 C_NUM_REG、UseMem_g、ResetVal_g 等参数的配置。",
+          "learning_goals": [
+            "理解 psi_common_axi_slave_ipif 把 AXI 协议降级为寄存器数组的思路",
+            "掌握 reg_rdata/reg_wdata/reg_wr 三个数组的握手语义",
+            "看清 NumReg_g=64、AxiAddrWidth_g=8 与地址范围的对应关系"
+          ],
+          "source_files": [
+            "hdl/fpga_base_v1_0.vhd"
+          ],
+          "minimal_modules": [
+            "AXI 到寄存器解耦",
+            "寄存器数组语义",
+            "复位默认值"
+          ],
+          "practice_task": "说明为何地址宽度被固定为 8 位、寄存器数取 64（2 的幂），并推算该 IP 可寻址的寄存器地址范围。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "寄存器映射：从偏移到功能",
+          "order": 3,
+          "filename": "u2-l3-register-map.md",
+          "level": "intermediate",
+          "topic": "对照 HDL 的 reg_rdata/reg_wdata 赋值与 C 驱动头文件宏，梳理 0x00 版本、0x04-0x14 固件日期、0x18-0x28 软件日期、0x40 项目串、0x50 设施串、0x60 LED、0x64 DIP 开关的完整寄存器映射。",
+          "learning_goals": [
+            "建立从地址偏移到功能含义的完整寄存器映射表",
+            "区分只读寄存器（版本、固件日期、开关）与可读写寄存器（LED、软件日期）",
+            "理解 HDL 与 C 驱动偏移宏必须严格一致的重要性"
+          ],
+          "source_files": [
+            "hdl/fpga_base_v1_0.vhd",
+            "drivers/fpga_base/src/fpga_base.h"
+          ],
+          "minimal_modules": [
+            "寄存器地址映射",
+            "读写权限",
+            "硬件/软件契约"
+          ],
+          "practice_task": "制作一张寄存器映射表（偏移、名称、读写、宽度、说明），并指出 0x18-0x28 软件日期寄存器为何是可写的、由谁在何时写入。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "版本与编译时间机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "用 FDPE 触发器存储固件编译日期",
+          "order": 1,
+          "filename": "u3-l1-fdpe-date-storage.md",
+          "level": "intermediate",
+          "topic": "精读 fpga_base_date_package.vhd：用 generate 实例化 32 个 FDPE 触发器分别存年/月/日/时/分，靠 dont_touch 属性保护，并通过 C_USE_GENERIC_DATE 在 generic 注入与 INIT 注入两种模式间切换。",
+          "learning_goals": [
+            "理解为什么用 FDPE 触发器而非普通寄存器/常量存编译时间",
+            "掌握 dont_touch 属性防止综合优化的作用",
+            "看清 generic 日期模式与 INIT 日期模式的双分支结构"
+          ],
+          "source_files": [
+            "hdl/fpga_base_date_package.vhd",
+            "hdl/fpga_base_v1_0.vhd"
+          ],
+          "minimal_modules": [
+            "FDPE 原语",
+            "dont_touch 属性",
+            "双模式分支"
+          ],
+          "practice_task": "解释为什么把 D/CE/PRE 都接常量的 FDPE 在正常综合下会被优化掉、又是如何被保留下来的，并说明 g_generics/g_ngenerics 两个 generate 各对应哪种使用场景。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "综合阶段 TCL 钩子：把编译时间写入 INIT",
+          "order": 2,
+          "filename": "u3-l2-synthesis-tcl-hook.md",
+          "level": "intermediate",
+          "topic": "精读 fpga_base.tcl：它作为 Vivado 综合/实现阶段的 tcl.pre 钩子运行，把当前年月日时分转成二进制，再用 set_property INIT 覆盖到对应 FDPE 触发器的初值，从而每次编译都更新固件时间。",
+          "learning_goals": [
+            "理解 dec2bin 辅助函数与按位循环写 INIT 的逻辑",
+            "掌握 set_property INIT 配合 get_cells 修改触发器初值的方法",
+            "看清触发器实例路径命名规律（gen_year[x].year_dfpe_inst）"
+          ],
+          "source_files": [
+            "fpga_base.tcl",
+            "hdl/fpga_base_date_package.vhd"
+          ],
+          "minimal_modules": [
+            "TCL 综合钩子",
+            "INIT 属性回写",
+            "触发器实例路径"
+          ],
+          "practice_task": "追踪 fpga_base.tcl 中 year 字段的写入循环：解释 x 从 31 递减、y 从 0 递增时二进制位与 FDPE 实例下标如何对应，并说明若改用 generic 模式该脚本是否还需要执行。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "脚本化构建信息：Python 占位符注入",
+          "order": 3,
+          "filename": "u3-l3-scripted-build-info.md",
+          "level": "intermediate",
+          "topic": "讲解 fpga_base_scripted_info_pkg.vhd 中的 $$tag$$ 占位符常量、update_version.py 如何用 gitpython 读取 git hash 与当前时间并通过正则替换写回 HDL，以及顶层 C_USE_INFO_FROM_SCRIPT 在 git hash 版本号与用户版本号之间的切换。",
+          "learning_goals": [
+            "理解 $$tag$$ 占位符 + 正则替换的版本注入模式",
+            "掌握 update_version.py 处理脏仓库、8 位 git hash、assume-unchanged 的策略",
+            "看清脚本化信息与传统 TCL 综合钩子两条路径的差异与选择"
+          ],
+          "source_files": [
+            "hdl/fpga_base_scripted_info_pkg.vhd",
+            "scripts/update_version.py",
+            "hdl/fpga_base_v1_0.vhd"
+          ],
+          "minimal_modules": [
+            "占位符替换模式",
+            "gitpython 版本读取",
+            "双信息源切换"
+          ],
+          "practice_task": "说明 update_version.py 对脏仓库（is_dirty）做了什么特殊处理，并解释为何最后要执行 git update-index --assume-unchanged 忽略脚本改动的文件。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Vivado IP 集成机制",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "用 PsiIpPackage 打包 IP 核",
+          "order": 1,
+          "filename": "u4-l1-ip-packaging-psiippackage.md",
+          "level": "intermediate",
+          "topic": "精读 scripts/package.tcl：调用 PsiIpPackage 的 init/add_sources_relative/add_lib_relative/add_drivers_relative/gui_* 流程，配置 IP 名称、版本、描述、Logo，并在指定器件上综合打包生成 component.xml。",
+          "learning_goals": [
+            "掌握 PsiIpPackage 打包 API 的调用顺序与参数含义",
+            "理解相对路径聚合源码、psi_common 库与驱动文件的方式",
+            "看清 package_ip 中 Edit/Synth 标志与目标器件的作用"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "PsiIpPackage 打包 API",
+            "源码与库聚合",
+            "综合打包配置"
+          ],
+          "practice_task": "对照 scripts/package.tcl 与生成的 component.xml，指出 add_sources_relative 列出的三个 HDL 文件在 component.xml 中对应哪些 fileSet 条目，并说明 IP 版本号 1.4 如何体现在 component.xml 中。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "GUI 参数与可选端口实现",
+          "order": 2,
+          "filename": "u4-l2-gui-params-optional-ports.md",
+          "level": "intermediate",
+          "topic": "讲解 package.tcl 中的 gui_create_parameter/gui_create_user_parameter 定义的可配置参数，xgui/fpga_base_v1_4.tcl 的 init_gui 布局与 update/validate 回调，以及 IMPL_BLINK/IMPL_LED/IMPL_SWITCH 用户参数如何通过 add_port_enablement_condition 控制端口是否实现。",
+          "learning_goals": [
+            "理解 IP GUI 参数与端口使能条件如何联动",
+            "掌握 xgui TCL 中 init_gui、update_PARAM_VALUE、update_MODELPARAM_VALUE 三类回调的作用",
+            "看清布尔用户参数如何裁剪生成的硬件端口"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "xgui/fpga_base_v1_4.tcl",
+            "gui/fpga_base_v1_0.gtcl"
+          ],
+          "minimal_modules": [
+            "GUI 参数定义",
+            "xgui 回调",
+            "端口使能条件"
+          ],
+          "practice_task": "追踪 IMPL_LED=false 时 o_led 端口会被裁掉的完整链路（package.tcl 的 add_port_enablement_condition 到最终硬件），并说明 user parameter 与普通 parameter 的区别。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Block Design 钩子与 AXI ID 宽度传播",
+          "order": 3,
+          "filename": "u4-l3-bd-hooks-id-width.md",
+          "level": "intermediate",
+          "topic": "精读 bd/bd.tcl 的 init、pre_propagate、propagate 三个 Block Design 回调，理解它们如何在 IP 被放进 Block Design 后自动协商、传播 AXI4 的 ID_WIDTH 参数，保持主从一致。",
+          "learning_goals": [
+            "理解 BD 回调 init/pre_propagate/propagate 的触发时机与职责",
+            "掌握 mark_propagate_only 与 set_property 协调参数传播的方法",
+            "看清 AXI4 ID_WIDTH 在主从接口间的自动匹配逻辑"
+          ],
+          "source_files": [
+            "bd/bd.tcl"
+          ],
+          "minimal_modules": [
+            "Block Design 回调",
+            "AXI 参数传播",
+            "主从 ID 宽度协商"
+          ],
+          "practice_task": "区分 bd.tcl 中三个回调各自处理 master 还是 slave 接口，并解释若一个 AXI 主机的 ID_WIDTH 与本 IP 不一致时 propagate 回调会如何修正。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "软件栈与系统集成",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "裸机 C 驱动与 __DATE__/__TIME__ 宏",
+          "order": 1,
+          "filename": "u5-l1-baremetal-c-driver.md",
+          "level": "advanced",
+          "topic": "精读 drivers/fpga_base/src/fpga_base.h 与 fpga_base.c：基于 Xil_IO 的寄存器读写函数、用 C 预处理器 __DATE__/__TIME__ 宏解析出软件编译年月日时分并回写到固件寄存器、字符串拼接打印项目与设施名。",
+          "learning_goals": [
+            "掌握 Xil_Out32/Xil_In32 等内存映射 IO 访问方式",
+            "理解用 C 预处理器宏解析 __DATE__/__TIME__ 字符串为数值的技巧",
+            "看清软件编译时间如何在处理器启动时回写到 0x18-0x28 寄存器"
+          ],
+          "source_files": [
+            "drivers/fpga_base/src/fpga_base.c",
+            "drivers/fpga_base/src/fpga_base.h"
+          ],
+          "minimal_modules": [
+            "Xil 内存映射 IO",
+            "预处理器日期解析",
+            "软件时间回写"
+          ],
+          "practice_task": "编写一小段 C 代码调用 fpga_base_version() 与 fpga_base_print()，并说明 DATE_MONTH 宏是如何从形如 'Jul 20 2026' 的 __DATE__ 字符串中识别出月份 7 的。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Vitis 驱动构建与元数据文件",
+          "order": 2,
+          "filename": "u5-l2-vitis-driver-build.md",
+          "level": "advanced",
+          "topic": "讲解 Vitis/Baremetal 驱动如何被构建与集成：drivers/fpga_base/src/Makefile 的编译/归档/依赖规则、data/fpga_base.tcl 生成 xparameters.h、data/fpga_base.mdd 声明驱动支持的周边与拷贝策略。",
+          "learning_goals": [
+            "理解 Vitis 驱动 Makefile 的 RELEASEDIR/INCLUDEDIR/对象文件规则",
+            "掌握 data/*.tcl 通过 xdefine_include_file 生成 xparameters.h 的机制",
+            "看清 .mdd 文件声明 supported_peripherals 与 copyfiles 的作用"
+          ],
+          "source_files": [
+            "drivers/fpga_base/src/Makefile",
+            "drivers/fpga_base/data/fpga_base.tcl",
+            "drivers/fpga_base/data/fpga_base.mdd"
+          ],
+          "minimal_modules": [
+            "驱动 Makefile",
+            "xparameters 生成",
+            "MDD 驱动描述"
+          ],
+          "practice_task": "追踪 Makefile 如何把所有 .c 编译进 libxil.a 并把头文件拷贝到 include 目录，并说明 data/fpga_base.tcl 生成的 xparameters.h 会为该 IP 定义哪些宏（NUM_INSTANCES、DEVICE_ID、C_BASEADDR、C_HIGHADDR）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "硬件调试 TCL 与 EPICS 集成",
+          "order": 3,
+          "filename": "u5-l3-debug-tcl-epics.md",
+          "level": "advanced",
+          "topic": "讲解两条系统侧集成路径：jtag_to_axi_master_cmd.tcl 通过 JTAG-to-AXI 主机在硬件上读写 LED/版本/XADC 寄存器的调试函数；epics/FPGA_BASE.template 用 regDev 把版本、固件/软件日期、项目、设施映射成 EPICS 记录并定时扫描。",
+          "learning_goals": [
+            "掌握 create_hw_axi_txn/run_hw_axi 通过 JTAG 调试 AXI 寄存器的方法",
+            "理解 report_hw_axi_txn 的 -t/-w 选项如何把读回数据解释为字符或数值",
+            "看清 EPICS template 中 longin/scalcout/seq 记录与 regDev 偏移地址的对应关系"
+          ],
+          "source_files": [
+            "jtag_to_axi_master_cmd.tcl",
+            "epics/FPGA_BASE.template"
+          ],
+          "minimal_modules": [
+            "JTAG-to-AXI 调试",
+            "寄存器数据解释",
+            "EPICS regDev 映射"
+          ],
+          "practice_task": "对照 FPGA_BASE.template 中 VERSION-FW-DATE 记录链与寄存器映射，说明 seq 记录如何每秒触发一组 longin/scalcout 记录把固件日期拼成可读字符串，并指出 jtag_to_axi 调试脚本中读取项目串时为何要按 4-word×4-byte 且字节倒序拼接字符。",
+          "depends_on": [
+            "u2-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

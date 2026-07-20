@@ -1,0 +1,443 @@
+# IP 打包与发布流程
+
+## 1. 本讲目标
+
+本讲解决一个工程化问题：**如何把散落的 VHDL 源码、外部库、C 驱动和一组可配参数，封装成一个能被 Vivado IP Catalog 识别、能在 Block Design 里拖拽、能随 BSP 自动生成软件驱动的标准 IP**。
+
+学完后你应当能够：
+
+- 读懂 `scripts/package.tcl`，说出它从「加载 PsiIpPackage」到 `package_ip` 的完整流水线。
+- 读懂 `component.xml`（IP-XACT 清单），说出它的总线接口、内存映射、端口、参数、视图、文件集合各代表什么。
+- 读懂 `bd/bd.tcl` 的三个回调（`init` / `pre_propagate` / `propagate`），理解 AXI `ID_WIDTH` 是如何在 Block Design 中自动传播的。
+- 读懂 `drivers/spi_simple` 的 `mdd` / `tcl` / `Makefile` 三件套，说明驱动是如何被纳入 BSP 的。
+- 能回答「新增一个 generic 需要改哪几处」。
+
+本讲是专家层第四讲，承接 [u3-l1 可配置 generics 与 Vivado 参数化](u3-l1-configurable-generics.md) 中确立的「三层值链」（`PARAM_VALUE → MODELPARAM_VALUE → VHDL generic`），把视线从「参数怎么流」上移到「整个 IP 怎么打出来」。
+
+## 2. 前置知识
+
+在进入打包流程前，先建立几条直觉。
+
+### 2.1 什么是「打包成一个 IP」
+
+Vivado 里的 IP（Intellectual Property core）本质是一个**自描述的目录**：里面除了 RTL 源码，还有一份机器可读的「说明书」告诉 Vivado 这个 IP 叫什么、有哪些端口、有哪些可配参数、支持哪些器件、附带了什么软件驱动。这份说明书就是 **IP-XACT** 标准（IEEE 1685-2009）下的 `component.xml`。
+
+> 一句话：**源码 + `component.xml` = 一个 Vivado IP**。打包（packaging）就是生成这份 `component.xml` 并把文件组织成 Vivado 期望的目录结构。
+
+### 2.2 为什么不手写 component.xml
+
+`component.xml` 极其冗长（本项目的就有 1600 多行），且字段之间存在大量机械对应关系（比如每个 generic 要同时出现在 `parameters`、`modelParameters`、xgui 的 `update_*` 回调里）。手写极易出错、极易漏同步。所以 PSI 的做法是：**写一个简短的 Tcl 脚本 `package.tcl` 作为唯一数据源（SSOT），由它驱动 PsiIpPackage 工具自动生成 `component.xml` 和 xgui 脚本**。这与 [u1-l3 工具链、依赖与获取方式](u1-l3-toolchain-and-dependencies.md) 讲的 `dependencies.py` 把 README 当 SSOT 是同一种思路。
+
+### 2.3 关键术语速查
+
+| 术语 | 含义 |
+|------|------|
+| **IP-XACT** | IEEE 1685 标准，规定 IP 描述文件的 XML schema，`component.xml` 即其实现 |
+| **PsiIpPackage** | PSI 自研的 Tcl 打包框架，封装 Vivado `ipx::` 命令，本项目依赖版本 2.0.0 |
+| **SSOT** | Single Source Of Truth，单一数据源。这里指 `package.tcl` |
+| **generic** | VHDL 实体参数，综合时确定 |
+| **PARAM_VALUE** | Vivado 里用户在 GUI 填写的参数值 |
+| **MODELPARAM_VALUE** | 由 PARAM_VALUE 派生、最终喂给 RTL generic 的值 |
+| **IPIC** | IP Inter-Connect，扁平寄存器接口（见 [u2-l3](u2-l3-axi-register-interface.md)） |
+| **BSP** | Board Support Package，Vivado 生成的裸机软件包，含 `xparameters.h` 与驱动库 |
+| **MDD** | Microprocessor Driver Description，Xilinx 驱动描述文件，告诉 BSP 工具链如何处理一个驱动 |
+| **BFM** | Bus Functional Model，总线功能模型 |
+
+## 3. 本讲源码地图
+
+| 文件 | 角色 |
+|------|------|
+| `scripts/package.tcl` | **打包脚本（SSOT）**。声明源码、库、驱动、GUI 参数、端口使能条件，最后调 `package_ip` 生成 IP |
+| `component.xml` | **IP-XACT 清单（产物）**。由 `package.tcl` 自动生成，描述总线接口、内存映射、端口、参数、视图、文件集合 |
+| `xgui/spi_simple_v1_4.tcl` | **GUI 布局脚本（产物）**。由 `package.tcl` 自动生成，定义 Vivado「Re-customize IP」对话框的控件与 `update_*` 回调 |
+| `bd/bd.tcl` | **Block Design 钩子**。三个 Tcl 回调，负责在 BD 中自动传播 AXI `ID_WIDTH` |
+| `drivers/spi_simple/data/spi_simple.mdd` | 驱动描述文件，声明驱动名、版本、支持的 peripheral、拷贝策略 |
+| `drivers/spi_simple/data/spi_simple.tcl` | 驱动生成脚本，`generate` 回调生成 `xparameters.h` 中的实例条目 |
+| `drivers/spi_simple/src/Makefile` | 驱动编译脚本，把 `*.c` 编进 `libxil.a`，把 `*.h` 拷进 include 目录 |
+| `hdl/spi_vivado_wrp.vhd` | 顶层 RTL，其 entity 的 generic 列表是 `package.tcl` 暴露参数的「事实依据」 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 PsiIpPackage 打包脚本结构（package.tcl）
+
+#### 4.1.1 概念说明
+
+`scripts/package.tcl` 是整个 IP 的**唯一数据源**。它本身不长（约 130 行），但它说了四件事：
+
+1. **这个 IP 叫什么**（名字、版本、库、描述、logo、数据手册）。
+2. **它由哪些文件组成**（自有 RTL、外部依赖库、软件驱动）。
+3. **用户能在 GUI 里配什么**（13 个 generic 及其范围、下拉、复选框）。
+4. **哪些端口是有条件出现的**（`spi_tri` 仅当 3-Wire 时出现）。
+
+PsiIpPackage 是一层薄封装：它把 Vivado 原生的 `ipx::*` 命令包装成更短、更可读的 `init` / `add_sources_relative` / `gui_create_parameter` / `package_ip` 等命令。这些命令最终落到 Vivado 的 IP-XACT API 上，生成 `component.xml` 和 `xgui/*.tcl`。
+
+> 注意一个容易混的点：**IP 名是 `spi_simple`，但顶层实体名是 `spi_vivado_wrp`**。前者是 IP Catalog 里看到的目录名/库名，后者是综合时真正例化的 RTL 顶层。两者在 `component.xml` 里都能看到，不要搞混。
+
+#### 4.1.2 核心流程
+
+`package.tcl` 是一条直线流水线，可画成五段：
+
+```text
+[1] 加载 PsiIpPackage 框架
+        │  source PsiIpPackage.tcl + namespace import
+        ▼
+[2] init：登记 IP 元信息（名/版本/库/描述/logo/数据手册）
+        │
+        ▼
+[3] 声明文件来源
+        ├─ add_sources_relative   → hdl/*.vhd（自有 RTL）
+        ├─ add_lib_relative       → psi_common/hdl/*.vhd（外部库子集）
+        └─ add_drivers_relative   → drivers/spi_simple/src/*.c|h（软件驱动）
+        ▼
+[4] 声明 GUI 参数
+        ├─ gui_add_page "Configuration"
+        └─ 对每个 generic：gui_create_parameter → (可选)set_range/widget → gui_add_parameter
+        ▼
+[5] 声明条件端口 + 打包
+        ├─ add_port_enablement_condition "spi_tri" "$TriWiresSpi_g = true"
+        └─ package_ip $TargetDir  false  true
+                                   │     │     │
+                                   │     │     └─ 是否综合后打包（true）
+                                   │     └─────── 是否可编辑 IP（false）
+                                   └────────────── 目标输出目录（..，即项目根）
+```
+
+第 [3] 段决定了 `component.xml` 的 `fileSets`，第 [4] 段决定了 `parameters` 与 `xgui` 脚本，第 [5] 段决定了端口的 `enablement` 条件。
+
+#### 4.1.3 源码精读
+
+**第 [1] 段：加载框架。** 任何 `package.tcl` 的第一件事都是把 PsiIpPackage 的命令引进当前命名空间：
+
+[scripts/package.tcl:10-11](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L10-L11) — `source` 外部依赖里的 `PsiIpPackage.tcl`，再 `namespace import`，使 `init`、`add_sources_relative` 等命令可直接调用。这里的相对路径 `../../../TCL/PsiIpPackage/PsiIpPackage.tcl` 暗示了 PSI 仓库的标准目录布局（见 [u1-l3](u1-l3-toolchain-and-dependencies.md)）。
+
+**第 [2] 段：IP 元信息。**
+
+[scripts/package.tcl:16-25](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L16-L25) — 设定 `IP_NAME=spi_simple`、`IP_VERSION=1.4`、`IP_REVISION="auto"`（让工具按时间戳自动生成 revision）、`IP_LIBRARY=PSI`，然后 `init` 建立工程、`set_description` 写描述、`set_logo_relative` / `set_datasheet_relative` 关联 `doc/` 下的 logo gif 与数据手册 pdf。这五条信息最终落到 `component.xml` 的 `vendor/library/name/version` 与各 `fileSet`（logo、datasheet）里。
+
+**第 [3] 段：声明文件来源。** 这是三组「相对路径 + 文件清单」的声明：
+
+[scripts/package.tcl:32-50](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L32-L50) — `add_sources_relative` 列出三个自有 RTL（`definitions_pkg`、`spi_simple`、`spi_vivado_wrp`）；`add_lib_relative` 列出 `psi_common` 里**实际用到的子集**（8 个文件，不是整个库）。注意：这里只挑需要的文件，是为了让 IP 自包含、不把整个 `psi_common` 都塞进去。这正对应 [u1-l4](u1-l4-simulation-and-regression.md) 里仿真 `config.tcl` 也只编译子集的做法——**「按需取用」是 PSI 生态的一致风格**。
+
+[scripts/package.tcl:56-59](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L56-L59) — `add_drivers_relative` 把 C 驱动的 `.c/.h` 纳入 IP。这一步会让 `component.xml` 生成一个 `xilinx_softwaredriver_view_fileset`（见 4.4）。
+
+**第 [4] 段：GUI 参数。** 以 `ClockDivider_g` 为例，三行声明一个参数：
+
+[scripts/package.tcl:69-71](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L69-L71) — `gui_create_parameter` 给出参数名与显示文本，`gui_parameter_set_range 4 1000000` 限定取值范围，`gui_add_parameter` 把它加入当前页面。其余 12 个 generic 同理，只是控件不同：`SpiCPOL_g` 用 `gui_parameter_set_widget_dropdown {0 1}` 做下拉（[package.tcl:80-82](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L80-L82)），`LsbFirst_g` 用 `gui_parameter_set_widget_checkbox` 做复选框（[package.tcl:92-94](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L92-L94)）。注意 `CsHighCycles_g` 与 `FifoDepth_g` **没有 set_range**，只靠 VHDL 的 `positive` 子类型兜底——这是 [u3-l1](u3-l1-configurable-generics.md) 提到的阅读陷阱之一。
+
+**第 [5] 段：条件端口 + 打包。**
+
+[scripts/package.tcl:124](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L124) — `add_port_enablement_condition` 声明 `spi_tri` 端口仅在 `TriWiresSpi_g = true` 时显现于 IP 边界。这是 3-Wire SPI 扩展（[u3-l2](u3-l2-three-wire-spi.md)）在打包层的落点。
+
+[scripts/package.tcl:129-131](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L129-L131) — `package_ip $TargetDir false true` 收尾：目标目录是上级 `..`（即项目根，所以你会看到根目录下有 `component.xml`、`xgui/`、`bd/`），第二个参数 `false` 表示打包后**不允许在 IP 内部再编辑**（锁定），第三个参数 `true` 表示**需要先跑综合再打包**（这样端口宽度等可由综合结果推断）。
+
+#### 4.1.4 代码实践：走查 package.tcl 的「值链」
+
+1. **实践目标**：验证 `package.tcl` 里的每条声明都能在生成的 `component.xml` 里找到对应字段，建立「脚本 → 清单」的映射直觉。
+2. **操作步骤**：
+   - 打开 `scripts/package.tcl`，定位第 [16-25] 行的元信息。
+   - 在 `component.xml` 里搜索 `spi_simple`、`PSI`、`1.4`，确认它们分别对应 `spirit:name` / `spirit:library` / `spirit:version`。
+   - 回到 `package.tcl` 第 [69-71] 行的 `ClockDivider_g`，再到 `component.xml` 里搜 `ClockDivider_g`，确认它**同时出现在三处**：`parameters`（`PARAM_VALUE.ClockDivider_g`）、`modelParameters`（`MODELPARAM_VALUE.ClockDivider_g`）、以及 `xgui/spi_simple_v1_4.tcl` 的 `update_MODELPARAM_VALUE.ClockDivider_g` 回调。
+   - 对比 `package.tcl` 第 [124] 行的端口使能条件，在 `component.xml` 里搜 `PORT_ENABLEMENT.spi_tri`，确认 `xilinx:dependency` 字符串就是 `$TriWiresSpi_g = true`。
+3. **需要观察的现象**：脚本里写一次，清单里出现多处——这正是「SSOT 自动展开成多份冗余描述」的体现。
+4. **预期结果**：每个 `gui_*` 声明都 1:1 落到 `PARAM_VALUE` + `MODELPARAM_VALUE` + xgui 回调三处。
+5. 运行打包命令本身需要完整 PSI 目录结构与 Vivado 环境，**待本地验证**；本实践以源码对照为主。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`package.tcl` 里 `IP_REVISION` 设为 `"auto"`，这意味着什么？
+**答案**：revision 不由人工写死，而是由 PsiIpPackage 在打包时自动生成（通常基于时间戳）。在 `component.xml` 里能看到 `<xilinx:coreRevision>1726493495</xilinx:coreRevision>` 和 `<xilinx:coreCreationDateTime>2024-09-16T13:32:37Z</xilinx:coreCreationDateTime>`，这就是 `auto` 的产物。
+
+**练习 2**：为什么 `add_lib_relative` 只列了 8 个 `psi_common` 文件，而不是整个库目录？
+**答案**：为了让发布的 IP 自包含且最小化——只带 SPI 真正依赖的那几个组件（`spi_master`、`sync_fifo`、`axi_slave_ipif`、`sdp_ram`、几个 pkg 与 `pl_stage`）。打包工具会把这些文件连同 `logicalName` 一起写进 `component.xml` 的综合/仿真 fileSet。
+
+---
+
+### 4.2 component.xml：IP-XACT 清单的五大部分
+
+#### 4.2.1 概念说明
+
+`component.xml` 是打包的**产物**，也是 Vivado 真正消费的 IP 描述。它遵循 IP-XACT 1685-2009 schema，根元素 `<spirit:component>` 带四个身份属性 `vendor / library / name / version`（VLNV），本例是 `psi.ch / PSI / spi_simple / 1.4`。
+
+这份清单虽长，但结构清晰，可归纳为**五大块**：
+
+1. **busInterfaces**：总线接口，声明哪些端口属于 AXI/时钟/复位/中断。
+2. **memoryMaps**：地址空间，声明 AXI slave 暴露的寄存器窗口大小。
+3. **model**（含 views / ports / modelParameters）：RTL 模型——用哪个顶层、有哪些端口、有哪些 generic。
+4. **fileSets**：文件集合，按用途（综合/仿真/GUI/logo/数据手册/驱动）分组列出所有源文件。
+5. **parameters** + **vendorExtensions**：用户可配参数（`PARAM_VALUE.*`）与厂商扩展（支持器件、分类、校验和等）。
+
+记住这五块的名字，读 `component.xml` 时就不会迷失在 1600 行 XML 里。
+
+#### 4.2.2 核心流程
+
+「值链」在本清单里体现为**同一段事实的三种写法**，由 `package.tcl` 自动同步：
+
+```text
+  用户在 GUI 填写 ──→ <spirit:parameters>        PARAM_VALUE.Foo_g      （用户层）
+                            │
+                            │  xgui 的 update_MODELPARAM_VALUE.Foo_g 回调拷贝
+                            ▼
+                       <spirit:modelParameters>  MODELPARAM_VALUE.Foo_g （派生层）
+                            │
+                            │  Vivado 把 MODELPARAM_VALUE 作为 VHDL generic 实参
+                            ▼
+                       hdl/spi_vivado_wrp.vhd     generic Foo_g          （RTL 层）
+```
+
+而端口（`ports`）与总线接口（`busInterfaces`）之间是**引用关系**：`busInterface` 通过 `portMap` 把逻辑名（如 `AWADDR`）映射到物理端口名（如 `s00_axi_awaddr`），物理端口的位宽则可能**依赖某个 MODELPARAM_VALUE**（如 AXI ID 信号依赖 `C_S00_AXI_ID_WIDTH`，片选依赖 `SlaveCnt_g`）。
+
+#### 4.2.3 源码精读
+
+**身份（VLNV）与总线接口。**
+
+[component.xml:3-6](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L3-L6) — `vendor=psi.ch`、`library=PSI`、`name=spi_simple`、`version=1.4`。注意与顶层实体名 `spi_vivado_wrp` 不同。
+
+[component.xml:8-14](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L8-L14) — 第一个 `busInterface` 名为 `s00_axi`，busType 指向 Xilinx 的 `aximm`（AXI 内存映射），角色是 `slave`，并引用了名为 `s00_axi` 的 memoryMap。其后 [component.xml:15-296](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L15-L296) 是一大串 `portMap`，把逻辑信号（`AWADDR`/`WDATA`/`BRESP`/`ARADDR`/`RDATA` …）一一映射到物理端口（`s00_axi_awaddr` 等），完整覆盖 AXI4 的五通道。
+
+[component.xml:298-367](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L298-L367) — 另外三个信号型总线接口：`s00_axi_aresetn`（reset，`POLARITY=ACTIVE_LOW`）、`s00_axi_aclk`（clock，`ASSOCIATED_BUSIF=s00_axi`、`ASSOCIATED_RESET=s00_axi_aresetn`）、`irq`（interrupt，`SENSITIVITY=LEVEL_HIGH`）。时钟的 `ASSOCIATED_BUSIF` 尤其重要——它告诉 Vivado 这个时钟驱动哪个 AXI 接口，BD 里连线时会自动用它。
+
+**内存映射（地址空间）。**
+
+[component.xml:369-380](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L369-L380) — `memoryMap s00_axi` 下有一个 `addressBlock reg0`：`baseAddress=0`、`range=256`、`width=32`、`usage=register`。256 字节 = 8 位地址，这正对应 [u2-l1](u2-l1-register-map.md) 讲的「10 个寄存器、4 字节步进、地址 0x00–0x24、空间向上取整到 256 字节」。注意 `range` 的 `minimum=4096` 是 Vivado 的地址对齐下限，实际生效值是 256。
+
+**model：视图、端口、modelParameters。**
+
+[component.xml:381-471](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L381-L471) — `model/views` 声明六个视图：综合、仿真、xpgui（UI 布局）、utilityxitfiles（logo 等）、datasheet（pdf）、softwaredriver（驱动）。前两个视图的 `modelName` 都是 `spi_vivado_wrp`——这就是「顶层实体名」。每个视图引用一个 fileSet（如 `xilinx_anylanguagesynthesis_view_fileset`）。
+
+[component.xml:529-551](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L529-L551) — 端口 `spi_tri` 是条件端口的范本：它的 `vendorExtensions/portInfo/enablement/isEnabled` 带 `dependency="$TriWiresSpi_g = true"`、`id="PORT_ENABLEMENT.spi_tri"`，默认 `false`。这正是 `package.tcl` 第 [124] 行 `add_port_enablement_condition` 的落地。
+
+[component.xml:486-502](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L486-L502) — 端口 `spi_cs_n` 是**位宽依赖参数**的范本：`vector/left` 的 `dependency` 是 `(spirit:decode(id('MODELPARAM_VALUE.SlaveCnt_g')) - 1)`，即左边界随 `SlaveCnt_g` 变化。`spi_le` 同理（[component.xml:552-568](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L552-L568)）。AXI 的 `awid`/`arid`/`bid`/`rid` 则依赖 `C_S00_AXI_ID_WIDTH`（[component.xml:883-902](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L883-L902) 等处）。
+
+[component.xml:1214-1285](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1214-L1285) — `modelParameters` 列出全部 14 个 `MODELPARAM_VALUE.*`（13 个用户 generic + `C_S00_AXI_ID_WIDTH`），每个带 `resolve="generated"`，表示由 PARAM_VALUE 派生。注意 `SpiDataPos_g` 这里默认值是 **8**（与 wrapper 一致），而 [u3-l1](u3-l1-configurable-generics.md) 指出核心 `spi_simple` 的默认是 3——IP 边界生效的是 8。
+
+**fileSets：文件按用途分组。**
+
+[component.xml:1311-1475](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1311-L1475) — 六个 fileSet，分别对应六个视图。综合与仿真 fileSet 列出 11 个 VHDL 文件（3 个自有 + 8 个 psi_common），每个都带 `logicalName=spi_simple_1_4`——这是 VHDL 库名（`library spi_simple_1_4;`），Vivado 会让所有 IP 内部源码编译进这个隔离库，避免与其他 IP 的同名文件冲突。注意综合 fileSet 里的 `spi_vivado_wrp.vhd` 多了一个 `CHECKSUM_5e5254ab`（[component.xml:1364-1369](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1364-L1369)），用于增量打包时判断文件是否变更。
+
+[component.xml:1452-1474](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1452-L1474) — `xilinx_softwaredriver_view_fileset` 把驱动的 5 个文件（`.mdd`、`.tcl`、`Makefile`、`.c`、`.h`）纳入 IP，这是 4.4 节驱动打包的清单落点。
+
+**parameters + vendorExtensions。**
+
+[component.xml:1477-1552](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1477-L1552) — 用户可配 `parameters`，每个带 `resolve="user"` 与 `id="PARAM_VALUE.*"`。末尾还有 `Component_Name`（默认 `spi_vivado_wrp_v1_0`），即 BD 里例化时的实例名前缀。
+
+[component.xml:1553-1621](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1553-L1621) — `vendorExtensions` 声明支持器件（spartan7/artix7/zynq/zynquplus 等一大串 7 系列/UltraScale+）、分类（`/UserIP`）、厂商显示名、核心 revision 与创建时间，以及各 scope 的 checksum。`xilinxVersion=2019.1_AR73479` 说明这份清单是用 Vivado 2019.1 打的。
+
+#### 4.2.4 代码实践：五大部分寻宝
+
+1. **实践目标**：在 1600 行 `component.xml` 里快速定位五大部分，建立「读清单」的肌肉记忆。
+2. **操作步骤**：
+   - 用编辑器折叠或搜索，分别定位 `<spirit:busInterfaces>`、`<spirit:memoryMaps>`、`<spirit:model>`（含 `views`/`ports`/`modelParameters`）、`<spirit:fileSets>`、`<spirit:parameters>`。
+   - 对每个 AXI 物理端口 `s00_axi_awaddr`，沿 `portMap` 找到它的逻辑名 `AWADDR`，再回到总线接口确认它属于 `s00_axi` 这个 slave。
+   - 找出所有 `dependency="..."` 出现的地方，分类：哪些是端口位宽依赖（`SlaveCnt_g`、`C_S00_AXI_ID_WIDTH`），哪些是端口使能依赖（`TriWiresSpi_g`）。
+3. **需要观察的现象**：同一个 generic 名（如 `SlaveCnt_g`）在 `modelParameters`、`parameters`、`ports` 的 dependency、xgui 回调里反复出现，彼此引用。
+4. **预期结果**：能口述「填一个 `SlaveCnt_g=4` 会同时改变 `spi_cs_n`/`spi_le` 的位宽（3 downto 0）与 `MODELPARAM_VALUE.SlaveCnt_g`」。
+5. 本实践为纯源码阅读，无需运行。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`component.xml` 里 `range=256` 但 `minimum=4096`，二者矛盾吗？
+**答案**：不矛盾。`minimum=4096` 是 Vivado 对 AXI 地址范围的强制对齐下限（IP-XACT 约束），`range=256` 是本 IP 实际声明的有效窗口。Vivado 会按 4096 对齐分配基地址，但 IP 内部只用低 8 位解码（对应 [u2-l3](u2-l3-axi-register-interface.md) 讲的 8 位地址）。
+
+**练习 2**：为什么所有 VHDL 文件都要带同一个 `logicalName=spi_simple_1_4`？
+**答案**：把 IP 的全部源码编译进一个以「IP 名_版本」命名的独立 VHDL 库，实现 IP 间的命名隔离——这样即便两个 IP 都含 `definitions_pkg.vhd`，它们也不会互相覆盖。库名随版本号变（`spi_simple_1_4`），也便于多版本共存。
+
+---
+
+### 4.3 Block Design 自动化（bd.tcl 三个回调）
+
+#### 4.3.1 概念说明
+
+当 IP 被拖进 Vivado Block Design（BD）并连到 AXI 互联（如 Zynq 的 GP 口）时，会遇到一个典型问题：**AXI 总线有一组 `ID` 信号（`awid`/`bid`/`arid`/`rid`），其位宽 `ID_WIDTH` 应该由谁定？**
+
+理想情况是：`ID_WIDTH` 由上游 master 决定，自动传播到下游所有 slave，用户不用手填。`bd/bd.tcl` 就是实现这种「自动传播」的钩子脚本。它定义三个 Tcl 回调，Vivado 在 BD 的不同阶段调用它们：
+
+| 回调 | 调用时机 | 本 IP 里的职责 |
+|------|----------|----------------|
+| `init` | IP 刚被加入 BD | 把 slave 的 `C_S00_AXI_ID_WIDTH` 标记为「仅由传播设置」，屏蔽手动赋值回灌 |
+| `pre_propagate` | 连线前 | 在 master 侧，把接口 pin 上的 `ID_WIDTH` 写回 cell 参数 |
+| `propagate` | 连线后 | 在 slave 侧，把接口 pin 上的实际 `ID_WIDTH` 写回 `C_S00_AXI_ID_WIDTH` |
+
+这套写法其实是 Xilinx 官方推荐模板（`bd::mark_propagate_only` 等），PSI 直接沿用。注意作者署名是 Goran Marinkovic 与 Oliver Bruendler——说明这部分是从 Xilinx 模板改造而来。
+
+#### 4.3.2 核心流程
+
+BD 里 AXI `ID_WIDTH` 的自动传播可画成三步：
+
+```text
+[init]  对 slave 总线 s00_axi：
+        C_S00_AXI_ID_WIDTH := mark_propagate_only
+        （告诉 BD：这个参数只接受传播，不要从 cell 反灌回网络）
+            │
+            ▼  用户连线  Master.GP ── s00_axi
+[pre_propagate]  遍历 AXI4【master】接口：
+        读接口 pin 上的 ID_WIDTH，若与 cell 参数不同且 cell 已有值 → 写回接口 pin
+        （保证 master 侧一致，为下游传播做准备）
+            │
+            ▼
+[propagate]  遍历 AXI4【slave】接口：
+        读接口 pin 上的实际 ID_WIDTH（已被 master 决定），
+        写回 cell 参数 C_S00_AXI_ID_WIDTH
+        （本 IP 的 awid/arid/bid/rid 位宽随之确定）
+```
+
+关键在于：`C_S00_AXI_ID_WIDTH` 一旦被 `propagate` 写回，`component.xml` 里那些 `dependency=(...C_S00_AXI_ID_WIDTH... - 1)` 的端口（`s00_axi_awid` 等）位宽就会自动变成 `ID_WIDTH-1 downto 0`。
+
+#### 4.3.3 源码精读
+
+**init 回调：标记「仅传播」。**
+
+[bd/bd.tcl:7-27](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/bd/bd.tcl#L7-L27) — 遍历所有总线接口 pin，只挑 MODE 为 `slave` 且名字在 `full_sbusif_list`（这里只有 `S00_AXI`）里的；为它构造参数名 `C_S00_AXI_ID_WIDTH`，调 `bd::mark_propagate_only` 标记。效果是：这个 cell 参数只由 BD 传播机制写入，不会被其他来源覆盖。
+
+**pre_propagate 回调：master 侧回写。**
+
+[bd/bd.tcl:30-58](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/bd/bd.tcl#L30-L58) — 跳过非 AXI4、非 master 的接口；对每个 master 接口，比较接口 pin 上的 `ID_WIDTH` 与 cell 参数 `C_<busif>_ID_WIDTH`，若不一致且 cell 参数非空，则把 cell 值写到接口 pin 上。这一步是为下游 slave 的传播准备好一致的 master 值。
+
+**propagate 回调：slave 侧落定。**
+
+[bd/bd.tcl:61-90](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/bd/bd.tcl#L61-L90) — 跳过非 AXI4、非 slave 的接口；对每个 slave 接口，比较接口 pin 上的 `ID_WIDTH` 与 cell 参数，若不一致且接口 pin 值非空，则把接口 pin 值写回 cell 参数 `C_<busif>_ID_WIDTH`（注释明确说 only for slaves）。这正是让本 IP 的 `C_S00_AXI_ID_WIDTH` 跟随上游 master 的关键一步。
+
+> 把 4.1（打包声明端口）与 4.3（BD 传播位宽）连起来看：`package.tcl` 声明 `s00_axi_awid` 的位宽依赖 `C_S00_AXI_ID_WIDTH`，`bd.tcl` 负责在 BD 里把 `C_S00_AXI_ID_WIDTH` 自动填成正确值。两者合力，用户在 BD 里只需把 `s00_axi` 连到 Zynq GP 口，ID 位宽就自动对了。
+
+#### 4.3.4 代码实践：追踪 ID_WIDTH 的传播路径
+
+1. **实践目标**：把 `bd.tcl` 三个回调与 `component.xml` 的端口位宽依赖串成一条完整因果链。
+2. **操作步骤**：
+   - 在 `component.xml` 里搜 `C_S00_AXI_ID_WIDTH`，记录所有出现位置：`modelParameters`（默认 1）、`parameters`、以及 `s00_axi_awid`/`arid`/`bid`/`rid` 四个端口的 `vector/left` dependency。
+   - 读 `bd.tcl` 的 `propagate` 回调（[bd/bd.tcl:61-90](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/bd/bd.tcl#L61-L90)），确认它写回的就是 `C_S00_AXI_ID_WIDTH`。
+   - 在脑中模拟：BD 里 master 的 `ID_WIDTH=4` → propagate 写回 `C_S00_AXI_ID_WIDTH=4` → 四个 ID 端口位宽变成 `3 downto 0`。
+3. **需要观察的现象**：`init` 回调里 `full_sbusif_list` 只列了 `S00_AXI`，说明本 IP 只有一个 AXI slave 接口。
+4. **预期结果**：能解释「为什么用户在 BD 里从不用手填 `C_S00_AXI_ID_WIDTH`」。
+5. 实际在 Vivado BD 中观察需要图形界面与完整工程，**待本地验证**。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`init` 回调里 `bd::mark_propagate_only` 的作用是什么？如果不调用会怎样？
+**答案**：它告诉 BD「这个 cell 参数只由传播机制写入」。不调用的话，BD 可能允许其他来源（如用户手动设值或反向回灌）覆盖传播结果，导致 master/slave 的 `ID_WIDTH` 不一致、综合报错或时序问题。
+
+**练习 2**：`pre_propagate` 与 `propagate` 一个处理 master、一个处理 slave，为什么顺序不能反？
+**答案**：`pre_propagate` 在连线前运行，负责把 master 侧的 `ID_WIDTH` 准备/校正一致；`propagate` 在连线后运行，才能读到已被网络连通的实际 master 值并写回 slave。若反过来，slave 在还没拿到正确 master 值时就尝试落定，结果会错。
+
+---
+
+### 4.4 驱动打包与纳入 BSP
+
+#### 4.4.1 概念说明
+
+把 RTL 打成 IP 只完成了一半——SPI Master 最终要由 PS 侧软件（如 Zynq ARM 核）驱动。Vivado 的 BSP 生成流程能**自动把随 IP 附带的 C 驱动编译进 BSP**，条件是这个驱动被正确「登记」。
+
+Xilinx 的驱动登记靠三个文件，正好对应 `component.xml` 里 `xilinx_softwaredriver_view_fileset` 列出的那五个文件中的三个：
+
+| 文件 | 作用 |
+|------|------|
+| `spi_simple.mdd` | **驱动描述**：声明驱动名、版本、支持的 peripheral、拷贝策略。BSP 工具靠它识别「这个 IP 有一个驱动」 |
+| `spi_simple.tcl` | **生成脚本**：定义 `generate` 回调，在 BSP 生成时为每个 IP 实例写出 `xparameters.h` 中的宏（基地址、设备 ID 等） |
+| `Makefile` | **编译脚本**：把 `spi_simple.c` 编进 `libxil.a`，把 `spi_simple.h` 拷进 BSP 的 include 目录 |
+
+驱动本身的 C 代码（`spi_simple.c/h`）已在 [u2-l7 C 驱动软件接口](u2-l7-c-driver-interface.md) 讲过，这里只关注**「驱动怎么被装进 BSP」**这条工程链。
+
+#### 4.4.2 核心流程
+
+驱动从「IP 里的几个文件」到「BSP 里可 `#include "spi_simple.h"` 的库」，经过：
+
+```text
+[打包阶段]  package.tcl: add_drivers_relative ../drivers/spi_simple
+            → component.xml 生成 xilinx_softwaredriver_view_fileset
+            （mdd / tcl / Makefile / .c / .h 五个文件随 IP 发布）
+                │
+                ▼
+[BSP 识别]  Vivado 导出硬件后，BSP 工具扫描 mdd：
+            supported_peripherals=(spi_simple) ⇒ 发现本 IP 实例需要此驱动
+            copyfiles=all ⇒ 把整个驱动目录拷进 BSP
+                │
+                ▼
+[BSP 生成]  对每个 spi_simple 实例，调 spi_simple.tcl 的 generate 回调
+            → 往 xparameters.h 写 NUM_INSTANCES / DEVICE_ID / C_BASEADDR / C_HIGHADDR
+                │
+                ▼
+[BSP 编译]  执行 Makefile 的 libs 目标
+            → 编 spi_simple.c → 归档进 libxil.a
+            → 拷 spi_simple.h 到 include/
+            用户代码即可 #include "spi_simple.h" 并链接
+```
+
+#### 4.4.3 源码精读
+
+**mdd：驱动描述。**
+
+[drivers/spi_simple/data/spi_simple.mdd:3-10](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/drivers/spi_simple/data/spi_simple.mdd#L3-L10) — `psf_version=2.1` 声明 MDD schema 版本；`supported_peripherals=(spi_simple)` 是关键——它把驱动名 `spi_simple` 与 IP 名绑定（注意这里用的是 IP 名 `spi_simple`，不是实体名 `spi_vivado_wrp`）；`copyfiles=all` 表示拷整个目录；`VERSION=1.0`/`NAME=spi_simple` 是驱动自身版本与名。BSP 工具正是靠 `supported_peripherals` 判断「硬件里有 `spi_simple` 这个 IP → 要用这个驱动」。
+
+**tcl：xparameters.h 生成。**
+
+[drivers/spi_simple/data/spi_simple.tcl:3-5](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/drivers/spi_simple/data/spi_simple.tcl#L3-L5) — `generate` 回调调 Xilinx 内置的 `xdefine_include_file`，向 `xparameters.h` 写入四个宏：`NUM_INSTANCES`（IP 实例数）、`DEVICE_ID`（设备 ID）、`C_BASEADDR`/`C_HIGHADDR`（地址窗口）。这些宏是 C 驱动定位硬件寄存器的依据（`spi_simple.c` 里的基地址就来自这里，见 [u2-l7](u2-l7-c-driver-interface.md)）。注意 `xdefine_include_file` 的第二个参数 `spi_simple` 必须与 mdd 的 `NAME`、IP 名三者一致。
+
+**Makefile：编译进 libxil.a。**
+
+[drivers/spi_simple/src/Makefile:17-24](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/drivers/spi_simple/src/Makefile#L17-L24) — `libs` 目标：用 `$(COMPILER)` 编译 `LIBSOURCES=*.c`（即 `spi_simple.c`），再用 `$(ARCHIVER) -r` 把 `.o` 归档进 `${RELEASEDIR}/${LIB}`（即 `../../../lib/libxil.a`）。`include` 目标把 `INCLUDEFILES=*.h` 拷到 `../../../include/`。`COMPILER`/`ARCHIVER` 变量留空，由 BSP 工具链在调用时注入（如 `arm-none-eabi-gcc`）。这就是为什么 [u2-l7](u2-l7-c-driver-interface.md) 里用户代码能直接 `#include "spi_simple.h"` 并调用其 API——头文件已在 include 路径、实现已进静态库。
+
+#### 4.4.4 代码实践：验证驱动三件套的自洽性
+
+1. **实践目标**：确认 mdd / tcl / Makefile 三处的「驱动名」与 IP 名一致，理解命名一致性是驱动被正确纳入 BSP 的前提。
+2. **操作步骤**：
+   - 在 `spi_simple.mdd` 里找到 `supported_peripherals=(spi_simple)` 与 `NAME = spi_simple`。
+   - 在 `spi_simple.tcl` 里找到 `xdefine_include_file $drv_handle "xparameters.h" spi_simple ...` 的第 3 个参数 `spi_simple`。
+   - 在 `component.xml` 的 `xilinx_softwaredriver_view_fileset`（[component.xml:1452-1474](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/component.xml#L1452-L1474)）里确认这五个文件路径与 `package.tcl` 第 [56-59] 行 `add_drivers_relative` 声明一致。
+   - 在 `Makefile` 里确认 `LIB=libxil.a`、`RELEASEDIR=../../../lib`，推断出 BSP 里 `libxil.a` 的相对位置。
+3. **需要观察的现象**：驱动名 `spi_simple` 在 mdd、tcl、IP 名三处保持一致；任何一个写错（比如拼成 `spi_simpl`）都会导致 BSP 找不到驱动。
+4. **预期结果**：能口述「硬件里有 `spi_simple` IP 实例 → mdd 匹配 → 拷驱动 → tcl 生成 xparameters.h → Makefile 编进 libxil.a」的完整链路。
+5. 实际生成 BSP 需要 Vitis/Vivado 与硬件导出文件，**待本地验证**。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：如果把这个 IP 改名为 `spi_advanced`，驱动侧需要同步改哪些地方？
+**答案**：至少要改 mdd 的 `supported_peripherals` 与 `NAME`、tcl 里 `xdefine_include_file` 的驱动名参数、`package.tcl` 里 `IP_NAME`、以及目录名 `drivers/spi_simple`。任一不一致都会让 BSP 匹配失败。
+
+**练习 2**：`Makefile` 里 `COMPILER=` 留空，编译时谁来填？
+**答案**：由 BSP 生成工具链（Vitis）在调用 Makefile 时通过环境变量或命令行注入，例如指向 `arm-none-eabi-gcc`。这样同一个 Makefile 可跨处理器架构复用。
+
+---
+
+## 5. 综合实践：新增一个 generic 的「全链路走查」
+
+把本讲四节串起来，做一个贯穿任务：**假设要给 `spi_simple` 新增一个 generic `SpiMode_g`（整数，范围 0..3），请列出需要改动的地方，并说明每处的作用。**
+
+### 任务步骤
+
+1. **RTL 层（事实依据）**：在 `hdl/spi_vivado_wrp.vhd` 的 entity generic 列表（参照 [hdl/spi_vivado_wrp.vhd:23-43](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/hdl/spi_vivado_wrp.vhd#L23-L43)）加一行 `SpiMode_g : natural range 0 to 3 := 0;`。这是参数的「真实定义」，决定了范围与默认值。如核心也需要，再在 `hdl/spi_simple.vhd` 加同名 generic 并在 wrapper 的 `generic map` 里透传（参考 [u3-l1](u3-l1-configurable-generics.md) 的透传链）。
+
+2. **打包脚本（SSOT）**：在 `scripts/package.tcl` 的 GUI 段（参照 [package.tcl:69-71](https://github.com/paulscherrerinstitute/vivadoIP_spi_simple/blob/fda4db7a10b98ac138f37decc5211130dc425ada/scripts/package.tcl#L69-L71) 的 `ClockDivider_g` 模板）加三行：
+   ```tcl
+   gui_create_parameter "SpiMode_g" "SPI mode selector (0..3)"
+   gui_parameter_set_range 0 3
+   gui_add_parameter
+   ```
+   这是**唯一需要手写的声明**。
+
+3. **重新打包（产物自动生成）**：运行 `package.tcl` 后，`component.xml` 会自动新增三处：`parameters` 下的 `PARAM_VALUE.SpiMode_g`、`modelParameters` 下的 `MODELPARAM_VALUE.SpiMode_g`；`xgui/spi_simple_v1_4.tcl` 会自动新增 `update_PARAM_VALUE.SpiMode_g` 与 `update_MODELPARAM_VALUE.SpiMode_g` 回调，并在 `init_gui` 里加一行控件。**这三处都不需要手改**，它们是 SSOT 自动展开的结果。
+
+4. **驱动侧**：本例 `SpiMode_g` 是纯硬件参数，不影响寄存器地图，所以驱动（mdd/tcl/Makefile）**不用动**。但如果新 generic 改变了寄存器布局，则还要同步 `definitions_pkg.vhd` 与 `spi_simple.h`（见 [u2-l1](u2-l1-register-map.md) 的软硬件契约）。
+
+### 验证清单
+
+完成后，用本讲学到的对照法自检：
+
+- 在 `component.xml` 里搜 `SpiMode_g`，确认它出现在 `parameters`、`modelParameters` 两块（值链前两环）。
+- 在重新生成的 `xgui/spi_simple_v1_4.tcl` 里确认有对应的 `update_MODELPARAM_VALUE.SpiMode_g`（值链第三环：PARAM_VALUE → MODELPARAM_VALUE）。
+- 在 Vivado 里 Re-customize IP，确认 GUI 出现了新控件（**待本地验证**）。
+
+这个任务把 4.1（脚本 SSOT）、4.2（清单自动展开）、4.4（驱动边界）串成一条线：**改一处 RTL + 一处脚本，其余全自动**。
+
+## 6. 本讲小结
+
+- **`package.tcl` 是 IP 的唯一数据源（SSOT）**，一条流水线串起：加载 PsiIpPackage → `init` 元信息 → `add_sources_relative`/`add_lib_relative`/`add_drivers_relative` 声明文件 → `gui_*` 声明参数 → `add_port_enablement_condition` 声明条件端口 → `package_ip` 生成 IP。
+- **`component.xml`（IP-XACT 清单）分五大块**：`busInterfaces`（AXI/时钟/复位/中断）、`memoryMaps`（256 字节寄存器窗口）、`model`（views/ports/modelParameters）、`fileSets`（按用途分组的源文件）、`parameters`+`vendorExtensions`。它是 `package.tcl` 的产物，日常不手改。
+- **值链是「同一段事实的三种写法」**：`PARAM_VALUE`（用户层）→ xgui 回调拷成 `MODELPARAM_VALUE`（派生层）→ 作为 VHDL generic 喂给 RTL（RTL 层）。端口位宽与使能也通过 `dependency` 引用 `MODELPARAM_VALUE`。
+- **IP 名 `spi_simple` 与顶层实体名 `spi_vivado_wrp` 不同**，前者是 VLNV/目录名/库名前缀，后者是综合的 `modelName`；所有源码编译进隔离库 `spi_simple_1_4`。
+- **`bd/bd.tcl` 三个回调（`init`/`pre_propagate`/`propagate`）实现 AXI `ID_WIDTH` 自动传播**：`init` 标记「仅传播」，`pre_propagate` 校正 master 侧，`propagate` 把实际值写回 slave 的 `C_S00_AXI_ID_WIDTH`，从而自动确定 ID 信号位宽。
+- **驱动靠 mdd/tcl/Makefile 三件套纳入 BSP**：mdd 用 `supported_peripherals=(spi_simple)` 把驱动与 IP 绑定，tcl 的 `generate` 回调写 `xparameters.h`，Makefile 把 `.c` 编进 `libxil.a`、`.h` 拷进 include。
+
+## 7. 下一步学习建议
+
+- 本讲聚焦「打包流程」，但**何时触发打包、如何在 CI 里跑打包与回归**是工程化下一环，这正是 [u3-l5 CI、回归与开发工作流](u3-l5-ci-and-dev-workflow.md) 的主题，建议接着读，把 `ciFlow.py` / `ci.do` / `dependencies.py` 串成完整的「改代码 → 拉依赖 → 跑仿真 → 判退出码」闭环。
+- 若想深入「参数如何影响硬件行为」，回到 [u3-l1](u3-l1-configurable-generics.md) 逐个精读 13 个 generic 的取值范围，再到 [u3-l2 3-Wire SPI](u3-l2-three-wire-spi.md) 看 `spi_tri` 端口条件使能与 3-Wire 扩展的端到端透传。
+- 若想验证打包结果，建议在本地按 [u1-l3](u1-l3-toolchain-and-dependencies.md) 搭好 PSI 目录结构后，在 Vivado 里 `source scripts/package.tcl`，亲眼看 `component.xml` 与 `xgui/*.tcl` 被重新生成。
+- 进一步可阅读 Xilinx UG1118（Creating and Packaging Custom IP）与 IP-XACT 1685-2009 标准，理解 `component.xml` 背后的完整 schema。
