@@ -1,0 +1,408 @@
+{
+  "project": "plum",
+  "head": "b1be1969f914cc005add4090631b855db00c2591",
+  "rationale": "plum 是 Rime 输入法的配置管理器，本质是一套 Bash 脚本（外加 Windows 批处理对应实现），核心是把 GitHub 上的输入方案/数据包按\"配方\"下载并安装到 Rime 用户目录。整体规模属中小型，故设计为 3 层共 14 篇讲义。入门层先建立\"项目是什么、怎么跑、入口在哪\"的整体认知（u1）；进阶层沿着真实调用链 rime-install → bootstrap/styles → resolver → install-packages → fetch/update/recipe 展开，把配方字符串解析、增量安装、配方执行等核心机制逐篇拆解（u2）；专家层再覆盖交互选择、Windows 批处理双实现、Makefile 共享数据构建，以及 split-packages 这种高级 git 历史改写维护工具（u3）。讲义顺序遵循\"概念→入口→主流程→子机制→跨平台/工程化\"的依赖递进，每篇只解决一个独立主题并配一个可动手的实践任务，源码引用均来自实际读过的文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 plum 与上手运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与核心概念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 plum 是什么——Rime 输入法引擎的配置管理器，以及 schema（方案）、dictionary（词典）、package（数据包）、recipe（配方 ℞）等核心概念。",
+          "learning_goals": [
+            "理解 plum 在 Rime 生态中的定位与价值",
+            "区分输入方案、词典、数据包与配方这四个概念",
+            "了解 plum 维护的官方包集合的大致分类"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目定位与解决的问题",
+            "schema/dictionary/package/recipe 概念",
+            "官方包索引分类"
+          ],
+          "practice_task": "阅读 README，分别列出 Essentials 与 Phonetic-based 两类下各有哪些官方包，并用一段自己的话说明 plum 帮 Rime 用户解决了什么问题。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与脚本入口",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-entry.md",
+          "level": "beginner",
+          "topic": "讲解仓库的目录结构，重点是入口脚本 rime-install 如何自举（自动 clone plum、转发到新版脚本）以及 scripts/ 模块目录的组织方式。",
+          "learning_goals": [
+            "认识 plum 仓库的文件组成与职责划分",
+            "理解 rime-install 的自举与重入逻辑（plum_dir 判定、新版脚本转发）",
+            "知道核心逻辑都集中在 scripts/ 目录"
+          ],
+          "source_files": [
+            "README.md",
+            "rime-install"
+          ],
+          "minimal_modules": [
+            "仓库文件总览",
+            "rime-install 自举与转发逻辑",
+            "scripts 目录职责"
+          ],
+          "practice_task": "跟踪 rime-install 前 25 行，画出",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "运行安装与常用用法",
+          "order": 3,
+          "filename": "u1-l3-running-and-usage.md",
+          "level": "beginner",
+          "topic": "介绍如何运行 rime-install：curl 一行命令、:preset/:extra/:all 预设、指定包名/user-repo/分支，以及用环境变量定制 rime_dir 与 rime_frontend。",
+          "learning_goals": [
+            "掌握 curl 一行安装命令及其行为",
+            "学会使用预设集合与第三方包名语法（含 @branch）",
+            "理解 rime_dir / rime_frontend / plum_repo 等环境变量的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "rime-install"
+          ],
+          "minimal_modules": [
+            "一行安装命令",
+            "预设集合与包名语法",
+            "环境变量定制"
+          ],
+          "practice_task": "在本地空目录用 rime_dir=./rime-test bash rime-install :preset 跑一次安装，观察输出并记录它把文件装到了哪个目录、更新了多少文件。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心模块与安装机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "模块系统与终端样式约定",
+          "order": 1,
+          "filename": "u2-l1-module-system-and-styles.md",
+          "level": "intermediate",
+          "topic": "解析 scripts/bootstrap.sh 提供的 require/provide 模块加载机制，以及 scripts/styles.sh 定义的终端配色与统一输出函数。",
+          "learning_goals": [
+            "理解 require/provide 的去重加载与查找路径",
+            "掌握 styles.sh 提供的 info/warning/error/highlight 等输出函数",
+            "明白为何几乎所有模块都先 require 'styles'"
+          ],
+          "source_files": [
+            "scripts/bootstrap.sh",
+            "scripts/styles.sh"
+          ],
+          "minimal_modules": [
+            "require/provide 加载机制",
+            "loaded_modules 去重",
+            "styles 输出函数族"
+          ],
+          "practice_task": "仿照 bootstrap 模式写一个最小 module.sh，用 provide 注册自己，再写另一个脚本 require 它并调用其中定义的函数，验证重复 require 不会重复加载。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配方字符串解析 resolver.sh",
+          "order": 2,
+          "filename": "u2-l2-recipe-string-resolver.md",
+          "level": "intermediate",
+          "topic": "讲解 recipe order 语法 user/repo@branch:recipe:key=value,...，以及 resolver.sh 中各 resolve_* 函数如何拆解它，load_package_list_from_target 如何把 :preset、*.conf、远程 packages.conf 解析为 package_list。",
+          "learning_goals": [
+            "掌握配方字符串的完整语法与各部分可省略规则",
+            "理解 resolve_user_name/package/branch/recipe/recipe_options 的拆解逻辑",
+            "学会 load_package_list_from_target 对四类 target 的分支处理"
+          ],
+          "source_files": [
+            "scripts/resolver.sh"
+          ],
+          "minimal_modules": [
+            "配方字符串语法",
+            "resolve_* 拆解函数",
+            "target 到 package_list 的加载"
+          ],
+          "practice_task": "手工对 lotem/rime-zhung@master:my-recipe:opt1=a,opt2=b 逐字段拆解，再 source resolver.sh 调用各 resolve_* 函数，对比两者结果是否一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "安装主循环 install-packages.sh",
+          "order": 3,
+          "filename": "u2-l3-install-main-loop.md",
+          "level": "intermediate",
+          "topic": "逐段讲解安装主流程：install_package 如何决定执行 recipe 还是直接安装文件，fetch_or_update_package 的下载/更新分支，install_files 的增量拷贝与 files_updated 计数。",
+          "learning_goals": [
+            "理解 install_package 的三种安装路径（指定 recipe / recipe.yaml / 直接安装）",
+            "掌握 fetch 与 update 的选择逻辑",
+            "明白 install_files 如何用 diff 实现增量更新与计数"
+          ],
+          "source_files": [
+            "scripts/install-packages.sh"
+          ],
+          "minimal_modules": [
+            "install_package 决策",
+            "fetch_or_update_package",
+            "install_files 增量拷贝"
+          ],
+          "practice_task": "预测当目标目录已存在且文件内容相同时 install_files 的行为，再在本地构造一个已安装且内容相同的测试包，验证输出为 No files updated。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "前端识别与用户目录猜测 frontend.sh",
+          "order": 4,
+          "filename": "u2-l4-frontend-detection.md",
+          "level": "intermediate",
+          "topic": "讲解 guess_rime_user_dir 如何根据 OSTYPE 推断 rime_frontend，再根据 frontend 映射到各平台（ibus/squirrel/weasel/fcitx/fcitx5）的 Rime 用户目录。",
+          "learning_goals": [
+            "理解 OSTYPE 到 frontend 的默认映射",
+            "掌握各前端对应的默认 rime_dir 路径",
+            "知道如何用 rime_dir / rime_frontend 环境变量覆盖猜测"
+          ],
+          "source_files": [
+            "scripts/frontend.sh"
+          ],
+          "minimal_modules": [
+            "OSTYPE 推断 frontend",
+            "frontend 映射 rime_dir",
+            "环境变量覆盖"
+          ],
+          "practice_task": "在 OSTYPE=msys、OSTYPE=darwin 等取值下调用 guess_rime_user_dir，记录导出的 rime_frontend 与 rime_dir，并验证显式设置 rime_frontend=fcitx5-rime 时的路径。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "包的拉取与更新 fetch/update-package.sh",
+          "order": 5,
+          "filename": "u2-l5-fetch-and-update-package.md",
+          "level": "intermediate",
+          "topic": "讲解 fetch-package.sh 的浅克隆策略（--depth 1、--recurse-submodules、git 版本判断）与 update-package.sh 的分支切换、默认分支检测、ff-only 合并与硬重置回退。",
+          "learning_goals": [
+            "理解 fetch-package.sh 的浅克隆选项与 rime- 前缀补全逻辑",
+            "掌握 update-package.sh 中 git_current_branch / git_default_branch 的检测",
+            "明白 fast-forward 合并失败时的硬重置回退策略"
+          ],
+          "source_files": [
+            "scripts/fetch-package.sh",
+            "scripts/update-package.sh"
+          ],
+          "minimal_modules": [
+            "浅克隆与子模块",
+            "分支检测",
+            "ff-only 合并与回退"
+          ],
+          "practice_task": "用 fetch-package.sh 在临时目录克隆一个 rime 官方包，手动改动其中文件后运行 update-package.sh，观察它如何通过 fetch+merge 恢复到 origin 状态。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "配方执行引擎 recipe.sh",
+          "order": 6,
+          "filename": "u2-l6-recipe-engine.md",
+          "level": "intermediate",
+          "topic": "深入 recipe.yaml 的三个段落（download_files / install_files / patch_files）以及 recipe.sh 如何用 print_section + sed 提取并执行它们，重点讲解 patch_files 通过拼装 bash 脚本改写目标文件的机制。",
+          "learning_goals": [
+            "理解 recipe.yaml 的结构与 Rx 校验",
+            "掌握 apply_download_files / apply_install_files 的模式匹配安装",
+            "弄懂 apply_patch_files 如何把 YAML 片段转写成 patch_file 调用并注入 __patch 段"
+          ],
+          "source_files": [
+            "scripts/recipe.sh"
+          ],
+          "minimal_modules": [
+            "recipe.yaml 结构与校验",
+            "download/install 文件处理",
+            "patch_files 脚本生成"
+          ],
+          "practice_task": "为一个最小包编写 recipe.yaml，包含 install_files 与一个简单的 patch_files（如修改 default.yaml 的 schema_list），运行后检查目标文件中被注入的 __patch 段与 # Rx: 标记。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "配置包清单与预设集合",
+          "order": 7,
+          "filename": "u2-l7-package-lists-and-presets.md",
+          "level": "intermediate",
+          "topic": "讲解 preset/extra/all-packages.conf 如何用 package_list 数组定义三档预设集合，以及 Windows 侧 preset-packages.bat 等用 %package_list% 的对应实现。",
+          "learning_goals": [
+            "理解三档预设集合的内容差异与 all-packages 的组合方式",
+            "掌握 package_list 数组如何被 source 进 resolver",
+            "知道 .conf 与 .bat 两套清单的对应关系"
+          ],
+          "source_files": [
+            "preset-packages.conf",
+            "extra-packages.conf",
+            "all-packages.conf",
+            "preset-packages.bat"
+          ],
+          "minimal_modules": [
+            "三档预设集合",
+            "package_list 数组约定",
+            "conf 与 bat 双实现"
+          ],
+          "practice_task": "新建一个 my-packages.conf 自定义集合写入若干包名，用 source（或 bash rime-install my-packages.conf）方式验证 package_list 被正确加载。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "扩展、跨平台与工程化",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "交互式包选择 selector.sh",
+          "order": 1,
+          "filename": "u3-l1-interactive-selector.md",
+          "level": "advanced",
+          "topic": "讲解 --select 模式下 select_packages 如何用 bash 内建 select 构建菜单、处理 end/reset/手输包名等指令，以及空选时回退到默认包的确认逻辑。",
+          "learning_goals": [
+            "理解 rime-install 中 --select 标志的处理时序",
+            "掌握 select_packages 的去重收集与 select 菜单交互",
+            "明白空选时回退到默认参数的交互逻辑"
+          ],
+          "source_files": [
+            "scripts/selector.sh",
+            "rime-install"
+          ],
+          "minimal_modules": [
+            "--select 入口处理",
+            "select 菜单与指令",
+            "空选回退"
+          ],
+          "practice_task": "运行 bash rime-install --select :preset 体验菜单交互，并阅读代码解释输入 reset 与 . 分别触发什么行为。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Windows 批处理安装器",
+          "order": 2,
+          "filename": "u3-l2-windows-batch-installer.md",
+          "level": "advanced",
+          "topic": "讲解 rime-install.bat 的整套批处理安装逻辑：参数解析、ZIP 包下载与 7z 解压安装、7z/git 的自动安装，以及在检测到 git-bash 时把工作委托给 plum 的 bash 脚本；并介绍 bootstrap 与 config 脚本。",
+          "learning_goals": [
+            "理解 .bat 安装器的参数路由与 ZIP 离线安装流程",
+            "掌握 7z/git 依赖的自动安装探测",
+            "明白 use_plum 机制下批处理如何转调 bash 版 rime-install"
+          ],
+          "source_files": [
+            "rime-install.bat",
+            "rime-install-bootstrap.bat",
+            "rime-install-config.bat"
+          ],
+          "minimal_modules": [
+            "参数路由与 ZIP 安装",
+            "依赖自动安装",
+            "转调 plum bash 脚本"
+          ],
+          "practice_task": "对照 rime-install.bat 的 :install_package 标签，画出传入一个 GitHub zip 链接时的调用流程（download_package → install_zip_package），并说明它如何决定是否转调 :install_with_plum。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "作为共享数据构建安装 Makefile 与 minimal-build",
+          "order": 3,
+          "filename": "u3-l3-makefile-and-minimal-build.md",
+          "level": "advanced",
+          "topic": "讲解 Makefile 如何把 Rime 数据作为系统软件构建安装（preset/all/minimal 目标、rime_deployer --build、install 到 RIME_DATA_DIR、dist 打包），以及 minimal-build.sh 如何裁剪词典与方案生成精简版。",
+          "learning_goals": [
+            "理解 Makefile 的目标体系与 SRCDIR/OUTPUT/PREFIX/RIME_DATA_DIR 变量",
+            "掌握 rime_deployer --build 的预编译作用与 dist 源码包的复现方式",
+            "明白 minimal-build.sh 对 essay/luna_pinyin/方案的裁剪策略"
+          ],
+          "source_files": [
+            "Makefile",
+            "scripts/minimal-build.sh"
+          ],
+          "minimal_modules": [
+            "Makefile 目标与变量",
+            "rime_deployer 构建与安装",
+            "minimal 裁剪"
+          ],
+          "practice_task": "阅读 Makefile 说明 make preset-bin 相比 make preset 多做了什么，并指出 minimal-build.sh 中哪条 awk/sed 命令负责精简 essay.txt 词频表。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "仓库拆分维护工具 split-packages.sh",
+          "order": 4,
+          "filename": "u3-l4-split-packages-maintenance.md",
+          "level": "advanced",
+          "topic": "讲解这个一次性维护脚本如何用 git filter-branch 把单体仓库按包目录重写历史、嫁接拼接，并推送到各 rime-<package> 子仓库——属于高级 git 历史改写实践。",
+          "learning_goals": [
+            "理解 split-packages.sh 的整体目标（拆分单体仓库为多个子仓库）",
+            "掌握 git filter-branch 的 --index-filter / --subdirectory-filter / --parent-filter 组合用法",
+            "明白 graft 嫁接与清理 reflog/gc 的善后步骤"
+          ],
+          "source_files": [
+            "scripts/split-packages.sh"
+          ],
+          "minimal_modules": [
+            "拆分目标与包文件映射",
+            "filter-branch 历史重写",
+            "嫁接与清理"
+          ],
+          "practice_task": "在一个练习用的本地 git 仓库（含两个子目录）上，参考 rewrite_git_history 的思路用 filter-branch 把其中一个子目录的历史拆成独立分支，观察 commit 历史的变化（切勿在 plum 真实仓库上操作）。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
