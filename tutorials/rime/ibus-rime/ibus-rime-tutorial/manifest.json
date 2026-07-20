@@ -1,0 +1,485 @@
+{
+  "project": "ibus-rime",
+  "head": "ba8bfc3654c53d1723532907028ee6d59936b592",
+  "rationale": "ibus-rime 是一个体量小但交互面丰富的 C 项目：它是 Rime 输入法引擎在 Linux/IBus 下的「薄前端」，负责把 IBus 框架的 UI 原语与 librime 的 RimeApi 对接。学习路线按读者由浅入深的自然顺序设计：先建立项目定位与运行方式（U1），再顺着启动流程从 main() 一路追到 IBus 总线/工厂/引擎注册与 librime 初始化部署（U2）；随后进入核心——引擎 GObject 类型、会话与按键主链路、回调与状态栏操作（U3）；接着拆解前端最复杂的 UI 渲染三件事：综合更新与状态同步、预编辑/辅助文本、候选词表（U4）；再讲清 ibus_rime.yaml 配置如何驱动运行时行为（U5）；最后落到专家层——打包/静态构建/子模块，以及整体架构取舍与二次开发扩展点（U6）。每篇讲义只解决一个独立主题、引用真实源码文件、附带可操作的代码实践任务，依赖关系形成单向链路，确保初学者循序渐进。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门：定位、构建与源码地图",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 Rime 生态",
+          "order": 1,
+          "filename": "u1-l1-project-positioning.md",
+          "topic": "介绍 ibus-rime 是什么——它是 Rime 输入法引擎在 Linux/IBus 下的前端适配器，连接 IBus 桌面框架与 librime 核心引擎。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 ibus-rime 在 Rime 生态中的定位（前端与核心分离）",
+            "了解输入法引擎与桌面输入法框架（IBus）的关系",
+            "明确本项目的运行平台、许可证与外部依赖来源"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitmodules",
+            "CHANGELOG.md"
+          ],
+          "minimal_modules": [
+            "Rime 生态（librime / plum / ibus-rime）",
+            "IBus 输入法框架",
+            "前端与核心的分层"
+          ],
+          "practice_task": "阅读 README.md 与 .gitmodules，绘制一张图说明 ibus-rime、librime、plum、IBus 之间的依赖与调用方向，并指出谁是前端、谁是核心引擎。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "依赖、构建与运行",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "topic": "讲解如何用 CMake + Makefile 构建 ibus-rime，涉及 ibus-1.0、libnotify、librime、rime-data 等依赖，以及 rime_config.h.in 的配置生成。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握构建依赖（cmake>=3.10、librime、libibus-1.0、libnotify、rime-data）",
+            "理解 CMakeLists.txt 如何用 pkg-config 发现依赖并生成 rime_config.h",
+            "学会用 Makefile 触发构建与安装"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "Makefile",
+            "rime_config.h.in",
+            "cmake/FindRimeData.cmake"
+          ],
+          "minimal_modules": [
+            "CMake 构建脚本",
+            "pkg-config 依赖发现",
+            "configure_file 模板生成",
+            "Makefile 包装"
+          ],
+          "practice_task": "配置好依赖后执行 make 完成 build 目录构建，指出最终可执行文件 ibus-engine-rime 的生成路径，并说明 rime_config.h 中 IBUS_RIME_VERSION、IBUS_RIME_ICONS_DIR、IBUS_RIME_SHARED_DATA_DIR 的值来源。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码地图",
+          "order": 3,
+          "filename": "u1-l3-source-map.md",
+          "topic": "梳理仓库目录结构，建立三个核心 C 源文件与配置文件的职责地图，为后续阅读打基础。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握仓库整体目录结构（源码、icons、package、子模块）",
+            "明确 rime_main.c / rime_engine.c / rime_settings.c 各自职责",
+            "理解 rime.xml.in 如何向 IBus 注册组件"
+          ],
+          "source_files": [
+            "rime_main.c",
+            "rime_engine.c",
+            "rime_settings.c",
+            "rime.xml.in"
+          ],
+          "minimal_modules": [
+            "源码文件职责划分",
+            "IBus 组件描述文件 rime.xml",
+            "入口/引擎/设置三层结构"
+          ],
+          "practice_task": "制作一张「文件 → 职责」对照表，说明每个 C 文件负责什么，并标注 rime.xml.in 中 engine 的 name、layout、symbol 字段含义。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "启动流程与 IBus 接入",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "main 入口与进程生命周期",
+          "order": 1,
+          "filename": "u2-l1-main-and-lifecycle.md",
+          "topic": "从 main() 出发，讲解信号处理（SIGTERM/SIGINT）、rime_get_api 获取核心 API、以及 ibus_rime_start/stop 的生命周期作用。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 main 函数的启动顺序",
+            "掌握信号回调如何触发 ibus_quit 优雅退出",
+            "理解 ibus_rime_start/stop 与 librime initialize/finalize 的对应关系"
+          ],
+          "source_files": [
+            "rime_main.c"
+          ],
+          "minimal_modules": [
+            "main 函数",
+            "信号处理 sigterm_cb",
+            "rime_api 全局指针",
+            "initialize / finalize 生命周期"
+          ],
+          "practice_task": "在 rime_main.c 中标注从 main() 到 ibus_main() 的完整调用链，并解释 SIGTERM 到来时程序如何安全退出 librime。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "IBus 总线、工厂与引擎注册",
+          "order": 2,
+          "filename": "u2-l2-ibus-bus-factory.md",
+          "topic": "深入 rime_with_ibus()，讲解 IBus 总线连接、IBusFactory 创建、注册 IBUS_TYPE_RIME_ENGINE 引擎类型，以及请求 bus name 的过程。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 ibus_init/ibus_bus_new/ibus_bus_is_connected 的连接建立",
+            "掌握 ibus_factory_new/add_engine/request_name 的注册流程",
+            "理解 disconnect 信号回调的作用"
+          ],
+          "source_files": [
+            "rime_main.c",
+            "rime.xml.in"
+          ],
+          "minimal_modules": [
+            "IBusBus 总线",
+            "IBusFactory 工厂",
+            "ibus_factory_add_engine 注册",
+            "request_name 总线命名"
+          ],
+          "practice_task": "解释为何需要 g_object_ref_sink，并说明 ibus_bus_request_name 失败时为何直接 exit(1)；对照 rime.xml.in 说明 engine name 与代码中 add_engine 的对应关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "librime 初始化、部署与通知",
+          "order": 3,
+          "filename": "u2-l3-librime-init-deploy.md",
+          "topic": "讲解 librime 的 setup/initialize/start_maintenance/deploy_config_file 流程，以及通过 libnotify 向用户展示部署状态通知。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 RimeTraits（shared/user data dir、distribution 信息）的填充",
+            "掌握 maintenance 与 deploy ibus_rime.yaml 的意义",
+            "理解 notification_handler 如何将 librime 的 deploy 消息转成桌面通知"
+          ],
+          "source_files": [
+            "rime_main.c"
+          ],
+          "minimal_modules": [
+            "RimeTraits 特征结构",
+            "setup / initialize / start_maintenance",
+            "deploy_config_file",
+            "libnotify 通知",
+            "user_data_dir 用户目录"
+          ],
+          "practice_task": "跟踪 notification_handler 中 deploy/success 分支，说明它为何在部署成功后调用 ibus_rime_load_settings，并描述 ~/.config/ibus/rime 用户目录的创建时机。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "引擎对象与会话机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "IBusRimeEngine 类型与生命周期",
+          "order": 1,
+          "filename": "u3-l1-engine-type-lifecycle.md",
+          "topic": "讲解 IBusRimeEngine 这个 GObject 子类的定义、G_DEFINE_TYPE 宏、class_init/init/destroy 三件套，以及它持有的 session/status/table/props 成员。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 GObject 类型注册机制（G_DEFINE_TYPE、get_type）",
+            "掌握 class_init 中如何挂载 IBusEngineClass 虚函数",
+            "理解 init/destroy 中的资源分配与释放"
+          ],
+          "source_files": [
+            "rime_engine.c",
+            "rime_engine.h"
+          ],
+          "minimal_modules": [
+            "GObject 类型系统",
+            "G_DEFINE_TYPE",
+            "IBusEngineClass 虚函数表",
+            "init / destroy 资源管理"
+          ],
+          "practice_task": "列出 class_init 中挂载的所有虚函数，并解释 destroy 函数为何要先释放 session、status、table、props 再调用父类 destroy。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "会话管理与按键处理主链路",
+          "order": 2,
+          "filename": "u3-l2-session-and-key-event.md",
+          "topic": "讲解 Rime 会话的创建/查找/销毁，以及 process_key_event 的核心流程：过滤 super 修饰键、同步 _horizontal 选项、调用 librime process_key、再触发 UI 更新。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 RimeSessionId 的生命周期（create/find/destroy_session）",
+            "掌握 process_key_event 的修饰键过滤与按键转发",
+            "理解 _horizontal 选项如何与候选表方向联动"
+          ],
+          "source_files": [
+            "rime_engine.c"
+          ],
+          "minimal_modules": [
+            "Rime 会话（create/find/destroy_session）",
+            "process_key_event 按键处理",
+            "修饰键过滤",
+            "_horizontal 方向同步",
+            "set_option / get_option"
+          ],
+          "practice_task": "在 process_key_event 中标注按键从 IBus 进入到 librime 的完整路径，并解释为何在 process_key 前要先设置 _horizontal 选项（对照最近的 arrow key orientation 修复）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "引擎回调与状态栏操作",
+          "order": 3,
+          "filename": "u3-l3-callbacks-and-toolbar.md",
+          "topic": "讲解 focus_in/out、enable/disable、reset 等生命周期回调，以及 property_activate 如何处理 InputMode/Deploy/Sync 三个状态栏按钮。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解各引擎回调的职责（focus_in 注册属性、disable 销毁会话、reset 清空候选）",
+            "掌握 property_activate 中 deploy（重启 librime）、sync（sync_user_data）、InputMode（切换 ascii_mode）的处理",
+            "理解状态栏三个按钮与对应 librime 操作的关系"
+          ],
+          "source_files": [
+            "rime_engine.c"
+          ],
+          "minimal_modules": [
+            "focus_in / focus_out / reset / enable / disable 回调",
+            "property_activate 属性激活",
+            "ascii_mode 中英文切换",
+            "deploy / sync 操作"
+          ],
+          "practice_task": "说明点击「部署」按钮时 ibus_rime_stop + ibus_rime_start(TRUE) 的作用，并解释「同步」按钮调用 sync_user_data 与维护线程的关系（参考源码注释）。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "前端 UI 渲染",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "综合更新函数与状态同步",
+          "order": 1,
+          "filename": "u4-l1-update-and-status.md",
+          "topic": "以 ibus_rime_engine_update 为核心，讲解它如何依次拉取 RimeStatus/RimeCommit/RimeContext，并把状态变化同步到状态栏图标与提交文本。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 engine_update 的三段式更新（status、commit、context）",
+            "掌握 ibus_rime_update_status 的去重与图标/标签切换逻辑",
+            "理解 get_commit 提交文本的时机"
+          ],
+          "source_files": [
+            "rime_engine.c"
+          ],
+          "minimal_modules": [
+            "get_status / get_commit / get_context",
+            "update_status 状态去重",
+            "状态栏图标切换（disabled/abc/zh）",
+            "ibus_engine_commit_text"
+          ],
+          "practice_task": "跟踪 update_status 中的判断分支，说明在 disabled、ascii、中文三种模式下状态栏分别显示什么图标与符号，并解释去重 return 的条件。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "预编辑与辅助文本渲染",
+          "order": 2,
+          "filename": "u4-l2-preedit-and-auxiliary.md",
+          "topic": "讲解根据 preedit_style（preview/composition）与 cursor_type（insert/select）两种模式，如何构造内联预编辑文本与辅助文本，并应用下划线/颜色属性。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 embed_preedit 与两种 preedit_style 的渲染差异",
+            "掌握 cursor_type 对光标位置的影响",
+            "理解 has_highlighted_span 下颜色高亮（color_scheme）的应用方式"
+          ],
+          "source_files": [
+            "rime_engine.c"
+          ],
+          "minimal_modules": [
+            "inline_text 内联预编辑",
+            "auxiliary_text 辅助文本",
+            "preedit_style preview/composition",
+            "cursor_type insert/select",
+            "IBusText 属性（下划线/前景/背景）"
+          ],
+          "practice_task": "对比 PREEDIT_STYLE_PREVIEW 与 PREEDIT_STYLE_COMPOSITION 两个分支，写出它们在 inline_text 来源、光标位置、auxiliary_text 显示上的差异表。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "候选词列表渲染",
+          "order": 3,
+          "filename": "u4-l3-candidate-table.md",
+          "topic": "讲解如何把 librime 的 RimeContext.menu 翻译成 IBusLookupTable，包括候选词与注释拼接、序号标签、分页占位、方向与光标定位。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 IBusLookupTable 的清空、追加候选、设置标签流程",
+            "掌握候选注释着色与三种 label 来源的优先级",
+            "理解翻页占位候选与 cursor_pos 的计算逻辑"
+          ],
+          "source_files": [
+            "rime_engine.c"
+          ],
+          "minimal_modules": [
+            "IBusLookupTable 候选表",
+            "候选词与注释拼接",
+            "label 优先级（select_labels/select_keys/数字）",
+            "分页占位与 round/orientation",
+            "candidate_clicked 选择"
+          ],
+          "practice_task": "在候选表构建循环中标注三类 label 的优先级判断，并解释为何在最后一页时需要先插入 page_size 个空候选再设置 cursor_pos。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "配置系统",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "ibus_rime.yaml 与运行时配置加载",
+          "order": 1,
+          "filename": "u5-l1-yaml-config-loading.md",
+          "topic": "讲解 rime_settings.c 如何通过 librime 的 config API 读取 ibus_rime.yaml，解析 style 下的 inline_preedit/preedit_style/cursor_type/horizontal/color_scheme 等选项，并维护全局 g_ibus_rime_settings。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 config_open/config_get_bool/config_get_cstring/config_close 的配置读取流程",
+            "掌握各 style 选项到全局设置结构的映射",
+            "理解 preset_color_schemes 与 select_color_scheme 的颜色方案机制"
+          ],
+          "source_files": [
+            "rime_settings.c",
+            "rime_settings.h",
+            "ibus_rime.yaml"
+          ],
+          "minimal_modules": [
+            "RimeConfig 配置读取 API",
+            "ibus_rime.yaml 默认样式",
+            "IBusRimeSettings 全局结构",
+            "颜色方案（aqua/azure/ink/luna）",
+            "默认值与覆盖"
+          ],
+          "practice_task": "修改本地 ibus_rime.yaml 把 color_scheme 改为 aqua 并重新部署，用日志或调试确认 g_ibus_rime_settings.color_scheme 指向 aqua 定义；再尝试新增一个 style 选项并打通加载链路。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "工程化与架构",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "打包、静态构建与子模块",
+          "order": 1,
+          "filename": "u6-l1-packaging-static-submodule.md",
+          "topic": "讲解 package/ 下的打包脚本、BUILD_STATIC 静态构建（静态链接 boost/leveldb/opencc 等）、以及 librime/plum 子模块和 FindRimeData 的数据目录定位。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 make-package/make-binpkg-static/binpkg-install 的打包流程",
+            "掌握静态构建依赖与 RIME_DEPS 的组成",
+            "理解子模块（librime/plum）的作用与 FindRimeData 的目录探测逻辑"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "package/make-binpkg-static",
+            "package/binpkg-install",
+            "cmake/FindRimeData.cmake",
+            ".gitmodules"
+          ],
+          "minimal_modules": [
+            "静态构建 BUILD_STATIC",
+            "RIME_DEPS 静态库依赖",
+            "打包脚本",
+            "librime/plum 子模块",
+            "FindRimeData 数据目录定位"
+          ],
+          "practice_task": "说明 make-binpkg-static 依次构建 librime、plum(brise)、ibus-rime 的顺序，并解释 binpkg-install 中各 install 目标路径与 CMake install 规则的对应关系。",
+          "depends_on": [
+            "u1-l2",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "架构取舍与二次开发",
+          "order": 2,
+          "filename": "u6-l2-architecture-and-extension.md",
+          "topic": "从整体架构出发，分析 ibus-rime 作为「薄前端」的设计取舍（稳定的 librime RimeApi 边界、GObject 适配 IBus、配置驱动 UI），并给出新增 style 选项、状态栏按钮、按键处理等扩展点的二次开发思路。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解前端/核心分离架构与 RimeApi 作为稳定边界的意义",
+            "掌握新增配置项、状态栏按钮、按键处理的完整改造路径",
+            "理解 GObject + IBus 虚函数的扩展模式"
+          ],
+          "source_files": [
+            "rime_engine.c",
+            "rime_settings.c",
+            "rime_settings.h",
+            "ibus_rime.yaml",
+            "rime_main.c"
+          ],
+          "minimal_modules": [
+            "薄前端架构",
+            "RimeApi 稳定边界",
+            "GObject + IBusEngineClass 扩展点",
+            "配置驱动的 UI",
+            "二次开发改造路径"
+          ],
+          "practice_task": "设计并实现一个小扩展：在 ibus_rime.yaml 新增一个 style 选项，在 rime_settings.c 解析它，并在 rime_engine.c 的候选表构建处使用它，画出从配置到生效的完整改造流程图。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
