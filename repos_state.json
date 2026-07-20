@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-20T11:01:55Z"
+      "last_run_at": "2026-07-20T15:41:23Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -21851,7 +21851,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":184608,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":187709,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         },
         "u5-l1": {
           "status": "pending",
@@ -21875,7 +21875,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/paulscherrerinstitute/vivadoIP_psi_ms_daq/vivadoIP_psi_ms_daq-tutorial",
       "last_head": "c210e3ff7e1ea1066502a5cbc8be4f33e0fae3f7",
-      "last_run_at": "2026-07-20T11:01:55Z",
+      "last_run_at": "2026-07-20T15:41:23Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "paulscherrerinstitute/vivadoIP_spi_simple": {
@@ -21998,7 +21998,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":183899,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":193580,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
         }
       },
       "manifest_head": "fda4db7a10b98ac138f37decc5211130dc425ada",
@@ -22007,7 +22007,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/paulscherrerinstitute/vivadoIP_spi_simple/vivadoIP_spi_simple-tutorial",
       "last_head": "fda4db7a10b98ac138f37decc5211130dc425ada",
-      "last_run_at": "2026-07-20T11:01:55Z",
+      "last_run_at": "2026-07-20T15:41:23Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "pytorch/pytorch": {
@@ -22257,8 +22257,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/pytorch/pytorch/pytorch-tutorial",
       "last_head": "baa92d5d799e0c51216a30d34c2f0058c7ac9936",
-      "last_run_at": "2026-07-20T11:01:55Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-20T15:41:23Z",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":200832,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-07-21 02:02:00 重置。][202607210019059affaf5fe98b4756]\",\"stop_reason\":\"stop_seq"
     },
     "rime/ibus-rime": {},
     "rime/librime": {},
