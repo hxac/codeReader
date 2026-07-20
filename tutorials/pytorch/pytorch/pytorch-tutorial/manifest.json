@@ -1,7 +1,7 @@
 {
   "project": "pytorch",
-  "head": "baa92d5d799e0c51216a30d34c2f0058c7ac9936",
-  "rationale": "PyTorch 是一个体量庞大的 C++/Python 混合深度学习框架，学习路径设计遵循「先跑起来、再读核心数据结构、再读关键机制、最后做扩展与性能优化」的渐进原则。Unit 1-2 帮助读者从零搭建环境并理解 Tensor 这一最核心对象；Unit 3 讲清算子从 native_functions.yaml 定义到 Dispatcher 分发的全链路，这是理解所有上层能力的基石；Unit 4-6 覆盖 autograd、nn 模块、优化器与数据加载这三大用户最高频使用的子系统；Unit 7-8 进入 torch.compile（Dynamo + Inductor）这条现代性能主线，也是当前框架演进的核心方向；Unit 9 单独深入 CUDA 后端、内存分配器与流/图模型；Unit 10 覆盖分布式训练（process group、DDP、FSDP、elastic）；Unit 11 收束于自定义算子 torch.library、torch.export、torch.func、C++ 扩展等二次开发与部署场景。单元内部按依赖关系排序，避免读者在缺少前置知识的情况下阅读高阶内容；每篇讲义仅聚焦一个独立主题，并配套一个结合真实源码的可操作实践任务。",
+  "head": "ca62582ef0678dece3130b28bcf10ce0501777b9",
+  "rationale": "PyTorch 是一个体量庞大的 C++/Python 混合深度学习框架，学习路径设计遵循「先跑起来、再读核心数据结构、再读关键机制、最后做扩展与性能优化」的渐进原则。Unit 1-2 帮助读者从零搭建环境并理解 Tensor 这一最核心对象；Unit 3 讲清算子从 native_functions.yaml 定义到 Dispatcher 分发的全链路，这是理解所有上层能力的基石；Unit 4-6 覆盖 autograd、nn 模块、优化器与数据加载这三大用户最高频使用的子系统；Unit 7-8 进入 torch.compile（Dynamo + Inductor）这条现代性能主线，也是当前框架演进的核心方向；Unit 9 单独深入 CUDA 后端、内存分配器与流/图模型；Unit 10 覆盖分布式训练（process group、DDP、FSDP、elastic）；Unit 11 收束于自定义算子 torch.library、torch.export、torch.func、C++ 扩展等二次开发与部署场景。单元内部按依赖关系排序，避免读者在缺少前置知识的情况下阅读高阶内容；每篇讲义仅聚焦一个独立主题，并配套一个结合真实源码的可操作实践任务。\n\n本次为增量更新（baa92d5d7 → ca62582e，共 19 个提交、约 108 个文件）。变更主体是：(1) 大量注释/文档拼写修正（4 个 typo 提交），不影响任何讲义逻辑；(2) CI/构建基础设施改动（Python 3.15 nightly、ROCm 分片），属 .ci/.github 范畴，未触及 u1-l2 所引用的 setup.py/CMakeLists.txt/Makefile；(3) 少量局部逻辑改动。逐篇核对每篇讲义引用的 source_files 后，仅有两篇需要 update：u8-l1（compile_fx.py 新增在 joint_graph_passes 前记录 output strides 的步骤以修复 pad_mm 泄漏 padded strides，config.py 新增 strict_output_strides 开关）与 u10-l2（_functional_collectives.py 新增 _LegacyToFunctionalCollectiveMode 与 _remap_traceable_collective，在 tracing/export 下把 legacy dist.* 集合通信重定向到 functional collectives，对应 compile_on_one_rank 的 in-graph ProcessGroup 解析）。其余讲义所引用的核心源文件均未改变，或仅受到与其主题无关的局部改动（如 u3-l5 的 grouped-GEMM cublasLt 版本门槛、u9-l2 未引用的 AveragePool3d.cu 64 位索引修复、Dynamo builder.py 的 automatic dynamic int 内部优化未触及 u7 引用的 convert_frame/_guards 文件），故全部 keep。本区间无新增子系统或核心流程架构变更，因此无 new/rebuild。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "在本地导入 torch，打印 torch.__version__，并在 README 的组件表中为 torch、torch.autograd、torch.nn 各找到对应的一句职责描述，整理成一张架构速查表。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -91,7 +91,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -120,7 +120,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -155,7 +155,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -182,7 +182,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -204,13 +204,13 @@
           "minimal_modules": [
             "torch/types.py 中的 Dtype/Layout/Device 定义",
             "TensorOptions.cpp 的聚合与默认值",
-            "Tensor 的 dtype/device/laylout 属性访问"
+            "Tensor 的 dtype/device/layout 属性访问"
           ],
           "practice_task": "用不同 dtype/device 创建若干 Tensor，打印它们的 TensorOptions；用 torch.set_default_device 切换默认设备（若可用），观察新建张量的 device 变化。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -238,7 +238,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -273,7 +273,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -301,7 +301,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -329,7 +329,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -356,7 +356,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l5",
@@ -384,7 +384,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -419,7 +419,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -446,7 +446,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -473,7 +473,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -500,7 +500,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -535,7 +535,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -562,7 +562,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -589,7 +589,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -615,7 +615,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -650,7 +650,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -677,7 +677,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -704,7 +704,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -741,7 +741,7 @@
             "u3-l5",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -768,7 +768,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -796,7 +796,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -823,7 +823,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -839,11 +839,11 @@
           "order": 1,
           "filename": "u8-l1-inductor-architecture.md",
           "level": "advanced",
-          "topic": "讲解 Inductor 作为默认编译后端的入口 compile_fx：接收 FX 图、应用 decompositions、构建 IR。",
+          "topic": "讲解 Inductor 作为默认编译后端的入口 compile_fx：接收 FX 图、应用 decompositions、构建 IR；并说明输出 stride 在 joint_graph_passes 前被记录以避免 pad_mm 等优化污染用户可见 stride。",
           "learning_goals": [
             "理解 Inductor 在整条 compile 链路中的位置",
             "掌握 compile_fx 的输入输出与子进程编译模式",
-            "认识 Inductor 配置项的作用"
+            "认识 Inductor 配置项（含 strict_output_strides/keep_output_stride）的作用"
           ],
           "source_files": [
             "torch/_inductor/compile_fx.py",
@@ -851,14 +851,14 @@
           ],
           "minimal_modules": [
             "compile_fx.py 的入口与流程",
-            "config.py 的关键开关（triton/cpp/aot）",
+            "config.py 的关键开关（triton/cpp/aot、output stride）",
             "子进程与缓存编译"
           ],
-          "practice_task": "用 TORCHINDUCTOR_LOG_LEVEL=info 编译一个小函数，从日志中识别 decompositions 应用与 IR 构建阶段；在 config.py 中找到控制后端语言的开关。",
+          "practice_task": "用 TORCHINDUCTOR_LOG_LEVEL=info 编译一个小函数，从日志中识别 decompositions 应用与 IR 构建阶段；在 config.py 中找到控制后端语言与输出 stride 行为的开关（如 strict_output_strides、keep_output_stride）。",
           "depends_on": [
             "u7-l4"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l2",
@@ -885,7 +885,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -912,7 +912,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -940,7 +940,7 @@
           "depends_on": [
             "u8-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -975,7 +975,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1003,7 +1003,7 @@
             "u3-l4",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1030,7 +1030,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1058,7 +1058,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1093,7 +1093,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1101,11 +1101,12 @@
           "order": 2,
           "filename": "u10-l2-collectives-and-functional-collectives.md",
           "level": "advanced",
-          "topic": "讲解 all_reduce/broadcast/all_gather 等集合通信原语，以及新的 functional collectives 编程模型。",
+          "topic": "讲解 all_reduce/broadcast/all_gather 等集合通信原语、新的 functional collectives 编程模型，以及在 tracing/export 下把 legacy dist.* 重定向到 functional collectives 的 _LegacyToFunctionalCollectiveMode 机制。",
           "learning_goals": [
             "理解常见集合通信原语的语义",
             "掌握 dist.all_reduce 等 API 与 functional collectives 的对应",
-            "认识 op 类型与异步/同步语义"
+            "认识 op 类型与异步/同步语义",
+            "了解 tracing 时 legacy 集合通信如何被重写为 functional 形式以避免 ProcessGroup 被烤进图常量"
           ],
           "source_files": [
             "torch/distributed/_functional_collectives.py",
@@ -1114,13 +1115,14 @@
           "minimal_modules": [
             "functional_collectives 的原生算子式 API",
             "经典 dist.all_reduce/all_gather",
-            "异步与 op 枚举"
+            "异步与 op 枚举",
+            "_LegacyToFunctionalCollectiveMode 与 _remap_traceable_collective 的 tracing 重写"
           ],
-          "practice_task": "用 dist.all_reduce 对两个进程的 tensor 求和（或描述单进程下的等价操作）；在 _functional_collectives.py 中找到一个对应的原生集合算子并对比签名。",
+          "practice_task": "用 dist.all_reduce 对两个进程的 tensor 求和（或描述单进程下的等价操作）；在 _functional_collectives.py 中找到一个对应的原生集合算子并对比签名；再找到 _LegacyToFunctionalCollectiveMode，说明它在 make_fx 追踪下如何把 dist.all_reduce 改写为 functional collective。",
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l3",
@@ -1145,9 +1147,9 @@
           ],
           "practice_task": "在 distributed.py 中找到 DDP 的 bucket 相关逻辑；在 fsdp 中找到 shard/unshard 的入口，描述 FSDP 在前向与反向各何时做 unshard/shard。",
           "depends_on": [
-            "u10-2"
+            "u10-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1180,9 +1182,9 @@
           ],
           "practice_task": "用 torch.library 定义一个 schema 为 (Tensor) -> Tensor 的自定义算子，注册 CPU 与 Meta 实现，并在 eager 与 FakeTensorMode 下分别调用验证。",
           "depends_on": [
-            "u3-3"
+            "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1208,9 +1210,9 @@
           ],
           "practice_task": "导出一个带分支（if x.sum()>0）的小模型为 ExportedProgram，打印其 graph_module 与 graph_signature；说明动态维度 dim 与导出的关系。",
           "depends_on": [
-            "u7-1"
+            "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1235,9 +1237,9 @@
           ],
           "practice_task": "用 torch.func.vmap 对一个作用于单个向量的函数做批处理，对比手写循环的结果与性能；再用 torch.func.grad 计算高阶导数。",
           "depends_on": [
-            "u4-2"
+            "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l4",
@@ -1262,10 +1264,10 @@
           ],
           "practice_task": "用 torch.extension.h 写一个最小 C++ 扩展（实现一个 elementwise op 并通过 TORCH_LIBRARY 暴露），用 torch.utils.cpp_extension 加载并在 Python 调用；说明它与 u11-l1 的 torch.library 路径的异同。",
           "depends_on": [
-            "u3-4",
-            "u11-1"
+            "u3-l4",
+            "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

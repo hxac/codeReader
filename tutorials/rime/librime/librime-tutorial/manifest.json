@@ -1,0 +1,1214 @@
+{
+  "project": "librime",
+  "head": "d4c324ca988ed67f45e41524c2ab01d40cb55695",
+  "rationale": "librime 是一个模块化、可扩展的 C++17 中文输入法引擎，代码体量大、抽象层次清晰。学习路线遵循「先用起来 → 理解运行时模型 → 拆解配置与组件机制 → 走通按键处理流水线 → 深入词典与部署子系统 → 动手做插件」的递进逻辑。入门层（u1-u2）让读者掌握项目定位、构建方式、目录结构、C API 入口以及 Service/Session/Engine/Schema/KeyEvent 等核心运行时对象；进阶层（u3-u7）围绕「一次按键如何变成候选词」这条主线，依次讲解输入状态（Context/Segmentation/Composition/Menu）、YAML 配置系统（含 __include/__patch DSL）、组件与模块注册体系、由 Processor→Segmentor→Translator→Filter 组成的引擎流水线，以及拼写代数与音节切分；专家层（u8-u9）深入字典构建与查询（Prism/Table/DictCompiler/用户词典）、部署任务与 Levers、开关切换，并以 sample 插件收尾讲二次开发。每个单元只解决一类问题，讲义间通过 depends_on 显式声明依赖，源码引用均限定在已确认存在的文件，大型项目拆分为 41 篇以保证每篇聚焦、可实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 librime：项目定位与运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：RIME 输入法引擎是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 librime 的定位、核心特性、技术栈以及它在 RIME 前端生态（Squirrel/Weasel/ibus-rime 等）中的位置。",
+          "learning_goals": [
+            "理解 librime 作为输入法引擎的职责边界（引擎 vs 前端）",
+            "了解 RIME 的核心特性：方案、拼写代数、OpenCC、和弦输入",
+            "熟悉项目依赖（Boost/LevelDB/marisa/OpenCC/yaml-cpp/glog）"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README"
+          ],
+          "practice_task": "阅读 README，列出 librime 的运行时依赖，并写一段话说明 librime 与某个具体前端（如 Squirrel）的分工关系。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与安装：CMake 与依赖",
+          "order": 2,
+          "filename": "u1-l2-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解如何用 make/CMake 构建 librime，理解关键构建选项、依赖查找与静态/动态库产物。",
+          "learning_goals": [
+            "掌握 make / cmake 的标准构建流程",
+            "理解 BUILD_SHARED_LIBS、BUILD_TEST、ENABLE_LOGGING 等构建选项",
+            "了解各第三方依赖在 CMakeLists.txt 中是如何被查找与链接的"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "Makefile",
+            "deps.mk"
+          ],
+          "minimal_modules": [
+            "CMakeLists.txt",
+            "Makefile"
+          ],
+          "practice_task": "配置并构建 librime（make 或 cmake），记录生成的库文件路径，尝试切换 BUILD_TEST 选项观察 test 目标是否生成。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录与分层架构",
+          "order": 3,
+          "filename": "u1-l3-source-layout.md",
+          "level": "beginner",
+          "topic": "梳理 src/rime 下的目录划分（algo/config/dict/gear/lever）以及 include、data、tools、sample、plugins 的职责，建立全局地图。",
+          "learning_goals": [
+            "记住 src/rime 各子目录的职责（算法/配置/字典/齿轮组件/部署）",
+            "区分公共头文件（src/*.h）与内部头文件（src/rime/*.h）",
+            "了解 data/minimal 提供的最小可运行数据集"
+          ],
+          "source_files": [
+            "src/rime/common.h",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "src/rime 目录结构",
+            "common.h"
+          ],
+          "practice_task": "画一张 src/rime 子目录职责图，并为 algo、config、dict、gear、lever 各举一个代表文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "C API 入口 rime_api.h",
+          "order": 4,
+          "filename": "u1-l4-c-api-entry.md",
+          "level": "beginner",
+          "topic": "讲解 librime 对外暴露的 C API：rime_get_api 入口、RimeApi 结构体、RimeTraits 以及自版本化结构体宏。",
+          "learning_goals": [
+            "理解 rime_get_api() 作为 API 总入口的设计",
+            "掌握 RimeApi 结构体按功能分组的方法指针（setup/session/input/config 等）",
+            "理解 RIME_STRUCT_INIT / RIME_STRUCT_HAS_MEMBER 版本兼容机制"
+          ],
+          "source_files": [
+            "src/rime_api.h",
+            "src/rime_api.cc"
+          ],
+          "minimal_modules": [
+            "rime_api.h",
+            "rime_api.cc"
+          ],
+          "practice_task": "在 rime_api.h 中找到会话管理、按键处理、配置读取三组 API 方法，写一个最小调用顺序清单（setup → initialize → create_session → process_key）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "实战：用 rime_api_console 体验输入流程",
+          "order": 5,
+          "filename": "u1-l5-console-walkthrough.md",
+          "level": "beginner",
+          "topic": "通过 tools/rime_api_console.cc 这个完整示例，端到端走一遍 setup/initialize/maintenance/session/process_key/context 的使用流程。",
+          "learning_goals": [
+            "看懂 console 程序从 setup 到 finalize 的完整生命周期",
+            "理解 RimeCommit/RimeStatus/RimeContext 三种输出结构的获取与释放",
+            "掌握 simulate_key_sequence、select_candidate、set_option 等交互 API"
+          ],
+          "source_files": [
+            "tools/rime_api_console.cc",
+            "tools/line_editor.h",
+            "src/rime_api.h"
+          ],
+          "minimal_modules": [
+            "rime_api_console.cc"
+          ],
+          "practice_task": "编译并运行 rime_api_console，输入一段拼音，观察 commit / context / status 的输出，并尝试用 'select schema' 命令切换方案。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心运行时对象",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "KeyEvent 与 KeyTable：按键的内部表示",
+          "order": 1,
+          "filename": "u2-l1-key-event-and-table.md",
+          "level": "beginner",
+          "topic": "讲解按键如何在 librime 内部表示：keycode + modifier、键名映射表以及按键序列的文字编解码。",
+          "learning_goals": [
+            "理解 KeyEvent 的 keycode/modifier 双字段模型",
+            "掌握各种 modifier 掩码（kShiftMask/kControlMask 等）",
+            "理解 KeyEvent::repr/Parse 与 KeySequence 的文字表示（如 {Control+Left}）"
+          ],
+          "source_files": [
+            "src/rime/key_event.h",
+            "src/rime/key_event.cc",
+            "src/rime/key_table.h"
+          ],
+          "minimal_modules": [
+            "key_event.h",
+            "key_table.h"
+          ],
+          "practice_task": "写一段代码，把字符串 \"Shift+a\" 解析成 KeyEvent，再打印它的 keycode 与 modifier，验证组合键的掩码位。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Service 与 Session：会话管理",
+          "order": 2,
+          "filename": "u2-l2-service-and-session.md",
+          "level": "beginner",
+          "topic": "讲解 Service 单例如何管理多个输入会话、会话的生命周期与过期清理、以及通知回调机制。",
+          "learning_goals": [
+            "理解 Service 作为单例管理 SessionMap 的设计",
+            "掌握 Session 的生命周期：Create/Get/Destroy/CleanupStale",
+            "理解 Session 内部持有 Engine 并通过 OnCommit 回写提交文本"
+          ],
+          "source_files": [
+            "src/rime/service.h",
+            "src/rime/service.cc",
+            "src/rime_api.cc"
+          ],
+          "minimal_modules": [
+            "service.h"
+          ],
+          "practice_task": "追踪 rime_api.cc 中 create_session/destroy_session 如何委托给 Service，画出 Session 与 Engine 的持有关系图。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Schema：输入方案",
+          "order": 3,
+          "filename": "u2-l3-schema.md",
+          "level": "beginner",
+          "topic": "讲解 Schema 如何封装一个输入方案：schema_id、Config 句柄以及常用配置项（page_size/select_keys）。",
+          "learning_goals": [
+            "理解 Schema = schema_id + Config 的组合",
+            "了解 SchemaComponent 如何复用 Config::Component 生产 Config",
+            "认识方案文件 *.schema.yaml 的结构"
+          ],
+          "source_files": [
+            "src/rime/schema.h",
+            "src/rime/schema.cc",
+            "data/minimal/luna_pinyin.schema.yaml"
+          ],
+          "minimal_modules": [
+            "schema.h",
+            "luna_pinyin.schema.yaml"
+          ],
+          "practice_task": "阅读 luna_pinyin.schema.yaml，找出 schema/switches/engine/speller/translator 几个顶层键，对照 Schema::FetchUsefulConfigItems 说明哪些配置会被预提取。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Engine：引擎骨架",
+          "order": 4,
+          "filename": "u2-l4-engine-skeleton.md",
+          "level": "beginner",
+          "topic": "讲解 Engine 抽象基类的职责：持有 Schema 与 Context、提交信号 CommitSink、以及 Engine::Create 工厂。",
+          "learning_goals": [
+            "理解 Engine 持有 schema_ 与 context_ 两个核心对象",
+            "掌握 CommitSink 信号如何把提交文本传递给上层",
+            "了解 Engine::Create 如何根据方案装配具体引擎"
+          ],
+          "source_files": [
+            "src/rime/engine.h",
+            "src/rime/engine.cc",
+            "src/rime/messenger.h"
+          ],
+          "minimal_modules": [
+            "engine.h",
+            "messenger.h"
+          ],
+          "practice_task": "在 engine.cc 中找到 Engine::Create 的实现，说明它如何读取方案的 engine 配置并装配出 ProcessKey 流水线所需的四类组件容器。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "输入状态与候选生成",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Context：输入状态容器",
+          "order": 1,
+          "filename": "u3-l1-context.md",
+          "level": "intermediate",
+          "topic": "深入 Context：原始输入 input、光标位置、Composition、options/properties 以及各类 Notifier 信号。",
+          "learning_goals": [
+            "理解 Context 是当前输入状态的中央容器",
+            "掌握 input/caret_pos/composition/commit_history 的读写",
+            "理解 options/properties 的会话级与方案级作用域及各类 Notifier"
+          ],
+          "source_files": [
+            "src/rime/context.h",
+            "src/rime/context.cc",
+            "src/rime/commit_history.h"
+          ],
+          "minimal_modules": [
+            "context.h",
+            "commit_history.h"
+          ],
+          "practice_task": "列出 Context 暴露的所有 Notifier（commit/select/update/delete/abort/option/property/unhandled_key），并说明每种信号在何时被触发。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Segmentation 与 Segment",
+          "order": 2,
+          "filename": "u3-l2-segmentation.md",
+          "level": "intermediate",
+          "topic": "讲解输入串如何被切分成 Segment 序列，Segment 的状态机（Void/Guess/Selected/Confirmed）与 tags。",
+          "learning_goals": [
+            "理解 Segmentation 是 Segment 的有序集合，覆盖整段输入",
+            "掌握 Segment 的 [start,end) 区间、status 状态机与 tags 集合",
+            "理解 segments->Forward() 推进切分边界的机制"
+          ],
+          "source_files": [
+            "src/rime/segmentation.h",
+            "src/rime/segmentation.cc"
+          ],
+          "minimal_modules": [
+            "segmentation.h"
+          ],
+          "practice_task": "阅读 segmentation.h，画出 Segment 的四种 status 迁移图，并解释 tags（如 abc/raw/punct）如何由 segmentor 写入。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Composition、Translation 与 Candidate",
+          "order": 3,
+          "filename": "u3-l3-composition-translation-candidate.md",
+          "level": "intermediate",
+          "topic": "讲解 Composition 如何组织多个 Segment、Translation 作为候选拉取迭代器、Candidate 作为最终候选项的数据模型。",
+          "learning_goals": [
+            "理解 Composition 包装 Segmentation 并附加候选信息",
+            "掌握 Translation 的 Next/Peek 迭代器模式及其子类（Union/Merged/Distinct 等）",
+            "理解 Candidate 的 text/comment/preedit/start/end 字段及常见子类"
+          ],
+          "source_files": [
+            "src/rime/composition.h",
+            "src/rime/translation.h",
+            "src/rime/candidate.h",
+            "src/rime/candidate.cc"
+          ],
+          "minimal_modules": [
+            "composition.h",
+            "translation.h",
+            "candidate.h"
+          ],
+          "practice_task": "在 translation.h 中找出 UnionTranslation、MergedTranslation、DistinctTransaction 的作用，说明它们如何把多个 Translator 的输出合并去重。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Menu 与分页",
+          "order": 4,
+          "filename": "u3-l4-menu-and-paging.md",
+          "level": "intermediate",
+          "topic": "讲解 Menu 如何把 Translation 与 Filter 串联成惰性候选流，并按 page_size 分页产出候选。",
+          "learning_goals": [
+            "理解 Menu 作为 Translation+Filter 的惰性包装器",
+            "掌握 AddTranslation/AddFilter/Prepare/CreatePage 的协作",
+            "理解候选分页与高亮索引的计算"
+          ],
+          "source_files": [
+            "src/rime/menu.h",
+            "src/rime/menu.cc",
+            "src/rime/translation.cc"
+          ],
+          "minimal_modules": [
+            "menu.h"
+          ],
+          "practice_task": "追踪 Menu::Prepare(count) 如何从 Translation 拉取候选并经 Filter 链过滤，画出一次 CreatePage 的数据流。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "配置系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Config 数据模型",
+          "order": 1,
+          "filename": "u4-l1-config-data-model.md",
+          "level": "intermediate",
+          "topic": "讲解 Config 的树形数据模型：ConfigItem 基类及其 ConfigValue/ConfigList/ConfigMap 三种子类型。",
+          "learning_goals": [
+            "理解 ConfigItem/ConfigValue/ConfigList/ConfigMap 的类型层次",
+            "掌握 ConfigValue 的类型化访问（GetBool/GetInt/GetDouble/GetString）",
+            "理解 ConfigItemRef 系列引用如何做类型检查与路径寻址"
+          ],
+          "source_files": [
+            "src/rime/config.h",
+            "src/rime/config/config_types.h",
+            "src/rime/config/config_types.cc"
+          ],
+          "minimal_modules": [
+            "config.h",
+            "config_types.h"
+          ],
+          "practice_task": "用一段 YAML（含标量、列表、映射）描述它在内存中对应的 ConfigItem 树结构，标注每个节点的具体子类型。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Config::Component 与配置加载",
+          "order": 2,
+          "filename": "u4-l2-config-component-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 Config::Component 如何作为组件工厂加载 YAML、ConfigData 如何存储根节点，以及资源解析与缓存。",
+          "learning_goals": [
+            "理解 ConfigComponentBase 用 weak_ptr 缓存 ConfigData",
+            "区分 ConfigLoader（直接读 YAML）与 ConfigBuilder（带编译插件）",
+            "理解 ResourceResolver 如何把 config_id 解析为文件路径"
+          ],
+          "source_files": [
+            "src/rime/config/config_component.h",
+            "src/rime/config/config_component.cc",
+            "src/rime/config/config_data.h",
+            "src/rime/resource.h"
+          ],
+          "minimal_modules": [
+            "config_component.h",
+            "config_data.h",
+            "resource.h"
+          ],
+          "practice_task": "追踪一次 config_open(id) 调用，说明它如何经过 ResourceResolver 找到 .yaml 文件并用 ConvertFromYaml 转成 ConfigData。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "配置编译器：__include / __patch DSL",
+          "order": 3,
+          "filename": "u4-l3-config-compiler-dsl.md",
+          "level": "intermediate",
+          "topic": "讲解 ConfigCompiler 提供的配置复用 DSL：__include/__patch/__append/__merge、后缀运算符与复制时写时拷贝（COW）。",
+          "learning_goals": [
+            "掌握 __include/__patch/__append/__merge 四类指令的语义",
+            "理解 /+、/=、索引追加等后缀运算符",
+            "理解 ConfigCowRef 的写时拷贝与依赖解析顺序（kPendingChild/kInclude/kPatch）"
+          ],
+          "source_files": [
+            "src/rime/config/config_compiler.h",
+            "src/rime/config/config_compiler.cc",
+            "src/rime/config/config_compiler_impl.h",
+            "src/rime/config/config_cow_ref.h"
+          ],
+          "minimal_modules": [
+            "config_compiler.h",
+            "config_cow_ref.h"
+          ],
+          "practice_task": "写一个含 __include 与 __patch 的小 YAML，画出 ConfigCompiler 解析它时的依赖图，并解释循环依赖如何被 resolve_chain 检测。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "配置插件与 default.yaml",
+          "order": 4,
+          "filename": "u4-l4-config-plugins-default.md",
+          "level": "intermediate",
+          "topic": "讲解 ConfigBuilder 挂载的配置插件族（默认值、自动 patch、build info、遗留预设等）以及 default.yaml 的全局配置。",
+          "learning_goals": [
+            "了解 DefaultConfigPlugin/AutoPatchConfigPlugin/BuildInfoPlugin 等插件的作用时机",
+            "理解 import_preset 如何被 legacy_preset_config_plugin 转成 __include",
+            "认识 default.yaml 中的 schema_list/switcher/menu/punctuator/key_binder/recognizer"
+          ],
+          "source_files": [
+            "src/rime/config/plugins.h",
+            "src/rime/config/default_config_plugin.cc",
+            "src/rime/config/legacy_preset_config_plugin.cc",
+            "data/minimal/default.yaml"
+          ],
+          "minimal_modules": [
+            "plugins.h",
+            "default.yaml"
+          ],
+          "practice_task": "对照 luna_pinyin.schema.yaml 中 punctuator/key_binder/recognizer 的 import_preset: default，说明这些配置最终如何从 default.yaml 合并进来。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "组件与模块架构",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Component / Class / Registry 组件体系",
+          "order": 1,
+          "filename": "u5-l1-component-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 librime 的组件注册基础：Class<T,Arg> 模板、Component<T> 默认工厂、Registry 单例与按名 Require 机制。",
+          "learning_goals": [
+            "理解 Class<T,Arg>::Component 定义 Create(arg) 接口、Component<T> 用 new T(arg) 实现",
+            "掌握 Registry 单例的 Register/Find/Unregister",
+            "理解 Class<T,Arg>::Require(name) 如何查表并实例化组件"
+          ],
+          "source_files": [
+            "src/rime/component.h",
+            "src/rime/registry.h",
+            "src/rime/registry.cc"
+          ],
+          "minimal_modules": [
+            "component.h",
+            "registry.h"
+          ],
+          "practice_task": "阅读 sample_module.cc 中 new Component<sample::TrivialTranslator> 的注册代码，说明 Registry 如何把它与名字 'trivial_translator' 绑定。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "四大组件基类",
+          "order": 2,
+          "filename": "u5-l2-component-base-classes.md",
+          "level": "intermediate",
+          "topic": "讲解引擎流水线依赖的四种组件基类：Processor、Segmentor、Translator、Filter，以及 Formatter。",
+          "learning_goals": [
+            "掌握 Processor::ProcessKeyEvent 返回 kRejected/kAccepted/kNoop 的含义",
+            "掌握 Segmentor::Proceed、Translator::Query、Filter::Apply 的签名",
+            "理解四种组件都以 Ticket 构造、由方案配置驱动实例化"
+          ],
+          "source_files": [
+            "src/rime/processor.h",
+            "src/rime/segmentor.h",
+            "src/rime/translator.h",
+            "src/rime/filter.h",
+            "src/rime/formatter.h"
+          ],
+          "minimal_modules": [
+            "processor.h",
+            "segmentor.h",
+            "translator.h",
+            "filter.h"
+          ],
+          "practice_task": "为四种组件基类各写一行说明，描述它在 ProcessKey 流水线中的触发时机与输入输出。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Module 机制与模块组",
+          "order": 3,
+          "filename": "u5-l3-module-system.md",
+          "level": "intermediate",
+          "topic": "讲解 Module 抽象与注册宏、ModuleManager 的加载流程，以及 core/dict/gears/levers 各模块注册了哪些组件。",
+          "learning_goals": [
+            "掌握 RIME_REGISTER_MODULE / RIME_REGISTER_MODULE_GROUP 宏的展开",
+            "理解 default 模块组 = core + dict + gears、deployer = core + dict + levers",
+            "了解 core/gears/dict/levers 四个 *_module.cc 各注册的组件清单"
+          ],
+          "source_files": [
+            "src/rime/module.h",
+            "src/rime/module.cc",
+            "src/rime/setup.h",
+            "src/rime/setup.cc",
+            "src/rime/core_module.cc",
+            "src/rime/gear/gears_module.cc"
+          ],
+          "minimal_modules": [
+            "module.h",
+            "setup.h",
+            "core_module.cc",
+            "gears_module.cc"
+          ],
+          "practice_task": "在 gears_module.cc 中按 Processor/Segmentor/Translator/Filter 四类整理出所有注册的组件名，对照 luna_pinyin.schema.yaml 的 engine 配置进行印证。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Ticket 与外部插件加载",
+          "order": 4,
+          "filename": "u5-l4-ticket-and-plugins.md",
+          "level": "intermediate",
+          "topic": "讲解 Ticket 如何携带 engine/schema/namespace/klass 上下文，以及 PluginManager 如何用 boost::dll 动态加载外部插件。",
+          "learning_goals": [
+            "理解 Ticket 在组件实例化时传递的上下文（含 namespace 解析 klass）",
+            "掌握 affix_segmentor@pinyin 这类带 namespace 的组件命名如何被 Ticket 拆解",
+            "理解 PluginManager::LoadPlugins 扫描 librime-* 共享库并转成模块名加载"
+          ],
+          "source_files": [
+            "src/rime/ticket.h",
+            "src/rime/ticket.cc",
+            "plugins/plugins_module.cc",
+            "plugins/plugin.cc",
+            "plugins/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "ticket.h",
+            "plugins_module.cc"
+          ],
+          "practice_task": "解释 'script_translator@pinyin' 与 'affix_segmentor@cangjie' 这种命名如何通过 Ticket 的 namespace + klass 映射到具体的配置节与组件类。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "按键处理流水线",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "引擎流水线总览",
+          "order": 1,
+          "filename": "u6-l1-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "总览一次 ProcessKey 的完整旅程：Processors → 上下文更新 → Compose（Segmentors → Translators → Filters → Menu）。",
+          "learning_goals": [
+            "掌握 ProcessKey 中 Processors 循环的早退规则（kAccepted/kRejected）",
+            "理解 Compose 的两阶段：CalculateSegmentation 与 TranslateSegments",
+            "理解方案 engine/{processors,segmentors,translators,filters} 配置如何装配流水线"
+          ],
+          "source_files": [
+            "src/rime/engine.cc",
+            "src/rime/engine.h"
+          ],
+          "minimal_modules": [
+            "engine.cc"
+          ],
+          "practice_task": "在 engine.cc 中找到 ProcessKey 与 Compose 的实现，画出从按键到候选产出的完整时序图。",
+          "depends_on": [
+            "u5-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Processor 组件族",
+          "order": 2,
+          "filename": "u6-l2-processors.md",
+          "level": "intermediate",
+          "topic": "逐类讲解常用 Processor：speller、ascii_composer、recognizer、navigator、selector、key_binder、punctuator、editor。",
+          "learning_goals": [
+            "理解 speller 如何把按键追加进 context->input",
+            "理解 ascii_composer/recognizer/key_binder/punctuator 的分工",
+            "区分 express_editor/fluid_editor/fluency_editor 等编辑器的行为"
+          ],
+          "source_files": [
+            "src/rime/gear/speller.cc",
+            "src/rime/gear/ascii_composer.cc",
+            "src/rime/gear/recognizer.cc",
+            "src/rime/gear/selector.cc",
+            "src/rime/gear/navigator.cc",
+            "src/rime/gear/editor.cc"
+          ],
+          "minimal_modules": [
+            "speller.cc",
+            "recognizer.cc",
+            "editor.cc"
+          ],
+          "practice_task": "对照 luna_pinyin.schema.yaml 的 engine/processors 列表，说明按键依次经过哪些 Processor 以及它们的早退条件。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Segmentor 组件族",
+          "order": 3,
+          "filename": "u6-l3-segmentors.md",
+          "level": "intermediate",
+          "topic": "讲解 Segmentor 如何协作切分输入：ascii/abc/affix/matcher/punct/fallback，以及 tag 如何指导后续翻译。",
+          "learning_goals": [
+            "理解 abc_segmentor 如何按字母表切分并打 'abc' tag",
+            "理解 affix_segmentor@tag 如何按前缀/后缀识别带标记的片段",
+            "理解 fallback_segmentor 兜底把未识别输入变成 'raw' 片段"
+          ],
+          "source_files": [
+            "src/rime/gear/abc_segmentor.cc",
+            "src/rime/gear/ascii_segmentor.cc",
+            "src/rime/gear/affix_segmentor.cc",
+            "src/rime/gear/matcher.cc",
+            "src/rime/gear/fallback_segmentor.cc"
+          ],
+          "minimal_modules": [
+            "abc_segmentor.cc",
+            "affix_segmentor.cc",
+            "fallback_segmentor.cc"
+          ],
+          "practice_task": "以输入 'P:ni hao' 为例，推演各 segmentor 如何切分并打上 pinyin/raw 等 tag，对照 recognizer 的 patterns 配置。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Translator 组件族",
+          "order": 4,
+          "filename": "u6-l4-translators.md",
+          "level": "intermediate",
+          "topic": "讲解主要 Translator：script_translator vs table_translator 的差异，以及 echo/history/switch/punct/reverse_lookup/schema_list 等辅助翻译器。",
+          "learning_goals": [
+            "区分 script_translator（音节图+用户词典，适合拼音）与 table_translator（直接码表，适合仓颉）",
+            "理解 reverse_lookup_translator 与 schema_list_translator/switch_translator 的特殊用途",
+            "了解 translator_commons 中 TranslatorOptions/Phrase/Sentence 的复用"
+          ],
+          "source_files": [
+            "src/rime/gear/script_translator.cc",
+            "src/rime/gear/table_translator.cc",
+            "src/rime/gear/translator_commons.h",
+            "src/rime/gear/reverse_lookup_translator.cc",
+            "src/rime/gear/schema_list_translator.cc",
+            "src/rime/gear/punctuator.cc"
+          ],
+          "minimal_modules": [
+            "script_translator.cc",
+            "table_translator.cc",
+            "translator_commons.h"
+          ],
+          "practice_task": "比较 luna_pinyin.schema.yaml 中 script_translator 与 table_translator@cangjie 的配置，说明为何同方案里两种翻译器共存。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "Filter 组件族",
+          "order": 5,
+          "filename": "u6-l5-filters.md",
+          "level": "intermediate",
+          "topic": "讲解候选过滤链：simplifier（OpenCC 繁简转换）、uniquifier、charset_filter、single_char_filter、reverse_lookup_filter。",
+          "learning_goals": [
+            "理解 simplifier 如何借助 rime::Opencc 对候选做繁简/区域字形转换",
+            "理解 uniquifier 如何把重复文本合并为 UniquifiedCandidate",
+            "理解 charset_filter/single_char_filter 的过滤与重排逻辑"
+          ],
+          "source_files": [
+            "src/rime/gear/simplifier.cc",
+            "src/rime/gear/opencc.cc",
+            "src/rime/gear/uniquifier.cc",
+            "src/rime/gear/charset_filter.cc",
+            "src/rime/gear/single_char_filter.cc",
+            "src/rime/gear/reverse_lookup_filter.cc"
+          ],
+          "minimal_modules": [
+            "simplifier.cc",
+            "opencc.cc",
+            "uniquifier.cc"
+          ],
+          "practice_task": "对照 luna_pinyin.schema.yaml 的 filters（simplifier@zh_simp / simplifier@zh_tw / uniquifier），说明一条候选如何依次穿过这条过滤链。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "拼写代数与音节切分",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Spelling 与拼写属性",
+          "order": 1,
+          "filename": "u7-l1-spelling.md",
+          "level": "intermediate",
+          "topic": "讲解 Spelling 与 SpellingProperties：拼写类型枚举、可信度、提示文本以及叠加/合并规则。",
+          "learning_goals": [
+            "掌握 SpellingType 各取值（kNormal/kFuzzy/kAbbreviation/kCompletion 等）",
+            "理解 SpellingProperties 的 credibility/tips/is_correction",
+            "理解 Compose 与 Update 如何合并多条候选拼写的属性"
+          ],
+          "source_files": [
+            "src/rime/algo/spelling.h",
+            "src/rime/algo/spelling.cc"
+          ],
+          "minimal_modules": [
+            "spelling.h"
+          ],
+          "practice_task": "说明一次模糊音（fuzz）产生的 Spelling 与一次缩写（abbrev）产生的 Spelling 在 type/credibility 上的区别。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Calculus 与拼写运算",
+          "order": 2,
+          "filename": "u7-l2-calculus.md",
+          "level": "intermediate",
+          "topic": "讲解 Calculus 注册表与各种 Calculation：xform/derive/erase/fuzz/abbrev/xlit，以及 Projection 如何对 Script 批量施加运算。",
+          "learning_goals": [
+            "理解 Calculus::Register/Parse 把 'xform/x/y/' 这类串解析成 Calculation",
+            "掌握 Transformation/Erasion/Derivation/Fuzzing/Abbreviation/Transliteration 的语义",
+            "理解 Projection::Apply 对 Script 与字符串两种应用方式"
+          ],
+          "source_files": [
+            "src/rime/algo/calculus.h",
+            "src/rime/algo/calculus.cc",
+            "src/rime/algo/algebra.h",
+            "src/rime/algo/algebra.cc"
+          ],
+          "minimal_modules": [
+            "calculus.h",
+            "algebra.h"
+          ],
+          "practice_task": "对照 luna_pinyin.schema.yaml 的 speller/algebra 规则，逐条标注它属于 erase/abbrev/derive/correction 中的哪一种运算。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Syllabifier 与音节图",
+          "order": 3,
+          "filename": "u7-l3-syllabifier.md",
+          "level": "intermediate",
+          "topic": "讲解 Syllabifier 如何基于 Prism 把输入串切分成所有可能的音节组合，构建 SyllableGraph（顶点/边/索引）。",
+          "learning_goals": [
+            "理解 SyllableGraph 的 vertices/edges/indices 三张表",
+            "掌握 BuildSyllableGraph 利用 Prism 做前缀/扩展搜索生成边",
+            "理解 delimiters/enable_completion/strict_spelling 与纠错 Corrector 的作用"
+          ],
+          "source_files": [
+            "src/rime/algo/syllabifier.h",
+            "src/rime/algo/syllabifier.cc",
+            "src/rime/algo/spelling.h"
+          ],
+          "minimal_modules": [
+            "syllabifier.h"
+          ],
+          "practice_task": "以拼音输入 'xian' 为例，说明 Syllabifier 如何同时切出 'xi/an'、'xi'an'(xian)、'xian' 等多条路径并记录到 edges 中。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "词典系统",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "词典系统总览与构建产物",
+          "order": 1,
+          "filename": "u8-l1-dict-overview.md",
+          "level": "advanced",
+          "topic": "总览 dict 子系统：*.dict.yaml 源文件、DictCompiler 的四步构建，以及 .prism.bin/.table.bin/.reverse.bin 三种产物。",
+          "learning_goals": [
+            "理解词典从 .dict.yaml 到三类 .bin 文件的编译流程",
+            "认识 Prism（音节索引）/Table（码表）/ReverseDb（反查）的分工",
+            "了解 MappedFile 作为内存映射基座的角色"
+          ],
+          "source_files": [
+            "src/rime/dict/dict_compiler.h",
+            "src/rime/dict/dict_settings.h",
+            "src/rime/dict/mapped_file.h",
+            "data/minimal/luna_pinyin.dict.yaml"
+          ],
+          "minimal_modules": [
+            "dict_compiler.h",
+            "mapped_file.h"
+          ],
+          "practice_task": "梳理 DictCompiler::Compile 的四步（BuildTable/BuildPrism/BuildReverseDb/打包），标注每一步的输出文件名。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Prism：音节索引（双数组 Trie）",
+          "order": 2,
+          "filename": "u8-l2-prism.md",
+          "level": "advanced",
+          "topic": "深入 Prism：基于 Darts 双数组 trie 的音节拼写索引、拼写代数应用与查询接口（CommonPrefixSearch/ExpandSearch）。",
+          "learning_goals": [
+            "理解 Prism 把拼写（经拼写代数变换后）建成双数组 trie，映射到 syllable_id",
+            "掌握 GetValue/CommonPrefixSearch/ExpandSearch/QuerySpelling 的用途",
+            "理解 SpellingMap 如何记录同义的多种拼写（模糊音/缩写）"
+          ],
+          "source_files": [
+            "src/rime/dict/prism.h",
+            "src/rime/dict/prism.cc",
+            "src/rime/dict/mapped_file.h"
+          ],
+          "minimal_modules": [
+            "prism.h"
+          ],
+          "practice_task": "说明 Prism 如何在构建阶段把拼写代数（algebra）产生的派生拼写也纳入索引，从而支持模糊音与缩写输入。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Table：码表与多级索引",
+          "order": 3,
+          "filename": "u8-l3-table.md",
+          "level": "advanced",
+          "topic": "深入 Table：从 syllable_id 序列到词条的多级索引（HeadIndex/TrunkIndex/TailIndex）及其序列化结构。",
+          "learning_goals": [
+            "理解 Table 用多级数组索引实现 '音节序列 -> 词条集合' 的查询",
+            "掌握 TableQuery 的有状态逐级遍历",
+            "理解 Syllabary/StringTable 的去重存储与 OffsetPtr 相对寻址"
+          ],
+          "source_files": [
+            "src/rime/dict/table.h",
+            "src/rime/dict/table.cc",
+            "src/rime/dict/mapped_file.h"
+          ],
+          "minimal_modules": [
+            "table.h",
+            "mapped_file.h"
+          ],
+          "practice_task": "解释为什么超过 kIndexCodeMaxLength 个音节的词条要落到 TailIndex，并说明这对长词查询的影响。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "DictCompiler 构建流程",
+          "order": 4,
+          "filename": "u8-l4-dict-compiler.md",
+          "level": "advanced",
+          "topic": "讲解 DictCompiler 的完整构建链：EntryCollector 三遍收集、Vocabulary 组织、Table/Prism/ReverseDb 写盘与校验。",
+          "learning_goals": [
+            "理解 EntryCollector 解析 .dict.yaml 并产出 syllabary 与 RawDictEntry",
+            "掌握 Vocabulary 的 map<int, VocabularyPage> 树形组织",
+            "理解校验和（checksum）如何决定是否需要重建"
+          ],
+          "source_files": [
+            "src/rime/dict/dict_compiler.cc",
+            "src/rime/dict/entry_collector.h",
+            "src/rime/dict/vocabulary.h",
+            "src/rime/dict/vocabulary.cc"
+          ],
+          "minimal_modules": [
+            "dict_compiler.cc",
+            "entry_collector.h",
+            "vocabulary.h"
+          ],
+          "practice_task": "追踪一个词条（如 '你好\tni hao'）从 .dict.yaml 被收集、编码、并入 Vocabulary 到最终写入 .table.bin 的全过程。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "Dictionary 查询主链路",
+          "order": 5,
+          "filename": "u8-l5-dictionary-lookup.md",
+          "level": "advanced",
+          "topic": "讲解 Dictionary 门面如何把 SyllableGraph 经 Prism/Table 翻译成 DictEntryCollector，以及按字符串反查 LookupWords。",
+          "learning_goals": [
+            "理解 Dictionary::Lookup(SyllableGraph) 返回按 end_pos 分组的 DictEntryCollector",
+            "掌握 Table::Query 沿音节图逐路径收集 Chunk 的过程",
+            "理解 Decode 把 syllable_id 序列还原为可读拼写"
+          ],
+          "source_files": [
+            "src/rime/dict/dictionary.h",
+            "src/rime/dict/dictionary.cc",
+            "src/rime/dict/vocabulary.h"
+          ],
+          "minimal_modules": [
+            "dictionary.h"
+          ],
+          "practice_task": "画出 SyllableGraph → Prism(取 syllable_id) → Table(查词条) → DictEntryCollector(按 end_pos 分组) 的查询数据流。",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l6",
+          "title": "用户词典与 user_db",
+          "order": 6,
+          "filename": "u8-l6-user-dictionary.md",
+          "level": "advanced",
+          "topic": "讲解用户词典如何用 LevelDB 记录学习数据（提交次数、动态权重、tick），以及事务与恢复机制。",
+          "learning_goals": [
+            "理解 UserDbValue(commits/dee/tick) 与 'code\\tword' 键格式",
+            "掌握 UserDictionary::Lookup 的 DFS 查询与 UpdateEntry 的权重更新",
+            "理解 Db 抽象接口及其 LevelDb/TextDb 实现、事务与 user_db_recovery_task"
+          ],
+          "source_files": [
+            "src/rime/dict/user_db.h",
+            "src/rime/dict/user_dictionary.h",
+            "src/rime/dict/db.h",
+            "src/rime/dict/level_db.cc",
+            "src/rime/dict/user_db_recovery_task.h"
+          ],
+          "minimal_modules": [
+            "user_db.h",
+            "user_dictionary.h",
+            "db.h"
+          ],
+          "practice_task": "说明用户每提交一次词，UserDictionary 如何更新 commits/tick 并重算动态权重，以及 sync_user_data 时发生了什么。",
+          "depends_on": [
+            "u8-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "部署、Levers 与二次开发",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Deployer 与 DeploymentTask",
+          "order": 1,
+          "filename": "u9-l1-deployer-tasks.md",
+          "level": "advanced",
+          "topic": "讲解 Deployer 如何持有数据目录、调度 DeploymentTask 队列，以及工作线程与维护模式。",
+          "learning_goals": [
+            "理解 Deployer 持有 shared/user/prebuilt/staging/sync 目录与分发信息",
+            "掌握 RunTask/ScheduleTask/NextTask 的任务队列调度",
+            "理解 StartWork/StartMaintenance/JoinWorkThread 的线程模型"
+          ],
+          "source_files": [
+            "src/rime/deployer.h",
+            "src/rime/deployer.cc",
+            "src/rime/service.h"
+          ],
+          "minimal_modules": [
+            "deployer.h"
+          ],
+          "practice_task": "追踪 rime_api 中 start_maintenance 如何触发 Deployer 在后台线程运行部署任务。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "部署任务族",
+          "order": 2,
+          "filename": "u9-l2-deployment-tasks.md",
+          "level": "advanced",
+          "topic": "逐个讲解 levers 注册的部署任务：检测改动、安装更新、工作区/方案/配置更新、预构建、用户词典升级与同步等。",
+          "learning_goals": [
+            "掌握 DetectModifications/WorkspaceUpdate/SchemaUpdate/ConfigFileUpdate 的职责",
+            "理解 PrebuildAllSchemas/SymlinkingPrebuiltDictionaries 的安装期用途",
+            "了解 levers_module.cc 如何把这些任务注册为 DeploymentTask 组件"
+          ],
+          "source_files": [
+            "src/rime/lever/deployment_tasks.h",
+            "src/rime/lever/deployment_tasks.cc",
+            "src/rime/lever/levers_module.cc"
+          ],
+          "minimal_modules": [
+            "deployment_tasks.h",
+            "levers_module.cc"
+          ],
+          "practice_task": "梳理一次完整 deploy 的任务执行顺序，说明哪些任务依赖前一步的产物（如 SchemaUpdate 依赖 DictCompiler）。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Customizer 与用户设置",
+          "order": 3,
+          "filename": "u9-l3-customizer-settings.md",
+          "level": "advanced",
+          "topic": "讲解 Customizer/CustomSettings/SwitcherSettings/UserDictManager 如何用 *.custom.yaml 对官方配置做增量定制。",
+          "learning_goals": [
+            "理解 *.custom.yaml 通过 __patch 覆盖官方 schema/default 的机制",
+            "掌握 CustomSettings 加载与定制流程",
+            "了解 SwitcherSettings/UserDictManager 的用户层管理职责"
+          ],
+          "source_files": [
+            "src/rime/lever/customizer.cc",
+            "src/rime/lever/customizer.h",
+            "src/rime/lever/custom_settings.h",
+            "src/rime/lever/switcher_settings.h",
+            "src/rime/lever/user_dict_manager.h"
+          ],
+          "minimal_modules": [
+            "customizer.h",
+            "custom_settings.h",
+            "switcher_settings.h"
+          ],
+          "practice_task": "写一个 luna_pinyin.custom.yaml，用 __patch 修改 page_size 或追加一个 filter，并说明 Customizer 如何把它合并进方案。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "Switcher 与 Switches",
+          "order": 4,
+          "filename": "u9-l4-switcher-switches.md",
+          "level": "advanced",
+          "topic": "讲解方案切换器 Switcher（既是 Processor 又是 Engine）与 Switches 配置模型（开关、单选组、状态标签）。",
+          "learning_goals": [
+            "理解 Switcher 作为特殊引擎列出/切换方案的交互",
+            "掌握 switches 配置中的 toggle 与 radio group 两种类型",
+            "理解 save_options 如何持久化开关状态到 user.yaml"
+          ],
+          "source_files": [
+            "src/rime/switcher.h",
+            "src/rime/switcher.cc",
+            "src/rime/switches.h",
+            "src/rime/switches.cc"
+          ],
+          "minimal_modules": [
+            "switcher.h",
+            "switches.h"
+          ],
+          "practice_task": "对照 luna_pinyin.schema.yaml 的 switches 段，说明 ascii_mode（toggle）与 zh_trad/zh_simp/...（radio group）的区别，以及状态如何被保存。",
+          "depends_on": [
+            "u9-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "Encoder：编码生成",
+          "order": 5,
+          "filename": "u9-l5-encoder.md",
+          "level": "advanced",
+          "topic": "讲解 Encoder 体系：RawCode、PhraseCollector、TableEncoder（规则编码，如 Aa/Za 公式）与 ScriptEncoder（音节编码）。",
+          "learning_goals": [
+            "理解 TableEncoder 如何按 encoder/rules 公式为多字词生成编码",
+            "掌握 CodeCoords/TableEncodingRule 与编码公式解析",
+            "理解 ScriptEncoder 如何对短语做 DFS 音节编码"
+          ],
+          "source_files": [
+            "src/rime/algo/encoder.h",
+            "src/rime/algo/encoder.cc",
+            "src/rime/dict/entry_collector.h"
+          ],
+          "minimal_modules": [
+            "encoder.h"
+          ],
+          "practice_task": "为一个形码方案写一段 encoder/rules 公式（如 'AaZa'），说明 TableEncoder 如何据此为双字词推导出编码并交给 PhraseCollector。",
+          "depends_on": [
+            "u8-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l6",
+          "title": "插件开发实战",
+          "order": 6,
+          "filename": "u9-l6-plugin-development.md",
+          "level": "advanced",
+          "topic": "以 sample 插件为模板，讲解如何从零开发一个 librime 插件：实现自定义 Translator、注册模块、配置方案引用。",
+          "learning_goals": [
+            "掌握 RIME_REGISTER_MODULE 与 Registry::Register 注册自定义组件",
+            "理解 TrivialTranslator::Query 返回 Translation 的最小实现",
+            "了解插件共享库命名（librime-* / rime-*）与加载约定"
+          ],
+          "source_files": [
+            "sample/src/sample_module.cc",
+            "sample/src/trivial_translator.h",
+            "sample/src/trivial_translator.cc",
+            "sample/tools/sample.schema.yaml",
+            "rime-new-plugin.sh",
+            "plugins/plugins_module.cc"
+          ],
+          "minimal_modules": [
+            "sample_module.cc",
+            "trivial_translator.h",
+            "rime-new-plugin.sh"
+          ],
+          "practice_task": "参照 TrivialTranslator，编写一个返回固定问候语候选的自定义 Translator，注册为模块并在一个测试方案里引用它。",
+          "depends_on": [
+            "u9-l1",
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

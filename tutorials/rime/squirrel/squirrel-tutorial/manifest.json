@@ -1,0 +1,774 @@
+{
+  "project": "squirrel",
+  "head": "2158538755542b11964655e2f9606ba4a066edfe",
+  "rationale": "Squirrel（鼠鬚管）是 Rime 输入法引擎的 macOS 前端，基于 InputMethodKit（IMK），用 Swift 编写，核心源码集中在 sources/ 下 12 个文件（约 3500 行）。它的学习难点不在于规模，而在于「macOS 输入法生命周期 + librime C 桥接 + 自绘候选面板」三套复杂系统的交织。因此学习路线按「由外到内、由控制流到视图、由核心到集成」分三层五个单元：第一单元（入门）从项目定位、目录结构、构建方式、入口启动到 IMK 基础概念，让读者先建立宏观认知；第二单元（进阶）沿着「AppDelegate → 全局 librime 初始化 → 输入控制器生命周期 → 键盘事件主循环 → 按键映射 → rimeUpdate 数据流 → marked/commit 文本规则」这条真实输入主链路逐层下钻，这是整个项目的灵魂；第三单元（进阶）横向展开配置与主题体系（SquirrelConfig / squirrel.yaml / SquirrelTheme / 亮暗与 schema 特化）；第四单元（专家）深入候选词面板的自绘 UI（Panel.update 富文本拼装 → show 定位与全屏缩放 → View 自定义绘制路径 → 鼠标滚轮事件命中）；第五单元（专家）覆盖系统级集成与扩展点（分布式通知、TIS 输入源注册、插件保留属性、Swift/C 桥接约定、打包安装与 Sparkle 更新、本地化与 CI）。讲义依赖关系刻意让「主链路」（第二单元）成为枢纽，配置/UI/集成单元都挂接到它之上，避免读者在未理解输入流之前就被 UI 细节淹没。每个单元只讲相对独立的主题，每篇讲义引用 1-6 个真实源码文件并配一个可操作的实践任务，符合「逻辑优先、不为数量硬拆」的原则。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 Squirrel",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：Squirrel 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Squirrel（鼠鬚管）作为 Rime 引擎的 macOS 输入法前端的定位、GPL 授权，以及它与 librime、plum、Sparkle 等组件的协作关系。",
+          "learning_goals": [
+            "理解 Squirrel 在 Rime 生态中的角色（前端 vs 引擎）",
+            "知道项目授权方式与运行平台要求",
+            "识别 Squirrel 引用的关键开源依赖"
+          ],
+          "source_files": [
+            "README.md",
+            "SKILL.md"
+          ],
+          "minimal_modules": [
+            "项目定位与名称由来",
+            "Rime 引擎生态（librime/plum/Sparkle）",
+            "授权、平台与跨平台发行版关系"
+          ],
+          "practice_task": "阅读 README 与 SKILL.md，列出 Squirrel 运行所依赖的三个外部组件，各用一句话说明其作用，并指出 Squirrel 自己是引擎还是前端。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理 Squirrel 仓库的目录组织：sources/ 源码、resources/ 资源与配置、data/ 默认配置、package/ 打包脚本、librime/plum/Sparkle 子模块。",
+          "learning_goals": [
+            "掌握仓库顶层目录的职责划分",
+            "区分源码目录与资源/数据目录",
+            "识别 git 子模块在构建中的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "sources/Main.swift",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "源码目录 sources/",
+            "资源与数据目录（resources/、data/）",
+            "构建与打包目录（package/、scripts/）",
+            "子模块（librime/plum/Sparkle）"
+          ],
+          "practice_task": "依据仓库实际目录绘制一张目录树，标注 sources/、resources/、data/、package/、scripts/ 各自的作用，并标出哪些是 git 子模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建与运行",
+          "order": 3,
+          "filename": "u1-l3-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 Makefile 构建依赖（librime 数据、plum、Sparkle）并通过 xcodebuild 编译出 Squirrel.app，以及关键的构建环境变量。",
+          "learning_goals": [
+            "理解 make 的依赖链与目标（release/debug/install/package）",
+            "掌握 librime/plum/Sparkle 依赖的构建方式",
+            "了解 ARCHS/BUILD_UNIVERSAL/DEV_ID 等环境变量"
+          ],
+          "source_files": [
+            "INSTALL.md",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "依赖构建（librime/data/sparkle 目标）",
+            "xcodebuild 编译 Squirrel.app",
+            "安装与清理目标（install/clean/clean-deps）",
+            "构建环境变量（ARCHS/DEV_ID/MACOSX_DEPLOYMENT_TARGET）"
+          ],
+          "practice_task": "阅读 Makefile，写出在执行 `make release` 之前必须先就绪的依赖产物（RIME_LIBRARY、PLUM_DATA、OPENCC_DATA、SPARKLE_FRAMEWORK），并解释 DEPS_CHECK 的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "程序入口与启动流程",
+          "order": 4,
+          "filename": "u1-l4-entry-and-startup.md",
+          "level": "beginner",
+          "topic": "解析 Main.swift 的 SquirrelApp.main()：先处理命令行维护命令，再创建 IMKServer、NSApplication、AppDelegate，执行 problem-launch 检测并启动 librime。",
+          "learning_goals": [
+            "理解入口的双分支：命令行命令 vs 正常输入法运行",
+            "掌握正常启动时的对象创建顺序",
+            "了解 problem-launch 检测的目的"
+          ],
+          "source_files": [
+            "sources/Main.swift"
+          ],
+          "minimal_modules": [
+            "命令行分支（--quit/--reload/--build/--ascii 等）",
+            "IMKServer 与 NSApplication 创建",
+            "AppDelegate 启动序列",
+            "problematicLaunchDetected 防崩溃循环"
+          ],
+          "practice_task": "列出 Main.swift 中处理的所有命令行参数及其作用；并写出正常（非命令行）启动时依次调用的 AppDelegate 三个方法（setupRime/startRime/loadSettings）的顺序。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "macOS 输入法（IMK）基础概念",
+          "order": 5,
+          "filename": "u1-l5-imk-input-method-concepts.md",
+          "level": "beginner",
+          "topic": "介绍 InputMethodKit 的核心概念：IMKServer、IMKInputController、IMKTextInput、marked text / commit text 协议，以及 Squirrel 如何通过 Info.plist 被系统注册。",
+          "learning_goals": [
+            "理解 IMKServer 与连接名的作用",
+            "掌握 controller 与 client 的关系",
+            "理解 marked text 与 commit text 的区别"
+          ],
+          "source_files": [
+            "resources/Info.plist",
+            "sources/SquirrelInputController.swift"
+          ],
+          "minimal_modules": [
+            "IMKServer 与 InputMethodConnectionName",
+            "输入模式（Hans/Hant）与 controller 类名",
+            "IMKInputController 与弱引用 client",
+            "marked text / commit text 协议"
+          ],
+          "practice_task": "对照 Info.plist 说明：Squirrel 注册了哪两个输入模式 ID？InputMethodConnectionName 是什么？InputMethodServerControllerClass 指向哪个类？",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：输入处理主链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "应用委托与全局状态",
+          "order": 1,
+          "filename": "u2-l1-app-delegate.md",
+          "level": "intermediate",
+          "topic": "解析 SquirrelApplicationDelegate：它持有共享 SquirrelPanel、全局 SquirrelConfig、状态栏图标、Sparkle 更新控制器，并注册各类观察者。",
+          "learning_goals": [
+            "理解 AppDelegate 持有的全局状态及其归属",
+            "掌握 applicationWillFinishLaunching 的初始化动作",
+            "理解为什么全局 librime 生命周期归 AppDelegate"
+          ],
+          "source_files": [
+            "sources/SquirrelApplicationDelegate.swift"
+          ],
+          "minimal_modules": [
+            "全局状态属性（config/panel/statusItem/updateController）",
+            "applicationWillFinishLaunching 初始化",
+            "观察者注册 addObservers",
+            "状态栏图标与 ASCII 模式显示"
+          ],
+          "practice_task": "找出 AppDelegate 在启动时创建并持有的三个核心对象（panel、config、statusItem），说明它们各自的生命周期归属，以及为什么 librime 全局生命周期必须由 AppDelegate 而非 controller 持有。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "全局 librime 初始化",
+          "order": 2,
+          "filename": "u2-l2-global-rime-init.md",
+          "level": "intermediate",
+          "topic": "讲解 setupRime/startRime/loadSettings 如何填充 RimeTraits、设置日志目录与通知处理器，并通过 start_maintenance 部署 squirrel.yaml。",
+          "learning_goals": [
+            "掌握 RimeTraits 各字段的含义与设置方式",
+            "理解 setup/initialize/start_maintenance 三阶段",
+            "了解 librime 通知处理器的安装与回调"
+          ],
+          "source_files": [
+            "sources/SquirrelApplicationDelegate.swift",
+            "sources/BridgingFunctions.swift"
+          ],
+          "minimal_modules": [
+            "RimeTraits 填充与 setCString",
+            "setup/initialize/start_maintenance 流程",
+            "notificationHandler 安装",
+            "deploy_config_file 部署 squirrel.yaml"
+          ],
+          "practice_task": "列出 setupRime 通过 setCString 设置的至少 5 个 traits 字段（如 shared_data_dir/user_data_dir/log_dir/distribution_code_name/app_name）及其含义，并指出 user_data_dir 指向的目录路径。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "输入控制器生命周期与会话",
+          "order": 3,
+          "filename": "u2-l3-input-controller-lifecycle.md",
+          "level": "intermediate",
+          "topic": "解析 SquirrelInputController 的生命周期：createSession/destroySession、activate/deactivate、commitComposition，以及弱引用 client 的谨慎访问。",
+          "learning_goals": [
+            "理解 controller 与 librime session 的一一对应",
+            "掌握 activate/deactivate 时该做的清理",
+            "理解弱引用 client 的必要性与守卫"
+          ],
+          "source_files": [
+            "sources/SquirrelInputController.swift"
+          ],
+          "minimal_modules": [
+            "init 与 createSession",
+            "activateServer/deactivateServer",
+            "commitComposition 提交原始输入",
+            "deinit 与 destroySession"
+          ],
+          "practice_task": "解释为什么 client 必须声明为 weak；并描述 deactivateServer(_:) 依次执行的三件事（hidePalettes、commitComposition、置空 client），说明其为何对避免「悬挂组合」至关重要。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "键盘事件处理主循环",
+          "order": 4,
+          "filename": "u2-l4-key-event-loop.md",
+          "level": "intermediate",
+          "topic": "精读 handle(_:client:)：flagsChanged 与 keyDown 分支、修饰键释放优先、capslock 特殊处理、Command 快捷键放行、session 自愈，以及返回值的吞/放语义。",
+          "learning_goals": [
+            "掌握 handle 的整体结构与事件类型分发",
+            "理解 flagsChanged 的修饰键顺序与 capslock 处理",
+            "理解返回 true/false 对事件传递的影响"
+          ],
+          "source_files": [
+            "sources/SquirrelInputController.swift"
+          ],
+          "minimal_modules": [
+            "事件类型分发与 session 自愈",
+            "flagsChanged：capslock 与释放优先",
+            "keyDown：放行 Command 快捷键",
+            "返回值语义（吞掉 vs 透传）"
+          ],
+          "practice_task": "解释为什么 flagsChanged 分支要「先处理释放、再处理按下」；并说明为什么 keyDown 中带 Command 修饰的键要 break 放行给宿主应用。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "macOS 到 Rime 的按键映射",
+          "order": 5,
+          "filename": "u2-l5-keycode-translation.md",
+          "level": "intermediate",
+          "topic": "解析 MacOSKeyCodes / SquirrelKeycode：osxModifiersToRime、osxKeycodeToRime、modifierKeycodes/inferModifierKeycode，以及按键码表的组织。",
+          "learning_goals": [
+            "掌握修饰键掩码从 NSEvent 到 Rime 的转换",
+            "理解字符与按键码两条映射路径",
+            "了解远程桌面 keyCode=0 的推断兜底"
+          ],
+          "source_files": [
+            "sources/MacOSKeyCodes.swift"
+          ],
+          "minimal_modules": [
+            "osxModifiersToRime 修饰键掩码",
+            "osxKeycodeToRime 字符/码表映射",
+            "inferModifierKeycode 推断兜底",
+            "keycodeMappings / additionalCodeMappings 组织"
+          ],
+          "practice_task": "追踪一次「Shift+a」按键：从 NSEvent 的 keyCode/characters/modifiers 出发，经过 SquirrelKeycode.osxKeycodeToRime 与 osxModifiersToRime，最终得到传给 rimeAPI.process_key 的 keycode 与 modifier 值。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "rimeUpdate 数据流",
+          "order": 6,
+          "filename": "u2-l6-rime-update-dataflow.md",
+          "level": "intermediate",
+          "topic": "精读 rimeUpdate：依次调用 get_commit/get_status/get_context 三段式消费 librime 状态，处理 schema 切换、计算 inline 策略、读取候选，并配对释放结构。",
+          "learning_goals": [
+            "掌握 rimeUpdate 的三段式消费顺序",
+            "理解 schema 切换触发的重载与 inline 策略计算",
+            "掌握 get_commit/status/context 与 free_* 的配对释放"
+          ],
+          "source_files": [
+            "sources/SquirrelInputController.swift",
+            "sources/BridgingFunctions.swift"
+          ],
+          "minimal_modules": [
+            "rimeConsumeCommittedText（get_commit）",
+            "get_status 与 schema 切换重载",
+            "get_context 读取 preedit/候选/标签/页码",
+            "free_commit/free_status/free_context 配对"
+          ],
+          "practice_task": "说明 get_commit、get_status、get_context 三个 librime 调用各自返回什么信息；并解释为什么每次成功读取后必须配对调用对应的 free 函数（提示：C 内存所有权）。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "marked text、commit 与 inline 策略",
+          "order": 7,
+          "filename": "u2-l7-marked-text-commit.md",
+          "level": "intermediate",
+          "topic": "讲解 show()/commit() 的 marked/commit 文本规则、inlinePreedit/inlineCandidate 由主题配置与 librime 选项联合判定、以及非 inline 时的全角空格占位符策略。",
+          "learning_goals": [
+            "掌握 commit→insertText 与 show→setMarkedText 的区别",
+            "理解 inlinePreedit/inlineCandidate 的联合判定",
+            "了解全角空格占位符解决 iTerm2 回显问题"
+          ],
+          "source_files": [
+            "sources/SquirrelInputController.swift"
+          ],
+          "minimal_modules": [
+            "commit→client.insertText",
+            "show→setMarkedText 与缓存去重",
+            "inlinePreedit/inlineCandidate 联合判定（no_inline/inline）",
+            "全角空格占位符与 soft_cursor"
+          ],
+          "practice_task": "解释 inlinePreedit 与 inlineCandidate 各自由哪两方（主题配置 + librime 选项）共同决定；并说明在非 inline 预编辑模式下，为什么要把 marked text 设为全角空格 U+3000 而非半角空格。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：配置与主题",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "SquirrelConfig 类型化配置门面",
+          "order": 1,
+          "filename": "u3-l1-squirrel-config.md",
+          "level": "intermediate",
+          "topic": "解析 SquirrelConfig：openBaseConfig/open(schemaID:baseConfig:) 的回退机制、getBool/getDouble/getString/getColor 的缓存、以及 getAppOptions 读取应用级选项。",
+          "learning_goals": [
+            "理解 base config 与 schema config 的回退关系",
+            "掌握类型化读取与缓存机制",
+            "了解颜色字符串解析与色空间"
+          ],
+          "source_files": [
+            "sources/SquirrelConfig.swift"
+          ],
+          "minimal_modules": [
+            "openBaseConfig / open(schemaID:baseConfig:) 回退",
+            "getBool/getDouble/getString 缓存读取",
+            "getColor 与 0xAABBGGRR 解析",
+            "getAppOptions 读取 app_options"
+          ],
+          "practice_task": "说明当 schema 配置缺失某项时，SquirrelConfig 如何回退到 base config；并解释 cache 字典的作用与生命周期。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "squirrel.yaml 配置文件结构",
+          "order": 2,
+          "filename": "u3-l2-squirrel-yaml.md",
+          "level": "intermediate",
+          "topic": "逐节讲解 data/squirrel.yaml：keyboard_layout、status_icon、style 全局样式、preset_color_schemes 预设配色、app_options 应用级选项。",
+          "learning_goals": [
+            "掌握 squirrel.yaml 的顶层结构与各节作用",
+            "理解 style 下布局/字体/颜色等选项",
+            "理解 app_options 如何按应用定制输入行为"
+          ],
+          "source_files": [
+            "data/squirrel.yaml"
+          ],
+          "minimal_modules": [
+            "顶层选项（keyboard_layout/chord_duration/show_notifications_when/status_icon）",
+            "style 布局/字体/颜色选项",
+            "preset_color_schemes 预设配色",
+            "app_options 应用级选项（ascii_mode/no_inline/vim_mode/inline）"
+          ],
+          "practice_task": "在 squirrel.yaml 的 app_options 中为一个新应用（例如 com.todesktop.某编辑器）添加 ascii_mode: true 与 no_inline: true 两项，并说明这两项分别改变什么输入行为。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "SquirrelTheme 主题加载",
+          "order": 3,
+          "filename": "u3-l3-theme-loading.md",
+          "level": "intermediate",
+          "topic": "解析 SquirrelTheme.load：先读取全局 style/* 项，再叠加 color scheme 的覆盖项，处理字体级联合并、颜色空间与 candidate_format 归一化。",
+          "learning_goals": [
+            "掌握主题加载的全局→配色方案两层结构",
+            "理解配色方案可覆盖哪些全局项",
+            "了解字体解析与级联、颜色空间选择"
+          ],
+          "source_files": [
+            "sources/SquirrelTheme.swift"
+          ],
+          "minimal_modules": [
+            "全局 style/* 读取",
+            "color_scheme / preset_color_schemes 叠加覆盖",
+            "decodeFonts 字体解析与 cascadeList 级联",
+            "candidate_format 中 %@/%c 归一化"
+          ],
+          "practice_task": "列出 color scheme 可以覆盖的至少 6 个全局 style 项（如 candidate_list_layout/font_face/corner_radius 等）；并说明 candidate_format 中 %@ 与 %c 各自被归一化成什么模板占位符。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "亮/暗主题与 schema 特化样式",
+          "order": 4,
+          "filename": "u3-l4-light-dark-schemas.md",
+          "level": "intermediate",
+          "topic": "讲解 loadSettings 中亮/暗主题分别加载、native/available 判定，以及 loadSettings(for schemaID:) 的 schema 特化 style 叠加与回退。",
+          "learning_goals": [
+            "掌握亮/暗双主题的加载与切换判定",
+            "理解 schema 特化样式的叠加与回退",
+            "了解 native 配色方案的特殊处理"
+          ],
+          "source_files": [
+            "sources/SquirrelApplicationDelegate.swift",
+            "sources/SquirrelTheme.swift"
+          ],
+          "minimal_modules": [
+            "loadSettings 亮/暗双主题加载",
+            "native / available 判定",
+            "loadSettings(for:) schema 特化 style",
+            "回退到 base config"
+          ],
+          "practice_task": "描述切换输入方案时主题的加载顺序（先 base config 的亮暗主题，再视 schema 是否含 style 节叠加）；并说明 color_scheme 设为 native 时主题如何处理（提示：native 标志与窗口 appearance）。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：候选词面板 UI",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "SquirrelPanel 模型与 update",
+          "order": 1,
+          "filename": "u4-l1-panel-model-update.md",
+          "level": "advanced",
+          "topic": "解析 SquirrelPanel.update：拼装 preedit + 候选行的单一富文本、应用主题属性、candidate_format 模板替换、noBreak 防断行、TextKit 2 强制布局。",
+          "learning_goals": [
+            "掌握候选富文本的拼装与段落样式",
+            "理解 candidate_format 模板的替换流程",
+            "了解 TextKit 2 强制布局与测量顺序"
+          ],
+          "source_files": [
+            "sources/SquirrelPanel.swift",
+            "sources/SquirrelView.swift"
+          ],
+          "minimal_modules": [
+            "富文本拼装（preedit 行 + 候选行）",
+            "candidate_format [label]/[candidate]/[comment] 替换",
+            "主题属性应用与 noBreak 防断行",
+            "TextKit 2 ensureLayout 强制布局"
+          ],
+          "practice_task": "描述 candidate_format 模板（默认 '[label]. [candidate] [comment]'）的替换流程：先对占位符区间加属性、再替换 [label]/[candidate]/[comment] 字面量；并解释 .noBreak 自定义属性在短候选中防止断行的作用。",
+          "depends_on": [
+            "u2-l7",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "面板定位与全屏缩放",
+          "order": 2,
+          "filename": "u4-l2-panel-positioning.md",
+          "level": "advanced",
+          "topic": "精读 SquirrelPanel.show：用 TextKit 测量自然尺寸、normal vs fullscreen 缩放、光标附近定位与边界修正、垂直模式旋转、半透明背景视图。",
+          "learning_goals": [
+            "掌握面板尺寸测量与全屏缩放判定",
+            "理解光标锚定定位与边界修正",
+            "了解垂直模式的坐标旋转与 translucency 背景"
+          ],
+          "source_files": [
+            "sources/SquirrelPanel.swift"
+          ],
+          "minimal_modules": [
+            "TextKit 自然尺寸测量",
+            "fullscreen 缩放计算（optimalTextWidth）",
+            "光标附近定位与屏幕边界修正",
+            "垂直旋转 / translucency 背景视图"
+          ],
+          "practice_task": "说明当自然面板尺寸超过屏幕 95% 时如何进入 fullscreen 缩放路径（计算 scaleX/scaleY/scale）；并解释垂直模式下 contentView 的 boundsRotation 与 setBoundsOrigin 处理。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "SquirrelView 自定义绘制",
+          "order": 3,
+          "filename": "u4-l3-custom-drawing.md",
+          "level": "advanced",
+          "topic": "解析 SquirrelView.draw：用 Core Graphics 路径绘制面板背景、候选背景、高亮、预编辑高亮、边框、阴影、翻页箭头，shape 路径同时作为遮罩与命中区。",
+          "learning_goals": [
+            "掌握 draw 中各路径的组织与叠加顺序",
+            "理解多层 CAShapeLayer 的颜色驱动",
+            "了解 shape 路径作为遮罩与命中测试的双重用途"
+          ],
+          "source_files": [
+            "sources/SquirrelView.swift"
+          ],
+          "minimal_modules": [
+            "draw 路径组织（background/preedit/candidate/highlighted）",
+            "多层 CAShapeLayer 与 fillColor/mask",
+            "mutual_exclusive 叠加规则",
+            "paging 箭头与 shape 命中区"
+          ],
+          "practice_task": "说明 panelLayer、highlightedPath、candidatePaths 各自由哪些主题颜色配置（backgroundColor/highlightedBackColor/candidateBackColor）驱动；并解释 self.shape.path 为何同时用作 panelLayer.mask 的反面遮罩和 click() 的命中测试区。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "面板鼠标与滚轮事件",
+          "order": 4,
+          "filename": "u4-l4-panel-events.md",
+          "level": "advanced",
+          "topic": "解析 SquirrelPanel.sendEvent 与 SquirrelView.click：候选点击、翻页箭头点击、预编辑位置移动光标、滚轮翻页方向，以及回调到 inputController 的 selectCandidate/page/moveCaret。",
+          "learning_goals": [
+            "掌握鼠标 down/up 的命中测试与防误触",
+            "理解滚轮翻页方向与垂直模式的关系",
+            "了解面板事件如何回调驱动 librime 更新"
+          ],
+          "source_files": [
+            "sources/SquirrelPanel.swift",
+            "sources/SquirrelView.swift"
+          ],
+          "minimal_modules": [
+            "leftMouseDown/Up 命中测试（candidate/paging/preedit）",
+            "mouseMoved 高亮跟随",
+            "scrollWheel 翻页方向（dx/dy 与 vertical）",
+            "回调 inputController（selectCandidate/page/moveCaret）"
+          ],
+          "practice_task": "追踪一次候选词鼠标点击：从 sendEvent 的 leftMouseDown 记录 index，到 leftMouseUp 校验后调用 inputController.selectCandidate(index)，再到 rimeUpdate 刷新面板的完整链路；并说明为什么要分别在 down 和 up 记录/校验 index。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：系统集成与扩展",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "分布式通知与外部命令",
+          "order": 1,
+          "filename": "u5-l1-distributed-notifications.md",
+          "level": "advanced",
+          "topic": "讲解 addObservers 注册的分布式通知：SquirrelReload/Sync/ToggleASCII/GetASCII，本地通知转发，ASCII 模式请求/应答协议，以及 kTISNotifySelectedKeyboardInputSourceChanged 的兜底。",
+          "learning_goals": [
+            "掌握分布式通知驱动已运行实例的机制",
+            "理解 ASCII 模式 toggle/get 的请求-应答协议",
+            "了解输入源切换通知的悬挂组合兜底"
+          ],
+          "source_files": [
+            "sources/SquirrelApplicationDelegate.swift",
+            "sources/Main.swift"
+          ],
+          "minimal_modules": [
+            "分布式通知名（Reload/Sync/ToggleASCII/GetASCII）",
+            "reload/sync 处理",
+            "ASCII toggle/get 协议（本地通知转发）",
+            "kTISNotifySelectedKeyboardInputSourceChanged 与 finalizeStrandedComposition"
+          ],
+          "practice_task": "描述 `Squirrel --reload` 如何通过分布式通知 SquirrelReloadNotification 触发已运行实例重新部署（rimeNeedsReload→deploy）；并画出 `--getascii` 查询当前 ASCII 模式的请求/应答时序（GetASCIIMode→Report→ASCIIModeResponse）。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "输入源注册（TIS）",
+          "order": 2,
+          "filename": "u5-l2-input-source-registration.md",
+          "level": "advanced",
+          "topic": "解析 SquirrelInstaller：TISRegisterInputSource 注册、enable/disable/select、currentInputSourceID 查询，InputMode（Hans/Hant）与 Info.plist 的一致性。",
+          "learning_goals": [
+            "掌握 TIS 输入源的注册/启用/选择流程",
+            "理解 Hans 与 Hant 两种输入模式",
+            "了解 Info.plist 与 InputSource.swift 必须保持一致"
+          ],
+          "source_files": [
+            "sources/InputSource.swift",
+            "resources/Info.plist"
+          ],
+          "minimal_modules": [
+            "输入源 ID 与 InputMode（Hans/Hant）",
+            "register/enable/disable/select",
+            "currentInputSourceID 查询",
+            "与 Info.plist 的 TISInputSourceID 一致性"
+          ],
+          "practice_task": "说明 Hans 与 Hant 两个输入模式 ID 的区别及默认主模式（primary）；并解释 register() 为什么在检测到已有模式被启用时直接返回而不重复注册。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "保留属性：插件→前端协调",
+          "order": 3,
+          "filename": "u5-l3-reserved-property.md",
+          "level": "advanced",
+          "topic": "解析 ReservedProperty 协议：ReservedPropertyKey/Value 解析、handleReservedProperty 应用 _comment_highlight/_comment_warning/_refresh_ui，以及 notificationHandler 中的 property 消息分发。",
+          "learning_goals": [
+            "掌握保留属性的键枚举与 query-string 解析",
+            "理解 handleReservedProperty 的分发与应用",
+            "了解 librime 通知中 property 消息如何路由到主线程"
+          ],
+          "source_files": [
+            "sources/ReservedProperty.swift",
+            "sources/SquirrelInputController.swift",
+            "sources/SquirrelApplicationDelegate.swift"
+          ],
+          "minimal_modules": [
+            "ReservedPropertyKey 枚举",
+            "ReservedPropertyValue.parse（query-string / 逗号列表）",
+            "handleReservedProperty 分发与应用",
+            "notificationHandler 中 property 消息路由（Task.detached @MainActor）"
+          ],
+          "practice_task": "说明 librime 插件如何通过 notification 的 property 消息发送 _comment_highlight=0,2；并追踪前端如何把它解析为候选索引集合，再在 SquirrelPanel.update 中对该行注释应用 accent_text_color。",
+          "depends_on": [
+            "u2-l6",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Swift/C 桥接约定",
+          "order": 4,
+          "filename": "u5-l4-bridging-conventions.md",
+          "level": "advanced",
+          "topic": "解析 BridgingFunctions：rimeStructInit 的零内存与 data_size、setCString 的 strdup/free 所有权、?= 可选赋值运算符、NSRange.empty 哨兵、几何工具。",
+          "learning_goals": [
+            "掌握 librime C 结构的初始化约定",
+            "理解 setCString 的 C 字符串所有权与释放",
+            "了解 ?= 与 NSRange.empty 等项目级约定"
+          ],
+          "source_files": [
+            "sources/BridgingFunctions.swift",
+            "sources/SquirrelApplicationDelegate.swift",
+            "sources/Squirrel-Bridging-Header.h"
+          ],
+          "minimal_modules": [
+            "rimeStructInit 零内存与 data_size",
+            "setCString strdup/free 所有权",
+            "?= 可选赋值运算符",
+            "NSRange.empty 哨兵与 RimeStringSlice.asString"
+          ],
+          "practice_task": "解释为什么所有 librime 结构（RimeTraits/RimeCommit/RimeStatus 等）必须用 .rimeStructInit() 初始化而非默认 init（提示：data_size 字段）；并说明 setCString 用 strdup 分配的 C 字符串由谁、在何时释放。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "打包、安装与 Sparkle 更新",
+          "order": 5,
+          "filename": "u5-l5-packaging-installer.md",
+          "level": "advanced",
+          "topic": "讲解 package/* 脚本与 scripts/postinstall：pkgbuild/productbuild 打包、DEV_ID 签名与公证、postinstall 注册输入源并 build、Sparkle appcast 更新集成。",
+          "learning_goals": [
+            "掌握 .pkg 的构建与签名公证流程",
+            "理解 postinstall 在安装时执行的动作",
+            "了解 Sparkle 自动更新的配置"
+          ],
+          "source_files": [
+            "package/make_package",
+            "scripts/postinstall",
+            "package/sign_app",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "pkgbuild/productbuild 打包",
+            "DEV_ID 签名与 notarytool 公证",
+            "postinstall 安装动作（register/build/enable/select）",
+            "Sparkle SUFeedURL/SUPublicEDKey 更新"
+          ],
+          "practice_task": "描述安装 .pkg 后 scripts/postinstall 依次执行的命令（killall→--register-input-source→--build→--enable-input-source→--select-input-source）；并说明 Info.plist 中 SUFeedURL 与 SUPublicEDKey 在 Sparkle 自动更新中分别起什么作用。",
+          "depends_on": [
+            "u1-l3",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "本地化与 CI",
+          "order": 6,
+          "filename": "u5-l6-localization-and-ci.md",
+          "level": "advanced",
+          "topic": "讲解 resources/*.xcstrings 本地化、.swiftlint.yml 规则配置、GitHub Actions 工作流与 action-build.sh 构建脚本。",
+          "learning_goals": [
+            "掌握 xcstrings 本地化目录字符串机制",
+            "理解 SwiftLint 规则与抑制注释",
+            "了解 CI 工作流与 action-build.sh 的作用"
+          ],
+          "source_files": [
+            "resources/Localizable.xcstrings",
+            ".swiftlint.yml",
+            "action-build.sh",
+            ".github/workflows/commit-ci.yml"
+          ],
+          "minimal_modules": [
+            "xcstrings 本地化（Localizable/InfoPlist）",
+            "SwiftLint 规则与 swiftlint:disable 注释",
+            "GitHub Actions 工作流（commit/pull-request/release）",
+            "action-build.sh 构建脚本"
+          ],
+          "practice_task": "在 Localizable.xcstrings 中定位 deploy_success 等字符串键，说明它如何被 NSLocalizedString 引用；并解释源码中 // swiftlint:disable:next cyclomatic_complexity 这类抑制注释的作用（结合 .swiftlint.yml 的规则阈值）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
