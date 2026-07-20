@@ -1,0 +1,1275 @@
+{
+  "project": "pytorch",
+  "head": "ca62582ef0678dece3130b28bcf10ce0501777b9",
+  "rationale": "PyTorch 是一个体量庞大的 C++/Python 混合深度学习框架，学习路径设计遵循「先跑起来、再读核心数据结构、再读关键机制、最后做扩展与性能优化」的渐进原则。Unit 1-2 帮助读者从零搭建环境并理解 Tensor 这一最核心对象；Unit 3 讲清算子从 native_functions.yaml 定义到 Dispatcher 分发的全链路，这是理解所有上层能力的基石；Unit 4-6 覆盖 autograd、nn 模块、优化器与数据加载这三大用户最高频使用的子系统；Unit 7-8 进入 torch.compile（Dynamo + Inductor）这条现代性能主线，也是当前框架演进的核心方向；Unit 9 单独深入 CUDA 后端、内存分配器与流/图模型；Unit 10 覆盖分布式训练（process group、DDP、FSDP、elastic）；Unit 11 收束于自定义算子 torch.library、torch.export、torch.func、C++ 扩展等二次开发与部署场景。单元内部按依赖关系排序，避免读者在缺少前置知识的情况下阅读高阶内容；每篇讲义仅聚焦一个独立主题，并配套一个结合真实源码的可操作实践任务。\n\n本次为增量更新（baa92d5d7 → ca62582e，共 19 个提交、约 108 个文件）。变更主体是：(1) 大量注释/文档拼写修正（4 个 typo 提交），不影响任何讲义逻辑；(2) CI/构建基础设施改动（Python 3.15 nightly、ROCm 分片），属 .ci/.github 范畴，未触及 u1-l2 所引用的 setup.py/CMakeLists.txt/Makefile；(3) 少量局部逻辑改动。逐篇核对每篇讲义引用的 source_files 后，仅有两篇需要 update：u8-l1（compile_fx.py 新增在 joint_graph_passes 前记录 output strides 的步骤以修复 pad_mm 泄漏 padded strides，config.py 新增 strict_output_strides 开关）与 u10-l2（_functional_collectives.py 新增 _LegacyToFunctionalCollectiveMode 与 _remap_traceable_collective，在 tracing/export 下把 legacy dist.* 集合通信重定向到 functional collectives，对应 compile_on_one_rank 的 in-graph ProcessGroup 解析）。其余讲义所引用的核心源文件均未改变，或仅受到与其主题无关的局部改动（如 u3-l5 的 grouped-GEMM cublasLt 版本门槛、u9-l2 未引用的 AveragePool3d.cu 64 位索引修复、Dynamo builder.py 的 automatic dynamic int 内部优化未触及 u7 引用的 convert_frame/_guards 文件），故全部 keep。本区间无新增子系统或核心流程架构变更，因此无 new/rebuild。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与环境搭建",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "PyTorch 项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview-and-architecture.md",
+          "level": "beginner",
+          "topic": "讲清楚 PyTorch 是什么、由哪些核心组件（torch、autograd、nn、jit、distributed）构成，以及各组件之间的关系。",
+          "learning_goals": [
+            "理解 PyTorch 作为 GPU 张量库与动态计算图框架的双重定位",
+            "识别 torch、torch.autograd、torch.nn、torch.jit、torch.distributed 等顶层组件及其职责",
+            "建立对 C++ 后端（aten/c10）与 Python 前端分层架构的整体认知"
+          ],
+          "source_files": [
+            "README.md",
+            "torch/__init__.py",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "README 中的组件总览表",
+            "torch/__init__.py 的模块 docstring 与顶层导出",
+            "顶层目录 torch/aten/c10/caffe2 的职责划分"
+          ],
+          "practice_task": "在本地导入 torch，打印 torch.__version__，并在 README 的组件表中为 torch、torch.autograd、torch.nn 各找到对应的一句职责描述，整理成一张架构速查表。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从源码构建与运行 PyTorch",
+          "order": 2,
+          "filename": "u1-l2-build-from-source.md",
+          "level": "beginner",
+          "topic": "讲解 setup.py + CMake 的构建体系，以及如何用 pip install -e . --no-build-isolation 完成开发态可编辑安装。",
+          "learning_goals": [
+            "理解 PyTorch 使用 pip + CMake 的混合构建入口",
+            "掌握从源码安装开发版本的完整命令与环境变量（USE_CUDA、CMAKE_PREFIX_PATH 等）",
+            "能够区分 codegen、C++、Python 三类构建产物"
+          ],
+          "source_files": [
+            "setup.py",
+            "CMakeLists.txt",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "setup.py 中的 cmake 配置与构建扩展",
+            "CMakeLists.txt 的顶层选项（CUDA/ROCm/XPU）",
+            "Makefile 中的 triton 等 make 目标"
+          ],
+          "practice_task": "阅读 setup.py，列出至少 3 个控制构建行为的 USE_ 开头环境变量，并说明 USE_CUDA=0 会带来什么效果；在沙箱中尝试一次 CPU-only 可编辑安装（或 dry-run 描述步骤）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与代码组织",
+          "order": 3,
+          "filename": "u1-l3-repo-directory-layout.md",
+          "level": "beginner",
+          "topic": "梳理 torch/、aten/、c10/、torchgen/、torch/csrc/、caffe2/ 等目录的职责，建立源码导航地图。",
+          "learning_goals": [
+            "区分 Python 包目录 torch/ 与 C++ 后端目录 aten/c10/csrc",
+            "理解 torchgen 作为代码生成器的角色",
+            "建立在不同目录之间快速定位代码的能力"
+          ],
+          "source_files": [
+            "README.md",
+            "torch/__init__.py",
+            "aten/src/ATen/README.md"
+          ],
+          "minimal_modules": [
+            "torch/ Python 前端包",
+            "aten/ ATen 张量算子库",
+            "c10/ 核心数据结构与 dispatcher",
+            "torchgen/ 代码生成工具",
+            "torch/csrc/ Python 绑定 C++ 源码"
+          ],
+          "practice_task": "在仓库根目录下，为 torch/、aten/、c10/、torchgen/、torch/csrc/ 各写一句话职责说明，并找到 aten/src/ATen/native/native_functions.yaml 所在路径，记录下来。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Python 包入口与 torch 导入流程",
+          "order": 4,
+          "filename": "u1-l4-torch-import-and-entry.md",
+          "level": "beginner",
+          "topic": "追踪 import torch 时发生了什么：版本信息、C 扩展 _C 的加载、全局依赖初始化、顶层符号导出。",
+          "learning_goals": [
+            "理解 torch/__init__.py 的加载顺序与关键初始化步骤",
+            "认识 _C 扩展模块与 USE_GLOBAL_DEPS 机制",
+            "看懂 __all__ 与顶层符号如何被组装出来"
+          ],
+          "source_files": [
+            "torch/__init__.py",
+            "torch/_utils_internal.py",
+            "torch/_utils.py",
+            "torch/csrc/Module.cpp"
+          ],
+          "minimal_modules": [
+            "torch/__init__.py 顶部导入与版本加载",
+            "_utils_internal 中的 get_file_path / USE_GLOBAL_DEPS",
+            "torch/csrc/Module.cpp 作为 _C 模块的初始化入口"
+          ],
+          "practice_task": "在 torch/__init__.py 中找到加载 libtorch 全局依赖的代码片段，解释 _running_with_deploy 与 USE_GLOBAL_DEPS 的作用；用一个最小脚本 import torch 并打印 torch._C，确认 C 扩展已被加载。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Tensor 核心数据结构",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Tensor 的 Python 实现",
+          "order": 1,
+          "filename": "u2-l1-tensor-python-class.md",
+          "level": "beginner",
+          "topic": "讲解 torch/_tensor.py 中 Tensor 类的结构：属性、算子方法、与 C++ 后端的桥接。",
+          "learning_goals": [
+            "理解 Tensor 是对底层 C++ TensorImpl 的 Python 包装",
+            "掌握 Tensor 方法如何通过 ops 机制分发到底层",
+            "看懂常用属性（shape/dtype/device/grad）的实现"
+          ],
+          "source_files": [
+            "torch/_tensor.py",
+            "torch/__init__.py"
+          ],
+          "minimal_modules": [
+            "Tensor 类定义与构造",
+            "Tensor 上的算子方法绑定",
+            "属性访问与 __repr__"
+          ],
+          "practice_task": "在 _tensor.py 中找到一个通过 torch.ops / _C 分发到底层的算子方法（如 add），解释它如何转发；编写代码创建两个 Tensor 并观察其 type(Tensor) 与底层 storage。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Storage 与内存布局",
+          "order": 2,
+          "filename": "u2-l2-storage-and-memory-layout.md",
+          "level": "beginner",
+          "topic": "讲解 Tensor 背后的 Storage 概念、stride/offset/size 三元组如何描述 N 维张量的内存布局。",
+          "learning_goals": [
+            "理解 Tensor 与 Storage 的分离设计",
+            "掌握 stride、storage_offset、sizes 如何共同描述张量视图",
+            "理解 contiguous、view、reshape 与内存布局的关系"
+          ],
+          "source_files": [
+            "torch/storage.py",
+            "c10/core/StorageImpl.h"
+          ],
+          "minimal_modules": [
+            "Storage / UntypedStorage 的 Python 封装",
+            "c10 StorageImpl 的 data_ptr 与 size",
+            "stride 与 offset 的语义"
+          ],
+          "practice_task": "创建一个非连续张量（如转置后的矩阵），打印其 stride 与 storage_offset，并用 storage_offset + stride 手动推算某元素位置，再用 .contiguous() 对比前后 stride 变化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "dtype、device 与 layout 与 TensorOptions",
+          "order": 3,
+          "filename": "u2-l3-dtype-device-layout.md",
+          "level": "beginner",
+          "topic": "讲解张量的三大基础属性 dtype、device、layout，以及 C++ 侧 TensorOptions 如何聚合它们。",
+          "learning_goals": [
+            "掌握 PyTorch 支持的标量类型与设备抽象",
+            "理解 device 字符串（cpu/cuda:xpu）的解析",
+            "看懂 TensorOptions 在 C++ 层如何携带这些配置"
+          ],
+          "source_files": [
+            "torch/types.py",
+            "c10/core/TensorOptions.cpp",
+            "torch/_tensor.py"
+          ],
+          "minimal_modules": [
+            "torch/types.py 中的 Dtype/Layout/Device 定义",
+            "TensorOptions.cpp 的聚合与默认值",
+            "Tensor 的 dtype/device/layout 属性访问"
+          ],
+          "practice_task": "用不同 dtype/device 创建若干 Tensor，打印它们的 TensorOptions；用 torch.set_default_device 切换默认设备（若可用），观察新建张量的 device 变化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "算子的 Python 调用路径与 _C 绑定",
+          "order": 4,
+          "filename": "u2-l4-op-call-path-and-c-binding.md",
+          "level": "beginner",
+          "topic": "追踪一次 torch.add 这样的算子调用从 Python 到 _C 绑定的路径，理解 torch/_C 与 .pyi 类型桩的作用。",
+          "learning_goals": [
+            "理解算子如何通过 torch._C._VariableFunctions 等绑定暴露给 Python",
+            "认识 .pyi.in 模板与生成出的类型桩",
+            "建立『Python 调用 → C++ native 实现』的最简心智模型"
+          ],
+          "source_files": [
+            "torch/__init__.py",
+            "torch/_tensor.py",
+            "torch/_C/__init__.pyi.in"
+          ],
+          "minimal_modules": [
+            "torch/__init__.py 中 add 等函数的导出",
+            "_tensor.py Tensor.add 的转发",
+            "_C/__init__.pyi.in 类型桩"
+          ],
+          "practice_task": "在 torch/__init__.py 中找到 add/addmm 等算子是如何被绑定到模块的；打开 _C/__init__.pyi.in 找到对应签名，说明类型桩与运行时绑定的对应关系。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "ATen、算子定义与 Dispatcher 分发",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "native_functions.yaml 算子模式定义",
+          "order": 1,
+          "filename": "u3-l1-native-functions-yaml-schema.md",
+          "level": "intermediate",
+          "topic": "讲解算子的单一事实来源 native_functions.yaml：schema 语法、参数类型、dispatch、autograd 标记。",
+          "learning_goals": [
+            "读懂一个算子 schema 的语法（参数、可选、返回类型）",
+            "理解 dispatch、autograd、structured 等 yaml 字段的含义",
+            "认识 schema 如何决定生成代码的形态"
+          ],
+          "source_files": [
+            "aten/src/ATen/native/native_functions.yaml",
+            "aten/src/ATen/README.md"
+          ],
+          "minimal_modules": [
+            "schema 的基本语法",
+            "dispatch/structured/autograd 标记",
+            "常见算子示例（add/sum/mul）"
+          ],
+          "practice_task": "在 native_functions.yaml 中找到 add 的 schema，逐字段解释其含义；再找一个带 structured: True 的算子，说明它和普通算子在 schema 上的区别。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "TorchGen 代码生成机制",
+          "order": 2,
+          "filename": "u3-l2-torchgen-codegen.md",
+          "level": "intermediate",
+          "topic": "讲解 torchgen 如何读取 yaml 并生成 Python 绑定、C++ 注册、类型桩等大量样板代码。",
+          "learning_goals": [
+            "理解 PyTorch 以代码生成管理海量算子的策略",
+            "认识 gen.py 的入口与 model.py 的数据模型",
+            "看清一个算子从 yaml 到多个生成文件的路径"
+          ],
+          "source_files": [
+            "torchgen/gen.py",
+            "torchgen/model.py",
+            "torchgen/native_function_generation.py"
+          ],
+          "minimal_modules": [
+            "gen.py 的顶层生成入口",
+            "model.py 中的 NativeFunction/FunctionSchema 模型",
+            "native_function_generation.py 的生成规则"
+          ],
+          "practice_task": "在 torchgen/model.py 中找到 FunctionSchema/NativeFunction 类，列出它的关键字段；在 gen.py 中找到生成 Python 绑定的调用点，描述生成目标文件名。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "DispatchKey 与 Dispatcher 分发机制",
+          "order": 3,
+          "filename": "u3-l3-dispatchkey-and-dispatcher.md",
+          "level": "intermediate",
+          "topic": "讲解 PyTorch 的核心分发机制：DispatchKey、DispatchKeySet 以及 Dispatcher 如何按 key 选择 kernel。",
+          "learning_goals": [
+            "理解 DispatchKey 代表的后端/功能维度（CPU/CUDA/Autograd/CompositeImplicit 等）",
+            "掌握 DispatchKeySet 的位集合表示",
+            "看清一次算子调用在 Dispatcher 中的查表与跳转过程"
+          ],
+          "source_files": [
+            "c10/core/DispatchKey.h",
+            "aten/src/ATen/core/DispatchKeySet.cpp",
+            "aten/src/ATen/Dispatch.cpp"
+          ],
+          "minimal_modules": [
+            "DispatchKey 枚举与分组",
+            "DispatchKeySet 位运算",
+            "Dispatch.cpp 的注册与查表"
+          ],
+          "practice_task": "在 DispatchKey.h 中找到 CPU、CUDA、AutogradCUDA 等 key 的定义并归类（后端 vs 功能）；解释为什么同一个算子会有多个 key 的 kernel 注册。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "TensorImpl C++ 核心数据结构",
+          "order": 4,
+          "filename": "u3-l4-tensorimpl-cpp-core.md",
+          "level": "intermediate",
+          "topic": "深入 c10/core/TensorImpl.h，讲解张量在 C++ 层的真正表示：Storage、sizes、strides、dtype、dispatch key set。",
+          "learning_goals": [
+            "理解 TensorImpl 持有的核心字段及其内存占用优化",
+            "掌握 sizes_/strides_/storage_offset_ 的存储方式",
+            "看懂 TensorImpl 与 StorageImpl、DispatchKeySet 的协作"
+          ],
+          "source_files": [
+            "c10/core/TensorImpl.h",
+            "c10/core/StorageImpl.h"
+          ],
+          "minimal_modules": [
+            "TensorImpl 的成员字段",
+            "sizes/strides 的惰性与紧凑存储",
+            "StorageImpl 的数据指针与容量"
+          ],
+          "practice_task": "在 TensorImpl.h 中找到存储 sizes/strides 的成员，解释其『何时存 contiguous 优化』；估算一个 4 维 CPU float 张量的 TensorImpl 关键字段取值。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Meta 实现、FakeTensor 与 Python 分发",
+          "order": 5,
+          "filename": "u3-l5-meta-faketensor-python-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 Meta dispatch key、_meta_registrations 与 FakeTensor 如何在不持有真实数据的情况下推导形状与 dtype。",
+          "learning_goals": [
+            "理解 Meta 后端的作用：只推 shape/dtype，不分配真实内存",
+            "掌握 FakeTensor 在 tracing 中的核心地位",
+            "认识 Python 侧 _dispatch/python.py 如何参与自定义分发"
+          ],
+          "source_files": [
+            "torch/_meta_registrations.py",
+            "torch/_subclasses/fake_tensor.py",
+            "torch/_dispatch/python.py"
+          ],
+          "minimal_modules": [
+            "_meta_registrations.py 的 Meta kernel",
+            "FakeTensor 的包装与传播规则",
+            "_dispatch/python.py 的 Python 注册分发"
+          ],
+          "practice_task": "用 torch.empty(2,3) 与在 FakeTensorMode 下创建同形状张量对比，说明 Meta/Fake 路径没有真实数据；在 _meta_registrations.py 中找一个算子的 Meta 实现，描述它如何返回 shape。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Autograd 自动求导",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "grad_mode 与计算图模式",
+          "order": 1,
+          "filename": "u4-l1-grad-mode-and-flags.md",
+          "level": "intermediate",
+          "topic": "讲解 enable_grad / no_grad / inference_mode 等梯度模式的实现与线程局部状态管理。",
+          "learning_goals": [
+            "理解 AutogradMode 系列上下文管理器的实现原理",
+            "掌握 grad 模式与 inference 模式的区别",
+            "看清模式如何影响算子是否记录反向图"
+          ],
+          "source_files": [
+            "torch/autograd/grad_mode.py",
+            "torch/autograd/__init__.py"
+          ],
+          "minimal_modules": [
+            "grad_mode.py 的 AutogradMode 基类",
+            "enable_grad/no_grad/inference_mode 上下文",
+            "线程局部模式状态"
+          ],
+          "practice_task": "在 grad_mode.py 中找到 inference_mode 与 no_grad 的实现差异；编写代码对比在两种模式下做矩阵乘后是否可调用 backward。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "autograd 计算图与 Node",
+          "order": 2,
+          "filename": "u4-l2-autograd-graph-and-node.md",
+          "level": "intermediate",
+          "topic": "讲解反向计算图的构建：每个算子如何注册梯度函数（Node），Variable 如何持有 grad_fn。",
+          "learning_goals": [
+            "理解前向执行时如何动态构建反向计算图",
+            "掌握 Node/grad_fn/next_edges 的图结构",
+            "认识 Variable 的历史角色与现代统一 Tensor"
+          ],
+          "source_files": [
+            "torch/autograd/function.py",
+            "torch/autograd/variable.py"
+          ],
+          "minimal_modules": [
+            "function.py 中 Function 与梯度函数抽象",
+            "grad_fn / next_edges 的图边",
+            "variable.py 的历史与现状"
+          ],
+          "practice_task": "对一个三步运算（a→b→c）打印每个中间张量的 grad_fn 与 grad_fn.next_edges，画出反向计算图；说明哪些情况下 grad_fn 为 None。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "autograd 引擎 engine",
+          "order": 3,
+          "filename": "u4-l3-autograd-engine.md",
+          "level": "advanced",
+          "topic": "深入 C++ autograd 引擎，讲解它如何在多线程上按拓扑序执行反向图中的 Node。",
+          "learning_goals": [
+            "理解 autograd 引擎的线程池与任务调度",
+            "掌握 ready queue 与图遍历的关系",
+            "认识 accumulate grad 节点与图根的关系"
+          ],
+          "source_files": [
+            "torch/csrc/autograd/engine.cpp",
+            "torch/csrc/autograd/autograd.cpp"
+          ],
+          "minimal_modules": [
+            "engine.cpp 的线程池与 execute",
+            "ready queue 调度",
+            "autograd.cpp 对外 Python 入口"
+          ],
+          "practice_task": "在 engine.cpp 中找到线程数与 ready_queue 的相关逻辑，解释反向传播为何可以多线程并行；构造一个分叉与汇合的反向图，描述其执行顺序。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "自定义 autograd.Function",
+          "order": 4,
+          "filename": "u4-l4-custom-autograd-function.md",
+          "level": "intermediate",
+          "topic": "讲解如何通过 torch.autograd.Function 定义前向/反向，以及它在 C++ 侧如何被注册为带自定义反向的算子。",
+          "learning_goals": [
+            "掌握 autograd.Function 的 forward/backward 协议",
+            "理解 save_for_output/save_for_backward 的内存安全机制",
+            "看清 Function 在分发层如何与 Autograd key 交互"
+          ],
+          "source_files": [
+            "torch/autograd/function.py",
+            "torch/csrc/autograd/custom_function.cpp"
+          ],
+          "minimal_modules": [
+            "Function 的 forward/backward 定义",
+            "save_for_backward 的约定",
+            "custom_function.cpp 的 C++ 适配"
+          ],
+          "practice_task": "用 autograd.Function 实现一个自定义可微函数（如带截断的 ReLU），正确保存前向输入并在 backward 中使用；验证梯度与数值有限差分一致。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "nn 神经网络模块",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "nn.Module 与 Parameter",
+          "order": 1,
+          "filename": "u5-l1-nn-module-and-parameter.md",
+          "level": "intermediate",
+          "topic": "讲解 nn.Module 的设计：子模块自动注册、Parameter 作为可学习张量、模块树的组织方式。",
+          "learning_goals": [
+            "理解 Module 如何通过 __setattr__ 自动收集子模块与参数",
+            "掌握 Parameter 是 requires_grad=True 的 Tensor 子类",
+            "看清模块嵌套树的遍历机制"
+          ],
+          "source_files": [
+            "torch/nn/modules/module.py",
+            "torch/nn/parameter.py"
+          ],
+          "minimal_modules": [
+            "Module 的 __setattr__ 与模块注册",
+            "Parameter 的定义与 grad 标记",
+            "modules/parameters/children 等遍历方法"
+          ],
+          "practice_task": "自定义一个包含两个 Linear 子模块的 Module，打印其 named_parameters() 与 named_children()，验证 Parameter 被自动收集；说明为何普通 Tensor 不会被当作参数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "模块状态管理与 state_dict",
+          "order": 2,
+          "filename": "u5-l2-state-dict-and-buffers.md",
+          "level": "intermediate",
+          "topic": "讲解 state_dict、load_state_dict、buffer 机制，以及模块如何被序列化与迁移设备。",
+          "learning_goals": [
+            "理解 state_dict 的键命名规则与持久化语义",
+            "掌握 buffer（如 BatchNorm 的 running_mean）的注册与保存",
+            "看清 to()/.cuda() 等设备/精度迁移的实现"
+          ],
+          "source_files": [
+            "torch/nn/modules/module.py",
+            "torch/nn/parameter.py"
+          ],
+          "minimal_modules": [
+            "state_dict / load_state_dict",
+            "register_buffer",
+            "to() 设备与 dtype 迁移"
+          ],
+          "practice_task": "构建一个带 Parameter 与 buffer 的 Module，导出 state_dict 并重新加载到一个新实例；用 .to('cpu') 之外的精度（如 half）迁移，检查参数 dtype 变化。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "functional 接口与常见网络层",
+          "order": 3,
+          "filename": "u5-l3-functional-and-layers.md",
+          "level": "intermediate",
+          "topic": "讲解 torch.nn.functional 与各类 modules（Linear、Conv、Norm 等）如何对应到底层算子。",
+          "learning_goals": [
+            "理解 nn.functional 与模块化层的分工",
+            "掌握 Linear/Conv2d 层如何调用底层 aten 算子",
+            "认识 init.py 中的权重初始化策略"
+          ],
+          "source_files": [
+            "torch/nn/functional.py",
+            "torch/nn/init.py"
+          ],
+          "minimal_modules": [
+            "functional.py 中的 F.linear/F.conv2d",
+            "modules/ 中的 Linear/Conv 包装",
+            "init.py 的初始化函数"
+          ],
+          "practice_task": "在 functional.py 中找到 F.linear 的实现，确认它调用了 addmm/matmul；对比 nn.Linear.forward 与 F.linear 的等价性并写代码验证。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "forward/backward hook 与模块子类",
+          "order": 4,
+          "filename": "u5-l4-hooks-and-module-subclasses.md",
+          "level": "intermediate",
+          "topic": "讲解模块 hook 机制（forward_pre/forward/full_backward）以及如何编写自定义 Module 子类。",
+          "learning_goals": [
+            "理解各类 hook 的注册时机与触发顺序",
+            "掌握 hook 在调试与梯度修改中的应用",
+            "看清 Module 子类的常见模式（如重写 forward）"
+          ],
+          "source_files": [
+            "torch/nn/modules/module.py"
+          ],
+          "minimal_modules": [
+            "register_forward_hook / register_full_backward_hook",
+            "hook 的调用时机",
+            "Module 子类化约定"
+          ],
+          "practice_task": "给一个已有 Module 注册 forward hook 与 backward hook，记录每层的输入输出与梯度形状；用一个 hook 修改某层梯度并观察训练效果。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "优化器与数据加载",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "优化器基类与 Adam 实现",
+          "order": 1,
+          "filename": "u6-l1-optimizer-and-adam.md",
+          "level": "intermediate",
+          "topic": "讲解 torch.optim.Optimizer 的设计（param_groups、state、step）并以 Adam 为例剖析更新逻辑。",
+          "learning_goals": [
+            "理解 Optimizer 基类管理参数组与状态的机制",
+            "掌握 Adam 的更新公式与 PyTorch 实现细节",
+            "认识 zero_grad / state_dict 在优化器中的作用"
+          ],
+          "source_files": [
+            "torch/optim/adam.py",
+            "torch/optim/__init__.py"
+          ],
+          "minimal_modules": [
+            "Optimizer 基类的 param_groups/state",
+            "Adam.step 的逐参数更新",
+            "zero_grad 与 grad 清零"
+          ],
+          "practice_task": "在 adam.py 中找到 exp_avg/exp_avg_sq 的状态初始化与更新；手写一段训练循环对一个线性回归用 Adam 拟合，并打印每步 loss。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "DataLoader 与 Dataset",
+          "order": 2,
+          "filename": "u6-l2-dataloader-and-dataset.md",
+          "level": "intermediate",
+          "topic": "讲解 Dataset/IterableDataset 抽象与 DataLoader 的批组装、collate 与迭代协议。",
+          "learning_goals": [
+            "理解 Dataset 与 IterableDataset 的两种数据范式",
+            "掌握 DataLoader 的 batch_sampler 与 collate_fn 协作",
+            "看清 DataLoader 迭代器如何产出 batch"
+          ],
+          "source_files": [
+            "torch/utils/data/dataloader.py",
+            "torch/utils/data/dataset.py"
+          ],
+          "minimal_modules": [
+            "Dataset/IterableDataset 抽象",
+            "DataLoader 的配置项",
+            "默认 collate 与批组装"
+          ],
+          "practice_task": "实现一个返回 (x,y) 的 Dataset，用 DataLoader 以 batch_size=4 迭代；替换 collate_fn 为自定义实现并对比输出结构。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Sampler 与多进程数据加载",
+          "order": 3,
+          "filename": "u6-l3-sampler-and-multiprocess.md",
+          "level": "intermediate",
+          "topic": "讲解 Sampler（随机/顺序/分布式）、batch sampler，以及 DataLoader 的多 worker 进程加载机制。",
+          "learning_goals": [
+            "理解 Sampler 如何决定样本读取顺序",
+            "掌握分布式 sampler 的分片逻辑",
+            "看清多 worker 子进程如何通过共享内存传递 batch"
+          ],
+          "source_files": [
+            "torch/utils/data/sampler.py",
+            "torch/utils/data/dataloader.py"
+          ],
+          "minimal_modules": [
+            "Sampler 基类与 RandomSampler",
+            "BatchSampler",
+            "DataLoader 的 num_workers 与 IPC"
+          ],
+          "practice_task": "使用 RandomSampler 与 num_workers>0 的 DataLoader 迭代数据，记录耗时；对比 num_workers=0 与 4 的吞吐差异并解释共享内存的作用。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "torch.compile 与 Dynamo",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "torch.compile 架构总览",
+          "order": 1,
+          "filename": "u7-l1-torch-compile-overview.md",
+          "level": "advanced",
+          "topic": "讲解 torch.compile 的整体流水线：Dynamo 捕获 → 后端（默认 AOTAutograd + Inductor）→ 缓存。",
+          "learning_goals": [
+            "理解 torch.compile 的分层架构与各阶段职责",
+            "掌握 backend、fullgraph、mode 等关键参数",
+            "认识 Dynamo / AOTAutograd / Inductor 三者关系"
+          ],
+          "source_files": [
+            "torch/_dynamo/__init__.py",
+            "torch/_compile.py",
+            "torch/_dynamo/config.py"
+          ],
+          "minimal_modules": [
+            "torch/_compile.py 的 compile 入口",
+            "_dynamo/__init__.py 的顶层 API",
+            "_dynamo/config.py 的可调开关"
+          ],
+          "practice_task": "对一个小函数分别用与不用 torch.compile 调用，记录首次与后续调用的耗时差异；在 config.py 中找到 explain/verbose 相关开关并尝试开启。",
+          "depends_on": [
+            "u3-l5",
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Dynamo 字节码追踪与 convert_frame",
+          "order": 2,
+          "filename": "u7-l2-dynamo-tracing-convert-frame.md",
+          "level": "advanced",
+          "topic": "讲解 Dynamo 如何通过 eval_frame 钩子接管 Python 帧、在 convert_frame 中把字节码符号化追踪为 FX 图。",
+          "learning_goals": [
+            "理解 PEP 523 帧求值钩子如何被 Dynamo 启用",
+            "掌握 convert_frame 把 Python 执行转为图追踪的过程",
+            "认识 graph break 的触发与恢复"
+          ],
+          "source_files": [
+            "torch/_dynamo/convert_frame.py",
+            "torch/_dynamo/eval_frame.py"
+          ],
+          "minimal_modules": [
+            "eval_frame.py 的帧钩子安装",
+            "convert_frame 的追踪入口",
+            "graph break 处理"
+          ],
+          "practice_task": "在 convert_frame.py 中找到触发 graph break 的相关逻辑；写一个会触发 graph break（如调用 print 或不支持的函数）的函数，用 torch._dynamo.explain 观察断点数量。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Guards 与帧缓存",
+          "order": 3,
+          "filename": "u7-l3-guards-and-cache.md",
+          "level": "advanced",
+          "topic": "讲解 Dynamo 的 guards 机制：如何用一组假设判定缓存是否可复用，以及失败时的重追踪。",
+          "learning_goals": [
+            "理解 guard 表示的『重用条件』",
+            "掌握缓存命中与失配对性能的影响",
+            "认识字节码变换如何替换为编译产物"
+          ],
+          "source_files": [
+            "torch/_dynamo/convert_frame.py",
+            "torch/_guards.py",
+            "torch/_dynamo/bytecode_transformation.py"
+          ],
+          "minimal_modules": [
+            "_guards.py 的 Guard 结构",
+            "convert_frame 的缓存查询",
+            "bytecode_transformation 的代码替换"
+          ],
+          "practice_task": "对同一函数用两种不同 shape 的输入调用，用 torch._dynamo.utils.counters 观察 guard 失配与重编译次数；说明何种输入变化会导致缓存失配。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "backend 协议与 AOTAutograd",
+          "order": 4,
+          "filename": "u7-l4-backend-and-aot-autograd.md",
+          "level": "advanced",
+          "topic": "讲解 Dynamo 的 backend 协议，以及默认后端中 AOTAutograd 如何把前向+反向拆分为两个可编译图。",
+          "learning_goals": [
+            "理解 backend callable 的输入（FX 图）与输出契约",
+            "掌握 AOTAutograd 区分前向图与反向图的切分",
+            "认识 decompositions 在编译前的作用"
+          ],
+          "source_files": [
+            "torch/_dynamo/backends/__init__.py",
+            "torch/_functorch/aot_autograd.py"
+          ],
+          "minimal_modules": [
+            "backends/__init__.py 的注册与 lookup",
+            "aot_autograd.py 的 fw/bw 切分",
+            "decompositions 应用"
+          ],
+          "practice_task": "实现一个最小 backend（打印图节点并直接返回原函数），用 torch.compile(backend=...) 编译一个带反向的训练步，确认前向与反向图被分别处理。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Inductor 代码生成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Inductor 架构与 FX 图输入",
+          "order": 1,
+          "filename": "u8-l1-inductor-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 Inductor 作为默认编译后端的入口 compile_fx：接收 FX 图、应用 decompositions、构建 IR；并说明输出 stride 在 joint_graph_passes 前被记录以避免 pad_mm 等优化污染用户可见 stride。",
+          "learning_goals": [
+            "理解 Inductor 在整条 compile 链路中的位置",
+            "掌握 compile_fx 的输入输出与子进程编译模式",
+            "认识 Inductor 配置项（含 strict_output_strides/keep_output_stride）的作用"
+          ],
+          "source_files": [
+            "torch/_inductor/compile_fx.py",
+            "torch/_inductor/config.py"
+          ],
+          "minimal_modules": [
+            "compile_fx.py 的入口与流程",
+            "config.py 的关键开关（triton/cpp/aot、output stride）",
+            "子进程与缓存编译"
+          ],
+          "practice_task": "用 TORCHINDUCTOR_LOG_LEVEL=info 编译一个小函数，从日志中识别 decompositions 应用与 IR 构建阶段；在 config.py 中找到控制后端语言与输出 stride 行为的开关（如 strict_output_strides、keep_output_stride）。",
+          "depends_on": [
+            "u7-l4"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u8-l2",
+          "title": "调度器与算子融合",
+          "order": 2,
+          "filename": "u8-l2-scheduler-and-fusion.md",
+          "level": "advanced",
+          "topic": "讲解 Inductor scheduler 如何把 IR 节点分组成可融合的 kernel 组，并进行点对点/规约融合。",
+          "learning_goals": [
+            "理解 scheduler 的 fusion 策略与依赖分析",
+            "掌握点对点融合与规约融合的条件",
+            "认识 fusion 如何减少 kernel 启动与显存读写"
+          ],
+          "source_files": [
+            "torch/_inductor/scheduler.py",
+            "torch/_inductor/config.py"
+          ],
+          "minimal_modules": [
+            "scheduler.py 的节点分组",
+            "fusion 规则",
+            "依赖与排序"
+          ],
+          "practice_task": "编译一个 y=(a+b)*c 形式的表达式，用 Inductor 的代码输出找到融合后的单个 kernel；再编译一个带大规约的函数对比融合差异。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "kernel 代码生成（C++/Triton）",
+          "order": 3,
+          "filename": "u8-l3-kernel-codegen-cpp-triton.md",
+          "level": "advanced",
+          "topic": "讲解 Inductor 如何为融合后的 IR 生成目标代码：CPU 走 C++ 模板，CUDA 走 Triton，并处理 GEMM/点对点模板。",
+          "learning_goals": [
+            "理解 codegen 模块按目标后端分流的策略",
+            "掌握 cpp.py 的 C++ 模板生成与 kernel/mm.py 的 Triton 模板",
+            "认识模板特化（GEMM/卷积/flex）的选取"
+          ],
+          "source_files": [
+            "torch/_inductor/codegen/cpp.py",
+            "torch/_inductor/kernel/mm.py"
+          ],
+          "minimal_modules": [
+            "codegen/cpp.py 的 C++ 输出",
+            "kernel/mm.py 的 Triton GEMM 模板",
+            "模板选择逻辑"
+          ],
+          "practice_task": "分别编译同一函数的 CPU 与 CUDA 版本，找到 Inductor 缓存目录（TORCHINDUCTOR_CACHE_DIR）下生成的 .cpp 与 .py（Triton）文件，对比两者结构。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "AOTI 编译与部署",
+          "order": 4,
+          "filename": "u8-l4-aoti-compile-and-deploy.md",
+          "level": "advanced",
+          "topic": "讲解 AOTInductor（AOTI）如何把模型提前编译为可独立加载的 .so/.pt2 包，脱离 Python 运行。",
+          "learning_goals": [
+            "理解 AOTI 的『提前编译、运行时加载』模型",
+            "掌握 aoti 编译产物的组成（kernel + 常量）",
+            "认识 AOTI 与 eager/inductor JIT 的差异与适用场景"
+          ],
+          "source_files": [
+            "torch/_inductor/codegen/aoti_runtime",
+            "torch/_inductor/aoti_eager.py",
+            "torch/_inductor/__init__.py"
+          ],
+          "minimal_modules": [
+            "aoti_runtime 的运行时支持",
+            "aoti_eager.py 的 eager 路径",
+            "编译与打包流程"
+          ],
+          "practice_task": "阅读 aoti_eager.py 与 aoti_runtime 目录说明，描述 AOTI 产物的加载方式；用 torch._inductor.aoti_compile_and_package（如可用）编译一个最小模型并说明其产物文件构成。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "CUDA 后端与性能",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "CUDA tensor 与设备管理",
+          "order": 1,
+          "filename": "u9-l1-cuda-tensor-and-device.md",
+          "level": "advanced",
+          "topic": "讲解 torch.cuda 模块：设备枚举、当前设备切换、tensor 与 CPU 之间的数据搬运。",
+          "learning_goals": [
+            "理解 torch.cuda 的设备管理与上下文",
+            "掌握 .to/.cuda 的跨设备拷贝语义",
+            "认识 device count、set_device 等运行时控制"
+          ],
+          "source_files": [
+            "torch/cuda/__init__.py",
+            "torch/cuda/_utils.py"
+          ],
+          "minimal_modules": [
+            "torch/cuda/__init__.py 的设备枚举与上下文",
+            "_utils.py 的设备工具",
+            "跨设备拷贝语义"
+          ],
+          "practice_task": "查询可用 CUDA 设备数量并切换当前设备；将一个 CPU tensor 搬到 GPU 再搬回，打印每一步的 device 与 data_ptr 变化（若有 GPU，否则描述流程）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "CUDA 算子编写与 ATen CUDA kernel",
+          "order": 2,
+          "filename": "u9-l2-cuda-kernels-in-aten.md",
+          "level": "advanced",
+          "topic": "以 ATen/native/cuda 下的真实 kernel 为例，讲解 CUDA 算子的结构：grid/block、向量化宏、launch。",
+          "learning_goals": [
+            "理解 ATen CUDA kernel 的文件组织与命名",
+            "掌握 kernel_element / vectorized / launch 的常见模式",
+            "认识 AT_DISPATCH 宏在类型分发中的作用"
+          ],
+          "source_files": [
+            "aten/src/ATen/native/cuda/BinaryMulKernel.cu",
+            "aten/src/ATen/native/cuda/Copy.cu"
+          ],
+          "minimal_modules": [
+            "kernel 的模板与向量化结构",
+            "launch 参数与 grid/block",
+            "类型分发宏"
+          ],
+          "practice_task": "阅读 BinaryMulKernel.cu，描述其向量化与 launch 流程；找到一个 AT_DISPATCH 宏的使用点，说明它如何按 dtype 选择内核模板。",
+          "depends_on": [
+            "u3-l4",
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "CUDA 缓存内存分配器",
+          "order": 3,
+          "filename": "u9-l3-cuda-caching-allocator.md",
+          "level": "advanced",
+          "topic": "讲解 PyTorch 的 CUDA caching allocator：按块切分、缓存复用、碎片管理与统计。",
+          "learning_goals": [
+            "理解 caching allocator 的块切分与复用策略",
+            "掌握显存统计 API 与 empty_cache 的语义",
+            "认识碎片化与可设置分配策略的影响"
+          ],
+          "source_files": [
+            "c10/cuda/CUDACachingAllocator.h",
+            "torch/cuda/memory.py"
+          ],
+          "minimal_modules": [
+            "CUDACachingAllocator 的块与池",
+            "memory.py 的统计与 empty_cache",
+            "分配策略选项"
+          ],
+          "practice_task": "运行一段反复分配/释放 tensor 的代码，用 torch.cuda.memory_allocated 与 caching allocator 统计观察显存复用；调用 empty_cache 前后对比 reserved 与 allocated。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "Stream、Event 与 CUDA Graph",
+          "order": 4,
+          "filename": "u9-l4-stream-event-cuda-graph.md",
+          "level": "advanced",
+          "topic": "讲解 CUDA 流与事件、异步执行模型，以及 CUDA Graph 如何录制并重放一段执行以降低 launch 开销。",
+          "learning_goals": [
+            "理解 stream 的异步执行与默认流行为",
+            "掌握 event 的同步与计时用途",
+            "认识 CUDA Graph 的录制/实例化/重放流程"
+          ],
+          "source_files": [
+            "torch/cuda/streams.py",
+            "torch/cuda/graphs.py",
+            "c10/cuda/CUDAStream.h"
+          ],
+          "minimal_modules": [
+            "streams.py 的 Stream/Event",
+            "graphs.py 的 CUDAGraph API",
+            "C++ CUDAStream 与流优先级"
+          ],
+          "practice_task": "用两个 stream 并发执行两段独立 kernel，用 Event 同步并计时；再用 torch.cuda.graphs.GraphCapturer 录制一段计算并重放，对比 launch 开销（无 GPU 时描述流程）。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "分布式训练",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "分布式初始化与 process group",
+          "order": 1,
+          "filename": "u10-l1-distributed-init-and-process-group.md",
+          "level": "advanced",
+          "topic": "讲解 torch.distributed 的初始化（init_process_group）、后端（gloo/nccl）与 process group 抽象。",
+          "learning_goals": [
+            "理解 rank/world_size/backend 等分布式基本概念",
+            "掌握 init_process_group 的初始化流程",
+            "认识 ProcessGroup 在不同后端上的抽象"
+          ],
+          "source_files": [
+            "torch/distributed/__init__.py",
+            "torch/distributed/distributed_c10d.py"
+          ],
+          "minimal_modules": [
+            "distributed/__init__.py 的顶层 API",
+            "distributed_c10d.py 的初始化与后端选择",
+            "ProcessGroup 抽象"
+          ],
+          "practice_task": "阅读 distributed_c10d.py 中的 init_process_group，列出支持的 backend 与 rendezvous 方式；写一个单机多进程伪初始化脚本（或描述 env:// 的环境变量）。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "集合通信与 functional collectives",
+          "order": 2,
+          "filename": "u10-l2-collectives-and-functional-collectives.md",
+          "level": "advanced",
+          "topic": "讲解 all_reduce/broadcast/all_gather 等集合通信原语、新的 functional collectives 编程模型，以及在 tracing/export 下把 legacy dist.* 重定向到 functional collectives 的 _LegacyToFunctionalCollectiveMode 机制。",
+          "learning_goals": [
+            "理解常见集合通信原语的语义",
+            "掌握 dist.all_reduce 等 API 与 functional collectives 的对应",
+            "认识 op 类型与异步/同步语义",
+            "了解 tracing 时 legacy 集合通信如何被重写为 functional 形式以避免 ProcessGroup 被烤进图常量"
+          ],
+          "source_files": [
+            "torch/distributed/_functional_collectives.py",
+            "torch/distributed/__init__.py"
+          ],
+          "minimal_modules": [
+            "functional_collectives 的原生算子式 API",
+            "经典 dist.all_reduce/all_gather",
+            "异步与 op 枚举",
+            "_LegacyToFunctionalCollectiveMode 与 _remap_traceable_collective 的 tracing 重写"
+          ],
+          "practice_task": "用 dist.all_reduce 对两个进程的 tensor 求和（或描述单进程下的等价操作）；在 _functional_collectives.py 中找到一个对应的原生集合算子并对比签名；再找到 _LegacyToFunctionalCollectiveMode，说明它在 make_fx 追踪下如何把 dist.all_reduce 改写为 functional collective。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u10-l3",
+          "title": "DDP 与 FSDP 机制",
+          "order": 3,
+          "filename": "u10-3-ddp-and-fsdp.md",
+          "level": "advanced",
+          "topic": "讲解 DistributedDataParallel 的梯度同步与桶化，以及 FSDP 如何分片参数与状态以降低显存。",
+          "learning_goals": [
+            "理解 DDP 在反向传播时重叠通信与计算的桶化机制",
+            "掌握 FSDP 的参数/梯度/优化器状态分片策略",
+            "认识二者适用场景与取舍"
+          ],
+          "source_files": [
+            "torch/nn/parallel/distributed.py",
+            "torch/distributed/fsdp/fully_sharded_data_parallel.py"
+          ],
+          "minimal_modules": [
+            "DDP 的桶与 allreduce 触发",
+            "FSDP 的 shard/unshard 与 prefetch",
+            "二者显存与通信对比"
+          ],
+          "practice_task": "在 distributed.py 中找到 DDP 的 bucket 相关逻辑；在 fsdp 中找到 shard/unshard 的入口，描述 FSDP 在前向与反向各何时做 unshard/shard。",
+          "depends_on": [
+            "u10-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "扩展、导出与生态",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "自定义算子 torch.library",
+          "order": 1,
+          "filename": "u11-l1-custom-ops-torch-library.md",
+          "level": "advanced",
+          "topic": "讲解 torch.library 如何定义自定义算子 schema、注册多后端实现与 autograd 公式。",
+          "learning_goals": [
+            "理解 torch.library 的 schema 定义与实现注册",
+            "掌握为自定义算子注册 Meta/Autograd 实现的方式",
+            "认识 custom op 与 FakeTensor/compose 的集成"
+          ],
+          "source_files": [
+            "torch/library.py",
+            "torch/_custom_ops.py"
+          ],
+          "minimal_modules": [
+            "library.py 的 Library/impl/define",
+            "_custom_ops.py 的自定义算子 API",
+            "Meta/Autograd 注册"
+          ],
+          "practice_task": "用 torch.library 定义一个 schema 为 (Tensor) -> Tensor 的自定义算子，注册 CPU 与 Meta 实现，并在 eager 与 FakeTensorMode 下分别调用验证。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "torch.export 模型导出",
+          "order": 2,
+          "filename": "u11-l2-torch-export.md",
+          "level": "advanced",
+          "topic": "讲解 torch.export 如何捕获一个与 Python 无关的、可序列化的计算图（ExportedProgram）。",
+          "learning_goals": [
+            "理解 export 与 trace/JIT 的区别（捕获控制流、guard-free）",
+            "掌握 ExportedProgram 的图与 graph signature 结构",
+            "认识动态形状与导出后部署的关系"
+          ],
+          "source_files": [
+            "torch/export/__init__.py",
+            "torch/export/exported_program.py",
+            "torch/export/_trace.py"
+          ],
+          "minimal_modules": [
+            "export/__init__.py 的 export 入口",
+            "ExportedProgram 的结构与 signature",
+            "_trace.py 的捕获流程"
+          ],
+          "practice_task": "导出一个带分支（if x.sum()>0）的小模型为 ExportedProgram，打印其 graph_module 与 graph_signature；说明动态维度 dim 与导出的关系。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "torch.func 向量化与 vmap",
+          "order": 3,
+          "filename": "u11-l3-torch-func-vmap.md",
+          "level": "advanced",
+          "topic": "讲解 torch.func（源自 functorch）如何提供 vmap/grad/grad-of-grad 等函数式变换。",
+          "learning_goals": [
+            "理解 vmap 对批处理的无循环向量化语义",
+            "掌握 torch.func.grad 与 module 的函数化（functional_call）",
+            "认识 functorch 作为子模块的演进"
+          ],
+          "source_files": [
+            "torch/_functorch/apis.py",
+            "torch/_vmap_internals.py"
+          ],
+          "minimal_modules": [
+            "apis.py 的 vmap/grad 入口",
+            "_vmap_internals 的批处理规则",
+            "functional_call 与模块函数化"
+          ],
+          "practice_task": "用 torch.func.vmap 对一个作用于单个向量的函数做批处理，对比手写循环的结果与性能；再用 torch.func.grad 计算高阶导数。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l4",
+          "title": "C++ 扩展与 libtorch 部署",
+          "order": 4,
+          "filename": "u11-l4-cpp-extension-and-libtorch.md",
+          "level": "advanced",
+          "topic": "讲解如何用 torch.extension.h 编写 C++ 扩展（绑定自定义算子到 Python），以及 libtorch 在纯 C++ 环境的部署。",
+          "learning_goals": [
+            "理解 torch.extension.h 提供的 PYBIND11 绑定与算子注册",
+            "掌握 C++ 扩展的编译与加载方式",
+            "认识 libtorch 作为不依赖 Python 的部署后端"
+          ],
+          "source_files": [
+            "torch/csrc/Module.cpp",
+            "torch/extension.h"
+          ],
+          "minimal_modules": [
+            "extension.h 的绑定宏与算子注册",
+            "Module.cpp 的模块组织",
+            "扩展的编译与 JIT 加载"
+          ],
+          "practice_task": "用 torch.extension.h 写一个最小 C++ 扩展（实现一个 elementwise op 并通过 TORCH_LIBRARY 暴露），用 torch.utils.cpp_extension 加载并在 Python 调用；说明它与 u11-l1 的 torch.library 路径的异同。",
+          "depends_on": [
+            "u3-l4",
+            "u11-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
