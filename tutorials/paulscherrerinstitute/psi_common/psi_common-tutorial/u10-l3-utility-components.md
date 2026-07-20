@@ -1,182 +1,174 @@
-# 实用组件：看门狗 / 消抖 / 防优化 / 触发器 / 动态移位
+# 实用组件：看门狗/消抖/防优化/触发器/动态移位
 
 ## 1. 本讲目标
 
-psi_common 库里有一批「个头不大、但几乎每个 FPGA 工程都会用到」的实用组件。它们不像 FIFO、AXI 那样自成体系，却解决着真实工程中反复出现的零碎问题：按键抖动怎么滤、心跳信号丢了怎么报警、综合工具把我的调试端口优化掉了怎么办、模拟信号越过门限怎么产生一拍触发、按运行时变量做任意位移怎么不拖垮时序。
+学完本讲后，你应该能够：
 
-学完本讲，你应当能够：
-
-- 说清**看门狗（watchdog）**与**消抖器（debouncer）**各自监视的「时间窗」语义，以及二者的本质区别。
-- 理解 **dont_opt** 如何只用 4 个物理引脚就骗过综合工具、保住一整片「虚拟 I/O」。
-- 掌握模拟/数字**触发器**的「越限/边沿 + arm/disarm」状态机模型。
-- 看懂 **dyn_sft** 为什么把一个桶形移位器拆成多级流水线、代价与收益各是什么。
-- 会为本讲所有组件挑选正确的 generic 参数（尤其是把「秒/赫兹」换算成「时钟周期数」）。
-
-本讲承接 [u6-l1 选通与节拍生成](u6-l1-strobe-tick-generator.md)：那里建立的「频率↔周期计数比」「边沿检测（打一拍再比较）」是本讲多个组件的共同基础。本讲全部组件也都沿用 [u7-l1](u7-l1-pl-stage.md) 确立的**二进程 record 设计法**（`r`/`r_next` + 组合进程 + 时序进程）。
+- 说清 **看门狗（watchdog）** 与 **消抖器（debouncer）** 各自解决什么问题，并能从「计数器 + 边沿/电平检测」的角度理解它们的工作原理。
+- 理解 **dont_opt** 为什么能只用 4 个物理引脚就保住上百根信号不被综合工具优化掉，知道它在「超 I/O 资源的综合试验」中的用途。
+- 掌握 **模拟触发（trigger_analog）** 与 **数字触发（trigger_digital）** 的阈值跨越/边沿检测机制，以及 arm/disarm、continuous/single 两种模式。
+- 理解 **动态移位器（dyn_sft）** 如何用「对数级数分摊移位量」的多级桶形移位器实现良好时序。
+- 把这六个组件都看作对前两讲（u6-l1 节拍生成、u7-l1 二进程 record 设计法）已建立范式的小型应用。
 
 ## 2. 前置知识
 
-在进入源码前，先用三段话把本讲反复出现的几个概念讲透。
+本讲是「杂项组件」单元的一篇，组件彼此独立，但都建立在前面已经建立的几条通用范式之上，阅读前请确认你已熟悉：
 
-**边沿检测与「变化检测」。** 数字信号处理里，我们经常想知道「信号刚刚跳变了吗」。通用做法是先把信号打一拍得到 `sig_dff`，再比较：
+- **二进程 record 设计法（u7-l1）**：所有寄存器收敛进一个 record，组合进程 `p_comb` 用变量 `v` 算次态、时序进程 `p_seq` 只负责打拍与复位。本讲六个组件全部沿用此法。
+- **节拍/计数就是分频（u6-l1）**：strobe_generator 把「频率」换算成「计数比」。本讲的 watchdog、debouncer 把「时间（秒）」换算成「时钟周期数」，是同一思想。
+- **math_pkg 的编译期函数（u2-l1）**：`log2ceil` 推位宽、`choose` 做编译期条件选择、`ceil` 向上取整，会反复出现。
+- **边沿检测**：把信号打一拍，再与原值比较，是本讲 trigger 系列与 watchdog 的核心小动作。
 
-- 数字边沿：`sig_dff='0' and sig='1'` → 上升沿；`sig_dff='1' and sig='0'` → 下降沿。
-- 向量变化：`dat_i /= dat_dff` → 任意一位发生了变化（看门狗就用它判「事件来了」）。
+几个通俗概念先解释清楚：
 
-这一手法在 u6-l1 的 `strobe_divider`、本讲的 watchdog / debouncer / trigger 里反复出现。
-
-**从「时间」到「计数」。** FPGA 里没有「秒」，只有时钟周期。要把一个以秒为单位的物理量（如消抖周期 10 ms）变成计数器初值，靠的是时钟频率：
-
-\[
-\text{count} = \lceil\, t_{\text{目标}} \cdot f_{\text{clk}}\,\rceil - 1
-\]
-
-例如 \( f_{\text{clk}}=100\,\text{MHz} \)、\( t=10\,\text{ms} \)，则计数约 \( 10\times10^{-3}\times10^{8}=10^{6} \)，即 100 万拍、约 20 位计数器。本讲的 debouncer / watchdog 都在内部做这个换算，调用 `math_pkg` 的 `log2ceil` 自动推导计数器位宽。
-
-**二进程 record 设计法回顾。** 所有寄存器收敛进一个 record（如 `two_process_t`），用 `r` 表示当前态、`r_next` 表示次态；组合进程算 `r_next`、时序进程在时钟沿把 `r_next` 写回 `r` 并处理复位。增删寄存器只动 record 与组合进程。本讲六个组件无一例外都采用此法。
+| 术语 | 通俗解释 |
+|:--|:--|
+| 消抖（debounce） | 机械按键按下/松开时，触点会在几毫秒内反复通断，产生一串毛刺而非一次干净的跳变。消抖就是「输入必须稳定持续 N 时间，才承认它真的变了」。|
+| 看门狗（watchdog） | 一条「必须在规定时间内活动一次」的看护狗。若被监视信号在限定周期内没有任何变化，就累计一次「缺失」，缺失过多就报警/报错。|
+| 阈值触发（trigger） | 像示波器的触发一样：当某个模拟值跨过设定门限、或某个数字信号出现上升/下降沿时，产生一个单周期脉冲。|
+| 动态移位（dynamic shift） | 移位量不是常数、而是每个样本运行时给定的移位。实现上要避免一根超长组合移位链，故拆成多级。|
 
 ## 3. 本讲源码地图
 
-本讲涉及六个源文件，按「最小模块」归组如下：
+本讲涉及六个独立的单文件组件，均位于 `hdl/`，除 `dont_opt` 外都有对应自校验测试平台（位于 `testbench/<组件名>_tb/`）。
 
-| 最小模块 | 源文件 | 一句话作用 |
-|---|---|---|
-| watchdog / debouncer | [hdl/psi_common_watchdog.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd) | 监视 dat_i 是否在规定时间内发生过变化，否则报警 |
-|  | [hdl/psi_common_debouncer.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd) | 输入稳定满一个消抖周期才放行到输出 |
-| dont_opt 防优化 | [hdl/psi_common_dont_opt.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd) | 用 4 个物理引脚保住任意多位 I/O 不被综合优化掉 |
-| trigger 模拟/数字 | [hdl/psi_common_trigger_analog.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd) | 模拟值越过门限时产生单拍触发 |
-|  | [hdl/psi_common_trigger_digital.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd) | 数字信号上升/下降沿产生单拍触发 |
-| dyn_sft 动态移位 | [hdl/psi_common_dyn_sft.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd) | 运行时按 shift_i 做多级流水线桶形移位 |
+| 文件 | 作用 | 是否有 TB |
+|:--|:--|:--:|
+| [hdl/psi_common_watchdog.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd) | 监视信号是否按期活动，超期未活动则累计缺失并报警/报错 | 有 |
+| [hdl/psi_common_debouncer.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd) | 消抖滤波器，输入需稳定持续可设时长才输出 | 有 |
+| [hdl/psi_common_dont_opt.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd) | 用 4 个物理引脚保住任意数量信号不被综合优化 | **无** |
+| [hdl/psi_common_trigger_analog.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd) | 模拟值跨阈值时产生单周期触发脉冲 | 有 |
+| [hdl/psi_common_trigger_digital.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd) | 数字信号上升/下降沿产生单周期触发脉冲 | 有 |
+| [hdl/psi_common_dyn_sft.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd) | 多级动态（运行时移位量）桶形移位器 | 有 |
 
-辅助依赖：debouncer 内部例化 [hdl/psi_common_bit_cc.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_bit_cc.vhd)（两级同步器，详见 u5-l2）；dyn_sft 用 [hdl/psi_common_logic_pkg.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_logic_pkg.vhd) 的 `shift_right`；位宽推导统一用 [hdl/psi_common_math_pkg.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_math_pkg.vhd) 的 `log2ceil` / `ceil` / `choose`。
-
-除 `dont_opt` 外，其余五个组件都有专属自校验测试平台，并已登记到 [sim/config.tcl](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl) 的回归列表中（参见 L142、L145-L150、L434-L464）。
+> 说明：`doc/files/psi_common_dont_opt.md` 文末虽然写着一行指向 `psi_common_dont_opt_tb.vhd` 的链接，但仓库里实际不存在该测试平台，`sim/config.tcl` 也未注册它——这是一处过时文档，阅读时请注意。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 看门狗与消抖器（watchdog / debouncer）
+本讲按四个最小模块组织：①watchdog/debouncer（时间监视与消抖），②dont_opt（防优化），③trigger 模拟/数字（触发生成），④dyn_sft（动态移位）。
+
+### 4.1 看门狗 watchdog 与消抖器 debouncer
 
 #### 4.1.1 概念说明
 
-这两个组件都围绕一个「时间窗」工作，但方向相反，初学者最容易混淆，先把区别讲死：
+这两个组件都把「一段时间」换算成「若干个时钟周期」，再用一个计数器来判断「这段时间内是否发生了某件事」，但出发点相反：
 
-- **消抖器 debouncer**——「**输入必须连续稳定够久，我才相信它**」。机械按键按下/松开时触点会弹跳，产生几毫秒的毛刺。debouncer 在输入每次跳变时把一个倒计数器重载到满量程；只有当输入稳定到计数器数到 0，输出才更新。任何抖动都会重置计数器，于是短毛刺被「耗死」在窗口里，永远到不了输出。它面向**慢变、有噪声的物理输入**。
+- **debouncer（消抖）**：关心「输入是否**稳定**」。输入一发生跳变，就把计数器重灌满；只要输入还在抖（反复跳变），计数器永远到不了 0，输出就不更新。只有输入稳定持续满 `dbnc_per_g` 秒，计数器才归零、输出才承认这次变化。它过滤掉短于门限时间的毛刺。
+- **watchdog（看门狗）**：关心「输入是否**还在动**」。输入一发生变化，就把活动计数器清零；如果输入长时间不变，活动计数器就会一路数到「一个事件周期」的上限，说明「该动的时候没动」，记一次「缺失（miss）」。缺失累计到警告门限就拉 `warn_o`，到故障门限就拉 `fault_o`。
 
-- **看门狗 watchdog**——「**输入必须定期变化，否则我报警**」。它监视一个本该周期性跳变的信号（心跳、选通、握手脉冲）。每检测到一次变化（`dat_i /= dat_dff`）就把活动计数器清零；若活动计数器数满一个完整周期都没等到变化，就算「漏一次」，累计漏次达到阈值就拉 `warn_o` / `fault_o`。它面向**本该活着、却可能卡死的事件源**。
-
-一句话区分：debouncer 怕输入**变得太快**（滤掉），watchdog 怕输入**变得太慢**（报警）。
+一句话区分：**debouncer 防止「不该算数」的抖动被算数；watchdog 防止「该来」的活动没来。**
 
 #### 4.1.2 核心流程
 
-**watchdog** 流程（伪代码）：
+**debouncer** 主循环（组合进程视角）：
 
 ```
-每个时钟沿:
-  dat_dff <= dat_i                       -- 打一拍
-  if dat_i /= dat_dff:                   -- 检测到事件（任意位变化）
-      activ_count <= 0                   -- 重置活动计时
-  elif activ_count < 一个周期(thld_c):
-      activ_count <= activ_count + 1     -- 没事件就继续计时
-  else:                                  -- 整整一个周期没事件
-      miss_count <= miss_count + 1       -- 记一次漏
-      (successive 模式下，来事件会把 succ_count 清零)
-  -- miss_count / succ_count 达到阈值 => warn_o / fault_o 置 1（锁存）
+每个时钟上升沿：
+  inp_dff   <= (经 bit_cc 同步后的) 输入     # 打一拍，用于比较
+  if inp_dff /= 当前输入:        # 输入又变了 → 还在抖
+      counter <= count_max_c     # 重灌满计数器
+  else:                         # 输入稳定
+      if counter /= 0:
+          counter <= counter - 1 # 继续倒计数
+  if counter == 0:              # 已稳定满门限时间
+      output <= inp_dff (按极性可选取反)
 ```
 
-其中「一个周期」由 generic 换算：
+消抖时长与参数的关系：
 
 \[
-\text{thld\_c} = \lfloor f_{\text{clk}} / f_{\text{act}} \rfloor - 1
+N_{\text{count}} = \left\lceil \frac{T_{\text{dbnc}}}{T_{\text{clk}}} \right\rceil - 1
 \]
 
-\( f_{\text{act}} \) 是期望的事件频率。默认 \( f_{\text{clk}}=100\,\text{MHz}, f_{\text{act}}=100\,\text{kHz} \) 时，thld_c = 999，即每 1000 拍应来一次事件。
+即 `count_max_c = integer(ceil(dbnc_per_g / clk_period_c)) - 1`，计数器从该值倒数到 0 所需时间正好约为 `dbnc_per_g`。
 
-**debouncer** 流程（伪代码）：
+**watchdog** 主循环（组合进程视角）：
 
 ```
-每个时钟沿:
-  inp_dff <= inp_sync_s                  -- 打一拍（先经 bit_cc 同步）
-  if inp_dff /= inp_sync_s:              -- 输入又跳变了
-      counter <= count_max_c             -- 重载满量程（重新开始稳态计时）
-  elif counter /= 0:
-      counter <= counter - 1             -- 继续倒计数
-  if counter = 0:                        -- 已稳定满一个窗口
-      output <= inp_dff (按极性)         -- 才把新值放到输出
+事件周期上限 thld_c = integer(freq_clk_g / freq_act_g) - 1
+每个时钟上升沿：
+  dat_dff <= dat_i                       # 打一拍
+  if dat_i /= dat_dff:                   # 本拍数据变了 = 有活动
+      activ_count <= 0                   # 活动计数器清零
+  else:                                  # 没变
+      if activ_count >= thld_c:          # 已数满一个事件周期
+          activ_count <= 0
+          miss_count <= miss_count + 1   # 记一次缺失
+      else:
+          activ_count <= activ_count + 1 # 继续等
+  # 缺失计数到 warn/fault 门限 → 拉标志
 ```
 
-计数满量程：
+watchdog 还有两种「缺失统计口径」，由 `thld_fault_succ_g` 选择：
 
-\[
-\text{count\_max\_c} = \lceil\, \text{dbnc\_per\_g} \cdot f_{\text{clk}}\,\rceil - 1
-\]
+- `thld_fault_succ_g = 0`（默认）：**累计缺失**模式。`miss_count` 只增不减，统计整个时间段内的总缺失数。
+- `thld_fault_succ_g > 0`：**连续缺失**模式。一旦出现一次正常活动，连续计数器 `succ_count` 清零、标志撤销；只有「连续缺失」达到门限才报警。适合「偶发缺失可以容忍、但连续缺失一定是故障」的场景。
 
 #### 4.1.3 源码精读
 
-**watchdog 的 generic 与周期换算**——`freq_clk_g`/`freq_act_g` 在 elaboration 期算出每个事件折合多少个时钟周期，并推导计数器位宽：
+**watchdog 的事件周期与位宽推导**（把频率换算成周期数，位宽由 math_pkg 自动推导）：
 
-[psi_common_watchdog.vhd:40-43](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L40-L43) —— `thld_c` 是一个事件周期对应的时钟拍数，`nbit_count0_c` 用 `log2ceil` 自动算活动计数器位宽。
+[psi_common_watchdog.vhd:41-43](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L41-L43) —— `thld_c` 就是「一个事件周期等于多少个时钟周期减一」，是整条逻辑的时间基准。
 
-[psi_common_watchdog.vhd:24-38](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L24-L38) —— 注意 generic 表：`thld_fault_succ_g` 为 `integer`，**取 0** 走「累计漏次」模式，**取正值**走「连续漏次」模式（来一次事件就把连续计数清零）。`miss_o` 的位宽是 `log2ceil(thld_fault_total_g)`。
+**watchdog 的活动检测与缺失计数**（组合进程核心）：
 
-事件检测与活动计数（核心三段）：
+[psi_common_watchdog.vhd:67-84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L67-L84) —— 注意判据是 `dat_i /= r.dat_dff`，即「本拍值与上一拍值不同」才算活动。这意味着一条**恒定电平**（例如一直为高的 level）**不会**被视作活动；只有**会跳变/翻转**的信号（脉冲串、计数器低位、toggle 标志）才适合喂给 watchdog。这是选型时容易踩的坑。
 
-[psi_common_watchdog.vhd:67-77](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L67-L77) —— `dat_i /= r.dat_dff` 即「事件来了」，立即把 `activ_count` 清零；否则在未故障时向上数，到 `thld_usign_c` 回零。
+**watchdog 的两种统计口径**（编译期 `if` 分支）：
 
-[psi_common_watchdog.vhd:79-84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L79-L84) —— 活动计数器数满一个周期（说明这一周期没来事件），`miss_count + 1`。
+[psi_common_watchdog.vhd:99-117](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L99-L117) —— `thld_fault_succ_g = 0` 走 `miss_count` 累计分支，否则走 `succ_count` 连续分支；`warn_o`/`fault_o` 一旦置位便自锁（只有复位才清除），符合「故障锁存待处理」的语义。
 
-[psi_common_watchdog.vhd:98-117](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L98-L117) —— 两种模式分别用 `miss_count` 或 `succ_count` 与告警/故障阈值比较，置位后由时序进程锁存（`fault='1'` 后所有计数冻结，需复位才能恢复）。
+**watchdog 的标志自锁与复位清除**：标志在 record 中是普通 `std_logic`，置位后不会被自动清零，只能由 `proc_seq` 的复位分支清零（[L128-L141](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L128-L141)）。`miss_o` 直接引出 `miss_count`（[L126](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L126)）。
 
-**debouncer 的周期换算与极性处理**：
+> 小观察：record 里声明了 `evt_count` 字段（[L49](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L49)）并在复位中清零（[L135](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L135)），但组合进程从未真正使用它——属于历史遗留的死代码，阅读时不必纠结。
 
-[psi_common_debouncer.vhd:36-38](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L36-L38) —— `count_max_c` 把消抖秒数换算成计数满量程；`pol_eq_c` 用 `math_pkg.choose` 判断输入/输出极性是否一致，决定输出时是否取反。
+**debouncer 的参数与极性处理**：
 
-[psi_common_debouncer.vhd:52-64](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L52-L64) —— `sync_g=true` 时例化 `psi_common_bit_cc` 做两级同步（异步按键必备）；`sync_g=false` 时直通。两个 `generate` 分支二选一。
+[psi_common_debouncer.vhd:36-38](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L36-L38) —— `count_max_c` 由「消抖时长/时钟周期」推导；`pol_eq_c` 用 `choose` 在编译期判断「输入极性是否等于输出极性」，决定输出时是否取反。这是 math_pkg `choose` 充当端口声明区「编译期三元运算符」的典型用法。
 
-[psi_common_debouncer.vhd:75-90](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L75-L90) —— 输入一跳变就把计数器重载到 `count_max_c`；只有计数器数到 0（输入已稳定满一个窗口），输出才按极性更新。这正是「毛刺被窗口耗死」的实现。
+**debouncer 的输入同步**（复用 bit_cc）：
 
-[psi_common_debouncer.vhd:46](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L46) —— 复位常量 `rst_two_process_c`：计数器清 0、输入/输出寄存器预置为「空闲极性」（`not in_pol_g` / `not out_pol_g`），保证上电时输出处于确定的非激活电平。
+[psi_common_debouncer.vhd:53-64](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L53-L64) —— `sync_g=true` 时例化 `psi_common_bit_cc`（见 u5-l2）做两级同步，把异步外部输入（如按键）先纳入本时钟域；`sync_g=false` 则直通。debouncer 处理的往往是异步外部输入，故默认 `true`。
 
-#### 4.1.4 代码实践：用 debouncer 处理一个按键
+**debouncer 的倒计数与输出更新**（组合进程核心）：
 
-> 本实践对应任务：「用 debouncer 处理一个按键输入，并选择合适的消抖周期。」
+[psi_common_debouncer.vhd:75-90](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L75-L90) —— 输入一变就重灌 `count_max_c`；稳定才递减；归零才把 `inp_dff`（按极性）写入 `output`。复位初值用 `not in_pol_g`/`not out_pol_g`（[L46](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_debouncer.vhd#L46)），保证上电时输入/输出处于各自的「无效电平」。
 
-**实践目标**：为一只机械按键配置消抖器，验证短毛刺被滤除、长按被放行。
+#### 4.1.4 代码实践
 
-**第 1 步——选消抖周期。** 机械按键抖动通常持续 1–10 ms，工程上取 **10–20 ms** 的消抖窗即可覆盖最坏情况。本例取 `dbnc_per_g = 10.0e-3`（10 ms），时钟 `freq_clk_g = 100.0e6`。
+**实践目标**：用 debouncer 处理一个按键输入，选定合适的消抖周期，并通过运行官方 TB 观察滤波行为。
 
-**第 2 步——手工算计数满量程（理解原理）**：
+**操作步骤**：
 
-\[
-\text{count\_max\_c} = \lceil 10\times10^{-3} \times 10^{8}\rceil - 1 = 1{,}000{,}000 - 1 = 999{,}999
-\]
-
-计数器位宽 \( = \text{log2ceil}(999{,}999) = 20 \) 位（\( 2^{19}=524{,}288 < 999{,}999 < 2^{20}=1{,}048{,}576 \)）。组件内部会自动算这两项，你不必手填。
-
-**第 3 步——阅读现成 TB 看如何驱动。** 仓库已带 [testbench/psi_common_debouncer_tb/psi_common_debouncer_tb.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_debouncer_tb/psi_common_debouncer_tb.vhd)。注意它的 generic 与源码默认值不同：`dbnc_per_g = 20.0e-6`（20 μs，仅为加速仿真）、`in_pol_g='1'` / `out_pol_g='0'`（输入输出极性相反）。TB 在 [L87-L96](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_debouncer_tb/psi_common_debouncer_tb.vhd#L87-L96) 先注入 4 个「半周期翻转」（每次抖动短于窗口），断言输出**不应**翻转；随后稳定保持 5 个窗口，断言输出**才**翻转。
-
-**第 4 步——跑回归。** 该 TB 已登记在 [sim/config.tcl:460-461](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl#L460-L461)。按 u1-l3 介绍的方式执行 Modelsim 回归：
-
-```tcl
-source run.tcl    ;# 内部依次 init -> config.tcl -> compile_files -all -> run_tb -all -> run_check_errors
-```
+1. 打开测试平台 [testbench/psi_common_debouncer_tb/psi_common_debouncer_tb.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_debouncer_tb/psi_common_debouncer_tb.vhd)，看清它的 generic 默认值：`dbnc_per_g = 20.0e-6`（20 µs，仅为缩短仿真时间）、`freq_clk_g = 100.0e6`、`len_g = 10`、`sync_g = true`，并注意 TB 内部固定 `in_pol_c='1'`、`out_pol_c='0'`（输入高有效、输出低有效，极性相反）。
+2. 阅读 `proc_stim`（[L73-L109](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_debouncer_tb/psi_common_debouncer_tb.vhd#L73-L109)）：第一段循环每 `dbnc_per_g/2` 秒翻转一次输入——**抖动周期短于门限**，应被滤除；第二段每 `2*dbnc_per_g` 秒翻转——**稳定时间长于门限**，应被承认。
+3. 在 `sim/` 下按 u1-l3 的方法跑回归（`run.tcl`，Modelsim）或单独跑 `psi_common_debouncer_tb`：
+   ```tcl
+   # sim 目录下
+   source run.tcl
+   ```
+   若只想跑这一个 TB，可在 `config.tcl` 中临时只保留 `create_tb_run "psi_common_debouncer_tb"`。
+4. **为真实按键重选参数**：机械按键抖动通常持续 5–20 ms。若你的系统时钟是 100 MHz，把 `dbnc_per_g` 改为 `20.0e-3`（20 ms）才是上板合理值；此时 `count_max_c = ceil(20e-3/10e-9)-1 = 1 999 999`，计数器位宽 `log2ceil(2 000 000) = 21` 位。
 
 **需要观察的现象**：
 
-1. 前 4 次半周期翻转期间，`dat_o` 始终保持空闲极性不变（毛刺被滤）。
-2. 输入稳定满 5 个 `dbnc_per_g` 后，`dat_o` 才翻到激活极性。
-3. 若控制台不出现 `###ERROR###`，即自校验通过。
+- 第一段（半周期抖动）期间，`out_obs` 维持在初始的「输出有效电平」不变（因为短抖动被滤掉）。
+- 第二段（稳定 ≥ 门限）后，`out_obs` 翻转并稳定，TB 末尾的 `StdlvCompareStdlv(test, out_obs, ...)` 自检通过。
 
-**预期结果**：仿真结束无 `###ERROR###`，证明消抖窗对短抖动有效、对稳定输入放行。若你想验证 10 ms 的真实按键场景，把 TB 的 `dbnc_per_g` 改回 `10.0e-3` 即可（仿真时间会变长）。**待本地验证**：实际波形与拍数请在你本地的仿真器中确认。
+**预期结果**：仿真日志不出现 `###ERROR###`，TB 正常结束。把 `dbnc_per_g` 改成 20 ms 后**逻辑结论不变**，只是计数器位宽变宽、仿真时间变长（建议仿真时仍用 20 µs）。
+
+> 若本地暂无 Modelsim/GHDL 环境，本实践可降级为「源码阅读型」：手动用 `count_max_c` 公式验算 20 ms / 100 MHz 下的计数器位宽，并解释为何 TB 故意把 `dbnc_per_g` 设成 20 µs（答案：把真实毫秒级时间压缩到微秒级以缩短仿真时长，逻辑等价）。待本地验证。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：watchdog 默认 `freq_clk_g=100e6`、`freq_act_g=100e3`，`thld_fault_succ_g=0`、`thld_fault_total_g=10`。若 `dat_i` 从复位后一直不变，多少个时钟周期后 `fault_o` 拉高？
+**练习 1**：watchdog 默认 `freq_clk_g=100 MHz`、`freq_act_g=100 kHz`，`thld_c` 等于多少？它代表什么物理含义？
+**答**：代入公式 `integer(100.0e6/100.0e3)-1 = 1000-1 = 999`。它表示「期望每 1000 个时钟周期（=10 µs）输入至少变化一次」；若 1000 周期内输入毫无变化，就记一次缺失。
 
-> **答案**：`thld_c = 100e6/100e3 - 1 = 999`，每个周期 1000 拍算一次漏。累计模式（`succ=0`）下漏 10 次达 `thld_fault_total_g`，故约 \( 10 \times 1000 = 10{,}000 \) 拍后 `fault_o='1'`（精确边界由 `miss_count >= 9 and activ_count = thld_usign_c` 判定，约第 10 个周期末）。
+**练习 2**：为什么不能把一个**恒为高**的「电源正常」信号直接喂给 watchdog 来监测？
+**答**：watchdog 的活动判据是 `dat_i /= dat_dff`（本拍与上拍不同）。恒定电平每拍都与上拍相同，永远被判为「无活动」，会立即开始累计缺失并很快报故障。要监测「电源正常」这类电平，应先把它转成一个会翻转的信号（例如用它门控一个计数器、把计数器低位喂给 watchdog）。
 
-**练习 2**：把 watchdog 从「累计漏次」改成「连续漏次」模式，应改哪个 generic？来一次事件会发生什么？
-
-> **答案**：把 `thld_fault_succ_g` 设为正值（如 4）。此后每来一次事件（`dat_i` 变化），连续漏次计数 `succ_count` 被 [L92-L94](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_watchdog.vhd#L92-L94) 清零，告警/故障标志也随之具备「恢复」语义——只要心跳恢复，连续计数就重新开始。
+**练习 3**：debouncer 把 `dbnc_per_g` 从 20 µs 改为 20 ms，`count_max_c` 与计数器位宽各如何变化？
+**答**：`count_max_c` 由 1999 变为 1 999 999；计数器位宽由 `log2ceil(2000)=11` 变为 `log2ceil(2 000 000)=21`。
 
 ---
 
@@ -184,144 +176,143 @@ source run.tcl    ;# 内部依次 init -> config.tcl -> compile_files -all -> ru
 
 #### 4.2.1 概念说明
 
-综合工具会自动剔除「输出没人用」的逻辑。做时序或资源评估时，你常需要把一个**引脚比芯片多得多的设计**综合上去看资源占用——可一旦 I/O 接不上，工具就把这些路径全优化掉了，测出来的资源数就失真。
+综合工具会优化掉「对输出没有任何可观测影响」的信号。但有时我们恰恰需要做一次**综合试验**——评估一个还接不进真实芯片的设计的时序和资源——而这个设计的 I/O 数量可能远超任何现有芯片的引脚。直接综合会被工具以「引脚不足」拒绝，或大量端口被裁剪导致资源统计失真。
 
-`psi_common_dont_opt` 解决这个问题：它用**仅仅 4 个物理引脚**（`pin_io(3:0)`），通过移位/锁存逻辑把 DUT（被测设计）的全部输入输出「拴」在这 4 根线上，让综合工具无法证明这些信号无用，从而全部保留。可把它理解成一片「**虚拟引脚扩展器**」：4 根真实线 serial-in/serial-out 地搬运任意位宽的 DUT I/O。
+`psi_common_dont_opt` 就是为这种场景准备的「虚拟引脚（Virtual Pin）」：它**只用 4 个真实物理引脚**，通过移位寄存器串行搬运，把被测设计（DUT）任意数量的输入/输出都「挂」在这 4 个引脚上，且因为存在真实的、工具可见的数据依赖，这些信号都不会被优化掉。
+
+```
+       4 个物理引脚 pin_io(3:0)        CLK
+              |                          |
+--+-------------------------+            |
+|  psi_common_dont_opt      |--- dat_o -->  DUT 的 N 个输入
+|  (4 个引脚串行搬运)        |<-- dat_i ---  DUT 的 N 个输出
++---------------------------+
+```
 
 #### 4.2.2 核心流程
 
-dont_opt 有两条独立的移位通路，共享 4 个引脚：
+dont_opt 内部维护三组寄存器，靠 4 根 `pin_io` 双向引脚串行收发：
 
-```
-DUT 输出 (dat_i, from_dut_width_g 位) ──► FromDutShiftReg
-        pin_io(2)='1' 时整拍装入, 否则每拍左移补 0
-        最高位 ──► pin_io(3)   (唯一一个对外输出引脚)
+- **ToDutShiftReg / ToDutLatchReg**：把要送给 DUT 的数据（`dat_o`）逐位从 `pin_io(1)` 串行移入；`pin_io(0)` 为高时把移位结果锁存到 `ToDutLatchReg`，作为稳定的 DUT 输入。
+- **FromDutShiftReg**：捕获 DUT 送回的数据（`dat_i`）；`pin_io(2)` 为高时装载 `dat_i`，否则每拍移入一个 `'0'`；最高位通过 `pin_io(3)` 串行送出，让工具「看见」DUT 输出确实流向了一个物理引脚。
 
-DUT 输入 (dat_o, to_dut_width_g 位) ◄── ToDutLatchReg ◄── ToDutShiftReg
-        pin_io(1) 每拍串行移入 ToDutShiftReg
-        pin_io(0)='1' 时把移位寄存器整体锁存到 ToDutLatchReg ──► dat_o
-```
-
-关键点：`pin_io(3:0)` 中 `(0)(1)(2)` 被驱动为 `'Z'`（高阻，当作外部输入用），只有 `(3)` 是真输出。数据经移位寄存器在 DUT 与物理引脚之间循环流动，形成真实的「数据依赖」，综合工具因而无法剔除。
+四根引脚的方向：`pin_io(0/1/2)` 由外部驱动（组件端置 `'Z'` 高阻，当输入用），`pin_io(3)` 由组件驱动输出。
 
 #### 4.2.3 源码精读
 
-[psi_common_dont_opt.vhd:36-43](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L36-L43) —— generic `from_dut_width_g`（DUT 输出位数，进 `dat_i`）/ `to_dut_width_g`（DUT 输入位数，出 `dat_o`）。注意端口注释「signal from DUT / to DUT」是相对 **DUT** 视角描述的，`dat_o` 对 dont_opt 是输出、对 DUT 是输入。
+**移位装载与串行输出**（组合进程）：
 
-[psi_common_dont_opt.vhd:64-73](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L64-L73) —— 两条移位通路：`pin_io(2)` 为 1 时把 `dat_i` 整拍装入 `FromDutShiftReg`，否则逐拍左移补 0；`pin_io(1)` 逐拍串行移入 `ToDutShiftReg`，`pin_io(0)` 为 1 时锁存到 `ToDutLatchReg`。
+[psi_common_dont_opt.vhd:64-73](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L64-L73) —— `pin_io(1)` 逐位左移进 `ToDutShiftReg`，`pin_io(0)` 为高时锁存；`pin_io(2)` 选择把 `dat_i` 装入 `FromDutShiftReg` 还是继续移入 `'0'`。
 
-[psi_common_dont_opt.vhd:79-84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L79-L84) —— `(0)(1)(2)` 置 `'Z'` 当输入，`(3)` 输出 `FromDutShiftReg` 的最高位，`dat_o <= ToDutLatchReg`。这 4 行就是「4 根线拴住全部 I/O」的全部魔法。
+**引脚方向与输出**：
 
-> 说明：dont_opt 无专属测试平台（它是综合期工具，行为在仿真里看不出价值），故本模块不设运行型实践，改用下面的源码阅读型实践。
+[psi_common_dont_opt.vhd:79-84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L79-L84) —— `pin_io(0/1/2) <= 'Z'`（高阻，作输入），`pin_io(3) <= FromDutShiftReg 的最高位`（组件驱动，作输出），`dat_o <= ToDutLatchReg`（送给 DUT 的稳定值）。注意时序进程 [L86-L91](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L86-L91) **没有复位分支**——上电状态由 FPGA 触发器初值决定，这在该组件的应用场景（综合试验，非功能通路）里可以接受。
 
-#### 4.2.4 代码实践：阅读型实践——追踪「为何不会被优化」
+#### 4.2.4 代码实践
 
-**实践目标**：从源码推导出综合工具为何无法删掉 DUT 的任意一位 I/O。
+**实践目标**：理解 dont_opt 的「虚拟引脚」机制，并在源码层面推演一次数据搬运过程。
 
 **操作步骤**：
 
-1. 读 [L67](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L67)：`ToDutShiftReg` 每拍把 `pin_io(1)` 串行移入，若干拍后经 `pin_io(0)` 锁存到 `dat_o`，进入 DUT——所以 DUT 的每一位输入都有「可能影响内部」的外部来源。
-2. 读 [L69-L73](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L69-L73)：`dat_i`（DUT 输出）被装入 `FromDutShiftReg`，其最高位经 [L82](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L82) 驱动到物理引脚 `pin_io(3)`——所以 DUT 的每一位输出都「最终连到一个真实焊盘」。
-3. 结论：输入侧有外部源、输出侧有真实焊盘，综合工具无法证明任何一位是死逻辑，于是全保留。
+1. 阅读 [hdl/psi_common_dont_opt.vhd:57-84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dont_opt.vhd#L57-L84)，画出三组寄存器与四根引脚的数据流图。
+2. 假设 `to_dut_width_g=8`，回答：要把一个 8 位字从外部送进 DUT，需要多少个时钟周期？外部应如何驱动 `pin_io(1)` 与 `pin_io(0)`？
+3. 在你的顶层里，把一个 I/O 数超标的设计的所有端口连到 dont_opt 的 `dat_i`/`dat_o`，只把 `pin_io(3:0)` 与 `clk_i` 连到真实物理引脚，跑一次综合，对比「不挂 dont_opt」与「挂 dont_opt」两种情况下 DUT 的资源占用是否接近。
 
-**需要观察的现象 / 预期结果**：在 Quartus/ Vivado 里对一个引脚不足的设计套上 dont_opt 综合后，对比资源报告——原本被优化掉的 DUT 逻辑应重新出现在资源占用中。**待本地验证**：具体资源数字依你选用的器件与设计而定。
+**需要观察的现象**：综合报告里 DUT 的 LUT/FF/BRAM 数量在两种情况下应基本一致（因为 dont_opt 保住了所有信号）；`pin_io` 只占用 4 个物理引脚。
+
+**预期结果**：能复述「8 位字需 8 拍移入 + 1 拍锁存」的串行搬运过程；综合后 DUT 信号未被裁剪。本组件无官方 TB，综合行为需待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 dont_opt 只需要 4 个物理引脚，就能保住「任意位宽」的 DUT I/O？
+**练习 1**：为什么 dont_opt 只用 4 个引脚就能保住上百根信号？
+**答**：因为所有 DUT 信号都被接进了 dont_opt 内部的移位寄存器，而这些寄存器又通过 `pin_io(3)` 形成了对物理引脚的真实数据依赖。综合工具只要顺着数据依赖分析，就会发现这些信号最终都「可达」一个真实引脚，故不会优化掉；N 位数据只需 1 根串行数据线 + 几根控制线即可分时搬运。
 
-> **答案**：因为它用**串行移位**而非并行接线：DUT 的多位 I/O 在片内移位寄存器里逐拍搬移，对外只暴露「串行数据入 `(1)`、移位/锁存控制 `(0)(2)`、串行数据出 `(3)`」共 4 根线。位宽由片内移位寄存器宽度决定，与对外引脚数无关。
-
-**练习 2**：把 `pin_io(3)` 这一行注释掉（令 `(3)` 也为 `'Z'`），综合会发生什么？
-
-> **答案**：`FromDutShiftReg` 不再驱动任何物理输出，DUT 输出侧变成纯片内死逻辑，综合工具会判定其无外部影响而把整条 DUT 输出通路优化掉——dont_opt 失效。这正是 `(3)` 必须保留为真输出的原因。
+**练习 2**：dont_opt 的时序进程为什么没有复位分支？
+**答**：它服务于综合试验（评估时序/资源），不是功能数据通路，初值不影响资源评估结论；省略复位可减少复位布线负担。生产功能逻辑不应照搬这种写法。
 
 ---
 
-### 4.3 模拟 / 数字触发器（trigger_analog / trigger_digital）
+### 4.3 触发生成 trigger_analog / trigger_digital
 
 #### 4.3.1 概念说明
 
-示波器里「在信号越过某个门限时产生一次触发」是常见需求。psi_common 把它拆成两个组件：
+trigger 系列像示波器的触发器：当满足某个「条件」时产生一个单周期脉冲，用来对齐采集、启动某段处理。两个组件条件不同：
 
-- **trigger_analog**：输入是一个（或多个）多 bit 模拟样本（`signed` 或 `unsigned`），当样本**越过阈值** `anl_th_trig_i` 时产生单拍 `trig_o`，可选上升越限、下降越限或两者。
-- **trigger_digital**：输入是一位（或多位）`std_logic`，当其出现**上升沿 / 下降沿**时产生单拍 `trigger_o`。
+- **trigger_analog**：条件是「一个（有符号或无符号）数值**跨过阈值**」。可配置为上升沿跨越、下降沿跨越或两者皆可。从多路模拟输入里用 `trg_anlg_src_cfg_i` 选一路，与阈值 `anl_th_trig_i` 比较。
+- **trigger_digital**：条件是「一个数字信号出现**上升沿/下降沿**」。从多路数字输入里用 `trg_digital_source_cfg_i` 选一路做边沿检测。
 
-两者共享同一套「**arm/disarm 装弹机制**」与「**连续 / 单次模式**」：
+两者共享一套**触发管理**机制：
 
-- `trg_arm_cfg_i` 的**上升沿**切换 armed 状态（装弹/退弹）。
-- `trg_mode_cfg_i(0)`：0 = 连续模式（每次满足条件都触发），1 = 单次模式（触发一次后自动 disarm，需重新装弹）。
-- `ext_disarm_i`：当多个触发源同时装弹、只要一个触发就让其余退弹时使用。
-- `trg_is_armed_o`：指示当前是否处于装弹待发状态。
+- **arm/disarm**：`trg_arm_cfg_i` 的**上升沿**用来 toggle「装填（armed）」状态。只有 armed 时才会输出触发脉冲。
+- **模式（continuous/single）**：`trg_mode_cfg_i(0)` = 0 为连续模式，每次满足条件都发脉冲；=1 为单次模式，发一次脉冲后自动 disarm，必须重新 arm 才能再触发。
+- **外部 disarm（ext_disarm_i）**：当多个触发源同时装填、只允许其中一个真正触发时，被选中触发的那个会通过此信号把其余触发源一起 disarm。
+
+文档里特别提醒的延迟：trigger_analog 满足条件后**延迟 2 拍**输出脉冲（因为内部要先把模拟值打一拍做比较），trigger_digital **延迟 1 拍**。需要在采集对齐时由用户外部补偿。
 
 #### 4.3.2 核心流程
 
-**装弹状态机**（两组件相同）：
+以 trigger_analog（有符号）为例：
 
 ```
-if (本拍产生了触发 OTrg='1' 或 ext_disarm_i='1') 且 单次模式:
-    TrgArmed <= '0'                      -- 单次模式触发后自动退弹
-elsif trg_arm_cfg_i 上升沿:
-    TrgArmed <= not TrgArmed             -- 装弹/退弹翻转
+每个时钟上升沿：
+  在 armed 状态下：
+    取出选中通道的本拍值 RegAnalogValue 与上拍值 RegAnalogValue_dff
+    if (上拍 < 阈值) and (本拍 >= 阈值) and edge_rising_enabled:  OTrg <= '1'  # 上升跨越
+    if (上拍 > 阈值) and (本拍 <= 阈值) and edge_falling_enabled: OTrg <= '1'  # 下降跨越
+  single 模式下 OTrg 一出现 → 自动 disarm
 ```
 
-**触发条件**（analog，以 signed 为例）：
+trigger_digital 把「阈值跨越」换成「0→1 / 1→0」的边沿检测：
 
 ```
-把选中通道的样本打入 RegAnalogValueSigned，再打一拍得 _dff
-若 TrgArmed='1':
-    上升越限: _dff < 阈值 且 当前 >= 阈值 且 edge_bit(1)='1'  => OTrg='1'
-    下降越限: _dff > 阈值 且 当前 <= 阈值 且 edge_bit(0)='1'  => OTrg='1'
+  if (上拍=0) and (本拍=1) and rising_enabled:  OTrg <= '1'
+  if (上拍=1) and (本拍=0) and falling_enabled: OTrg <= '1'
 ```
-
-注意「`_dff` 在阈值一侧、当前在另一侧」就是一次**穿越**，比单纯 `>=` 阈值更稳健（不会因样本持续高于阈值而每拍都触发）。
-
-**触发条件**（digital）：
-
-```
-把选中通道打入 RegDigitalValue_dff
-若 TrgArmed='1':
-    上升沿: _dff='0' 且 当前='1' 且 edge_bit(1)='1'  => OTrg='1'
-    下降沿: _dff='1' 且 当前='0' 且 edge_bit(0)='1'  => OTrg='1'
-```
-
-延迟差异：analog 因多了一级样本寄存再比较，触发延迟 **2 拍**；digital 只打一拍，延迟 **1 拍**（文档明确标注，可由用户外部补偿）。
 
 #### 4.3.3 源码精读
 
-[psi_common_trigger_digital.vhd:32](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd#L32) —— 通道选择位宽用 `choose(trig_nb_g > 1, log2ceil(trig_nb_g)-1, 0)`：只有 1 个触发源时不浪费选择位。这是 `math_pkg.choose` 在端口声明区当「三元运算符」的典型用法（端口声明区不能写 `if`）。
+**trigger_analog 的 arm/触发管理**（与 digital 完全同构）：
 
-[psi_common_trigger_digital.vhd:63-67](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd#L63-L67) 与 [psi_common_trigger_analog.vhd:73-77](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L73-L77) —— 两组件的装弹状态机完全一致：单次模式触发即退弹，否则 `trg_arm_cfg_i` 上升沿翻转 armed。
+[psi_common_trigger_analog.vhd:69-77](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L69-L77) —— `InTrgArmCfg_dff` 是 `trg_arm_cfg_i` 打一拍，二者比较得到上升沿；上升沿 toggle `TrgArmed`；single 模式下触发或外部 disarm 时清零。
 
-[psi_common_trigger_digital.vhd:72-80](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd#L72-L80) —— 数字边沿检测：`dff='0' and cur='1'` 判上升、`dff='1' and cur='0'` 判下降，分别由 `trg_edge_cfg_i` 的 bit1/bit0 使能。
+**trigger_analog 的有符号阈值跨越检测**：
 
-[psi_common_trigger_analog.vhd:84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L84) —— 用 `trg_anlg_src_cfg_i` 从 `trig_nb_g` 路模拟输入里切出当前通道（按 `width_g` 位宽切片），再 [L88-L95](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L88-L95) 做「`_dff` 与阈值异侧」的穿越判定。
+[psi_common_trigger_analog.vhd:84-96](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L84-L96) —— 用「上拍值与阈值的关系」对照「本拍值与阈值的关系」判定跨越方向，`trg_edge_cfg_i(1)` 使能上升、`(0)` 使能下降。通道选择靠把 `trg_anlg_src_cfg_i` 当作字索引，从拼接的 `anl_trig_i` 里切出对应 `width_g` 位片段（[L84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L84)）。无符号分支逻辑同构（[L100-L112](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L100-L112)），由 `is_signed_g` 的 `if` 在编译期二选一。
 
-> 说明：`is_signed_g` 在 elaboration 期用两个独立 `if`（[L82](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L82) 与 [L98](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L98)）分别处理 signed / unsigned，综合后只保留其一。
+**trigger_digital 的单输入位宽兜底**：
 
-#### 4.3.4 代码实践：阅读型实践——读懂一次模拟越限触发
+[psi_common_trigger_digital.vhd:32](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd#L32) —— 源选择端口宽度用 `choose(trig_nb_g > 1, log2ceil(trig_nb_g)-1, 0)`：只有 1 路输入时端口缩成 0 位（恒定选第 0 路），多于 1 路才需要选择位。这是 `choose` 处理「边界退化」的又一范例。
 
-**实践目标**：跟踪一个上升越限触发从输入到 `trig_o` 的完整路径，确认 2 拍延迟。
+**trigger_digital 的边沿检测**：
+
+[psi_common_trigger_digital.vhd:72-80](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_digital.vhd#L72-L80) —— `RegDigitalValue_dff` 是选中信号的上拍值，与本拍值比较得 0→1 / 1→0 边沿。digital 信号本身只有 1 位，比较比 analog 简单，故延迟只有 1 拍。
+
+> 命名小提醒：trigger_analog 的「已装填」状态输出端口写成 `trg_is_armed_i`（带 `_i` 后缀但实为 `out`，[L38/L117](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L38)），与库的 `_o` 规范（见 u1-l4）不一致；trigger_digital 则规整地写作 `trg_is_armed_o`。这是历史遗留命名，使用时以方向而非后缀为准。
+
+#### 4.3.4 代码实践
+
+**实践目标**：跑通官方 trigger TB，观察 arm/触发/disarm 与 single/continuous 两种模式的波形差异。
 
 **操作步骤**：
 
-1. 在 [trigger_analog_tb](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_trigger_analog_tb/psi_common_trigger_analog_tb.vhd) 中找到一次「装弹 → 阈值从低到高越过 → 检查 trig_o」的用例。
-2. 对照源码 [L84](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L84) → [L86](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L86)（打一拍）→ [L89](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L89)（比较置 `OTrg`）→ [L116](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L116)（`trig_o <= r.OTrg` 再寄存一拍），数清楚穿越发生在第 N 拍时 `trig_o` 在第几拍拉高。
-3. 跑回归：该 TB 已登记在 [sim/config.tcl:434-435](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl#L434-L435)。
+1. 打开 [testbench/psi_common_trigger_digital_tb/psi_common_trigger_digital_tb.vhd](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_trigger_digital_tb/psi_common_trigger_digital_tb.vhd)，定位它如何驱动 `trg_arm_cfg_i`、`trg_mode_cfg_i`、`trg_edge_cfg_i` 与 `digital_trg_i`。
+2. 在 `sim/` 跑回归或单独跑 `psi_common_trigger_digital_tb` 与 `psi_common_trigger_analog_tb`（`config.tcl` 第 [434-438](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl#L434-L438) 行）。
+3. 在波形窗口观察：armed 之前 `trigger_o` 是否始终为 0；digital 在选中的输入出现上升沿后，`trigger_o` 是否在**下一拍**出现单周期脉冲；single 模式下脉冲后 `trg_is_armed_o` 是否立即掉到 0。
 
-**需要观察的现象**：样本穿越阈值后，`trig_o` 在约 **2 个时钟周期**后出现一个单周期脉冲；单次模式下脉冲出现后 `trg_is_armed_o` 立即掉到 0。
+**需要观察的现象**：
 
-**预期结果**：波形中 `trig_o` 恰为一拍宽、相对穿越点延迟 2 拍。**待本地验证**：精确拍数与极性请对照本地仿真波形确认。
+- 连续模式下，输入反复跳变时 `trigger_o` 反复出脉冲；
+- 单次模式下只出一次脉冲，必须再次 arm 才会继续触发。
+
+**预期结果**：两个 TB 均不报 `###ERROR###`。digital 延迟 1 拍、analog 延迟 2 拍，可在波形上数拍确认。待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 trigger_analog 用「`_dff < 阈值 且 当前 >= 阈值`」而不是简单的「`当前 >= 阈值`」来判上升越限？
+**练习 1**：trigger_analog 用「上拍 < 阈值 且 本拍 ≥ 阈值」判定上升跨越，而不是单纯「本拍 ≥ 阈值」。为什么必须引入上拍值？
+**答**：单纯「本拍 ≥ 阈值」只要信号停留在阈值上方就会每拍都触发。引入上拍值后，只有「从下到上真正跨过阈值的那一拍」才触发，等价于在阈值处做一个上升沿检测，保证每个跨越只产生一个脉冲。
 
-> **答案**：若只判 `当前 >= 阈值`，只要样本持续高于阈值，每拍都会触发——与「越限一次」的语义不符。用前后两拍分处阈值两侧来判定「穿越」，保证一次跨越只产生一拍触发，对缓慢变化的模拟信号更稳健。
-
-**练习 2**：要在数字触发器上同时响应上升沿和下降沿，`trg_edge_cfg_i` 应设为何值？
-
-> **答案**：`"11"`（bit1=1 使能上升、bit0=1 使能下降）。只上升沿用 `"10"`，只下降沿用 `"01"`。
+**练习 2**：single 模式下，触发脉冲产生后会发生什么？想再次触发必须做什么？
+**答**：`OTrg` 一出现，`TrgArmed` 立即被清零（[trigger_analog L73-L74](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_trigger_analog.vhd#L73-L74)），组件进入 disarm 态，不再产生新脉冲。要再次触发，必须给 `trg_arm_cfg_i` 一个上升沿重新 arm。
 
 ---
 
@@ -329,101 +320,112 @@ elsif trg_arm_cfg_i 上升沿:
 
 #### 4.4.1 概念说明
 
-「按运行时变量 `shift_i` 把数据左/右移任意位」叫**动态移位**（barrel shifter，桶形移位器）。最朴素的实现是用一个 \( 2^{N}:1 \) 的巨大多路选择器一次选好结果——但移位位宽一宽，这个 mux 就又宽又深，成为时序瓶颈。
+「动态移位」指移位量不是一个编译期常数，而是每个样本都可能在变的运行时值 `shift_i`（例如可变增益、可变延时里按值移位）。朴素实现是直接 `dat_i sll shift_i`，但 `shift_i` 是变量时，综合器会展开成一根覆盖所有可能移位量的超长组合多路选择链，时序很差。
 
-`psi_common_dyn_sft` 的思路是**把一次大移位拆成多级小移位**，每级只移「`sel_bit_per_stage_g` 位」的一段（即每级 mux 只有 \( 2^{\text{sel\_bit\_per\_stage\_g}}:1 \)），级与级之间插寄存器。这样每级组合逻辑很浅、频率高，代价是多花 `Stages_c` 拍延迟与若干寄存器——典型的「用流水线换频率」。它用 `vld_i`/`vld_o` 选通，是一段 AXI-S 风格的数据通路（但无反压）。
+`psi_common_dyn_sft` 用经典的**对数级数桶形移位器（logarithmic barrel shifter）**解决这个问题：把 N 位的移位量拆成若干段，每段 `sel_bit_per_stage_g` 位，每段对应一级移位器，该级只移「0 或 2^k」位（k 随级数增长）。于是总移位量 = 各级移位量之和，级数为 `ceil(shift位宽 / sel_bit_per_stage_g)`，每级组合逻辑深度恒定且浅，整体时序良好。
 
 #### 4.4.2 核心流程
 
-级数推导（关键公式）：
+设移位量端口位宽为 `B = log2ceil(max_shift_g + 1)`，每段取 `S = sel_bit_per_stage_g` 位，则级数：
 
 \[
-\text{shift\_i 位宽} = \text{log2ceil}(\text{max\_shift\_g}+1)
+N_{\text{stages}} = \left\lceil \frac{B}{S} \right\rceil
 \]
 
-\[
-\text{Stages\_c} = \left\lceil \frac{\text{shift\_i 位宽}}{\text{sel\_bit\_per\_stage\_g}} \right\rceil
-\]
+每级 `stg`（从 0 开始）：
 
-每级 `stg` 处理 `shift_i` 的低 `sel_bit_per_stage_g` 位（记 `Select_v`），实际移位量为：
+```
+StepSize = 2^(stg * S)                       # 本级「单位移位量」
+Select   = 取 shift(stg) 的低 S 位           # 本级实际移 0..(2^S - 1) 个 StepSize
+data_out = data_in 移位 (Select * StepSize) 位  # LEFT: 左移补0; RIGHT: 右移补符号或0
+shift    = shift(stg) 逻辑右移 S 位          # 把剩下的高位交给下一级
+vld      = vld(stg)                          # 有效随数据逐级下传
+```
 
-\[
-\text{移位量} = \text{Select\_v} \times 2^{\,\text{stg}\cdot\text{sel\_bit\_per\_stage\_g}}
-\]
+默认例（`max_shift_g=16`、`sel_bit_per_stage_g=4`）：`B = log2ceil(17) = 5`，`Stages_c = ceil(5/4) = 2` 级。第一级每步 1 位（可选移 0/1/…/15 位），第二级每步 16 位（可选移 0/16 位）。
 
-即第 0 级移 \( 0\ldots 2^{s}-1 \) 位、第 1 级移 \( 0 \) 或 \( 2^{s} \) 的整数倍、……（\( s=\text{sel\_bit\_per\_stage\_g} \)）。每级处理后把 `shift_i` 右移 `sel_bit_per_stage_g` 位交给下一级（用 `logic_pkg.shift_right`）。
-
-例：`max_shift_g=16`、`sel_bit_per_stage_g=4` → shift_i 5 位 → Stages_c = ⌈5/4⌉ = 2 级；第 0 级移 0–15 位（步长 1），第 1 级移 0 或 16 位（步长 16），合计覆盖 0–31 ≥ 16。
-
-左移填 0；右移可由 `sign_extend_g` 选择填符号位（算术移位）或填 0（逻辑移位）。
+方向 `direction_g`：`"LEFT"` 左移低位补 0；`"RIGHT"` 右移高位补 `sign_extend_g ? 符号位 : '0'`。移位量是否非法由开头 `assert` 检查（方向必须为 LEFT/RIGHT）。
 
 #### 4.4.3 源码精读
 
-[psi_common_dyn_sft.vhd:41](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L41) —— `Stages_c` 用 `ceil(shift_i'length / sel_bit_per_stage_g)` 推导级数，决定流水线深度。
+**级数与类型推导**：
 
-[psi_common_dyn_sft.vhd:48-53](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L48-L53) —— record 用**数组字段** `Data(0 to Stages_c)` / `Shift(...)` / `Vld(...)` 承载每级中间结果，是「带数组类型的 record」的范例。
+[psi_common_dyn_sft.vhd:41](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L41) —— `Stages_c = ceil(shift_i'length / sel_bit_per_stage_g)`，是「分摊移位量」的关键。`Data_t`/`Shift_t` 是各级数据与剩余移位量的数组类型（[L44-L45](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L44-L45)）。
 
-[psi_common_dyn_sft.vhd:77-100](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L77-L100) —— `for stg in 0 to Stages_c-1 loop` 展开各级：算 `StepSize_v = 2**(stg*sel_bit_per_stage_g)`，取本级的 `Select_v`，按方向拼一个双倍宽临时向量 `TempData_v` 再切出结果。
+**方向合法性与综合期断言**：
 
-[psi_common_dyn_sft.vhd:83-90](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L83-L90) —— 右移：`sign_extend_g` 为真时用符号位填充（算术右移），否则填 0。
+[psi_common_dyn_sft.vhd:57](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L57) —— 用 `###ERROR###` 前缀的 `assert` 校验方向（库统一的 TB/综合错误标记，见 u1-l3）。
 
-[psi_common_dyn_sft.vhd:98](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L98) —— 把 `shift_i` 右移 `sel_bit_per_stage_g` 位交给下一级，逐级消耗移位指令。
+**多级移位主循环**（组合进程核心）：
 
-[psi_common_dyn_sft.vhd:57](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L57) —— `assert` 校验 `direction_g` 必须是 `"LEFT"` 或 `"RIGHT"`，非法值在仿真期报 `###ERROR###`。
+[psi_common_dyn_sft.vhd:77-100](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L77-L100) —— 每级先用 `Select_v * StepSize_v` 算出本级移位量，再在双倍宽度的临时向量 `TempData_v` 里「放置数据后取半」实现一次干净的移位（RIGHT 分支 [L83-L90](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L83-L90)，LEFT 分支 [L91-L94](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L91-L94)），然后 `shift_right(r.Shift(stg), sel_bit_per_stage_g, '0')` 把剩余位移交给下一级（[L98](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L98)，用的是 logic_pkg 的 `shift_right`，见 u2-l2）。
 
-#### 4.4.4 代码实践：推算延迟与资源
+**输出与流水**：
 
-**实践目标**：给定三组 generic，预测延迟拍数与每级 mux 规模，体会「流水线换频率」的取舍。
+[psi_common_dyn_sft.vhd:103-104](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L103-L104) —— 输出取最后一级 `Data(Stages_c)`；`vld_o` 同步随级数延迟 `Stages_c` 拍。注意 record 把 `Vld`/`Data`/`Shift` 都做成 `0 to Stages_c` 的数组，每一级都是一组寄存器——这是把「流水线每一级」直接映成 record 数组的写法。
+
+#### 4.4.4 代码实践
+
+**实践目标**：通过官方 TB 的多组 generic 组合，体会 `sel_bit_per_stage_g`（每级位数）对级数与延迟的影响。
 
 **操作步骤**：
 
-1. 默认配置 `max_shift_g=16, sel_bit_per_stage_g=4, width_g=32`：按上文公式算出 shift_i=5 位、Stages_c=2、每级 mux \( 16:1 \)、数据延迟 2 拍。
-2. 改成 `sel_bit_per_stage_g=1`：Stages_c=5、每级 mux 仅 \( 2:1 \)、延迟 5 拍——组合更浅、频率更高、但寄存器更多、延迟更长。
-3. 改成 `sel_bit_per_stage_g=5`：Stages_c=1、单级 \( 32:1 \) mux、延迟 1 拍——回到「快但时序紧」。
-4. 跑现成回归验证功能：[testbench/psi_common_dyn_sft_tb](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/testbench/psi_common_dyn_sft_tb/psi_common_dyn_sft_tb.vhd)，登记在 [sim/config.tcl:463-464](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl#L463-L464)。
+1. 看 `config.tcl` 为 `psi_common_dyn_sft_tb` 注册的 5 组运行（[L463-L470](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl#L463-L470)）：覆盖 LEFT/RIGHT、`sel_bit_per_stage_g=2/3`、`sign_extend_g=true/false` 的组合。
+2. 在 `sim/` 跑该 TB 的全部组合。
+3. 手算：默认 `max_shift_g=16`、`width_g=32`。
+   - `sel_bit_per_stage_g=4` 时，`B=5`，级数 `ceil(5/4)=2`，输出延迟 2 拍；
+   - `sel_bit_per_stage_g=2` 时，`B=5`，级数 `ceil(5/2)=3`，输出延迟 3 拍。
 
-**需要观察的现象**：TB 在不同 `shift_i`、不同 `direction_g`/`sign_extend_g` 下注入数据，自校验 `dat_o` 与 `vld_o` 时序对齐——`vld_o` 应比 `vld_i` 恰好晚 `Stages_c` 拍。
+   体会「每级位数越小 → 级数越多 → 延迟越大，但每级组合逻辑越浅」的权衡。
 
-**预期结果**：所有用例无 `###ERROR###`；`dat_o` 是 `dat_i` 按 `shift_i` 移位后的结果，延迟等于 Stages_c。**待本地验证**：波形与具体拍数请本地确认。
+**需要观察的现象**：`vld_i` 拉高后，`vld_o` 在 `Stages_c` 拍后跟随；`dat_o` 是 `dat_i` 按 `shift_i` 移位后的结果，LEFT 低位补 0，RIGHT 在 `sign_extend_g=true` 时高位补符号位。
+
+**预期结果**：5 组运行全部通过、无 `###ERROR###`；手算的级数与延迟与波形一致。待本地验证。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`max_shift_g=16`、`sel_bit_per_stage_g=4` 时，数据从 `dat_i` 到 `dat_o` 延迟几拍？为什么？
+**练习 1**：`max_shift_g=16`、`sel_bit_per_stage_g=4`，移位量端口位宽与级数各是多少？
+**答**：移位量端口位宽 `B = log2ceil(max_shift_g+1) = log2ceil(17) = 5`；级数 `Stages_c = ceil(5/4) = 2`。
 
-> **答案**：2 拍。shift_i 5 位 → Stages_c = ⌈5/4⌉ = 2，每级之间有寄存器，`vld`/`Data` 沿 `0→1→2` 共穿过 2 级寄存器。
+**练习 2**：把 `sel_bit_per_stage_g` 从 4 改为 2，时序与延迟如何变化？
+**答**：每级处理的移位位变少，单级组合逻辑更浅、时序更好；但级数从 2 增至 3，输出延迟增加 1 拍，寄存器数量也增加。这是「时序 vs 延迟/资源」的经典权衡。
 
-**练习 2**：要把右移改成「算术右移（保留符号位）」，应设哪个 generic？左移受它影响吗？
-
-> **答案**：设 `sign_extend_g => true`（默认即真）。它只对 `direction_g="RIGHT"` 生效（见 [L84-L88](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L84-L88)）；左移恒填 0（[L92](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/hdl/psi_common_dyn_sft.vhd#L92)），不受影响。
+**练习 3**：为什么 dyn_sft 用「在双倍宽向量里放数据再取半」的方式做移位，而不是直接写 `sll`/`slr`？
+**答**：移位量是运行时变量时，`sll`/`slr` 会被综合成面向所有可能移位量的长多路选择链。用双倍宽缓冲「先按 `Select*StepSize` 偏移放置、再截取目标半段」，把每一级的移位限制为「若干个固定 StepSize 的倍数」，每级只需一个浅 MUX，再靠多级累加得到任意移位量，整体组合深度为对数级，时序可控。
 
 ---
 
 ## 5. 综合实践
 
-**任务：为一只按键搭建一条「带心跳监控的边沿触发通道」。** 把本讲三个组件串起来：
+**任务**：为一个 100 MHz 系统设计一个「按键触发采集」的小数据通路，把本讲至少三个组件串起来。
 
-1. **输入消抖**：用 `psi_common_debouncer`（`width_g=1`、`dbnc_per_g=10.0e-3`、`freq_clk_g=100.0e6`、`sync_g=true`）处理异步按键，输出干净的电平 `btn_clean`。
-2. **边沿触发**：把 `btn_clean` 接到 `psi_common_trigger_digital` 的 `digital_trg_i`，配置 `trg_edge_cfg_i="10"`（上升沿）、`trg_mode_cfg_i="0"`（连续）、预先给 `trg_arm_cfg_i` 一个上升沿装弹。观察每按一次键产生一个单拍 `trigger_o`。
-3. **心跳看门狗**：另用一个 `psi_common_watchdog` 监视 `trigger_o`（作为 `dat_i`），设 `freq_act_g` 为「期望的最慢按键节奏」（如 2 Hz），`thld_fault_succ_g` 取正值走连续漏次模式。若用户长时间不按键，`fault_o` 拉高。
+要求：
 
-**完成建议**：
+1. 用 **debouncer** 处理一个机械按键：输入高有效、输出高有效，消抖周期选 20 ms（写出 `count_max_c` 与计数器位宽的手算结果）。
+2. 把消抖后的按键沿（你需要在 debouncer 之后自己做一次边沿检测，得到「按下」单周期脉冲）接到 **trigger_digital** 的 `digital_trg_i`，配置为 single 模式、上升沿触发，作为「采集启动」。
+3. 用 **watchdog** 监视「采集启动」脉冲的活动：`freq_act_g` 设为 1 Hz（即期望每秒至少按一次键用于自检），`thld_fault_succ_g` 设为正数启用连续缺失模式，思考 `thld_c` 等于多少个时钟周期。
+4. 画出这条「按键 → debouncer → 边沿检测 → trigger_digital → 启动脉冲 → watchdog 监视」的数据通路框图，并标注每级的延迟拍数。
 
-- 先逐个用现成 TB（debouncer_tb / trigger_digital_tb / watchdog_tb）验证单组件行为，再在自建顶层里把它们连起来。
-- 复用 [sim/config.tcl](https://github.com/paulscherrerinstitute/psi_common/blob/98c2fcc75fa11edfe837cf0de885da95d94c871f/sim/config.tcl) 的注册与 `###ERROR###` 自检约定（u1-l3、u11-l1）写一个自校验 TB。
-- 难点提示：触发器的 arm 是上升沿敏感，TB 里给 `trg_arm_cfg_i` 一个单周期脉冲即可，不要长拉高。
+**参考思路**：
+
+- debouncer 参数：`count_max_c = ceil(20e-3/10e-9)-1 = 1 999 999`，计数器位宽 21 位；输入输出极性相同（都高有效），`pol_eq_c=true` 不取反。
+- 边沿检测：把 debouncer 输出打一拍得 `d`，`按下脉冲 = output and not d`。
+- watchdog：`thld_c = integer(100e6/1)-1 = 99 999 999`，即期望每 1 亿个时钟周期（1 秒）至少看到一次启动脉冲的变化；连续缺失模式下，若连续 N 秒没有按键，按 `thld_fault_succ_g` 报故障。注意 watchdog 看的是「信号是否变化」，单周期脉冲本身就会带来两拍变化，天然适合喂给它。
+- 延迟：debouncer 内部有 bit_cc 同步 2 拍 + 倒计数（稳定后 1 拍输出更新）；trigger_digital 1 拍；watchdog 不在本关键路径。
+
+> 这是一个设计型实践，没有唯一答案。重点是练习「按真实物理时间（毫秒/秒）反推 generic 参数」以及把多个小组件拼成数据通路。若本地有仿真环境，可把这条通路写成一个顶层并自检；否则以框图与参数手算作为交付。待本地验证。
 
 ## 6. 本讲小结
 
-- **debouncer 与 watchdog 方向相反**：前者滤掉「变得太快」的输入（需稳定满窗口才放行），后者报警「变得太慢」的事件源（一周期无变化记一次漏）；两者都用「打一拍比较」做变化/边沿检测。
-- 两个组件都把 generic 里的**秒/赫兹**在 elaboration 期换算成**计数满量程**，并用 `log2ceil` 自动推导计数器位宽。
-- **dont_opt** 用 4 个物理引脚 + 串行移位，制造真实数据依赖，骗过综合工具保住任意位宽 DUT I/O，是综合/资源评估的专用工具。
-- **trigger_analog / trigger_digital** 共享「arm/disarm + 连续/单次」状态机；analog 判阈值**穿越**（延迟 2 拍），digital 判信号**边沿**（延迟 1 拍）。
-- **dyn_sft** 把大动态移位拆成多级小移位、级间插寄存器，用 `Stages_c` 拍延迟换高频率，是「流水线换时序」的范例。
-- 全部六个组件统一采用**二进程 record 设计法**，并复用 `math_pkg`（`log2ceil`/`ceil`/`choose`）、`logic_pkg`（`shift_right`）、`bit_cc`（同步器）等基础包。
+- **debouncer 与 watchdog 是一对镜像**：debouncer 要输入「稳定」才承认变化（滤除短毛刺）；watchdog 要输入「还在动」才算正常（检出该来没来的活动）。两者都把「时间」换算成「时钟周期计数」。
+- **watchdog 的活动判据是 `dat_i /= dat_dff`**，只对会跳变/翻转的信号有效，恒定电平会被判为无活动；它有「累计缺失」与「连续缺失」两种口径，由 `thld_fault_succ_g` 切换。
+- **debouncer 默认例化 bit_cc 做两级同步**，因为它的输入常是异步外部信号（如按键）；极性由 `in_pol_g`/`out_pol_g` 决定。
+- **dont_opt 是「虚拟引脚」**，用 4 个物理引脚 + 移位寄存器保住任意数量信号不被综合优化，专用于 I/O 超标的综合试验；它无官方 TB、无复位分支。
+- **trigger_analog / trigger_digital** 用「上拍 vs 本拍」做阈值跨越/边沿检测，共享 arm/disarm 与 continuous/single 模式；analog 延迟 2 拍、digital 延迟 1 拍。
+- **dyn_sft 是对数级桶形移位器**，把运行时移位量拆成多级、每级移「2 的幂」位，以恒定浅组合深度换取良好时序；级数 = `ceil(移位量位宽 / sel_bit_per_stage_g)`。
 
 ## 7. 下一步学习建议
 
-- **脉冲/斜坡生成与整形**（[u10-l2](u10-l2-ramp-pulse-shaper.md)）：与本讲的 trigger/选通组件同属「事件/波形生成」家族，可对照阅读 `ramp_gene`、`pulse_shaper` 如何用状态机产生持续波形。
-- **统计与信号源**（[u10-l4](u10-l4-stats-and-sources.md)）：`find_min_max`、`prbs` 与本讲的 trigger_analog 配合，可组成「PRBS 激励 → 越限触发 → 流式统计」的完整数据采集链。
-- **自校验测试平台**（[u11-l1](u11-l1-self-checking-testbench.md)）：本讲多次引用的 `###ERROR###` 自检约定与 psi_tb 工具包在那里系统讲解，是写好本讲组件 TB 的前提。
-- 想深入边沿/同步细节，可回看 [u5-l1 pulse_cc](u5-l1-pulse-cc.md) 与 [u5-l2 bit_cc](u5-l2-simple-status-bit-cc.md)；想巩固流水线拆级思想，可回看 [u7-l1 pl_stage](u7-l1-pl-stage.md) 与 [u7-l2 multi_pl_stage](u7-l2-multi-pl-stage.md)。
+- 本讲的 watchdog/trigger/dyn_sft 都把「时间」或「移位」作为变量，下一讲 **u10-l4（统计与信号源：min_max/prbs/pwm/sample_rate_converter）** 会继续介绍流式数据上的统计与信号生成组件，可对照阅读 `psi_common_prbs`（伪随机激励源，常与本讲的 trigger 配合做采集自检）。
+- 若你对 dyn_sft 的多级思想感兴趣，可回头看 **u7-l2（multi_pl_stage）** 的 `for generate` 级联写法，二者的「级数化」思路一致。
+- 想系统练习「为这些组件写自校验 TB」，请进入 **u11-l1（编写自校验测试平台）**，本讲引用的 `debouncer_tb`、`dyn_sft_tb` 都是很好的入门范本。
