@@ -1,0 +1,697 @@
+{
+  "project": "vivadoIP_data_rec",
+  "head": "f68c9316296346ff77c2c328711309d558b72cc5",
+  "rationale": "本项目是一个 PSI 开发的 Vivado/VHDL-2008 数据记录 IP 核，采用「核心记录器 + Vivado 封装（AXI/时钟域/存储）+ 仿真 + IP 打包 + EPICS 集成」的分层结构。学习路线因此按由外到内、由行为到机制的顺序设计：第一单元让读者从零认识项目定位、依赖、目录并能跑起仿真和打包 IP；第二单元建立顶层端口与寄存器地图的整体认知（这两层是后续阅读源码的索引）；第三单元深入 data_rec 核心的状态机、流水线与地址/采样计数（记录器最核心的数据通路）；第四单元专门拆解三类触发源（外部/SW/自触发）与最小录制间隔、计数器、Trig_Out 转发等触发相关机制（这是该 IP 最有特色的部分）；第五单元回到 Vivado 封装，讲解 AXI 寄存器/存储解码、跨时钟域策略与每通道双端口 RAM 读出（理解 IP 如何被软件访问）；第六单元覆盖验证体系（测试平台与 6 个用例）、EPICS 控制系统集成以及二次开发实践。依赖关系严格按「行为→机制→封装→验证/扩展」递进，每篇讲义只聚焦一个主题并配套源码阅读与代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目、依赖与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：data_rec 是什么、能做什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 vivadoIP_data_rec 这个 PSI 多通道数据记录 IP 核的定位、核心特性（前/后触发、自触发、多种触发模式、最多 8 通道、可配置深度）以及数据手册位置。",
+          "learning_goals": [
+            "理解该 IP 核的用途与典型应用场景",
+            "能列出前/后触发、自触发、外部触发等主要特性",
+            "知道在何处查阅详细数据手册"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "doc/data_rec.pdf"
+          ],
+          "minimal_modules": [
+            "项目说明 (README)",
+            "版本变更 (Changelog)",
+            "数据手册 (doc/data_rec.pdf)"
+          ],
+          "practice_task": "阅读 README 与 Changelog，用一张表总结该 IP 支持的触发模式与版本 2.4 相对 2.3 新增的 Trig_Out 端口的作用，并写出你会把该 IP 用在哪个场景。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与外部依赖",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-dependencies.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录划分（hdl/testbench/sim/scripts/bd/xgui/epics/doc）以及对外部库 psi_common、psi_tb、PsiSim、PsiIpPackage 的依赖与所需文件夹结构。",
+          "learning_goals": [
+            "能说清每个顶层目录的职责",
+            "理解 PSI FPGA 库的依赖与文件夹结构约定",
+            "知道如何用 dependencies.py 拉取依赖"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/dependencies.py",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "目录结构 (hdl/sim/testbench/scripts/epics)",
+            "依赖解析脚本 (scripts/dependencies.py)",
+            "psi_common / psi_tb / PsiSim / PsiIpPackage"
+          ],
+          "practice_task": "对照 git ls-files 的输出画出仓库目录树，并标注每个目录的作用；再说明若用 psi_fpga_all 仓库时本仓库应处于什么相对路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "在仿真中跑起来：PsiSim/Modelsim 回归测试",
+          "order": 3,
+          "filename": "u1-l3-run-simulation.md",
+          "level": "beginner",
+          "topic": "讲解如何用 sim/ 下的 PsiSim 脚本与 Modelsim 跑回归仿真，包括 config.tcl 如何组织源码与测试平台、run.tcl/ci.do 的流程，以及 ciFlow.py 的批处理检查逻辑。",
+          "learning_goals": [
+            "掌握在 sim 目录执行 source ./run.tcl 跑仿真的流程",
+            "理解 config.tcl 中库、源码、测试平台的组织方式",
+            "知道 CI 如何通过 ciFlow.py 判定仿真成功或失败"
+          ],
+          "source_files": [
+            "sim/run.tcl",
+            "sim/config.tcl",
+            "sim/ci.do",
+            "sim/interactive.tcl",
+            "scripts/ciFlow.py"
+          ],
+          "minimal_modules": [
+            "PsiSim 框架 (psi::sim::*)",
+            "仿真配置 (sim/config.tcl)",
+            "CI 流程 (scripts/ciFlow.py)"
+          ],
+          "practice_task": "在 sim 目录下按照 README 执行回归仿真，记录输出的测试用例名称，并解释 ciFlow.py 中如何区分预期错误与意外错误。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "IP 打包与在 Vivado 中使用",
+          "order": 4,
+          "filename": "u1-l4-ip-packaging-and-vivado.md",
+          "level": "beginner",
+          "topic": "讲解如何用 scripts/package.tcl 把工程打包成 Vivado IP（IP-XACT），包括 component.xml 中的参数、端口、总线接口，以及 xgui 下参数页面的组织。",
+          "learning_goals": [
+            "理解 package.tcl 如何声明 IP 名称、版本、源码与 GUI 参数",
+            "能读懂 component.xml 中 generics、端口使能与 AXI 总线接口的定义",
+            "知道 In_Data/Trig_Out 等可选端口是如何按 generic 条件使能的"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "component.xml",
+            "xgui/data_rec_v2_4.tcl"
+          ],
+          "minimal_modules": [
+            "IP 打包脚本 (scripts/package.tcl)",
+            "IP-XACT 描述 (component.xml)",
+            "参数 GUI (xgui/data_rec_v2_4.tcl)"
+          ],
+          "practice_task": "在 Vivado Tcl 控制台中运行 scripts/package.tcl 打包 IP，然后在一个 Block Design 中实例化它，确认 NumOfInputs_g 改变时 In_Data 端口数量随之变化。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "顶层接口与寄存器地图",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "顶层封装端口与 AXI4 Slave 接口",
+          "order": 1,
+          "filename": "u2-l1-top-level-ports-and-axi.md",
+          "level": "intermediate",
+          "topic": "讲解 data_rec_vivado_wrp 的全部端口：数据/触发/控制信号、Done_Irq 中断、Trig_Out 转发，以及 s00_axi AXI4 Slave 总线接口（读地址/读数据/写地址/写数据/写响应五通道）。",
+          "learning_goals": [
+            "能列出顶层的数据、触发、时钟复位与中断端口",
+            "理解 AXI4 Slave 五个通道的信号含义",
+            "区分数据时钟域（Clk）与 AXI 时钟域（s00_axi_aclk）"
+          ],
+          "source_files": [
+            "hdl/data_rec_vivado_wrp.vhd",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "data_rec_vivado_wrp (entity)",
+            "AXI4 Slave 接口 (s00_axi_*)",
+            "Done_Irq / Trig_Out"
+          ],
+          "practice_task": "为 data_rec_vivado_wrp 画一张端口分组图（数据、触发、AXI、时钟复位、中断），并标注哪些端口属于数据时钟域、哪些属于 AXI 时钟域。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "寄存器与存储地址地图",
+          "order": 2,
+          "filename": "u2-l2-register-and-memory-map.md",
+          "level": "intermediate",
+          "topic": "讲解 data_rec_register_pkg 中定义的所有寄存器地址常量与字段位（状态、配置、前/总触发采样数、自触发、触发使能、最小录制间隔等），以及 MemAddr 函数如何为每个通道/样本计算存储地址。",
+          "learning_goals": [
+            "能说出每个寄存器的字节地址与关键字段位",
+            "理解 TrigEna 三种触发源位与 Cfg 寄存器 Arm/TrgCntClr 位",
+            "掌握 MemAddr 通道间距与样本寻址的计算方法"
+          ],
+          "source_files": [
+            "hdl/data_rec_register_pkg.vhd",
+            "hdl/data_rec_vivado_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "寄存器地址常量 (Reg_*_Addr_c)",
+            "字段位常量 (Reg_*_Idx_c / *_Sft_c)",
+            "ToWordAddr / MemAddr 函数"
+          ],
+          "practice_task": "根据 data_rec_register_pkg 整理一张寄存器表（地址、读写、字段含义），并手算 MemAddr(ch=2, sample=5, memdepth=128) 的字节地址。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心记录器：状态机与数据通路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "data_rec 实体：generics 与端口语义",
+          "order": 1,
+          "filename": "u3-l1-data-rec-entity.md",
+          "level": "intermediate",
+          "topic": "讲解 data_rec 核心实体的四个 generic（NumOfInputs_g、InputWidth_g、MemoryDepth_g、TrigInputs_g）及其取值范围，以及数据、触发、寄存器侧、存储侧端口的具体含义与位宽推导。",
+          "learning_goals": [
+            "理解四个 generic 如何决定端口位宽与通道数",
+            "能解释 Mem_Adr、Mem_Data、Mem_Wr、FirstSplAddr 等存储端口用途",
+            "掌握 PreTrigSpls/TotalSpls/SelfTrigLo/Hi 等寄存器端口的作用"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd"
+          ],
+          "minimal_modules": [
+            "data_rec (entity generics)",
+            "数据/触发端口",
+            "存储侧端口 (Mem_*)"
+          ],
+          "practice_task": "给定 NumOfInputs_g=6、InputWidth_g=12、MemoryDepth_g=256，计算 Mem_Data、Mem_Adr、PreTrigSpls、TotalSpls 的位宽，并解释原因。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "记录状态机：Idle→PreTrig→WaitTrig→PostTrig→Done",
+          "order": 2,
+          "filename": "u3-l2-recorder-state-machine.md",
+          "level": "intermediate",
+          "topic": "讲解记录器五状态机的迁移条件：Arm 触发 PreTrig、预触发采样满进入 WaitTrig、TrigNow 进入 PostTrig、TotalSpls 采满进入 Done、Ack 回 Idle 或再次 Arm 重新录制。",
+          "learning_goals": [
+            "能画出五个状态的迁移图及触发条件",
+            "理解 Done 后读状态寄存器自动产生 Ack 回 Idle 的机制",
+            "掌握状态码 Reg_Stat_State*_c 与 State 端口的映射"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd"
+          ],
+          "minimal_modules": [
+            "State_t 类型与状态枚举",
+            "p_comb 中的 case r.State_2 状态迁移",
+            "Ack 自动确认逻辑"
+          ],
+          "practice_task": "画出状态机迁移图，标注每个迁移的精确条件（参考 p_comb 中 case r.State_2 分支），并说明 Done 状态下 Arm 与 Ack 分别导致什么结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "两进程法与 Stage0-3 流水线",
+          "order": 3,
+          "filename": "u3-l3-two-process-and-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 data_rec 采用的两进程设计（组合 p_comb + 时序 p_seq）以及 record r 的结构，并梳理 Stage0~3 的流水线寄存器如何搬运 In_Vld、Trig_In、Data 与 Done。",
+          "learning_goals": [
+            "理解两进程法中 v := r 的模板与 r_next 的更新方式",
+            "能说出每个流水级（Stage0/1/2/3）寄存的信号与用途",
+            "掌握带数字后缀信号（如 Data_2、AdrCnt_3）表示所处流水级"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd"
+          ],
+          "minimal_modules": [
+            "data_rec_r record",
+            "p_comb (组合进程)",
+            "p_seq (时序进程)",
+            "流水级搬运 (In_Vld/Trig_In/Data/Done)"
+          ],
+          "practice_task": "在 data_rec.vhd 中标注出 Stage0~3 各自处理的逻辑，并解释为什么 Trigger_2、MemWr_3、FirstSpl_3 使用带后缀的命名。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "地址计数器、采样计数器与触发长度",
+          "order": 4,
+          "filename": "u3-l4-address-and-sample-counters.md",
+          "level": "intermediate",
+          "topic": "讲解环形地址计数器 AdrCnt（在 Idle/Done 复位、到 MemoryDepth-1 回绕）、采样计数器 SplCnt（WaitTrig 时预置为 PreTrigSpls+1，之后随有效样本递增）以及它们如何配合 PreTrigSpls/TotalSpls 决定录制窗口。",
+          "learning_goals": [
+            "理解 AdrCnt 的回绕逻辑与复位条件",
+            "掌握 SplCnt 如何同时计前/后触发样本从而判断 PostTrig 结束",
+            "能解释 PreTrigSpls=0 时直接跳到 WaitTrig 的特例"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd"
+          ],
+          "minimal_modules": [
+            "AdrCnt_2/AdrCnt_3 地址计数",
+            "SplCnt_2 采样计数",
+            "PreTrigSpls/TotalSpls 长度配置"
+          ],
+          "practice_task": "设 MemoryDepth_g=128、PreTrigSpls=30、TotalSpls=100，逐步推演从 Arm 到 Done 过程中 AdrCnt 与 SplCnt 的变化，并指出触发时刻两者的值。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "非二次幂深度与 FirstSplAddr 起始地址",
+          "order": 5,
+          "filename": "u3-l5-non-power-of-two-and-firstspl.md",
+          "level": "intermediate",
+          "topic": "讲解 NonPwr2MemDepth_c 常量如何区分二次幂与非二次幂存储深度，以及触发时刻 FirstSplAddr 的计算：二次幂用简单减法，非二次幂需判断借位并加回 MemoryDepth_g。",
+          "learning_goals": [
+            "理解为何非二次幂深度需要更复杂的地址处理",
+            "掌握 FirstSplAddr 在两种情况下的计算公式",
+            "知道 FirstSplAddr 如何用于读出时把环形缓冲对齐成线性数据"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_vivado_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "NonPwr2MemDepth_c 判定",
+            "FirstSpl_3 计算逻辑",
+            "封装层 g_pwr2mem/g_npwr2mem 读地址生成"
+          ],
+          "practice_task": "对比 data_rec 中 if not NonPwr2MemDepth_c 分支与 else 分支的 FirstSpl 计算，并说明封装层 g_npwr2mem generate 块如何再次处理读地址回绕。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "触发机制：外部、软件与自触发",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "触发源总览与 TrigEna 掩码",
+          "order": 1,
+          "filename": "u4-l1-trigger-sources-and-masking.md",
+          "level": "intermediate",
+          "topic": "讲解三种触发源（外部 ExtTrigPending、软件 SwTrigPending、自触发 StTrig）如何通过 TrigEna 寄存器的三位掩码选择性地合成 TrigNow，并受 In_Vld 门控。",
+          "learning_goals": [
+            "理解 TrigEna 的 Ext/Sw/Self 三个位索引常量",
+            "掌握 TrigNow_2 的合成公式与 In_Vld 门控作用",
+            "能区分电平/边沿/sticky 三类触发源的 pending 处理"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_register_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "TrigEna 端口与位索引",
+            "TrigNow_2 触发合成",
+            "ExtTrigPending_2 / SwTrigPending_2"
+          ],
+          "practice_task": "写出只允许软件触发、只允许自触发、同时允许外部+自触发三种配置下应写入 Reg_TrigEna_Addr_c 的值，并解释 TrigNow 为何还要 and r.In_Vld(1)。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "外部触发：边沿检测与多路 OR",
+          "order": 2,
+          "filename": "u4-l2-external-trigger.md",
+          "level": "intermediate",
+          "topic": "讲解外部触发 Trig_In 如何经两拍流水后做上升沿检测，配合 EnableExtTrig 按位使能，最多 8 路外部触发 OR 合成 ExtTrigPending，并在进入 PreTrig 时清 pending。",
+          "learning_goals": [
+            "理解外部触发的上升沿检测原理（当前为 1 上一拍为 0）",
+            "掌握 EnableExtTrig 逐路使能与多路 OR 的语义",
+            "知道 ExtTrigPending 在重新 Arm（PreTrig）时被清除"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_vivado_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "Trig_In 两拍流水",
+            "边沿检测 + EnableExtTrig 使能",
+            "ExtTrigPending_2 置位/清除"
+          ],
+          "practice_task": "参考 top_tb_case5，设计一个场景：4 路外部触发中只使能第 2 路，向其余路发脉冲不应触发录制，说明代码中哪几行保证了这一点。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "软件触发：sticky pending 行为",
+          "order": 3,
+          "filename": "u4-l3-software-trigger.md",
+          "level": "intermediate",
+          "topic": "讲解 SwTrig 寄存器位的 sticky pending 行为：写 1 后 SwTrigPending 一直保持，直到进入 PreTrig 状态被清除；因此先置软件触发再 Arm 也会立即触发。",
+          "learning_goals": [
+            "理解软件触发的 sticky（粘滞）pending 语义",
+            "掌握 SwTrigPending 在 PreTrig 被清除的时机",
+            "能解释 free-running（自循环）模式如何借助软件触发实现"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_register_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "SwTrig 端口",
+            "SwTrigPending_2 置位/清除",
+            "EPICS SWTRIG 默认为 1 的含义"
+          ],
+          "practice_task": "参考 top_tb_case3 中先写 SwTrig 再 Arm 也能触发的用例，解释 sticky pending 为何让 free-running 模式可行，并说明触发后需要把 SwTrig 写回 0 吗、为什么。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "自触发：范围检测、符号与进入/退出",
+          "order": 4,
+          "filename": "u4-l4-self-trigger.md",
+          "level": "intermediate",
+          "topic": "讲解自触发如何在 Stage1 判断每个通道样本是否落在 SelfTrigLo..Hi 范围内（先试 unsigned 再试 signed），在 Stage2 检测进入/退出边沿，并由 SelfTrigChEna 选择通道、SelfTrigOnEnter/OnExit 选择方向。",
+          "learning_goals": [
+            "理解 StInRange 同时按 unsigned 与 signed 判定的设计",
+            "掌握 StEnter/StExit 边沿检测与通道使能掩码",
+            "能区分 OnEnter（进入范围触发）与 OnExit（离开范围触发）"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_register_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "StInRange_1/StInRangeLast_1 范围判定",
+            "StEnter_2/StExit_2 边沿检测",
+            "SelfTrigChEna/OnEnter/OnExit 配置"
+          ],
+          "practice_task": "参考 top_tb_case2，给出一个跨零点的 signed 范围（如 -10..10）配置，预测当样本从 -20 线性增长到 +20 时，OnExit 与 OnEnter 分别在哪个样本触发，并用代码行佐证。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "最小录制间隔、计数器与 Trig_Out 转发",
+          "order": 5,
+          "filename": "u4-l5-minrepperiod-counters-trigout.md",
+          "level": "intermediate",
+          "topic": "讲解 MinRecPeriod 如何抑制两次录制之间过短的触发（LastRecCnt 倒计时、期间 pending 被清除），TrigCnt 累计触发次数，DoneTime 统计 Done 持续时钟数，以及 v2.4 新增 Trig_Out 转发内部 Trigger 信号。",
+          "learning_goals": [
+            "理解 MinRecPeriod 抑制背靠背触发的计数与 pending 清除逻辑",
+            "掌握 TrigCnt 与 DoneTime 计数器的增减与清零条件",
+            "了解 Trig_Out 转发端口与 TrigForwarding_g 的关系"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_vivado_wrp.vhd",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "LastRecCnt_2 最小间隔计数",
+            "TrigCnt_3 / DoneTime_3 计数器",
+            "Trig_Out <= r.Trigger_2 转发"
+          ],
+          "practice_task": "参考 top_tb_case1 中 MinRecPeriod 测试，解释为什么第二次 Arm 后立即触发不会录制、需等待一段时间后才生效；再说明 Trig_Out 与 Done_Irq 分别在哪个时钟域、转发的各是什么事件。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Vivado 封装：AXI、时钟域与存储",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AXI4 Slave 寄存器与存储解码",
+          "order": 1,
+          "filename": "u5-l1-axi-register-memory-decode.md",
+          "level": "advanced",
+          "topic": "讲解封装层如何用 psi_common_axi_slave_ipif 把 AXI 访问拆成 32 个寄存器（reg_rd/reg_wr/reg_wdata/reg_rdata）和一块存储（mem_addr/mem_wr/mem_rdata），以及寄存器解码、回读与默认复位值。",
+          "learning_goals": [
+            "理解 USER_SLV_NUM_REG 与 reg_rd/wr/wdata/rdata 信号组的作用",
+            "掌握每个寄存器如何从 reg_wdata 抽取字段并回写到 reg_rdata",
+            "知道 RegRstVal_c 默认使能所有外部触发的用意"
+          ],
+          "source_files": [
+            "hdl/data_rec_vivado_wrp.vhd",
+            "hdl/data_rec_register_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "psi_common_axi_slave_ipif 实例",
+            "寄存器解码与回读 (reg_rdata)",
+            "RegRstVal_c 复位默认值"
+          ],
+          "practice_task": "在 data_rec_vivado_wrp 中找到 Reg_Cfg_Addr_c 的 Arm 位如何被解码成单拍脉冲 reg_cfg_arm，并解释为何 EnableExtTrig 寄存器复位默认为全 1。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "跨时钟域：status_cc 与 pulse_cc 策略",
+          "order": 2,
+          "filename": "u5-l2-clock-domain-crossing.md",
+          "level": "advanced",
+          "topic": "讲解封装层在数据时钟域（Clk）与 AXI 时钟域（s00_axi_aclk）之间如何用 psi_common_status_cc 同步多比特状态/配置，用 psi_common_pulse_cc 同步单拍脉冲（Arm/Ack/TrigCntClr/Done），以及各信号被分到哪条 CC。",
+          "learning_goals": [
+            "区分状态型（status_cc）与脉冲型（pulse_cc）跨时钟域适用场景",
+            "掌握哪些配置从 AXI→Data（status）、哪些脉冲从 AXI→Data（pulse）",
+            "理解 Done 中断如何经 pulse_cc 跨到 AXI 域产生 Done_Irq"
+          ],
+          "source_files": [
+            "hdl/data_rec_vivado_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "psi_common_status_cc (ToAxi/FromAxi 两路)",
+            "psi_common_pulse_cc (FromAxi/ToAxi 两路)",
+            "CcS/CcP 信号拼接范围定义"
+          ],
+          "practice_task": "为封装层画一张跨时钟域信号流向图，标明 State/TrigCnt/DoneTime 走 status、Arm/Ack/TrigCntClr/Done 走 pulse，并解释 Arm 为何不能走 status_cc。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "录制存储：每通道双端口 RAM 与读出",
+          "order": 3,
+          "filename": "u5-l3-recording-memory-and-readout.md",
+          "level": "advanced",
+          "topic": "讲解封装层为每个通道实例化一块 psi_common_tdp_ram（A 口写来自记录器、B 口读来自 AXI），AXI 读地址如何叠加 FirstSplAddr 对齐环形缓冲，以及读出时按通道 mux 并做符号扩展。",
+          "learning_goals": [
+            "理解每通道独立 TDP RAM 的写/读端口分配与两个时钟域",
+            "掌握 AxiMemAdr 叠加 FirstSplAddr 的对齐与（非二次幂）回绕",
+            "知道 mem_read_mux 如何按 AxiMemSel 选通道并做符号扩展"
+          ],
+          "source_files": [
+            "hdl/data_rec_vivado_wrp.vhd",
+            "hdl/data_rec.vhd"
+          ],
+          "minimal_modules": [
+            "psi_common_tdp_ram 每通道实例 (g_mem)",
+            "AxiMemAdr 地址生成 (g_pwr2mem/g_npwr2mem)",
+            "mem_read_mux 读出 mux 与符号扩展"
+          ],
+          "practice_task": "解释为何读地址要先加 FirstSplAddr 再（非二次幂时）判断是否超过 MemoryDepth 回绕；并说明符号扩展 mem_rdata(31 downto InputWidth_g) 的作用对 16 位有符号数据读出的影响。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "验证、集成与二次开发",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "仿真测试平台架构与公共过程",
+          "order": 1,
+          "filename": "u6-l1-testbench-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 top_tb 顶层测试平台的双时钟驱动、AXI master/slave 记录类型、DUT 实例化，以及 top_tb_pkg 中的公共过程 InputSamples/InputSamplesNoCh/CheckData/CheckDataNoCh 如何生成激励与校验数据。",
+          "learning_goals": [
+            "理解 top_tb 如何用两个独立时钟（160M 数据/125M AXI）驱动 DUT",
+            "掌握 InputSamples 按通道偏移生成样本并在指定时刻发触发的机制",
+            "知道 CheckData 经由 AXI 读 MemAddr 并用 axi_single_expect 比对"
+          ],
+          "source_files": [
+            "testbench/top_tb/top_tb.vhd",
+            "testbench/top_tb/top_tb_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "top_tb (DUT 实例 + 双时钟)",
+            "InputSamples/InputSamplesNoCh 激励过程",
+            "CheckData/CheckDataNoCh 校验过程"
+          ],
+          "practice_task": "阅读 top_tb_pkg 中 InputSamples，说明样本值如何由 PatternCnt_v 与通道偏移组合而成，并解释 CheckData 中期望值 ExpVal_v = ch*2**(W-3)+spl+startValue 的来源。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "六个测试用例的覆盖设计",
+          "order": 2,
+          "filename": "u6-l2-test-cases-coverage.md",
+          "level": "advanced",
+          "topic": "逐一讲解 case0~case5 六个测试用例的覆盖目标：基本功能与边沿触发、边界条件与最小录制间隔、自触发（含 signed 跨零点）、软件触发 sticky、异常配置恢复、多外部触发 OR 与逐路使能。",
+          "learning_goals": [
+            "能说出每个 case 验证的核心功能点",
+            "理解 case0 中触发设为高电平仍不触发的边沿检测验证",
+            "掌握 case4 非法配置（PreTrig>Total、Total=0）后的恢复验证思路"
+          ],
+          "source_files": [
+            "testbench/top_tb/top_tb_case0_pkg.vhd",
+            "testbench/top_tb/top_tb_case1_pkg.vhd",
+            "testbench/top_tb/top_tb_case2_pkg.vhd",
+            "testbench/top_tb/top_tb_case3_pkg.vhd",
+            "testbench/top_tb/top_tb_case4_pkg.vhd",
+            "testbench/top_tb/top_tb_case5_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "case0 基本功能",
+            "case1 边界/MinRecPeriod",
+            "case2 自触发",
+            "case3 软件触发",
+            "case4 异常恢复",
+            "case5 多外部触发"
+          ],
+          "practice_task": "为六个 case 制作一张「验证功能点—关键代码行—期望状态」对照表，并挑选 case2 中任一 signed 跨零点子用例手算首个触发样本值。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "EPICS 控制系统集成",
+          "order": 3,
+          "filename": "u6-l3-epics-integration.md",
+          "level": "advanced",
+          "topic": "讲解 epics/ 下两个 Python 生成器如何根据通道数/外部触发数生成 EPICS db 模板（CONTROL.tpl，含状态、Arm、触发源、自触发、数据 aai 记录）与控制面板（.ui），以及模板如何经 regDev 映射到寄存器/存储地址。",
+          "learning_goals": [
+            "理解 GenerateDataRecTemplates 如何把通道/触发数展开成 db 记录",
+            "掌握 CONTROL.tpl 中各 record 对应的寄存器地址与字段",
+            "知道 EPICS 状态机如何监听 Done 并触发数据回读与自动 re-arm"
+          ],
+          "source_files": [
+            "epics/GenerateDataRecTemplates.py",
+            "epics/GenerateDataRecPanel.py",
+            "epics/TemplateInput/CONTROL.tpl",
+            "epics/test.bat",
+            "epics/README.txt"
+          ],
+          "minimal_modules": [
+            "模板生成 (GenerateDataRecTemplates.py)",
+            "面板生成 (GenerateDataRecPanel.py)",
+            "CONTROL.tpl 占位符替换",
+            "regDev 地址映射"
+          ],
+          "practice_task": "按 epics/test.bat 运行两个生成器生成 test.template 与 test.ui，然后对照 CONTROL.tpl 找出 STATUS、ARM、TRIGSRC、SELFTRIG-CTRL、DATA-CH0 各自映射的寄存器地址，并与 data_rec_register_pkg 核对一致。",
+          "depends_on": [
+            "u2-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "二次开发：扩展通道、触发源与寄存器",
+          "order": 4,
+          "filename": "u6-l4-extension-and-customization.md",
+          "level": "advanced",
+          "topic": "在理解全栈的基础上讨论二次开发：调整 generics、新增触发源、扩展寄存器地图与对应 EPICS/db、修改存储读出位宽，以及打包升级版本号、维护 component.xml/xgui 一致性的注意事项。",
+          "learning_goals": [
+            "能评估新增触发源需要改动 data_rec 哪些段落（pending/TrigEna 合成）",
+            "掌握新增寄存器时 register_pkg、封装解码、EPICS 模板三处的联动修改",
+            "理解打包版本号、component.xml 文件集与 xgui 参数同步的重要性"
+          ],
+          "source_files": [
+            "hdl/data_rec.vhd",
+            "hdl/data_rec_register_pkg.vhd",
+            "hdl/data_rec_vivado_wrp.vhd",
+            "scripts/package.tcl",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "触发源扩展 (TrigNow 合成)",
+            "寄存器地图扩展 (register_pkg + 解码)",
+            "存储/读出位宽调整",
+            "IP 打包与版本同步"
+          ],
+          "practice_task": "设计一个「每通道独立自触发阈值」的扩展方案：列出需要修改的源文件、新增的寄存器地址与字段、封装层解码改动、以及 EPICS 模板需要新生成的记录，给出改动清单（不要求实现）。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

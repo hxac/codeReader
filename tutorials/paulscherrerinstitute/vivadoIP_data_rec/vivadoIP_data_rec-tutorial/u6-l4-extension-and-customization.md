@@ -1,0 +1,480 @@
+# 二次开发：扩展通道、触发源与寄存器
+
+## 1. 本讲目标
+
+本讲是整本学习手册的收尾篇。前面二十二讲我们一直在「读懂」`data_rec`：它怎么跑、怎么触发、怎么存、怎么被 AXI/EPICS 访问。本讲反过来——假设你要「改造」它：新增一类触发源、加几个寄存器、改样本位宽、或者升级版本号重新打包发布。
+
+学完后你应当能够：
+
+- 评估「新增一类触发源」需要改动 [`hdl/data_rec.vhd`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd) 的哪些段落：pending 产生、`TrigEna` 掩码、`TrigNow_2` 合成、pending 清除。
+- 掌握「新增一个寄存器」时**三处必须联动**的修改：[`data_rec_register_pkg.vhd`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd) 地址常量、封装层 [`data_rec_vivado_wrp.vhd`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd) 的解码/回读/跨时钟域、EPICS [`CONTROL.tpl`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl) + 生成器。
+- 理解样本位宽（`InputWidth_g`）改动如何牵动存储写端口、读出符号扩展与 AXI 固定 32 位数据通道这一硬约束。
+- 理解版本升级时 [`scripts/package.tcl`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl)、[`component.xml`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml) 文件集、[`xgui/data_rec_v2_4.tcl`](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/xgui/data_rec_v2_4.tcl) 参数页乃至 VHDL 库名 `data_rec_2_4` 为何必须同步。
+
+本讲依赖 u6-l2（测试用例覆盖）、u6-l3（EPICS 集成）与 u5-l3（存储与读出）。它的视角是「工程方法论」：不再逐行讲代码怎么工作，而是讲「改一个点，要同步哪些面」。
+
+## 2. 前置知识
+
+本讲默认你已经读过前面几讲的结论。这里只用一句话回顾最关键的几个：
+
+- **两进程法与流水级后缀**（u3-l3）：`data_rec.vhd` 用 `p_comb`/`p_seq` 两进程，信号名后的数字（`_0`/`_1`/`_2`/`_3`）表示它处于第几级流水。新增逻辑必须挂到正确的 Stage。
+- **三类触发源 + `TrigEna` 掩码 + `TrigNow_2` 合成**（u4-l1~u4-l4）：外部触发 = 边沿检测 + sticky pending；软件触发 = 电平 + sticky pending；自触发 = 边沿检测 + 非锁存瞬时变量。三者各与 `TrigEna` 一位相与后或起来，再 `and r.In_Vld(1)` 得到 `TrigNow_2`。
+- **寄存器地址地图**（u2-l2）：13 个寄存器位于 `0x0000`–`0x0030`，存储区从 `0x0080` 开始；`ToWordAddr(ByteAddr)=ByteAddr/4`、`MemAddr(ch,spl,d)` 给出任意样本字节地址。
+- **AXI IPIF 解码三风格**（u5-l1）：脉冲解码 `reg_wr and reg_wdata(bit)`、电平解码仅切 `reg_wdata`、回读驱动 `reg_rdata`。
+- **跨时钟域判据**（u5-l2）：「值走 `status_cc`、事件走 `pulse_cc`」；多比特值用链式 `subtype` 拼成宽向量整体采样。
+- **存储读出**（u5-l3）：每通道一块 `psi_common_tdp_ram`，A 口写（数据域）、B 口读（AXI 域）；读地址叠加 `FirstSplAddr` 把环形展开成线性；窄于 32 位的有符号数据做符号扩展。
+- **EPICS 代码生成**（u6-l3）：`CONTROL.tpl` 是带 `<占位符>` 的母版，`GenerateDataRecTemplates.py` 按通道/触发数展开；regDev 把 PV 绑到 `@base:offset T=type`。
+
+> 一句话方法论：**这个 IP 的每一处设计都在多个文件里「镜像」存在**（generic、端口、地址、GUI 参数、库版本……）。二次开发的核心难度不在「写新逻辑」，而在「把所有镜像同步改对」。本讲反复用 v2.4 刚加的 `TrigForwarding_g`/`Trig_Out` 作为真实范例——它是「一个新特性正确落地」的完整标本。
+
+## 3. 本讲源码地图
+
+本讲横跨整个仓库，因为二次开发本就横跨整个仓库：
+
+| 文件 | 二次开发时它的角色 |
+| --- | --- |
+| [hdl/data_rec.vhd](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd) | **核心记录器**。改触发源、改位宽、改计数都在这里。 |
+| [hdl/data_rec_register_pkg.vhd](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd) | **地址真相源**。新增寄存器先在这里加常量。 |
+| [hdl/data_rec_vivado_wrp.vhd](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd) | **封装层**。AXI 解码、回读、跨时钟域、存储读出全在这里。 |
+| [scripts/package.tcl](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl) | **打包菜谱**。声明 IP 名称/版本/源码/GUI 参数/可选端口。 |
+| [component.xml](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml) | **IP-XACT 身份证**。`package_ip` 自动生成，Vivado 实际读它。 |
+| [xgui/data_rec_v2_4.tcl](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/xgui/data_rec_v2_4.tcl) | **参数 GUI 驱动**。文件名带版本号。 |
+| [Changelog.md](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/Changelog.md) | **版本变更记录**。每次发布要写。 |
+| [epics/TemplateInput/CONTROL.tpl](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl) | **EPICS db 母版**。新增寄存器要在这里加对应 record。 |
+| [epics/GenerateDataRecTemplates.py](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/GenerateDataRecTemplates.py) | **db 生成器**。按通道数展开的 record 在这里加循环。 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 触发源扩展：往 TrigNow 合成里加一类源
+
+#### 4.1.1 概念说明
+
+「触发源」是 `data_rec` 最有特色的部分，也是最常被要求扩展的部分。典型需求如：「我想加一个『当外部 Busy 信号撤销时』触发」「我想加一个『计数器达到某值时』触发」。
+
+从 u4-l1 我们知道，所有触发源最终都汇聚到一个单拍信号 `TrigNow_2`，它驱动状态机 `WaitTrig → PostTrig` 的迁移。所以「新增一类触发源」的本质是：**在 `TrigNow_2` 的合成公式里再 OR 进一个新项**。但要正确地 OR 进去，新项必须遵守三条既定规则：
+
+1. **产生一个与现有三类同性质的「请求信号」**（pending 或瞬时变量），并挂到正确的流水级（一般是 Stage2，与 `TrigNow_2` 对齐）。
+2. **受 `TrigEna` 一个新位门控**（让软件能选择是否启用这类源）。
+3. **在正确的时机被清除**（进入 `PreTrig_s` 抹掉陈旧请求；`MinRecPeriod` 抑制期内被丢弃）。
+
+> 关键认知：现有 `TrigEna` 只有 3 位（`std_logic_vector(2 downto 0)`），刚好对应三类源。**加第四类源必然要扩宽 `TrigEna`**，而 `TrigEna` 是端口，扩宽它会牵动封装层与跨时钟域——这是触发源扩展的「咽喉」，4.1.3 会精确指出。
+
+#### 4.1.2 核心流程
+
+新增一类触发源（记为 `NewTrig`）的标准改动流程：
+
+```
+1. 在 register_pkg 加 Reg_TrigEna_NewIdx_c（新位索引，=3）
+2. 在 data_rec entity 把 TrigEna 端口从 (2 downto 0) 扩到 (3 downto 0)
+3. 在 p_comb 产生 NewTrig 请求（选一种范式）：
+     - 边沿+sticky pending  → 仿 ExtTrigPending_2
+     - 电平+sticky pending  → 仿 SwTrigPending_2
+     - 边沿+瞬时变量        → 仿 StTrig_2
+4. 把新项 OR 进 TrigNow_2
+5. 在 PreTrig_s（与 MinRecPeriod）清除新 pending（若用了 pending）
+6. 封装层同步：reg_trigena/port_trigena 扩宽、CDC subtype 扩宽、
+   EPICS TRIGSRC 加一个枚举值 = 2**3 = 8
+```
+
+三种「请求范式」的区别决定你该抄哪一段：
+
+| 范式 | 请求保持？ | 代表信号 | 适用场景 |
+| --- | --- | --- | --- |
+| 边沿 + sticky pending | 上升沿置 1，PreTrig 清 | `ExtTrigPending_2` | 短脉冲硬件触发（可能早于 Arm 到来） |
+| 电平 + sticky pending | 电平为 1 即置，PreTrig 清 | `SwTrigPending_2` | 软件持续请求、free-running |
+| 边沿 + 瞬时变量 | 不保持，当拍有效 | `StTrig_2` | 由数据流实时判定（错过就错过） |
+
+#### 4.1.3 源码精读
+
+**`TrigNow_2` 合成公式**，[hdl/data_rec.vhd:224-228](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L224-L228)：三类源各与 `TrigEna` 一位相与后或起来，最后 `and r.In_Vld(1)` 门控到有效样本上。新增源就是在这里 OR 进 `(NewTrigReq and TrigEna(Reg_TrigEna_NewIdx_c))`。注意它引用的是 `Reg_TrigEna_*Idx_c` 常量而非裸数字——这正是为了让你加新位时只改常量、不必改这行。
+
+**`TrigEna` 端口宽度（咽喉）**，[hdl/data_rec.vhd:66](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L66)：`TrigEna : in std_logic_vector(2 downto 0)` 写死 3 位。加第四类源必须改成 `(3 downto 0)`，并连带改封装层。
+
+**外部触发 pending 范式（边沿 + sticky）**，[hdl/data_rec.vhd:207-215](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L207-L215)：进入 `PreTrig_s` 先清 `ExtTrigPending_2`，再用 `for` 循环对每路做上升沿检测（`r.Trig_In(0)(i)='1' and r.Trig_In(1)(i)='0'`）并受 `EnableExtTrig(i)` 逐路使能，命中即置位。抄这段可得到一个边沿敏感、会锁存的新 pending。
+
+**软件触发 pending 范式（电平 + sticky）**，[hdl/data_rec.vhd:217-222](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L217-L222)：`if SwTrig='1' then ... elsif r.State_2=PreTrig_s then ... '0'`——`if/elsif` 顺序保证「置位优先于清除」，这是 free-running 成立的关键（u4-l3）。抄这段可得到电平置位、PreTrig 清的 sticky pending。
+
+**`MinRecPeriod` 抑制期清除 pending**，[hdl/data_rec.vhd:231-241](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L231-L241)：冷却期内 `TrigNow_2 := '0'` 并把 `ExtTrigPending_2`/`SwTrigPending_2` 清 0（「太早的请求被丢弃而非延后」，u4-l5）。**新增的 sticky pending 必须在这里加一行清除**，否则冷却期内积累的请求会在冷却结束时一次全部触发。
+
+**`TrigEna` 位索引常量**，[hdl/data_rec_register_pkg.vhd:50-53](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd#L50-L53)：`ExtIdx_c=0/SwIdx_c=1/SelfIdx_c=2`。新增 `Reg_TrigEna_NewIdx_c := 3` 即可，EPICS 侧对应的枚举值就是 `2**3 = 8`。
+
+#### 4.1.4 代码实践
+
+**目标**：用「源码阅读」验证「`TrigEna` 是 3 位、且每类源各占一位」这一咽喉事实，并定位新增第四类源要改的精确行号。
+
+**步骤**：
+
+1. 打开 [hdl/data_rec.vhd:66](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L66)，确认 `TrigEna` 端口声明宽度。
+2. 在 [hdl/data_rec.vhd:224-228](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L224-L228) 数出 `TrigNow_2` 公式里 OR 了几个源、各用 `TrigEna` 的哪一位。
+3. 在 [hdl/data_rec_register_pkg.vhd:50-53](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd#L50-L53) 数出有几个 `Reg_TrigEna_*Idx_c` 常量。
+
+**观察**：端口 3 位、公式 3 个 OR 项、常量 3 个——三者一一对应，恰好把 3 位用满。这说明 **`TrigEna` 没有空闲位**，新增源必须扩宽。
+
+**预期结果**：你应得出一张「新增第四类源的最小行号清单」：改 entity 第 66 行端口宽度、加第 53 行后一个新常量、在第 228 行前 OR 进新项、在第 237/238 行后清新 pending。这正是 4.1.2 流程的代码落点。
+
+> 待本地验证：扩宽 `TrigEna` 后，封装层 `reg_trigena`/`port_trigena`（[hdl/data_rec_vivado_wrp.vhd:142](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L142) 与 [第 162 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L162)）与 CDC 子类型 `CcSFromAxi_TrigEna_Rng`（[第 190 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L190)）也要同步扩宽，否则综合会报位宽不匹配。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：若新触发源是「当某个外部计数器达到阈值时触发」，且阈值事件是一个单拍脉冲、可能早于 Arm 到来，应抄哪种范式？为什么自触发范式（`StTrig_2`）不合适？
+
+**答案**：抄**边沿 + sticky pending**（`ExtTrigPending_2` 范式）。因为脉冲可能早于 Arm 到来，必须锁存成 pending 等到 `WaitTrig_s` 才能被消费。自触发范式（[hdl/data_rec.vhd:199-205](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L199-L205)）是瞬时变量、不锁存，脉冲错过就永远错过——它只适合「由实时数据流判定、每个有效样本都重新评估」的场景。
+
+**练习 2**：新增的 sticky pending 为什么必须在 [hdl/data_rec.vhd:231-241](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L231-L241) 的 `MinRecPeriod` 分支里也加一行清除？
+
+**答案**：`MinRecPeriod` 是两次录制之间的冷却期（u4-l5）。若不清新 pending，冷却期内到达的请求会一直锁存，冷却一结束就立刻触发——相当于冷却被旁路，背靠背录制无法抑制。现有代码对 `ExtTrigPending_2`/`SwTrigPending_2` 都做了清除（第 237–238 行），新 pending 必须同等处理。
+
+---
+
+### 4.2 寄存器地图扩展：register_pkg + 封装解码 + 跨时钟域
+
+#### 4.2.1 概念说明
+
+「加一个寄存器」是二次开发最高频的需求，例如：暴露一个内部计数器给软件读、加一个配置位、加一组阈值。u6-l3 末尾已经埋下伏笔：**改寄存器地图必须三处联动**——`register_pkg`（地址常量）、封装层（解码 + 回读 + 跨时钟域）、EPICS 模板（软件访问）。本节把这三处讲透。
+
+先看地址地图的「硬边界」。封装层用 `psi_common_axi_slave_ipif` 声明了固定 32 个寄存器字（`USER_SLV_NUM_REG`），存储区紧随其后从 `0x0080` 开始：
+
+- 寄存器区：`0x0000`–`0x007C`，共 32 个 32 位字（`32 × 4 = 128 = 0x80` 字节）。
+- 当前已用：`0x0000`–`0x0030`（13 个，寄存器 0–12）。
+- 空闲：寄存器 13–31，即 `0x0034`–`0x007C`，共 **19 个空位**。
+- 越过 `0x007C` 就会撞上 `0x0080` 的存储区——这是不可逾越的上限。
+
+> 这是寄存器扩展的「天花板」：你最多还能加 19 个寄存器而不动存储区起点。若需求超过 19 个，必须同时把 `Mem_Addr_c`（与封装层 `use_mem_g` 的存储窗口）往后挪，并同步改所有引用 `Mem_Addr_c` 的地方（`MemAddr` 函数、EPICS 的 `MEM_WRD` 基址）。这属于较大改动，务必先评估。
+
+#### 4.2.2 核心流程
+
+新增一个 32 位寄存器 `Reg_Xxx`（字节地址 `0x0034`，字地址 13）的完整流程：
+
+```
+A. register_pkg（地址真相源）
+   1. 加 Reg_Xxx_Addr_c : integer := 16#0034#;
+   2. 若含字段位：加 Reg_Xxx_Foo_Idx_c（单 bit）或 Reg_Xxx_Foo_Sft_c（移位）
+
+B. 封装层 data_rec_vivado_wrp（IPIC ↔ 核心端口 翻译）
+   3. 声明 reg_xxx / port_xxx 信号（按读/写/读写方向）
+   4. 解码（三选一）：
+        - 脉冲：reg_xxx <= reg_wr(13) and reg_wdata(13)(bit);
+        - 电平：reg_xxx <= reg_wdata(13)(range);
+        - 回读：reg_rdata(13)(range) <= ...;
+   5. 跨时钟域路由：
+        - 电平/值 → 拼进 CcSFromAxIn 的 status_cc 向量（加 subtype）
+        - 脉冲   → 拼进 CcPFromAxIn 的 pulse_cc 向量（加常量位）
+   6. data_rec 实例的 port map 接 port_xxx
+   7. 若需非零复位默认：在 RegRstVal_c(13) 填值
+
+C. 核心记录器 data_rec（若新寄存器驱动核心逻辑）
+   8. entity 加 Xxx : in ... 端口
+   9. p_comb 里使用该端口
+
+D. EPICS（软件访问）
+   10. CONTROL.tpl 加一条 record，OUT/INP 写 @$(REG_WRD):0x34 T=...
+   11. 若按通道数展开 → 在 GenerateDataRecTemplates.py 加循环
+```
+
+「走 status 还是 pulse」的判据（u5-l2）在步骤 5 是关键：**值/配置走 `status_cc`，单拍事件走 `pulse_cc`**。判断方法——看封装层解码出的信号是「持续电平」还是「单拍脉冲」：若解码含 `reg_wr`（写脉冲，单拍）就是事件、走 pulse；若只切 `reg_wdata`（持续电平）就是值、走 status。
+
+#### 4.2.3 源码精读
+
+**`USER_SLV_NUM_REG` 与存储窗口边界**，[hdl/data_rec_vivado_wrp.vhd:116](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L116)：`USER_SLV_NUM_REG : integer := 32` 写死 32。配合 [hdl/data_rec_register_pkg.vhd:60](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd#L60) 的 `Mem_Addr_c := 16#0080#`，二者共同划定「寄存器区 32 字 / 存储区从 0x80 起」的边界。新增寄存器只能在 0x34–0x7C 内分配。
+
+**IPIC 信号组形态**，[hdl/data_rec_vivado_wrp.vhd:119-126](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L119-L126)：`reg_rd`/`reg_wr` 是 32 位单拍脉冲向量（每位对应一个字），`reg_wdata`/`reg_rdata` 是 32 个 32 位字的数组（`t_aslv32(0 to 31)`）。新寄存器就是这套数组的第 13 项。注意 `reg_rdata` 初始化为全 0（[第 120 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L120)），所以未驱动的高位读回是 0，安全。
+
+**解码三风格的现存范例**，[hdl/data_rec_vivado_wrp.vhd:316-328](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L316-L328)：
+- 脉冲解码：`reg_cfg_arm <= reg_wr(ToWordAddr(Reg_Cfg_Addr_c)) and reg_wdata(...)(Reg_Cfg_ArmIdx_c)`（[第 316 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L316)）——`Arm` 是单拍事件，走 `pulse_cc`。
+- 电平解码：`reg_pretrig <= reg_wdata(...)(reg_pretrig'left downto 0)`（[第 318 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L318)）——`PreTrigSpls` 是持续值，走 `status_cc`。
+- 逐路使能的电平解码：`reg_selftrigchena <= reg_wdata(...)(NumOfInputs_g-1 downto 0)`（[第 322 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L322)）——宽度随 generic 变化的范例，新增「按通道数变宽」的寄存器抄它。
+
+**回读范例**，[hdl/data_rec_vivado_wrp.vhd:331-342](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L331-L342)：把 `reg_*` 信号回写到对应 `reg_rdata` 字。只读寄存器（如 `TrigCnt`/`DoneTime`）的回读值来自 `CcSToAxOut`（数据域→AXI 域），见 [第 338-339 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L338-L339)。
+
+**`status_cc` 向量的链式 subtype 拼装**，[hdl/data_rec_vivado_wrp.vhd:183-196](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L183-L196)：从 `PreTrig_Rng` 起，每段 range 的上界都由上一段的 `'left+N` 推出，整条向量宽度 `CcSFromAxi_Width_c` 随各 generic（`MemoryDepth_g`/`InputWidth_g`/`NumOfInputs_g`/`TrigInputs_g`）自动伸缩。新增一个值类寄存器（如一组按通道变宽的阈值）就是在这条链尾端再加一段 subtype，并相应扩 `CcSFromAxIn`/`CcSFromAxOut` 与 `port_xxx <= CcSFromAxOut(NewRange)`（参考 [第 401-411 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L401-L411)）。
+
+**复位默认值数组**，[hdl/data_rec_vivado_wrp.vhd:222-223](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L222-L223)：`RegRstVal_c` 只为 `EnableExtTrig`（字地址 12）设了全 1 默认，其余全 0。若新寄存器需要上电非零默认（如某使能位 fail-safe），在这里加 `Reg_Xxx_Addr_c/4 => (others => '1')`。
+
+#### 4.2.4 代码实践
+
+**目标**：亲手在地址地图里「定位一个空位」，并验证三处联动的关系链。
+
+**步骤**：
+
+1. 在 [hdl/data_rec_register_pkg.vhd:22-60](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd#L22-L60) 列出当前已用地址，确认 `0x0034`（`Reg_EnableExtTrig_Addr_c=0x0030` 的下一个 4 字节对齐地址）是空闲的。
+2. 在 [hdl/data_rec_vivado_wrp.vhd:316-328](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L316-L328) 找到 `Reg_EnableExtTrig` 的解码行（[第 328 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L328)），确认它用的是「电平解码 + 宽度随 `TrigInputs_g` 变」的范式。
+3. 在 [epics/TemplateInput/CONTROL.tpl:133-138](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl#L133-L138) 找到 `EXTTRIG-SEL` 这条 record，确认它的 `OUT @$(REG_WRD):0x30` 正好对应 `Reg_EnableExtTrig_Addr_c`。
+
+**观察**：你会看到同一条「外部触发逐路使能」特性，在 `register_pkg`（地址 `0x30` + 无字段位常量，因为是整字）、封装层（[第 328 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L328) 电平解码）、EPICS（[第 136 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl#L136) `:0x30`）三处镜像出现。这就是「三处联动」的活样本。
+
+**预期结果**：若你在 `register_pkg` 加 `Reg_Xxx_Addr_c := 16#0034#`，就必须在封装层加一行 `reg_xxx <= reg_wdata(ToWordAddr(Reg_Xxx_Addr_c))(...)` 与（若需回读）`reg_rdata(13)(...) <= ...`，并在 EPICS 加 `OUT @$(REG_WRD):0x34`。三处的 `0x34` 必须三处一致——漏任何一处，软件读写都会落空或写错地方。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：新寄存器 `Reg_Xxx` 是一个「软件写 1 触发一次复位脉冲」的只写事件位。它应走 `status_cc` 还是 `pulse_cc`？封装层该用哪种解码风格？
+
+**答案**：走 `pulse_cc`（事件）。封装层用**脉冲解码**：`reg_xxx <= reg_wr(ToWordAddr(Reg_Xxx_Addr_c)) and reg_wdata(ToWordAddr(Reg_Xxx_Addr_c))(0)`，仿 [第 316-317 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L316-L317) 的 `reg_cfg_arm`。判据：解码含 `reg_wr`（写脉冲）→ 单拍事件 → 必须走 `pulse_cc` 才能跨时钟域精确复现一拍；若错走 `status_cc`，握手采样可能把这一拍拉长或与相邻值撕裂。
+
+**练习 2**：你需要加 20 个新寄存器。当前空闲 19 个（0x34–0x7C）。怎么办？
+
+**答案**：超过 19 个就撞上了 `0x0080` 的存储区。两个选择：(a) 把 `Mem_Addr_c` 与封装层存储窗口起点整体后移（如移到 `0x0100`），并同步改 `MemAddr` 函数、EPICS `MEM_WRD`、`C_S00_AXI_ADDR_WIDTH`（若超出当前 16 KiB 还要加宽地址）；(b) 把多个小字段压进一个 32 位寄存器（像 `SelfTrigCfg` 那样，[hdl/data_rec_register_pkg.vhd:38-41](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_register_pkg.vhd#L38-L41) 把三段压一字）。优先选 (b) 省地址，(a) 是最后手段。
+
+---
+
+### 4.3 存储/读出位宽与样本格式调整
+
+#### 4.3.1 概念说明
+
+样本位宽由 generic `InputWidth_g`（封装层允许 1–32，[hdl/data_rec_vivado_wrp.vhd:28](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L28)）决定。它牵动一长串位宽推导：数据端口、`Mem_Data` 总宽、自触发阈值端口、存储 RAM 宽度、读出符号扩展。本节讲清「改位宽」要同步哪些面，以及一条**硬架构约束**——AXI 数据通道固定 32 位。
+
+`InputWidth_g` 上限之所以是 32，不是任意数字：AXI4 Slave 的 `s00_axi_rdata`/`s00_axi_wdata` 写死 32 位（[hdl/data_rec_vivado_wrp.vhd:75](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L75) 与 [第 92 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L92)）。软件一次 AXI 读只拿 32 位，所以一个样本最多 32 位才能在一拍内读出。**若你需要 >32 位样本（如 64 位），就必须改 AXI 数据总线宽度**——这牵动 `component.xml` 的端口位宽、`psi_common_axi_slave_ipif` 的 `axi_data_width_g`、读出 mux、EPICS 的 `T=int32`/`FTVL=LONG` 等一整条链，属于重大改动。
+
+读出侧还有一个**符号扩展**约定：窄于 32 位的有符号样本，高位用符号位填满 32 位，让软件按 `int32` 解读负数正确。
+
+#### 4.3.2 核心流程
+
+样本位宽（`InputWidth_g`）在系统里的传播链：
+
+```
+InputWidth_g (封装层 generic, 1..32)
+  ├─ data_rec entity:
+  │    ├─ In_Data0..7 每路位宽             [data_rec.vhd:38-45]
+  │    ├─ SelfTrigLo/Hi 阈值位宽           [data_rec.vhd:56-57]
+  │    └─ Mem_Data 总宽 = NumOfInputs_g×W  [data_rec.vhd:72]
+  ├─ 封装层:
+  │    ├─ reg_selftriglo/hi 内部 32 位(留余量做符号扩展回读) [wrp:134-135]
+  │    ├─ CDC SelfTrigLo/Hi_Rng 宽 = W     [wrp:185-186]
+  │    ├─ 每通道 tdp_ram width_g = W       [wrp:550]
+  │    └─ 读出符号扩展 mem_rdata(31..W)    [wrp:534]
+  └─ EPICS: DATA-CHx 的 T=int32 / FTVL=LONG [gen:70-73]
+```
+
+「符号扩展」的数学：读出值 `mem_rdata` 是 32 位，低 `W` 位是真实样本 `s`，高 `32-W` 位全部填 `s` 的符号位（第 `W-1` 位）。即：
+
+\[
+\text{mem\_rdata} = \text{sign\_ext}(s, W) = \begin{cases} s & 32\text{ 位样本} \\ \underbrace{s_{W-1}\cdots s_{W-1}}_{32-W\text{ 位}}\,\Vert\,s & W<32 \end{cases}
+\]
+
+> 这要求软件按**有符号** 32 位（`int32`/`LONG`）解读，对应 EPICS 生成器写出的 `T=int32`、`FTVL=LONG`（u6-l3）。若数据实际是无符号 ADC 码且你不想要符号扩展，需要在读出 mux 处把高位填 0 而非符号位——这是一处可定制点。
+
+#### 4.3.3 源码精读
+
+**`InputWidth_g` 范围**，[hdl/data_rec_vivado_wrp.vhd:28](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L28)：`positive range 1 to 32 := 8`。注意核心 `data_rec` 的同名 generic 没写范围（[hdl/data_rec.vhd:28](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L28)），范围约束只在封装层把关——这是 PSI IP 的惯例：边界检查集中在封装层。
+
+**`Mem_Data` 总宽推导**，[hdl/data_rec.vhd:72](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L72)：`Mem_Data : out std_logic_vector(NumOfInputs_g*InputWidth_g-1 downto 0)`——所有通道拼成宽字，通道 0 在最低位（[第 349 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L349) 的 `for` 循环按 `(i+1)*W-1 downto i*W` 切片）。改 `InputWidth_g` 这条会自动伸缩。
+
+**自触发阈值端口的「内部 32 位」技巧**，[hdl/data_rec_vivado_wrp.vhd:134-135](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L134-L135)：`reg_selftriglo/hi` 声明成 32 位（注释 `Full width for sign-correct extended readback`），而非 `InputWidth_g` 位。好处是软件写一个 32 位有符号数（如 `-32768`），经符号截断送到核心时符号正确，且回读时能还原软件写入的完整值。这是位宽处理的一个良好实践：**内部用全宽暂存、边界处再截取**。
+
+**CDC 中阈值宽度随 generic 变**，[hdl/data_rec_vivado_wrp.vhd:185-186](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L185-L186)：`CcSFromAxi_SelfTrigLo_Rng` 的宽度是 `InputWidth_g`。改 `InputWidth_g`，这段 range 与整条 status 向量宽度自动重算。
+
+**每通道 RAM 宽度**，[hdl/data_rec_vivado_wrp.vhd:547-552](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L547-L552)：`psi_common_tdp_ram` 的 `width_g => InputWidth_g`、`depth_g => MemoryDepth_g`。RAM 形状完全由两个 generic 决定，改位宽不需动这里的代码。
+
+**读出符号扩展**，[hdl/data_rec_vivado_wrp.vhd:534](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L534)：`mem_rdata(31 downto InputWidth_g) <= (others => mem_rdata(InputWidth_g-1))`——高位全填符号位（第 `InputWidth_g-1` 位）。若 `InputWidth_g=32`，这段切片为空（`31 downto 32`），符号扩展自然不生效，样本直接占满 32 位。
+
+**AXI 数据固定 32 位（硬约束）**，[hdl/data_rec_vivado_wrp.vhd:75](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L75) 与 [hdl/data_rec_vivado_wrp.vhd:92](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L92)：`s00_axi_rdata(31 downto 0)` / `s00_axi_wdata(31 downto 0)`。这是 `InputWidth_g` 上限 32 的根因。
+
+#### 4.3.4 代码实践
+
+**目标**：用具体数字验证符号扩展的行为，理解窄样本如何变成 32 位有符号值。
+
+**步骤**：
+
+1. 设 `InputWidth_g=8`，软件写入一个样本值 `-1`（8 位二进制补码 `0xFF`）。
+2. 套用 [hdl/data_rec_vivado_wrp.vhd:534](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L534) 的符号扩展公式，算出 32 位 `mem_rdata`。
+3. 确认软件按 `int32` 读回的十进制值。
+
+**观察**：低 8 位 = `0xFF`，符号位（第 7 位）= 1，高 24 位全填 1 → 32 位 = `0xFFFFFFFF`。
+
+**预期结果**：`0xFFFFFFFF` 作为 32 位有符号整数是 `-1`。软件读回 `-1`，与写入一致。符号扩展保证了负数样本的正确传递。若此处误填 0，`0x000000FF` 会被读成 `+255`——符号错误。
+
+> 待本地验证：若你的 ADC 是无符号码（如 0–255 表示 0–Vref），你不希望符号扩展。可在 [第 534 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L534) 加一个 generic（如 `SignedData_g`）选择填符号位还是填 0——这需要同步在 `package.tcl`/`component.xml`/xgui 加参数（见 4.4）。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `InputWidth_g` 上限是 32 而非任意？若强行要 48 位样本，最少要改哪几处？
+
+**答案**：因为 AXI 数据通道固定 32 位（[hdl/data_rec_vivado_wrp.vhd:75](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L75)）。48 位样本一拍读不完。最少改动：把 AXI 数据宽度参数化（涉及 `psi_common_axi_slave_ipif` 的数据宽度 generic、`component.xml` 里 `rdata`/`wdata` 端口位宽、读出 mux、EPICS `T=`/`FTVL=`），或改为「一个样本拆两次读」——两者都是大改，通常不如把高位截断或拆通道划算。
+
+**练习 2**：[hdl/data_rec_vivado_wrp.vhd:134-135](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L134-L135) 把 `reg_selftriglo/hi` 声明成 32 位而非 `InputWidth_g` 位，有什么好处？
+
+**答案**：让软件能写完整的 32 位有符号数（如 `SELFTRIG-LO VAL=-32768`，见 [epics/TemplateInput/CONTROL.tpl:203-209](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl#L203-L209)），经截断送核心时符号正确，且回读能还原软件原值（便于诊断「我到底写进去了什么」）。若声明成 `InputWidth_g` 位，8 位模式下写 `-32768` 会被截成 0，符号与值都错。
+
+---
+
+### 4.4 IP 打包与版本同步
+
+#### 4.4.1 概念说明
+
+前面三节都在改「逻辑」。但一个 IP 要能被别人用，还必须正确「打包」成 Vivado IP（IP-XACT）。二次开发的最后一公里是：**改完逻辑后，把打包相关的镜像同步改对，并按规范升级版本号**。
+
+本节用 v2.4 刚加入的 `TrigForwarding_g` / `Trig_Out` 作为完整范例。这是「一个新特性（新增一个 generic + 一个可选端口）从代码到打包正确落地」的真实标本——Changelog 里有记录（[Changelog.md:1-3](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/Changelog.md#L1-L3)），我们可以逐个文件核对它到底改了哪些镜像。
+
+核心概念是「**镜像法则**」：同一个 generic/端口/参数在仓库里被复制（镜像）到很多地方。改它必须同步所有镜像，否则会出现「Vivado GUI 里能设这个参数、但综合时没传给 VHDL」或「端口在 entity 里有、但 Vivado 不显示」这类诡异 bug。
+
+版本号升级还有一个**级联效应**：版本号 2.4 不仅出现在 `package.tcl` 和 `component.xml`，还出现在 xgui 文件名（`data_rec_v2_4.tcl`）和 VHDL 库名（`data_rec_2_4`）里。升版本号意味着这些都要跟着改。
+
+#### 4.4.2 核心流程
+
+「新增一个 generic + 可选端口」（以 `TrigForwarding_g`/`Trig_Out` 为例）的镜像同步清单：
+
+```
+逻辑层
+  ├─ data_rec.vhd:     Trig_Out 端口 + r.Trig_Out record 字段 + Trig_Out <= r.Trigger_2 赋值
+  └─ data_rec_vivado_wrp.vhd: TrigForwarding_g generic + Trig_Out 端口(直通核心)
+
+打包层
+  ├─ package.tcl:      gui_create_parameter + gui_add_parameter
+  │                    add_port_enablement_condition "Trig_Out" "$TrigForwarding_g = true"
+  ├─ component.xml:    [自动生成] modelParameter + parameter + port + enablement
+  └─ xgui/*.tcl:       [自动生成] init_gui 加参数 + update_MODELPARAM_VALUE.* 同步
+
+版本层
+  ├─ package.tcl:      set IP_VERSION 2.4  → init 用
+  ├─ component.xml:    <spirit:version>2.4</spirit:version>
+  ├─ xgui 文件名:       data_rec_v2_4.tcl
+  ├─ VHDL 库名:         data_rec_2_4 (出现在 component.xml 每个文件的 logicalName)
+  └─ Changelog.md:     ## 2.4 章节记录新特性
+```
+
+两个「自动生成」值得强调：`component.xml` 与 xgui `.tcl` 都是 `package_ip` 命令根据 `package.tcl` 的声明 + RTL 实际端口**重新生成**的。所以**正常流程是改 `package.tcl` + 改 RTL，然后重跑 `package_ip` 让 `component.xml`/xgui 自动更新**——不要手改这两个生成物（手改会被下次打包覆盖，或与 RTL 不一致）。本讲引用 `component.xml`/xgui 是为了让你看清「自动生成出来的结果长什么样、该包含什么」。
+
+#### 4.4.3 源码精读（TrigForwarding_g/Trig_Out 全栈追踪）
+
+下面逐文件追踪 v2.4 这个新特性出现在哪些镜像里——这是「镜像法则」最直观的演示。
+
+**逻辑层 ①：核心 `data_rec` 的端口与赋值**，[hdl/data_rec.vhd:49](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L49)（端口声明 `Trig_Out : out std_logic`，注释 `Optional output for trigger sharing`）、[hdl/data_rec.vhd:121](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L121)（record 字段 `Trig_Out : std_logic`）、[hdl/data_rec.vhd:393](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L393)（赋值 `Trig_Out <= r.Trigger_2`）。
+
+**逻辑层 ②：封装层 generic + 端口**，[hdl/data_rec_vivado_wrp.vhd:31](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L31)（`TrigForwarding_g : boolean := false`）、[hdl/data_rec_vivado_wrp.vhd:54](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L54)（`Trig_Out : out std_logic`）。注意 `TrigForwarding_g` 在封装层声明，但**没有**传给核心 `data_rec` 的 generic map（[第 461-466 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L461-L466) 只有四个 generic）——它只在打包层控制「端口是否暴露」，核心逻辑恒输出 `Trig_Out`，封装层直通（[第 484 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L484) `Trig_Out => Trig_Out`）。这是一个重要设计模式：**「可选端口」用 generic 在打包层使能，而非在 RTL 里 if-else**。
+
+**打包层 ①：`package.tcl` 声明参数**，[scripts/package.tcl:78-80](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L78-L80)：`gui_create_parameter "TrigForwarding_g" "..."` + `gui_parameter_set_widget_checkbox`（渲染成勾选框）+ `gui_add_parameter`。这是 generic 出现在 Vivado GUI 的入口。
+
+**打包层 ②：`package.tcl` 声明可选端口使能条件**，[scripts/package.tcl:98-102](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L98-L102)：`add_port_enablement_condition "Trig_Out" "\$TrigForwarding_g = true"`——`Trig_Out` 端口仅当 `TrigForwarding_g=true` 时在 Vivado 里可见。紧邻的 `In_Data$i` 条件（`$NumOfInputs_g > $i`）是同一机制的另一实例。
+
+**打包层 ③：`component.xml` 里自动生成的镜像**，[component.xml:756-778](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L756-L778)（`Trig_Out` 端口声明 + `xilinx:enablement` 依赖 `$TrigForwarding_g = true`）、[component.xml:1445-1449](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1445-L1449)（`modelParameter TrigForwarding_g`，综合用）、[component.xml:1651-1654](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1651-L1654)（`parameter TrigForwarding_g`，GUI 用户可设）。这就是「同一个 generic 在 `component.xml` 里出现两次」——`MODELPARAM_VALUE`（综合）与 `PARAM_VALUE`（GUI）。
+
+**打包层 ④：xgui 同步**，[xgui/data_rec_v2_4.tcl:11](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/xgui/data_rec_v2_4.tcl#L11)（`init_gui` 里 `ipgui::add_param ... -name "TrigForwarding_g"`）、[xgui/data_rec_v2_4.tcl:100-103](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/xgui/data_rec_v2_4.tcl#L100-L103)（`update_MODELPARAM_VALUE.TrigForwarding_g` 把 GUI 的 `PARAM_VALUE` 同步为综合用的 `MODELPARAM_VALUE`）。
+
+**版本层 ①：版本号源头**，[scripts/package.tcl:17](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L17)（`set IP_VERSION 2.4`）→ [scripts/package.tcl:22](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L22)（`init $IP_NAME $IP_VERSION $IP_REVISION $IP_LIBRARY`）。VLNB 四元组 `psi.ch:GPAC3:data_rec:2.4` 在此确立。
+
+**版本层 ②：版本号的级联镜像**，[component.xml:6](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L6)（`<spirit:version>2.4</spirit:version>`）、xgui 文件名 `data_rec_v2_4.tcl`（[component.xml:1607](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1607) 引用）、VHDL 库名 `data_rec_2_4`（[component.xml:1482](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1482) 等每个文件的 `<spirit:logicalName>`）。升版本号到 2.5，xgui 要改名 `data_rec_v2_5.tcl`、库 `data_rec_2_5`、`sim/config.tcl` 里相应库名（u1-l3）也要同步。
+
+**打包执行**，[scripts/package.tcl:107-109](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L107-L109)：`package_ip $TargetDir false true`，两个布尔分别是 `Edit`（打包后是否打开 GUI，false）与 `Synth`（是否跑综合检查，true）。这一步根据上面所有声明重新生成 `component.xml` 与 xgui。
+
+#### 4.4.4 代码实践
+
+**目标**：用 v2.4 的真实改动，验证「镜像法则」——确认 `TrigForwarding_g`/`Trig_Out` 确实出现在逻辑、打包、版本三层的所有镜像里。
+
+**步骤**：
+
+1. 在以下 7 个位置逐一找到 `TrigForwarding_g` 或 `Trig_Out`，记下它的形态：
+   - [hdl/data_rec.vhd:49](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L49)（核心端口）
+   - [hdl/data_rec_vivado_wrp.vhd:31](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L31)（封装 generic）
+   - [scripts/package.tcl:78-80](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L78-L80)（GUI 参数）
+   - [scripts/package.tcl:102](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L102)（端口使能条件）
+   - [component.xml:774](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L774)（端口使能依赖）
+   - [component.xml:1448](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1448)（modelParameter 默认值）
+   - [xgui/data_rec_v2_4.tcl:11](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/xgui/data_rec_v2_4.tcl#L11)（GUI 摆放）
+
+2. 回答：若有人只在 `data_rec_vivado_wrp.vhd` 加了 `Trig_Out` 端口、却忘了在 `package.tcl` 加 `add_port_enablement_condition`，Vivado 里会看到什么？
+
+**观察**：同一个特性在 7 个文件里都有镜像，缺任何一个都会出问题。
+
+**预期结果**：忘加 `add_port_enablement_condition` 时，`Trig_Out` 端口在 Vivado 里会**永远显示**（不受 `TrigForwarding_g` 控制），且 `TrigForwarding_g` 勾选框可能存在却不影响端口可见性——典型的「镜像不同步」症状。这正是为什么 `package.tcl` 第 [98-102 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/scripts/package.tcl#L98-L102) 要显式声明使能条件。
+
+> 待本地验证：在装了 Vivado 的机器上跑 `scripts/package.tcl`（参考 u1-l4），改 `TrigForwarding_g` 勾选状态，观察 `Trig_Out` 端口是否如 [component.xml:774](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L774) 的 `$TrigForwarding_g = true` 条件那样出现/消失。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 `TrigForwarding_g` 在封装层声明，却不传给核心 `data_rec` 的 generic map？为什么不让核心内部用 `if TrigForwarding_g then ...` 来决定是否输出 `Trig_Out`？
+
+**答案**：因为 `Trig_Out` 是**纯转发端口**——核心恒计算 `Trigger_2` 并输出（[hdl/data_rec.vhd:393](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L393)），`TrigForwarding_g` 只在打包层控制「这个端口要不要暴露给用户」。把使能放在打包层（`add_port_enablement_condition`）而非核心逻辑，好处是核心 RTL 简单、不引入条件分支；若端口不暴露，Vivado 综合时该输出悬空、会被优化掉，不影响资源。这是「可选端口」的标准做法。
+
+**练习 2**：把版本从 2.4 升到 2.5，除改 `package.tcl` 的 `IP_VERSION`，还有哪些文件名/标识必须同步改？
+
+**答案**：xgui 文件名 `data_rec_v2_4.tcl` → `data_rec_v2_5.tcl`（[component.xml:1607](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1607) 的引用同步）；VHDL 库名 `data_rec_2_4` → `data_rec_2_5`（[component.xml:1482](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/component.xml#L1482) 等所有 `<spirit:logicalName>`）；`sim/config.tcl` 里目标库若写死了 `data_rec_2_4` 也要改；最后在 [Changelog.md](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/Changelog.md) 顶部加 `## 2.5` 章节。`component.xml` 的 `<spirit:version>` 与文件集由 `package_ip` 自动重生成，不需手改。
+
+---
+
+## 5. 综合实践：设计「每通道独立自触发阈值」扩展
+
+把本讲四个模块串起来，完成一个贯穿性的二次开发设计任务。
+
+### 5.1 场景与现状
+
+当前自触发阈值是**全局**的：一组 `SelfTrigLo`/`SelfTrigHi`（[hdl/data_rec.vhd:56-57](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L56-L57)）对**所有**通道生效，Stage1 的判定循环（[hdl/data_rec.vhd:175-187](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L175-L187)）里每个通道 `i` 都跟同一对 `SelfTrigLo`/`SelfTrigHi` 比。
+
+**新需求**：每个通道有独立的 Lo/Hi 阈值。例如 CH0 监测 `-10..10`、CH1 监测 `100..200`，互不干扰。
+
+### 5.2 任务：给出完整改动清单（不要求实现）
+
+请按下面四个维度产出一份「改动清单」文档：
+
+1. **触发源/逻辑层**（对应 4.1）：核心 `data_rec` 要改哪些段落？阈值端口从标量改数组后，Stage1 判定循环要怎么改？`SelfTrigChEna`/`OnEnter`/`OnExit` 逻辑是否还成立？
+2. **寄存器地图**（对应 4.2）：需要新增多少个寄存器？地址怎么分配（给出 8 通道时的地址表）？是否在 19 个空位内？封装层解码/回读/CDC 各加什么？
+3. **存储/读出**（对应 4.3）：阈值位宽跟谁走？是否受 AXI 32 位约束？
+4. **打包与版本**（对应 4.4）：要不要加新 generic？版本号怎么升？EPICS 模板要新增哪些 record？
+
+### 5.3 参考改动清单（设计要点）
+
+下面是一份可行设计的要点，供你对照自己的方案。
+
+**① 逻辑层（`data_rec.vhd`）**
+
+- 阈值端口由标量改数组：`SelfTrigLo : in Data_t(NumOfInputs_g-1 downto 0)`、`SelfTrigHi : in Data_t(...)`（复用已有的 `Data_t` 类型，[hdl/data_rec.vhd:87](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L87)）。
+- Stage1 判定循环（[第 175-187 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L175-L187)）把 `unsigned(SelfTrigHi)` 改成 `unsigned(SelfTrigHi(i))`、Lo 同理——每个通道用自己的阈值。
+- `SelfTrigChEna`/`OnEnter`/`OnExit`（[第 58-60 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L58-L60)）与 Stage2 边沿检测（[第 197-205 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L197-L205)）**不变**——它们本来就是按通道 `i` 索引的（`StInRange_1(i)`），改阈值只是让「在不在范围」的判定按通道独立，下游合成逻辑天然兼容。
+- `TrigNow_2` 合成（[第 225 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L225)）**不变**——自触发仍是一类源、占 `TrigEna` bit2，不需要扩宽 `TrigEna`（这是本设计的幸运点：阈值从「全局一组」变「每通道一组」，但触发源**类别**没增加）。
+
+**② 寄存器地图（`data_rec_register_pkg.vhd` + 封装层）**
+
+- 需新增 `2 × NumOfInputs_g` 个寄存器（每通道 Lo/Hi 各一）。8 通道 = 16 个。
+- 地址分配（固定分配 16 个，不随通道数变，保证地址地图静态）：
+
+  | 通道 | Lo 地址 | Hi 地址 |
+  | --- | --- | --- |
+  | CH0 | `0x0034` | `0x0038` |
+  | CH1 | `0x003C` | `0x0040` |
+  | CH2 | `0x0044` | `0x0048` |
+  | CH3 | `0x004C` | `0x0050` |
+  | CH4 | `0x0054` | `0x0058` |
+  | CH5 | `0x005C` | `0x0060` |
+  | CH6 | `0x0064` | `0x0068` |
+  | CH7 | `0x006C` | `0x0070` |
+
+  最高用到 `0x0070`（寄存器 28），未超 `0x007C`（寄存器 31）边界，**在 19 个空位内**（实际用 16 个，余 3）。
+- `register_pkg` 加基址常量与函数（避免写 16 个常量）：
+  ```
+  constant Reg_SelfTrigChLo_Base_c : integer := 16#0034#;
+  constant Reg_SelfTrigChHi_Base_c : integer := 16#0038#;
+  -- 每通道间距 8 字节（Lo/Hi 各 4）
+  -- 地址 = Base_c + ch*8
+  ```
+- 封装层：加 `reg_selftrigchlo/hi : Data_t(NumOfInputs_g-1 downto 0)`（或 `t_aslv32`），16 条解码 + 16 条回读（仿 [第 318/331 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L318) 范式，但用 `for i in 0 to NumOfInputs_g-1 generate`/loop 展开）；CDC `CcSFromAxi` 向量扩宽 `2*NumOfInputs_g*InputWidth_g` 位（仿 [第 185-186 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L185-L186) 的 `SelfTrigChEna_Rng` 用 `NumOfInputs_g` 的写法）；`data_rec` 实例 port map 把数组阈值接上。
+
+**③ 存储位宽**
+
+- 阈值位宽 = `InputWidth_g`，与现有 `SelfTrigLo/Hi` 完全一致，走同样的 CDC 切片与符号处理（内部 32 位暂存、边界截取，仿 [第 134-135 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L134-L135)）。
+- 不触及存储 RAM 与读出符号扩展（[第 534/550 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L534)）——本扩展不改波形数据通路，AXI 32 位约束不构成限制。
+
+**④ 打包与 EPICS**
+
+- **不需要新 generic**：通道数仍由 `NumOfInputs_g` 决定，寄存器数虽变但地址地图静态分配（固定 16 个），不引入新参数。
+- 版本号升级：如 `2.4 → 2.5`，按 4.4.3 的级联清单同步（xgui 文件名、库名 `data_rec_2_5`、`Changelog.md` 加章节）。建议标记为 minor 版本（新增功能、向后兼容：旧软件不写新寄存器时，阈值默认 0，行为可预测）。
+- EPICS 模板：`CONTROL.tpl` 加一组按通道展开的 record（占位符 `<SELFTRIG-CH-LO-HI>`），`GenerateDataRecTemplates.py` 加一个 `for ch in range(args.channels)` 循环生成 `SELFTRIG-LO-CH{ch}`/`SELFTRIG-HI-CH{ch}` 两条 `ao` record，地址 `@$(REG_WRD):0x34+ch*8` / `0x38+ch*8`，`T=int32`（仿 [epics/TemplateInput/CONTROL.tpl:203-217](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl#L203-L217) 的现有 SELFTRIG-LO/HI）。`INIT-SELFTRIG` fanout（[第 25-29 行](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/epics/TemplateInput/CONTROL.tpl#L25-L29)）也要扩链指向新 record。
+- 测试：更新 `testbench/top_tb/top_tb_case2_pkg.vhd`（u6-l2 的自触发用例），为每通道设不同阈值并校验各自独立触发。
+
+> 待本地验证：地址地图静态分配 16 个寄存器（不随 `NumOfInputs_g` 变）是否可接受——若 `NumOfInputs_g=2` 时仍占 16 个寄存器觉得浪费，可改为「动态间距」但会使 EPICS 偏移随通道数变复杂，权衡后建议保留静态分配（与现有 `MemAddr` 向上取整到二次幂的思路一致：牺牲少量地址换简单性）。
+
+完成此设计，你就把「触发逻辑 → 寄存器地图 → 位宽 → 打包 → EPICS → 测试」整条二次开发链路在纸面上走了一遍。这正是 u6-l4 想传递的「改一个点、同步整条面」的工程能力。
+
+## 6. 本讲小结
+
+- **镜像法则**是二次开发的总纲：同一个 generic/端口/地址/参数在仓库里被复制到很多文件，改它必须同步所有镜像。v2.4 的 `TrigForwarding_g`/`Trig_Out` 是「一个新特性正确落地」的完整标本，横跨逻辑、打包、版本三层共 7+ 处镜像。
+- **触发源扩展**的咽喉是 `TrigEna`（[hdl/data_rec.vhd:66](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec.vhd#L66) 写死 3 位）；新增源要扩宽它，并按「边沿+sticky / 电平+sticky / 边沿+瞬时」三范式之一产生请求、OR 进 `TrigNow_2`、在 `PreTrig` 与 `MinRecPeriod` 清 pending。
+- **寄存器扩展**必须三处联动：`register_pkg` 地址常量、封装层解码/回读/CDC、EPICS 模板。空闲地址仅 `0x0034`–`0x007C`（19 个，受 `USER_SLV_NUM_REG=32` 与 `Mem_Addr_c=0x80` 边界限制）；值走 `status_cc`、事件走 `pulse_cc`。
+- **位宽调整**沿 `InputWidth_g` 传播链同步；硬约束是 AXI 数据固定 32 位，故样本上限 32 位；窄样本靠符号扩展（[hdl/data_rec_vivado_wrp.vhd:534](https://github.com/paulscherrerinstitute/vivadoIP_data_rec/blob/f68c9316296346ff77c2c328711309d558b72cc5/hdl/data_rec_vivado_wrp.vhd#L534)）填满 32 位有符号值。
+- **打包与版本**：正常流程是改 `package.tcl` + 改 RTL，重跑 `package_ip` 让 `component.xml`/xgui 自动重生成（勿手改生成物）；版本号升级有级联效应——xgui 文件名、VHDL 库名 `data_rec_2_4`、`Changelog.md` 都要同步。
+- 「每通道独立自触发阈值」综合实践证明：即使一个看似局部的新需求，也要同时评估触发逻辑、寄存器地图、CDC 向量、EPICS 生成器、测试用例与版本号——这正是「全栈二次开发」的真实工作量。
+
+## 7. 下一步学习建议
+
+- 恭喜你读完整个学习手册。若要动手实践本讲，建议从「**最小可行扩展**」开始：先尝试加一个**只读寄存器**（如把某个内部调试计数器暴露出来），只动 4.2 的三处（`register_pkg` + 封装层回读 + EPICS 一条 `ai` record），跑通「三处联动」的肌肉记忆，再挑战更大的扩展。
+- 若想深入打包机制，重读 [u1-l4 IP 打包与在 Vivado 中使用](u1-l4-ip-packaging-and-vivado.md) 并在装了 Vivado 的机器上实跑 `scripts/package.tcl`，对照本讲 4.4 检视自动生成的 `component.xml` 与 xgui。
+- 若关心扩展的正确性验证，回看 [u6-l1 测试平台架构](u6-l1-testbench-architecture.md) 与 [u6-l2 六个测试用例](u6-l2-test-cases-coverage.md)：任何二次开发都应配套新增或修改测试用例，靠 `axi_single_expect` 的 `###ERROR###` 机制守住回归。
+- PSI 系列其他 IP 核（`psi_common` 里的 `axi_slave_ipif`/`status_cc`/`pulse_cc`/`tdp_ram` 等）遵循与本 IP 相同的打包与镜像约定，掌握本讲的「镜像法则」后可举一反三地二次开发整个 PSI FPGA 生态。
+- 长期维护建议：把本讲的「改动清单」模板固化成项目里的 `CONTRIBUTING` 或 PR 检查表，每次改寄存器地图/触发源时逐项打勾，杜绝「镜像不同步」这类最难查的 bug。
