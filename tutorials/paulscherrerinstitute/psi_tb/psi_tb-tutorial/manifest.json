@@ -1,0 +1,617 @@
+{
+  "project": "psi_tb",
+  "head": "8ee9c066e4a87b65865e184a966002e818dc7f65",
+  "rationale": "psi_tb 是 Paul Scherrer Institute 的 VHDL 测试平台工具库（仅用于仿真、不可综合），核心由 7 个 package 组成，外加一个 I2C 示例 testbench 和基于 PsiSim 的仿真/CI 基础设施。学习顺序遵循「先能用、再读源码、最后扩展」的思路：第一单元带读者从零认识项目定位、目录结构与运行方式；第二、三、四单元覆盖基础层的文本工具、比较检查与信号活动/激励，这三层是后续所有 BFM 的依赖底座；第五单元深入最复杂的 AXI 总线功能模型（类型→单事务→部分事务/突发→与综合包互转）；第六单元讲位真仿真用的文本文件驱动；第七单元以 I2C BFM + 真实 testbench 收尾，把前面的比较、活动、文本知识串成完整实战；第八单元拔高到 CI 流程、错误消息约定与二次开发。单元内部按「声明→实现→组合使用」递进，讲义之间通过 depends_on 显式标注依赖，确保读者可按拓扑顺序逐步搭建一个能用的 VHDL testbench。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：认识 psi_tb 与运行环境",
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "psi_tb 项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 psi_tb 是什么：一个仅供仿真（不可综合）的 VHDL 测试平台工具库，包含 BFM、数值检查、激励生成与文本驱动等能力，并说明其许可证、维护者与版本演进。",
+          "learning_goals": [
+            "理解 psi_tb 的用途与「仅用于 testbench、无需可综合」的定位",
+            "了解项目维护者、作者与 PSI HDL Library License 关系",
+            "通过 Changelog 把握 v1 到 v3.0.0 的功能演进脉络"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "README 中的 What belongs/does not belong 章节",
+            "Changelog 版本条目",
+            "License 概述"
+          ],
+          "practice_task": "阅读 README 与 Changelog，用一段话写出 psi_tb 解决的三类问题，并指出 v3.0.0 相对 v2.x 的主要变化点。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与目录组织",
+          "order": 2,
+          "filename": "u1-l2-repository-structure.md",
+          "level": "beginner",
+          "topic": "讲解 psi_tb 的目录布局：hdl 放 package、testbench 放示例 TB、sim 放 PsiSim 脚本、scripts 放 CI、doc 放文档、sigasi 放工程映射，以及与 psi_common 的依赖关系。",
+          "learning_goals": [
+            "记住 hdl/testbench/sim/scripts/doc 各目录的职责",
+            "理解 psi_tb 对 psi_common 与 PsiSim 的依赖",
+            "能够定位每个 package 源文件与其在 config.tcl 中的编译入口"
+          ],
+          "source_files": [
+            "README.md",
+            "sim/config.tcl"
+          ],
+          "minimal_modules": [
+            "hdl/*.vhd package 清单",
+            "sim/config.tcl 中的 add_sources 列表",
+            "testbench/psi_tb_i2c_pkg_tb.vhd"
+          ],
+          "practice_task": "对照 config.tcl 的 add_sources 列表，画出「源码文件 → 编译 tag（lib/src/tb）」的对照表，标出哪些来自 psi_common、哪些来自 psi_tb 自身。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仿真环境与 CI 构建流程",
+          "order": 3,
+          "filename": "u1-l3-simulation-and-ci.md",
+          "level": "beginner",
+          "topic": "讲解如何用 PsiSim 在 ModelSim 或 GHDL 下编译运行 psi_tb 的 testbench，以及 ci.do / ciFlow.py 如何在 CI 中检测 ###ERROR### 并判定通过。",
+          "learning_goals": [
+            "掌握通过 run.tcl（ModelSim）与 runGhdl.tcl（GHDL）运行仿真",
+            "理解 config.tcl 中编译抑制与 run_check_errors 的作用",
+            "理清 ci.do → ciFlow.py 的 CI 通过/失败判定逻辑"
+          ],
+          "source_files": [
+            "sim/config.tcl",
+            "sim/run.tcl",
+            "sim/runGhdl.tcl",
+            "sim/ci.do",
+            "scripts/ciFlow.py"
+          ],
+          "minimal_modules": [
+            "PsiSim init/compile_files/run_tb 流程",
+            "run_check_errors \"###ERROR###\"",
+            "ciFlow.py 对 Transcript 的检查"
+          ],
+          "practice_task": "在本机或容器中执行 sim/run.tcl（或 runGhdl.tcl）跑通 psi_tb_i2c_pkg_tb，并在 Transcript 中确认看到 SIMULATIONS COMPLETED SUCCESSFULLY。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "order": 2,
+      "title": "基础工具：文本与字符串（psi_tb_txt_util）",
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "字符串与数值转换函数",
+          "order": 1,
+          "filename": "u2-l1-txt-util-conversions.md",
+          "level": "beginner",
+          "topic": "讲解 psi_tb_txt_util 中的 print、str、chr、hstr（十六进制）以及 to_string 系列重载，这些是整个库日志与断言消息的基础。",
+          "learning_goals": [
+            "掌握 print 输出与 str/hstr 在 std_logic_vector 与字符串间的互转",
+            "理解 to_string 重载为何要模仿 VHDL-2008 内建函数",
+            "能够用任意进制（str(int, base)）输出整数"
+          ],
+          "source_files": [
+            "hdl/psi_tb_txt_util.vhd"
+          ],
+          "minimal_modules": [
+            "print / str / chr / hstr",
+            "str(int; base) 与 to_string 重载",
+            "to_upper / to_lower / to_std_logic_vector"
+          ],
+          "practice_task": "写一个最小 testbench，构造一个 12 位 std_logic_vector，分别用 str、hstr、to_string 打印其十进制、十六进制与二进制表示。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "文件 I/O 与 print 重载",
+          "order": 2,
+          "filename": "u2-l2-txt-util-fileio.md",
+          "level": "intermediate",
+          "topic": "讲解 psi_tb_txt_util 中基于 std.textio 的文件读写：str_read 读取变长行、str_write/print 向文件写字符串或字符，为后续文本文件驱动测试打基础。",
+          "learning_goals": [
+            "理解 TEXT 文件类型与 readline/writeline 的用法",
+            "掌握 str_read 如何逐字符读取并清空结果字符串",
+            "能够用 print(file) 重载把仿真数据写入文件"
+          ],
+          "source_files": [
+            "hdl/psi_tb_txt_util.vhd"
+          ],
+          "minimal_modules": [
+            "str_read / str_write",
+            "print(file out_file: TEXT) 重载",
+            "std.textio 的 line/writeline"
+          ],
+          "practice_task": "扩展上一个 testbench，把每次打印的内容同时用 print(file) 写入一个 report.txt 文件，并在仿真结束后核对文件内容。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "比较与检查助手（psi_tb_compare_pkg）",
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "基础比较过程：整数、实数、std_logic",
+          "order": 1,
+          "filename": "u3-l1-compare-basic.md",
+          "level": "intermediate",
+          "topic": "讲解 IntCompare、RealCompare、StdlCompare、StdlvCompareInt、StdlvCompareStdlv 等过程，理解它们如何用 assert + 统一前缀输出可读错误信息。",
+          "learning_goals": [
+            "掌握各 Compare 过程的参数与默认前缀 ###ERROR### 的含义",
+            "理解容差（Tolerance）在整数/实数比较中的作用",
+            "看清 assert ... report ... severity error 的错误消息拼接方式"
+          ],
+          "source_files": [
+            "hdl/psi_tb_compare_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "IntCompare / RealCompare",
+            "StdlCompare（两个重载）/ StdlvCompareInt",
+            "StdlvCompareStdlv"
+          ],
+          "practice_task": "在一个 testbench 中分别调用 IntCompare（带 Tolerance）和 RealCompare，故意制造一次失败，观察输出的 Expected/Received/Tolerance 消息格式。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "signed/unsigned 比较与容差、IndexString",
+          "order": 2,
+          "filename": "u3-l2-compare-signed-unsigned.md",
+          "level": "intermediate",
+          "topic": "讲解 SignCompare、SignCompare2（十六进制输出以支持 >32 位）、UsignCompare、SignCompareInt、UsignCompareInt，以及用于循环里标注下标的 IndexString 函数。",
+          "learning_goals": [
+            "理解 SignCompare 与 SignCompare2 在消息格式上的差异与适用场景",
+            "掌握 SignCompareInt/UsignCompareInt 如何复用 StdlvCompareInt",
+            "能用 IndexString 在批量比较中标注每一项的下标"
+          ],
+          "source_files": [
+            "hdl/psi_tb_compare_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "SignCompare / SignCompare2 / UsignCompare",
+            "SignCompareInt / UsignCompareInt",
+            "IndexString"
+          ],
+          "practice_task": "对一个 40 位 signed 信号做期望值比较：先用 SignCompare 再用 SignCompare2，对比两者错误消息的可读性，并在一个 for 循环里用 IndexString 给每项加下标。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "order": 4,
+      "title": "信号活动检查与激励生成（psi_tb_activity_pkg）",
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "信号活动检查：CheckNoActivity / CheckLastActivity",
+          "order": 1,
+          "filename": "u4-l1-activity-check.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 CheckNoActivity / CheckLastActivity（及其 Stlv 变体）结合 Sig'last_event 判断信号在一段时间内是否保持空闲，并可同时校验电平。",
+          "learning_goals": [
+            "理解 Sig'last_event 信号属性在活动检查中的作用",
+            "掌握 Level 参数（-1 不检查 / 0 低 / 1 高）的用法",
+            "看清这些过程内部如何复用 StdlCompare / StdlvCompareInt"
+          ],
+          "source_files": [
+            "hdl/psi_tb_activity_pkg.vhd",
+            "hdl/psi_tb_compare_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "CheckNoActivity / CheckNoActivityStlv",
+            "CheckLastActivity / CheckLastActivityStlv",
+            "Stdl'last_event 信号属性"
+          ],
+          "practice_task": "写一段测试：在 DUT 输出应保持稳定的窗口内调用 CheckNoActivityStlv 检查空闲，并验证当出现意外翻转时会触发 ###ERROR### 消息。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "时钟同步等待、脉冲与选通生成",
+          "order": 2,
+          "filename": "u4-l2-stimulus-and-wait.md",
+          "level": "intermediate",
+          "topic": "讲解 PulseSig、ClockedWaitFor、WaitClockCycles、ClockedWaitTime、GenerateStrobe 以及带超时的 WaitForValueStdlv / WaitForValueStdl，掌握时钟域内的激励与等待模式。",
+          "learning_goals": [
+            "掌握基于 rising_edge(Clk) 的各类同步等待过程",
+            "理解 GenerateStrobe 如何按 freq_clock/freq_str 分频产生周期性选通",
+            "学会用 WaitForValueStdlv/Stdl 在超时内等待目标值并报告未达成"
+          ],
+          "source_files": [
+            "hdl/psi_tb_activity_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "PulseSig / ClockedWaitFor",
+            "WaitClockCycles / ClockedWaitTime",
+            "GenerateStrobe / WaitForValueStdlv / WaitForValueStdl"
+          ],
+          "practice_task": "在 100 MHz 时钟下用 GenerateStrobe 产生 1 MHz 选通，再用 WaitForValueStdlv 等待某个信号达到预期值（设置一个会超时的场景），观察超时报告。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "order": 5,
+      "title": "AXI 总线功能模型（psi_tb_axi_pkg / psi_tb_axi_conv_pkg）",
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "AXI 类型、常量、初始化与字符串转换",
+          "order": 1,
+          "filename": "u5-l1-axi-types-and-init.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_ms_r / axi_sm_r 记录类型、AXI 响应与突发常量、axi_master_init / axi_slave_init，以及 >32 位数据用的 decimal/hex_string_to_signed/unsigned 转换函数。",
+          "learning_goals": [
+            "理解 axi_ms_r / axi_sm_r 记录如何映射 AXI 五个通道",
+            "记住 xRESP_*、xBURST_*、AxSIZE_* 常量含义",
+            "掌握 axi_master_init / axi_slave_init 的初始化约定"
+          ],
+          "source_files": [
+            "hdl/psi_tb_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "axi_ms_r / axi_sm_r 记录定义",
+            "xRESP/xBURST/AxSIZE 常量",
+            "axi_master_init / axi_slave_init",
+            "decimal/hex_string_to_signed/unsigned"
+          ],
+          "practice_task": "声明一组 axi_ms_r / axi_sm_r 信号并调用 init 过程，再用 hex_string_to_unsigned 把一个十六进制字符串解析为 64 位 unsigned 并打印校验。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "AXI 单次事务：single_write / read / expect",
+          "order": 2,
+          "filename": "u5-l2-axi-single-transactions.md",
+          "level": "intermediate",
+          "topic": "讲解 axi_single_write、axi_single_read、axi_single_expect（含整数与字符串/base 重载），理解它们如何串联地址、数据、响应并自动校验 bresp/rresp。",
+          "learning_goals": [
+            "掌握单次读写与「读后自动比较」的 expect 用法",
+            "理解 msb/lsb/sex 参数如何截取并解释读回数据",
+            "看清响应错误时如何复用 StdlvCompareStdlv 报错"
+          ],
+          "source_files": [
+            "hdl/psi_tb_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "axi_single_write（integer / string 重载）",
+            "axi_single_read（integer / signed 重载）",
+            "axi_single_expect（integer / string 重载）"
+          ],
+          "practice_task": "搭建一个最小 AXI slave 模型，用 axi_single_expect 验证写后读回的值，并故意返回 SLVERR 观察自动产生的错误消息。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "AXI 部分事务与突发传输",
+          "order": 3,
+          "filename": "u5-l3-axi-partial-and-burst.md",
+          "level": "advanced",
+          "topic": "讲解 axi_apply_aw/ar、axi_apply_wd_single/burst、axi_apply_bresp/rresp_single/burst 及对应 axi_expect_* 过程，理解如何手工组装任意 AXI 突发并做背靠背校验。",
+          "learning_goals": [
+            "区分 apply（驱动主/从一侧）与 expect（等待并校验一侧）两类过程",
+            "掌握突发参数 Beats/DataStart/DataIncr/Wstrb/VldLowCycles 的含义",
+            "理解节流（Vld/Rdy Low Cycles）如何用于测试协议鲁棒性"
+          ],
+          "source_files": [
+            "hdl/psi_tb_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "axi_apply_aw/ar 与 axi_expect_aw/ar",
+            "axi_apply_wd_burst 与 axi_expect_wd_burst",
+            "axi_apply_rresp_burst 与 axi_expect_rresp_burst",
+            "axi_apply_bresp / axi_expect_bresp"
+          ],
+          "practice_task": "用 apply/expect 系列完成一次长度为 4 的 INCR 突发读：master 端发 ar+expect rresp_burst，slave 端 expect_ar+apply_rresp_burst，并加入 RdyLowCycles 测试节流。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "TB 与综合 AXI 类型互转（psi_tb_axi_conv_pkg）",
+          "order": 4,
+          "filename": "u5-l4-axi-conversion.md",
+          "level": "advanced",
+          "topic": "讲解 psi_tb_axi_conv_pkg 为何独立存在，以及 axi_conv_tb_synth_master 如何在 psi_tb 的 axi_ms_r/axi_sm_r 与 psi_common 的 axi_slv_inp/axi_slv_oup 之间逐字段映射。",
+          "learning_goals": [
+            "理解把转换独立成 package 以避免强依赖 psi_common AXI 包的设计动机",
+            "掌握 master 侧 tb→synth 与 slave 侧 synth→tb 的信号流向",
+            "能够在一个 testbench 里同时驱动 TB BFM 与综合 DUT"
+          ],
+          "source_files": [
+            "hdl/psi_tb_axi_conv_pkg.vhd",
+            "hdl/psi_tb_axi_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "axi_conv_tb_synth_master 过程",
+            "axi_ms_r/axi_sm_r 与 axi_slv_inp/axi_slv_oup 字段对照",
+            "package 分离的依赖管理动机"
+          ],
+          "practice_task": "在一个 testbench 中实例化 axi_conv_tb_synth_master，用 psi_tb 的 axi_single_write 写入，验证转换后综合侧 DUT 收到正确的地址与数据。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "order": 6,
+      "title": "位真仿真：文本文件驱动（psi_tb_textfile_pkg）",
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ApplyTextfileContent / CheckTextfileContent / WriteTextfile",
+          "order": 1,
+          "filename": "u6-l1-textfile-driven-testing.md",
+          "level": "intermediate",
+          "topic": "讲解如何用整数列文本文件驱动位真仿真：ApplyTextfileContent 施加激励、CheckTextfileContent 逐列比对、WriteTextfile 把结果连同表头写回文件供 Python/MATLAB 处理。",
+          "learning_goals": [
+            "掌握文本文件「每行一个采样、空格分列」的整数格式约定",
+            "理解 ClkPerSpl、MaxLines、IgnoreLines、Tolerance 等参数",
+            "学会用 Apply+Check 构建端到端的位真激励/响应回路"
+          ],
+          "source_files": [
+            "hdl/psi_tb_textfile_pkg.vhd",
+            "hdl/psi_tb_txt_util.vhd"
+          ],
+          "minimal_modules": [
+            "ApplyTextfileContent",
+            "CheckTextfileContent",
+            "WriteTextfile",
+            "PsiTextfile_SigOne/SigUnused 辅助信号"
+          ],
+          "practice_task": "用 Python（np.savetxt）生成一份两列整数激励文件，用 ApplyTextfileContent 施加、CheckTextfileContent 校验 DUT 输出，再用 WriteTextfile 导出结果并循环比较。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "order": 7,
+      "title": "I2C 总线功能模型（psi_tb_i2c_pkg）",
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "I2C 概览、寻址与总线初始化",
+          "order": 1,
+          "filename": "u7-l1-i2c-overview-and-setup.md",
+          "level": "intermediate",
+          "topic": "讲解 psi_tb_i2c_pkg 的整体结构：ACK/NACK 常量、I2c_Transaction_t 类型、I2cGetAddr 寻址函数，以及 I2cPullup / I2cBusFree / I2cSetFrequency 总线初始化。",
+          "learning_goals": [
+            "理解 I2C 开漏总线与上拉（I2cPullup）的仿真建模",
+            "掌握 7 位/10 位地址编码与 I2cGetAddr 的用法",
+            "学会用 I2cSetFrequency 配置仿真位时序"
+          ],
+          "source_files": [
+            "hdl/psi_tb_i2c_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "I2c_ACK/I2c_NACK 常量与 I2c_Transaction_t",
+            "I2cGetAddr",
+            "I2cPullup / I2cBusFree / I2cSetFrequency"
+          ],
+          "practice_task": "建立一个只有 scl/sda 两个 inout 信号的最小 testbench，调用 I2cPullup 与 I2cSetFrequency(400 kHz)，观察总线空闲电平。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "I2C 主机事务",
+          "order": 2,
+          "filename": "u7-l2-i2c-master.md",
+          "level": "intermediate",
+          "topic": "讲解主机侧过程：I2cMasterSendStart / SendRepeatedStart / SendStop、I2cMasterSendAddr、I2cMasterSendByte、I2cMasterExpectByte，含 ACK/NACK 期望与可定制消息前缀。",
+          "learning_goals": [
+            "掌握一次完整 I2C 主机读/写事务的过程调用顺序",
+            "理解 ExpectedAck 参数对 ACK/NACK 校验的控制",
+            "能够组合 Repeated Start 完成混合读写事务"
+          ],
+          "source_files": [
+            "hdl/psi_tb_i2c_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "I2cMasterSendStart/SendRepeatedStart/SendStop",
+            "I2cMasterSendAddr",
+            "I2cMasterSendByte / I2cMasterExpectByte"
+          ],
+          "practice_task": "用主机过程发起一次「写 1 字节后 Repeated Start 读 1 字节」的混合事务，分别设置 ACK 与 NACK 期望并验证消息输出。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "I2C 从机事务与时钟拉伸",
+          "order": 3,
+          "filename": "u7-l3-i2c-slave-and-clock-stretching.md",
+          "level": "advanced",
+          "topic": "讲解从机侧过程：I2cSlaveWaitStart/WaitRepeatedStart/WaitStop、I2cSlaveExpectAddr、I2cSlaveExpectByte、I2cSlaveSendByte，重点理解 Timeout 与 ClkStretch（时钟拉伸）参数。",
+          "learning_goals": [
+            "掌握从机端等待与应答的过程调用顺序",
+            "理解 ClkStretch 如何在仿真中模拟从机拉低 SCL",
+            "学会用 Timeout 防止从机过程在异常时永久挂起"
+          ],
+          "source_files": [
+            "hdl/psi_tb_i2c_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "I2cSlaveWaitStart/WaitRepeatedStart/WaitStop",
+            "I2cSlaveExpectAddr",
+            "I2cSlaveExpectByte / I2cSlaveSendByte",
+            "Timeout / ClkStretch 参数"
+          ],
+          "practice_task": "实现一个从机过程序列，在读取事务中用 ClkStretch 拉低 SCL 一段时间，主机侧过程仍能正确完成握手。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "I2C 测试平台实战（psi_tb_i2c_pkg_tb）",
+          "order": 4,
+          "filename": "u7-l4-i2c-testbench-walkthrough.md",
+          "level": "advanced",
+          "topic": "逐段讲解 testbench/psi_tb_i2c_pkg_tb.vhd：master 与 slave 两个并发 process 如何配对调用、print 分节、7b/10b 与读/写/ACK/NACK/时钟拉伸场景如何被完整覆盖。",
+          "learning_goals": [
+            "理解 master/slave 双 process 并发对拍的组织方式",
+            "掌握用 print 分节管理长测试用例的可读性技巧",
+            "能够基于该 TB 扩展自己的 I2C 用例"
+          ],
+          "source_files": [
+            "testbench/psi_tb_i2c_pkg_tb.vhd",
+            "hdl/psi_tb_i2c_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "p_master process",
+            "p_slave process",
+            "I2cPullup 实例化",
+            "print 分节标记"
+          ],
+          "practice_task": "在 psi_tb_i2c_pkg_tb 中新增一个用例：主机连续写 3 个字节，从机逐一 ExpectByte 并返回 ACK，跑通后确认无 ###ERROR###。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "order": 8,
+      "title": "进阶：CI 深入、编码约定与二次开发",
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "仿真脚本与 CI 流程深入",
+          "order": 1,
+          "filename": "u8-l1-ci-and-sim-scripts-deep.md",
+          "level": "advanced",
+          "topic": "深入讲解 PsiSim 的 config/run/runGhdl/interactive 脚本分工、compile_suppress/run_suppress 的消息过滤，以及 ciFlow.py 与 dependencies.py 如何自动判定 CI 结果与依赖。",
+          "learning_goals": [
+            "理解 ModelSim 与 GHDL 两条仿真路径的差异与切换方式",
+            "掌握 compile/run 消息抑制编号的作用与取舍",
+            "理清 dependencies.py 从 README 解析依赖的机制"
+          ],
+          "source_files": [
+            "sim/run.tcl",
+            "sim/runGhdl.tcl",
+            "sim/interactive.tcl",
+            "sim/config.tcl",
+            "scripts/ciFlow.py",
+            "scripts/dependencies.py"
+          ],
+          "minimal_modules": [
+            "PsiSim init -ghdl 与 init",
+            "compile_suppress / run_suppress",
+            "ciFlow.py 的 Transcript 检查",
+            "dependencies.py 的 Parse.FromReadme"
+          ],
+          "practice_task": "为新加的一个 testbench 在 config.tcl 中注册 add_sources 与 create_tb_run，并在本地用 run.tcl 与 runGhdl.tcl 分别跑通，对比两者 Transcript 差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "编码约定、错误消息机制与二次开发指南",
+          "order": 2,
+          "filename": "u8-l2-conventions-and-extending.md",
+          "level": "advanced",
+          "topic": "总结 psi_tb 的设计约定：一个 package 一个 .vhd、统一的 ###ERROR### 前缀、compare 与 activity 的复用关系、消息生成（如 i2c 的 GenMessage），以及如何按这些约定新增自己的 BFM 或检查过程。",
+          "learning_goals": [
+            "掌握 ###ERROR### 前缀与 CI run_check_errors 的协同约定",
+            "理解 compare/activity/txt_util 之间的依赖与复用模式",
+            "能够遵循既有约定设计并实现一个新的 testbench 辅助过程"
+          ],
+          "source_files": [
+            "hdl/psi_tb_compare_pkg.vhd",
+            "hdl/psi_tb_activity_pkg.vhd",
+            "hdl/psi_tb_i2c_pkg.vhd",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "统一 Prefix 参数与 ###ERROR### 约定",
+            "compare→activity→bfm 的复用链",
+            "i2c GenMessage/GenMessageNoPrefix 消息生成"
+          ],
+          "practice_task": "仿照 psi_tb_compare_pkg 的风格，新增一个 StdlvCompareReal 过程（比较 std_logic_vector 转实数后的容差），保持统一前缀与消息格式，并接入一个示例 TB 验证。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l2",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
