@@ -1,0 +1,484 @@
+{
+  "project": "vivadoIP_axi_mm_reader",
+  "head": "ca5ef76b35221949ccac652c9e97978268dd956f",
+  "rationale": "本项目是一个由 Paul Scherrer Institute (PSI) / Oliver Bründler 开发的 Xilinx Vivado IP 核 vivadoIP_axi_mm_reader，功能是周期性或由事件触发地经 AXI4 总线读取一批 32 位寄存器，并把结果经 AXI-Stream 或软件 FIFO 输出。学习路径设计为三层：第一单元（入门）先让读者认识项目定位、目录结构、仿真与打包流程，建立“如何看懂并跑起来一个 Vivado IP”的整体认知；第二单元（进阶）自顶向下拆解 wrapper → 寄存器映射 → 核心 FSM → 触发/超时 → AXI 从机 → AXI 主机 → 输出模式与 FIFO 的数据通路，是理解硬件实现的主干；第三单元（专家）覆盖 C 软件驱动、仿真测试台、参数化与 GUI、IP-XACT 打包与 Block Design 集成，以及二次开发实践，帮助读者从“看懂”走向“改造”。讲义之间通过 depends_on 形成依赖图，保证读者可按顺序由浅入深地结合真实源码学习。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目、目录与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：vivadoIP_axi_mm_reader 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍该 IP 核的功能定位：周期性或触发式地经 AXI4 读取一批 32 位寄存器，并经 AXI-Stream 或软件 FIFO 输出；说明典型用途、许可证（PSI HDL/LGPL）与外部依赖。",
+          "learning_goals": [
+            "理解 IP 核的功能定位与典型应用场景（如把 System-Monitor 寄存器转成 AXI-Stream、低抖动采集状态寄存器）",
+            "了解许可证（PSI HDL Library License / LGPL）与依赖关系（psi_common、PsiSim、PsiIpPackage、psi_tb）",
+            "建立后续学习所需的背景知识与项目动机"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/Documentation.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "README 项目定位",
+            "Documentation 概述",
+            "依赖列表"
+          ],
+          "practice_task": "阅读 README 与 Documentation，用自己的话写出该 IP 核解决什么问题、有哪些可配置项与两种输出方式，并列出运行仿真与打包所需的外部依赖。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构速览",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录布局：hdl（核心与 wrapper）、tb（测试台）、sim（仿真脚本）、bd/xgui/scripts（打包与 GUI）、drivers（C 驱动）、doc 及 component.xml 各自的职责。",
+          "learning_goals": [
+            "掌握仓库目录的整体布局",
+            "理解每个目录在 IP 开发流程（编码→仿真→打包→驱动）中的角色",
+            "能够快速定位核心源码、wrapper、测试台与驱动入口"
+          ],
+          "source_files": [
+            "README.md",
+            "doc/Documentation.md"
+          ],
+          "minimal_modules": [
+            "目录树总览",
+            "hdl/tb/sim",
+            "drivers/bd/xgui/scripts/doc"
+          ],
+          "practice_task": "绘制仓库目录树并标注每个目录的职责，指出“核心 RTL、wrapper、测试台、C 驱动入口”分别位于哪些具体文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "如何运行仿真与 CI 流程",
+          "order": 3,
+          "filename": "u1-l3-running-simulation.md",
+          "level": "beginner",
+          "topic": "讲解基于 PsiSim 的仿真流程：config.tcl 的源文件分组（lib/src/tb）、run.tcl 的编译与运行、Modelsim 的 source ./run.tcl、GHDL 的 runGhdl.tcl，以及 ci.do/ciFlow.py 如何解析 transcript 判定通过。",
+          "learning_goals": [
+            "理解 PsiSim 仿真库的配置与源文件分组（lib/src/tb tag）",
+            "学会在 Modelsim 与 GHDL 下运行回归仿真",
+            "理解 CI（ciFlow.py + ci.do）通过 transcript 关键字判定通过/失败的逻辑"
+          ],
+          "source_files": [
+            "sim/config.tcl",
+            "sim/run.tcl",
+            "sim/ci.do",
+            "scripts/ciFlow.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "PsiSim config",
+            "run.tcl 流程",
+            "ci.do/ciFlow.py 判定逻辑"
+          ],
+          "practice_task": "梳理一次完整的仿真运行步骤；说明若要新增一个测试台文件需修改 config.tcl 的哪几处；并解释 ciFlow.py 中 “###ERROR###” 与 “SIMULATIONS COMPLETED SUCCESSFULLY” 两个判据各自的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "IP 打包与 Vivado 集成",
+          "order": 4,
+          "filename": "u1-l4-ip-packaging.md",
+          "level": "beginner",
+          "topic": "讲解如何用 PsiIpPackage（scripts/package.tcl）把 HDL 打包成 Vivado IP：加入源文件与 psi_common 库、声明 GUI 参数页、设置 m_axis 可选端口的启用条件、目标器件与综合设置。",
+          "learning_goals": [
+            "理解 package.tcl 的打包流程与 PsiIpPackage 命令序列",
+            "理解源文件、psi_common 库与驱动文件如何被加入 IP",
+            "理解可选端口/接口基于 Output_g 的条件启用机制"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "xgui/axi_mm_reader_v1_0.tcl"
+          ],
+          "minimal_modules": [
+            "PsiIpPackage 打包",
+            "GUI 参数页",
+            "可选端口启用条件"
+          ],
+          "practice_task": "阅读 package.tcl，写出一个 IP 打包步骤清单（初始化→加源→加库→加驱动→加 GUI 参数→设置可选端口→package_ip），并解释为何 m_axis 端口只在 Output_g==\"AXIS\" 时出现。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心模块与数据通路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "整体架构与数据流",
+          "order": 1,
+          "filename": "u2-l1-architecture-dataflow.md",
+          "level": "intermediate",
+          "topic": "自顶向下讲解 IP 核整体架构与数据流：s00_axi（从机，配置）→ RegTable RAM → 核心 FSM → m00_axi（主机，读寄存器）→ FIFO → AXIS 或 AXIMM 输出，结合 Documentation 的架构图。",
+          "learning_goals": [
+            "建立完整数据通路的心智模型",
+            "理解触发/超时如何启动一次读周期",
+            "理解 AXIS 与 AXIMM 两种输出模式在数据流上的差异"
+          ],
+          "source_files": [
+            "doc/Documentation.md",
+            "hdl/axi_mm_reader_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "接口总览",
+            "读周期数据流",
+            "AXIS vs AXIMM"
+          ],
+          "practice_task": "画一张数据流框图，标出 Trig/DoneIrq、s00_axi、RegTable、核心 FSM、m00_axi、FIFO 与输出端口的关系，并用一句话描述一次完整读周期的流程。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "寄存器映射与配置表",
+          "order": 2,
+          "filename": "u2-l2-register-map.md",
+          "level": "intermediate",
+          "topic": "讲解寄存器映射：definitions_pkg.vhd 中的地址常量（Ctrl/RegCnt/RdData/RdLast/Level 与 MemOffs），对照 Documentation 寄存器表，理解每个寄存器的位含义与读写模式。",
+          "learning_goals": [
+            "掌握配置寄存器与内存映射表的布局",
+            "理解 Ena/RegCnt/RdData/RdLast/Level 各寄存器的作用与读写模式",
+            "理解 Addr[] 表从 0x20 开始的内存区与 MemOffs 的关系"
+          ],
+          "source_files": [
+            "hdl/definitions_pkg.vhd",
+            "doc/Documentation.md"
+          ],
+          "minimal_modules": [
+            "definitions_pkg 常量",
+            "寄存器表",
+            "内存偏移 MemOffs"
+          ],
+          "practice_task": "用表格列出所有寄存器的地址、名称、模式、位宽与用途；并指出 AXIMM 模式下为何“读 RdData 会弹出 FIFO、因此要先读 RdLast”。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "核心 FSM：双进程状态机",
+          "order": 3,
+          "filename": "u2-l3-core-fsm.md",
+          "level": "intermediate",
+          "topic": "深入 axi_mm_reader.vhd 的核心状态机：双进程（two-process）方法、状态 Idle/ReadAddr/SetCmd/ApplyCmd/WaitDone 的转换与每态动作、DoneCnt 计数与 Last 检测。",
+          "learning_goals": [
+            "掌握双进程（combinatorial + sequential）RTL 编码风格",
+            "理解 FSM 如何遍历 RegTable 逐个发起读取",
+            "理解 DoneCnt 计数与组合逻辑 Last 检测的作用"
+          ],
+          "source_files": [
+            "hdl/axi_mm_reader.vhd"
+          ],
+          "minimal_modules": [
+            "two-process record",
+            "FSM 状态机",
+            "DoneCnt/Last"
+          ],
+          "practice_task": "画出 FSM 状态转移图并标注转移条件；解释在 ApplyCmd_s 等待 AxiM_CmdRd_Rdy 时 RamAddr 已经自增到下一项的设计意图。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "触发与超时机制",
+          "order": 4,
+          "filename": "u2-l4-trigger-timeout.md",
+          "level": "intermediate",
+          "topic": "讲解读周期启动机制：Trig 脉冲触发与 TimeoutCkCycles_g 超时自动触发、Enable 的门控、超时计数器的复位以及如何用超时实现周期性读取。",
+          "learning_goals": [
+            "理解触发与超时两种启动方式",
+            "理解 Enable 门控与禁用时立即回到 Idle 的行为",
+            "理解如何仅用超时（不接 Trig）实现周期性读取"
+          ],
+          "source_files": [
+            "hdl/axi_mm_reader.vhd",
+            "hdl/axi_mm_reader_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "Trig 脉冲",
+            "TimeoutCnt 超时",
+            "Enable 门控"
+          ],
+          "practice_task": "阅读组合进程中 Trigger/TimeoutCnt/Enable 段落，说明“Enable=0 时的行为”与“读周期进行中 Trig 被忽略”分别由哪些代码保证；并计算 ClkFrequencyHz=100MHz、TimeoutUs_g=100 时 TimeoutCkCycles_c 的值（参照 wrapper 常量）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "AXI 从机配置接口（wrapper）",
+          "order": 5,
+          "filename": "u2-l5-axi-slave-wrapper.md",
+          "level": "intermediate",
+          "topic": "讲解 wrapper 中 s00_axi 从机一侧：psi_common_axi_slave_ipif 把 AXI 事务解码为寄存器读/写（reg_rd/reg_wr/reg_wdata/reg_rdata）与内存读/写（mem_addr/mem_wr/mem_wdata/mem_rdata），并映射到 Enable/RegCount/RegTable。",
+          "learning_goals": [
+            "理解 AXI 从机 IPIC 接口与寄存器/内存解码",
+            "理解 RegCount、Enable 如何从 reg_wdata 的位字段提取",
+            "理解 mem_addr 如何换算成 RegTable 索引（含字节地址右移）"
+          ],
+          "source_files": [
+            "hdl/axi_mm_reader_wrp.vhd",
+            "hdl/definitions_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "axi_slave_ipif 解码",
+            "寄存器/内存接口",
+            "位字段映射"
+          ],
+          "practice_task": "追踪一次“软件写 RegCount”与一次“软件写 RegTable 某项”的完整路径（从 s00_axi 信号到核心端口），说明 reg_wdata(RegIdx_RegCnt_c) 与 mem_addr(log2ceil(MaxRegCount_g)+1 downto 2) 的换算含义。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "AXI 主机读取通路",
+          "order": 6,
+          "filename": "u2-l6-axi-master-read.md",
+          "level": "intermediate",
+          "topic": "讲解 wrapper 中 m00_axi 主机一侧：psi_common_axi_master_simple 的实例化（只读不写、CmdRd 单拍事务、最大打开事务数、数据 FIFO 深度），以及核心如何用 CmdRd/RdDat 通道与之配合。",
+          "learning_goals": [
+            "理解 AXI 主机 IPIC 命令/数据接口",
+            "理解只读配置与单拍读取（AxiMaxBeats_g=1、CmdRd_Size=\"1\"）",
+            "理解命令与数据通道的握手机制对吞吐/背压的影响"
+          ],
+          "source_files": [
+            "hdl/axi_mm_reader_wrp.vhd",
+            "hdl/axi_mm_reader.vhd"
+          ],
+          "minimal_modules": [
+            "axi_master_simple 实例",
+            "CmdRd/RdDat 握手",
+            "只读配置"
+          ],
+          "practice_task": "对照核心 FSM 的 SetCmd_s/ApplyCmd_s，描述一次“发命令→等 Rdy→收数据”的时序；并解释 DataFifoDepth_g 与 AxiMaxOpenTrasactions_g 对读取吞吐与背压的影响。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "输出模式与 FIFO/RegTable 存储",
+          "order": 7,
+          "filename": "u2-l7-output-modes-fifo.md",
+          "level": "intermediate",
+          "topic": "讲解两种输出模式的实现：psi_common_sync_fifo 缓存读取值（含 Last 位）、psi_common_tdp_ram 存放 RegTable；wrapper 中 g_axis/g_naxis generate 块在 AXIS（直接驱动 m_axis）与 AXIMM（把 FIFO 映射到 RdData/RdLast 寄存器）之间切换。",
+          "learning_goals": [
+            "理解同步 FIFO 的宽度（32+1 位含 Last）与深度（MaxRegCount×MinBuffers）",
+            "理解 generate 块的条件综合（g_axis vs g_naxis）",
+            "理解 AxiS_Level 与 Level 寄存器、AXIMM 下 AxiS_Rdy 的接法"
+          ],
+          "source_files": [
+            "hdl/axi_mm_reader.vhd",
+            "hdl/axi_mm_reader_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "sync_fifo",
+            "tdp_ram RegTable",
+            "g_axis/g_naxis generate"
+          ],
+          "practice_task": "解释 FIFO 的 InData(32)=Last 与 OutData(32)=AxiS_Last 的对应关系；并说明在 AXIMM 模式下 AxiS_Rdy 为何接到 reg_rd(RegIdx_RdData_c)（即软件读 RdData 弹出 FIFO）。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：驱动、测试、打包与二次开发",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "C 软件驱动",
+          "order": 1,
+          "filename": "u3-l1-c-driver.md",
+          "level": "advanced",
+          "topic": "讲解 Vitis/嵌入式侧的 C 驱动 drivers/axi_mm_reader：基于 Xil_In32/Xil_Out32 的寄存器访问、使能/寄存器表配置/Level 查询、单条与整包 FIFO 读取、错误码与“先读 RdLast 再读 RdData”约定，以及 Makefile/MDD/tcl 的驱动集成。",
+          "learning_goals": [
+            "掌握驱动 API（SetEnable/GetEnable/SetRegTable/GetLevel/ReadFifoEntry/ReadFifoPacket）",
+            "理解错误码（IpMustBeDisabled/FifoIsEmpty/NoCompletePacketInFifo）的含义与触发条件",
+            "理解驱动函数与寄存器映射、IP 使能状态的对应关系"
+          ],
+          "source_files": [
+            "drivers/axi_mm_reader/src/axi_mm_reader.h",
+            "drivers/axi_mm_reader/src/axi_mm_reader.c",
+            "drivers/axi_mm_reader/src/Makefile",
+            "drivers/axi_mm_reader/data/axi_mm_reader.mdd",
+            "drivers/axi_mm_reader/data/axi_mm_reader.tcl"
+          ],
+          "minimal_modules": [
+            "寄存器访问 API",
+            "FIFO 包读取",
+            "错误码",
+            "Makefile/MDD 集成"
+          ],
+          "practice_task": "编写一段示例代码：禁用 IP→用 SetRegTable 配置地址数组→使能→触发后用 ReadFifoPacket 读取一个完整包并打印；并说明 SetRegTable 为何要求 IP 处于禁用状态。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "测试台架构与用例",
+          "order": 2,
+          "filename": "u3-l2-testbench.md",
+          "level": "advanced",
+          "topic": "讲解 top_tb.vhd 的自校验测试台：AXI 主/从 BFM、基于 OutputType_g 的双模式、6 组激励/响应用例（单次读、缓冲双读、超时、禁用、背压、单寄存器四次读）及 CheckResults 等过程。",
+          "learning_goals": [
+            "理解自校验测试台结构（激励进程 p_control + 从机仿真进程 p_spi）",
+            "理解用 StimCase/RespCase 同步两个进程的握手机制",
+            "理解 AXIS 与 AXIMM 两条校验路径（CheckResultsAxiS/CheckResultsAxiMM）"
+          ],
+          "source_files": [
+            "tb/top_tb.vhd",
+            "sim/config.tcl"
+          ],
+          "minimal_modules": [
+            "AXI BFM",
+            "激励/响应用例",
+            "双模式校验过程"
+          ],
+          "practice_task": "选择“缓冲双读”用例，逐步说明 p_control 与 p_spi 如何通过 StimCase/RespCase 配合，并指出该用例验证了 IP 的什么行为（缓冲、数据不丢失）。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "参数化与 GUI 配置",
+          "order": 3,
+          "filename": "u3-l3-parameters-gui.md",
+          "level": "advanced",
+          "topic": "讲解 IP 的参数化与 GUI：package.tcl 中声明的可配置参数（AxiSlaveAddrWidth_g/ClkFrequencyHz/TimeoutUs_g/MaxRegCount_g/MinBuffers_g/Output_g）及取值范围/下拉选项，xgui 的 init_gui 与 update/validate/update_MODEL 回调。",
+          "learning_goals": [
+            "理解各 generic 参数对硬件的影响（地址宽度、超时、缓冲深度、输出类型）",
+            "理解 GUI 参数与 VHDL generic 的映射机制（update_MODELPARAM_VALUE）",
+            "理解参数范围与下拉约束的设置方式"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "xgui/axi_mm_reader_v1_0.tcl",
+            "doc/Documentation.md"
+          ],
+          "minimal_modules": [
+            "可配置参数",
+            "GUI 页面构建",
+            "generic 映射回调"
+          ],
+          "practice_task": "列一张“参数→默认值→范围→作用”表；并解释为何 s00_axi 地址宽度需满足 ceil(log2(MaxRegisters×4+32))（提示：寄存器区 + RegTable 内存区共享地址空间）。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "IP-XACT 打包产物与 Block Design 集成",
+          "order": 4,
+          "filename": "u3-l4-ipxact-block-design.md",
+          "level": "advanced",
+          "topic": "讲解 IP-XACT 打包与 Block Design 集成：bd/bd.tcl 中 init/pre_propagate/propagate 对 AXI4 ID_WIDTH 在主/从接口上的自动传播，以及 MDD/tcl 声明驱动用于 Vitis BSP 生成 xparameters.h。component.xml 内部细节为待确认。",
+          "learning_goals": [
+            "理解 Vivado IP-XACT 组件描述（component.xml）在打包流程中的作用（细节待确认）",
+            "理解 BD 钩子如何在不同时机自动传递 AXI4 ID_WIDTH",
+            "理解驱动如何在 Vitis BSP 中被识别并生成 xparameters.h"
+          ],
+          "source_files": [
+            "bd/bd.tcl",
+            "drivers/axi_mm_reader/data/axi_mm_reader.tcl",
+            "drivers/axi_mm_reader/data/axi_mm_reader.mdd",
+            "scripts/package.tcl"
+          ],
+          "minimal_modules": [
+            "component.xml/IP-XACT（待确认）",
+            "bd.tcl ID_WIDTH 传播",
+            "MDD/xparameters 生成"
+          ],
+          "practice_task": "阅读 bd.tcl，说明 pre_propagate（针对 master）与 propagate（针对 slave）分别在什么时机修改 ID_WIDTH；并追踪 axi_mm_reader.tcl 的 generate 过程会向 xparameters.h 写入哪些字段（NUM_INSTANCES/DEVICE_ID/C_BASEADDR/C_HIGHADDR）。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "二次开发实践：扩展该 IP",
+          "order": 5,
+          "filename": "u3-l5-extending-ip.md",
+          "level": "advanced",
+          "topic": "二次开发实践：如何端到端扩展该 IP——新增配置寄存器（definitions_pkg + wrapper 解码 + 文档）、调整输出/缓冲深度、为新增行为编写测试用例并加入 sim/config.tcl、同步更新 C 驱动。",
+          "learning_goals": [
+            "掌握从寄存器定义到硬件/文档/测试/驱动的端到端改动流程",
+            "理解一次扩展需要同步修改的多处文件与潜在风险",
+            "具备安全扩展 IP（含仿真验证）的能力"
+          ],
+          "source_files": [
+            "hdl/definitions_pkg.vhd",
+            "hdl/axi_mm_reader_wrp.vhd",
+            "hdl/axi_mm_reader.vhd",
+            "tb/top_tb.vhd",
+            "drivers/axi_mm_reader/src/axi_mm_reader.h",
+            "doc/Documentation.md"
+          ],
+          "minimal_modules": [
+            "新增寄存器流程",
+            "测试与仿真维护",
+            "驱动与文档同步"
+          ],
+          "practice_task": "设计一个“读取内部状态”的小扩展（例如新增一个只读寄存器反映 DoneCnt/Level），写出需要修改的文件清单与每个文件的关键改动点，并在 top_tb 中规划一个验证用例、在 config.tcl 中确认无需新增文件。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
