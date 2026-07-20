@@ -1,0 +1,518 @@
+{
+  "project": "vivadoIP_spi_simple",
+  "head": "fda4db7a10b98ac138f37decc5211130dc425ada",
+  "rationale": "本项目是 Paul Scherrer Institute 发布的 Vivado SPI Master IP-core，技术栈为 VHDL + C 驱动 + Tcl 打包，属于中型 FPGA IP 项目，因此设计为 17 篇讲义、三层结构。第一单元「入门层」先帮读者从零认识项目定位（README/Changelog/License）、目录结构、工具链与依赖（PsiIpPackage、psi_common、psi_tb、dependencies.py）以及仿真运行方式，让读者能跑通回归测试。第二单元「进阶层」按自顶向下数据流拆解核心实现：寄存器地图（definitions_pkg）→ spi_simple 核心架构与 FIFO/双进程 → AXI 从接口与寄存器映射（spi_vivado_wrp）→ SPI 时序引擎 → FIFO 背压 → 中断与状态机制 → C 驱动软件接口 → 测试平台与 AXI/SPI 自检。第三单元「专家层」聚焦工程化与扩展：可配置 generics 与 Vivado GUI/端口条件化、3-Wire SPI 三态扩展、LE（Latch Enable）输出、IP 打包发布流程（package.tcl/component.xml/bd.tcl/驱动打包）以及 CI 与开发工作流。讲义之间通过 depends_on 形成清晰依赖链，确保先建宏观再钻细节，最后落到扩展与二次开发。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 vivadoIP_spi_simple",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体概览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍这个 Vivado IP-core 是什么（简单 SPI Master），它与 Xilinx 官方 SPI IP 的区别、维护者、作者、License 与 changelog 演进。",
+          "learning_goals": [
+            "理解项目的一句话定位：基于 AXI4 寄存器接口的简单可配置 SPI Master IP",
+            "掌握项目背景：PSI HDL Library 的一部分，相对 Xilinx SPI IP 提供任意传输宽度等更高可配置性",
+            "了解版本演进与 License（PSI HDL Library License / LGPL + 例外）"
+          ],
+          "source_files": [
+            "README.md",
+            "Changelog.md",
+            "License.txt"
+          ],
+          "minimal_modules": [
+            "项目定位与 SPI Master 概念",
+            "维护者/作者/License 背景",
+            "Changelog 版本演进（1.0.0 到 1.3.0，新增 LE 与 AXI readback）"
+          ],
+          "practice_task": "阅读 README 与 Changelog，用一段话说明本 IP 解决什么问题，并列出从 1.0.0 到 1.3.0 至少三个功能变化。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与文件分工",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "讲解仓库目录（hdl/tb/sim/bd/xgui/scripts/drivers/doc）每个目录的角色，以及顶层 RTL、testbench、打包脚本之间的对应关系。",
+          "learning_goals": [
+            "把目录名映射到角色：hdl=RTL，tb=测试平台，sim=仿真脚本，drivers=C 驱动，scripts=打包/CI",
+            "识别三处关键入口：hdl/spi_vivado_wrp.vhd（顶层）、tb/top_tb.vhd（测试）、scripts/package.tcl（打包）",
+            "理解 component.xml 与 xgui/ 在 Vivado IP 中的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "hdl/spi_vivado_wrp.vhd",
+            "scripts/package.tcl",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "目录角色速查表",
+            "三处关键入口文件",
+            "Vivado IP 打包相关文件（component.xml / xgui）"
+          ],
+          "practice_task": "绘制一张目录树，在每个目录旁标注它的职责，并标出顶层 RTL、testbench、打包脚本三条主线的文件路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "工具链、依赖与获取方式",
+          "order": 3,
+          "filename": "u1-l3-toolchain-and-dependencies.md",
+          "level": "beginner",
+          "topic": "讲解本项目依赖的 PSI 生态（PsiIpPackage、PsiSim、psi_common、psi_tb）以及用 dependencies.py 解析 README 自动获取依赖的方式。",
+          "learning_goals": [
+            "掌握所需的依赖清单：TCL 层 PsiSim/PsiIpPackage、VHDL 层 psi_common/psi_tb",
+            "理解要求的目录结构以及 psi_fpga_all 聚合仓库的作用",
+            "学会用 scripts/dependencies.py 配合 PsiFpgaLibDependencies 拉取依赖"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/dependencies.py"
+          ],
+          "minimal_modules": [
+            "PSI FPGA 库生态与依赖清单",
+            "要求的目录结构与 psi_fpga_all",
+            "dependencies.py 工作原理"
+          ],
+          "practice_task": "运行或阅读 dependencies.py，列出本 IP 编译与打包分别需要哪些外部仓库及最低版本。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "仿真与回归测试运行方式",
+          "order": 4,
+          "filename": "u1-l4-simulation-and-regression.md",
+          "level": "beginner",
+          "topic": "讲解如何在 Modelsim/Vsim 中运行回归测试（sim/run.tcl、config.tcl、ci.do、interactive.tcl），以及 ciFlow.py 如何在 CI 中驱动仿真并判定结果。",
+          "learning_goals": [
+            "掌握从 sim 目录执行 source ./run.tcl 跑通回归的流程",
+            "理解 config.tcl 如何声明库、源码、testbench run 与 message 抑制",
+            "了解 ciFlow.py 的成功/失败判定逻辑（###ERROR### 与 SIMULATIONS COMPLETED SUCCESSFULLY）"
+          ],
+          "source_files": [
+            "sim/run.tcl",
+            "sim/config.tcl",
+            "sim/ci.do",
+            "sim/interactive.tcl",
+            "scripts/ciFlow.py"
+          ],
+          "minimal_modules": [
+            "PsiSim 仿真框架与 run.tcl 流程",
+            "config.tcl 的库/源码/run 声明",
+            "CI 自动化与结果判定"
+          ],
+          "practice_task": "在 sim 目录下梳理 run.tcl 的执行步骤，写出从 init 到 run_check_errors 的完整顺序，并解释 ci.do 为何会自动 quit。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：理解核心实现",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "寄存器地图与常量定义包",
+          "order": 1,
+          "filename": "u2-l1-register-map.md",
+          "level": "intermediate",
+          "topic": "讲解 definitions_pkg.vhd 中定义的全部寄存器索引、状态位、中断位常量，建立 AXI 软件可见的寄存器地图。",
+          "learning_goals": [
+            "掌握 10 个寄存器的索引与 4 字节步进地址映射（Data/Status/RxLevel/TxLevel/SlaveNr/StoreRx/TxAlmEmpty/RxAlmFull/IrqVec/IrqEna）",
+            "理解 Status 各 bit（TxEmpty/TxFull/TxAlmEmpty/RxEmpty/RxFull/RxAlmFull/Busy）的含义",
+            "理解 IRQ 各 bit（TxEmpty/TxAlmEmpty/TfDone/RxFull/RxAlmFull）的含义"
+          ],
+          "source_files": [
+            "hdl/definitions_pkg.vhd",
+            "drivers/spi_simple/src/spi_simple.h"
+          ],
+          "minimal_modules": [
+            "寄存器索引与地址映射",
+            "状态位常量",
+            "中断位常量与宽度"
+          ],
+          "practice_task": "依据 definitions_pkg.vhd 绘制一张寄存器地图表（地址、名称、读写方向、关键 bit），并与 C 驱动头文件中的 SPI_SIMPLE_REG_* 宏一一对照。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "spi_simple 核心架构与数据流",
+          "order": 2,
+          "filename": "u2-l2-spi-core-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 spi_simple.vhd 的整体架构：TX 命令 FIFO、RX 响应 FIFO、双进程（two-process）方法，以及与 psi_common_spi_master 的衔接。",
+          "learning_goals": [
+            "掌握顶层结构：命令 FIFO（打包 StoreRx+Slave+Data）→ SPI 引擎 → 响应 FIFO",
+            "理解双进程方法：p_comb 组合逻辑生成 next state 与输出、p_seq 时序寄存",
+            "理清 SpiStart/StoreRx/RxWrite/SpiDone/SpiBusy 等内部信号的握手时序"
+          ],
+          "source_files": [
+            "hdl/spi_simple.vhd",
+            "hdl/definitions_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "命令 FIFO 与响应 FIFO 的角色",
+            "双进程方法 p_comb/p_seq",
+            "SPI 事务启动与完成握手"
+          ],
+          "practice_task": "画出一次「写后读」事务从 AXI 写 Data 到 RX FIFO 出数据的完整数据流框图，标注关键内部信号。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "AXI4 从接口与寄存器映射",
+          "order": 3,
+          "filename": "u2-l3-axi-register-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 spi_vivado_wrp.vhd 如何用 psi_common_axi_slave_ipif 把 AXI4 总线转换为 reg_rd/reg_wr/reg_wdata/reg_rdata，并连接到 spi_simple。",
+          "learning_goals": [
+            "掌握 AXI4 slave 五通道信号在顶层 wrapper 的声明与含义",
+            "理解 psi_common_axi_slave_ipif 的 IPIC 接口（o_reg_rd/i_reg_rdata/o_reg_wr/o_reg_wdata）",
+            "理解寄存器读回（reg_rdata）如何拼接配置寄存器与 spi_simple 输出的状态/RX/level"
+          ],
+          "source_files": [
+            "hdl/spi_vivado_wrp.vhd",
+            "hdl/definitions_pkg.vhd"
+          ],
+          "minimal_modules": [
+            "AXI4 通道与 wrapper 端口",
+            "psi_common_axi_slave_ipif IPIC 接口",
+            "寄存器读回拼接逻辑"
+          ],
+          "practice_task": "追踪一次 AXI 单字写（写 Data 寄存器）从 s00_axi_aw* / w* 通道到 spi_simple 的 TxWrite 的完整路径，列出经过的信号。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "SPI 主控时序与引擎集成",
+          "order": 4,
+          "filename": "u2-l4-spi-master-timing.md",
+          "level": "intermediate",
+          "topic": "讲解 SPI 时序相关 generics（ClockDivider/CPOL/CPHA/CsHighCycles/LsbFirst/MosiIdleState）以及 spi_simple 如何把这些参数透传给 psi_common_spi_master。",
+          "learning_goals": [
+            "理解 ClockDivider_g、CsHighCycles_g 对 SCK 频率与片选间隔的影响",
+            "掌握 CPOL/CPHA 四种模式与采样边沿的关系",
+            "理解 spi_simple 实例化 psi_common_spi_master 时的 generic/port 映射"
+          ],
+          "source_files": [
+            "hdl/spi_simple.vhd",
+            "tb/top_tb.vhd"
+          ],
+          "minimal_modules": [
+            "时钟分频与片选时序",
+            "CPOL/CPHA 模式",
+            "spi_master 实例化映射"
+          ],
+          "practice_task": "在 top_tb.vhd 的 SPI 从机仿真进程（p_spi）中，定位 CPHA/CPOL 决定 apply/transfer 边沿的代码段，画出 CPOL=0/CPHA=0 模式下 8 bit 的 SCK/MOSI/MISO 时序图。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "FIFO 缓冲与背压机制",
+          "order": 5,
+          "filename": "u2-l5-fifo-and-backpressure.md",
+          "level": "intermediate",
+          "topic": "讲解 spi_simple 中两个 psi_common_sync_fifo（TX 命令、RX 响应）的配置、level 输出、almost empty/full 阈值与背压。",
+          "learning_goals": [
+            "掌握命令 FIFO 与响应 FIFO 的宽度/深度/RAM 风格配置",
+            "理解 TxLevel/RxLevel、empty/full 标志如何驱动状态与中断",
+            "理解 CfgTxAlmEmpty/CfgRxAlmFull 阈值寄存器如何产生 almost 条件"
+          ],
+          "source_files": [
+            "hdl/spi_simple.vhd",
+            "hdl/spi_vivado_wrp.vhd",
+            "tb/top_tb.vhd"
+          ],
+          "minimal_modules": [
+            "TX/RX FIFO 配置与接口",
+            "level/empty/full 标志用途",
+            "almost empty/full 阈值机制"
+          ],
+          "practice_task": "依据 top_tb.vhd 中「Fill FIFO and check status」段，解释 TxAlmEmpty/RxAlmFull 阈值设为 3/2 时，9 次事务中各状态位的期望取值逻辑。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "中断向量与状态机制",
+          "order": 6,
+          "filename": "u2-l6-irq-and-status.md",
+          "level": "intermediate",
+          "topic": "讲解 spi_simple 中 IRQ 向量的锁存、清除、自动重置，以及状态寄存器的组合生成与 Irq 输出逻辑。",
+          "learning_goals": [
+            "掌握 IrqVec 的锁存条件（TxEmpty/TxAlmEmpty/TfDone/RxFull/RxAlmFull）与按位清除（CfgIrqClr/CfgIrqClrVld）",
+            "理解条件仍然成立的中断位在清除后会自动重新置位的机制",
+            "理解 IrqEna 使能与最终 Irq 输出的与/或逻辑"
+          ],
+          "source_files": [
+            "hdl/spi_simple.vhd",
+            "hdl/definitions_pkg.vhd",
+            "tb/top_tb.vhd"
+          ],
+          "minimal_modules": [
+            "IRQ 锁存与按位清除",
+            "条件持续时的自动重置",
+            "IrqEna 使能与 Irq 聚合输出"
+          ],
+          "practice_task": "依据 top_tb.vhd 中「Test IRQ clearing」段，推演写 0x0C 清除后再写 0x02 时 IrqVec 为何从 0x17 变为 0x13 再保持 0x13。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "C 驱动软件接口",
+          "order": 7,
+          "filename": "u2-l7-c-driver-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 drivers/spi_simple 的 C 驱动：寄存器宏、阻塞/非阻塞收发 API、状态查询与配置 API，以及 Xil_Out32/In32 的底层访问。",
+          "learning_goals": [
+            "掌握 SpiSimple_TxBlocking/RxTxBlocking/TxNonBlocking/RxTxNonBlocking/GetRxData 的语义与返回码",
+            "理解驱动如何通过 Status 寄存器位判断 FIFO full/empty 与 Busy 并实现背压",
+            "理解 ClrIrqVec/SetIrqEna/SetTxAlmEmptyThreshold/SetRxAlmFullThreshold 等配置函数"
+          ],
+          "source_files": [
+            "drivers/spi_simple/src/spi_simple.h",
+            "drivers/spi_simple/src/spi_simple.c"
+          ],
+          "minimal_modules": [
+            "寄存器宏与返回码枚举",
+            "阻塞/非阻塞收发 API",
+            "状态查询与配置 API"
+          ],
+          "practice_task": "用 C 驱动写一段最小代码：向 slave 0 发送 0x55 并读回一个字，要求处理 TxFifoFull/RxFifoEmpty 返回码并说明每步访问的寄存器。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "测试平台结构与 AXI/SPI 自检",
+          "order": 8,
+          "filename": "u2-l8-testbench-structure.md",
+          "level": "intermediate",
+          "topic": "讲解 top_tb.vhd 的结构：AXI BFM（axi_ms/axi_sm）、时钟与复位、控制进程（p_control）的测试场景、以及 SPI 从机仿真进程（p_spi）。",
+          "learning_goals": [
+            "掌握 testbench 如何实例化 spi_vivado_wrp 并驱动完整 AXI4 总线",
+            "理解 p_control 中的四个测试场景（只写、读写、FIFO 填充+IRQ、RX 满+IRQ 清除）",
+            "理解 p_spi 从机仿真如何校验片选、逐 bit 收发、以及 LE 信号断言"
+          ],
+          "source_files": [
+            "tb/top_tb.vhd",
+            "hdl/spi_vivado_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "DUT 例化与 AXI BFM",
+            "p_control 测试场景",
+            "p_spi 从机仿真与数据校验"
+          ],
+          "practice_task": "为 top_tb 增加一个注释良好的新场景：向 slave 2 发送两字节并断言 Busy 在两次事务间正确翻转，描述你会插入的代码位置与 AXI 调用顺序。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：扩展、配置与工程化",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "可配置 generics 与 Vivado 参数化",
+          "order": 1,
+          "filename": "u3-l1-configurable-generics.md",
+          "level": "advanced",
+          "topic": "讲解全部可配置 generics 的取值范围与含义，以及它们如何通过 package.tcl / xgui 暴露为 Vivado GUI 参数并约束综合。",
+          "learning_goals": [
+            "掌握每个 generic（ClockDivider/TransWidth/CsHighCycles/CPOL/CPHA/SlaveCnt/LsbFirst/FifoDepth/MosiIdleState/ReadBitPol/TriStatePol/SpiDataPos/TriWiresSpi）的范围与默认值",
+            "理解 package.tcl 中 gui_create_parameter/gui_parameter_set_range/gui_parameter_set_widget_dropdown 的 GUI 声明",
+            "理解 spi_tri 端口的条件使能 add_port_enablement_condition 与 component.xml 的 PORT_ENABLEMENT 依赖"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "xgui/spi_simple_v1_4.tcl",
+            "component.xml",
+            "hdl/spi_vivado_wrp.vhd"
+          ],
+          "minimal_modules": [
+            "generic 取值范围与含义",
+            "GUI 参数声明（package.tcl/xgui）",
+            "端口条件使能机制"
+          ],
+          "practice_task": "选定 TriWiresSpi_g=true，说明这会激活哪个端口、影响哪些 generic，并追踪 package.tcl 与 component.xml 中对应的声明位置。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "3-Wire SPI 与三态/读写位扩展",
+          "order": 2,
+          "filename": "u3-l2-three-wire-spi.md",
+          "level": "advanced",
+          "topic": "讲解 HEAD 引入的 3-Wire SPI 扩展：spi_tri 三态控制、ReadBitPol/TriStatePol 极性、SpiDataPos 数据起始位，以及它们如何透传到 spi_simple 与 spi_master。",
+          "learning_goals": [
+            "理解 3-Wire SPI 共用单线收发的原理与 spi_tri 三态信号的作用",
+            "掌握 ReadBitPol_g、TriStatePol_g、SpiDataPos_g 三个 generic 如何配置 RW 位与三态极性",
+            "理解 wrapper 端 spi_tri 端口条件存在与 spi_simple 内部 SpiTri 透传"
+          ],
+          "source_files": [
+            "hdl/spi_vivado_wrp.vhd",
+            "hdl/spi_simple.vhd",
+            "scripts/package.tcl",
+            "component.xml"
+          ],
+          "minimal_modules": [
+            "3-Wire SPI 原理与 spi_tri 三态",
+            "ReadBitPol/TriStatePol/SpiDataPos 配置",
+            "generic 与端口的端到端透传"
+          ],
+          "practice_task": "结合 git log 中最近提交（3-Wires SPI interface signal added），写一份变更影响清单：哪些文件、端口、generic 改动，并说明 spi_tri 为何只在 TriWiresSpi_g=true 时综合。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "LE 锁存使能输出时序",
+          "order": 3,
+          "filename": "u3-l3-latch-enable-output.md",
+          "level": "advanced",
+          "topic": "讲解 1.3.0 引入并经 HEAD 巩固的 spi_le（Latch Enable）输出：每从机一根 LE，事务期间为低、事务结束后置高的语义，以及在 testbench 中的断言方式。",
+          "learning_goals": [
+            "理解 spi_le 端口（每 slave 一位）的锁存使能语义：传输中低、传输完成高",
+            "掌握 top_tb 中对 spi_le 的两处断言（传输中为 0、CS 释放后等于选中 slave 位）",
+            "理解 spi_le 从 spi_simple 经 wrapper 到顶层 spi_le 端口的传递路径"
+          ],
+          "source_files": [
+            "hdl/spi_simple.vhd",
+            "hdl/spi_vivado_wrp.vhd",
+            "tb/top_tb.vhd",
+            "Changelog.md"
+          ],
+          "minimal_modules": [
+            "LE 输出语义与端口定义",
+            "testbench 对 LE 的断言",
+            "LE 信号传递路径"
+          ],
+          "practice_task": "在 top_tb.vhd 的 p_spi 中定位 spi_le 的两处比较（StdlvCompareStdlv），解释为何期望值是 2**SlaveNr，并画出一次事务 CS_n/LE 的理想波形。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "IP 打包与发布流程",
+          "order": 4,
+          "filename": "u3-l4-ip-packaging.md",
+          "level": "advanced",
+          "topic": "讲解用 PsiIpPackage（scripts/package.tcl）把 RTL 打包成 Vivado IP 的完整流程，包括源码/库/驱动声明、GUI、component.xml 生成与 bd.tcl 自动化钩子。",
+          "learning_goals": [
+            "掌握 package.tcl 的结构：init/add_sources_relative/add_lib_relative/add_drivers_relative/gui_add_page/package_ip",
+            "理解 component.xml 如何描述总线接口、端口、参数与文件集合",
+            "理解 bd/bd.tcl 三个回调（init/pre_propagate/propagate）如何自动传播 AXI ID_WIDTH"
+          ],
+          "source_files": [
+            "scripts/package.tcl",
+            "bd/bd.tcl",
+            "component.xml",
+            "drivers/spi_simple/data/spi_simple.tcl",
+            "drivers/spi_simple/data/spi_simple.mdd",
+            "drivers/spi_simple/src/Makefile"
+          ],
+          "minimal_modules": [
+            "PsiIpPackage 打包脚本结构",
+            "component.xml 描述内容",
+            "Block design 自动化与驱动打包"
+          ],
+          "practice_task": "走查 package.tcl，列出新增一个 generic 需要在哪几处声明（generic 定义、gui_create_parameter、component.xml 参数），并说明驱动是如何被纳入 BSP（mdd/tcl/Makefile）的。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "CI、回归与开发工作流",
+          "order": 5,
+          "filename": "u3-l5-ci-and-dev-workflow.md",
+          "level": "advanced",
+          "topic": "讲解项目的工程化与二次开发工作流：CI 回归（ciFlow.py/ci.do）、依赖解析、以及 scripts/refactoring 下的代码重构脚本。",
+          "learning_goals": [
+            "掌握 CI 如何用 ciFlow.py 调用 vsim -c 跑 ci.do 并按 transcript 判定成败",
+            "理解 dependencies.py 与 PsiFpgaLibDependencies 如何从 README 解析依赖",
+            "了解 scripts/refactoring（hdlrefactor.py/refactor_library_and_testbench.py/alpha.json）的用途与风险"
+          ],
+          "source_files": [
+            "scripts/ciFlow.py",
+            "sim/ci.do",
+            "sim/run.tcl",
+            "scripts/dependencies.py",
+            "scripts/refactoring/hdlrefactor.py",
+            "scripts/refactoring/refactor_library_and_testbench.py"
+          ],
+          "minimal_modules": [
+            "CI 回归与结果判定",
+            "依赖解析机制",
+            "代码重构脚本与工作流"
+          ],
+          "practice_task": "设计一个最小改动验证流程：修改 spi_simple 后，说明应依次运行哪些脚本/命令完成「依赖获取→仿真回归→CI 判定」，并指出 transcript 中哪两个字符串决定退出码。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
