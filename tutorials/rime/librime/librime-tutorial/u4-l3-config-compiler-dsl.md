@@ -246,7 +246,7 @@ static void InsertByPriority(vector<of<Dependency>>& list, const an<Dependency>&
 }
 ```
 
-`ConfigDependencyGraph::Add` 的「向上传播 pending」逻辑（[src/rime/config/config_compiler.cc:L290-L326](https://github.com/rime/librime/librime/blob/d4c324ca988ed67f45e41524c2ab01d40cb55695/src/rime/config/config_compiler.cc#L290-L326)），核心是把当前节点挂上依赖后，再沿 `node_stack` 反向给每个尚未 pending 的祖先插一条 `PendingChild`：
+`ConfigDependencyGraph::Add` 的「向上传播 pending」逻辑（[src/rime/config/config_compiler.cc:L290-L326](https://github.com/rime/librime/blob/d4c324ca988ed67f45e41524c2ab01d40cb55695/src/rime/config/config_compiler.cc#L290-L326)），核心是把当前节点挂上依赖后，再沿 `node_stack` 反向给每个尚未 pending 的祖先插一条 `PendingChild`：
 
 ```cpp
 // Pending children should be resolved before applying __include or __patch

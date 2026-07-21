@@ -1,0 +1,810 @@
+{
+  "project": "weasel",
+  "head": "f9203cae5e2b0796d94575b975f62a6be9614b00",
+  "rationale": "Weasel（小狼毫）是 Rime 输入法引擎在 Windows 上的前端，采用「多进程 + 命名管道 IPC」架构：WeaselTSF（DLL，被 Windows 加载进每个应用进程，作为 IPC 客户端）通过命名管道把按键事件转发给 WeaselServer（后台服务进程，托管 librime 引擎、运行 IPC 服务端、驱动 UI）。因此学习路线按「先看清全貌与构建方式 → 打通 IPC 骨架 → 理解 TSF 前端如何取键与上屏 → 理解 RimeWithWeasel 如何桥接 librime → 深入候选窗口的 DirectWrite 渲染与布局 → 部署/安装/系统集成工具 → 测试、工具与二次开发扩展点」的顺序递进。这样安排是因为 IPC 是连接前后端的中枢，必须先于 TSF 与 Rime 桥接讲清楚；UI 渲染与部署工具属于较独立的进阶/专家内容，放在最后；最后用工程实践与扩展点收束，便于读者进行二次开发。共 7 单元 25 讲，覆盖小型到中大型 C++/Win32/WTL 项目的全部关键模块。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目认知、目录与构建运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Weasel 是什么：项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview-and-architecture.md",
+          "level": "beginner",
+          "topic": "介绍小狼毫输入法在 Rime 生态中的定位，以及 WeaselTSF/WeaselServer/WeaselIPC/RimeWithWeasel/WeaselUI 多进程分工的整体架构。",
+          "learning_goals": [
+            "理解 Weasel 与 librime、Rime 生态（鼠须管、fcitx-rime 等）的关系",
+            "掌握多进程架构：TSF 前端进程、后台 Server 进程、命名管道 IPC 的角色划分",
+            "能够画出一次按键从应用到上屏的数据流概览图"
+          ],
+          "source_files": [
+            "README.md",
+            "include/WeaselIPC.h",
+            "include/RimeWithWeasel.h",
+            "WeaselServer/WeaselServerApp.cpp"
+          ],
+          "minimal_modules": [
+            "Rime 引擎与各平台前端",
+            "Weasel 的多进程架构与职责划分",
+            "按键到上屏的主链路概览"
+          ],
+          "practice_task": "用一张图描绘「用户在记事本按键 → WeaselTSF → IPC → WeaselServer → librime → UI 候选 → 上屏」的完整数据流，并标注每个环节对应的源码目录。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码目录与解决方案结构",
+          "order": 2,
+          "filename": "u1-l2-directory-and-solution-layout.md",
+          "level": "beginner",
+          "topic": "梳理仓库根目录、各子工程（WeaselTSF/WeaselServer/WeaselIPC/WeaselIPCServer/RimeWithWeasel/WeaselUI/WeaselDeployer/WeaselSetup）以及 include 公共头、test、output 等目录的职责。",
+          "learning_goals": [
+            "记住八大子工程各自产出（EXE/DLL/lib）与依赖关系",
+            "理解 include/ 公共头与 WTL 的作用",
+            "了解 test、resource、output、plum、librime 等辅助目录的用途"
+          ],
+          "source_files": [
+            "weasel.sln",
+            "WeaselTSF/ReadMe.txt",
+            "include/WeaselUI.h",
+            "include/WeaselIPCData.h"
+          ],
+          "minimal_modules": [
+            "根目录与子工程清单",
+            "公共头 include 与 WTL",
+            "辅助目录 test/resource/output"
+          ],
+          "practice_task": "制作一张「子工程 → 产出类型 → 直接依赖的其它工程」对照表，并结合 weasel.sln 中的 Project 条目核对。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与从源码运行调试",
+          "order": 3,
+          "filename": "u1-l3-build-and-run-from-source.md",
+          "level": "beginner",
+          "topic": "讲解 build.bat、env.bat、weasel.sln(VC++) 与 xmake.lua 两套构建体系，版本号注入、BOOST_ROOT 依赖、output 安装目录与调试技巧。",
+          "learning_goals": [
+            "掌握 build.bat all 的构建流程与 env.bat 关键变量",
+            "理解 weasel.sln 与 xmake.lua 两套构建方式的关系",
+            "学会把 WeaselServer/WeaselTSF 装到 output 并 attach 调试"
+          ],
+          "source_files": [
+            "INSTALL.md",
+            "build.bat",
+            "env.bat.template",
+            "xmake.lua",
+            "weasel.props.template"
+          ],
+          "minimal_modules": [
+            "构建脚本与版本号注入",
+            "VC++ 解决方案与 xmake 双轨",
+            "安装到 output 与调试方法"
+          ],
+          "practice_task": "对照 INSTALL.md 与 build.bat，列出从干净 checkout 到生成 output/archives 安装包所需的全部步骤与环境变量，并标注容易踩坑的点。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进程间通信 IPC 骨架",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "IPC 接口、命令协议与请求处理器",
+          "order": 1,
+          "filename": "u2-l1-ipc-interface-and-command-protocol.md",
+          "level": "intermediate",
+          "topic": "解析 WeaselIPC.h：Client/Server 接口、WEASEL_IPC_COMMAND 枚举、PipeMessage、RequestHandler 抽象基类与命名管道命名规则。",
+          "learning_goals": [
+            "掌握 WEASEL_IPC_COMMAND 全部命令与会话生命周期",
+            "理解 RequestHandler 虚函数表如何抽象服务端能力",
+            "了解 GetPipeName() 基于用户名的管道隔离机制"
+          ],
+          "source_files": [
+            "include/WeaselIPC.h",
+            "include/WeaselIPCData.h"
+          ],
+          "minimal_modules": [
+            "Client/Server/RequestHandler 三大接口",
+            "IPC 命令枚举与 PipeMessage",
+            "管道命名与共享内存常量"
+          ],
+          "practice_task": "列出 RequestHandler 的全部虚函数，并为每一个标注「由哪个 IPC 命令触发、对应 Client 的哪个方法」，形成命令-方法映射表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "命名管道通道 PipeChannel",
+          "order": 2,
+          "filename": "u2-l2-pipechannel-named-pipe.md",
+          "level": "intermediate",
+          "topic": "深入 PipeChannel.h：PipeChannelBase 的连接/重连/读写，PipeChannel 模板的 Transact/Write/_Send/_ReceiveResponse，以及线程本地句柄与缓冲流设计。",
+          "learning_goals": [
+            "理解 PipeChannel 模板的模板参数（消息类型/响应类型/大小）",
+            "掌握 _Ensure/_Connect/_Reconnect 与 Transact 请求-响应模型",
+            "了解 thread_specific_ptr 实现的线程本地管道隔离与 boost::wbufferstream 缓冲"
+          ],
+          "source_files": [
+            "include/PipeChannel.h",
+            "WeaselIPC/PipeChannel.cpp"
+          ],
+          "minimal_modules": [
+            "PipeChannelBase 连接管理",
+            "PipeChannel 模板 Transact 流程",
+            "线程本地句柄与缓冲流"
+          ],
+          "practice_task": "画出一次 Transact(msg) 的时序图，包含客户端写消息体、_Send、服务端 Listen、_ReceiveResponse 各步，并标注缓冲与线程本地存储的位置。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "IPC 客户端与服务器实现",
+          "order": 3,
+          "filename": "u2-l3-client-and-server-impl.md",
+          "level": "intermediate",
+          "topic": "对照阅读 WeaselClientImpl（客户端连接/启动服务/各命令封装）与 WeaselServerImpl/PipeServer（服务端监听线程、消息派发、窗口与托盘命令）。",
+          "learning_goals": [
+            "掌握 Client::Connect 如何按需启动 Server 进程并建立会话",
+            "理解 PipeServer::Listen/_ProcessPipeThread 的多线程处理模型",
+            "了解 ServerImpl 如何把 PipeMessage 派发给 RequestHandler 与菜单处理器"
+          ],
+          "source_files": [
+            "WeaselIPC/WeaselClientImpl.cpp",
+            "WeaselIPC/WeaselClientImpl.h",
+            "WeaselIPCServer/WeaselServerImpl.cpp",
+            "WeaselIPCServer/WeaselServerImpl.h"
+          ],
+          "minimal_modules": [
+            "ClientImpl 连接与会话管理",
+            "PipeServer 监听与线程模型",
+            "ServerImpl 命令派发与菜单"
+          ],
+          "practice_task": "追踪 Client::Connect → StartSession → ProcessKeyEvent 的完整调用链，写出每一步在 WeaselClientImpl.cpp 中对应的代码行与向管道写入的命令。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "数据模型与 boost 序列化",
+          "order": 4,
+          "filename": "u2-l4-data-model-and-serialization.md",
+          "level": "intermediate",
+          "topic": "讲解 WeaselIPCData.h 中的 Context/Status/UIStyle/CandidateInfo/Text 等核心数据结构，以及 boost::serialization 模板如何把它们序列化进管道缓冲。",
+          "learning_goals": [
+            "掌握 Context(preedit/aux/cinfo)、Status、CandidateInfo 的字段含义",
+            "理解 UIStyle 庞大字段集对应的样式定制能力",
+            "了解 boost::serialization serialize 模板在 IPC 传输中的作用"
+          ],
+          "source_files": [
+            "include/WeaselIPCData.h"
+          ],
+          "minimal_modules": [
+            "Context/Status/CandidateInfo 数据结构",
+            "UIStyle 样式字段全集",
+            "boost 序列化模板"
+          ],
+          "practice_task": "选取 UIStyle 中「颜色」「布局」「字体」三类各 5 个字段，整理成一张「字段名 → 含义 → 取值/枚举」的速查表。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "响应解析、反序列化与动作分发",
+          "order": 5,
+          "filename": "u2-l5-response-parser-and-deserializer.md",
+          "level": "intermediate",
+          "topic": "解析 WeaselIPC 中的 ResponseParser、Deserializer、ActionLoader、ContextUpdater、Committer、Styler 如何把服务端返回的文本流解析成 Context/Status/UIStyle 更新。",
+          "learning_goals": [
+            "理解 ResponseParser 以行为单位解析服务端响应的协议",
+            "掌握 ActionLoader + Deserializer 的注册与分发机制",
+            "了解 ContextUpdater/Committer/Styler 三类更新动作的差异"
+          ],
+          "source_files": [
+            "include/ResponseParser.h",
+            "WeaselIPC/ResponseParser.cpp",
+            "WeaselIPC/Deserializer.cpp",
+            "WeaselIPC/ActionLoader.cpp",
+            "WeaselIPC/ContextUpdater.cpp",
+            "WeaselIPC/Styler.cpp"
+          ],
+          "minimal_modules": [
+            "ResponseParser 行协议",
+            "ActionLoader/Deserializer 分发",
+            "ContextUpdater/Committer/Styler 动作"
+          ],
+          "practice_task": "仿照 ContextUpdater/Styler 的写法，编写一个新的 Deserializer 子类骨架（例如只更新 Status.composing），并说明它需要在 ActionLoader 中如何注册才能被服务端响应触发。",
+          "depends_on": [
+            "u2-l4",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "TSF 文本服务前端",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "TSF IME 的注册与生命周期",
+          "order": 1,
+          "filename": "u3-l1-tsf-registration-and-lifecycle.md",
+          "level": "intermediate",
+          "topic": "讲解 WeaselTSF 作为 Windows TSF 文本服务的注册与生命周期：dllmain、CClassFactory、Register、ActivateEx/Deactivate、QueryInterface 多接口聚合。",
+          "learning_goals": [
+            "理解 TSF 文本服务（ITfTextInputProcessorEx）被系统加载与激活的流程",
+            "掌握 WeaselTSF 聚合的多个 TSF 接口（KeyEventSink/EditSink/CompositionSink 等）",
+            "了解 ActivateEx 中各个 _Init* 的初始化顺序与服务器连接"
+          ],
+          "source_files": [
+            "WeaselTSF/WeaselTSF.cpp",
+            "WeaselTSF/Server.cpp",
+            "WeaselTSF/Register.cpp",
+            "WeaselTSF/dllmain.cpp"
+          ],
+          "minimal_modules": [
+            "DllMain 与类工厂",
+            "Register 注册文本服务",
+            "ActivateEx 初始化链"
+          ],
+          "practice_task": "在 ActivateEx 中标注每个 _Init* 调用的作用，并说明若某个 _Init 失败会走到 ExitError 的哪一步、产生什么后果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "按键事件捕获：KeyEventSink",
+          "order": 2,
+          "filename": "u3-l2-key-event-sink.md",
+          "level": "intermediate",
+          "topic": "深入 KeyEventSink.cpp：OnTestKeyDown/OnKeyDown 的去重策略、_ProcessKeyEvent 如何转换按键并通过 IPC 发给 Server，以及 Caps Lock 等特殊键处理。",
+          "learning_goals": [
+            "理解 OnTestKeyDown/OnKeyDown 配合 _fTestKeyDownPending 的去重原理",
+            "掌握 ConvertKeyEvent 把 Windows 按键转成 weasel::KeyEvent 的过程",
+            "了解键盘开关、服务器连接失败时按键的放行逻辑"
+          ],
+          "source_files": [
+            "WeaselTSF/KeyEventSink.cpp",
+            "WeaselTSF/KeyEvent.cpp",
+            "include/KeyEvent.h"
+          ],
+          "minimal_modules": [
+            "TestKeyDown/KeyDown 去重",
+            "ConvertKeyEvent 按键转换",
+            "特殊键与连接异常处理"
+          ],
+          "practice_task": "追踪一个普通字母键从 OnTestKeyDown 到 m_client.ProcessKeyEvent 的完整路径，写出每一步的变量变化（_fTestKeyDownPending、pfEaten、ke）。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "编辑会话与上屏：EditSession 与 Composition",
+          "order": 3,
+          "filename": "u3-l3-edit-session-and-composition.md",
+          "level": "intermediate",
+          "topic": "讲解 EditSession.cpp/Composition.cpp/TextEditSink.cpp：如何用 ITfEditSession 把 preedit 写入应用文档、如何提交（commit）最终文字、如何中止写作。",
+          "learning_goals": [
+            "理解 TSF EditSession 修改应用文档的锁机制",
+            "掌握内联 preedit（inline_preedit）写入与候选窗口两种模式的差异",
+            "了解 _AbortComposition / CommitComposition 的清理逻辑"
+          ],
+          "source_files": [
+            "WeaselTSF/EditSession.cpp",
+            "WeaselTSF/Composition.cpp",
+            "WeaselTSF/TextEditSink.cpp"
+          ],
+          "minimal_modules": [
+            "EditSession 文档写入与锁",
+            "Composition preedit/commit",
+            "中止与清理"
+          ],
+          "practice_task": "对比「内联 preedit 模式」与「独立候选窗口模式」下 EditSession 是否被调用、调用时机与写入内容，写出差异对照表。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "候选列表、语言栏与显示属性",
+          "order": 4,
+          "filename": "u3-l4-candidate-list-language-bar-display-attribute.md",
+          "level": "intermediate",
+          "topic": "讲解 CandidateList（ITfCandidateList 实现）、LanguageBar（输入法状态切换按钮）、DisplayAttribute（写作串样式）与 Compartment（状态存储）。",
+          "learning_goals": [
+            "理解 CCandidateList 如何呈现与选择候选并回传给 Server",
+            "掌握 LanguageBar 的中/英、全/半角切换与状态同步",
+            "了解 DisplayAttribute/Compartment 在 TSF 中的作用"
+          ],
+          "source_files": [
+            "WeaselTSF/CandidateList.cpp",
+            "WeaselTSF/LanguageBar.cpp",
+            "WeaselTSF/DisplayAttribute.cpp",
+            "WeaselTSF/Compartment.cpp"
+          ],
+          "minimal_modules": [
+            "候选列表交互",
+            "语言栏与状态切换",
+            "显示属性与 Compartment"
+          ],
+          "practice_task": "追踪用户用鼠标点击候选列表第 2 项后的处理：从 CandidateList 事件到 m_client.SelectCandidateOnCurrentPage 的 IPC 调用，写出调用链。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Rime 引擎桥接 RimeWithWeasel",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "RimeWithWeaselHandler 与引擎初始化",
+          "order": 1,
+          "filename": "u4-l1-handler-and-engine-init.md",
+          "level": "intermediate",
+          "topic": "讲解 RimeWithWeaselHandler 作为 RequestHandler 实现，如何通过 rime_api 初始化 librime、设置 traits、注册通知回调、进入维护模式。",
+          "learning_goals": [
+            "理解 _Setup/Initialize 如何配置 RimeTraits 并 initialize/start_maintenance",
+            "掌握 rime_api（librime C API）在 Weasel 中的使用方式",
+            "了解 OnNotify 通知回调与静态消息缓冲的线程安全设计"
+          ],
+          "source_files": [
+            "include/RimeWithWeasel.h",
+            "RimeWithWeasel/RimeWithWeasel.cpp"
+          ],
+          "minimal_modules": [
+            "librime C API 与 traits",
+            "Initialize 与维护模式",
+            "OnNotify 通知与互斥锁"
+          ],
+          "practice_task": "梳理 RimeWithWeaselHandler 构造 → _Setup → Initialize 的执行顺序，标注每一步调用的 rime_api 函数与其作用。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "会话管理与按键处理",
+          "order": 2,
+          "filename": "u4-l2-session-and-key-processing.md",
+          "level": "intermediate",
+          "topic": "讲解 AddSession/RemoveSession/ProcessKeyEvent/CommitComposition 等会话相关方法，WeaselSessionId 与 RimeSessionId 的映射，以及 _Respond 如何回传结果。",
+          "learning_goals": [
+            "理解 WeaselSessionId(pid 编码) 与 librime RimeSessionId 的双向映射",
+            "掌握 ProcessKeyEvent → rime process_key → _UpdateUI/_Respond 的主链路",
+            "了解 _ReadClientInfo 读取客户端应用名与能力的作用"
+          ],
+          "source_files": [
+            "RimeWithWeasel/RimeWithWeasel.cpp",
+            "include/RimeWithWeasel.h"
+          ],
+          "minimal_modules": [
+            "会话 ID 映射与状态表",
+            "按键处理主链路",
+            "_Respond 结果回传"
+          ],
+          "practice_task": "追踪一次有效按键从 ProcessKeyEvent 到 _Respond 的完整流程，标出 rime_api 调用、会话状态更新、UI 更新与回写客户端的位置。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "方案配置、App 选项与 inline preedit",
+          "order": 3,
+          "filename": "u4-l3-schema-config-app-options-inline-preedit.md",
+          "level": "intermediate",
+          "topic": "讲解 _LoadSchemaSpecificSettings、AppOptionsByAppName 应用级选项、_LoadAppInlinePreeditSet 与 _UpdateInlinePreeditStatus 的配置加载机制。",
+          "learning_goals": [
+            "理解按输入方案加载样式与配置的机制",
+            "掌握 AppOptions 如何让特定应用（如游戏）默认英文/特定开关",
+            "了解 inline preedit 状态的动态切换"
+          ],
+          "source_files": [
+            "RimeWithWeasel/RimeWithWeasel.cpp",
+            "include/RimeWithWeasel.h"
+          ],
+          "minimal_modules": [
+            "方案专属配置加载",
+            "应用级 AppOptions",
+            "inline preedit 动态切换"
+          ],
+          "practice_task": "设计一个 AppOptions 配置示例（app: xxx, ascii_mode: true），并追踪它在 AddSession/_ReadClientInfo 中如何生效、影响后续按键。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "UI 更新、消息通知与维护/主题",
+          "order": 4,
+          "filename": "u4-l4-ui-update-notify-maintenance-theme.md",
+          "level": "intermediate",
+          "topic": "讲解 _UpdateUI、OnNotify/_ShowMessage 的提示消息、StartMaintenance/EndMaintenance 维护模式，以及 UpdateColorTheme 深色模式适配。",
+          "learning_goals": [
+            "理解 _UpdateUI 如何把 Context/Status 推送给 UI 并控制显隐",
+            "掌握 Rime 通知（schema/option/error）到用户提示的转换",
+            "了解维护模式与深色主题对输入行为的影响"
+          ],
+          "source_files": [
+            "RimeWithWeasel/RimeWithWeasel.cpp",
+            "include/RimeWithWeasel.h",
+            "include/WeaselUI.h"
+          ],
+          "minimal_modules": [
+            "_UpdateUI 推送与显隐",
+            "通知转提示",
+            "维护模式与深色主题"
+          ],
+          "practice_task": "追踪「切换输入方案」时 OnNotify 收到消息 → _ShowMessage → UI 提示的全过程，说明通知去重与超时机制（m_show_notifications_time）。",
+          "depends_on": [
+            "u4-l2",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "候选窗口 UI 渲染",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "WeaselPanel 窗口、分层与交互",
+          "order": 1,
+          "filename": "u5-l1-weasel-panel-window-and-interaction.md",
+          "level": "advanced",
+          "topic": "讲解 WeaselPanel 作为分层、置顶、不抢焦点的 popup 窗口：消息映射、双缓冲、DPI 适配、鼠标交互（hover/点击选择/滚轮翻页）与光标跟随定位。",
+          "learning_goals": [
+            "理解 WS_EX_LAYERED/TOPMOST/NOACTIVATE 窗口属性与双缓冲绘制",
+            "掌握鼠标 hover/点击选词、滚轮翻页的事件处理",
+            "了解光标跟随、DPI 变化与多显示器下的窗口定位"
+          ],
+          "source_files": [
+            "WeaselUI/WeaselPanel.h",
+            "WeaselUI/WeaselPanel.cpp",
+            "WeaselUI/WeaselUI.cpp"
+          ],
+          "minimal_modules": [
+            "分层窗口与双缓冲",
+            "鼠标交互与选词",
+            "光标跟随与 DPI"
+          ],
+          "practice_task": "阅读 WeaselPanel 的消息映射表，画出鼠标 hover 高亮候选并点击上屏的事件流转图，标注涉及到的成员变量（m_hoverIndex、m_sticky 等）。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "布局系统：Layout 与多种排布",
+          "order": 2,
+          "filename": "u5-l2-layout-system.md",
+          "level": "advanced",
+          "topic": "讲解 Layout 抽象基类及其子类 StandardLayout/HorizontalLayout/VerticalLayout/VHorizontalLayout/FullScreenLayout，如何根据 UIStyle.layout_type 计算候选、preedit、状态图标的几何位置。",
+          "learning_goals": [
+            "理解 Layout 多态体系与 DoLayout 的统一接口",
+            "掌握水平/竖直/竖排文字/全屏四种布局的几何差异",
+            "了解 GetCandidateRect/GetPreeditRect 等接口如何被 WeaselPanel 绘制时使用"
+          ],
+          "source_files": [
+            "WeaselUI/Layout.h",
+            "WeaselUI/Layout.cpp",
+            "WeaselUI/StandardLayout.cpp",
+            "WeaselUI/HorizontalLayout.cpp",
+            "WeaselUI/VerticalLayout.cpp"
+          ],
+          "minimal_modules": [
+            "Layout 抽象与多态",
+            "水平/竖直/竖排文字布局",
+            "几何接口与绘制协作"
+          ],
+          "practice_task": "仿照 HorizontalLayout 的结构，写出一个「双列候选」布局类的 DoLayout 伪代码，说明需要重写哪些几何接口、如何在 _CreateLayout 中选择它。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "DirectWrite 资源与文本绘制",
+          "order": 3,
+          "filename": "u5-l3-directwrite-resources-and-text-rendering.md",
+          "level": "advanced",
+          "topic": "讲解 DirectWriteResources 如何管理 D2D/DWrite 工厂、文本格式、画刷、文本布局，以及 WeaselPanel 中 _DrawPreedit/_DrawCandidates/_HighlightText 的绘制流程与 GdiplusBlur 阴影。",
+          "learning_goals": [
+            "理解 DirectWriteResources 的资源创建、字体回退与 DPI 缩放",
+            "掌握 preedit/候选/高亮的分层绘制顺序与圆角矩形路径",
+            "了解 GdiplusBlur 实现阴影模糊与配色应用"
+          ],
+          "source_files": [
+            "WeaselUI/DirectWriteResources.cpp",
+            "WeaselUI/WeaselPanel.cpp",
+            "WeaselUI/GdiplusBlur.cpp",
+            "WeaselUI/Layout.h"
+          ],
+          "minimal_modules": [
+            "DWrite 资源与字体回退",
+            "分层绘制流程",
+            "圆角/阴影/配色"
+          ],
+          "practice_task": "梳理 DoPaint 的绘制顺序（背景→preedit→候选背景→候选文字→高亮→阴影），并指出每一步调用的 DirectWriteResources 接口与 Layout 几何接口。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "部署、安装与系统集成",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "WeaselDeployer 配置器",
+          "order": 1,
+          "filename": "u6-l1-weasel-deployer-configurator.md",
+          "level": "advanced",
+          "topic": "讲解 WeaselDeployer 的 Configurator 与 rime_levers_api：方案切换设置、UI 样式设置、用户词典管理，以及 /deploy /sync /dict 等命令行模式。",
+          "learning_goals": [
+            "理解 Deployer 如何用 rime_levers_api 加载/保存 default.custom.yaml、weasel.custom.yaml",
+            "掌握 SwitcherSettingsDialog/UIStyleSettingsDialog/DictManagementDialog 的配置入口",
+            "了解 /deploy（重新部署）、/sync（同步用户词典）、/dict（词典管理）的触发链路"
+          ],
+          "source_files": [
+            "WeaselDeployer/WeaselDeployer.cpp",
+            "WeaselDeployer/Configurator.cpp",
+            "WeaselDeployer/SwitcherSettingsDialog.cpp",
+            "WeaselDeployer/UIStyleSettings.cpp"
+          ],
+          "minimal_modules": [
+            "Configurator 与 rime_levers_api",
+            "方案/UI/词典三类设置对话框",
+            "命令行模式 deploy/sync/dict"
+          ],
+          "practice_task": "追踪「用户在托盘点【用户设定】→ 修改 UI 样式 → 保存」的流程，写出 Deployer 如何保存到 weasel.custom.yaml 并提示重新部署。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "WeaselSetup 安装与 IME 注册",
+          "order": 2,
+          "filename": "u6-l2-weasel-setup-and-ime-registration.md",
+          "level": "advanced",
+          "topic": "讲解 WeaselSetup 安装程序：InstallOptionsDlg 安装选项（输入语言选择）、imesetup 对 TSF 文本服务的注册/注销（register/unregister）。",
+          "learning_goals": [
+            "理解安装时如何把 WeaselTSF 注册到指定语言键盘布局",
+            "掌握 imesetup 中 ITfInputProcessorProfiles 注册/注销的调用",
+            "了解安装选项对话框与安装目录结构"
+          ],
+          "source_files": [
+            "WeaselSetup/WeaselSetup.cpp",
+            "WeaselSetup/InstallOptionsDlg.cpp",
+            "WeaselSetup/imesetup.cpp"
+          ],
+          "minimal_modules": [
+            "安装选项对话框",
+            "TSF 文本服务注册/注销",
+            "安装目录结构"
+          ],
+          "practice_task": "梳理 imesetup 注册文本服务的系统调用序列，并说明卸载时如何反向注销、为什么要先停掉 WeaselServer。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "系统托盘、服务进程与自动更新",
+          "order": 3,
+          "filename": "u6-l3-tray-icon-server-and-update.md",
+          "level": "advanced",
+          "topic": "讲解 WeaselServer 的系统托盘（WeaselTrayIcon/SystemTraySDK）、WeaselServerApp 的菜单命令分发、单实例重启机制，以及 WinSparkle 自动更新。",
+          "learning_goals": [
+            "理解 WeaselServerApp 如何组装 RequestHandler/UI/Server/托盘并进入消息循环",
+            "掌握命令行参数（/q /ascii /userdir /update）与单实例重启逻辑",
+            "了解 WinSparkle 的更新检查与托盘菜单项绑定"
+          ],
+          "source_files": [
+            "WeaselServer/WeaselServer.cpp",
+            "WeaselServer/WeaselServerApp.cpp",
+            "WeaselServer/WeaselTrayIcon.cpp",
+            "WeaselServer/SystemTraySDK.cpp"
+          ],
+          "minimal_modules": [
+            "ServerApp 组装与消息循环",
+            "命令行与单实例重启",
+            "托盘菜单与 WinSparkle 更新"
+          ],
+          "practice_task": "对照 WeaselServer.cpp 的命令行分支与 WeaselServerApp::SetupMenuHandlers，制作一张「命令/菜单项 → 行为」对照表。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "工程实践与二次开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "测试工程：IPC 与响应解析",
+          "order": 1,
+          "filename": "u7-l1-testing-ipc-and-response-parser.md",
+          "level": "advanced",
+          "topic": "讲解 test/TestWeaselIPC 与 test/TestResponseParser 两个 Google Test 工程如何验证 IPC 通道与响应解析协议，以及如何编写新测试。",
+          "learning_goals": [
+            "理解 TestWeaselIPC 如何构造 Client/Server 做端到端 IPC 验证",
+            "掌握 TestResponseParser 如何针对响应文本做单元测试",
+            "了解测试工程的构建（vcxproj/xmake）与运行方式"
+          ],
+          "source_files": [
+            "test/TestWeaselIPC/TestWeaselIPC.cpp",
+            "test/TestResponseParser/TestResponseParser.cpp"
+          ],
+          "minimal_modules": [
+            "TestWeaselIPC 端到端测试",
+            "TestResponseParser 单元测试",
+            "测试构建与运行"
+          ],
+          "practice_task": "参考 TestResponseParser，为某一类 UIStyle 字段（如颜色）编写一个新的断言用例骨架，说明需要构造的输入响应文本。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "工具函数、常量与按键映射",
+          "order": 2,
+          "filename": "u7-l2-utility-constants-and-key-mapping.md",
+          "level": "advanced",
+          "topic": "讲解 WeaselUtility（路径、用户名、编码转换）、WeaselConstants（版本号、路径常量）、KeyEvent/ConvertKeyEvent（按键映射）与 VersionHelpers 等公共工具。",
+          "learning_goals": [
+            "掌握 WeaselUserDataPath/WeaselSharedDataPath/WeaselLogPath 等路径工具",
+            "理解 WEASEL_VERSION/WEASEL_CODE_NAME 等常量的来源与注入",
+            "了解 ConvertKeyEvent 在 Windows 虚拟键与 ibus keycode 之间的映射"
+          ],
+          "source_files": [
+            "include/WeaselUtility.h",
+            "RimeWithWeasel/WeaselUtility.cpp",
+            "include/WeaselConstants.h",
+            "include/KeyEvent.h",
+            "WeaselTSF/KeyEvent.cpp"
+          ],
+          "minimal_modules": [
+            "路径与编码工具",
+            "版本与路径常量",
+            "按键映射"
+          ],
+          "practice_task": "整理一份「虚拟键 → ibus keycode」的常用键映射表（字母、数字、方向键、Caps Lock、修饰键），并指出在 ConvertKeyEvent 中对应分支。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "配色方案与样式定制实战",
+          "order": 3,
+          "filename": "u7-l3-color-scheme-and-style-customization.md",
+          "level": "advanced",
+          "topic": "结合 UIStyle 颜色字段、ARGB/RGBA/ABGR 颜色格式转换（RimeWithWeasel.cpp 中的宏）、weasel.custom.yaml 与深色主题，实战定制一套配色与外观。",
+          "learning_goals": [
+            "掌握 UIStyle 中所有颜色字段的语义与配色对象（文本/候选/高亮/边框/阴影）",
+            "理解 ARGB2ABGR/RGBA2ABGR 颜色格式转换的原因与场景",
+            "了解通过 weasel.custom.yaml 定制样式并触发布局/绘制刷新的链路"
+          ],
+          "source_files": [
+            "include/WeaselIPCData.h",
+            "RimeWithWeasel/RimeWithWeasel.cpp",
+            "WeaselUI/DirectWriteResources.cpp",
+            "WeaselDeployer/UIStyleSettings.cpp"
+          ],
+          "minimal_modules": [
+            "UIStyle 颜色字段语义",
+            "颜色格式转换",
+            "custom.yaml 定制与刷新"
+          ],
+          "practice_task": "编写一份 weasel.custom.yaml 片段，定义一套自定义配色（含颜色、圆角、阴影、字体），并说明它经过 Deployer 加载 → UIStyle 序列化 → DirectWriteResources 应用到绘制的全过程。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "扩展点与架构权衡总结",
+          "order": 4,
+          "filename": "u7-l4-extension-points-and-tradeoffs.md",
+          "level": "advanced",
+          "topic": "总结 Weasel 的关键扩展点（新增 IPC 命令、新增布局、新增配置项、方案专属设置）与架构取舍（多进程 IPC vs 单进程、DirectWrite vs GDI、WTL/ATL 选型）。",
+          "learning_goals": [
+            "能够定位「新增一个功能」需要改动的模块清单与扩展点",
+            "理解多进程 IPC 架构在性能、稳定性、安全上的权衡",
+            "形成对 Weasel 整体架构的设计层面评价与改进思路"
+          ],
+          "source_files": [
+            "include/WeaselIPC.h",
+            "include/RimeWithWeasel.h",
+            "include/PipeChannel.h",
+            "WeaselUI/Layout.h",
+            "WeaselServer/WeaselServerApp.cpp"
+          ],
+          "minimal_modules": [
+            "功能扩展点清单",
+            "多进程架构权衡",
+            "整体设计评价"
+          ],
+          "practice_task": "选择一个假想需求（例如「新增一个 IPC 命令实现服务端日志开关」或「新增一种布局」），列出从协议、Client、Server、Handler 到 UI 需要改动的全部文件与函数清单。",
+          "depends_on": [
+            "u7-l3",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
