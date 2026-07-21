@@ -1,0 +1,728 @@
+{
+  "project": "RISC-V-Vector",
+  "head": "8ded0f4036bcb34868c2d15475883d03bff37328",
+  "rationale": "本项目是 RISC-V²（RISC-V-Vector）向量处理器数据通路的 SystemVerilog RTL 实现，核心流水线为 vRRM（寄存器重映射）→ vIS（计分板发射）→ vEX（执行），并旁路 vMU（向量存储单元），外围有完整的仿真框架（sim_generator.py + vector_driver + QuestaSim）和 SVA 断言。学习路线据此分四单元、共 25 篇讲义：单元一（入门）先让读者认识项目定位、目录与构建方式、参数与共享类型，并能端到端跑通仿真；单元二（进阶·前端与执行）沿数据通路自顶向下讲解 vector_top 顶层连线、弹性缓冲解耦、vrrm/vrat/vrf 寄存器子系统、vis 计分板与硬件循环展开、vex/vex_pipe 执行流水与整数 ALU/归约树；单元三（进阶·存储）专门讲 vmu 的仲裁与 load/store/tile-prefetch 三个引擎及其解耦执行；单元四（专家）上升到解耦执行的 acquire-release 语义、转发与变延迟、缓存/L2 子系统、TB 与驱动器内部、sim_generator 解码原理、SVA 断言、性能调优与示例实战。讲义顺序严格遵循\"先整体后局部、先数据通路后存储、先使用后验证\"的依赖关系，每篇只讲一个主题、结合 1–6 个真实源码文件并给出可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识项目与跑通仿真",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview-and-architecture.md",
+          "level": "beginner",
+          "topic": "介绍 RISC-V² 向量处理器是什么、它解决什么问题，以及标量核加向量数据通路的整体架构和三大核心创新（寄存器重映射、解耦执行、归约树）。",
+          "learning_goals": [
+            "理解向量处理在高吞吐与高能效上的价值",
+            "理解 RISC-V² 在双发射超标量核中的定位与指令分流",
+            "了解寄存器重映射、解耦执行、动态归约树三大创新点"
+          ],
+          "source_files": [
+            "README.md",
+            "rtl/README.md",
+            "images/core_ppln.png"
+          ],
+          "minimal_modules": [
+            "项目定位与背景",
+            "架构概览：标量核+向量数据通路",
+            "三大核心创新点"
+          ],
+          "practice_task": "阅读 README.md 与 rtl/README.md，用自己的话画出标量核与向量数据通路的连接关系图，并在向量数据通路中标注 vrrm/vis/vex/vmu 四大阶段。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与构建流程",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-build.md",
+          "level": "beginner",
+          "topic": "讲解仓库的目录层级、各子目录职责，以及如何用文件清单 files_rtl.f / files_sim.f 配合 compile_vector_simulator.do 在 QuestaSim 中构建仿真。",
+          "learning_goals": [
+            "说出 rtl/shared、rtl/vector、sva、vector_simulator 各自职责",
+            "理解 RTL 文件清单的组织与 +incdir 包含路径",
+            "看懂 QuestaSim 的 vlog/vsim 编译运行脚本"
+          ],
+          "source_files": [
+            "rtl/README.md",
+            "vector_simulator/files_rtl.f",
+            "vector_simulator/files_sim.f",
+            "vector_simulator/compile_vector_simulator.do"
+          ],
+          "minimal_modules": [
+            "目录层级与职责",
+            "文件清单组织",
+            "编译运行脚本"
+          ],
+          "practice_task": "在 files_rtl.f 中为每个文件标注它属于哪个子系统（共享/向量前端/执行/存储/断言），并解释 vlog 命令中三个 +incdir 路径各自让哪些 .sv 能被 `include。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "设计参数与可调旋钮",
+          "order": 3,
+          "filename": "u1-l3-design-parameters.md",
+          "level": "beginner",
+          "topic": "解析 params.sv，区分标量参数与向量参数，明确哪些是可调参数（如 VECTOR_LANES、USE_HW_UNROLL、转发点）以及它们的取值约束。",
+          "learning_goals": [
+            "区分 TUNABLE 与 NOT TUNABLE 参数",
+            "理解 VECTOR_LANES、USE_HW_UNROLL、VECTOR_FWD_POINT 的含义",
+            "掌握参数变化对位宽与结构的影响边界"
+          ],
+          "source_files": [
+            "rtl/shared/params.sv"
+          ],
+          "minimal_modules": [
+            "标量参数",
+            "向量参数",
+            "可调与不可调边界"
+          ],
+          "practice_task": "把 VECTOR_LANES 从 8 改为 4，预测哪些模块的位宽会随之改变；并说明 README 中提到当前最大支持 16 lane 的原因。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "共享类型与宏定义",
+          "order": 4,
+          "filename": "u1-l4-shared-types-and-macros.md",
+          "level": "beginner",
+          "topic": "讲解 vstructs.sv（向量指令结构体与整数操作码枚举）、vmacros.sv（FU 编码、存储操作编码、转发点宏）和 structs.sv（标量结构体）。",
+          "learning_goals": [
+            "看懂 to_vector / remapped_v_instr / to_vector_exec 等结构体字段",
+            "理解 v_int_op_t 操作码枚举与 microop 取值",
+            "掌握 MEM_FU/INT_FU/FP_FU/FXP_FU 功能单元编码"
+          ],
+          "source_files": [
+            "rtl/vector/vstructs.sv",
+            "rtl/vector/vmacros.sv",
+            "rtl/shared/structs.sv"
+          ],
+          "minimal_modules": [
+            "向量指令结构体",
+            "操作码枚举",
+            "FU 与存储操作宏"
+          ],
+          "practice_task": "给定一条 vadd v2,v0,v1 指令，写出它在 to_vector 结构体中各字段的取值，并指出 VADD 对应的 7 位 microop 值。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "端到端跑通仿真",
+          "order": 5,
+          "filename": "u1-l5-running-the-simulator.md",
+          "level": "beginner",
+          "topic": "手把手跑通仿真：用 sim_generator.py 把 CSV 转成存储文件，再用 compile.do 在 QuestaSim 中编译运行，查看波形与 perf_results/results.log 性能日志。",
+          "learning_goals": [
+            "掌握 sim_generator.py 的三个参数（csv/AVL/VECTOR_LANES）",
+            "理解 decoder_results 目录产出的各类文件",
+            "知道如何查看波形与性能日志"
+          ],
+          "source_files": [
+            "vector_simulator/README.md",
+            "vector_simulator/sim_generator.py",
+            "vector_simulator/compile_vector_simulator.do",
+            "vector_simulator/examples/vvadd/instrs.csv"
+          ],
+          "minimal_modules": [
+            "仿真整体流程",
+            "脚本参数与产物",
+            "波形与性能日志"
+          ],
+          "practice_task": "复制 vvadd/instrs.csv 到 vector_simulator 目录，运行生成器（AVL=5000、VECTOR_LANES=8）并启动仿真，报告 results.log 中的总周期数与 stall 统计。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：前端与执行流水线",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "vector_top 顶层数据通路",
+          "order": 1,
+          "filename": "u2-l1-vector-top-datapath.md",
+          "level": "intermediate",
+          "topic": "解析 vector_top.sv，理解 vRRM→vIS→vEX→vMU 四级数据通路如何在顶层连线、指令路径与存储路径如何分叉，以及各级 idle 信号如何汇聚。",
+          "learning_goals": [
+            "看懂顶层 generate（USE_HW_UNROLL）如何插入弹性缓冲",
+            "理解整数指令路径与存储指令路径的分叉点",
+            "掌握 ready/valid 握手在各流水级的传递与 idle 汇聚"
+          ],
+          "source_files": [
+            "rtl/vector/vector_top.sv"
+          ],
+          "minimal_modules": [
+            "四级流水线整体",
+            "弹性缓冲的插入",
+            "idle 信号汇聚"
+          ],
+          "practice_task": "在 vector_top.sv 中标注一条整数指令从 instr_in 到 wrtbck 的完整路径，以及一条存储指令走向 vmu 的分叉点；指出 USE_HW_UNROLL=0 时哪些缓冲被旁路。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "弹性缓冲与流水线解耦",
+          "order": 2,
+          "filename": "u2-l2-elastic-buffers-and-decoupling.md",
+          "level": "intermediate",
+          "topic": "讲解 eb_buff_generic 及其三种后端（one-slot/two-slot/fifo），理解弹性缓冲如何用 ready/valid 握手解耦流水级并实现满吞吐。",
+          "learning_goals": [
+            "区分 BUFF_TYPE 0/1/2/3 的吞吐与延迟差异",
+            "理解 ready/valid 反压与组合逻辑回压路径",
+            "看懂 eb_one_slot 的 FULL_THROUGHPUT 含义"
+          ],
+          "source_files": [
+            "rtl/shared/eb_buff_generic.sv",
+            "rtl/shared/eb_one_slot.sv",
+            "rtl/shared/eb_two_slot.sv",
+            "rtl/shared/fifo_duth.sv"
+          ],
+          "minimal_modules": [
+            "弹性缓冲类型",
+            "握手与反压",
+            "FIFO 后端"
+          ],
+          "practice_task": "解释为何 vector_top 中 vRR_vIS 使用 BUFF_TYPE=1，并比较 one-slot 与 two-slot 在时序（频率）上的差异，给出取舍理由。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "vRRM 寄存器重映射",
+          "order": 3,
+          "filename": "u2-l3-vrrm-register-remap.md",
+          "level": "intermediate",
+          "topic": "解析 vrrm.sv，理解寄存器重映射机制：自由列表分配、ticket 跟踪、hop 步长分配、以及 load/store/prefetch 的 lock 位设置。",
+          "learning_goals": [
+            "理解动态寄存器分配如何支撑硬件循环展开",
+            "掌握 last_producer 与 next_ticket 的作用",
+            "区分 load/store/toeplitz 的 lock 编码"
+          ],
+          "source_files": [
+            "rtl/vector/vrrm.sv"
+          ],
+          "minimal_modules": [
+            "自由列表分配",
+            "ticket 生产者跟踪",
+            "lock 位编码"
+          ],
+          "practice_task": "追踪一条 vadd 指令在 vrrm 中如何获得物理寄存器和 ticket；并说明 reconfigure 信号何时生效、对映射状态做什么。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "VRF 寄存器堆与 VRAT 别名表",
+          "order": 4,
+          "filename": "u2-l4-vrf-and-vrat-register-file.md",
+          "level": "intermediate",
+          "topic": "讲解 vrf.sv（向量寄存器堆：元素级与整寄存器级访问）和 vrat.sv（寄存器别名表：架构寄存器到物理寄存器的映射）。",
+          "learning_goals": [
+            "理解 memory[32][4][32] 三维寄存器堆组织",
+            "掌握整寄存器写优先于元素写的优先级",
+            "理解 vrat 的 remapped 标志与复位时的恒等映射"
+          ],
+          "source_files": [
+            "rtl/vector/vrf.sv",
+            "rtl/vector/vrat.sv"
+          ],
+          "minimal_modules": [
+            "寄存器堆组织与端口",
+            "mask 提取",
+            "别名表与复位"
+          ],
+          "practice_task": "解释 mask 如何从寄存器元素的 LSB 提取；并画出 vrat 在 reconfigure 时如何把所有映射复位为恒等映射。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "vIS 计分板与冒险检测",
+          "order": 5,
+          "filename": "u2-l5-vis-scoreboard-and-hazards.md",
+          "level": "intermediate",
+          "topic": "解析 vis.sv 的计分板：pending/locked 位矩阵、逐元素冒险检测、三处转发点，以及与存储单元的 lock/unlock 交互。",
+          "learning_goals": [
+            "理解 per-element 计分板如何支持部分写完成",
+            "掌握 src1_ok/src2_ok/rdst_ok/no_hazards 逻辑",
+            "看懂 unlock 接口与 locked_ticket 的配合"
+          ],
+          "source_files": [
+            "rtl/vector/vis.sv"
+          ],
+          "minimal_modules": [
+            "计分板位矩阵",
+            "逐元素冒险检测",
+            "转发与解锁接口"
+          ],
+          "practice_task": "给定两条相继的向量指令，分析它们在哪些 lane/元素上存在 RAW 冒险，并说明三处转发点如何消除等待。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "vIS 硬件循环展开与掩码",
+          "order": 6,
+          "filename": "u2-l6-vis-loop-unrolling-and-masks.md",
+          "level": "intermediate",
+          "topic": "解析 vis.sv 的硬件循环展开与掩码：current_exp_loop 如何把一条指令展开成多个 micro-op、归约指令的特殊目标偏移、以及 v1[mask_src] 掩码门控。",
+          "learning_goals": [
+            "理解展开次数 maxvl>>clog2(LANES) 的由来",
+            "掌握归约指令目标偏移与最后一个 micro-op 写基址寄存器",
+            "理解掩码如何门控逐元素写回"
+          ],
+          "source_files": [
+            "rtl/vector/vis.sv"
+          ],
+          "minimal_modules": [
+            "硬件循环展开",
+            "归约特例",
+            "掩码门控写回"
+          ],
+          "practice_task": "对一条 vl=20、VECTOR_LANES=8 的指令，计算展开出的 micro-op 数量，以及每个 micro-op 的 dst/src1/src2 偏移。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "vEX 与 vex_pipe 执行流水",
+          "order": 7,
+          "filename": "u2-l7-vex-and-vex-pipe-execution.md",
+          "level": "intermediate",
+          "topic": "解析 vex.sv（执行级顶层、lane 例化、EX1-EX4 流水、归约树连线）和 vex_pipe.sv（单 lane 流水、FU 路由到 int/fp/fxp ALU、可配置转发、变延迟）。",
+          "learning_goals": [
+            "理解 4 级流水线寄存器如何传递 dst/ticket/mask",
+            "掌握 FU 路由如何分发到整数/浮点/定点 ALU",
+            "理解可配置转发点的引出位置"
+          ],
+          "source_files": [
+            "rtl/vector/vex.sv",
+            "rtl/vector/vex_pipe.sv",
+            "rtl/vector/v_fp_alu.sv"
+          ],
+          "minimal_modules": [
+            "执行级顶层结构",
+            "单 lane 流水与 FU 路由",
+            "变延迟与转发"
+          ],
+          "practice_task": "画出一条 vadd 在 vex_pipe 中 EX1→EX4 的数据通路，标注转发点在哪里引出；并说明 v_fp_alu 当前为何只是占位实现。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "整数 ALU 与跨 lane 归约树",
+          "order": 8,
+          "filename": "u2-l8-integer-alu-and-reduction.md",
+          "level": "intermediate",
+          "topic": "解析 v_int_alu.sv：简单 ALU（1 周期）、MUL（3 周期字节切片部分积）、DIV（4 周期恢复除法）、以及 log2(LANES) 级的跨 lane 归约树。",
+          "learning_goals": [
+            "理解不同操作带来的变延迟",
+            "掌握 MUL 部分积与 DIV 逐位组迭代的实现",
+            "理解归约树为何只在偶数 lane 激活及其互连模式"
+          ],
+          "source_files": [
+            "rtl/vector/v_int_alu.sv",
+            "rtl/vector/vex.sv"
+          ],
+          "minimal_modules": [
+            "简单 ALU 操作",
+            "乘除法实现",
+            "跨 lane 归约树"
+          ],
+          "practice_task": "分析 VMUL 为何需要 3 周期、VDIV 为何需要 4 周期；并解释归约树在 vex.sv 中 lane N 到 lane N-2/N-4/N-8 的连线含义。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：向量存储单元",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "VMU 存储单元与三路仲裁",
+          "order": 1,
+          "filename": "u3-l1-vmu-memory-unit-and-arbitration.md",
+          "level": "intermediate",
+          "topic": "解析 vmu.sv：把存储指令分派到 load/store/tile-prefetch 三个引擎、用 fifo_duth 跟踪在途引擎做三路仲裁、写回优先级与 unlock 信号的复用。",
+          "learning_goals": [
+            "理解 is_load/is_store/is_toepl 的判定与分派",
+            "掌握三路 grant 仲裁与 prefetch 利用空闲周期的策略",
+            "理解 reconfigure 同时下发三引擎的行为"
+          ],
+          "source_files": [
+            "rtl/vector/vmu.sv"
+          ],
+          "minimal_modules": [
+            "引擎分派",
+            "三路仲裁",
+            "写回优先级与解锁复用"
+          ],
+          "practice_task": "追踪一条 vld 指令在 vmu 中如何被分派、获得 grant 并最终写回与解锁；说明 is_older 寄存器如何决定写回优先级。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "VMU 加载引擎与解耦执行",
+          "order": 2,
+          "filename": "u3-l2-vmu-load-engine.md",
+          "level": "intermediate",
+          "topic": "解析 vmu_ld_eng.sv：三种地址生成模式（unit-strided/strided/indexed）、双行 scratchpad 实现解耦执行、逐元素 pending/served/active 跟踪与 expansion loop。",
+          "learning_goals": [
+            "理解双行 scratchpad 如何让写回与取数并行",
+            "掌握三种寻址模式的地址计算",
+            "理解 expansion loop 如何处理 VL>LANES 的多寄存器展开"
+          ],
+          "source_files": [
+            "rtl/vector/vmu_ld_eng.sv"
+          ],
+          "minimal_modules": [
+            "地址生成三模式",
+            "双行 scratchpad",
+            "逐元素跟踪与解耦"
+          ],
+          "practice_task": "解释 row_0_ready 的成立条件（所有 active 元素已 served 且寄存器以匹配 ticket 锁定），以及请求 ticket {row,pointer} 如何与响应匹配。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "VMU 存储引擎",
+          "order": 3,
+          "filename": "u3-l3-vmu-store-engine.md",
+          "level": "intermediate",
+          "topic": "解析 vmu_st_eng.sv：从寄存器收集数据、多元素按 size（8/16/32 位）打包、unit-strided 打包请求，以及按寄存器边界 start_new_loop 的解锁时机。",
+          "learning_goals": [
+            "理解 store 引擎无写回、双读端口（数据+索引偏移）",
+            "掌握多元素打包与按 size 选择位宽",
+            "理解 store 的解锁时机与 load 的差异"
+          ],
+          "source_files": [
+            "rtl/vector/vmu_st_eng.sv"
+          ],
+          "minimal_modules": [
+            "数据收集与读端口",
+            "元素打包",
+            "解锁时机"
+          ],
+          "practice_task": "比较 store 引擎与 load 引擎在 scratchpad 与写回上的差异，解释为何 store 不需要双行 scratchpad。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "VMU 分块预取引擎（Toeplitz）",
+          "order": 4,
+          "filename": "u3-l4-vmu-tile-prefetch-engine.md",
+          "level": "intermediate",
+          "topic": "解析 vmu_tp_eng.sv：用于卷积加速的 2D 分块预取、IDLE/ACTIVE/PREFETCH 状态机、投机预取与命中/作废验证，以及 vtplcfg/vtpl 自定义指令。",
+          "learning_goals": [
+            "理解 2D 地址计算（image_size/kernel_size/window 行列）",
+            "掌握投机预取的命中继续与作废回退逻辑",
+            "理解该引擎为何能加速图像/卷积类访存"
+          ],
+          "source_files": [
+            "rtl/vector/vmu_tp_eng.sv"
+          ],
+          "minimal_modules": [
+            "2D 地址计算",
+            "预取状态机",
+            "投机预取验证"
+          ],
+          "practice_task": "画出 IDLE→ACTIVE→PREFETCH 的状态转移条件，并说明当下一指令的 base_addr 与预取不符（instr_mismatch_found）时如何作废预取。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：集成、验证与扩展",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "解耦执行与 acquire-release 语义",
+          "order": 1,
+          "filename": "u4-l1-decoupled-execution-acquire-release.md",
+          "level": "advanced",
+          "topic": "综合讲解向量核的解耦执行：计算流与存储流之间用 lock/unlock 的 acquire-release 语义解耦，借助 ticket 跨数据通路消除歧义，从而允许独立流速。",
+          "learning_goals": [
+            "理解 vis 的 lock 与 vmu 的 unlock 构成资源获取-释放",
+            "掌握 ticket 如何在两条数据通路间消除生产者-消费者歧义",
+            "理解解耦执行带来的性能收益与正确性权衡"
+          ],
+          "source_files": [
+            "rtl/vector/vis.sv",
+            "rtl/vector/vmu.sv",
+            "rtl/vector/vrrm.sv"
+          ],
+          "minimal_modules": [
+            "解耦执行模型",
+            "acquire-release 语义",
+            "ticket 跨路消歧"
+          ],
+          "practice_task": "用一张时序图说明一条 vld 后接 vadd 时，lock/unlock 与 ticket 如何让取数与计算两条流异步推进而不出错。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "转发网络与变延迟执行",
+          "order": 2,
+          "filename": "u4-l2-forwarding-and-variable-latency.md",
+          "level": "advanced",
+          "topic": "深入转发网络与变延迟执行：EX1/EX2/EX3/EX4 及其 _F（flopped）变体、可配置转发点，以及不同操作的不同延迟如何与计分板协作。",
+          "learning_goals": [
+            "理解 VECTOR_FWD_POINT_A/B 的可配置性与时序代价",
+            "掌握 _F（flopped）转发变体的作用与频率取舍",
+            "理解变延迟如何影响计分板的冒险解除时机"
+          ],
+          "source_files": [
+            "rtl/vector/vex_pipe.sv",
+            "rtl/shared/params.sv",
+            "rtl/vector/vmacros.sv",
+            "rtl/vector/vis.sv"
+          ],
+          "minimal_modules": [
+            "转发点配置",
+            "_F 变体与频率",
+            "变延迟与计分板协作"
+          ],
+          "practice_task": "把转发点从 EX1/EX4_F 改为 EX2/EX3，分析这一改动对关键路径（频率）与冒险解除速度的影响。",
+          "depends_on": [
+            "u2-l7",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "存储子系统：非阻塞缓存与 L2/主存",
+          "order": 3,
+          "filename": "u4-l3-memory-subsystem-cache-l2.md",
+          "level": "advanced",
+          "topic": "讲解存储子系统：非阻塞 data_cache（{Valid}{Dirty}[Tag][Data]）、main_memory 的 L2/主存模型与 REALISTIC 延迟、ld_st_buffer/wait_buffer 的 miss-under-miss 与转发，以及向量请求如何接入。",
+          "learning_goals": [
+            "理解非阻塞缓存的格式与多端口",
+            "掌握 load/store/wait buffer 实现 miss-under-miss",
+            "理解 REALISTIC 延迟模型与向量 mem_req 的接入"
+          ],
+          "source_files": [
+            "rtl/shared/data_cache.sv",
+            "rtl/shared/main_memory.sv",
+            "rtl/shared/ld_st_buffer.sv",
+            "rtl/shared/wait_buffer.sv",
+            "rtl/vector/vdata_operation.sv"
+          ],
+          "minimal_modules": [
+            "非阻塞数据缓存",
+            "L2/主存模型",
+            "缓冲与转发"
+          ],
+          "practice_task": "解释向量 mem_req 如何在 data_cache 中与标量 load/store 端口共存，并说明 ld_st_buffer 的 search 端口如何做 store-to-load 转发。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "测试台与驱动器内部",
+          "order": 4,
+          "filename": "u4-l4-testbench-and-driver-internals.md",
+          "level": "advanced",
+          "topic": "解析 vector_sim_top.sv（时钟/复位、死锁与自动结束检测、性能打印）和 vector_driver.sv（用 $readmemb 加载 12 个数组拼装 to_vector、用 dummy 编码注入气泡模拟标量核）。",
+          "learning_goals": [
+            "理解 sim_finished 与 deadlock 检测的阈值机制",
+            "掌握 driver 如何从 12 个数组拼装并按 ready/valid 推送指令",
+            "理解 dummy 指令编码如何模拟标量核的气泡周期"
+          ],
+          "source_files": [
+            "vector_simulator/vector_sim_top.sv",
+            "vector_simulator/vector_driver.sv"
+          ],
+          "minimal_modules": [
+            "TB 顶层与结束检测",
+            "驱动器拼装逻辑",
+            "气泡注入"
+          ],
+          "practice_task": "调整死锁检测的 300 周期阈值与 idle 100 周期阈值，分析它们对仿真结束行为与误判风险的影响。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "sim_generator.py 解码原理深入",
+          "order": 5,
+          "filename": "u4-l5-sim-generator-deep-dive.md",
+          "level": "advanced",
+          "topic": "深入 sim_generator.py：CSV 解析、助记符到 microop 的映射、VL 展开（REPEATS=ceil(AVL/maxvl)，maxvl=max_vregs*LANES）、气泡注入 TOTAL_BUBBLE_CYCLES，以及 autogenerated_params.sv 的生成。",
+          "learning_goals": [
+            "理解伪汇编到解码信息的完整生成流程",
+            "掌握 maxvl 与 REPEATS 的计算与多寄存器展开",
+            "理解 TOTAL_BUBBLE_CYCLES 为何要匹配标量循环的控制指令数"
+          ],
+          "source_files": [
+            "vector_simulator/sim_generator.py",
+            "vector_simulator/examples/saxpy/instrs.csv",
+            "vector_simulator/examples/dot_product/instrs.csv"
+          ],
+          "minimal_modules": [
+            "CSV 解析与操作数识别",
+            "助记符→microop 映射",
+            "VL 展开与气泡注入"
+          ],
+          "practice_task": "为一条新指令（如 vsub）在 sim_generator.py 的映射字典中添加条目，运行后验证生成的 microop_output.txt 与预期编码一致。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "SVA 断言与验证",
+          "order": 6,
+          "filename": "u4-l6-sva-assertions-and-verification.md",
+          "level": "advanced",
+          "topic": "讲解 sva/ 目录：X 检查、各 FU 的 microop 合法性断言、以及 vex/vis/vmu/vrrm 等单元的属性断言，并通过 `ifdef MODEL_TECH 与 `include 注入到设计中。",
+          "learning_goals": [
+            "理解断言的 include 注入机制与仿真专用现状",
+            "掌握 x-check 与操作码合法性断言的写法",
+            "理解断言覆盖的设计意图与尚未做形式验证的边界"
+          ],
+          "source_files": [
+            "sva/vector_top_sva.sv",
+            "sva/vex_sva.sv",
+            "sva/vis_sva.sv",
+            "sva/vmu_sva.sv"
+          ],
+          "minimal_modules": [
+            "断言注入机制",
+            "X 检查",
+            "操作码合法性"
+          ],
+          "practice_task": "在 vector_top_sva.sv 中为一个尚未被 inside 列表覆盖的 microop 编码新增一条断言，验证非法编码会在仿真中被捕获并报错。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "性能指标与参数调优",
+          "order": 7,
+          "filename": "u4-l7-performance-metrics-and-tuning.md",
+          "level": "advanced",
+          "topic": "讲解性能统计指标（total_cycles/issues/idle、stall_locked/stall_pending、ld_stalled_due_is）以及如何结合波形与参数（lane 数、气泡周期、转发点）进行调优。",
+          "learning_goals": [
+            "理解 results.log 各项性能指标的含义",
+            "掌握 lane 数/气泡周期/转发点对吞吐的影响",
+            "学会用波形定位 stall 的具体来源"
+          ],
+          "source_files": [
+            "vector_simulator/vector_sim_top.sv",
+            "vector_simulator/wave_simulator.do",
+            "rtl/shared/params.sv"
+          ],
+          "minimal_modules": [
+            "性能指标解读",
+            "参数调优",
+            "波形定位 stall"
+          ],
+          "practice_task": "对同一程序分别用 4/8/16 lane 跑仿真，比较总 cycles 与各类 stall 计数，给出在该 AVL 下的最优配置建议。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l8",
+          "title": "示例实战与项目扩展",
+          "order": 8,
+          "filename": "u4-l8-running-examples-and-extension.md",
+          "level": "advanced",
+          "topic": "综合实战：跑通 vvadd/saxpy/dot_product/fir 四个示例并理解其程序结构；结合 README 的 Future Work 讨论扩展方向（新增指令、加浮点 lane、增大 lane、加背压）。",
+          "learning_goals": [
+            "理解四个典型向量内核（vvadd/saxpy/dot/fir）的程序写法",
+            "掌握从 CSV 到性能结果的完整端到端流程",
+            "识别项目的扩展点与硬限制（如 16 lane 上限、vis-vmu 时序紧张）"
+          ],
+          "source_files": [
+            "vector_simulator/examples/fir/instrs.csv",
+            "vector_simulator/examples/saxpy/instrs.csv",
+            "vector_simulator/examples/dot_product/instrs.csv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "示例程序结构",
+            "端到端流程",
+            "扩展方向与限制"
+          ],
+          "practice_task": "选 saxpy 示例端到端跑通，修改 AVL 观察周期变化趋势；并写一份新增一条整数指令（如 vsub）的扩展方案，列出需改动的 RTL 与脚本文件。",
+          "depends_on": [
+            "u4-l5",
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
