@@ -1,0 +1,452 @@
+{
+  "project": "sgl-learning-materials",
+  "head": "160433e8779cb38c4a894674474f67a85bc8915d",
+  "rationale": "本仓库不含 SGLang 运行时源码，而是一个聚合幻灯片、博客、视频与论文的官方学习资料库，因此大纲以『认识资料库 → 按主题绘制资料地图 → 深度阅读与硬件适配 → 贡献与学习路线』为四层递进。单元 1（入门）先让读者从零认识项目定位、目录结构与 README 导航方式，满足\"从零开始\"的要求；单元 2（进阶）按 SGLang 的核心优化主题（版本演进、调度与性能、受限解码、DeepSeek MLA、大规模 EP/PD 分离部署、路由与权重热更新）把分散在 slides/ 中的幻灯片组织成主题地图；单元 3（进阶）进入深度阅读，以仓库内唯一一篇长博客为范本，并补充量化/AMD 硬件适配与 KV Cache 侧信道安全边界；单元 4（专家）面向进阶读者，讲解如何按既有惯例贡献新资料、设计个人学习路线，并厘清本仓库与官方文档站、NeurIPS 论文、sgl-project/sglang 主仓库代码的衔接边界。讲义顺序保证每篇只解决一个主题、依赖关系清晰（前序讲义解锁后续），且全部 source_files 均为仓库内真实存在的 README、博客与幻灯片文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 SGLang 学习资料库",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位：SGLang 学习资料库是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍本仓库的定位——它是 SGLang 官方维护的学习资料聚合库，收录幻灯片、博客、视频与论文链接，本身不含 SGLang 运行时源码。",
+          "learning_goals": [
+            "认识 SGLang 是什么、解决什么问题",
+            "理解本仓库与 SGLang 主仓库（sgl-project/sglang）及文档站的关系",
+            "知道本仓库收录了哪些类型的资料"
+          ],
+          "source_files": [
+            "README.md",
+            "LICENSE"
+          ],
+          "minimal_modules": [
+            "SGLang 简介与定位",
+            "本仓库的资料类型（Slides/Blog/Videos/Paper/Documentation）",
+            "本仓库与 SGLang 主仓库、文档站的关系"
+          ],
+          "practice_task": "阅读 README 顶部说明，用一段话写出本仓库的定位，并分别列出 Slides、Blog、Videos、Paper、Documentation 五类资料各自指向哪里（仓库内还是外部链接）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与内容类型",
+          "order": 2,
+          "filename": "u1-l2-directory-structure.md",
+          "level": "beginner",
+          "topic": "解析仓库的目录结构——根目录的 README/LICENSE/.gitignore，以及 blogs/、slides/、sgl-learning-materials-tutorial/ 三个目录分别存放什么。",
+          "learning_goals": [
+            "描述仓库的整体目录布局",
+            "区分博客、幻灯片、讲义三类内容及其文件格式",
+            "理解 .gitignore 与 LICENSE 的作用"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitignore",
+            "blogs/Efficient LLM Deployment and Serving.md"
+          ],
+          "minimal_modules": [
+            "根目录文件（README/LICENSE/.gitignore）",
+            "blogs 目录与配图（docs/figs）",
+            "slides 目录（PDF/PPT/PNG）",
+            "sgl-learning-materials-tutorial 讲义目录"
+          ],
+          "practice_task": "用树形图画出仓库目录结构，为每个目录写一句话说明其中存放的文件类型；并指出仓库里唯一一篇 .md 博客与唯一的 .pptx 文件分别是什么。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "把 README 当作导航地图",
+          "order": 3,
+          "filename": "u1-l3-readme-navigation.md",
+          "level": "beginner",
+          "topic": "把 README 当作资料导航索引来使用——理解 Slides / Blog / Videos / Paper / Documentation 各大区段的组织方式和日期标注惯例。",
+          "learning_goals": [
+            "掌握 README 的分区结构",
+            "学会按事件或主题在 README 中定位资料",
+            "区分仓库内链接（本地 PDF）与外部链接（lmsys.org 等）"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README 的分区（Slides/Blog/Videos/Paper/Documentation）",
+            "事件归类（meetup / 学术会议 / biweekly developer sync）",
+            "内链（仓库内 PDF）与外链（lmsys.org、pytorch.org 等）的区别"
+          ],
+          "practice_task": "制作一张「主题→README 位置」的速查表，至少覆盖调度、受限解码、MLA、大规模部署四个主题，分别写出能从 README 的哪个分区/哪一行找到对应资料。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：按主题绘制资料地图",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "SGLang 版本演进与里程碑资料",
+          "order": 1,
+          "filename": "u2-l1-version-evolution.md",
+          "level": "intermediate",
+          "topic": "通过 README 的 Announcement 区段和 v0.2 等资料，了解 SGLang 的版本演进（v0.2→v0.3→v0.4→大规模 EP）与里程碑。",
+          "learning_goals": [
+            "梳理 SGLang 的版本演进时间线",
+            "理解各版本的核心卖点",
+            "学会用 README 中的 LMSYS 博客外链追根溯源"
+          ],
+          "source_files": [
+            "README.md",
+            "slides/sglang_v0_2.pdf",
+            "slides/adoption.png"
+          ],
+          "minimal_modules": [
+            "Announcement 里程碑（2024-12 / 2025-02 / 2025-03 / 2025-05）",
+            "v0.2 / v0.3 / v0.4 版本博客外链",
+            "adoption 采纳情况（AMD / xAI 等）"
+          ],
+          "practice_task": "依据 README 的 Announcement 与 Blog 区段，整理一份 SGLang 版本演进时间线表，包含：版本、日期、核心改进、对应博客链接。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "调度器与性能优化资料",
+          "order": 2,
+          "filename": "u2-l2-scheduler-performance.md",
+          "level": "intermediate",
+          "topic": "汇总与「调度器 / CPU 开销隐藏 / 公平调度 / 性能优化」相关的幻灯片，帮助读者定位 SGLang 性能的来源。",
+          "learning_goals": [
+            "认识 SGLang 的调度与 CPU overhead hiding 思路",
+            "了解 FLPM 公平调度算法",
+            "知道在哪里找到性能优化类幻灯片"
+          ],
+          "source_files": [
+            "slides/lmsys_1st_meetup_sglang.pdf",
+            "slides/SGLang-Performance-Optimization-YinengZhang.pdf",
+            "slides/sglang-FLPM.pdf"
+          ],
+          "minimal_modules": [
+            "SGLang 概览与 CPU 开销隐藏",
+            "FLPM 公平调度算法",
+            "GPU MODE 性能优化分享"
+          ],
+          "practice_task": "阅读上述三份幻灯片，用要点列表写出 SGLang 提升吞吐的 3 个关键机制，并标注每条要点分别出自哪一份幻灯片。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "受限解码与结构化输出资料",
+          "order": 3,
+          "filename": "u2-l3-constrained-decoding.md",
+          "level": "intermediate",
+          "topic": "聚焦受限解码（constrained decoding）与 XGrammar 结构化输出相关资料，理解 JSON 等结构化生成的加速原理。",
+          "learning_goals": [
+            "理解受限解码与压缩有限状态机（Compressed FSM）的作用",
+            "认识 XGrammar 在结构化生成中的加速效果",
+            "定位相关幻灯片与 LMSYS 博客"
+          ],
+          "source_files": [
+            "slides/lmsys_1st_meetup_constrained_decoding.pdf",
+            "slides/lmsys_1st_meetup_xgrammar.pdf"
+          ],
+          "minimal_modules": [
+            "受限解码与 Compressed FSM",
+            "XGrammar 结构化生成",
+            "JSON 解码加速"
+          ],
+          "practice_task": "结合幻灯片与 README 指向的「Fast JSON Decoding ... Compressed Finite State Machine」博客，写一段说明：为什么压缩 FSM 能加速本地 LLM 的 JSON 解码。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "DeepSeek MLA 与模型优化资料",
+          "order": 4,
+          "filename": "u2-l4-deepseek-mla.md",
+          "level": "intermediate",
+          "topic": "聚焦 DeepSeek MLA（Multi-Head Latent Attention）与模型优化相关资料，理解 MLA 在精度与速度上的作用。",
+          "learning_goals": [
+            "认识 MLA 的工作原理与价值",
+            "了解 DeepSeek 模型在 SGLang 中的专项优化",
+            "定位 MLA 相关幻灯片"
+          ],
+          "source_files": [
+            "slides/lmsys_1st_meetup_deepseek_mla.pdf",
+            "slides/sglang_deepseek_model_optimizations.pdf"
+          ],
+          "minimal_modules": [
+            "DeepSeek MLA 原理",
+            "DeepSeek 模型优化（v0.3 中 7x 提速）",
+            "MLA 资料的多次出现（meetup 与 biweekly）"
+          ],
+          "practice_task": "对比两份 MLA 幻灯片，指出它们各自强调的侧重点，并写一份 MLA 学习要点清单。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "大规模部署：EP 与 PD 分离资料",
+          "order": 5,
+          "filename": "u2-l5-large-scale-ep.md",
+          "level": "intermediate",
+          "topic": "聚焦大规模专家并行（Expert Parallelism）与 Prefill-Decode 分离部署相关资料，理解 2025 年 5 月的里程碑。",
+          "learning_goals": [
+            "理解 EP 与 PD disaggregation 的目标",
+            "认识 96×H100 大规模部署案例",
+            "定位 PyTorch Day China 等幻灯片与 LMSYS 博客"
+          ],
+          "source_files": [
+            "slides/amd_meetup_sglang_ep.pdf",
+            "slides/sglang_pytorch_china_2025.pdf"
+          ],
+          "minimal_modules": [
+            "大规模 Expert Parallelism",
+            "Prefill-Decode 分离部署",
+            "PyTorch Day China / AMD meetup 部署案例"
+          ],
+          "practice_task": "依据幻灯片与 README 指向的「large-scale-ep」博客，写一份要点说明：为什么 EP + PD 分离能把成本降到 $0.20/1M output tokens。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "路由与权重热更新资料",
+          "order": 6,
+          "filename": "u2-l6-router-weights.md",
+          "level": "intermediate",
+          "topic": "聚焦 SGLang Router（缓存感知负载均衡）与分布式权重热更新相关资料。",
+          "learning_goals": [
+            "理解 cache-aware 负载均衡器（Router）的作用",
+            "认识分布式权重热更新（update weights from distributed）的使用场景",
+            "学会区分文件名相近的两份 router 幻灯片"
+          ],
+          "source_files": [
+            "slides/sglang_router.pdf",
+            "slides/sglang-router.pdf",
+            "slides/update-weights-from-distributed.pdf"
+          ],
+          "minimal_modules": [
+            "Cache-Aware Load Balancer（Router）",
+            "分布式权重热更新",
+            "RLHF 大规模训练场景"
+          ],
+          "practice_task": "整理两份 router 幻灯片（sglang_router.pdf 与 sglang-router.pdf）的差异，并说明权重热更新对大规模 RLHF 训练的价值。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：深度阅读与硬件适配",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "精读一篇 meetup 回顾博客",
+          "order": 1,
+          "filename": "u3-l1-meetup-blog-reading.md",
+          "level": "intermediate",
+          "topic": "以仓库内唯一一篇长博客「Efficient LLM Deployment and Serving」为范本，学习如何从 meetup 回顾中提炼 SGLang / XGrammar / FlashInfer / MLC-LLM 四个项目的要点。",
+          "learning_goals": [
+            "学会从一篇回顾博客中提炼多个项目的要点",
+            "理解博客正文与配套图片（docs/figs）的配合关系",
+            "掌握 meetup 回顾类资料的阅读方法"
+          ],
+          "source_files": [
+            "blogs/Efficient LLM Deployment and Serving.md",
+            "blogs/docs/figs/1016 meetup - SGLANG scheduler.png",
+            "blogs/docs/figs/1016 meetup - Xgrammer benchmark.png",
+            "blogs/docs/figs/1016 meetup - flashinfer.png",
+            "blogs/docs/figs/1016 meetup - MLC LLM.png"
+          ],
+          "minimal_modules": [
+            "SGLang 的 CPU/GPU 协同与 MLA",
+            "XGrammar 的解码加速",
+            "FlashInfer 的 attention 内核",
+            "MLC-LLM 的跨平台部署"
+          ],
+          "practice_task": "精读该博客，为 SGLang / XGrammar / FlashInfer / MLC-LLM 各写 3 条要点，并标注每条要点对应的是哪一张配图（写出图片文件名）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "硬件适配与量化资料",
+          "order": 2,
+          "filename": "u3-l2-quantization-hardware.md",
+          "level": "intermediate",
+          "topic": "聚焦 AMD 硬件适配、量化（fp8/mxfp）与 AITER/MoRI 等资料，理解 SGLang 的跨硬件与量化策略。",
+          "learning_goals": [
+            "了解 SGLang 在 AMD GPU 上的适配",
+            "认识 fp8 / mxfp 量化方案",
+            "了解 AMD meetup 的 roadmap 与 AITER/MoRI"
+          ],
+          "source_files": [
+            "slides/sglang-fp8-mxfp-quantizations.pdf",
+            "slides/amd_meetup_aiter_mori.pdf",
+            "slides/amd_meetup_sglang_roadmap.pdf"
+          ],
+          "minimal_modules": [
+            "AMD 平台适配与 roadmap",
+            "fp8 / mxfp 量化",
+            "AITER / MoRI 介绍"
+          ],
+          "practice_task": "结合幻灯片与 README 中 AMD 相关博客，写一段说明：SGLang 在 AMD MI300X 上为 DeepSeek 提供加速的关键技术（量化 + AITER 等）有哪些。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "安全与边界：KV Cache 侧信道资料",
+          "order": 3,
+          "filename": "u3-l3-kv-cache-side-channel.md",
+          "level": "advanced",
+          "topic": "通过「Possible Timing Side Channel Of KV Cache」幻灯片，认识 SGLang 共享 KV 缓存可能带来的时序侧信道安全问题。",
+          "learning_goals": [
+            "理解 KV cache 共享与时序侧信道的关系",
+            "认识多租户场景下的潜在风险",
+            "定位该安全议题的资料并思考缓解方向"
+          ],
+          "source_files": [
+            "slides/Possible_Timing_Side_Channel_Of_KV_Cache.pdf"
+          ],
+          "minimal_modules": [
+            "KV Cache 共享机制回顾",
+            "时序侧信道攻击原理",
+            "缓解措施与运营注意点"
+          ],
+          "practice_task": "阅读该幻灯片，写一份面向运维的「KV Cache 共享安全注意事项」清单，包含潜在风险与可能的缓解措施。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：贡献与学习路线设计",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "如何向资料库贡献新内容",
+          "order": 1,
+          "filename": "u4-l1-contributing.md",
+          "level": "advanced",
+          "topic": "学习为本仓库贡献新资料的方法——幻灯片放入 slides/、博客放入 blogs/、在 README 中按既有格式追加条目并提交 PR。",
+          "learning_goals": [
+            "掌握 slides/ 与 blogs/ 的命名与放置惯例",
+            "学会按 README 既有格式（[日期] [标题](链接)）新增条目",
+            "理解 .gitignore 与 PR 提交流程"
+          ],
+          "source_files": [
+            "README.md",
+            ".gitignore",
+            "slides/sglang_adoption_logo.pptx"
+          ],
+          "minimal_modules": [
+            "slides/ 与 blogs/ 的命名惯例",
+            "README 条目格式（[日期] [标题](链接)）",
+            "图片与配图目录（docs/figs）",
+            "PR 提交流程与 .gitignore"
+          ],
+          "practice_task": "模拟一次贡献：为一份假想的新幻灯片 new_topic.pdf，在 README 的合适分区追加一条符合既有格式的条目（写出整行 markdown），并说明该文件应放置在哪个目录。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "设计个人 SGLang 学习路线",
+          "order": 2,
+          "filename": "u4-l2-study-plan.md",
+          "level": "advanced",
+          "topic": "综合本仓库资料，为读者设计一条从入门到进阶的 SGLang 学习路线，并映射到具体幻灯片与博客。",
+          "learning_goals": [
+            "能基于资料主题绘制学习路径",
+            "能为不同目标（部署 / 优化 / 贡献）选择资料顺序",
+            "产出可执行的学习计划"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "按目标的资料分组（部署 / 优化 / 硬件 / 安全）",
+            "学习顺序建议",
+            "资料与外部文档 / 论文 / 主仓库的衔接"
+          ],
+          "practice_task": "输出一份为期 4 周的个人学习计划，每周指定要读的 2-3 份仓库内资料（写出文件名），并写明本周学习目标。",
+          "depends_on": [
+            "u2-l6",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "资料的边界与延伸资源",
+          "order": 3,
+          "filename": "u4-l3-external-resources.md",
+          "level": "advanced",
+          "topic": "厘清本仓库资料的边界——它聚合资料但不含运行时代码；进一步指向 SGLang 文档站、NeurIPS 论文与 sgl-project/sglang 主仓库代码。",
+          "learning_goals": [
+            "认识本仓库的能力边界（无运行时代码）",
+            "学会从资料跳转到官方文档、论文与主仓库",
+            "理解「资料 → 文档 → 论文 → 代码」的递进关系"
+          ],
+          "source_files": [
+            "README.md",
+            "blogs/Efficient LLM Deployment and Serving.md"
+          ],
+          "minimal_modules": [
+            "本仓库的边界（聚合资料、不含运行时代码）",
+            "外部延伸（文档站 / 论文 / YouTube / Slack）",
+            "主仓库 sgl-project/sglang 的衔接"
+          ],
+          "practice_task": "整理一份「延伸资源清单」，把 README 末尾的 Documentation、Paper、Videos、Slack 等入口分类，并写明每个入口适合用来解决什么问题。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
