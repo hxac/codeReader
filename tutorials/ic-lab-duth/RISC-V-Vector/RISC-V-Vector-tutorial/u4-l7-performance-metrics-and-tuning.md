@@ -1,0 +1,334 @@
+# 性能指标与参数调优
+
+## 1. 本讲目标
+
+学完本讲后，你应该能够：
+
+- 看懂 `results.log` 中七项性能指标各自的含义、它们由哪段 RTL 累加而来，以及它们之间的数量关系（哪些可加、哪些有重叠）。
+- 区分「cycle 数」与「wall-clock 时间」这两类性能，理解为什么 `results.log` 只能回答前者。
+- 掌握三个真正影响吞吐的可调旋钮（lane 数、转发点、气泡周期）的作用机理与代价。
+- 学会用 `wave_simulator.do` 里预设的波形分组，在波形上定位一个 stall 的具体来源（是源 pending、目的 locked，还是访存侧等待 vIS 解锁）。
+
+本讲是专家单元的「度量与调优」收口，承接 u4-l4（测试台与驱动器），把那里讲过的仿真结束判定与计数器引用，落到「怎么读、怎么调」上。
+
+## 2. 前置知识
+
+本讲默认你已经掌握以下内容（均为前序讲义建立）：
+
+- **数据通路四级**：vRRM→vIS→vEX 计算主路，外加 vRRM→vMU 访存岔路（u2-l1）。
+- **计分板两套位矩阵**：`pending`（守护 RAW 数据就绪）、`locked`（守护访存资源互斥）；vIS 发射访存指令时置 `locked`（acquire），vMU 完成时 `unlock` 清位（release）（u2-l5、u4-l1）。
+- **变延迟与转发点**：简单 ALU 在 EX1 就绪、乘法 EX3、除法 EX4；两处可配转发点 `FWD_POINT_A/B`，`_F` 变体寄存数据切断组合路径（u2-l7、u4-l2）。
+- **驱动器与结束判定**：`vector_driver` 用 `$readmemb` 回放生成器产物；仿真靠 `sim_finished` / 空闲 100 拍 / 死锁 300 拍三种条件结束（u1-l5、u4-l4）。
+- **归约树限制**：lane 数最多 16，根因是 `vex.sv` 静态生成的四级归约树（u1-l3、u2-l8）。
+
+几个术语先统一：
+
+- **性能计数器（performance counter）**：嵌在 RTL 里、每个时钟沿条件自增的 64 位寄存器。它们只在仿真中存在（被 TB 用层次引用 XMR 读出），综合时一般会保留但通常没有软件可读通路——本仓库里它们纯粹是仿真量测工具。
+- **stall（停顿）**：本拍本可以推进却没推进的周期。本讲的全部工作就是把「总停顿」拆成可定位的几类。
+- **IPC**：这里指 instructions per cycle，即 `total_issues / total_cycles`。注意向量核里「一条指令」会被展开成多个 micro-op（u2-l6），`total_issues` 统计的是 micro-op 发射数，不是架构指令数。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [rtl/vector/vis.sv](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vis.sv) | 发射级。六个核心计数器（cycles/issues/idle 与三类 stall）全部在此累加；`do_issue`、`no_pending`、`rdst_ok` 是计数器的判定源头。 |
+| [rtl/vector/vmu_ld_eng.sv](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vmu_ld_eng.sv) | 加载引擎。第七个计数器 `total_ld_stalled_due_is` 在此累加，度量「访存侧等 vIS 解锁」的停顿。 |
+| [vector_simulator/vector_sim_top.sv](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/vector_sim_top.sv) | 仿真顶层。`print_perf_stats()` 把七个计数器写成 `perf_results/results.log`；死锁/空闲判定也在其中。 |
+| [vector_simulator/wave_simulator.do](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/wave_simulator.do) | 波形配置脚本。预置了 `{Performance Stats}` 分组与各级 idle/can_issue/pending/locked 信号，是定位 stall 的现成「探头」。 |
+| [rtl/shared/params.sv](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/shared/params.sv) | 参数中央配置台。真正影响性能的可调旋钮（lane 数、转发点、访存延迟）都在此。 |
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 性能指标解读
+
+#### 4.1.1 概念说明
+
+`results.log` 里的七行数字，本质上是对「一个程序从第一条指令喂入到 `sim_finished`」这段时间的拆账。先把账本列出来：
+
+| 指标 | 含义 | 累加位置 |
+| --- | --- | --- |
+| Total Cycles | 仿真运行的总周期数（每拍 +1） | `vis.total_cycles` |
+| Total Issued Instrs | 成功发射的 micro-op 数 | `vis.total_issues` |
+| Total Idle | 没有发射的周期数 | `vis.total_idle` |
+| Idle due to no valid instr | 上游没喂指令（驱动器饥饿/气泡） | `vis.idle_no_valid` |
+| Idle due to pending | 源数据未就绪（RAW） | `vis.stall_pending` |
+| Idle due to locked | 目的寄存器仍被访存占用 | `vis.stall_locked` |
+| memory stalled due to IS | 访存侧数据已就绪但目的未解锁 | `vmu_ld_eng.total_ld_stalled_due_is` |
+
+理解这套指标的关键有三点，后面三小节逐一展开。
+
+#### 4.1.2 核心流程
+
+**第一，总账恒等式。** 每个 `posedge clk`，`total_cycles` 无条件 +1；同一拍要么 `do_issue` 为真（计入 `total_issues`），要么为假（计入 `total_idle`）。所以：
+
+\[
+\texttt{total\_cycles} \;\approx\; \texttt{total\_issues} \;+\; \texttt{total\_idle}
+\]
+
+之所以是约等而非严格相等，是因为复位期间（`~rst_n`）计数器被清零但不停止时钟，最末几拍的结束流程也有少量出入。做粗略核账时这个等式成立得很好。
+
+**第二，停顿不是干净的互斥划分。** 三个 idle 子计数器都附带 `ready_i && valid_in` 前提，但彼此可重叠：
+
+- `stall_pending`：`ready_i && valid_in && !no_pending`——至少一条 lane 的源 pending。
+- `stall_locked`：`ready_i && valid_in && !(&rdst_ok)`——至少一条 lane 的目的 locked。
+
+一拍里完全可能同时存在「源 pending」和「目的 locked」（典型场景：`vld` 之后紧跟一条既要用到 load 结果、其目的又被上一条 store 锁住的指令），于是这一拍会被**同时**计入两个计数器。此外还有一段**未被单独计数**的空白：当 `!ready_i`（下游 vEX 反压）或展开循环的换拍间隙，既不算 pending 也不算 locked，却仍计入 `total_idle`。因此：
+
+\[
+\texttt{total\_idle} \;\neq\; \texttt{idle\_no\_valid} + \texttt{stall\_pending} + \texttt{stall\_locked}
+\]
+
+**正确的心智模型是「诊断灯」而非「分饼」**：三个子计数器告诉你停顿的*味道*，不保证加起来等于总停顿。
+
+**第三，第七个指标是同一枚硬币的另一面。** `stall_locked` 是 vIS 视角：「我要写回，但目的被 vMU 锁着」；`total_ld_stalled_due_is` 是 vMU 视角：「我数据取回来了，但 vIS 还没把目的解锁给我写」。二者度量的是 acquire-release 同步的同一处张力，只是站在两条数据通路的不同一侧。看到其中一个高，就该去看另一个——这是定位「解耦执行是否成瓶颈」的最快入口。
+
+#### 4.1.3 源码精读
+
+六个核心计数器全部在 `vis.sv` 的 `perf_mon` 进程里，集中在一处：
+
+[rtl/vector/vis.sv:398-422](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vis.sv#L398-L422) — 计数器声明与累加逻辑。注意每条的累加条件就是上文流程里列的判定。
+
+`no_pending` 的定义是这套指标里最容易看走眼的一行：
+
+[rtl/vector/vis.sv:405-406](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vis.sv#L405-L405) — `assign no_pending = &(src1_ok & src2_ok);`
+
+这是一次**缩位与（reduction-AND）**跨所有 lane：只有当*所有*有效 lane 的两个源都 ok，`no_pending` 才为真。所以 `!no_pending` 的含义是「至少一条 lane 的源未就绪」，正是 `stall_pending` 的触发条件。它和逐 lane 的 `no_hazards[p]`（见下）不是一回事——后者用于发射判定，前者只用于统计。
+
+要理解 `stall_locked` 的 `!(&rdst_ok)`，得看逐 lane 的就绪判定：
+
+[rtl/vector/vis.sv:244-258](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vis.sv#L244-L258) — `can_issue`、`src1_ok/src2_ok/rdst_ok`、`no_hazards` 的逐 lane 计算。其中 `rdst_ok[p] = ~locked[dst][p]`（L256）说明「目的就绪」即「目的未被访存锁住」，`stall_locked` 度量的正是访存 acquire 尚未 release 的等待。
+
+发射判定本身在：
+
+[rtl/vector/vis.sv:128-129](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vis.sv#L128-L129) — `do_issue` 对存储/非存储指令分别判定。注意存储指令的 `do_issue` **不**检查 `output_ready`（下游 vEX 是否就绪），因为存储指令流向 vMU 而非 vEX；这影响后面「lane 调优」一节的结论。
+
+第七个计数器在加载引擎里，触发条件比 vIS 侧更具体：
+
+[rtl/vector/vmu_ld_eng.sv:559-575](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vmu_ld_eng.sv#L559-L575) — `total_ld_stalled_due_is` 的累加。`stall_row_X_while_ready` 的成立条件是「本行所有 active 元素都已 served（数据齐了）**且** 目的寄存器要么未锁、要么 ticket 不匹配」——也就是数据备好却写不回，原因只能是 vIS 那边的 `locked` 位还没被上一条指令的 unlock 清掉。
+
+最后，这七个数字怎么变成 `results.log` 的：
+
+[vector_simulator/vector_sim_top.sv:253-275](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/vector_sim_top.sv#L253-L275) — `print_perf_stats()`。它用 `$fopen` 写文件、同时 `$display` 打到控制台；读法是 TB 通过层次引用（XMR，如 `vector_top.vis.total_cycles`、`vector_top.vmu.vmu_ld_eng.total_ld_stalled_due_is`）把 DUT 内部寄存器掏出来。这正是这些计数器「只在仿真中可读」的原因——综合后的硅片没有这条软件通路。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+**目标**：亲手验证「总账恒等式」与「三子计数器可重叠」这两条结论。
+
+**步骤**：
+
+1. 打开你之前跑任意一个示例（如 `vvadd`）得到的 `perf_results/results.log`，记下七个数字。
+2. 用计算器核验 `total_issues + total_idle` 是否近似等于 `total_cycles`（记录差值，思考差值来自何处：复位周期？结束流程？）。
+3. 再算 `idle_no_valid + stall_pending + stall_locked`，与 `total_idle` 比较。差值即为「下游反压 + 展开换拍」这类未被单独计数的停顿。
+4. 思考：要让上面的和**等于** `total_idle`，需要满足什么前提？（提示：考虑 `stall_pending` 与 `stall_locked` 同拍重叠的情形。）
+
+**预期结果**：第 2 步等式近似成立（误差个位数到几十拍）；第 3 步通常**小于** `total_idle`，且如果程序里有密集的「load 后立即用」序列，第 3 步可能因为重叠而更明显偏小。
+
+> 若本地尚未跑过仿真，此项标注「待本地验证」，可先用 u1-l5 的流程补跑一次再回来。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：某次仿真 `total_cycles=1200`、`total_issues=900`、`total_idle=305`。三者关系说明了什么？缺失的那 ~5 拍最可能是什么？
+
+> 答案：`900 + 305 = 1205 ≈ 1200`，符合总账恒等式；多出的几拍来自复位期与 `sim_finished` 后的收尾（`print_perf_stats` 前后还有两个 `@(posedge clk)`），属正常。
+
+**练习 2**：为什么 `stall_pending` 用 `!no_pending`（缩位），而发射判定 `can_issue` 用 `&issue_masked`（也是缩位），二者看似一样却服务于不同目的？
+
+> 答案：两者确实都是「全 lane 就绪」的缩位。区别在用途：`can_issue` 参与组合发射逻辑，决定 `do_issue`；`no_pending` 只喂给计数器，纯粹是统计。它们分属「控制通路」与「量测通路」，即使逻辑相同也不能共用，否则会改变时序。
+
+**练习 3**：`total_ld_stalled_due_is` 与 `stall_locked` 同时变大，说明程序的什么特征？
+
+> 答案：访存与计算的 acquire-release 同步成为瓶颈——典型的「短依赖链、load 紧接消费」序列。此时加 lane 数通常无效（瓶颈在同步等待而非算力），应优先看能否重排指令拉开 load 与消费的距离，或调转发点让计算侧更快 unlock。
+
+---
+
+### 4.2 参数调优
+
+#### 4.2.1 概念说明
+
+「调优」在本项目里有明确的边界：它不是改算法，而是改三类编译期/生成期旋钮，观察 `results.log` 的变化。旋钮分两类来源：
+
+- **RTL 参数**（`params.sv`，改完要重新 `vlog` 编译）：lane 数、转发点、访存延迟、cache 几何。
+- **生成期参数**（`sim_generator.py`，改完要重新生成 `decoder_results/`）：气泡周期 `TOTAL_BUBBLE_CYCLES`、AVL、目的寄存器数（影响 maxvl/REPEATS）。
+
+一个常被忽略的根本性认识：**`results.log` 度量的是 cycle 数，不是秒。** 仿真器只数时钟沿，不知道你的设计能跑多高频率。把转发点从 EX4_F 提前到 EX1，会让 `stall_pending` 下降、总 cycle 下降——但 EX1 抽头把 ALU 组合输出直接拉进 vIS 的操作数 mux，关键路径变长，综合后 fmax 可能掉一截。墙钟时间 ≈ cycle 数 / fmax，两个量朝相反方向走时，cycle 数更小未必更快。**`results.log` 永远无法单独回答「哪个配置更快」，它只能回答「哪个配置 cycle 更少」**；要判断墙钟，必须结合综合报告。本节其余讨论都在「cycle 数」语境下进行，请牢记这条 caveat。
+
+#### 4.2.2 核心流程
+
+三个旋钮的 cycle-级效果：
+
+**旋钮一：`VECTOR_LANES`（8，上限 16）。**
+一条 VL 元素的指令被展开成 ⌈VL/LANES⌉ 个 micro-op（u2-l6）。lane 翻倍 → micro-op 数减半 → 理想情况下 `total_issues` 与计算段 cycle 都减半。但有两个衰减因素：
+
+1. **访存墙**：每条 `vld/vst` 仍要付固定的 cache/main memory 延迟（`DELAY_CYCLES`）。当 `stall_locked` 或 `total_ld_stalled_due_is` 已经主导停顿时，说明程序是访存bound，加 lane 只增加 `idle_no_valid`（算得再快也得等数据），cycle 几乎不降。这就是「边际收益递减」的拐点。
+2. **气泡摊薄**：每个循环末尾注入 `TOTAL_BUBBLE_CYCLES=4` 条 dummy（u4-l4）。AVL 越大、REPEATS 越多，总气泡 = REPEATS×4 越多；但每个气泡分摊到的有效元素数 = maxvl = ⌊32/N_vregs⌋×LANES，lane 越大单轮做的事越多，气泡的相对占比下降。所以大 AVL 下加 lane 的收益更明显。
+
+**旋钮二：转发点 `VECTOR_FWD_POINT_A/B`（默认 EX1 / EX4_F）。**
+转发点越靠前（EX1），依赖指令越早拿到数据 → `stall_pending` 越小 → cycle 越少。但越早的抽头组合路径越长（`_F` 变体就是为此牺牲一拍来保频率）。在 cycle 语境下：把 `FWD_POINT_B` 从 EX4_F 改成 EX3，依赖链上的停顿会减少；改回 EX4_F 则 cycle 上升但路径更短。**这是 results.log 里最直接可观察的 cycle 杠杆**，也是唯一一个「改一个 localparam 就见效」的旋钮。
+
+**旋钮三：气泡周期 `TOTAL_BUBBLE_CYCLES`（生成器里 =4）。**
+它把仿真从「理想向量核」拉回「真实双核」。增大它，`idle_no_valid` 线性上升，总 cycle 上升；设为 0，你看到的是该向量数据通路的理论上限。调它的目的不是「优化性能」，而是「还原真实」——做架构探索时设 0 看上限，做对比评估时设回 4。
+
+一个总纲：**先看哪类 stall 最大，再选旋钮。** `idle_no_valid` 大→上游/气泡问题，调 AVL 或气泡；`stall_pending` 大→计算依赖链长，调转发点；`stall_locked` + `ld_stalled_due_is` 大→访存墙，调 cache 几何或 `DELAY_CYCLES`，或重排程序，lane 数无效。
+
+#### 4.2.3 源码精读
+
+三个旋钮的源位置：
+
+[rtl/shared/params.sv:84-99](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/shared/params.sv#L84-L99) — 向量侧可调参数：`VECTOR_LANES=8`（L87，注释「currently max 16」）、`VECTOR_FWD_POINT_A=`EX1`（L96）、`VECTOR_FWD_POINT_B=`EX4_F`（L97）、`USE_HW_UNROLL=1`（L99）。转发点宏的编码规则（EX1=1、EX2_F=20…）以注释形式列在 L88-95，`_F` 即十位带 0 的「寄存变体」。
+
+访存延迟旋钮（影响「访存墙」的厚度）在标量段，但向量仿真同样受其约束：
+
+[rtl/shared/params.sv:41-44](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/shared/params.sv#L41-L44) — `REALISTIC=1`、`DELAY_CYCLES=10`。后者是 L2/主存模型的响应延迟（u4-l3 的移位计数器实现），直接决定一次 cache miss 要等多少拍，是 `stall_locked` 拖长的主因之一。
+
+死锁判定阈值本身也可视为一个「调优旋钮」，但它调的是仿真的可信度而非 DUT 性能：
+
+[vector_simulator/vector_sim_top.sv:88-102](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/vector_sim_top.sv#L88-L102) — `deadlock_en`（L88）当「有有效指令但 `total_issues` 连续不变」时拉高；`deadlock_counter` 到 300（L100）即强制结束。如果你把 lane/转发点调到极端导致真死锁，这个阈值决定了你要等多久才被发现——调小反应快但易误判长 stall，调大则可能让一个真死锁的仿真白白跑很久。`previous_total_issues` 的采样见 [vector_sim_top.sv:69-75](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/vector_sim_top.sv#L69-L75)。
+
+最后提醒两个改 lane 数的**隐藏耦合**（u1-l3 已详述，这里只点出对「调优流程」的影响）：一是必须同步改 `vstructs.sv` 的 `DUMMY_VECTOR_LANES`，否则结构体位宽与例化不符，计数器数值本身都会错；二是归约树级数 = ⌈log₂(LANES)⌉，超过 16 需要新增归约级与背压，不是改一个数那么简单。**调优时务必整参数一起改、整参数回归**。
+
+#### 4.2.4 代码实践（参数扫描型）
+
+**目标**：体验「转发点」这个最轻量的 cycle 杠杆，并验证「cycle↓ 不等于频率不变」的认知。
+
+**步骤**：
+
+1. 选一个计算密集、依赖链长的示例（如 `dot_product`，含归约链）。
+2. 基线：`FWD_POINT_A=EX1, FWD_POINT_B=EX4_F`，跑一次，记 `total_cycles` 与 `stall_pending`。
+3. 改 `params.sv`：`VECTOR_FWD_POINT_B = `EX3;`（提前一级、且非 flopped），重新 `vlog` + 仿真，再记两个数。
+4. 再改：`VECTOR_FWD_POINT_B = `EX4;`（提前一级但非 flopped 的最晚点），再记。
+5. 观察 `stall_pending` 与 `total_cycles` 的单调关系。
+
+**预期结果**：转发点越靠前，`stall_pending` 越小、`total_cycles` 越少。但请明确写下一条备注：**这只是 cycle 数的改进**；EX3 抽头把乘法（EX3 才就绪，u2-l8）的组合输出拉进 vIS mux，关键路径可能变长，真实频率需要综合才能知道。
+
+> 本地无 QuestaSim 时标注「待本地验证」；即使只读 `vis.sv` 的转发命中逻辑（L240 附近的 `frw_*`）也能推出 `stall_pending` 必然下降的定性结论。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：某程序 `stall_locked` 占 `total_idle` 的 70%。把 `VECTOR_LANES` 从 8 翻到 16，`total_cycles` 会显著下降吗？
+
+> 答案：基本不会。`stall_locked` 大说明瓶颈是访存 acquire-release 等待（等 unlock），不是算力。lane 翻倍只让计算 micro-op 减半，但每一拍仍卡在等 unlock 上，反而可能让 `idle_no_valid` 上升（算得太快、上游喂不过来）。应先排查能否让 load 与消费拉开距离。
+
+**练习 2**：为什么把 `REALISTIC` 设 0、`DELAY_CYCLES` 设 0 后，`total_cycles` 会大幅下降，但这个数字对评估「真实双核性能」没有意义？
+
+> 答案：二者关掉了主存的 REALISTIC 延迟，cache miss 几乎免费，`stall_locked` 与 `total_ld_stalled_due_is` 趋零。得到的是「理想存储」下的计算上限，适合量测数据通路本身的算力天花板，但不能反映真实程序在真实存储层次下的行为。
+
+**练习 3**：增大 `TOTAL_BUBBLE_CYCLES`（生成器）会让哪一项计数器上升？它和增大 `DELAY_CYCLES`（RTL）影响的计数器相同吗？
+
+> 答案：增大 `TOTAL_BUBBLE_CYCLES` 让 driver 更频繁地没有真指令可喂，直接推高 `idle_no_valid`（上游饥饿类停顿）。而增大 `DELAY_CYCLES` 让每次 miss 等更久，推高的是 `stall_locked` 与 `total_ld_stalled_due_is`（访存同步类停顿）。两者都属于「停顿」，但味道完全不同，混淆会导致调错旋钮。
+
+---
+
+### 4.3 波形定位 stall
+
+#### 4.3.1 概念说明
+
+`results.log` 只告诉你「停顿的总量与味道」，不告诉你「停顿发生在哪条指令、哪一拍」。要定位到具体现场，必须回到波形。本仓库已经为你预置了一套探头——`wave_simulator.do`，它用 `add wave` 把整套数据通路的「状态信号」分组成区，省去你手动逐个加信号的功夫。
+
+定位 stall 的通用方法就是**让一个 stall 计数器自增的那一拍，与波形上的状态对齐**：在波形里找到 `stall_pending`/`stall_locked` 的上升沿，往左看一拍，读那一拍的 `instr_in`、`pending`/`locked` 位矩阵、`can_issue`，就能说出「这条指令卡在哪」。
+
+#### 4.3.2 核心流程
+
+定位一条 stall 的四步法：
+
+1. **定位计数器沿**：在波形里把目光锁定在 `vis/stall_pending` 或 `vis/stall_locked` 上，找到它 +1 的那个时钟沿（这两个是 64 位计数器，看低位翻转即可）。
+2. **回退一拍读指令**：在该沿的前一个 `posedge`，读 `vis/instr_in`（波形容器已展开 valid/dst/src1/src2/fu/microop/lock/vl 等子字段），确认是哪条指令、是计算还是访存。
+3. **读位矩阵**：
+   - 若查 `stall_pending`：看 `vis/pending` 与 `vis/src1_ok`/`src2_ok`（在 generate 块里），找出哪条 lane 的源位还是 1——那就是未到位的生产者；再去 `locked_ticket` 对照，确认等的是哪条在飞指令。
+   - 若查 `stall_locked`：看 `vis/locked`，找出目的寄存器哪条 lane 仍为 1；再去 `vmu/` 下看是 load/store/tp 哪个引擎尚未 `unlock`。
+4. **验证**：看那一拍 `vis/can_issue` 是否为 0、`vis/current_exp_loop` 是几（是否卡在某个展开轮次），印证你的判断。
+
+访存侧的 `total_ld_stalled_due_is` 用同样方法，只是探头换到 `vmu/vmu_ld_eng/`：看 `stall_row_0_while_ready`/`stall_row_1_while_ready`、`active_elem`/`served_elem`、`wrtbck_locked_*` 与 `ticket_r` 的关系。
+
+#### 4.3.3 源码精读
+
+波形脚本里和性能直接相关的分组：
+
+[vector_simulator/wave_simulator.do:10-18](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/wave_simulator.do#L10-L18) — `{Performance Stats}` 分组把六个 vis 计数器与 vmu 的 `total_ld_stalled_due_is` 一次性加进波形，且都标了 `-radix unsigned`（否则 64 位计数器默认按有符号/十六进制显示，读起来费劲）。这是定位计数器沿的起点。
+
+各级 idle 信号（判断「停顿在哪一级」）在波形最上方：
+
+[vector_simulator/wave_simulator.do:5-9](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/wave_simulator.do#L5-L9) — `vector_idle_o` 与 `vrrm_idle`/`vmu_idle`/`vis_idle`/`vex_idle` 四路子 idle。回忆 u2-l1：`vector_idle_o` 是四路相与；某一路为 0 就说明该级未空。先看这五行能快速缩小「卡在哪一级」。
+
+定位 pending/locked 现场的核心信号：
+
+[vector_simulator/wave_simulator.do:50-57](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/wave_simulator.do#L50-L57) — `current_exp_loop`（展开轮次）、`can_issue`、`unlock_en/unlock_reg_a/unlock_reg_b`、以及 `pending`/`locked` 两套位矩阵、`locked_ticket[31:0]`（每个架构寄存器正在等的 ticket）。这一组是「为什么没发射」的完整证据链。
+
+触发条件对应回 RTL，便于在波形上验证「这一拍为何 stall_pending 自增」：
+
+[rtl/vector/vis.sv:405-406](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vis.sv#L405-L406) — 重申 `no_pending` 的缩位定义。波形里若看到 `stall_pending` 在涨，就去找那一拍 `&(src1_ok & src2_ok)` 为 0 的那条 lane。
+
+最后，整套波形是由编译脚本里 `log -r /*` 全量记录、再 `do wave_simulator.do` 套用配置的：
+
+[vector_simulator/compile_vector_simulator.do:11-18](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/vector_simulator/compile_vector_simulator.do#L11-L18) — 注意 L14 `log -r /*` 会记录设计里**所有**信号（波形文件很大但定位无忧），L15 才套波形配置。若仿真太慢/波形太大，可改成只 `log` 关键层级，但会牺牲定位便利。
+
+#### 4.3.4 代码实践（波形定位型）
+
+**目标**：用四步法在波形上定位一次真实的 `stall_locked`，说清楚它在等谁。
+
+**步骤**：
+
+1. 按 u1-l5 跑 `saxpy` 示例（含 load→计算→store 序列），打开生成的波形。
+2. 在 `{Performance Stats}` 分组里找到 `stall_locked`，跳到它第一次明显上升的区段。
+3. 回退一拍，读 `vis/instr_in`：这条指令的 `fu`、`microop`、`dst`、`lock` 各是什么？判断它是计算指令在等目的解锁，还是别的。
+4. 读 `vis/locked`：哪一位（哪个架构寄存器）为 1？再去 `vmu/` 下找对应的 load/store 引擎，看它是否尚未拉起 `unlock_en`。
+5. 记录：等待的 ticket（`locked_ticket[dst]`）与 vmu 侧当前处理的 ticket，确认二者匹配——这就是 u4-l1 讲的 ticket 跨路消歧在波形上的具象。
+
+**预期结果**：能看到一次清晰的「vIS 持枪（locked=1）等待 → vMU 完成 → unlock_en 拉起 → 下一拍 locked 清零、stall_locked 停止增长」的过程。如果始终定位不到 `stall_locked` 上升沿，说明该示例访存停顿不显著，可换 `vvadd`（连续 load）再试。
+
+> 本地无 QuestaSim 时标注「待本地验证」。纯阅读角度，对照 [vmu_ld_eng.sv:559-575](https://github.com/ic-lab-duth/RISC-V-Vector/blob/8ded0f4036bcb34868c2d15475883d03bff37328/rtl/vector/vmu_ld_eng.sv#L559-L575) 与 vis 的 unlock 逻辑即可推断波形上应出现的信号组合。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：波形上 `stall_pending` 在涨，但你发现那一拍 `instr_in.src1_iszero=1`。这矛盾吗？
+
+> 答案：不矛盾。`src1_iszero` 只让 `src1_ok` 全 1，`no_pending` 还要求 `src2_ok` 也全 1。`stall_pending` 涨说明 `src2` 至少一条 lane 未就绪（源 2 的生产者还在飞）。定位时应转去看 `pending[src2]` 与 `src2_ok`。
+
+**练习 2**：为什么 `wave_simulator.do` 给计数器加 `-radix unsigned` 很重要？不加会怎样？
+
+> 答案：计数器是 64 位无符号。若按默认（可能是有符号或十六进制），高位一旦有值会显示成巨大的负数或难以口算的十六进制，极难判断「涨了多少」。`-radix unsigned` 让它按自然数十进制显示，直接看出增量。
+
+**练习 3**：你看到 `total_cycles` 还在涨，但 `vector_idle_o` 已经为 1，且 `total_issues` 也停了。这是什么状态？应排查哪里？
+
+> 答案：DUT 已空但仿真还没结束——典型是 `sim_finished` 条件未满足（如 `memory_empty` 因 driver 的 `head` 未达 `SIM_VECTOR_INSTRS`），或正处于空闲超时（100 拍兜底）的倒数中。应查 `vector_sim_top` 的 `pipeline_empty`/`idle_counter`，而非 DUT 内部 stall。这与「性能 stall」是两类不同问题。
+
+---
+
+## 5. 综合实践
+
+**任务**：对同一个程序做一次完整的「度量→定位→调优→复测」闭环，找出给定 AVL 下的最优 lane 配置。
+
+选 `dot_product`（归约类，依赖链长，对 lane 与转发点都敏感）。固定 AVL（如 5000），按下表跑三组配置，填入 `results.log` 的关键数：
+
+| 配置 | VECTOR_LANES | FWD_POINT_A | FWD_POINT_B | total_cycles | total_issues | stall_pending | stall_locked | ld_stalled_due_is |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A（基线） | 8 | EX1 | EX4_F | | | | | |
+| B（小 lane） | 4 | EX1 | EX4_F | | | | | |
+| C（大 lane） | 16 | EX1 | EX4_F | | | | | |
+
+操作要点：
+
+1. 每改一次 `VECTOR_LANES`，**务必同步改 `vstructs.sv` 的 `DUMMY_VECTOR_LANES`**，重新 `vlog`。
+2. 每组跑完先核账（`issues + idle ≈ cycles`），再读停顿味道。
+3. 选出 cycle 最小的一组，用 4.3 的四步法在波形上确认它的主导停顿是什么。
+4. 给出结论：在该 AVL 下，最优 lane 数是几？瓶颈是算力（pending）还是访存（locked）？如果瓶颈是访存，说明继续加 lane 无效，应改程序或存储层次。
+
+进阶（可选）：在最优 lane 下，再把 `FWD_POINT_B` 从 EX4_F 调到 EX3，观察 `stall_pending` 变化，验证「cycle↓ 但频率待综合」的认知——写下你认为该改动对关键路径的影响方向。
+
+> 本地无仿真环境时，综合实践可降级为「纸面预测」：依据 ⌈VL/LANES⌉、归约树级数 ⌈log₂(LANES)⌉ 与停顿味道，预测三组配置的 cycle 相对大小与主导 stall 类型，标注「待本地验证」。
+
+## 6. 本讲小结
+
+- `results.log` 七项指标中，`total_cycles ≈ total_issues + total_idle` 是总账恒等式；但三个 idle 子计数器（`idle_no_valid`/`stall_pending`/`stall_locked`）是**诊断灯而非分饼**——它们可同拍重叠，且有一段「下游反压/展开换拍」的停顿未被单独计数，所以加起来不等于 `total_idle`。
+- `stall_locked`（vIS 等 vMU unlock）与 `total_ld_stalled_due_is`（vMU 等 vIS 解锁）是 acquire-release 同步张力的**两面的同一枚硬币**，同时变大即说明解耦执行的同步成瓶颈，加 lane 无效。
+- 三个 cycle 级旋钮：`VECTOR_LANES`（受访存墙与气泡摊薄双重衰减）、转发点 `FWD_POINT_A/B`（最直接的 cycle 杠杆）、`TOTAL_BUBBLE_CYCLES`（还原真实，非优化）。选旋钮前先看哪类 stall 最大。
+- **`results.log` 只量 cycle，不量秒**：转发点提前让 cycle↓ 但可能让 fmax↓，墙钟孰优需综合报告裁决；本讲所有结论都在 cycle 语境下成立。
+- 波形定位用 `wave_simulator.do` 预置的 `{Performance Stats}` 分组与 `pending/locked/locked_ticket` 证据链，四步法把「计数器沿」对齐到「具体指令与位矩阵」。
+- 改 lane 数有两个隐藏耦合：同步改 `vstructs.sv` 的 `DUMMY_VECTOR_LANES`、归约树级数上限导致 16 lane 天花板——调优必须整参数回归。
+
+## 7. 下一步学习建议
+
+- 下一讲 **u4-l8 示例实战与项目扩展** 会把本讲的度量方法用到 vvadd/saxpy/dot_product/fir 四个真实内核上，并讨论加指令、加浮点 lane、加背压等扩展方向——本讲的「先看停顿味道再选旋钮」正是那里的核心工作法。
+- 想深挖某类 stall 的硬件根源：计算侧重读 u2-l5/u2-l7（计分板与转发）、u4-l2（转发网络与变延迟）；访存侧重读 u3-l2（load 引擎与解耦）、u4-l1（acquire-release 语义）、u4-l3（缓存与 L2）。
+- 想把「cycle 度量」升级为「墙钟度量」：本仓库暂无综合/时序脚本，需自行把 RTL 接入 Vivado/Design Compiler 流程，用本讲的 cycle 数据交叉综合后的 fmax，才能得到真实性能排序。
