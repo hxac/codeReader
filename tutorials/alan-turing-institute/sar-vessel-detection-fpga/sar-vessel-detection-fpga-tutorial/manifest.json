@@ -1,0 +1,981 @@
+{
+  "project": "sar-vessel-detection-fpga",
+  "head": "a318ec963da6007330fc2d80cd27b3060dd1cee3",
+  "rationale": "本项目是一个跨领域（遥感数据 + 深度学习 + FPGA 硬件 + HLS + C++ 边缘推理）的研究型工程，目标是在 Kria KV260 MPSoC 上部署一个用于星载 SAR 船舶检测的 YOLOv8 模型。学习路线按「数据→训练→量化→硬件→框架→推理→HLS 加速→集成」的真实工程链路设计：第一单元先建立项目定位与全局视图；随后单元 2-3 处理数据准备与模型训练（在普通 CPU/GPU 即可理解）；单元 4 把模型量化到 int8 以适配 DPU；单元 5 进入 FPGA 硬件平台的构建与部署；单元 6-7 讲解 Vitis AI 推理框架补丁与板载 C++ 推理应用；单元 8 深入最硬核的 HLS 后处理解码内核（PL 侧加速）；最后单元 9 串联端到端流程并讨论性能-精度-功耗权衡。层级从 beginner 到 advanced 逐步加深，每篇讲义只讲一个相对独立的主题，依赖关系严格遵循工程链路，使读者既能从零上手，也能逐步深入到硬件级优化。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目总览与快速上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目背景与目标：星载 SAR 船舶检测",
+          "order": 1,
+          "filename": "u1-l1-project-background.md",
+          "level": "beginner",
+          "topic": "介绍项目要解决的问题：为什么要在卫星上用 SAR 做船舶检测，为什么选择 FPGA（KV260）而不是 GPU，以及本项目的核心成果指标。",
+          "learning_goals": [
+            "理解 SAR 遥感与船舶检测的应用场景与时效性挑战",
+            "理解星载机器学习（on-satellite ML）的功耗与体积约束",
+            "理解本项目相对 SOTA GPU 模型的计算效率优势（约 50×/2500×）"
+          ],
+          "source_files": [
+            "README.md",
+            "assets/multi_panel_v2.jpg"
+          ],
+          "minimal_modules": [
+            "项目定位与动机",
+            "xView3-SAR 数据集简介",
+            "KV260 与功耗约束"
+          ],
+          "practice_task": "阅读 README 后，用自己的话写一段 200 字以内的摘要，说明本项目「为什么不用 GPU 而用 FPGA」，并指出论文给出的两项关键对比指标（检测/分类精度差距与计算效率倍数）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与各模块职责",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "逐个讲解仓库顶层目录（dataset / software/{training,quantization,inference_app} / framework/vitis_ai / platform/{kv260,post_processing} / assets）各自承担的职责。",
+          "learning_goals": [
+            "记住仓库的六大组件及其职责划分",
+            "区分软件侧（训练/量化/推理）与平台侧（硬件/固件）",
+            "识别每个目录的入口文件（README、主脚本）"
+          ],
+          "source_files": [
+            "README.md",
+            "dataset/README.md",
+            "software/training/README.md",
+            "platform/kv260/README.md",
+            "platform/post_processing/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "软件栈组件",
+            "平台与硬件组件"
+          ],
+          "practice_task": "在仓库根目录绘制一张模块依赖关系图（文本或手绘），标出数据从 xView3 原始场景到板载推理结果所经过的目录，并为每个目录写一句话职责说明。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "端到端工作流总览",
+          "order": 3,
+          "filename": "u1-l3-end-to-end-pipeline.md",
+          "level": "beginner",
+          "topic": "把六个组件串成一条完整流水线：数据切片→YOLOv8 训练→Vitis AI 量化→DPU 编译→KV260 硬件/固件部署→板载推理与 HLS 后处理。",
+          "learning_goals": [
+            "掌握端到端流水线的七个阶段及其顺序",
+            "理解各阶段的产物（chips、.pt、.xmodel、.xclbin、JSON 预测）如何流转",
+            "建立后续每个单元在整体链路中的位置感"
+          ],
+          "source_files": [
+            "README.md",
+            "dataset/README.md",
+            "software/quantization/README.md",
+            "software/inference_app/README.md",
+            "platform/post_processing/README.md"
+          ],
+          "minimal_modules": [
+            "数据准备阶段",
+            "模型训练与量化阶段",
+            "硬件部署与推理阶段"
+          ],
+          "practice_task": "用表格列出流水线每个阶段的「输入→工具/脚本→输出」，例如：原始 xView3 场景 → generate_xview3.py → 800×800 chips。本讲义作为后续单元的导航地图。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "xView3-SAR 数据集准备",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "xView3-SAR 数据集与目录结构",
+          "order": 1,
+          "filename": "u2-l1-dataset-structure.md",
+          "level": "beginner",
+          "topic": "讲解 xView3-SAR 数据集的组织方式：data（VH/VV/bathymetry 三通道 .tif 场景）、labels（.csv 标注）、shoreline（.npy 海岸线）三个子目录及 train/val/public 划分。",
+          "learning_goals": [
+            "理解 SAR 场景的三个输入通道（VV、VH、bathymetry）的物理含义",
+            "掌握数据集的目录约定与 train/validation/public 划分",
+            "理解标注 CSV 中关键字段（scene_id、detect_scene_row/column、is_vessel、is_fishing）"
+          ],
+          "source_files": [
+            "dataset/README.md"
+          ],
+          "minimal_modules": [
+            "数据集目录约定",
+            "SAR 三通道输入",
+            "xView3 标注字段"
+          ],
+          "practice_task": "按照 dataset/README.md 的目录树，在本地创建一个空的数据集骨架目录（data/labels/shoreline 及其子目录），并写一个 Python 片段用 rasterio 打开一个示例 VH_dB.tif 读取其形状与数据类型。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "切片生成与滑动窗口裁剪",
+          "order": 2,
+          "filename": "u2-l2-chip-generation.md",
+          "level": "intermediate",
+          "topic": "逐段解析 generate_xview3.py 的 main()：如何用 rasterio 读三个通道、用 np.arange+meshgrid 生成裁剪坐标、用 sliding_window_view 切片，以及用 NODATA 掩码过滤无效芯片。",
+          "learning_goals": [
+            "掌握用 numpy sliding_window_view 生成不重叠裁剪网格的方法",
+            "理解如何用 NODATA(-32768) 掩码剔除全空切片",
+            "理解三通道（VV/VH/bathymetry）如何写入单个多波段 GeoTIFF"
+          ],
+          "source_files": [
+            "dataset/generate_xview3.py"
+          ],
+          "minimal_modules": [
+            "rasterio 读取与重采样",
+            "滑动窗口裁剪网格",
+            "NODATA 过滤"
+          ],
+          "practice_task": "在 generate_xview3.py 的主循环中找到生成裁剪坐标的代码，修改 imgsz 参数说明（800 与 640）对裁剪数量与显存的影响，并实现一个小函数：给定一个二维数组和 imgsz，返回所有有效（非全 NODATA）裁剪的起始坐标列表。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "标注转换与背景负样本采样",
+          "order": 3,
+          "filename": "u2-l3-label-conversion.md",
+          "level": "intermediate",
+          "topic": "讲解 get_annots() 如何把 xView3 像素坐标转成 YOLO 归一化标签（含 vessel/fishing 类别编码与极小宽高），以及主循环中如何按 30% 比例采样背景负样本芯片。",
+          "learning_goals": [
+            "理解 is_vessel/is_fishing 到 0/1/2 三类标签的编码方式",
+            "掌握 YOLO 归一化坐标（cx/imgsz, cy/imgsz）与点目标近似（极小 w/h）",
+            "理解 30% 背景负样本采样策略及其对训练的作用"
+          ],
+          "source_files": [
+            "dataset/generate_xview3.py"
+          ],
+          "minimal_modules": [
+            "YOLO 标签格式",
+            "类别编码",
+            "负样本采样"
+          ],
+          "practice_task": "实现一个简化版 get_annots：输入若干 (row, col, is_vessel, is_fishing) 与裁剪起点，输出 YOLO 格式 [class, x_norm, y_norm, w, h] 列表；再写一段逻辑，从一个场景的所有空芯片中随机抽取 30% 作为负样本。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "YOLOv8 训练与框架定制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "YOLOv8 架构与训练入口",
+          "order": 1,
+          "filename": "u3-l1-yolov8-overview.md",
+          "level": "intermediate",
+          "topic": "结合 yolov8_diagram.jpg 讲解 YOLOv8 的 backbone/neck/head 三段式结构，以及本工作基于 Ultralytics v8.2.91 的修改点总览与 yolo CLI 训练/验证/推理命令。",
+          "learning_goals": [
+            "理解 YOLOv8 的 backbone-neck-detect head 架构与多尺度特征融合",
+            "掌握 yolo train/val/predict CLI 的基本用法与 .yaml 配置",
+            "了解本工作对 Ultralytics 框架的五类修改（加载/归一化/IoU/验证/指标）"
+          ],
+          "source_files": [
+            "software/training/README.md",
+            "assets/yolov8_diagram.jpg"
+          ],
+          "minimal_modules": [
+            "YOLOv8 网络结构",
+            "Ultralytics CLI",
+            "框架修改总览"
+          ],
+          "practice_task": "对照 yolov8_diagram.jpg，在讲义中标注 backbone、neck、head 三部分，并写出一条训练命令示例（model/data/imgsz），解释 imgsz 取 800 或 640 的含义。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SAR 多通道图像加载与归一化",
+          "order": 2,
+          "filename": "u3-l2-sar-normalization.md",
+          "level": "intermediate",
+          "topic": "讲解两处关键修改：cv2.imread 加 IMREAD_UNCHANGED 以读取 TIFF；以及在 BaseDataset.get_image_and_label 中对 SAR 波段（[-50,20]）和 bathymetry（[-6000,2000]）做线性归一化到 uint8。",
+          "learning_goals": [
+            "理解为何 SAR TIFF 必须用 IMREAD_UNCHANGED 读取",
+            "掌握线性归一化（clip+缩放）把多通道 SAR 映射到 [0,255] uint8 的方法",
+            "理解归一化后可复用默认数据增强的好处"
+          ],
+          "source_files": [
+            "software/training/README.md"
+          ],
+          "minimal_modules": [
+            "TIFF 图像加载",
+            "多通道线性归一化",
+            "数据增强复用"
+          ],
+          "practice_task": "实现 README 中的 normalize() 函数，对一张三通道（bathymetry,VV,VH）numpy 数组做归一化，验证输入越界值被 clip 到 [0,1] 后再映射到 uint8；并思考为何 min/max 数组顺序是 [-6000,-50,-50] 而非按波段顺序。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "PIoU2 边界框回归损失",
+          "order": 3,
+          "filename": "u3-l3-piou2-loss.md",
+          "level": "intermediate",
+          "topic": "解析 metrics.py 中的 compute_piou()：PIoU/PIoU2/PIoU3 三种方法的数学推导，以及它如何被嵌入到 ultralytics 的 bbox_iou 中替代默认 CIoU。",
+          "learning_goals": [
+            "理解 PIoU 系列损失相对 CIoU 的优势（非单调聚焦机制）",
+            "掌握 compute_piou 中 dw/dh、P、L_v1 与 PIoU2 公式的计算步骤",
+            "理解如何把自定义 IoU 方法接入 YOLOv8 的 bbox_iou"
+          ],
+          "source_files": [
+            "software/training/metrics.py"
+          ],
+          "minimal_modules": [
+            "IoU 与 CIoU 回顾",
+            "PIoU/PIoU2 数学推导",
+            "bbox_iou 接入点"
+          ],
+          "practice_task": "用 numpy 或 torch 复现 compute_piou 的 PIoU2 分支，给定两组边界框坐标与 IoU，输出 PIoU2 值；并对比同一输入下 CIoU 与 PIoU2 的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "xView3 评估指标体系",
+          "order": 4,
+          "filename": "u3-l4-xview3-metrics.md",
+          "level": "intermediate",
+          "topic": "解析 xview3_metrics.py：用匈牙利算法（linear_sum_assignment）做检测-真值匹配，计算 Detection/Near-shore/Vessel/Fishing 四个 F1 与 length accuracy，以及 aggregate 聚合分。",
+          "learning_goals": [
+            "理解 xView3 竞赛的四个核心 F1 指标及其定义",
+            "掌握用匈牙利算法在像素距离容差内做检测匹配的方法",
+            "理解 near-shore 子集筛选（基于海岸线 .npy 的 KDTree 距离）与 aggregate 聚合公式"
+          ],
+          "source_files": [
+            "software/training/xview3_metrics.py"
+          ],
+          "minimal_modules": [
+            "匈牙利匹配",
+            "距离矩阵与容差",
+            "近岸筛选与 aggregate"
+          ],
+          "practice_task": "实现 calculate_p_r_f(num_tp,num_fp,num_fn)，并构造一个微型 pred/gt DataFrame，调用 compute_loc_performance 得到 tp/fp/fn，再算出 detection F1；验证边界情况（零除法返回 0）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "验证流程、NMS 与全局坐标变换",
+          "order": 5,
+          "filename": "u3-l5-validation-nms.md",
+          "level": "intermediate",
+          "topic": "讲解训练 README 中的 update_metrics 修改（把 chip 内预测用 offset 还原到场景全局坐标），以及 prune.py 中基于 cKDTree 的距离阈值 NMS。",
+          "learning_goals": [
+            "理解如何用 chip offset 把局部预测坐标还原为场景全局坐标",
+            "掌握 xView3Metrics.process 中按 score 截断 + NMS + 低置信过滤的评估流程",
+            "理解 prune.py 用 cKDTree.query_ball_point 实现距离 NMS 的原理"
+          ],
+          "source_files": [
+            "software/training/README.md",
+            "software/training/prune.py",
+            "software/training/metrics.py"
+          ],
+          "minimal_modules": [
+            "chip 偏移坐标还原",
+            "xView3 验证流程",
+            "KDTree 距离 NMS"
+          ],
+          "practice_task": "实现 prune.py 的 nms() 核心逻辑：给定每条检测的 (row,col,score)，用 cKDTree 在 distance_thresh 内只保留最高分检测；并用一个小例子验证冗余点被剔除。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Vitis AI 量化",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "量化基础与 PTQ 校准",
+          "order": 1,
+          "filename": "u4-l1-quantization-ptq.md",
+          "level": "intermediate",
+          "topic": "讲解模型量化的动机（int8 减小体积/提速以适配 DPU），PTQ 与 QAT 的区别，以及 quantization/README.md 中的 PTQ 校准命令（nndct_quant=calib）。",
+          "learning_goals": [
+            "理解 PTQ 与 QAT 的适用场景与权衡",
+            "掌握 Vitis AI PTQ 校准的 CLI 参数与流程",
+            "理解 sigmoid→hsigmoid、silu→hswish 替换标志的作用动机"
+          ],
+          "source_files": [
+            "software/quantization/README.md"
+          ],
+          "minimal_modules": [
+            "量化动机与 int8",
+            "PTQ 校准流程",
+            "激活函数替换标志"
+          ],
+          "practice_task": "对比 PTQ 与 QAT 两条命令的差异，列出它们各自的额外参数（epochs、optimizer、momentum 等），并解释为何校准阶段只需要前向推理而 QAT 需要完整训练循环。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "量化感知训练 QAT 实现要点",
+          "order": 2,
+          "filename": "u4-l2-qat-modifications.md",
+          "level": "advanced",
+          "topic": "解析 modifications.md 中对 task.py/trainer.py/modules.py/validator.py 的 QAT 改造：QatProcessor、阈值参数组（~100× 学习率）、deepcopy 补丁、deployable model 转换与 quant_info 导出。",
+          "learning_goals": [
+            "理解 QatProcessor 如何把浮点模型转为可训练量化模型",
+            "掌握 QAT 中对 threshold 参数单独设置高学习率的技巧",
+            "理解 convert_to_deployable 与 quant_info.json 的作用"
+          ],
+          "source_files": [
+            "software/quantization/modifications.md",
+            "software/quantization/README.md"
+          ],
+          "minimal_modules": [
+            "QatProcessor 与 deployable model",
+            "阈值参数组优化",
+            "quant_info 导出"
+          ],
+          "practice_task": "根据 modifications.md 描述，写一段伪代码展示 trainer._setup_train 中创建 QatProcessor、提取 trainable_model 的流程；并解释为何要把 __deepcopy__ 打补丁。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "激活函数替换与 DPU 算子适配",
+          "order": 3,
+          "filename": "u4-l3-activation-replacement.md",
+          "level": "advanced",
+          "topic": "讲解为何 DPU 上要把 sigmoid 换成 hsigmoid、silu 换成 hswish（硬件友好、查表近似），以及 modules.py 中 C2f/SPPF/Detect head、torch.cat→nndct cat、MaxPool2d 实例化的修改原因。",
+          "learning_goals": [
+            "理解 DPU 对激活函数的硬件偏好（分段线性/查表）",
+            "掌握为何 nndct 的 cat 与独立的 MaxPool2d 实例利于量化图追踪",
+            "理解 C2f/SPPF/Detect head 改造对量化稳定性的影响"
+          ],
+          "source_files": [
+            "software/quantization/modifications.md",
+            "software/quantization/README.md"
+          ],
+          "minimal_modules": [
+            "DPU 硬件友好激活",
+            "nndct 算子替换",
+            "模块量化改造"
+          ],
+          "practice_task": "列出 --nndct_convert_sigmoid_to_hsigmoid 与 --nndct_convert_silu_to_hswish 两个标志的作用；并在讲义中画出 sigmoid 与 hsigmoid 的函数曲线对比，解释后者为何更适合 int8 定点实现。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "模型导出与 DPU 编译",
+          "order": 4,
+          "filename": "u4-l4-export-and-compile.md",
+          "level": "intermediate",
+          "topic": "讲解 dump_xmodel/dump_onnx 导出、vai_c_xir 针对 DPUCZDX8G/KV260 arch.json 的编译、xir subgraph 查找输出层名，以及 model.prototxt 配置与 scp 部署。",
+          "learning_goals": [
+            "掌握把量化模型导出为 xmodel/ONNX 的命令",
+            "理解 vai_c_xir 用 arch.json 把 xmodel 编译为 DPU 可执行 .xmodel 的过程",
+            "掌握用 xir subgraph 定位输出层名并填入 prototxt 的方法"
+          ],
+          "source_files": [
+            "software/quantization/README.md"
+          ],
+          "minimal_modules": [
+            "xmodel/onnx 导出",
+            "vai_c_xir DPU 编译",
+            "prototxt 与输出层定位"
+          ],
+          "practice_task": "写出完整的「导出→编译→部署」三步命令序列，并解释 vai_c_output 目录中 .xmodel、meta.json、checksum 各自的作用；说明 detect_layer_name 字段为何必须从 xir subgraph 输出获取。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "FPGA 硬件平台构建",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "KV260 MPSoC 与 DPU 硬件架构",
+          "order": 1,
+          "filename": "u5-l1-kv260-dpu-architecture.md",
+          "level": "intermediate",
+          "topic": "讲解 Kria KV260 SOM 的 PS+PL 架构、DPU 4.1（DPUCZDX8G_ISA1_B4096）IP、325MHz 频率，以及 README 中的 FPGA 资源利用率表（LUT/BRAM/URAM）。",
+          "learning_goals": [
+            "理解 KV260 的 PS（ARM A53）+ PL（FPGA）协同架构",
+            "掌握 DPU IP 的核心参数（架构名、频率、softmax 使能）",
+            "能读懂 Vivado 资源利用率表并评估设计余量"
+          ],
+          "source_files": [
+            "platform/kv260/README.md",
+            "assets/Vivado_KV260_DPU_TRD.png"
+          ],
+          "minimal_modules": [
+            "KV260 PS/PL 架构",
+            "DPU 4.1 IP 参数",
+            "资源利用率解读"
+          ],
+          "practice_task": "阅读 README 资源表，计算 BRAM（75.69%）与 URAM（62.5%）的剩余余量，判断该设计是否还有空间容纳额外的 PL 加速核（如后处理解码核），并说明判断依据。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Vivado 硬件设计与 XSA 导出",
+          "order": 2,
+          "filename": "u5-l2-vivado-hardware-design.md",
+          "level": "advanced",
+          "topic": "讲解用 main.tcl 脚本批处理构建 Vivado DPU 设计、xdc 约束（引脚/电平/压缩）、目标 board part 选择，以及导出 .xsa 硬件平台文件作为软硬件交接物。",
+          "learning_goals": [
+            "掌握 vivado -mode batch -source main.tcl 的批处理构建方式",
+            "理解 xdc 约束文件的作用（PACKAGE_PIN/IOSTANDARD/SLEW/DRIVE）",
+            "理解 .xsa 文件在硬件→软件交接中的角色"
+          ],
+          "source_files": [
+            "platform/kv260/README.md",
+            "platform/kv260/hw/main.tcl",
+            "platform/kv260/hw/xdc/kv260.xdc"
+          ],
+          "minimal_modules": [
+            "TCL 批处理构建",
+            "xdc 约束",
+            "XSA 导出"
+          ],
+          "practice_task": "阅读 main.tcl 与 kv260.xdc，找出 DPU 设计用到的关键约束（如 BITSTREAM 压缩、风扇使能引脚），并写出一条命令用 main.tcl 针对 zcu104 板生成参考设计的用法。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "PetaLinux 软件镜像构建",
+          "order": 3,
+          "filename": "u5-l3-petalinux-image.md",
+          "level": "advanced",
+          "topic": "讲解 helper_build_bsp.sh 构建 PetaLinux 工程、petalinux-config -c kernel 启用 DPU 驱动、petalinux-build 生成镜像，以及 rootfs 过大导致 do_image_cpio 报错的排查与修复。",
+          "learning_goals": [
+            "掌握 PetaLinux BSP 构建与内核 DPU 驱动启用流程",
+            "理解 BOOT.BIN/image.ub/boot.scr 与 rootfs 的分区关系",
+            "掌握 rootfs >2GB 时移除 cpio 镜像类型的排查方法"
+          ],
+          "source_files": [
+            "platform/kv260/README.md",
+            "platform/kv260/sw/helper_build_bsp.sh"
+          ],
+          "minimal_modules": [
+            "PetaLinux BSP 构建",
+            "内核 DPU 驱动配置",
+            "镜像构建排错"
+          ],
+          "practice_task": "写出从 source settings.sh 到 petalinux-build 的完整命令序列；并解释为何 rootfs 超过 2GB 会触发 do_image_cpio 错误、IMAGE_FSTYPES:remove 如何缓解。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "固件制作与板载部署",
+          "order": 4,
+          "filename": "u5-l4-firmware-deployment.md",
+          "level": "intermediate",
+          "topic": "讲解三件套固件（.bit.bin、.dtbo、shell.json）的制作：XSCT 生成 dtsi、dtc 转 dtbo、bit 重命名；以及 scp 上板、xmutil loadapp 加载、xdputil query 验证 DPU。",
+          "learning_goals": [
+            "掌握 KV260 加速器固件三件套的含义与制作流程",
+            "理解设备树 overlay（dtbo）与 shell.json（XRT_FLAT）的作用",
+            "掌握 xmutil loadapp/unloadapp 与 xdputil query 的板载验证方法"
+          ],
+          "source_files": [
+            "platform/kv260/README.md",
+            "platform/kv260/sw/shell.json",
+            "platform/kv260/sw/kv260.dtbo"
+          ],
+          "minimal_modules": [
+            "固件三件套制作",
+            "设备树 overlay",
+            "xmutil 加载与验证"
+          ],
+          "practice_task": "模拟在 KV260 上部署：写出 scp 三文件上板、创建 /lib/firmware/xilinx/kv260-dpu-trd 目录、xmutil unloadapp/loadapp 的命令序列；并解读 xdputil query 输出中 DPU Arch 与频率字段。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Vitis AI 推理框架补丁",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "框架补丁总览与图像加载/归一化",
+          "order": 1,
+          "filename": "u6-l1-patch-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 framework/vitis_ai/xview3_yolov8_v3.5.patch 涉及的四个文件，重点解析 demo_accuracy.hpp（ReadImagesThread 加 IMREAD_UNCHANGED）与 image_preprocess（C++ 侧 SAR 归一化、转 signed int8）。",
+          "learning_goals": [
+            "理解该 patch 修改的四个 Vitis AI 源文件及其作用",
+            "掌握 C++ 侧 SAR 三通道归一化与 CV_8S（signed int8）转换",
+            "理解为何推理输入要转成 signed 8-bit 以匹配量化模型"
+          ],
+          "source_files": [
+            "framework/vitis_ai/README.md",
+            "framework/vitis_ai/xview3_yolov8_v3.5.patch"
+          ],
+          "minimal_modules": [
+            "patch 四文件总览",
+            "C++ TIFF 加载",
+            "image_preprocess 归一化"
+          ],
+          "practice_task": "阅读 patch 中 demo_accuracy.hpp 的 hunk，说明 cv::IMREAD_UNCHANGED 的加入解决了什么问题；并对照 README 的 image_preprocess 代码，画出从原始 SAR 到 signed int8 输入张量的数据流。",
+          "depends_on": [
+            "u4-l4",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "PIoU2 NMS 后处理",
+          "order": 2,
+          "filename": "u6-l2-piou2-nms.md",
+          "level": "advanced",
+          "topic": "解析 patch 中 apply_nms.cpp 新增的 cal_piou2() 与 PIOU2_NMS 环境变量，对比 DIoU 分支，理解把训练侧 PIoU2 一致性带到推理 NMS 的必要性。",
+          "learning_goals": [
+            "理解 apply_nms.cpp 中 cal_iou/cal_new_iou(DIoU)/cal_piou2 三种 IoU 实现",
+            "掌握 DEF_ENV_PARAM(PIOU2_NMS) 环境变量开关的运行时切换机制",
+            "理解训练与推理使用一致 IoU 度量对精度的影响"
+          ],
+          "source_files": [
+            "framework/vitis_ai/xview3_yolov8_v3.5.patch",
+            "framework/vitis_ai/README.md"
+          ],
+          "minimal_modules": [
+            "apply_nms 三种 IoU",
+            "PIOU2_NMS 环境变量",
+            "训推一致 IoU"
+          ],
+          "practice_task": "从 patch 中提取 cal_piou2() 的完整实现，对照 metrics.py 的 compute_piou 验证两者公式一致；并说明推理时设置 PIOU2_NMS=1 与 =0 的差异（参见 inference_app README）。",
+          "depends_on": [
+            "u6-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "YOLOv8 后处理优化与 P2 架构",
+          "order": 3,
+          "filename": "u6-l3-postprocess-optimization.md",
+          "level": "advanced",
+          "topic": "解析 patch 对 yolov8.cpp/yolov8_imp.cpp 的 yolov8_post_process 优化：处理新增 P2 高分辨率头预测，使解码加速约 27×，并讨论其与 HLS 解码核的关系。",
+          "learning_goals": [
+            "理解 P2 高分辨率检测头对 SAR 小目标检测的意义",
+            "掌握 yolov8_post_process 针对 P2 预测的优化思路",
+            "理解软件后处理优化与硬件 HLS 解码核的分工与衔接"
+          ],
+          "source_files": [
+            "framework/vitis_ai/README.md",
+            "framework/vitis_ai/xview3_yolov8_v3.5.patch"
+          ],
+          "minimal_modules": [
+            "P2 多尺度头",
+            "后处理解码优化",
+            "软硬后处理分工"
+          ],
+          "practice_task": "阅读 patch 中 yolov8.cpp/yolov8_imp.cpp 的改动，列出 yolov8_post_process 处理 P2 预测的关键步骤；并讨论：若把该后处理完全下放到 unit 8 的 HLS 核，软件侧还需要保留哪些逻辑。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "板载推理应用",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "推理应用构建与依赖",
+          "order": 1,
+          "filename": "u7-l1-inference-build.md",
+          "level": "intermediate",
+          "topic": "解析 build.sh 的编译流程：pkg-config 探测 OpenCV、g++ -std=c++17 -O3 链接 Vitis AI 库（yolov8/dpu_task/xnnpp/model_config/math 等），以及 test-image-list.txt 输入约定。",
+          "learning_goals": [
+            "掌握 build.sh 自动编译所有 .cpp 的机制与链接的 Vitis AI 库",
+            "理解推理输入约定（800×800 TIFF、每行一个路径的列表文件）",
+            "理解两个可执行文件 benchmark/performance 的用途差异"
+          ],
+          "source_files": [
+            "software/inference_app/README.md",
+            "software/inference_app/build.sh"
+          ],
+          "minimal_modules": [
+            "build.sh 编译流程",
+            "Vitis AI 库依赖",
+            "输入列表约定"
+          ],
+          "practice_task": "阅读 build.sh，列出链接的全部 -l 库与 OpenCV 组件，说明每个 Vitis AI 库（如 -lvitis_ai_library-yolov8、-lxir）的作用；并构造一个最小 test-image-list.txt 示例。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "多线程精度基准流水线",
+          "order": 2,
+          "filename": "u7-l2-accuracy-benchmark.md",
+          "level": "advanced",
+          "topic": "解析 xview3_benchmark.cpp：基于 Vitis AI demo_accuracy 的 ReadImages→DpuRun→Sort→Acc 多线程流水线，TiffReadImagesThread 子类化，以及 YolovXAcc 输出 JSON 预测。",
+          "learning_goals": [
+            "理解 Vitis AI demo 的多线程流水线（读图/DPU/排序/精度线程）",
+            "掌握 TiffReadImagesThread 通过 IMREAD_UNCHANGED 读取 TIFF 的改造",
+            "理解 AccThread 如何把 YOLOv8Result 写成 chip_id,label,x,y,w,h,score 的 JSON"
+          ],
+          "source_files": [
+            "software/inference_app/xview3_benchmark.cpp",
+            "software/inference_app/README.md"
+          ],
+          "minimal_modules": [
+            "demo 多线程流水线",
+            "TiffReadImagesThread",
+            "AccThread JSON 输出"
+          ],
+          "practice_task": "梳理 xview3_benchmark.cpp 中 queue_t/queue_dpu、DpuRunThread、SortDpuThread、YolovXAcc 的数据流向，画一张流水线时序图；并说明 g_last_frame_id 如何触发输出文件收尾的 ]。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "吞吐性能测试与 profiling",
+          "order": 3,
+          "filename": "u7-l3-performance-profiling.md",
+          "level": "advanced",
+          "topic": "解析 xview3_performance.cpp：ImageListTIFF 管理图像、多线程 thread_main_for_performance 跑 FPS、StatSamples 统计 E2E/DPU 均值，以及 DEEPHI_PROFILING 拆分预处理/DPU/后处理耗时。",
+          "learning_goals": [
+            "掌握多线程并发推理测 FPS 的方法与 alarm 定时机制",
+            "理解 StatSamples 统计端到端与纯 DPU 耗时的意义",
+            "理解 DEEPHI_PROFILING 如何拆解 pre/inference/post 三段耗时"
+          ],
+          "source_files": [
+            "software/inference_app/xview3_performance.cpp",
+            "software/inference_app/README.md",
+            "assets/inference_breakdown.jpg"
+          ],
+          "minimal_modules": [
+            "多线程 FPS 测试",
+            "E2E/DPU 统计",
+            "三段耗时拆解"
+          ],
+          "practice_task": "运行思路分析：说明 -t 线程数与 -s 秒数对 FPS 测量的影响；对照 inference_breakdown.jpg 解释不同 YOLOv8 变体的预处理/DPU/后处理耗时占比，指出哪一段最值得用 HLS 加速。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "结果处理与输出格式",
+          "order": 4,
+          "filename": "u7-l4-result-processing.md",
+          "level": "intermediate",
+          "topic": "解析 process_result.hpp：process_result 在图像上画框、process_results_txt 把 YOLOv8Result 转成 csv 字符串，以及它们如何配合 benchmark/performance 使用。",
+          "learning_goals": [
+            "理解 vitis::ai::YOLOv3Result/bboxes 结构与 box[4]/label/score 字段",
+            "掌握 process_results_txt 生成 chip_id,x,y,w,h,label,score 的 csv 格式",
+            "理解 PROCESS_RESULTS_DEBUG 环境变量控制日志的机制"
+          ],
+          "source_files": [
+            "software/inference_app/process_result.hpp",
+            "software/inference_app/README.md"
+          ],
+          "minimal_modules": [
+            "YOLOv8Result 结构",
+            "csv 结果格式化",
+            "调试日志开关"
+          ],
+          "practice_task": "实现一个简化版 process_results_txt：给定一个含若干 bbox 的结果与文件名，输出符合 README 约定的 csv 行；并说明该输出如何被 unit 3 的 xview3_metrics 评估流程消费（需还原到全局坐标）。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "HLS 后处理解码内核",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "HLS 内核接口与数据打包",
+          "order": 1,
+          "filename": "u8-l1-hls-interface.md",
+          "level": "advanced",
+          "topic": "解析 decode_kernel.cpp 的顶层接口：ap_uint<64>* input_data 的 64 位打包 int8 特征图、m_axi/s_axilite INTERFACE pragma、bundle 划分（gmem0/gmem1），以及 MAX_BOXES/OUTPUT_DIM/NUM_CLASSES 等可配置常量。",
+          "learning_goals": [
+            "理解为何用 ap_uint<64> 打包 8 个 int8 提高带宽利用率",
+            "掌握 HLS INTERFACE pragma 中 m_axi（offset=slave）与 s_axilite 的分工",
+            "理解输入/输出 bundle 划分（gmem0 读、gmem1 写）对带宽的影响"
+          ],
+          "source_files": [
+            "platform/post_processing/decode_krnl/decode_kernel.cpp",
+            "platform/post_processing/decode_krnl/decode_kernel.h"
+          ],
+          "minimal_modules": [
+            "ap_uint<64> 数据打包",
+            "INTERFACE pragma",
+            "bundle 与可配置常量"
+          ],
+          "practice_task": "阅读 decode_kernel.cpp 顶部，列出所有 #pragma HLS INTERFACE 并标注每个端口的 bundle（gmem0/gmem1）与类型（m_axi/s_axilite）；计算 335000 个 ap_uint<64> 对应多少字节，说明 depth 选择的依据。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "解码算法实现",
+          "order": 2,
+          "filename": "u8-l2-decode-algorithm.md",
+          "level": "advanced",
+          "topic": "解析 ANCHOR_LOOP 主循环：从 64 位字中按字节偏移提取 int8 类别 logit、用整型阈值 conf_thresh_inverse 提前剔除、对 4 个距离分支各做 16-bin softmax 加权均值、最后由 anchor 中心+距离还原 cx/cy/w/h。",
+          "learning_goals": [
+            "掌握从 ap_uint<64> 按 word_idx/byte_idx 提取 int8 的位运算",
+            "理解用整数阈值（-log 反推）提前剔除低置信 anchor 的优化",
+            "掌握 4 距离分支 ×16-bin softmax 还原 DFL 距离分布的算法"
+          ],
+          "source_files": [
+            "platform/post_processing/decode_krnl/decode_kernel.cpp"
+          ],
+          "minimal_modules": [
+            "64 位字按字节提取",
+            "整型置信阈值剔除",
+            "16-bin 距离 softmax"
+          ],
+          "practice_task": "用 Python/C++ 复现 kernel 的核心：给定一个 int8 特征图缓冲与某 anchor 索引 n，实现按 byte 提取 3 个类别 logit、整型阈值判断、4×16-bin softmax 加权均值，并还原出 box cx/cy/w/h（参考代码中 box_cx 公式）。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "HLS 优化指令",
+          "order": 3,
+          "filename": "u8-l3-hls-optimization.md",
+          "level": "advanced",
+          "topic": "解析 kernel 中的 UNROLL（类别检查/距离分支/logits）、PIPELINE II=1（prefetch/emit）、ARRAY_PARTITION complete（cls_logits），以及 local 写指针 tb 与 total_boxes 回写、奇数框丢弃等吞吐/资源权衡。",
+          "learning_goals": [
+            "理解 UNROLL 对距离分支/类别循环的并行化与资源代价",
+            "掌握 PIPELINE II=1 与 ARRAY_PARTITION complete 的配合使用",
+            "理解用局部写指针 tb 帮助 HLS 分析依赖、提升吞吐的技巧"
+          ],
+          "source_files": [
+            "platform/post_processing/decode_krnl/decode_kernel.cpp"
+          ],
+          "minimal_modules": [
+            "UNROLL 并行化",
+            "PIPELINE/ARRAY_PARTITION",
+            "局部写指针与依赖"
+          ],
+          "practice_task": "在 decode_kernel.cpp 中找出所有 #pragma HLS UNROLL/PIPELINE/ARRAY_PARTITION，分类说明每个指令作用于哪个循环/数组；并讨论把 DIST_BRANCH_LOOP 完全 UNROLL 后对 LUT/BRAM 资源的影响。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "测试激励与 OpenCL 宿主程序",
+          "order": 4,
+          "filename": "u8-l4-testbench-host.md",
+          "level": "advanced",
+          "topic": "解析 test_bench.cpp（构造 4 层 packed 输入、逐层调用 decode_kernel、汇总 global_box_count）与 decode_host/decode.cpp（OpenCL 加载 xclbin、创建 buffer/kernel、enqueueMigrate/Task、profiling 计时）。",
+          "learning_goals": [
+            "掌握 C++ testbench 构造 ap_uint<64> 打包数据并逐层验证内核的方法",
+            "理解 OpenCL host 程序加载 xclbin、setArg、enqueueTask 的流程",
+            "掌握用 cl::Event profiling 测量 host→device/kernel/device→host 三段耗时"
+          ],
+          "source_files": [
+            "platform/post_processing/decode_krnl/test_bench.cpp",
+            "platform/post_processing/decode_host/decode.cpp"
+          ],
+          "minimal_modules": [
+            "C++ testbench 构造",
+            "OpenCL host 流程",
+            "Event profiling 计时"
+          ],
+          "practice_task": "对照 test_bench.cpp 与 decode.cpp，说明两者输入数据来源差异（随机模式 vs 文件加载）；在 decode.cpp 中定位 layer_size_arg_index/layer_stride_arg_index 的逐层重设逻辑，并解释 profiling 三段时间（write/kernel/read）的含义。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "HLS 综合配置与平台打包",
+          "order": 5,
+          "filename": "u8-l5-hls-synthesis-packaging.md",
+          "level": "advanced",
+          "topic": "解析 hls_config.cfg（part/clock/syn.top/package.output）、vitis-comp.json（HLS 组件）与 decodeapp/decode_host 的 CMakeLists（VITIS_PLATFORM_PATH、sysroot、xclbin 打包），以及 README 的平台创建四步流程。",
+          "learning_goals": [
+            "理解 hls_config.cfg 中 part/clock/syn.top/package.output 的作用",
+            "掌握 Vitis HLS 组件编译为 .xo 再链接 xclbin 的流程",
+            "理解 decodeapp 打包与 decode_host 交叉编译（sysroot/arm64）的差异"
+          ],
+          "source_files": [
+            "platform/post_processing/decode_krnl/hls_config.cfg",
+            "platform/post_processing/decode_krnl/vitis-comp.json",
+            "platform/post_processing/decodeapp/CMakeLists.txt",
+            "platform/post_processing/decode_host/CMakeLists.txt",
+            "platform/post_processing/README.md"
+          ],
+          "minimal_modules": [
+            "hls_config.cfg 配置",
+            "HLS 组件与 xclbin 打包",
+            "CMake 交叉编译"
+          ],
+          "practice_task": "梳理后处理核从 HLS 源码到板载可执行的全流程：hls_config.cfg 综合 → .xo → decodeapp 链接 xclbin → decode_host 交叉编译 → dtg_output/shell 部署；指出 CMakeLists 中硬编码的绝对路径（如 /home/colin/...）为何需要按本机环境修改。",
+          "depends_on": [
+            "u8-l4",
+            "u5-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "端到端集成与性能权衡",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "端到端部署串联与调优",
+          "order": 1,
+          "filename": "u9-l1-end-to-end-integration.md",
+          "level": "advanced",
+          "topic": "把前八个单元串联：从 xView3 场景切片到 KV260 上 yview3_benchmark/performance 端到端跑通，涵盖模型编译、框架补丁、固件、HLS 核加载的衔接点与常见踩坑。",
+          "learning_goals": [
+            "掌握端到端部署各阶段产物的衔接（xmodel→编译→prototxt→部署目录）",
+            "理解 Vitis AI 框架补丁、KV260 固件、HLS xclbin 三者的加载顺序",
+            "能定位端到端链路中常见的失败点（输出层名、signed int8、xmutil 加载）"
+          ],
+          "source_files": [
+            "README.md",
+            "software/quantization/README.md",
+            "software/inference_app/README.md",
+            "platform/post_processing/README.md"
+          ],
+          "minimal_modules": [
+            "阶段产物衔接",
+            "运行时加载顺序",
+            "端到端踩坑排查"
+          ],
+          "practice_task": "编写一份端到端部署 checklist：从训练好的 .pt 出发，列出直到板载跑出 FPS 与 JSON 预测所需的每一步命令与产物；标注哪些步骤依赖前序单元的修改（激活替换、PIOU2_NMS、signed int8 归一化）。",
+          "depends_on": [
+            "u4-l4",
+            "u6-l3",
+            "u7-l2",
+            "u8-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "性能-精度-功耗权衡分析",
+          "order": 2,
+          "filename": "u9-l2-performance-tradeoffs.md",
+          "level": "advanced",
+          "topic": "结合 xview3_models.jpg（F1 vs 模型大小）与 inference_breakdown.jpg，分析本项目在 <10W 功耗下实现 ~2%/3% 精度差距与 50×/2500× 效率提升的架构取舍：P2 头、剪枝、量化、HLS 后处理各自的贡献。",
+          "learning_goals": [
+            "理解 F1-模型大小权衡曲线上本项目相对 SOTA 的位置",
+            "掌握量化（int8）、剪枝、P2 头、HLS 后处理对效率/精度的分别贡献",
+            "能基于功耗约束（<10W）论证 FPGA 边缘部署相对 GPU 的合理性"
+          ],
+          "source_files": [
+            "README.md",
+            "assets/xview3_models.jpg",
+            "assets/inference_breakdown.jpg",
+            "software/inference_app/README.md"
+          ],
+          "minimal_modules": [
+            "F1-大小权衡曲线",
+            "效率优化手段贡献",
+            "功耗约束论证"
+          ],
+          "practice_task": "对照 xview3_models.jpg 与 inference_breakdown.jpg，写一段分析：若进一步压缩模型（去掉 P2 头），预计 F1 与吞吐如何变化；并基于本讲义所学，提出一个在功耗不变前提下提升精度的可行改进方向（如更好的量化校准或 HLS 核扩展）。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
