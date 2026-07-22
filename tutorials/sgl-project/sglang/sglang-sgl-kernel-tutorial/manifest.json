@@ -1,0 +1,947 @@
+{
+  "project": "sglang-sgl-kernel",
+  "head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+  "rationale": "sgl-kernel（包名 sglang-kernel，import 名 sgl_kernel）是 SGLang 推理引擎的独立 GPU 算子库，其学习主线是「一个算子从 CUDA 实现到 Python 调用的完整链路」。因此大纲先在入门层（U1-U3）建立项目定位、目录结构、构建系统、多扩展/多后端架构的整体认知；再用贯穿性例子 rmsnorm 在 U2 把「Python 入口 → torch op 分派 → C++ schema → CUDA kernel」走通。进阶层（U4-U8）按 LLM 推理的功能族划分：elementwise/归一化、GEMM 与量化、MoE、Attention、通信与 KV cache I/O，每组先讲语义再讲实现与 Python 包装。专家层（U9-U11）覆盖投机解码、SSM(Mamba)/采样/grammar 等专项算子，最后以测试、基准与「贡献一个新算子」的端到端流程收尾，呼应 README 明确的贡献步骤。讲义之间通过 depends_on 形成清晰依赖链，读者可由浅入深按序阅读；每篇均含一个可操作的代码实践任务。本次增量更新：git diff 1b4cb6b8..977ea336 在 sgl-kernel/ 子目录下为零文件变更（期间共 33 个提交均属于 sglang 主仓的 python/sglang 改动，如 config 重构、JIT 迁移到 kernels.ops、NPU 修复，均未触及本独立算子库），故全部讲义 action 标记为 keep，单元划分、源码引用与依赖关系保持不变，仅推进 head 指针。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "sgl-kernel 是什么：项目定位与安装",
+          "order": 1,
+          "filename": "u1-l1-overview-install.md",
+          "level": "beginner",
+          "topic": "介绍 sgl-kernel 作为 LLM 推理算子库的定位、它与 SGLang 引擎的关系、Python 包名/import 名差异，以及如何从 PyPI 或源码安装运行。",
+          "learning_goals": [
+            "理解 sgl-kernel 是独立的 GPU 算子库，服务于 LLM/VLM 推理",
+            "区分包名 sglang-kernel、import 名 sgl_kernel 与目录名 sgl-kernel",
+            "掌握 pip 安装与从源码构建的前置依赖（torch、CMake、scikit-build-core）"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "python/sgl_kernel/version.py"
+          ],
+          "minimal_modules": [
+            "项目定位与版权说明",
+            "pyproject.toml 依赖与构建后端",
+            "version 与 wheel 打包"
+          ],
+          "practice_task": "阅读 README 与 pyproject.toml，写出 sgl-kernel 的一句话定位、Python 版本/torch 版本要求，并尝试 pip install sglang-kernel 后在 Python 中 import sgl_kernel 并打印 sgl_kernel.__version__。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与内核流水线总览",
+          "order": 2,
+          "filename": "u1-l2-directory-pipeline.md",
+          "level": "beginner",
+          "topic": "讲解 csrc/include/python/tests/benchmark 的目录职责，并给出「一个算子从 CUDA 到 Python」的六步流水线总览，作为后续所有讲义的主线索。",
+          "learning_goals": [
+            "掌握 csrc/include/python/tests/benchmark 五大目录的分工",
+            "理解算子链路：CUDA(.cu) → 头文件声明 → torch 扩展注册(m.def/m.impl) → Python 包装 → __init__ 导出 → 构建",
+            "能在源码中定位任意一个算子的每个环节"
+          ],
+          "source_files": [
+            "README.md",
+            "python/sgl_kernel/__init__.py",
+            "csrc/common_extension.cc",
+            "include/sgl_kernel_ops.h"
+          ],
+          "minimal_modules": [
+            "目录职责划分",
+            "六步内核流水线总览",
+            "链路定位练习"
+          ],
+          "practice_task": "任选一个算子（如 rmsnorm），分别在 csrc、include、python/sgl_kernel、__init__.py 中找到它对应的四个文件位置，画一张「算子流转图」并标注每个文件在流水线中的环节。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统：CMake + scikit-build + 多扩展产物",
+          "order": 3,
+          "filename": "u1-l3-build-system.md",
+          "level": "beginner",
+          "topic": "讲解 CMakeLists.txt 如何用 scikit-build-core 把同一份 SOURCES 编译成 sm90/sm100 两个 common_ops 变体，以及 Makefile/build.sh 的构建入口与资源控制。",
+          "learning_goals": [
+            "理解 CMakeLists.txt 中 SOURCES 列表与 common_ops_sm90/sm100 双产物的关系",
+            "掌握 make build、MAX_JOBS、SGL_KERNEL_COMPILE_THREADS 的作用",
+            "了解 FetchContent 拉取 cutlass/flashinfer/flash-attention/triton 等第三方库"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "Makefile",
+            "build.sh",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "scikit-build-core 与 pyproject 配置",
+            "SOURCES 列表与 sm90/sm100 双产物",
+            "Makefile 目标与资源控制"
+          ],
+          "practice_task": "在 CMakeLists.txt 中追踪 common_ops_sm90_build 与 common_ops_sm100_build 两个 target 的差异（-use_fast_math、输出目录），并解释为什么用同一份源码要产出两个 .so；尝试运行 make build MAX_JOBS=2 观察构建过程。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "一个算子的完整链路：从 Python 到 CUDA",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Python 入口与架构自适应加载",
+          "order": 1,
+          "filename": "u2-l1-python-entry-loading.md",
+          "level": "beginner",
+          "topic": "讲解 __init__.py 如何按 macOS/CUDA 分支加载，load_utils.py 如何根据 GPU compute capability 选择 sm90 或 sm100 的 common_ops，以及 CUDA 运行时预加载。",
+          "learning_goals": [
+            "理解 import sgl_kernel 时发生的架构探测与 .so 加载",
+            "掌握 _load_architecture_specific_ops 的三级回退（arch-specific / fallback / 标准导入）",
+            "了解 _preload_cuda_library 解决 libcudart.so 找不到的机制"
+          ],
+          "source_files": [
+            "python/sgl_kernel/__init__.py",
+            "python/sgl_kernel/load_utils.py",
+            "python/sgl_kernel/debug_utils.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 的平台/后端分支",
+            "compute capability 探测与 sm90/sm100 选择",
+            "CUDA 运行时预加载与回退"
+          ],
+          "practice_task": "阅读 load_utils.py，回答：在一台 H100（compute capability 90）上会加载哪个目录的 common_ops？在一张 Blackwell(100) 上呢？用 SGLANG_KERNEL_API_LOGLEVEL 调试观察加载日志（若环境允许）。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "torch op 分派：从 Python 调用到 C++ schema",
+          "order": 2,
+          "filename": "u2-l2-torch-op-dispatch.md",
+          "level": "beginner",
+          "topic": "讲解 TORCH_LIBRARY_FRAGMENT(sgl_kernel) 如何用 m.def(schema)+m.impl(device,&fn) 注册算子，Python 端如何用 torch.ops.sgl_kernel.<name>.default 调用，以及 schema 中 Tensor! 的可变语义。",
+          "learning_goals": [
+            "理解 torch custom op 的 schema 写法（类型、Tensor! 可变参数、-> 返回）",
+            "掌握 m.def/m.impl 双步注册与 device 绑定",
+            "理解 Python 包装层如何转发到 torch.ops.sgl_kernel"
+          ],
+          "source_files": [
+            "csrc/common_extension.cc",
+            "include/sgl_kernel_ops.h",
+            "python/sgl_kernel/elementwise.py",
+            "python/sgl_kernel/moe.py"
+          ],
+          "minimal_modules": [
+            "TORCH_LIBRARY_FRAGMENT 与 m.def/m.impl",
+            "schema 类型语法与 Tensor! 可变语义",
+            "Python 包装转发模式"
+          ],
+          "practice_task": "在 common_extension.cc 中找到 rmsnorm 与 moe_align_block_size 的 m.def/m.impl，对照 schema 写出它们各自的输入/输出张量；解释为什么很多算子返回 () 而用 Tensor! 原地写回。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "CUDA kernel 体：CHECK 宏与 dtype 分发",
+          "order": 3,
+          "filename": "u2-l3-cuda-kernel-check-macros.md",
+          "level": "beginner",
+          "topic": "以 fused_add_rms_norm_kernel.cu 为例，讲解 CUDA 算子函数体的输入校验（CHECK_INPUT/CHECK_DIM/CHECK_EQ）、dtype 分发宏 DISPATCH_PYTORCH_DTYPE_TO_CTYPE，以及如何获取 stream 并调用底层模板。",
+          "learning_goals": [
+            "掌握 utils.h 中 CHECK_INPUT/CHECK_DIM/CHECK_EQ 等校验宏",
+            "理解 DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16 的类型分发机制",
+            "了解如何在算子中获取当前 CUDA stream 并传给底层实现"
+          ],
+          "source_files": [
+            "csrc/elementwise/fused_add_rms_norm_kernel.cu",
+            "include/utils.h",
+            "include/sgl_kernel_ops.h",
+            "python/sgl_kernel/elementwise.py"
+          ],
+          "minimal_modules": [
+            "输入校验宏体系",
+            "dtype 编译期分派宏",
+            "stream 获取与底层调用"
+          ],
+          "practice_task": "阅读 fused_add_rms_norm_kernel.cu，列出它对 input/residual/weight 做了哪些维度与设备校验；说明 DISPATCH 宏如何把 PyTorch dtype 映射到 nv_bfloat16/nv_half/float 并调用同一份模板逻辑。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "多扩展与多后端架构",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "多扩展拆分：common_ops / flash_ops / infllm_ops / flashmla_ops / spatial_ops",
+          "order": 1,
+          "filename": "u3-l1-multiple-extensions.md",
+          "level": "beginner",
+          "topic": "讲解为什么 sgl-kernel 拆成多个独立 .so 扩展（隔离 flash:: 符号、可选 FA3、独立编译参数），以及各自的 REGISTER_EXTENSION 入口与 CMake target 对应关系。",
+          "learning_goals": [
+            "理解五个扩展模块的职责边界与编译产物",
+            "掌握 REGISTER_EXTENSION 宏如何生成 PyInit_ 入口",
+            "理解为何 flash_ops 用独立 gencode 与可选 SGL_KERNEL_ENABLE_FA3"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "csrc/common_extension.cc",
+            "csrc/flash_extension.cc",
+            "csrc/spatial_extension.cc",
+            "csrc/infllm_v2/flash_extension.cc"
+          ],
+          "minimal_modules": [
+            "扩展拆分动机与符号隔离",
+            "REGISTER_EXTENSION 宏",
+            "可选扩展与编译开关"
+          ],
+          "practice_task": "对照 CMakeLists.txt 与各 *_extension.cc，整理一张表：每个扩展(target)→入口文件→REGISTER_EXTENSION 名→是否可选→install 目标目录；解释 infllm_ops 为何要单独链接 torch_python。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "多后端支持：CUDA / ROCm / MUSA / CPU / Metal",
+          "order": 2,
+          "filename": "u3-l2-multi-backend.md",
+          "level": "beginner",
+          "topic": "讲解 sgl-kernel 如何用 USE_ROCM/USE_MUSA 条件编译与独立 extension 文件支持 NVIDIA、AMD、摩尔线程、CPU(x86/aarch64)、Apple Metal 五种后端，以及 __init__.py 的平台分支。",
+          "learning_goals": [
+            "理解 common_extension.cc/_rocm.cc/_musa.cc 与 cpu/torch_extension_cpu.cpp 的并存关系",
+            "掌握 include/utils.h 与 sgl_kernel_ops.h 中 USE_ROCM 条件分支",
+            "了解 macOS 上仅 Metal 后端的 __init__.py 分支"
+          ],
+          "source_files": [
+            "csrc/common_extension_rocm.cc",
+            "csrc/common_extension_musa.cc",
+            "csrc/cpu/torch_extension_cpu.cpp",
+            "python/sgl_kernel/__init__.py",
+            "python/sgl_kernel/metal.py",
+            "include/sgl_kernel_ops.h"
+          ],
+          "minimal_modules": [
+            "条件编译后端隔离",
+            "ROCm/MUSA 专属 extension",
+            "CPU 与 Metal 后端入口"
+          ],
+          "practice_task": "对比 common_extension.cc（CUDA）与 common_extension_rocm.cc 中 init_custom_ar 的签名差异，说明 ROCm 版为何多出 handles/offsets 参数；指出 __init__.py 中哪段代码保证 macOS arm64 只加载 Metal。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Elementwise 与归一化算子",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "RMSNorm 家族与 FlashInfer 回退",
+          "order": 1,
+          "filename": "u4-l1-rmsnorm-family.md",
+          "level": "intermediate",
+          "topic": "讲解 rmsnorm/fused_add_rmsnorm/gemma_rmsnorm 的数学定义、enable_pdl（程序化依赖启动）在 Hopper 上的自动开启，以及 Python 包装层在可用时回退到 FlashInfer 的策略。",
+          "learning_goals": [
+            "掌握 RMSNorm 与 Gemma 变体的数学差异（(1+w)）",
+            "理解 fused_add_rmsnorm 的两步原地更新语义",
+            "理解 Python 包装的 FlashInfer 回退与 torch.compile 兼容性处理"
+          ],
+          "source_files": [
+            "python/sgl_kernel/elementwise.py",
+            "csrc/elementwise/fused_add_rms_norm_kernel.cu",
+            "python/sgl_kernel/utils.py",
+            "tests/test_norm.py"
+          ],
+          "minimal_modules": [
+            "RMSNorm 数学语义",
+            "fused_add 残差融合",
+            "FlashInfer 回退与 PDL"
+          ],
+          "practice_task": "阅读 elementwise.py 的 rmsnorm，写出在「有 FlashInfer 且非 dynamo 编译」与「无 FlashInfer」两条路径分别调用什么；用 tests/test_norm.py 中的 llama_rms_norm 参考实现验证 sgl_kernel.rmsnorm 的数值一致性（rtol=1e-3）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "激活与门控融合：silu/gelu_and_mul",
+          "order": 2,
+          "filename": "u4-l2-activation-gating.md",
+          "level": "intermediate",
+          "topic": "讲解 silu_and_mul/gelu_tanh_and_mul/gelu_and_mul 这类门控激活算子的输入拼接布局、16 字节对齐要求，以及输出张量的就地/新建分配逻辑。",
+          "learning_goals": [
+            "理解 and_mul 类算子的 (gate, up) 拼接输入与半宽输出布局",
+            "掌握 16 字节（input.shape[-1]*itemsize % 16）对齐校验的原因",
+            "了解 out 可选参数的就地/新建分配模式"
+          ],
+          "source_files": [
+            "python/sgl_kernel/elementwise.py",
+            "csrc/elementwise/activation.cu",
+            "include/sgl_kernel_ops.h"
+          ],
+          "minimal_modules": [
+            "门控激活数学语义",
+            "输入拼接与半宽输出",
+            "16 字节对齐约束"
+          ],
+          "practice_task": "在 elementwise.py 中找到 _check_shape，解释为何要求 input.shape[-1] == 2*output.shape[-1]；编写一个小脚本用 silu_and_mul 验证 x*sigmoid(x_gate) 的语义，并测试一个不满足 16 字节对齐的输入是否会抛出 ValueError。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "旋转位置编码 RoPE 与 QK-norm 融合",
+          "order": 3,
+          "filename": "u4-l3-rope-position-encoding.md",
+          "level": "intermediate",
+          "topic": "讲解 rotary_embedding（is_neox 两种旋转方式）与 fused_qk_norm_rope、DeepSeek-V4 融合 norm+rope 的设计，理解融合如何减少 kernel launch 与中间显存。",
+          "learning_goals": [
+            "理解 rotary_embedding 的 positions/cos_sin_cache/is_neox 参数语义",
+            "掌握 fused_qk_norm_rope 把 RMSNorm+RoPE 融合的动机与参数",
+            "了解 DeepSeek-V4 专属的 q/k norm+rope+quant 融合算子"
+          ],
+          "source_files": [
+            "python/sgl_kernel/elementwise.py",
+            "python/sgl_kernel/moe.py",
+            "csrc/elementwise/pos_enc.cu",
+            "csrc/moe/fused_qknorm_rope_kernel.cu",
+            "csrc/elementwise/dsv4_norm_rope.cu"
+          ],
+          "minimal_modules": [
+            "RoPE NeoX 与 GPT-NeoX 变体",
+            "QK-norm + RoPE 融合",
+            "DeepSeek-V4 norm/rope/quant 融合"
+          ],
+          "practice_task": "对比 elementwise.py 中独立的 rotary_embedding 与 moe.py 中的 fused_qk_norm_rope，说明后者融合了哪些原本独立的操作；查阅 dsv4_fused_q_norm_rope 的 Python 文档，列出它的输入/输出 dtype 约束。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "GEMM 与低精度量化算子",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "低精度 scaled GEMM：fp8/int8/bmm_fp8 与 per-token 量化",
+          "order": 1,
+          "filename": "u5-l1-low-precision-scaled-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 fp8_scaled_mm/int8_scaled_mm 的 per-tensor 缩放矩阵乘、bmm_fp8 的批量 FP8 GEMM（cublas handle + workspace），以及 per-token/per-token-group 量化算子如何为 GEMM 准备缩放因子。",
+          "learning_goals": [
+            "理解 scaled_mm 的双缩放因子 (scales_a, scales_b) 与 out_dtype/bias",
+            "掌握 bmm_fp8 如何获取 cublas handle 并复用 workspace 缓冲",
+            "了解 per_token_quant_fp8 / per_token_group_quant_8bit 的量化语义"
+          ],
+          "source_files": [
+            "python/sgl_kernel/gemm.py",
+            "csrc/gemm/fp8_gemm_kernel.cu",
+            "csrc/gemm/int8_gemm_kernel.cu",
+            "csrc/gemm/bmm_fp8.cu",
+            "csrc/gemm/per_token_quant_fp8.cu"
+          ],
+          "minimal_modules": [
+            "fp8/int8 scaled GEMM 语义",
+            "bmm_fp8 与 cublas handle",
+            "per-token 量化前置算子"
+          ],
+          "practice_task": "阅读 gemm.py 的 bmm_fp8，解释 _get_cache_buf 如何复用 32MB workspace 避免反复分配；用 fp8_scaled_mm 构造一个小例子（A/B 为 fp8、scales 为对应缩放）并对比 float32 参考结果的相对误差。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "权重-only 量化 GEMM：GPTQ 与 AWQ",
+          "order": 2,
+          "filename": "u5-l2-weight-only-quant-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 GPTQ（gptq_gemm + gptq_shuffle + group index）与 AWQ（awq_dequantize）两种权重-only 量化方案在 sgl-kernel 中的实现与 Python 接口。",
+          "learning_goals": [
+            "理解 GPTQ 的 q_weight/qzeros/scales/g_idx 布局与 use_shuffle/bit 参数",
+            "掌握 gptq_shuffle 把权重重排为对 GEMM 友好布局的作用",
+            "了解 AWQ dequantize 把压缩权重解量化为 ByteTensor 的流程"
+          ],
+          "source_files": [
+            "python/sgl_kernel/gemm.py",
+            "csrc/gemm/gptq/gptq_kernel.cu",
+            "csrc/gemm/awq_kernel.cu",
+            "csrc/common_extension.cc"
+          ],
+          "minimal_modules": [
+            "GPTQ 权重布局与 shuffle",
+            "group index 反排列",
+            "AWQ 反量化"
+          ],
+          "practice_task": "对照 common_extension.cc 中 gptq_gemm 的 schema，解释 b_g_idx 与 use_shuffle 的作用；在 gemm.py 中找到 awq_dequantize 的返回类型，说明它产出的是 ByteTensor 而非浮点的含义。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "DeepSeek 融合 GEMM 与 norm/rope 融合算子",
+          "order": 3,
+          "filename": "u5-l3-deepseek-fused-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解针对 DeepSeek-V3/V4 的特化融合算子：dsv3_fused_a_gemm 与 dsv4 系列 fused norm/rope/indexer/quant 算子，理解为何要为特定模型手写融合内核。",
+          "learning_goals": [
+            "理解 dsv3_fused_a_gemm 的 A 矩阵融合 GEMM 语义与就地输出",
+            "掌握 DeepSeek-V4 的 q/k norm+rope 与 indexer rope+hadamard+quant 融合",
+            "了解模型特化融合对吞吐的意义"
+          ],
+          "source_files": [
+            "python/sgl_kernel/gemm.py",
+            "csrc/gemm/dsv3_fused_a_gemm.cu",
+            "python/sgl_kernel/elementwise.py",
+            "csrc/elementwise/dsv4_norm_rope.cu"
+          ],
+          "minimal_modules": [
+            "DeepSeek-V3 融合 GEMM",
+            "V4 fused norm+rope",
+            "V4 indexer rope+hadamard+quant"
+          ],
+          "practice_task": "阅读 elementwise.py 中 dsv4_fused_q_indexer_rope_hadamard_quant 的 docstring，画出该算子内部串联的四个步骤；讨论这种融合相比四个独立 kernel 在 launch 开销与显存读写上的收益。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "MoE 混合专家算子",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "MoE 路由：topk softmax/sigmoid 与 fast_topk",
+          "order": 1,
+          "filename": "u6-l1-moe-routing-topk.md",
+          "level": "intermediate",
+          "topic": "讲解 MoE 门控路由算子 topk_softmax/topk_sigmoid（含 renormalize、softcapping、correction_bias）以及面向 DeepSeek 的 fast_topk 系列索引变换算子。",
+          "learning_goals": [
+            "理解 topk_softmax/topk_sigmoid 的门控 logits→top-k 权重/专家索引语义",
+            "掌握 renormalize/moe_softcapping/correction_bias 三个可选行为",
+            "了解 fast_topk_v2 及其 transform_fused 对 paged/ragged KV 的索引变换"
+          ],
+          "source_files": [
+            "python/sgl_kernel/moe.py",
+            "python/sgl_kernel/top_k.py",
+            "csrc/moe/moe_topk_softmax_kernels.cu",
+            "csrc/moe/moe_topk_sigmoid_kernels.cu",
+            "csrc/elementwise/topk.cu"
+          ],
+          "minimal_modules": [
+            "topk softmax/sigmoid 路由",
+            "路由修正与软截断",
+            "fast_topk 索引变换"
+          ],
+          "practice_task": "阅读 moe.py 的 topk_softmax，编写参考实现（softmax→topk→可选 renorm）并用 sgl_kernel.topk_softmax 验证；说明 fast_topk_v2 为何断言 topk==2048（DeepSeek-V3.2 专用）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "token-expert 对齐与排序：moe_align_block_size 与 prepare_moe_input",
+          "order": 2,
+          "filename": "u6-l2-moe-align-sort.md",
+          "level": "intermediate",
+          "topic": "讲解 moe_align_block_size 如何把 token 按 expert 分桶并对齐到 block_size（产出 sorted_token_ids/experts_ids）、prepare_moe_input 如何为分组 GEMM 计算 problem_sizes/排列，以及 shuffle_rows/apply_shuffle_mul_sum 的数据重排。",
+          "learning_goals": [
+            "理解 moe_align_block_size 产出的 sorted_token_ids 稀疏布局与 padding",
+            "掌握 prepare_moe_input 为 grouped GEMM 准备的 input/output permutation",
+            "了解 shuffle_rows / apply_shuffle_mul_sum 的数据搬运语义"
+          ],
+          "source_files": [
+            "python/sgl_kernel/moe.py",
+            "csrc/moe/moe_align_kernel.cu",
+            "csrc/moe/prepare_moe_input.cu",
+            "include/sgl_kernel_ops.h"
+          ],
+          "minimal_modules": [
+            "token-expert 分桶与 block 对齐",
+            "grouped GEMM 输入准备",
+            "行重排与 mul-sum"
+          ],
+          "practice_task": "阅读 moe_align_block_size 的 schema，解释 sorted_token_ids、experts_ids、num_tokens_post_pad 三个输出各自含义；用一个小例子（num_tokens=4, num_experts=2, block_size=4）手算 padding 后的 sorted_token_ids 长度。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "分组 GEMM 与专家聚合：fp8 blockwise / cutlass w4a8 / moe_sum",
+          "order": 3,
+          "filename": "u6-l3-moe-grouped-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 MoE 分组矩阵乘的三条路径：fp8_blockwise_scaled_grouped_mm、cutlass w4a8 moe mm（get_data + mm 两步），以及 moe_sum/moe_sum_reduce 把多专家输出按权重聚合回原 token。",
+          "learning_goals": [
+            "理解 fp8_blockwise_scaled_grouped_mm 的指针数组 + problem_sizes 接口",
+            "掌握 cutlass_w4a8_moe_mm 的两步式（data 准备 + grouped mm）",
+            "了解 moe_sum/moe_sum_reduce 的加权聚合与 routed_scaling_factor"
+          ],
+          "source_files": [
+            "python/sgl_kernel/moe.py",
+            "python/sgl_kernel/cutlass_moe.py",
+            "csrc/moe/fp8_blockwise_moe_kernel.cu",
+            "csrc/moe/moe_sum.cu",
+            "csrc/moe/cutlass_moe/w4a8/scaled_mm_entry.cu"
+          ],
+          "minimal_modules": [
+            "fp8 blockwise grouped mm",
+            "cutlass w4a8 两步式 moe",
+            "专家输出聚合"
+          ],
+          "practice_task": "对比 moe.py 的 fp8_blockwise_scaled_grouped_mm 与 cutlass_moe.py 的 cutlass_w4a8_moe_mm 两套接口，总结它们在「输入准备」与「权重精度」上的差异；阅读 moe_sum_reduce schema 说明 routed_scaling_factor 如何参与聚合。",
+          "depends_on": [
+            "u6-l2",
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Attention 注意力算子",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "cutlass MLA decode 与注意力状态合并",
+          "order": 1,
+          "filename": "u7-l1-cutlass-mla-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 MLA（Multi-head Latent Attention）decode 算子的 q_nope/q_pe/kv_c_and_k_pe_cache 输入布局、page_table 分页、workspace 与 num_kv_splits，以及 merge_state_v2 的双路注意力状态合并。",
+          "learning_goals": [
+            "理解 MLA 的 latent(512)+rope(64) 维度拆分与 head padding 到 128",
+            "掌握 cutlass_mla_get_workspace_size 与 num_kv_splits 的作用",
+            "了解 merge_state_v2 的加权合并语义"
+          ],
+          "source_files": [
+            "python/sgl_kernel/attention.py",
+            "csrc/attention/cutlass_mla_kernel.cu",
+            "csrc/attention/merge_attn_states.cu",
+            "include/sgl_kernel_ops.h"
+          ],
+          "minimal_modules": [
+            "MLA 输入布局与 head padding",
+            "workspace 与 kv splits",
+            "双路状态合并"
+          ],
+          "practice_task": "阅读 attention.py 的 cutlass_mla_decode，列出它对 q_nope/q_pe/kv_cache 维度的断言（D_latent=512, D_rope=64, MAX_HEADS=128）；解释为什么 head 数不足时要 pad 到 128 再裁剪返回。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Flash Attention 扩展：flash_ops / FA3 与 sparse mask",
+          "order": 2,
+          "filename": "u7-l2-flash-attention-extension.md",
+          "level": "intermediate",
+          "topic": "讲解独立的 flash_ops 扩展如何注册 mha_fwd 类算子、CMake 中 FA3 的可选编译（SGL_KERNEL_ENABLE_FA3、按 hdim/dtype glob 源文件），以及 sparse flash attention 的 vertical/slash index 机制。",
+          "learning_goals": [
+            "理解 flash_ops 作为独立扩展注册的算子与 sgl_flash_kernel_ops.h",
+            "掌握 CMake 中 FA3 按 hdim/dtype 分文件 glob 的编译策略",
+            "了解 sparse attention 的 block_count/block_offset/column_index 稀疏模式"
+          ],
+          "source_files": [
+            "csrc/flash_extension.cc",
+            "include/sgl_flash_kernel_ops.h",
+            "CMakeLists.txt",
+            "csrc/attention/vertical_slash_index.cu"
+          ],
+          "minimal_modules": [
+            "flash_ops 独立扩展注册",
+            "FA3 可选编译与 glob",
+            "sparse vertical/slash mask"
+          ],
+          "practice_task": "在 CMakeLists.txt 的 FA3 段落中，追踪 FA3_BF16_GEN_SRCS/FA3_FP16_GEN_SRCS/FA3_FP8_GEN_SRCS 的 glob 规则；说明 SGL_KERNEL_ENABLE_FA3 默认在哪些条件下开启（CUDA 版本、架构）。",
+          "depends_on": [
+            "u3-l1",
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "InfLLM-v2 注意力与 FlashMLA 后端",
+          "order": 3,
+          "filename": "u7-l3-infllm-flashmla.md",
+          "level": "intermediate",
+          "topic": "讲解 vendored 的 infllm_ops 扩展（隔离 flash:: 符号、仅 bf16 hdim64/128 forward）与 FlashMLA 扩展，以及 max_pooling_1d_varlen 等配套算子的 Python 接口。",
+          "learning_goals": [
+            "理解 infllm_ops 为何单独成模块以隔离 flash 符号",
+            "掌握 infllmv2_attn_stage1 / max_pooling_1d_varlen 的用途",
+            "了解 FlashMLA 扩展（flashmla_ops）的独立 cmake 引入"
+          ],
+          "source_files": [
+            "python/sgl_kernel/infllm_v2/attention.py",
+            "python/sgl_kernel/infllm_v2/max_pooling.py",
+            "csrc/infllm_v2/flash_extension.cc",
+            "CMakeLists.txt",
+            "cmake/flashmla.cmake"
+          ],
+          "minimal_modules": [
+            "InfLLM-v2 隔离注意力后端",
+            "max_pooling varlen 配套算子",
+            "FlashMLA 独立 cmake"
+          ],
+          "practice_task": "阅读 CMakeLists.txt 中 infllm_ops 段落的注释，说明为何只编译 hdim 64/128 的 bf16 forward、为何省略 backward；对比它和 flash_ops 在 gencode/use_fast_math 上的差异。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "通信与 KV cache I/O 算子",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "自定义 allreduce：IPC 信号缓冲与 CUDA graph 兼容",
+          "order": 1,
+          "filename": "u8-l1-custom-allreduce.md",
+          "level": "intermediate",
+          "topic": "讲解绕过 NCCL 的自定义 allreduce：init_custom_ar 用 IPC 句柄建立 rank 间通信、Signal/RankData/RankSignals 缓冲结构、register_buffer/register_graph_buffers 支持 CUDA graph 捕获，以及 ROCm 版的差异与 quick allreduce。",
+          "learning_goals": [
+            "理解 CustomAllreduce 用 IPC 共享显存实现低延迟 allreduce 的原理",
+            "掌握 init/all_reduce/register_buffer/graph buffer 的生命周期",
+            "了解 CUDA graph 捕获下 IPC meta 的注册流程与 ROCm 接口差异"
+          ],
+          "source_files": [
+            "python/sgl_kernel/allreduce.py",
+            "csrc/allreduce/custom_all_reduce.cu",
+            "csrc/allreduce/custom_all_reduce.cuh",
+            "csrc/common_extension.cc"
+          ],
+          "minimal_modules": [
+            "IPC 共享显存通信",
+            "Signal/RankData 缓冲结构",
+            "CUDA graph 兼容注册"
+          ],
+          "practice_task": "阅读 allreduce.py 的 CUDA 分支，整理 init_custom_ar→register_buffer/register_graph_buffers→all_reduce→dispose 的完整调用时序；说明为什么 all_reduce 需要传入 reg_buffer 与 reg_buffer_sz_bytes。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "kvcacheio：跨布局 KV 搬运算子",
+          "order": 2,
+          "filename": "u8-l2-kvcacheio-transfer.md",
+          "level": "intermediate",
+          "topic": "讲解 transfer_kv_per_layer/transfer_kv_all_layer 及其 MLA/direct/pf_lf/ph_lf 变体如何在 KV cache 迁移（如 PD 分离、KV offload）时按 page/block 布局高效搬运 K/V。",
+          "learning_goals": [
+            "理解 transfer_kv 系列算子的 per_layer/all_layer 两种粒度",
+            "掌握 pf_lf/ph_lf（page-first/last → flat/head）布局转换变体的用途",
+            "了解 MLA 单张量 KV 与普通 K/V 分离张量的搬运差异"
+          ],
+          "source_files": [
+            "python/sgl_kernel/kvcacheio.py",
+            "csrc/kvcacheio/transfer.cu",
+            "csrc/common_extension.cc"
+          ],
+          "minimal_modules": [
+            "per_layer / all_layer 粒度",
+            "布局转换变体 pf_lf/ph_lf",
+            "MLA 与普通 KV 差异"
+          ],
+          "practice_task": "在 common_extension.cc 中统计 transfer_kv_* 家族的算子数量，按 per_layer/all_layer × MLA/普通 × direct/布局变体 分类；讨论这类算子在 PD（prefill-decode）分离场景中搬运 KV cache 的作用。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "投机解码算子",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "树形投机采样与目标验证",
+          "order": 1,
+          "filename": "u9-l1-tree-speculative-sampling.md",
+          "level": "advanced",
+          "topic": "讲解 tree_speculative_sampling_target_only（基于草稿/目标概率的拒绝采样）与 verify_tree_greedy（贪心树验证）、reconstruct_indices_from_tree_mask（从树掩码重建索引）三个核心采样验证算子。",
+          "learning_goals": [
+            "理解树形投机采样的 predicts/accept_index/accept_token_num 原地输出",
+            "掌握 retrive_index/retrive_next_token/retrive_next_sibling 的树拓扑表示",
+            "了解 deterministic、threshold_single/threshold_acc 采样控制参数"
+          ],
+          "source_files": [
+            "python/sgl_kernel/speculative.py",
+            "csrc/speculative/speculative_sampling.cu",
+            "csrc/common_extension.cc"
+          ],
+          "minimal_modules": [
+            "树形拒绝采样",
+            "贪心树验证",
+            "树掩码索引重建"
+          ],
+          "practice_task": "阅读 speculative.py 的 tree_speculative_sampling_target_only，列出 mutable 输出张量与只读输入张量；解释 retrive_index 这组张量如何编码「树中每个候选的下一个 token 与兄弟」。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "树构建、packbits 与 ngram/eagle 工具算子",
+          "order": 2,
+          "filename": "u9-l2-tree-build-packbits.md",
+          "level": "advanced",
+          "topic": "讲解 build_tree_kernel_efficient（从父列表构建树掩码与 retrive 结构）、segment_packbits（分段位压缩）以及 ngram/eagle 两个推测解码后端的工具算子。",
+          "learning_goals": [
+            "理解 build_tree_kernel_efficient 产出的 tree_mask/positions/retrive_* 结构",
+            "掌握 segment_packbits 的分段位压缩输入输出",
+            "了解 ngram/eagle 后端在 CPU 与 GPU 上的工具算子分布"
+          ],
+          "source_files": [
+            "python/sgl_kernel/speculative.py",
+            "csrc/speculative/packbit.cu",
+            "csrc/speculative/ngram_utils.cu",
+            "csrc/speculative/eagle_utils.cu",
+            "csrc/common_extension.cc"
+          ],
+          "minimal_modules": [
+            "树掩码高效构建",
+            "分段位压缩",
+            "ngram/eagle 工具算子"
+          ],
+          "practice_task": "在 __init__.py 中找出所有 *_cpu 结尾的投机解码算子，说明为何部分算子提供 CPU 版本（如 assign_*_cpu、verify_tree_greedy_cpu）；查阅 segment_packbits 的 schema 解释 input_indptr/output_indptr 的作用。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "专项算子：SSM / 采样 / 语法 / 内存 / 空间",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "Mamba 状态空间模型：causal_conv1d",
+          "order": 1,
+          "filename": "u10-l1-mamba-causal-conv.md",
+          "level": "advanced",
+          "topic": "讲解 Mamba/SSM 所需的 causal_conv1d_fwd 与 causal_conv1d_update 算子（卷积状态、varlen、cache_indices、silu 激活），以及 CPU 变体 causal_conv1d_fn_cpu。",
+          "learning_goals": [
+            "理解 causal_conv1d_fwd 的前向卷积与 conv_states/initial_state 语义",
+            "掌握 causal_conv1d_update 的逐步（per-step decode）状态更新",
+            "了解 varlen/query_start_loc/cache_indices 的变长批处理"
+          ],
+          "source_files": [
+            "python/sgl_kernel/mamba.py",
+            "csrc/mamba/causal_conv1d.cu",
+            "csrc/common_extension.cc"
+          ],
+          "minimal_modules": [
+            "causal conv1d 前向",
+            "per-step 状态更新",
+            "varlen 与 cache 索引"
+          ],
+          "practice_task": "对比 common_extension.cc 中 causal_conv1d_fwd 与 causal_conv1d_update 的 schema，说明前者用于 prefill（长序列）而后者用于 decode（单步）的原因；列出 conv_states、query_start_loc、cache_indices 各自何时为可选。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "采样重归一化、grammar 掩码、内存与 spatial greenctx",
+          "order": 2,
+          "filename": "u10-l2-sampling-grammar-memory-spatial.md",
+          "level": "advanced",
+          "topic": "讲解 top_k/top_p 概率重归一化、apply_token_bitmask_inplace（语法约束掩码）、weak_ref_tensor（弱引用内存）与 spatial greenctx stream（SM 分区上下文）四组横切关注点算子。",
+          "learning_goals": [
+            "理解 top_k_renorm_prob/top_p_renorm_prob 的概率重缩放语义",
+            "掌握 apply_token_bitmask_inplace 的 token 位掩码约束机制",
+            "了解 weak_ref_tensor 与 create_greenctx_stream_by_value/get_sm_available 的用途"
+          ],
+          "source_files": [
+            "python/sgl_kernel/sampling.py",
+            "python/sgl_kernel/grammar.py",
+            "python/sgl_kernel/memory.py",
+            "csrc/grammar/apply_token_bitmask_inplace_cuda.cu",
+            "csrc/memory/weak_ref_tensor.cpp"
+          ],
+          "minimal_modules": [
+            "top-k/top-p 概率重归一化",
+            "token 位掩码语法约束",
+            "weak_ref 与 greenctx stream"
+          ],
+          "practice_task": "阅读 __init__.py，发现 create_greenctx_stream_by_value 与 get_sm_available 用了延迟导入包装，解释这种写法的好处；说明 weak_ref_tensor 与普通 torch tensor 在生命周期上的区别。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "测试、基准与贡献流程",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "测试模式：pytest 参数化与 conftest 守卫",
+          "order": 1,
+          "filename": "u11-l1-testing-patterns.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 的测试组织：pytest.mark.parametrize 的形状/dtype 矩阵、用 PyTorch 参考实现做数值对齐、conftest.py 的 reset_torch_defaults autouse 守卫，以及 @pytest.mark.skipif 的硬件门控。",
+          "learning_goals": [
+            "掌握参数化测试覆盖 batch/hidden/dtype 的写法",
+            "理解用纯 PyTorch 参考实现对齐 CUDA 算子的验证范式",
+            "了解 conftest 的 autouse fixture 防止 torch 默认值污染"
+          ],
+          "source_files": [
+            "tests/test_norm.py",
+            "tests/conftest.py",
+            "Makefile",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "参数化形状矩阵",
+            "PyTorch 参考对齐",
+            "conftest 守卫与 skipif"
+          ],
+          "practice_task": "仿照 tests/test_norm.py，为 silu_and_mul 写一个测试：用 x*sigmoid(x_gate) 的 PyTorch 参考对比 sgl_kernel.silu_and_mul，参数化 batch 与 hidden，并设置合理的 rtol/atol；确保通过 make test 可运行。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "基准测试：triton.testing.do_bench_cudagraph",
+          "order": 2,
+          "filename": "u11-l2-benchmarking.md",
+          "level": "advanced",
+          "topic": "讲解 benchmark/ 的基准范式：用 triton.testing.perf_report + Benchmark 做 provider 对比、为何推荐 do_bench_cudagraph（降低 CPU 开销、纳入 PDL 效应）、以及可选 provider（FlashInfer/vLLM）的探测式对比。",
+          "learning_goals": [
+            "掌握 perf_report/Benchmark 的 x_names/line_arg 配置",
+            "理解 do_bench_cudagraph 相对 do_bench 的精度优势与 PDL 关联",
+            "了解多 provider（naive/flashinfer/vllm/sglang）的基准对比结构"
+          ],
+          "source_files": [
+            "benchmark/bench_rmsnorm.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "perf_report 基准骨架",
+            "do_bench_cudagraph 与 PDL",
+            "多 provider 对比"
+          ],
+          "practice_task": "阅读 bench_rmsnorm.py，说明 timed() 中 5 次预热 + do_bench_cudagraph 的目的；仿照其结构，为 silu_and_mul 写一个最小基准，对比 sgl_kernel 实现与 torch 参考的耗时。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "贡献一个新算子：端到端流程",
+          "order": 3,
+          "filename": "u11-l3-contributing-new-kernel.md",
+          "level": "advanced",
+          "topic": "综合 README 的贡献步骤，把「写 CUDA → 声明头文件 → m.def/m.impl 注册 → Python 包装 → __init__ 导出 → CMake 加源 → 测试基准」完整走一遍，并讲解 make_pytorch_shim 的 int→int64 适配技巧。",
+          "learning_goals": [
+            "掌握 README 中六步贡献流程在源码中的对应位置",
+            "理解 make_pytorch_shim / pytorch_library_compatible_type 的类型适配",
+            "能够独立把一个新 CUDA kernel 接入完整链路"
+          ],
+          "source_files": [
+            "README.md",
+            "csrc/common_extension.cc",
+            "include/sgl_kernel_ops.h",
+            "include/sgl_kernel_torch_shim.h",
+            "CMakeLists.txt",
+            "include/utils.h"
+          ],
+          "minimal_modules": [
+            "六步贡献流程串联",
+            "make_pytorch_shim 类型适配",
+            "完整接入练习"
+          ],
+          "practice_task": "依照 README 的六步流程，规划一个新算子（例如「elementwise 的 x*sigmoid(x)+tanh(x) 融合」）的接入清单：列出要改的 csrc 文件、头文件声明、common_extension.cc 的 m.def/m.impl、python 包装函数、__init__ 导出名、CMake SOURCES 追加、测试与基准文件，并说明 make_pytorch_shim 在何种 int 参数场景下需要用到。",
+          "depends_on": [
+            "u11-l1",
+            "u11-l2",
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
