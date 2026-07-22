@@ -1,0 +1,965 @@
+{
+  "project": "mini-sglang",
+  "head": "9a91cfafe754aa85daee49998176275667eb58f2",
+  "rationale": "本手册按『先整体后局部、先数据流后实现细节』的顺序设计。第 1 单元让读者从零认识项目定位、运行方式、目录与多进程架构；第 2 单元切入贯穿全链路的核心数据结构（Req/Batch/Context）、配置继承链与消息序列化；第 3 单元讲前端 FastAPI 与 tokenizer/detokenizer 两个面向用户的进程；第 4–5 单元进入系统心脏——Scheduler 的主循环/Overlap Scheduling/多 rank 广播/Prefill/Decode 与 Engine 的初始化/前向/采样/CUDA Graph；第 6 单元专门讲 KV cache 的池存储、Radix 基数树与 CacheManager 页分配回收；第 7 单元讲注意力后端抽象与 FlashInfer 实现；第 8 单元讲自定义 BaseOP 模型体系与权重分片加载；第 9–10 单元进入专家层的张量并行算子、PyNCCL 分布式通信、Fused MoE 与自定义 CUDA/Triton kernel，并以『接入新模型架构』作为综合实践；第 11 单元用离线 LLM 接口与基准、测试体系收尾。整体形成 beginner→intermediate→advanced 三层递进，每篇只解决一个主题并附可操作实践任务，依赖关系沿数据流自顶向下，读者可按顺序通读也可按单元跳读。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 Mini-SGLang",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Mini-SGLang 是什么——一个约 5000 行 Python 的高性能 LLM 推理框架，SGLang 的精简教学版，覆盖其定位、核心特性与适用场景。",
+          "learning_goals": [
+            "理解 Mini-SGLang 的定位以及它相对 SGLang 的关系",
+            "列出核心特性：Radix Cache、Chunked Prefill、Overlap Scheduling、Tensor Parallelism、FlashAttention/FlashInfer",
+            "了解支持的模型系列与硬件/平台限制"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/features.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "核心特性清单",
+            "技术栈与依赖",
+            "支持模型"
+          ],
+          "practice_task": "阅读 README 与 docs/features.md，整理一份『Mini-SGLang 能做什么 / 不能做什么』清单，并说明它依赖哪些外部 CUDA 库（sgl-kernel、flashinfer、quack-kernels）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与快速运行",
+          "order": 2,
+          "filename": "u1-l2-install-and-run.md",
+          "level": "beginner",
+          "topic": "如何安装 Mini-SGLang（uv/Docker）并以在线服务、交互式 Shell 两种方式快速启动一个模型。",
+          "learning_goals": [
+            "掌握 uv venv + uv pip install -e . 的安装流程",
+            "能用 python -m minisgl 启动 OpenAI 兼容服务",
+            "能用 --shell 进入交互式对话并用 /reset 清空历史"
+          ],
+          "source_files": [
+            "python/minisgl/__main__.py",
+            "python/minisgl/server/launch.py",
+            "Dockerfile",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "__main__ 入口",
+            "launch_server 启动",
+            "--shell 交互模式",
+            "Docker 构建"
+          ],
+          "practice_task": "在本机或 WSL2 安装后，用 Qwen/Qwen3-0.6B 启动服务，并用 curl 调用 /v1/chat/completions 得到一次回复；再尝试 --shell 模式与 /reset。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块地图",
+          "order": 3,
+          "filename": "u1-l3-directory-structure.md",
+          "level": "beginner",
+          "topic": "梳理 python/minisgl 的目录划分，建立『每个子包负责什么』的整体地图。",
+          "learning_goals": [
+            "识别 server/tokenizer/scheduler/engine/kvcache/attention/layers/models/distributed/moe/kernel 等子包职责",
+            "理解 docs/structures.md 给出的模块说明",
+            "建立从源码目录到功能模块的映射"
+          ],
+          "source_files": [
+            "docs/structures.md",
+            "python/minisgl/core.py",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "包目录划分",
+            "模块职责说明",
+            "入口与导出"
+          ],
+          "practice_task": "依据 docs/structures.md 与实际目录，绘制一张『子包 → 职责 → 关键文件』对照表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "进程架构与请求生命周期",
+          "order": 4,
+          "filename": "u1-l4-process-architecture.md",
+          "level": "beginner",
+          "topic": "讲清 Mini-SGLang 的多进程架构（API Server / Tokenizer / Detokenizer / 每个 GPU 一个 Scheduler）以及一个请求从到达到返回的完整数据流。",
+          "learning_goals": [
+            "理解四类进程及其数量关系（每个 TP rank 一个 Scheduler）",
+            "描述 ZMQ 控制消息 + NCCL 张量数据的通信分工",
+            "复述 8 步请求生命周期"
+          ],
+          "source_files": [
+            "docs/structures.md",
+            "python/minisgl/server/launch.py"
+          ],
+          "minimal_modules": [
+            "进程模型",
+            "ZMQ/NCCL 通信",
+            "请求生命周期",
+            "TP rank"
+          ],
+          "practice_task": "对照 launch_server 里启动的各类 mp.Process，画出进程拓扑与 ZMQ 地址连接图，并标注哪条链路走 ZMQ、哪条走 NCCL。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心数据结构与配置",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "核心数据结构 Req/Batch/Context",
+          "order": 1,
+          "filename": "u2-l1-core-data-structures.md",
+          "level": "intermediate",
+          "topic": "解析 core.py 中的核心数据类 SamplingParams、Req、Batch、Context 与全局上下文，它们贯穿整个调度与执行链路。",
+          "learning_goals": [
+            "理解 Req 的字段（input_ids/cached_len/device_len/table_idx/cache_handle）及其不变量",
+            "区分 prefill/decode 两种 Batch 阶段",
+            "理解 Context 作为全局状态持有者与 forward_batch 上下文管理器"
+          ],
+          "source_files": [
+            "python/minisgl/core.py"
+          ],
+          "minimal_modules": [
+            "SamplingParams",
+            "Req 状态机",
+            "Batch 阶段",
+            "Context 全局上下文"
+          ],
+          "practice_task": "阅读 Req 的 __post_init__ 与 complete_one/append_host，画出 prefill→decode 过程中 device_len/cached_len 的变化时间线。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配置体系 EngineConfig→SchedulerConfig→ServerArgs",
+          "order": 2,
+          "filename": "u2-l2-config-system.md",
+          "level": "intermediate",
+          "topic": "讲解 EngineConfig → SchedulerConfig → ServerArgs 的 dataclass 继承链，以及 CLI 参数如何被解析与归一化。",
+          "learning_goals": [
+            "理解三层配置的继承与字段扩展（zmq 地址、cache_type、offline_mode 等）",
+            "掌握 parse_args 的归一化逻辑（dtype auto、modelscope 下载、shell 模式覆写）",
+            "理解 cached_property 延迟加载 hf_config/model_config"
+          ],
+          "source_files": [
+            "python/minisgl/engine/config.py",
+            "python/minisgl/scheduler/config.py",
+            "python/minisgl/server/args.py"
+          ],
+          "minimal_modules": [
+            "EngineConfig",
+            "SchedulerConfig",
+            "ServerArgs",
+            "parse_args 归一化"
+          ],
+          "practice_task": "给 ServerArgs 新增一个 CLI 参数（例如 --log-level），追踪它如何从 argparse 流入 EngineConfig，并说明在代码何处可以读取它。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "进程间消息与序列化",
+          "order": 3,
+          "filename": "u2-l3-message-serialization.md",
+          "level": "intermediate",
+          "topic": "解析 message 包定义的各类消息（UserMsg/DetokenizeMsg/TokenizeMsg 等）以及基于 __dict__ 的自动序列化/反序列化机制（含 1D tensor）。",
+          "learning_goals": [
+            "区分 backend/frontend/tokenizer 三类消息及其流转方向",
+            "理解 serialize_type/deserialize_type 如何递归处理嵌套对象与 torch.Tensor",
+            "掌握 encoder/decoder 如何与 ZMQ 队列配合"
+          ],
+          "source_files": [
+            "python/minisgl/message/backend.py",
+            "python/minisgl/message/utils.py",
+            "python/minisgl/message/__init__.py",
+            "python/minisgl/message/frontend.py",
+            "python/minisgl/message/tokenizer.py"
+          ],
+          "minimal_modules": [
+            "消息类型层次",
+            "serialize_type",
+            "deserialize_type",
+            "tensor 序列化"
+          ],
+          "practice_task": "参考 tests/misc/test_serialize.py，给某个消息类新增一个字段并编写序列化往返测试，验证 tensor 字段能被正确还原。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "前端服务与 Tokenizer",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "API Server 与 OpenAI 兼容接口",
+          "order": 1,
+          "filename": "u3-l1-api-server.md",
+          "level": "intermediate",
+          "topic": "解析 FastAPI 前端 api_server.py：/generate、/v1/chat/completions（流式与非流式）、FrontendManager 的 uid/ack/event 机制与客户端断连中止、交互式 shell。",
+          "learning_goals": [
+            "理解 FrontendManager 如何用 uid + asyncio.Event 关联请求与增量回复",
+            "区分流式 SSE 与非流式聚合两种返回路径",
+            "理解 stream_with_cancellation 的断连中止与 AbortMsg"
+          ],
+          "source_files": [
+            "python/minisgl/server/api_server.py"
+          ],
+          "minimal_modules": [
+            "FastAPI 路由",
+            "FrontendManager",
+            "流式/非流式",
+            "客户端断连中止"
+          ],
+          "practice_task": "阅读 api_server.py 后新增一个简单的 /health 健康检查端点，并说明它为何不需要经过 tokenizer/scheduler 即可直接返回。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Tokenizer / Detokenizer Worker",
+          "order": 2,
+          "filename": "u3-l2-tokenizer-worker.md",
+          "level": "intermediate",
+          "topic": "解析 tokenize_worker 进程：同一函数同时承担 tokenize 与 detokenize，按消息类型分流到 TokenizeManager/DetokenizeManager 并转发给 backend 或 frontend。",
+          "learning_goals": [
+            "理解 tokenize_worker 的事件循环与 local_bs 批处理",
+            "区分 TokenizeMsg→UserMsg（去 scheduler）与 DetokenizeMsg→UserReply（回 frontend）",
+            "理解共享/独立 tokenizer 的配置（num_tokenizer）"
+          ],
+          "source_files": [
+            "python/minisgl/tokenizer/server.py",
+            "python/minisgl/tokenizer/tokenize.py",
+            "python/minisgl/tokenizer/detokenize.py"
+          ],
+          "minimal_modules": [
+            "tokenize_worker 循环",
+            "TokenizeManager",
+            "DetokenizeManager",
+            "消息分流"
+          ],
+          "practice_task": "追踪一条用户文本：API→TokenizeMsg→tokenize→UserMsg→backend，再追踪返回的 DetokenizeMsg→detokenize→UserReply→API，画出两端的消息转换图。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "调度器 Scheduler",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Scheduler 主循环与 Overlap Scheduling",
+          "order": 1,
+          "filename": "u4-l1-scheduler-main-loop.md",
+          "level": "intermediate",
+          "topic": "解析 Scheduler 的 run_forever、overlap_loop 与 normal_loop，理解如何用两条 CUDA stream 把『处理上一批结果』与『执行当前批』重叠以隐藏 CPU 开销。",
+          "learning_goals": [
+            "理解 overlap_loop 中 forward 与 _process_last_data 的交错执行",
+            "区分 overlap 与 normal 两种循环及环境开关 DISABLE_OVERLAP_SCHEDULING",
+            "理解 ForwardInput/ForwardData 在 overlap 下的缓存作用"
+          ],
+          "source_files": [
+            "python/minisgl/scheduler/scheduler.py",
+            "python/minisgl/env.py"
+          ],
+          "minimal_modules": [
+            "run_forever",
+            "overlap_loop",
+            "normal_loop",
+            "ForwardInput/ForwardData"
+          ],
+          "practice_task": "用 MINISGL_DISABLE_OVERLAP_SCHEDULING=1 与默认两种模式各跑一次离线 bench，记录吞吐差异，并对照代码解释 overlap 为何更快。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Scheduler I/O 与多 rank 广播",
+          "order": 2,
+          "filename": "u4-l2-scheduler-io.md",
+          "level": "intermediate",
+          "topic": "解析 SchedulerIOMixin：rank0 从 tokenizer 收消息、通过 ZMQ pub/sub 广播给其他 rank，并用 torch.distributed broadcast 同步消息数量，保证各 rank 批次一致。",
+          "learning_goals": [
+            "理解单 rank 与多 rank 两种 receive_msg 路径",
+            "理解 rank0 pub / rank1 sub 的广播与消息计数同步",
+            "理解 send_result 在 rank0 回送 detokenizer、其他 rank 静默"
+          ],
+          "source_files": [
+            "python/minisgl/scheduler/io.py"
+          ],
+          "minimal_modules": [
+            "SchedulerIOMixin",
+            "多 rank 广播",
+            "broadcast 计数同步",
+            "sync_all_ranks"
+          ],
+          "practice_task": "画出 tp=2 时 rank0 与 rank1 的消息收发时序，说明为何要用 broadcast 同步『消息条数』而非直接转发 tensor。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Prefill 调度与 Chunked Prefill",
+          "order": 3,
+          "filename": "u4-l3-prefill-chunked.md",
+          "level": "intermediate",
+          "topic": "解析 PrefillManager 与 PrefillAdder：如何在 token budget 内挑选请求、处理 prefix 命中、把超长 prompt 切成 ChunkedReq 分批 prefill。",
+          "learning_goals": [
+            "理解 token_budget 与 reserved_size 对批大小的约束",
+            "理解 ChunkedReq 的切分与跨批续算",
+            "理解 prefill 与 in-flight decode 的资源争用估计"
+          ],
+          "source_files": [
+            "python/minisgl/scheduler/prefill.py",
+            "python/minisgl/scheduler/utils.py"
+          ],
+          "minimal_modules": [
+            "PrefillManager",
+            "PrefillAdder",
+            "ChunkedReq",
+            "token budget"
+          ],
+          "practice_task": "手动模拟 3 个长度分别为 500/5000/50000 的请求在 max_extend_tokens=8192 下被分成几批 prefill，标出每批的 ChunkedReq。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Decode 调度、TableManager 与 TokenPool",
+          "order": 4,
+          "filename": "u4-l4-decode-table-manager.md",
+          "level": "intermediate",
+          "topic": "解析 DecodeManager（running_reqs 维护、inflight_tokens 估计）与 TableManager（table_idx 分配、token_pool 存放输入 token）。",
+          "learning_goals": [
+            "理解 decode 批按 uid 排序的确定性以及 filter_reqs",
+            "理解 table_idx 槽位分配与 page_table/token_pool 的二维结构",
+            "理解 inflight_tokens 如何为 prefill 预留空间"
+          ],
+          "source_files": [
+            "python/minisgl/scheduler/decode.py",
+            "python/minisgl/scheduler/table.py"
+          ],
+          "minimal_modules": [
+            "DecodeManager",
+            "running_reqs",
+            "TableManager",
+            "token_pool/page_table"
+          ],
+          "practice_task": "解释 dummy_req 为何复用 token_pool（在 table.py 注释中找到原因），并说明 max_running_req 如何同时约束 table 槽位与 page_table 行数。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Engine 执行引擎",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Engine 初始化与显存管理",
+          "order": 1,
+          "filename": "u5-l1-engine-init-memory.md",
+          "level": "intermediate",
+          "topic": "解析 Engine.__init__：用 meta device 创建模型、加载权重、按剩余显存计算 KV cache 页数、跨 TP rank 对齐显存并构建 page_table。",
+          "learning_goals": [
+            "理解 meta device + load_state_dict 的低内存建图方式",
+            "理解 _determine_num_pages 的显存估算公式",
+            "理解 _sync_get_memory 的跨 rank 显存对齐与不平衡检测"
+          ],
+          "source_files": [
+            "python/minisgl/engine/engine.py",
+            "python/minisgl/engine/graph.py"
+          ],
+          "minimal_modules": [
+            "Engine 初始化",
+            "meta 建图",
+            "_determine_num_pages",
+            "_sync_get_memory"
+          ],
+          "practice_task": "给定一个模型的 num_layers/head_dim/num_kv_heads/dtype/page_size 与可用显存，手算可分配的 KV cache 页数，对照 _determine_num_pages 验证。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Engine forward 与采样",
+          "order": 2,
+          "filename": "u5-l2-engine-forward-sampling.md",
+          "level": "intermediate",
+          "topic": "解析 Engine.forward_batch：在 cuda graph 与普通 forward 间选择、推进 Req 状态、用 Sampler 进行贪婪/top-k/top-p 采样并异步拷回 CPU。",
+          "learning_goals": [
+            "理解 forward_batch 中 graph replay 与 model.forward 的分支",
+            "理解 Sampler.prepare 如何把逐请求参数批量打包",
+            "理解 next_tokens_gpu/cpu + copy_done_event 的异步返回"
+          ],
+          "source_files": [
+            "python/minisgl/engine/engine.py",
+            "python/minisgl/engine/sample.py"
+          ],
+          "minimal_modules": [
+            "forward_batch",
+            "Sampler.prepare",
+            "sample_impl",
+            "ForwardOutput"
+          ],
+          "practice_task": "阅读 Sampler.prepare，解释为何全是贪婪采样时 temperatures=None 走 torch.argmax 快路径，并说明 top_k=-1 的归一化处理。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "CUDA Graph 捕获与回放",
+          "order": 3,
+          "filename": "u5-l3-cuda-graph.md",
+          "level": "advanced",
+          "topic": "解析 GraphRunner：按一组 batch size 捕获 decode 的 CUDA graph、用 dummy_req 把真实 batch pad 到捕获尺寸、回放时只拷贝输入缓冲。",
+          "learning_goals": [
+            "理解 _capture_graphs 的逐 bs 捕获与 graph pool 复用",
+            "理解 pad_batch 把真实请求补齐到捕获尺寸的机制",
+            "理解 can_use_cuda_graph 的判定与 buffer.copy_from/replay"
+          ],
+          "source_files": [
+            "python/minisgl/engine/graph.py"
+          ],
+          "minimal_modules": [
+            "GraphRunner",
+            "_capture_graphs",
+            "pad_batch",
+            "replay"
+          ],
+          "practice_task": "解释为什么 CUDA graph 只对 decode 且 size<=max_graph_bs 生效，并说明 dummy_req 的 table_idx 指向 dummy page 的作用。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "KV Cache 管理",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "KV Cache 池、存储与 Prefix Cache 抽象",
+          "order": 1,
+          "filename": "u6-l1-kvcache-pool-prefix-abstract.md",
+          "level": "intermediate",
+          "topic": "解析 MHAKVCache 的 paged 缓冲布局、store_kv kernel 写入，以及 BasePrefixCache/BaseCacheHandle/SizeInfo 的接口契约与 NaivePrefixCache 占位实现。",
+          "learning_goals": [
+            "理解 _kv_buffer 的 (2, layers, pages, page_size, heads, head_dim) 布局与 TP 切分",
+            "理解 store_kv 如何按 out_loc 把新 K/V 写入池",
+            "理解 BasePrefixCache 的 match/insert/evict/lock 接口语义"
+          ],
+          "source_files": [
+            "python/minisgl/kvcache/base.py",
+            "python/minisgl/kvcache/mha_pool.py",
+            "python/minisgl/kvcache/naive_cache.py",
+            "python/minisgl/kvcache/__init__.py"
+          ],
+          "minimal_modules": [
+            "MHAKVCache",
+            "store_kv",
+            "BasePrefixCache 接口",
+            "NaivePrefixCache"
+          ],
+          "practice_task": "说明 NaivePrefixCache 为何 match_prefix 总返回空、evict 直接抛错，并解释它如何作为『无前缀复用』的基线实现。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Radix Cache 实现",
+          "order": 2,
+          "filename": "u6-l2-radix-cache.md",
+          "level": "advanced",
+          "topic": "解析 RadixPrefixCache：基于 RadixTreeNode 的基数树、按 page 对齐的 tree walk 与节点分裂、ref_count 锁定、按 timestamp 的 LRU 堆淘汰。",
+          "learning_goals": [
+            "理解 radix 树节点（key/value/children/ref_count/timestamp）与分裂 split_at",
+            "理解 match_prefix 的 tree walk 与 page 对齐匹配",
+            "理解 evict 用最小堆按 timestamp 回收 ref_count=0 的叶子节点"
+          ],
+          "source_files": [
+            "python/minisgl/kvcache/radix_cache.py"
+          ],
+          "minimal_modules": [
+            "RadixTreeNode",
+            "_tree_walk/split",
+            "lock/unlock ref_count",
+            "evict LRU"
+          ],
+          "practice_task": "手动构造一棵含共享前缀的 radix 树，依次执行两次 match（命中）、一次 insert（分裂）、一次 evict，画出每步的树结构与 evictable/protected size 变化。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "CacheManager 页分配、回收与淘汰",
+          "order": 3,
+          "filename": "u6-l3-cache-manager.md",
+          "level": "advanced",
+          "topic": "解析 scheduler 侧的 CacheManager：free_slots 页分配、allocate_paged 写 page_table、cache_req 把结果插回前缀缓存并区分 finished 释放尾部、lazy_free_region 延迟回收。",
+          "learning_goals": [
+            "理解 free_slots 的页对齐分配与 _allocate 触发 radix 淘汰",
+            "理解 cache_req 中 valid/allocated 缓存区域的边界与释放逻辑",
+            "理解 lazy_free_region 为何延迟到区域结束才合并 free_slots"
+          ],
+          "source_files": [
+            "python/minisgl/scheduler/cache.py"
+          ],
+          "minimal_modules": [
+            "CacheManager",
+            "allocate_paged",
+            "cache_req",
+            "lazy_free_region"
+          ],
+          "practice_task": "追踪一个 prefill 完成的请求在 _process_last_data→cache_req 中，哪些 page 被插入前缀缓存、哪些被释放，并解释 finished=True/False 的差异。",
+          "depends_on": [
+            "u6-l2",
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "注意力后端",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "注意力后端抽象与 Hybrid",
+          "order": 1,
+          "filename": "u7-l1-attention-backend-abstract.md",
+          "level": "intermediate",
+          "topic": "解析 BaseAttnBackend/BaseAttnMetadata 接口、HybridBackend 让 prefill 与 decode 用不同后端，以及注册表 create_attention_backend 与 auto 选择策略。",
+          "learning_goals": [
+            "理解 attention backend 的 forward/prepare_metadata/capture 接口",
+            "理解 HybridBackend 按 batch 阶段分发到不同后端",
+            "理解 --attn fa,fi 的解析与 auto（按 SM 版本选 trtllm/fa,fi/fi）"
+          ],
+          "source_files": [
+            "python/minisgl/attention/base.py",
+            "python/minisgl/attention/__init__.py",
+            "python/minisgl/engine/engine.py"
+          ],
+          "minimal_modules": [
+            "BaseAttnBackend",
+            "HybridBackend",
+            "注册表",
+            "auto 后端选择"
+          ],
+          "practice_task": "阅读 _adjust_config 中 auto 的选择逻辑，说明在 SM100(H200) 与 SM90(Hopper) 上默认分别选什么 prefill/decode 后端。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "FlashInfer 后端实现",
+          "order": 2,
+          "filename": "u7-l2-flashinfer-backend.md",
+          "level": "advanced",
+          "topic": "解析 FlashInferBackend：从 Batch 构造 FIMetadata（cu_seqlens/indices/page_table）、plan 规划、forward 中 store_kv + paged run，以及 CUDA graph 捕获专用 wrapper。",
+          "learning_goals": [
+            "理解 prepare_metadata 如何把 prefill/decode 的 q/k 长度转成 flashinfer 所需的 indptr/indices",
+            "理解 forward 中先 store_kv 再用 wrapper.run 读 paged kv",
+            "理解 capture/replay 专用的 CUDAGraphBatchDecodeWithPagedKVCacheWrapper"
+          ],
+          "source_files": [
+            "python/minisgl/attention/fi.py",
+            "python/minisgl/attention/utils.py"
+          ],
+          "minimal_modules": [
+            "FIMetadata",
+            "prepare_metadata",
+            "plan/run",
+            "capture graph wrapper"
+          ],
+          "practice_task": "对照 prepare_metadata，解释 decode（extend_len=1）与纯 prefill（无缓存命中）两种情况下 cu_seqlens_q 的不同构造方式。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "模型实现与权重加载",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "BaseOP 体系与 Llama 模型实现",
+          "order": 1,
+          "filename": "u8-l1-baseop-model.md",
+          "level": "intermediate",
+          "topic": "解析自定义的 BaseOP/StateLessOP/OPList（替代 nn.Module 的 state_dict/load_state_dict）以及 LlamaForCausalLM/LlamaDecoderLayer/GatedMLP/RopeAttn 如何用层组合而成。",
+          "learning_goals": [
+            "理解 BaseOP 的递归 state_dict/load_state_dict 与下划线前缀跳过",
+            "理解 Llama 模型的层结构（embed→decoder layers→norm→lm_head）",
+            "理解 GatedMLP/RopeAttn 的前向计算与残差融合"
+          ],
+          "source_files": [
+            "python/minisgl/layers/base.py",
+            "python/minisgl/models/base.py",
+            "python/minisgl/models/llama.py",
+            "python/minisgl/models/utils.py",
+            "python/minisgl/models/register.py"
+          ],
+          "minimal_modules": [
+            "BaseOP/OPList",
+            "LlamaForCausalLM",
+            "GatedMLP",
+            "RopeAttn"
+          ],
+          "practice_task": "对照 nn.Module，列出 BaseOP 没有实现的功能（如 autograd、register_buffer），并解释在纯推理场景下为何仍然足够。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "模型配置解析与权重加载分片",
+          "order": 2,
+          "filename": "u8-l2-config-weight-loading.md",
+          "level": "advanced",
+          "topic": "解析 ModelConfig.from_hf 如何把异构的 HF config 适配为统一字段，以及 load_weight 如何流式加载 safetensors、按 TP 分片、合并 qkv/gate_up、堆叠 MoE expert。",
+          "learning_goals": [
+            "理解 ModelConfig.from_hf 的字段兼容处理（text_config、rope_theta 等）",
+            "理解 _shard_tensor 对 dim0/dim1/vocab 的不同切分方式",
+            "理解 _MERGE_GROUPS 把 q/k/v 合并成 qkv_proj、以及 expert 堆叠"
+          ],
+          "source_files": [
+            "python/minisgl/models/config.py",
+            "python/minisgl/models/weight.py"
+          ],
+          "minimal_modules": [
+            "ModelConfig.from_hf",
+            "_shard_tensor",
+            "_MERGE_GROUPS",
+            "expert 堆叠"
+          ],
+          "practice_task": "追踪 HF ckpt 中的 q_proj/k_proj/v_proj 三个权重如何被分片、合并成运行时的 qkv_proj，并说明 kv_heads<tp_size 时的复制处理。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "算子层与张量并行",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "张量并行 Linear 与分布式通信",
+          "order": 1,
+          "filename": "u9-l1-linear-tp-distributed.md",
+          "level": "advanced",
+          "topic": "解析 TP 下的各种 Linear（ColParallelMerged/QKVMerged/RowParallel/OProj/Replicated）的切分与 all_reduce，以及 DistributedCommunicator 在 torch.distributed 与 PyNCCL 间的选择。",
+          "learning_goals": [
+            "理解 column-parallel（切输出）与 row-parallel 的通信位置差异",
+            "理解 QKVMerged 对 GQA（kv_heads<tp_size）的 head 复制",
+            "理解 enable_pynccl_distributed 如何挂载 PyNCCL 实现替代 NCCL"
+          ],
+          "source_files": [
+            "python/minisgl/layers/linear.py",
+            "python/minisgl/distributed/info.py",
+            "python/minisgl/distributed/impl.py",
+            "python/minisgl/distributed/__init__.py"
+          ],
+          "minimal_modules": [
+            "TP Linear 族",
+            "all_reduce/all_gather",
+            "DistributedCommunicator",
+            "PyNCCL"
+          ],
+          "practice_task": "画出 tp=2 时一个 MLP（gate_up→down）各权重的切分维度与 all_reduce 发生的位置，解释为何只在 down_proj 后通信。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Embedding / Norm / RoPE 与 AttentionLayer",
+          "order": 2,
+          "filename": "u9-l2-embedding-norm-rope-attention.md",
+          "level": "intermediate",
+          "topic": "解析 VocabParallelEmbedding/ParallelLMHead 的词表切分与 all_gather、RMSNormFused 的残差融合、以及 AttentionLayer 如何接 RoPE 后调用 attn backend。",
+          "learning_goals": [
+            "理解词表并行 embedding 的 vocab_range 与 all_reduce/all_gather",
+            "理解 RMSNormFused 的 fused_add_rmsnorm 残差路径",
+            "理解 AttentionLayer.split qkv、RoPE、调用 ctx.attn_backend.forward 的流程"
+          ],
+          "source_files": [
+            "python/minisgl/layers/embedding.py",
+            "python/minisgl/layers/norm.py",
+            "python/minisgl/layers/rotary.py",
+            "python/minisgl/layers/attention.py",
+            "python/minisgl/layers/activation.py"
+          ],
+          "minimal_modules": [
+            "VocabParallelEmbedding/ParallelLMHead",
+            "RMSNormFused",
+            "RoPE",
+            "AttentionLayer"
+          ],
+          "practice_task": "阅读 AttentionLayer.forward，说明 q/k/v 的切分维度如何由 num_qo_heads/num_kv_heads 在 TP 下决定，并指出 q_norm/k_norm（Qwen3）何时启用。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "高级特性：MoE、Kernel 与扩展",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "MoE 后端（Fused MoE）",
+          "order": 1,
+          "filename": "u10-l1-moe-fused.md",
+          "level": "advanced",
+          "topic": "解析 FusedMoe 的完整流程：fused_topk 选专家、moe_align_block_size 做 block 对齐、fused_experts_impl 两次 triton grouped GEMM + 激活 + moe_sum_reduce。",
+          "learning_goals": [
+            "理解 topk_softmax 与权重归一化",
+            "理解 moe_align_block_size 把 token 按 expert 排序并 pad 到 block_size",
+            "理解两段 grouped GEMM（w1/w2）与最终 moe_sum_reduce"
+          ],
+          "source_files": [
+            "python/minisgl/moe/fused.py",
+            "python/minisgl/moe/base.py",
+            "python/minisgl/kernel/triton/fused_moe.py",
+            "python/minisgl/models/qwen3_moe.py"
+          ],
+          "minimal_modules": [
+            "fused_topk",
+            "moe_align_block_size",
+            "fused_experts_impl",
+            "MoELayer"
+          ],
+          "practice_task": "用 fused.py 注释里的 topk_ids 例子，手动推演 moe_align_block_size 后的 sorted_token_ids/expert_ids，验证 pad token 的位置。",
+          "depends_on": [
+            "u9-l2",
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "自定义 Kernel（CUDA/Triton/tvm-ffi）",
+          "order": 2,
+          "filename": "u10-l2-custom-kernels.md",
+          "level": "advanced",
+          "topic": "解析 kernel 包如何通过 tvm-ffi JIT 提供 indexing/store_cache/fast_compare_key/pynccl 等 kernel，以及它们被上层调用的位置。",
+          "learning_goals": [
+            "理解 indexing（vocab 并行 embedding 取行）、store_cache（写 KV pool）、fast_compare_key（radix 匹配）的用途",
+            "理解 PyNCCLCommunicator 的初始化与最大缓冲",
+            "理解 kernel/__main__ 的 JIT 构建/自测入口"
+          ],
+          "source_files": [
+            "python/minisgl/kernel/__init__.py",
+            "python/minisgl/kernel/index.py",
+            "python/minisgl/kernel/store.py",
+            "python/minisgl/kernel/radix.py",
+            "python/minisgl/kernel/pynccl.py"
+          ],
+          "minimal_modules": [
+            "indexing",
+            "store_cache",
+            "fast_compare_key",
+            "PyNCCLCommunicator"
+          ],
+          "practice_task": "在代码库中搜索 indexing/store_cache/fast_compare_key 的所有调用点，整理一份『哪个 kernel 服务于哪个上层功能』的映射表。",
+          "depends_on": [
+            "u6-l1",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "支持新模型架构",
+          "order": 3,
+          "filename": "u10-l3-add-new-model.md",
+          "level": "advanced",
+          "topic": "以 register.py + config + 现有 llama/qwen3 为模板，讲解如何为一个新的 decoder 架构接入 Mini-SGLang（注册、config 字段、层实现、权重映射）。",
+          "learning_goals": [
+            "理解 _MODEL_REGISTRY 与 get_model_class 的动态导入机制",
+            "理解新增模型需要的 ModelConfig 字段与 RopeAttn/GatedMLP 复用",
+            "理解权重 key 如何与 load_weight 的合并/分片规则对接"
+          ],
+          "source_files": [
+            "python/minisgl/models/register.py",
+            "python/minisgl/models/config.py",
+            "python/minisgl/models/llama.py",
+            "python/minisgl/models/qwen3.py",
+            "python/minisgl/models/weight.py"
+          ],
+          "minimal_modules": [
+            "模型注册表",
+            "ModelConfig",
+            "层复用",
+            "权重映射"
+          ],
+          "practice_task": "参照 qwen3.py 的注册流程，写一份『接入新模型 checklist』，列出必须修改/新增的文件与字段（注册项、config 解析、权重 key 映射）。",
+          "depends_on": [
+            "u8-l2",
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "离线接口、测试与基准",
+      "level": "intermediate",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "LLM 离线推理接口与基准",
+          "order": 1,
+          "filename": "u11-l1-llm-offline-benchmark.md",
+          "level": "intermediate",
+          "topic": "解析 LLM 类（继承 Scheduler、offline_mode 下直接在进程内收发消息）的 generate 流程，以及 offline/online benchmark 如何度量吞吐。",
+          "learning_goals": [
+            "理解 LLM 如何复用 Scheduler 但绕过 ZMQ/tokenizer（offline_receive/send）",
+            "理解 generate 由 pending_requests/status_map 驱动直到 RequestAllFinished",
+            "理解 offline bench 的吞吐计算与 warmup"
+          ],
+          "source_files": [
+            "python/minisgl/llm/llm.py",
+            "benchmark/offline/bench.py",
+            "benchmark/online/bench_qwen.py"
+          ],
+          "minimal_modules": [
+            "LLM.generate",
+            "offline_receive/send",
+            "离线/在线基准",
+            "吞吐统计"
+          ],
+          "practice_task": "用 LLM.generate 对同一组 prompt 分别在 page_size=1 与 256、overlap 开/关下跑离线 bench，记录并解释吞吐差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "测试体系与质量保证",
+          "order": 2,
+          "filename": "u11-l2-tests-quality.md",
+          "level": "intermediate",
+          "topic": "解析 tests/ 下的测试组织：序列化往返、cache 分配完整性、scheduler 端到端、kernel（comm/index/store/tensor）测试，以及 pytest+cov 配置。",
+          "learning_goals": [
+            "理解各测试覆盖的子系统与最小可运行配置",
+            "理解 test_scheduler 如何用 ZMQ 直接驱动 scheduler",
+            "理解 test_cache_allocate 的完整性断言与 pytest 配置"
+          ],
+          "source_files": [
+            "tests/misc/test_serialize.py",
+            "tests/core/test_scheduler.py",
+            "tests/core/test_cache_allocate.py",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "序列化测试",
+            "scheduler 端到端测试",
+            "cache 完整性测试",
+            "pytest 配置"
+          ],
+          "practice_task": "运行 tests/core 下的测试（或在无 GPU 环境下阅读），针对 CacheManager.check_integrity 写一段说明：它检测什么不变量、在调度器何时被触发。",
+          "depends_on": [
+            "u2-l3",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
