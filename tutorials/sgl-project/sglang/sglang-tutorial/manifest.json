@@ -1,7 +1,7 @@
 {
   "project": "sglang",
-  "head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
-  "rationale": "本次增量主要受两处架构演进驱动，并伴随一次全局机械替换。(1) 配置体系重构：ServerArgs 在 __post_init__ 后变为只读，字段用 NS('namespace') 标注所属命名空间，唯一合法改写入口是 override()，声明式覆盖由 arg_groups/overrides.py 的 materialize_declarations 装配；运行期配置与进程全局状态统一由 runtime_context.py（已扩充至 1100+ 行）的四层结构（Parallel 拓扑 / Config bags 解析配置 / Flags 运行态 / Resources 句柄）与 get_parallel()/get_exec()/get_spec() 等访问器提供，并由 publish(server_args, role) 发布。为此将 u2-l2 重建为「只读 ServerArgs + override + NS 标注」，并新增 u2-l5 专门讲解 RuntimeContext 与配置命名空间，置于 ServerArgs 之后、请求生命周期之前。(2) 算子体系迁移（RFC #29630）：新增 python/sglang/kernels/ 统一命名空间（registry/selector/spec/fused_op + ops/ 下 16 个算子组），通过 KernelSpec 注册与 BaseFusedOp 多后端分发在 AOT sgl-kernel 与 JIT 之间按设备能力自动选择，旧 jit_kernel/ 退化为兼容 shim，故将 u11-l2 重建为新的统一算子体系。此外，scheduler.py(170 行)、model_runner.py(160 行)、tokenizer_manager.py(77 行) 等多处出现 get_server_args().x → 命名空间访问器的机械替换，导致引用行号与惯用法漂移但概念未变，相关讲义标记 update；其中 u3-l1 与 u5-l1 新增对 u2-l5 的依赖。其余未受影响的讲义保持 keep。",
+  "head": "40b2119b23e49be767da1f9f73746ac8e158dae5",
+  "rationale": "本次增量（977ea336..40b2119b，共 11 个提交）以局部功能增强为主，未发生架构重构，故整体沿用上一版的单元与讲义结构，只对被触及的讲义调整 action。(1) 新增 HPC-Ops 注意力后端（#30540）：在 attention_registry.py 注册 'hpc_ops' 后端、新增 hpc_ops_backend.py（要求 Hopper+/--page-size 64/bf16 或 fp8 KV），并加入 ATTENTION_BACKEND_CHOICES，同时新增 hunyuan_v3 模型与 overrides.py 的配套校验，故将 u5-l3 标记 update 以补充该后端。(2) 原生 gRPC sidecar 模块启动器（#31076）：server_args.py 在 serving 命名空间新增 sidecar/sidecar_args 字段并在 __post_init__ 做校验，http_server lifespan 通过新增的 entrypoints/sidecar.py 拉起本地 sidecar 进程；由于上一轮 u2-l2 的「只读 ServerArgs + override + NS」重建已完成、本轮为小幅字段与启动链路补充，故标记 update。(3) AMD/ROCm 融合 all-reduce+RMSNorm+per-group FP8 量化（#24651，服务 Qwen3.5 FP8）：在 parallel_state.py 的 GroupCoordinator、communication_op.py、communicator.py、layernorm.py 新增 fused_allreduce_rmsnorm_quant_per_group 融合 collective，故 u8-l1 标记 update；同批 MoE 的 topk.py 与 token_dispatcher/standard.py 亦有局部优化（含 #31889 的 decode 阶段 AITER expert mask 缓存），故 u8-l3 标记 update。(4) 算子迁移 Phase 4 batch-3（#32045，RFC #29630）继续把 attention/diffusion/kv_canary 等大量 jit_kernel 子系统迁入 kernels/ops，ops/ 下算子组已由 16 增至 20，旧 jit_kernel 进一步退化为兼容 shim（含 #32076 的 Inkling 导入路径修复）；由于 u11-l2 讲义尚未生成且迁移仍在推进，保持 rebuild 以按当前结构重写并修正算子组数量。其余讲义——包括上一轮已重建/更新且本轮未被触及的 u2-l5（runtime_context 未变）、u3-l1（scheduler 未变）、u5-l1（model_runner 未变）、u5-l4/u5-l5（权重加载与 llama 未变）、u4-l4（hicache 未变）、u10-l2（eagle 未变）、u12-l3（Engine 未变）等——均保持 keep。本轮无新增独立讲义，所涉新能力均归入既有讲义。",
   "units": [
     {
       "id": "u1",
@@ -153,7 +153,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -161,30 +161,32 @@
           "order": 2,
           "filename": "u2-l2-launch-and-server-args.md",
           "level": "intermediate",
-          "topic": "追踪从 sglang serve 到 http_server.launch_server 的启动链路，并理解 ServerArgs 数据类的新模型：__post_init__ 后只读、字段用 NS('namespace') 标注归属、唯一合法改写入口 override()，以及 materialize_declarations 装配声明式覆盖。",
+          "topic": "追踪从 sglang serve 到 http_server.launch_server 的启动链路，理解 ServerArgs 只读模型（__post_init__ 后只读、字段用 NS('namespace') 标注、唯一改写入口 override()、materialize_declarations 装配声明式覆盖）；并讲解新增的 serving 命名空间 sidecar/sidecar_args 字段如何经 __post_init__ 校验后，在 http_server lifespan 中通过 entrypoints/sidecar.py 拉起一个对接原生 gRPC server 的本地 sidecar 进程。",
           "learning_goals": [
             "追踪 launch_server → http_server.launch_server 的调用链",
             "理解 ServerArgs 只读模型与 NS 命名空间标注",
             "掌握 override() 单一审计式改写入口与 materialize_declarations 声明装配",
-            "知道如何通过 CLI 参数与 override 调整配置"
+            "理解 sidecar/sidecar_args 字段（serving 命名空间）及其与原生 gRPC server 的启动关系"
           ],
           "source_files": [
             "python/sglang/srt/server_args.py",
             "python/sglang/srt/arg_groups/overrides.py",
             "python/sglang/srt/entrypoints/http_server.py",
+            "python/sglang/srt/entrypoints/sidecar.py",
             "python/sglang/cli/serve.py"
           ],
           "minimal_modules": [
             "ServerArgs 数据类与 NS 标注",
             "override() 改写入口与 _in_override 守卫",
             "materialize_declarations 声明装配",
-            "http_server.launch_server"
+            "http_server.launch_server",
+            "sidecar/sidecar_args 字段与 http_server lifespan 中 start_sidecar"
           ],
-          "practice_task": "在 server_args.py 中找到 model_path、tp_size、dp_size、chunked_prefill_size、mem_fraction_static 五个字段的 NS 命名空间标注，说明它们各自归入哪个命名空间；再定位 override() 方法，描述为何运行期不能直接 server_args.x = y、必须走 override()。",
+          "practice_task": "在 server_args.py 中找到 model_path、tp_size、dp_size、chunked_prefill_size、mem_fraction_static 五个字段的 NS 命名空间标注，说明它们各自归入哪个命名空间；再定位 override() 方法，描述为何运行期不能直接 server_args.x = y、必须走 override()。最后找到 sidecar/sidecar_args 两个字段，说明它们属于哪个命名空间、__post_init__ 对其做了哪些校验，以及 http_server lifespan 在何处启动 sidecar。",
           "depends_on": [
             "u2-l1"
           ],
-          "action": "rebuild"
+          "action": "update"
         },
         {
           "id": "u2-l5",
@@ -192,7 +194,7 @@
           "order": 3,
           "filename": "u2-l5-runtime-context-config-bags.md",
           "level": "intermediate",
-          "topic": "讲解 runtime_context.py 作为运行期状态的中枢：四层结构（Parallel 拓扑 / Config bags 解析配置 / Flags 运行态 / Resources 句柄），11 个配置命名空间袋（device/model/exec/schedule/memory/spec/lora/mm/disagg/serving/observability），以及 get_parallel()/get_exec()/get_spec() 等访问器与 publish(server_args, role) 发布流程。",
+          "topic": "讲解 runtime_context.py 作为运行期状态的中枢：四层结构（Parallel 拓扑 / Config bags 解析配置 / Flags 运行态 / Resources 句柄），配置命名空间袋（device/model/exec/schedule/memory/spec/lora/mm/disagg/serving/observability），以及 get_parallel()/get_exec()/get_spec() 等访问器与 publish(server_args, role) 发布流程。",
           "learning_goals": [
             "理解 RuntimeContext 的四层结构与各自职责",
             "掌握 get_parallel/get_exec/get_spec 等命名空间访问器与返回的 _ConfigBag",
@@ -213,7 +215,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -242,7 +244,7 @@
             "u2-l1",
             "u2-l2"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -309,7 +311,7 @@
             "u2-l3",
             "u2-l5"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -317,7 +319,7 @@
           "order": 2,
           "filename": "u3-l2-req-and-schedule-batch.md",
           "level": "intermediate",
-          "topic": "讲解 schedule_batch.py 中 Req（单请求状态）与 ScheduleBatch（批容器）的核心字段，以及它们在调度过程中的演化（本文件因配置访问惯用法调整有少量行号漂移）。",
+          "topic": "讲解 schedule_batch.py 中 Req（单请求状态）与 ScheduleBatch（批容器）的核心字段，以及它们在调度过程中的演化。",
           "learning_goals": [
             "掌握 Req 的关键字段（rid、origin_input_ids、output_ids、fill_ids 等）",
             "理解 ScheduleBatch 如何持有内存池与树缓存引用",
@@ -335,7 +337,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -511,7 +513,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "update"
+          "action": "keep"
         }
       ]
     },
@@ -549,7 +551,7 @@
             "u4-l2",
             "u2-l5"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -584,28 +586,29 @@
           "order": 3,
           "filename": "u5-l3-attention-backends.md",
           "level": "intermediate",
-          "topic": "讲解 layers/attention 下如何通过 base_attn_backend + attention_registry 按硬件/模型选择 FlashInfer、FlashAttention、Triton、TRT-LLM 等注意力后端。",
+          "topic": "讲解 layers/attention 下如何通过 base_attn_backend + attention_registry 按硬件/模型选择 FlashInfer、FlashAttention、Triton、TRT-LLM、HPC-Ops 等注意力后端；新增的 hpc_ops 后端由腾讯 HPC-Ops 提供分页 MHA kernel，要求 Hopper+ 与 --page-size 64。",
           "learning_goals": [
             "理解注意力后端的注册与选择机制",
-            "区分主流后端（FlashInfer/FA3/Triton/TRTLLM）适用场景",
+            "区分主流后端（FlashInfer/FA3/Triton/TRTLLM/HPC-Ops）适用场景",
             "看懂 RadixAttention 如何委托给具体后端"
           ],
           "source_files": [
             "python/sglang/srt/layers/attention/base_attn_backend.py",
             "python/sglang/srt/layers/attention/attention_registry.py",
             "python/sglang/srt/layers/attention/flashinfer_backend.py",
-            "python/sglang/srt/layers/attention/triton_backend.py"
+            "python/sglang/srt/layers/attention/triton_backend.py",
+            "python/sglang/srt/layers/attention/hpc_ops_backend.py"
           ],
           "minimal_modules": [
             "base_attn_backend 接口",
-            "attention_registry 注册",
-            "flashinfer/triton 后端"
+            "attention_registry 注册（含 create_hpc_ops_backend 的约束校验）",
+            "flashinfer/triton/hpc_ops 后端"
           ],
-          "practice_task": "用 --attention-backend 切换不同后端启动服务（如 flashinfer/triton），并说明选择逻辑在 attention_registry 中的代码位置与匹配字段。",
+          "practice_task": "用 --attention-backend 切换不同后端启动服务（如 flashinfer/triton/hpc_ops），并说明选择逻辑在 attention_registry 中的代码位置与匹配字段；针对 hpc_ops 说明其非 MLA、非 encoder-decoder、不支持投机解码等约束在 create_hpc_ops_backend 中的校验位置。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "keep"
+          "action": "update"
         },
         {
           "id": "u5-l4",
@@ -634,7 +637,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -664,7 +667,7 @@
             "u5-l3",
             "u5-l4"
           ],
-          "action": "update"
+          "action": "keep"
         }
       ]
     },
@@ -898,27 +901,31 @@
           "order": 1,
           "filename": "u8-l1-tensor-parallelism.md",
           "level": "advanced",
-          "topic": "讲解张量并行（TP）如何在多 GPU 间切分模型权重与计算，重点看 parallel_state 的进程组管理与 tp_worker 的角色。",
+          "topic": "讲解张量并行（TP）如何在多 GPU 间切分模型权重与计算，重点看 parallel_state 的进程组管理与 GroupCoordinator 中的融合 collective（含新增的 ROCm/aiter fused all-reduce+RMSNorm+per-group FP8 量化），以及 tp_worker 的角色。",
           "learning_goals": [
             "理解 TP 切分策略与通信开销",
-            "看懂 parallel_state 的进程组/rank",
+            "看懂 parallel_state 的进程组/rank 与 GroupCoordinator 的融合 collective",
             "理解 TpModelWorker 在 TP 下的职责"
           ],
           "source_files": [
             "python/sglang/srt/distributed/parallel_state.py",
+            "python/sglang/srt/distributed/communication_op.py",
+            "python/sglang/srt/layers/communicator.py",
             "python/sglang/srt/managers/tp_worker.py",
             "python/sglang/srt/layers/model_parallel.py"
           ],
           "minimal_modules": [
-            "parallel_state 进程组",
+            "parallel_state 进程组与 GroupCoordinator",
+            "fused_allreduce_rmsnorm 与 fused_allreduce_rmsnorm_quant_per_group（ROCm/aiter/gfx95 融合 collective）",
+            "communication_op 包装与 ca_comm 自定义 all-reduce",
             "TpModelWorker",
             "model_parallel 工具"
           ],
-          "practice_task": "用 --tp 2 启动服务，在 parallel_state.py 中标注各进程组的创建，并解释一次 forward 中 all-reduce 发生的位置。",
+          "practice_task": "用 --tp 2 启动服务，在 parallel_state.py 中标注各进程组的创建，并解释一次 forward 中 all-reduce 发生的位置；再定位 fused_allreduce_rmsnorm_quant_per_group，说明其在非 AMD 或 ca_comm 不可用时如何返回 None 让调用方回退到分离的 fused-AR-RMSNorm + per-group-quant 路径。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "keep"
+          "action": "update"
         },
         {
           "id": "u8-l2",
@@ -954,7 +961,7 @@
           "order": 3,
           "filename": "u8-l3-pp-ep-moe.md",
           "level": "advanced",
-          "topic": "讲解流水线并行（PP）、专家并行（EP）以及 MoE 层（layers/moe）的实现，包括 token 分发与 top-k 路由。",
+          "topic": "讲解流水线并行（PP）、专家并行（EP）以及 MoE 层（layers/moe）的实现，包括 token 分发与 top-k 路由；注意本轮 topk.py 与 token_dispatcher 有局部优化（如 AMD AITER 在 decode 阶段缓存 expert mask）。",
           "learning_goals": [
             "理解 PP/EP 与 TP/DP 的组合",
             "看懂 MoE 的 token dispatcher/topk 路由",
@@ -967,14 +974,14 @@
           ],
           "minimal_modules": [
             "topk 路由",
-            "token_dispatcher",
+            "token_dispatcher（含 expert mask 复用）",
             "ep_moe 专家并行"
           ],
-          "practice_task": "在一个 MoE 模型上分析 token 如何被 topk 路由分发到专家，并说明 EP 模式下专家在多 GPU 的分布方式。",
+          "practice_task": "在一个 MoE 模型上分析 token 如何被 topk 路由分发到专家，并说明 EP 模式下专家在多 GPU 的分布方式；再指出 token_dispatcher/standard.py 中 decode 阶段复用 expert mask 的优化点。",
           "depends_on": [
             "u8-l1"
           ],
-          "action": "keep"
+          "action": "update"
         }
       ]
     },
@@ -1006,7 +1013,7 @@
             "decode worker",
             "run_server 的 encoder_only 分支"
           ],
-          "practice_task": "对照单进程模式，画出 PD 分离下一一条请求在 prefill worker 与 decode worker 之间的流转，并标注 KV 何时需要跨 worker 迁移。",
+          "practice_task": "对照单进程模式，画出 PD 分离下一条请求在 prefill worker 与 decode worker 之间的流转，并标注 KV 何时需要跨 worker 迁移。",
           "depends_on": [
             "u3-l1",
             "u8-l1"
@@ -1135,7 +1142,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "update"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1209,12 +1216,12 @@
           "order": 2,
           "filename": "u11-l2-sgl-kernel-jit-kernel.md",
           "level": "advanced",
-          "topic": "讲解 RFC #29630 迁移后的统一算子体系：python/sglang/kernels/ 通过 registry（KernelRegistry/register_kernel）+ spec（KernelSpec/KernelBackend/CapabilityRequirement/PlatformInfo）+ selector（get_kernel/select_kernel）按设备能力在 AOT（sgl-kernel）与 JIT 之间自动选择；BaseFusedOp 以多后端 forward_<backend>() 聚合多个实现，ops/ 下按 16 个算子组组织，旧 jit_kernel/ 退化为兼容 shim。",
+          "topic": "讲解 RFC #29630 迁移后的统一算子体系：python/sglang/kernels/ 通过 registry（KernelRegistry/register_kernel）+ spec（KernelSpec/KernelBackend/CapabilityRequirement/PlatformInfo）+ selector（get_kernel/select_kernel）按设备能力在 AOT（sgl-kernel）与 JIT 之间自动选择；BaseFusedOp 以多后端 forward_<backend>() 聚合多个实现，ops/ 下按算子组（attention/communication/diffusion/gemm/layernorm/moe/quantization/kvcache/speculative/mamba/memory 等，经 Phase 4 batch-3 迁移后已扩展至 20 组）组织，旧 jit_kernel/ 持续退化为兼容 shim。",
           "learning_goals": [
             "理解 kernels/ 的统一命名空间与 KernelSpec 注册模型",
             "掌握 selector 如何按设备/能力在 AOT 与 JIT 间解析算子",
             "看懂 BaseFusedOp 多后端分发与后端优先级",
-            "区分 sgl-kernel（AOT）、kernels/jit（JIT 基础设施）与 legacy jit_kernel（shim）"
+            "区分 sgl-kernel（AOT）、kernels/jit（JIT 基础设施）与 legacy jit_kernel（shim），了解 Phase 4 batch-3 后 ops/ 算子组的现状"
           ],
           "source_files": [
             "python/sglang/kernels/registry.py",
@@ -1229,9 +1236,9 @@
             "KernelSpec / CapabilityRequirement / PlatformInfo",
             "selector.get_kernel / select_kernel",
             "BaseFusedOp.forward 多后端分发",
-            "kernels/ops 算子组与 legacy jit_kernel shim 关系"
+            "kernels/ops 算子组（20 组）与 legacy jit_kernel shim 关系"
           ],
-          "practice_task": "在 kernels/ops 中选一个算子（如 layernorm 或 quantization 的 per_token_group_quant），追踪它如何 register_kernel(KernelSpec)、selector 如何按设备解析到 AOT 或 JIT 后端，并说明 BaseFusedOp.forward 的后端优先级顺序；再判断一个新算子应放入 kernels/ops 还是 sgl-kernel。",
+          "practice_task": "在 kernels/ops 中选一个算子（如 layernorm 或 quantization 的 per_token_group_quant），追踪它如何 register_kernel(KernelSpec)、selector 如何按设备解析到 AOT 或 JIT 后端，并说明 BaseFusedOp.forward 的后端优先级顺序；再判断一个新算子应放入 kernels/ops 还是 sgl-kernel，并对照 ops/ 当前 20 个算子组说明本次 Phase 4 batch-3 把哪些原 jit_kernel 子系统（attention/diffusion/kv_canary 等）迁入。",
           "depends_on": [
             "u5-l3"
           ],
@@ -1331,7 +1338,7 @@
             "u1-l4",
             "u5-l1"
           ],
-          "action": "update"
+          "action": "keep"
         }
       ]
     }

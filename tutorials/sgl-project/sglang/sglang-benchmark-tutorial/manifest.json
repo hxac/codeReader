@@ -1,0 +1,948 @@
+{
+  "project": "sglang-benchmark",
+  "head": "4eaa5ca6510622cb0006bcfee5947b17859ac8c7",
+  "rationale": "本手册以 benchmark/ 目录为学习对象，按“先认识整体、再跑通最小评测/吞吐、最后深入内核与基础设施”的顺序组织。Unit 1 帮助读者建立目录四分类（精度评测 / 在线吞吐 / 内核微基准 / 基础设施微基准）与“客户端脚本驱动运行中的 SGLang 服务”的心智模型，并用 MMLU 与 benchmark_batch 跑通第一次精度与吞吐基准；Unit 2-4 覆盖选择题、数学推理、多模态/语音、LLM-judge、多引擎对比、结构化 JSON 输出、长上下文检索、Agent 工作负载等精度评测家族——它们共享 bench_sglang.py 骨架，故集中在前面打通；Unit 5 进入在线服务吞吐，先讲被 hicache/lora 等多处复用的 bench_serving 框架与 TTFT/TPOT/ITL 指标，再分讲多轮对话、在线 LoRA、投机解码自适应；Unit 6 转向缓存（HiCache）、存储后端（3FS）与调度热路径等系统级基准；Unit 7-9 系统梳理内核微基准（通信集合 / MoE 与量化 / 注意力与算子），统一强调 torchrun 多进程与 warmup/barrier/cuda.synchronize 的正确计时范式；Unit 10 以两个实践收尾，要求读者分别独立编写一个精度评测脚本与一个内核微基准。依赖上：评测类讲义大多基于 u1-l2 的评测骨架，服务类基于 u5-l1 的 bench_serving 框架，内核类基于 u7-l1 的计时范式，避免读者在未掌握公共模式前跳入细节。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 benchmark 目录与第一次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "benchmark 目录总览与定位",
+          "order": 1,
+          "filename": "u1-l1-benchmark-overview.md",
+          "level": "beginner",
+          "topic": "介绍 sglang/benchmark 目录的整体定位：它是面向 SGLang 推理服务的评测与压测脚本集合，按精度评测、在线吞吐、内核微基准、基础设施微基准四类组织，并说明这些脚本作为客户端去驱动一个运行中的 SGLang 服务。",
+          "learning_goals": [
+            "理解 benchmark 目录在 sglang 项目中的角色",
+            "区分四类基准各自的用途与典型子目录",
+            "建立“客户端脚本驱动服务端”的心智模型"
+          ],
+          "source_files": [
+            "benchmark/mmlu/README.md",
+            "benchmark/benchmark_batch/benchmark_batch.py",
+            "benchmark/kernels/fused_moe_triton/README.md",
+            "benchmark/hicache/README.md"
+          ],
+          "minimal_modules": [
+            "目录结构与四分类",
+            "客户端-服务端模型",
+            "README 即运行说明"
+          ],
+          "practice_task": "浏览 benchmark 目录，分别列出属于“精度评测”和“内核微基准”的子目录各 5 个，并对每个写一句话说明其评测目标。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "精度评测的通用骨架：以 MMLU 为例",
+          "order": 2,
+          "filename": "u1-l2-eval-skeleton-mmlu.md",
+          "level": "beginner",
+          "topic": "以 mmlu/bench_sglang.py 为样板，拆解一个精度评测脚本的标准结构：下载/构造数据、用 @sgl.function 定义生成程序、select_sglang_backend 选择后端、run_batch 并发执行、计算准确率并把结果写入 JSONL。",
+          "learning_goals": [
+            "掌握 bench_sglang.py 的标准模板",
+            "理解 sgl.function + run_batch 的用法",
+            "知道评测结果如何落盘与对比"
+          ],
+          "source_files": [
+            "benchmark/mmlu/bench_sglang.py",
+            "benchmark/mmlu/README.md",
+            "python/sglang/test/test_utils.py"
+          ],
+          "minimal_modules": [
+            "add_common_sglang_args_and_parse",
+            "select_sglang_backend",
+            "sgl.function/run_batch",
+            "dump_bench_raw_result"
+          ],
+          "practice_task": "仿照 mmlu/bench_sglang.py，把数据源换成一个只含 3 道选择题的本地 CSV，跑通“构造 prompt→生成→统计准确率”的最小流程。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一次吞吐基准：合成数据的批量请求",
+          "order": 3,
+          "filename": "u1-l3-throughput-benchmark-batch.md",
+          "level": "beginner",
+          "topic": "用 benchmark_batch/benchmark_batch.py 讲解一个最小吞吐基准：多进程预生成随机 token prompt，分批通过 HTTP /generate 发送，统计每请求/每 prompt 延迟与吞吐，并用 benchmark_tokenizer.py 衡量分词开销。",
+          "learning_goals": [
+            "理解用合成随机 prompt 压测 prefill 的思路",
+            "掌握 HTTP 端点压测的计时与吞吐统计",
+            "了解分词预处理的并行化"
+          ],
+          "source_files": [
+            "benchmark/benchmark_batch/benchmark_batch.py",
+            "benchmark/benchmark_batch/benchmark_tokenizer.py"
+          ],
+          "minimal_modules": [
+            "ProcessPoolExecutor 预生成",
+            "RuntimeEndpoint",
+            "/generate 请求",
+            "延迟与吞吐统计"
+          ],
+          "practice_task": "修改 benchmark_batch.py 的 NUM_TOKENS/BATCH_SIZE，分别测一次“长 prompt 零生成”和“短 prompt 多生成”，记录吞吐变化并解释原因。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "精度评测基准集",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "选择题评测范式",
+          "order": 1,
+          "filename": "u2-l1-multiple-choice-eval.md",
+          "level": "beginner",
+          "topic": "以 hellaswag/boolq/ceval 为例，讲解 few-shot 多项选择准确率评测：如何组织 dev/test 切分、控制 few-shot token 长度、抽取首字母作为预测答案并与标签比较。",
+          "learning_goals": [
+            "掌握 few-shot MCQ 评测流程",
+            "理解答案抽取与准确率统计",
+            "能套用到任意选择题数据集"
+          ],
+          "source_files": [
+            "benchmark/hellaswag/bench_sglang.py",
+            "benchmark/boolq/bench_sglang.py",
+            "benchmark/ceval/bench_sglang.py",
+            "benchmark/hellaswag/README.md"
+          ],
+          "minimal_modules": [
+            "few-shot prompt 构造",
+            "答案首字母抽取",
+            "加权准确率"
+          ],
+          "practice_task": "选 hellaswag，分别用 0-shot 和 5-shot 跑同一批题，比较准确率差异并记录。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "数学与推理评测",
+          "order": 2,
+          "filename": "u2-l2-math-reasoning-eval.md",
+          "level": "intermediate",
+          "topic": "用 gsm8k 与 reasoning_benchmark 讲解数学推理评测：gsm8k 的答案抽取与对比，reasoning_benchmark 面向 DeepSeek-R1 的 AIME/LIMO 评测，重点解释 num-tries 多次采样、标准误差(SE)与统计稳定性分析。",
+          "learning_goals": [
+            "理解数学题答案匹配方式",
+            "掌握 num-tries 采样评测与标准误差含义",
+            "能解读推理模型的统计结果"
+          ],
+          "source_files": [
+            "benchmark/gsm8k/bench_sglang.py",
+            "benchmark/gsm8k/README.md",
+            "benchmark/reasoning_benchmark/bench_sglang.py",
+            "benchmark/reasoning_benchmark/README.md",
+            "benchmark/reasoning_benchmark/eval_utils.py"
+          ],
+          "minimal_modules": [
+            "answer_extraction 答案抽取",
+            "num-tries 多次采样",
+            "标准误差 SE",
+            "符号等价校验(parse_latex)"
+          ],
+          "practice_task": "用 reasoning_benchmark 在一个小数学数据集上分别跑 num-tries=4 与 16，对比准确率与 SE，观察 SE 是否随尝试次数下降。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "多模态与语音评测",
+          "order": 3,
+          "filename": "u2-l3-multimodal-asr-eval.md",
+          "level": "intermediate",
+          "topic": "讲解多模态评测：mmmu/llava_bench/ocr 的视觉问答（图片输入、prompt_format、eval_utils 评分），以及 asr 的语音识别评测（WER 指标、transcription/chat 两种 API、流式与并发）。",
+          "learning_goals": [
+            "理解视觉与语音多模态评测流程",
+            "掌握 WER 等模态专属指标",
+            "知道多模态 prompt 格式与数据预处理"
+          ],
+          "source_files": [
+            "benchmark/mmmu/bench_sglang.py",
+            "benchmark/mmmu/eval_utils.py",
+            "benchmark/mmmu/prompt_format.yaml",
+            "benchmark/llava_bench/bench_sglang.py",
+            "benchmark/ocr/bench_sglang.py",
+            "benchmark/asr/bench_sglang.py",
+            "benchmark/asr/README.md"
+          ],
+          "minimal_modules": [
+            "图片输入",
+            "prompt_format.yaml",
+            "eval_utils 评分",
+            "WER(jiwer/evaluate)",
+            "transcription API"
+          ],
+          "practice_task": "用 asr/bench_sglang.py 在一个小语音集上分别用 chat 与 transcription 两种 API 跑，比较 WER 与延迟。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "LLM-as-judge 与指令跟随评测",
+          "order": 4,
+          "filename": "u2-l4-llm-judge-instruction-eval.md",
+          "level": "intermediate",
+          "topic": "以 mtbench（多轮指令跟随）和 llm_judge（用大模型当裁判打分）为例，讲解主观/开放式任务的评测：如何组织多轮对话、用 judge 模型评分、汇总分数。",
+          "learning_goals": [
+            "理解 LLM-as-judge 评测范式",
+            "掌握多轮指令跟随打分流程",
+            "知道主观评测的局限"
+          ],
+          "source_files": [
+            "benchmark/mtbench/bench_sglang.py",
+            "benchmark/mtbench/bench_sglang_eagle.py",
+            "benchmark/llm_judge/bench_sglang.py",
+            "benchmark/llm_judge/bench_other.py",
+            "benchmark/llm_judge/README.md"
+          ],
+          "minimal_modules": [
+            "多轮指令数据",
+            "judge 模型打分",
+            "分数聚合"
+          ],
+          "practice_task": "用 llm_judge 对两段不同模型的输出打分，整理 judge 评分理由并讨论其一致性。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "多引擎横向对比：bench_other 模式",
+          "order": 5,
+          "filename": "u2-l5-cross-engine-comparison.md",
+          "level": "intermediate",
+          "topic": "讲解 bench_other.py 这一统一对比入口，如何把同一数据集分别打到 vllm/guidance/lmql/outlines/lightllm 等后端，并以 gsm8k/long_json_decode 的 README 命令为参照，组织一次公平的跨引擎对比。",
+          "learning_goals": [
+            "理解 bench_other 的后端抽象",
+            "掌握跨引擎公平对比的变量控制",
+            "能复现一次 sglang vs 其他引擎的对比"
+          ],
+          "source_files": [
+            "benchmark/gsm8k/bench_other.py",
+            "benchmark/gsm8k/README.md",
+            "benchmark/long_json_decode/bench_other.py",
+            "benchmark/long_json_decode/README.md",
+            "benchmark/mmlu/bench_other.py"
+          ],
+          "minimal_modules": [
+            "backend 选择",
+            "公平对比变量控制",
+            "结果对齐"
+          ],
+          "practice_task": "选一个数据集，按 README 同时起 sglang 与 vllm 服务，用 bench_other.py 跑同一批请求并记录延迟/准确率对比表。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "长文本、检索与结构化输出评测",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "结构化 JSON 输出评测",
+          "order": 1,
+          "filename": "u3-l1-structured-json-eval.md",
+          "level": "intermediate",
+          "topic": "以 json_decode_regex/json_jump_forward/long_json_decode/json_schema 为例，讲解受限生成评测：build_dataset 构造数据，用正则约束、jump-forward 跳转约束、schema 约束保证输出合法 JSON，并衡量合法性与速度。",
+          "learning_goals": [
+            "理解受限生成(constrained decoding)评测目标",
+            "掌握 JSON 合法性统计",
+            "知道正则/jump-forward/schema 三类约束差异"
+          ],
+          "source_files": [
+            "benchmark/json_decode_regex/bench_sglang.py",
+            "benchmark/json_decode_regex/build_dataset.py",
+            "benchmark/json_jump_forward/bench_sglang.py",
+            "benchmark/json_jump_forward/build_dataset.py",
+            "benchmark/long_json_decode/bench_sglang.py",
+            "benchmark/json_schema/bench_sglang.py",
+            "benchmark/json_jump_forward/README.md"
+          ],
+          "minimal_modules": [
+            "build_dataset 数据构造",
+            "正则约束",
+            "jump-forward",
+            "json schema",
+            "合法性率统计"
+          ],
+          "practice_task": "用 json_schema 跑同一 schema 的请求，分别开关约束，统计输出能被 json.loads 解析的成功率。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "长上下文与检索评测",
+          "order": 2,
+          "filename": "u3-l2-long-context-retrieval-eval.md",
+          "level": "intermediate",
+          "topic": "以 line_retrieval（大海捞针）与 multi_document_qa/multi_chain_reasoning 为例，讲解长上下文检索评测：gen_data 构造超长上下文与 needle 问题，衡量模型在不同上下文长度/深度下的命中率。",
+          "learning_goals": [
+            "理解 needle-in-haystack 评测思路",
+            "掌握长上下文命中率的度量",
+            "知道多文档/多跳推理评测的区别"
+          ],
+          "source_files": [
+            "benchmark/line_retrieval/bench_sglang.py",
+            "benchmark/line_retrieval/gen_data.py",
+            "benchmark/multi_document_qa/bench_sglang.py",
+            "benchmark/multi_document_qa/build_dataset.py",
+            "benchmark/multi_chain_reasoning/bench_sglang.py",
+            "benchmark/line_retrieval/README.md"
+          ],
+          "minimal_modules": [
+            "大海捞针数据构造",
+            "命中率统计",
+            "上下文长度/深度扫描"
+          ],
+          "practice_task": "用 line_retrieval/gen_data.py 生成一个 8K 上下文的 needle 数据集，跑评测并画出“上下文深度→命中率”的简单表格。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Agent 与程序化工作负载评测",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Agent 与推理模式工作负载评测",
+          "order": 1,
+          "filename": "u4-l1-agent-workload-eval.md",
+          "level": "intermediate",
+          "topic": "以 react/tree_of_thought/tip_suggestion/generative_agents/dspy 为例，讲解复杂多步推理工作负载的吞吐评测：这些脚本重放固定的 agent 轨迹（而非真实 agent），用 lmql_funcs/agent_functions 组织多步生成请求来衡量延迟与吞吐。",
+          "learning_goals": [
+            "理解“轨迹重放”式压测与真实 agent 的区别",
+            "掌握多步生成工作负载的组织方式",
+            "知道 lmql/dspy 等 DSL 评测的接入"
+          ],
+          "source_files": [
+            "benchmark/react/bench_sglang.py",
+            "benchmark/react/README.md",
+            "benchmark/tree_of_thought_v0/bench_sglang.py",
+            "benchmark/tree_of_thought_deep/lmql_funcs.py",
+            "benchmark/tip_suggestion/lmql_funcs.py",
+            "benchmark/generative_agents/agent_functions.py",
+            "benchmark/dspy/bench_dspy_intro.py"
+          ],
+          "minimal_modules": [
+            "轨迹重放",
+            "多步生成请求",
+            "lmql_funcs/agent_functions",
+            "工作负载吞吐"
+          ],
+          "practice_task": "阅读 react/bench_sglang.py 的轨迹重放逻辑，写一段说明它为什么“不是真实 ReAct agent”，并改造为按固定轮数发请求的最小版本。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "在线服务吞吐基准",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "bench_serving 框架与核心服务指标",
+          "order": 1,
+          "filename": "u5-l1-bench-serving-framework.md",
+          "level": "intermediate",
+          "topic": "讲解 SGLang 服务吞吐基准的统一框架：python/sglang/bench_serving.py 与 sglang/benchmark 包定义了 RequestFuncInput/Output、按 Poisson/常数速率发请求的 get_request、以及 calculate_metrics 计算 TTFT/TPOT/ITL/E2E 延迟与各类吞吐；benchmark/ 下的 hicache/bench_serving.py 与 lora/lora_bench.py 都复用这套框架。",
+          "learning_goals": [
+            "理解 TTFT/TPOT/ITL/吞吐等核心服务指标",
+            "掌握 bench_serving 的请求发生与统计流程",
+            "知道子目录脚本如何复用框架"
+          ],
+          "source_files": [
+            "python/sglang/bench_serving.py",
+            "python/sglang/benchmark/serving.py",
+            "python/sglang/benchmark/utils.py",
+            "benchmark/hicache/bench_serving.py",
+            "benchmark/lora/lora_bench.py"
+          ],
+          "minimal_modules": [
+            "RequestFuncInput/Output",
+            "get_request(Poisson/常数速率)",
+            "calculate_metrics",
+            "TTFT/TPOT/ITL/吞吐"
+          ],
+          "practice_task": "用 python -m sglang.bench_serving 对本地服务跑一次 sharegpt 数据集压测，记录 Median TTFT/ITL 与 output throughput。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "多轮对话与共享前缀服务基准",
+          "order": 2,
+          "filename": "u5-l2-multiturn-shared-prefix-bench.md",
+          "level": "intermediate",
+          "topic": "以 multi_turn_chat 与 hicache 的 multiturn/shared-prefix 模式为例，讲解多轮对话压测：轮次/并发如何组织、round-robin 与 shared-prefix 两种请求顺序对缓存复用的影响，以及 cached_tokens 统计。",
+          "learning_goals": [
+            "理解多轮对话压测的请求编排",
+            "掌握 round-robin vs shared-prefix 对缓存复用的不同影响",
+            "知道 cached_tokens 指标含义"
+          ],
+          "source_files": [
+            "benchmark/multi_turn_chat/bench_sglang.py",
+            "benchmark/multi_turn_chat/data_gen.py",
+            "benchmark/multi_turn_chat/long_prompt_multi_turn.py",
+            "benchmark/hicache/README.md"
+          ],
+          "minimal_modules": [
+            "多轮请求编排",
+            "round-robin",
+            "shared-prefix",
+            "cached_tokens"
+          ],
+          "practice_task": "用 hicache 的 multiturn 模式分别跑 round-robin 与 shared-prefix 两种顺序，比较 cached_tokens 与吞吐。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "在线 LoRA 服务基准",
+          "order": 3,
+          "filename": "u5-l3-online-lora-bench.md",
+          "level": "intermediate",
+          "topic": "以 lora/lora_bench.py 为主，讲解在线多 LoRA 服务压测：随机为每个请求指定 lora_path、随机采样请求、用流式响应采集 TTFT/ITL，以及配套的 launch_server.py 启动多 LoRA 服务。",
+          "learning_goals": [
+            "理解在线 LoRA 服务的压测方式",
+            "掌握 lora_path 随机分配与流式指标采集",
+            "知道 base-only 基线对比"
+          ],
+          "source_files": [
+            "benchmark/lora/lora_bench.py",
+            "benchmark/lora/launch_server.py"
+          ],
+          "minimal_modules": [
+            "随机 lora_path",
+            "sample_random_requests",
+            "流式 TTFT/ITL",
+            "base-only 基线"
+          ],
+          "practice_task": "用 launch_server.py 起一个 4-LoRA 服务，用 lora_bench.py 分别跑 base-only 与多 LoRA，比较吞吐与延迟。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "投机解码自适应基准",
+          "order": 4,
+          "filename": "u5-l4-adaptive-speculative-bench.md",
+          "level": "intermediate",
+          "topic": "以 bench_adaptive_speculative.py 为例，讲解投机解码的自适应 vs 静态对比基准：用 low/high/transition 三种工作负载，统计 accept_length（验收长度）、吞吐与延迟，评估自适应切换的收益。",
+          "learning_goals": [
+            "理解投机解码的验收长度指标",
+            "掌握自适应 vs 静态基线的对比方法",
+            "知道 transition 工作负载如何压测运行时切换"
+          ],
+          "source_files": [
+            "benchmark/bench_adaptive_speculative.py"
+          ],
+          "minimal_modules": [
+            "accept_length",
+            "low/high/transition 工作负载",
+            "自适应 vs 静态",
+            "spec_verify_ct"
+          ],
+          "practice_task": "起一个投机解码服务，用 transition 工作负载跑 bench_adaptive_speculative.py，记录各阶段 accept_length 与吞吐。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "缓存、存储与调度热路径基准",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "分层缓存 HiCache 基准矩阵",
+          "order": 1,
+          "filename": "u6-l1-hicache-bench-matrix.md",
+          "level": "intermediate",
+          "topic": "系统讲解 hicache 目录的分层缓存（Radix vs Hierarchical）基准矩阵：bench_long_context/bench_mix/bench_warm_cache/bench_serving/bench_multiturn/bench_hicache_write_back 分别从长上下文、混合负载、冷热缓存、写回等角度衡量 HiCache 收益，配套 perf.py 与 data_processing/nextqa 数据。",
+          "learning_goals": [
+            "理解分层缓存的设计目标与收益来源",
+            "掌握不同负载下 HiCache 的评测角度",
+            "知道缓存命中率/复用距离的影响因素"
+          ],
+          "source_files": [
+            "benchmark/hicache/bench_long_context.py",
+            "benchmark/hicache/bench_mix.py",
+            "benchmark/hicache/bench_warm_cache.py",
+            "benchmark/hicache/bench_hicache_write_back.py",
+            "benchmark/hicache/perf.py",
+            "benchmark/hicache/README.md"
+          ],
+          "minimal_modules": [
+            "Radix vs Hierarchical 缓存",
+            "缓存命中率",
+            "复用距离",
+            "写回(write-back)"
+          ],
+          "practice_task": "用 bench_long_context.py 分别在 --disable-radix-cache 与 --enable-hierarchical-cache 两种服务配置下跑同一负载，比较 cached_tokens 与吞吐。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "3FS 分布式存储后端基准",
+          "order": 2,
+          "filename": "u6-l2-hf3fs-storage-bench.md",
+          "level": "intermediate",
+          "topic": "以 hf3fs 目录为例，讲解 SGLang HiCache 的 3FS 存储后端微基准：bench_storage 测读写吞吐与延迟分位、bench_zerocopy 测零拷贝路径、bench_client 测元数据客户端，配套 bench.sh 编排。",
+          "learning_goals": [
+            "理解 KV cache 卸载到分布式存储的评测目标",
+            "掌握存储读写吞吐/分位延迟的度量",
+            "知道零拷贝与元数据客户端的作用"
+          ],
+          "source_files": [
+            "benchmark/hf3fs/bench_storage.py",
+            "benchmark/hf3fs/bench_zerocopy.py",
+            "benchmark/hf3fs/bench_client.py",
+            "benchmark/hf3fs/bench.sh"
+          ],
+          "minimal_modules": [
+            "HiCacheHF3FS",
+            "读写吞吐/分位延迟",
+            "零拷贝",
+            "元数据客户端"
+          ],
+          "practice_task": "阅读 bench_storage.py 的分位统计(print_stats)，说明它度量了哪些存储性能维度，并设计一个变量（如 page 大小）做一次对比。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Scheduler 热路径微基准：token 存储容器",
+          "order": 3,
+          "filename": "u6-l3-scheduler-token-storage-bench.md",
+          "level": "intermediate",
+          "topic": "以 scheduler/bench_token_storage.py 为例，讲解调度器热路径上 token 存储容器的微基准：用 list[int] vs array.array('q') 模拟 ingest/prefix_match/prefill/decode/finish 各阶段，量化 PyLong 装箱开销与 radix-tree 匹配代价。",
+          "learning_goals": [
+            "理解调度器热路径上 per-element Python 开销的影响",
+            "掌握分阶段微基准的构造",
+            "知道 list 与 array.array 在不同阶段的权衡"
+          ],
+          "source_files": [
+            "benchmark/scheduler/bench_token_storage.py"
+          ],
+          "minimal_modules": [
+            "STAGES 分阶段",
+            "list[int] vs array.array",
+            "PyLong 装箱",
+            "radix-tree 匹配"
+          ],
+          "practice_task": "运行 bench_token_storage.py，找出哪个阶段 array.array 相对 list 最吃亏，并解释原因。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "请求解析与 prefill-only 基准",
+          "order": 4,
+          "filename": "u6-l4-io-prefill-only-bench.md",
+          "level": "intermediate",
+          "topic": "讲解两个周边微基准：io/bench_input_ids_validator.py 对比默认 pydantic 校验与 C 循环校验器在 input_ids 上的开销；prefill_only 的 bench_score/bench_embeddings 测量 prefill-only 模型（打分/嵌入，如 reranker）的 /v1/score 服务性能，含 util.py 的 BenchmarkConfig 与 Poisson/常数分布。",
+          "learning_goals": [
+            "理解请求体校验在热路径的开销与优化",
+            "掌握 prefill-only(打分/嵌入)服务的压测方式",
+            "知道 RPS/时长/批量的压测配置"
+          ],
+          "source_files": [
+            "benchmark/io/bench_input_ids_validator.py",
+            "benchmark/prefill_only/bench_score.py",
+            "benchmark/prefill_only/bench_embeddings.py",
+            "benchmark/prefill_only/util.py"
+          ],
+          "minimal_modules": [
+            "pydantic vs C-loop 校验",
+            "/v1/score",
+            "BenchmarkConfig",
+            "Poisson/常数分布"
+          ],
+          "practice_task": "运行 bench_input_ids_validator.py，记录 1K/10K/100K/1M token 下两种校验器的耗时比；并用 bench_score.py 对一个 reranker 模型跑一次打分压测。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "内核微基准：通信集合",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "All-Reduce / All-Gather 通信内核基准",
+          "order": 1,
+          "filename": "u7-l1-all-reduce-gather-bench.md",
+          "level": "advanced",
+          "topic": "以 kernels/all_reduce 为主，讲解集合通信内核微基准：用 torchrun 启动多进程，跨消息尺寸对比 SGLang 自定义 custom_all_reduce、Torch symm_mem、aiter、mscclpp 等实现；强调 warmup/iters/barrier/cuda.synchronize 的正确计时范式；all_gather 为另一集合操作。",
+          "learning_goals": [
+            "掌握多进程内核微基准的计时范式",
+            "理解 custom all-reduce 与对称内存实现的差异",
+            "知道消息尺寸扫描与跨 rank 聚合"
+          ],
+          "source_files": [
+            "benchmark/kernels/all_reduce/benchmark_all_reduce.py",
+            "benchmark/kernels/all_reduce/benchmark_aiter.py",
+            "benchmark/kernels/all_reduce/benchmark_mscclpp.py",
+            "benchmark/kernels/all_reduce/benchmark_torch_symm_mem.py",
+            "benchmark/kernels/all_reduce/README.md",
+            "benchmark/kernels/all_gather/benchmark_aiter.py"
+          ],
+          "minimal_modules": [
+            "torchrun 多进程",
+            "warmup/iters/barrier/synchronize",
+            "custom_all_reduce vs symm_mem",
+            "消息尺寸扫描"
+          ],
+          "practice_task": "用 torchrun --nproc_per_node=2 跑 benchmark_all_reduce.py，整理一张“消息尺寸→CustomAR/TorchSymmMem 延迟”对比表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "融合通信、AMD 与 DeepEP 基准",
+          "order": 2,
+          "filename": "u7-l2-fused-comm-amd-deepep-bench.md",
+          "level": "advanced",
+          "topic": "讲解通信相关进阶微基准：flashinfer_allreduce_fusion 的融合 all-reduce+RMSNorm；all_reduce 下 benchmark_fused_ar_rms_amd/quant 的 AMD 融合路径；以及 deepep 的专家并行(Expert Parallel)通信调优。",
+          "learning_goals": [
+            "理解融合通信算子的收益",
+            "知道 AMD 平台的融合 all-reduce 路径",
+            "了解专家并行通信的调优流程"
+          ],
+          "source_files": [
+            "benchmark/kernels/flashinfer_allreduce_fusion/benchmark_fused_collective.py",
+            "benchmark/kernels/flashinfer_allreduce_fusion/README.md",
+            "benchmark/kernels/all_reduce/benchmark_fused_ar_rms_amd.py",
+            "benchmark/kernels/all_reduce/benchmark_fused_ar_rms_quant_amd.py",
+            "benchmark/kernels/deepep/tuning_deepep.py",
+            "benchmark/kernels/deepep/deepep_utils.py"
+          ],
+          "minimal_modules": [
+            "融合 all-reduce+RMSNorm",
+            "AMD 融合路径",
+            "专家并行(DeepEP)通信调优"
+          ],
+          "practice_task": "阅读 benchmark_fused_collective.py，说明“融合”相比“分立”算子减少了哪些 kernel launch/访存，并整理 deepep 调优脚本的输入输出。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "内核微基准：MoE 与量化",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "MoE 内核调优与对比",
+          "order": 1,
+          "filename": "u8-l1-fused-moe-triton-bench.md",
+          "level": "advanced",
+          "topic": "以 kernels/fused_moe_triton 为主，讲解 MoE 内核微基准与调优：TP/EP 两种并行、tuning（自动搜索 BLOCK_M/N/K 等配置）与 benchmark（测特定配置）的区别、与 vllm 实现及 torch.compile 的对比，调优产物如何落到 moe_runner 配置目录。",
+          "learning_goals": [
+            "理解 MoE 内核的 TP/EP 调优维度",
+            "掌握 tuning 与 benchmark 的区别",
+            "知道调优产物如何被 SGLang 加载"
+          ],
+          "source_files": [
+            "benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py",
+            "benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py",
+            "benchmark/kernels/fused_moe_triton/benchmark_vllm_vs_sglang_fused_moe_triton.py",
+            "benchmark/kernels/fused_moe_triton/benchmark_torch_compile_fused_moe.py",
+            "benchmark/kernels/fused_moe_triton/common_utils.py",
+            "benchmark/kernels/fused_moe_triton/README.md"
+          ],
+          "minimal_modules": [
+            "TP/EP 并行",
+            "自动调优(tune)",
+            "BLOCK_M/N/K 配置",
+            "vllm/torch.compile 对比",
+            "调优产物落地"
+          ],
+          "practice_task": "按 README 用 tuning_fused_moe_triton.py 对一个小 MoE 模型跑一次调优，记录生成的配置文件名格式与其落地的目录。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "量化与 DeepGEMM FP8 基准",
+          "order": 2,
+          "filename": "u8-l2-quantization-deepgemm-bench.md",
+          "level": "advanced",
+          "topic": "讲解量化/低精度内核微基准：quantization 的 int8/block-wise 调优（何时用 Triton block-wise、何时用 DeepGEMM，产物落到 quantization/configs）；deepseek 的 DeepGEMM FP8 GEMM/group-GEMM/MLA concat 基准；lora_csgmv 的 LoRA 内核调优。",
+          "learning_goals": [
+            "理解 W8A8 block-wise 量化内核的调优与选型",
+            "掌握 DeepGEMM FP8 的适用条件",
+            "知道内核调优产物的落地与加载"
+          ],
+          "source_files": [
+            "benchmark/kernels/quantization/tuning_block_wise_kernel.py",
+            "benchmark/kernels/quantization/bench_int8_quant.py",
+            "benchmark/kernels/quantization/README.md",
+            "benchmark/kernels/deepseek/benchmark_deepgemm_fp8_gemm.py",
+            "benchmark/kernels/deepseek/benchmark_deepgemm_fp8_group_gemm.py",
+            "benchmark/kernels/deepseek/benchmark_cute_dsl_fp8_paged_mqa_logits.py",
+            "benchmark/kernels/deepseek/README.md",
+            "benchmark/kernels/lora_csgmv/tune_lora_csgmv.py"
+          ],
+          "minimal_modules": [
+            "W8A8 block-wise 调优",
+            "Triton vs DeepGEMM 选型",
+            "FP8 GEMM/group-GEMM",
+            "MLA concat",
+            "配置产物落地"
+          ],
+          "practice_task": "用 tuning_block_wise_kernel.py 对一组 (N,K) 跑调优，说明产物 JSON 如何把 batch size 映射到最优 BLOCK_SIZE；并整理 DeepGEMM 的启用条件（SM90+/bfloat16）。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "内核微基准：注意力与算子",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "注意力内核基准",
+          "order": 1,
+          "filename": "u9-l1-attention-kernel-bench.md",
+          "level": "advanced",
+          "topic": "讲解注意力相关内核微基准：decoding_attention_triton（对比 triton/flashinfer/cudnn 解码注意力）、sliding_window_attention_triton（滑动窗口）、verify_splitkv_triton（split-KV 校验）、bench_attention_sink（注意力 sink）。",
+          "learning_goals": [
+            "理解不同注意力变体的内核评测目标",
+            "掌握解码注意力/滑动窗口/split-KV 的基准构造",
+            "知道对比多后端的方式"
+          ],
+          "source_files": [
+            "benchmark/kernels/decoding_attention_triton/triton_flashinfer_cudnn.py",
+            "benchmark/kernels/sliding_window_attention_triton/bench_triton_swa_kernel.py",
+            "benchmark/kernels/verify_splitkv_triton/bench_verify_splitkv.py",
+            "benchmark/bench_attention_sink/bench_attention_sink_triton.py"
+          ],
+          "minimal_modules": [
+            "解码注意力",
+            "滑动窗口注意力",
+            "split-KV 校验",
+            "attention sink",
+            "多后端对比"
+          ],
+          "practice_task": "运行 triton_flashinfer_cudnn.py，整理“序列长度/batch→三后端延迟”对比，说明哪个后端在哪种形状下占优。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "线性注意力、RoPE 与融合算子基准",
+          "order": 2,
+          "filename": "u9-l2-linear-attention-rope-fused-bench.md",
+          "level": "advanced",
+          "topic": "讲解一组算子微基准：bench_linear_attention 与 fla 的门控线性注意力（Gated DeltaNet，KDA/GDN 的 prefill/decode）、bench_rope 的 RoPE index、以及 kernels/ 下 bench_fused_sigmoid_mul/bench_fused_gate_sigmoid_mul_add 的融合算子。",
+          "learning_goals": [
+            "理解线性注意力内核的评测维度",
+            "掌握 RoPE index 基准",
+            "知道融合算子微基准的构造与收益衡量"
+          ],
+          "source_files": [
+            "benchmark/bench_linear_attention/bench_gdn_decode.py",
+            "benchmark/bench_linear_attention/bench_kda_decode.py",
+            "benchmark/bench_linear_attention/bench_gdn_prefill.py",
+            "benchmark/fla/benchmark_layernorm_gated.py",
+            "benchmark/bench_rope/benchmark_rope_index.py",
+            "benchmark/kernels/bench_fused_sigmoid_mul.py",
+            "benchmark/kernels/bench_fused_gate_sigmoid_mul_add.py"
+          ],
+          "minimal_modules": [
+            "门控线性注意力(GDN/KDA)",
+            "RoPE index",
+            "融合 sigmoid/mul 算子",
+            "算子级微基准"
+          ],
+          "practice_task": "选 bench_gdn_decode.py，说明它扫描了哪些形状/数据类型维度，并整理融合算子 bench_fused_sigmoid_mul.py 相比分立算子的加速比。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Scheduler-batch Triton 内核与算子基准",
+          "order": 3,
+          "filename": "u9-l3-scheduler-batch-triton-bench.md",
+          "level": "advanced",
+          "topic": "讲解 scheduler-batch 相关 Triton 内核微基准：write_req_to_token_pool（写 req→token 池）、get_last_loc（取 last loc）、elementwise 的 concat_mla，以及 in_batch_prefix/pynccl_allocator 等周边算子基准。",
+          "learning_goals": [
+            "理解调度批处理中 token 池写入/位置查询内核的评测",
+            "掌握 elementwise MLA concat 基准",
+            "知道 in-batch prefix 与 allocator 的微基准角度"
+          ],
+          "source_files": [
+            "benchmark/kernels/scheduler_batch/benchmark_write_req_to_token_pool_triton.py",
+            "benchmark/kernels/scheduler_batch/benchmark_get_last_loc_triton.py",
+            "benchmark/kernels/elementwise/benchmark_concat_mla.py",
+            "benchmark/bench_in_batch_prefix/bench_in_batch_prefix.py",
+            "benchmark/bench_pynccl_allocator/bench_segment_tracking.py"
+          ],
+          "minimal_modules": [
+            "req→token 池写入",
+            "get_last_loc",
+            "concat_mla",
+            "in-batch prefix",
+            "pynccl allocator"
+          ],
+          "practice_task": "运行 benchmark_write_req_to_token_pool_triton.py，整理 batch size→写入耗时；并说明 in_batch_prefix 基准衡量的是哪种前缀复用收益。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "扩展实践",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "实践：编写一个新的精度评测基准",
+          "order": 1,
+          "filename": "u10-l1-write-new-eval-bench.md",
+          "level": "advanced",
+          "topic": "综合前述评测模式，指导读者按“数据构造→sgl.function 生成程序→run_batch 并发→指标统计→JSONL 落盘→README”的标准模板，为一个新数据集编写一个完整的精度评测脚本，并可选用 bench_other 接入对比后端。",
+          "learning_goals": [
+            "能独立设计一个精度评测脚本",
+            "能复用 select_sglang_backend/add_common_sglang_args_and_parse 等公共工具",
+            "能产出可复现的 README"
+          ],
+          "source_files": [
+            "benchmark/mmlu/bench_sglang.py",
+            "benchmark/mmlu/README.md",
+            "benchmark/gsm8k/bench_sglang.py",
+            "benchmark/gsm8k/bench_other.py",
+            "python/sglang/test/test_utils.py"
+          ],
+          "minimal_modules": [
+            "评测模板",
+            "公共参数解析",
+            "结果落盘",
+            "README 复现说明"
+          ],
+          "practice_task": "为一个本地选择题/简答题数据集新建 benchmark/mytask/ 目录，实现 bench_sglang.py（含准确率统计与 JSONL 结果）与 README，跑通最小用例。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "实践：编写一个新的内核微基准",
+          "order": 2,
+          "filename": "u10-l2-write-new-kernel-bench.md",
+          "level": "advanced",
+          "topic": "综合前述内核微基准范式，指导读者按“多进程初始化(torchrun)→warmup→计时迭代→barrier/synchronize→跨 rank 聚合→对比表”的标准模板，为一个新的算子或通信原语编写内核微基准，并正确处理计时与对比。",
+          "learning_goals": [
+            "能独立设计一个内核微基准",
+            "能正确使用 warmup/barrier/synchronize 计时",
+            "能组织多实现对比"
+          ],
+          "source_files": [
+            "benchmark/kernels/all_reduce/benchmark_all_reduce.py",
+            "benchmark/kernels/fused_moe_triton/benchmark_sglang_fused_moe_triton.py",
+            "benchmark/kernels/quantization/bench_int8_quant.py",
+            "benchmark/scheduler/bench_token_storage.py"
+          ],
+          "minimal_modules": [
+            "多进程初始化",
+            "warmup/计时范式",
+            "barrier/synchronize",
+            "多实现对比表"
+          ],
+          "practice_task": "选一个 SGLang 内的算子（如某融合算子），新建 benchmark/kernels/myop/，实现一个对比“融合 vs 分立”的微基准，含 warmup/iters 与汇总表。",
+          "depends_on": [
+            "u7-l1",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
