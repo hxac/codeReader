@@ -1,0 +1,1242 @@
+{
+  "project": "sglang-sgl-model-gateway",
+  "head": "0bdd4730af8c215545821049ea9f794519c13fa8",
+  "rationale": "sgl-model-gateway（库名 smg，二进制 sgl-model-gateway/smg/amg）是 SGLang 生态中用 Rust 编写的高性能推理网关，体量大、模块多，包含控制面（Worker 注册/健康/发现）、数据面（HTTP/PD/gRPC/OpenAI 四类路由器）、可靠性（重试/熔断/限流/队列）、负载均衡策略族、可扩展点（MCP/WASM/Mesh/历史存储）和可观测性等子系统。手册按「先跑起来 → 再看启动链路 → 控制面 → 数据面 → 策略 → 可靠性 → gRPC → OpenAI 与状态 → 扩展运维」九个单元、从入门到专家三层推进。第 1-2 单元让读者从零理解定位、构建方式、目录、配置与启动编排；第 3 单元讲清 Worker 抽象、注册表、作业队列与工作流引擎这条控制面主链；第 4-6 单元深入数据面的路由器、RouterManager(IGW)、负载均衡策略与中间件可靠性层；第 7-8 单元覆盖业界首创的全 Rust gRPC 流水线、OpenAI 代理/MCP 工具循环/会话与历史存储等高阶能力；第 9 单元讲服务发现、WASM、Mesh 高可用与多语言绑定等扩展点。讲义之间通过 depends_on 形成清晰依赖，每篇只解决一个主题并结合真实源码与可操作实践任务。本次为 incremental 增量更新：经核对 git diff 40b2119..0bdd4730 范围内共 5 个提交全部属于 sglang Python 主体（CI 修复、get_server_args lint、Inkling 测试、partial_json_parser、min_new_tokens penalizer），sgl-model-gateway 目录树字节级未发生任何变化，因此全部讲义标记为 keep，仅将 head 推进到当前 HEAD，结构与源码引用保持不变。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 sgl-model-gateway 是什么、在 SGLang 生态中的位置，以及控制面/数据面/可靠性/可观测性的整体架构。",
+          "learning_goals": [
+            "理解网关的定位：模型路由控制面与数据面",
+            "区分控制面（Worker 管理/作业队列/发现）与数据面（HTTP/PD/gRPC/OpenAI 路由）",
+            "了解库依赖与外部 crate（smg-mesh、smg-mcp、reasoning-parser、openai-protocol 等）的边界"
+          ],
+          "source_files": [
+            "README.md",
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml workspace/deps",
+            "lib.rs 模块导出",
+            "README 架构总览"
+          ],
+          "practice_task": "阅读 README 与 Cargo.toml，画出一张包含控制面、数据面、可靠性、可观测性四个区域的架构草图，并标注每类路由器依赖的外部 crate。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、安装与发布",
+          "order": 2,
+          "filename": "u1-l2-build-and-install.md",
+          "level": "beginner",
+          "topic": "讲解 Rust 二进制与 Python wheel 的构建方式、Cargo profile、构建脚本与发布流程。",
+          "learning_goals": [
+            "掌握 cargo build --release 与 Docker 镜像的使用",
+            "理解 release/ci/dev 等 profile 的取舍（opt-level、LTO、codegen-units）",
+            "了解 build.rs 的作用与 Makefile 发布脚本"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "Makefile",
+            "build.rs",
+            "rust-toolchain.toml",
+            "bindings/python/Cargo.toml"
+          ],
+          "minimal_modules": [
+            "Cargo profile.release/ci/dev",
+            "build.rs",
+            "Makefile release-notes 目标"
+          ],
+          "practice_task": "分别用 debug 和 release profile 构建二进制，对比二进制体积；用 maturin develop 在 bindings/python 下构建并安装 Python 包。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速启动与运行模式",
+          "order": 3,
+          "filename": "u1-l3-quickstart-and-modes.md",
+          "level": "beginner",
+          "topic": "通过 CLI 快速启动网关，理解常规/PD/IGW/gRPC/OpenAI 五种运行模式与三种二进制别名。",
+          "learning_goals": [
+            "会用 --worker-urls 启动常规 HTTP 路由",
+            "区分 Regular、PrefillDecode、IGW、gRPC、OpenAI 五种模式",
+            "理解 --version / --version-verbose 与版本信息"
+          ],
+          "source_files": [
+            "README.md",
+            "src/main.rs",
+            "src/version.rs"
+          ],
+          "minimal_modules": [
+            "main.rs Backend 枚举",
+            "version.rs",
+            "README Quick Start"
+          ],
+          "practice_task": "启动两个 mock HTTP worker（可用 nc 或简单服务），用 smg --worker-urls 启动网关并向 /v1/chat/completions 发一次请求，观察日志中的模式与策略输出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "源码目录结构与模块地图",
+          "order": 4,
+          "filename": "u1-l4-source-layout.md",
+          "level": "beginner",
+          "topic": "梳理 src/ 下 config、core、routers、policies、observability、wasm、middleware 等模块的组织方式与依赖关系。",
+          "learning_goals": [
+            "掌握顶层模块划分与职责",
+            "理解 core（抽象）/routers（数据面）/policies（策略）的分层",
+            "了解 bindings、benches、e2e_test、examples 的用途"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/app_context.rs",
+            "src/server.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块树",
+            "src/core/mod.rs",
+            "src/routers/mod.rs"
+          ],
+          "practice_task": "在 src/ 下绘制一张模块依赖图，标注 config→core→policies→routers 的依赖方向，并指出哪些模块会被 main.rs 直接引用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "配置与启动链路",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "CLI 参数与 RouterConfig 构建",
+          "order": 1,
+          "filename": "u2-l1-cli-and-router-config.md",
+          "level": "beginner",
+          "topic": "讲解 clap 定义的 CliArgs 如何通过 builder 模式转换为 RouterConfig，包括策略解析与历史后端选择。",
+          "learning_goals": [
+            "理解 CliArgs 结构与分组（Worker/Policy/PD/Discovery/Retry 等）",
+            "掌握 to_router_config 与 RouterConfig::builder 链式构建",
+            "理解 --prefill 可选 bootstrap 端口的特殊解析逻辑"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "src/config/builder.rs"
+          ],
+          "minimal_modules": [
+            "CliArgs",
+            "to_router_config",
+            "RouterConfig::builder"
+          ],
+          "practice_task": "在 main.rs 中新增一个布尔型 CLI 参数，并通过 builder 将其注入 RouterConfig，验证 cargo run -- --help 能看到该参数。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配置类型与校验",
+          "order": 2,
+          "filename": "u2-l2-config-types-and-validation.md",
+          "level": "beginner",
+          "topic": "讲解 RouterConfig 及其子配置（重试、熔断、健康检查、历史后端、TLS、tokenizer 缓存）的字段与校验规则。",
+          "learning_goals": [
+            "理解 RouterConfig 各字段语义与默认值",
+            "掌握 RoutingMode（Regular/PrefillDecode/OpenAI）与 ConnectionMode",
+            "了解 ConfigError 与 validate() 校验链"
+          ],
+          "source_files": [
+            "src/config/types.rs",
+            "src/config/validation.rs",
+            "src/config/mod.rs"
+          ],
+          "minimal_modules": [
+            "RouterConfig",
+            "RoutingMode",
+            "CircuitBreakerConfig",
+            "HistoryBackend"
+          ],
+          "practice_task": "构造一个非法的 RouterConfig（如 oracle 未提供凭据），调用 validate() 并观察 ConfigError 的错误信息分类。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "server::startup 启动编排",
+          "order": 3,
+          "filename": "u2-l3-server-startup.md",
+          "level": "beginner",
+          "topic": "跟踪从 main 到 server::startup 的完整启动流程：日志/指标初始化、Mesh、AppContext、作业队列、RouterManager、健康检查、服务发现。",
+          "learning_goals": [
+            "理解 startup 中各子系统的初始化顺序",
+            "掌握 tokenizer / worker / MCP 启动作业的提交时机",
+            "理解 OnceLock 在惰性初始化中的作用"
+          ],
+          "source_files": [
+            "src/server.rs",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "server::startup",
+            "JobQueue 提交",
+            "RouterManager::from_config"
+          ],
+          "practice_task": "在 startup 中插入两行 tracing::info，分别在 AppContext 创建前后输出，运行后对比日志时间线，解释初始化顺序的必要性。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "AppContext 共享状态",
+          "order": 4,
+          "filename": "u2-l4-app-context.md",
+          "level": "beginner",
+          "topic": "讲解 AppContext 如何聚合 worker_registry、policy_registry、storage、tokenizer_registry、mcp_manager 等共享组件。",
+          "learning_goals": [
+            "理解 AppContext 字段构成与克隆语义（Arc 共享）",
+            "掌握 from_config / builder 的组件装配",
+            "了解 OnceLock 字段（job_queue/engines/mcp_manager）的惰性设置"
+          ],
+          "source_files": [
+            "src/app_context.rs"
+          ],
+          "minimal_modules": [
+            "AppContext",
+            "AppContextBuilder",
+            "from_config"
+          ],
+          "practice_task": "列出 AppContext 中所有 Arc 字段，说明哪些是启动即就绪、哪些通过 OnceLock 延迟初始化，并解释这样设计的原因。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Axum 应用与路由表",
+          "order": 5,
+          "filename": "u2-l5-axum-app-and-routes.md",
+          "level": "beginner",
+          "topic": "讲解 build_app 如何组装 public/protected/admin/worker/mesh 路由组以及中间件分层。",
+          "learning_goals": [
+            "掌握路由分组与认证保护范围",
+            "理解 concurrency_limit / auth / wasm 三层中间件的顺序",
+            "了解 /liveness /readiness 与 readiness 的就绪判定逻辑"
+          ],
+          "source_files": [
+            "src/server.rs",
+            "src/middleware.rs"
+          ],
+          "minimal_modules": [
+            "build_app",
+            "readiness",
+            "AuthConfig"
+          ],
+          "practice_task": "在 build_app 中为一个新端点添加路由，并将其放入 protected 组使其受认证保护，编写一个测试验证未带 key 返回 401。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "控制面：Worker 生命周期",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Worker 抽象与构建器",
+          "order": 1,
+          "filename": "u3-l1-worker-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解 Worker trait、WorkerType、ConnectionMode、CircuitBreaker 集成与 BasicWorkerBuilder 构建器。",
+          "learning_goals": [
+            "理解 Worker trait 的核心方法（url/worker_type/circuit_breaker/load）",
+            "区分 Regular/Prefill/Decode 三种 WorkerType 与 DP 信息",
+            "掌握 BasicWorkerBuilder 与 DPAwareWorkerBuilder 的用法"
+          ],
+          "source_files": [
+            "src/core/worker.rs",
+            "src/core/worker_builder.rs",
+            "src/core/model_type.rs",
+            "src/core/model_card.rs"
+          ],
+          "minimal_modules": [
+            "Worker trait",
+            "WorkerType",
+            "BasicWorkerBuilder",
+            "ModelCard"
+          ],
+          "practice_task": "用 BasicWorkerBuilder 构造一个带 circuit breaker 的 Regular worker，调用其 load guard 与 is_healthy 接口，编写单元测试断言状态。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "WorkerRegistry 与 HashRing",
+          "order": 2,
+          "filename": "u3-l2-worker-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 WorkerRegistry 的并发安全存储、按 model/type/connection 查询，以及 HashRing 一致性哈希环。",
+          "learning_goals": [
+            "理解 registry 的注册/移除/按维度查询 API",
+            "掌握 HashRing 的构建与 find_healthy_url 查找",
+            "了解 get_hash_ring 的缓存与 set_mesh_sync"
+          ],
+          "source_files": [
+            "src/core/worker_registry.rs"
+          ],
+          "minimal_modules": [
+            "WorkerRegistry",
+            "HashRing",
+            "WorkerId"
+          ],
+          "practice_task": "注册若干 worker 并调用 get_by_model / get_prefill_workers / get_hash_ring，编写测试验证一致性哈希在 worker 增减时的迁移比例。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "WorkerManager 与 LoadMonitor",
+          "order": 3,
+          "filename": "u3-l3-worker-manager-and-loadmonitor.md",
+          "level": "intermediate",
+          "topic": "讲解 WorkerManager 的 flush_cache_all、get_all_worker_loads、get_engine_metrics，以及 LoadMonitor 的轮询与订阅。",
+          "learning_goals": [
+            "理解 flush_cache 与 get_loads 的实现",
+            "掌握 LoadMonitor 的 start/stop/subscribe 周期采样",
+            "了解 load 数据如何驱动 power_of_two 等策略"
+          ],
+          "source_files": [
+            "src/core/worker_manager.rs",
+            "src/core/worker_service.rs"
+          ],
+          "minimal_modules": [
+            "WorkerManager",
+            "LoadMonitor",
+            "flush_cache_all"
+          ],
+          "practice_task": "启动 LoadMonitor 并 subscribe 一个 receiver，注入若干 worker 模拟负载，打印采样到的负载快照。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "JobQueue 异步作业队列",
+          "order": 4,
+          "filename": "u3-l4-job-queue.md",
+          "level": "intermediate",
+          "topic": "讲解 Job 枚举、JobQueue 的 mpsc+信号量并发模型与作业状态跟踪。",
+          "learning_goals": [
+            "理解 Job 枚举涵盖的 worker/MCP/WASM/tokenizer 作业",
+            "掌握 submit/process_job 的异步分发与并发限制",
+            "了解 status_map 的 pending/processing/failed 状态"
+          ],
+          "source_files": [
+            "src/core/job_queue.rs"
+          ],
+          "minimal_modules": [
+            "Job",
+            "JobQueue",
+            "JobQueueConfig",
+            "JobStatus"
+          ],
+          "practice_task": "构造一个 JobQueue，提交 AddWorker 与 RemoveWorker 作业，轮询 /workers/{id} 状态字段，观察从 pending 到 processing 的变化。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Workflow 引擎与注册步骤",
+          "order": 5,
+          "filename": "u3-l5-workflow-engines-and-steps.md",
+          "level": "intermediate",
+          "topic": "讲解基于 wfaas 的 WorkflowEngines 与 steps 模块（worker/MCP/WASM/tokenizer 的多步工作流）。",
+          "learning_goals": [
+            "理解 WorkflowEngines 的类型化引擎与 subscribe_all 日志订阅",
+            "掌握 worker 注册工作流的步骤链（发现元数据/模型/连接模式/激活）",
+            "了解本地 vs 外部 worker 工作流的差异"
+          ],
+          "source_files": [
+            "src/core/steps/mod.rs",
+            "src/core/steps/worker.rs",
+            "src/core/steps/workflow_engines.rs",
+            "src/core/steps/workflow_data.rs"
+          ],
+          "minimal_modules": [
+            "WorkflowEngines",
+            "DiscoverMetadataStep",
+            "CreateLocalWorkerStep",
+            "ActivateWorkersStep"
+          ],
+          "practice_task": "梳理 create_local_worker_workflow 的步骤顺序，画出从 DetectConnectionModeStep 到 ActivateWorkersStep 的流程图，并解释每步的输入输出。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l6",
+          "title": "Worker 管理 API 与 WorkerService",
+          "order": 6,
+          "filename": "u3-l6-worker-api-and-service.md",
+          "level": "intermediate",
+          "topic": "讲解 /workers REST 接口（增删改查 + 202 异步）与 WorkerService 对作业的封装。",
+          "learning_goals": [
+            "掌握 POST/GET/PUT/DELETE /workers 的语义与 202 Accepted 模式",
+            "理解 WorkerService 如何将 HTTP 请求转为 Job 提交",
+            "了解 worker 注册请求体 WorkerConfigRequest 的字段"
+          ],
+          "source_files": [
+            "src/server.rs",
+            "src/core/worker_service.rs"
+          ],
+          "minimal_modules": [
+            "create_worker",
+            "list_workers_rest",
+            "WorkerService"
+          ],
+          "practice_task": "用 curl 向运行中的网关注册一个 worker，立即 GET /workers/{id} 查看作业状态，再轮询直到 processing 完成。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l7",
+          "title": "健康检查与启动探活",
+          "order": 7,
+          "filename": "u3-l7-health-checks.md",
+          "level": "intermediate",
+          "topic": "讲解 per-worker 健康探针、失败/成功阈值、worker_startup 超时与 readiness 判定。",
+          "learning_goals": [
+            "理解 HealthConfig 与 start_health_checker 的周期探活",
+            "掌握健康状态如何反馈到 circuit breaker 与 registry",
+            "了解 worker_startup_timeout/check_interval 的作用"
+          ],
+          "source_files": [
+            "src/core/worker.rs",
+            "src/core/worker_registry.rs",
+            "src/config/types.rs"
+          ],
+          "minimal_modules": [
+            "HealthConfig",
+            "update_worker_health",
+            "start_health_checker"
+          ],
+          "practice_task": "配置不同的失败/成功阈值，模拟 worker 健康端点间歇失败，观察 worker 在 registry 中 healthy 状态的翻转。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "数据面：路由器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "RouterTrait 与 RouterFactory",
+          "order": 1,
+          "filename": "u4-l1-router-trait-and-factory.md",
+          "level": "intermediate",
+          "topic": "讲解 RouterTrait 统一接口与 RouterFactory 按 connection_mode+mode 分发创建路由器的逻辑。",
+          "learning_goals": [
+            "理解 RouterTrait 的 route_chat/route_generate/route_embeddings 等方法",
+            "掌握 RouterFactory 按 Grpc/Http × Regular/PD/OpenAI 的分发矩阵",
+            "了解默认 501 Not Implemented 的设计"
+          ],
+          "source_files": [
+            "src/routers/mod.rs",
+            "src/routers/factory.rs"
+          ],
+          "minimal_modules": [
+            "RouterTrait",
+            "RouterFactory",
+            "create_router"
+          ],
+          "practice_task": "阅读 factory.rs，列出所有 (connection_mode, routing_mode) 组合对应的创建函数，并标注哪些组合会返回错误。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "RouterManager 与 IGW 多模型",
+          "order": 2,
+          "filename": "u4-l2-router-manager-and-igw.md",
+          "level": "intermediate",
+          "topic": "讲解 RouterManager 如何协调多个路由器实现多模型推理网关（IGW）与按 model 路由。",
+          "learning_goals": [
+            "理解 from_config 构建 RouterManager 的过程",
+            "掌握 get_router_for_model / select_router_for_request 的分发",
+            "了解 IGW 模式下 per-model 策略的应用"
+          ],
+          "source_files": [
+            "src/routers/router_manager.rs"
+          ],
+          "minimal_modules": [
+            "RouterManager",
+            "get_router_for_model",
+            "select_router_for_request"
+          ],
+          "practice_task": "用 --enable-igw 启动网关，注册两个不同 model_id 的 worker，发送不同 model 的请求，验证请求被路由到对应 worker。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "HTTP 常规路由器",
+          "order": 3,
+          "filename": "u4-l3-http-regular-router.md",
+          "level": "intermediate",
+          "topic": "讲解 HTTP Router 的请求处理主链路：策略选 worker、注入 trace、转发、重试与流式回传。",
+          "learning_goals": [
+            "理解 route_chat 等方法的选 worker→转发→重试流程",
+            "掌握 RetryExecutor 与 BreakerTrackedStream 在转发中的协作",
+            "了解 dp_aware 与 enable_igw 对选路的影响"
+          ],
+          "source_files": [
+            "src/routers/http/router.rs"
+          ],
+          "minimal_modules": [
+            "Router",
+            "route_chat",
+            "RetryExecutor",
+            "BreakerTrackedStream"
+          ],
+          "practice_task": "在 route_chat 路径上加一条 tracing::info 记录被选中的 worker url 与耗时，运行后从日志确认选路与转发链路。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "HTTP PD 分离部署路由器",
+          "order": 4,
+          "filename": "u4-l4-http-pd-router.md",
+          "level": "intermediate",
+          "topic": "讲解 Prefill/Decode 分离部署的 PDRouter：双策略、元数据合并与 bootstrap 端口处理。",
+          "learning_goals": [
+            "理解 prefill/decode worker 的配对与双策略选择",
+            "掌握 prefill 元数据与 decode 输出的流式合并",
+            "了解 bootstrap port 的传递与 cache-aware 合并"
+          ],
+          "source_files": [
+            "src/routers/http/pd_router.rs",
+            "src/routers/http/pd_types.rs"
+          ],
+          "minimal_modules": [
+            "PDRouter",
+            "pd_types",
+            "bootstrap port"
+          ],
+          "practice_task": "用 --pd-disaggregation 启动一前置填一解码的拓扑（可用 mock），发送请求并解释日志中 prefill→decode 的元数据流转。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l5",
+          "title": "流式响应与 streaming_utils",
+          "order": 5,
+          "filename": "u4-l5-streaming-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 SSE 流式响应的工具函数、BreakerTrackedStream 与请求头处理。",
+          "learning_goals": [
+            "理解 SSE 流的转发与背压处理",
+            "掌握 BreakerTrackedStream 如何在流结束时上报熔断器结果",
+            "了解 header_utils 中 trace/请求头的透传"
+          ],
+          "source_files": [
+            "src/routers/streaming_utils.rs",
+            "src/routers/header_utils.rs"
+          ],
+          "minimal_modules": [
+            "BreakerTrackedStream",
+            "streaming_utils",
+            "header_utils"
+          ],
+          "practice_task": "实现一个 mock 的 SSE worker，用网关转发流式响应，断言客户端收到的 chunk 数与 worker 一致且 trace 头被透传。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "负载均衡策略",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "策略体系、PolicyRegistry 与 Factory",
+          "order": 1,
+          "filename": "u5-l1-policy-registry-and-factory.md",
+          "level": "intermediate",
+          "topic": "讲解 LoadBalancingPolicy trait、SelectWorkerInfo、PolicyRegistry 与 PolicyFactory。",
+          "learning_goals": [
+            "理解 LoadBalancingPolicy 的 select_worker/on_request_complete 等方法",
+            "掌握 PolicyRegistry 的 per-model 策略与 prefill/decode 策略",
+            "了解 PolicyFactory 从 PolicyConfig 创建策略"
+          ],
+          "source_files": [
+            "src/policies/mod.rs",
+            "src/policies/registry.rs",
+            "src/policies/factory.rs"
+          ],
+          "minimal_modules": [
+            "LoadBalancingPolicy",
+            "PolicyRegistry",
+            "PolicyFactory",
+            "SelectWorkerInfo"
+          ],
+          "practice_task": "实现一个自定义 LoadBalancingPolicy（如总是选第一个健康 worker），通过 PolicyFactory 注册并验证 select_worker 返回值。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "基础策略：random / round_robin / power_of_two",
+          "order": 2,
+          "filename": "u5-l2-basic-policies.md",
+          "level": "intermediate",
+          "topic": "讲解三种基础无状态/轻状态策略的实现与适用场景。",
+          "learning_goals": [
+            "理解 random 的均匀选择与 round_robin 的原子计数",
+            "掌握 power_of_two 的两随机取轻及其与 LoadMonitor 的协作",
+            "了解 get_healthy_worker_indices 的过滤逻辑"
+          ],
+          "source_files": [
+            "src/policies/random.rs",
+            "src/policies/round_robin.rs",
+            "src/policies/power_of_two.rs"
+          ],
+          "minimal_modules": [
+            "RandomPolicy",
+            "RoundRobinPolicy",
+            "PowerOfTwoPolicy"
+          ],
+          "practice_task": "编写基准测试比较三种策略在 8 个 worker 下的负载分布方差，验证 power_of_two 比随机更均衡。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "cache_aware 策略与前缀树",
+          "order": 3,
+          "filename": "u5-l3-cache-aware-policy.md",
+          "level": "intermediate",
+          "topic": "讲解基于前缀树的 cache_aware 策略：插入/匹配/驱逐，以及负载均衡阈值与 DP-aware。",
+          "learning_goals": [
+            "理解前缀树如何缓存 prompt→worker 映射以复用 KV cache",
+            "掌握 cache_threshold/balance 阈值的触发条件",
+            "了解 evict_cache 与 mesh 远程树操作的同步"
+          ],
+          "source_files": [
+            "src/policies/cache_aware.rs",
+            "src/policies/tree.rs"
+          ],
+          "minimal_modules": [
+            "CacheAwarePolicy",
+            "PrefixTree",
+            "TreeOperation"
+          ],
+          "practice_task": "构造相同前缀的多次请求，验证 cache_aware 将它们路由到同一 worker，并在超过 balance 阈值时发生再均衡。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "高级策略：prefix_hash / manual / consistent hashing / bucket",
+          "order": 4,
+          "filename": "u5-l4-advanced-policies.md",
+          "level": "intermediate",
+          "topic": "讲解会话亲和与一致性策略族：prefix_hash、manual、consistent hashing、bucket。",
+          "learning_goals": [
+            "理解 prefix_hash 基于 token 前缀的哈希与负载因子",
+            "掌握 manual 策略的 routing key 固定与赋值模式",
+            "了解 consistent hashing 与 bucket 的均衡调节"
+          ],
+          "source_files": [
+            "src/policies/prefix_hash.rs",
+            "src/policies/manual.rs",
+            "src/policies/consistent_hashing.rs",
+            "src/policies/bucket.rs"
+          ],
+          "minimal_modules": [
+            "PrefixHashPolicy",
+            "ManualPolicy",
+            "ConsistentHashingPolicy",
+            "BucketPolicy"
+          ],
+          "practice_task": "用 manual 策略配合 X-SMG-Routing-Key 头发送请求，验证相同 key 固定到同一 worker；改 key 后观察迁移。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "可靠性与中间件",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "重试执行器 RetryExecutor",
+          "order": 1,
+          "filename": "u6-l1-retry-executor.md",
+          "level": "intermediate",
+          "topic": "讲解带指数退避与抖动的重试执行器，以及可重试状态码判定。",
+          "learning_goals": [
+            "理解 execute_response_with_retry 的回调式重试",
+            "掌握 backoff_multiplier / jitter_factor 的退避计算",
+            "了解 is_retryable_status 对 408/429/5xx 的判定"
+          ],
+          "source_files": [
+            "src/core/retry.rs"
+          ],
+          "minimal_modules": [
+            "RetryExecutor",
+            "is_retryable_status",
+            "RetryConfig"
+          ],
+          "practice_task": "构造一个间歇返回 503 的 mock worker，配置重试参数，统计客户端最终成功所需的平均重试次数。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "熔断器 CircuitBreaker",
+          "order": 2,
+          "filename": "u6-l2-circuit-breaker.md",
+          "level": "intermediate",
+          "topic": "讲解 per-worker 熔断器的三态机（closed/open/half-open）与滑动窗口统计。",
+          "learning_goals": [
+            "理解 CircuitState 转换与 can_execute 判定",
+            "掌握 record_outcome/success/failure 的状态推进",
+            "了解 disable_circuit_breaker 的实现方式"
+          ],
+          "source_files": [
+            "src/core/circuit_breaker.rs"
+          ],
+          "minimal_modules": [
+            "CircuitBreaker",
+            "CircuitState",
+            "record_outcome"
+          ],
+          "practice_task": "注入连续失败使熔断器进入 open，断言 can_execute 返回 false，等待 timeout 后验证 half-open 的探活逻辑。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "令牌桶限流与并发队列",
+          "order": 3,
+          "filename": "u6-l3-token-bucket-and-queue.md",
+          "level": "intermediate",
+          "topic": "讲解 TokenBucket 令牌桶与 concurrency_limit_middleware 的请求排队。",
+          "learning_goals": [
+            "理解 TokenBucket 的 capacity/refill 与 acquire_timeout",
+            "掌握 max_concurrent_requests / queue_size / queue_timeout 的协作",
+            "了解 FIFO 队列与请求取消"
+          ],
+          "source_files": [
+            "src/core/token_bucket.rs",
+            "src/middleware.rs"
+          ],
+          "minimal_modules": [
+            "TokenBucket",
+            "concurrency_limit_middleware",
+            "QueuedRequest"
+          ],
+          "practice_task": "配置较小的 max_concurrent_requests 与 queue_size，并发压测，观察部分请求被排队或拒绝（429）的行为。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "中间件链与认证（API Key / JWT / RBAC）",
+          "order": 4,
+          "filename": "u6-l4-middleware-and-auth.md",
+          "level": "intermediate",
+          "topic": "讲解 axum 中间件链（auth/wasm/concurrency）与控制面 RBAC（API Key、JWT/OIDC、审计）。",
+          "learning_goals": [
+            "理解三层中间件的执行顺序与职责",
+            "掌握 ControlPlaneAuthConfig 的 API Key + JWT 组合",
+            "了解 admin/worker 路由的 control_plane_auth 保护与审计"
+          ],
+          "source_files": [
+            "src/middleware.rs",
+            "src/server.rs"
+          ],
+          "minimal_modules": [
+            "auth_middleware",
+            "AuthConfig",
+            "control_plane_auth_middleware",
+            "ControlPlaneAuthConfig"
+          ],
+          "practice_task": "配置一个 admin API Key 与一个 user JWT role mapping，分别用两种凭据访问 /workers，验证角色与审计日志输出。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "gRPC 数据面",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "gRPC 路由器总览与客户端",
+          "order": 1,
+          "filename": "u7-l1-grpc-router-and-client.md",
+          "level": "advanced",
+          "topic": "讲解全 Rust gRPC 路由器结构、HarmonyDetector 与底层 GrpcClient。",
+          "learning_goals": [
+            "理解 GrpcRouter 的 harmony/regular 双流水线选择",
+            "掌握 HarmonyDetector 如何按模型判定走 harmony 流水线",
+            "了解 GrpcClient 与 SRT gRPC worker 的通信"
+          ],
+          "source_files": [
+            "src/routers/grpc/mod.rs",
+            "src/routers/grpc/router.rs",
+            "src/routers/grpc/client.rs"
+          ],
+          "minimal_modules": [
+            "GrpcRouter",
+            "HarmonyDetector",
+            "GrpcClient"
+          ],
+          "practice_task": "阅读 GrpcRouter::new，列出其持有的 pipeline 与 context 字段，并说明 route_chat_impl 如何根据 is_harmony 分流。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "gRPC 请求流水线与阶段",
+          "order": 2,
+          "filename": "u7-l2-grpc-pipeline-and-stages.md",
+          "level": "advanced",
+          "topic": "讲解 RequestPipeline 的多种构造（regular/harmony/pd/embeddings/classify）与阶段链。",
+          "learning_goals": [
+            "理解 new_regular/new_harmony/new_pd 等流水线构造",
+            "掌握 preparation→request_building→response_processing 阶段",
+            "了解 execute_chat/execute_generate 等执行入口"
+          ],
+          "source_files": [
+            "src/routers/grpc/pipeline.rs",
+            "src/routers/grpc/regular/stages/mod.rs",
+            "src/routers/grpc/context.rs"
+          ],
+          "minimal_modules": [
+            "RequestPipeline",
+            "PreparationStage",
+            "RequestBuildingStage",
+            "ResponseProcessingStage"
+          ],
+          "practice_task": "画出 new_regular 流水线的阶段依赖图，标注每个阶段读取与产出的上下文字段（context.rs）。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "gRPC 响应处理与 reasoning/tool 解析",
+          "order": 3,
+          "filename": "u7-l3-grpc-response-and-parsers.md",
+          "level": "advanced",
+          "topic": "讲解流式/非流式响应处理、reasoning parser 与 tool parser 的解析循环。",
+          "learning_goals": [
+            "理解 process_single_choice / process_non_streaming_chat_response",
+            "掌握 reasoning_parser（deepseek-r1/qwen3/glm 等）的选择与分离",
+            "了解 tool_parser（json/python/xml）的 tool call 提取"
+          ],
+          "source_files": [
+            "src/routers/grpc/regular/processor.rs",
+            "src/routers/grpc/regular/stages/response_processing.rs"
+          ],
+          "minimal_modules": [
+            "Processor",
+            "process_single_choice",
+            "parse_tool_calls"
+          ],
+          "practice_task": "用 deepseek-r1 reasoning parser 与 json tool parser 配置 gRPC 路由器，发送一段含 <think> 与 tool call 的输出，验证被正确分离。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "gRPC PD 路由与 Harmony 流水线",
+          "order": 4,
+          "filename": "u7-l4-grpc-pd-and-harmony.md",
+          "level": "advanced",
+          "topic": "讲解 gRPC PD 路由器与 OpenAI Harmony 格式流水线的实现。",
+          "learning_goals": [
+            "理解 GrpcPDRouter 的 prefill/decode 双流水线",
+            "掌握 harmony stages（preparation/request_building/response_processing）",
+            "了解 harmony responses 的流式与非流式实现"
+          ],
+          "source_files": [
+            "src/routers/grpc/pd_router.rs",
+            "src/routers/grpc/harmony/mod.rs",
+            "src/routers/grpc/harmony/detector.rs"
+          ],
+          "minimal_modules": [
+            "GrpcPDRouter",
+            "HarmonyDetector",
+            "harmony stages"
+          ],
+          "practice_task": "对照 new_harmony 与 new_regular 流水线，列出 harmony 特有的阶段，并解释 HarmonyDetector 为何需要按 registry 判定模型。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "OpenAI 路由器与状态管理",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "OpenAI 路由器与 provider 代理",
+          "order": 1,
+          "filename": "u8-l1-openai-router-and-provider.md",
+          "level": "advanced",
+          "topic": "讲解 OpenAIRouter 如何代理 OpenAI 兼容请求、保留 header 与 SSE 语义。",
+          "learning_goals": [
+            "理解 OpenAI backend 模式的单端点代理（不做负载均衡）",
+            "掌握 provider 对 chat/responses 的转发与流式保留",
+            "了解外部 worker 的发现与注册"
+          ],
+          "source_files": [
+            "src/routers/openai/mod.rs",
+            "src/routers/openai/router.rs",
+            "src/routers/openai/provider.rs"
+          ],
+          "minimal_modules": [
+            "OpenAIRouter",
+            "provider",
+            "RouterFactory::create_openai_router"
+          ],
+          "practice_task": "用 --backend openai 指向一个 mock OpenAI 兼容服务，转发一次 chat completions，验证 header 与 SSE 流被透传。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "/v1/responses 与 MCP 工具循环",
+          "order": 2,
+          "filename": "u8-l2-responses-and-mcp-loop.md",
+          "level": "advanced",
+          "topic": "讲解 /v1/responses 后台作业与流式/非流式 MCP 工具执行循环。",
+          "learning_goals": [
+            "理解 responses 的后台作业（创建/取消/删除/列表 input items）",
+            "掌握 streaming/non_streaming 中的 MCP tool loop 与 ToolLoopState",
+            "了解 mcp_utils 的 ensure_request_mcp_client 与 McpLoopConfig"
+          ],
+          "source_files": [
+            "src/routers/openai/responses/mod.rs",
+            "src/routers/openai/responses/streaming.rs",
+            "src/routers/openai/responses/mcp.rs"
+          ],
+          "minimal_modules": [
+            "StreamingToolHandler",
+            "execute_streaming_tool_calls",
+            "ToolLoopState"
+          ],
+          "practice_task": "配置一个 STDIO MCP server，发送带 tool 定义的 /v1/responses 请求，跟踪日志中的工具调用迭代轮次。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "会话与历史存储连接器",
+          "order": 3,
+          "filename": "u8-l3-conversations-and-history.md",
+          "level": "advanced",
+          "topic": "讲解 /v1/conversations 与可插拔历史后端（memory/none/oracle/postgres/redis）。",
+          "learning_goals": [
+            "理解 conversation/response/item 三类 storage trait",
+            "掌握 data_connector 的 create_storage 与 StorageFactoryConfig",
+            "了解 conversation 状态集中在 router 的合规性意义"
+          ],
+          "source_files": [
+            "src/routers/conversations/handlers.rs",
+            "src/app_context.rs",
+            "src/config/types.rs"
+          ],
+          "minimal_modules": [
+            "conversations handlers",
+            "ResponseStorage",
+            "HistoryBackend"
+          ],
+          "practice_task": "分别用 memory 与 redis 后端启动网关，创建会话并追加 item，验证两者都能 GET 回历史且重启后行为不同。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l4",
+          "title": "tokenize/parse 端点与 tokenizer 注册",
+          "order": 4,
+          "filename": "u8-l4-tokenize-parse-and-registry.md",
+          "level": "advanced",
+          "topic": "讲解 /v1/tokenize、/v1/detokenize、/parse/* 端点与 tokenizer 异步注册管理。",
+          "learning_goals": [
+            "理解 tokenize/detokenize 的批量处理与镜像 SGLang Python API",
+            "掌握 reasoning/function_call parser 端点的实现",
+            "了解 TokenizerRegistry 的异步加载与状态查询"
+          ],
+          "source_files": [
+            "src/routers/tokenize/handlers.rs",
+            "src/routers/parse/handlers.rs"
+          ],
+          "minimal_modules": [
+            "tokenize handlers",
+            "parse handlers",
+            "TokenizerRegistry"
+          ],
+          "practice_task": "调用 /v1/tokenizers 注册一个 tokenizer，轮询 /status 直到就绪，再用 /v1/tokenize 与 /parse/reasoning 验证可用。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "扩展点与高级运维",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "可观测性：Prometheus / OpenTelemetry / 日志",
+          "order": 1,
+          "filename": "u9-l1-observability.md",
+          "level": "advanced",
+          "topic": "讲解 40+ Prometheus 指标、OTLP 追踪、结构化日志与 inflight 采样。",
+          "learning_goals": [
+            "理解 Metrics 的 record_*/set_* 方法与指标分层",
+            "掌握 otel_trace 的 OTLP 导出与 W3C 上下文注入",
+            "了解 InFlightRequestTracker 的采样与 GaugeHistogram"
+          ],
+          "source_files": [
+            "src/observability/mod.rs",
+            "src/observability/metrics.rs",
+            "src/observability/otel_trace.rs",
+            "src/observability/logging.rs"
+          ],
+          "minimal_modules": [
+            "Metrics",
+            "start_prometheus",
+            "otel_tracing_init",
+            "InFlightRequestTracker"
+          ],
+          "practice_task": "启用 --enable-trace 与 Prometheus 端口，发起若干请求，用 curl 抓取 /metrics 并定位 smg_router_ttft_seconds 与 smg_worker_cb_state。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "Kubernetes 服务发现",
+          "order": 2,
+          "filename": "u9-l2-service-discovery.md",
+          "level": "advanced",
+          "topic": "讲解基于 kube 的 Pod 发现、selector、bootstrap port 注解与 PD 独立选择器。",
+          "learning_goals": [
+            "理解 ServiceDiscoveryConfig 与 start_service_discovery 的对账",
+            "掌握 regular/PD 独立 selector 与 bootstrap-port 注解",
+            "了解自动开启 IGW 模式与 RBAC 要求"
+          ],
+          "source_files": [
+            "src/service_discovery.rs"
+          ],
+          "minimal_modules": [
+            "ServiceDiscoveryConfig",
+            "start_service_discovery",
+            "selector"
+          ],
+          "practice_task": "编写一份带 sglang.ai/bootstrap-port 注解的 Pod 清单片段，说明 PD 模式下 prefill/decode selector 如何分别匹配。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "WASM 中间件扩展",
+          "order": 3,
+          "filename": "u9-l3-wasm-middleware.md",
+          "level": "advanced",
+          "topic": "讲解 WASM 中间件机制、模块管理 API 与 guest 扩展示例。",
+          "learning_goals": [
+            "理解 wasm_middleware 在请求链中的执行时机",
+            "掌握 WasmModuleManager 的注册/移除与哈希去重",
+            "了解 examples/wasm 中 auth/logging/ratelimit guest 的写法"
+          ],
+          "source_files": [
+            "src/wasm/mod.rs",
+            "src/wasm/route.rs",
+            "examples/wasm/wasm-guest-ratelimit/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "wasm_middleware",
+            "WasmModuleManager",
+            "wasm guest component"
+          ],
+          "practice_task": "参考 wasm-guest-ratelimit 示例编写一个简单的 WASM guest，构建 .wasm 后通过 /wasm 注册，验证中间件对请求的拦截。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l4",
+          "title": "Mesh / 高可用 CRDT 状态同步",
+          "order": 4,
+          "filename": "u9-l4-mesh-and-ha.md",
+          "level": "advanced",
+          "topic": "讲解基于 CRDT 的 Mesh 多实例状态同步、全局限流与集群状态 API。",
+          "learning_goals": [
+            "理解 smg_mesh 的 MeshSyncManager 与 StateStores",
+            "掌握 RateLimitWindow 的全局限流重置",
+            "了解 /ha/* 路由与 policy/worker 状态同步"
+          ],
+          "source_files": [
+            "src/routers/mesh/handlers.rs",
+            "src/routers/mesh/mod.rs",
+            "src/policies/cache_aware.rs"
+          ],
+          "minimal_modules": [
+            "MeshSyncManager",
+            "RateLimitWindow",
+            "/ha handlers",
+            "apply_remote_tree_operation"
+          ],
+          "practice_task": "用 --enable-mesh 启动两个互为 peer 的网关，在一个实例注册 worker，通过 /ha/workers 验证状态已 CRDT 同步到另一实例。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l5",
+          "title": "多语言绑定（Python / Go）",
+          "order": 5,
+          "filename": "u9-l5-language-bindings.md",
+          "level": "advanced",
+          "topic": "讲解 PyO3 Python 绑定与 Go（cgo）绑定的结构、能力与构建方式。",
+          "learning_goals": [
+            "理解 bindings/python 如何通过 maturin 暴露配置与启动",
+            "掌握 bindings/golang 的预处理/后处理/流式/converter 模块",
+            "了解两个绑定共享 smg 核心的边界"
+          ],
+          "source_files": [
+            "bindings/python/src/lib.rs",
+            "bindings/python/Cargo.toml",
+            "bindings/golang/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "python lib.rs",
+            "golang preprocessor/postprocessor",
+            "grpc_converter"
+          ],
+          "practice_task": "对比 Python 与 Go 绑定暴露的能力集合，列出各自独有的函数，并解释 Go 绑定中 grpc_converter 的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
