@@ -1,0 +1,524 @@
+{
+  "project": "RTL-Coder",
+  "head": "b2847073be62d5f1d5f1d6d9b17bb247f0cfeb1ce642",
+  "rationale": "RTL-Coder 是一个面向 Verilog/RTL 代码生成的 LLM 项目，核心由「自动化数据集生成」「三种训练方案」「基准评测推理」三大块组成，代码量中等（约 9 个脚本 + 1 个 DeepSpeed 配置 + 数据样本）。因此整体设计为 3 层 18 篇讲义：入门层（u1，5 篇）先让读者搞清项目定位、目录与依赖、快速跑通推理、看懂三类数据格式与输出抽取；进阶层（u2，8 篇）沿「数据生成流程总览→提示词模板→GPT 工具→生成主循环→ROUGE 去重→训练总览→标准 SFT→评测脚本」的真实链路逐文件精读，覆盖 data_generation、train、benchmark_inference 三个目录；专家层（u3，5 篇）聚焦论文的核心贡献——质量评分训练（mle_scoring.py）及其损失数学、为省显存的梯度切分（mle_scoring_grad_split.py）、DeepSpeed ZeRO-2 分布式配置与量化推理及二次开发。讲义依赖严格对应代码阅读顺序：先数据格式再生成流程，先标准 SFT 再评分训练，评分训练是梯度切分与损失推导的前置，保证读者由浅入深、每篇只解一个主题并结合真实源码。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 RTL-Coder 并跑通第一个推理",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 RTL-Coder 是什么、解决什么问题，以及三篇论文与四个 HuggingFace 发布模型的整体定位。",
+          "learning_goals": [
+            "理解 RTL/Verilog 代码生成任务的背景与数据稀缺痛点",
+            "掌握 RTL-Coder 的两大贡献：自动化数据集生成与质量评分训练",
+            "了解四个 HF 模型（Deepseek/Mistral/GPTQ/GGUF）的差异与适用场景"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "RTLCoder-flow 数据集生成与训练两大贡献",
+            "四个 HuggingFace 模型（Deepseek/Mistral/GPTQ/GGUF）定位",
+            "VerilogEval 与 RTLLM 两个评测基准"
+          ],
+          "practice_task": "阅读 README 后画一张从“原始需求”到“可推理模型”的整体流程图，标注数据集生成与训练两个阶段各自对应的代码文件夹。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与依赖",
+          "order": 2,
+          "filename": "u1-l2-repo-structure-dependencies.md",
+          "level": "beginner",
+          "topic": "通览仓库目录结构、各文件夹职责，以及 requirements.txt 中关键依赖。",
+          "learning_goals": [
+            "掌握 data_generation/dataset/train/benchmark_inference 四个目录的职责",
+            "理解 torch/transformers/deepspeed/openai 等依赖的作用",
+            "区分脚本文件、数据文件与配置文件"
+          ],
+          "source_files": [
+            "README.md",
+            "requirements.txt"
+          ],
+          "minimal_modules": [
+            "data_generation/dataset/train/benchmark_inference 四目录职责",
+            "requirements.txt 依赖（torch2.1/transformers4.34/deepspeed/openai0.28）",
+            "脚本、数据、配置三类文件的分布"
+          ],
+          "practice_task": "对照目录树写一份每个文件作用的一行清单，并按“数据生成→训练→推理”的顺序对这些文件重新排序。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "快速上手：加载预训练模型做推理",
+          "order": 3,
+          "filename": "u1-l1-quick-start-inference.md",
+          "level": "beginner",
+          "topic": "用 README 提供的代码片段加载 RTLCoder 模型，完成一次 Verilog 代码生成。",
+          "learning_goals": [
+            "掌握 AutoTokenizer / AutoModelForCausalLM 的加载方式",
+            "理解 model.generate 的采样参数（temperature/top_p/max_length）",
+            "学会构造专业的 verilog designer 输入 prompt"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "AutoTokenizer/AutoModelForCausalLM 加载与 fp16",
+            "model.generate 采样（temperature/top_p/max_length）",
+            "输入 prompt 模板构造与多 GPU device_map 指定"
+          ],
+          "practice_task": "编写一个最小脚本，加载 ishorn5/RTLCoder-v1.1，输入半加器（half_adder）prompt，打印模型生成的 Verilog 代码。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "数据格式详解",
+          "order": 4,
+          "filename": "u1-l4-data-formats.md",
+          "level": "beginner",
+          "topic": "详解项目里生成、训练、评测各阶段用到的几种 JSON 数据格式与字段含义。",
+          "learning_goals": [
+            "看懂 {Instruction, Input, Response} 的普通指令格式",
+            "理解 Resyn27k.json 中 Response 为列表的结构",
+            "区分评分训练数据多候选 + Score 字段的格式"
+          ],
+          "source_files": [
+            "data_generation/data_sample.json",
+            "dataset/Resyn27k.json",
+            "train/scoring_data_sample.json"
+          ],
+          "minimal_modules": [
+            "{Instruction,Input,Response} 普通指令格式",
+            "Resyn27k.json 中 Response 为列表",
+            "scoring_data_sample.json 多候选 Response + Score 字段"
+          ],
+          "practice_task": "用 Python 读取三份 JSON 各一行，打印字段名与 Response 列表长度，对比普通训练数据与评分训练数据的结构差异。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "输出后处理与代码抽取",
+          "order": 5,
+          "filename": "u1-l5-output-extraction.md",
+          "level": "beginner",
+          "topic": "讲解如何从模型原始输出中抽取干净的 Verilog 模块代码（endmodule 切分、testbench 剔除、Deepseek 特殊处理）。",
+          "learning_goals": [
+            "掌握基于 endmodule 的代码截断方法",
+            "理解为何要剔除 tb_module/testbench 等多余输出",
+            "了解 RTLCoder-Deepseek 版本的特殊抽取关键字"
+          ],
+          "source_files": [
+            "README.md",
+            "benchmark_inference/test_on_verilog-eval.py",
+            "benchmark_inference/test_on_rtllm.py"
+          ],
+          "minimal_modules": [
+            "rsplit('endmodule') 截断并补全 endmodule",
+            "tb_module/testbench 段落剔除",
+            "endmodulemodule 关键字处理（Deepseek 版）"
+          ],
+          "practice_task": "写一个函数 extract_verilog(raw, model_type)，根据模型类型返回第一个 endmodule 之前的代码并在末尾补全 endmodule，对一段含 testbench 的假输出做测试。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：精读数据生成、训练与评测主链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "数据集生成流程总览",
+          "order": 1,
+          "filename": "u2-l1-data-generation-overview.md",
+          "level": "intermediate",
+          "topic": "总览 RTL-Coder 三阶段自动化数据集生成流程（关键词准备→指令生成→参考代码生成）与对应代码位置。",
+          "learning_goals": [
+            "理解三阶段数据生成流程的整体设计",
+            "定位每个阶段对应的脚本文件",
+            "明确 GPT 仅用于数据生成、不参与最终模型"
+          ],
+          "source_files": [
+            "README.md",
+            "data_generation/instruction_gen.py",
+            "data_generation/utils.py",
+            "data_generation/p_example.txt"
+          ],
+          "minimal_modules": [
+            "三阶段流程（关键词准备/指令生成/参考代码生成）",
+            "p_example 模板驱动的指令变异",
+            "instruction_gen.py 与 utils.py 的分工"
+          ],
+          "practice_task": "在 README 的 data_gen_flow 流程图上标注每个阶段对应的脚本文件，并用一句话说明 GPT 在流程中的角色边界。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "变异提示词模板 p_example.txt",
+          "order": 2,
+          "filename": "u2-l2-mutation-prompt-template.md",
+          "level": "intermediate",
+          "topic": "解析 p_example.txt 变异提示词模板的结构、占位符与设计意图。",
+          "learning_goals": [
+            "理解 #method# 变异方法描述的作用",
+            "掌握 {Instruction}/{Input}/#given prompt# 占位符",
+            "看懂 instruction_gen.py 中 encode_prompt_uniq 的拼接逻辑"
+          ],
+          "source_files": [
+            "data_generation/p_example.txt",
+            "data_generation/instruction_gen.py"
+          ],
+          "minimal_modules": [
+            "#method# 变异方法描述",
+            "{Instruction}/{Input}/#given prompt#/#Rewritten prompt# 占位符",
+            "encode_prompt_uniq 的模板拼接"
+          ],
+          "practice_task": "修改 p_example.txt 的 #method#，要求改写为“相同功能但不同位宽”的电路，并手写一个 #given prompt# 跑通 encode_prompt_uniq 查看输出。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "GPT-3.5 调用工具 utils.py",
+          "order": 3,
+          "filename": "u2-l3-gpt-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 utils.py 中 GPT-3.5 调用、重试、上下文超限降级与逐行 JSON 读写工具。",
+          "learning_goals": [
+            "理解 askGPT35 的 system/user 消息构造与 is_response 模式",
+            "掌握 5 次重试与 maximum context 超限时 max_tokens 降级策略",
+            "看懂 load_json/save_json 的逐行 JSON 格式"
+          ],
+          "source_files": [
+            "data_generation/utils.py",
+            "data_generation/instruction_gen.py"
+          ],
+          "minimal_modules": [
+            "askGPT35 的 system/user 消息构造",
+            "5 次重试与 max context 降级（max_tokens/1.3）",
+            "load_json/save_json 逐行 JSON 读写"
+          ],
+          "practice_task": "把 askGPT35 改写为一个本地 mock 函数（返回固定文本并在第 3 次抛出 'maximum context' 错误），验证重试逻辑会逐步减小 max_gen_tokens。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "指令生成主循环 instruction_gen.py",
+          "order": 4,
+          "filename": "u2-l4-instruction-gen-loop.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 instruction_gen.py 的指令生成主循环：批量请求、响应解析、去重与落盘。",
+          "learning_goals": [
+            "理解 generate_instruction_following_data 主循环结构",
+            "掌握 post_process_gpt3_response_uniq 的解析逻辑",
+            "看懂断点续生成与 tqdm 进度更新机制"
+          ],
+          "source_files": [
+            "data_generation/instruction_gen.py",
+            "data_generation/utils.py"
+          ],
+          "minimal_modules": [
+            "generate_instruction_following_data 主循环",
+            "post_process_gpt3_response_uniq 解析 {Instruction}/{Input}",
+            "os.path.exists 续跑与 tqdm 进度、save_json 落盘"
+          ],
+          "practice_task": "把 num_instructions_to_generate 改成 3，用 mock 的 askGPT35 跑通整个生成循环，输出 new_instructions.json 并检查每条记录字段。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "基于 ROUGE-L 的指令去重",
+          "order": 5,
+          "filename": "u2-l5-rouge-dedup.md",
+          "level": "intermediate",
+          "topic": "讲解基于 ROUGE-L 相似度的指令去重机制与阈值选择。",
+          "learning_goals": [
+            "理解 rouge_scorer.RougeScorer(rougeL) 的用法",
+            "掌握 _score_lcs 与 fmeasure 相似度计算",
+            "看懂 0.7 去重阈值与 top-10 相似记录统计"
+          ],
+          "source_files": [
+            "data_generation/instruction_gen.py"
+          ],
+          "minimal_modules": [
+            "rouge_scorer.RougeScorer(['rougeL'])",
+            "_score_lcs 与 fmeasure 逐条比对",
+            "max(rouge_scores)>0.7 过滤与 most_similar_instructions 记录"
+          ],
+          "practice_task": "编写脚本对 data_sample.json 中 10 条指令两两计算 ROUGE-L，找出最相似的指令对，并解释 0.7 阈值如何过滤近似重复。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "训练方案总览与共享数据管线",
+          "order": 6,
+          "filename": "u2-l6-training-overview.md",
+          "level": "intermediate",
+          "topic": "总览三种训练方案（MLE/Scoring/Grad-split）与它们共享的数据预处理与多候选构造管线。",
+          "learning_goals": [
+            "掌握三种训练方案对应的脚本与适用场景",
+            "理解 ScoreDataset 的候选长度过滤（model_max_length*0.5）",
+            "看懂 DataCollator 多候选 query+response 拼接"
+          ],
+          "source_files": [
+            "train/mle.py",
+            "train/mle_scoring.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "三种训练方案对应脚本（mle/mle_scoring/mle_scoring_grad_split）",
+            "ScoreDataset 候选数量与长度过滤",
+            "DataCollatorForSupervisedDataset 多候选拼接"
+          ],
+          "practice_task": "阅读 README 的训练章节，列一张表对比三种方案的 torchrun 命令、per_device_train_batch_size、gradient_accumulation_steps 与显存需求差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "mle.py 标准监督微调",
+          "order": 7,
+          "filename": "u2-l7-mle-sft.md",
+          "level": "intermediate",
+          "topic": "讲解 mle.py 标准 SFT：数据预处理、标签掩码、数据集与 collator 实现。",
+          "learning_goals": [
+            "掌握 preprocess 的标签掩码机制（IGNORE_INDEX=-100）",
+            "理解 SupervisedDataset 取 Response[-1] 作为训练目标",
+            "看懂 DataCollator 的 padding 与 attention_mask 构造"
+          ],
+          "source_files": [
+            "train/mle.py"
+          ],
+          "minimal_modules": [
+            "preprocess 标签掩码（IGNORE_INDEX=-100 覆盖 instruction）",
+            "SupervisedDataset 取 Response[-1] + eos_token 作为目标",
+            "DataCollatorForSupervisedDataset padding",
+            "smart_tokenizer_and_embedding_resize"
+          ],
+          "practice_task": "在 mle.py 基础上打印一条训练样本的 labels 张量，验证 instruction 部分被 -100 掩码、response 部分保留真实 token id。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "基准评测推理脚本（VerilogEval 与 RTLLM）",
+          "order": 8,
+          "filename": "u2-l8-benchmark-inference.md",
+          "level": "intermediate",
+          "topic": "讲解 verilog-eval 与 RTLLM 两个基准推理脚本的参数、采样与结果保存逻辑。",
+          "learning_goals": [
+            "掌握 argparse 参数（model/n/temperature/bench_type/gpu_name）",
+            "理解 verilog-eval 的 description+prompt 拼接与 n 个候选重复",
+            "看懂 RTLLM 的 design_list 关键字匹配落盘 .v 文件"
+          ],
+          "source_files": [
+            "benchmark_inference/test_on_verilog-eval.py",
+            "benchmark_inference/test_on_rtllm.py",
+            "benchmark_inference/rtllm-1.1.json"
+          ],
+          "minimal_modules": [
+            "argparse 参数（model/n/temperature/bench_type）",
+            "verilog-eval 的 detail_description+prompt 拼接",
+            "RTLLM 的 design_list 关键字匹配与 .v 落盘"
+          ],
+          "practice_task": "在 rtllm-1.1.json 上跑 test_on_rtllm.py，设 n=1、temperature=0.2，检查输出目录 test_1 下是否按 design_list 关键字生成了对应 .v 文件。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：质量评分训练、显存优化与扩展",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "mle_scoring.py 质量评分训练",
+          "order": 1,
+          "filename": "u3-l1-scoring-training.md",
+          "level": "advanced",
+          "topic": "讲解 mle_scoring.py 的 CompareTrainer 与 compute_loss，如何把代码质量评分融入训练。",
+          "learning_goals": [
+            "掌握 CompareTrainer.compute_loss 的域损失 + 比较损失结构",
+            "理解多候选 logits 重排为 (batch,cand,L,vocab) 的过程",
+            "看懂 compare_weight 加权与取最后一个候选做 SFT 域损失"
+          ],
+          "source_files": [
+            "train/mle_scoring.py",
+            "train/scoring_data_sample.json"
+          ],
+          "minimal_modules": [
+            "CompareTrainer.compute_loss（域损失 + 比较损失）",
+            "多候选 logits 重排为 (batch, cand, L, vocab)",
+            "compare_weight 加权、最后一候选做 SFT 域损失"
+          ],
+          "practice_task": "在 scoring_data_sample.json 上构造一个 batch，手动调用 DataCollator 打印 input_ids、labels、scores 的形状，理解多候选维度如何形成。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "比较损失的数学原理与候选归一化",
+          "order": 2,
+          "filename": "u3-l2-comparison-loss-math.md",
+          "level": "advanced",
+          "topic": "深入比较损失的数学：候选归一化、分数差分与“可学习边距”机制。",
+          "learning_goals": [
+            "掌握 get_comp_loss 中逐候选 token 级 NLL 与 softmax 归一化",
+            "理解 compare_loss 的 diff/rw_diff 差分矩阵",
+            "看懂 0.2/0.3 边距阈值与 aval 掩码的作用"
+          ],
+          "source_files": [
+            "train/mle_scoring.py"
+          ],
+          "minimal_modules": [
+            "get_comp_loss 逐候选 token 级 NLL 与 exp 归一化",
+            "compare_loss 的 diff/rw_diff 差分矩阵",
+            "0.2/0.3 边距阈值与 aval 掩码"
+          ],
+          "practice_task": "推导 prod_normalized = exp(prod)/sum(exp(prod)) 的含义，并在 numpy 中复现 compare_loss 对一组假 scores 与 rw_scores 的输出，观察 aval 掩码如何挑选可学习样本对。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "梯度切分显存优化 mle_scoring_grad_split.py",
+          "order": 3,
+          "filename": "u3-l3-grad-split-memory.md",
+          "level": "advanced",
+          "topic": "讲解 mle_scoring_grad_split.py 通过梯度切分降低显存的核心技巧与自定义 training_step。",
+          "learning_goals": [
+            "掌握覆写 training_step 分两步前向的设计",
+            "理解 represent_grad 表征梯度与逐候选加权反向",
+            "看懂为何该方案能让 per_device_train_batch_size=1 也能训练评分任务"
+          ],
+          "source_files": [
+            "train/mle_scoring_grad_split.py",
+            "train/mle_scoring.py"
+          ],
+          "minimal_modules": [
+            "覆写 training_step 分两步前向",
+            "represent_grad 表征梯度",
+            "逐候选 compute_loss 加权反向（represent_grad[i]*loss）",
+            "per_device_train_batch_size=1 的显存含义"
+          ],
+          "practice_task": "对比 mle_scoring.py 与 mle_scoring_grad_split.py 的 compute_loss/training_step，画出两者单步显存峰值差异示意图，说明为何后者更省显存。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "DeepSpeed ZeRO-2 与分布式训练",
+          "order": 4,
+          "filename": "u3-l4-deepspeed-zero2.md",
+          "level": "advanced",
+          "topic": "讲解 ds_stage_2.json 配置、ZeRO-2 + CPU offload 原理与 torchrun 多卡启动。",
+          "learning_goals": [
+            "掌握 ZeRO stage 2 优化器状态切分原理",
+            "理解 offload_optimizer 到 CPU 的取舍",
+            "看懂 fp16 动态 loss scale 与 torchrun 启动方式"
+          ],
+          "source_files": [
+            "train/ds_stage_2.json",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "ZeRO stage 2 优化器状态切分",
+            "offload_optimizer 到 CPU（pin_memory）",
+            "fp16 动态 loss scale 与 torchrun --nproc_per_node 启动"
+          ],
+          "practice_task": "修改 ds_stage_2.json 关闭 optimizer offload（删除 offload_optimizer 段或改 device），预测显存与速度变化，并解释为何评分训练比普通 SFT 更需要 offload。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "量化推理与二次开发扩展",
+          "order": 5,
+          "filename": "u3-l5-quantized-inference-extensions.md",
+          "level": "advanced",
+          "topic": "讲解 GPTQ/GGUF 量化推理方式，以及如何通过自定义 prompt、数据、基准扩展 RTL-Coder。",
+          "learning_goals": [
+            "掌握 GPTQ 4bit（AutoGPTQForCausalLM）推理方式",
+            "理解 GGUF 4bit 在 CPU 上用 ctransformers 运行",
+            "学会通过自定义 p_example 与 design_list 扩展数据集与评测"
+          ],
+          "source_files": [
+            "README.md",
+            "benchmark_inference/test_on_rtllm.py",
+            "data_generation/p_example.txt"
+          ],
+          "minimal_modules": [
+            "GPTQ 4bit（AutoGPTQForCausalLM）",
+            "GGUF 4bit CPU（ctransformers / gpu_layers）",
+            "自定义 p_example #method# 扩展数据集",
+            "新增 design_list / 适配新基准"
+          ],
+          "practice_task": "二选一：编写一个 GGUF CPU 推理脚本跑通 RTLCoder-v1.1-gguf-4bit；或设计一个新的 p_example #method# 变异策略，说明你期望扩展现有数据集的方向，并讨论它会带来哪些新 design_list 关键字。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2",
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
