@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-21T23:01:54Z"
+      "last_run_at": "2026-07-22T11:01:52Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -23720,282 +23720,291 @@
           "error": null
         },
         "u8-l5": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":189074,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.6181489999999998,
+          "error": null
         },
         "u9-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9308400000000001,
+          "error": null
         },
         "u9-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.138875,
+          "error": null
         }
       },
       "manifest_head": "a318ec963da6007330fc2d80cd27b3060dd1cee3",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/alan-turing-institute/sar-vessel-detection-fpga/sar-vessel-detection-fpga-tutorial",
       "last_head": "a318ec963da6007330fc2d80cd27b3060dd1cee3",
-      "last_run_at": "2026-07-21T23:01:54Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-22T11:01:52Z",
+      "last_error": null,
+      "abandoned": []
     },
     "sgl-project/sglang": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.700683,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9127000000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9492149999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.889602,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.234994,
+          "cost": 1.523347,
           "error": null
         },
         "u2-l2": {
           "status": "done",
+          "action": "rebuild",
+          "retries": 0,
+          "cost": 1.8382429999999998,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.213736,
+          "cost": 1.280576,
           "error": null
         },
         "u2-l3": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.647276,
+          "cost": 1.9749759999999998,
           "error": null
         },
         "u2-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.598573,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.436447,
+          "cost": 2.7559810000000002,
           "error": null
         },
         "u3-l2": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.302921,
+          "cost": 1.565539,
           "error": null
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1738439999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.263922,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.822986,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":187368,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 2.1863120000000005,
+          "error": null
         },
         "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 2.3315809999999995,
+          "error": null
         },
         "u5-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.4854179999999997,
+          "error": null
         },
         "u5-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.136201,
+          "error": null
         },
         "u6-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u6-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.4004420000000002,
+          "error": null
         },
         "u10-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u11-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u11-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "failed",
+          "action": "rebuild",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: claude 退出码 1：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":null,\"duration_ms\":419972,\"duration_api_ms\":149321,\"num_turns\":21,\"result\":\"API Error: The operation timed out.\","
         },
         "u12-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u12-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u12-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.043708,
+          "error": null
         }
       },
-      "manifest_head": "4a55fdba0b7e5ac8e8dee0233064d34468b16a06",
-      "prev_head": null,
+      "manifest_head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+      "prev_head": "4a55fdba0b7e5ac8e8dee0233064d34468b16a06",
       "phase": "workers",
-      "mode": "full",
+      "mode": "incremental",
       "tutorial_path": "tutorials/sgl-project/sglang/sglang-tutorial",
-      "last_head": "4a55fdba0b7e5ac8e8dee0233064d34468b16a06",
-      "last_run_at": "2026-07-21T23:01:54Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+      "last_run_at": "2026-07-22T11:01:52Z",
+      "last_error": "1 篇未完成: ['u11-l2']",
+      "abandoned": []
     },
     "slaclab/surf": {},
     "google-deepmind/synthid-text": {},
@@ -29577,179 +29586,312 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u7-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u8-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u9-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u10-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u11-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        }
+      },
+      "manifest_head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+      "prev_head": "1b4cb6b8c14944fbe3d7e02d4f8de6e8b465d971",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/sgl-project/sglang/sglang-sgl-kernel-tutorial",
+      "last_head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+      "last_run_at": "2026-07-22T11:01:52Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "sgl-project/sglang@sgl-model-gateway": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nBudget limit reached ($3.13 of $3); stopping background agents.\n\n{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"duration_ms\":213643,\"duration_api_ms\":514136,\"is_error\":true,\"num_turns\":19,\"stop_reason\":\"tool_use\",\"session_id\":\"22b17be9-abac-492b-981d-7f4e008b0671\",\"total_cost_",
+      "last_run_at": "2026-07-22T11:01:52Z"
+    },
+    "sgl-project/sglang@rust/sglang-grpc": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.7362789999999999,
+          "cost": 1.022926,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.0590089999999999,
+          "cost": 1.084407,
           "error": null
         },
         "u1-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.032898,
+          "cost": 6.566656000000001,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.676189,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.803962,
+          "cost": 0.792962,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.0715789999999998,
+          "cost": 0.982192,
           "error": null
         },
         "u2-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.947842,
+          "cost": 1.547668,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9342809999999999,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.247838,
+          "error": null
+        },
+        "u2-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.359872,
+          "error": null
+        },
+        "u2-l7": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.063602,
+          "error": null
+        },
+        "u2-l8": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.844819,
           "error": null
         },
         "u3-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.2796750000000001,
+          "cost": 1.4512589999999999,
           "error": null
         },
         "u3-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":429,\"duration_ms\":186638,\"duration_api_ms\":0,\"num_turns\":1,\"result\":\"API Error: Request rejected (429) · [1308][已达"
+          "cost": 1.039018,
+          "error": null
         },
-        "u4-l1": {
-          "status": "pending",
+        "u3-l3": {
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.8660739999999998,
+          "error": null
         },
-        "u4-l2": {
-          "status": "pending",
+        "u3-l4": {
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.7306779999999999,
+          "error": null
         },
-        "u4-l3": {
-          "status": "pending",
+        "u3-l5": {
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.284963,
+          "error": null
         },
-        "u5-l1": {
-          "status": "pending",
+        "u3-l6": {
+          "status": "done",
           "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u11-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.384767,
+          "error": null
         }
       },
-      "manifest_head": "1b4cb6b8c14944fbe3d7e02d4f8de6e8b465d971",
+      "manifest_head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
-      "tutorial_path": "tutorials/sgl-project/sglang/sglang-sgl-kernel-tutorial",
-      "last_head": "1b4cb6b8c14944fbe3d7e02d4f8de6e8b465d971",
-      "last_run_at": "2026-07-21T23:01:54Z",
-      "last_error": "quota exhausted; will resume next window"
+      "tutorial_path": "tutorials/sgl-project/sglang/sglang-rust-sglang-grpc-tutorial",
+      "last_head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+      "last_run_at": "2026-07-22T11:01:52Z",
+      "abandoned": [],
+      "version": 1,
+      "last_error": null
     },
-    "sgl-project/sglang@sgl-model-gateway": {},
-    "sgl-project/sglang@rust/sglang-grpc": {},
-    "sgl-project/sglang@python/sglang": {},
+    "sgl-project/sglang@python/sglang": {
+      "prompt_hash": "b21aef51792b02df",
+      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nBudget limit reached ($3.06 of $3); stopping background agents.\n\n{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"duration_ms\":6,\"duration_api_ms\":499252,\"is_error\":true,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"49a0b1fa-afd1-478c-90b8-46d64e1516fd\",\"total_cost_usd\":3.06005",
+      "last_run_at": "2026-07-22T11:01:52Z"
+    },
     "sgl-project/sglang@benchmark": {},
     "triton-lang/triton-ascend": {},
     "triton-lang/Triton-to-tile-IR": {},

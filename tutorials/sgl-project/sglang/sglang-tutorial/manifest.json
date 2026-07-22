@@ -1,7 +1,7 @@
 {
   "project": "sglang",
-  "head": "4a55fdba0b7e5ac8e8dee0233064d34468b16a06",
-  "rationale": "SGLang 是一个面向大语言模型/多模态模型的高性能推理服务框架，体量大、子系统多，因此采用「先会跑、再读生命周期、然后逐层下钻核心引擎，最后进入分布式/分离式/投机解码/算子等专家话题」的路线。U1 让读者零基础上手并理解仓库布局；U2 讲清多进程请求链路（TokenizerManager→Scheduler→Detokenizer）；U3-U6 是引擎四大支柱：调度器与连续批处理、RadixAttention/KV 缓存、模型执行、采样与结构化输出，它们之间存在「调度→缓存→前向→采样」的自然数据流依赖。U7-U12 为专家层，依赖前面已建立的心智模型：性能优化（CUDA Graph/重叠/可观测性）、TP/DP/PP/EP 并行、Prefill-Decode 分离、投机解码、量化与算子、LoRA/扩展/RL 后端。讲义之间通过 depends_on 严格约束先后，每篇只解决一个主题、引用 1-6 个真实源码文件、给出可操作的实践任务，大型项目按 30+ 篇拆分以保证逻辑清晰而非凑数。",
+  "head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+  "rationale": "本次增量主要受两处架构演进驱动，并伴随一次全局机械替换。(1) 配置体系重构：ServerArgs 在 __post_init__ 后变为只读，字段用 NS('namespace') 标注所属命名空间，唯一合法改写入口是 override()，声明式覆盖由 arg_groups/overrides.py 的 materialize_declarations 装配；运行期配置与进程全局状态统一由 runtime_context.py（已扩充至 1100+ 行）的四层结构（Parallel 拓扑 / Config bags 解析配置 / Flags 运行态 / Resources 句柄）与 get_parallel()/get_exec()/get_spec() 等访问器提供，并由 publish(server_args, role) 发布。为此将 u2-l2 重建为「只读 ServerArgs + override + NS 标注」，并新增 u2-l5 专门讲解 RuntimeContext 与配置命名空间，置于 ServerArgs 之后、请求生命周期之前。(2) 算子体系迁移（RFC #29630）：新增 python/sglang/kernels/ 统一命名空间（registry/selector/spec/fused_op + ops/ 下 16 个算子组），通过 KernelSpec 注册与 BaseFusedOp 多后端分发在 AOT sgl-kernel 与 JIT 之间按设备能力自动选择，旧 jit_kernel/ 退化为兼容 shim，故将 u11-l2 重建为新的统一算子体系。此外，scheduler.py(170 行)、model_runner.py(160 行)、tokenizer_manager.py(77 行) 等多处出现 get_server_args().x → 命名空间访问器的机械替换，导致引用行号与惯用法漂移但概念未变，相关讲义标记 update；其中 u3-l1 与 u5-l1 新增对 u2-l5 的依赖。其余未受影响的讲义保持 keep。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 README 的 About 与核心特性列表，用一段话写出 SGLang 相比你熟悉的另一个推理框架的三个差异化优势，并标注每个特性对应的源码目录位置。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -39,7 +39,7 @@
           "order": 2,
           "filename": "u1-l2-install-and-first-run.md",
           "level": "beginner",
-          "topic": "讲解如何安装 SGLang、用 `sglang serve` 启动一个推理服务，并发送第一个请求（OpenAI 兼容 API）。",
+          "topic": "讲解如何安装 SGLang、用 sglang serve 启动一个推理服务，并发送第一个请求（OpenAI 兼容 API）。",
           "learning_goals": [
             "掌握 pip/源码安装方式与依赖管理",
             "能用 sglang serve 启动一个小模型服务",
@@ -60,7 +60,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -87,7 +87,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -132,7 +132,7 @@
           "order": 1,
           "filename": "u2-l1-multi-process-ipc.md",
           "level": "intermediate",
-          "topic": "讲解 SGLang 由 TokenizerManager、Scheduler、Detokenizer、DataParallelController 等进程组成，进程之间通过 ZMQ + msgspec 结构体（io_struct）通信。",
+          "topic": "讲解 SGLang 由 TokenizerManager、Scheduler、Detokenizer、DataParallelController 等进程组成，进程之间通过 ZMQ + msgspec 结构体（io_struct）通信；各进程通过 runtime_context 的命名空间访问器读取运行期配置。",
           "learning_goals": [
             "理解为什么拆成多进程及各进程职责",
             "看懂 io_struct 中 BaseReq/GenerateReqInput 等消息定义",
@@ -146,50 +146,82 @@
           "minimal_modules": [
             "io_struct.py 的消息结构体",
             "TokenizerManager 类",
-            "DetokenizerManager 类"
+            "DetokenizerManager 类",
+            "TokenizerManager 中 get_parallel()/get_exec() 配置读取"
           ],
           "practice_task": "在 io_struct.py 中找出请求输入、批次输出、取消三类消息结构体，画出一条请求在这些进程间的消息时序图。",
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u2-l2",
-          "title": "启动流程与 ServerArgs 配置",
+          "title": "启动流程与 ServerArgs 只读配置模型",
           "order": 2,
           "filename": "u2-l2-launch-and-server-args.md",
           "level": "intermediate",
-          "topic": "追踪从 `sglang serve` 到 http_server.launch_server 的完整启动链路，并理解 ServerArgs 数据类中上百个配置字段（tp/dp/chunked-prefill 等）。",
+          "topic": "追踪从 sglang serve 到 http_server.launch_server 的启动链路，并理解 ServerArgs 数据类的新模型：__post_init__ 后只读、字段用 NS('namespace') 标注归属、唯一合法改写入口 override()，以及 materialize_declarations 装配声明式覆盖。",
           "learning_goals": [
             "追踪 launch_server → http_server.launch_server 的调用链",
-            "理解 ServerArgs 关键字段含义",
-            "知道如何通过 CLI 参数覆盖配置"
+            "理解 ServerArgs 只读模型与 NS 命名空间标注",
+            "掌握 override() 单一审计式改写入口与 materialize_declarations 声明装配",
+            "知道如何通过 CLI 参数与 override 调整配置"
           ],
           "source_files": [
-            "python/sglang/launch_server.py",
-            "python/sglang/cli/serve.py",
             "python/sglang/srt/server_args.py",
-            "python/sglang/srt/entrypoints/http_server.py"
+            "python/sglang/srt/arg_groups/overrides.py",
+            "python/sglang/srt/entrypoints/http_server.py",
+            "python/sglang/cli/serve.py"
           ],
           "minimal_modules": [
-            "ServerArgs 数据类",
-            "http_server.launch_server",
-            "launch_server.run_server 分支"
+            "ServerArgs 数据类与 NS 标注",
+            "override() 改写入口与 _in_override 守卫",
+            "materialize_declarations 声明装配",
+            "http_server.launch_server"
           ],
-          "practice_task": "在 server_args.py 中找到 model_path、tp_size、dp_size、chunked_prefill_size、mem_fraction_static 五个字段，分别说明默认值和用途，并尝试用 CLI 修改它们启动服务。",
+          "practice_task": "在 server_args.py 中找到 model_path、tp_size、dp_size、chunked_prefill_size、mem_fraction_static 五个字段的 NS 命名空间标注，说明它们各自归入哪个命名空间；再定位 override() 方法，描述为何运行期不能直接 server_args.x = y、必须走 override()。",
           "depends_on": [
             "u2-l1"
+          ],
+          "action": "rebuild"
+        },
+        {
+          "id": "u2-l5",
+          "title": "RuntimeContext 与配置命名空间（四层结构）",
+          "order": 3,
+          "filename": "u2-l5-runtime-context-config-bags.md",
+          "level": "intermediate",
+          "topic": "讲解 runtime_context.py 作为运行期状态的中枢：四层结构（Parallel 拓扑 / Config bags 解析配置 / Flags 运行态 / Resources 句柄），11 个配置命名空间袋（device/model/exec/schedule/memory/spec/lora/mm/disagg/serving/observability），以及 get_parallel()/get_exec()/get_spec() 等访问器与 publish(server_args, role) 发布流程。",
+          "learning_goals": [
+            "理解 RuntimeContext 的四层结构与各自职责",
+            "掌握 get_parallel/get_exec/get_spec 等命名空间访问器与返回的 _ConfigBag",
+            "理解 publish(role) 发布与 override() 审计式改写的关系",
+            "看懂 Resources 中的 stream/buffer/graph_memory_pool 句柄"
+          ],
+          "source_files": [
+            "python/sglang/srt/runtime_context.py",
+            "python/sglang/srt/server_args.py"
+          ],
+          "minimal_modules": [
+            "RuntimeContext 类与四层",
+            "ParallelContext 与各 _ConfigBag",
+            "get_*() 访问器族",
+            "publish(role) 发布与 override() 改写"
+          ],
+          "practice_task": "在 runtime_context.py 中列出 get_parallel/get_exec/get_spec 等访问器返回的命名空间袋，并选一个子系统（如 scheduler）grep 出它通过哪个访问器读取配置；再说明 publish(role) 如何把只读 ServerArgs 快照成命名空间袋。",
+          "depends_on": [
+            "u2-l2"
           ],
           "action": "new"
         },
         {
           "id": "u2-l3",
           "title": "请求端到端流转",
-          "order": 3,
+          "order": 4,
           "filename": "u2-l3-request-end-to-end.md",
           "level": "intermediate",
-          "topic": "跟踪一条请求从 HTTP 进入，经 TokenizerManager 分词、Scheduler 调度执行、Detokenizer 解码流式返回的全过程。",
+          "topic": "跟踪一条请求从 HTTP 进入，经 TokenizerManager 分词、Scheduler 调度执行、Detokenizer 解码流式返回的全过程；注意各进程通过 runtime_context 访问器读取运行期配置。",
           "learning_goals": [
             "理解 TokenizerManager 接收与转发逻辑",
             "理解 Detokenizer 流式回写机制",
@@ -210,12 +242,12 @@
             "u2-l1",
             "u2-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u2-l4",
           "title": "OpenAI 兼容 API 层",
-          "order": 4,
+          "order": 5,
           "filename": "u2-l4-openai-compatible-api.md",
           "level": "intermediate",
           "topic": "讲解 entrypoints/openai 下如何把 OpenAI 风格的 /v1/chat/completions、/v1/completions 等端点映射到内部 GenerateReqInput。",
@@ -239,7 +271,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -255,7 +287,7 @@
           "order": 1,
           "filename": "u3-l1-scheduler-event-loop.md",
           "level": "intermediate",
-          "topic": "精读 scheduler.py 的 Scheduler 类与事件循环 run_event_loop（normal/overlap 两种模式），理解它如何协调 prefill、decode、内存分配与缓存。",
+          "topic": "精读 scheduler.py 的 Scheduler 类与事件循环 run_event_loop（normal/overlap 两种模式），理解它如何协调 prefill、decode、内存分配与缓存；注意调度器现已通过 get_schedule()/get_disagg()/get_exec() 等命名空间访问器读取运行期配置。",
           "learning_goals": [
             "理解 Scheduler 在进程内的核心职责",
             "看懂 event_loop_normal 与 event_loop_overlap 的区别",
@@ -269,13 +301,15 @@
           "minimal_modules": [
             "Scheduler 类 __init__",
             "run_event_loop / event_loop_normal",
-            "get_new_batch_prefill / update_running_batch"
+            "get_new_batch_prefill / update_running_batch",
+            "get_schedule()/get_disagg() 配置访问"
           ],
-          "practice_task": "在 scheduler.py 中定位 run_event_loop、event_loop_normal、get_new_batch_prefill、update_running_batch，用文字描述一次迭代里它们的调用顺序与各自输出。",
+          "practice_task": "在 scheduler.py 中定位 run_event_loop、event_loop_normal、get_new_batch_prefill、update_running_batch，用文字描述一次迭代里它们的调用顺序与各自输出，并指出调度器从哪些命名空间访问器读取 chunked_prefill_size 等配置。",
           "depends_on": [
-            "u2-l3"
+            "u2-l3",
+            "u2-l5"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l2",
@@ -283,7 +317,7 @@
           "order": 2,
           "filename": "u3-l2-req-and-schedule-batch.md",
           "level": "intermediate",
-          "topic": "讲解 schedule_batch.py 中 Req（单请求状态）与 ScheduleBatch（批容器）的核心字段，以及它们在调度过程中的演化。",
+          "topic": "讲解 schedule_batch.py 中 Req（单请求状态）与 ScheduleBatch（批容器）的核心字段，以及它们在调度过程中的演化（本文件因配置访问惯用法调整有少量行号漂移）。",
           "learning_goals": [
             "掌握 Req 的关键字段（rid、origin_input_ids、output_ids、fill_ids 等）",
             "理解 ScheduleBatch 如何持有内存池与树缓存引用",
@@ -295,13 +329,13 @@
           "minimal_modules": [
             "Req 类",
             "ScheduleBatch 类",
-            "NextBatchPlan"
+            "NextSequenceInfo"
           ],
           "practice_task": "为一条请求从到达到结束的每个阶段，标注 Req 上哪些字段被读/写（origin_input_ids、fill_ids、output_ids 等），并说明 ScheduleBatch 在 prefill 与 decode 阶段分别保存什么。",
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l3",
@@ -327,7 +361,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -356,7 +390,7 @@
             "u3-l1",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -392,7 +426,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -419,7 +453,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -448,7 +482,7 @@
             "u4-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -456,26 +490,28 @@
           "order": 4,
           "filename": "u4-l4-hicache.md",
           "level": "intermediate",
-          "topic": "讲解 HiRadixCache 如何在 GPU KV 之上增加主机内存/磁盘层级，实现更长上下文与更低显存压力，以及 prefetch 机制。",
+          "topic": "讲解 HiRadixCache 如何在 GPU KV 之上增加主机内存/磁盘层级，实现更长上下文与更低显存压力，以及 prefetch 机制；并介绍对非对称 MHA 的分阶段写回（staged write-back）支持。",
           "learning_goals": [
             "理解分层 KV 缓存的动机与架构",
             "看懂 HiRadixCache 的 write_backup/load_back/prefetch",
-            "了解 HiCacheStorage 后端抽象"
+            "了解 HiCacheStorage 后端抽象与主机侧非对称 MHA 池"
           ],
           "source_files": [
             "python/sglang/srt/mem_cache/hiradix_cache.py",
-            "python/sglang/srt/mem_cache/hicache_storage.py"
+            "python/sglang/srt/mem_cache/hicache_storage.py",
+            "python/sglang/srt/mem_cache/pool_host/mha.py"
           ],
           "minimal_modules": [
             "HiRadixCache 类",
             "attach/detach storage_backend",
-            "HiCacheStorage 抽象"
+            "HiCacheStorage 抽象",
+            "pool_host/mha.py 主机侧 MHA 池与分阶段写回"
           ],
-          "practice_task": "描述一条长上下文请求在 GPU 显存不足时，其 KV 如何被 evict 到主机、再次需要时如何被 prefetch 回 GPU，并标注涉及的方法调用。",
+          "practice_task": "描述一条长上下文请求在 GPU 显存不足时，其 KV 如何被 evict 到主机、再次需要时如何被 prefetch 回 GPU，并标注涉及的方法调用；说明非对称 MHA 场景下分阶段写回为何必要。",
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -491,7 +527,7 @@
           "order": 1,
           "filename": "u5-l1-model-runner-forward.md",
           "level": "intermediate",
-          "topic": "精读 model_runner.py 的 ModelRunner，理解它如何准备输入、选择注意力后端、调度 CUDA graph 并完成一次前向。",
+          "topic": "精读 model_runner.py 的 ModelRunner，理解它如何准备输入、选择注意力后端、调度 CUDA graph 并完成一次前向；注意运行期配置现已通过 get_exec() 等命名空间访问器读取、运行期调整走 get_context().override()。",
           "learning_goals": [
             "理解 ModelRunner 在 Scheduler/Worker 与模型之间的桥梁角色",
             "看懂 forward/_forward_raw 的执行步骤",
@@ -504,14 +540,16 @@
           "minimal_modules": [
             "ModelRunner.forward",
             "TpModelWorker.forward_batch_generation",
-            "forward_raw 路径"
+            "forward_raw 路径",
+            "get_exec() 配置访问与 get_context().override()"
           ],
-          "practice_task": "在 model_runner.py 与 tp_worker.py 中追踪从 ScheduleBatch 到一次 forward 返回的调用链，标注每一步的输入输出张量形状来源。",
+          "practice_task": "在 model_runner.py 与 tp_worker.py 中追踪从 ScheduleBatch 到一次 forward 返回的调用链，标注每一步的输入输出张量形状来源，并指出 forward 中读取的配置来自哪个命名空间访问器。",
           "depends_on": [
             "u3-l2",
-            "u4-l2"
+            "u4-l2",
+            "u2-l5"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l2",
@@ -538,7 +576,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -567,7 +605,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -575,10 +613,10 @@
           "order": 4,
           "filename": "u5-l4-weight-loading.md",
           "level": "intermediate",
-          "topic": "讲解 model_loader 如何加载 HF 权重，包括默认加载器、量化加载、远程实例加载、GGUF 等，以及 auto_loader 的原生模型权重映射工具。",
+          "topic": "讲解 model_loader 如何加载 HF 权重，包括默认加载器、量化加载、远程实例加载、GGUF 等，以及 auto_loader 的原生模型权重映射工具；并说明 load_weights v2 分发机制及对配置的 get_exec() 访问。",
           "learning_goals": [
             "理解 get_model_loader 的分发与各 Loader 职责",
-            "看懂 DefaultModelLoader 的加载流程",
+            "看懂 DefaultModelLoader 的加载流程与 load_weights v2 分发",
             "了解 auto_loader 的 StackedParamsDispatch/WeightsMapper"
           ],
           "source_files": [
@@ -589,13 +627,14 @@
           "minimal_modules": [
             "get_model_loader / DefaultModelLoader",
             "auto_loader 的分发与映射",
-            "weight_utils 下载工具"
+            "weight_utils 下载工具",
+            "load_weights v2 分发"
           ],
-          "practice_task": "选择一个 HF 模型，对照 auto_loader.py 的 WeightsMapper/StackedParamsDispatch，说明它的 qkv_proj/gate_up_proj 权重如何被重映射到 SGLang 的层结构。",
+          "practice_task": "选择一个 HF 模型，对照 auto_loader.py 的 WeightsMapper/StackedParamsDispatch，说明它的 qkv_proj/gate_up_proj 权重如何被重映射到 SGLang 的层结构，并指出 load_weights v2 如何按模型类型分发加载。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l5",
@@ -603,7 +642,7 @@
           "order": 5,
           "filename": "u5-l5-reading-llama.md",
           "level": "intermediate",
-          "topic": "以 models/llama.py 为范例，讲解一个 SGLang 模型由哪些层组成（Embedding、DecoderLayer、RadixAttention、MLP、LM Head），以及它与 HF 实现的差异。",
+          "topic": "以 models/llama.py 为范例，讲解一个 SGLang 模型由哪些层组成（Embedding、DecoderLayer、RadixAttention、MLP、LM Head），以及它与 HF 实现的差异；注意模型内现已通过 get_parallel() 等访问器读取并行配置。",
           "learning_goals": [
             "掌握 SGLang 模型的标准组件结构",
             "理解 RadixAttention 在 DecoderLayer 中的位置",
@@ -617,14 +656,15 @@
           "minimal_modules": [
             "LlamaForCausalLM / LlamaModel",
             "LlamaDecoderLayer / LlamaAttention",
-            "registry 模型注册"
+            "registry 模型注册",
+            "get_parallel() 并行配置访问"
           ],
-          "practice_task": "对照 HF transformers 的 Llama 实现，列出 SGLang llama.py 中对应组件，并标注 RadixAttention 替换了原 SelfAttention 的哪些逻辑。",
+          "practice_task": "对照 HF transformers 的 Llama 实现，列出 SGLang llama.py 中对应组件，并标注 RadixAttention 替换了原 SelfAttention 的哪些逻辑，以及并行相关字段从哪个访问器读取。",
           "depends_on": [
             "u5-l3",
             "u5-l4"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -660,7 +700,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -687,7 +727,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -717,7 +757,7 @@
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -747,7 +787,7 @@
             "u6-l3",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -784,7 +824,7 @@
             "u5-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -813,7 +853,7 @@
             "u3-l1",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -842,7 +882,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -878,7 +918,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -906,7 +946,7 @@
             "u8-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -934,7 +974,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -971,7 +1011,7 @@
             "u3-l1",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1000,7 +1040,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1029,7 +1069,7 @@
             "u9-l1",
             "u8-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1066,7 +1106,7 @@
             "u3-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1074,7 +1114,7 @@
           "order": 2,
           "filename": "u10-l2-eagle-draft.md",
           "level": "advanced",
-          "topic": "讲解 EAGLE 系列投机解码：用一个轻量草稿模型预测多 token，再由主模型批量验证（eagle_worker_v2）。",
+          "topic": "讲解 EAGLE 系列投机解码：用一个轻量草稿模型预测多 token，再由主模型批量验证（eagle_worker_v2）；注意草稿 worker 现已通过 get_spec() 读取投机相关配置，并叠加了若干性能优化。",
           "learning_goals": [
             "理解 EAGLE 的草稿-验证流程",
             "看懂 eagle_worker_v2 的生成与验证",
@@ -1088,13 +1128,14 @@
           "minimal_modules": [
             "eagle_worker_v2",
             "eagle_info",
-            "eagle_utils"
+            "eagle_utils",
+            "get_spec() 投机配置访问"
           ],
-          "practice_task": "对比开启 EAGLE 前后的 token 吞吐与接受率，并在源码中标注草稿生成与主模型验证两阶段的分界。",
+          "practice_task": "对比开启 EAGLE 前后的 token 吞吐与接受率，并在源码中标注草稿生成与主模型验证两阶段的分界，以及 speculative_eagle_topk 等配置从哪个访问器读取。",
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l3",
@@ -1122,7 +1163,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1160,36 +1201,41 @@
             "u5-l4",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
-          "title": "sgl-kernel 与 jit_kernel 算子体系",
+          "title": "统一算子体系：kernels 注册/选择与 sgl-kernel/JIT",
           "order": 2,
           "filename": "u11-l2-sgl-kernel-jit-kernel.md",
           "level": "advanced",
-          "topic": "讲解两类算子来源：AOT 编译的 sgl-kernel（C++/CUDA）与运行时 JIT 的 jit_kernel，以及如何为新算子选择合适体系。",
+          "topic": "讲解 RFC #29630 迁移后的统一算子体系：python/sglang/kernels/ 通过 registry（KernelRegistry/register_kernel）+ spec（KernelSpec/KernelBackend/CapabilityRequirement/PlatformInfo）+ selector（get_kernel/select_kernel）按设备能力在 AOT（sgl-kernel）与 JIT 之间自动选择；BaseFusedOp 以多后端 forward_<backend>() 聚合多个实现，ops/ 下按 16 个算子组组织，旧 jit_kernel/ 退化为兼容 shim。",
           "learning_goals": [
-            "区分 sgl-kernel 与 jit_kernel 的定位",
-            "了解 sgl-kernel 的构建与打包",
-            "了解 jit_kernel 的运行时编译机制"
+            "理解 kernels/ 的统一命名空间与 KernelSpec 注册模型",
+            "掌握 selector 如何按设备/能力在 AOT 与 JIT 间解析算子",
+            "看懂 BaseFusedOp 多后端分发与后端优先级",
+            "区分 sgl-kernel（AOT）、kernels/jit（JIT 基础设施）与 legacy jit_kernel（shim）"
           ],
           "source_files": [
-            "sgl-kernel/pyproject.toml",
-            "python/sglang/jit_kernel/__init__.py",
-            "python/sglang/jit_kernel/flash_attention.py",
-            "python/sglang/jit_kernel/triton/"
+            "python/sglang/kernels/registry.py",
+            "python/sglang/kernels/selector.py",
+            "python/sglang/kernels/spec.py",
+            "python/sglang/kernels/fused_op.py",
+            "python/sglang/kernels/ops/quantization/__init__.py",
+            "sgl-kernel/pyproject.toml"
           ],
           "minimal_modules": [
-            "sgl-kernel 工程结构",
-            "jit_kernel 入口",
-            "triton JIT 算子"
+            "KernelRegistry / register_kernel",
+            "KernelSpec / CapabilityRequirement / PlatformInfo",
+            "selector.get_kernel / select_kernel",
+            "BaseFusedOp.forward 多后端分发",
+            "kernels/ops 算子组与 legacy jit_kernel shim 关系"
           ],
-          "practice_task": "在 jit_kernel 与 sgl-kernel 中各找一个注意力相关算子，说明它们的调用方式差异，并判断新算子应放入哪一体系。",
+          "practice_task": "在 kernels/ops 中选一个算子（如 layernorm 或 quantization 的 per_token_group_quant），追踪它如何 register_kernel(KernelSpec)、selector 如何按设备解析到 AOT 或 JIT 后端，并说明 BaseFusedOp.forward 的后端优先级顺序；再判断一个新算子应放入 kernels/ops 还是 sgl-kernel。",
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "rebuild"
         }
       ]
     },
@@ -1226,7 +1272,7 @@
           "depends_on": [
             "u5-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1234,7 +1280,7 @@
           "order": 2,
           "filename": "u12-l2-add-new-model.md",
           "level": "advanced",
-          "topic": "讲解如何为新模型架构添加支持：在 models/ 实现模型类、在 registry.py 注册架构映射、对接权重加载与注意力层。",
+          "topic": "讲解如何为新模型架构添加支持：在 models/ 实现模型类、在 registry.py 注册架构映射、对接权重加载（含 load_weights v2 分发）与注意力层。",
           "learning_goals": [
             "掌握 models/registry 的架构映射机制",
             "理解实现一个新模型需要的组件",
@@ -1255,7 +1301,7 @@
             "u5-l5",
             "u5-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -1263,7 +1309,7 @@
           "order": 3,
           "filename": "u12-l3-rl-backend-offline.md",
           "level": "advanced",
-          "topic": "讲解 SGLang 作为 RL rollout 后端的用法，以及离线批量推理（offline_batch_inference）与 Engine 异步接口的工程模式。",
+          "topic": "讲解 SGLang 作为 RL rollout 后端的用法，以及离线批量推理（offline_batch_inference）与 Engine 异步接口的工程模式；注意 Engine 内部配置访问已迁移到 runtime_context 命名空间访问器。",
           "learning_goals": [
             "理解 SGLang 在 RL 训练后端中的角色",
             "掌握离线批量推理与异步 Engine 的用法",
@@ -1285,7 +1331,7 @@
             "u1-l4",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     }

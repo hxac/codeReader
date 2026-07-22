@@ -1,0 +1,552 @@
+{
+  "project": "sglang-rust-sglang-grpc",
+  "head": "977ea336cd3e960141c4c6e746b4efc24fdf312e",
+  "rationale": "本手册围绕 sglang-grpc 这一用 Rust+PyO3 编写的 SGLang 进程内原生 gRPC 服务扩展展开。该 crate 体量虽小，但横跨 PyO3 扩展、Tonic gRPC、Tokio 异步运行时与 Python GIL 互操作四个领域，且在背压、中止传播、错误映射方面内容较深，因此采用三层结构：入门层(u1)先让读者建立项目定位、构建链、目录地图与启动入口的整体认知，确保从零可理解、可构建；进阶层(u2)按\"proto 契约→服务实现总览→流式分发→一元分发→Python 桥接→回调→请求字典构建→原生分词器\"的真实调用链顺序逐层展开核心模块，使每篇只讲一个相对独立的机制；专家层(u3)聚焦背压停泊、RAII 中止传播、Python 异常到 gRPC 状态码映射、服务引导与优雅关停、Tokio/GIL 协作模型以及测试与扩展实践。讲义之间通过 depends_on 显式标注依赖，遵循\"先整体后细节、先数据流后并发控制\"的递进，避免读者在未理解桥接通道前就接触背压等高阶话题。所有 source_files 均为已确认存在的真实文件，full 模式下 action 全部为 new。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位、构建与启动入口",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构：Rust 原生 gRPC 服务扩展",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 sglang-grpc 是什么——一个用 Rust+PyO3 编写、编译为 Python 扩展 sglang.srt.grpc._core 的进程内原生 gRPC 服务，以及它与 SGLang Python RuntimeHandle、外部 smg-grpc-servicer 包之间的边界关系。",
+          "learning_goals": [
+            "理解项目定位：为 SGLang 提供高性能原生 gRPC 前端",
+            "理解 PyO3 扩展模型：cdylib crate 编译为可被 import 的 _core 模块",
+            "理解 Rust 服务与 Python 运行时(RuntimeHandle)的职责边界"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/Cargo.toml",
+            "rust/sglang-grpc/src/lib.rs",
+            "python/pyproject.toml",
+            "python/sglang/srt/entrypoints/grpc_server.py"
+          ],
+          "minimal_modules": [
+            "package manifest [lib] 段",
+            "_core PyO3 模块(_pymodule)",
+            "pyproject.toml ext-modules 声明",
+            "grpc_server.serve_grpc 委托"
+          ],
+          "practice_task": "阅读 Cargo.toml 的 [lib] 段，说明 crate-type=[\"cdylib\"] 与 name=\"_core\" 如何对应到 Python 端的 sglang.srt.grpc._core；再在 python/pyproject.toml 中找到对应的 [[tool.setuptools-rust.ext-modules]] 声明，写一段文字解释 target/path/binding 三个字段如何把本 crate 接入 Python 包构建。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建链与工具链：Cargo、build.rs 与 setuptools-rust",
+          "order": 2,
+          "filename": "u1-l2-build-and-toolchain.md",
+          "level": "beginner",
+          "topic": "讲解构建链：Cargo.toml 的依赖与 profile、build.rs 用 tonic-build 编译 proto、rust-toolchain.toml 固定工具链，以及 Python 端 setup.py 的 BuildRust 如何通过 SGLANG_BUILD_RUST_EXTS 选择性构建本扩展。",
+          "learning_goals": [
+            "理解 build.rs 用 tonic_build::configure 编译 proto 的流程与产物(file_descriptor_set)",
+            "理解关键依赖(tonic/prost/pyo3/tokio/tokenizers)的作用",
+            "理解 setuptools-rust 打包与 SGLANG_BUILD_RUST_EXTS 的子串匹配选择机制"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/Cargo.toml",
+            "rust/sglang-grpc/build.rs",
+            "rust/sglang-grpc/rust-toolchain.toml",
+            "python/setup.py",
+            "python/pyproject.toml"
+          ],
+          "minimal_modules": [
+            "build.rs main",
+            "tonic_build::configure",
+            "BuildRust.run",
+            "_selected_rust_extensions"
+          ],
+          "practice_task": "在 build.rs 中找到 cargo:rerun-if-changed 指令，说明它为何只盯住 proto 文件；然后阅读 python/setup.py 的 _selected_rust_extensions，说明当设置 SGLANG_BUILD_RUST_EXTS=grpc 时为何能只构建 sglang.srt.grpc._core 而跳过 sglang-mm。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块地图",
+          "order": 3,
+          "filename": "u1-l3-directory-and-module-map.md",
+          "level": "beginner",
+          "topic": "梳理 src 目录结构：lib/server/bridge/tokenizers/utils 各模块的职责，proto 子模块的引入方式，以及内嵌测试文件(server/tests.rs、bridge/tests.rs 等)的组织约定。",
+          "learning_goals": [
+            "能画出四个业务模块(bridge/server/tokenizers/utils)与 proto 模块的依赖关系",
+            "理解 pub mod 与 pub(crate) mod 的可见性差异(utils 为何是 crate 私有)",
+            "知道每个源文件大致负责什么，便于后续精读定位"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/lib.rs",
+            "rust/sglang-grpc/src/utils/mod.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块声明(pub mod / pub(crate) mod)",
+            "proto 模块 include_proto!",
+            "utils/mod.rs re-export"
+          ],
+          "practice_task": "根据 src/lib.rs 顶部的模块声明，画出 bridge/server/tokenizers/utils/proto 之间的依赖图；指出 utils 模块为何声明为 pub(crate) 而不是 pub，并说明这种可见性对作为 Python 扩展的 crate 有何意义。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "启动入口全景：start_server 与 GrpcServerHandle 生命周期",
+          "order": 4,
+          "filename": "u1-l4-start-server-lifecycle.md",
+          "level": "beginner",
+          "topic": "逐段讲解 lib.rs 的 #[pyfunction] start_server：地址解析与绑定、提取 tokenizer 信息、参数归一化、构建多线程 Tokio 运行时、构造 PyBridge、在独立 OS 线程启动 gRPC 服务，以及 GrpcServerHandle 的 shutdown/is_alive 控制。",
+          "learning_goals": [
+            "理解服务启动的完整顺序与每一步的副作用",
+            "理解 worker_threads/response_channel_capacity/response_timeout_secs 的下限归一化",
+            "理解 GrpcServerHandle 通过 Notify 与 JoinHandle 控制服务生命周期的语义"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "start_server",
+            "GrpcServerHandle",
+            "extract_tokenizer_info",
+            "try_get_attr / try_get_attr_str / try_get_attr_i32"
+          ],
+          "practice_task": "阅读 start_server 的 #[pyo3(signature = ...)]，列出全部参数及其默认值；并解释为什么先用标准库 TcpListener 绑定地址、调用 set_nonblocking(true)，再把 listener 转交 Tokio(提示：与端口占用错误时机和 from_std 有关)。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：proto 契约、服务实现与 Python 桥接",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "proto 契约与 tonic 代码生成",
+          "order": 1,
+          "filename": "u2-l1-proto-contract-and-codegen.md",
+          "level": "intermediate",
+          "topic": "讲解 proto/sglang/runtime/v1/sglang.proto 定义的服务与消息(SGLang 原生 RPC、OpenAI 透传、Admin 三类)，以及 tonic-build 如何生成 Rust 服务 trait 与消息结构，再由 tonic::include_proto! 导入。",
+          "learning_goals": [
+            "读懂 proto 服务的三类 RPC 与 stream 返回关键字",
+            "理解 build.rs 的 tonic_build::configure 如何控制生成 server 端代码",
+            "理解 include_proto!(\"sglang.runtime.v1\") 与 package 名的对应关系"
+          ],
+          "source_files": [
+            "proto/sglang/runtime/v1/sglang.proto",
+            "rust/sglang-grpc/build.rs",
+            "rust/sglang-grpc/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "SglangService service 块",
+            "build_server(true)/build_client(false)",
+            "proto 模块 include_proto!"
+          ],
+          "practice_task": "在 proto 文件中统计 rpc 定义的总数并按三类(原生/OpenAI 透传/Admin)分组；然后说明若要新增一个最简单的一元 RPC，需要在 proto、build.rs、server.rs 三处分别做哪些改动(build.rs 是否需要手改)。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "服务实现总览：SglangServiceImpl 与三类 RPC",
+          "order": 2,
+          "filename": "u2-l2-service-impl-overview.md",
+          "level": "intermediate",
+          "topic": "总览 server.rs 中 SglangServiceImpl 对 SglangService trait 的实现布局：bridge 与 response_timeout 字段、流式 RPC 用关联 type XStream 声明、一元 RPC 直接返回 Response，以及 OpenAI 透传与 Admin/Ops RPC 的组织。",
+          "learning_goals": [
+            "理解 #[tonic::async_trait] 实现的整体结构与字段",
+            "区分流式(stream)与一元(unary) RPC 的返回类型模式",
+            "认识三类 RPC 的公共提交模式(submit_request / submit_json / submit_openai)"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server.rs"
+          ],
+          "minimal_modules": [
+            "SglangServiceImpl 结构体",
+            "impl SglangService for SglangServiceImpl",
+            "StreamResult 类型别名"
+          ],
+          "practice_task": "在 server.rs 中统计 SglangService impl 块实现了多少个 async fn，并按 SGLang 原生 / OpenAI 透传 / Admin 三类分组列出；指出流式 RPC 与一元 RPC 各自的返回 Result<Response<...>> 内层类型差异。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "流式 RPC 与 async_stream：text_generate / generate / OpenAI 流",
+          "order": 3,
+          "filename": "u2-l3-streaming-rpcs.md",
+          "level": "intermediate",
+          "topic": "深入流式 RPC 的实现：async_stream::stream! 宏构造响应流、对 ResponseChunk 的 Data/Finished/Error/None 四分支匹配循环、finished 标志的设置，以及与 RequestAbortGuard 的集成。",
+          "learning_goals": [
+            "掌握用 async_stream::stream! 构造 tonic 响应流的写法",
+            "理解 ResponseChunk::Data/Finished/Error/None 四种分支各自的产出与终止语义",
+            "理解 rid 的自动生成(uuid)与在闭包中的 clone 必要性"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server.rs"
+          ],
+          "minimal_modules": [
+            "text_generate",
+            "generate",
+            "openai_streaming_rpc",
+            "recv_chunk_with_timeout"
+          ],
+          "practice_task": "对照 text_generate 的 stream! 循环，说明每收到一个 ResponseChunk::Data 时 yield 的 TextGenerateResponse 中 finished 为何是 false；并解释 Ok(None) 分支如何借助 closed_stream_status 决定是否调用 abort_guard.abort_now()。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "一元 RPC 与 JSON 响应解析：embed/classify/list_models 等",
+          "order": 4,
+          "filename": "u2-l4-unary-rpcs-and-json.md",
+          "level": "intermediate",
+          "topic": "讲解一元 RPC(text_embed/embed/classify/list_models/flush_cache 等)如何用 recv_terminal_chunk_for_request/recv_json_response 收取单个终止 chunk，并用 serde_json 解析 Python 返回的 JSON 字符串、做默认值兜底。",
+          "learning_goals": [
+            "理解一元响应只期望 Finished 终止 chunk(收到 Data 视为协议违例)",
+            "掌握把 Python JSON 字符串解析为 proto 响应字段并兜底默认值的模式",
+            "理解 classify 复用 embed 提交路径(req_type=\"embed\")的原因"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server.rs"
+          ],
+          "minimal_modules": [
+            "text_embed",
+            "classify",
+            "list_models",
+            "recv_terminal_chunk_for_request",
+            "recv_json_response"
+          ],
+          "practice_task": "阅读 list_models，画出从 JSON 数组到 proto::ModelCard 的字段映射表(id/root/parent/max_model_len 的取值与兜底)；并说明 classify 在调用 submit_request 时为何传 \"embed\" 作为 req_type(提示：proto 注释与内部 EmbeddingReqInput 路径)。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "PyBridge 与请求通道架构",
+          "order": 5,
+          "filename": "u2-l5-pybridge-and-channels.md",
+          "level": "intermediate",
+          "topic": "讲解 bridge.rs 的 PyBridge：持有 Python RuntimeHandle 与 per-request mpsc 通道，BridgeState(channels/pending_sends/ready_callbacks/ready_signals/terminal_errors) 由 Mutex 保护；create_channel 做去重，submit_request 通过 GIL 调用 Python submit_request。",
+          "learning_goals": [
+            "理解桥接的核心数据结构 PyBridge 与 BridgeState 及其 Mutex 保护",
+            "理解 rid 到 mpsc Sender 的映射与重复 rid 的报错处理",
+            "理解 Python 方法调用(kwargs 构造)与失败时 remove_channel 的清理"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/bridge.rs"
+          ],
+          "minimal_modules": [
+            "PyBridge",
+            "BridgeState",
+            "create_channel",
+            "submit_request",
+            "lock_or_recover"
+          ],
+          "practice_task": "阅读 create_channel，说明遇到重复 rid 时返回何种错误、并清理了哪些与该 rid 相关的旧状态(terminal_errors/ready_callbacks/...);再解释 submit_request 在 Python 调用失败时为何要调用 remove_channel(rid)。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "回调机制：ChunkCallback 与 JsonChunkCallback",
+          "order": 6,
+          "filename": "u2-l6-chunk-callbacks.md",
+          "level": "intermediate",
+          "topic": "讲解两个 #[pyclass] 回调：Python 通过 __call__ 推送 chunk，Rust 从中提取 text/output_ids/embedding/json_bytes 与 meta_info；以及 set_on_ready/clear_on_ready 的就绪信号机制和 meta_info 的 JSON 编码。",
+          "learning_goals": [
+            "理解 Python→Rust 的回调数据流与 ResponseData 字段提取",
+            "理解 finished/error 分支如何决定 ResponseChunk 变体",
+            "理解为何 meta_info 每个值都要 JSON 编码以适配 proto map<string,string>"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/bridge.rs"
+          ],
+          "minimal_modules": [
+            "ChunkCallback.__call__",
+            "JsonChunkCallback.__call__",
+            "extract_meta_info",
+            "make_chunk_callback / make_json_callback"
+          ],
+          "practice_task": "对照 ChunkCallback.__call__ 与 JsonChunkCallback.__call__，列表说明二者在提取 ResponseData 字段(text/embedding/json_bytes/meta_info)上的差异；并解释 extract_meta_info 为何调用 py_value_to_json_string 把每个 value(包括字符串)做 JSON 编码。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "请求字典构建：proto 消息到 Python dict",
+          "order": 7,
+          "filename": "u2-l7-request-dict-building.md",
+          "level": "intermediate",
+          "topic": "讲解 utils/request_utils.rs 的 build_*_dict 函数：把 proto 消息转成 serde_json map 再经 py_utils 的 json_map_to_pydict 交给 Python；涵盖 SamplingParams、DisaggregatedParams、trace_headers、optional 字段的条件插入。",
+          "learning_goals": [
+            "掌握 proto→serde_json→PyDict 的字段映射流程",
+            "理解 optional/repeated 字段的条件与整体插入策略",
+            "理解 py_utils 的 json_map_to_pydict 与 py_value_to_json_string 两个转换的作用"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/utils/request_utils.rs",
+            "rust/sglang-grpc/src/utils/py_utils.rs",
+            "rust/sglang-grpc/src/utils/mod.rs"
+          ],
+          "minimal_modules": [
+            "build_text_generate_dict",
+            "build_generate_dict",
+            "sampling_params_to_map",
+            "insert_disaggregated_params",
+            "json_map_to_pydict"
+          ],
+          "practice_task": "对比 build_text_generate_dict 与 build_generate_dict，列出二者共有字段与各自独有字段(如 text vs input_ids、return_text_in_logprobs);并说明 sampling_params_to_map 如何处理 stop / stop_token_ids 这类 repeated 字段(为何用 !p.stop.is_empty() 判断)。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "Rust 原生分词器与 Python 回退",
+          "order": 8,
+          "filename": "u2-l8-native-tokenizer.md",
+          "level": "intermediate",
+          "topic": "讲解 tokenizers.rs 的 RustTokenizer 与可插拔后端 trait TokenizerBackend(目前仅 HuggingFaceTokenizerBackend)，以及 server.rs 中 tokenize/detokenize 的\"先 Rust(无 GIL)后 Python(spawn_blocking)\"回退策略。",
+          "learning_goals": [
+            "理解后端抽象 TokenizerBackend trait 与 load_backend 的扩展点",
+            "理解 from_tokenizer_path 在哪些情况下返回 None(禁用 Rust 分词器)",
+            "理解 server.rs 中 tokenize/detokenize 的原生优先与 Python 回退分支"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/tokenizers.rs",
+            "rust/sglang-grpc/src/server.rs"
+          ],
+          "minimal_modules": [
+            "RustTokenizer",
+            "TokenizerBackend trait",
+            "HuggingFaceTokenizerBackend",
+            "from_tokenizer_path",
+            "tokenize / detokenize(server.rs)"
+          ],
+          "practice_task": "阅读 from_tokenizer_path，列出所有会让 Rust 分词器返回 None 的情况(无 tokenizer.json、tokenizer_mode=slow、后端加载失败);再在 server.rs 的 tokenize 中追踪：当 self.bridge.rust_tokenizer() 为 Some 时走原生路径返回什么，为 None 时如何用 spawn_blocking 回退到 bridge.tokenize_py 并解析 JSON。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "专家：并发、背压、错误与生命周期",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "背压与 pending-send 停泊机制",
+          "order": 1,
+          "filename": "u3-l1-backpressure-and-parking.md",
+          "level": "advanced",
+          "topic": "深入 try_send_chunk 的背压处理：通道满时(TrySendError::Full)注册 pending_send、用 tokio_handle.spawn 异步发送该 chunk、通过 on_ready/ready_signals 边沿通知 Python 恢复生产，以及 ChannelFull/ClientDisconnected 终止错误。",
+          "learning_goals": [
+            "理解非阻塞 try_send + tokio spawn 兜底的背压设计动机",
+            "理解 register_pending_send 防止同 rid 堆积第二个 parked chunk 而直接关闭流",
+            "理解终端 chunk(Finished/Error)排空后不再触发 on_ready 的契约"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/bridge.rs"
+          ],
+          "minimal_modules": [
+            "try_send_chunk",
+            "register_pending_send",
+            "mark_send_ready",
+            "set_on_ready_for_rid",
+            "close_channel_with_error"
+          ],
+          "practice_task": "阅读 try_send_chunk 的 TrySendError::Full 分支，画出\"通道满→spawn 异步 sender.send().await→mark_send_ready→notify_ready\"的时序图;并说明为何 register_pending_send 返回 false(即已有一个 pending)时会立即 close_channel_with_error(ChannelFull)。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "中止传播：RequestAbortGuard 与 abort/abort_all",
+          "order": 2,
+          "filename": "u3-l2-abort-propagation.md",
+          "level": "advanced",
+          "topic": "讲解 server.rs 的 RequestAbortGuard(利用 Drop 在响应流提前结束时向 Python 发起 abort)与 bridge.rs 的 abort/abort_all：批量 drain 通道、写入 TerminalError::Aborted、再调用 Python abort 方法。",
+          "learning_goals": [
+            "理解 RAII 式 abort：guard 的 disarm/abort_now/drop 三种处置路径",
+            "理解 spawn_abort 用 spawn_blocking 避免阻塞 Tokio worker",
+            "理解 abort_all 的批量清理语义及其安全告警含义"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server.rs",
+            "rust/sglang-grpc/src/bridge.rs"
+          ],
+          "minimal_modules": [
+            "RequestAbortGuard(new/disarm/abort_now/Drop)",
+            "spawn_abort",
+            "PyBridge::abort / abort_all",
+            "remove_channel_refs_locked"
+          ],
+          "practice_task": "对照 RequestAbortGuard 的 drop 与 disarm/abort_now，分别说明三种情形下 guard 如何处置：流正常收到 Finished、客户端断开(Ok(None))、超时(DeadlineExceeded);再解释 bridge.rs 的 abort_all 为何在 server.rs 的 abort RPC 中触发\"仅限可信客户端\"的告警。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "错误映射：PyErr 到 gRPC Status",
+          "order": 3,
+          "filename": "u3-l3-error-mapping.md",
+          "level": "advanced",
+          "topic": "讲解错误映射体系：pyerr_to_status 把 PyValueError/PyTypeError 映射为 INVALID_ARGUMENT、其余为 INTERNAL；terminal_error_status 把 ChannelFull/Aborted/ClientDisconnected 映射为 RESOURCE_EXHAUSTED/CANCELLED；closed_stream_status 与 recv_chunk_with_timeout 的 DEADLINE_EXCEEDED 超时。",
+          "learning_goals": [
+            "掌握 Python 异常到 gRPC 状态码的两分法(客户端错误 vs 服务端错误)",
+            "掌握 TerminalError 三变体到 gRPC Code 的映射",
+            "理解 closed_stream_status 如何区分\"已有终端错误\"与\"流异常关闭需 abort\""
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server.rs"
+          ],
+          "minimal_modules": [
+            "pyerr_to_status",
+            "terminal_error_status",
+            "closed_stream_status",
+            "recv_chunk_with_timeout",
+            "TerminalError"
+          ],
+          "practice_task": "制作一张映射表，把 TerminalError::ChannelFull/ClientDisconnected/Aborted 与对应的 gRPC Code(RESOURCE_EXHAUSTED/CANCELLED)一一对应;并说明 pyerr_to_status 如何用 Python::with_gil + is_instance_of::<PyValueError/PyTypeError> 区分 INVALID_ARGUMENT 与 INTERNAL。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Tonic 服务引导、消息大小上限与优雅关停",
+          "order": 4,
+          "filename": "u3-l4-server-bootstrap-shutdown.md",
+          "level": "advanced",
+          "topic": "讲解 run_grpc_server：构建 SglangServiceImpl、用 resolve_max_message_size 解析 SGLANG_TONIC_PAYLOAD 与默认 64MiB 上限、配置 max_decoding/encoding_message_size、serve_with_incoming_shutdown 接收 Notify 信号，并与 GrpcServerHandle.shutdown 协作。",
+          "learning_goals": [
+            "理解服务引导流程与消息大小上限的意义(高于 tonic 4MiB 默认)",
+            "理解 SGLANG_TONIC_PAYLOAD 的合法/非法/0 值处理与回退",
+            "理解优雅关停的 shutdown 信号链(Notify→serve_with_incoming_shutdown)"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server.rs",
+            "rust/sglang-grpc/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "run_grpc_server",
+            "resolve_max_message_size",
+            "DEFAULT_GRPC_MAX_MESSAGE_SIZE",
+            "serve_with_incoming_shutdown",
+            "GrpcServerHandle::shutdown"
+          ],
+          "practice_task": "阅读 resolve_max_message_size，说明当 SGLANG_TONIC_PAYLOAD 设为非数字字符串、0、合法正数时的不同行为;再从 GrpcServerHandle::shutdown 的 notify_one() 出发，追踪信号如何传递到 serve_with_incoming_shutdown 的异步闭包并最终停止 tonic Server。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "Tokio 运行时与 GIL 协作模型",
+          "order": 5,
+          "filename": "u3-l5-tokio-runtime-and-gil.md",
+          "level": "advanced",
+          "topic": "讲解并发模型：start_server 在独立 std::thread 里构建多线程 Tokio 运行时并把 handle 交给 PyBridge；Python GIL 调用通过 Python::with_gil / tokio::task::spawn_blocking 完成；回调持有 tokio_handle 以便在通道满时 spawn 异步发送。",
+          "learning_goals": [
+            "理解 Tokio 运行时与承载它的 OS 线程的关系及为何独占一个线程",
+            "理解 GIL 获取时机与为何用 spawn_blocking 包装同步 GIL 调用",
+            "理解 PyBridge / 回调为何需要保存并共享 tokio_handle"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/lib.rs",
+            "rust/sglang-grpc/src/server.rs",
+            "rust/sglang-grpc/src/bridge.rs"
+          ],
+          "minimal_modules": [
+            "start_server 的 runtime Builder::new_multi_thread",
+            "tokio_handle 的 clone 与共享",
+            "server.rs 中的 spawn_blocking 调用点",
+            "Python::with_gil 的使用"
+          ],
+          "practice_task": "在 server.rs 中找出所有 tokio::task::spawn_blocking 调用(如 health_check/get_model_info/tokenize 的 Python 回退),说明它们为何不能直接在 async fn 里用 Python::with_gil 同步阻塞;再解释 PyBridge 构造时保存 tokio_handle 的用途(提示：与 try_send_chunk 的 Full 分支有关)。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "测试组织与扩展实践：新增 RPC、新增分词器后端",
+          "order": 6,
+          "filename": "u3-l6-testing-and-extension.md",
+          "level": "advanced",
+          "topic": "讲解单元测试组织(server/tests.rs、bridge/tests.rs、py_utils/tests.rs、request_utils 内联测试)与串行 env 测试模式；并以两个扩展场景收尾——如何新增一个 RPC、如何新增一个 TokenizerBackend。",
+          "learning_goals": [
+            "掌握现有测试写法与 SGLANG_TONIC_PAYLOAD 这类 env 串行测试的 SAFETY 约定",
+            "理解新增一个 gRPC RPC 需要改动的完整清单(proto、server trait 实现、请求字典、错误映射)",
+            "理解 tokenizers.rs 的 load_backend 后端扩展点"
+          ],
+          "source_files": [
+            "rust/sglang-grpc/src/server/tests.rs",
+            "rust/sglang-grpc/src/bridge/tests.rs",
+            "rust/sglang-grpc/src/utils/py_utils/tests.rs",
+            "rust/sglang-grpc/src/utils/request_utils.rs",
+            "rust/sglang-grpc/src/tokenizers.rs"
+          ],
+          "minimal_modules": [
+            "resolve_max_message_size_honors_env_var",
+            "terminal_error_messages_include_request_id",
+            "generate_dicts_include_session_id",
+            "load_backend",
+            "TokenizerBackend trait"
+          ],
+          "practice_task": "参照 request_utils.rs 内联测试(generate_dicts_include_session_id 等)的风格，为 build_text_embed_dict 编写一个单元测试，断言 routing_key 与 trace_headers 被正确写入字典、且空 trace_headers 时不出现 external_trace_header 键;或参照 HuggingFaceTokenizerBackend 为 TokenizerBackend 新增一个占位后端结构体并在 load_backend 中注册探测。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
