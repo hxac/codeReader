@@ -1,0 +1,1176 @@
+{
+  "project": "SpecForge",
+  "head": "a4fca140bc5fd12d6db40bc694c1a7dd790da57d",
+  "rationale": "SpecForge 是 SGLang 团队的投机解码草稿模型训练框架，体量大、多平面：单一 typed 入口 specforge train → 七段配置 → application 组合根 → 算法契约/注册表（算法与草稿架构是两条独立轴线）→ 训练面（装配/策略/Trainer/FSDP/损失算子）→ DataFlow 运行时（控制面元数据账本 + 数据面特征存储 + 在线引用分发 + 推理面 SGLang 捕获）→ 分布式 TP/DP/USP → 检查点/导出/评测/基准/扩展。学习路线据此由浅入深分三层：入门层先建立\"是什么、怎么跑、目录与原理\"的直觉；进阶层沿真实调用链拆解入口启动、算法契约、数据特征、训练主链路四大子系统；专家层进入运行时四条路径、分布式并行、工程化运维与二次开发扩展点。每篇只讲一个独立主题、引用 1-6 个真实源码、配一个可操作代码任务，并通过 depends_on 形成 DAG，使读者能从零顺读到能新增草稿架构与训练算法。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 SpecForge",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与生态",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清 SpecForge 是什么：SGLang 团队出品的投机解码草稿模型训练框架，开箱即用、训练产物可直接导入 SGLang 加速推理。",
+          "learning_goals": [
+            "理解投机解码训练框架的定位与价值",
+            "掌握 SpecForge 与 SGLang 服务的关系",
+            "了解支持的草稿方法与 SpecBundle 生态"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/get_started/about.md"
+          ],
+          "minimal_modules": [
+            "README 概述",
+            "支持方法矩阵",
+            "SpecBundle 资源"
+          ],
+          "practice_task": "阅读 README，列出当前支持的草稿方法名称，并用一句话说明 SpecForge 相比其它开源投机解码项目的三个核心承诺。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与环境准备",
+          "order": 2,
+          "filename": "u1-l2-install-and-env.md",
+          "level": "beginner",
+          "topic": "讲解如何从零安装 SpecForge，包括源码安装、PyPI 安装，以及 CUDA / ROCm / Ascend NPU 三类加速器环境差异。",
+          "learning_goals": [
+            "掌握 uv/pip 安装 SpecForge 的步骤",
+            "理解 pyproject.toml 依赖与可选扩展",
+            "了解 CUDA/ROCm/NPU 三种加速器的安装差异"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "docs/get_started/installation.md",
+            "requirements-rocm.txt"
+          ],
+          "minimal_modules": [
+            "pyproject 依赖与 scripts 入口",
+            "installation 指南",
+            "ROCm 依赖清单"
+          ],
+          "practice_task": "创建 Python 3.11 虚拟环境，安装 SpecForge，运行 specforge --help 确认 train/export/benchmark 三个子命令可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "投机解码原理",
+          "order": 3,
+          "filename": "u1-l3-speculative-decoding.md",
+          "level": "beginner",
+          "topic": "用初学者能懂的方式讲解投机解码：目标模型与草稿模型、prefill/drafting/verification 三阶段，以及为何能保证输出分布不变。",
+          "learning_goals": [
+            "理解目标模型与草稿模型的分工",
+            "掌握 prefill/草拟/验证三阶段流程",
+            "理解拒绝采样保证输出等价的原理"
+          ],
+          "source_files": [
+            "docs/concepts/speculative_decoding.md"
+          ],
+          "minimal_modules": [
+            "延迟瓶颈分析",
+            "草稿/目标协作",
+            "验证与拒绝采样"
+          ],
+          "practice_task": "画一张投机解码三阶段时序图，标注目标模型与草稿模型各自负责的计算，并解释为何验证多个 token 的时间接近生成一个 token。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "EAGLE3 特征式草稿原理",
+          "order": 4,
+          "filename": "u1-l4-eagle3-concepts.md",
+          "level": "beginner",
+          "topic": "讲解 SpecForge 的主力方法 EAGLE3：基于目标模型隐藏状态的特征式草拟、训练时测试（TTT）、动态草稿树。",
+          "learning_goals": [
+            "理解特征式草拟与直接 token 草拟的区别",
+            "掌握 EAGLE3 抽取多层隐藏状态拼接的机制",
+            "理解训练时测试如何提升接受率"
+          ],
+          "source_files": [
+            "docs/concepts/EAGLE3.md"
+          ],
+          "minimal_modules": [
+            "特征式草拟",
+            "多层隐藏状态拼接",
+            "训练时测试与动态草稿树"
+          ],
+          "practice_task": "用一段文字说明 EAGLE3 草稿模型的输入来自哪里、输出是什么，并对比它与「用同家族小模型当草稿」的做法差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "目录结构与源码地图",
+          "order": 5,
+          "filename": "u1-l5-source-map.md",
+          "level": "beginner",
+          "topic": "通览 specforge 源码包的目录结构，建立从 cli 到 algorithms/training/runtime/inference/modeling 的整体地图。",
+          "learning_goals": [
+            "掌握 specforge 包的顶层目录划分",
+            "理解每个子包（config/algorithms/training/runtime/inference/modeling）的职责",
+            "能在源码中快速定位功能模块"
+          ],
+          "source_files": [
+            "specforge/cli.py",
+            "specforge/__init__.py",
+            "docs/basic_usage/training.md"
+          ],
+          "minimal_modules": [
+            "cli 单一入口",
+            "algorithms/training/runtime/inference/modeling 分工",
+            "配置与脚本目录"
+          ],
+          "practice_task": "在源码中找出：负责命令解析的文件、负责训练装配的文件、负责在线引用分发的目录，并填写一张「目录→职责」对照表。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "第一次运行训练",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "五分钟跑通一次训练",
+          "order": 1,
+          "filename": "u2-l1-first-run.md",
+          "level": "beginner",
+          "topic": "用一个 checked-in 示例配置走通 specforge train 的完整命令，理解在线/离线/disaggregated 三种数据模式的差异。",
+          "learning_goals": [
+            "掌握 specforge train --config 的基本用法",
+            "理解 online/offline/disaggregated 数据模式",
+            "能读懂一个示例 YAML 的关键字段"
+          ],
+          "source_files": [
+            "specforge/cli.py",
+            "docs/basic_usage/training.md",
+            "examples/configs/qwen3-8b-eagle3-disaggregated.yaml"
+          ],
+          "minimal_modules": [
+            "train 子命令",
+            "online/offline 模式表",
+            "示例 YAML 字段"
+          ],
+          "practice_task": "复制 qwen3-8b-dflash-online.yaml，把 run_id/output_dir 改成你自己的，并说明该配置属于 online 还是 offline、用到几个训练进程。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "配置文件七段结构",
+          "order": 2,
+          "filename": "u2-l2-config-sections.md",
+          "level": "beginner",
+          "topic": "拆解 typed run config 的七大段（model/data/training/tracking/profiling/runtime/deployment）及 run_id/output_dir，理解每段职责。",
+          "learning_goals": [
+            "掌握 run config 的七段结构",
+            "理解 model/data/training 三段的核心字段",
+            "了解 schema.py 中各配置类的对应关系"
+          ],
+          "source_files": [
+            "specforge/config/schema.py",
+            "docs/basic_usage/training.md",
+            "examples/configs/qwen3-8b-eagle3-disaggregated.yaml"
+          ],
+          "minimal_modules": [
+            "ModelConfig/DataConfig/TrainingConfig",
+            "DeploymentConfig/TrackingConfig",
+            "Config 顶层聚合"
+          ],
+          "practice_task": "对照 schema.py，为一个 EAGLE3 离线训练写一份最小 YAML，包含 model/data/training/deployment 四段必需字段，并解释 strategy 字段如何选择算法。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "命令行覆盖与 plan 预览",
+          "order": 3,
+          "filename": "u2-l3-overrides-and-plan.md",
+          "level": "beginner",
+          "topic": "讲解 section.field=value 覆盖语法、未知字段报错机制，以及 --plan 预览解析后的进程计划而不启动训练。",
+          "learning_goals": [
+            "掌握 dotted overrides 语法与校验",
+            "理解未知字段为何直接报错",
+            "能用 --plan 检查拓扑计划"
+          ],
+          "source_files": [
+            "specforge/cli.py",
+            "specforge/config/schema.py",
+            "docs/basic_usage/training.md"
+          ],
+          "minimal_modules": [
+            "apply_overrides",
+            "load_config 校验",
+            "--plan 渲染"
+          ],
+          "practice_task": "对 qwen3-8b-eagle3-disaggregated.yaml 运行 specforge train --plan，并叠加 training.max_steps=10、training.learning_rate=5e-5 两个覆盖，观察输出变化。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "入口与启动链路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "CLI 入口与命令解析",
+          "order": 1,
+          "filename": "u3-l1-cli-entry.md",
+          "level": "intermediate",
+          "topic": "深入 cli.py：argparse 子命令（train/export/benchmark）、role 选择、单进程环境引导、worker 信号优雅退出。",
+          "learning_goals": [
+            "掌握 main() 的子命令分发逻辑",
+            "理解 role（auto/producer/consumer/both）如何影响启动",
+            "了解 _worker_signal_unwind 与单进程分布式引导"
+          ],
+          "source_files": [
+            "specforge/cli.py"
+          ],
+          "minimal_modules": [
+            "argparse 子命令",
+            "_train / _config_for_role",
+            "_bootstrap_single_process_env 与信号处理"
+          ],
+          "practice_task": "在 cli.py 中追踪一次 `specforge train` 调用：从 main 到 _train，标出配置加载、plan 构建、worker/命令分支三个关键点。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "启动计划 launch_plan",
+          "order": 2,
+          "filename": "u3-l2-launch-plan.md",
+          "level": "intermediate",
+          "topic": "讲解 launch_plan.py 如何从 typed config 推导进程拓扑计划（worker vs supervisor）、渲染命令、处理 node-rank 与 role 派生。",
+          "learning_goals": [
+            "掌握 build_launch_plan 的输入输出",
+            "理解 plan.kind 为 worker 或 supervisor 的分支",
+            "了解 --node-rank 与多节点 consumer 的关系"
+          ],
+          "source_files": [
+            "specforge/launch_plan.py",
+            "specforge/cli.py"
+          ],
+          "minimal_modules": [
+            "build_launch_plan",
+            "run_commands",
+            "plan.render 与角色派生"
+          ],
+          "practice_task": "阅读 launch_plan.py，说明当 deployment.trainer.nnodes=1 且省略 --role 时，计划会生成哪两种角色进程，以及 plan.kind 如何决定 cli 走 _train 还是 run_commands。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "拓扑构建器 launch",
+          "order": 3,
+          "filename": "u3-l3-topology-builders.md",
+          "level": "intermediate",
+          "topic": "讲解 launch.py 暴露的四个拓扑构建器（offline / disagg_offline / disagg_online_producer / disagg_online_consumer）及其汇聚到的统一训练路径。",
+          "learning_goals": [
+            "掌握四个 build_* 运行时构建器的适用场景",
+            "理解所有 trainer 构建器汇聚到 Trainer→FeatureDataLoader→Controller→Core",
+            "了解 producer 与 consumer 的参考源与特征存储差异"
+          ],
+          "source_files": [
+            "specforge/launch.py",
+            "specforge/runtime/ARCHITECTURE.md"
+          ],
+          "minimal_modules": [
+            "build_offline_runtime",
+            "build_disagg_online_producer/consumer",
+            "统一训练路径汇聚"
+          ],
+          "practice_task": "对照 ARCHITECTURE.md 的支持路径表，为「在线 disaggregated」「离线 colocated」「离线 disaggregated」三种模式分别指出应调用哪个 build_* 构建器。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "应用组合根 composition",
+          "order": 4,
+          "filename": "u3-l4-composition-root.md",
+          "level": "intermediate",
+          "topic": "讲解 application/composition.py 作为唯一组合根：resolve_run 解析算法、bind_run 校验、build_application_run 装配可执行 run。",
+          "learning_goals": [
+            "掌握 ResolvedRun 的含义与 resolve_run 流程",
+            "理解 bind_run 的角色配置校验",
+            "了解 build_application_run 如何衔接到 training.assembly"
+          ],
+          "source_files": [
+            "specforge/application/composition.py",
+            "specforge/application/planning.py",
+            "specforge/application/__init__.py"
+          ],
+          "minimal_modules": [
+            "resolve_run/bind_run",
+            "build_application_run",
+            "validate_resolved_run"
+          ],
+          "practice_task": "追踪从 cli._train 调用 build_application_run(resolved).run() 的链路，说明 resolve_run 在其中如何用 training.strategy 找到对应的 AlgorithmRegistration。",
+          "depends_on": [
+            "u3-l3",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "算法注册与契约",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "算法契约 contracts",
+          "order": 1,
+          "filename": "u4-l1-algorithm-contracts.md",
+          "level": "intermediate",
+          "topic": "讲解 algorithms/contracts.py 中的纯数据契约：AlgorithmSpec、FeatureContract、DraftRequirement、AlgorithmCapabilities，以及「无 executable」的纯值校验。",
+          "learning_goals": [
+            "掌握 AlgorithmSpec 描述的算法静态约束",
+            "理解 FeatureContract 如何声明 (mode,modality) 特征需求",
+            "了解 _assert_pure_value 为何拒绝可执行对象"
+          ],
+          "source_files": [
+            "specforge/algorithms/contracts.py"
+          ],
+          "minimal_modules": [
+            "AlgorithmSpec/FeatureContract",
+            "DraftRequirement/AlgorithmCapabilities",
+            "FeatureMode 与纯值校验"
+          ],
+          "practice_task": "对照 contracts.py，说明 EAGLE3 与 DFlash 在 required_tensors、attention_backends、supports_vocab_mapping 上分别应声明哪些差异，并解释为何这些契约不含模型类。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "算法注册表 registry 与 builtin",
+          "order": 2,
+          "filename": "u4-l2-algorithm-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 AlgorithmRegistration/AlgorithmRegistry 如何把纯 spec 与可执行 providers 绑定，以及 builtin_algorithm_registry 注册全部内置算法。",
+          "learning_goals": [
+            "掌握 AlgorithmRegistration 的 spec+providers 双半结构",
+            "理解 Registry 的不可变与去重校验",
+            "了解 builtin 注册了哪些算法名"
+          ],
+          "source_files": [
+            "specforge/algorithms/registry.py",
+            "specforge/algorithms/builtin.py"
+          ],
+          "minimal_modules": [
+            "AlgorithmRegistration/AlgorithmRegistry",
+            "registry.resolve",
+            "builtin_algorithm_registry"
+          ],
+          "practice_task": "阅读 builtin.py，列出当前注册的全部算法名，并说明 registry.resolve('dflash') 返回的对象里 spec 和 providers 分别指向什么。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "算法 providers 与扩展端口",
+          "order": 3,
+          "filename": "u4-l3-algorithm-providers.md",
+          "level": "intermediate",
+          "topic": "讲解各算法的 providers（eagle3/dflash/domino/dspark/peagle）如何提供 draft 配置解析、捕获层解析、特征 collator、离线捕获 layout 等端口。",
+          "learning_goals": [
+            "掌握 provider 端口（model/offline/collator）的含义",
+            "理解 resolve_capture_layers 如何决定捕获哪些目标层",
+            "了解 common/providers 的共享抽象"
+          ],
+          "source_files": [
+            "specforge/algorithms/eagle3/providers.py",
+            "specforge/algorithms/common/providers.py",
+            "specforge/algorithms/model_providers.py"
+          ],
+          "minimal_modules": [
+            "model provider",
+            "offline_for / capture_layout",
+            "collation 与 defaults"
+          ],
+          "practice_task": "对比 eagle3 与 dflash 的 providers，说明二者在捕获层选取与离线特征 layout 上的不同，并指出这些差异如何体现在离线特征文件 schema 上。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "草稿模型注册表 modeling draft registry",
+          "order": 4,
+          "filename": "u4-l4-draft-model-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 modeling/draft/registry.py 的 @register_draft 装饰器与 AutoDraftModel：草稿架构是与算法独立的另一条轴线，新增架构只需一个文件加装饰器。",
+          "learning_goals": [
+            "掌握 @register_draft 与 DRAFT_REGISTRY 机制",
+            "理解草稿架构与算法注册是两条独立轴线",
+            "了解 AutoDraftModel 如何从 config.json 的 architectures 字段解析模型"
+          ],
+          "source_files": [
+            "specforge/modeling/draft/registry.py",
+            "specforge/modeling/auto.py",
+            "specforge/modeling/draft/base.py"
+          ],
+          "minimal_modules": [
+            "register_draft/resolve_draft",
+            "AutoDraftModel",
+            "draft base 接口"
+          ],
+          "practice_task": "阅读 registry.py，说明为何同一个草稿架构可以服务于多个算法、同一个算法也可换不同架构，并指出 config_class 在注册时的强制作用。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "数据与特征流水线",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "数据集准备",
+          "order": 1,
+          "filename": "u5-l1-dataset-prep.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/prepare_data.py 的 19 个数据集预设、对话格式与预格式化文本格式，以及数据再生成（regenerate）为何能提升接受率。",
+          "learning_goals": [
+            "掌握对话格式与预格式化文本两种数据 schema",
+            "理解 prepare_data.py 预设与输出契约",
+            "了解数据再生的意义与 regenerate 脚本"
+          ],
+          "source_files": [
+            "docs/basic_usage/data_preparation.md",
+            "scripts/prepare_data.py",
+            "scripts/regenerate_train_data.py"
+          ],
+          "minimal_modules": [
+            "数据格式 schema",
+            "prepare_data 预设",
+            "regenerate 流程"
+          ],
+          "practice_task": "用 prepare_data.py 生成一份 ultrachat 训练 jsonl，再写出对应的 conversation 格式样例（含 id 与 conversations 字段）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "模板与预处理",
+          "order": 2,
+          "filename": "u5-l2-template-preprocessing.md",
+          "level": "intermediate",
+          "topic": "讲解 data/ 包如何把原始对话应用 chat_template、构建 loss mask、解析与构建 prompt，支撑在线捕获与离线特征。",
+          "learning_goals": [
+            "掌握 chat_template 的选择与作用",
+            "理解 loss mask 如何标识 assistant 可监督区间",
+            "了解 preprocessing/parse/prompt_builder 的分工"
+          ],
+          "source_files": [
+            "specforge/data/template.py",
+            "specforge/data/preprocessing.py",
+            "specforge/data/parse.py"
+          ],
+          "minimal_modules": [
+            "template 渲染",
+            "loss mask 构建",
+            "parse 与 prompt_builder"
+          ],
+          "practice_task": "阅读 template.py 与 preprocessing.py，说明 is_preformatted=true 时模板仍必需的原因，并描述 loss mask 是如何从 assistant 区间生成的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "离线特征生成 prepare_hidden_states",
+          "order": 3,
+          "filename": "u5-l3-offline-feature-capture.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/prepare_hidden_states.py 与 offline_capture 包如何为各策略生成预计算目标特征，以及不同策略的特征 schema 差异。",
+          "learning_goals": [
+            "掌握 prepare_hidden_states.py 的参数与 --strategy",
+            "理解各策略离线特征 schema（EAGLE3/DFlash/Domino/DSpark）",
+            "了解 offline_capture 包仅用于离线准备"
+          ],
+          "source_files": [
+            "scripts/prepare_hidden_states.py",
+            "specforge/offline_capture/sglang_backend/capture.py",
+            "docs/basic_usage/data_preparation.md"
+          ],
+          "minimal_modules": [
+            "prepare_hidden_states 参数",
+            "离线特征 schema 表",
+            "offline_capture 局部 SGLang 内核"
+          ],
+          "practice_task": "为 DFlash 写一条 prepare_hidden_states.py 命令，指定 strategy/target/draft/data/output，并说明其输出 .ckpt 记录里会包含哪些 tensor。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "跨平面契约与 SampleRef",
+          "order": 4,
+          "filename": "u5-l4-runtime-contracts.md",
+          "level": "intermediate",
+          "topic": "讲解 runtime/contracts.py 的纯 stdlib 契约：PromptTask/SampleRef/FeatureSpec/FeatureHandle 只携带元数据，TrainBatch 是唯一携带 tensor 的契约，assert_no_tensors 强制边界。",
+          "learning_goals": [
+            "掌握各跨平面记录的职责与是否携带 tensor",
+            "理解 assert_no_tensors 的递归守卫机制",
+            "了解控制面只传元数据、tensor 只在数据面的不变量"
+          ],
+          "source_files": [
+            "specforge/runtime/contracts.py",
+            "specforge/runtime/CONTRACTS.md"
+          ],
+          "minimal_modules": [
+            "PromptTask/SampleRef/FeatureSpec",
+            "TrainBatch",
+            "assert_no_tensors"
+          ],
+          "practice_task": "对照 CONTRACTS.md 的记录表，说明 SampleRef 如何通过 feature_store_uri+feature_keys 指向一个样本而不持有 tensor，并解释这一边界对分布式传输的意义。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "训练主链路",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "训练装配 assembly",
+          "order": 1,
+          "filename": "u6-l1-training-assembly.md",
+          "level": "intermediate",
+          "topic": "讲解 training/assembly.py 的 build_training_run：装配 ModelBundle（草稿/目标/tokenizer/输入工具）、优化器工厂、数据加载、profiling，产出 TrainingRun。",
+          "learning_goals": [
+            "掌握 build_training_run 的装配步骤",
+            "理解 ModelBundle 与 TrainingRun 的组成",
+            "了解 vocab mapping、prompts 准备与 dataloader workers 的配置"
+          ],
+          "source_files": [
+            "specforge/training/assembly.py",
+            "specforge/training/model_loading.py",
+            "specforge/training/vocab_mapping.py"
+          ],
+          "minimal_modules": [
+            "build_training_run",
+            "ModelBundle/TrainingRun",
+            "优化器与数据加载装配"
+          ],
+          "practice_task": "在 assembly.py 中标出：草稿模型加载、tokenizer 加载、离线 vocab mapping 安装三个步骤分别调用的函数，并说明它们依赖哪个配置段。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "训练策略 DraftTrainStrategy",
+          "order": 2,
+          "filename": "u6-l2-train-strategy.md",
+          "level": "intermediate",
+          "topic": "讲解 training/strategies/base.py 的 DraftTrainStrategy 抽象与各实现（Eagle3/PEagle/DFlash/Domino/DSpark）：required_features、forward_loss、checkpoint_state_filter。",
+          "learning_goals": [
+            "掌握 DraftTrainStrategy 的抽象方法与职责",
+            "理解各策略 forward_loss 的差异与 target 投影",
+            "了解 checkpoint_state_filter 如何过滤草稿权重"
+          ],
+          "source_files": [
+            "specforge/training/strategies/base.py"
+          ],
+          "minimal_modules": [
+            "DraftTrainStrategy 抽象",
+            "Eagle3/DFlash/Domino forward_loss",
+            "StepContext 与 lambda 衰减"
+          ],
+          "practice_task": "对比 Eagle3TrainStrategy 与 DFlashTrainStrategy，说明二者 required_features、target 处理方式、checkpoint 过滤逻辑的三点差异。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Trainer 与 TrainerController",
+          "order": 3,
+          "filename": "u6-l3-trainer-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 Trainer.fit 公共生命周期、TrainerController 的 epoch 循环与 optimizer 边界计数、interval 检查点与 durable ack。",
+          "learning_goals": [
+            "掌握 Trainer.fit 的进入/退出与最终保存",
+            "理解 TrainerController 的 epoch 循环与 global_step 边界",
+            "了解自然结束必须在 optimizer 边界的约束"
+          ],
+          "source_files": [
+            "specforge/training/trainer.py",
+            "specforge/training/controller.py",
+            "specforge/training/DESIGN.md"
+          ],
+          "minimal_modules": [
+            "Trainer.fit 生命周期",
+            "TrainerController epoch 循环",
+            "optimizer 边界与 ack"
+          ],
+          "practice_task": "对照 DESIGN.md 的流程图，说明 TrainerCore 返回的 optimizer_stepped 为何是「单一权威边界信号」，以及 global_step 何时才自增。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "FSDP 后端与梯度累积",
+          "order": 4,
+          "filename": "u6-l4-fsdp-backend.md",
+          "level": "intermediate",
+          "topic": "讲解 training/backend.py 的 FSDPTrainingBackend：模型包裹、backward、optimizer step、分布式梯度范数、no_sync 与梯度累积边界。",
+          "learning_goals": [
+            "掌握 FSDPTrainingBackend 的 backward/step 职责",
+            "理解梯度累积与 no_sync 的配合",
+            "了解 TrainerCore 如何除以 accumulation_steps"
+          ],
+          "source_files": [
+            "specforge/training/backend.py",
+            "specforge/training/DESIGN.md"
+          ],
+          "minimal_modules": [
+            "FSDP 包裹",
+            "backward/step",
+            "no_sync 与累积边界"
+          ],
+          "practice_task": "解释当 accumulation_steps>1 时，非边界 micro-batch 为何用 no_sync，并说明若最后一次 backward 落在 no_sync 内 fit 会如何处理。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "损失与核心算子",
+          "order": 5,
+          "filename": "u6-l5-loss-kernels.md",
+          "level": "intermediate",
+          "topic": "讲解 core/ 包的损失与算子：loss.py 的 LogSoftmaxLoss 与 triton kernel、lk_loss.py 的 LK 损失、compact_teacher.py 的分块教师投影。",
+          "learning_goals": [
+            "掌握 LogSoftmaxLoss 的前向/反向 kernel",
+            "理解 LK loss 与 compact teacher 的用途",
+            "了解 chunking/eagle3_adapters 的辅助作用"
+          ],
+          "source_files": [
+            "specforge/core/loss.py",
+            "specforge/core/lk_loss.py",
+            "specforge/core/compact_teacher.py"
+          ],
+          "minimal_modules": [
+            "LogSoftmaxLoss",
+            "LK loss",
+            "compact teacher 分块投影"
+          ],
+          "practice_task": "阅读 compact_teacher.py 相关入口，说明 compact_teacher=true 为何能降低峰值显存且不改变教师分布，并指出它对哪些运行模式被拒绝。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "DataFlow 运行时",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "运行时架构与四条路径",
+          "order": 1,
+          "filename": "u7-l1-runtime-architecture.md",
+          "level": "advanced",
+          "topic": "总览 runtime/ARCHITECTURE.md：四条路径（colocated offline / disagg offline / online producer / online consumer）、跨面契约、canonical 在线 disaggregated 流。",
+          "learning_goals": [
+            "掌握四条路径的参考源与特征存储差异",
+            "理解控制面/数据面/推理面/训练面的分工",
+            "了解在线 consumer 的标准数据通路"
+          ],
+          "source_files": [
+            "specforge/runtime/ARCHITECTURE.md",
+            "specforge/launch.py"
+          ],
+          "minimal_modules": [
+            "四条路径表",
+            "跨面契约",
+            "canonical 在线流图"
+          ],
+          "practice_task": "对照 ARCHITECTURE 的支持路径表，说明 colocated offline 与 online 在「是否可重迭代」「参考源」「特征存储」上的三处不同。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "控制平面与元数据账本",
+          "order": 2,
+          "filename": "u7-l2-control-plane.md",
+          "level": "advanced",
+          "topic": "讲解 control_plane：DataFlowController 的 prompt 租赁/提交/去重、NoOp/InMemory/SQLite 三种 metadata store、freshness 与恢复契约。",
+          "learning_goals": [
+            "掌握 DataFlowController 的元数据原语",
+            "理解三种 metadata store 的适用拓扑",
+            "了解 rank0 单一写账本与恢复契约"
+          ],
+          "source_files": [
+            "specforge/runtime/control_plane/controller.py",
+            "specforge/runtime/control_plane/metadata_store.py",
+            "specforge/runtime/control_plane/DESIGN.md"
+          ],
+          "minimal_modules": [
+            "DataFlowController",
+            "metadata stores",
+            "freshness/恢复契约"
+          ],
+          "practice_task": "说明在线 consumer 为何只有 rank0 读写 SQLite 账本，并解释「durable ack step 必须等于 checkpoint step」这条恢复约束的用意。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "数据平面 feature store 与传输",
+          "order": 3,
+          "filename": "u7-l3-data-plane-stores.md",
+          "level": "advanced",
+          "topic": "讲解 data_plane：FeatureStore 契约、LocalFeatureStore、shared_dir 与 Mooncake 后端、offline_reader 与 disagg_ingest、FeatureDataLoader 桥接。",
+          "learning_goals": [
+            "掌握 FeatureStore 的 put/get/release/abort/gc 生命周期",
+            "理解 local/shared_dir/mooncake 三种后端实现同一契约",
+            "了解 FeatureDataLoader 的 refs 与 queue 两种模式"
+          ],
+          "source_files": [
+            "specforge/runtime/data_plane/feature_store.py",
+            "specforge/runtime/data_plane/mooncake_store.py",
+            "specforge/runtime/data_plane/offline_reader.py",
+            "specforge/runtime/data_plane/feature_dataloader.py"
+          ],
+          "minimal_modules": [
+            "FeatureStore 契约",
+            "mooncake/shared_dir 后端",
+            "FeatureDataLoader refs/queue"
+          ],
+          "practice_task": "说明为何 trainer 与 loader 对传输后端无感，并指出在线 queue 模式与离线 refs 模式在「是否可重迭代」上的根本差异。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "在线引用分发与流式队列",
+          "order": 4,
+          "filename": "u7-l4-online-ref-distribution.md",
+          "level": "advanced",
+          "topic": "讲解在线 consumer 的引用分发链：RefDistributor→InboxChannel→StreamingRefQueue、quantum 握手、DPAckController 的 optimizer 边界 durable ack、部分 quantum 的终态处理。",
+          "learning_goals": [
+            "掌握 RefDistributor 的去重与按 quantum 分发",
+            "理解 quantum 握手与 producer 背压",
+            "了解 DPAckController 的两段式 ack 与部分窗口处理"
+          ],
+          "source_files": [
+            "specforge/runtime/data_plane/ref_distributor.py",
+            "specforge/runtime/data_plane/streaming_ref_channel.py",
+            "specforge/runtime/data_plane/sample_ref_queue.py",
+            "specforge/runtime/control_plane/dp_ack.py"
+          ],
+          "minimal_modules": [
+            "RefDistributor",
+            "StreamingRefChannel/Inbox",
+            "DPAckController"
+          ],
+          "practice_task": "推算一个 dp=4、batch=2、accum=2 的 consumer 的 quantum 值，并说明 producer 的 in-flight high watermark 必须满足什么条件、EOF 残留不足一个 quantum 时会如何处理。",
+          "depends_on": [
+            "u7-l2",
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "推理平面与 SGLang 捕获",
+          "order": 5,
+          "filename": "u7-l5-inference-capture.md",
+          "level": "advanced",
+          "topic": "讲解 inference/：RolloutWorker 作为 RefSource、SGLangServerCaptureAdapter 把输入发给 patched SGLang、服务器直接写 Mooncake、仅返回元数据。",
+          "learning_goals": [
+            "掌握 RolloutWorker 的 lease/produce_refs/commit 流程",
+            "理解 SGLangServerCaptureAdapter 的传输边界",
+            "了解为何 tensor 不经过 controller 或 producer 进程"
+          ],
+          "source_files": [
+            "specforge/inference/rollout_worker.py",
+            "specforge/inference/adapters/server_capture.py",
+            "specforge/inference/capture.py",
+            "specforge/inference/DESIGN.md"
+          ],
+          "minimal_modules": [
+            "RolloutWorker",
+            "SGLangServerCaptureAdapter",
+            "capture contract"
+          ],
+          "practice_task": "对照 inference/DESIGN.md 的流程图，说明一次 capture 请求中「模型执行」「tensor 写入」「元数据返回」分别发生在哪里，并解释 verify_capture_specs 的作用。",
+          "depends_on": [
+            "u7-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "分布式与并行",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "分布式初始化与设备网格",
+          "order": 1,
+          "filename": "u8-l1-distributed-init.md",
+          "level": "advanced",
+          "topic": "讲解 distributed.py：init_distributed、TP/DP/SP group、device mesh、shard/gather 算子，以及 CUDA/ROCm/NPU(HCCL) 后端选择。",
+          "learning_goals": [
+            "掌握 init_distributed 与 process group 划分",
+            "理解 TP/DP/SP ulysses/ring group 的获取",
+            "了解 shard_tensor/gather_tensor 算子与后端选择"
+          ],
+          "source_files": [
+            "specforge/distributed.py",
+            "specforge/cli.py"
+          ],
+          "minimal_modules": [
+            "init_distributed",
+            "TP/DP/SP group",
+            "shard/gather"
+          ],
+          "practice_task": "阅读 distributed.py，说明 tp_size/sp_ulysses_size/sp_ring_size 如何共同决定 device mesh，并指出 world size 必须满足的整除约束。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "并行拓扑 USP 与 ring attention",
+          "order": 2,
+          "filename": "u8-l2-parallel-topologies.md",
+          "level": "advanced",
+          "topic": "讲解并行拓扑约束：online consumer DP、offline DP、EAGLE3 USP（ulysses×ring）、layers/ring 的 ring attention 实现，以及 batch_size 约束。",
+          "learning_goals": [
+            "掌握各模式支持的并行组合",
+            "理解 USP 的 ulysses/ring 分组与共享序列语义",
+            "了解 ring_flash_attn 在 SP 中的作用"
+          ],
+          "source_files": [
+            "specforge/distributed.py",
+            "specforge/layers/ring/ring_flash_attn.py",
+            "docs/basic_usage/training.md"
+          ],
+          "minimal_modules": [
+            "并行拓扑表",
+            "USP 分组",
+            "ring attention"
+          ],
+          "practice_task": "为 EAGLE3 离线 USP 设计一个 8 卡配置（sp_ulysses_size/sp_ring_size/batch_size），使其满足乘积>1 且 world size 整除约束，并解释 SP peer 共享一条序列的含义。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "工程化与运维",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "检查点与恢复",
+          "order": 1,
+          "filename": "u9-l1-checkpoint-resume.md",
+          "level": "advanced",
+          "topic": "讲解 training/checkpoint.py：save_interval/max_checkpoints 轮转、latest/best 指针、resume_from（完整恢复）与 draft_checkpoint_path（仅权重热启动）的区别、在线 consumer-only 恢复。",
+          "learning_goals": [
+            "掌握两种检查点操作的语义差异",
+            "理解轮转与 latest/best 指针机制",
+            "了解在线 disaggregated 恢复的 consumer-only 契约"
+          ],
+          "source_files": [
+            "specforge/training/checkpoint.py",
+            "docs/basic_usage/training.md",
+            "docs/basic_usage/disaggregated_training.md"
+          ],
+          "minimal_modules": [
+            "checkpoint 轮转",
+            "resume vs warm start",
+            "online 恢复契约"
+          ],
+          "practice_task": "写两条命令：一条用 resume_from 续训一个离线 run，一条用 draft_checkpoint_path 从旧权重热启动新 run，并说明二者恢复状态的差异。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "优化器与学习率调度",
+          "order": 2,
+          "filename": "u9-l2-optimizer-scheduler.md",
+          "level": "advanced",
+          "topic": "讲解 optimizer.py 的优化器工厂、lr_scheduler.py 的学习率调度、training/schedule.py 的步数/损失 horizons，以及 global_step 语义。",
+          "learning_goals": [
+            "掌握优化器工厂与配置驱动",
+            "理解学习率 warmup/decay 调度",
+            "了解 max_steps/total_steps 的 horizon 语义"
+          ],
+          "source_files": [
+            "specforge/optimizer.py",
+            "specforge/lr_scheduler.py",
+            "specforge/training/schedule.py"
+          ],
+          "minimal_modules": [
+            "优化器工厂",
+            "lr 调度",
+            "step horizons"
+          ],
+          "practice_task": "说明 max_steps 与 total_steps 的区别：当二者都省略时 online producer 如何推导 schedule horizon，consumer 又如何使用它。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "实验跟踪与性能分析",
+          "order": 3,
+          "filename": "u9-l3-tracking-profiling.md",
+          "level": "advanced",
+          "topic": "讲解 tracker.py 的多后端跟踪（wandb/tensorboard/swanlab/mlflow）、training/profiling.py 的有界 per-rank PyTorch trace、metrics 命名约定。",
+          "learning_goals": [
+            "掌握 tracking 后端选择与配置",
+            "理解 profiling 窗口的 step 语义与跨 resume 行为",
+            "了解 train/*/eval/* metrics 命名约定"
+          ],
+          "source_files": [
+            "specforge/tracker.py",
+            "specforge/training/profiling.py",
+            "docs/basic_usage/training.md"
+          ],
+          "minimal_modules": [
+            "tracker 后端",
+            "profiling 窗口",
+            "metrics 命名"
+          ],
+          "practice_task": "为一个 run 配置 tensorboard 跟踪与一段 start_step=30、num_steps=4 的 profiling，并说明该 trace 窗口在梯度累积与 resume 下如何对齐到 optimizer step。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "导出、评测与基准",
+          "order": 4,
+          "filename": "u9-l4-export-eval-benchmark.md",
+          "level": "advanced",
+          "topic": "讲解 export（to_hf/to_sglang/checkpoint_io）把运行时检查点物化为服务目录、eval/evaluator 的离线评测与 best 选择、benchmarks/sglang.py 的服务端吞吐与投机解码遥测基准。",
+          "learning_goals": [
+            "掌握 specforge export --to hf/sglang 的用法与权重键校验",
+            "理解离线评测的默认选择指标与 best 指针",
+            "了解 benchmark 子命令如何度量加速"
+          ],
+          "source_files": [
+            "specforge/export/to_hf.py",
+            "specforge/export/to_sglang.py",
+            "specforge/eval/evaluator.py",
+            "specforge/benchmarks/sglang.py"
+          ],
+          "minimal_modules": [
+            "export hf/sglang",
+            "evaluator best 选择",
+            "sglang benchmark"
+          ],
+          "practice_task": "为一个 EAGLE3 检查点写出 sglang 与 hf 两条 export 命令，并说明 --to sglang 会校验哪些必需权重键、默认 best 选择指标是什么。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "扩展与二次开发",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "新增一个草稿架构",
+          "order": 1,
+          "filename": "u10-l1-custom-draft-arch.md",
+          "level": "advanced",
+          "topic": "结合 customization 文档讲解如何用 @register_draft 新增一个草稿模型架构：新文件+装饰器+config_class，无需改 modeling/auto.py。",
+          "learning_goals": [
+            "掌握 @register_draft 扩展点",
+            "理解 config_class 与 architectures 字段的解析",
+            "了解新增架构的 layers/modeling 落点"
+          ],
+          "source_files": [
+            "docs/advanced_features/customization.md",
+            "specforge/modeling/draft/registry.py",
+            "specforge/modeling/draft/base.py",
+            "specforge/modeling/auto.py"
+          ],
+          "minimal_modules": [
+            "register_draft 扩展点",
+            "config_class 约束",
+            "auto 解析"
+          ],
+          "practice_task": "编写一个最小草稿架构类骨架：声明 config_class 并用 @register_draft 注册，说明它如何被一份 config.json 的 architectures 字段选中。",
+          "depends_on": [
+            "u4-l4",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "新增一个训练算法",
+          "order": 2,
+          "filename": "u10-l2-custom-algorithm.md",
+          "level": "advanced",
+          "topic": "讲解如何端到端新增一个训练算法：声明 AlgorithmSpec 契约、实现 providers 端口、加入 builtin registry、实现 DraftTrainStrategy，以及离线捕获 layout。",
+          "learning_goals": [
+            "掌握算法契约+provider+strategy 三件套",
+            "理解注册到 builtin registry 的步骤",
+            "了解离线捕获 layout 与特征 schema 的绑定"
+          ],
+          "source_files": [
+            "specforge/algorithms/contracts.py",
+            "specforge/algorithms/builtin.py",
+            "specforge/algorithms/common/providers.py",
+            "specforge/training/strategies/base.py"
+          ],
+          "minimal_modules": [
+            "AlgorithmSpec 契约",
+            "providers 端口",
+            "DraftTrainStrategy 实现"
+          ],
+          "practice_task": "为新算法 mydraft 设计：一份 AlgorithmSpec（含一个 offline 文本 FeatureContract）、一个 providers 端口清单、一个 DraftTrainStrategy 的 required_features，并说明需在哪里注册才能被 training.strategy 选中。",
+          "depends_on": [
+            "u4-l3",
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "测试与质量门禁",
+          "order": 3,
+          "filename": "u10-l3-testing-gates.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 的分层结构（algorithms/application/config/data/modeling/runtime/training 等）、scripts/gates 的 e2e 门禁、CI 与 pre-commit 配置。",
+          "learning_goals": [
+            "掌握 tests 分层与各子目录覆盖范围",
+            "理解 run_disaggregated_overfit_gate.sh 的端到端校验",
+            "了解 CI 与 pre-commit 质量约束"
+          ],
+          "source_files": [
+            "tests/utils.py",
+            "scripts/gates/run_disaggregated_overfit_gate.sh",
+            ".pre-commit-config.yaml",
+            ".github"
+          ],
+          "minimal_modules": [
+            "tests 分层",
+            "e2e gate",
+            "CI/pre-commit"
+          ],
+          "practice_task": "浏览 tests/ 各子目录，为新算法 mydraft 列出应补齐的最少测试目录（contracts/application/training），并说明 overfit gate 验证了哪几类行为。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
