@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-22T23:01:54Z"
+      "last_run_at": "2026-07-23T15:50:18Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -24703,8 +24703,8 @@
     },
     "sgl-project/sglang-omni": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\nBudget limit reached ($3.06 of $3); stopping background agents.\n\n{\"is_error\":true,\"duration_api_ms\":374560,\"num_turns\":1,\"stop_reason\":null,\"session_id\":\"e354ca4b-40c2-429d-9bed-726e99dd288b\",\"total_cost_usd\":3.0639140000000005,\"usage\":{\"input_tokens\":0,\"cache_creation_input_token",
-      "last_run_at": "2026-07-22T23:01:54Z"
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"21dd3fa6-2d98-4d20-a3ad-97cc577a3267\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search",
+      "last_run_at": "2026-07-23T15:50:18Z"
     },
     "sgl-project/genai-bench": {
       "prompt_hash": "b21aef51792b02df",
@@ -24721,7 +24721,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8fb1067f-1338-474d-83aa-6aef6782b72a\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d92b897e-560e-425e-a15a-50d154bf98df\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u1-l3": {
           "status": "pending",
@@ -24870,7 +24870,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/sgl-project/genai-bench/genai-bench-tutorial",
       "last_head": "7fd04d8c53b1df20450019fb7eedec0c4caec24f",
-      "last_run_at": "2026-07-22T23:01:54Z",
+      "last_run_at": "2026-07-23T15:50:18Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "tile-ai/AttentionEngine": {},
@@ -30890,8 +30890,8 @@
     },
     "sgl-project/sglang@python/sglang": {
       "prompt_hash": "b21aef51792b02df",
-      "last_error": "ClaudeRunnerError: claude 非零退出（分类匹配）：\n685,\"cacheReadInputTokens\":294720,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.425385,\"contextWindow\":1000000,\"maxOutputTokens\":32000,\"canonicalModel\":\"glm-5.2[1m]\",\"provider\":\"firstParty\"},\"claude-opus-4-8[1m]\":{\"inputTokens\":339996,\"outputTokens\":12918,\"cacheRe",
-      "last_run_at": "2026-07-22T23:01:54Z"
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1355cbaa-d1e4-43dc-b9d7-edf193bd40e0\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search",
+      "last_run_at": "2026-07-23T15:50:18Z"
     },
     "sgl-project/sglang@benchmark": {
       "prompt_hash": "b21aef51792b02df",
