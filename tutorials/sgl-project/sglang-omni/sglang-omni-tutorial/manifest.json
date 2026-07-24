@@ -1,0 +1,997 @@
+{
+  "project": "sglang-omni",
+  "head": "e7979b0719e16290a56f571745af0d4428326f1f",
+  "rationale": "本次为增量更新，覆盖 cf61f234..e7979b07 共 2 个提交，均为性能优化与局部正确性修复，未改变整体架构、请求主链路、公共接口或核心模型，因此 7 单元 33 讲的学习路径与单元划分保持不变。全部变更仅为文件修改(M)、无新增模块，故不新增讲义。变更集中在两处：(1) [Perf][MOSS-TTS]#1158 将 audio 状态下的文本通道采样限制为仅两个控制 token(gen/delay slot)，新增 compact 两 token 采样路径与 seeded Gumbel-max(murmur_hash32) 哈希、以及 _apply_two_token_top_k/skip_inactive_check 的免 host-sync 热路径——这是 MOSS-TTS 模型内部的采样性能优化；现有讲义无一引用 sglang_omni/models/moss_tts/* 源码文件，且 TTS 接入讲义 u5-l3 的范例(qwen3_tts)与 docs/developer_reference/tts_model_integration.md 集成文档均未改动，故相关讲义保持 keep。(2) [Qwen3-Omni Perf]#1027 修复 OmniScheduler 在 extend/mixed batch 上丢弃 stale 请求时 KV slot 与 per-token 字段(input_ids/out_cache_loc/extend_lens/prefix_lens/extend_logprob_start_lens/extend_input_logprob_token_ids/decoding_reqs)的错误切片——这正是 u4-l2「OmniScheduler 与 SGLang 后端」中以 omni_scheduler.py 为源码、并强调『哪些工作仍由 omni 自己负责(per-token 字段 filter_batch 不处理)』的内容范围，属局部逻辑变化，故 u4-l2 标记为 update，需补充 drop-stale extend 切片与 decoding_reqs 过滤的说明。其余 32 篇讲义所列源码均未被本次 diff 触及，统一保持 keep。讲义依赖关系不变，仍沿用『先会跑、再懂链路、后能扩展』的整体顺序。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 SGLang-Omni 并跑通第一个服务",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与多阶段运行时概念",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 SGLang-Omni 是什么、解决什么问题——面向 omni/语音/TTS 模型的多阶段(multi-stage decoding)推理服务运行时的定位与核心设计目标。",
+          "learning_goals": [
+            "理解多阶段解码的设计动机：生成被拆成异构阶段(预处理/编码器/AR引擎/talker/解码器/vocoder/聚合)",
+            "识别框架拥有的五大职责：管线拓扑、阶段生命周期、跨阶段传输、模型族集成层、OpenAI 兼容 API 面",
+            "区分 SGLang-Omni 与上游 SGLang 的分工边界"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/developer_reference/main.md"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "多阶段运行时",
+            "与 SGLang 的关系"
+          ],
+          "practice_task": "用一段话向同事解释 SGLang-Omni 与 SGLang 各自负责什么；并从 README 中列举 omni、TTS、ASR 三类被服务模型各一个具体例子。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与安装",
+          "order": 2,
+          "filename": "u1-l2-installation.md",
+          "level": "beginner",
+          "topic": "如何通过 Docker(推荐)或手动方式安装 SGLang-Omni，理解 UCX/flash-attn-4/CUDA/nixl/mooncake 等前置与运行时依赖。",
+          "learning_goals": [
+            "掌握 Docker 一键拉起容器并在其中用 uv 安装包的流程",
+            "理解 pyproject.toml 中核心依赖(torch/sglang/flash-attn-4/nixl-cu13/mooncake)及其版本约束的作用",
+            "知道手动安装需要先自行构建 UCX 1.20.x 与 flash-attn-4"
+          ],
+          "source_files": [
+            "docs/get_started/installation.md",
+            "pyproject.toml",
+            "docker/Dockerfile"
+          ],
+          "minimal_modules": [
+            "Docker 安装",
+            "uv venv",
+            "依赖版本约束",
+            "CLI 入口 sgl-omni"
+          ],
+          "practice_task": "在容器内克隆仓库，用 uv venv 创建 .venv 并执行 uv pip install -v -e . 安装，然后运行 sgl-omni --help 验证 CLI 可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与代码组织",
+          "order": 3,
+          "filename": "u1-l3-directory-layout.md",
+          "level": "beginner",
+          "topic": "仓库与 sglang_omni 包的目录结构，各子包(pipeline/scheduling/model_runner/models/config/relay/comm/serve/proto 等)的职责划分与模型目录约定。",
+          "learning_goals": [
+            "读懂 main.md 中的 Directory Layout，把每个子目录对应到架构层",
+            "理解 sglang_omni/__init__.py 的惰性导出机制",
+            "理解 model 包约定(config.py/stages.py/components/)"
+          ],
+          "source_files": [
+            "sglang_omni/__init__.py",
+            "docs/developer_reference/main.md"
+          ],
+          "minimal_modules": [
+            "包结构",
+            "子包职责",
+            "模型目录约定"
+          ],
+          "practice_task": "在 sglang_omni/ 下找出「控制平面消息」与「数据传输后端」分别对应哪两个子目录，并各举一个真实文件名作为证据。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "启动 API Server 与第一次请求",
+          "order": 4,
+          "filename": "u1-l4-start-server-first-request.md",
+          "level": "beginner",
+          "topic": "用 sgl-omni serve 启动 OpenAI 兼容服务，完成第一次 /health 与 /v1/chat/completions 请求。",
+          "learning_goals": [
+            "掌握 sgl-omni serve 的常用 flag(--model-path/--host/--port/--model-name/--log-level)",
+            "理解 HTTP→FastAPI→Client→Coordinator→Pipeline 的请求路径",
+            "学会用 curl 验证健康检查与列出模型"
+          ],
+          "source_files": [
+            "docs/get_started/apiserver_quickstart.md",
+            "sglang_omni/cli/serve.py",
+            "sglang_omni/cli/__init__.py"
+          ],
+          "minimal_modules": [
+            "sgl-omni serve",
+            "常用 flag",
+            "健康检查",
+            "请求路径"
+          ],
+          "practice_task": "启动一个 text-only 的 Qwen3-Omni 服务，用 curl 发送一条文本 chat completion 请求并拿到回复，再用 /health 确认状态。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l5",
+          "title": "配置查看、导出与 YAML 结构",
+          "order": 5,
+          "filename": "u1-l5-config-view-export.md",
+          "level": "beginner",
+          "topic": "使用 sgl-omni config view/export 查看/导出 PipelineConfig，理解 YAML 配置文件中 stage_overrides 与 runtime resources 的结构。",
+          "learning_goals": [
+            "掌握 config view / config export 两个子命令",
+            "读懂 examples/configs 中 YAML 的 config_cls 与 stage_overrides 结构",
+            "理解配置是「模型定义」与「模型无关运行时」之间的契约"
+          ],
+          "source_files": [
+            "sglang_omni/cli/config.py",
+            "examples/configs/qwen3_omni_colocated_h100_bf16.yaml"
+          ],
+          "minimal_modules": [
+            "ConfigManager",
+            "resolve_config_cls_for_model_path",
+            "YAML 导出",
+            "stage_overrides"
+          ],
+          "practice_task": "用 sgl-omni config export 把某个模型的默认配置导出为 YAML，修改其中一个 stage 的 total_gpu_memory_fraction，并说明该覆盖会被如何应用。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：追踪请求主链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "请求主链路总览",
+          "order": 1,
+          "filename": "u2-l1-request-main-chain.md",
+          "level": "intermediate",
+          "topic": "从 HTTP 请求到模型前向的完整主链路分层(HTTP API→Client→Coordinator→Stage→Scheduler→ModelRunner)及其职责与接口边界。",
+          "learning_goals": [
+            "画出请求与响应两条数据流并标注各层职责",
+            "区分 create_app(只建 FastAPI)与 launch_server(完整生命周期)",
+            "理解每层「只做什么、不做什么」的边界"
+          ],
+          "source_files": [
+            "docs/developer_reference/apiserver_design.md",
+            "docs/developer_reference/main.md"
+          ],
+          "minimal_modules": [
+            "分层职责",
+            "create_app vs launch_server",
+            "请求/响应路径"
+          ],
+          "practice_task": "绘制一张请求时序图，标注一次流式 chat completion 从 curl 到首个 token 经过的五个组件，并为每层写一句「只负责什么」。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "OpenAI 兼容 API 服务层",
+          "order": 2,
+          "filename": "u2-l2-openai-api-layer.md",
+          "level": "intermediate",
+          "topic": "serve/openai_api.py 的 FastAPI 路由、请求转换(_build_chat_generate_request)与响应/SSE 流式格式化。",
+          "learning_goals": [
+            "掌握 /v1/chat/completions、/v1/audio/speech、/health、/v1/models 等路由",
+            "理解 ChatCompletionRequest→GenerateRequest 的转换点",
+            "理解 SSE 流式语义(首 chunk 仅 role、文本/音频分离、末尾 finish_reason、[DONE])"
+          ],
+          "source_files": [
+            "sglang_omni/serve/openai_api.py",
+            "sglang_omni/serve/protocol.py"
+          ],
+          "minimal_modules": [
+            "FastAPI app",
+            "路由表面",
+            "请求转换",
+            "SSE 流式"
+          ],
+          "practice_task": "在 openai_api.py 中找到 _build_chat_generate_request，跟踪 images/audios/video 字段如何进入 GenerateRequest 的 metadata，并写一句话总结该转换为何放在 HTTP 层而非运行时层。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "内部 Client 客户端层",
+          "order": 3,
+          "filename": "u2-l3-client-layer.md",
+          "level": "intermediate",
+          "topic": "内部 Client 如何把 GenerateRequest 转成 OmniRequest 并提交给 Coordinator、聚合文本/音频结果。",
+          "learning_goals": [
+            "理解 Client 的 completion/speech/generate 接口与 request_id 生成",
+            "跟踪 GenerateRequest→OmniRequest 的转换",
+            "理解文本/音频片段聚合与音频 base64 编码"
+          ],
+          "source_files": [
+            "sglang_omni/client/client.py",
+            "sglang_omni/client/types.py"
+          ],
+          "minimal_modules": [
+            "Client",
+            "OmniRequest",
+            "结果聚合",
+            "音频编码"
+          ],
+          "practice_task": "阅读 client.py 的 generate 方法，写一段伪代码说明 request_id 如何生成、OmniRequest 如何提交、流式片段如何被聚合成最终结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Coordinator 协调器",
+          "order": 4,
+          "filename": "u2-l4-coordinator.md",
+          "level": "intermediate",
+          "topic": "Coordinator 作为全局请求路由：注册阶段端点、把新请求送到入口阶段、收集终态结果、合并多终态、广播 abort。",
+          "learning_goals": [
+            "理解 Coordinator 的请求状态机(pending/running/completed/failed/aborted)",
+            "理解多终态(如 decode 与 code2wav)结果合并",
+            "理解 TP 阶段只与 rank0 通信"
+          ],
+          "source_files": [
+            "sglang_omni/pipeline/coordinator.py"
+          ],
+          "minimal_modules": [
+            "Coordinator",
+            "entry_stage",
+            "terminal 合并",
+            "abort 广播"
+          ],
+          "practice_task": "在 coordinator.py 中定位提交请求与处理完成的方法，说明当 pipeline 同时有 decode 和 code2wav 两个终态时，Coordinator 如何合并结果。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l5",
+          "title": "声明式配置 PipelineConfig 与 StageConfig",
+          "order": 5,
+          "filename": "u2-l5-declarative-config.md",
+          "level": "intermediate",
+          "topic": "PipelineConfig/StageConfig/CommConfig 的字段含义，以及拓扑、放置、终态如何由 stage 派生。",
+          "learning_goals": [
+            "掌握 StageConfig 关键字段(factory/next/terminal/gpu/process/wait_for/merge_fn/stream_to/project_payload)",
+            "理解 route_fn/wait_for_fn 的请求感知路由与 fan-in 子集选择",
+            "理解派生字段(resolved_entry_stage/terminal_stages/gpu_placement)"
+          ],
+          "source_files": [
+            "sglang_omni/config/schema.py",
+            "docs/developer_reference/config.md"
+          ],
+          "minimal_modules": [
+            "PipelineConfig",
+            "StageConfig",
+            "CommConfig",
+            "派生字段"
+          ],
+          "practice_task": "阅读一份 examples/configs yaml，手绘其 stage 拓扑(fan-out/fan-in/stream)，并指出哪个字段声明了 fan-in 的 merge 函数。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：Pipeline 与 Stage 编排机制",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Stage 抽象与 IO 外壳",
+          "order": 1,
+          "filename": "u3-l1-stage-abstraction.md",
+          "level": "intermediate",
+          "topic": "Stage 作为 IO 外壳：接收控制消息、读写 relay payload、fan-in 聚合、桥接 scheduler inbox/outbox，且不分支于 scheduler 类型。",
+          "learning_goals": [
+            "理解 Stage 的不变量：不依赖 scheduler 类型(SimpleScheduler/OmniScheduler/流式调度器共用同一表面)",
+            "掌握 AggregatedInput/DirectInput/InputHandler",
+            "理解 stream 路由与 same-GPU CUDA IPC"
+          ],
+          "source_files": [
+            "sglang_omni/pipeline/stage/runtime.py",
+            "sglang_omni/pipeline/stage/input.py"
+          ],
+          "minimal_modules": [
+            "Stage",
+            "InputHandler",
+            "AggregatedInput",
+            "scheduler 桥接"
+          ],
+          "practice_task": "在 runtime.py 中找到处理 DataReadyMessage 与 fan-in 的代码，写一句话解释为何把所有可执行工作推入 scheduler.inbox 是关键不变量。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "控制平面与 ZMQ 消息",
+          "order": 2,
+          "filename": "u3-l2-control-plane-zmq.md",
+          "level": "intermediate",
+          "topic": "控制平面如何用 ZMQ PUSH/PULL 与 PUB/SUB 携带 msgpack 序列化的控制消息在各阶段与 Coordinator 之间流转。",
+          "learning_goals": [
+            "理解 SubmitMessage/DataReadyMessage/CompleteMessage/StreamMessage/AbortMessage/ShutdownMessage 的用途",
+            "理解 PUB/SUB 广播 abort 的原因",
+            "理解 DataReadyMessage.data_ref 携带 CUDA IPC 信封或 relay DataRef"
+          ],
+          "source_files": [
+            "sglang_omni/pipeline/control_plane.py",
+            "sglang_omni/proto/messages.py"
+          ],
+          "minimal_modules": [
+            "ZMQ PUSH/PULL",
+            "PUB/SUB abort",
+            "msgpack 序列化",
+            "控制消息类型"
+          ],
+          "practice_task": "列出 proto/messages.py 中的消息类型并分类(协调/数据就绪/完成/流/中止/关闭)，说明哪类走 PUB/SUB、为什么。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Relay 数据平面与传输后端",
+          "order": 3,
+          "filename": "u3-l3-relay-data-plane.md",
+          "level": "intermediate",
+          "topic": "Relay 数据平面接口(put_async/get_async/cleanup)与各后端(cuda_ipc/shm/nccl/nixl/mooncake)的实现要点。",
+          "learning_goals": [
+            "理解 Relay 抽象与 RelayOperation.metadata 的契约",
+            "理解 CUDA IPC 发送侧有界 GPU 池与 slot 粒度",
+            "理解资源生命周期：sender 写→发消息→wait、receiver 读→cleanup"
+          ],
+          "source_files": [
+            "sglang_omni/relay/base.py",
+            "sglang_omni/relay/cuda_ipc.py"
+          ],
+          "minimal_modules": [
+            "Relay 接口",
+            "RelayOperation",
+            "CUDA IPC 池",
+            "资源生命周期"
+          ],
+          "practice_task": "阅读 cuda_ipc.py 的发送池分配与单次逻辑 ACK 释放逻辑，解释 slot 粒度与「一次 DataAckMessage 释放整段区间」的关系。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "进程拓扑与多进程 Runner",
+          "order": 4,
+          "filename": "u3-l4-process-topology-mp-runner.md",
+          "level": "intermediate",
+          "topic": "多进程 Runner 如何解析进程拓扑、生成可 pickle 的 stage/process 规格、在子进程中重建 Stage 而不重编译 pipeline。",
+          "learning_goals": [
+            "理解每非 TP 阶段必须显式声明 process、共享 process 即共进程",
+            "理解 fused_stages 共置约束与拓扑合并",
+            "理解子进程导入 factory 构建 scheduler 的启动流程"
+          ],
+          "source_files": [
+            "sglang_omni/pipeline/mp_runner.py",
+            "sglang_omni/pipeline/stage_workers.py",
+            "sglang_omni/config/topology.py"
+          ],
+          "minimal_modules": [
+            "MultiProcessPipelineRunner",
+            "StageLaunchConfig",
+            "进程拓扑",
+            "fused_stages"
+          ],
+          "practice_task": "在 topology.py/mp_runner.py 中找到「哪些 stage 共享一个 OS 进程」的求解逻辑，写一段话说明 colocated Qwen3-Omni 配置如何把多阶段压进单进程。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：调度器与 ModelRunner 执行机制",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "调度器接口与 SimpleScheduler",
+          "order": 1,
+          "filename": "u4-l1-scheduler-interface-simple.md",
+          "level": "intermediate",
+          "topic": "调度器统一接口(inbox/outbox/start/stop/abort)与 SimpleScheduler 的 inbox.get→compute→outbox.put 循环。",
+          "learning_goals": [
+            "掌握 IncomingMessage/OutgoingMessage 消息类型",
+            "理解 batch_compute_fn 何时对非 AR 阶段有用",
+            "理解 abort 在预处理/编码器/聚合等非 AR 阶段的作用"
+          ],
+          "source_files": [
+            "sglang_omni/scheduling/simple_scheduler.py",
+            "sglang_omni/scheduling/types.py",
+            "sglang_omni/scheduling/messages.py"
+          ],
+          "minimal_modules": [
+            "Scheduler 接口",
+            "SimpleScheduler",
+            "batch_compute_fn",
+            "消息类型"
+          ],
+          "practice_task": "用 SimpleScheduler 为一个假想的 uppercase 计算阶段写一个 compute_fn，并说明它如何通过 outbox 把结果送回 Stage。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "OmniScheduler 与 SGLang 后端",
+          "order": 2,
+          "filename": "u4-l2-omni-scheduler-sglang-backend.md",
+          "level": "intermediate",
+          "topic": "OmniScheduler 如何复用 SGLang 的 prefill/decode 管理、KV 缓存、batch 选择，同时保留 omni 自己的传输、请求对象与流式行为；以及 drop-stale 请求时 omni 自行负责的 per-token 字段切片(KV slot 释放/extend_lens/prefix_lens 等)。",
+          "learning_goals": [
+            "理解 OmniScheduler 与 SGLang 上游 scheduler 的组合边界",
+            "理解 create_sglang_infrastructure 返回的(worker/tree_cache/kv 池/prefill/decode/model_config)元组",
+            "理解 build_sglang_server_args 的职责",
+            "理解丢弃 stale 请求时为何需要 omni 自行 reslice extend/mixed batch 的 per-token 字段(input_ids/out_cache_loc/extend_lens/prefix_lens/extend_logprob_start_lens)与 decoding_reqs，而不是依赖 SGLang 的 filter_batch"
+          ],
+          "source_files": [
+            "sglang_omni/scheduling/omni_scheduler.py",
+            "sglang_omni/scheduling/bootstrap.py",
+            "sglang_omni/scheduling/sglang_backend/server_args_builder.py"
+          ],
+          "minimal_modules": [
+            "OmniScheduler",
+            "SGLang prefill/decode",
+            "KV cache",
+            "drop-stale extend 切片",
+            "server args"
+          ],
+          "practice_task": "在 omni_scheduler.py 中定位 run_batch 与 prefill/decode 调度，说明它把哪些工作交给 SGLang、哪些仍由 omni 自己负责；并找到 drop-stale 对 extend/mixed batch 的处理，解释为何 per-token 字段必须手动 reslice 而 filter_batch 做不到。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u4-l3",
+          "title": "ModelRunner 与 AR 前向路径",
+          "order": 3,
+          "filename": "u4-l3-model-runner-ar-forward.md",
+          "level": "intermediate",
+          "topic": "共享 ModelRunner 基类如何构造 ForwardBatch、处理 sampling/logit、转换 scheduler 输出，以及 ThinkerModelRunner/FeedbackARModelRunner 的分工。",
+          "learning_goals": [
+            "理解 ForwardBatch→before/custom forward hooks→model forward→post hook→输出处理 的链路",
+            "理解 ThinkerModelRunner 注入多模态(image/video/audio)embedding 的时机",
+            "理解 FeedbackStrategy 写缓冲→forward→抽码本/反馈→推流 的反馈循环"
+          ],
+          "source_files": [
+            "sglang_omni/model_runner/base.py",
+            "sglang_omni/model_runner/sglang_model_runner.py"
+          ],
+          "minimal_modules": [
+            "ForwardBatch",
+            "sampling",
+            "ThinkerModelRunner",
+            "FeedbackStrategy"
+          ],
+          "practice_task": "阅读基类的前向与输出处理，画一条 ForwardBatch→hooks→forward→output 的处理链，并指出 ThinkerModelRunner 在哪一步注入 image/audio embedding。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l4",
+          "title": "流式调度器与流式 vocoder",
+          "order": 4,
+          "filename": "u4-l4-streaming-schedulers.md",
+          "level": "advanced",
+          "topic": "流式 SimpleScheduler 与流式 vocoder(Code2Wav)如何按 chunk 处理 new_request/stream_chunk/stream_done，在生成完成前就吐出音频。",
+          "learning_goals": [
+            "理解 new_request/stream_chunk/stream_done 三类消息的状态机",
+            "理解 can_accept_stream_before_payload 的流式边",
+            "理解 code2wav_first_audio 与最终 flush 的触发时机"
+          ],
+          "source_files": [
+            "sglang_omni/scheduling/streaming_simple_scheduler.py",
+            "sglang_omni/scheduling/streaming_vocoder.py"
+          ],
+          "minimal_modules": [
+            "流式调度器",
+            "Code2WavScheduler",
+            "chunk 累积与 flush"
+          ],
+          "practice_task": "阅读 streaming_vocoder.py 的 _decode_and_emit，说明 code2wav_first_audio 与最终 flush 何时触发，以及为何需要 stream_done。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：模型家族集成与预处理",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "模型注册表与能力声明",
+          "order": 1,
+          "filename": "u5-l1-model-registry-capabilities.md",
+          "level": "intermediate",
+          "topic": "registry 如何自动发现 models/<name>/ 的 EntryClass 并按 HF architecture 匹配，以及 ModelCapabilities 静态能力声明。",
+          "learning_goals": [
+            "理解 import_pipeline_configs 对 models 子包的自动扫描",
+            "理解 architecture 与 architecture_aliases 如何匹配 HF config",
+            "理解能力标志(reference_audio/batch_vocoder/streaming_vocoder/cuda_graph/torch_compile)如何影响路由与部署"
+          ],
+          "source_files": [
+            "sglang_omni/models/registry.py",
+            "sglang_omni/models/model_capabilities.py"
+          ],
+          "minimal_modules": [
+            "PIPELINE_CONFIG_REGISTRY",
+            "EntryClass",
+            "architecture",
+            "ModelCapabilities"
+          ],
+          "practice_task": "选一个 models/<name>/，找到它的 config.py 中 architecture 与 EntryClass 的声明，并解释 registry 如何仅凭这两者找到它。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Qwen3-Omni 端到端管线",
+          "order": 2,
+          "filename": "u5-l2-qwen3-omni-e2e.md",
+          "level": "intermediate",
+          "topic": "以 Qwen3-Omni 为例，串联 preprocessing/image_encoder/audio_encoder/mm_aggregate/thinker/talker/decode/code2wav 全链路。",
+          "learning_goals": [
+            "读懂 Qwen3OmniPipelineConfig 的 stage 列表与 route_fn/project_payload",
+            "理解 thinker→talker 的 hidden state 流式(stream_to)与 code2wav",
+            "理解 colocated 与 disaggregated 拓扑的差异"
+          ],
+          "source_files": [
+            "sglang_omni/models/qwen3_omni/config.py",
+            "sglang_omni/models/qwen3_omni/stages.py"
+          ],
+          "minimal_modules": [
+            "Qwen3Omni pipeline",
+            "thinker-talker",
+            "stream_to talker",
+            "colocated"
+          ],
+          "practice_task": "对照 config.py 与 stages.py，画出 Qwen3-Omni 的 stage DAG，标注哪条边是普通 next、哪条是 stream_to。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "TTS 模型接入流程",
+          "order": 3,
+          "filename": "u5-l3-tts-integration.md",
+          "level": "intermediate",
+          "topic": "TTS 三阶段(preprocessing/tts_engine/vocoder)接入流程，request_builders 与 payload_types 的作用，以及设备/张量纪律。",
+          "learning_goals": [
+            "掌握 tts_model_integration 的步骤清单(架构→config→stages→runner→注册→yaml→测试)",
+            "理解请求边界：端点默认值会静默覆盖模型默认值的陷阱",
+            "理解张量设备/dtype 纪律与 radix cache key 必须由 embedding 内容派生"
+          ],
+          "source_files": [
+            "docs/developer_reference/tts_model_integration.md",
+            "sglang_omni/models/qwen3_tts/config.py"
+          ],
+          "minimal_modules": [
+            "TTS 三阶段",
+            "request_builder",
+            "payload_types",
+            "vocoder"
+          ],
+          "practice_task": "按 integration 文档的步骤，为一个假想 TTS 列出需要新建/修改的文件清单，并指出 abort 清理为何必须挂在多个 scheduler 上。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l4",
+          "title": "预处理与多模态输入",
+          "order": 4,
+          "filename": "u5-l4-preprocessing-multimodal.md",
+          "level": "intermediate",
+          "topic": "preprocessing 子包如何把异构的文本/图像/音频/视频输入规范化为管线状态，以及 resource_connector 与 cache_key 的作用。",
+          "learning_goals": [
+            "理解 base 预处理接口与各模态(audio/image/video/text)处理器",
+            "理解 resource_connector 如何控制本地媒体可访问路径",
+            "理解 cache_key 如何用于参考音频/资源缓存"
+          ],
+          "source_files": [
+            "sglang_omni/preprocessing/base.py",
+            "sglang_omni/preprocessing/resource_connector.py",
+            "sglang_omni/preprocessing/image.py"
+          ],
+          "minimal_modules": [
+            "预处理基类",
+            "resource_connector",
+            "cache_key",
+            "多模态规范化"
+          ],
+          "practice_task": "阅读 resource_connector 的 resolve_allowed_local_media_path，说明它如何防止任意本地文件被读取，并写一个测试用例验证越界路径被拒绝。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家层：通信、量化、性能与控制",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "通信路由与传输选择",
+          "order": 1,
+          "filename": "u6-l1-comm-routing-transport.md",
+          "level": "advanced",
+          "topic": "CommRouter 如何根据阶段局部性与放置派生传输(local_object/直接 CUDA IPC/cuda_ipc/shm/mooncake)，以及 CommEngine/StageIO 的打包解包。",
+          "learning_goals": [
+            "掌握传输选择规则表(local_object/直接 CUDA IPC/cuda_ipc/shm/mooncake)",
+            "理解 LOCAL_OBJECT 直传的 read-only 与生命周期约束",
+            "理解 control-before-wait 排序对 NIXL 等基于信用的后端的重要性"
+          ],
+          "source_files": [
+            "sglang_omni/comm/router.py",
+            "sglang_omni/comm/engine.py",
+            "sglang_omni/comm/stage_io.py"
+          ],
+          "minimal_modules": [
+            "CommRouter",
+            "CommEngine",
+            "StageIO",
+            "transport 选择"
+          ],
+          "practice_task": "给定一对同进程、同节点跨 GPU、跨节点三种 stage 边，分别写出 CommRouter 会选择的传输并说明理由。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "量化、权值加载与校验",
+          "order": 2,
+          "filename": "u6-l2-quantization-weights.md",
+          "level": "advanced",
+          "topic": "量化(FP8/AutoRound INT4)支持、自定义权值加载器(如 Higgs DiscreteWeightMapper)与 weight_checker 的 SHA256 校验。",
+          "learning_goals": [
+            "理解 quantization.py 如何选择量化策略",
+            "理解自定义 weight_loader 何时需要及其形态",
+            "理解 weights_checker 的 snapshot/compare/checksum 与为何全模型校验会阻塞推理"
+          ],
+          "source_files": [
+            "sglang_omni/quantization.py",
+            "sglang_omni/model_runner/weight_checker.py",
+            "sglang_omni/models/higgs_tts/weight_loader.py"
+          ],
+          "minimal_modules": [
+            "量化",
+            "weight_loader",
+            "weight_checker",
+            "SHA256 校验"
+          ],
+          "practice_task": "阅读 weight_checker 的 checksum 实现，说明它对每个 tensor 计算哪些字段参与摘要，以及全模型校验为何会阻塞推理。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "请求级 Profiler",
+          "order": 3,
+          "filename": "u6-l3-request-profiler.md",
+          "level": "advanced",
+          "topic": "请求级 event recorder 与 torch profiler 的协作，标准事件名、active-stage 绑定与 timeline/stage/hop 报告。",
+          "learning_goals": [
+            "理解事件 JSONL 格式与 active-stage(threading.local + contextvar)绑定",
+            "掌握 /start_profile、/stop_profile、/start_request_profile 等接口",
+            "理解 build_report 的三类视图(timeline/stage breakdown/hop breakdown)"
+          ],
+          "source_files": [
+            "sglang_omni/profiler/event_recorder.py",
+            "sglang_omni/profiler/views.py",
+            "docs/developer_reference/profiler.md"
+          ],
+          "minimal_modules": [
+            "event_recorder",
+            "torch_profiler",
+            "views",
+            "run_id"
+          ],
+          "practice_task": "用 curl 触发一次只开事件、不开 torch trace 的 profiling，跑少量请求后用 python -m sglang_omni.profiler 生成报告，定位耗时最长的 stage。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l4",
+          "title": "RL 权重热更新与 Admin 控制",
+          "order": 4,
+          "filename": "u6-l4-rl-admin-control.md",
+          "level": "advanced",
+          "topic": "推理侧 RL 的 admin 控制：暂停/恢复生成、从磁盘/分布式更新权重、权重校验，以及 TP rank 聚合与 router 广播。",
+          "learning_goals": [
+            "理解 admin 端点列表(model_info/pause/continue/update_weights*/weights_checker)与鉴权(admin_api_key)",
+            "理解 update_weights_from_disk 的 暂停→(abort/retract)→更新→刷缓存→恢复 生命周期",
+            "理解 TP rank 聚合 rank_results 与 router 用 admin 锁串行广播"
+          ],
+          "source_files": [
+            "docs/developer_reference/rl_admin_control.md",
+            "sglang_omni/proto/admin.py"
+          ],
+          "minimal_modules": [
+            "admin 端点",
+            "权重更新",
+            "pause/retract",
+            "router 广播"
+          ],
+          "practice_task": "设计一个 RL rollout 的权重更新调用序列(init_weights_update_group→distributed update→destroy)，并说明若分布式更新失败 worker 为何保持暂停。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "参考音频编码缓存服务",
+          "order": 5,
+          "filename": "u6-l5-reference-encode-cache.md",
+          "level": "advanced",
+          "topic": "ReferenceEncodeService 的缓存键、字节有界 LRU、同键 single-flight、失败不缓存机制，以及 hook 责任划分。",
+          "learning_goals": [
+            "理解 ReferenceEncodeKey 必须包含所有影响产物身份的输入",
+            "理解 leader/follower 同键 single-flight 与失败不缓存",
+            "理解 TensorReferenceEncodeHook 的存储 dtype/输出 dtype 策略与 M4a/M4b 边界"
+          ],
+          "source_files": [
+            "sglang_omni/scheduling/reference_encoder.py",
+            "docs/developer_reference/reference_encode_service.md"
+          ],
+          "minimal_modules": [
+            "ReferenceEncodeService",
+            "ReferenceEncodeKey",
+            "single-flight",
+            "byte budget"
+          ],
+          "practice_task": "为一个假想编码器实现一个 KeyedReferenceEncodeHook 骨架，写出 cache_key 应包含哪些字段以避免参考音频串扰。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l6",
+          "title": "张量并行与流水线并行",
+          "order": 6,
+          "filename": "u6-l6-tp-pipeline-parallelism.md",
+          "level": "advanced",
+          "topic": "张量并行(阶段内)与流水线并行(阶段间)的正交关系，TP rank 进程派生与 rank0 拥有外部 IO。",
+          "learning_goals": [
+            "理解 tp_size 与 gpu 列表的对应关系",
+            "理解 rank0 收 ZMQ、扇出 work/abort、所有 rank 做同样调度决策、仅 rank0 发下游结果",
+            "理解每 TP 组独立 NCCL 端口分配"
+          ],
+          "source_files": [
+            "sglang_omni/config/topology.py",
+            "sglang_omni/config/placement.py",
+            "sglang_omni/pipeline/tp_control.py"
+          ],
+          "minimal_modules": [
+            "张量并行",
+            "流水线并行",
+            "rank0 IO",
+            "NCCL 端口"
+          ],
+          "practice_task": "为 thinker 阶段写一个 tp_size=2 的 StageConfig 片段，并解释派生出的两个进程名与各自承担的 IO 职责。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家层：部署、服务化与实战",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "SGLang-Omni Router 路由器",
+          "order": 1,
+          "filename": "u7-l1-omni-router.md",
+          "level": "advanced",
+          "topic": "SGLang-Omni Router 作为外部 HTTP 路由，前置多个完整 worker，提供选择策略、健康跟踪、过载保护与能力发现。",
+          "learning_goals": [
+            "理解 router 拓扑与三选一(launcher-config/worker-urls/worker-config)",
+            "理解路由策略(round_robin/least_request/random)与请求能力推断",
+            "理解 max-connections 过载 503 与失败处理(只驱逐传输级失败而非应用状态)"
+          ],
+          "source_files": [
+            "sglang_omni_router/serve.py",
+            "sglang_omni_router/app.py",
+            "sglang_omni_router/selector.py"
+          ],
+          "minimal_modules": [
+            "router",
+            "选择策略",
+            "健康检查",
+            "过载保护"
+          ],
+          "practice_task": "用 --launcher-config 启动一个 2 worker 的 router，发起请求观察 X-SGLang-Omni-Worker 头，并停掉一个 worker 验证 failover。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "/v1/realtime WebSocket 实时会话",
+          "order": 2,
+          "filename": "u7-l2-realtime-websocket.md",
+          "level": "advanced",
+          "topic": "/v1/realtime WebSocket 实时会话：RealtimeSessionManager/RealtimeSession、服务端 VAD 与音频缓冲。",
+          "learning_goals": [
+            "理解 session 生命周期(open/active/close)与复用 Client",
+            "理解 VAD 切分输入与音频缓冲(audio_buffer)",
+            "理解实时事件流(events)如何驱动一次会话"
+          ],
+          "source_files": [
+            "sglang_omni/serve/realtime/manager.py",
+            "sglang_omni/serve/realtime/session.py"
+          ],
+          "minimal_modules": [
+            "RealtimeSessionManager",
+            "RealtimeSession",
+            "VAD",
+            "audio buffer"
+          ],
+          "practice_task": "阅读 session.py，写一段话说明一次实时会话中音频输入如何被 VAD 切分成请求、输出如何流回客户端。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "ASR 转录与说话人分离",
+          "order": 3,
+          "filename": "u7-l3-asr-transcription-diarization.md",
+          "level": "advanced",
+          "topic": "/v1/audio/transcriptions 的 OpenAI 兼容转录、transcription_adapters 与 MOSS-Transcribe-Diarize 的说话人/时间戳分离。",
+          "learning_goals": [
+            "理解 speech_service 的转录校验与 response_format=verbose_json",
+            "理解 transcription adapter 基类与如何接入新 ASR",
+            "理解说话人标注、时间戳段的输出结构"
+          ],
+          "source_files": [
+            "sglang_omni/serve/speech_service.py",
+            "sglang_omni/serve/transcription_adapters/base.py"
+          ],
+          "minimal_modules": [
+            "转录端点",
+            "transcription adapter",
+            "diarization",
+            "verbose_json"
+          ],
+          "practice_task": "用 curl 对 tests/data/cough.wav 发起一次转录请求，并说明若要接入一个新的 ASR 模型需要实现哪个 adapter 接口。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l4",
+          "title": "基准测试与评测",
+          "order": 4,
+          "filename": "u7-l4-benchmarks-eval.md",
+          "level": "advanced",
+          "topic": "benchmarks 目录的评测脚本(omni mmmu/mmsu、tts seedtts、asr、streaming ttft)与 benchmarker runner 的运行方式。",
+          "learning_goals": [
+            "理解 benchmarks/eval 各脚本覆盖的指标(WER/CER/throughput/rtf/ttft)",
+            "理解 benchmarker runner 的数据加载与运行方式",
+            "理解 tts_model_integration 推荐的上线验收流程"
+          ],
+          "source_files": [
+            "benchmarks/eval/benchmark_tts_seedtts.py",
+            "benchmarks/benchmarker/runner.py",
+            "benchmarks/README.md"
+          ],
+          "minimal_modules": [
+            "评测脚本",
+            "benchmarker",
+            "指标",
+            "验收"
+          ],
+          "practice_task": "阅读 benchmark_tts_seedtts.py 的 --help 与输出字段，设计一个最小评测命令并说明如何用 WER/rtf 判断一个 TTS 模型是否可上线。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l5",
+          "title": "综合实战：新增一个模型家族",
+          "order": 5,
+          "filename": "u7-l5-add-new-model-family.md",
+          "level": "advanced",
+          "topic": "综合实战：从零为 SGLang-Omni 接入一个新模型家族的完整步骤(架构→config→stages→runner→注册→yaml→测试)。",
+          "learning_goals": [
+            "串联 registry/config/scheduler/model_runner/serve 各层",
+            "复现 tts_model_integration 全流程并产出可服务的新模型",
+            "理解 GPU-free 单测应覆盖的请求边界与 abort 清理路径"
+          ],
+          "source_files": [
+            "docs/developer_reference/tts_model_integration.md",
+            "sglang_omni/models/registry.py"
+          ],
+          "minimal_modules": [
+            "新模型接入",
+            "全链路串联",
+            "端到端验收"
+          ],
+          "practice_task": "选定一个最小三阶段模型，按文档落地 config.py/stages.py/request_builders.py/payload_types.py 并在 _register_omni_model 注册，最后用 GPU-free 单测验证请求边界。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
