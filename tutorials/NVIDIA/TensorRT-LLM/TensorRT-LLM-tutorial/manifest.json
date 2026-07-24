@@ -1,0 +1,1133 @@
+{
+  "project": "TensorRT-LLM",
+  "head": "f5c2a07052f2324c23b3235a09a3a72120bc68a5",
+  "rationale": "TensorRT-LLM 是一个体量很大的 LLM/VisualGen 推理优化库，采用 PyTorch 原生架构、由 C++ 共享核心（经 nanobind 暴露）支撑高性能运行时，并存在 PyTorch（默认）与 AutoDeploy（beta）两条执行路径。据此，我把学习手册设计成三段递进：入门层（u1–u3）先建立\"项目是什么、怎么装、怎么跑、仓库怎么组织、请求怎么从 HF 模型走到生成 token\"的整体心智，避免初学者一上来陷入细节；进阶层（u4–u9）按推理系统的主要子系统纵向展开——配置体系（llm_args/llm_utils/ModelConfig）、模型与注册机制、注意力与后端、KV Cache 与显存管理、调度与请求生命周期/采样、分布式与并行原语，每个子系统只解决一个主题并指向真实源码；专家层（u10–u12）覆盖性能/工程取舍与二次开发：MoE、量化、投机解码、CUDA Graph/编译等高级优化，trtllm-serve 服务与分离式部署、基准与配置数据库，以及 AutoDeploy 图变换、自定义算子/内核、VisualGen、测试与 CI 贡献流程。讲义依赖关系按\"先总览再深入、先机制再扩展\"组织：先 u3 端到端流程打通主链路，再由 PyExecutor 单步循环派生出调度/KV cache/模型前向三条线，最后在专家层组合这些能力。每篇讲义聚焦单一主题、引用 1–6 个真实源码文件、配一个可操作的代码实践任务，所有源码路径均经实际确认。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 TensorRT-LLM 与首次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体架构",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 TensorRT-LLM 是什么、为什么存在，其 PyTorch 原生架构、PyTorch 与 AutoDeploy 双后端、C++ 共享核心，以及 LLM API / Serving / VisualGen 三条产品线的整体定位。",
+          "learning_goals": [
+            "理解 TensorRT-LLM 的核心定位与价值（专用 kernel、高效运行时、可扩展的 Python 框架）",
+            "区分 PyTorch 默认后端与 AutoDeploy beta 后端的入口差异",
+            "认识 LLM API、trtllm-serve 服务、VisualGen 三条产品线",
+            "建立仓库顶层结构的初步心智模型"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/source/torch/arch_overview.md",
+            "docs/source/overview.md"
+          ],
+          "minimal_modules": [
+            "README 与技术博客",
+            "架构总览",
+            "后端矩阵"
+          ],
+          "practice_task": "阅读 README 与架构总览文档，用自己的话画出 \"HF 模型 → LLM API → Executor → Scheduler → 模型前向 → Sampling → 生成 Token\" 的高层流程图，并简要说明 PyTorch 与 AutoDeploy 两个后端在入口上的区别。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、容器与从源码构建",
+          "order": 2,
+          "filename": "u1-l2-installation-and-build.md",
+          "level": "beginner",
+          "topic": "讲解依赖技术栈（CUDA / PyTorch / Python 版本）、通过 NGC 容器或 pip 安装，以及从源码构建 C++ 组件的入口。",
+          "learning_goals": [
+            "了解 CUDA / PyTorch / Python 等依赖的版本要求",
+            "掌握通过预构建容器或 pip 安装 TensorRT-LLM 的方式",
+            "理解 pyproject.toml / setup.py 中的构建配置与可选依赖",
+            "知道从源码构建 C++ 组件的入口与适用场景"
+          ],
+          "source_files": [
+            "requirements.txt",
+            "pyproject.toml",
+            "setup.py",
+            "docs/source/installation/installation-guide.md",
+            "docs/source/installation/containers.md",
+            "docs/source/installation/build-from-source.md"
+          ],
+          "minimal_modules": [
+            "依赖声明",
+            "安装指南",
+            "构建脚本"
+          ],
+          "practice_task": "查看 pyproject.toml 的项目元数据与依赖，确认本机的 CUDA / PyTorch / Python 版本组合是否满足；写一段说明列出 pip 安装、容器、源码构建三种方式的适用场景。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "首次运行：LLM API 与 trtllm-serve",
+          "order": 3,
+          "filename": "u1-l3-first-run-llm-api-and-serve.md",
+          "level": "beginner",
+          "topic": "通过最小可运行示例，分别用 Python LLM API 离线推理和 trtllm-serve 在线服务两种方式跑通第一个模型。",
+          "learning_goals": [
+            "用 LLM API 跑通一次离线推理",
+            "用 trtllm-serve 启动 OpenAI 兼容服务并发送请求",
+            "理解 tokenizer / detokenizer 由 LLM 托管",
+            "定位命令入口 commands/serve.py"
+          ],
+          "source_files": [
+            "docs/source/quick-start-guide.md",
+            "examples/llm-api/quickstart_example.py",
+            "tensorrt_llm/commands/serve.py",
+            "tensorrt_llm/llmapi/__init__.py"
+          ],
+          "minimal_modules": [
+            "LLM API 用法",
+            "serve 命令",
+            "OpenAI 协议"
+          ],
+          "practice_task": "基于 examples/llm-api/quickstart_example.py 改写一段脚本，加载一个小模型（如 TinyLlama）并打印生成结果；再用 trtllm-serve 启动服务，用 curl 发送一次 /v1/chat/completions 请求，对比两种入口的输出。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "仓库结构与代码地图",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "顶层目录与代码组织",
+          "order": 1,
+          "filename": "u2-l1-repo-layout.md",
+          "level": "beginner",
+          "topic": "带读者走一遍仓库顶层目录（tensorrt_llm、cpp、examples、docs、tests、triton_kernels、scripts），建立全局心智模型。",
+          "learning_goals": [
+            "识别 Python 包、C++ 核心、示例、文档、测试五大块的位置",
+            "理解 examples/ 按模型 / 特性组织的方式",
+            "了解 scripts 与 jenkins 在 CI 中的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/index.rst",
+            "examples/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录",
+            "examples 组织",
+            "docs 结构"
+          ],
+          "practice_task": "制作一张仓库目录速查表，标注每个顶层目录的职责；在 examples/models/core 下找出 3 个模型示例目录并说明它们各自对应 docs/source/deployment-guide 中的哪个部署文档。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "tensorrt_llm Python 包与公共 API",
+          "order": 2,
+          "filename": "u2-l2-python-package-public-api.md",
+          "level": "beginner",
+          "topic": "深入 tensorrt_llm 包的导出层，理解 LLM / AsyncLLM、SamplingParams、Mapping、LLM 参数等公共 API 的来源。",
+          "learning_goals": [
+            "看懂 __init__.py 的导出与库初始化逻辑",
+            "区分 llmapi 子包的角色",
+            "知道 LLM、TorchLlmArgs、SamplingParams、Mapping 等核心导出对象"
+          ],
+          "source_files": [
+            "tensorrt_llm/__init__.py",
+            "tensorrt_llm/llmapi/__init__.py",
+            "tensorrt_llm/version.py",
+            "tensorrt_llm/sampling_params.py"
+          ],
+          "minimal_modules": [
+            "包初始化",
+            "llmapi 导出",
+            "版本信息"
+          ],
+          "practice_task": "在 Python 中 import tensorrt_llm，列举通过 dir(tensorrt_llm) 暴露的核心类与函数；写一段最小代码演示 LLM、SamplingParams、Mapping 的典型用法。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "C++ 核心与 Python↔C++ 绑定",
+          "order": 3,
+          "filename": "u2-l3-cpp-core-and-nanobind.md",
+          "level": "beginner",
+          "topic": "介绍共享 C++ 核心（调度、批管理、KV cache 管理）以及它如何通过 nanobind 暴露给 Python，建立 \"Python 调度 + C++ 实现\" 的心智模型。",
+          "learning_goals": [
+            "了解 cpp/ 目录的组织（runtime、batch_manager、kernels、executor）",
+            "理解 nanobind 绑定的分层",
+            "知道哪些组件是 C++ 实现但 Python 可定制接口"
+          ],
+          "source_files": [
+            "cpp/tensorrt_llm/CMakeLists.txt",
+            "cpp/tensorrt_llm/nanobind/bindings.cpp",
+            "docs/source/torch/arch_overview.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "C++ 目录结构",
+            "nanobind 绑定",
+            "共享核心组件"
+          ],
+          "practice_task": "在 cpp/tensorrt_llm/nanobind 下找到 batch_manager、runtime、executor 的绑定模块，列举每个绑定模块大致暴露了哪些 C++ 类；说明 Scheduler / KVCacheManager 为何 \"接口在 Python、实现可选 C++\"。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "端到端推理流程总览",
+      "level": "beginner",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "请求全链路：HF 模型到生成 token",
+          "order": 1,
+          "filename": "u3-l1-end-to-end-request-flow.md",
+          "level": "beginner",
+          "topic": "从用户调用 LLM.generate() 出发，追踪请求一路走到 Scheduler、模型前向、Decoder、Sampling，再到返回 token 的完整链路。",
+          "learning_goals": [
+            "复述 HF → LLM API → Executor → Scheduler → Forward → Decoder → Sampling → Token 的全链路",
+            "定位每一段对应的源码文件",
+            "理解生成任务在 Executor 内部如何被表示"
+          ],
+          "source_files": [
+            "AGENTS.md",
+            "tensorrt_llm/llmapi/llm.py",
+            "tensorrt_llm/executor/executor.py",
+            "docs/source/torch/arch_overview.md"
+          ],
+          "minimal_modules": [
+            "LLM 入口",
+            "Executor 抽象",
+            "请求流图"
+          ],
+          "practice_task": "沿 llm.py 的 generate → _build_model 与 executor.py 的请求提交路径，画出调用时序图；标注每个环节由 Python 还是 C++ 负责。",
+          "depends_on": [
+            "u1-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "PyExecutor 单步循环",
+          "order": 2,
+          "filename": "u3-l2-pyexecutor-step-loop.md",
+          "level": "beginner",
+          "topic": "拆解 PyExecutor 的单步执行循环：取请求 → 调度 → 模型前向 → 解码 → 处理响应。",
+          "learning_goals": [
+            "理解 PyExecutor 的单步流程",
+            "识别 Scheduler、ModelEngine、采样、响应处理各组件在 py_executor.py 中的位置",
+            "理解 inflight batching 的单步含义"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/pyexecutor/py_executor.py",
+            "tensorrt_llm/_torch/pyexecutor/py_executor_creator.py",
+            "docs/source/torch/arch_overview.md"
+          ],
+          "minimal_modules": [
+            "单步循环",
+            "调度与执行",
+            "响应处理"
+          ],
+          "practice_task": "在 py_executor.py 中定位主循环方法与 _handle_responses / _handle_executed_batch 等处理函数，绘制单步状态转换图；解释 BatchState 与 BatchStatePP 的区别。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "ModelEngine 与模型前向",
+          "order": 3,
+          "filename": "u3-l3-model-engine-forward.md",
+          "level": "beginner",
+          "topic": "聚焦 ModelEngine 如何高效执行单步前向，以及模型如何被加载与构建。",
+          "learning_goals": [
+            "区分 ModelEngine 抽象基类与 PyTorchModelEngine",
+            "理解 forward() 承担的职责",
+            "了解 model_loader 如何加载配置与权重，建立 ModelConfig 与前向的关联"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/pyexecutor/model_engine.py",
+            "tensorrt_llm/_torch/pyexecutor/model_loader.py",
+            "tensorrt_llm/_torch/model_config.py",
+            "docs/source/torch/arch_overview.md"
+          ],
+          "minimal_modules": [
+            "ModelEngine 抽象",
+            "PyTorchModelEngine",
+            "模型加载器"
+          ],
+          "practice_task": "阅读 PyTorchModelEngine.forward 的签名与实现要点，写一段说明 \"一次前向需要哪些输入、产出什么\"；在 model_loader.py 中追踪 ModelLoader 如何从 HF checkpoint 得到可前向的模型。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "配置体系",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "TorchLlmArgs 与配置层级",
+          "order": 1,
+          "filename": "u4-l1-llm-args-hierarchy.md",
+          "level": "intermediate",
+          "topic": "解析 BaseLlmArgs → TorchLlmArgs 的配置层级与各类子配置（并行、调度、KV cache、CUDA graph 等）。",
+          "learning_goals": [
+            "理解 Pydantic 配置模型的组织方式",
+            "掌握 _ParallelConfig / SchedulerConfig / KvCacheConfig / CudaGraphConfig 等关键子配置的作用",
+            "知道如何通过 llm_args 一次性表达所有运行时参数"
+          ],
+          "source_files": [
+            "tensorrt_llm/llmapi/llm_args.py",
+            "tensorrt_llm/llmapi/__init__.py",
+            "CODING_GUIDELINES.md"
+          ],
+          "minimal_modules": [
+            "BaseLlmArgs",
+            "TorchLlmArgs",
+            "子配置族"
+          ],
+          "practice_task": "在 llm_args.py 中找出 BaseLlmArgs 与 TorchLlmArgs 的字段，挑出 3 个对推理性能影响最大的配置项（如并行度、CUDA graph、KV cache），写明默认值与作用；遵循 CODING_GUIDELINES 的 Pydantic 规范说明修改配置类的注意事项。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "模型默认值与 llm_utils",
+          "order": 2,
+          "filename": "u4-l2-model-defaults-llm-utils.md",
+          "level": "intermediate",
+          "topic": "讲解不同模型架构的默认优化参数如何在 llm_utils 中被注入到 llm_args。",
+          "learning_goals": [
+            "理解 apply_model_defaults_to_llm_args 与深度合并优先级",
+            "知道 ModelLoader / CachedModelLoader 的角色",
+            "了解 auto 语义的解析（如 KV cache manager v2 auto）"
+          ],
+          "source_files": [
+            "tensorrt_llm/llmapi/llm_utils.py",
+            "tensorrt_llm/llmapi/llm_args.py"
+          ],
+          "minimal_modules": [
+            "模型默认值",
+            "深度合并",
+            "auto 解析"
+          ],
+          "practice_task": "追踪 apply_model_defaults_to_llm_args 的合并逻辑，画出一组用户参数 + 模型默认值 + 框架默认值的合并优先级示意图；解释用户显式设置如何覆盖模型默认值。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "ModelConfig 与 PretrainedConfig",
+          "order": 3,
+          "filename": "u4-l3-model-config-and-pretrained.md",
+          "level": "intermediate",
+          "topic": "区分表示运行时模型的 ModelConfig 与表示模型权重的 PretrainedConfig / QuantConfig。",
+          "learning_goals": [
+            "理解 ModelConfig（generic）包裹 PretrainedConfig 的设计",
+            "掌握 QuantConfig / LayerQuantConfig 的量化描述能力",
+            "了解 SpeculativeDecodingMode 标志位"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/model_config.py",
+            "tensorrt_llm/models/modeling_utils.py",
+            "tensorrt_llm/models/__init__.py"
+          ],
+          "minimal_modules": [
+            "ModelConfig",
+            "PretrainedConfig",
+            "QuantConfig"
+          ],
+          "practice_task": "对比 ModelConfig 与 PretrainedConfig 的字段，说明为什么运行时需要额外包一层；列举 QuantConfig 能描述的几种量化算法。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "模型与注册机制",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "模型架构范式：Config + ForCausalLM",
+          "order": 1,
+          "filename": "u5-l1-model-architecture-pattern.md",
+          "level": "intermediate",
+          "topic": "讲解每个模型遵循的 Config + ForCausalLM 范式，以 llama 为例剖析 DecoderModelForCausalLM。",
+          "learning_goals": [
+            "理解 DecoderModelForCausalLM 基类的职责",
+            "看懂一个 modeling_xxx.py 的结构（embedding / decoder layer / lm head）",
+            "了解 Decoder 类如何驱动逐层前向"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/models/modeling_utils.py",
+            "tensorrt_llm/_torch/models/modeling_llama.py",
+            "tensorrt_llm/_torch/modules/decoder_layer.py"
+          ],
+          "minimal_modules": [
+            "DecoderModelForCausalLM",
+            "Decoder",
+            "decoder_layer"
+          ],
+          "practice_task": "阅读 modeling_llama.py，对照 DecoderModelForCausalLM 基类列出 LlamaForCausalLM 复用了哪些基类能力、又覆盖了什么；标注 Decoder 类所在位置。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "自动发现与模型注册",
+          "order": 2,
+          "filename": "u5-l2-model-registry-and-auto-discovery.md",
+          "level": "intermediate",
+          "topic": "讲解模型如何通过 HF architectures 字段被自动发现与注册（顶层 MODEL_MAP 与 torch 后端 MODEL_CLASS_MAPPING）。",
+          "learning_goals": [
+            "理解 AutoConfig / AutoModelForCausalLM 的解析流程",
+            "区分顶层 models/automodel.py 与 _torch/models/modeling_auto.py 两套注册表",
+            "知道模型类如何自注册"
+          ],
+          "source_files": [
+            "tensorrt_llm/models/automodel.py",
+            "tensorrt_llm/models/__init__.py",
+            "tensorrt_llm/_torch/models/modeling_auto.py",
+            "tensorrt_llm/_torch/models/modeling_utils.py"
+          ],
+          "minimal_modules": [
+            "AutoConfig / AutoModel",
+            "MODEL_MAP",
+            "MODEL_CLASS_MAPPING"
+          ],
+          "practice_task": "选一个模型（如 DeepseekV3），追踪从 HF architectures 字段到最终模型类的解析路径，说明两套注册表分别在哪个环节起作用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "添加一个新模型",
+          "order": 3,
+          "filename": "u5-l3-adding-a-new-model.md",
+          "level": "intermediate",
+          "topic": "按照 adding_new_model 指南，实践配置 / 定义 / 权重加载 / 注册的完整 onboarding 流程。",
+          "learning_goals": [
+            "掌握添加新模型的四个步骤",
+            "理解 in-tree 与 out-of-tree 两种注册方式",
+            "知道如何复用 HF 配置类与权重映射"
+          ],
+          "source_files": [
+            "docs/source/torch/adding_new_model.md",
+            "tensorrt_llm/_torch/models/modeling_deepseekv3.py",
+            "tensorrt_llm/_torch/models/hf_parameter_utils.py"
+          ],
+          "minimal_modules": [
+            "配置",
+            "模型定义",
+            "权重加载",
+            "注册"
+          ],
+          "practice_task": "参照指南为假想的 MyModel 起草 modeling_mymodel.py 骨架（继承 DecoderModelForCausalLM），并在 MODEL_CLASS_MAPPING 处写出注册代码片段；说明 in-tree 与 out-of-tree 注册的差异。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "注意力机制",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Attention 模块与 MLA",
+          "order": 1,
+          "filename": "u6-l1-attention-and-mla.md",
+          "level": "intermediate",
+          "topic": "剖析 Attention 模块与多头潜注意力（MLA）的实现，理解 attention 的元数据契约。",
+          "learning_goals": [
+            "理解 Attention(nn.Module) 的接口与职责",
+            "区分标准 attention 与 MLA",
+            "掌握 KV cache 参数与 metadata 契约"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/modules/attention.py",
+            "tensorrt_llm/_torch/modules/mla.py",
+            "tensorrt_llm/_torch/metadata.py",
+            "tensorrt_llm/_torch/modules/ATTENTION_DEVELOPER_GUIDE.md"
+          ],
+          "minimal_modules": [
+            "Attention 模块",
+            "MLA",
+            "metadata 契约"
+          ],
+          "practice_task": "阅读 ATTENTION_DEVELOPER_GUIDE.md，列出修改 attention.py 前必须遵守的契约；对比 Attention 与 MLA 的前向输入差异。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "注意力后端家族",
+          "order": 2,
+          "filename": "u6-l2-attention-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 TRTLLM / FlashInfer / FlashAttention 等注意力后端的选择与实现，以及 sparse 后端。",
+          "learning_goals": [
+            "理解 attn_backend 选项如何路由到不同后端",
+            "看懂 attention_backend/interface.py 的统一接口",
+            "了解 sparse attention 与 vanilla fallback"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/attention_backend/interface.py",
+            "tensorrt_llm/_torch/attention_backend/trtllm.py",
+            "tensorrt_llm/_torch/attention_backend/flashinfer.py",
+            "tensorrt_llm/_torch/attention_backend/__init__.py",
+            "docs/source/features/attention.md"
+          ],
+          "minimal_modules": [
+            "后端接口",
+            "TRTLLM 后端",
+            "FlashInfer 后端",
+            "sparse 后端"
+          ],
+          "practice_task": "追踪 interface.py 中后端如何被选择，画一张 \"attn_backend 配置值 → 实际后端类\" 的映射表；说明在什么场景应选 FlashInfer。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "KV Cache 与显存管理",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "分页 KV Cache 与 KVCacheManager",
+          "order": 1,
+          "filename": "u7-l1-paged-kv-cache-manager.md",
+          "level": "intermediate",
+          "topic": "讲解 paged KV cache 的数据结构与 KVCacheManager（含 v2 实现）如何分配 / 回收缓存块。",
+          "learning_goals": [
+            "理解分页 KV cache 的块结构",
+            "区分 KVCacheManager 的 Python 接口与 C++ / v2 实现",
+            "掌握 prepare / update / free resources 的生命周期"
+          ],
+          "source_files": [
+            "docs/source/torch/kv_cache_manager.md",
+            "tensorrt_llm/_torch/pyexecutor/kv_cache_manager_v2.py",
+            "tensorrt_llm/runtime/kv_cache_manager_v2/__init__.py",
+            "tensorrt_llm/_torch/pyexecutor/kv_cache_transceiver.py"
+          ],
+          "minimal_modules": [
+            "分页缓存",
+            "KVCacheManager",
+            "v2 实现"
+          ],
+          "practice_task": "阅读 kv_cache_manager.md，说明一个请求的 KV cache 块是如何被分配与释放的；列举 KVCacheManager 在单步循环中被调用的三个接口及调用时机。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "ResourceManager 与 KV Cache 连接器",
+          "order": 2,
+          "filename": "u7-l2-resource-manager-and-connectors.md",
+          "level": "intermediate",
+          "topic": "讲解 ResourceManager 的资源容器模式以及 KV cache connector（分离式服务时的缓存迁移）。",
+          "learning_goals": [
+            "理解 BaseResourceManager 的 prepare / update / free 三接口",
+            "掌握 resource_manager.py 如何组织多种资源",
+            "了解 kv_cache_connector 与 transceiver 的作用"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/pyexecutor/resource_manager.py",
+            "tensorrt_llm/_torch/pyexecutor/connectors/kv_cache_connector.py",
+            "tensorrt_llm/_torch/pyexecutor/connectors/registry.py",
+            "tensorrt_llm/_torch/pyexecutor/kv_cache_transceiver.py"
+          ],
+          "minimal_modules": [
+            "ResourceManager",
+            "BaseResourceManager",
+            "KV cache connector"
+          ],
+          "practice_task": "在 resource_manager.py 中找出继承 BaseResourceManager 的资源类型；说明 connector 与 transceiver 在分离式服务中如何配合搬运 KV cache。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "调度与运行时",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "调度器与 inflight batching",
+          "order": 1,
+          "filename": "u8-l1-scheduler-and-ifb.md",
+          "level": "intermediate",
+          "topic": "剖析 CapacityScheduler + MicroBatchScheduler 两步调度，以及 SimpleScheduler 如何组合。",
+          "learning_goals": [
+            "理解两步调度的职责划分",
+            "掌握 inflight batching 动态批的含义",
+            "知道如何自定义调度器"
+          ],
+          "source_files": [
+            "docs/source/torch/scheduler.md",
+            "tensorrt_llm/_torch/pyexecutor/scheduler/scheduler.py",
+            "tensorrt_llm/_torch/pyexecutor/scheduler/scheduler_v2.py",
+            "tensorrt_llm/_torch/pyexecutor/py_executor_creator.py"
+          ],
+          "minimal_modules": [
+            "CapacityScheduler",
+            "MicroBatchScheduler",
+            "自定义调度"
+          ],
+          "practice_task": "参照 GuaranteedNoEvictScheduler 的例子，写一个简化的自定义 CapacityScheduler 骨架，并在 py_executor_creator.py 处说明如何接入。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "请求生命周期与状态机",
+          "order": 2,
+          "filename": "u8-l2-request-lifecycle-state-machine.md",
+          "level": "intermediate",
+          "topic": "讲解 LlmRequest 的状态机（CONTEXT_INIT / GENERATION_* / COMPLETE）与等待队列、序列槽管理。",
+          "learning_goals": [
+            "掌握请求在各状态间的迁移",
+            "理解 waiting_queue 与 seq_slot_manager 的作用",
+            "了解 ADP router 在数据并行中的调度"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/pyexecutor/llm_request.py",
+            "tensorrt_llm/_torch/pyexecutor/scheduler/waiting_queue.py",
+            "tensorrt_llm/_torch/pyexecutor/seq_slot_manager.py",
+            "tensorrt_llm/_torch/pyexecutor/scheduler/adp_router.py"
+          ],
+          "minimal_modules": [
+            "LlmRequest 状态",
+            "等待队列",
+            "序列槽"
+          ],
+          "practice_task": "列出请求从入队到完成经过的所有状态，画状态迁移图；解释 seq_slot_manager 如何管理并发请求槽位。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Decoder 与 Sampling",
+          "order": 3,
+          "filename": "u8-l3-decoder-and-sampling.md",
+          "level": "intermediate",
+          "topic": "讲解基于模型 logits 的采样与解码（贪心 / 温度 / top-k / top-p / 罚分）以及 guided decoding。",
+          "learning_goals": [
+            "理解采样在 pyexecutor 中的组织",
+            "掌握 SamplingParams 的主要参数",
+            "了解 sampler 与 guided_decoder 的协作"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/pyexecutor/sampler/sampler.py",
+            "tensorrt_llm/_torch/pyexecutor/sampler/sampling_utils.py",
+            "tensorrt_llm/sampling_params.py",
+            "tensorrt_llm/_torch/pyexecutor/guided_decoder.py",
+            "docs/source/features/sampling.md"
+          ],
+          "minimal_modules": [
+            "sampler",
+            "SamplingParams",
+            "guided decoding"
+          ],
+          "practice_task": "用不同 SamplingParams（temperature / top_p）跑同一提示，对比输出；在 sampler.py 中定位采样算子调用，说明 guided decoding 如何约束输出格式。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "分布式与并行",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Mapping 与并行策略",
+          "order": 1,
+          "filename": "u9-l1-mapping-and-parallelism.md",
+          "level": "intermediate",
+          "topic": "讲解 Mapping 类如何描述 TP / PP / CP / EP 等并行拓扑，以及配置并行策略的方式。",
+          "learning_goals": [
+            "理解 Mapping 表示的张量 / 流水 / 上下文 / 专家并行",
+            "掌握并行度的配置方式",
+            "了解 CpType 等枚举含义"
+          ],
+          "source_files": [
+            "tensorrt_llm/mapping.py",
+            "docs/source/features/parallel-strategy.md",
+            "tensorrt_llm/llmapi/llm_args.py"
+          ],
+          "minimal_modules": [
+            "Mapping",
+            "并行拓扑",
+            "并行配置"
+          ],
+          "practice_task": "构造一个 4 卡 TP=2、PP=2 的 Mapping，说明每个 rank 的角色；列出代码中 Mapping 被消费的几个关键位置。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "分布式通信原语",
+          "order": 2,
+          "filename": "u9-l2-distributed-communication.md",
+          "level": "intermediate",
+          "topic": "讲解 allreduce / allgather、MoE alltoall 等通信原语与 process group 管理。",
+          "learning_goals": [
+            "理解 communicator 抽象",
+            "掌握 allreduce_helper / symm_mem 的实现选择",
+            "了解 moe_alltoall 在专家并行中的角色"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/distributed/communicator.py",
+            "tensorrt_llm/_torch/distributed/allreduce_helper.py",
+            "tensorrt_llm/_torch/distributed/symm_mem_allreduce.py",
+            "tensorrt_llm/_torch/distributed/moe_alltoall.py",
+            "tensorrt_llm/_torch/device_mesh.py"
+          ],
+          "minimal_modules": [
+            "communicator",
+            "allreduce",
+            "MoE alltoall"
+          ],
+          "practice_task": "对比 allreduce_helper 与 symm_mem_allreduce 的适用场景；追踪一次 MoE alltoall 在专家并行 forward 中的数据搬运方向。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "高级优化特性",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "MoE 架构与后端",
+          "order": 1,
+          "filename": "u10-l1-moe-architecture-backends.md",
+          "level": "advanced",
+          "topic": "深入 MoE 的路由、融合 GEMM、多种后端（triton / cutlass / deepgemm / wide_ep）与 MoE 调度、负载均衡。",
+          "learning_goals": [
+            "理解 ConfigurableMoE 的抽象",
+            "掌握 MoE 后端的选择与通信",
+            "了解 moe_scheduler、moe_load_balancer、ep_group_health 的作用"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/modules/fused_moe/MOE_DEVELOPER_GUIDE.md",
+            "tensorrt_llm/_torch/modules/fused_moe/configurable_moe.py",
+            "tensorrt_llm/_torch/modules/fused_moe/create_moe.py",
+            "tensorrt_llm/_torch/modules/fused_moe/moe_scheduler.py",
+            "tensorrt_llm/_torch/modules/fused_moe/moe_load_balancer.py"
+          ],
+          "minimal_modules": [
+            "ConfigurableMoE",
+            "MoE 后端",
+            "MoE 调度与均衡"
+          ],
+          "practice_task": "阅读 MOE_DEVELOPER_GUIDE.md，列出修改 MoE 代码前必须了解的架构约束；对比 triton 与 deepgemm 两个 MoE 后端的适用场景。",
+          "depends_on": [
+            "u6-l1",
+            "u9-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "量化机制",
+          "order": 2,
+          "filename": "u10-l2-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 FP8 / FP4 / INT8 AWQ 等量化算法在 TensorRT-LLM 中的配置与实现。",
+          "learning_goals": [
+            "理解 QuantConfig / QuantAlgo 能描述的量化方案",
+            "掌握 modelopt_config 与 quant_config_utils 的作用",
+            "了解量化算子在 custom_ops 中的落点"
+          ],
+          "source_files": [
+            "tensorrt_llm/quantization/modelopt_config.py",
+            "tensorrt_llm/quantization/functional.py",
+            "tensorrt_llm/models/quant_config_utils.py",
+            "docs/source/features/quantization.md",
+            "tensorrt_llm/_torch/custom_ops/trtllm_gen_custom_ops.py"
+          ],
+          "minimal_modules": [
+            "QuantConfig",
+            "modelopt 配置",
+            "量化算子"
+          ],
+          "practice_task": "为一个模型设计一份 FP8 量化配置（QuantConfig / QuantAlgo），说明每层如何被描述；列举量化相关 custom_ops 的命名规律。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "投机解码",
+          "order": 3,
+          "filename": "u10-l3-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "讲解 EAGLE / MTP / N-gram / PARD 等投机解码方法在 speculative 模块中的实现与统一接口。",
+          "learning_goals": [
+            "理解 draft-target 投机解码的基本原理",
+            "掌握 interface.py 的统一接口",
+            "区分各类 drafter（eagle3 / mtp / ngram / pard / dspark）"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/speculative/interface.py",
+            "tensorrt_llm/_torch/speculative/drafter.py",
+            "tensorrt_llm/_torch/speculative/eagle3.py",
+            "tensorrt_llm/_torch/speculative/mtp.py",
+            "tensorrt_llm/_torch/speculative/ngram.py",
+            "docs/source/features/speculative-decoding.md"
+          ],
+          "minimal_modules": [
+            "统一接口",
+            "drafter 家族",
+            "动态树"
+          ],
+          "practice_task": "对比 ngram 与 eagle3 两类 drafter 的输入输出与开销；在 interface.py 中定位 draft 长度如何动态调整（speculation_gate / auto_heuristic）。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "CUDA Graph 与 torch.compile / piecewise",
+          "order": 4,
+          "filename": "u10-l4-cuda-graph-and-compile.md",
+          "level": "advanced",
+          "topic": "讲解 CUDA Graph 捕获 / 回放、torch.compile 与 piecewise CUDA graph 的协同。",
+          "learning_goals": [
+            "理解 cuda_graph_runner 的捕获机制",
+            "掌握 compilation/ 的 piecewise 优化与多流",
+            "了解 CudaGraphConfig 的配置项"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/pyexecutor/cuda_graph_runner.py",
+            "tensorrt_llm/_torch/compilation/backend.py",
+            "tensorrt_llm/_torch/compilation/piecewise_optimizer.py",
+            "docs/source/features/torch_compile_and_piecewise_cuda_graph.md"
+          ],
+          "minimal_modules": [
+            "cuda_graph_runner",
+            "piecewise 优化",
+            "多流"
+          ],
+          "practice_task": "说明 piecewise CUDA graph 如何在动态形状下保持高效；列出 CudaGraphConfig 中可调节的捕获参数；解释 piecewise_optimizer 与 multi_stream 的关系。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "部署与服务",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "trtllm-serve 与 OpenAI 兼容服务",
+          "order": 1,
+          "filename": "u11-l1-trtllm-serve-openai-server.md",
+          "level": "advanced",
+          "topic": "剖析 trtllm-serve CLI 与 OpenAI 兼容服务器的实现（路由、协议、推理 / 响应）。",
+          "learning_goals": [
+            "理解 commands/serve.py 的启动流程",
+            "掌握 openai_server / openai_service 的职责",
+            "了解 OpenAI 协议的请求 / 响应映射与 tool parser"
+          ],
+          "source_files": [
+            "tensorrt_llm/commands/serve.py",
+            "tensorrt_llm/serve/openai_server.py",
+            "tensorrt_llm/serve/openai_service.py",
+            "tensorrt_llm/serve/openai_protocol.py",
+            "tensorrt_llm/serve/tool_parser/__init__.py"
+          ],
+          "minimal_modules": [
+            "serve CLI",
+            "OpenAI server",
+            "tool parser"
+          ],
+          "practice_task": "追踪一次 /v1/chat/completions 请求在 serve.py → openai_server → openai_service → LLM 的处理路径；说明 tool parser 如何把工具调用嵌入输出。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "分离式服务（prefill/decode disaggregation）",
+          "order": 2,
+          "filename": "u11-l2-disaggregated-serving.md",
+          "level": "advanced",
+          "topic": "讲解把 prefill 与 decode 分离到不同 GPU、通过 NIXL / UCX / MPI 交换 KV cache 的架构。",
+          "learning_goals": [
+            "理解分离式服务的角色（context / decode）",
+            "掌握 disaggregation/ 与 transceiver 的数据搬运",
+            "了解协调服务与自动扩缩"
+          ],
+          "source_files": [
+            "docs/source/features/disagg-serving.md",
+            "tensorrt_llm/serve/openai_disagg_server.py",
+            "tensorrt_llm/_torch/disaggregation/transceiver.py",
+            "tensorrt_llm/_torch/disaggregation/nixl/__init__.py",
+            "tensorrt_llm/serve/disagg_coordinator.py"
+          ],
+          "minimal_modules": [
+            "分离角色",
+            "KV 搬运",
+            "协调服务"
+          ],
+          "practice_task": "画一张 prefill 节点与 decode 节点之间的 KV cache 搬运时序图；对比 NIXL 与 UCX / MPI 三种传输方式。",
+          "depends_on": [
+            "u11-l1",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "基准测试与配置数据库",
+          "order": 3,
+          "filename": "u11-l3-benchmark-and-config-database.md",
+          "level": "advanced",
+          "topic": "讲解 trtllm-bench 工具、bench 子包与 examples/configs 配置数据库的使用。",
+          "learning_goals": [
+            "掌握 trtllm-bench 的吞吐 / 延迟基准方式",
+            "理解 bench/ 子包的组织",
+            "会用 configs/database 的 pareto 配置作为部署起点"
+          ],
+          "source_files": [
+            "tensorrt_llm/commands/bench.py",
+            "tensorrt_llm/bench/__init__.py",
+            "examples/configs/database/database.py",
+            "examples/configs/database/lookup.yaml",
+            "docs/source/commands/trtllm-bench.rst"
+          ],
+          "minimal_modules": [
+            "bench CLI",
+            "bench 子包",
+            "配置数据库"
+          ],
+          "practice_task": "用 lookup.yaml 找出一个目标模型 / GPU 的 pareto 配置，说明如何把它作为 trtllm-serve 的 --config 起点；设计一次吞吐基准的命令行。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "二次开发与扩展",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "AutoDeploy 后端（图变换与编译）",
+          "order": 1,
+          "filename": "u12-l1-autodeploy-backend.md",
+          "level": "advanced",
+          "topic": "讲解 AutoDeploy 如何把 PyTorch 模型通过 FX 图变换、torch.export 与 piecewise 编译加速部署。",
+          "learning_goals": [
+            "理解 AutoDeploy 的 shim 与 PyExecutor 适配",
+            "掌握 transform/library 的图变换机制",
+            "了解 compile 与 backends 的关系"
+          ],
+          "source_files": [
+            "tensorrt_llm/_torch/auto_deploy/llm.py",
+            "tensorrt_llm/_torch/auto_deploy/compile/compiler.py",
+            "tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py",
+            "tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py",
+            "docs/source/features/auto_deploy/auto-deploy.md"
+          ],
+          "minimal_modules": [
+            "AutoDeploy shim",
+            "图变换",
+            "piecewise 编译"
+          ],
+          "practice_task": "追踪一个图变换（如 fuse_silu_mul）如何注册与执行；说明 AutoDeploy 与默认 PyTorch 后端在入口上的差异。",
+          "depends_on": [
+            "u3-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "自定义算子与内核",
+          "order": 2,
+          "filename": "u12-l2-custom-ops-and-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 custom_ops 分层（cpp / torch / triton / cute-dsl）、triton_kernels 与添加自定义内核的流程。",
+          "learning_goals": [
+            "理解 custom_ops 各实现来源的优先级",
+            "掌握 triton_kernels 的角色",
+            "学会按指南添加自定义内核"
+          ],
+          "source_files": [
+            "docs/source/torch/adding_custom_kernels.md",
+            "tensorrt_llm/_torch/custom_ops/__init__.py",
+            "tensorrt_llm/_torch/custom_ops/cpp_custom_ops.py",
+            "tensorrt_llm/_torch/custom_ops/torch_custom_ops.py"
+          ],
+          "minimal_modules": [
+            "custom_ops 分层",
+            "triton_kernels",
+            "添加内核流程"
+          ],
+          "practice_task": "对照 adding_custom_kernels.md，说明四类 custom_ops（cpp / torch / triton / cute-dsl）的选择优先级；为一个新算子选择合适的实现来源并说明理由。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "VisualGen 扩展",
+          "order": 3,
+          "filename": "u12-l3-visual-gen-extension.md",
+          "level": "advanced",
+          "topic": "讲解 VisualGen（扩散模型图像 / 视频生成）这条独立产品线的 API、参数与引擎。",
+          "learning_goals": [
+            "理解 VisualGen 与 LLM 后端的区别",
+            "掌握 VisualGen / VisualGenArgs / VisualGenParams 公共 API",
+            "了解其内部实现位置与工程准则"
+          ],
+          "source_files": [
+            "tensorrt_llm/visual_gen/visual_gen.py",
+            "tensorrt_llm/visual_gen/args.py",
+            "tensorrt_llm/visual_gen/params.py",
+            "tensorrt_llm/visual_gen/__init__.py",
+            "docs/source/models/visual-generation.md"
+          ],
+          "minimal_modules": [
+            "VisualGen API",
+            "参数与输出",
+            "工程准则"
+          ],
+          "practice_task": "参照 quickstart 用 VisualGen API 起草一段视频 / 图像生成脚本；说明 VisualGen 为何与 LLM 后端分离（独立引擎 / 参数 / 输出）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "测试、CI 与贡献流程",
+          "order": 4,
+          "filename": "u12-l4-tests-ci-and-contributing.md",
+          "level": "advanced",
+          "topic": "讲解测试分层（单元 / 集成 / API 稳定性）、CI bot 命令与代码贡献流程。",
+          "learning_goals": [
+            "理解 tests/ 的分层与 test_to_stage_mapping",
+            "掌握 CI 触发命令",
+            "遵循 CONTRIBUTING / CODING_GUIDELINES 的 DCO、PR 标题、版权头规范"
+          ],
+          "source_files": [
+            "CONTRIBUTING.md",
+            "CODING_GUIDELINES.md",
+            "scripts/test_to_stage_mapping.py",
+            "docs/source/developer-guide/ci-overview.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "测试分层",
+            "CI 触发",
+            "贡献规范"
+          ],
+          "practice_task": "用 test_to_stage_mapping.py 找出某个单元测试对应的 CI stage；写一份 \"提交 PR 前的自检清单\"（DCO 签名、PR 标题、版权头、pre-commit、相关测试）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

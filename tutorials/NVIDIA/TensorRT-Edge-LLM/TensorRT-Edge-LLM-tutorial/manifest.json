@@ -1,0 +1,1108 @@
+{
+  "project": "TensorRT-Edge-LLM",
+  "head": "7f061f21f0a581ba234a1e233c9315b89d8e47d6",
+  "rationale": "本项目是 NVIDIA 面向边缘设备（Jetson/DRIVE/DGX Spark）的高性能 LLM/VLM C++ 推理框架，整体由「量化 → ONNX 导出 → C++ 引擎构建 → C++ 运行时推理」三段式流水线组成。学习顺序严格遵循这条流水线：先用入门单元让读者建立全局认知（定位、目录、构建、端到端跑通）；再沿数据流深入——先讲 Python 导出前端（config 解析 → 模型分发 → 默认架构 → 权重加载 → ONNX 导出 → 多模态导出编排），再讲量化，再讲 C++ 引擎构建器，再进入 C++ 运行时核心（运行时入口 → 请求模型 → 引擎执行 → 解码策略 → 缓存 → 张量与采样）。专家层围绕真实扩展点展开：多模态、投机解码（EAGLE/MTP/DFlash/Gemma4-MTP）、插件与算子、以及 LoRA/系统提示缓存/词表裁剪/新模型接入/实验性 Python API 与服务端/测试与 CI。每一篇只解决一个独立主题、引用真实源码、配一个可操作的代码实践任务，单元与讲义之间形成清晰的依赖链，便于由浅入深逐步掌握。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目认知与首次运行",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：TensorRT Edge-LLM 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 TensorRT Edge-LLM 的定位、目标平台（Jetson/DRIVE/DGX Spark）、核心特性与典型用例。",
+          "learning_goals": [
+            "理解本项目是面向 NVIDIA 边缘设备的 C++ LLM/VLM 推理框架",
+            "记住它支持的关键特性：高性能、低内存、4-bit 量化、FP8 KV 缓存、LoRA、投机解码、多模态",
+            "了解汽车、机器人、工业物联网等典型应用场景"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/overview.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "README",
+            "overview 文档"
+          ],
+          "practice_task": "阅读 README 与 overview，用一段话写出本项目的三段式流水线，并列出两个它区别于普通推理框架（如直接用 vLLM）的边缘特定设计点。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与三段式流水线",
+          "order": 2,
+          "filename": "u1-l2-repo-layout-and-pipeline.md",
+          "level": "beginner",
+          "topic": "讲解仓库顶层目录划分，以及「HF 检查点 → Python 导出(ONNX) → C++ 引擎构建 → C++ 运行时」的整体数据流。",
+          "learning_goals": [
+            "识别 tensorrt_edgellm/（Python 导出）、cpp/（运行时与构建器）、examples/、experimental/、kernelSrcs/、tests/ 各自职责",
+            "理解从 HuggingFace 检查点到最终推理输出的完整链路",
+            "区分量化、导出、构建、运行四个阶段的产物"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md",
+            "docs/source/overview.md"
+          ],
+          "minimal_modules": [
+            "仓库目录",
+            "流水线图"
+          ],
+          "practice_task": "在仓库中为每个顶层目录写一句中文说明，并画出一张「检查点→ONNX→engine→推理」的流程图，标注每一步产出的文件类型。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建系统与依赖",
+          "order": 3,
+          "filename": "u1-l3-build-system-and-dependencies.md",
+          "level": "beginner",
+          "topic": "讲解 C++ 端的 CMake 构建（TRT_PACKAGE_DIR、单元测试、交叉编译、NVTX）与 Python 端的 pyproject 依赖与可选项（tools/server）。",
+          "learning_goals": [
+            "掌握最小化构建、带单元测试构建、AArch64 交叉编译的 cmake 命令",
+            "理解 git submodule（googletest、nlohmann/json、NVTX）与 LD_LIBRARY_PATH 的设置",
+            "区分 Python 的基础依赖、tools 与 server 可选依赖"
+          ],
+          "source_files": [
+            "CMakeLists.txt",
+            "cpp/CMakeLists.txt",
+            "pyproject.toml",
+            "requirements.txt",
+            ".gitmodules",
+            "docs/source/user_guide/getting_started/installation.md"
+          ],
+          "minimal_modules": [
+            "CMake",
+            "pyproject",
+            "submodule"
+          ],
+          "practice_task": "参照 AGENTS.md 的命令，写出在你本机执行最小化 C++ 构建所需的全部命令（含 submodule 初始化与 LD_LIBRARY_PATH），并解释 TRT_PACKAGE_DIR 的作用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口与包导出",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-points.md",
+          "level": "beginner",
+          "topic": "梳理 tensorrt_edgellm 安装后提供的命令行工具（quantize/export/insert-lora/process-lora/merge-lora/reduce-vocab）以及 Python 包的对外导出符号。",
+          "learning_goals": [
+            "记住六个 tensorrt-edgellm-* 命令分别对应 scripts 下的哪个入口",
+            "理解 pyproject.toml 的 [project.scripts] 如何把命令映射到 main 函数",
+            "了解 __init__.py 暴露的 AutoModel、export_onnx 等公共 API"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "tensorrt_edgellm/__init__.py",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "CLI 脚本映射",
+            "包导出"
+          ],
+          "practice_task": "在 pyproject.toml 中找到 export 命令的入口函数，然后追踪到 scripts/export.py 的 main，写出一行最简单的「把某个检查点导出为 ONNX」的命令调用。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "端到端流水线实战",
+          "order": 5,
+          "filename": "u1-l5-end-to-end-pipeline-walkthrough.md",
+          "level": "beginner",
+          "topic": "用一个最小模型把 export → llm_build → llm_inference 三步串起来跑通，建立对每个阶段输入输出的直观认识。",
+          "learning_goals": [
+            "能用 tensorrt-edgellm-export 导出一个 LLM 的 ONNX",
+            "能用 examples/llm/llm_build 编译出 TensorRT 引擎",
+            "能用 examples/llm/llm_inference 跑出推理文本"
+          ],
+          "source_files": [
+            "docs/source/user_guide/getting_started/quick-start-guide.md",
+            "tensorrt_edgellm/scripts/export.py",
+            "examples/llm/llm_build.cpp",
+            "examples/llm/llm_inference.cpp"
+          ],
+          "minimal_modules": [
+            "export CLI",
+            "llm_build",
+            "llm_inference"
+          ],
+          "practice_task": "依照 quick-start-guide，对一个最小尺寸的 Qwen/Llama 模型完成 export→build→inference，并把每一步命令和输出目录记录下来；如无 GPU 则至少把命令组装完整并解释每个参数。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Python 导出前端",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "检查点配置解析：ModelConfig 与 QuantConfig",
+          "order": 1,
+          "filename": "u2-l1-checkpoint-config-parsing.md",
+          "level": "intermediate",
+          "topic": "讲解如何从 HF config.json / hf_quant_config.json 解析出架构字段、量化元数据、层类型（attention/mamba/gdn/moe）与 RoPE 配置。",
+          "learning_goals": [
+            "理解 ModelConfig / QuantConfig 的数据结构与来源",
+            "掌握 fp8/nvfp4/int4_awq/int4_gptq/int8_sq/mixed_precision 等量化常量",
+            "理解混合模型（layer_types）与 Mamba 参数如何被解析"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/config.py",
+            "tensorrt_edgellm/checkpoint/checkpoint_utils.py"
+          ],
+          "minimal_modules": [
+            "ModelConfig",
+            "QuantConfig",
+            "checkpoint_utils"
+          ],
+          "practice_task": "找一个真实的 HF config.json（如 Qwen3），手动用 load_checkpoint_config_dicts 与 ModelConfig.from_pretrained 读出关键架构字段，并打印其量化类型与 layer_types。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "AutoModel 分发与模型注册表",
+          "order": 2,
+          "filename": "u2-l2-automodel-dispatch-and-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 AutoModel.from_pretrained 如何按 model_type 选择已注册模型类或回退到默认 CausalLM，以及投机解码变体（eagle/mtp/dflash/gemma4-mtp）的解析逻辑。",
+          "learning_goals": [
+            "理解 _MODEL_REGISTRY 与 register_model 注册机制",
+            "掌握 _resolve_model_variant 如何在 llm/eagle/mtp/dflash/gemma4 等变体间裁决",
+            "了解权重 key remapping（eagle3/mtp/dflash）的作用"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/model.py",
+            "tensorrt_edgellm/__init__.py"
+          ],
+          "minimal_modules": [
+            "AutoModel",
+            "注册表",
+            "变体解析"
+          ],
+          "practice_task": "追踪 register_model 调用，列出当前注册了哪些 model_type→模型类映射；然后写一段伪代码说明若要为新的 model_type 接入自定义类需要做哪几步。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "默认解码器模型实现",
+          "order": 3,
+          "filename": "u2-l3-default-decoder-implementation.md",
+          "level": "intermediate",
+          "topic": "深入 models/default/modeling_default.py 的 CausalLM 实现，以及共享的 linear.py 线性层与 ops.py 自定义算子。",
+          "learning_goals": [
+            "理解 CausalLM 如何用 EdgeLLM 自定义算子从零搭建解码器层（而非 trace HF FX 图）",
+            "掌握 embedding、attention、MLP、lm_head 的组装方式",
+            "理解为什么从检查点权重直接构建而非追踪 HF 模型"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/models/default/modeling_default.py",
+            "tensorrt_edgellm/models/linear.py",
+            "tensorrt_edgellm/models/ops.py"
+          ],
+          "minimal_modules": [
+            "CausalLM",
+            "linear",
+            "ops"
+          ],
+          "practice_task": "在 modeling_default.py 中定位 Transformer 层的 forward 组装，画出每一层用到的算子调用顺序；并解释 FP16Linear 与量化线性层在 linear.py 中的区别。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "检查点加载与权重重排",
+          "order": 4,
+          "filename": "u2-l4-checkpoint-loading-and-repacking.md",
+          "level": "intermediate",
+          "topic": "讲解 checkpoint/loader.py 如何从 safetensors 加载权重、做 key remap，以及 repacking.py 如何把量化权重重排为运行时/导出格式。",
+          "learning_goals": [
+            "理解 load_weights 的分片映射、key remap、pre_repack_hook 流程",
+            "掌握 int4_awq/gptq、nvfp4 等权重的重排逻辑",
+            "了解张量并行（tp_size/tp_rank）下的分片加载"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/checkpoint/loader.py",
+            "tensorrt_edgellm/checkpoint/repacking.py",
+            "tensorrt_edgellm/checkpoint/embedding_quantization.py"
+          ],
+          "minimal_modules": [
+            "loader",
+            "repacking",
+            "embedding_quantization"
+          ],
+          "practice_task": "阅读 loader.py 的 _build_shard_map 与 load_weights 主流程，写出一个普通 FP16 权重从 safetensors 进入模型 nn.Module 的完整步骤清单。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "ONNX 导出：自定义算子与 Dynamo 翻译",
+          "order": 5,
+          "filename": "u2-l5-onnx-export-custom-ops-dynamo.md",
+          "level": "intermediate",
+          "topic": "讲解 onnx/export.py 如何用 torch.onnx.export(dynamo=True) 导出图，onnx_custom_schemas.py 注册自定义算子 schema，dynamo_translations.py 把 PyTorch 自定义算子翻译为 EdgeLLM ONNX 节点。",
+          "learning_goals": [
+            "理解 EdgeLLM 自定义 ONNX 算子域为何必须（要 lowering 到 C++ 插件/算子）",
+            "掌握 dynamo 导出与自定义翻译规则的配合方式",
+            "了解导出产物与引擎构建器的契约"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/onnx/export.py",
+            "tensorrt_edgellm/onnx/onnx_custom_schemas.py",
+            "tensorrt_edgellm/onnx/dynamo_translations.py",
+            "tensorrt_edgellm/onnx/export_encoder.py"
+          ],
+          "minimal_modules": [
+            "export",
+            "custom schemas",
+            "dynamo translations"
+          ],
+          "practice_task": "在 onnx_custom_schemas.py 中找一个自定义算子定义，在 dynamo_translations.py 中找到它对应的翻译规则，说明这个算子最终在 ONNX 图里以什么节点形式出现。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "导出 CLI 与多模态组件编排",
+          "order": 6,
+          "filename": "u2-l6-export-cli-multimodal-orchestration.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/export.py 如何按 model_type 分类组件（LLM/视觉/音频/code2wav），并协调文本、视觉、EAGLE、MTP、DFlash 及运行时 sidecar 的导出。",
+          "learning_goals": [
+            "理解 VLM/AUDIO/TTS/OMNI 的模型类型分类常量",
+            "掌握一次导出会产出哪些 ONNX 子图与 sidecar（tokenizer/config/chat template）",
+            "了解 export_encoder.py 的视觉/音频编码器注册与选择"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/scripts/export.py",
+            "tensorrt_edgellm/onnx/export_encoder.py",
+            "tensorrt_edgellm/external_weights.py"
+          ],
+          "minimal_modules": [
+            "export CLI",
+            "组件分类",
+            "sidecar 产物"
+          ],
+          "practice_task": "追踪一个 VLM（如 qwen3_vl）走 export.py 的分支，列出它会被导出哪些子图目录（llm/visual 等）以及每个目录的产物文件。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "量化",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "量化包设计与配方",
+          "order": 1,
+          "filename": "u3-l1-quantization-package-design.md",
+          "level": "intermediate",
+          "topic": "讲解 quantization/ 包为何与导出解耦，以及 quantization_configs.py 的配方预设与 quantize.py 的 load→quant→save 流程。",
+          "learning_goals": [
+            "理解量化阶段只产出「统一 HF 检查点」，与导出完全解耦的设计动机",
+            "掌握配方预设（fp8/nvfp4/int4_awq/mxfp8/int8_sq）与 lm_head/visual/audio 量化选项",
+            "了解量化对 draft（EAGLE3/DFlash/MTP）模型的支持"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/quantization/README.md",
+            "tensorrt_edgellm/quantization/quantize.py",
+            "tensorrt_edgellm/quantization/quantization_configs.py",
+            "docs/source/developer_guide/software-design/quantization-design.md"
+          ],
+          "minimal_modules": [
+            "quantize 编排",
+            "quantization_configs",
+            "design 文档"
+          ],
+          "practice_task": "阅读 quantize.py 与 quantization_configs.py，写出一个 nvfp4 量化的配方需要指定哪些字段，并说明量化后的检查点与原始 HF 检查点在目录结构上的异同。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "量化 CLI 与支持的格式",
+          "order": 2,
+          "filename": "u3-l2-quantization-cli-and-formats.md",
+          "level": "intermediate",
+          "topic": "讲解 scripts/quantize.py 的子命令（llm/draft/qwen3-omni）与各种量化格式的选择项与适用场景。",
+          "learning_goals": [
+            "掌握 tensorrt-edgellm-quantize 的 llm/draft/qwen3-omni 子命令用法",
+            "理解各量化格式（fp8/nvfp4/int4_awq/mxfp8/int8_sq）的精度与显存权衡",
+            "了解 lm_head 与 backbone 可以用不同量化"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/scripts/quantize.py",
+            "tensorrt_edgellm/config.py",
+            "docs/source/user_guide/features/quantization.md"
+          ],
+          "minimal_modules": [
+            "quantize CLI",
+            "量化格式常量"
+          ],
+          "practice_task": "组装一条命令：对一个 LLM 做 nvfp4 backbone + nvfp4 lm_head 量化；再组装一条对一个 base+draft 做投机解码 draft 量化的命令，并解释每个参数。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "量化权重格式与 sidecar",
+          "order": 3,
+          "filename": "u3-l3-quantized-weight-formats.md",
+          "level": "intermediate",
+          "topic": "讲解量化检查点的存储布局（AWQ 列打包 int32、ModelOpt 预打包 uint8、NVFP4 分组+FP8 scale）以及导出阶段如何 repack。",
+          "learning_goals": [
+            "理解 int4_awq / int4_awq_modelopt / nvfp4 检查点的张量布局差异",
+            "掌握量化权重如何在 repacking.py 中被重排为运行时格式",
+            "了解 FP8 embedding sidecar 的用途与限制"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/checkpoint/repacking.py",
+            "tensorrt_edgellm/checkpoint/embedding_quantization.py",
+            "tensorrt_edgellm/quantization/models/eagle3_draft.py",
+            "tensorrt_edgellm/quantization/models/dflash_draft.py"
+          ],
+          "minimal_modules": [
+            "repacking",
+            "embedding_quantization",
+            "量化 draft 模型"
+          ],
+          "practice_task": "对比 AWQ 与 NVFP4 在检查点中的张量布局，写出导出阶段各自需要哪些 repack 步骤；并说明为何 TTS talker/code_predictor 不支持 FP8 embedding sidecar。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "C++ 引擎构建器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "构建器架构与八阶段流程",
+          "order": 1,
+          "filename": "u4-l1-builder-architecture-eight-stages.md",
+          "level": "intermediate",
+          "topic": "讲解 cpp/builder 的 LLM Builder / Visual Encoder Builder，以及插件加载→配置解析→网络创建→模型类型检测→ONNX 解析→优化 profile→引擎编译→文件管理八阶段。",
+          "learning_goals": [
+            "理解构建器在流水线中的位置（ONNX→TRT engine）",
+            "掌握八阶段构建流程及每阶段的产物",
+            "理解为何 ONNX 与 engine 不能跨版本移植"
+          ],
+          "source_files": [
+            "cpp/builder/llmBuilder.cpp",
+            "cpp/builder/builderUtils.cpp",
+            "docs/source/developer_guide/software-design/engine-builder.md"
+          ],
+          "minimal_modules": [
+            "llmBuilder",
+            "builderUtils",
+            "engine-builder 文档"
+          ],
+          "practice_task": "对照 engine-builder.md 的八阶段表，在 llmBuilder.cpp 中定位每个阶段对应的函数/代码段，写出函数名清单。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "双阶段优化 profile 与模型类型分发",
+          "order": 2,
+          "filename": "u4-l2-dual-phase-profiles-model-dispatch.md",
+          "level": "intermediate",
+          "topic": "讲解 context（prefill）与 generation（decode）双 profile、投机解码/VLM/LoRA 各自的 profile 设置，以及模型类型检测如何选择 ONNX 文件。",
+          "learning_goals": [
+            "理解 prefill 与 decode 为何需要两套优化 profile",
+            "掌握 setupVanillaProfiles/setupSpecDecodeProfiles/setupVLMProfiles/setupLoraProfiles 的区别",
+            "理解 lora_model.onnx 与 model.onnx 的选择逻辑"
+          ],
+          "source_files": [
+            "cpp/builder/llmBuilder.cpp",
+            "cpp/builder/visualBuilder.cpp",
+            "cpp/builder/builderUtils.cpp"
+          ],
+          "minimal_modules": [
+            "双 profile",
+            "模型类型分发",
+            "visualBuilder"
+          ],
+          "practice_task": "说明为什么 prefill profile 倾向小 batch、大序列，而 generation profile 倾向大 batch、单 token；并解释 EAGLE 构建为何 base 与 draft 共用同一 engineDir。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "使用构建器 CLI（llm_build / visual_build）",
+          "order": 3,
+          "filename": "u4-l3-using-the-builder-cli.md",
+          "level": "intermediate",
+          "topic": "讲解 examples/llm/llm_build.cpp 与 examples/multimodal/visual_build.cpp 的命令行参数与典型用法。",
+          "learning_goals": [
+            "掌握 --onnxDir/--engineDir/--maxBatchSize/--maxInputLen/--maxKVCacheCapacity 等参数",
+            "理解 --specBase/--specDraft 构建投机解码引擎的流程",
+            "掌握 VLM 视觉引擎 --minImageTokens/--maxImageTokens 的设置"
+          ],
+          "source_files": [
+            "examples/llm/llm_build.cpp",
+            "examples/multimodal/visual_build.cpp"
+          ],
+          "minimal_modules": [
+            "llm_build",
+            "visual_build"
+          ],
+          "practice_task": "组装三条命令：标准 LLM 构建、EAGLE base+draft 构建（同 engineDir）、VLM 的 LLM+视觉构建；为每条解释 maxKVCacheCapacity 与输入长度的关系。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "C++ 运行时核心",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "LLMInferenceRuntime 与 handleRequest",
+          "order": 1,
+          "filename": "u5-l1-llminferenceruntime-handle-request.md",
+          "level": "intermediate",
+          "topic": "讲解统一的 LLMInferenceRuntime 类、其构造（vanilla vs 投机解码）、handleRequest 主入口与 CUDA graph 捕获。",
+          "learning_goals": [
+            "理解 LLMInferenceRuntime 是所有 LLM 推理的统一入口",
+            "掌握 vanilla 与 speculative 两种构造方式的区别",
+            "理解 handleRequest 从请求到响应的整体流程"
+          ],
+          "source_files": [
+            "cpp/runtime/llmInferenceRuntime.h",
+            "cpp/runtime/llmInferenceRuntime.cpp",
+            "docs/source/developer_guide/software-design/llm-inference-runtime.md"
+          ],
+          "minimal_modules": [
+            "LLMInferenceRuntime",
+            "handleRequest",
+            "inference-runtime 文档"
+          ],
+          "practice_task": "参照文档用法示例，写一段最小 C++ 代码：构造 vanilla runtime、填一个 LLMGenerationRequest、调用 handleRequest 并打印输出；解释为何要用 non-blocking CUDA stream。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "请求/响应数据模型与流式",
+          "order": 2,
+          "filename": "u5-l2-request-response-model-streaming.md",
+          "level": "intermediate",
+          "topic": "讲解 llmRuntimeUtils.h 中的 Message/LLMGenerationRequest/LLMGenerationResponse/采样参数等结构，以及 streaming 的回调机制。",
+          "learning_goals": [
+            "掌握多轮消息（role/contents）、imageBuffers、loraWeightsName 等请求字段",
+            "理解 temperature/topK/topP/numLogprobs/finishReason 等响应字段",
+            "了解 token 回调与流式输出的实现方式"
+          ],
+          "source_files": [
+            "cpp/runtime/llmRuntimeUtils.h",
+            "cpp/runtime/llmRuntimeUtils.cpp",
+            "cpp/runtime/streaming.h",
+            "cpp/runtime/streaming.cpp"
+          ],
+          "minimal_modules": [
+            "请求/响应结构",
+            "streaming"
+          ],
+          "practice_task": "阅读 llmRuntimeUtils.h，列出 LLMGenerationRequest 的关键字段；然后构造一个多模态请求结构（文本+图片）说明 contents 顺序与 imageBuffers 的对应关系。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "引擎执行器与张量注册表",
+          "order": 3,
+          "filename": "u5-l3-engine-executor-tensor-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 exec/engineExecutor.cpp 的双阶段执行（prefill/decode profile 切换、LoRA 动态切换）、以及 tensorRegistry/tensorMap 如何管理引擎 I/O 绑定。",
+          "learning_goals": [
+            "理解 EngineExecutor 用单执行上下文在 prefill/generation profile 间切换",
+            "掌握 TensorMap/TensorRegistry 如何把引擎输入输出绑定到运行时张量",
+            "理解 engineExecutor 与 KV cache 的归属关系"
+          ],
+          "source_files": [
+            "cpp/runtime/exec/engineExecutor.cpp",
+            "cpp/runtime/exec/engineExecutor.h",
+            "cpp/runtime/exec/tensorRegistry.cpp",
+            "cpp/runtime/exec/tensorMap.cpp"
+          ],
+          "minimal_modules": [
+            "engineExecutor",
+            "tensorRegistry",
+            "tensorMap"
+          ],
+          "practice_task": "在 engineExecutor.cpp 中找到 profile 切换相关代码，解释一次 prefill 后切换到 decode profile 时引擎是如何复用同一 context 的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "解码策略与解码器注册表",
+          "order": 4,
+          "filename": "u5-l4-decoding-strategies-decoder-registry.md",
+          "level": "intermediate",
+          "topic": "讲解 decodingStrategy.h 的抽象基类、DecodingStrategyKind、DecoderRegistry 如何按部署配置选择 vanilla/eagle/mtp/dflash/gemma4-mtp 策略。",
+          "learning_goals": [
+            "理解 DecodingStrategy 抽象接口（decodeStep/captureCudaGraphs/系统提示缓存等）",
+            "掌握 DecoderRegistry 的策略选择逻辑",
+            "理解策略层如何与 base/draft engine executor 解耦"
+          ],
+          "source_files": [
+            "cpp/runtime/decoding/decodingStrategy.h",
+            "cpp/runtime/decoding/decoderRegistry.cpp",
+            "cpp/runtime/decoding/vanillaDecoder.cpp"
+          ],
+          "minimal_modules": [
+            "DecodingStrategy",
+            "decoderRegistry",
+            "vanillaDecoder"
+          ],
+          "practice_task": "阅读 decodingStrategy.h，列出策略必须实现的纯虚方法；然后说明 vanillaDecoder 与投机解码策略在 decodeStep 上的本质差异。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "KV 缓存与混合（Mamba）缓存管理",
+          "order": 5,
+          "filename": "u5-l5-kv-cache-hybrid-cache-management.md",
+          "level": "intermediate",
+          "topic": "讲解 kvCacheManager（线性 KV 缓存）、mambaCacheManager（SSM/conv 状态）、hybridCacheManager（attention+mamba 混合层）的管理与复用。",
+          "learning_goals": [
+            "理解线性 KV cache 的内存布局与批量/变长序列支持",
+            "掌握 Mamba/线性注意力（gdn）层的 SSM 状态与 conv 状态缓存",
+            "理解 hybrid 模型如何同时维护 KV 与 recurrent 缓存"
+          ],
+          "source_files": [
+            "cpp/runtime/kvCacheManager.cpp",
+            "cpp/runtime/kvCacheManager.h",
+            "cpp/runtime/mambaCacheManager.cpp",
+            "cpp/runtime/hybridCacheManager.cpp"
+          ],
+          "minimal_modules": [
+            "kvCacheManager",
+            "mambaCacheManager",
+            "hybridCacheManager"
+          ],
+          "practice_task": "对比纯 attention 模型与 Nemotron-H/Qwen3.5 混合模型在每一层需要缓存什么状态；说明 hybridCacheManager 如何在 autoregressive 步进中更新这两类缓存。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "张量抽象与公共工具",
+          "order": 6,
+          "filename": "u5-l6-tensor-abstraction-common-utils.md",
+          "level": "intermediate",
+          "topic": "讲解 common/tensor.h 的 RAII GPU/CPU 张量、Coords、DeviceType，以及 logger/fileUtils/safetensorsUtils 等公共工具。",
+          "learning_goals": [
+            "理解 Tensor 类如何封装 GPU/CPU 线性布局张量与 RAII 生命周期",
+            "掌握 Coords 与 TensorRT Dims 的转换",
+            "了解运行时各处复用的公共工具"
+          ],
+          "source_files": [
+            "cpp/common/tensor.h",
+            "cpp/common/tensor.cpp",
+            "cpp/common/logger.h"
+          ],
+          "minimal_modules": [
+            "Tensor",
+            "Coords",
+            "logger"
+          ],
+          "practice_task": "阅读 tensor.h，写一段代码：用 Coords 构造一个 GPU 上的 FP16 张量、写入数据、再拷贝到 CPU；说明为何拷贝构造被 delete 而移动构造被允许。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l7",
+          "title": "采样与分词",
+          "order": 7,
+          "filename": "u5-l7-sampling-and-tokenization.md",
+          "level": "intermediate",
+          "topic": "讲解 sampler/sampling.cu 的 GPU 采样（greedy/top-k/top-p/temperature）与 tokenizer 的 BPE 分词/编解码。",
+          "learning_goals": [
+            "理解采样如何在 logits 上做 top-k/top-p/temperature 并产出 token",
+            "掌握 tokenizer 的 BPE 预处理与特殊 token 处理",
+            "了解采样在 GPU 上批量执行的方式"
+          ],
+          "source_files": [
+            "cpp/sampler/sampling.cu",
+            "cpp/sampler/sampling.h",
+            "cpp/tokenizer/tokenizer.cpp",
+            "cpp/tokenizer/tokenizer.h"
+          ],
+          "minimal_modules": [
+            "sampling",
+            "tokenizer"
+          ],
+          "practice_task": "说明 greedy 与 top-p 采样在 sampling.cu 中的实现差异；然后解释一个用户 prompt 从字符串到 input ids 再到生成文本的完整 token 来回过程。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "多模态",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "多模态运行器与视觉编码器",
+          "order": 1,
+          "filename": "u6-l1-multimodal-runner-vision-encoders.md",
+          "level": "intermediate",
+          "topic": "讲解 multimodalRunner 如何调度视觉编码器（Qwen-VL/InternVL/Phi4MM/Gemma4 等）并把图像 embedding 与文本 token 融合。",
+          "learning_goals": [
+            "理解 multimodalRunner 对多种 ViT runner 的统一调度",
+            "掌握 Qwen-VL 动态分块与 InternVL/Phi4 下采样的差异",
+            "理解图像 token 如何插入文本序列"
+          ],
+          "source_files": [
+            "cpp/multimodal/multimodalRunner.cpp",
+            "cpp/multimodal/qwenViTRunner.cpp",
+            "cpp/multimodal/internViTRunner.cpp"
+          ],
+          "minimal_modules": [
+            "multimodalRunner",
+            "qwenViTRunner",
+            "internViTRunner"
+          ],
+          "practice_task": "对照引擎构建器的视觉 profile，说明为何 InternVL/Phi4 要求图像 token 为 256 的倍数；并描述一张图从原始像素到送入 LLM 的 embedding 的处理路径。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "音频与 Omni（ASR/TTS）流水线",
+          "order": 2,
+          "filename": "u6-l2-audio-and-omni-asr-tts.md",
+          "level": "intermediate",
+          "topic": "讲解音频编码器（audioRunner/melSpectrogram）、Qwen3-Omni 的 thinker/talker、code2wav 声码器与 TTS 运行时的协作。",
+          "learning_goals": [
+            "理解音频输入如何被预处理为 mel/fbank 特征并编码",
+            "掌握 Omni 模型 thinker（理解）与 talker（生成语音 token）的分工",
+            "理解 code2wav 如何把语音 token 转为波形"
+          ],
+          "source_files": [
+            "cpp/multimodal/audioRunner.cpp",
+            "cpp/multimodal/code2WavRunner.cpp",
+            "cpp/runtime/qwen3OmniTTSRuntime.cpp"
+          ],
+          "minimal_modules": [
+            "audioRunner",
+            "code2WavRunner",
+            "qwen3OmniTTSRuntime"
+          ],
+          "practice_task": "画出 Qwen3-Omni 从「文本+音频输入」到「文本+音频输出」的组件协作图，标注 thinker/talker/code2wav 各自的角色与产物。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "投机解码",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "投机解码策略（EAGLE/MTP/DFlash/Gemma4-MTP）",
+          "order": 1,
+          "filename": "u7-l1-speculative-decoding-strategies.md",
+          "level": "advanced",
+          "topic": "深入对比四种投机解码策略的 C++ 解码器：树形（EAGLE）、链式（MTP）、块状（DFlash）与 Gemma4-MTP 的草稿提议与验证接受逻辑。",
+          "learning_goals": [
+            "理解 EAGLE 树形提议、base 验证与 accept 算法",
+            "掌握 MTP 链式与 DFlash 块状/DDTree 的差异",
+            "理解 Gemma4-MTP 与目标模型共享 KV 的特殊设计"
+          ],
+          "source_files": [
+            "cpp/runtime/decoding/eagleDecoder.cpp",
+            "cpp/runtime/decoding/mtpDecoder.cpp",
+            "cpp/runtime/decoding/dflashDecoder.cpp",
+            "cpp/runtime/decoding/gemma4MTPDecoder.cpp"
+          ],
+          "minimal_modules": [
+            "eagleDecoder",
+            "mtpDecoder",
+            "dflashDecoder",
+            "gemma4MTPDecoder"
+          ],
+          "practice_task": "对比四种解码器的 decodeStep，列出各自在「草稿如何提议」「base 如何验证」「KV 是否共享」三个维度上的差异，并说明各自适合什么场景。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "导出侧的投机解码",
+          "order": 2,
+          "filename": "u7-l2-speculative-decoding-export-side.md",
+          "level": "advanced",
+          "topic": "讲解 Python 侧如何导出 EAGLE3 draft、Qwen3.5 MTP draft、DFlash draft 与 Gemma4 assistant 模型，以及 base/draft 的变体解析与权重 remap。",
+          "learning_goals": [
+            "理解 _resolve_model_variant 如何裁决 base/draft 角色",
+            "掌握 eagle3/dflash/mtp/gemma4-mtp 各自的 key remap 规则",
+            "理解 draft-to-target 词表映射（d2t）的产出"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/model.py",
+            "tensorrt_edgellm/models/eagle3/modeling_eagle3_draft.py",
+            "tensorrt_edgellm/models/dflash/modeling_dflash_draft.py"
+          ],
+          "minimal_modules": [
+            "变体解析",
+            "eagle3 draft",
+            "dflash draft"
+          ],
+          "practice_task": "追踪 eagle3 draft 的导出路径，说明它如何从 draft 检查点（含 t2d/target_model 等训练产物）重映射出可加载的权重，并解释 d2t 映射在哪个阶段产出。",
+          "depends_on": [
+            "u2-l2",
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "插件与算子",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "TensorRT 插件架构",
+          "order": 1,
+          "filename": "u8-l1-tensorrt-plugin-architecture.md",
+          "level": "advanced",
+          "topic": "讲解 cpp/plugins 的自定义 TRT 插件（attention/MoE/int4 gemm/mamba/gdn 等）如何被注册并以共享库 NvInfer_edgellm_plugin 动态加载。",
+          "learning_goals": [
+            "理解 EdgeLLM 自定义算子如何以 TRT 插件形式落地",
+            "掌握插件注册机制与共享库加载（为何是 shared 不是 static）",
+            "了解 attention/nvfp4Moe/int4GroupwiseGemm 插件的职责"
+          ],
+          "source_files": [
+            "cpp/plugins/attentionPlugin/attentionPlugin.cpp",
+            "cpp/plugins/attentionPlugin/attentionPlugin.h",
+            "cpp/plugins/nvfp4MoePlugin/README.md",
+            "cpp/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "attentionPlugin",
+            "nvfp4MoePlugin",
+            "CMake 插件目标"
+          ],
+          "practice_task": "说明 NvInfer_edgellm_plugin 为何必须是 SHARED 库；然后参照 tensorrt-plugins 文档，列出新增一个自定义插件需要实现的 TRT 接口方法。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "自定义 CUDA 算子（FMHA/MoE/Mamba）",
+          "order": 2,
+          "filename": "u8-l2-custom-cuda-kernels.md",
+          "level": "advanced",
+          "topic": "讲解 cpp/kernels 下的核心算子族：FMHA（context/decode attention）、MoE、RoPE/posEncoding、Mamba SSM、投机解码工具算子，及其 SM 特异性构建。",
+          "learning_goals": [
+            "理解 prefill(context) 与 decode 两类 FMHA 算子的差异",
+            "掌握 MoE 算子（topk/align/per-expert/nvfp4）的分工",
+            "理解 FMHA 算子按 SM 架构构建与 kernelSrcs 的关系"
+          ],
+          "source_files": [
+            "cpp/kernels/moe/f16MoeSupportKernels.cu",
+            "kernelSrcs/fmha_v2/README.md",
+            "kernelSrcs/README.md",
+            "cpp/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "MoE 算子",
+            "FMHA README",
+            "SM 构建配置"
+          ],
+          "practice_task": "参照 AGENTS.md 的说明，解释新增一个 SM 架构时需要更新哪些 FMHA 构建配置；并描述 decode 阶段 FMHA 为何能与 KV cache 结合实现单 token 高效注意力。",
+          "depends_on": [
+            "u8-l1",
+            "u5-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "特性与扩展",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "LoRA 支持（导出 + 运行时）",
+          "order": 1,
+          "filename": "u9-l1-lora-support.md",
+          "level": "advanced",
+          "topic": "讲解 LoRA 的全链路：导出阶段在 ONNX 图里插入 LoRA 输入与 hook、处理/合并 adapter 权重，运行时动态切换 adapter。",
+          "learning_goals": [
+            "理解 LoRA 图插入与 adapter 权重 sidecar 转换",
+            "掌握 insert-lora/process-lora/merge-lora 三个 CLI 的用途",
+            "理解运行时如何按 loraWeightsName 动态切换 adapter"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/lora/lora.py",
+            "tensorrt_edgellm/scripts/insert_lora.py",
+            "tensorrt_edgellm/scripts/merge_lora.py",
+            "cpp/runtime/state/loraManager.cpp"
+          ],
+          "minimal_modules": [
+            "lora.py",
+            "LoRA CLI",
+            "loraManager"
+          ],
+          "practice_task": "说明 Phi-4-Multimodal 为何需要在量化前用 merge-lora 静态合并 LoRA；并描述运行时在同一 runtime 上用不同 loraWeightsName 连续推理时 adapter 如何切换。",
+          "depends_on": [
+            "u2-l6",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "系统提示 KV 缓存与流式",
+          "order": 2,
+          "filename": "u9-l2-system-prompt-cache-and-streaming.md",
+          "level": "advanced",
+          "topic": "讲解系统提示 KV 缓存的预生成与保存/恢复机制，以及流式 token 回调如何在生成过程中增量输出。",
+          "learning_goals": [
+            "理解 genAndSaveSystemPromptKVCache 的预填充与缓存复用",
+            "掌握 systemPromptKVCache 的键与恢复策略",
+            "理解流式回调如何避免等待整段生成"
+          ],
+          "source_files": [
+            "cpp/runtime/state/systemPromptKVCache.h",
+            "cpp/runtime/streaming.cpp",
+            "docs/source/user_guide/features/system-prompt-cache.md",
+            "docs/source/user_guide/features/streaming.md"
+          ],
+          "minimal_modules": [
+            "systemPromptKVCache",
+            "streaming"
+          ],
+          "practice_task": "设计一个场景：固定系统提示 + 变化用户问题。说明如何用系统提示 KV 缓存减少每次推理的 prefill 开销，并说明流式回调如何让首 token 提早返回。",
+          "depends_on": [
+            "u5-l5",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "词表裁剪、FP8 KV 缓存与 chat 模板",
+          "order": 3,
+          "filename": "u9-l3-vocab-reduction-fp8kv-chat-templates.md",
+          "level": "advanced",
+          "topic": "讲解三项优化/格式特性：词表裁剪（vocab_map 应用到 lm_head）、FP8 KV 缓存（省内存）、以及 chat_templates 的配置与运行时使用。",
+          "learning_goals": [
+            "理解词表裁剪如何生成 vocab_map 并在导出时应用到 lm_head",
+            "掌握 FP8 KV 缓存的自动启用（来自检查点元数据）与收益",
+            "理解 chat 模板 JSON 如何驱动多轮对话格式化"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/vocab_reduction/selection.py",
+            "tensorrt_edgellm/vocab_reduction/onnx_export.py",
+            "tensorrt_edgellm/scripts/reduce_vocab.py",
+            "tensorrt_edgellm/chat_templates/__init__.py"
+          ],
+          "minimal_modules": [
+            "vocab_reduction",
+            "reduce_vocab CLI",
+            "chat_templates"
+          ],
+          "practice_task": "组装一条 reduce-vocab 命令并说明它产出的 vocab_map.safetensors 如何在后续 export 中被消费；再说明 FP8 KV 缓存相比 FP16 在边缘设备上的内存收益。",
+          "depends_on": [
+            "u2-l6",
+            "u5-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "接入一个新模型架构",
+          "order": 4,
+          "filename": "u9-l4-adding-a-new-model-architecture.md",
+          "level": "advanced",
+          "topic": "综合 Python 侧的 config/模型实现/权重加载/注册，讲解从零为一个新 model_type 接入 EdgeLLM 的完整步骤。",
+          "learning_goals": [
+            "理解新增模型类需保持与 HF 检查点张量名兼容",
+            "掌握 register_model、自定义算子、ONNX 导出的改动点",
+            "了解 customization-guide 给出的扩展边界"
+          ],
+          "source_files": [
+            "tensorrt_edgellm/models/default/modeling_default.py",
+            "tensorrt_edgellm/model.py",
+            "tensorrt_edgellm/config.py",
+            "docs/source/developer_guide/customization/customization-guide.md"
+          ],
+          "minimal_modules": [
+            "modeling_default",
+            "model",
+            "config",
+            "customization 文档"
+          ],
+          "practice_task": "假设要接入一个新的 decoder-only 模型，列出需要修改/新增的文件清单，并说明每一步的验证方式（export→build→inference）。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "实验性 Python API 与 OpenAI 服务端",
+          "order": 5,
+          "filename": "u9-l5-experimental-python-api-server.md",
+          "level": "advanced",
+          "topic": "讲解 experimental/server 的 vLLM 风格 LLM API（generate/generate_stream）、engine 编排、pybind 绑定与 OpenAI 兼容服务端。",
+          "learning_goals": [
+            "理解 LLM 类如何从 checkpoint/onnx/engine 三种来源初始化",
+            "掌握 SamplingParams 与流式生成的用法",
+            "理解 pybind 如何把 C++ 运行时暴露给 Python"
+          ],
+          "source_files": [
+            "experimental/server/engine.py",
+            "experimental/server/api_server.py",
+            "experimental/pybind/edgellm_pybind.cpp",
+            "docs/source/user_guide/examples/experimental-server.md"
+          ],
+          "minimal_modules": [
+            "engine.py",
+            "api_server.py",
+            "pybind"
+          ],
+          "practice_task": "用 LLM(engine_dir=...) 写一段流式生成代码；然后说明 api_server.py 如何把请求映射到底层 C++ runtime 的 handleRequest，并标注它是 experimental 的原因。",
+          "depends_on": [
+            "u5-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l6",
+          "title": "测试与 CI",
+          "order": 6,
+          "filename": "u9-l6-testing-and-ci.md",
+          "level": "advanced",
+          "topic": "讲解三层测试（C++ GTest 单测、Python 单测、YAML 驱动的集成测试）、按 --priority 的设备参数化，以及 export→build→inference 的验证范式。",
+          "learning_goals": [
+            "理解 tests/conftest.py 的 YAML 驱动测试选择与 test_lists",
+            "掌握 C++ 单测（unittests/）与 Python 单测的运行方式",
+            "理解为何模型改动必须用 export→build→inference 三步验证"
+          ],
+          "source_files": [
+            "tests/conftest.py",
+            "tests/test_lists/l0_pipeline_a30.yml",
+            "tests/README.md",
+            "unittests/eagleAcceptTests.cpp",
+            "unittests/engineExecutorTest.cpp"
+          ],
+          "minimal_modules": [
+            "conftest",
+            "test_lists",
+            "unittests"
+          ],
+          "practice_task": "解释 l0_pipeline_a30.yml 这类测试列表的作用，以及 --priority 如何决定在哪个 GPU/设备上跑哪些用例；然后说明一条模型改动 PR 应该附带的最低验证证据是什么。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

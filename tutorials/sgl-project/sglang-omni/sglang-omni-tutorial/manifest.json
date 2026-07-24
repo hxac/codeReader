@@ -1,7 +1,7 @@
 {
   "project": "sglang-omni",
-  "head": "cf61f234e5a2cc7f63a24bdef84b446bd9a42f74",
-  "rationale": "SGLang-Omni 是一个面向 omni/语音/TTS 模型的多阶段(multi-stage)推理服务运行时，核心主链路为 HTTP API→Client→Coordinator→Stage→Scheduler→ModelRunner，并复用上游 SGLang 做高性能自回归调度。学习路径按「先会跑、再懂链路、后能扩展」设计为 7 个单元 33 篇讲义。入门单元 u1 让读者从零理解项目定位、装好环境、启动服务并看懂声明式配置；进阶 u2 追踪一次请求从 HTTP 到 Coordinator 的完整路径并掌握配置契约；u3/u4 分别拆解 Pipeline-Stage 的控制平面/数据平面/进程拓扑 与 Scheduler-ModelRunner 的执行机制，这是理解整个运行时的关键；u5 以 Qwen3-Omni 与 TTS 为例讲清模型家族接入与预处理。专家层 u6 聚焦通信传输选择、量化/权值校验、Profiler、RL 热更新、参考音频缓存、张量并行等扩展与性能主题；u7 覆盖 Router、实时 WebSocket、ASR 转录、基准评测等生产服务化能力，并以一篇「新增模型家族」实战收尾。讲义依赖关系严格遵循「主链路先行、子机制后置、模型集成在框架之后」的顺序，确保读者每篇只消化一个独立主题且能对照真实源码动手实践。",
+  "head": "e7979b0719e16290a56f571745af0d4428326f1f",
+  "rationale": "本次为增量更新，覆盖 cf61f234..e7979b07 共 2 个提交，均为性能优化与局部正确性修复，未改变整体架构、请求主链路、公共接口或核心模型，因此 7 单元 33 讲的学习路径与单元划分保持不变。全部变更仅为文件修改(M)、无新增模块，故不新增讲义。变更集中在两处：(1) [Perf][MOSS-TTS]#1158 将 audio 状态下的文本通道采样限制为仅两个控制 token(gen/delay slot)，新增 compact 两 token 采样路径与 seeded Gumbel-max(murmur_hash32) 哈希、以及 _apply_two_token_top_k/skip_inactive_check 的免 host-sync 热路径——这是 MOSS-TTS 模型内部的采样性能优化；现有讲义无一引用 sglang_omni/models/moss_tts/* 源码文件，且 TTS 接入讲义 u5-l3 的范例(qwen3_tts)与 docs/developer_reference/tts_model_integration.md 集成文档均未改动，故相关讲义保持 keep。(2) [Qwen3-Omni Perf]#1027 修复 OmniScheduler 在 extend/mixed batch 上丢弃 stale 请求时 KV slot 与 per-token 字段(input_ids/out_cache_loc/extend_lens/prefix_lens/extend_logprob_start_lens/extend_input_logprob_token_ids/decoding_reqs)的错误切片——这正是 u4-l2「OmniScheduler 与 SGLang 后端」中以 omni_scheduler.py 为源码、并强调『哪些工作仍由 omni 自己负责(per-token 字段 filter_batch 不处理)』的内容范围，属局部逻辑变化，故 u4-l2 标记为 update，需补充 drop-stale extend 切片与 decoding_reqs 过滤的说明。其余 32 篇讲义所列源码均未被本次 diff 触及，统一保持 keep。讲义依赖关系不变，仍沿用『先会跑、再懂链路、后能扩展』的整体顺序。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           ],
           "practice_task": "用一段话向同事解释 SGLang-Omni 与 SGLang 各自负责什么；并从 README 中列举 omni、TTS、ASR 三类被服务模型各一个具体例子。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -118,7 +118,7 @@
             "u1-l2",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -146,7 +146,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -181,7 +181,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -209,7 +209,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -237,7 +237,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -264,7 +264,7 @@
           "depends_on": [
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l5",
@@ -292,7 +292,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -328,7 +328,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -356,7 +356,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -384,7 +384,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -414,7 +414,7 @@
             "u2-l5",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -451,7 +451,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -459,11 +459,12 @@
           "order": 2,
           "filename": "u4-l2-omni-scheduler-sglang-backend.md",
           "level": "intermediate",
-          "topic": "OmniScheduler 如何复用 SGLang 的 prefill/decode 管理、KV 缓存、batch 选择，同时保留 omni 自己的传输、请求对象与流式行为。",
+          "topic": "OmniScheduler 如何复用 SGLang 的 prefill/decode 管理、KV 缓存、batch 选择，同时保留 omni 自己的传输、请求对象与流式行为；以及 drop-stale 请求时 omni 自行负责的 per-token 字段切片(KV slot 释放/extend_lens/prefix_lens 等)。",
           "learning_goals": [
             "理解 OmniScheduler 与 SGLang 上游 scheduler 的组合边界",
             "理解 create_sglang_infrastructure 返回的(worker/tree_cache/kv 池/prefill/decode/model_config)元组",
-            "理解 build_sglang_server_args 的职责"
+            "理解 build_sglang_server_args 的职责",
+            "理解丢弃 stale 请求时为何需要 omni 自行 reslice extend/mixed batch 的 per-token 字段(input_ids/out_cache_loc/extend_lens/prefix_lens/extend_logprob_start_lens)与 decoding_reqs，而不是依赖 SGLang 的 filter_batch"
           ],
           "source_files": [
             "sglang_omni/scheduling/omni_scheduler.py",
@@ -474,13 +475,14 @@
             "OmniScheduler",
             "SGLang prefill/decode",
             "KV cache",
+            "drop-stale extend 切片",
             "server args"
           ],
-          "practice_task": "在 omni_scheduler.py 中定位 run_batch 与 prefill/decode 调度，说明它把哪些工作交给 SGLang、哪些仍由 omni 自己负责。",
+          "practice_task": "在 omni_scheduler.py 中定位 run_batch 与 prefill/decode 调度，说明它把哪些工作交给 SGLang、哪些仍由 omni 自己负责；并找到 drop-stale 对 extend/mixed batch 的处理，解释为何 per-token 字段必须手动 reslice 而 filter_batch 做不到。",
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l3",
@@ -508,7 +510,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -535,7 +537,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -571,7 +573,7 @@
           "depends_on": [
             "u2-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -600,7 +602,7 @@
             "u5-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -628,7 +630,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -657,7 +659,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -694,7 +696,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -723,7 +725,7 @@
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -752,7 +754,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -780,7 +782,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -808,7 +810,7 @@
           "depends_on": [
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l6",
@@ -837,7 +839,7 @@
           "depends_on": [
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -874,7 +876,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -902,7 +904,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -930,7 +932,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -959,7 +961,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l5",
@@ -987,7 +989,7 @@
             "u5-l1",
             "u5-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
