@@ -1,0 +1,925 @@
+{
+  "project": "genai-bench",
+  "head": "7fd04d8c53b1df20450019fb7eedec0c4caec24f",
+  "rationale": "genai-bench 是一个基于 Locust 的 LLM 服务 token 级基准测试工具，核心由「CLI 编排 + 多后端 User + 场景/采样 + 指标采集聚合 + 分布式运行 + 实时 UI + 多云认证存储 + 实验分析报告」几大子系统构成。学习路线据此分成 8 个单元、共 30 篇讲义，按依赖关系与难度递进：U1 入门层先让读者跑通项目并建立整体地图；U2–U6 进阶层依次深入「任务/场景/数据采样」「User 后端执行」「指标计算与聚合」「多云认证与存储」「实验分析与报告」这条从输入到产出的主链路；U7–U8 专家层再讲分布式主从架构、实时 UI、日志，以及把所有子系统串起来的 benchmark 主流程编排、扩展开发、测试/CI/发布。第一单元从零开始覆盖定位、安装、目录与入口；后续单元各自聚焦一个相对独立子系统，每篇讲义只解决一个主题，引用 1–6 个真实源码文件并配一个可操作的代码实践任务，讲义之间通过 depends_on 明确前置依赖，最终由 U8-L1 的 benchmark 主流程作为贯穿全局的 capstone。full 模式下所有讲义 action 均为 \"new\"。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 genai-bench 并跑通第一个基准",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "topic": "genai-bench 是什么、解决什么问题、核心特性（CLI/Live UI/分析报告）与整体技术栈。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 LLM 服务基准测试的概念与 token 级指标的意义",
+            "说出 genai-bench 的三大能力：CLI 工具、实时 UI 仪表盘、实验分析器",
+            "识别项目的关键依赖与版本信息"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "genai_bench/version.py",
+            "genai_bench/__init__.py"
+          ],
+          "minimal_modules": [
+            "项目定位与核心特性",
+            "技术栈与关键依赖",
+            "版本与发布信息"
+          ],
+          "practice_task": "阅读 README 与 pyproject.toml，用 pip install genai-bench 安装，运行 genai-bench --version 确认版本，并列出 genai-bench 依赖的 5 个关键库及其作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与运行第一个基准",
+          "order": 2,
+          "filename": "u1-l2-install-and-first-run.md",
+          "topic": "如何安装 genai-bench，以及如何用 benchmark 子命令对模型发起一次最小基准测试。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握 pip 安装与可选依赖（aws/azure/gcp/multi-cloud）安装方式",
+            "能读懂 README 中的快速开始命令并完成一次 text-to-text 基准",
+            "理解 benchmark 命令关键参数的含义与运行产出物"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/getting-started/installation.md",
+            "genai_bench/cli/cli.py",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "安装方式",
+            "快速开始命令解析",
+            "运行产出物"
+          ],
+          "practice_task": "启动一个本地 OpenAI 兼容服务（或用占位地址 dry-run），执行 README 中的 text-to-text benchmark 命令，观察生成的 experiments 目录与 summary 文件结构。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块全景",
+          "order": 3,
+          "filename": "u1-l3-directory-and-module-map.md",
+          "topic": "genai-bench 仓库的目录组织、各子包职责与源码地图。",
+          "level": "beginner",
+          "learning_goals": [
+            "画出 genai_bench 包的目录结构",
+            "说明 cli/user/sampling/scenarios/metrics/auth/storage/analysis/ui/distributed 各包职责",
+            "定位每个子系统的入口文件"
+          ],
+          "source_files": [
+            "README.md",
+            "genai_bench/cli/cli.py",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "顶层目录结构",
+            "子包职责地图",
+            "入口与调用链概览"
+          ],
+          "practice_task": "阅读 cli.py 顶部的 import，绘制一张从 cli 到各子系统的依赖草图，标注每个 import 对应的功能模块。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口与三大命令",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-commands.md",
+          "topic": "用 click 定义的 cli 组，以及 benchmark/excel/plot 三个子命令的注册与职责。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 click group 与子命令注册机制",
+            "区分 benchmark/excel/plot 三命令各自的作用",
+            "看懂 cli.py 中 add_command 的组织方式以及 report 模块的复用"
+          ],
+          "source_files": [
+            "genai_bench/cli/cli.py",
+            "genai_bench/cli/report.py",
+            "docs/getting-started/cli-guidelines.md"
+          ],
+          "minimal_modules": [
+            "click group 与入口",
+            "三大子命令注册",
+            "report 模块（excel/plot 命令实现）"
+          ],
+          "practice_task": "阅读 report.py，分别说明 excel 和 plot 子命令接收哪些参数，并写一段说明它们如何复用 analysis 子系统。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "协议数据模型（protocol.py）",
+          "order": 5,
+          "filename": "u1-l5-protocol-models.md",
+          "topic": "用 Pydantic 定义的请求/响应/实验元数据模型，是各模块间的统一数据契约。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 UserRequest/UserResponse 及其子类的字段含义",
+            "掌握 ExperimentMetadata 的关键字段",
+            "认识 Pydantic 在项目中作为数据契约的作用"
+          ],
+          "source_files": [
+            "genai_bench/protocol.py"
+          ],
+          "minimal_modules": [
+            "请求模型族",
+            "响应模型族",
+            "ExperimentMetadata"
+          ],
+          "practice_task": "基于 protocol.py 写一个小脚本，构造一个 UserChatRequest 和一个 ExperimentMetadata 实例并 model_dump_json 打印，验证字段校验行为。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：任务、场景与数据采样",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Task 任务定义体系",
+          "order": 1,
+          "filename": "u2-l1-task-definition.md",
+          "topic": "input-to-output 任务命名约定、各后端支持的任务集合与默认场景映射。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 \"<input>-to-<output>\" 任务格式",
+            "知道 text-to-text/embeddings/rerank/image/speech 等任务",
+            "看懂 validate_task 的校验逻辑与后端任务限制"
+          ],
+          "source_files": [
+            "docs/getting-started/task-definition.md",
+            "genai_bench/cli/validation.py",
+            "genai_bench/user/openai_user.py"
+          ],
+          "minimal_modules": [
+            "任务命名约定",
+            "后端任务支持表",
+            "校验与默认场景"
+          ],
+          "practice_task": "阅读 DEFAULT_SCENARIOS_BY_TASK，为某个自定义任务设想一个合理场景字符串，并解释为何 image 类任务需要数据集。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Traffic Scenario 场景定义与解析",
+          "order": 2,
+          "filename": "u2-l2-scenario-definition.md",
+          "topic": "场景字符串（N/D/U/E/R/I/A/dataset）的语法、Scenario 基类的注册表与 from_string 工厂。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握各类场景字符串的含义与正则校验",
+            "理解 Scenario 基类与 __init_subclass__ 自动注册机制",
+            "能用 from_string 解析任意场景字符串"
+          ],
+          "source_files": [
+            "genai_bench/scenarios/base.py",
+            "genai_bench/scenarios/text.py",
+            "genai_bench/scenarios/multimodal.py",
+            "docs/user-guide/scenario-definition.md"
+          ],
+          "minimal_modules": [
+            "场景语法与正则",
+            "分布类与模态类实现",
+            "注册表与 from_string 工厂"
+          ],
+          "practice_task": "写脚本调用 Scenario.from_string 解析 \"N(480,240)/(300,150)\"、\"E(1024)\"、\"I(1024,1024)\"，并打印各自 sample() 的结果。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "数据集加载（DatasetConfig 与 Loaders）",
+          "order": 3,
+          "filename": "u2-l3-dataset-loading.md",
+          "topic": "支持本地文件 / HuggingFace / 自定义的数据集配置与加载工厂。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 DatasetConfig 与 DatasetSourceConfig 的字段",
+            "掌握 DataLoaderFactory 按输入模态分发的逻辑",
+            "了解 TextDatasetLoader/ImageDatasetLoader 的数据处理方式"
+          ],
+          "source_files": [
+            "genai_bench/data/config.py",
+            "genai_bench/data/loaders/factory.py",
+            "genai_bench/data/loaders/text.py",
+            "genai_bench/data/loaders/image.py",
+            "genai_bench/data/loaders/base.py"
+          ],
+          "minimal_modules": [
+            "DatasetConfig 模型",
+            "加载工厂",
+            "loader 实现"
+          ],
+          "practice_task": "用 from_cli_args 构造一个指向内置 sonnet.txt 的 DatasetConfig，再用 DataLoaderFactory.load_data_for_task 加载 text-to-text 数据并打印前几条。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "采样器 Sampler 与请求构造",
+          "order": 4,
+          "filename": "u2-l4-sampler-and-request-construction.md",
+          "topic": "Sampler 基类与 create 工厂、TextSampler 如何结合场景生成 UserRequest，以及 prefix 缓存机制。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 Sampler 的 modality_registry 与 create(task) 工厂",
+            "掌握 TextSampler.sample 按 output_modality 分发的流程",
+            "了解 prefix-len / prefix-ratio 的共享前缀缓存"
+          ],
+          "source_files": [
+            "genai_bench/sampling/base.py",
+            "genai_bench/sampling/text.py",
+            "genai_bench/sampling/image.py"
+          ],
+          "minimal_modules": [
+            "Sampler 基类与注册",
+            "TextSampler 采样流程",
+            "prefix 缓存"
+          ],
+          "practice_task": "构造一个 TextSampler，分别用 D(100,100) 和 dataset 模式调用 sample，对比返回的 UserChatRequest 字段差异。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：User 后端体系与请求执行",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "User 基类与 Locust 集成",
+          "order": 1,
+          "filename": "u3-l1-base-user-and-locust.md",
+          "topic": "BaseUser 作为 Locust HttpUser 子类、supported_tasks、sample 与 collect_metrics 机制。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 genai-bench 如何基于 Locust 构造虚拟用户",
+            "掌握 sample() 从 environment.sampler 取请求的流程",
+            "理解 collect_metrics 如何把指标上报给 locust events 与 runner"
+          ],
+          "source_files": [
+            "genai_bench/user/base_user.py",
+            "genai_bench/user/openai_user.py"
+          ],
+          "minimal_modules": [
+            "BaseUser 与 Locust HttpUser",
+            "采样入口 sample()",
+            "指标上报链路 collect_metrics"
+          ],
+          "practice_task": "阅读 base_user.py，画出一次请求从 sample() 到 send_message('request_metrics') 的完整时序，并指出关键扩展点。",
+          "depends_on": [
+            "u1-l5",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "OpenAIUser 流式与非流式响应解析",
+          "order": 2,
+          "filename": "u3-l2-openai-user-response-parsing.md",
+          "topic": "OpenAIUser 对 chat/embeddings/rerank/images/speech 的请求构造与响应解析，重点解析 SSE 流式 chunk。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 chat 流式解析中 TTFT、tokens、reasoning_tokens 的提取",
+            "理解不同任务的 parse 策略",
+            "了解 usage 信息缺失时的 tokenizer 回退估算逻辑"
+          ],
+          "source_files": [
+            "genai_bench/user/openai_user.py",
+            "genai_bench/protocol.py"
+          ],
+          "minimal_modules": [
+            "请求构造与 endpoint",
+            "流式 chunk 解析",
+            "usage 提取与回退估算"
+          ],
+          "practice_task": "写一个最小函数，给定一段模拟的 SSE data 行列表，复用解析思路统计 tokens_received 与 time_at_first_token。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "多后端 User 体系",
+          "order": 3,
+          "filename": "u3-l3-multi-backend-users.md",
+          "topic": "OpenAI / OCI / AWS Bedrock / Azure / GCP / Together 等多后端 User 类与 API_BACKEND_USER_MAP 映射。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解各后端 User 的差异与共同基类",
+            "掌握 validate_api_backend 如何选择 user_class",
+            "知道 vllm/sglang 复用 OpenAIUser 的原因"
+          ],
+          "source_files": [
+            "genai_bench/cli/validation.py",
+            "genai_bench/user/openai_user.py",
+            "genai_bench/user/oci_openai_user.py",
+            "genai_bench/user/aws_bedrock_user.py"
+          ],
+          "minimal_modules": [
+            "后端 User 全景",
+            "选择映射 API_BACKEND_USER_MAP",
+            "后端差异与复用"
+          ],
+          "practice_task": "阅读 validation.py 的 API_BACKEND_USER_MAP，选择一个非 OpenAI 后端（如 aws-bedrock），说明它复用了哪些基类方法、覆写了哪些。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：指标计算与聚合",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "单请求指标计算 RequestMetricsCollector",
+          "order": 1,
+          "filename": "u4-l1-request-metrics-collector.md",
+          "topic": "从 UserResponse 计算 TTFT / TPOT / 吞吐等请求级指标的公式。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握 ttft/e2e_latency/output_latency 的计算",
+            "理解 tpot 与 output_inference_speed 的关系",
+            "区分 chat/tts/image/embeddings 的指标重置逻辑"
+          ],
+          "source_files": [
+            "genai_bench/metrics/request_metrics_collector.py",
+            "genai_bench/metrics/metrics.py",
+            "docs/getting-started/metrics-definition.md"
+          ],
+          "minimal_modules": [
+            "指标公式",
+            "输出指标计算",
+            "非聊天任务的指标重置"
+          ],
+          "practice_task": "构造一个 UserChatResponse（给定时间戳与 token 数），调用 RequestMetricsCollector.calculate_metrics，验证 ttft/tpot/throughput 的数值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "运行级聚合 AggregatedMetricsCollector",
+          "order": 2,
+          "filename": "u4-l2-aggregated-metrics-collector.md",
+          "topic": "对一个 [scenario, concurrency] 运行的所有请求做统计聚合、warmup/cooldown 过滤与保存。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 aggregate_metrics_data 的百分位与吞吐聚合",
+            "掌握 warmup/cooldown 过滤机制",
+            "了解 save 的 JSON 结构与 filter_metrics 异常值处理"
+          ],
+          "source_files": [
+            "genai_bench/metrics/aggregated_metrics_collector.py",
+            "genai_bench/metrics/metrics.py"
+          ],
+          "minimal_modules": [
+            "聚合流程",
+            "warmup/cooldown 过滤",
+            "异常值过滤与保存"
+          ],
+          "practice_task": "构造若干 RequestLevelMetrics 喂给 collector，调用 aggregate_metrics_data，检查 stats 的 p50/p99 与 mean_output_throughput。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "指标数据模型与时间单位转换",
+          "order": 3,
+          "filename": "u4-l3-metrics-models-and-time-units.md",
+          "topic": "RequestLevelMetrics/AggregatedMetrics/MetricStats/StatField 的分层结构，以及 s↔ms 单位转换。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解分层指标模型的字段与序列化",
+            "掌握 TimeUnitConverter 对延迟字段的转换",
+            "了解 metrics_time_unit 如何贯穿保存/UI/报告"
+          ],
+          "source_files": [
+            "genai_bench/metrics/metrics.py",
+            "genai_bench/time_units.py"
+          ],
+          "minimal_modules": [
+            "指标模型分层",
+            "序列化与校验",
+            "时间单位转换"
+          ],
+          "practice_task": "用 TimeUnitConverter.convert_metrics_dict 把一份聚合指标从 s 转成 ms，验证 ttft/e2e_latency 放大 1000 倍而 token 数不变。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：多云认证与存储",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "认证体系总览与 UnifiedAuthFactory",
+          "order": 1,
+          "filename": "u5-l1-auth-overview-and-factory.md",
+          "topic": "模型认证与存储认证两套 provider 抽象，以及统一工厂 UnifiedAuthFactory。",
+          "level": "intermediate",
+          "learning_goals": [
+            "区分 ModelAuthProvider 与 StorageAuthProvider 接口",
+            "理解 UnifiedAuthFactory 的两个 create 方法",
+            "认识 adapter 模式（OCI/OpenAI/Together）"
+          ],
+          "source_files": [
+            "genai_bench/auth/unified_factory.py",
+            "genai_bench/auth/model_auth_provider.py",
+            "genai_bench/auth/storage_auth_provider.py"
+          ],
+          "minimal_modules": [
+            "两类 provider 接口",
+            "统一工厂",
+            "适配器模式"
+          ],
+          "practice_task": "阅读 unified_factory.py，列出 create_model_auth 支持的 provider 及其各自构造的类，画出 provider→adapter 关系图。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "模型认证 Provider 实现",
+          "order": 2,
+          "filename": "u5-l2-model-auth-providers.md",
+          "topic": "OpenAI / OCI / Bedrock / Azure / GCP / Together 等模型认证 provider 的具体实现。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 get_headers/get_config/get_auth_type 的实现差异",
+            "掌握 OCI/OpenAI 适配器如何包装底层 auth",
+            "了解 Azure AD、GCP credentials 等凭据来源"
+          ],
+          "source_files": [
+            "genai_bench/auth/openai/auth.py",
+            "genai_bench/auth/openai/model_auth_adapter.py",
+            "genai_bench/auth/aws/bedrock_auth.py",
+            "genai_bench/auth/azure/openai_auth.py",
+            "genai_bench/auth/gcp/vertex_auth.py"
+          ],
+          "minimal_modules": [
+            "api_key 类认证",
+            "云厂商认证",
+            "适配器封装"
+          ],
+          "practice_task": "选择一个 provider（如 AzureOpenAIAuth），实现/补全一个返回 headers 的 mock，验证 get_config 输出符合预期。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "存储认证与多云存储",
+          "order": 3,
+          "filename": "u5-l3-storage-auth-and-providers.md",
+          "topic": "StorageFactory、BaseStorage 抽象与各云存储 provider 的上传/下载能力。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 BaseStorage 的统一接口（upload/download/list/delete）",
+            "掌握 StorageFactory 的 lazy import 与 provider-auth 校验",
+            "了解 upload_folder 在结果上传中的作用"
+          ],
+          "source_files": [
+            "genai_bench/storage/factory.py",
+            "genai_bench/storage/base.py",
+            "genai_bench/storage/oci_storage.py",
+            "docs/user-guide/multi-cloud-auth-storage.md"
+          ],
+          "minimal_modules": [
+            "BaseStorage 接口",
+            "存储工厂与校验",
+            "结果上传链路"
+          ],
+          "practice_task": "阅读 cli.py 末尾 upload 逻辑，说明 --storage-provider/--storage-bucket 如何驱动 StorageFactory 并上传实验文件夹。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "OCI 认证与对象存储深入",
+          "order": 4,
+          "filename": "u5-l4-oci-auth-and-object-storage.md",
+          "topic": "OCI 多种认证方式（user/instance principal、obo token）与对象存储 datastore 细节。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 OCI session 与多种 auth type",
+            "掌握 OCIStorageAuthAdapter / OCIModelAuthAdapter 的封装",
+            "了解 oci_object_storage 的 datastore 与 object_uri"
+          ],
+          "source_files": [
+            "genai_bench/auth/oci/session.py",
+            "genai_bench/auth/oci/user_principal.py",
+            "genai_bench/auth/oci/storage_auth_adapter.py",
+            "genai_bench/storage/oci_storage.py",
+            "genai_bench/storage/oci_object_storage/datastore.py"
+          ],
+          "minimal_modules": [
+            "OCI session 与认证类型",
+            "认证适配器",
+            "对象存储 datastore"
+          ],
+          "practice_task": "阅读 session.py，列出 OCI 支持的认证方式，并解释 instance principal 与 user principal 的适用场景。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "进阶：实验分析与报告",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "实验结果加载 experiment_loader",
+          "order": 1,
+          "filename": "u6-l1-experiment-loader.md",
+          "topic": "从实验目录读取 experiment_metadata.json 与各 run JSON，组织为 scenario×concurrency 结构。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 load_one_experiment/load_multiple_experiments 的输出结构",
+            "掌握 filter_criteria 过滤",
+            "了解缺失场景/并发级别的告警逻辑"
+          ],
+          "source_files": [
+            "genai_bench/analysis/experiment_loader.py",
+            "genai_bench/protocol.py"
+          ],
+          "minimal_modules": [
+            "元数据加载",
+            "run 数据加载与索引",
+            "过滤与一致性检查"
+          ],
+          "practice_task": "用 tests/analysis 下的 mock 数据或自有实验，调用 load_one_experiment 打印 run_data 的 scenario→concurrency 结构。",
+          "depends_on": [
+            "u4-l2",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Excel 报告生成",
+          "order": 2,
+          "filename": "u6-l2-excel-report.md",
+          "topic": "用 openpyxl 把聚合指标写成多 sheet 的 Excel 报告。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 create_workbook 的输入与 percentile 选择",
+            "了解 sheet 结构、空列折叠与表头重命名",
+            "知道 SCENARIO_MAP 与定价信息的作用"
+          ],
+          "source_files": [
+            "genai_bench/analysis/excel_report.py",
+            "genai_bench/cli/report.py",
+            "examples/experiment_excel.py"
+          ],
+          "minimal_modules": [
+            "workbook 构造",
+            "sheet 与列处理",
+            "excel 命令封装"
+          ],
+          "practice_task": "运行 examples/experiment_excel.py（或用 mock 数据）生成一个 Excel，打开并说明各 sheet 的含义。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "绘图配置系统 plot_config",
+          "order": 3,
+          "filename": "u6-l3-plot-config-system.md",
+          "topic": "PlotSpec/PlotConfig/PlotLayout 的声明式绘图配置、内置 preset 与字段路径解析。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 plot 配置模型与校验（单/多 y_field、position）",
+            "掌握 preset（2x4_default 等）的用法",
+            "了解 get_field_value 按 stats.ttft.mean 路径取值"
+          ],
+          "source_files": [
+            "genai_bench/analysis/plot_config.py",
+            "examples/plot_configs/custom_2x2.json"
+          ],
+          "minimal_modules": [
+            "配置模型与校验",
+            "preset 体系",
+            "字段路径解析"
+          ],
+          "practice_task": "编写一个自定义 2x2 plot 配置 JSON，用 PlotConfigManager.load_from_file 加载并打印每个 PlotSpec。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "灵活绘图与 plot 命令",
+          "order": 4,
+          "filename": "u6-l4-flexible-plot-and-plot-command.md",
+          "topic": "FlexiblePlotGenerator 按 group_key 生成图、plot_report 的单场景图与 plot 子命令串联。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 group_key（traffic_scenario/none/自定义）的分组绘图",
+            "掌握 plot_experiment_data_flexible 的调用",
+            "了解 plot 命令如何组合 config + loader"
+          ],
+          "source_files": [
+            "genai_bench/analysis/flexible_plot_report.py",
+            "genai_bench/analysis/plot_report.py",
+            "genai_bench/cli/report.py"
+          ],
+          "minimal_modules": [
+            "灵活绘图生成器",
+            "单场景绘图",
+            "plot 命令封装"
+          ],
+          "practice_task": "用 examples/plot_configs 中的配置，对一份实验数据运行 plot 命令（或脚本），生成 PNG 并对照 PlotSpec 解释每幅图。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：分布式运行、实时 UI 与日志",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "DistributedRunner 主从架构",
+          "order": 1,
+          "filename": "u7-l1-distributed-runner.md",
+          "topic": "基于 Locust master/worker 与 multiprocessing 的分布式压测架构、消息处理与清理。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 master/worker/local 三种模式与 setup 流程",
+            "掌握 update_scenario/request_metrics 等消息的收发",
+            "了解 CPU 亲和、worker 日志与资源清理"
+          ],
+          "source_files": [
+            "genai_bench/distributed/runner.py"
+          ],
+          "minimal_modules": [
+            "进程模型与 setup",
+            "消息注册与处理",
+            "指标聚合与清理"
+          ],
+          "practice_task": "阅读 _register_message_handlers，画出 master 与 worker 各自注册哪些 handler、互相发送哪些消息的流程图。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "实时仪表盘 Dashboard",
+          "order": 2,
+          "filename": "u7-l2-live-dashboard.md",
+          "topic": "基于 rich 的实时仪表盘，展示指标面板、直方图、散点图与进度条。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 RichLiveDashboard 与 MinimalDashboard 的切换（ENABLE_UI）",
+            "掌握 handle_single_request 的进度与面板更新",
+            "了解 layout/plots 子模块的组成"
+          ],
+          "source_files": [
+            "genai_bench/ui/dashboard.py",
+            "genai_bench/ui/layout.py",
+            "genai_bench/ui/plots.py"
+          ],
+          "minimal_modules": [
+            "Dashboard 工厂与模式切换",
+            "面板与绘图更新",
+            "进度计算"
+          ],
+          "practice_task": "设置 ENABLE_UI=false 运行一次基准，对比 MinimalDashboard 与 RichLiveDashboard 的行为差异，说明 no-op 设计的好处。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "日志系统",
+          "order": 3,
+          "filename": "u7-l3-logging-system.md",
+          "topic": "基于 rich 的日志 handler、缓冲 flush，以及 worker 日志跨进程传递。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 RollingRichPanelHandler / DelayedRichHandler 的作用",
+            "掌握 WorkerLoggingManager 把 worker 日志经队列回传 master",
+            "了解日志同时落终端与文件的机制"
+          ],
+          "source_files": [
+            "genai_bench/logging.py",
+            "genai_bench/distributed/runner.py"
+          ],
+          "minimal_modules": [
+            "rich 日志 handler",
+            "延迟 flush",
+            "worker 日志队列"
+          ],
+          "practice_task": "阅读 logging.py，解释为何在 Live 上下文中要延迟 flush 日志，并说明 worker 日志如何不污染各自终端。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "专家：主流程编排、扩展与工程实践",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "benchmark 主流程编排（capstone）",
+          "order": 1,
+          "filename": "u8-l1-benchmark-main-flow-capstone.md",
+          "topic": "cli.py benchmark 命令如何串联认证→采样→环境→分布式→双层循环→报告→上传的完整流程。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 benchmark 函数的整体阶段划分",
+            "掌握 scenario×iteration 双层循环与每次 run 的指标收集",
+            "看懂结尾自动生成 excel/plot 与可选上传"
+          ],
+          "source_files": [
+            "genai_bench/cli/cli.py",
+            "genai_bench/cli/utils.py"
+          ],
+          "minimal_modules": [
+            "阶段编排",
+            "双层运行循环",
+            "收尾报告与上传"
+          ],
+          "practice_task": "在 cli.py 中为 benchmark 的每个阶段加上注释标签（认证/数据/采样/运行/报告/上传），并用一张时序图描述一次完整实验的数据流。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l4",
+            "u3-l1",
+            "u4-l2",
+            "u5-l1",
+            "u6-l4",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "CLI 选项分组与校验机制",
+          "order": 2,
+          "filename": "u8-l2-option-groups-and-validation.md",
+          "topic": "option_groups 的选项分组、validation 中的回调式校验与跨参数约束。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 api_options/sampling_options 等分组如何组合到 benchmark",
+            "掌握 validate_tokenizer / validate_prefix_options 等校验",
+            "了解 iteration_type 与 task 的联动"
+          ],
+          "source_files": [
+            "genai_bench/cli/option_groups.py",
+            "genai_bench/cli/validation.py"
+          ],
+          "minimal_modules": [
+            "选项分组",
+            "回调式校验",
+            "跨参数约束"
+          ],
+          "practice_task": "阅读前缀校验逻辑，构造一组会触发 --prefix-len / --prefix-ratio 报错的参数组合，解释每条错误的触发条件。",
+          "depends_on": [
+            "u8-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "扩展指南：添加新后端 / 任务 / 场景",
+          "order": 3,
+          "filename": "u8-l3-extension-guide.md",
+          "topic": "如何在不破坏既有架构的前提下新增一个模型后端、任务或场景。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解新增 User 子类并注册到 API_BACKEND_USER_MAP 的步骤",
+            "掌握新增 Sampler / Scenario 通过注册表自动生效的机制",
+            "了解官方扩展文档的约定"
+          ],
+          "source_files": [
+            "docs/developer-guide/adding-new-features.md",
+            "genai_bench/user/base_user.py",
+            "genai_bench/sampling/base.py",
+            "genai_bench/scenarios/base.py"
+          ],
+          "minimal_modules": [
+            "新增后端 User",
+            "新增任务 / 采样器",
+            "新增场景"
+          ],
+          "practice_task": "仿照 OpenAIUser 实现一个极简的 CustomUser 子类（仅 text-to-text），并说明需要改哪些注册点才能让它被 --api-backend 选中。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "测试体系、CI 与发布",
+          "order": 4,
+          "filename": "u8-l4-testing-ci-and-release.md",
+          "topic": "pytest 测试组织、CI 流水线、代码风格（ruff/mypy/pre-commit）与 Docker / 发布流程。",
+          "level": "advanced",
+          "learning_goals": [
+            "了解 tests 目录与 conftest 的组织",
+            "理解 CI（ci.yml）与 release.yml 的流程",
+            "掌握 Docker 运行方式与版本管理"
+          ],
+          "source_files": [
+            "tests/conftest.py",
+            ".github/workflows/ci.yml",
+            ".github/workflows/release.yml",
+            "Makefile",
+            "Dockerfile",
+            "docs/user-guide/run-benchmark-using-docker.md",
+            "genai_bench/version.py"
+          ],
+          "minimal_modules": [
+            "测试组织",
+            "CI 与代码质量",
+            "Docker 与发布"
+          ],
+          "practice_task": "运行 make（或 pytest）执行测试套件，阅读 ci.yml 说明它跑了哪些检查，并尝试用 Dockerfile 构建镜像运行一次基准。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
