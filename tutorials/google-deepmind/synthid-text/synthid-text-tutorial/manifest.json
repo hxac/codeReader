@@ -1,0 +1,661 @@
+{
+  "project": "synthid-text",
+  "head": "addb4a158143c7c6851a1308f78b89fceed59683",
+  "rationale": "本项目是 DeepMind 发表于 Nature 的 SynthID Text 文本水印「参考实现」，体量中等但概念密度高。它由两个相对独立的技术栈构成：水印施加用 PyTorch + HuggingFace Transformers，水印检测用 JAX + Flax，二者共享的核心数据结构是「g 值」（由 ngram 上下文与水印密钥经哈希链得到的二进制位）。因此学习路线设计为：先让读者从零认识项目定位、运行方式与目录结构，建立端到端流程的直觉；再统一讲清楚「水印配置 + 哈希函数 + g 值」这一贯穿全项目的基础概念；随后分别深入「水印施加」（logits processor 主流程、得分更新、上下文去重）与「HuggingFace 集成」（mixin、重写采样循环、子类化 Gemma/GPT-2）；再进入检测侧，先讲训练无关的掩码与 Mean/Weighted Mean 打分；最后在专家层讲解贝叶斯检测器的原理、训练循环与端到端 API，并用理论期望值、测试套件、扩展点收尾。单元与讲义之间通过 depends_on 形成清晰依赖链，确保「概念→施加→集成→检测→训练→进阶」的递进顺序。所有 source_files 均为仓库中真实存在的文件；注意 README 中提到的 train_detector_bayesian.optimize_model 在当前代码中并不存在，实际训练入口为 detector_bayesian.py 中的 BayesianDetector.train_best_detector，大纲一律以真实源码为准。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 SynthID Text：从零开始",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位：SynthID Text 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 SynthID Text 的研究背景、它要解决的问题（识别 LLM 生成的文本），以及「水印施加」与「水印检测」两大能力在整个系统中的关系。",
+          "learning_goals": [
+            "理解文本水印化的目的与 SynthID Text 在学术/工程中的定位",
+            "区分水印施加（watermarking）与水印检测（detection）两个阶段",
+            "了解本仓库是参考实现而非生产实现"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "项目定位与论文背景",
+            "水印施加 vs 检测",
+            "参考实现的边界与免责声明"
+          ],
+          "practice_task": "阅读 README 并用自己的话写一段 100 字以内的说明，回答「这个仓库能做什么、不能做什么」，并列出它支持的两类模型。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "运行与环境：安装、Notebook 与测试",
+          "order": 2,
+          "filename": "u1-l2-setup-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何从源码安装、创建虚拟环境、运行 Colab/本地 Notebook 以及执行测试套件，并说明依赖与可选依赖分组。",
+          "learning_goals": [
+            "掌握 pip install 的多种可选依赖（notebook-local / test）",
+            "能够本地运行 Notebook 与 pytest 测试",
+            "理解依赖中 PyTorch 与 JAX/Flax 并存的原因"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            ".github/workflows/ci.yaml"
+          ],
+          "minimal_modules": [
+            "虚拟环境与安装命令",
+            "Notebook 运行流程",
+            "pytest 测试与 CI"
+          ],
+          "practice_task": "在新虚拟环境中按 README 安装 test 依赖并执行 `pytest -v`，记录测试用例数量与是否全部通过。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码地图",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构，标注每个源码文件的职责，并区分水印侧（PyTorch）与检测侧（JAX）的文件归属，帮助读者建立源码地图。",
+          "learning_goals": [
+            "记住 src/synthid_text 下各文件的职责",
+            "区分水印施加链路与检测链路对应的文件",
+            "定位测试文件、Notebook、数据文件"
+          ],
+          "source_files": [
+            "README.md",
+            "src/synthid_text/logits_processing.py",
+            "src/synthid_text/synthid_mixin.py",
+            "src/synthid_text/detector_bayesian.py",
+            "src/synthid_text/detector_mean.py"
+          ],
+          "minimal_modules": [
+            "src 包结构",
+            "PyTorch 文件 vs JAX 文件",
+            "测试与 Notebook 位置"
+          ],
+          "practice_task": "画一张源码地图，把 9 个源码文件按「水印施加 / 检测 / 公共工具 / 测试」分类，并标出每类用到的深度学习框架。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "端到端流程总览：施加→生成→检测",
+          "order": 4,
+          "filename": "u1-l4-end-to-end-pipeline.md",
+          "level": "beginner",
+          "topic": "用 Notebook 的实际代码走一遍端到端流程：加载 SynthID 模型→生成水印文本→重算 g 值与掩码→打分，让读者在深入源码前先有全局直觉。",
+          "learning_goals": [
+            "理解从输入到打分的完整数据流",
+            "识别流程中各关键 API（模型、logits processor、打分函数）",
+            "建立「先整体后细节」的学习预期"
+          ],
+          "source_files": [
+            "notebooks/synthid_text_huggingface_integration.ipynb",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "水印化生成",
+            "g 值与掩码重算",
+            "打分输出"
+          ],
+          "practice_task": "对照 Notebook 列出端到端流程的 5 个关键步骤，每步写出对应的函数或类名（无需运行）。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心概念：水印配置、哈希与 g 值",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "水印配置 WatermarkingConfig 与默认配置",
+          "order": 1,
+          "filename": "u2-l1-watermarking-config.md",
+          "level": "beginner",
+          "topic": "讲解 WatermarkingConfig 的字段含义（ngram_len、keys、context_history_size 等）以及仓库内置的静态 DEFAULT_WATERMARKING_CONFIG。",
+          "learning_goals": [
+            "理解每个配置字段的含义与作用",
+            "知道 len(keys) 决定水印层数（深度）",
+            "明白默认配置为何是静态、为何不适合生产"
+          ],
+          "source_files": [
+            "src/synthid_text/synthid_mixin.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "WatermarkingConfig 字段",
+            "DEFAULT_WATERMARKING_CONFIG",
+            "静态配置的局限"
+          ],
+          "practice_task": "解释 ngram_len=5 对应论文中 H=4 的上下文窗口，并说明把 keys 改成只有 3 个元素会对水印产生什么影响。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "哈希函数：线性同余 accumulate_hash",
+          "order": 2,
+          "filename": "u2-l2-hashing-function.md",
+          "level": "intermediate",
+          "topic": "逐行讲解 hashing_function.py 中的 accumulate_hash，说明它基于 LCG（newlib/musl 参数）的累加哈希特性及其可累积性质。",
+          "learning_goals": [
+            "理解 LCG 的乘子/增量参数",
+            "掌握 f(x, data[:T]) 可增量累积的性质",
+            "理解该函数非密码学安全的提醒"
+          ],
+          "source_files": [
+            "src/synthid_text/hashing_function.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "LCG 原理与参数",
+            "累积哈希性质",
+            "非密码学安全说明"
+          ],
+          "practice_task": "手算一个简单例子：给定 current_hash 与一段 data，模拟两步 accumulate_hash 的结果，验证其可累积性。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "g 值是什么：从 ngram 到二进制位",
+          "order": 3,
+          "filename": "u2-l3-g-values.md",
+          "level": "intermediate",
+          "topic": "讲解 compute_ngram_keys、_compute_keys、get_gvals、compute_g_values 如何把 ngram + 水印密钥转换为深度方向的二进制 g 值，这是贯穿全项目的核心数据。",
+          "learning_goals": [
+            "理解 ngram→hash→g 值的完整推导链",
+            "掌握 get_gvals 中多次哈希取低位的思想",
+            "知道 compute_g_values 输出形状与 ngram_len 的关系"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py",
+            "src/synthid_text/hashing_function.py"
+          ],
+          "minimal_modules": [
+            "compute_ngram_keys / _compute_keys",
+            "get_gvals 取位逻辑",
+            "compute_g_values 的输入输出形状"
+          ],
+          "practice_task": "构造一个很小的 vocab 与一段随机 token，调用 compute_g_values 打印其形状，并解释为何序列长度会减少 ngram_len-1。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "水印施加机制：LogitsProcessor 内核",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "处理器初始化、状态与哈希 IV",
+          "order": 1,
+          "filename": "u3-l1-processor-init-and-state.md",
+          "level": "intermediate",
+          "topic": "讲解 SynthIDLogitsProcessor 的构造逻辑、hash_iv 的生成与取模、SynthIDState 的 context/context_history/num_calls 字段，以及参数校验。",
+          "learning_goals": [
+            "理解 keys 如何被哈希成不可预测的 IV",
+            "掌握 SynthIDState 维护的滑动上下文",
+            "理解 temperature/top_k 的合法性校验"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py"
+          ],
+          "minimal_modules": [
+            "构造函数与 hash_iv",
+            "SynthIDState 结构",
+            "参数校验逻辑"
+          ],
+          "practice_task": "实例化一个 SynthIDLogitsProcessor，故意传入 temperature=0.0 和 top_k=1，观察抛出的异常信息，解释其设计意图。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "watermarked_call：水印施加主流程",
+          "order": 2,
+          "filename": "u3-l2-watermarked-call.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 watermarked_call 的 5 步流程：温度/top_k 处理→滑动上下文→计算 ngram keys→采样 g 值→更新得分，并说明返回的三元组含义。",
+          "learning_goals": [
+            "理清水印施加的完整步骤顺序",
+            "理解稀疏 top_k 与 indices mapping 的设计",
+            "掌握返回值（updated scores, indices, 原始 scores）的用途"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py"
+          ],
+          "minimal_modules": [
+            "温度与 top_k 处理",
+            "上下文滑动与 key 计算",
+            "g 值采样与得分更新返回"
+          ],
+          "practice_task": "用一张流程图把 watermarked_call 的 5 个步骤串起来，并标注每一步的输入输出张量形状。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "得分更新：锦标赛与 distortionary 变体",
+          "order": 3,
+          "filename": "u3-l3-update-scores.md",
+          "level": "intermediate",
+          "topic": "对比 update_scores 与 update_scores_distortionary 两个函数，理解它们如何用 g 值在 softmax 概率上施加偏置，以及 num_leaves（锦标赛叶子数）的作用。",
+          "learning_goals": [
+            "理解 update_scores 的逐层概率修正公式",
+            "区分标准锦标赛（num_leaves=2）与 distortionary 变体",
+            "知道 num_leaves 如何影响水印强度与失真"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py"
+          ],
+          "minimal_modules": [
+            "update_scores 概率修正",
+            "update_scores_distortionary",
+            "num_leaves 选择"
+          ],
+          "practice_task": "取一段固定 scores，分别用 num_leaves=2 与 3 调用处理器，对比输出的 updated_scores，描述二者的差异。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "上下文去重：context_history 与重复跳过",
+          "order": 4,
+          "filename": "u3-l4-context-repetition.md",
+          "level": "intermediate",
+          "topic": "讲解 watermarked_call 中如何用 context_history 记录已见上下文并在重复时跳过水印，以及 compute_context_repetition_mask 的检测侧对应实现。",
+          "learning_goals": [
+            "理解为何重复上下文不应重复水印",
+            "掌握 context_history 的滑动窗口维护",
+            "理解 compute_context_repetition_mask 的输出语义"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py"
+          ],
+          "minimal_modules": [
+            "is_repeated_context 判定",
+            "context_history 维护",
+            "compute_context_repetition_mask"
+          ],
+          "practice_task": "构造一个包含重复 n-1 gram 的序列，运行 compute_context_repetition_mask，指出哪些位置被标记为重复（值为 0）。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "HuggingFace 集成：Mixin 与采样循环",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "SynthIDSparseTopKMixin 与 logits warper",
+          "order": 1,
+          "filename": "u4-l1-mixin-and-warper.md",
+          "level": "intermediate",
+          "topic": "讲解 SynthIDSparseTopKMixin 如何通过 _get_logits_warper 与 _construct_warper_list 注入 SynthIDLogitsProcessor，并控制 top_k/temperature 的应用方式。",
+          "learning_goals": [
+            "理解 Mixin 如何覆盖 transformers 的 logits warper 构造",
+            "掌握为何只构造 SynthID 单一 warper",
+            "理解 temperature/top_k 的额外校验"
+          ],
+          "source_files": [
+            "src/synthid_text/synthid_mixin.py"
+          ],
+          "minimal_modules": [
+            "_get_logits_warper 覆盖",
+            "_construct_warper_list",
+            "参数校验"
+          ],
+          "practice_task": "阅读 _get_logits_warper，解释如果传入 top_k<1 会发生什么，以及这种设计如何保护水印正确性。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "重写 _sample 采样循环",
+          "order": 2,
+          "filename": "u4-l2-sample-loop.md",
+          "level": "intermediate",
+          "topic": "逐段讲解 Mixin 中被复制改写的 _sample 采样循环，重点理解稀疏 top_k、watermarked_call 调用、indices_mapping 回映到稠密 token 的全过程。",
+          "learning_goals": [
+            "理解为何要复制并改写 HF 的 _sample",
+            "掌握 next_token_scores 与 indices_mapping 的协同",
+            "理解 scores/输出在 return_dict_in_generate 下的记录方式"
+          ],
+          "source_files": [
+            "src/synthid_text/synthid_mixin.py"
+          ],
+          "minimal_modules": [
+            "采样主循环结构",
+            "稀疏 watermarking 调用",
+            "indices_mapping 回映"
+          ],
+          "practice_task": "在 _sample 中找到调用 watermarked_call 与执行 torch.vmap(torch.take) 回映 token 的两处代码，解释它们为何必须成对出现。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "子类化 Gemma 与 GPT-2",
+          "order": 3,
+          "filename": "u4-l3-model-subclasses.md",
+          "level": "intermediate",
+          "topic": "讲解 SynthIDGPT2LMHeadModel 与 SynthIDGemmaForCausalLM 如何通过多重继承把 Mixin 挂到 transformers 模型上，从而获得「与原模型 API 一致但带水印」的生成能力。",
+          "learning_goals": [
+            "理解多重继承 Mixin + transformers 模型的组合方式",
+            "掌握 from_pretrained 后即可 generate 的用法",
+            "了解为何两种模型共享同一套水印 API"
+          ],
+          "source_files": [
+            "src/synthid_text/synthid_mixin.py",
+            "notebooks/synthid_text_huggingface_integration.ipynb"
+          ],
+          "minimal_modules": [
+            "SynthIDGPT2LMHeadModel",
+            "SynthIDGemmaForCausalLM",
+            "from_pretrained + generate 用法"
+          ],
+          "practice_task": "参考 Notebook 写出用 SynthIDGPT2LMHeadModel 生成水印文本的最小代码片段（可不实际运行），说明它与普通 GPT2LMHeadModel 在 API 上的差异。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "检测基础：掩码与无需训练的打分",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "检测所需的掩码体系",
+          "order": 1,
+          "filename": "u5-l1-detection-masks.md",
+          "level": "intermediate",
+          "topic": "讲解检测侧如何构造 eos_token_mask、context_repetition_mask 并相乘得到 combined_mask，理解掩码为何决定哪些 g 值参与打分。",
+          "learning_goals": [
+            "理解 compute_eos_token_mask 的截断语义",
+            "理解 context_repetition_mask 在检测侧的作用",
+            "掌握 combined_mask 的构造与对齐"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "compute_eos_token_mask",
+            "compute_context_repetition_mask",
+            "combined_mask 构造"
+          ],
+          "practice_task": "对一段含 eos token 的输出序列，分别画出 eos_token_mask 与 context_repetition_mask，再写出 combined_mask，解释每一段为什么是 0 或 1。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Mean 与 Weighted Mean 打分",
+          "order": 2,
+          "filename": "u5-l2-mean-scoring.md",
+          "level": "intermediate",
+          "topic": "讲解 detector_mean.py 中 mean_score 与 weighted_mean_score 的公式，理解默认权重为何从 10 线性递减到 1，以及归一化方式。",
+          "learning_goals": [
+            "掌握 mean_score 的计算公式",
+            "理解 weighted_mean_score 的深度方向加权",
+            "知道阈值需根据 token 长度/假阳率确定"
+          ],
+          "source_files": [
+            "src/synthid_text/detector_mean.py",
+            "notebooks/synthid_text_huggingface_integration.ipynb"
+          ],
+          "minimal_modules": [
+            "mean_score 公式",
+            "weighted_mean_score 权重",
+            "阈值与假阳率"
+          ],
+          "practice_task": "用 mean_score 和 weighted_mean_score 分别对同一批 g 值打分，比较两类分数在水印/非水印样本上的分布差异（可用随机数据模拟）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "贝叶斯检测器：原理、训练与端到端",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "贝叶斯检测原理：似然模型与后验",
+          "order": 1,
+          "filename": "u6-l1-bayesian-principle.md",
+          "level": "advanced",
+          "topic": "讲解 LikelihoodModelWatermarked/Unwatermarked、_compute_latents（logistic 回归潜变量）与 _compute_posterior，理解 P(watermarked|g) 的贝叶斯推导。",
+          "learning_goals": [
+            "理解水印/非水印两个似然模型的差异",
+            "掌握潜变量 psi 的 logistic 回归参数化",
+            "理解后验 P(w|g) 由相对惊奇度求和再 sigmoid 得到"
+          ],
+          "source_files": [
+            "src/synthid_text/detector_bayesian.py"
+          ],
+          "minimal_modules": [
+            "似然模型 beta/delta 参数",
+            "_compute_latents 潜变量",
+            "_compute_posterior 后验"
+          ],
+          "practice_task": "解释为何 LikelihoodModelUnwatermarked 对所有 g 值返回 0.5，以及这一假设在贝叶斯后验计算中起到的作用。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "训练循环：损失、优化与 TPR@FPR 验证",
+          "order": 2,
+          "filename": "u6-l2-bayesian-training-loop.md",
+          "level": "advanced",
+          "topic": "讲解 xentropy_loss/loss_fn、train 训练循环（minibatch、optax.adam、jit）、l2 正则，以及 TPR@FPR 与 cross_entropy 两种验证指标。",
+          "learning_goals": [
+            "理解交叉熵 + L2 的复合损失",
+            "掌握 jit 化的 minibatch 更新流程",
+            "理解为何用 TPR@FPR 作为验证指标并选最优 epoch"
+          ],
+          "source_files": [
+            "src/synthid_text/detector_bayesian.py"
+          ],
+          "minimal_modules": [
+            "损失函数与 L2",
+            "train 训练循环",
+            "TPR@FPR 验证与最优 epoch 选择"
+          ],
+          "practice_task": "阅读 train 函数，说明 best_val_epoch 是如何根据 val_loss 选出的，以及为何最终把 history[best_val_epoch] 的参数写回 detector_module。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "数据处理与端到端检测 API",
+          "order": 3,
+          "filename": "u6-l3-bayesian-data-and-api.md",
+          "level": "advanced",
+          "topic": "讲解 process_outputs_for_training/process_raw_model_outputs 的填充与截断、train_best_detector_given_g_values/train_best_detector 的超参搜索，以及 BayesianDetector.score 的端到端用法。",
+          "learning_goals": [
+            "掌握正负样本的截断/填充与 mask 对齐",
+            "理解 l2_weights 网格搜索选最优检测器",
+            "掌握 train_best_detector → score 的完整使用链路"
+          ],
+          "source_files": [
+            "src/synthid_text/detector_bayesian.py",
+            "notebooks/synthid_text_huggingface_integration.ipynb"
+          ],
+          "minimal_modules": [
+            "process_raw_model_outputs 数据处理",
+            "train_best_detector 超参搜索",
+            "BayesianDetector.score 端到端打分"
+          ],
+          "practice_task": "对照 Notebook 说明：为何 README 里 train_detector_bayesian.optimize_model 在当前代码中并不存在，正确的训练入口应该是哪个类方法，并写出它的调用签名。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "理论、测试与扩展实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "理论期望值：expected_mean_g_value",
+          "order": 1,
+          "filename": "u7-l1-theoretical-expectations.md",
+          "level": "advanced",
+          "topic": "讲解 g_value_expectations.py 中基于均匀 LM 分布的单层锦标赛理论期望公式（num_leaves=2 与 3 两种），及其与论文补充材料的对应。",
+          "learning_goals": [
+            "理解均匀分布下 num_leaves=2 的期望公式",
+            "理解 num_leaves=3 的期望推导来源",
+            "知道理论值如何用于校验实现正确性"
+          ],
+          "source_files": [
+            "src/synthid_text/g_value_expectations.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "num_leaves=2 期望公式",
+            "num_leaves=3 期望公式",
+            "与论文补充材料对应"
+          ],
+          "practice_task": "用 expected_mean_g_value 分别计算 vocab_size=1000、num_leaves=2 和 3 的理论期望，并解释为何 num_leaves 增大会提高期望 g 值。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "测试套件如何验证水印正确性",
+          "order": 2,
+          "filename": "u7-l2-test-suite.md",
+          "level": "advanced",
+          "topic": "讲解 logits_processing_test.py 与 synthid_mixin_test.py 如何验证 g 值均匀性、分布收敛性、掩码形状，以及用 mock 验证 _sample 确实调用了 watermarked_call。",
+          "learning_goals": [
+            "理解 g 值均匀性的统计测试方法",
+            "掌握分布收敛性（distributional convergence）测试",
+            "理解用 mock 验证采样循环集成了水印"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing_test.py",
+            "src/synthid_text/synthid_mixin_test.py",
+            "src/synthid_text/torch_testing.py"
+          ],
+          "minimal_modules": [
+            "g 值均匀性/形状测试",
+            "分布收敛与理论期望测试",
+            "mixin mock 测试"
+          ],
+          "practice_task": "挑选 test_g_value_uniformity_for_random_ngrams，解释它如何用 assertAlmostEqual(..., 0.5, delta=0.01) 来验证 g 值的无偏性，并思考 batch_size 为何要取得很大。",
+          "depends_on": [
+            "u3-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "性能、扩展点与二次开发",
+          "order": 3,
+          "filename": "u7-l3-extensions.md",
+          "level": "advanced",
+          "topic": "总结项目的扩展点（自定义 keys、num_leaves、distortionary 变体、自定义打分函数）、性能取舍（稀疏 top_k 降低延迟）、以及生产化注意事项与官方 Transformers 实现的关系。",
+          "learning_goals": [
+            "掌握如何自定义水印配置与打分策略",
+            "理解稀疏 top_k 对延迟/显存的优化",
+            "了解参考实现的局限与生产化路径"
+          ],
+          "source_files": [
+            "src/synthid_text/logits_processing.py",
+            "src/synthid_text/synthid_mixin.py",
+            "src/synthid_text/detector_bayesian.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "配置与打分扩展点",
+            "稀疏 top_k 性能取舍",
+            "生产化与官方实现"
+          ],
+          "practice_task": "设计一个二次开发方案：在不改主流程的前提下，把 Mean 打分替换成自定义加权打分，并说明需要改动/新增哪些函数（仅设计，不实现）。",
+          "depends_on": [
+            "u3-l3",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
