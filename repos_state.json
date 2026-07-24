@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-24T11:01:55Z"
+      "last_run_at": "2026-07-24T13:04:55Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -24208,7 +24208,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"553e661a-ff9b-42d8-942b-dab87ef2b1f3\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1c997a70-6a44-4338-9a1b-cad3b960fdaf\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u8-l2": {
           "status": "pending",
@@ -24257,7 +24257,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/slaclab/surf/surf-tutorial",
       "last_head": "0ca723d282315cceb93f374ab69284db3d3d9d83",
-      "last_run_at": "2026-07-24T11:01:55Z",
+      "last_run_at": "2026-07-24T13:04:55Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "google-deepmind/synthid-text": {
@@ -24464,7 +24464,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7ce145a4-5e5f-4593-ba3c-5267baa19514\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6b3b1ae7-5d56-4c46-a472-fce886baf6f2\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u2-l1": {
           "status": "pending",
@@ -24558,7 +24558,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/abdelazeem201/Systolic-array-implementation-in-RTL-for-TPU/Systolic-array-implementation-in-RTL-for-TPU-tutorial",
       "last_head": "6a93418faefac866eeab6349c8adfc91576099fb",
-      "last_run_at": "2026-07-24T11:01:55Z",
+      "last_run_at": "2026-07-24T13:04:55Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "tensorflow/tensorflow": {},
@@ -25272,7 +25272,7 @@
     "sgl-project/sglang-omni": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-24T11:01:55Z",
+      "last_run_at": "2026-07-24T13:04:55Z",
       "lectures": {
         "u1-l1": {
           "status": "done",
@@ -25447,7 +25447,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1aa273a8-c7d9-4260-b475-7f63975f5f42\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4fcfa729-2caa-4f03-86d3-05dbc8c43af4\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u6-l4": {
           "status": "pending",
