@@ -1,0 +1,1214 @@
+{
+  "project": "surf",
+  "head": "0ca723d282315cceb93f374ab69284db3d3d9d83",
+  "rationale": "SURF 是一个非常庞大的共享 VHDL/IP/ruckus/cocotb/PyRogue 基础设施库，而非单板项目，因此学习路线按“自底向上的依赖层次”编排：先用单元一让读者建立全局认知（项目定位、构建/仿真工具链 ruckus+Makefile+GHDL、目录约定、StdRtlPkg 与双进程 RTL 风格），因为后续所有内容都依赖这两件事。单元二覆盖 base 层（CDC/FIFO/RAM/CRC/通用原语），这是全仓库复用的最底层积木。单元三、四进入 AXI-Lite 寄存器层与 AXI-Stream 数据平面——这是 SURF 几乎所有模块的通用总线抽象。单元五把 AXI-Stream 扩展为 SSI 流式协议并串联 SRP、packetizer/batcher、line-code/ECC。单元六讲以太网协议栈（MAC→IPv4→UDP→RawEth→速率核与 PHY 拆分）。单元七集中在高速链路协议（PGP/RSSI/JESD204B/CoaXPress），属进阶。单元八讲 AXI4、DMA、桥接与 simlink 协同仿真。单元九回归工程实践：cocotb 回归测试方法论与 PyRogue 软件镜像，并以 devices/transceivers/xilinx 家族封装与贡献流程收尾。每个单元内部按“先看包/记录类型→再看核心模块→再看扩展/测试”的顺序，保证 depends_on 形成清晰的有向依赖，初学者可从单元一逐层推进，有经验者也可按子系统跳读。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目认知与 RTL 基石",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "SURF 项目总览：它是什么、为什么这样组织",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 SURF（SLAC Ultimate RTL Framework）的定位、它解决的共享 RTL/IP/PyRogue 基础设施问题，以及顶层目录地图。",
+          "learning_goals": [
+            "理解 SURF 是一个跨板卡复用的 VHDL 协议/IP 库而非单个工程",
+            "记住 axi/base/devices/dsp/ethernet/protocols/xilinx/python/tests 八大顶层子树的职责",
+            "知道 README.md 与 AGENTS.md 在仓库中的导航作用"
+          ],
+          "source_files": [
+            "README.md",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "仓库地图",
+            "README 导航",
+            "AGENTS 贡献者指南"
+          ],
+          "practice_task": "浏览 README.md 的 Repository Map，画一张顶层子树职责表，并为每个子树写一句话说明它提供什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建与仿真工具链：ruckus、Makefile、GHDL 与 CI",
+          "order": 2,
+          "filename": "u1-l2-build-sim-toolchain.md",
+          "level": "beginner",
+          "topic": "讲解 ruckus.tcl 如何作为 HDL 构建清单、Makefile/GHDL 如何做语法分析、以及 surf_ci.yml 串起 lint/test/docs 的完整流程。",
+          "learning_goals": [
+            "理解 ruckus.tcl 的 loadRuckusTcl/loadSource 机制与 getFpgaArch 家族选择",
+            "看懂 Makefile 中 GHDL_BASE_FLAGS(--std=08 --ieee=synopsys) 与 system_ghdl.mk 的关系",
+            "理解 GitHub Actions 中 lint/test/docs 三条流水线的职责"
+          ],
+          "source_files": [
+            "ruckus.tcl",
+            "Makefile",
+            ".github/workflows/surf_ci.yml",
+            "pip_requirements.txt"
+          ],
+          "minimal_modules": [
+            "ruckus 清单",
+            "Makefile/GHDL",
+            "CI 流水线"
+          ],
+          "practice_task": "运行 make MODULES=$PWD analysis 对全仓库做一次 VHDL 语法分析，记录任何报错涉及的文件与 ruckus 路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与文件分类约定",
+          "order": 3,
+          "filename": "u1-l3-directory-layout.md",
+          "level": "beginner",
+          "topic": "讲解 rtl/sim/tb/wrappers/ip_integrator 与家族子目录（7Series、UltraScale、gth7 等）的文件分类约定，以及 core/ 与家族 PHY 拆分模式。",
+          "learning_goals": [
+            "区分 rtl(可综合)/sim(仿真模型)/tb(测试台)/wrappers(薄封装)的用途",
+            "理解 core/ 通用 RTL 与家族 PHY 目录（gtx7/gth7/gthUs+/gtyUs+）的拆分与 getFpgaArch 守卫",
+            "知道 cocotb 测试为何放在 tests/<subsystem> 而非散落根目录"
+          ],
+          "source_files": [
+            "AGENTS.md",
+            "base/README.md",
+            "axi/README.md",
+            "protocols/README.md",
+            "ethernet/README.md"
+          ],
+          "minimal_modules": [
+            "rtl/sim/tb/wrappers 分类",
+            "core 与家族 PHY 拆分",
+            "tests 子系统组织"
+          ],
+          "practice_task": "在 ethernet/GigEthCore 下找到 core/ 与某一家族 PHY 目录，说明 ruckus.tcl 如何用 getFpgaArch 在二者之间选择源文件。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "VHDL 约定与 StdRtlPkg 基础类型",
+          "order": 4,
+          "filename": "u1-l4-stdrtlpkg-conventions.md",
+          "level": "beginner",
+          "topic": "讲解 StdRtlPkg.vhd 提供的 sl/slv 别名、_G/_C/Type/Array/_INIT_C 命名、TPD_G/RST_POLARITY_G/RST_ASYNC_G 复位泛型等全仓库通用约定。",
+          "learning_goals": [
+            "掌握 sl/slv、log2、ite 等基础别名与函数的用法",
+            "理解泛型后缀 _G、常量后缀 _C、记录 Type/Array、初值 _INIT_C 的命名规则",
+            "理解 TPD_G、RST_POLARITY_G、RST_ASYNC_G 三个复位/时序泛型的语义"
+          ],
+          "source_files": [
+            "base/general/rtl/StdRtlPkg.vhd",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "StdRtlPkg 别名",
+            "命名后缀约定",
+            "复位/时序泛型"
+          ],
+          "practice_task": "在 StdRtlPkg.vhd 中找出 sl、slv 的定义与 RST_POLARITY_G 的默认极性，并写一个小实体声明复用这些泛型。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "双进程 RTL 风格：RegType / comb / seq",
+          "order": 5,
+          "filename": "u1-l5-two-process-style.md",
+          "level": "beginner",
+          "topic": "讲解 SURF 通用的 Gaisler 双进程风格：RegType 记录 + REG_INIT_C 初值 + r/rin 信号 + comb 组合进程 + seq 时序进程。",
+          "learning_goals": [
+            "理解 comb 进程用 variable v := r 更新次态、rin <= v 的写法",
+            "理解 seq 进程在上升沿 r <= rin after TPD_G、以及异步复位在 seq 中处理",
+            "能看懂一个完整的状态机/计数器/握手是如何在 comb/seq 中组织的"
+          ],
+          "source_files": [
+            "base/general/rtl/Arbiter.vhd",
+            "base/general/rtl/Debouncer.vhd",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "RegType/REG_INIT_C",
+            "comb 次态逻辑",
+            "seq 寄存与时序"
+          ],
+          "practice_task": "以 Arbiter.vhd 为模板，仿写一个简单的“单比特脉冲到电平”双进程模块，保留 TPD_G 与 RST_ASYNC_G 行为。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基础库：CDC、FIFO、RAM、CRC 与通用原语",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "时钟域跨越与同步器（base/sync）",
+          "order": 1,
+          "filename": "u2-l1-cdc-synchronizers.md",
+          "level": "intermediate",
+          "topic": "讲解 base/sync 提供的同步器族：多级触发器同步、边沿/单脉冲跨域、复位同步、状态向量与频率/速率测量。",
+          "learning_goals": [
+            "掌握 Synchronizer 多级同步与 ASYNC_REG 的用途",
+            "理解 SynchronizerOneShot 如何把跨域脉冲压成单周期",
+            "理解 RstSync 的复位安全撤销与 SyncStatusVector 的事件计数"
+          ],
+          "source_files": [
+            "base/sync/rtl/Synchronizer.vhd",
+            "base/sync/rtl/SynchronizerOneShot.vhd",
+            "base/sync/rtl/RstSync.vhd",
+            "base/sync/rtl/SyncStatusVector.vhd"
+          ],
+          "minimal_modules": [
+            "多级同步器",
+            "脉冲/边沿跨域",
+            "复位同步与状态同步"
+          ],
+          "practice_task": "用 SynchronizerOneShot 把一个慢时钟域的脉冲送到快时钟域，并写一段注释说明为何不能直接用普通信号传递。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "FIFO 构建块（base/fifo）",
+          "order": 2,
+          "filename": "u2-l2-fifo-blocks.md",
+          "level": "intermediate",
+          "topic": "讲解同步/异步 FIFO、Gray 指针跨域、FWFT、级联与输出流水，以及统一封装 Fifo 如何切换 inferred/xilinx/altera 后端。",
+          "learning_goals": [
+            "理解 FifoAsync 用 Gray 指针安全跨时钟域的原理",
+            "掌握 FWFT 与普通读模式的区别及 FifoOutputPipeline 的作用",
+            "理解统一封装 Fifo 如何按 GEN_TYPE 选择 inferred/xpm/altera_mf 后端"
+          ],
+          "source_files": [
+            "base/fifo/rtl/Fifo.vhd",
+            "base/fifo/rtl/inferred/FifoSync.vhd",
+            "base/fifo/rtl/inferred/FifoAsync.vhd",
+            "base/fifo/rtl/FifoOutputPipeline.vhd"
+          ],
+          "minimal_modules": [
+            "同步FIFO",
+            "异步FIFO与Gray指针",
+            "统一封装与后端选择"
+          ],
+          "practice_task": "实例化一个 FifoAsync，给出读/写两套时钟，并说明它的 almostFull/empty 判定依据。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "RAM 构建块（base/ram）",
+          "order": 3,
+          "filename": "u2-l3-ram-blocks.md",
+          "level": "intermediate",
+          "topic": "讲解 inferred RAM（SimpleDualPortRam、DualPortRam、TrueDualPortRam、LutRam）与 Xilinx XPM/原语封装的用法与选择。",
+          "learning_goals": [
+            "掌握 SimpleDualPortRam 与 TrueDualPortRam 的端口与字节写使能",
+            "理解 inferred RAM 如何推断块 RAM/分布式 RAM",
+            "理解何时改用 xilinx/ 下的 XPM 或原语封装"
+          ],
+          "source_files": [
+            "base/ram/inferred/SimpleDualPortRam.vhd",
+            "base/ram/inferred/DualPortRam.vhd",
+            "base/ram/inferred/TrueDualPortRam.vhd",
+            "base/ram/inferred/LutRam.vhd"
+          ],
+          "minimal_modules": [
+            "简单双口RAM",
+            "真双口RAM与字节写",
+            "推断与XPM封装选择"
+          ],
+          "practice_task": "用 SimpleDualPortRam 实现一个可字节写的浅 FIFO 存储体，注释说明它会被推断成 block RAM 还是 distributed RAM。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "CRC 包与并行实现（base/crc）",
+          "order": 4,
+          "filename": "u2-l4-crc-package.md",
+          "level": "intermediate",
+          "topic": "讲解 CrcPkg 提供的并行 CRC 函数与 Crc32Parallel 模块，以及如何在协议核中复用而非重复实现 CRC。",
+          "learning_goals": [
+            "理解 CrcPkg 中 1-8 字节并行 CRC32 函数的接口",
+            "掌握 Crc32Parallel 模块的串入/结果时序与多项式",
+            "知道为什么要在包里集中维护 CRC 而非在叶子模块重写"
+          ],
+          "source_files": [
+            "base/crc/rtl/CrcPkg.vhd",
+            "base/crc/rtl/Crc32Parallel.vhd"
+          ],
+          "minimal_modules": [
+            "CrcPkg并行函数",
+            "Crc32Parallel模块",
+            "CRC复用约定"
+          ],
+          "practice_task": "用 CrcPkg 的函数对一段固定字节流计算 CRC32，并与 Crc32Parallel 模块逐拍输出的结果做对照。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "通用原语：仲裁器、复用器、防抖、Gearbox、PRBS",
+          "order": 5,
+          "filename": "u2-l5-general-primitives.md",
+          "level": "intermediate",
+          "topic": "讲解 base/general 中的高频复用原语：Arbiter/Mux/Debouncer/WatchDogRst/PwrUpRst/Gearbox 与 PrbsPkg 伪随机函数。",
+          "learning_goals": [
+            "掌握 Arbiter 的轮询仲裁与 ArbiterPkg 函数",
+            "理解 Gearbox/AsyncGearbox 做位宽转换的思路",
+            "会用 PrbsPkg 生成测试用伪随机数据"
+          ],
+          "source_files": [
+            "base/general/rtl/Arbiter.vhd",
+            "base/general/rtl/ArbiterPkg.vhd",
+            "base/general/rtl/Debouncer.vhd",
+            "base/general/rtl/WatchDogRst.vhd",
+            "base/general/rtl/Gearbox.vhd",
+            "base/general/rtl/PrbsPkg.vhd"
+          ],
+          "minimal_modules": [
+            "仲裁器",
+            "防抖与看门狗复位",
+            "Gearbox与PRBS"
+          ],
+          "practice_task": "用 Arbiter 实现一个 4 路请求的轮询仲裁，并用 PrbsPkg 产生请求激励观察授予顺序。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "AXI-Lite 寄存器层",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "AXI-Lite 记录类型与包（AxiLitePkg）",
+          "order": 1,
+          "filename": "u3-l1-axilite-records.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiLitePkg 定义的读写 Master/Slave 记录、_INIT_C 初值与 AXI 响应码，以及为何 SURF 用记录而非扁平端口。",
+          "learning_goals": [
+            "掌握 AxiLiteReadMasterType 等四个记录及其 INIT_C 常量",
+            "理解 AXI_RESP_OKAY/SLVERR/DECERR 响应码的用法",
+            "理解记录+扁平器（IP integrator）相对扁平端口的优势"
+          ],
+          "source_files": [
+            "axi/axi-lite/rtl/AxiLitePkg.vhd"
+          ],
+          "minimal_modules": [
+            "AXI-Lite记录",
+            "INIT_C初值",
+            "响应码"
+          ],
+          "practice_task": "在 AxiLitePkg.vhd 中找出四个 INIT_C 常量，并写出一个最小从机的接口信号声明。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "AXI-Lite 寄存器端点模式（helper 过程）",
+          "order": 2,
+          "filename": "u3-l2-axilite-register-endpoint.md",
+          "level": "intermediate",
+          "topic": "讲解用 axiSlaveWaitTxn/axiSlaveRegister/axiSlaveRegisterR/axiSlaveDefault 在双进程寄存器块里实现内存映射寄存器的标准模式。",
+          "learning_goals": [
+            "掌握 axiSlaveWaitTxn 解码事务、axiSlaveRegister 读写、axiSlaveDefault 处理未映射地址的标准流程",
+            "理解只读状态寄存器用 axiSlaveRegisterR、写副作用在 comb 中显式表达",
+            "理解为何跨域状态必须先同步再暴露到 AXI-Lite"
+          ],
+          "source_files": [
+            "axi/axi-lite/rtl/AxiLitePkg.vhd",
+            "axi/axi-lite/rtl/AxiVersion.vhd",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "WaitTxn解码",
+            "Register/RegisterR映射",
+            "Default未映射响应"
+          ],
+          "practice_task": "用四个 helper 过程实现一个含 1 个读写寄存器和 1 个只读计数器的最小 AXI-Lite 从机，未映射地址返回 DECERR。",
+          "depends_on": [
+            "u1-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "AXI-Lite 交叉开关、主机与异步跨域",
+          "order": 3,
+          "filename": "u3-l3-axilite-crossbar-master.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiLiteCrossbar 的地址解码与多主多从路由、AxiLiteMaster 的事务状态机、以及 AxiLiteAsync 的时钟域跨越桥。",
+          "learning_goals": [
+            "掌握 AxiLiteCrossbarMasterConfigArray 如何描述地址窗口与从机",
+            "理解 AxiLiteMaster 一次读/写事务的状态流转",
+            "理解 AxiLiteAsync 用异步 FIFO 安全跨时钟域的原理"
+          ],
+          "source_files": [
+            "axi/axi-lite/rtl/AxiLiteCrossbar.vhd",
+            "axi/axi-lite/rtl/AxiLiteMaster.vhd",
+            "axi/axi-lite/rtl/AxiLiteAsync.vhd"
+          ],
+          "minimal_modules": [
+            "交叉开关地址解码",
+            "主机事务状态机",
+            "异步桥跨域"
+          ],
+          "practice_task": "配置一个 1 主 3 从的 AxiLiteCrossbar，写出三段地址窗口配置，并说明每个从机的基地址与大小。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "AxiVersion 与内存映射辅助块",
+          "order": 4,
+          "filename": "u3-l4-axiversion-helpers.md",
+          "level": "intermediate",
+          "topic": "以 AxiVersion（固件版本、git hash、构建时间）为范例讲解标准状态/版本寄存器块，并介绍 AxiLiteRam/AxiDualPortRam 等内存映射辅助。",
+          "learning_goals": [
+            "理解 AxiVersion 暴露的版本/时间戳/用户常量寄存器布局",
+            "掌握 AxiDualPortRam 把双口 RAM 挂到 AXI-Lite 的模式",
+            "知道这类块如何与 PyRogue 镜像对齐"
+          ],
+          "source_files": [
+            "axi/axi-lite/rtl/AxiVersion.vhd",
+            "axi/axi-lite/rtl/AxiDualPortRam.vhd",
+            "axi/axi-lite/rtl/AxiLiteRegs.vhd"
+          ],
+          "minimal_modules": [
+            "AxiVersion版本寄存器",
+            "AxiDualPortRam",
+            "寄存器文件封装"
+          ],
+          "practice_task": "阅读 AxiVersion 的寄存器偏移表，列出至少 5 个寄存器及其地址与含义，准备给 PyRogue 篇对照。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "AXI-Stream 数据平面",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "AXI-Stream 记录与配置（AxiStreamPkg）",
+          "order": 1,
+          "filename": "u4-l1-axistream-records.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiStreamMasterType/SlaveType 记录、AxiStreamConfigType（TDATA/TSTRB/TKEEP/TLAST/TDEST/TID/TUSER 宽度）及 tValid/tReady 握手。",
+          "learning_goals": [
+            "掌握 AxiStreamConfigType 如何描述一条流的各侧带宽度",
+            "理解 tValid/tReady 采样握手与 AXI_STREAM_MASTER_INIT_C 初值",
+            "会用 axiStreamSetUserField/Bit 等包函数操作 TUSER"
+          ],
+          "source_files": [
+            "axi/axi-stream/rtl/AxiStreamPkg.vhd"
+          ],
+          "minimal_modules": [
+            "AXI-Stream记录",
+            "AxiStreamConfigType",
+            "握手与TUSER函数"
+          ],
+          "practice_task": "构造一个 AxiStreamConfigType（如 64 位数据、使能 TKEEP/TLAST/TDEST），并说明它对应的字节宽与 VC 数。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "AXI-Stream FIFO、流水与位宽调整",
+          "order": 2,
+          "filename": "u4-l2-axistream-fifo-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiStreamFifoV2 的流式 FIFO、AxiStreamPipeline 切割组合路径、以及 AxiStreamResize 的位宽调整。",
+          "learning_goals": [
+            "掌握 AxiStreamFifoV2 的深度/流水/FWFT 配置与帧边界保持",
+            "理解 AxiStreamPipeline 用于改善时序的用法",
+            "理解 AxiStreamResize 如何保持 TKEEP/TSTRB 语义做位宽变换"
+          ],
+          "source_files": [
+            "axi/axi-stream/rtl/AxiStreamFifoV2.vhd",
+            "axi/axi-stream/rtl/AxiStreamPipeline.vhd",
+            "axi/axi-stream/rtl/AxiStreamResize.vhd"
+          ],
+          "minimal_modules": [
+            "AXI-Stream FIFO",
+            "流水寄存器",
+            "位宽Resize"
+          ],
+          "practice_task": "在一条 64 位流前后各加一个 AxiStreamPipeline，并说明它对时序路径与帧 TLAST 传播的影响。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "AXI-Stream 路由：Mux / DeMux / Gearbox",
+          "order": 3,
+          "filename": "u4-l3-axistream-routing.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiStreamMux 的轮询合并、AxiStreamDeMux 按 TDEST 分发、以及 AxiStreamGearbox 的位宽变换与打包/解包。",
+          "learning_goals": [
+            "掌握 AxiStreamMux 多入单出的仲裁与公平性",
+            "理解 AxiStreamDeMux 依据 TDEST 路由到多输出",
+            "理解 GearboxPack/Unpack 在窄↔宽变换中的字节序"
+          ],
+          "source_files": [
+            "axi/axi-stream/rtl/AxiStreamMux.vhd",
+            "axi/axi-stream/rtl/AxiStreamDeMux.vhd",
+            "axi/axi-stream/rtl/AxiStreamGearbox.vhd",
+            "axi/axi-stream/rtl/AxiStreamGearboxPack.vhd"
+          ],
+          "minimal_modules": [
+            "流复用仲裁",
+            "TDEST分发",
+            "Gearbox位宽变换"
+          ],
+          "practice_task": "用 AxiStreamDeMux 把一条流按 TDEST 分到 4 路，再用 AxiStreamMux 合回，验证帧序与 TDEST 一致。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "AXI-Stream 监控、抽头与测试码型",
+          "order": 4,
+          "filename": "u4-l4-axistream-monitoring.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiStreamMon/MonAxiL 的带宽与帧率监控、AxiStreamTap 的无侵入抽头、以及 PRBS 流控测试码型发生器。",
+          "learning_goals": [
+            "掌握 AxiStreamMon 如何统计帧数/字节并经 AXI-Lite 上报",
+            "理解 AxiStreamTap 作为调试观测点的非侵入性",
+            "会用 PRBS 流控码型做链路自检"
+          ],
+          "source_files": [
+            "axi/axi-stream/rtl/AxiStreamMon.vhd",
+            "axi/axi-stream/rtl/AxiStreamMonAxiL.vhd",
+            "axi/axi-stream/rtl/AxiStreamTap.vhd",
+            "axi/axi-stream/rtl/AxiStreamPrbsFlowCtrl.vhd"
+          ],
+          "minimal_modules": [
+            "流量监控",
+            "调试抽头",
+            "PRBS测试码型"
+          ],
+          "practice_task": "在一条流上挂 AxiStreamMonAxiL，读出帧计数与字节计数寄存器，验证与激励一致。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "SSI 流式协议与数据成帧",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "SSI 侧带与帧边界（SsiPkg / SsiFifo）",
+          "order": 1,
+          "filename": "u5-l1-ssi-sideband-framing.md",
+          "level": "intermediate",
+          "topic": "讲解 SSI 在 AXI-Stream 之上定义的 SOF/EOF/EOFE 侧带（编码在 TUSER）、TDEST 作为虚拟通道、以及 ssiAxiStreamConfig。",
+          "learning_goals": [
+            "掌握 SSI 把 SOF/EOF/EOFE 编码进 TUSER 的方式及 ssiGetUserSof/Eofe 函数",
+            "理解 TDEST 作为 VC（虚拟通道）的语义与最多 16 个 VC",
+            "理解 SsiFifo 如何保持帧边界并支持 EOFE 错误帧处理"
+          ],
+          "source_files": [
+            "protocols/ssi/rtl/SsiPkg.vhd",
+            "protocols/ssi/rtl/SsiFifo.vhd",
+            "protocols/README.md"
+          ],
+          "minimal_modules": [
+            "SSI侧带编码",
+            "虚拟通道TDEST",
+            "帧边界FIFO"
+          ],
+          "practice_task": "用 ssiAxiStreamConfig 构造一条 SSI 流配置，并标注每一拍 TUSER 中 SOF/EOF/EOFE 的比特位置。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "SSI 测试码型与帧过滤",
+          "order": 2,
+          "filename": "u5-l2-ssi-prbs-filters.md",
+          "level": "intermediate",
+          "topic": "讲解 SsiPrbsTx/Rx 的 PRBS 帧收发与校验、SsiIbFrameFilter/ObFrameFilter 的帧过滤与限长。",
+          "learning_goals": [
+            "掌握 SsiPrbsTx 产生带 SOF/EOF 的 PRBS 帧、SsiPrbsRx 校验 payload 与 EOFE",
+            "理解入/出帧过滤器按 VC 过滤与丢弃错误帧的机制",
+            "理解 SsiFrameLimiter 对帧长/字节数的限制"
+          ],
+          "source_files": [
+            "protocols/ssi/rtl/SsiPrbsTx.vhd",
+            "protocols/ssi/rtl/SsiPrbsRx.vhd",
+            "protocols/ssi/rtl/SsiIbFrameFilter.vhd",
+            "protocols/ssi/rtl/SsiFrameLimiter.vhd"
+          ],
+          "minimal_modules": [
+            "PRBS帧收发",
+            "帧过滤器",
+            "帧长限制"
+          ],
+          "practice_task": "把 SsiPrbsTx 直连 SsiPrbsRx 构成环回，注入一帧错误并观察 EOFE 是否被正确置位。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "SRP：SLAC 寄存器协议（SRPv3）",
+          "order": 3,
+          "filename": "u5-l3-srp-register-protocol.md",
+          "level": "intermediate",
+          "topic": "讲解 SRPv3 如何把 AXI-Lite 读/写请求封装成 SSI 帧、SrpV3ReqType/AckType 与 READ/WRITE/POSTED 操作码，以及 SrpV3AxiLite 适配。",
+          "learning_goals": [
+            "掌握 SRPv3 请求/响应记录与操作码语义",
+            "理解 SrpV3Core 在流式链路上承载寄存器事务的工作方式",
+            "理解 SrpV3AxiLite 如何把本地 AXI-Lite 暴露给远端"
+          ],
+          "source_files": [
+            "protocols/srp/rtl/SrpV3Pkg.vhd",
+            "protocols/srp/rtl/SrpV3Core.vhd",
+            "protocols/srp/rtl/SrpV3AxiLite.vhd"
+          ],
+          "minimal_modules": [
+            "SRPv3请求/响应",
+            "Core协议引擎",
+            "AXI-Lite适配"
+          ],
+          "practice_task": "画出一次 SRPv3 WRITE 在链路上的请求帧与响应帧结构，标出地址、数据、操作码字段。",
+          "depends_on": [
+            "u3-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Packetizer / Batcher 与线路码、ECC",
+          "order": 4,
+          "filename": "u5-l4-packetizer-linecodes-ecc.md",
+          "level": "intermediate",
+          "topic": "讲解 AxiStreamPacketizer/Batcher 的数据成帧与聚合、8B/10B 等线路码、以及 HammingEcc 的纠错编码。",
+          "learning_goals": [
+            "理解 Packetizer 给流加帧头/尾、Batcher 聚合多帧的用途",
+            "掌握 8B/10B（Code8b10bPkg）编解码与 K 字符控制",
+            "理解 HammingEcc 的编解码与单比特纠错能力"
+          ],
+          "source_files": [
+            "protocols/packetizer/rtl/AxiStreamPacketizer.vhd",
+            "protocols/batcher/rtl/AxiStreamBatcher.vhd",
+            "protocols/line-codes/rtl/Code8b10bPkg.vhd",
+            "protocols/line-codes/rtl/Encoder8b10b.vhd",
+            "protocols/hamming-ecc/rtl/HammingEccPkg.vhd"
+          ],
+          "minimal_modules": [
+            "成帧/聚合",
+            "线路码",
+            "汉明纠错"
+          ],
+          "practice_task": "用 Encoder8b10b/Decoder8b10b 做一对编解码，发送一个 K 字符加若干数据字节并验证解码一致。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "以太网协议栈",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "以太网 MAC 核心（EthMacCore）",
+          "order": 1,
+          "filename": "u6-l1-ethernet-mac-core.md",
+          "level": "intermediate",
+          "topic": "讲解 EthMacTop 的 TX/RX 数据通路、PAUSE 流控、收发校验和、MAC 过滤，以及 GMII/XGMII/XLGMII 的导入导出适配。",
+          "learning_goals": [
+            "掌握 EthMacTop 串联 TX/RX FIFO、Pause、Csum、Filter 的结构",
+            "理解 IEEE 802.3x PAUSE 帧的收发与节流",
+            "理解 RX 过滤（本机/广播 MAC）与 TX/RX 校验和卸载"
+          ],
+          "source_files": [
+            "ethernet/EthMacCore/rtl/EthMacPkg.vhd",
+            "ethernet/EthMacCore/rtl/EthMacTop.vhd",
+            "ethernet/EthMacCore/rtl/EthMacTx.vhd",
+            "ethernet/EthMacCore/rtl/EthMacRx.vhd",
+            "ethernet/EthMacCore/rtl/EthMacRxPause.vhd"
+          ],
+          "minimal_modules": [
+            "MAC收发通路",
+            "PAUSE流控",
+            "过滤与校验和"
+          ],
+          "practice_task": "在 EthMacPkg 中找出 EtherType（ARP/IPv4）与协议 ID 常量，并说明 RX 路径如何按 EtherType 分流。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "IPv4 引擎：ARP / ICMP / IGMP",
+          "order": 2,
+          "filename": "u6-l2-ipv4-engine.md",
+          "level": "intermediate",
+          "topic": "讲解 IpV4Engine 的 IPv4 收发与按协议解复用，以及 ArpEngine（ARP 缓存）、IcmpEngine（ping）、IgmpV2Engine（组播）。",
+          "learning_goals": [
+            "掌握 IpV4EngineRx/Tx 对 IPv4 头的解析与构造",
+            "理解 ArpEngine 的请求/应答与 IP→MAC 缓存超时",
+            "理解 ICMP 回显与 IGMPv2 组播加入"
+          ],
+          "source_files": [
+            "ethernet/IpV4Engine/rtl/IpV4Engine.vhd",
+            "ethernet/IpV4Engine/rtl/IpV4EngineRx.vhd",
+            "ethernet/IpV4Engine/rtl/ArpEngine.vhd",
+            "ethernet/IpV4Engine/rtl/IcmpEngine.vhd"
+          ],
+          "minimal_modules": [
+            "IPv4收发",
+            "ARP缓存",
+            "ICMP/IGMP"
+          ],
+          "practice_task": "描述一次 ping 的完整往返：ARP 解析→ICMP 请求→ICMP 应答，标注每个引擎处理的帧。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "UDP 引擎与原始以太网成帧",
+          "order": 3,
+          "filename": "u6-l3-udp-raweth.md",
+          "level": "intermediate",
+          "topic": "讲解 UdpEngine 的服务器/客户端、端口路由、ARP 表与可选 DHCP，以及 RawEthFramer 的二层成帧。",
+          "learning_goals": [
+            "掌握 UdpEngineTx/Rx 的端口查找与 ARP 表集成",
+            "理解 UdpEngineDhcp 的 IP 获取流程",
+            "理解 RawEthFramer 增删以太网头（源/目的 MAC、EtherType）"
+          ],
+          "source_files": [
+            "ethernet/UdpEngine/rtl/UdpEngine.vhd",
+            "ethernet/UdpEngine/rtl/UdpEngineTx.vhd",
+            "ethernet/UdpEngine/rtl/UdpEngineDhcp.vhd",
+            "ethernet/RawEthFramer/rtl/RawEthFramer.vhd"
+          ],
+          "minimal_modules": [
+            "UDP收发与端口路由",
+            "DHCP",
+            "RawEth二层成帧"
+          ],
+          "practice_task": "配置 UdpEngine 的若干服务器/客户端通道，写出每个通道的本地/远端端口与 IP 在寄存器中的布局。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "速率核与 PHY 家族拆分（Gig/TenGig）",
+          "order": 4,
+          "filename": "u6-l4-speed-cores-phy-split.md",
+          "level": "intermediate",
+          "topic": "讲解 GigEthCore/TenGigEthCore 如何把通用 core/ RTL 与 GTX7/GTH7/GTH UltraScale+/GTY UltraScale+ 等 PHY 家族封装分离并用 ruckus 选择。",
+          "learning_goals": [
+            "掌握 core/ 与各家族 PHY 目录的职责划分",
+            "理解 GigEthReg/TenGigEthReg 的 AXI-Lite 配置与状态",
+            "理解 ruckus.tcl 用 getFpgaArch 选择 PHY 源的机制"
+          ],
+          "source_files": [
+            "ethernet/GigEthCore/core/rtl/GigEthPkg.vhd",
+            "ethernet/GigEthCore/core/rtl/GigEthReg.vhd",
+            "ethernet/TenGigEthCore/core/rtl/TenGigEthPkg.vhd",
+            "ethernet/TenGigEthCore/core/rtl/TenGigEthReg.vhd"
+          ],
+          "minimal_modules": [
+            "通用速率核",
+            "家族PHY封装",
+            "ruckus架构选择"
+          ],
+          "practice_task": "比较 GigEthCore 与 TenGigEthCore 的 core/ 内容，说明二者共享了哪些 MAC 层组件、又各自封装了哪些 PHY。",
+          "depends_on": [
+            "u6-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高速链路协议：PGP / RSSI / JESD204B / CoaXPress",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "PGP 协议族总览（PGP2b / PGP3 / PGP4）",
+          "order": 1,
+          "filename": "u7-l1-pgp-family-overview.md",
+          "level": "advanced",
+          "topic": "对比 PGP2b（8B/10B、2 字节）、PGP3（扰码+BTF、8 字节）、PGP4（带 CRC）三代链路协议的 VC 路由、定界与错误模型。",
+          "learning_goals": [
+            "理解 PGP 用 TDEST/TVC 做虚拟通道路由的统一思想",
+            "掌握 PGP2b 的 8B/10B K 字符定界与 PGP3/4 的 BTF 定界差异",
+            "理解 PGP4 相对 PGP3 增加的 CRC 与错误上报"
+          ],
+          "source_files": [
+            "protocols/pgp/pgp2b/core/rtl/Pgp2bPkg.vhd",
+            "protocols/pgp/pgp3/core/rtl/Pgp3Pkg.vhd",
+            "protocols/pgp/pgp4/core/rtl/Pgp4Pkg.vhd",
+            "protocols/pgp/pgp3/core/rtl/Pgp3Core.vhd"
+          ],
+          "minimal_modules": [
+            "PGP虚拟通道",
+            "定界方式对比",
+            "PGP4 CRC"
+          ],
+          "practice_task": "列表对比 PGP2b/PGP3/PGP4 的数据位宽、定界方式、是否带 CRC 三项差异。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "RSSI：可靠流式传输",
+          "order": 2,
+          "filename": "u7-l2-rssi-reliable-stream.md",
+          "level": "advanced",
+          "topic": "讲解 RssiCore 的连接/收/发三个状态机、窗口与重传、ACK/NAK，以及校验和与 AXI-Lite 寄存器接口。",
+          "learning_goals": [
+            "掌握 RssiConnFsm 的连接建立与断开流程",
+            "理解发送/接收窗口、序号、ACK/NAK 重传机制",
+            "理解 RssiAxiLiteRegItf 暴露的参数与状态寄存器"
+          ],
+          "source_files": [
+            "protocols/rssi/v1/rtl/RssiPkg.vhd",
+            "protocols/rssi/v1/rtl/RssiCore.vhd",
+            "protocols/rssi/v1/rtl/RssiConnFsm.vhd",
+            "protocols/rssi/v1/rtl/RssiTxFsm.vhd"
+          ],
+          "minimal_modules": [
+            "连接状态机",
+            "窗口与重传",
+            "寄存器接口"
+          ],
+          "practice_task": "画出 RSSI 连接从 Conn→Open 的握手序列，标注 SYN/ACK 与窗口协商字段。",
+          "depends_on": [
+            "u7-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "JESD204B 子系统",
+          "order": 3,
+          "filename": "u7-l3-jesd204b.md",
+          "level": "advanced",
+          "topic": "讲解 Jesd204bRx/Tx、通道对齐、ILAS、LMFC、SYSREF 监测与 8B/10B 字符集等 JESD204B 核心机制。",
+          "learning_goals": [
+            "掌握 JESD204B 的通道（lane）模型与 JesdGtRxLaneType 记录",
+            "理解 ILAS 初始通道对齐序列与 LMFC 多帧时钟的作用",
+            "理解 SYSREF 监测与确定性延迟的关系"
+          ],
+          "source_files": [
+            "protocols/jesd204b/rtl/Jesd204bPkg.vhd",
+            "protocols/jesd204b/rtl/Jesd204bRx.vhd",
+            "protocols/jesd204b/rtl/JesdIlasGen.vhd",
+            "protocols/jesd204b/rtl/JesdLmfcGen.vhd",
+            "protocols/jesd204b/rtl/JesdSysrefMon.vhd"
+          ],
+          "minimal_modules": [
+            "lane模型",
+            "ILAS/LMFC",
+            "SYSREF监测"
+          ],
+          "practice_task": "说明一次 JESD204B 链路从代码组同步→ILAS→数据各阶段的对齐机制，并指出 LMFC 的作用。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "CoaXPress 核心",
+          "order": 4,
+          "filename": "u7-l4-coaxpress.md",
+          "level": "advanced",
+          "topic": "讲解 CoaXPressCore 的高速接收/低速发送状态机、Lane、配置，以及 Over-Fiber 桥接，并说明 core/ 与 PHY 家族拆分。",
+          "learning_goals": [
+            "掌握 CoaXPress 的高速下行与低速上行（设备触发/控制）模型",
+            "理解 CoaXPressRxHsFsm/CoaXPressTxLsFsm 的状态流转",
+            "理解 CoaXPressOverFiberBridge 把 CXP 承载到光纤的思路"
+          ],
+          "source_files": [
+            "protocols/coaxpress/core/rtl/CoaXPressPkg.vhd",
+            "protocols/coaxpress/core/rtl/CoaXPressCore.vhd",
+            "protocols/coaxpress/core/rtl/CoaXPressRxHsFsm.vhd",
+            "protocols/coaxpress/core/rtl/CoaXPressTxLsFsm.vhd",
+            "protocols/coaxpress/core/rtl/CoaXPressOverFiberBridge.vhd"
+          ],
+          "minimal_modules": [
+            "高速接收FSM",
+            "低速发送FSM",
+            "Over-Fiber桥接"
+          ],
+          "practice_task": "在 CoaXPressPkg 中找出 SOP/EOP/IDLE 标记常量，并说明高速流如何用这些标记定界。",
+          "depends_on": [
+            "u5-l4",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "AXI4、DMA、桥接与协同仿真",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "完整 AXI4 总线与 AxiRam",
+          "order": 1,
+          "filename": "u8-l1-axi4-axiram.md",
+          "level": "advanced",
+          "topic": "讲解 AXI4 的五个通道（AR/R/AW/W/B）记录、AxiRam 的突发与写选通，以及与 AXI-Lite 的关系。",
+          "learning_goals": [
+            "掌握 AxiReadMasterType/AxiWriteMasterType 等记录与 5 通道握手",
+            "理解 AxiRam 的突发读写、写选通与响应",
+            "理解 AxiToAxiLite 把 AXI4 降级为 AXI-Lite 的桥接"
+          ],
+          "source_files": [
+            "axi/axi4/rtl/AxiPkg.vhd",
+            "axi/axi4/rtl/AxiRam.vhd",
+            "axi/bridge/rtl/AxiToAxiLite.vhd"
+          ],
+          "minimal_modules": [
+            "AXI4五通道",
+            "AxiRam突发",
+            "AXI→AXI-Lite桥"
+          ],
+          "practice_task": "用 AxiRam 作为从机，发起一次长度为 4 的突发写再突发读回，验证数据与 BRESP/RRESP。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "AXI-Stream DMA V2 与描述符",
+          "order": 2,
+          "filename": "u8-l2-axistream-dma-v2.md",
+          "level": "advanced",
+          "topic": "讲解 AxiStreamDmaV2 的流↔内存搬移、描述符处理、读写引擎与环形缓冲模式。",
+          "learning_goals": [
+            "掌握 AxiDmaPkg 的请求/应答记录与 DMA 配置",
+            "理解 AxiStreamDmaV2Write/Read 把 AXI-Stream 落到 AXI4 内存的流程",
+            "理解描述符驱动与 ring buffer 模式"
+          ],
+          "source_files": [
+            "axi/dma/rtl/AxiDmaPkg.vhd",
+            "axi/dma/rtl/v2/AxiStreamDmaV2.vhd",
+            "axi/dma/rtl/v2/AxiStreamDmaV2Write.vhd",
+            "axi/dma/rtl/v2/AxiStreamDmaV2Desc.vhd"
+          ],
+          "minimal_modules": [
+            "DMA请求/应答",
+            "流→内存写引擎",
+            "描述符与环形缓冲"
+          ],
+          "practice_task": "描述一次“流→内存”DMA：描述符如何给出基地址与长度，写引擎如何把帧写到内存并回写状态。",
+          "depends_on": [
+            "u8-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "总线与外设桥接（I2C / SPI / UART / SACI）",
+          "order": 3,
+          "filename": "u8-l3-peripheral-bridges.md",
+          "level": "advanced",
+          "topic": "讲解如何用 AXI-Lite 桥接到 I2C、SPI、UART、SACI 等低速外设寄存器访问，以及寄存器主控复用。",
+          "learning_goals": [
+            "掌握 I2cRegMasterAxiBridge 把 AXI-Lite 映射为 I2C 寄存器事务",
+            "理解 AxiSpiMaster、UartAxiLiteMaster 的桥接模式",
+            "理解 I2cRegMasterMux 等主控复用与轮询"
+          ],
+          "source_files": [
+            "protocols/i2c/rtl/I2cRegMasterAxiBridge.vhd",
+            "protocols/i2c/rtl/I2cRegMaster.vhd",
+            "protocols/spi/rtl/AxiSpiMaster.vhd",
+            "protocols/uart/rtl/UartAxiLiteMaster.vhd"
+          ],
+          "minimal_modules": [
+            "I2C寄存器桥",
+            "SPI/UART桥",
+            "主控复用"
+          ],
+          "practice_task": "用 I2cRegMasterAxiBridge 把一组 I2C 设备寄存器映射到一段 AXI-Lite 地址窗口，写出地址到设备/寄存器的映射规则。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Simlink：与 Rogue 的 VHPI/ZMQ 协同仿真",
+          "order": 4,
+          "filename": "u8-l4-simlink-rogue-cosim.md",
+          "level": "advanced",
+          "topic": "讲解 axi/simlink 如何通过 VHPI C 模块（RogueTcpMemory/Stream/SideBand）经 ZeroMQ 把仿真里的 AXI-Lite/AXI-Stream 接到 Python Rogue。",
+          "learning_goals": [
+            "理解 RogueTcpMemory.vhd/.c 在仿真中提供 AXI-Lite 内存映射 TCP 桥",
+            "理解 RogueTcpStream 桥接 AXI-Stream 帧",
+            "理解 VHPI + ZMQ 的协同仿真数据路径"
+          ],
+          "source_files": [
+            "axi/simlink/src/RogueTcpMemory.c",
+            "axi/simlink/sim/RogueTcpMemory.vhd",
+            "axi/simlink/sim/RogueTcpStream.vhd"
+          ],
+          "minimal_modules": [
+            "内存映射桥",
+            "流桥",
+            "VHPI/ZMQ协同仿真"
+          ],
+          "practice_task": "说明一个 Python Rogue 脚本读寄存器的请求如何经 ZMQ 到达仿真中的 RogueTcpMemory 并驱动 AXI-Lite。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "验证方法论与软件集成",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "cocotb 测试工具链（pytest+cocotb+GHDL+ruckus）",
+          "order": 1,
+          "filename": "u9-l1-cocotb-toolchain.md",
+          "level": "advanced",
+          "topic": "讲解 SURF 的回归测试栈：ruckus import 生成源缓存、regression_utils 的 run_surf_vhdl_test 串起 cocotb-test 与 GHDL、pytest 做发现与并行。",
+          "learning_goals": [
+            "掌握 make MODULES=$PWD import 与 build/SRC_VHDL 缓存的关系",
+            "理解 run_surf_vhdl_test 如何调用 cocotb_test.simulator.run 并配置 GHDL",
+            "理解 pytest -n auto --dist=worksteal 的并行回归"
+          ],
+          "source_files": [
+            "tests/common/regression_utils.py",
+            "tests/README.md",
+            "pytest.ini",
+            "pip_requirements.txt",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "ruckus源缓存",
+            "run_surf_vhdl_test",
+            "pytest并行回归"
+          ],
+          "practice_task": "运行一次 make ... import，再用 ./.venv/bin/python -m pytest -q tests/base/fifo 跑一个子系统回归并记录结果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "编写一个 cocotb 回归测试",
+          "order": 2,
+          "filename": "u9-l2-writing-cocotb-test.md",
+          "level": "advanced",
+          "topic": "以 tests/base/fifo/test_Fifo.py 为范例讲解 Test methodology 头、TB 类、@cocotb.test 协程、PARAMETER_SWEEP 与 pytest 包装函数。",
+          "learning_goals": [
+            "掌握标准测试文件结构：方法学头→TB 类→@cocotb.test→PARAMETER_SWEEP→test_* 包装",
+            "会写可读的 parameter_case 与有界 with_timeout 等待",
+            "理解对 TPD_G/复位极性/异步复位等泛型的参数扫描策略"
+          ],
+          "source_files": [
+            "tests/base/fifo/test_Fifo.py",
+            "tests/common/regression_utils.py",
+            "tests/README.md"
+          ],
+          "minimal_modules": [
+            "方法学头与TB类",
+            "@cocotb.test协程",
+            "参数扫描与pytest包装"
+          ],
+          "practice_task": "仿照 test_Fifo.py 为一个简单模块写一个 cocotb 测试，包含方法学头、一个复位后激励协程和 2 个参数用例。",
+          "depends_on": [
+            "u9-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "测试辅助与帧构造器",
+          "order": 3,
+          "filename": "u9-l3-test-utils-frame-builders.md",
+          "level": "advanced",
+          "topic": "讲解 tests/axi/utils.py 的 AXI 原语、wait_sampled_ready/start_lockstep_clocks，以及各子系统 *_test_utils.py 的帧构造与记分板。",
+          "learning_goals": [
+            "掌握 axil_read_u32/axil_write_u32 与 wait_sampled_ready 的采样握手用法",
+            "理解为何 COMMON_CLK_G 要用 start_lockstep_clocks",
+            "会用 ethmac/ipv4/raw_eth/srp 等 *_test_utils 构造与校验帧"
+          ],
+          "source_files": [
+            "tests/axi/utils.py",
+            "tests/common/regression_utils.py",
+            "tests/ethernet/EthMacCore/ethmac_test_utils.py",
+            "tests/protocols/srp/srp_test_utils.py"
+          ],
+          "minimal_modules": [
+            "AXI原语与采样握手",
+            "公共时钟启动",
+            "子系统帧构造器"
+          ],
+          "practice_task": "用 ethmac_test_utils 构造一帧 IPv4/UDP 以太网帧，说明其中哪些字段会被 EthMacRx 过滤/校验。",
+          "depends_on": [
+            "u9-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "PyRogue 设备模型",
+          "order": 4,
+          "filename": "u9-l4-pyrogue-device-models.md",
+          "level": "advanced",
+          "topic": "以 _AxiVersion.py 为范例讲解 pr.Device、RemoteVariable、RemoteCommand、LinkVariable、addRemoteVariables 与 __init__.py 再导出模式。",
+          "learning_goals": [
+            "掌握 pr.RemoteVariable 的 offset/bitSize/mode/base/disp 用法",
+            "理解 pr.RemoteCommand 触发与 @self.command 包装",
+            "理解私有 _Xxx.py + __init__.py from ... import * 的导出约定"
+          ],
+          "source_files": [
+            "python/surf/axi/_AxiVersion.py",
+            "python/surf/axi/__init__.py",
+            "python/surf/ethernet/udp/__init__.py",
+            "python/README.md",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "RemoteVariable/Command",
+            "LinkVariable派生",
+            "包导出约定"
+          ],
+          "practice_task": "对照 AxiVersion.vhd 的寄存器偏移，写一个最小 PyRogue 设备类镜像其中两个寄存器并保持名称/偏移一致。",
+          "depends_on": [
+            "u3-l4",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "器件、收发器、Xilinx 家族封装与贡献流程",
+          "order": 5,
+          "filename": "u9-l5-devices-xilinx-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 devices/ 厂商器件核与 transceivers（SFP/QSFP）、xilinx/ 家族原语封装，以及 ruckus/vsg/CI 构成的贡献与发布流程。",
+          "learning_goals": [
+            "掌握 devices/ 按厂商组织、rtl/sim/家族目录与本地 ruckus.tcl 的约定",
+            "理解 xilinx/ 下 7Series/UltraScale/UltraScale+/Versal 家族封装与 dummy 兼容",
+            "理解改 HDL 需同步更新 ruckus.tcl、PyRogue、测试并经 CI(lint/test/docs) 验证"
+          ],
+          "source_files": [
+            "devices/README.md",
+            "xilinx/README.md",
+            "devices/transceivers/rtl",
+            "ruckus.tcl",
+            ".github/workflows/surf_ci.yml",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "器件核与收发器",
+            "Xilinx家族封装",
+            "贡献与CI流程"
+          ],
+          "practice_task": "选定一个 devices/ 下的器件核，列出它的 rtl/、ruckus.tcl 与对应 python/surf/devices 模型，说明三者如何保持一致。",
+          "depends_on": [
+            "u9-l4",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

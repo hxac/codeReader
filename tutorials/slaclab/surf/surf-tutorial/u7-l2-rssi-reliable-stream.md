@@ -1,0 +1,526 @@
+# RSSI：可靠流式传输
+
+## 1. 本讲目标
+
+SSI（u5-l1）给了一条 AXI-Stream 流以「帧边界」，SRP（u5-l3）在这条流上承载了寄存器事务。但底层物理链路（PGP、以太网、光纤）会丢帧、乱序、重复。本讲要回答一个问题：**怎样在一条不可靠的流式链路之上，搭出一层「像 TCP 一样可靠」的有序字节/数据流？**
+
+学完后你应当能够：
+
+1. 说清 RSSI（Reliable Streaming）协议的定位：它是一层建立在 SSI 之上的「可靠、有序、有连接」协议，参考 RUDP（RFC-908 / RFC-1151）。
+2. 画出 RSSI 连接从 `CLOSED` 到 `OPEN` 的三次握手状态流转，并标注 SYN / SYN+ACK / ACK 与窗口协商字段。
+3. 解释发送窗口（`firstUnackAddr` / `nextSentAddr` / `lastSentAddr`）、序号、累积 ACK、重传超时与最大重传次数这套机制。
+4. 看懂 `RssiAxiLiteRegItf` 暴露给软件的控制 / 状态寄存器布局，并理解多比特状态为何要跨时钟域同步。
+
+## 2. 前置知识
+
+阅读本讲前，你应已具备（由前序讲义建立）：
+
+- **SSI 帧语义**（u5-l1）：SOF/EOF/EOFE 编码在 TUSER，`tLast` 即 EOF。RSSI 内部统一用 `ssiAxiStreamConfig` 描述的 SSI 流。
+- **AXI-Stream 记录与配置**（u4-l1）：`AxiStreamMasterType/SlaveType`、`AxiStreamConfigType`。
+- **AXI-Lite 寄存器端点**（u3-l2）：`axiSlaveWaitTxn / axiSlaveRegister / axiSlaveDefault` 四步骨架与响应码。
+- **双进程 RTL 风格**（u1-l5）：`RegType` + `REG_INIT_C` + `r/rin` + `comb`/`seq`。本讲所有 FSM 仍是这套骨架。
+- **时钟域跨越**（u2-l1）：`SynchronizerVector` / `SynchronizerFifo` 用于把多比特状态安全搬到 AXI-Lite 时钟域。
+
+几个本讲要用的术语：
+
+- **段（segment）**：RSSI 在流上传输的最小单位，等于一个 SSI 帧。段由「头 + 可选 payload」组成。头有 6 类：SYN、ACK、EACK、RST、NULL、DATA。
+- **序号（seqN）/确认号（ackN）**：8 位，模 256 循环。发 SYN / DATA / NULL / RST 都会消耗一个序号。
+- **窗口（window）**：发送方可以「发出但尚未被确认」的段的数量上限，由连接建立时双方协商。
+
+## 3. 本讲源码地图
+
+RSSI 全部位于 `protocols/rssi/v1/`，由一个顶层核把若干子模块拼起来。本讲涉及的关键文件：
+
+| 文件 | 作用 |
+| --- | --- |
+| [RssiPkg.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd) | 协议包：内部流配置 `RSSI_AXIS_CONFIG_C`、各类头长度常量、`RssiParamType`（协商参数）、`flagsType`、`WindowType` 与 `endianSwap64`。 |
+| [RssiCore.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd) | 顶层核：例化 ConnFSM、Monitor、HeaderReg、TxFsm、RxFsm、双口 RAM 缓冲、校验和与输入输出 FIFO，把应用侧与传输侧的 AXI-Stream 接在一起。 |
+| [RssiConnFsm.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd) | **连接状态机**：连接建立/断开、参数协商、客户端/服务端模式。本讲模块一的核心。 |
+| [RssiTxFsm.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd) | **发送 FSM**：管理发送窗口、应用侧入帧、ACK 处理、各类段的发送与重发。本讲模块二的核心。 |
+| [RssiMonitor.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd) | 监控/定时器：重传超时、NULL 段收发、累积 ACK 超时、各类计数与状态寄存器。模块二的「触发源」。 |
+| [RssiHeaderReg.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiHeaderReg.vhd) | 头部组装/译码：按段类型把参数拼成 64 位头字，SYN 头里就含窗口协商字段。 |
+| [RssiAxiLiteRegItf.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd) | **AXI-Lite 寄存器接口**：控制 / 参数 / 状态寄存器译码与跨域同步。本讲模块三的核心。 |
+| [RssiRxFsm.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiRxFsm.vhd) | 接收 FSM：校验段、按序入缓冲、向上递交、产生 ackN。本讲作为窗口机制的「对端」引用。 |
+| [tb/RssiCoreTb.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/tb/RssiCoreTb.vhd) | 仿真测试台：把一个 Server 核与一个 Client 核背靠背对接成环回。实践任务依据。 |
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 RSSI 总览：协议定位与数据通路
+
+#### 4.1.1 概念说明
+
+RSSI 是「在一条会丢包的流式链路之上，提供可靠、有序、有连接的数据传输」的协议层。它的设计蓝本是 Cisco 的 RUDP（RFC-908、RFC-1151、sigtran 草案），并做了内部简化。文件头注释直接写明这一点：
+
+[RssiCore.vhd:6-7](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L6-L7) — 说明本模块基于 RUDP，并做了内部裁剪。
+
+「可靠、有序、有连接」拆开看就是三件事，恰好对应三个子 FSM：
+
+- **有连接**：通信前要先「握手」建立连接、协商参数；通信中任一方可发 RST 拆连。→ `RssiConnFsm`
+- **可靠**：发出的每一段都要被对方确认（ACK）；没收到确认就重传，重传超过上限就拆连。→ `RssiTxFsm` + `RssiMonitor`
+- **有序**：接收方按序号重组，只把「按序到达」的数据向上递交，乱序段留在接收窗口里等待补齐。→ `RssiRxFsm`
+
+RSSI 的段（segment）就是一个 SSI 帧。内部统一用 64 位（8 字节）宽的 SSI 流，配置写死在包里：
+
+[RssiPkg.vhd:31-38](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd#L31-L38) — `RSSI_WORD_WIDTH_C=8`（64 位），`RSSI_AXIS_CONFIG_C` 用 `ssiAxiStreamConfig` 配出 `TKEEP_COMP_C`、`TUSER_FIRST_LAST_C`、2 位 TUSER。
+
+各种段只有头长度不同，SYN 头最长（要装下全部协商参数），其余都是单字（8 字节）头：
+
+[RssiPkg.vhd:41-46](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd#L41-L46) — `SYN_HEADER_SIZE_C=24`（3 个 64 位字），其余 `ACK/EACK/RST/NULL/DATA` 均为 8 字节。
+
+每段头里有一个「标志字节」区分段类型。标志在 `flagsType` 记录里定义：
+
+[RssiPkg.vhd:85-94](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd#L85-L94) — `syn/ack/eack/rst/nul/data/busy/eofe` 八个标志位。
+
+#### 4.1.2 核心流程
+
+`RssiCore` 是一个纯结构顶层，把数据通路和五个子模块织在一起。数据通路分两侧：
+
+```
+        应用侧 (App)                      传输侧 (Tsp, 即物理链路)
+   sAppAxisMaster ─► AxiStreamResize ─► axis2Ssi ─► [TxFsm] ─► ssi2Axis ─► AxiStreamFifoV2 ─► mTspAxisMaster
+        ▲                                                                          │
+        │                                                                          ▼
+   mAppAxisSlave  ◄─ AxiStreamFifoV2 ◄─ ssi2Axis ◄─ [RxFsm] ◄─ axis2Ssi ◄─ AxiStreamResize ◄─ sTspAxisMaster
+```
+
+控制面则是：`ConnFsm`（连接）+ `Monitor`（定时器/状态）+ `HeaderReg`（拼头）+ `RssiChksum`（头校验和）。`RssiCore` 顶层例化的五块见：
+
+[RssiCore.vhd:476-511](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L476-L511) — 例化 `RssiConnFsm`；[RssiCore.vhd:513-551](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L513-L551) — 例化 `RssiMonitor`；[RssiCore.vhd:595-666](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L595-L666) — 例化 `RssiTxFsm`；[RssiCore.vhd:758-793](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L758-L793) — 例化 `RssiRxFsm`。
+
+几个顶层关键点：
+
+- **收到的 ACK 段会变成发送侧的输入**：接收侧只负责把「带 ACK 标志的有效段」抽出来交给 TX 侧去滑动窗口。
+
+[RssiCore.vhd:862](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L862) — `s_rxAck <= s_rxValidSeg and s_rxFlags.ack and s_connActive;` 即「连接已开 + 段有效 + 带 ACK 标志」才产生一次 ACK 脉冲给 TxFsm。
+
+- **核心可配为服务端或客户端**，由泛型 `SERVER_G` 决定（见模块一）。
+
+- **应用侧 FIFO 在连接断开时会被复位**，避免半截残留帧：
+
+[RssiCore.vhd:413](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L413) — `s_rstFifo <= rst_i or not s_connActive;`
+
+#### 4.1.3 源码精读
+
+顶层把「应用参数从哪来」用一个小组合进程决定：`modeReg='0'` 时用泛型，`modeReg='1'` 时用 AXI-Lite 寄存器。这是后面模块三的伏笔：
+
+[RssiCore.vhd:370-404](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L370-L404) — `combParamAssign`：`modeReg='0'` 分支把 `MAX_NUM_OUTS_SEG_G`、`MAX_SEG_SIZE_G`、各超时泛型等打包成 `s_appRssiParam`；`modeReg='1'` 分支直接用寄存器值。
+
+`RssiParamType` 这个记录是「RSSI 全部可协商参数」的载体，整个协议围绕它转：
+
+[RssiPkg.vhd:51-69](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd#L51-L69) — 含 `version / chksumEn / timeoutUnit`（三者必须双方一致）、`maxOutsSeg`（最大在途段数＝窗口）、`maxSegSize`（最大段字节数）、各类超时与计数上限、`connectionId`。
+
+头校验和采用「反码和」（与 IP/TCP 同族），16 位，可选开关 `HEADER_CHKSUM_EN_G`。发送侧把校验和塞进每个头字的最低 2 字节：
+
+[RssiTxFsm.vhd:370-371](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L370-L371) — `s_chksum` 在校验和关闭时强制清零；`s_headerAndChksum` 把头高 48 位与 16 位校验和拼成完整 64 位字。
+
+注意每段头在送出前都做了 `endianSwap64`（小端↔大端翻转），因为内部 SSI 是小端排列、而 RSSI 头字段按大端定义：
+
+[RssiPkg.vhd:129-140](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd#L129-L140) — `endianSwap64` 按字节反序。
+
+#### 4.1.4 代码实践
+
+**实践目标**：在仿真里观察一对 RSSI 核（Server + Client）如何对接，建立对「数据通路环回」的直觉。
+
+**操作步骤**（源码阅读型）：
+
+1. 打开 [tb/RssiCoreTb.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/tb/RssiCoreTb.vhd)。
+2. 阅读 Server 例化 [RssiCoreTb.vhd:171-191](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/tb/RssiCoreTb.vhd#L171-L191) 与 Client 例化 [RssiCoreTb.vhd:196-217](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/tb/RssiCoreTb.vhd#L196-L217)。
+3. 注意 `tspMasters(1)`（Server 发）接到 `sTspAxisMaster_i`（Client 收），`tspMasters(0)`（Client 发）接到 Server 收——两者背靠背成环回。
+4. 两端 `openRq_i => '1'`，即一上电就各自请求建连。
+
+**需要观察的现象**：仿真启动后，两个核应自动完成握手并进入 `OPEN`，随后 Client 侧注入的 SRP/数据帧应能经传输侧环回被 Server 侧收到。
+
+**预期结果**：若仿真正常，`statusReg(0)`（Connection Active）最终为 1。
+
+> 待本地验证：本仓库 `tests/` 下尚无 RSSI 的 cocotb 回归（见 `tests/protocols/` 列表无 `rssi`），完整跑通需要 Vivado 仿真或手工驱动 GHDL + 该 VHDL testbench。如本地无 Vivado，可只做源码阅读。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：RSSI 内部流固定为 64 位宽。如果应用侧给出的是 32 位 AXI-Stream，顶层如何适配？
+
+**答案**：顶层用 `AxiStreamResize` 把应用侧配置（`APP_AXIS_CONFIG_G`）整形成内部 `RSSI_AXIS_CONFIG_C`，见 [RssiCore.vhd:416-433](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L416-L433)。
+
+**练习 2**：为什么 `s_rxAck` 要乘上 `s_connActive`？
+
+**答案**：只有连接处于 OPEN 时，收到的 ACK 才对发送窗口有意义；未建连时收到的「ACK」可能是残帧或攻击，必须忽略。
+
+---
+
+### 4.2 连接状态机：三次握手与参数协商
+
+#### 4.2.1 概念说明
+
+`RssiConnFsm` 负责「有连接」这件事：何时建连、何时拆连、建连时和对方协商哪些参数。它用 `SERVER_G` 区分两种角色：
+
+- **服务端（SERVER_G=true，被动打开）**：上电后进入监听，等客户端发来 SYN；校验参数，若己方不能接受就改提新参数。
+- **客户端（SERVER_G=false，主动打开）**：主动发 SYN 提出参数；等服务端回 SYN+ACK；若参数版本/校验和不匹配则拒绝并拆连。
+
+这本质是 TCP 的三次握手：`SYN → SYN+ACK → ACK`，但参数协商更重——RSSI 把窗口大小、段大小、各类超时、连接 ID 都放进 SYN 段里一次谈妥。
+
+#### 4.2.2 核心流程
+
+状态机定义如下（`connState_o` 给出每态的 4 位编码，方便软件观测）：
+
+[RssiConnFsm.vhd:105-115](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L105-L115) — 九态：`CLOSED_S / SEND_SYN_S / WAIT_SYN_S / LISTEN_S / SEND_ACK_S / SEND_SYN_ACK_S / WAIT_ACK_S / SEND_RST_S / OPEN_S`。
+
+**客户端建连路径**（`connState` 编码 0→1→2→3→7）：
+
+```
+CLOSED(0) --connRq--> SEND_SYN(1) --SYN头已发--> WAIT_SYN(2)
+   WAIT_SYN(2) --收到 SYN+ACK 且参数匹配--> SEND_ACK(3) --ACK头已发--> OPEN(7)
+   WAIT_SYN(2) --参数不匹配--> SEND_RST(8) --> CLOSED(0)
+   WAIT_SYN(2) --重传超时 & 未超次数--> SEND_SYN(1)（带 closed 复位 seqN）
+   WAIT_SYN(2) --重传超时 & 超过 MAX_RETRANS_CNT_G--> CLOSED(0) 且 peerTout=1
+```
+
+**服务端建连路径**（编码 0→4→5→6→7）：
+
+```
+CLOSED(0) --connRq--> LISTEN(4) --收到 SYN--> SEND_SYN_ACK(5) --SYN头已发--> WAIT_ACK(6)
+   WAIT_ACK(6) --收到 ACK--> OPEN(7)
+   WAIT_ACK(6) --重传超时同上规则--> SEND_SYN_ACK(5) 或 CLOSED(0)
+```
+
+注意一个细节：`CLOSED_S` 里 `closed_o` 会拉高，用来通知 TxFsm「复位序号到 `initSeqN`」——这样每次重发 SYN 都从同一个初始序号出发。
+
+超时与重传计数用的是同一个时间换算：把「TIMEOUT_UNIT_G（默认 1 µs）× CLK_FREQUENCY_G」换算成时钟周期数 `SAMPLES_PER_TIME_C`，再用 `RETRANS_TOUT_G`（默认 50，单位即 TIMEOUT_UNIT_G）作倍数：
+
+[RssiConnFsm.vhd:103](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L103) — `SAMPLES_PER_TIME_C : integer := integer(TIMEOUT_UNIT_G * CLK_FREQUENCY_G);`
+
+即一次重传超时阈值（周期数）为
+
+\[
+T_{\text{retrans,cyc}} = \text{RETRANS\_TOUT\_G} \times (\text{TIMEOUT\_UNIT\_G} \times \text{CLK\_FREQUENCY\_G})
+\]
+
+#### 4.2.3 源码精读
+
+**CLOSED 态**按角色分流，并复位全部寄存器：
+
+[RssiConnFsm.vhd:188-201](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L188-L201) — `connRq_i='1'` 且 `SERVER_G=true` → `LISTEN_S`；`SERVER_G=false` → `SEND_SYN_S`。
+
+**客户端 SEND_SYN 态**把己方参数装进 `rssiParam`、置 `sndSyn=1`，等 SYN 头真的被发出去（`synHeadSt_i`）再进 WAIT_SYN：
+
+[RssiConnFsm.vhd:208-226](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L208-L226) — `v.rssiParam := appRssiParam_i; v.sndSyn := '1';` 收到 `synHeadSt_i` → `WAIT_SYN_S`。
+
+**WAIT_SYN 态**是参数协商的关键：收到 SYN+ACK 后先校验「三必同」`version / chksumEn / timeoutUnit`，再做窗口与段大小的「取小」自协商：
+
+[RssiConnFsm.vhd:239-269](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L239-L269) — 校验三项一致后，对 `maxOutsSeg` 取双方较小者赋给 `txWindowSize`、对 `maxSegSize` 取小者并右移 3 位（除以 8，字节→64 位字）赋给 `txBufferSize`；不匹配则 `paramReject='1'` 转 `SEND_RST_S`。
+
+窗口「取小」逻辑（客户端侧）：
+
+[RssiConnFsm.vhd:251-266](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L251-L266) — 若对端 `maxOutsSeg` 比本地大，则用本地值（更小者）；否则用对端值。`maxSegSize` 同理，并 `conv_integer(...(15 downto 3))` 除以 8 得字数。
+
+**服务端 LISTEN 态**对参数采取「能接受就接受，不能就改提己方值」的策略（与客户端的「不匹配就拆」不同）：
+
+[RssiConnFsm.vhd:328-369](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L328-L369) — 先 `v.rssiParam := rxRssiParam_i` 接受对端值并自协商窗口；若 `version/chksumEn/timeoutUnit` 任一不等，则把这三项覆写成本地值并 `paramReject='1'`，然后转 `SEND_SYN_ACK_S`。
+
+**SEND_ACK / SEND_SYN_ACK**：客户端回纯 ACK（`sndAck=1, txAckF=1`），服务端回 SYN+ACK（`sndSyn=1, txAckF=1`，`txAckF` 会让 SYN 头里的 ACK 标志位置 1）：
+
+[RssiConnFsm.vhd:372-389](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L372-L389) — 服务端 `SEND_SYN_ACK_S`：`v.sndSyn := '1'; v.txAckF := '1';`，等 `synHeadSt_i` → `WAIT_ACK_S`。
+
+**OPEN 态**只监测两种拆连触发：收到 RST，或上层 `closeRq_i`：
+
+[RssiConnFsm.vhd:426-446](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L426-L446) — `connActive_o='1'`，收到 `rxFlags_i.rst` 或 `closeRq_i` → `SEND_RST_S`。
+
+输出端口上有一个易混淆点：`rxBufferSize_o / rxWindowSize_o / txBufferSize_o / txWindowSize_o` 四个输出全部绑定到同一组内部寄存器 `r.txBufferSize / r.txWindowSize`：
+
+[RssiConnFsm.vhd:501-504](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L501-L504) — 四路输出同源。即收发两侧的缓冲/窗口尺寸在本实现里取同一协商值。
+
+最后，SYN 头里窗口字段的实际位置在 `RssiHeaderReg`：SYN 头第 0 字最高位是 SYN 标志、次高位是 ACK 标志，而 `maxOutsSeg` 与 `maxSegSize` 就在同一字的低位：
+
+[RssiHeaderReg.vhd:121-129](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiHeaderReg.vhd#L121-L129) — SYN 头字 0：`"1" & r.ack & "000000" & SYN_HEADER_SIZE & txSeqN & rxAckN & version & '1' & chksumEn & "00" & maxOutsSeg & maxSegSize`。即 bit63=SYN、bit62=ACK、bit55:48=头长、bit47:40=seqN、bit39:32=ackN、bit23:16=maxOutsSeg（窗口）、bit15:0=maxSegSize。
+
+#### 4.2.4 代码实践
+
+**实践目标**：画出 RSSI 连接从 `CLOSED` 到 `OPEN` 的完整握手序列，标注每一段的 SYN/ACK 标志与窗口协商字段。这是本讲的核心实践。
+
+**操作步骤**（源码阅读 + 画图）：
+
+1. 阅读客户端路径 `SEND_SYN_S → WAIT_SYN_S → SEND_ACK_S`（[RssiConnFsm.vhd:208-307](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L208-L307)）与服务端路径 `LISTEN_S → SEND_SYN_ACK_S → WAIT_ACK_S`（[RssiConnFsm.vhd:316-419](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L316-L419)）。
+2. 参考 SYN 头字段布局 [RssiHeaderReg.vhd:121-145](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiHeaderReg.vhd#L121-L145)。
+3. 画一张时序图，三段分别为：Client→Server SYN；Server→Client SYN+ACK；Client→Server ACK。
+4. 在 SYN / SYN+ACK 段上标出 `seqN`、`ackN`、`version`、`chksumEn`、`maxOutsSeg`（窗口）、`maxSegSize`。
+
+**需要观察的现象 / 预期结果**：
+
+- 第一段 SYN：标志 `syn=1,ack=0`，`seqN=initSeqN`（默认 0x80），`ackN=0`，携带 Client 的 `maxOutsSeg / maxSegSize`。
+- 第二段 SYN+ACK：标志 `syn=1,ack=1`，`seqN=Server 的 initSeqN`，`ackN=Client initSeqN+1`（因为 Client 的 SYN 消耗了一个序号），携带 Server 协商后的参数（窗口取小）。
+- 第三段 ACK：标志 `syn=0,ack=1`，`seqN=Client initSeqN+1`，`ackN=Server initSeqN+1`，无 payload。
+- 三段走完后，两端 `connActive_o=1`、`connState=0x7`（OPEN）。
+
+> 待本地验证：可在 `RssiCoreTb` 仿真波形里抓 Client 的 `mTspAxisMaster` 与 Server 的 `mTspAxisMaster`，按拍解码头字验证上述字段。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么客户端发现 `version` 不匹配就走 `SEND_RST`，而服务端却「改提己方值」继续？
+
+**答案**：客户端是发起方，参数不匹配意味着它无法工作，故直接拆连（[RssiConnFsm.vhd:270-276](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L270-L276)）；服务端是响应方，更倾向于「我来迁就你」把 `version/chksumEn/timeoutUnit` 覆写成本地值并带 `paramReject` 提示，给客户端一次重新对齐的机会（[RssiConnFsm.vhd:354-367](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L354-L367)）。
+
+**练习 2**：`txWindowSize` 与 `maxOutsSeg` 是什么关系？
+
+**答案**：协商后 `txWindowSize = conv_integer(min(本地 maxOutsSeg, 对端 maxOutsSeg))`，即发送窗口大小＝双方允许的「最大在途段数」的较小者（[RssiConnFsm.vhd:251-257](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L251-L257)）。
+
+**练习 3**：重传 SYN 时为什么要把 `closed` 拉高？
+
+**答案**：`closed` 通知 TxFsm 把序号复位回 `initSeqN`，保证每次重发的 SYN 用同一个初始序号，避免序号漂移（[RssiConnFsm.vhd:284](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L284) 与 [RssiTxFsm.vhd:801-814](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L801-L814)）。
+
+---
+
+### 4.3 发送窗口与重传：序号、ACK 与重传
+
+#### 4.3.1 概念说明
+
+「可靠」靠两件事保证：**缓存 + 重传**。`RssiTxFsm` 把每个已发送但未确认的段留在发送缓冲（一块双口 RAM）里，并用三个指针管理一个环形「发送窗口」：
+
+- `firstUnackAddr`：最老的、尚未被确认的段。
+- `nextSentAddr`：下一个可写入 / 待发送的空槽。
+- `lastSentAddr`：最近一次已发送的段。
+
+窗口里每个槽是个 `WindowType` 记录，存该段的 `seqN / segType / keep / segSize / occupied`：
+
+[RssiPkg.vhd:96-102](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiPkg.vhd#L96-L102) — `WindowType`。
+
+ACK 是「累积确认」：接收方回一个 `ackN`，表示「ackN 之前的段我都收好了」。发送方据此把 `firstUnackAddr` 向前推过所有 seqN 小于等于 ackN 的段。若 ackN 在窗口里找不到对应序号，就报 `ackErr`。
+
+重传由 `RssiMonitor` 的定时器触发：若距离上次发送过了 `RETRANS_TOUT_G` 仍无新进展，就重发窗口里所有未确认段；连续重传超过 `MAX_RETRANS_CNT_G` 次仍未收到 ACK，就置 `retransMax` 并请求拆连。
+
+#### 4.3.2 核心流程
+
+`RssiTxFsm` 内部其实有**三个并行 FSM**（共用一个 `RegType`）：
+
+[RssiTxFsm.vhd:166-203](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L166-L203) — `TspStateType`（传输侧，发段）、`AppStateType`（应用侧，收帧入缓冲）、`AckStateType`（处理 ACK）。
+
+**缓冲满/空判定**（每拍组合算出）：
+
+- 满：下一个要写的槽已被占用 → 暂停从应用收帧。
+- 空：`firstUnackAddr` 指向的槽未占用 → 没有未确认数据，不需重传。
+
+[RssiTxFsm.vhd:397-409](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L397-L409) — `bufferFull` 看 `rxBufferAddr` 槽；`bufferEmpty` 看 `firstUnackAddr` 槽。
+
+**ACK FSM**（累积确认滑动窗口）：
+
+```
+IDLE --ack_i--> ACK_S
+ACK_S: 沿 firstUnackAddr 逐槽前进、清 occupied，直到某槽 seqN == ackN_i → 记 lastAckSeqN，回 IDLE
+       若一直找到 lastSentAddr 都没匹配 → ERR_S（ackErr=1）
+```
+
+[RssiTxFsm.vhd:448-504](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L448-L504) — ACK 状态机：同 ackN 重复到达则不动；否则逐槽清 `occupied`、推进 `firstUnackAddr`；命中则保存 `lastAckSeqN` 回 IDLE，未命中且已到 `lastSentAddr` 则转 `ERR_S`。
+
+**传输侧 FSM 的 CONN 态**是调度中心，按优先级选择下一步动作：
+
+[RssiTxFsm.vhd:856-899](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L856-L899) — 优先级从高到低：`sndRst` > 有数据待发且未满（`DATA_WE_S`）> `sndResend` 且非空（`RESEND_INIT_S`）> `sndAck`（`ACK_H_S`）> `sndNull` 且未满且应用不忙（`NULL_WE_S`）。
+
+**重发流程**从 `firstUnackAddr` 走到 `lastSentAddr`，把窗口里所有 DATA/NULL/RST 段原样重发一遍，且**重发期间绝不递增 seqN**：
+
+[RssiTxFsm.vhd:1371-1571](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L1371-L1571) — `RESEND_INIT_S → RESEND_H_S → RESEND_DATA_S → RESEND_PP_S`，每态注释均写 `Never increment seqN while resending`，`seqN` 直接取自 `windowArray(txBufferAddr).seqN`。
+
+**Monitor 的触发逻辑**：
+
+[RssiMonitor.vhd:218-244](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd#L218-L244) — 重传计数器在「连接断、收到 busy、发了 data/rst/null 头、缓冲空、或重传被禁」时清零；否则计数，到 `retransTout × SAMPLES_PER_TIME_C` 即置 `sndResend`。
+
+[RssiMonitor.vhd:256-273](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd#L256-L273) — 连续重传计数 `retransCnt`：连接断或收到有效 ACK 时清零；`sndResend` 上升沿时递增；超过 `maxRetrans` 则置 `retransMax`。
+
+最终输出把「已超限」的重发请求屏蔽掉，并把超限/错误转成拆连请求：
+
+[RssiMonitor.vhd:450-456](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd#L450-L456) — `sndResend_o <= r.sndResend and not r.retransMax;` `closeRq_o` 在 `retransMax` 上升沿、null 超时、ackErr、lenErr 时拉高。
+
+#### 4.3.3 源码精读
+
+段被发送时（`buffWe=1`），把它的 `seqN / segType / occupied` 写进 `nextSentAddr` 槽，并更新 `lastSentAddr`：
+
+[RssiTxFsm.vhd:414-423](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L414-L423) — `v.windowArray(nextSentAddr).seqN := r.nextSeqN; segType := r.rstH & r.nullH & r.dataH; occupied := '1'; lastSentAddr := r.nextSentAddr;`
+
+注意注释（[RssiTxFsm.vhd:28-29](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L28-L29)）：只有 DATA、NULL、RST 段会被存进发送缓冲（SYN 与纯 ACK 不存，因为它们不需要被数据级重传）。但 RST 在写入时 `buffWe` 实际被设为 `'0'`（见 [RssiTxFsm.vhd:1045](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L1045) 注释「Ignore the buffer because the RST will not get retransmitted」），所以真正进缓冲、会参与重发的只有 DATA 与 NULL。
+
+序号在每个新段（SYN/DATA/NULL/RST）发完时递增。以 DATA 为例：
+
+[RssiTxFsm.vhd:1336-1341](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L1336-L1341) — `DATA_SENT_S`：`v.nextSeqN := r.nextSeqN+1; v.seqN := r.nextSeqN+1;` 并置 `buffSent:=1` 推进 `lastSentAddr`。
+
+应用侧 FSM 把进入的 SSI 帧逐字写进缓冲，并在 EOF 时记下末拍 `keep` 与段长，超长则报 `lenErr`：
+
+[RssiTxFsm.vhd:656-694](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L656-L694) — `SEG_RCV_S`：EOF 时记 `keep` 与 `segSize`；若 `rxSegmentAddr > bufferSize_i` 或最高位进位则转 `SEG_LEN_ERR`。
+
+接收侧（`RssiRxFsm`）的校验是窗口机制的另一面：它只接受 `seqN == inorderSeqN` 或 `lastSeqN+1` 的段，并校验 `ackN` 落在 `[lastAckN, lastAckN + txWindowSize]` 范围内：
+
+[RssiRxFsm.vhd:7-31](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiRxFsm.vhd#L7-L31) — 文件头说明接收侧的 4 项校验：校验和、头长、序号（仅当前 seqN 或 lastSeqN+1）、ackN 范围（lastAckN ~ lastAckN+txWindowSize）。
+
+ACK 的发送也由 Monitor 触发，有三个独立来源：累积到 `maxCumAck` 个未确认段、`cumulAckTout` 超时、或收到 NULL 段 / 本地 busy 上升沿：
+
+[RssiMonitor.vhd:368-393](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd#L368-L393) — ACK 请求 SRFF：超时、累积达 `maxCumAck`、收到 NUL、本地 busy 上升沿均可触发 `sndAck`。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用 `inject_i`（故障注入）让一帧 DATA 的头校验和出错，观察接收侧丢弃、发送侧重传、直至恢复的全过程，从而在「现象」上验证窗口与重传机制。
+
+**操作步骤**（源码阅读 + 现象预测）：
+
+1. 阅读 [RssiTxFsm.vhd:774-783](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L774-L783)（故障注入上升沿检测）与 [RssiTxFsm.vhd:1268-1273](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L1268-L1273)（在 DATA 头 checksum 上异或全 1 翻转位）。
+2. 在 testbench 里，在某次发送 DATA 前给 Client 的 `inject_i` 一个时钟周期的高脉冲（`RssiCore` 把 `inject_i` 与寄存器的 `injectFault` 相或，见 [RssiCore.vhd:363](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L363)）。
+3. 跑仿真，观察 Server 侧 `rxDropSeg` 与 Client 侧重传。
+
+**需要观察的现象 / 预期结果**：
+
+- 被注入的 DATA 段头校验和错 → Server 侧 `RssiRxFsm` 校验失败、置 `rxDropSeg`（不计入 `rxValidSeg`）。
+- Client 侧收不到对应 ACK → `retransToutCnt` 计满 → `Monitor` 置 `sndResend` → TxFsm 走 `RESEND_*` 重发该段。
+- 重发的段校验和正确 → Server 正常接收、回 ACK → Client 的 ACK FSM 推进 `firstUnackAddr`，`retransCnt` 被清零。
+- `statusReg` 中不应出现 `retransMax`（因为只错了一帧，重传一次就恢复）。
+
+> 待本地验证：需要可运行 VHDL testbench 的仿真器（Vivado xsim / GHDL + 接线）。若仅源码阅读，可逐步在脑中走上述链路并对照注释核对。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：重发时为什么不递增 seqN？
+
+**答案**：重发的是「同一个未确认段」，序号必须与原段一致，接收方才能用它做去重与按序重组；递增会被当成新段。源码每态都注释 `Never increment seqN while resending`（如 [RssiTxFsm.vhd:1378](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L1378)）。
+
+**练习 2**：`bufferEmpty` 与 `bufferFull` 分别看哪个槽？为什么不是同一个？
+
+**答案**：空看 `firstUnackAddr`（最老未确认槽，它空了说明全确认完）；满看 `rxBufferAddr`（下一个写入槽，它被占说明追上了未确认数据）。二者分别保护「无谓重传」与「应用反压」（[RssiTxFsm.vhd:397-409](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiTxFsm.vhd#L397-L409)）。
+
+**练习 3**：连续重传多少次会拆连？由谁计数？
+
+**答案**：连续重传达 `maxRetrans`（默认 `MAX_RETRANS_CNT_G=2`）次仍无 ACK，`Monitor` 置 `retransMax`，屏蔽后续 `sndResend` 并拉高 `closeRq`（[RssiMonitor.vhd:271-273](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd#L271-L273) 与 [RssiMonitor.vhd:453](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiMonitor.vhd#L453)）。
+
+---
+
+### 4.4 AXI-Lite 寄存器接口
+
+#### 4.4.1 概念说明
+
+`RssiAxiLiteRegItf` 是 RSSI 暴露给 CPU / 软件的「控制面板」。它做三件事：
+
+1. **控制（RW）**：开/关连接、选择参数来源（泛型 vs 寄存器）、头校验和开关、注入故障、初始序号、以及全套可协商参数。
+2. **状态（RO）**：连接状态、各类错误、收发与重传计数、双方协商后的参数、各 FSM 的当前状态编码。
+3. **跨时钟域**：RSSI 核跑在 `devClk`（`clk_i`），AXI-Lite 跑在 `axiClk`，两域之间的多比特信号必须同步。
+
+它把 u3-l2 的 `axiSlaveWaitTxn` 四步骨架用在一个固定布局的寄存器表上。
+
+#### 4.4.2 核心流程
+
+寄存器以字（4 字节）为单位编址，地址低 2 位恒为 0、用 `araddr(9 downto 2)` 转成字索引：
+
+[RssiAxiLiteRegItf.vhd:216-217](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L216-L217) — `s_RdAddr <= conv_integer(axilReadMaster.araddr(9 downto 2));`
+
+控制 / 参数区（RW，0x00–0x0B）与状态区（RO，0x10 起）布局完整列在文件头注释里：
+
+[RssiAxiLiteRegItf.vhd:7-56](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L7-L56) — 寄存器表：0x00 控制（开/关/模式/校验和/注入故障）、0x01 初始序号、0x02 版本、0x03 最大在途段、0x04 最大段大小、0x05/06/07 三种超时、0x08 最大重传、0x09 最大累积 ACK、0x0A 乱序段（TBD 未用）、0x0B 连接 ID；状态：0x10 状态字、0x11 有效段数、0x12 丢弃段数、0x13 重传次数、0x14 重连次数。
+
+读写流程是标准的 u3-l2 骨架：
+
+[RssiAxiLiteRegItf.vhd:236-274](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L236-L274) — `axiSlaveWaitTxn` 解事务；`writeEnable` 时按 `s_WrAddr` case 写入控制/参数字段，未映射地址回 `AXI_RESP_DECERR_C`，非字对齐（`awaddr(1:0)/="00"`）也回 DECERR。
+
+读端口的一个亮点是「本地值 + 协商后值」并排返回：每个参数寄存器的低半放己方设定、高半放协商后的结果（`negRssiParam`），便于软件一眼对比：
+
+[RssiAxiLiteRegItf.vhd:289-291](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L289-L291) — 以 0x04 为例：`rdata(15:0):=appRssiParam.maxSegSize`（本地），`rdata(31:16):=negRssiParam.maxSegSize`（协商后）。
+
+状态寄存器位含义与 `RssiCore` 头注释一致（连接激活、重传超限、null 超时、ACK 错、帧长错、对端超时、参数被拒、本地忙、远端忙）：
+
+[RssiCore.vhd:17-25](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L17-L25) — 状态位定义。
+
+#### 4.4.3 源码精读
+
+跨时钟域处理分两类，呼应 u2-l1 的「单比特同步器 vs 多比特数据」铁律：
+
+- **状态字（9 位）**：是「电平」，用 `SynchronizerVector` 同步（多级触发器）；`COMMON_CLK_G=true` 时 `BYPASS_SYNC_G` 直接旁路。
+
+[RssiAxiLiteRegItf.vhd:378-386](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L378-L386) — `U_status: SynchronizerVector` 把 `status_i` 从 `devClk` 搬到 `axiClk`。
+
+- **计数器（32 位）**：是「多比特数值」，逐位同步会撕裂，故用 `SynchronizerFifo`（异步 FIFO）原子搬运：
+
+[RssiAxiLiteRegItf.vhd:388-430](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L388-L430) — `U_validCnt / U_dropCnt / U_resendCnt / U_reconCnt` 四个 `SynchronizerFifo`。
+
+控制信号（`openRq / closeRq / mode / injectFault` 等）从 `axiClk` 域反向同步回 `devClk` 域：
+
+[RssiAxiLiteRegItf.vhd:432-454](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L432-L454) — `U_SyncVecOut` 与 `U_initSeqN` 把控制字与初始序号同步到 `devClk`。
+
+参数记录（含多个字段）整体跨域用一个专门的 `RssiParamSync`（它内部对每个字段做安全同步）：
+
+[RssiAxiLiteRegItf.vhd:456-472](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L456-L472) — `U_RssiParamSync_In/Out` 双向同步协商参数。
+
+`RssiCore` 顶层把 `RssiAxiLiteRegItf` 的输出接入主控逻辑：`openRq_o` 与外部 `openRq_i` 相或、`closeRq_o` 与外部及内部拆连请求相或，使软件与硬件都能发起建/拆连：
+
+[RssiCore.vhd:370-378](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L370-L378) — `s_closeRq <= s_closeRqReg or closeRq_i or s_intCloseRq; s_openRq <= s_openRqReg or openRq_i;`
+
+状态字最终汇总输出（`RssiMonitor` 的 9 位 status 接到 `RssiAxiLiteRegItf.status_i`，再由其同步后经 0x10 读出）：
+
+[RssiCore.vhd:964](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L964) — `statusReg_o <= s_statusReg;`
+
+#### 4.4.4 代码实践
+
+**实践目标**：通过寄存器表理解「软件如何完全掌控一条 RSSI 连接」，并把寄存器字段与协议参数一一对应。
+
+**操作步骤**（源码阅读型）：
+
+1. 读寄存器表注释 [RssiAxiLiteRegItf.vhd:7-56](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L7-L56)。
+2. 列一张「地址 → 字段 → 读写性 → 对应协议参数 / FSM 信号」的表，至少覆盖：0x00、0x03、0x04、0x05、0x08、0x10、0x11、0x13、0x1B。
+3. 对 0x00 控制字的 `bit2`（mode）追踪它如何切换参数来源（[RssiCore.vhd:374-403](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCore.vhd#L374-L403)）。
+
+**需要观察的现象 / 预期结果**：
+
+| 地址 | 字段 | 读写 | 含义 |
+| --- | --- | --- | --- |
+| 0x00 | control[4:0] | RW | 0:openRq, 1:closeRq, 2:mode, 3:chksumEn, 4:injectFault |
+| 0x03 | maxOutsSeg | RW | 窗口大小（最大在途段） |
+| 0x04 | maxSegSize | RW | 最大段字节数 |
+| 0x05 | retransTout | RW | 重传超时 |
+| 0x08 | maxRetrans | RW | 最大重传次数 |
+| 0x10 | status | RO | bit0 连接激活、bit1 重传超限、… |
+| 0x11 | validCnt | RO | 有效段计数 |
+| 0x13 | resendCnt | RO | 重传次数计数 |
+| 0x1B | 各 FSM state | RO | txTsp/txApp/txAck/rxTsp/rxApp/conn 状态编码 |
+
+**预期结果**：写 0x00 的 bit0=1 可触发建连；读 0x10 的 bit0 可查询是否已 OPEN；读 0x1B 可看到连接态 `connState` 从 0x1/0x2 演进到 0x7。
+
+> 待本地验证：在带 PyRogue / Rogue 桥的真实系统里，这些寄存器会映射为 `pyrogue` 设备变量；纯仿真下可用 `RogueTcpMemory`（u8-l4）经 ZMQ 读写。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么状态字用 `SynchronizerVector`，而计数器用 `SynchronizerFifo`？
+
+**答案**：状态字是缓慢变化的电平，逐位多级同步即可（[RssiAxiLiteRegItf.vhd:378-386](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L378-L386)）；计数器是快速变化的多比特数值，逐位同步会得到撕裂的错值，必须用异步 FIFO 原子搬运（[RssiAxiLiteRegItf.vhd:388-430](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L388-L430)）。呼应 u2-l1 的 CDC 铁律。
+
+**练习 2**：读 0x04 时返回的高 16 位是什么？
+
+**答案**：是协商后的 `maxSegSize`（`negRssiParam.maxSegSize`），低 16 位是本地设定值，方便软件对比「我设的」与「最终谈成的」（[RssiAxiLiteRegItf.vhd:289-291](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L289-L291)）。
+
+**练习 3**：非字对齐的写访问会怎样？
+
+**答案**：回 `AXI_RESP_DECERR`（[RssiAxiLiteRegItf.vhd:239](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiAxiLiteRegItf.vhd#L239)），与 u3-l1 的响应码语义一致。
+
+---
+
+## 5. 综合实践
+
+把本讲三个模块串起来，完成一件完整任务：**手工「解码」一次 RSSI 连接建立全过程，并用寄存器接口验证结果。**
+
+任务步骤：
+
+1. **准备参数**：设定 Client 与 Server 的 `maxOutsSeg` 分别为 4 与 8、`maxSegSize` 为 1024 与 512（可通过泛型或 0x03/0x04 寄存器）。先在纸上预测协商后的窗口与段大小。
+2. **画握手时序图**（承接 4.2.4）：画出 SYN、SYN+ACK、ACK 三段，标注每段的标志位、`seqN`、`ackN`、以及 SYN 段里的 `maxOutsSeg / maxSegSize` 字段位置（参考 [RssiHeaderReg.vhd:121-129](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiHeaderReg.vhd#L121-L129)）。
+3. **核对协商**：确认 Client 与 Server 最终都采用 `min(4,8)=4` 段窗口、`min(1024,512)=512` 字节段大小（参考 [RssiConnFsm.vhd:251-266](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiConnFsm.vhd#L251-L266)）。
+4. **注入一帧错**（承接 4.3.4）：建连后注入一次校验和故障，画出「丢弃 → 重传超时 → 重发 → ACK → 窗口推进」的时序，并预测 `retransCnt`（0x13）会增 1、而 `retransMax` 不会置位。
+5. **用寄存器验证**（承接 4.4.4）：读 0x10 确认 bit0=1（已 OPEN）、读 0x1B 确认 `connState=0x7`、读 0x13 确认重传次数、读 0x04 高 16 位确认协商后的段大小。
+
+预期产物：一张含三段握手的时序图 + 一张「地址-字段-预测值-实测值」对照表。
+
+> 待本地验证：完整跑通需可仿真 `RssiCoreTb` 或经 Rogue 桥读写寄存器的环境；若仅做源码阅读，第 1–3 步与第 5 步的预测值均可由源码确定地推出。
+
+## 6. 本讲小结
+
+- RSSI 是建立在 SSI 之上的「可靠、有序、有连接」协议层，参考 RUDP，由 `RssiCore` 顶层把 Conn/Monitor/HeaderReg/Tx/Rx 五块与双口 RAM 缓冲拼成。
+- **连接**靠 `RssiConnFsm` 的三次握手（SYN → SYN+ACK → ACK）建立，参数在 SYN 段里协商；窗口与段大小「取小」，`version/chksumEn/timeoutUnit` 必须一致。
+- **可靠**靠发送窗口（`firstUnackAddr/nextSentAddr/lastSentAddr`）+ 累积 ACK + 重传：`RssiTxFsm` 管窗口与发送/重发，`RssiMonitor` 管各类超时与拆连触发。
+- 重发期间序号绝不递增；连续重传超 `maxRetrans` 即拆连；ACK 可由累积量、超时、NULL 段、本地 busy 四种事件触发。
+- **软件接口** `RssiAxiLiteRegItf` 用 u3-l2 四步骨架实现固定寄存器表，控制 / 状态 / 协商参数齐备；状态字用同步器、计数器用异步 FIFO 跨时钟域。
+- 头字段经 `endianSwap64` 翻转后上线；可选的 16 位反码校验和保护头部完整性，并可经 `inject_i` 注入故障用于链路自检。
+
+## 7. 下一步学习建议
+
+- **看接收侧**：本讲对 `RssiRxFsm` 只做了窗口「对端」的引用。建议通读 [RssiRxFsm.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiRxFsm.vhd)，重点看它如何按 `inorderSeqN` 重组、如何向上递交、如何产生 `ackN`。
+- **看校验和实现**：[RssiChksum.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiChksum.vhd) 与其 testbench `tb/RssiChksumTb.vhd`，对照 u2-l4 的 CRC 与 IP/TCP 反码和的区别。
+- **看封装与多 VC**：[RssiCoreWrapper.vhd](https://github.com/slaclab/surf/blob/0ca723d282315cceb93f374ab69284db3d3d9d83/protocols/rssi/v1/rtl/RssiCoreWrapper.vhd) 如何把单条 RSSI 与多虚拟通道、SRP 组合起来（承接 u5-l3 SRP 与 u7-l1 PGP 的 VC 思想）。
+- **下一讲 u7-l3** 将进入 JESD204B：另一类高速链路协议，同样有「通道、对齐、定界」问题，可与本讲的窗口/序号机制做对比。
