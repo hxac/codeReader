@@ -1,0 +1,667 @@
+{
+  "project": "Systolic-array-implementation-in-RTL-for-TPU",
+  "head": "6a93418faefac866eeab6349c8adfc91576099fb",
+  "rationale": "本项目是一个完整的 TPU（张量处理单元）脉动阵列 RTL 实现，包含三条主线：核心 8x8/32x32 脉动阵列计算核心（rtl/ 与 Pre-Synthesis_Simulation/）、ASIC 后端流程（syn 综合 + pnr 布局布线）、以及 FPGA SoC 集成与扩展架构（rtl/RTL_modified/）。学习顺序按\"由外到内、由功能到实现、由 RTL 到物理\"设计：第一单元让读者从零认识项目定位、目录、顶层与仿真运行方式；第二、三单元拆解核心数据通路（移位队列→MAC→输出收集）与控制/地址/写回/量化机制，这是理解整个 TPU 工作原理的关键；第四单元用 testbench 把前面的模块串成端到端验证闭环；第五单元进入 ASIC 后端（DC 综合 + ICC2 PnR）与 FPGA 集成，面向物理实现与工程化；第六单元讲解更完整的扩展 TPU 架构（master_control + sysArr + accumTable + ReLU + FIFO + Avalon 总线 + 主机软件 API + tiny_dnn 基准测试），面向二次开发与系统级理解。单元之间通过 depends_on 形成清晰依赖，每篇讲义只讲一个独立主题并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目与开发运行环境",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：TPU、脉动阵列与本项目定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍什么是 TPU 与脉动阵列（systolic array），以及本项目实现的 8x8/32x32 定点矩阵乘加速器的整体定位与设计目标。",
+          "learning_goals": [
+            "理解 TPU 与脉动阵列在神经网络加速中的角色",
+            "掌握本项目要解决的矩阵乘法问题与数据流方向（weight 自上而下、data 自左而右）",
+            "了解项目三个主要部分：核心 RTL、后端流程、扩展架构"
+          ],
+          "source_files": [
+            "README.md",
+            "rtl/systolic array/Readme.md"
+          ],
+          "minimal_modules": [
+            "项目说明",
+            "8x8 脉动阵列架构图"
+          ],
+          "practice_task": "阅读 README 与 rtl/systolic array/Readme.md，用自己的话画出 weight/data 在阵列中的流动方向示意图，并说明每个 cell 内三类寄存器（ALU 累加、weight 寄存器、data 寄存器）的作用。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库目录结构与源码组织",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库的目录结构：rtl/ 核心 RTL、Pre-Synthesis_Simulation/ 仿真与 SRAM 模型、syn/ 综合流程、pnr/ 布局布线、rtl/RTL_modified/ 扩展架构，以及各自承担的职责。",
+          "learning_goals": [
+            "识别 rtl/ 下五个核心模块文件及其作用",
+            "区分 Pre-Synthesis_Simulation 仿真目录与 rtl 综合目录的文件差异",
+            "了解 syn、pnr、RTL_modified 三大目录的用途"
+          ],
+          "source_files": [
+            "README.md",
+            "rtl/tpu_top.v"
+          ],
+          "minimal_modules": [
+            "目录划分",
+            "模块文件清单"
+          ],
+          "practice_task": "用 git ls-files 列出仓库全部文件，按 rtl / 仿真 / 综合 / 布局布线 / 扩展架构 五类整理一份文件归属表，并标注每个核心模块的存放路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "顶层模块 tpu_top 与系统级数据流",
+          "order": 3,
+          "filename": "u1-l3-tpu-top-datapath.md",
+          "level": "beginner",
+          "topic": "精读顶层模块 tpu_top.v，理解它如何例化 addr_sel、quantize、systolic、systolic_controll、write_out 五个子模块，以及 weight/data SRAM 读数据如何流入、量化结果如何写出。",
+          "learning_goals": [
+            "看懂 tpu_top 的端口（8 路 weight SRAM、8 路 data SRAM、三组写回端口、tpu_done）",
+            "理清五个子模块之间的 wire 连接关系与数据流向",
+            "理解内部信号 ori_data、quantized_data、matrix_index、cycle_num 的传递"
+          ],
+          "source_files": [
+            "rtl/tpu_top.v"
+          ],
+          "minimal_modules": [
+            "tpu_top 端口声明",
+            "五处模块例化",
+            "内部 wire/localparam"
+          ],
+          "practice_task": "依据 tpu_top.v 画出一张顶层框图，标注 clk/srstn/tpu_start 的控制路径、weight 与 data 的读入路径、以及 a/b/c 三组 SRAM 的写回路径，并在图上标出每个 wire 的位宽。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Verilog 参数化设计与定点数表示",
+          "order": 4,
+          "filename": "u1-l4-parameterization-fixedpoint.md",
+          "level": "beginner",
+          "topic": "讲解 ARRAY_SIZE、SRAM_DATA_WIDTH、DATA_WIDTH、OUTPUT_DATA_WIDTH 等参数与 localparam（ORI_WIDTH=DATA_WIDTH+DATA_WIDTH+5），以及 8bit 有符号定点输入、21bit 中间结果、16bit 量化输出的定点含义。",
+          "learning_goals": [
+            "掌握 parameter 与 localparam 的用法与 ORI_WIDTH 的推导",
+            "理解 8bit 输入（4 整数 4 小数）、21bit 乘加结果、16bit 输出的定点格式",
+            "了解 ARRAY_SIZE 如何把阵列从 8x8 扩展到 32x32"
+          ],
+          "source_files": [
+            "rtl/tpu_top.v",
+            "rtl/systolic.v",
+            "rtl/quantize.v"
+          ],
+          "minimal_modules": [
+            "参数声明",
+            "ORI_WIDTH/OUTCOME_WIDTH localparam",
+            "有符号位宽推导"
+          ],
+          "practice_task": "把 ARRAY_SIZE 改为一个新值（如 4），手动推算 ORI_WIDTH、mul_outcome、quantized_data 的位宽变化，并说明改参数后哪些模块的位宽会自动跟随、哪些不会。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "仿真环境搭建：testbench、SRAM 模型与激励",
+          "order": 5,
+          "filename": "u1-l5-sim-env-tb-sram.md",
+          "level": "beginner",
+          "topic": "介绍 Pre-Synthesis_Simulation 下的 testbench test_tpu.v 与各类 SRAM 行为模型，讲解时钟生成、复位、tpu_start 单脉冲激励与 $readmhb 加载矩阵数据的基本仿真框架。",
+          "learning_goals": [
+            "看懂 testbench 的时钟生成与复位/启动时序",
+            "理解 SRAM 行为模型（sram_16x128b 等）的读写时序与 char2sram 任务",
+            "了解 $readmemb 加载 mat1/mat2/golden 文件的方式"
+          ],
+          "source_files": [
+            "Pre-Synthesis_Simulation/test_tpu.v",
+            "Pre-Synthesis_Simulation/sram_16x128b.v",
+            "Pre-Synthesis_Simulation/sram_256x32b.v"
+          ],
+          "minimal_modules": [
+            "时钟与复位 initial 块",
+            "tpu_top 例化与 SRAM 例化",
+            "$readmemb 数据加载"
+          ],
+          "practice_task": "梳理 test_tpu.v 中例化了哪些 SRAM 模型、它们与 tpu_top 端口的连接关系，并写一段说明描述从 tpu_start 拉高到 tpu_finish 拉高之间 testbench 在等待什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "脉动阵列数据通路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "数据与权重的移位队列（weight_queue / data_queue）",
+          "order": 1,
+          "filename": "u2-l1-shift-queues.md",
+          "level": "intermediate",
+          "topic": "精读 systolic.v 中 weight_queue 与 data_queue 两个二维寄存器阵列，理解 SRAM 读数据如何被拆分成 8bit 喂入第 0 行/第 0 列，并在每个时钟沿向下、向右移位传递。",
+          "learning_goals": [
+            "理解 sram_rdata_w0/w1 如何按 8bit 切片填入 weight_queue 第 0 行",
+            "理解 data_queue 第 0 列的填入与整阵向右移位逻辑",
+            "掌握 weight 自上而下、data 自左而右的脉动传递机制"
+          ],
+          "source_files": [
+            "rtl/systolic.v"
+          ],
+          "minimal_modules": [
+            "weight_queue/data_queue 声明",
+            "第 0 行/列填入逻辑",
+            "移位 for 循环"
+          ],
+          "practice_task": "在纸上跟踪连续 3 个时钟周期内某一个内部 cell 的 weight_queue[i][j] 与 data_queue[i][j] 来源，画出每个周期该 cell 接收到的 weight 与 data 来自上游哪个 cell 或哪路 SRAM。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "MAC 乘加计算与累加时序",
+          "order": 2,
+          "filename": "u2-l2-mac-accumulate.md",
+          "level": "intermediate",
+          "topic": "讲解 systolic.v 的组合乘加逻辑：依据 cycle_num 与 FIRST_OUT/PARALLEL_START 判断每个 cell 当前应做新累加、继续累加还是保持，并理解符号扩展 {5{mul_result[15]}} 与 matrix_mul_2D/_nx 的时序/组合双份设计。",
+          "learning_goals": [
+            "理解 mul_result = weight_queue*data_queue 的逐 cell 乘法",
+            "掌握 cycle_num 门控下三种分支（首入/并行/累加/保持）的判断条件",
+            "理解 matrix_mul_2D（时序）与 matrix_mul_2D_nx（组合）的配合"
+          ],
+          "source_files": [
+            "rtl/systolic.v"
+          ],
+          "minimal_modules": [
+            "乘加 always@(*) 块",
+            "FIRST_OUT/PARALLEL_START localparam",
+            "符号扩展与累加"
+          ],
+          "practice_task": "选定一个 cell(i,j)，列出在 cycle_num 从 0 递增过程中它依次命中哪条分支（保持/累加/首入），并解释 (i+j) 与 cycle_num 的关系如何决定一个 cell 何时开始累加。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "结果收集与 mul_outcome 输出索引",
+          "order": 3,
+          "filename": "u2-l3-output-gather.md",
+          "level": "intermediate",
+          "topic": "讲解 systolic.v 最后一个 always@(*) 如何依据 matrix_index 计算 upper_bound/lower_bound，从 8x8 结果矩阵中按反对角线挑选 ARRAY_SIZE 个有效结果拼成 mul_outcome 输出。",
+          "learning_goals": [
+            "理解 matrix_index 如何映射到 upper_bound 与 lower_bound",
+            "掌握按反对角线 (i+j==bound) 收集结果的逻辑",
+            "理解 mul_outcome 各 OUTCOME_WIDTH 段的填入顺序"
+          ],
+          "source_files": [
+            "rtl/systolic.v"
+          ],
+          "minimal_modules": [
+            "upper/lower_bound 计算",
+            "两段 for 循环反对角线收集",
+            "mul_outcome 拼装"
+          ],
+          "practice_task": "对 matrix_index=0 与 matrix_index=ARRAY_SIZE（即 8）两种情况，分别写出 upper_bound/lower_bound 的值，并标出哪几个 matrix_mul_2D[i][j] 会被挑进 mul_outcome 的哪个输出段。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "控制器、地址与写回后处理",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "主控状态机 systolic_controll",
+          "order": 1,
+          "filename": "u3-l1-controller-fsm.md",
+          "level": "intermediate",
+          "topic": "精读 systolic_controll.v 的四状态机 IDLE→LOAD_DATA→WAIT1→ROLLING，理解它如何产生 alu_start、cycle_num、matrix_index、data_set、sram_write_enable、addr_serial_num 与 tpu_done。",
+          "learning_goals": [
+            "掌握四状态机的转移条件与 ROLLING 中的结束判断",
+            "理解 cycle_num、matrix_index、data_set 的递增与回绕规则",
+            "看懂三段式（状态/addr_sel/系统控制）组合输出"
+          ],
+          "source_files": [
+            "rtl/systolic_controll.v"
+          ],
+          "minimal_modules": [
+            "状态定义与转移 case",
+            "addr_serial_num 递增",
+            "ROLLING 中各计数器更新"
+          ],
+          "practice_task": "画出状态转移图，并标注在 ROLLING 状态下 matrix_index 从 0 计到 15、data_set 从 0 到 1 时 sram_write_enable 何时为 1、何时置 tpu_done。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "地址选择与输入歪斜 addr_sel",
+          "order": 2,
+          "filename": "u3-l2-addr-sel-skew.md",
+          "level": "intermediate",
+          "topic": "讲解 addr_sel.v 如何把单一 addr_serial_num 解码成 w0/w1/d0/d1 四组 SRAM 读地址，通过偏移与上界截断（127）实现喂入阵列所需的地址歪斜（skew）。",
+          "learning_goals": [
+            "理解 addr_serial_num 到 sram_raddr 的零扩展与偏移(-4)关系",
+            "掌握用上界截断到 127 产生空数据的做法",
+            "理解地址歪斜如何让 weight/data 在时间上对齐进入阵列"
+          ],
+          "source_files": [
+            "rtl/addr_sel.v"
+          ],
+          "minimal_modules": [
+            "四组 raddr_nx assign",
+            "截断到 127 的条件",
+            "输出打一拍 flip-flop"
+          ],
+          "practice_task": "对 addr_serial_num=0、4、50、100 四个取值，分别算出 sram_raddr_w0/w1/d0/d1 的值，并解释为什么 w1/d1 要比 w0/d0 滞后 4 个地址。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "输出写回 write_out（a/b/c 三端口）",
+          "order": 3,
+          "filename": "u3-l3-write-out.md",
+          "level": "intermediate",
+          "topic": "精读 write_out.v 三个 always@(*) 块，理解它如何依据 data_set 与 matrix_index 把量化后的 quantized_data 按反对角线重排写入 a/b/c 三组输出 SRAM，并管理写使能与写地址。",
+          "learning_goals": [
+            "理解 write_enable=0 表示写入的约定",
+            "掌握 data_set 与 matrix_index 共同决定写 a 还是 b/c 的逻辑",
+            "理解 quantized_data 到 sram_wdata 的反对角线重排与补零"
+          ],
+          "source_files": [
+            "rtl/write_out.v",
+            "rtl/tpu_top.v"
+          ],
+          "minimal_modules": [
+            "a/b/c 三段写逻辑",
+            "MAX_INDEX 重排",
+            "写使能/写地址生成"
+          ],
+          "practice_task": "对比 write_out 中 a、b、c 三组在 data_set=0 与 data_set=1 下写使能的互斥关系，写一份说明解释为什么需要三组输出 SRAM 来承接一批矩阵乘的全部反对角线结果。",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "后处理量化 quantize（饱和与定点截断）",
+          "order": 4,
+          "filename": "u3-l4-quantize.md",
+          "level": "intermediate",
+          "topic": "讲解 quantize.v 如何把 21bit（16 整数 +5 保护位）的乘加结果饱和截断到 16bit（8 整数 8 小数）输出，理解 max_val/min_val 饱和与正常截取分支。",
+          "learning_goals": [
+            "理解饱和量化到 ±32767/−32768 的三个分支",
+            "掌握 ori_shifted_data 切片与 OUTPUT_DATA_WIDTH 截取",
+            "理解从 21bit 到 16bit 的定点语义变化"
+          ],
+          "source_files": [
+            "rtl/quantize.v",
+            "rtl/systolic.v"
+          ],
+          "minimal_modules": [
+            "max_val/min_val localparam",
+            "饱和判断三分支",
+            "for 循环逐元素量化"
+          ],
+          "practice_task": "构造三个 ori_shifted_data 样例（一个远大于 max_val、一个远小于 min_val、一个在范围内），手算 quantize 输出，并说明若去掉饱和逻辑直接截取低位会在什么输入下出错。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "端到端仿真与验证闭环",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "测试数据加载 data2sram 与三批矩阵拼接",
+          "order": 1,
+          "filename": "u4-l1-data2sram-loading.md",
+          "level": "intermediate",
+          "topic": "精读 testbench 的 data2sram 任务，理解如何把三批 8x8 矩阵按 i%4 错位拼接成 tmp_mat1/tmp_mat2，再通过 char2sram 写入 a0/a1/b0/b1 四块读 SRAM，模拟进入/稳态/离开三种工况。",
+          "learning_goals": [
+            "理解三批矩阵拼接到 tmp_c_mat 的移位合并过程",
+            "掌握按 i%4 进行字节级错位（0/8/16/24bit 偏移）的目的",
+            "理解 char2sram 将 4 个 8bit 打包写入 32bit SRAM 字的方式"
+          ],
+          "source_files": [
+            "Pre-Synthesis_Simulation/test_tpu.v"
+          ],
+          "minimal_modules": [
+            "data2sram 任务",
+            "i%4 错位 case",
+            "char2sram 调用"
+          ],
+          "practice_task": "跟踪一个具体矩阵元素从 mat1 数组经过 tmp_c_mat1、tmp_mat1 到最终写入某块 SRAM 某地址的位变换路径，解释 i%4 错位为什么能模拟脉动阵列的输入时序。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "golden 参考比对与结果验证流程",
+          "order": 2,
+          "filename": "u4-l2-golden-verify.md",
+          "level": "intermediate",
+          "topic": "讲解 golden_transform 任务把 golden1/2/3 重排成反对角线形式，以及主流程如何在 tpu_finish 后逐地址比对 c0/c1/c2 输出 SRAM 与 trans_golden，打印 PASS 或失败明细并统计总周期数。",
+          "learning_goals": [
+            "理解 golden_transform 的反对角线重排逻辑",
+            "掌握三组输出 SRAM 与三套 golden 的对应比对流程",
+            "理解用 cycle_cnt 统计一次完整三批矩阵乘所耗周期"
+          ],
+          "source_files": [
+            "Pre-Synthesis_Simulation/test_tpu.v"
+          ],
+          "minimal_modules": [
+            "golden_transform 任务",
+            "c0/c1/c2 逐地址比对",
+            "PASS/FAIL 与 cycle_cnt 输出"
+          ],
+          "practice_task": "说明 golden 文件为何必须经过 trans_golden 反对角线重排才能与 SRAM 逐地址比对，并设计一个最小改动：让 testbench 在发现第一处不一致时不仅打印明细，还同时输出该地址期望值与实际值的十六进制。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "ASIC 后端流程与 FPGA 集成",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Design Compiler 综合流程与脚本",
+          "order": 1,
+          "filename": "u5-l1-dc-synthesis-flow.md",
+          "level": "advanced",
+          "topic": "精读 syn/scripts/syn.tcl，理解 analyze/elaborate/link、uniquify、check_design、clock gating、compile_ultra 以及写出 netlist/sdc/ddc 的完整 DC 综合流程与 Nangate 工艺库设置。",
+          "learning_goals": [
+            "理解 search_path/link_library/target_library 的工艺库设置",
+            "掌握 compile_ultra 的关键选项（gate_clock/exact_map/no_autoungroup）",
+            "理解 analyze-elaborate-link 与 write 输出产物的对应关系"
+          ],
+          "source_files": [
+            "syn/scripts/syn.tcl",
+            "syn/report/synth_resources.rpt"
+          ],
+          "minimal_modules": [
+            "工艺库设置",
+            "编译与优化选项",
+            "报告与输出"
+          ],
+          "practice_task": "依据 syn.tcl 列出从读入 RTL 到产出 .v/.sdc/.ddc 的命令顺序，并说明 set_fix_multiple_port_nets 与 remove_unconnected_ports 在综合里各起什么作用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "时序约束 cons.tcl 与综合结果解读",
+          "order": 2,
+          "filename": "u5-l2-constraints-qor.md",
+          "level": "advanced",
+          "topic": "讲解 syn/cons/cons.tcl 的时钟（3.01ns）、I/O 延迟、clock uncertainty、false path、wireload 与面积约束，并解读 synth_qor.rpt 的关键路径、面积、单元数与违例情况。",
+          "learning_goals": [
+            "理解 create_clock 3.01ns 与 set_clock_uncertainty/false_path 的作用",
+            "掌握 set_max_area/set_max_fanout 等约束的含义",
+            "能读懂 QoR 报告中的 slack、面积、leaf cell 数与违例"
+          ],
+          "source_files": [
+            "syn/cons/cons.tcl",
+            "syn/report/synth_qor.rpt",
+            "syn/report/synth_area.rpt",
+            "syn/report/synth_power.rpt"
+          ],
+          "minimal_modules": [
+            "时钟与 I/O 约束",
+            "wireload/面积约束",
+            "QoR 关键指标"
+          ],
+          "practice_task": "对照 synth_qor.rpt 说明本设计是否满足 3.01ns 时序（slack、违例路径数），并解释 Critical Path Clk Period 与 README 中 3ns 周期目标的关系；若把周期收紧到 2.5ns，预判哪些指标会恶化。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "ICC2 布局布线 PnR 六阶段流程",
+          "order": 3,
+          "filename": "u5-l3-icc2-pnr-flow.md",
+          "level": "advanced",
+          "topic": "梳理 pnr/scripts 下 0~6 号脚本构成的 ICC2 流程：design_setup、floorplan、powerplan、placement、clock_tree（CTS）、route、verify_and_output，理解每阶段目标与关键命令。",
+          "learning_goals": [
+            "理解 floorplan 的 utilization/flip_first_row/io2core 设置",
+            "掌握 CTS 的 clock_opt、set_fix_hold、derive_pg_connection",
+            "理解 placement→route→verify 的递进与时序收敛目标"
+          ],
+          "source_files": [
+            "pnr/scripts/1_floorplan.tcl",
+            "pnr/scripts/4_clock_tree.tcl",
+            "pnr/scripts/6_verify_and_output.tcl",
+            "pnr/scripts/5_route.tcl"
+          ],
+          "minimal_modules": [
+            "floorplan 阶段",
+            "CTS 阶段",
+            "route 与 verify"
+          ],
+          "practice_task": "把 0~6 号脚本按顺序整理成一张流程表，标注每阶段的输入、关键命令与产出（save_mw_cel），并说明 CTS 阶段为什么要在路由前先做 clock_opt 再 derive_pg_connection。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "FPGA 综合与 SoC 顶层集成",
+          "order": 4,
+          "filename": "u5-l4-fpga-soc-integration.md",
+          "level": "advanced",
+          "topic": "讲解 RTL_modified 下的 tpu.v/tpu_system.v 这类 FPGA SoC 顶层（CLOCK_50、HEX 显示、KEY、SW、LEDR 与 HPS DDR3 接口），以及 README 中提到的 Vivado FPGA 综合结果，理解 TPU 如何作为 SoC 的一部分。",
+          "learning_goals": [
+            "理解 FPGA 顶层的引脚分配与外设（七段码、按键、开关、LED）",
+            "掌握 HPS DDR3 memory 接口信号集的作用",
+            "理解 TPU 加速器与 SoC/总线集成的整体形态"
+          ],
+          "source_files": [
+            "rtl/RTL_modified/tpu.v",
+            "rtl/RTL_modified/tpu_system.v",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "FPGA 引脚声明",
+            "HPS DDR3 接口",
+            "Qsys 系统例化"
+          ],
+          "practice_task": "对比 tpu.v（FPGA 纯逻辑顶层）与 ASIC 后端流程的差异，列出在 FPGA 上把 TPU 接入 SoC 至少需要处理哪几类信号（时钟、复位、总线、存储），并说明 hex3_hex0 显示映射的取反逻辑原因。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "扩展 TPU 架构（RTL_modified）与系统集成",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "扩展 TPU 架构总览（top.v 数据通路）",
+          "order": 1,
+          "filename": "u6-l1-rtl-modified-overview.md",
+          "level": "advanced",
+          "topic": "精读 rtl/RTL_modified/top.v，理解以 master_control 为调度核心、sysArr 为计算阵列、配合 inputMem/weightMem/outputMem、accumTable、reluArr、weightFifo 等模块构成的更完整 TPU 数据通路。",
+          "learning_goals": [
+            "理解 top.v 中 master_control 对各模块的统一调度",
+            "掌握 inputMem→sysArr→accumTable→reluArr→outputMem 的主数据流",
+            "理解 sys_arr_active 两拍延迟与 data_mem_calc_done 的产生"
+          ],
+          "source_files": [
+            "rtl/RTL_modified/top.v"
+          ],
+          "minimal_modules": [
+            "master_control 调度",
+            "sysArr 计算",
+            "存储与输出侧模块组"
+          ],
+          "practice_task": "依据 top.v 画出扩展架构的完整数据通路框图，标出 weight 从 weightMem 经 weightFifo 进入 sysArr、结果经 accumTable/reluArr 写入 outputMem 的路径，并指出哪些信号由 master_control 统一下发。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "权重 FIFO 与歪斜喂入（weightFifo / dff8）",
+          "order": 2,
+          "filename": "u6-l2-weight-fifo.md",
+          "level": "advanced",
+          "topic": "精读 weightFifo.v 与 dff8.v，理解由 DATA_WIDTH×FIFO_DEPTH 个 D 触发器构成的移位 FIFO 如何按列共享使能、逐级传递权重，从而为 sysArr 提供时间上歪斜的权重输入。",
+          "learning_goals": [
+            "理解 dff8 的带使能/复位 D 触发器行为",
+            "掌握 weightFifo 用 generate 动态连接各级 DFF 与按列共享 en 的结构",
+            "理解 FIFO_DEPTH 决定权重歪斜拍数的作用"
+          ],
+          "source_files": [
+            "rtl/RTL_modified/weightFifo/weightFifo.v",
+            "rtl/RTL_modified/weightFifo/dff8.v"
+          ],
+          "minimal_modules": [
+            "dff8 时序逻辑",
+            "generate 级联与列使能",
+            "FIFO 深度参数化"
+          ],
+          "practice_task": "对 FIFO_INPUTS=4、FIFO_DEPTH=4 的配置，画出一组 weightIn 在连续 4 个时钟周期内逐级移到 weightOut 的过程，并说明 colEn 如何让同一列所有 DFF 共享一个使能信号。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "累加表 accumTable 与 ReLU 激活输出",
+          "order": 3,
+          "filename": "u6-l3-accumtable-relu.md",
+          "level": "advanced",
+          "topic": "讲解 top.v 中 accumTable 及其读写控制（accumTableWr_control/accumTableRd_control）如何按子矩阵行列索引累积多次矩阵乘结果，再经 reluArr 做 ReLU 激活写入 outputMem，实现大于阵列尺寸的矩阵分块计算。",
+          "learning_goals": [
+            "理解 accumTable 用子矩阵(submat_row/col)索引支持分块累加",
+            "掌握 wr/rd control 如何把 sysArr 列有效信号转成写使能与地址",
+            "理解 reluArr 的激活作用与 MAX_MAT_WH 支持的大矩阵输出"
+          ],
+          "source_files": [
+            "rtl/RTL_modified/top.v"
+          ],
+          "minimal_modules": [
+            "accumTable 及 wr/rd control",
+            "子矩阵索引与分块累加",
+            "reluArr 激活"
+          ],
+          "practice_task": "解释 accumTable 如何让 16x16 的 sysArr 计算超过 16 行/列的大矩阵乘（结合 submat_row/submat_col 与 mat_row），并说明 accum_clear 与 relu_en 各在什么阶段生效。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Avalon 总线接口与控制指令（busConn / matrixMultiplier）",
+          "order": 4,
+          "filename": "u6-l4-avalon-bus-interface.md",
+          "level": "advanced",
+          "topic": "精读 busConn.v（matrixMultiplier 模块），理解它如何把 Avalon MM slave 的地址空间划分成 CONTROL/INPUT/WEIGHT/OUTPUT 四段，解码出 RESET/FILL_FIFO/DRAIN_FIFO/MULTIPLY 等控制命令并驱动 TPU。",
+          "learning_goals": [
+            "理解 slave_address 高位划分四类地址空间的机制",
+            "掌握 slave_writedata[3:0] 解码出的四条控制命令",
+            "理解读侧如何回传 outputMem 数据与三类 done 状态"
+          ],
+          "source_files": [
+            "rtl/RTL_modified/busConn.v"
+          ],
+          "minimal_modules": [
+            "四类地址偏移宏",
+            "控制命令解码 case",
+            "总线读回逻辑"
+          ],
+          "practice_task": "整理一张"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Avalon 总线接口与控制指令（busConn / matrixMultiplier）",
+          "order": 4,
+          "filename": "u6-l4-avalon-bus-interface.md",
+          "level": "advanced",
+          "topic": "精读 busConn.v（matrixMultiplier 模块），理解它如何把 Avalon MM slave 的地址空间划分成 CONTROL/INPUT/WEIGHT/OUTPUT 四段，解码出 RESET/FILL_FIFO/DRAIN_FIFO/MULTIPLY 等控制命令并驱动 TPU。",
+          "learning_goals": [
+            "理解 slave_address 高位划分四类地址空间的机制",
+            "掌握 slave_writedata[3:0] 解码出的四条控制命令",
+            "理解读侧如何回传 outputMem 数据与三类 done 状态"
+          ],
+          "source_files": [
+            "rtl/RTL_modified/busConn.v"
+          ],
+          "minimal_modules": [
+            "四类地址偏移宏",
+            "控制命令解码 case",
+            "总线读回逻辑"
+          ],
+          "practice_task": "整理一张主机访问表：对每个地址空间列出读写含义与对应 TPU 内部信号，并指出 busConn 中例化的 top 端口与 top.v 实际端口存在差异（待确认），分析这种总线封装带来的好处。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
