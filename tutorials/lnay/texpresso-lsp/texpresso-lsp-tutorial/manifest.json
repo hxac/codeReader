@@ -1,0 +1,360 @@
+{
+  "project": "texpresso-lsp",
+  "head": "c13ec89e84758ba32fe6d2e8ccfd402abb8c311d",
+  "rationale": "项目体量较小（src/ 下仅 server.ts / process-manager.ts / types.ts 三个核心文件），但横跨「LSP 协议、子进程管理、自定义 NDJSON 通信协议」三个领域，因此按「认识项目 → 核心模块 → 高级机制与扩展」三层递进设计。入门层先让读者跑起来项目、看懂目录与入口、建立 LSP 心智模型；进阶层沿「配置 → 进程管理器 → JSON 行协议 → 文档同步」这条服务器内部主链路深入，这是理解后续所有功能的基础；专家层按功能专题（实时预览与编译、SyncTeX 正反向搜索、错误处理与进程生命周期）拆分，最后以「架构取舍与二次开发」收尾，帮助读者从读懂源码过渡到改造源码。讲义之间的依赖严格对应真实代码的调用顺序，确保读者始终能顺着实际源码阅读与上手实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识项目：定位、运行与入口",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：texpresso-lsp 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 texpresso-lsp 的定位：一个用 TypeScript 编写的 LSP 服务器，封装 TeXpresso 可执行文件，为 LaTeX 提供实时预览与正反向搜索能力。",
+          "learning_goals": [
+            "理解项目要解决的问题与实验性质",
+            "了解 TeXpresso 可执行文件与本 LSP 服务器的关系",
+            "掌握整体架构：编辑器 ⇄ LSP 服务器 ⇄ texpresso 子进程"
+          ],
+          "source_files": [
+            "README.md",
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "项目背景与目的",
+            "已实现与未实现的功能清单",
+            "三层架构概览"
+          ],
+          "practice_task": "阅读 README 后，画出「编辑器 / texpresso-lsp / texpresso 子进程」三者之间的数据流图，并列出当前已实现（实时预览、逆向搜索）和未实现（正向搜索跟随光标）的功能。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建、运行与编辑器集成",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何安装依赖、构建 TypeScript、启动服务器，以及通过 npm 全局安装并配置编辑器以初始化选项连接该 LSP。",
+          "learning_goals": [
+            "掌握 npm 脚本 build/start/dev/watch 的用途",
+            "理解 texpresso 可执行文件的前置依赖与 PATH 要求",
+            "学会用初始化选项在编辑器中连接 texpresso-lsp --stdio"
+          ],
+          "source_files": [
+            "README.md",
+            "package.json",
+            "bin/texpresso-lsp.sh"
+          ],
+          "minimal_modules": [
+            "依赖安装与构建命令",
+            "运行方式",
+            "编辑器集成与初始化选项"
+          ],
+          "practice_task": "在本地执行 npm install 与 npm run build，然后参照 README 的初始化选项示例，为一个支持 LSP 的编辑器（如 zed + 对应扩展，或自定义 LSP 客户端）编写连接 texpresso-lsp --stdio 的配置，并记录启动时控制台输出。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与入口文件链路",
+          "order": 3,
+          "filename": "u1-l3-structure-and-entry.md",
+          "level": "beginner",
+          "topic": "逐文件讲解项目结构（src/、bin/、.github/、配置文件），并定位程序入口 dist/server.js 与 npm bin 脚本的调用链路。",
+          "learning_goals": [
+            "理解项目的目录组织",
+            "看懂 package.json 的 main / bin / scripts 字段",
+            "理解 tsconfig.json 的 rootDir / outDir 映射，定位 server.ts 为唯一源码入口"
+          ],
+          "source_files": [
+            "package.json",
+            "tsconfig.json",
+            "bin/texpresso-lsp.sh",
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "目录布局",
+            "package.json 关键字段",
+            "tsconfig 编译映射与入口链路"
+          ],
+          "practice_task": "构建后画出「源码 src/server.ts → 编译产物 dist/server.js → bin/texpresso-lsp.sh → npm bin 字段」的入口调用链，并说明 tsconfig 中 strict 模式对代码编写的影响。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "LSP 基础与连接建立",
+          "order": 4,
+          "filename": "u1-l4-lsp-connection-basics.md",
+          "level": "beginner",
+          "topic": "介绍 LSP 协议基础与 vscode-languageserver 库，精读 server.ts 顶部的连接创建、TextDocuments 监听、listen() 调用，以及 onInitialize 如何声明服务器能力。",
+          "learning_goals": [
+            "理解 LSP 客户端/服务器基于 stdio 的通信模型",
+            "掌握 createConnection / ProposedFeatures / TextDocuments 的作用",
+            "读懂 onInitialize 返回的 capabilities（textDocumentSync、documentHighlightProvider）"
+          ],
+          "source_files": [
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "LSP 协议概念",
+            "连接与文档管理器",
+            "capabilities 声明"
+          ],
+          "practice_task": "在 onInitialize 返回对象中找到 textDocumentSync 的取值并解释 Incremental 增量同步的含义；尝试临时移除 documentHighlightProvider 字段，预测并验证编辑器侧的行为变化（待确认）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心模块：配置、进程与协议",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "配置体系与类型定义",
+          "order": 1,
+          "filename": "u2-l1-config-and-types.md",
+          "level": "intermediate",
+          "topic": "精读 types.ts 的 ServerConfig 与 WorkspaceSettings 接口，结合 server.ts 中的 defaultInitOpts / defaultWorkspaceSettings 以及 onInitialize 里对 initializationOptions 的合并逻辑，理解配置如何流入服务器。",
+          "learning_goals": [
+            "区分初始化选项（ServerConfig）与工作区设置（WorkspaceSettings）",
+            "理解 root_tex / texpresso_path / inverse_search 三类配置项的用途",
+            "掌握默认值与 ?? 空值合并的写法"
+          ],
+          "source_files": [
+            "src/types.ts",
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "ServerConfig 接口",
+            "WorkspaceSettings 接口",
+            "默认值与初始化选项合并"
+          ],
+          "practice_task": "阅读 types.ts，指出当前未被实际使用的接口（如 CustomRule / AnalysisResult / DocumentStatistics）；并为 inverse_search 编写一份适用于自己常用编辑器（如 VS Code / codium）的 command 与 arguments 配置。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "进程管理器 TexpressoProcessManager",
+          "order": 2,
+          "filename": "u2-l2-process-manager.md",
+          "level": "intermediate",
+          "topic": "精读 process-manager.ts 的类结构：构造函数、start()/stop() 生命周期、child_process.spawn 启动子进程、isRunning 状态管理，以及继承 EventEmitter 的设计。",
+          "learning_goals": [
+            "理解用 child_process.spawn 启动子进程的方式与参数",
+            "掌握进程生命周期与 isRunning 状态管理",
+            "理解 start() 中用 Promise + 超时等待首次 stdout 的技巧"
+          ],
+          "source_files": [
+            "src/process-manager.ts",
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "spawn 子进程",
+            "生命周期 start/stop",
+            "状态管理与超时等待"
+          ],
+          "practice_task": "跟踪 onInitialize 中 new TexpressoProcessManager(...) 传入的参数（executablePath、[\"-json\",\"-lines\"]、rootTex），解释构造函数里 args.push(this.rootTex) 的作用；并用 Node 写一个最小脚本以相同方式 spawn 任意命令并打印其 PID。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "JSON 行协议与命令分发",
+          "order": 3,
+          "filename": "u2-l3-json-line-protocol.md",
+          "level": "intermediate",
+          "topic": "精读 process-manager.ts 中 stdout 的逐行缓冲、JSON 解析、事件 emit，以及 sendCommand 向 stdin 写入 JSON 数组的逻辑，理解 LSP 与 texpresso 之间基于换行分隔 JSON（NDJSON）的通信协议。",
+          "learning_goals": [
+            "理解按行缓冲（stdout_buffer）解决数据半包问题的必要性",
+            "掌握 JSON 数组协议 [command, ...data] 的编码与解码",
+            "理解 emit(command, data) 的事件分发机制"
+          ],
+          "source_files": [
+            "src/process-manager.ts",
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "行缓冲",
+            "JSON 解析与容错",
+            "命令写入与事件分发"
+          ],
+          "practice_task": "解释缓冲逻辑中 lines.pop() 的作用（为何能正确处理不完整的末尾行）；列出 server.ts 中所有 texpressoProcess.on(...) 监听的事件名及其含义；用 Node 实现一个最小的 NDJSON 收发示例（一端写、一端按行解析）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "文档同步机制",
+          "order": 4,
+          "filename": "u2-l4-document-sync.md",
+          "level": "intermediate",
+          "topic": "精读 server.ts 中 documents.onDidOpen / onDidClose / onDidChangeTextDocument，理解 LSP 增量文档同步如何转换为发送给 texpresso 的 open / close / change-range 命令。",
+          "learning_goals": [
+            "理解 TextDocumentSyncKind.Incremental 的含义",
+            "掌握 onDidOpen 发送完整文本与 onDidChangeTextDocument 发送 change-range 增量的差异",
+            "理解 URI.parse 与 path 转换在命令参数中的作用"
+          ],
+          "source_files": [
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "onDidOpen 发送全文",
+            "onDidChangeTextDocument 增量 change-range",
+            "onDidClose 与 URI 处理"
+          ],
+          "practice_task": "对照 change-range 命令构造的 6 元素数组，逐项说明每个元素对应 LSP change 中的哪个字段；并思考代码注释 \"can this be out of sync?\" 所暗示的潜在一致性隐患。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "高级机制与扩展实践",
+      "level": "advanced",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "实时预览与编译流程",
+          "order": 1,
+          "filename": "u3-l1-preview-and-compile.md",
+          "level": "advanced",
+          "topic": "精读 documents.onDidSave 的完整链路：用 is_texpresso_tonic_running 标志防重入、spawn texpresso-tonic 做编译、退出后 sendCommand(\"rescan\")，理解「保存即重编译」的预览刷新机制。",
+          "learning_goals": [
+            "理解 onDidSave 触发的 texpresso-tonic 编译流程",
+            "掌握用布尔标志防止 tonic 重入的简单并发控制",
+            "理解 rescan 命令的作用及相关 TODO 注释的含义"
+          ],
+          "source_files": [
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "onDidSave 链路",
+            "texpresso-tonic 编译",
+            "rescan 与防重入"
+          ],
+          "practice_task": "画出从保存事件到预览更新的时序图（onDidSave → spawn tonic → exit → rescan）；评估当前 is_texpresso_tonic_running 标志在快速连续保存时是否存在竞态或丢更新问题。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "SyncTeX 正反向搜索",
+          "order": 2,
+          "filename": "u3-l2-synctex-search.md",
+          "level": "advanced",
+          "topic": "精读两套搜索机制：反向搜索（texpresso 的 synctex 事件 → 替换 %f/%l → spawn 编辑器命令）与正向搜索（onDocumentHighlight → sendCommand(\"synctex-forward\")），并理解 preview_follow_cursor 开关的作用。",
+          "learning_goals": [
+            "理解反向搜索从 PDF 定位到源码的事件链",
+            "掌握 %f / %l 占位符替换与命令拼接",
+            "理解借用 documentHighlight 请求作为正向搜索触发器的设计及其副作用"
+          ],
+          "source_files": [
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "synctex 事件与反向搜索",
+            "占位符替换与命令拼接",
+            "synctex-forward 与 documentHighlight、preview_follow_cursor 开关"
+          ],
+          "practice_task": "解释为何 onDocumentHighlight 始终返回空数组却能驱动正向搜索；为另一个编辑器（如 code / codium）编写 inverse_search 配置，并验证 %f / %l 的替换结果。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "错误处理与进程生命周期",
+          "order": 3,
+          "filename": "u3-l3-error-and-lifecycle.md",
+          "level": "advanced",
+          "topic": "系统梳理 server.ts 与 process-manager.ts 中的错误与生命周期处理：onInitialize 的 try/catch、error/stderr/exit 事件转发、sendCommand 守卫、onShutdown 优雅停止，以及 parse-fail 容错。",
+          "learning_goals": [
+            "理解进程 error / stderr / exit 三类事件如何在 server.ts 转发到 LSP 日志",
+            "掌握 start / stop / onShutdown 的协同",
+            "理解 JSON 解析失败时返回 [\"parse-fail\", line] 的容错策略"
+          ],
+          "source_files": [
+            "src/process-manager.ts",
+            "src/server.ts"
+          ],
+          "minimal_modules": [
+            "事件转发",
+            "try/catch 边界与 sendCommand 守卫",
+            "parse-fail 容错与 shutdown"
+          ],
+          "practice_task": "列出代码中所有 connection.console.error / warn 调用点并说明各自触发场景；分析 stop() 在进程已退出的情况下被调用是否安全，并给出依据。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "架构取舍与二次开发",
+          "order": 4,
+          "filename": "u3-l4-architecture-and-extensions.md",
+          "level": "advanced",
+          "topic": "从整体视角审视「薄封装」设计哲学与可扩展点：如何新增一对 texpresso 命令（emit 与 sendCommand）、运行期工作区配置（onInitialized / onDidChangeConfiguration）、未完成功能（forward search TODO）与未使用类型，以及该实现的性能与工程取舍。",
+          "learning_goals": [
+            "理解为何用 Node/TS 做「薄封装」是合理选择",
+            "掌握新增一个 texpresso 命令需要在协议两端各加哪些代码",
+            "理解运行期工作区配置的热更新机制",
+            "能识别代码中的 TODO/FUTURE 注释与技术债"
+          ],
+          "source_files": [
+            "src/server.ts",
+            "src/types.ts",
+            "src/process-manager.ts",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "薄封装哲学",
+            "新增命令的扩展点",
+            "运行期配置热更新",
+            "技术债与未来工作"
+          ],
+          "practice_task": "为当前仅打日志的 append-lines 事件设计一个更有意义的处理逻辑（如格式化输出到 LSP 日志或转换成 diagnostics），写出需要在协议两端（emit 与 sendCommand 调用处）各补充哪些代码；并列出 README 中尚未实现的功能，讨论其实现思路。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,390 @@
+# LSP 基础与连接建立
+
+## 1. 本讲目标
+
+[u1-l3](u1-l3-structure-and-entry.md) 把整条入口链路追到了终点：`require('../dist/server.js')` 加载模块后，顶层语句 [src/server.ts:281](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L281) 的 `connection.listen()` 被执行，服务器开始「服务」。但 u1-l3 全程停留在**静态结构**——它只确认了「这一行会被执行」，没有回答一个更根本的问题：
+
+> `connection.listen()` 到底在「听」什么？`connection` 这个对象又是怎么来的？编辑器是怎么知道「对面这个进程是一个 LSP 服务器、而不是一个普通的命令行工具」的？
+
+本讲就从 `server.ts` 的顶部一行行往下读，把这三件事讲清楚。学完本讲你应该能够：
+
+1. 用一句话说清 **LSP（Language Server Protocol）** 要解决的问题，并解释「客户端/服务器基于 stdio 的通信模型」为什么能让任意编辑器接入同一个语言服务器。
+2. 看懂 `server.ts` 顶部三件套——`createConnection(ProposedFeatures.all)`、`new TextDocuments(TextDocument)`、`documents.listen(connection)`——分别负责什么，以及 `connection` 这个「混入对象」是如何把「LSP 方法」和「应用自己的状态」拼在一起的。
+3. 读懂 `onInitialize` 回调返回的 `capabilities`（`textDocumentSync: TextDocumentSyncKind.Incremental` 与 `documentHighlightProvider: true`），并解释 `Incremental` 增量同步的含义。
+
+本讲是「静态骨架」到「运行期行为」的转折点：之后所有讲义（配置合并、文档同步、预览、SyncTeX）都建立在「连接已建立、握手已完成」的前提上。本讲只到「握手」为止，握手之后的具体命令收发留给 [u2-l3](u2-l3-json-line-protocol.md) 与 [u2-l4](u2-l4-document-sync.md)。
+
+## 2. 前置知识
+
+- **什么是「协议（protocol）」**：两方要通信，就得先约定「用什么格式说话、按什么顺序一来一回」。HTTP 是浏览器和 Web 服务器之间的协议；本讲的 LSP 是**编辑器和语言服务器之间的协议**。协议的价值在于「换了一方，另一方不用改」——浏览器换成 `curl`，Web 服务器照常工作；编辑器从 VS Code 换成 Zed，语言服务器也照常工作。
+- **进程间通信（IPC）与 stdio**：两个独立进程之间没法直接读对方的内存，必须通过操作系统提供的「通道」传数据。最朴素也最通用的通道就是 **stdio**——标准输入（stdin）和标准输出（stdout）。LSP 默认就用 stdio：编辑器把请求**写进**语言服务器的 stdin，从语言服务器的 stdout **读出**响应。这就是 README 要求用 `texpresso-lsp --stdio` 启动的根本原因（见 [README.md:27](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/README.md#L27)）。
+- **JSON-RPC**：LSP 的消息格式建立在 JSON-RPC 之上——每条消息是一段 JSON，里面有 `id`（请求编号）、`method`（方法名，如 `"initialize"`）、`params`（参数）等字段。本讲不会逐字段拆 JSON-RPC，只要知道「双方约定好用 JSON 文本来交换请求和响应」即可。
+- **TypeScript 的对象展开（spread）`...obj`**：`{ a: 1, ...b }` 会把 `b` 的所有属性「摊开」塞进新对象，若与前面的 `a` 同名则后面的覆盖前面的。本讲 `connection` 对象正是用这个写法把「真实 LSP 连接」的所有方法合并进一个自定义对象，读懂这个语法是 4.2 节的关键。
+
+> 本讲承接 [u1-l3](u1-l3-structure-and-entry.md) 末尾的 `connection.listen()`。如果你对 `server.ts` 是「唯一源码入口」、或 `texpresso-lsp --stdio` 这条命令的来源还不清楚，请先回看 u1-l3 的 4.1 与 4.3 节。本讲也会少量提到「三层架构」（编辑器 ⇄ texpresso-lsp ⇄ texpresso 子进程），它完整版的解释在 [u1-l1](u1-l1-project-overview.md)。
+
+## 3. 本讲源码地图
+
+本讲几乎只围绕一个文件展开，但会顺带用到另外两个作为「边界确认」。
+
+| 文件 | 本讲用到哪一部分 | 作用 |
+| --- | --- | --- |
+| [src/server.ts](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts) | 第 1–44 行（导入、`connection`、`documents`、`listen`）、第 46–131 行（`onInitialize`）、第 281 行（`connection.listen()`） | **本讲核心**：连接的创建、文档管理器的挂载、握手与能力声明全在这里。 |
+| [bin/texpresso-lsp.sh](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/bin/texpresso-lsp.sh) | 第 2 行 `require('../dist/server.js')` | 确认「加载模块即触发顶层 `connection.listen()`」的入口，承接 u1-l3。 |
+| [README.md](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/README.md) | 第 27 行 `texpresso-lsp --stdio` | 说明 `--stdio` 这个启动参数从哪来。 |
+
+> 本讲**不深入** `src/process-manager.ts` 与 `src/types.ts` 的内部实现——它们分别是 [u2-l2](u2-l2-process-manager.md) 与 [u2-l1](u2-l1-config-and-types.md) 的主题。本讲只把 `onInitialize` 里 `new TexpressoProcessManager(...)` 当作「握手阶段顺带启动了子进程」这一事实来提及，点到为止。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 LSP 协议概念
+
+#### 4.1.1 概念说明
+
+在 LSP 出现之前，每写一个编辑器，就得为它单独写一套「补全、跳转、诊断」逻辑；每多支持一门语言，工作量就翻倍。这是一个「M 个编辑器 × N 种语言 = M×N 份重复实现」的困境。
+
+**LSP（Language Server Protocol）** 把这个问题拆成了「M + N」：它规定了一种**标准的对话方式**，让「编辑器（客户端）」和「语言能力提供方（服务器）」解耦——
+
+- 任何编辑器只要**会按 LSP 说话**，就能接入任何 LSP 服务器；
+- 任何 LSP 服务器只要**按 LSP 暴露能力**，就能被任何支持 LSP 的编辑器使用。
+
+texpresso-lsp 正是这样一个「LSP 服务器」：它的客户端可以是 Zed（README 推荐的 [zed-texpresso](https://github.com/lnay/zed-texpresso) 扩展），也可以是任何能跑 LSP 客户端的编辑器。本项目用 TypeScript 写、依赖 `vscode-languageserver` 库，只是**实现手段**——LSP 本身和语言无关。
+
+需要特别澄清一个容易混淆的点（[u1-l1](u1-l1-project-overview.md) 已强调过）：**texpresso-lsp 不是 LaTeX 渲染器，也不是编译器**。它只做「翻译官」——把编辑器发来的 LSP 请求，翻译成给 `texpresso` 子进程的命令；把子进程回报的事件，再翻译回 LSP 世界。真正的渲染/编译由 `texpresso` 本体和 `texpresso-tonic` 完成。所以本讲关注的「LSP 协议」，只覆盖「编辑器 ⇄ texpresso-lsp」这一段，不覆盖「texpresso-lsp ⇄ texpresso 子进程」那一段（后者是自定义 JSON 行协议，见 [u2-l3](u2-l3-json-line-protocol.md)）。
+
+#### 4.1.2 核心流程
+
+LSP 通信的两个核心特征是「**传输方式**」和「**消息格式**」：
+
+```text
+  编辑器（LSP 客户端）                          texpresso-lsp（LSP 服务器）
+        │                                              │
+        │   ① 以 texpresso-lsp --stdio 启动子进程       │
+        │ ───────────────────────────────────────────► │  连到子进程的 stdin/stdout
+        │                                              │
+        │   ② initialize 请求（JSON-RPC，写进 stdin）   │
+        │ ───────────────────────────────────────────► │  onInitialize 被调用
+        │                                              │  → 启动 texpresso 子进程
+        │   ③ InitializeResult 响应（含 capabilities） │   → 返回能力清单
+        │ ◄─────────────────────────────────────────── │
+        │                                              │
+        │   ④ initialized 通知                         │
+        │ ───────────────────────────────────────────► │  onInitialized 被调用
+        │                                              │
+        │   ⑤ 此后各种 textDocument/* 请求与通知        │
+        │ ◄══════════════════════════════════════════► │  （文档同步、高亮、保存……）
+```
+
+- **传输方式 = stdio**：编辑器把语言服务器当成一个子进程启动（命令是 `texpresso-lsp --stdio`），然后**往它的 stdin 写请求、从它的 stdout 读响应**。`--stdio` 这个参数就是告诉服务器「用标准输入输出作为传输通道」。同一台机器、无需开端口，是最简朴也最通用的 IPC 方式。
+- **消息格式 = JSON-RPC（带 `Content-Length` 头）**：每条消息是一段 JSON，前面带一个表示长度的头部，方便对方「按长度切分消息」，避免粘包。好消息是——这些底层细节 `vscode-languageserver` 库都替我们处理了，`server.ts` 里**一行都没写**。
+
+整个过程的关键节奏是「**先握手，再干活**」：客户端必须先发 `initialize`、等服务端返回能力清单、再发 `initialized` 确认，之后才能发业务请求。握手这一步正是 4.3 节要精读的 `onInitialize`。
+
+#### 4.1.3 源码精读
+
+**`--stdio` 从哪来**：
+
+[README.md:27](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/README.md#L27) —— README 明确要求编辑器用 `texpresso-lsp --stdio` 启动语言服务器。这个 `--stdio` 不是项目自定义的参数，而是 LSP 传输方式的标志：它告诉 `vscode-languageserver` 的 `createConnection`「请用进程的 stdin/stdout 建立连接」。本仓库的代码没有自己去解析 `--stdio`，这件事由库在 [src/server.ts:37](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L37) 的 `createConnection(ProposedFeatures.all)` 内部完成（详见 4.2.3）。
+
+**`server.ts` 顶部那一大串导入，几乎全部来自 `vscode-languageserver`**：
+
+[src/server.ts:1-13](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L1-L13) —— 从 `vscode-languageserver/node` 导入了 `createConnection`、`TextDocuments`、`ProposedFeatures`、`TextDocumentSyncKind` 以及一系列 `*Params` / `*Result` 类型。这些就是「LSP 协议在 TypeScript 里的化身」：协议里每一个请求/通知，在库里都有对应的类型与处理函数。本讲会用到其中三个（`createConnection`、`ProposedFeatures`、`TextDocuments`），其余在后续讲义用到时再展开。
+
+> 小结：LSP 是「编辑器 ⇄ 语言服务器」之间的标准协议，传输走 stdio、消息走 JSON-RPC；`vscode-languageserver` 库把协议细节封装好，`server.ts` 只需调用它的高级 API。本节没有需要单独标注「待确认」的库内部行为——`--stdio` 选 stdio 传输、库封装 JSON-RPC，都是该库文档化的公开约定。
+
+#### 4.1.4 代码实践
+
+**实践目标**：用最朴素的方式「看见」LSP 就是「stdin 写请求 / stdout 读响应」的文本交换，建立直观感受。这是一个**源码阅读 + 思考型实践**，不需要真的接一个编辑器。
+
+**操作步骤**：
+
+1. 回看 [src/server.ts:281](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L281) 的 `connection.listen()`，确认它是模块顶层语句（不在任何函数内）。结合 [bin/texpresso-lsp.sh:2](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/bin/texpresso-lsp.sh#L2) 的 `require('../dist/server.js')`，回答：为什么编辑器一启动这个进程，服务器就立刻「开始监听」，而不需要额外敲一条「启动」命令？
+2. 在 README 里找到 [README.md:27](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/README.md#L27) 的初始化选项示例，注意它列出的三个字段（`root_tex`、`texpresso_path`、`inverse_search`）。这些是 LSP 握手阶段由客户端通过 `initializationOptions` 传进来的——它们走的是 4.1.2 图里的第 ② 步（`initialize` 请求），不是命令行参数。先记住这个区分，4.3 节会看到代码怎么接收它们。
+3. （可选，待本地验证）若本地已 `npm run build` 且装了 `texpresso`，可手动构造一条 `initialize` 请求写进进程 stdin，观察 stdout 是否回吐一段含 `capabilities` 的 JSON。这需要按 LSP 的 `Content-Length` 头格式拼消息，较繁琐，做不出也无妨——本讲的目的是建立「LSP = 文本交换」的直觉，而非精通报文格式。
+
+**需要观察的现象**：
+
+- 第 1 步：`connection.listen()` 是顶层语句，所以「模块被加载」与「服务器开始监听」是同一件事。
+- 第 2 步：README 的初始化选项和命令行的 `--stdio` 是**两条不同的信息通道**——`--stdio` 决定「怎么传」，`initializationOptions` 决定「传什么配置」。
+
+**预期结果**：你能清楚区分 LSP 的「传输方式（`--stdio`）」与「握手时携带的配置（`initializationOptions`）」，并理解为什么服务器进程一拉起就开始服务。
+
+> 若本地无 Node/texpresso 环境，第 3 步标注「待本地验证」即可；第 1、2 步纯阅读，结论确定。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：既然 LSP 让「M 个编辑器 × N 种语言」从 M×N 变成了 M+N，那为什么 texpresso-lsp 还要单独存在，而不是直接把 LSP 能力做进 `texpresso` 本体（C 写的那个）？
+
+**参考答案**：理论上确实可以把 LSP 实现进 `texpresso` 本体，但那样就要在 C 里处理「stdio 上的 JSON-RPC 帧解析、编辑器握手、文档同步模型」——这些恰恰是 Node/TS 生态（`vscode-languageserver`）最擅长、最现成的部分。texpresso-lsp 选择做一个**薄壳**（见 [README.md:15-17](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/README.md#L15-L17)），把「LSP 这一摊麻烦事」交给 JS，把「渲染/编译/SyncTeX」留给 C 本体，两边用简单的 JSON 行协议沟通（[u2-l3](u2-l3-json-line-protocol.md)）。这是典型的「用合适的工具做合适的事」的工程取舍。
+
+**练习 2**：LSP 的「客户端」和「服务器」分别跑在谁的进程里？
+
+**参考答案**：服务器（texpresso-lsp）是被编辑器当作**子进程**拉起的——编辑器是父进程，通过子进程的 stdin/stdout 与之通信。所以「客户端在编辑器进程里，服务器是编辑器 spawn 出来的子进程」。而 texpresso-lsp 自己又会再 spawn 一个 `texpresso` 子进程（见 4.3 节），于是形成了 [u1-l1](u1-l1-project-overview.md) 讲过的三层：编辑器 → texpresso-lsp → texpresso。
+
+---
+
+### 4.2 连接与文档管理器
+
+#### 4.2.1 概念说明
+
+要「按 LSP 说话」，需要一个能收发 JSON-RPC 消息的对象——在 `vscode-languageserver` 里它就叫 **`Connection`**，由 `createConnection` 创建。但本项目的 `connection` 不只是库返回的那个连接：作者用对象展开（spread）把它和「应用自己的状态」合并成了一个自定义对象。这是本节最值得品味的写法。
+
+光有连接还不够。LSP 有一大块功能叫**文档同步（document sync）**——编辑器每打开、修改、关闭一个文件，都要告诉服务器。如果每次都让 `server.ts` 自己去解析这些通知、自己维护「当前打开了哪些文件、内容是什么」，会非常繁琐。于是库提供了第二个帮手：**`TextDocuments` 文档管理器**。它自动监听并解析文档同步通知，在内存里维护每个文档的最新全文，业务代码只需在它暴露的事件（`onDidOpen` / `onDidChangeTextDocument` / `onDidSave` / `onDidClose`）上挂回调即可。
+
+所以本节的两个主角是：
+
+- **`createConnection`**：建立「能收发 LSP 消息」的连接（传输层）。
+- **`TextDocuments`**：建立「能跟踪文档变化」的内存模型（文档层），并通过 `documents.listen(connection)` 把它**挂到**连接上。
+
+#### 4.2.2 核心流程
+
+`server.ts` 顶部把这两件事用三步搭起来：
+
+```text
+第①步  createConnection(ProposedFeatures.all)
+        │  建立一个走 stdio 的 LSP 连接，并启用所有（含提案中的）特性
+        ▼
+第②步  const documents = new TextDocuments(TextDocument)
+        │  新建一个文档管理器，用 vscode-languageserver-textdocument 的 TextDocument 做工厂
+        ▼
+第③步  documents.listen(connection)
+        │  让文档管理器「订阅」连接上的文档同步通知
+        │  此后 open/change/close/save 通知会自动进入 documents 的事件流
+        ▼
+（后续）connection.onInitialize(...)   挂上握手回调（4.3 节）
+       documents.onDidOpen(...) 等     挂上业务回调（u2-l4 详解）
+       connection.listen()             真正开始收发消息（第 281 行）
+```
+
+一个容易踩的坑：**`documents.listen(connection)` 和末尾的 `connection.listen()` 是两件不同的事**。前者是「让文档管理器**订阅**连接」（注册监听器），后者是「让连接**开始工作**」（真正开始读写 stdio）。名字都叫 `listen`，但主语不同、职责不同。前者必须在后者之前调用，否则连接一旦开始工作，文档管理器还没挂上去，就会漏掉早期的通知。
+
+#### 4.2.3 源码精读
+
+**第 ② 步：`connection` 是一个「混入对象」**（本节重点）：
+
+[src/server.ts:33-38](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L33-L38) —— 这段代码用一个对象字面量做了三件事：
+
+```typescript
+const connection = {
+    init_options: defaultInitOpts,            // 应用状态：初始化选项
+    workspace_config: defaultWorkspaceSettings,// 应用状态：工作区设置
+    is_texpresso_tonic_running: false,         // 应用状态：编译进程防重入标志
+    ...createConnection(ProposedFeatures.all), // 展开：真实 LSP 连接的所有方法
+};
+```
+
+- 前三行是**应用自己的状态**：`init_options`（配置，4.3 节会用）、`workspace_config`（工作区设置）、`is_texpresso_tonic_running`（编译防重入标志，[u3-l1](u3-l1-preview-and-compile.md) 会用）。
+- 最后一行 `...createConnection(ProposedFeatures.all)` 把库返回的真实连接的**所有方法**（`onInitialize`、`onDidChangeTextDocument`、`console`、`workspace`、`listen`、……）一股脑儿「摊开」合并进来。
+
+合并之后，这个 `connection` 既能当 LSP 连接用（`connection.onInitialize(...)`、`connection.listen()`），又能当应用状态容器用（`connection.init_options.root_tex`）。这是一种很实用的「**把工具对象和业务状态捏在一起**」的写法——省得再单独声明一个全局 `state` 变量。代价是「连接」和「状态」的概念被混在同一个对象上，阅读时要注意区分某个属性是库给的还是应用自己加的。
+
+> 关于 `ProposedFeatures.all`：`createConnection` 接收一个「特性函数」参数，`ProposedFeatures.all` 表示「启用所有特性，包括 LSP 规范里尚处于提案（proposed）阶段的部分」。这是该库推荐的通用写法，能让服务器用上最新的协议能力。本讲不需要区分「已定稿」与「提案」特性，知道「它把全套特性都开了」即可。
+
+**第 ② 步的另一半：创建文档管理器**：
+
+[src/server.ts:39](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L39) —— `new TextDocuments(TextDocument)`。`TextDocuments` 是文档管理器，传入的 `TextDocument`（来自 [src/server.ts:14](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L14) 导入的 `vscode-languageserver-textdocument`）是它内部用来创建文档实例的「工厂」。创建出来的 `documents` 对象随后会被业务代码大量使用（如 `documents.onDidOpen`、`documents.get(uri)`），是文档同步的核心入口。
+
+[src/server.ts:40](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L40) —— `let texpressoProcess: TexpressoProcessManager;`。这里只是**声明**了子进程管理器的变量（用 `let`，因为要等到 `onInitialize` 里才 `new` 出来赋值）。注意 `let` 而非 `const`：握手前它还是 `undefined`，握手时才被赋值。如果有人在握手完成前就调用依赖它的回调，会出错——这是一个潜在的时序约束，4.3 节会看到作者用 try/catch 兜底。
+
+**第 ③ 步：把文档管理器挂到连接上**：
+
+[src/server.ts:42-44](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L42-L44) —— 注释写得很清楚：「让文档管理器监听连接上的 open / change / close 事件」。调用之后，`documents` 就和 `connection` 绑定了：连接上一旦收到 `textDocument/didOpen` 等通知，`documents` 会自动更新内部模型，并把这些事件转发给它自己的 `onDidOpen` 等回调。
+
+**真正开始工作：`connection.listen()`**：
+
+[src/server.ts:281](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L281) —— 文件**最后一行**才是 `connection.listen()`。它调用的是「被展开进来的」连接方法，作用是「真正开始读写 stdio、派发收到的消息」。注意它和 [src/server.ts:44](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L44) 的 `documents.listen(connection)` 名字一样但完全不同（见 4.2.2 的提醒）。把它放在文件末尾是一种常见编排：先把所有回调（`onInitialize`、`onDidChangeTextDocument`、`onShutdown`、……）都挂好，最后再 `listen()` 开始派发，避免「消息来了但回调还没挂」的竞态。
+
+#### 4.2.4 代码实践
+
+**实践目标**：把「连接」「文档管理器」「应用状态」三者在一个对象上的混入关系亲手梳理一遍，并验证两个 `listen` 的区别。这是本讲承接 u1-l3 的核心实践。
+
+**操作步骤**：
+
+1. 打开 [src/server.ts:33-38](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L33-L38)，画一张表，把 `connection` 对象的属性分成两列：「应用自己加的状态」（`init_options` / `workspace_config` / `is_texpresso_tonic_running`）与「从 `createConnection` 展开进来的方法」（在文件里搜索 `connection.` 开头的调用，能找到 `onInitialize` / `onInitialized` / `onDidChangeConfiguration` / `onDidChangeTextDocument` / `onDocumentHighlight` / `onShutdown` / `listen` / `console` / `workspace` 等）。
+2. 在 [src/server.ts](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts) 中分别定位 `documents.listen(connection)`（第 44 行）和 `connection.listen()`（第 281 行），用自己的话写一句各自的职责。
+3. 思考：如果有人把第 281 行的 `connection.listen()` **移到文件最顶部**（第 33 行之前），会发生什么？提示——考虑「回调还没挂好，消息就来了」的时序。
+
+**需要观察的现象**：
+
+- 第 1 步：能清晰区分哪些属性是库给的（连接方法）、哪些是应用自定义的（状态字段）。
+- 第 2 步：两个 `listen` 主语不同——`documents.listen(connection)` 让文档管理器订阅连接；`connection.listen()` 让连接开始工作。
+- 第 3 步：意识到「先挂回调、最后 listen」是一种刻意的时序保护。
+
+**预期结果**：你能解释「为什么 `connection` 既像 LSP 连接、又像全局状态容器」，并能讲清两个同名 `listen` 的差异与时序约束。
+
+> 本实践为纯源码阅读与推理，无需运行环境，结论确定。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`const connection = { ...createConnection(ProposedFeatures.all) };` 如果改成 `const connection = createConnection(ProposedFeatures.all);`（不要混入状态，状态另开一个全局对象保存），会有什么不同？哪种更好？
+
+**参考答案**：功能上完全等价——状态放哪都能存。当前写法把状态「寄生」在 `connection` 上，好处是「想拿配置/连接，统一从 `connection` 一个对象取」，调用处写起来短（如 `connection.init_options.root_tex`）；代价是「连接」与「应用状态」概念混在一起，初读时容易困惑哪个属性来自库。改成拆开则更「干净」、职责清晰，但调用处会变成 `connection.xxx` + `state.xxx` 两套对象。本项目体量小，选了「省事」的混入写法；更大的项目里通常会更强调分离。这是风格取舍，没有绝对对错。
+
+**练习 2**：`documents.listen(connection)` 和 `connection.listen()` 能不能调换顺序（先 `connection.listen()` 再 `documents.listen(connection)`）？
+
+**参考答案**：不应该调换。`connection.listen()` 一旦执行，连接就开始从 stdio 读消息并派发；如果此时 `documents` 还没挂上去（`documents.listen` 还没调），那么在这之间到达的 `textDocument/didOpen` 等通知就可能无人接收、或导致文档管理器模型与真实状态不一致。先 `documents.listen(connection)` 注册监听、最后再 `connection.listen()` 开闸放消息，正是为了避免这种竞态。这也解释了为什么 [src/server.ts:281](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L281) 把 `connection.listen()` 放在文件最末尾。
+
+---
+
+### 4.3 capabilities 声明
+
+#### 4.3.1 概念说明
+
+握手（`initialize` 请求 / `InitializeResult` 响应）是 LSP 最关键的一步。客户端在握手时问服务器「**你能做什么**」，服务器用一份**能力清单（capabilities）**回答。客户端之后只使用服务器声明过的能力——服务器没声明的，客户端绝不会发对应请求。
+
+这份能力清单就是 `InitializeResult` 里的 `capabilities` 字段。texpresso-lsp 声明了两个能力：
+
+1. **`textDocumentSync`**：文档同步方式——告诉客户端「请按什么粒度把文档变化同步给我」。本项目声明为 `TextDocumentSyncKind.Incremental`（增量同步）。
+2. **`documentHighlightProvider`**：是否提供「文档高亮」能力。本项目声明为 `true`——但稍后会看到（[u3-l2](u3-l2-synctex-search.md) 详述），这里其实是「借壳」：服务器并不真的提供高亮，只是借用这个请求来触发正向 SyncTeX 搜索。
+
+`onInitialize` 还干了另一件重要的事：**在这个回调里启动 `texpresso` 子进程**。也就是说，握手不只是「填一张能力表」，还顺带「把后面的工人（子进程）叫到岗」。这是 texpresso-lsp 的一个重要设计决定——子进程的生命周期与 LSP 连接的握手紧耦合。本节聚焦 `capabilities`，子进程启动的细节留给 [u2-l2](u2-l2-process-manager.md)，错误兜底留给 [u3-l3](u3-l3-error-and-lifecycle.md)。
+
+#### 4.3.2 核心流程
+
+`onInitialize` 回调的执行逻辑（聚焦握手与能力声明，省略事件挂载等后续步骤）：
+
+```text
+connection.onInitialize(async (params) => {           ← 客户端发来 initialize 请求
+    try {
+        ① 合并 initializationOptions 到 connection.init_options
+           （root_tex / texpresso_path / inverse_search，用 ?? 兜默认值）
+        ② new TexpressoProcessManager(executablePath, ["-json","-lines"], rootTex)
+           await texpressoProcess.start()              ← 子进程在这里启动
+        ③ 挂上 texpressoProcess 的 error/stderr/exit/synctex/append-lines 事件
+        ④ return {
+              capabilities: {
+                  textDocumentSync: TextDocumentSyncKind.Incremental,  ← 能力①：增量同步
+                  documentHighlightProvider: true,                     ← 能力②：高亮（借壳）
+              },
+           }
+    } catch (error) {
+        记日志并 throw（握手失败 → 客户端得知服务器不可用）
+    }
+})
+```
+
+要点：
+
+- 回调是 `async`，因为里面 `await texpressoProcess.start()` 要等子进程就绪（[u2-l2](u2-l2-process-manager.md) 会讲它如何「等 stdout 首次有数据或 5 秒超时」）。在 `start()` 完成前，不会返回 `capabilities`——客户端也就一直等着。这意味着：**如果子进程启动失败，整个握手就失败**。
+- `capabilities` 必须在 `return` 里给齐。客户端拿到后，今后只会按这份清单来发请求。
+
+关于 `TextDocumentSyncKind` 的三种取值（按 LSP 规范）：
+
+| 取值 | 含义 | 客户端的行为 |
+| --- | --- | --- |
+| `None`（0） | 不同步 | 客户端不发任何文档变化通知 |
+| `Full`（1） | 全量同步 | 每次变化，客户端把**整篇文档**重新发给服务器 |
+| `Incremental`（2） | 增量同步 | 每次变化，客户端只发**改动的那一小段**（范围 + 新文本） |
+
+> 上述枚举值（0/1/2）来自公开的 LSP 规范与 `vscode-languageserver-types` 的实现。本项目用 `TextDocumentSyncKind.Incremental` 这个**符号名**而非魔法数字 `2`，可读性更好——这正是导入 [src/server.ts:5](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L5) 的目的。
+
+#### 4.3.3 源码精读
+
+**`onInitialize` 的注册与签名**：
+
+[src/server.ts:46-47](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L46-L47) —— `connection.onInitialize(async (params: InitializeParams): Promise<InitializeResult> => { ... })`。这是「注册握手回调」：把一个函数交给连接，等客户端发来 `initialize` 请求时，连接自动调用它。入参 `params`（`InitializeParams`）携带客户端传来的信息（包括 `initializationOptions`）；返回值是一个 `Promise<InitializeResult>`，因为函数是 `async` 的，库会等这个 Promise resolve 后再把结果作为响应发回客户端。
+
+**第 ① 步：合并初始化选项**（承接 4.1.4 第 2 步的「配置走 initialize 请求」）：
+
+[src/server.ts:48-62](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L48-L62) —— 用 `let init_params = params.initializationOptions` 取出客户端传来的配置；若存在，就**逐字段**用 `??`（空值合并）把客户端的值与 [src/server.ts:20-27](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L20-L27) 的默认值合并，写进 `connection.init_options`。`a ?? b` 的意思是「`a` 不为 `null`/`undefined` 就用 `a`，否则用 `b`」——即「客户端给了就用客户端的，没给就用默认值」。这一段细节是 [u2-l1](u2-l1-config-and-types.md) 的主题，本节只需知道「握手阶段接收了配置」。
+
+**第 ② 步：启动子进程**：
+
+[src/server.ts:64-71](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L64-L71) —— 用合并后的配置 `new TexpressoProcessManager(connection.init_options.texpresso_path, ["-json", "-lines"], connection.init_options.root_tex)` 创建管理器，并 `await texpressoProcess.start()` 启动它。`start()` 内部用 `child_process.spawn` 拉起 `texpresso` 子进程（详见 [src/process-manager.ts:24](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/process-manager.ts#L24) 与 [u2-l2](u2-l2-process-manager.md)）。成功后打一条 `connection.console.info("Texpresso process started successfully")`——注意 `connection.console` 是库提供的「往 LSP 客户端日志通道输出」的对象，不是 Node 的 `console`。
+
+**第 ③ 步：挂子进程事件**：
+
+[src/server.ts:74-116](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L74-L116) —— 给 `texpressoProcess` 挂上 `error` / `stderr` / `exit` / `synctex` / `append-lines` 五个事件的回调。这些事件来自子进程的 stdout/stderr，是「texpresso-lsp ⇄ texpresso 子进程」那一端的通信（见 [u2-l3](u2-l3-json-line-protocol.md)）。本节不展开，只需知道「握手阶段就把这些监听挂好了，确保子进程任何消息都不会漏」。
+
+**第 ④ 步：返回能力清单（本节核心）**：
+
+[src/server.ts:118-123](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L118-L123) —— 返回的 `InitializeResult` 只有一个 `capabilities` 字段，里面两项：
+
+```typescript
+capabilities: {
+    textDocumentSync: TextDocumentSyncKind.Incremental,  // src/server.ts:120
+    documentHighlightProvider: true,                     // src/server.ts:121
+},
+```
+
+- [src/server.ts:120](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L120) —— `textDocumentSync: TextDocumentSyncKind.Incremental`。声明「请客户端按**增量**方式同步文档」：编辑器里每改一个字符，客户端只发送「改动的范围 + 新文本」给服务器，而不是重发整篇。这对大文件特别重要——全量同步每次都传整篇，开销巨大；增量同步只传一小段，几乎无感。具体的增量处理在 [src/server.ts:204-226](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L204-L226) 的 `onDidChangeTextDocument` 里，把每个 `change.range` 转成发给 texpresso 的 `change-range` 命令——这是 [u2-l4](u2-l4-document-sync.md) 的主题。
+- [src/server.ts:121](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L121) —— `documentHighlightProvider: true`。声明「我能处理文档高亮请求」。但看 [src/server.ts:229-268](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L229-L268) 的 `onDocumentHighlight` 实现会发现，它**始终返回空数组 `[]`**（[src/server.ts:266](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L266)），真正做的事是借用这个请求去发 `synctex-forward` 命令、让预览跟随光标。这是一种「**借壳触发**」的取巧设计——声明一个现成的 LSP 能力，只是为了白嫖它「光标停留时自动触发」的时机。详细剖析见 [u3-l2](u3-l2-synctex-search.md)。
+
+**兜底：握手失败怎么办**：
+
+[src/server.ts:124-129](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L124-L129) —— 整个回调体包在 `try/catch` 里。若子进程启动失败（如 `texpresso` 不在 PATH、或 5 秒超时），`catch` 会用 `connection.console.error` 记一条日志，然后 `throw error` 把异常重新抛出——这会让握手以失败告终，客户端据此知道「这个服务器不可用」。注意这里的类型收窄写法 `error instanceof Error ? error.message : String(error)`，正是 [u1-l3](u1-l3-structure-and-entry.md) 4.3.3 讲过的 `strict` 模式下 `catch` 变量为 `unknown` 的直接产物。
+
+#### 4.3.4 代码实践
+
+**实践目标**：亲手定位 `onInitialize` 返回的 `capabilities`，理解 `Incremental` 的含义，并通过一个「思想实验」预测「移除某项能力」的后果。对应本讲规格里的实践任务。
+
+**操作步骤**：
+
+1. **定位 `textDocumentSync` 的取值**：在 [src/server.ts:120](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L120) 找到 `textDocumentSync: TextDocumentSyncKind.Incremental`。按 4.3.2 节的对照表，写出 `Incremental` 对应的数值（2）与含义（只发改动的那一小段，不重发整篇）。
+2. **解释「增量」为什么重要**：设想一个 5000 行的 `.tex` 文件，用户每敲一个字符就触发一次同步。若是 `Full`，每敲一键就传整篇 5000 行；若是 `Incremental`，每敲一键只传「第 X 行第 Y 列插入了一个字符 `a`」这样几十字节的消息。把这个对比用自己的话写一遍。
+3. **思想实验：移除 `documentHighlightProvider`**：假设把 [src/server.ts:121](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L121) 这一行删掉，重新构建。预测：编辑器还会不会发 `textDocument/documentHighlight` 请求？结合 [src/server.ts:229-268](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L229-L268) 的 `onDocumentHighlight` 回答——不发请求的话，`synctex-forward` 还会被触发吗？预览还能跟随光标吗？（待本地验证）
+4. **（可选）实测验证**：本地 `npm run build` 后，用一个 LSP 客户端连上服务器，分别观察「保留 / 删除 `documentHighlightProvider`」两种情况下，光标停留时预览是否跟随。**实验后务必恢复代码**（本讲不得修改源码，这只是临时本地实验）。
+
+**需要观察的现象**：
+
+- 第 1 步：能准确说出 `Incremental = 2` 及其「只发增量」的含义。
+- 第 3 步：能推断出——删除该能力后，客户端不再发高亮请求 → `onDocumentHighlight` 不被调用 → `synctex-forward` 不发 → 预览不再跟随光标（前提是 `preview_follow_cursor` 依赖这条链路，详见 [u3-l2](u3-l2-synctex-search.md)）。
+
+**预期结果**：你理解了 `capabilities` 是「服务器对客户端的能力承诺」，移除一项能力就会让对应的整条链路失效；并且能解释 `Incremental` 同步对大文件性能的意义。
+
+> 第 3、4 步涉及「删代码后预测/验证行为」，标注「待本地验证」；第 1、2 步为阅读与推理，结论确定。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：`onInitialize` 是 `async` 函数且内部 `await texpressoProcess.start()`。如果 `start()` 永远不 resolve（比如子进程 hang 住），会发生什么？
+
+**参考答案**：`onInitialize` 的 Promise 永远不 resolve，服务器就一直不返回 `InitializeResult`，客户端的 `initialize` 请求会一直挂起。但 [src/process-manager.ts:65-81](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/process-manager.ts#L65-L81) 的 `start()` 内部设了一个 5 秒 `setTimeout`——若子进程 5 秒内 stdout 没有任何数据，就会 `reject(new Error("Process start timeout"))`。这个 reject 会冒泡到 [src/server.ts:124](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L124) 的 `catch`，被记日志后 `throw`，握手以失败告终。所以「永远不 resolve」实际被 5 秒超时兜住了——这是一个有意的防护（详见 [u2-l2](u2-l2-process-manager.md)、[u3-l3](u3-l3-error-and-lifecycle.md)）。
+
+**练习 2**：为什么 `textDocumentSync` 要用 `TextDocumentSyncKind.Incremental` 这个符号常量，而不是直接写数字 `2`？
+
+**参考答案**：可读性。看到 `TextDocumentSyncKind.Incremental` 立刻知道是「增量同步」；看到 `2` 则必须去查规范才知道含义。而且符号常量有类型保障——`TextDocumentSyncKind` 是一个枚举，传一个非法值会被 tsc 在编译期拦下；直接写数字则失去了这层检查。这正是 [src/server.ts:5](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L5) 专门导入它的原因。
+
+**练习 3**：`onInitialize` 返回的 `capabilities` 里**没有** `completionProvider`（补全）、`hoverProvider`（悬停提示）等字段。这意味着什么？
+
+**参考答案**：意味着 texpresso-lsp **不提供**这些能力。按 LSP 约定，客户端只会使用服务器声明过的能力——服务器没在 `capabilities` 里声明的，客户端绝不会发对应请求。所以编辑器里不会有「TeX 补全」「悬停文档」这类来自本服务器的功能（若编辑器自己有，那是编辑器自带的，与本服务器无关）。这与项目定位一致：它只做「实时预览 + 正反向搜索」，不做完整的语言智能。`capabilities` 清单就是这一定位的直接体现。
+
+---
+
+## 5. 综合实践
+
+**任务**：产出一份《texpresso-lsp 连接建立时序说明书》，把本讲三个最小模块（LSP 协议概念、连接与文档管理器、capabilities 声明）串成一份「从启动到握手完成」的完整时序文档。
+
+请按顺序完成：
+
+1. **画 LSP 时序图**：以 4.1.2 节的时序图为蓝本，补全每一步在 `server.ts` 中的**真实代码出处**。例如：
+   - 「客户端发 `initialize`」→ 触发 [src/server.ts:46-47](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L46-L47) 的 `onInitialize`；
+   - 「服务器返回 `capabilities`」→ [src/server.ts:118-123](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L118-L123)。
+   在每个箭头旁标注对应的行号。
+2. **拆解 `connection` 对象**：列一张表，把 `connection` 的属性分成「应用状态」与「库方法」两类（参考 4.2.4 第 1 步），并指出它是由 `...createConnection(ProposedFeatures.all)` 展开得到的。
+3. **解释两个 `listen`**：在时序图上标出 `documents.listen(connection)`（[src/server.ts:44](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L44)，注册监听）与 `connection.listen()`（[src/server.ts:281](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L281)，开始工作）的位置，说明为什么顺序不能反。
+4. **写 capabilities 小节**：逐项解释 `textDocumentSync: Incremental`（含数值 2、增量含义、对大文件的意义）与 `documentHighlightProvider: true`（含「借壳触发 synctex-forward」的事实），并预测删掉其中任一项的后果。
+5. **反思**：在说明书结尾回答——「为什么 texpresso 子进程要在 `onInitialize` 里启动，而不是等收到第一个文档请求时再启动？」提示：考虑握手是客户端判断「服务器是否可用」的唯一时机（见 4.3 与练习 1）。
+
+> 涉及「删代码验证」的部分请标注「待本地验证」；其余各步可完全基于本讲源码精读完成。
+
+## 6. 本讲小结
+
+- **LSP** 是「编辑器 ⇄ 语言服务器」之间的标准协议，把「M 个编辑器 × N 种语言」的 M×N 困境降为 M+N；它走 **stdio 传输、JSON-RPC 消息**，`--stdio` 启动参数就是传输方式标志（[README.md:27](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/README.md#L27)）。
+- `vscode-languageserver` 库封装了协议细节；`server.ts` 顶部三件套搭建连接：`createConnection(ProposedFeatures.all)` 建连接、`new TextDocuments(TextDocument)` 建文档管理器、`documents.listen(connection)` 把后者挂到前者上（[src/server.ts:33-44](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L33-L44)）。
+- `connection` 是一个**混入对象**：用 `...createConnection(...)` 把真实连接的所有方法，与应用自己的状态（`init_options` / `workspace_config` / `is_texpresso_tonic_running`）合并在一起（[src/server.ts:33-38](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L33-L38)）。
+- 两个同名 `listen` 职责不同：`documents.listen(connection)` 注册监听、`connection.listen()`（[src/server.ts:281](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L281)）才真正开始收发消息；先挂回调、最后 `listen`，是刻意的时序保护。
+- 握手在 `onInitialize` 里完成（[src/server.ts:46-131](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L46-L131)）：它合并初始化选项、启动 `texpresso` 子进程，并返回 `capabilities` 清单。
+- 能力清单声明了两项：`textDocumentSync: TextDocumentSyncKind.Incremental`（增量同步，按 LSP 规范其值为 2，只传改动不传整篇）与 `documentHighlightProvider: true`（借壳触发正向 SyncTeX，实际返回空数组）；客户端只会使用服务器声明过的能力（[src/server.ts:118-123](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L118-L123)）。
+
+## 7. 下一步学习建议
+
+至此你已经把「连接是怎么建立的、握手是怎么完成的」看透了——`server.ts` 从顶部的导入到第 131 行的 `onInitialize` 结束，这一段不再是黑盒。u1 入门层到此基本完成：你已知项目是什么（u1-l1）、怎么跑（u1-l2）、由哪些文件组成（u1-l3）、怎么连上编辑器（本讲）。
+
+接下来有两条路，按你的兴趣选：
+
+- **沿「握手时拿到的配置」往里走**：读 [u2-l1 配置体系与类型定义](u2-l1-config-and-types.md)，正式拆解 [src/types.ts](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/types.ts) 里的 `ServerConfig` / `WorkspaceSettings`，弄清本讲反复提到的 `init_options` / `workspace_config` 的类型结构，以及 `inverse_search` 的 `%f` / `%l` 占位符设计。
+- **沿「握手时启动的子进程」往里走**：读 [u2-l2 进程管理器 TexpressoProcessManager](u2-l2-process-manager.md)，拆解 [src/process-manager.ts](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/process-manager.ts) 的 `spawn` 子进程、`start`/`stop` 生命周期与本讲提到的「5 秒超时等待 stdout」机制。
+
+如果想直接看「握手之后，文档怎么同步」，可以跳到 [u2-l4 文档同步机制](u2-l4-document-sync.md)——它会用本讲建立的 `TextDocumentSyncKind.Incremental` 概念，解释 [src/server.ts:204-226](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L204-L226) 如何把增量变化翻译成 `change-range` 命令。建议按 u2-l1 → u2-l2 → u2-l3 → u2-l4 的顺序读完整个进阶单元，建立完整的服务器内部主链路图。
