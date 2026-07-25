@@ -357,7 +357,7 @@ src/types.ts           ─┘                                        dist/proces
 
 **练习 3**：`forceConsistentCasingInFileNames: true` 防的是什么 bug？本项目里能找到对应的潜在风险点吗？
 
-**参考答案**：它防止「文件名大小写不一致」导致的跨平台 bug——例如某人把 `./types` 误写成 `./Types`，在大小写不敏感的 macOS/Windows 上能跑，但到了大小写敏感的 Linux（比如本项目 CI 所用的 ubuntu-latest，见 [.github/workflows/npm-publish.yml:24](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/.github/workflows/npm-publish.yml#L24)）上就会找不到文件。本项目里 [src/server.ts:15-16](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L15-L16) 的 `./types`、`./process-manager` 都是全小写、与磁盘文件名一致，所以目前没有问题——这个开关是一道预防性保险。
+**参考答案**：它防止「文件名大小写不一致」导致的跨平台 bug——例如某人把 `./types` 误写成 `./Types`，在大小写不敏感的 macOS/Windows 上能跑，但到了大小写敏感的 Linux（比如本项目 CI 所用的 ubuntu-latest，见 [.github/workflows/npm-publish.yml:23](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/.github/workflows/npm-publish.yml#L23)）上就会找不到文件。本项目里 [src/server.ts:15-16](https://github.com/lnay/texpresso-lsp/blob/c13ec89e84758ba32fe6d2e8ccfd402abb8c311d/src/server.ts#L15-L16) 的 `./types`、`./process-manager` 都是全小写、与磁盘文件名一致，所以目前没有问题——这个开关是一道预防性保险。
 
 ---
 
