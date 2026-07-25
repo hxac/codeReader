@@ -2,400 +2,431 @@
 
 ## 1. 本讲目标
 
-本讲是「二次开发与扩展」单元的第一讲，承接 u3-l3（ModelEngine 与模型前向）和 u5-l1（模型架构范式）。前面所有讲义默认的都是 TensorRT-LLM 的**默认 PyTorch 后端**——模型由人工编写的 `modeling_*.py` 实现，前向逻辑手工写死、手工优化。本讲要打开的是第二条执行路径——**AutoDeploy（Beta）后端**。
+前面几讲里，PyTorch 后端的「模型」都是人工写好的 `DecoderModelForCausalLM`（见 [u5-l1](u5-l1-model-architecture-pattern.md)），KV cache、融合、量化都要开发者手工接线。本讲换一个视角：**能不能不改模型源码，让它自动获得这些推理优化？** AutoDeploy 就是为此而生。
 
-学完本讲，你应当能够：
+读完本讲，你应当能：
 
-1. 说清 AutoDeploy 与默认 PyTorch 后端在**入口**和**模型来源**上的根本差异。
-2. 复述 AutoDeploy 的核心思路：把一个（几乎）未经修改的 HuggingFace 模型，`torch.export` 成 FX 计算图，再跑过一条**自动图变换流水线**，最后编译进同一个 PyExecutor 运行时。
-3. 看懂图变换的注册机制（`@TransformRegistry.register`、import 即注册）、流水线编排（`InferenceOptimizer` + `Stages` 阶段排序），并以 `fuse_silu_mul` 为例追踪一次「检测子图 → 替换为融合算子」的完整过程。
-4. 理解 COMPILE 阶段的 `CompileBackendRegistry` 与四种后端，以及 **piecewise（分片）CUDA Graph** 如何在动态形状下用「按桶分段录图 + 强制 padding」高效回放。
-
-> 前置认知回顾：u3-l3 讲过 `ModelEngine` 是引擎的抽象契约（必须实现 `forward` 与 `get_max_num_sequences`），`PyTorchModelEngine` 是其默认实现；u3-l2 讲过 `PyExecutor` 单步循环把请求推进一个 token；u2-l3 讲过「Python 调度、C++ 加速」。AutoDeploy 不会推翻这套运行时，它只是换了一种方式来生产 `PyExecutor` 跑的那个 `model` 模块。
+1. 说清 AutoDeploy 是什么、它与默认 PyTorch 后端在「入口」与「模型来源」上的本质差异。
+2. 复述 AutoDeploy 的三段式工作流：`torch.export` 抽图 → 图变换（transform pipeline）优化 → 编译后端（compile backend）落地为 CUDA Graph。
+3. 看懂 `BaseTransform` / `TransformRegistry` / `Stages` 这套「可注册、按阶段排序、统一调用」的图变换框架，并能读懂一个真实变换 `fuse_silu_mul` 的注册与执行。
+4. 区分「整图 CUDA Graph」与「分片（piecewise）CUDA Graph」，理解分片为什么要在动态算子边界切图、如何按 `num_tokens` 分桶捕获。
+5. 独立跟踪一条「装饰器注册 → YAML 配置 → InferenceOptimizer 调度执行」的完整链路。
 
 ## 2. 前置知识
 
-在进入源码前，先用通俗语言建立三个直觉。
+本讲依赖 [u3-l3（ModelEngine 与模型前向）](u3-l3-model-engine-forward.md) 与 [u5-l1（模型架构范式）](u5-l1-model-architecture-pattern.md)。在进入正文前，先确认几个术语：
 
-### 2.1 什么是「图变换」
+- **FX Graph / GraphModule**：PyTorch 把一个 `nn.Module` 的前向逻辑「追踪」下来，得到一张有向无环图（节点是算子调用，边是张量流动），存进 `torch.fx.GraphModule`。AutoDeploy 的所有优化都改的是这张图，而不是改原始模型代码。
+- **torch.export**：PyTorch 官方推荐的、比旧版 `torch.jit.trace` 更稳的导出 API，能把模型（含自定义算子）导成一份标准 ATen IR 图。AutoDeploy 用它做「抽图」的第一步。
+- **CUDA Graph**：把一串 CUDA kernel 调用录制成一张图，之后一次性回放（replay），省掉每次 kernel launch 的 CPU 开销。生成（decode）阶段形状固定，最适合用整图 CUDA Graph；但 prefill 阶段序列长度千变万化，整图录不下，于是有了「分片」方案。
+- **ModelEngine / PyExecutor**：回顾 u3-l3，`ModelEngine` 是引擎抽象基类（只要求实现 `forward` 与 `get_max_num_sequences`），`PyExecutor` 是单步循环发动机。AutoDeploy 不重写发动机，只是换了一个 `ModelEngine` 的实现（`ADEngine`），仍复用整套 `PyExecutor` 调度、采样、in-flight batching。
 
-PyTorch 模型在执行时，本质上是一张**有向无环计算图**：节点是算子（加、乘、矩阵乘、注意力……），边是张量。所谓「图变换」，就是在这张图上做**等价改写**以提升性能。比如：
-
-- 把相邻的 `silu` 和 `mul` 两个小算子合并（fuse）成一个 `silu_and_mul`，省掉一次 kernel 启动和一次显存读写；
-- 把一个线性层的权重在多卡间切成多份（sharding），插入 `all_reduce`；
-- 把标准注意力替换成带 KV cache 的分页注意力。
-
-PyTorch 用 `torch.fx` 把 `nn.Module` 捕获成 `GraphModule`，于是你可以用 Python 直接增删改图里的节点。AutoDeploy 的全部魔法都建立在 `torch.fx` 之上。
-
-### 2.2 FX 图、`torch.export` 与「export」是什么
-
-`torch.export` 是 PyTorch 2.x 提供的「把一个 `nn.Module` 序列化成稳定计算图」的官方手段。它会把模型拆解成最基本的 ATen 算子（`aten.mm`、`aten.silu` 等）加上一些自定义算子，得到一份与具体输入形状解耦的图。AutoDeploy 在流水线最前面就用 `torch.export` 把 HF 模型变成图，后面所有变换都作用于这张图。
-
-### 2.3 为什么需要「piecewise CUDA Graph」
-
-u10-l4 讲过 CUDA Graph：把一串 kernel 调用录制成一张图，回放时一次性提交，省掉逐个 kernel 的 CPU 启动开销。但 CUDA Graph 要求**输入地址和形状在录图时固定**。问题是推理时 batch 里的 token 数是动态的（prefill 一长串、decode 一两个）。解决办法是「分片（piecewise）」：把模型在**动态算子**（如注意力，它的输出形状依赖 token 数）处切开，动态算子保持 eager（每次真算），而切出来的**静态段**（GEMM、RMSNorm 等形状只随 token 数线性变化的段）则按若干个 token 档位（bucket）分别录图，运行时把实际 token 数 **padding 到最近的档位**再回放。这就是 piecewise CUDA Graph 的核心思想。
+一句话定位：**AutoDeploy 不是新引擎，而是「自动把任意 PyTorch 模型变成一个高效的 `ModelEngine`」的编译器，产出的引擎照样跑在 `PyExecutor` 上。**
 
 ## 3. 本讲源码地图
 
-AutoDeploy 的代码集中在 `tensorrt_llm/_torch/auto_deploy/`，体量很大，本讲只聚焦以下文件：
-
-| 文件 | 作用 |
+| 文件 | 角色 |
 |------|------|
-| `tensorrt_llm/_torch/auto_deploy/llm.py` | AutoDeploy 的 `LLM` 高层入口，继承 `_TorchLLM`，把 `backend` 强制为 `_autodeploy` |
-| `tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py` | `ADEngine`（`ModelEngine` 的 AD 实现）+ `create_autodeploy_executor`（把 AD 接进 `PyExecutor` 的总装函数） |
-| `tensorrt_llm/_torch/auto_deploy/transform/interface.py` | 图变换的统一契约：`Stages` 阶段枚举、`BaseTransform` 基类、`TransformRegistry` 注册表 |
-| `tensorrt_llm/_torch/auto_deploy/transform/optimizer.py` | `InferenceOptimizer`：编排整条变换流水线 |
-| `tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py` | 一个具体图变换示例：融合 `narrow+silu+mul` |
-| `tensorrt_llm/_torch/auto_deploy/transform/library/build_model.py` | `build_model` 变换：流水线起点，通过 factory 构建模型 |
-| `tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py` | `compile_model` 变换：流水线终点，选择编译后端并编译 |
-| `tensorrt_llm/_torch/auto_deploy/compile/compiler.py` | `CompileBackendRegistry` + `CompilerBackend` 抽象 |
-| `tensorrt_llm/_torch/auto_deploy/compile/backends/torch_compile.py` | 最简单的编译后端：`torch.compile(model, dynamic=True)` |
-| `tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py` | CUDA Graph 后端，含 monolithic 与 piecewise 两套机制 |
-| `tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py` | `ADPiecewiseRunner`：单个静态段的 warmup→capture→replay |
-| `tensorrt_llm/_torch/auto_deploy/config/default.yaml` | 默认变换流水线配置（"graph" 模式） |
-| `docs/source/features/auto_deploy/auto-deploy.md` | AutoDeploy 官方总览文档 |
+| `tensorrt_llm/_torch/auto_deploy/llm.py` | AutoDeploy 的 `LLM` 类，继承 `_TorchLLM`，是面向用户的入口与 shim |
+| `tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py` | `ADEngine`（`ModelEngine` 的 AutoDeploy 实现）+ `create_autodeploy_executor`（分布式入口） |
+| `tensorrt_llm/_torch/auto_deploy/transform/interface.py` | 图变换的根基类 `BaseTransform`、注册表 `TransformRegistry`、阶段枚举 `Stages` |
+| `tensorrt_llm/_torch/auto_deploy/transform/optimizer.py` | `InferenceOptimizer`：按阶段顺序串起所有变换的流水线 |
+| `tensorrt_llm/_torch/auto_deploy/transform/library/export_to_gm.py` | `EXPORT` 阶段：用 `torch.export` 把模型抽成 `GraphModule` |
+| `tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py` | `POST_LOAD_FUSION` 阶段：融合 SiLU+Mul 的样例变换 |
+| `tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py` | `COMPILE` 阶段：调起编译后端 |
+| `tensorrt_llm/_torch/auto_deploy/compile/compiler.py` | `CompileBackendRegistry` + `CompilerBackend` 抽象基类 |
+| `tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py` | 默认后端 `torch-cudagraph`：整图 + 分片 CUDA Graph |
+| `tensorrt_llm/_torch/auto_deploy/compile/backends/torch_opt.py` | `torch-opt` 后端：在 `torch-cudagraph` 之前叠加 `torch.compile` |
+| `tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py` | `ADPiecewiseRunner`：单个静态子段的 warmup→capture→replay 管理 |
+| `tensorrt_llm/_torch/auto_deploy/config/default.yaml` | 默认变换流水线配置（哪些变换、什么阶段、是否启用） |
+| `docs/source/features/auto_deploy/auto-deploy.md` | 官方功能文档 |
 
-记住一句话定位：**`llm.py`/`ad_executor.py` 负责「把 AD 接进运行时」，`transform/` 负责「把模型变成优化图」，`compile/` 负责「把优化图编译成可高效执行的模块」**。
+一句话定位：**`llm.py` / `ad_executor.py` 负责「把 AD 接进运行时」，`transform/` 负责「把模型变成优化图」，`compile/` 负责「把优化图编译成可高效执行的模块」。**
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 AutoDeploy shim：把 AD 接进 PyExecutor
+### 4.1 AutoDeploy shim：把编译后的模型塞进 PyExecutor
 
 #### 4.1.1 概念说明
 
-「shim（垫片）」在这里的含义是：AutoDeploy 并没有另起炉灶写一套运行时，而是做了一层薄薄的适配，让自己生产的模型能塞进 `PyExecutor`——也就是 u3-l2 讲的那个单步循环发动机。
+「shim」中文是「垫片」——夹在两块接口之间做适配。AutoDeploy 的 shim 要解决的问题是：
 
-回忆 u3-l1/u3-l3：用户调用 `LLM.generate()` → 构造 Executor → `PyExecutor` 单步循环 → 调 `ModelEngine.forward()` → 模型前向。默认后端里 `ModelEngine` 的实现是 `PyTorchModelEngine`，它直接 `self.model.forward(...)` 调用手工写的 `modeling_*.py`。
+- 上层（`LLM` API、`trtllm-serve`）只认 `LLM` 这一套接口（`generate` / `generate_async` / tokenizer 托管）。
+- 下层（`PyExecutor`）只认 `ModelEngine`（要 `forward`、要能调度）。
+- AutoDeploy 真正想做的，是用 `torch.export + 图变换 + 编译` 造一个优化过的 `nn.Module`。
 
-AutoDeploy 的关键洞察是：**`ModelEngine` 是一个抽象契约，只要提供一个实现了 `forward` 和 `get_max_num_sequences` 的引擎类，就能替换掉 `PyTorchModelEngine`**。AutoDeploy 提供的就是 `ADEngine`。两者共享同一个 `PyExecutor`、同一套 `ResourceManager` / `Scheduler` / `Sampler`，唯一不同的是「那个被 forward 的 `model` 是怎么来的、长什么样」。
+shim 就是把这三层粘起来：它继承默认后端的 `LLM`（`_TorchLLM`），在「构建模型」这一步偷偷换掉实现——不走手工模型加载，而是先 prefetch checkpoint，再让 `ADEngine` 跑一遍编译流水线，产出一个优化模型，最后把它装进 `PyExecutor`。
 
-- 默认后端：`model` = 人工写的 `DecoderModelForCausalLM`（u5-l1）。
-- AutoDeploy：`model` = HF 模型经 `torch.export` + 一串图变换 + 编译后得到的优化 `nn.Module`。
+这样设计的妙处是「最小惊讶」：对用户而言，`LLM(model=..., backend="_autodeploy")` 的用法与默认后端完全一致，只是底层模型从「人工写」变成「自动编」。
 
 #### 4.1.2 核心流程
 
-AutoDeploy 从用户入口到 `PyExecutor` 的总装过程：
-
 ```text
-用户构造
-  LLM(model=..., backend 自动设为 _autodeploy)        # llm.py
-    └─ _build_model()  绕过 CachedModelLoader，走 factory
-         └─ create_autodeploy_executor(ad_config)     # ad_executor.py 的入口函数
-              ├─ build ADEngine:
-              │     ADEngine.build_from_config(...)
-              │       ├─ factory = ad_config.create_factory()
-              │       ├─ cache_seq_interface = CachedSequenceInterface(...)
-              │       └─ InferenceOptimizer(factory, config=ad_config.transforms)  ← 变换流水线
-              └─ PyExecutor(model_engine=engine, sampler=..., scheduler=..., ...)
-                   ↑ 与默认后端用的是同一个 PyExecutor 类
-运行时单步
-  PyExecutor._engine_loop → ADEngine.forward(scheduled_requests, ...) → self.model(**named_args)
+用户: LLM(model="xxx", backend="_autodeploy")
+  │
+  ├─ llm.py 的 LLM.__init__ 强制 backend="_autodeploy"，调 super().__init__
+  │    → llmapi/llm.py 派发：backend=="_autodeploy" → 选用 AutoDeployLlmArgs
+  │
+  ├─ _TorchLLM._build_model() → auto_deploy/llm.py._build_model()
+  │    ├─ _prefetch_model()：先把权重从 HF 下载到本地
+  │    └─ super()._build_model() → 最终构造 ADEngine
+  │
+  └─ ADEngine.build_from_config()
+       ├─ create_factory()：建模型骨架（HfModelFactory / 自定义）
+       ├─ InferenceOptimizer(factory, config=ad_config.transforms)：组装流水线
+       └─ ADEngine(get_inference_model=InferenceOptimizer实例, ...)
+            └─ __init__ 里 self.model = get_inference_model(cache_seq_interface)
+                 └─ 真正跑完 export → transforms → compile，产出优化模型
 ```
 
-也就是说：**入口和运行时都复用，AD 只替换了「模型生产」这一段**。
+随后 `PyExecutor` 的单步循环（[u3-l2](u3-l2-pyexecutor-step-loop.md)）每次前向就调 `ADEngine.forward`，后者把 TRT-LLM 的 `ScheduledRequests` 翻译成 AutoDeploy 原生的张量输入，喂给优化模型。
 
 #### 4.1.3 源码精读
 
-**入口 `LLM` 类**：[tensorrt_llm/_torch/auto_deploy/llm.py:136-150](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm.py#L136-L150) 中，`class LLM(_TorchLLM)` 继承自默认后端的 `_TorchLLM`（见 u3-l1 的三层继承），并在 `__init__` 里强制 `kwargs["backend"] = "_autodeploy"`，于是父类 `BaseLLM.__init__` 会按 AD 分支来构建。
+AutoDeploy 的 `LLM` 只做两件关键小事：强制 backend 标记，并接管 `_build_model`：
 
-[llm.py:187-203](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm.py#L187-L203) 的 `_build_model` 关键是 `super()._build_model()` 之前先 `self._prefetch_model()` 用 factory 拉取 checkpoint，注释明确写道「we bypass the regular LLM CachedModelLoader in _autodeploy backend」——因为 AD 用自己的 `ModelFactory` 和图变换来装载权重，不复用默认后端的 `CachedModelLoader`。
+[tensorrt_llm/_torch/auto_deploy/llm.py:136-150](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm.py#L136-L150) —— `class LLM(_TorchLLM)`：构造时把 `backend` 钉成 `"_autodeploy"`，其余全部复用父类。这就是「垫片」最薄的地方。
 
-**真正的引擎 `ADEngine`**：[ad_executor.py:369-375](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L369-L375) 声明 `class ADEngine(ModelEngine)`，docstring 说明它遵循 `ModelEngine` 抽象、负责「构建 AD 优化模型、把 TRT-LLM 的 scheduled requests 翻译成 AD 原生的 PyTorch 输入、跑模型、返回 logits」。
+[tensorrt_llm/_torch/auto_deploy/llm.py:187-203](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm.py#L187-L203) —— `_build_model`：先 `_prefetch_model()`，再调 `super()._build_model()`，并注释「我们绕过默认后端的 `CachedModelLoader`」。注意最后一行 `self.input_processor = self._create_input_processor()`——AutoDeploy 自己接管多模态/聊天 token 化（见 `ADInputProcessor`），不沿用父类的处理器。
 
-它的工厂方法 [ad_executor.py:420-433](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L420-L433) 构造了 `InferenceOptimizer(factory=factory, config=ad_config.transforms, dist_config=dist_config)`——这就是图变换流水线对象。注意 `config=ad_config.transforms`：整条流水线来自 `LlmArgs.transforms`，而这个字段的默认值就是 `default.yaml`（见 4.2.3）。
+派发逻辑在 `llmapi/llm.py`：
 
-**前向入口**：[ad_executor.py:1049-1079](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L1049-L1079) 是 `ADEngine.forward`，它被 `@maybe_pad_for_cuda_graph` 装饰（用 dummy 请求把 batch 补齐到 CUDA Graph 档位，呼应 u3-l2 讲的 is_dummy 假请求），内部先 `_prepare_inputs` 把 scheduled requests 翻译成 `cache_seq_interface`（缓存序列接口）里的张量，再调 `_run_forward`。[ad_executor.py:1017-1043](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L1017-L1043) 的 `_run_forward` 最关键的一行是：
+[tensorrt_llm/llmapi/llm.py:185-189](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/llmapi/llm.py#L185-L189) —— 见到 `backend == '_autodeploy'` 就改用 `AutoDeployLlmArgs`（与默认的 `TorchLlmArgs` 并列）。这就是 u4-l1 里提到的「`LLM.__init__` 按 backend 派发」的具体落点。
 
-```python
-model_output = self.model(**csi.named_args, cache_seq_interface=csi)
-```
+真正的编译发生在 `ADEngine`：
 
-这里的 `self.model` 就是经过图变换和编译后的 `nn.Module`。对比 u3-l3 的 `PyTorchModelEngine.forward` 也是汇聚到 `self.model.forward`——**两者最终都是在跑一个 `nn.Module`，区别只在那个模块是被人工写的还是被图变换造出来的**。
+[tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py:381-433](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L381-L433) —— `ADEngine.build_from_config`：先用 `ad_config.create_factory()` 建模型骨架，再用 `InferenceOptimizer(factory=factory, config=ad_config.transforms, dist_config=dist_config)` 组装流水线（L420），把这个**可调用对象**当作 `get_inference_model` 传进 `ADEngine`。
 
-**总装函数 `create_autodeploy_executor`**：[ad_executor.py:1156-1344](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L1156-L1344) 是 AD 后端的对外入口，docstring 写明「This is the entrypoint API to the _autodeploy backend」。它做的事情几乎全部是「把 AD 引擎和默认后端的运行时组件拼到一起」：构造 `ADEngine`、`KVCacheManager`、`SeqSlotManager`、`ResourceManager`、`SimpleScheduler`（u8-l1 的两步调度）、`Sampler`（u8-l3），最后 `py_executor = PyExecutor(...)`。读这段代码会发现：**除了 `model_engine=engine` 换成 `ADEngine`，其余参数和默认后端构造 `PyExecutor` 时如出一辙**——这是「shim」二字最好的注脚。
+[tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py:521-524](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L521-L524) —— `__init__` 里 `self.model = get_inference_model(self.cache_seq_interface)`：这一行才真正触发整条 export→transform→compile 流水线跑完，`self.model` 就是最终的优化模型。`InferenceOptimizer` 实现了 `__call__`，所以它本身就是「构造模型的函数」。
+
+前向入口（单步循环每次调它）：
+
+[tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py:1017-1043](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L1017-L1043) —— `_run_forward`：`model_output = self.model(**csi.named_args, cache_seq_interface=csi)`。注意优化模型接受的是 `CacheSeqInterface` 整理好的命名张量，而非 TRT-LLM 的 `ScheduledRequests`——翻译工作在 `_prepare_inputs`（L728）里完成。
+
+> 入口差异小结（实践任务要用）：默认 PyTorch 后端 `LLM(model=..., backend="pytorch")` → `TorchLlmArgs` → `ModelLoader` 装载**手写**的 `DecoderModelForCausalLM`；AutoDeploy `LLM(model=..., backend="_autodeploy")` → `AutoDeployLlmArgs` → `ADEngine` 用 `torch.export` 把**任意** PyTorch 模型抽图再自动优化。两者最终都产出一个喂给 `PyExecutor` 的 `ModelEngine`，因此 in-flight batching、调度、采样完全共享。
 
 #### 4.1.4 代码实践
 
-**实践目标**：用「源码阅读 + 配置 dry-run」的方式，亲眼确认 AutoDeploy 与默认后端共用 `PyExecutor`，只是换了 `model_engine`。
+**目标**：确认 AutoDeploy 与默认后端在「派发」上的分叉点，并理解 `ADEngine` 如何复用 `PyExecutor`。
 
-**操作步骤**：
+**步骤**：
 
-1. 先做静态阅读。打开 [ad_executor.py:1326-1343](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L1326-L1343)，列出 `PyExecutor(...)` 构造时传入的全部参数，标注哪些来自 AD 专属对象（`engine`）、哪些与默认后端同名同语义（`scheduler`、`sampler`、`resource_manager`、`dist`）。
-2. 对比 u3-l2 / u3-l3 中默认后端构造 `PyExecutor` 的路径（`py_executor_creator.py` 的 `create_py_executor_instance`），列出两者的异同。
-3. 用 `build_and_run_ad.py --dry-run` 打印最终配置而不真正加载模型（该脚本支持 `--dry-run` 标志，见 [examples/auto_deploy/build_and_run_ad.py:370-378](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/examples/auto_deploy/build_and_run_ad.py#L370-L378)）：
+1. 在 `tensorrt_llm/llmapi/llm.py:185` 处设断点或加日志，分别用 `backend="pytorch"` 与 `backend="_autodeploy"` 构造 `LLM`，观察 `llm_args_cls` 分别取到哪个类。
+2. 打开 `tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py`，定位 `create_autodeploy_executor`（L1156）——这是多卡（MPI worker）场景下构造执行器的统一入口。看它在 L1326 如何把 `engine`（即 `ADEngine`）当作 `model_engine` 传给 `PyExecutor(...)`。
+3. 对照 u3-l2 的单步循环，确认 `PyExecutor` 调用的 `model_engine.forward` 在 AutoDeploy 下落到 `ADEngine.forward`（L1049），而 PyTorch 后端下落到 `PyTorchModelEngine.forward`。**同一个发动机，两个不同的引擎实现。**
 
-   ```bash
-   cd examples/auto_deploy
-   python build_and_run_ad.py --model "TinyLlama/TinyLlama-1.1B-Chat-v1.0" --dry-run
-   ```
+**需要观察的现象**：
 
-**需要观察的现象**：dry-run 会 dump 出完整的 `ExperimentConfig`（一个 YAML），其中 `args.transforms` 字段就是即将跑的图变换清单（来自 `default.yaml`），`args.compile_backend` 是编译后端。
+- 两种 backend 走不同的 `llm_args_cls`，但都进入 `PyExecutor`。
+- `create_autodeploy_executor` 里 `resource_manager`、`scheduler`、`sampler` 的构造方式与 PyTorch 后端几乎一致——印证「AutoDeploy 只换引擎、不换发动机」。
 
-**预期结果**：你能从输出的 YAML 里看到 `transforms` 是一个从 `build_model` 到 `compile_model` 的有序字典，验证「AD = 流水线 + 编译」的心智模型。
+**预期结果**：能画出「`LLM` → `build_from_config` → `InferenceOptimizer` → `ADEngine` → `PyExecutor`」的调用链，并指出与默认后端唯一本质不同的环节是「模型的来源与构建方式」。
 
-**说明**：若本机无 GPU 或无法下载模型权重，dry-run 仍可工作（它在构造模型前就 return）；但若 `transformers` 未安装则会报 import 错误——这种情况按「待本地验证」处理，重点放在静态阅读步骤。
+> 说明：本机若无可用的 GPU 与模型权重，无法真正跑通 `LLM(...)` 构造（`torch.export` 需要在 GPU 上 trace）。以上为源码阅读型实践；若需运行，可参照官方 `examples/auto_deploy/build_and_run_ad.py` 用一个小模型（如 `TinyLlama/TinyLlama-1.1B-Chat-v1.0`）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`ADEngine` 为什么必须继承 `ModelEngine` 而不能直接当 `nn.Module` 用？
-**参考答案**：因为 `PyExecutor` 单步循环通过 `ModelEngine` 抽象契约（`forward` / `get_max_num_sequences`）与引擎交互。继承 `ModelEngine` 并实现这两个方法，AD 才能以「可替换引擎」的身份插进同一个 `PyExecutor`，从而复用调度、采样、资源管理等全部运行时设施。这正是 u3-l3 讲的「抽象使 PyExecutor 与具体后端解耦」。
+**练习 1**：AutoDeploy 的 `LLM` 为什么要继承 `_TorchLLM` 而不是直接继承 `BaseLLM`？
 
-**练习 2**：`ADEngine.forward` 上的 `@maybe_pad_for_cuda_graph` 装饰器（[ad_executor.py:132-233](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L132-L233)）和 u3-l2 讲的「is_dummy 假请求」是什么关系？
-**参考答案**：它们是同一件事的两面。`maybe_pad_for_cuda_graph` 在 batch 不足某个 CUDA Graph 档位时，生成 `padding_dummy_request`（一个 `is_cuda_graph_dummy=True` 的请求）把 batch 补齐；这些假请求正是 u3-l2 讲的「attention-DP/CUDA Graph 造出的 is_dummy 占位请求」，会被排除出投机解码接受率统计。
+**参考答案**：因为 AutoDeploy 要复用 `_TorchLLM` 里所有与 PyTorch 后端共享的通用流程（tokenizer 托管、generate 的「提交 + 等待」语义、future 处理、`_build_model` 的整体骨架）。它只需覆盖「模型从哪来」这一点，继承 `_TorchLLM` 让它免费拿到这些能力，是「复用多、覆盖少」原则的体现。
 
-### 4.2 图变换：transform/library 与 InferenceOptimizer 流水线
+**练习 2**：`ADEngine` 是 `ModelEngine` 的子类吗？它的 `forward` 接收什么、返回什么？
+
+**参考答案**：是。`class ADEngine(ModelEngine)`。它的 `forward` 接收 TRT-LLM 的 `ScheduledRequests` + `ResourceManager`，内部 `_prepare_inputs` 把它们翻译成命名张量喂给优化模型，`_run_forward` 返回含 `logits`（已 squeeze 并转 float32）的字典。
+
+---
+
+### 4.2 图变换：把优化做成可注册、可排序的 pass
 
 #### 4.2.1 概念说明
 
-如果说 4.1 解决了「把 AD 接进运行时」，那 4.2 解决的是「AD 的模型是怎么被造出来的」。答案是：**一条分阶段的图变换流水线**。
+拿到 FX 图之后，AutoDeploy 要对它做一连串「改写」（pass）：清理冗余、自动分片（sharding）、插入 KV cache、融合算子、改 RMSNorm……每个 pass 都是「输入一张图、输出一张图」。如果把这些 pass 散落在各处硬编码调用，会难以维护、难以增删。AutoDeploy 的解法是经典的**注册表 + 阶段枚举**模式：
 
-这条流水线的设计哲学是「**一个变换只做一件事，按阶段排序串联**」。每个变换（transform）是一个继承 `BaseTransform` 的类，实现一个 `_apply` 方法，输入输出都是一个 `GraphModule`。变换之间靠「阶段（stage）」和「图清理（cleanup）」协作：
+- 每个 pass 是一个 `BaseTransform` 子类，用 `@TransformRegistry.register("名字")` 装饰器自注册。
+- 每个 pass 声明自己属于哪个**阶段**（`Stages`），阶段是有序的。
+- 一份 YAML 配置（`default.yaml`）列出本次要跑哪些 pass、各自参数。
+- `InferenceOptimizer` 按「阶段顺序」把 pass 排好，依次调用 `__call__`。
 
-- **阶段**：每个变换声明自己属于哪个阶段，`InferenceOptimizer` 会按阶段把所有变换排成一条有序流水线。
-- **图清理**：变换可能把图弄「脏」（留下死节点、shape 信息失效），所以 `BaseTransform.__call__` 会在每个变换前后自动跑 `canonicalize_graph`（图规范化）和 `run_shape_prop`（shape 传播），保证下一个变换拿到的是干净图。
-
-这种「小变换 + 自动清理 + 注册表」的设计，让添加新优化极其容易——写一个类、加一个装饰器、在 YAML 里写一行，流水线就自动纳入。
+这套设计的好处：新增一个优化 = 写一个类 + 加一个装饰器 + 在 YAML 加一行，**完全不改流水线主框架**。这与 PyTorch 后端「每个优化都写死在 modeling 文件里」形成鲜明对比。
 
 #### 4.2.2 核心流程
 
-变换流水线的九个阶段（按执行顺序）：
-
 ```text
-FACTORY          构建模型骨架（meta 设备，不装权重）
-  │              ── build_model / build_and_load_factory_model
-EXPORT           torch.export 把 nn.Module 捕获成 GraphModule
-  │              ── export_to_gm
-POST_EXPORT      导出后的低层清理（去 noop slice/add）
+default.yaml (transforms 配置)
+  │  ad_config.transforms
+  ▼
+InferenceOptimizer.__init__
+  └─ _clean_config: 把配置按键的 Stages 值排序，得到 strict_config
   │
-PATTERN_MATCHER  高层模式匹配，把千奇百怪的 HF 写法「标准化」成统一 IR
-  │              ── match_rmsnorm_pattern / match_swiglu_pattern / match_rope_pattern ...
-SHARDING         自动并行切分：切权重、插 all_reduce、插 MoE alltoall
-  │              ── apply_sharding_hints / detect_sharding
-WEIGHT_LOAD      装载真实权重到切分后的骨架
-  │              ── load_weights / move_inputs_to_device
-POST_LOAD_FUSION 装完权重后的融合优化（此时张量是真实的）
-  │              ── fuse_silu_mul / fuse_fp8_linear / fuse_rmsnorm / fuse_moe ...
-CACHE_INIT       插入带 KV cache 的分页注意力、初始化缓存池
-  │              ── insert_cached_attention / initialize_cache / resize_kv_cache
-VISUALIZE        （可选）可视化图
-  │
-COMPILE          最终编译：torch.compile + CUDA Graph
-                 ── compile_model
+  └─ __call__(cm, mod):
+       for (t_name, t_config) in strict_config:      # 按阶段顺序
+           transform = TransformRegistry.get(t_name)(t_config)
+           mod = transform(mod, cm, factory, shared_config, idx)
+                  │
+                  └─ BaseTransform.__call__ (final, 统一外壳):
+                       ├─ 取历史 TransformInfo（是否 clean、shape 是否有效）
+                       ├─ pre-cleanup: canonicalize_graph + shape_prop（按需）
+                       ├─ _apply_per_gm_or_whole_model → 子类的 _apply
+                       ├─ post-cleanup
+                       ├─ 记录 mem/时间/匹配数 → TransformInfo，写回图 meta
+                       └─ 可视化 + graph_writer.dump_graph（调试用）
 ```
 
-`InferenceOptimizer.__call__` 的执行逻辑很直白：把 YAML 配置里的变换按阶段排序，逐个实例化、逐个调用：
+阶段顺序（关键，来自 `Stages` 枚举的定义次序）：
 
-```python
-for idx, (t_name, t_config) in enumerate(sorted_config.items()):
-    transform = TransformRegistry.get(t_name)(t_config)   # 从注册表取类、实例化
-    mod = transform(mod, cm, factory, shared_config, idx)  # 跑这个变换
+```
+FACTORY → EXPORT → POST_EXPORT → PATTERN_MATCHER → SHARDING → WEIGHT_LOAD
+       → POST_LOAD_FUSION → CACHE_INIT → VISUALIZE → COMPILE
 ```
 
-每个 `transform(...)` 调用背后，`BaseTransform.__call__` 会包一层样板代码：读历史的 `TransformInfo`、跑 pre-cleanup、跑 `_apply`、跑 post-cleanup、记录显存变化、dump 图（受 `AD_DUMP_GRAPHS_DIR` 控制）、写回元数据。
+直觉上是一条「从无到有再到优」的流水线：先建骨架（FACTORY），抽图（EXPORT），清洗（POST_EXPORT），识别可优化模式（PATTERN_MATCHER），切分到多卡（SHARDING），装权重（WEIGHT_LOAD），融合算子（POST_LOAD_FUSION），插 KV cache（CACHE_INIT），最后编译（COMPILE）。
 
 #### 4.2.3 源码精读
 
-**阶段枚举**：[interface.py:108-130](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L108-L130) 定义 `class Stages(Enum)`，并用 `@total_ordering` + `__lt__` 让枚举值「按定义顺序可排序」。这正是 `_clean_config` 能按阶段排序的依据。
+**阶段枚举（有序）**：
 
-**注册表**：[interface.py:822-835](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L822-L835) 的 `TransformRegistry.register(name)` 是一个装饰器工厂，它把变换类存进 `_registry` 字典、并把名字写成类的 `_transform_key` 属性。用法形如：
+[tensorrt_llm/_torch/auto_deploy/transform/interface.py:108-131](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L108-L131) —— `class Stages(Enum)` 用 `@total_ordering` + `__lt__` 让枚举值「按定义顺序」可比较。这是后续排序的依据——哪个 pass 先跑，不是写死的，而是由它声明的 `stage` 在这个枚举里的位置决定。
 
-```python
-@TransformRegistry.register("fuse_silu_mul")
-class FuseSiluMul(BaseTransform):
-    ...
+**注册表**：
+
+[tensorrt_llm/_torch/auto_deploy/transform/interface.py:822-850](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L822-L850) —— `class TransformRegistry`：`register(name)` 返回装饰器，把类存进 `_registry[name]` 并把名字记到类的 `_transform_key` 属性上。`get(name)` 反查。
+
+**统一外壳 `BaseTransform.__call__`**：
+
+[tensorrt_llm/_torch/auto_deploy/transform/interface.py:368-511](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L368-L511) —— 这是所有 pass 的「主入口」，被 `@final` 锁定不可覆盖。它做了大量统一工作：取上一 pass 的 `TransformInfo`、pre/post 清理、按 `skip_on_error` 包 try/except、统计耗时与显存、dump 图（`graph_writer.dump_graph`，受 `AD_DUMP_GRAPHS_DIR` 控制）。子类只需实现 `_apply`（改图并返回 `(gm, TransformInfo)`）。这种「模板方法 + 注册表」是可扩展架构的范本。
+
+**流水线编排**：
+
+[tensorrt_llm/_torch/auto_deploy/transform/optimizer.py:62-75](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/optimizer.py#L62-L75) —— `_clean_config`：`sorted(nested_kwargs.keys(), key=lambda k: Stages(...))`。一句排序就保证了 pass 的执行顺序与 YAML 里书写的次序无关，只取决于阶段。
+
+[tensorrt_llm/_torch/auto_deploy/transform/optimizer.py:110-115](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/optimizer.py#L110-L115) —— 主循环：`transform = self._create_transform(...)` 然后 `mod = transform(mod, cm, ...)`。
+
+**抽图（EXPORT 阶段样例）**：
+
+[tensorrt_llm/_torch/auto_deploy/transform/library/export_to_gm.py:199-208](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/export_to_gm.py#L199-L208) —— `torch_export_to_gm(sub_mod, args=(), kwargs=captured_kwargs, dynamic_shapes=..., strict=self.config.strict, ...)`：把子模块导成 `GraphModule`。注意默认 `strict=False`（用非严格导出，避免依赖字节码表示的脆弱性，详见字段注释 L42-47）。
+
+**真实融合 pass：fuse_silu_mul**：
+
+MLP 里常见的 SwiGLU 结构是 `hidden = silu(gate) * up`。当 `gate`、`up` 两个投影先被 GEMM 融合合并成一次 `gemm(x, gate_up_weight)`、再用 `narrow` 切回两半后，图里会留下：
+
+```text
+fused = gemm(x, gate_up_weight)
+gate  = narrow(fused, -1, 0,         size)
+up    = narrow(fused, -1, size,      size)
+hidden = silu(gate) * up
 ```
 
-这与 u5-l2 讲的模型注册（`@register_auto_model`）是同一种「import 即注册」模式：变换类只要被 import 一次，就自动进入注册表。触发 import 的是 [transform/\_\_init\_\_.py:17-20](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/__init__.py#L17-L20)，它 `from . import (library, pipeline_cache)`，其中 `library` 包的 `__init__` 会 import 所有具体变换模块——注释 `- ensure all transforms are registered` 直白说明了目的。
+这一坨可以用一个融合算子 `silu_and_mul(fused)` 替代，省掉两次 `narrow`、一次 `silu`、一次逐元素乘，改成一次 kernel。数学上：
 
-**BaseTransform 模板方法**：[interface.py:368-511](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L368-L511) 的 `__call__` 是用 `@final` 锁定的模板方法，子类不能覆盖它，只能覆盖 `_apply`（[interface.py:770-783](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L770-L783)）。这套模板把「日志、清理、shape 传播、显存统计、图 dump、元数据回写」全部收口在基类，子类只关心改图逻辑。注意 [interface.py:507-508](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/interface.py#L507-L508) 的 `graph_writer.dump_graph(mod, t_name, self.config.stage.value)`——这就是环境变量 `AD_DUMP_GRAPHS_DIR` 控制的「每个变换之后 dump 一份图文本」机制，是调试变换的关键工具。
+\[
+\mathrm{silu}(g)\cdot u = \frac{g}{1+e^{-g}}\cdot u
+\]
 
-**编排器**：[optimizer.py:62-75](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/optimizer.py#L62-L75) 的 `_clean_config` 把 YAML 里「名字 → 字典」的配置，按 `Stages(stage)` 排序，并用 `TransformRegistry.get_config_class(k)` 取每个变换专属的 Pydantic 配置类来校验，得到一个严格有序的 `StrictInferenceOptimizerConfig`。[optimizer.py:83-124](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/optimizer.py#L83-L124) 的 `__call__` 就是上文伪代码的真实版，它还支持「从 pipeline cache 前缀恢复」（`_maybe_restore_from_cache`），这是为加速重复构建设计的缓存机制。
+融合算子把 \(g\) 与 \(u\) 在同一 kernel 里就地切片、算 silu、再乘 \(u\)。
 
-**默认配置**：[config/default.yaml](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/config/default.yaml#L18-L346) 是「graph」模式的默认流水线。它用一个顶层 `transforms:` 字典，把每个变换的名字映射到其配置（含 `stage` 字段）。注意 [default.yaml:340-346](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/config/default.yaml#L340-L346) 里 `compile_model` 的 `backend: torch-cudagraph`、`piecewise_enabled: true`——这就是为什么默认情况下 AD 会走 piecewise CUDA Graph 路径。这个 YAML 如何变成 `ad_config.transforms`？看 [llm_args.py:567-574](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm_args.py#L567-L574) 的 `_get_yaml_default_from_mode`，它把 `mode="graph"` 映射到 `default.yaml`，再由 `DynamicYamlMixIn`（`utils/_config.py`）合并用户 `yaml_extra` 覆盖项——优先级是「用户 yaml_extra > 默认 yaml」，与 u4-l2 讲的「用户显式优先」一脉相承。
+[tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py:186-225](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L186-L225) —— 注册与目标算子选择：`@TransformRegistry.register("fuse_silu_mul")` 自注册；按 `backend` 配置（默认 `flashinfer`，可选 `trtllm`）选 `target_op`（`flashinfer_silu_and_mul` 或 `trtllm_silu_and_mul`）。注意文件顶部的 `from ...custom_ops.linear.silu_mul import flashinfer_silu_and_mul, trtllm_silu_and_mul  # noqa: F401`（L51）——import 即注册自定义算子，和模型的「import 即注册」是同一套路（见 u5-l2）。
 
-#### 4.2.4 代码实践：追踪 `fuse_silu_mul` 的注册与执行
+[tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py:230-254](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L230-L254) —— 核心改写：遍历图节点找 `aten.mul.Tensor`，`_try_fuse_mul` 判定它是否匹配「silu(narrow) * narrow」模式；命中后 `graph.call_function(target_op, args=(fused_parent,))` 插入融合节点，`node.replace_all_uses_with(fused_node)` 把原 mul 的消费者改指向新节点，最后 `eliminate_dead_code()` 清掉死掉的 narrow/silu。
 
-这是本讲的主线实践——完整追踪一个图变换「如何被发现、如何被调用、改了什么图」。
+[tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py:355-406](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L355-L406) —— `_match_silu_narrow_mul`：模式匹配的「守卫」。它要求 gate 的 narrow 在 offset 0、up 的 narrow 在 offset=size、两者 size 相等，且**两半合起来恰好覆盖父张量最后一维**（`parent_last_dim == 2 * gate_size`）。这个约束很重要：融合算子总是从「中点」切分输入，若两半没铺满最后一维，融合结果就会错位。
 
-**实践目标**：理解一个变换从注册到执行的完整生命周期，并能用 `AD_DUMP_GRAPHS_DIR` 看到它对图的实际改写。
+**YAML 配置（注册的另一半）**：
 
-**操作步骤**：
+[tensorrt_llm/_torch/auto_deploy/config/default.yaml:244-247](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/config/default.yaml#L244-L247) —— 默认启用 `fuse_silu_mul`，阶段 `post_load_fusion`，backend `flashinfer`。`export_to_gm` 在 L27、`compile_model` 在 L340。这份 YAML 由 `LlmArgs` 在 [tensorrt_llm/_torch/auto_deploy/llm_args.py:571](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm_args.py#L571) 处加载（`"graph": str(config_path / "default.yaml")`）。
 
-1. **看注册**。打开 [fuse_silu_mul.py:186-187](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L186-L187)，确认 `@TransformRegistry.register("fuse_silu_mul")` 装饰器把 `FuseSiluMul` 注册到注册表，key 是字符串 `"fuse_silu_mul"`。
+#### 4.2.4 代码实践
 
-2. **看它在流水线里的位置**。在 [default.yaml:244-247](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/config/default.yaml#L244-L247) 看到 `fuse_silu_mul` 配置：`stage: post_load_fusion`、`enabled: true`、`backend: flashinfer`。这表示它要在「装完权重后」执行（因为此时张量是真实的，融合算子才能拿到真实 shape），且用 flashinfer 的融合 kernel。
+**目标**：完整跟踪 `fuse_silu_mul` 从注册到执行的链路，验证「装饰器注册 + YAML 启用 + InferenceOptimizer 调度」三段闭环。
 
-3. **读它要匹配的子图模式**。[fuse_silu_mul.py:16-41](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L16-L41) 的模块 docstring 写得很清楚：GEMM 融合把 gate/up 投影合成一个 `gemm(x, gate_up_weight)`，于是图里出现 `narrow(...,0,size)` 与 `narrow(...,size,size)` 两个切片，再做 `silu(gate) * up`。这个变换的目标是把 `silu(gate)*up` 替换成单个 `silu_and_mul(fused_out)`。
+**步骤**：
 
-4. **读改图核心**。[fuse_silu_mul.py:211-271](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L211-L271) 的 `_apply` 逻辑是：遍历图中所有 `aten.mul.Tensor` 节点；对每个 mul 调 `_try_fuse_mul` 判断它是不是 `silu(narrow)*narrow` 模式；若是，则在 mul 前插入一个新的 `silu_and_mul` 算子节点（`graph.call_function(target_op, ...)`），用 `node.replace_all_uses_with(fused_node)` 把所有对原 mul 的引用改指向新节点，最后 `eliminate_dead_code()` 清理孤儿节点。匹配校验在 [fuse_silu_mul.py:355-406](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L355-L406) 的 `_match_silu_narrow_mul`，它会确认两个 narrow 来自同一父节点、偏移分别是 0 和 `size`、且父节点最后一维恰好是 `2*size`（保证融合 kernel 从中点切分等价于两个 narrow）。
+1. **注册环节**：打开 `transform/library/fuse_silu_mul.py`，定位 `@TransformRegistry.register("fuse_silu_mul")`（L186）。这是 import 时即生效的副作用。追溯 `transform/__init__.py` 与 `transform/library/__init__.py`，确认 `fuse_silu_mul` 被 import，从而被注册（若未被 import，注册就不会发生）。
+2. **配置环节**：打开 `config/default.yaml`，找到 `fuse_silu_mul`（L244），记下它的 `stage`（`post_load_fusion`）与 `backend`（`flashinfer`）。
+3. **排序环节**：在 `optimizer.py:69` 的 `sorted(...)` 处，按 `Stages` 枚举确认 `post_load_fusion` 排在 `weight_load` 之后、`cache_init` 之前——这正是「装完权重再融合」的合理时机。
+4. **执行环节**：在 `interface.py:453` 的 `mod, info_apply = self._apply_per_gm_or_whole_model(...)` 处，确认它会调到 `fuse_silu_mul._apply`（L211），后者扫描 `aten.mul.Tensor` 节点并改写。
+5. **可选 dump**：设环境变量 `AD_DUMP_GRAPHS_DIR=/tmp/ad_graphs`，跑一次 AutoDeploy 构造，在 `BaseTransform.__call__` 的 `graph_writer.dump_graph`（L508）处会写出每个 pass 之后的图。对比 `fuse_silu_mul` 前后两张图，应能看到 `aten.mul` + `aten.silu` + `narrow` 被替换成单个 `auto_deploy.flashinfer_silu_and_mul`。
 
-5. **运行并 dump 图**（需要 GPU 与可下载的小模型）：
+**需要观察的现象**：
 
-   ```bash
-   cd examples/auto_deploy
-   AD_DUMP_GRAPHS_DIR=/tmp/ad_graphs python build_and_run_ad.py \
-       --model "TinyLlama/TinyLlama-1.1B-Chat-v1.0" \
-       --args.runtime demollm --args.skip-loading-weights False
-   ```
+- 注释掉 `transform/library/__init__.py` 里对 `fuse_silu_mul` 的 import 后，`TransformRegistry.has("fuse_silu_mul")` 应返回 False——印证「import 即注册」。
+- `TransformInfo.num_matches` 反映该模型里命中了几处 SiLU+Mul 模式（典型 MLP 每层 1 处）。
 
-   然后在 `/tmp/ad_graphs/` 下找到 `*_fuse_silu_mul_*.py`（变换「之前」）和紧随其后的下一个变换的 dump（变换「之后」），用 `grep` 搜 `silu_and_mul` 与 `aten.mul`，验证 mul 节点确实被替换。
-
-**需要观察的现象**：在 `fuse_silu_mul` 之前的图 dump 里应能看到 `aten.silu.default` + `aten.mul.Tensor` + `aten.narrow` 的组合；之后的 dump 里这部分变成单个 `auto_deploy.flashinfer_silu_and_mul.default`。日志里 `[SUMMARY] matches=N` 行会告诉你这个变换在整个模型里匹配并融合了多少处。
-
-**预期结果**：TinyLlama 每一层 FFN 有 1 处 gate/up，共 `num_hidden_layers` 处匹配，所以 `matches=` 应等于隐藏层数（TinyLlama-1.1B 是 22 层）。
-
-**说明**：若本机无 GPU，步骤 1–4 的纯源码阅读完全可做，是本实践的核心；步骤 5 标注为「待本地验证」。即使不跑，你也可以在 `tests/` 下搜 `fuse_silu_mul` 的单测来验证上述断言（见第 5 节综合实践）。
+**预期结果**：能复述「装饰器把类塞进 `_registry` → YAML 声明启用 → `InferenceOptimizer` 按阶段排序后调 `__call__` → `BaseTransform` 外壳做清理与统计 → 子类 `_apply` 改图」这条完整链路。若本机无 GPU，第 5 步的 dump 标注「待本地验证」。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `fuse_silu_mul` 必须在 `stage: post_load_fusion`（装权重之后），而不能在 `pattern_matcher`（标准化阶段）就做？
-**参考答案**：因为 `silu_and_mul` 融合算子要拿到真实的 shape 元信息（`node.meta["val"]`），而且 GEMM 融合（把 gate/up 投影合成单个 GEMM）要先发生、产生 `narrow` 切片模式，`fuse_silu_mul` 才有东西可匹配。GEMM 融合本身需要真实权重布局，所以整个链条必须在 `weight_load` 之后。`pattern_matcher` 阶段模型还在 meta 设备、且尚未做 GEMM 融合，此时图里还没有可匹配的 narrow+silu+mul 模式。
+**练习 1**：如果我新写了一个融合 pass，但忘了在 `default.yaml` 里加它，会发生什么？
 
-**练习 2**：如果用户想完全关掉 `fuse_silu_mul`，应该怎么改？改完会影响什么？
-**参考答案**：通过 `yaml_extra` 覆盖 `transforms.fuse_silu_mul.enabled: false`（或直接改一份自定义 YAML）。影响是：FFN 里 `silu(gate)*up` 不再融合成单算子，会多出若干小 kernel 启动和一次显存往返，前向略慢；但数值结果不变（融合是等价改写）。这体现了「变换可插拔」的设计。
+**参考答案**：装饰器仍会在 import 时把类注册进 `TransformRegistry`，所以 `TransformRegistry.has(name)` 为真；但因为 `ad_config.transforms` 来自 YAML，未列出的 pass 不会进入 `InferenceOptimizer._clean_config` 的结果，也就不会被执行。即「注册 ≠ 启用」，启用必须经 YAML（或等价的配置注入）。
 
-### 4.3 piecewise 编译：CompileBackend 与分片 CUDA Graph
+**练习 2**：为什么 `fuse_silu_mul` 的阶段是 `post_load_fusion` 而不是 `pattern_matcher`？
+
+**参考答案**：这个融合依赖一个前置条件——`gate`/`up` 已经被 GEMM 融合成单个 `gate_up` 投影（产生 `narrow` 切分模式）。GEMM 融合需要权重已加载（`weight_load`），因此它必须在 `weight_load` 之后的 `post_load_fusion` 阶段；而 `pattern_matcher` 在更早的位置，那时还没有可融合的 narrow 模式。
+
+**练习 3**：`BaseTransform.__call__` 被标记为 `@final`，子类不能覆盖它，那子类怎么自定义行为？
+
+**参考答案**：通过实现抽象方法 `_apply`（或 `_apply_to_full_model`，当 `run_per_gm=False` 时）。`__call__` 是固定的「模板方法」，它负责清理、统计、日志、dump，把控制权在合适时机交给 `_apply`；可选的 `_post_init` 钩子允许自定义初始化。
+
+---
+
+### 4.3 piecewise 编译：用编译后端把优化图变成 CUDA Graph
 
 #### 4.3.1 概念说明
 
-流水线的最后一个阶段 `COMPILE` 负责把优化好的图「编译」成高效可执行的模块。AutoDeploy 用一个**编译后端注册表** `CompileBackendRegistry` 管理多种编译策略，默认提供四种：
+图变换结束后，模型还是个普通的 FX `GraphModule`——能跑，但每次前向都要逐个 kernel launch，CPU 开销大。**编译（COMPILE）阶段**的任务是把它变成可高效回放的形态，最典型的就是 CUDA Graph。
 
-| 后端名 | 做什么 | 适用场景 |
-|--------|--------|----------|
-| `torch-simple` | 不做编译，直接返回原模块 | 调试、最简基线 |
-| `torch-compile` | 仅 `torch.compile(model, dynamic=True)` | 只要 torch.compile 的图优化、不要 CUDA Graph |
-| `torch-cudagraph` | `torch.compile` + CUDA Graph（含 piecewise） | **默认**，生产路径，兼顾 prefill 与 decode |
-| `torch-opt` | 更激进的优化后端 | 实验性 |
+但生成场景有个老大难：
 
-`torch-cudagraph`（默认）内部其实是**双模式**：decode-only 的 batch 用「整模型录一张大图（monolithic）」最快；prefill / 混合 batch 因为 token 数大且动态，用「分片（piecewise）CUDA Graph」。这个分流由一个 `DualModeCapturedGraph` 包装器在运行时根据 batch 性质自动派发（[torch_cudagraph.py:15-24](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L15-L24) 的模块 docstring 有明确说明）。
+- **decode（生成）阶段**：每步每个序列只产 1 个 token，batch 形状可控，可以把整个模型录成**一张整图（monolithic）CUDA Graph**，按 batch size 分桶捕获，回放最快。
+- **prefill（上下文）阶段**：序列长度千变万化，整图录不下；而且图里有「动态算子」（attention、SSM 等，它们的输出形状依赖运行时的 batch_info），无法被静态捕获。
 
-piecewise 的难点在于「地址稳定性」：CUDA Graph 录制时记住了所有输入/输出张量的 GPU 地址，回放时这些地址必须不变。但动态算子（注意力、mamba 元数据准备等）每次跑都会 `torch.empty` 新分配张量，地址漂移会破坏图。`ADPiecewiseRunner` 用一套「在录图时把动态算子的输出缓冲也一并从共享 graph pool 分配出来、运行时复用固定地址」的机制解决它——这就是 [piecewise_runner.py](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py) 文件顶部那段长 docstring 讲的全部内容。
+AutoDeploy 的解法是 **dual-mode（双模式）**：
+
+- 默认开 `piecewise_enabled`：同时构造一个整图 `CapturedGraph`（管 decode）和一个分片 `PiecewiseCapturedGraph`（管 prefill/mixed）。
+- 分片方案在动态算子边界把图切成「静态段」和「动态段」：静态段包进 `ADPiecewiseRunner` 录 CUDA Graph，动态段走 eager（或包进 wrapper 喂预分配 buffer）。
+- 运行时 `DualModeCapturedGraph` 按 `batch_info` 判断当前是 decode-only 还是 prefill/mixed，分流到对应路径。
+
+这套机制由一个独立的 `CompileBackendRegistry` 管理，提供 `torch-simple` / `torch-compile` / `torch-cudagraph` / `torch-opt` 四个后端，互可替换。
 
 #### 4.3.2 核心流程
 
-`compile_model` 变换如何把模型切成段并分别录图：
-
 ```text
-COMPILE 阶段：compile_model 变换（compile_model.py）
-  │
-  ├─ 读 CompileModelConfig：backend、piecewise_enabled、piecewise_num_tokens
-  │    （num_tokens 档位未指定时，自动生成 [64,128,256,...,max_num_tokens]）
-  │
-  ├─ 从 CompileBackendRegistry.get(backend) 取后端类（如 TorchCudagraph）
-  │
-  └─ piecewise_enabled=True 时：
-       1. split_graph_at_dynamic_ops：在动态算子（注意力等）处把模型切成多个子图
-            ── 动态段（含注意力）→ 保持 eager，运行时每次真算
-            ── 静态段（GEMM/Norm 等）→ 用 ADPiecewiseRunner 包起来
-       2. 对每个 ADPiecewiseRunner，按每个 num_tokens 档位跑 warmup→capture：
-            WARMUP : 多次 eager 跑子模块，让分配器状态稳定、发现动态算子输出 shape
-            CAPTURE: torch.cuda.graph(...) 录图；同时把下游动态算子的输出缓冲
-                     从共享 graph pool 分配，得到「确定性地址」
-            REPLAY : 运行时把实际 token 数 padding 到档位，replay 录好的图；
-                     动态算子从预分配缓冲拿 out=
-       3. 返回 DualModeCapturedGraph：decode-only → monolithic，否则 → piecewise
+compile_model (COMPILE 阶段 pass)
+  └─ CompileModelConfig.backend ∈ {torch-simple, torch-compile, torch-cudagraph, torch-opt}
+     └─ CompileBackendRegistry.get(backend)(target, **kwargs).compile()
+        │
+        ├─ torch-opt: 先 torch.compile(model, dynamic=True)，再走 torch-cudagraph
+        │
+        └─ torch-cudagraph (默认):
+             ├─ monolithic = CapturedGraph(target_gm)
+             │    └─ capture_graph(get_args_kwargs, cuda_graph_batch_sizes)
+             │         对每个 batch_size: warmup → cuda.graph 捕获 → 存进 self.cudagraphs[shape]
+             │
+             ├─ piecewise = PiecewiseCapturedGraph(target_gm, piecewise_num_tokens)
+             │    ├─ prepare(): split_graph_at_dynamic_ops(gm)
+             │    │     静态段 → ADPiecewiseRunner；动态段 → DynamicOpWrapper/MetadataWrapper/留 eager
+             │    └─ warmup_and_capture(get_args_kwargs):
+             │         对每个 num_tokens 桶（大到小）:
+             │           warmup → 发现动态算子输出形状 → capture → empty_cache
+             │           （ADPiecewiseRunner 内部：warmup/capture/replay 三态由类变量切换）
+             │
+             └─ DualModeCapturedGraph(monolithic, piecewise)
+                 运行时：decode-only → monolithic.replay；prefill/mixed → piecewise
 ```
 
-「强制 padding 到档位」是 piecewise 驯服动态形状的关键：录图只录了 64/128/256/... 这些档位，运行时若 batch 是 100 个 token，就 pad 到 128 再 replay，多算的 28 个 token 的结果事后丢弃。代价是最多 2 倍的算力浪费，换来的是 CUDA Graph 的极低启动开销。档位用 2 的幂是为了让 padding 倍数最多 2×。
+**整图（monolithic）的运行时逻辑**（`CapturedGraph.forward`）：把输入张量按各自动态维 copy 进预捕获的 input buffer，查表找匹配的 `combined_shape`，`cudagraphs[shape].replay()`，从输出 buffer 截取实际 batch 长度返回。不匹配则回退 eager。
 
-动态形状与 padding 的关系可这样理解：若实际 token 数为 \(n\)，档位集合为 \(B=\{64,128,256,...\}\)，则回放档位
-
-\[
-b(n)=\min\{b\in B \mid b\ge n\},
-\]
-
-浪费比为 \(\frac{b(n)-n}{n}\)，上界为 \(1\)（即最多翻倍）。
+**分片（piecewise）的三态机**：`ADPiecewiseRunner` 用两个类级变量 `_current_phase`（warmup/capture/replay）与 `_current_num_tokens`（哪个桶）控制行为，由编排器 `PiecewiseCapturedGraph` 在每次前向前设置。
 
 #### 4.3.3 源码精读
 
-**编译后端注册表**：[compiler.py:29-48](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/compiler.py#L29-L48) 的 `CompileBackendRegistry` 与变换注册表同构：`register(backend)` 装饰器把后端类存进 `_backend_registry`。抽象基类 [compiler.py:51-57](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/compiler.py#L51-L57) 的 `CompilerBackend` 只要求实现 `compile() -> nn.Module`。后端的注册同样是 import 触发，见 [compile/backends/\_\_init\_\_.py:15](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/__init__.py#L15)，一行 import 四个后端模块，副作用就是把这四个后端全部注册。
+**编译后端注册表与抽象**：
 
-**最简后端 torch-compile**：[torch_compile.py:24-32](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_compile.py#L24-L32) 的 `TorchCompileCompiler.compile` 只有 `return torch.compile(self.model, dynamic=True)` 一行。读它能帮你建立「编译后端 = 拿到一个 nn.Module、还回一个 nn.Module」的最小心智模型——所有后端的契约都是这个。
+[tensorrt_llm/_torch/auto_deploy/compile/compiler.py:29-57](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/compiler.py#L29-L57) —— `CompileBackendRegistry`（与 `TransformRegistry` 同构）+ `CompilerBackend(ABC)`，后者只要求实现 `compile() -> nn.Module`。注意它和图变换的注册表是**两套独立系统**：图变换用 `TransformRegistry`，编译后端用 `CompileBackendRegistry`。
 
-**compile_model 变换**：[compile_model.py:67-103](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L67-L103) 的 `CompileModelConfig` 定义了 `backend`（四种之一）、`piecewise_enabled`、`piecewise_num_tokens` 等字段，并用 `model_validator` 强制「piecewise 只能配 torch-cudagraph 或 torch-opt」。[compile_model.py:43-64](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L43-L64) 的 `_generate_default_piecewise_num_tokens` 实现了「64 起步、2 的幂递增、直到 max_num_tokens」的自动档位生成。[compile_model.py:116-237](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L116-L237) 的 `_apply_to_full_model` 是真正的编译入口：piecewise 开启时，它遍历模块树收集所有顶层 `GraphModule`（`compile_targets`），对每个 GM 调 `_compile_one`——`CompileBackendRegistry.get(self.config.backend)(target, **backend_kwargs).compile()`。
+**COMPILE 阶段 pass**：
 
-**单段录图器 ADPiecewiseRunner**：这是 piecewise 的灵魂。[piecewise_runner.py:272-287](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L272-L287) 类 docstring 说明它的行为由两个**类级**上下文控制——`_current_phase`（warmup/capture/replay）与 `_current_num_tokens`（用哪个档位），这两个上下文由编排器（`PiecewiseCapturedGraph`）在每次 forward 前设置。注意这是「类级」变量，意味着同一时刻所有 runner 共享同一个相位——这是靠编排器统一驱动的。
+[tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py:81-103](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L81-L103) —— `CompileModelConfig`：四个 backend 选项；`piecewise_enabled` 默认 False，但 YAML 里默认开 True；`piecewise_enabled` 要求 backend 必须是 `torch-cudagraph` 或 `torch-opt`（`validate_piecewise_backend` 校验器）。
 
-核心 [piecewise_runner.py:381-455](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L381-L455) 的 `forward` 三段式：
+[tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py:184-200](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L184-L200) —— `_compile_one`：`CompileBackendRegistry.get(self.config.backend)(target, **backend_kwargs).compile()`。这就是 pass 与后端的接缝。
 
-- **WARMUP**（[389-390](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L389-L390)）：直接 eager 跑 `self.submodule`，目的是让 PyTorch 分配器状态稳定，并让编排器通过 shape 发现拿到下游动态算子的输出 shape（存进 `_next_dynamic_out_infos`）。
-- **CAPTURE**（[398-426](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L398-L426)）：`torch.cuda.graph(graph, pool=self._graph_pool)` 录图；关键是在录图上下文里**额外**为下游动态算子 `torch.empty(info.shape, ...)` 预分配输出缓冲——这些缓冲从共享 graph pool 拿地址，于是回放时地址固定。
-- **REPLAY**（[428-455](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L428-L455)）：若该档位录过图，直接 `entry.cuda_graph.replay()`；若没录过（运行时 token 数不在档位里），则回退 eager（`self.submodule(...)`）。它还做了一次输入地址校验（[432-452](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L432-L452)），若地址与录图时不符会打 ERROR 日志——这是排查「图失效」的关键信号。
+[tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py:43-64](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L43-L64) —— `_generate_default_piecewise_num_tokens`：当用户未指定桶时，自动生成 2 的幂 `[64, 128, 256, ..., max_num_tokens]`，每桶最多 2× padding 开销。
 
-**动态算子包装器**：[piecewise_runner.py:466-500](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L466-L500) 的 `DynamicOpWrapper` 包住那些非 in-place 的动态算子，在 capture/replay 阶段从上游 runner 那里取回预分配缓冲、作为 `out=` 传进去，从而保证动态算子输出落在固定地址。文件里的 `MetadataWrapper` 则专门处理 mamba 这类「元数据准备」算子（输出虽小但地址会漂移），用「capture 时克隆稳定缓冲、replay 时 `copy_`」的方式保地址。这两个包装器共同保证了「动态段 eager、静态段录图」的混合执行不出错。
+**整图 CUDA Graph**：
+
+[tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py:175-274](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L175-L274) —— `class CapturedGraph` 与 `_capture_one_graph`：在 `with torch.cuda.graph(graph, pool=self._cuda_graph_mem_pool):` 里跑一次模型，把输出写进预分配 buffer；所有 batch size 共享同一个 graph memory pool。
+
+[tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py:276-398](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L276-L398) —— `capture_graph`：先用「max_batch 与 probe_batch 形状对比」**自动探测动态维**（L311-322），再对每个 batch size 把输入 copy 进 input buffer 后捕获，存进 `self.cudagraphs[combined_shape]`。运行时 `forward`（L399）用输入形状做 key 查表回放，不命中则 eager。
+
+**分片 CUDA Graph 编排器**：
+
+[tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py:465-659](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L465-L659) —— `class PiecewiseCapturedGraph`。`prepare()`（L505）调 `split_graph_at_dynamic_ops(gm)` 切图，把静态段包进 `ADPiecewiseRunner`、动态段按策略包进 `DynamicOpWrapper`（喂 `out=` 预分配 buffer）或 `MetadataWrapper`（稳定地址）或留 eager。一个值得注意的优化：默认把尾部的 `lm_head` 静态段排除出捕获（L552-564），因为它产出的 `[num_tokens, vocab_size]` 张量在 graph pool 里代价巨大（注释举 256K vocab、nt=8192 时 4–6 GiB），让它 eager 跑更划算——与 PyTorch 后端 piecewise 行为一致。
+
+[tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py:793-864](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L793-L864) —— `warmup_and_capture`：对每个 num_tokens 桶（大到小）做 warmup → 形状发现 → capture → `gc.collect() + empty_cache()`。捕获后转 replay 态。
+
+**分片运行器（三态机）**：
+
+[tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py:272-300](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L272-L300) —— `class ADPiecewiseRunner`：用类级 `_current_phase` 与 `_current_num_tokens` 控制三态。这种「用类变量当全局开关」的设计让被包的子模块完全无感——它只管 `forward`，由外部编排器告诉它现在该 warmup / capture / replay。
+
+[tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py:397-426](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L397-L426) —— capture 态：`with torch.cuda.graph(graph, pool=self._graph_pool):` 录制子段，并在录制**内部**为后续动态算子预分配输出 buffer（`dynamic_out_bufs`），保证它们从共享 graph pool 拿到确定性地址。这是「不需要 copy-back」的关键：输入来自稳定 InputBuffer、权重地址固定、动态输出在 capture 内预分配——所有地址在 replay 时都不变。
+
+[tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py:428-455](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L428-L455) —— replay 态：`entry.cuda_graph.replay()`，返回预存的 `static_output`。还内置了一次性「地址校验」：首次 replay 时比对运行时输入地址与捕获时记录的地址，不一致则打 error 日志（帮助排查 InputBuffer 地址漂移）。
+
+**双模式分流**：
+
+[tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py:910-1071](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L910-L1071) —— `class DualModeCapturedGraph`：`forward`（L1037）先用 `_is_decode_only`（读 `batch_info_host[0]` 即 num_prefill）判断；decode-only 走 monolithic；否则按 `_get_num_tokens` 找 `>= num_tokens` 的最小桶走 piecewise，并对输出做截断（`_truncate_output` 把 padding 桶截回真实长度）；找不到桶则 eager 回退。
+
+**叠加 torch.compile 的后端**：
+
+[tensorrt_llm/_torch/auto_deploy/compile/backends/torch_opt.py:25-41](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_opt.py#L25-L41) —— `torch-opt` 继承 `torch-cudagraph`，`compile()` 里先 `torch.compile(self.model, dynamic=True)` 再 `super().compile()`。即先让 PyTorch 的 inductor 做一轮图级融合/优化，再录 CUDA Graph，两者叠加。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解四种编译后端的差异，并能根据日志判断一次运行是否真的走了 piecewise。
+**目标**：理清「编译 pass → 后端注册表 → dual-mode 分流」的关系，并验证分片捕获对 num_tokens 分桶的行为。
 
-**操作步骤**：
+**步骤**：
 
-1. **静态对比四个后端**。读 [torch_compile.py:30-32](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_compile.py#L30-L32) 与 [torch_cudagraph.py:15-24](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/backends/torch_cudagraph.py#L15-L24)，写一句话概括两者的差别（提示：一个只 compile、一个 compile+录图+piecewise）。
+1. **后端二选一**：在 `transform/library/compile_model.py:196` 处，把 `self.config.backend` 分别设想为 `torch-cudagraph` 与 `torch-opt`，确认两者都经 `CompileBackendRegistry.get(...)` 拿到对应类（`torch_opt.py:26` 继承自 `torch_cudagraph.py:1155` 的 `TorchCudagraphCompiler`）。
+2. **桶的生成**：读 `compile_model.py:43-64` 的 `_generate_default_piecewise_num_tokens`。假设 `max_num_tokens=2048`，手算默认桶序列应为 `[64, 128, 256, 512, 1024, 2048]`。
+3. **分流判定**：在 `DualModeCapturedGraph.forward`（`torch_cudagraph.py:1037`）设断点，构造三种 batch：纯 decode（num_prefill=0）、纯 prefill、混合，观察分别走哪条路径。注意 `_is_decode_only` 读的是 `batch_info_host[0]`。
+4. **分桶查找**：跟踪 `_find_nearest_bucket`（L990）。若某次 prefill 总 token 数 = 300，桶序列如上，应选到 512 这档（`>=300` 的最小桶），输出最后被 `_truncate_output` 截回 300。
+5. **可选运行验证**：用 `examples/auto_deploy/build_and_run_ad.py` 跑一个小模型，开 `piecewise_enabled`，在日志里搜 `PiecewiseCapturedGraph: captured graphs for num_tokens=` 与 `Capturing graph for batch size:`，对比分片桶与整图 batch size 两套捕获日志。
 
-2. **追配置链**。在 [default.yaml:340-346](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/config/default.yaml#L340-L346) 里确认 `compile_model` 默认 `backend: torch-cudagraph`、`piecewise_enabled: true`、`piecewise_num_tokens: null`（即自动生成档位）。再读 [compile_model.py:147-164](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/library/../../compile/library/compile_model.py#L147-L164)（注：实际路径为 `compile_model.py`）确认 `piecewise_num_tokens: null` 时会调 `_generate_default_piecewise_num_tokens(max_num_tokens)` 自动生成档位，并会 drop 掉 < 3 与超过 mixed-batch 容量的档位。
+**需要观察的现象**：
 
-3. **运行并看日志**（需要 GPU）。用 `TLLM_LOG_LEVEL_BY_MODULE` 打开 AD 的 info 日志（见 AGENTS.md 的模块级日志说明），观察编译阶段是否打印类似 `Auto-generated piecewise_num_tokens from max_num_tokens=...: [64, 128, ...]` 与 `CompileModel: compiling N GraphModule(s)` 的行。
+- 日志里同时出现整图捕获（按 batch_size）与分片捕获（按 num_tokens）两套——印证 dual-mode。
+- `prepare()` 日志会打印 `N static runners, M dynamic wrapped, K dynamic eager`，反映切图结果。
+- 尾部 lm_head 段被排除捕获时会有一行 `excluding trailing static submod_* (lm_head) from capture`。
 
-**需要观察的现象**：日志里应能看到自动生成的档位列表、被编译的 GraphModule 数量，以及 capture 阶段的耗时。若 `piecewise_enabled=false`（比如改用 `torch-compile` 后端），则不会出现 piecewise 档位生成与分段编译的日志。
-
-**预期结果**：默认配置下，AD 会为模型的每个 transformer 层的静态段按若干档位录图；运行时 decode（小 batch）走 monolithic，prefill（大 batch）走 piecewise。
-
-**说明**：步骤 1–2 是纯源码阅读，必做；步骤 3 标注「待本地验证」。
+**预期结果**：能解释「为什么 decode 用整图、prefill 用分片」「为什么按 num_tokens 分桶而不是按 batch size」「为什么要在动态算子处切图」。第 5 步若无 GPU，标注「待本地验证」，仅做源码阅读。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `ADPiecewiseRunner` 用「类级」上下文变量（`_current_phase`、`_current_num_tokens`）而不是把 phase 当参数传进 `forward`？
-**参考答案**：因为 piecewise 模型是「静态段（runner）与动态段（DynamicOpWrapper）交错」嵌套在一个 `nn.Module` 树里，运行时是通过普通的 `module(*args)` 调用链触发的，没有额外通道把 phase 一层层传下去。用类级变量相当于一个「全局相位开关」，编排器（`PiecewiseCapturedGraph`）在整次 forward 前设好相位，所有 runner 与 wrapper 在各自的 forward 里读同一个相位，从而协同走 warmup/capture/replay。代价是不能并发跑多相位，但推理单步本来就是串行驱动的。
+**练习 1**：为什么不能直接对 prefill 阶段也录整图 CUDA Graph？
 
-**练习 2**：运行时如果一个 batch 的 token 数恰好落在两个档位之间（比如档位是 [64,128]，实际是 100），会发生什么？会不会崩？
-**参考答案**：不会崩。`ADPiecewiseRunner.forward` 在 replay 分支里，若 `entries.get(num_tokens)` 命中则 replay，否则在 capture 阶段会为新档位建条目录、replay 阶段若该档位未录过则回退 eager（`return self.submodule(...)`，见 [piecewise_runner.py:429-430](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/compile/piecewise_runner.py#L429-L430)）。实际工程上，编排器会在调用前把 token 数 padding 到档位（compile_model 的逻辑保证档位覆盖典型大小），所以多数情况是命中档位 replay；真正的未命中兜底是 eager，保证正确性。
+**参考答案**：prefill 的序列长度随请求变化，输入形状动态；整图 CUDA Graph 要求录制的输入形状与回放时完全一致（地址也要稳定）。形状一变就要重新捕获，而运行时捕获会引入毛刺且可能因地址失效出错。分片方案把可静态化的部分（norm、GEMM 等）录图、把形状依赖运行时的动态算子（attention 等）留在 eager，兼顾了性能与灵活性。
+
+**练习 2**：`ADPiecewiseRunner` 用「类级变量」`_current_phase` 控制三态，这种全局状态有什么风险？
+
+**参考答案**：类级变量是所有实例共享的「隐式全局」。如果同一时刻有多个 `ADPiecewiseRunner` 并发执行（比如多线程），它们会互相覆盖 `_current_phase` / `_current_num_tokens`，导致行为错乱。AutoDeploy 通过「由单一编排器 `PiecewiseCapturedGraph` 在每次 forward 前统一设置、且单步内不并发」来规避——这是一种「靠调用纪律保证安全」的设计，使用时要遵守该约定。
+
+**练习 3**：`torch-opt` 与 `torch-cudagraph` 的关系是什么？
+
+**参考答案**：`TorchOptCompiler` 继承 `TorchCudagraphCompiler`，`compile()` 先 `torch.compile(model, dynamic=True)` 再调 `super().compile()`。即 `torch-opt = torch.compile（inductor 图级优化）+ torch-cudagraph（CUDA Graph 录制）`，是叠加关系而非并列。这与 u10-l4 讲的「piecewise 建在 torch.compile 的 fullgraph 追踪之上」一脉相承。
+
+---
 
 ## 5. 综合实践
 
-设计一个贯穿本讲三块内容的「端到端追踪」任务：**用一份自定义 YAML 关掉若干变换并观察行为差异，从而把「shim → 流水线 → 编译」串起来。**
+把三个模块串起来，做一次「端到端追踪」。
 
-**任务**：写一份最小 YAML 覆盖文件 `my_override.yaml`，内容如下（示例代码，仅用于演示 yaml_extra 机制）：
+**任务**：选定一个 pass（推荐 `fuse_silu_mul`）与一个 compile 后端（推荐 `torch-cudagraph`），从用户构造 `LLM` 开始，一路追到该 pass 执行、再到编译后端产出 CUDA Graph，画出一张包含下列要素的完整时序图：
 
-```yaml
-# 示例代码：关掉 silu 融合与 piecewise，仅作演示
-transforms:
-  fuse_silu_mul:
-    enabled: false
-  compile_model:
-    backend: torch-compile
-    piecewise_enabled: false
-```
+1. `LLM(__init__)` → `llmapi/llm.py:185` 派发 → `AutoDeployLlmArgs`。
+2. `_build_model` → `ADEngine.build_from_config` → `InferenceOptimizer(...)`。
+3. `InferenceOptimizer.__call__` 按 `Stages` 排序后遍历：`export_to_gm`（EXPORT）→ `fuse_silu_mul`（POST_LOAD_FUSION）→ `compile_model`（COMPILE）。
+4. 在 `fuse_silu_mul` 节点标注：装饰器注册（`fuse_silu_mul.py:186`）→ YAML 启用（`default.yaml:244`）→ `BaseTransform.__call__` 外壳 → `_apply` 改图。
+5. 在 `compile_model` 节点标注：`CompileBackendRegistry.get("torch-cudagraph")` → `DualModeCapturedGraph`（monolithic + piecewise）。
 
-然后用 `yaml_extra` 加载它跑 dry-run：
+**进阶（可选）**：对照 [u3-l2 PyExecutor 单步循环](u3-l2-pyexecutor-step-loop.md) 与 [u3-l3 ModelEngine](u3-l3-model-engine-forward.md)，在时序图末尾画一条「`PyExecutor` 单步 → `ADEngine.forward` → `DualModeCapturedGraph.forward` → 整图/分片 replay」的运行时链路，体现「编译期产物在运行期被回放」。
 
-```bash
-cd examples/auto_deploy
-python build_and_run_ad.py \
-  --model "TinyLlama/TinyLlama-1.1B-Chat-v1.0" \
-  --args.yaml-extra my_override.yaml \
-  --dry-run
-```
+**交付物**：一张时序图 + 一段说明，指出 AutoDeploy 与默认 PyTorch 后端在「编译期做什么」「运行期共享什么」上的异同。
 
-完成后做三件事：
-
-1. **入口侧（4.1）**：从 dry-run 输出确认 `args.backend`（或等价的运行时字段）表明走的是 AD；在 `create_autodeploy_executor` 里指出 `model_engine` 是 `ADEngine`。
-2. **流水线侧（4.2）**：对比覆盖前后 dump 的 `args.transforms`，确认 `fuse_silu_mul.enabled` 变成 `false`；在 [optimizer.py:111-115](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/optimizer.py#L111-L115) 指出变换实例化与调用的那两行，说明「关掉一个变换 = 不实例化它」。
-3. **编译侧（4.3）**：确认覆盖后 `compile_model.backend` 是 `torch-compile`、`piecewise_enabled` 是 `false`；在 [compile_model.py:97-103](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/compile_model.py#L97-L103) 指出 `model_validator` 为何不再报错（因为 piecewise 关掉后 backend 不再受限）。
-
-**无 GPU 的替代方案（源码阅读型）**：在仓库的 `tests/` 目录下搜 `fuse_silu_mul` 与 `compile_model` 相关单测（如 `tests/unittest/_torch/auto_deploy/` 下），阅读测试断言：它们通常构造一个包含 `narrow+silu+mul` 的小 GraphModule，跑一次变换，断言图里出现了 `silu_and_mul`、原 mul 消失。把这些断言当作「ground truth」写进你的笔记，效果等同于亲眼 dump 图。
+> 若本机无 GPU/模型权重无法实跑，可纯做源码追踪；凡涉及实际运行结果处明确标注「待本地验证」。
 
 ## 6. 本讲小结
 
-- AutoDeploy 是 Beta 后端，**入口与运行时都复用默认后端**：`LLM`（[llm.py](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/llm.py)）继承 `_TorchLLM`，`ADEngine` 实现 `ModelEngine` 后塞进同一个 `PyExecutor`；它替换的不是运行时，而是「模型模块的生产方式」。
-- AD 的模型生产走一条**九阶段图变换流水线**（FACTORY → ... → COMPILE），由 `InferenceOptimizer` 按 `Stages` 排序编排，配置来自 `default.yaml`，可用 `yaml_extra` 覆盖。
-- 图变换遵循统一契约 `BaseTransform`（模板方法 `__call__` + 子类 `_apply`），用 `@TransformRegistry.register` + import 即注册；`fuse_silu_mul` 是典型范例：检测 `narrow+silu+mul` 子图、替换为融合算子。
-- 编译阶段用 `CompileBackendRegistry` 选后端，默认 `torch-cudagraph`；piecewise CUDA Graph 在动态算子处切图、静态段按 token 档位录图、运行时强制 padding 到档位回放，由 `ADPiecewiseRunner` 用「类级 phase 上下文 + 预分配输出缓冲」保证地址稳定。
-- 三大调试工具：`build_and_run_ad.py --dry-run` 看最终配置、`AD_DUMP_GRAPHS_DIR` dump 每个变换后的图、`TLLM_LOG_LEVEL_BY_MODULE` 打开 AD 模块日志。
-- 心智模型一句话：**默认后端是「人工写模型 + 直接跑」，AutoDeploy 是「拿现成模型 + 自动改图 + 编译再跑」**，二者殊途同归于同一个 `PyExecutor`。
+- **AutoDeploy 是编译器，不是新引擎**：它用 `torch.export` 把任意 PyTorch 模型抽成 FX 图，自动做推理优化，最后产出一个 `ADEngine`（`ModelEngine` 的实现），照样跑在共享的 `PyExecutor` 单步循环上——in-flight batching、调度、采样全部复用。
+- **shim 极薄**：AutoDeploy 的 `LLM` 继承 `_TorchLLM`，只强制 `backend="_autodeploy"` 并接管 `_build_model`（绕过 `CachedModelLoader`），其余全部复用；`llmapi/llm.py:185` 是派发分叉点。
+- **图变换是「注册表 + 阶段枚举」架构**：`@TransformRegistry.register(name)` 自注册，`Stages` 枚举定义执行顺序，`InferenceOptimizer._clean_config` 按阶段排序，`BaseTransform.__call__` 是统一的清理/统计/dump 外壳，子类只实现 `_apply`。新增优化 = 一个类 + 一个装饰器 + 一行 YAML。
+- **`fuse_silu_mul` 是典型 pass**：在 `post_load_fusion` 阶段把「silu(narrow) * narrow」模式替换成单个融合算子；改图靠 FX 的 `graph.call_function` + `replace_all_uses_with` + `eliminate_dead_code`。
+- **编译阶段产出 dual-mode CUDA Graph**：`compile_model` pass 经 `CompileBackendRegistry` 选后端；默认 `torch-cudagraph` 同时构造整图（管 decode）与分片（管 prefill/mixed）两套，由 `DualModeCapturedGraph` 按 `batch_info` 分流。
+- **分片核心是「在动态算子边界切图 + 三态机捕获」**：`split_graph_at_dynamic_ops` 切图，静态段包进 `ADPiecewiseRunner`（warmup/capture/replay 三态由类变量切换），按 num_tokens 分桶捕获；动态输出在 capture 内预分配以拿到稳定地址，故 replay 无需 copy-back。
 
 ## 7. 下一步学习建议
 
-- **u12-l2 自定义算子与内核**：本讲反复出现的 `silu_and_mul`、`trtllm_quant_fp8_linear` 等都是挂在 `torch.ops.auto_deploy` 命名空间下的自定义算子（见 [fuse_silu_mul.py:51](https://github.com/NVIDIA/TensorRT-LLM/blob/cf44a1ccee7dd3381a7b4c49a8318c0c3ae4426b/tensorrt_llm/_torch/auto_deploy/transform/library/fuse_silu_mul.py#L51) 的 import），下一讲会讲这些算子的四类实现来源（cpp/torch/triton/cute-dsl）与添加流程。
-- **若想深入 AD 图变换**：阅读 `transform/library/` 下其它变换，推荐顺序 `load_weights.py`（权重装载）→ `sharding.py` / `sharding_ir.py`（并行切分，呼应 u9-l1）→ `kvcache.py`（KV cache 注入，呼应 u7-l1）→ `fused_moe.py`（MoE 融合，呼应 u10-l1）。
-- **若想深入 piecewise**：读 `compile/piecewise_utils.py` 的 `split_graph_at_dynamic_ops`（切图策略）与 `compile/backends/torch_cudagraph.py` 的 `DualModeCapturedGraph`（decode/prefill 分流），并结合 u10-l4 的 CUDA Graph 知识对照。
-- **官方文档**：`docs/source/features/auto_deploy/` 下有 `transforms/`（按类别的变换文档）、`advanced/workflow.md`（嵌入自家工作流）、`advanced/example_run.md`（运行参数表）、`pipeline_cache_design.md`（变换缓存），是本讲之外最成体系的进阶资料。
+- **往下读自定义算子**：本讲多次出现 `torch.ops.auto_deploy.*`（如 `flashinfer_silu_and_mul`、`trtllm_quant_fp8_linear`）。这些算子的定义、`torch.library.custom_op` 的纯函数约定、与 CUDA Graph 的兼容性，见 [u12-l2 自定义算子与内核](u12-l2-custom-ops-and-kernels.md)。
+- **对比 PyTorch 后端的 piecewise**：[u10-l4 CUDA Graph 与 torch.compile / piecewise](u10-l4-cuda-graph-and-compile.md) 讲的是默认后端的同源机制，对照阅读能看清「自动编译」与「手工接线」两种范式的取舍。
+- **深入分布式 sharding pass**：本讲把 `SHARDING` 阶段当作黑盒一笔带过。AutoDeploy 的自动分片（`transform/library/sharding.py` / `sharding_ir.py`）是其相对 PyTorch 后端最具差异化的能力之一，建议结合 [u9-l1 Mapping 与并行策略](u9-l1-mapping-and-parallelism.md) 阅读。
+- **跑官方 demo**：`examples/auto_deploy/build_and_run_ad.py` 与 `examples/auto_deploy/README.md` 是最低成本的实跑入口；`docs/source/features/auto_deploy/` 下的 `advanced/` 目录有 KV cache 架构、测试策略、benchmark 等专题。
+- **动手加一个 pass**：参照 `fuse_silu_mul.py` 的结构（继承 `BaseTransform` + 装饰器 + 实现 `_apply` + 在 `default.yaml` 加一行），试着写一个最小改写（如把某个 `aten` 序列替换成单算子），是检验是否真正理解本讲的最佳方式。
