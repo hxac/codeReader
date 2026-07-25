@@ -1,7 +1,7 @@
 {
   "project": "TensorRT-LLM",
-  "head": "f5c2a07052f2324c23b3235a09a3a72120bc68a5",
-  "rationale": "TensorRT-LLM 是一个体量很大的 LLM/VisualGen 推理优化库，采用 PyTorch 原生架构、由 C++ 共享核心（经 nanobind 暴露）支撑高性能运行时，并存在 PyTorch（默认）与 AutoDeploy（beta）两条执行路径。据此，我把学习手册设计成三段递进：入门层（u1–u3）先建立\"项目是什么、怎么装、怎么跑、仓库怎么组织、请求怎么从 HF 模型走到生成 token\"的整体心智，避免初学者一上来陷入细节；进阶层（u4–u9）按推理系统的主要子系统纵向展开——配置体系（llm_args/llm_utils/ModelConfig）、模型与注册机制、注意力与后端、KV Cache 与显存管理、调度与请求生命周期/采样、分布式与并行原语，每个子系统只解决一个主题并指向真实源码；专家层（u10–u12）覆盖性能/工程取舍与二次开发：MoE、量化、投机解码、CUDA Graph/编译等高级优化，trtllm-serve 服务与分离式部署、基准与配置数据库，以及 AutoDeploy 图变换、自定义算子/内核、VisualGen、测试与 CI 贡献流程。讲义依赖关系按\"先总览再深入、先机制再扩展\"组织：先 u3 端到端流程打通主链路，再由 PyExecutor 单步循环派生出调度/KV cache/模型前向三条线，最后在专家层组合这些能力。每篇讲义聚焦单一主题、引用 1–6 个真实源码文件、配一个可操作的代码实践任务，所有源码路径均经实际确认。",
+  "head": "4b7d7199752f41960eedbf2846755e174940f164",
+  "rationale": "TensorRT-LLM 是一个体量很大的 LLM/VisualGen 推理优化库，采用 PyTorch 原生架构、由 C++ 共享核心（经 nanobind 暴露）支撑高性能运行时，并存在 PyTorch（默认）与 AutoDeploy（beta）两条执行路径。据此，我把学习手册设计成三段递进：入门层（u1–u3）先建立\\\"项目是什么、怎么装、怎么跑、仓库怎么组织、请求怎么从 HF 模型走到生成 token\\\"的整体心智，避免初学者一上来陷入细节；进阶层（u4–u9）按推理系统的主要子系统纵向展开——配置体系（llm_args/llm_utils/ModelConfig）、模型与注册机制、注意力与后端、KV Cache 与显存管理、调度与请求生命周期/采样、分布式与并行原语，每个子系统只解决一个主题并指向真实源码；专家层（u10–u12）覆盖性能/工程取舍与二次开发：MoE、量化、投机解码、CUDA Graph/编译等高级优化，trtllm-serve 服务与分离式部署、基准与配置数据库，以及 AutoDeploy 图变换、自定义算子/内核、VisualGen、测试与 CI 贡献流程。讲义依赖关系按\\\"先总览再深入、先机制再扩展\\\"组织：先 u3 端到端流程打通主链路，再由 PyExecutor 单步循环派生出调度/KV cache/模型前向三条线，最后在专家层组合这些能力。每篇讲义聚焦单一主题、引用 1–6 个真实源码文件、配一个可操作的代码实践任务，所有源码路径均经实际确认。本次增量（f5c2a07052..4b7d719975）仅有两个小修：py_executor.py 排除 ADP/cuda-graph dummy 请求对投机解码接受率统计的影响（影响 u3-l2/u10-l3），以及 serve 层修复 GPT-OSS router token identity（新增 chat_tokenization.py 并被 openai_server 引用，影响 u11-l1/u11-l2）。这些改动不引入新子系统、不改变主流程或公共接口，故无需新增讲义或重建；已写成的 u1-l1/u1-l2 源码范围未被触及，标记为 keep；尚未生成的讲义保持 new，将在生成时自然纳入最新源码。",
   "units": [
     {
       "id": "u1",
@@ -35,7 +35,7 @@
           ],
           "practice_task": "阅读 README 与架构总览文档，用自己的话画出 \"HF 模型 → LLM API → Executor → Scheduler → 模型前向 → Sampling → 生成 Token\" 的高层流程图，并简要说明 PyTorch 与 AutoDeploy 两个后端在入口上的区别。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -67,7 +67,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -237,7 +237,7 @@
           "order": 2,
           "filename": "u3-l2-pyexecutor-step-loop.md",
           "level": "beginner",
-          "topic": "拆解 PyExecutor 的单步执行循环：取请求 → 调度 → 模型前向 → 解码 → 处理响应。",
+          "topic": "拆解 PyExecutor 的单步执行循环：取请求 → 调度 → 模型前向 → 解码 → 处理响应。最新代码在聚合投机解码接受率统计时会排除 attention-dp dummy / CUDA Graph padding 请求（is_dummy）。",
           "learning_goals": [
             "理解 PyExecutor 的单步流程",
             "识别 Scheduler、ModelEngine、采样、响应处理各组件在 py_executor.py 中的位置",
@@ -253,7 +253,7 @@
             "调度与执行",
             "响应处理"
           ],
-          "practice_task": "在 py_executor.py 中定位主循环方法与 _handle_responses / _handle_executed_batch 等处理函数，绘制单步状态转换图；解释 BatchState 与 BatchStatePP 的区别。",
+          "practice_task": "在 py_executor.py 中定位主循环方法与 _handle_responses / _handle_executed_batch 等处理函数，绘制单步状态转换图；解释 BatchState 与 BatchStatePP 的区别，并说明为何聚合接受率统计要跳过 is_dummy 请求。",
           "depends_on": [
             "u3-l1"
           ],
@@ -845,7 +845,7 @@
           "order": 3,
           "filename": "u10-l3-speculative-decoding.md",
           "level": "advanced",
-          "topic": "讲解 EAGLE / MTP / N-gram / PARD 等投机解码方法在 speculative 模块中的实现与统一接口。",
+          "topic": "讲解 EAGLE / MTP / N-gram / PARD 等投机解码方法在 speculative 模块中的实现与统一接口；并说明接受率统计在 PyExecutor 中如何聚合（注意 dummy / padding 请求会被排除）。",
           "learning_goals": [
             "理解 draft-target 投机解码的基本原理",
             "掌握 interface.py 的统一接口",
@@ -864,7 +864,7 @@
             "drafter 家族",
             "动态树"
           ],
-          "practice_task": "对比 ngram 与 eagle3 两类 drafter 的输入输出与开销；在 interface.py 中定位 draft 长度如何动态调整（speculation_gate / auto_heuristic）。",
+          "practice_task": "对比 ngram 与 eagle3 两类 drafter 的输入输出与开销；在 interface.py 中定位 draft 长度如何动态调整（speculation_gate / auto_heuristic），并说明 py_executor.py 中接受率统计为何要跳过 is_dummy 请求。",
           "depends_on": [
             "u3-l3"
           ],
@@ -913,10 +913,10 @@
           "order": 1,
           "filename": "u11-l1-trtllm-serve-openai-server.md",
           "level": "advanced",
-          "topic": "剖析 trtllm-serve CLI 与 OpenAI 兼容服务器的实现（路由、协议、推理 / 响应）。",
+          "topic": "剖析 trtllm-serve CLI 与 OpenAI 兼容服务器的实现（路由、协议、聊天 token 化与推理 / 响应）。新增 chat_tokenization.py 负责聊天请求的 token 化，被 openai_server 引用。",
           "learning_goals": [
             "理解 commands/serve.py 的启动流程",
-            "掌握 openai_server / openai_service 的职责",
+            "掌握 openai_server / openai_service 与 chat_tokenization 的职责",
             "了解 OpenAI 协议的请求 / 响应映射与 tool parser"
           ],
           "source_files": [
@@ -924,14 +924,16 @@
             "tensorrt_llm/serve/openai_server.py",
             "tensorrt_llm/serve/openai_service.py",
             "tensorrt_llm/serve/openai_protocol.py",
+            "tensorrt_llm/serve/chat_tokenization.py",
             "tensorrt_llm/serve/tool_parser/__init__.py"
           ],
           "minimal_modules": [
             "serve CLI",
             "OpenAI server",
+            "聊天 token 化",
             "tool parser"
           ],
-          "practice_task": "追踪一次 /v1/chat/completions 请求在 serve.py → openai_server → openai_service → LLM 的处理路径；说明 tool parser 如何把工具调用嵌入输出。",
+          "practice_task": "追踪一次 /v1/chat/completions 请求在 serve.py → openai_server → chat_tokenization → openai_service → LLM 的处理路径；说明 tool parser 如何把工具调用嵌入输出，并指出 chat_tokenization 相对以往内联 token 化的变化。",
           "depends_on": [
             "u1-l3",
             "u3-l2"
@@ -944,25 +946,26 @@
           "order": 2,
           "filename": "u11-l2-disaggregated-serving.md",
           "level": "advanced",
-          "topic": "讲解把 prefill 与 decode 分离到不同 GPU、通过 NIXL / UCX / MPI 交换 KV cache 的架构。",
+          "topic": "讲解把 prefill 与 decode 分离到不同 GPU、通过 NIXL / UCX / MPI 交换 KV cache 的架构；并说明分离式 router 如何维护请求 token identity（如 GPT-OSS 场景）。",
           "learning_goals": [
             "理解分离式服务的角色（context / decode）",
             "掌握 disaggregation/ 与 transceiver 的数据搬运",
-            "了解协调服务与自动扩缩"
+            "了解协调服务、router 与 disagg_utils 的作用"
           ],
           "source_files": [
             "docs/source/features/disagg-serving.md",
             "tensorrt_llm/serve/openai_disagg_server.py",
             "tensorrt_llm/_torch/disaggregation/transceiver.py",
             "tensorrt_llm/_torch/disaggregation/nixl/__init__.py",
-            "tensorrt_llm/serve/disagg_coordinator.py"
+            "tensorrt_llm/serve/disagg_coordinator.py",
+            "tensorrt_llm/llmapi/disagg_utils.py"
           ],
           "minimal_modules": [
             "分离角色",
             "KV 搬运",
-            "协调服务"
+            "协调服务与 router"
           ],
-          "practice_task": "画一张 prefill 节点与 decode 节点之间的 KV cache 搬运时序图；对比 NIXL 与 UCX / MPI 三种传输方式。",
+          "practice_task": "画一张 prefill 节点与 decode 节点之间的 KV cache 搬运时序图；对比 NIXL 与 UCX / MPI 三种传输方式；并说明 router/disagg_utils 如何保证跨节点请求的 token identity 正确。",
           "depends_on": [
             "u11-l1",
             "u7-l1"
