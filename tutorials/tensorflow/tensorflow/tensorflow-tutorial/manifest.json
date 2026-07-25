@@ -1,7 +1,7 @@
 {
   "project": "tensorflow",
-  "head": "4efe77a0562d30d57b733ebb4adfa4ea1f930ecb",
-  "rationale": "TensorFlow 是一个跨语言、跨平台的大型端到端机器学习框架，代码量巨大，因此学习路径按「认知与运行 → 数据与图的基础概念 → 计算图与执行模型 → Op/Kernel 注册机制 → 核心子系统 → 设备与图优化 → 编译器与运行时 → 边缘部署 → 扩展与二次开发」九个单元、由浅入深三层（beginner / intermediate / advanced）展开。单元 1 先解决「项目是什么、怎么跑起来、目录怎么组织」；单元 2 建立张量、dtype、Variable、Operation 等贯穿全栈的核心抽象；单元 3 串起 TensorFlow 最重要的两条执行链路——Graph + Session 与 Eager + tf.function；单元 4 解释 Python 接口如何通过 Op 注册、OpKernel、C API、pywrap 与代码生成落地到 C++；单元 5 覆盖自动微分、tf.data、SavedModel、Keras、Optimizer 这些日常最常用的子系统；单元 6 进入设备/内存管理、Grappler 图优化与分布式策略；专家层单元 7–9 再深入 MLIR/XLA 编译流水线、TFRT 运行时、TFLite 部署与自定义 Op / AutoGraph / Profiler。讲义之间通过 depends_on 严格排序，确保每篇只讲一个相对独立的主题，并都结合真实源码与一个可操作的实践任务。",
+  "head": "92725c7290ff3c4f1ca8125eebd69a70e02ae03b",
+  "rationale": "本次增量（4efe77a→92725c7，共 11 个提交）的全部改动集中在：CI/Docker/wheel 校验脚本、third_party/xla 下 vendored 的 XLA 项目内部源码（XLA:CPU fusion emitter 选项弃用、PjRt RunAsync 重构、HLO parser 新增 algorithm 属性、AsyncValueRef/Future/tsl::PromiseOnce、LLVM 升级）、以及 tensorflow/lite/delegates/gpu/common/transformations 下三个文件仅移除未使用的 absl/memory/memory.h 头文件（Automated Code Change，无逻辑变化）。这些改动均未触及任何讲义所引用的 tensorflow/ 源码文件的行为或接口，也未改动根 WORKSPACE/MODULE.bazel/configure.py/.bazelrc。因此已生成的 u1-l1~u3-l1 十篇讲义全部保持 keep；尚未生成的 u3-l2~u9-l3 二十篇讲义因仍需首次撰写而保持 new。整体学习路径与单元划分沿用原设计：按「认知与运行 → 数据与图的基础概念 → 计算图与执行模型 → Op/Kernel 注册机制 → 核心子系统 → 设备与图优化 → 编译器与运行时 → 边缘部署 → 扩展与二次开发」九个单元、由浅入深三层（beginner/intermediate/advanced）展开，讲义间通过 depends_on 严格排序，每篇只讲一个相对独立的主题并结合真实源码与一个可操作的实践任务。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 README 后，用一句话写下 TensorFlow 与 PyTorch、JAX 的差异定位，并在仓库根目录列出三个最关键的入口文件路径。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -59,7 +59,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -89,7 +89,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -143,7 +143,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -177,7 +177,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -202,7 +202,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -227,7 +227,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -251,7 +251,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -285,7 +285,7 @@
           "depends_on": [
             "u2-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
