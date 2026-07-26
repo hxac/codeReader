@@ -5,8 +5,8 @@
 本讲是「多后端实现」单元的第三讲，承接 u7-l1（tilecpp 后端）和 u5-l3（cuTile 自动调优）。学完后你应该能够：
 
 - 理解 cutile-rs 后端如何用 **Rust** 写 GPU 内核，并编译成一个 **cdylib**（C 动态库）`libcutile_kernels.so`。
-- 看懂 Python 与 Rust 之间的 **cffi / cdef 跨语言边界**，以及数据如何以 `TensorDesc` 这个 `#[repr(C)]` 结构体跨界搬运。
-- 理解「按需 autobuild」与后端可用性探测的设计取舍。
+- 看懂 Python 与 Rust 之间的 **cffi / cdef 跨语言边界**，以及数据如何以 `TensorDesc` 这个 `#[repr(C)]` 结构体跨界搬运，包括本轮新增的 **NVFP4 dtype 码**。
+- 理解「按需 autobuild」与后端可用性探测的设计取舍，以及本轮新增的 **per-suite 内核 crate** 支持（自定义 `so_name` 与多 `src_roots` 的过期判定）。
 - 解释为什么 cutile-rs 的自动调优器用 **CUPTI**（`torch.profiler`）而非 `cuda.Event` 计时，以及由此引出的「`kernel_fn` 只能用 `torch.empty`」铁律。
 
 一句话定位：cutile-rs 与 cuTile（默认后端）、tilecpp、triton 一样，都是挂在**同一个算子名**下的一种实现；它用 Rust 替代 Python DSL，用运行时 `cargo` 编译替代运行时 `tileiras`，复用同一套分发机制。理解本讲后，你会清楚「算子名是全局键、后端只是子键、实现语言无关」这条贯穿全库的结论。
@@ -32,15 +32,15 @@
 
 | 文件 | 职责 |
 |------|------|
-| [src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml) | Rust crate 清单：`crate-type = ["cdylib"]`，声明把所有内核编译成一个共享库 |
-| [src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs) | crate 根，用 `mod + include!` 聚合每个算子的 `kernel.rs` / `ffi.rs` |
-| [src/tilegym/ops/cutile_rs/ffi_util.rs](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/ffi_util.rs) | 共享 FFI 工具：`TensorDesc` 结构体、`borrow_tensor`、dtype 码、返回码、宏 |
-| [src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs) | Rust 版 matmul 设备内核（`#[cutile::module]`） |
-| [src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs) | matmul 的 C-ABI 导出 `cutile_matmul` |
-| [src/tilegym/ops/cutile_rs/matmul.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py) | Python 包装：校验、grid 计算、调用 `autotune_launch`、cffi 调用 |
-| [src/tilegym/backend/cutile_rs/utils.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py) | cffi 加载器、`TensorDesc` 打包、autobuild、小工具 |
-| [src/tilegym/backend/cutile_rs/autotuner.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/autotuner.py) | 基于 CUPTI 的自动调优器 `autotune_launch` |
-| [src/tilegym/backend/selector.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/selector.py) | `is_cutile_rs_available()` 可用性探测 |
+| [src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml) | Rust crate 清单：`crate-type = ["cdylib"]`，声明把所有内核编译成一个共享库 |
+| [src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs) | crate 根，用 `mod + include!` 聚合每个算子的 `kernel.rs` / `ffi.rs` |
+| [src/tilegym/ops/cutile_rs/ffi_util.rs](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/ffi_util.rs) | 共享 FFI 工具：`TensorDesc` 结构体、`borrow_tensor`、dtype 码（含本轮新增 NVFP4）、返回码、宏 |
+| [src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs) | Rust 版 matmul 设备内核（`#[cutile::module]`） |
+| [src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs) | matmul 的 C-ABI 导出 `cutile_matmul` |
+| [src/tilegym/ops/cutile_rs/matmul.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py) | Python 包装：校验、grid 计算、调用 `autotune_launch`、cffi 调用 |
+| [src/tilegym/backend/cutile_rs/utils.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py) | cffi 加载器、`TensorDesc` 打包、autobuild（含本轮新增 per-suite 参数）、小工具 |
+| [src/tilegym/backend/cutile_rs/autotuner.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/autotuner.py) | 基于 CUPTI 的自动调优器 `autotune_launch` |
+| [src/tilegym/backend/selector.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/selector.py) | `is_cutile_rs_available()` 可用性探测 |
 
 一个值得记住的目录分工：**基础设施**（autotuner、cffi 加载器）住在 `backend/cutile_rs/`，**算子包装与内核 crate** 住在 `ops/cutile_rs/`——这一点 `backend/cutile_rs/__init__.py` 的文档串明确说明。
 
@@ -57,11 +57,9 @@ cuTile 默认后端用 Python DSL（`@ct.kernel`）写内核，交给运行时�
 - Rust 的 `crate-type = ["cdylib"]` 告诉 cargo：把这个 crate 编译成 `.so`（Linux）/ `.dylib`（macOS）/ `.dll`（Windows），并导出其中带 `#[no_mangle] extern "C"` 标记的函数为 C-ABI 符号。
 - 编译产物 `libcutile_kernels.so` 就像一个普通的 C 共享库，任何能 `dlopen` 的语言（包括 Python 的 cffi）都能按符号名调用它。
 
-关键设计取舍：**所有 cutile-rs 内核编译进同一个 cdylib**，而不是每个算子一个 crate。`Cargo.toml` 头部的注释把这层意图写得很清楚：
+关键设计取舍：**所有 cutile-rs 内核编译进同一个 cdylib**，而不是每个算子一个 crate。`Cargo.toml` 头部的注释把这层意图写得很清楚（详见 4.1.3）。这样做的收益是：一次 `cargo build` 算完所有算子、依赖只编译一遍、缓存只维护一份 `.so`。
 
-> Single cdylib for ALL cutile-rs kernels. ... One Cargo.toml + one (gitignored) Cargo.lock + one target/ for every kernel — no per-kernel crate, no shared cutile-rs checkout.
-
-这样做的收益是：一次 `cargo build` 算完所有算子、依赖只编译一遍、缓存只维护一份 `.so`。
+> 本轮（4.3 节详述）给加载/构建函数加了 `crate_dir`/`src_roots`/`so_name` 参数，使「每个 suite 自带一个内核 crate」成为可能；但当前仓库内的算子仍全部编进这唯一的 ops crate。
 
 #### 4.1.2 核心流程
 
@@ -75,9 +73,12 @@ cuTile 默认后端用 Python DSL（`@ct.kernel`）写内核，交给运行时�
 
 #### 4.1.3 源码精读
 
-**crate 清单**——注意 `crate-type = ["cdylib"]` 与依赖都钉死在 `=0.2.0` 以保证可复现（[src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml:15-28](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml#L15-L28)）：
+**crate 清单**——注意 `crate-type = ["cdylib"]` 与依赖都钉死在 `=0.2.0` 以保证可复现（[src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml:5-28](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml#L5-L28)）：
 
 ```toml
+# Single cdylib for ALL cutile-rs kernels. ... One Cargo.toml + one
+# (gitignored) Cargo.lock + one target/ for every kernel — no per-kernel
+# crate, no shared cutile-rs checkout.
 [lib]
 name = "cutile_kernels"
 crate-type = ["cdylib"]
@@ -93,7 +94,7 @@ cuda-async = "=0.2.0"
 
 `cutile` transitively 拉入 `cutile-ir`，`cuda-bindings` 经 `cuda-core` 引入——也就是说，Rust 端用的 Tile IR 与 cuTile Python 端是同一套。
 
-**crate 根聚合**——`lib.rs` 用 `include!` 宏文本嵌入各算子源，并用独立 `mod` 隔离（[src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs:16-42](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs#L16-L42)）：
+**crate 根聚合**——`lib.rs` 用 `include!` 宏文本嵌入各算子源，并用独立 `mod` 隔离（[src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs:16-42](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs#L16-L42)）：
 
 ```rust
 #[path = "../../ffi_util.rs"]
@@ -106,9 +107,9 @@ mod matmul {
 // ...bmm / silu_and_mul / swiglu / attention_sink 同构
 ```
 
-注释点明「新增算子」的步骤：丢一对 `<op>_kernel/{kernel.rs,ffi.rs}` 文件，再加一个 `mod <op> { ... }` 块即可。
+注释点明「新增算子」的步骤（lib.rs:11-12）：丢一对 `<op>_kernel/{kernel.rs,ffi.rs}` 文件，再加一个 `mod <op> { ... }` 块即可。
 
-**Rust 设备内核**——仍是 tile 编程模型。matmul 的非持久化变体用 `#[cutile::module]` + `#[cutile::entry()]` 标注，const 泛型 `BM/BN/BK` 即编译期瓦片尺寸（[src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs:13-32](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs#L13-L32)）：
+**Rust 设备内核**——仍是 tile 编程模型。matmul 的非持久化变体用 `#[cutile::module]` + `#[cutile::entry()]` 标注，const 泛型 `BM/BN/BK` 即编译期瓦片尺寸（[src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs:13-32](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul_kernel/kernel.rs#L13-L32)）：
 
 ```rust
 #[cutile::module]
@@ -127,7 +128,7 @@ pub mod matmul_module {
 
 内核体（`kernel.rs` 后半段）做的事情与 cuTile 版 matmul 一一对应：`get_tile_block_id` 取瓦片坐标、GROUP_SIZE_M=8 的 swizzle 重排、`partition(const_shape![BM,BK])` 切瓦片、`load_view_tko(..., tma::Enabled)` 走 TMA 加载、`mmaf` 张量核心乘加、`convert_tile` 在 fp32 累加器与 `E` 之间转换、`store_view_tko_mut` 写回。可见 **tile 编程模型与语言无关**——cuTile、tilecpp、cutile-rs 三者算法骨架相同。
 
-**C-ABI 导出**——`ffi.rs` 把内核包装成一个返回 `i32` 返回码的 C 函数（[src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs:29-53](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs#L29-L53)）：
+**C-ABI 导出**——`ffi.rs` 把内核包装成一个返回 `i32` 返回码的 C 函数（[src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs:29-53](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs#L29-L53)）：
 
 ```rust
 #[unsafe(no_mangle)]
@@ -148,7 +149,7 @@ pub unsafe extern "C" fn cutile_matmul(
 
 **操作步骤**：
 
-1. 打开 `src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs`，找到四个 `mod` 块（matmul / bmm / silu_and_mul / swiglu / attention_sink）。
+1. 打开 `src/tilegym/ops/cutile_rs/cutile_kernels/src/lib.rs`，找到五个 `mod` 块（matmul / bmm / silu_and_mul / swiglu / attention_sink）。
 2. 打开任一 `<op>_kernel/` 目录（如 `matmul_kernel/`），确认里面正好只有 `kernel.rs` 和 `ffi.rs` 两个文件。
 3. 对照 `lib.rs` 注释「To add an op: drop its `<op>_kernel/{kernel.rs,ffi.rs}` and add a `mod <op> { ... }` block」，写出新增一个假想算子 `add` 所需的最小改动。
 
@@ -168,18 +169,20 @@ pub unsafe extern "C" fn cutile_matmul(
 
 ---
 
-### 4.2 cffi / cdef 与 TensorDesc 跨界
+### 4.2 cffi / cdef 与 TensorDesc 跨界（含 NVFP4 dtype）
 
 #### 4.2.1 概念说明
 
-Rust 把内核编成了 `.so`，但 Python 怎么调用它？cutile-rs 选择了 **cffi 的 ABI 模式**：你把要调用的 C 函数签名写成一段字符串（`cdef`），cffi 在运行时 `dlopen` 这个 `.so` 并按符号名生成可调用对象。相比手写一长串 ctypes `argtypes`，cdef 只需声明一次、与 `.so` 的真实签名漂移更少（`utils.py:204-209` 的注释称之为「lighter, drift-resistant alternative」）。
+Rust 把内核编成了 `.so`，但 Python 怎么调用它？cutile-rs 选择了 **cffi 的 ABI 模式**：你把要调用的 C 函数签名写成一段字符串（`cdef`），cffi 在运行时 `dlopen` 这个 `.so` 并按符号名生成可调用对象。相比手写一长串 ctypes `argtypes`，cdef 只需声明一次、与 `.so` 的真实签名漂移更少（`utils.py:225-230` 的注释称之为「lighter, drift-resistant alternative」）。
 
 数据跨界靠一个共同的 C 结构体 **`TensorDesc`**：Python 端把 `torch.Tensor` 的 `data_ptr / ndim / shape / strides / dtype` 打包成一个 `TensorDesc`，传指针给 Rust；Rust 端解包成借用视图。这是整个 FFI 的**边界契约**——Rust 的 `#[repr(C)] struct TensorDesc` 与 Python 的 `_TENSORDESC_CDEF` 字符串必须逐字段对齐，否则会读到错位的内存。
+
+其中 `dtype` 字段被编码成一个**整数码**，两端各维护一张「码 ↔ 类型」的小表。本轮这张表扩容了：为支持 **NVFP4**（NVIDIA 4 位浮点格式），新增了两个码——`torch.uint8`（码 6）携带「打包成对的 NVFP4 元素」，`torch.float8_e4m3fn`（码 7）携带 NVFP4 的块缩放系数。这正好示范了边界契约的一个性质：**新增一种低精度格式 = 两张表 + 一份文档同步**，缺一不可。
 
 两个关键术语：
 
 - **cffi ABI 模式 vs API 模式**：ABI 模式无需 C 编译器、纯靠 `cdef` 字符串 + `dlopen`；API 模式需让 cffi 调用 C 编译器生成绑定。cutile-rs 用 ABI 模式，部署更轻。
-- **`ManuallyDrop` 与 FFI 所有权闸门**：PyTorch 才是显存的真正所有者，Rust 只是「借用」。若 Rust 端构造的 `Tensor<E>` 在作用域结束触发 `Drop`，就会误释放 PyTorch 的显存。`borrow_tensor` 返回 `ManuallyDrop<Tensor<E>>`，使其析构变成空操作，从而保证显存不被 Rust 释放（`ffi_util.rs:218-233`）。
+- **`ManuallyDrop` 与 FFI 所有权闸门**：PyTorch 才是显存的真正所有者，Rust 只是「借用」。若 Rust 端构造的 `Tensor<E>` 在作用域结束触发 `Drop`，就会误释放 PyTorch 的显存。`borrow_tensor` 返回 `ManuallyDrop<Tensor<E>>`，使其析构变成空操作，从而保证显存不被 Rust 释放（`ffi_util.rs:223-238`）。
 
 #### 4.2.2 核心流程
 
@@ -187,17 +190,16 @@ Rust 把内核编成了 `.so`，但 Python 怎么调用它？cutile-rs 选择了
 
 1. Python 包装器调 `bind_kernel_function_cffi(kernel, cdef)`：首次会触发 autobuild + `dlopen`，把 `(ffi, lib)` 缓存进 `_cffi_kernel_libs`；之后直接命中缓存。
 2. `ffi.cdef(_TENSORDESC_CDEF + cdef)`：先注册共享的 `TensorDesc` typedef，再注册该算子的函数签名（所以每个算子的 `cdef` 里可以直接写 `const TensorDesc*` 形参）。
-3. 对每个张量调 `make_tensor_desc(ffi, t)`：校验是 CUDA 张量、维度 ≤ 5、dtype 受支持，然后填充 `TensorDesc` 各字段，返回一个 cdata 指针（**调用方必须保活到 FFI 调用之后**，否则会被 GC 释放）。
+3. 对每个张量调 `make_tensor_desc(ffi, t)`：校验是 CUDA 张量、维度 ≤ 5、dtype 受支持（在 `_DTYPE_CODE` 表中），然后填充 `TensorDesc` 各字段，返回一个 cdata 指针（**调用方必须保活到 FFI 调用之后**，否则会被 GC 释放）。
 4. `lib.cutile_<op>(cd, ad, bd, ...)` 触发真正的 C 调用，返回一个 `int` 返回码。
 5. `check_rc(rc, fn_name)` 把非 0 返回码翻译成 `RuntimeError`。
 6. Rust 端 `cutile_<op>` 用 `borrow_tensor::<E>(desc)` 把 `TensorDesc` 还原成一个借用的 `Tensor<E>`，喂给设备内核，全程不持有所有权。
 
 #### 4.2.3 源码精读
 
-**边界契约——Python 侧**。`_TENSORDESC_CDEF` 是 Python 端对结构体的声明（[src/tilegym/backend/cutile_rs/utils.py:219-240](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L219-L240)）：
+**边界契约——Python 侧**。`_TENSORDESC_CDEF` 是 Python 端对结构体的声明，紧随其后的 `_DTYPE_CODE` 是 dtype 映射表（[src/tilegym/backend/cutile_rs/utils.py:235-265](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L235-L265)）：
 
 ```python
-_TENSORDESC_MAX_DIMS = 5
 _TENSORDESC_CDEF = """
 typedef struct {
     uint64_t ptr;
@@ -207,27 +209,68 @@ typedef struct {
     int32_t  dtype;
 } TensorDesc;
 """
-_DTYPE_CODE = {"torch.float32": 0, "torch.float16": 1, "torch.bfloat16": 2,
-               "torch.int32": 3, "torch.int64": 4, "torch.float8_e5m2": 5}
+# ... float8_e5m2 (code 5) is a low-precision element type. uint8 (code 6)
+# carries packed NVFP4 pairs (cutile f4e2m1fnx2: two E2M1 nibbles per byte, low
+# nibble = even element); float8_e4m3fn (code 7) carries NVFP4 block scales.
+_DTYPE_CODE = {
+    "torch.float32": 0,
+    "torch.float16": 1,
+    "torch.bfloat16": 2,
+    "torch.int32": 3,
+    "torch.int64": 4,
+    "torch.float8_e5m2": 5,
+    "torch.uint8": 6,
+    "torch.float8_e4m3fn": 7,
+}
 ```
 
-注意两点：`strides` 的单位是**元素**而非字节；`dtype` 是一个整数码（与 Rust 端 `dtype_str` 一一对应）。这段注释明确「MUST stay in sync with `TensorDesc` in ops/cutile_rs/ffi_util.rs」。
+注意三点：`strides` 的单位是**元素**而非字节；`dtype` 是一个整数码（与 Rust 端 `dtype_str` 一一对应）；本轮新增的码 6/7 服务于 NVFP4。这段注释明确「MUST stay in sync with `TensorDesc` in ops/cutile_rs/ffi_util.rs」。
 
-**边界契约——Rust 侧**。`#[repr(C)]` 保证逐字段与上面 cdef 对齐（[src/tilegym/ops/cutile_rs/ffi_util.rs:21-34](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/ffi_util.rs#L21-L34)）：
+**理解 NVFP4 的两个码**。NVFP4 把权重压到 4 位（E2M1）以省显存，但它需要两类张量配合：被量化的「元素」与每块的「缩放系数」。
+
+- 码 6 `torch.uint8 → f4e2m1fnx2`：一个 4 位元素放不进字节边界，于是**两个 E2M1 元素打包成一个字节**（`fnx2` = "fn × 2"）。用 `torch.uint8` 过界是因为 FFI 边界没有「半字节」类型；注释点明「low nibble = even element」（低位半字节是偶数下标元素，高位半字节是奇数下标元素）。注意它的「元素尺寸」按**字节**算是 1（一个 uint8），但逻辑上承载 2 个元素。
+- 码 7 `torch.float8_e4m3fn`：NVFP4 的**块缩放系数**（每个 block 一个 e4m3 标量），本身就是标准 8 位浮点，故元素尺寸就是 1 字节。
+
+**边界契约——Rust 侧**。`#[repr(C)]` 保证逐字段与上面 cdef 对齐，dtype 文档同步到码 6/7（[src/tilegym/ops/cutile_rs/ffi_util.rs:23-35](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/ffi_util.rs#L23-L35)）：
 
 ```rust
-pub const MAX_DIMS: usize = 5;
 #[repr(C)]
 pub struct TensorDesc {
     pub ptr: u64,
     pub ndim: i32,
     pub shape: [i64; MAX_DIMS],
     pub strides: [i64; MAX_DIMS],  // strides in ELEMENTS
-    pub dtype: i32,                 // 0=f32, 1=f16, 2=bf16, 3=i32, 4=i64, 5=f8e5m2
+    pub dtype: i32,                 // 0=f32, 1=f16, 2=bf16, 3=i32, 4=i64,
+                                    // 5=f8e5m2, 6=f4e2m1fnx2, 7=f8e4m3fn
 }
 ```
 
-**Python 打包器**。`make_tensor_desc` 把 `torch.Tensor` 填进 `TensorDesc`（[src/tilegym/backend/cutile_rs/utils.py:243-265](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L243-L265)）：
+**码 ↔ 类型名 / 字节尺寸**（Rust 端）。`dtype_str` 把整数码映回 cutile 的类型名字符串（用于 `.generics(...)`），`dtype_elem_size` 给出**存储字节尺寸**（[src/tilegym/ops/cutile_rs/ffi_util.rs:67-95](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/ffi_util.rs#L67-L95)）：
+
+```rust
+pub fn dtype_str(code: i32) -> Option<&'static str> {
+    match code {
+        0 => Some("f32"), 1 => Some("f16"), 2 => Some("bf16"),
+        3 => Some("i32"), 4 => Some("i64"), 5 => Some("f8e5m2"),
+        6 => Some("f4e2m1fnx2"),  // 打包 NVFP4 对（torch.uint8 过界）
+        7 => Some("f8e4m3fn"),    // NVFP4 块缩放
+        _ => None,
+    }
+}
+pub fn dtype_elem_size(code: i32) -> usize {
+    match code {
+        0 | 3 => 4,
+        1 | 2 => 2,
+        4 => 8,
+        5..=7 => 1,   // f8e5m2 / 打包 f4e2m1fnx2(uint8) / f8e4m3fn 都是 1 字节存储
+        _ => 0,
+    }
+}
+```
+
+注意 `5..=7 => 1`：码 6 虽然逻辑元素是 4 位，但**过界存储单元是 `uint8`**，所以按字节算是 1。`nbytes()`（`nelem() * dtype_elem_size`）算的是「这个 view 跨越的字节数」，对打包类型而言就是字节数而非逻辑元素数——这是 pack 类型在 FFI 边界的约定。
+
+**Python 打包器**。`make_tensor_desc` 把 `torch.Tensor` 填进 `TensorDesc`，dtype 由 `_DTYPE_CODE` 查表（[src/tilegym/backend/cutile_rs/utils.py:268-290](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L268-L290)）：
 
 ```python
 d = ffi.new("TensorDesc *")
@@ -240,7 +283,7 @@ d.dtype = code
 return d
 ```
 
-**Rust 解包器（FFI 所有权闸门）**。`borrow_tensor` 返回 `ManuallyDrop<Tensor<E>>`，析构为空操作，绝不释放 PyTorch 显存（[src/tilegym/ops/cutile_rs/ffi_util.rs:229-233](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/ffi_util.rs#L229-L233)）：
+**Rust 解包器（FFI 所有权闸门）**。`borrow_tensor` 返回 `ManuallyDrop<Tensor<E>>`，析构为空操作，绝不释放 PyTorch 显存（[src/tilegym/ops/cutile_rs/ffi_util.rs:234-238](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/ffi_util.rs#L234-L238)）：
 
 ```rust
 pub unsafe fn borrow_tensor<E: DType>(d: &TensorDesc) -> ManuallyDrop<Tensor<E>> {
@@ -250,7 +293,7 @@ pub unsafe fn borrow_tensor<E: DType>(d: &TensorDesc) -> ManuallyDrop<Tensor<E>>
 }
 ```
 
-**cdef 声明与调用**。每个算子的 `cdef` 是其 FFI 签名的镜像，例如 matmul（[src/tilegym/ops/cutile_rs/matmul.py:39-46](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L39-L46)）：
+**cdef 声明与调用**。每个算子的 `cdef` 是其 FFI 签名的镜像，例如 matmul（[src/tilegym/ops/cutile_rs/matmul.py:39-46](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L39-L46)）：
 
 ```python
 _FFI_CDEF = """
@@ -263,21 +306,25 @@ int32_t cutile_matmul(
 """
 ```
 
-注释提醒它必须与 Rust 端 `cutile_matmul` 签名同步。调用处 `_run_ffi` 打包三个张量并传入 stream（[src/tilegym/ops/cutile_rs/matmul.py:91-116](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L91-L116)）：`raw_stream = torch.cuda.current_stream(device=_dev).cuda_stream` 把 PyTorch 当前 stream 的原始句柄以 `uint64_t` 传过界，Rust 端再用 `Stream::borrow_raw` 借用，保证内核跑在调用方的 stream 上。
+注释提醒它必须与 Rust 端 `cutile_matmul` 签名同步。调用处 `_run_ffi` 打包三个张量并传入 stream（[src/tilegym/ops/cutile_rs/matmul.py:91-116](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L91-L116)）：`raw_stream = torch.cuda.current_stream(device=_dev).cuda_stream` 把 PyTorch 当前 stream 的原始句柄以 `uint64_t` 传过界，Rust 端再用 `Stream::borrow_raw` 借用，保证内核跑在调用方的 stream 上。
 
-**返回码**。Rust 端定义错误码常量 `rc::{OK, UNSUPPORTED_DTYPE, LAUNCH_FAILED, DEVICE_INIT_FAILED, NULL_PTR, INVALID_ARGS}`（[src/tilegym/ops/cutile_rs/ffi_util.rs:103-117](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/ffi_util.rs#L103-L117)），Python 端 `_RC_MESSAGES` 与之对应、`check_rc` 把非 0 码翻译成异常（[src/tilegym/backend/cutile_rs/utils.py:321-334](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L321-L334)）。注意 `-1` 故意不是错误码，它是编译选项「auto/default」的哨兵值（见 4.4 节）。
+**返回码**。Rust 端定义错误码常量 `rc::{OK, UNSUPPORTED_DTYPE, LAUNCH_FAILED, DEVICE_INIT_FAILED, NULL_PTR, INVALID_ARGS}`（[src/tilegym/ops/cutile_rs/ffi_util.rs:108-122](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/ffi_util.rs#L108-L122)），Python 端 `_RC_MESSAGES` 与之对应、`check_rc` 把非 0 码翻译成异常（[src/tilegym/backend/cutile_rs/utils.py:353-370](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L353-L370)）。注意 `-1` 故意不是错误码，它是编译选项「auto/default」的哨兵值（见 4.4 节）。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证「TensorDesc 两边对齐」与「借用不释放」这两个契约，方法是阅读型实践。
+**实践目标**：验证「TensorDesc 两边对齐」「借用不释放」与「dtype 表新增 NVFP4 码后两端同步」这三个契约，方法是阅读型实践。
 
 **操作步骤**：
 
-1. 并排打开 `utils.py` 的 `_TENSORDESC_CDEF`（L220-228）与 `ffi_util.rs` 的 `struct TensorDesc`（L26-34），逐字段对照：`ptr(u64)/ndim(i32)/shape[5](i64)/strides[5](i64)/dtype(i32)`。
-2. 找到 `make_tensor_desc`（L243-265）里 `d.strides[i] = int(t.stride(i))`，确认 stride 用的是 `torch.Tensor.stride(i)`（单位是元素，不是字节），与 Rust 注释「Strides are in ELEMENTS」一致。
-3. 读 `borrow_tensor`（L229-233），解释为何返回 `ManuallyDrop` 而非普通 `Tensor`。
+1. 并排打开 `utils.py` 的 `_TENSORDESC_CDEF` + `_DTYPE_CODE`（L235-265）与 `ffi_util.rs` 的 `struct TensorDesc`（L26-35）+ `dtype_str`（L72-84），逐项对照：8 个 dtype 码（0–7）在两端是否一一对应。
+2. 找到 `make_tensor_desc`（L268-290）里 `d.strides[i] = int(t.stride(i))`，确认 stride 用的是 `torch.Tensor.stride(i)`（单位是元素，不是字节），与 Rust 注释「Strides are in ELEMENTS」一致。
+3. 读 `borrow_tensor`（L234-238），解释为何返回 `ManuallyDrop` 而非普通 `Tensor`。
+4. 解释码 6 为何用 `torch.uint8` 过界、且 `dtype_elem_size` 返回 1 而非 0.5。
 
-**预期结果**：你能用自己的话说明「若把 Rust 端 `strides` 改成按字节解释，或漏掉 `ManuallyDrop`，分别会发生什么」——前者会算错瓦片偏移读到越界/错位数据，后者会在每次 FFI 调用结束后误释放 PyTorch 显存。
+**预期结果**：你能用自己的话说明：
+
+- 「若把 Rust 端 `strides` 改成按字节解释，或漏掉 `ManuallyDrop`，分别会发生什么」——前者会算错瓦片偏移读到越界/错位数据，后者会在每次 FFI 调用结束后误释放 PyTorch 显存。
+- 「NVFP4 打包元素为何用 uint8」——FFI 边界没有半字节类型，两个 4 位元素必须共用一个字节过界；`dtype_elem_size=1` 反映的是**过界存储字节数**而非逻辑元素位宽。
 
 **待本地验证**：若有 GPU 与 cutile-rs 后端，可写脚本构造一个非连续张量（如 `t[::2]`），观察 `matmul.py` 的 `a = a.contiguous()`（L134）是否在 FFI 前把它连续化——这印证了「TensorDesc 只搬运紧密布局」的隐含前提。
 
@@ -287,30 +334,44 @@ int32_t cutile_matmul(
 
 > 参考答案：cffi 分配的 `TensorDesc` 由 Python GC 管理，一旦被回收，其内存可能被释放或复用，传给 Rust 的指针就会变成野指针。把 `cd, ad, bd` 都保留到 FFI 调用之后，才能保证 Rust 读到完整的描述符。
 
-**练习 2**：`TensorDesc` 把 dtype 编码成一个整数（0=f32…5=f8e5m2）而不是传字符串，这样做的好处是什么？
+**练习 2**：`TensorDesc` 把 dtype 编码成一个整数而不是传字符串，这样做的好处是什么？新增 NVFP4 时两端要各改哪里？
 
-> 参考答案：C-ABI 边界传整数最廉价、无字符串生命周期问题；Rust 端再用 `dtype_str(code)` 把整数映回 cutile 的类型名字符串（`"f16"` 等）用于 `.generics(...)`。整数码只需在两端各维护一张小表并保持同步。
+> 参考答案：C-ABI 边界传整数最廉价、无字符串生命周期问题；Rust 端再用 `dtype_str(code)` 把整数映回 cutile 的类型名字符串（`"f4e2m1fnx2"` 等）用于 `.generics(...)`。新增 NVFP4 时，Python 侧要在 `_DTYPE_CODE` 加码 6/7、Rust 侧要在 `dtype_str`/`dtype_elem_size` 的 `match` 各加一支，并把 `TensorDesc.dtype` 与 `_TENSORDESC_CDEF` 上方的注释同步——整数码只需在两端各维护一张小表并保持同步。
+
+**练习 3**：码 6（`f4e2m1fnx2`）的 `dtype_elem_size` 是 1，但它逻辑上是 4 位元素。这个「1」代表什么？
+
+> 参考答案：代表**过界存储单元的字节尺寸**。打包类型用 `torch.uint8`（1 字节）携带两个 4 位元素过界，所以「每份过界存储」是 1 字节；`nbytes() = nelem() * 1` 算出的是该 view 跨越的字节数，而非逻辑 4 位元素的个数。内核侧再按「低半字节 = 偶数元素」的约定拆包。
 
 ---
 
-### 4.3 autobuild 与可用性探测
+### 4.3 autobuild 与可用性探测（含 per-suite 内核 crate）
 
 #### 4.3.1 概念说明
 
 cuTile 与 tilecpp 都把编译缓存（cubin）当成一种「编译产物」来管理；cutile-rs 走得更彻底——整个 `.so` 都是**按需构建**的。`backend/cutile_rs/utils.py` 提供了一套 autobuild 机制：第一次真正用到某个 cutile-rs 算子时，才检查「`.so` 是否过期」，过期就跑 `cargo build --release` 重新编译。这套机制由环境变量 `CUTILE_RS_AUTOBUILD` 控制（默认开），可用 `CUTILE_RS_AUTOBUILD=0` 关闭以钉住一个预编译 `.so`。
 
+**本轮的关键扩展：per-suite 内核 crate 支持。** 之前整套机制都假定「全库只有一个 ops crate（`ops/cutile_rs/cutile_kernels/`）、产物固定叫 `libcutile_kernels.so`」。本轮把 `_shared_so_path` / `_so_stale` / `_build_kernels` / `_ensure_built_and_path` / `bind_kernel_function_cffi` 全部加上三个新参数：
+
+- `crate_dir`：要编译的 crate 目录（默认仍是 ops crate）。
+- `src_roots`：判定过期时要扫描的**源码根目录列表**（默认 `ops/cutile_rs/`）。
+- `so_name`：产出的 `.so` 文件名（默认 `libcutile_kernels.so`）。
+
+这样，**一个 suite 若自带 Rust 内核 crate**（自己的 `Cargo.toml`），就能用自己的 `so_name` 编出独立的 `.so`、用 `src_roots` 指定自己的源码根，互不干扰。需要特别强调 `src_roots` 是**列表**：suite 必须把自己的源码根**和 `ops/cutile_rs/` 一起**传进来——因为每个 crate 的 `lib.rs` 都 `#[path = "../../ffi_util.rs"] include!` 了 `ops/cutile_rs/ffi_util.rs` 这份共享文件（见 4.1.2 第 3 步），若 `ffi_util.rs` 改了而 suite 的 `.so` 没重编，就会 ABI 错位。
+
+> 现状说明：本讲义写作时，仓库内的算子（matmul/bmm/silu_and_mul/swiglu/attention_sink）仍全部走默认 ops crate——它们的 `bind_kernel_function_cffi(_KERNEL, _FFI_CDEF)` 调用都只传两个位置参数。这三个新参数是**为 suites 自带内核 crate 预留的扩展点**，加载/构建函数已具备该能力，但当前没有 in-tree suite 实际传入。
+
 与之配套的是**可用性探测** `is_cutile_rs_available()`。回顾 u7-l1：tilecpp 的探测刻意「延迟且缓存」，因为它要 fork `nvcc --version`，很贵。cutile-rs 的探测策略相反——**宽松探测（Rule 35）**：只要 `cargo` 在 `PATH` 上（能按需编译），或已有一份不过期的预编译 `.so`，就报告「可用」；真正昂贵的校验（libclang、CUDA 头、tileiras）推迟到第一次 dispatch 时才做。这样 import 期的探测保持轻量。
 
 #### 4.3.2 核心流程
 
-autobuild 的判定与执行：
+autobuild 的判定与执行（默认 ops crate 路径）：
 
 1. `_kernels_crate_dir()` 定位 crate 目录（支持 `CUTILE_RS_KERNELS_DIR` 覆盖）。
-2. `_so_stale(so_path)` 判定过期：`.so` 不存在，或 `ops/cutile_rs/` 下任一 `.rs/.toml` 的 mtime 比 `.so` 新（`target/` 跳过）。
-3. `_ensure_built_and_path()`：若 autobuild 开启且过期，调 `_build_kernels()` 重建，并清空 cffi 句柄缓存 `_cffi_kernel_libs`。
-4. `_build_kernels()` 用 `fcntl.flock` 加文件锁，**锁内再次检查过期**，避免多进程重复编译；解析 `cargo` 为绝对路径防 PATH 劫持；以白名单环境变量 + 修正过的 `CUDA_TOOLKIT_PATH` 跑 `cargo build --release`，900 秒超时。
+2. `_so_stale(so_path, src_roots)` 判定过期：`.so` 不存在，或 `src_roots` 任一目录下（递归，`target/` 跳过）有 `.rs/.toml` 的 mtime 比 `.so` 新。
+3. `_ensure_built_and_path(crate_dir, src_roots, so_name)`：若 autobuild 开启且过期，调 `_build_kernels(crate_dir, src_roots, so_name)` 重建，并清空 cffi 句柄缓存 `_cffi_kernel_libs`。
+4. `_build_kernels()` 用 `fcntl.flock` 加文件锁，**锁内再次检查过期**（用同一个 `src_roots`），避免多进程重复编译；解析 `cargo` 为绝对路径防 PATH 劫持；以白名单环境变量（本轮新增 `BINDGEN_EXTRA_CLANG_ARGS`）+ 修正过的 `CUDA_TOOLKIT_PATH` 跑 `cargo build --release`，900 秒超时。
 
-可用性探测 `is_cutile_rs_available()`：
+可用性探测 `is_cutile_rs_available()`（只看默认 ops crate）：
 
 1. crate 目录不存在 → 不可用。
 2. autobuild 关闭（`CUTILE_RS_AUTOBUILD=0`）→ 仅当 `.so` 存在才可用。
@@ -318,47 +379,96 @@ autobuild 的判定与执行：
 
 #### 4.3.3 源码精读
 
-**过期判定**——遍历 `ops/cutile_rs/` 下所有 `.rs/.toml`，任一比 `.so` 新即过期（[src/tilegym/backend/cutile_rs/utils.py:85-98](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L85-L98)）：
+**过期判定（本轮重构核心）**——`_so_stale` 现在接受 `src_roots`（单个 str 或元组），遍历**每一个**源码根下所有 `.rs/.toml`，任一比 `.so` 新即过期（[src/tilegym/backend/cutile_rs/utils.py:85-106](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L85-L106)）：
 
 ```python
-def _so_stale(so_path: str) -> bool:
+def _so_stale(so_path: str, src_roots: str | tuple[str, ...] | None = None) -> bool:
+    """... Suites with their own kernels crate pass their cutile_rs/ source
+    root (plus ops/cutile_rs/ for the shared ffi_util.rs they include)."""
     if not os.path.isfile(so_path):
         return True
     so_mtime = os.path.getmtime(so_path)
-    for root, _, files in os.walk(_ops_src_root()):
-        if "target" in root.split(os.sep):
-            continue
-        for f in files:
-            if f.endswith((".rs", ".toml")) and os.path.getmtime(os.path.join(root, f)) > so_mtime:
-                return True
+    if src_roots is None:
+        src_roots = (_ops_src_root(),)
+    elif isinstance(src_roots, str):
+        src_roots = (src_roots,)
+    for src_root in src_roots:
+        for root, _, files in os.walk(src_root):
+            if "target" in root.split(os.sep):
+                continue
+            for f in files:
+                if f.endswith((".rs", ".toml")) and os.path.getmtime(os.path.join(root, f)) > so_mtime:
+                    return True
     return False
 ```
 
-**带锁的重建**——锁内复检，避免并发冗余编译（[src/tilegym/backend/cutile_rs/utils.py:118-175](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L118-L175)，节选关键段）：
+文档串点明了 suite 的用法：传「自己的 `cutile_rs/` 源码根 **外加** `ops/cutile_rs/`（因为共享了 `ffi_util.rs`）」。这正是 per-suite 过期判定的关键——共享文件改了，所有依赖它的 suite `.so` 都必须重编。
+
+**`.so` 路径与自定义名**——`_shared_so_path` 加 `so_name` 参数，让每个 crate 产出独立 `.so`（[src/tilegym/backend/cutile_rs/utils.py:72-74](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L72-L74)）：
 
 ```python
-with open(lock_path, "w") as lock_f:
-    fcntl.flock(lock_f, fcntl.LOCK_EX)
-    if not _so_stale(so_path):
-        return
-    ...
-    subprocess.run([cargo_bin, "cargo build --release"[1]], cwd=crate_dir, env=env,
-                   check=True, capture_output=True, text=True, timeout=900)
+def _shared_so_path(crate_dir: str, profile: str = "release", so_name: str = "libcutile_kernels.so") -> str:
+    return os.path.join(crate_dir, "target", profile, so_name)
 ```
 
-注意它特意把 `cargo` 解析成绝对路径（`shutil.which("cargo")`，L150）防 PATH 劫持，并在 `CUDA_TOOLKIT_PATH` 指向的目录没有 `include/cuda.h` 时回退到 `/usr/local/cuda`（L145-148）——因为运行时入口可能把 `CUDA_TOOLKIT_PATH` 指向一个无头文件的运行时 CUDA（供 tileiras 用）。
-
-**按需构建入口**——重建后清空 cffi 句柄缓存（[src/tilegym/backend/cutile_rs/utils.py:178-201](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L178-L201)）：
+**带锁的重建（透传新参数）**——`_build_kernels` 把 `src_roots` 透传给锁内复检的 `_so_stale`、把 `so_name` 透传给 `_shared_so_path`（[src/tilegym/backend/cutile_rs/utils.py:127-188](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L127-L188)，节选关键段）：
 
 ```python
-if _autobuild_enabled() and _so_stale(so_path):
-    _build_kernels(crate_dir)
-    _cffi_kernel_libs.clear()
+def _build_kernels(crate_dir, src_roots=None, so_name="libcutile_kernels.so") -> None:
+    ...
+    so_path = _shared_so_path(crate_dir, so_name=so_name)
+    ...
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        if not _so_stale(so_path, src_roots):    # 锁内用同一 src_roots 复检
+            return
+        ...
+        env = {k: os.environ[k] for k in _BUILD_ENV_KEYS_KERNEL if k in os.environ}
+        ...
+        subprocess.run([cargo_bin, "build", "--release"], cwd=crate_dir, env=env,
+                       check=True, capture_output=True, text=True, timeout=900)
+```
+
+构建环境的白名单 `_BUILD_ENV_KEYS_KERNEL` 本轮新增 `BINDGEN_EXTRA_CLANG_ARGS`（[src/tilegym/backend/cutile_rs/utils.py:109-124](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L109-L124)）——因为 `cuda-bindings` 的 `build.rs` 跑 bindgen 生成 CUDA 绑定，`BINDGEN_EXTRA_CLANG_ARGS` 是给 bindgen 传额外 clang 参数的标准入口（例如非标准位置的 CUDA 头），不透传就会在定制环境里编译失败。注意它特意把 `cargo` 解析成绝对路径（`shutil.which("cargo")`，L163）防 PATH 劫持，并在 `CUDA_TOOLKIT_PATH` 指向的目录没有 `include/cuda.h` 时回退到 `/usr/local/cuda`（L158-161）——因为运行时入口可能把 `CUDA_TOOLKIT_PATH` 指向一个无头文件的运行时 CUDA（供 tileiras 用）。
+
+**按需构建入口（透传新参数）**——重建后清空 cffi 句柄缓存（[src/tilegym/backend/cutile_rs/utils.py:191-222](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L191-L222)）：
+
+```python
+def _ensure_built_and_path(crate_dir=None, src_roots=None, so_name="libcutile_kernels.so") -> str:
+    if crate_dir is None:
+        crate_dir = _kernels_crate_dir()
+    ...
+    so_path = _shared_so_path(crate_dir, so_name=so_name)
+    if _autobuild_enabled() and _so_stale(so_path, src_roots):
+        _build_kernels(crate_dir, src_roots, so_name)
+        _cffi_kernel_libs.clear()
+    ...
+    return so_path
 ```
 
 注释指出一个重要限制：清空缓存**不会**在本进程内热重载——OS 的 `dlopen` 对同一路径会复用既有映射，就地重建的 `.so` 只在**下一个进程**生效。
 
-**可用性探测**——宽松策略（[src/tilegym/backend/selector.py:149-181](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/selector.py#L149-L181)）：
+**cffi 加载（透传 + 缓存键唯一性）**——`bind_kernel_function_cffi` 把三个参数透传给 `_ensure_built_and_path`，并强调 `kernel` 必须在**所有 crate 间唯一**（[src/tilegym/backend/cutile_rs/utils.py:293-327](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L293-L327)）：
+
+```python
+def bind_kernel_function_cffi(kernel, cdef, crate_dir=None, src_roots=None,
+                              so_name="libcutile_kernels.so"):
+    """... ``kernel`` keys the cffi handle cache, so it must be unique across
+    all crates."""
+    ...
+    if kernel in _cffi_kernel_libs:
+        return _cffi_kernel_libs[kernel]
+    so_path = _ensure_built_and_path(crate_dir, src_roots, so_name)
+    ffi = FFI()
+    ffi.cdef(_TENSORDESC_CDEF + cdef)
+    lib = ffi.dlopen(so_path)
+    _cffi_kernel_libs[kernel] = (ffi, lib)
+    return ffi, lib
+```
+
+为什么 `kernel` 必须全局唯一？`_cffi_kernel_libs` 是以 `kernel` 字符串为键的字典，若两个不同 crate 用了同名 `kernel`（比如 ops 和某 suite 都叫 `"matmul"`），后加载的会先命中前者的缓存、绑到错误的 `.so`。所以多 crate 场景下 suite 必须用带命名前缀的名字（如 `"liger.matmul"`）作键——这与 u10-l1 将讲的「suite 算子名带 `liger.` 前缀」的命名空间思想一致。
+
+**可用性探测**——宽松策略（[src/tilegym/backend/selector.py:149-181](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/selector.py#L149-L181)）：
 
 ```python
 if not _autobuild_enabled():
@@ -368,35 +478,41 @@ if shutil.which("cargo") is not None:
 return not _so_stale(so_path)                   # 否则要现成且不过期的 .so
 ```
 
-这与 `_check_backends_availability()` 里把 `"cutile-rs": is_cutile_rs_available()` 一起探测（[src/tilegym/backend/selector.py:188-195](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/selector.py#L188-L195)）衔接，最终由 `ops/cutile_rs/__init__.py` 用 `if is_backend_available("cutile-rs"):` 门控算子注册（[src/tilegym/ops/cutile_rs/__init__.py:18-23](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/__init__.py#L18-L23)）——与 tilecpp「注册受 `is_backend_available` 门控、作为导入副作用」完全同构（u7-l1）。
+这与 `_check_backends_availability()` 里把 `"cutile-rs": is_cutile_rs_available()` 一起探测（[src/tilegym/backend/selector.py:188-195](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/selector.py#L188-L195)）衔接，最终由 `ops/cutile_rs/__init__.py` 用 `if is_backend_available("cutile-rs"):` 门控算子注册（[src/tilegym/ops/cutile_rs/__init__.py:18-23](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/__init__.py#L18-L23)）——与 tilecpp「注册受 `is_backend_available` 门控、作为导入副作用」完全同构（u7-l1）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：观察 autobuild 的两种模式（默认 vs 关闭）行为差异。
+**实践目标**：观察 autobuild 的两种模式（默认 vs 关闭）行为差异，并搞懂 per-suite 过期判定。
 
 **操作步骤**：
 
-1. 读 README 第 5 节「Enable the cuTile-rs (Rust) backend」（[README.md:159-208](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/README.md#L159-L208)），确认官方用法是 `tilegym.set_backend("cutile-rs")`，并强调「no manual build step is required」。
+1. 读 README 第 5 节「Enable the cuTile-rs (Rust) backend」（[README.md:159-208](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/README.md#L159-L208)），确认官方用法是 `tilegym.set_backend("cutile-rs")`，并强调「no manual build step is required」。
 2. 对照 `is_cutile_rs_available()`（selector.py:174-181），回答：在一台**没装 cargo** 的机器上，分别当 `.so` 存在/不存在、过期/不过期时，后端可用性如何？
 3. 设想设 `CUTILE_RS_AUTOBUILD=0`：此时探测与 dispatch 行为会发生什么变化？
+4. **per-suite 过期判定**：读 `_so_stale`（utils.py:85-106）的文档串与实现，回答——若某 suite 自带 crate 且传了 `src_roots=(suite_cutile_rs_dir, ops_cutile_rs_dir)`，为什么必须把 `ops/cutile_rs/` 也列进去？只传 suite 自己的目录会有什么后果？
 
 **预期结果**：
 - 无 cargo 且无 `.so` → 不可用，cutile-rs 测试被 skip（README L206-208）。
 - 无 cargo 但有不过期 `.so` → 可用。
 - 无 cargo 但 `.so` 过期 → 不可用（因为它无法被重建）。
 - `CUTILE_RS_AUTOBUILD=0` 时：探测只看 `.so` 是否存在（selector.py:174-176），dispatch 时即便源码改了也不会重建，等于「钉死预编译 .so」。
+- **per-suite**：必须列 `ops/cutile_rs/` 是因为每个 crate 的 `lib.rs` 都 `include!` 了共享的 `ops/cutile_rs/ffi_util.rs`；只传 suite 自己的目录，会漏掉对 `ffi_util.rs` 改动的感知——一旦该文件改动（例如本轮新增 NVFP4 dtype 码），suite 的 `.so` 不会被重编，运行时就会按旧 ABI 解包新结构的 `TensorDesc`，读到错位内存。
 
-**待本地验证**：在有 cargo 的机器上，删掉 `target/release/libcutile_kernels.so`，`set_backend("cutile-rs")` 后首次调用任一算子，观察日志是否出现 `cutile-rs: building libcutile_kernels.so (cargo build --release) ...`。
+**待本地验证**：在有 cargo 的机器上，删掉 `target/release/libcutile_kernels.so`，`set_backend("cutile-rs")` 后首次调用任一算子，观察日志是否出现 `cutile-rs: building libcutile_kernels.so (cargo build --release) ...`（utils.py:145）。
 
 #### 4.3.5 小练习与答案
 
 **练习 1**：为什么 `_build_kernels` 要在拿到文件锁之后**再检查一次** `_so_stale`？
 
-> 参考答案：多个进程可能同时发现 `.so` 过期并同时尝试编译。第一个进程拿到锁、编译完成、写出新 `.so`；后续进程拿到锁时，若不再检查就会重复编译。锁内复检让「等待者」发现 `.so` 已是最新而直接返回，避免冗余编译。
+> 参考答案：多个进程可能同时发现 `.so` 过期并同时尝试编译。第一个进程拿到锁、编译完成、写出新 `.so`；后续进程拿到锁时，若不再检查就会重复编译。锁内复检（用同一个 `src_roots`）让「等待者」发现 `.so` 已是最新而直接返回，避免冗余编译。
 
 **练习 2**：对比 tilecpp 的 `is_tilecpp_available`（用 `@functools.cache` 缓存、fork nvcc），cutile-rs 的 `is_cutile_rs_available` 为什么可以做得这么轻？
 
 > 参考答案：cutile-rs 只需 `shutil.which("cargo")`（纯 PATH 查找，无子进程）就能判断「能否按需编译」，真正昂贵的 libclang/CUDA 头校验推迟到 dispatch 时由 `cargo build` 本身暴露错误。tilecpp 则必须真正运行 nvcc 才知道版本是否达标，没法用便宜的方式预判，所以才需要延迟 + 缓存。
+
+**练习 3**：`bind_kernel_function_cffi` 的 `kernel` 参数为什么被要求「在所有 crate 间唯一」？
+
+> 参考答案：`_cffi_kernel_libs` 字典以 `kernel` 字符串为键缓存 `(ffi, lib)` 句柄。若两个不同 crate（如 ops crate 与某 suite crate）都用同名 `kernel`，后加载者会命中前者的缓存，绑到错误的 `.so` 与错误的符号。多 crate 场景必须用带命名前缀的键（如 `"liger.matmul"`）避免碰撞。
 
 ---
 
@@ -404,7 +520,7 @@ return not _so_stale(so_path)                   # 否则要现成且不过期的
 
 #### 4.4.1 概念说明
 
-cutile-rs 的每个算子包装都走自动调优（如 matmul 的 `autotune_launch`，[matmul.py:178-184](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L178-L184)）。这套调优器与 u5-l3 讲的 cuTile 自动调优**模式相同**（tune-once / cache / launch：首次按 `cache_key` 遍历候选、缓存最优配置、之后零开销），但**计时手段完全不同**——这也是本模块的核心：它用 **CUPTI**（经 `torch.profiler`）而非 `cuda.Event`。
+cutile-rs 的每个算子包装都走自动调优（如 matmul 的 `autotune_launch`，[matmul.py:178-184](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L178-L184)）。这套调优器与 u5-l3 讲的 cuTile 自动调优**模式相同**（tune-once / cache / launch：首次按 `cache_key` 遍历候选、缓存最优配置、之后零开销），但**计时手段完全不同**——这也是本模块的核心：它用 **CUPTI**（经 `torch.profiler`）而非 `cuda.Event`。
 
 为什么要换计时器？cutile-rs 内核在**首次调用**时会把 MLIR JIT 编译成 cubin，这一步可能花 **50–500 ms**。`cuda.Event` 计时本质上测的是「主机端从 record 到 end 之间的墙钟时间」，它会把这个 JIT 开销、ctypes/cffi FFI 调用开销、Python 参数编组开销**全部算进去**，于是对一个本就很小的内核产生「幽灵差距」。而 CUPTI 测的是**纯 GPU 内核执行时间**，这才是与 cuTile-Python / Triton-TileIR 做苹果对苹果比较的唯一标尺。autotuner.py 的文档串用实测数据佐证：layer_norm 2D 用 `cuda.Event` 测出 1.5×，用 CUPTI 测只有 0.96×（rs 其实更快）。
 
@@ -427,7 +543,7 @@ cutile-rs 的每个算子包装都走自动调优（如 matmul 的 `autotune_lau
 
 #### 4.4.3 源码精读
 
-**为什么要用 CUPTI**——文档串把动机与实测写得很直白（[src/tilegym/backend/cutile_rs/autotuner.py:16-26](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/autotuner.py#L16-L26)）：
+**为什么要用 CUPTI**——文档串把动机与实测写得很直白（[src/tilegym/backend/cutile_rs/autotuner.py:16-25](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/autotuner.py#L16-L25)）：
 
 ```python
 # WHY CUPTI (not torch.cuda.Event):
@@ -440,7 +556,7 @@ cutile-rs 的每个算子包装都走自动调优（如 matmul 的 `autotune_lau
 #   with CUPTI (rs actually faster).
 ```
 
-**铁律（Rule 16-autotuner）**——`kernel_fn` 内只准用 `torch.empty`（[src/tilegym/backend/cutile_rs/autotuner.py:36-42](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/autotuner.py#L36-L42)）：
+**铁律（Rule 16-autotuner）**——`kernel_fn` 内只准用 `torch.empty`（[src/tilegym/backend/cutile_rs/autotuner.py:36-42](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/autotuner.py#L36-L42)）：
 
 ```python
 # LAMBDA RULE (Rule 16-autotuner — non-negotiable):
@@ -451,9 +567,9 @@ cutile-rs 的每个算子包装都走自动调优（如 matmul 的 `autotune_lau
 #     DtoD on a 7μs kernel → CUPTI reported 1.8x gap when kernel was at parity.
 ```
 
-matmul 包装器正是这么做的——`launch_with_cfg` 里用 `torch.empty((m, n), ...)` 分配输出（[src/tilegym/ops/cutile_rs/matmul.py:155-173](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L155-L173)），没有任何 clone/zeros。
+matmul 包装器正是这么做的——`launch_with_cfg` 里用 `torch.empty((m, n), ...)` 分配输出（[src/tilegym/ops/cutile_rs/matmul.py:155-173](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L155-L173)），没有任何 clone/zeros。
 
-**CUPTI 计时实现**——用 `torch.profiler.profile` 取设备侧 self time 求和（[src/tilegym/backend/cutile_rs/autotuner.py:134-158](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/autotuner.py#L134-L158)）：
+**CUPTI 计时实现**——用 `torch.profiler.profile` 取设备侧 self time 求和（[src/tilegym/backend/cutile_rs/autotuner.py:135-157](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/autotuner.py#L135-L157)）：
 
 ```python
 for i in range(rep):
@@ -474,27 +590,29 @@ median_ms = sorted(t / 1000.0 for t in times_us)[len(times_us) // 2]
 
 注意两个细节：第一次若得到 0 设备时间直接报错（提示检查 libcupti），引导排查环境；每次 rep 之间额外 `sync` 是因为 cutile-rs 的 `DeviceContext` 会与 profiler 竞争。
 
-**tune-once / cache**——模块级字典 `_cache` 以 `(kernel_name, key)` 为键，命中时直接复用最优配置（[src/tilegym/backend/cutile_rs/autotuner.py:197-209](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/autotuner.py#L197-L209)），与 u5-l3 的 cuTile 调优同构。`clear_cache` / `get_cache_stats`（L266-291）供测试强制重调优或调试。
+**tune-once / cache**——模块级字典 `_cache` 以 `(kernel_name, key)` 为键，命中时直接复用最优配置（[src/tilegym/backend/cutile_rs/autotuner.py:197-209](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/autotuner.py#L197-L209)），与 u5-l3 的 cuTile 调优同构。`clear_cache` / `get_cache_stats`（L266-291）供测试强制重调优或调试。
 
-**返回码 `-1` 哨兵的呼应**。4.2 节提到 `-1` 不是错误码——它是编译选项「auto/默认」的哨兵。`autotune_launch` 的候选配置里 `num_cta_in_cga` / `occupancy` 若想表达「让编译器自己决定」，就传 `<= 0`（如 matmul 配置 `OCCUPANCY=1` 是显式值，但机制上 `compile_options!` 宏只在值 `> 0` 时才设——[ffi_util.rs:204-216](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/ffi_util.rs#L204-L216)）。这就是为什么 `-1` 不能被返回码占用。
+**返回码 `-1` 哨兵的呼应**。4.2 节提到 `-1` 不是错误码——它是编译选项「auto/默认」的哨兵。`autotune_launch` 的候选配置里 `num_cta_in_cga` / `occupancy` 若想表达「让编译器自己决定」，就传 `<= 0`（如 matmul 配置 `OCCUPANCY=1` 是显式值，但机制上 `compile_options!` 宏只在值 `> 0` 时才设——[ffi_util.rs:209-221](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/ffi_util.rs#L209-L221)）。这就是为什么 `-1` 不能被返回码占用。
 
 #### 4.4.4 代码实践（本讲指定实践任务）
 
-**实践目标**：用自己的话解释「`autotune_launch` 为什么要求 `kernel_fn` 内只用 `torch.empty`」以及「CUPTI 与 `cuda.Event` 在测量小内核时的差异」，并用源码证据支撑。
+**实践目标**：用自己的话解释「`autotune_launch` 为什么要求 `kernel_fn` 内只用 `torch.empty`」「CUPTI 与 `cuda.Event` 在测量小内核时的差异」，并说明「`_so_stale` 现在如何按 per-suite 的 `src_roots`（含共享 `ffi_util.rs`）判定 `.so` 是否过期」，用源码证据支撑。
 
 **操作步骤**：
 
-1. 打开 `autotuner.py` 的 LAMBDA RULE（L36-42）与 WHY CUPTI 段（L16-26），找到两处实测数据：
+1. 打开 `autotuner.py` 的 LAMBDA RULE（L36-42）与 WHY CUPTI 段（L16-25），找到两处实测数据：
    - layer_norm `.clone()` 给 7μs 内核加 4.8μs DtoD → CUPTI 报 1.8× 虚假差距；
    - layer_norm 2D：`cuda.Event` 报 1.5×，CUPTI 报 0.96×。
 2. 在 `matmul.py` 的 `launch_with_cfg`（L155-173）确认输出分配用的是 `torch.empty`，没有 clone/zeros。
-3. 写一段说明，覆盖以下两点（见下方「参考答案」）。
-4. （可选）参照 README 给出的基准命令（[README.md:210-219](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/README.md#L210-L219)）：`CUPTI=1 pytest tests/ops/test_bmm.py -k "test_perf and cutile_rs" --print-record`，体会官方推荐的「CUPTI 测纯 GPU 时间」对比姿势。
+3. 打开 `utils.py` 的 `_so_stale`（L85-106），读它的签名 `src_roots: str | tuple[str, ...] | None` 与文档串「plus ops/cutile_rs/ for the shared ffi_util.rs they include」，弄清 per-suite 过期判定。
+4. 写一段说明，覆盖以下三点（见下方「参考答案」）。
+5. （可选）参照 README 给出的基准命令（[README.md:210-219](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/README.md#L210-L219)）：`CUPTI=1 pytest tests/ops/test_bmm.py -k "test_perf and cutile_rs" --print-record`，体会官方推荐的「CUPTI 测纯 GPU 时间」对比姿势。
 
-**参考答案（这两点即本讲指定实践任务的答案）**：
+**参考答案（这三点即本讲指定实践任务的答案）**：
 
 - **为什么只能用 `torch.empty`**：`autotune_launch` 的计时器是 CUPTI，它会计入**所有**在 `kernel_fn(cfg)` 调用期间启动的 GPU 内核。`.clone()`、`torch.zeros`、`torch.ones`、`.expand().contiguous()` 这些看似只是「分配/初始化」的操作，其实会向 GPU 提交设备到设备拷贝或填充内核。这些额外内核的时间会被算进候选配置的得分，制造出与目标内核真实性能无关的「幽灵差距」——`layer_norm` 一次 `.clone()` 就给 7μs 的内核加了 4.8μs，使 CUPTI 报出 1.8× 的虚假劣势。`torch.empty` 只在主机侧分配显存、不启动任何 GPU 内核，因此是唯一不会污染计时的分配方式。
 - **CUPTI 与 `cuda.Event` 的差异**：`cuda.Event` 测的是「主机端在 `record` 与 `end` 之间流逝的墙钟时间」，它**包含** cutile-rs 首次调用的 MLIR→cubin JIT（50–500 ms）、cffi/ctypes 的 FFI 调用、Python 参数编组等所有主机侧与启动开销；对小（亚微秒）内核，这些开销会主导测量，夸大差距（layer_norm 2D 实测 1.5×）。CUPTI 经 `torch.profiler` 直接读取 GPU 硬件计数器，测的是**纯内核执行时间**，剔除了 JIT 与主机开销，是与 cuTile-Python / Triton-TileIR 做公平比较的唯一标尺（同内核实测 0.96×，rs 其实更快）。
+- **per-suite 的 `_so_stale` 过期判定**：`_so_stale(so_path, src_roots)` 接受 `src_roots`（字符串或字符串元组），递归扫描其中**每个**目录下的 `.rs/.toml`（`target/` 跳过），任一比 `.so` 的 mtime 新即判为过期。suite 自带 crate 时传 `src_roots=(my_suite_cutile_rs, ops/cutile_rs)`——必须把 `ops/cutile_rs/` 也列进去，是因为每个 crate 的 `lib.rs` 都 `#[path = "../../ffi_util.rs"] include!` 了 `ops/cutile_rs/ffi_util.rs` 这份共享 FFI 契约文件。若漏掉它，当 `ffi_util.rs` 改动（例如本轮新增 NVFP4 dtype 码 6/7 改了 `TensorDesc` 文档与 `dtype_str`）时，suite 的 `.so` 不会被重编，运行时就会按旧 ABI 解包新结构，读到错位内存。
 
 **待本地验证**：在 `kernel_fn` 里故意把 `torch.empty` 换成 `out.clone()` 跑一次 bmm 调优，对比 `tuning_record`（用 `get_cache_stats()`）中各配置的 `best_ms` 是否被系统性抬高——这能直接观察到「幽灵差距」。
 
@@ -516,13 +634,13 @@ median_ms = sorted(t / 1000.0 for t in times_us)[len(times_us) // 2]
 
 **操作步骤**：
 
-1. **注册与门控**：读 `ops/cutile_rs/__init__.py`（L18-23）——只有 `is_backend_available("cutile-rs")` 为真时才 `from . import matmul`，触发 `@register_impl("matmul", backend="cutile-rs")`（[matmul.py:119-120](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L119-L120)），把实现挂进 `_REGISTRY["matmul"]["cutile-rs"]`。
+1. **注册与门控**：读 `ops/cutile_rs/__init__.py`（L18-23）——只有 `is_backend_available("cutile-rs")` 为真时才 `from . import matmul`，触发 `@register_impl("matmul", backend="cutile-rs")`（[matmul.py:119-120](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L119-L120)），把实现挂进 `_REGISTRY["matmul"]["cutile-rs"]`。
 2. **分发**：调用 `tilegym.ops.matmul(a, b)` 时，`dispatch` wrapper 查 `_REGISTRY`，按当前后端 `"cutile-rs"` 路由到上面的 `matmul` 函数（复习 u2-l2 的三级查找）。
-3. **校验与连续化**：`matmul` 函数检查 CUDA/同卡/dtype/K 匹配，对 `a/b` 调 `.contiguous()`、`.detach()`（[matmul.py:120-145](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L120-L145)）。
-4. **调优**：按 `persistent` 选候选配置集，调 `autotune_launch(kernel_fn=..., configs=..., key=(m,n,k,dtype,persistent), ...)`（[matmul.py:178-184](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L178-L184)）。首次：CUPTI 遍历配置选最优并缓存；之后：命中缓存零开销。
-5. **cffi 加载**：`kernel_fn → launch_with_cfg → _run_ffi → bind_kernel_function_cffi("matmul", _FFI_CDEF)`。首次触发 `_ensure_built_and_path`（可能 autobuild）+ `dlopen`，之后命中 `_cffi_kernel_libs` 缓存（[utils.py:268-291](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/backend/cutile_rs/utils.py#L268-L291)）。
-6. **跨界**：`make_tensor_desc` 把 `out/a/b` 打包成 `TensorDesc*`，`lib.cutile_matmul(...)` 越过 FFI，返回码交给 `check_rc`（[matmul.py:91-116](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul.py#L91-L116)）。
-7. **Rust 侧**：`cutile_matmul` 用 `deref_descs!` / `resolve_dtype!` / `setup_device_stream!` / `borrow_tensor` 还原借用张量，拼 `.generics(...).grid(...).compile_options(...)`，`op.sync_on(&stream)` 启动内核（[matmul_kernel/ffi.rs:54-116](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs#L54-L116)）。
+3. **校验与连续化**：`matmul` 函数检查 CUDA/同卡/dtype/K 匹配，对 `a/b` 调 `.contiguous()`、`.detach()`（[matmul.py:120-145](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L120-L145)）。
+4. **调优**：按 `persistent` 选候选配置集，调 `autotune_launch(kernel_fn=..., configs=..., key=(m,n,k,dtype,persistent), ...)`（[matmul.py:178-184](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L178-L184)）。首次：CUPTI 遍历配置选最优并缓存；之后：命中缓存零开销。
+5. **cffi 加载**：`kernel_fn → launch_with_cfg → _run_ffi → bind_kernel_function_cffi("matmul", _FFI_CDEF)`。首次触发 `_ensure_built_and_path`（可能 autobuild）+ `dlopen`，之后命中 `_cffi_kernel_libs` 缓存（[utils.py:293-327](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/backend/cutile_rs/utils.py#L293-L327)）。注意 `bind_kernel_function_cffi` 走的是默认 ops crate（不传 `crate_dir`/`src_roots`/`so_name`），per-suite 参数在此路径上全用默认值。
+6. **跨界**：`make_tensor_desc` 把 `out/a/b` 打包成 `TensorDesc*`（dtype 走 `_DTYPE_CODE` 查表），`lib.cutile_matmul(...)` 越过 FFI，返回码交给 `check_rc`（[matmul.py:91-116](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul.py#L91-L116)）。
+7. **Rust 侧**：`cutile_matmul` 用 `deref_descs!` / `resolve_dtype!` / `setup_device_stream!` / `borrow_tensor` 还原借用张量，拼 `.generics(...).grid(...).compile_options(...)`，`op.sync_on(&stream)` 启动内核（[matmul_kernel/ffi.rs:54-116](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile_rs/matmul_kernel/ffi.rs#L54-L116)）。
 
 **预期产出**：一张从 Python 调用到 GPU 内核的调用图，标注每一步属于哪个模块、首次调用与命中缓存时的差异（首次多了 autobuild + JIT + CUPTI 全量调优；之后仅 cffi 缓存命中 + autotune 缓存命中）。
 
@@ -531,8 +649,9 @@ median_ms = sorted(t / 1000.0 for t in times_us)[len(times_us) // 2]
 ## 6. 本讲小结
 
 - cutile-rs 用 **Rust**（`cutile` crate）写内核，所有算子编译进**一个 cdylib** `libcutile_kernels.so`；crate 根用 `mod + include!` 聚合各算子的 `kernel.rs`/`ffi.rs`，一个 `Cargo.toml` 管所有内核。
-- Python 与 Rust 之间用 **cffi ABI 模式**跨界：`cdef` 声明 C 签名，`TensorDesc`（`#[repr(C)]` 与 `_TENSORDESC_CDEF` 必须逐字段同步）搬运张量；Rust 用 `ManuallyDrop` 的 `borrow_tensor` 借用显存、绝不释放。
-- `.so` 是**按需 autobuild** 的：源码过期才 `cargo build --release`，文件锁内复检防并发冗余编译；`is_cutile_rs_available` 用宽松探测（`cargo` 在 PATH 或现成 `.so` 即可），重校验推迟到 dispatch。
+- Python 与 Rust 之间用 **cffi ABI 模式**跨界：`cdef` 声明 C 签名，`TensorDesc`（`#[repr(C)]` 与 `_TENSORDESC_CDEF` 必须逐字段同步）搬运张量；Rust 用 `ManuallyDrop` 的 `borrow_tensor` 借用显存、绝不释放。本轮 dtype 表新增 **NVFP4 码**：码 6（`torch.uint8`/`f4e2m1fnx2`，两元素打包成一字节）与码 7（`torch.float8_e4m3fn`，块缩放），两端 `dtype_str`/`dtype_elem_size` 同步更新。
+- `.so` 是**按需 autobuild** 的：源码过期才 `cargo build --release`，文件锁内复检防并发冗余编译；本轮把整条管线（`_so_stale`/`_build_kernels`/`_ensure_built_and_path`/`bind_kernel_function_cffi`）参数化为 `crate_dir`/`src_roots`/`so_name`，支持 **suite 自带内核 crate**——`src_roots` 必须包含 `ops/cutile_rs/` 以感知共享 `ffi_util.rs` 的改动，`kernel` 名须在所有 crate 间唯一。
+- `is_cutile_rs_available` 用宽松探测（`cargo` 在 PATH 或现成 `.so` 即可），重校验推迟到 dispatch；构建环境白名单新增 `BINDGEN_EXTRA_CLANG_ARGS`（cuda-bindings 的 bindgen 需要）。
 - 与 cuTile/tilecpp 一样，注册受 `is_backend_available` 门控、作为导入副作用挂到同一算子名——**算子名是全局键、后端是子键、实现语言无关**。
 - 自动调优沿用 tune-once/cache/launch 模式，但**用 CUPTI（`torch.profiler`）而非 `cuda.Event`** 计时，以剔除 JIT/FFI/编组开销；由此引出铁律：`kernel_fn` 内只能用 `torch.empty`，禁用 clone/zeros 等会启动 GPU 内核的操作。
 - cutile-rs 当前是**仅前向**的后端（matmul 文档串明确 forward-only；测试对齐时无反向），且只覆盖一部分算子（matmul/bmm/silu_and_mul/swiglu/attention_sink）。
@@ -541,5 +660,6 @@ median_ms = sorted(t / 1000.0 for t in times_us)[len(times_us) // 2]
 
 - **回到 LLM 集成**：U8 把内核 monkey-patch 进 HuggingFace 模型。可对比 cutile-rs 的「仅前向」与 cuTile 的 autograd 能力（u4-l2），思考 cutile-rs 当前为何主要服务于推理/基准而非训练。
 - **横向对比三个后端**：重读 u7-l1（tilecpp）与本讲，列出 cuTile（Python DSL + tileiras JIT）、tilecpp（C++ + nvcc 离线 + cubin 缓存）、cutile-rs（Rust + cargo autobuild + cffi）在「编译器、加载方式、可用性探测、调优计时」四个维度上的异同，巩固「同一算子名、多实现」的架构观。
-- **贡献一个 cutile-rs 算子**：参考 u9-l2（新增算子工作流）与本讲 4.1，尝试把一个已有 cuTile 算子移植成 Rust（一对 `kernel.rs`/`ffi.rs` + 在 `lib.rs` 加 `mod`），用 `tests/ops/test_matmul.py` 的后端参数化（`is_backend_available("cutile-rs")`，L90-91）验证正确性。
+- **贡献一个 cutile-rs 算子**：参考 u9-l2（新增算子工作流）与本讲 4.1，尝试把一个已有 cuTile 算子移植成 Rust（一对 `kernel.rs`/`ffi.rs` + 在 `lib.rs` 加 `mod`），用 `tests/ops/test_matmul.py` 的后端参数化（`is_backend_available("cutile-rs")`）验证正确性。
+- **suite 自带 crate 的扩展点**：结合 u10-l1（suites 命名空间），设想一个 suite 要自带 Rust 内核 crate 时，如何用 `bind_kernel_function_cffi("liger.xxx", cdef, crate_dir=..., src_roots=(suite_rs, ops_rs), so_name="libliger_kernels.so")` 绑定，并保证 `kernel` 名带命名前缀、`src_roots` 纳入共享 `ffi_util.rs`。
 - **深入 CUPTI**：阅读 `torch.profiler` 文档与 `_bench_config_cupti` 的 `kernel_filter` 用法，理解在多内核场景下如何只计时目标内核。

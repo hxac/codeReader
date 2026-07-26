@@ -2,479 +2,558 @@
 
 ## 1. 本讲目标
 
-本讲是「编译器与运行时」单元的第四讲，承接 [u3-l2 会话执行链路 Session 与 DirectSession](u3-l2-session-execution.md) 中讲透的 `DirectSession` 执行模型，以及 [u6-l1 Device 与 DeviceFactory](u6-l1-device-and-devicefactory.md) 中的设备抽象。
+学完本讲后，你应当能够：
 
-学完本讲，你应当能够：
+- 说清 **TFRT（TensorFlow Runtime）** 想解决什么问题，它与传统 `DirectSession` 运行时在设计理念上的根本差异。
+- 沿着「`Runtime` → `TfrtSession` → `GraphExecutor` → `runtime_fallback`」这条链路，读懂 TFRT 把一张 `GraphDef` 编译成可执行产物并跑出结果的全过程。
+- 理解 **BEF / MLRT 字节码** 与 **fallback（回退）执行** 两个核心概念，明白为什么 TFRT 能在没有原生 kernel 时透明地复用老的 TF `OpKernel`。
+- 对照源码，判断 TFRT 在当前仓库里是「默认关闭、按需开启」的，并知道开启它的几种入口。
 
-- 说清 **TFRT（TensorFlow Runtime）** 这个「新一代运行时」到底想解决 `DirectSession` 的哪些历史包袱；
-- 理解 TFRT 的分层模型：`HostContext` / `CoreRuntime` / `OpHandler` / `AsyncValue` / `BEF`，以及 TF 用 `tfrt_stub::Runtime` 把它们包起来的方式；
-- 看懂 `TfrtSession` 如何用**静态注册的 `SessionFactory`** 把一整套 TFRT 运行时「塞进」既有的 `Session` 接口里，做到对用户代码透明；
-- 理解「**内核回退（kernel fallback）**」机制——TFRT 自己负责调度，但每个算子的真正计算仍然委托给现有的 `OpKernel` 去跑，理解这一点就能解开「TFRT 为什么能渐进替换而不推倒重来」的谜题；
-- 能对比 **BEF/MLRT 解释器**与 `DirectSession` 的 `Executor` 在执行模型上的根本差异。
-
-本讲覆盖三个最小模块：`core.tfrt.runtime`、`core.tfrt.tfrt_session`、`core.runtime_fallback`，并以 `core.tfrt.graph_executor` 作为衔接前两者的中间层。
-
----
+本讲属「编译器与运行时」单元，是 u3-l2（`DirectSession` 执行链路）与 u6-l1（`Device`/`DeviceFactory`）的对照与延伸——前者讲「老运行时怎么跑图」，本讲讲「新一代运行时想怎么跑图」。
 
 ## 2. 前置知识
 
-### 2.1 为什么要再造一个运行时
+在进入源码前，先用三段通俗的话建立直觉。
 
-回顾 [u3-l2](u3-l2-session-execution.md)：传统的 `DirectSession` 在 `Run` 时会经历「剪枝 → 放置 → 优化 → 分区 → 由 `Executor` 按节点拓扑调度 → 经 `Rendezvous` 传递张量」这条链路。这套设计诞生于 TF 1.x 的图模式时代，有两个长期痛点：
+**第一，什么是「运行时」。** 你在 Python 里写 `tf.constant`、`tf.matmul`，最终都会变成一张计算图（见 u3-l1）。图本身只是一份「说明书」，描述了谁连到谁；真正要把这张图跑起来、调度 op、分配内存、把结果送回 Python，需要一套执行引擎，这就是「运行时」。u3-l2 讲的 `DirectSession` 就是 TF 历史最久、默认使用的本地运行时。
 
-1. **同步模型固化**：`Executor` 用「节点就绪检查 + 线程池调度」驱动整张图，每条数据依赖靠 `Rendezvous` 显式 `Send`/`Recv` 配对，跨设备开销与代码复杂度都很高。
-2. **执行器与设备/算子强耦合**：算子执行、设备抽象、内存分配、线程调度交织在一起，难以单独演进或替换。
+**第二，为什么需要「新一代」。** `DirectSession` 是一个「大而全」的单体执行器：放置、剪枝、分区、优化、调度、kernel 执行都揉在一起，且以同步、命令式调度为主。这在工程上带来两个痛点：一是难以针对**异步执行**（尤其是 GPU/TPU 的流式并行）做深度优化；二是它与 TF 的具体 op 体系耦合过深，难以被裁剪复用到端侧、服务端等不同场景。TFRT 的目标就是把「运行时」重新拆成一组**可组合、异步优先、与具体 op 解耦**的组件，让同一套基础设施既能服务训练也能服务推理。
 
-TFRT（独立项目 `tf_runtime`，作为 `@tf_runtime` 外部依赖引入）试图把运行时拆成**清晰的、可组合的、以异步数据流为核心**的几个抽象，让 CPU/GPU/TPU、同步/异步、TF 原生/XLA 等不同后端能在同一套框架下共存。它的口号是：**算子调度归 TFRT，真正计算归后端（对 TF 原生算子来说，就是「回退」到既有 `OpKernel`）**。
+**第三，TFRT 的两个关键词。**
 
-### 2.2 TFRT 的五个核心名词
+- **异步优先（async-first）**：TFRT 内部以 `AsyncValue`（一个尚不可用的值，将来会被填充）为基本数据单元，op 一旦输入就绪就立即异步调度，而不是像传统执行器那样按拓扑序一拍一拍同步推进。
+- **BEF（Bytecode Executor Format）**：TFRT 不直接解释 `GraphDef`，而是先把图编译成一种紧凑的字节码（BEF），再由一个轻量字节码执行器解释。这把「图」从 protobuf 对象变成了可序列化、可预编译的产物，类似 JVM 与 `.class` 文件的关系。
 
-本讲会反复出现下面五个 TFRT 原语，先建立直觉：
-
-| 名词 | 直觉 | 类比 TF 既有概念 |
-| --- | --- | --- |
-| **HostContext** | 主机环境：分配器、工作队列、诊断器，是一切的容器 | 类似一个进程级的「资源根」 |
-| **ConcurrentWorkQueue** | 异步任务队列，决定「就绪的算子」何时被哪个线程执行 | 类似 `DirectSession` 的 inter-op 线程池 |
-| **AsyncValue** | 异步值（future/lazy value），算子之间的数据单位 | 类似 `Tensor`，但**未就绪时也能被引用和依赖** |
-| **CoreRuntime** | 运行时中枢，持有 `HostContext` 与一组 `OpHandler` | 类似一个「超级 Session」 |
-| **OpHandler** | 后端抽象：知道如何把一个 op 派发到具体后端执行 | 类似 `Device`，但更细粒度（参见 [u6-l1](u6-l1-device-and-devicefactory.md)） |
-
-还有一个序列化格式 **BEF（Binary Executor Format）**：把 MLIR 编译出的图序列化成二进制，再由 BEF 执行器解释运行。它是「编译期产物」与「运行期执行器」之间的契约。本讲后半段还会出现 **MLRT**——TF 自己实现的、MLIR 字节码（bytecode）解释器，是与 BEF 执行器并列的第二种执行引擎。
-
-> 提示：TFRT 是一个**独立仓库**（以 `@tf_runtime` 外部依赖引入，源码在 `third_party/`），本讲只读 TF 仓库里 `tensorflow/core/tfrt/` 与 `tensorflow/core/runtime_fallback/` 这些「把 TFRT 用起来」的胶水代码，不去翻 `@tf_runtime` 内部。
-
----
+> 名词澄清：本讲还会出现 **MLRT**（一种更新的、进程内字节码解释器）和 **fallback**（回退）。它们都是在 BEF 之后陆续加入的演进，后文会逐一精读。
 
 ## 3. 本讲源码地图
 
-| 文件/目录 | 作用 |
-| --- | --- |
-| `tensorflow/core/tfrt/runtime/runtime.h` / `.cc` | 定义 `tfrt_stub::Runtime`，对 `tfrt::CoreRuntime` 的薄封装，是 TF 侧用 TFRT 的入口 |
-| `tensorflow/core/tfrt/runtime/work_queue_interface.h` | 把 TF 的线程池适配成 TFRT 的 `ConcurrentWorkQueue` |
-| `tensorflow/core/tfrt/tfrt_session/tfrt_session.h` / `.cc` | `TfrtSession` 与 `TfrtSessionFactory`：把 TFRT 接入既有 `Session` 接口 |
-| `tensorflow/core/tfrt/graph_executor/graph_executor.h` / `.cc` | `GraphExecutor`：把 GraphDef 经 MLIR 编译成 BEF/字节码并运行 |
-| `tensorflow/core/tfrt/fallback/fallback_state.h` / `.cc` | `FallbackState`：承载既有 TF 运行时状态（DeviceMgr、函数库等），供回退使用 |
-| `tensorflow/core/runtime_fallback/runtime/runtime_fallback_op_handler.h` | `RuntimeFallbackOpHandler`：把 op 路由到 TF 内核的后端 |
-| `tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute.h` | `KernelFallbackExecute`：回退执行的对外入口 |
-| `tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute_compat.cc` | 回退的真正实现：实例化 `OpKernelContext` 跑既有 `OpKernel` |
-| `tensorflow/core/runtime_fallback/tf_bef_executor_main.cc` | 一个命令行 demo，演示如何用 BEF 执行器加载并运行 BEF 文件 |
+本讲涉及的关键目录与文件如下：
 
----
+| 文件 / 目录 | 作用 |
+| --- | --- |
+| `tensorflow/core/tfrt/runtime/runtime.h` | TFRT 在 TF 侧的运行时抽象 `tfrt_stub::Runtime`，包装上游 `tfrt::CoreRuntime` 与工作队列。 |
+| `tensorflow/core/tfrt/runtime/work_queue_interface.h` | `WorkQueueInterface`，把 TF 的线程池注入 TFRT 的抽象接口。 |
+| `tensorflow/core/tfrt/tfrt_session/tfrt_session.h` / `.cc` | `TfrtSession` 与 `TfrtSessionFactory`：让 TFRT 伪装成一个普通 `tensorflow::Session`。 |
+| `tensorflow/core/tfrt/graph_executor/graph_executor.h` | `GraphExecutor`：编译图（`GraphDef → MLIR → BEF/MLRT 字节码`）并执行的核心引擎。 |
+| `tensorflow/core/runtime_fallback/tf_bef_executor_main.cc` | 一个 BEF 执行器驱动二进制，用来直接跑一份 BEF 文件，是观察 TFRT 执行的最小入口。 |
+| `tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute.h` | `KernelFallbackExecute`：当某 op 没有 TFRT 原生 kernel 时，回退到老 `OpKernel` 的桥梁。 |
+| `tensorflow/core/runtime_fallback/runtime/static_registration.cc` | 用静态构造对象在启动期自动注册 fallback kernels（与 u4-l1 的 `REGISTER_OP` 同构）。 |
+| `tensorflow/core/common_runtime/direct_session.cc` / `local_session_selection.cc` | 对照组：`DirectSession` 如何与 `TfrtSession` 在工厂里「抢」同一个本地 Session。 |
+
+整体调用栈（自顶向下）：
+
+```
+用户 Python: session.run(...)
+        │
+   TfrtSession (实现 tensorflow::Session 接口)
+        │  Create() / Run()
+   GraphExecutor (编译 + 执行)
+        │  GraphDef → MLIR → BEF/MLRT 字节码
+   tfrt::CoreRuntime + WorkQueueInterface (由 tfrt_stub::Runtime 持有)
+        │
+   ┌────┴────────────────────┐
+   │ 原生 TFRT kernel        │ 没有 native kernel？
+   │ (异步 AsyncValue)        │
+   └─────────────────────────┘
+        │
+   KernelFallbackExecute → 老的 tensorflow::OpKernel::Compute
+```
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 TFRT 运行时抽象 Runtime（core.tfrt.runtime）
+### 4.1 TFRT 的设计动机与整体形态
 
 #### 4.1.1 概念说明
 
-`@tf_runtime` 暴露的最顶层对象是 `tfrt::CoreRuntime`，它内含一个 `HostContext`（管理分配器与工作队列）和一组 `OpHandler`。但 TF 代码不直接 `new CoreRuntime`，而是在 `tensorflow/core/tfrt/runtime/` 里包了一层 `tfrt_stub::Runtime`。
+TFRT 不是「替换 `DirectSession` 的又一个 Session」，而是一套**可重用的运行时基础设施**。它的设计目标可以归纳为三点：
 
-这一层封装做了三件事：
+1. **异步优先**：用 `AsyncValue` 串起整条数据流，让设备（GPU/TPU）的计算与主机调度最大程度重叠。
+2. **可组合**：把「执行器」「工作队列」「设备」「kernel 注册表」拆成独立组件，按需拼装；同一套内核既能做训练也能做推理。
+3. **与 op 解耦 + 渐进迁移**：TFRT 允许部分 op 用「原生 TFRT kernel」，部分 op 通过 **fallback** 透明地走老 `OpKernel`。这样不必等所有 op 都重写就能上线。
 
-1. **隐藏构造细节**：用一个静态工厂 `Runtime::Create(...)` 把「分配器 + 工作队列 + 默认 host 设备名」凑齐再创建 `CoreRuntime`。
-2. **适配 TF 线程池**：TF 有自己成熟的线程池实现，TFRT 想复用它而不是另起炉灶，于是用 `WorkQueueInterface` 做适配。
-3. **提供进程级单例**：通过 `GetGlobalRuntime()` / `SetGlobalRuntime()` 让整个进程共享一个 `Runtime`（典型场景是 SavedModel 加载）。
-
-源码注释里坦白说这是**临时封装**，将来会被官方的 `tensorflow::experimental::cc::Runtime` 取代——这恰好印证了 TFRT 是「仍在演进中的新一代设计」。
+为了让用户**几乎无感知**地切换，TFRT 被包装成了与 `DirectSession` 同级的 `TfrtSession`——它们都实现 `tensorflow::Session` 接口（见 u1-l5、u3-l2）。也就是说，从 Python 侧看 `session.run()` 没有任何变化，变的只是工厂选了哪个实现。
 
 #### 4.1.2 核心流程
 
-创建一个 `Runtime` 的过程可以画成：
+TFRT 跑一张图的大致流程：
 
-```text
-用户指定线程数
-      │
-      ▼
-Runtime::Create(num_inter, num_intra)
-      │  构造一个 ConcurrentWorkQueue（默认实现：多线程工作队列）
-      ▼
-Runtime::Create(unique_ptr<WorkQueueInterface>, diag_handler)
-      │
-      ▼
-tfrt::CoreRuntime::Create(diag_handler, malloc_allocator, work_queue,
-                          "/job:localhost/.../CPU:0")   ← 默认 host 设备名
-      │
-      ▼
-持有 core_runtime_ 与 work_queue_，对外暴露 core_runtime() / work_queue()
-```
-
-这里有一个关键设计：`CoreRuntime` 在创建时需要一个**默认 host 设备名**（字符串）。这继承了 TF 的设备命名约定（见 [u6-l1](u6-l1-device-and-devicefactory.md) 中 `/job:/replica:/task:/device:CPU:0` 格式），但注意它在 TFRT 里只是一个标识字符串，真正的「设备」语义由 `OpHandler` 承载。
+1. **建运行时**：进程启动时创建一个 `tfrt_stub::Runtime`（内含 `tfrt::CoreRuntime` 与工作队列）。
+2. **建 Session**：`TfrtSessionFactory::NewSession` 造出一个 `TfrtSession`，持有上面的 Runtime。
+3. **Create（建图）**：`TfrtSession::Create` 把 `GraphDef` 交给 `GraphExecutor::Create`。
+4. **编译**：`GraphExecutor` 把 `GraphDef` 翻译成 MLIR（TF dialect），再做一系列 lowering，最后产出 **BEF 缓冲区** 或 **MLRT 字节码**。
+5. **Run（执行）**：`GraphExecutor::Run` 用 BEF 执行器 / MLRT 解释器解释这段字节码；遇到无原生 kernel 的 op，经 fallback 调老 `OpKernel`。
+6. **回收**：结果张量回填给 `TfrtSession::Run`，再按 Session 契约返回 Python。
 
 #### 4.1.3 源码精读
 
-工厂方法 `Runtime::Create` 把线程数翻译成一个工作队列，再委托给重载版本：
+最能体现「TFRT 是可独立运行的运行时」的，是仓库里自带的一个驱动二进制 `tf_bef_executor_main.cc`。它不经过任何 Session，直接读一份 BEF 文件并执行：
 
-[tensorflow/core/tfrt/runtime/runtime.cc:66-73](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.cc#L66-L73) — 把 `(num_inter_op_threads, num_intra_op_threads)` 翻成 TFRT 的多线程工作队列，再调用下面的核心 `Create`。
+[tensorflow/core/runtime_fallback/tf_bef_executor_main.cc:33-73](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/runtime_fallback/tf_bef_executor_main.cc#L33-L73) —— `main` 把命令行参数（输入文件、共享库、函数名、工作队列类型）组装成 `RunBefConfig`，再调 `RunBefExecutor`。注意最后那个回调：它创建了一个 `HostContext` 资源 `TfThreadPool`，然后用 `CreateFallbackTestExecutionContext` 构造出执行上下文。这说明 **BEF 文件本身已经是一份可独立加载、可独立执行的产物**，与 Python、Session 无关——这正是「运行时」该有的样子。
 
-真正创建 `CoreRuntime` 的地方：
+关键片段（去掉参数解析后）：
 
-[tensorflow/core/tfrt/runtime/runtime.cc:51-64](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.cc#L51-L64) — 调用 `tfrt::CoreRuntime::Create(...)`，传入诊断处理器、`CreateMallocAllocator()` 分配器、移动进来的工作队列，以及默认 host 设备名 `kDefaultHostDeviceName`。
+```cpp
+tfrt::RunBefConfig run_config;
+run_config.input_filename = input_filename;
+run_config.work_queue_type = absl::GetFlag(FLAGS_work_queue_type);
+run_config.host_allocator_type = absl::GetFlag(FLAGS_host_allocator_type);
 
-默认 host 设备名定义在文件顶部：
+return RunBefExecutor(run_config, [](tfrt::HostContext* host, ...) {
+  // 构造一个 fallback 执行上下文，模拟生产环境的 intra-op 线程池
+  return tensorflow::tfd::CreateFallbackTestExecutionContext(host, ...);
+});
+```
 
-[tensorflow/core/tfrt/runtime/runtime.cc:35-36](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.cc#L35-L36) — `kDefaultHostDeviceName = "/job:localhost/replica:0/task:0/device:CPU:0"`。
-
-`Runtime` 类本身的定义与「临时性」注释：
-
-[tensorflow/core/tfrt/runtime/runtime.h:123-159](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.h#L123-L159) — 注释说明它「将被官方 `tensorflow::experimental::cc::Runtime` 取代」，并暴露 `core_runtime()`、`work_queue()` 两个 getter。
-
-进程级单例的获取与设置：
-
-[tensorflow/core/tfrt/runtime/runtime.h:241-249](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.h#L241-L249) — `GetGlobalRuntime()` 在未 `SetGlobalRuntime` 前返回 `nullptr`。
-
-此外，`Runtime` 还提供一个**资源注入点** `AddCreateRuntimeResourceFn`：
-
-[tensorflow/core/tfrt/runtime/runtime.h:162-184](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.h#L162-L184) — 允许在加载 SavedModel 时注入「按模型维度」的资源（如设备）创建回调。注释里说明这是临时方案，长期会被一个 Device 概念替代。
+这段代码把「字节码 + HostContext + 工作队列」三件套凑齐就能跑，是理解 TFRT 整体形态的最小样例。
 
 #### 4.1.4 代码实践
 
-**实践目标**：从源码层面确认「TFRT 运行时 = `CoreRuntime` + 一个适配自 TF 线程池的工作队列」。
+**实践目标**：不运行任何东西，仅通过阅读确认「BEF 是独立可执行产物」这个判断。
 
 **操作步骤**：
 
-1. 打开 `tensorflow/core/tfrt/runtime/runtime.cc`，定位 `Runtime::Create` 的两个重载。
-2. 打开同目录 `tf_threadpool_concurrent_work_queue.h`，找到把 TF 的 `thread::ThreadPool` 包成 TFRT `ConcurrentWorkQueue` 的适配类。
-3. 对照本节的流程图，确认：`Runtime` 持有 `core_runtime_` 与 `work_queue_` 两个成员。
+1. 打开 [tf_bef_executor_main.cc:36-55](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/runtime_fallback/tf_bef_executor_main.cc#L36-L55)。
+2. 找到 `FLAGS_input_filename`、`FLAGS_shared_libs`、`FLAGS_functions` 三个 absl flag 的使用点。
+3. 观察它们都被填进 `run_config`，最后交给 `RunBefExecutor`。
 
-**需要观察的现象**：`runtime.cc` 里 `Runtime` 的构造函数只接受一个 `CoreRuntime` 与一个裸指针 `WorkQueueInterface*`（见 [runtime.h:230-231](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/runtime/runtime.h#L230-L231)）。这说明 `CoreRuntime` 拿走了工作队列的**所有权**，而 `Runtime` 只保留一个裸指针用于后续访问——这是 TFRT「`HostContext` 管理工作队列生命周期」这一约定的体现。
+**需要观察的现象**：整个 `main` 里没有任何 `tensorflow::Session`、没有 `GraphDef`、没有 `NewSession`——输入就是一份 BEF 文件。
 
-**预期结果**：你能用一句话回答「`tfrt_stub::Runtime` 持有哪两样东西」——一个 `tfrt::CoreRuntime`（包含 `HostContext`）和一个指向工作队列的指针。
+**预期结论**：TFRT 的执行层是「字节码 → 解释器」，与上层 Session 解耦；Session 只是给这套执行层套了一个符合老接口的外壳。
+
+**运行结果**：本实践为源码阅读型，无需运行。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `Runtime::Create` 要提供「传线程数」和「传工作队列」两个重载？
+**练习 1**：`tf_bef_executor_main.cc` 里的 `work_queue_type` 和 `host_allocator_type` 两个参数说明了 TFRT 的什么设计取向？
 
-**参考答案**：前者是便捷入口，把「线程数 → TFRT 多线程工作队列」的默认策略固化下来，适合大多数场景；后者把工作队列的选择权完全交给调用方，使得 `TfrtSession` 可以传入自己定制的 `RunHandlerThreadWorkQueue`（一种按请求动态分配线程的高级队列，见 4.2 节）。这是典型的「便利构造 vs 完全控制」双入口设计。
+> **答案**：说明执行器、工作队列（线程池策略）、主机内存分配器都是**可插拔**的组件，由调用方按需选择，而不是写死在运行时里——这是「可组合运行时」的体现。
 
-**练习 2**：`GetGlobalRuntime()` 在未被初始化时返回什么？这暗示了怎样的使用约定？
+**练习 2**：为什么 TFRT 选择把图编译成 BEF 字节码，而不是像 `DirectSession` 那样直接在内存的 `Graph` 对象上调度？
 
-**参考答案**：返回 `nullptr`。这暗示 `SetGlobalRuntime` 必须在使用前被显式调用一次（通常在进程初始化阶段），调用方需要自己处理「尚未设置」的情况，而不是依赖全局对象自动构造。
+> **答案**：BEF 是一份预编译的、可序列化的产物，避免了每次执行都重新解释 `GraphDef`；同时它把「编译期」与「执行期」彻底分开，使执行器可以做得非常轻量、专注于异步调度。
 
 ---
 
-### 4.2 TfrtSession：把 TFRT 接入既有 Session 接口（core.tfrt.tfrt_session）
+### 4.2 `tfrt_stub::Runtime`：TFRT 在 TF 侧的运行时抽象（core.tfrt.runtime）
 
 #### 4.2.1 概念说明
 
-TFRT 想成为「新一代运行时」，但不能要求所有用户一夜之间改写代码。TF 的解决方案极其优雅：**让 TFRT 伪装成一个 `Session` 实现**。
+`Runtime` 是 TF 在 C++ 侧为 TFRT 定义的「运行时入口」抽象，位于 `tensorflow::tfrt_stub` 命名空间。它的注释直言不讳地写着「It is temporary」（它是临时的），最终会被官方的 `tensorflow::experimental::cc::Runtime` 取代。但当前它就是承载 TFRT 运行时能力的核心对象。
 
-回顾 [u3-l2](u3-l2-session-execution.md) 与 [u1-l5 版本信息与 C++ public 接口](u1-l5-version-and-public-api.md)：`Session` 是一个抽象基类，由 `SessionFactory` 按名字注册、由 `NewSession()` 经 `SessionFactory::GetFactory` 选用。`DirectSession` 就是注册名为 `"DIRECT_SESSION"` 的那个工厂。TFRT 只要：
+它对外只暴露两件最关键的事：
 
-1. 写一个 `TfrtSession : public tensorflow::Session`，实现 `Create/Run/Extend/Close` 等纯虚方法；
-2. 写一个 `TfrtSessionFactory : public tensorflow::SessionFactory`，实现 `AcceptsOptions` 与 `NewSession`；
-3. 用静态全局对象把它注册名为 `"tfrt_session"`。
+1. **创建运行时实例**（带可配置的线程数 / 工作队列）。
+2. **创建张量**（TODO，注释里还标注着「待实现」）。
 
-这样一来，用户只要把 `SessionOptions.target` 设成 `"tfrt_session"`，或开启 `use_tfrt` 实验选项，拿到的 `Session*` 就是 TFRT 实现的，**上层 Python 代码完全无感**。
+其内部真正干活的是上游 `tf_runtime` 项目（`@tf_runtime` 外部仓库）的 `tfrt::CoreRuntime`。
 
 #### 4.2.2 核心流程
 
-`TfrtSession` 的生命周期：
+`Runtime` 的生命周期：
 
-```text
-NewSession(options)
-   │  DeviceFactory::AddDevices  ← 复用既有设备发现
-   │  TfrtSessionFactory::InitializeLocked
-   │     └─ 若无外部 Runtime，则 Runtime::Create(RunHandlerWorkQueue) 造一个
-   ▼
-TfrtSession 构造，持有 runtime_ 指针
-   │
-session.Create(graph)
-   │  FallbackState::CreateWithDeviceMgr(fdef_lib, device_manager)
-   │     └─ 准备既有 TF 运行时状态（DeviceMgr、函数库、PFLR）
-   │  GraphExecutor::Create(options, fallback_state, resource_context, graph, ...)
-   │     └─ 把 graph 预处理（Placer 等），交给 GraphExecutor
-   ▼
-session.Run(inputs, outputs)
-   │  构造本次请求的工作队列（intra/inter 线程池可按 Run 配置）
-   │  graph_executor_->Run(...)   ← 进入 4.3 节
-   ▼
-outputs 填回
-```
-
-注意一个关键事实：`TfrtSession::Create` 会**创建一个 `FallbackState`**（见 4.4 节）。也就是说，即便走 TFRT，整张图的算子仍可能逐个回退到既有 TF 内核——这就是「回退」二字的由来。
+1. **构造**：`Runtime::Create(num_inter_op_threads, num_intra_op_threads)` 先造工作队列，再据此构造 `tfrt::CoreRuntime`。
+2. **注入 per-model 资源**：通过 `AddCreateRuntimeResourceFn` 注册若干回调；加载一个 SavedModel 时，依次调用这些回调，把设备等「系统级资源」注入到该模型的 `ResourceContext` 里。
+3. **per-request 工作队列**：每次推理请求可以经 `CreateRequestQueue` 拿到一个独立工作队列，实现请求间隔离。
+4. **全局单例**：`GetGlobalRuntime` / `SetGlobalRuntime` 提供进程级单例，供 `TfrtSession` 取用。
 
 #### 4.2.3 源码精读
 
-工厂的 `AcceptsOptions` 决定了何时选用 `TfrtSession`：
+`Runtime` 类的定义与设计意图，在头文件注释里写得很清楚：
 
-[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:838-845](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L838-L845) — 当 `target == "tfrt_session"`，或 `target` 为空且开启了 `use_tfrt` 实验选项、或默认本地 Session 实现被全局设为 `kTfrtSession` 时受理。对照 [u3-l2](u3-l2-session-execution.md) 中 `DirectSession` 的 `AcceptsOptions`（target 空且非 TFRT 时受理），二者恰好互斥。
+[tensorflow/core/tfrt/runtime/runtime.h:123-160](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/runtime/runtime.h#L123-L160) —— 类注释说明它「只用于创建运行时实例与创建张量」，并明示它是临时方案。注意两个工厂方法：
 
-静态注册（与 `DirectSession` 完全同构的手法，见 u1-l5/u3-l2）：
+```cpp
+static std::unique_ptr<Runtime> Create(int num_inter_op_threads,
+                                       int num_intra_op_threads = 0);
+static std::unique_ptr<Runtime> Create(
+    std::unique_ptr<WorkQueueInterface> work_queue,
+    std::function<void(const tfrt::DecodedDiagnostic&)> diag_handler =
+        LogOnError);
+```
 
-[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:905-910](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L905-L910) — 借 C++ 静态全局对象在 `main` 前执行 `SessionFactory::Register("tfrt_session", session_factory)`。
+[tensorflow/core/tfrt/runtime/runtime.h:159-160](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/runtime/runtime.h#L159-L160) —— 暴露出的两个 getter：`core_runtime()` 取上游 `tfrt::CoreRuntime`，`work_queue()` 取工作队列。
 
-`TfrtSession::CreateLocked` 是连接 TFRT 与既有 TF 的关键。它先造 `FallbackState`，再造 `GraphExecutor`：
+全局单例与 per-model 资源注入：
 
-[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:226-274](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L226-L274) — 用图的 `FunctionDefLibrary` 创建 `FallbackState`（L226-229），再调用 `GraphExecutor::Create(...)`（L270-274）。其中 L231-234 还注册了 MLRT 的内核注册表（`RegisterTfMlrtKernels`），为 4.3 节的字节码执行器铺路。
+[tensorflow/core/tfrt/runtime/runtime.h:172-196](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/runtime/runtime.h#L172-L196) —— `AddCreateRuntimeResourceFn` 把「创建设备等资源」的回调收进一个列表；`CreateRuntimeResources` 在加载模型时遍历调用它们，参数是一个 `ModelRuntimeContext`（封装了 `GraphExecutionOptions`、`ResourceContext`、设备管理器等模型级状态）。
 
-`TfrtSession::Run` 经过 `RunInternal` 把请求转交给 `GraphExecutor`：
+[tensorflow/core/tfrt/runtime/runtime.h:244-249](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/runtime/runtime.h#L244-L249) —— 进程级单例 `GetGlobalRuntime` / `SetGlobalRuntime`。
 
-[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:297-362](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L297-L362) — 重点看 L322-348：每次 `Run` 都按 `RunOptions` 决定本次请求的 inter-op 工作队列（可由调用方传入线程池，也可退化为单线程或默认池），然后把 `inputs/output_names` 交给 `graph_executor_->Run`（L351-353）。这与 `DirectSession` 每次 `Run` 重建/复用 `ExecutorsAndKeys` 的思路一致（见 u3-l2），但调度核心换成了 TFRT。
+工作队列的抽象层很重要——它把 TF 自己的线程池「翻译」给 TFRT：
 
-工厂初始化时若没有外部 `Runtime`，会自己造一个，并选用 `RunHandlerThreadWorkQueue` 这种「按请求动态分配线程」的高级队列：
-
-[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:803-836](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L803-L836) — `InitializeLocked` 中 `Runtime::Create(CreateRunHandlerWorkQueue(...))`（L826-828）。`CreateRunHandlerWorkQueue` 在同文件 L591-627 定义，它区分 main / complementary 两类线程，是 TFRT 为「高并发推理」专门设计的。
+[tensorflow/core/tfrt/runtime/work_queue_interface.h:41-54](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/runtime/work_queue_interface.h#L41-L54) —— `WorkQueueInterface` 继承自上游 `tfrt::ConcurrentWorkQueue`，但额外携带了 `intra_op_threadpool_`（intra-op 线程池）与一个 `id_`。头注释说得很明白：「这是 TF 与 TFRT core 之间的中间接口，让我们能加入 savedmodel/tensorflow 特有的方法（如创建 intra-op 线程池），而不必改动 TFRT 核心」。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证「`TfrtSession` 是通过 `SessionFactory` 注册机制透明替换 `DirectSession` 的」。
+**实践目标**：理解 `Runtime` 如何把 TF 的线程池注入 TFRT。
 
 **操作步骤**：
 
-1. 在 `tfrt_session.cc` 中搜索 `SessionFactory::Register`，确认注册名字为 `"tfrt_session"`。
-2. 在 `tfrt_session.cc:838-845` 的 `AcceptsOptions` 里，列出会触发 TFRT 的三种条件。
-3. 对照 [u3-l2 讲义](u3-l2-session-execution.md) 中 `DirectSession` 的 `AcceptsOptions`，写出二者如何「瓜分」`target` 为空的情况。
+1. 打开 `runtime.h`，找到两个 `Create` 重载（L139 与 L144）。
+2. 打开 `work_queue_interface.h`，找到 `intra_op_threadpool_` 字段（L46）。
+3. 在仓库里搜索 `CreateRunHandlerWorkQueue`（出现在 `tfrt_session.cc` 的 `InitializeLocked` 中），观察它是如何被传给 `Runtime::Create` 的。
 
-**需要观察的现象**：当 `target` 为空时，到底选 `DirectSession` 还是 `TfrtSession`，取决于 `use_tfrt()` 实验选项和 `GetDefaultLocalSessionImpl()` 的全局默认值——这是一个**运行期开关**，而不是编译期绑定。
+**需要观察的现象**：`TfrtSession` 在初始化时，用一个基于 `RunHandler` 的线程池构造 `Runtime`，而这个线程池正是 TF 已有的 intra-op 调度器。
 
-**预期结果**：你能画出一张「`SessionOptions` → 工厂选择」的真值表：`target="tfrt_session"` → TFRT；`target=""` + `use_tfrt=true` → TFRT；否则 → DirectSession。这解释了为什么切换运行时**不需要重新编译用户代码**。
+**预期结果**：你能画出一条「TF 线程池 → `WorkQueueInterface` → `tfrt::CoreRuntime`」的接线，说明 TFRT 复用了 TF 的线程调度基础设施，而非另起炉灶。
+
+**运行结果**：源码阅读型实践，无需运行。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`TfrtSession::Create` 为什么要构造 `FallbackState`？一个「新运行时」为何要带上旧运行时的状态？
+**练习 1**：`Runtime` 头注释说它是「temporary」，最终会被谁取代？这反映了 TFRT 演进的什么状态？
 
-**参考答案**：因为 TFRT 并没有为每一个 TF op 都重新写一份原生实现，绝大多数算子仍要回退到既有 `OpKernel` 执行（见 4.4 节）。而跑 `OpKernel` 需要 `DeviceMgr`、`ProcessFunctionLibraryRuntime`、函数库定义等既有 TF 状态——`FallbackState` 正是这些状态的容器。带着旧状态，TFRT 才能「调度用新的、计算用旧的」。
+> **答案**：会被 `tensorflow::experimental::cc::Runtime` 取代。这反映 TFRT 仍在演进中，当前 `tfrt_stub::Runtime` 是过渡形态，最终接口尚未冻结。
 
-**练习 2**：`TfrtSessionFactory::AcceptsOptions` 与 `DirectSessionFactory::AcceptsOptions` 的判定必须保证不冲突。如果两者都受理同一个 `SessionOptions`，会发生什么？
+**练习 2**：`AddCreateRuntimeResourceFn` 注册的回调为什么要求「thread-safe」？
 
-**参考答案**：`SessionFactory::GetFactory` 在多工厂都受理时会按注册顺序或优先级裁决，可能导致行为不确定。因此两者被设计成对 `target` 为空的情况做「排他性」判定（`use_tfrt` 与默认本地实现开关），确保任意一份 `SessionOptions` 只被一个工厂受理。
+> **答案**：因为 `CreateRuntimeResources` 可能在加载多个模型、处理多个请求时被并发调用，回调若非线程安全会引发数据竞争。
 
 ---
 
-### 4.3 GraphExecutor：编译 GraphDef 为 BEF/字节码并运行
-
-> 本节严格说属于「把 `TfrtSession` 与 `Runtime` 衔接起来」的中间层（`core.tfrt.graph_executor`），是理解 4.4 节回退机制的前置。它解答一个核心问题：TFRT 拿到一张 GraphDef 之后，到底把它变成了什么、又用什么执行。
+### 4.3 `TfrtSession`：把 TFRT 装进 Session 接口（core.tfrt.tfrt_session）
 
 #### 4.3.1 概念说明
 
-`GraphExecutor` 是 TFRT 的「图执行器」，职责是：给定一个 `GraphDef` 与一组输入输出，**按需编译并缓存**一个可执行的工件，然后用 TFRT 解释器跑它。它内部维护一张「`LoadedClientGraph` 缓存」，按输入输出名字的拼接键复用已编译产物——这与 `DirectSession` 用 `ExecutorsAndKeys` 缓存执行器的思路同源（见 u3-l2）。
+`TfrtSession` 是 TFRT 与既有 TensorFlow 体系之间的**适配层**。它继承自 `tensorflow::Session`（u1-l5 讲过这个抽象基类，契约是 `Create/Extend/Run/...`），所以从 Python 或 C++ 客户端看，它和一个 `DirectSession` 没有区别；但它的内部完全交给 `GraphExecutor` 与 TFRT 运行时。
 
-关键的「双引擎」设计：编译产物有两种形态，对应两种执行器：
-
-- **BEF 路径**：MLIR 模块经 `CompileMlirModuleToBef` 序列化成 `tfrt::BefBuffer`，加载成 `tfrt::BefFile`，由 TFRT 原生的 BEF 执行器解释运行。
-- **MLRT 路径**：MLIR 模块 lower 成 TF 自己的字节码（`mlrt::LoadedExecutable`），由 MLRT 字节码解释器运行（`enable_mlrt` 选项控制）。
-
-二者在加载期通过 `LoadedClientGraph::executable_context()->IsForMlrt()` 二选一。
+它由 `TfrtSessionFactory` 生产。这个工厂同样用 u6-l1 见过的「静态全局对象自动注册」手法接入 `SessionFactory::Register("tfrt_session", ...)`。
 
 #### 4.3.2 核心流程
 
-加载并运行一张子图（`ClientGraph`）：
+**工厂裁决**：`NewSession(SessionOptions)` 时，`SessionFactory::GetFactory` 会依次问每个已注册工厂的 `AcceptsOptions`。`TfrtSessionFactory::AcceptsOptions` 在三种情况下受理：
 
-```text
-GetOrCreateLoadedClientGraph(name, inputs, outputs)
-   │  命中缓存？ ── 是 ──► 直接返回 LoadedClientGraph
-   │  否
-   ▼
-ImportAndCompileClientGraph
-   │  ImportClientGraphToMlirModule
-   │     ├─ graph_execution_state_->CreateOptimizedGraph  ← 复用既有优化（Placer、Grappler）
-   │     └─ tf2xla::v2::ConvertGraphToTfExecutor           ← 把 TF Graph 变成 tf_executor MLIR
-   │  CompileMlirModuleToBef  或  lower 到 MLRT 字节码
-   ▼
-LoadClientGraph
-   │  if (IsForMlrt())  InitBytecode()    ← 跑 _tfrt_fallback_init / _tfrt_resource_init
-   │  else              InitBef()         ← 跑同样的两个初始化函数，但经 BEF 执行器
-   ▼
-GraphExecutionRunOnFunction
-   │  CreateRequestInfo（构造本次请求的 ExecutionContext、工作队列等）
-   │  if (loaded_executable)  RunMlrtFunction(...)        ← MLRT 路径
-   │  else                    经 BEF 执行器运行 func      ← BEF 路径
-   ▼
-outputs
-```
+1. `options.target == "tfrt_session"`（显式点名）。
+2. `options.target` 为空 **且** `config.experimental().use_tfrt()` 为真。
+3. `options.target` 为空 **且** 默认本地 Session 实现被设为 `kTfrtSession`。
 
-注意 `_tfrt_fallback_init` 与 `_tfrt_resource_init` 这两个特殊函数：它们由编译器生成，作用是在正式推理前**预先创建好所有需要回退的 op 与资源**（变量、资源句柄等），避免推理路径上的锁开销。这是 TFRT 为「热路径零开销」做的关键优化。
+而 `DirectSessionFactory::AcceptsOptions` 恰好是「target 为空 **且** `!use_tfrt()` **且** 默认实现是 `kDirectSession`」。二者构成互补：**默认走 DirectSession，TFRT 需显式开启**。
+
+**Create 阶段**：`TfrtSession::Create` 做四件事——构造 `GraphExecutionOptions`、用原图的函数库造 `FallbackState`（回退所需的老 runtime 状态）、注册 MLRT kernels、最后 `GraphExecutor::Create`。
+
+**Run 阶段**：把 fetches/feed_dict 翻成 `GraphExecutor::Run` 的输入，由后者完成编译缓存查找与执行。
 
 #### 4.3.3 源码精读
 
-导入 GraphDef 到 MLIR 模块，复用了既有的图优化（Placer、Grappler），再转换成 `tf_executor` 方言：
+工厂与配置选项：
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.cc:823-861](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L823-L861) — 重点看 L838-840 调用 `graph_execution_state_->CreateOptimizedGraph`（复用既有优化），以及 L853-857 调用 `tf2xla::v2::ConvertGraphToTfExecutor` 把优化后的图转成 MLIR。这与 [u6-l3 Grappler](u6-l3-grappler-optimizers.md) 的优化、[u7-l1 MLIR](u7-l1-mlir-tf-dialect.md) 的 dialect 概念直接衔接。
+[tensorflow/core/tfrt/tfrt_session/tfrt_session.h:67-75](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/tfrt_session/tfrt_session.h#L67-L75) —— `TfrtSessionFactory` 继承 `SessionFactory`，声明了 `AcceptsOptions` 与 `NewSession`。`TfrtSessionOptions`（L52）里的 `runtime`、`use_tpu`、`use_gpu`、`enable_mlrt` 等开关决定了走哪条执行路径。
 
-加载时按编译产物形态二选一地初始化：
+`AcceptsOptions` 的实现是理解「何时启用 TFRT」的钥匙：
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.cc:799-821](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L799-L821) — L810-813 是双引擎分叉点：`IsForMlrt()` 为真走 `InitBytecode`，否则走 `InitBef`。
+[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:838-845](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L838-L845)
 
-BEF 路径的初始化（用 BEF 执行器跑两个特殊初始化函数）：
+```cpp
+bool TfrtSessionFactory::AcceptsOptions(const SessionOptions& options) {
+  if (options.target == "tfrt_session") return true;
+  if (options.target.empty()) {
+    return options.config.experimental().use_tfrt() ||
+           GetDefaultLocalSessionImpl() == LocalSessionImpl::kTfrtSession;
+  }
+  return false;
+}
+```
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.cc:863-891](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L863-L891) — L878-888 注释清楚说明：先跑 `_tfrt_fallback_init` 创建所有回退 op，再跑 `_tfrt_resource_init` 把资源写进运行时状态以实现「无锁高效检索」。
+对照 [tensorflow/core/common_runtime/direct_session.cc:209-213](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/common_runtime/direct_session.cc#L209-L213)，可以看到 `DirectSession` 的受理条件正好是 `target.empty() && !use_tfrt() && 默认==kDirectSession`。再配合 [tensorflow/core/common_runtime/local_session_selection.cc:20-21](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/common_runtime/local_session_selection.cc#L20-L21)（`default_local_session = kDirectSession`），可知**当前仓库默认仍是 DirectSession，TFRT 是 opt-in**。
 
-MLRT 路径的初始化（同样的两个函数，换执行器）：
+`NewSession` 的关键步骤：
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.cc:893-923](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L893-L923) — 与 `InitBef` 结构对称，只是把 `RunRuntimeInitializer` 换成 `RunMlrtFunction`。
+[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:847-880](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L847-L880) —— 注意 L862 调 `DeviceFactory::AddDevices` 收集设备（承接 u6-l1），L874 `new TfrtSession(...)` 把 runtime、设备管理器、各种开关传入。L866-868 还会跑 `InitializerRegistry`，说明 TFRT 也有自己的初始化钩子链。
 
-请求执行时的双引擎分叉：
+`Create` 阶段如何把图交给 `GraphExecutor`：
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.cc:394-405](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L394-L405) — `loaded_executable` 非空（MLRT 路径）则 `RunMlrtFunction`，否则走 BEF 路径。
+[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:231-274](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L231-L274) —— 这里做了三件值得注意的事：
 
-`GraphExecutor` 类本身的公共接口与缓存：
+```cpp
+auto kernel_registry = std::make_unique<mlrt::KernelRegistry>();
+tensorflow::tf_mlrt::RegisterTfMlrtKernels(*kernel_registry);       // 注册原生 MLRT kernel
+tensorflow::tf_mlrt::RegisterTfMlrtBatchKernels(*kernel_registry);
+...
+TF_ASSIGN_OR_RETURN(
+    graph_executor_,
+    tensorflow::tfrt_stub::GraphExecutor::Create(
+        options, std::move(fallback_state), std::move(resource_context),
+        std::move(graph), std::move(kernel_registry)));             // 交给 GraphExecutor
+```
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.h:146-336](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.h#L146-L336) — 关注 `Run`（L269）、`LoadedClientGraph`（L152，编译产物与运行状态的打包）、`ClientGraph`（L238，由 feed/fetch/target 圈定的子图描述）。
+`Run` 阶段非常薄：
 
-[tensorflow/core/tfrt/graph_executor/graph_executor.h:387-393](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.h#L387-L393) — `loaded_client_graphs_` 这个 `flat_hash_map` 就是「按输入输出名缓存已编译子图」的核心，键的拼接逻辑在 [graph_executor.cc:937-946](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L937-L946)。
+[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:351-353](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L351-L353) —— 直接转发给 `graph_executor_->Run(...)`。说明 `TfrtSession` 本身确实只是个「外壳」，重活都在 `GraphExecutor`。
+
+工厂的静态自动注册：
+
+[tensorflow/core/tfrt/tfrt_session/tfrt_session.cc:905-910](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/tfrt_session/tfrt_session.cc#L905-L910) —— 一个静态 bool 变量在 `main` 之前构造，`new TfrtSessionFactory()` 并调 `SessionFactory::Register("tfrt_session", ...)`，与 u6-l1 的 `REGISTER_LOCAL_DEVICE_FACTORY` 完全同构。
 
 #### 4.3.4 代码实践
 
-**实践目标**：理解「同一张子图在 TFRT 下有两条编译/执行路径，但初始化逻辑是镜像对称的」。
+**实践目标**：通过修改一行配置，观察 Session 工厂的裁决结果（纯源码阅读 + 可选运行）。
 
 **操作步骤**：
 
-1. 打开 `graph_executor.cc`，把 `InitBef`（L863）与 `InitBytecode`（L893）并排对照阅读。
-2. 列出二者都调用的两个魔法函数名（提示：在源码中以 `kFallbackInitFunction` / `kResourceInitFunction` 常量出现，分别对应 `_tfrt_fallback_init`、`_tfrt_resource_init`）。
-3. 思考：为什么要把「创建回退 op」放在推理之前单独跑一次，而不是每次推理都创建？
+1. 对照 `tfrt_session.cc:838-845` 与 `direct_session.cc:209-213`，填写下表，判断每种 `SessionOptions` 下哪个工厂受理。
 
-**需要观察的现象**：两个初始化函数的内容几乎一模一样（构造 `RequestInfo` → 跑 `kFallbackInitFunction` → 跑 `kResourceInitFunction`），唯一区别是「用什么执行器跑这两个函数」。
+   | `target` | `use_tfrt()` | `GetDefaultLocalSessionImpl()` | 谁受理 |
+   | --- | --- | --- | --- |
+   | `""` | false | `kDirectSession` | ? |
+   | `""` | true | `kDirectSession` | ? |
+   | `"tfrt_session"` | false | `kDirectSession` | ? |
+   | `""` | false | `kTfrtSession` | ? |
 
-**预期结果**：你能解释——把 op 创建提前到加载期一次性完成，是为了让**推理热路径**只剩纯粹的算子调度与计算，不再有创建/查找开销。这是 TFRT 相对 `DirectSession` 的一个重要性能设计。
+2. （可选运行，**待本地验证**）在已编译了 TFRT 的 TF 环境里运行以下示例代码，观察日志中是否出现 `"Registering TfrtSession"` 与 `"Start initializing TfrtSession"`：
+
+   ```python
+   # 示例代码：显式点名 tfrt_session
+   import tensorflow as tf
+   c = tf.constant([[1., 2.], [3., 4.]])
+   # 注意：以下为示意，能否真正走 TFRT 取决于该 TF 是否编译并启用了 TFRT
+   with tf.compat.v1.Session(target="tfrt_session") as sess:
+       print(sess.run(c))
+   ```
+
+**需要观察的现象**：第 2 步若 TFRT 未编译，会报 `No session factory registered for the given session options` 之类的错误；这正是「TFRT 默认关闭」的实证。
+
+**预期结果**：第 1 步答案依次是 DirectSession、TfrtSession、TfrtSession、TfrtSession。
+
+**运行结果**：第 1 步可立即得出；第 2 步「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`GraphExecutor` 的 `loaded_client_graphs_` 缓存键是什么？为什么需要这个缓存？
+**练习 1**：为什么 `TfrtSession` 与 `DirectSession` 的 `AcceptsOptions` 在 `target.empty()` 这一支上必须是「互补」关系？
 
-**参考答案**：键是「排序后的输入名 + 输出名 + 目标名」拼接成的 `joined_name`（见 `GetOrCreateLoadedClientGraph`，L937-946），或显式的 `graph_name`（通常是 SavedModel 的 signature 名）。需要它是因为编译（MLIR 导入、Grappler、lower 到 BEF/字节码）开销很大，而同一组输入输出在反复推理时编译产物完全可复用。这与 `DirectSession` 缓存 `ExecutorsAndKeys` 是同一个动机。
+> **答案**：`NewSession` 时 `SessionFactory::GetFactory` 会遍历所有工厂，若两个工厂对同一组 `SessionOptions` 都返回 true，就会产生歧义。互补的设计保证任何本地 Session 选项都有且只有一个工厂受理。
 
-**练习 2**：BEF 与 MLRT 是什么关系？为什么 TFRT 要维护两套执行器？
+**练习 2**：`TfrtSession::Create` 里为什么要单独构造一个 `FallbackState`？
 
-**参考答案**：BEF 是 TFRT 项目（`@tf_runtime`）自带的序列化格式与执行器，成熟但与 TFRT 项目绑定；MLRT 是 TF 自己实现的 MLIR 字节码解释器（`tensorflow/core/tfrt/mlrt/`），更贴近 TF 的需求、更易迭代，由 `enable_mlrt` 开关启用。二者是「新旧两种执行引擎」的过渡并存，最终目标是收敛到 MLRT。两者都复用同一套回退内核（4.4 节）。
+> **答案**：因为 TFRT 并非所有 op 都有原生 kernel，需要保留一份「老 TF runtime 状态」（含函数库、设备管理器），以便在执行期对无原生 kernel 的 op 回退到老 `OpKernel`（见 4.5）。
 
 ---
 
-### 4.4 内核回退 Kernel Fallback：用既有 OpKernel 干活（core.runtime_fallback）
+### 4.4 `GraphExecutor`：从图到字节码的编译与执行（core.tfrt.graph_executor）
 
 #### 4.4.1 概念说明
 
-这是理解整个 TFRT 的**钥匙**。TFRT 并没有、也不打算重写 TF 的全部算子。它的策略是：
+`GraphExecutor` 是 TFRT 的「施工队长」：它接收一张 `GraphDef`，负责把它编译成 TFRT 能执行的产物，并在每次 `Run` 时查找/执行已编译的子图。它是 `TfrtSession` 与底层 TFRT 执行器之间的中间层，也是最能体现「编译期 vs 执行期分离」的地方。
 
-- **调度（scheduling）**：由 TFRT 的 BEF/MLRT 解释器完成。解释器读字节码，按数据依赖（`AsyncValue` 的就绪关系）决定算子何时、在哪个线程执行，天然支持异步与流水线。
-- **计算（compute）**：对没有 TFRT 原生实现的 op，**回退**到既有 TF `OpKernel`。具体做法是在 TFRT 的某个「OpHandler」（即 `RuntimeFallbackOpHandler`）里，把 TFRT 的张量转成 `tensorflow::Tensor`，构造一个 `OpKernelContext`，然后调用既有 `OpKernel::Compute`（回顾 [u4-l2 OpKernel 与 Compute 接口](u4-l2-opkernel-and-compute.md)）。
+它管理两类核心产物：
 
-这样做的好处是「渐进迁移」：TFRT 可以先接管调度（拿到异步、流水线、低开销的好处），算子实现暂时复用既有内核，等某个 op 的原生实现成熟了再切换，无需推倒重来。
+- **BEF 缓冲区**（`tfrt::BefBuffer`）：经典的 TFRT 字节码格式，由 MLIR 模块经 `CompileMlirModuleToBef` 产出，用上游 `tfrt::BEFExecutor` 执行。
+- **MLRT 字节码**（`mlrt::bc::Executable`）：一种更新的、进程内字节码解释器产物（见 `core/tfrt/mlrt/`），由 `ConvertTfMlirToBytecode` 产出，用 `mlrt::LoadedExecutable` 执行。
 
-支撑这一切的是 `FallbackState`（4.2 节提到）：它持有既有 TF 运行时所需的 `DeviceMgr`、`DeviceSet`、`FunctionLibraryDefinition`、`ProcessFunctionLibraryRuntime`，因为跑 `OpKernel` 这些都缺一不可。
+二者通过 `options.enable_mlrt` 这个开关二选一。
 
 #### 4.4.2 核心流程
 
-一次回退执行的链路：
+`GraphExecutor::Run` 的大致步骤：
 
-```text
-BEF/MLRT 解释器遇到一个需要回退的 op
-   │
-   ▼
-命中 RuntimeFallbackOpHandler（一个 OpHandler 后端）
-   │  把 AsyncValue<Tensor> 输入 → tensorflow::Tensor
-   ▼
-KernelFallbackExecuteCompatCoreRuntimeDispatch(op_name, device, args, results, ...)
-   │  准备 OpKernelRunState（params：设备、op、属性）
-   │  从 OpKernelRunnerCache 取得（或创建）对应的 OpKernel
-   ▼
-KernelFallbackExecuteCompatSyncInternal / ...AsyncInternal
-   │  构造 OpKernelContext context(&params, num_outputs)
-   │  kernel_runner.Run(&context)        ← 真正调用既有 OpKernel::Compute
-   ▼
-把 context 的 outputs 包装回 TFRT 的 AsyncValue<Tensor>
-```
+1. **解析 ClientGraph**：把输入/输出张量名翻译成一个 `ClientGraph`（feed/fetch/target 节点集合）。
+2. **查找/创建 LoadedClientGraph**：以「排序后的输入输出名拼接出的 joined_name」为键查缓存（`loaded_client_graphs_`），命中则复用。
+3. **未命中则 ImportAndCompile**：`GraphDef → MLIR(TF dialect)` → lowering → BEF 或 MLRT 字节码。
+4. **执行**：`GraphExecutionRunOnFunction` 或 `RunWithSyncInterpreter` 拿到字节码解释器跑一遍，产出输出张量。
+5. （可选）**在线代价分析**：用 `CostRecorder` 记录 op 耗时，必要时触发重编译。
 
-最关键的一行就是 `kernel_runner.Run(&context)`——它和 `DirectSession` 里 `Executor` 调 `device->Compute(op_kernel, &ctx)` 跑的是**同一份** `OpKernel` 代码。区别只在于「谁来调度这次调用」。
+`LoadedClientGraph` 是「一个被请求过的子图 + 它的编译产物 + 运行期状态」的打包对象。
 
 #### 4.4.3 源码精读
 
-回退 OpHandler 的创建入口与职责说明：
+`GraphExecutor` 类与它的两个执行入口：
 
-[tensorflow/core/runtime_fallback/runtime/runtime_fallback_op_handler.h:16-34](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/runtime_fallback/runtime/runtime_fallback_op_handler.h#L16-L34) — 注释一句话点题：「responsible for running TFRT ops on Tensorflow」——即把 TFRT 的 op 跑到 TF 内核上。
+[tensorflow/core/tfrt/graph_executor/graph_executor.h:146-150](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.h#L146-L150) —— 类定义，`Run` 与 `RunWithSyncInterpreter` 是两个对外执行入口。
 
-回退执行的对内统一入口声明：
+异步 `Run`：
 
-[tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute.h:16-48](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute.h#L16-L48) — 注释「Provides a way to execute a TensorFlow kernel using TFRT kernel fallback」，`KernelFallbackExecute` 接收 TFRT 的 `ExecutionContext`、op 名、`AsyncValue*` 输入与属性，输出回 `AsyncValue`。
+[tensorflow/core/tfrt/graph_executor/graph_executor.h:269-274](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.h#L269-L274) —— 接收输入张量名-值对、输出/目标张量名，回填 `outputs`。
 
-真正调用既有 `OpKernel` 的地方——同步版本：
+同步解释器入口：
 
-[tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute_compat.cc:231-255](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute_compat.cc#L231-L255) — L239 构造 `OpKernelContext context(&run_state->params, results.size())`，**L240 `kernel_runner.Run(&context)`** 就是真正触发既有 `OpKernel::Compute` 的那一行；随后 L249-252 把 `context.mutable_output(i)` 包装成 TFRT 的 `AsyncValue`。对照 [u4-l2 讲义](u4-l2-opkernel-and-compute.md) 中「`OpKernelContext` 是总线」的描述，这里完全复用了那套机制。
+[tensorflow/core/tfrt/graph_executor/graph_executor.h:302-308](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.h#L302-L308) —— `RunWithSyncInterpreter` 用 MLRT 解释器同步跑一张图，注释点明「run synchronously with the TFRT interpreter」。
 
-异步版本（异步 `OpKernel` 通过 `done_callback` 回填结果）：
+编译产物的两条路径（私有方法）：
 
-[tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute_compat.cc:159-224](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute_compat.cc#L159-L224) — L223 `kernel_runner.RunAsync(context_ptr, done_callback)`，`done_callback`（L196-221）在 op 完成后把输出搬进 `AsyncValue`。注意 L213 `tfrt::EnqueueWork` 把「搬运输出」扔回 TFRT 线程，体现 TFRT 与既有 TF 线程模型的协作。
+[tensorflow/core/tfrt/graph_executor/graph_executor.h:357-363](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.h#L357-L363)
 
-`FallbackState` 持有的既有运行时状态：
+```cpp
+absl::StatusOr<tfrt::BefBuffer> CompileMlirModuleToBef(mlir::ModuleOp module) const;
+absl::Status InitBef(LoadedClientGraph* loaded_client_graph,
+                     tensorflow::tfrt_stub::WorkQueueInterface* work_queue);
+absl::Status InitBytecode(LoadedClientGraph* loaded_graph);
+```
 
-[tensorflow/core/tfrt/fallback/fallback_state.h:38-100](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/tfrt/fallback/fallback_state.h#L38-L100) — 成员 `device_manager_`、`device_set_`、`func_lib_def_`、`pflr_`（L94-99）正是跑 `OpKernel` 所需的全部既有 TF 状态。注释（L38-39）说明它「contains the necessary runtime states used in current tensorflow」。
+`CompileMlirModuleToBef` + `InitBef` 是经典 BEF 路径；`InitBytecode` 是新的 MLRT 字节码路径。二者并存正是 TFRT 在执行器层面的演进现状。
 
-> 旁证：`tf_bef_executor_main.cc` 是仓库里自带的一个 BEF 执行器 demo，它用 `RunBefExecutor` 加载一个 BEF 文件并运行，并构造一个 fallback 执行上下文：
+`LoadedClientGraph` 的内部状态：
 
-[tensorflow/core/runtime_fallback/tf_bef_executor_main.cc:59-72](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/core/runtime_fallback/tf_bef_executor_main.cc#L59-L72) — `RunBefExecutor` 的回调里，用 `resource_context` 取得一个 intra-op 线程池，再调 `CreateFallbackTestExecutionContext` 构造一个带回退能力的 `ExecutionContext`。这正是「BEF 执行器 + 回退内核」组合的最小可运行示例，也是本讲「综合实践」的切入点。
+[tensorflow/core/tfrt/graph_executor/graph_executor.h:152-235](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.h#L152-L235) —— 它持有 `mlir_context_`、`executable_context_`（真正的编译产物）、`runner_table_`（fallback kernel 运行所需的 `OpKernelRunner` 缓存）、`resource_array_`、`sync_resource_state_` 等。`MaybeGetCostRecorder` / `UpdateCost`（L168-175）实现了「记录 op 代价 → 必要时重编译」的自适应优化。
+
+缓存表与并发安全：
+
+[tensorflow/core/tfrt/graph_executor/graph_executor.h:387-393](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.h#L387-L393) —— `loaded_client_graphs_` 是以 `joined_name` 为键的 `flat_hash_map`，用 `unique_ptr` 保值的指针稳定性，并由 `loaded_client_graphs_mu_` 保护。这与 u3-l2 里 `DirectSession` 的 `ExecutorsAndKeys` 缓存思路一致——都是「按 fetches/feed 组合缓存已编译子图」。
+
+BEF vs MLRT 的开关（在 `.cc` 里）：
+
+[tensorflow/core/tfrt/graph_executor/graph_executor.cc:532](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L532) —— `->Set(options.enable_mlrt ? "mlrt" : "bef")`，配合同文件 [graph_executor.cc:140](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/graph_executor/graph_executor.cc#L140) 的统计指标描述 `"executor modes (BEF vs MLRT interpreter)"`，可以确认存在两种执行器模式。
+
+> 说明：`graph_executor.cc` 不在本讲 `source_files` 的头文件清单里，但它是理解 BEF/MLRT 选择逻辑的关键，这里作为补充引用。本讲引用的 `.cc` 行号基于当前 HEAD，若后续仓库改动请以实际为准。
 
 #### 4.4.4 代码实践
 
-**实践目标**：亲眼确认「TFRT 的回退 = 复用既有 `OpKernel::Compute`」这一核心论断。
+**实践目标**：画出 `GraphExecutor` 的「编译产物二选一」与「缓存」两条主线。
 
 **操作步骤**：
 
-1. 打开 `kernel_fallback_execute_compat.cc`，定位 `KernelFallbackExecuteCompatSyncInternal`（L231）。
-2. 找到 `kernel_runner.Run(&context)`（L240），点进 `OpKernelRunner::Run`（在 `tensorflow/core/tfrt/fallback/op_kernel_runner.cc`），看它最终是否调用 `OpKernel` 的 `Compute`。
-3. 对照 [u4-l2 讲义](u4-l2-opkernel-and-compute.md) 中 `device->Compute(op_kernel, &ctx)` 的传统调用方式，列出两者的相同点（同一个 `OpKernelContext`、同一个 `OpKernel` 子类）与不同点（调度方不同）。
+1. 打开 `graph_executor.h`，定位 `CompileMlirModuleToBef`（L357）、`InitBef`（L360）、`InitBytecode`（L363）三个私有方法。
+2. 定位缓存表 `loaded_client_graphs_`（L391）与其保护锁 `loaded_client_graphs_mu_`（L387）。
+3. 阅读 `LoadedClientGraph::MaybeGetCostRecorder` 的注释（L164-167），理解「在线代价分析 → 重编译」的触发条件。
 
-**需要观察的现象**：`OpKernelContext` 在两条路径里**完全是同一个类型**，`mutable_output(i)`、`SetStatus`、`OP_REQUIRES` 这些 API 对算子作者来说完全不变。也就是说，一个用 `REGISTER_KERNEL_BUILDER` 写好的 CPU/GPU kernel，既能在 `DirectSession` 里跑，也能在 TFRT 回退里跑，**无需任何修改**。
+**需要观察的现象**：`LoadedClientGraph` 同时持有「MLIR 模块」「executable_context」「cost_recorder」三套对象，说明一次 `Load` 之后仍可能因为代价数据更新而重编译。
 
-**预期结果**：你能用一句话总结——「TFRT 把『谁来调度 op』这件事重写了，但『op 怎么算』完全复用既有内核」。这就是 TFRT 能渐进落地的根本原因。
+**预期结果**：你能用一句话概括——`GraphExecutor` 把「按 joined_name 缓存的子图」编译成「BEF 或 MLRT 字节码」，执行时交给对应解释器，并可据运行时代价重编译。
 
-**待本地验证**：若你本地能完整构建 TF，可尝试构建 `tf_bef_executor_main` 这个二进制目标，并用一个简单的 BEF 文件运行它，观察日志中 fallback 相关的初始化函数被执行的顺序。若无法构建，则以上为源码阅读型实践。
+**运行结果**：源码阅读型实践，无需运行。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：既然每个算子最终都回退到既有 `OpKernel`，那 TFRT 的性能优势从何而来？
+**练习 1**：`GraphExecutor` 为什么用「排序后的输入输出名」作为缓存键，而不是直接用调用顺序？
 
-**参考答案**：优势不在「单个算子算得更快」，而在「调度层」：TFRT 以 `AsyncValue` 为单位做数据流驱动，能更细粒度地并行与流水线化算子间执行；线程池（如 `RunHandlerThreadWorkQueue`）针对高并发推理优化；加载期预创建回退 op 让热路径零开销；以及未来可逐步把热点 op 换成 TFRT 原生或 XLA 实现从而省去回退开销。简言之，先赢在调度，再逐步赢在计算。
+> **答案**：因为同一次逻辑请求可能以不同顺序传入相同的输入输出集合，排序后归一化能保证「同样的子图只编译一次」，避免重复编译。这和 u3-l2 `DirectSession` 用 sorted key 缓存 `ExecutorsAndKeys` 的思路一致。
 
-**练习 2**：`FallbackState` 与 `TfrtSession` 的关系是什么？为什么不把它的内容直接放进 `Runtime`？
+**练习 2**：`enable_mlrt` 为真时走 MLRT 字节码，为假时走 BEF。从 `LoadedClientGraph` 同时持有 `tf_mlir_with_op_keys` 与 `tfrt_mlir` 两个 MLIR 模块（L214-215）来看，重编译时为什么需要保留 MLIR 模块而不是只留字节码？
 
-**参考答案**：`FallbackState` 是**按模型/按 Session** 的（持有该图的设备集、函数库、PFLR），而 `Runtime` 是**进程级单例**（一个 `CoreRuntime` 服务多个模型）。把按模型的状态放进进程级 `Runtime` 会造成模型间耦合与资源浪费，因此 `FallbackState` 由 `TfrtSession`（或 `GraphExecutor`）按实例持有，而 `Runtime` 只放跨模型共享的调度基础设施。这是「进程级 vs 模型级」的关注点分离。
+> **答案**：因为重编译需要从 MLIR 层面重新做 lowering（例如根据新代价数据改变聚类/分桶），而字节码是 lowering 的终点、不可逆；故必须保留上游 MLIR 模块作为重编译的起点。
+
+---
+
+### 4.5 `runtime_fallback`：让 TFRT 跑老 OpKernel 的回退机制（core.runtime_fallback）
+
+#### 4.5.1 概念说明
+
+TFRT 想用一套全新的异步 kernel 体系替代老 `OpKernel`，但 TF 仓库里有数百个 op，不可能一夜之间全重写。于是有了 **fallback（回退）机制**：当某个 op 在 TFRT 侧没有原生 kernel 时，运行时透明地退回到老的 `tensorflow::OpKernel::Compute`（u4-l2 讲过的那个 `Compute(OpKernelContext*)`）去执行。
+
+这套机制住在 `tensorflow/core/runtime_fallback/` 目录，是 TFRT 能「渐进迁移」的关键——它让 TFRT 即使在 op 覆盖不全的情况下也能跑通任意 `GraphDef`。
+
+目录里有两组实现：
+
+- `runtime_fallback/kernel/`：把「执行一个老 OpKernel」封装成一个 TFRT kernel（`KernelFallbackExecute`）。
+- `runtime_fallback/runtime/`：在 TFRT 运行时层面注册这些 fallback kernel 与张量转换函数。
+
+#### 4.5.2 核心流程
+
+fallback 的执行流程：
+
+1. **建图/编译期**：`GraphExecutor` 在 lowering 时，遇到没有 TFRT 原生 kernel 的 op，就为它生成一个「调用 fallback」的 TFRT kernel（如 `tfrt_op_kernel`）。
+2. **运行期**：BEF/MLRT 执行器跑到该 kernel 时，调用 `KernelFallbackExecute`。
+3. **KernelFallbackExecute**：从 `ExecutionContext` 取出 `OpKernelRunner`（一个缓存了具体 `OpKernel` 对象 + `OpKernelContext` 所需状态的运行器），按老 TF 的方式调 `Compute`。
+4. **张量适配**：fallback kernel 的输入输出在 TFRT 的 `AsyncValue` 与 TF 的 `tensorflow::Tensor` 之间转换（由 `runtime_fallback_tensor.h` 等负责）。
+5. **结果回填**：把 `Compute` 写入的输出张量包回 `AsyncValue`，交给上游执行器继续异步传播。
+
+#### 4.5.3 源码精读
+
+fallback kernel 的核心入口：
+
+[tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute.h:43-47](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/runtime_fallback/kernel/kernel_fallback_execute.h#L43-L47) —— `KernelFallbackExecute` 接收 `ExecutionContext`、op 名、一组 `AsyncValue*` 输入、一组输出槽、属性 `OpAttrsRef`，异步执行一个老 OpKernel。头注释说得很直白：「Provides a way to execute a TensorFlow kernel using TFRT kernel fallback」。
+
+注意它完全是异步签名（输入是 `AsyncValue*`，输出是 `RCReference<AsyncValue>`），这正是「把同步的老 kernel 塞进异步执行图」的接口形态：
+
+```cpp
+bool KernelFallbackExecute(
+    const tfrt::ExecutionContext& exec_ctx, tfrt::string_view op_name,
+    llvm::ArrayRef<tfrt::AsyncValue*> arguments,
+    llvm::MutableArrayRef<tfrt::RCReference<tfrt::AsyncValue>> results,
+    const tfrt::OpAttrsRef& attrs, KernelFallbackOutputType output_type);
+```
+
+`KernelFallbackOutputType` 枚举（L35-38）区分输出是普通 `tensorflow::Tensor` 还是 `KernelFallbackTensor`——后者是 fallback 体系内部用的张量包装，避免频繁格式转换。
+
+fallback kernel 的自动注册：
+
+[tensorflow/core/runtime_fallback/runtime/static_registration.cc:30-36](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/runtime_fallback/runtime/static_registration.cc#L30-L36)
+
+```cpp
+TFRT_STATIC_KERNEL_REGISTRATION(RegisterTfdDelegateKernels);
+
+static bool runtime_fallback_conversion_fn_registration = []() {
+  tfrt::AddStaticTensorConversionFn(
+      RegisterTFRuntimeFallbackTensorToHostConversionFn);
+  return true;
+}();
+```
+
+这里用了两种「启动期自动注册」手法，都是 u4-l1、u6-l1 见过的老朋友：
+
+- `TFRT_STATIC_KERNEL_REGISTRATION`：把一组 fallback kernel 注册进 TFRT 的 `KernelRegistry`（对应 TF 的 `REGISTER_KERNEL_BUILDER`）。
+- 一个静态 bool lambda：在 `main` 之前注册「`RuntimeFallbackTensor` ↔ host tensor」的转换函数，让两种张量表示能互转。
+
+`OpKernelRunner` 的缓存：
+
+[tensorflow/core/tfrt/fallback/op_kernel_runner.h](https://github.com/tensorflow/tensorflow/blob/7749c6197a553299f76f3ca02bc92a4986de70f2/tensorflow/core/tfrt/fallback/op_kernel_runner.h) —— `OpKernelRunner` 把「具体 `OpKernel` 对象 + NodeDef + 设备 + 函数库运行时」打包成一个可重复调用的运行器，`OpKernelRunnerCache`（`op_kernel_runner_cache.h`）按 (op, device, attrs) 缓存它，避免每次执行都重新 `CreateOpKernel`（承接 u4-l2）。
+
+#### 4.5.4 代码实践
+
+**实践目标**：理解 fallback 如何把「异步 TFRT 执行」与「同步老 OpKernel」粘合在一起。
+
+**操作步骤**：
+
+1. 打开 `kernel_fallback_execute.h`，确认 `KernelFallbackExecute` 的输入输出都是 `AsyncValue`。
+2. 打开 `static_registration.cc`，确认它用静态构造对象注册了 fallback kernel 与张量转换函数。
+3. 在 `runtime_fallback/kernel/` 下找到 `tfrt_op_kernel.cc`，阅读它如何把 `KernelFallbackExecute` 包成一个可被 BEF 调用的 TFRT kernel（即「一个 op 在图里长成一个 kernel 节点，执行时转交 fallback」）。
+
+**需要观察的现象**：fallback 这条路对调用方完全透明——BEF/MLRT 执行器不关心一个 kernel 是「原生」还是「fallback」，它只管按字节码调度，具体实现由 kernel 注册表决定。
+
+**预期结果**：你能解释「为什么 TFRT 不必等所有 op 重写完才能上线」——因为 fallback 让任意 op 都能跑，只是非原生 op 不享受 TFRT 的异步优化收益。
+
+**运行结果**：源码阅读型实践，无需运行。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`KernelFallbackExecute` 为什么用 `AsyncValue` 而不是直接传 `tensorflow::Tensor`？
+
+> **答案**：因为 TFRT 整体是异步优先的，数据流以 `AsyncValue` 串联；fallback kernel 必须遵守同样的异步契约，才能与原生 TFRT kernel 混在一张执行图里被统一调度，否则会破坏异步流水线。
+
+**练习 2**：`static_registration.cc` 同时注册了「kernel」和「张量转换函数」两类东西。为什么缺一不可？
+
+> **答案**：只注册 kernel 能让 fallback 被调用，但 fallback 产出的 `KernelFallbackTensor` 无法被下游原生 TFRT kernel 识别；张量转换函数负责在两种张量表示之间转换，缺了它数据流会在类型边界断裂。
 
 ---
 
 ## 5. 综合实践
 
-**任务**：完成本讲规格中要求的核心实践——对照 `tfrt` 目录与 `runtime_fallback`，说明 BEF 执行器与传统 `DirectSession` 在执行模型上的主要不同，并指出 TFRT 试图解决什么问题。
+**任务**：用一张「时序对照表 + 调用链图」把本讲四个模块串起来，回答规格里给出的核心问题——**BEF 执行器与传统 `DirectSession` 在执行模型上的主要不同是什么，TFRT 试图解决什么问题？**
 
-**操作步骤**：
+请按以下步骤完成：
 
-1. **重读 `DirectSession` 的执行链路**（复习 [u3-l2 讲义](u3-l2-session-execution.md)）：回忆「剪枝 → 放置 → 优化 → 分区 → `Executor` 按拓扑调度 → `Rendezvous` 传张量」这条链路，以及 `ExecutorsAndKeys` 的缓存机制。
-2. **梳理 TFRT 的执行链路**（综合本讲 4.1–4.4）：`TfrtSession::Create` 造 `FallbackState` + `GraphExecutor`；首次 `Run` 触发 `GetOrCreateLoadedClientGraph`，把 GraphDef 经 MLIR 编译成 BEF/字节码；之后每次 `Run` 用 TFRT 解释器（BEF 或 MLRT）跑字节码，遇到需回退的 op 经 `RuntimeFallbackOpHandler` 调既有 `OpKernel`。
-3. **填写对比表**（建议自己画在纸上或笔记里）：
+1. **复现两套执行链**。在源码中分别定位：
+   - 传统链路：`direct_session.cc` 的 `Run` → `GetOrCreateExecutors` → `Executor::Run`（参见 u3-l2）。
+   - TFRT 链路：`tfrt_session.cc:351` → `graph_executor_->Run` → BEF/MLRT 执行器。
 
-   | 维度 | DirectSession（传统） | TFRT（BEF/MLRT 执行器） |
+2. **填写对照表**（写在你的学习笔记里）：
+
+   | 维度 | DirectSession | TfrtSession + GraphExecutor |
    | --- | --- | --- |
-   | 调度核心 | 自研 `Executor`，按节点就绪状态 + 线程池 | TFRT 解释器，以 `AsyncValue` 就绪关系做数据流驱动 |
-   | 数据传递 | `Rendezvous` 显式 `Send`/`Recv` 配对 | `AsyncValue` 引用传递，天然异步 |
-   | 跨设备 | 显式插入 `_Send`/`_Recv` 节点 | `OpHandler` + 设备流抽象（stream） |
-   | 算子计算 | `device->Compute(op_kernel, &ctx)` | 回退到**同一个** `OpKernel::Compute`（`kernel_runner.Run`） |
-   | 线程池 | inter-op 固定线程池 | 可按请求分配（`RunHandlerThreadWorkQueue`） |
-   | 编译产物 | 运行时 `Graph*` + 分区子图 | 预编译的 BEF/字节码，加载期预创建回退 op |
-   | 接入方式 | `SessionFactory` 注册为 `"DIRECT_SESSION"` | `SessionFactory` 注册为 `"tfrt_session"`，同一 `Session` 接口 |
+   | 执行单元 | 内存中的 `Graph*` + `ExecutorImpl`（节点拓扑序调度） | BEF / MLRT 字节码 + 字节码解释器 |
+   | 调度模型 | 以同步拓扑序为主，跨设备用 `_Send`/`_Recv` | 异步优先，`AsyncValue` 数据流驱动 |
+   | op 覆盖 | 全部用老 `OpKernel` | 原生 TFRT kernel + 不足处 fallback 到老 `OpKernel` |
+   | 编译期与执行期 | 揉在一次 `Run` 里（放置/优化/分区都在首次 Run） | 显式分离：`GraphExecutor::Create` 期编译成字节码，`Run` 期只解释 |
+   | 可组合性 | 单体执行器 | Runtime / WorkQueue / KernelRegistry 可插拔 |
 
-4. **回答「TFRT 试图解决什么」**：用一段话写清——TFRT 把运行时拆成可组合的、以异步数据流为核心的抽象（`HostContext`/`CoreRuntime`/`OpHandler`/`AsyncValue`/BEF），让调度、设备、计算解耦；它用「回退到既有 `OpKernel`」实现渐进迁移，用「加载期预创建 + 热路径零开销」与「按请求分配线程池」提升推理吞吐，最终目标是既能容纳 CPU/GPU/TPU 与 XLA 等多后端，又能逐步用原生实现替换回退。
+3. **回答「TFRT 解决什么」**。结合 4.1 的三点设计目标（异步优先、可组合、与 op 解耦+渐进迁移），用 3-5 句话写明 TFRT 相对 `DirectSession` 的改进点，并指出当前它「默认关闭、opt-in」这一事实（引用 `direct_session.cc:209-213` 与 `local_session_selection.cc:20-21`）。
 
-**需要观察的现象**：你会清楚地看到，TFRT 与 `DirectSession` 共享了「`OpKernel` 怎么算」「`SessionFactory` 怎么注册」「Placer/Grappler 怎么优化」这一整层既有资产，**真正的差异只在调度核心与数据传递方式**。
+4. **（可选，待本地验证）**：若你有一个编译了 TFRT 的 TF，尝试用 4.3.4 的示例代码显式 `target="tfrt_session"` 跑一个常量加法，对比同样的图在默认 `DirectSession` 下的日志差异（重点看是否出现 `"Start initializing TfrtSession"`）。
 
-**预期结果**：你能用三句话向同事讲清 TFRT——(1) 它是一个以异步数据流为核心的新运行时，通过 `SessionFactory` 透明替换 `DirectSession`；(2) 它复用既有 `OpKernel` 做计算（回退），自己只重写调度；(3) 它用 BEF/MLRT 两套解释器、`RunHandler` 线程池、加载期预创建等手段追求高并发推理的低开销。
-
-**待本地验证**：完整构建 TFRT 相关目标（如 `tf_bef_executor_main`）需要较重的 Bazel 环境；若本地不具备，本实践以源码追踪与对比分析为准，不必强行运行。
-
----
+**交付物**：一张对照表 + 一段结论 + （可选）一份运行日志摘录。
 
 ## 6. 本讲小结
 
-- **TFRT 是「新一代运行时」**，以 `HostContext` / `CoreRuntime` / `OpHandler` / `AsyncValue` / BEF 为核心抽象，目标是把调度、设备、计算解耦，支持异步与多后端；TF 侧用 `tfrt_stub::Runtime` 把 `CoreRuntime` 包起来，并提供进程级单例。
-- **`TfrtSession` 用 `SessionFactory` 静态注册**（名 `"tfrt_session"`），伪装成一个 `Session` 实现，让上层代码无感切换；`AcceptsOptions` 与 `DirectSession` 排他性地瓜分 `target` 为空的情况。
-- **`GraphExecutor` 是编译+运行的中间层**：把 GraphDef 经既有优化（Placer/Grappler）导入 MLIR，再编译成 BEF 或 MLRT 字节码，按输入输出名缓存 `LoadedClientGraph`，并在加载期跑 `_tfrt_fallback_init`/`_tfrt_resource_init` 预创建回退 op。
-- **「内核回退」是理解 TFRT 的钥匙**：TFRT 自己只做调度，算子计算委托给既有 `OpKernel`——在 `kernel_fallback_execute_compat.cc` 里实例化 `OpKernelContext` 并调用 `kernel_runner.Run(&context)`，跑的是和 `DirectSession` 完全相同的内核代码。
-- **`FallbackState` 承载既有运行时状态**（`DeviceMgr`/`DeviceSet`/函数库/PFLR），按模型实例持有，与进程级 `Runtime` 形成「模型级 vs 进程级」的关注点分离。
-- **BEF/MLRT 解释器与 `DirectSession` 的 `Executor` 的根本差异**在于调度核心与数据传递：前者以 `AsyncValue` 就绪关系做数据流驱动，后者按节点就绪状态 + `Rendezvous` 显式配对。
-
----
+- **TFRT 是新一代、异步优先、可组合的运行时基础设施**，目标是替代 `DirectSession` 那套单体、同步、与 op 强耦合的执行器。
+- 它把图**编译成字节码**（经典 BEF 或更新的 MLRT 字节码）再解释执行，做到了「编译期与执行期分离」，`tf_bef_executor_main.cc` 证明 BEF 是可独立加载执行的产物。
+- `tfrt_stub::Runtime`（`core/tfrt/runtime/`）是 TF 侧的运行时抽象，内部包装上游 `tfrt::CoreRuntime`，并通过 `WorkQueueInterface` 复用 TF 的线程池。
+- `TfrtSession`（`core/tfrt/tfrt_session/`）让 TFRT 伪装成普通 `tensorflow::Session`，与 `DirectSession` 在 `AcceptsOptions` 上互补；当前仓库**默认仍是 DirectSession，TFRT 需经 `use_tfrt()` 或 `target="tfrt_session"` 显式开启**。
+- `GraphExecutor`（`core/tfrt/graph_executor/`）是施工队长，负责 `GraphDef → MLIR → BEF/MLRT` 的编译与按 `joined_name` 缓存的子图执行，还支持据运行时代价重编译。
+- `runtime_fallback`（`core/runtime_fallback/`）通过 `KernelFallbackExecute` 与静态注册的 fallback kernel，让 TFRT 在 op 覆盖不全时透明回退到老 `OpKernel::Compute`，实现渐进迁移。
 
 ## 7. 下一步学习建议
 
-- **回到调度细节**：阅读 `tensorflow/core/tfrt/runtime/work_queue_interface.h` 与 `tf_threadpool_concurrent_work_queue.cc`，理解 TF 线程池如何被适配成 TFRT 的 `ConcurrentWorkQueue`，对比 `DirectSession` 的 inter-op 线程池模型。
-- **深入回退热路径**：读 `tensorflow/core/tfrt/fallback/op_kernel_runner.cc` 与 `op_kernel_runner_cache.cc`，看清「加载期把 `OpKernel` 预先创建并缓存」的实现，理解热路径零开销的具体落地。
-- **MLRT 字节码**：浏览 `tensorflow/core/tfrt/mlrt/`（`bytecode/`、`interpreter/`、`kernel/`），理解与 BEF 执行器并列的第二种执行引擎的字节码与解释器结构。
-- **连接编译器**：本讲止步于「GraphDef → MLIR → BEF」的入口，建议接着读 [u7-l1 MLIR 与 TF dialect](u7-l1-mlir-tf-dialect.md) 与 [u7-l2 XLA / StableHLO](u7-l2-xla-stablehlo-tf2xla.md)，理解 `ConvertGraphToTfExecutor` 之后的 bridge pass 流水线如何把 `tf_executor` 方言 lower 到可执行形态。
-- **设备与流**：结合 [u6-l1 Device 与 DeviceFactory](u6-l1-device-and-devicefactory.md)，对照 TFRT 的 `OpHandler` 与 `tensorflow/core/tfrt/runtime/stream.h`，体会 TFRT 如何用「流（stream）」抽象替代既有的 `_Send`/`_Recv` 跨设备机制。
+- **横向对比执行模型**：回到 u3-l2（`DirectSession`）与本讲，亲手画一张「同一张图在两套运行时里的执行时序图」，这是巩固理解的最佳方式。
+- **深入 MLRT 字节码**：阅读 `tensorflow/core/tfrt/mlrt/bytecode/executable.h` 与 `function.h`，理解 MLRT 作为 BEF 后继的字节码布局（`kernel_names` / `attributes` / `functions` 三段式）。
+- **跟进上游 TFRT**：本讲多次出现 `@tf_runtime` 外部仓库（`tfrt::CoreRuntime`、`tfrt::BEFExecutor`、`AsyncValue`）。可在 `third_party/` 下找到其引用配置，进一步阅读上游设计与 `DecodedDiagnostic`、`HostContext` 等概念。
+- **回到编译侧**：TFRT 的执行依赖 MLIR lowering 产物，建议接着读 u7-l1（MLIR 与 TF dialect）与 u7-l2（XLA / StableHLO），把「图 → MLIR → 字节码/设备代码」整条编译流水线打通。
+- **服务端落地**：若关注推理部署，可继续阅读 `tensorflow/core/tfrt/saved_model/`，看 TFRT 如何配合 SavedModel 做加载与 AOT 编译（`saved_model_aot_compile.h`），这与后续的 TFLite（u8）形成「服务端 TFRT / 端侧 TFLite」的部署双线。

@@ -1,6 +1,8 @@
 # Autotuning 机制
 
 > 本讲属于 U5「分块 GEMM 与 Autotuning」的第三讲，承接 u5-l2 讲过的静态持久化调度与 `replace_hints` 结论，把视角从「单个内核怎么调度」抬到「整个内核族怎么自动选出最优配置」。前置认知：你已经知道 cuTile 内核由 `@ct.kernel` 定义、由 `ct.launch` 启动，`num_ctas`/`occupancy` 是编译器 hint、`TILE_SIZE_*`/`LOAD_LATENCY` 是 `ct.Constant` 内核参数（见 u5-l1、u5-l2）。
+>
+> **本轮（HEAD `7410bd8`）更新**：`_static_persistent_matmul_autotune_configs()` 的 sm100+（Blackwell）分支新增了一条「小瓦片候选」`128×128×64`，专门救小/矩形 GEMM 上大瓦片把持久化 grid 压死、闲置 SM 的问题（即 u5-l2 讲过的 stranded SM）。本讲在 4.2 节专门讨论这种「形状适配的候选设计」。
 
 ## 1. 本讲目标
 
@@ -11,6 +13,7 @@
 3. 解释**模块级 tune cache** 的键设计，以及为什么必须把 `(best_cfg, tuned_kernel)` 一起缓存、绝不能在热路径上反复 `replace_hints`。
 4. 掌握全局开关 `TILEGYM_DISABLE_AUTOTUNE` 的契约（`is_autotune_enabled()` / `is_autotune_disabled()`），并准确说出**哪些代码真正读了它、哪些没有**。
 5. 说清楚 `LOAD_LATENCY` 这个字段为什么**每条候选配置都必须带**，哪怕大多数架构都填 `-1`。
+6. 解释为什么 sm100+ 持久化候选表要**同时**包含大瓦片（256×256 等）和一个小瓦片（128×128）—— 即「形状适配的候选设计」如何避免小/矩形 GEMM 上 SM 被闲置（stranded SM）。
 
 ## 2. 前置知识
 
@@ -30,21 +33,23 @@
 
 **(C) tune-once / cache / launch 是什么。** 第一次遇到某个 `(形状, dtype, 设备)` 时，花几秒到几十秒把候选集全跑一遍、选出最优；之后把「最优配置 + 烤好 hint 的内核对象」存进一个进程内的字典，后续每次调用都是一次普通 `ct.launch`，**零额外开销**。这个「只调一次、永久缓存、之后直接启动」的模式，是 cuTile 自动调优区别于 Triton `@triton.autotune` 装饰器的核心工程特征（见 4.4 对照）。
 
+**(D) 候选集不是「越大越好」。** 这一点在本轮更新里尤其重要。候选多 → 首次调优慢（每条 0.5–1s 编译）；候选少 → 可能漏掉某个形状的最优解。所以候选表是「按架构 + 按形状族」手工挑出来的**最小覆盖集**：大瓦片覆盖大而方的 GEMM，小瓦片覆盖小/矩形 GEMM（见 4.2 的形状适配设计）。
+
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 |---|---|
-| [src/tilegym/autotune.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/autotune.py) | 全库唯一的自动调优策略开关：环境变量 `TILEGYM_DISABLE_AUTOTUNE` + 两个查询函数 `is_autotune_disabled()` / `is_autotune_enabled()`。业务代码只调函数、不读环境变量。 |
-| [src/tilegym/ops/cutile/matmul.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py) | cuTile 版 matmul 全部实现。本讲主样本：两个候选生成函数、两个 `_cutile_autotune_*` 调优函数、模块级 tune cache，以及最外层 `matmul()` 入口。 |
-| [src/tilegym/ops/cutile/utils.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/utils.py) | `cached_replace_hints`：一个全局 LRU，避免 `replace_hints` 在热路径上反复触发重编译。本讲用它解释「缓存整个内核对象」的替代写法。 |
-| [tests/benchmark/bench_matrix_multiplication.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/tests/benchmark/bench_matrix_multiplication.py) | matmul 非持久化路径的基准脚本（本讲实践的入口之一）。 |
-| [tests/benchmark/bench_persistent_matmul.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/tests/benchmark/bench_persistent_matmul.py) | matmul 持久化路径的基准脚本（带 `LOAD_LATENCY` 的那条路径）。 |
+| [src/tilegym/autotune.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/autotune.py) | 全库唯一的自动调优策略开关：环境变量 `TILEGYM_DISABLE_AUTOTUNE` + 两个查询函数 `is_autotune_disabled()` / `is_autotune_enabled()`。业务代码只调函数、不读环境变量。 |
+| [src/tilegym/ops/cutile/matmul.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py) | cuTile 版 matmul 全部实现。本讲主样本：两个候选生成函数、两个 `_cutile_autotune_*` 调优函数、模块级 tune cache，以及最外层 `matmul()` 入口。**本轮新增的 sm100+ 小瓦片候选就在这里。** |
+| [src/tilegym/ops/cutile/utils.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/utils.py) | `cached_replace_hints`：一个全局 LRU，避免 `replace_hints` 在热路径上反复触发重编译。本讲用它解释「缓存整个内核对象」的替代写法。 |
+| [tests/benchmark/bench_matrix_multiplication.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/tests/benchmark/bench_matrix_multiplication.py) | matmul 非持久化路径的基准脚本（本讲实践的入口之一）。 |
+| [tests/benchmark/bench_persistent_matmul.py](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/tests/benchmark/bench_persistent_matmul.py) | matmul 持久化路径的基准脚本（带 `LOAD_LATENCY` 的那条路径）。 |
 
 > 还有一类「同族用法」文件不在 `source_files` 里，但本讲会引用它们来证明开关的契约：`src/tilegym/suites/flashinfer/cutile/gemm/ragged_bmm.py`、`masked_bmm.py`、`rope_quantize_fp8.py` 等 suite 内核真正调用了 `is_autotune_enabled()`。
 
 ## 4. 核心概念与源码讲解
 
-本讲按四个最小模块展开：① autotune 全局开关；② 按架构产出候选配置（含 `LOAD_LATENCY`）；③ `exhaustive_search` 调优流程；④ 模块级 tune cache 与 tune-once/cache/launch。
+本讲按四个最小模块展开：① autotune 全局开关；② 按架构产出候选配置（含 `LOAD_LATENCY` 与本轮新增的形状适配小瓦片）；③ `exhaustive_search` 调优流程；④ 模块级 tune cache 与 tune-once/cache/launch。
 
 ### 4.1 autotune 全局开关：autotune.py
 
@@ -87,15 +92,15 @@ return False     strip().lower() 后查表：
 
 常量与合法值集合（注意 `_DISABLE_AUTOTUNE_TRUE_VALUES` / `_FALSE_VALUES` 是 `frozenset`，查表 O(1) 且不可变）：
 
-[src/tilegym/autotune.py:L5-L7](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/autotune.py#L5-L7) —— 定义环境变量名 `TILEGYM_DISABLE_AUTOTUNE` 与两组合法取值。
+[src/tilegym/autotune.py:L5-L7](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/autotune.py#L5-L7) —— 定义环境变量名 `TILEGYM_DISABLE_AUTOTUNE` 与两组合法取值。
 
 判定函数本体，注意「未设即启用」「strip+lower 归一化」「非法即报错」三段：
 
-[src/tilegym/autotune.py:L10-L33](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/autotune.py#L10-L33) —— `is_autotune_disabled()`：进程级自动调优策略的唯一裁判。
+[src/tilegym/autotune.py:L10-L33](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/autotune.py#L10-L33) —— `is_autotune_disabled()`：进程级自动调优策略的唯一裁判。
 
 对外更顺手的别名（业务侧多数调这个正向名字）：
 
-[src/tilegym/autotune.py:L36-L38](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/autotune.py#L36-L38) —— `is_autotune_enabled()` 就是 `not is_autotune_disabled()`。
+[src/tilegym/autotune.py:L36-L38](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/autotune.py#L36-L38) —— `is_autotune_enabled()` 就是 `not is_autotune_disabled()`。
 
 > ⚠️ **本讲最重要的准确性提醒**：本讲的主样本 `src/tilegym/ops/cutile/matmul.py` **并没有** import 这两个函数，它的两个 `_cutile_autotune_*` 函数**永远走自动调优**（靠 tune cache 把开销摊到只付一次）。真正在代码里 `if is_autotune_enabled(): ... else: 走固定配置` 的是 **suites** 里的内核，例如 `src/tilegym/suites/flashinfer/cutile/gemm/ragged_bmm.py`、`masked_bmm.py`、`rope_quantize_fp8.py`。所以「开关」是**全库契约**，但「是否在某个内核里接进开关」是逐内核的设计选择——这取决于该内核候选集有多大、固定配置够不够好。本讲的实践环节会专门验证这一点，避免你误以为 `TILEGYM_DISABLE_AUTOTUNE=1` 会让 matmul 变慢或跳过调优。
 
@@ -148,6 +153,8 @@ return False     strip().lower() 后查表：
 
 所以两个生成函数都用 `torch.cuda.get_device_capability()` 拿到 `(主版本, 次版本)`，走三分支 `if/elif/else` 产出该架构专属的候选。
 
+本轮更新还体现了第三层裁剪：**在同一架构内，再按 GEMM 形状族补候选**。sm100+ 持久化表原本只有大瓦片（适合大而方的 GEMM），本轮补了一条 128×128 小瓦片，让小/矩形 GEMM 也有候选可选（详见 4.2.3 的形状适配设计）。
+
 #### 4.2.2 核心流程
 
 `_matmul_autotune_configs()`（非持久化路径）的三分支：
@@ -174,37 +181,61 @@ sm120/sm121        sm80(A100)       sm100+(Blackwell)
 
 \[ \text{grid} = \min\!\left(\left\lfloor \frac{\text{NUM\_SM}}{n_{\text{ctas}}} \right\rfloor,\ \left\lceil \frac{M}{T_M} \right\rceil \left\lceil \frac{N}{T_N} \right\rceil \right) \cdot \text{occupancy} \]
 
+注意这个 `min`：grid 被「SM 簇槽数」和「输出瓦片数」**同时**封顶。大瓦片让输出瓦片数很小，于是 `min` 被瓦片数这一侧压死——这正是本轮 sm100+ 分支**从 4 条扩到 5 条**（新增一条 128×128 小瓦片）的原因（见 4.2.3）。
+
 #### 4.2.3 源码精读
 
 非持久化候选，注意 `SimpleNamespace` 当配置对象、`num_ctas` 在 pre-SM90 恒为 1（A100 无 CGA）：
 
-[src/tilegym/ops/cutile/matmul.py:L47-L72](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L47-L72) —— `_matmul_autotune_configs()`：按 sm120 / pre-SM90 / sm100+ 三档产出候选，是典型的「按架构裁剪搜索空间」。
+[src/tilegym/ops/cutile/matmul.py:L47-L72](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L47-L72) —— `_matmul_autotune_configs()`：按 sm120 / pre-SM90 / sm100+ 三档产出候选，是典型的「按架构裁剪搜索空间」。**注意：非持久化路径本轮未改，sm100+ 仍是 4 条大瓦片候选。**
 
 持久化候选，开头注释解释了 `LOAD_LATENCY` 的取值含义与「为何每条都得带」：
 
-[src/tilegym/ops/cutile/matmul.py:L74-L83](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L74-L83) —— 注释点明：`LOAD_LATENCY` 是 `ct.load` 的代价提示（1..10，`-1`=编译器推断）；目前只有 sm90 会真正调它，其余架构都填 `-1`，**但每条配置都必须带这个字段**，因为内核无条件读取 `cfg.LOAD_LATENCY`。
+[src/tilegym/ops/cutile/matmul.py:L74-L83](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L74-L83) —— 注释点明：`LOAD_LATENCY` 是 `ct.load` 的代价提示（1..10，`-1`=编译器推断）；目前只有 sm90 会真正调它，其余架构都填 `-1`，**但每条配置都必须带这个字段**，因为内核无条件读取 `cfg.LOAD_LATENCY`。
 
-[src/tilegym/ops/cutile/matmul.py:L83-L137](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L83-L137) —— sm120 / sm80 / sm100+ 三档持久化候选，每条都带 `GROUP_SIZE_M=8` 与 `LOAD_LATENCY=-1`。
+[src/tilegym/ops/cutile/matmul.py:L83-L141](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L83-L141) —— sm120 / sm80 / sm100+ 三档持久化候选，每条都带 `GROUP_SIZE_M=8` 与 `LOAD_LATENCY=-1`。**本轮在 sm100+ 分支（`else`）末尾新增了第 5 条 128×128 小瓦片候选**（见下方专论）。
+
+##### 形状适配的候选设计（本轮新增）
+
+本轮 sm100+ 持久化分支新增的小瓦片候选，注释直接说清了动机：
+
+[src/tilegym/ops/cutile/matmul.py:L137-L141](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L137-L141) —— `# Small-tile candidate for small/rectangular GEMMs, where the entries above cap the persistent grid at 16-32 tile-jobs and strand most SMs.`，配置为 `TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1`。
+
+为什么需要它？把 4.2.2 的持久化 grid 公式套到一个**小/矩形 GEMM** 上就一目了然。设 Blackwell 的 `NUM_SMS` 为 \(S\)（量级百余），考查一个扁的 GEMM \(M=256, N=4096\)：
+
+- 用大瓦片 \(T_M=T_N=256\)：输出瓦片数 \(n_{\text{tiles}}=\lceil 256/256\rceil\cdot\lceil 4096/256\rceil=1\cdot 16=16\)。取 `num_ctas=2, occupancy=1`，则
+  \[ \text{grid}=\min\!\left(\left\lfloor S/2\right\rfloor,\ 16\right)\cdot 1 = 16 \quad(\text{因为 }16\ll S/2) \]
+  即整个持久化 grid 只有 16 个 tile-job，再乘 `num_ctas=2` 也只占 32 个 SM，**余下约 \(S-32\) 个 SM 全程闲置**——这就是注释里说的 *strand most SMs*。
+- 改用本轮新增的小瓦片 \(T_M=T_N=128\)：\(n_{\text{tiles}}=\lceil 256/128\rceil\cdot\lceil 4096/128\rceil=2\cdot 32=64\)（正好是上一行的 **4 倍**，因为 128×128 的面积是 256×256 的 1/4）。取 `num_ctas=1, occupancy=1`，则
+  \[ \text{grid}=\min\!\left(S,\ 64\right)\cdot 1 = 64 \]
+  持久化 grid 从 16 抬到 64，闲置 SM 大幅减少。
+
+关键结论有三：
+
+1. **`num_ctas=1, occupancy=1` 是刻意的**。小瓦片的目的就是「用更多更小的 tile-job 填满 SM」，所以不再聚簇（`num_ctas=1` 把 \(S\) 个 SM 全留作单 CTA 槽位）、也不再叠加 occupancy——否则又把 grid 压回去了。
+2. **这是「按形状族补候选」，不是「按架构」**。大瓦片仍留给大而方的 GEMM（那里 `n_tiles` 本来就大，不会被 `min` 压死、且大瓦片单 CTA 算得更快）；小瓦片只在小/矩形 GEMM 上才会被 `exhaustive_search` 选中。一条候选救一个形状族。
+3. **为什么非持久化路径不需要补**。非持久化的 grid 公式是 \(n_{\text{tiles}}\) 本身（没有 `min(NUM_SM//num_ctas, …)` 这层 SM 封顶），小/矩形 GEMM 上它只是「少占几个 SM」，并不会像持久化路径那样把 grid **卡死**在 16–32；且非持久化本就是更简单的基准路径，形状适配的重点放在了高性能的持久化路径上。
 
 最外层 `matmul()` 入口，按 `static_persistent` 把请求分流到两条调优函数之一：
 
-[src/tilegym/ops/cutile/matmul.py:L416-L450](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L416-L450) —— `@register_impl("matmul", backend="cutile")` 的 `matmul()`：算出 M/N/K、分配输出 `c`、按 `static_persistent` 选 `_cutile_autotune_static_persistent_matmul` 或 `_cutile_autotune_matmul`。注意非持久化分支还会 `assert trans_a/trans_b == False`。
+[src/tilegym/ops/cutile/matmul.py:L421-L454](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L421-L454) —— `@register_impl("matmul", backend="cutile")` 的 `matmul()`：算出 M/N/K、分配输出 `c`、按 `static_persistent` 选 `_cutile_autotune_static_persistent_matmul` 或 `_cutile_autotune_matmul`。注意非持久化分支还会 `assert trans_a/trans_b == False`。
 
-> **关于 `LOAD_LATENCY` 的完整答案**（本讲实践题之一）：① 它是内核签名里的 `ct.Constant[int]` 参数（见 [matmul.py:L227](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L227)），`args_fn` 对**每条**候选都无条件传入 `cfg.LOAD_LATENCY`（见 4.3）；哪条候选缺这个字段，`exhaustive_search` 调它时就会 `AttributeError`。② 值 `<=0` 时内核走「编译器推断」分支，**省略** `ct.load` 的 `latency=` 关键字（因为 `ct.load` 不接受 `-1`）；`>=1` 时才真正把代价提示喂给两个操作数的 load（见 [matmul.py:L249-L307](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L249-L307) 的 `if LOAD_LATENCY >= 1: ... else: ...` 显式分支——cuTile tracer 不支持 `**kwargs` 解包，所以必须写成编译期 `if/else`）。③ 它是 `Constant`，每个不同值都会特化出不同内核，所以「带字段」与「真正调优它」是两件事：目前多数架构带的是 `-1`（=不调），只是为了让签名闭合。
+> **关于 `LOAD_LATENCY` 的完整答案**（本讲实践题之一）：① 它是内核签名里的 `ct.Constant[int]` 参数（见 [matmul.py:L232](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L232)），`args_fn` 对**每条**候选都无条件传入 `cfg.LOAD_LATENCY`（见 4.3）；哪条候选缺这个字段，`exhaustive_search` 调它时就会 `AttributeError`。② 值 `<=0` 时内核走「编译器推断」分支，**省略** `ct.load` 的 `latency=` 关键字（因为 `ct.load` 不接受 `-1`）；`>=1` 时才真正把代价提示喂给两个操作数的 load（见 [matmul.py:L254-L312](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L254-L312) 的 `if LOAD_LATENCY >= 1: ... else: ...` 显式分支——cuTile tracer 不支持 `**kwargs` 解包，所以必须写成编译期 `if/else`）。③ 它是 `Constant`，每个不同值都会特化出不同内核，所以「带字段」与「真正调优它」是两件事：目前多数架构带的是 `-1`（=不调），只是为了让签名闭合。
 
 #### 4.2.4 代码实践
 
-**目标**：在不跑内核的前提下，观察「同一段代码在不同架构产出不同候选集」。
+**目标**：在不跑内核的前提下，观察「同一段代码在不同架构产出不同候选集」，并定位本轮新增的小瓦片候选。
 
 **操作步骤**：
 
-1. 阅读上面引用的 [matmul.py:L47-L72](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L47-L72) 与 [matmul.py:L83-L137](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L83-L137)。
+1. 阅读上面引用的 [matmul.py:L47-L72](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L47-L72) 与 [matmul.py:L83-L141](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L83-L141)。
 2. 做一张表：列出 sm80 / sm100+ / sm120 三档下，非持久化与持久化各自的候选数、最大 `num_ctas`、`LOAD_LATENCY` 取值。
-3. （可选，需 GPU）在 Python 里 `print(torch.cuda.get_device_capability())`，确认本机走哪一档。
+3. **专门核对 sm100+ 持久化分支**：确认它有 5 条候选——4 条大瓦片（128×512、256×256×2 条、256×256/256×K128）+ 本轮新增的 1 条 128×128 小瓦片；并确认小瓦片的 `num_ctas=1, occupancy=1`。
+4. （可选，需 GPU）在 Python 里 `print(torch.cuda.get_device_capability())`，确认本机走哪一档。
 
-**需要观察的现象**：pre-SM90 段 `num_ctas` 恒为 1（无 CGA）；sm100+ 才出现 `num_ctas=2/4`；sm120 的瓦片明显比 sm80 小（64×64 居多）。
+**需要观察的现象**：pre-SM90 段 `num_ctas` 恒为 1（无 CGA）；sm100+ 才出现 `num_ctas=2/4`（但小瓦片候选特意用 `num_ctas=1`）；sm120 的瓦片明显比 sm80 小（64×64 居多）。
 
-**预期结果**：表格能反映「架构越新、瓦片越大、可用 num_ctas 越多」的总体趋势。无 GPU 时填「待本地验证」。
+**预期结果**：表格能反映「架构越新、大瓦片越大、可用 num_ctas 越多」的总体趋势，同时 sm100+ 持久化表里能看到「大瓦片 + 1 条小瓦片」的形状适配组合。无 GPU 时填「待本地验证」。
 
 #### 4.2.5 小练习与答案
 
@@ -212,9 +243,13 @@ sm120/sm121        sm80(A100)       sm100+(Blackwell)
 
 **答**：CGA（线程块簇）是 sm90+ 才有的硬件特性，pre-SM90 上 `num_ctas>1` 无意义甚至不可用；写死 1 既正确又省编译时间。这正体现了「按架构裁剪」的价值：不在不可能赢的维度上浪费搜索。
 
-**Q2**：`_matmul_autotune_configs()` 里 sm100+ 只给了 4 条候选，而 pre-SM90 给了 24 条。为什么 Blackwell 反而更少？
+**Q2**：`_matmul_autotune_configs()`（非持久化）里 sm100+ 只给了 4 条候选，而 pre-SM90 给了 24 条。为什么 Blackwell 反而更少？
 
 **答**：Blackwell 的张量核心与内存子系统相对更「可预测」，少量大瓦片配置就能覆盖大部分形状；而 A100 上瓦片/occupancy 的最优组合对形状更敏感，需要更细的网格搜索。候选数是「够用就好」的工程权衡，不是越多越好。
+
+**Q3**（本轮新增）：sm100+ 持久化表本轮为什么要在 4 条大瓦片之外，再补一条 `128×128, num_ctas=1, occupancy=1` 的小瓦片？为什么不直接调大 `occupancy` 来填满 SM？
+
+**答**：小/矩形 GEMM 上大瓦片让输出瓦片数 \(n_{\text{tiles}}\) 很小（如 16），持久化 grid 被 \(\min(\lfloor S/n_{\text{ctas}}\rfloor,\ n_{\text{tiles}})\) 压死在 16–32，大部分 SM 闲置（stranded SM）。补一条 128×128 小瓦片可把 \(n_{\text{tiles}}\) 放大 4 倍，从而抬起 grid。不靠调大 `occupancy` 的原因是：`occupancy` 乘在整个 `min(...)` 之外，当 `min` 被 \(n_{\text{tiles}}\) 这一侧压死时，再大的 `occupancy` 也救不回来（瓶颈在瓦片数，不在每 SM 的 CTA 并发数）；而且小瓦片就是要用「更多更小的 tile-job」铺满 SM，所以反而要 `num_ctas=1`（不聚簇）、`occupancy=1`。
 
 ---
 
@@ -229,7 +264,7 @@ sm120/sm121        sm80(A100)       sm100+(Blackwell)
 - **grid 随候选变**：瓦片越大，输出瓦片数越少，grid 越小；持久化路径还要乘 occupancy、除 num_ctas。
 - **args 随候选变**：`TILE_SIZE_*`、`LOAD_LATENCY` 要按候选填进内核的 ConstInt 形参；而 hint（`num_ctas`/`occupancy`）走另一条路（`hints_fn`），最终由 `replace_hints` 烤进内核，**不进 args**。
 
-此外，整个搜索被 `ct.compiler_timeout(5)` 包住，给每个候选的编译设了 5 秒上限，防止单条配置卡死整个调优（这是 skills 文档里反复强调的「编译超时」坑）。
+此外，整个搜索被 `ct.compiler_timeout(5)` 包住，给每个候选的编译设了 5 秒上限，防止单条配置卡死整个调优（这是 skills 文档里反复强调的「编译超时」坑）。注意：本轮新增的小瓦片候选也会被 `exhaustive_search` 一视同仁地编译实测——只有当某次调优的形状让它真正最快时，它才会胜出并被写进 cache。
 
 #### 4.3.2 核心流程
 
@@ -257,21 +292,21 @@ best_cfg = result.best.config
 缓存 (best_cfg, _matmul_kernel.replace_hints(num_ctas=..., occupancy=...))
 ```
 
-持久化路径结构相同，只是 `cache_key` 多了 `trans_a/trans_b`、`grid_fn` 换成持久化公式、`args_fn` 多塞 `M,N,K,trans_a,trans_b,GROUP_SIZE_M,LOAD_LATENCY`。
+持久化路径结构相同，只是 `cache_key` 多了 `trans_a/trans_b`、`grid_fn` 换成持久化公式、`args_fn` 多塞 `M,N,K,trans_a,trans_b,GROUP_SIZE_M,LOAD_LATENCY`。候选集换成 `_static_persistent_matmul_autotune_configs()`（即 4.2 里含本轮小瓦片的那 5 条 sm100+ 候选）。
 
 #### 4.3.3 源码精读
 
 模块顶部导入调优引擎，并声明两个**模块级 tune cache**：
 
-[matmul.py:L10-L17](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L10-L17) —— `from cuda.tile.tune import exhaustive_search` 与两条 cache 字典，注释写明键的语义。
+[matmul.py:L10-L17](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L10-L17) —— `from cuda.tile.tune import exhaustive_search` 与两条 cache 字典，注释写明键的语义。
 
 非持久化调优函数，注意三个 lambda 的分工与 `compiler_timeout(5)`：
 
-[matmul.py:L322-L348](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L322-L348) —— `_cutile_autotune_matmul`：先查缓存；未命中则 `exhaustive_search` 三回调齐发，把 `(best_cfg, replace_hints 后的内核)` 存进 cache；最后用缓存里的 `tuned_kernel` 直接 `ct.launch`。
+[matmul.py:L327-L353](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L327-L353) —— `_cutile_autotune_matmul`：先查缓存；未命中则 `exhaustive_search` 三回调齐发，把 `(best_cfg, replace_hints 后的内核)` 存进 cache；最后用缓存里的 `tuned_kernel` 直接 `ct.launch`。
 
 持久化调优函数，对比看 `grid_fn` / `args_fn` 的差异：
 
-[matmul.py:L351-L413](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L351-L413) —— `_cutile_autotune_static_persistent_matmul`：grid 用持久化公式（`min(NUM_SMS//num_ctas, 输出瓦片数) * occupancy`），`args_fn` 把 `LOAD_LATENCY` 等 ConstInt 一并传入；`hints_fn` 与非持久化完全一样（都只回 `num_ctas`/`occupancy`）。
+[matmul.py:L356-L418](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L356-L418) —— `_cutile_autotune_static_persistent_matmul`：grid 用持久化公式（`min(NUM_SMS//num_ctas, 输出瓦片数) * occupancy`），候选集是含本轮小瓦片的 `_static_persistent_matmul_autotune_configs()`；`args_fn` 把 `LOAD_LATENCY` 等 ConstInt 一并传入；`hints_fn` 与非持久化完全一样（都只回 `num_ctas`/`occupancy`）。
 
 三个 lambda 的对照表（本讲核心结论之一）：
 
@@ -281,19 +316,21 @@ best_cfg = result.best.config
 | `args_fn` | `(a,b,c,TM,TN,TK)` | `(a,b,c,M,N,K,TM,TN,TK,ta,tb,GSM,LOAD_LATENCY)` | 填内核 ConstInt 形参 |
 | `hints_fn` | `{num_ctas, occupancy}` | `{num_ctas, occupancy}` | 编译器 hint，**不进 args** |
 
+注意：`grid_fn` 在持久化路径里读的是 `cfg.num_ctas` 与 `cfg.occupancy`，所以本轮新增小瓦片候选的 `num_ctas=1` 会直接体现在它被实测时的 grid 上（`min(NUM_SMS//1, n_tiles)·1`），这正是它能把 grid 抬起来的机制。
+
 #### 4.3.4 代码实践
 
-**目标**：读懂「同一内核、不同 grid/args」是怎么由候选驱动的。
+**目标**：读懂「同一内核、不同 grid/args」是怎么由候选驱动的，并理解大/小瓦片如何同台竞技。
 
 **操作步骤**：
 
-1. 打开 [matmul.py:L322-L348](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L322-L348)。
-2. 对 `_matmul_autotune_configs()` 在 sm100+ 产出的 4 条候选，**手算**每条的 grid（设 `M=N=4096`）。例如 `TILE_SIZE_M=N=128` 那条：grid = `(⌈4096/128⌉², 1, 1) = (1024, 1, 1)`；`256×256` 那条：grid = `(256, 1, 1)`。
-3. 思考：grid 差这么多，`exhaustive_search` 是怎么「公平」比较它们的？
+1. 打开 [matmul.py:L327-L353](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L327-L353) 与 [matmul.py:L356-L418](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L356-L418)。
+2. 对持久化路径 sm100+ 的 5 条候选，**手算**每条在 \(M=N=4096\)（大而方）与 \(M=256,N=4096\)（扁矩形）两种形状下的 `n_tiles` 与 grid（设 `NUM_SMS=148`）。例如大矩形 GEMM 下 `256×256/num_ctas=2`：`n_tiles=(16·16=256)`，`grid=min(74,256)·1=74`；而小瓦片 `128×128/num_ctas=1`：`n_tiles=(32·32=1024)`，`grid=min(148,1024)·1=148`。
+3. 思考：grid 差这么多，`exhaustive_search` 是怎么「公平」比较它们的？再思考：在扁矩形形状下，哪条候选最可能胜出？
 
-**需要观察的现象**：瓦片越大，grid 越小、单 CTA 干的活越多；`exhaustive_search` 比的是**整轮启动的实际耗时**（含编译后的实测），而非「grid 大小」，所以大小瓦片能同台竞技。
+**需要观察的现象**：瓦片越大，单 CTA 干的活越多但 grid 越小；在扁矩形 GEMM 上，大瓦片的 grid 被 `n_tiles` 压死，小瓦片反而能铺满 SM——`exhaustive_search` 比的是**整轮启动的实际耗时**（含编译后的实测），而非「grid 大小」，所以大小瓦片能同台竞技，且在不同形状下胜出者不同。
 
-**预期结果**：手算的 grid 与上表公式一致；关于「公平性」的解释——`exhaustive_search` 对每条候选都真实启动并计时，挑 wall-clock 最短者，因此 grid 大小本身不是评判标准。无法在本机实测时标「待本地验证」。
+**预期结果**：手算的 grid 与上表公式一致；扁矩形形状下小瓦片候选更可能胜出（这正是它被加进表的合理性）。无法在本机实测时标「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
@@ -303,7 +340,7 @@ best_cfg = result.best.config
 
 **Q2**：把 `ct.compiler_timeout(5)` 去掉会有什么风险？
 
-**答**：某条候选若触发了 cuTile 编译器的病态路径（大瓦片 + 高 occupancy 容易触发），可能卡几十秒甚至更久，导致整个首次调优体验极差。5 秒上限是「单候选编译」的护栏，不是「整轮搜索」的总时限。
+**答**：某条候选若触发了 cuTile 编译器的病态路径（大瓦片 + 高 occupancy 容易触发），可能卡几十秒甚至更久，导致整个首次调优体验极差。5 秒上限是「单候选编译」的护栏，不是「整轮搜索」的总时限。本轮新增的小瓦片候选编译代价与大瓦片相当，不会显著拉长整轮搜索。
 
 ---
 
@@ -319,6 +356,8 @@ best_cfg = result.best.config
 
 这里有一个**必须牢记的坑**：缓存里存的不只是 `best_cfg`，还要存 `tuned_kernel = kernel.replace_hints(num_ctas=..., occupancy=...)`。原因是 `replace_hints` 会生成一个**带独立 JIT 缓存的新内核对象**——如果每次调用都现 `replace_hints`，等于每次都触发重编译（慢 100–500 倍）。把它和配置一起缓存，就把「重编译」摊到只付一次。
 
+这也意味着：本轮新增的小瓦片候选只有在**首次**调优某个扁矩形 `(M,N,K)` 时才会被编译实测一次；一旦它胜出并被写进 cache，之后该形状的每次调用都是直接 launch 缓存好的小瓦片内核，零额外开销。
+
 > 对照 Triton：Triton 用 `@triton.autotune` 装饰器 + `Config(...)` 对象，cache 由运行时自动管理；cuTile 没有 `num_warps`/`num_stages`（由编译器决定），只有瓦片尺寸 + `occupancy` + `num_ctas`，cache 是**用户自管理**的进程内字典（无持久化），并把 `args_fn`（内核参数）与 `hints_fn`（编译器 hint）显式分开。
 
 #### 4.4.2 核心流程
@@ -330,7 +369,7 @@ best_cfg = result.best.config
 | `_matmul_tune_cache` | `(M, N, K, dtype, str(device))` | `(best_cfg, tuned_kernel)` |
 | `_static_persistent_matmul_tune_cache` | `(M, N, K, trans_a, trans_b, dtype, str(device))` | `(best_cfg, tuned_kernel)` |
 
-注意持久化路径的键多了 `trans_a/trans_b`——因为持久化内核支持转置（见 u5-l2），转置与否会改变最优配置，必须区分。
+注意持久化路径的键多了 `trans_a/trans_b`——因为持久化内核支持转置（见 u5-l2），转置与否会改变最优配置，必须区分。键里**没有**候选表版本号，所以「本轮扩了候选表」只影响**首次**调优的结果（更优的候选可能胜出并覆盖进 cache），不会让旧进程的 cache 失效——重启进程后新候选表才生效。
 
 命中与否的分支：
 
@@ -347,21 +386,21 @@ ct.launch(stream, grid, tuned_kernel, args)  # 普通启动
 
 「未命中→搜→存」与「命中→直接 launch」的完整闭环，非持久化：
 
-[matmul.py:L326-L348](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L326-L348) —— 注意 `replace_hints` 只在「未命中」分支里调一次，之后永远用缓存的 `tuned_kernel`；`ct.launch` 用的是 `best_cfg.TILE_SIZE_*` 作为 ConstInt args（瓦片特化发生在 launch 时，不在 replace_hints 里）。
+[matmul.py:L331-L353](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L331-L353) —— 注意 `replace_hints` 只在「未命中」分支里调一次，之后永远用缓存的 `tuned_kernel`；`ct.launch` 用的是 `best_cfg.TILE_SIZE_*` 作为 ConstInt args（瓦片特化发生在 launch 时，不在 replace_hints 里）。
 
 持久化的对应闭环：
 
-[matmul.py:L354-L413](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/matmul.py#L354-L413) —— 同样的模式；注意 launch 的 args 里把 `best_cfg.LOAD_LATENCY` 也一并传入，使瓦片尺寸与 LOAD_LATENCY 的特化都在这次 launch 里完成。
+[matmul.py:L359-L418](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/matmul.py#L359-L418) —— 同样的模式；注意 launch 的 args 里把 `best_cfg.LOAD_LATENCY` 也一并传入，使瓦片尺寸与 LOAD_LATENCY 的特化都在这次 launch 里完成。**若本轮小瓦片候选在某形状上胜出，这里缓存的 `best_cfg.TILE_SIZE_M/N` 就是 128/128**，之后该形状直接走小瓦片内核。
 
 另一种写法：suite 内核常用 `cached_replace_hints`（一个按 `(id(kernel), hints)` 去重的全局 LRU），用于「不按形状缓存、只按内核+hint 缓存」的场景：
 
-[src/tilegym/ops/cutile/utils.py:L11-L33](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/utils.py#L11-L33) —— `cached_replace_hints`：用 `OrderedDict` 做容量 256 的 LRU，并额外持有 `owner=kernel` 防止源内核被回收后 `id()` 被复用（否则缓存键会撞车）。本讲的 matmul 没用它（自己按形状缓存了整对象），但 suite 的 `ragged_bmm`/`masked_bmm`/`gemm_alpha_beta` 都用它。
+[src/tilegym/ops/cutile/utils.py:L11-L33](https://github.com/NVIDIA/TileGym/blob/7410bd8dcc7e83bc1de9d41807056fa463998a39/src/tilegym/ops/cutile/utils.py#L11-L33) —— `cached_replace_hints`：用 `OrderedDict` 做容量 256 的 LRU，并额外持有 `owner=kernel` 防止源内核被回收后 `id()` 被复用（否则缓存键会撞车）。本讲的 matmul 没用它（自己按形状缓存了整对象），但 suite 的 `ragged_bmm`/`masked_bmm`/`gemm_alpha_beta` 都用它。
 
 > **一句话总结 cache 设计**：缓存的对象粒度有两种——①「按形状缓存整个 tuned_kernel」（matmul 的做法，最优，因为连瓦片特化都一起缓存了）；②「按 `(kernel, hint)` 缓存 hinted 内核」（`cached_replace_hints`，适合不调瓦片、只调 occupancy 的内核）。两者都是为了把 `replace_hints`/重编译挡在热路径之外。
 
 #### 4.4.4 代码实践
 
-**目标**：用基准脚本观察「冷缓存（首次调优）」与「热缓存（直接启动）」的耗时差。
+**目标**：用基准脚本观察「冷缓存（首次调优）」与「热缓存（直接启动）」的耗时差，并验证形状切换会触发独立的首次调优。
 
 **操作步骤**：
 
@@ -373,8 +412,9 @@ ct.launch(stream, grid, tuned_kernel, args)  # 普通启动
    python tests/benchmark/bench_persistent_matmul.py
    ```
 2. 关注**第一个形状**的首次计时（冷：含编译+搜索）与其后相同形状的计时（热：仅 launch）。
+3. （可选）刻意塞一个扁矩形形状（如 `M=256, N=4096`）进基准，观察持久化路径首次调优是否选中了本轮新增的 128×128 小瓦片——可在 `_cutile_autotune_static_persistent_matmul` 的 cache 写入处临时 `print(best_cfg)` 确认（**仅本地调试，勿提交**）。
 
-**需要观察的现象**：第一个 `(M,N,K)` 会停顿几秒到几十秒（编译 N 条候选 + 实测），之后相同形状几乎瞬时；不同形状各自有独立的「首次停顿」。
+**需要观察的现象**：第一个 `(M,N,K)` 会停顿几秒到几十秒（编译 N 条候选 + 实测），之后相同形状几乎瞬时；不同形状各自有独立的「首次停顿」；扁矩形形状的持久化首次调优后，cache 里 `best_cfg` 的 `TILE_SIZE_M/N` 可能是 128/128。
 
 **预期结果**：冷/热耗时差距可达数十倍，正说明 tune-once/cache 的价值。**注意**：此实践**不受** `TILEGYM_DISABLE_AUTOTUNE=1` 影响——本讲的 matmul 路径不读这个开关（见 4.1.3 的提醒）。无 GPU 时标「待本地验证」。
 
@@ -408,23 +448,26 @@ ct.launch(stream, grid, tuned_kernel, args)  # 普通启动
 3. **cache_key 怎么设计？** 至少 `(N_ROWS, H, dtype, str(device))`；要不要进 `trans`？逐元素无转置，不需要。
 4. **要不要接 `TILEGYM_DISABLE_AUTOTUNE` 开关？** 参照 suite 内核：写 `if is_autotune_enabled(): 走调优 else: 走固定 occupancy` 的分支，并准备一个「固定 occupancy」的回退配置。
 5. **LOAD_LATENCY 呢？** 逐元素内核若不在签名里声明 `LOAD_LATENCY: ct.Constant[int]`，就不需要带这个字段——它只是 matmul 持久化内核的专属需求（4.2.3）。
+6. **要不要像本轮 matmul 那样「按形状族补候选」？** 思考：silu_and_mul 的 grid 是 `min(NUM_SM*occupancy, N_ROWS)`，当 `N_ROWS` 很小（短序列）时会被 `N_ROWS` 压死——这时你会不会想为「短序列」补一个低 occupancy 的候选？把这条理由写下来。
 
-**交付物**：一段约 30 行的 `_cutile_autotune_silu_and_mul(stream, a, b, out)` 伪代码（标注「示例代码」），覆盖 tune-once/cache/launch 三段，并在注释里写明「为何 occupancy-only」「为何 cache_key 这样选」。完成后与 `tests/benchmark/bench_silu_and_mul.py` 的真实写法对照（若该算子已接入调优），修正你的假设。
+**交付物**：一段约 30 行的 `_cutile_autotune_silu_and_mul(stream, a, b, out)` 伪代码（标注「示例代码」），覆盖 tune-once/cache/launch 三段，并在注释里写明「为何 occupancy-only」「为何 cache_key 这样选」「是否需要按形状族补候选」。完成后与 `tests/benchmark/bench_silu_and_mul.py` 的真实写法对照（若该算子已接入调优），修正你的假设。
 
-> 这个综合实践不需要你真的改源码（本讲禁止改源码），重点是让你把「候选生成 → exhaustive_search → cache → 开关」四件事在一个新算子上重新推演一遍。
+> 这个综合实践不需要你真的改源码（本讲禁止改源码），重点是让你把「候选生成 → exhaustive_search → cache → 开关」四件事在一个新算子上重新推演一遍，并体会本轮 matmul「按形状族补候选」的思路如何迁移。
 
 ## 6. 本讲小结
 
 - cuTile 自动调优 = **tune-once / cache / launch**：首次按形状跑 `exhaustive_search` 选最优，之后命中模块级 cache 直接 `ct.launch`，零额外开销。
 - 候选配置**按 GPU 架构分流**（sm120 / pre-SM90 / sm100+），不同架构给不同瓦片与 `num_ctas` 上限，避免在无效维度上浪费编译时间。
+- 候选配置还要**按 GEMM 形状族互补**（本轮新增）：sm100+ 持久化表在大瓦片之外补一条 128×128 小瓦片（`num_ctas=1, occupancy=1`），救小/矩形 GEMM 上大瓦片把持久化 grid 压到 16–32、闲置大部分 SM（stranded SM）的问题——小瓦片把输出瓦片数放大 4 倍，从而抬起 `min(NUM_SM//num_ctas, n_tiles)·occupancy` 这层封顶。
 - `exhaustive_search` 用三个回调 `grid_fn`/`args_fn`/`hints_fn` 解耦「grid、内核参数、编译器 hint」；只有 `num_ctas`/`occupancy` 进 `hints_fn` → `replace_hints`，瓦片尺寸走 `args_fn` → `ct.launch`。
-- cache 必须把 `(best_cfg, tuned_kernel)` **整对象**缓存，绝不能在热路径上反复 `replace_hints`（否则每次重编译）；键设计要把所有影响最优配置的量（形状、dtype、设备、转置）都纳入。
+- cache 必须把 `(best_cfg, tuned_kernel)` **整对象**缓存，绝不能在热路径上反复 `replace_hints`（否则每次重编译）；键设计要把所有影响最优配置的量（形状、dtype、设备、转置）都纳入，但不含候选表版本号——扩候选表只影响重启后的首次调优。
 - `TILEGYM_DISABLE_AUTOTUNE` 是**全库唯一**的自动调优开关（`is_autotune_enabled()`/`is_autotune_disabled()`），但**是否接入开关是逐内核的选择**——本讲的 matmul 不接（永远调优、靠 cache 摊销），suite 的 ragged_bmm/masked_bmm/rope_quantize_fp8 才接。
 - `LOAD_LATENCY` 是持久化 matmul 内核的 `ct.Constant` 形参，因 `args_fn` 无条件读取，**每条候选都必须带**；多数架构填 `-1`（编译器推断），目前真正调它的只有 sm90。
 
 ## 7. 下一步学习建议
 
 - **横向看其它内核的调优写法**：`src/tilegym/ops/cutile/group_gemm.py`（批量 GEMM，occupancy-only 调优）、`src/tilegym/ops/cutile/attention.py`（FMHA，瓦片 + num_ctas 全量搜索），对照本讲的「三类回调 + cache」模板，体会「按内核类型裁剪搜索维度」。
+- **对照本轮「形状适配候选」的同类思路**：留意其它内核是否也在候选表里混排大/小瓦片以覆盖不同形状族——这是判断一份候选表设计是否成熟的经验法则。
 - **深入 suite 的开关分支**：读 `src/tilegym/suites/flashinfer/cutile/gemm/ragged_bmm.py` 里 `if is_autotune_enabled(): ... else: 走固定配置` 的完整写法，理解「调优路径」与「固定配置回退路径」如何共存。
-- **下一讲 U6 进入注意力内核族**：u6-l1 的 FMHA 会复用本讲的 `exhaustive_search` + cache 模式，但搜索空间更复杂（ TILE_M × num_ctas 等），是检验你是否真懂本讲的好样本。
+- **下一讲 U6 进入注意力内核族**：u6-l1 的 FMHA 会复用本讲的 `exhaustive_search` + cache 模式，但搜索空间更复杂（TILE_M × num_ctas 等），是检验你是否真懂本讲的好样本。
 - **若要自己加调优**：直接读 `skills/tilegym-cutile-autotuning/SKILL.md` 及其 `references/`（按内核类型 T1–T9 给模板、列了 7 个常见坑），它是本讲所述机制的操作手册。

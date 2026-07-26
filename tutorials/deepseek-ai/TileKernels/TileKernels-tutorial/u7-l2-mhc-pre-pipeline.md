@@ -102,13 +102,13 @@ mhc_pre(residual, fn, scale, base, ...):
 
 **实践目标**：确认两条路径的前向等价性，并定位融合路径没有反向的证据。
 
-**操作步骤（源码阅读型）**：
+**操作步骤（源码阅读型 + 可选运行）**：
 
 1. 打开 `tile_kernels/modeling/mhc/ops/pre_big_fuse.py`，确认 `mhc_pre_big_fuse` 是一个**普通 `def` 函数**，不是 `torch.autograd.Function` 的子类，函数体内也没有 `save_for_backward`。证据见 [pre_big_fuse.py:7-18](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/modeling/mhc/ops/pre_big_fuse.py#L7-L18)。
 2. 对比 `tile_kernels/modeling/mhc/ops/pre_split_mixes.py` 中的 `MHCPreSplitMixes(torch.autograd.Function)`，它有完整的 `forward` / `backward`，见 [pre_split_mixes.py:7](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/modeling/mhc/ops/pre_split_mixes.py#L7) 与 [pre_split_mixes.py:58](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/modeling/mhc/ops/pre_split_mixes.py#L58)。
-3. （可选，需 GPU，**待本地验证**）造一组小输入，分别在 `torch.no_grad()` 与默认（梯度开启）下调用 `mhc_pre`，对 `layer_input` 用 `torch.testing.assert_close` 比对，验证前向等价。
+3. **直接复用项目自带的对拍测试**：`tests/mhc/test_pre_big_fuse.py` 已经把「融合路径」与「四步拆分参考」跑在同一组输入上比对，断言用的是位精确的 `torch.equal`（而非浮点容差），见 [test_pre_big_fuse.py:110-138](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tests/mhc/test_pre_big_fuse.py#L110-L138)。其中的参考函数 `big_fuse_reference`（[test_pre_big_fuse.py:57-93](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tests/mhc/test_pre_big_fuse.py#L57-L93)）内部就是 `mhc_pre_norm_fn → mhc_pre_split_mixes → sinkhorn_normalize → mhc_pre_apply_mix` 四步。有 GPU 时执行 `pytest tests/mhc/test_pre_big_fuse.py -v`（**待本地验证**），无 GPU 时纯阅读这两段代码即可确认等价性已被项目固化。
 
-**需要观察的现象**：融合路径产物与拆分路径产物在浮点容差内一致；融合路径返回的 `layer_input` 没有 `grad_fn`（不连计算图），拆分路径的有 `grad_fn`。
+**需要观察的现象**：测试里三个 `torch.equal` 全部通过，说明两条路径连浮点累加顺序都做到位一致；融合路径返回的 `layer_input` 没有 `grad_fn`（不连计算图），拆分路径的有 `grad_fn`。
 
 **预期结果**：前向数值一致；只有拆分路径能 `.backward()`。
 

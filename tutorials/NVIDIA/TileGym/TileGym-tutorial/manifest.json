@@ -1,7 +1,7 @@
 {
   "project": "TileGym",
-  "head": "efbfefc760f608e4b04d32c36813a1291fe36f3c",
-  "rationale": "学习路径按\"先理解项目再理解抽象、再学写内核、再按复杂度攀升内核类别、最后回到集成与生态\"组织。U1 让读者从零跑起 TileGym 并建立全局地图；U2 是全库核心抽象——基于 @dispatch/_REGISTRY 的多后端分发，必须先吃透它后续所有算子才讲得清；U3-U4 用最简单的 cuTile 内核（softmax/silu_and_mul/rms_norm）讲清 tile 编程模型、数据搬运、启动、autograd；U5 引入分块 GEMM 与 autotuning 这两个更高阶机制；U6 集中讲最复杂的注意力内核族（FMHA/解码/MLA/变体）；U7 覆盖 tilecpp/Triton/cuTile-rs 三个备选后端，理解\"同一算子名、多实现\"；U8 把内核用到真实 LLM（monkey-patch + 融合模块 + HF 基准）；U9 闭环到测试与贡献流程；U10 介绍 suites 扩展、实验内核追踪/内核清单生成、Julia 等进阶生态。依赖链确保每篇只增量引入一个新概念，避免一开始就陷入 attention 等复杂内核。",
+  "head": "7410bd8dcc7e83bc1de9d41807056fa463998a39",
+  "rationale": "学习路径按\"先理解项目再理解抽象、再学写内核、再按复杂度攀升内核类别、最后回到集成与生态\"组织。U1 让读者从零跑起 TileGym 并建立全局地图；U2 是全库核心抽象——基于 @dispatch/_REGISTRY 的多后端分发；U3-U4 用最简单的 cuTile 内核讲清 tile 编程模型、数据搬运、启动、autograd；U5 引入分块 GEMM 与 autotuning；U6 集中讲注意力内核族（FMHA/解码/MLA/变体），并本轮新增\"门控增量规则\"这种循环线性注意力机制（recurrent 逐步推理 + chunk 分块并行 + 三角求解的数值稳定性）；U7 覆盖 tilecpp/Triton/cuTile-rs 三个备选后端，理解\"同一算子名、多实现\"；U8 把内核用到真实 LLM；U9 闭环到测试与贡献流程；U10 介绍 suites 扩展、实验内核追踪/内核清单生成、Julia 等进阶生态，并新增一篇专门讲 liger suite 本轮大幅扩展的训练内核族（策略梯度损失/融合线性交叉熵/归一化变体/激活等）。本轮 diff 的主体是 liger suite 扩容、门控增量规则的稳定性重构，以及 matmul/MLA 的 autotune 配置与 cutile-rs 构建机制的小幅改动，故绝大多数讲义 keep；仅对持久化 GEMM 与 MLA autotune（u5-l2/u5-l3/u6-l3）、cutile-rs 构建（u7-l3）、suites 与 kernel_inventory（u10-l1/u10-l2，尚未生成故仍为 new 但内容已刷新）做 update/new，并新增\"门控增量规则与循环线性注意力\"（u6-l5）和\"Liger 训练内核族\"（u10-l4）两篇。依赖链确保每篇只增量引入一个新概念。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 后，用自己的话写一份 TileGym 的 3 句话简介，并列出它支持的后端（cuTile/tilecpp/triton/cutile-rs）与目标硬件（Blackwell、Ampere）。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -63,7 +63,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -93,7 +93,7 @@
             "u1-l1",
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -123,7 +123,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -159,7 +159,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -188,7 +188,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -216,7 +216,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -253,7 +253,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -282,7 +282,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -309,7 +309,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -339,7 +339,7 @@
             "u3-l2",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -375,7 +375,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -402,7 +402,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -430,7 +430,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -467,7 +467,7 @@
             "u3-l2",
             "u3-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -475,11 +475,12 @@
           "order": 2,
           "filename": "u5-l2-persistent-matmul.md",
           "level": "intermediate",
-          "topic": "_static_persistent_matmul_kernel 用持久化 grid-stride 遍历多个输出 tile、num_ctas/CGA、replace_hints 应用最优配置。",
+          "topic": "_static_persistent_matmul_kernel 用持久化 grid-stride 遍历多个输出 tile、num_ctas/CGA、replace_hints 应用最优配置；本轮为 sm100+ 新增 128x128 小 tile 候选以覆盖小/矩形 GEMM（避免大 tile 把持久化 grid 压到 16-32 个 tile-job 而闲置 SM）。",
           "learning_goals": [
             "理解持久化 grid-stride 调度",
             "掌握 num_ctas/CGA 聚合",
             "理解 replace_hints 应用最优配置",
+            "理解按 GEMM 形状选择大/小 tile 候选",
             "了解 group_gemm 批量矩阵乘"
           ],
           "source_files": [
@@ -490,13 +491,14 @@
             "持久化 grid-stride",
             "num_ctas/CGA",
             "replace_hints",
+            "小 tile 候选与形状适配",
             "group_gemm 批量"
           ],
-          "practice_task": "对比 _matmul_kernel 与 _static_persistent_matmul_kernel 的 grid 设置，说明持久化如何在输出 tile 多于 SM 时复用 CTA。",
+          "practice_task": "对比 _matmul_kernel 与 _static_persistent_matmul_kernel 的 grid 设置，说明持久化如何在输出 tile 多于 SM 时复用 CTA；再说明新增 128x128 候选为何能改善小/矩形 GEMM 的 SM 占用。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u5-l3",
@@ -504,11 +506,12 @@
           "order": 3,
           "filename": "u5-l3-autotuning.md",
           "level": "advanced",
-          "topic": "_matmul_autotune_configs 按架构(sm80/sm100/sm120)产出候选、exhaustive_search 调优、tune cache、TILEGYM_DISABLE_AUTOTUNE 开关与 LOAD_LATENCY 提示。",
+          "topic": "_matmul_autotune_configs 按架构(sm80/sm100/sm120)产出候选、exhaustive_search 调优、tune cache、TILEGYM_DISABLE_AUTOTUNE 开关与 LOAD_LATENCY 提示；本轮为 sm100+ 静态持久化表新增 128x128/K64 小 tile 候选示例。",
           "learning_goals": [
             "理解按架构产出候选配置",
             "掌握 exhaustive_search 调优流程",
-            "理解 tune cache 缓存与 autotune 开关"
+            "理解 tune cache 缓存与 autotune 开关",
+            "理解候选配置需按 GEMM 形状覆盖大/小 tile"
           ],
           "source_files": [
             "src/tilegym/ops/cutile/matmul.py",
@@ -518,13 +521,14 @@
             "按架构产出候选配置",
             "exhaustive_search 调优",
             "模块级 tune cache",
-            "autotune 开关"
+            "autotune 开关",
+            "形状适配的候选设计"
           ],
-          "practice_task": "用 TILEGYM_DISABLE_AUTOTUNE=1 与默认各跑一次 matmul 基准，观察调优前后差异；说明为何每条配置都要带 LOAD_LATENCY 字段。",
+          "practice_task": "用 TILEGYM_DISABLE_AUTOTUNE=1 与默认各跑一次 matmul 基准，观察调优前后差异；说明为何每条配置都要带 LOAD_LATENCY 字段，以及新增小 tile 候选对矩形 GEMM 的意义。",
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -561,7 +565,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -589,7 +593,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -597,11 +601,12 @@
           "order": 3,
           "filename": "u6-l3-mla-decode.md",
           "level": "advanced",
-          "topic": "mla.py 的 MLA prefill（q/k/v + qpe/kpe 联合位置编码）、mla_decoding 单步解码、mla_decoding_split_kv。",
+          "topic": "mla.py 的 MLA prefill（q/k/v + qpe/kpe 联合位置编码）、mla_decoding 单步解码、mla_decoding_split_kv；本轮改进了 pre-SM90（sm80）MLA autotune 表，新增 TILE_M=64/TILE_N=64/occupancy=3 候选以提升小规模 MLA 的并行度。",
           "learning_goals": [
             "理解 MLA 的 qpe/kpe 联合位置编码",
             "掌握 prefill tile_mla",
-            "理解解码与 split_kv 两种 MLA 解码"
+            "理解解码与 split_kv 两种 MLA 解码",
+            "理解按架构(sm80/sm90+)的 MLA autotune 候选差异"
           ],
           "source_files": [
             "src/tilegym/ops/cutile/mla.py",
@@ -612,13 +617,14 @@
             "MLA 联合位置编码（qpe/kpe）",
             "prefill tile_mla",
             "解码 mla_decoding",
-            "split_kv 并行"
+            "split_kv 并行",
+            "pre-SM90 autotune 候选"
           ],
-          "practice_task": "对比 mla_decoding 与 mla_decoding_split_kv 的 kv 布局与 kv_len_per_split 参数作用，说明何时选 split_kv 版本。",
+          "practice_task": "对比 mla_decoding 与 mla_decoding_split_kv 的 kv 布局与 kv_len_per_split 参数作用，说明何时选 split_kv 版本；并解释 sm80 表里新增 64x64/occupancy=3 候选为何有助于小规模 MLA。",
           "depends_on": [
             "u6-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l4",
@@ -647,6 +653,37 @@
           "practice_task": "选两个变体，说明它们的索引/掩码语义差异，例如 sparse_mla 的 indices 张量与 attention_sink 的 sliding_window 参数各自如何限制注意力范围。",
           "depends_on": [
             "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "门控增量规则与循环线性注意力",
+          "order": 5,
+          "filename": "u6-l5-gated-delta-rule.md",
+          "level": "advanced",
+          "topic": "门控增量规则（gated delta rule）作为循环线性注意力机制：recurrent_gated_delta_rule 逐步推理版与 chunk_gated_delta_rule 分块并行版，含 intra-chunk 单位下三角求解（serial 与 Neumann-by-squaring guarded 两种路径）与 inter-chunk 状态递推；本轮对三角求解做了重大数值稳定性重构。",
+          "learning_goals": [
+            "理解门控增量规则作为线性注意力/状态空间递推的数学形式",
+            "掌握 recurrent_gated_delta_rule 逐步推理内核",
+            "理解 chunk 分块并行的 intra-chunk prepare 与 inter-chunk recurrence",
+            "理解三角求解的数值稳定性：serial 与 Neumann-by-squaring guarded 的选择依据"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/chunk_gated_delta_rule.py",
+            "src/tilegym/ops/cutile/recurrent_gated_delta_rule.py",
+            "tests/ops/test_chunk_gated_delta_rule.py"
+          ],
+          "minimal_modules": [
+            "门控增量规则的线性注意力形式",
+            "recurrent 逐步推理内核",
+            "chunk 分块：intra-chunk prepare + inter-chunk recurrence",
+            "三角求解稳定性（serial vs Neumann guarded）"
+          ],
+          "practice_task": "在 chunk_gated_delta_rule.py 中对比 _ct_solve_tril_serial 与 _ct_solve_tril_neumann_guarded 两条路径；说明 norm_inf<1 守卫为何能避免全 fp32 Neumann 乘积在相关模型键上放大到 1e15 量级的抵消误差，并指出 occupancy=2 的 intra_chunk_prepare 设计意图。",
+          "depends_on": [
+            "u5-l1",
+            "u6-l2"
           ],
           "action": "new"
         }
@@ -686,7 +723,7 @@
             "u2-l2",
             "u3-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -716,7 +753,7 @@
             "u2-l3",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -724,12 +761,12 @@
           "order": 3,
           "filename": "u7-l3-cutile-rs-backend.md",
           "level": "advanced",
-          "topic": "cutile_rs 用 Rust 写内核、编译成 libcutile_kernels.so、cffi 绑定 + TensorDesc、autobuild、CUPTI autotuner。",
+          "topic": "cutile_rs 用 Rust 写内核、编译成 cdylib、cffi 绑定 + TensorDesc、autobuild、CUPTI autotuner；本轮支持 per-suite 内核 crate（自定义 so_name 与多 src_roots 的 stale 判定）与 NVFP4 dtype codes。",
           "learning_goals": [
             "理解 Rust kernel crate 与 cdylib",
             "掌握 cffi/cdef 与 TensorDesc 跨界",
-            "理解 autobuild 与可用性探测",
-            "理解 CUPTI autotune 为何不用 cuda.Event"
+            "理解 autobuild（含 per-suite src_roots/so_name）与可用性探测",
+            "理解 NVFP4 dtype 与 CUPTI autotune 为何不用 cuda.Event"
           ],
           "source_files": [
             "src/tilegym/ops/cutile_rs/matmul.py",
@@ -740,15 +777,15 @@
           "minimal_modules": [
             "Rust kernel crate + cdylib",
             "cffi/cdef 与 TensorDesc",
-            "autobuild 与可用性",
-            "CUPTI autotune（vs cuda.Event）"
+            "autobuild（per-suite src_roots/so_name）与可用性",
+            "NVFP4 dtype 与 CUPTI autotune"
           ],
-          "practice_task": "说明 autotune_launch 为何要求 kernel_fn 内只用 torch.empty 而不能用 clone/zeros；解释 CUPTI 与 cuda.Event 在测量小内核时的差异。",
+          "practice_task": "说明 autotune_launch 为何要求 kernel_fn 内只用 torch.empty 而不能用 clone/zeros；解释 CUPTI 与 cuda.Event 在测量小内核时的差异；并说明 _so_stale 现在如何按 per-suite 的 src_roots（含共享 ffi_util.rs）判定 .so 是否过期。",
           "depends_on": [
             "u5-l3",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -784,7 +821,7 @@
             "u2-l2",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -814,7 +851,7 @@
             "u4-l1",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -843,7 +880,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -881,7 +918,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -913,7 +950,7 @@
             "u2-l2",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -929,11 +966,12 @@
           "order": 1,
           "filename": "u10-l1-suites-extension.md",
           "level": "advanced",
-          "topic": "suites/ 如何用 @dispatch(\"liger.xxx\") 等命名空间扩展 TileGym，suite ops.py 接口与后端实现目录的关系。",
+          "topic": "suites/ 如何用 @dispatch(\"liger.xxx\") 等命名空间扩展 TileGym，suite ops.py 统一接口与后端实现目录的关系；本轮 liger suite 大幅扩容（新增 dyt/fused_add_rms_norm/fused_linear_cross_entropy/grpo_loss/poly_norm/rms_norm/softmax/swiglu/tvd 等），并通过新增的 liger/ops.py 暴露统一算子接口。",
           "learning_goals": [
             "理解 suite 命名空间算子名",
             "掌握 suite ops 接口与后端实现",
-            "理解 suites 与核心 ops 的异同"
+            "理解 suites 与核心 ops 的异同",
+            "了解 liger suite 的算子目录与统一接口"
           ],
           "source_files": [
             "src/tilegym/suites/liger/ops.py",
@@ -944,9 +982,10 @@
             "suite 命名空间算子名",
             "suite ops 接口",
             "后端实现目录",
+            "liger 算子目录与统一接口",
             "与核心 ops 的区别"
           ],
-          "practice_task": "选 liger.cross_entropy，说明它的算子名为何带 \"liger.\" 前缀，以及它与 ops.py 中算子的 register_impl 注册方式有何相同与不同。",
+          "practice_task": "选 liger.cross_entropy，说明它的算子名为何带 \"liger.\" 前缀，以及它与 ops.py 中算子的 register_impl 注册方式有何相同与不同；再列出本轮 liger/ops.py 新增的若干算子名。",
           "depends_on": [
             "u2-l2"
           ],
@@ -958,24 +997,27 @@
           "order": 2,
           "filename": "u10-l2-experimental-inventory.md",
           "level": "advanced",
-          "topic": "experimental.py 对 ct.launch 的 monkey-patch 打印一次性实验警告、kernel_inventory 基于 FIB/flashinfer-bench 的 Solution/Definition 代码生成、autotune 全局开关。",
+          "topic": "experimental.py 对 ct.launch 的 monkey-patch 打印一次性实验警告、kernel_inventory 基于 FIB/flashinfer-bench 的 Solution/Definition 代码生成（现已把 cutile_rs 也作为 suite 后端纳入遍历）、autotune 全局开关。",
           "learning_goals": [
             "理解 experimental_kernel 装饰器与 launch 补丁",
             "掌握 kernel_inventory 的数据契约（pydantic 模型）",
+            "理解 suite 后端（triton/cutile/cutile_rs）的 solution 遍历",
             "理解 autotune 全局开关"
           ],
           "source_files": [
             "src/tilegym/experimental.py",
             "src/tilegym/kernel_inventory/generation.py",
+            "src/tilegym/kernel_inventory/__init__.py",
             "src/tilegym/autotune.py"
           ],
           "minimal_modules": [
             "experimental_kernel 装饰器与 launch 补丁",
             "kernel_inventory 数据契约",
+            "suite 后端 solution 遍历（含 cutile_rs）",
             "FIB/Solution 模式",
             "autotune 全局开关"
           ],
-          "practice_task": "说明 experimental_kernel 如何在不修改内核内部代码的情况下实现一次性告警；列出 generation.py 用到的核心 pydantic 模型（如 TileGymBuildSpec/TileGymSolution）。",
+          "practice_task": "说明 experimental_kernel 如何在不修改内核内部代码的情况下实现一次性告警；列出 generation.py 用到的核心 pydantic 模型，并解释 iter_kernel_solution_paths 现在如何遍历 triton/cutile/cutile_rs 三类后端。",
           "depends_on": [
             "u3-l3",
             "u2-l2"
@@ -1009,6 +1051,39 @@
           "practice_task": "对照 julia/kernels/softmax.jl 与 src/tilegym/ops/cutile/softmax.py，列出 0-index→1-index、行列主序等关键差异，并说明它们如何影响索引计算。",
           "depends_on": [
             "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "Liger 训练内核族：损失、归一化与融合算子",
+          "order": 4,
+          "filename": "u10-l4-liger-training-kernels.md",
+          "level": "advanced",
+          "topic": "liger suite 本轮大幅扩展的训练内核族：策略梯度损失（grpo_loss 含 DAPO/GSPO 等）、融合线性交叉熵与 JSD/KL/TVD、dyt/poly_norm/fused_add_rms_norm 归一化、swiglu/softmax 激活，以及它们的 token/sequence-level 前向 grid 与 autograd 反向内核。",
+          "learning_goals": [
+            "理解 liger 训练损失族（grpo_loss/fused_linear_cross_entropy/jsd/kl_div/tvd）的 token/sequence-level 实现",
+            "掌握 dyt/poly_norm/fused_add_rms_norm 等归一化变体内核",
+            "理解 swiglu/softmax 等激活内核与 autograd Function 反向重计算",
+            "理解 liger/ops.py 统一接口与 liger 命名空间注册的关系"
+          ],
+          "source_files": [
+            "src/tilegym/suites/liger/ops.py",
+            "src/tilegym/suites/liger/cutile/grpo_loss.py",
+            "src/tilegym/suites/liger/cutile/fused_linear_cross_entropy.py",
+            "src/tilegym/suites/liger/cutile/fused_add_rms_norm.py",
+            "src/tilegym/suites/liger/cutile/cross_entropy.py"
+          ],
+          "minimal_modules": [
+            "策略梯度损失族（grpo_loss 等）",
+            "融合线性交叉熵 / JSD / KL / TVD",
+            "归一化变体（dyt/poly_norm/fused_add_rms_norm）",
+            "激活内核与 autograd 反向"
+          ],
+          "practice_task": "选 grpo_loss，说明其前向 grid=(B,L) 内核如何在一个 block 内完成 vocab 维 logsumexp、目标 logp、重要性比 coef_1=exp(logp-old_logp) 与可选 KL；再说明反向内核为何从缓存的 lse 重算 logp 而非保存完整 logits，并指出 DLOGITS[:, -1, :]=0 的语义。",
+          "depends_on": [
+            "u10-l1",
+            "u4-l2"
           ],
           "action": "new"
         }
