@@ -2,468 +2,541 @@
 
 ## 1. 本讲目标
 
-上一讲（u3-l8）我们看懂了 TileLang 算子的「四件套」骨架——`get_configs` 造搜索空间、`@autotune` 遍历调优、`@jit` 编译、`best_result` 取结果。我们知道了 `best_result.kernel` 是编译产物，但**它编译出来的内核体到底写了什么、数据是怎么在 GPU 上搬运的**还没展开。
+本讲承接 [u3-l8（TileLang 内核骨架）](u3-l8-tilelang-kernel-skeleton.md)。在上一讲里，我们已经看清一个 TileLang 算子文件「定义—调优—评估」的整体骨架（`get_configs` / `@autotune` / `@jit` / `best_result`），但当时刻意跳过了 `@T.prim_func` 内核本体。本讲就要把这块最核心的「块级 GEMM 内核」逐行拆开。
 
-本讲就只做一件事：**逐行解剖那个 `@T.prim_func` 内核体**，把它拆成五个最小模块——网格映射、显存/寄存器分配、数据搬运、TensorCore 矩阵乘、K 维软件流水线。
+学完本讲，你应当能够：
 
-学完后你应该能够：
+- 说出 TileLang 块级 GEMM 的**五要素**：`T.Kernel`（网格映射）、`alloc_shared`/`alloc_fragment`（存储分配）、`T.copy`（数据搬运）、`T.gemm`（Tensor Core MMA）、`T.Pipelined`（软件流水），并理解它们如何各司其职。
+- 理解 K 维循环为什么是「累加」语义，以及为什么用软件流水来隐藏访存延迟。
+- 画出 A / B / C 在「全局内存 ↔ 共享内存 ↔ 寄存器 fragment」之间的数据搬运路径。
+- 解释回写阶段为什么是 `C_local → C_shared → C 全局`，而不是直接写回。
 
-- 说清 `T.Kernel` 如何把输出矩阵切成块、如何把线程块索引绑定到矩阵维度。
-- 区分 `alloc_shared`（共享内存）和 `alloc_fragment`（寄存器 fragment）各自的用途。
-- 列出内核里每一次 `T.copy` 的「源 → 目的」与方向。
-- 解释 `T.gemm` 如何对应一次 TensorCore MMA 累加。
-- 说明 `T.Pipelined` 的软流水如何隐藏访存延迟。
-- **画出整张数据搬运路径图**，并解释为何写回要走 `C_local → C_shared → C` 两段。
+本讲的内核是后续几乎所有 TileLang 算子（多精度 matmul、反量化 GEMV、FlashAttention、MLA 等）的共同原型，把它吃透是理解整个项目的前提。
 
 ## 2. 前置知识
 
-在进入源码前，先用通俗语言把几个 GPU 概念讲清楚。
+在进入源码前，先用三段话建立直觉。
 
-### 2.1 GPU 的三级存储层级
+### 2.1 为什么要「分块」（tiling）
 
-| 层级 | 位置 | 容量 | 速度 | 可见范围 |
-|---|---|---|---|---|
-| **global memory**（全局/显存） | DRAM（如 HBM） | 几十 GB | 最慢（最远） | 所有线程 |
-| **shared memory**（共享内存） | 片上 SRAM | 每个 SM 几十 KB | 很快 | 同一个线程块内的所有线程 |
-| **register / fragment**（寄存器） | 每个线程私有 | 每线程几百个 | 最快 | 仅当前线程 |
-
-矩阵乘的典型打法就是「**global 太慢、register 太小，所以用 shared 做中转**」：先把数据从 global 成块搬到 shared，再让所有线程协作地从 shared 取数、在 register 里累加。
-
-### 2.2 线程、线程块、网格
-
-- **grid（网格）**：一次 kernel 启动的所有线程块的集合，可以是一维/二维/三维。
-- **block / threadblock（线程块）**：grid 里的一个单元，内含若干线程，共享一段 shared memory。
-- 本讲的内核把输出矩阵 C 切成很多 (block_M, block_N) 的小块，**每个线程块负责算其中一块**。
-
-### 2.3 Tensor Core 与分块矩阵乘
-
-普通 CUDA Core 一次算一个标量乘加；**Tensor Core** 一次算一个小矩阵乘（例如 int8 输入的 MMA 指令），是现代 GPU 算矩阵乘的主力单元。要把大矩阵乘喂给 Tensor Core，就得把它切成「块」：每个线程块加载 A、B 的子块到 shared，再反复调用 Tensor Core 做小矩阵乘并累加。
-
-### 2.4 本讲用到的数学记号
-
-设输入 \(A\in\mathbb{Z}^{M\times K}\)、\(B\in\mathbb{Z}^{N\times K}\)，本内核计算
+一个完整的 GEMM，比如 `C = A @ B^T`，其中 `A ∈ ℤ^{M×K}`、`B ∈ ℤ^{N×K}`、`C ∈ ℤ^{M×N}`，当 M、N、K 都上万时，矩阵远大于显存里任何一级高速缓存。GPU 不可能把整张 A、B 一次性搬进片上存储。于是我们把输出 C 切成一个个 `block_M × block_N` 的小块（tile），每个线程块（block）只负责计算一个输出块：
 
 \[
-C = A\,B^{\top}\in\mathbb{Z}^{M\times N}.
+C[m, n] = \sum_{k=0}^{K-1} A[m, k] \cdot B[n, k]
 \]
 
-注意 \(B\) 被声明成 \((N,K)\)（K 是最后一维），转置在 `T.gemm` 内部完成。整次乘法的浮点/整型运算量为 \(2MNK\)（承接 u2-l4）。
+切分后，单个输出块只需要 A 的一段行（`block_M × K`）和 B 的一段行（`block_N × K`）。再把 K 维也切成 `block_K` 的小段，每个线程块就可以「加载一小段 A 和 B → 做一次小矩阵乘并累加 → 再加载下一段」，直到 K 维累加完毕。这就是**块级 GEMM** 的核心思想。
 
-> **承接 u3-l8 的两个提醒（以代码为准）**：
-> 1. 本文件注释写「half-precision」，但代码里 `dtype = "int8"`、`accum_dtype = "int32"`，且驱动脚本 `benchmark_tilelang_matmul.sh` 实际只跑 `int8 int8 int32 int32` 一组——**真实路径是 int8**。本讲按 int8 讲解。
-> 2. `print(f"Best latency (s): ...")` 标的是 `(s)`，但下游 `extract_benchmark_results.py` 把它打印成 `ms`——**真实单位是毫秒**。
+### 2.2 GPU 的三级存储与「搬运」
+
+理解本讲需要先记住 GPU 的存储层级：
+
+| 存储层级 | 位置 | 容量 | 速度 | 在 TileLang 里的对应 |
+|---|---|---|---|---|
+| 全局内存（Global / HBM） | 片外显存 | 大（几十 GB） | 慢 | 内核入参 `A`、`B`、`C` |
+| 共享内存（Shared Memory） | 片上（SM 内） | 小（几十 KB/block） | 快 | `T.alloc_shared(...)` |
+| 寄存器 / Fragment | 单个线程内 | 极小 | 极快 | `T.alloc_fragment(...)` |
+
+数据必须在三者之间**搬运**：全局内存的原始数据，要先搬到共享内存（让一个 block 内所有线程共用），再让 Tensor Core 从共享内存取数做矩阵乘，乘出来的累加结果先放在寄存器 fragment 里，最后再搬回全局内存。`T.copy` 就是负责搬运的指令。
+
+### 2.3 Tensor Core 与「软流水」
+
+Tensor Core 是 GPU 上专门做小矩阵乘加（MMA / IMMA）的硬件单元，一条指令就能完成一个（例如 `16×16×16`）的小矩阵乘加。但它执行一次 MMA 需要的数据必须已经在共享内存里。而全局→共享的搬运又很慢。如果「等搬完再算」，Tensor Core 就会闲置。
+
+解决之道是**软件流水**（software pipelining）：当 Tensor Core 在算第 `k` 段时，提前把第 `k+1`、`k+2` 段的数据从全局内存搬到共享内存。这样搬运与计算重叠，访存延迟被「藏」了起来。TileLang 用 `T.Pipelined` 来表达这件事，`num_stages` 就是流水深度（0 表示关闭流水）。
+
+> 概念提示：本讲反复出现的 `block_M / block_N / block_K` 是「块大小」，决定每个线程块处理的输出块与 K 段大小；它们来自 u3-l8 讲过的 `get_configs` 搜索空间。
 
 ## 3. 本讲源码地图
 
-本讲只读一个文件，但会从三个角度反复看它：
+本讲只看一个文件，但它承载了块级 GEMM 的全部五要素：
 
-| 文件 | 作用 | 本讲关注 |
-|---|---|---|
-| [benchmark_tilelang_matmul.py](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py) | TileLang 块级 GEMM 内核 + autotune 驱动 | 内核体 `main`（L191–L246） |
-| [benchmark_tilelang_matmul.sh](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.sh) | 驱动 shell：枚举 shape × dtype 跑内核 | 确认真实跑的是 int8/int32（L24–L28） |
-| [extract_benchmark_results.py](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/extract_benchmark_results.py) | 从日志正则提取 latency | 确认 `Best latency` 单位是 ms（L29–L31） |
+| 文件 | 作用 |
+|---|---|
+| [`benchmark_tilelang_matmul.py`](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py) | hopper 架构下 dense matmul 的 TileLang 内核。`get_configs` 造搜索空间（u3-l8 已讲），`matmul()` 用装饰器定义并调优内核，本讲聚焦其中的 `@T.prim_func main`（L191-L246）。 |
 
-内核体被包在 `kernel()` 函数内部的 `@T.prim_func def main(...)` 里（[L191–L196](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L191-L196)）。`@jit` 装饰器（上一讲讲过）负责把这段声明式代码编译成 GPU 代码，编译产物就是上一讲的 `best_result.kernel`。本讲只看这段 `main` 的内部。
+辅助参考（本讲不展开，但实践任务会用到）：
 
----
+| 文件 | 作用 |
+|---|---|
+| [`benchmark_tilelang_matmul.sh`](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.sh) | 驱动脚本，遍历 14 组 shape 调用上面的 `.py`。注意它的 dtype 只跑 `int8 int8 int32 int32`。 |
+
+> 一个贯穿本讲的「以代码为准」提醒（u3-l8 已建立此意识）：本文件 L186-L189 的注释说「half-precision / accumulate in float」，但**紧随其后的代码**写的是 `dtype = "int8"`、`accum_dtype = "int32"`；驱动脚本 `benchmark_tilelang_matmul.sh` 也只跑 int8。因此实际执行的内核是 **int8 输入、int32 累加**的 INT8 Tensor Core（IMMA）路径。本讲讲的是**结构与五要素，这部分与精度无关**，int8 的细节留到 [u4-l12（int8 与多精度 GEMM）](u4-l12-int8-multiprecision-gemm.md)。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 T.Kernel：网格映射
+先给出整段内核全貌，再按五要素逐个拆。内核本体在 [benchmark_tilelang_matmul.py:191-246](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L191-L246)：
+
+```python
+@T.prim_func
+def main(
+        A: T.Tensor((M, K), dtype),       # 输入 A：(M, K)
+        B: T.Tensor((N, K), dtype),       # 输入 B：(N, K)，注意是 N×K
+        C: T.Tensor((M, N), accum_dtype), # 输出 C：(M, N)
+):
+    with T.Kernel(
+            T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K), dtype)
+        B_shared = T.alloc_shared((block_N, block_K), dtype)
+        C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)
+        C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
+
+        T.use_swizzle(panel_size=10, enable=enable_rasteration)
+        T.clear(C_local)
+
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A[by * block_M, k * block_K], A_shared)
+            T.copy(B[bx * block_N, k * block_K], B_shared)
+            T.gemm(A_shared, B_shared, C_local, transpose_B=True, policy=policy)
+
+        T.copy(C_local, C_shared)
+        T.copy(C_shared, C[by * block_M, bx * block_N])
+```
+
+> 数据形状约定（贯穿全讲，务必先记住）：
+> - 输入 `A` 是 `(M, K)`，输入 `B` 是 `(N, K)`——B 存的是「转置后」的形态，所以内核做的是 `C = A @ B^T`。
+> - 每个线程块负责输出 C 的一个 `block_M × block_N` 子块。
+> - K 维被切成若干 `block_K` 段，循环累加。
+
+下面按五要素拆解。
+
+### 4.1 模块一：T.Kernel——网格映射
 
 #### 4.1.1 概念说明
 
-`T.Kernel` 是 TileLang 用来声明「**启动一个多大的网格、线程块索引怎么取**」的构造。它回答两个问题：
+`T.Kernel` 是 TileLang 内核的「入口块」，对应 CUDA 里的「`__global__` 函数 + 网格配置」。它做两件事：
 
-1. **网格有多大**：输出矩阵要被切成多少个块，每个块由一个线程块负责。
-2. **索引怎么绑**：`with T.Kernel(...) as (bx, by):` 里的 `bx`、`by` 就是当前线程块在各网格维度上的下标，后面用它们定位「我这一块要算 C 的哪一部分、要从 A/B 取哪一片」。
+1. 声明**网格形状**（grid），即整个计算被切成多少个线程块。
+2. 把每个线程块的二维索引 `(bx, by)` 绑定出来，供内核体内计算「我负责哪个输出块」时使用。
+
+一句话：`T.Kernel` 把「输出空间」映射到「线程块空间」。
 
 #### 4.1.2 核心流程
 
-把输出 \(C\in\mathbb{Z}^{M\times N}\) 切成 \((block_M, block_N)\) 的子块，则两个方向的块数为：
+设输出 C 的形状是 `(M, N)`，块大小是 `block_M × block_N`，那么：
 
-\[
-\text{grid}_N = \lceil N / block_N\rceil,\qquad \text{grid}_M = \lceil M / block_M\rceil.
-\]
+- M 方向需要 `⌈M / block_M⌉` 个块，N 方向需要 `⌈N / block_N⌉` 个块。
+- 网格二维 `(gridX, gridY) = (⌈N/block_N⌉, ⌈M/block_M⌉)`，索引 `(bx, by)` 中 `bx` 遍历 N 方向（列块），`by` 遍历 M 方向（行块）。
+- 本块负责的输出子块为 `C[by·block_M : (by+1)·block_M, bx·block_N : (bx+1)·block_N]`。
 
-本内核把网格写成 `(grid_N, grid_M)`，并把第一个下标 `bx` 绑定到 N 方向（C 的**列块**），第二个下标 `by` 绑定到 M 方向（C 的**行块**）。于是线程块 `(by, bx)` 负责的输出子块是：
-
-\[
-C\,[\,by\cdot block_M:(by{+}1)\cdot block_M,\;\; bx\cdot block_N:(bx{+}1)\cdot block_N\,].
-\]
+向上取整用 `T.ceildiv(a, b)`（即 `⌈a/b⌉`），保证 M、N 不是 block 整数倍时也能覆盖全部输出。
 
 #### 4.1.3 源码精读
 
-[benchmark_tilelang_matmul.py:L209-L210](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L209-L210) —— 声明网格并绑定索引：
+网格映射在 [benchmark_tilelang_matmul.py:209-210](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L209-L210)：
 
 ```python
 with T.Kernel(
         T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
 ```
 
-- 第一个网格维度 `T.ceildiv(N, block_N)` 绑定给 `bx` → `bx` 是 N 方向块号。
-- 第二个网格维度 `T.ceildiv(M, block_M)` 绑定给 `by` → `by` 是 M 方向块号。
-- `threads=thread_num` 指定每个线程块的线程数（来自 config，如 128 或 256，见上一讲的搜索空间）。
+说明：
 
-> **命名小坑**：直觉上 `bx` 像是 x 轴、`by` 像是 y 轴。这里 `bx` 对应 N（横向/列），`by` 对应 M（纵向/行）。后面 `T.copy(A[by*block_M, ...])` 用 `by` 取 A 的行块、`C[by*block_M, bx*block_N]` 用 `(by,bx)` 定位 C 子块——**全靠这套绑定保持一致**。
+- 第一个参数 `T.ceildiv(N, block_N)` 是 gridX（N 方向块数），第二个 `T.ceildiv(M, block_M)` 是 gridY（M 方向块数）。TileLang 这里把 `bx` 绑定给 N 方向、`by` 绑定给 M 方向（与上方注释「Bind x-dimension to block index in N, y-dimension to block index in M」一致，见 [L207-L208](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L207-L208)）。
+- `threads=thread_num` 设置每个线程块的线程数（来自搜索空间，如 128 或 256）。线程数会参与决定 warp 切分，但具体切分策略由 `policy` 控制，留到 u3-l11 讲。
+- 之后 `(bx, by)` 在循环里被用来定位「取 A 的哪一段、取 B 的哪一段、写 C 的哪一块」。
 
-#### 4.1.4 代码实践（源码阅读型）
+#### 4.1.4 代码实践
 
-1. **目标**：确认网格维度与索引绑定的对应关系。
-2. **步骤**：在内核里搜索 `bx`、`by` 出现的全部位置（共 4 处：`T.Kernel` 绑定、`A[by*block_M,...]`、`B[bx*block_N,...]`、`C[by*block_M, bx*block_N]`）。
-3. **观察**：每一次出现都用「M 维用 by、N 维用 bx」。
-4. **预期**：你能口述「by 永远乘 block_M、bx 永远乘 block_N」，且没有任何一处混用。
-5. 待本地验证（可选）：若有 GPU，把 `block_M` 调小，用 `print` 或 `get_kernel_source()` 观察生成的网格维度。
+**实践目标**：确认网格映射与输出块的对应关系。
+
+**操作步骤**：
+
+1. 打开 [benchmark_tilelang_matmul.py:209-210](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L209-L210)。
+2. 取一组具体数值，例如 `M=N=8192, K=8192, block_M=block_N=128`（这是搜索空间里的合法取值）。
+3. 手算 gridX、gridY 各等于多少，以及 `(bx=1, by=2)` 这个块负责 C 的哪个子块。
+
+**需要观察的现象**：把 grid 形状与输出子块坐标写下来。
+
+**预期结果**：`gridX = ⌈8192/128⌉ = 64`，`gridY = 64`，共 `64×64=4096` 个块。`(bx=1, by=2)` 负责 `C[2·128:3·128, 1·128:2·128] = C[256:384, 128:256]`。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`bx` 绑定到哪个矩阵维度？为什么 `T.copy(A[by*block_M, ...])` 用的是 `by` 而不是 `bx`？
+**练习 1**：如果把 `T.ceildiv` 改成普通整除 `//`，当 M 不是 `block_M` 的整数倍时会出什么问题？
+**答案**：M 方向最后几行（不足一个 block_M 的部分）不会被任何线程块覆盖，输出 C 的右下角会缺一块、写不进去，结果错误。`ceildiv` 正是为了向上取整覆盖全部输出。
 
-> **答**：`bx` 绑定 N 维（列块），`by` 绑定 M 维（行块）。A 的形状是 \((M,K)\)，要取 A 的「行块」必须沿 M 维偏移，所以用 `by`。
-
-**练习 2**：当 \(M=N=8192\)、\(block_M=block_N=128\) 时，整个 grid 有多少个线程块？
-
-> **答**：\(\lceil8192/128\rceil\times\lceil8192/128\rceil = 64\times64 = 4096\) 个。
+**练习 2**：为什么 `bx` 绑定 N 方向、`by` 绑定 M 方向，而不是反过来？
+**答案**：这只是一种坐标约定，不改变计算正确性（每个块仍负责一个 `block_M × block_N` 子块）。不同绑定会影响 block 在网格里的遍历顺序，从而影响 L2 缓存命中——这正是 u3-l11 要讲的 swizzle / rasterization 优化的切入点。
 
 ---
 
-### 4.2 alloc_shared / alloc_fragment：显存与寄存器分配
+### 4.2 模块二：alloc_shared / alloc_fragment——存储分配
 
 #### 4.2.1 概念说明
 
-进入 `T.Kernel` 之后，线程块要先**申请好工作中要用的缓冲区**。TileLang 提供两种分配：
+进入 `T.Kernel` 块之后，第一件事是给本块「申请存储」。TileLang 提供两种片上存储分配原语：
 
-- `T.alloc_shared(shape, dtype)`：在 **shared memory** 里开一块，**块内所有线程都能访问**，用来暂存从 global 搬来的子块，也作为 `T.gemm` 的输入和最终写回的中转。
-- `T.alloc_fragment(shape, dtype)`：在 **每个线程的寄存器**里开一块，是**线程私有**的，主要用来放累加器 `C_local`。
+- `T.alloc_shared(shape, dtype)`：在**共享内存**（block 内所有线程可见）里分配一块。共享内存是全局↔寄存器之间的「中转站」，也是 Tensor Core 取数的来源。
+- `T.alloc_fragment(shape, dtype)`：在**寄存器**（fragment）里分配一块。fragment 是 Tensor Core MMA 指令的「累加器」所在，每个线程持有该块的一部分，布局由硬件 MMA 决定。
 
-此外，累加器在进入 K 循环累加之前必须先清零——这就是 `T.clear(C_local)` 的作用。
+二者分工：**共享内存放「待算的数据」，fragment 放「累加结果」**。
 
 #### 4.2.2 核心流程
 
-每个线程块申请四个缓冲：
+本内核一共申请了 4 块片上存储：
 
-| 缓冲 | 分配方式 | 形状 | dtype | 用途 |
+| 变量 | 类型 | 形状 | dtype | 用途 |
 |---|---|---|---|---|
-| `A_shared` | shared | \((block_M, block_K)\) | int8 | A 的当前 K 子块 |
-| `B_shared` | shared | \((block_N, block_K)\) | int8 | B 的当前 K 子块 |
-| `C_local` | fragment（寄存器） | \((block_M, block_N)\) | **int32** | 累加器（私有分布） |
-| `C_shared` | shared | \((block_M, block_N)\) | int32 | 写回前的中转 |
+| `A_shared` | shared | `(block_M, block_K)` | `dtype`(int8) | 缓存 A 的一段 |
+| `B_shared` | shared | `(block_N, block_K)` | `dtype`(int8) | 缓存 B 的一段 |
+| `C_local` | fragment | `(block_M, block_N)` | `accum_dtype`(int32) | **累加器**，K 循环里累加 |
+| `C_shared` | shared | `(block_M, block_N)` | `accum_dtype`(int32) | 回写时的中转 |
 
-关键设计：**累加器 `C_local` 用 `accum_dtype`（int32）而不是 `dtype`（int8）**。因为两个 int8 相乘再累加很多次，结果会远超 int8 的表示范围，必须用高精度整数承载，否则溢出导致结果错误。
+注意形状的搭配：`A_shared(block_M,block_K)` 与 `B_shared(block_N,block_K)` 经过 `B^T` 后做矩阵乘，结果正好是 `(block_M, block_N)`，与 `C_local`、`C_shared` 的形状一致。验证一下：
+
+\[
+\underbrace{(block_M,\, block_K)}_{A_{\text{shared}}} \times \underbrace{(block_K,\, block_N)}_{B_{\text{shared}}^{\top}} = \underbrace{(block_M,\, block_N)}_{C_{\text{local}}}
+\]
+
+> 为什么 A、B 用 int8 而 C 用 int32？因为 int8 × int8 的点积会累加很多次，中间结果远超 int8 表示范围，必须用更宽的累加类型（int32）才不溢出。这是低精度 GEMM 的通用做法，详见 u4-l12。
 
 #### 4.2.3 源码精读
 
-[benchmark_tilelang_matmul.py:L213-L219](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L213-L219) —— 四块缓冲分配：
+四块分配集中在 [benchmark_tilelang_matmul.py:213-219](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L213-L219)：
 
 ```python
-A_shared = T.alloc_shared((block_M, block_K), dtype)          # A 子块
-B_shared = T.alloc_shared((block_N, block_K), dtype)          # B 子块
-C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)  # 累加器(寄存器)
-C_shared = T.alloc_shared((block_M, block_N), accum_dtype)    # 写回中转
+A_shared = T.alloc_shared((block_M, block_K), dtype)       # A 的共享缓冲
+B_shared = T.alloc_shared((block_N, block_K), dtype)       # B 的共享缓冲
+C_local  = T.alloc_fragment((block_M, block_N), accum_dtype) # 累加器（寄存器）
+C_shared = T.alloc_shared((block_M, block_N), accum_dtype)  # 回写中转（共享）
 ```
 
-[benchmark_tilelang_matmul.py:L225](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L225) —— 清零累加器：
+紧随其后的是 `T.clear(C_local)`（[L225](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L225)）：
 
 ```python
 T.clear(C_local)
 ```
 
-> 中间夹了一行 [L222](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L222) 的 `T.use_swizzle(...)`（栅格化优化开关），它和 `policy` 一起属于「swizzle 与 warp 策略」，是 u3-l11 的主题，本讲先跳过其细节。
+说明：**累加器在使用前必须清零**。因为 K 循环里做的是 `C_local += A_shared @ B_shared^T`，若 `C_local` 初始是脏值（寄存器残留），累加结果会全部错乱。`T.clear` 把整块 fragment 置 0。A_shared / B_shared 不需要清零，因为它们在每次循环里会被 `T.copy` 整块覆盖。
 
-#### 4.2.4 代码实践（源码阅读型）
+#### 4.2.4 代码实践
 
-1. **目标**：弄清四个缓冲的存储层级与精度选择。
-2. **步骤**：把 L213–L219 四行的「分配方式 / 形状 / dtype」抄成一张表，对照 [L188-L189](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L188-L189) 的 `dtype="int8"`、`accum_dtype="int32"`。
-3. **观察**：只有 `C_local` 用 `alloc_fragment` 且用 `accum_dtype`；其余三个都在 shared。
-4. **预期**：你能解释「为什么只有累加器是寄存器、且是 int32」。
+**实践目标**：核对四块存储的形状与 dtype 是否自洽。
+
+**操作步骤**：
+
+1. 打开 [benchmark_tilelang_matmul.py:213-225](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L213-L225)。
+2. 取 `block_M=128, block_N=128, block_K=128`，`dtype=int8`（1 字节）、`accum_dtype=int32`（4 字节）。
+3. 估算本块共享内存用量 = `A_shared + B_shared + C_shared`，以及 fragment 用量 = `C_local`。
+
+**需要观察的现象**：算出 shared 与 fragment 各占多少字节。
+
+**预期结果**：`A_shared = 128×128×1 = 16 KB`，`B_shared = 16 KB`，`C_shared = 128×128×4 = 64 KB`，shared 合计约 `96 KB`（这只是粗算；实际还会受流水多缓冲放大，见 4.5）；`C_local = 64 KB` 寄存器（实际由 block 内线程分摊，每个线程持有其中一份）。这也能解释为什么 `block_*` 不能无限放大——共享内存有容量上限（H100 每块最多约 228 KB 可用）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：四个缓冲里哪些在 shared memory？哪些在 fragment？`C_local` 为什么用 `accum_dtype`？
+**练习 1**：为什么 `C_local` 用 fragment 而不是 shared？
+**答案**：`C_local` 是 Tensor Core MMA 指令的累加器，MMA 的输入来自共享内存、输出直接落到寄存器 fragment 里。把累加器放 fragment（寄存器）读写最快，且天然匹配 MMA 的输出布局，K 循环里每段的累加都不必经过较慢的共享内存。
 
-> **答**：`A_shared`、`B_shared`、`C_shared` 在 shared；`C_local` 在 fragment。`C_local` 是累加器，要把很多对 int8 的乘积加起来，结果会很大，必须用 int32 才不溢出，所以用 `accum_dtype`。
-
-**练习 2**：如果删掉 `T.clear(C_local)`，结果会怎样？
-
-> **答**：`C_local` 未初始化，里面是垃圾值，累加会从一个未定义初值开始，最终 `C` 完全错误。所以累加前必须 `T.clear`。
+**练习 2**：`C_shared` 是否可以省掉、让回写直接 `C_local → C 全局`？
+**答案**：从「数值正确」角度，理论上有办法直接写；但从 TileLang 的 `T.copy` 抽象和访存效率角度，fragment 是「按线程寄存器分布」的、其逻辑布局与内存地址不是简单行优先对应，直接写全局难以做到合并（coalesced）访存。`C_shared` 作为中转，先把 fragment 重排成规整的内存布局，再做一次合并的全局写回。这正是本讲综合实践要深入解释的点。
 
 ---
 
-### 4.3 T.copy：全局 ↔ 共享 ↔ 寄存器的搬运
+### 4.3 模块三：T.copy——数据搬运
 
 #### 4.3.1 概念说明
 
-`T.copy(src, dst)` 是 TileLang 的「**成块搬运**」原语：把一块数据从 `src` 拷到 `dst`，形状由 `dst`（或 `src` 的切片）决定。它能跨存储层级工作，方向靠「源」和「目的」的层级自动判断：
-
-- **global → shared**：进 K 循环时把 A、B 的子块从显存搬到共享内存（协作加载，合并访存）。
-- **fragment → shared**：算完之后把寄存器里的累加结果汇总到共享内存。
-- **shared → global**：最后把结果合并写回显存。
+`T.copy(src, dst)` 是 TileLang 的数据搬运原语，负责在「全局 ↔ 共享 ↔ fragment」之间搬运一块数据。它屏蔽了底层是 `cp.async`、`ldmatrix` 还是普通 load/store 的细节，让用户只描述「从哪块、搬到哪块」。本内核里一共有 **4 处** `T.copy`：K 循环里 2 处（搬 A、搬 B 进来），回写阶段 2 处（C_local→C_shared、C_shared→C 全局）。
 
 #### 4.3.2 核心流程
 
-本内核一共有 **4 次** `T.copy`，按时间顺序：
+本内核的搬运路径可以画成一张图（箭头表示 `T.copy` 方向）：
 
-1. K 循环内：`A[global] → A_shared`
-2. K 循环内：`B[global] → B_shared`
-3. K 循环外（写回）：`C_local[fragment] → C_shared`
-4. 写回：`C_shared → C[global]`
+```
+        ┌──────────── K 循环内（每段执行一次）────────────┐
+全局 A ──copy──▶ A_shared ──┐
+全局 B ──copy──▶ B_shared ──┤
+                            └──▶ T.gemm ──▶ C_local（累加器，+=）
+        └────────────────────────────────────────────────┘
 
-K 循环内的两次（1、2）每轮 k 重复一次；写回的两次（3、4）只在循环结束后做一次。
+        ┌──────────── K 循环外（回写，只执行一次）─────────┐
+C_local ──copy──▶ C_shared ──copy──▶ C（全局）
+        └────────────────────────────────────────────────┘
+```
 
-**为何写回要两段（`C_local → C_shared → C`），而不是直接 `C_local → C`？**
+关键点：
 
-- `C_local` 是 fragment（寄存器），其数据按 **MMA 指令的输出片段布局**分布在各线程上，并不是一段连续的二维排列。
-- 想往 global 写得快，需要**合并写（coalesced store）**：相邻线程写相邻地址，凑成一个完整的事务。
-- 先把各线程的片段汇总到 `C_shared`（一块连续二维 shared），就能再做**一次合并的** `shared → global` 拷贝，吞吐最高。
-- 这是 CUTLASS/TileLang 风格「shared memory epilogue」的通用做法。（**注意**：这是社区通用的设计层解释；本文件的注释只说「copy them back to global memory C」，并未直接给出原因。）
+- **进**：全局 A/B → 共享 A_shared/B_shared。注意 `T.copy` 的「源」用 `A[by * block_M, k * block_K]` 这种**带偏移的区域表达式**，表示「从 A 的 `(by·block_M, k·block_K)` 位置开始取一个与目的同形的子块」。
+- **算**：不是 `T.copy`，而是 `T.gemm`，把两个 shared 块相乘累加进 `C_local`。
+- **出**：`C_local`（fragment）→ `C_shared`（shared）→ `C`（全局），分两步走（原因见 4.3.5 与综合实践）。
 
 #### 4.3.3 源码精读
 
-循环内的两次加载（[L230](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L230)、[L232](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L232)）：
+K 循环内的两处加载在 [benchmark_tilelang_matmul.py:230-232](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L230-L232)：
 
 ```python
-T.copy(A[by * block_M, k * block_K], A_shared)   # global -> shared
-T.copy(B[bx * block_N, k * block_K], B_shared)   # global -> shared
+T.copy(A[by * block_M, k * block_K], A_shared)   # A 的第 by 个行块、第 k 个 K 段
+T.copy(B[bx * block_N, k * block_K], B_shared)   # B 的第 bx 个行块、第 k 个 K 段
 ```
 
-`A[by*block_M, k*block_K]` 是一个二维偏移，表示「从 A 的第 `by*block_M` 行、第 `k*block_K` 列开始」取一片，片大小由目的 `A_shared` 的形状 \((block_M, block_K)\) 决定。
+说明：
 
-写回的两段（[L243-L244](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L243-L244)）：
+- `A[by * block_M, k * block_K]` 表示从全局 A 起始偏移 `(by·block_M, k·block_K)`，取一个 `(block_M, block_K)` 子块——因为目的 `A_shared` 形状是 `(block_M, block_K)`，源区域自动对齐到这个形状。
+- A 用 `by`（M 方向块号）定位行，因为本块算的是 C 的第 `by` 个行块，对应的 A 数据就在 A 的第 `by` 个行段。
+- B 用 `bx`（N 方向块号）定位行——这是初学者最容易看漏的点：因为 B 的形状是 `(N, K)`，本块算的是 C 的第 `bx` 个列块，而 C 的列对应 B 的行（`C = A @ B^T`），所以要取 B 的第 `bx` 个行段。
+
+回写阶段的两处在 [benchmark_tilelang_matmul.py:243-244](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L243-L244)：
 
 ```python
-T.copy(C_local, C_shared)                          # fragment -> shared
-T.copy(C_shared, C[by * block_M, bx * block_N])    # shared -> global
+T.copy(C_local, C_shared)                        # fragment → shared
+T.copy(C_shared, C[by * block_M, bx * block_N])  # shared → 全局，写到本块对应的输出位置
 ```
 
-> 注意 `C_local → C_shared` 这一段没有写偏移，因为整个 `C_local`（\((block_M,block_N)\)）就是要整块搬；而 `C_shared → C` 要用 `(by, bx)` 定位写到 C 的哪一块。
+说明：
 
-#### 4.3.4 代码实践（源码阅读型）
+- 第一步把累加器 fragment 搬到 shared，做一次**布局重排**：fragment 是按线程寄存器分布的，shared 是按地址可索引的，这一步把数据「摊平」成规整布局。
+- 第二步把 shared 的 `block_M × block_N` 块写到全局 C 的 `(by·block_M, bx·block_N)` 位置——注意这里偏移用 `by` 配 M、`bx` 配 N，与网格映射一一对应。
+- 这两步都在 K 循环**之外**，意味着整个 K 维累加完成后只回写一次。
 
-1. **目标**：把内核里所有 `T.copy` 整理成「源 → 目的 + 方向」表。
-2. **步骤**：在文件中数出全部 `T.copy(`，逐一标注源缓冲层级、目的缓冲层级、方向。
-3. **观察**：你会得到 4 行表（见 4.3.2）。
-4. **预期**：能说出哪两段在循环内、哪两段在循环外。
-5. 待本地验证（可选）：跑一次内核，用 `best_result.kernel.get_kernel_source()`（见 [L275](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L275)）查看生成的 CUDA 代码里对应的 global/shared store 指令。
+#### 4.3.4 代码实践
+
+**实践目标**：把 4 处 `T.copy` 的「源/目的/层级/位置」整理成表，建立搬运全景。
+
+**操作步骤**：
+
+1. 通读 [benchmark_tilelang_matmul.py:228-244](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L228-L244)。
+2. 列一张表，记录每次 `T.copy`：源（含偏移表达式）、目的、源所在层级、目的所在层级、是在 K 循环内还是外。
+
+**需要观察的现象**：数据流向是否形成「全局→shared→fragment(算)→shared→全局」的闭环。
+
+**预期结果**（这就是本讲综合实践要求整理的表的雏形）：
+
+| # | 源 | 目的 | 源层级 | 目的层级 | 位置 |
+|---|---|---|---|---|---|
+| 1 | `A[by*block_M, k*block_K]` | `A_shared` | 全局 | shared | K 循环内 |
+| 2 | `B[bx*block_N, k*block_K]` | `B_shared` | 全局 | shared | K 循环内 |
+| 3 | `C_local` | `C_shared` | fragment | shared | K 循环外（回写） |
+| 4 | `C_shared` | `C[by*block_M, bx*block_N]` | shared | 全局 | K 循环外（回写） |
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：列出内核里所有 `T.copy` 的 (源, 目的) 及方向。
+**练习 1**：`T.copy(B[bx * block_N, k * block_K], B_shared)` 里为什么定位 B 用 `bx`（N 方向块号），而不是 `by`？
+**答案**：因为本块算的是输出 C 的第 `bx` 个**列**块。在 `C = A @ B^T` 中，C 的第 n 列等于 A 乘上 B 的第 n 行（B 已是 `N×K`，相当于转置后的 `K×N` 的第 n 列 = B 的第 n 行）。所以取 B 的第 `bx` 个行段。用 `by` 会取错数据。
 
-> **答**：
-> - `A[global] → A_shared`（global→shared）
-> - `B[global] → B_shared`（global→shared）
-> - `C_local[fragment] → C_shared`（fragment→shared）
-> - `C_shared → C[global]`（shared→global）
-
-**练习 2**：为什么写回走 `C_local → C_shared → C` 两段，而不是直接 `C_local → C`？
-
-> **答**：`C_local` 是寄存器片段，数据按 MMA 输出布局分散在各线程，直接写 global 难以合并。先汇总到 `C_shared`（连续二维），再一次合并写回 global，吞吐更高。这是设计层原因，文件注释未直接说明。
+**练习 2**：回写为什么是 `C_local → C_shared → C` 两步，而不是 `C_local → C` 一步？
+**答案**：`C_local` 是 fragment（寄存器），其逻辑元素按 MMA 硬件布局分散在各线程的寄存器里，与目标内存地址不是简单的行优先映射。直接写全局难以合并访存。先 `C_local → C_shared` 把数据重排成共享内存里规整、可索引的布局，再 `C_shared → C` 做一次合并的全局写，整体吞吐更高。这是 TileLang 块级 GEMM 的标准回写 idiom。
 
 ---
 
-### 4.4 T.gemm：TensorCore MMA 累加
+### 4.4 模块四：T.gemm——Tensor Core MMA
 
 #### 4.4.1 概念说明
 
-`T.gemm(A, B, C, transpose_B=..., policy=...)` 是 TileLang 的「**块级矩阵乘累加**」原语，它把一次小矩阵乘映射到 **Tensor Core 的 MMA 指令**（int8 输入、int32 累加）。它做的是**累加**而非赋值：
+`T.gemm(A, B, C, ...)` 是块级矩阵乘加原语，对应一条或多条 Tensor Core MMA（int8 时是 IMMA）指令。它的语义是：
 
 \[
-C \leftarrow C + A\,B^{\top}.
+C \leftarrow C + A \times B
 \]
 
-这是「块级」抽象：你只需声明三个缓冲和是否转置，TileLang 自动把它 lowering 成具体的 MMA 指令序列，不用手写 warp 切分和片段布局。
+即「读 A、读 B，做矩阵乘，**加到** C 上」。注意是「加到」而非「赋值」——所以 C 必须先清零（见 4.2 的 `T.clear`），且 K 循环里每段都累加进同一个 `C_local`。
+
+`T.gemm` 的输入 A、B 来自**共享内存**，输出累加器 C 是**fragment**——这与硬件 MMA 指令的数据通路完全一致。
 
 #### 4.4.2 核心流程
 
-本内核里：
+本内核只调一次 `T.gemm`（在 K 循环内）：
 
 \[
-\texttt{C\_local} \;\leftarrow\; \texttt{C\_local} \;+\; \texttt{A\_shared} \cdot \texttt{B\_shared}^{\top}.
+C_{\text{local}} \mathrel{+}= A_{\text{shared}} \times B_{\text{shared}}^{\top}
 \]
 
-形状核对（注意 `transpose_B=True`）：
+其中：
+
+- `A_shared ∈ ℤ^{block_M × block_K}`（int8）
+- `B_shared ∈ ℤ^{block_N × block_K}`（int8），因 `transpose_B=True` 实际参与相乘的是 `B_shared^T ∈ ℤ^{block_K × block_N}`
+- `C_local ∈ ℤ^{block_M × block_N}`（int32 累加器）
+
+逐段累加的数学等价性：K 循环遍历 `k = 0, 1, …, ⌈K/block_K⌉-1`，每段加载 A、B 的一个 `block_K` 切片并累加。由于矩阵乘对 K 维的可加性：
 
 \[
-\underbrace{\texttt{A\_shared}}_{(block_M,\,block_K)}
-\cdot
-\underbrace{\texttt{B\_shared}^{\top}}_{(block_K,\,block_N)}
-\;=\;
-\underbrace{(block_M,\,block_N)}_{\texttt{C\_local}}.
+A \times B^{\top} = \sum_{k_b} A_{[:,\,k_b]} \times \left(B_{[:,\,k_b]}\right)^{\top}
 \]
 
-每次 `T.gemm` 贡献的运算量为 \(2\cdot block_M\cdot block_N\cdot block_K\)，K 维一共 \(\lceil K/block_K\rceil\) 次，加起来正好 \(2MNK\)（每块的 M、N 维）。
+分块累加的结果与一次性算完整 K 维完全等价。这就是「K 维流水线累加」可行的数学基础。
 
-**为什么 B 声明成 \((N,K)\) 而不是 \((K,N)\)？** 因为这样 A、B 的 K 都是连续（最后一）维，K 维规约时两矩阵的 global 加载都能合并访存；转置交给 MMA 指令在内部完成，不增加访存代价。
+> 参数补充：`policy=policy` 控制 warp 切分策略（来自搜索空间的 `GemmWarpPolicy.Square`），决定 block 内的 warp 如何瓜分 `block_M × block_N` 输出块；`transpose_B=True` 表示对 B 取转置后再乘。这二者深入讨论留到 u3-l11。
 
 #### 4.4.3 源码精读
 
-[benchmark_tilelang_matmul.py:L235-L241](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L235-L241)：
+矩阵乘加在 [benchmark_tilelang_matmul.py:235-241](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L235-L241)：
 
 ```python
 T.gemm(
     A_shared,
     B_shared,
     C_local,
-    transpose_B=True,   # C_local += A_shared @ B_shared^T
-    policy=policy,       # warp 切分策略（详见 u3-l11）
+    transpose_B=True,
+    policy=policy,
 )
 ```
 
-- `transpose_B=True`：把第二个矩阵转置后再乘，对应 \(A\,B^{\top}\)。
-- `policy=policy`：决定 warp 如何切分这个块（如 `GemmWarpPolicy.Square`），属于 u3-l11 的内容。
-- 这一行会被 lowering 成 int8 Tensor Core 的 MMA 指令，结果累加进 `C_local`。
+说明：
 
-#### 4.4.4 代码实践（源码阅读型）
+- 前两个参数是输入（都来自 shared），第三个 `C_local` 既是输入（提供累加基）也是输出（写入累加结果）。这就是「`C += A @ B^T`」的语义。
+- `transpose_B=True`：因为 B 的形状是 `(N, K)`，要让 `A(block_M,block_K) × B^T(block_K,block_N)` 维度匹配，必须对 B 转置。这也呼应了内核顶部 `C = A @ B^T` 的定义。
+- `policy=policy`：warp 切分策略，来自 `get_configs`（见 [L80](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L80) 的 `T.GemmWarpPolicy.Square`）。
+- 这一行会被编译成 INT8 Tensor Core（IMMA）指令，单条指令完成一个固定尺寸（如 int8 下 `16×16×32`）的小矩阵乘加，比标量 dp4a 高效得多。
 
-1. **目标**：核对 `T.gemm` 的形状与累加语义。
-2. **步骤**：取一个 config（如 `block_M=block_N=block_K=128`），写出一次 `T.gemm` 的三个张量形状与贡献的 FLOPs。
-3. **观察**：`A_shared(128,128) @ B_shared(128,128)^T → C_local(128,128)`，每次贡献 \(2\cdot128^3\approx 4.19\times10^6\) 次运算。
-4. **预期**：当 \(K=8192\)、`block_K=128` 时，K 循环跑 64 次 `T.gemm`，累加得到该块的完整结果。
-5. 待本地验证（可选）：把 `transpose_B` 改成 `False`（并把 B 声明改成 \((K,N)\)）观察结果是否仍正确——这会帮你理解转置在数学上的等价关系（**示例代码，非项目原有**）。
+#### 4.4.4 代码实践
+
+**实践目标**：确认 `T.gemm` 的形状自洽与累加语义。
+
+**操作步骤**：
+
+1. 阅读 [benchmark_tilelang_matmul.py:228-241](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L228-L241)（整个 K 循环体）。
+2. 取 `block_M=block_N=block_K=128`，写出第 `k=0` 段 `T.gemm` 的三个操作数形状。
+3. 解释为什么 `T.gemm` 之前必须 `T.clear(C_local)`，以及为什么不需要对 `C_local` 在每段循环里重新清零。
+
+**需要观察的现象**：累加器在循环开始前清零一次，之后每段都「加到」它上面。
+
+**预期结果**：第 `k=0` 段 `A_shared(128,128) × B_shared(128,128)^T = (128,128)`，与 `C_local(128,128)` 匹配。`T.clear` 只在 K 循环**之前**调用一次（L225）；若在循环内每段都清零，就会把之前段的累加抹掉，等价于只算了最后一段，结果错误。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`transpose_B=True` 在数学上对应什么？为什么 B 要声明成 \((N,K)\)？
+**练习 1**：`T.gemm` 的第三个参数 `C_local` 既是输入又是输出，会不会有数据竞争？
+**答案**：不会。`C_local` 是 fragment，其 `block_M × block_N` 元素由 block 内各 warp/线程按 `policy` 切分，每个元素归唯一一个线程持有，不存在多线程写同一元素。MMA 指令本身也保证「读旧值、加新值、写回」是原子完成的。
 
-> **答**：对应 \(C \leftarrow C + A\,B^{\top}\)。B 声明成 \((N,K)\) 使 K 为连续维，与 A 一致，K 维规约时两矩阵加载都能合并访存；转置在 MMA 内部完成。
-
-**练习 2**：一次 `T.gemm` 算的是多大的矩阵乘？贡献多少运算量？
-
-> **答**：\((block_M,block_K)\@(block_K,block_N)=(block_M,block_N)\)，贡献 \(2\cdot block_M\cdot block_N\cdot block_K\) 次乘加运算。
+**练习 2**：如果去掉 `transpose_B=True`，会发生什么？
+**答案**：`A_shared(block_M, block_K) × B_shared(block_N, block_K)` 维度不匹配（第二个矩阵的行数 `block_N` 不等于第一个的列数 `block_K`，除非 `block_N == block_K`），编译期就会报错或算出错误形状。`transpose_B=True` 是为了让 B 以 `(block_K, block_N)` 的有效形态参与乘法。
 
 ---
 
-### 4.5 T.Pipelined：K 维软件流水线
+### 4.5 模块五：T.Pipelined——软件流水
 
 #### 4.5.1 概念说明
 
-朴素的做法是「加载第 k 块 → 算第 k 块 → 加载第 k+1 块 → 算第 k+1 块」，加载和计算**串行**，访存延迟白白浪费。**软件流水线（software pipelining）**用多份共享内存缓冲，让「算第 k 块」和「预取第 k+1 块」**重叠**起来，把访存延迟藏在计算里。
+`T.Pipelined` 是 TileLang 表达**软件流水**的循环构造。普通 `for` 循环里，每段都是「先搬数据、再算」，搬运与计算串行，Tensor Core 在搬运时空闲。`T.Pipelined` 把循环体改成多级流水：当 Tensor Core 算第 `k` 段时，提前把后面几段的数据搬进共享内存，让「搬运」和「计算」重叠。
 
-TileLang 用 `for k in T.Pipelined(range, num_stages=N)` 表达这件事：`num_stages` 就是流水线级数（也对应多缓冲的份数）。
+`num_stages` 控制流水深度：
+
+- `num_stages = 0`：关闭流水，退化为普通串行循环。
+- `num_stages = 1`：单级缓冲，基本算双缓冲的雏形。
+- `num_stages = 2/3`：多级流水，搬算重叠更深，但需要更多共享内存做缓冲。
 
 #### 4.5.2 核心流程
 
-把 K 维切成 \(\lceil K/block_K\rceil\) 段，对每段重复「取 A、取 B、gemm 累加」：
+把 K 循环画成时间线（以 `num_stages=2` 为例）：
 
 ```
-for k in [0 .. ⌈K/block_K⌉):
-    if num_stages >= 1: 预取下一块的 A/B 到额外 shared 缓冲   # 与下面计算重叠
-    C_local += A_shared_k @ B_shared_k^T                      # TensorCore 计算
+时间段:        t0       t1       t2       t3       t4       ...
+搬 load k=0  [======]
+搬 load k=1           [======]
+算 gemm k=0                    [======]
+搬 load k=2                             [======]
+算 gemm k=1                                      [======]
+算 gemm k=2                                               [======]
 ```
 
-`num_stages` 的含义：
+理想情况下，「搬」与「算」错峰重叠，Tensor Core 几乎不再等待搬运。代价是：流水需要在共享内存里同时持有 `num_stages` 份 `A_shared`/`B_shared` 缓冲（即 4.2 里粗算的 shared 用量会被放大），所以 `num_stages` 不能无限大——它和 `block_*` 一起受共享内存容量约束。这也解释了 u3-l8 里 `get_configs` 为什么要把 `num_stages ∈ {0,1,2,3}` 放进搜索空间（[L78](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L78)）：不同 shape 下最佳流水深度不同，需调优决定。
 
-- `num_stages=0`：不做软流水，单缓冲，加载与计算串行。
-- `num_stages=1`：双缓冲，加载第 k+1 块与计算第 k 块重叠。
-- `num_stages=2/3`：更深流水，更多缓冲、更彻底地隐藏延迟。
-
-代价：每多一级，就要多一份 `A_shared`/`B_shared`，共享内存占用随级数线性增长。所以搜索空间里 `num_stages ∈ {0,1,2,3}`（见上一讲 `get_configs`）。
+> 原理补充：流水的本质是用空间（多份缓冲）换时间（隐藏访存延迟）。一个 GEMM 是「访存密集」还是「计算密集」，取决于搬运量与计算量之比。分块越大，计算/搬运比越高，越值得用更深流水；但块越大共享内存占用也越多。这是 GEMM 调优的核心矛盾。
 
 #### 4.5.3 源码精读
 
-[benchmark_tilelang_matmul.py:L228-L241](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L228-L241) —— K 维流水线循环，包住两次 `T.copy` 加载和一次 `T.gemm`：
+K 循环的流水构造在 [benchmark_tilelang_matmul.py:228](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L228)：
 
 ```python
 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-    T.copy(A[by * block_M, k * block_K], A_shared)   # 取 A 的第 k 子块
-    T.copy(B[bx * block_N, k * block_K], B_shared)   # 取 B 的第 k 子块
-    T.gemm(A_shared, B_shared, C_local,
-           transpose_B=True, policy=policy)          # C_local += A_k @ B_k^T
+    T.copy(A[by * block_M, k * block_K], A_shared)
+    T.copy(B[bx * block_N, k * block_K], B_shared)
+    T.gemm(A_shared, B_shared, C_local, transpose_B=True, policy=policy)
 ```
 
-- `T.ceildiv(K, block_K)`：K 维块数，即循环总轮数。
-- `num_stages=num_stages`：流水线级数，来自 config。
-- 循环体被 `T.Pipelined` 包住后，TileLang 自动把「加载」和「gemm」重排成可重叠的多缓冲流水。
+说明：
 
-#### 4.5.4 代码实践（源码阅读型）
+- `T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages)`：循环次数是 K 维的段数 `⌈K/block_K⌉`，`num_stages` 来自搜索空间（由 autotuner 在 `{0,1,2,3}` 里选最优，见 [L78](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L78) 与 [L156](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L156) 的 `num_stages=None` 占位）。
+- 循环体只有三句：两搬一算。`T.Pipelined` 会自动把这三句改造成「搬算重叠」的流水调度，并隐式地为 `A_shared`/`B_shared` 分配多份缓冲（用户无需手写多缓冲）。
+- 底层通常映射到 CUDA 的异步拷贝（`cp.async`）+ 多缓冲（multi-buffer），但 TileLang 把这些细节都藏在了 `T.Pipelined` 里。
 
-1. **目标**：理解 `num_stages` 对结构与共享内存占用的影响。
-2. **步骤**：在上一讲 `get_configs` 的 `else` 分支里找到 `num_stages = [0, 1, 2, 3]`（[L78](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L78)），对照本节的循环结构。
-3. **观察**：`num_stages` 越大，`A_shared`/`B_shared` 实际占用的 shared memory 越多。
-4. **预期**：能口述「`num_stages=0` 时加载与计算串行；`num_stages=2` 时有三块缓冲在轮转」。
-5. 待本地验证（可选）：跑 `--with_roller` 与不带 roller 两种模式，比较最终选出的 `num_stages`（见 [L280](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L280) 打印的 `Best config`）。
+#### 4.5.4 代码实践
+
+**实践目标**：理解 `num_stages` 对行为的影响（源码阅读型，性能待本地验证）。
+
+**操作步骤**：
+
+1. 阅读 [benchmark_tilelang_matmul.py:228](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L228) 与 [L156](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L156)。
+2. 假设你想手工对比 `num_stages=0` 与 `num_stages=2` 的差异。在 `get_configs` 的非 Roller 分支（[L75-L103](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L75-L103)）里，临时把 `num_stages` 列表改成 `[0]` 跑一次、再改成 `[2]` 跑一次（**只描述改动点，不要真的改源码**——本讲不允许修改源码，这是思路说明）。
+
+**需要观察的现象**：理论上 `num_stages=0` 时搬算串行、Tensor Core 空闲多、latency 更高；`num_stages=2` 时搬算重叠、latency 更低，但共享内存占用更大。
+
+**预期结果**：**待本地验证**。在真实 H100 + int8 shape 上跑 `benchmark_tilelang_matmul.sh`，对比两次的 `Best latency (s)`（注意：u3-l8 已指出该标签写 `(s)` 但实际单位是 ms，见 [L278](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L278)）。预期 `num_stages=2` 的 latency 明显小于 `num_stages=0`。
 
 #### 4.5.5 小练习与答案
 
-**练习 1**：`num_stages=0` 与 `num_stages=2` 的区别是什么？
+**练习 1**：`num_stages` 越大越好吗？限制因素是什么？
+**答案**：不是。`num_stages` 越大，需要的共享内存缓冲越多（`A_shared`/`B_shared` 各要 `num_stages` 份），会撞上 block 共享内存上限；同时超出计算/搬运比所需的流水深度后，再加深也不再带来收益。所以它在 `{0,1,2,3}` 里被当作调优旋钮，由 autotuner 按实际 shape 选。
 
-> **答**：`num_stages=0` 不做软流水，单缓冲，加载与计算串行；`num_stages=2` 用多份 shared 缓冲，加载第 k+1 块与计算第 k 块重叠，隐藏访存延迟，但占用更多 shared memory。
-
-**练习 2**：为什么 `num_stages` 不能无限大？
-
-> **答**：每多一级就要多一份 `A_shared`/`B_shared` 缓冲，shared memory 占用线性增长，受 SM 的 shared memory 容量限制；所以搜索空间只取 `{0,1,2,3}`。
+**练习 2**：如果把 `T.Pipelined(...)` 换成普通 `for k in range(...)`（假设 TileLang 允许），最直接的影响是什么？
+**答案**：失去软件流水，搬运（`T.copy`）与计算（`T.gemm`）退化为串行，每段都要「等搬完才能算」，访存延迟无法隐藏，性能显著下降。这正是 `T.Pipelined` 存在的意义。
 
 ---
 
-## 5. 综合实践：画出块级 GEMM 的完整数据搬运路径
+## 5. 综合实践
 
-**任务**：把本讲五个模块串起来，整理出整张「缓冲分配 + 搬运 + 计算」表，并画出数据流。
+本讲综合实践就是把五要素串起来，完成一个完整的「数据搬运全景表 + 回写顺序解释」。
 
-### 步骤 1：缓冲分配表
+### 5.1 任务
 
-根据 [L213-L219](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L213-L219)，填写：
+通读整段内核 [benchmark_tilelang_matmul.py:191-246](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L191-L246)，完成两件事：
 
-| 缓冲 | 层级 | 形状 | dtype | 谁负责写 | 谁负责读 |
+1. **整理 A/B/C 的 shared/fragment 分配表，以及每次 `T.copy` 的（源, 目的）表**。
+2. **解释回写阶段为什么是 `C_local → C_shared → C 全局`，而不是直接 `C_local → C 全局`**。
+
+### 5.2 参考答案
+
+**第一张表：存储分配**
+
+| 变量 | 分配原语 | 形状 | dtype | 所在层级 | 角色 |
 |---|---|---|---|---|---|
-| `A_shared` | shared | (block_M, block_K) | int8 | `T.copy(A→A_shared)` | `T.gemm` |
-| `B_shared` | shared | (block_N, block_K) | int8 | `T.copy(B→B_shared)` | `T.gemm` |
-| `C_local` | fragment | (block_M, block_N) | int32 | `T.gemm` 累加 / `T.clear` | `T.copy(C_local→C_shared)` |
-| `C_shared` | shared | (block_M, block_N) | int32 | `T.copy(C_local→C_shared)` | `T.copy(C_shared→C)` |
+| `A_shared` | `alloc_shared` | `(block_M, block_K)` | int8 | 共享内存 | 缓存 A 的一段（待算输入） |
+| `B_shared` | `alloc_shared` | `(block_N, block_K)` | int8 | 共享内存 | 缓存 B 的一段（待算输入） |
+| `C_local` | `alloc_fragment` | `(block_M, block_N)` | int32 | 寄存器 fragment | MMA 累加器（K 循环累加） |
+| `C_shared` | `alloc_shared` | `(block_M, block_N)` | int32 | 共享内存 | 回写中转（布局重排） |
 
-### 步骤 2：搬运与计算顺序表
+**第二张表：每次 T.copy 的（源, 目的）**
 
-根据 [L228-L244](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L228-L244)：
+| # | 源（含偏移） | 目的 | 源层级 → 目的层级 | 在 K 循环内/外 | 行号 |
+|---|---|---|---|---|---|
+| 1 | `A[by*block_M, k*block_K]` | `A_shared` | 全局 → shared | 内 | [L230](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L230) |
+| 2 | `B[bx*block_N, k*block_K]` | `B_shared` | 全局 → shared | 内 | [L232](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L232) |
+| 3 | `C_local` | `C_shared` | fragment → shared | 外（回写） | [L243](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L243) |
+| 4 | `C_shared` | `C[by*block_M, bx*block_N]` | shared → 全局 | 外（回写） | [L244](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L244) |
 
-| 顺序 | 语句 | (源 → 目的) | 方向 | 何时执行 |
-|---|---|---|---|---|
-| 0 | `T.clear(C_local)` | — | 清零 | 循环前一次 |
-| 1 | `T.copy(A[...], A_shared)` | global→shared | 加载 | 循环内每轮 |
-| 2 | `T.copy(B[...], B_shared)` | global→shared | 加载 | 循环内每轮 |
-| 3 | `T.gemm(A_shared,B_shared,C_local)` | shared→fragment | 计算（MMA 累加） | 循环内每轮 |
-| 4 | `T.copy(C_local, C_shared)` | fragment→shared | 写回中转 | 循环后一次 |
-| 5 | `T.copy(C_shared, C[...])` | shared→global | 最终写回 | 循环后一次 |
-
-### 步骤 3：画出数据流图
-
-用文字箭头画出（global 在最外、register 在最内）：
+加上 K 循环内的 `T.gemm`（[L235-L241](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py#L235-L241)）：`A_shared, B_shared → C_local`（shared → fragment，累加）。整个数据路径成闭环：
 
 ```
-global A ──copy──► A_shared (shared) ┐
-                                      ├──gemm(MMA)──► C_local (fragment, 累加)
-global B ──copy──► B_shared (shared) ┘                    │
-   ↑ 循环 K/block_K 次，受 T.Pipelined 软流水重叠          │
-                                                          ▼
-                                          C_local ──copy──► C_shared (shared) ──copy──► global C
+全局 A ──①──▶ A_shared ──┐
+全局 B ──②──▶ B_shared ──┤
+                          └─gemm─▶ C_local ──③──▶ C_shared ──④──▶ 全局 C
+              （K 循环内，每段累加）            （K 循环外，回写一次）
 ```
 
-### 步骤 4：回答关键问题
+**第二问的解释（为什么先 `C_local → C_shared` 再 `→ C 全局`）**：
 
-**为何写回要走 `C_local → C_shared → C` 两段？**
+1. `C_local` 是 fragment（寄存器），其 `block_M × block_N` 个逻辑元素按 MMA 硬件输出布局分散在 block 内各线程的寄存器里，**与目标全局内存的行优先地址不是简单的对应关系**。
+2. 若直接 `C_local → C 全局`，每个线程要根据 fragment 布局反推自己该写哪些全局地址，这些地址通常是散乱的，导致全局写**不合并**（non-coalesced），显存带宽利用率极差。
+3. `C_local → C_shared` 这一步本质是一次**布局重排**：fragment 把数据交出到共享内存，由 block 内线程协作把它排成规整、可按地址索引的 `block_M × block_N` 块。共享内存是 block 内所有线程都可寻址的「公共黑板」，天然适合做这种重排。
+4. `C_shared → C[by*block_M, bx*block_N]` 随后做一次**合并的 2D block store**：线程们按相邻地址协同写入，对齐良好，带宽利用率高。
 
-> `C_local` 是寄存器片段，数据按 MMA 输出布局分散在各线程，直接写 global 难以合并。先汇总到 `C_shared`（连续二维布局），再一次合并写回 global，得到最高的写吞吐。这是 CUTLASS/TileLang 风格「shared memory epilogue」的通用做法（文件注释未直接说明原因，此为设计层解释）。
+简言之：**共享内存充当 fragment（寄存器分布布局）与全局内存（行优先布局）之间的「布局转换 + 合并写」中转站**，这是 TileLang 块级 GEMM 回写的标准 idiom，也是它比直接写回更高效的原因。
 
-### 验收标准
+### 5.3 进阶（可选）
 
-- 能凭表与图，向别人讲清「数据从哪进、在哪算、从哪出」。
-- 能指出循环内的 3 步（2 次加载 + 1 次 gemm）和循环外的 2 步写回。
-- 待本地验证（可选）：用 [benchmark_tilelang_matmul.sh](https://github.com/tile-ai/tilelang-benchmark/blob/b658f7e9f326156d11a09dff1e9825fa6d9a8767/hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.sh) 跑一个 shape（如 `1024 1024 8192`，int8/int32），观察 `Best config` 里 `block_M/block_N/block_K/num_stages` 的实际取值，并对照本讲的表格理解它选了什么样的搬运路径。
-
----
+试着把本讲的五要素对应到 u2-l6 讲过的 Triton 基线：Triton 用 `tl.program_id` 做网格映射（对应 `T.Kernel`）、`tl.load`/`tl.store` 做搬运（对应 `T.copy`）、`tl.dot` 做乘加（对应 `T.gemm`）。你会发现 TileLang 的 `T.Pipelined` 和 fragment/shared 的显式分层是它比 Triton 更「贴近硬件」的地方——代价是写法更繁，收益是对 Tensor Core 调度和软流水有更细粒度的控制。
 
 ## 6. 本讲小结
 
-- **网格映射**：`T.Kernel(⌈N/block_N⌉, ⌈M/block_M⌉) as (bx, by)`，`bx` 绑定 N（列块）、`by` 绑定 M（行块），后续所有索引都遵循「M 用 by、N 用 bx」。
-- **缓冲分配**：`A_shared`/`B_shared`/`C_shared` 在 shared memory，`C_local` 在 fragment（寄存器）；累加器 `C_local` 用 `accum_dtype`（int32）避免溢出，且进入循环前必须 `T.clear`。
-- **数据搬运**：内核共有 4 次 `T.copy`——循环内 2 次 global→shared 加载，循环外 2 次写回（fragment→shared→global）。
-- **块级矩阵乘**：`T.gemm(..., transpose_B=True, policy=...)` 做 \(C \leftarrow C + A\,B^{\top}\)，lowering 成 int8 Tensor Core 的 MMA 指令；B 声明成 \((N,K)\) 使 K 连续、访存合并。
-- **软件流水线**：`for k in T.Pipelined(...)` 用 `num_stages` 份多缓冲，把加载与 gemm 重叠，隐藏访存延迟，代价是 shared memory 占用随级数增长。
-- **以代码为准**：文件注释与代码在精度上有出入（注释说 half-precision、代码是 int8，且 shell 只跑 int8/int32），`Best latency (s)` 实为 ms——读源码时始终以代码与下游脚本为准。
+- 块级 GEMM 的**五要素**：`T.Kernel`（网格映射）、`alloc_shared`/`alloc_fragment`（存储分配）、`T.copy`（数据搬运）、`T.gemm`（Tensor Core MMA）、`T.Pipelined`（软件流水）。
+- `T.Kernel` 把输出 `(M,N)` 切成 `block_M × block_N` 块，`bx` 绑定 N 方向、`by` 绑定 M 方向；每个线程块算一个输出子块。
+- 片上存储分两类：`alloc_shared` 给「待算输入」（A_shared/B_shared）和「回写中转」（C_shared），`alloc_fragment` 给「累加器」（C_local）；累加器使用前必须 `T.clear` 清零。
+- K 维被切成 `block_K` 段循环累加，`T.gemm` 做 `C_local += A_shared @ B_shared^T`（`transpose_B=True`，因为 B 是 `N×K`）；分块累加在数学上等价于完整 K 维相乘。
+- 回写是 `C_local → C_shared → C 全局` 两步：共享内存负责把 fragment 的寄存器分布布局重排成可合并写的规整布局。
+- 本文件多处「注释与代码不符」：注释说 half-precision / accumulate float，代码实为 **int8 / int32**（驱动脚本也只跑 int8）。结构讲解与精度无关，int8 细节留到 u4-l12。
 
 ## 7. 下一步学习建议
 
-本讲把内核体拆成了「五要素」，但有两个细节被刻意留到了后面：
-
-- **`T.use_swizzle` 与 `policy=GemmWarpPolicy`**：栅格化（rasterization）如何提升 L2 命中、warp 如何切分块——见 **u3-l11（swizzle、warp 策略与调优旋钮）**。
-- **`tilelang.carver` 与 Roller 自动调优**：`with_roller=True` 时搜索空间怎么由 Roller 推导、`num_stages` 等字段如何换算——见 **u3-l10（tilelang.carver 与 Roller 自动调优）**。
-
-读完 u3-l10、u3-l11 后，建议回到本讲的「综合实践」表格，把 `Best config` 里每个字段（`block_M/N/K`、`num_stages`、`thread_num`、`policy`、`enable_rasteration`）逐一对应回内核里的某个决策，完成对块级 GEMM 的闭环理解。之后进入第 4 单元，看多精度与量化矩阵乘如何复用这套骨架。
+- 本讲只解剖了**手工搜索空间**下的块级 GEMM 内核结构，但没讲搜索空间怎么被高效生成。下一步推荐 [u3-l10（tilelang.carver 与 Roller 自动调优）](u3-l10-roller-autotuning.md)：看 Roller 如何用 `MatmulTemplate.recommend_hints` 推导 top-10 个高质量 config，替代 `get_configs` 里 `itertools.product` 的 1296 个暴搜配置。
+- 如果你对 `T.use_swizzle`、`policy=GemmWarpPolicy.Square` 这些「调优旋钮」如何影响 L2 命中与 bank conflict 感兴趣，接着读 [u3-l11（swizzle、warp 策略与调优旋钮）](u3-l11-swizzle-and-warp-policy.md)。
+- 想了解 int8 / 多精度路径与 dtype 切换，跳到第 4 单元 [u4-l12（int8 与多精度 GEMM）](u4-l12-int8-multiprecision-gemm.md)。
+- 也可以回顾 [u2-l6（Triton 基线）](u2-l6-triton-baseline.md)，对照「Triton 指针式内核」与「TileLang 声明式块级内核」在抽象层级上的差异，巩固本讲五要素的定位。
