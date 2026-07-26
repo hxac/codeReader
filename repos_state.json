@@ -15617,7 +15617,7 @@
     },
     "futz12/ncnn_llm": {
       "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-25T18:01:56Z"
+      "last_run_at": "2026-07-25T23:01:55Z"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -24616,7 +24616,7 @@
     "tensorflow/tensorflow": {
       "prompt_hash": "b21aef51792b02df",
       "last_error": "quota exhausted; will resume next window",
-      "last_run_at": "2026-07-25T18:01:56Z",
+      "last_run_at": "2026-07-25T23:01:55Z",
       "lectures": {
         "u1-l1": {
           "status": "keep",
@@ -24757,64 +24757,62 @@
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 4.017519,
+          "cost": 4.451181,
           "error": null
         },
         "u7-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.176415,
+          "cost": 1.646391,
           "error": null
         },
         "u7-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 2.642696000000001,
+          "cost": 1.8320150000000002,
           "error": null
         },
         "u7-l4": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.7352269999999996,
+          "cost": 1.8188579999999996,
           "error": null
         },
         "u8-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.643608,
+          "cost": 2.1168,
           "error": null
         },
         "u8-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 2.0831980000000003,
+          "cost": 2.4400630000000003,
           "error": null
         },
         "u8-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.591244,
+          "cost": 3.115982,
           "error": null
         },
         "u9-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.617858,
-          "error": null
-        },
-        "u9-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"64439ad1-b796-459e-85fa-34bda44d11f8\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"a72e9ee2-7652-47ca-98e1-6a6775669f66\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+        },
+        "u9-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
         },
         "u9-l3": {
           "status": "pending",
@@ -24822,12 +24820,12 @@
           "retries": 0
         }
       },
-      "manifest_head": "6a6ae5d9d29b922f3f16ef297b33de06ba0c5131",
-      "prev_head": "92725c7290ff3c4f1ca8125eebd69a70e02ae03b",
+      "manifest_head": "44d7a2dcda991165f62cdd9633b7c6421610cdda",
+      "prev_head": "6a6ae5d9d29b922f3f16ef297b33de06ba0c5131",
       "phase": "workers",
       "mode": "incremental",
       "tutorial_path": "tutorials/tensorflow/tensorflow/tensorflow-tutorial",
-      "last_head": "6a6ae5d9d29b922f3f16ef297b33de06ba0c5131"
+      "last_head": "44d7a2dcda991165f62cdd9633b7c6421610cdda"
     },
     "NVIDIA/TensorRT-Edge-LLM": {
       "prompt_hash": "b21aef51792b02df",
@@ -25535,81 +25533,109 @@
           "error": null
         },
         "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.287837,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.073747,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.09963,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0242989999999998,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1697220000000002,
+          "error": null
+        },
+        "u6-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.299164,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.415559,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.00647,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.4725010000000003,
+          "error": null
+        },
+        "u8-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.43252,
+          "error": null
+        },
+        "u8-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2194749999999999,
+          "error": null
+        },
+        "u8-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.094533,
+          "error": null
+        },
+        "u9-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.2251910000000001,
+          "error": null
+        },
+        "u9-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.400893,
+          "error": null
+        },
+        "u10-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"5e0bfe4e-5a62-432b-b6aa-addc8d527d77\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u8-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7cf9c6b1-d1ca-4b5a-a2cc-066384774e60\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u10-l2": {
           "status": "pending",
@@ -25628,7 +25654,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/NVIDIA/TileGym/TileGym-tutorial",
       "last_head": "efbfefc760f608e4b04d32c36813a1291fe36f3c",
-      "last_run_at": "2026-07-25T18:01:56Z",
+      "last_run_at": "2026-07-25T23:01:55Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "deepseek-ai/TileKernels": {
@@ -25698,76 +25724,102 @@
           "error": null
         },
         "u4-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9188399999999999,
+          "error": null
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8152019999999999,
+          "error": null
+        },
+        "u4-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.742958,
+          "error": null
+        },
+        "u4-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.981043,
+          "error": null
+        },
+        "u5-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0186499999999998,
+          "error": null
+        },
+        "u5-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.952743,
+          "error": null
+        },
+        "u5-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9547360000000001,
+          "error": null
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.105749,
+          "error": null
+        },
+        "u5-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1257199999999998,
+          "error": null
+        },
+        "u6-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.99393,
+          "error": null
+        },
+        "u6-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.164705,
+          "error": null
+        },
+        "u6-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.987039,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.219889,
+          "error": null
+        },
+        "u7-l2": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"63a53b69-efd3-470a-88b3-66259413c058\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
-        },
-        "u4-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u4-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u5-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u6-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"245ecb2e-0bc3-4bc0-929a-42e1e9f97b69\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u7-l3": {
           "status": "pending",
@@ -25831,7 +25883,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/deepseek-ai/TileKernels/TileKernels-tutorial",
       "last_head": "36d9e45d38e204ebb87e6f6e833821eee0482fe5",
-      "last_run_at": "2026-07-25T18:01:56Z",
+      "last_run_at": "2026-07-25T23:01:55Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "tile-ai/tilelang": {},
