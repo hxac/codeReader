@@ -1,0 +1,386 @@
+# 权重归一化、TP 掩码、aux 负载与完整路由参考
+
+## 1. 本讲目标
+
+本讲是 MoE 路由单元的收尾篇。前四讲（u5-l1 ~ u5-l4）已经把路由链路的「打分 → top-k 选取 → 分组粗筛 → 融合派发」走了一遍。本讲聚焦链路里三个相对独立、但都不可或缺的「后处理」算子，并用一份纯 PyTorch 写的**完整路由参考**把它们串成一条端到端流水线。
+
+学完后你应该能够：
+
+1. 说清 `normalize_weight` 做的「top-sum 归一化」是什么，以及它为何要在分母里加一个 `1e-20`。
+2. 用一个具体例子推演 `mask_indices_by_tp` 的 EP/TP 掩码与本地重映射数学，明白哪些专家会被置 `-1`、哪些会被改写成本地下标。
+3. 写出 `aux_fi` 计算的负载均衡指标 \(f_i\) 的公式，并理解它的两级直方图（shared → global）为何能缓解原子竞争。
+4. 对照 `tile_kernels/torch/topk.py` 中的 `top2_sum_gate`，按 11 个步骤复述从 `logits` 到 `(topk_idx, topk_weights)` 的全过程，重点讲透 **logical→physical 映射** 与 **EP/TP 掩码** 两段逻辑。
+
+## 2. 前置知识
+
+在进入正文前，先用三段话把本讲需要的背景补齐（详细版本见依赖讲义）。
+
+**MoE 路由的产物。** 路由的最后要给每个 token 产出两样东西：选中的专家下标 `topk_idx`（形状 `(num_tokens, num_topk)`，int64）和对应的混合权重 `topk_weights`（同形状，float32）。`topk_idx` 来自 u5-l2 的 top-k 选取，`topk_weights` 来自打分函数（u5-l1）。本讲处理的正是这两个产物在「派发到具体 GPU」之前的最后几道加工。
+
+**EP 与 TP 两种并行。** 分布式 MoE 把专家切分到多张卡上：
+
+- **EP（Expert Parallelism，专家并行）**：不同专家分布在不同 rank 上，全局专家下标空间被等分成若干段，每段归一个 EP rank。
+- **TP（Tensor Parallelism，张量并行）**：在同一个数据并行组内，相同的专家被复制到多张卡上，每张卡只负责该专家的一部分计算。
+
+本讲的 `mask_indices_by_tp` 就是回答一个核心问题：给定一个**全局**专家下标，它属不属本卡（本 TP rank）？如果属，它在**本卡本地**的下标又是多少？
+
+**辅助损失（auxiliary loss）。** MoE 训练有个著名的「表征坍塌」问题：路由器倾向于把几乎所有 token 都送给少数几个「热门」专家，其余专家闲置。为了让负载均衡，训练时加一个辅助损失项（GShard / Switch Transformer / DeepSeek-MoE 都有类似设计）：
+
+\[
+L_{\text{aux}} = \alpha \cdot N \cdot \sum_{i} f_i \cdot P_i
+\]
+
+其中 \(f_i\) 是「被路由到专家 \(i\) 的 token 比例」（frequency indicator），\(P_i\) 是路由器分配给专家 \(i\) 的平均概率，\(N\) 是专家总数。本讲的 `aux_fi` 算的就是这个 \(f_i\)。
+
+## 3. 本讲源码地图
+
+本讲涉及的关键文件如下：
+
+| 文件 | 作用 |
+| --- | --- |
+| `tile_kernels/moe/normalize_weight_kernel.py` | top-sum 权重归一化算子（TileLang kernel + wrapper） |
+| `tile_kernels/moe/mask_indices_by_tp_kernel.py` | EP/TP 掩码与本地下标重映射算子 |
+| `tile_kernels/moe/aux_fi_kernel.py` | 负载均衡指标 \(f_i\) 的两级直方图 kernel |
+| `tile_kernels/torch/topk.py` | 纯 PyTorch 版**完整路由参考** `top2_sum_gate`（含 `stable_topk`、`topk_sum_and_topk_group_idx`） |
+| `tile_kernels/torch/moe.py` | 上面三个算子的 PyTorch 参考实现（`normalize_weight`/`mask_indices_by_tp`/`aux_fi`），测试对拍用 |
+| `tile_kernels/moe/top2_sum_gate_kernel.py` | TileLang 版完整路由 kernel，本讲用于和参考交叉对照（u5-l2 已精读） |
+
+四个最小模块：`normalize_weight_kernel`、`mask_indices_by_tp_kernel`、`aux_fi_kernel`、`torch/topk`。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 normalize_weight：top-sum 权重归一化
+
+#### 4.1.1 概念说明
+
+top-k 选取给出的是「原始分数」（如 sigmoid 值、softmax 值），它们并不保证和为 1。但 MoE 最终要把多个专家的输出按权重相加，这个权重通常要求是一个**凸组合**（和为 1），再乘一个整体缩放 `routed_scaling_factor`。
+
+「top-sum 归一化」就是把每个权重除以**所有 top-k 权重之和**：
+
+\[
+\hat{w}_i = \frac{w_i}{\sum_{j} w_j}
+\]
+
+为什么需要一个独立算子？因为在完整路由 kernel `top2_sum_gate` 里，归一化是**融合**在主 kernel 内部（一个 warp 顺带做完）的；但在一些把路由拆成多步、或只做增量更新的场景里，需要单独跑一次归一化。`normalize_weight` 就是这个「拆出来」的独立版本。
+
+#### 4.1.2 核心流程
+
+每个 token 一行，一行用一个线程处理：
+
+1. **分块**：`num_threads = 128`，每 block 处理 128 行，`num_blocks = ceildiv(num_tokens, 128)`。
+2. **加载**：每个线程把自己那一行的 `num_topk` 个权重用 `T.vectorized` 读进 local 寄存器。
+3. **求和**：用一个初值为 `1e-20` 的累加器，`T.unroll` 把 `num_topk` 个权重加进去。注意这个 `1e-20` 是**加到分母里**的，不是单纯的防零 clamp。
+4. **写分母**：把（含 `1e-20` 的）和写到 `denominator[row]`。
+5. **归一化**：`T.vectorized` 逐个做除法，写到 `normalized_weights`。
+
+关键细节：分母里加了 `1e-20`，所以归一化后的权重之和是 \(\frac{\sum w_j}{\sum w_j + 10^{-20}}\)，**接近 1 但不严格等于 1**。这是刻意的——源码注释明说「要与 `top2_sum_gate` kernel 对齐」（后者也用 `1e-20` 起步累加）。
+
+#### 4.1.3 源码精读
+
+kernel 构造函数与 JIT 装饰（注意它关掉了 warp 特化，与同模块其它算子一致）：
+
+[tile_kernels/moe/normalize_weight_kernel.py:7-16](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/normalize_weight_kernel.py#L7-L16) — `@tilelang.jit` 装饰 kernel 构造器，`num_topk` 是编译期参数（不同 topk 各自特化一份产物），`num_tokens` 用 `T.dynamic` 声明为运行时符号。
+
+prim_func 主体，一眼看穿「一行一线程」的结构：
+
+[tile_kernels/moe/normalize_weight_kernel.py:29-40](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/normalize_weight_kernel.py#L29-L40) — `sum` 累加器初值 `1e-20`，先 `vectorized` 读、`unroll` 加、再 `vectorized` 除。读/写连续内存用向量化，累加是小次数固定循环用 unroll。
+
+wrapper 部分是 u2-l1 讲过的标准四步（校验 → 分配输出 → 触发/命中 JIT → 启动）：
+
+[tile_kernels/moe/normalize_weight_kernel.py:55-70](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/normalize_weight_kernel.py#L55-L70) — 注意 `num_tokens > 0` 的零规模守卫；它**不接收** `routed_scaling_factor`，只做纯归一化，这一点和融合版的 `top2_sum_gate` 不同。
+
+PyTorch 参考实现，逻辑完全对应：
+
+[tile_kernels/torch/moe.py:77-93](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/moe.py#L77-L93) — `denominator = full(1e-20)` 起步，逐列累加，最后相除。和 kernel 在数值上位精确对齐（测试用 `assert_equal` 而非浮点相似度）。
+
+#### 4.1.4 代码实践
+
+1. **实践目标**：验证归一化后每行权重之和「接近 1 但略小于 1」，并定位这个偏差的来源。
+2. **操作步骤**：
+   - 构造一个 `(num_tokens=4096, num_topk=6)` 的随机 float32 张量 `w`。
+   - 调用 `tile_kernels.moe.normalize_weight(w)`，拿到 `(denominator, normalized_weights)`。
+   - 计算 `normalized_weights.sum(dim=1)`，观察它和 `1.0` 的差。
+   - 把它和 `w.sum(dim=1) / (w.sum(dim=1) + 1e-20)` 对比。
+3. **需要观察的现象**：每行和约为 `0.999999...`（差 ~`1e-20 / w.sum` 量级），且与 `denominator` 的关系满足 `行和 = w.sum / denominator`。
+4. **预期结果**：行和与 1 的差正比于 `1e-20`、反比于 `w.sum`；`denominator` 恰好等于 `w.sum + 1e-20`。
+5. 若本地无 GPU，此为「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果把 kernel 里 `sum` 的初值 `1e-20` 改成 `0.0`，在什么输入下会出错？
+**答案**：当某一行所有 `topk_weights` 都为 0（例如该 token 是 padding 或路由完全失败）时，分母为 0，发生除零得到 NaN/Inf。`1e-20` 就是这个兜底。
+
+**练习 2**：为什么读和写都用 `T.vectorized`，而求和用 `T.unroll`？
+**答案**：读/写访问的是连续内存（一行的相邻列），向量化能把它们合成一条合并的 load/store；求和是一个有累加依赖的串行归约，无法向量化，但 `num_topk` 是编译期已知的小常数，`unroll` 展开后省去循环开销即可。
+
+---
+
+### 4.2 mask_indices_by_tp：EP/TP 掩码与本地重映射
+
+#### 4.2.1 概念说明
+
+分布式推理时，路由器产出的 `topk_idx` 是**全局**专家下标，但本卡只持有一部分专家。必须做两件事：
+
+1. **掩码（mask）**：不属本 TP rank 的专家下标置 `-1`（表示「这张卡不处理这个专家，交给别的卡」）；原本就是 `-1` 的 padding 保持 `-1`。
+2. **重映射（remap）**：属本卡的专家，把全局下标改写成**本卡本地**的下标（从 0 开始重新编号），方便后续直接索引本卡的专家权重。
+
+这个算子解决的就是「全局 → 本卡本地」的下标翻译问题。
+
+#### 4.2.2 核心流程
+
+先定义两个量（wrapper 里算好，作为 int32 标量传进 kernel）：
+
+- `per_gpu = n // num_ep_ranks`：每个 EP rank 持有的专家数（n 是全局专家总数）。
+- `per_dp = num_tp_ranks * per_gpu`：一个数据并行（DP）组持有的专家数。
+
+对每个全局下标 `value`：
+
+1. 算它落在哪个 EP 段：`ep_of = value // per_gpu`。
+2. 判 TP 归属：本卡的 TP rank 是 `tp_rank`，该专家的 TP rank 是 `ep_of % num_tp_ranks`。**两者不等 → 置 `-1`**。
+3. 若相等，做本地重映射：
+   - `value -= tp_rank * per_gpu`（扣掉本 TP rank 的起点偏移）
+   - `dp_rank = value // per_dp`（算落在第几个 DP 组）
+   - `value -= dp_rank * (per_dp - per_gpu)`（把同 DP 组内**别的 TP rank 占的空隙**抽掉，使下标连续）
+
+**用一个最小例子推演**：取全局专家总数 `n=8`、`num_ep_ranks=4`、`num_tp_ranks=2`，则 `per_gpu=2`、`per_dp=4`。全局下标空间按 EP 段切成 4 段，每段 2 个，段内 TP rank 为 `段号 % 2`：
+
+| 全局段（EP rank） | 全局下标 | TP rank |
+| --- | --- | --- |
+| 0 | [0, 2) | 0 |
+| 1 | [2, 4) | 1 |
+| 2 | [4, 6) | 0 |
+| 3 | [6, 8) | 1 |
+
+本卡 `tp_rank=0`，持有 `[0,2) ∪ [4,6)`。
+
+- 全局 `5`：`ep_of = 5//2 = 2`，`2%2 = 0 = tp_rank` → 保留；`local = 5-0=5`，`dp_rank = 5//4 = 1`，重映射 `5 - 1*(4-2) = 3`。即全局 5 → 本地 3。
+- 全局 `1`：`ep_of = 0`，保留；`dp_rank = 1//4 = 0`，重映射 `1 - 0 = 1`。即全局 1 → 本地 1。
+- 全局 `3`：`ep_of = 3//2 = 1`，`1%2 = 1 ≠ 0` → 置 `-1`。
+
+最终本卡本地范围是 `[0, per_dp) = [0, 4)`，正好等于一个 DP 组的专家数。
+
+#### 4.2.3 源码精读
+
+kernel 把二维 `(num_tokens, num_topk)` 展平成一维，**每个线程处理一个 (token, topk) 元素**：
+
+[tile_kernels/moe/mask_indices_by_tp_kernel.py:27-42](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/mask_indices_by_tp_kernel.py#L27-L42) — `T.reshape` 展平后线性索引；`T.truncdiv` / `T.truncmod` 是 TileLang 的**整数截断除法/取模**内建；`T.Select(value < 0, -1, value)` 是最终的安全兜底（重映射后若仍为负则强制 `-1`）。
+
+注意判 TP 归属的那一行核心逻辑：
+
+```python
+if value < 0 or T.truncmod(T.truncdiv(value, per_gpu), num_tp_ranks) != tp_rank:
+    masked_indices_1d[index] = -1
+```
+
+这等价于「padding 或 TP rank 不匹配 → `-1`」。
+
+wrapper 计算 `per_gpu`/`per_dp` 并把 dtype 作为编译期参数（支持 int64 与 int32）：
+
+[tile_kernels/moe/mask_indices_by_tp_kernel.py:61-71](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/mask_indices_by_tp_kernel.py#L61-L71) — `per_gpu = n // num_ep_ranks`、`per_dp = num_tp_ranks * per_gpu`；`T.dtype(indices.dtype)` 让同一份 kernel 逻辑特化出不同整数 dtype 的产物。
+
+PyTorch 参考实现，数学完全一致（用 `//` 和 `%`）：
+
+[tile_kernels/torch/moe.py:63-74](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/moe.py#L63-L74) — 先用 `invalid` 掩码标记不属本卡的元素，再做重映射，最后把 `invalid | (value < 0)` 一并置 `-1`。
+
+#### 4.2.4 代码实践
+
+1. **实践目标**：用上面 `n=8` 的小例子手工验证 kernel 行为。
+2. **操作步骤**：
+   - 取 `num_tokens=2, num_topk=4`，`indices = torch.tensor([[0,1,2,3],[4,5,6,7]], dtype=int64, device='cuda')`。
+   - 调 `tile_kernels.moe.mask_indices_by_tp(indices, n=8, num_ep_ranks=4, tp_rank=0, num_tp_ranks=2)`。
+3. **需要观察的现象**：输出里全局 `[0,1]→[0,1]`、`[2,3]→[-1,-1]`、`[4,5]→[2,3]`、`[6,7]→[-1,-1]`。
+4. **预期结果**：`[[-1或本地]...]`，具体为 `[[0, 1, -1, -1], [2, 3, -1, -1]]`（前 4 个本卡保留并重映射，后 4 个里偶数段保留）。再换成 `tp_rank=1` 重跑，保留/掩码关系应正好互补。
+5. 此例可纯 CPU 用 `tile_kernels.torch.mask_indices_by_tp` 验证，kernel 版「待本地验证（需 GPU）」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 TP 归属判据是 `ep_of % num_tp_ranks` 而不是 `ep_of // 某个数`？
+**答案**：全局专家空间按 EP rank 顺序分段，而 EP rank 又按 `rank % num_tp_ranks` 归属到 TP rank（同一个 DP 组内的若干 EP rank 共享相同专家的 TP 副本）。所以一段 EP 的 TP 归属 = 该段序号对 `num_tp_ranks` 取模。
+
+**练习 2**：重映射公式里 `dp_rank * (per_dp - per_gpu)` 这一项扣掉的是什么？
+**答案**：在同一个 DP 组内，除了本 TP rank 的 `per_gpu` 个专家，其余 `(per_dp - per_gpu)` 个专家属于别的 TP rank（已被掩码掉）。重映射要把这些「空洞」从下标空间里挤出去，让本卡专家下标连续。
+
+---
+
+### 4.3 aux_fi：负载均衡辅助损失 \(f_i\)
+
+#### 4.3.1 概念说明
+
+`aux_fi` 计算前述辅助损失里的频率指标 \(f_i\)，对每个专家输出一个值：
+
+\[
+f_i[e] = \frac{\text{count}[e] \cdot N}{\text{num\_tokens} \cdot \text{num\_aux\_topk}}
+\]
+
+其中 `count[e]` 是专家 `e` 在 `topk_idx`（忽略 `-1` padding）里出现的次数，`N = num_experts`。这个归一化因子让「完美均匀负载」时每个 \(f_i\) 都接近 1：此时每个专家被选 \( \text{num\_tokens}\cdot\text{num\_aux\_topk}/N \) 次，代入后分子分母相消。
+
+#### 4.3.2 核心流程
+
+难点是算 `count`：要对 `num_tokens × num_topk` 个选择做**直方图**（每个专家一个桶），桶数 = `num_experts`（可达 256）。朴素做法是所有线程对一个全局 `out` 数组 `atomic_add`，竞争极激烈。本 kernel 用**两级直方图**缓解：
+
+1. **每个 block 建局部直方图**：在 shared memory 开 `out_shared`（大小 `align(num_experts, num_threads)`，int32），线程用 **grid-stride 循环**遍历各自负责的若干 token，对每个非 `-1` 的专家下标 `atomic_add(out_shared[expert_idx], 1)`。shared memory 内的原子操作快、且竞争只在本 block 内。
+2. **归约到全局**：block 处理完后，线程协作把 `out_shared` 累加进全局 `out`（float32），只对 `out_shared[i] > 0` 的桶做 `atomic_add`，并**直接乘上归一化因子** \(N / (\text{num\_tokens}\cdot\text{num\_aux\_topk})\)，所以 `out` 最终直接就是 \(f_i\)。
+
+调度规模 `num_blocks = num_sms * 2`：随硬件 SM 数伸缩（持久化风格），保证 SM 被铺满；不同 SM 数只改变归约树的形状，不改变结果。
+
+#### 4.3.3 源码精读
+
+kernel 构造，`num_blocks = num_sms * 2` 与 shared 直方图大小：
+
+[tile_kernels/moe/aux_fi_kernel.py:14-32](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/aux_fi_kernel.py#L14-L32) — `align(num_experts, num_threads)`（来自 `tile_kernels/utils.py`）保证 shared 直方图至少 `num_threads` 个元素，使后续归约循环干净；`T.clear` + `T.sync_threads` 初始化局部直方图。
+
+第一级：grid-stride 循环建局部直方图：
+
+[tile_kernels/moe/aux_fi_kernel.py:34-40](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/aux_fi_kernel.py#L34-L40) — `T.serial(global_thread_idx, num_tokens, num_blocks*num_threads)` 是典型的网格步幅循环；`T.device_assert(-1 <= expert_idx < num_experts)` 做运行时检查，`T.assume(expert_idx < num_experts)` 给编译器优化提示；仅对 `expert_idx >= 0` 计数。
+
+第二级：归约到全局并乘归一化因子：
+
+[tile_kernels/moe/aux_fi_kernel.py:42-45](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/aux_fi_kernel.py#L42-L45) — 只对非零桶累加；`out_shared[i] * num_experts / (num_tokens * num_aux_topk)` 把整数计数直接转成 float32 的 \(f_i\)。
+
+wrapper 把 `get_num_sms()` 作为编译期参数：
+
+[tile_kernels/moe/aux_fi_kernel.py:61-70](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/aux_fi_kernel.py#L61-L70) — `out = torch.zeros(num_experts, float32)`（必须清零，因为第二级是 `atomic_add` 累加）。
+
+PyTorch 参考用 `scatter_add_` 一行算 `count`：
+
+[tile_kernels/torch/moe.py:4-24](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/moe.py#L4-L24) — `counts.scatter_add_(0, valid_idx, ones)` 即直方图；测试因浮点除法顺序用 `calc_diff < 2e-7` 而非位精确。
+
+#### 4.3.4 代码实践
+
+1. **实践目标**：验证「完美均匀分布时 \(f_i\) 均值 ≈ 1」，并确认改变 SM 数不改变结果。
+2. **操作步骤**：
+   - 构造 `topk_idx` 使每个专家被选次数相同（例如 `num_tokens=1024, num_topk=4, num_experts=64`，把 `arange` 均匀铺开），`num_aux_topk=4`。
+   - 调 `tile_kernels.moe.aux_fi(topk_idx, num_experts=64, num_aux_topk=4)`，看 `out.mean()` 与 `out.sum()`。
+   - 用 `tile_kernels.config.set_num_sms(8)`、`set_num_sms(16)` 分别重跑，对比输出。
+3. **需要观察的现象**：`out.mean() ≈ 1.0`；`out.sum() ≈ num_experts`（当 `num_aux_topk == num_topk` 且无 padding 时）；不同 SM 数下输出差 `< 2e-7`。
+4. **预期结果**：均值贴近 1，SM 数变化只引起浮点级的微小差异（这正是 `test_aux_fi.py` 遍历 `generate_num_sms()` 并用 `calc_diff` 判等的原因）。
+5. kernel 版「待本地验证（需 GPU）」；参考版可在 CPU 跑。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么第二级归约只对 `out_shared[i] > 0` 的桶做 `atomic_add`，而不是所有桶？
+**答案**：桶为 0 表示本 block 内没有 token 路由到该专家，加 0 是无意义的全局原子操作，反而徒增竞争。跳过 0 桶能显著减少全局 `atomic_add` 次数。
+
+**练习 2**：把 `num_blocks` 从 `num_sms*2` 改成固定值（如 16），结果会变吗？性能呢？
+**答案**：结果不变（直方图是可交换的累加），但性能可能下降——固定 block 数无法随硬件 SM 数伸缩，SM 多时铺不满、SM 少时可能排队。`num_sms*2` 是「每 SM 派 2 个 block」的常见持久化启发式。
+
+---
+
+### 4.4 完整路由参考：torch/topk.py 的 top2_sum_gate 全流程
+
+#### 4.4.1 概念说明
+
+前面三个算子都是路由链路里的「零件」。`tile_kernels/torch/topk.py` 的 `top2_sum_gate` 是一份**纯 PyTorch 写的完整路由参考**，把所有零件拼成一条端到端流水线：输入原始 `logits`，输出最终的 `(topk_idx, topk_weights)`。它的价值有二：
+
+1. **文档作用**：相比 TileLang kernel（`top2_sum_gate_kernel.py`，warp shuffle 满天飞），纯 Python 版可读性高得多，是算法的权威描述。
+2. **测试对拍**：TileLang kernel 的输出与它逐元素比对（`test_top2_sum_gate.py`），保证 GPU 实现没走样。
+
+它和 TileLang 版 `top2_sum_gate` 的参数、步骤一一对应；本讲重点读其中的 **logical→physical 映射** 和 **EP/TP 掩码** 两段——它们是分布式路由区别于单卡路由的关键。
+
+#### 4.4.2 核心流程（11 步）
+
+源码用注释 `# 1` ~ `# 11` 把流程明确分段。从 `logits` 到 `(topk_idx, topk_weights)`：
+
+1. **打分**：按 `scoring_func`（sigmoid / sqrtsoftplus / softmax）算无偏分数 `scores_wo_bias`。
+2. **加偏置用于排序**：softmax 把 bias 加在原始 logits 上（`softmax(logits+bias)`），另两个把 bias 加在分数之后。**最终权重一律用不带 bias 的 `scores_wo_bias`**——bias 只决定选谁，不改变权重大小（承接 u5-l1 的关键陷阱）。
+3. **分流**：把 token 分成「正常路由」和「固定路由（fix_routing，直接复用上次的 `unmapped_topk_idx`）」两类。
+4. **正常路由选 top-k**：先做 group-limited 粗筛（组内 top-2 之和，掩掉非 top 组为 `-inf`），再 `stable_topk` 选出 `num_topk` 个专家；用 `scores_wo_bias` gather 出对应分数。
+5. **固定路由**：直接用 `unmapped_topk_idx` 里预存的下标。
+6. **回写 unmapped**：把本轮选出的下标写回 `unmapped_topk_idx`（供下一轮或反向复用）。
+7. **归一化权重**：top-sum 归一化 `topk_score / sum * routed_scaling_factor`（即 4.1 的归一化 + 缩放）。
+8. **拼接共享专家**：若有共享专家（`use_shared_as_routed`），把它们的下标和权重（=1）拼到尾部。
+9. **logical → physical 映射**：把逻辑专家下标翻译成物理专家下标（处理 EP 冗余副本）。
+10. **EP / TP 掩码**：即 4.2 的逻辑，把非本卡的专家置 `-1`、本卡的改成本地下标。
+11. **写输出**：把结果散回完整 token 维度（含 padding token）。
+
+其中第 9、10 步是分布式专属，下面单独精读。
+
+#### 4.4.3 源码精读
+
+完整函数签名与文档（参数极多，每个都有明确语义）：
+
+[tile_kernels/torch/topk.py:22-77](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/topk.py#L22-L77) — 注意 `mask`（True=路由该 token，False=填 -1/0）、`fix_routing_mask`、`to_physical_map`/`logical_count`（logical→physical）、`unmapped_topk_idx` 等可选参数。
+
+打分与加偏置（第 1、2 步），注意 softmax 的特殊性：
+
+[tile_kernels/torch/topk.py:106-115](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/topk.py#L106-L115) — softmax 走 `logits + bias`，其余走 `scores_wo_bias + bias`。
+
+group-limited 粗筛 + 稳定 top-k（第 4 步），对应 u5-l3 的 `get_topk_group_idx`：
+
+[tile_kernels/torch/topk.py:131-143](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/topk.py#L131-L143) — 用 `topk_sum_and_topk_group_idx` 选 top 组，把非 top 组掩成 `-inf`，再 `stable_topk` 选 `num_topk` 个；权重从 `scores_wo_bias` gather。
+
+top-sum 归一化（第 7 步），与 4.1 同源：
+
+[tile_kernels/torch/topk.py:158-160](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/topk.py#L158-L160) — `clamp(min=1e-20)` 防除零，乘 `routed_scaling_factor`。
+
+**第 9 步：logical → physical 映射**（重点）。一个逻辑专家可能在多个 EP rank 上有**物理副本**（冗余），需按 token 和 rank 选一个具体副本：
+
+[tile_kernels/torch/topk.py:176-184](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/topk.py#L176-L184) — `logical_count[logical]` 是该逻辑专家的活跃副本数；`dup_idx = (ep_rank + global_idx * 23333) % logical_count` 用一个素数哈希（`23333`）挑选副本下标——`ep_rank` 让不同 EP rank 倾向不同副本（负载均衡），`global_idx * 23333` 让不同 token 散开；最后 `to_physical_map[logical, dup_idx]` 取出物理专家 id。
+
+这段与 TileLang kernel 完全对应，可对照阅读（`large_prime_number = 23333`）：
+
+[tile_kernels/moe/top2_sum_gate_kernel.py:282-286](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/top2_sum_gate_kernel.py#L282-L286) — TileLang 版用 `duplicate_idx = (ep_rank + global_token_idx * large_prime_number) % num_duplicates`，与参考逐字一致。
+
+**第 10 步：EP / TP 掩码**（重点）。即 4.2 的数学，作用在含共享专家的完整 `topk_idx_all` 上：
+
+[tile_kernels/torch/topk.py:186-200](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/torch/topk.py#L186-L200) — 先算 `experts_per_rank = (num_routed_experts + num_extra)//num_ep_ranks`（注意这里多了 `num_extra`，即冗余副本数）与 `experts_per_dp = experts_per_rank * num_tp_ranks`；`ep_of = idx // experts_per_rank`，`ep_of % num_tp_ranks != tp_rank` → `-1`；否则扣偏移、抽空洞改写成本地下标。逻辑与 4.2 的 `mask_indices_by_tp` 同构。
+
+对应 TileLang kernel 版的掩码段：
+
+[tile_kernels/moe/top2_sum_gate_kernel.py:288-301](https://github.com/deepseek-ai/TileKernels/blob/36d9e45d38e204ebb87e6f6e833821eee0482fe5/tile_kernels/moe/top2_sum_gate_kernel.py#L288-L301) — 同一套 `per_rank`/`per_dp` 数学，只是用 `T.if_then_else` 表达分支。
+
+#### 4.4.4 代码实践
+
+1. **实践目标**：用一份极小输入跑通 PyTorch 参考的 11 步，肉眼追踪 `logits → (topk_idx, topk_weights)`，重点验证 logical→physical 与 EP/TP 两段。
+2. **操作步骤**（纯 CPU 即可，调用参考实现 `tile_kernels.torch.top2_sum_gate`）：
+   - 取 `num_tokens=4, num_routed_experts=8, num_groups=4, num_topk_groups=2, num_topk=2`，`num_shared_experts=0`，`scoring_func='sigmoid'`，`num_ep_ranks=2, num_tp_ranks=2, tp_rank=0, ep_rank=0`。
+   - 造随机 `logits`（4×8）与 `bias`（8，）。
+   - 调用 `top2_sum_gate(...)`，打印 `topk_idx`、`topk_weights`。
+   - 再造一个 `to_physical_map`（形状 `(num_logical_experts, num_duplicate_experts+1)`）与 `logical_count`，重新调用，观察第 9 步如何把逻辑下标改成物理下标。
+3. **需要观察的现象**：不带 `to_physical_map` 时，第 9 步跳过，`topk_idx` 直接进第 10 步；带之后，下标会被映射成物理 id；第 10 步会把约一半（非本 TP rank）的专家置 `-1`。
+4. **预期结果**：`topk_weights` 每行之和 ≈ `routed_scaling_factor`（sigmoid、无共享专家时）；`topk_idx` 中非本卡位置为 `-1`。
+5. 参考版可在 CPU 直接跑通；TileLang kernel 版「待本地验证（需 GPU）」，可用 `tests/moe/test_top2_sum_gate.py` 的对拍用例验证两者一致。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：第 9 步里 `dup_idx = (ep_rank + global_idx * 23333) % logical_count`，为什么既要乘 token 又要加 `ep_rank`？
+**答案**：乘 token（再配大素数 23333 散列）让**不同 token** 倾向不同副本，避免所有 token 挤到同一个物理副本；加 `ep_rank` 让**不同 EP rank** 倾向不同副本。两者合起来在「token × rank」两个维度上摊开负载，避免冗余副本冷热不均。
+
+**练习 2**：为什么第 10 步的 `experts_per_rank` 要用 `(num_routed_experts + num_extra) // num_ep_ranks` 而不是 `num_routed_experts // num_ep_ranks`？
+**答案**：经过第 9 步 logical→physical 映射后，下标空间已经从 `num_routed_experts` 扩展到了 `num_routed_experts + num_extra`（含冗余物理副本）。掩码必须按**物理下标空间**的总大小来切分，否则会把副本下标算错所属 rank。
+
+---
+
+## 5. 综合实践
+
+**任务**：以 `tile_kernels/torch/topk.py` 的 `top2_sum_gate` 为蓝本，手写一份「精简版」路由，并把它和官方参考对拍，从而把本讲四个模块的知识串起来。
+
+具体步骤：
+
+1. **复刻核心链路**：用 PyTorch 实现 `sigmoid` 打分 → 加 bias → `torch.topk` 选 `num_topk=4`（可跳过 group 粗筛以简化）→ 用 `scores_wo_bias` gather 权重 → top-sum 归一化（记得 `+1e-20`）→ 乘 `routed_scaling_factor=1.0`。
+2. **接上 EP/TP 掩码**：在选出 `topk_idx` 后，调用 `tile_kernels.torch.mask_indices_by_tp(topk_idx, n, num_ep_ranks, tp_rank, num_tp_ranks)`，把非本卡专家置 `-1`。
+3. **接上 aux**：对掩码后的 `topk_idx` 调 `tile_kernels.torch.aux_fi(topk_idx, num_experts, num_aux_topk)`，算出 \(f_i\)。
+4. **对照**：把你前两步的结果与 `tile_kernels.torch.top2_sum_gate`（传 `num_groups=0, num_topk_groups=0` 关闭分组、`use_shared_as_routed=False`）对比，确认 `topk_idx`（掩码前）、`topk_weights` 一致。
+5. **解释**：写一段话说明，为什么 bias 不影响 `topk_weights` 的大小、logical→physical 映射为什么需要 `ep_rank` 和 token 共同决定副本、EP/TP 掩码为什么用 `ep_of % num_tp_ranks` 判归属。
+
+**预期结果**：你的精简链路与官方参考在 `topk_weights` 上位精确一致；`topk_idx` 在掩码前一致、掩码后非本卡位置变 `-1`；\(f_i\) 的均值在均匀分布时接近 1。
+
+> 说明：本任务可在 CPU 完成（全部用 `tile_kernels.torch.*` 参考实现），无需 GPU。若要验证 TileLang kernel 版，运行 `pytest tests/moe/test_top2_sum_gate.py tests/moe/test_mask_indices_by_tp.py tests/moe/test_normalize_weight.py tests/moe/test_aux_fi.py`（「待本地验证」）。
+
+## 6. 本讲小结
+
+- `normalize_weight` 做 top-sum 归一化，分母刻意加 `1e-20` 以与融合版 `top2_sum_gate` 对齐；它只做纯归一化、**不含** `routed_scaling_factor`。
+- `mask_indices_by_tp` 用 `ep_of = value // per_gpu` 与 `ep_of % num_tp_ranks != tp_rank` 判 TP 归属，非本卡置 `-1`，本卡的通过扣偏移、抽空洞（`per_dp - per_gpu`）改写为连续本地下标。
+- `aux_fi` 算负载指标 \(f_i = \text{count}\cdot N/(\text{num\_tokens}\cdot\text{num\_aux\_topk})\)，用 shared 局部直方图 + global 归约的两级结构缓解原子竞争；`num_blocks = num_sms*2` 随硬件伸缩但结果不变。
+- `torch/topk.py` 的 `top2_sum_gate` 是完整路由的权威参考，11 步把打分、加偏、分组粗筛、top-k、归一化、共享专家、logical→physical、EP/TP 掩码串成一条线。
+- **logical→physical 映射**用 `(ep_rank + token*23333) % logical_count` 在 token 与 rank 两维度摊开冗余副本负载。
+- **EP/TP 掩码**与 `mask_indices_by_tp` 同构，区别仅在于下标空间需按物理副本数（`num_extra`）扩展后再切分。
+
+## 7. 下一步学习建议
+
+- 本讲是 MoE 路由单元（第 5 单元）的收尾。建议回头用 `tests/moe/test_top2_sum_gate.py` 的对拍用例，把 TileLang kernel 版与 PyTorch 参考版并排读一遍，巩固「GPU 实现 ↔ 可读参考」的对照方法。
+- 第 9 单元（u9-l1）会系统讲 `generate_moe_params`、`assert_equal`/`calc_diff` 等测试设施——本讲多次提到测试用位精确还是浮点相似度，届时会给出统计原理。
+- 第 10 单元（u10-l1）会深入 `get_num_sms`/`set_num_sms` 与硬件感知调优，本讲 `aux_fi` 的 `num_blocks = num_sms*2` 是其中一个具体例子。
+- 若想动手扩展，可参考 u10-l3 的「新增算子四件套」，尝试把本讲的某个零件（如只做 logical→physical 映射的独立算子）独立实现并加上对拍测试。

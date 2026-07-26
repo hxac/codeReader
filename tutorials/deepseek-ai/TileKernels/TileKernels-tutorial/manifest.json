@@ -1,0 +1,1022 @@
+{
+  "project": "TileKernels",
+  "head": "36d9e45d38e204ebb87e6f6e833821eee0482fe5",
+  "rationale": "本项目是一个基于 TileLang 的高性能 GPU 算子库，技术栈横跨 TileLang DSL、PyTorch autograd、GPU 存储层级与硬件调优，因此学习路线采用「先建立心智模型，再由简到繁走遍各算子家族」的顺序。第 1 单元先让读者搞清项目定位、运行方式与包结构；第 2 单元作为地基，集中讲清 TileLang 的 jit+prim_func 骨架、存储层级与循环/规约原语这三类通用模式；第 3 单元用最简单的 transpose 把这些模式走通一遍并接触测试范式。随后按复杂度递增广度展开各算子家族：quant（配置体系重）、MoE（warp/reducer 重）、engram（持久化 kernel 与占用估算）、mhc（迭代算法与自定义反向）。第 8 单元上升到 modeling 层的 autograd 封装，第 9 单元补齐测试与基准设施，第 10 单元用硬件感知调优和一个端到端「新增算子」的综合任务收尾。依赖关系保证地基与通用模式先于具体算子，具体算子先于高层封装，测试设施在需要时被引用、最后集中深化。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 TileKernels",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "TileKernels 项目定位与价值",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "TileKernels 是什么、为 LLM 训练/推理提供哪类高性能算子，以及它与 TileLang、PyTorch、CUDA、目标硬件之间的关系。",
+          "learning_goals": [
+            "理解 TileKernels 作为 TileLang 算子库的定位与目标场景",
+            "能列出项目提供的五大类算子（gating/MoE/quant/transpose/engram/mHC）",
+            "厘清 TileLang DSL、PyTorch、CUDA Toolkit、SM90/SM100 之间的依赖层次"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "README",
+            "pyproject"
+          ],
+          "practice_task": "阅读 README 与 pyproject.toml，整理一张表：项目支持的算子类别、目标 GPU 架构、Python/PyTorch/TileLang/CUDA 的版本要求；尝试在本地或只读环境执行依赖解析（如 pip install -e . --dry-run），记录缺失的依赖。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、运行与测试工作流",
+          "order": 2,
+          "filename": "u1-l2-install-and-run.md",
+          "level": "beginner",
+          "topic": "如何安装、运行单测、压力测试与 benchmark，以及 TK_FULL_TEST、TK_PRINT_KERNEL_SOURCE 等环境变量的作用。",
+          "learning_goals": [
+            "掌握 pip install -e .[dev] 与发布版安装方式",
+            "会用 pytest 跑单文件正确性测试与 --run-benchmark 基准",
+            "理解 TK_FULL_TEST 与 TK_PRINT_KERNEL_SOURCE 的用途"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "tests/conftest.py"
+          ],
+          "minimal_modules": [
+            "README(Testing)",
+            "pyproject(optional-dependencies dev)",
+            "conftest"
+          ],
+          "practice_task": "运行 tests/transpose/test_transpose.py 的正确性测试；用 --run-benchmark 跑一个 benchmark 并读懂其延迟/带宽输出；设置 TK_PRINT_KERNEL_SOURCE=1 观察一次生成的 CUDA 源码。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与包入口",
+          "order": 3,
+          "filename": "u1-l3-directory-and-entry.md",
+          "level": "beginner",
+          "topic": "tile_kernels 包的四层结构（算子/torch 参考/modeling/testing），__init__ 导出方式，以及 config、utils 提供的基础设施。",
+          "learning_goals": [
+            "画出 tile_kernels 包的目录树并标注各子模块职责",
+            "理解 tile_kernels/__init__.py 如何聚合各子模块导出",
+            "掌握 config（num_sms/smem 探测）与 utils（对齐/整除工具）的基础作用"
+          ],
+          "source_files": [
+            "tile_kernels/__init__.py",
+            "tile_kernels/config.py",
+            "tile_kernels/utils.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "tile_kernels/__init__",
+            "config",
+            "utils"
+          ],
+          "practice_task": "绘制包结构树并标注每个子模块职责；追踪 tile_kernels.transpose.transpose 的一条完整调用路径（包入口 → 子模块 __init__ → wrapper 函数）。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "TileLang 算子基础",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "TileLang 算子解剖：jit + prim_func + 动态符号",
+          "order": 1,
+          "filename": "u2-l1-tilelang-anatomy.md",
+          "level": "intermediate",
+          "topic": "一个 TileLang 算子的标准骨架：@tilelang.jit 装饰的 kernel 构造函数、T.dynamic 运行时符号、@T.prim_func 内核、T.Kernel 网格与 threads。",
+          "learning_goals": [
+            "理解 kernel 构造函数 + @T.prim_func 的两层结构",
+            "掌握 T.dynamic 声明运行时维度的方式",
+            "会用 T.Kernel(..., threads=N) 定义网格与线程块"
+          ],
+          "source_files": [
+            "tile_kernels/transpose/batched_transpose_kernel.py",
+            "tile_kernels/moe/topk_gate_kernel.py"
+          ],
+          "minimal_modules": [
+            "batched_transpose_kernel",
+            "topk_gate_kernel"
+          ],
+          "practice_task": "以 topk_gate_kernel 为模板，编写一个 get_rowmax_kernel（返回每行最大值）及其 rowmax wrapper，按 topk_gate 的 wrapper 写法分配输出张量并启动 kernel。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "GPU 存储层级与数据搬运",
+          "order": 2,
+          "filename": "u2-l2-memory-hierarchy.md",
+          "level": "intermediate",
+          "topic": "fragment（寄存器）/shared（共享内存）/local 的分配，T.copy 在各级存储间的搬运，disable_tma 选项，以及共享内存 padding 减少 bank conflict。",
+          "learning_goals": [
+            "区分 T.alloc_fragment / T.alloc_shared / T.alloc_local 的存储层级",
+            "掌握 T.copy 的用法与 disable_tma 的含义",
+            "理解共享内存 padding 为何能减少 bank conflict"
+          ],
+          "source_files": [
+            "tile_kernels/transpose/batched_transpose_kernel.py",
+            "tile_kernels/quant/per_token_cast_kernel.py"
+          ],
+          "minimal_modules": [
+            "batched_transpose_kernel",
+            "per_token_cast_kernel"
+          ],
+          "practice_task": "解释转置 kernel 中 out_shared 形状为 (block_y, block_x+block_k) 的 +block_k padding 为何能减少 bank conflict；用一个最小例子说明 T.copy 在 fragment/shared/global 三级之间的搬运方向。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "循环、并行与规约原语",
+          "order": 3,
+          "filename": "u2-l3-loops-and-reduce.md",
+          "level": "intermediate",
+          "topic": "T.Parallel/T.unroll/T.vectorized/T.serial 循环构造，T.ceildiv，以及 T.reduce_max/sum/absmax 和 T.alloc_reducer 等规约原语。",
+          "learning_goals": [
+            "掌握四种循环构造的语义与适用场景",
+            "会用 T.reduce_max/sum/absmax 做维度规约",
+            "理解 T.alloc_reducer 与 replication 的跨线程归约机制"
+          ],
+          "source_files": [
+            "tile_kernels/quant/per_token_cast_kernel.py",
+            "tile_kernels/moe/topk_gate_kernel.py",
+            "tile_kernels/mhc/sinkhorn_kernel.py"
+          ],
+          "minimal_modules": [
+            "per_token_cast_kernel",
+            "topk_gate_kernel",
+            "sinkhorn_kernel"
+          ],
+          "practice_task": "在 topk_gate 中找到 reduce_max 与 alloc_reducer('min', replication='all') 的配合用法，说明它如何逐个稳定选出 top-k；再改写一个用 reduce_sum 计算每行元素和的 kernel。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Transpose 模块深入",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "批量转置 kernel：寄存器转置 + swizzle 布局",
+          "order": 1,
+          "filename": "u3-l1-batched-transpose-kernel.md",
+          "level": "intermediate",
+          "topic": "create_loop_layout_fn 与 T.Fragment 的 forward_fn swizzle、4x4 寄存器块转置、向量化读写共享内存与输出。",
+          "learning_goals": [
+            "理解 loop_layout_fn 中 forward_thread/forward_local 的映射",
+            "掌握用寄存器 4x4 块 + 共享内存完成矩阵转置的流程",
+            "理解 swizzle 写布局如何避免 bank conflict"
+          ],
+          "source_files": [
+            "tile_kernels/transpose/batched_transpose_kernel.py"
+          ],
+          "minimal_modules": [
+            "batched_transpose_kernel"
+          ],
+          "practice_task": "解释 loop_layout_fn 的映射如何让写共享内存时不产生 bank conflict；修改 block_k 或 num_threads，用 benchmark 观察对性能的影响并解释原因。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "转置的测试与基准：参考实现、strided 输入、带宽",
+          "order": 2,
+          "filename": "u3-l2-transpose-test-and-bench.md",
+          "level": "intermediate",
+          "topic": "用 torch 参考 x.T.contiguous() 对拍、twice_stride 构造非连续输入、count_bytes 计算并报告带宽。",
+          "learning_goals": [
+            "掌握 generate_test_data_* + assert_equal 的对拍范式",
+            "理解 twice_stride 构造非连续输入的目的",
+            "会用 count_bytes 与延迟计算 GB/s 带宽"
+          ],
+          "source_files": [
+            "tests/transpose/test_transpose.py",
+            "tile_kernels/torch/__init__.py"
+          ],
+          "minimal_modules": [
+            "test_transpose",
+            "torch/__init__"
+          ],
+          "practice_task": "为 batched_transpose 新增一组 benchmark 参数（不同 dtype/shape/num_experts），运行并报告 GB/s 带宽，判断其是否接近硬件显存带宽极限。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "量化模块（FP8/FP4/E5M6）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "量化基础：低比特格式与配置体系",
+          "order": 1,
+          "filename": "u4-l1-quant-config-basics.md",
+          "level": "intermediate",
+          "topic": "低比特浮点格式（e4m3/e2m1/e5m6）、scaling factor（SF）概念，以及 CastInputConfig/CastOutputConfig 配置体系与 QuantTensor、SF 形状/布局。",
+          "learning_goals": [
+            "对比 e4m3/e2m1/e5m6 的位宽与表示范围",
+            "理解 scaling factor 的作用与 QuantTensor=(tensor,sf) 约定",
+            "掌握 BaseCastConfig 及其 dtype/sf_dtype 派生属性"
+          ],
+          "source_files": [
+            "tile_kernels/quant/common.py",
+            "tile_kernels/quant/types.py"
+          ],
+          "minimal_modules": [
+            "quant/common",
+            "quant/types"
+          ],
+          "practice_task": "列表对比 e4m3/e2m1/e5m6 的位宽、指数、尾数与表示范围；给定 (num_tokens,hidden) 与 sf_block，手算 get_sf_shape 在 row-major、col-major、packed ue8m0 三种布局下的输出形状。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "per_token_cast kernel：absmax + 两段规约 + 向量化",
+          "order": 2,
+          "filename": "u4-l2-per-token-cast-kernel.md",
+          "level": "intermediate",
+          "topic": "per-token 行级量化主流程：block_m/block_k 划分、带输入 SF 时的两段 absmax/max 规约、cast 写出。",
+          "learning_goals": [
+            "画出 per_token_cast_kernel 的完整数据流",
+            "理解 with_sf 分支为何需要两段规约（absmax→max）",
+            "掌握 block_m/block_k/num_per_channels 的划分逻辑"
+          ],
+          "source_files": [
+            "tile_kernels/quant/per_token_cast_kernel.py",
+            "tile_kernels/quant/common.py"
+          ],
+          "minimal_modules": [
+            "per_token_cast_kernel",
+            "quant/common"
+          ],
+          "practice_task": "画出 per_token_cast_kernel 的数据流图（load → reduce_absmax → get_sf_and_inv → scale → store）；分别解释 with_sf=True 与 with_sf=False 两条路径的差异。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "SF 宏与幂次舍入：get_sf_and_inv / load / store / transform",
+          "order": 3,
+          "filename": "u4-l3-sf-macros-and-rounding.md",
+          "level": "intermediate",
+          "topic": "clamp_min、sf 与 sf_inv 的计算，幂次 round_sf 的位操作实现，UE8M0 打包格式，以及 load_sf/store_sf/transform_sf 的多布局分发。",
+          "learning_goals": [
+            "理解 get_sf_and_inv 中 clamp 与 sf/sf_inv 的计算",
+            "掌握 round_sf 用 reinterpret/位操作把 sf 舍入到 2 的幂的原理",
+            "理解 UE8M0 打包与 load/store/transform 宏的多布局分发"
+          ],
+          "source_files": [
+            "tile_kernels/quant/common.py"
+          ],
+          "minimal_modules": [
+            "quant/common"
+          ],
+          "practice_task": "用纯 Python 复现 get_sf_and_inv 的 round_sf 逻辑（对 float32 的位模式做 (bits-1)>>23+1-127 得到 exp），验证返回的 sf 恰为 2 的幂。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "per-block / lossless / E5M6 变体与 cast_back 反量化",
+          "order": 4,
+          "filename": "u4-l4-block-lossless-e5m6-castback.md",
+          "level": "intermediate",
+          "topic": "per_block_cast、per_block_cast_lossless、per_token_cast_to_e5m6（含特殊值处理），以及 cast_back 反量化。",
+          "learning_goals": [
+            "对比 per_token 与 per_block 的 SF 粒度差异",
+            "理解 lossless 变体的约束与用途",
+            "掌握 cast_back 反量化的流程与精度损失来源"
+          ],
+          "source_files": [
+            "tile_kernels/quant/per_block_cast_kernel.py",
+            "tile_kernels/quant/per_block_cast_lossless_kernel.py",
+            "tile_kernels/quant/per_token_cast_to_e5m6_kernel.py",
+            "tile_kernels/quant/cast_back_kernel.py"
+          ],
+          "minimal_modules": [
+            "per_block_cast_kernel",
+            "per_block_cast_lossless_kernel",
+            "per_token_cast_to_e5m6_kernel",
+            "cast_back_kernel"
+          ],
+          "practice_task": "比较 per_token 与 per_block 的 SF 粒度差异；用 cast_back 把 per_token_cast 的输出还原为高精度，计算与原值的相对误差并分析来源。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "融合 SwiGLU + 量化 与 per-channel transpose",
+          "order": 5,
+          "filename": "u4-l5-fused-swiglu-quant.md",
+          "level": "intermediate",
+          "topic": "swiglu_forward/backward 与 per_token/per_channel cast 的融合算子，以及 per_channel_cast_and_transpose（转置+量化一次完成）。",
+          "learning_goals": [
+            "理解 SwiGLU 与量化融合为何能省一次全局存储读写",
+            "掌握 per_channel_cast_and_transpose 的融合点",
+            "能对照 torch/swiglu.py 参考理解融合前后的数值等价"
+          ],
+          "source_files": [
+            "tile_kernels/quant/swiglu_forward_and_per_token_cast_kernel.py",
+            "tile_kernels/quant/swiglu_forward_and_per_channel_cast_and_transpose_kernel.py",
+            "tile_kernels/quant/per_channel_cast_and_transpose_kernel.py",
+            "tile_kernels/torch/swiglu.py"
+          ],
+          "minimal_modules": [
+            "swiglu_forward_and_per_token_cast_kernel",
+            "swiglu_forward_and_per_channel_cast_and_transpose_kernel",
+            "per_channel_cast_and_transpose_kernel",
+            "torch/swiglu"
+          ],
+          "practice_task": "解释把 SwiGLU 与 per_token cast 融合相比「先 SwiGLU 再单独量化」省下了哪些全局存储读写；对照 torch/swiglu.py 参考验证融合前后数值等价。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "MoE 路由模块",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "MoE 路由概览与打分函数",
+          "order": 1,
+          "filename": "u5-l1-moe-overview-scoring.md",
+          "level": "intermediate",
+          "topic": "专家混合（MoE）路由问题，sigmoid/softmax/sqrtsoftplus 三种打分函数，ScoringFunc 枚举与 softplus 宏。",
+          "learning_goals": [
+            "理解 MoE token→expert 路由的整体问题",
+            "掌握三种打分函数的数学定义与区别",
+            "理解 ScoringFunc 枚举与 @T.macro softplus 的作用"
+          ],
+          "source_files": [
+            "tile_kernels/moe/scoring.py",
+            "tile_kernels/moe/common.py",
+            "tile_kernels/torch/topk.py"
+          ],
+          "minimal_modules": [
+            "moe/scoring",
+            "moe/common",
+            "torch/topk"
+          ],
+          "practice_task": "用 torch 实现 sigmoid/softmax/sqrtsoftplus 三种打分，对同一 logits 比较排序差异；对照 ScoringFunc 枚举值确认一致性。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Top-k 门控 kernel：reducer 与 warp shuffle",
+          "order": 2,
+          "filename": "u5-l2-topk-gate-kernels.md",
+          "level": "intermediate",
+          "topic": "topk_gate（反复 reduce_max + min reducer 选最大并稳定处理并列）、top2_sum_gate，以及 warp 原语 shfl_sync/sync_warp。",
+          "learning_goals": [
+            "理解 topk_gate 用 reduce_max + alloc_reducer('min') 逐个选 top-k 的流程",
+            "掌握 warp 原语 T.shfl_sync / T.sync_warp 的用法",
+            "理解并列最大时取更小下标的稳定策略"
+          ],
+          "source_files": [
+            "tile_kernels/moe/topk_gate_kernel.py",
+            "tile_kernels/moe/top2_sum_gate_kernel.py",
+            "tile_kernels/moe/common.py"
+          ],
+          "minimal_modules": [
+            "topk_gate_kernel",
+            "top2_sum_gate_kernel",
+            "moe/common"
+          ],
+          "practice_task": "解释 topk_gate 为何用 alloc_reducer('min', replication='all') 来稳定处理并列最大；用 torch 参考 stable_topk 对拍 topk_gate 的输出（含并列场景）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "分组路由与 group counting",
+          "order": 3,
+          "filename": "u5-l3-grouped-routing.md",
+          "level": "intermediate",
+          "topic": "get_topk_group_idx 宏（warp 内每组 top2 求和 + 计数排序）、topk_sum_and_topk_group_idx，以及 group_count。",
+          "learning_goals": [
+            "理解 get_topk_group_idx 中 shfl_sync 的「比我大的组有几个」计数逻辑",
+            "掌握分组 top-k 路由的稳定排序保证",
+            "理解 group_count 在派发中的作用"
+          ],
+          "source_files": [
+            "tile_kernels/moe/common.py",
+            "tile_kernels/moe/topk_sum_and_topk_group_idx_kernel.py",
+            "tile_kernels/moe/group_count_kernel.py"
+          ],
+          "minimal_modules": [
+            "moe/common",
+            "topk_sum_and_topk_group_idx_kernel",
+            "group_count_kernel"
+          ],
+          "practice_task": "逐步跟读 get_topk_group_idx，画出从 scores 到 topk group idx 的全过程；说明 count_var 计数与 i<lane_idx 如何共同保证稳定排序。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "融合派发：expand / reduce / mapping",
+          "order": 4,
+          "filename": "u5-l4-fused-dispatch.md",
+          "level": "intermediate",
+          "topic": "token→专家映射与「fused」派发布局：expand_to_fused、reduce_fused、get_fused_mapping、inplace_unique_group_indices。",
+          "learning_goals": [
+            "理解 fused 布局相对朴素 scatter/gather 的连续访存优势",
+            "掌握 expand_to_fused / reduce_fused 的配对关系",
+            "理解 get_fused_mapping 与 inplace_unique_group_indices 的作用"
+          ],
+          "source_files": [
+            "tile_kernels/moe/expand_to_fused_kernel.py",
+            "tile_kernels/moe/reduce_fused_kernel.py",
+            "tile_kernels/moe/get_fused_mapping_kernel.py",
+            "tile_kernels/moe/inplace_unique_group_indices_kernel.py"
+          ],
+          "minimal_modules": [
+            "expand_to_fused_kernel",
+            "reduce_fused_kernel",
+            "get_fused_mapping_kernel",
+            "inplace_unique_group_indices_kernel"
+          ],
+          "practice_task": "用 torch 参考实现一个简化版 expand（按 topk_idx 复制 token 到 fused 布局），对照 expand_to_fused 的输出；解释 fused 布局为何更利于连续访存。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "权重归一化、TP 掩码、aux 负载与完整路由参考",
+          "order": 5,
+          "filename": "u5-l5-norm-mask-aux-reference.md",
+          "level": "advanced",
+          "topic": "normalize_weight、mask_indices_by_tp（EP/TP 掩码）、aux_fi（负载均衡辅助损失），以及 torch/topk.py 中 top2_sum_gate 的完整算法。",
+          "learning_goals": [
+            "掌握 normalize_weight 的 top-sum 归一化",
+            "理解 mask_indices_by_tp 把非本卡专家置 -1 的 EP/TP 逻辑",
+            "能对照 torch/topk.py 列出完整路由的步骤"
+          ],
+          "source_files": [
+            "tile_kernels/moe/normalize_weight_kernel.py",
+            "tile_kernels/moe/mask_indices_by_tp_kernel.py",
+            "tile_kernels/moe/aux_fi_kernel.py",
+            "tile_kernels/torch/topk.py"
+          ],
+          "minimal_modules": [
+            "normalize_weight_kernel",
+            "mask_indices_by_tp_kernel",
+            "aux_fi_kernel",
+            "torch/topk"
+          ],
+          "practice_task": "对照 torch/topk.py 的 top2_sum_gate，按顺序列出从 logits 到最终 (topk_idx, topk_weights) 的全部步骤；重点解释 EP/TP 掩码与 logical→physical 映射两段逻辑。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Engram 模块",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Engram 门控前向 kernel 与持久化调度",
+          "order": 1,
+          "filename": "u6-l1-engram-gate-fwd.md",
+          "level": "advanced",
+          "topic": "engram 数学（RMSNorm + signed_sqrt 点积 + sigmoid 门控）、persistent kernel 模式与 SM 占用估算。",
+          "learning_goals": [
+            "理解 engram gate 的前向数学定义",
+            "掌握 persistent kernel 的网格与持久化块设计",
+            "理解 _choose_blk_d 与 _choose_num_persistent_blocks 的占用启发式"
+          ],
+          "source_files": [
+            "tile_kernels/engram/engram_gate_kernel.py",
+            "tile_kernels/config.py"
+          ],
+          "minimal_modules": [
+            "engram_gate_kernel",
+            "config"
+          ],
+          "practice_task": "根据 get_max_smem_per_sm 与 get_num_sms 推算给定 hidden_size 下的 blocks_per_sm 与 num_persistent_blocks；解释持久化块如何覆盖所有 token。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Engram 反向与权重梯度归约",
+          "order": 2,
+          "filename": "u6-l2-engram-gate-bwd-gradw.md",
+          "level": "advanced",
+          "topic": "engram_gate_bwd 的反向传播、grad_w_reduce 跨 hc_mult 的权重梯度归约，以及 main_grad fp32 缓冲的就地累加。",
+          "learning_goals": [
+            "理解前向 save_for_backward 保存的 dot/gate_score/rstd_x/rstd_k 在反向中的用途",
+            "掌握 grad_w_reduce 的跨头权重梯度归约",
+            "理解 main_grad 存在时返回 None 的优化原因"
+          ],
+          "source_files": [
+            "tile_kernels/engram/engram_gate_kernel.py",
+            "tile_kernels/engram/engram_grad_w_reduce_kernel.py"
+          ],
+          "minimal_modules": [
+            "engram_gate_kernel",
+            "engram_grad_w_reduce_kernel"
+          ],
+          "practice_task": "列出前向 save_for_backward 保存的张量并说明各自在反向中的用途；解释当 weight_hidden 拥有 main_grad 时，backward 为何对该参数返回 None。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Engram 哈希与融合权重",
+          "order": 3,
+          "filename": "u6-l3-engram-hash-fused-weight.md",
+          "level": "advanced",
+          "topic": "engram_hash 哈希 kernel，以及 fused_weight 把两个 RMSNorm 权重融合为一个，供前向一次读取。",
+          "learning_goals": [
+            "理解 engram_hash 的哈希计算",
+            "掌握 fused_weight 的融合策略与收益",
+            "能区分 fused_weight 与 main_grad 两种「权重融合/缓冲」概念"
+          ],
+          "source_files": [
+            "tile_kernels/engram/engram_hash_kernel.py",
+            "tile_kernels/engram/engram_fused_weight_kernel.py"
+          ],
+          "minimal_modules": [
+            "engram_hash_kernel",
+            "engram_fused_weight_kernel"
+          ],
+          "practice_task": "解释 fused_weight 如何减少前向 kernel 对权重的多次加载；为 engram_hash 编写一个 torch 参考并对拍 kernel 输出。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Manifold HyperConnection（mhc）模块",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "MHC 概览：残差扩展与后处理",
+          "order": 1,
+          "filename": "u7-l1-mhc-overview-expand-post.md",
+          "level": "advanced",
+          "topic": "超连接（hyper-connection）思想、expand_from_embedding 把 (…,H) 扩展为 (…,mhc_mult,H)，以及 post、norm_fn。",
+          "learning_goals": [
+            "理解 mhc_mult 残差维度的含义",
+            "掌握 expand_from_embedding 的输入输出变换",
+            "理解 post 与 norm_fn 在 mhc 流水线中的位置"
+          ],
+          "source_files": [
+            "tile_kernels/mhc/expand_kernel.py",
+            "tile_kernels/mhc/post_kernel.py",
+            "tile_kernels/mhc/norm_fn_kernel.py",
+            "tile_kernels/modeling/mhc/functional.py"
+          ],
+          "minimal_modules": [
+            "expand_kernel",
+            "post_kernel",
+            "norm_fn_kernel",
+            "modeling/mhc/functional"
+          ],
+          "practice_task": "说明 mhc_mult 维度的作用；用 torch 实现 expand_from_embedding 的参考并对拍 expand kernel 的输出。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "MHC 前处理流水线与融合",
+          "order": 2,
+          "filename": "u7-l2-mhc-pre-pipeline.md",
+          "level": "advanced",
+          "topic": "pre_norm_fn + pre_split_mixes + pre_apply_mix 的组合，推理模式下的 pre_big_fuse 融合，以及 head_compute_mix。",
+          "learning_goals": [
+            "掌握 mhc_pre 三段前处理的组合顺序",
+            "理解 pre_big_fuse 仅在推理（no grad）启用的原因",
+            "理解 head_compute_mix 用于 lm_head 的特殊处理"
+          ],
+          "source_files": [
+            "tile_kernels/modeling/mhc/functional.py",
+            "tile_kernels/mhc/pre_split_mixes_kernel.py",
+            "tile_kernels/mhc/pre_apply_mix_kernel.py",
+            "tile_kernels/mhc/pre_big_fuse_kernel.py"
+          ],
+          "minimal_modules": [
+            "modeling/mhc/functional",
+            "pre_split_mixes_kernel",
+            "pre_apply_mix_kernel",
+            "pre_big_fuse_kernel"
+          ],
+          "practice_task": "在 mhc_pre 中比较 torch.is_grad_enabled() 走 pre_big_fuse 与走三段拆分的两条路径；说明融合为何只在推理时安全启用。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Sinkhorn 归一化（前向 + 自定义反向）",
+          "order": 3,
+          "filename": "u7-l3-sinkhorn-fwd-bwd.md",
+          "level": "advanced",
+          "topic": "迭代行列归一化的前向，以及反向需保存全部中间 xs/sums 再逆序回传的复杂实现。",
+          "learning_goals": [
+            "理解 Sinkhorn 前向的 softmax + 行列迭代归一化",
+            "掌握反向 kernel 保存 xs/sums 中间量并逆序回传的设计",
+            "理解为何这类迭代算法需要手写反向而非依赖自动微分"
+          ],
+          "source_files": [
+            "tile_kernels/mhc/sinkhorn_kernel.py",
+            "tile_kernels/modeling/mhc/ops/sinkhorn.py"
+          ],
+          "minimal_modules": [
+            "sinkhorn_kernel",
+            "modeling/mhc/ops/sinkhorn"
+          ],
+          "practice_task": "跟读反向 kernel 中 xs[step]/sums[step] 的保存与 for inv_step 逆序循环，画出「softmax→col→row…→row」的反向计算图；说明为何不能直接交给 autograd。",
+          "depends_on": [
+            "u7-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "多层重计算 kernel",
+          "order": 4,
+          "filename": "u7-l4-multilayer-recompute.md",
+          "level": "advanced",
+          "topic": "multilayer_recompute 用于训练时跨层重算/混合，及其在 mhc 训练流水线与 ops 层 autograd 封装中的位置。",
+          "learning_goals": [
+            "理解 multilayer_recompute 的用途与训练场景",
+            "掌握其在 modeling/mhc/ops 层的 autograd 封装",
+            "对比训练（重算）与推理（big_fuse）两条路径"
+          ],
+          "source_files": [
+            "tile_kernels/mhc/multilayer_recompute_kernel.py",
+            "tile_kernels/modeling/mhc/ops/multilayer_recompute.py"
+          ],
+          "minimal_modules": [
+            "multilayer_recompute_kernel",
+            "modeling/mhc/ops/multilayer_recompute"
+          ],
+          "practice_task": "阅读 multilayer_recompute 在 ops 层的 autograd 封装，说明它在 mhc 训练流水线中的位置；与 pre_big_fuse 对比训练/推理两条路径的差异。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Modeling 高层可训练层",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "torch.autograd.Function 封装范式（以 EngramGate 为例）",
+          "order": 1,
+          "filename": "u8-l1-autograd-function-pattern.md",
+          "level": "intermediate",
+          "topic": "EngramGateFn 的 forward/backward、save_for_backward、main_grad 就地累加与返回 None、view/reshape 形状处理。",
+          "learning_goals": [
+            "掌握 torch.autograd.Function 封装底层 kernel 的标准范式",
+            "理解 save_for_backward 的选择与反向输入输出对应关系",
+            "理解 main_grad 就地累加与对应返回 None 的优化"
+          ],
+          "source_files": [
+            "tile_kernels/modeling/engram/engram_gate.py"
+          ],
+          "minimal_modules": [
+            "modeling/engram/engram_gate"
+          ],
+          "practice_task": "仿照 EngramGateFn 的结构，为 transpose 写一个 autograd.Function：forward 调 batched_transpose，backward 调自身转置（转置的导数仍是转置）。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "MHC functional API：pre / head 的组合",
+          "order": 2,
+          "filename": "u8-l2-mhc-functional-api.md",
+          "level": "intermediate",
+          "topic": "mhc_pre 与 mhc_head 把多个 op 组合成可调用入口、ctx 不透明元组传递、lm_head 的 padding 复用。",
+          "learning_goals": [
+            "追踪 mhc_pre 从 residual 到 layer_input 的完整调用链",
+            "理解 ctx=(post_mix,comb_mix) 不透明元组如何传给 mhc_post",
+            "掌握 mhc_head 对 fn 做 padding 以复用 pre_norm_fn 的技巧"
+          ],
+          "source_files": [
+            "tile_kernels/modeling/mhc/functional.py",
+            "tile_kernels/modeling/mhc/__init__.py"
+          ],
+          "minimal_modules": [
+            "modeling/mhc/functional",
+            "modeling/mhc/__init__"
+          ],
+          "practice_task": "追踪 mhc_pre 的完整调用链并标注每一步调用的底层 op；解释 ctx 元组如何在前向产出、在后续 mhc_post 中被消费。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "ops 层 autograd 封装（sinkhorn / head_compute_mix）",
+          "order": 3,
+          "filename": "u8-l3-mhc-ops-autograd.md",
+          "level": "advanced",
+          "topic": "modeling/mhc/ops 下每个 autograd.Function 如何桥接底层 kernel 与 functional API，含反向中的 reducer/分块归约细节。",
+          "learning_goals": [
+            "理解 ops 层 autograd.Function 桥接底层 kernel 的方式",
+            "掌握 head_compute_mix 反向中按 num_sms 分块再 sum(0) 的归约",
+            "对比 ops 层与 functional 层的职责分工"
+          ],
+          "source_files": [
+            "tile_kernels/modeling/mhc/ops/sinkhorn.py",
+            "tile_kernels/modeling/mhc/ops/head_compute_mix.py",
+            "tile_kernels/modeling/mhc/ops/__init__.py"
+          ],
+          "minimal_modules": [
+            "modeling/mhc/ops/sinkhorn",
+            "modeling/mhc/ops/head_compute_mix",
+            "modeling/mhc/ops/__init__"
+          ],
+          "practice_task": "对照 head_compute_mix 的 backward，说明 mhc_scale_grad_partial/mhc_base_grad_partial 为何按 num_sms 分块输出、再在外层 .sum(0) 聚合。",
+          "depends_on": [
+            "u8-l1",
+            "u7-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "测试与基准设施",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "测试数据生成与数值对拍",
+          "order": 1,
+          "filename": "u9-l1-generator-numeric.md",
+          "level": "intermediate",
+          "topic": "generator（token/hidden/moe 参数生成与 TK_FULL_TEST）与 numeric（assert_equal/calc_diff/check_bias 的统计原理）。",
+          "learning_goals": [
+            "掌握 generate_* 系列参数生成器与 TK_FULL_TEST 的关系",
+            "理解 assert_equal（位精确）与 calc_diff（浮点相似度）的适用场景",
+            "理解 check_bias 基于二项分布/中心极限定理的统计检验"
+          ],
+          "source_files": [
+            "tile_kernels/testing/generator.py",
+            "tile_kernels/testing/numeric.py"
+          ],
+          "minimal_modules": [
+            "testing/generator",
+            "testing/numeric"
+          ],
+          "practice_task": "用 generate_moe_params 生成一组参数；为一个量化算子写对拍测试，分别用 assert_equal（整数/位精确）和 calc_diff（浮点）做断言；推导 check_bias 中 10/sqrt(n) 阈值的来源。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "benchmark 插件与回归检测",
+          "order": 2,
+          "filename": "u9-l2-benchmark-plugin.md",
+          "level": "intermediate",
+          "topic": "benchmark_timer（CUPTI）、benchmark_record（JSONL schema）、baseline 回归阈值与 xdist 多卡内存切分。",
+          "learning_goals": [
+            "掌握 benchmark_timer/benchmark_record fixture 的用法与 JSONL schema",
+            "理解 baseline 回归检测的阈值与报告机制",
+            "理解 xdist 多 worker 的 GPU 绑定与内存 fraction 切分"
+          ],
+          "source_files": [
+            "tests/pytest_benchmark_plugin.py",
+            "tile_kernels/testing/bench.py"
+          ],
+          "minimal_modules": [
+            "pytest_benchmark_plugin",
+            "testing/bench"
+          ],
+          "practice_task": "跑一个 benchmark 并用 --benchmark-output 写出 JSONL；调整 --benchmark-regression-threshold 观察回归报告；解释 make_param_key 如何生成稳定可比的 key。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "可复现性：随机种子与 pytest 插件机制",
+          "order": 3,
+          "filename": "u9-l3-reproducibility-plugins.md",
+          "level": "intermediate",
+          "topic": "pytest_random_plugin 用 nodeid 哈希派生种子，conftest 通过 pytest_plugins 加载非 conftest 命名插件以避免重复注册。",
+          "learning_goals": [
+            "理解 seed = base + sha256(nodeid) 的派生与稳定性",
+            "掌握 conftest.py + pytest_plugins 的加载机制",
+            "理解插件文件故意不命名为 conftest.py 的原因"
+          ],
+          "source_files": [
+            "tests/pytest_random_plugin.py",
+            "tests/conftest.py"
+          ],
+          "minimal_modules": [
+            "pytest_random_plugin",
+            "conftest"
+          ],
+          "practice_task": "解释为何 seed = base + sha256(nodeid) 能让每个测试既稳定又互不干扰；说明 pytest_benchmark_plugin 不命名为 conftest.py 是为了规避 pluggy 的什么问题。",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "硬件感知调优与扩展",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "SM / 共享内存感知调优",
+          "order": 1,
+          "filename": "u10-l1-hardware-aware-tuning.md",
+          "level": "advanced",
+          "topic": "get_num_sms/get_max_smem_per_sm 的硬件探测、持久化 kernel 占用启发式，以及 num_sms 可配置覆盖。",
+          "learning_goals": [
+            "掌握 get_device_num_sms/get_max_smem_per_sm 的硬件探测方式",
+            "理解持久化 kernel 的占用启发式估算",
+            "会用 set_num_sms 限制可用 SM 并观察性能影响"
+          ],
+          "source_files": [
+            "tile_kernels/config.py",
+            "tile_kernels/engram/engram_gate_kernel.py",
+            "tile_kernels/testing/generator.py"
+          ],
+          "minimal_modules": [
+            "config",
+            "engram_gate_kernel",
+            "testing/generator"
+          ],
+          "practice_task": "用 set_num_sms 限制可用 SM 数，跑 engram benchmark 观察性能变化；对给定 hidden_size 推算持久化块数并与默认 SM 数下的结果对比。",
+          "depends_on": [
+            "u6-l1",
+            "u9-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "TMA、向量化、布局与 pass_configs",
+          "order": 2,
+          "filename": "u10-l2-tma-vectorize-layout.md",
+          "level": "advanced",
+          "topic": "get_best_vectorize_size（按 SM major 选 16/32）、T.StridedTensor 处理非连续输入、T.Fragment swizzle/annotate_layout，以及 pass_configs 各开关。",
+          "learning_goals": [
+            "理解 get_best_vectorize_size 按 compute major 选择 16/32 的逻辑",
+            "掌握 T.StridedTensor 相比 T.Tensor 携带的额外 stride 信息",
+            "理解常见 pass_configs 开关（如 TL_DISABLE_WARP_SPECIALIZED）的作用"
+          ],
+          "source_files": [
+            "tile_kernels/quant/common.py",
+            "tile_kernels/quant/per_token_cast_kernel.py",
+            "tile_kernels/transpose/batched_transpose_kernel.py"
+          ],
+          "minimal_modules": [
+            "quant/common",
+            "per_token_cast_kernel",
+            "batched_transpose_kernel"
+          ],
+          "practice_task": "收集至少 3 个 kernel 中 pass_configs 的不同取值并推测各自作用；解释 T.StridedTensor 相比普通 T.Tensor 多携带了什么信息、为何量化/engram 需要它。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "扩展 TileKernels：新增一个算子的完整流程（综合实战）",
+          "order": 3,
+          "filename": "u10-l3-add-new-kernel-capstone.md",
+          "level": "advanced",
+          "topic": "端到端新增一个算子的四件套：TileLang kernel + Python wrapper + torch 参考实现 + pytest 测试（正确性 + benchmark），可选 modeling 封装。",
+          "learning_goals": [
+            "整合前述所有知识，独立完成一个新算子的端到端落地",
+            "掌握 kernel/wrapper/torch 参考/测试四件套的协同约定",
+            "能复用 testing 与 benchmark 设施验证正确性与性能"
+          ],
+          "source_files": [
+            "tile_kernels/moe/topk_gate_kernel.py",
+            "tile_kernels/torch/topk.py",
+            "tests/moe/test_topk_gate.py",
+            "tests/transpose/test_transpose.py"
+          ],
+          "minimal_modules": [
+            "topk_gate_kernel",
+            "torch/topk",
+            "test_topk_gate",
+            "test_transpose"
+          ],
+          "practice_task": "实现一个新算子（如 rowmax 或 RMSNorm）的完整四件套：TileLang kernel、wrapper、torch 参考、pytest 测试，跑通正确性对拍与 benchmark，并报告带宽或延迟。",
+          "depends_on": [
+            "u10-l1",
+            "u10-l2",
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
