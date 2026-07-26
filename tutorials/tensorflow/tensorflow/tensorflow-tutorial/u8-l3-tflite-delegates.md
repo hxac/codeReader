@@ -1,452 +1,473 @@
 # TFLite 委托机制 delegates
 
-> 本讲承接 u8-l2（FlatBuffer 模型格式与 OpResolver）。上一讲我们讲清楚了「模型里的算子如何经 OpResolver 找到 CPU kernel」，本讲回答它的下一个自然问题：**如果设备上有 GPU、NPU、DSP 等更强的算力，TFLite 怎么把计算交给它们？** 答案就是 **delegate（委托）**。
-
----
+> 本讲是「边缘部署 TFLite」单元的第三讲。前置讲义 u8-l1 讲清了 Interpreter 的四件套执行模型（FlatBufferModel→InterpreterBuilder→AllocateTensors→Invoke），u8-l2 讲清了 `.tflite` 的 FlatBuffer 格式与 OpResolver 如何把算子码解析成 `TfLiteRegistration`。本讲回答一个进阶问题：**既然 CPU kernel 已经能让模型跑起来，TFLite 还用什么机制去榨取 GPU/NNAPI/专用 NPU 的算力？** 答案就是 **delegate（委托）**。
 
 ## 1. 本讲目标
 
 学完本讲，你应当能够：
 
-1. 说清 **delegate 是什么**：它不是一个 kernel，而是一套「把一段子图整体替换成一个宏算子、交给加速后端执行」的协议。
-2. 画出 **图分区（graph partitioning）** 的过程：为什么一张图会被切成「可加速子图 + 不可加速 CPU 子图」交替的若干段。
-3. 区分 **两种失败回退**：apply 期（委托生效时）失败会整图回滚，运行期（Invoke 时）失败会自动退回 CPU 再跑一遍。
-4. 对比 **GPU / NNAPI / XNNPACK** 三类常见委托后端的适用场景与编程入口。
-
----
+- 说清 **delegate 是什么**：它不是一个新的 Interpreter，而是一种「在执行前把图里一部分节点整体替换成一个『宏节点』，并把这部分计算交给后端」的契约。
+- 画出 **图分区（partition）** 的完整流程：delegate 的 `Prepare` 回调如何声明「我支持哪些节点」，运行时如何用 `PartitionGraph` 把这些节点切成若干 `NodeSubset`，再用一个 delegate 宏节点替换每个子集。
+- 对照 **GPU delegate、NNAPI delegate、XNNPACK delegate** 三个真实实现，理解它们各自的适用场景与差异。
+- 解释 **三级回退（fallback）策略**：加载期回退、运行期 `InvokeWithCPUFallback`、`UndoAllDelegates`/`RemoveAllDelegates` 各自在什么情况下触发。
 
 ## 2. 前置知识
 
-本讲假设你已经掌握（详见 u8-l1、u8-l2）：
+本讲默认你已经掌握 u8-l1、u8-l2 的内容。下面补充两个本讲会用到的关键概念。
 
-- **Interpreter 的执行计划 `execution_plan_`**：一张图加载后被展开成一条按序执行的算子序列，`Invoke` 就是逐个调用每个算子的 `invoke` 函数指针。
-- **`TfLiteRegistration`**：一个算子的「身份证 + 函数指针集合」（`init/prepare/invoke/free`），由 OpResolver 从 FlatBuffer 算子码翻译而来。
-- **`TfLiteContext`**：运行时传给算子的「工具箱」，算子通过它读写张量、上报错误。
+### 2.1 执行计划 execution_plan 与「宏节点」
 
-补充两个本讲要用的新概念：
+回顾 u8-l1：Interpreter 实际把状态存在它持有的 `Subgraph` 里，`Invoke()` 时只是按 `execution_plan_`（一个 `std::vector<int>` 节点下标序列）顺序遍历每个节点，取出它的 `TfLiteRegistration` 调用 `invoke` 函数指针。
 
-- **宏算子（macro-op / DELEGATE op）**：一个代表「整段被委托子图」的特殊算子，它的 `builtin_code` 被标记为 `BuiltinOperator_DELEGATE`。对运行时而言，它和普通算子一样排在执行计划里、同样有 `invoke`，只是它的 `invoke` 内部跑的是整段子图而非单个 op。
-- **后端（backend）**：真正干活的硬件/库，如 GPU（OpenCL/Vulkan）、NNAPI（Android 厂商加速器）、XNNPACK（高度优化的 CPU 库）、Hexagon（高通 DSP）、CoreML（Apple）。Delegate 是「TFLite 运行时 ↔ 后端」之间的适配层。
+delegate 的核心技巧是：**允许某个 `TfLiteRegistration` 的 `invoke` 不做单个算子的计算，而是「代为执行一整段被替换掉的子图」**。这种节点被称为 delegate 宏节点（macro node），它的 `builtin_code` 是特殊的 `kTfLiteBuiltinDelegate`。对 `Invoke()` 来说，它和普通节点没区别——遍历到它、调它的 `invoke` 就行；真正的差异藏在 `invoke` 内部。
 
----
+### 2.2 TfLiteRegistration 的 init/prepare/invoke 三件套（回顾）
+
+u8-l2 已介绍 `TfLiteRegistration` 含 `init / prepare / invoke / free` 等函数指针。delegate 宏节点也是一个 `TfLiteRegistration`，同样遵守这套契约：`init` 时拿到子图描述并编译后端模型，`prepare` 时处理形状/内存，`invoke` 时真正跑一次推理。所以「一个 delegate kernel」在结构上和「一个普通算子 kernel」是同构的，这正是 TFLite 能用同一套 `Invoke` 机制兼容二者的原因。
+
+> 术语提示：本讲的 **delegate** 指委托对象（`TfLiteDelegate`）；**delegate kernel** 指替换子图后产生的那个宏节点（一个 `TfLiteRegistration`）；**后端（backend）** 指 GPU/NNAPI/XNNPACK 等真实算力提供者。三者别混淆。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|------|------|
-| `tensorflow/lite/core/c/common.h` | 定义委托协议核心：`TfLiteDelegate` 结构体、`TfLiteDelegateFlags` 位标志、`TfLiteDelegateParams`（一段被委托子图的输入输出清单）。 |
-| `tensorflow/lite/core/interpreter.{h,cc}` | `Interpreter::ModifyGraphWithDelegate` / `RemoveAllDelegates` 的对外入口与跨子图分发。 |
-| `tensorflow/lite/core/subgraph.cc` | 委托的真正主战场：`ModifyGraphWithDelegateImpl`（应用委托三步走）、`ReplaceNodeSubsetsWithDelegateKernels`（执行计划改写）、`SwitchToDelegateContext`（上下文切换）、`RemoveAllDelegates`（回滚）。 |
-| `tensorflow/lite/graph_info.{h,cc}` | 图分区算法 `PartitionGraphIntoIndependentNodeSubsets`：把执行计划切成 `NodeSubset` 序列。 |
-| `tensorflow/lite/delegates/interpreter_utils.{h,cc}` | 运行期自动 CPU 回退工具 `InvokeWithCPUFallback`。 |
-| `tensorflow/lite/delegates/gpu/common/model_builder.cc` | GPU 委托的 `DelegatePrepare`，是「委托如何声明支持哪些节点」的范本。 |
-| `tensorflow/lite/delegates/gpu/delegate.h` | GPU 委托的 C API（`TfLiteGpuDelegateV2Create`）。 |
-| `tensorflow/lite/delegates/nnapi/nnapi_delegate.h` | NNAPI 委托的 C++ 接口 `StatefulNnApiDelegate` 及其 `Options`。 |
-| `tensorflow/lite/delegates/xnnpack/xnnpack_delegate.cc` | XNNPACK 委托的 `DelegatePrepare`（常作为默认委托被自动应用）。 |
-| `tensorflow/lite/delegates/utils/simple_delegate.h` | 写自定义委托的高层脚手架 `SimpleDelegateInterface`。 |
-| `tensorflow/lite/python/interpreter.py` | Python 侧加载外部委托 `load_delegate` / `Delegate`。 |
-
----
+| --- | --- |
+| [`tensorflow/lite/core/c/common.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h) | 定义 `TfLiteDelegate` 结构、`TfLiteDelegateFlags`、`TfLiteDelegateParams` 与 context 上的 `ReplaceNodeSubsetsWithDelegateKernels` 函数指针——delegate 的「C 语言契约」。 |
+| [`tensorflow/lite/core/subgraph.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc) | `ModifyGraphWithDelegateImpl`（委托入口）、`ReplaceNodeSubsetsWithDelegateKernels`（建宏节点）、`InvokeImpl`（运行时遍历）、`UndoAllDelegates`/`RemoveAllDelegates`（回退）。 |
+| [`tensorflow/lite/graph_info.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/graph_info.h) | `NodeSubset` 结构与 `PartitionGraphIntoIndependentNodeSubsets` 分区算法的声明。 |
+| [`tensorflow/lite/delegates/interpreter_utils.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.h) / [`.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc) | `InterpreterUtils::InvokeWithCPUFallback`——运行期回退的兜底实现。 |
+| [`tensorflow/lite/delegates/utils/simple_delegate.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.h) / [`simple_delegate.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.cc) | `SimpleDelegateInterface`——写一个新 delegate 的「模板基类」，浓缩了 Prepare 的标准骨架。 |
+| [`tensorflow/lite/delegates/utils.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils.h) | `GraphPartitionHelper`——通用的「逐节点判定支持性 + 取最大分区」工具类。 |
+| [`tensorflow/lite/delegates/gpu/delegate.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.h) / [`delegate.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc) / [`common/model_builder.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/common/model_builder.cc) | GPU delegate 的对外 C 接口与 `DelegatePrepare`/`GetOpsToReplace`。 |
+| [`tensorflow/lite/delegates/nnapi/nnapi_delegate.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.h) / [`nnapi_delegate.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.cc) | Android NNAPI delegate：把子图交给系统驱动模型。 |
+| [`tensorflow/lite/delegates/xnnpack/xnnpack_delegate.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/xnnpack/xnnpack_delegate.cc) | XNNPACK delegate：高度优化的 CPU 后端，常作为默认 delegate。 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 委托是什么：把子图卸载到加速后端（lite.delegates）
+### 4.1 delegate 的抽象与契约（lite.delegates）
 
 #### 4.1.1 概念说明
 
-TFLite 默认在 CPU 上逐算子解释执行。但很多设备有更强的算力：手机 GPU、Android 的 NPU/DSP、Apple 的 Neural Engine。问题是——这些后端各有各的 API、各自只支持一部分算子、而且通常**只在大段连续计算时才有收益**（单算子卸载的开销反而大于收益）。
+「delegate」直译是「代表/委托」。在 TFLite 里，它的含义非常具体：**一个对象，它代表某个后端（GPU/NNAPI/...）向运行时声明「图里这些节点我能算」，并接管这些节点的实际计算。**
 
-Delegate（委托）就是为解决这件事而设计的协议。它的核心思想可以一句话概括：
+为什么需要它？因为 TFLite 的设计哲学是「**一个 CPU 解释器 + 可插拔加速后端**」。如果每加一个加速器都要 fork 一份 Interpreter，维护成本不可控。delegate 把「后端如何识别自己支持的算子」「后端如何编译并执行这些算子」这两件事抽象成一个统一的 C 结构体契约，运行时只需认这个契约，就能透明地把部分图「外包」给任意后端。
 
-> **delegate 告诉运行时「我能接管这些节点」，运行时就把这些连续节点打包成一个宏算子，由 delegate 自己负责这一整段的编译与执行；其余节点照旧在 CPU 上跑。**
-
-所以 delegate 不是「替换某一个 kernel」，而是「替换一整段子图」。这带来三个关键设计后果：
-
-1. **选择性卸载**：delegate 只需支持它能支持的算子，不支持的留在 CPU，两者能共存于同一张图。
-2. **连续性收益**：相邻的支持算子会被合并成尽量大的段，最大化融合与减少跨后端拷贝。
-3. **统一的「DELEGATE 宏算子」抽象**：无论后端是 GPU 还是 NPU，对运行时而言都是执行计划里一个 `invoke` 即可的宏算子，运行时主循环无需为每种后端改写。
+打个比方：Interpreter 像一家总承包商，CPU kernel 是它自己的施工队；delegate 像外包分包商。总承包商在动工前（`AllocateTensors`/`ModifyGraphWithDelegate` 之前）和分包商签合同——「二楼到五楼的混凝土工程归你」，然后把这部分从总进度表里替换成「分包商施工」这一条目。真正施工（`Invoke`）时，总进度表照常推进，只是走到那条目时打电话叫分包商来干。
 
 #### 4.1.2 核心流程
 
-一个 delegate 从「被创建」到「真正加速推理」要经过三幕：
+delegate 契约的核心是一个 C 函数指针 `Prepare`，它的工作流程是：
 
-```
-第一幕：创建委托对象
-   用户调用 TfLiteGpuDelegateV2Create() / StatefulNnApiDelegate() / load_delegate()
-   得到一个 TfLiteDelegate*（含 data_、Prepare、flags）
-
-第二幕：应用委托  ModifyGraphWithDelegate(delegate)
-   1. 运行时校验：委托是否支持动态形状？图里有没有动态张量？
-      不支持动态形状 + 图有动态张量 → 直接拒绝（kTfLiteApplicationError）
-   2. 备份原始执行计划 → pre_delegation_execution_plan_（为回滚留底）
-   3. SwitchToDelegateContext()：把 ReplaceNodeSubsetsWithDelegateKernels 等
-      委托专用函数挂进 TfLiteContext，让委托能调用它们
-   4. 调 delegate->Prepare(context, delegate)
-      委托扫描全图，挑出「我支持的节点」nodes_to_replace，
-      调 context->ReplaceNodeSubsetsWithDelegateKernels(...)
-      → 运行时执行【图分区】，把执行计划改写成 CPU段 / DELEGATE宏算子 交替
-   5. SwitchToKernelContext()：撤下委托专用函数（普通 kernel 不能再乱改图）
-   6. 图进入 kStateInvokableAndImmutable（不可变）状态
-
-第三幕：推理  Invoke()
-   执行计划里逐个跑：CPU 算子照旧；遇到 DELEGATE 宏算子 → 调它的 invoke
-   → 该段在 GPU/NPU 上跑完，结果写回张量
+```text
+运行时调用 delegate->Prepare(context, delegate)
+        │
+        ├─ 1. 遍历 execution_plan，逐节点判定「我是否支持」
+        │     → 收集出 supported_nodes（一个节点下标列表）
+        │
+        ├─ 2. 调用 context->ReplaceNodeSubsetsWithDelegateKernels(
+        │        context, delegate_kernel_registration, supported_nodes, delegate)
+        │
+        └─ 3. 运行时把 supported_nodes 分区、替换成宏节点（见 4.2）
 ```
 
-注意第二幕第 6 步的「不可变」：大多数委托在编译时就需要固定形状，因此应用委托后图会被冻结，不能再改输入尺寸。这就是为什么**委托必须在 `AllocateTensors()` 之前、且只能在输入形状确定后应用一次**。
+关键点：**`Prepare` 自己不替换节点，它只把「想替换哪些节点」通过 `ReplaceNodeSubsetsWithDelegateKernels` 告诉运行时，真正改图的是运行时**。这是一种「声明意图 + 运行时执行」的分工，好处是 delegate 作者不必关心图的内部数据结构怎么改。
 
 #### 4.1.3 源码精读
 
-委托协议的核心是 `common.h` 里的 `TfLiteDelegate` 结构体——它本质是一组函数指针 + 一份位标志：
+**`TfLiteDelegate` 结构体**就是契约本身，定义在 `common.h`：
 
-[common.h:1408-1448](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1408-L1448) — 定义委托的「身份证 + 能力声明」。关键字段：
+[TfLiteDelegate 结构体定义:common.h#L1408-L1459](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1408-L1459) —— 注意它几乎全是函数指针：`Prepare` 是必填的委托入口；`CopyFromBufferHandle`/`CopyToBufferHandle`/`FreeBufferHandle` 三件套用于支持后端用「自己的硬件 buffer 句柄」存张量数据（如 GPU 纹理），需要时才填；`flags` 是行为位掩码；`data_` 是 delegate 自己的私有数据口袋。
 
-- `data_`：委托自用的不透明状态指针（如 GPU 编译出的模型、NNAPI 的 `ANeuralNetworksCompilation`），生命周期由委托自己管理。
-- `Prepare(TfLiteContext*, TfLiteDelegate*)`：**最核心的方法**。被 `ModifyGraphWithDelegate` 调用，委托在这里浏览全图并调用 `ReplaceNodeSubsetsWithDelegateKernels()` 把自己能接管的节点替换成宏算子。
-- `CopyFromBufferHandle` / `CopyToBufferHandle` / `FreeBufferHandle`：当委托使用自己的硬件缓冲区（如 OpenGL 纹理）时，这三者负责在「硬件缓冲 ↔ 普通 CPU 张量」之间搬运数据。不用硬件缓冲的委托可置空。
-- `flags`：位掩码能力声明，见 `TfLiteDelegateFlags`。
+`flags` 的取值定义在同一文件的 `TfLiteDelegateFlags` 枚举里：
 
-位标志的含义见 [common.h:1356-1405](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1356-L1405)：
+[TfLiteDelegateFlags 枚举:common.h#L1358-L1405](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1358-L1405) —— 最重要的两个：`kTfLiteDelegateFlagsAllowDynamicTensors = 1`（声明本 delegate 能处理运行时才知形状的动态张量，否则图会被冻结成不可变）；`kTfLiteDelegateFlagsHintFullyDelegatedToSingleDelegate = 8`（调用方保证整图都被这一个 delegate 接管，可跳过部分内存分配）。这两个 flag 直接决定 4.2 节里 `ModifyGraphWithDelegateImpl` 走哪条分支。
 
-| 标志 | 值 | 含义 |
-|------|----|------|
-| `kTfLiteDelegateFlagsNone` | 0 | 无特殊能力 |
-| `kTfLiteDelegateFlagsAllowDynamicTensors` | 1 | 委托能处理动态尺寸张量（否则图被冻结为不可变） |
-| `kTfLiteDelegateFlagsRequirePropagatedShapes` | 2 | 要求运行时在张量 resize 时自动传播形状到委托 kernel 的 I/O 张量（依赖标志 1） |
-| `kTfLiteDelegateFlagsPerOperatorProfiling` | 4 | 按 op 粒度而非「整段委托」粒度做 profiling |
-| `kTfLiteDelegateFlagsHintFullyDelegatedToSingleDelegate` | 8 | 提示整图会被单一委托全包，可跳过部分分配 |
+**`TfLiteDelegateParams`** 是运行时回传给 delegate kernel 的「子图描述」，每个宏节点 init 时会拿到一份：
 
-而 `ReplaceNodeSubsetsWithDelegateKernels` 改写执行计划时，会为每一段被委托的子图构造一个 `TfLiteDelegateParams` 作为该宏算子的「参数包」：
+[TfLiteDelegateParams 结构:common.h#L835-L840](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L835-L840) —— 含 `delegate`（指向自己）、`nodes_to_replace`（这个分区里包含哪些原始节点）、`input_tensors`/`output_tensors`（这个分区与外界的数据边界）。这正是分包商拿到的「合同附件」：你负责这些节点，输入从这几个张量来，输出写到那几个张量去。
 
-[common.h:835-840](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L835-L840) — 一段被委托子图的清单：它由哪些节点组成（`nodes_to_replace`）、跨段边界的输入张量（`input_tensors`）、输出张量（`output_tensors`）。这份清单会被原样塞进 DELEGATE 宏算子的 `builtin_data`，让委托 kernel 在 `invoke` 时知道该算什么。
+而 context 上挂的 `ReplaceNodeSubsetsWithDelegateKernels` 函数指针，就是「声明意图」的入口：
+
+[context->ReplaceNodeSubsetsWithDelegateKernels 声明:common.h#L948-L952](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L948-L952) —— 参数是：一个 `TfLiteRegistration`（这就是 delegate kernel 的注册信息，运行时会用它造宏节点）、`nodes_to_replace`（要替换的节点列表）、`delegate`（自己）。同一个 context 上还有 `PreviewDelegatePartitioning`（[common.h#L1023-L1045](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1023-L1045)），允许 delegate 在真正替换前先「预演」分区结果，方便它决定要不要接单。
 
 #### 4.1.4 代码实践
 
-**实践目标**：在源码中亲手确认「委托的本质是一组函数指针 + 一段被替换的子图」，并理解三个回调各自的职责。
+**实践目标**：在源码里数清「一个 delegate 至少要填 `TfLiteDelegate` 的哪些字段才能工作」。
 
 **操作步骤**：
 
-1. 打开 [common.h:1408-1448](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1408-L1448)，找到 `struct TfLiteDelegate`，数一数它有几个函数指针字段（`Prepare`、`CopyFromBufferHandle`、`CopyToBufferHandle`、`FreeBufferHandle`）。
-2. 打开 [simple_delegate.h:77-117](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/utils/simple_delegate.h#L77-L117)，对照高层封装 `SimpleDelegateInterface`：注意它要求实现的 `IsNodeSupportedByDelegate`、`Name`、`CreateDelegateKernelInterface`、`DelegateOptions` 四个方法，正好对应「声明支持谁 / 我叫什么 / 给我一个 kernel / 分区参数」。
-3. 思考：`Prepare` 与 `SimpleDelegateKernelInterface::Init/Prepare/Eval` 的关系——前者负责「圈地」（声明支持哪些节点、触发分区），后者负责「在这块地上干活」（编译 + 执行）。
+1. 打开 [`tensorflow/lite/delegates/utils/simple_delegate.cc`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.cc)，看 `TfLiteDelegateFactory::CreateSimpleDelegate`（[第 119-153 行](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.cc#L119-L153)）如何用 `new TfLiteDelegate{}` 构造一个空 delegate，然后只设了 `Prepare`、`flags`、`data_` 以及三个 buffer 句柄回调。
+2. 对照 4.1.3 的结构体定义，标记哪些字段被赋值、哪些留空。
 
-**需要观察的现象 / 预期结果**：你会确认委托的「协议」非常薄——运行时只认 `Prepare` 这一个入口，其余全靠委托自己回调 `context->ReplaceNodeSubsetsWithDelegateKernels`。这正是它能跨「GPU/NNAPI/XNNPACK」统一的原因。
+**需要观察的现象**：除了 `Prepare`，其余函数指针都允许为 `null`；`data_` 被塞进了 `SimpleDelegateInterface*`（delegate 作者的业务对象），这是「C 结构体 + C++ 对象」的常见粘合手法。
 
-> 待本地验证：若你有 Android/桌面 GPU 环境，可用本讲 4.4.4 的 Python 示例实际创建一个 GPU 委托并打印分区结果；本 CI 环境无 GPU，故此处为源码阅读型实践。
+**预期结果**：你会得出结论——**一个最小可用的 delegate 只需提供 `Prepare` 和 `data_`**，其余都是可选能力。这正是为什么写一个新 delegate 门槛不高。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：委托的 `flags` 标志位 `kTfLiteDelegateFlagsAllowDynamicTensors` 没设（为 0），会对应用流程产生什么影响？
-**答案**：运行时会在应用委托前先 `PrepareOpsStartingAt` 探测图是否含动态张量；若含动态张量则直接拒绝委托并返回 `kTfLiteApplicationError`；若不含，则应用后把图置为 `kStateInvokableAndImmutable`（不可变），后续不能再 resize 张量。
+**练习 1**：如果一个 delegate 不设置 `kTfLiteDelegateFlagsAllowDynamicTensors`，模型里却存在动态形状张量，会发生什么？
 
-**练习 2**：为什么 `ReplaceNodeSubsetsWithDelegateKernels` 要把整段子图打包成「一个」宏算子，而不是给每个被支持的节点各换一个委托 kernel？
-**答案**：因为整段连续计算在后端上可以融合、复用缓冲区，收益远大于逐算子卸载；逐算子卸载还会引入大量 CPU↔后端 的边界拷贝，得不偿失。分区算法（4.2）正是为「尽量合并连续支持节点」而设计。
+**参考答案**：在 `ModifyGraphWithDelegateImpl` 里（见 4.2.3），运行时会先 `PrepareOpsStartingAt` 探测，一旦 `has_dynamic_tensors_` 为真，就返回 `kTfLiteApplicationError`，整个委托失败。即「不支持动态张量的 delegate 遇到动态图」会直接被拒绝。
+
+**练习 2**：`TfLiteDelegateParams` 里为什么没有「边的连接关系」字段，只有 `nodes_to_replace` / `input_tensors` / `output_tensors`？
+
+**参考答案**：因为分区后，**分区内部的连接对运行时不可见**——整个分区被替换成一个宏节点，内部如何连线是 delegate kernel 自己的事。运行时只关心这个宏节点对外暴露哪些输入、哪些输出张量（边界），所以 `TfLiteDelegateParams` 只描述边界。
 
 ---
 
-### 4.2 图分区：从执行计划到 NodeSubset
+### 4.2 图分区与子图卸载：ModifyGraphWithDelegate（lite.delegates 核心）
 
 #### 4.2.1 概念说明
 
-委托说「我支持节点 {2,3,5,6,7}」，但执行计划是线性的 `{0,1,2,3,4,5,6,7}`，其中 0/1/4 不被支持。运行时要把它改写成可执行的形式：
+4.1 讲了「契约」，本节讲「运行时如何履约」。一个 delegate 通常只支持模型里的**一部分**算子（比如 GPU 支持 Conv2D、DepthwiseConv2D，但不支持某个冷门 custom op）。那么被支持的节点之间，如果夹杂着不支持的节点，运行时怎么处理？
 
-```
-原始:  [0][1][2][3][4][5][6][7]      （[]内是节点 id）
-支持集:        [2][3]   [5][6][7]
-改写后执行计划:
-  ┌─── CPU 段 ───┐┌─ 委托段 ─┐┌CPU┐┌─── 委托段 ───┐
-  [0][1]           [2,3](宏)   [4]  [5,6,7](宏)
-```
+答案是 **图分区（graph partition）**：运行时把 `execution_plan` 切成若干个 `NodeSubset`（节点子集），每个子集要么是「连续的支持节点」（交给 delegate），要么是「不支持节点」（留在 CPU）。最终 `execution_plan` 变成交替排列的 `[CPU 段] → [delegate 宏节点] → [CPU 段] → [delegate 宏节点] → ...`。
 
-也就是说，运行时把执行计划切成一串 **NodeSubset（节点子集）**，每个子集要么全是 CPU 节点（`kTfNonPartition`，原样保留），要么全是被委托节点（`kTfPartition`，合并成一个 DELEGATE 宏算子）。两种子集交替出现，数据在边界处通过张量传递（可能伴随 CPU↔后端 拷贝）。
+> 注意：分区不保证「支持节点一定被连续合并」。如果支持节点被一个不支持节点隔开，它们会被切成**两个独立的 delegate 宏节点**——也就是说，一次委托可能产生多个宏节点，每个宏节点对应 `TfLiteDelegateParams` 里一份独立的分区。
 
 #### 4.2.2 核心流程
 
-分区由 `ReplaceNodeSubsetsWithDelegateKernels` 触发，核心算法是 `graph_info.cc` 的 **epoch（纪元）遍历**：
+完整的「启用一个 delegate」从用户调用 `interpreter.ModifyGraphWithDelegate(delegate)` 开始：
 
+```text
+ModifyGraphWithDelegate(delegate)
+  │
+  └─ ModifyGraphWithDelegateImpl(delegate)               [subgraph.cc:2485]
+       │
+       ├─ STEP 1 准备：RedoAllDelegates；按 flags 处理动态张量
+       │              首次委托时保存 pre_delegation_execution_plan_（原始计划）
+       │
+       ├─ STEP 2 委托：SwitchToDelegateContext()
+       │              → TfLiteDelegatePrepareInternal()  即调 delegate->Prepare
+       │                  │
+       │                  └─ delegate 的 Prepare 内部：
+       │                       逐节点判定支持性 → 收集 supported_nodes
+       │                       → context->ReplaceNodeSubsetsWithDelegateKernels(...)
+       │                           │
+       │                           └─ Subgraph::ReplaceNodeSubsetsWithDelegateKernels
+       │                                 ├─ PartitionGraph(nodes_to_replace)   [分区]
+       │                                 │    → NodeSubset 列表（kTfPartition/kTfNonPartition）
+       │                                 └─ 清空 execution_plan_，按 NodeSubset 重建：
+       │                                      kTfNonPartition  → 原节点逐个加回
+       │                                      kTfPartition     → AddNodeWithParameters
+       │                                                         建一个宏节点
+       │
+       └─ STEP 3 收尾：按 flags 决定 state_（kStateInvokableAndImmutable 等）
+                       EnsureMemoryAllocations()；delegates_applied_.push_back(delegate)
+                       若任何一步失败 → reset_delegation_if_not_ok → RemoveAllDelegates
 ```
-为每个节点打标记 node_type_[i]:
-   在 nodes_to_replace 中 → kTfPartition；否则 → kTfNonPartition
 
-按执行顺序遍历，维护「当前 subset」与 tensor 的产出纪元 tensor_epochs_[t]:
-   每轮循环 = 一个 epoch = 一个新 NodeSubset:
-     尽量把「所有输入都已就绪 且 类型与当前 subset 相同」的节点并入当前 subset
-     遇到类型不同的节点 → 当前 subset 收尾，开下一个 subset（类型翻转）
-
-结果: 一串类型交替的 NodeSubset
-```
-
-用形式化的说法，张量 \( t \) 的产出纪元记为 \( \text{epoch}(t) \)，则一个跨段边界张量必须满足：
-
-\[ \text{epoch}(t_{\text{产出}}) \neq \text{epoch}(t_{\text{消费}}) \]
-
-这类张量既是上一段的输出、又是下一段的输入，会被同时登记进两个相邻 subset 的 `output_tensors` / `input_tensors`，正是 4.1.3 里 `TfLiteDelegateParams` 的来源。
+分区算法本身（`PartitionGraphIntoIndependentNodeSubsets`）的逻辑：**按拓扑序扫描 `nodes_to_replace`，把「连续且都被支持」的节点贪心合并成一个 `kTfPartition` 子集，遇到不支持的节点就归入 `kTfNonPartition` 子集**。它保证：子集内部、子集之间都保持依赖顺序（即按子集出现的顺序执行就是合法拓扑序）。
 
 #### 4.2.3 源码精读
 
-改写执行计划的主入口在 `Subgraph::ReplaceNodeSubsetsWithDelegateKernels`：
+**委托总入口** `Subgraph::ModifyGraphWithDelegateImpl`：
 
-[subgraph.cc:521-615](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L521-L615) — 这段代码做了四件事：
+[ModifyGraphWithDelegateImpl:subgraph.cc#L2485-L2608](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2485-L2608) —— 这段是理解整个机制的关键，重点看三处：
 
-1. 给传入的 `registration` 打上 `builtin_code = BuiltinOperator_DELEGATE` 标记（L525），宣告「这是个宏算子，不是普通 op」。
-2. 空集直接返回（L564-L566）——委托声明「一个节点都不支持」是合法的，此时图原样不动。
-3. 调 `PartitionGraph(nodes_to_replace, &node_subsets)` 做分区（L570-L573）。
-4. **清空并重建 `execution_plan_`**（L586 起）：遍历每个 subset，`kTfNonPartition` 的节点原样 `push_back` 回执行计划；`kTfPartition` 的节点用 `AddNodeWithParameters` 新增**一个** DELEGATE 宏算子（其参数即 4.1.3 的 `TfLiteDelegateParams`）。
+- [STEP 1 准备与动态张量检查:subgraph.cc#L2507-L2548](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2507-L2548)：`delegates_applied_.empty()` 时把当前 `execution_plan_` 备份到 `pre_delegation_execution_plan_`——这就是回退时恢复原图的「底片」。
+- [STEP 2 调 delegate->Prepare:subgraph.cc#L2553-L2558](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2553-L2558)：`SwitchToDelegateContext()` 切换 context 让 delegate 能用扩展接口，`TfLiteDelegatePrepareInternal` 真正触发 `delegate->Prepare(context, delegate)`，之后立刻 `SwitchToKernelContext()` 切回。
+- [失败即回退的 lambda:subgraph.cc#L2496-L2505](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2496-L2505)：`reset_delegation_if_not_ok` 在 status 非 OK 时调 `RemoveAllDelegates()` 还原原图。这是**加载期回退**的核心。
 
-`NodeSubset` 的定义很简洁：
+**真正改图的地方** `Subgraph::ReplaceNodeSubsetsWithDelegateKernels`：
 
-[graph_info.h:76-93](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/graph_info.h#L76-L93) — 三类 `Type`（`kTfUnexplored` 仅构造期用、`kTfPartition`、`kTfNonPartition`），外加 `nodes`（成员节点）、`input_tensors`（来自别的 subset 或全局输入的跨段张量）、`output_tensors`（被别的 subset 消费或作为全局输出的张量；既非输入又非输出的中间张量可被省略）。
+[ReplaceNodeSubsetsWithDelegateKernels 主体:subgraph.cc#L521-L634](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L521-L634) —— 重点三段：
 
-分区算法本体在 `PartitionGraphIntoIndependentNodeSubsetsImpl`：
+- [先分区:subgraph.cc#L568-L573](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L568-L573)：调 `PartitionGraph(nodes_to_replace, &node_subsets)` 得到 `NodeSubset` 列表。
+- [清空并重建 execution_plan:subgraph.cc#L586-L633](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L586-L633)：对每个 `NodeSubset` 走 switch——`kTfNonPartition` 把节点原样加回；`kTfPartition` 用 `AddNodeWithParameters(...)` 造一个宏节点。
+- [给宏节点的输出张量打上 delegate 标记:subgraph.cc#L616-L626](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L616-L626)：`tensor->delegate = delegate;` 与 `node->delegate = delegate;`。这一步很重要——它让运行时知道「这个张量/节点的数据可能在 delegate 的私有 buffer 里」，跨边界时需要 `CopyFromBufferHandle`。
 
-[graph_info.cc:90-123](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/graph_info.cc#L90-L123) — `Partition()` 的主循环「每轮造一个 subset，直到造出空 subset 为止」。构造期先初始化两个特殊纪元：`kEpochAlwaysReady`（−2，表示常量/全局输入，永远就绪）和 `kEpochNotReady`（−1，表示尚未产出）。`UpdateNode`（[graph_info.cc:171 起](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/graph_info.cc#L171)）负责判断一个节点能否并入当前 subset——要求其输入张量全部已就绪，且节点类型与当前 subset 一致；不一致就触发新 subset。
+**分区数据结构** `NodeSubset`：
 
-把委托挂载到图上的「三步走」在 `Subgraph::ModifyGraphWithDelegateImpl`：
+[NodeSubset 结构:graph_info.h#L76-L93](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/graph_info.h#L76-L93) —— 三种类型 `kTfUnexplored`（算法内部临时态）/`kTfPartition`（交给 delegate）/`kTfNonPartition`（留在 CPU）；字段 `nodes`/`input_tensors`/`output_tensors` 与 `TfLiteDelegateParams` 一一对应。分区算法的语义在 [graph_info.h#L101-L122](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/graph_info.h#L101-L122) 有详细注释：贪心模式下会把同类节点尽量合并，非贪心模式则严格保持原始执行顺序。
 
-[subgraph.cc:2485-2558](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2485-L2558) — 对应 4.1.2 的三幕：
+**标准 Prepare 骨架**（以 `SimpleDelegateInterface` 为模板）：
 
-- **STEP 1（校验准备，L2507-L2548）**：若委托不支持动态形状，先 `PrepareOpsStartingAt` 探测；有动态张量则返回 `kTfLiteApplicationError`。首次应用委托时把 `execution_plan_` 备份到 `pre_delegation_execution_plan_`（L2547）——这是回滚的「存档点」。
-- **STEP 2（委托接管，L2554-L2558）**：`SwitchToDelegateContext()` 把 `ReplaceNodeSubsetsWithDelegateKernels` 挂进 context，调 `TfLiteDelegatePrepareInternal(&context_, delegate)`（最终触发 `delegate->Prepare`），再 `SwitchToKernelContext()` 撤下。
+[DelegatePrepare 标准 skeleton:simple_delegate.cc#L82-L116](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.cc#L82-L116) —— 这是写新 delegate 时 `Prepare` 应有的样子，浓缩为四步：`Initialize` → 用 `GraphPartitionHelper` + `IsNodeSupportedByDelegate` 判定 → `GetNodesOfFirstNLargestPartitions`（按 `Options::max_delegated_partitions` / `min_nodes_per_partition` 取最大若干分区）→ [ReplaceNodeSubsetsWithDelegateKernels: simple_delegate.cc#L113-L115](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.cc#L113-L115)。`SimpleDelegateInterface` 抽象本身见 [simple_delegate.h#L77-L117](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.h#L77-L117)，子类只需实现 `IsNodeSupportedByDelegate`（决定支持性）与 `CreateDelegateKernelInterface`（造每个分区的 kernel）。
 
-`SwitchToDelegateContext` / `SwitchToKernelContext` 的「挂上/摘下」机制值得注意：
+**通用分区工具** `GraphPartitionHelper`：
 
-[subgraph.cc:2127-2158](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2127-L2158) — 委托上下文开启时，context 上的 `ReplaceNodeSubsetsWithDelegateKernels`、`GetExecutionPlan` 等函数指针指向真实实现；切换回 kernel 上下文后，这些指针被替换成 `ForbiddenContextFunction`（一调就报错）。这是一种**能力收窄**设计：普通算子 kernel 在 `Compute`/`invoke` 期间根本不该再去改图，所以直接把它禁掉。
+[GraphPartitionHelper:utils.h#L101-L154](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils.h#L101-L154) —— 提供 `Partition()`、`GetNodesOfFirstNLargestPartitions()`、`num_partitions()` 等，是 GPU/XNNPACK/NNAPI 共用的「逐节点问支持性 + 取大分区」工具。注意 `num_partitions()` 直接反映「本次委托会建几个宏节点」。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用一个最小的人造图，手动模拟分区算法的输出，从而真正理解 `NodeSubset` 的交替。
+**实践目标**：在源码里跟踪「一次 `ReplaceNodeSubsetsWithDelegateKernels` 调用，`execution_plan_` 的长度发生了什么变化」。
 
 **操作步骤**：
 
-1. 假设有执行计划节点 `[A,B,C,D,E,F]`，其中委托声明支持 `{B, C, E}`（不支持 A、D、F）。
-2. 按 4.2.2 的算法手算：
-   - subset 0（CPU）：A
-   - subset 1（委托）：B, C
-   - subset 2（CPU）：D
-   - subset 3（委托）：E
-   - subset 4（CPU）：F
-3. 写出每个 subset 的 `type`，以及 B 的输入（来自 A，故 A→B 的张量是 subset0 的输出、subset1 的输入）这类边界张量。
-4. 对照 [delegate_test.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/delegate_test.cc) 与 [graph_info_test.cc:127](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/graph_info_test.cc#L127) 中 `PartitionGraphIntoIndependentNodeSubsets` 的断言，验证你的手算结果与测试预期一致。
+1. 打开 [subgraph.cc 的 ReplaceNodeSubsetsWithDelegateKernels:subgraph.cc#L521-L634](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L521-L634)。
+2. 假设原图 `execution_plan_` 有 10 个节点，其中节点 {2,3,4,5,6} 被 delegate 支持，其余不支持，且 {2..6} 连续。
+3. 在纸上推演 `PartitionGraph` 产出的 `NodeSubset` 序列，再推演重建后的 `execution_plan_`。
 
-**预期结果**：你会得到 5 个交替的 subset（CPU/委托/CPU/委托/CPU），共 2 个 DELEGATE 宏算子。关键观察是——**委托段的数量 = 支持集被「不支持节点」切成的连续块数**，这正是「连续性收益」的几何体现。
+**需要观察的现象**：分区结果应是三个子集：`kTfNonPartition{0,1}` → `kTfPartition{2,3,4,5,6}` → `kTfNonPartition{7,8,9}`；重建后 `execution_plan_` 长度从 10 变成 **8**（5 个支持节点被压缩成 1 个宏节点）。
 
-> 待本地验证：可改 `graph_info_test.cc` 的输入构造一个相同的人造图，编译运行该测试观察 `node_subsets` 的实际内容。
+**预期结果**：`execution_plan_.size()` 与宏节点个数的关系是 `新长度 = 原长度 - Σ(每个分区节点数 - 1)`。如果支持节点 {2,3,4} 和 {6} 被 {5}（假设 5 其实不支持，仅举例）隔开，则会变成两个 `kTfPartition` 子集、两个宏节点。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：如果一张图里所有节点都被委托支持，分区结果是什么？执行计划变成几个宏算子？
-**答案**：只有一个 `kTfPartition` subset，整张图被合并成**一个** DELEGATE 宏算子。这也是 `kTfLiteDelegateFlagsHintFullyDelegatedToSingleDelegate`（4.1.3）成立的前提——运行时在 [subgraph.cc:2560](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2560) 会用 `IsFullyDelegated()` 校验。
+**练习 1**：为什么 `ModifyGraphWithDelegateImpl` 要先 `RedoAllDelegates()`？
 
-**练习 2**：为什么分区算法强调「independent（独立）」node subsets？
-**答案**：每个 subset 只通过显式的 `input_tensors`/`output_tensors` 与相邻 subset 交换数据，子集之间没有隐式耦合。这样每个 DELEGATE 宏算子都能被独立编译/执行，跨段边界只需处理边界张量，保证委托 kernel 的自洽性。
+**参考答案**：因为如果之前曾经调用过 `ResizeInputTensor` 等导致委托被「撤销但保留」（`delegates_undone_=true`，见 4.5），在叠加新 delegate 之前必须先把之前「暂时撤销」的 delegate 重新应用，否则图状态不一致。`RedoAllDelegates` 就是把 `delegates_applied_` 里的 delegate 逐个重新 `ModifyGraphWithDelegateImpl` 一遍。
+
+**练习 2**：`kTfNonPartition` 子集里的节点会被改写吗？
+
+**参考答案**：不会。代码里 [kTfNonPartition 分支:subgraph.cc#L593-L598](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L593-L598) 只是把节点原样 `push_back` 进新 `execution_plan_`，它们的 `TfLiteRegistration` 还是原来的 CPU kernel，依然由 OpResolver 提供（承接 u8-l2）。
 
 ---
 
-### 4.3 失败回退：apply 期回滚与运行期 CPU fallback（lite.delegates）
+### 4.3 GPU delegate 实例剖析（lite.delegates.gpu）
 
 #### 4.3.1 概念说明
 
-委托不是万能的，失败可能发生在两个截然不同的时刻，TFLite 对它们的处理策略也不同：
+GPU delegate（`TfLiteGpuDelegateV2`）把支持的计算卸载到设备 GPU。它最大的特点是「**多后端合一**」：同一个对外接口 `TfLiteGpuDelegateV2Create`，内部根据设备能力在 OpenCL、OpenGL、Metal（iOS）等 API 之间选最快的。它适合浮点（FP32/FP16）的密集计算，尤其是卷积、矩阵乘、各类激活——这类算子在 GPU 上并行度极高，往往比 CPU 快一个数量级。
 
-1. **应用期失败（apply-time）**：委托在 `Prepare` 阶段就发现自己搞不定（比如编译失败、显存不足）。此时推理还没开始，运行时可以**整图回滚**到委托应用前的状态，就像委托从没来过——用户最多看到「委托未生效」，不会得到错误结果。
-2. **运行期失败（runtime/invoke-time）**：委托在应用时一切正常，但在某次 `Invoke` 时后端出错（GPU 驱动崩溃、NPU 超时）。此时用户已经调用了 `Invoke` 并期待结果。TFLite 提供可选的 **CPU 自动回退**：把委托撤掉、用 CPU 把这一帧重算一遍，把正确结果交还给用户。
-
-理解两者的区别是本模块的核心：「**应用期回滚是运行时内置的、无条件的；运行期 CPU 回退是可选的、有代价的、有前提的**」。
+它的局限：通常只支持浮点（可选地支持量化），且某些算子（如特定形状的 Split）在 OpenCL 不支持时会被排除——这些被排除的节点会自然留在 CPU，由分区机制处理。
 
 #### 4.3.2 核心流程
 
-**应用期回滚**（无条件，内置）：
+GPU delegate 的 `Prepare` 完全遵循 4.2 的标准骨架，只是把「判定支持性」换成了自己复杂的 `GetOpsToReplace`：
 
-```
-Interpreter::ModifyGraphWithDelegateImpl 对每个子图调 Subgraph::ModifyGraphWithDelegate
-   若返回 kTfLiteDelegateError → 调 RemoveAllDelegates() 恢复原图 → 整体返回该错误
-Subgraph 内部还有更细的 reset_delegation_if_not_ok：
-   任何一步失败 → RemoveAllDelegates + 报错 → 返回 kTfLiteDelegateError
-```
-
-**运行期 CPU 回退**（可选，需显式调用 `InvokeWithCPUFallback`）：
-
-```
-InterpreterUtils::InvokeWithCPUFallback(interpreter):
-   status = interpreter->Invoke()
-   if (status==OK || 已取消 || 根本没委托)  → 直接返回 status
-   否则（委托相关的运行期失败）:
-      1. 把当前输入张量数据拷到一块临时 buffer（CPU 回退要重算，输入得留着）
-      2. interpreter->RemoveAllDelegates()  （撤掉所有委托，恢复 CPU 执行计划）
-      3. 把输入数据从 buffer 拷回张量
-      4. interpreter->Invoke()  （纯 CPU 再跑一遍，拿到正确结果）
-      5. 返回 kTfLiteDelegateError  ← 注意：不是 OK，提醒调用方「这次是 CPU 兜底的」
+```text
+DelegatePrepare(context, delegate)                    [gpu/delegate.cc:1526]
+  │
+  ├─ kRegistration = CreateRegistration()             # 构造 GPU 宏节点的 TfLiteRegistration
+  │
+  ├─ ops_to_replace = GetOpsToReplace(context, ...)   # 逐节点问「GPU 支持吗」
+  │     └─ 内部用 FP16GraphPartitionHelper + IsSupported()
+  │
+  └─ context->ReplaceNodeSubsetsWithDelegateKernels(   # 交给运行时分区+建宏节点
+         context, kRegistration, ops_to_replace, delegate)
 ```
 
 #### 4.3.3 源码精读
 
-应用期回滚的入口在 `Interpreter::ModifyGraphWithDelegateImpl`：
+**对外 C 接口**（应用层调用它创建/销毁 delegate）：
 
-[interpreter.cc:401-423](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L401-L423) — 逐子图应用委托；一旦某子图返回 `kTfLiteDelegateError`（L419），立即 `RemoveAllDelegates()` 把所有子图都恢复到委托前的执行计划，再把这个错误向上抛。注意它**跳过**校验子图（`IsValidationSubgraph`）和可跳过的子图（L405-L411）——这些子图不该被委托。
+[TfLiteGpuDelegateV2Create/Delete:gpu/delegate.h#L41-L49](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.h#L41-L49) —— 返回的是一个裸 `TfLiteDelegate*`，调用方负责 `TfLiteGpuDelegateV2Delete` 释放（或交给 Interpreter 接管所有权）。具体实现在 [delegate.cc#L1573-L1578](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc#L1573-L1578)：`new tflite::gpu::Delegate(options, /*async=*/false)` 后返回其内部的 `tflite_delegate()`。
 
-`RemoveAllDelegates` 的真正实现：
+**GPU 的 Prepare**：
 
-[subgraph.cc:2282-2288](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2282-L2288) — 三步：`UndoAllDelegates()`（把执行计划从 `pre_delegation_execution_plan_` 还原，正是 4.2.3 STEP1 留的存档点）、清空 `delegates_applied_`、`EnsureMemoryAllocations()` 重新规划内存。回滚之所以可行，全靠 4.2.3 中那句 `pre_delegation_execution_plan_ = execution_plan_` 的备份。
+[DelegatePrepare:gpu/delegate.cc#L1526-L1567](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc#L1526-L1567) —— 先根据平台选 sync 还是 async 的 `kRegistration`（[L1529-L1534](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc#L1529-L1534)），再 `GetOpsToReplace` 拿到支持节点列表，最后 [ReplaceNodeSubsetsWithDelegateKernels: delegate.cc#L1552-L1553](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc#L1552-L1553)。注意它还做遥测上报（`TelemetryReportDelegateSettings`）和可选的 per-op profiling。
 
-运行期 CPU 回退的实现在 `delegates/interpreter_utils.cc`：
+**支持性判定** `GetOpsToReplace`：
 
-[interpreter_utils.cc:29-71](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/interpreter_utils.cc#L29-L71) — 逐行对应 4.3.2 的伪代码。两个细节值得注意：
+[GetOpsToReplace:model_builder.cc#L3291-L3365](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3291-L3365) —— 这里的判定分两层：先调 `IsSupported(...)` 看算子本身和参数是否被 GPU 接受（[L3299-L3307](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3299-L3307)），再额外检查张量 dtype 是否在允许清单内（[L3308-L3350](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3308-L3350)），最后用 `FP16GraphPartitionHelper.Partition()` 汇总（[L3354-L3362](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3354-L3362)）。`FP16GraphPartitionHelper` 是 `GraphPartitionHelper` 的子类，额外处理「把支持的 FP32 节点输入重映射到 FP16 版本」这种 delegate 特有优化。
 
-- L31-L34：只有「失败且图上确实有委托」才需要回退；没委托的失败是真正的运行时错误，不该重试。
-- L47-L56：先把所有输入张量的字节流拷进 `buf`。注释点明输入数据是安全的，因为 `ArenaPlanner` 用了 `preserve_inputs=true` 不会覆盖输入区——这保证了回退后重算时输入仍然正确。
-- L70：返回 `kTfLiteDelegateError` 而非 `kTfLiteOk`，**结果有效但调用方应知晓发生过回退**。
-
-这个工具的契约与限制写在头文件里：
-
-[interpreter_utils.h:25-46](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/interpreter_utils.h#L25-L46) — 明确警告两条前提：（1）调用方不能跨 `Invoke` 缓存张量数据指针（因为回退会重算、指针会变）；（2）模型最好是无状态的（无变量、无 LSTM），否则状态在批次间会不一致。这正是 XNNPACK 默认委托失败时能安全回退到内置 CPU kernel 的基础——见 [interpreter.cc:339-348](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L339-L348) 的注释「the execution will fall back to default implementation if the XNNPACK delegate fails」。
+> 设计要点：`GetOpsToReplace` 把「GPU 是否支持某算子」这件事完全封装在 GPU delegate 内部，运行时对此一无所知。这正是 delegate 架构「可插拔」的体现——换一个后端，只需换一份 `IsSupported`。
 
 #### 4.3.4 代码实践
 
-**实践目标**：在源码层面追踪一次「运行期委托失败 → CPU 兜底」的完整数据流，确认输入数据在回退过程中不会丢失。
+**实践目标**：对比 GPU delegate 与 4.2 的标准 Prepare 骨架，确认 GPU delegate 完全是「标准骨架 + 自定义支持性判定」。
 
 **操作步骤**：
 
-1. 打开 [interpreter_utils.cc:29-71](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/interpreter_utils.cc#L29-L71)。
-2. 在 `InvokeWithCPUFallback` 中标记三个关键点：
-   - **点 A**（L47-L56）：备份输入到 `buf`；
-   - **点 B**（L58）：`RemoveAllDelegates()` 撤销委托；
-   - **点 C**（L62-L66）：从 `buf` 恢复输入、再 `Invoke()`。
-3. 思考：为什么必须先备份再 `RemoveAllDelegates`？因为 `RemoveAllDelegates` 会调 `EnsureMemoryAllocations` 重新规划内存（见 [subgraph.cc:2286](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2286)），张量缓冲区地址可能改变，不备份就会丢输入。
-4. 对照 [interpreter_utils.h:33-36](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/interpreter_utils.h#L33-L36) 的两条限制，回答：一个用 `tf.Variable` 维护 LSTM 隐藏状态的模型，为什么不适合用这个自动回退？
+1. 并排打开 [simple_delegate.cc 的 DelegatePrepare（L82-L116）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.cc#L82-L116) 与 [gpu/delegate.cc 的 DelegatePrepare（L1526-L1567）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc#L1526-L1567)。
+2. 用一张表对齐两边的「构造 Registration / 取支持节点 / 调 ReplaceNodeSubsetsWithDelegateKernels」三步。
 
-**预期结果**：你会确认 CPU 回退的正确性完全建立在「输入可备份 + 图无状态」两个前提上；对有状态模型，回退会让批次间状态错乱，因此这类模型应依赖应用期回滚而非运行期回退。
+**需要观察的现象**：两者结构完全同构，唯一差异是「取支持节点」这一步——SimpleDelegate 用 `GraphPartitionHelper` + `IsNodeSupportedByDelegate`，GPU 用 `GetOpsToReplace`（内部也是 partition helper，但判定逻辑复杂得多）。
 
-> 待本地验证：可参考 [interpreter_utils_test.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/interpreter_utils_test.cc)，它用一个故意在 N 次调用后失败的测试委托来验证回退行为。
+**预期结果**：你会得出本节最重要的结论——**所有 delegate 的 Prepare 都是同一个三段式模板，差异只集中在「判定哪些节点支持」这一步**。理解了这一点，看任何一个新 delegate 都能快速找到它的核心逻辑。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：应用期回滚和运行期 CPU 回退，哪个是无条件发生的？
-**答案**：应用期回滚无条件发生——只要委托 `Prepare` 返回 `kTfLiteDelegateError`，运行时就自动 `RemoveAllDelegates`。运行期 CPU 回退是**可选**的，必须显式调用 `InterpreterUtils::InvokeWithCPUFallback` 而非普通 `Invoke`，普通 `Invoke` 遇到委托运行期失败只会原样返回错误码。
+**练习 1**：如果模型里有一个 GPU 不支持的 custom op 夹在两个大卷积块之间，会建几个 GPU 宏节点？
 
-**练习 2**：`InvokeWithCPUFallback` 最后为什么返回 `kTfLiteDelegateError` 而不是 `kTfLiteOk`？结果不是已经算对了吗？
-**答案**：结果确实有效，但返回 `kTfLiteDelegateError` 是为了**告知调用方「这次是 CPU 兜底的、性能可能不达标」**，让上层（如默认 XNNPACK 委托的回退逻辑）能据此决定是否禁用该委托、避免后续每次都触发回退的开销。
+**参考答案**：建 **2 个** GPU 宏节点。分区算法会把前一段连续支持的卷积切成一个 `kTfPartition`，中间的 custom op 单独成 `kTfNonPartition`，后一段卷积再成第二个 `kTfPartition`。运行时执行顺序是 `[GPU 宏节点1] → [CPU custom op] → [GPU 宏节点2]`，跨边界张量会经 `CopyFromBufferHandle`/`CopyToBufferHandle` 在 GPU buffer 与 CPU 内存间搬运。
+
+**练习 2**：`TfLiteGpuDelegateV2Create` 返回的 `TfLiteDelegate*` 与 `tflite::gpu::Delegate` 是什么关系？
+
+**参考答案**：`tflite::gpu::Delegate` 是 C++ 实现类，持有选项、后端选择、遥测等状态；它内部持有一个 `TfLiteDelegate` 成员（其 `Prepare` 指向 `DelegatePrepare`，`data_` 指向自己）。对外暴露的裸指针就是这个内部成员的地址。这是「C 接口 + C++ 实现」的典型粘合，和 u8-l1 里 TfLiteContext 与 Subgraph 的关系同构。
 
 ---
 
-### 4.4 常见委托后端：GPU / NNAPI / XNNPACK
+### 4.4 NNAPI delegate 与硬件抽象（lite.delegates.nnapi）
 
 #### 4.4.1 概念说明
 
-仓库 `tensorflow/lite/delegates/` 下有多个具体后端，它们的适用场景各异：
+NNAPI（Neural Networks API）是 Android 系统层提供的统一推理抽象。Android 手机上有形形色色的 AI 加速器（高通 Hexagon DSP、联发科 APU、华为 NPU 等），每家驱动都不一样；NNAPI 在它们之上提供一套统一 C API，应用只需对接 NNAPI，系统会分派到本机实际可用的加速器。
 
-| 委托 | 目录 | 典型后端 | 适用场景 |
-|------|------|----------|----------|
-| **GPU** | `delegates/gpu/` | OpenCL / OpenGL / Vulkan / Metal | 手机/桌面 GPU，浮点密集型 CNN，延迟敏感的实时推理 |
-| **NNAPI** | `delegates/nnapi/` | Android 厂商 NPU/DSP/GPU | Android 8.1+，走系统抽象层访问芯片专用加速器 |
-| **XNNPACK** | `delegates/xnnpack/` | 高度优化 CPU 库 | 几乎所有平台，常作为**默认委托**自动应用，无需 GPU/NPU 也能提速 |
-| Hexagon | `delegates/hexagon/` | 高通 DSP（Hexagon） | 高通芯片的极致低功耗推理 |
-| CoreML | `delegates/coreml/` | Apple Neural Engine | iOS/macOS |
-| Flex | `delegates/flex/` | TF 选择注册的 op | 在 TFLite 里调用尚未移植到 Lite 的 TF op |
-
-它们对外接口各异（C API、C++ 类、外部动态库），但**内部都遵循同一个 Prepare 模板**——这正是 4.1 所讲协议的威力。
+所以 **NNAPI delegate 的角色是「TFLite 图 ↔ Android NNAPI」的翻译器**：它把 TFLite 子图翻译成 NNAPI 模型（`ANeuralNetworksModel`），交给系统编译执行。与 GPU delegate 不同，NNAPI delegate 自己不含任何计算实现，它完全依赖设备厂商的驱动。它的适用场景是：你想用一个「不挑后端、让系统选最快加速器」的方案，且主要在 Android 上部署。
 
 #### 4.4.2 核心流程
 
-所有委托的 `Prepare` 几乎都是同一个套路（「委托 Prepare 三段式」）：
+NNAPI delegate 在结构上更特殊：它的 `StatefulNnApiDelegate` **本身直接继承自 `TfLiteDelegate`**（而不是像 SimpleDelegate 那样把 `TfLiteDelegate` 当成员），并把 `Prepare` 设成自己的 `DoPrepare`：
 
-```
-DelegatePrepare(context, delegate):
-   1. 构造一个 TfLiteRegistration（含 init/prepare/free/invoke，代表 DELEGATE 宏算子）
-   2. 用「节点支持判定函数」扫描全图，得到 ops_to_replace（委托能接管的节点 id 列表）
-   3. context->ReplaceNodeSubsetsWithDelegateKernels(context, registration, ops_to_replace, delegate)
-      —— 把 4.2 的分区+改写交给运行时
+```text
+StatefulNnApiDelegate（是一个 TfLiteDelegate）           [nnapi_delegate.h:46]
+  └─ Prepare = DoPrepare                                  [nnapi_delegate.cc:6559]
+       └─ DoPrepare(context, delegate)                    [nnapi_delegate.cc:6825]
+            ├─ 用 NnapiDelegateKernel 逐节点判定支持性
+            └─ context->ReplaceNodeSubsetsWithDelegateKernels(
+                  context, nnapi_delegate_kernel, ops_to_replace, delegate)
 ```
 
-第 2 步的「判定函数」是各委托的差异化所在：GPU 判定能否转成它的算子图、NNAPI 查 `ANeuralNetworks` 支持表、XNNPACK 查自己的 op 支持表。判定函数返回 `false` 的节点就会被分到 `kTfNonPartition` 段留在 CPU（4.3 的回退也由此自然成立）。
+注意替换用的 `nnapi_delegate_kernel`（一个 `TfLiteRegistration`）的 `init` 会真正把子图翻译成 NNAPI 模型并编译；`invoke` 则触发一次 NNAPI 执行。
 
 #### 4.4.3 源码精读
 
-**GPU 委托**是最完整的范本。[model_builder.cc:3599-3627](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3599-L3627) 的 `DelegatePrepare` 严格对应三段式：先内联构造 `registration`（`init` 建 `DelegateContext`、`free` 释放、`prepare` 检查 `user_data`），再 `GetOpsToReplace(context, ...)` 拿到支持节点，最后 `context->ReplaceNodeSubsetsWithDelegateKernels(...)`。其判定函数见 [model_builder.cc:3291-3300](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3291-L3300)：`IsNodeSupportedFn` 调 `IsSupported(...)` 并限定输入输出类型为 `{kTfLiteFloat32, kTfLiteFloat16}`。对外的 C API 在 [delegate.h:30-49](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/gpu/delegate.h#L30-L49)（`TfLiteGpuDelegateV2Create` / `Delete`），内部封装多种图形 API 自动择优。
+**delegate 类声明**：
 
-**NNAPI 委托**面向 Android。[nnapi_delegate.h:46-97](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/nnapi/nnapi_delegate.h#L46-L97) 的 `StatefulNnApiDelegate : public TfLiteDelegate` 直接继承委托结构体，其 `Options` 暴露了若干重要旋钮：`execution_preference`（低功耗/单次最快/持续高速）、`accelerator_name`（指定厂商加速器）、`cache_dir`+`model_token`（**编译缓存**，避免每次启动重新编译）、`disallow_nnapi_cpu`（默认 true，因 NNAPI CPU 常比 TFLite 内置 kernel 还慢）、`max_number_delegated_partitions`（默认 3，限制分段数以免跨段拷贝开销超过加速收益）、`allow_fp16`。注意头文件 L28-L29 标注 NNAPI 已 **DEPRECATED**，官方建议迁移到厂商插件。
+[StatefulNnApiDelegate:nnapi_delegate.h#L46](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.h#L46) —— `class StatefulNnApiDelegate : public TfLiteDelegate`。它的构造函数（[nnapi_delegate.h#L188-L237](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.h#L188-L237)）接受 `Options`（加速器类型、缓存目录、分区数等），构造时把基类的 `Prepare` 指向 `DoPrepare`。
 
-**XNNPACK 委托**特殊在「常被默认应用」。[xnnpack_delegate.cc:7637-7654](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/xnnpack/xnnpack_delegate.cc#L7637-L7654) 的 `DelegatePrepare` 同样三段式：`PrepareOpsToDelegate` 得到 `ops_to_replace`，再 `ReplaceNodeSubsetsWithDelegateKernels`。[interpreter.cc:339-348](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L339-L348) 表明 InterpreterBuilder 会遍历 `delegate_providers`（目前仅 XNNPACK 可能默认开启），对返回非空的委托自动 `ModifyGraphWithDelegateImpl`；若 XNNPACK 应用失败则回退默认实现。所以即使用户什么委托都不显式加，TFLite 也可能已悄悄用 XNNPACK 加速了你的 CPU 推理。
+**宏节点注册信息**：
 
-**自定义委托的捷径**：若你要写自己的委托，`SimpleDelegateInterface`（[simple_delegate.h:77-117](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/utils/simple_delegate.h#L77-L117)）把三段式封装好了，你只需实现 `IsNodeSupportedByDelegate`（判定函数）+ `CreateDelegateKernelInterface`（给一个 `Init/Prepare/Eval` 的 kernel）+ `DelegateOptions`（`max_delegated_partitions`、`min_nodes_per_partition`），再用 `TfLiteDelegateFactory::CreateSimpleDelegate` 换成 `TfLiteDelegate*`。参考实现见 [simple_delegate_test.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/utils/simple_delegate_test.cc)。
+[nnapi_delegate_kernel:nnapi_delegate.cc#L6945-L6989](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.cc#L6945-L6989) —— 这就是 NNAPI delegate 宏节点的 `TfLiteRegistration`：`init` 里从 `TfLiteDelegateParams*` 拿到子图，构造/复用一个 `NNAPIDelegateKernel` 并 `Init`（这一步把 TFLite 算子翻译成 NNAPI op 并编译）；`prepare`/`invoke` 转发给 kernel state；注意 `builtin_code = kTfLiteBuiltinDelegate`，确认它就是一个 delegate 宏节点。运行时真正触发 NNAPI 编译与执行的是 [ReplaceNodeSubsetsWithDelegateKernels: nnapi_delegate.cc#L7009 与 L7089](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.cc#L7009)。
+
+**DoPrepare 与支持性判定**：
+
+[DoPrepare 入口:nnapi_delegate.cc#L6825](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.cc#L6825) 与节点支持性函数 [IsNodeSupportedFn:nnapi_delegate.cc#L6797](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.cc#L6797)。和 GPU delegate 一样，这里把「某算子 NNAPI 是否支持」封装在 delegate 内部，运行时不感知。
+
+> 对比要点：GPU delegate 把 `TfLiteDelegate` 当**成员**（`new tflite::gpu::Delegate` 后取其内部指针），NNAPI delegate 直接**继承** `TfLiteDelegate`。两种粘合方式都合法，体现了 C 结构体契约的灵活性。
 
 #### 4.4.4 代码实践
 
-**实践目标**：用 Python 加载一个 GPU（或 XNNPACK）委托并应用，观察分区与不可加速段的回退；并在源码侧印证「不可加速部分回退到 CPU kernel」。
+**实践目标**：理解 NNAPI delegate 与 GPU delegate 在「`TfLiteDelegate` 如何被持有」上的差异。
 
-**操作步骤**（Python，示例代码）：
+**操作步骤**：
 
-```python
-# 示例代码：加载并应用 GPU 委托（需有对应平台的 GPU 委托动态库）
-import tensorflow as tf
+1. 打开 [nnapi_delegate.h 的 StatefulNnApiDelegate 类继承（L46）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/nnapi/nnapi_delegate.h#L46)。
+2. 对比 4.3 节 GPU delegate 的 `TfLiteGpuDelegateV2Create`（返回一个由 `tflite::gpu::Delegate` 拥有的成员指针）。
+3. 在源码里搜 `StatefulNnApiDelegate` 如何被传给 `ModifyGraphWithDelegate`（它自身就是 `TfLiteDelegate`，直接传 `this`/对象地址即可）。
 
-# 1) 通过 load_delegate 从动态库加载委托（CTypes 调 tflite_plugin_create_delegate）
-gpu_delegate = tf.lite.experimental.load_delegate(
-    "libdelegate.so",            # GPU 委托共享库路径，依平台而异
-    options={"precision_loss_allowed": "1"})
+**需要观察的现象**：NNAPI delegate 的对象本身就能当 `TfLiteDelegate*` 用；而 GPU delegate 要先 `new` 一个 C++ 对象再取其内部 `TfLiteDelegate` 成员。
 
-# 2) 把委托传给 Interpreter；构造期会触发 ModifyGraphWithDelegate
-interp = tf.lite.Interpreter(
-    model_path="model.tflite",
-    experimental_delegates=[gpu_delegate])
-interp.allocate_tensors()
-
-# 3) 推理；被委托段在 GPU 跑，不支持段在 CPU 跑，运行时自动衔接
-interp.invoke()
-```
-
-> 注意：`tf.lite.experimental.load_delegate` 的实现见 [interpreter.py:137](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/python/interpreter.py#L137) 与 `Delegate` 类 [interpreter.py:56-134](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/python/interpreter.py#L56-L134)：它用 `ctypes` 加载动态库、调用约定的 `tflite_plugin_create_delegate` 拿到原生 `TfLiteDelegate*` 指针，再交给 C++ 侧 `ModifyGraphWithDelegate`。
-
-**源码印证（不可加速段如何回退 CPU）**：
-
-1. 在 [model_builder.cc:3291-3300](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3291-L3300) 看到 GPU 的判定函数对不支持的算子返回 `false` → 这些节点**不进** `ops_to_replace`。
-2. 在 [subgraph.cc:564-615](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L564-L615) 看到 `PartitionGraph` 把它们归入 `kTfNonPartition` subset，在重建执行计划时（L593-L598）**原样 push 回 `execution_plan_`**，仍由原 OpResolver 解析出的 CPU kernel 执行。
-3. 于是「GPU 段 + CPU 段」在同一执行计划里交替，`Invoke` 时各自走自己的 `invoke`——这就是「不可加速部分回退到 CPU kernel」的真正含义（它不是失败回退，而是分区时就规划好的混合执行）。
-
-**需要观察的现象**：开启 `TFLITE_LOG` 后，`ReplaceNodeSubsetsWithDelegateKernels` 的日志（[subgraph.cc:578-584](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L578-L584)）会打印形如「Replacing N out of M node(s) with delegate ... yielding P partitions」——`P` 即分区数，`M - N` 即留在 CPU 的节点数。
-
-> 待本地验证：上述 Python 代码需在有 GPU 委托动态库的真实设备（Android/桌面 GPU）运行；本 CI 无 GPU。在无 GPU 环境可改用 XNNPACK（通常已默认启用）并观察同一日志。
+**预期结果**：你会总结出两种「C 结构体 + C++ 类」粘合范式——**继承式**（NNAPI）与**组合式**（GPU/SimpleDelegate）。组合式更解耦，继承式更省一次指针跳转，各有利弊。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 NNAPI 的 `Options::disallow_nnapi_cpu` 默认为 `true`？
-**答案**：因为 NNAPI 的 CPU 实现通常比 TFLite 自带的 CPU kernel 还慢。设为 true 意味着「只有当整图都能被硬件加速器接管时才用 NNAPI」，避免出现「一部分在慢速 NNAPI CPU 上跑」反而拖慢整体的情况（注释见 [nnapi_delegate.h:84-88](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/nnapi/nnapi_delegate.h#L84-L88)）。
+**练习 1**：为什么 NNAPI delegate 的宏节点 `init` 里要做「翻译」而不是在 `Prepare` 里？
 
-**练习 2**：XNNPACK 委托和 GPU/NNAPI 委托在「是否需要专用硬件」上有何根本区别？这对默认开启策略有什么影响？
-**答案**：XNNPACK 跑在 CPU 上，不需要专用硬件，几乎所有平台都能受益，所以它适合作为**默认委托**自动应用（[interpreter.cc:339-348](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L339-L348)）；而 GPU/NNAPI 依赖特定硬件与驱动，必须由用户或应用显式启用，且失败时需回退。
+**参考答案**：因为 `init` 是在 `ReplaceNodeSubsetsWithDelegateKernels` 建宏节点时（[subgraph.cc#L612-L614 的 AddNodeWithParameters](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L612-L614)）被运行时调用的，此时分区已确定、`TfLiteDelegateParams` 已就绪，正好把这块子图翻译成 NNAPI 模型并编译；`Prepare`（kernel 的 prepare）则处理后续的形状/张量准备。这种「init 编译、prepare 调整、invoke 执行」的分工与 OpKernel 生命周期一致（承接 u4-l2、u8-l1）。
+
+**练习 2**：如果一台 Android 手机既没有 NPU、GPU 驱动也挂了，NNAPI delegate 还能加速吗？
+
+**参考答案**：NNAPI 标准要求所有 Android 设备至少提供 CPU 参考实现（`nnapi-reference`），所以即便没有专用加速器，NNAPI 仍会在 CPU 上跑（不一定比 TFLite 原生 CPU kernel 快）。 delegate 本身不保证加速，只保证「把活转交给 NNAPI」。
+
+---
+
+### 4.5 卸载失败的回退策略（lite.delegates + interpreter_utils）
+
+#### 4.5.1 概念说明
+
+delegate 把计算外包出去能加速，但也带来风险：万一后端在**加载期**或**运行期**失败怎么办？比如 GPU 不支持某个组合、NNAPI 驱动崩溃、XNNPACK 在某输入形状上崩溃。TFLite 设计了**三级回退**来保证「最坏情况下也能用 CPU 跑出正确结果」：
+
+1. **加载期回退（prepare-time fallback）**：`ModifyGraphWithDelegateImpl` 任何一步失败 → 立刻 `RemoveAllDelegates()` 还原原图，整个 delegate 等于从未应用。
+2. **显式撤销/重做（undo/redo）**：`UndoAllDelegates` 暂存原始计划、`RedoAllDelegates` 重新应用，用于输入形状变化时优雅处理。
+3. **运行期回退（runtime fallback）**：`Invoke()` 时宏节点报错 → `InterpreterUtils::InvokeWithCPUFallback` 自动撤销所有 delegate，用 CPU 重跑一次。
+
+#### 4.5.2 核心流程
+
+```text
+=== 第一级：加载期回退 ===
+ModifyGraphWithDelegateImpl
+  └─ reset_delegation_if_not_ok(status)
+       └─ 若 status != kTfLiteOk → RemoveAllDelegates() → 返回 kTfLiteDelegateError
+
+=== 第二级：撤销/重做（输入形状变化时）===
+ResizeInputTensor() 等触发 → UndoAllDelegates（暂存原图、释放宏节点）
+  ... 用户再次 Invoke 前 ...
+  → RedoAllDelegates（用 delegates_applied_ 重新委托）
+
+=== 第三级：运行期回退 ===
+Invoke() → 某宏节点 invoke 返回错误
+  └─ 调用方用 InterpreterUtils::InvokeWithCPUFallback：
+       1. 先 Invoke()，失败且 HasDelegates()
+       2. 备份输入张量数据到 buf
+       3. RemoveAllDelegates()
+       4. 还原输入、再次 Invoke()
+       5. 返回 kTfLiteDelegateError（提示「已回退，结果有效」）
+```
+
+#### 4.5.3 源码精读
+
+**第一级——加载期回退**：
+
+[reset_delegation_if_not_ok lambda:subgraph.cc#L2496-L2505](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2496-L2505) —— 这是 `ModifyGraphWithDelegateImpl` 里的局部 lambda，凡 `status != kTfLiteOk` 就 `RemoveAllDelegates()` 并报告「Restored original execution plan after delegate application failure」。它保证：**delegate 哪怕只在最后一步失败，图也回到委托前的干净状态**，不会留下半残的混合图。
+
+**第二级——撤销/重做**：
+
+[UndoAllDelegates 释放宏节点并恢复计划:subgraph.cc#L2183-L2198](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2183-L2198) —— 遍历 `execution_plan_`，对所有 `node.delegate != nullptr` 的宏节点 `CleanupNode`（释放后端资源），再把 `execution_plan_` 恢复成 `pre_delegation_execution_plan_`。注意它不删除 `delegates_applied_`，只是把 `delegates_undone_` 置真，因此稍后可以 `RedoAllDelegates` 重新应用（[subgraph.cc#L2267-L2279](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2267-L2279)）。彻底移除则用 [RemoveAllDelegates: subgraph.cc#L2282-L2288](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L2282-L2288)（`UndoAllDelegates` + 清空 `delegates_applied_` + 重分配内存）。
+
+**第三级——运行期回退**：
+
+[InvokeWithCPUFallback:interpreter_utils.cc#L29-L71](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L29-L71) —— 这是回退机制最巧妙的部分，分四步：
+
+- [先试一次：L30-L34](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L30-L34)：正常 `Invoke()`，成功/已取消/根本没 delegate 就直接返回。
+- [备份输入：L44-L56](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L44-L56)：把所有输入张量的裸字节拷进 `buf`。注释解释了为何安全——`ArenaPlanner` 用 `preserve_inputs=true`，输入张量地址在 `RemoveAllDelegates` 后不变。
+- [撤销所有 delegate：L58](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L58)：`RemoveAllDelegates()`。
+- [还原输入并重跑：L61-L69](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L61-L69)：从 `buf` 拷回输入，再 `Invoke()` 一次。返回 `kTfLiteDelegateError` 表示「委托失败但已用 CPU 兜底，输出有效」。
+
+其声明与使用约束在 [interpreter_utils.h#L25-L46](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.h#L25-L46) —— 注释特别强调：允许回退的前提是「调用方不在跨 `Invoke()` 之间缓存张量数据指针」且「模型无状态或状态在 batch 间不需要」。
+
+> 运行期回退的代价：第一次 `Invoke` 失败 + `RemoveAllDelegates`（重建计划与内存）+ 第二次 `Invoke`，单次推理延迟会有一次明显尖峰。但换来的是「结果永远正确」。生产环境里它是兜底，不应频繁触发——频繁触发说明 delegate 选型有问题。
+
+#### 4.5.4 代码实践
+
+**实践目标**：用一次 `InvokeWithCPUFallback` 的「备份-撤销-重跑」流程，理解运行期回退为何能保证结果正确。
+
+**操作步骤**：
+
+1. 阅读 [interpreter_utils.cc#L29-L71](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L29-L71) 的完整实现。
+2. 回答：如果第 58 行 `RemoveAllDelegates()` 会改变输入张量的内存地址，第 61-66 行「从 buf 拷回输入」还能工作吗？源码注释（L42-L43）是怎么保证地址不变的？
+
+**需要观察的现象**：源码注释明确依赖 `ArenaPlanner` 的 `preserve_inputs=true` 这一上游保证。这是典型的「跨模块契约」——回退逻辑能正确工作，是因为内存规划器承诺了输入张量地址稳定。
+
+**预期结果（待本地验证）**：在一个真实带 delegate 的模型上，若故意让 delegate kernel 在 `invoke` 里返回 `kTfLiteError`，并改用 `InvokeWithCPUFallback`，应能观察到：第一次 Invoke 报错 → 日志打印 "Invoke() failed in the presence of delegation. Retrying without." → 第二次 Invoke 成功 → 返回 `kTfLiteDelegateError` 且输出与纯 CPU 一致。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`UndoAllDelegates` 和 `RemoveAllDelegates` 的区别是什么？
+
+**参考答案**：`UndoAllDelegates` 是「暂时撤销」：释放宏节点、恢复原始 `execution_plan_`，但**保留 `delegates_applied_` 列表**，并设 `delegates_undone_=true`，之后可用 `RedoAllDelegates` 重新委托。`RemoveAllDelegates` 是「彻底移除」：在 `UndoAllDelegates` 基础上**清空 `delegates_applied_`**、重置 `delegates_undone_` 并重分配内存，delegate 不再可恢复。前者用于输入形状变化后重委托，后者用于彻底回退到纯 CPU。
+
+**练习 2**：为什么 `InvokeWithCPUFallback` 的注释要求「模型无状态（无 variables、无 LSTM）或状态在 batch 间不需要」？
+
+**参考答案**：因为回退流程是「第一次 Invoke 失败后丢弃那次的所有副作用，再重跑」。如果模型带状态（如 variable 的累加、LSTM 的隐状态），第一次失败 Invoke 可能已经部分改写了状态，第二次 CPU Invoke 会基于被污染的状态继续，结果就错了。无状态模型没有这种「部分副作用」问题，重跑等价于从头跑，所以安全。
 
 ---
 
 ## 5. 综合实践
 
-**任务**：把本讲四个模块串起来，完整复述「一次带 GPU 委托的推理」从创建到（可能的）回退的全过程，并标注每一步对应的源码位置。
+**任务**：把本讲的三块知识（图分区、GPU delegate、运行期回退）串起来，在源码层面完整还原「用户启用一个 GPU delegate 后，Interpreter 如何把可加速子图交给它，不可加速部分如何回退到 CPU kernel」这一全过程，并给出一份带行号引用的「调用链说明文档」。
 
-请按下列提示写出一份「带行号引用的执行轨迹」：
+**要求完成的工作**：
 
-1. **创建**：用户调 `TfLiteGpuDelegateV2Create`（[delegate.h:41](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/gpu/delegate.h#L41)），得到含 `Prepare=DelegatePrepare`、`flags=0`（不支持动态张量）的 `TfLiteDelegate*`。
-2. **应用**：`Interpreter::ModifyGraphWithDelegate` → [interpreter.cc:401](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L401) → `Subgraph::ModifyGraphWithDelegateImpl`（[subgraph.cc:2485](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2485)）。写出 STEP1（备份 `pre_delegation_execution_plan_`）、STEP2（`SwitchToDelegateContext` + `Prepare` + `SwitchToKernelContext`）各自行号。
-3. **圈地**：委托的 `DelegatePrepare`（[model_builder.cc:3599](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/gpu/common/model_builder.cc#L3599)）用 `GetOpsToReplace` 得到支持集，调 `ReplaceNodeSubsetsWithDelegateKernels`（[subgraph.cc:521](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L521)）。
-4. **分区**：`PartitionGraph`（[subgraph.cc:509](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L509)）→ `PartitionGraphIntoIndependentNodeSubsets`（[graph_info.cc:90](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/graph_info.cc#L90)），产出交替的 `NodeSubset`，重建 `execution_plan_`。
-5. **执行**：`Invoke` 按新执行计划跑，DELEGATE 宏算子在 GPU 执行，CPU 段走原 kernel。
-6. **失败分支**：若应用期失败 → [interpreter.cc:419](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L419) 调 `RemoveAllDelegates`（[subgraph.cc:2282](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L2282)）回滚；若运行期失败且用了 `InvokeWithCPUFallback`（[interpreter_utils.cc:29](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/interpreter_utils.cc#L29)）则 CPU 兜底重算。
+1. **分区链路**：从 [gpu/delegate.cc 的 DelegatePrepare（L1526）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/gpu/delegate.cc#L1526) 出发，依次标注 `GetOpsToReplace` → `ReplaceNodeSubsetsWithDelegateKernels` → `PartitionGraph` → `NodeSubset` 重建 这四步各自所在的文件与行号，用箭头画出调用链。
+2. **运行链路**：标注 [subgraph.cc 的 InvokeImpl（L1662）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L1662) 如何遍历新 `execution_plan_`，遇到 `kTfNonPartition` 节点走 CPU kernel、遇到 delegate 宏节点走其 `invoke`。
+3. **回退链路**：标注 [interpreter_utils.cc 的 InvokeWithCPUFallback（L29）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/interpreter_utils.cc#L29) 在宏节点 invoke 失败时的「备份→RemoveAllDelegates→重跑」三步。
 
-完成后，你应当能用一张图把「协议结构体 → 三步应用 → 图分区 → 混合执行 → 两级回退」整条链路一次性讲清。
+**可选的运行验证（待本地验证，需 Android/Linux 真机或带 GPU 的环境）**：用下面的示例代码加载一个 `.tflite` 模型并启用 GPU delegate（示例代码，非项目原有）：
 
----
+```python
+# 示例代码：仅供参考，运行需要 tflite_runtime 与对应平台的 GPU delegate 共享库
+import tflite_runtime.interpreter as tflite
+
+interpreter = tflite.Interpreter(
+    model_path="model.tflite",
+    experimental_delegates=[
+        tflite.load_delegate("lib delegate.so")  # 替换为实际 GPU delegate 路径
+    ],
+)
+interpreter.allocate_tensors()
+# ... 填输入 ...
+interpreter.invoke()
+```
+
+**需要观察的现象**：开启 verbose 日志后（如 `TFLITE_LOG_VERBOSE`），应能看到类似 `Replacing N out of M node(s) with delegate (TfLiteGpuDelegateV2) node, yielding K partitions` 的日志（来自 [subgraph.cc#L578-L584](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/subgraph.cc#L578-L584)），它直接告诉你「这次委托建了几个分区、替换了几个节点」。把日志里的 N/M/K 与你手算的分区结果对照。
+
+**预期结果**：你能用一张图说清——**分区是「加载期一次性」的，回退是「运行期按需」的；前者用 `pre_delegation_execution_plan_` 作底片，后者用 `buf` 暂存输入再 `RemoveAllDelegates`**。两者共同保证「加速优先、正确兜底」。
 
 ## 6. 本讲小结
 
-- **Delegate 是「子图卸载协议」**：本质是 `TfLiteDelegate` 这组函数指针（`Prepare` + 缓冲回调 + `flags`），它把一段连续节点合并成一个 `BuiltinOperator_DELEGATE` 宏算子交给加速后端。
-- **图分区是核心机制**：运行时把执行计划按「委托支持/不支持」切成交替的 `NodeSubset`，支持段合并成宏算子、不支持段原样留 CPU，二者在同一条 `execution_plan_` 里混合执行。
-- **分区靠 epoch 遍历**：`PartitionGraphIntoIndependentNodeSubsets` 用纪元遍历，相邻同类型节点尽量合并，边界张量成为各 subset 的输入输出。
-- **上下文能力收窄**：`SwitchToDelegateContext`/`SwitchToKernelContext` 让只有委托 `Prepare` 期间才能调用改图函数，普通 kernel 期间调用即报错。
-- **两级失败回退**：应用期失败无条件整图回滚（靠 `pre_delegation_execution_plan_` 存档）；运行期失败可选 CPU 兜底（`InvokeWithCPUFallback`，前提是无状态模型且不缓存张量指针）。
-- **各后端遵循同一 Prepare 模板**：GPU/NNAPI/XNNPACK 的 `DelegatePrepare` 都是「构造 registration + 判定支持集 + `ReplaceNodeSubsetsWithDelegateKernels`」三段式；XNNPACK 常作为默认委托自动应用。
-
----
+- **delegate 是契约不是实现**：`TfLiteDelegate` 这个 C 结构体用函数指针（核心是 `Prepare`）定义了「后端如何声明支持的节点并接管计算」，运行时只认契约，从而可插拔任意后端。
+- **图分区是委托的核心机制**：delegate 的 `Prepare` 提供 `nodes_to_replace`，运行时用 `PartitionGraph` 切出 `kTfPartition`/`kTfNonPartition` 子集，把每个支持分区替换成一个 `kTfLiteBuiltinDelegate` 宏节点，重建后的 `execution_plan_` 由 CPU 段与宏节点交替构成。
+- **所有 delegate 的 Prepare 都是同一个三段式模板**：构造 `TfLiteRegistration` → 判定支持节点 → `ReplaceNodeSubsetsWithDelegateKernels`。GPU（`GetOpsToReplace`）、NNAPI（`DoPrepare`）、XNNPACK（`PrepareOpsToDelegate`）的差异只集中在「判定支持性」这一步。
+- **GPU 与 NNAPI 代表两类粘合范式**：GPU 把 `TfLiteDelegate` 当**组合成员**且多后端合一；NNAPI 直接**继承** `TfLiteDelegate` 并把图翻译成系统 NNAPI 模型，自身不含计算。
+- **三级回退保证正确性**：加载期 `reset_delegation_if_not_ok`→`RemoveAllDelegates`；形状变化用 `UndoAllDelegates`/`RedoAllDelegates` 暂存重做；运行期 `InvokeWithCPUFallback` 备份输入、撤销 delegate、CPU 重跑。
+- **回退依赖跨模块契约**：`InvokeWithCPUFallback` 之所以能正确还原输入，依赖 `ArenaPlanner` 的 `preserve_inputs=true`；这正是「为什么回退要求模型无状态」的根因。
 
 ## 7. 下一步学习建议
 
-- **动手写一个最小自定义委托**：参照 [simple_delegate.h](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/delegates/utils/simple_delegate.h) 与 `simple_delegate_test.cc`，实现一个只接管 `ADD` 算子的玩具委托，亲手跑通「判定 → 分区 → 宏算子 invoke」全链路。这是巩固本讲的最佳方式。
-- **深入 GPU 委托的编译细节**：阅读 `delegates/gpu/common/model_builder.cc` 中 `IsSupported` 与 GPU 算子图（`GraphFloat32`）的构造，理解委托如何在 `init/prepare` 阶段把 TFLite 子图编译成 GPU shader。
-- **回看运行时主线**：本讲的「执行计划改写」与 u8-l1 的「`Invoke` 按计划逐算子执行」是一枚硬币的两面；建议重读 `Subgraph::InvokeImpl`，体会加入 DELEGATE 宏算子后主循环其实无需任何特判。
-- **关注 Stable Delegate / 外部委托**：若对跨进程、可热更新的委托感兴趣，可读 `delegates/external/` 与 `delegates/utils/experimental/stable_delegate/`，它们代表了委托 ABI 稳定化的方向。
+- **亲手写一个最小 delegate**：精读 [`tensorflow/lite/delegates/utils/simple_delegate.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils/simple_delegate.h) 与仓库自带的示例 `tensorflow/lite/delegates/utils/dummy_delegate/`，实现一个 `SimpleDelegateInterface` 子类，跑通「自己声明支持某几个 op 并把它们替换成一个空操作宏节点」。这是巩固本讲最有效的练习。
+- **深入 XNNPACK delegate**：它是生产环境里**默认开启**的 CPU 后端，逻辑相对 GPU/NNAPI 更易读，建议精读 [xnnpack_delegate.cc 的 DelegatePrepare（L7637）](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/xnnpack/xnnpack_delegate.cc#L7637) 与其 `PrepareOpsToDelegate`，理解「为什么连纯 CPU 也要走 delegate 机制」（答案：XNNPACK 的算子融合与高度手写优化比 TFLite reference kernel 快很多）。
+- **承接 TFLite 序列化与 telemetry**：本讲多处出现 `TelemetryReportDelegateSettings`。可继续阅读 [`tensorflow/lite/delegates/serialization.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/serialization.h) 与 [`telemetry.h`](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/telemetry.h)，理解 delegate 的编译结果（如 GPU 编译出的 kernel）如何被缓存到磁盘、遥测数据如何上报，这是生产部署的关键一环。
+- **回到执行模型主线**：本讲是「边缘部署」单元的收尾。若想继续追 TFLite 的边界，可研究 control flow op（`WHILE`/`IF`）如何跨子图委托（涉及 `MarkSubgraphAsDelegationSkippable`，见 [utils.h#L62-L93](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/delegates/utils.h#L62-L93)），那是 delegate 机制里最复杂的一块。

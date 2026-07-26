@@ -1,419 +1,456 @@
 # TFLite 架构与 Interpreter
 
-> 单元 u8 边缘部署 TFLite · 第 1 讲
-> 依赖：u1-l5（版本信息与 C++ public 接口）
+> 本讲进入「边缘部署 TFLite」单元。前面七个单元我们一直在桌面端/服务器端打转：从张量、计算图、Op/Kernel 注册，一直到 DirectSession 的多设备执行调度。本讲要换一个视角——当一个 TensorFlow 模型被打包成一个 `.tflite` 文件、塞进一部手机或一块嵌入式板子时，它由谁来执行？答案就是 **TensorFlow Lite**。
 
 ## 1. 本讲目标
 
 学完本讲后，你应当能够：
 
-1. 说清 **TensorFlow Lite（TFLite）** 与桌面端 TensorFlow 的定位差异，理解它为何要「轻」、靠什么「轻」。
-2. 描述一个 `.tflite` 模型从**加载 → 建图 → 分配张量 → 推理**的完整链路，并能在源码中定位每个阶段对应的函数。
-3. 理解 `Interpreter` 的**解释执行模型**——它不像 DirectSession 那样放置/分区/跨设备通信，而是按一张「执行计划」顺序逐个调用 op 的 `invoke`。
-4. 认识 TFLite 的 **C 接口边界**：`common.h` 定义的 `TfLiteTensor`/`TfLiteContext`/`TfLiteRegistration` 等核心 C 结构，以及 `c_api.h` 提供的稳定 ABI。
+1. 说清楚 TFLite **为什么**要被单独设计、它放弃了桌面端的哪些东西、又换来了什么（轻、快、省内存）。
+2. 画出 TFLite 推理的「四件套」架构：`FlatBufferModel` → `InterpreterBuilder` + `OpResolver` → `Interpreter` → `AllocateTensors` / `Invoke`。
+3. 精读 [interpreter.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h)，掌握 Interpreter 的执行流程与生命周期。
+4. 看懂 TFLite 的 C 边界：[common.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h) 里的 `TfLiteTensor`/`TfLiteNode`/`TfLiteContext`/`TfLiteRegistration` 如何定义运行时与算子之间的契约；以及 [c_api.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h) 作为「不透明指针」稳定 ABI 边界的意义。
+5. 能把 TFLite 的解释执行模型与桌面端 `DirectSession` 的执行模型对照起来，指出二者在图表示、设备、算子分发、内存上的本质差别。
 
 ## 2. 前置知识
 
-本讲假定你已经读过 **u1-l5**，知道桌面端有一个 C++ 抽象入口 `Session`（`core/public/session.h`），它用工厂模式 `NewSession()` 创建 `DirectSession`，执行靠「放置（Placement）→ 剪枝 → 优化 → 分区 → 调度执行」。TFLite 是这套执行模型在「移动/嵌入式」场景下的精简对应物，因此我们会不断拿它和 `Session`/`DirectSession` 做对照。
+本讲依赖前面几讲已建立的概念，下面用一句话帮你回忆，不会重复展开：
 
-需要先建立的几个直觉：
+- **桌面端执行模型（u1-l5、u3-l2）**：用户拿到一张 `GraphDef`，通过 `NewSession()` 创建 `DirectSession`；`Run` 时要做 **Placement（放置）→ Pruning（剪枝）→ Optimize（Grappler 优化）→ Partition（分区）**，为每台设备产出一个 `Executor`，跨设备靠 `_Send`/`_Recv` + `Rendezvous` 传张量。TFLite 几乎把这些全砍掉了——本讲会逐条对比。
+- **Op 与 Kernel（u4-l1、u4-l2）**：桌面端 Op 是「说明书」（`OpDef`），Kernel 是「工人」（`OpKernel::Compute(OpKernelContext*)`），靠全局 `OpRegistry`/`KernelRegistry` 注册。TFLite 用一张显式传入的 `OpResolver` 查找表替代全局注册表，用 C 函数指针 `TfLiteRegistration::invoke` 替代 C++ 虚函数。
+- **FlatBuffer**：TFLite 的模型文件不是 protobuf，而是 Google 的 FlatBuffer 序列化格式。它的杀手锏是 **零拷贝（zero-copy）**——可以直接 mmap 到内存，无需反序列化即可按偏移读取，这对内存紧张的移动端至关重要。与之对照，protobuf 必须先反序列化成一棵对象树。
 
-- **推理（inference）vs 训练（training）**：TFLite 只做推理。模型先在桌面端用完整 TF 训练好，再转换（convert）成 `.tflite` 文件，最后在手机/嵌入式设备上由 TFLite 解释执行。
-- **解释执行（interpretation）vs JIT 编译**：TFLite 默认不把图编译成新的设备代码，而是拿到 FlatBuffer 模型后逐个 op 调用预注册的 C kernel（`invoke` 函数指针）。这是它「启动快、二进制小」的根源；加速则交给可选的 **delegate**（下讲 u8-l2 专题）。
-- **C ABI 边界**：op 的实现可以用 C++ 写，但 op 与解释器之间的契约是 **纯 C 结构 + 函数指针**（`TfLiteRegistration`）。这让 TFLite 能以一个稳定 `.so` 被多种语言绑定复用。
+如果你对「解释执行 vs 编译执行」这个区分陌生，记住一句话即可：TFLite 默认是 **解释器（interpreter）**——读一条算一条，按 `execution_plan` 数组里的顺序依次调用每个算子的 C 函数；而桌面端 XLA/TFRT 走的是 **编译/调度** 路线。第 7 单元讲过编译器，这里我们看它的「轻量兄弟」。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| [tensorflow/lite/README.md](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/README.md) | TFLite 一句话定位 |
-| [tensorflow/lite/core/interpreter.h](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h) | `Interpreter` 类的 C++ 接口（本讲主线） |
-| [tensorflow/lite/core/interpreter.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc) | `AllocateTensors`/`Invoke` 等方法的实现（多数转交给主子图） |
-| [tensorflow/lite/core/subgraph.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc) | `Subgraph::InvokeImpl` 真正的「按执行计划逐 op 调用」循环 |
-| [tensorflow/lite/core/c/common.h](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h) | C 核心类型：`TfLiteTensor`/`TfLiteNode`/`TfLiteContext`/`TfLiteRegistration` |
-| [tensorflow/lite/core/c/c_api_types.h](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api_types.h) | `TfLiteStatus` 枚举 |
-| [tensorflow/lite/core/c/c_api.h](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h) | 稳定 C API：`TfLiteModel*`/`TfLiteInterpreter*` 等 |
-| [tensorflow/lite/examples/label_image/label_image.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/examples/label_image/label_image.cc) | 一个完整可参考的 C++ 调用示例 |
+|------|------|
+| `tensorflow/lite/core/interpreter.h` | **本讲主角**。定义 `tflite::Interpreter`（实为 `impl::Interpreter` 的别名），是驱动整张图推理的顶层对象。 |
+| `tensorflow/lite/c/common.h` | 公共头，仅 `#include` 下一层实现。真正的类型定义在 `tensorflow/lite/core/c/common.h`。 |
+| `tensorflow/lite/c/c_api.h` | 公共头，仅 `#include` 下一层实现。真正的 C API 声明在 `tensorflow/lite/core/c/c_api.h`。 |
+| `tensorflow/lite/core/c/common.h` | **运行时↔算子的 C 契约**：`TfLiteStatus`、`TfLiteTensor`、`TfLiteNode`、`TfLiteContext`、`TfLiteRegistration`、`TfLiteDelegate`。 |
+| `tensorflow/lite/core/c/c_api.h` | **稳定 ABI 的 C API**：`TfLiteModel`/`TfLiteInterpreter`/`TfLiteTensor` 等不透明类型及其生命周期函数。 |
+| `tensorflow/lite/core/c/c_api_types.h` | `TfLiteStatus` 枚举、不透明类型 `TfLiteOpaqueContext` 等的前向声明。 |
+| `tensorflow/compiler/mlir/lite/core/model_builder_base.h` | `FlatBufferModelBase`：把 `.tflite` 文件 mmap 成内存表示的 `FlatBufferModel`。 |
+| `tensorflow/lite/core/interpreter_builder.h` | `InterpreterBuilder`：吃 `FlatBufferModel` + `OpResolver`，把 FlatBuffer 里的算子解析、装配成一个 `Interpreter`。 |
+| `tensorflow/lite/core/api/op_resolver.h` | `OpResolver` 抽象：把 FlatBuffer 里的 op code 映射到 `TfLiteRegistration`（算子实现）。 |
+| `tensorflow/lite/examples/minimal/minimal.cc` | 最小可运行示例，串起「加载→构建→分配→推理」全流程，是本讲代码实践的样板。 |
 
-> 注意：仓库里 `tensorflow/lite/c/common.h`、`tensorflow/lite/c/c_api.h`、`tensorflow/lite/model.h` 都是**转发 shim**，内部只有一行 `#include "tensorflow/lite/core/c/..."`。官方要求使用者 include shim、实现者 include `core/` 下的真实文件。本讲引用的是真实实现文件。
-
----
+> **关于头文件分层**：你会注意到 `lite/c/common.h`、`lite/c/c_api.h`、`lite/model_builder.h` 这些文件内容都只有一两行 `#include`。这是 TFLite 的约定——`lite/c/`、`lite/` 是面向用户的 **公共 include 路径**，`lite/core/c/`、`lite/core/` 才是 **实现路径**。用户文档里反复出现的 `WARNING: Users of TensorFlow Lite should not include this file directly` 说的就是这个。本讲为了讲清实现，会直接引用 `core/` 下的真实定义。
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 TFLite 是什么：轻量化推理的设计取舍
+### 4.1 TFLite 的轻量化定位与「四件套」推理架构
 
 #### 4.1.1 概念说明
 
-`README.md` 用一句话点明了 TFLite 的定位：
+TFLite 解决的问题是：**把一个在云端训练好的模型，塞进一部只有几 MB 内存余量、没有独立 GPU 调度栈、甚至没有完整 C++ 标准库的手机或微控制器里去推理。** 为此它必须做出取舍：
 
-> TensorFlow Lite is TensorFlow's lightweight solution for mobile and embedded devices. It enables low-latency inference of on-device machine learning models with a small binary size and fast performance supporting hardware acceleration.
+- **去掉多设备**：移动端推理只在单设备（CPU 或某块加速器）上跑，于是桌面端那一整套 Placement、Partition、`_Send`/`_Recv`、`Rendezvous` 全部不需要。
+- **去掉图调度器**：不再用异步 `Executor`，而是用一张扁平的 **执行计划（execution_plan）** 数组，按依赖顺序一个一个调用算子。
+- **去掉全局注册表**：桌面端依赖进程级 `OpRegistry`，而 TFLite 要求把可用的算子实现 **显式** 地通过 `OpResolver` 传进来——这样可以按需裁剪二进制体积（只链接你用得到的算子）。
+- **去掉按需分配**：改用 **arena（内存竞技场）+ 静态 memory planner**，把所有张量预先规划进一两块连续内存里；权重甚至直接 mmap，连拷贝都省了。
 
-提取出三个关键词，正是 TFLite 全部设计的出发点：
+代价是：TFLite **默认不训练**（它有「从训练好的模型继续训练」的能力，但主战场是推理），且单进程单设备，不擅长分布式。
 
-- **low-latency（低延迟）**：模型要在设备上即时跑，不能依赖云端往返。
-- **small binary size（小体积）**：要能塞进 APK/IPA，运行库越小越好。
-- **hardware acceleration（硬件加速）**：CPU 跑不动时，能把子图卸载到 GPU/NPU/ DSP。
+#### 4.1.2 核心流程
 
-为了这三点，TFLite 相比桌面端 TF 做了若干「减法」与一处「加法」：
-
-| 维度 | 桌面端 TF（`DirectSession`） | TFLite（`Interpreter`） |
-| --- | --- | --- |
-| 模型格式 | 内存中的 `Graph`/序列化 `GraphDef`（protobuf） | `.tflite`（**FlatBuffer**，零拷贝 mmap） |
-| 是否训练 | 训练 + 推理 | **仅推理** |
-| 执行方式 | 放置 → 剪枝 → 优化（Grappler）→ 分区 → 调度 | 直接按「执行计划」**逐 op 解释执行** |
-| 设备 | 单机/多机多卡，靠 `_Send`/`_Recv` 跨设备 | 单设备；加速靠 **delegate** 替换子图 |
-| 依赖 | 重（protobuf、众多框架代码） | 轻（纯 C 内核 + FlatBuffer） |
-
-那一处「加法」是 **delegate 机制**：当解释执行的纯 CPU 路径不够快时，delegate 可以「接管」一段子图，用 GPU/NNAPI/XNNPACK 替换它。这是 u8-l3 的主题，本讲只在「执行计划」处点到为止。
-
-#### 4.1.2 核心流程：一条贯穿的推理流水线
-
-把一个 `.tflite` 文件变成一次推理结果，分五步。这五步既是本讲的骨架，也是后面所有源码精读的索引：
+TFLite 的推理由 **四个角色** 协作完成，这正是 [interpreter.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h) 顶部那段 `Usage` 注释所描述的：
 
 ```
-.tflite 文件
-   │ ① 加载（FlatBufferModel::BuildFromFile，零拷贝 mmap）
-   ▼
-FlatBufferModel（只读模型描述：算子表 + 权重 buffer）
-   │ ② 建图（InterpreterBuilder + OpResolver，把算子解析成 TfLiteRegistration）
-   ▼
-Interpreter（持有 Subgraph，里面有 tensors[] 与 execution_plan）
-   │ ③ 分配张量（AllocateTensors：依据输入形状做内存规划）
-   ▼
-已就绪的 Interpreter
-   │ ④ 填输入（typed_tensor / TfLiteTensorCopyFromBuffer）
-   │ ⑤ 推理（Invoke：按 execution_plan 顺序调每个 op 的 invoke）
-   ▼
-输出张量
+┌───────────────────────────┐
+│  ① FlatBufferModel        │  把 .tflite 文件 mmap 成只读内存模型
+│  （只读、可被多 Interpreter│  （权重零拷贝，常量权重直接指向文件映射区）
+│     共享）                 │
+└─────────────┬─────────────┘
+              │ + OpResolver（算子查找表）
+              ▼
+┌───────────────────────────┐
+│  ② InterpreterBuilder     │  解析 FlatBuffer 里的算子/张量，
+│  （一次性装配）            │  把 op code 解析成 TfLiteRegistration，
+│                           │  装配出一个 Interpreter
+└─────────────┬─────────────┘
+              ▼
+┌───────────────────────────┐
+│  ③ Interpreter            │  AllocateTensors()：做内存规划，给所有
+│  （常驻、可反复 Invoke）   │  张量分配 arena 缓冲；填输入 →
+│                           │  Invoke()：按 execution_plan 顺序跑每个
+│                           │  算子的 invoke() → 读输出
+└───────────────────────────┘
 ```
 
-注意这五步和桌面端 `Session` 的对应关系：**①加载**≈`Session::Create(GraphDef)`；**③分配**≈`DirectSession` 的放置/分区（但 TFLite 不跨设备，所以只剩内存规划）；**⑤推理**≈`Session::Run`，只是 TFLite 不走 Executor/Rendezvous，而是直接一个 for 循环。
+用伪代码表示一次完整推理：
+
+```text
+model     = FlatBufferModel::BuildFromFile("model.tflite")
+resolver  = BuiltinOpResolver()              # 内置算子实现表
+builder   = InterpreterBuilder(*model, resolver)
+interpreter = builder()                      # 装配
+interpreter.AllocateTensors()                # 内存规划（贵，只做一次）
+填输入: typed_input_tensor<float>(0)[i] = ...
+interpreter.Invoke()                         # 按计划遍历算子
+读输出: typed_output_tensor<float>(0)[i]
+```
+
+注意一个与桌面端的重要差异：桌面端的 `Session.run()` 每次都会 **按 fetches 重新剪枝子图**；而 TFLite 的 `AllocateTensors()` 是 **昂贵的一次性操作**，之后 `Invoke()` 就是廉价的纯遍历。如果输入形状变了（动态 shape），才需要重新 `ResizeInputTensor` + `AllocateTensors`。
 
 #### 4.1.3 源码精读
 
-官方在 `interpreter.h` 顶部用一段注释给出了这五步的「标准写法」（C++ 视角）：
+先看主角 [interpreter.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h) 顶部的使用示例，它就是上面那张图的文字版：
 
-[interpreter.h:L87-L115](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L87-L115) —— Interpreter 的推荐用法：先 `BuildFromFile` 建模型，再用 `InterpreterBuilder(model, resolver)` 造解释器，接着 `AllocateTensors()`，填输入，最后 `Invoke()`。
+- [tensorflow/lite/core/interpreter.h:87-122](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L87-L122) —— 这段文档注释给出标准用法：先 `FlatBufferModel::BuildFromFile`，再 `InterpreterBuilder(*model, resolver)(&interpreter)`，再 `AllocateTensors()`，填输入，最后 `Invoke()`。这是全篇的纲领。
 
-这段示例里隐藏了一个关键设计：**几乎从不直接 `new Interpreter`**。注释明确写道：
+模型的加载由 `FlatBufferModelBase` 负责，它本质是 FlatBuffer 的一个 RAII 只读包装：
 
-> Note: For nearly all practical use cases, one should not directly construct an Interpreter object, but rather use the InterpreterBuilder.
+- [tensorflow/compiler/mlir/lite/core/model_builder_base.h:60-68](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/compiler/mlir/lite/core/model_builder_base.h#L60-L68) —— 注释说明 `FlatBufferModelBase` 是「从磁盘拷贝或 mmap 的只读 tflite 模型」，并强调它 **不可变（immutable）**，因此一个模型可被多个 Interpreter 共享（甚至跨线程）。
 
-因为「把 FlatBuffer 算子表翻译成可执行图」这件事由 `InterpreterBuilder` 配合 `OpResolver` 完成（见 4.2）。真实的端到端范例在示例程序里：
+- [tensorflow/compiler/mlir/lite/core/model_builder_base.h:94-105](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/compiler/mlir/lite/core/model_builder_base.h#L94-L105) —— `BuildFromFile` 把文件经 `GetAllocationFromFile` 转成 `Allocation`（mmap 或读入内存），再 `BuildFromAllocation`。注意大端机器还要 `ByteConvertModel` 做字节序转换（移动端几乎都是小端，故直接返回）。
 
-[label_image.cc:L210-L224](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/examples/label_image/label_image.cc#L210-L224) —— `RunInference` 的开头：`FlatBufferModel::BuildFromFile` 加载模型，`BuiltinOpResolver` 提供内置算子注册表，`InterpreterBuilder(*model, resolver)(&interpreter)` 一步建好解释器。
+装配过程在 `InterpreterBuilder` 里：
 
-#### 4.1.4 代码实践（源码阅读型）
+- [tensorflow/lite/core/interpreter_builder.h:98-102](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter_builder.h#L98-L102) —— `operator()` 是构建入口：成功返回 `kTfLiteOk` 并把 `*interpreter` 置为有效对象，失败置为 `nullptr`。这就是示例里 `builder(&interpreter)` 那一行的真身。
 
-1. **目标**：在真实示例里把「五步流水线」逐行对上号。
-2. **步骤**：打开 [label_image.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/examples/label_image/label_image.cc) 的 `RunInference` 函数（第 203 行起），按下表填空：
+- [tensorflow/lite/core/interpreter_builder.h:133-139](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter_builder.h#L133-L139) —— `ParseNodes` / `ParseTensors` 是构建期的两个核心私有方法，分别把 FlatBuffer 里的算子和张量翻译成 `Subgraph` 里的节点与 `TfLiteTensor`。
 
-   | 流水线步骤 | 对应代码行 | 调用的方法 |
-   | --- | --- | --- |
-   | ① 加载模型 | 第 212 行 | `FlatBufferModel::BuildFromFile(...)` |
-   | ② 建解释器 | 第 224 行 | `InterpreterBuilder(*model, resolver)(&interpreter)` |
-   | ③ 分配张量 | 第 286 行 | `interpreter->AllocateTensors()` |
-   | ④ 填输入 | 第 300~321 行 | `interpreter->typed_tensor<T>(input)` 后写入数据 |
-   | ⑤ 推理 | 第 325 / 334 行 | `interpreter->Invoke()` |
+算子的查找表定义在 `OpResolver`：
 
-3. **观察现象**：注意第 274~284 行在 `AllocateTensors` **之前**先 `ModifyGraphWithDelegate`——这印证了 delegate 必须在分配前应用（因为 delegate 会改写图、进而改变内存规划）。
-4. **预期结果**：你能用一句话说出「TFLite 推理 = 加载 + 建图 + 分配 + 填输入 + Invoke」，并指出每一步的源码位置。
+- [tensorflow/lite/core/api/op_resolver.h:55-60](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/api/op_resolver.h#L55-L60) —— `FindOp` 有两个重载：一个按 builtin op 枚举码（如 `ADD`）、一个按自定义 op 名字字符串查；二者都要带 `version`（算子版本）。这取代了桌面端的进程级全局 `OpRegistry`。
+
+- [tensorflow/lite/core/api/op_resolver.h:218-221](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/api/op_resolver.h#L218-L221) —— `GetRegistrationFromOpCode` 是把 FlatBuffer 里的 `OperatorCode` 翻译成 `TfLiteRegistration`（算子实现）的桥梁函数，构建期每个节点都要查一次。
+
+#### 4.1.4 代码实践
+
+**实践目标**：用最小可运行示例 [minimal.cc](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/examples/minimal/minimal.cc) 把「四件套」流程在源码里逐行对上号。
+
+**操作步骤**（源码阅读型实践，无需编译）：
+
+1. 打开 `tensorflow/lite/examples/minimal/minimal.cc`。
+2. 在 `main` 里找到这四步，并把每一行与 4.1.2 的流程图对应：
+   - `FlatBufferModel::BuildFromFile(filename)` —— ①
+   - `BuiltinOpResolver resolver; InterpreterBuilder builder(*model, resolver);` —— ②
+   - `builder(&interpreter)` —— 得到 ③
+   - `interpreter->AllocateTensors()` 与 `interpreter->Invoke()` —— ③ 的运行期
+3. 参考源码：[tensorflow/lite/examples/minimal/minimal.cc:49-74](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/examples/minimal/minimal.cc#L49-L74)。
+
+**需要观察的现象**：你会看到 `AllocateTensors()` 之后示例调用了 `PrintInterpreterState` 打印状态，`Invoke()` 之后再打印一次——这正是观察「分配前/分配后/推理后」三态的官方手段。
+
+**预期结果**：你能写出一个表格，左列是 minimal.cc 的代码行，右列对应四件套中的哪一步。
+
+**待本地验证**：若你想真正运行，minimal 示例自带极简 Makefile（`tensorflow/lite/tools/make`），可 `make` 出一个 `minimal` 二进制并用任意 `.tflite` 文件运行；但本实践以源码阅读为主。
 
 #### 4.1.5 小练习与答案
 
-**Q1**：TFLite 为什么默认不做 Grappler 那样的图优化？
-**A**：因为优化（常量折叠、布局变换等）在**转换阶段**（桌面端 `TFLiteConverter`）就已经做完并固化进 `.tflite`；运行时只需解释执行，从而换取更小的运行库与更快的启动。
+**练习 1**：为什么 TFLite 推荐用 `InterpreterBuilder` 而不是直接 `new Interpreter()`？
 
-**Q2**：`FlatBufferModel` 为何要求「模型实例必须比 Interpreter 活得更久」？
-**A**：TFLite 用 **mmap 零拷贝** 读取权重，Interpreter 里的张量数据直接指向 FlatBufferModel 持有的只读内存（`kTfLiteMmapRo`）。模型一旦先被释放，这些指针就成了悬空指针。
+**参考答案**：直接构造的 `Interpreter` 是一张空图——没有节点、没有张量、没有算子实现。`InterpreterBuilder` 才负责把 FlatBuffer 里的算子用 `OpResolver` 解析成 `TfLiteRegistration`、把张量描述装配进 `Subgraph`。`interpreter.h` 的构造函数注释就明确写了 `Use of this constructor outside of an InterpreterBuilder is not recommended`。
+
+**练习 2**：一个 `.tflite` 模型能否被多个 `Interpreter` 共享？为什么？
+
+**参考答案**：能。因为 `FlatBufferModel` 是不可变的只读对象（权重经 mmap 直接指向文件映射区），`InterpreterBuilder` 的文档（见 [interpreter_builder.h:50-70](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter_builder.h#L50-L70)）明确说「a single model instance may safely be used with multiple interpreters」。这与桌面端「一份 GraphDef 可喂给多个 Session」是类似的设计，只是 TFLite 凭借 mmap 连拷贝都省了。
 
 ---
 
-### 4.2 Interpreter：解释执行模型（模块 `lite.core.interpreter`）
+### 4.2 lite.core.interpreter —— Interpreter 的解释执行与生命周期
 
 #### 4.2.1 概念说明
 
-`Interpreter` 是 TFLite 的「主控对象」，地位类似桌面端的 `DirectSession`，但简单得多。它的核心职责只有两个：
+本模块精读 `lite.core.interpreter`，也就是 [interpreter.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h) 里的 `Interpreter` 类。它是 TFLite 的「主控对象」，但需要先纠正一个直觉：**Interpreter 自己并不真正存张量、也不真正遍历算子**。
 
-1. **持有图**：一张由若干 `Subgraph` 组成的计算图。绝大多数模型只有一个主子图（primary subgraph），`Interpreter` 的多数方法只是把调用**转发**给主子图。
-2. **驱动执行**：`Invoke()` 按执行计划逐个调用 op。
+真正干活的是一个叫 **`Subgraph`（子图）** 的对象。一个 Interpreter 持有一个 `std::vector<unique_ptr<Subgraph>>`，第 0 个就是 **主子图（primary subgraph）**。我们平时调用的 `AllocateTensors()`、`Invoke()`、`inputs()`、`tensor(i)`，Interpreter 几乎都是转手交给 `primary_subgraph()` 去做。引入多子图是为了支持控制流（`while`/`if`）和「签名（signature）」——每个子图可以有自己的输入输出。
 
-它对外暴露的几乎全是「张量索引」语义：输入、输出、张量都用 `int` 索引引用（`inputs()[0]`、`tensor(5)`），而不是桌面端那种带名字的 `Tensor` 对象。这是一种刻意的轻量化——少造对象、少拷贝。
+Interpreter 真正自己持有的核心状态只有一个 C 结构体指针 `TfLiteContext* context_`。这个 `TfLiteContext` 是运行时和算子之间通信的「总线」——算子实现（一个 C 函数指针）就是通过它来读写张量、请求分配内存、上报错误的。我们会在 4.3 专门讲它。
 
-#### 4.2.2 核心流程：Invoke 到底干了什么
+#### 4.2.2 核心流程
 
-`Interpreter::Invoke` 本身非常薄，真正的活全在 `Subgraph::InvokeImpl`：
+Interpreter 的生命周期可以分成 **构建期** 和 **运行期** 两段：
 
+```text
+【构建期】（由 InterpreterBuilder 驱动，Interpreter 被动接收）
+  构造空 Interpreter  →  Builder 调 AddTensors/AddNodeWithParameters/SetInputs/SetOutputs
+                       把模型装配进 Subgraph  →  Builder 返回
+
+【运行期】（用户主动调用）
+  (可选) ResizeInputTensor  —— 改输入形状（会令图"不一致"，需重新分配）
+        AllocateTensors     —— 内存规划：按 execution_plan 跑一遍每个算子的 prepare()，
+                                算出输出形状，再用 memory planner 把所有张量布局进 arena
+  填输入张量缓冲
+        Invoke              —— 按 execution_plan 顺序，对每个节点调用其 invoke() 函数指针
+  读输出张量缓冲
+        (可反复 Invoke，只要输入形状不变)
 ```
-Interpreter::Invoke()                         [interpreter.cc:232]
-   ├─ 重置取消标志、抑制非规格化浮点（性能）
-   └─ primary_subgraph().Invoke()             [interpreter.cc:246]
-         └─ Subgraph::InvokeImpl()            [subgraph.cc:1662]
-               ├─ 检查 consistent_ / state_（是否就绪）
-               └─ for node_index in execution_plan_:        ← 按计划顺序
-                    ├─ (按需) PrepareOpsAndTensors()         ← 懒 prepare
-                    ├─ 检查输入张量数据是否就绪
-                    ├─ MayAllocateOpOutput()                 ← 分配动态张量
-                    ├─ 检查取消标志
-                    └─ OpInvoke(registration, &node)         [subgraph.cc:1770]
-                          └─ registration->invoke(&context_, node)  [subgraph.cc:1467]
-```
 
-两个关键点：
+关键点：
 
-- **「执行计划」**（`execution_plan_`）是一串**节点索引**，按依赖顺序排好。`Invoke` 就是老老实实 `for` 一遍。和桌面端 `Executor` 的异步调度、`Rendezvous` 跨设备传张量相比，这里没有调度器、没有通信——因为 TFLite 假设**单设备、同步**。
-- **「懒 prepare」**：op 的 `prepare`（形状推导 + 申请输出）不是一次性全做完，而是在 `Invoke` 循环里**用到时才做**（`next_execution_plan_index_to_prepare_`）。若某个 op 在运行时改变了中间张量形状，会触发下游 op 重新 prepare。
+1. **`AllocateTensors()` 是分水岭**。它内部会触发每个算子的 `prepare` 回调来推导形状、规划内存。只有它返回 `kTfLiteOk` 之后，张量缓冲才真正可用。文档反复强调：访问张量数据前 **必须** 先 `AllocateTensors()`；改了输入形状后 **必须** 再次调用。
+2. **`Invoke()` 是廉价且可重复的**。它只是遍历一遍已经规划好的执行计划，逐个调用算子的 `invoke`。
+3. **执行顺序由 `execution_plan()` 决定**，它是一个 `vector<int>`——节点索引的有序列表，已经做过拓扑排序，直接按数组下标遍历即可，无需桌面端那种复杂的图调度。
 
 #### 4.2.3 源码精读
 
-**类定义与构造**。`Interpreter` 其实是 `impl::Interpreter` 的别名：
+先确认类型别名与类的真实身份：
 
-[interpreter.h:L122](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L122) 与 [interpreter.h:L128-L139](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L128-L139) —— `using Interpreter = impl::Interpreter;`，类注释明确「not thread-safe」（客户端需自行串行化调用）。
+- [tensorflow/lite/core/interpreter.h:122-128](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L122-L128) —— `using Interpreter = impl::Interpreter;` 这一行说明用户用的 `tflite::Interpreter` 其实是命名空间 `impl` 里的那个类。前面的 `#include` 注释也提醒：**不要直接 include 这个文件**，应 include `lite/interpreter.h`。
 
-**关键私有字段**。`Interpreter` 把图的真相藏在两个成员里：
+注意它的线程安全声明，这是与桌面端 `Executor` 异步模型的鲜明对比：
 
-[interpreter.h:L1013](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L1013) —— `TfLiteContext* context_;`：这是与 C 插件通信的**纯 C 结构**，也是张量元数据的「权威存储」（见 4.3）。
+- [tensorflow/lite/core/interpreter.h:120-121](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L120-L121) —— 明确写着 `This class is *not* thread-safe`，客户端要自己串行化对同一个 Interpreter 的访问。桌面端是异步多线程图调度，TFLite 默认是同步单线程（并行交给 delegate，见下一讲 u8-l3）。
 
-[interpreter.h:L1043](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L1043) —— `std::vector<std::unique_ptr<Subgraph>> subgraphs_;`：真正的图住在子图里。`primary_subgraph()`（[L874](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L874)）永远返回 `subgraphs_.front()`。
+两个最关键的运行期方法：
 
-**转发模式**。看 `AllocateTensors` 的实现就能体会「Interpreter 多数只是转发」：
+- [tensorflow/lite/core/interpreter.h:574-582](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L574-L582) —— `AllocateTensors()` 的声明。注释说明它「相对昂贵」，**必须在创建后、推理前调用**，且**当且仅当**改了输入张量形状时才需再次调用；若模型里有算子不被 `OpResolver` 支持（且未被 delegate 改写），它会失败。
 
-[interpreter.cc:L190-L198](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L190-L198) —— `Interpreter::AllocateTensors` 先应用默认 delegate，然后 `return primary_subgraph().AllocateTensors();`。几乎每个公开方法都是这个「转给主子图」的形状。
+- [tensorflow/lite/core/interpreter.h:584-590](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L584-L590) —— `Invoke()` 的声明，「按依赖顺序跑完整张图」。注释提醒：若之前做了 `ResizeTensor` 却没 `AllocateTensors`，Interpreter 可能不在就绪态。
 
-**Invoke 的薄壳**：
+现在看「Interpreter 只是转交给主子图」的证据：
 
-[interpreter.cc:L232-L257](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.cc#L232-L257) —— `Invoke` 重置取消标志、抑制非规格化浮点（x86 上的性能陷阱），核心一行是 `primary_subgraph().Invoke()`；执行后若未允许 buffer handle 输出，还会逐个输出张量调 `EnsureTensorDataIsReadable`（delegate 把数据留在 GPU 时需拷回 CPU）。
+- [tensorflow/lite/core/interpreter.h:248-264](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L248-L264) —— `inputs()`/`outputs()`/`variables()` 全都直接 `return primary_subgraph().inputs()` 等，自身不存数据。
 
-**真正的执行循环**在子图里：
+- [tensorflow/lite/core/interpreter.h:874-881](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L874-L881) —— `primary_subgraph()` 返回 `*subgraphs_.front()`，注释还贴心地注明 `subgraphs_ always has 1 entry`，保证取首元素安全。
 
-[subgraph.cc:L1662-L1693](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L1662-L1693) —— `InvokeImpl` 先做就绪检查（`consistent_`、`state_`、内存规划是否存在），随后一个 `for (execution_plan_index ...)` 循环，逐节点取出 `TfLiteNode` 与 `TfLiteRegistration`。
+最后看 Interpreter 真正持有的核心状态：
 
-[subgraph.cc:L1770-L1774](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L1770-L1774) —— 循环体里调用 `OpInvoke(registration, &node)`，失败则报错返回。
+- [tensorflow/lite/core/interpreter.h:1009-1013](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L1009-L1013) —— `TfLiteContext* context_`，注释写得很清楚：这是「与纯 C 插件接口通信的纯 C 数据结构」，而且为了避免拷贝张量元数据，**它也是张量的权威存储**。注意它存的是「主子图的 context」。
 
-**OpInvoke 落到函数指针**：
+- [tensorflow/lite/core/interpreter.h:1043-1043](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L1043-L1043) —— `std::vector<std::unique_ptr<Subgraph>> subgraphs_`，这就是多子图机制的存储。
 
-[subgraph.cc:L1466-L1467](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L1466-L1467) —— 最终 `return op_reg.invoke(&context_, node);`。也就是说，整条推理链路的终点，就是调用某个 op 注册时填进 `TfLiteRegistration` 的那个 C 函数指针。这与桌面端「`OpKernel::Compute(OpKernelContext*)`」是同一思想，只是换成了纯 C 形态。
+填输入、读输出最常用的便捷方法：
 
-**访问张量的便捷方法**：
+- [tensorflow/lite/core/interpreter.h:325-345](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L325-L345) —— 模板方法 `typed_tensor<T>(idx)`：先取张量、再校验 `tensor->type` 与 `T` 匹配，匹配才把 `data.raw` reinterpret 成 `T*`，否则返回 `nullptr`。这是一个带类型检查的安全转型，`typed_input_tensor`/`typed_output_tensor` 都建立在它之上。
 
-[interpreter.h:L288-L290](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L288-L290) —— `tensor(int)` 返回 `TfLiteTensor*`，注释反复警告「地址不保证稳定，`Invoke`/`AllocateTensors` 等操作可能使其失效」——所以**每次取值前重新拿指针**是正确用法。
+> 本讲的目的是建立架构认知，所以不深入 `Subgraph::AllocateTensors`/`Invoke` 的实现细节（那涉及 `memory_planner` 与算子 `prepare`/`invoke` 的交互）。你只需记住：Interpreter 是门面，Subgraph 是引擎，`TfLiteContext` 是总线。
 
-[interpreter.h:L325-L333](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/interpreter.h#L325-L333) —— `typed_tensor<T>(idx)`：先校验 `tensor->type == typeToTfLiteType<T>()`，类型匹配才 `reinterpret_cast` 返回。这是一个「带类型检查的窄化访问」，避免误把 int8 张量当 float 读。
+#### 4.2.4 代码实践
 
-#### 4.2.4 代码实践（源码阅读型 · 对照桌面端 Session）
+**实践目标**：通过阅读 [interpreter.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h) 的公有方法，复原一个最小推理程序的 API 序列，并验证「Interpreter 转交主子图」这一论断。
 
-1. **目标**：把 TFLite 的执行链路逐行对照桌面端 `DirectSession`，找出「减掉了什么」。
-2. **步骤**：
-   - 重读 [subgraph.cc:L1662](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L1662) 的 `InvokeImpl` 循环。
-   - 回忆 u1-l5 / u3-l2 讲的 `DirectSession::Run`：它要做「剪枝 → 放置 → Grappler 优化 → 分区 → 每设备一个 Executor → 跨设备 `_Send`/`_Recv`」。
-3. **需要观察的现象**：在 `InvokeImpl` 里搜索 `Placement`/`Partition`/`Rendezvous`/`_Send`——你会发现**一个都找不到**。这正是 TFLite 的「减法」：单设备、同步、不跨进程，所以整个调度基础设施都被删掉，只剩一个 for 循环。
-4. **预期结果**：写出下表（答案见小练习 Q3）。
+**操作步骤**：
 
-   | 概念 | DirectSession | TFLite Interpreter |
-   | --- | --- | --- |
-   | 放置（Placement） | 有，`Placer` 选设备 | 无（单设备） |
-   | 图优化 | 有，Grappler | 无（转换期已做） |
-   | 跨设备通信 | `_Send`/`_Recv` + Rendezvous | 无 |
-   | 执行单元 | Executor 异步调度 | for 循环同步逐 op |
+1. 在 `interpreter.h` 中找到这些方法并抄下它们的签名与文档前一句：构造函数、`AllocateTensors`、`Invoke`、`inputs`、`typed_input_tensor`、`ResizeInputTensor`、`ResetVariableTensors`。
+2. 对 `inputs()`、`tensor(int)`、`node_and_registration(int)` 三个方法，确认它们的方法体是否都形如 `return primary_subgraph().xxx(...)`，统计有多少个公有方法是「纯转发」。
+3. 找到私有成员 `context_`，阅读它的注释，回答：为什么 TFLite 选择用纯 C 的 `TfLiteContext` 而不是 C++ 类来存张量？
+
+**需要观察的现象**：你会看到大量「函数体只有一行、调用 `primary_subgraph()`」的公有方法，这印证了「Interpreter 是门面，Subgraph 是引擎」。
+
+**预期结果**：你能用 5~8 行 C++ 代码写出（伪代码即可）一个不含错误处理的完整推理骨架：构造 → `AllocateTensors` → `typed_input_tensor` 填值 → `Invoke` → `typed_output_tensor` 读值。
+
+**待本地验证**：纯源码阅读即可完成；若要编译验证，需 Bazel 构建 `//tensorflow/lite/examples/minimal:minimal`。
 
 #### 4.2.5 小练习与答案
 
-**Q1**：`Interpreter::Invoke` 为什么不直接遍历节点，而要转交给 `primary_subgraph().Invoke()`？
-**A**：因为图的真实结构（张量、节点、执行计划、内存规划）住在 `Subgraph` 里，`Interpreter` 只是「门面」。这种分层让一个 `Interpreter` 能挂多个子图（控制流、子函数），且 `SignatureRunner` 能复用同一套子图机制。
+**练习 1**：以下两段代码，哪段会在运行期出错？为什么？
+```cpp
+// A
+builder(&interpreter);
+interpreter->Invoke();
+```
+```cpp
+// B
+builder(&interpreter);
+interpreter->AllocateTensors();
+interpreter->Invoke();
+```
 
-**Q2**：注释说 `Interpreter` 非线程安全，那想在多线程并发推理怎么办？
-**A**：**每个线程一个 Interpreter 实例**（各自独立加载模型或共享只读 `FlatBufferModel`）。`Invoke` 会改写张量缓冲区，共享一个实例并发调用会数据竞争。
+**参考答案**：A 会出问题（很可能段错误或返回 `kTfLiteError`）。因为 `AllocateTensors()` 还没调用，张量缓冲尚未分配，`Invoke` 时算子读到的输入/输出指针无效。`Invoke` 的文档（[interpreter.h:584-590](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h#L584-L590)）就提示「interpreter 可能不在就绪态」。
 
-**Q3**：补全 4.2.4 的对照表。
-**A**：放置/优化/通信三栏 TFLite 全为「无」，执行单元栏 TFLite 是「for 循环同步逐 op」。原因即 4.1 的「减法」：单设备 + 转换期已优化。
+**练习 2**：一个模型用了 `while` 控制流，Interpreter 里会有几个 `Subgraph`？
+
+**参考答案**：至少 2 个：主子图（`subgraphs_[0]`）加上为循环体单独建的子图。控制流的每个分支/循环体在 TFLite 里会被编译成独立子图，运行时由控制流算子（`While`/`If`）在子图之间切换调用。这也是 `subgraphs_size()`、`subgraph(int)` 这些方法存在的理由。
+
+**练习 3**：`AllocateTensors()` 内部为什么需要调用每个算子的 `prepare` 回调？
+
+**参考答案**：因为输出形状往往依赖输入形状，只有当输入形状确定后，才能逐个算子推导（`prepare` 里算子声明自己的输出形状、申请持久缓冲），memory planner 才知道每个张量有多大、该在 arena 里怎么排布。这与桌面端「形状推导在建图期做」不同——TFLite 把它推迟到了 `AllocateTensors`，以支持动态形状。
 
 ---
 
-### 4.3 C 接口边界：common.h 与 c_api.h（模块 `lite.c.common`）
+### 4.3 lite.c.common 与 C API —— 运行时与算子之间的 C 边界
 
 #### 4.3.1 概念说明
 
-TFLite 的内核与 op 之间隔着一条 **纯 C 边界**。`common.h` 顶部说得直白：
+本模块覆盖两个「C 边界」，它们位于不同层次，容易混淆，先分清楚：
 
-> This file defines common C types and APIs for implementing operations, delegates and other constructs... the interface between the interpreter and the operations are C. The actual operations and delegates can be defined using C++.
+1. **内部 C 契约（`common.h`）**：定义 **运行时（Interpreter/Subgraph）** 与 **算子实现/委托** 之间怎么对话。核心是 `TfLiteContext`（运行时给算子的工具箱）、`TfLiteTensor`（张量）、`TfLiteNode`（一次算子调用）、`TfLiteRegistration`（一个算子的实现 = 一组 C 函数指针）。这些结构体 **不是** 不透明的——算子作者会直接读写它们的字段。`common.h` 的开头注释就说得很直白：「the interface between the interpreter and the operations are C」。
 
-为什么一定要 C？因为 C 结构 + 函数指针构成的 ABI 跨编译器/版本更稳定，便于：把 op 实现单独编译进插件 `.so`、把整套运行库以 `libtensorflowlite_c.so` 形态提供给各语言绑定（Python/Swift/Java）。这条边界上有两层 API：
+2. **外部稳定 ABI（`c_api.h`）**：定义 **应用程序** 与 **运行时库** 之间的边界。这里全部是 **不透明指针（opaque pointer）**——`TfLiteModel`、`TfLiteInterpreter`、`TfLiteTensor` 都只是 `typedef struct` 的前向声明，用户只能通过 `TfLiteXxxCreate/Delete/...` 一族函数操作，看不到内部字段。好处是 **ABI 稳定**：运行时 `.so` 内部怎么改，只要这些函数签名不变，调用方就不用重编。这正是「TF Lite in Play Services」能独立升级运行时而无需重新打包 App 的基础。
 
-- **`common.h`（内核契约）**：定义「op 长什么样」——`TfLiteRegistration`、`TfLiteTensor`、`TfLiteNode`、`TfLiteContext`。写自定义 op / delegate 时打交道的是它。
-- **`c_api.h`（稳定推理 API）**：定义「用户怎么跑模型」——`TfLiteModel`/`TfLiteInterpreter`/`TfLiteInterpreterInvoke`。它面向的是「只要能 `.tflite` 跑起来」的使用者。
+> 联想 u4-l4 讲过的桌面端 C API（`TF_Graph`/`TF_Session`/`TF_SessionRun` 也是不透明指针风格）。TFLite 的 `c_api.h` 是同一哲学在移动端的翻版，但更精简。
 
-#### 4.3.2 核心流程：一张图看清 C 边界上的数据流
+此外，`common.h` 还定义了贯穿全系统的 `TfLiteStatus`（不过这个枚举实际声明在被 `#include` 的 `c_api_types.h` 里）。
 
-```
-            ┌─────────────── c_api.h（稳定 ABI，面向用户）───────────────┐
-用户代码 ──► TfLiteModelCreateFromFile(".tflite")
-            TfLiteInterpreterCreate(model, options)  ──► 内部 new Interpreter
-            TfLiteInterpreterAllocateTensors(...)
-            TfLiteInterpreterInvoke(...)             ──► Interpreter::Invoke
-            └──────────────────────────────────────────────────────────┘
-                            │ 内部桥接
-            ┌─────────── common.h（内核契约，面向 op/delegate）──────────┐
-            TfLiteRegistration { init, prepare, invoke, ... }   ← op 注册
-            TfLiteContext      { tensors, ResizeTensor, ... }    ← 运行时能力
-            TfLiteTensor / TfLiteNode                            ← 数据与连线
-            └──────────────────────────────────────────────────┘
+#### 4.3.2 核心流程
+
+**算子如何被调用（内部契约视角）**：
+
+```text
+Invoke() 遍历 execution_plan:
+  for node_index in plan:
+      node, registration = context->GetNodeAndRegistration(node_index)
+      # node 是 TfLiteNode（含 inputs/outputs 的张量索引数组、user_data 等）
+      # registration 是 TfLiteRegistration（含 init/prepare/invoke 函数指针）
+      registration->invoke(context, node)   # ← 算子的真正计算
 ```
 
-两条贯穿全篇的契约：
+- 运行时通过 `TfLiteContext` 把「张量数组」「执行计划」「内存分配能力」暴露给算子；
+- 算子通过 `TfLiteNode->inputs/outputs`（`TfLiteIntArray*`，张量索引）拿到自己要读写哪些张量；
+- 算子再用 `context->GetTensor(ctx, idx)` 取到具体的 `TfLiteTensor`，对其 `data` 联合体读写真实数值。
 
-1. **op = 四个回调**：`init`（一次性初始化）、`prepare`（形状推导/分配输出，可多次）、`invoke`（真正计算）、`free`（释放）。这与桌面端「OpDef 声明 + OpKernel::Compute 实现」是同构的，只是用 C 函数指针表达。
-2. **状态码统一为 `TfLiteStatus`**：成功 `kTfLiteOk=0`，失败 `kTfLiteError=1`，另有 delegate 专用错误码。所有跨边界调用都用它。
+**外部 C API 的对象生命周期（ABI 视角）**，对应 [c_api.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h) 顶部那段 Usage：
+
+```text
+TfLiteModel* model = TfLiteModelCreateFromFile(path);    // 创建不透明模型
+options = TfLiteInterpreterOptionsCreate();
+TfLiteInterpreter* interp = TfLiteInterpreterCreate(model, options);  // 创建解释器
+TfLiteInterpreterAllocateTensors(interp);
+input = TfLiteInterpreterGetInputTensor(interp, 0);
+TfLiteTensorCopyFromBuffer(input, data, bytes);          // 填输入
+TfLiteInterpreterInvoke(interp);                         // 推理
+output = TfLiteInterpreterGetOutputTensor(interp, 0);
+TfLiteTensorCopyToBuffer(output, buf, bytes);            // 读输出
+TfLiteInterpreterDelete(interp);                         // 全部 Delete 释放
+```
+
+它与 C++ API 一一对应，只是把对象换成不透明指针、把方法换成 `TfLiteXxxYyy` 函数。
 
 #### 4.3.3 源码精读
 
-**状态码**（先看它，因为后面到处用）：
+**先看公共 shim 头如何转发到实现**——理解了这层就理解了 TFLite 的头文件分层：
 
-[c_api_types.h:L74-L120](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api_types.h#L74-L120) —— `TfLiteStatus` 枚举：`kTfLiteOk`/`kTfLiteError`/`kTfLiteDelegateError`/`kTfLiteApplicationError`/`kTfLiteUnresolvedOps`/`kTfLiteCancelled` 等。注释提醒「未来可能新增，别死依赖具体枚举值」。
+- [tensorflow/lite/c/common.h:28-33](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/c/common.h#L28-L33) —— 公共 `lite/c/common.h` 全部内容就是 `#include "tensorflow/lite/core/c/common.h"`。
 
-**张量 `TfLiteTensor`**——TFLite 的「数据载体」，比桌面端的 `Tensor` 朴素得多，就是一个 C 结构：
+- [tensorflow/lite/c/c_api.h:24-26](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/c/c_api.h#L24-L26) —— 公共 `lite/c/c_api.h` 同样只 `#include "tensorflow/lite/core/c/c_api.h"`，末尾还附了一段 `TfLiteRegistrationExternal → TfLiteOperator` 的向后兼容别名。
 
-[common.h:L548-L619](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L548-L619) —— `type`（元素类型）、`data`（`TfLitePtrUnion` 联合体指针）、`dims`（`TfLiteIntArray*` 形状）、`allocation_type`（内存来源）、`bytes`、`quantization` 等。
+**状态码 `TfLiteStatus`**（实际在 `c_api_types.h`）：
 
-[common.h:L415-L435](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L415-L435) —— `TfLitePtrUnion`：一个 union，`int8_t*`/`float*`/`int64_t*`… 共用同一块缓冲区，建议只访问 `.data`（`void*`）或用 `GetTensorData<T>`。
+- [tensorflow/lite/core/c/c_api_types.h:74-120](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api_types.h#L74-L120) —— `kTfLiteOk=0` 之外，还有 `kTfLiteDelegateError`、`kTfLiteApplicationError`、`kTfLiteUnresolvedOps`、`kTfLiteCancelled` 等。注意注释提醒「未来可能新增更细的状态值，应用不要依赖枚举值是固定集合」——这是 ABI 谨慎设计的体现。
 
-[common.h:L112-L128](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L112-L128) —— `TfLiteIntArray`：定长 int 数组（`size` + 柔性数组 `data[]`），用来存形状和输入输出索引。这种「自带 size 的紧凑数组」是为了避免依赖 STL，契合嵌入式场景。
+**张量 `TfLiteTensor`**（运行时存储张量的权威结构）：
 
-**节点 `TfLiteNode`**：
+- [tensorflow/lite/core/c/common.h:548-619](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L548-L619) —— 字段包括 `type`（`TfLiteType`）、`data`（`TfLitePtrUnion` 指针联合体）、`dims`（`TfLiteIntArray*` 形状）、`allocation_type`（内存来源）、`bytes`、`name`、`quantization`、`is_variable` 等。对照桌面端的 `Tensor`（C++ 类、由 `TensorBuffer` 持数据），这里是一个 **扁平的 C struct**，直接持有裸指针——为的是省内存、省间接跳转。
+  - `bytes` 字段的注释给出计算公式：\( \text{bytes} = \text{sizeof}(\text{元素类型}) \times \prod_i \text{dims}[i] \)。
 
-[common.h:L624-L661](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L624-L661) —— 一个节点的全部连线：`inputs`/`outputs`/`temporaries`/`intermediates`（都是 `TfLiteIntArray*` 张量索引）、`user_data`（init 返回的私有数据）、`builtin_data`（内置 op 参数）。
+- [tensorflow/lite/core/c/common.h:410-435](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L410-L435) —— `TfLitePtrUnion`：一个指针联合体，按 `type` 取 `.f`/`.i32`/`.int8`/`.data`(void*) 等。注释提醒优先用 `GetTensorData<T>(tensor)` 而非直接访问成员。
 
-**op 注册 `TfLiteRegistration`**——本讲最重要的结构：
+**形状数组 `TfLiteIntArray`**——一个 C 风格的「柔性数组」技巧：
 
-[common.h:L1184-L1281](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1184-L1281) —— 定义一个 op 的实现。四个回调的签名与职责：
+- [tensorflow/lite/core/c/common.h:110-128](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L110-L128) —— `int size; int data[];`，即「长度 + 内联数据」一次 `malloc`，避免二次间接寻址。`dims`、节点的 `inputs/outputs` 都用它。这是移动端省内存、省指针跳转的典型手法。
 
-[common.h:L1210](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1210) `init`：一次性初始化，返回 `void*` 存进 `node->user_data`。
+**节点 `TfLiteNode`**（一次算子调用的上下文）：
 
-[common.h:L1222](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1222) `prepare`：输入尺寸变化时被调用，可在此 `context->ResizeTensor()` 申请输出。
+- [tensorflow/lite/core/c/common.h:621-661](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L621-L661) —— 含 `inputs/outputs/intermediates/temporaries`（都是 `TfLiteIntArray*`，即张量索引数组）、`user_data`（算子在 `init` 里返回的私有状态）、`builtin_data`（内置算子的参数，如卷积的 stride）、`delegate`、`might_have_side_effect`。注意它 **只描述连通关系与私有数据，不含算子类型**——算子类型在 `TfLiteRegistration` 里。
 
-[common.h:L1228](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L1228) `invoke`：执行计算，读 `node->inputs`、写 `node->outputs`。
+**算子实现 `TfLiteRegistration`**（一个算子 = 一组 C 函数指针）：
 
-> 和桌面端 `OpKernel` 的对照：`init`≈构造、`prepare`≈`Compute` 前的形状推导、`invoke`≈`Compute`。区别是 TFLite 把「形状推导」和「计算」拆成两个独立回调，且都是 C 函数指针。
+- [tensorflow/lite/core/c/common.h:1184-1281](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1184-L1281) —— 这是本模块最重要的一段。结构体里挂了四个关键函数指针：
+  - [common.h:1210-1210](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1210-L1210) `init`：每个算子节点 **只调用一次**，反序列化参数、做一次性分配，返回 `user_data`；
+  - [common.h:1222-1222](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1222-L1222) `prepare`：输入形状变化时调用，算子据此声明输出形状、申请持久缓冲（对应 `AllocateTensors`）；
+  - [common.h:1228-1228](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1228-L1228) `invoke`：真正的计算，读 `node->inputs` 写 `node->outputs`（对应 `Invoke`）；
+  - 还有 `free`、`profiling_string`、`builtin_code`、`custom_name`、`version` 等。
 
-**上下文 `TfLiteContext`**——op 访问运行时能力的「总线」：
+  这就是桌面端 `OpKernel::Compute` 的 TFLite 等价物，只不过从 C++ 虚函数换成了 C 函数指针，从而可以纯 C 编译、跨语言、跨 ABI。
 
-[common.h:L871-L1104](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L871-L1104) —— 里面既有数据（`tensors` 数组、`tensors_size`、`recommended_num_threads`），也有能力（函数指针：`ResizeTensor`、`AddTensors`、`GetTensor`、`AllocatePersistentBuffer`、`RequestScratchBufferInArena`、`ReportError`…）。它的注释（[L858-L870](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/common.h#L858-L870)）点明：由运行时创建、传给 op 的回调，作用相当于桌面端的 `OpKernelContext`。
+**运行时总线 `TfLiteContext`**：
 
-**稳定推理 C API `c_api.h`**——面向「跑模型」的用户：
+- [tensorflow/lite/core/c/common.h:858-871](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L858-L871) —— 文档说它是「由 TF Lite 运行时创建、传给算子函数指针的结构体」，给算子提供张量访问、内存分配、错误上报等能力。
 
-[c_api.h:L109-L115](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L109-L115) —— 三个不透明类型：`TfLiteModel`、`TfLiteInterpreterOptions`、`TfLiteInterpreter`。对外只暴露指针，内部布局可自由演进——这就是「稳定 ABI」的含义（与 u4-l4 的 `c_api.h` 不透明指针风格一致）。
+- [tensorflow/lite/core/c/common.h:871-923](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L871-L923) —— 字段 `tensors_size`、`tensors`（张量数组首地址）、`impl_`（指向 C++ `Subgraph` 的不透明指针）、以及一堆函数指针：`ResizeTensor`、`ReportError`、`AddTensors`、`GetNodeAndRegistration`、`AllocatePersistentBuffer`、`RequestScratchBufferInArena`、`GetTensor`、`GetEvalTensor` 等。换句话说，算子要动运行时的任何东西，都得通过 `context` 上的函数指针「走正门」。
 
-[c_api.h:L47-L77](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L47-L77) —— 官方给出的 C API 标准用法：`TfLiteModelCreateFromFile` → `TfLiteInterpreterOptionsCreate` → `TfLiteInterpreterCreate` → `AllocateTensors` → `TfLiteTensorCopyFromBuffer` 填输入 → `TfLiteInterpreterInvoke` → `TfLiteTensorCopyToBuffer` 取输出 → 一系列 `Delete`。
+**错误检查宏**——算子里最常见的写法：
 
-关键函数一一对应 C++ 流水线：
+- [tensorflow/lite/core/c/common.h:228-235](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L228-L235) —— `TF_LITE_ENSURE(context, a)`：条件不成立就记日志并 `return kTfLiteError`。它取代了桌面端的 `OP_REQUIRES`，是 TFLite 算子里「自给自足的错误检查」（见文件顶部摘要）。
 
-[c_api.h:L201-L202](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L201-L202) `TfLiteModelCreateFromFile`：从文件加载（对应 ①）。
+**外部 C API 的不透明类型**（[c_api.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h)）：
 
-[c_api.h:L312-L313](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L312-L313) `TfLiteInterpreterCreate`：建解释器（对应 ②）。
+- [tensorflow/lite/core/c/c_api.h:108-119](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L108-L119) —— `TfLiteModel`、`TfLiteInterpreterOptions`、`TfLiteInterpreter`、`TfLiteTensor` 全是 `typedef struct Xxx Xxx;` 的前向声明——字段不可见，这就是「不透明」。
 
-[c_api.h:L362-L363](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L362-L363) `TfLiteInterpreterAllocateTensors`：分配张量（对应 ③）。
+- [tensorflow/lite/core/c/c_api.h:47-77](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L47-L77) —— 顶部 Usage 给出完整生命周期，与 4.3.2 的伪代码一致。
 
-[c_api.h:L395-L396](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L395-L396) `TfLiteInterpreterInvoke`：推理（对应 ⑤）。
+- [tensorflow/lite/core/c/c_api.h:201-202](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L201-L202) —— `TfLiteModelCreateFromFile`：从文件路径创建不透明模型。
 
-[c_api.h:L640-L641](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L640-L641) `TfLiteTensorCopyFromBuffer`：往输入张量拷数据（对应 ④）。
+- [tensorflow/lite/core/c/c_api.h:312-313](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L312-L313) —— `TfLiteInterpreterCreate(model, options)`：创建解释器，对应 C++ 的 `InterpreterBuilder(...)(&interpreter)`。
 
-**C API 的实现只是薄桥**。以 `Invoke` 为例：
+- [tensorflow/lite/core/c/c_api.h:362-363](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L362-L363) 与 [395-396](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L395-L396) —— `TfLiteInterpreterAllocateTensors` 与 `TfLiteInterpreterInvoke`，与 C++ 方法同名同义。
 
-[c_api.cc:L205-L209](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.cc#L205-L209) —— `TfLiteInterpreterAllocateTensors` 与 `TfLiteInterpreterInvoke` 各自只是取出内部 `Interpreter*` 转调 `AllocateTensors()`/`Invoke()`。C API 不做计算，只做「翻译与转发」——这和 u4-l4 讲的「Python→pywrap→C API→C++ kernel，C 层只翻译」如出一辙。
+- [tensorflow/lite/core/c/c_api.h:640-647](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h#L640-L647) —— `TfLiteTensorCopyFromBuffer` / `TfLiteTensorCopyToBuffer`：填输入/读输出的标准手段，要求 `size == TfLiteTensorByteSize(tensor)`。注意 C API 提倡 **拷贝**（而非像 C++ API 那样直接拿 `typed_input_tensor` 裸指针），是因为不透明边界下用户拿不到稳定裸指针。
 
-#### 4.3.4 代码实践（可运行 · 待本地验证）
+#### 4.3.4 代码实践
 
-下面这段「最小 C API 推理程序」直接改自 [c_api.h:L47-L77](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.h#L47-L77) 的官方示例，是上面五步流水线的 C 语言版本。
+**实践目标**：通过对照「C++ API」与「C API」两套等价调用，体会「不透明指针」边界的设计。
 
-> 标注为**示例代码**——它不是仓库里现成的文件，你需要自己创建并链接 `libtensorflowlite_c`。
+**操作步骤**：
 
-```c
-// 示例代码：min_tflite.c —— 最小 TFLite C API 推理
-#include <stdio.h>
-#include "tensorflow/lite/c/c_api.h"   // 经 shim 转发到 core/c/c_api.h
+1. 在 [c_api.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/c_api.h) 里找出与下列 C++ 调用一一对应的 C 函数，填入下表（左列 C++，右列写 C 函数名）：
 
-int main(void) {
-  // ① 加载模型（mmap 只读，model_data 必须比 interpreter 活得久）
-  TfLiteModel* model = TfLiteModelCreateFromFile("model.tflite");
+   | C++ API | 对应 C API 函数 |
+   |---|---|
+   | `FlatBufferModel::BuildFromFile` | ? |
+   | `InterpreterBuilder(...)(&interp)` | ? |
+   | `interpreter->AllocateTensors()` | ? |
+   | `interpreter->typed_input_tensor<float>(0)` 写入 | ?（提示：填输入用什么） |
+   | `interpreter->Invoke()` | ? |
+   | `interpreter->typed_output_tensor<float>(0)` 读取 | ? |
 
-  // ② 建解释器 + 选项
-  TfLiteInterpreterOptions* opt = TfLiteInterpreterOptionsCreate();
-  TfLiteInterpreterOptionsSetNumThreads(opt, 2);
-  TfLiteInterpreter* interp = TfLiteInterpreterCreate(model, opt);
+2. 阅读 [common.h:1184-1281](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/c/common.h#L1184-L1281) 的 `TfLiteRegistration`，回答：桌面端 `OpKernel` 子类要 override 的 `Compute`，在 TFLite 里对应哪个函数指针？这个改变带来什么好处？
 
-  // ③ 分配张量（依据输入形状做内存规划）
-  TfLiteInterpreterAllocateTensors(interp);
+**需要观察的现象**：C API 几乎是 C++ API 的「一一翻译」，但所有对象都换成了不透明指针，所有方法都换成了全局函数。
 
-  // ④ 填输入（把一段 float 缓冲拷进第 0 个输入张量）
-  TfLiteTensor* in = TfLiteInterpreterGetInputTensor(interp, 0);
-  float input_buf[/*输入元素数*/ 1];   // 按模型实际形状填
-  TfLiteTensorCopyFromBuffer(in, input_buf, sizeof(input_buf));
+**预期结果**：你能给出填好的表格，并说出「不透明指针 + 全局函数」让运行时库 `.so` 可以独立升级而不破坏调用方。
 
-  // ⑤ 推理
-  TfLiteInterpreterInvoke(interp);
-
-  // 取输出
-  const TfLiteTensor* out = TfLiteInterpreterGetOutputTensor(interp, 0);
-  float output_buf[1];
-  TfLiteTensorCopyToBuffer(out, output_buf, sizeof(output_buf));
-  printf("result = %f\n", output_buf[0]);
-
-  // 释放（顺序：先 interpreter/options，最后 model）
-  TfLiteInterpreterDelete(interp);
-  TfLiteInterpreterOptionsDelete(opt);
-  TfLiteModelDelete(model);
-  return 0;
-}
-```
-
-1. **实践目标**：用 C API 复现「加载→建图→分配→填输入→Invoke」五步，验证它与 C++ `Interpreter` 是同一套机制的两个面。
-2. **操作步骤**：
-   - 用 Bazel 构建 C 运行库（具体 target 与编译选项请参考 `tensorflow/lite/c/BUILD`，**待本地验证**）。
-   - 准备一个 `.tflite` 模型（可用 `tf.lite.TFLiteConverter` 转换任意 Keras 模型得到）。
-   - 按模型真实输入形状调整 `input_buf` 大小与 `TfLiteInterpreterResizeInputTensor`（若输入维度可变）。
-3. **观察现象**：删掉第 ③ 步 `AllocateTensors` 直接 `Invoke`，预期返回非 `kTfLiteOk`（解释器未就绪）；删掉第 ④ 步填输入，`Invoke` 仍可能成功但结果无意义——说明「分配」是硬前置、「填输入」是数据前提。
-4. **预期结果**：程序打印出一个浮点结果；若无法本地编译运行，明确标注「待本地验证」，并改为阅读 `c_api.cc` 确认每个 C 函数确实转调了同名 C++ 方法。
-
-> **无法运行时的退路（源码阅读型）**：打开 [c_api.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/c/c_api.cc) 第 96、168、205、209 行，确认 `TfLiteModelCreateFromFile`/`TfLiteInterpreterCreate`/`AllocateTensors`/`Invoke` 四个 C 函数分别桥接到 `FlatBufferModel` 与 `Interpreter` 的 C++ 方法——这同样能完成「五步流水线」的追踪目标。
+**待本地验证**：纯源码阅读即可完成，无需运行。
 
 #### 4.3.5 小练习与答案
 
-**Q1**：`TfLiteRegistration` 的 `prepare` 和 `invoke` 为什么要分成两个回调，而不是像 `OpKernel::Compute` 那样合一？
-**A**：分开后，**形状推导/输出分配**（`prepare`）可以在真正推理前批量、甚至提前完成，便于内存规划（arena 复用）；而 `invoke` 只做纯计算。合并会导致每次推理都重复算形状、无法静态规划内存——这对内存紧张的嵌入式设备是致命的。
+**练习 1**：`TfLiteTensor` 和桌面端的 `tensorflow::Tensor` 在「如何持有数据」上有什么本质区别？
 
-**Q2**：`c_api.h` 里的 `TfLiteModel`/`TfLiteInterpreter` 为什么都是「不透明指针」而不是暴露字段的结构？
-**A**：为了 **ABI 稳定**。字段隐藏后，TFLite 运行库可以在版本升级时自由调整内部类的内存布局，而只要 C 函数签名不变，旧的调用方代码与旧 `.so` 仍能工作。这正是「libtensorflowlite_c.so 作为稳定分发物」的前提。
+**参考答案**：桌面端 `Tensor` 是 C++ 对象，内部通过引用计数的 `TensorBuffer` 间接持有数据，有分配器抽象；`TfLiteTensor` 是一个 **扁平 C struct**，直接用 `TfLitePtrUnion data` 这个裸指针联合体指向缓冲（`allocation_type` 标明来源：mmap 的权重、arena 分配的临时区、动态分配等）。扁平结构省去了虚函数与间接跳转，是面向移动端体积与缓存友好的设计。
 
-**Q3**：`TfLitePtrUnion` 里为什么建议只访问 `.data` 而不是 `.f`/`.i32`？
-**A**：直接访问具名成员会绕过类型检查，且部分成员已标记 deprecated。官方推荐用 `GetTensorData<T>(tensor)` 模板，它内部依据 `tensor->type` 做了安全转换，等价于 `Interpreter::typed_tensor<T>` 的 C++ 版本。
+**练习 2**：`TfLiteRegistration` 里的 `init` 和 `prepare` 都能分配内存，它们的区别是什么？
 
----
+**参考答案**：`init` 在节点生命周期内 **只调一次**，适合与张量尺寸无关的一次性分配（解析参数）；它分配的是「持久缓冲」，可用 `context->AllocatePersistentBuffer`。`prepare` 在 **输入形状变化时** 被调用（即每次 `AllocateTensors` 相关流程），用于声明输出形状、按当前形状做布局相关准备。简单说：`init` 管「不变的」，`prepare` 管「随形状变的」。
+
+**练习 3**：为什么 `c_api.h` 提倡用 `TfLiteTensorCopyFromBuffer` 拷贝数据，而 C++ API 直接给 `typed_input_tensor` 裸指针？
+
+**参考答案**：因为 C API 把 `TfLiteTensor` 做成不透明，用户拿不到稳定的内部缓冲地址（且文档多处警告 `Invoke`/`AllocateTensors` 等操作可能使指针失效），所以提供「按字节拷贝」的函数作为唯一安全的数据通路。C++ API 用户在同一编译单元内，可以接受「指针不稳、用完即弃」的契约，故直接给裸指针更高效。
 
 ## 5. 综合实践
 
-把本讲的三条主线串起来，完成下面这个「端到端追踪」任务。
+**任务**：把本讲三节串起来——对照 [interpreter.h](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/core/interpreter.h)，说明一个 TFLite 模型从加载到推理经历的关键步骤，并把它与桌面端 `Session` 执行（u3-l2）逐项对比。
 
-**任务**：选定一个真实示例 [label_image.cc](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/examples/label_image/label_image.cc) 的 `RunInference`，画一张「从 `.tflite` 文件到一次 `Invoke` 返回」的**完整调用链时序图**，要求：
+**步骤**：
 
-1. 在图上标注 **C++ 层**（`FlatBufferModel` → `InterpreterBuilder` → `Interpreter` → `Subgraph` → `registration->invoke`）与 **C 边界层**（`TfLiteRegistration` 的四个回调、`TfLiteContext` 提供的能力）的衔接点。
-2. 用三种颜色/标记区分五步流水线（加载/建图/分配/填输入/推理）。
-3. 在图旁写一段「与 `DirectSession::Run` 的差异说明」，至少列出三条 TFLite **没有**的步骤（提示：放置、Grappler、跨设备通信、异步 Executor）。
-4. 最后回答一个开放问题：如果某个 op 没有被 `OpResolver` 注册（即「unresolved op」），追踪到 [subgraph.cc:L1406-L1424](https://github.com/tensorflow/tensorflow/blob/6a6ae5d9d29b922f3f16ef297b33de06ba0c5131/tensorflow/lite/core/subgraph.cc#L1406-L1424) 的 `OpPrepare`，运行时会返回哪个 `TfLiteStatus`？这和桌面端「op 未注册」的表现有何不同？
+1. **画出 TFLite 推理时序**。以 [minimal.cc:49-74](https://github.com/tensorflow/tensorflow/blob/44d7a2dcda991165f62cdd9633b7c6421610cdda/tensorflow/lite/examples/minimal/minimal.cc#L49-L74) 为准，列出 6 个阶段（加载模型、装配 Interpreter、分配张量、填输入、Invoke、读输出），并为每个阶段注明调用的方法名、发生在「构建期」还是「运行期」。
 
-**验收标准**：你的时序图能让一个没读过 TFLite 源码的人，仅凭图与差异说明，就说出「TFLite 推理为何比桌面端 Session 简单、简单在哪」。
+2. **填对比表**。按下表，对比 TFLite Interpreter 与桌面端 `DirectSession`：
 
----
+   | 维度 | 桌面端 DirectSession（u3-l2） | TFLite Interpreter（本讲） |
+   |---|---|---|
+   | 图表示 | ? | 扁平 `execution_plan`（节点索引数组） |
+   | 设备 | 多设备，需 Placement/Partition | ? |
+   | 每次执行的剪枝 | 按 fetches 重新剪枝 | ? |
+   | 算子分发 | `OpKernel::Compute`（C++ 虚函数） | ? |
+   | 跨设备数据传递 | ? | 无（单设备） |
+   | 内存 | BFCAllocator 等按需分配 | ? |
+   | 模型格式 | ? | FlatBuffer（mmap 零拷贝） |
+   | 算子注册 | 全局 OpRegistry/KernelRegistry | ? |
+   | 线程模型 | 异步 Executor | ? |
+
+3. **回答一个理解题**：为什么 TFLite 把「形状推导 + 内存规划」推迟到 `AllocateTensors()`，而不是像桌面端那样在建图期就完成？请结合「移动端需要支持动态输入形状」与「`prepare` 回调」来回答（参考 4.2.5 练习 3）。
+
+**预期结果**：你得到一份填满的时序图与对比表。表的关键答案（自测用）：图表示=扁平执行计划；设备=单设备无放置；剪枝=一次性规划好整图、Invoke 不再剪枝；算子分发=`TfLiteRegistration::invoke` C 函数指针；跨设备=桌面端 `_Send`/`_Recv`+Rendezvous；内存=arena+静态 memory planner；模型格式=桌面端 GraphDef/SavedModel(protobuf)；注册=`OpResolver` 显式查找表；线程=同步、单 Interpreter 非线程安全（并行靠 delegate）。
+
+**待本地验证**：本实践为源码阅读型，全部可在阅读源码后完成；若要实跑，需用 Bazel 构建 minimal 示例并准备一个 `.tflite` 文件。
 
 ## 6. 本讲小结
 
-- TFLite 是面向**移动/嵌入式**的轻量推理方案，目标是「低延迟、小体积、可硬件加速」，只做推理、不做训练。
-- 推理五步流水线：**加载（`FlatBufferModel`）→ 建图（`InterpreterBuilder`+`OpResolver`）→ 分配（`AllocateTensors`）→ 填输入 → `Invoke`**。
-- `Interpreter` 是 `DirectSession` 的精简对应物：多数方法只是转交给主 `Subgraph`；`Invoke` 的本质是 `Subgraph::InvokeImpl` 里**一个 for 循环按 `execution_plan_` 逐个调 `registration->invoke`**，没有放置、没有 Grappler、没有跨设备通信。
-- op 的契约是纯 C 的 `TfLiteRegistration`（`init`/`prepare`/`invoke`/`free` 四回调），数据载体是朴素的 `TfLiteTensor`，运行时能力通过 `TfLiteContext` 这条「总线」传给 op——对应桌面端的 `OpKernel`/`Tensor`/`OpKernelContext`。
-- `c_api.h` 提供稳定 ABI（不透明指针 + `TfLite*` 函数族），其实现 `c_api.cc` 只是到 `Interpreter` 的薄桥；状态码统一为 `TfLiteStatus`。
+- TFLite 是为移动/嵌入式 **单设备推理** 设计的轻量运行时，主动放弃了桌面端的多设备放置、图分区、异步 Executor、全局注册表，换来小体积、低内存、mmap 零拷贝。
+- 推理由「四件套」协作：`FlatBufferModel`（mmap 只读模型）→ `InterpreterBuilder` + `OpResolver`（解析算子、装配）→ `Interpreter`（`AllocateTensors` 规划内存 → `Invoke` 按计划遍历算子）→ 读输出。
+- `Interpreter` 是 **门面**，真正存张量、遍历算子的是它持有的 `Subgraph`；大量公有方法只是转发给 `primary_subgraph()`。Interpreter 自身的核心状态是纯 C 的 `TfLiteContext* context_`。
+- `AllocateTensors()` 是分水岭（昂贵、按需重做），`Invoke()` 是廉价可重复的纯遍历；二者之间填输入、之后读输出。
+- `common.h` 定义运行时↔算子的 **内部 C 契约**：`TfLiteTensor`（扁平张量）、`TfLiteNode`（一次调用）、`TfLiteContext`（运行时总线）、`TfLiteRegistration`（算子=一组 C 函数指针 init/prepare/invoke）；`c_api.h` 定义应用↔运行时的 **外部不透明 ABI 边界**。两者都是「C 当边界」，但层次不同。
+- 与桌面端 `DirectSession` 的本质差别：单设备无放置、扁平执行计划、C 函数指针分发、arena 静态内存规划、FlatBuffer 零拷贝、`OpResolver` 显式注册、同步单线程。
 
 ## 7. 下一步学习建议
 
-- **u8-l2 FlatBuffer 模型格式与 OpResolver**：本讲把加载当成黑盒，下一讲拆开 `.tflite` 的 FlatBuffer 结构，并讲清 `OpResolver`/`MutableOpResolver` 如何把算子名映射到 4.3 里的 `TfLiteRegistration`，以及 `flatbuffer_conversions` 如何把 FlatBuffer 节点翻译成 `TfLiteNode`。
-- **u8-l3 TFLite 委托机制 delegates**：本讲提到 `ModifyGraphWithDelegate` 会改写图。下一讲讲清 delegate 如何**分区**子图、把可加速部分卸载到 GPU/NNAPI/XNNPACK，以及失败时如何回退到 CPU kernel。
-- 想加深「C 边界」理解的读者，可先读 u4-l4（C API 与 pywrap）做对照——桌面端 `c_api.h` 与 TFLite `c_api.h` 是同一套「不透明指针 + 稳定 ABI」哲学的两次应用。
+- **下一讲 u8-l2「FlatBuffer 模型格式与 OpResolver」** 会钻进本讲只是「点名」的两个对象：深入 FlatBuffer 的 schema 与零拷贝读取、以及 `MutableOpResolver` 如何把 op code 注册到具体 kernel。建议先重读本讲的 4.1.3 与 4.3.3 中关于 `OpResolver`/`TfLiteRegistration` 的部分作为铺垫。
+- **u8-l3「TFLite 委托机制 delegates」** 会解释本讲提到的「并行交给 delegate」是怎么回事——届时你会理解 `Interpreter::ModifyGraphWithDelegate` 如何把子图分区卸载到 GPU/NNAPI/XNNPACK，以及失败时如何回退到 CPU kernel。
+- 若你想横向对照，建议回看 **u3-l2（DirectSession 执行链路）** 与 **u6-l2（BFCAllocator）**，把本讲对比表里的每一行都在桌面端那一侧找到对应的源码依据。
+- 进阶可阅读 `tensorflow/lite/core/subgraph.h`（Interpreter 的真正引擎）与 `tensorflow/lite/memory_planner.h`（arena 静态规划），它们是本讲有意留到后续的「引擎内部」。
