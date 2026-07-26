@@ -1,0 +1,471 @@
+# 解码注意力与 Split-KV
+
+> 承接 u6-l1。u6-l1 讲的是 **prefill（预填充）** 阶段的 Flash 多头注意力：query 有很多行，沿 K 维分块、用在线 softmax 把 \(O(N^2)\) 显存压成 \(O(N)\)。本讲把镜头转向 **decode（解码/自回归生成）** 阶段：每步只生成一个 token，query 只有一行。这个看似更简单的小问题，却会暴露一个全新的并行度瓶颈，并引出 TileGym 里一对配合默契的内核——`fmha_decode`（分块算）与 `splitk_reduce`（合并结果）。
+
+## 1. 本讲目标
+
+学完本讲你应当能够：
+
+1. 说清楚 **decode 阶段为什么天然并行度不足**，以及为什么需要 **Split-KV** 来补足并行度。
+2. 读懂 cuTile 版 `fmha_decode` 的 **两阶段架构**：先用一个解码内核沿 KV 切分、各算各的，再交给 `splitk_reduce` 归约。
+3. 理解中间结果张量 `Att_Mid_Out [B,H_q,NUM_KV_SPLITS,D]` 与 `LSE_Out [B,H_q,NUM_KV_SPLITS]` 各自代表什么、形状从何而来。
+4. 掌握 **LSE（log-sum-exp）合并** 的数学原理：如何把多个「部分输出 + 部分 LSE」无损地融合成最终结果。
+5. 能在源码里追踪一条完整的 `tilegym.ops.fmha_decode(q,k,v,sm_scale)` 调用链。
+
+## 2. 前置知识
+
+本讲默认你已掌握 u6-l1 的内容。为方便回顾，先复述几个关键术语：
+
+- **prefill vs decode**：LLM 推理分两阶段。prefill 一次性处理整段 prompt，query 序列长度 \(S\) 很大；decode 逐 token 生成，每步 query 长度恒为 1。
+- **在线 softmax（online softmax）**：沿 K 维分块滚动，每个块更新行最大值 \(m\)、行求和 \(l\) 与累加器 `acc`，循环结束再除以 \(l\)。详见 u6-l1。
+- **exp2 / log2 快速路径**：把 softmax 的底数从 \(e\) 换成 2（`ct.exp2`/`ct.log2`），为此把 scale 预乘 \(1/\ln 2\)。u6-l1 已说明。
+- **GQA（Grouped Query Attention）**：query 头数 \(H_q\) 多于 KV 头数 \(H_{kv}\)，多个 query 头共享同一组 K/V，比值 `num_q_head_per_kv = H_q // H_kv` 即「group size」。
+- **CTA / SM / grid**：GPU 上一个线程块（CTA / program）跑在一个 SM 上；grid 是启动的 CTA 总数。`ct.bid(i)` 是当前 CTA 在第 i 维的编号，`ct.num_blocks(i)` 是该维 CTA 总数（见 u3-l1）。
+- **`@register_impl` / `@dispatch`**：ops.py 里 `@dispatch("fmha_decode")` 只声明统一签名（stub，抛 `NotImplementedError`）；后端用 `@register_impl("fmha_decode", backend="cutile")` 把实现挂进全局注册表 `_REGISTRY`，由 wrapper 在运行时按当前后端路由（见 u2-l2）。
+
+> 还需要一个新的直觉：**GPU 的算力只有在「启动足够多的 CTA 把 SM 填满」时才发挥得出来**。一块 H100 有 132 个 SM，如果只启动 32 个 CTA，就有 100 个 SM 在空转。本讲的故事，就是 decode 阶段如何从「喂不饱 SM」变成「喂饱 SM」。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+| --- | --- |
+| [src/tilegym/ops/cutile/flash_decode.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py) | cuTile 版 **单 token 解码注意力**。含解码内核 `_attention_decode_kernel_grouped`、可复用的计算体 `attention_decode_kernel_grouped_impl`、autograd 封装 `_AttentionDecodeFunction`，以及注册到 `"fmha_decode"` 的 `fmha_decode`。它产出**中间的部分输出与部分 LSE**。 |
+| [src/tilegym/ops/cutile/splitk_reduce.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py) | cuTile 版 **跨 split 归约内核** `_splitk_reduce_kernel` 与注册到 `"splitk_reduce"` 的 `splitk_reduce`。把上一步的多个部分结果按 LSE 合并成最终输出。 |
+| [src/tilegym/ops/ops.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/ops.py) | 统一算子接口：`fmha_decode`（L349）与 `splitk_reduce`（L526）两个 `@dispatch` stub。 |
+| [src/tilegym/ops/attn_interface.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/attn_interface.py) | 面向 HF 集成的工厂式接口，内部把 decode 调用转发给 `tilegym.ops.fmha_decode`（L101-103）。 |
+| [tests/ops/test_flash_decode.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/tests/ops/test_flash_decode.py) | `fmha_decode` 的正确性与性能测试，参数化 seq_len / group_size，参考实现用 `scaled_dot_product_attention(enable_gqa=True)`。 |
+| [tests/ops/test_splitk_reduce.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/tests/ops/test_splitk_reduce.py) | `splitk_reduce` 的独立测试，用纯 PyTorch 实现的 LSE 合并参考对照。 |
+
+调用链全景：
+
+```
+tilegym.ops.fmha_decode(q,k,v,sm_scale)        # ops.py 的 @dispatch stub
+  └─ wrapper 查 _REGISTRY → cutile 的 fmha_decode   # flash_decode.py L395
+       └─ attention_decode = _AttentionDecodeFunction.apply   # L392
+            └─ _AttentionDecodeFunction.forward             # L253
+                 ├─ ① ct.launch(_attention_decode_kernel_grouped, grid=(B,H_kv,NUM_KV_SPLITS))
+                 └─ ② splitk_reduce(Att_Mid_Out, LSE_Out, O, seq_len)   # L383
+```
+
+记住这条「**先切分启动、再归约合并**」的两段式骨架，后面四个最小模块都是在拆解它。
+
+## 4. 核心概念与源码讲解
+
+### 4.1 单 token 解码：decode 的并行度困境
+
+#### 4.1.1 概念说明
+
+prefill 时，query 有 \(S\) 行，一个 CTA 负责一组 query 行，仅靠 query 维度就能启动大量 CTA 把 SM 填满（见 u6-l1 的 grid 设计）。
+
+decode 时，query 只有一行（\(S=1\)）。此时能并行的「天然任务」只有 **batch × query 头数** \(= B \cdot H_q\) 个。对一个典型的单请求推理 \(B=1, H_q=32\)，只有 32 个任务——远小于一块 GPU 的 SM 数（H100 有 132 个，B200 更多）。**绝大多数 SM 在空转**，解码内核因此严重「吃不饱」。
+
+这就是 decode 的并行度困境：计算量小（每步只算一个 token 对全部 KV 的注意力），但 KV 序列长度 \(S_{kv}\) 可能很长（数千到数万），单 CTA 串行走完整个 KV 维度既慢又浪费硬件。
+
+#### 4.1.2 核心流程
+
+解决思路叫 **Split-K（沿归约维 K 切分并行）**，在注意力语境下即 **Split-KV**：
+
+1. 把长 KV 序列沿序列维切成 `NUM_KV_SPLITS` 段，每段长 `KV_LEN_PER_SPLIT`。
+2. 给每一段分配一个独立 CTA，各 CTA **并行**地对自己那段 KV 做在线 softmax，得到一个**部分输出**和一个**部分统计量 LSE**。
+3. 于是并行任务数从 \(B \cdot H_q\) 暴涨到 \(B \cdot H_{kv} \cdot \text{NUM\_KV\_SPLITS}\)（注意切分是按 KV 头组织的，下文解释），足以填满 SM。
+4. 代价：多了一份**归约步骤**，把所有部分结果合并成最终输出——这正是 `splitk_reduce` 干的事（4.4 节）。
+
+> 关键直觉：Split-KV 是用 **「多启动几个 CTA 分摊 KV 长度」** 换 **「SM 利用率」**，再用 **「一次轻量归约」** 把它们缝合。这是经典的 *map-reduce* 思想在注意力里的体现。
+
+#### 4.1.3 源码精读
+
+autograd 封装 `_AttentionDecodeFunction.forward` 在启动解码内核时，grid 的第三维就是 split 数，显式体现了「按 split 扩并行」的设计：
+
+[flash_decode.py:270-291](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L270-L291) 读取维度并计算 split 数。其中 `kv_len_per_split is None` 的分支是「自动选 split」：
+
+[flash_decode.py:281-291](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L281-L291)：
+
+```python
+NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+NUM_KV_SPLITS = max(1, NUM_SMS // (batch_size * num_kv_heads))
+TILE_SIZE = max(TILE_N, next_power_of_2((seq_len + NUM_KV_SPLITS - 1) // NUM_KV_SPLITS))
+NUM_KV_SPLITS = (seq_len + TILE_SIZE - 1) // TILE_SIZE
+```
+
+这段逻辑的意图就是「**让总 CTA 数 ≈ SM 数**」：
+
+- 先按 `NUM_SMS // (B·H_kv)` 估一个 split 数，使得 \(B \cdot H_{kv} \cdot \text{NUM\_KV\_SPLITS} \approx \text{NUM\_SMS}\)。
+- 再把每段长度 `TILE_SIZE` 取成「≥128 的 2 的幂」（`TILE_N=128` 是 KV tile 的最小粒度，`next_power_of_2` 见 utils）。
+- 最后用取整后的 `TILE_SIZE` 反推精确的 `NUM_KV_SPLITS`。
+
+而 grid 本身把 split 放在第三维（[flash_decode.py:351](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L351)）：
+
+```python
+grid = (batch_size, num_kv_heads, NUM_KV_SPLITS)
+```
+
+也就是说，**网格大小直接随 split 数增长**——split 越多，启动的 CTA 越多，这正是补足并行度的落点。
+
+#### 4.1.4 代码实践（源码阅读型）
+
+**实践目标**：用具体数字验证「自动 split 让 CTA 数≈SM 数」。
+
+**操作步骤**：
+
+1. 假设一块 H100（NUM_SMS=132），单请求 decode：\(B=1, H_{kv}=8, H_q=32, S_{kv}=8192, D=128\)。
+2. 手算 [flash_decode.py:281-291](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L281-L291) 的三行：`NUM_KV_SPLITS` 初值、`TILE_SIZE`、最终 `NUM_KV_SPLITS`。
+3. 算出最终 grid = `(1, 8, NUM_KV_SPLITS)` 的总 CTA 数，与 132 比较。
+
+**预期结果**：初值 `NUM_KV_SPLITS = 132//(1·8) = 16`；`TILE_SIZE = max(128, next_power_of_2(ceil(8192/16)=512)) = 512`；最终 `NUM_KV_SPLITS = ceil(8192/512) = 16`；总 CTA = `1·8·16 = 128`，非常接近 132。若不切分则只有 `1·8 = 8` 个 CTA。**结论：Split-KV 把可并行 CTA 从 8 提升到 128。**（待本地用真实 GPU 核对 NUM_SMS。）
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果把 `kv_len_per_split` 显式传成 `seq_len`（即整段不切），grid 第三维会是多少？这对 SM 利用率意味着什么？
+
+**答案**：`NUM_KV_SPLITS = ceil(seq_len / seq_len) = 1`，grid 退化为 `(B, H_kv, 1)`，回到「天然并行度不足」的状态，SM 大量空闲。这正是 Split-KV 要避免的情况。
+
+**练习 2**：为什么 grid 的第二维是 `num_kv_heads` 而不是 `num_q_heads`？
+
+**答案**：因为 GQA 下多个 query 头共享同一组 K/V。内核按 KV 头切分任务，每个 CTA 一次性处理「一个 KV 头 + 它挂载的那一组 query 头」（即 `NUM_Q_HEAD_PER_KV` 个 query 头，见 4.3 节），避免重复加载同一份 K/V。
+
+---
+
+### 4.2 Split-KV 切分：fmha_decode 的两阶段架构
+
+#### 4.2.1 概念说明
+
+把 KV 切开后，**每一段只能算出「自己这段的局部注意力」**，不是最终答案。要让最终结果数值上等价于「对完整 KV 做一次 softmax」，就必须：
+
+1. **解码内核**对每段 KV 算出两个东西：① 这段的**部分输出**（已对段内 softmax 归一）；② 这段的 **LSE（log-sum-exp）**，记录段内分数的「总量级」。
+2. **归约内核**用各段的 LSE 当权重，把各段的部分输出加权合并。
+
+为什么需要 LSE 而不是直接平均？因为各段的分数量级不同——某段里恰好有个超大分数，它就该主导输出。LSE 就是用来**无损携带「段内 softmax 分母的量级」**的统计量，4.4 节会严格推导。
+
+于是 `fmha_decode` 在结构上是「**启动解码内核 → 调 splitk_reduce**」两步，在 [flash_decode.py:383](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L383) 一眼可见：
+
+```python
+ct.launch(..., _attention_decode_kernel_grouped, ...)   # ① 各 split 并行算
+splitk_reduce(Att_Mid_Out, LSE_Out, O, seq_len)          # ② 合并
+```
+
+#### 4.2.2 核心流程
+
+主机侧 `forward` 的完整流程：
+
+1. **reshape 到 GQA 布局**：把 `Q [B,H_q,1,D]` 视图重排成 `[B, H_q//g, g, D]`（g = `num_q_head_per_kv`），让「同一 KV 头下的 g 个 query 头」在内存里相邻，便于一个 CTA 一次取走（[flash_decode.py:345-350](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L345-L350)）。
+2. **算 split 参数**：`NUM_KV_SPLITS`、`TILE_SIZE`（4.1 节）。
+3. **分配中间缓冲**：
+   - `Att_Mid_Out [B, H_q, NUM_KV_SPLITS, D]`：每个 query 头、每个 split 一份部分输出。
+   - `LSE_Out [B, H_q, NUM_KV_SPLITS]`：对应的部分 LSE（fp32）。
+4. **启动解码内核**：grid `(B, H_kv, NUM_KV_SPLITS)`，把 `Att_Mid_Out_5D`、`LSE_Out_4D` 作为写出张量传入。
+5. **调 splitk_reduce**：输入中间缓冲与最终输出 `O`，跨 split 归约。
+6. **返回** `O.view(B, H_q, 1, D)`。
+
+注意中间缓冲按 **query 头数** `H_q` 分配，但 grid 按 **KV 头数** `H_kv` 启动——内核里一个 CTA 会写入「一个 KV 头对应的 g 个 query 头」的连续切片，二者靠 reshape 视图对齐。
+
+#### 4.2.3 源码精读
+
+中间缓冲的分配与形状是理解整条链路的钥匙：
+
+[flash_decode.py:296-306](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L296-L306) 分配 `Att_Mid_Out` 与 `LSE_Out`：
+
+```python
+Att_Mid_Out = torch.empty((batch_size, num_q_heads, NUM_KV_SPLITS, head_dim), ...)
+LSE_Out     = torch.empty((batch_size, num_q_heads, NUM_KV_SPLITS), dtype=torch.float32, ...)
+```
+
+`Att_Mid_Out` 的四维含义：`[batch, query 头, split, head_dim]`；`LSE_Out` 是 `[batch, query 头, split]`。注意 LSE 强制 fp32——它承担跨 split 合并的数值稳定性，不能降精度。
+
+为了配合「一个 CTA 处理 g 个 query 头」的写法，主机把它们重排成 5D / 4D 视图（[flash_decode.py:317-329](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L317-L329)）：
+
+```python
+Att_Mid_Out_5D = Att_Mid_Out.view(B, num_kv_heads, num_q_head_per_kv, NUM_KV_SPLITS, head_dim)
+LSE_Out_4D     = LSE_Out.view(B, num_kv_heads, num_q_head_per_kv, NUM_KV_SPLITS)
+```
+
+最后两步的衔接（[flash_decode.py:353-385](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L353-L385)）：`ct.launch` 启动解码内核写出 `Att_Mid_Out_5D / LSE_Out_4D`，紧接着 `splitk_reduce(Att_Mid_Out, LSE_Out, O, seq_len)` 把它们合并进 `O`。注意传给归约的是 **3D 的 `Att_Mid_Out / LSE_Out`**（不带 g 维），因为到归约阶段已不再关心 GQA 分组——每个 query 头独立合并自己的 split。
+
+`ct.launch` 的参数约定（u3-l3 已讲）：`(stream, grid, kernel, args_tuple)`，`ConstInt` 形参（如 `HEAD_DIM`、`TILE_N`、`KV_LEN_PER_SPLIT`、`NUM_KV_SPLITS`）传入 Python int 即被特化进内核。
+
+#### 4.2.4 代码实践（源码阅读型）
+
+**实践目标**：理清「grid 按 H_kv 启动、缓冲按 H_q 分配」的对应关系。
+
+**操作步骤**：
+
+1. 读 [flash_decode.py:312-351](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L312-L351)，找出 `num_q_head_per_kv`、`query_group_tile_size` 的定义。
+2. 在纸上画一个 \(B=1, H_q=32, H_{kv}=8, S_{kv}=8192, D=128, \text{NUM\_KV\_SPLITS}=16\) 的例子：grid 是 `(1,8,16)`，共 128 个 CTA；而 `Att_Mid_Out` 形状是 `(1,32,16,128)`。
+3. 回答：一个 CTA（`head_id=3, tile_id=5`）会写入 `Att_Mid_Out_5D` 的哪些 query 头切片？
+
+**预期结果**：`num_q_head_per_kv = 32//8 = 4`，`query_group_tile_size = max(8, next_power_of_2(4)) = 8`（注意它是 ≥8 的 2 的幂，作为内核里 query 分组的瓦片大小）。CTA `head_id=3` 负责该 KV 头下挂载的 4 个 query 头（在 5D 视图的第 2 维），`tile_id=5` 对应第 5 个 split。所以一个 CTA 写 4 份（query 头）部分输出到 `Att_Mid_Out_5D[0, 3, 0:4, 5, :]`。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `LSE_Out` 用 `torch.float32`，而 `Att_Mid_Out` 用 `Q.dtype`（如 fp16）？
+
+**答案**：LSE 要在 `splitk_reduce` 里做 `exp2(lse - lse_max)` 与求和，量级跨度极大，必须高精度才不丢数值稳定性；部分输出 `Att_Mid_Out` 本身已是归一化的 attention 输出（量级有限），用低精度存储省显存与带宽，与最终 `O` 的 dtype 一致即可。
+
+**练习 2**：`kv_len_per_split` 这个参数（`fmha_decode` 的可选入参）什么时候会被外部显式指定？
+
+**答案**：当调用方想**固定**切分粒度（而非让内核按 SM 数自动选）时，例如 MLA 解码（u6-l3 会讲）或为了与某个固定 `splitk_reduce` 配置对齐。此时 `NUM_KV_SPLITS = ceil(seq_len / kv_len_per_split)`，`TILE_SIZE = kv_len_per_split`，走 [flash_decode.py:289-291](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L289-L291) 的 else 分支。
+
+---
+
+### 4.3 中间 attn/lse 结果：解码内核的在线 softmax 与 LSE 产出
+
+#### 4.3.1 概念说明
+
+解码内核 `_attention_decode_kernel_grouped` 是一个 CTA 跑一个 `(batch, kv_head, split)`。它在自己负责的 KV 段内，做一次**完整的在线 softmax**——逻辑和 u6-l1 的 prefill 内核同源，只是 query 只有「g 个头各一行」。
+
+每个 CTA 最终写出两类东西到中间缓冲：
+
+- **部分输出 acc**：对段内 KV 归一化后的 attention 输出，形状 `(QUERY_GROUP_TILE_SIZE, HEAD_DIM)`，写到 `Att_Mid_Out`。
+- **部分 LSE**：段内分数的 log-sum-exp，标量（每个 query 头一个），写到 `LSE_Out`。
+
+> 代码里把可复用的计算体单独抽成 `attention_decode_kernel_grouped_impl`（[flash_decode.py:25](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L25)），文件头注释说明它被「独立 decode」和「融合 POD attention」等多个内核共用，避免重复书写 decode 计算。`@ct.kernel()` 包装器（[flash_decode.py:191](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L191)）只负责把 `ct.bid` 取出的三个 program id 传进 impl。
+
+#### 4.3.2 核心流程
+
+单个 CTA（`batch_id, head_id, tile_id`）的执行流程：
+
+1. **取 program id**：`batch_id=ct.bid(0), head_id=ct.bid(1), tile_id=ct.bid(2)`。
+2. **定位本 split 的 KV 区间**：`start_idx = tile_id * KV_LEN_PER_SPLIT`，`end_idx = min(start_idx + KV_LEN_PER_SPLIT, S_kv)`。
+3. **加载 query**：取本 KV 头下 `QUERY_GROUP_TILE_SIZE` 个 query 头，转置成 `(HEAD_DIM, QUERY_GROUP_TILE_SIZE)` 方便后面做 `mma`。
+4. **初始化在线 softmax 状态**：`m_i`（行最大值，初值 \(-\infty\)）、`l_i`（行求和）、`acc`（输出累加器，零初值）。
+5. **沿本 split 的 KV 分 tile 循环**（tile 大小 `TILE_N`）：
+   - 加载 K tile，算 `qk = mma(k, q)`（分块 QK^T）。
+   - 边界处理：超出 `S_kv` 的位置掩码成 \(-\infty\)（用大负数 \(-10^6\)）。
+   - 在线 softmax 更新：`m_ij = max(m_i, max(qk_scaled))`、`alpha = exp2(m_i - m_ij)`、`l_i = l_i*alpha + p`、`acc = acc*alpha`。
+   - 加载 V tile，`acc = mma(v, p, acc=acc)`（分块 PV 累加）。
+   - `m_i = m_ij`。
+6. **收尾**：`acc /= l`（段内归一化），`l = m_i + log2(l)`（算出本 split 的 LSE）。
+7. **写出**：`acc` 存进 `Att_Mid_Out`，`l`（LSE）存进 `LSE_Out`。
+
+其中 `qk_scale = softmax_scale * INV_LOG_2`（[flash_decode.py:61](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L61)，`INV_LOG_2 = 1/ln2`）——把自然底 scale 换成 log2 底，从而能用 `exp2`，与 u6-l1 完全一致。
+
+#### 4.3.3 源码精读
+
+**初始化在线 softmax 状态**（[flash_decode.py:79-87](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L79-L87)）：
+
+```python
+m_i = ct.full((QUERY_GROUP_TILE_SIZE,), -math.inf, dtype=ct.float32)
+l_i = ct.full((TILE_N, QUERY_GROUP_TILE_SIZE), 1.0, dtype=ct.float32)
+acc = ct.full((HEAD_DIM, QUERY_GROUP_TILE_SIZE), 0.0, dtype=ct.float32)
+```
+
+`m_i` 是每个 query 头的行最大值；`acc` 形状 `(HEAD_DIM, QUERY_GROUP_TILE_SIZE)` 是 PV 累加器，列对应该组里的 query 头。
+
+**分块 QK 与在线 softmax 更新**（[flash_decode.py:108-127](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L108-L127)）：
+
+```python
+qk = ct.mma(k, q, qk)                      # (TILE_N, QUERY_GROUP_TILE_SIZE)
+...
+qk_scaled = qk * qk_scale
+m_ij = ct.maximum(m_i, ct.max(qk_scaled, 0))
+qk = qk_scaled - m_ij[None, :]
+p = ct.exp2(qk)
+alpha = ct.exp2(m_i - m_ij)
+l_i = l_i * alpha[None, :] + p
+```
+
+这正是 u6-l1 在线 softmax 的标准 \(m/l\) 在线更新：`alpha` 把「旧基准下的累积」平移到「新最大值基准」下，再合并新块的贡献。
+
+**分块 PV 累加**（[flash_decode.py:130-147](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L130-L147)）：先 `acc = acc * alpha` 把旧累加器平移，再 `acc = ct.mma(v, p, acc=acc)` 加上新块——和 prefill 内核里 PV 累加同构。
+
+**收尾：归一化 + 算 LSE**（[flash_decode.py:149-154](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L149-L154)）：
+
+```python
+l = ct.sum(l_i, 0)
+acc = ct.truediv(acc, l[None, :], flush_to_zero=True, rounding_mode=RMd.APPROX)
+...
+l = m_i + ct.log2(l)
+```
+
+两件事：① `acc / l` 得到**段内归一化**的部分输出（这就是 `Att_Mid_Out` 存的内容）；② `l = m_i + log2(l)` 得到本 split 的 **LSE**。注意这里的 `l` 在求和前是「以 \(m_i\) 为基准的 exp2 之和」，加上 `m_i` 后才恢复成真实量级：
+
+\[ \ell_s \;=\; m_s + \log_2\!\Big(\sum_{i \in s} 2^{\text{qk}_i}\Big) \;=\; \log_2\!\Big(\sum_{i \in s} 2^{\text{qk}_i + m_s}\Big) \]
+
+（实现里 `qk` 已减去过 `m_i`，故 `m_i + log2(sum 2^(qk))` 恰好抵消，等价于上式。）这个 \(\ell_s\) 就是 4.4 节合并时要用的「段内分母量级」。
+
+**写出部分输出与 LSE**（[flash_decode.py:156-188](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L156-L188)：当 `NUM_Q_HEAD_PER_KV == QUERY_GROUP_TILE_SIZE` 时用 TMA `ct.store` 整块写，否则退化用 `ct.scatter` 带边界检查逐元素写。LSE 一律用 `ct.scatter` 写到 `LSE_Out`。
+
+> 一个易错点：`NUM_Q_HEAD_PER_KV` 是真实的 group size（如 4），而 `QUERY_GROUP_TILE_SIZE` 是被向上取到 ≥8 的 2 的幂（如 8）作为瓦片大小。二者不等时，瓦片里有「空 query 头」槽位，故走 scatter 分支逐个写出真实的那几个。
+
+#### 4.3.4 代码实践（源码阅读 + 测试阅读）
+
+**实践目标**：确认解码内核产出的「部分输出 + LSE」与参考实现等价。
+
+**操作步骤**：
+
+1. 打开 [tests/ops/test_flash_decode.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/tests/ops/test_flash_decode.py)，看 `reference`（L17-22）：它用 `torch.nn.functional.scaled_dot_product_attention(q,k,v,scale=sm_scale,enable_gqa=True)` 作为参考。
+2. 看 `test_op`（L33-82）的参数化：`seq_len ∈ {9,119,256,8192}`、`group_size ∈ {1,4,8}`、`dtype=fp16`，容差 `atol=rtol=1e-2`。
+3. 注意 L123-124：sm120（compute capability 12）被标 `xfail`，原因是「共享内存不足：FlashDecode 需要 133,152 B > 硬件上限 102,400 B」。
+
+**预期结果**：在支持的 GPU 上，`fmha_decode` 对各种 seq_len / group_size 组合的输出与 `scaled_dot_product_attention(enable_gqa=True)` 在 1e-2 容差内一致。这说明「切分 + 归约」两阶段合起来与「不分」数值等价。注意 `test_op` 没有显式传 `kv_len_per_split`，即走 4.1 节的自动 split 分支。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：内核里 `l_i` 初始化为形状 `(TILE_N, QUERY_GROUP_TILE_SIZE)`、值全 1，循环里 `l_i = l_i * alpha[None,:] + p`。为什么最后要 `ct.sum(l_i, 0)` 再做归一化，而不是维护一个标量求和？
+
+**答案**：`p = exp2(qk)` 形状是 `(TILE_N, QUERY_GROUP_TILE_SIZE)`，沿 TILE_N（KV tile 内的元素）维度直接累加进 `l_i` 最自然；循环结束对 TILE_N 维求和 `ct.sum(l_i, 0)` 即得到「整个 split 内、每个 query 头」的总分母。这与维护标量等价，只是把累加摊到了 tile 维度上、便于向量化。
+
+**练习 2**：边界掩码为什么写成 `qk = ct.where(mask, qk, -1.0e6)` 而不是 `-math.inf`？
+
+**答案**：越界 KV 位置不应参与 softmax（相当于 padding）。用一个大负数 \(-10^6\) 让 `exp2` 后近似为 0 即可。用 \(-\infty\) 在某些硬件/路径下可能产生 NaN（\(-\infty - (-\infty)\) 之类），大负数是更稳妥的工程写法；最终越界项的权重 \(\approx 0\)，对结果无实质影响。
+
+---
+
+### 4.4 splitk_reduce 归约：跨 split 合并 LSE 与部分输出
+
+#### 4.4.1 概念说明
+
+解码内核给每个 query 头、每个 split 留下了一对 `(部分输出 acc_s, LSE ℓ_s)`。`splitk_reduce` 的任务是把同一个 query 头的 `NUM_KV_SPLITS` 对结果合并成最终那一行输出。
+
+核心是 **LSE 合并公式**。设第 \(s\) 段的部分输出（已段内归一化）为 \(\tilde{o}_s\)、LSE 为 \(\ell_s\)。注意 \(\tilde{o}_s\) 是「段内分数加权平均」：
+
+\[ \tilde{o}_s = \frac{\sum_{i \in s} 2^{\text{qk}_i} v_i}{\sum_{i \in s} 2^{\text{qk}_i}}, \qquad \ell_s = \log_2\!\Big(\sum_{i \in s} 2^{\text{qk}_i}\Big) \]
+
+完整 attention 输出要对**所有** KV 归一：
+
+\[ o = \frac{\sum_{\text{all } i} 2^{\text{qk}_i} v_i}{\sum_{\text{all } i} 2^{\text{qk}_i}} \]
+
+把分子按 split 拆开，并用 \(\sum_{i \in s} 2^{\text{qk}_i} v_i = 2^{\ell_s}\,\tilde{o}_s\) 代入：
+
+\[ o = \frac{\sum_s 2^{\ell_s}\,\tilde{o}_s}{\sum_s 2^{\ell_s}} \]
+
+为数值稳定，提出 \(M = \max_s \ell_s\)：
+
+\[ \boxed{\; o = \frac{\sum_s 2^{\ell_s - M}\,\tilde{o}_s}{\sum_s 2^{\ell_s - M}} \;} \]
+
+这就是 `splitk_reduce` 的全部数学。它和在线 softmax 的「平移到最大值基准」是同一个思想，只不过这里是在 **split 粒度** 上做一次——所以也有人把 Split-KV 解码叫作「**两层的 Flash attention**」：内层在 split 内做在线 softmax，外层在 split 间做 LSE 合并。
+
+#### 4.4.2 核心流程
+
+`splitk_reduce` 内核 `_splitk_reduce_kernel` 一个 CTA 处理「一个 (batch, head, head_dim_tile)」，对 `NUM_KV_SPLITS` 维做归约：
+
+1. `batch_id=ct.bid(0), head_id=ct.bid(1), tile_id=ct.bid(2)`，其中第三维按 `head_dim` 切片（`TILE_D`）。
+2. **加载部分输出**：从 `attn_splitk_out [B,H,NUM_KV_SPLITS,D]` 取出本 head、本 D-tile 的 `NUM_KV_SPLITS_POW2` 行（pad 到 2 的幂）。
+3. **加载 LSE**：用 `ct.gather` 取 `lse_splitk_out [B,H,NUM_KV_SPLITS]`，越界槽位用 `padding_value=-inf`。
+4. **算 \(M\)**：`lse_max = max(lse_splitk)`。
+5. **算归一化权重**：`w_s = exp2(lse_splitk - lse_max)`，求和 `Z = sum(w_s)`。
+6. **加权合并部分输出**：`numerator = sum_s w_s · out_splitk[s]`（split 多时用 `mma`，少时用逐元素乘加求和）。
+7. **归一化**：`acc = numerator / Z`，转 dtype 写回 `attn_out [B,H,D]`。
+
+其中越界的 split 槽位因 LSE = \(-\infty\)，`w_s = exp2(-inf - M) = 0`，对求和与加权都不贡献——这是用 `-inf` padding 把 `NUM_KV_SPLITS_POW2` 与真实 `NUM_KV_SPLITS` 的差异无痛抹平的关键。
+
+#### 4.4.3 源码精读
+
+`splitk_reduce` 主机函数与签名（[splitk_reduce.py:100-141](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L100-L141)），docstring 明确了四个张量的形状契约（[splitk_reduce.py:103-109](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L103-L109)）：
+
+- `attn_splitk_out: [B, num_heads, NUM_KV_SPLITS, head_dim]` —— 各 split 的部分输出。
+- `lse_splitk_out: [B, num_heads, NUM_KV_SPLITS]` —— 各 split 的 LSE。
+- `attn_out: [B, num_heads, head_dim]` —— 最终输出。
+- `S_kv` —— KV 序列长，用于边界处理。
+
+grid 与瓦片设置（[splitk_reduce.py:111-120](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L111-L120)）：
+
+```python
+TILE_D = min(128, next_power_of_2(head_dim))
+NUM_KV_SPLITS_POW2 = next_power_of_2(NUM_KV_SPLITS)
+...
+grid = (B, num_heads, (head_dim + TILE_D - 1) // TILE_D)
+```
+
+`NUM_KV_SPLITS_POW2` 把 split 数向上取到 2 的幂，配合下面的 `-inf` padding，让 gather/mma 走规整瓦片。
+
+**加载 + LSE 合并的数学实现**（[splitk_reduce.py:52-67](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L52-L67)）：
+
+```python
+lse_splitk = ct.gather(lse_splitk_out, (batch_id, head_id, offs_lse), padding_value=-math.inf)
+lse_max = ct.max(lse_splitk)
+sumexp_normalized_splitk = ct.exp2(lse_splitk - lse_max)   # 即 w_s
+sumexp_normalized_splitk = ct.astype(sumexp_normalized_splitk, ct.float32)
+sumexp_normalized = ct.sum(sumexp_normalized_splitk)        # 即 Z
+```
+
+这正是公式里的 \(w_s = 2^{\ell_s - M}\) 与 \(Z = \sum_s w_s\)。
+
+**加权合并分子的两条路径**（[splitk_reduce.py:70-81](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L70-L81)）：
+
+```python
+if USE_DOT:
+    mma_result = ct.mma(sumexp_normalized_splitk[None,:], out_splitk_fp32, zeros)   # 走张量核心
+    numerator_normalized = ct.extract(mma_result, (0,0), shape=(1,TILE_D))
+else:
+    numerator_normalized = ct.sum(out_splitk * sumexp_normalized_splitk.reshape(...), axis=0)
+```
+
+`USE_DOT` 的选择（[splitk_reduce.py:115-117](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L115-L117)）：split 数大到能摊薄 `mma` 启动开销时（pre-SM90 阈值 4，SM9.0+ 阈值 16）才走 dot 路径，否则用逐元素乘加求和更划算——一个按问题规模自适应的计算路径选择。
+
+最终归一化与写回（[splitk_reduce.py:84-97](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L84-L97)）：`acc = numerator / sumexp_normalized`，降回 `attn_out.dtype` 后用 TMA `ct.store` 写回。
+
+#### 4.4.4 代码实践（测试阅读型）
+
+**实践目标**：用独立测试验证 LSE 合并公式的正确性，并理解其参考实现。
+
+**操作步骤**：
+
+1. 打开 [tests/ops/test_splitk_reduce.py](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/tests/ops/test_splitk_reduce.py)，读 `reference`（L17-41）。它用纯 PyTorch 实现了同样的 LSE 合并：`lse_max = max(...)`、`sumexp_normalized_splitk = exp2(lse - lse_max)`、分子 `sum(attn_splitk * w, dim=2)`、输出 `numerator / sumexp_normalized`。
+2. 注意它独立构造随机 `attn_splitk_out [B,H,num_kv_splits,head_dim]` 与 `lse_splitk_out [B,H,num_kv_splits]` 直接喂给 `splitk_reduce`，**不经过解码内核**——因此它是一道纯粹的「LSE 合并」单元测试。
+3. 看参数化（L48-52）：`num_kv_splits ∈ {1,2,8,16}`、`head_dim=512`、`dtype ∈ {fp16,bf16}`，容差 `atol=rtol=1e-2`。
+
+**预期结果**：cuTile 的 `splitk_reduce` 与 PyTorch 参考在 1e-2 内一致，覆盖 `USE_DOT` 的两条路径（split 数 1/2 多半走非 dot，8/16 走 dot，取决于架构阈值）。`num_kv_splits=1` 是退化情形（只有一段，无需合并），用于验证边界。
+
+> 阅读型思考：参考实现里 `torch.exp2(lse_splitk - lse_max) / math.log(2)` 多除了一个 `math.log(2)`。由于这个因子**同时**出现在分子（间接，经加权）与分母 `sumexp_normalized` 中，最终相除时被约掉，不影响结果——这是参考代码的一个「无害但易困惑」的写法，理解时可把它视作常数因子抵消。内核实现则没有这个除法。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：把 `splitk_reduce` 输入 `attn_splitk_out [B,H,NUM_KV_SPLITS,D]`、`lse_splitk_out [B,H,NUM_KV_SPLITS]`、输出 `attn_out [B,H,D]` 的形状含义各用一句话说清。
+
+**答案**：
+- `attn_splitk_out`：每个 batch、每个 query 头、每个 KV split，存一份「段内归一化的部分 attention 输出」（head_dim 维）。
+- `lse_splitk_out`：每个 batch、每个 query 头、每个 KV split，存一个标量 LSE，记录该段内 softmax 分母的量级。
+- `attn_out`：每个 batch、每个 query 头，合并所有 split 后的最终 attention 输出（head_dim 维），即 decode 的结果。
+
+**练习 2**：如果某个 split 的 LSE 远小于其它 split（比如小 60），它对最终输出的贡献约是多少？
+
+**答案**：其权重 \(w_s = 2^{\ell_s - M}\)。若 \(\ell_s\) 比 \(M\) 小 60，则 \(w_s \approx 2^{-60} \approx 8.7\times10^{-19}\)，相对分母几乎为 0，对最终输出的贡献可忽略。这正是 LSE 合并「自动让大量级 split 主导」的特性，也说明用 `-inf` padding 屏蔽越界 split 是安全的。
+
+**练习 3**：为什么 `splitk_reduce` 的 grid 第三维按 `head_dim` 切片（`TILE_D`），而不是像解码内核那样按 split 切？
+
+**答案**：归约的「 Reduction 维」是 split 数（要把多个 split 合成一个），这个归约**在每个 CTA 内部**沿 `NUM_KV_SPLITS_POW2` 完成；而 grid 需要把不同 CTA 映射到「不同的 (batch, head, head_dim 段)」上做数据并行。`head_dim` 可能很大（MLA 下可达 512），沿它切片（`TILE_D=min(128, next_power_of_2(head_dim))`）能让一个 CTA 的输出瓦片规整、贴合 TMA，同时保证有足够 CTA 并行。
+
+## 5. 综合实践
+
+**任务**：在纸上把一次完整的 decode 调用「跑」一遍，把两阶段的数据流与形状填满，验证「先切分再合并」与「不分」数值等价。
+
+设定：\(B=1, H_q=32, H_{kv}=8, D=128, S_{kv}=8192\)，fp16，`sm_scale = 1/√128`，NUM_SMS=132。
+
+请完成：
+
+1. **自动 split**：照 [flash_decode.py:281-291](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/flash_decode.py#L281-L291) 算出 `NUM_KV_SPLITS`、`TILE_SIZE`、`num_q_head_per_kv`、`query_group_tile_size`。
+2. **解码内核 grid 与缓冲**：写出 grid、`Att_Mid_Out`、`LSE_Out` 的形状；指出一个 CTA `(head_id=3, tile_id=5)` 在 `Att_Mid_Out_5D` 里写入的切片范围。
+3. **归约内核 grid**：照 [splitk_reduce.py:111-120](https://github.com/NVIDIA/TileGym/blob/efbfefc760f608e4b04d32c36813a1291fe36f3c/src/tilegym/ops/cutile/splitk_reduce.py#L111-L120) 算出 `TILE_D`、`NUM_KV_SPLITS_POW2`、grid、`USE_DOT`（假设 SM9.0+）。
+4. **LSE 合并推导**：用 4.4.1 的公式写出第 3 个 query 头的最终输出 \(o\) 如何由 `Att_Mid_Out[0,2,:,:]` 与 `LSE_Out[0,2,:]` 表达。
+5. **（可选，待本地验证）** 在有 GPU 的环境运行：
+
+   ```bash
+   pytest tests/ops/test_flash_decode.py -k "seq_len8192 and group_size8" -v
+   pytest tests/ops/test_splitk_reduce.py -k "num_kv_splits16" -v
+   ```
+
+   观察是否通过，并思考：若把 `kv_len_per_split` 显式设成 `8192`（不切），`test_flash_decode` 还会过吗？为什么 SM 利用率会变差？
+
+**参考答案要点**：
+
+1. `NUM_KV_SPLITS=16, TILE_SIZE=512, num_q_head_per_kv=4, query_group_tile_size=8`。
+2. grid `(1,8,16)`；`Att_Mid_Out (1,32,16,128)`、`LSE_Out (1,32,16)`；该 CTA 写 `Att_Mid_Out_5D[0,3,0:4,5,:]`（4 个真实 query 头）。
+3. `TILE_D=min(128,128)=128`、`NUM_KV_SPLITS_POW2=16`、grid `(1,32,1)`（`head_dim=128` 只需一个 D-tile）、`USE_DOT = 16>=16 = True`。
+4. \(o = \frac{\sum_{s=0}^{15} 2^{\ell_s - M}\,\tilde{o}_s}{\sum_{s=0}^{15} 2^{\ell_s - M}}\)，其中 \(M=\max_s \ell_s\)，\(\tilde{o}_s =\) `Att_Mid_Out[0,2,s,:]`，\(\ell_s =\) `LSE_Out[0,2,s]`。
+5. 不切分时 `NUM_KV_SPLITS=1`，数值仍正确（退化为单 split，`splitk_reduce` 几乎是直通），但 grid 退化到 `(1,8,1)`，仅 8 个 CTA，SM 大量空闲——数值等价、性能骤降。这正是 Split-KV 要解决的问题。
+
+## 6. 本讲小结
+
+- decode 阶段 query 只有 1 行，天然并行度仅 \(B\cdot H_q\)，**喂不饱 SM**；Split-KV 沿 KV 序列维切分，把并行任务数提升到 \(B\cdot H_{kv}\cdot\text{NUM\_KV\_SPLITS}\)。
+- `fmha_decode` 是**两阶段架构**：解码内核 `_attention_decode_kernel_grouped` 各 split 并行算「部分输出 + 部分 LSE」，再由 `splitk_reduce` 合并；自动 split 以「总 CTA ≈ NUM_SMS」为目标。
+- 中间结果形状是理解整条链路的钥匙：`Att_Mid_Out [B,H_q,NUM_KV_SPLITS,D]`（段内归一化的部分输出）与 `LSE_Out [B,H_q,NUM_KV_SPLITS]`（段内分母量级，强制 fp32）。
+- 解码内核沿本 split 的 KV 分 tile 做在线 softmax（\(m_i/l_i/acc\)，与 u6-l1 同构），收尾算出 \(\ell_s = m_s + \log_2(\sum 2^{\text{qk}})\)。
+- `splitk_reduce` 用 **LSE 合并公式** \(o = \frac{\sum_s 2^{\ell_s-M}\tilde{o}_s}{\sum_s 2^{\ell_s-M}}\) 把多段无损融合，本质是「split 粒度的在线 softmax」；越界 split 靠 LSE=`-inf` padding 自动归零。
+- 这套「切分 + LSE 合并」是 decode 注意力的通用骨架，后续 MLA 解码（u6-l3）的 `mla_decoding_split_kv` 复用同一个 `splitk_reduce`。
+
+## 7. 下一步学习建议
+
+- **u6-l3 多潜注意力 MLA 与解码**：看 `mla_decoding_split_kv` 如何把本讲的 Split-KV 骨架搬到 MLA 的「q/k/v + qpe/kpe 联合位置编码」上，并复用 `splitk_reduce`——届时可对比 `mla_decoding`（不切分）与 `mla_decoding_split_kv`（切分）的取舍。
+- **u6-l4 专用注意力变体**：`attention_sink`、`gemma_attention` 等解码变体如何在同一个「分块 + 在线 softmax」框架上换索引/掩码语义（如滑窗、soft cap）。
+- **动手验证**：在 GPU 上跑 `tests/ops/test_flash_decode.py` 与 `tests/ops/test_splitk_reduce.py`，用 `nsys` 或 torch profiler 观察一次 `fmha_decode` 是否真启动了两个内核（decode + splitk_reduce），以及 split 数对 decode 内核耗时的影响。
+- **回看 u5-l2 持久化调度**：Split-KV 是「沿归约维扩并行」，u5-l2 的持久化 GEMM 是「沿输出维复用 CTA」，对照两者能加深对 GPU 并行策略的理解。

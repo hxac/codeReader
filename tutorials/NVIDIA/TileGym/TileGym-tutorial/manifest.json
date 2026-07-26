@@ -1,0 +1,1093 @@
+{
+  "project": "TileGym",
+  "head": "7410bd8dcc7e83bc1de9d41807056fa463998a39",
+  "rationale": "学习路径按\"先理解项目再理解抽象、再学写内核、再按复杂度攀升内核类别、最后回到集成与生态\"组织。U1 让读者从零跑起 TileGym 并建立全局地图；U2 是全库核心抽象——基于 @dispatch/_REGISTRY 的多后端分发；U3-U4 用最简单的 cuTile 内核讲清 tile 编程模型、数据搬运、启动、autograd；U5 引入分块 GEMM 与 autotuning；U6 集中讲注意力内核族（FMHA/解码/MLA/变体），并本轮新增\"门控增量规则\"这种循环线性注意力机制（recurrent 逐步推理 + chunk 分块并行 + 三角求解的数值稳定性）；U7 覆盖 tilecpp/Triton/cuTile-rs 三个备选后端，理解\"同一算子名、多实现\"；U8 把内核用到真实 LLM；U9 闭环到测试与贡献流程；U10 介绍 suites 扩展、实验内核追踪/内核清单生成、Julia 等进阶生态，并新增一篇专门讲 liger suite 本轮大幅扩展的训练内核族（策略梯度损失/融合线性交叉熵/归一化变体/激活等）。本轮 diff 的主体是 liger suite 扩容、门控增量规则的稳定性重构，以及 matmul/MLA 的 autotune 配置与 cutile-rs 构建机制的小幅改动，故绝大多数讲义 keep；仅对持久化 GEMM 与 MLA autotune（u5-l2/u5-l3/u6-l3）、cutile-rs 构建（u7-l3）、suites 与 kernel_inventory（u10-l1/u10-l2，尚未生成故仍为 new 但内容已刷新）做 update/new，并新增\"门控增量规则与循环线性注意力\"（u6-l5）和\"Liger 训练内核族\"（u10-l4）两篇。依赖链确保每篇只增量引入一个新概念。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "初识 TileGym：定位、安装与目录结构",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "TileGym 是什么：项目定位与核心特性",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "TileGym 是基于 CUDA Tile 的 GPU 内核教学与示例库，本讲建立对 tile 编程模型、项目定位与核心特性的整体认知。",
+          "learning_goals": [
+            "理解 CUDA Tile / tile 编程模型的基本概念",
+            "理解 TileGym 作为 cuTile 教学场与 LLM 加速示例库的双重定位",
+            "了解核心特性：丰富内核示例、多后端、基准、端到端 LLM 集成"
+          ],
+          "source_files": [
+            "README.md",
+            "ROADMAP.md"
+          ],
+          "minimal_modules": [
+            "项目定位与价值",
+            "核心特性概览",
+            "目标硬件与依赖要求",
+            "支持的后端与 LLM"
+          ],
+          "practice_task": "阅读 README 后，用自己的话写一份 TileGym 的 3 句话简介，并列出它支持的后端（cuTile/tilecpp/triton/cutile-rs）与目标硬件（Blackwell、Ampere）。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境准备与安装",
+          "order": 2,
+          "filename": "u1-l2-installation-setup.md",
+          "level": "beginner",
+          "topic": "如何准备 torch/triton、通过 PyPI 或源码安装 TileGym，并理解 cuda-tile/tileiras 依赖与各后端的额外前置条件。",
+          "learning_goals": [
+            "掌握 torch/triton 环境准备与 cu130 安装方式",
+            "理解 cuda-tile 与 tileiras 运行时编译器依赖",
+            "了解各后端的额外前置条件（CUDA 版本、nvcc、cargo 等）"
+          ],
+          "source_files": [
+            "README.md",
+            "requirements.txt",
+            "pyproject.toml",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "torch/triton 环境准备",
+            "PyPI/源码安装与 editable 模式",
+            "tileiras 依赖",
+            "各后端前置条件"
+          ],
+          "practice_task": "在干净环境中按文档安装 tilegym[tileiras]，记录每一步命令；运行 python -c \"import tilegym; print(tilegym.get_available_backends())\" 查看当前可用后端。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一次调用 TileGym 算子",
+          "order": 3,
+          "filename": "u1-l3-first-op-call.md",
+          "level": "beginner",
+          "topic": "用最小脚本调用一个 TileGym 算子（如 softmax），理解 tilegym.ops 入口、set_backend 与正确性验证。",
+          "learning_goals": [
+            "掌握 tilegym.ops 统一入口",
+            "理解 set_backend 切换后端的用法",
+            "能用最小脚本调用算子并与 PyTorch 参考比较"
+          ],
+          "source_files": [
+            "tests/ops/README.md",
+            "src/tilegym/__init__.py",
+            "src/tilegym/ops/__init__.py"
+          ],
+          "minimal_modules": [
+            "tilegym.ops 入口",
+            "set_backend 切换后端",
+            "最小调用脚本",
+            "与 torch 参考对比"
+          ],
+          "practice_task": "写一个约 10 行脚本：随机生成 (256,2048) 的 fp32 张量，调用 tilegym.ops.softmax，并与 torch.nn.functional.softmax 比较最大绝对误差。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "仓库目录结构导览",
+          "order": 4,
+          "filename": "u1-l4-repo-layout.md",
+          "level": "beginner",
+          "topic": "梳理 src/tilegym 下 ops/backend/transformers/suites/kernel_inventory 等模块职责，以及 tests/benchmark/modeling/julia 等顶层目录。",
+          "learning_goals": [
+            "掌握顶层目录与子项目的职责划分",
+            "理解 src/tilegym 包内各模块分工",
+            "建立从目录到功能的映射地图"
+          ],
+          "source_files": [
+            "src/tilegym/__init__.py",
+            "src/tilegym/ops/__init__.py",
+            "src/tilegym/ops/cutile/__init__.py",
+            "src/tilegym/backend/__init__.py"
+          ],
+          "minimal_modules": [
+            "顶层目录概览",
+            "src/tilegym 包结构",
+            "ops 后端目录组织",
+            "tests/modeling/julia 辅助目录"
+          ],
+          "practice_task": "画出 src/tilegym 的目录树，并为 ops/cutile、ops/tilecpp、ops/triton、ops/cutile_rs、backend、transformers、suites 各写一句职责说明。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "统一算子接口与后端调度",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "统一算子接口 ops.py",
+          "order": 1,
+          "filename": "u2-l1-unified-op-interface.md",
+          "level": "intermediate",
+          "topic": "ops.py 如何用 @dispatch 装饰器定义统一算子签名（softmax/matmul/fmha 等），每个 stub 默认抛 NotImplementedError。",
+          "learning_goals": [
+            "理解 @dispatch 装饰器与算子名的作用",
+            "理解统一签名与 NotImplementedError stub 的设计",
+            "了解 fallback_backend 与显式 backend 参数"
+          ],
+          "source_files": [
+            "src/tilegym/ops/ops.py",
+            "src/tilegym/ops/__init__.py"
+          ],
+          "minimal_modules": [
+            "@dispatch 装饰器与算子名",
+            "统一签名与 stub",
+            "fallback_backend 概念",
+            "显式 backend 参数"
+          ],
+          "practice_task": "在 ops.py 中找一个带 fallback_backend=\"triton\" 的算子，说明当当前后端无实现、又不显式指定 backend 时会发生什么。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "后端注册表与分发机制 dispatcher.py",
+          "order": 2,
+          "filename": "u2-l2-backend-dispatcher.md",
+          "level": "intermediate",
+          "topic": "dispatcher.py 的全局 _REGISTRY、register_impl 装饰器，以及 dispatch wrapper 如何按当前后端选择实现并处理 fallback/默认实现。",
+          "learning_goals": [
+            "理解 _REGISTRY 的 {函数名: {后端: 实现}} 结构",
+            "掌握 register_impl 注册后端实现的方式",
+            "理解 dispatch wrapper 的查找与 fallback 逻辑"
+          ],
+          "source_files": [
+            "src/tilegym/backend/dispatcher.py",
+            "src/tilegym/backend/__init__.py",
+            "src/tilegym/ops/cutile/softmax.py"
+          ],
+          "minimal_modules": [
+            "_REGISTRY 结构",
+            "register_impl 注册",
+            "dispatch wrapper 分发逻辑",
+            "fallback 与 DISABLE_FALLBACK"
+          ],
+          "practice_task": "追踪一次 tilegym.ops.softmax 调用：从 ops.py 的 stub 到 cutile/softmax.py 中 @register_impl(\"softmax\", backend=\"cutile\")，画出完整调用链路。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "后端选择与可用性 selector.py",
+          "order": 3,
+          "filename": "u2-l3-backend-selector.md",
+          "level": "intermediate",
+          "topic": "selector.py 如何探测各后端可用性（cuda.tile 导入、nvcc 版本、cargo）、维护 _CURRENT_BACKENDS，并通过环境变量选择后端。",
+          "learning_goals": [
+            "理解各后端可用性探测方式",
+            "掌握 _CURRENT_BACKENDS 与 set_backend",
+            "了解影响后端选择的环境变量"
+          ],
+          "source_files": [
+            "src/tilegym/backend/selector.py",
+            "src/tilegym/autotune.py"
+          ],
+          "minimal_modules": [
+            "后端可用性探测（cuda.tile/nvcc/cargo）",
+            "_CURRENT_BACKENDS 与 set_backend",
+            "CUTILE_TUTORIALS_BACKEND 环境变量",
+            "get_available_backends"
+          ],
+          "practice_task": "解释为何 tilecpp 的 nvcc 版本检查被设计为延迟且缓存（is_tilecpp_available）；列出影响后端与自动调优的环境变量及其含义。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "cuTile 内核编程模型",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "cuTile 内核基础：@ct.kernel 与网格索引",
+          "order": 1,
+          "filename": "u3-l1-cutile-kernel-basics.md",
+          "level": "intermediate",
+          "topic": "用 @ct.kernel 定义内核、ConstInt 泛型常量、ct.bid/ct.num_blocks 的网格索引与 occupancy 概念。",
+          "learning_goals": [
+            "理解 @ct.kernel 装饰器与内核签名",
+            "掌握 ConstInt 编译期常量",
+            "理解 bid/num_blocks 与 grid-stride 循环",
+            "了解 occupancy 含义"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/softmax.py",
+            "src/tilegym/ops/cutile/silu_and_mul.py"
+          ],
+          "minimal_modules": [
+            "@ct.kernel 装饰器",
+            "ConstInt 常量",
+            "bid/num_blocks 与 grid-stride",
+            "occupancy"
+          ],
+          "practice_task": "在 softmax 基础内核里找出 pid、num_programs 与 for row_idx in range(pid, N_ROWS, num_programs)，解释这种 grid-stride 循环为何称为静态持久化调度。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "数据搬运原语：load/store 与 gather/scatter",
+          "order": 2,
+          "filename": "u3-l2-data-movement.md",
+          "level": "intermediate",
+          "topic": "ct.load/ct.store（基于 shape/index 的 tile 访问）与 ct.gather/ct.scatter（基于索引数组）的区别，以及 ct.arange、ct.astype、padding。",
+          "learning_goals": [
+            "区分 load/store 与 gather/scatter 两种访问语义",
+            "掌握 arange 生成偏移索引",
+            "理解 check_bounds 与 padding_value/mode",
+            "掌握 astype 类型转换"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/softmax.py",
+            "src/tilegym/ops/cutile/silu_and_mul.py"
+          ],
+          "minimal_modules": [
+            "load/store tile 语义",
+            "gather/scatter 索引访问",
+            "arange 与 bounds/padding",
+            "astype 类型转换"
+          ],
+          "practice_task": "对比 softmax 中 gather/scatter 版与 TMA 版（load/store）两种加载方式，写一段说明各自适用的列宽与硬件场景。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l3",
+          "title": "内核启动模式：ct.launch 与 grid 计算",
+          "order": 3,
+          "filename": "u3-l3-launch-patterns.md",
+          "level": "intermediate",
+          "topic": "主机侧 _launch_* 函数如何计算 grid、保证 contiguous、取 NUM_SM、并调用 ct.launch(stream, grid, kernel, args)。",
+          "learning_goals": [
+            "掌握 grid 计算与 NUM_SM*occupancy 的关系",
+            "理解 contiguous 保证的必要性",
+            "掌握 ct.launch 的参数约定"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/softmax.py"
+          ],
+          "minimal_modules": [
+            "grid 计算（NUM_SM*occupancy）",
+            "contiguous 保证",
+            "ct.launch 三参 + args 元组",
+            "多启动变体选择"
+          ],
+          "practice_task": "阅读 _launch_softmax_kernel，解释 num_programs = min(NUM_SM*4, n_rows) 的含义；再阅读多波版本，比较两者 grid 的差别。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "softmax 内核全解：四种实现与 autograd 封装",
+          "order": 4,
+          "filename": "u3-l4-softmax-deep-dive.md",
+          "level": "intermediate",
+          "topic": "以 softmax 为完整案例串起 basic/TMA/chunked(3-pass)/multi-wave 四种实现与 use_tma/use_chunked/use_multi_wave 选择，并用 torch.autograd.Function 封装。",
+          "learning_goals": [
+            "理解数值稳定的 basic softmax",
+            "掌握 TMA 单 tile 加载路径",
+            "理解 chunked 三遍算法",
+            "理解 multi-wave 一块一行模式"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/softmax.py",
+            "tests/ops/test_softmax.py"
+          ],
+          "minimal_modules": [
+            "basic 数值稳定 softmax",
+            "TMA 单 tile 加载",
+            "chunked 三遍算法",
+            "multi-wave 与 autograd 封装"
+          ],
+          "practice_task": "运行 tests/ops/test_softmax.py 的几种变体，记录每种变体的触发条件，并说明 TMA 为何在 compute capability < 9 时回退。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "逐元素与归约内核、Autograd 集成",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "逐元素内核模式：silu_and_mul",
+          "order": 1,
+          "filename": "u4-l1-elementwise-kernel.md",
+          "level": "intermediate",
+          "topic": "以 silu_and_mul 为例讲解逐元素 row-wise 内核：两段加载、近似 sigmoid、flush_to_zero/rounding_mode、scatter 写回。",
+          "learning_goals": [
+            "掌握 row-wise grid 逐元素模式",
+            "理解两半切片加载 a/b 与就地计算",
+            "了解近似 sigmoid（truediv/flush_to_zero/rounding_mode）",
+            "理解 _ensure_contiguous 装饰器"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/silu_and_mul.py"
+          ],
+          "minimal_modules": [
+            "row-wise grid",
+            "两半切片加载 a/b",
+            "近似 sigmoid（truediv/flush_to_zero）",
+            "_ensure_contiguous"
+          ],
+          "practice_task": "把 silu_and_mul 内核改造为等价的 gelu_and_mul（使用 gelu 的 tanh 近似），并保证结果近似 torch.nn.functional.gelu 参考。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Autograd 集成与反向内核",
+          "order": 2,
+          "filename": "u4-l2-autograd-backward.md",
+          "level": "intermediate",
+          "topic": "用 torch.autograd.Function 包装内核实现前向+反向，silu_and_mul 反向用重计算(recomputation)避免存激活，以及 requires_grad 分支。",
+          "learning_goals": [
+            "掌握 torch.autograd.Function 封装内核",
+            "理解 save_for_backward 与反向重计算策略",
+            "理解 requires_grad 分支（autograd vs 直接调用）"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/silu_and_mul.py"
+          ],
+          "minimal_modules": [
+            "torch.autograd.Function",
+            "save_for_backward",
+            "反向重计算策略",
+            "requires_grad 分支"
+          ],
+          "practice_task": "说明 _SiLUAndMulFunction.backward 为何从 input 重算 a/b 而非保存中间激活，并估算相比保存激活的显存收益。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "归一化归约内核：rms_norm 与 layer_norm",
+          "order": 3,
+          "filename": "u4-l3-normalization-reduction.md",
+          "level": "intermediate",
+          "topic": "以 rms_norm 为例讲解跨列归约内核（mean/rstd）、weight/bias 仿射、mode 选择不同调度（static_persistent/multi_wave）。",
+          "learning_goals": [
+            "理解归约计算 mean/rstd 的方式",
+            "掌握 weight/bias 仿射变换",
+            "理解 mode 调度选择与模块工厂"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/rms_norm.py",
+            "src/tilegym/ops/cutile/layer_norm_legacy.py"
+          ],
+          "minimal_modules": [
+            "归约计算 mean/rstd",
+            "仿射变换",
+            "mode 调度选择",
+            "get_rms_norm_module 模块工厂"
+          ],
+          "practice_task": "阅读 rms_norm 里不同 mode 的 launch 分支，解释 static_persistent 与 multi_wave_cached 两种调度的区别与适用规模。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "分块 GEMM 与 Autotuning",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "分块矩阵乘内核 matmul",
+          "order": 1,
+          "filename": "u5-l1-tiled-matmul.md",
+          "level": "intermediate",
+          "topic": "matmul tiled GEMM——_swizzle_2d 块重排、accumulator、K 方向 num_tiles 循环、tile load 与累加。",
+          "learning_goals": [
+            "理解 TILE_M/N/K 分块计算输出 tile",
+            "掌握 _swizzle_2d 提升二级缓存局部性",
+            "理解 float32 accumulator 与 K-tile 循环"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/matmul.py",
+            "src/tilegym/ops/cutile/bmm.py"
+          ],
+          "minimal_modules": [
+            "TILE_M/N/K 分块",
+            "_swizzle_2d 与 L2 局部性",
+            "accumulator float32 累加",
+            "K-tile 循环与 num_tiles"
+          ],
+          "practice_task": "在 _matmul_kernel 中标注 bidx/bidy 如何由 _swizzle_2d 得到，并解释 GROUP_SIZE_M 对二级缓存命中率的影响。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "静态持久化调度与 group_gemm",
+          "order": 2,
+          "filename": "u5-l2-persistent-matmul.md",
+          "level": "intermediate",
+          "topic": "_static_persistent_matmul_kernel 用持久化 grid-stride 遍历多个输出 tile、num_ctas/CGA、replace_hints 应用最优配置；本轮为 sm100+ 新增 128x128 小 tile 候选以覆盖小/矩形 GEMM（避免大 tile 把持久化 grid 压到 16-32 个 tile-job 而闲置 SM）。",
+          "learning_goals": [
+            "理解持久化 grid-stride 调度",
+            "掌握 num_ctas/CGA 聚合",
+            "理解 replace_hints 应用最优配置",
+            "理解按 GEMM 形状选择大/小 tile 候选",
+            "了解 group_gemm 批量矩阵乘"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/matmul.py",
+            "src/tilegym/ops/cutile/group_gemm.py"
+          ],
+          "minimal_modules": [
+            "持久化 grid-stride",
+            "num_ctas/CGA",
+            "replace_hints",
+            "小 tile 候选与形状适配",
+            "group_gemm 批量"
+          ],
+          "practice_task": "对比 _matmul_kernel 与 _static_persistent_matmul_kernel 的 grid 设置，说明持久化如何在输出 tile 多于 SM 时复用 CTA；再说明新增 128x128 候选为何能改善小/矩形 GEMM 的 SM 占用。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Autotuning 机制",
+          "order": 3,
+          "filename": "u5-l3-autotuning.md",
+          "level": "advanced",
+          "topic": "_matmul_autotune_configs 按架构(sm80/sm100/sm120)产出候选、exhaustive_search 调优、tune cache、TILEGYM_DISABLE_AUTOTUNE 开关与 LOAD_LATENCY 提示；本轮为 sm100+ 静态持久化表新增 128x128/K64 小 tile 候选示例。",
+          "learning_goals": [
+            "理解按架构产出候选配置",
+            "掌握 exhaustive_search 调优流程",
+            "理解 tune cache 缓存与 autotune 开关",
+            "理解候选配置需按 GEMM 形状覆盖大/小 tile"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/matmul.py",
+            "src/tilegym/autotune.py"
+          ],
+          "minimal_modules": [
+            "按架构产出候选配置",
+            "exhaustive_search 调优",
+            "模块级 tune cache",
+            "autotune 开关",
+            "形状适配的候选设计"
+          ],
+          "practice_task": "用 TILEGYM_DISABLE_AUTOTUNE=1 与默认各跑一次 matmul 基准，观察调优前后差异；说明为何每条配置都要带 LOAD_LATENCY 字段，以及新增小 tile 候选对矩形 GEMM 的意义。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "注意力内核族",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Flash 多头注意力 FMHA（prefill）",
+          "order": 1,
+          "filename": "u6-l1-fmha-prefill.md",
+          "level": "advanced",
+          "topic": "attention.py 的 tile_fmha prefill——分块 QK、online softmax（m/l 在线更新）、causal 掩码、scaling。",
+          "learning_goals": [
+            "理解分块 QK^T 计算",
+            "掌握 online softmax 的 m/l 在线更新",
+            "理解 causal 掩码与 scaling",
+            "了解 fmha_interface 封装"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/attention.py",
+            "src/tilegym/ops/attn_interface.py"
+          ],
+          "minimal_modules": [
+            "分块 QK^T",
+            "online softmax（m/l）",
+            "causal 掩码",
+            "fmha_interface 封装"
+          ],
+          "practice_task": "描述 online softmax 为何不需要物化完整 (S,S) 注意力矩阵；指出 fmha_interface 如何把调用转发到 tilegym.ops.fmha 的 dispatch。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "解码注意力与 Split-KV",
+          "order": 2,
+          "filename": "u6-l2-decode-splitkv.md",
+          "level": "advanced",
+          "topic": "fmha_decode 单 token 解码、split-KV 并行切分、splitk_reduce 归约中间结果、flash_decode 的 LSE 合并。",
+          "learning_goals": [
+            "理解单 token 解码内核",
+            "掌握 split-KV 切分提升并行度",
+            "理解中间 attn/lse 结果的归约"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/flash_decode.py",
+            "src/tilegym/ops/cutile/splitk_reduce.py"
+          ],
+          "minimal_modules": [
+            "单 token 解码",
+            "split-KV 切分",
+            "中间 attn/lse 结果",
+            "splitk_reduce 归约"
+          ],
+          "practice_task": "解释 fmha_decode 为何在长 KV 时采用 split-KV；说明 splitk_reduce 输入 attn_splitk_out [B,H,NUM_KV_SPLITS,D] 与 lse_splitk_out 的形状含义。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l3",
+          "title": "多潜注意力 MLA 与解码",
+          "order": 3,
+          "filename": "u6-l3-mla-decode.md",
+          "level": "advanced",
+          "topic": "mla.py 的 MLA prefill（q/k/v + qpe/kpe 联合位置编码）、mla_decoding 单步解码、mla_decoding_split_kv；本轮改进了 pre-SM90（sm80）MLA autotune 表，新增 TILE_M=64/TILE_N=64/occupancy=3 候选以提升小规模 MLA 的并行度。",
+          "learning_goals": [
+            "理解 MLA 的 qpe/kpe 联合位置编码",
+            "掌握 prefill tile_mla",
+            "理解解码与 split_kv 两种 MLA 解码",
+            "理解按架构(sm80/sm90+)的 MLA autotune 候选差异"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/mla.py",
+            "src/tilegym/ops/cutile/mla_decoding.py",
+            "src/tilegym/ops/cutile/mla_decoding_split_kv.py"
+          ],
+          "minimal_modules": [
+            "MLA 联合位置编码（qpe/kpe）",
+            "prefill tile_mla",
+            "解码 mla_decoding",
+            "split_kv 并行",
+            "pre-SM90 autotune 候选"
+          ],
+          "practice_task": "对比 mla_decoding 与 mla_decoding_split_kv 的 kv 布局与 kv_len_per_split 参数作用，说明何时选 split_kv 版本；并解释 sm80 表里新增 64x64/occupancy=3 候选为何有助于小规模 MLA。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u6-l4",
+          "title": "专用注意力变体",
+          "order": 4,
+          "filename": "u6-l4-specialized-attention.md",
+          "level": "advanced",
+          "topic": "attention_sink（带 sink token 的 KV-cache + 滑窗）、gemma_attention（soft cap + sliding window）、swa_attention、sparse_mla（top-k 稀疏）。",
+          "learning_goals": [
+            "理解 attention sink 与滑窗语义",
+            "掌握 gemma 的 soft cap 与 SWA",
+            "理解 swa 在线 softmax exp2 与 sparse_mla 的 top-k 稀疏"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/attention_sink.py",
+            "src/tilegym/ops/cutile/gemma_attention.py",
+            "src/tilegym/ops/cutile/experimental/swa_attention.py",
+            "src/tilegym/ops/cutile/experimental/sparse_mla.py"
+          ],
+          "minimal_modules": [
+            "attention sink + 滑窗",
+            "gemma soft cap/SWA",
+            "swa 在线 softmax exp2",
+            "sparse_mla top-k 稀疏"
+          ],
+          "practice_task": "选两个变体，说明它们的索引/掩码语义差异，例如 sparse_mla 的 indices 张量与 attention_sink 的 sliding_window 参数各自如何限制注意力范围。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l5",
+          "title": "门控增量规则与循环线性注意力",
+          "order": 5,
+          "filename": "u6-l5-gated-delta-rule.md",
+          "level": "advanced",
+          "topic": "门控增量规则（gated delta rule）作为循环线性注意力机制：recurrent_gated_delta_rule 逐步推理版与 chunk_gated_delta_rule 分块并行版，含 intra-chunk 单位下三角求解（serial 与 Neumann-by-squaring guarded 两种路径）与 inter-chunk 状态递推；本轮对三角求解做了重大数值稳定性重构。",
+          "learning_goals": [
+            "理解门控增量规则作为线性注意力/状态空间递推的数学形式",
+            "掌握 recurrent_gated_delta_rule 逐步推理内核",
+            "理解 chunk 分块并行的 intra-chunk prepare 与 inter-chunk recurrence",
+            "理解三角求解的数值稳定性：serial 与 Neumann-by-squaring guarded 的选择依据"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile/chunk_gated_delta_rule.py",
+            "src/tilegym/ops/cutile/recurrent_gated_delta_rule.py",
+            "tests/ops/test_chunk_gated_delta_rule.py"
+          ],
+          "minimal_modules": [
+            "门控增量规则的线性注意力形式",
+            "recurrent 逐步推理内核",
+            "chunk 分块：intra-chunk prepare + inter-chunk recurrence",
+            "三角求解稳定性（serial vs Neumann guarded）"
+          ],
+          "practice_task": "在 chunk_gated_delta_rule.py 中对比 _ct_solve_tril_serial 与 _ct_solve_tril_neumann_guarded 两条路径；说明 norm_inf<1 守卫为何能避免全 fp32 Neumann 乘积在相关模型键上放大到 1e15 量级的抵消误差，并指出 occupancy=2 的 intra_chunk_prepare 设计意图。",
+          "depends_on": [
+            "u5-l1",
+            "u6-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "多后端实现",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "CUDA Tile C++（tilecpp）后端",
+          "order": 1,
+          "filename": "u7-l1-tilecpp-backend.md",
+          "level": "advanced",
+          "topic": "tilecpp 用 .cuh 内核 + TileCppKernel 包装、nvcc>=13.3、cubin 缓存、register_impl 注册同一算子名。",
+          "learning_goals": [
+            "理解 .cuh 内核源 + kernel_name 的组织",
+            "掌握 TileCppKernel 包装与编译缓存",
+            "理解后端无关的 register_impl 注册"
+          ],
+          "source_files": [
+            "src/tilegym/ops/tilecpp/softmax.py",
+            "README.tilecpp.md",
+            "src/tilegym/ops/tilecpp/utils/_cuda_utils.py"
+          ],
+          "minimal_modules": [
+            ".cuh 内核源 + kernel_name",
+            "TileCppKernel 包装与编译",
+            "nvcc 版本与缓存",
+            "后端无关注册"
+          ],
+          "practice_task": "追踪 tilecpp softmax 如何与 cutile softmax 注册到同一 \"softmax\" 算子名；说明 set_backend(\"tilecpp\") 后 dispatch 如何选中 tilecpp 实现。",
+          "depends_on": [
+            "u2-l2",
+            "u3-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Triton CUDA Tile IR 后端",
+          "order": 2,
+          "filename": "u7-l2-triton-tileir-backend.md",
+          "level": "advanced",
+          "topic": "ops/triton 下的 Triton(nvtriton/Triton-to-tile-IR) 实现、ENABLE_TILE 选择、is_nvt_available 探测、与 cutile 互为 fallback。",
+          "learning_goals": [
+            "理解 triton 后端实现位置",
+            "掌握 ENABLE_TILE 与 oait/nvt 选择",
+            "理解后端探测与 fallback_backend=\"triton\""
+          ],
+          "source_files": [
+            "src/tilegym/ops/triton/rms_norm.py",
+            "src/tilegym/ops/triton/rope.py",
+            "src/tilegym/backend/selector.py"
+          ],
+          "minimal_modules": [
+            "triton 后端实现",
+            "ENABLE_TILE / oait vs nvt",
+            "后端探测",
+            "fallback_backend=\"triton\""
+          ],
+          "practice_task": "解释为何 ops.py 中多个算子的 fallback_backend 设为 \"triton\"；说明用 PYTHONPATH=/opt/nvtriton ENABLE_TILE=1 切换 nvtriton 后端的原理。",
+          "depends_on": [
+            "u2-l3",
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "cuTile-rs Rust FFI 后端",
+          "order": 3,
+          "filename": "u7-l3-cutile-rs-backend.md",
+          "level": "advanced",
+          "topic": "cutile_rs 用 Rust 写内核、编译成 cdylib、cffi 绑定 + TensorDesc、autobuild、CUPTI autotuner；本轮支持 per-suite 内核 crate（自定义 so_name 与多 src_roots 的 stale 判定）与 NVFP4 dtype codes。",
+          "learning_goals": [
+            "理解 Rust kernel crate 与 cdylib",
+            "掌握 cffi/cdef 与 TensorDesc 跨界",
+            "理解 autobuild（含 per-suite src_roots/so_name）与可用性探测",
+            "理解 NVFP4 dtype 与 CUPTI autotune 为何不用 cuda.Event"
+          ],
+          "source_files": [
+            "src/tilegym/ops/cutile_rs/matmul.py",
+            "src/tilegym/backend/cutile_rs/autotuner.py",
+            "src/tilegym/ops/cutile_rs/cutile_kernels/Cargo.toml",
+            "src/tilegym/backend/cutile_rs/utils.py"
+          ],
+          "minimal_modules": [
+            "Rust kernel crate + cdylib",
+            "cffi/cdef 与 TensorDesc",
+            "autobuild（per-suite src_roots/so_name）与可用性",
+            "NVFP4 dtype 与 CUPTI autotune"
+          ],
+          "practice_task": "说明 autotune_launch 为何要求 kernel_fn 内只用 torch.empty 而不能用 clone/zeros；解释 CUPTI 与 cuda.Event 在测量小内核时的差异；并说明 _so_stale 现在如何按 per-suite 的 src_roots（含共享 ffi_util.rs）判定 .so 是否过期。",
+          "depends_on": [
+            "u5-l3",
+            "u7-l1"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "LLM 集成：从内核到真实模型",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Transformer monkey-patching 集成",
+          "order": 1,
+          "filename": "u8-l1-transformer-monkey-patch.md",
+          "level": "advanced",
+          "topic": "monkey_patch.py 的 apply_tilegym_kernel_to_* 函数如何替换 HF modeling 模块里的 RoPE/RMSNorm/MLP/Attention/MoE，及 MODEL_TYPE_TO_APPLY_TILEGYM_FN 分发。",
+          "learning_goals": [
+            "理解模块属性替换（monkey-patch）机制",
+            "掌握各模型的替换点",
+            "理解 use_cutile 分支与模型类型分发"
+          ],
+          "source_files": [
+            "src/tilegym/transformers/monkey_patch.py"
+          ],
+          "minimal_modules": [
+            "模块属性替换（monkey-patch）",
+            "各模型替换点",
+            "use_cutile 分支",
+            "模型类型分发"
+          ],
+          "practice_task": "以 apply_tilegym_kernel_to_llama 为例，列出它替换的 4 个点；说明为何 monkey-patch 必须在模型初始化前调用。",
+          "depends_on": [
+            "u2-l2",
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "融合模块与算子接口",
+          "order": 2,
+          "filename": "u8-l2-fused-modules-interfaces.md",
+          "level": "advanced",
+          "topic": "PartiallyFusedSwiGLUMLP/PartiallyFusedGEGLUMLP 融合权重、attn_interface 工厂函数、fused_mlp 的 3 步融合。",
+          "learning_goals": [
+            "理解融合 MLP 的 gate+up 权重融合",
+            "掌握 silu_and_mul 融合步与 attn_interface 工厂",
+            "理解保留原始参数名的 checkpoint 兼容"
+          ],
+          "source_files": [
+            "src/tilegym/ops/fused_mlp.py",
+            "src/tilegym/ops/attn_interface.py",
+            "src/tilegym/ops/ops.py"
+          ],
+          "minimal_modules": [
+            "融合 MLP（gate+up 权重融合）",
+            "silu_and_mul 融合步",
+            "attn_interface 工厂",
+            "get_fused_swiglu_module"
+          ],
+          "practice_task": "计算 PartiallyFusedSwiGLUMLP 把标准 5 个 kernel 压缩到 3 个的来源；说明融合权重为何仍保留 gate_proj/up_proj 等原始参数名。",
+          "depends_on": [
+            "u4-l1",
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "HF 推理基准与内核覆盖率",
+          "order": 3,
+          "filename": "u8-l3-hf-bench-coverage.md",
+          "level": "advanced",
+          "topic": "modeling/transformers 的 tilegym-hf-bench CLI、infer.py shim、profiling（nsys/torch_profiler）、kernel coverage 与 kernel_filters。",
+          "learning_goals": [
+            "掌握 CLI 参数（use_tilegym/use_cutile/use_attn）",
+            "理解 profiling 路径",
+            "理解 kernel coverage 报告与内核名称过滤"
+          ],
+          "source_files": [
+            "modeling/transformers/README.md",
+            "modeling/transformers/infer.py",
+            "modeling/transformers/src/tilegym_hf_bench/_cli.py"
+          ],
+          "minimal_modules": [
+            "CLI 参数与预设",
+            "profiling 路径",
+            "kernel coverage 报告",
+            "kernel 名称过滤"
+          ],
+          "practice_task": "写出一条对 Llama-3.1-8B 开启 TileGym 注意力并报告内核覆盖率的命令；说明 coverage 指标如何由 kernel_filters 的前缀匹配定义。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "测试、基准与贡献流程",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "测试框架与基准框架",
+          "order": 1,
+          "filename": "u9-l1-test-benchmark-framework.md",
+          "level": "advanced",
+          "topic": "tests/common.py 的 PyTestCase（reference + assertCorrectness + parametrize）、tests/ops 组织、benchmark bench_*.py 与 run_all.sh。",
+          "learning_goals": [
+            "掌握 PyTestCase 基类与 reference/assertCorrectness",
+            "理解后端参数化测试",
+            "掌握 benchmark 框架与 run_all.sh"
+          ],
+          "source_files": [
+            "tests/ops/test_softmax.py",
+            "tests/ops/README.md",
+            "tests/common.py",
+            "tests/benchmark/run_all.sh"
+          ],
+          "minimal_modules": [
+            "PyTestCase 基类",
+            "reference/assertCorrectness/parametrize",
+            "后端参数化",
+            "benchmark 框架"
+          ],
+          "practice_task": "照 test_softmax 的结构，为一个新算子写一个最小 Test_Xxx 类骨架（reference 静态方法 + test_op + parametrize backend）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "贡献新算子的完整工作流",
+          "order": 2,
+          "filename": "u9-l2-add-new-op-workflow.md",
+          "level": "advanced",
+          "topic": "端到端新增一个 cuTile op：ops.py 加 @dispatch stub、cutile/__init__ 导出、写内核+register_impl、加 tests/ops 与 benchmark。",
+          "learning_goals": [
+            "掌握新增算子的接口 stub 步骤",
+            "掌握后端实现与注册步骤",
+            "理解测试与基准的配套要求"
+          ],
+          "source_files": [
+            "src/tilegym/ops/ops.py",
+            "src/tilegym/ops/cutile/__init__.py",
+            "src/tilegym/ops/cutile/softmax.py",
+            "tests/ops/test_softmax.py",
+            "skills/tilegym-adding-cutile-kernel/SKILL.md"
+          ],
+          "minimal_modules": [
+            "接口 stub",
+            "后端实现 + 注册",
+            "测试",
+            "基准"
+          ],
+          "practice_task": "仿照 softmax，规划新增一个 \"abs\" 算子所需的 4 个改动点（接口 stub / cutile 实现 + register_impl / cutile/__init__ 导出 / tests），列出每处要改的文件与函数。",
+          "depends_on": [
+            "u2-l2",
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "进阶机制与生态",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "Suites 扩展机制（liger/flashinfer/unsloth）",
+          "order": 1,
+          "filename": "u10-l1-suites-extension.md",
+          "level": "advanced",
+          "topic": "suites/ 如何用 @dispatch(\"liger.xxx\") 等命名空间扩展 TileGym，suite ops.py 统一接口与后端实现目录的关系；本轮 liger suite 大幅扩容（新增 dyt/fused_add_rms_norm/fused_linear_cross_entropy/grpo_loss/poly_norm/rms_norm/softmax/swiglu/tvd 等），并通过新增的 liger/ops.py 暴露统一算子接口。",
+          "learning_goals": [
+            "理解 suite 命名空间算子名",
+            "掌握 suite ops 接口与后端实现",
+            "理解 suites 与核心 ops 的异同",
+            "了解 liger suite 的算子目录与统一接口"
+          ],
+          "source_files": [
+            "src/tilegym/suites/liger/ops.py",
+            "src/tilegym/suites/liger/__init__.py",
+            "src/tilegym/suites/flashinfer/ops.py"
+          ],
+          "minimal_modules": [
+            "suite 命名空间算子名",
+            "suite ops 接口",
+            "后端实现目录",
+            "liger 算子目录与统一接口",
+            "与核心 ops 的区别"
+          ],
+          "practice_task": "选 liger.cross_entropy，说明它的算子名为何带 \"liger.\" 前缀，以及它与 ops.py 中算子的 register_impl 注册方式有何相同与不同；再列出本轮 liger/ops.py 新增的若干算子名。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "实验内核追踪与内核清单生成",
+          "order": 2,
+          "filename": "u10-l2-experimental-inventory.md",
+          "level": "advanced",
+          "topic": "experimental.py 对 ct.launch 的 monkey-patch 打印一次性实验警告、kernel_inventory 基于 FIB/flashinfer-bench 的 Solution/Definition 代码生成（现已把 cutile_rs 也作为 suite 后端纳入遍历）、autotune 全局开关。",
+          "learning_goals": [
+            "理解 experimental_kernel 装饰器与 launch 补丁",
+            "掌握 kernel_inventory 的数据契约（pydantic 模型）",
+            "理解 suite 后端（triton/cutile/cutile_rs）的 solution 遍历",
+            "理解 autotune 全局开关"
+          ],
+          "source_files": [
+            "src/tilegym/experimental.py",
+            "src/tilegym/kernel_inventory/generation.py",
+            "src/tilegym/kernel_inventory/__init__.py",
+            "src/tilegym/autotune.py"
+          ],
+          "minimal_modules": [
+            "experimental_kernel 装饰器与 launch 补丁",
+            "kernel_inventory 数据契约",
+            "suite 后端 solution 遍历（含 cutile_rs）",
+            "FIB/Solution 模式",
+            "autotune 全局开关"
+          ],
+          "practice_task": "说明 experimental_kernel 如何在不修改内核内部代码的情况下实现一次性告警；列出 generation.py 用到的核心 pydantic 模型，并解释 iter_kernel_solution_paths 现在如何遍历 triton/cutile/cutile_rs 三类后端。",
+          "depends_on": [
+            "u3-l3",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "cuTile.jl Julia 内核",
+          "order": 3,
+          "filename": "u10-l3-julia-cutile.md",
+          "level": "advanced",
+          "topic": "julia/ 目录的 cuTile.jl 内核（add/matmul/softmax）、Project.toml 依赖、Julia 侧 runtests，与 Python cuTile 的对照。",
+          "learning_goals": [
+            "理解 cuTile.jl 内核写法",
+            "掌握 Julia Project/依赖管理",
+            "理解与 Python cuTile 的关键差异（1-index、列主序）"
+          ],
+          "source_files": [
+            "julia/kernels/softmax.jl",
+            "julia/test/test_softmax.jl",
+            "julia/Project.toml",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "cuTile.jl 内核写法",
+            "Julia Project/依赖",
+            "runtests 测试",
+            "与 Python cuTile 对照"
+          ],
+          "practice_task": "对照 julia/kernels/softmax.jl 与 src/tilegym/ops/cutile/softmax.py，列出 0-index→1-index、行列主序等关键差异，并说明它们如何影响索引计算。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "Liger 训练内核族：损失、归一化与融合算子",
+          "order": 4,
+          "filename": "u10-l4-liger-training-kernels.md",
+          "level": "advanced",
+          "topic": "liger suite 本轮大幅扩展的训练内核族：策略梯度损失（grpo_loss 含 DAPO/GSPO 等）、融合线性交叉熵与 JSD/KL/TVD、dyt/poly_norm/fused_add_rms_norm 归一化、swiglu/softmax 激活，以及它们的 token/sequence-level 前向 grid 与 autograd 反向内核。",
+          "learning_goals": [
+            "理解 liger 训练损失族（grpo_loss/fused_linear_cross_entropy/jsd/kl_div/tvd）的 token/sequence-level 实现",
+            "掌握 dyt/poly_norm/fused_add_rms_norm 等归一化变体内核",
+            "理解 swiglu/softmax 等激活内核与 autograd Function 反向重计算",
+            "理解 liger/ops.py 统一接口与 liger 命名空间注册的关系"
+          ],
+          "source_files": [
+            "src/tilegym/suites/liger/ops.py",
+            "src/tilegym/suites/liger/cutile/grpo_loss.py",
+            "src/tilegym/suites/liger/cutile/fused_linear_cross_entropy.py",
+            "src/tilegym/suites/liger/cutile/fused_add_rms_norm.py",
+            "src/tilegym/suites/liger/cutile/cross_entropy.py"
+          ],
+          "minimal_modules": [
+            "策略梯度损失族（grpo_loss 等）",
+            "融合线性交叉熵 / JSD / KL / TVD",
+            "归一化变体（dyt/poly_norm/fused_add_rms_norm）",
+            "激活内核与 autograd 反向"
+          ],
+          "practice_task": "选 grpo_loss，说明其前向 grid=(B,L) 内核如何在一个 block 内完成 vocab 维 logsumexp、目标 logp、重要性比 coef_1=exp(logp-old_logp) 与可选 KL；再说明反向内核为何从缓存的 lse 重算 logp 而非保存完整 logits，并指出 DLOGITS[:, -1, :]=0 的语义。",
+          "depends_on": [
+            "u10-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
