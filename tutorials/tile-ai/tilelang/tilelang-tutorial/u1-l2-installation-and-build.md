@@ -4,221 +4,198 @@
 
 学完本讲后，你应该能够：
 
-- 用 `pip` 安装 tilelang，并用 `python -c "import tilelang; print(tilelang.__version__)"` 验证安装是否成功。
-- 说清楚 tilelang 的三种获取方式（PyPI / 源码构建 / nightly）各自适用场景。
-- 理解从源码构建时，TVM 子模块、CUTLASS、Composable Kernel（CK）三者的角色，以及 `USE_CUDA / USE_ROCM / USE_LLVM` 等 CMake 选项的含义。
-- 知道 `pyproject.toml` 如何用 `scikit-build-core` 把 C++ 工程打包成 wheel，并把 `3rdparty` 里的 TVM/CUTLASS/CK 映射进安装目录。
-- **重点**：讲清楚运行期 `import tilelang` 时，Python 是怎么在文件系统里定位到原生库 `libtilelang.so` 的——也就是 `tilelang.libinfo` 与 `tilelang.env` 这两个最小模块。
+1. 用三种方式（pip、源码构建、nightly）成功安装 tilelang，并通过 `import tilelang` 验证。
+2. 理解源码构建背后的依赖链条：为什么需要 TVM 子模块、CUTLASS、Composable Kernel，以及 `USE_CUDA` / `USE_ROCM` / `USE_METAL` / `USE_LLVM` 等 CMake 选项的作用。
+3. 看懂 `pyproject.toml` 如何用 scikit-build-core 把 C++ 工程打包成 Python wheel，并把 `3rdparty` 映射进安装目录。
+4. **重点**：读懂 `tilelang/env.py`（运行时环境变量中枢）和 `tilelang/libinfo.py`（原生库定位器）这两个最小模块，搞清楚 `import tilelang` 时 `libtilelang.so` 到底是从哪里被找到并加载的。
 
-本讲承接 [u1-l1 项目总览](./u1-l1-project-overview.md)：上一讲建立了「Python DSL → TIR → Pass → 设备代码 → Kernel Adapter」的全景认知，本讲解决「这套东西先得装得上、跑得起来」。
+本讲承接上一讲「项目总览与架构定位」：上一讲建立了「Python DSL → TVM TIR → Pass → 设备代码 → Kernel Adapter」的全景认知；本讲解决的是「我手上这份代码，怎么变成一个能 `import` 的 Python 包，以及 `import` 时那个 C++ 引擎从哪里被加载」。
 
 ## 2. 前置知识
 
-在动手之前，先用大白话理解几个概念：
+在动手之前，用大白话理解几个概念（不熟悉也没关系，本讲会反复用到）：
 
-- **原生库（native library / shared library）**：tilelang 不只是纯 Python。它的编译器核心（Pass、代码生成器等）是用 C++ 写的，编译后会得到一个动态库，Linux 上叫 `libtilelang.so`，macOS 上叫 `libtilelang.dylib`，Windows 上则被打进了 `tvm_compiler.dll`。Python 侧通过 `ctypes` 把这个库加载进进程，才能调用里面的 C++ 函数。
-- **TVM**：tilelang 建立在 TVM 之上，把 TVM 当作「TIR 中间表示 + 一套基础设施」来用。仓库 `3rdparty/tvm` 里是一个定制版 TVM，源码构建时会和 tilelang 一起编译。
-- **CUTLASS / Composable Kernel（CK）**：分别是 NVIDIA 与 AMD 官方的高性能矩阵运算模板库。tilelang 在生成 GEMM 等算子的设备代码时，会 include 这些库的头文件，所以它们的 include 路径在构建期和运行期都要能被找到。
-- **wheel**：Python 的二进制安装包格式（`.whl`）。因为 tilelang 含 C++ 代码，所以它的 wheel 不只是 `.py` 文件，里面还打包了编译好的 `.so`/`.dll`。
-- **scikit-build-core**：一个把 CMake 工程接入 Python 打包（PEP 517）的工具。tilelang 用它来「先跑 CMake 编译 C++，再把产物打成 wheel」。
-- **环境变量**：tilelang 大量使用环境变量来配置路径与行为，本讲会涉及 `CUDA_HOME`、`TVM_LIBRARY_PATH`、`TL_CUTLASS_PATH` 等，它们都集中在 `tilelang/env.py`。
+- **原生库（native / shared library）**：tilelang 不只是纯 Python。它的编译器核心（Pass、代码生成器）是用 C++ 写的，编译后得到一个动态库——Linux 上是 `libtilelang.so`，macOS 上是 `libtilelang.dylib`，Windows 上则被合并进 `tvm_compiler.dll`。Python 层通过 `ctypes` 把这个库加载进进程，才能调用其中的 C++ 函数。
+- **TVM**：tilelang 构建在 TVM 之上，把它当作「TIR 中间表示 + 一套基础设施」来用。仓库 `3rdparty/tvm` 里是一个定制版 TVM，源码构建时会和 tilelang 一起编译。
+- **CUTLASS / Composable Kernel（CK）**：分别是 NVIDIA 与 AMD 官方的高性能矩阵运算模板库（header-only）。tilelang 生成 GEMM 等算子的设备代码时会 include 这些头文件，所以它们的 include 路径在构建期和运行期都要能被找到。
+- **wheel（.whl）**：Python 的标准二进制分发格式。因为 tilelang 含 C++ 代码，它的 wheel 不只是 `.py` 文件，里面还打包了编译好的 `.so`/`.dll`。
+- **scikit-build-core**：把 CMake 工程接入 Python 打包（PEP 517）的工具——它驱动 CMake 编译 C++，再把产物塞进 wheel。
+- **环境变量**：tilelang 大量用环境变量配置路径与行为，本讲会涉及 `CUDA_HOME`、`TVM_LIBRARY_PATH`、`TL_CUTLASS_PATH` 等，它们都集中定义在 `tilelang/env.py`。
 
-如果你对「Python 如何加载一个 C 动态库」完全陌生，记住一句话即可：**Python 进程启动后，需要知道 `.so` 文件在磁盘上的绝对路径，然后用系统调用把它映射进进程地址空间，之后才能调用里面的函数。** 本讲很大一部分内容就是在回答「路径从哪来」。
+一句话总结 tilelang 的安装本质：**编译一份 C++ 共享库，再配上一堆 Python 文件和第三方头文件，打包成 wheel 供 `pip` 安装；运行时再由 Python 把那份共享库找出来加载。**
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件如下：
+本讲涉及的关键文件及其作用：
 
 | 文件 | 作用 |
 | --- | --- |
-| [docs/get_started/Installation.md](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md) | 官方安装文档，列出三种安装方式与构建期/运行期环境变量 |
-| [pyproject.toml](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e18f2cfd9c218d81d/pyproject.toml) | 项目元信息、运行期依赖、`scikit-build-core` 打包配置、`cibuildwheel` CI 构建配置 |
-| [CMakeLists.txt](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt) | C++ 工程的构建脚本：后端开关、加载 TVM、产出 `libtilelang.so`、Cython 封装 |
-| [tilelang/env.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py) | 运行期环境的大管家：定位库目录 `TL_LIBS`、第三方头文件路径、`CUDA_HOME/ROCM_HOME`、缓存开关 |
-| [tilelang/libinfo.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py) | 在 `TL_LIBS` 候选目录里查找具体的 `.so`/`.dll` 文件名并返回绝对路径 |
-| [tilelang/__init__.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py) | 包入口：计算 `__version__`、加载原生库、触发轻量/完整导入分支 |
-| [version_provider.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py) | 打包期动态生成版本号（拼接后端标签 + git hash） |
-| [cmake/load_tvm.cmake](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/cmake/load_tvm.cmake) | 确定用哪个 TVM 源码（自带子模块或 `TVM_ROOT` 指向的外部 TVM） |
+| [docs/get_started/Installation.md](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md) | 官方安装手册，覆盖 pip / 源码 / Docker / nightly 四条路径与构建期/运行期环境变量说明。 |
+| [pyproject.toml](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml) | 项目元信息、Python 运行时依赖、构建后端（scikit-build-core）配置、wheel 中 `3rdparty` 的映射规则、cibuildwheel CI 配置。 |
+| [CMakeLists.txt](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt) | C++ 侧的 CMake 主入口：后端开关、TVM 子模块加载、`libtilelang.so` 目标定义、stub 库与 rpath。 |
+| [cmake/load_tvm.cmake](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/cmake/load_tvm.cmake) | 决定用哪个 TVM 源码（自带子模块，或 `TVM_ROOT` 指向的外部 TVM）。 |
+| [version_provider.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py) | 给 scikit-build-core 动态生成版本号，把 SDK 后缀和 git hash 拼进 `tilelang.__version__`。 |
+| [tilelang/env.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py) | 运行时环境变量中枢：`EnvVar` 描述符、`Environment` 配置类、CUDA/ROCm 定位、缓存控制、第三方库路径初始化、库搜索目录 `TL_LIBS`。 |
+| [tilelang/libinfo.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py) | 原生库定位器：跨平台拼出库文件名并从候选目录中找到 `libtilelang.so`。 |
+| [tilelang/__init__.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py) | 包入口：计算 `__version__`、轻量导入模式、用 `libinfo` 加载原生库、导出公共 API。 |
 
-> 说明：上面带 `tile-ai/tilelang/blob/<HEAD>/...` 的链接都是指向当前 HEAD `c6294f07` 的永久链接，点击可直接跳转到对应文件。
+> 上面所有形如 `tile-ai/tilelang/blob/c6294f07.../...` 的链接都是指向当前 HEAD `c6294f07` 的永久链接，点击可直接跳转到对应文件与行。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成 4 个最小模块：
+本讲拆成四个最小模块：4.1 三种安装方式、4.2 源码构建与打包机制、4.3 `tilelang.env` 运行时环境中枢、4.4 `tilelang.libinfo` 原生库定位。其中 **4.3 和 4.4 是本讲指定的两个核心最小模块**，它们共同回答「`import tilelang` 时 C++ 引擎从哪加载」。
 
-1. **4.1 三种安装方式与运行期依赖**——怎么装、装进来哪些 Python 依赖。
-2. **4.2 wheel 是怎么打包出来的**——`scikit-build-core` 如何把 C++ 产物和 `3rdparty` 一起塞进 `.whl`。
-3. **4.3 从源码构建**——`CMakeLists.txt` 如何编译 C++、加载 TVM 子模块、选择后端。
-4. **4.4 运行期库定位**（核心）——`import tilelang` 时如何找到 `libtilelang.so`。
-
-### 4.1 三种安装方式与运行期依赖
+### 4.1 三种安装方式：pip / 源码 / nightly
 
 #### 4.1.1 概念说明
 
-tilelang 提供三种获取方式，适用人群不同：
+tilelang 提供三条主流安装路径，复杂度递增：
 
 | 方式 | 命令 | 适用场景 |
 | --- | --- | --- |
 | PyPI 稳定版 | `pip install tilelang` | 大多数用户；预编译 wheel，开箱即用 |
-| nightly 版 | `pip install tilelang -f https://tile-ai.github.io/whl/nightly` | 想用最新特性、尚未发版的修复 |
-| 源码构建 | `git clone --recursive ... && pip install . -v` | 需要改 C++/Python 源码、或目标机器没有预编译 wheel |
+| nightly 版 | `pip install tilelang -f https://tile-ai.github.io/whl/nightly` | 想要最新未发布功能/修复 |
+| 源码构建 | `git clone --recursive ... && pip install . -v` | 要改 C++/Python 源码、或需要非默认后端（ROCm/Metal/CPU） |
 
-另外还有「Docker 镜像」「外部 TVM」等变体，本质都是源码构建的封装或特例。
-
-理解这三种方式的关键在于：**预编译 wheel 已经把 `libtilelang.so` 和 `3rdparty` 打包好了**，所以安装后无需编译；而源码构建则要在本机跑 CMake 把 C++ 编出来。
+理解这三者的关键在于：**预编译 wheel 已经把 `libtilelang.so` 和 `3rdparty`（TVM/CUTLASS/CK）打包好了**，所以安装后无需编译；而源码构建则要在本机跑 CMake 把 C++ 编出来。无论哪条路径，最终验证命令都一样。
 
 #### 4.1.2 核心流程
 
-安装后验证的正确姿势只有一行：
+```
+需要改源码 / 自定义后端？
+├── 是 ──> 源码构建（git clone --recursive + pip install . -v）
+└── 否 ──> 想要最新未发布功能？
+           ├── 是 ──> nightly（pip install -f <nightly 链接>）
+           └── 否 ──> pip install tilelang（PyPI 稳定版）
+```
+
+三种方式验证安装是否成功的命令完全相同：
 
 ```bash
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
-这一行其实触发了两件事：
-
-1. **导入 Python 包**：解析 `tilelang` 包，执行 `tilelang/__init__.py`，过程中加载原生库（详见 4.4）。
-2. **打印版本号**：`__version__` 的来源取决于「源码检出」还是「已安装的 wheel」（详见 4.4.1）。
-
-tilelang 的运行期 Python 依赖在 [pyproject.toml](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml) 里声明，其中几条值得记住：
-
-- `apache-tvm-ffi`：tvm-ffi 的 Python 绑定，tilelang 的 FFI 调用基于它。
-- `torch`：tilelang 把 PyTorch tensor 作为主要的输入输出载体。
-- `z3-solver`：Z3 SMT 求解器，tilelang 用它做符号推理（如索引边界分析）。
-- `ml-dtypes`：提供 `float8` 等低精度 dtype。
-- `numpy`、`psutil`、`cloudpickle`、`tqdm`、`typing-extensions`：常用工具库。
+这一行其实触发两件事：① 导入 Python 包并加载原生库（详见 4.3、4.4）；② 打印版本号（版本号来源见 4.2.3）。
 
 #### 4.1.3 源码精读
 
-Python 版本与项目定位写在 [pyproject.toml:1-9](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L1-L9)：
+**pip 安装的前提条件**，见官方手册 [docs/get_started/Installation.md:5-9](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L5-L9)：glibc ≥ 2.28（Ubuntu 20.04+）、Python ≥ 3.10、CUDA ≥ 10.0（或用 pip 提供的 CUDA 工具链 ≥ 13.0）。最简安装命令见 [docs/get_started/Installation.md:14-15](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L14-L15)，验证命令见 [docs/get_started/Installation.md:32-33](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L32-L33)。
 
-```toml
-name = "tilelang"
-description = "A tile level programming language to generate high performance code."
-requires-python = ">=3.10"
-```
+**nightly 安装**见 [docs/get_started/Installation.md:289-298](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L289-L298)：用 `--find-links`（`-f`）指向专门的 whl 索引页，并提醒 nightly 可能不如正式版稳定。
 
-注意 `requires-python = ">=3.10"`——这是 tilelang 支持的最低 Python 版本，对应 classifiers 里列出的 3.10 ~ 3.14。
+**pip 安装会顺带装哪些 Python 依赖**，见 [pyproject.toml:29-45](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L29-L45)。几条值得记住：
 
-运行期依赖列表见 [pyproject.toml:29-45](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L29-L45)（节选）：
+- `apache-tvm-ffi>=0.1.11,<0.1.12`：TVM 的 Python↔C++ FFI 绑定，Python 调 C++ 编译器靠它（注意有版本上界，因为 ABI 变化快）。
+- `torch` 与 `torch-c-dlpack-ext`：tilelang 把 PyTorch tensor 作为主要输入输出载体，并依赖 dlpack 零拷贝交换。
+- `z3-solver>=4.13.0,<4.15.5`：SMT 求解器，tilelang 的符号分析（边界证明、索引化简）依赖它（这也是 `import` 时会尝试 `import z3` 的原因，见 4.3.3）。
+- `numpy`、`ml-dtypes`（低精度 dtype）、`cloudpickle`、`psutil`、`tqdm`、`typing-extensions` 等常规依赖。
 
-```toml
-dependencies = [
-    "apache-tvm-ffi>=0.1.11,<0.1.12",
-    "torch-c-dlpack-ext; python_version < '3.14'",
-    "cloudpickle",
-    "ml-dtypes",
-    "numpy>=1.23.5",
-    "psutil",
-    "torch",
-    ...
-    "z3-solver>=4.13.0,<4.15.5",
-]
-```
-
-注意几条依赖带了**版本上界**（如 `apache-tvm-ffi>=0.1.11,<0.1.12`、`z3-solver>=4.13.0,<4.15.5`）。这是因为这些库的 ABI/行为变化较快，tilelang 需要把它钉在经过验证的区间内。如果安装时报依赖冲突，多半是这些上界在起作用。
-
-官方文档里的安装命令见 [docs/get_started/Installation.md:11-33](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L11-L33)，其中验证步骤正是上面那一行 `import`。
+[pyproject.toml:47-63](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L47-L63) 定义可选依赖（`extras`）：`fp4`（启用 fp4 需要更新的 ml-dtypes）、`vis`（布局可视化需要 matplotlib）、`nvcc`（带 NVCC 的构建需要 `nvidia-cuda-nvcc` 等）。安装时用 `pip install "tilelang[nvcc]"` 启用。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：用 pip 安装 tilelang 并确认能导入、能拿到版本号。
-2. **操作步骤**：
-   - 创建一个干净的虚拟环境（推荐 Python ≥ 3.10）。
-   - 执行 `pip install tilelang`。
-   - 执行 `python -c "import tilelang; print(tilelang.__version__)"`。
-3. **需要观察的现象**：终端打印一串版本号，例如形如 `0.1.12+cuda.gitxxxxxxxx`（具体后缀取决于你装的 wheel 是哪个后端构建的，详见 4.2）。
-4. **预期结果**：命令退出码为 0，且无 `ImportError` / `Cannot find libraries` 报错。
-5. 若手头没有 GPU 也无妨——只要 wheel 里带了 stub 库，`import` 本身不需要真实 GPU；但真正编译/运行 kernel 时仍需对应运行时（CUDA/ROCm）。
+**实践目标**：在本地环境用 pip 走通最简安装并验证。
 
-> 本环境无 GPU 与网络，无法替你执行安装，具体输出「待本地验证」。
+**操作步骤**：
+
+1. 确认 Python 版本：`python --version`（需 ≥ 3.10，见 [pyproject.toml:5](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L5)）。
+2. 执行安装：`pip install tilelang`。
+3. 验证：`python -c "import tilelang; print(tilelang.__version__)"`。
+
+**需要观察的现象**：第 3 步应打印一串版本号，形如 `0.1.12+cu130.gitxxxxxxxx` 或纯 `0.1.12`（取决于 wheel 是否带版本标签，见 4.2.3）。
+
+**预期结果**：命令退出码为 0，无 `ImportError` / `Cannot find libraries` 报错。
+
+**关于无 GPU 环境**：pip wheel 用了 CUDA/HIP stub 库做 lazy load（见 4.2.3），所以即使机器没装 CUDA Toolkit，`import` 本身通常也能成功；只有真正编译/运行 kernel 时才需要 CUDA。
+
+**待本地验证**：记录你机器上实际打印的 `__version__` 字符串，留作后续讲义对比。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `pip install tilelang` 之后通常不需要再装 CUDA Toolkit 也能 `import` 成功？
+**练习 1**：`pip install tilelang` 之后通常不需要再装 CUDA Toolkit 也能 `import` 成功，为什么？
 
-> **答案**：因为官方 wheel 用了 CUDA/HIP 的 **stub 库**（见 4.3.3 的 `TILELANG_USE_CUDA_STUBS` / `TILELANG_USE_HIP_STUBS`）。stub 库在导入时只满足符号链接关系，真正的 `libcuda.so.1` 等运行时是在调用时 lazy-load（dlopen）的。所以「能 import」不等于「能跑 kernel」。
+> **答案**：因为官方 wheel 用了 CUDA/HIP 的 **stub 库**（见 4.2.3）。stub 库在导入时只满足符号链接关系，真正的 `libcuda.so.1` 等运行时是在调用时 lazy-load（dlopen）的。所以「能 import」不等于「能跑 kernel」——后者仍需真实 CUDA/ROCm Toolkit。
 
 **练习 2**：`apache-tvm-ffi` 为什么被钉在 `<0.1.12`？
 
-> **答案**：tvm-ffi 是 tilelang FFI 的基础，小版本之间可能改 ABI 或调用约定；钉死上界可以避免上游突然发新版把已验证的集成破坏掉。遇到冲突时以 `requirements.txt`/`pyproject.toml` 声明的区间为准。
+> **答案**：tvm-ffi 是 tilelang FFI 的基础，小版本之间可能改 ABI 或调用约定；钉死上界避免上游突然发新版破坏已验证的集成。遇到依赖冲突时以 `pyproject.toml` 声明的区间为准。
 
-### 4.2 wheel 是怎么打包出来的：scikit-build-core 与 3rdparty 映射
+---
+
+### 4.2 源码构建与打包机制
 
 #### 4.2.1 概念说明
 
-tilelang 是「C++ + Python」混合工程。纯 Python 包用 `setuptools` 打包即可，但有 C++ 的包需要：**先编译 C++，再把编译产物连同 Python 文件一起塞进 wheel**。`scikit-build-core` 就是干这个的——它把 CMake 作为构建后端，在打包时自动跑一遍 CMake，收集产物。
+源码构建是理解 tilelang 工程结构的关键，涉及三个层次：
 
-理解 wheel 的内部结构很重要，因为运行期「去哪找 `.so`」直接由 wheel 里文件的摆放位置决定（见 4.4）。简单说：
+1. **C++ 编译**：用 CMake 把 `src/` 下的 C++ 源码 + TVM 子模块编译成 `libtilelang.so`。
+2. **第三方依赖**：TVM（定制版，作为 git 子模块）、CUTLASS、Composable Kernel 作为头文件依赖参与编译。
+3. **Python 打包**：scikit-build-core 作为 PEP 517 构建后端，驱动 CMake 编译，再把 `.so`、Python 代码、第三方头文件组装进 wheel。
 
-- Python 代码放在 `tilelang/`。
-- 编译出的原生库放在 `tilelang/lib/`。
-- 第三方头文件（TVM/CUTLASS/CK）放在 `tilelang/3rdparty/`，因为运行期生成 kernel 时还要 include 它们。
+理解这一层后，你就能解释「为什么 `git clone` 要加 `--recursive`」「为什么 wheel 体积大但开箱即用」「为什么 `TL_CUTLASS_PATH` 这种环境变量存在」。
 
 #### 4.2.2 核心流程
 
-打包流程可以概括为：
+源码构建的端到端流程：
 
-```text
-pip install / python -m build
+```
+git clone --recursive   (拉取 tilelang + TVM/CUTLASS/CK 子模块)
         │
         ▼
-scikit-build-core 启动（PEP 517 build backend）
+pip install . -v        (触发 scikit-build-core)
         │
-        ├── 读 [tool.scikit-build] 配置
-        ├── 调用 CMake: cmake -S . -B build  →  生成 build 系统
-        ├── 调用编译: cmake --build build    →  产出 libtilelang.so / cython 包装
-        ├── 按 [tool.scikit-build.wheel.packages] 收集文件
-        │     · tilelang/        → wheel/tilelang/
-        │     · 3rdparty/tvm/... → wheel/tilelang/3rdparty/...
-        │     · build/lib/*.so   → wheel/tilelang/lib/*.so
-        └── 打成 .whl
+        ▼
+scikit-build-core 调用 CMake (按 pyproject.toml 的 [tool.scikit-build] 配置)
+        │
+        ├─ include(FindPipCUDAToolkit)       先找主机 CUDA，找不到回退 pip 包
+        ├─ 定义 USE_CUDA/ROCM/METAL/LLVM 后端开关
+        ├─ include(cmake/load_tvm.cmake)     定位 TVM 源码（自带或 TVM_ROOT）
+        ├─ add_subdirectory(TVM)             编译 TVM
+        ├─ add_library(tilelang SHARED ...)  链接成 libtilelang.so
+        ├─ Cython 编译 cython_wrapper.pyx
+        └─ install(... DESTINATION tilelang/lib)
+        │
+        ▼
+version_provider 生成带 git hash 的版本号
+        │
+        ▼
+组装 wheel: Python 包 tilelang/ + libtilelang.so + 3rdparty 头文件
 ```
 
-版本号是「动态生成」的：`scikit-build-core` 会在打包期调用 `version_provider.py` 的 `dynamic_metadata("version")`，把后端标签和 git hash 拼到基础版本后面。
+后端选择遵循「显式优先」原则：用户在命令行或环境变量里显式指定了 `USE_*`，就用用户指定的；否则按平台默认——macOS 默认 Metal，Linux 在检测到 CUDA Toolkit 时默认 CUDA，否则不开。
 
 #### 4.2.3 源码精读
 
-构建后端声明见 [pyproject.toml:75-93](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L75-L93)：
+**Python 侧构建后端声明**，见 [pyproject.toml:75-93](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L75-L93)：
 
 ```toml
 [build-system]
-requires = ["cython>=3.1.0", "scikit-build-core", "z3-solver>=4.13.0,<4.15.5", ...]
+requires = ["cython>=3.1.0", "scikit-build-core", "z3-solver>=4.13.0,<4.15.5",
+            "patchelf>=0.17.2; platform_system == 'Linux'", ...]
 build-backend = "scikit_build_core.build"
-
-[tool.scikit-build]
-wheel.py-api = "cp38"
-cmake.version = ">=3.26.1"
-build-dir = "build"
-metadata.version.provider = "version_provider"
-metadata.version.provider-path = "."
 ```
 
-关键点：
+注意 `[build-system].requires`（构建 wheel 时需要的工具）和 `[project].dependencies`（安装后运行时需要的库）是两套——构建期还需要 `cython`、`patchelf` 等。
 
-- `build-backend = "scikit_build_core.build"` 指明用 scikit-build-core 打包。
-- `cmake.version = ">=3.26.1"` 要求构建期有 CMake ≥ 3.26。
-- `metadata.version.provider = "version_provider"` 把版本号交给同目录下的 `version_provider.py` 动态生成（对应 `dynamic_metadata` 函数）。
+[pyproject.toml:95-115](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L95-L115) 是 scikit-build 配置：`wheel.py-api = "cp38"` 表示用稳定 ABI（cp38 起的 abi3，一个 wheel 能跨多个 Python 版本）；`cmake.version = ">=3.26.1"`；`build-dir = "build"`；并用 `metadata.version.provider` 指向 `version_provider.py` 动态生成版本号；Windows 下强制 `-G Ninja` 生成器。
 
-把 `3rdparty` 打进 wheel 的映射见 [pyproject.toml:153-169](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L153-L169)（节选）：
+**wheel 如何把 3rdparty 打进去（关键设计）**，见 [pyproject.toml:153-169](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L153-L169)：
 
 ```toml
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
-"tilelang/src" = "src"
-# 把 3rdparty 的内容放进 wheel 内的 tilelang/3rdparty，运行期才能找到 TVM 共享库
+# 把 3rdparty 内容放进 wheel 内的 tilelang/3rdparty，运行期才能找到 TVM 共享库
 "tilelang/3rdparty/tvm/src" = "3rdparty/tvm/src"
 "tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
-"tilelang/3rdparty/tvm/include" = "3rdparty/tvm/include"
-# CUTLASS
 "tilelang/3rdparty/cutlass/include" = "3rdparty/cutlass/include"
-# Composable Kernel
 "tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
 ```
 
-注意左侧形如 `"tilelang/3rdparty/tvm/src"` 的键是「**wheel 内的目标路径**」，右侧 `"3rdparty/tvm/src"` 是「**源码仓库里的来源路径**」。也就是说，仓库根目录下的 `3rdparty/tvm/...` 会被安装到 wheel 里的 `tilelang/3rdparty/tvm/...`。这一步是运行期能找到 TVM/CUTLASS/CK 的前提。
+左侧形如 `"tilelang/3rdparty/tvm/src"` 的键是「**wheel 内的目标路径**」，右侧是「**仓库里的来源路径**」。也就是说，仓库根目录下的 `3rdparty/tvm/...` 会被安装到 wheel 里的 `tilelang/3rdparty/tvm/...`。这一步是运行期能找到 TVM/CUTLASS/CK 的前提——这也是为什么 tilelang wheel 体积较大但开箱即用。
 
-CI 构建配置（cibuildwheel）见 [pyproject.toml:252-316](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L252-L316)，其中两条最关键：
+**CI 构建（cibuildwheel）**，见 [pyproject.toml:252-316](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L252-L316)。两条最关键：
 
 ```toml
 [tool.cibuildwheel.linux]
@@ -226,120 +203,17 @@ environment.USE_CUDA = "ON"
 environment.USE_ROCM = "ON"
 ```
 
-这表示官方 Linux wheel 是「CUDA + ROCm 同时开启」的 **fat wheel**——同一个 wheel 既能跑 CUDA 也能跑 ROCm（ROCm 侧靠 vendored HIP 头文件 + dlopen stub 编译，运行期仍需真实 ROCm 运行时）。而 cibuildwheel 的导入自检命令正是本讲的验证一行：
+官方 Linux wheel 是「CUDA + ROCm 同时开启」的 **fat wheel**——ROCm 侧靠 vendored HIP 头文件 + dlopen stub 编译，运行期仍需真实 ROCm 运行时。cibuildwheel 的导入自检命令正是本讲的验证一行，见 [pyproject.toml:270-272](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L270-L272)。
 
-```toml
-test-command = ['python -c "import tilelang; print(tilelang.__version__)"']
-```
+**C++ 侧的 CMake 主入口**：
 
-见 [pyproject.toml:270-272](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L270-L272)。
+[CMakeLists.txt:4](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L4) 要求 CMake ≥ 3.26。注意 [CMakeLists.txt:9](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L9) 在 `project()` **之前** include `FindPipCUDAToolkit`——因为 CUDA 编译器必须在 project() 启用 CUDA 语言前确定好。这个模块先找主机 CUDA Toolkit，找不到回退 pip 装的 `nvidia-cuda-nvcc` 包，对应官方文档「With pip-provided CUDA toolchain (no host CUDA required)」路径（[docs/get_started/Installation.md:66-86](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L66-L86)）。
 
-版本号的动态拼接逻辑在 [version_provider.py:44-96](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L44-L96)，它读取 `USE_CUDA` / `USE_ROCM` / `CUDA_VERSION` 等环境变量决定后缀：
+[CMakeLists.txt:253](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L253) 定义四个后端 `CUDA ROCM METAL LLVM`，[CMakeLists.txt:264-296](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L264-L296) 用宏 `tilelang_define_backend_option` 为每个后端定义 `USE_*` 选项，并记下用户是否显式设置过。
 
-```python
-elif _read_cmake_bool(os.environ.get("USE_ROCM", "")) and not _read_cmake_bool(os.environ.get("USE_CUDA", "")):
-    backend = "rocm"
-elif "USE_CUDA" in os.environ and not _read_cmake_bool(os.environ.get("USE_CUDA")):
-    backend = "cpu"
-else:  # cuda
-    if cuda_version := os.environ.get("CUDA_VERSION"):
-        major, minor, *_ = cuda_version.split(".")
-        backend = f"cu{major}{minor}"
-    else:
-        backend = "cuda"
-```
+[CMakeLists.txt:381-445](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L381-L445) 是后端自动选择逻辑：先看用户有没有显式指定；若没有，读环境变量 `USE_CUDA` 等；若都没有，则 macOS 开 Metal、Linux 检测到 CUDA Toolkit 就开 CUDA。这正是 [docs/get_started/Installation.md:123-128](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L123-L128) 里那些 CMake 选项的来源。
 
-所以你会看到形如 `0.1.12+cu130.gita1b2c3d4` 这样的版本号——`cu130` 表示用 CUDA 13.0 构建，`gita1b2c3d4` 是 8 位 git hash。
-
-#### 4.2.4 代码实践
-
-1. **实践目标**：在不真的构建的前提下，通过阅读配置「预测」一个官方 Linux wheel 里会包含哪些目录。
-2. **操作步骤**：
-   - 读 [pyproject.toml:153-169](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L153-L169) 的 `wheel.packages` 映射。
-   - 读 [pyproject.toml:117-143](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L117-L143) 的 sdist include 列表作对照。
-   - 在纸上列出 wheel 内 `tilelang/` 下应出现的子目录：`lib/`、`3rdparty/tvm/...`、`3rdparty/cutlass/include`、`3rdparty/composable_kernel/include`、`src/` 等。
-3. **需要观察的现象**：`lib/` 目录（放 `.so`）不在 `wheel.packages` 列表里——它是由 CMake 的 `install(TARGETS ... DESTINATION tilelang/lib)` 单独装进去的（见 4.3.3）。
-4. **预期结果**：你能说出「Python 源码靠 `wheel.packages` 收，原生库靠 CMake `install` 收」这条分工。
-5. 若本地已装好 tilelang，可用 `python -c "import tilelang, os; print(os.path.dirname(tilelang.__file__))"` 找到安装目录，再 `ls` 其下的 `lib/` 与 `3rdparty/` 验证（「待本地验证」）。
-
-#### 4.2.5 小练习与答案
-
-**练习 1**：为什么 `3rdparty/tvm/python` 要被打进 wheel？
-
-> **答案**：tilelang 运行期需要 `import tvm`，而它用的是仓库自带的定制版 TVM 的 Python 绑定。把 `3rdparty/tvm/python` 装进 wheel 并在导入期把它加入 `sys.path`（见 4.4.3 的 `env.py`），就保证了「装的 tilelang 用的是配套版本的 TVM」，而不是系统里碰巧存在的另一个 tvm。
-
-**练习 2**：版本号 `0.1.12+cuda.gitxxxxxxxx` 里 `+` 后面的部分叫什么？去掉它会发生什么？
-
-> **答案**：`+` 后面是 **local version label**（PEP 440）。`version_provider.py` 用 `NO_VERSION_LABEL=ON` 可以关掉它；构建 sdist 时也会关掉，以保证 sdist 与 wheel 的版本字符串一致，避免 pip 抱怨版本不匹配（见 [version_provider.py:14-18](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L14-L18) 的注释）。
-
-### 4.3 从源码构建：CMakeLists 与 TVM 子模块
-
-#### 4.3.1 概念说明
-
-当你需要修改 tilelang 的 C++ 源码，或者官方 wheel 不覆盖你的平台/后端时，就要从源码构建。源码构建的本质是：**让 CMake 调用编译器，把 `src/` 下的 C++ 和 `3rdparty/tvm` 一起编成 `libtilelang.so`**，再由 scikit-build-core 把它打包（或直接用 PYTHONPATH 引用）。
-
-这里有几个关键角色：
-
-- **TVM 子模块**：`3rdparty/tvm` 是定制版 TVM。`git clone --recursive` 会把它拉下来；构建时和 tilelang 一起编译。
-- **后端开关 `USE_CUDA / USE_ROCM / USE_METAL / USE_LLVM`**：决定编译哪些硬件后端的代码生成器。
-- **CUTLASS / CK**：作为头文件库被 include，构建期需要它们的 include 路径。
-- **Z3**：tilelang 编译器用 Z3 做符号推理，构建期通过 PyPI 的 `z3-solver` 提供。
-
-#### 4.3.2 核心流程
-
-最小化的源码构建流程（官方「Working from Source via PYTHONPATH」路径）：
-
-```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tilelang
-mkdir -p build && cd build
-cmake .. -DUSE_CUDA=ON        # 配置，生成 Makefile/Ninja
-make -j                       # 编译，产出 build/lib/libtilelang.so
-cd ..
-export PYTHONPATH=$PWD:$PYTHONPATH
-python -c "import tilelang; print(tilelang.__version__)"
-```
-
-CMake 阶段做的事：
-
-```text
-1. include(FindPipCUDAToolkit)        # 先找主机 CUDA，找不到回退 pip 包
-2. project(TILE_LANG C CXX)
-3. 定义后端开关 USE_CUDA/ROCM/METAL/LLVM
-4. include(cmake/load_tvm.cmake)      # 定位 TVM 源码（自带或 TVM_ROOT）
-5. include(TVM 的 config.cmake)
-6. add_subdirectory(TVM)              # 把 TVM 编进来
-7. add_library(tilelang SHARED ...)   # 编译 tilelang 自己的 C++，链接 tvm_compiler
-8. Cython 化 cython_wrapper.pyx       # 生成 Python↔C++ 桥接
-9. install(... DESTINATION tilelang/lib)
-```
-
-#### 4.3.3 源码精读
-
-CMake 起点见 [CMakeLists.txt:4-18](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L4-L18)：
-
-```cmake
-cmake_minimum_required(VERSION 3.26)
-# 必须在 project() 之前 include，以便设置 CMAKE_CUDA_COMPILER
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
-project(TILE_LANG C CXX)
-```
-
-注意 `FindPipCUDAToolkit` 在 `project()` **之前** include——因为 CUDA 编译器必须在 project() 启用 CUDA 语言前确定好。这个模块的逻辑是「先找主机 CUDA Toolkit，找不到就回退到 pip 装的 `nvidia-cuda-nvcc` 包」，对应官方文档里「With pip-provided CUDA toolchain (no host CUDA required)」那条路径。
-
-后端开关定义见 [CMakeLists.txt:253-296](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L253-L296)：
-
-```cmake
-set(TILELANG_BACKENDS CUDA ROCM METAL LLVM)
-...
-foreach(BACKEND IN LISTS TILELANG_BACKENDS)
-  tilelang_define_backend_option(${BACKEND})
-endforeach()
-```
-
-四个后端 `USE_CUDA / USE_ROCM / USE_METAL / USE_LLVM`，默认值由平台决定（macOS 默认开 Metal，有 CUDA Toolkit 时默认开 CUDA，否则不开）。
-
-加载 TVM 见 [cmake/load_tvm.cmake:3-13](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/cmake/load_tvm.cmake#L3-L13)：
+**TVM 源码定位**，见 [cmake/load_tvm.cmake:3-13](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/cmake/load_tvm.cmake#L3-L13)：
 
 ```cmake
 set(TVM_BUILD_FROM_SOURCE TRUE)
@@ -352,359 +226,327 @@ if(DEFINED ENV{TVM_ROOT})
 endif()
 ```
 
-默认用 `3rdparty/tvm`；若设置了 `TVM_ROOT` 环境变量且该目录有 `cmake/config.cmake`，则改用外部 TVM。这就是官方文档「Building with Customized TVM Path」的实现。
+默认用 `3rdparty/tvm`；若设置了 `TVM_ROOT` 环境变量且该目录有 `cmake/config.cmake`，则改用外部 TVM。这就是 [docs/get_started/Installation.md:131-139](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L131-L139)「Building with Customized TVM Path」的实现。
 
-产出原生库见 [CMakeLists.txt:549-569](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L549-L569)：
+**最终链接出 libtilelang.so**，见 [CMakeLists.txt:549-569](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L549-L569)。要点：
 
-```cmake
-if(WIN32)
-  # Windows 把 tilelang 的原生代码链接进 tvm_compiler.dll
-  target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
-else()
-  add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-  target_link_libraries(tilelang PUBLIC tvm_compiler)
-  set_target_properties(tilelang PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    ...)
-endif()
+- **POSIX**：`add_library(tilelang SHARED ...)` 编出独立的 `libtilelang.so`，放到 `build/lib/`。
+- **Windows**：不单独出 `tilelang.dll`，而是把 tilelang 的目标文件塞进 `tvm_compiler.dll`（因为 Windows DLL 有 65535 符号上限，且 tilelang 需要访问 TVM 未导出的内部符号）。这正是 4.4 里 `libinfo.py` 在 Windows 上要找 `tvm_compiler.dll` 的根因。
+
+**stub 库设计**，见 [CMakeLists.txt:300-324](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L300-L324)：CUDA/HIP 的 stub 库让 wheel 不在二进制里硬编码对 `libcudart.so` 等的依赖，运行时用 `dlopen` 懒加载真实库。这样同一个 wheel 能在不同 CUDA 主版本、甚至纯 CPU 机器上被 `import`。
+
+**安装产物进 wheel**，见 [CMakeLists.txt:713-718](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L713-L718)：`install(TARGETS ... DESTINATION tilelang/lib)` 把 `.so`/`.dll` 装进 wheel 的 `tilelang/lib/`。
+
+**版本号怎么带上 git hash**，见 [version_provider.py:12](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L12)（从 `VERSION` 文件读基础版本如 `0.1.12`）和 [version_provider.py:44-96](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L44-L96) 的 `dynamic_metadata`。后者根据 `USE_ROCM`/`USE_CUDA`/`CUDA_VERSION` 决定后端标签（`rocm` / `cuda` / `cu<major><minor>` / `cpu`），再用 `git rev-parse HEAD` 取前 8 位拼成 `gitxxxxxxxx`：
+
+```python
+if cuda_version := os.environ.get("CUDA_VERSION"):
+    major, minor, *_ = cuda_version.split(".")
+    backend = f"cu{major}{minor}"
+else:
+    backend = "cuda"
 ```
 
-两个要点：
+最终形如 `0.1.12+cu130.git0d4a74be`。设置 `NO_VERSION_LABEL=ON` 可关掉（见 [docs/get_started/Installation.md:315-326](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L315-L326)）。
 
-1. **POSIX**：编出独立的 `libtilelang.so`，放到 `build/lib/`。
-2. **Windows**：不单独出 `tilelang.dll`，而是把 tilelang 的目标文件塞进 `tvm_compiler.dll`（因为 Windows DLL 有 65535 符号上限，且 tilelang 需要调用 TVM 未导出的内部符号）。这正是 4.4 里 `libinfo.py` 在 Windows 上要找 `tvm_compiler.dll` 的原因。
+#### 4.2.4 代码实践
 
-安装产物进 wheel 见 [CMakeLists.txt:713-718](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L713-L718)：
+**实践目标**：用一个 CMake 选项改变构建行为并预测影响（源码阅读型实践，无需真编译）。
 
-```cmake
-install(
-  TARGETS ${TILELANG_OUTPUT_TARGETS}
-  LIBRARY DESTINATION tilelang/lib
-  RUNTIME DESTINATION tilelang/lib
-  ARCHIVE DESTINATION tilelang/lib)
-```
+**操作步骤**：
 
-无论走 `pip install` 还是 PYTHONPATH，原生库最终都落在 `tilelang/lib/`（或 dev 模式的 `build/lib/`）。
+1. 假设要构建「只支持 CPU、不带 CUDA」的 tilelang。读 [docs/get_started/Installation.md:303-309](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L303-L309)。
+2. 写出配置命令：`cmake .. -DUSE_CUDA=OFF -DUSE_LLVM=ON`。
+3. 对照 [CMakeLists.txt:381-445](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L381-L445) 确认：因为你显式传了 `USE_CUDA=OFF`，CMake 不会因为「检测到 CUDA Toolkit」而自动打开。
 
-stub 库选项见 [CMakeLists.txt:300-324](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L300-L324)：
+**需要观察的现象**：构建产物里不会有 CUDA codegen；版本号后缀应变为 `+cpu.gitxxxxxxxx`（参考 [version_provider.py:65-69](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L65-L69)）。
 
-```cmake
-option(TILELANG_USE_CUDA_STUBS
-       "Use stub libraries (cuda/cudart/nvrtc) for portable wheels" ON)
-...
-option(TILELANG_USE_HIP_STUBS
-       "Use POSIX dlopen-based HIP stub libraries (hip/hiprtc) for portable wheels" ON)
-```
+**预期结果**：能解释「显式传 `USE_*`」与「让 CMake 自动选」的区别——自动选只在用户**没有**显式指定任何后端时才生效。
 
-stub 库让 wheel 在「没有 CUDA/ROCm 运行时的机器上也能 import」，真实运行时按需 dlopen 加载——这是官方 wheel 能做到「开箱 import」的关键。
+**待本地验证**：实际构建需本地编译环境与源码。
 
-#### 4.3.4 代码实践
-
-1. **实践目标**：用一个 CMake 选项改变构建行为，并预测它对 wheel 的影响。
-2. **操作步骤**：
-   - 假设你要构建一个「只支持 CPU、不带 CUDA」的 tilelang。阅读 [docs/get_started/Installation.md:303-309](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L303-L309)。
-   - 写出配置命令：`cmake .. -DUSE_CUDA=OFF -DUSE_LLVM=ON`。
-   - 对照 [CMakeLists.txt:383-445](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L383-L445) 的自动后端选择逻辑，确认你显式传了 `USE_CUDA=OFF`，所以不会因为「检测到 CUDA Toolkit」而被自动打开。
-3. **需要观察的现象**：构建产物里不会有 CUDA 相关 codegen；版本号后缀应变为 `+cpu.gitxxxxxxxx`（参考 [version_provider.py:68-69](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L68-L69)）。
-4. **预期结果**：你能解释「显式传 `USE_*`」与「让 CMake 自动选」的区别：自动选只在用户**没有**显式指定任何后端时才生效。
-5. 实际构建需本地有编译环境与源码，本环境无法执行，「待本地验证」。
-
-#### 4.3.5 小练习与答案
+#### 4.2.5 小练习与答案
 
 **练习 1**：`git clone` 时忘了加 `--recursive`，构建会怎样？
 
-> **答案**：`3rdparty/tvm` 子模块为空。CMakeLists.txt 在 [CMakeLists.txt:157-179](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L157-L179) 会尝试自动 `git submodule update --init --recursive`；若 git 不可用或失败，则直接 `FATAL_ERROR`。补救方法是手动 `git submodule update --init --recursive`。
+> **答案**：`3rdparty/tvm` 子模块为空。[CMakeLists.txt:157-179](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L157-L179) 会尝试自动 `git submodule update --init --recursive`；若 git 不可用或失败，则 `FATAL_ERROR`。补救方法是手动 `git submodule update --init --recursive`。
 
-**练习 2**：为什么 tilelang 默认把 `HIDE_PRIVATE_SYMBOLS` 设为 `OFF`？
+**练习 2**：为什么 `[tool.scikit-build.wheel.packages]` 要把 `3rdparty/tvm` 映射进 wheel？
 
-> **答案**：见 [CMakeLists.txt:354-356](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L354-L356) 的注释：tilelang 作为独立共享库，会跨 DSO 调用/继承 TVM 的 C++ 内部符号；TVM 默认隐藏私有符号会让这些引用在 `libtilelang.so` 被 dlopen 时无法解析，所以必须关掉。
+> **答案**：运行期 `import tilelang` 后需要 `import tvm`，且要加载 TVM 的共享库。把 `3rdparty/tvm` 打进 wheel 的 `tilelang/3rdparty/tvm`，安装后无论用户机器上有没有 TVM，tilelang 都能用自带的配套版本，避免版本错配。
 
-### 4.4 运行期库定位：tilelang.libinfo 与 tilelang.env（核心）
+---
 
-> 这是本讲最重要的模块。前面三节都在讲「怎么把 `.so` 装到磁盘上」，这一节讲「`import tilelang` 时，Python 怎么把它找出来加载」。涉及的两个最小模块就是 `tilelang.libinfo` 与 `tilelang.env`。
+### 4.3 tilelang.env：运行时环境变量中枢
 
-#### 4.4.1 概念说明
+> 这是本讲的核心最小模块之一。所有「tilelang 运行时读哪个环境变量」「`.so` 从哪找」「缓存开不开」几乎都汇聚到这里。
 
-当你执行 `import tilelang`，Python 解释器会运行 `tilelang/__init__.py`。这个文件干了很多事，但其中和「装在哪」最相关的是：
+#### 4.3.1 概念说明
 
-1. **计算版本号** `__version__`——源码检出和已安装两种情况来源不同。
-2. **确定「库搜索目录」** `TL_LIBS`——一个候选目录列表，原生库只会在这些目录里找。
-3. **配置第三方路径**——TVM Python 路径、CUTLASS/CK 头文件路径、模板路径。
-4. **真正加载** `libtilelang.so`——调用 `libinfo.find_lib_path("tilelang")` 拿到绝对路径，再 `ctypes.CDLL` 加载。
+`tilelang/env.py` 解决的问题是：tilelang 是一个行为高度可配置的系统（编译目标、缓存目录、调试开关、CUDA/ROCm 路径……），如果到处散落 `os.environ.get(...)`，会很难维护和发现。所以 tilelang 设计了两个抽象：
 
-`tilelang.env` 负责 1~3（**去哪些目录找**），`tilelang.libinfo` 负责 4（**在这些目录里挑出具体文件**）。两者分工明确：env 给「目录候选」，libinfo 给「文件名匹配」。
+- **`EnvVar` 描述符**：把「环境变量名 + 默认值 + 是否被强制覆盖」封装成描述符，集中定义、动态读取（改 `os.environ` 立即生效）、可被测试强制覆盖。
+- **`Environment` 类**：把所有配置项组织成一个对象，并附带一簇「智能默认」方法（根据 CUDA_HOME 算 DLL 搜索目录、解析 target 配置、判断是否处于轻量导入模式等）。
 
-一个关键概念是 **dev 模式 vs 安装模式**：
+模块底部还会初始化第三方路径（TVM/CUTLASS/Composable Kernel/模板路径）和库搜索路径 `TL_LIBS`——这正是 `libinfo.py` 能找到 `libtilelang.so` 的前提（见 4.4）。
 
-- **安装模式（wheel/pip）**：包目录里有 `3rdparty/` 子目录。`TL_LIBS` 指向 `tilelang/lib/`。
-- **dev 模式（源码 + PYTHONPATH）**：包目录里**没有** `3rdparty/`（它在仓库根的 `3rdparty/`）。`TL_LIBS` 改指向 `build/lib/` 和 `build/tvm/`，并打印一条 `Loading tilelang libs from dev root` 警告。
+#### 4.3.2 核心流程
 
-区分这两种模式靠一个简单的存在性检查：包目录旁边有没有 `3rdparty/`。
+`import tilelang` 时 `env.py` 的关键执行顺序：
 
-#### 4.4.2 核心流程
-
-`import tilelang` 的库定位流程（聚焦 `env.py` + `libinfo.py` + `__init__.py`）：
-
-```text
-import tilelang
-   │
-   ├─ tilelang/__init__.py
-   │     ├─ _compute_version()       # 决定 __version__
-   │     └─ from .env import env     # ← 关键：导入 env.py（模块级副作用在这里执行）
-   │
-   ├─ tilelang/env.py（模块加载时执行）
-   │     ├─ TL_ROOT = tilelang 包所在目录
-   │     ├─ THIRD_PARTY_ROOT = TL_ROOT/3rdparty
-   │     ├─ if 存在 3rdparty/:  安装模式
-   │     │       TL_LIBS = [TL_ROOT/lib]
-   │     ├─ else:                dev 模式
-   │     │       TL_LIBS = [build/lib, build/tvm]
-   │     ├─ 设置 TVM/CUTLASS/CK/Template 路径环境变量
-   │     └─ 探测 CUDA_HOME / ROCM_HOME
-   │
-   ├─ tilelang/__init__.py（继续）
-   │     ├─ from . import libinfo
-   │     └─ _load_tile_lang_lib():
-   │           lib_path = libinfo.find_lib_path("tilelang")
-   │           ctypes.CDLL(lib_path)        # 真正加载
-   │
-   └─ tilelang/libinfo.py
-         └─ find_lib_path("tilelang"):
-               在 TL_LIBS 里找 libtilelang.so / tvm_compiler.dll / libtilelang.dylib
-               找到 → 返回绝对路径
-               找不到 → raise RuntimeError("Cannot find libraries ...")
+```
+1. 计算 TL_ROOT = tilelang 包所在目录
+2. 判断是「安装版」还是「开发版」(DEV)
+   ├─ 安装版: TL_LIBS = [TL_ROOT/lib]         (.so 装在包的 lib 子目录)
+   └─ 开发版: TL_LIBS = [build/lib, build/tvm] (.so 在仓库 build 目录)
+3. 把 TL_LIBS 注入 sys.path 与 Windows %PATH%
+4. _find_cuda_home() / _find_rocm_home() 探测 SDK 路径
+5. 实例化 Environment（EnvVar 描述符此时只是定义，读取时才查 os.environ）
+6. 初始化第三方路径: TVM python 路径、CUTLASS、Composable Kernel、模板路径
+7. 导出静态变量: CUDA_HOME / ROCM_HOME / CUTLASS_INCLUDE_DIR ...
 ```
 
-库定位的目标函数可以用一个简单式子概括其候选集：
+`TL_LIBS` 是整条加载链的「源头」：它决定了原生库的搜索根目录，`libinfo.py` 直接消费它。dev 模式与安装模式的判定可以用一个存在性检查概括：
 
 \[
-\text{candidates} = \{\, d \in \text{TL\_LIBS} \;\mid\; \text{isdir}(d) \,\} \times \{\text{libtilelang.so}, \ldots\}
+\text{DEV} = \neg\; \text{exists}(\text{TL\_ROOT}/3\text{rdparty})
 \]
 
-即在「存在的目录」与「平台对应的文件名」做笛卡尔积，命中第一个就返回。
+即包目录旁有没有 `3rdparty/` 子目录。
 
-#### 4.4.3 源码精读
+#### 4.3.3 源码精读
 
-**第一步：`TL_LIBS` 与 dev/安装模式判定**，见 [tilelang/env.py:47-64](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L47-L64)：
+**TL_ROOT 与 TL_LIBS 的定义**，见 [tilelang/env.py:47-51](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L47-L51)：定义包根 `TL_ROOT` 和默认库目录 `TL_LIBS = [TL_ROOT/lib]`，并过滤掉不存在的目录。
+
+**开发版 vs 安装版的分叉**，见 [tilelang/env.py:53-75](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L53-L75)：
 
 ```python
-TL_ROOT = os.path.dirname(os.path.abspath(__file__))
-TL_LIBS = [os.path.join(TL_ROOT, "lib")]
-TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
-
 DEV = False
 THIRD_PARTY_ROOT = os.path.join(TL_ROOT, "3rdparty")
 if not os.path.exists(THIRD_PARTY_ROOT):
     DEV = True
-    tl_dev_root = os.path.dirname(TL_ROOT)
     dev_lib_root = os.path.join(tl_dev_root, "build")
     TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
-    THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
     logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
-```
-
-读法：
-
-- `TL_ROOT` 是 `env.py` 所在目录，即 `tilelang` 包目录。
-- 安装模式下 `TL_LIBS = [tilelang/lib]`（因为 wheel 把 `.so` 装到了 `tilelang/lib`，见 4.3.3）。
-- dev 模式下 `TL_LIBS = [build/lib, build/tvm]`——也就是你 `make` 之后产物所在的位置。
-- `THIRD_PARTY_ROOT` 也随之切换：安装模式在包内，dev 模式在仓库根。
-
-**第二步：第三方路径初始化**，见 [tilelang/env.py:597-632](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L597-L632)（节选 TVM 与 CUTLASS）：
-
-```python
-# 初始化 TVM Python 路径
-if env.TVM_IMPORT_PYTHON_PATH is not None:
-    prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
 else:
-    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm", "python")
-    assert os.path.exists(tvm_path), tvm_path
-    prepend_pythonpath(tvm_path)
-
-# 初始化 CUTLASS 路径
-if os.environ.get("TL_CUTLASS_PATH", None) is None:
-    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "cutlass", "include")
-    if os.path.exists(cutlass_inc_path):
-        os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
+    try:
+        import z3  # noqa: F401
+    except ImportError:
+        logger.error("Failed to import z3, consider to reinstall tilelang.")
 ```
 
-这里把 `3rdparty/tvm/python` 加入 `sys.path`（这样 `import tvm` 用的是配套版本），并把 CUTLASS/CK 的 include 路径写进 `TL_CUTLASS_PATH` / `TL_COMPOSABLE_KERNEL_PATH`。注意 CK（Composable Kernel）路径在 [tilelang/env.py:619-624](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L619-L624)，模板路径在 [tilelang/env.py:626-632](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L626-L632)。这些环境变量后续会被代码生成阶段读取（在后续讲义展开）。
+这是核心判断：如果包目录下没有 `3rdparty` 子目录（说明不是从 wheel 装的，而是直接跑源码树），就置 `DEV=True`，并把 `TL_LIBS` 改成 `[build/lib, build/tvm]`——即从仓库的 `build` 目录找 `.so`，并打印 `Loading tilelang libs from dev root` 警告。这就是 4.2.4 / 手册 [docs/get_started/Installation.md:373-380](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L373-L380) 里「开发模式日志」的来源。安装版（有 `3rdparty`）则会尝试 `import z3` 验证依赖（[env.py:66-69](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L66-L69)），缺失只打 `error` 日志不抛异常。最后 [env.py:73-75](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L73-L75) 把 `TL_LIBS` 插入 `sys.path`。
 
-**第三步：CUDA/ROCm 主目录探测**，见 [tilelang/env.py:141-190](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L141-L190)。`_find_cuda_home()` 按 4 个优先级查找：
+**CUDA 主目录探测（多级回退）**，见 [tilelang/env.py:141-190](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L141-L190)。`_find_cuda_home()` 依次尝试：① 环境变量 `CUDA_HOME`/`CUDA_PATH`；② `which nvcc` 反推；③ pip 包 `nvidia-cuda-nvcc` 的安装位置（仅 ≥13.0 有效）；④ 平台默认路径（Windows 的 `C:/Program Files/...`、Linux 的 `/usr/local/cuda`）。这套多级回退保证了「无论 CUDA 装在哪都能找到」——它在运行期需要调用 `nvcc`/`ptxas` 做 JIT 编译时被用到。
+
+**EnvVar 描述符**，见 [tilelang/env.py:229-309](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L229-L309)。读（`__get__`）时优先返回 `_forced_value`（测试/调试用的强制覆盖），否则查 `os.environ`，最后用默认值——每次读取都动态查，所以改环境变量立即生效。写（`__set__`）只存 `_forced_value`，不污染真实 `os.environ`（除非你取消注释那行）。
+
+**Environment 类与缓存控制**，见 [tilelang/env.py:332-525](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L332-L525)。几个与本讲相关的环境变量：
+
+- `TILELANG_CACHE_DIR`（[env.py:356](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L356)，默认 `~/.tilelang/cache`）：编译缓存目录，对应手册 [Installation.md:339-341](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L339-L341) 提到的默认缓存路径。
+- `TILELANG_DISABLE_CACHE`（[env.py:361-363](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L361-L363)）：高优先级关掉缓存，常用于单测/调试。
+- `TILELANG_DEFAULT_TARGET`（[env.py:396](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L396)，默认 `"auto"`）：默认编译目标。
+- `SKIP_LOADING_TILELANG_SO`（[env.py:401](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L401)）：跳过加载原生库（`__init__.py` 会读它）。
+
+缓存全局开关由 `CacheState` 类管理（[env.py:208-227](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L208-L227)），`Environment.is_cache_enabled()` 把「环境变量级禁用」和「运行时级禁用」两者合并判断（[env.py:418-419](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L418-L419)）。模块末尾 [env.py:528-530](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L528-L530) 导出顶层函数 `enable_cache` / `disable_cache` / `is_cache_enabled`，这就是 `tilelang.enable_cache()` 这类公共 API 的真正出处。
+
+**第三方路径初始化（运行时）**，见 [tilelang/env.py:597-632](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L597-L632)。导入时设置 TVM Python 路径（[env.py:598-605](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L598-L605) 把 `3rdparty/tvm/python` 加进 `sys.path`，这样 `import tvm` 用的是配套版本）、CUTLASS 头文件路径（`TL_CUTLASS_PATH`）、Composable Kernel 头文件路径（[env.py:619-624](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L619-L624)）、模板路径（[env.py:626-632](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L626-L632)）。找不到时只打 warning 不报错，保证「即使部分依赖缺失也能继续 import」。
+
+> 关于完整运行时环境变量清单，官方手册 [Installation.md:328-330](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/docs/get_started/Installation.md#L328-L330) 也明确指引「请参考 `env.py`」——本节即是对该文件的解读。
+
+#### 4.3.4 代码实践
+
+**实践目标**：用 Python 交互式验证 `EnvVar` 的「动态读取」特性。
+
+**操作步骤**（示例代码，非项目原有文件）：
 
 ```python
-# Guess #1
-cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-# Guess #2
-if cuda_home is None:
-    nvcc_path = shutil.which("nvcc")
-    ...
-# Guess #3
-elif _get_package_version("nvidia-cuda-nvcc") is not None:
-    # 从 pip 包 nvidia-cuda-nvcc 里找
-    ...
-# Guess #4
-else:
-    # Linux/macOS 默认路径 /usr/local/cuda 等
-    ...
+# 示例代码：观察 EnvVar 动态读取
+import os
+import tilelang  # 若已安装
+from tilelang.env import env
+
+# 1. 读当前值（默认）
+print("default target =", env.TILELANG_DEFAULT_TARGET)
+
+# 2. 运行时改环境变量，不重启进程
+os.environ["TILELANG_DEFAULT_TARGET"] = "cuda"
+print("after env set  =", env.TILELANG_DEFAULT_TARGET)
+
+# 3. 用强制覆盖（仅当前进程生效，不污染 os.environ）
+env.TILELANG_DEFAULT_TARGET = "hip"
+print("after force    =", env.TILELANG_DEFAULT_TARGET)
+print("os.environ still =", os.environ.get("TILELANG_DEFAULT_TARGET"))
 ```
 
-这套探测在「运行期需要调用 `nvcc`/`ptxas` 做 JIT 编译」时被用到——所以即使 wheel 自带 stub，要在运行期把生成的 CUDA 源码编成 cubin，仍然需要找到真实的 CUDA Toolkit（主机安装或 pip 包）。
+**需要观察的现象**：第 2 步打印 `cuda`（说明改 `os.environ` 立即生效，无需重新 import）；第 3 步打印 `hip`，而最后一行仍是 `cuda`（说明强制覆盖不写回真实环境变量）。
 
-**第四步：`libinfo.find_lib_path` 真正定位文件**，见 [tilelang/libinfo.py:13-47](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L13-L47)：
+**预期结果**：三行输出依次为 `auto`、`cuda`、`hip`，且 `os.environ` 未被第 3 步污染。
+
+**待本地验证**：在已安装 tilelang 的环境里跑这段代码并记录输出。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：为什么 `import tilelang` 时可能看到 `Failed to import z3` 的 error 日志？这意味着安装失败了吗？
+
+> **答案**：不是安装失败。`env.py` 在「安装版」分支里会尝试 `import z3`（[env.py:66-69](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L66-L69)）做健康检查，z3 缺失只影响依赖符号推理的功能，且日志级别是 `error` 但不会抛异常。正确做法是按提示重装：`pip install z3-solver`。
+
+**练习 2**：开发模式下 `import tilelang` 打印的 `Loading tilelang libs from dev root: .../build` 是哪段代码产生的？为什么 `TL_LIBS` 会变成 `build/lib`？
+
+> **答案**：由 [env.py:64](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L64) 的 `logger.warning` 产生。因为开发模式下包目录里没有 `3rdparty`，触发 [env.py:55-62](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L55-L62) 的 `DEV=True` 分支，把 `TL_LIBS` 指向仓库 `build/lib` 和 `build/tvm`——也就是 CMake 产物所在位置。
+
+---
+
+### 4.4 tilelang.libinfo：定位原生库 libtilelang.so
+
+> 这是本讲第二个核心最小模块。它回答「`import tilelang` 时，那个 C++ 编译器共享库到底从哪个路径被加载」。它消费 4.3 里产生的 `TL_LIBS`。
+
+#### 4.4.1 概念说明
+
+tilelang 的 Python 层本身不能编译 kernel——真正干活的是 C++ 编译出的共享库（Linux: `libtilelang.so`，macOS: `libtilelang.dylib`，Windows: 合并进 `tvm_compiler.dll`）。`libinfo.py` 的职责就是：**给定库名（如 `"tilelang"`），跨平台拼出正确的文件名，并在一组候选目录里找到它，返回绝对路径。**
+
+它非常短（不到 50 行），却是连接 Python 与 C++ 引擎的「最后一公里」。它和 `env.py` 的分工是：**`env.py` 给「目录候选」（`TL_LIBS`），`libinfo.py` 给「文件名匹配」（`find_lib_path`）。**
+
+#### 4.4.2 核心流程
+
+`find_lib_path("tilelang")` 的查找逻辑：
+
+```
+输入 name="tilelang"
+   │
+   ├─ 根据平台拼候选文件名:
+   │    Linux:   ["libtilelang.so"]
+   │    Windows: ["tvm_compiler.dll"]   ← 特例！
+   │    macOS:   ["libtilelang.dylib"]
+   │
+   ├─ 遍历候选目录 TL_LIBS (来自 env.py)
+   │    安装版: [tilelang包/lib]
+   │    开发版: [build/lib, build/tvm]
+   │
+   ├─ 在每个目录下检查候选文件是否存在且是普通文件
+   │
+   └─ 找到 → 返回绝对路径
+      找不到 → 抛 RuntimeError，列出所有尝试过的候选
+```
+
+库定位的候选集可以用一个笛卡尔积概括：
+
+\[
+\text{candidates} = \{\, d \in \text{TL\_LIBS} \;\mid\; \text{isdir}(d) \,\} \times \{\text{平台对应的库文件名}\}
+\]
+
+即在「存在的目录」与「平台对应的文件名」做笛卡尔积，命中第一个就返回。
+
+`get_dll_directories()` 则是把 `TL_LIBS` 与 Windows 上的 CUDA DLL 目录合并，供 `__init__.py` 在 Windows 上注册 DLL 搜索路径。
+
+#### 4.4.3 源码精读
+
+**get_dll_directories：合并库目录**，见 [tilelang/libinfo.py:8-10](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L8-L10)：把 `env.TL_LIBS`（原生库根）和 `get_cuda_dll_search_dirs()`（Windows 上 CUDA DLL 子目录，由 [env.py:538-555](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L538-L555) 产生）合并，过滤掉非目录，返回绝对路径列表。
+
+**find_lib_path：跨平台库定位器**，见 [tilelang/libinfo.py:13-47](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L13-L47)。平台分派在 [tilelang/libinfo.py:26-38](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L26-L38)：
 
 ```python
-def find_lib_path(name: str, py_ext=False):
-    if py_ext:
-        lib_names = [f"{name}{suffix}" for suffix in importlib.machinery.EXTENSION_SUFFIXES]
-    elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
-        lib_names = [f"lib{name}.so"]
-    elif sys.platform.startswith("win32"):
-        if name == "tilelang":
-            # Windows 把 tilelang 原生注册对象链接进了 tvm_compiler.dll
-            lib_names = ["tvm_compiler.dll"]
-        else:
-            lib_names = [f"{name}.dll"]
-    elif sys.platform.startswith("darwin"):
-        lib_names = [f"lib{name}.dylib"]
-
-    for lib_root in TL_LIBS:
-        for lib_name in lib_names:
-            lib_dll_path = os.path.join(lib_root, lib_name)
-            if os.path.exists(lib_dll_path) and os.path.isfile(lib_dll_path):
-                return lib_dll_path
+elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
+    lib_names = [f"lib{name}.so"]
+elif sys.platform.startswith("win32"):
+    if name == "tilelang":
+        # Windows 把 tilelang 原生注册对象链接进了 tvm_compiler.dll
+        lib_names = ["tvm_compiler.dll"]
     else:
-        raise RuntimeError(f"Cannot find libraries: {', '.join(lib_names)}\n..."
-                           + "\n".join(TL_LIBS))
+        lib_names = [f"{name}.dll"]
+elif sys.platform.startswith("darwin"):
+    lib_names = [f"lib{name}.dylib"]
 ```
 
-这段非常关键，逐行理解：
+注意 Windows 特例：当 `name == "tilelang"` 时找的是 `tvm_compiler.dll`（因为 Windows 构建把 tilelang 的目标代码合并进了 `tvm_compiler.dll`，见 [CMakeLists.txt:549-557](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L549-L557) 的注释），没有单独的 `tilelang.dll`。
 
-- 按平台拼出候选文件名：Linux 是 `lib{name}.so`，macOS 是 `lib{name}.dylib`。
-- **Windows 例外**：当 `name == "tilelang"` 时，找的不是 `tilelang.dll` 而是 `tvm_compiler.dll`——原因就是 4.3.3 提到的「Windows 把 tilelang 编进了 tvm_compiler.dll」。
-- 双层循环：遍历 `TL_LIBS` 的每个候选目录 × 每个候选文件名，命中即返回绝对路径。
-- 全部找不到：抛 `RuntimeError`，并把搜索过的 `TL_LIBS` 列出来辅助排查。
+查找循环在 [tilelang/libinfo.py:40-47](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L40-L47)：双层循环——外层遍历 `TL_LIBS`（候选根目录），内层遍历候选文件名，命中即返回；全部 miss 则抛 `RuntimeError`，并把所有候选路径打印出来（这就是你看到 `Cannot find libraries: ... List of candidates: ...` 报错时的来源）。
 
-`get_dll_directories()` 是给 Windows 用的辅助函数，见 [tilelang/libinfo.py:8-10](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L8-L10)，它把 `TL_LIBS` 与 `get_cuda_dll_search_dirs()` 合并，用于向 Windows 的安全 DLL 加载器注册目录（见 [tilelang/__init__.py:170-177](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L170-L177) 的 `os.add_dll_directory`）。
-
-**第五步：调用方**，见 [tilelang/__init__.py:183-190](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L183-L190)：
+**调用方：__init__.py 如何加载库**，见 [tilelang/__init__.py:183-190](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L183-L190)：
 
 ```python
 def _load_tile_lang_lib():
     lib_path = libinfo.find_lib_path("tilelang")
     return ctypes.CDLL(lib_path), lib_path
 
+# only load once here
 if env.SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 ```
 
-也就是说，只要环境变量 `SKIP_LOADING_TILELANG_SO` 不为 `"0"` 之外的真值，就会真正加载库。加载后，C++ 侧通过 tvm-ffi 注册的 `tl.*` 全局函数就可被 Python 调用（注册入口在 [tilelang/_ffi_api.py:6](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/_ffi_api.py#L6) 的 `tvm_ffi.init_ffi_api("tl", __name__)`）。
+`_load_tile_lang_lib()` 调用 `libinfo.find_lib_path("tilelang")` 拿到路径，再用 `ctypes.CDLL(lib_path)` 加载。注意有开关 `SKIP_LOADING_TILELANG_SO`：只有它为 `"0"`（默认）时才加载。加载发生在 `_lazy_load_lib()` 上下文里（[tilelang/__init__.py:133-155](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L133-L155)），该上下文会预加载 torch 并设置 `RTLD_LAZY` 以避免 dlopen 顺序问题。加载后，C++ 侧通过 tvm-ffi 注册的 `tl.*` 全局函数就可被 Python 调用（注册入口 [tilelang/_ffi_api.py:6](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/_ffi_api.py#L6) 的 `tvm_ffi.init_ffi_api("tl", __name__)`）。
 
-**版本号的来源**，见 [tilelang/__init__.py:10-44](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L10-L44)：
+**轻量导入模式（不加载库的捷径）**：[tilelang/__init__.py:100-106](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L100-L106) 与 [tilelang/__init__.py:158-191](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L158-L191) 体现了「轻量导入」：当 `env.is_light_import()` 为真（如运行 `python -m tilelang.autodd`）时，跳过 logger 初始化、跳过加载 `.so`、跳过一堆重型 import，让 CLI 能快速启动。
 
-```python
-def _compute_version() -> str:
-    repo_root = Path(__file__).resolve().parent.parent
-    version_file = repo_root / "VERSION"
-    if version_file.is_file():
-        # 源码检出：用 version_provider 动态算
-        from version_provider import dynamic_metadata
-        return dynamic_metadata("version")
-    # 已安装：用 importlib.metadata
-    from importlib.metadata import version as _dist_version
-    return _dist_version("tilelang")
-```
-
-所以同一个 `print(tilelang.__version__)`：
-
-- 在源码检出里会拼上 git hash（如 `0.1.12+cuda.gita1b2c3d4`）。
-- 在 pip 安装里读到的是 wheel 打包时定型、写进 metadata 的版本字符串。
-
-**缓存目录** 也属于运行期环境，见 [tilelang/env.py:356](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L356)：
-
-```python
-TILELANG_CACHE_DIR = EnvVar("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
-```
-
-默认编译缓存目录是 `~/.tilelang/cache`（与官方文档「Compile Cache」一致）。
+**版本号的来源**，见 [tilelang/__init__.py:10-44](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L10-L44)：源码检出时（仓库根有 `VERSION` 文件）调用 `version_provider.dynamic_metadata("version")` 动态拼出带 git hash 的版本；pip 安装时走 `importlib.metadata.version("tilelang")` 读 wheel 打包时写死的 metadata。所以同一个 `print(tilelang.__version__)`，源码检出会带 git hash（如 `0.1.12+cuda.gita1b2c3d4`），pip 安装则读定型 metadata。
 
 #### 4.4.4 代码实践
 
-本实践是本讲的主任务：**亲手观察 libinfo 如何定位 `libtilelang.so`**。
+**实践目标**：亲手调用 `libinfo.find_lib_path`，记录你的安装里 `libtilelang.so` 的真实路径，并理解候选目录构造（本讲主任务）。
 
-1. **实践目标**：在不破坏安装的前提下，让 tilelang 告诉你它加载的是哪个 `.so`、在哪个目录找到的。
-2. **操作步骤**：
-   - 先确认正常导入：`python -c "import tilelang; print(tilelang.__version__)"`。
-   - 打印库搜索目录与加载路径。新建 `trace_lib.py`（**示例代码**，非项目原有文件）：
+**操作步骤**（示例代码，非项目原有文件）：
 
-     ```python
-     # 示例代码：仅用于观察 tilelang 的库定位过程
-     import tilelang                       # 触发完整导入与原生库加载
-     from tilelang import env as tenv
-     from tilelang import libinfo
+```python
+# 示例代码：观察 libinfo 如何定位原生库
+import tilelang  # 触发完整导入与原生库加载
+from tilelang import env as tenv
+from tilelang import libinfo
 
-     print("TL_ROOT 候选目录 TL_LIBS =", tenv.TL_LIBS)
-     print("DEV 模式? =", tenv.DEV)
-     print("THIRD_PARTY_ROOT =", tenv.THIRD_PARTY_ROOT)
-     print("CUDA_HOME =", tenv.CUDA_HOME)
-     print("CUTLASS path =", tenv.CUTLASS_INCLUDE_DIR)
+print("TL_LIBS 候选目录     =", tenv.TL_LIBS)
+print("DEV 模式?            =", tenv.DEV)
+print("find_lib_path 结果   =", libinfo.find_lib_path("tilelang"))
+```
 
-     # 直接问 libinfo 它会选哪个文件
-     print("find_lib_path('tilelang') =", libinfo.find_lib_path("tilelang"))
-     ```
+**需要观察的现象**：
 
-   - 运行 `python trace_lib.py`。
-3. **需要观察的现象**：
-   - `TL_LIBS` 应是一个目录列表（pip 安装时通常只有一项，指向 `site-packages/tilelang/lib`；dev 模式指向 `build/lib` 与 `build/tvm`）。
-   - `DEV` 在 pip 安装下为 `False`，在 PYTHONPATH 源码运行下为 `True`，且会打印 `Loading tilelang libs from dev root` 警告。
-   - `find_lib_path("tilelang")` 返回的绝对路径就是被 `ctypes.CDLL` 加载的那个文件。
-4. **预期结果**：你能把「`TL_LIBS` 目录」与「最终加载的 `.so` 文件」一一对应起来，并说清是哪条 `find_lib_path` 分支命中的（Linux 命中 `libtilelang.so`，Windows 命中 `tvm_compiler.dll`）。
-5. **进阶**：设置 `SKIP_LOADING_TILELANG_SO=1` 再导入，观察是否跳过 `_load_tile_lang_lib()`（此时调用任何需要原生库的 API 会报错，但 `env` 模块本身的属性仍可读，可用于排障）。本环境无法执行，「待本地验证」。
+- 安装版：`TL_LIBS` 形如 `['/.../site-packages/tilelang/lib']`，`DEV` 为 `False`，`find_lib_path` 返回 `.../tilelang/lib/libtilelang.so`。
+- 开发版：`TL_LIBS` 形如 `['/.../tilelang/build/lib', '/.../tilelang/build/tvm']`，`DEV` 为 `True`，且导入时会先打印 `Loading tilelang libs from dev root` 警告；返回 `.../build/lib/libtilelang.so`。
+
+**预期结果**：打印出的路径与 `TL_LIBS` 中的某个根目录 + 平台库名拼接一致；Windows 上返回的是 `tvm_compiler.dll`。
+
+**进一步（可选）**：用 `SKIP_LOADING_TILELANG_SO=1` 跑 `python -c "import tilelang; print('ok')"`，观察 `import` 仍能成功（跳过了 `.so` 加载），但后续真正编译 kernel 会失败——验证了 `.so` 加载是「按需」而非 `import` 必需。
+
+**待本地验证**：记录你机器上的实际路径字符串，它将帮助你后续调试「找不到库」类报错。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：导入时报错 `Cannot find libraries: libtilelang.so`，列出 `TL_LIBS` 里只有一个错误的目录。可能的原因有哪些？
+**练习 1**：在 Windows 上 `find_lib_path("tilelang")` 找的是哪个文件？为什么不是 `tilelang.dll`？
 
-> **答案**：常见原因：(a) wheel 安装不完整或被破坏，`tilelang/lib/` 下没有 `.so`；(b) 你在源码目录用 PYTHONPATH 运行（dev 模式），但还没执行 `make`，`build/lib/` 不存在或没产物；(c) 手动改过 `TL_LIBS` 或 `TVM_LIBRARY_PATH` 指错了路径。排查方法是按报错里列出的 `TL_LIBS` 逐个 `ls`，确认目标 `.so` 是否真的在。
+> **答案**：找的是 `tvm_compiler.dll`。因为 [libinfo.py:29-32](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/libinfo.py#L29-L32) 对 `name == "tilelang"` 做了特例处理，原因是 Windows 构建把 tilelang 的原生目标代码合并进了 `tvm_compiler.dll`（见 [CMakeLists.txt:549-557](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L549-L557)），没有单独的 `tilelang.dll`。
 
-**练习 2**：为什么在 Windows 上 `find_lib_path("tilelang")` 找的是 `tvm_compiler.dll` 而不是 `tilelang.dll`？
+**练习 2**：如果你看到报错 `Cannot find libraries: libtilelang.so ... List of candidates: ...`，最可能的两个原因是什么？分别该怎么修？
 
-> **答案**：因为 Windows 构建把 tilelang 的原生目标文件链接进了 `tvm_compiler.dll`（见 [CMakeLists.txt:550-557](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/CMakeLists.txt#L550-L557)），原因是 Windows DLL 有 65535 符号上限且 tilelang 需要访问 TVM 未导出的内部符号。`libinfo.py` 的 Windows 分支用 `if name == "tilelang"` 专门处理了这个特例。
+> **答案**：① wheel 安装不完整或被破坏，导致 `tilelang/lib/libtilelang.so` 缺失——重装 `pip install --force-reinstall tilelang`。② 处于开发模式但还没编译 C++，即 `build/lib/libtilelang.so` 不存在——按手册跑一次 `cmake .. -DUSE_CUDA=ON -G Ninja && ninja`（或 `pip install -e . -v`）。`List of candidates` 里列出的就是 `TL_LIBS`，据此可判断当前是安装版还是开发版路径。
 
 **练习 3**：`tilelang.__version__` 在「源码检出」和「pip 安装」下分别从哪来？
 
 > **答案**：源码检出时，`__init__.py` 发现仓库根有 `VERSION` 文件，调用 `version_provider.dynamic_metadata("version")` 动态拼出带 git hash 的版本；pip 安装时没有 `VERSION` 文件（在包外），走 `importlib.metadata.version("tilelang")` 读 wheel 打包时写死的 metadata（见 [tilelang/__init__.py:10-44](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/__init__.py#L10-L44)）。
 
+---
+
 ## 5. 综合实践
 
-把本讲的知识串起来，做一个「安装取证」小任务。
+**综合任务**：用一篇「安装诊断报告」把本讲四个模块串起来。假设你帮同事排查「机器 A 上 `pip install tilelang` 跑得好好的，把代码拷到机器 B 却 `import` 失败」的问题，按以下步骤产出报告：
 
-**背景**：你的同事在机器 A 上 `pip install tilelang` 跑得好好的，把代码拷到机器 B 却 `import` 失败。请你用本讲学到的方法定位问题。
-
-**任务步骤**：
-
-1. **看版本号推断构建**：在机器 A 上记录 `tilelang.__version__` 的完整字符串（含 `+...` 后缀）。根据 [version_provider.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py) 解释后缀含义：是 `cu130`？`rocm`？`cpu`？还是 `cuda`（无具体版本）？这决定了该 wheel 期望的运行时。
-2. **看库定位**：在机器 A 上运行 4.4.4 的 `trace_lib.py`，记录 `TL_LIBS`、`find_lib_path("tilelang")` 的输出。确认 `.so` 真实落在磁盘上的位置。
+1. **看版本号推断构建**：在机器 A 上记录 `tilelang.__version__` 的完整字符串（含 `+...` 后缀）。根据 [version_provider.py:44-96](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/version_provider.py#L44-L96) 解释后缀含义：是 `cu130`？`rocm`？`cpu`？还是 `cuda`（无具体版本）？这决定了该 wheel 期望的运行时。
+2. **看库定位**：在机器 A 上运行 4.4.4 的示例脚本，记录 `TL_LIBS`、`DEV`、`find_lib_path("tilelang")` 的输出，确认 `.so` 真实落在磁盘上的位置。
 3. **看依赖目录**：用 `ls` 查看 `tilelang` 安装目录下的 `lib/`、`3rdparty/tvm/python`、`3rdparty/cutlass/include` 是否齐全（对应 [pyproject.toml:153-169](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/pyproject.toml#L153-L169) 的映射）。
-4. **复现 B 的失败**：在机器 B 上同样跑 `trace_lib.py`。如果报 `Cannot find libraries`，对照 `TL_LIBS` 看是缺文件还是路径错；如果 import 成功但跑 kernel 失败，检查 `env.CUDA_HOME`（参考 [tilelang/env.py:141-190](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L141-L190) 的四级探测）是否为空——很可能 B 没装 CUDA Toolkit，导致运行期 JIT 找不到 `nvcc`。
+4. **复现 B 的失败**：在机器 B 上同样跑该脚本。如果报 `Cannot find libraries`，对照 `TL_LIBS` 看是缺文件还是路径错（4.4）；如果 import 成功但跑 kernel 失败，检查 `env.CUDA_HOME`（参考 [tilelang/env.py:141-190](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/tilelang/env.py#L141-L190) 的四级探测）是否为空——很可能 B 没装 CUDA Toolkit，导致运行期 JIT 找不到 `nvcc`。
 5. **给出结论**：写一句话诊断，例如「A 装的是 `cu130` wheel，B 没有 CUDA 13 运行时，故 import 后 JIT 失败」。
 
-> 提示：区分「能 import」（靠 stub 库）和「能编译运行 kernel」（靠真实 CUDA/ROCm Toolkit）是本任务的核心收获。本环境无法实际部署，上述步骤的运行输出「待本地验证」。
+**核心收获**：区分「能 import」（靠 stub 库）和「能编译运行 kernel」（靠真实 CUDA/ROCm Toolkit）。本环境无法实际部署，上述步骤的运行输出「待本地验证」。
 
 ## 6. 本讲小结
 
-- tilelang 有三种获取方式：`pip`（PyPI 稳定版）、`-f nightly`（每日构建）、源码构建；验证安装统一用 `python -c "import tilelang; print(tilelang.__version__)"`。
-- tilelang 是 C++ + Python 混合工程，用 `scikit-build-core` 把 CMake 构建产物打进 wheel；wheel 内 `tilelang/lib/` 放原生库，`tilelang/3rdparty/` 放 TVM/CUTLASS/CK。
-- 源码构建的关键是 `CMakeLists.txt`：`USE_CUDA/ROCM/METAL/LLVM` 选后端，`3rdparty/tvm` 子模块提供 TVM，POSIX 产出 `libtilelang.so`，Windows 则把 tilelang 编进 `tvm_compiler.dll`。
-- **运行期库定位** 由 `tilelang.env`（给目录候选 `TL_LIBS`）和 `tilelang.libinfo`（在目录里匹配文件名 `find_lib_path`）协作完成；dev 模式与安装模式靠「包内有无 `3rdparty/`」自动切换。
-- 版本号在源码检出下由 `version_provider.py` 动态拼接（含 git hash），在 pip 安装下读 `importlib.metadata`。
-- wheel 靠 CUDA/HIP **stub 库**实现「无 GPU 也能 import」，但真正 JIT 编译 kernel 仍需 `_find_cuda_home()` 探测到的真实 Toolkit。
+- tilelang 提供三条安装路径：`pip install tilelang`（最简）、源码 `pip install . -v`（最灵活）、nightly（最新），三者最终都用 `python -c "import tilelang; print(tilelang.__version__)"` 验证。
+- 源码构建由 scikit-build-core 驱动 CMake，需要 TVM 子模块（`--recursive`）、CUTLASS、Composable Kernel；后端由 `USE_CUDA` / `USE_ROCM` / `USE_METAL` / `USE_LLVM` 控制，遵循「显式优先、否则平台默认」。
+- wheel 通过 `[tool.scikit-build.wheel.packages]` 把 `3rdparty/tvm` 等映射进 `tilelang/3rdparty`，保证安装后自带 TVM；stub 库让 wheel 能在无 CUDA 的机器上被 import（懒加载）。
+- **`tilelang.env`** 是运行时配置中枢：`EnvVar` 描述符集中管理环境变量并动态读取，`TL_LIBS` 决定原生库搜索根，安装版用 `TL_ROOT/lib`、开发版用 `build/lib`。
+- **`tilelang.libinfo`** 的 `find_lib_path` 跨平台拼出库名（Linux `libtilelang.so`、Windows 特例 `tvm_compiler.dll`）并在 `TL_LIBS` 中查找；`__init__.py` 用它加载 `.so`，且支持「轻量导入」跳过加载。
+- `tilelang.__version__` 由 `version_provider.py` 动态生成，会带上后端标签和 git hash（如 `0.1.12+cu130.git0d4a74be`），可用 `NO_VERSION_LABEL` 关闭；pip 安装版则读 `importlib.metadata`。
 
 ## 7. 下一步学习建议
 
-装好之后，下一步自然是「看懂仓库结构、找到入口」。建议进入下一讲 [u1-l3 仓库目录结构与包入口](./u1-l3-repo-layout-and-entry.md)，在那里你会：
+本讲解决了「装好、能 import」的问题。下一讲 **u1-l3 仓库目录结构与包入口** 将带你深入 `tilelang/__init__.py` 的完整导入流程（不只是版本和加载库，还包括 `jit` / `compile` / `language` / `Profiler` 等公共 API 的导出位置），以及 Python 侧子包与 C++ 侧 `src/` 子系统的一一对应关系。
 
-- 梳理 `tilelang/`（Python）与 `src/`（C++）的子系统对应关系。
-- 看 `tilelang/__init__.py` 暴露的公共 API（`jit / compile / language / Profiler / autotune`）。
-
-如果想先「跑起来一个 kernel」再回头读结构，也可以跳到 [u1-l4 第一个 Kernel：Quickstart GEMM 实跑](./u1-l4-quickstart-gemm.md)。后续涉及编译流水线的讲义（第 4 单元）会反复用到本讲提到的 `env.py` 路径变量（如 `TL_CUTLASS_PATH`、`TVM_LIBRARY_PATH`、缓存目录），届时可回看 4.4.3 巩固。
+建议你在进入下一讲前，先把本讲的「综合实践」跑一遍——亲手打印一次 `TL_LIBS` 和 `find_lib_path` 的返回值，会让后续阅读包入口代码时事半功倍。如果想提前感受「装好之后能干什么」，可以浏览 [examples/quickstart.py](https://github.com/tile-ai/tilelang/blob/c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d/examples/quickstart.py)，那是下一单元 u1-l4 会实跑的第一个 kernel。
