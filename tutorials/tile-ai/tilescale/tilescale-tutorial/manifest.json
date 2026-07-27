@@ -1,0 +1,1027 @@
+{
+  "project": "tilescale",
+  "head": "4704282a16fd0e7ff2c2c13f87772b42e4dc6163",
+  "rationale": "TileScale 本质上是 TileLang（基于 TVM 的 tile 级 DSL 与编译栈）的分布式扩展，Python 包名为 tilelang。因此学习路线先从「认识项目、装环境、跑通第一个 kernel、看懂仓库结构」入门（Unit 1），再系统学习 tile 编程语言的 T.* 原语——Kernel 启动、显存层级、gemm/reduce、循环、copy/view（Unit 2）；这两层让读者能写单 GPU kernel。接着进入编译流水线：从 PrimFunc 到 JITKernel 的总览、前端解析、LowerAndLegalize、OptimizeForTarget、codegen、JIT 适配器（Unit 3），再深入核心优化机制：Layout 推理、软件流水线、Warp 特化、存储/内存 pass（Unit 4），以及自动调优框架与 Carver/Roller 代价模型（Unit 5）。Unit 6 是 TileScale 的核心差异化能力——分布式编程：先讲 HDA 愿景与「已实现 vs 待确认」（README 宣传的 T.Scale 尚未落地，实际为 NVSHMEM 路线），再逐一拆解 NVSHMEM 多设备原语、CP-engine 远程 get/put、pynvshmem 运行时与启动、tilescale_ext 的 IPC 张量与内存管理、DeepEP 集成，最后落到 allgather/all2all/summa 等实战示例。Unit 7 面向二次开发：C++ 算子实现机制、CUDA 模板与 GEMM 内核族、目标后端 codegen、Transform pass 深入与扩展、测试/基准/贡献流程。依赖关系按「先会写、再看编译、再懂优化、最后做分布式与扩展」递进，保证每篇只讲一个独立主题且引用真实存在的源码文件。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 TileScale 并跑通第一个 kernel",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与愿景：TileScale 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 TileScale 作为 TileLang 的分布式扩展、HDA（层次化分布式架构）愿景，以及单 GPU tile 编程与多机分布式的区别；说明 README 中宣传的 T.Scale 原语目前属愿景、待确认。",
+          "learning_goals": [
+            "理解 TileScale/TileLang 的定位、与 TVM 的关系",
+            "区分「已实现的 NVSHMEM 分布式路线」与「HDA/T.Scale 愿景」",
+            "建立 tile 级编程模型的整体认知"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/get_started/overview.md"
+          ],
+          "minimal_modules": [
+            "项目背景与 scaling-law 时代的分布式计算需求",
+            "HDA：compute/memory/network 三类基础资源",
+            "tile-based 编程接口（compute/memory/communicate）",
+            "系统总览：frontend/compiler/tile-kernel/cost model/backend"
+          ],
+          "practice_task": "阅读 README 后，用自己的话写出一段 200 字以内的项目定位说明，列出 3 个 TileScale 想解决的问题，并标注哪些是 README 中已实现、哪些标注为待确认。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与安装",
+          "order": 2,
+          "filename": "u1-l2-installation.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 TileScale：Python 依赖、CUDA/HIP 工具链、Docker 镜像选择，以及如何确认 tilelang 可正常 import 并加载底层 .so。",
+          "learning_goals": [
+            "掌握从源码/pip 安装 tilelang 的步骤",
+            "理解 C++ 编译产物（tilelang/tilelang_module .so）的加载机制",
+            "能够诊断常见安装与环境问题"
+          ],
+          "source_files": [
+            "docs/get_started/Installation.md",
+            "pyproject.toml",
+            "requirements.txt",
+            "docker/README.md"
+          ],
+          "minimal_modules": [
+            "依赖与 Python 版本要求（pyproject.toml）",
+            "CUDA 版本与 Docker 镜像对应关系",
+            "tilelang .so 的加载（libinfo.find_lib_path）"
+          ],
+          "practice_task": "在本地或容器中安装 tilelang，运行 `python -c \"import tilelang; print(tilelang.__version__)\"`，并记录依赖中 apache-tvm-ffi、torch、z3-solver、nvidia-nvshmem-cu12 各自的作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一个 kernel：quickstart 详解",
+          "order": 3,
+          "filename": "u1-l3-quickstart.md",
+          "level": "beginner",
+          "topic": "通过 examples/quickstart.py 的 matmul+relu kernel，端到端理解一个 TileLang 程序：T.Kernel、T.alloc_shared/fragment、T.copy、T.gemm、T.Pipelined、T.Parallel，以及 @tilelang.jit 编译与运行。",
+          "learning_goals": [
+            "读懂一个完整 TileLang kernel 的结构",
+            "掌握 tile 声明、copy、gemm、循环的基本写法",
+            "学会用 @tilelang.jit 编译并用 torch 张量调用与校验"
+          ],
+          "source_files": [
+            "examples/quickstart.py",
+            "docs/get_started/run_example.md"
+          ],
+          "minimal_modules": [
+            "T.Kernel 启动上下文与 (bx,by) 绑定",
+            "多级显存 tile 声明与 T.copy 数据搬运",
+            "T.Pipelined 软件流水与 T.Parallel 元素并行",
+            "编译、调用、与 torch 参考结果校验"
+          ],
+          "practice_task": "复制 quickstart.py 并修改：把 relu 换成 gelu（用 T.exp/T.tanh 等数学原语近似或自定义），运行并校验输出。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "仓库结构与入口文件地图",
+          "order": 4,
+          "filename": "u1-l4-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录：C++ 编译器 src/、Python DSL 包 tilelang/、分布式扩展 tilescale_ext/ 与 tilelang/utils/ts_ext/、examples/、benchmark/、docs/，以及 tilelang/__init__.py 的导出与库加载入口。",
+          "learning_goals": [
+            "建立仓库整体地图，知道每个目录负责什么",
+            "理解 tilelang 包的导出结构与底层 .so 加载",
+            "能快速定位 DSL 原语、编译 pass、codegen、分布式代码"
+          ],
+          "source_files": [
+            "tilelang/__init__.py",
+            "pyproject.toml",
+            "CMakeLists.txt",
+            "tilelang/libinfo.py"
+          ],
+          "minimal_modules": [
+            "顶层目录职责（src/tilelang/tilescale_ext/examples/benchmark/docs）",
+            "tilelang/__init__.py 的模块导出与可选分布式扩展",
+            "scikit-build + CMake 的构建产物布局",
+            "libinfo 如何定位 tilelang .so"
+          ],
+          "practice_task": "画一张仓库目录树，标注每个关键目录的职责，并用一句话说明 `import tilelang` 时依次加载了哪些模块与底层库。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Tile 编程语言基础（T.* 原语）",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "T.Kernel：启动配置与线程/块绑定",
+          "order": 1,
+          "filename": "u2-l1-kernel-launch.md",
+          "level": "beginner",
+          "topic": "详解 T.Kernel 的 grid/threads 配置、(bx,by,bz) 块索引绑定、get_thread_bindings/get_block_bindings 等辅助函数，以及 is_cpu 等选项。",
+          "learning_goals": [
+            "掌握 T.Kernel 的参数与 grid/threads 语义",
+            "理解块索引变量如何在 kernel 内被使用",
+            "能用 1D/2D/3D grid 编写启动配置"
+          ],
+          "source_files": [
+            "tilelang/language/kernel.py",
+            "examples/quickstart.py"
+          ],
+          "minimal_modules": [
+            "Kernel 函数签名与 threads 规范化",
+            "LaunchThreadFrame 与块/线程绑定",
+            "get_thread_binding(s)/get_block_binding(s) 辅助 API"
+          ],
+          "practice_task": "写一个 2D grid 的 elementwise kernel（用 T.Parallel 把 A+B 写入 C），分别打印 bx、by 的语义并校验正确性。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Tile 声明与显存层级",
+          "order": 2,
+          "filename": "u2-l2-tile-alloc.md",
+          "level": "beginner",
+          "topic": "讲解 T.alloc_shared/alloc_fragment/alloc_local 等 tile 声明原语，对应 shared memory/寄存器 fragment/local memory，以及 T.Tensor、Buffer、make_tensor 等代理对象。",
+          "learning_goals": [
+            "理解 GPU 显存层级与 tile 分配的对应关系",
+            "掌握 shared/fragment/local 三类分配的适用场景",
+            "区分 fragment（寄存器）与 shared memory 的使用模式"
+          ],
+          "source_files": [
+            "tilelang/language/allocate.py",
+            "tilelang/language/proxy.py",
+            "docs/programming_guides/language_basics.md"
+          ],
+          "minimal_modules": [
+            "显存层级：global/shared/fragment(local/register)",
+            "alloc_shared/alloc_fragment/alloc_local/empty",
+            "T.Tensor、Buffer、make_tensor 代理对象"
+          ],
+          "practice_task": "实现一个把 global tensor 加载到 shared、再做 reduce 到 fragment 的 kernel，注释每一步数据所在的显存层级。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "计算原语：gemm 与 reduce",
+          "order": 3,
+          "filename": "u2-l3-compute-primitives.md",
+          "level": "beginner",
+          "topic": "讲解 T.gemm（及 gemm_v1/v2、gemm_sp）、T.reduce_max/min/sum、T.fill/clear、GemmWarpPolicy 等计算原语的用法与关键参数。",
+          "learning_goals": [
+            "掌握 T.gemm 的输入输出与常用参数（transpose、policy）",
+            "学会用 reduce_* 系列做规约",
+            "理解 fill/clear 的初始化用途"
+          ],
+          "source_files": [
+            "tilelang/language/gemm_op.py",
+            "tilelang/language/reduce_op.py",
+            "tilelang/language/fill_op.py",
+            "tilelang/tileop/base.py"
+          ],
+          "minimal_modules": [
+            "T.gemm 参数与 GemmWarpPolicy",
+            "reduce_max/min/sum/abssum 等规约",
+            "fill/clear 与 finalize_reducer"
+          ],
+          "practice_task": "基于 quickstart 的 matmul，把累加器 C_local 用 T.reduce_max 沿某一维规约，输出每行的最大值并校验。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "循环与控制流",
+          "order": 4,
+          "filename": "u2-l4-loops-control-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 T.Parallel、T.Pipelined、T.serial、T.Unroll、T.Persistent 等循环原语的语义，以及 T.ceildiv 等工具。",
+          "learning_goals": [
+            "区分 Parallel/Pipelined/serial/Unroll/Persistent 的语义",
+            "掌握 T.Pipelined 的 num_stages 软件流水用法",
+            "能在 kernel 内组合多种循环结构"
+          ],
+          "source_files": [
+            "tilelang/language/loop.py",
+            "tilelang/language/parallel.py",
+            "tilelang/language/pipeline.py",
+            "docs/programming_guides/control_flow.md"
+          ],
+          "minimal_modules": [
+            "T.Parallel 元素级并行与多维权",
+            "T.Pipelined 与 num_stages 软件流水",
+            "serial/Unroll/Persistent 循环变体"
+          ],
+          "practice_task": "写一个 kernel 用 T.Pipelined 做 matmul 并对比 num_stages=1 与 3 的性能（用 get_profiler().do_bench()），记录延迟差异。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "数据搬运：T.copy 与 T.view",
+          "order": 5,
+          "filename": "u2-l5-copy-view.md",
+          "level": "intermediate",
+          "topic": "讲解 T.copy（含 c2d_im2col）的数据搬运语法、T.view/reshape 的视图与 layout 重解释，以及 copy 在 global/shared/fragment 之间的作用。",
+          "learning_goals": [
+            "掌握 T.copy 的源/目的 tile 切片语法",
+            "理解 T.view 如何以不同 layout 引用同一 tile",
+            "学会 c2d_im2col 等特殊搬运的用途"
+          ],
+          "source_files": [
+            "tilelang/language/copy_op.py",
+            "tilelang/language/copy.py",
+            "tilelang/language/customize.py"
+          ],
+          "minimal_modules": [
+            "T.copy 切片语法与并行化搬运",
+            "T.view/reshape 视图与 layout 重解释",
+            "c2d_im2col 与卷积数据布局"
+          ],
+          "practice_task": "写一个 kernel 把一个 (M,K) 的矩阵用 T.copy 分块加载到 shared，再用 T.view 以转置 layout 引用，验证转置读取正确。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "编译流水线与 IR",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "编译总览：从 PrimFunc 到 JITKernel",
+          "order": 1,
+          "filename": "u3-l1-compile-overview.md",
+          "level": "intermediate",
+          "topic": "总览编译主链路：tilelang.compile/lower 的三阶段（PreLowerSemanticCheck → LowerAndLegalize → OptimizeForTarget）、host/device 拆分与 codegen，最终产出 JITKernel/CompiledArtifact。",
+          "learning_goals": [
+            "掌握 TileLang 编译主流程的三个阶段",
+            "理解 host/device 模块拆分与 codegen 时机",
+            "看懂 CompiledArtifact/JITKernel 的产出结构"
+          ],
+          "source_files": [
+            "tilelang/engine/lower.py",
+            "tilelang/engine/phase.py",
+            "tilelang/jit/__init__.py",
+            "tilelang/engine/param.py"
+          ],
+          "minimal_modules": [
+            "lower() 的阶段编排与 target 处理",
+            "PreLowerSemanticCheck/LowerAndLegalize/OptimizeForTarget",
+            "host/device filter 与 CompiledArtifact 产出"
+          ],
+          "practice_task": "对一个简单 kernel 调用 tilelang.lower（而非 compile），打印/检视返回的 CompiledArtifact 各字段，说明每个字段代表什么。",
+          "depends_on": [
+            "u1-l3",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "前端解析与 TIR 表示",
+          "order": 2,
+          "filename": "u3-l2-frontend-tir.md",
+          "level": "intermediate",
+          "topic": "讲解 TileLang 前端如何把 Python @T.prim_func 解析为 TVM TIR：language/parser、language/tir、language/v2（PrimFunc/prim_func/LazyJITFunc）与 overrides 机制。",
+          "learning_goals": [
+            "理解 @T.prim_func 到 TIR PrimFunc 的转换",
+            "认识 language/v2 的新前端与 LazyJITFunc",
+            "了解 overrides 如何复用上游 tir script 解析"
+          ],
+          "source_files": [
+            "tilelang/language/__init__.py",
+            "tilelang/language/parser/entry.py",
+            "tilelang/language/tir/entry.py",
+            "tilelang/language/v2/__init__.py"
+          ],
+          "minimal_modules": [
+            "@T.prim_func 与 TVM tir script 的关系",
+            "language/parser 与 overrides 解析链",
+            "language/v2 的 PrimFunc/prim_func/LazyJITFunc"
+          ],
+          "practice_task": "写一个 prim_func，用 tilelang.lower 得到 IRModule，并用 mod.show() 或 AST 打印查看其 TIR 结构，标注 Kernel/copy/gemm 对应的 IR 节点。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "LowerAndLegalize：前端 Tile IR 合法化",
+          "order": 3,
+          "filename": "u3-l3-lower-legalize.md",
+          "level": "intermediate",
+          "topic": "逐 pass 讲解 LowerAndLegalize 阶段：负索引合法化、InjectAssumes、Simplify、LayoutReducer、LayoutInference、LowerTileOp、LowerL2Persistent、向量化与安全访存合法化。",
+          "learning_goals": [
+            "理解 layout 推理在合法化阶段的位置与作用",
+            "掌握 LowerTileOp 如何把高层 tile op 降级",
+            "了解安全访存与负索引合法化的必要性"
+          ],
+          "source_files": [
+            "tilelang/engine/phase.py",
+            "tilelang/transform/layout_inference.cc",
+            "src/transform/lower_tile_op.cc",
+            "src/transform/legalize_negative_index.cc"
+          ],
+          "minimal_modules": [
+            "BindTarget/LegalizeNegativeIndex/InjectAssumes/Simplify",
+            "LayoutReducer + LayoutInference（fragment/shared 布局推理）",
+            "LowerTileOp/LowerL2Persistent 与安全访存合法化"
+          ],
+          "practice_task": "对同一 kernel 分别开关 tl 相关 pass_config（如 disable_tma_lower），对比 lower 后的 IR 差异，说明 LayoutInference 改变了什么。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "OptimizeForTarget：目标相关优化",
+          "order": 4,
+          "filename": "u3-l4-optimize-target.md",
+          "level": "intermediate",
+          "topic": "逐 pass 讲解 OptimizeForTarget 阶段：warp 特化与 TMA、软件流水、FlattenBuffer、向量化、StorageRewrite、线程同步、SplitHostDevice、MakePackedAPI、持久化 threadblock 等。",
+          "learning_goals": [
+            "理解 Hopper(TMA/wgmma) 路径与普通路径的分支差异",
+            "掌握 FlattenBuffer/向量化/StorageRewrite 的作用",
+            "了解 SplitHostDevice 与 MakePackedAPI 如何为 codegen 做准备"
+          ],
+          "source_files": [
+            "tilelang/engine/phase.py",
+            "src/transform/inject_pipeline.cc",
+            "src/transform/warp_specialized_rewriter.cc",
+            "src/transform/storage_rewrite.cc",
+            "src/transform/split_host_device.cc"
+          ],
+          "minimal_modules": [
+            "TMA+warp 特化分支 vs 普通分支",
+            "FlattenBuffer/ConfigIndexBitwidth/VectorizeLoop/StorageRewrite",
+            "ThreadSync/SplitHostDevice/MakePackedAPI/PersistThreadblock"
+          ],
+          "practice_task": "在 phase.py 的 OptimizeForTarget 中追踪一个 matmul kernel 的 pass 顺序，列出每个 pass 输入输出的关键变化（可借助 IR 打印）。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "代码生成与目标后端",
+          "order": 5,
+          "filename": "u3-l5-codegen-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 device_codegen/host_codegen 如何把 IR 编译为 CUDA/HIP/C/CuteDSL/Metal 源码，以及 tilelang_callback_cuda_compile/hip_compile 回调（含 NVSHMEM 链接）。",
+          "learning_goals": [
+            "理解 host/device codegen 的分工",
+            "掌握 CUDA/HIP/C/CuteDSL/Metal 后端的选择逻辑",
+            "了解 NVSHMEM 设备库链接的触发条件"
+          ],
+          "source_files": [
+            "tilelang/engine/lower.py",
+            "src/target/codegen_cuda.cc",
+            "src/target/codegen_hip.cc",
+            "docs/get_started/targets.md"
+          ],
+          "minimal_modules": [
+            "device_codegen/host_codegen 与 target.build.tilelang_* ",
+            "tilelang_callback_cuda_compile/hip_compile 回调",
+            "多后端：cuda/hip/c/llvm/metal/webgpu/cutedsl"
+          ],
+          "practice_task": "用 kernel.get_kernel_source() 取出某 matmul 生成的 CUDA 源码，定位其中由 LowerTileOp/codegen 生成的 CUTLASS/模板调用片段并注释。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "JIT 适配器与运行时调用",
+          "order": 6,
+          "filename": "u3-l6-jit-adapters.md",
+          "level": "intermediate",
+          "topic": "讲解 JITKernel 的多种执行后端（dlpack/tvm_ffi/cython/nvrtc/torch/cutedsl）、adapter 机制、Profiler 与 dlpack 张量桥接。",
+          "learning_goals": [
+            "理解 compile 的 execution_backend 可选项与取舍",
+            "掌握 adapter 如何把编译产物封装为可调用对象",
+            "学会用 Profiler 测延迟与张量供给"
+          ],
+          "source_files": [
+            "tilelang/jit/__init__.py",
+            "tilelang/jit/adapter/base.py",
+            "tilelang/jit/adapter/dlpack.py",
+            "tilelang/contrib/dlpack.py"
+          ],
+          "minimal_modules": [
+            "compile/par_compile/jit/lazy_jit 与 JITKernel",
+            "execution_backend 各适配器（ctypes/cython/nvrtc/torch/dlpack/cutedsl）",
+            "Profiler 与 TensorSupplyType 张量供给"
+          ],
+          "practice_task": "用同一个 kernel 分别以 torch 与 dlpack 后端编译运行，对比可用性与性能，并用 get_profiler().do_bench() 记录延迟。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "核心优化机制深入",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Layout 推理机制",
+          "order": 1,
+          "filename": "u4-l1-layout-inference.md",
+          "level": "advanced",
+          "topic": "深入 LayoutInference pass 与 Layout/Fragment 抽象：如何为 fragment/shared tile 推导线程级布局（如 wmma/wgmma 所需布局），以及可视化。",
+          "learning_goals": [
+            "理解 Layout/Fragment 抽象与线程布局推导",
+            "掌握 LayoutInference 在编译中的输入输出",
+            "学会用 layout 可视化调试布局"
+          ],
+          "source_files": [
+            "tilelang/transform/layout_inference.cc",
+            "tilelang/layout/__init__.py",
+            "src/layout/layout.cc",
+            "tilelang/analysis/layout_visual.py"
+          ],
+          "minimal_modules": [
+            "Layout/Fragment 数据结构与线程布局",
+            "LayoutInference pass 算法思路",
+            "布局可视化（TL_LAYOUT_VISUALIZATION_ENABLE）"
+          ],
+          "practice_task": "对一个 gemm kernel 开启 layout 可视化（txt），解读 fragment 的线程布局，说明它如何匹配 wgmma/mma 的形状要求。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "软件流水线与异步拷贝",
+          "order": 2,
+          "filename": "u4-l2-software-pipeline.md",
+          "level": "advanced",
+          "topic": "深入 T.Pipelined 背后的 PipelinePlanning 与 InjectSoftwarePipeline pass，以及 cp.async/TMA 异步拷贝与多缓冲重叠。",
+          "learning_goals": [
+            "理解 num_stages 多缓冲与软件流水的实现",
+            "掌握 PipelinePlanning 如何规划缓冲与同步",
+            "了解 cp.async/TMA 在流水中的角色"
+          ],
+          "source_files": [
+            "src/transform/pipeline_planning.cc",
+            "src/transform/inject_pipeline.cc",
+            "src/transform/inject_ptx_async_copy.cc",
+            "src/transform/inject_tma_barrier.cc"
+          ],
+          "minimal_modules": [
+            "T.Pipelined 到多缓冲 lowering",
+            "PipelinePlanning 缓冲与同步规划",
+            "cp.async/TMA 异步拷贝注入"
+          ],
+          "practice_task": "对同一 matmul 改变 num_stages（1/2/3/4），测量延迟并解释软件流水带来的收益与寄存器/共享内存代价。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Warp 特化与 Hopper wgmma",
+          "order": 3,
+          "filename": "u4-l3-warp-specialization.md",
+          "level": "advanced",
+          "topic": "深入 WarpSpecialized 重写、T.ws、IfStmtBinding/MultiVersionBuffer、wgmma 同步重写与 fence proxy 等 Hopper 专项优化。",
+          "learning_goals": [
+            "理解 warp specialization 的生产-消费模型",
+            "掌握 T.ws 与 WarpSpecialized pass 的关系",
+            "了解 wgmma 异步与 RewriteWgmmaSync/InjectFenceProxy"
+          ],
+          "source_files": [
+            "src/transform/warp_specialized_rewriter.cc",
+            "tilelang/language/warpgroup.py",
+            "src/transform/wgmma_sync_rewriter.cc",
+            "src/transform/inject_fence_proxy.cc"
+          ],
+          "minimal_modules": [
+            "T.ws 与 warp 特化生产-消费",
+            "WarpSpecialized/IfStmtBinding/MultiVersionBuffer",
+            "wgmma 异步同步与 fence proxy"
+          ],
+          "practice_task": "阅读 examples/warp_specialize 下的示例，定位 T.ws 的用法，并用一句话描述哪个 warp 做搬运、哪个做计算。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "存储与内存管理 pass",
+          "order": 4,
+          "filename": "u4-l4-storage-memory-pass.md",
+          "level": "advanced",
+          "topic": "深入存储相关 pass：StorageRewrite、MergeSharedMemoryAllocations、FlattenBuffer、动态共享内存对齐、thread storage sync 等。",
+          "learning_goals": [
+            "理解共享/寄存器内存分配的合并与重写",
+            "掌握同步插入（shared/shared.dyn/global barrier）逻辑",
+            "了解动态共享内存分配对齐"
+          ],
+          "source_files": [
+            "src/transform/storage_rewrite.cc",
+            "src/transform/merge_shared_memory_allocations.cc",
+            "src/transform/flatten_buffer.cc",
+            "src/transform/thread_storage_sync.cc"
+          ],
+          "minimal_modules": [
+            "StorageRewrite 内存分配与复用",
+            "MergeSharedMemoryAllocations 合并策略",
+            "FlattenBuffer 与 thread storage sync"
+          ],
+          "practice_task": "对比开关 TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE 时生成的 CUDA 源码中 shared memory 分配的差异，估算共享内存占用变化。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "自动调优",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Autotuner 框架",
+          "order": 1,
+          "filename": "u5-l1-autotuner.md",
+          "level": "intermediate",
+          "topic": "讲解 tilelang.autotune/AutoTuner 框架：如何声明可调参数、set_autotune_inputs 捕获输入、搜索与缓存最优配置。",
+          "learning_goals": [
+            "掌握 autotune 装饰器与可调参数声明",
+            "理解搜索过程的输入捕获与评测",
+            "学会读取/复用调优结果"
+          ],
+          "source_files": [
+            "tilelang/autotuner/tuner.py",
+            "tilelang/autotuner/capture.py",
+            "tilelang/autotuner/param.py",
+            "examples/gemm/example_gemm_autotune.py",
+            "docs/programming_guides/autotuning.md"
+          ],
+          "minimal_modules": [
+            "@autotune 与可调参数声明",
+            "set_autotune_inputs/get_autotune_inputs 捕获",
+            "搜索、评测与结果缓存"
+          ],
+          "practice_task": "基于 example_gemm_autotune.py，为 block_M/block_N/block_K/num_stages 增加一个新候选值并运行调优，记录最优配置与延迟。",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Carver 与 Roller 代价模型",
+          "order": 2,
+          "filename": "u5-l2-carver-roller.md",
+          "level": "advanced",
+          "topic": "讲解 Carver（从计算图 carving 出可调度子图）与 Roller（基于张量核心策略与 best-fit 的代价模型/启发式调度生成）。",
+          "learning_goals": [
+            "理解 Carver 的子图 carving 与模板",
+            "掌握 Roller 的 policy/best-fit 调度生成",
+            "了解架构抽象（cuda/cdna/metal/cpu）的作用"
+          ],
+          "source_files": [
+            "tilelang/carver/analysis.py",
+            "tilelang/carver/roller/policy/default.py",
+            "tilelang/carver/roller/bestfit.py",
+            "tilelang/carver/arch/cuda.py"
+          ],
+          "minimal_modules": [
+            "Carver 分析与模板（matmul/flashattention 等）",
+            "Roller policy 与 best-fit 启发式",
+            "架构 driver 抽象（cuda/cdna/metal/cpu）"
+          ],
+          "practice_task": "对某 matmul kernel，运行 Roller 给出的 hint（参考 carver/common_schedules.py），对比手写 schedule 与 hint schedule 的性能。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "分布式编程（TileScale 核心）",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "分布式总览与 HDA 愿景",
+          "order": 1,
+          "filename": "u6-l1-distributed-overview.md",
+          "level": "advanced",
+          "topic": "总览 TileScale 分布式能力：HDA 愿景、README 中宣传但尚未落地的 T.Scale（待确认）、实际采用的 NVSHMEM 多设备路线，以及分布式子系统的组成。",
+          "learning_goals": [
+            "区分 HDA/T.Scale 愿景与已实现的 NVSHMEM 路线",
+            "理解分布式子系统（language/distributed、pynvshmem、tilescale_ext、DeepEP）组成",
+            "建立 PE/rank 的基本概念"
+          ],
+          "source_files": [
+            "README.md",
+            "tilelang/distributed/__init__.py",
+            "examples/distributed/README.md",
+            "tilelang/language/distributed/common.py"
+          ],
+          "minimal_modules": [
+            "HDA 愿景 vs NVSHMEM 实现现状",
+            "分布式子系统目录与职责",
+            "PE（处理单元）/rank 基本概念"
+          ],
+          "practice_task": "整理一张表：README 宣传的能力（如 T.Scale、T.Kernel 的 device=/cta_cluster=）中，哪些在代码中已实现、哪些标注为待确认，并给出依据。",
+          "depends_on": [
+            "u1-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "NVSHMEM 多设备通信原语",
+          "order": 2,
+          "filename": "u6-l2-nvshmem-primitives.md",
+          "level": "advanced",
+          "topic": "讲解基于 NVSHMEM 的多设备原语：putmem/getmem（含 nbi/block/warp 变体）、barrier_all/sync_all/quiet/fence、signal_op/signal_wait_until、broadcast/fcollect 等，及其 C++ 后端 tl.* op。",
+          "learning_goals": [
+            "掌握 putmem/getmem 系列远程拷贝原语",
+            "理解 barrier/sync/quiet/fence 同步语义",
+            "学会 signal/wait 的远程通知模式"
+          ],
+          "source_files": [
+            "tilelang/language/distributed/multi_device/nvshmem.py",
+            "tilelang/language/distributed/common.py",
+            "src/op/distributed.cc",
+            "src/op/sync.cc"
+          ],
+          "minimal_modules": [
+            "putmem/getmem（nbi/block/warp）远程拷贝",
+            "barrier_all/sync_all/quiet/fence 同步",
+            "signal_op/signal_wait_until/broadcast/fcollect"
+          ],
+          "practice_task": "阅读 examples/distributed/primitives/ 下的 put_block/get_block/sync 示例，画出两个 PE 之间一次 put+wait 的时序，标注同步点。",
+          "depends_on": [
+            "u6-l1",
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "CP-engine 远程 get/put 原语",
+          "order": 3,
+          "filename": "u6-l3-cpengine-remote-copy.md",
+          "level": "advanced",
+          "topic": "讲解 CP-engine 风格的远程拷贝：put_warp/put_block/get_warp/get_block（基于 tl.tileop.put/get）、unroll_factor/aggressive vectorize，以及 wait_eq/wait_ne 等条件等待与 C++ remote_copy。",
+          "learning_goals": [
+            "掌握 put_block/get_block/put_warp/get_warp 的参数与粒度",
+            "理解 unroll_factor 与向量化对拷贝性能的影响",
+            "学会 wait_* 条件等待配合远程拷贝"
+          ],
+          "source_files": [
+            "tilelang/language/distributed/multi_device/cpengine.py",
+            "src/op/remote_copy.cc",
+            "src/op/copy.cc"
+          ],
+          "minimal_modules": [
+            "put_block/get_block/put_warp/get_warp 与 dst_pe/src_pe",
+            "unroll_factor/aggressive vectorize",
+            "wait_eq/wait_ne/... 条件等待"
+          ],
+          "practice_task": "基于 example_simple_shift.py，实现一个 ring-shift：每个 PE 把本地一段数据 put 给下一个 PE，并用 wait 等待完成，校验结果。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "分布式运行时：pynvshmem 与启动",
+          "order": 4,
+          "filename": "u6-l4-pynvshmem-launch.md",
+          "level": "advanced",
+          "topic": "讲解分布式运行时：pynvshmem 主机端 API（nvshmem_create_tensor/barrier_all）、init_distributed（WORLD_SIZE/RANK/LOCAL_RANK/TP_GROUP）、launch.sh 多进程启动与 perf_fn 评测。",
+          "learning_goals": [
+            "掌握 init_distributed 的返回与 torch.distributed 集成",
+            "理解 pynvshmem 对称堆张量创建与 barrier",
+            "学会用 launch.sh 启动多进程分布式程序"
+          ],
+          "source_files": [
+            "tilelang/distributed/utils.py",
+            "tilelang/distributed/launch.sh",
+            "tilelang/distributed/pynvshmem/python/pynvshmem/__init__.py",
+            "examples/distributed/example_allgather.py"
+          ],
+          "minimal_modules": [
+            "init_distributed 与 RANK/WORLD_SIZE/TP_GROUP",
+            "pynvshmem 主机端 API 与对称堆张量",
+            "launch.sh 多进程启动与 perf_fn"
+          ],
+          "practice_task": "在单机多卡环境下用 launch.sh 启动 example_allgather.py（或简化版），记录每个 rank 的输出并与 torch all_gather 对比正确性。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "IPC 张量与 tilescale_ext 内存管理",
+          "order": 5,
+          "filename": "u6-l5-ipc-tilescale-ext.md",
+          "level": "advanced",
+          "topic": "讲解 tilescale_ext C++ 扩展提供的 IPC 张量与内存管理：_create_tensor（从指针构造 torch 张量）、_create_ipc_handle/_sync_ipc_handles（跨进程 IPC）、allocator 与 cudaMalloc/cudaFree 所有权。",
+          "learning_goals": [
+            "理解 tilescale_ext 的 tensor_from_ptr 与所有权模型",
+            "掌握 IPC handle 创建与同步的用途",
+            "了解 get_allocator 与分布式内存分配"
+          ],
+          "source_files": [
+            "tilescale_ext/__init__.py",
+            "tilelang/utils/ts_ext/tensor.cpp",
+            "tilelang/utils/ts_ext/ipc_ops.cpp",
+            "tilelang/utils/allocator.py",
+            "tilelang/utils/tensor.py"
+          ],
+          "minimal_modules": [
+            "tensor_from_ptr 与 take_ownership 所有权",
+            "IPC handle 创建/同步（跨进程共享显存）",
+            "allocator 与 tensor Python 封装"
+          ],
+          "practice_task": "阅读 ts_ext/tensor.cpp 与 ipc_ops.cpp，画出两个进程通过 IPC handle 共享一段 GPU 显存的流程图，说明谁负责 cudaFree。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "DeepEP 集成（节点内 Expert Parallel）",
+          "order": 6,
+          "filename": "u6-l6-deepep.md",
+          "level": "advanced",
+          "topic": "讲解 DeepEP（节点内/all-to-all 专家路由）集成：3rdparty/DeepEP、install_deepep.sh 构建、dispatch/combine/get_dispatch_layout 与 intranode 示例。",
+          "learning_goals": [
+            "理解 DeepEP 在 MoE 专家路由中的作用",
+            "掌握 install_deepep.sh 的构建与依赖",
+            "看懂 intranode dispatch/combine 示例结构"
+          ],
+          "source_files": [
+            "tilelang/distributed/install_deepep.sh",
+            "examples/distributed/deepseek_deepep/intranode/example_intranode.py",
+            "examples/distributed/deepseek_deepep/intranode/dispatch.py",
+            "examples/distributed/deepseek_deepep/intranode/combine.py",
+            "examples/distributed/deepseek_deepep/deepep.md"
+          ],
+          "minimal_modules": [
+            "DeepEP 背景与 MoE all-to-all 路由",
+            "install_deepep.sh 构建与链接",
+            "dispatch/combine/get_dispatch_layout 示例"
+          ],
+          "practice_task": "阅读 deepep.md 与 intranode 示例，写出 dispatch 与 combine 两个阶段各自的数据流向，标注每步用到的通信原语。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l7",
+          "title": "分布式实战：allgather / all2all / summa / gemm-rs",
+          "order": 7,
+          "filename": "u6-l7-distributed-examples.md",
+          "level": "advanced",
+          "topic": "通过经典分布式示例串起所学：allgather、all_to_all、SUMMA、gemm+reduce-scatter、cannon 等，理解通信与计算的组织与 overlap。",
+          "learning_goals": [
+            "掌握 allgather/all2all 的 TileLang 实现思路",
+            "理解 SUMMA/Cannon 分布式 GEMM 的通信模式",
+            "学会在 kernel 内组织通信与计算的 overlap"
+          ],
+          "source_files": [
+            "examples/distributed/example_allgather.py",
+            "examples/distributed/example_all_to_all.py",
+            "examples/distributed/example_summa.py",
+            "examples/distributed/example_gemm_rs_overlapped.py",
+            "examples/distributed/example_cannon.py"
+          ],
+          "minimal_modules": [
+            "allgather/all_to_all 实现",
+            "SUMMA/Cannon 分布式 GEMM",
+            "gemm+reduce-scatter 与计算通信 overlap"
+          ],
+          "practice_task": "选择 example_summa.py，画出 N 个 PE 上一次完整 SUMMA 迭代的通信-计算时序，标注 broadcast/putmem 与本地 gemm 的位置。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "后端、算子内核与二次开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "C++ 算子实现机制",
+          "order": 1,
+          "filename": "u7-l1-cpp-ops.md",
+          "level": "advanced",
+          "topic": "讲解 src/op 下算子的注册与实现框架：operator.cc 的 Op 注册、gemm/copy/reduce/distributed/remote_copy/sync 等算子如何对接 Python tl.* intrin 与 lowering。",
+          "learning_goals": [
+            "理解 TVM Op 注册与 tl.* intrin 的对应",
+            "掌握 gemm/copy/reduce 算子的实现位置",
+            "了解 distributed/remote_copy/sync 算子如何落地"
+          ],
+          "source_files": [
+            "src/op/operator.cc",
+            "src/op/gemm.cc",
+            "src/op/copy.cc",
+            "src/op/reduce.cc",
+            "src/op/builtin.cc"
+          ],
+          "minimal_modules": [
+            "Op 注册与 tl.tileop.*/tl.* intrin",
+            "compute/copy/gemm 算子实现",
+            "reduce/sync/distributed 算子"
+          ],
+          "practice_task": "追踪 T.gemm 从 Python gemm_op.py 到 src/op/gemm.cc 的调用链，画出 intrin 名到 C++ Op 的对应关系图。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "CUDA 模板与 GEMM 内核族",
+          "order": 2,
+          "filename": "u7-l2-cuda-gemm-templates.md",
+          "level": "advanced",
+          "topic": "讲解 src/tl_templates/cuda 下的 GEMM 内核族：sm70/sm80/sm89/sm90/sm100/sm120、mma/wgmma/tcgen05 指令模板、copy(TMA/LSU)、barrier/reduce 等设备模板。",
+          "learning_goals": [
+            "理解不同 SM 架构对应的不同 GEMM 模板",
+            "掌握 mma/wgmma/tcgen05 指令封装",
+            "了解 copy(TMA/LSU)/barrier/reduce 设备模板"
+          ],
+          "source_files": [
+            "src/tl_templates/cuda/gemm.h",
+            "src/tl_templates/cuda/gemm_sm90.h",
+            "src/tl_templates/cuda/gemm_sm100.h",
+            "src/tl_templates/cuda/instruction/wgmma.h",
+            "src/tl_templates/cuda/copy.h"
+          ],
+          "minimal_modules": [
+            "按架构分发的 GEMM 模板（sm70~sm120）",
+            "mma/wgmma/tcgen05 指令模板",
+            "copy（TMA/LSU）/barrier/reduce 辅助模板"
+          ],
+          "practice_task": "对比 gemm_sm80.h 与 gemm_sm90.h 的关键差异，说明 wgmma 相对 mma 在接口上的变化（如同步、描述符）。",
+          "depends_on": [
+            "u7-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "目标后端 codegen 深入",
+          "order": 3,
+          "filename": "u7-l3-codegen-internals.md",
+          "level": "advanced",
+          "topic": "深入 src/target 的 codegen：codegen_cuda/cpp/hip/cutedsl、rt_mod_cuda（运行时模块加载 cubin）、ptx/intrin_rule，以及 codegen 如何 emit C++/CUDA 源码。",
+          "learning_goals": [
+            "理解 codegen_cuda 如何 emit 设备源码",
+            "掌握 rt_mod_* 运行时模块的加载与执行",
+            "了解 intrin_rule/ptx 的指令映射"
+          ],
+          "source_files": [
+            "src/target/codegen_cuda.cc",
+            "src/target/codegen_cpp.cc",
+            "src/target/rt_mod_cuda.cc",
+            "src/target/intrin_rule_cuda.cc",
+            "src/target/ptx.cc"
+          ],
+          "minimal_modules": [
+            "codegen_cuda/cpp/hip/cutedsl 源码生成",
+            "rt_mod_* 运行时模块加载与调用",
+            "intrin_rule/ptx 指令映射"
+          ],
+          "practice_task": "阅读 codegen_cuda.cc，找到它如何把 T.copy/T.gemm 对应的模板调用 emit 为 CUDA 源码片段，并举例说明。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Transform pass 深入与扩展",
+          "order": 4,
+          "filename": "u7-l4-transform-extend.md",
+          "level": "advanced",
+          "topic": "选取若干有文档的 pass 深入讲解（inject_fence_proxy、letstmt_inline、tensor_checks、lower_thread_allreduce），并说明如何新增/注册一个 transform pass。",
+          "learning_goals": [
+            "理解 fence_proxy/let_inline/tensor_checks 等 pass 细节",
+            "掌握 lower_thread_allreduce 的实现思路",
+            "学会在 tilelang.transform 中新增 pass 并接入 phase"
+          ],
+          "source_files": [
+            "src/transform/inject_fence_proxy.cc",
+            "src/transform/lower_thread_allreduce.cc",
+            "docs/compiler_internals/inject_fence_proxy.md",
+            "docs/compiler_internals/letstmt_inline.md",
+            "docs/compiler_internals/tensor_checks.md"
+          ],
+          "minimal_modules": [
+            "inject_fence_proxy / letstmt_inline / tensor_checks",
+            "lower_thread_allreduce 实现",
+            "新增并注册 transform pass 的步骤"
+          ],
+          "practice_task": "参考现有 pass，写一个最小的「打印每个 PrimFunc 名字」的诊断 pass，挂到 PreLowerSemanticCheck 中并验证输出。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "测试、基准与贡献流程",
+          "order": 5,
+          "filename": "u7-l5-testing-benchmark-contrib.md",
+          "level": "advanced",
+          "topic": "讲解项目的测试体系（testing/python、cpp）、benchmark 结构（matmul/attention/distributed/mamba）、CI（.github/workflows）、格式化 format.sh 与 CONTRIBUTING 贡献流程。",
+          "learning_goals": [
+            "掌握如何运行单元/集成测试与 benchmark",
+            "理解 CI 矩阵（cuda/amd/各 CUDA 版本）",
+            "学会按贡献规范提交 PR（格式化、pre-commit）"
+          ],
+          "source_files": [
+            "testing/conftest.py",
+            "benchmark/matmul/benchmark_matmul.py",
+            "format.sh",
+            "CONTRIBUTING.md",
+            ".github/workflows/ci.yml"
+          ],
+          "minimal_modules": [
+            "testing 体系（python/cpp）与 conftest",
+            "benchmark 结构与运行",
+            "CI 矩阵、format.sh、pre-commit 与贡献流程"
+          ],
+          "practice_task": "运行 benchmark/matmul/benchmark_matmul.py（或一个 testing 用例），按 format.sh + pre-commit 规范整理一段自己写的 kernel 代码，确认通过 lint。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

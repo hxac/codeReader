@@ -1,7 +1,7 @@
 {
   "project": "TileOPs",
-  "head": "9bda1ac53758c21b0ffd25e84c6a2cfcad2aac72",
-  "rationale": "学习顺序按\"先认识再深入、先机制后实战\"设计。U1 入门层让读者从零建立项目定位、运行方式、目录与 API 心智模型。U2/U3 进入双层抽象——Op(主机调度)与 Kernel(TileLang 实现)，这是理解一切后续内容的基础。U4 讲解作为\"唯一真相来源\"的 manifest，是 U5(正确性测试)与 U6(性能基准)两条横切关注的前置。进阶层先讲性能模型 roofline(U7)，再回到\"manifest 驱动代码生成\"这一本项目最核心的机制(U8)，随后是保证规范一致性的信任模型与验证器(U9)、torch.compile 编译边界(U10)、以及让 184 个算子可规模化的家族基类重构(U11)。最后 U12 用 attention/MoE/mamba-SSD/gemm-fp8 四大复杂家族做综合实战。单元依赖严格：U1 为公共前置；U2/U3 先于 U4；U5/U6 依赖 U4；U7 依赖 U6；U8/U9 依赖 U2+U4；U10/U11 依赖 U2+U8；U12 依赖 U2+U7+U11。全 38 篇对应一个机制密集、算子众多的大型项目。",
+  "head": "2392b7ed28edea82505b50b639463ee564576e38",
+  "rationale": "本次为增量更新。本轮 7 个提交集中在三处：基准体系（CUPTI 回退控制与诊断、二进制算子按规范身份记录、夜行 CI 改为每文件一进程）、池/规约家族重构（mean_pooling 迁入 pool 家族、剥离 pool 过度设计、cumsum 新增小 M 大 N 自适应三阶段并行扫描）、以及 manifest/验证器/公式的大量去重与文档收敛。关键判断：op_base.py、_roofline_codegen.py、kernel_base.py 及规约原语均未改动，故 u2（Op 层）、u3-l1/l2/l3（Kernel 基类与 RMSNorm/autotune）、u8-l2（roofline codegen）保持稳定；u1/u5 的文档源（README、architecture、testing、trust-model、roofline）也未变，故保持。受影响的讲义按“机制是否变化”定级：u6-l1（bench_kernel 新增 CUPTI 回退控制与 L2 flush 同步）、u6-l2（新增 workload_field_params）、u6-l3（record 按规范 Op 身份）、u7-l3（formulas.py 新增多输入 dtype/逻辑算子 func）、u8-l1/u8-l3（_dtype_codegen 变动）、u9-l2（验证器 kernel_map 由 advisory 升为 L0 硬错误）、u9-l3（carve-out 含 kernel_map 必填）、u10-l1/u10-l2（ops-design 与 elementwise inplace 分发）、u11-l1/l2/l3（家族基类与 pool 重构）、u12-l3（mamba.yaml 调整）均为 update。新增两篇讲义覆盖本轮引入的全新子系统：u3-l4 讲 cumsum 形状驱动的 local-scan/carry-scan/propagate 三 kernel 并行分解，u6-l4 讲 scripts/ci/run_benchmarks.py 的每文件一进程隔离、GPU 串行授权与失败兜底。依赖关系维持：u1 为公共前置；u3-l4 依赖 u3-l2/l3；u6-l4 依赖 u6-l1/l3。同时修复了旧 manifest 中 5 处结构损坏（u5-l1、u6-l2、u7-l1、u9-l1、u9-l3）的字段。",
   "units": [
     {
       "id": "u1",
@@ -15,7 +15,7 @@
           "order": 1,
           "filename": "u1-l1-spec-driven-philosophy.md",
           "level": "beginner",
-          "topic": "TileOPs 是构建于 TileLang 之上的 LLM GPU 算子库；它用",
+          "topic": "TileOPs 是构建于 TileLang 之上的 LLM GPU 算子库；它用 design-first、spec-driven 的方式让 manifest 成为算子接口的唯一真相来源。",
           "learning_goals": [
             "理解 TileOPs 的定位以及与 TileLang 的依赖关系",
             "理解 Op(L2, 主机侧) 与 Kernel(L1, TileLang GPU 实现) 的双层分离",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 与 architecture.md，手绘 M1–M8 八模块以及四条数据流（Op Delivery / Perf Tuning / HW Calibration / Publish）的草图，并标注每条流的当前状态。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -88,7 +88,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -96,7 +96,7 @@
           "order": 4,
           "filename": "u1-l4-public-api-and-usage.md",
           "level": "beginner",
-          "topic": "tileops.ops 的导出聚合；如何导入并调用任意算子；Op 的可调用契约与",
+          "topic": "tileops.ops 的导出聚合；如何导入并调用任意算子；Op 的可调用契约与形状/dtype 推断时机。",
           "learning_goals": [
             "知道从 tileops.ops 导入算子类（如 GemmOp、RMSNormFwdOp、SoftmaxFwdOp）",
             "理解 Op 实例化 + op(*inputs) 的调用契约",
@@ -116,7 +116,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -150,7 +150,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -160,7 +160,7 @@
           "level": "intermediate",
           "topic": "kernel_map 的安装与校验、supported_archs 架构兼容检查、用户通过 kernel_map 参数 override 默认 kernel 的路径。",
           "learning_goals": [
-            "理解 _install_kernel_map 的",
+            "理解 _install_kernel_map 的安装与校验逻辑",
             "理解 supported_archs 如何在运行时按 SM 版本过滤或报错",
             "学会用 kernel_map 参数替换默认 kernel 实现"
           ],
@@ -178,7 +178,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -188,7 +188,7 @@
           "level": "intermediate",
           "topic": "_cache_key 与 _static_axes 如何决定 kernel 复用；lazy build（首次 forward 构造并缓存）vs eager 构造；fixed-rank 与 arbitrary-rank 的时序差异。",
           "learning_goals": [
-            "理解 _cache_key 默认按",
+            "理解 _cache_key 默认按形状/dtype 投影的实现",
             "掌握 _static_axes 表示构造期已提交的 (input_index, axis) 轴集合",
             "区分 lazy build 缓存与 eager 构造两种模式"
           ],
@@ -205,7 +205,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l4",
@@ -213,7 +213,7 @@
           "order": 4,
           "filename": "u2-l4-trace-gemmop-end-to-end.md",
           "level": "intermediate",
-          "topic": "从 __init__ 到 forward，依次走过 dtype 校验、mnk 推断、kernel 选择、GEMV 快路径、以及",
+          "topic": "从 __init__ 到 forward，依次走过 dtype 校验、mnk 推断、kernel 选择、GEMV 快路径，以及 eval_roofline 绑定时序。",
           "learning_goals": [
             "能完整叙述 GemmOp 一次 forward 的执行步骤",
             "理解 _infer_mnk 对四种 (trans_a, trans_b) 布局的推导",
@@ -233,7 +233,7 @@
             "u2-l2",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -267,7 +267,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -279,7 +279,10 @@
           "learning_goals": [
             "理解 @T.prim_func + with T.Kernel 的 TileLang kernel 写法",
             "掌握 shared memory / fragment 的分配与 T.copy 用法",
-            "理解 256 对齐 padding 与",
+            "理解 256 对齐 padding 与 fp32 累加的数值约定"
+          ],
+          "source_files": [
+            "tileops/kernels/norm/rms_norm.py",
             "tileops/kernels/norm/_config.py",
             "tileops/kernels/kernel_base.py"
           ],
@@ -292,7 +295,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -320,6 +323,35 @@
           "depends_on": [
             "u3-l1",
             "u3-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l4",
+          "title": "并行扫描的多 Kernel 分解（Cumsum 自适应）",
+          "order": 4,
+          "filename": "u3-l4-parallel-scan-multikernel.md",
+          "level": "advanced",
+          "topic": "cumsum/cumprod 的形状驱动 kernel 选择：小 M 大 N（M<128 且 N>8192）触发三阶段并行扫描（local-scan / carry-scan / propagate），其余形状与 cumprod 回退到顺序实现。",
+          "learning_goals": [
+            "理解形状驱动的 kernel 分发（小 M 大 N 触发并行路径）",
+            "掌握 local-scan → carry-scan → propagate 三 kernel 流水如何把顺序扫描并行化",
+            "理解为何 cumprod 无并行实现、以及 fp32 tile_sums/tile_carries 中间量的作用"
+          ],
+          "source_files": [
+            "tileops/kernels/reduction/cumulative.py",
+            "tileops/ops/reduction/cumulative.py",
+            "tests/ops/test_cumulative.py"
+          ],
+          "minimal_modules": [
+            "形状驱动分发",
+            "三阶段并行扫描",
+            "cumprod 回退"
+          ],
+          "practice_task": "阅读 cumulative.py 的并行扫描路径，画出 y_local→tile_sums→tile_carries→propagate 的数据流，标注每个 T.Kernel 的网格与 shared memory 用途；并解释回退到顺序实现的判定条件。",
+          "depends_on": [
+            "u3-l2",
+            "u3-l3"
           ],
           "action": "new"
         }
@@ -357,7 +389,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -385,7 +417,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -414,7 +446,7 @@
             "u4-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -430,9 +462,9 @@
           "order": 1,
           "filename": "u5-l1-test-three-abstractions.md",
           "level": "intermediate",
-          "topic": "WorkloadBase（gen_inputs）、TestBase（ref_program + check）、FixtureBase/FixtureMeta（parametrize 装饰器）三层抽象，以及",
-          "理解 WorkloadBase/TestBase/FixtureBase 各自的职责边界与依赖方向（基准导入 workload，永不导入 test）。<br />参考文件：<br />1. workloads/workload_base.py<br />2. tests/test_base.py<br />3. docs/design/testing.md<br />实践任务：阅读三个基类，画图说明": [
-            "理解 WorkloadBase/TestBase/FixtureBase 各自的职责边界",
+          "topic": "WorkloadBase（gen_inputs）、TestBase（ref_program + check）、FixtureBase/FixtureMeta（parametrize 装饰器）三层抽象，以及它们之间的依赖方向（基准导入 workload，永不导入 test）。",
+          "learning_goals": [
+            "理解 WorkloadBase/TestBase/FixtureBase 各自的职责边界与依赖方向（基准导入 workload，永不导入 test）",
             "掌握 FixtureMeta 让 Fixture 子类可直接作为 @装饰器",
             "理解 ref_program 局部性（定义在测试文件，不在 workload）"
           ],
@@ -446,11 +478,11 @@
             "TestBase",
             "FixtureBase / FixtureMeta"
           ],
-          "practice_task": "阅读三个基类，画图说明",
+          "practice_task": "阅读三个基类，画图说明 Workload/Test/Fixture 的依赖方向，并解释为何基准可以导入 workload 却永不导入 test。",
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -478,7 +510,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -507,7 +539,7 @@
             "u5-l1",
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -523,11 +555,11 @@
           "order": 1,
           "filename": "u6-l1-bench-kernel-sol-protocol.md",
           "level": "intermediate",
-          "topic": "BenchmarkBase 泛型基类与 bench_kernel 的 NVIDIA SOL-ExecBench 风格协议：CUPTI 纯 kernel 计时、L2 flush、warmup/repeat/trial、输入克隆、CUDA-events 回退。",
+          "topic": "BenchmarkBase 泛型基类与 bench_kernel 的 NVIDIA SOL-ExecBench 风格协议：CUPTI 纯 kernel 计时、L2 flush、warmup/repeat/trial、输入克隆、CUDA-events 回退及其控制开关。",
           "learning_goals": [
             "理解 BenchmarkBase[W] 泛型与 calculate_flops/calculate_memory 抽象",
-            "掌握 bench_kernel 的计时协议与 L2 cache flush 作用",
-            "理解 CUPTI 窗口投影与 CUDA-events 回退的差异"
+            "掌握 bench_kernel 的计时协议、L2 cache flush 作用与 CUPTI 窗口投影",
+            "理解 TILEOPS_ALLOW_CUDA_EVENTS_FALLBACK 控制回退，以及 CUDA-events 回退路径与 CUPTI 的计时差异（约 6–7x 膨胀）"
           ],
           "source_files": [
             "benchmarks/benchmark_base.py",
@@ -536,13 +568,13 @@
           "minimal_modules": [
             "BenchmarkBase",
             "bench_kernel 协议",
-            "L2 flush / CUPTI"
+            "L2 flush / CUPTI 回退控制"
           ],
-          "practice_task": "阅读 bench_kernel，解释为何要克隆输入、为何取 trial 中位数、以及 _sum_kernel_time_us 为何只统计标注窗口内的 kernel；说明 profile() 返回 latency_ms/tflops/bandwidth_tbs 的来源。",
+          "practice_task": "阅读 bench_kernel，解释为何要克隆输入、为何取 trial 中位数、_sum_kernel_time_us 为何只统计标注窗口内的 kernel；说明 CUPTI 投影失败时回退到 CUDA-events 的条件与诊断信息来源。",
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l2",
@@ -550,20 +582,28 @@
           "order": 2,
           "filename": "u6-l2-manifest-driven-benchmark.md",
           "level": "intermediate",
-          "topic": "workloads_to_params 把 manifest workloads 转成 pytest 参数；ManifestBenchmark 从 Op.eval_roofline() 读 (flops,bytes)；benchmark 不得本地硬编码公式（CI 失败）。",
+          "topic": "workloads_to_params（及其新同伴 workload_field_params）把 manifest workloads 转成 pytest 参数；ManifestBenchmark 从 Op.eval_roofline() 读 (flops,bytes)；benchmark 不得本地硬编码公式（CI 失败）。",
           "learning_goals": [
-            "掌握 workloads_to_params(include_extra=True) 的转换与 op-call 参数转发",
+            "掌握 workloads_to_params(include_extra=True) 的转换与 op-call 参数转发，以及 workload_field_params 的字段取值与 smoke/full 标记",
             "理解 ManifestBenchmark 通过 eval_roofline() 取 flops/bytes 的契约",
-            "理解",
-            "manifest 驱动基准",
+            "理解 manifest 驱动基准禁止本地硬编码公式（CI 失败）"
+          ],
+          "source_files": [
+            "benchmarks/benchmark_base.py",
+            "benchmarks/ops/bench_norm.py",
+            "docs/design/testing.md"
+          ],
+          "minimal_modules": [
+            "workloads_to_params / workload_field_params",
+            "ManifestBenchmark / eval_roofline",
             "禁止本地公式"
           ],
-          "practice_task": "阅读 workloads_to_params，解释它如何从 signature 推出 shape_key 并校验未知键；对照 bench_norm.py 说明基准如何调用 op.eval_roofline() 而非自算。",
+          "practice_task": "阅读 workloads_to_params 与 workload_field_params，解释前者如何从 signature 推出 shape_key 并校验未知键、后者如何按指定 keys 取值并解析 dtype；对照 bench_norm.py 说明基准如何调用 op.eval_roofline() 而非自算。",
           "depends_on": [
             "u6-l1",
             "u4-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l3",
@@ -571,10 +611,10 @@
           "order": 3,
           "filename": "u6-l3-benchmark-report-and-baselines.md",
           "level": "intermediate",
-          "topic": "BenchmarkReport 静态收集器（record/dump/clear）、tag 体系（tileops/torch/fa3/fla）、自动生成 profile_run.log；每个基准必须记录至少一个非 tileops 基线。",
+          "topic": "BenchmarkReport 静态收集器（record/dump/clear）、tag 体系（tileops/torch/fa3/fla）、record 必须传规范 Op 实例（非字符串别名）以推导规范身份、自动生成 profile_run.log；每个基准必须记录至少一个非 tileops 基线。",
           "learning_goals": [
             "掌握 BenchmarkReport.record/dump 的用法与 markdown 报告结构",
-            "理解 tag 体系与",
+            "理解 tag 体系与按规范 Op 身份（类 + op_module）推导、避免字符串别名造成的重复归类",
             "理解基准不得从 tests/workloads 导入 oracle（避免泄漏）"
           ],
           "source_files": [
@@ -585,11 +625,40 @@
           "minimal_modules": [
             "BenchmarkReport",
             "tag 体系",
-            "基线规则"
+            "规范身份与基线规则"
           ],
-          "practice_task": "阅读 BenchmarkReport.dump，说明它如何按 tag 分组生成表格；对照一个 bench 文件指出其记录的 tileops 与 baseline 两条结果。",
+          "practice_task": "阅读 BenchmarkReport.dump，说明它如何按 tag 分组生成表格；对照一个 bench 文件指出其记录的 tileops 与 baseline 两条结果，并说明为何 record 必须传 Op 实例而非 maximum/cmp_eq 这类别名。",
           "depends_on": [
             "u6-l1"
+          ],
+          "action": "update"
+        },
+        {
+          "id": "u6-l4",
+          "title": "夜行基准 CI 运行器（进程隔离与失败隔离）",
+          "order": 4,
+          "filename": "u6-l4-nightly-bench-ci-runner.md",
+          "level": "advanced",
+          "topic": "scripts/ci/run_benchmarks.py 为每个基准文件启动独立 pytest 进程：文件发现（不导入）、GPU 串行授权（stdin grant + NVML 校验）、超时 py-spy dump、SIGKILL、合成 junit 条目合并；父进程永不导入 torch。",
+          "learning_goals": [
+            "理解为何基准按文件进程隔离（一次 hang/segfault/OOM 只损失一个文件而非整个 session）",
+            "掌握 GPU 串行授权（stdin grant + NVML 校验）与子进程 collect-only 预热、延后 CUDA 初始化的设计",
+            "理解超时/信号死亡时 py-spy dump 与合成 junit 条目如何保证不丢报告"
+          ],
+          "source_files": [
+            "scripts/ci/run_benchmarks.py",
+            "benchmarks/tests/test_run_benchmarks.py",
+            ".github/workflows/nightly.yml"
+          ],
+          "minimal_modules": [
+            "每文件一进程",
+            "GPU 串行授权",
+            "失败隔离与 junit 合并"
+          ],
+          "practice_task": "阅读 run_benchmarks.py，画出父进程与子进程的交互（collect-only → stdin grant → 运行 → rc 回传），解释为何父进程不能导入 torch、子进程为何用 prctl 允许 py-spy attach、超时时合成 junit 条目如何携带日志尾部。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l3"
           ],
           "action": "new"
         }
@@ -607,8 +676,8 @@
           "order": 1,
           "filename": "u7-l1-sol-model-and-metrics.md",
           "level": "advanced",
-          "topic": "roofline 性能模型：memory_time/compute_time/sol_time/efficiency 的定义、bound type 由形状决定、以及",
-          "理解 SOL 效率公式与各输入来源（flops/bytes 来自 manifest、profile 来自 GPU、actual_time 来自基准）。<br />理解 bound type 是按 workload 计算而非 op 声明。<br />理解 per-element FLOP 计数约定（算术/超越/比较各计 1）。<br />实践任务：给定一个 RMSNorm workload（M=2048,N=4096,fp16）与 H200 profile，手算其 memory_time/compute_time 与 bound type；解释为何 small/large 形状可能改变 bound。依赖：u6-l1。参考文件：docs/design/roofline.md、docs/design/architecture.md。": [
+          "topic": "roofline 性能模型：memory_time/compute_time/sol_time/efficiency 的定义、bound type 由形状决定，以及 per-element FLOP 计数约定。",
+          "learning_goals": [
             "掌握 SOL 效率公式与各输入来源（flops/bytes 来自 manifest、profile 来自 GPU、actual_time 来自基准）",
             "理解 bound type 由形状决定而非 op 声明",
             "理解 per-element FLOP 计数约定（算术/超越/比较各计 1）"
@@ -626,7 +695,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -655,7 +724,7 @@
             "u7-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -663,10 +732,10 @@
           "order": 3,
           "filename": "u7-l3-gpu-profile-and-formulas.md",
           "level": "advanced",
-          "topic": "tileops/perf/profiles/*.yaml 的 theoretical+calibration 结构与 effective 计算；tileops/perf/formulas.py 中 func 模式公式的推荐签名 func(op)->(flops,bytes)。",
+          "topic": "tileops/perf/profiles/*.yaml 的 theoretical+calibration 结构与 effective 计算；tileops/perf/formulas.py 中 func 模式公式的推荐签名 func(op)->(flops,bytes)，含多输入 dtype 字节记账与逻辑算子（clamp/masked_fill）的融合计数。",
           "learning_goals": [
             "理解 profile YAML 的 theoretical/calibration/effective 关系与 load_profile",
-            "掌握 func 模式公式的编写约定与混合精度字节记账",
+            "掌握 func 模式公式的编写约定与混合精度/布尔条件字节记账",
             "理解基准与 roofline 解耦（M4 产 raw time，M5 读数算效率）"
           ],
           "source_files": [
@@ -679,12 +748,12 @@
             "effective 计算",
             "func 公式签名"
           ],
-          "practice_task": "阅读 h200.yaml 与 load_profile，解释 effective=theoretical×calibration 的含义；在 formulas.py 中挑一个 func（如 mha_fwd_roofline）说明它如何处理多输入 dtype 的字节计量。",
+          "practice_task": "阅读 h200.yaml 与 load_profile，解释 effective=theoretical×calibration 的含义；在 formulas.py 中挑一个 func（如 clamp/masked_fill 的多输入字节计量或 mamba bias 变体）说明它如何处理多输入 dtype 的字节计量。",
           "depends_on": [
             "u7-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -721,7 +790,7 @@
             "u2-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l2",
@@ -749,7 +818,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -777,7 +846,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -796,7 +865,7 @@
           "topic": "Manifest→Test→Implementation→Benchmark 各阶段的 OWNS/MUST NOT WRITE/MUST NOT；阶段独立防止一方削弱另一方；workloads 共享层的边界。",
           "learning_goals": [
             "记住四阶段各自的拥有物与禁止写入物",
-            "理解",
+            "理解阶段独立防止一方削弱另一方",
             "理解 workloads 层为何不能含 ref_program/check/flops/baseline"
           ],
           "source_files": [
@@ -808,12 +877,12 @@
             "MUST NOT WRITE",
             "workloads 共享层"
           ],
-          "practice_task": "为一个假想的",
+          "practice_task": "为一个假想的算子改动场景，标注每阶段可写/不可写的文件，并指出违反信任边界的具体例子；说明 workloads 共享层为何禁止放入 ref_program/check/flops/baseline。",
           "depends_on": [
             "u4-l1",
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -821,11 +890,11 @@
           "order": 2,
           "filename": "u9-l2-validator-five-levels.md",
           "level": "advanced",
-          "topic": "validate_manifest.py 的 L0–L4（schema/signature/shape/dtype/bench）；spec-only 仅 L0、implemented 全级；--check-op 强制对单个条目及其 variant 跑全级。",
+          "topic": "validate_manifest.py 的 L0–L4（schema/signature/shape/dtype/bench）；spec-only 仅 L0、implemented 全级；L0 中 implemented 缺 kernel_map 现为硬错误（不再是 advisory）；--check-op 强制对单个条目及其 variant 跑全级。",
           "learning_goals": [
             "掌握五级检查各自的范围与数据来源",
-            "理解 L2/L3 的 parity 扩展（对照 _infer_output_shapes/_validate_dtypes）",
-            "理解 L4 要求基准用 load_workloads 与 eval_roofline"
+            "理解 L0 中 implemented op 缺 kernel_map 从 advisory 升级为硬错误的规则",
+            "理解 L2/L3 的 parity 扩展（对照 _infer_output_shapes/_validate_dtypes）与 L4 要求基准用 load_workloads 与 eval_roofline"
           ],
           "source_files": [
             "scripts/validate_manifest.py",
@@ -834,15 +903,15 @@
           ],
           "minimal_modules": [
             "L0–L4 检查",
-            "parity 扩展",
-            "--check-op"
+            "kernel_map 必填（L0）",
+            "parity 扩展 / --check-op"
           ],
-          "practice_task": "运行（或阅读）validate_manifest.py 的 --check-op 某算子输出，逐级解释每级检查的内容；说明 advisory 与 --strict 模式的区别。",
+          "practice_task": "运行（或阅读）validate_manifest.py 的 --check-op 某算子输出，逐级解释每级检查的内容；说明 advisory 与 --strict 模式的区别，并指出 L0 中 implemented op 缺 kernel_map 的报错行为。",
           "depends_on": [
             "u9-l1",
             "u4-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u9-l3",
@@ -850,19 +919,27 @@
           "order": 3,
           "filename": "u9-l3-status-flip-carveout.md",
           "level": "advanced",
-          "topic": "status: spec-only → implemented 的翻转流程；实现 PR 仅可改 status/source.kernel_map/source.test/source.bench/(workloads 配合翻转)/(torch_compile_fullgraph 配合证据)，其余字段需单独 manifest-only PR。",
+          "topic": "status: spec-only → implemented 的翻转流程；实现 PR 仅可改 status/source.kernel_map/source.test/source.bench/(workloads 配合翻转)/(torch_compile_fullgraph 配合证据)；由于 L0 已要求 implemented 必填 kernel_map，翻转时通常需同时补齐 kernel_map；其余字段需单独 manifest-only PR。",
           "learning_goals": [
             "掌握 status 字段语义与翻转时机",
-            "理解实现 PR 对 manifest 的窄化可改字段集（carve-out）",
-            "理解",
-            "carve-out 字段集",
-            "不改 manifest 迎合代码"
+            "理解实现 PR 对 manifest 的窄化可改字段集（carve-out）及 kernel_map 在翻转时的必填性",
+            "理解 carve-out 不等于放松信任边界，且不得改 manifest 迎合代码"
           ],
-          "practice_task": "阅读 carve-out 规则，判断",
+          "source_files": [
+            "docs/design/trust-model.md",
+            ".claude/rules/manifest-trust-model.md",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "status 翻转流程",
+            "carve-out 字段集",
+            "kernel_map 必填"
+          ],
+          "practice_task": "阅读 carve-out 规则，判断一个实现 PR 改动 status/source.kernel_map/source.test/source.bench 是否合法，并举出一个需要单独 manifest-only PR 的字段例子；说明为何翻转后 kernel_map 通常必须同时补齐。",
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -880,7 +957,7 @@
           "level": "advanced",
           "topic": "dynamo 可追踪的 forward 不得构造 Kernel 或进入 TileLang builder；compile_boundary.py 用 weak 实例注册表 + 字符串 key（dynamo 把字符串当静态常量）把不可追踪路径藏进 custom_op eager 体。",
           "learning_goals": [
-            "理解",
+            "理解编译边界不变量（forward 不得构造 Kernel / 进入 builder）",
             "掌握字符串 instance key 为何优于 int key（SymInt 不可哈希）",
             "理解 eager 体 resolve 实例后跑未追踪路径、fake 用 _infer_output_shapes"
           ],
@@ -899,7 +976,7 @@
             "u2-l1",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l2",
@@ -907,10 +984,10 @@
           "order": 2,
           "filename": "u10-l2-custom-op-registration-factory.md",
           "level": "advanced",
-          "topic": "tileops/ops/elementwise/_base.py 中 _register_unary/binary/fused_gated 等 custom_op 工厂、_OP_REGISTRY 按 id(instance) 查找、register_fake 计算广播输出 shape 以支持 fullgraph。",
+          "topic": "tileops/ops/elementwise/_base.py 中 _register_unary/binary/fused_gated 等 custom_op 工厂、inplace 路径经 _wrapped_inplace（mutates_args=(\"x\",)）分发、_OP_REGISTRY 按 id(instance) 查找、register_fake 计算广播输出 shape 以支持 fullgraph。",
           "learning_goals": [
             "理解每个 elementwise op 在包加载时注册一个 torch.library.custom_op",
-            "掌握 _OP_REGISTRY + _instance_key 的运行时分发",
+            "掌握 _OP_REGISTRY + _instance_key 的运行时分发，以及 inplace 经 _wrapped_inplace 注册 mutates_args 的做法",
             "理解 register_fake 的 fake 函数如何推导广播输出 shape"
           ],
           "source_files": [
@@ -920,14 +997,14 @@
           ],
           "minimal_modules": [
             "custom_op 工厂",
-            "_OP_REGISTRY 分发",
+            "_wrapped_inplace / _OP_REGISTRY 分发",
             "register_fake"
           ],
-          "practice_task": "阅读 _register_binary_custom_op，画出 forward→_wrapped→instance._eager_forward 的调用链；并说明 register_fake 中 broadcast_shapes 为何对 fullgraph 必要。",
+          "practice_task": "阅读 _register_binary_custom_op 与 inplace 注册，画出 forward→_wrapped→instance._eager_forward（inplace 则经 _wrapped_inplace）的调用链；并说明 register_fake 中 broadcast_shapes 为何对 fullgraph 必要。",
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -946,7 +1023,7 @@
           "topic": "Op(L1) → FamilyBase(L2, 家族共享 forward 流程) → ConcreteOp(L3) 的三层结构；T2（L1-direct，scaffold 产物）与 T1（薄包装）的区别；何时抽取 L2。",
           "learning_goals": [
             "理解 L1/L2/L3 三层与 T1/T2 两种形态",
-            "掌握",
+            "掌握抽取 L2 的前提条件与共享 forward 流程的边界",
             "理解维度参数化家族用单一 ndim 泛化基类的做法"
           ],
           "source_files": [
@@ -964,7 +1041,7 @@
             "u2-l1",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u11-l2",
@@ -972,11 +1049,11 @@
           "order": 2,
           "filename": "u11-l2-elementwise-umbrella-bases.md",
           "level": "advanced",
-          "topic": "UnaryOp/BinaryOp/FusedGatedOp 三个伞形基类如何用 kernel_cls + _op_name 模板化数十个 elementwise op；广播 coalesce、FP8 后置 cast、inplace 分发等共享逻辑。",
+          "topic": "UnaryOp/BinaryOp/FusedGatedOp 三个伞形基类如何用 kernel_cls + _op_name 模板化数十个 elementwise op；广播 coalesce、FP8 后置 cast、inplace 分发（_wrapped_inplace）等共享逻辑。",
           "learning_goals": [
-            "理解伞形基类的",
+            "理解伞形基类的模板化（kernel_cls + _op_name）复用",
             "掌握 coalesce_broadcast_dims 的广播降维",
-            "理解 FP8 后置 cast 与 inplace custom_op 分发"
+            "理解 FP8 后置 cast 与 inplace custom_op 分发（_wrapped_inplace）"
           ],
           "source_files": [
             "tileops/ops/elementwise/_base.py",
@@ -986,14 +1063,14 @@
           "minimal_modules": [
             "三大伞形基类",
             "kernel_cls 模板",
-            "广播 coalesce"
+            "广播 coalesce / inplace 分发"
           ],
           "practice_task": "阅读 UnaryOp/BinaryOp，说明子类如何仅靠类属性就能复用 forward；并解释 coalesce_broadcast_dims 为何能减少 kernel 内 divmod 次数。",
           "depends_on": [
             "u11-l1",
             "u10-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u11-l3",
@@ -1001,11 +1078,11 @@
           "order": 3,
           "filename": "u11-l3-dimension-parametrized-families.md",
           "level": "advanced",
-          "topic": "pool 的 1d/2d/3d 用单一 ndim 泛化基类 + 类属性区分变体；reduction 家族的 _multidim/_primitives 共享原语；rank 相关命名表驱动、永不位置参数。",
+          "topic": "pool 的 1d/2d/3d 用单一 ndim 泛化基类 + 类属性区分变体；mean_pooling 已迁入 pool 家族（MeanPoolingForwardOp）；pool 剥离过度设计后 indexed max-pool 显式化；reduction 家族的 _multidim/_primitives 共享原语；rank 相关命名表驱动、永不位置参数。",
           "learning_goals": [
-            "理解 ndim 泛化基类如何用类属性表达空间秩差异",
-            "掌握 kernel-cache key 与构造关键字名在重构中必须保持",
-            "理解真正的 per-rank 行为差异保留为子类 override"
+            "理解 ndim 泛化基类如何用类属性表达空间秩差异，以及 mean_pooling 归入 pool 家族的归属依据",
+            "掌握 pool 剥离过度设计后 indexed max-pool forward 显式化的做法",
+            "理解 kernel-cache key 与构造关键字名在重构中必须保持，以及真正的 per-rank 行为差异保留为子类 override"
           ],
           "source_files": [
             "tileops/ops/pool.py",
@@ -1014,14 +1091,14 @@
           ],
           "minimal_modules": [
             "ndim 泛化基类",
-            "变体类属性",
+            "变体类属性 / mean_pooling 归属",
             "表驱动命名"
           ],
-          "practice_task": "阅读 pool.py，说明 MaxPool1d/2d/3dFwdOp 如何共享同一 ndim 基类；指出 indices 输出这类 rank 外变体如何用额外类属性表达。",
+          "practice_task": "阅读 pool.py，说明 MaxPool1d/2d/3dFwdOp 如何共享同一 ndim 基类、indexed 变体如何显式化；并解释为何 MeanPoolingForwardOp 从 attention 迁入 pool 家族（路径推断与归属）。",
           "depends_on": [
             "u11-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -1059,7 +1136,7 @@
             "u2-l4",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1089,7 +1166,7 @@
             "u2-l4",
             "u11-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -1097,11 +1174,11 @@
           "order": 3,
           "filename": "u12-l3-mamba-ssd-family.md",
           "level": "advanced",
-          "topic": "Mamba2 的 SSD 分解：chunk_scan/chunk_state/state_passing/decode 多 kernel；manifest sequence_modeling/scan/mamba 的 roofline 与 source；状态传递语义。",
+          "topic": "Mamba2 的 SSD 分解：chunk_scan/chunk_state/state_passing/decode 多 kernel；manifest sequence_modeling/scan/mamba 的 roofline（含 bias 变体）与 source；状态传递语义。",
           "learning_goals": [
             "理解 SSD（State-Space Dual）的四阶段分解",
             "掌握 chunk-wise 与 decode 路径的 kernel 选择",
-            "理解状态传递 kernel 的作用"
+            "理解状态传递 kernel 的作用与 mamba bias 变体 roofline 来源"
           ],
           "source_files": [
             "tileops/ops/mamba2_fwd.py",
@@ -1113,14 +1190,14 @@
           "minimal_modules": [
             "SSD 分解",
             "chunk/decode 路径",
-            "状态传递"
+            "状态传递 / bias 变体"
           ],
-          "practice_task": "阅读 Mamba2FwdOp 前向，画出 chunk_scan/state_passing/decode 的编排；对照 manifest 解释各 SSD 子算子的 roofline 来源。",
+          "practice_task": "阅读 Mamba2FwdOp 前向，画出 chunk_scan/state_passing/decode 的编排；对照 manifest 解释各 SSD 子算子（含 bias 变体）的 roofline 来源。",
           "depends_on": [
             "u2-l4",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u12-l4",
@@ -1150,7 +1227,7 @@
             "u2-l4",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
