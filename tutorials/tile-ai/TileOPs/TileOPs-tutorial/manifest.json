@@ -1,0 +1,1158 @@
+{
+  "project": "TileOPs",
+  "head": "9bda1ac53758c21b0ffd25e84c6a2cfcad2aac72",
+  "rationale": "学习顺序按\"先认识再深入、先机制后实战\"设计。U1 入门层让读者从零建立项目定位、运行方式、目录与 API 心智模型。U2/U3 进入双层抽象——Op(主机调度)与 Kernel(TileLang 实现)，这是理解一切后续内容的基础。U4 讲解作为\"唯一真相来源\"的 manifest，是 U5(正确性测试)与 U6(性能基准)两条横切关注的前置。进阶层先讲性能模型 roofline(U7)，再回到\"manifest 驱动代码生成\"这一本项目最核心的机制(U8)，随后是保证规范一致性的信任模型与验证器(U9)、torch.compile 编译边界(U10)、以及让 184 个算子可规模化的家族基类重构(U11)。最后 U12 用 attention/MoE/mamba-SSD/gemm-fp8 四大复杂家族做综合实战。单元依赖严格：U1 为公共前置；U2/U3 先于 U4；U5/U6 依赖 U4；U7 依赖 U6；U8/U9 依赖 U2+U4；U10/U11 依赖 U2+U8；U12 依赖 U2+U7+U11。全 38 篇对应一个机制密集、算子众多的大型项目。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "走进 TileOPs",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与 Spec-Driven 设计哲学",
+          "order": 1,
+          "filename": "u1-l1-spec-driven-philosophy.md",
+          "level": "beginner",
+          "topic": "TileOPs 是构建于 TileLang 之上的 LLM GPU 算子库；它用",
+          "learning_goals": [
+            "理解 TileOPs 的定位以及与 TileLang 的依赖关系",
+            "理解 Op(L2, 主机侧) 与 Kernel(L1, TileLang GPU 实现) 的双层分离",
+            "理解 spec-driven：manifest 是算子接口的唯一真相来源"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/design/architecture.md",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "项目定位与关键属性",
+            "双层分离 Op/Kernel",
+            "Spec-driven 开发模型"
+          ],
+          "practice_task": "阅读 README 与 architecture.md，手绘 M1–M8 八模块以及四条数据流（Op Delivery / Perf Tuning / HW Calibration / Publish）的草图，并标注每条流的当前状态。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与首次运行",
+          "order": 2,
+          "filename": "u1-l2-install-and-first-run.md",
+          "level": "beginner",
+          "topic": "如何在 CUDA（Hopper）机器上安装 TileOPs，并用 GemmOp 跑通第一个算子。",
+          "learning_goals": [
+            "掌握 make install 安装流程与前置依赖（TileLang / PyTorch / CUDA）",
+            "会实例化 GemmOp 并调用，理解 trans_b=True 的 NT 默认语义",
+            "学会用 PyTorch 验证算子输出"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "前置依赖",
+            "make install 安装",
+            "Quick Start GEMM 示例"
+          ],
+          "practice_task": "安装后写一段脚本，用 GemmOp() 计算 a @ b.T，并与 torch.matmul(a, b.T) 比对结果，打印最大误差。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与模块全景",
+          "order": 3,
+          "filename": "u1-l3-directory-and-modules.md",
+          "level": "beginner",
+          "topic": "tileops/、workloads/、tests/、benchmarks/、docs/、scripts/ 的职责，以及它们如何映射到 M1–M8 模块与 data contracts。",
+          "learning_goals": [
+            "记住顶层目录各自的职责",
+            "能把 M1–M8 模块映射到具体目录与产物",
+            "理解模块间的 data contracts（signature/workloads/roofline/raw time）"
+          ],
+          "source_files": [
+            "docs/design/architecture.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "目录布局",
+            "M1–M8 模块参考表",
+            "Data Contracts"
+          ],
+          "practice_task": "用 git ls-files 统计 tileops/manifest/ 下各 family YAML 文件，建立 family→文件 映射表，并标注每个 family 的算子数量。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "算子的公开 API 与调用方式",
+          "order": 4,
+          "filename": "u1-l4-public-api-and-usage.md",
+          "level": "beginner",
+          "topic": "tileops.ops 的导出聚合；如何导入并调用任意算子；Op 的可调用契约与",
+          "learning_goals": [
+            "知道从 tileops.ops 导入算子类（如 GemmOp、RMSNormFwdOp、SoftmaxFwdOp）",
+            "理解 Op 实例化 + op(*inputs) 的调用契约",
+            "理解形状与 dtype 在 forward 调用时推断、而非构造时固定"
+          ],
+          "source_files": [
+            "tileops/ops/__init__.py",
+            "tileops/ops/gemm.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "ops 导出聚合",
+            "GemmOp 调用示例",
+            "可调用契约"
+          ],
+          "practice_task": "从 tileops.ops 导入 SoftmaxFwdOp 或 RMSNormFwdOp，跑一个例子并与对应的 torch 函数对比结果，观察输出 dtype 与 shape。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Op 层：用户侧调度器",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Op 基类与生命周期",
+          "order": 1,
+          "filename": "u2-l1-op-base-lifecycle.md",
+          "level": "intermediate",
+          "topic": "Op ABC 的核心属性与执行流程：dispatch_kernel、default_kernel_map、forward、__call__，以及 _validate_dtypes/_infer_output_shapes/eval_roofline 三个 codegen 契约。",
+          "learning_goals": [
+            "掌握 Op 基类的关键属性（kernel_map、dtype、_static_axes）",
+            "理解 dispatch_kernel → default_kernel_map → forward 的标准流程",
+            "认识三个 codegen 契约方法及其 staged-rollout 状态"
+          ],
+          "source_files": [
+            "tileops/ops/op_base.py"
+          ],
+          "minimal_modules": [
+            "Op 类属性",
+            "dispatch_kernel / default_kernel_map",
+            "forward / __call__"
+          ],
+          "practice_task": "在 op_base.py 中标注 dispatch_kernel 何时被调用、default_kernel_map 为何是 abstract property，并解释 _cache_key 默认实现的含义。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Kernel 选择与架构兼容性",
+          "order": 2,
+          "filename": "u2-l2-kernel-selection-and-arch.md",
+          "level": "intermediate",
+          "topic": "kernel_map 的安装与校验、supported_archs 架构兼容检查、用户通过 kernel_map 参数 override 默认 kernel 的路径。",
+          "learning_goals": [
+            "理解 _install_kernel_map 的",
+            "理解 supported_archs 如何在运行时按 SM 版本过滤或报错",
+            "学会用 kernel_map 参数替换默认 kernel 实现"
+          ],
+          "source_files": [
+            "tileops/ops/op_base.py",
+            "tileops/ops/gemm.py",
+            "tileops/kernels/kernel_base.py"
+          ],
+          "minimal_modules": [
+            "_install_kernel_map",
+            "supported_archs",
+            "default_kernel_map override"
+          ],
+          "practice_task": "阅读 GemmOp.default_kernel_map，解释为何 GemvKernel 只在 SM90 上被注册；尝试用自定义 kernel_map 构造一个 Op 观察校验行为。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "形状推断与 Kernel 缓存",
+          "order": 3,
+          "filename": "u2-l3-shape-inference-and-caching.md",
+          "level": "intermediate",
+          "topic": "_cache_key 与 _static_axes 如何决定 kernel 复用；lazy build（首次 forward 构造并缓存）vs eager 构造；fixed-rank 与 arbitrary-rank 的时序差异。",
+          "learning_goals": [
+            "理解 _cache_key 默认按",
+            "掌握 _static_axes 表示构造期已提交的 (input_index, axis) 轴集合",
+            "区分 lazy build 缓存与 eager 构造两种模式"
+          ],
+          "source_files": [
+            "tileops/ops/op_base.py",
+            "tileops/ops/gemm.py"
+          ],
+          "minimal_modules": [
+            "_cache_key",
+            "_static_axes",
+            "kernel 缓存"
+          ],
+          "practice_task": "对比 GemmOp._cache_key 与 Op 基类默认 _cache_key，说明 GemmOp 投影到 (m,n,k,trans,dtype) 的原因，以及它如何减少重复 JIT 编译。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "跟读 GemmOp 完整链路",
+          "order": 4,
+          "filename": "u2-l4-trace-gemmop-end-to-end.md",
+          "level": "intermediate",
+          "topic": "从 __init__ 到 forward，依次走过 dtype 校验、mnk 推断、kernel 选择、GEMV 快路径、以及",
+          "learning_goals": [
+            "能完整叙述 GemmOp 一次 forward 的执行步骤",
+            "理解 _infer_mnk 对四种 (trans_a, trans_b) 布局的推导",
+            "理解 _active_sig 快路径与 eval_roofline 绑定时序"
+          ],
+          "source_files": [
+            "tileops/ops/gemm.py"
+          ],
+          "minimal_modules": [
+            "GemmOp init",
+            "_infer_mnk",
+            "_get_kernel / forward 快路径"
+          ],
+          "practice_task": "在 gemm.py 中画出 forward 流程图，标注 GEMV 快路径（lhs_row/rhs_col）触发条件，并解释 _active_sig 缓存为何能跳过校验。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Kernel 层：TileLang 实现",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Kernel 基类与配置",
+          "order": 1,
+          "filename": "u3-l1-kernel-base-config.md",
+          "level": "intermediate",
+          "topic": "Kernel ABC 的属性与流程：config / default_config / autotune_configs / supported_archs / forward，以及 init_config 如何在 tune 与 config 间抉择。",
+          "learning_goals": [
+            "掌握 Kernel 基类的核心属性（config、default_config、autotune_configs）",
+            "理解 init_config 在 tune=True 与提供 config 时的行为",
+            "认识 dtype_str 转换与 supported_archs 的作用"
+          ],
+          "source_files": [
+            "tileops/kernels/kernel_base.py"
+          ],
+          "minimal_modules": [
+            "Kernel 类属性",
+            "init_config",
+            "default_config"
+          ],
+          "practice_task": "阅读 init_config，解释当 tune=True 但没有 autotune_configs 时的回退逻辑，并说明 self.kernel 必须在 init_config 前就绪的原因。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "第一个 TileLang Kernel：RMSNorm",
+          "order": 2,
+          "filename": "u3-l2-tilelang-kernel-walkthrough.md",
+          "level": "intermediate",
+          "topic": "以 RMSNormKernel 为例讲解一个 TileLang kernel 的结构：@tilelang.jit + @T.prim_func + T.Kernel、shared/fragment 缓冲、对齐 padding、fp32 中间计算。",
+          "learning_goals": [
+            "理解 @T.prim_func + with T.Kernel 的 TileLang kernel 写法",
+            "掌握 shared memory / fragment 的分配与 T.copy 用法",
+            "理解 256 对齐 padding 与",
+            "tileops/kernels/norm/_config.py",
+            "tileops/kernels/kernel_base.py"
+          ],
+          "minimal_modules": [
+            "prim_func 结构",
+            "shared/fragment 缓冲",
+            "对齐与 padding"
+          ],
+          "practice_task": "对照 rms_norm.py 指出 x² 求和在哪一步、为何用 float32 累加、N_padded 与 N 的区别如何影响结果，并说明 @torch.library.custom_op 包装的作用。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "自动调优与数值稳定性",
+          "order": 3,
+          "filename": "u3-l3-autotune-and-numeric-stability.md",
+          "level": "intermediate",
+          "topic": "autotune 机制（autotune_configs、do_not_specialize、supply_prog），以及 fp16/bf16 的 fp32 提升与边界面 cast 的数值约定。",
+          "learning_goals": [
+            "理解 Kernel.autotune 如何对配置空间做基准测试并选出最优",
+            "掌握 do_not_specialize 防止 JIT 参数污染缓存键的原理",
+            "理解 fp16/bf16 提升到 fp32 计算、在边界 cast 回存储 dtype 的约定"
+          ],
+          "source_files": [
+            "tileops/kernels/kernel_base.py",
+            "tileops/kernels/norm/rms_norm.py",
+            "docs/design/roofline.md"
+          ],
+          "minimal_modules": [
+            "autotune 流程",
+            "do_not_specialize",
+            "fp32 提升"
+          ],
+          "practice_task": "阅读 .claude/rules/code-style.md 中关于数值提升的条目与 rms_norm 的 fp32 累加，写一段说明为何 softmax/cubic/exp 必须用 fp32 中间量再在边界 cast。",
+          "depends_on": [
+            "u3-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "Manifest：规约即真理",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Manifest 文件组织与加载",
+          "order": 1,
+          "filename": "u4-l1-manifest-organization-loading.md",
+          "level": "intermediate",
+          "topic": "tileops/manifest/ 的 family 分文件布局、加载时合并为单一 ops dict、重复名报错，以及 load_manifest/load_workloads 的程序化访问。",
+          "learning_goals": [
+            "理解一个 family 一个（或多个）YAML 文件、顶层 op_name→entry 映射",
+            "掌握 load_manifest 的合并去重与 lru_cache",
+            "学会用 load_workloads(op_name) 取某算子的基准负载"
+          ],
+          "source_files": [
+            "tileops/manifest/__init__.py",
+            "docs/design/manifest.md",
+            "docs/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "family 文件布局",
+            "load_manifest 合并",
+            "load_workloads"
+          ],
+          "practice_task": "用交互式 python 调用 load_manifest()，统计总算子数与各 family 数量；尝试构造一个重复 op 名的小 YAML，观察加载报错。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Signature 与形状规约",
+          "order": 2,
+          "filename": "u4-l2-signature-shape-rules.md",
+          "level": "intermediate",
+          "topic": "signature.inputs/outputs/params 的有序字典语义、dtype 语法（|、same_as、promote_int_to_float）、shape（固定秩）与 shape_rules（任意秩）的选择决策树。",
+          "learning_goals": [
+            "掌握 R1 有序字典、R4 dtype 语法、R17 PyTorch API 对齐等规则",
+            "理解固定秩用 shape、任意秩用 shape_rules + static_dims 的决策树",
+            "能读懂一个真实 manifest 条目的 signature"
+          ],
+          "source_files": [
+            "docs/design/manifest.md",
+            "tileops/manifest/shape_rules.py",
+            "tileops/manifest/normalization.yaml"
+          ],
+          "minimal_modules": [
+            "signature 字段",
+            "dtype 语法",
+            "shape/shape_rules 决策树"
+          ],
+          "practice_task": "阅读 RMSNormFwdOp 的完整 manifest 条目，逐字段解释其含义；并参照 shape_rules.py 说明 reduction dim 的 range/normalize/uniqueness 校验。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Workloads 与 Source 字段",
+          "order": 3,
+          "filename": "u4-l3-workloads-and-source.md",
+          "level": "intermediate",
+          "topic": "workloads 的基准负载语义（shape/dtypes/label/op 参数）、R21 shape 键派生规则，以及 source（kernel/kernel_map/op/test/bench）如何登记实现路径。",
+          "learning_goals": [
+            "理解 workloads 仅用于基准参数化、而非单测覆盖",
+            "掌握 {input}_shape 键派生与 R21 校验",
+            "理解 source.kernel_map 的 dispatch_key→KernelClass 登记表语义"
+          ],
+          "source_files": [
+            "docs/design/manifest.md",
+            "tileops/manifest/normalization.yaml",
+            "tileops/manifest/gemm.yaml"
+          ],
+          "minimal_modules": [
+            "workloads 语义",
+            "R21 shape 键",
+            "source / kernel_map"
+          ],
+          "practice_task": "为 reduction.yaml 中的某个算子列出其 workloads 条目并解释每个键的来源；说明 kernel_map（登记表）与 dispatch 策略（运行时关注点）的区别。",
+          "depends_on": [
+            "u4-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "正确性测试体系",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "测试三件套：Workload / Test / Fixture",
+          "order": 1,
+          "filename": "u5-l1-test-three-abstractions.md",
+          "level": "intermediate",
+          "topic": "WorkloadBase（gen_inputs）、TestBase（ref_program + check）、FixtureBase/FixtureMeta（parametrize 装饰器）三层抽象，以及",
+          "理解 WorkloadBase/TestBase/FixtureBase 各自的职责边界与依赖方向（基准导入 workload，永不导入 test）。<br />参考文件：<br />1. workloads/workload_base.py<br />2. tests/test_base.py<br />3. docs/design/testing.md<br />实践任务：阅读三个基类，画图说明": [
+            "理解 WorkloadBase/TestBase/FixtureBase 各自的职责边界",
+            "掌握 FixtureMeta 让 Fixture 子类可直接作为 @装饰器",
+            "理解 ref_program 局部性（定义在测试文件，不在 workload）"
+          ],
+          "source_files": [
+            "workloads/workload_base.py",
+            "tests/test_base.py",
+            "docs/design/testing.md"
+          ],
+          "minimal_modules": [
+            "WorkloadBase",
+            "TestBase",
+            "FixtureBase / FixtureMeta"
+          ],
+          "practice_task": "阅读三个基类，画图说明",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "编写一个算子测试",
+          "order": 2,
+          "filename": "u5-l2-write-an-op-test.md",
+          "level": "intermediate",
+          "topic": "以 test_rms_norm.py 为模板，讲解 Workload+TestBase 多继承、ref_program 实现、Fixture PARAMS（smoke/full/packaging mark）、test.check() 调用。",
+          "learning_goals": [
+            "能照模板为一个新算子搭出测试骨架",
+            "掌握 PARAMS 中 pytest.param + marks 的写法",
+            "理解 test.check(op, *inputs, atol=, rtol=) 的调用约定"
+          ],
+          "source_files": [
+            "tests/ops/test_rms_norm.py",
+            "workloads/normalization.py",
+            "tests/test_base.py"
+          ],
+          "minimal_modules": [
+            "Workload+TestBase 多继承",
+            "ref_program",
+            "Fixture PARAMS"
+          ],
+          "practice_task": "仿照 test_rms_norm.py 的结构，为一个已实现算子（如 SoftmaxFwdOp）草拟测试文件，定义 ref_program 与覆盖 FP16/BF16 的 Fixture。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "容差策略与覆盖规则",
+          "order": 3,
+          "filename": "u5-l3-tolerance-and-coverage.md",
+          "level": "intermediate",
+          "topic": "浮点用 torch.testing.assert_close（FP16/BF16 容差）、整型/bool 用精确比较；测试用例策略（dtype/shape/feature/regression）；UT 形状针对 kernel 分支而非负载代表性。",
+          "learning_goals": [
+            "掌握浮点/非浮点的不同比较方式与容差取值",
+            "理解每个参数化用例必须服务于四类目的之一",
+            "理解 UT 形状选择针对 kernel 代码路径（tile 边界、对齐、退化维）"
+          ],
+          "source_files": [
+            "tests/test_base.py",
+            "docs/design/testing.md",
+            "tests/ops/test_rms_norm.py"
+          ],
+          "minimal_modules": [
+            "assert_close 容差",
+            "用例策略",
+            "形状覆盖规则"
+          ],
+          "practice_task": "阅读 test_rms_norm.py 的 PARAMS，为每个用例标注其目的（dtype/shape/feature/regression），并解释 1025×4096 这个 tail-M 用例针对哪条 kernel 路径。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "性能基准评测",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "bench_kernel 与 SOL 计时协议",
+          "order": 1,
+          "filename": "u6-l1-bench-kernel-sol-protocol.md",
+          "level": "intermediate",
+          "topic": "BenchmarkBase 泛型基类与 bench_kernel 的 NVIDIA SOL-ExecBench 风格协议：CUPTI 纯 kernel 计时、L2 flush、warmup/repeat/trial、输入克隆、CUDA-events 回退。",
+          "learning_goals": [
+            "理解 BenchmarkBase[W] 泛型与 calculate_flops/calculate_memory 抽象",
+            "掌握 bench_kernel 的计时协议与 L2 cache flush 作用",
+            "理解 CUPTI 窗口投影与 CUDA-events 回退的差异"
+          ],
+          "source_files": [
+            "benchmarks/benchmark_base.py",
+            "docs/design/testing.md"
+          ],
+          "minimal_modules": [
+            "BenchmarkBase",
+            "bench_kernel 协议",
+            "L2 flush / CUPTI"
+          ],
+          "practice_task": "阅读 bench_kernel，解释为何要克隆输入、为何取 trial 中位数、以及 _sum_kernel_time_us 为何只统计标注窗口内的 kernel；说明 profile() 返回 latency_ms/tflops/bandwidth_tbs 的来源。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Manifest 驱动的基准",
+          "order": 2,
+          "filename": "u6-l2-manifest-driven-benchmark.md",
+          "level": "intermediate",
+          "topic": "workloads_to_params 把 manifest workloads 转成 pytest 参数；ManifestBenchmark 从 Op.eval_roofline() 读 (flops,bytes)；benchmark 不得本地硬编码公式（CI 失败）。",
+          "learning_goals": [
+            "掌握 workloads_to_params(include_extra=True) 的转换与 op-call 参数转发",
+            "理解 ManifestBenchmark 通过 eval_roofline() 取 flops/bytes 的契约",
+            "理解",
+            "manifest 驱动基准",
+            "禁止本地公式"
+          ],
+          "practice_task": "阅读 workloads_to_params，解释它如何从 signature 推出 shape_key 并校验未知键；对照 bench_norm.py 说明基准如何调用 op.eval_roofline() 而非自算。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "报告与基线对比",
+          "order": 3,
+          "filename": "u6-l3-benchmark-report-and-baselines.md",
+          "level": "intermediate",
+          "topic": "BenchmarkReport 静态收集器（record/dump/clear）、tag 体系（tileops/torch/fa3/fla）、自动生成 profile_run.log；每个基准必须记录至少一个非 tileops 基线。",
+          "learning_goals": [
+            "掌握 BenchmarkReport.record/dump 的用法与 markdown 报告结构",
+            "理解 tag 体系与",
+            "理解基准不得从 tests/workloads 导入 oracle（避免泄漏）"
+          ],
+          "source_files": [
+            "benchmarks/benchmark_base.py",
+            "benchmarks/ops/bench_gemm.py",
+            "docs/design/testing.md"
+          ],
+          "minimal_modules": [
+            "BenchmarkReport",
+            "tag 体系",
+            "基线规则"
+          ],
+          "practice_task": "阅读 BenchmarkReport.dump，说明它如何按 tag 分组生成表格；对照一个 bench 文件指出其记录的 tileops 与 baseline 两条结果。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "Roofline 性能模型",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Speed-of-Light 模型与度量",
+          "order": 1,
+          "filename": "u7-l1-sol-model-and-metrics.md",
+          "level": "advanced",
+          "topic": "roofline 性能模型：memory_time/compute_time/sol_time/efficiency 的定义、bound type 由形状决定、以及",
+          "理解 SOL 效率公式与各输入来源（flops/bytes 来自 manifest、profile 来自 GPU、actual_time 来自基准）。<br />理解 bound type 是按 workload 计算而非 op 声明。<br />理解 per-element FLOP 计数约定（算术/超越/比较各计 1）。<br />实践任务：给定一个 RMSNorm workload（M=2048,N=4096,fp16）与 H200 profile，手算其 memory_time/compute_time 与 bound type；解释为何 small/large 形状可能改变 bound。依赖：u6-l1。参考文件：docs/design/roofline.md、docs/design/architecture.md。": [
+            "掌握 SOL 效率公式与各输入来源（flops/bytes 来自 manifest、profile 来自 GPU、actual_time 来自基准）",
+            "理解 bound type 由形状决定而非 op 声明",
+            "理解 per-element FLOP 计数约定（算术/超越/比较各计 1）"
+          ],
+          "source_files": [
+            "docs/design/roofline.md",
+            "docs/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "SOL 公式",
+            "bound type",
+            "FLOP 计数约定"
+          ],
+          "practice_task": "给定一个 RMSNorm workload（M=2048,N=4096,fp16）与 H200 profile，手算其 memory_time/compute_time 与 bound type；解释为何 small/large 形状可能改变 bound。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "roofline 字段与两种模式",
+          "order": 2,
+          "filename": "u7-l2-roofline-field-modes.md",
+          "level": "advanced",
+          "topic": "roofline 的输出契约 (flops,bytes)；inline 模式（vars + flops/bytes 表达式）与 func 模式（指向 tileops.perf.formulas.*）；两层表达式（vars 层 / 算术层）与命名空间。",
+          "learning_goals": [
+            "区分 inline 与 func 两种模式及各自适用场景",
+            "掌握 vars 层与算术层的允许操作差异",
+            "理解 elem_bytes 与多输入 dtype 时必须用 func"
+          ],
+          "source_files": [
+            "docs/design/roofline.md",
+            "tileops/manifest/normalization.yaml",
+            "tileops/manifest/gemm.yaml"
+          ],
+          "minimal_modules": [
+            "inline / func 模式",
+            "vars / 算术两层",
+            "elem_bytes"
+          ],
+          "practice_task": "对比 RMSNorm（inline + vars）与某个 attention/gemm 条目（func 或 inline），分别说明为何选该模式；为一个新的 elementwise 算子草拟 inline roofline。",
+          "depends_on": [
+            "u7-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "GPU Profile 与 func 公式实现",
+          "order": 3,
+          "filename": "u7-l3-gpu-profile-and-formulas.md",
+          "level": "advanced",
+          "topic": "tileops/perf/profiles/*.yaml 的 theoretical+calibration 结构与 effective 计算；tileops/perf/formulas.py 中 func 模式公式的推荐签名 func(op)->(flops,bytes)。",
+          "learning_goals": [
+            "理解 profile YAML 的 theoretical/calibration/effective 关系与 load_profile",
+            "掌握 func 模式公式的编写约定与混合精度字节记账",
+            "理解基准与 roofline 解耦（M4 产 raw time，M5 读数算效率）"
+          ],
+          "source_files": [
+            "tileops/perf/profile.py",
+            "tileops/perf/formulas.py",
+            "tileops/perf/profiles/h200.yaml"
+          ],
+          "minimal_modules": [
+            "profile 加载",
+            "effective 计算",
+            "func 公式签名"
+          ],
+          "practice_task": "阅读 h200.yaml 与 load_profile，解释 effective=theoretical×calibration 的含义；在 formulas.py 中挑一个 func（如 mha_fwd_roofline）说明它如何处理多输入 dtype 的字节计量。",
+          "depends_on": [
+            "u7-l1",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "Manifest 驱动的代码生成",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "__init_subclass__ 钩子与自动安装",
+          "order": 1,
+          "filename": "u8-l1-codegen-init-subclass-hook.md",
+          "level": "advanced",
+          "topic": "Op.__init_subclass__ 在子类定义时按 manifest 元数据自动合成 _validate_dtypes 与 eval_roofline；codegen 是 spec-only 状态的关卡。",
+          "learning_goals": [
+            "理解 __init_subclass__ 的自动安装时机与懒导入避免循环依赖",
+            "掌握 codegen 仅对 status: implemented 生效、spec-only 保留 stub",
+            "理解 codegen 是名字/形式正确性的权威关卡"
+          ],
+          "source_files": [
+            "tileops/ops/op_base.py",
+            "tileops/ops/_roofline_codegen.py",
+            "tileops/ops/_dtype_codegen.py"
+          ],
+          "minimal_modules": [
+            "__init_subclass__",
+            "maybe_install_*",
+            "spec-only 跳过"
+          ],
+          "practice_task": "阅读 op_base.py 的 __init_subclass__，追踪 maybe_install_eval_roofline/maybe_install_validator 何时为 no-op；解释一个 spec-only op 为何仍保留 NotImplementedError stub。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Roofline 代码生成",
+          "order": 2,
+          "filename": "u8-l2-roofline-codegen.md",
+          "level": "advanced",
+          "topic": "synthesize_eval_roofline 从 manifest roofline 块合成 plain Python 方法体；AST 校验 vars/算术两层命名空间；Evaluator Surface Boundary 禁止任何运行时求值器。",
+          "learning_goals": [
+            "理解 inline 模式如何被编译成纯 Python（不在运行时 eval/parse）",
+            "掌握 vars 层/算术层允许的 AST 节点与命名表",
+            "理解 §4.4.6 为何禁止 Op-local 或 manifest 级 roofline 求值器"
+          ],
+          "source_files": [
+            "tileops/ops/_roofline_codegen.py",
+            "docs/design/roofline.md",
+            "tileops/ops/op_base.py"
+          ],
+          "minimal_modules": [
+            "synthesize_eval_roofline",
+            "AST 命名空间",
+            "Evaluator Surface Boundary"
+          ],
+          "practice_task": "阅读 _roofline_codegen.py，说明它如何在合成期校验未知名字/禁用 AST 节点；解释 _ShapeProxy 在 op 未保留原始 tensor 时如何提供 .shape/.ndim。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Dtype 校验代码生成",
+          "order": 3,
+          "filename": "u8-l3-dtype-codegen.md",
+          "level": "advanced",
+          "topic": "synthesize_validate_dtypes 从 signature.inputs 的 dtype 并集与 same_as 引用合成 _validate_dtypes；处理普通 token、| 并集、same_as(ref) 及其并集形式。",
+          "learning_goals": [
+            "理解合成的 _validate_dtypes 关键字参数名镜像 signature.inputs",
+            "掌握 same_as(ref) 与并集中 same_as 的展开",
+            "理解验证器 L3 用 inspect.signature 绑定做 parity 探测"
+          ],
+          "source_files": [
+            "tileops/ops/_dtype_codegen.py",
+            "docs/design/manifest.md",
+            "docs/design/ops-design.md"
+          ],
+          "minimal_modules": [
+            "synthesize_validate_dtypes",
+            "same_as / union 展开",
+            "parity 探测"
+          ],
+          "practice_task": "给定一个 signature（如 a:float16|bfloat16, b:same_as(a)），手写出 codegen 应合成的 _validate_dtypes 函数体；并解释其与验证器 L3 parity 检查的关系。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "信任模型与验证器",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "四阶段信任模型",
+          "order": 1,
+          "filename": "u9-l1-trust-model-stages.md",
+          "level": "advanced",
+          "topic": "Manifest→Test→Implementation→Benchmark 各阶段的 OWNS/MUST NOT WRITE/MUST NOT；阶段独立防止一方削弱另一方；workloads 共享层的边界。",
+          "learning_goals": [
+            "记住四阶段各自的拥有物与禁止写入物",
+            "理解",
+            "理解 workloads 层为何不能含 ref_program/check/flops/baseline"
+          ],
+          "source_files": [
+            "docs/design/trust-model.md",
+            "docs/design/architecture.md"
+          ],
+          "minimal_modules": [
+            "四阶段 OWNS",
+            "MUST NOT WRITE",
+            "workloads 共享层"
+          ],
+          "practice_task": "为一个假想的",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "验证器的五级检查",
+          "order": 2,
+          "filename": "u9-l2-validator-five-levels.md",
+          "level": "advanced",
+          "topic": "validate_manifest.py 的 L0–L4（schema/signature/shape/dtype/bench）；spec-only 仅 L0、implemented 全级；--check-op 强制对单个条目及其 variant 跑全级。",
+          "learning_goals": [
+            "掌握五级检查各自的范围与数据来源",
+            "理解 L2/L3 的 parity 扩展（对照 _infer_output_shapes/_validate_dtypes）",
+            "理解 L4 要求基准用 load_workloads 与 eval_roofline"
+          ],
+          "source_files": [
+            "scripts/validate_manifest.py",
+            "tests/test_validate_manifest.py",
+            "docs/design/manifest.md"
+          ],
+          "minimal_modules": [
+            "L0–L4 检查",
+            "parity 扩展",
+            "--check-op"
+          ],
+          "practice_task": "运行（或阅读）validate_manifest.py 的 --check-op 某算子输出，逐级解释每级检查的内容；说明 advisory 与 --strict 模式的区别。",
+          "depends_on": [
+            "u9-l1",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "Status 翻转与字段 carve-out",
+          "order": 3,
+          "filename": "u9-l3-status-flip-carveout.md",
+          "level": "advanced",
+          "topic": "status: spec-only → implemented 的翻转流程；实现 PR 仅可改 status/source.kernel_map/source.test/source.bench/(workloads 配合翻转)/(torch_compile_fullgraph 配合证据)，其余字段需单独 manifest-only PR。",
+          "learning_goals": [
+            "掌握 status 字段语义与翻转时机",
+            "理解实现 PR 对 manifest 的窄化可改字段集（carve-out）",
+            "理解",
+            "carve-out 字段集",
+            "不改 manifest 迎合代码"
+          ],
+          "practice_task": "阅读 carve-out 规则，判断",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "torch.compile 集成",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "编译边界不变量",
+          "order": 1,
+          "filename": "u10-l1-compile-dispatch-boundary.md",
+          "level": "advanced",
+          "topic": "dynamo 可追踪的 forward 不得构造 Kernel 或进入 TileLang builder；compile_boundary.py 用 weak 实例注册表 + 字符串 key（dynamo 把字符串当静态常量）把不可追踪路径藏进 custom_op eager 体。",
+          "learning_goals": [
+            "理解",
+            "掌握字符串 instance key 为何优于 int key（SymInt 不可哈希）",
+            "理解 eager 体 resolve 实例后跑未追踪路径、fake 用 _infer_output_shapes"
+          ],
+          "source_files": [
+            "tileops/ops/compile_boundary.py",
+            "docs/design/ops-design.md",
+            "tileops/ops/op_base.py"
+          ],
+          "minimal_modules": [
+            "编译不变量",
+            "weak 注册表",
+            "字符串 key"
+          ],
+          "practice_task": "阅读 compile_boundary.py 与 dispatch_kernel，解释 id()+weakref 如何兼顾实例查找与 stale-graph 安全；说明为何构造期已建 kernel 的 op 不需要该边界。",
+          "depends_on": [
+            "u2-l1",
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "custom_op 注册工厂",
+          "order": 2,
+          "filename": "u10-l2-custom-op-registration-factory.md",
+          "level": "advanced",
+          "topic": "tileops/ops/elementwise/_base.py 中 _register_unary/binary/fused_gated 等 custom_op 工厂、_OP_REGISTRY 按 id(instance) 查找、register_fake 计算广播输出 shape 以支持 fullgraph。",
+          "learning_goals": [
+            "理解每个 elementwise op 在包加载时注册一个 torch.library.custom_op",
+            "掌握 _OP_REGISTRY + _instance_key 的运行时分发",
+            "理解 register_fake 的 fake 函数如何推导广播输出 shape"
+          ],
+          "source_files": [
+            "tileops/ops/elementwise/_base.py",
+            "tileops/ops/compile_boundary.py",
+            "tests/compile_contract.py"
+          ],
+          "minimal_modules": [
+            "custom_op 工厂",
+            "_OP_REGISTRY 分发",
+            "register_fake"
+          ],
+          "practice_task": "阅读 _register_binary_custom_op，画出 forward→_wrapped→instance._eager_forward 的调用链；并说明 register_fake 中 broadcast_shapes 为何对 fullgraph 必要。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "家族基类与规模化重构",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "家族基类模式（T1/T2 与三层继承）",
+          "order": 1,
+          "filename": "u11-l1-family-base-pattern.md",
+          "level": "advanced",
+          "topic": "Op(L1) → FamilyBase(L2, 家族共享 forward 流程) → ConcreteOp(L3) 的三层结构；T2（L1-direct，scaffold 产物）与 T1（薄包装）的区别；何时抽取 L2。",
+          "learning_goals": [
+            "理解 L1/L2/L3 三层与 T1/T2 两种形态",
+            "掌握",
+            "理解维度参数化家族用单一 ndim 泛化基类的做法"
+          ],
+          "source_files": [
+            "docs/design/ops-design.md",
+            "docs/design/ops-design-reference.md",
+            "tileops/ops/op_base.py"
+          ],
+          "minimal_modules": [
+            "三层继承",
+            "T1/T2 形态",
+            "何时抽 L2"
+          ],
+          "practice_task": "阅读 ops-design.md 的 Family-Base Refactoring，列出抽取 L2 的前提条件；解释为何 eval_roofline/_validate_dtypes 必须留在具体类体内。",
+          "depends_on": [
+            "u2-l1",
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "elementwise 三大伞形基类",
+          "order": 2,
+          "filename": "u11-l2-elementwise-umbrella-bases.md",
+          "level": "advanced",
+          "topic": "UnaryOp/BinaryOp/FusedGatedOp 三个伞形基类如何用 kernel_cls + _op_name 模板化数十个 elementwise op；广播 coalesce、FP8 后置 cast、inplace 分发等共享逻辑。",
+          "learning_goals": [
+            "理解伞形基类的",
+            "掌握 coalesce_broadcast_dims 的广播降维",
+            "理解 FP8 后置 cast 与 inplace custom_op 分发"
+          ],
+          "source_files": [
+            "tileops/ops/elementwise/_base.py",
+            "tileops/kernels/elementwise.py",
+            "docs/design/ops-design.md"
+          ],
+          "minimal_modules": [
+            "三大伞形基类",
+            "kernel_cls 模板",
+            "广播 coalesce"
+          ],
+          "practice_task": "阅读 UnaryOp/BinaryOp，说明子类如何仅靠类属性就能复用 forward；并解释 coalesce_broadcast_dims 为何能减少 kernel 内 divmod 次数。",
+          "depends_on": [
+            "u11-l1",
+            "u10-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "维度参数化家族（pool / reduction）",
+          "order": 3,
+          "filename": "u11-l3-dimension-parametrized-families.md",
+          "level": "advanced",
+          "topic": "pool 的 1d/2d/3d 用单一 ndim 泛化基类 + 类属性区分变体；reduction 家族的 _multidim/_primitives 共享原语；rank 相关命名表驱动、永不位置参数。",
+          "learning_goals": [
+            "理解 ndim 泛化基类如何用类属性表达空间秩差异",
+            "掌握 kernel-cache key 与构造关键字名在重构中必须保持",
+            "理解真正的 per-rank 行为差异保留为子类 override"
+          ],
+          "source_files": [
+            "tileops/ops/pool.py",
+            "tileops/ops/reduction/_multidim.py",
+            "tileops/kernels/reduction/_primitives.py"
+          ],
+          "minimal_modules": [
+            "ndim 泛化基类",
+            "变体类属性",
+            "表驱动命名"
+          ],
+          "practice_task": "阅读 pool.py，说明 MaxPool1d/2d/3dFwdOp 如何共享同一 ndim 基类；指出 indices 输出这类 rank 外变体如何用额外类属性表达。",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "复杂算子家族实战",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "Attention 家族",
+          "order": 1,
+          "filename": "u12-l1-attention-family.md",
+          "level": "advanced",
+          "topic": "GQA/MHA 的 prefill/decode（含 paged）多 kernel 协作；manifest 中 attention.yaml 的多 kernel kernel_map；Q/K/V 布局与 causal/sliding_window 变体。",
+          "learning_goals": [
+            "理解 attention op 如何在 forward 中编排多个 kernel",
+            "掌握 decode/prefill/paged 不同 kernel 的选择",
+            "理解 attention 用 func 模式 roofline（混合精度字节）"
+          ],
+          "source_files": [
+            "tileops/ops/attention/gqa.py",
+            "tileops/ops/attention/mha.py",
+            "tileops/kernels/attention/gqa_fwd.py",
+            "tileops/manifest/attention.yaml"
+          ],
+          "minimal_modules": [
+            "GQA/MHA op",
+            "多 kernel 协作",
+            "decode/paged 变体"
+          ],
+          "practice_task": "阅读 GQA forward，画出多 kernel 的调用顺序；对照 manifest 说明 kernel_map 中各 dispatch key 的 kernel 职责；解释为何 attention 用 func roofline。",
+          "depends_on": [
+            "u2-l4",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l2",
+          "title": "MoE 家族",
+          "order": 2,
+          "filename": "u12-l2-moe-family.md",
+          "level": "advanced",
+          "topic": "fused_moe 的 topk→permute→grouped_gemm→unpermute 流水；routed_expert 子包的 nopad/persistent 变体；manifest moe.yaml 的 source 结构。",
+          "learning_goals": [
+            "理解 MoE 前向的算子流水与各 kernel 职责",
+            "掌握 permute/unpermute 与 grouped GEMM 的协作",
+            "理解 routed_expert 子包的变体组织"
+          ],
+          "source_files": [
+            "tileops/ops/moe/fused_moe.py",
+            "tileops/ops/moe/routed_expert/fused_routed_expert.py",
+            "tileops/kernels/moe/moe_grouped_gemm_persistent_3wg_fused_act.py",
+            "tileops/manifest/moe.yaml"
+          ],
+          "minimal_modules": [
+            "fused_moe 流水",
+            "permute/grouped_gemm",
+            "routed_expert 变体"
+          ],
+          "practice_task": "阅读 fused_moe 前向，列出 topk/permute/gemm/unpermute 的执行顺序与各自 kernel；说明 persistent 3wg fused-act 变体融合了哪些步骤。",
+          "depends_on": [
+            "u2-l4",
+            "u11-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l3",
+          "title": "Mamba / SSD 状态空间家族",
+          "order": 3,
+          "filename": "u12-l3-mamba-ssd-family.md",
+          "level": "advanced",
+          "topic": "Mamba2 的 SSD 分解：chunk_scan/chunk_state/state_passing/decode 多 kernel；manifest sequence_modeling/scan/mamba 的 roofline 与 source；状态传递语义。",
+          "learning_goals": [
+            "理解 SSD（State-Space Dual）的四阶段分解",
+            "掌握 chunk-wise 与 decode 路径的 kernel 选择",
+            "理解状态传递 kernel 的作用"
+          ],
+          "source_files": [
+            "tileops/ops/mamba2_fwd.py",
+            "tileops/ops/ssd_chunk_scan.py",
+            "tileops/ops/ssd_decode.py",
+            "tileops/kernels/mamba/ssd_chunk_scan.py",
+            "tileops/manifest/mamba.yaml"
+          ],
+          "minimal_modules": [
+            "SSD 分解",
+            "chunk/decode 路径",
+            "状态传递"
+          ],
+          "practice_task": "阅读 Mamba2FwdOp 前向，画出 chunk_scan/state_passing/decode 的编排；对照 manifest 解释各 SSD 子算子的 roofline 来源。",
+          "depends_on": [
+            "u2-l4",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u12-l4",
+          "title": "GEMM 与 FP8 量化路径",
+          "order": 4,
+          "filename": "u12-l4-gemm-and-fp8-quant.md",
+          "level": "advanced",
+          "topic": "GemmOp 的 GEMV 快路径与四种 trans 布局；GemmFp8Op 的 per-tensor/block128 scale 选择与 kernel 分发；FP8 量化算子的 dtype 契约。",
+          "learning_goals": [
+            "理解 GEMM 的 GEMV 快路径触发与 NT/NN/TN/TT 布局",
+            "掌握 FP8 GEMM 的 scale shape 校验与 kernel 选择",
+            "理解 FP8 量化算子的输入/输出 dtype 契约"
+          ],
+          "source_files": [
+            "tileops/ops/gemm.py",
+            "tileops/ops/fp8_quant.py",
+            "tileops/kernels/gemm.py",
+            "tileops/manifest/quantization.yaml"
+          ],
+          "minimal_modules": [
+            "GEMM GEMV 快路径",
+            "FP8 scale 选择",
+            "FP8 量化契约"
+          ],
+          "practice_task": "阅读 GemmFp8Op._validate_shapes 与 _select_kernel_name，说明 per-tensor vs block128 scale 如何决定 kernel；对照 quantization.yaml 解释 FP8 量化算子的 signature。",
+          "depends_on": [
+            "u2-l4",
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

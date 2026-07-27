@@ -1,0 +1,696 @@
+{
+  "project": "TileRT",
+  "head": "a8368a681342d0686e76bbd2225b320f2fead8a2",
+  "rationale": "TileRT 的复杂度集中在两个抽象层：底层是被编译进两个 .so 后端的 tile 级 C++ 运行时（通过 torch.ops.tilert.* 暴露），上层是 Python 对 8 张 B200 的模型组装、权重加载与解码编排。因此学习路线遵循「先会用、再懂模型组装、再深入解码机制、最后攻克 PD 分离部署」的递进逻辑。\n\n单元 1（入门）让读者从零跑通生成：理解项目定位、目录与双后端设计、安装与 load_backend、CLI、Generator 生命周期、权重转换这六步闭环。单元 2（进阶）拆解核心执行契约：TileRTModule 抽象体系、ModelArgs 双模型差异、ShowHandsDSALayer 的多设备多线程加载、DSA 层组装、params/temp_vars/caches 三层张量模型、MLA 稀疏注意力和 MoE/MLP 前馈。单元 3 进一步讲算子（ops）融合与权重分片、非 MTP 解码主循环、MTP 投机解码、采样与 CUDA Graph 重捕获、基准测试。\n\n单元 4（专家）专门讲 v0.1.5 引入的 PD 分离部署：先给总览与 ModelProfile 抽象，再分别拆解 vLLM prefill 连接器、接收/控制平面、解码服务编排、RDMA 传输层、引擎接口与缓存注入。依赖关系上，单元 2 建立在单元 1 的 Generator 认知之上，单元 3 的解码循环依赖单元 2 的执行契约，单元 4 的缓存注入依赖三层张量模型与解码服务。共 24 篇讲义，每篇只解决一个主题、引用真实源码、配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门层：认识 TileRT 并跑通第一次生成",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与核心理念：tile 级运行时如何实现超低延迟",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "讲清楚 TileRT 是什么、解决什么问题：与传统高吞吐批处理推理不同，它优先响应延迟（TPOT），通过编译器驱动的 tile 级运行时把算子分解成细粒度任务、动态重排计算/IO/通信以极致重叠，面向高频交易、交互式 AI、长程 Agent 等场景。",
+          "learning_goals": [
+            "理解 ultra-low-latency 推理与高吞吐推理的目标差异",
+            "理解 tile-level runtime engine 的核心思想：算子分解 + 计算与通信重叠",
+            "了解 TileRT 当前支持的模型（DeepSeek-V3.2 / GLM-5）与硬件（8× B200）"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "项目定位与设计目标",
+            "tile 级运行时引擎概念",
+            "支持的模型与硬件"
+          ],
+          "practice_task": "阅读 README 的 Overview 段落，用自己的话写一段 200 字说明：为什么 tile 级重排能降低单 token 延迟；列出 TileRT 与 vLLM 这类高吞吐系统在优化目标上的三点不同。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "项目目录结构与双后端架构地图",
+          "order": 2,
+          "filename": "u1-l2-directory-map.md",
+          "level": "beginner",
+          "topic": "通览仓库目录结构：tilert 顶层包、models 下 deepseek_v3_2 与 glm_5 两套镜像模型、preprocess 权重转换、benchmark 基准、pd_vllm 分离部署。重点解释「每模型族一个独立 .so 后端」的设计与单进程只能加载一个后端的约束。",
+          "learning_goals": [
+            "掌握 tilert 包的顶层目录划分与职责",
+            "理解 libtilert_dsv32.so 与 libtilert_glm5.so 双后端为何分离、为何不能共存",
+            "建立从目录名快速定位功能模块的能力"
+          ],
+          "source_files": [
+            "README.md",
+            "tilert/__init__.py",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "目录结构与模块职责",
+            "双后端 .so 架构",
+            "单进程单后端约束"
+          ],
+          "practice_task": "用 git ls-files 或目录浏览画出 tilert/ 的三层树状结构图，标注 deepseek_v3_2 与 glm_5 哪些子模块是镜像对应关系，并说明两个模型为何各自维护一份 ops 目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "环境安装与后端动态加载机制",
+          "order": 3,
+          "filename": "u1-l3-install-and-backend-loading.md",
+          "level": "beginner",
+          "topic": "讲解如何用官方 Docker 镜像与 wheel 安装到精确 ABI 环境，并深入 tilert/__init__.py 的 load_backend：用 ctypes.CDLL(RTLD_GLOBAL|RTLD_LAZY) 与 torch.ops.load_library 把后端 .so 注入进程并注册 torch.ops.tilert 命名空间，理解懒加载、单后端互斥校验。",
+          "learning_goals": [
+            "按 README 搭建匹配的 CUDA 13.2 / torch 2.11 / Python 3.12 环境",
+            "理解 load_backend 的懒加载与「已加载则互斥报错」逻辑",
+            "掌握 ctypes + torch.ops.load_library 注册自定义算子的原理"
+          ],
+          "source_files": [
+            "README.md",
+            "tilert/__init__.py",
+            "Dockerfile",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "Docker/wheel 安装与版本锁",
+            "load_backend 懒加载流程",
+            "ctypes + torch.ops.load_library 算子注册"
+          ],
+          "practice_task": "在容器内执行 python -c \"import tilert, torch; print(tilert.__version__, torch.version.cuda)\" 验证安装；然后写一小段脚本，故意连续调用 load_backend('deepseek_v3_2') 与 load_backend('glm5')，观察并解释第二次为何抛 RuntimeError。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口 tilert.generate 与生成流程",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-generation-flow.md",
+          "level": "beginner",
+          "topic": "以 tilert/generate.py 为线索讲 CLI：parse_args 定义的全部参数（--model/--with-mtp/--top-p/--modes/--workloads 等）、get_weights_dir 从 ~/.tilert/config.toml 解析权重路径、get_generator 按模型分发构造生成器、交互模式与默认 benchmark 模式的分支。",
+          "learning_goals": [
+            "掌握 python -m tilert.generate 的完整参数与默认行为",
+            "理解权重目录解析的两种来源（config.toml vs --model-weights-dir）",
+            "看懂 get_generator 如何按 model_type 选择生成器与采样参数"
+          ],
+          "source_files": [
+            "tilert/generate.py",
+            "tilert/benchmark/config.py"
+          ],
+          "minimal_modules": [
+            "CLI 参数解析",
+            "权重目录解析",
+            "get_generator 模型分发"
+          ],
+          "practice_task": "运行 python -m tilert.generate --help 并对照源码列出每个参数对应的 argparse 定义；把默认 --max-new-tokens 改为 100、--workloads 设为 short，预测会发生什么并实际验证。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "程序化 API 与 Generator 生命周期",
+          "order": 5,
+          "filename": "u1-l5-generator-api-and-lifecycle.md",
+          "level": "beginner",
+          "topic": "讲解 DSAv32Generator / GLM5Generator 的编程式用法：构造参数（max_new_tokens、with_mtp、temperature、top_p 等）、init→from_pretrained→generate→cleanup 的生命周期、generate 返回 (text, time_list, accepted_counts, prompt_len)，以及 enable_thinking 怎样映射到 chat template。",
+          "learning_goals": [
+            "用纯 Python API 完成一次端到端生成",
+            "理解 Generator 从初始化、加载权重到生成、清理的完整生命周期",
+            "掌握 generate 的返回结构与 enable_thinking 的作用"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/generator.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "Generator 构造参数",
+            "init/from_pretrained/generate/cleanup 生命周期",
+            "generate 返回值结构"
+          ],
+          "practice_task": "照 README 的编程示例写一个脚本，先 load_backend，再构造 DSAv32Generator，调用 from_pretrained 与 generate，打印返回的 time_list 并计算平均单 token 延迟；最后务必调用 cleanup。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l6",
+          "title": "权重转换 weight_converter：从 HF checkpoint 到 8 卡分片",
+          "order": 6,
+          "filename": "u1-l6-weight-converter.md",
+          "level": "beginner",
+          "topic": "讲清 WeightConverter 把官方 HF 权重重写成 per-device 分片布局的全过程：按层分组加载、transform_mla/transform_moe/transform_mlp/transform_mtp 分别调用各 op 的 device_sharding、键名加 _dev_{0..7} 后缀、save_file_sharded 写出 model.safetensors.index.json。",
+          "learning_goals": [
+            "理解为何需要把权重预先重排成每卡一份的 TileRT 布局",
+            "掌握 transform_mla/moe/mlp/mtp 四类层各自的转换思路",
+            "学会用 python -m tilert.models.preprocess.weight_converter 做离线转换"
+          ],
+          "source_files": [
+            "tilert/models/preprocess/weight_converter.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "按层分组加载与索引文件",
+            "四类层 transform 与 device_sharding 委托",
+            "分片写出与 index.json 生成"
+          ],
+          "practice_task": "阅读 to_tilert_weights 与 convert_a_layer，画出从 HF 键名 model.layers.{i}.mlp.gate.weight 到 TileRT 键名 layer_{i}_exp_gate_weights_dev_{d} 的转换映射；在 test_mode=True 下（只转换少数层）理解 target_layers 的作用。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶层：模型组装与执行契约",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "TileRTModule 抽象体系：算子、可序列化容器与权重别名",
+          "order": 1,
+          "filename": "u2-l1-tilert-module-base.md",
+          "level": "intermediate",
+          "topic": "深入 tilert/models/base.py：TileRTModule 抽象基类（compute_kernel_type、algorithm、权重别名、profiling 开关、golden/tilert_forward 双路径），以及 SerializableTileRTModule 如何用 exec_seq/prefix_seq/suffix_seq 把一组子算子串成可加载权重的容器，并提供 init_tilert_weights/init_random_weights。",
+          "learning_goals": [
+            "理解 TileRTModule 作为所有算子统一基类承担的职责",
+            "掌握 SerializableTileRTModule 的 register_op 与 exec_seq 机制",
+            "看懂 tilert_weights_alias / ref_weights_alias 如何驱动权重加载与转换"
+          ],
+          "source_files": [
+            "tilert/models/base.py"
+          ],
+          "minimal_modules": [
+            "TileRTModule 基类字段与校验",
+            "SerializableTileRTModule 的 exec_seq 容器",
+            "权重别名与初始化钩子"
+          ],
+          "practice_task": "写一个继承 SerializableTileRTModule 的最小伪容器，注册两个子算子（可空实现 get_tilert_weights_alias/init_tilert_weights），模拟 register_op 后打印 exec_seq/prefix_seq/suffix_seq，验证 init_tilert_weights 按 prefix+alias+suffix 匹配 state_dict 的行为。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "ModelArgs 超参与 DeepSeek-V3.2 / GLM-5 双模型差异",
+          "order": 2,
+          "filename": "u2-l2-model-args-and-two-models.md",
+          "level": "intermediate",
+          "topic": "逐字段解读 ModelArgs 超参数（dim、n_layers、n_dense_layers、q_lora_rank、kv_lora_rank、qk_nope/rope_head_dim、n_routed_experts、index_n_heads/index_topk 等），并对比 ModelArgsGLM5：arch_name、vocab_size、head 维度、score_func（softmax vs sigmoid）、rope_theta 的关键差异。",
+          "learning_goals": [
+            "读懂每个超参数对模型结构与显存布局的影响",
+            "区分 DeepSeek-V3.2 与 GLM-5 在注意力维度、MoE 路由上的差异",
+            "理解 arch_name 如何被用于算子算法分发与后端选择"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/model_args.py",
+            "tilert/models/glm_5/model_args.py",
+            "tilert/models/glm_5/_dsa_v32/model_args.py"
+          ],
+          "minimal_modules": [
+            "ModelArgs 全字段含义",
+            "GLM-5 与 DSv3.2 的关键差异",
+            "arch_name 在分发中的作用"
+          ],
+          "practice_task": "对照两个 model_args 文件做一张对比表，至少列出 dim、n_layers、n_heads、qk_nope_head_dim、score_func、rope_theta 的取值差异；并解释 index_topk=2048 这个 NSA 索引参数与 max_seq_len 的关系。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "ShowHandsDSALayer：8 卡多线程权重加载与 prepare_money 编排",
+          "order": 3,
+          "filename": "u2-l3-show-hands-dsa-layer.md",
+          "level": "intermediate",
+          "topic": "拆解 end2end.py 的 ShowHandsDSALayer：_init_weights 用 threading 为 8 张卡并行加载分片权重、load_device_weights 按 *_dev_{id} 过滤键、V2 P2P 把各卡 ll_buf 指针回填到 0 卡 peer_bufs，最后 dsa_show_hands_prepare_money 把 params/temp_vars/caches/profile_logs 绑定进 C++ 运行时。",
+          "learning_goals": [
+            "理解 8 卡并行权重加载与键名过滤策略",
+            "掌握 V2 P2P 缓冲区指针交换的用途",
+            "理解 prepare_money 这一「把 Python 张量交给后端」的绑定契约"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/modules/end2end.py"
+          ],
+          "minimal_modules": [
+            "多线程分卡权重加载",
+            "V2 P2P peer_bufs/ll_buf 交换",
+            "prepare_money 绑定契约"
+          ],
+          "practice_task": "阅读 _init_weights，画出 8 个线程各自的数据流（从 load_device_weights 到 multi_devices_results 的四元组）；解释为什么 V2 P2P 交换要在所有线程 join 之后、prepare_money 之前进行。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "DSA 层组装：dense 层、MoE 层与 Head 的 register_op 调度",
+          "order": 4,
+          "filename": "u2-l4-dsa-layer-assembly.md",
+          "level": "intermediate",
+          "topic": "讲解 dsa.py 的 Dsa 模块：循环 n_layers 层，前 n_dense_layers 用 MlpBlock、其余用 MoeBlock，每块内含一个 MLA 注意力加一个 FFN，并以 layer_{n_layers}_ 前缀注册 RMSNormHeadProj；prefix/suffix 如何拼接出与转换时一致的 state_dict 键名。",
+          "learning_goals": [
+            "理解 DSA 的层循环与 dense/MoE 分界",
+            "掌握 register_op 的 prefix/suffix 与权重键名的对应关系",
+            "了解 device_id==0 与其他卡在 MLA 类型选择上的差异"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/modules/dsa.py",
+            "tilert/models/deepseek_v3_2/modules/mlp.py",
+            "tilert/models/deepseek_v3_2/modules/moe.py"
+          ],
+          "minimal_modules": [
+            "Dsa 层循环与 dense/MoE 分界",
+            "MlpBlock/MoeBlock 内部结构",
+            "prefix/suffix 键名拼接"
+          ],
+          "practice_task": "对照 dsa.py 与 weight_converter.py，验证 layer_3 的 MoE 权重键名 layer_3_exp_gate_weights_dev_{d} 在 register_op(prefix=layer_3_, suffix=_dev_{d}) 下能正确匹配；写一个小函数模拟该拼接逻辑。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "三层张量执行契约：params / temp_vars / caches 与 Idx 索引",
+          "order": 5,
+          "filename": "u2-l5-three-layer-tensor-contract.md",
+          "level": "intermediate",
+          "topic": "讲清后端执行的核心契约：把权重(params)、激活临时变量(temp_vars/intermediates)、KV 缓存(caches)、profiling 日志四组「扁平张量列表」交给 C++。重点讲 dsa.get_temp_vars 用 Idx 枚举定位每个激活槽、continuous storage 把多个 temp_var 拼进一块连续显存，以及 validate_temp_vars_layout 的布局校验。",
+          "learning_goals": [
+            "理解 params/temp_vars/caches/profile_logs 四元组的执行契约",
+            "掌握 Idx 枚举如何把命名激活映射到扁平列表下标",
+            "理解连续存储对齐(generate_params_with_continuous_storage)的用途"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/temp_var_indices.py",
+            "tilert/models/deepseek_v3_2/modules/dsa.py",
+            "tilert/models/deepseek_v3_2/modules/end2end.py"
+          ],
+          "minimal_modules": [
+            "四元张量列表契约",
+            "Idx 枚举与扁平下标映射",
+            "连续存储与布局校验"
+          ],
+          "practice_task": "在 get_temp_vars 中挑出 Q、KV、KI、TOKEN_OUT、CUR_POS 五个槽，说明它们各自的 dtype 与 shape 来源（对照 ModelArgs）；再解释 TEMP_VARS_SIZE=56 与后端 dsa_temp_vars_size 校验为何重要。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "MLA 注意力模块与稀疏选择（SparseSelect vs Pure）",
+          "order": 6,
+          "filename": "u2-l6-mla-and-sparse-select.md",
+          "level": "intermediate",
+          "topic": "拆解 mla_v2.py：device_id==0 用 SparseSelectMlaV2（NSA 稀疏索引 + peer_bufs/partial_buf 汇聚），其余卡用 PureMlaV2（接收 0 卡广播的稀疏选择结果）。讲清两者的算子组装（RMSNormProjxWqakis、RmsnormProjqWqi、ProjxWis、LayerNormRoPERotate 等）与 KI/KV/PE 缓存。",
+          "learning_goals": [
+            "理解 NSA 稀疏 MLA 与普通 MLA 的分工",
+            "掌握 0 卡计算稀疏索引、广播给其余卡的通信模型",
+            "了解 MLA 子算子的组装顺序与缓存变量"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/modules/mla_v2.py",
+            "tilert/models/deepseek_v3_2/modules/dsa.py"
+          ],
+          "minimal_modules": [
+            "SparseSelectMlaV2 稀疏索引职责",
+            "PureMlaV2 与 0 卡广播",
+            "MLA 子算子组装与缓存"
+          ],
+          "practice_task": "画一张 8 卡 MLA 数据流图：标注 0 卡产出 IDX_SELECTS 后如何通过 peer_bufs/ll_buf 传递给其余卡；说明为什么只有 device_id==0 需要 partial_buf。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "MoE / MLP 前馈模块：专家路由、门控与 allreduce",
+          "order": 7,
+          "filename": "u2-l7-moe-mlp-ffn.md",
+          "level": "intermediate",
+          "topic": "讲解 moe.py 与 mlp.py：MoeBlock 由 MLA + Moe 组成，Moe 内含 RMSNormExpertProj、ExpertSelectUpGateSiLU（专家选择+up/gate+SiLU 融合）、ExpertDownAllReduce；MlpBlock 用 RMSNormUpGateSiLU + DownAllReduce。讲清 FP8 权重（gate/up/down weights 与 scales）与专家选择 SCORES/SEL_INDICES 槽。",
+          "learning_goals": [
+            "理解 MoE 专家选择与前馈的融合算子链",
+            "掌握 dense MLP 与 MoE 在算子结构上的对应关系",
+            "了解 FP8 权重的 weights/scales 配对与 allreduce 通信"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/modules/moe.py",
+            "tilert/models/deepseek_v3_2/modules/mlp.py",
+            "tilert/models/deepseek_v3_2/ops/expert_sel_up_gate_silu.py"
+          ],
+          "minimal_modules": [
+            "Moe 融合算子链",
+            "Mlp 与 MoE 的结构对应",
+            "FP8 权重/scales 与 allreduce"
+          ],
+          "practice_task": "对照 get_temp_vars 中的 SCORES、SEL_PROBS、SEL_INDICES、UP_GATE、EXP_OUT 槽，画出一次 MoE 前馈的数据流；解释 expert_sel_up_gate_silu 如何把「选专家+计算 up/gate+SiLU」融合成一步。",
+          "depends_on": [
+            "u2-4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶层：算子层、解码与基准",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "算子(ops)层设计：融合算子、algorithm 枚举与 device_sharding",
+          "order": 1,
+          "filename": "u3-l1-ops-layer-design.md",
+          "level": "intermediate",
+          "topic": "通览 deepseek_v3_2/ops/ 下约 30 个融合算子（RmsnormProjqWqi、UnProjOAllReduce、ExpertSelectUpGateSiLU、DownAllReduce 等）。讲清一个 op 的统一结构：继承 TileRTModule、定义 algorithm 枚举（BF16MMA/FP8MMA/FP16MMA 等）、提供 ref/tilert 权重别名、device_sharding 用于离线转换、tilert_forward 调用 torch.ops.tilert.*。",
+          "learning_goals": [
+            "理解融合算子类的统一骨架与可枚举算法",
+            "掌握 op 的 device_sharding 如何同时服务离线转换与运行时加载",
+            "建立从 ops/__init__.py 全局索引定位具体算子的能力"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/ops/__init__.py",
+            "tilert/models/deepseek_v3_2/ops/rmsnorm_projq_wqi.py",
+            "tilert/models/deepseek_v3_2/ops/expert_sel_up_gate_silu.py"
+          ],
+          "minimal_modules": [
+            "融合算子统一骨架",
+            "algorithm 枚举与权重别名",
+            "device_sharding 双用途"
+          ],
+          "practice_task": "选一个算子类（如 RmsnormProjqWqi），列出它的 algorithm 枚举成员、ref/tilert 权重别名，并追踪 weight_converter 与运行时 init_tilert_weights 分别如何调用它的 device_sharding 与权重别名。",
+          "depends_on": [
+            "u2-1",
+            "u2-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "生成主循环：非 MTP 的逐 token 解码",
+          "order": 2,
+          "filename": "u3-l2-generation-loop-without-mtp.md",
+          "level": "intermediate",
+          "topic": "精读 generator._generate_without_mtp 与 decode_layer.forward：apply_chat模板 tokenize、用 -1 填充 token 缓冲、prompt_mask 区分 prompt 与生成、每步调 dsa_show_hands(token_id) 取 next_token、finished 判 EOS、reset_sequence 收尾；理解 prev_pos/cur_pos 的位置推进与 decode_layer.forward 返回的多卡结果。",
+          "learning_goals": [
+            "掌握非 MTP 逐 token 自回归解码的完整循环",
+            "理解 prompt_mask 与 EOS 终止逻辑",
+            "看懂 decode_layer.forward 如何驱动后端 dsa_show_hands"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/generator.py",
+            "tilert/models/deepseek_v3_2/modules/end2end.py"
+          ],
+          "minimal_modules": [
+            "tokenize 与缓冲填充",
+            "逐 token forward 与位置推进",
+            "EOS 终止与 reset_sequence"
+          ],
+          "practice_task": "在 _generate_without_mtp 中追踪一次循环：token_id 从哪来、next_token 如何被 prompt_mask 覆盖写入 tokens、finished 何时触发；编写一段伪代码精简表示该循环的最少必要步骤。",
+          "depends_on": [
+            "u1-5",
+            "u2-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "MTP 多 token 预测与投机解码",
+          "order": 3,
+          "filename": "u3-l3-mtp-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "精读 _generate_with_mtp：分 prefill 与 decode 两阶段、mtp_seq_len=4 的 draft token 组装与 padding、set_prefill_valid_tokens/set_prefill_mtp_extra_token、每步 get_next_draft_tokens/get_num_accepted/get_predicted_tokens 统计接受长度；并讲 mtp.py 的 MTP 模块（MTPPreprocessLayer + MoeBlock + RMSNormHeadProj）。",
+          "learning_goals": [
+            "理解 MTP prefill/decode 双阶段与 draft token 组装",
+            "掌握接受长度统计与多 token 输出回写逻辑",
+            "了解 MTP 模块的子结构与其复用主模型算子"
+          ],
+          "source_files": [
+            "tilert/models/deepseek_v3_2/generator.py",
+            "tilert/models/deepseek_v3_2/modules/mtp.py",
+            "tilert/models/deepseek_v3_2/modules/mtp_preprocess.py"
+          ],
+          "minimal_modules": [
+            "MTP prefill/decode 双阶段",
+            "draft token 与接受长度统计",
+            "MTP 模块子结构"
+          ],
+          "practice_task": "在 _generate_with_mtp 的 decode 循环里追踪 num_accepted 与 predicted_tokens 如何决定写入 tokens 的位置（cur_pos += num_accepted）；用 README 给出的 mean=2.77 例子说明一次 forward 实际产出多少 token。",
+          "depends_on": [
+            "u3-2",
+            "u2-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "采样、CUDA Graph 重捕获与 logprobs 导出",
+          "order": 4,
+          "filename": "u3-l4-sampling-and-cuda-graph.md",
+          "level": "advanced",
+          "topic": "讲解采样与图捕获机制：set_sampling_seed 固定每请求种子、SAMPLING_CONFIG 槽存放 (temperature, top_p, top_k, use_topp)、update_sampling_config 在参数变化时调 go_home 释放旧图再重跑 prepare_money 重捕获 CUDA Graph；以及 TOP_N_LOG_PROBS/TOP_N_INDICES 的 top-256 logprobs 导出开关。",
+          "learning_goals": [
+            "理解请求级采样种子与 SAMPLING_CONFIG 的作用",
+            "掌握参数变化触发 CUDA Graph 重捕获的流程",
+            "了解 logprobs 导出如何在不重写图的情况下开启"
+          ],
+          "practice_task": "对照 update_sampling_config 解释：为何 new_config==current_config 时直接 return、否则要先 go_home 再 prepare_money；设计一个实验比较「每次请求都换 top_p」与「固定 top_p」在首 token 延迟上的差异。",
+          "depends_on": [
+            "u2-3",
+            "u3-2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "性能基准测试套件：BenchMode、workload 与汇总表",
+          "order": 5,
+          "filename": "u3-l5-benchmark-suite.md",
+          "level": "intermediate",
+          "topic": "讲解 tilert/benchmark：BenchMode 描述采样组合（top-k1 w/o MTP、w/ MTP、top-p w/ MTP）、short/coding/long 三类 prompt workload、apply_mode 通过 update_sampling_params 切换、merge_stats/print_summary_table 输出 tok/s、it/s、acc_rate 汇总表，以及 generate.py 里 --modes/--workloads 的过滤逻辑。",
+          "learning_goals": [
+            "掌握基准测试的模式定义与三类 workload",
+            "理解 apply_mode 如何在运行时切换采样参数",
+            "看懂汇总表三行（tok/s、it/s、acc）的统计来源"
+          ],
+          "source_files": [
+            "tilert/benchmark/__init__.py",
+            "tilert/benchmark/config.py",
+            "tilert/generate.py"
+          ],
+          "minimal_modules": [
+            "BenchMode 与 workload 定义",
+            "apply_mode 运行时切换",
+            "汇总表统计"
+          ],
+          "practice_task": "运行一次 --workloads short --modes top-k1 的最小基准，对照 print_summary_table 解释每个单元格的含义；再修改一个 workload 文件（如 short_prompt.py）的 prompt 列表，观察汇总变化。",
+          "depends_on": [
+            "u1-4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家层：PD 分离部署（vLLM Prefill + TileRT Decode）",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "PD 分离架构总览与 ModelProfile 抽象",
+          "order": 1,
+          "filename": "u4-l1-pd-overview-and-profile.md",
+          "level": "advanced",
+          "topic": "给出 PD（prefill-decode）分离的全景：vLLM 做 prefill 产出首 token，经 RDMA 把 KV 状态送到 TileRT decode 节点继续解码，router 暴露 OpenAI 接口。重点讲 profiles/base.py 的 ModelProfile Protocol——把 buffer_bytes/convert/classify_layers/extract/rdma_plan/build_engine 等模型相关逻辑抽离，框架（connector/receive/decode_server/router）保持模型无关。",
+          "learning_goals": [
+            "理解 PD 分离的三进程拓扑与数据流",
+            "掌握 ModelProfile Protocol 如何隔离模型差异",
+            "了解 profile 注册表与别名机制"
+          ],
+          "source_files": [
+            "tilert/pd_vllm/profiles/base.py",
+            "tilert/pd_vllm/engine_iface.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "PD 三进程拓扑与数据流",
+            "ModelProfile Protocol 方法集",
+            "profile 注册与别名"
+          ],
+          "practice_task": "对照 README 的 Topology A，画出 decode_server / vLLM prefill / pd_router 三者的端口与调用关系；列出 ModelProfile Protocol 中哪些方法属于 receive 侧、哪些属于 prefill 侧、哪些属于 engine 侧。",
+          "depends_on": [
+            "u1-5",
+            "u2-5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "vLLM Prefill 连接器：claim 纪律、chunked prefill 与后台发送",
+          "order": 2,
+          "filename": "u4-l2-prefill-connector.md",
+          "level": "advanced",
+          "topic": "精读 prefill_connector.py：作为 vLLM V1 KVConnectorBase_V1 插件加载；_claim 只认带 tilert_host 的请求（MultiConnector 安全）；build_connector_meta 跟踪 chunked prefill 累积 _Pending；worker 侧 register_kv_caches→classify_layers→staging_bytes→extract→rdma_plan；wait_for_save 触发同步/异步后台 _send 经 TCP 握手 + transport.write 把 KV 推到 decode 节点。",
+          "learning_goals": [
+            "理解 connector 作为 vLLM 插件的加载与 claim 纪律",
+            "掌握 chunked prefill 的累积与发射逻辑",
+            "看懂 worker 侧 KV 抽取、staging 与 RDMA 发送链路"
+          ],
+          "source_files": [
+            "tilert/pd_vllm/prefill_connector.py",
+            "tilert/pd_vllm/wire.py"
+          ],
+          "minimal_modules": [
+            "claim 纪律与 MultiConnector 安全",
+            "chunked prefill 累积",
+            "worker 抽取/staging/发送链路"
+          ],
+          "practice_task": "对照 README 的 --kv-transfer-config，解释 _claim 为何只认 tilert_host 而对其余请求「严格 no-op」；追踪一个请求从 scheduled_new_reqs 到 _emit→wait_for_save→_send 的完整路径。",
+          "depends_on": [
+            "u4-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "接收服务与控制平面协议（hello 握手与 wire 消息）",
+          "order": 3,
+          "filename": "u4-l3-receive-server-and-wire.md",
+          "level": "advanced",
+          "topic": "讲解 receive_server.py 与 wire.py：ReceiveServer 分配 RDMA 接收缓冲、profile.hello_layout 给出发送端各 section 的目标地址、控制平面用 TCP 交换 magic/layout_version/transport/max_seq_len 校验、send_msg/recv_msg 用长度前缀 JSON 帧、ReceivedRequest 累积 done_ranks 直到 8 卡齐。",
+          "learning_goals": [
+            "理解接收侧缓冲分配与 hello 布局协商",
+            "掌握控制平面 TCP 协议与 magic/layout 校验",
+            "了解 ReceivedRequest 的多 rank 汇聚逻辑"
+          ],
+          "source_files": [
+            "tilert/pd_vllm/receive_server.py",
+            "tilert/pd_vllm/wire.py"
+          ],
+          "minimal_modules": [
+            "接收缓冲与 hello 布局",
+            "TCP 控制平面协议与校验",
+            "多 rank 汇聚"
+          ],
+          "practice_task": "解释 hello 握手中 layout_version、transport、max_seq_len 三项校验分别防止什么问题；写一段伪代码描述接收端如何用 hello 中的地址把 8 个 rank 的 RDMA 写入拼成一个完整请求。",
+          "depends_on": [
+            "u4-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "解码服务编排：wire-wait → convert → inject → decode",
+          "order": 4,
+          "filename": "u4-l4-decode-server-orchestration.md",
+          "level": "advanced",
+          "topic": "精读 decode_server.py 的 FastAPI 编排：POST /pd/decode 两阶段——先等 wire 传输完成(server.completed)→profile.convert 转回原生张量→engine.inject→engine.decode；bs=1 互斥锁与 429；streaming 用 ndjson 异步生成器并把客户端断连通过 cancel_event 与 CancelScope(shield=True) 安全收尾；/pd/cancel 显式取消。",
+          "learning_goals": [
+            "掌握 /pd/decode 的两阶段（prepare + decode）编排",
+            "理解 bs=1 互斥与 streaming 异步生成的取消安全",
+            "看懂 wire_wait/convert/inject/decode 四段计时"
+          ],
+          "source_files": [
+            "tilert/pd_vllm/decode_server.py",
+            "tilert/pd_vllm/engine_iface.py"
+          ],
+          "minimal_modules": [
+            "两阶段 decode 编排",
+            "互斥锁与 429",
+            "streaming 取消安全"
+          ],
+          "practice_task": "在 /pd/decode 里追踪一次请求的四段计时（wire_wait/convert/inject/decode）来源；解释为何 streaming 模式必须用 async generator + CancelScope(shield=True) 才能避免 engine 槽位泄漏。",
+          "depends_on": [
+            "u4-3",
+            "u4-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "RDMA 传输层抽象：Mooncake 与 NIXL",
+          "order": 5,
+          "filename": "u4-l5-rdma-transport.md",
+          "level": "advanced",
+          "topic": "讲解 transport.py：Transport 基类与 MooncakeTransport（TransferEngine + P2PHANDSHAKE + batch_transfer_sync_write）、NixlTransport（UCX 后端 + VRAM 描述符 + WRITE 轮询）两种实现；make_transport 工厂；两端 transport 必须一致（hello 校验）；README 中 UCX_NET_DEVICES 绑定 RDMA NIC 的实践。",
+          "learning_goals": [
+            "理解 Transport 抽象与 mooncake/nixl 两实现的差异",
+            "掌握 register/local_meta/write 在两端如何配合",
+            "了解多 NIC 主机绑定 UCX_NET_DEVICES 的原因"
+          ],
+          "source_files": [
+            "tilert/pd_vllm/transport.py",
+            "tilert/pd_vllm/prefill_connector.py"
+          ],
+          "minimal_modules": [
+            "Transport 基类与两种实现",
+            "register/meta/write 配合",
+            "多 NIC 绑定实践"
+          ],
+          "practice_task": "对比 MooncakeTransport.write 与 NixlTransport.write 的同步模型（batch_transfer_sync_write vs 轮询 check_xfer_state）；解释为何 hello 中 transport 字段必须两端一致。",
+          "depends_on": [
+            "u4-3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "引擎接口与缓存注入：inject_cache / inject_last_hidden_state",
+          "order": 6,
+          "filename": "u4-l6-engine-iface-and-cache-injection.md",
+          "level": "advanced",
+          "topic": "讲解引擎缝接：engine_iface.py 的 PDEngine Protocol（inject/decode/reset）与 StubEngine（无 GPU 联调）；generator.inject_cache 把外部 prefill 的 (ki,kv,pe) 逐层写入 caches、set_cur_pos 同步 RoPE 位置、inject_last_hidden_state 给 MTP 预处理层喂入主模型末 token 隐状态；profile.build_engine 如何构造具体适配器。",
+          "learning_goals": [
+            "理解 PDEngine 协议与 StubEngine 的联调价值",
+            "掌握 inject_cache 逐层写入 KI/KV/PE 的实现",
+            "了解 MTP 模式下 inject_last_hidden_state 的作用"
+          ],
+          "source_files": [
+            "tilert/pd_vllm/engine_iface.py",
+            "tilert/models/deepseek_v3_2/generator.py",
+            "tilert/pd_vllm/profiles/base.py"
+          ],
+          "minimal_modules": [
+            "PDEngine 协议与 StubEngine",
+            "inject_cache 逐层写入",
+            "inject_last_hidden_state 与 set_cur_pos"
+          ],
+          "practice_task": "对照 inject_cache 与 set_cur_pos，解释为何注入缓存后必须设置 cur_pos 才能正确继续 RoPE；用 StubEngine 设计一个端到端联调脚本（decode_server --engine stub）验证 receive→convert→inject→decode 管道，不需要真实 GPU。",
+          "depends_on": [
+            "u4-4",
+            "u2-5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

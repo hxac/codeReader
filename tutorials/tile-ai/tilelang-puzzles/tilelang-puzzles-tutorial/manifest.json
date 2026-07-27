@@ -1,0 +1,510 @@
+{
+  "project": "tilelang-puzzles",
+  "head": "de37efb54067cad12d6676f15959e0a201ee601d",
+  "rationale": "本手册严格遵循项目自带的递进难度（easy 拷贝/向量 → medium 归约/softmax/矩阵乘/卷积 → hard 量化矩阵乘）。第一单元从零开始，先建立项目认知、环境与 kernel 骨架及测试/基准框架（common/utils.py），再用 Puzzle 01 拷贝让读者跑通第一个 kernel。第二单元进入元素级并行，并在首次需要处引入 GPU 三级内存与 T.alloc_fragment 这条贯穿全册的主线。第三单元用归约（reduce-sum）与数值稳定 softmax 讲透神经网络初等算子，并过渡到 Online Softmax / LSE。第四单元是矩阵乘家族：先 GEMV（归约视角），再 GEMM naive（T.gemm / Tensor Core），最后 GEMM 优化（shared memory + T.Pipelined 软件流水线），并衔接标量 FlashAttention。第五单元以卷积（朴素滑动窗口 + im2col→GEMM）与 W4A16 量化矩阵乘收尾，并用一讲专门讲性能工程与生成代码检视。每讲只解决一个问题，引用 1–6 个真实源码文件，含一个基于 puzzle TODO 的动手任务，讲义间通过 depends_on 形成清晰的由浅入深依赖链。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门导览：认识 TileLang Puzzles",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与环境准备",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 TileLang Puzzles 的定位、它如何通过 10 个递进 puzzle 帮助学习 TileLang 这一高性能深度学习 kernel DSL，以及整体目录结构与推荐学习路线。",
+          "learning_goals": [
+            "了解 TileLang 是什么、TileLang Puzzles 的教学目标与灵感来源",
+            "掌握仓库目录结构（puzzles/、ans/、common/、docs/、scripts/）与 puzzle/answer 对照关系",
+            "完成环境配置并用 check_tilelang_env.py 验证 GPU 与 TileLang 版本"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/README.md",
+            "scripts/check_tilelang_env.py",
+            "ruff.toml"
+          ],
+          "minimal_modules": [
+            "TileLang 与 TileLang Puzzles 的定位",
+            "仓库目录结构与学习路线",
+            "环境检查与运行方式"
+          ],
+          "practice_task": "安装 tilelang，运行 python3 scripts/check_tilelang_env.py 确认版本与 GPU，再运行 python3 ans/01-copy.py 观察参考实现输出，并用 python -c \"import tilelang; print(tilelang.__version__)\" 记录版本。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "TileLang Kernel 骨架与测试/基准框架",
+          "order": 2,
+          "filename": "u1-l2-kernel-anatomy-and-test-framework.md",
+          "level": "beginner",
+          "topic": "拆解一个 TileLang kernel 的声明骨架（@tilelang.jit、T.const、T.Tensor、T.empty、T.Kernel、返回输出张量），并讲解 common/utils.py 提供的 test_puzzle 与 bench_puzzle 测试/基准框架。",
+          "learning_goals": [
+            "掌握 TileLang kernel 的声明部分（T.const / T.Tensor / T.empty / 返回输出）",
+            "理解 T.Kernel 的启动配置（blocks 与 threads）以及块索引变量的来源",
+            "理解 test_puzzle 如何编译 kernel、通过 KernelParam 自动构造输入并与 torch 参考结果比对，以及 bench_puzzle 如何用 CUDA Event 计时"
+          ],
+          "source_files": [
+            "scripts/check_tilelang_env.py",
+            "common/utils.py",
+            "puzzles/01-copy.py"
+          ],
+          "minimal_modules": [
+            "@tilelang.jit 与 kernel 声明骨架",
+            "T.Kernel 启动配置与块索引",
+            "test_puzzle / bench_puzzle 框架"
+          ],
+          "practice_task": "阅读 common/utils.py 中 test_puzzle 的实现，解释它如何通过 KernelParam 的 shape/dtype 自动构造输入张量；然后修改 scripts/check_tilelang_env.py 中 GEMM 的 block_M/block_N/block_K，观察 kernel 是否仍能成功编译运行。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "Puzzle 01 Copy：第一个 Kernel 与并行",
+          "order": 3,
+          "filename": "u1-l1-puzzle01-copy.md",
+          "level": "beginner",
+          "topic": "通过 Puzzle 01 Copy 串起三种实现——单线程串行、多线程、多 block 并行，学习 T.copy TileOp、threads、blocks 与块索引（bx/pid_n）的用法。",
+          "learning_goals": [
+            "理解 T.copy 作为 TileOp 的自动并行与向量化能力",
+            "掌握通过 threads 与多 block 两种方式实现并行拷贝",
+            "学会用块索引 pid_n 计算每个 block 负责的数据区间"
+          ],
+          "source_files": [
+            "puzzles/01-copy.py",
+            "ans/01-copy.py"
+          ],
+          "minimal_modules": [
+            "单线程串行 copy",
+            "多线程 copy（threads）",
+            "多 block 分块 copy（pid_n + BLOCK_N）"
+          ],
+          "practice_task": "补全 puzzles/01-copy.py 中的 tl_copy_1d_multi_threads 与 tl_copy_1d_parallel，使多 block 版本每个 block 拷贝 BLOCK_N 个元素；运行验证与 torch 一致，并用 bench_puzzle 比较串行/多线程/并行版的耗时。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "元素级并行计算与 GPU 内存层级",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Puzzle 02 Vector Add：T.Parallel 与元素级运算",
+          "order": 1,
+          "filename": "u2-l1-puzzle02-vector-add.md",
+          "level": "beginner",
+          "topic": "通过 Puzzle 02 的 vector add 与融合 mul-relu 学习 T.Parallel 循环、元素级算术运算以及 T.if_then_else 条件表达式。",
+          "learning_goals": [
+            "掌握用 T.Parallel 循环表达元素级并行计算",
+            "理解元素级算术与 TileOp（如 T.copy）的区别",
+            "学会用 T.if_then_else 实现条件逻辑（如 ReLU）"
+          ],
+          "source_files": [
+            "puzzles/02-vector-add.py",
+            "ans/02-vector-add.py"
+          ],
+          "minimal_modules": [
+            "T.Parallel 元素级加法",
+            "融合乘法 + ReLU",
+            "T.if_then_else 条件表达式"
+          ],
+          "practice_task": "补全 puzzles/02-vector-add.py 的 tl_mul_relu_1d，用 T.Parallel 与 T.if_then_else 实现 C[i]=max(0, A[i]*B[i])，运行 test_puzzle 验证与 torch 一致。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "GPU 内存层级与 T.alloc_fragment",
+          "order": 2,
+          "filename": "u2-l2-memory-hierarchy-fragments.md",
+          "level": "intermediate",
+          "topic": "借助 Puzzle 02 的内存优化版（mul_relu_1d_mem）讲解 GPU 三级内存（global/shared/registers）、T.alloc_fragment 寄存器片段抽象，以及 pass_configs 开关与生成代码的作用。",
+          "learning_goals": [
+            "理解 GPU global/shared/registers 三级内存层级与用寄存器优化的动机（如 ldg128）",
+            "掌握 T.alloc_fragment 作为 block 内寄存器的统一抽象",
+            "认识 pass_configs（TL_DISABLE_WARP_SPECIALIZED / TL_DISABLE_TMA_LOWER）与 print_source_code 生成的 CUDA 代码"
+          ],
+          "source_files": [
+            "puzzles/02-vector-add.py",
+            "ans/02-vector-add.py",
+            "common/utils.py"
+          ],
+          "minimal_modules": [
+            "GPU 三级内存层级",
+            "T.alloc_fragment 寄存器片段",
+            "pass_configs 与生成的 CUDA 代码"
+          ],
+          "practice_task": "参照 ans 实现补全 tl_mul_relu_1d_mem：用 T.alloc_fragment 缓存 A/B/C，再用 T.copy 在 global 与 fragment 间搬运，并用 compile().print_source_code() 对比朴素版与优化版生成的 CUDA。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Puzzle 03 Outer Vector Add：进入二维",
+          "order": 3,
+          "filename": "u2-l3-puzzle03-outer-vec-add.md",
+          "level": "beginner",
+          "topic": "通过 Puzzle 03 Outer Vector Add 进入二维：学习多维 T.Kernel、多维 T.Parallel(i, j) 循环以及二维分块与索引。",
+          "learning_goals": [
+            "掌握二维张量与二维分块（BLOCK_N × BLOCK_M）",
+            "理解多维 T.Kernel 的块索引（pid_n, pid_m）",
+            "学会用多维 T.Parallel(i, j) 表达二维元素级计算"
+          ],
+          "source_files": [
+            "puzzles/03-outer-vec-add.py",
+            "ans/03-outer-vec-add.py"
+          ],
+          "minimal_modules": [
+            "二维 T.Kernel 与块索引",
+            "多维 T.Parallel",
+            "二维 fragment 中间结果与 T.copy 回写"
+          ],
+          "practice_task": "补全 puzzles/03-outer-vec-add.py 的 tl_outer_add：用 (BLOCK_N, BLOCK_M) 分块、缓存 A_local/B_local，并用 T.Parallel(i, j) 计算 C[i, j]=A[i]+B[j]。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "归约与神经网络初等算子",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Puzzle 04 Backward Op：广播与反向算子",
+          "order": 1,
+          "filename": "u3-l1-puzzle04-backward-op.md",
+          "level": "intermediate",
+          "topic": "通过 Puzzle 04 学习广播（broadcast）乘法 ReLU 前向，以及如何把对应反向算子的梯度计算写成一个 TileLang kernel。",
+          "learning_goals": [
+            "理解在 TileLang 中如何手动处理广播（B 广播到 A 的二维形状）",
+            "掌握把前向 fused mul-relu 写成 kernel",
+            "学会实现反向算子：依据链式法则用条件掩码计算 dA"
+          ],
+          "source_files": [
+            "puzzles/04-backward-op.py",
+            "ans/04-backward-op.py"
+          ],
+          "minimal_modules": [
+            "广播 mul-relu 前向",
+            "反向算子的链式法则",
+            "条件掩码（A*B>0）与梯度回传"
+          ],
+          "practice_task": "补全 puzzles/04-backward-op.py 的 tl_mul_relu_bcast（前向广播）与 tl_mul_relu_bwd（反向），并用 torch.autograd 的参考结果验证 dA 正确。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Puzzle 05 Reduce Sum：归约 TileOp",
+          "order": 2,
+          "filename": "u3-l2-puzzle05-reduce-sum.md",
+          "level": "intermediate",
+          "topic": "通过 Puzzle 05 Reduce Sum 学习 TileLang 的归约 TileOp（T.reduce_sum）、T.Serial 串行循环与 T.clear，理解在 fragment 上做归约的语义。",
+          "learning_goals": [
+            "掌握 T.reduce_sum 的接口（dim、clear）及其需在 fragment 上工作的要求",
+            "理解用 T.Serial 串行循环分块累加的思想",
+            "认识 T.clear / clear 参数与累加语义"
+          ],
+          "source_files": [
+            "puzzles/05-reduce-sum.py",
+            "ans/05-reduce-sum.py"
+          ],
+          "minimal_modules": [
+            "T.reduce_sum 归约 TileOp",
+            "T.Serial 分块累加",
+            "T.clear / clear 累加语义"
+          ],
+          "practice_task": "补全 puzzles/05-reduce-sum.py 的 tl_reduce_sum：用 T.Serial 沿 M 分块加载到 fragment，再用 T.reduce_sum(dim=1, clear=False) 累加到 B_local，最后回写 B。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Puzzle 06 Softmax：数值稳定与 Online Softmax",
+          "order": 3,
+          "filename": "u3-l3-puzzle06-softmax.md",
+          "level": "intermediate",
+          "topic": "通过 Puzzle 06 Softmax 学习数值稳定 softmax：T.reduce_max、T.fill、T.exp2 / T.log2 与 log2_e 恒等式，以及 Online Softmax / log-sum-exp (LSE) 两遍算法。",
+          "learning_goals": [
+            "理解数值稳定 softmax 的减最大值技巧",
+            "掌握 T.reduce_max、T.fill、T.exp2 与 T.log2 的用法",
+            "理解 Online Softmax / LSE 两遍算法及其与 FlashAttention 的联系"
+          ],
+          "source_files": [
+            "puzzles/06-softmax.py",
+            "ans/06-softmax.py"
+          ],
+          "minimal_modules": [
+            "数值稳定 softmax 与 reduce_max/fill",
+            "exp2/log2 与 log2_e 恒等式",
+            "Online Softmax / LSE 两遍算法"
+          ],
+          "practice_task": "补全 puzzles/06-softmax.py 的 tl_softmax：第一遍用 online 算法算每行 LSE，第二遍用 exp2(A*log2_e - lse) 得到归一化输出；可选实现朴素三遍版做对比。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "矩阵乘法与注意力机制",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Puzzle 07 标量 FlashAttention",
+          "order": 1,
+          "filename": "u4-l1-puzzle07-scalar-flash-attn.md",
+          "level": "intermediate",
+          "topic": "通过 Puzzle 07 标量版 FlashAttention，把 softmax 的归约与 exp 融合成一个多遍 kernel，完成 attention 的核心计算。",
+          "learning_goals": [
+            "理解简化标量 attention 的计算（Q*K 后 softmax 再乘 V）",
+            "把 reduce_max / reduce_sum / exp2 组合成多遍 kernel",
+            "建立从 softmax 到完整 FlashAttention 的过渡直觉"
+          ],
+          "source_files": [
+            "puzzles/07-scalar-flash-attn.py",
+            "ans/07-scalar-flash-attn.py"
+          ],
+          "minimal_modules": [
+            "标量 attention 计算流程",
+            "多遍归约 + exp 融合 kernel",
+            "从 softmax 到 FlashAttention 的扩展点"
+          ],
+          "practice_task": "补全 puzzles/07-scalar-flash-attn.py 的 tl_scalar_flash_attn：复用 softmax 的 online LSE 思路，先算 QK=Q*K，再 softmax，最后乘 V，并用 bench_puzzle 对比 torch。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Puzzle 08 GEMV：从归约到矩阵-向量乘",
+          "order": 2,
+          "filename": "u4-l2-puzzle08-gemv.md",
+          "level": "intermediate",
+          "topic": "通过 Puzzle 08 的 GEMV（矩阵-向量乘）理解如何用 reduce_sum 把矩阵乘法表达为带累加器（accumulator dtype=float32）的分块归约 kernel。",
+          "learning_goals": [
+            "理解 GEMV 作为 reduce_sum 的扩展",
+            "掌握累加器与高精度累加（accum_dtype=float32）的用法",
+            "学会用 T.Serial 沿 K 维分块累加点积"
+          ],
+          "source_files": [
+            "puzzles/08-matrix.py",
+            "ans/08-matrix.py"
+          ],
+          "minimal_modules": [
+            "GEMV 作为分块归约",
+            "累加器与 accum_dtype",
+            "astype 与高精度累加"
+          ],
+          "practice_task": "补全 puzzles/08-matrix.py 的 tl_gemv：用 BLOCK_M×BLOCK_K fragment 加载 A、加载 B，做并行逐元素乘法后用 reduce_sum(dim=1, clear=False) 在 K 上累加到 C。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Puzzle 08 GEMM Naive：T.gemm 与 Tensor Core",
+          "order": 3,
+          "filename": "u4-l3-puzzle08-gemm-naive.md",
+          "level": "intermediate",
+          "topic": "通过 Puzzle 08 的 naive GEMM 学习 T.gemm TileOp 与 Tensor Core / MMA，理解二维分块（BLOCK_M×BLOCK_N×BLOCK_K）与 float32 累加。",
+          "learning_goals": [
+            "理解 T.gemm 的接口与它对 Tensor Core 的封装",
+            "掌握二维分块的 K 维串行累加（T.Serial + T.clear）",
+            "认识 float16 输入 + float32 累加器的混合精度模式"
+          ],
+          "source_files": [
+            "puzzles/08-matrix.py",
+            "ans/08-matrix.py"
+          ],
+          "minimal_modules": [
+            "T.gemm 与 Tensor Core",
+            "二维分块 K 维串行累加",
+            "混合精度累加器"
+          ],
+          "practice_task": "补全 puzzles/08-matrix.py 的 tl_matmul_naive：用 (pid_n, pid_m) 二维分块、T.Serial 沿 K 加载 A/B fragment，调用 T.gemm 累加到 C_local 后回写 C。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Puzzle 08 GEMM 优化：共享内存与软件流水线",
+          "order": 4,
+          "filename": "u4-l4-puzzle08-gemm-optimized.md",
+          "level": "advanced",
+          "topic": "通过 Puzzle 08 的优化版 GEMM 学习两项关键优化：用 T.alloc_shared 把 A/B 放进共享内存以减少寄存器压力，以及用 T.Pipelined 软件流水线重叠访存与计算。",
+          "learning_goals": [
+            "理解为什么把 A/B tile 放进 shared memory 而非全用 fragment",
+            "掌握 T.alloc_shared 在 GEMM 中的用法",
+            "掌握 T.Pipelined 软件流水线（num_stages）及其对访存/计算重叠的作用"
+          ],
+          "source_files": [
+            "puzzles/08-matrix.py",
+            "ans/08-matrix.py"
+          ],
+          "minimal_modules": [
+            "共享内存优化（T.alloc_shared）",
+            "软件流水线（T.Pipelined, num_stages）",
+            "朴素 vs 优化的性能对比"
+          ],
+          "practice_task": "补全 puzzles/08-matrix.py 的 tl_matmul_opt：把 A/B 改用 T.alloc_shared，循环改用 T.Pipelined(K//BLOCK_K, num_stages=3)，运行 run_matmul_opt 对比 naive 与优化版的生成代码和耗时。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "卷积、量化与性能工程",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Puzzle 09 Conv1D Naive：滑动窗口与 Halo 区域",
+          "order": 1,
+          "filename": "u5-l1-puzzle09-conv1d-naive.md",
+          "level": "advanced",
+          "topic": "通过 Puzzle 09 的朴素 Conv1D 学习滑动窗口卷积的数据依赖、用 T.alloc_shared 处理 halo（重叠）区域、以及 T.Parallel 与 T.Serial 嵌套循环和边界检查。",
+          "learning_goals": [
+            "理解 1D 卷积的滑动窗口与数据复用/依赖",
+            "掌握用 shared memory 分配带 halo 的 tile（BLOCK_L + KL）",
+            "学会 T.Parallel 外层 + T.Serial 内层 + 边界 if 的写法"
+          ],
+          "source_files": [
+            "puzzles/09-conv.py",
+            "ans/09-conv.py"
+          ],
+          "minimal_modules": [
+            "滑动窗口卷积与数据依赖",
+            "shared memory halo 区域",
+            "Parallel/Serial 嵌套与边界检查"
+          ],
+          "practice_task": "补全 puzzles/09-conv.py 的 tl_conv1d_naive：用 T.alloc_shared((BLOCK_N, BLOCK_L + KL)) 装载 X，内层 T.Serial(KL) 累加卷积，注意 j + k < L 的边界检查。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Puzzle 09 Conv im2col：卷积转 GEMM",
+          "order": 2,
+          "filename": "u5-l2-puzzle09-conv-im2col.md",
+          "level": "advanced",
+          "topic": "通过 Puzzle 09 的多输出通道卷积与 im2col 版本，学习把卷积转换为 GEMM：用 T.if_then_else 做 im2col 填充、T.reshape 重排布局，再用 T.gemm（clear_accum）加速。",
+          "learning_goals": [
+            "理解多输出通道卷积的扩展",
+            "掌握 im2col 变换思路与 T.if_then_else 填充",
+            "掌握 T.reshape 与 T.gemm(clear_accum) 的配合"
+          ],
+          "source_files": [
+            "puzzles/09-conv.py",
+            "ans/09-conv.py"
+          ],
+          "minimal_modules": [
+            "多输出通道卷积",
+            "im2col 变换与 T.if_then_else 填充",
+            "T.reshape + T.gemm(clear_accum)"
+          ],
+          "practice_task": "补全 puzzles/09-conv.py 的 tl_conv1d_multi_outchannel（朴素多通道）与 tl_conv1d_im2col（im2col + T.gemm），并对比两者正确性与耗时。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "Puzzle 10 Dequant MM：INT4 量化矩阵乘",
+          "order": 3,
+          "filename": "u5-l3-puzzle10-dequant-mm.md",
+          "level": "advanced",
+          "topic": "通过 Puzzle 10 学习 W4A16 量化矩阵乘：把打包在 uint8 中的两个 INT4 解量化（& 0x0F / >> 4 / -8 / T.cast），并在同一 kernel 内与 GEMM 融合。",
+          "learning_goals": [
+            "理解 INT4 量化、uint8 打包与有符号解量化（-8）的原理",
+            "掌握位运算（& 0x0F、>> 4）与 T.cast 的用法",
+            "学会把解量化与 T.gemm 融合进一个软件流水线 kernel"
+          ],
+          "source_files": [
+            "puzzles/10-dequant-mm.py",
+            "ans/10-dequant-mm.py"
+          ],
+          "minimal_modules": [
+            "INT4/uint8 打包与有符号解量化",
+            "位运算与 T.cast",
+            "融合解量化 + GEMM 的流水线 kernel"
+          ],
+          "practice_task": "补全 puzzles/10-dequant-mm.py 的 tl_dequant_matmul：在 T.Pipelined 循环里把 B_shared 解量化到 B_dequantized（低 4 位与高 4 位分别减 8），再调用 T.gemm(A_shared, B_dequantized, C_local)。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "性能工程与生成代码检视",
+          "order": 4,
+          "filename": "u5-l4-performance-and-codegen.md",
+          "level": "advanced",
+          "topic": "总结性能工程方法论：用 bench_puzzle（CUDA Event 计时、warmup/repeats）做基准对比、用 compile + print_source_code 检查生成的 CUDA，以及调参（block size、num_stages、shared/fragment 取舍）的思路。",
+          "learning_goals": [
+            "掌握 bench_puzzle 的计时方法学与公平对比（warmup、同步、repeats）",
+            "学会用 compile + print_source_code 阅读并诊断生成的 CUDA",
+            "建立 block size / 流水线级数 / shared vs fragment 的调参直觉"
+          ],
+          "source_files": [
+            "common/utils.py",
+            "puzzles/08-matrix.py",
+            "ans/08-matrix.py",
+            "puzzles/09-conv.py"
+          ],
+          "minimal_modules": [
+            "bench_puzzle 计时方法学",
+            "print_source_code 代码检视",
+            "block size / num_stages / 内存层级调参"
+          ],
+          "practice_task": "挑选 GEMM（08）或 Conv（09），固定问题规模，分别改变 BLOCK_K 与 num_stages，记录 bench_puzzle 的耗时，并阅读对应 print_source_code 输出，写一份简短的调参观察报告。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
