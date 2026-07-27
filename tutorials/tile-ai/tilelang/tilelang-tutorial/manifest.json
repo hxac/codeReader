@@ -1,0 +1,1012 @@
+{
+  "project": "tilelang",
+  "head": "c6294f07e3c9cb452e13ce5a18f2cfd9c218d81d",
+  "rationale": "tilelang 是一个基于 TVM、用 Pythonic 语法描述 GPU/CPU 高性能 kernel 的 DSL，其核心链路是「Python DSL → eager builder/AST → TVM TIR → 编译 Pass → 设备代码生成(CUDA/HIP/Metal/CPU/WebGPU/CuTeDSL) → kernel adapter」。因此学习路线按「先会用、再懂机制、最后能扩展」三层推进：第 1-2 单元(beginner)让读者跑通第一个 kernel 并掌握 DSL 基本语法(prim_func/Kernel/内存层级/控制流/类型系统)；第 3-6 单元(intermediate)进入核心计算原语(gemm/reduce/流水线/swizzle)、完整编译流水线、JIT 与缓存、以及 Python 如何变成 TIR、Pass 体系与代码生成；第 7-10 单元(advanced)面向二次开发，覆盖运行时 adapter、host/device 拆分、Autotuner 与 Carver 自动调优、Profiler、调试工具，以及如何加新 op/pass/backend。讲义之间通过 depends_on 形成清晰依赖，每篇只聚焦一个主题并配套真实源码阅读与动手实践，大型项目拆成 32 篇以覆盖其编译器+多后端+工具链的完整广度。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步：认识 TileLang 并跑通第一个 Kernel",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与架构定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 tilelang 是什么：基于 TVM 的高性能 GPU/CPU kernel DSL，它解决什么问题，整体编译链路与适用场景。",
+          "learning_goals": [
+            "理解 tilelang 的定位：Pythonic DSL 生成 CUDA/HIP/Metal/CPU/WebGPU kernel",
+            "掌握 DSL→TIR→Pass→CodeGen→Adapter 的端到端链路概念",
+            "了解项目支持的硬件与典型算子(GEMM/FlashAttention/MLA)"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/get_started/overview.md",
+            "docs/programming_guides/overview.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "tilelang",
+            "tilelang.language"
+          ],
+          "practice_task": "阅读 README 与 overview 文档，画出 tilelang 从 Python 函数到可执行 kernel 的数据流草图，并用一句话写出 tilelang 相比手写 CUDA/Triton 的取舍。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、构建与运行环境",
+          "order": 2,
+          "filename": "u1-l2-installation-and-build.md",
+          "level": "beginner",
+          "topic": "讲解三种安装方式：pip 安装、从源码构建(自带 TVM 子模块)、nightly 版本，以及 CMake/scikit-build 构建要点。",
+          "learning_goals": [
+            "会用 pip 安装 tilelang 并验证 import",
+            "理解源码构建中 TVM/CUTLASS/Composable Kernel 依赖与 CMake 选项",
+            "知道 pyproject.toml 如何用 scikit-build-core 打包并映射 3rdparty"
+          ],
+          "source_files": [
+            "docs/get_started/Installation.md",
+            "pyproject.toml",
+            "CMakeLists.txt",
+            "tilelang/libinfo.py"
+          ],
+          "minimal_modules": [
+            "tilelang.libinfo",
+            "tilelang.env"
+          ],
+          "practice_task": "在本地用 pip 安装 tilelang，运行 `python -c \"import tilelang; print(tilelang.__version__)\"` 成功；记录 libinfo 如何定位 libtilelang.so 的查找路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构与包入口",
+          "order": 3,
+          "filename": "u1-l3-repo-layout-and-entry.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录：Python 包 tilelang/、C++ 源码 src/、3rdparty、docs、examples、testing，以及 tilelang/__init__.py 暴露的公共 API。",
+          "learning_goals": [
+            "掌握 tilelang/language、jit、engine、backend、transform、tileop、carver 等子目录职责",
+            "理解 __init__.py 的轻量导入(light import)与 native 库加载流程",
+            "能定位 DSL 入口、编译入口与公共 API(jit/compile/language/autotune)"
+          ],
+          "source_files": [
+            "tilelang/__init__.py",
+            "tilelang/env.py",
+            "tilelang/libinfo.py",
+            "tilelang/_ffi_api.py"
+          ],
+          "minimal_modules": [
+            "tilelang",
+            "tilelang.env",
+            "tilelang.libinfo"
+          ],
+          "practice_task": "浏览 tilelang/ 与 src/ 目录，列出 Python 侧与 C++ 侧一一对应的子系统(如 transform、op、codegen)，并在 __init__.py 中找到 jit/compile/language/Profiler 的导出位置。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "第一个 Kernel：Quickstart GEMM 实跑",
+          "order": 4,
+          "filename": "u1-l4-quickstart-gemm.md",
+          "level": "beginner",
+          "topic": "通过 examples/quickstart.py 与 README 的 GEMM 示例，实跑一个 tilelang kernel，理解 T.Kernel、T.copy、T.gemm、T.Pipelined 的直观用法。",
+          "learning_goals": [
+            "能用 @tilelang.jit 写并运行一个 GEMM kernel",
+            "理解 T.Kernel 网格/线程、shared/fragment 缓冲、T.copy 搬运的直观含义",
+            "学会用 kernel.get_kernel_source() 查看生成的设备代码并用 profiler 测延迟"
+          ],
+          "source_files": [
+            "examples/quickstart.py",
+            "examples/gemm/example_gemm.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "tilelang.jit",
+            "tilelang.language",
+            "tilelang.profiler"
+          ],
+          "practice_task": "运行 examples/quickstart.py(或 CPU 下改 target) 跑通 matmul，打印生成的 kernel 源码，并用 get_profiler().do_bench() 测出一次延迟。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "DSL 语言基础",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "定义 Kernel：prim_func、Kernel 与 Tensor/Buffer",
+          "order": 1,
+          "filename": "u2-l1-prim-func-kernel-tensor.md",
+          "level": "beginner",
+          "topic": "讲解如何用 @T.prim_func 定义 kernel、用 T.Tensor/T.Buffer 标注形状与 dtype、用 with T.Kernel(...) 声明 launch 上下文与网格/线程绑定。",
+          "learning_goals": [
+            "会写 @T.prim_func 并用 T.Tensor 标注输入输出",
+            "掌握 T.Kernel 的 grid/threads 与 blockIdx 绑定",
+            "理解符号维度 T.dyn / T.dynamic 与具体 shape 的关系"
+          ],
+          "source_files": [
+            "docs/programming_guides/language_basics.md",
+            "tilelang/language/kernel.py",
+            "tilelang/language/common.py",
+            "tilelang/language/builtin.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language",
+            "tilelang.language.kernel"
+          ],
+          "practice_task": "写一个 elementwise 向量加法 kernel(A+B→C)，用 @tilelang.jit 装饰并传入 torch tensor 调用，断言结果与 torch 一致。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "内存层级与数据搬运",
+          "order": 2,
+          "filename": "u2-l2-memory-hierarchy-and-copy.md",
+          "level": "beginner",
+          "topic": "讲解 GPU 三级内存(global/shared/fragment/local)的分配(T.alloc_shared/alloc_fragment/alloc_local)与 T.copy 在不同 scope 间的数据搬运。",
+          "learning_goals": [
+            "理解 shared memory、fragment(register)、local 的区别与用途",
+            "会用 alloc_shared/alloc_fragment 分配缓冲并用 T.copy 搬运",
+            "知道 T.clear/T.fill 如何初始化局部缓冲"
+          ],
+          "source_files": [
+            "tilelang/language/allocate.py",
+            "tilelang/language/copy_op.py",
+            "tilelang/language/fill_op.py",
+            "examples/elementwise/"
+          ],
+          "minimal_modules": [
+            "tilelang.language.allocate",
+            "tilelang.language.copy_op"
+          ],
+          "practice_task": "实现一个把 global 数据先 copy 到 shared 再 copy 到 fragment 并做缩放后写回 global 的 kernel，对比直接 global 读写的结果正确性。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "控制流与循环原语",
+          "order": 3,
+          "filename": "u2-l3-control-flow-and-loops.md",
+          "level": "beginner",
+          "topic": "讲解 T.serial/T.unroll/T.Parallel 循环原语、Python if/elif/else 与三元、while，以及 LegalizeSafeMemoryAccess 自动边界保护。",
+          "learning_goals": [
+            "掌握 serial/unroll/Parallel 三种循环及其适用场景",
+            "理解 TIR 条件与 Python 常量条件的区别",
+            "知道 OOB 访问如何被自动 guard 并可省略显式边界判断"
+          ],
+          "source_files": [
+            "docs/programming_guides/control_flow.md",
+            "tilelang/language/loop.py",
+            "tilelang/language/logical.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language.loop",
+            "tilelang.language.logical"
+          ],
+          "practice_task": "写一个带边界处理的 row-wise softmax 片段，分别用显式 if 与省略 if(依赖安全访问 pass) 两种写法，验证输出一致。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "类型系统与数据类型",
+          "order": 4,
+          "filename": "u2-l4-type-system-and-dtypes.md",
+          "level": "beginner",
+          "topic": "讲解 tilelang 的 dtype 体系：字符串/T.float32/torch.float32 三种写法归一化、fp8/bf16/fp4 支持，以及 T.const 绑定编译期常量。",
+          "learning_goals": [
+            "理解 dtype 三种等价写法与归一化机制",
+            "掌握 T.const 绑定编译期 shape 常量与重编译行为",
+            "了解 fp8/fp4 等低精度类型的声明方式"
+          ],
+          "source_files": [
+            "docs/programming_guides/type_system.md",
+            "tilelang/language/dtypes.py",
+            "tilelang/dtypes.py",
+            "tilelang/language/fp8.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language.dtypes",
+            "tilelang.dtypes"
+          ],
+          "practice_task": "把 u2-l1 的加法 kernel 改为 float16 累加 float32 输出，再用 T.const 把 M/N/K 固定为编译期常量，观察 kernel source 的变化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "核心计算与调度原语",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "T.gemm 与 tile op 体系",
+          "order": 1,
+          "filename": "u3-l1-gemm-and-tileop.md",
+          "level": "intermediate",
+          "topic": "讲解 T.gemm 的用法与背后 tileop 注册机制：resolve_gemm_impl 如何根据 target/dispatch 到 CuTe/HIP 等实现，以及 T.gemm_sp 的 2:4 稀疏支持。",
+          "learning_goals": [
+            "会用 T.gemm 在 shared 缓冲上做分块矩阵乘并累加到 fragment",
+            "理解 tileop/gemm 的 registry 与 infer_layout/lower 钩子",
+            "了解 T.gemm_sp 的稀疏 tensor core 路径"
+          ],
+          "source_files": [
+            "tilelang/language/gemm_op.py",
+            "tilelang/tileop/gemm/__init__.py",
+            "tilelang/tileop/gemm/registry.py",
+            "examples/gemm/example_gemm_intrinsics.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language.gemm_op",
+            "tilelang.tileop.gemm"
+          ],
+          "practice_task": "实现一个带累加(clearAccum=False)的分块 GEMM，对比 T.gemm 与手写双重循环累加的性能差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "归约、原子、scan 与填充",
+          "order": 2,
+          "filename": "u3-l2-reduce-atomic-scan-fill.md",
+          "level": "intermediate",
+          "topic": "讲解 T.reduce_*、T.atomic_*、T.scan、T.fill/T.clear 等计算原语及其 lowering 到 warp/thread 归约的方式。",
+          "learning_goals": [
+            "会用 T.reduce_max/sum 做分块归约并理解 thread allreduce",
+            "掌握 T.atomic_add 的并发写回用法",
+            "理解 scan_op 在递推计算(如 prefix sum)中的作用"
+          ],
+          "source_files": [
+            "tilelang/language/reduce_op.py",
+            "tilelang/language/atomic.py",
+            "tilelang/language/scan_op.py",
+            "tilelang/language/fill_op.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language.reduce_op",
+            "tilelang.language.atomic",
+            "tilelang.language.scan_op"
+          ],
+          "practice_task": "用 T.reduce_sum/T.reduce_max 实现一个 block 内的在线 softmax(online softmax)，再用 T.atomic_add 写回全局结果。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "软件流水线 Pipelined",
+          "order": 3,
+          "filename": "u3-l3-software-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 T.Pipelined 的自动 producer/consumer 流水线推断、num_stages 含义，以及手动 stage/order 注解的用法。",
+          "learning_goals": [
+            "会用 T.Pipelined(num_stages=N) 加速 GEMM 类 kernel",
+            "理解 stage/order 注解模型与 replayable Bind 不入调度的规则",
+            "能诊断流水线推断失败并改用手动注解"
+          ],
+          "source_files": [
+            "docs/programming_guides/software_pipeline.md",
+            "tilelang/language/tile_schedule.py",
+            "src/transform/inject_pipeline.cc",
+            "src/transform/pipeline_planning.cc"
+          ],
+          "minimal_modules": [
+            "tilelang.language.tile_schedule",
+            "tilelang.transform(inject_pipeline)"
+          ],
+          "practice_task": "把 u3-l1 的 GEMM 包一层 T.Pipelined(num_stages=3)，再尝试手动 stage=[0,0,1]/order=[0,1,2] 注解，对比两者的 kernel source 与延迟。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "布局标注、swizzle 与 L2 优化",
+          "order": 4,
+          "filename": "u3-l4-layout-swizzle-l2.md",
+          "level": "intermediate",
+          "topic": "讲解 Layout/Fragment 布局、T.use_swizzle 的 L2 cache 友好栅格化(rasterization)与 memory layout 可视化思路。",
+          "learning_goals": [
+            "理解 Layout 抽象与 Fragment 布局对 fragment 数据排布的影响",
+            "会用 T.use_swizzle(panel_size=) 改善 L2 局部性",
+            "了解 swizzle 模式与布局推理(layout inference)的关系"
+          ],
+          "source_files": [
+            "tilelang/layout/layout.py",
+            "tilelang/layout/fragment.py",
+            "tilelang/layout/swizzle.py",
+            "docs/programming_guides/instructions.md"
+          ],
+          "minimal_modules": [
+            "tilelang.layout",
+            "tilelang.language.tile_schedule"
+          ],
+          "practice_task": "给一个 GEMM kernel 加上 T.use_swizzle(panel_size=10)，对比开关前后 H100/模拟下的延迟，并用 plot_layout 工具画出 shared 布局。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "编译流水线与 JIT",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "编译总流程：DSL → TIR → 后端",
+          "order": 1,
+          "filename": "u4-l1-compile-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "讲解 engine.lower 作为编译器入口：semantic check → PassContext/pipeline → device codegen → host codegen 的完整链路与 IRModule 流转。",
+          "learning_goals": [
+            "理解 lower() 如何把 PrimFunc 经 Pass 流水线变成可编译 IR",
+            "掌握 device_codegen/host_codegen 的注册与解析机制",
+            "能定位 pass_pipeline.resolve_pipeline 与目标判定 determine_target"
+          ],
+          "source_files": [
+            "tilelang/engine/lower.py",
+            "tilelang/engine/__init__.py",
+            "tilelang/backend/pass_pipeline/pipeline.py",
+            "tilelang/backend/device_codegen.py"
+          ],
+          "minimal_modules": [
+            "tilelang.engine",
+            "tilelang.backend.pass_pipeline",
+            "tilelang.backend.device_codegen"
+          ],
+          "practice_task": "在 verbose 模式下编译一个 GEMM，跟踪日志中 Pass 顺序，画出 IRModule 从 PrimFunc 到生成设备源码的各阶段。",
+          "depends_on": [
+            "u1-l4",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "jit 装饰器与 lazy/eager 执行模式",
+          "order": 2,
+          "filename": "u4-l2-jit-lazy-eager-modes.md",
+          "level": "intermediate",
+          "topic": "讲解 @tilelang.jit 的两种执行模式：lazy(返回 PrimFunc→得 kernel 对象)与 eage(标注 tensor 直接编译执行)，以及 JITKernel 的封装。",
+          "learning_goals": [
+            "区分 lazy 与 eager 模式及其推断规则 _infer_jit_mode",
+            "掌握 compile()/par_compile() 与 JITKernel 的关系",
+            "理解 get_tir/get_kernel_source/compile 的调用链"
+          ],
+          "source_files": [
+            "tilelang/jit/__init__.py",
+            "tilelang/jit/kernel.py",
+            "examples/eager_jit/"
+          ],
+          "minimal_modules": [
+            "tilelang.jit",
+            "tilelang.jit.kernel"
+          ],
+          "practice_task": "把同一个 GEMM 分别写成 lazy 与 eager 两种风格，调用并比较返回值类型与 out_idx 的用法差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "编译缓存机制",
+          "order": 3,
+          "filename": "u4-l3-compilation-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 tilelang 的多层缓存：JITKernel 的 kernel cache、_CallFormCache、cached() 装饰器，以及 CUDA binary cache 与 enable/disable_cache。",
+          "learning_goals": [
+            "理解 JIT 层缓存键的构造(parse_cache_key)与失效条件",
+            "掌握 CUDABinaryCache 对 cubin/fatbin 的缓存复用",
+            "会用 enable_cache/disable_cache 控制缓存行为"
+          ],
+          "source_files": [
+            "tilelang/jit/__init__.py",
+            "tilelang/jit/adapter/kernel_cache.py",
+            "tilelang/cache/",
+            "tilelang/env.py"
+          ],
+          "minimal_modules": [
+            "tilelang.cache",
+            "tilelang.jit",
+            "tilelang.env"
+          ],
+          "practice_task": "对一个 GEMM 连续调用两次并打印计时，观察第二次命中缓存；再用 disable_cache() 对比编译耗时变化。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "目标判定与多后端支持",
+          "order": 4,
+          "filename": "u4-l4-targets-and-backends.md",
+          "level": "intermediate",
+          "topic": "讲解 determine_target 如何从 'auto'/字符串/dict 解析 TVM Target，以及 cuda/hip/metal/c/webgpu/cutedsl 各后端的语言扩展与差异。",
+          "learning_goals": [
+            "理解 target='auto' 的推断逻辑与 {kind,arch} 配置写法",
+            "掌握各后端 language 子包(cuda/rocm/metal/cpu/webgpu)的关系",
+            "了解 CuTeDSL backend 的定位与适用场景"
+          ],
+          "source_files": [
+            "tilelang/backend/target.py",
+            "docs/get_started/targets.md",
+            "tilelang/language/__init__.py",
+            "tilelang/cuda/language/__init__.py"
+          ],
+          "minimal_modules": [
+            "tilelang.backend.target",
+            "tilelang.cuda.language",
+            "tilelang.rocm.language"
+          ],
+          "practice_task": "把同一个 elementwise kernel 分别指定 target 为 cuda 与 cpu(llvm)，编译并查看两份生成的设备源码差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "从 Python 到 TIR：DSL 的实现",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "eager builder 与 prim_func 转换",
+          "order": 1,
+          "filename": "u5-l1-eager-builder-prim-func.md",
+          "level": "intermediate",
+          "topic": "讲解 language/eager 中的 prim_func/JITFunc/IRGenerator：如何用 builder 模式把 Python 语句逐步构建成 TVM TIR PrimFunc。",
+          "learning_goals": [
+            "理解 eager builder 的 frame 栈与 IRGenerator 工作方式",
+            "掌握 prim_func 装饰器与 JITFunc 的 set_mode/parse_args",
+            "能追踪 T.Kernel/T.copy 等语句如何落到 TIR 节点"
+          ],
+          "source_files": [
+            "tilelang/language/eager/builder.py",
+            "tilelang/language/eager/__init__.py",
+            "tilelang/language/eager/ast.py",
+            "tilelang/language/frame.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language.eager",
+            "tilelang.language.frame"
+          ],
+          "practice_task": "在 builder 关键函数处加日志(只读分析)，跟踪一个简单 kernel 从 Python 调用到生成 PrimFunc 的语句序列，写出追踪笔记。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "Python AST 解析器与 overrides",
+          "order": 2,
+          "filename": "u5-l2-python-ast-parser.md",
+          "level": "intermediate",
+          "topic": "讲解 language/parser 与 language/overrides 如何用 Python AST 把用户函数体解析成 DSL 调用，处理 buffer/parser 的语义改写。",
+          "learning_goals": [
+            "理解 entry/parser/operation 三个模块在 AST→DSL 中的分工",
+            "掌握 overrides/parser.py 与 buffer.py 的语义改写机制",
+            "了解 language/ast 模块在 IR 生成中的角色"
+          ],
+          "source_files": [
+            "tilelang/language/parser/entry.py",
+            "tilelang/language/parser/parser.py",
+            "tilelang/language/overrides/parser.py",
+            "tilelang/language/ast/ir.py"
+          ],
+          "minimal_modules": [
+            "tilelang.language.parser",
+            "tilelang.language.overrides",
+            "tilelang.language.ast"
+          ],
+          "practice_task": "阅读 parser/entry.py，说明一个 T.copy 调用如何被解析并最终调用 eager builder，画出 AST 节点到 builder 调用的映射。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "语义检查与参数抽取",
+          "order": 3,
+          "filename": "u5-l3-semantic-check-and-params.md",
+          "level": "intermediate",
+          "topic": "讲解 PreLowerSemanticCheck 在 lower 前对 kernel 的合法性校验，以及 KernelParam/CompiledArtifact 如何描述 kernel 的张量参数与编译产物。",
+          "learning_goals": [
+            "理解 PreLowerSemanticCheck 检查哪些约束(可由 PassConfigKey 关闭)",
+            "掌握 KernelParam 的张量类型抽取 extrac_params",
+            "了解 CompiledArtifact 承载 runtime module 与参数"
+          ],
+          "source_files": [
+            "tilelang/engine/semantic_check.py",
+            "tilelang/engine/param.py",
+            "tilelang/engine/lower.py",
+            "docs/compiler_internals/tensor_checks.md"
+          ],
+          "minimal_modules": [
+            "tilelang.engine.semantic_check",
+            "tilelang.engine.param"
+          ],
+          "practice_task": "故意写一个越界或类型不匹配的 kernel，触发 semantic check 报错并阅读信息；再用 TL_DISABLE_PRELOWER_SEMANTIC_CHECK 观察行为变化。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Pass 体系与代码生成",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "Pass 系统、PassContext 与 PassConfigKey",
+          "order": 1,
+          "filename": "u6-l1-pass-system-and-config.md",
+          "level": "intermediate",
+          "topic": "讲解 tilelang 的 Pass 组织方式：Python 侧 transform 包与 C++ 侧 src/transform 的对应，以及 PassConfigKey 如何通过 PassContext 控制各 pass 行为。",
+          "learning_goals": [
+            "理解 transform/pass_config.py 中 PassConfigKey 枚举的含义",
+            "掌握 pass_configs / compile_flags 如何经 JIT 传入 PassContext",
+            "了解 normalize_pass_configs 与 pass timing 仪器"
+          ],
+          "source_files": [
+            "tilelang/transform/pass_config.py",
+            "tilelang/transform/__init__.py",
+            "tilelang/transform/simplify.py",
+            "tilelang/backend/pass_pipeline/pipeline_utils.py"
+          ],
+          "minimal_modules": [
+            "tilelang.transform",
+            "tilelang.transform.pass_config"
+          ],
+          "practice_task": "用 pass_configs 开启 TL_ENABLE_FAST_MATH 与 TL_DUMP_IR，编译 GEMM 并查看 dump 出的各阶段 IR 与生成的 fast_math 选项。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "关键 lowering Pass 解读",
+          "order": 2,
+          "filename": "u6-l2-key-lowering-passes.md",
+          "level": "intermediate",
+          "topic": "解读若干核心 C++ pass：layout_inference、inject_pipeline、lower_tile_op、loop_vectorize、storage_rewrite、thread_storage_sync、legalize_safe_memory_access 的作用与协作。",
+          "learning_goals": [
+            "理解 layout inference 如何推导 fragment/shared 布局",
+            "掌握 lower_tile_op 如何把 T.gemm 等 tile op 展开为底层指令",
+            "了解 vectorize/storage_rewrite/safe_memory 对最终代码质量的影响"
+          ],
+          "source_files": [
+            "src/transform/layout_inference.cc",
+            "src/transform/inject_pipeline.cc",
+            "src/transform/lower_tile_op.cc",
+            "src/transform/storage_rewrite.cc",
+            "src/transform/legalize_safe_memory_access.cc"
+          ],
+          "minimal_modules": [
+            "src.transform.layout_inference",
+            "src.transform.inject_pipeline",
+            "src.transform.lower_tile_op"
+          ],
+          "practice_task": "对照 dump 的 IR，定位 layout_inference 前后缓冲布局变化，以及 lower_tile_op 把 T.gemm 展开的位置，写出对应 pass 名。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "设备代码生成、模板与 tile op lowering",
+          "order": 3,
+          "filename": "u6-l3-device-codegen-and-templates.md",
+          "level": "intermediate",
+          "topic": "讲解 src/cuda/codegen 与 src/cuda/op 的 CUDA 代码生成与 tile op lowering，以及 src/tl_templates 下的 CuTe/HIP/C++/CPU 模板如何被注入。",
+          "learning_goals": [
+            "理解 codegen_cuda 如何把 TIR 生成 CUDA C++ 源码",
+            "掌握 src/op 与 src/cuda/op 中 gemm/copy/reduce 的 lowering 路径",
+            "了解 tl_templates/cuda、hip、cpp、cpu 模板的作用与 include 路径"
+          ],
+          "source_files": [
+            "src/cuda/codegen/codegen_cuda.cc",
+            "src/cuda/op/gemm.cc",
+            "src/op/gemm.cc",
+            "src/cuda/op/copy.cc",
+            "src/tl_templates/cuda/"
+          ],
+          "minimal_modules": [
+            "src.cuda.codegen",
+            "src.op",
+            "src.cuda.op",
+            "src.tl_templates.cuda"
+          ],
+          "practice_task": "编译一个 GEMM 并阅读 get_kernel_source()，在其中找到由 tl_templates 注入的 reduce.h / CuTe 调用片段，标注其来源 pass 与文件。",
+          "depends_on": [
+            "u6-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "运行时适配与执行后端",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "执行后端与 kernel adapter",
+          "order": 1,
+          "filename": "u7-l1-execution-backend-and-adapter.md",
+          "level": "advanced",
+          "topic": "讲解 execution_backend 的解析与 jit/adapter 下 tvm_ffi/cython/nvrtc/torch/cutedsl 五种 adapter 如何把编译产物包装成可调用对象。",
+          "learning_goals": [
+            "理解 resolve_execution_backend_spec 的 auto 推断与各 adapter 适用场景",
+            "掌握 BaseKernelAdapter 抽象与 TVMFFIKernelAdapter 的实现",
+            "了解 nvrtc/torch adapter 如何与 PyTorch tensor 交互"
+          ],
+          "source_files": [
+            "tilelang/backend/execution_backend.py",
+            "tilelang/jit/adapter/base.py",
+            "tilelang/jit/adapter/tvm_ffi.py",
+            "tilelang/jit/adapter/__init__.py"
+          ],
+          "minimal_modules": [
+            "tilelang.backend.execution_backend",
+            "tilelang.jit.adapter"
+          ],
+          "practice_task": "把同一 kernel 分别用 execution_backend='tvm_ffi' 与 'nvrtc'/'torch' 编译调用，对比可调用对象类型与一次调用的开销(粗略)。",
+          "depends_on": [
+            "u4-l2",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "host/device 拆分、库生成与编译回调",
+          "order": 2,
+          "filename": "u7-l2-host-device-split-libgen-callbacks.md",
+          "level": "advanced",
+          "topic": "讲解 split_host_device/make_packed_api/host_codegen 如何拆分主机与设备、libgen/wrapper 如何生成库与封装，以及 nvcc/hipcc 编译回调(tilelang_callback_cuda_compile 等)。",
+          "learning_goals": [
+            "理解 host/device 拆分与 CallingConv.DEVICE_KERNEL_LAUNCH 的关系",
+            "掌握 libgen/wrapper 生成 .so 与 kernel 启动封装的流程",
+            "了解 cuda/hip 编译回调中 nvcc/hipcc、binary cache、ptxas 选项的传入"
+          ],
+          "source_files": [
+            "src/transform/split_host_device.cc",
+            "tilelang/backend/host_codegen.py",
+            "tilelang/jit/adapter/libgen.py",
+            "tilelang/jit/adapter/wrapper.py",
+            "tilelang/engine/lower.py"
+          ],
+          "minimal_modules": [
+            "src.transform.split_host_device",
+            "tilelang.backend.host_codegen",
+            "tilelang.jit.adapter.libgen"
+          ],
+          "practice_task": "跟踪 verbose 日志，找出 host 函数与 device kernel 的边界，并说明 tilelang_callback_cuda_compile 如何把源码变成 cubin 并写入 binary cache。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "自动调优、Carver 与性能剖析",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Autotuner：配置搜索与并行编译",
+          "order": 1,
+          "filename": "u8-l1-autotuner.md",
+          "level": "advanced",
+          "topic": "讲解 @tilelang.autotune 装饰器与 AutoTuner 程序化接口：配置空间、并行编译(par_compile)、正确性校验、基准与结果缓存。",
+          "learning_goals": [
+            "会用 autotune 装饰器暴露可调参数并定义配置空间",
+            "理解 AutoTuner.from_kernel(...).run() 的程序化流程",
+            "掌握 warmup/rep/timeout 与缓存复用对调优的影响"
+          ],
+          "source_files": [
+            "tilelang/autotuner/tuner.py",
+            "tilelang/autotuner/__init__.py",
+            "tilelang/autotuner/grouped_compile.py",
+            "docs/programming_guides/autotuning.md",
+            "examples/gemm/example_gemm_autotune.py"
+          ],
+          "minimal_modules": [
+            "tilelang.autotuner",
+            "tilelang.jit.par_compile"
+          ],
+          "practice_task": "为一个 GEMM 定义 block_M/block_N/block_K/num_stages 的配置空间并跑 autotune，记录最优 config 与延迟。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "Carver：切分提示推荐框架",
+          "order": 2,
+          "filename": "u8-l2-carver-tiling-hints.md",
+          "level": "advanced",
+          "topic": "讲解 carver 框架：基于硬件 arch 模型(CUDA/CDNA/RDNA/Metal/CPU)、roller(bestfit/policy/rasterization)与 template(matmul/flashattention/gemv/conv)推荐 tile 切分策略。",
+          "learning_goals": [
+            "理解 carver 如何结合硬件约束生成并排序 tile 候选",
+            "掌握 arch 模型与 template 的关系及扩展点",
+            "了解 roller 的 bestfit/policy/rasterization 在 hint 生成中的作用"
+          ],
+          "source_files": [
+            "tilelang/carver/README.md",
+            "tilelang/carver/arch/cuda.py",
+            "tilelang/carver/template/matmul.py",
+            "tilelang/carver/roller/bestfit.py",
+            "tilelang/carver/template/base.py"
+          ],
+          "minimal_modules": [
+            "tilelang.carver",
+            "tilelang.carver.arch",
+            "tilelang.carver.template",
+            "tilelang.carver.roller"
+          ],
+          "practice_task": "用 carver.CUDA + GeneralReductionTemplate/MatmulTemplate 为一个 GEMM 生成若干 tile hint，打印推荐配置并任选一个在 tilelang 中验证正确性。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "Profiler 与基准测试",
+          "order": 3,
+          "filename": "u8-l3-profiler-and-benchmark.md",
+          "level": "advanced",
+          "topic": "讲解 profiler/bench 的 do_bench 基准方法、TensorSupplyType 输入供给、kernel.get_profiler() 的用法，以及与实战算子(FlashAttention/MLA)的性能对照。",
+          "learning_goals": [
+            "会用 kernel.get_profiler().do_bench() 测延迟并理解 warmup/rep",
+            "掌握 TensorSupplyType 控制输入数据供给的方式",
+            "了解 examples 中 FlashAttention/MLA 如何用 tilelang 达到高性能"
+          ],
+          "source_files": [
+            "tilelang/profiler/bench.py",
+            "tilelang/profiler/__init__.py",
+            "examples/flash_attention/example_mha_fwd_bhsd.py",
+            "examples/deepseek_mla/example_mla_decode.py"
+          ],
+          "minimal_modules": [
+            "tilelang.profiler",
+            "tilelang.utils.TensorSupplyType"
+          ],
+          "practice_task": "为一个 GEMM/FlashAttention kernel 用 profiler 测延迟，并和 examples 提供的参考实现做一次性能对照(记录延迟与吞吐)。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "调试、可视化与高级 intrinsics",
+      "level": "advanced",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "调试工具：lower trace、pass 可视化与 T.print",
+          "order": 1,
+          "filename": "u9-l1-debug-tools-lower-trace.md",
+          "level": "advanced",
+          "topic": "讲解 tools/lower_trace(IR diff/HTML)、tools/pass_visualizer、T.print 调试输出，以及 pass_diff_hook 如何在编译期 diff 各 pass 的 IR。",
+          "learning_goals": [
+            "会用 enable lower trace 与 pass_visualizer 观察各 pass 的 IR 变化",
+            "掌握 T.print 在 kernel 内打印变量/缓冲用于调试",
+            "理解 pass_diff_hook(TILELANG_PASS_DIFF) 的零开销设计"
+          ],
+          "source_files": [
+            "tilelang/tools/lower_trace/core.py",
+            "tilelang/tools/lower_trace/diff.py",
+            "tilelang/tools/pass_visualizer/core.py",
+            "tilelang/utils/pass_diff_hook.py",
+            "docs/tools/lower_trace.md"
+          ],
+          "minimal_modules": [
+            "tilelang.tools.lower_trace",
+            "tilelang.tools.pass_visualizer",
+            "tilelang.utils.pass_diff_hook"
+          ],
+          "practice_task": "开启 lower trace 编译一个 GEMM，用 diff/html 工具对比 layout_inference 前后 IR，并在 kernel 中用 T.print 打印一次循环变量。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "布局可视化与 Analyzer",
+          "order": 2,
+          "filename": "u9-l2-layout-viz-and-analyzer.md",
+          "level": "advanced",
+          "topic": "讲解 tools/plot_layout 的内存布局绘制、tools/Analyzer(基于 TVM Arith + Z3 的符号分析)以及 layout visualization pass 的协作。",
+          "learning_goals": [
+            "会用 plot_layout 画出 shared/fragment 的内存布局",
+            "理解 Analyzer 如何借助 Z3 做符号推理与边界/整除证明",
+            "了解 layout visualization pass 的开关与输出格式"
+          ],
+          "source_files": [
+            "tilelang/tools/plot_layout.py",
+            "tilelang/tools/Analyzer.py",
+            "tilelang/layout/layout.py",
+            "docs/tools/analyzer.md",
+            "docs/tools/layout_visualization.md"
+          ],
+          "minimal_modules": [
+            "tilelang.tools.plot_layout",
+            "tilelang.tools.Analyzer",
+            "tilelang.layout"
+          ],
+          "practice_task": "用 plot_layout 画出一个 GEMM shared 缓冲的布局图；用 Analyzer 对一个含不等式的索引表达式做符号化简并解释结果。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "高级 CUDA intrinsics、TMA/cluster 与 iket",
+          "order": 3,
+          "filename": "u9-l3-cuda-intrinsics-tma-iket.md",
+          "level": "advanced",
+          "topic": "讲解 SM80+/SM90 的高级特性：cuda/language 的 cluster、warpgroup、pdl、TMA 拷贝、random，以及 tools/cuda/iket 的 CUDA kernel 探索与内联汇编入口。",
+          "learning_goals": [
+            "理解 TMA、cluster launch、warpgroup(WGMMA) 等 H100 特性的 DSL 入口",
+            "掌握 cuda/language/intrinsics、cluster、warpgroup、pdl 模块的职责",
+            "了解 iket 工具如何帮助探索/内联 CUDA kernel"
+          ],
+          "source_files": [
+            "tilelang/cuda/language/intrinsics.py",
+            "tilelang/cuda/language/cluster.py",
+            "tilelang/cuda/language/warpgroup.py",
+            "tilelang/tools/cuda/iket/cli.py",
+            "docs/programming_guides/cluster_tma.md"
+          ],
+          "minimal_modules": [
+            "tilelang.cuda.language",
+            "tilelang.tools.cuda.iket"
+          ],
+          "practice_task": "写一个使用 TMA 拷贝或 cluster launch 的 GEMM 示例(可参考 examples/gemm_sm100)，说明该 intrinsics 最终在 kernel source 中对应的指令。",
+          "depends_on": [
+            "u3-l4",
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "二次开发与贡献",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "测试体系与贡献流程",
+          "order": 1,
+          "filename": "u10-l1-testing-and-contributing.md",
+          "level": "advanced",
+          "topic": "讲解 testing/python 与 testing/cpp 的测试组织、pytest marker(perf/slow)、CI 配置，以及 CONTRIBUTING/格式化/pre-commit 的贡献规范。",
+          "learning_goals": [
+            "掌握 testing 目录的 Python/C++ 测试结构与运行方式",
+            "理解 pytest perf/slow marker 与 requirements-test-*.txt 的作用",
+            "了解 pre-commit/ruff/format.sh 与 CI workflow 的贡献流程"
+          ],
+          "source_files": [
+            "testing/python/",
+            "testing/cpp/",
+            "pyproject.toml",
+            ".pre-commit-config.yaml",
+            "CONTRIBUTING.md"
+          ],
+          "minimal_modules": [
+            "testing.python",
+            "testing.cpp"
+          ],
+          "practice_task": "在 testing/python 中运行一个已有 GEMM 正确性测试，并按 pre-commit 规范为某个 example 补一个最小的 pytest 用例。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "扩展 TileLang：新 op、新 pass 与新后端",
+          "order": 2,
+          "filename": "u10-l2-extending-op-pass-backend.md",
+          "level": "advanced",
+          "topic": "讲解如何为 tilelang 扩展：在 src/op 增加新 tile op 并注册、在 src/transform 增加新 pass 并接入 pipeline、以及向 cpu/metal/webgpu 等后端移植 language 与 codegen。",
+          "learning_goals": [
+            "理解新增 tile op 的注册(op lowering + tileop registry)流程",
+            "掌握新增 Pass 如何通过 PassContext 接入 pass_pipeline",
+            "了解向新后端移植时 language/codegen/template 需要补齐的部分"
+          ],
+          "source_files": [
+            "src/op/operator.cc",
+            "src/op/gemm.cc",
+            "src/transform/frontend_legalize.cc",
+            "tilelang/backend/pass_pipeline/pipeline.py",
+            "tilelang/cpu/language/__init__.py"
+          ],
+          "minimal_modules": [
+            "src.op",
+            "src.transform",
+            "tilelang.backend.pass_pipeline",
+            "tilelang.cpu.language"
+          ],
+          "practice_task": "设计(可只到伪代码/接口签名)一个自定义 tile op 或自定义 pass 的接入方案：写出需要新增/修改的文件清单与注册点。",
+          "depends_on": [
+            "u6-l2",
+            "u6-l3",
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
