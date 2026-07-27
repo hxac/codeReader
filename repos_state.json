@@ -15616,8 +15616,9 @@
       "abandoned": []
     },
     "futz12/ncnn_llm": {
-      "last_error": "RuntimeError: git clone https://github.com/futz12/ncnn_llm.git /home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm 失败：Cloning into '/home/runner/work/codeReader/codeReader/work/futz12-ncnn_llm'...\nfatal: could not read Username for 'https://github.com': No such device or address",
-      "last_run_at": "2026-07-26T23:01:58Z"
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b26f42a1-8c21-4dab-ae91-ba31c02a3746\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search",
+      "last_run_at": "2026-07-27T15:50:21Z",
+      "prompt_hash": "b21aef51792b02df"
     },
     "NJU-ProjectN/nemu": {
       "prompt_hash": "b21aef51792b02df",
@@ -26668,7 +26669,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"06cc3c9e-0190-40f1-a3b5-4cde9b0712cd\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c03a4f57-789a-45ea-8070-33a8d8252fea\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u5-l1": {
           "status": "pending",
@@ -26697,7 +26698,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/tile-ai/tilelang-puzzles/tilelang-puzzles-tutorial",
       "last_head": "de37efb54067cad12d6676f15959e0a201ee601d",
-      "last_run_at": "2026-07-26T23:01:58Z",
+      "last_run_at": "2026-07-27T15:50:21Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "tile-ai/TileOPs": {
@@ -26914,8 +26915,8 @@
       "mode": "full",
       "tutorial_path": "tutorials/tile-ai/TileOPs/TileOPs-tutorial",
       "last_head": "9bda1ac53758c21b0ffd25e84c6a2cfcad2aac72",
-      "last_run_at": "2026-07-26T23:01:58Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-27T15:50:21Z",
+      "last_error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4e2b6655-44b5-4a12-bae8-2e86fa581b47\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search"
     },
     "tile-ai/TileRT": {
       "prompt_hash": "b21aef51792b02df",
@@ -26974,7 +26975,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4c95a1be-15a8-4397-9ec2-9191eea11a74\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c50d9029-a61e-4188-8940-d6896ad39eb5\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u2-l3": {
           "status": "pending",
@@ -27063,7 +27064,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/tile-ai/TileRT/TileRT-tutorial",
       "last_head": "a8368a681342d0686e76bbd2225b320f2fead8a2",
-      "last_run_at": "2026-07-26T23:01:58Z",
+      "last_run_at": "2026-07-27T15:50:21Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "tile-ai/tilescale": {},
