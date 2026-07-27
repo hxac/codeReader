@@ -1,0 +1,765 @@
+{
+  "project": "tilelang-benchmark",
+  "head": "b658f7e9f326156d11a09dff1e9825fa6d9a8767",
+  "rationale": "本手册按\"先认识项目→理解基准方法论与对比框架→掌握 TileLang 语言核心→深入多精度/量化/Attention/MLA 等算子→工程化二次开发\"的顺序设计。第 1 单元从 README、目录约定和运行方式入手建立全局观；第 2 单元先讲清 TFlops 度量、cuBLAS C++ 测试床、Triton 基线与数据可视化管线，因为\"如何公平对比\"是本项目一切内核的前提；第 3 单元以最经典的块级 GEMM 为切入点讲透 TileLang 的 autotune/jit/prim_func 五要素与 Roller 自动调优；第 4-5 单元沿\"多精度/量化 matmul → FlashAttention/稀疏注意力\"逐步提升算子复杂度，每个算子都先解剖 TileLang 内核再串联对应基线；第 6 单元进入 MLA split-KV、tvm.tl/卷积变体、显式 AutoTuner 等高级机制；第 7 单元收束于对比基线生态、跨架构适配与新增算子基准的工程实践。依赖关系上，块级 GEMM 内核(u3-l9)是几乎所有算子讲义的基础，cuBLAS/Triton 基线(u2-l5/u2-l6)是所有对比讲义的标尺，故前置。算子按架构分布不同(dense matmul 仅 NVIDIA、conv/MLA 多见 CDNA)也在跨架构单元中说明。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 tilelang-benchmark 与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与整体概览",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 tilelang-benchmark 是什么——一套按 GPU 架构组织、用 TileLang DSL 与 cuBLAS/Triton/BitBLAS 等多框架对比的算子性能基准套件，并说明项目已归档、迁移到 TileOps。",
+          "learning_goals": [
+            "理解项目的定位与价值",
+            "能说出四大架构目录与算子类别",
+            "读懂 README 中的性能图与 V/M/FA/CC/CT shape 表"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "README 性能汇总",
+            "shape 配置表 V/M/FA/CC/CT",
+            "归档提示与 TileOps 链接"
+          ],
+          "practice_task": "阅读 README，列出项目包含的 GPU 架构与算子类别，用一句话描述 TileLang 与各基线的关系，并找到归档提示与 TileOps 链接。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录组织约定",
+          "order": 2,
+          "filename": "u1-l2-directory-layout.md",
+          "level": "beginner",
+          "topic": "讲解按架构(ada/ampere/cdna/hopper)→算子→编号化框架子目录(0.cublas/1.triton/2.tilelang…)的层次约定，以及 data/pdf/png 与 benchmark.sh 编排脚本的角色，并指出命名不一致现象。",
+          "learning_goals": [
+            "掌握目录命名约定",
+            "能定位某个架构×算子×框架的内核文件",
+            "理解命名不一致(2.tilelang vs 3.tilelang vs 1.tilelang_benchmark)"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/benchmark.sh",
+            "hopper_benchmark/flashattention/1.tilelang_benchmark/benchmark_tilelang_mha.py"
+          ],
+          "minimal_modules": [
+            "架构目录",
+            "算子目录",
+            "编号框架子目录",
+            "benchmark.sh 编排"
+          ],
+          "practice_task": "任选一个算子目录，画出架构→算子→各框架的目录树，标注哪些子目录是 TileLang、哪些是基线。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "运行一次基准测试",
+          "order": 3,
+          "filename": "u1-l3-running-a-benchmark.md",
+          "level": "beginner",
+          "topic": "以 dense_matmul 为例，讲解 benchmark.sh 如何依次调用 cuBLAS(compile_and_run.sh+CMake)、Triton(.sh)、TileLang(.sh) 完成一次对比运行，以及所需环境与依赖。",
+          "learning_goals": [
+            "理解编排脚本的执行顺序",
+            "理解 cuBLAS 用 CMake 编译、Python 基线用 shell 调用的差异",
+            "能看懂日志输出格式"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/benchmark.sh",
+            "hopper_benchmark/dense_matmul/0.cublas-benchmark/compile_and_run.sh",
+            "hopper_benchmark/dense_matmul/0.cublas-benchmark/Readme.md"
+          ],
+          "minimal_modules": [
+            "benchmark.sh",
+            "compile_and_run.sh",
+            "CMake 构建",
+            "shell 调用 python"
+          ],
+          "practice_task": "跟踪 dense_matmul/benchmark.sh 的三步调用，写出每一步实际执行的命令与产生的日志文件路径。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "基准测试方法论与对比框架",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l4",
+          "title": "性能度量方法论",
+          "order": 1,
+          "filename": "u2-l4-benchmark-methodology.md",
+          "level": "intermediate",
+          "topic": "讲解如何用 2*M*N*K 计算 FLOPS、由 latency 换算 TFlops、warmup/rep 的作用，以及 README 中 V0-V7/M0-M7/FA/CC/CT 等 shape 表如何定义测试集。",
+          "learning_goals": [
+            "掌握 TFlops 计算",
+            "理解 warmup 与 rep 对测量稳定性的影响",
+            "能读懂 shape 配置表"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py",
+            "hopper_benchmark/dense_matmul/data/data_float16_gemm.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "FLOPS 计算",
+            "warmup/rep",
+            "shape 配置表",
+            "latency 到 TFlops"
+          ],
+          "practice_task": "给定 M=N=K=16384、latency=X ms，手算 TFlops；并解释 attention 内核里 causal 情况 total_flops×0.5 的原因。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "cuBLAS 参考基准(CUDA C++ 测试床)",
+          "order": 2,
+          "filename": "u2-l5-cublas-reference-harness.md",
+          "level": "intermediate",
+          "topic": "解剖 cuBLAS 基线：CMakeLists 的架构设置与依赖查找、tensor.h 张量工具、cublas_benchmark.cu 中 time_gemm 用 chrono 计时、inference_server_set 形状集、fp32/fp16/int8 与 tensor core 多精度路径。",
+          "learning_goals": [
+            "理解 C++ 基线如何用 chrono 自适应重复次数计时",
+            "理解 cublasGemmEx 的多精度调用",
+            "能看懂 CSV 日志各列含义"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/0.cublas-benchmark/cublas_benchmark.cu",
+            "hopper_benchmark/dense_matmul/0.cublas-benchmark/CMakeLists.txt",
+            "hopper_benchmark/dense_matmul/0.cublas-benchmark/tensor.h"
+          ],
+          "minimal_modules": [
+            "CMakeLists",
+            "tensor.h",
+            "time_gemm 计时",
+            "cublasGemmEx 多精度"
+          ],
+          "practice_task": "在 cublas_benchmark.cu 中找到决定最少运行 100ms 的自适应重复次数逻辑，解释 minimal_repeat_ms 的作用。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "Triton 基线与 triton.testing.do_bench",
+          "order": 3,
+          "filename": "u2-l6-triton-baseline.md",
+          "level": "intermediate",
+          "topic": "以 Triton matmul 基线为例，讲解 triton.autotune/triton.Config/triton.jit、tl.load/store/dot 指针式内核、grouped pid 的 L2 复用优化，以及 triton.testing.do_bench 的统一计时接口，作为后续与 TileLang 对比的标尺。",
+          "learning_goals": [
+            "理解 Triton 基线内核结构",
+            "掌握 do_bench 计时约定",
+            "理解 TileLang 与 Triton 在抽象层级上的差异"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/1.triton-benchmark/benchmark_triton_matmul_float16.py",
+            "hopper_benchmark/dense_matmul/1.triton-benchmark/benchmark_float16.sh"
+          ],
+          "minimal_modules": [
+            "triton.autotune",
+            "triton.Config",
+            "tl.load/store/dot",
+            "do_bench"
+          ],
+          "practice_task": "对比同一 shape 下 Triton 基线与(下一单元将讲的)TileLang 内核的输出格式，写出两者 latency/TFlops 的打印差异。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "数据提取与可视化",
+          "order": 4,
+          "filename": "u2-l7-data-extraction-and-plotting.md",
+          "level": "intermediate",
+          "topic": "讲解 data/*.py 用正则从各框架日志解析 latency、以 (provider, [times]) 组织数据，plot_*.py 与 extract_*.py 生成 png/pdf 对比图与 speedup 的完整流程。",
+          "learning_goals": [
+            "掌握日志→数据→图表的管线",
+            "理解 matmul_providers/matmul_times_data 的数据结构",
+            "能定位某个 shape 的某框架耗时"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/data/data_float16_gemm.py",
+            "hopper_benchmark/dense_matmul/1.triton-benchmark/extract_triton_data.py",
+            "hopper_benchmark/dense_matmul/plot_operator_figures_fp16_gemm.py"
+          ],
+          "minimal_modules": [
+            "日志正则解析",
+            "matmul_times_data",
+            "plot 脚本",
+            "speedup 计算"
+          ],
+          "practice_task": "跟踪 data_float16_gemm.py，写出 cuBLAS/Triton/BitBLAS 三条数据分别从哪个日志文件、用哪条正则提取，并说明 -1 占位符的含义。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "TileLang 语言核心——从 GEMM 开始",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l8",
+          "title": "TileLang 内核骨架：autotune/jit 与 prim_func",
+          "order": 1,
+          "filename": "u3-l8-tilelang-kernel-skeleton.md",
+          "level": "intermediate",
+          "topic": "以 dense matmul tilelang 内核为入口，讲解 @autotune(configs,warmup,rep)+@jit(out_idx,supply_type,target) 装饰器、get_configs 生成搜索空间、kernel() 返回 best_result(.latency/.config/.ref_latency/.kernel) 的整体骨架。",
+          "learning_goals": [
+            "理解装饰器驱动的定义-调优-评估流程",
+            "理解 out_idx/supply_type/target 参数含义",
+            "能读懂 best_result 各字段"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py"
+          ],
+          "minimal_modules": [
+            "@autotune",
+            "@jit",
+            "get_configs",
+            "best_result"
+          ],
+          "practice_task": "在内核文件中标注出搜索空间生成/内核定义/结果取出三段，并解释 warmup=3,rep=20 的作用。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l9",
+          "title": "块级 GEMM 内核解剖",
+          "order": 2,
+          "filename": "u3-l9-block-gemm-anatomy.md",
+          "level": "intermediate",
+          "topic": "逐行解剖 T.prim_func 内核：T.Kernel 网格映射、alloc_shared/alloc_fragment 分配、T.copy 全局↔共享、T.gemm 做 TensorCore MMA、T.Pipelined 软流水、T.clear 清零与回写顺序。",
+          "learning_goals": [
+            "掌握 TileLang 块级 GEMM 的五要素(网格/共享/fragment/copy/gemm)",
+            "理解 K 维流水线累加",
+            "能画出数据搬运路径"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py"
+          ],
+          "minimal_modules": [
+            "T.Kernel",
+            "alloc_shared/fragment",
+            "T.copy",
+            "T.gemm",
+            "T.Pipelined"
+          ],
+          "practice_task": "将内核里 A/B/C 的 shared/fragment 分配与每次 T.copy 的(源,目的)整理成表格，说明为何先 C_local→C_shared 再→C 全局。",
+          "depends_on": [
+            "u3-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "tilelang.carver 与 Roller 自动调优",
+          "order": 3,
+          "filename": "u3-l10-roller-autotuning.md",
+          "level": "intermediate",
+          "topic": "讲解 with_roller 路径：MatmulTemplate.with_arch(CUDA)、equivalent_function、recommend_hints(topk) 由 Roller 推导 TensorCore 调度提示(block/warp/rstep/pipeline_stage/rasterization)，替代手工 itertools 暴搜。",
+          "learning_goals": [
+            "理解 Roller 如何缩小搜索空间",
+            "能把 hint 字段映射回 block_M/N/K、num_stages、thread_num、policy",
+            "理解两种 get_configs 的取舍"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py"
+          ],
+          "minimal_modules": [
+            "MatmulTemplate",
+            "CUDA arch",
+            "recommend_hints",
+            "NoRasterization"
+          ],
+          "practice_task": "比较 with_roller=True/False 两条 get_configs 分支产出的配置数量级，写出 hint.block/warp/rstep 如何换算成 config 字段。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l11",
+          "title": "swizzle、warp 策略与调优旋钮",
+          "order": 4,
+          "filename": "u3-l11-swizzle-and-warp-policy.md",
+          "level": "intermediate",
+          "topic": "讲解 T.use_swizzle(panel_size,enable) 的栅格化(rasterization)优化、GemmWarpPolicy(Square/from_warp_partition)、以及 block_M/N/K、num_stages、thread_num、enable_rasterization 等调优旋钮对 L2 命中与 bank conflict 的影响，并对照 test_config.json 理解一份序列化最佳配置。",
+          "learning_goals": [
+            "理解 rasterization/swizzle 的作用",
+            "理解 warp 切分策略",
+            "能读懂 test_config.json 中 GEMV_REVSPLITK 的字段含义"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py",
+            "test_config.json"
+          ],
+          "minimal_modules": [
+            "T.use_swizzle",
+            "GemmWarpPolicy",
+            "调优旋钮",
+            "序列化 config"
+          ],
+          "practice_task": "在 test_config.json 里找到 BLOCK_SIZE_M/N/K、num_stages、atomic_mode 等字段，用一句话解释每个字段对应内核里的哪个决策。",
+          "depends_on": [
+            "u3-l10"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "多精度与量化矩阵乘",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l12",
+          "title": "int8 与多精度 GEMM",
+          "order": 1,
+          "filename": "u4-l12-int8-multiprecision-gemm.md",
+          "level": "intermediate",
+          "topic": "讲解 dense matmul 中 dtype/accum_dtype 如何切换 int8/int32、fp16/float 路径，对照 data_int8_gemm/gemv 与 cuBLAS int8 tensor core 路径，理解低精度对 TensorCore 利用率与 TFlops 的影响。",
+          "learning_goals": [
+            "理解 dtype/accum_dtype/out_dtype 三者关系",
+            "理解 int8 走 dp4a/TensorCore 的收益",
+            "能区分 GEMM 与 GEMV shape"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py",
+            "hopper_benchmark/dense_matmul/data/data_int8_gemm.py",
+            "ada_benchmark/lowprecision_matmul/0.cublas-benchmark/cublas_benchmark.cu"
+          ],
+          "minimal_modules": [
+            "dtype/accum_dtype",
+            "int8 路径",
+            "GEMM vs GEMV",
+            "lowprecision"
+          ],
+          "practice_task": "把 dense matmul tilelang 内核里 dtype 从 int8 改读为 fp16 的等价设置(只描述改动点)，并说明 accum_dtype 为何要保持高精度。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l13",
+          "title": "反量化 GEMV 内核：线程级外积规约",
+          "order": 2,
+          "filename": "u4-l13-dequant-gemv-thread-reduction.md",
+          "level": "intermediate",
+          "topic": "解剖 dequantize_gemv 内核：T.Kernel 的二维线程 (reduce_thread, n_partition)、alloc_local 寄存器缓冲、T.thread_binding、T.serial/T.vectorized 循环、以及用 T.comm_reducer+T.tvm_thread_allreduce 做跨线程 block 归约，区别于块级 TensorCore GEMM。",
+          "learning_goals": [
+            "理解 GEMV 为何用外积-规约而非 TensorCore",
+            "掌握 thread_binding 与 allreduce 模式",
+            "理解 micro_size_k/block_K 的推导"
+          ],
+          "source_files": [
+            "hopper_benchmark/dequantize_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul_fp16xint4.py"
+          ],
+          "minimal_modules": [
+            "alloc_local",
+            "thread_binding",
+            "T.serial/vectorized",
+            "tvm_thread_allreduce"
+          ],
+          "practice_task": "在内核中标注 (reduce_thread, n_partition) 两个线程维度各自负责的循环，并解释 tvm_thread_allreduce 的输入输出。",
+          "depends_on": [
+            "u4-l12"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l14",
+          "title": "量化与 lop3 快速解码",
+          "order": 3,
+          "filename": "u4-l14-quantize-fast-decoding.md",
+          "level": "advanced",
+          "topic": "讲解 tilelang.quantize 的 _tir_packed_int_to_int_convert 解包与 get_lop3_intrin_group 的 lop3 快速解码：通过 T.import_source 注入 C 源、T.call_extern 调用、T.dp4a 做 int8 点积，以及 storage_dtype/num_bits/num_elems_per_byte 的打包关系。",
+          "learning_goals": [
+            "理解 W4A16 的比特打包与解包",
+            "理解 lop3 快速解码相对标量解包的加速原理",
+            "掌握 import_source/call_extern/dp4a 用法"
+          ],
+          "source_files": [
+            "hopper_benchmark/dequantize_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul_fp16xint4.py"
+          ],
+          "minimal_modules": [
+            "_tir_packed_int_to_int_convert",
+            "get_lop3_intrin_group",
+            "T.import_source/call_extern",
+            "T.dp4a"
+          ],
+          "practice_task": "对比 fast_decoding=True/False 两条分支的解包方式，写出 lop3 注入的 C 函数名与 call_extern 的实参。",
+          "depends_on": [
+            "u4-l13"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l15",
+          "title": "fp4/int4 反量化 matmul 与量化基线生态",
+          "order": 4,
+          "filename": "u4-l15-fp4-int4-and-quant-baselines.md",
+          "level": "advanced",
+          "topic": "讲解 fp16xint4/fp16xfp4 两种反量化 matmul 的差异，并串联量化领域的对比基线：BitBLAS、Marlin、CUTLASS(fpa_intb)、bitsandbytes(nf4)，理解各框架在 W4A16/W4A8/nf4 上的覆盖与 install_*.sh 依赖安装方式。",
+          "learning_goals": [
+            "区分 int4 与 fp4 反量化",
+            "理解各量化基线的定位与安装",
+            "能定位每个基线的入口脚本"
+          ],
+          "source_files": [
+            "hopper_benchmark/dequantize_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul_fp16xfp4.py",
+            "hopper_benchmark/dequantize_matmul/5.marlin-benchmark/benchmark_marlin.py",
+            "ampere_benchmark/dequant_matmul/2.cutlass_fpa_intb_benchmark/cutlass_fpa_intb.py",
+            "ampere_benchmark/dequant_matmul/3.bitsandbytes_benchmark/nf4_benchmark.py"
+          ],
+          "minimal_modules": [
+            "fp4 vs int4",
+            "Marlin",
+            "CUTLASS fpa_intb",
+            "bitsandbytes nf4"
+          ],
+          "practice_task": "列出 hopper dequantize_matmul 与 ampere dequant_matmul 下各自的基线框架编号目录，说明哪些框架在两个架构上都出现、哪些只在一个架构上。",
+          "depends_on": [
+            "u4-l14"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Attention 系列",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l16",
+          "title": "FlashAttention：在线 softmax 与 macro 结构",
+          "order": 1,
+          "filename": "u5-l16-flashattention-online-softmax.md",
+          "level": "intermediate",
+          "topic": "解剖 flashattn 内核：用 T.macro 拆出 MMA0/Softmax/Rescale/MMA1 四段、FragmentBuffer/SharedBuffer 缓冲、online softmax 的 reduce_max/reduce_sum/exp2 与 logsum 重缩放，以及 Q·K^T 与 P·V 两次 T.gemm。",
+          "learning_goals": [
+            "理解 FlashAttention 分块在线 softmax 的数值等价性",
+            "掌握 T.macro 复用与 Fragment/Shared buffer",
+            "理解 exp2(log2(e)) 替代 exp 的指令优化"
+          ],
+          "source_files": [
+            "hopper_benchmark/flashattention/1.tilelang_benchmark/benchmark_tilelang_mha.py"
+          ],
+          "minimal_modules": [
+            "T.macro",
+            "online softmax",
+            "reduce_max/sum",
+            "exp2/logsum",
+            "两次 gemm"
+          ],
+          "practice_task": "把 MMA0→Softmax→Rescale→MMA1 四步在 K 循环里的执行顺序画成流程图，并写出 logsum 的更新公式。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l17",
+          "title": "causal 掩码、循环裁剪与 -inf 处理",
+          "order": 2,
+          "filename": "u5-l17-causal-mask-and-loop-trimming.md",
+          "level": "intermediate",
+          "topic": "讲解 is_causal 分支：用 T.if_then_else+T.infinity 给上三角置 -inf、根据 (bx+1)*block_M 裁剪 loop_range 减少无效迭代、以及注释中提到的 FA3 Check_inf(把 -inf 最大值归零)技巧。",
+          "learning_goals": [
+            "理解 causal 掩码的数值实现",
+            "理解按 query 行裁剪 KV 循环的优化",
+            "认识 Check_inf 的必要性"
+          ],
+          "source_files": [
+            "hopper_benchmark/flashattention/1.tilelang_benchmark/benchmark_tilelang_mha.py"
+          ],
+          "minimal_modules": [
+            "is_causal",
+            "T.if_then_else/-infinity",
+            "loop_range 裁剪",
+            "Check_inf"
+          ],
+          "practice_task": "写出 causal=True 时第 bx 个 query block 的 loop_range 计算式，并解释为何 acc_s 的 -inf 会在后续 exp2 后变成 0。",
+          "depends_on": [
+            "u5-l16"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l18",
+          "title": "tilelang.compile 评估与正确性校验",
+          "order": 3,
+          "filename": "u5-l18-compile-profiler-and-correctness.md",
+          "level": "intermediate",
+          "topic": "讲解非调优路径的评估流程：tilelang.compile(program,out_idx) 编译、kernel.get_profiler().do_bench(warmup) 计时、用 ref_program(torch einsum/softmax) 做参考、torch.testing.assert_close 校验数值正确性，以及 disable_cache 与 get_kernel_source 的调试用法。",
+          "learning_goals": [
+            "掌握 compile+profiler 的离线评估模式",
+            "理解 ref_prog/ref_latency 在 autotune 中的校验作用",
+            "能区分 tune 与非 tune 两条主流程"
+          ],
+          "source_files": [
+            "hopper_benchmark/flashattention/1.tilelang_benchmark/benchmark_tilelang_mha.py",
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py"
+          ],
+          "minimal_modules": [
+            "tilelang.compile",
+            "get_profiler/do_bench",
+            "ref_program",
+            "assert_close"
+          ],
+          "practice_task": "对比 FlashAttention 文件里 tune=True 与 tune=False 两条返回路径，写出各自如何得到 latency 与如何校验正确性。",
+          "depends_on": [
+            "u5-l16"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l19",
+          "title": "block-sparse attention",
+          "order": 4,
+          "filename": "u5-l19-block-sparse-attention.md",
+          "level": "advanced",
+          "topic": "讲解 block-sparse FlashAttention：用 topk/阈值生成 BlockSparseMask 下采样块掩码、在 K 循环里 if block_mask[k]!=0 条件执行 MMA、T.alloc_local 加载掩码、以及按 (1-sparsity) 折算有效 FLOPS。",
+          "learning_goals": [
+            "理解块级稀疏掩码的生成与加载",
+            "理解条件跳过 MMA 的节省",
+            "掌握稀疏 FLOPS 折算"
+          ],
+          "source_files": [
+            "hopper_benchmark/blocksparse_attention/1.tilelang-benchmark/benchmark_tilelang_bsa.py",
+            "hopper_benchmark/blocksparse_attention/1.tilelang-benchmark/benchmark_tilelang_bsa.sh"
+          ],
+          "minimal_modules": [
+            "topk 掩码",
+            "BlockSparseMask",
+            "条件 MMA",
+            "稀疏 FLOPS"
+          ],
+          "practice_task": "解释 downsample_len 与 block_size 的关系，并说明把 mask 放进 alloc_local 而非 shared/fragment 的原因。",
+          "depends_on": [
+            "u5-l16"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "高级机制：MLA、tvm.tl/卷积、显式 AutoTuner",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l20",
+          "title": "MLA decode：split-KV 并行与 combine",
+          "order": 1,
+          "filename": "u6-l20-mla-decode-split-combine.md",
+          "level": "advanced",
+          "topic": "解剖 FlashMLA decode：flash_attn 把 Q/KV 与解耦 RoPE(Q_pe/K_pe) 两路 gemm 合并到 acc_s、flash_attn_split 按 num_split 切分 KV 并写出 glse/Output_partial、combine 用 log2/exp2 在线合并各 split 的 logsum 与输出，涉及 T.annotate_layout/T.Fragment 布局标注。",
+          "learning_goals": [
+            "理解 MLA 的低秩 KV 与解耦 PE 结构",
+            "掌握 split-KV 并行 + combine 的两阶段设计",
+            "理解 glse(logsum) 合并数学"
+          ],
+          "source_files": [
+            "cdna_benchmark/mla_benchmark/1.tilelang_benchmark/benchmark_mla_decode_amd_tilelang.py",
+            "cdna_benchmark/mla_benchmark/plot_figure.py"
+          ],
+          "minimal_modules": [
+            "flash_attn/flash_attn_split",
+            "combine",
+            "glse 合并",
+            "T.annotate_layout"
+          ],
+          "practice_task": "写出 num_split>1 时 main_split 调用的两个子内核及其输入输出张量，并解释 combine 里 lse_max→exp2→log2 的合并步骤。",
+          "depends_on": [
+            "u5-l16"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l21",
+          "title": "tvm.tl 变体与卷积(AMD/HIP)",
+          "order": 2,
+          "filename": "u6-l21-tvmtl-conv-amd.md",
+          "level": "advanced",
+          "topic": "讲解 cdna 上 conv 等内核使用 TVM 内置的 tvm.tl 变体(from tvm import tl; tvm.tl.language as T; tvm.tl.autotuner; target=\"hip\"; profiler=\"tvm\")，与独立 tilelang 包在 import 与 target 上的差异；并以卷积内核讲解 im2col 思路：用 kernel_flat/out_flat 的 T.Buffer 重排、if_then_else 处理 padding 边界、k_pack/coalesced_width 调优。profiler=\"tvm\" 与独立包 profiler 的具体差异待确认。",
+          "learning_goals": [
+            "区分 tvm.tl 与独立 tilelang 两种 API",
+            "理解卷积如何映射成带边界判断的 GEMM",
+            "掌握 Buffer 重排与 in_bound 掩码"
+          ],
+          "source_files": [
+            "cdna_benchmark/conv_benchmark/benchmark_tilelang_conv.py",
+            "cdna_benchmark/conv_benchmark/benchmark_torch_conv.py"
+          ],
+          "minimal_modules": [
+            "tvm.tl import",
+            "target=hip",
+            "im2col+GEMM",
+            "Buffer 重排/in_bound"
+          ],
+          "practice_task": "把卷积内核里 data_shared 加载时的 access_h/access_w/in_bound 计算整理成公式，说明它如何实现 padding 与 stride。",
+          "depends_on": [
+            "u3-l9"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l22",
+          "title": "显式 AutoTuner API 与多内核组合",
+          "order": 3,
+          "filename": "u6-l22-explicit-autotuner-multi-kernel.md",
+          "level": "advanced",
+          "topic": "讲解 AutoTuner.from_kernel(kernel,configs).set_compile_args(supply_type,target).run(warmup,rep) 的显式调优 API(区别于装饰器式)，以及用多个 @T.prim_func(main_split/main_no_split) 按条件返回、再用 tilelang.compile(out_idx) 组合多内核的写法。",
+          "learning_goals": [
+            "掌握显式 AutoTuner 用法",
+            "理解装饰器式与显式式两种调优入口",
+            "理解多 prim_func 条件组合"
+          ],
+          "source_files": [
+            "cdna_benchmark/mla_benchmark/1.tilelang_benchmark/benchmark_mla_decode_amd_tilelang.py",
+            "hopper_benchmark/dequantize_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul_fp16xint4.py"
+          ],
+          "minimal_modules": [
+            "AutoTuner.from_kernel",
+            "set_compile_args/run",
+            "多 prim_func",
+            "条件返回"
+          ],
+          "practice_task": "比较装饰器 @autotune 与 AutoTuner.from_kernel 两种写法，分别列出它们的 config 传入方式与结果取出方式。",
+          "depends_on": [
+            "u6-l20"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "工程实践、对比基线生态与二次开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l23",
+          "title": "对比基线生态总览",
+          "order": 1,
+          "filename": "u7-l23-baseline-ecosystem.md",
+          "level": "advanced",
+          "topic": "系统梳理项目涉及的全部对比基线——cuBLAS(C++)、Triton、BitBLAS、Marlin、CUTLASS(fpa_intb)、bitsandbytes(nf4)、DeepGEMM(fp8)、aiter/CK(AMD)、Ladder、torch、FA3——各自的定位、覆盖算子、入口脚本与 install_*.sh 依赖安装方式。",
+          "learning_goals": [
+            "建立对各基线定位的全局认识",
+            "能为给定算子选择合适基线",
+            "理解 install 脚本的依赖管理"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/2.bitblas-benchmark/benchmark_bitblas_matmul.py",
+            "hopper_benchmark/deepgemm/1.deepgemm_benchmark/benchmark_bitblas_matmul.py",
+            "cdna_benchmark/mla_benchmark/0.aiter_benchmark/install_aiter.sh",
+            "ampere_benchmark/contiguous_dequant_matmul/1.marlin_benchmark/install_marlin.sh"
+          ],
+          "minimal_modules": [
+            "cuBLAS/Triton/BitBLAS",
+            "Marlin/CUTLASS/bitsandbytes",
+            "DeepGEMM/aiter/CK",
+            "Ladder/torch/FA3"
+          ],
+          "practice_task": "制作一张基线×算子×架构覆盖表，标注每个基线出现在哪些目录，并指出哪些基线是 AMD 专用(aiter/CK/Ladder)、哪些是 NVIDIA 专用。",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l24",
+          "title": "跨架构适配",
+          "order": 2,
+          "filename": "u7-l24-cross-architecture-adaptation.md",
+          "level": "advanced",
+          "topic": "讲解同一套算子如何适配 Ada(89)/Ampere(80)/Hopper(90)/CDNA(gfx)：CMakeLists 的 CMAKE_CUDA_ARCHITECTURES、TileLang target=\"auto\" vs tvm.tl target=\"hip\"、cuBLAS tensor core math mode、以及各架构算子集合差异(dense matmul 仅 NVIDIA、conv/MLA 多见 CDNA)。",
+          "learning_goals": [
+            "理解架构号与 target 的对应",
+            "理解算子按架构分布的原因",
+            "能根据目标 GPU 选择正确目录与 target"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/0.cublas-benchmark/CMakeLists.txt",
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py",
+            "cdna_benchmark/conv_benchmark/benchmark_tilelang_conv.py"
+          ],
+          "minimal_modules": [
+            "CMAKE_CUDA_ARCHITECTURES",
+            "target auto/hip",
+            "tensor core math mode",
+            "算子架构分布"
+          ],
+          "practice_task": "解释为何 hopper dense_matmul 的 CMake 里 set_target_properties CUDA_ARCHITECTURES 为 80 而 CMAKE 默认 89，并说明把同一 GEMM 内核迁移到 MI300X 需要改哪些 target。",
+          "depends_on": [
+            "u7-l23"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l25",
+          "title": "二次开发——新增一个算子基准",
+          "order": 3,
+          "filename": "u7-l25-add-new-operator-benchmark.md",
+          "level": "advanced",
+          "topic": "总结新增算子基准的工程约定：建立编号框架子目录、编写 TileLang 内核(.py)+驱动 shell、复用 cuBLAS/Triton 基线、添加 data/ shape 与 plot/extract 脚本、在 benchmark.sh 中编排，并指出命名不一致(2.tilelang vs 3.tilelang)等历史遗留需注意点。",
+          "learning_goals": [
+            "掌握新增算子基准的完整步骤",
+            "能复用现有基线与可视化管线",
+            "理解目录命名约定与不一致风险"
+          ],
+          "source_files": [
+            "hopper_benchmark/dense_matmul/benchmark.sh",
+            "hopper_benchmark/dense_matmul/data/data_float16_gemm.py",
+            "hopper_benchmark/dense_matmul/3.tilelang-benchmark/benchmark_tilelang_matmul.py"
+          ],
+          "minimal_modules": [
+            "目录约定",
+            "内核+shell 驱动",
+            "data/plot 管线",
+            "benchmark.sh 编排"
+          ],
+          "practice_task": "为一个新算子(如 batched GEMM 或 RMSNorm)设计目录结构与文件清单，写出 benchmark.sh 的编排顺序与 data/plot 脚本的复用方案。",
+          "depends_on": [
+            "u7-l24"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
