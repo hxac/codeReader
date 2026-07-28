@@ -1,0 +1,423 @@
+# 三层张量执行契约：params / temp_vars / caches 与 Idx 索引
+
+## 1. 本讲目标
+
+本讲要回答一个贯穿整个 TileRT 运行时的核心问题：**Python 这边用 `nn.Module` 树组装出来的模型，到底是怎么「交给」C++ 后端执行的？**
+
+学完本讲，你应当能够：
+
+1. 说清楚 `params / temp_vars / caches / profile_logs` 这**四组扁平张量列表**是如何从一棵算子树压扁出来的，以及为什么后端只认这种扁平结构。
+2. 看懂 `Idx`（`DsaTempVarIdx`）枚举如何用一个名字（如 `Idx.TOKEN_OUT`）定位一个扁平列表里的整数下标（如 `25`），以及为什么这个名字↔下标的映射必须和编译进 `.so` 的后端逐字段一致。
+3. 理解 `generate_params_with_continuous_storage` 为什么要把 56 个临时变量拼进**一块连续显存**，以及 `validate_temp_vars_layout` 的三道校验分别防止什么故障。
+
+本讲是上一讲（u2-l3 `ShowHandsDSALayer` 的 8 卡加载与 `prepare_money`）的继续：上一讲讲了「谁负责搬运」，本讲讲「搬的这四样东西内部到底是什么结构」。
+
+## 2. 前置知识
+
+- **扁平张量列表（flat tensor list）**：把一整棵嵌套的算子树，按「先序遍历」铺平成一个一维的 `list[torch.Tensor]`。树形结构里的「第 3 层的 MLA 的 KV 缓存」会被映射成「列表里的第 N 个张量」。
+- **CUDA Graph 捕获**：把一次前向计算里所有 kernel 调用「录制成一段录像」，之后每次推理只回放这段录像，省掉 kernel 启动开销。**录像要求张量的显存地址在录制期间和回放期间完全一致**——这是本讲「连续存储」要解决的核心问题。
+- **IntEnum**：Python 里整数枚举，`Idx.TOKEN_OUT` 既是名字、又能当整数 `25` 用（`intermediates[Idx.TOKEN_OUT]` 等价于 `intermediates[25]`）。
+- **ABI（应用二进制接口）一致性**：Python 侧和编译好的 `.so` 后端，必须对「列表有几个槽、每个槽是什么」达成一致，否则后端会按错误的下标读张量。TileRT 用 `TEMP_VARS_SIZE` 与后端 `dsa_temp_vars_size()` 的对拍来卡住这条线。
+
+如果 `prepare_money / show_hands / go_home` 这族控制算子、`SerializableTileRTModule` 的 `exec_seq` 容器、`init_tilert_weights` 的键名重构你还不熟悉，请先复习 u2-l1 与 u2-l3。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲关注点 |
+| --- | --- | --- |
+| `tilert/models/deepseek_v3_2/temp_var_indices.py` | 定义 `DsaTempVarIdx` 枚举（别名 `Idx`）、`TEMP_VARS_SIZE=56`、`validate_temp_vars_layout()` | 名字↔下标映射；布局校验 |
+| `tilert/models/deepseek_v3_2/modules/dsa.py` | `Dsa` 容器；其中 `get_temp_vars()` 逐槽构造 56 个临时变量张量 | 每个激活槽的 dtype/shape 来源 |
+| `tilert/models/deepseek_v3_2/modules/end2end.py` | `ShowHandsDSALayer`：装配四元组、连续存储、`prepare_money` 绑定 | 四元组契约、`generate_params_with_continuous_storage` |
+| `tilert/models/base.py` | `SerializableTileRTModule.get_weights_list / get_cache_vars` 的递归聚合 | params 与 caches 如何被压扁 |
+| `tilert/models/deepseek_v3_2/modules/mla_v2.py` | 叶子算子 `get_cache_vars` 返回 `[ki_cache, kv_cache, pe_cache]` | caches 的最小组成单元 |
+
+> 提示：本讲的「四元组」在 u2-l3 里被称为「四元张量契约」，本讲把它拆开讲透。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 四元张量列表契约：Python 与 C++ 后端的握手货币
+
+#### 4.1.1 概念说明
+
+TileRT 的真正「大脑」编译进了 `.so` 后端库，Python 这边的 `Dsa`、`Mla`、`Moe` 等类只是「壳」——它们不自己算，而是负责**把模型结构压扁成后端能消化的格式**。
+
+后端要求的格式非常朴素：**四个扁平的张量列表**，外加一个最大序列长度：
+
+| 组 | 变量名 | 内容 | 生命周期 |
+| --- | --- | --- | --- |
+| 1 | `params` | 权重（RMSNorm scale、Q/K/V 投影、专家权重、embedding…） | 一次加载，反复用 |
+| 2 | `caches` | KV 缓存（每层的 `ki_cache / kv_cache / pe_cache`） | 跨 token 持续累积 |
+| 3 | `temp_vars`（代码里常叫 `intermediates`） | 激活/中间变量（Q、O、SCORES、TOKEN_OUT、采样配置…） | 每个 forward 覆写 |
+| 4 | `profile_logs` | 性能埋点日志张量 | 后端写入，可选读出 |
+
+为什么后端不要「树」而非要「扁平列表」？因为 C++ 侧只关心「第 i 个权重张量的指针 + 形状」，不关心它属于哪一层。把树压扁成一维列表，后端就可以用 `params[3]`、`temp_vars[25]` 这样的**整数下标**直接寻址，省掉任何字符串匹配或对象遍历——这在 CUDA Graph 回放的高频路径里至关重要。
+
+#### 4.1.2 核心流程
+
+以单张卡（`device_id`）为视角，装配流程是：
+
+```text
+Dsa 算子树（61 层 block + 1 个 head）
+   │
+   ├── get_weights_list()   ──递归聚合──▶ params:   list[Tensor]   （权重）
+   ├── get_cache_vars()     ──递归聚合──▶ caches:   list[Tensor]   （KV 缓存）
+   └── get_temp_vars(1, 4)  ──逐槽构造──▶ temp_vars: list[Tensor]  （56 个激活槽）
+                                              │
+                          generate_params_with_continuous_storage
+                                              │
+                                  拼进一块连续显存（仍是长度 56 的列表）
+                                              │
+        profile_logs = get_profile_log_tensor(...)
+                                              │
+        result = (temp_vars, caches, params, profile_logs)   ◀── 四元组（DeviceResult）
+                                              │
+        dsa_show_hands_prepare_money(params, temp_vars, caches, profile_logs, seq_len)
+                                              │
+                                  后端拿到指针、捕获 CUDA Graph
+```
+
+每张卡各自装配一份四元组（8 卡并行，详见 u2-l3），所以一份四元组 = 一张卡的完整状态。
+
+#### 4.1.3 源码精读
+
+**① 四元组的类型定义**就一行，但它是整条契约的「合同模板」：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:26-26](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L26-L26) — `DeviceResult = tuple[list[Tensor], list[Tensor], list[Tensor], Tensor]`，前三项分别是 `temp_vars / caches / params`，第四项是单个 `profile_logs` 张量。
+
+**② 四元组在 `_init_weights` 里的实际装配**（每卡一线程）：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:391-392](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L391-L392) — `params.extend(dsa.get_weights_list())` 与 `caches.extend(dsa.get_cache_vars())`，把算子树递归压扁成两个列表。
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:402-416](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L402-L416) — `intermediates` 由 `generate_params_with_continuous_storage(dsa.get_temp_vars(...))` 得到，即「先逐槽构造 56 个张量，再拼进连续显存」。
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:456-458](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L456-L458) — `profile_logs = get_profile_log_tensor(...)`，最后打包成 `result = (intermediates, caches, params, profile_logs)` 存进 `self.multi_devices_results[device_id]`。
+
+**③ 把四元组交给后端的「绑定」算子**：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:79-96](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L79-L96) — `dsa_show_hands_prepare_money(params, temp_vars, cache_vars, profile_logs, forward_max_seq_len, ...)` 把四个列表交给后端并捕获 CUDA Graph。注意签名顺序就是 `(params, temp_vars, caches, profile_logs)`。
+
+**④ params 与 caches 的递归聚合**发生在容器基类里：
+
+[tilert/models/base.py:292-296](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/base.py#L292-L296) — `get_weights_list` 遍历 `exec_seq`，把每个子算子的权重列表 `extend` 进来，天然支持嵌套。
+
+[tilert/models/base.py:266-270](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/base.py#L266-L270) — `get_cache_vars` 同理递归聚合。叶子算子的贡献例如 MLA：
+
+[tilert/models/deepseek_v3_2/modules/mla_v2.py:93-113](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/mla_v2.py#L93-L113) — 每层 MLA 的 `get_cache_vars` 返回 `[ki_cache, kv_cache, pe_cache]`，于是 61 层 × 3 = 一长串 KV 缓存张量，按层序铺平进 `caches`。
+
+> 一句话：**`params` 是权重、`caches` 是 KV、`temp_vars` 是激活、`profile_logs` 是埋点**——四者压扁后交给后端，后端用整数下标寻址，捕获进 CUDA Graph。
+
+#### 4.1.4 代码实践
+
+**实践目标**：验证四元组的「长度 = 算子树叶子数」这一压扁关系，理解列表是无序的「按遍历顺序」结构。
+
+**操作步骤**（源码阅读型，无需真实 8 卡环境）：
+
+1. 打开 `dsa.py`，确认 `Dsa.__init__` 里 `register_op` 的调用顺序：先是 `layer_0..layer_60`（每个 block），最后是 `layer_61_` 的 `RMSNormHeadProj`（见 [dsa.py:85-92](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L85-L92)）。
+2. 推断：`get_cache_vars()` 聚合后，`caches` 列表的前 3×3=9 个元素属于前 3 层 dense 层（每个 `MlpBlock` 的 MLA 各贡献 3 个缓存），后面 58 层 MoE 各贡献 3 个。
+3. 数一下：61 层 × 3 = 183 个 KV 缓存张量（MTP 模式下还会追加 MTP 层的缓存）。
+
+**需要观察的现象**：`caches` 的长度严格等于「层数 × 每层缓存数」，与 `register_op` 的注册顺序一一对应；换层序就会错位。
+
+**预期结果**：`len(caches) == n_layers * 3`（非 MTP 基线）。这是后端能用整数下标寻址的前提——顺序不能乱。
+
+**待本地验证**：在有 8 卡的环境里实际构造 `Dsa`，打印 `len(dsa.get_cache_vars())` 与 `len(dsa.get_weights_list())` 验证。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：为什么后端不接受 Python 的 `state_dict`（字符串键名），而要扁平列表？
+
+**参考答案**：CUDA Graph 回放路径里，每个 kernel 启动都以纳秒计；用字符串查字典的开销不可接受。扁平列表让后端用 `temp_vars[25]` 这样的整数下标直接取指针，O(1) 且零解析。字符串键名只在「加载权重」这种一次性场景里用（`init_tilert_weights`），用完即删。
+
+**练习 2**：四元组里哪一项跨 token 持续累积、哪一项每个 forward 都被覆写？
+
+**参考答案**：`caches`（KV 缓存）跨 token 持续累积——每生成一个 token 就往 `ki_cache/kv_cache` 追加一列；`temp_vars`（激活）每个 forward 都被覆写，是「草稿纸」。`params`（权重）在整个请求生命周期内不变。
+
+---
+
+### 4.2 Idx 枚举：用名字定位扁平列表里的激活槽
+
+#### 4.2.1 概念说明
+
+`temp_vars` 是一个长度 56 的扁平列表，但用「第 25 个」这种魔数写代码既难读又易错。`DsaTempVarIdx`（别名 `Idx`）这个 `IntEnum` 解决的就是**给 56 个下标起名字**：
+
+- `Idx.TOKEN_OUT` 既是名字，又等于整数 `25`；
+- 于是 `temp_vars[Idx.TOKEN_OUT]` 与 `temp_vars[25]` 完全等价，但前者一眼能看出「这是输出的 token」。
+
+这层抽象的关键约束是：**`Idx` 这个「名字→下标」的映射，Python 侧和编译进 `.so` 的后端必须完全一致**。因为后端也用同样的整数下标读写 `temp_vars`——后端把第 25 个张量当 `TOKEN_OUT` 写入，Python 也必须把第 25 个当 `TOKEN_OUT` 读出。任何错位都会导致「读到的根本不是 token」。
+
+#### 4.2.2 核心流程
+
+`get_temp_vars` 的执行过程是「按名字逐槽填表」：
+
+```text
+temp_vars = [None] * 56                      # 先开 56 个空槽
+temp_vars[Idx.Q]          = torch.zeros(..., q_lora_rank, bf16)
+temp_vars[Idx.KV]         = torch.zeros(..., kv_lora_rank, bf16)
+temp_vars[Idx.TOKEN_OUT]  = torch.zeros(..., 1, int32)
+...
+for i, t in enumerate(temp_vars):           # 收尾：任一槽为 None 就报错
+    if t is None: raise RuntimeError(...)
+```
+
+每个槽的 **dtype** 由它承载的数据类型决定（激活用 bf16、索引用 int32、概率用 fp32、采样配置用 fp32），每个槽的 **shape** 由 `ModelArgs` 的超参决定。于是 `Idx` 枚举 + `ModelArgs` 共同定义了「第 i 个张量长什么样」。
+
+#### 4.2.3 源码精读
+
+**① 56 个名字→下标的映射**：
+
+[tilert/models/deepseek_v3_2/temp_var_indices.py:15-73](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L15-L73) — `DsaTempVarIdx(IntEnum)`，从 `Q=0` 到 `LOGPROBS_FLAG=55`，共 56 个成员。文件顶部 docstring 给出典型用法 `token_out = intermediates[Idx.TOKEN_OUT]  # 等价于 intermediates[25]`（见 [temp_var_indices.py:1-10](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L1-L10)）。
+
+[tilert/models/deepseek_v3_2/temp_var_indices.py:76-78](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L76-L78) — `TEMP_VARS_SIZE = 56` 与 `Idx = DsaTempVarIdx` 别名。
+
+**② 逐槽构造，dtype/shape 全部来自 ModelArgs**：
+
+[tilert/models/deepseek_v3_2/modules/dsa.py:108-118](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L108-L118) — 先定义 5 种 dtype 描述符（bf16/fp32/int32/int64/fp8），再从 `extra_args` 取出采样参数。
+
+[tilert/models/deepseek_v3_2/modules/dsa.py:120-148](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L120-L148) — 把 `ModelArgs` 的字段读进局部变量（`dim`、`q_lora_rank`、`kv_lora_rank`、`index_head_dim`、`index_topk`、`vocab_size` 等），作为各槽 shape 的来源。
+
+五个本讲重点槽（实践任务要求）：
+
+| 槽名 | Idx 值 | 构造语句 | dtype | shape（batch=1, seq=4 时） | shape 来源 |
+| --- | --- | --- | --- | --- | --- |
+| `Q` | 0 | [dsa.py:150](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L150) | bf16 | (1, 4, **1536**) | `q_lora_rank=1536` |
+| `KV` | 1 | [dsa.py:151](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L151) | bf16 | (1, 4, **512**) | `kv_lora_rank=512` |
+| `KI` | 2 | [dsa.py:152](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L152) | bf16 | (1, 4, **128**) | `index_head_dim=128` |
+| `TOKEN_OUT` | 25 | [dsa.py:180](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L180) | int32 | (1, 4, **1**) | 末维固定 1（每位置 1 个 token id） |
+| `CUR_POS` | 31 | [dsa.py:187](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L187) | int32 | (**1**,) | `batch_size`（每 batch 一个当前位置） |
+
+对应的 `ModelArgs` 取值见 [model_args.py:74-89](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/model_args.py#L74-L89)。`batch_seq=(1,4)` 来自 `get_temp_vars(1, self.forward_max_seq_len=4, ...)`（见 [end2end.py:404-405](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L404-L405) 与 [end2end.py:189](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L189)）。
+
+**③ 采样配置槽**——一个会被运行时改写的特殊槽：
+
+[tilert/models/deepseek_v3_2/modules/dsa.py:211-213](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L211-L213) — `SAMPLING_CONFIG` 是个长度 4 的 fp32 向量 `(temperature, top_p, top_k, use_topp)`，因为采样参数被烘焙进 CUDA Graph，改参必须重捕图（见 4.3 节与 u3-l4）。
+
+**④ 收尾的完整性校验**——任一槽漏填就报错：
+
+[tilert/models/deepseek_v3_2/modules/dsa.py:225-227](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L225-L227) — 遍历 56 个槽，发现 `None` 就用 `Idx(i).name` 报出是哪个名字漏了。这是一道「开发期护栏」：新增一个 `Idx` 成员却忘了在 `get_temp_vars` 里构造，会立刻在这里炸出来而不是跑到后端里才出错。
+
+**⑤ Python 怎么读后端写回的结果**：同样靠 `Idx`：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:653-663](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L653-L663) — `get_logits` 读 `intermediates[Idx.LOGITS_OUT]`；`forward` 后整个 `temp_vars` 缓冲区被后端覆写，Python 用名字取回想要的那个张量。这要求后端写 `LOGITS_OUT` 的下标（24）和 Python 读的下标完全相同——这正是「映射必须逐字段一致」的体现。
+
+#### 4.2.4 代码实践
+
+**实践目标**：吃透「每个槽的 dtype/shape 来自 ModelArgs」，并理解 `TEMP_VARS_SIZE=56` 与后端 `dsa_temp_vars_size()` 对拍的意义。
+
+**操作步骤**（源码阅读 + 本地验证型）：
+
+1. 对照上表，在 [dsa.py:150-187](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L150-L187) 逐行确认五个槽的构造语句，并到 [model_args.py](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/model_args.py) 找到 `q_lora_rank`、`kv_lora_rank`、`index_head_dim` 的取值。
+2. 写一段独立脚本（**示例代码**，需真实环境验证），直接调用 `get_temp_vars` 并打印这五个槽：
+
+   ```python
+   # 示例代码：验证五个关键槽的 dtype 与 shape
+   from tilert.models.deepseek_v3_2.model_args import ModelArgs
+   from tilert.models.deepseek_v3_2.modules.dsa import Dsa
+   from tilert.models.deepseek_v3_2.temp_var_indices import Idx
+
+   args = ModelArgs()
+   dsa = Dsa(args, device_id=0, num_devices=8)
+   tv = dsa.get_temp_vars(1, 4, {"temperature": 1.0, "top_p": 0.9, "top_k": 256, "use_topp": False})
+   for name in ["Q", "KV", "KI", "TOKEN_OUT", "CUR_POS"]:
+       t = tv[getattr(Idx, name)]
+       print(f"{name:12s} idx={int(getattr(Idx, name)):2d} "
+             f"dtype={str(t.dtype):18s} shape={tuple(t.shape)}")
+   ```
+
+3. **解释 `TEMP_VARS_SIZE=56` 与后端校验为何重要**：
+   - Python 的 `get_temp_vars` 严格构造 56 个槽（0..55），后端 `.so` 也按「56 个槽」的约定用整数下标读写。一旦两者版本不一致——比如 Python 新增了一个槽变成 57，但后端 `.so` 还是旧的 56——后端仍会按旧下标读，从某一项开始全错位，且**不会有任何 Python 异常**，只表现为输出乱码或段错误。
+   - `validate_temp_vars_layout()` 在 `ShowHandsDSALayer.__init__`（[end2end.py:180](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L180)）就调用，相当于在**模型构造期**就把这种「Python↔.so 版本错配」提前炸出来，而不是等第一次 `forward` 才崩。详见 4.3.3。
+
+**需要观察的现象**：打印出的 dtype/shape 与上表完全一致；`Q` 末维 1536、`KV` 末维 512、`KI` 末维 128，分别对应 `q_lora_rank / kv_lora_rank / index_head_dim`。
+
+**预期结果**：
+```
+Q            idx= 0 dtype=torch.bfloat16   shape=(1, 4, 1536)
+KV           idx= 1 dtype=torch.bfloat16   shape=(1, 4, 512)
+KI           idx= 2 dtype=torch.bfloat16   shape=(1, 4, 128)
+TOKEN_OUT    idx=25 dtype=torch.int32      shape=(1, 4, 1)
+CUR_POS      idx=31 dtype=torch.int32      shape=(1,)
+```
+
+**待本地验证**：上述脚本依赖 8 卡 B200 与已 `load_backend` 的环境；无此环境时退化为纯阅读型——对照源码填出上表即可。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：为什么 `Q` 是 bf16 而 `IDX_LOGITS` 是 fp32？
+
+**参考答案**：`Q` 是模型激活，走 tensor core 的高吞吐 bf16 路径；`IDX_LOGITS` 是 NSA 索引头打分用的 logits，要做 softmax/argmax 等对数值精度敏感的归约，用 fp32 避免精度损失导致选错 top-k 位置。dtype 由「这张张量后续被怎么算」决定。
+
+**练习 2**：如果在 `DsaTempVarIdx` 里把 `TOKEN_OUT` 的值从 25 改成 60（超出 56），会发生什么？
+
+**参考答案**：`get_temp_vars` 开的是 `[None]*56`，下标 60 越界会直接 `IndexError`；即便不越界，`validate_temp_vars_layout` 的「contiguity」校验（见 4.3）也会因为出现缺口/重复而抛 `RuntimeError`。这正是该校验的价值——把「枚举写错」挡在启动期。
+
+**练习 3**：`get_logits` 读 `intermediates[Idx.LOGITS_OUT]`，后端是按什么下标写入这个张量的？
+
+**参考答案**：后端按**同一个整数 24**（`Idx.LOGITS_OUT` 的值）写入 `temp_vars[24]`。Python 和后端共享这份「名字→下标」约定，所以名字只存在于 Python 侧做可读性，真正传递给后端的是下标本身。
+
+---
+
+### 4.3 连续存储与布局校验：CUDA Graph 捕获的前提
+
+#### 4.3.1 概念说明
+
+`get_temp_vars` 返回的是 56 个**各自独立分配**的张量。但在交给后端前，`ShowHandsDSALayer` 又用 `generate_params_with_continuous_storage` 把它们重新「拼」进**一块连续显存**——56 个张量变成同一块大缓冲区上的 56 个 view（视图）。
+
+为什么要多此一举？
+
+1. **CUDA Graph 需要稳定地址**：Graph 回放时，kernel 访问的显存地址必须和录制时一模一样。一块连续缓冲区的地址在整个请求生命周期里固定，不会因为 Python GC 或显存碎片而漂移。
+2. **一次分配优于 56 次**：56 次 `torch.zeros` 各自向 CUDA 申请显存，既慢又碎；改成一次大 `torch.zeros` 后切片，分配开销和碎片都最小。
+3. **对齐访问**：每个子 view 起始地址按 `aligned_size=1024` 字节对齐，匹配 GPU 显存事务的对齐粒度，避免跨事务读写惩罚。
+
+与之配套的 `validate_temp_vars_layout` 是**三道启动期护栏**，分别防止「枚举数量对不上」「下标有空洞/重复」「Python 与后端版本错配」三类故障。
+
+#### 4.3.2 核心流程
+
+**连续存储的拼装逻辑**：
+
+```text
+tot_size = Σ ceil(每个 temp_var 的字节数 / 1024) * 1024    # 对齐后的总字节
+big = torch.zeros(tot_size, dtype=uint8)                   # 一次性开一块大显存
+offset = 0
+for tv in temp_vars:
+    aligned = ceil(tv.nbytes / 1024) * 1024
+    view = big[offset : offset + tv.nbytes].view(tv.dtype).view(tv.shape)  # 切片再换 dtype/shape
+    cloned.append(view)
+    offset += aligned
+return cloned                                              # 56 个 view，共享 big 这一块
+```
+
+对齐字节数的计算：
+
+\[
+\text{aligned}(n) = \left\lceil \frac{n}{1024} \right\rceil \times 1024
+\]
+
+**布局校验的三道关**：
+
+```text
+① len(枚举成员) == TEMP_VARS_SIZE(56)        # 数量对
+② sorted(下标) == [0,1,...,55]               # 连续无空洞无重复
+③ (若后端已加载) dsa_temp_vars_size() == 56  # Python 与 .so 一致
+```
+
+#### 4.3.3 源码精读
+
+**① 对齐字节计算**：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:313-319](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L313-L319) — `tot_size_in_bytes_aligned` 对每个 temp_var 做 `ceil(nbytes/aligned)*aligned` 累加。
+
+**② 拼进一块大缓冲区**：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:321-334](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L321-L334) — `generate_params_with_continuous_storage`：开一块 `torch.zeros(tot_size, dtype=uint8)`，逐个 temp_var 切片 `.view(dtype).view(shape)` 生成视图，每个视图起始偏移按 1024 对齐。
+
+> 阅读提示：方法名里带 `params`，但实际操作的是 `temp_vars`——它只是一个通用的「把张量列表拼进连续显存」工具，命名是历史遗留，别被误导。
+
+**③ 在 `_init_weights` 里实际调用**：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:402-416](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L402-L416) — `intermediates` = 连续化后的 56 个视图；之后 [end2end.py:418-430](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L418-L430) 立刻把 `SAMPLING_CONFIG` 槽的视图 `copy_` 写入采样参数——证明这些视图就是后端要读写的同一块内存。
+
+**④ 三道布局校验**：
+
+[tilert/models/deepseek_v3_2/temp_var_indices.py:81-118](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L81-L118) — `validate_temp_vars_layout`：
+- [行 94-97](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L94-L97)：成员数必须等于 `TEMP_VARS_SIZE`，防止「加了枚举成员却忘了改常量」；
+- [行 99-107](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L99-L107)：下标必须连续 `0..55`，无空洞无重复，保证 `Idx` 是「名字↔下标」的双射；
+- [行 109-118](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/temp_var_indices.py#L109-L118)：若后端已加载，调 `torch.ops.tilert.dsa_temp_vars_size()` 与 `TEMP_VARS_SIZE` 对拍，不一致就抛错；后端未加载时静默跳过（`AttributeError/RuntimeException` 吞掉）。
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:180](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L180) — 校验在 `ShowHandsDSALayer.__init__` 第一行就执行，把所有布局错误挡在模型构造期。
+
+**⑤ CUDA Graph 重捕与连续存储的联动**：采样参数变化时，`update_sampling_config` 先 `go_home` 释放旧图、改 `SAMPLING_CONFIG` 槽，再重新 `prepare_money` 捕获新图：
+
+[tilert/models/deepseek_v3_2/modules/end2end.py:267-301](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L267-L301) — 注意它只 `copy_` 改 `intermediates[Idx.SAMPLING_CONFIG]` 的内容，**不重新分配显存**——因为连续存储保证了这块地址稳定，所以改一个槽的值后重捕图即可，其余 55 个槽的地址纹丝不动。这就是连续存储对 CUDA Graph 最直接的收益。
+
+#### 4.3.4 代码实践
+
+**实践目标**：理解连续存储的「视图共享同一块缓冲区」特性，以及对齐的代价。
+
+**操作步骤**（纯 Python，无需 GPU 也可跑通逻辑）：
+
+1. **示例代码**——用 CPU 张量复刻 `generate_params_with_continuous_storage` 的核心，验证视图共享：
+
+   ```python
+   # 示例代码：CPU 上复刻连续存储，验证视图共享同一块缓冲区
+   import torch
+
+   def contig(tv, aligned=1024):
+       tot = 0
+       for t in tv:
+           tot += (t.nbytes + aligned - 1) // aligned * aligned
+       big = torch.zeros(tot, dtype=torch.uint8)
+       out, off = [], 0
+       for t in tv:
+           a = (t.nbytes + aligned - 1) // aligned * aligned
+           out.append(big[off:off + t.nbytes].view(t.dtype).view(t.shape))
+           off += a
+       return out, big
+
+   a = torch.zeros(1, 4, 1536, dtype=torch.bfloat16)   # 模拟 Idx.Q
+   b = torch.zeros(1, 4, 1, dtype=torch.int32)         # 模拟 Idx.TOKEN_OUT
+   views, big = contig([a, b])
+   print("views[0].data_ptr() 与 views[1].data_ptr() 都落在 big 内:",
+         big.data_ptr() <= views[0].data_ptr() < views[1].data_ptr() < big.data_ptr() + big.nbytes)
+   views[1].fill_(42)                                   # 改 TOKEN_OUT 视图
+   print("改视图后底层 big 被修改:", int(views[1].sum().item()) == 42 * views[1].numel())
+   ```
+
+2. 计算：`Q` 槽 `1×4×1536` 个 bf16 = `1*4*1536*2 = 12288` 字节，已是 1024 的整数倍，对齐后仍 12288；若某个槽是 1500 字节，对齐后变成 `ceil(1500/1024)*1024 = 2048`，多出 548 字节填充——这就是对齐的「空间代价」。
+
+**需要观察的现象**：两个视图的 `data_ptr()` 都落在 `big` 这块缓冲区的地址范围内；改一个视图，底层 `big` 对应字节立即变化。
+
+**预期结果**：两行打印均为 `True`，证明视图与底层缓冲区是同一块内存——这正是后端写、Python 读能互通的物理基础。
+
+**待本地验证**：CPU 上 `data_ptr()` 行为一致；GPU 上的地址稳定性（CUDA Graph 场景）需在真实环境验证。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果把 `aligned_size` 从 1024 改成 1（不对齐），功能上还能跑吗？为什么要选 1024？
+
+**参考答案**：功能上仍能跑（视图照样切片）。但 1024 字节是 GPU 显存事务（memory transaction）的常见对齐粒度，不对齐会让某些 kernel 跨事务读写，性能下降。这里的对齐是为后端 kernel 的访存效率服务的。
+
+**练习 2**：`update_sampling_config` 改 `SAMPLING_CONFIG` 时，为什么不用重新分配 56 个 temp_vars，只需要 `copy_` 改一个槽再重捕图？
+
+**参考答案**：因为连续存储让 56 个槽共享一块固定地址的大缓冲区，改采样参数只需覆写 `SAMPLING_CONFIG` 槽那几个字节，其余 55 个槽地址不变；CUDA Graph 重捕时记录的地址仍有效。若每个槽独立分配，重捕图可能拿到新地址，反而更脆弱。
+
+**练习 3**：`validate_temp_vars_layout` 的第三道校验（后端 `dsa_temp_vars_size()` 对拍）为何要包在 `try/except` 里？
+
+**参考答案**：因为校验在 `__init__` 调用，而此时后端可能尚未 `load_backend`，`torch.ops.tilert.dsa_temp_vars_size` 不存在会抛 `AttributeError`。包住异常让「后端未加载」时只跳过这道关、不阻断构造；一旦后端加载了，这道关就生效。前两道（数量、连续性）是纯 Python 校验，始终生效。
+
+---
+
+## 5. 综合实践
+
+**任务**：用一张图把「算子树 → 四元组 → 后端」整条契约画出来，并标注每个关键文件/行号。
+
+**操作步骤**：
+
+1. 画一棵 `Dsa` 算子树（`layer_0..layer_60` block + `layer_61_` head），在每个 block 上标出它会贡献哪些 `params`（权重）、哪些 `caches`（`ki/kv/pe_cache`）。
+2. 在树旁画一个长度 56 的 `temp_vars` 条带，标出本讲重点的 5 个槽（`Q=0 / KV=1 / KI=2 / TOKEN_OUT=25 / CUR_POS=31`）以及 `SAMPLING_CONFIG=48` 的位置。
+3. 用箭头把 `get_weights_list / get_cache_vars / get_temp_vars` 三条聚合路径分别连到 `params / caches / temp_vars` 三个列表上，并标注每条路径对应的源码行（[base.py:266-296](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/base.py#L266-L296)、[dsa.py:105-229](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/dsa.py#L105-L229)）。
+4. 在 `temp_vars` 条带外再画一层「连续存储大缓冲区」，把 56 个槽画成这块缓冲区上的 56 段切片，标出 1024 字节对齐边界，并标出 `generate_params_with_continuous_storage`（[end2end.py:321-334](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L321-L334)）的位置。
+5. 最后用一个粗箭头把四元组 `(params, temp_vars, caches, profile_logs)` 指向 `dsa_show_hands_prepare_money`（[end2end.py:79-96](https://github.com/tile-ai/TileRT/blob/a8368a681342d0686e76bbd2225b320f2fead8a2/tilert/models/deepseek_v3_2/modules/end2end.py#L79-L96)），代表「交给后端、捕获 CUDA Graph」。
+
+**预期结果**：一张能回答以下三个问题的图——(a) 后端为什么能用整数下标寻址？(b) 为什么改采样参数只需重捕图不用重分配？(c) 为什么 `Idx` 枚举必须和后端逐字段一致？
+
+**待本地验证**：图的正确性可通过在有环境时打印 `len(params)`、`len(caches)`、`len(temp_vars)` 与各槽 `dtype/shape` 来核对。
+
+---
+
+## 6. 本讲小结
+
+- **四元组契约**：Python 把算子树压扁成 `params`（权重）/ `caches`（KV 缓存）/ `temp_vars`（激活）/ `profile_logs`（埋点）四个扁平张量列表，外加 `forward_max_seq_len`，交给 `dsa_show_hands_prepare_money` 绑定进后端。
+- **压扁方式**：`params` 与 `caches` 由 `SerializableTileRTModule.get_weights_list / get_cache_vars` 递归 `extend` 聚合；`temp_vars` 由 `Dsa.get_temp_vars` 逐槽构造。
+- **Idx 枚举**：`DsaTempVarIdx`（别名 `Idx`）给 56 个下标起名字，让 `temp_vars[Idx.TOKEN_OUT]` 等价于 `temp_vars[25]`；这套「名字↔下标」映射 Python 与后端必须逐字段一致。
+- **dtype/shape 来源**：每个槽的 dtype 由用途决定（激活 bf16、索引 int32、概率 fp32），shape 由 `ModelArgs` 超参决定（如 `Q` 末维 = `q_lora_rank`）。
+- **连续存储**：`generate_params_with_continuous_storage` 把 56 个 temp_var 拼进一块 1024 对齐的大缓冲区，保证 CUDA Graph 捕获的地址稳定、分配开销最小、kernel 访存对齐。
+- **布局校验**：`validate_temp_vars_layout` 在 `__init__` 跑三道关——成员数、下标连续性、后端 `dsa_temp_vars_size()` 对拍——把枚举写错和 Python↔.so 版本错配挡在启动期。
+
+## 7. 下一步学习建议
+
+- **下一讲 u2-l6（MLA 与稀疏选择）**：本讲把 `caches` 当作「每层 3 个 KV 缓存」的黑盒，下一讲会打开它，讲清 `SparseSelectMlaV2`（0 卡）与 `PureMlaV2`（其余卡）如何读写 `ki_cache / kv_cache / pe_cache`，以及 `peer_bufs / partial_buf` 如何在卡间汇聚。
+- **下一讲 u2-l7（MoE/MLP 前馈）**：会打开 `temp_vars` 里的 `SCORES / SEL_PROBS / SEL_INDICES / UP_GATE / EXP_OUT` 几个槽，讲清专家路由的算子链。
+- **u3-l2（生成主循环）**：会回到本讲的 `Idx.TOKEN_OUT / Idx.CUR_POS`，看它们在逐 token 解码循环里如何被读写，把「契约」放进真实执行流。
+- 建议带着本讲的「四元组」与「Idx 下标」两个视角去读后续所有 `modules/` 与 `ops/` 代码——你会发现每个算子的 `get_cache_vars`、每个 generator 的 `get_xxx(intermediates[Idx.XXX])`，都在遵守同一条契约。
