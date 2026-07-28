@@ -4,400 +4,464 @@
 
 学完本讲后，你应该能够：
 
-- 用 `T.copy(src, dst)` 在 global / shared / fragment 之间搬运一个 tile，并说清楚搬运范围（extent）是怎么由源/目的 tile 自动推断出来的。
-- 读懂 `T.copy` 在前端只是拼装一条 `tl.tileop.copy` intrin，真正的 TMA / cp.async / ldmatrix / 普通并行 load-store 指令是在 C++ lowering 阶段按目标硬件自动挑选的。
-- 用 `T.view` / `T.reshape` 以**零拷贝**方式把同一块显存重新解释成新的形状或数据类型，并理解它的硬性约束（bit 总数守恒、只能构造连续 stride）。
-- 用 `T.c2d_im2col` 理解卷积如何借助 Hopper 的 TMA im2col 把「取卷积窗口」融合进一次 global→shared 搬运，以及非 Hopper 架构为什么要退回到手写 gather 循环。
+- 看懂 `T.copy(src, dst, ...)` 的**切片语法**：传入 `Buffer`、`BufferLoad`（带切片）或 `BufferRegion` 时，搬运范围（extent）是如何被推导、对齐与广播的。
+- 理解同一个 `T.copy` 在编译期会被**自动选路**为不同的底层指令——TMA（Bulk Load/Store，含 1D 与多维）、`ldmatrix`/`stmatrix`（LDSM/STSM）、`tcgen05`（tensor memory）或普通 SIMT 拷贝——以及 `disable_tma`、`coalesced_width`、`eviction_policy` 这几个旋钮的作用。
+- 掌握 `T.view` / `T.reshape` 的本质：**零拷贝视图**，它们复用同一块底层存储（同一个 `.data` 指针），只换一个「形状/数据类型」的解释，并且必须满足「比特总数守恒」这一硬约束。
+- 认识 `T.c2d_im2col`：卷积里把图像重排成矩阵列（im2col）的专用搬运，在 Hopper 上直接落到 TMA-im2col 指令。
+- 把上述知识串成一个可运行的小 kernel（综合实践）。
 
-本讲承接 u2-l2（显存层级与 tile 声明）。你已经在那里学过 `alloc_shared` / `alloc_fragment`；本讲回答的问题是：**tile 在各级显存之间怎么搬、搬完之后怎么换一种方式看同一块数据**。
+本讲承接 [u2-l2](./u2-l2-tile-alloc.md) 的「显存层级与 tile 分配」，是后续 u3（编译流水线，尤其是 `LowerTileOp` 与 `LayoutInference`）和 u4（TMA / 软件流水）的前置。
 
 ## 2. 前置知识
 
-在进入源码之前，先用三个直觉把概念立起来。
+在动手之前，先用一句话回顾几个会反复出现的概念（细节见 [u2-l2](./u2-l2-tile-alloc.md)）：
 
-**(1) GPU 显存是一栋分层的「仓库」。** 数据从最远最大但最慢的 global memory（HBM），搬到离计算单元最近但最小的 fragment / 寄存器，中间通常要在 shared memory（SMEM）中转。每一次搬运都有代价，所以我们要让搬运「足够粗」以摊销寻址开销（用 tile 而不是逐元素），又要「足够巧」以用上硬件最快的那条路径（TMA bulk、cp.async 异步、ldmatrix 矩阵加载等）。
-
-**(2) TileLang 把搬运抽象成「按目的推断范围」的 copy。** 你只要说清楚源 tile 和目的 tile 长什么样，`T.copy` 就自动算出要搬多少、怎么并行、用哪条指令。这是它和「手写两重 for 循环逐元素赋值」的根本区别。
-
-**(3) 「视图（view）」不搬数据，只换看法。** 同一段连续字节，既可以当成 `(M, K)` 的 float16 矩阵看，也可以重新解释成形状不同、甚至数据类型不同的 buffer，前提是**总 bit 数不变**。这和 NumPy 的 `ndarray.view()` / PyTorch 在同一 storage 上做 reshape 是同一个思想。
-
-> 本讲涉及的关键 scope 字符串回顾（来自 u2-l2）：`global`、`shared` / `shared.dyn`（动态共享内存）、`local` / `local.fragment`（寄存器/fragment）。`T.copy` 选哪条指令，本质上就是看 src 和 dst 各自在哪一层 scope。
+- **显存层级**：TileLang 把抽象 tile 绑定到不同 scope——`global`（HBM/显存）、`shared`/`shared.dyn`（block 内共享内存）、`local.fragment`（散布在 warp 线程上、对接 tensor core 的寄存器片段）、`local`（线程私有标量寄存器）。数据搬运的本质，就是让数据在这些层级之间流动。
+- **tile 与 Buffer**：一个 tile 在 TIR 里就是一个 `tir.Buffer`；对它做切片 `A[i, j:k]` 得到的是 `tir.BufferLoad`/`tir.BufferRegion`，描述「这个 buffer 里的一个矩形子区域」。
+- **「视图」是什么**：你有一块连续的内存，可以同时用多种方式去「读」它——同样 16 个 `float16` 元素，既能看成 `(4,4)` 的矩阵，也能看成 `(16,)` 的向量，还能看成 8 个 `float32`。只要总比特数不变，换一个解释是免费的，不需要搬动数据。这就是 `T.view` / `T.reshape`。
+- **TMA / cp.async 的直觉**：从 global 搬一整块数据到 shared，老办法是开一串线程、每个线程搬几个元素（cp.async / ldg）；新硬件（Hopper 起）提供了 TMA，由「一个线程」发起、整块搬运、自带 swizzle 与边界处理，吞吐高、占用低。TileLang 的 `T.copy` 会在**编译期**替你决定用哪一种。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| [tilelang/language/copy_op.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py) | **本讲主角**。`T.copy` 与 `T.c2d_im2col` 的前端实现：推断 extent、构造 region、拼装 `tl.tileop.*` intrin。 |
-| [tilelang/language/customize.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py) | `T.reshape` 与 `T.view` 的实现：零拷贝重解释，bit 总数守恒校验。 |
-| [tilelang/utils/language.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py) | `copy` 依赖的工具：`to_buffer_region`、`get_buffer_region_from_load`、`legalize_pairwise_extents`、`bits_product`。 |
-| [tilelang/language/proxy.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/proxy.py) | `T.Tensor` 代理对象，`view`/`reshape` 返回值就靠它构造；决定「连续 stride」如何生成。 |
-| [src/op/copy.cc](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc) | **C++ 后端**。`Copy` 与 `Conv2DIm2ColOp` 算子的实现：指令选择（`GetCopyInst`）、SIMT 并行循环生成、TMA 描述符构造、im2col lowering。 |
-| [examples/convolution/example_convolution.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py) | `T.c2d_im2col`（Hopper）与手写 gather（非 Hopper）的真实对照，以及 `T.copy` 切片语法的活样例。 |
-
-先记住一条导出关系：`tilelang/language/__init__.py:52` 处 `from .copy_op import copy, c2d_im2col`，以及同文件 `:84-85` 处 `reshape, view` 来自 `.customize` —— 也就是说你写 `T.copy` / `T.c2d_im2col` 调的是 `copy_op.py`，写 `T.view` / `T.reshape` 调的是 `customize.py`。（仓库里还有一个 `tilelang/language/copy.py`，它用旧的 `tl.copy` op 名、且未被 `__init__` 导出，不是 `T.copy` 的实际实现，阅读时请勿混淆。）
+| [tilelang/language/copy_op.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py) | **`T.copy` 与 `T.c2d_im2col` 的活跃实现**：推导 extent、构造 region、最终拼出 `tl.tileop.copy` 这条 intrin。 |
+| [tilelang/language/copy.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy.py) | `T.copy` 的**旧版**实现（生成 `tl.copy`）。当前 `__init__.py` **并未导入**它，C++ 也没有注册 `tl.copy`，仅作历史对照。 |
+| [tilelang/language/customize.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py) | `T.reshape` / `T.view` 的实现：检查「比特总数守恒」后，复用 `src.data` 构造新 `T.Tensor`。 |
+| [tilelang/language/proxy.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/proxy.py) | `TensorProxy`：`T.Tensor(...)` 怎样由 `shape` 推出连续 row-major strides，以及如何复用传入的 `data` 指针。 |
+| [tilelang/utils/language.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py) | 工具函数：`to_buffer_region`（把 Buffer/切片编码成 `tl.region`）、`legalize_pairwise_extents`（左右对齐 + 广播）、`bits_product`（比特总数）、`get_buffer_region_from_load`（从 `BufferLoad` 反推 region）。 |
+| [src/op/copy.cc](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc) | C++ 侧 `tl.tileop.copy` / `tl.tileop.c2d_im2col` 的 **lowering**：按优先级选 TMA/LDSM/STSM/tcgen05/Normal，并真正生成 PTX 级别的拷贝语句。 |
+| [src/op/copy.h](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.h) | `CopyNode` 的字段与注解读取（`GetDisableTMA`/`GetEvictionPolicy`）、`CopyInst` 枚举。 |
+| [src/op/operator.h](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/operator.h) | 宏 `TIR_REGISTER_TL_TILE_OP`，把 C++ 算子注册成 `tl.tileop.<name>`，并挂上 builder。 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 T.copy：切片语法与并行化搬运
+### 4.1 T.copy 的切片语法与搬运语义
 
 #### 4.1.1 概念说明
 
-`T.copy(src, dst)` 是 TileLang 里**唯一的**通用 tile 级搬运原语。它接收源和目的两个「buffer-like」对象（`Buffer` / `BufferRegion` / `BufferLoad` 都行），自动推断要搬多少数据，然后交给后端挑选当前硬件上最优的指令去执行。
+`T.copy(src, dst)` 的职责非常纯粹：**把 `src` 这块数据搬到 `dst` 这块**。它不关心你用的是 global 还是 shared、是整块还是切片、是矩阵还是向量——这些信息都藏在 `src` / `dst` 这两个参数里。
 
-它最重要的设计取舍是「**按形状推断范围，而不是让你手写循环边界**」：
+你会遇到三种写法：
 
-- 给它两个完整 `Buffer`，它就搬整个 buffer；
-- 给它一个切片（如 `A[by*block_M, bx*block_N]`），它就从切片的 region 推断出要搬的 tile 形状；
-- 给它两个标量 `BufferLoad`（如 `copy(a[i], b[i])`），它直接降级成一条 `b[i] = a[i]` 的 store。
+```python
+# 1) 整块搬运：src/dst 都是完整 Buffer，要求形状相同
+T.copy(A_shared, B_shared)
+
+# 2) 切片搬运：用 Python 切片语法指定子区域，这是最常见的 GEMM 写法
+T.copy(A[bx * BM, 0:K], A_shared)
+T.copy(kernel_flat[k_iter * BK, bx * BN], kernel_shared)
+
+# 3) 标量搬运：两边都是单个元素，退化为一次赋值
+T.copy(A[i], B[i])   # 等价于 B[i] = A[i]
+```
+
+关键在于：**搬运范围（extent）是从参数里「推导」出来的**，而不是你显式声明的。Buffer 用自己的 `shape`；切片用切片的 `[start:stop]` 长度；当两边形状不完全一致时，TileLang 还会做「尾部对齐 + 广播」。下面就看这套推导在源码里是怎么实现的。
 
 #### 4.1.2 核心流程
 
-前端 `copy()` 的执行过程可以概括为 6 步：
+`T.copy` 在 Python 前端做的事情，可以归纳成五步：
 
-1. **形状校验**：若 src 和 dst 都是完整 `Buffer`，断言二者 shape 结构相等。
-2. **推断 extent**：`Buffer → shape`，`BufferRegion → [r.extent for r in region]`，`BufferLoad → 由其 region 推断`，标量 `BufferLoad → None`。
-3. **标量快捷路径**：若两边都是没有 region 的标量 `BufferLoad`，直接返回 `tir.BufferStore(dst.buffer, src, dst.indices)`，等价于一次赋值。
-4. **广播对齐**：把缺失的 extent 当作全 1，再用 `legalize_pairwise_extents` 从尾部对齐，逐维做广播（相等则保留、一边为 1 则扩成另一边、动态不等则取 `max`）。
-5. **打包成 region**：用 `to_buffer_region` 把 src/dst 各自编码成一条 `tl.region` 调用，标明读/写权限与每维 extent。
-6. **发出 intrin**：拼装 `tir.call_intrin("handle", Op.get("tl.tileop.copy"), src_region, dst_region, annotations=ann)`。
+1. **整块校验**：若两边都是完整 `Buffer`，断言两者 `shape` 结构相同。
+2. **推导 extent**：分别对 `src`、`dst` 调 `get_extent`——`Buffer` 给 `shape`、`BufferRegion` 给每维 `[r.extent]`、`BufferLoad` 先尝试反推出 region 再给 extent。
+3. **标量快速通道**：若两边都推不出 extent（都是标量 `BufferLoad`），直接降级成一条 `tir.BufferStore`（`B[i] = A[i]`），不走拷贝原语。
+4. **广播对齐**：把缺失的一侧补成全 1，再用 `legalize_pairwise_extents` 从尾部对齐：相等则保留、某侧为 1 则广播成另一侧、动态冲突则保守取 `tir.max`。
+5. **编码成 region 并发出 intrin**：用 `to_buffer_region` 把 src/dst 编码成 `tl.region` 表示，把 `coalesced_width/disable_tma/eviction_policy` 收进 `annotations` 字典，最后发出 `tl.tileop.copy`。
 
-extent 广播的直觉可以用一行公式概括（从右往左逐维对齐，\(x\) 取自 src、\(y\) 取自 dst）：
+伪代码如下：
 
-\[
-(x, y) \mapsto
-\begin{cases}
-(x, y), & x = y \\
-(y, y), & x = 1 \\
-(x, x), & y = 1 \\
-(\max(x,y),\ \max(x,y)), & \text{否则（动态形状兜底）}
-\end{cases}
-\]
-
-到了 C++ 后端，`Copy` 算子再根据 src/dst 的 **scope 组合** 与硬件能力，用 `GetCopyInst` 选一条具体指令，优先级见下表（越靠上越优先）：
-
-| 指令 | 触发条件（scope 方向） | 含义 |
-| --- | --- | --- |
-| BulkLoad1D / BulkStore1D | global↔shared 且**连续** | Hopper TMA，一维连续整块搬运 |
-| BulkLoad / BulkStore | global↔shared，末维字节为 16 的倍数 | Hopper TMA，多维 box 搬运 |
-| LDSM (ldmatrix) | shared→fragment | warp 级 8×8 矩阵加载，喂 tensor core |
-| STSM (stmatrix) | fragment→shared | warp 级矩阵写回 |
-| TMemLoad / TMemStore | shared.tmem↔fragment | Blackwell (sm100) tensor memory |
-| Normal | 兜底 | 普通并行 load-store 循环 |
-
-两条关键事实：**Normal 拷贝会被并行化铺到整个 threadblock 的线程上**（由 `MakeSIMTLoop` 生成 `kParallel` 循环，再由 `LowerParallelLoop` 映射到线程）；而 **TMA bulk 拷贝只由 thread 0 发起**（TMA 是单线程发起的批量搬运，描述符由一个线程构建）。
+```
+copy(src, dst, *, coalesced_width, disable_tma, eviction_policy, annotations):
+    se = get_extent(src); de = get_extent(dst)
+    if se is None and de is None and 都是标量 BufferLoad:
+        return BufferStore(dst, src)            # 退化为赋值
+    se = se or [1]*len(de);  de = de or [1]*len(se)
+    se, de = legalize_pairwise_extents(se, de)  # 尾部对齐+广播
+    src = to_buffer_region(src, "r", extents=se)
+    dst = to_buffer_region(dst, "w", extents=de)
+    ann = 合并(coalesced_width, disable_tma, eviction_policy)
+    return call_intrin("tl.tileop.copy", src, dst, annotations=ann)
+```
 
 #### 4.1.3 源码精读
 
-先看前端的 extent 推断与标量快捷路径：
+`T.copy` 的活跃实现是 `copy_op.copy`（注意是 `copy_op.py`，不是 `copy.py`）。它的签名已经把所有旋钮亮出来了：
 
-[copy_op.py:L56-L81](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L56-L81) —— 先校验「两个完整 Buffer 必须同形」，再用 `get_extent` 按 `Buffer`/`BufferRegion`/`BufferLoad` 三种情况推断每维 extent；若两边都是标量 `BufferLoad`（如 `copy(a[i], b[i])`），直接降级成一条 `BufferStore`，等价于 `b[i] = a[i]`。
+[tilelang/language/copy_op.py:L14-L21](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L14-L21) —— 定义 `copy(src, dst, coalesced_width, disable_tma, eviction_policy, annotations)`。
 
-[copy_op.py:L83-L93](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L83-L93) —— 断言至少一边能推断出 extent；把缺失的一边补成全 1（为了支持广播）；调用 `legalize_pairwise_extents` 从尾部对齐、逐维广播；最后用 `to_buffer_region(..., access_type="r"/"w", extents=...)` 把 src/dst 各自打包成带 extent 的 `tl.region`。
+extent 推导的核心是内嵌的 `get_extent`，它按「Buffer → shape、BufferRegion → 每维 extent、BufferLoad → 先反推 region」三种情况返回：
 
-[copy_op.py:L96-L107](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L96-L107) —— 把三个可调旋钮（`coalesced_width`、`disable_tma`、`eviction_policy`）合并进一个 `annotations` 字典（`eviction_policy` 被映射成整数 0/1/2），然后发出本讲最关键的那条 intrin：`tir.call_intrin("handle", Op.get("tl.tileop.copy"), src, dst, annotations=ann)`。注意：和旧实现不同，这些旋钮现在走 `annotations`，位置参数只剩 src/dst 两个 region。
+[tilelang/language/copy_op.py:L59-L72](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L59-L72) —— `get_extent`：从 `Buffer`/`BufferRegion`/`BufferLoad` 三种入参推导搬运范围。
 
-广播对齐的具体规则在工具函数里：
+当两边都推不出 extent（典型场景 `copy(buffer_a[i], buffer_b[i])`）时，走标量快速通道，直接退化成一条 store：
 
-[tilelang/utils/language.py:L406-L449](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py#L406-L449) —— `legalize_pairwise_extents`：先有一个「两边非 1 维数量相等就原样返回」的早退规则（保留逐维迭代映射、不凭空多造轴）；否则从最后一维往前逐对处理，相等则保留、一边为 1 则广播、动态不等则两边都抬到 `tir.max(x, y)` 做安全兜底。
+[tilelang/language/copy_op.py:L77-L81](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L77-L81) —— 两边都是标量 `BufferLoad` 时，直接 `return tir.BufferStore(dst.buffer, src, dst.indices)`，不发出 copy intrin。
 
-再看后端如何选指令、如何并行：
+否则断言至少一侧有 extent，把缺失侧补成全 1，再调用 `legalize_pairwise_extents` 做尾部对齐广播，最后用 `to_buffer_region` 把 src/dst 编码成 `tl.region` 调用：
 
-[src/op/copy.cc:L106-L120](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L106-L120) —— C++ `Copy` 构造：`args[0]`/`args[1]` 就是前端发来的 src/dst region，`NormalizeToBufferRegion` 解析出 `buffer` 与每维 `Range`，`annotations` 直接保留。
+[tilelang/language/copy_op.py:L83-L93](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L83-L93) —— 广播对齐 + 编码 region：`legalize_pairwise_extents` 后 `to_buffer_region(..., "r"/"w", extents=...)`。
 
-[src/op/copy.cc:L688-L719](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L688-L719) —— `GetCopyInst` 是指令选择的「裁判」，严格按 4.1.2 表格的优先级依次试探：先 1D TMA（要求连续且无越界 OOB）、再多维 TMA、再 LDSM/STSM、再 tmem，全都不满足才落到 `kNormal`。`disable_tma_lower`（来自 pass_config）或调用方传 `disable_tma=True` 都会跳过所有 TMA 路径。
+注解（`coalesced_width/disable_tma/eviction_policy`）被收进一个 `ann` 字典，其中 `eviction_policy` 的字符串被映射成整数（`evict_normal=0 / evict_first=1 / evict_last=2`）：
 
-[src/op/copy.cc:L510-L543](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L510-L543) —— `CheckBulkLoad` 给出用 TMA bulk load 的四个硬条件：架构支持 bulk copy、src 在 global 且 dst 在 shared/shared.dyn、src 末维 `extent × dtype.bytes()` 是 16 的倍数、src 与 dst dtype 相同。任一不满足就回退 Normal。
+[tilelang/language/copy_op.py:L96-L105](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L96-L105) —— 构造 `annotations`，单参数优先级低于显式传入的 `annotations`。
 
-[src/op/copy.cc:L281-L325](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L281-L325) —— `MakeSIMTLoop`：Normal 拷贝的并行化核心。它选出所有 extent>1 的维，每维生成一个 `kDataPar` 的 `IterVar`，最终把循环体包成一棵 `ForKind::kParallel` 的嵌套循环——这就是「T.copy 自动并行化」的由来，后面 `LowerParallelLoop` 会把这棵并行循环映射到 threadblock 的线程上。
+最终发出 intrin——注意 op 名是 **`tl.tileop.copy`**，位置参数只有 `src, dst` 两个 region，控制信息全部走 `annotations`：
 
-[src/op/copy.cc:L758-L797](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L758-L797) —— `LowerNormalCopy`：先做 layout 推理（`par_op->InferLayout` 三档：Common/Strict/Free），再用 `LowerParallelLoop` 把并行循环落到线程、分区、向量化与谓词。CPU 目标或涉及 local buffer 时改走 `VectorizeLoop` 直接向量化。
+[tilelang/language/copy_op.py:L107](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L107) —— `tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)`。
 
-最后看 TMA 的「单线程发起」：
+> **对照旧版**：`copy.py` 的同名函数发出的是 `tl.copy`（见 [tilelang/language/copy.py:L88](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy.py#L88)），且把 `coalesced_width/disable_tma/eviction_policy` 作为位置参数传入。但当前 `tilelang/language/__init__.py` 只导入了 `copy_op` 版本（[tilelang/language/__init__.py:L52](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/__init__.py#L52)），C++ 也只注册了 `tl.tileop.copy`（见 4.2.3）。所以 `copy.py` 是**遗留代码**，理解 `T.copy` 时请以 `copy_op.py` 为准。
 
-[src/op/copy.cc:L1452-L1458](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1452-L1458) —— 多维 TMA 拷贝收尾时用 `IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy)` 包住，即**只有每个 block 的 0 号线程**真正发起 TMA。这与 Normal 拷贝「全员并行」形成鲜明对比，是理解 T.copy 性能行为的关键。
+辅助函数在 `utils/language.py`：
+
+- [tilelang/utils/language.py:L161-L191](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py#L161-L191) —— `get_buffer_region_from_load`：把带 `Ramp`（向量化下标）或普通下标的 `BufferLoad` 反推成一个 `BufferRegion`。
+- [tilelang/utils/language.py:L194-L237](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py#L194-L237) —— `to_buffer_region`：把 `Buffer`/`BufferRegion`/`BufferLoad` 编码成 `tl.region(...)` 调用（带 `access_type` 与 `extents`），这是 copy / fill / reduce 等原语共用的「区域表示」。
+- [tilelang/utils/language.py:L406-L449](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py#L406-L449) —— `legalize_pairwise_extents`：尾部对齐广播规则。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲眼看到「同一个 `T.copy`，在不同 scope 方向下被编译成完全不同的指令」。
+**目标**：亲手感受 `T.copy` 的切片搬运，并理解 extent 是「推导」出来的。
 
-**操作步骤**（示例代码，标注为「示例代码」）：
+**操作步骤**（基于 [examples/quickstart.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/quickstart.py) 的骨架，示例代码）：
+
+1. 写一个最小 elementwise kernel，把 global 的 `A` 整块搬到 shared，再搬回 global 的 `C`：
 
 ```python
-# 示例代码：对照 global→shared 与 shared→global 两条方向
-import torch, tilelang
+# 示例代码：最小 T.copy 搬运
+import tilelang
 import tilelang.language as T
 
-@tilelang.jit(out_idx=[1])
-def copy_demo(M, K, dtype=T.float16, block=128):
+@tilelang.jit
+def copy_kernel(N: int, BM: int):
     @T.prim_func
-    def main(A: T.Tensor((M, K), dtype),
-             C: T.Tensor((M, K), dtype)):
-        with T.Kernel(T.ceildiv(M, block), T.ceildiv(K, block), threads=128) as (bx, by):
-            A_sh = T.alloc_shared((block, block), dtype)
-            # 方向1: global -> shared（Hopper 上应被选为 TMA bulk load）
-            T.copy(A[bx * block, by * block], A_sh)
-            # 方向2: shared -> global（应被选为 TMA bulk store）
-            T.copy(A_sh, C[bx * block, by * block])
+    def main(A: T.Tensor((N,), "float32"), C: T.Tensor((N,), "float32")):
+        with T.Kernel(T.ceildiv(N, BM), threads=128) as (bx,):
+            A_shared = T.alloc_shared((BM,), "float32")
+            T.copy(A[bx * BM], A_shared)        # 切片搬运：extent 由 BM 推导
+            T.copy(A_shared, C[bx * BM])         # shared -> global 切片
     return main
-
-kernel = copy_demo(512, 512)
-print(kernel.get_kernel_source())   # 打印生成的 CUDA 源码
 ```
 
-**需要观察的现象**：
+2. 把 `T.copy(A[bx * BM], A_shared)` 改成 `T.copy(A[bx * BM : (bx+1) * BM], A_shared)`，两者应当等价（验证 extent 推导）。
+3. 再故意写一行 `T.copy(A_shared[0], A_shared[1])`，看它是否被前端「标量快速通道」处理（参考 [copy_op.py:L77-L81](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L77-L81)）。
 
-1. 在 Hopper（sm90）上，生成的 CUDA 里 `global→shared` 那段应出现 `cuTensorMapEncode*` + `cp.async.bulk.tensor`（TMA）；`shared→global` 应出现对应的 `cp.async.bulk.tensor.store`。
-2. 如果你在 `T.copy(..., disable_tma=True)` 或设了 `tl.disable_tma_lower` pass_config，源码里应**不再有 TMA**，而是普通的一重并行 load-store 循环。
-3. 在没有 TMA 的架构（如 Ampere sm80）上，`global→shared` 会落到 `cp.async` 或普通 load；`shared→fragment` 会落到 `ldmatrix`。
+**需要观察的现象**：第 2 步两种写法生成的 kernel 行为一致；第 3 步不会触发真正的 copy intrin，而是退化为一次赋值。
 
-**预期结果**：`get_kernel_source()` 输出的 CUDA 里能定位到上述指令；端到端 `kernel(a)` 与 `a` 数值一致。实际生成的具体指令随你的 GPU 架构而变——**待本地验证**。
+**预期结果 / 待本地验证**：用 `torch.testing.assert_close` 校验 `C == A`；标量搬运的退化行为可用 `kernel.get_kernel_source()` 查看生成代码确认。**该实践依赖 GPU 与 tilelang 安装，运行结果待本地验证。**
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：把上面示例的 `T.copy(A[bx*block, by*block], A_sh)` 改成 `T.copy(A, A_sh)`（不切片），会发生什么？
-**答案**：源 region 变成整张 `A`，extent 变成 `(M, K)`，而 `A_sh` 只有 `(block, block)`。`legalize_pairwise_extents` 无法把 `(512,512)` 广播成 `(128,128)`，形状校验/extent 断言会报错。结论：**`T.copy` 的 src 与 dst 的非 1 维 extent 必须能对上**，切片是表达「搬一个 tile」的正道。
+**练习 1**：`T.copy(A, B)` 中 `A`、`B` 都是完整 `Buffer` 但形状不同，会发生什么？
+**答案**：前端会先做结构相等断言（[copy_op.py:L56-L57](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L56-L57)），形状不同会在编译期报错。
 
-**练习 2**：为什么 TMA bulk 拷贝只由 thread 0 发起，而 Normal 拷贝由所有线程并行执行？
-**答案**：TMA 是「单线程构建描述符 + 硬件整块搬运」的机制，多线程重复发起既无意义又浪费；而 Normal 拷贝本质是「每个线程搬若干元素」，必须铺满整个 threadblock 才有足够带宽。
+**练习 2**：为什么 `T.copy(buffer_a[i], buffer_b[i])` 不会生成 copy intrin？
+**答案**：两边都是标量 `BufferLoad`、推不出 extent，命中标量快速通道，直接降级为 `tir.BufferStore`（[copy_op.py:L77-L81](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L77-L81)）。
 
 ---
 
-### 4.2 T.view / T.reshape：视图与 layout 重解释
+### 4.2 T.copy 的指令选路与并行化搬运
 
 #### 4.2.1 概念说明
 
-`T.reshape` 和 `T.view` 都**不搬运数据**。它们返回一个新的 `T.Tensor`，这个新 tensor 与源 buffer 共享**同一段底层 storage**（`src.data`），只是换了形状，或同时换了形状与数据类型。
+`T.copy` 在 Python 前端只是发出一条 `tl.tileop.copy` intrin；**真正决定「用什么指令搬」发生在 C++ 的 lowering 阶段**。同一条 `T.copy`，根据 src/dst 的 scope、数据类型、形状、目标架构，会被编译成完全不同的代码：
 
-二者的区别很轻：
+- **global → shared**：Hopper 上优先用 **TMA**（`tma.load` / `tma.store`，分 1D 与多维两种），否则退化成普通线程级 cp.async/ldg。
+- **shared → fragment**：用 **`ldmatrix`（LDSM）** 把 shared 里的数据按 8×8 矩阵片段喂给 tensor core。
+- **fragment → shared**：用 **`stmatrix`（STSM）**。
+- **shared.tmem → fragment**（Blackwell sm100）：用 **`tcgen05.ld`**。
+- 以上都不满足时：**普通 SIMT 拷贝**——开若干并行循环，每个线程搬若干元素。
 
-- `T.reshape(src, shape)`：只改形状，dtype 沿用源。
-- `T.view(src, shape=None, dtype=None)`：shape 和 dtype 都可省略（省略则沿用源），可同时改形状**和**数据类型。
+三个旋钮帮你微调：
 
-它们共同遵守一条铁律——**总 bit 数守恒**：
-
-\[
-\text{bits}_{\text{new}} = \left(\prod_i \text{shape}^{\text{new}}_i\right) \times \text{dtype}^{\text{new}}.\text{bits}
-\quad = \quad
-\left(\prod_i \text{shape}^{\text{src}}_i\right) \times \text{dtype}^{\text{src}}.\text{bits}
-= \text{bits}_{\text{src}}
-\]
-
-比如 `(128, 128)` 的 float16（bit 总数 = 128×128×16）可以 view 成 `(128, 64)` 的 float32（128×64×32），bit 数相等，合法；但 view 成 `(100, 100)` 的 float16 就会被断言拒绝。
-
-> ⚠️ **重要约束（务必记住）**：`T.view` / `T.reshape` 返回的 tensor 用的是**连续（row-major）stride**（由 `TensorProxy._construct_strides` 重新构造），它**不支持 stride 化的逻辑转置**。也就是说，你不能用 `T.view` 把 `(M, K)` 看成转置后的 `(K, M)`——那会改变数据排列，而 view 只是换「连续字节怎么切分」的看法。真正的转置要用 `T.copy` 配合交换索引，或用 `T.Parallel` 手写（见 4.2.4 与第 5 节）。
+- `disable_tma=True`（或全局 `pass_configs={"tl.disable_tma_lower": True}`）：强制不走 TMA，退回 cp.async/普通拷贝。在调试、或 TMA 不支持的形状下很有用。
+- `coalesced_width=...`：影响普通拷贝循环的最内层合并访问宽度（一种访存合并提示）。
+- `eviction_policy="evict_first"|"evict_last"|"evict_normal"`：L2 缓存逐出策略，控制这块数据在 L2 里留多久。
 
 #### 4.2.2 核心流程
 
-`reshape` 与 `view` 的实现极其简洁，只有三步：
+lowering 的核心是一个**优先级判定函数 `GetCopyInst`**，它按固定顺序逐个 `Check*`，命中谁就用谁：
 
-1. 用 `bits_product(shape, dtype)` 计算新形状的总 bit 数，与源的 bit 数做 `prim_expr_equal` 比较，不等就断言失败。
-2. 调 `T.Tensor(shape, dtype, src.data)`，构造一个**复用 `src.data` 这段 storage** 的新 buffer。
-3. 返回这个新 buffer。
+```
+GetCopyInst(target, disable_tma_lower, ...):
+  if !disable_tma && !oob && CheckBulkLoad1D(...):   return kBulkLoad1D   # TMA 1D 读
+  if !disable_tma && !oob && CheckBulkStore1D(...):  return kBulkStore1D  # TMA 1D 写
+  if !disable_tma && CheckBulkLoad(...):             return kBulkLoad     # TMA 多维读
+  if !disable_tma && CheckBulkStore(...):            return kBulkStore    # TMA 多维写
+  if CheckLDSMCopy(target):   return kLDSM          # ldmatrix
+  if CheckSTSMCopy(target):   return kSTSM          # stmatrix
+  if CheckTMemLoad(target):   return kTMemLoad      # tcgen05.ld
+  if CheckTMemStore(target):  return kTMemStore     # tcgen05.st
+  return kNormal                                     # 普通 SIMT 拷贝
+```
 
-其中 `T.Tensor(...)` 走 `TensorProxy.__call__`，它会用 `_construct_strides(shape)` 按 row-major 重新算出 stride，再把 `data`（storage 指针）原样塞进去——所以新 tensor 与源共享同一块显存，没有任何拷贝。
+以 TMA Bulk Load 为例，`CheckBulkLoad` 要求：架构支持 bulk copy、src 在 `global` 且 dst 在 `shared`/`shared.dyn`、src 最后一维 × 每元素字节数是 16 的倍数、src 与 dst 数据类型相同。任一不满足就 fallback。
+
+普通拷贝路径 `LowerNormalCopy` 则会先用 `MakeSIMTLoop` 生成一组**并行循环**（`ForKind::kParallel`），再交给 `LowerParallelLoop` 做线程划分、向量化与谓词保护。
 
 #### 4.2.3 源码精读
 
-[customize.py:L40-L53](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py#L40-L53) —— `reshape`：用 `bits_product` 校验「新 shape × dtype 的 bit 数」等于「源 shape × dtype 的 bit 数」，然后返回 `T.Tensor(shape, src.dtype, src.data)`。注意第三个参数是 `src.data`——这就是「零拷贝、共享 storage」的关键。
+C++ 算子注册与 builder 挂载靠宏 `TIR_REGISTER_TL_TILE_OP`，它把名字拼成 `tl.tileop.<OpName>` 并把 builder 绑到 `(args, annotations)` 构造：
 
-[customize.py:L56-L66](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py#L56-L66) —— `view`：相比 `reshape` 多了「shape/dtype 可省略（沿用源）」与「允许换 dtype」；同样以 bit 总数守恒做断言，同样返回 `T.Tensor(shape, dtype, src.data)`，同样共享 storage。
+[src/op/operator.h:L101-L112](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/operator.h#L101-L112) —— 宏展开为 `Op::Get("tl.tileop." #OpName)` 与 `TVM_REGISTER_OP("tl.tileop." #OpName)`，builder 调用 `Entry(args, annotations)`。
 
-[tilelang/utils/language.py:L377-L385](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py#L377-L385) —— `bits_product`：把 shape 各维连乘，再乘 `DataType(dtype).bits`，得到这段 buffer 的总 bit 数。这是 view/reshape 合法性的唯一判据。
+`Copy` 构造函数读取 `args[0]/args[1]` 作为 src/dst 的 region，并把 `annotations` 整个存下来（这就是前端那个 `ann` 字典）：
 
-[tilelang/language/proxy.py:L143-L154](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/proxy.py#L143-L154) —— `TensorProxy._construct_strides` 与 `__call__`：从 shape 倒着累乘得到 row-major stride，再带着 `data` 构造 tir.Buffer。这段解释了「为什么 view 只能给出连续 stride」——stride 是这里**重新算出来的**，跟源 buffer 的 stride 无关，也不可能表达转置。
+[src/op/copy.cc:L106-L120](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L106-L120) —— `Copy::Copy`：把两个参数 `NormalizeToBufferRegion` 成 src/dst 的 `Buffer + Range`，并保存 annotations。
 
-一个真实用例（来自仓库示例，view 同时改了 shape 与 dtype，把 shared 里的累加器重解释成另一种排布）：
+注解的字段含义与读取方式定义在头文件：
 
-[examples/dsa_sparse_finetune/sparse_mla_bwd.py:L165-L166](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/dsa_sparse_finetune/sparse_mla_bwd.py#L165-L166) —— `acc_dkv_shared = T.view(KV_shared, shape=[BS // split_store, D], dtype=accum_dtype)`：对同一个 `KV_shared` 这块 shared memory，用新的形状和累加 dtype 重新取一个视图，后续就按这个新视图读写——典型的「同一块 SMEM，多种看法」。
+[src/op/copy.h:L114-L123](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.h#L114-L123) —— `CopyNode` 字段与支持的注解键（`coalesced_width/disable_tma/eviction_policy`）。
+[src/op/copy.h:L140-L156](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.h#L140-L156) —— `GetDisableTMA()` / `GetEvictionPolicy()` 读取注解。
+
+选路优先级函数（注意 1D TMA 因为不支持越界访问，会额外要求 `!buffer_oob`）：
+
+[src/op/copy.cc:L688-L719](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L688-L719) —— `GetCopyInst`：按 BulkLoad1D → BulkStore1D → BulkLoad → BulkStore → LDSM → STSM → TMemLoad → TMemStore → Normal 的优先级返回 `CopyInst`。`CopyInst` 枚举见 [src/op/copy.h:L17-L29](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.h#L17-L29)。
+
+TMA Bulk Load 的前置条件（global→shared、末维对齐 16 字节、dtype 相同）：
+
+[src/op/copy.cc:L510-L543](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L510-L543) —— `CheckBulkLoad`：架构、scope、末维 16 字节对齐、dtype 四项检查；不满足则打印 WARNING 并返回 false（fallback 到普通拷贝）。
+
+`Lower` 根据选出的 `CopyInst` 分派到具体的 lowering 函数：
+
+[src/op/copy.cc:L723-L755](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L723-L755) —— `CopyNode::Lower`：按 `copy_inst` 分派到 `LowerBulkCopy / LowerBulkCopy1D / LowerLDSMCopy / LowerTmemCopy / LowerNormalCopy`。
+
+普通 SIMT 拷贝的循环生成：`MakeSIMTLoop` 选「scope 层级更低的一侧」作为循环基准，为每维 extent>1 的轴生成一个迭代变量，最内层带 `kParallel`，并把 `coalesced_width` 作为循环注解传下去：
+
+[src/op/copy.cc:L281-L325](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L281-L325) —— `MakeSIMTLoop`：选择 base ranges、构造谓词、生成嵌套 `kParallel` 循环；其中 [src/op/copy.cc:L316-L323](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L316-L323) 把 `coalesced_width` 写进循环 annotation。
+
+注册语句确认 op 名：
+
+[src/op/copy.cc:L1770-L1773](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1770-L1773) —— `TIR_REGISTER_TL_TILE_OP(Copy, copy)`，即 `tl.tileop.copy`（与前端 [copy_op.py:L107](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L107) 一致）。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证「view 共享 storage、零拷贝」，并亲手看清 view **不能**做转置。
+**目标**：用 `disable_tma` 旋钮强制关闭 TMA，对比生成代码与性能，直观感受「同一条 `T.copy` 走不同指令」。
 
-**操作步骤**（示例代码）：
+**操作步骤**（示例代码，参考真实用例 [examples/distributed/example_post_attn_all2all_transpose.py:L200](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/distributed/example_post_attn_all2all_transpose.py#L200)）：
+
+1. 写一个 matmul kernel（沿用 quickstart 思路），其 `T.copy(A[...], A_shared)` 是 global→shared 搬运。
+2. 分别用两种配置编译：
 
 ```python
-# 示例代码：view 共享 storage 验证
-import torch, tilelang
-import tilelang.language as T
-
-@tilelang.jit(out_idx=[1])
-def view_demo(N, dtype=T.float32):
-    @T.prim_func
-    def main(A: T.Tensor((N,), dtype),
-             C: T.Tensor((N,), dtype)):
-        with T.Kernel(1, threads=128):
-            S = T.alloc_shared((N,), dtype)        # 一段 shared
-            T.copy(A, S)                            # 把 A 搬进 S
-            # 把同一段 storage 重解释成 (N//2, 2) 的形状
-            S2 = T.reshape(S, [N // 2, 2])          # 零拷贝，与 S 共享 data
-            # 通过新视图把 S2[0,0] 读出来写回 C[0]
-            for i in T.Parallel(N):
-                C[i] = S[i]                         # 走原视图
-            C[0] = S2[0, 0]                          # 走 reshape 后的视图，值应等于 S[0]
-    return main
-
-a = torch.arange(1.0, 513.0, device="cuda").to(torch.float32)
-c = view_demo(512)(a)
-print("S2[0,0] via view ==", c[0].item(), " expected ==", a[0].item())
+# 示例代码：开关 TMA 对比
+kernel_tma   = tilelang.compile(func)                                  # 默认（Hopper 上走 TMA）
+kernel_notma = tilelang.compile(func, pass_configs={"tl.disable_tma_lower": True})
 ```
 
-**需要观察的现象**：
+3. 用 `kernel_tma.get_kernel_source()` 与 `kernel_notma.get_kernel_source()` 对比生成的 CUDA 源码。
+4. 用 `kernel.get_profiler().do_bench()` 测两者延迟。
 
-1. `c[0]` 应等于 `a[0]`（即 `1.0`），证明 `S2` 和 `S` 指向同一段 shared memory。
-2. 若把 `T.reshape(S, [N//2, 2])` 改成 bit 数不等的形状（如 `[N//3, 3]`），编译期断言会失败。
+**需要观察的现象**：默认版生成的源码里应出现 TMA 描述符创建与 `tma.load`（或等价 PTX）；`disable_tma_lower=True` 版应退化为线程级 cp.async / 普通加载循环，且通常更慢。
 
-**验证 view 不支持转置**：试着写 `T.view(S_of_shape_MK, shape=[K, M])` 期望得到转置——你会发现它**只是把连续字节按 `[K, M]` 重新切分**（等价于 reshape），读出来的数值并不是数学上的转置。结论：转置请改用 4.1 的 `T.copy` 配合交换索引，或第 5 节综合实践里的 `T.Parallel` 转置写法。
-
-**预期结果**：`c[0] == a[0]` 成立；非法 reshape 报断言错。具体数值**待本地验证**。
+**预期结果 / 待本地验证**：在 Hopper（sm90）上 TMA 路径通常更快、线程占用更低；在非 Hopper 架构上两者可能都走普通拷贝。**运行结果待本地验证。**
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：一个 `(64, 64)` 的 float16 buffer，下面哪些 `T.view` 合法？(a) shape=`(128, 32)`, dtype=float16；(b) shape=`(64, 64)`, dtype=float32；(c) shape=`(64, 32)`, dtype=float32。
-**答案**：源 bit 数 = 64×64×16 = 65536。(a) 128×32×16 = 65536 ✅；(b) 64×64×32 = 131072 ❌；(c) 64×32×32 = 65536 ✅。所以 (a)(c) 合法，(b) 非法。
+**练习 1**：为什么 1D TMA（`BulkLoad1D`）比多维 TMA 多了一个 `!buffer_oob` 前置条件？
+**答案**：1D TMA 不能处理越界访问（见 [copy.cc:L698-L703](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L698-L703) 的注释），存在潜在越界时会回退到带谓词的多维 TMA 或普通拷贝。
 
-**练习 2**：既然 view 共享 storage，那么在 kernel 里通过 view 写入一个元素，原 buffer 能看到吗？
-**答案**：能。因为二者底层 `data`（storage 指针）相同，通过任一视图写入都会反映到另一视图。这也是 `sparse_mla_bwd.py` 里用 `T.view` 重解释累加器、随后继续在同一块 SMEM 上读写的前提。
+**练习 2**：`MakeSIMTLoop` 为什么在 src/dst 之间选「scope 层级更低的一侧」作为循环基准？
+**答案**：选更低层级（如 fragment/shared）的一侧作为循环轴来源，可以保证生成的迭代域覆盖真正需要遍历的元素维度，避免在更高层级（如 global）的多余维度上产生过小或不对齐的循环（见 [copy.cc:L132-L148](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L132-L148) 的 scope_level 判定）。
 
 ---
 
-### 4.3 T.c2d_im2col：卷积数据布局的特殊搬运
+### 4.3 T.view / T.reshape：零拷贝视图与布局/类型重解释
 
 #### 4.3.1 概念说明
 
-卷积（Conv2D）的访存模式很「散」：输出一个像素要用到卷积核覆盖的一小块输入，跨空间位置、跨通道反复取数。直接实现这套寻址既复杂又低效。**im2col**（image to column）是一种经典变换：把每个卷积窗口要用的输入像素**gather（聚拢）**成矩阵的一列，于是卷积就退化成一次普通 GEMM，可以直接用 `T.gemm`。
+`T.view` 和 `T.reshape` 做的事情，用一句话讲就是：**同一块内存，换一种「形状 + 数据类型」的解释，但不搬动任何数据**。
 
-`T.c2d_im2col` 是 TileLang 提供的「卷积专用搬运」：它在 **Hopper 上借助 TMA 的 im2col 描述符**，把「取卷积窗口 + 搬到 shared」融合成**一次** global→shared 搬运，省掉手写 gather 循环。在非 Hopper 架构上，TMA im2col 不可用，必须退回到手写的 `T.Parallel` gather 循环。
+它返回的新 `T.Tensor` 共用源 buffer 的底层指针 `src.data`，只是声明了新的 `shape`（以及 `view` 还可换 `dtype`）。正因如此，必须满足一条硬约束——**比特总数守恒**：
+
+\[
+\text{bits} = \left(\prod_{i} \text{shape}_i\right) \times \text{dtype.bits}
+\]
+
+也就是说，新视图的「元素总数 × 每元素比特数」必须等于源 buffer 的同一量。比如 16 个 `float16`（共 256 bit）可以 `view` 成 8 个 `float32`，但不能 view 成 12 个 `float16`（192 bit ≠ 256 bit）。
+
+两者差别很小：
+
+- `T.reshape(src, shape)`：只能换 `shape`，`dtype` 沿用源。
+- `T.view(src, shape=None, dtype=None)`：`shape`、`dtype` 都可省略（省略则沿用源），可同时换 `shape` 和 `dtype`。
+
+> **重要**：`view`/`reshape` 只是把连续内存按新形状/类型重新切分，**它不会做矩阵转置**。把 `(M,K)` 的连续内存 `view` 成 `(K,M)`，得到的是「同样的扁平序列按 (K,M) 行优先重新分组」，**而不是**数学上的转置（转置需要交换两个轴的步长，那要用带 strides 的视图，见 4.3.4 的进阶说明）。
 
 #### 4.3.2 核心流程
 
-前端 `c2d_im2col()` 把卷积参数原样打包，发出 `tl.tileop.c2d_im2col` intrin：
+`view`/`reshape` 的实现极其简短：
 
-1. 把 `eviction_policy` 映射成整数 0/1/2。
-2. 把输入 `img`、输出 `col` 各自打包成读/写 region。
-3. 发出 `tir.call_intrin("handle", Op.get("tl.tileop.c2d_im2col"), img_region, col_region, nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy)`。
-
-后端 `Conv2DIm2ColOpNode::Lower` 在 Hopper 上构造一个 `TMAIm2ColDesc`（含全局形状、elem stride、lower/upper corner、smem box 等），发出 `tma_load_im2col`，同样由 thread 0 发起；并对源/目的 scope、维度做了严格断言（src 必须 4D global、dst 必须 2D shared、dtype 一致、目标必须是 Hopper）。
-
-> 关键设计点：`nhw_step` / `c_step` 是「当前要取哪一批 pixel / 哪一段 channel」的步进索引，由 kernel 外层的 tile 循环变量喂入；`kernel/stride/dilation/pad` 是卷积本身的几何参数。c2d_im2col 把这些参数编码进 TMA 描述符，硬件按描述符自动完成 gather。
+1. 处理默认值：`view` 的 `shape=None` 用源 `shape`、`dtype=None` 用源 `dtype`；`reshape` 的 `dtype` 恒为源 `dtype`。
+2. 检查比特守恒：用 `bits_product(new_shape, new_dtype)` 与 `bits_product(src.shape, src.dtype)` 做结构相等断言。
+3. 返回 `T.Tensor(new_shape, new_dtype, src.data)`——复用源指针，由 `TensorProxy` 按新形状重新算出连续 row-major strides。
 
 #### 4.3.3 源码精读
 
-前端：
+`reshape` 与 `view` 的定义在 `customize.py`：
 
-[copy_op.py:L110-L154](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L110-L154) —— `c2d_im2col`：参数为 `(img, col, nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy)`；把 img/col 各自用 `to_buffer_region` 打包成读/写 region，发出 `tl.tileop.c2d_im2col` intrin，共 9 个参数。
+[tilelang/language/customize.py:L40-L53](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py#L40-L53) —— `reshape(src, shape)`：比特守恒断言后 `return T.Tensor(shape, src.dtype, src.data)`。
+[tilelang/language/customize.py:L56-L66](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py#L56-L66) —— `view(src, shape=None, dtype=None)`：处理默认值、比特守恒断言后 `return T.Tensor(shape, dtype, src.data)`。
 
-后端构造与 lowering：
+比特守恒的判定函数：
 
-[src/op/copy.cc:L1564-L1580](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1564-L1580) —— `Conv2DIm2ColOp` 构造：从 9 个 args 里解出 src/dst region、`nhw_step_`/`c_step_` 以及 `kernel_`/`stride_`/`dilation_`/`padding_`/`eviction_policy_`（后五个强制为整数）。
+[tilelang/utils/language.py:L377-L385](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/utils/language.py#L377-L385) —— `bits_product(shape, dtype)`：返回 \(\prod \text{shape}_i \times \text{dtype.bits}\)。
 
-[src/op/copy.cc:L1589-L1634](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1589-L1634) —— `Conv2DIm2ColOpNode::Lower` 开头：断言目标必须是 Hopper、src 在 global 且为 4D、dst 在 shared 且为 2D、dtype 一致；随后构造 `TMAIm2ColDesc`，填入全局形状/stride、`elem_stride = {1, stride, stride, 1}`、`lower/upper_corner = {-padding, -padding}`（这就是 padding 在 TMA 层面的表达）、smem box 取自 dst 形状，并按 shared layout 决定 swizzle 模式（32B/64B/128B）。
+`T.Tensor(...)` 复用 `data` 并按新形状构造连续 strides：
 
-[src/op/copy.cc:L1661-L1711](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1661-L1711) —— 用 `nhw_step_`/`c_step_` 反推出这次要取的全局坐标 `global_coords`（c, w, h, n）与 `image_offset`（w, h），最终发出 `tma_load_im2col`，并由 `IfThenElse(EQ(T.thread_var, T.thread_bounds->min), ...)` 限定只由 thread 0 发起——和普通 TMA bulk 一样是「单线程发起」。
+[tilelang/language/proxy.py:L151-L154](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/proxy.py#L151-L154) —— `TensorProxy.__call__`：标量 shape 归一化后调用父类，把 `data=data` 透传，并由 `_construct_strides` 算出连续 strides。
+[tilelang/language/proxy.py:L143-L149](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/proxy.py#L143-L149) —— `_construct_strides`：按 row-major 从末维起累乘得到 strides。
 
-真实示例里 Hopper 与非 Hopper 两条分支的对照：
+真实用例（对照阅读，帮你理解为什么需要 view）：
 
-[examples/convolution/example_convolution.py:L52-L64](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py#L52-L64) —— 在 K 维的 `T.Pipelined` 循环里：`is_hopper` 为真时调 `T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)`，一次把卷积窗口聚拢进 `data_shared`；否则走 `T.Parallel(block_M, block_K)` 的手写 gather（逐元素算 `access_h/access_w`、用 `T.if_then_else(in_bound, ..., 0)` 处理越界补零）。两种走法后面都接 `T.copy(kernel_flat[...], kernel_shared)` + `T.gemm(...)`，说明 im2col 的目的就是「把卷积变成 GEMM」。
+- **类型 + 形状重解释（shared tile）**：[examples/dsa_sparse_finetune/sparse_mla_bwd.py:L165-L166](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/dsa_sparse_finetune/sparse_mla_bwd.py#L165-L166) —— `acc_dkv_shared = T.view(KV_shared, shape=[BS // split_store, D], dtype=accum_dtype)`，把一块 shared 缓存按累加精度（accum_dtype）重新看待。
+- **为 GEMM 重排权重（global，等价 reshape）**：[examples/convolution/example_convolution.py:L48-L49](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py#L48-L49) —— `kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)`，把 4D 卷积核 `(KH,KW,C,F)` 当成 2D 矩阵 `(KH*KW*C, F)` 喂给 `T.gemm`。这正是 `reshape` 的典型用途：**在调用 gemm/copy 之前，把张量整理成算子期望的形状**。
 
-同文件里还有 `T.copy` 切片语法的活样例：
-
-[examples/convolution/example_convolution.py:L63](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py#L63) —— `T.copy(kernel_flat[k_iter * block_K, bx * block_N], kernel_shared)`：源是一个二维切片 `BufferLoad`，`copy` 据此推断出要搬 `(block_K, block_N)` 这么大一块进 `kernel_shared`，正好对应 4.1 讲的「按切片推断 extent」。
-
-而 [examples/convolution/example_convolution.py:L48-L49](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py#L48-L49) 里 `kernel_flat = T.Tensor((KH*KW*C, F), dtype, kernel.data)` 则是 4.2 讲的「零拷贝重解释」的活用法：把 4D 卷积核 `(KH, KW, C, F)` 在**同一段 storage** 上看成 2D `(KH*KW*C, F)`，这样后续 GEMM 就能直接用。
+`view`/`reshape` 的导出在 [tilelang/language/__init__.py:L76-L89](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/__init__.py#L76-L89)（连同 `dp4a/clamp/atomic_*` 等）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：读懂两条分支，理解 c2d_im2col 把 gather 融进搬运的价值。
+**目标**：用 `T.copy` 分块加载一个 `(M,K)` 矩阵到 shared，再用 `T.view` 对这块 shared tile 做形状/类型重解释并验证「比特守恒、零拷贝」；同时亲手确认 `T.view` **不能**用来做转置。
 
-**操作步骤**：
+**操作步骤**（示例代码）：
 
-1. 打开 `examples/convolution/example_convolution.py`，定位 `is_hopper = check_hopper()` 与 `T.Pipelined` 内的两条分支（`:L52-L64`）。
-2. 在 Hopper GPU 上运行 `python examples/convolution/example_convolution.py`，应打印 `All checks passed.✅`。
-3. 强制走非 Hopper 分支：把 `is_hopper = check_hopper()` 临时改成 `is_hopper = False`（**仅用于本地观察，勿提交**），再运行，确认手写 gather 分支同样能通过校验。
-4. 用 `kernel.get_kernel_source()` 对比两条分支生成的 CUDA：Hopper 分支应含 `tma_load_im2col` 相关指令；手写分支应是一段带越界判断的 load 循环。
+1. 写一个 kernel：global `A (M,K)` → shared `A_shared (BM,BK)`，然后：
 
-**需要观察的现象**：两条分支数学结果一致（都通过 `torch.testing.assert_close`），但 Hopper 分支生成的指令更短、更「整块」，手写分支则有明显的逐元素寻址与补零逻辑。
+```python
+# 示例代码：T.view 重解释
+A_shared = T.alloc_shared((BM, BK), "float16")
+T.copy(A[bx * BM, by * BK], A_shared)
 
-**预期结果**：两次都打印 `All checks passed.✅`；指令差异如上。具体性能数字**待本地验证**。
+# (a) 形状重解释：(BM, BK) -> (BM*BK,)，元素一一对应
+A_flat = T.view(A_shared, shape=[BM * BK])
+
+# (b) 类型重解释：BM*BK 个 float16 -> (BM*BK//2) 个 float32（比特守恒）
+A_f32 = T.view(A_shared, shape=[BM * BK // 2], dtype="float32")
+```
+
+2. **转置实验**（关键）：尝试 `A_T = T.view(A_shared, shape=[BK, BM])`，然后写一段校验：在 host 上构造 `A`，运行只含「copy + view」的 kernel，比较 `A_T[j,i]` 与期望的 `A[i,j]`。
+
+**需要观察的现象**：
+- (a)(b) 中 `A_flat[i*BK+j]` 应严格等于 `A_shared[i,j]`；`A_f32` 的值是两个相邻 `float16` 比特按 `float32` 解释的结果（比特重排，零拷贝）。
+- 转置实验中 `A_T[j,i]` **不等于** `A[i,j]`。因为 `view` 只是按 `(BK,BM)` 的连续 row-major 重新切分同一块扁平内存：`A_T[j,i]` 读的是偏移 `j*BM+i`，而真正的转置 `A[i,j]` 在偏移 `i*BK+j`。
+
+**预期结果 / 待本地验证**：转置实验会「失败」（结果不是转置），这正是要建立的认知。**真正做转置**有两种正确写法：①用带 strides 的视图 `T.StridedTensor((BK, BM), (1, BM), dtype)`（[proxy.py:L157-L166](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/proxy.py#L157-L166)，步长 `(1, BM)` 即转置）；②最常用的是在 `T.Parallel` 循环里交换下标 `C_shared[j,i] = A_shared[i,j]`，或直接用 `T.gemm` 的转置参数。运行结果待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `c2d_im2col` 的 `Lower` 开头要 `ICHECK(TargetIsHopper(T.target))`？
-**答案**：因为它底层用的是 Hopper TMA 的 im2col 描述符（`tma_load_im2col` / `create_tma_im2col_descriptor`），这是 Hopper 才有的硬件能力；非 Hopper 架构没有这条指令，所以示例里用 `is_hopper` 判断后退回手写 gather。
+**练习 1**：能否把 `(4,4)` 的 `float16` buffer `view` 成 `(4,4)` 的 `float32`？
+**答案**：不能。前者 4·4·16=256 bit，后者 4·4·32=512 bit，比特总数不等，`bits_product` 断言失败（[customize.py:L65](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py#L65)）。能 view 成的 `float32` 形状最多是 `(4,2)`（4·2·32=256 bit）。
 
-**练习 2**：`T.c2d_im2col` 和 `T.copy` 在「取数据」这件事上最大的区别是什么？
-**答案**：`T.copy` 是**规则矩形**的整块搬运（src/dst region 形状一致）；`T.c2d_im2col` 则在搬运的同时做**卷积窗口 gather**——它按卷积的 stride/dilation/pad 把分散的输入像素聚拢成 shared 里的一列，这是普通 `T.copy` 表达不了的访存模式，所以才需要一条专用原语。
+**练习 2**：`T.view` 返回的新 buffer 和源 buffer 共享什么？为什么不产生拷贝？
+**答案**：共享底层指针 `src.data`（[customize.py:L66](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/customize.py#L66)）。新 `T.Tensor` 只是把同一个指针配上新 shape/strides，没有任何数据搬运，所以是「零拷贝」。
 
 ---
 
+### 4.4 c2d_im2col：卷积专用的 im2col 搬运
+
+#### 4.4.1 概念说明
+
+卷积有一种经典的高效实现——**im2col**：把输入图像里每个输出位置对应的感受野 patch 展开成矩阵的一列，于是卷积就变成了一个大矩阵乘法。这个「展开」过程如果用普通线程循环来做，访存很碎、很慢。
+
+`T.c2d_im2col(img, col, nhw_step, c_step, kernel, stride, dilation, pad)` 就是 TileLang 提供的**专用 im2col 搬运原语**：在 Hopper 上，它直接落到硬件的 **TMA-im2col** 指令（`tma.load` 的 im2col 变体），让 TMA 引擎替你完成 patch 展开与边界（padding）填充，直接写进 shared memory，供后续 `T.gemm` 使用。
+
+#### 4.4.2 核心流程
+
+前端 `c2d_im2col` 把 `img`/`col` 编码成 region，再把卷积参数（kernel/stride/dilation/pad）与步进（`nhw_step`/`c_step`）原样传给 `tl.tileop.c2d_im2col` intrin。C++ 的 `Conv2DIm2ColOp::Lower` 在 Hopper 上构建一个 `TMAIm2ColDesc`（含 `lower_corner/upper_corner` 表达 padding、`smem_box_pixel/smem_box_channel` 表达输出 tile 形状），生成 `create_tma_im2col_descriptor` + `tma_load_im2col` 调用。
+
+#### 4.4.3 源码精读
+
+前端实现（注意它要求 `img` 是完整 `Buffer`、`col` 也是完整 `Buffer`，范围由 buffer 自身形状决定）：
+
+[tilelang/language/copy_op.py:L110-L120](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L110-L120) —— `c2d_im2col` 签名。
+[tilelang/language/copy_op.py:L136-L154](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/tilelang/language/copy_op.py#L136-L154) —— 把 `eviction_policy` 映射成整数、`to_buffer_region` 编码 img/col，发出 `tl.tileop.c2d_im2col`。
+
+C++ lowering（仅 Hopper，要求 src 在 global、dst 在 shared、src 4D、dst 2D、dtype 相同）：
+
+[src/op/copy.cc:L1564-L1580](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1564-L1580) —— `Conv2DIm2ColOp` 构造：解析 src/dst region 与各卷积参数。
+[src/op/copy.cc:L1589-L1711](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1589-L1711) —— `Conv2DIm2ColOpNode::Lower`：构建 `TMAIm2ColDesc`、计算各维坐标与 image_offset、生成 `tma_load_im2col`。
+[src/op/copy.cc:L1786-L1789](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1786-L1789) —— 注册为 `tl.tileop.c2d_im2col`。
+
+真实用例对照：
+
+[examples/convolution/example_convolution.py:L48-L67](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py#L48-L67) —— Hopper 分支用 `T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)`，非 Hopper 分支则退化成手写的 `T.Parallel` im2col 循环；随后 `T.copy(kernel_flat[...], kernel_shared)` + `T.gemm(data_shared, kernel_shared, out_local)`。注意这里 `kernel_flat = T.Tensor((KH*KW*C, F), dtype, kernel.data)` 正是 4.3 讲的 reshape 用法。
+
+#### 4.4.4 代码实践
+
+**目标**：通过真实卷积示例，把 `c2d_im2col` + `T.copy` + `T.gemm` 三者串起来理解。
+
+**操作步骤**：
+
+1. 阅读 [examples/convolution/example_convolution.py](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/examples/convolution/example_convolution.py) 的 `convolution(...)` 函数（L28-L69）。
+2. 运行它：`python examples/convolution/example_convolution.py`（按文件 `main` 里的 argparse 调参）。
+3. 在 Hopper 与非 Hopper 机器上各跑一次，对比是否走了 `c2d_im2col` 分支（由 `is_hopper = check_hopper()` 决定，L34）。
+
+**需要观察的现象**：Hopper 上 kernel 源码里应出现 `tma_load_im2col`；非 Hopper 上是显式的 `T.Parallel` patch 展开循环。
+
+**预期结果 / 待本地验证**：两种路径输出都应与参考卷积结果一致（脚本内自带校验）。运行结果待本地验证。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`c2d_im2col` 为什么对 src 要求 4D、dst 要求 2D？
+**答案**：im2col 把 4D 输入 `(N,H,W,C)` 的 patch 展平成 2D 矩阵 `(patch数, KH*KW*C)`，dst 的两维正好对应「输出像素」与「展开后的通道×核」维度（见 [copy.cc:L1592-L1596](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1592-L1596) 的断言）。
+
+**练习 2**：为什么非 Hopper 架构不能用 `T.c2d_im2col`？
+**答案**：它的 lowering 只在 Hopper 上实现（`ICHECK(TargetIsHopper(...))`，[copy.cc:L1591](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/op/copy.cc#L1591)），依赖 TMA-im2col 指令；其它架构需用手写循环展开（见卷积示例 L56-L62）。
+
 ## 5. 综合实践
 
-把本讲三个模块串起来：**用 `T.copy` 分块加载、用 `T.view` 零拷贝重解释、用 `T.copy` + 交换索引实现真正的转置**，并和 PyTorch 对照验证。
+设计一个把本讲三个知识点（`T.copy` 搬运、`T.view` 重解释、`c2d_im2col` 的思想）串起来的小 kernel：**实现一个带 reshape 的转置搬运 kernel**。
 
-**任务**：写一个 kernel，把 `(M, K)` 矩阵 `A` 的每个 `(block_M, block_K)` tile 加载到 shared，然后写出它的转置 tile 到输出 `C`（形状 `(K, M)`）；途中用 `T.reshape` 把 shared tile 重解释，验证它共享 storage。
+任务：给定 global `A (M, K)`，输出 `C (K, M) = A^T`。要求：
+
+1. 用 `T.copy` 把 `(BM, BK)` 的 tile 从 global 分块加载到 `A_shared`。
+2. 用 `T.view` 把 `A_shared (BM, BK)` 重解释成一个一维视图 `A_flat (BM*BK,)`，并在一个 `T.Parallel` 循环里验证 `A_flat[i*BK + j]` 与 `A_shared[i, j]` 指向同一元素（理解零拷贝）。
+3. 用「交换下标」的方式完成真正的转置：`C_shared[j, i] = A_shared[i, j]`，再用 `T.copy` 把 `C_shared` 写回 global `C`。
+4. 编译运行，用 PyTorch 的 `A.t()` 作参考校验。
+
+参考骨架（示例代码）：
 
 ```python
-# 示例代码（综合实践）
-import torch, tilelang
+# 示例代码：综合实践——copy + view + 转置
+import tilelang
 import tilelang.language as T
 
-@tilelang.jit(out_idx=[1])
-def transpose_kernel(M, K, block_M=128, block_K=64, dtype=T.float16):
+@tilelang.jit
+def transpose_kernel(M: int, K: int, BM: int, BK: int):
     @T.prim_func
-    def main(A: T.Tensor((M, K), dtype),
-             C: T.Tensor((K, M), dtype)):           # 输出是转置后形状
-        # grid: 沿 A 的 (M,K) 切 tile；每个 block 产出一个转置 tile
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(K, block_K), threads=128) as (bm, bk):
-            A_sh = T.alloc_shared((block_M, block_K), dtype)
-
-            # 模块1: T.copy 切片加载 global -> shared
-            T.copy(A[bm * block_M, bk * block_K], A_sh)
-
-            # 模块2: T.reshape 零拷贝重解释（bit 总数守恒）
-            #   把 (block_M, block_K) 看成 (block_M//2, 2, block_K)，共享同一 storage
-            A_view = T.reshape(A_sh, [block_M // 2, 2, block_K])
-
-            # 模块3: 真正的转置——shared -> shared 的转置写（T.Parallel 交换索引）
-            AT_sh = T.alloc_shared((block_K, block_M), dtype)
-            for i, j in T.Parallel(block_M, block_K):
-                AT_sh[j, i] = A_sh[i, j]
-
-            # 再用 T.copy 把转置后的 shared tile 写回 global（shared -> global）
-            #   注意 C 的对应 tile 起点：(bk*block_K, bm*block_M)
-            T.copy(AT_sh, C[bk * block_K, bm * block_M])
+    def main(A: T.Tensor((M, K), "float16"), C: T.Tensor((K, M), "float16")):
+        with T.Kernel(T.ceildiv(M, BM), T.ceildiv(K, BK), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((BM, BK), "float16")
+            C_shared = T.alloc_shared((BK, BM), "float16")
+            # (1) 切片搬运 global -> shared
+            T.copy(A[bx * BM, by * BK], A_shared)
+            # (2) view 重解释（零拷贝）：(BM,BK) -> (BM*BK,)
+            A_flat = T.view(A_shared, shape=[BM * BK])
+            # (3) 真正的转置靠交换下标，不是靠 view
+            for i, j in T.Parallel(BM, BK):
+                C_shared[j, i] = A_shared[i, j]
+            # 顺手验证 view 的等价性（仅作演示，可删）
+            # assert A_flat[i * BK + j] == A_shared[i, j]
+            # (4) shared -> global 切片搬运
+            T.copy(C_shared, C[by * BK, bx * BM])
     return main
-
-M, K = 512, 256
-a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-c = transpose_kernel(M, K)(a)                         # 待本地验证
-ref = a.t().contiguous()
-torch.testing.assert_close(c, ref, rtol=1e-3, atol=1e-3)
-print("transpose check passed ✅")
-
-# 额外观察：看生成的指令
-src = transpose_kernel(M, K).get_kernel_source()
-print("TMA load found:", "cp.async.bulk" in src or "TensorMap" in src or "tma" in src.lower())
 ```
 
-**完成检查清单**：
+**验收要点**：
+- `C` 与 `A.t()` 数值一致（`torch.testing.assert_close`）。
+- 能说清第 (3) 步为什么不能用 `T.view(A_shared, shape=[BK, BM])` 替代（见 4.3.4 的转置实验结论）。
+- 用 `kernel.get_profiler().do_bench()` 量一下延迟，并尝试 `pass_configs={"tl.disable_tma_lower": True}` 看 TMA 开关对性能的影响。
 
-- [ ] 数值上 `c` 等于 `a.t()`（验证转置正确）。
-- [ ] 能解释为什么转置必须用 `T.Parallel` 交换索引（或 `T.copy` 配合交换索引），而**不能**用 `T.view(A_sh, [block_K, block_M])`——因为后者只是把连续字节按新形状切分，不是数学转置。
-- [ ] 能解释 `T.reshape` 那一行**没有搬运任何数据**，`A_view` 与 `A_sh` 共享同一段 shared memory。
-- [ ] `get_kernel_source()` 里能定位到 global→shared 的加载指令、shared→global 的写回指令。
-
-> 数值与具体生成指令随 GPU 架构而变，**待本地验证**。若手头无 GPU，至少完成「源码阅读型实践」：跟踪 `T.copy(A[...], A_sh)` 这一行，在 `copy_op.py`（前端 region 构造）→ `src/op/copy.cc:GetCopyInst`（指令选择）→ `Lower`（PTX 生成）之间画出调用链。
+> 该实践依赖 GPU 与 tilelang 安装，具体数值与性能数据待本地验证。
 
 ## 6. 本讲小结
 
-- `T.copy(src, dst)` 是唯一的通用 tile 搬运原语：**按 src/dst 的形状或切片自动推断 extent**，标量对会降级成单条 store，形状不齐时按尾部对齐做广播。
-- 它前端只发出 `tl.tileop.copy` intrin，**真正的指令在 C++ `GetCopyInst` 里按 scope 组合 + 硬件能力挑选**，优先级是 1D-TMA → 多维 TMA → LDSM/STSM → tmem → Normal。
-- **Normal 拷贝全员并行**（`MakeSIMTLoop` 生成 `kParallel` 循环再映射到线程），**TMA 拷贝只由 thread 0 发起**；`disable_tma` / pass_config 可强制回退到 Normal。
-- `T.view` / `T.reshape` 是**零拷贝**重解释：复用 `src.data`，只换形状（reshape）或形状+dtype（view），唯一约束是 **bit 总数守恒**；它们只构造**连续 stride**，**不支持转置视图**。
-- `T.c2d_im2col` 是卷积专用搬运：在 Hopper 上把「取卷积窗口 + 搬到 shared」融合成一次 TMA im2col（`tma_load_im2col`，thread 0 发起），把卷积变成 GEMM；非 Hopper 退回手写 `T.Parallel` gather。
+- `T.copy(src, dst, ...)` 的搬运范围是**推导**出来的：`Buffer` 用 shape、切片用切片长度、缺一侧则广播对齐；标量搬运直接退化为一次赋值；最终发出 `tl.tileop.copy` intrin（活跃实现在 `copy_op.py`，旧版 `copy.py` 已废弃）。
+- 同一条 `T.copy` 在 C++ lowering 阶段按**优先级**被自动选路：TMA（1D→多维）→ LDSM/STSM → tcgen05 → 普通 SIMT 拷贝；`disable_tma`/`coalesced_width`/`eviction_policy` 是三个可控旋钮。
+- `T.view` / `T.reshape` 是**零拷贝视图**：复用 `src.data`，只换 shape（view 还可换 dtype），受「比特总数守恒」约束；它**不做转置**，转置要用交换下标或带 strides 的 `T.StridedTensor`。
+- `T.c2d_im2col` 是卷积 im2col 的专用搬运，Hopper 上直接落到 TMA-im2col 指令，配合 `T.reshape`（把卷积核压成 2D）与 `T.gemm` 完成卷积。
+- 区域表示（`to_buffer_region` / `tl.region`）与注解字典是 copy/fill/reduce 等多个原语共用的底层机制，理解它有助于后续阅读 u3 的 `LowerTileOp`。
 
 ## 7. 下一步学习建议
 
-- **向编译流水线深入**：本讲反复出现的「前端发 intrin → C++ lowering 选指令」模式，将在 u3-l3（LowerAndLegalize）里作为完整 pass 链展开，建议接着读 `LowerTileOp` 如何调用本讲的 `CopyNode::Lower`。
-- **向 layout 推理深入**：4.1 里 `LowerNormalCopy` 调的 `InferLayout`、TMA 路径里决定 swizzle（32B/64B/128B）的逻辑，属于 u4-l1（Layout 推理机制）的内容，读 `src/op/copy.cc:InferLayout` 与 `tilelang/transform/layout_inference.cc` 会豁然开朗。
-- **向异步与流水深入**：T.copy 在 `T.Pipelined` 里作为「生产者」与 `T.gemm`（消费者）重叠，是 u4-l2（软件流水线）的核心戏码，建议结合 `quickstart.py` 的 K 维循环体会「copy 隐藏在 gemm 背后」的设计。
+- **进入编译流水线**：本讲的 `tl.tileop.copy` 是在 [src/transform/lower_tile_op.cc](https://github.com/tile-ai/tilescale/blob/4704282a16fd0e7ff2c2c13f87772b42e4dc6163/src/transform/lower_tile_op.cc) 里被 `ParseOperator` 识别并调用 `CopyNode::Lower` 的——下一讲 [u3-l1 编译总览](./u3-l1-compile-overview.md) 与 [u3-l3 LowerAndLegalize](./u3-l3-lower-legalize.md) 会把这条链路讲透。
+- **深入 TMA 与软件流水**：想真正搞懂 TMA 描述符、swizzle、`tma_load` 的 mbarrier 同步，可读 [u4-l2 软件流水线与异步拷贝](./u4-l2-software-pipeline.md)，那里会展开 `inject_tma_barrier`、`inject_ptx_async_copy` 等 pass。
+- **布局（Layout）系统**：`T.copy` 的 TMA/LDSM 选路高度依赖 `LayoutInference` 推出的 fragment/shared 布局，建议接着读 [u4-l1 Layout 推理机制](./u4-l1-layout-inference.md)。
+- **远程搬运（分布式）**：如果你关心多 GPU 间的 `put`/`get`（也是 `tl.tileop.put/get`），那是 [u6 分布式编程](./u6-l1-distributed-overview.md) 的内容，本讲只覆盖单机搬运。

@@ -1,0 +1,757 @@
+{
+  "project": "AttentionEngine",
+  "head": "b7088e28f5ba083b81d641861c4c1ef703616e21",
+  "rationale": "AttentionEngine 本质是一个「编译式注意力框架」：用户用 Pythonic 接口（score_mod/mask_mod/online_func/CustomIO）描述自定义注意力，系统通过符号 IR（SymbolScalar/DAG）→ 代码生成（generate_tl_from_dag）→ Jinja2 模板渲染，自动产出 TileLang/CuTe 高性能 kernel。因此学习顺序必须顺着这条编译链由外到内、由浅入深：第一单元先建立「定位、运行、目录、用户 API」的全局认识，让读者跑通 mha.py；第二单元深入符号 IR 与代码生成（graph→SymbolScalar→tl_gen→score_mod/online_func/custom_inputs/mask 各自的降级），这是理解整个项目的关键；第三单元把降级产物拼回模板、讲清 lower_tl 完整链路与引擎入口的分发/编译/缓存；第四单元横向覆盖线性注意力、GQA、decode、MLA 等变体与场景；第五单元上升到 CuTe 后端、autotuner 硬件建模、基准与正确性、综合实战、测试调试与架构取舍。每篇讲义只解决一个问题、引用真实源码、给出可操作的实践任务，讲义间通过 depends_on 形成清晰的编译链依赖。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步与全局认识",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "AttentionEngine 是什么：可定制注意力的代码生成框架",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 AttentionEngine 的定位——用 Pythonic 接口定义自定义注意力并自动生成高性能 GPU kernel；讲解「用户写符号函数→生成 device 代码」的编译思路，并区分 transformer 注意力与线性注意力两条路线。",
+          "learning_goals": [
+            "理解 AttentionEngine 要解决的问题：让自定义注意力既灵活又高性能",
+            "理解「前端符号定义→后端代码生成」的整体编译思路",
+            "区分 transformer 注意力（score_mod+online_func）与线性注意力（q/k/v/decay_mod）两条路线"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/API.md"
+          ],
+          "minimal_modules": [
+            "项目定位与动机",
+            "编译式注意力框架理念",
+            "tl 与 cute 两种后端"
+          ],
+          "practice_task": "阅读 README，列出 AttentionEngine 支持的注意力类型（softmax/sigmoid/relu/retention/mamba2/simple_gla/retnet_linear），并用一段话描述它如何把约 80 行 Python 定义自动变成优化 fused kernel。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建与运行第一个 softmax attention",
+          "order": 2,
+          "filename": "u1-l2-setup-and-first-run.md",
+          "level": "beginner",
+          "topic": "讲解如何配置 PYTHONPATH、TileLang/cuda 依赖，并运行 attn_script/mha.py 跑通第一个因果 softmax attention，理解 qkv_meta/meta_tensor 的作用。",
+          "learning_goals": [
+            "掌握安装步骤与 PYTHONPATH/LD_PRELOAD 等环境变量配置",
+            "能跑通 mha.py 并理解 AttentionEngine 的基本调用方式",
+            "理解 meta_tensor 作为「形状元信息」占位的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "attn_script/mha.py",
+            "attention_engine/core/utils.py"
+          ],
+          "minimal_modules": [
+            "安装与环境变量",
+            "meta_tensor 形状元信息",
+            "运行 mha.py"
+          ],
+          "practice_task": "按 README 配置环境并运行 mha.py，记录输出的 latency/tflops；尝试修改 B、H、S（如 S=4096）观察性能变化，并说明这些参数如何通过 qkv_meta 传入。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与代码地图",
+          "order": 3,
+          "filename": "u1-l3-directory-and-code-map.md",
+          "level": "beginner",
+          "topic": "梳理 attention_engine 下的 attn_engine / core / autotuner / benchmark / tests 子模块职责，建立「找代码」的心智地图，重点理清 core 下 transform/codegen/lower/template 四层的关系。",
+          "learning_goals": [
+            "掌握顶层目录与子模块划分",
+            "理解 core 下 transform（IR）/ codegen（发射）/ lower（降级）/ template（模板）四层职责",
+            "能快速定位某个功能对应的源文件"
+          ],
+          "source_files": [
+            "README.md",
+            "attention_engine/attn_engine/__init__.py",
+            "attention_engine/core/__init__.py"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "core 四层架构",
+            "调用链定位"
+          ],
+          "practice_task": "画一张模块依赖关系图，标出「用户 API → 降级（lower）→ 模板（template）→ 引擎（attn_engine）」这条调用链分别落在哪些文件，并标注每个目录的一句话职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "用户 API 全景：score_mod / mask_mod / online_func / CustomIO",
+          "order": 4,
+          "filename": "u1-l4-user-api-overview.md",
+          "level": "beginner",
+          "topic": "讲清用户要定义的四个组件及其签名，对照 mha.py 与 sigmoidattn.py 说明每个组件的输入输出与组合方式，建立「这些 Python 函数如何拼成一次注意力计算」的直观理解。",
+          "learning_goals": [
+            "掌握 score_mod/mask_mod/online_func/CustomIO 的函数签名与职责",
+            "理解这四个组件如何组合成 scores=q@k → score_mod → online_func → o=p@v 的流程",
+            "能读懂 mha.py 与 sigmoidattn.py 两个例子"
+          ],
+          "source_files": [
+            "docs/API.md",
+            "attn_script/Readme.md",
+            "attn_script/mha.py",
+            "attn_script/sigmoidattn.py"
+          ],
+          "minimal_modules": [
+            "score_mod 与 mask_mod",
+            "OnlineFunc 抽象",
+            "CustomIO 自定义输入"
+          ],
+          "practice_task": "在 sigmoidattn.py 基础上，把 score_mod 中的逐元素变换改写成另一种形式（例如把 sigmoid 换成 relu：score=F.relu(score)），并说明此时应搭配哪种 OnlineFunc（OnlineIdentity）以及它会走哪条 online 路径。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "符号 IR 与代码生成机制",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "符号表示基础：Node 图与算子",
+          "order": 1,
+          "filename": "u2-l1-symbolic-node-graph.md",
+          "level": "intermediate",
+          "topic": "讲解 transform/graph.py 的 Node 体系（Var/Const/Add/Mul/Neg/Sub/Div/Exp/Log/Max/ReduceSum/ReduceMax 等）以及它如何承载部分算子的手动反向 _backward。",
+          "learning_goals": [
+            "理解 Node 作为符号 IR 节点的设计（type/inputs/grad）",
+            "掌握各算子节点及其前向表达",
+            "理解 Add/Mul/Div/Max 等算子为何自带手动 _backward"
+          ],
+          "source_files": [
+            "attention_engine/core/transform/graph.py"
+          ],
+          "minimal_modules": [
+            "Node 基类与 Var/Const",
+            "二元与一元算子节点",
+            "部分算子的手动反向"
+          ],
+          "practice_task": "复用 graph.py 末尾 __main__ 的思路，构造一个表达式如 d=(a+b)*(a+b)*c 的 DAG，调用 d.backward() 并打印 a 的 grad，验证链式反向。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "SymbolScalar / SymbolicArray：带形状的符号值",
+          "order": 2,
+          "filename": "u2-l2-symbolscalar-and-array.md",
+          "level": "intermediate",
+          "topic": "讲解 transform/core.py 中 SymbolScalar 的 op 与运算符重载、shape_idx 形状索引、count/use_list/allow_reuse 复用机制，以及 SymbolicArray.get_reduce 如何表达行规约。",
+          "learning_goals": [
+            "理解 SymbolScalar 如何通过 __add__/__mul__/exp 等重载构建 DAG",
+            "掌握 shape_idx 与隐式广播、SymbolicArray 的行规约",
+            "理解 count/use_list/allow_reuse 为代码复用优化而存在"
+          ],
+          "source_files": [
+            "attention_engine/core/transform/core.py"
+          ],
+          "minimal_modules": [
+            "SymbolScalar 的 op 与运算符重载",
+            "shape_idx 与广播规约",
+            "SymbolicArray/SymbolicColReduceArray"
+          ],
+          "practice_task": "用 SymbolScalar 手写 online softmax 片段：m_new=m.max(scores.get_reduce(\"max\")); scale_tmp=(m-m_new).exp()，打印每个中间结果的 .code 与 .prev，观察 DAG 的链式结构。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "从 DAG 到 TileLang：generate_tl_from_dag",
+          "order": 3,
+          "filename": "u2-l3-generate-tl-from-dag.md",
+          "level": "intermediate",
+          "topic": "讲解 codegen/tl_gen.py 的 generate_tl_from_dag：拓扑遍历、input_vars 收集、lowered 去重、inplace 复用优化，以及 to_tl_op 如何逐算子生成 T.Parallel 循环代码。",
+          "learning_goals": [
+            "理解 DAG 的拓扑遍历与 lowered 去重",
+            "掌握 to_tl_op 的索引推导与隐式广播对齐",
+            "理解 inplace 复用的判定条件（count/visit_count/allow_reuse）"
+          ],
+          "source_files": [
+            "attention_engine/core/codegen/tl_gen.py",
+            "attention_engine/core/utils.py"
+          ],
+          "minimal_modules": [
+            "DAG 遍历与输入收集",
+            "to_tl_op 索引推导",
+            "inplace 复用优化"
+          ],
+          "practice_task": "构造一个多输入的 SymbolScalar 表达式（如 (a+b)*c 加一次行规约），调用 generate_tl_from_dag 观察生成的 T.Parallel(...) 循环与 T.reduce_sum/T.reduce_max 调用，并解释 input_vars 收集了哪些变量。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "多后端代码生成：TileLang / CuTe / PyTorch",
+          "order": 4,
+          "filename": "u2-l4-multi-backend-codegen.md",
+          "level": "intermediate",
+          "topic": "讲解 to_tl_op / to_cute_op / to_pytorch_op 三套发射器，以及 to_tl/to_cute 布尔参数如何切换目标，重点说明 exp→exp2、log→log2 的数值等价技巧。",
+          "learning_goals": [
+            "理解同一符号 DAG 可发射三种目标代码",
+            "掌握 cute（for-loop + exp2f/logf）、pytorch（torch.*）与 tl（T.*）的差异",
+            "理解 exp 用 exp2(x*1.442695) 的对数域等价技巧"
+          ],
+          "source_files": [
+            "attention_engine/core/codegen/tl_gen.py"
+          ],
+          "minimal_modules": [
+            "三套发射器对比",
+            "to_tl/to_cute 切换",
+            "exp2/log2 数值技巧"
+          ],
+          "practice_task": "对同一表达式（如 (scores-m_new).exp()）分别用 to_tl=True、to_cute=True、to_pytorch 生成代码并逐行对比，说明三种后端在循环结构与函数调用上的区别。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "score_mod 的符号化与降级",
+          "order": 5,
+          "filename": "u2-l5-lower-score-mod.md",
+          "level": "intermediate",
+          "topic": "讲解 lower.py 的 lower_score_mod：把用户 score_mod 跑成符号 DAG，生成前向函数定义/调用，并用 SymbolScalar.backward 生成反向（score_mod_backward）。",
+          "learning_goals": [
+            "理解 score_mod 如何被符号化为可调用的 kernel 函数定义",
+            "理解 score_mod 反向依赖 SymbolScalar 的手动 autodiff",
+            "掌握 func_block/call_op/arg_def 等 codegen helper 的作用"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower.py",
+            "attention_engine/core/codegen/common.py"
+          ],
+          "minimal_modules": [
+            "score_mod 符号化",
+            "前向定义与调用",
+            "反向 autodiff 降级"
+          ],
+          "practice_task": "跟读 lower_score_mod，对照 sigmoidattn.py 的 score_mod（score+bias 后 tanh），解释它的反向为何能由 SymbolScalar.backward 自动得到 dscores。",
+          "depends_on": [
+            "u2-l3",
+            "u2-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-6",
+          "title": "OnlineFunc 与 online 算法的降级",
+          "order": 6,
+          "filename": "u2-l6-lower-online-func.md",
+          "level": "intermediate",
+          "topic": "讲解 lower.py 的 lower_online_func：online_rowscales/final_rowscales 的初始化，online_fwd/online_fwd_epilogue/forward/backward 四段如何各自降级，以及 o_scale 与 doosum 的处理。",
+          "learning_goals": [
+            "理解 online algorithm 的分块递推模型（每 KV 块更新 rowscale 并 rescale o）",
+            "掌握 online_fwd/epilogue/forward/backward 四段降级产物",
+            "理解 final_rowscales 的保存与 doosum 在反向的复用"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower.py"
+          ],
+          "minimal_modules": [
+            "online_rowscales/final_rowscales",
+            "四段降级",
+            "o_scale 与 doosum"
+          ],
+          "practice_task": "对照 mha.py 的 OnlineSoftmax，标注 online_fwd/online_fwd_epilogue/forward/backward 四个方法分别对应 lower_online_func 输出的哪段代码（如 online_func_def、online_func_epilogue、online_func_fwd、custom_bwd_body）。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "自定义输入 CustomIO 的降级",
+          "order": 7,
+          "filename": "u2-l7-lower-custom-inputs.md",
+          "level": "intermediate",
+          "topic": "讲解 lower_custom_inputs：custom input 张量如何映射 global→shared→fragment 三级内存，shape_idx_map 的下标推导与 swizzle layout 处理。",
+          "learning_goals": [
+            "理解 custom input 张量的 global/shared/fragment 三级内存映射",
+            "掌握 RECURRENT_DIM（block_N）相关的特殊加载分支",
+            "理解 load_op/store_op/copy_op 等 codegen helper"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower.py",
+            "attention_engine/core/codegen/common.py"
+          ],
+          "minimal_modules": [
+            "三级内存映射",
+            "shape_idx 下标推导",
+            "swizzle layout"
+          ],
+          "practice_task": "跟读 sigmoidattn.py 中 softmax_bias 形状 (1,) 的 CustomIO，跟踪 lower_custom_inputs 把它降级成 kernel 参数声明与加载代码的全过程，并解释它为何不走 shared 分支。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "Mask 机制：mask_mod、block_mask 与 torch.fx 降级",
+          "order": 8,
+          "filename": "u2-l8-mask-mechanism.md",
+          "level": "intermediate",
+          "topic": "讲解 create_mask/create_block_mask/is_causal_mask/is_less_causal_mask，以及如何用 torch.fx 把 mask_mod 符号追踪降级成 kernel 内代码，并说明 infer_mask 如何在 dense 与 blocksparse 模板间选择。",
+          "learning_goals": [
+            "理解 mask_mod → 布尔张量 → block_mask 的生成流程",
+            "掌握 causal/less_causal 判定与 TlAttnTemplate/TlBlockAttnTemplate 的选择",
+            "理解 torch.fx 符号追踪在 mask 降级中的作用（tl_codegen_from_torchfx）"
+          ],
+          "source_files": [
+            "attention_engine/core/transform/core.py",
+            "attention_engine/core/codegen/common.py"
+          ],
+          "minimal_modules": [
+            "mask/block_mask 生成",
+            "causal 判定与模板选择",
+            "torch.fx 降级"
+          ],
+          "practice_task": "自定义一个非因果的 mask_mod（例如滑动窗口 q_idx-kv_idx<window），跟踪 lower_tl 中 infer_mask 分支如何判定它不是 causal，并据此选择 TlBlockAttnTemplate。",
+          "depends_on": [
+            "u2-l7"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "模板、引擎与完整编译链路",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Jinja2 模板渲染机制",
+          "order": 1,
+          "filename": "u3-l1-jinja-template-rendering.md",
+          "level": "intermediate",
+          "topic": "讲解 attn_template.py / linear_attn_template.py / cute_template.py 如何用 Jinja2 把降级产物 render 进 attn_tl.py 等模板文件，理清占位符与降级字段的对应关系。",
+          "learning_goals": [
+            "理解模板占位符（如 {{online_func_def}}、{{score_mod_func_def}}）与降级字段的对应",
+            "掌握 jinja2.Template.render 的渲染流程",
+            "能读懂 attn_tl.py 的 @T.macro/@T.prim_func 结构与 {{...}} 占位"
+          ],
+          "source_files": [
+            "attention_engine/core/template/attn_template.py",
+            "attention_engine/core/template/tl_template/attn/attn_tl.py"
+          ],
+          "minimal_modules": [
+            "Jinja2 渲染流程",
+            "占位符与降级字段对应",
+            "attn_tl.py 结构"
+          ],
+          "practice_task": "在 attn_tl.py 中找出 {{online_func_def}}、{{score_mod_func_def}}、{{online_rowscales_initvalue}}、{{custom_fwd_inputs}} 等占位符，逐一说明它们分别来自哪个降级函数的哪个字段。",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "训练前向+反向的完整 lower_tl 链路",
+          "order": 2,
+          "filename": "u3-l2-full-lower-tl-pipeline.md",
+          "level": "intermediate",
+          "topic": "讲解 lower.py 的 lower_tl 主流程：config 选择 → kernel_options 构建 → 降级三件套（score_mod/online_func/custom_inputs）+ mask → lower_kernel → 模板选择与渲染，重点说明 fwd/bwd 的 block 尺寸与 output_idx_list。",
+          "learning_goals": [
+            "理解 lower_tl 的整体编排顺序",
+            "掌握 AttnFwdKernelOption/AttnBwdKernelOption 与 lower_kernel 的内存分配/拷贝生成",
+            "理解 output_idx_list/bwd_output_idx_list 控制哪些张量作为 kernel 输出"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower.py"
+          ],
+          "minimal_modules": [
+            "lower_tl 主流程编排",
+            "kernel_options 与 lower_kernel",
+            "output_idx_list"
+          ],
+          "practice_task": "跟随 mha.py（infer_mask=True）走一遍 lower_tl，按顺序列出每一步生成的关键代码片段（init value、online_func 定义、gemm 循环、epilogue），并说明 fwd 与 bwd 的 block_M/block_N 默认值如何随 dim 变化。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l6"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "AttentionEngine 引擎入口：分发、编译与缓存",
+          "order": 3,
+          "filename": "u3-l3-engine-entry-dispatch-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 attn_engine.py 的 AttentionEngine.__init__/__call__：backend（tl/cute）选择、_select_lower_template 根据 q_seqlen/head 关系分发到不同 lower_*、md5 哈希缓存与 importlib 动态加载。",
+          "learning_goals": [
+            "理解 tl 与 cute 两种 backend 的选择逻辑",
+            "掌握根据 q_seqlen/head/head_kv 关系分发到 lower/lower_gqa/lower_decode/lower_decode_gqa/lower_decode_mla",
+            "理解 code_hash 缓存与 importlib 动态加载生成的 kernel 模块"
+          ],
+          "source_files": [
+            "attention_engine/attn_engine/attn_engine.py"
+          ],
+          "minimal_modules": [
+            "backend 选择",
+            "形状分发",
+            "md5 缓存与 importlib 加载"
+          ],
+          "practice_task": "给定若干组 qkv_meta 形状（如 train MHA、GQA、q_seqlen=1 的 decode、kv_shared MLA），逐一推断 AttentionEngine 会调用哪个 lower_* 函数；并尝试定位 attn_engine 的 cache 目录观察生成的 .py 文件。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "注意力变体与场景",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "线性注意力引擎 LinearAttentionEngine",
+          "order": 1,
+          "filename": "u4-l1-linear-attention-engine.md",
+          "level": "intermediate",
+          "topic": "讲解 linear_attn_engine.py 与 lower_linear.py：q_mod/k_mod/v_mod/decay_mod 的符号化与 fwd/bwd 降级，以及双 kernel（h 计算 chunk 间交互、o 聚合）的 chunked 线性注意力结构。",
+          "learning_goals": [
+            "理解线性注意力与 transformer 注意力在 IR 与计算结构上的差异",
+            "掌握 q/k/v/decay mod 的前向与反向降级（含 fused v_mod）",
+            "理解分块双 kernel（chunk-h / chunk-o）的线性注意力骨架"
+          ],
+          "source_files": [
+            "attention_engine/attn_engine/linear_attn_engine.py",
+            "attention_engine/core/lower/lower_linear.py"
+          ],
+          "minimal_modules": [
+            "LinearAttentionEngine 入口",
+            "q/k/v/decay mod 降级",
+            "双 kernel chunk 结构"
+          ],
+          "practice_task": "跟读 retention_linear.py，分别说明 q_mod（缩放）与 decay_mod（log 衰减）如何影响 h kernel 与 o kernel 的生成代码，并对照 lowerKmod/lowerDecaymod/lowerVmod/lowerQmodFused 给出对应关系。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "GQA 前向/反向降级",
+          "order": 2,
+          "filename": "u4-l2-gqa-lowering.md",
+          "level": "intermediate",
+          "topic": "讲解 lower_gqa.py：分组查询注意力（head>head_kv）的形状映射、与 lower.py 的异同，以及对应模板 attn_gqa_tl.py 的索引差异。",
+          "learning_goals": [
+            "理解 GQA 的 head 分组约束与形状关系（q_seqlen==kv_len 且 head>head_kv）",
+            "掌握 lower_gqa 与 lower 在形状映射/模板上的差异",
+            "理解 groupnum 与 head/head_kv 的关系"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower_gqa.py",
+            "attn_script/gqa.py"
+          ],
+          "minimal_modules": [
+            "GQA 形状约束",
+            "lower_gqa 与 lower 异同",
+            "attn_gqa_tl.py 模板"
+          ],
+          "practice_task": "用 attn_script/gqa.py 的形状（如 head=8、head_kv=2），对照 attn_engine 分发逻辑确认走 lower_gqa，并解释 groupnum 参数在 benchmark 与 kernel 中的含义。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "解码（decode）场景：MHA / GQA 解码",
+          "order": 3,
+          "filename": "u4-l3-decode-scenarios.md",
+          "level": "intermediate",
+          "topic": "讲解 lower_decode_gqa.py（及 lower_decode.py）：q_seqlen=1 的解码场景、split-kv（num_split）、多 split 维度的 final_rowscales 存储与 block_mask 处理。",
+          "learning_goals": [
+            "理解解码场景（q_seqlen<kv_len）与训练场景的分块差异",
+            "掌握 split-kv 与 num_split 的作用",
+            "理解 decode 模板中 final_rowscales 为何多出 num_split 维度"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower_decode_gqa.py",
+            "attn_script/gqa_inference.py"
+          ],
+          "minimal_modules": [
+            "解码场景分发",
+            "split-kv 与 num_split",
+            "decode block_mask"
+          ],
+          "practice_task": "跟读 lower_decode_gqa，解释 final_rowscales 的全局形状为何是 [batch, heads, num_split, seq_len]（torch_alloc_final_rowscales），并说明多 split 结果后续如何合并。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "MLA 解码与 combine kernel",
+          "order": 4,
+          "filename": "u4-l4-mla-decode-combine.md",
+          "level": "intermediate",
+          "topic": "讲解 lower_decode_mla.py 与 mla_decode.py：kv_shared MLA 解码、PE 维（DIM vs DV）拆分，以及 OnlineFunc.combine 的 split-kv 合并逻辑。",
+          "learning_goals": [
+            "理解 MLA 的 q/kv 结构（D=DV+D_pe）与 kv_shared 路径",
+            "掌握 combine kernel 的行规约合并（lse_max/row_sum/lse_sum/o_scale）",
+            "理解 PE_DIM/DIM 在 lower_decode_mla 中的拆分"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower_decode_mla.py",
+            "attn_script/mla_decode.py"
+          ],
+          "minimal_modules": [
+            "MLA 结构与 kv_shared",
+            "combine 合并逻辑",
+            "PE 维拆分"
+          ],
+          "practice_task": "对照 mla_decode.py 的 OnlineSoftmax.combine，逐步说明多个 split 的 lse 如何通过 lse_max→exp→sum→log 合并，最终得到每个 split 的 o_scale。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "后端、性能、扩展与工程化",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "CuTe 后端代码生成",
+          "order": 1,
+          "filename": "u5-l1-cute-backend-codegen.md",
+          "level": "advanced",
+          "topic": "讲解 lower_cute.py 与 cute_template.py：把 online_func/score_mod 降级成 CuTe C++ 片段（to_cute_op），渲染 flash fwd/bwd 的 .h/.cu 文件，并用 importlib 加载生成的 flash_attn_interface.py。",
+          "learning_goals": [
+            "理解 tl 与 cute 后端在降级（to_cute_op）与目标语言上的差异",
+            "掌握 CuTe C++ 模板（flash_fwd/flash_bwd）的渲染与 final_rowscales/LSE 处理",
+            "理解 cute_template_output 目录的产物与 importlib 加载"
+          ],
+          "source_files": [
+            "attention_engine/core/lower/lower_cute.py",
+            "attention_engine/core/template/cute_template.py",
+            "attn_script/mha_cute.py"
+          ],
+          "minimal_modules": [
+            "lower_cute 降级",
+            "CuTe C++ 模板渲染",
+            "importlib 加载 interface"
+          ],
+          "practice_task": "运行 mha_cute.py（backend=\"cute\"），查看 core/template/cute_template_output 目录生成的 C++/头文件，对照 lower_cute 的字段（如 online_fwd_body、final_rowscales_store_code_write）找到对应注入位置。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "MLA 解码的 CuTe kv_shared 后端",
+          "order": 2,
+          "filename": "u5-l2-cute-mla-kvshared.md",
+          "level": "advanced",
+          "topic": "讲解 cute_template_kvshared 与 attn_engine.py 中 kv_shared=True 的 CuTe MLA 路径：get_mla_metadata 计算 tile_scheduler_metadata/num_split、block_table 构造、flash_mla_with_kvcache 的组装。",
+          "learning_goals": [
+            "理解 MLA 在 CuTe 后端的 paged-kv（block_table/cache_seqlens）组织",
+            "掌握 tile_scheduler_metadata 与 num_split 的计算",
+            "理解 kv_shared 分支与 tl MLA 解码路径的差异"
+          ],
+          "source_files": [
+            "attention_engine/attn_engine/attn_engine.py",
+            "attn_script/mla_decode_cute.py"
+          ],
+          "minimal_modules": [
+            "paged-kv 组织",
+            "mla metadata 计算",
+            "flash_mla_with_kvcache 组装"
+          ],
+          "practice_task": "跟读 attn_engine.py 的 cute+kv_shared 分支，说明 cache_seqlens、max_seqlen_pad、block_size、block_table 如何一步步构造，以及 tile_scheduler_metadata/num_split 来自哪里。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "autotuner 配置空间与硬件建模",
+          "order": 3,
+          "filename": "u5-l3-autotuner-and-hw-modeling.md",
+          "level": "advanced",
+          "topic": "讲解 autotuner/decider.py 的 memory_usage 估算与 config 空间枚举/过滤、arch_base/H100 等硬件参数建模，以及 attnfwd_tunner.py 的实际搜索与 JSON 缓存。",
+          "learning_goals": [
+            "理解 block_M/N/K、stages、num_threads、内存层级等合法配置空间的枚举",
+            "掌握 shared_mem/register 占用约束的建模与过滤",
+            "理解模板中 TUNE/TUNE_FILE 开关如何接入自动调优"
+          ],
+          "source_files": [
+            "attention_engine/autotuner/decider.py",
+            "attention_engine/autotuner/arch/arch_base.py",
+            "attention_engine/autotuner/attnfwd_tunner.py"
+          ],
+          "minimal_modules": [
+            "memory_usage 估算",
+            "config 空间枚举与过滤",
+            "硬件参数与 tune 接入"
+          ],
+          "practice_task": "运行 decider.py 的 __main__（给定一组形状与 H100），打印合法配置数量并分析是哪些约束（smem_cap/reg_cap/register_per_thread）过滤掉了非法配置；再说明 mha.py 的 tune=True/tune_file 如何影响生成代码。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "基准测试与正确性验证",
+          "order": 4,
+          "filename": "u5-l4-benchmark-and-correctness.md",
+          "level": "advanced",
+          "topic": "讲解 benchmark/bench_utils.py：do_bench 的 GPU 计时与 L2 flush、check_close/print_debug 的误差校验，以及对照 flash-attn/mamba/fla 参考实现的各 do_bench_* 入口。",
+          "learning_goals": [
+            "掌握 GPU kernel 计时方法与 L2 cache flush 的意义",
+            "理解相对/绝对误差校验（rtol/atol）与错误定位输出",
+            "能为自定义注意力选择合适的参考实现进行对齐"
+          ],
+          "source_files": [
+            "attention_engine/benchmark/bench_utils.py",
+            "attn_script/mha.py"
+          ],
+          "minimal_modules": [
+            "do_bench 计时",
+            "正确性校验",
+            "参考实现选择"
+          ],
+          "practice_task": "用 do_bench_attention 跑 mha.py，对比生成 kernel 与 flash-attn（fa2/fa3）的 tflops，并记录 print_debug 输出的最大误差与误差占比，判断是否在可接受范围。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "综合实战：实现一种新的自定义注意力",
+          "order": 5,
+          "filename": "u5-l5-custom-attention-hands-on.md",
+          "level": "advanced",
+          "topic": "综合运用 score_mod/online_func/CustomIO，从零设计并实现一种新注意力（如 relu attention、带 bias 的 gated attention 或自定义衰减的线性注意力），走通 tl 后端前向+反向并与参考对齐。",
+          "learning_goals": [
+            "能独立设计 online_rowscales/final_rowscales 与四段 online 方法",
+            "能正确实现 online_fwd/epilogue/forward/backward 并保证数值正确",
+            "能跑通 tl 后端、完成反向并与参考实现对齐"
+          ],
+          "source_files": [
+            "attn_script/reluattn.py",
+            "attn_script/retention.py",
+            "attn_script/sigmoidattn.py"
+          ],
+          "minimal_modules": [
+            "online 算法设计",
+            "四段方法实现",
+            "前向反向对齐验证"
+          ],
+          "practice_task": "实现一个 OnlineRelu（OnlineIdentity + relu score_mod）并搭配 causal_mask 跑通 tl 后端前向+反向，用 do_bench_reluattn 与 torch 参考程序对齐；或为线性注意力实现一个自定义 decay_mod 并跑通 do_bench_retention_linear。",
+          "depends_on": [
+            "u2-l6",
+            "u4-l1",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l6",
+          "title": "测试与调试技巧",
+          "order": 6,
+          "filename": "u5-l6-testing-and-debugging.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 的覆盖范围与调试技巧：导出生成的 TileLang 代码、importlib 缓存命中机制、SymbolScalar.code/.prev 结构打印、按层定位「IR/降级/模板」错误。",
+          "learning_goals": [
+            "掌握现有 tests（test_sympy/test_blockmask/test_torchtrace）的覆盖意图",
+            "能定位生成代码错误属于 IR 层、降级层还是模板层",
+            "掌握 code_hash 缓存命中与强制重新生成的调试法"
+          ],
+          "source_files": [
+            "attention_engine/tests/test_sympy.py",
+            "attention_engine/tests/test_blockmask.py",
+            "attention_engine/tests/test_torchtrace.py",
+            "attention_engine/core/codegen/tl_gen.py"
+          ],
+          "minimal_modules": [
+            "测试覆盖范围",
+            "分层错误定位",
+            "缓存与导出调试"
+          ],
+          "practice_task": "利用 attn_engine 中注释掉的 generated_tl.py 导出逻辑（或直接读取 cache 目录）导出一次 mha.py 生成的完整 TileLang 代码，人工阅读其中的 online_func/score_mod/epilogue 段落，并标注每段来自哪个降级函数。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l7",
+          "title": "架构取舍、限制与二次开发方向",
+          "order": 7,
+          "filename": "u5-l7-architecture-tradeoffs.md",
+          "level": "advanced",
+          "topic": "总结 AttentionEngine 的设计取舍与 roadmap：online_func 不支持自动微分（需手写 bwd）、反向只算 q/k/v 梯度、CuTe bwd 与 decode 仍在完善、AMD/稀疏掩码待补；给出二次开发切入点。",
+          "learning_goals": [
+            "理解当前能力边界与 README/docs 中列出的 TODO",
+            "能评估新增算子/新后端/新场景（varlen、blocksparse）的工作量与落点",
+            "形成对该编译框架的整体评价与扩展思路"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/API.md",
+            "attn_script/Readme.md"
+          ],
+          "minimal_modules": [
+            "能力边界与限制",
+            "roadmap 与 TODO",
+            "二次开发切入点"
+          ],
+          "practice_task": "从 roadmap 中选择一项（例如为 graph.py 增加一个新算子的手动 _backward，或为新稀疏 mask 模式适配 blocksparse 模板），写出实现思路：涉及哪些文件、需要修改 IR/降级/模板的哪一层、如何测试对齐。",
+          "depends_on": [
+            "u5-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
