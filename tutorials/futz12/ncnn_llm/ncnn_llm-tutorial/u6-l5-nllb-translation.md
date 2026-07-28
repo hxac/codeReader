@@ -2,651 +2,436 @@
 
 ## 1. 本讲目标
 
-本讲是「其他模态」单元的最后一讲，主角是机器翻译运行时 `nllb_600m`。它和前面讲的 LLM（u2）、VLM（u5）都属于「带自回归生成」的模型，但架构完全不同——它使用的是经典的 **encoder-decoder（编码器-解码器）** 架构，而不是 LLM 那种「单一 decoder + KV cache 续写」的结构。
+本讲讲解 ncnn_llm 项目里唯一的「真·encoder-decoder」运行时 `nllb_600m`,它把 Meta 的 NLLB-600(No Language Left Behind)翻译模型跑在 ncnn 上,实现 200+ 语言对之间的互译。
 
-学完本讲，你应当能够：
+学完后你应该能够:
 
-1. 说清 `nllb_600m` 的构造过程：它加载了哪几个 ncnn 子网、用什么分词器、为什么用 Pimpl（指针实现）惯用法。
-2. 理解 **正弦位置编码（sinusoidal positional embedding）** 的数学公式与代码实现，并能解释它为什么在 C++ 端而不是 ncnn 图里完成。
-3. 跟踪 `translate` 的完整 encoder→cross-attention decoder 自回归流程，说清 **源语言 token** 和 **目标语言 token** 各自被放在哪里、如何引导翻译方向。
-4. 区分 `translate` 的四个重载，掌握「同步返回整句」与「流式 callback 增量返回」两种用法。
-
-本讲承接 u2-l1（基类 `ncnn_llm_base` 的公共能力，包括 `KVCache`、`create_option`、`load_net`、`sample_logits`）与 u3-l2（BPE 分词器）。NLLB 是项目中少数「自跑解码循环、不调用共享文本运行时四函数」的运行时，理解它能帮你对照出共享运行时（u2-l2）解决的是什么问题。
+1. 说清 encoder-decoder 架构在本项目里与前几讲 decoder-only 运行时(LLM/VLM/OCR/ASR)的本质区别——多出一个独立的 encoder,decoder 通过 cross-attention 读 encoder 的输出。
+2. 读懂 `nllb_600m` 的构造流程:三张子网(embed / encoder / decoder)+ BPE 词表,并理解它为何绕开 `model.json` 直接吃文件路径。
+3. 掌握 `translate` 的四个重载(同步/流式 × 默认/自定义配置)以及流式输出的「增量解码」原理。
+4. 说出正弦位置编码(sinusoidal positional embedding)的公式与它在 encoder、decoder 两端各自的作用,并理解它和 RoPE 的区别。
+5. 解释源语言 / 目标语言 token(`zho_Hans`、`eng_Latn` 等)如何塞进序列、如何引导翻译方向。
 
 ## 2. 前置知识
 
-在进入源码前，先建立三个直觉。
+阅读本讲前,请先掌握以下概念(本手册前几讲已建立):
 
-### 2.1 为什么要 encoder-decoder？
+- **encoder-decoder 与 decoder-only**:前面几讲的 LLM、VLM、OCR、ASR 都是 decoder-only——只有一个 Transformer decoder 堆,靠 KV cache 自回归续写。NLLB 是 encoder-decoder:先有一个 encoder 把源语言句子编码成一串「上下文向量」,再有一个 decoder 一边自回归生成目标语言、一边用 **cross-attention** 去「看」encoder 输出。
+- **KV cache 与 `cache_k%d`/`cache_v%d` 命名约定**:这是 ncnn_llm 与导出脚本之间的隐式契约,在 u2-l2 已讲过。NLLB 只在 **decoder** 侧使用 KV cache,encoder 不用。
+- **基类 `ncnn_llm_base` 的公共能力**:NLLB 的实现类继承自它,复用 `create_option`、`load_net`、`sample_logits`、`KVCache` 类型别名以及正弦位置编码工具函数(见 u2-l1)。
+- **BPE 分词器**:NLLB 用的是 `BpeTokenizer`(见 u3-l1、u3-l2),其词表里除了普通子词,还有一批特殊的「语言 token」。
 
-之前讲的 LLM（如 Qwen）是 **decoder-only** 架构：只有一个带因果掩码的 Transformer 堆栈，靠「续写下一个 token」工作。它做翻译时，是把「原文 + 指令」全部拼成输入序列，再自回归地吐出译文。
-
-而 NLLB（No Language Left Behind，Meta 的多语种翻译模型）走的是 **seq2seq（序列到序列）** 的老派但有效的路线：
-
-- **编码器（encoder）**：读入源语言整句，因为是双向自注意力（没有因果掩码），它可以同时「看到」全句，输出一组「理解了原意的记忆向量」（memory）。
-- **解码器（decoder）**：自回归地生成译文。每生成一个词，它既看自己已经生成的译文（带因果掩码的自注意力），又通过 **交叉注意力（cross-attention）** 去读 encoder 输出的 memory。
-
-打个比方：encoder 是「读完原文做笔记的人」，decoder 是「看着笔记逐句口译的人」。这种分工让 decoder 不必把整段原文塞进自己的上下文，特别适合「输入和输出是两种不同语言」的翻译任务。
-
-### 2.2 位置编码是什么、为什么用「正弦」？
-
-Transformer 的注意力机制本身没有「顺序」概念——把句子打乱词序，自注意力的计算方式不变。所以要额外给每个位置注入一个**位置编码（positional embedding）**，加到词向量上，告诉模型「这是第几个词」。
-
-位置编码有两大家族：
-
-- **可学习位置编码（learned）**：一张可训练的查找表，第 i 行就是第 i 个位置的向量。NLLB 原始模型用的其实是这种。
-- **正弦位置编码（sinusoidal）**：用固定的三角函数公式生成，不需要训练参数。这是 2017 年《Attention is All You Need》论文里的经典方案。
-
-NLLB-600 在本项目里被简化为用**正弦位置编码**（详见 4.2 与导出脚本注释）。它的妙处在于：同一套公式既能算位置 1、2、3，也能算位置 1000，理论上对任意长度都能外推。
-
-### 2.3 语言 token：用一个词控制翻译方向
-
-NLLB 词表里有专门的「语言标记 token」，命名遵循 `语言_文字` 格式，例如：
-
-- `eng_Latn`：英语（拉丁字母）
-- `zho_Hans`：简体中文（汉字）
-- `zho_Hant`：繁体中文
-
-神奇之处在于：**同一个 encoder 记忆，只要 decoder 起步时喂不同的语言 token，就会翻译成不同语言**。这就是 NLLB 用一个模型支持 200 种语言互译的关键——语言 token 充当了「翻译方向开关」。
-
----
+> 一个贯穿全讲的关键直觉:**NLLB 是项目里最「古典」的 Transformer**——它用原始论文里的正弦绝对位置编码、用 encoder-decoder 双塔、用 `</s>` 当 decoder 起始符,几乎不依赖前面几讲那些为 decoder-only 设计的 RoPE、mRoPE、xdrope。它是一个自包含的翻译小引擎。
 
 ## 3. 本讲源码地图
 
-本讲涉及四个文件：
-
 | 文件 | 作用 |
 |------|------|
-| `src/nllb_600m.h` | 对外头文件：声明 `nllb_600m` 类、`NllbConfig` 配置结构、四个 `translate` 重载。用 Pimpl 惯法隐藏实现细节。 |
-| `src/nllb_600m.cpp` | 全部实现：内部 `Impl` 类（继承 `ncnn_llm_base`）、子网加载、encoder/decoder 前向、自回归解码循环。本讲的绝对主角。 |
-| `examples/nllb_main.cpp` | 命令行示例：解析参数、拼出模型文件路径、构造 `nllb_600m`、演示同步与流式两种翻译调用。 |
-| `src/ncnn_llm_base.h` | 基类：提供 `sinusoidal_positional_embedding`（全序列版与单位置版）、`mat_from_int_vector`、`add_mats_inplace`、`sample_logits`、`KVCache` 等 NLLB 依赖的公共能力。 |
+| [src/nllb_600m.h](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h) | `nllb_600m` 对外头文件:`NllbConfig` 配置结构、构造函数、四个 `translate` 重载,用 pImpl 隐藏实现。 |
+| [src/nllb_600m.cpp](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp) | 核心实现:内部类 `Impl`(继承 `ncnn_llm_base`)、`translate_stream` 翻译主链路、encoder/decoder 前向。 |
+| [src/ncnn_llm_base.h](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h) | 基类公共能力,本讲重点用其中的正弦位置编码、`sample_logits`、`KVCache` 等。 |
+| [examples/nllb_main.cpp](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp) | 示例入口:命令行参数解析、拼装模型文件路径、演示同步与流式两种翻译。 |
+| [export/nllb_export.py](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/export/nllb_export.py) | 把 HuggingFace NLLB 模型导出成 ncnn 的 `.param`/`.bin`(细节在 u8-l4,本讲只顺带提及)。 |
 
-模型权重相关：运行 NLLB 需要在 `assets/nllb_600m/` 下准备 `embed.ncnn.param/.bin`、`encoder_noembed.ncnn.param/.bin`、`decoder_noembed.ncnn.param/.bin`、`vocab.txt`、`merges.txt`（见 [examples/nllb_main.cpp:73-80](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp#L73-L80)）。权重需自行下载/导出，仓库不随附（与 u1-l2/u1-l3 一致）。
-
----
+> 提醒:NLLB **不走 `model.json`**。它的构造函数直接接收 9 个文件路径,所以 `nllb_main` 在 xmake 里甚至不依赖 `nlohmann_json`(见 [xmake.lua:105-109](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/xmake.lua#L105-L109))。这与 `ncnn_llm_gpt` 系列很不一样。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成四个最小模块：
-
-- 4.1 `nllb_600m` 构造：Pimpl 惯法与子网布局
-- 4.2 正弦位置编码 `sinusoidal_positional_embedding`
-- 4.3 `translate` 主流程：源/目标语言 token 与 encoder→cross-attention decoder 自回归生成
-- 4.4 `translate` 重载与流式 callback
-
-### 4.1 `nllb_600m` 构造：Pimpl 惯法与子网布局
+### 4.1 nllb_600m 构造与三类子网
 
 #### 4.1.1 概念说明
 
-NLLB 的对外类 `nllb_600m` 是一个非常「薄」的壳：它只持有一个 `std::unique_ptr<Impl>` 指针，所有真实逻辑都在内部类 `Impl` 里。这种手法叫 **Pimpl（Pointer to Implementation，指向实现的指针）惯法**。
+NLLB-600 是一个标准的 encoder-decoder Transformer,共 24 层 decoder。要跑起来它需要三类 ncnn 子网:
 
-为什么这么做？因为 `Impl` 继承自 `ncnn_llm_base`，而后者包含了 ncnn 的 `ncnn::Net`、`ncnn::Mat` 等重型头文件。把这些藏到 `.cpp` 里，可以让 `nllb_600m.h` 保持轻量，外部使用者只需 `#include "nllb_600m.h"` 而不必拉入 ncnn 的全部头文件，降低编译耦合与编译时间。
+- **embed 子网**:token id → 词嵌入向量(本质是一个查表 `Embed` 层)。encoder 和 decoder **共用**这一个嵌入矩阵(权重共享),所以源语言、目标语言、生成出的 token 都走它。
+- **encoder 子网**:把源句子的嵌入序列编码成一串上下文向量(bidirectional self-attention)。
+- **decoder 子网**:自回归生成目标语言,每层同时做 self-attention(看已生成的目标 token)和 cross-attention(看 encoder 输出)。
 
-`NllbConfig` 是翻译时的采样/停止配置，字段与 LLM 的 `GenerateConfig` 概念对应但更精简：
+此外还需要一个 **BPE 分词器**(vocab.txt + merges.txt),它的词表里除了普通子词,还有语言 token(`eng_Latn`、`zho_Hans`、…)和特殊符(`</s>`、`<unk>`、`<mask>`)。
 
-```cpp
-struct NllbConfig {
-    float temperature = 1.0f;
-    int top_k = 0;
-    float top_p = 1.0f;
-    bool do_sample = false;   // 默认贪心解码
-    int max_steps = 512;      // 最多生成 512 步
-};
-```
-见 [src/nllb_600m.h:7-13](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h#L7-L13)。注意 NLLB **没有 repetition_penalty 字段**——这正是它与共享文本运行时（u2-l4）的一个区别：NLLB 走的是基类自带的 `sample_logits`，而非带重复惩罚的 `llm_select_next_token`。
+`nllb_600m` 类采用 **pImpl 惯用法**(pointer to implementation):对外头文件只暴露一个 `std::unique_ptr<Impl> impl_`,真正的逻辑全在 cpp 里的私有内部类 `Impl` 里。这样做能加快编译、隐藏 ncnn 细节。`Impl` 继承 `ncnn_llm_base`,从而白嫖基类那一整套工具。
 
 #### 4.1.2 核心流程
 
-构造时，外壳把八个路径参数（三组子网的 param/bin + 分词器的 vocab/merges）原样转发给 `Impl`：
+构造 `Impl` 的顺序:
 
-```
-nllb_600m(...) 构造
-   └─> std::make_unique<Impl>(...)   // 转发 8 个路径 + use_vulkan
-          └─> ncnn_llm_base(use_vulkan, 4)   // 基类：4 线程
-          └─> BpeTokenizer::LoadFromFiles(...)   // 加载词表+merges，注册特殊令牌
-          └─> create_option() 赋给三个 Net
-          └─> load_net(embed_net_/encoder_net_/decoder_net_)   // 任一失败置 ok_=false
-          └─> 从词表查 </s> 的 id，存入 bos_eos_id_
-```
-
-注意两个构造重载的区别：一个不传 `use_vulkan`（默认 `false`），一个显式传入（见 [src/nllb_600m.h:17-34](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h#L17-L34)）。`nllb_main.cpp` 用的是后者，由命令行 `--vulkan` 决定。
+1. 调基类构造 `ncnn_llm_base(use_vulkan, 4)`,设置 4 线程、可选 Vulkan。
+2. 用 `create_option()` 生成 `ncnn::Option`,赋给三张子网。
+3. 依次 `load_net` 加载 embed / encoder / decoder 三张网;任一失败则 `ok_=false`。
+4. 同时构造 BPE 分词器,注册四个特殊 token(`</s>`、`<unk>`、`<mask>`)。
+5. 若一切正常,从词表里查出 `</s>` 的 id,存为 `bos_eos_id_`(默认 2)。NLLB 里 `</s>` 既是结束符也是 decoder 起始符。
 
 #### 4.1.3 源码精读
 
-`Impl` 的构造函数（关键部分）：
+内部类继承基类并定下 24 层:
 
-```cpp
-class nllb_600m::Impl : public ncnn_llm_base {
-public:
-    Impl(...)
-        : ncnn_llm_base(use_vulkan, 4)            // 继承基类，4 线程
-        , ...
-        , bpe_(BpeTokenizer::LoadFromFiles(
-              vocab_file_, merges_file_,
-              SpecialTokensConfig{
-                  .bos_token = "</s>",            // NLLB 的 bos 和 eos 都是 </s>
-                  .eos_token = "</s>",
-                  .unk_token = "<unk>",
-                  .mask_token = "<mask>",
-              }))
-    {
-        ncnn::Option opt = create_option();
-        embed_net_.opt = opt;
-        encoder_net_.opt = opt;
-        decoder_net_.opt = opt;
+[src/nllb_600m.cpp:20](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L20) —— 译码器层数常量。
 
-        if (!load_net(embed_net_, embed_param_, embed_bin_)) { ... }
-        if (!load_net(encoder_net_, encoder_param_, encoder_bin_)) { ... }
-        if (!load_net(decoder_net_, decoder_param_, decoder_bin_)) { ... }
+[src/nllb_600m.cpp:24-35](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L24-L35) —— `Impl` 继承 `ncnn_llm_base(use_vulkan, 4)`,注意 4 线程写死在基类构造里。
 
-        if (ok_) {
-            const auto& t2i = bpe_.token_to_id();
-            auto it = t2i.find("</s>");
-            ... bos_eos_id_ = it->second;     // NLLB 中 </s> 的 id 通常为 2
-        }
-    }
-```
-见 [src/nllb_600m.cpp:24-82](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L24-L82)。
+构造函数主体,加载三张网并用 BPE 注册特殊 token:
 
-几个要点：
+[src/nllb_600m.cpp:44-52](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L44-L52) —— 用 `BpeTokenizer::LoadFromFiles` 加载词表,并显式声明 `</s>`/`<unk>`/`<mask>` 为特殊 token(其中 `bos_token` 和 `eos_token` 都是 `</s>`)。
 
-- **三个 `ncnn::Net` 成员**：`embed_net_`（token 查表）、`encoder_net_`（双向编码器）、`decoder_net_`（解码器 + lm_head 投影）。注意 encoder 和 decoder 的文件名都带 `_noembed` 后缀——意思是「不含 embedding 查表」，因为查表被单独拆成了 `embed` 子网。这呼应了导出脚本的设计：正弦位置编码不进 ncnn 图、embedding 单独导出。
-- **`load_net` 失败即 `ok_=false`**：基类的健康检查机制（u2-l1 讲过），任一子网加载失败就标记不可用，后续 `translate` 会因 `if (!ok_) return false;` 直接短路。
-- **`bos_eos_id_` 的解析**：NLLB 用同一个 `</s>` token 同时充当序列开始（bos）和结束（eos），默认值 `2`（见 [src/nllb_600m.cpp:273](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L273)），但构造时会用词表里的真实 id 覆盖。词表里找不到 `</s>` 会被视为致命错误（`ok_=false`）。
+[src/nllb_600m.cpp:60-70](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L60-L70) —— 依次 `load_net` 三张子网。
+
+[src/nllb_600m.cpp:72-81](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L72-L81) —— 加载成功后,从词表查 `</s>` 的 id;若词表里没有这个 token,直接把 `ok_` 置为 `false`,让整个对象「带病不可用」。
+
+成员默认值 `bos_eos_id_{2}`:
+
+[src/nllb_600m.cpp:273](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L273) —— `</s>` 在 NLLB 词表里的标准 id 就是 2。
+
+> 这里的 `ok_` 健康检查机制来自基类(见 [src/ncnn_llm_base.h:138-145](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L138-L145) 的 `load_net`):任何一次加载失败都会把 `ok_` 永久置假,对外通过 `ok()` 查询,后续 `translate` 一律短路返回空。
 
 #### 4.1.4 代码实践
 
-**实践目标**：理解 Pimpl 惯法与三子网布局，动手追踪构造链。
+**实践目标**:验证构造流程,看清「加载失败 → `ok()` 为假」的健康检查。
 
-**操作步骤**：
+**操作步骤**(源码阅读 + 可选运行):
 
-1. 打开 [src/nllb_600m.h](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h)，确认 `nllb_600m` 类只有一个成员 `std::unique_ptr<Impl> impl_;`（[第 59-60 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h#L59-L60)），且 `class Impl;` 只是前向声明（[第 59 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h#L59)）——头文件里完全看不到 ncnn 的痕迹。
-2. 打开 [src/nllb_600m.cpp](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L24-L82)，找到 `Impl` 的成员变量区（[第 262-273 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L262-L273)），数一数：3 个 `ncnn::Net`、1 个 `BpeTokenizer`、6 个路径 string、1 个 `bos_eos_id_`。
-3. 思考题（先自己想再看答案）：为什么 `embed` 要从 encoder/decoder 里拆出来单独成一个子网？
+1. 构建 nllb_main:`xmake build nllb_main`(若尚未装 ncnn master,见 u1-l2)。
+2. 阅读上面的构造函数,数清楚它要 9 个文件:embed 的 param/bin、encoder 的 param/bin、decoder 的 param/bin、vocab.txt、merges.txt。注意 encoder/decoder 的文件名带 `noembed` 后缀(见 4.2.3),说明嵌入层被拆到了单独的 embed 子网。
+3. (可选)故意把 `--model-dir` 指向一个不存在/不完整的目录,再跑 `xmake run nllb_main --model-dir ./assets/not_exist`,观察控制台打印的 `Failed to load ... model` 报错。
 
-**需要观察的现象**：头文件极简，实现全在 cpp；三个子网各对应一对 `.param/.bin` 文件。
+**需要观察的现象**:`nllb_main.cpp` 里 `translator.translate(...)` 在 `ok_` 为假时直接返回空串,因此你会看到 `[Sync] Output:` 后面什么都没有,而不是程序崩溃——这正是「尽早失败但不崩」的设计。
 
-**预期结果**：能在源码里指出「Pimpl 把 ncnn 隔离在 cpp 内」「三个子网分别负责查表、编码、解码」这两点。
+**预期结果**:正常情况下 `ok()` 为真,能产出翻译;缺文件时打印加载失败、输出为空。若你本地没有模型权重,**这步标注「待本地验证」**,转而只做源码阅读。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`NllbConfig` 里为什么没有 `repetition_penalty`？
+**练习 1**:为什么 `Impl` 要继承 `ncnn_llm_base`,而不是自己写一套 `create_option` / `load_net`?
 
-**参考答案**：因为 NLLB 走的是基类 `ncnn_llm_base::sample_logits`（[src/ncnn_llm_base.h:147-169](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L147-L169)），而该函数本身就只支持 temperature/top_k/top_p，不支持重复惩罚。重复惩罚是共享文本运行时 `llm_select_next_token`（u3-l4）才有的能力。NLLB 是项目中「自跑解码循环、不复用共享运行时」的代表。
+**参考答案**:因为这些是全模态通用的公共能力(见 u2-l1)。继承能复用 Vulkan/线程管理、网络加载、采样、正弦位置编码等,避免重复造轮子。`ncnn_llm_base` 的构造函数是 `protected`,必须继承才能用,NLLB 正是这么做的。
 
-**练习 2**：构造函数里 `ncnn_llm_base(use_vulkan, 4)` 的第二个参数 `4` 是什么？
+**练习 2**:`bos_eos_id_` 默认值是 2。如果换一个分词器、`</s>` 的 id 变成了别的值,代码会出错吗?
 
-**参考答案**：是 `num_threads`（线程数），即基类成员 `num_threads_`（[src/ncnn_llm_base.h:109](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L109)），会被 `create_option()` 写进 `ncnn::Option::num_threads`（[src/ncnn_llm_base.h:130-136](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L130-L136)）。NLLB 硬编码为 4 线程。
+**参考答案**:不会。构造函数在 [nllb_600m.cpp:72-81](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L72-L81) 运行时从词表动态查出真实 id 覆盖默认值;只有当词表里压根没有 `</s>` 时才会把 `ok_` 置假。默认值 2 只是 NLLB 标准词表的一个「占位猜测」。
 
 ---
 
-### 4.2 正弦位置编码 `sinusoidal_positional_embedding`
+### 4.2 encoder-decoder 翻译主链路与流式 callback
 
 #### 4.2.1 概念说明
 
-正弦位置编码用一个不依赖训练参数的固定公式，为序列中每个位置生成一个 d_model 维向量。它的核心思想是：用不同频率的正弦/余弦波来「编码」位置，低维用高频（变化快）、高维用低频（变化慢），让模型能从不同尺度感知相对位置。
+这是本讲的核心。一段源语言文本被翻译成目标语言,经过下面这条链:
 
-本项目里，正弦位置编码在 **C++ 端** 计算，加到 embedding 上，而不是写进 ncnn 计算图。导出脚本 [export/nllb_export.py](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/export/nllb_export.py) 的注释明确写了「Sinusoidal positional embedding is NOT exported, handled in Python」（在这里改成 C++ 处理）。这样做的好处是位置编码可由宿主代码灵活控制（例如区分 encoder 全序列编码与 decoder 单步编码），不绑死在导出的图里。
+```
+源文本
+  → BPE 分词 + 前置源语言 token + 末尾 </s>
+  → embed 子网(查表) + 正弦位置编码      [encoder 输入嵌入]
+  → encoder 子网(双向 self-attention)    [encoder_output:源句的上下文向量]
+  → decoder 预填充 </s> 种子               [初始化 decoder 的 KV cache]
+  → 自回归循环:
+       embed(上一个 token) + 正弦位置编码
+       → decoder 子网(self-attn + cross-attn 看 encoder_output + 更新 KV cache)
+       → lm_head → 采样下一个 token
+       → 遇 </s> 停止
+       → 增量解码,通过 callback 流式吐字
+```
+
+两个关键区别于 decoder-only 的点:
+
+1. **encoder 只跑一次**:它把整句源文本一次性编码成 `encoder_output`,之后 decoder 在每一步生成都通过 **cross-attention** 去反复「读」这份输出。所以 `encoder_output` 在整个生成循环里是常量,被反复喂给 decoder 的 `in1`。
+2. **KV cache 只在 decoder 侧**:encoder 是一次性前向、无缓存;decoder 像前几讲一样靠 `cache_k%d`/`cache_v%d` 累积历史。
+
+`translate` 对外提供 **4 个重载**,本质是「同步 vs 流式」「默认配置 vs 自定义 `NllbConfig`」两个维度的组合:
+
+| 重载 | 返回 | 配置 | 用途 |
+|------|------|------|------|
+| `translate(text, src, tgt)` | `string` | 默认 | 最简单,一次性拿完整译文 |
+| `translate(text, src, tgt, config)` | `string` | 自定义 | 想调温度/top_k/top_p/采样/max_steps |
+| `translate(text, src, tgt, callback)` | `bool` | 默认 | 流式,每生成一点就回调 |
+| `translate(text, src, tgt, config, callback)` | `bool` | 自定义 | 流式 + 自定义配置 |
+
+「同步」版本内部其实就是调「流式」版本,把所有 delta 拼成一个字符串返回(见 [nllb_600m.cpp:84-92](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L84-L92) 的 `translate_sync`)。
 
 #### 4.2.2 核心流程
 
-基类提供了**两个**函数，分别服务于两种调用场景：
+`translate_stream` 的伪代码:
 
-1. **全序列版** `sinusoidal_positional_embedding(seq_len, d_model)`：一次性生成 `(d_model, seq_len)` 的整张表，每个位置 `i` 对应位置号 `pos = i + 1`（注意是**从 1 起算**）。用于 encoder 输入（整句）和 decoder 的 prefill。
-2. **单位置版** `sinusoidal_positional_embedding_for_pos(position, d_model)`：只为某一个具体 `position` 生成 `d_model` 维的单行向量。用于 decoder 自回归解码的每一步（每步只处理一个新 token，不需要整张表）。
+```
+若 ok_ 为假 → return false
+src_lang_id = 词表[source_lang];  tgt_lang_id = 词表[target_lang]
+若任一语言 token 不存在 → return false
 
-数学公式（全序列版，位置 `pos = i+1`，`half_dim = d_model/2`）：
+input_ids = bpe.encode(文本, add_bos=false, add_eos=true)   # 末尾自动加 </s>
+input_ids.insert(开头, src_lang_id)                          # 前置源语言 token
+embed_input = embedding_forward(input_ids, pos=-1)           # 查表 + 整段正弦位置编码
+encoder_output = encoder_forward(embed_input)                # 一次性编码源句
 
-\[ \text{inv\_freq}_j = \exp\!\left(j \cdot \left(-\frac{\ln 10000}{\text{half\_dim}}\right)\right) = 10000^{-j/\text{half\_dim}}, \quad j = 0,1,\dots,\text{half\_dim}-1 \]
+bos = [bos_eos_id_]                                          # </s> 当 decoder 起始符
+bos_embed = embedding_forward(bos, pos=-1)
+kv_cache = decoder_prefill(bos_embed, encoder_output)        # 种子 KV cache
 
-\[ \text{PE}(\text{pos},\, j) = \sin(\text{pos}\cdot \text{inv\_freq}_j), \qquad \text{PE}(\text{pos},\, j+\text{half\_dim}) = \cos(\text{pos}\cdot \text{inv\_freq}_j) \]
+last_index = tgt_lang_id                                     # 第一个解码步喂目标语言 token
+for pos in 2..max_steps:
+    step_embed = embedding_forward([last_index], pos)        # 单 token + 单位置编码
+    (logits, kv_cache) = decoder_decode(step_embed, encoder_output, kv_cache)
+    last_index = sample_logits(logits, sample_cfg)           # 默认贪心 argmax
+    output.push(last_index)
+    if last_index == bos_eos_id_: break                      # 遇 </s> 停止
+    delta = decode(output) 去掉已输出的前缀
+    callback(delta)                                          # 流式吐增量
+return true
+```
 
-注意本项目的**布局是「前半 sin、后半 cos」拼接**（`[sin..., cos...]`），不是原论文那种 `[sin, cos, sin, cos]` 交错排布。这与导出脚本里 `torch.cat([torch.sin(x), torch.cos(x)], dim=-1)` 完全一致。
+注意三个细节:
+
+- **自回归的「上一个 token」**:`last_index` 每轮被更新为采样结果,下一轮就被 embed 进 decoder。初始值是 `tgt_lang_id`(详见 4.4)。
+- **停止条件**:采到 `bos_eos_id_`(`</s>`)就 break。
+- **流式增量解码**:BPE 解码可能因后续合并而改变已输出字符串的前缀,所以不能简单地「每步 decode 当前 token」。代码的做法是每步都对**整个 output 序列**重新 decode,再和上次的解码结果比较,只把「新增后缀」喂给 callback。
 
 #### 4.2.3 源码精读
 
-全序列版（[src/ncnn_llm_base.h:49-72](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L49-L72)）：
+主链路(分三段看):
 
-```cpp
-inline ncnn::Mat sinusoidal_positional_embedding(int seq_len, int d_model) {
-    int half_dim = d_model / 2;
-    ncnn::Mat emb(d_model, seq_len);          // w=d_model, h=seq_len
-    emb.fill(0.0f);
+[src/nllb_600m.cpp:99-118](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L99-L118) —— 健康检查 → 解析语言 id → 分词(末尾加 `</s>`)→ 前置源语言 token → 整段嵌入 → encoder 前向。
 
-    std::vector<float> inv_freq(half_dim);
-    double log_10000 = std::log(10000.0);
-    double denom_base = static_cast<double>(std::max(1, half_dim));
-    for (int i = 0; i < half_dim; ++i) {
-        inv_freq[i] = static_cast<float>(std::exp(
-            static_cast<double>(i) * -(log_10000 / denom_base)));   // 10000^(-i/half_dim)
-    }
+[src/nllb_600m.cpp:120-132](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L120-L132) —— 用 `</s>` 预填充 decoder 拿到种子 KV cache;把 `last_index` 设为目标语言 token,准备采样配置。
 
-    for (int i = 0; i < seq_len; ++i) {
-        float pos = static_cast<float>(i + 1);  // 关键：位置从 1 起算
-        float* row_ptr = emb.row(i);
-        for (int j = 0; j < half_dim; ++j) {
-            float angle = pos * inv_freq[j];
-            row_ptr[j] = std::sin(angle);                 // 前半段：sin
-            row_ptr[j + half_dim] = std::cos(angle);      // 后半段：cos
-        }
-    }
-    return emb;
-}
-```
+[src/nllb_600m.cpp:134-157](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L134-L157) —— 自回归主循环:嵌入上一 token → decoder decode(更新 KV cache)→ 采样 → 记录 → 遇 `</s>` 停 → 增量解码并回调。
 
-单位置版（[src/ncnn_llm_base.h:74-97](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L74-L97)）公式相同，但只算一行、且直接接收 `position`（不再 `+1`）：
+三个前向函数:
 
-```cpp
-inline ncnn::Mat sinusoidal_positional_embedding_for_pos(int position, int d_model) {
-    ...
-    for (int j = 0; j < half_dim; ++j) {
-        float angle = static_cast<float>(position) * inv_freq[j];   // 直接用 position，不 +1
-        emb_ptr[j] = std::sin(angle);
-        emb_ptr[j + half_dim] = std::cos(angle);
-    }
-    ...
-}
-```
+[src/nllb_600m.cpp:185-191](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L185-L191) —— `encoder_forward`:只喂 `in0`(嵌入序列)、取 `out0`,**不传任何 mask**。这正说明 encoder 是双向的(整句互相可见),区别于 decoder 的因果注意力。
 
-两个函数被 `nllb_600m.cpp` 的 `embedding_forward` 调用（[src/nllb_600m.cpp:163-183](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L163-L183)）：`pos == -1` 时走全序列版（用于 encoder 与 decoder prefill），否则走单位置版（用于 decoder 每步）。位置编码与 token embedding 相加后才送入网络：
+[src/nllb_600m.cpp:193-223](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L193-L223) —— `decoder_prefill`:喂 `in0`(hidden)、`in1`(encoder_output,供 cross-attention)、`in2`(因果掩码),并按层号抽取 `out_cache_k%d`/`out_cache_v%d` 组成 KV cache。掩码是 `seq_len×seq_len` 的下三角阵(未来位置填 `-inf` 屏蔽)。
 
-```cpp
-ncnn::Mat embedding_forward(const std::vector<int>& input_ids, int pos) {
-    ncnn::Extractor ex = embed_net_.create_extractor();
-    ex.input("in0", mat_from_int_vector(input_ids));   // token id -> 查表
-    ncnn::Mat out0;
-    ex.extract("out0", out0);                          // out0.h=seq_len, out0.w=d_model
+[src/nllb_600m.cpp:225-260](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L225-L260) —— `decoder_decode`:喂新 token 的嵌入(`in0`)、**同一份** `encoder_output`(`in1`)、`1×1` 全零掩码(`in2`,因为单 token 恒为序列末尾,因果性天然满足),并按层号回灌旧的 `cache_k%d`/`cache_v%d`(`in`)、抽取新的 `out_cache_k%d`/`out_cache_v%d`(`out`),最后取 `out0` 作为 logits。注意这里是「读旧 cache、写新 cache」(新的 KV cache 长度 +1)。
 
-    ncnn::Mat pos_emb = (pos == -1)
-        ? sinusoidal_positional_embedding(out0.h, out0.w)      // 全序列
-        : sinusoidal_positional_embedding_for_pos(pos, out0.w);// 单位置
-    ncnn::Mat result = out0.clone();
-    add_mats_inplace(result, pos_emb);                 // 逐元素相加：token_embed + PE
-    return result;
-}
-```
+四个 `translate` 公开方法:
 
-注意 `add_mats_inplace` 会校验形状一致才相加（[src/ncnn_llm_base.h:22-34](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L22-L34)），形状不匹配时静默跳过——这是个潜在陷阱：若维度算错，位置编码会「没加上」而不报错。
+[src/nllb_600m.cpp:315-345](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L315-L345) —— 四个重载都先检查 `impl_` 和 `impl_->ok()`,然后委托给 `translate_sync`(返回 string)或 `translate_stream`(返回 bool + callback)。
+
+`NllbConfig` 配置结构:
+
+[src/nllb_600m.h:7-13](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h#L7-L13) —— `temperature`/`top_k`/`top_p`/`do_sample`/`max_steps`,默认 `do_sample=false`(贪心)、`max_steps=512`。
 
 #### 4.2.4 代码实践
 
-**实践目标**：手算并验证正弦位置编码，理解「位置从 1 起算」与「前 sin 后 cos」布局。
+**实践目标**:跑通同步翻译,观察 `encoder→prefill→自回归→</s>停止` 的行为,并与流式输出对比。
 
-**操作步骤**：
+**操作步骤**:
 
-1. 假设 `d_model = 4`（故 `half_dim = 2`），手算 `position = 1` 时的 PE 向量：
-   - `inv_freq[0] = 10000^(0/2) = 1`，`inv_freq[1] = 10000^(-1/2) = 0.01`
-   - 前半（sin）：`[sin(1·1), sin(1·0.01)] = [sin(1), sin(0.01)] ≈ [0.8415, 0.0100]`
-   - 后半（cos）：`[cos(1), cos(0.01)] ≈ [0.5403, 0.9999]`
-   - 拼接：`[0.8415, 0.0100, 0.5403, 0.9999]`
-2. 对照 `sinusoidal_positional_embedding_for_pos(1, 4)` 的代码，确认你的手算与代码逻辑一致。
-3. 阅读导出脚本 [export/nllb_export.py:72-94](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/export/nllb_export.py#L72-L94) 的 `SinusoidalPositionalEmbeddingTS`，确认 C++ 与 Python 用的是同一套公式（`pos = arange(1, seq_len+1)`，同样从 1 起算；同样 `cat([sin, cos])`）。
+1. 准备模型:在 `assets/nllb_600m/` 下放好 9 个文件(权重需自行从 HuggingFace 导出,见 [export/nllb_export.py](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/export/nllb_export.py))。文件名以 [examples/nllb_main.cpp:72-80](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp#L72-L80) 为准:`embed.ncnn.param/bin`、`encoder_noembed.ncnn.param/bin`、`decoder_noembed.ncnn.param/bin`、`vocab.txt`、`merges.txt`。
+2. 运行默认例子(英→中):
+   ```
+   xmake run nllb_main
+   ```
+   默认文本见 [examples/nllb_main.cpp:16](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp#L16),默认 `--src eng_Latn --tgt zho_Hans`(见 [examples/nllb_main.cpp:13-18](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp#L13-L18))。
+3. 观察输出里 `[Sync] Output:`(一次性)与 `[Stream] Output:`(逐字刷新)两段。
 
-**需要观察的现象**：位置 1 与位置 2 的 PE 向量在前几个高频维差别明显、在后几个低频维几乎相同——这正是「不同频率编码不同尺度」的直观体现。
+**需要观察的现象**:同步版一次性打印整句;流式版的 `Output:` 会随着生成逐渐变长,印证 callback 在每一步被调用。
 
-**预期结果**：能解释为什么 `pos = i + 1`（而非 `i`），以及为什么 C++ 与导出脚本必须用完全一致的位置起算点与拼接顺序。
-
-**待本地验证**：若要打印真实数值，可写一个小程序调用 `sinusoidal_positional_embedding_for_pos` 并输出，需先 `#include "ncnn_llm_base.h"`。
+**预期结果**:得到一句通顺的中文翻译(英→中)。若本地无权重,本步骤标注「待本地验证」,改为纯源码阅读:在 [nllb_600m.cpp:134-157](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L134-L157) 的循环里,逐行标注「这一行在做 embed / decoder / 采样 / 停止判断 / 增量解码」。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：全序列版用 `pos = i + 1`，单位置版为什么不也 `+1`？
+**练习 1**:为什么 `decoder_decode` 每一步都要重新喂 `encoder_output`,而不是像 KV cache 那样缓存起来?
 
-**参考答案**：因为单位置版接收的 `position` 参数已经是「真实位置号」（decoder 解码循环里传入 `pos=2,3,4,...`），调用方已经算好了，函数内不必再偏移。全序列版则是根据数组下标 `i` 生成位置，需要 `+1` 把 0 基下标映射成「从 1 起算」的位置号。两者最终都遵循「位置从 1 开始」的同一约定。
+**参考答案**:因为 cross-attention 的 K/V 来自 encoder_output,它本身在整个生成过程中是**常量**。理论上确实可以预先算好 encoder 的 K/V 缓存复用,但本实现的 ncnn decoder 子网把 cross-attention 内部化了(通过 `in1` 接收 encoder_output,由网络内部计算 cross 的 K/V),所以 C++ 侧每步只需把同一份 `encoder_output` 喂进去即可,简单且无歧义。
 
-**练习 2**：为什么本项目选择在 C++ 端加位置编码，而不是放进 ncnn 图？
+**练习 2**:`decoder_prefill` 里的掩码是 `seq_len×seq_len` 下三角阵,而 `decoder_decode` 里是 `1×1` 的全零。为什么 decode 阶段不需要因果掩码?
 
-**参考答案**：因为 decoder 的自回归解码需要「每步只为单个新位置算一次 PE」，而 encoder 是「一次算整句」。把它们都塞进固定的 ncnn 图会很不灵活。在 C++ 端用 `embedding_forward` 的 `pos` 参数分流（`-1` 走全序列、否则走单位置），可以复用同一个 `embed_net_` 查表子网、只换位置编码策略，更简洁。
+**参考答案**:decode 阶段每次只输入当前这一个 token(它已是序列的最末位),self-attention 只需注意历史 KV cache 中的所有 token 与自己,不存在「未来」可泄露的位置,因果性天然成立,所以掩码退化为单个 0。prefill 阶段一次性输入多个 token,必须用因果掩码屏蔽「未来」位置。
 
 ---
 
-### 4.3 `translate` 主流程：源/目标语言 token 与自回归生成
+### 4.3 正弦位置编码 sinusoidal_positional_embedding
 
 #### 4.3.1 概念说明
 
-这是本讲的核心模块。`translate` 把一段源语言文本翻译成目标语言文本，全程由 `Impl::translate_stream` 驱动（[src/nllb_600m.cpp:94-160](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L94-L160)）。
+位置编码告诉 Transformer「每个 token 处在第几个位置」。前面几讲的 LLM/VLM 用 **RoPE**(旋转位置编码,作用在 query/key 上、只依赖相对位置);NLLB 用的是更古老的 **绝对正弦位置编码**(原始 *Attention is All You Need* 论文):给每个位置算一个固定向量,直接**加**到 token 嵌入上。
 
-关键设计有两个：
+为什么 NLLB 用它而不是 RoPE?因为 NLLB 模型当初就是这么训练的——ncnn_llm 在复现时要忠实还原训练时的位置编码方案,否则权重对不上、输出会乱。这也呼应了本讲开头:NLLB 是「最古典」的 Transformer。
 
-1. **源语言 token 进 encoder**：把 `source_lang` 对应的 id **插到输入 token 序列最前面**，告诉 encoder「这句是什么语言」。
-2. **目标语言 token 进 decoder**：decoder 不以普通词起步，而是先用 `</s>` 做 prefill、再以 `target_lang` 作为第一个解码输入。模型在「看到目标语言标记」后，自然地朝该语言生成。
+基类头里有两个函数:
 
-这两步共同实现「一个模型、双向互译」——只要你交换 `source_lang` 和 `target_lang`，翻译方向就反过来。
+- `sinusoidal_positional_embedding(seq_len, d_model)`:一次性给整段序列(长度 `seq_len`)算位置编码,返回 `(d_model, seq_len)` 矩阵。用于 encoder 输入和 decoder 的 prefill。
+- `sinusoidal_positional_embedding_for_pos(position, d_model)`:只给**单个**位置算一行,返回 `(d_model,)` 向量。用于 decoder 自回归的每一步。
 
-#### 4.3.2 核心流程
+#### 4.3.2 核心流程与数学原理
 
-完整的 encoder-decoder 翻译管线如下：
+设模型维度为 \(d\),取 \(d/2\) 个不同频率。先算每个频率的倒数(inv_freq):
+
+\[
+\text{inv\_freq}_j = \exp\!\left(-j \cdot \frac{\ln 10000}{d/2}\right),\quad j=0,1,\dots,d/2-1
+\]
+
+它等价于 \(1/10000^{2j/d}\):\(j\) 越小频率越高(变化越快)。再对位置 \(p\) 计算角度并取 sin/cos:
+
+\[
+\text{PE}(p,\,j) = \sin(p\cdot \text{inv\_freq}_j),\qquad
+\text{PE}(p,\,j+d/2) = \cos(p\cdot \text{inv\_freq}_j)
+\]
+
+也就是说每个位置的前半维放 sin、后半维放 cos。
+
+⚠️ **注意本实现的「1 起始」约定**:全序列版里 `pos = i + 1`([src/ncnn_llm_base.h:63](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L63)),即位置从 1 开始而不是 0。这与 decoder 自回归循环从 `pos=2` 起步是刻意对齐的(详见 4.3.3)。
+
+流程伪代码:
 
 ```
-translate_stream(text, src_lang, tgt_lang, config, callback)
-│
-├─ 1. 解析语言 token id：src_lang_id, tgt_lang_id（词表查不到则返回 false）
-│
-├─ 2. 编码源句（encoder 侧）
-│     bpe_.encode(text) → input_ids
-│     input_ids 头部插入 src_lang_id          # 源语言 token 引导 encoder
-│     embed + 正弦PE → encoder_forward → encoder_output(memory)
-│
-├─ 3. decoder 预填充（用 </s> 起步）
-│     bos = {bos_eos_id_}                      # </s>
-│     embed(</s>) + 正弦PE(位置1) → decoder_prefill(记忆=encoder_output)
-│     → 得到初始 KV cache（此时不取 logits）
-│
-├─ 4. 自回归解码循环（for pos = 2 .. max_steps）
-│     last_index 初始 = tgt_lang_id            # 目标语言 token 作为首个解码输入
-│     每步：
-│       embed(last_index) + 单位置PE(pos) → decoder_decode(记忆=encoder_output, 旧KV)
-│       → logits + 新 KV cache
-│       next = sample_logits(logits, sample_cfg)
-│       output.push_back(next)
-│       if next == </s> : break                # 遇到 eos 停止
-│       delta 解码 → callback 增量返回
-│
-└─ 返回 true
+half_dim = d_model / 2
+for j in 0..half_dim-1:
+    inv_freq[j] = exp(-j * ln(10000) / half_dim)
+for 每个位置 i:
+    pos = i + 1                       # 全序列版;单位置版直接用传入 position
+    for j in 0..half_dim-1:
+        angle = pos * inv_freq[j]
+        emb[i][j]          = sin(angle)
+        emb[i][j+half_dim] = cos(angle)
 ```
-
-三个要点：
-
-- **encoder 是双向的**：`encoder_forward` 不传任何 mask（[src/nllb_600m.cpp:185-191](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L185-L191)），整句 token 互相全可见。这与 LLM/VLM 的因果 decoder 形成对比。
-- **decoder 有两段注意力**：自注意力（带因果 mask，看已生成的译文）+ 交叉注意力（看 encoder 的 memory）。memory 在每一步都被重新喂入（`ex.input("in1", encoder_out)`）。
-- **目标语言 token 不进输出文本**：`output` 数组只收集真正的译文 token，`tgt_lang_id` 仅作为首步输入消费掉、不 push 进 `output`，所以 `decode` 出来的文本不含语言标记。
 
 #### 4.3.3 源码精读
 
-**第一步：解析语言 token + 准备 encoder 输入**（[src/nllb_600m.cpp:101-118](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L101-L118)）：
+全序列版:
 
-```cpp
-const auto& t2i = bpe_.token_to_id();
-auto it_src = t2i.find(source_lang);
-auto it_tgt = t2i.find(target_lang);
-if (it_src == t2i.end() || it_tgt == t2i.end()) {
-    std::cerr << "Unknown language tokens: ...";
-    return false;                          // 语言标记不存在 → 直接失败
-}
-int src_lang_id = it_src->second;
-int tgt_lang_id = it_tgt->second;
+[src/ncnn_llm_base.h:49-72](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L49-L72) —— `sinusoidal_positional_embedding(seq_len, d_model)`,注意第 63 行 `pos = i + 1` 的 1 起始约定,以及前半维 sin、后半维 cos 的填法。
 
-std::vector<int> input_ids = bpe_.encode(input_text, false, true);  // add_bos=false, add_eos=true
-input_ids.insert(input_ids.begin(), src_lang_id);  // 源语言 token 插到最前
+单位置版:
 
-ncnn::Mat embed_input = embedding_forward(input_ids, -1);     // 查表 + 全序列正弦PE
-ncnn::Mat encoder_output = encoder_forward(embed_input);      // 双向编码 → memory
-```
+[src/ncnn_llm_base.h:74-97](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L74-L97) —— `sinusoidal_positional_embedding_for_pos(position, d_model)`,只算一行;若 `d_model` 为奇数则末位置 0 兜底。
 
-注意 `bpe_.encode(input_text, false, true)`：第二个参数 `add_bos=false`、第三个 `add_eos=true`（见 [bpe_tokenizer.h:23-26](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/utils/tokenizer/bpe_tokenizer.h#L23-L26)），即源句末尾自动加 `</s>`。最终 encoder 输入形如 `[src_lang_id, t1, t2, ..., tn, </s>]`。
+在 NLLB 里被 `embedding_forward` 调用:
 
-**第二步：decoder prefill**（[src/nllb_600m.cpp:120-122](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L120-L122) + [193-223](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L193-L223)）：
+[src/nllb_600m.cpp:163-183](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L163-L183) —— embed 子网查表得 `out0` 后,**在 C++ 里**把位置编码加上去(`pos==-1` 走整段版、否则走单位置版)。这说明 embed 子网只负责查表,不含位置信息;位置编码由运行时补上。
 
-```cpp
-std::vector<int> bos = {bos_eos_id_};                       // </s>
-ncnn::Mat bos_embed = embedding_forward(bos, -1);           // 位置1的正弦PE
-KVCache kv_cache = decoder_prefill(bos_embed, encoder_output);
-```
+位置编号的呼应:
 
-`decoder_prefill` 把 `</s>` 作为 decoder 的第一个输入（位置 1），同时喂入 encoder memory（`in1`）和因果 mask（`in2`），但**只提取 KV cache、不提取 `out0` logits**：
+- encoder 输入(整段,`pos=-1`):位置 1, 2, …, N。
+- decoder 预填充的 `</s>`(整段版、`seq_len=1`):位置 1。
+- decoder 自回归循环从 `pos=2` 开始([src/nllb_600m.cpp:134](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L134)):目标语言 token 落在位置 2,第一个真正生成的词落在位置 3,依此类推。
 
-```cpp
-KVCache decoder_prefill(const ncnn::Mat& hidden, const ncnn::Mat& encoder_out) {
-    KVCache kv_cache;
-    kv_cache.reserve(kNumDecoderLayers);          // kNumDecoderLayers = 24
-    ncnn::Extractor ex = decoder_net_.create_extractor();
-    ex.input("in0", hidden);
-    ex.input("in1", encoder_out);                 // 交叉注意力的 memory
-
-    // 因果自注意力 mask：上三角置 -inf
-    const int seq_len = hidden.h;
-    ncnn::Mat attention_mask(seq_len, seq_len);
-    attention_mask.fill(0.0f);
-    for (int i = 0; i < seq_len; ++i)
-        for (int j = i + 1; j < seq_len; ++j)
-            attention_mask.row(i)[j] = -std::numeric_limits<float>::infinity();
-    ex.input("in2", attention_mask);
-
-    // 逐层提取输出 KV cache（out_cache_k0/k1/...）
-    for (int i = 0; i < kNumDecoderLayers; ++i) {
-        ... ex.extract("out_cache_k%d"/"out_cache_v%d", ...);
-        kv_cache.emplace_back(std::move(k_cache), std::move(v_cache));
-    }
-    return kv_cache;
-}
-```
-
-> 说明：本项目把 decoder 的 KV cache 槽位数固定为 `kNumDecoderLayers = 24`（[src/nllb_600m.cpp:20](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L20)），按 `out_cache_k%d`/`cache_k%d` 命名逐层读写。这与导出脚本注入的 KV cache 槽位是对应的契约。
-
-**第三步：自回归解码循环**（[src/nllb_600m.cpp:124-157](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L124-L157)）：
-
-```cpp
-int last_index = tgt_lang_id;                  // 目标语言 token 作为首个解码输入
-std::vector<int> output;
-...
-for (int pos = 2; pos < config.max_steps; ++pos) {
-    std::vector<int> step_ids = {last_index};
-    ncnn::Mat step_embed = embedding_forward(step_ids, pos);   // 单位置正弦PE
-
-    auto [logits, new_cache] = decoder_decode(step_embed, encoder_output, kv_cache);
-    kv_cache = std::move(new_cache);           // KV cache 更新
-
-    last_index = sample_logits(logits, sample_cfg);   // 基类采样（默认贪心 argmax）
-    output.push_back(last_index);
-
-    if (last_index == bos_eos_id_) break;      // 遇到 </s> 停止
-
-    // 增量解码（见 4.4）
-    ...
-}
-```
-
-`decoder_decode`（[src/nllb_600m.cpp:225-260](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L225-L260)）每步做三件事：喂新 token 嵌入（`in0`）、喂 encoder memory（`in1`）、喂旧 KV cache（`cache_k%d`/`cache_v%d`），再取出新 KV cache（`out_cache_k%d`）和 logits（`out0`）。mask 退化为 `(1,1)` 的 0（单 token 自注意力无需屏蔽）。
-
-把整个 token 位置序列列出来就清楚了：
-
-| 步骤 | 输入 token | 位置(PE) | 由谁产生 | 是否进 output |
-|------|-----------|----------|----------|--------------|
-| decoder prefill | `</s>` | 1 | 调用方固定 | 否 |
-| 解码第 1 步 (pos=2) | `tgt_lang_id` | 2 | 调用方固定 | 否（仅消费） |
-| 解码第 2 步 (pos=3) | 译文词 w1 | 3 | 上一步 argmax | 是（w1） |
-| 解码第 3 步 (pos=4) | 译文词 w2 | 4 | 上一步 argmax | 是（w2） |
-| ... | ... | ... | ... | ... |
-| 某步 | `</s>` | — | argmax | 触发 break |
-
-也就是说：喂 `tgt_lang_id` 得到的 logits，argmax 出的是译文的**第一个真正的词** w1。目标语言 token 就这样「身先士卒」地引导了生成方向，自己却不出现在译文里。
+所以「预填充占用了位置 1」与「循环从 pos=2 起步」是同一套编号体系,不会重复或跳号。
 
 #### 4.3.4 代码实践
 
-**实践目标**：跟踪一次完整的 encoder→decoder 翻译，亲手对应「语言 token 引导方向」的代码位置。
+**实践目标**:亲手算几行正弦位置编码,直观感受「低维变化快、高维变化慢」。
 
-**操作步骤**：
+**操作步骤**(源码阅读 + 可选手算):
 
-1. 打开 [src/nllb_600m.cpp](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L94-L160) 的 `translate_stream`，在源码旁标注：
-   - 「源语言 token 进 encoder」→ [第 115 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L115) `input_ids.insert(input_ids.begin(), src_lang_id)`
-   - 「目标语言 token 进 decoder」→ [第 124 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L124) `int last_index = tgt_lang_id`
-2. 对照上面的「token 位置序列」表格，确认 `output` 数组里不含 `tgt_lang_id`，也不含 prefill 的 `</s>`。
-3. 准备好 `assets/nllb_600m/` 模型目录后，构建并运行示例（默认英→中）：
-   ```
-   xmake build nllb_main
-   xmake run nllb_main --text "ncnn is the best edge-side neural network inference framework"
-   ```
-4. **做一次中→英翻译**（交换源/目标语言）：
-   ```
-   xmake run nllb_main --src zho_Hans --tgt eng_Latn --text "今天天气很好"
-   ```
+1. 阅读上面两个函数的实现,确认 inv_freq 公式与 sin/cos 填法。
+2. 设 \(d=8\)(即 `half_dim=4`),手算位置 \(p=1,2,3\) 的前 4 维 sin 值:
+   - 先算 `inv_freq[j] = exp(-j * ln(10000)/4)`,j=0,1,2,3。
+   - 再算 `sin(p * inv_freq[j])`。
+3. 对照观察:j=0 那一维随 p 变化最快(j=0 时 inv_freq=1,sin(p) 周期最短);j=3 那一维几乎不变(inv_freq 极小,接近常数 0)。
 
-**需要观察的现象**：同样的模型、同样的代码路径，仅因 `--src`/`--tgt` 不同，输出语言就相反。
+**需要观察的现象**:同一列(j 固定)随 p 增大呈正弦波动;j 越大波动越平缓。
 
-**预期结果**：英→中输出中文；中→英输出英文。这证明翻译方向完全由语言 token 决定。
-
-**待本地验证**：实际译文质量与 tokens 数取决于本地模型权重；若 `assets/nllb_600m/` 不存在，构造阶段 `load_net` 会失败、`translate` 直接返回空串/false。
+**预期结果**:你会得到一张「低维抖动剧烈、高维近乎平直」的位置编码表,这正是 Transformer 用不同频率编码相对/绝对位置的直觉。若不想手算,可写一个 10 行的小程序调用 `sinusoidal_positional_embedding(8, 8)` 打印矩阵(标注「示例代码」)。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `decoder_prefill` 用 `</s>` 而不是 `tgt_lang_id` 起步？
+**练习 1**:正弦位置编码和 RoPE(前几讲用的)最根本的区别是什么?
 
-**参考答案**：这遵循 NLLB/M2M 的解码约定——decoder 序列以 `</s>`（bos）开头，紧接目标语言 token，再接译文。prefill 先把 `</s>` 在位置 1 灌进 KV cache（只建 cache、不取 logits），随后第一步解码把 `tgt_lang_id` 放在位置 2、产出第一个译文词的预测。这与导出脚本 `scripted_greedy_decode` 里 seed `[2, lang_id]`（`</s>=2` 在前、语言 id 在后）的位置安排一致（[export/nllb_export.py:315-316](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/export/nllb_export.py#L315-L316)）。
+**参考答案**:正弦编码是**绝对**位置编码——给每个绝对位置一个固定向量,直接加到嵌入上,模型靠这些绝对向量间接推断相对关系;RoPE 是**相对**位置编码——作用在 query/key 上,通过对每对维度做旋转,使内积只依赖两个 token 的相对距离,不依赖绝对位置。NLLB 用前者是因为它就是这么训练的。
 
-**练习 2**：encoder 的自注意力为什么不需要因果 mask？
+**练习 2**:为什么需要 `sinusoidal_positional_embedding_for_pos` 这么一个「单位置」版本,不能复用全序列版?
 
-**参考答案**：因为 encoder 要「理解整句原意」，源句的每个词都应能互相看到（双向）。因果 mask 是 decoder-only 模型（如 LLM）为了防止「看到未来」才加的；翻译任务里源句是完整给定的，不存在「未来泄露」问题。
+**参考答案**:自回归 decode 阶段每次只输入一个 token,只需算这一个位置的一行编码;若用全序列版得构造一个长度为「已生成总长」的矩阵,既浪费又容易把位置编号搞错。单位置版直接接收 `pos` 返回一行,简洁且与循环里的 `pos` 变量天然对应。
 
 ---
 
-### 4.4 `translate` 重载与流式 callback
+### 4.4 源/目标语言 token 与翻译方向
 
 #### 4.4.1 概念说明
 
-`nllb_600m` 对外暴露 **四个** `translate` 重载（[src/nllb_600m.h:38-56](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.h#L38-L56)），按「是否传 `NllbConfig`」和「是否传 callback」两个维度组合：
+NLLB 一个模型支持 200+ 语言对,靠的就是**语言 token**:词表里有一批形如 `eng_Latn`(英语,拉丁字母)、`zho_Hans`(中文,简体)、`fra_Latn`(法语)、`jpn_Jpan`(日语)…的特殊 token。命名遵循「BCP-47 语言码 + 文字脚本」约定。
 
-| 重载 | NllbConfig | callback | 返回类型 | 语义 |
-|------|-----------|----------|---------|------|
-| 1 | 否（用默认） | 否 | `std::string` | 同步，返回整句译文 |
-| 2 | 是 | 否 | `std::string` | 同步，自定义采样配置 |
-| 3 | 否（用默认） | 是 | `bool` | 流式，增量回调 |
-| 4 | 是 | 是 | `bool` | 流式，自定义配置 + 增量回调 |
+语言 token 在翻译中扮演两个不同角色:
 
-两个「同步」重载内部都调用 `translate_sync`，它其实只是把一个「把 delta 追加到字符串」的 lambda 传给 `translate_stream`（[src/nllb_600m.cpp:84-92](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L84-L92)）。也就是说，**流式是底层实现，同步是在流式之上包了一层**。
+- **源语言 token**(source_lang):放在 **encoder 输入的最前面**,告诉 encoder「接下来这句是什么语言」。它帮助 encoder 用对应语言的特征去编码。
+- **目标语言 token**(target_lang):作为 **decoder 生成的第一个 token**(forced bos / decoder 起始),告诉 decoder「请用这种语言来生成译文」。这正是**控制翻译方向**的开关——同一句源文本、同一个 encoder 输出,只要把 decoder 起始的目标语言 token 换成不同语言,就能译成不同目标语言。
 
 #### 4.4.2 核心流程
 
-流式增量返回的关键在于「delta 解码」：每生成一个新 token，不是单独 decode 这个 token（因为多字节 UTF-8 或 BPE 合并可能跨 token），而是**对整个 `output` 数组重新 decode，再取与上次结果的差值**。
-
-```
-每步生成 next token 后：
-  current = bpe_.decode(output, skip_special=true)   # 重新解码整段
-  if current.size() >= last_decoded.size():
-      delta = current.substr(last_decoded.size())    # 取新增尾部
-      callback(delta)                                # 增量返回
-      last_decoded = current
-  else:
-      callback(current)                              # 异常回缩时整体返回
-      last_decoded = current
-```
-
-这样即便译文是中文（一个字可能由多个 BPE 片段拼成），也能保证每次 callback 收到的是完整的、不会截断 UTF-8 的字符串片段。
+1. 从词表查出 `src_lang_id = token_to_id[source_lang]`、`tgt_lang_id = token_to_id[target_lang]`。若任一不存在,直接返回失败(防止拼错语言代码)。
+2. encoder 输入 = `[src_lang_id] + bpe.encode(文本, add_eos=true)`,即「源语言 token 在最前、正文 token 在后、`</s>` 在末尾」。
+3. decoder 起始符是 `</s>`(用于 prefill 种子 KV cache)。
+4. 自回归循环的「上一个 token」初值设为 `tgt_lang_id`——也就是说 decoder 生成的第一步先「吃掉」目标语言 token,再开始产出真正的译文。这就是目标语言如何引导翻译方向。
 
 #### 4.4.3 源码精读
 
-四个重载的转发逻辑（[src/nllb_600m.cpp:315-345](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L315-L345)），以「默认配置 + 流式」为例：
+语言 id 解析与失败保护:
 
-```cpp
-bool nllb_600m::translate(const std::string& input_text,
-                          const std::string& source_lang,
-                          const std::string& target_lang,
-                          std::function<void(const std::string&)> callback) {
-    if (!impl_ || !impl_->ok()) return false;
-    return impl_->translate_stream(input_text, source_lang, target_lang,
-                                   NllbConfig{}, std::move(callback));
-}
-```
+[src/nllb_600m.cpp:103-112](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L103-L112) —— 用 `token_to_id().find()` 查两个语言 token;找不到就打印 `Unknown language tokens` 并返回 false。
 
-同步版则把结果攒进字符串（[src/nllb_600m.cpp:84-92](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L84-L92)）：
+源语言 token 前置:
 
-```cpp
-std::string translate_sync(...) {
-    std::string out;
-    translate_stream(..., [&](const std::string& delta) { out += delta; });
-    return out;
-}
-```
+[src/nllb_600m.cpp:114-115](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L114-L115) —— `encode(text, false, true)` 第二参 `add_bos=false`、第三参 `add_eos=true`(签名见 [src/utils/tokenizer/bpe_tokenizer.h:23-27](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/utils/tokenizer/bpe_tokenizer.h#L23-L27)),故序列末尾自动带 `</s>`;随后 `insert(begin, src_lang_id)` 把源语言 token 放到最前面。
 
-delta 解码的完整片段（[src/nllb_600m.cpp:144-156](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L144-L156)）：
+目标语言 token 作为生成起点:
 
-```cpp
-if (last_index == bos_eos_id_) {
-    break;                            // eos 先判断，不进 callback
-}
-
-std::string current = bpe_.decode(output, true);   // skip_special_tokens=true
-if (current.size() >= last_decoded.size()) {
-    std::string delta = current.substr(last_decoded.size());
-    if (!delta.empty() && callback) callback(delta);
-    last_decoded.swap(current);
-} else {
-    if (callback) callback(current);
-    last_decoded = std::move(current);
-}
-```
-
-`nllb_main.cpp` 同时演示了同步与流式两种用法（[examples/nllb_main.cpp:109-121](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp#L109-L121)）：
-
-```cpp
-// 1) 同步翻译
-std::string out = translator.translate(args.text, args.source_lang, args.target_lang);
-std::cout << "[Sync] Output: " << out << "\n\n";
-
-// 2) 流式翻译：每收到一段 delta 就立即打印
-std::cout << "[Stream] Output: ";
-bool ok = translator.translate(args.text, args.source_lang, args.target_lang,
-    [](const std::string& chunk) {
-        std::cout << chunk << std::flush;     // 边生成边输出
-    });
-std::cout << "\n[Stream] Status: " << (ok ? "success" : "failed") << "\n";
-```
+[src/nllb_600m.cpp:124](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L124) —— `last_index = tgt_lang_id`,自回归循环的第一步会把它 embed 进 decoder,从而把生成导向目标语言。
 
 #### 4.4.4 代码实践
 
-**实践目标**：体验同步与流式两种 API，理解 delta 解码。
+**实践目标**:验证「换目标语言 token = 换翻译方向」,并体会源/目标语言 token 各自的位置。
 
-**操作步骤**：
+**操作步骤**:
 
-1. 阅读 [examples/nllb_main.cpp:109-121](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/examples/nllb_main.cpp#L109-L121)，对比两种调用形式：同步版用返回值、流式版用 lambda。
-2. （源码阅读型实践）在 [src/nllb_600m.cpp:148-156](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L148-L156) 处思考：为什么用「整段重解码再取差值」，而不是直接 `bpe_.decode({next_token})`？提示：考虑中文 BPE 分片与多字节 UTF-8。
-3. 准备好模型后，运行 `nllb_main` 观察两种输出的差异：同步版一次性打印整句；流式版逐段「边译边吐」。
-4. 进阶（可选）：仿照 `nllb_main`，写一个自己的小 main，用带 `NllbConfig` 的重载把 `do_sample=true, temperature=0.8` 打开，观察贪心与采样的译文差异（需自行编译新 target）。
+1. 先跑默认英→中:`xmake run nllb_main`(`--src eng_Latn --tgt zho_Hans`)。
+2. 反向译中→英:`xmake run nllb_main --src zho_Hans --tgt eng_Latn --text " ncnn 是最好的边缘端神经网络推理框架"`。
+3. 换第三种目标语言(若有相应训练支持),例如 `--tgt fra_Latn` 译成法语。
 
-**需要观察的现象**：流式输出时，译文是分若干次打印出来的，每次一小段；同步输出则等全部生成完才打印。
+**需要观察的现象**:同一句输入,只改 `--src`/`--tgt`,encoder/decoder 走的是同一个模型权重,但语言 token 不同,译文语言随之改变。
 
-**预期结果**：两种方式的最终译文文本应当一致（在贪心解码下）。
-
-**待本地验证**：流式分段粒度取决于 BPE 合并边界，需本地实跑观察。
+**预期结果**:英→中产出中文,中→英产出英文。这印证「方向完全由语言 token 决定」。若本地无权重,标注「待本地验证」,改为源码阅读:在 [nllb_600m.cpp:103-124](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L103-L124) 标注「源语言 token 进 encoder 输入、目标语言 token 进 decoder 起点」两条线。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么不直接对单个新 token 调 `decode` 取增量，而要整段重解码？
+**练习 1**:如果把 `source_lang` 和 `target_lang` 都填成同一个语言(如都填 `eng_Latn`),会发生什么?
 
-**参考答案**：因为 BPE 解码不是「逐 token 独立」的。一个中文字符可能由多个 BPE 片段拼成，单个片段单独 decode 可能是无意义的半个字或空串。整段 `decode(output)` 后取 `substr(last_decoded.size())` 的差值，能保证每个增量都是完整的、合法的字符串片段，不会把多字节 UTF-8 字符从中间截断。
+**参考答案**:程序不会报错(两个 token 都存在),encoder 会按英语编码,decoder 起始 token 也是英语,模型大概率做「英语→英语」的近似复述(可能略有改写)。这正好说明语言 token 是**条件信号**而非硬性约束——模型只是被「引导」去用目标语言生成。
 
-**练习 2**：四个重载里，哪个是「最底层」的实现？
+**练习 2**:为什么源语言 token 放在 encoder 输入**最前面**,而不是最后面或中间?
 
-**参考答案**：是 `Impl::translate_stream`（带 `NllbConfig` 与 callback）。所有四个对外重载最终都落到它：同步重载只是把「追加到字符串」的 lambda 当 callback 传入，无 `NllbConfig` 的重载只是传一个默认 `NllbConfig{}`。所以「流式 + 配置」是最通用形态，其余都是它的便利封装。
+**参考答案**:这与 NLLB 的训练约定一致(训练时源语言 token 恒在句首、`</s>` 在句尾)。推理必须复现训练分布,否则位置编码与权重对不上。放在句首也让 encoder 的双向注意力能第一时间「看到」语言标识。
 
 ---
 
 ## 5. 综合实践
 
-把本讲四个模块串起来，完成下面的综合任务：
+把本讲四个模块串起来,完成一次「读懂 + 跑通 + 解释」的端到端任务。
 
-**任务：画出 NLLB 一次翻译的完整数据流图，并标注每个模块的代码位置。**
+**任务**:用 `nllb_main` 做一次英→中翻译,并能在源码里逐阶段解释发生了什么。
 
-1. 选一句短英文，例如 `"Hello world"`，设定 `--src eng_Latn --tgt zho_Hans`。
-2. 在一张纸上（或笔记软件里）画出从字符串到译文的数据流，至少包含以下节点，并在每个节点旁标出对应的源码行号：
-   - `bpe_.encode` → token id 序列（[nllb_600m.cpp:114](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L114)）
-   - 头部插入 `src_lang_id`（[第 115 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L115)）
-   - `embedding_forward`（查表 + 正弦 PE）（[第 117 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L117) / [163-183](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L163-L183)）
-   - `encoder_forward` → memory（[第 118 行](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L118) / [185-191](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L185-L191)）
-   - decoder prefill（`</s>` → KV cache）（[120-122](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L120-L122) / [193-223](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L193-L223)）
-   - 自回归循环：`tgt_lang_id` → decoder_decode → sample → ...（[134-157](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L134-L157) / [225-260](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L225-L260)）
-   - delta 解码与 callback（[148-156](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L148-L156)）
-3. 在图上用两种颜色分别标出 **源语言 token** 和 **目标语言 token** 的注入点，并各写一句话说明它们如何引导翻译方向。
-4. 在图旁写一句：本讲的正弦位置编码为什么必须用「位置从 1 起算、前 sin 后 cos」这套与导出脚本一致的约定。
+**步骤**:
 
-**验收标准**：图能自洽地解释「输入英文 → 输出中文」的全过程，且每个箭头都能在源码里指到具体行。
+1. **构建**:`xmake build nllb_main`(确认 target 名见 [xmake.lua:105-109](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/xmake.lua#L105-L109))。
+2. **跑同步翻译**:`xmake run nllb_main --text "Hello, world." --src eng_Latn --tgt zho_Hans`,记录 `[Sync] Output`。
+3. **跑流式翻译**:观察 `[Stream] Output` 是否逐字增长,印证 callback 机制。
+4. **写一份阶段说明**:对照 [nllb_600m.cpp:99-160](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/nllb_600m.cpp#L99-L160),用表格列出每个阶段对应的代码行与作用:
 
----
+   | 阶段 | 代码行 | 作用 |
+   |------|--------|------|
+   | 解析语言 token | L103-112 | 查 src/tgt id,失败保护 |
+   | 分词 + 前置源语言 token | L114-115 | encoder 输入序列 |
+   | 嵌入 + 正弦位置编码 | L117 | `embedding_forward(pos=-1)` |
+   | encoder 前向 | L118 | 一次性得 encoder_output |
+   | decoder 种子 prefill | L120-122 | `</s>` 初始化 KV cache |
+   | 目标语言起点 | L124 | `last_index = tgt_lang_id` |
+   | 自回归循环 | L134-157 | embed→decode→采样→停止→增量解码 |
+
+5. **回答两个解释题**(写进笔记):
+   - 正弦位置编码在 encoder 端和 decoder 端分别起什么作用?(答:都把绝对位置信息加到嵌入上,让双方知道 token 处于第几位;encoder 用整段版,decoder 自回归用单位置版。)
+   - 源语言 token 和目标语言 token 如何引导翻译方向?(答:源语言 token 在 encoder 输入最前,标识输入语言;目标语言 token 作为 decoder 生成起点,把输出导向目标语言。)
+
+**预期结果**:得到正确译文,并能口头复述 encoder-decoder 的完整数据流。若无权重,步骤 2-3 标注「待本地验证」,但步骤 4-5 的源码解释必须完成。
 
 ## 6. 本讲小结
 
-- `nllb_600m` 用 **Pimpl 惯法** 把 ncnn 隔离在 cpp 内，对外只暴露薄壳；内部 `Impl` 继承 `ncnn_llm_base`，加载 `embed`/`encoder`/`decoder` 三个子网加一个 BPE 分词器。
-- 它是经典的 **encoder-decoder（seq2seq）** 架构：encoder 双向编码源句成 memory，decoder 自回归生成译文，二者通过**交叉注意力**连接。
-- **正弦位置编码**在 C++ 端计算（不进 ncnn 图），有全序列版与单位置版两个函数；位置从 1 起算、采用「前 sin 后 cos」拼接，必须与导出脚本保持一致。
-- **源语言 token** 插到 encoder 输入最前、**目标语言 token** 作为 decoder 首个解码输入；交换二者即可反转翻译方向——这是 NLLB 一个模型支持 200 种语言互译的关键。
-- `translate` 有四个重载，本质是「流式 + 配置」最底层、其余是便利封装；流式靠**整段重解码取差值**实现增量返回，避免截断多字节字符。
-- NLLB 走的是基类 `sample_logits`（无重复惩罚），是项目中「自跑解码循环、不复用共享文本运行时」的代表，可与 u2 的 LLM 主链路对照阅读。
-
----
+- `nllb_600m` 是项目里唯一的 **encoder-decoder** 运行时,用 pImpl 隐藏实现、内部类继承 `ncnn_llm_base` 复用公共能力。
+- 构造时加载 **三类子网**(embed / encoder / decoder)+ BPE 词表,**绕开 `model.json`**、直接吃文件路径;`</s>` 既是 eos 也是 decoder 起始符(id 默认 2)。
+- 翻译主链路:分词 → 嵌入+正弦位置编码 → encoder 一次性编码 → decoder 种子 prefill → 自回归循环(embed→decode 更新 KV cache→采样→遇 `</s>` 停止→增量解码)。
+- `translate` 提供 **4 个重载**(同步/流式 × 默认/自定义配置),流式版靠「对整个 output 重新 decode、只吐新增后缀」实现稳定的增量输出。
+- NLLB 用**正弦绝对位置编码**(基类提供两个函数),而非前几讲的 RoPE;且采用 1 起始的位置编号,与 decoder 循环从 `pos=2` 起步刻意对齐。
+- 翻译方向完全由**语言 token** 决定:源语言 token 前置于 encoder 输入,目标语言 token 作为 decoder 生成起点,二者结合即可在 200+ 语言对间切换。
 
 ## 7. 下一步学习建议
 
-- **回看 u2-l1/u2-l2 对照差异**：本讲的 `decoder_prefill`/`decoder_decode` 与共享文本运行时的 `llm_run_decoder_with_kv`（u2-l2）解决的是同一类问题（带 KV cache 的 decoder 前向），但 NLLB 自管 KV cache、且多了交叉注意力（`in1` 喂 memory）。对比二者能加深对「为什么项目要抽象出共享运行时」的理解。
-- **看导出脚本 `export/nllb_export.py`**：理解 HF 的 NLLB 模型如何被拆成三个 TorchScript 模块、KV cache 槽位如何注入、正弦位置编码为何留在 Python/C++ 端。这是 u8-l4「模型导出流程」的具体案例。
-- **延伸到 u7（对话模板与工具调用）**：本讲的语言 token 是「用特殊 token 引导生成」的一个朴素例子；u7 的 ChatML 模板与工具调用机制是同一思想的工程化升级。
-- **尝试接入新语种**：在 `assets/nllb_600m/vocab.txt` 里找到目标语言 token（如 `jpn_Jpan` 日语、`kor_Hang` 韩语），用 `--src/--tgt` 跑一遍，验证「语言 token 即开关」的结论。
+- **横向对比采样实现**:本讲 NLLB 用的是基类 `sample_logits`(默认贪心,见 [src/ncnn_llm_base.h:147-169](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/src/ncnn_llm_base.h#L147-L169))。建议复习 u3-l4,对比它和共享运行时 `llm_select_next_token`(带 repetition penalty)的区别。
+- **看导出脚本**:想理解 NLLB 权重如何从 HuggingFace 变成 ncnn 的 `embed`/`encoder_noembed`/`decoder_noembed`,可读 [export/nllb_export.py](https://github.com/futz12/ncnn_llm/blob/f2f29e41be164c788c36cc44bdbf2d0d4810477e/export/nllb_export.py),对应 u8-l4。
+- **打通 KV cache 契约**:本讲 decoder 用的 `cache_k%d`/`cache_v%d` 命名与 u2-l2 的共享运行时完全一致,可回头体会这套「读旧写新」的缓存更新模式如何被多个运行时复用。
+- **尝试扩展**:若想加一个新功能(如限制最大生成长度、加 beam search),可参考 `NllbConfig` 的字段,在 `translate_stream` 循环里做实验,这是相对独立、风险小的练手点。
