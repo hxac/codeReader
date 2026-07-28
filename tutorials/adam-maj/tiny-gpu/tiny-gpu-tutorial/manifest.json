@@ -1,0 +1,617 @@
+{
+  "project": "tiny-gpu",
+  "head": "02b6c2ce223f606051a6d3a35ca942fbb1dffde2",
+  "rationale": "tiny-gpu 是一个用 SystemVerilog 编写的教学型 GPU，源码文件不多但概念密度极高，因此学习路线采用「先跑起来再读源码、先整体再局部、先硬件再仿真」的顺序。入门单元（Unit 1）先建立项目定位、仓库地图与 iverilog/cocotb/sv2v 工具链，让读者能独立跑通 make test 仿真；随后按「自顶向下」展开——Unit 2 从 gpu 顶层与内核启动（DCR/dispatcher）切入，Unit 3 下探到内存模型与内存控制器，Unit 4 解剖计算核心的七阶段流水线（scheduler/fetcher/decoder），Unit 5 进入每个线程的执行单元（ISA/ALU/LSU/registers/PC）。进阶单元 Unit 6 聚焦 Python cocotb 仿真框架、执行轨迹阅读与内核编写，把「读硬件」转化为「用硬件」；专家单元 Unit 7 讨论分支分歧、流水线、warp 调度、缓存与内存合并等真实 GPU 优化，引导读者对照源码做二次开发。单元间依赖严格遵循「上层先于下层、机制先于使用、硬件先于仿真」，确保每篇讲义只解决一个相对独立的问题，并都附带可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 tiny-gpu 并跑通仿真",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览：tiny-gpu 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "topic": "tiny-gpu 的定位与设计目标，以及为什么要用 SystemVerilog 从零搭建一个教学型 GPU。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 tiny-gpu 的定位与学习价值",
+            "区分 GPU 编程（软件）与 GPU 硬件实现",
+            "了解项目聚焦的三大主题：架构、并行化、内存"
+          ],
+          "source_files": [
+            "README.md"
+          ],
+          "minimal_modules": [
+            "项目背景与动机（GPU 硬件资料稀缺）",
+            "GPU vs CPU 学习资源差异",
+            "三大学习主题：架构/并行/内存",
+            "项目范围与简化原则"
+          ],
+          "practice_task": "阅读 README，用自己的话写出 tiny-gpu 相比真实开源 GPU（Miaow/VeriGPU）做了哪些简化，至少列出 3 点并说明每点为何有助于学习。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "仓库结构与源码地图",
+          "order": 2,
+          "filename": "u1-l2-repo-structure.md",
+          "topic": "仓库整体目录结构，src/ 下 12 个模块如何对应 GPU 架构图，test/ 下仿真框架如何组织。",
+          "level": "beginner",
+          "learning_goals": [
+            "掌握仓库目录组织",
+            "建立「源码文件 ↔ 架构模块」的映射",
+            "区分 SystemVerilog 硬件源码与 Python 仿真测试"
+          ],
+          "source_files": [
+            "README.md",
+            "src/gpu.sv",
+            "src/core.sv"
+          ],
+          "minimal_modules": [
+            "src/ 源码模块清单",
+            "架构图与模块对应关系",
+            "test/ 仿真框架结构",
+            "docs/ 文档与图片资源"
+          ],
+          "practice_task": "画出一张模块依赖树，把 src/ 下每个 .sv 文件挂到 gpu.sv 或 core.sv 之下，标注每个模块的一句话职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "构建与仿真工具链",
+          "order": 3,
+          "filename": "u1-l3-build-and-simulation.md",
+          "topic": "如何用 Makefile 配合 iverilog、cocotb、sv2v 把 SystemVerilog 编译并跑起内核仿真。",
+          "level": "beginner",
+          "learning_goals": [
+            "理解 HDL 仿真工具链的角色",
+            "掌握 make compile / make test_matadd 的执行流程",
+            "学会定位并阅读仿真日志输出"
+          ],
+          "source_files": [
+            "Makefile",
+            "test/helpers/setup.py"
+          ],
+          "minimal_modules": [
+            "Makefile 目标与依赖关系",
+            "sv2v 把 SystemVerilog 转 Verilog 的流程",
+            "iverilog 编译 + cocotb 仿真启动",
+            "日志输出位置 test/logs"
+          ],
+          "practice_task": "安装工具链后运行 make test_matadd，打开 test/logs 下生成的日志，找到「初始数据内存」与「最终数据内存」两段，报告矩阵加法的结果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "GPU 顶层与内核启动",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "gpu.sv 顶层架构",
+          "order": 1,
+          "filename": "u2-l1-gpu-top-level.md",
+          "topic": "顶层模块 gpu 的参数化设计、端口定义，以及它如何把 DCR、两个内存控制器、dispatcher 和多个 core 连接起来。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 SystemVerilog parameter 参数化设计",
+            "读懂顶层端口与多通道内存握手接口",
+            "掌握核心与控制器之间的信号走线"
+          ],
+          "source_files": [
+            "src/gpu.sv"
+          ],
+          "minimal_modules": [
+            "参数化设计 DATA_MEM/PROGRAM_MEM",
+            "顶层端口：clk/reset/start/done 与内存接口",
+            "子模块实例化清单（DCR/控制器/dispatch/core）",
+            "LSU 与 fetcher 到控制器的连线",
+            "generate 循环展开 NUM_CORES 个核"
+          ],
+          "practice_task": "在 gpu.sv 中追踪一条「线程发起 data 内存读请求」的信号路径，从某 core 的 LSU 一路到外部 data_mem_read_valid，用箭头标注经过的中间寄存器。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "内核启动：DCR 与 Dispatcher",
+          "order": 2,
+          "filename": "u2-l2-kernel-launch-dcr-dispatcher.md",
+          "topic": "设备控制寄存器如何配置 thread_count，dispatcher 如何把线程切成 block 并派发给空闲 core，最终汇总 done 信号。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 DCR 的作用与写入时序",
+            "掌握 block/thread 划分的向上取整公式",
+            "理解 dispatcher 的多核调度状态机"
+          ],
+          "source_files": [
+            "src/dcr.sv",
+            "src/dispatch.sv",
+            "src/gpu.sv"
+          ],
+          "minimal_modules": [
+            "DCR 写入与 thread_count 输出",
+            "total_blocks = (thread_count + TPB - 1) / TPB 公式",
+            "block 派发循环与 core_reset/core_start 握手",
+            "最后一个 block 的线程数计算",
+            "blocks_done 计数与 done 信号"
+          ],
+          "practice_task": "假设 thread_count=8、THREADS_PER_BLOCK=4、NUM_CORES=2，手算 dispatcher 在每个周期给每个 core 分配的 block_id 与 thread_count，画出派发时间线。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "内存子系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "内存模型与外部接口",
+          "order": 1,
+          "filename": "u3-l1-memory-model-interface.md",
+          "topic": "tiny-gpu 的 data/program 内存规格（8 位地址、8/16 位数据、多通道），以及 Python Memory 类如何模拟外部异步 DRAM。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 data/program 内存的位宽与容量规格",
+            "掌握多通道 valid/ready/data 握手接口",
+            "理解仿真端外部内存模型的响应逻辑"
+          ],
+          "source_files": [
+            "src/gpu.sv",
+            "test/helpers/memory.py"
+          ],
+          "minimal_modules": [
+            "data/program 内存规格（地址位/数据位/通道数）",
+            "多通道握手接口 valid/ready/data",
+            "Python Memory.run() 的逐通道响应逻辑",
+            "load()/display() 调试方法"
+          ],
+          "practice_task": "阅读 memory.py 的 run()，解释为什么每个周期要逐位解析 valid 与 address，并说明 read_ready/read_data 是如何被驱动回 DUT 的。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "内存控制器：带宽节流",
+          "order": 2,
+          "filename": "u3-l2-memory-controller.md",
+          "topic": "controller 如何在众多消费者（LSU/fetcher）和有限的外部内存通道之间做仲裁、节流与中继。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解带宽瓶颈与控制器存在的意义",
+            "掌握 IDLE/WAITING/RELAYING 五态状态机",
+            "理解 channel_serving_consumer 防止重复拾取的机制"
+          ],
+          "source_files": [
+            "src/controller.sv"
+          ],
+          "minimal_modules": [
+            "NUM_CONSUMERS vs NUM_CHANNELS 的不对称",
+            "五态状态机 IDLE/READ_WAITING/WRITE_WAITING/READ_RELAYING/WRITE_RELAYING",
+            "通道轮询消费者与 break",
+            "channel_serving_consumer 去重",
+            "READ/WRITE 中继应答时序"
+          ],
+          "practice_task": "追踪一次完整的 data 内存读：从某 LSU 的 read_valid 拉高，到控制器中继，再到 consumer_read_ready 回送，标注每个状态停留的周期数。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "计算核心与执行流水线",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Core 解剖结构",
+          "order": 1,
+          "filename": "u4-l1-core-anatomy.md",
+          "topic": "core.sv 如何用 1 个 fetcher + 1 个 decoder + 1 个 scheduler，再为每个线程复制 ALU/LSU/registers/PC。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 core「一次处理一个 block」的模型",
+            "掌握 per-thread 资源复制机制",
+            "读懂 generate 循环里的线程实例与 enable 门控"
+          ],
+          "source_files": [
+            "src/core.sv"
+          ],
+          "minimal_modules": [
+            "core 端口与 block 元数据（block_id/thread_count）",
+            "单实例：fetcher/decoder/scheduler",
+            "per-thread：ALU/LSU/registers/PC",
+            "enable = (i < thread_count) 门控",
+            "中间信号 rs/rt/alu_out/lsu_out 走线"
+          ],
+          "practice_task": "画出 core 内部数据通路：一条 ADD 指令的 rs/rt 如何从 registers 取出、经 ALU 计算再写回，标注每条连线连接的端口名。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Scheduler 核心状态机",
+          "order": 2,
+          "filename": "u4-l2-scheduler-fsm.md",
+          "topic": "scheduler 如何驱动一条指令走完 FETCH→DECODE→REQUEST→WAIT→EXECUTE→UPDATE 七个阶段。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解核心控制流的状态机",
+            "掌握 WAIT 阶段对所有 LSU 的同步等待",
+            "理解 next_pc 收敛假设与 done/RET 判定"
+          ],
+          "source_files": [
+            "src/scheduler.sv",
+            "src/core.sv"
+          ],
+          "minimal_modules": [
+            "七阶段状态机定义",
+            "FETCH 等待 fetcher_state",
+            "DECODE/REQUEST 同步推进",
+            "WAIT 轮询所有 lsu_state",
+            "UPDATE 写 current_pc 与 RET→DONE 判定"
+          ],
+          "practice_task": "给一条 LDR 指令，标出它在 scheduler 每个阶段分别停留几个周期，并解释 WAIT 阶段为什么可能多停几拍。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "Fetcher 与 Decoder",
+          "order": 3,
+          "filename": "u4-l3-fetcher-decoder.md",
+          "topic": "fetcher 异步从程序内存取指，decoder 把 16 位指令译码成一组控制信号。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解异步取指的三态 FSM",
+            "掌握指令到控制信号的译码表",
+            "理解 core_state 如何驱动各子模块的工作时机"
+          ],
+          "source_files": [
+            "src/fetcher.sv",
+            "src/decoder.sv"
+          ],
+          "minimal_modules": [
+            "fetcher IDLE/FETCHING/FETCHED 三态",
+            "取指握手与 instruction 锁存",
+            "decoder 字段切分 rd/rs/rt/imm/nzp",
+            "控制信号译码 case 表",
+            "各指令拉高的控制信号组合"
+          ],
+          "practice_task": "选一条 ADD 指令的二进制，逐位切出 opcode/rd/rs/rt，并写出 decoder 会拉高哪些控制信号（reg_write_enable、reg_input_mux、alu_arithmetic_mux）。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "ISA 与线程执行单元",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "指令集（ISA）与编码",
+          "order": 1,
+          "filename": "u5-l1-isa-encoding.md",
+          "topic": "tiny-gpu 的 11 条指令、16 位编码格式、寄存器约定，以及如何用 format.py 反汇编执行轨迹。",
+          "level": "intermediate",
+          "learning_goals": [
+            "掌握完整 11 条指令的语义",
+            "理解 16 位指令的位域分配",
+            "学会读写指令的二进制编码"
+          ],
+          "source_files": [
+            "src/decoder.sv",
+            "test/helpers/format.py",
+            "docs/images/isa.png"
+          ],
+          "minimal_modules": [
+            "11 条指令清单",
+            "16 位编码位域 opcode/rd/rs/rt",
+            "R0-R12 自由寄存器与 R13-R15 只读寄存器",
+            "format_instruction 反汇编逻辑",
+            "BRnzp 的 nzp 条件位"
+          ],
+          "practice_task": "把 matadd.asm 的前 4 条汇编手工编码成 16 位二进制，并与 test_matadd.py 里的 program 列表逐条核对。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "ALU 与比较/NZP",
+          "order": 2,
+          "filename": "u5-l2-alu-nzp.md",
+          "topic": "ALU 如何实现 ADD/SUB/MUL/DIV，以及 CMP 如何把比较结果编码进 alu_out[2:0] 的 N/Z/P 位。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解算术指令的硬件实现",
+            "掌握 decoded_alu_output_mux 切换算术/比较模式",
+            "理解 NZP 三位编码"
+          ],
+          "source_files": [
+            "src/alu.sv"
+          ],
+          "minimal_modules": [
+            "四则运算 case（ADD/SUB/MUL/DIV）",
+            "decoded_alu_arithmetic_mux 选择运算",
+            "比较模式 alu_out[2:0] 的 N/Z/P 编码",
+            "enable 与 core_state=EXECUTE 门控",
+            "alu_out_reg 寄存输出"
+          ],
+          "practice_task": "对 rs=5、rt=7 的输入，分别计算 ADD/SUB/MUL 结果，并给出 CMP 模式下 alu_out[2:0] 的值（N/Z/P 哪一位为 1）。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "LSU 异步访存",
+          "order": 3,
+          "filename": "u5-l3-lsu-async-memory.md",
+          "topic": "LSU 如何处理 LDR/STR 的异步内存请求，以及它如何与 scheduler、controller 协作等待响应。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解同步指令与异步访存的区别",
+            "掌握 LSU 四态 FSM",
+            "理解 scheduler WAIT 与 LSU 的配合"
+          ],
+          "source_files": [
+            "src/lsu.sv",
+            "src/controller.sv"
+          ],
+          "minimal_modules": [
+            "IDLE/REQUESTING/WAITING/DONE 四态",
+            "LDR 读地址=rs、结果写 lsu_out",
+            "STR 写地址=rs、写数据=rt",
+            "core_state=REQUEST 触发请求",
+            "mem_read_ready/mem_write_ready 应答"
+          ],
+          "practice_task": "对比 LDR 与 STR 在 LSU 中的状态转移，说明两者在 WAITING 阶段的差异（一个写 lsu_out，一个不写），并解释原因。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "寄存器堆与程序计数器",
+          "order": 4,
+          "filename": "u5-l4-registers-pc.md",
+          "topic": "每个线程的寄存器堆（13 个自由 + 3 个只读 %blockIdx/%blockDim/%threadIdx），以及 PC 如何计算 next_pc 并管理 NZP。",
+          "level": "intermediate",
+          "learning_goals": [
+            "理解 SIMD 的只读寄存器机制",
+            "掌握 reg_input_mux 三路写回",
+            "理解 BRnzp 的 NZP 匹配与跳转"
+          ],
+          "source_files": [
+            "src/registers.sv",
+            "src/pc.sv"
+          ],
+          "minimal_modules": [
+            "16 寄存器与只读 R13-R15",
+            "REQUEST 阶段读 rs/rt",
+            "UPDATE 阶段三路写回 ARITH/MEM/CONST",
+            "PC 默认 PC+1 与 BRnzp 跳转",
+            "NZP 寄存器在 UPDATE 写入"
+          ],
+          "practice_task": "解释为什么寄存器堆要在每个周期都更新 registers[13]（block_id），以及这对 dispatcher 切换 block 有什么意义。",
+          "depends_on": [
+            "u5-l2",
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "仿真、内核与轨迹分析",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "cocotb 仿真测试框架",
+          "order": 1,
+          "filename": "u6-l1-cocotb-testbench.md",
+          "topic": "test/helpers 下的 setup/memory/logger 如何协同，把时钟、复位、装填内存、写 DCR、拉 start 串成一次完整内核仿真。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 Python 驱动 HDL 仿真的原理",
+            "掌握 cocotb 时钟与 RisingEdge 触发",
+            "理解 setup 的启动序列"
+          ],
+          "source_files": [
+            "test/helpers/setup.py",
+            "test/helpers/memory.py",
+            "test/helpers/logger.py"
+          ],
+          "minimal_modules": [
+            "Clock 与 RisingEdge 触发",
+            "reset 脉冲序列",
+            "load 程序/数据内存",
+            "写 DCR 与拉 start",
+            "主循环 while not done"
+          ],
+          "practice_task": "阅读 test_matadd.py 的主循环，解释 data_memory.run()/program_memory.run()、ReadOnly、RisingEdge 三者在每个周期的执行顺序与各自作用。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "执行轨迹格式化与阅读",
+          "order": 2,
+          "filename": "u6-l2-execution-trace.md",
+          "topic": "format.py 如何把 DUT 内部信号翻译成可读的指令/状态/寄存器轨迹，以及如何用它调试内核。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握 format_cycle 的层次遍历结构",
+            "学会反汇编与状态字符串映射",
+            "能用日志定位执行异常"
+          ],
+          "source_files": [
+            "test/helpers/format.py",
+            "test/helpers/logger.py"
+          ],
+          "minimal_modules": [
+            "format_instruction 反汇编",
+            "core/fetcher/lsu/controller 状态映射",
+            "format_registers 的逆序处理",
+            "format_cycle 遍历 core→thread",
+            "日志文件写入机制"
+          ],
+          "practice_task": "运行 make test_matmul 并打开日志，在某个 cycle 里找出 thread 1 的 PC、指令、core_state 与所有寄存器值，说明该周期它在做什么。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "编写与仿真内核",
+          "order": 3,
+          "filename": "u6-l3-writing-kernels.md",
+          "topic": "以 matadd/matmul 两个示例内核为范本，学习如何用 ISA 写一个新内核并接入仿真。",
+          "level": "advanced",
+          "learning_goals": [
+            "掌握用汇编+二进制编码编写内核",
+            "理解 .threads/.data 与数据内存布局约定",
+            "能把新内核接入 test_*.py 跑通并校验"
+          ],
+          "source_files": [
+            "test/test_matadd.py",
+            "test/test_matmul.py",
+            "test/helpers/setup.py"
+          ],
+          "minimal_modules": [
+            "matadd 内核逐行解析",
+            "matmul 内核的循环与分支",
+            "数据内存布局 baseA/baseB/baseC",
+            ".threads 与 thread_count 的对应",
+            "断言校验结果"
+          ],
+          "practice_task": "编写一个「标量乘法」内核：把 data 内存 0 号地址的值乘以 2 存到 1 号地址，用 1 个线程。手工编码指令、仿照 test_matadd.py 写一个 test_scalar.py 并运行验证。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "架构取舍与扩展方向",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "被简化的机制：分支分歧、流水线、warp 调度",
+          "order": 1,
+          "filename": "u7-l1-scheduling-tradeoffs.md",
+          "topic": "tiny-gpu 在调度上做了哪些天真假设（PC 收敛、无流水线、无 warp），以及真实 GPU 如何改进。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解 scheduler 的 PC 收敛假设及其代价",
+            "掌握分支分歧/流水线/warp 调度的概念",
+            "能定位源码中的 TODO 与简化点"
+          ],
+          "source_files": [
+            "src/scheduler.sv",
+            "src/core.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "next_pc 收敛假设",
+            "无流水线的串行指令执行",
+            "单 block 串行处理",
+            "分支分歧（branch divergence）概念",
+            "warp 调度概念"
+          ],
+          "practice_task": "找到 scheduler.sv 与 README 中关于 branch divergence 的 TODO，设计一个会让当前 GPU 算错的「分支分歧」内核场景（不同线程走不同 PC），解释它为什么会失败。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "内存优化与缓存",
+          "order": 2,
+          "filename": "u7-l2-memory-optimizations.md",
+          "topic": "真实 GPU 的多层缓存、内存合并、共享内存机制，以及 tiny-gpu 当前的单层 cache 设想与控制器带宽瓶颈的关系。",
+          "level": "advanced",
+          "learning_goals": [
+            "理解缓存层次与命中率的意义",
+            "掌握内存合并（coalescing）的原理",
+            "理解 shared memory/barrier 的作用"
+          ],
+          "source_files": [
+            "src/controller.sv",
+            "src/gpu.sv",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "单层 cache 现状（README 标注 WIP）",
+            "多层缓存设计",
+            "内存合并 coalescing",
+            "共享内存与 barrier 同步",
+            "控制器 NUM_CHANNELS 带宽瓶颈分析"
+          ],
+          "practice_task": "基于 controller.sv 的 NUM_CHANNELS 节流逻辑，提出一个「内存合并」改进草图：当多个 LSU 请求连续地址时如何合并成一次外部事务，用文字+伪代码描述。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

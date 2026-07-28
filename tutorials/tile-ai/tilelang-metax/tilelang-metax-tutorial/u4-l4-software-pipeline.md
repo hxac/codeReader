@@ -2,132 +2,191 @@
 
 ## 1. 本讲目标
 
-学完本讲后，你应当能够：
+本讲承接 u4-l1（lowering 流程）与 u2-l3（循环与控制流），专门拆解 `T.Pipelined` 背后那条「软件流水线」编译链。学完后你应当能够：
 
-- 说清 `T.Pipelined(..., num_stages=...)` 这个循环构造「想表达什么」、它为何能隐藏访存延迟。
-- 把「软件流水线」这件事拆成两个编译 pass：先有 `PipelinePlanning`（规划），再有 `InjectSoftwarePipeline`（重写）。
-- 解释 `num_stages` 如何决定缓冲副本数、prologue/body/epilogue 三段如何切分，以及 copy 与 compute 如何被错位重叠。
-- 区分三种异步搬运机制：`cp.async`（CUDA Ampere+）、TMA（CUDA Hopper+）、以及 MACA 的 `memcpy_async`，并知道它们各自靠什么同步。
-- 理解 `mbarrier`（共享内存屏障）的 phase/parity 原理，以及编译器为何要把单个 barrier 扩展成 `num_stages` 个槽位。
-- 记住一个 metax 分支的关键事实：**MACA 后端在 `PipelinePlanning` 中被显式关闭了隐式 async-copy 流水线**（`use_async_copy = false`）。
-
-## 2. 前置知识
-
-本讲假定你已读过 [u4-l1 从 DSL 到 IR 的 lowering 流程](u4-l1-lowering-pipeline.md)，知道 pass 流水线与 `lower` 主流程；以及 [u2-l3 循环与控制流](u2-l3-loops-and-control-flow.md)，知道 `T.Pipelined` 是一种循环构造，会用 `num_stages` 控制流水深度。下面用通俗语言补两个前置概念。
-
-### 2.1 为什么 GPU kernel 需要「软件流水线」
-
-一个典型的分块 GEMM 内层循环长这样：把一块 A、一块 B 从显存搬到 shared memory，再用张量核算一次累加。如果严格串行执行，每次迭代都要「等搬完→才能算」，访存单元和计算单元轮流空闲，这是巨大的浪费。
-
-软件流水线（software pipelining）的核心思想是**提前发射下一轮甚至下几轮的搬运**：在算第 `i` 轮的同时，把第 `i+1`、`i+2` 轮的数据先搬进来。这样访存与计算就被「错位重叠」了。代价是要同时持有多个尚未消费的数据副本——这正是 `num_stages` 控制的东西。
-
-### 2.2 两种「重叠」的同步方式
-
-为了让搬运与计算真正并行，搬运本身必须是**异步的**（提交后立刻返回，不阻塞），之后再用某种机制等它完成：
-
-- **cp.async（CUDA）**：用 `cp.async.commit_group` 把若干次异步拷贝归组，用 `cp.async.wait_group N` 等到「在途」的拷贝少于 N 个。
-- **TMA（CUDA Hopper+）**：用 mbarrier（内存屏障）记录「期望收到的字节数」，搬运完成时 arrive，消费端用 `mbarrier_wait_parity` 等待。
-- **memcpy_async（MACA）**：把 barrier handle 写入一个 barrier buffer，消费端用 `T.maca_barrier_arrive_and_wait()` 同步。
-
-本讲的「异步拷贝」和「mbarrier」两个模块，就是讲编译器如何自动选择这些机制并插入同步。
-
-## 3. 本讲源码地图
-
-| 文件 | 角色 |
-|------|------|
-| [docs/programming_guides/software_pipeline.md](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/docs/programming_guides/software_pipeline.md) | 用户文档：`stage`/`order`/`num_stages` 的语义与注意事项 |
-| [tilelang/language/loop.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/loop.py) | 前端：`T.Pipelined` 构造器，把参数交给 C++ 生成带 `num_stages` 注解的循环 |
-| [src/transform/pipeline_planning.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc) | **Pass 1**：`tl.PipelinePlanning`，把 `num_stages` 规划成 `stage`/`order` 注解，并标记哪些 copy 是异步生产者 |
-| [src/transform/inject_pipeline.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc) | **Pass 2**：`tl.InjectSoftwarePipeline`，把循环重写成 prologue/body/epilogue，多版本化缓冲，插入 mbarrier/cp.async 同步 |
-| [tilelang/language/copy_op.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py) | 前端：`T.copy` / `T.async_copy` / `T.tma_copy` / `T.maca_async_copy` 搬运原语 |
-| [src/transform/common/mbarrier.h](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/common/mbarrier.h) | mbarrier 缓冲构造辅助 |
-| [src/transform/common/pipeline_utils.h](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/common/pipeline_utils.h) | 流水线注解键名与 `GetPipelineNumStages` 工具 |
-| [tilelang/cuda/pipeline.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/cuda/pipeline.py) / [tilelang/maca/pipeline.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/maca/pipeline.py) | 两个 pass 在编译流水线中的注册位置 |
-
-两个 pass 的调用顺序，可见 CUDA 与 MACA 流水线完全一致——都先 `PipelinePlanning` 再 `InjectSoftwarePipeline`，且都在 `LayoutInference` 之前（这样布局推断看到的就是已经流水化后的结构）：见 [tilelang/cuda/pipeline.py:102-117](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/cuda/pipeline.py#L102-L117) 与 [tilelang/maca/pipeline.py:39-54](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/maca/pipeline.py#L39-L54)。
-
-## 4. 核心概念与源码讲解
-
-### 4.1 Pipelined：用户接口与软件流水线的直觉
-
-#### 4.1.1 概念说明
-
-`T.Pipelined` 是 TileLang 表达软件流水线的唯一前端入口。它和 `T.serial` 一样产生一个 `for` 循环，但额外告诉编译器：「这个循环体里有生产者（搬数据）和消费者（算数据），请把它们重叠起来」。重叠的「深度」由 `num_stages` 控制——它表示生产者与消费者之间最多隔几轮迭代，等价于同时持有的数据缓冲份数。
-
-最常见、也是推荐的写法是**让编译器自动推断**：只给 `num_stages`，循环体里照常写 `T.copy` 和 `T.gemm`。TileLang 会自动识别哪些是 copy、哪些是 compute，并分派到合适的 stage。下面的 GEMM 示例（`num_stages=3`）就是这种用法：
-
-[examples/gemm/example_gemm.py:19-24](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/examples/gemm/example_gemm.py#L19-L24) — 这是本讲贯穿始终的示例。
-
-```python
-for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-    T.copy(A[by * block_M, k * block_K], A_shared)   # 生产者
-    T.copy(B[k * block_K, bx * block_N], B_shared)   # 生产者
-    T.gemm(A_shared, B_shared, C_local)              # 消费者
-```
-
-对于循环体顺序特殊、需要手动分组的场景，TileLang 也允许显式标注 `stage` 和 `order` 两个数组，见 [docs/programming_guides/software_pipeline.md:44-86](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/docs/programming_guides/software_pipeline.md#L44-L86)。`stage` 是逻辑流水段号（越小越早执行），`order` 是发射顺序；手动标注时不要同时设 `num_stages`，深度按 `max(stage)+1` 推断。
-
-#### 4.1.2 核心流程
-
-`T.Pipelined` 在前端做的事非常薄，它只是把参数打包后调用 C++：
-
-[tilelang/language/loop.py:112-191](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/loop.py#L112-L191) — 注意 `num_stages`、`order`、`stage` 都被透传给 `_ffi_api.Pipelined`。C++ 端据此生成一个带 `num_stages`（或 `tl_pipeline_stage`/`tl_pipeline_order`）注解的普通串行 `For` 节点。真正的工作留给两个 pass：
-
-```text
-T.Pipelined(extent, num_stages=N)
-        │  前端打包参数
-        ▼
-带 "num_stages" 注解的普通 for 循环
-        │
-        ▼  tl.PipelinePlanning        （本讲 4.2）
-带 software_pipeline_stage / software_pipeline_order 注解的循环
-（+ async producer / tma copy 标记）
-        │
-        ▼  tl.InjectSoftwarePipeline  （本讲 4.3 / 4.4）
-prologue + steady-state body + epilogue
-（缓冲多版本化 + cp.async/TMA/mbarrier 同步）
-```
-
-#### 4.1.3 num_stages 的数学含义
-
-设 `num_stages = N`，外层循环变量为 `i`（取值 `0..T-1`，T 为迭代总数）。软件流水线把「生产第 i 轮数据」和「消费第 i 轮数据」错开 N 步：
-
-- 生产者：在第 `i` 轮发射搬运，搬的是第 `i` 轮的数据。
-- 消费者：在第 `i` 轮执行计算，算的是第 `i - N` 轮的数据（因为数据提前 N 轮搬好了）。
-
-为了让前后轮的数据不互相覆盖，缓冲需要 `N` 个副本，运行时用取模选出当前轮的槽位：
-
-\[
-\text{version}(i) = i \bmod N
-\]
-
-当 `num_stages = 0`（或推导为 1）时，不存在错位重叠，等价于普通串行循环。这正是后面 `InjectSoftwarePipeline` 里用 `floormod` 给缓冲加一维版本号的依据。
-
-#### 4.1.4 代码实践
-
-1. **实践目标**：直观感受 `num_stages` 改变的是「重叠深度」而非计算结果。
-2. **操作步骤**：打开 `examples/gemm/example_gemm.py`，把第 19 行的 `num_stages=3` 分别改成 `1`、`2`、`4`，每次重新 `python examples/gemm/example_gemm.py` 运行。
-3. **需要观察的现象**：输出的 `c` 与 `ref_c` 在所有取值下都应数值一致（结果不变）；只有末尾打印的 `tilelang Latency` 变化。
-4. **预期结果**：`num_stages=1` 时无重叠、延迟最高；`2/3` 通常显著下降；`4` 在 shared memory 够用时可能再降一点或持平（副本过多会吃光 shared memory，反而可能失败）。
-5. 如果当前环境无 GPU，本步骤为「待本地验证」。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：`num_stages=1` 时，软件流水线退化成什么？
-**答**：退化为普通串行循环——没有提前搬运，生产者与消费者在同一轮紧邻执行，不存在重叠。
-
-**练习 2**：为什么 `num_stages` 不能无限增大？
-**答**：每多一级就要多一份 shared memory 副本（`version(i)=i mod N`），shared memory 容量有限（如每 SM 48–228 KB），过大会导致分配失败或占用过多而降低占用率（occupancy）。
+- 说清 **软件流水线（software pipeline）** 为什么能加速 GEMM 一类的访存密集 kernel，以及 `num_stages` 到底控制了什么。
+- 区分两个紧密配合又职责不同的 pass：`tl.PipelinePlanning`（规划）与 `tl.InjectSoftwarePipeline`（改写）。
+- 理解 **异步拷贝**（CUDA 的 `cp.async`、Hopper 的 TMA）是如何让「搬数据」和「算」重叠起来的，以及 `commit_group` / `wait_group` 的作用。
+- 掌握 **mbarrier**（显存屏障）的「抵达—等待奇偶」握手模型，以及它为何要被复制成 `num_stages` 份。
+- 知道在 **metax 分支**上 MACA 后端的流水线有什么特殊之处（异步拷贝被关闭）。
 
 ---
 
-### 4.2 pipeline_planning：从 num_stages 到 stage/order
+## 2. 前置知识
+
+### 2.1 为什么要流水线
+
+考虑一个最朴素的分块 GEMM 循环：
+
+```python
+for k in range(num_tiles):
+    copy(A_tile, A_shared)   # 搬：global -> shared
+    copy(B_tile, B_shared)
+    gemm(A_shared, B_shared, C_local)  # 算：shared -> fragment
+```
+
+这里「搬」和「算」是**串行**的：每个 `k` 都要先等数据搬完、再开始算，算的时候搬运单元（copy engine / 张量核加载通路）闲着，算的时候搬运通路又没活干。访存延迟被完全暴露，性能被「带宽 + 延迟」双重拖累。
+
+软件流水线的核心想法是：**把下一个（甚至下好几个）迭代的搬运，提前到当前迭代的计算里去做**，让搬运和计算在时间上重叠。直观地说：
+
+```text
+k=0: copy0
+k=1:        copy1   compute0   ← compute0 用的是 copy0 的数据
+k=2:               copy2   compute1
+...
+```
+
+要这么做，必须给 shared buffer 准备**多份副本**（否则 compute0 还在读 A_shared，copy1 就要往同一块 A_shared 里写，数据就乱了）。`num_stages` 就是「生产者（copy）和消费者（compute）之间最多保留几份缓冲」。
+
+### 2.2 生产者—消费者模型
+
+TileLang 把流水线体里的语句分成两类：
+
+- **生产者（producer）**：通常是 global→shared 的 copy，它「制造」一份 shared 数据。
+- **消费者（consumer）**：通常是 gemm/reduction，它「消费」那份 shared 数据。
+
+每个语句有两个调度编号（u2-l3 已经提过）：
+
+- `stage`：逻辑流水线阶段，越小越早。
+- `order`：在同一调度序列里的发射顺序。
+
+### 2.3 本讲用到的关键术语
+
+| 术语 | 含义 |
+|------|------|
+| `num_stages` | 用户在 `T.Pipelined` 上指定的流水线深度，即 copy/compute 之间保留的缓冲份数 |
+| prologue / steady / epilogue | 流水线改写后的三段：预热、稳态、收尾 |
+| 多版本化（multi-versioning） | 把 shared buffer 复制成 N 份，用 `floormod` 下标选版本 |
+| `cp.async` | Ampere+ 的异步 global→shared 拷贝指令 |
+| `commit_group` / `wait_group` | 把若干异步拷贝编组、并在需要时等待其完成 |
+| TMA | Hopper 的张量内存加速器，配合 mbarrier 同步 |
+| mbarrier | 64 位显存屏障，「抵达—奇偶等待」握手 |
+| parity（奇偶） | mbarrier 的状态位，每完成一轮翻转一次 |
+
+---
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 |
+|------|------|
+| [tilelang/language/loop.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/loop.py) | DSL 层的 `Pipelined` 构造器，把 `num_stages`/`stage`/`order` 转成 `for` 循环上的注解 |
+| [tilelang/language/copy_op.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py) | 各种 copy 原语：`copy`/`async_copy`/`tma_copy`/`maca_async_copy` |
+| [src/transform/pipeline_planning.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc) | **规划 pass**：分析循环体，为每条语句算出 `stage`/`order`，并标注异步生产者 |
+| [src/transform/inject_pipeline.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc) | **改写 pass**：把单个循环重写成 prologue/steady/epilogue，做多版本化、插 commit/wait、管 mbarrier |
+| [src/backend/common/target_utils.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/backend/common/target_utils.cc) | `TargetHasAsyncCopy`：按 target 分发「是否支持异步拷贝」 |
+| [tilelang/maca/pipeline.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/maca/pipeline.py) | MACA 的 pass 流水线，里面能看到这两个 pass 的注册位置 |
+| [examples/gemm/example_gemm.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/examples/gemm/example_gemm.py) | 实践用的 GEMM 示例 |
+
+> 提醒：两个 pass 在 [docs/programming_guides/software_pipeline.md](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/docs/programming_guides/software_pipeline.md) 有一份官方的用户向说明，本讲在其基础上补全「编译器内部到底做了什么」。
+
+---
+
+## 4. 核心概念与源码讲解
+
+### 4.1 `T.Pipelined`：用户视角的软件流水线
+
+#### 4.1.1 概念说明
+
+`T.Pipelined` 是一个长得像 `T.serial` 的循环构造器，但它额外带一个 `num_stages` 参数，告诉编译器「请把这个循环软件流水化，深度为 N」。它是软件流水线**最常用、最推荐**的入口：你只要照常写 copy + gemm，编译器会自动推断出谁是生产者、谁是消费者、各自在第几阶段。
+
+它也支持**手动调度**模式：用 `stage=[...]` 和 `order=[...]` 两个数组显式给每条「可调度语句」指定阶段与发射顺序。两种模式不要混用——要么只给 `num_stages`（让编译器推断），要么只给 `stage`/`order`（手动排程，深度由 `max(stage)+1` 推出）。
+
+#### 4.1.2 核心流程
+
+`T.Pipelined` 在前端做的事很薄，本质只是把参数打包，转成一个带 `num_stages`（或 `tl_pipeline_stage`/`tl_pipeline_order`）注解的普通 `for` 循环：
+
+```text
+for k in T.Pipelined(num_tiles, num_stages=3):
+    T.copy(...); T.copy(...); T.gemm(...)
+        │  前端
+        ▼
+for (k, 0, num_tiles, annotations={"num_stages": 3}) {
+    copy(...); copy(...); gemm(...)
+}
+```
+
+真正的「流水线化」不在前端，而在后续两个 pass。注解只是个**记号**，告诉 `tl.PipelinePlanning`「这个循环需要被规划」。
+
+#### 4.1.3 源码精读
+
+`Pipelined` 的签名与默认值在 [tilelang/language/loop.py:112-191](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/loop.py#L112-L191)。关键几行：
+
+```python
+def Pipelined(
+    start, stop=None,
+    num_stages: int = 0,        # 默认 0 = 不开启流水线
+    order: list[int] | None = None,
+    stage: list[int] | None = None,
+    sync=None, group=None,
+) -> frame.ForFrame:
+    ...
+    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group)
+```
+
+注意两点：
+
+1. `num_stages` 默认为 `0`，文档明确「`num_stages` 为 0 时不开启流水线」（[loop.py:129-134](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/loop.py#L129-L134)）。
+2. 它把所有参数交给 C++ 侧的 `_ffi_api.Pipelined`，后者产出一个 `ForFrame`，落成带注解的 `for` 循环。
+
+> 文档 [software_pipeline.md:7-12](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/docs/programming_guides/software_pipeline.md#L7-L12) 给出的典型用法，正是本讲实践要改的 GEMM：
+
+```python
+for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
+    T.copy(A[by * BM, ko * BK], A_shared)
+    T.copy(B[ko * BK, bx * BN], B_shared)
+    T.gemm(A_shared, B_shared, C_local)
+```
+
+#### 4.1.4 代码实践
+
+**实践目标**：直观感受 `num_stages=0` 与 `num_stages≥1` 的差别。
+
+1. 打开 [examples/gemm/example_gemm.py:19](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/examples/gemm/example_gemm.py#L19)，把 `num_stages=3` 改成 `num_stages=0`。
+2. 编译并打印 kernel 源码（`kernel.get_kernel_source()`）。
+3. **需要观察的现象**：`num_stages=0` 时，生成的代码里 K 循环退化成普通串行循环，**没有** prologue/epilogue，shared buffer 也没有多版本化（不会出现 `floormod` 选版本的下标）。
+4. **预期结果**：`num_stages=0` 的延迟应明显高于 `num_stages=3`（待本地验证，因为依赖具体 GPU 与带宽）。
+
+> 如果当前没有 GPU，可只做「读源码」部分：对比两种设置下 `get_kernel_source()` 的差异即可。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`num_stages=1` 和 `num_stages=2` 哪个才是「经典双缓冲（double buffering）」？
+
+> **答案**：`num_stages=2`。`num_stages` 是 copy 与 compute 之间保留的缓冲份数；2 份就是经典双缓冲，copy 和 compute 各占一份交替使用。`num_stages=1` 只有一份缓冲，producer 和 consumer 实际上无法真正重叠。
+
+**练习 2**：为什么文档建议「手动 `stage`/`order` 时不要再设 `num_stages`」？
+
+> **答案**：手动模式下，流水线深度由 `max(stage)+1` 推断（见 [software_pipeline.md:83-86](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/docs/programming_guides/software_pipeline.md#L83-L86)）。若同时给 `num_stages`，二者可能冲突，导致调度歧义；只有需要显式覆盖深度时才同时使用。
+
+---
+
+### 4.2 `tl.PipelinePlanning`：规划 stage 与 order
 
 #### 4.2.1 概念说明
 
-`PipelinePlanning` 是软件流水线的**第一个 pass**，职责是把循环上那个朴素的 `num_stages` 注解，翻译成下游能理解的、精确到每条语句的 `software_pipeline_stage` / `software_pipeline_order` 两个数组，并附带「哪些 copy 该异步发射」的标记。它的关键设计是：**先分析每条语句读了/写了哪些 buffer、谁是 copy、谁消费它，再据此决定 stage 和 order**。
+`PipelinePlanning` 是规划 pass。它的输入是一个带 `num_stages` 注解的循环，输出是**同一个循环，但每条可调度语句都被打上了 `software_pipeline_stage` / `software_pipeline_order` 注解**，外加一些异步生产者标记。换言之，它把「我要深度 3 的流水线」这个高层意图，翻译成「copy A 在 stage 0 order 1、gemm 在 stage 3 order 0」这样的具体调度表。
 
-它注册为 `tl.PipelinePlanning`，入口在 [src/transform/pipeline_planning.cc:1334-1348](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1334-L1348)：
+它还要做一件重要的事：**识别哪些语句是异步拷贝的生产者**，并标注出来，供下一个 pass 插入 `commit`/`wait`。
+
+#### 4.2.2 核心流程
+
+`PipelinePlanning` 对每个带 `num_stages` 的循环执行：
+
+```text
+1. 展平循环体，剔除「可重放的标量 Bind」（replayable scalar bind）
+2. 为每条语句建 PipelineStageInfo：分析它的读/写区域、是否条件执行、是否是 copy
+3. 传播 copy 的生产者依赖（PropagateBufferProducersForCopy）
+4. 算每个 copy 的「最后使用者」(AnalyzeCopyLastUse)
+5. 按规则分配 stage / order
+6. 若 target 支持异步拷贝，发射隐式异步注解（EmitImplicitAsyncAnnotations）
+7. 把 stage/order 写回循环注解
+```
+
+**stage 分配规则**（关键直觉）：消费者（gemm）分到 `stage = num_stages`；为它喂数据的 copy 分到 `stage = 0`，并且被排到 gemm **之后**发射（`order` 更大）——这正是「下一轮的 copy 提前到本轮 compute 之后」的体现。
+
+#### 4.2.3 源码精读
+
+pass 的入口在 [src/transform/pipeline_planning.cc:1334-1348](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1334-L1348)。注意 metax 分支的关键改动——**MACA 强制关闭异步拷贝**：
 
 ```cpp
 tvm::transform::Pass PipelinePlanning() {
@@ -136,9 +195,9 @@ tvm::transform::Pass PipelinePlanning() {
         ctx->GetConfig<Bool>("tirx.use_async_copy", Bool(true)).value();
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     if (TargetIsMaca(target.value())) {
-      use_async_copy = false;   // ★ MACA 显式关闭隐式 async-copy 流水线
+      use_async_copy = false;          // ← MACA 不走 cp.async 流水
     }
-    PrimFuncNode *fptr = f.CopyOnWrite();
+    ...
     fptr->body = PipelinePlanner::Substitute(f, use_async_copy);
     return f;
   };
@@ -146,318 +205,395 @@ tvm::transform::Pass PipelinePlanning() {
 }
 ```
 
-这一段是 metax 分支的**核心差异点之一**：MACA 即便硬件支持 async copy（`TargetMacaHasAsyncCopy` 恒返回 `true`，见 [src/maca/target_utils.cc:35-39](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/maca/target_utils.cc#L35-L39)），但隐式 async-copy 流水线尚未验证，于是被强制退化为普通重叠（仍会多版本化缓冲、错位发射 copy，只是 copy 不走异步通道）。若要异步搬运，MACA 需用显式的 `T.maca_async_copy`（见 4.3）。
+这条 `use_async_copy = false` 决定了 MACA 流水线的命运（见 4.3.4）。
 
-#### 4.2.2 核心流程
-
-`PipelinePlanner::VisitStmt_(ForNode)` 处理两种入口（[src/transform/pipeline_planning.cc:1061-1316](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1061-L1316)）：
-
-- **显式 `stage`/`order` 注解**（1065–1122 行）：用户已写好两个数组，pass 只需把可重放的标量 `Bind` 过滤掉，保留可调度语句的标注。
-- **`num_stages` 自动推断**（1124–1316 行）：核心路径，流程如下：
-
-```text
-1. 取出 num_stages（1126 行），校验 ≥1 且为 kSerial 循环。
-2. ROCm 特判：非 gfx950 时退化为普通串行（剥掉 num_stages 注解），1133-1149 行。
-3. 扁平化循环体为语句列表，分析出哪些是「可调度语句」、哪些是可重放 Bind
-   （AnalyzeScheduledStmts，1158 行）。
-4. 为每条可调度语句建 PipelineStageInfo：收集读/写区域、判定是否 copy 阶段
-   （MakePipelineStageInfo + ClassifyCopyLikeStage）。
-5. 传播 copy 的生产者依赖（PropagateBufferProducersForCopy）。
-6. 分析每个 copy 的「最后使用者」下标（AnalyzeCopyLastUse）。
-7. 按 stage 分配 + 把 copy 排到其消费者前（1194-1222 行）。
-8. 若所有 copy 都在尾部，整体前移并把 stage 偏移减 1（1230-1255 行）。
-9. 生成 software_pipeline_stage / software_pipeline_order 注解；
-   记 tl_pipelined_num_stages；标记 TMA copy；EmitImplicitAsyncAnnotations。
-```
-
-**第 7 步**是理解错位的关键（[src/transform/pipeline_planning.cc:1194-1222](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1194-L1222)）：非 copy 语句被赋予 `stage = num_stages`（最深的消费段），而 copy 语句被赋予 `stage = 0`（最早的生产段），并按「谁最后消费它」决定其 `order`。这样 copy（stage 0）与 compute（stage N）天然分到了不同的逻辑段，下游重写时才能错位。
-
-**第 6 步 `AnalyzeCopyLastUse`**（[src/transform/pipeline_planning.cc:612-652](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L612-L652)）会顺着 use-def 链找到某份 shared 数据「最后一次被读」的语句下标 `last_use_stmt_index`，这个值决定了 copy 应排在哪——尽量贴近它的最终消费者，从而最小化需要持有的副本数。
-
-#### 4.2.3 源码精读：如何识别一个 copy
-
-`BufferRegionCollector::HandleTileOp` 负责判定一条 tile op 是不是「global → shared 的 copy」，从而打上 `copy_stage` 标记，[src/transform/pipeline_planning.cc:109-147](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L109-L147)：
+每条语句的分析信息收集在 `PipelineStageInfo` 结构里（[pipeline_planning.cc:398-417](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L398-L417)），其中 `copy_stage`、`tma_copy`、`last_use_stmt_index` 是后续调度的依据：
 
 ```cpp
-if (const auto *copy = tile_op.as<CopyNode>()) {
-  if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
-    is_global_copy_pattern_ = true;     // 这是一条 global->shared copy
-  }
-}
-// Im2Col 在 Hopper 上走 TMA
-if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
-  if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
-    is_global_copy_pattern_ = true;
-    if (TargetIsHopper(target_)) is_tma_copy_ = true;   // 标记走 TMA 通道
-  }
-}
-```
-
-这段说明：只有 `global → shared` 的搬运才会被当作可异步的生产者；`shared → fragment` 这类搬运不算（它通常被吸收进 compute）。TMA 的判定依赖 target（Hopper 才有 TMA）。
-
-#### 4.2.4 源码精读：隐式 async 注解的发射
-
-`EmitImplicitAsyncAnnotations`（[src/transform/pipeline_planning.cc:835-904](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L835-L904)）把「异步生产者」信息写进注解。注意它最顶上的守卫：
-
-```cpp
-bool EmitImplicitAsyncAnnotations(...) const {
-  if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
-    return false;          // 不满足就完全不发 async 注解
-  }
+struct PipelineStageInfo {
+  Array<BufferRegion> reads, writes;
+  int order = -1, stage = -1;
+  bool copy_stage = false;
+  bool tma_copy = false;              // true = 用 TMA 而非 cp.async
+  int last_use_stmt_index = -1;       // 谁最后消费了我的输出
   ...
-  annotations->Set(kPipelineAsyncProducers, ...);        // 每条语句是否异步生产者
-  annotations->Set(kPipelineAsyncProducerGroups, ...);   // 异步分组 id
-  annotations->Set(s_tir::attr::software_pipeline_async_stages, ...);
-  return true;
+};
+```
+
+**stage/order 分配**在 [pipeline_planning.cc:1196-1222](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1196-L1222)。消费者拿到 `stage = num_stages`，喂数据的 copy 被放到 `stage = 0` 且排在它服务的消费者之后发射：
+
+```cpp
+for (auto &pinfo : pipeline_stage_infos) {
+  if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) continue; // copy 稍后处理
+  pinfo.order = order_idx++;
+  pinfo.stage = num_stages;                        // 消费者：stage = num_stages
+  for (auto &pinfo_1 : pipeline_stage_infos) {
+    if (pinfo_1.IsFirstStage() &&
+        pinfo_1.last_use_stmt_index == pinfo.original_stmt_index) {
+      pinfo_1.order = order_idx++;                 // copy：排到消费者之后
+      pinfo_1.stage = 0;                           // copy：stage 0
+    }
+  }
 }
 ```
 
-由于 MACA 时 `use_async_copy_ = false`，这里直接返回 `false`，于是 MACA 的循环不会带 `software_pipeline_async_producers` 注解——下游 `InjectSoftwarePipeline` 就不会把它当 cp.async 异步通道处理。这正是「MACA 有 async 硬件、但隐式 async 流水线被关」的实现落点。
+对 GEMM（`num_stages=3`，两条 copy + 一条 gemm），结果是：`gemm → stage 3, order 0`；`copy A → stage 0, order 1`；`copy B → stage 0, order 2`。
 
-> 说明：`TargetHasAsyncCopy` 的统一分发在 [src/backend/common/target_utils.cc:15-26](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/backend/common/target_utils.cc#L15-L26)，CUDA 要求 arch≥80（[src/cuda/target_utils.cc:85-90](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/cuda/target_utils.cc#L85-L90)），MACA 恒为 true。注解键名定义在 [src/transform/common/pipeline_utils.h:29-40](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/common/pipeline_utils.h#L29-L40)。
+随后还有一个小优化（[pipeline_planning.cc:1232-1255](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1232-L1255)）：若所有 copy 都被排到了序列末尾，就把它们整体「折」回开头，并把非 copy 语句的 stage 减 1，使调度更紧凑。
 
-#### 4.2.5 代码实践
+**异步生产者注解的发射**在 `EmitImplicitAsyncAnnotations`（[pipeline_planning.cc:835-904](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L835-L904)）。它先检查前置条件：
 
-1. **实践目标**：理解 `PipelinePlanning` 只做「规划」，不改语义。
-2. **操作步骤（源码阅读型）**：在 [src/transform/pipeline_planning.cc:1196-1222](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/pipeline_planning.cc#L1196-L1222) 处，对照 GEMM 示例的三条语句（`copy A`、`copy B`、`gemm`），手算它们最终得到的 `stage` 和 `order`：假设 `num_stages=3`，两个 copy 应得 `stage=0`，gemm 得 `stage=3`。
-3. **需要观察的现象**：你会看到 copy 的 `order` 紧贴 gemm（因为 gemm 是它们的消费者），而不是简单按源码顺序。
-4. **预期结果**：两条 copy 在 stage 0，gemm 在 stage 3；这正是「提前 3 轮搬数据」的编码方式。
-5. 若想直接验证，可借助 `tilelang/tools/pass_visualizer`（[tilelang/tools/pass_visualizer/core.py:124-125](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/tools/pass_visualizer/core.py#L124-L125)）把 `PipelinePlanning` 之后的 IR 打印出来查看注解。
+```cpp
+if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
+  return false;                       // MACA / 不支持异步拷贝 → 直接返回
+}
+```
 
-#### 4.2.6 小练习与答案
+只有支持异步拷贝的 target（CUDA/HIP 部分型号）才会把 copy 语句标成异步生产者，并按 `(stage, last_use_stmt_index)` 分配 `async_group_id`，写入 `software_pipeline_async_stages` 等注解。
 
-**练习 1**：为什么 `PipelinePlanning` 要把 copy 排到「它的最后消费者」之前，而不是循环开头？
-**答**：排到消费者前可以最小化 buffer 需要同时持有的副本数（`use - def + 1`），从而省 shared memory；副本数计算由下游 `ComputeBufferVersions` 完成（见 4.4）。
+#### 4.2.4 代码实践
 
-**练习 2**：MACA 下 `EmitImplicitAsyncAnnotations` 返回什么？为什么？
-**答**：返回 `false`。因为 `PipelinePlanning` 入口把 MACA 的 `use_async_copy` 置为 `false`，守卫 `!use_async_copy_` 命中，于是不发任何 async producer 注解——MACA 的隐式 async-copy 流水线被关闭。
+**实践目标**：确认 stage/order 的分配结果。
+
+1. 阅读上面的分配循环，对 GEMM（2 条 copy + 1 条 gemm，`num_stages=3`）手算每条语句的 `stage`/`order`。
+2. 操作步骤：在纸上列出 `pipeline_stage_infos` 的 `original_stmt_index`，逐条套用规则。
+3. **需要观察的现象**：copy 的 `order` 比 gemm 大（copy 排在 gemm 之后发射），但 copy 的 `stage=0` 比 gemm 的 `stage=3` 小。
+4. **预期结果**：`gemm(stage=3,order=0)`、`copyA(stage=0,order=1)`、`copyB(stage=0,order=2)`。
+5. 进一步思考：为什么 copy 的 `stage` 小、`order` 大，二者并不矛盾？（提示：stage 决定逻辑迭代偏移，order 决定同一轮里的发射先后。）
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`PipelineStageInfo::last_use_stmt_index` 有什么用？
+
+> **答案**：它记录「这份 copy 产出的数据，最后被第几条语句消费」。分配 stage 时，copy 会依附到它的「最后消费者」身边被调度（见分配循环里的 `last_use_stmt_index == pinfo.original_stmt_index` 判断），从而让 copy 尽量贴近消费者，减少不必要的缓冲版本。
+
+**练习 2**：为什么 MACA 要把 `use_async_copy` 关掉？
+
+> **答案**：MACA 的异步拷贝通路（`memcpy_async` + barrier 句柄）与 CUDA 的 `cp.async` 在语义和可用性上不同，metax 分支当前没有把异步拷贝接入流水线的 commit/wait 机制（见 4.3），因此规划阶段就不发射异步生产者注解，避免下游 pass 生成不兼容的 `cp.async`/barrier 代码。
 
 ---
 
-### 4.3 异步拷贝机制：cp.async / TMA / maca_async_copy
+### 4.3 异步拷贝机制：`cp.async` 与 TMA
 
 #### 4.3.1 概念说明
 
-「异步拷贝」指提交后不阻塞、稍后再同步的搬运。TileLang 在前端提供四个相关原语，它们对应不同的硬件通道和同步方式：
+「搬运」要和「计算」重叠，光有多份缓冲还不够——**搬运本身必须是非阻塞的**。如果 `copy` 是一条会卡住线程的同步指令，那么即使有 3 份缓冲，线程在搬数据时依然干不了别的。
 
-| 原语 | 通道 | 适用 target | 同步方式 |
-|------|------|------------|---------|
-| `T.copy` | 自动选择（TMA / cp.async / 普通循环） | 全部 | 自动（在流水线内由 pass 插入） |
-| `T.async_copy` | `cp.async` | CUDA Ampere+ | 显式 `commit_group` + `wait_group` |
-| `T.tma_copy` | TMA | CUDA Hopper+ | 显式 mbarrier（`expect_tx` + `wait_parity`） |
-| `T.maca_async_copy` | `memcpy_async` | MACA | 显式 barrier（`maca_barrier_arrive_and_wait`） |
+GPU 提供了两类异步搬运指令：
 
-注意「自动」与「显式」的区别：在 `T.Pipelined` 内写 `T.copy`，编译器会自动判定它是不是 `global → shared` 的异步生产者（4.2 已述），并选择通道；而 `T.async_copy` / `T.tma_copy` / `T.maca_async_copy` 是给需要手动掌控同步（如 warp specialization、自定义 barrier）的高级用户用的。
+- **`cp.async`（Ampere+）**：异步把 global 数据搬到 shared，不阻塞线程。线程可以继续发计算指令。配套有 `cp.async.commit_group`（把若干次 cp.async 编成一组）和 `cp.async.wait_group N`（等到在飞的组数 ≤ N），用来在真正读 shared 之前确保数据就位。
+- **TMA（Hopper）**：更强力的张量搬运单元，用 **mbarrier**（见 4.4）做同步，而非 commit/wait。
+
+TileLang 的策略是：**普通的 `T.copy` 在流水线里会被自动改写成异步形式**——CUDA 走 `cp.async`，Hopper（且满足条件）走 TMA。用户通常不需要手写异步。
 
 #### 4.3.2 核心流程
 
-四个原语在 [tilelang/language/copy_op.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py) 里都很薄——本质是把 src/dst 规整成 `BufferRegion`，再 `call_intrin` 发射对应的 tile op：
+异步拷贝在编译流水线里的生命周期：
 
-- `T.copy`（[tilelang/language/copy_op.py:53-133](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L53-L133)）：发射 `tl.tileop.copy`，带 `disable_tma` / `prefer_instruction` 等注解。
-- `T.async_copy`（[tilelang/language/copy_op.py:189-230](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L189-L230)）：发射 `tl.tileop.async_copy`，文档明言「发射 `ptx_cp_async(...)` + `ptx_commit_group()`，**不自动插 wait**」。
-- `T.tma_copy`（[tilelang/language/copy_op.py:233-309](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L233-L309)）：发射 `tl.tileop.tma_copy`，要求传入 `barrier`，发射 `expect_tx + tma_load`，wait 交给用户。
-- `T.maca_async_copy`（[tilelang/language/copy_op.py:496-540](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L496-L540)）：发射 `tl.tileop.maca_async_copy`，把 barrier handle 写入提供的 barrier buffer，需用户调 `T.maca_barrier_arrive_and_wait()` 同步。
+```text
+PipelinePlanning:
+  标注哪些 copy 是「异步生产者」(software_pipeline_async_stages)
+        │
+        ▼
+InjectSoftwarePipeline:
+  稳态循环里，生产者语句包进 async_commit_queue_scope
+  消费者语句前插 async_wait_queue_scope(inflight=N)
+        │
+        ▼
+LowerAsyncCommitWaitAttrs (inject_pipeline.cc 内):
+  async_commit_queue_scope  → ptx_commit_group()
+  async_wait_queue_scope    → ptx_wait_group(N)
+```
 
-#### 4.3.3 源码精读：T.async_copy 的契约
+关键在于 `wait` 的「等待数 N」：消费者读 shared 前，要保证「它要读的那份数据已经搬完」。N 通常取 `num_stages - 1` 左右——即允许最多 `num_stages-1` 组异步拷贝在飞，再老的就必须等。
 
-[tilelang/language/copy_op.py:189-230](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L189-L230) 的关键约定写在 docstring 里：
+#### 4.3.3 源码精读
 
-> The backend enforces cp.async constraints and emits: `ptx_cp_async(...)` + `ptx_commit_group()`. **No wait is auto-inserted for `T.async_copy`; synchronization is explicit.**
+DSL 层提供了几个相关原语。最常用的是普通 `copy`（会被流水线自动异步化），也有显式的 `async_copy`（强制走 `cp.async`）和 `tma_copy`（强制走 TMA）。
 
-这说明：单独使用 `T.async_copy` 时你必须自己管 wait；但当它出现在 `T.Pipelined` 内、且被 `PipelinePlanning` 识别为异步生产者时，同步（commit/wait）会由 `InjectSoftwarePipeline` 自动插入（见 4.4 的 `AsyncCommitWaitAttrLowerer`）。两套机制是互补的。
-
-#### 4.3.4 源码精读：T.tma_copy 与 barrier 的绑定
-
-[tilelang/language/copy_op.py:290-309](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L290-L309) 把用户传入的 barrier 转成 `BufferLoad` 放进注解：
+`async_copy` 的文档写明了它发射的指令序列（[tilelang/language/copy_op.py:189-230](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L189-L230)）：
 
 ```python
-if barrier is not None:
-    from .builtin import _mbar_to_buffer_load
-    ann["barrier"] = _mbar_to_buffer_load(barrier)
-...
-return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+def async_copy(src, dst, *, coalesced_width=None, annotations=None, loop_layout=None):
+    """Asynchronous copy primitive lowered through cp.async.
+    ...
+    The backend enforces cp.async constraints and emits:
+      `ptx_cp_async(...)` + `ptx_commit_group()`.
+    No wait is auto-inserted for `T.async_copy`; synchronization is explicit.
+    """
 ```
 
-TMA 的同步模型是「期望字节数」：load 前先 `expect_tx(N)`，搬运完成时硬件 arrive 这个 barrier 并减去 N 字节，消费端用 `mbarrier_wait_parity` 等到 phase 翻转。这个 parity 的计算正是 4.4 要讲的。
+注意最后一句：`async_copy` **不自动插 wait**，同步要用户自己管。而流水线场景下，`InjectSoftwarePipeline` 会替你管好 commit/wait。
 
-#### 4.3.5 代码实践
+`tma_copy` 走的是 mbarrier 同步（[copy_op.py:233-309](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L233-L309)），它只发射「生产者那一半」（`expect_tx + tma_load`），wait 由用户用 `T.mbarrier_wait_parity()` 显式做：
 
-1. **实践目标**：对比「自动 T.copy」与「显式 T.async_copy」在生成代码上的差异。
-2. **操作步骤**：复制 `examples/gemm/example_gemm.py` 为临时脚本，把 `T.copy(A[...], A_shared)` 改成 `T.async_copy(A[...], A_shared)`（同样改 B），编译并打印 `kernel.get_kernel_source()`。
-3. **需要观察的现象**：在 `num_stages=3` 的流水线内，两者生成的 `cp.async` 指令形态接近；若把它移出 `T.Pipelined`，`T.async_copy` 不会自动插 wait，需要你手动加同步，否则读到未完成的数据。
-4. **预期结果**：流水线内编译器自动管理 commit/wait；流水线外需手动同步。
-5. 无 GPU 时，至少完成「打印生成的 CUDA 源码并找到 `cp.async`/`mbarrier` 字样」这一步；若 target 是 maca，预期看不到自动 cp.async（因 4.2 所述），可改用 `T.maca_async_copy`。
-
-#### 4.3.6 小练习与答案
-
-**练习 1**：在 `T.Pipelined` 内用 `T.copy`，需要自己写 `commit_group` / `wait_group` 吗？
-**答**：不需要。`PipelinePlanning` 会把 `global→shared` 的 copy 标为异步生产者，`InjectSoftwarePipeline` 会自动插入 commit/wait（或 mbarrier）。
-
-**练习 2**：为什么 MACA 用的是 `memcpy_async` 而不是 `cp.async`？
-**答**：`cp.async` 是 NVIDIA PTX 的指令；MACA（MetaX）有自己的异步搬运硬件，暴露为 `memcpy_async` 语义，配套的同步是 barrier handle + `maca_barrier_arrive_and_wait`，由 `T.maca_async_copy` 暴露。
-
----
-
-### 4.4 mbarrier 同步与 InjectSoftwarePipeline 重写
-
-#### 4.4.1 概念说明
-
-`InjectSoftwarePipeline`（`tl.InjectSoftwarePipeline`）是软件流水线的**第二个 pass**，承担真正改写 IR 的工作：把那条带 `stage`/`order` 注解的循环，拆成 **prologue（预热）+ steady-state body（稳态）+ epilogue（收尾）** 三段，给需要的缓冲加一维「版本」下标，并在适当位置插入 commit/wait 或 mbarrier 同步。它注册在 [src/transform/inject_pipeline.cc:4020-4029](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L4020-L4029)，结尾还跑一次 `ConvertSSA` 保证变量名干净。
-
-「mbarrier」（memory barrier）是 Hopper 引入的共享内存屏障原语，存在 `shared.barrier` 作用域里。它用 **phase（相位）** 计数：每次到达预期字节数就翻转 phase，等待方用 `mbarrier_wait_parity(phase_parity)` 阻塞到指定位（0 或 1）。软件流水线里多个轮次复用同一 barrier，必须靠 phase 区分，否则会与上一轮的到达混淆。
-
-#### 4.4.2 核心流程
-
-主驱动是 `PipelineInjector::VisitStmt_(ForNode)`（[src/transform/inject_pipeline.cc:3363-3786](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L3363-L3786)），流程如下：
-
-```text
-1. 递归改写子节点；若循环无 pipeline 注解则原样返回。
-2. 抽出循环体语句流；剥离 AllocBuffer/DeclBuffer 声明（仍登记为本地分配）。
-3. 区分「可重放标量 Bind」与「可调度语句」，校验 stage/order 合法性
-   （ValidatePipelineBody / ValidateScheduledBindDependencies）。
-4. 若无可重叠 stage（所有语句同段），剥掉流水线注解、原样返回。
-5. TMA barrier 改写：RewritePipelineTmaBarriers（仅当有 TMA copy）。
-6. barrier 扩展：ExpandPipelineBarriers（把所有 shared.barrier 从 [N] 扩到 [N*depth]）。
-7. RewritePipeline：缓冲多版本化 + 发射 prologue/body/epilogue。
-8. 更新 barrier_init 注解；LowerAsyncCommitWaitAttrs 把 async 属性降级为具体指令。
+```python
+def tma_copy(src, dst, *, barrier=None, leader_scope_threads=None, ...):
+    """TMA copy with user-managed synchronization.
+    For loads (global -> shared): issues expect_tx + tma_load (no wait).
+    ...
+    The user must wait on the same barrier via T.mbarrier_wait_parity().
+    """
 ```
 
-**第 7 步**的核心是 `PipelineRewriter::BuildPipeline`（[src/transform/inject_pipeline.cc:1192-1268](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1192-L1268)）与 `EmitImpl`（[src/transform/inject_pipeline.cc:2828-3041](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L2828-L3041)）。三段的边界由 `max_stage_`（最大 stage 号）决定：
-
-```text
-prologue  : [min,            min + max_stage)     预热，逐轮展开
-body      : [min + max_stage, min + extent)        稳态，完整一轮
-epilogue  : [min + extent,    min + extent + max_stage)  收尾，逐轮展开
-```
-
-在 `EmitImpl` 里，每条语句的「逻辑迭代号」由当前循环变量按其 stage **反向偏移**得到——这正是错位的实现（[src/transform/inject_pipeline.cc:2893-2898](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L2893-L2898)）：
+「是否支持异步拷贝」的判定统一收口在 [src/backend/common/target_utils.cc:15-26](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/backend/common/target_utils.cc#L15-L26)，按 target 分发：
 
 ```cpp
-PrimExpr skewed_loop_var = new_loop_var - stage;   // ← 按 stage 错位
-if (need_bound_check)
-  inbound = (pipeline_loop_->min <= skewed_loop_var) &&
-            (skewed_loop_var < pipeline_loop_->min + pipeline_loop_->extent);
-```
-
-也就是说，stage 越大的语句（compute）「看到」的迭代号越小，于是它消费的是更早搬进来的数据——与 4.1 的数学描述完全对应。
-
-#### 4.4.3 源码精读：缓冲多版本化
-
-缓冲需要几份副本由 `ComputeBufferVersions`（[src/transform/inject_pipeline.cc:1472-1527](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1472-L1527)）用活跃性分析决定：
-
-```cpp
-int num_versions = buffer_info.use - buffer_info.def + 1;   // 上界：最后用 - 最早定义 + 1
-if (num_versions >= 2) {
-  // 特判：若不存在跨 stage 的读后写冲突，可减一份
-  ...
+bool TargetHasAsyncCopy(Target target) {
+  if (TargetIsCuda(target))  return TargetCudaHasAsyncCopy(target);
+  if (TargetIsRocm(target))  return TargetRocmHasAsyncCopy(target);
+  if (TargetIsMaca(target))  return TargetMacaHasAsyncCopy(target);
+  return false;
 }
 ```
 
-确定份数后，`RewriteAllocBuffer`（[src/transform/inject_pipeline.cc:1535-1544](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1535-L1544)）在 shape 最前面加一维 `num_versions`；随后 `PipelineBodyRewriter` 把每次访问的下标前置一个 `floormod` 版本号（[src/transform/inject_pipeline.cc:1099-1112](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1099-L1112)）：
+`commit`/`wait` 注解最终如何落地成 PTX 指令，由 `AsyncCommitWaitAttrLowerer` 负责（[inject_pipeline.cc:346-385](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L346-L385)）：
 
 ```cpp
-PrimExpr version = floormod((pipeline_loop_->loop_var - pipeline_loop_->min),
-                            new_buffer->shape[0]);
-n->indices.insert(n->indices.begin(), version);   // ← 取模选当前轮副本
+if (op->attr_key == s_tir::attr::async_commit_queue_scope) {
+  Stmt commit = Evaluate(Call(..., builtin::ptx_commit_group(), {}));  // → cp.async.commit_group
+  return SeqStmt({body, commit});
+}
+if (op->attr_key == s_tir::attr::async_wait_queue_scope) {
+  Stmt wait = Evaluate(Call(..., builtin::ptx_wait_group(), {wait_attrs.second})); // → cp.async.wait_group N
+  return SeqStmt({wait, body});
+}
 ```
 
-这就是 4.1 里 \(\text{version}(i)=i\bmod N\) 的代码落地：同一份 shared buffer 被物理复制成 N 份，第 i 轮访问第 `i mod N` 份，于是提前搬的数据不会被覆盖。
+#### 4.3.4 metax 分支特写：MACA 的异步拷贝现状
 
-#### 4.4.4 源码精读：mbarrier 的扩展与 parity
+虽然 MACA 在 `TargetHasAsyncCopy` 里有自己的分支（`TargetMacaHasAsyncCopy`），DSL 也提供了 `maca_async_copy`（基于 `memcpy_async` + barrier 句柄，[copy_op.py:496-540](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/language/copy_op.py#L496-L540)），但 **`T.Pipelined` 流水线当前并不为 MACA 启用异步拷贝**。原因有二：
 
-为了让多个流水轮次复用同一组 barrier，`ExpandPipelineBarriers`（[src/transform/inject_pipeline.cc:769-824](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L769-L824)）把每个 `shared.barrier` 缓冲从 `[N]` 扩成 `[N * num_stages]`，并把所有访问下标改成带 stage 偏移：
+1. `PipelinePlanning` 对 MACA 强制 `use_async_copy = false`（4.2.3），所以 `EmitImplicitAsyncAnnotations` 直接返回，不标异步生产者。
+2. 即便支持，`InjectSoftwarePipeline` 的 commit/wait/mbarrier 句柄管理与 MACA 的 `memcpy_async` 语义尚未完全对接。
 
-```cpp
-PrimExpr stage_expr  = FloorMod(loop_var - loop_min, ns);                       // 当前轮的槽
-PrimExpr parity_cycle= FloorMod(FloorDiv(loop_var - loop_min, ns), 2);          // 当前轮的 phase
-...
-new_node->shape = {PrimExpr(num_stages) * buf->shape[0]};                       // 扩容
-n->indices.Set(0, stage_expr * old_size + n->indices[0]);                        // 下标加偏移
-```
+**后果**：MACA 上 `T.Pipelined` 仍然会做多版本化、prologue/steady/epilogue 拆分（这些与异步无关），但循环里的 copy 是**同步**的——搬运和计算的重叠程度弱于 CUDA。这是 metax 分支相对上游的一个已知差异，也是后续可优化的方向。
 
-注意 `parity_cycle` 这个表达式——它就是 `mbarrier_wait_parity` 要等的位。barrier 的 phase 每 `ns` 轮翻转一次，取模 2 得到 0/1：
+#### 4.3.5 代码实践
 
-\[
-\text{phase}(i) = \left\lfloor \frac{i - \text{loop\_min}}{N} \right\rfloor \bmod 2
-\]
+**实践目标**：在生成的 CUDA 源码里找到 `cp.async` 的痕迹。
 
-随后 `BarrierIndexRewriter` 会把 `mbarrier_wait_parity` 的第二参数（parity）改写成上述表达式（[src/transform/inject_pipeline.cc:719-748](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L719-L748)），这样等待方就能正确等到「当前轮」的那次到达，而不是上一轮残留的到达。
+1. 用 [example_gemm.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/examples/gemm/example_gemm.py)（默认 `num_stages=3`）编译一个 CUDA kernel，打印 `kernel.get_kernel_source()`。
+2. 在源码里搜索 `cp.async`、`cp.async.commit_group`、`cp.async.wait_group`。
+3. **需要观察的现象**：稳态循环里，能看到 `cp.async` 发射拷贝、`commit_group` 编组、`wait_group N` 在 gemm 读 shared 之前等待。
+4. **预期结果**：能定位到 `wait_group` 语句，且其等待数与 `num_stages` 相关（增大 `num_stages`，允许在飞的拷贝组数也应增大）。待本地验证。
+5. 若用 `target={"kind":"maca"}` 编译（无设备时只取源码），对比应发现 MACA 源码里**没有** `cp.async`，而是普通同步拷贝。
 
-对于 TMA 路径，`RewritePipelineTmaBarriers`（[src/transform/inject_pipeline.cc:906-994](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L906-L994)）会创建一个共享的 `pipeline_mbar`，把 `tl.tileop.copy` 改写成 `tl.tileop.tma_copy`（带 barrier 与 `emit_arrive`），并在第一个消费段前插入 `mbarrier_wait_parity`。barrier 缓冲本身由 `CreateMBarrierBuffer` 构造在 `shared.barrier` 作用域（[src/transform/common/mbarrier.h:23-28](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/common/mbarrier.h#L23-L28)）。
+#### 4.3.6 小练习与答案
 
-#### 4.4.5 源码精读：cp.async 的 commit/wait 降级
+**练习 1**：`cp.async.wait_group N` 里的 N 越大越好吗？
 
-对非 TMA 的异步 copy（cp.async），pass 用 `async_commit_queue_scope` / `async_wait_queue_scope` 属性语句表达「归组」与「等待」，最后由 `AsyncCommitWaitAttrLowerer`（[src/transform/inject_pipeline.cc:346-385](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L346-L385)）降级成真实的 PTX 内建：
+> **答案**：不是。N 是「允许在飞的、尚未完成的拷贝组数上限」。N 越大，等待越松（性能可能更好），但需要更多缓冲版本（更多 shared memory）；N 过小则等待过紧，可能让消费者空等。它通常与 `num_stages` 联动，由 `InjectSoftwarePipeline` 计算合适值。
 
-```cpp
-Stmt commit = Evaluate(Call(..., builtin::ptx_commit_group(), {}));     // cp.async.commit_group
-Stmt wait   = Evaluate(Call(..., builtin::ptx_wait_group(), {N}));      // cp.async.wait_group N
-```
+**练习 2**：`T.async_copy` 和流水线里自动异步化的 `T.copy` 有何区别？
 
-等待计数 N 由 `PopulateWaitCounts` + `CompletePipelineLoopStatements` 推导（基于「生产者头」与「消费者访问号」之差），并有 `AsyncPipelineLoopWaitRelaxer` / `RelaxTrailingConsumerWaits` 做松弛优化，尽量把 wait 往后挪以隐藏更多延迟。这一整套机制**只在 `use_async_copy` 为真时生效**——MACA 因为被关掉，走的是普通同步 copy + 多版本缓冲的路径。
-
-#### 4.4.6 代码实践
-
-1. **实践目标**：在生成的设备源码里「看见」软件流水线的三段结构与同步指令。
-2. **操作步骤**：编译 `examples/gemm/example_gemm.py`（`num_stages=3`），打印 `kernel.get_kernel_source()`，在 CUDA 源码里搜索：循环开头的多次 `cp.async`（prologue 预热）、稳态里的 `cp.async.commit_group` / `cp.async.wait_group`、以及结尾的收尾计算。
-3. **需要观察的现象**：你会看到搬运次数多于计算次数（因为预热和收尾各多搬了几轮）；`wait_group` 的在途计数与 `num_stages` 相关。
-4. **预期结果**：`num_stages=3` 时稳态里典型出现 `wait_group 2`（允许 2 个在途），从而 copy 与 compute 重叠。
-5. 若 target 为 maca，由于 4.2 所述，预期**不会**出现自动 `cp.async`/`mbarrier`，而是普通同步搬运 + 多版本 shared buffer——可据此验证 metax 分支的差异。
-
-#### 4.4.7 小练习与答案
-
-**练习 1**：为什么 mbarrier 要按 `num_stages` 扩展成多个槽，而不是共用一个？
-**答**：流水线里同时有多个轮次的搬运在途，它们 arrive 的是不同轮的数据；共用一个 barrier 会把不同轮的到达混在一起。扩展成 `num_stages` 个槽并用 `stage_expr` 选槽、用 `parity_cycle` 选相位，才能让等待方精确等到当前轮的那次到达。
-
-**练习 2**：`ComputeBufferVersions` 算出的副本数一定等于 `num_stages` 吗？
-**答**：不一定。它的上界是 `use - def + 1`（最后使用 stage − 最早定义 stage + 1），若不存在跨 stage 的读后写冲突还会再减一。只有当 copy 在 stage 0、其消费者在 stage `num_stages` 时，副本数才接近 `num_stages`。
-
-**练习 3**：把 `num_stages` 从 3 调到 1，`InjectSoftwarePipeline` 还会生成 prologue/epilogue 吗？
-**答**：不会。`num_stages=1` 时没有可重叠的 stage（`HasOverlappableStages` 为假），pass 在第 4 步就剥掉流水线注解、原样返回普通循环（[src/transform/inject_pipeline.cc:3592-3601](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L3592-L3601)）。
+> **答案**：`T.async_copy` 是**显式**异步原语，强制走 `cp.async` 且**不自动插 wait**，适合需要手动精细控制同步的场景。流水线里的 `T.copy` 是**隐式**异步化——由 `InjectSoftwarePipeline` 自动加 commit/wait、做多版本化。日常 GEMM 用 `T.copy` + `T.Pipelined` 即可，无需手写 `async_copy`。
 
 ---
 
-## 5. 综合实践
+### 4.4 `tl.InjectSoftwarePipeline`：改写、多版本化与 mbarrier
 
-把本讲的知识串起来，做一个「num_stages 扫参 + 源码印证」的小任务。
+#### 4.4.1 概念说明
 
-**任务**：基于 `examples/gemm/example_gemm.py`，固定 `M=N=K=1024`、`block_M=block_N=128`、`block_K=32`，只变 `num_stages`（取 1、2、3、4），完成下表并解释。
+`InjectSoftwarePipeline` 是改写 pass。它读入 `PipelinePlanning` 产出的 stage/order 注解，把**单个循环**重写成三段：
 
-| num_stages | 延迟 (ms) | shared 副本数 | 是否出现 cp.async 异步 | prologue 搬运次数 |
-|------------|----------|--------------|----------------------|------------------|
-| 1          | ?        | 1            | 否                   | 0                |
-| 2          | ?        | ?            | ?                    | ?                |
-| 3          | ?        | ?            | ?                    | ?                |
-| 4          | ?        | ?            | ?                    | ?                |
+- **prologue（预热）**：先发若干轮 copy，把管道「灌满」。
+- **steady（稳态）**：copy 和 compute 完全重叠，是性能主力。
+- **epilogue（收尾）**：管道里残留的最后几轮 compute 排空。
 
-**步骤**：
+同时它做三件关键杂活：
 
-1. 编写一个脚本，循环 `for ns in [1,2,3,4]`，每次 `matmul.compile(..., )` 时把 `num_stages` 传进去（注意 `num_stages` 是 kernel 定义里的参数，需在 `@tilelang.jit` 函数签名里暴露它，或为每个 ns 单独定义函数）。
-2. 用 `kernel.get_profiler().do_bench(backend="cupti")` 记录延迟填表（CUDA 环境）。无 GPU 则此项标「待本地验证」。
-3. 对每个 ns 调 `kernel.get_kernel_source()`，搜索 `cp.async`、`commit_group`、`wait_group`（或 maca 下的对应指令）确认异步通道是否启用、在途计数是多少。
-4. 结合 4.4.2 的三段切分公式解释 prologue 的搬运次数：prologue 长度为 `max_stage`，故预热阶段会多搬 `max_stage` 轮。
+1. **多版本化**：把 shared buffer 复制成 N 份，用 `floormod` 下标选当前版本，避免生产者和消费者踩同一块内存。
+2. **commit/wait 插入**：为异步生产者插 `commit`，为消费者插 `wait`。
+3. **mbarrier 管理**：对 TMA 路径，创建并复制屏障缓冲，插 `mbarrier_wait_parity`。
+
+#### 4.4.2 核心流程
+
+改写的总入口是 `PipelineInjector::Inject`（[inject_pipeline.cc:3073-3084](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L3073-L3084)），对每个带 stage/order 注解的 `for` 循环：
+
+```text
+1. 校验 stage/order 合法性（唯一性、依赖不破坏）
+2. 若无重叠阶段 → 退化为普通循环（不值得流水化）
+3. TMA 路径：RewritePipelineTmaBarriers（把 copy 改写成 tma_copy + 共享屏障）
+4. ExpandPipelineBarriers：把所有相关屏障缓冲扩成 num_stages 份
+5. RewritePipeline：
+   a. 算每个 buffer 的版本数（ComputeBufferVersions，liveness 分析）
+   b. 多版本化分配（RewriteAllocBuffer）
+   c. 发射 prologue / steady / epilogue（EmitImpl）
+   d. 插 commit/wait、放松尾部 wait
+6. LowerAsyncCommitWaitAttrs：commit/wait 注解 → PTX 指令
+```
+
+**三段如何切**：设原循环为 `[min, min+extent)`，最大阶段为 `max_stage`，则
+
+\[
+\text{prologue} = [min,\; min + max\_stage),\quad
+\text{steady} = [min + max\_stage,\; min + extent),\quad
+\text{epilogue} = [min + extent,\; min + extent + max\_stage)
+\]
+
+每个语句在逻辑迭代 `loop_var` 上访问的「真实迭代」是 `loop_var - stage`（称为 skewed loop var）——stage 越大，消费得越「旧」的迭代。
+
+**版本选择**：多版本化后，buffer 第 0 维是版本号，访问时用
+
+\[
+\text{version} = \text{floormod}(\,loop\_var - loop\_min,\; num\_versions\,)
+\]
+
+来选当前迭代对应的那一份。版本数由活跃性分析得到（[inject_pipeline.cc:1472-1527](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1472-L1527)）：
+
+\[
+num\_versions = use - def + 1 \quad (\text{再按重排情况减一})
+\]
+
+对标准 copy→gemm 的 GEMM，最终版本数恰为 `num_stages`。
+
+#### 4.4.3 源码精读
+
+三段发射在 `PipelineRewriter::BuildPipeline`（[inject_pipeline.cc:1223-1230](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1223-L1230)），就是上面那三个区间：
+
+```cpp
+Stmt prologue = EmitImpl(pipeline_loop_->min,
+                         pipeline_loop_->min + max_stage_, true, true);
+Stmt body     = EmitImpl(pipeline_loop_->min + max_stage_,
+                         pipeline_loop_->min + pipeline_loop_->extent, false, false);
+Stmt epilogue = EmitImpl(pipeline_loop_->min + pipeline_loop_->extent,
+                         pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
+```
+
+`EmitImpl` 内部对每条语句计算 `skewed_loop_var = new_loop_var - stage` 并加边界守卫（[inject_pipeline.cc:2889-2897](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L2889-L2897)）：
+
+```cpp
+PrimExpr skewed_loop_var = new_loop_var - stage;
+if (need_bound_check)
+  inbound = And(pipeline_loop_->min <= skewed_loop_var,
+                (skewed_loop_var < pipeline_loop_->min + pipeline_loop_->extent));
+```
+
+这正是「prologue 里 compute 因 skewed 越界而被守卫掉、epilogue 里 copy 被守卫掉」的实现机制。
+
+多版本化的下标重写在 `PipelineBodyRewriter`（[inject_pipeline.cc:1099-1127](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L1099-L1127)），给每次 buffer 读写插入版本下标：
+
+```cpp
+PrimExpr version = floormod(
+    (pipeline_loop_->loop_var - pipeline_loop_->min), new_buffer->shape[0]);
+n->indices.insert(n->indices.begin(), version);   // 第 0 维 = 版本号
+```
+
+#### 4.4.4 mbarrier 同步：生产者—消费者握手
+
+**mbarrier** 是 Hopper 引入的 64 位共享内存屏障，配合 TMA 使用。它的握手模型是：
+
+- **生产者**（TMA load）：先 `mbarrier.expect_tx byte_count`（告诉屏障「我马上要写这么多字节」），TMA 硬件搬完数据后自动抵达屏障、扣减计数。
+- **消费者**：执行 `mbarrier.wait_parity P`，等到屏障的奇偶位翻成 `P`，表示数据已就位。
+
+**parity（奇偶）** 是关键：屏障每被「完全抵达」一次，奇偶就翻转。所以消费者要等第 `k` 轮的数据，就等 parity 等于 `k` 的奇偶。在流水线里，第 `iter` 次迭代的 parity 用
+
+\[
+parity = \text{floormod}\!\left(\text{floordiv}(iter,\; num\_stages),\; 2\right)
+\]
+
+来计算（见 [inject_pipeline.cc:974](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L974) 与 [inject_pipeline.cc:822-824](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L822-L824)）：
+
+```cpp
+PrimExpr ns = IntImm(DataType::Int(32), num_stages);
+PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
+```
+
+**为什么屏障要复制成 `num_stages` 份**？因为流水线里同时有 `num_stages` 轮 TMA 在飞，它们各自抵达同一个屏障会乱套。`ExpandPipelineBarriers`（[inject_pipeline.cc:769-884](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L769-L884)）把屏障缓冲从 `[N]` 扩成 `[N * num_stages]`，并给每次访问加上 `stage` 偏移（[inject_pipeline.cc:822-823](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L822-L823)）：
+
+```cpp
+PrimExpr stage_expr = FloorMod(loop_var - loop_min, ns);
+// 访问下标改写为：stage_expr * old_size + 原下标
+```
+
+而 `RewritePipelineTmaBarriers`（[inject_pipeline.cc:906-994](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L906-L994)）负责把流水线里的普通 `tl.tileop.copy` 改写成 `tl.tileop.tma_copy`（挂上共享屏障），并在第一个消费阶段前插 `mbarrier_wait_parity`（[inject_pipeline.cc:969-977](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L969-L977)）：
+
+```cpp
+PrimExpr barrier_ref = MakeBarrierRef(barrier_buf, IntImm(DataType::Int(32), 0));
+PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
+wait_stmts.push_back(Evaluate(Call(
+    DataType::Handle(), mbarrier_wait_parity(), {barrier_ref, parity})));
+```
+
+> 提醒：mbarrier/TMA 路径是 **Hopper（sm_90+）专属**，CUDA Ampere 走的是 `cp.async` + commit/wait，MACA 则两者都不走（同步拷贝）。
+
+pass 的最终注册在 [inject_pipeline.cc:4020-4029](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L4020-L4029)，名为 `tl.InjectSoftwarePipeline`，结尾还跑一遍 `ConvertSSA` 清理变量。
+
+#### 4.4.5 代码实践
+
+**实践目标**：在生成的 CUDA 源码里识别 prologue/steady/epilogue 三段与多版本化。
+
+1. 用 `num_stages=3` 的 GEMM 编译，打印 `kernel.get_kernel_source()`。
+2. 在稳态循环里找 shared buffer 的访问下标，应能看到形如 `[(k % 3), i, j]` 的版本下标（`k % 3` 即 `floormod` 选版本）。
+3. **需要观察的现象**：
+   - prologue 段只有 copy（compute 因越界守卫被裁掉）；
+   - 稳态段 copy 和 gemm 都在；
+   - epilogue 段只有 gemm（copy 被裁掉）。
+4. **预期结果**：能数出 shared buffer 被复制成了 3 份（版本维 = 3）。待本地验证。
+5. 若把 `num_stages` 改成 2，版本维应变 2，prologue/epilogue 长度也相应缩短。
+
+#### 4.4.6 小练习与答案
+
+**练习 1**：为什么 prologue 段里 gemm 不会执行？
+
+> **答案**：prologue 的循环范围是 `[min, min+max_stage)`。gemm 的 `stage = num_stages = max_stage`，其 `skewed_loop_var = loop_var - max_stage`，在 prologue 区间内为负值，落在 `[min, min+extent)` 之外，被 `inbound` 守卫裁掉。所以 prologue 只发 copy，把管道灌满。
+
+**练习 2**：`ExpandPipelineBarriers` 为什么要根据「是否有显式 `ptx_arrive_barrier` 调用」来决定是否扩展某个屏障？
+
+> **答案**：见 [inject_pipeline.cc:791-818](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc#L791-L818)。用户显式 `ptx_arrive_barrier` 的屏障是「用户自管同步」，需要按 stage 分槽才能流水化；而由 tile-op（如 tcgen05 MMA）内部自管的屏障，其抵达由算子自己负责，若也扩展反而会破坏其内部同步，故不扩展。
+
+---
+
+## 5. 综合实践：调参 `num_stages` 并解释重叠
+
+把本讲知识串起来，做一个完整的小任务。
+
+**任务**：基于 [examples/gemm/example_gemm.py](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/examples/gemm/example_gemm.py)，系统观察 `num_stages` 对性能与生成代码的影响。
+
+**操作步骤**：
+
+1. 固定 `M=N=K=1024`、`block_M=block_N=128`、`block_K=32`，把第 19 行的 `num_stages` 依次设为 **1、2、3、4**，分别编译。
+2. 对每个值，用 `kernel.get_profiler().do_bench(backend="cupti")` 测延迟，记录成表（无 GPU 则跳过计时，只做源码分析）。
+3. 对每个值，打印 `kernel.get_kernel_source()`，重点看三处：
+   - shared buffer 的版本维（`floormod` 里的模数）；
+   - prologue / epilogue 的长度；
+   - `cp.async` 与 `wait_group` 的等待数。
+4. 画出每个 `num_stages` 下「copy 与 compute 的时间重叠」示意（横轴为迭代，纵轴为语句）。
+
+**需要观察与解释的现象**：
+
+| `num_stages` | 版本维 | prologue/epilogue 长度 | copy/compute 重叠 | shared 内存占用 |
+|---|---|---|---|---|
+| 1 | 1 | 1 | 几乎无重叠 | 最省 |
+| 2 | 2 | 2 | 经典双缓冲 | 中等 |
+| 3 | 3 | 3 | 较深重叠 | 较大 |
+| 4 | 4 | 4 | 更深重叠 | 最大 |
 
 **预期结论**：
 
-- `num_stages=1`：无流水线，延迟最高，无 cp.async 异步。
-- `num_stages=2/3`：副本数与异步在途计数随 ns 增长，延迟显著下降。
-- `num_stages=4`：若 shared memory 仍够，延迟可能再略降；若吃紧则可能报错或占用率下降导致反而变慢——这是「副本数 vs shared 容量」的权衡。
-- MACA target：表格第 4 列预期全为「否」（隐式 async 被关），印证 metax 分支的差异。
+- `num_stages` 增大 → 重叠更深 → 延迟一般下降；但 shared 内存占用也线性增长，过大会导致 occupancy（占用率）下降，反而变慢。
+- 存在一个「甜点」`num_stages`，通常是 2~4 之间，取决于 block 大小与 GPU 的 shared 内存容量。**待本地验证**具体最优值。
+- 对 MACA target，由于异步拷贝未启用（4.3.4），增大 `num_stages` 带来的重叠收益弱于 CUDA——这是 metax 分支的一个可观察差异。
 
-> 提示：若要在不改动源码的前提下扫参，可参考 `examples/gemm/example_gemm_autotune.py` 用 `tilelang.autotuner` 定义 `num_stages` 参数空间（自动调优将在 [u8-l1](u8-l1-autotuner.md) 详述）。
+> 提示：如果你实现了自己的 kernel（如 elementwise 或 FlashAttention），同样的 `num_stages` 调参方法同样适用；只要循环体是「copy + compute」结构，流水线就能生效。
+
+---
 
 ## 6. 本讲小结
 
-- `T.Pipelined(..., num_stages=N)` 是表达软件流水线的唯一入口；`num_stages` 控制 copy/compute 错位的深度与缓冲副本数，结果不变只变性能。
-- 软件流水线分两个 pass：`PipelinePlanning` 把 `num_stages` 规划成 `stage`/`order` 注解并标记异步生产者；`InjectSoftwarePipeline` 据此把循环重写成 prologue/body/epilogue，并插入同步。
-- 缓冲多版本化靠 `floormod(loop_var, num_versions)` 选当前轮副本；副本数由活跃性分析 `use - def + 1` 决定，不一定等于 `num_stages`。
-- 异步搬运有三条通道：`cp.async`（CUDA，commit/wait）、TMA（Hopper，mbarrier + expect_tx）、`memcpy_async`（MACA，barrier handle）；流水线内用 `T.copy` 时编译器自动选通道与同步。
-- mbarrier 靠 phase/parity 区分不同轮次的到达；pass 把 barrier 扩展成 `num_stages` 个槽，并用 \(\lfloor(i-\text{min})/N\rfloor\bmod 2\) 计算等待相位。
-- **metax 关键差异**：MACA 在 `PipelinePlanning` 中被显式置 `use_async_copy=false`，隐式 async-copy 流水线被关闭，退化为普通同步 copy + 多版本缓冲；要异步需显式用 `T.maca_async_copy`。
+- `T.Pipelined(num_stages=N)` 是软件流水线的推荐入口；`num_stages=0` 不流水，`N≥1` 表示 copy 与 compute 之间保留 N 份缓冲。它在前端只是落成带 `num_stages` 注解的 `for` 循环。
+- `tl.PipelinePlanning` 是**规划** pass：分析每条语句的读写，把消费者分到 `stage=num_stages`、把喂数据的 copy 分到 `stage=0` 并排到消费者之后，再标注异步生产者。**metax 分支在此对 MACA 关闭异步拷贝**。
+- `tl.InjectSoftwarePipeline` 是**改写** pass：把单循环拆成 prologue/steady/epilogue，用 `floormod` 做 shared buffer 多版本化（版本数经活跃性分析得出，标准 GEMM 下等于 `num_stages`），并为异步生产者插 commit/wait。
+- 异步搬运有两条路：CUDA Ampere 走 `cp.async` + `commit_group`/`wait_group`；Hopper 走 TMA + mbarrier。MACA 当前在流水线里**不走异步拷贝**，使用同步拷贝。
+- mbarrier 用「expect_tx → 自动抵达 → wait_parity」握手；`parity = floormod(floordiv(iter, num_stages), 2)`；屏障被 `ExpandPipelineBarriers` 复制成 `num_stages` 份、按下标分槽，避免多轮 TMA 互相干扰。
+- 两个 pass 在 MACA 的 pass 流水线里注册于 [tilelang/maca/pipeline.py:45-46](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/maca/pipeline.py#L45-L46)，紧接 `MaterializeKernelLaunch`、先于 `LayoutInference`。
+
+---
 
 ## 7. 下一步学习建议
 
-- 想看流水线 + 布局推断如何配合？继续读 [u4-l3 内存布局推断 Layout/Fragment](u4-l3-layout-inference.md)，注意两个流水线 pass 都跑在 `LayoutInference` 之前。
-- 想理解 warp specialization（生产者/消费者 warp 分离）这条更强的重叠路径？它由 `allow_warp_specialized` 在 CUDA 流水线里开启（[tilelang/cuda/pipeline.py:94-95](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/tilelang/cuda/pipeline.py#L94-L95)），是软件流水线的「升级版」。
-- 想用扫参找最优 `num_stages`？进入 [u8-l1 自动调优 autotuner](u8-l1-autotuner.md) 与 [u8-l3 性能剖析与基准测试](u8-l3-profiling-and-benchmark.md)。
-- 想深入 MACA 后端的同步原语？阅读 `tilelang/maca/` 下的 intrinsics 与 [src/maca/transform/lower_maca_intrin.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/maca/transform/lower_maca_intrin.cc)（详见 [u7-l4 MACA 编译流水线与 transform](u7-l4-maca-pipeline.md)）。
+- **往深处**：`InjectSoftwarePipeline` 里关于 `wait` 放松（`RelaxTrailingConsumerWaits`、`AsyncPipelineLoopWaitRelaxer`）的逻辑相当精巧，建议结合生成的 PTX 阅读这部分优化如何减少不必要的等待。
+- **往广处**：阅读 [src/transform/inject_pipeline.cc](https://github.com/tile-ai/tilelang-metax/blob/60e2199fa6a972a526a3712d929c92ef8f09b9c1/src/transform/inject_pipeline.cc) 中 TMA 屏障管理（`RewritePipelineTmaBarriers`）与 cluster copy 的联动，衔接 u8-l2（swizzle/persistent/splitk）。
+- **MACA 方向**：若你关心 metax 分支的核心差异，可顺着 u7-l4（MACA 编译流水线）看 `LowerMACAIntrin` 如何处理 `memcpy_async`，以及未来如何把 MACA 的异步拷贝接入 `InjectSoftwarePipeline`。
+- **实践方向**：把本讲的 `num_stages` 调参方法应用到 FlashAttention（u8-l4）上，体会流水线对在线 softmax 这种「多段 copy+compute」kernel 的收益。
