@@ -1,151 +1,171 @@
 # 环境安装与项目目录结构
 
+> 本讲是学习手册第 2 篇（u1-l2），承接 u1-l1 建立的项目心智模型。上一篇你已经知道：TinyZero 是 DeepSeek R1 Zero 的轻量复现，本质是「veRL 框架 + 任务数据 + 规则奖励」。本篇我们离开「读文档」，正式进入「看仓库」——把它装起来，并把目录结构理清楚。
+
 ## 1. 本讲目标
 
-上一篇（u1-l1）我们已经建立了一个关键认知：**TinyZero 仓库的本质是「veRL 训练框架 + 任务数据 + 规则奖励函数」**，真正属于 TinyZero 自己的代码只集中在数据预处理和奖励打分两处，其余绝大部分是 vendored（直接拷贝进来）的 veRL 框架。
+学完本讲，你应该能够：
 
-本讲承接这个认知，学完后你应当能够：
+- 说出从「新建 conda 环境」到「`pip install -e .` 可编辑安装 verl」的完整步骤，并理解每一步装的是什么。
+- 看懂 `setup.py`、`pyproject.toml`、`requirements.txt` 三个构建文件各自的作用，以及它们之间「谁能替代谁」的关系。
+- 在不看资料的情况下，画出仓库顶层目录（`scripts`、`examples`、`verl`、`tests`、`docs`）的职责划分，并能进一步说出 `verl/` 内部 `trainer`、`workers`、`utils` 等子目录是干什么的。
+- 判断「一个新依赖该写在哪、一个配置文件该放哪、一个新脚本该建在哪」。
 
-1. 说出 TinyZero「安装」到底是在装什么——它装的不是某个叫 `tinyzero` 的包，而是仓库里的 `verl` 包。
-2. 理解 Python 打包「三件套」`pyproject.toml` / `setup.py` / `requirements.txt` 各自的角色，以及它们之间的关系与主次。
-3. 看懂 `pip install -e .`（可编辑安装）背后发生的事情，包括版本号、包数据（yaml 配置）是怎么被打进包里的。
-4. 对照真实仓库，理清顶层目录（`scripts`、`examples`、`verl`、`tests`、`docs` 等）的职责划分，为后续逐层进入源码打下地图。
+本篇**只讲环境与目录结构**，不深入任何一行训练算法代码。这是后续所有源码阅读篇（从 u2 开始）的「地图基础」。
 
 ## 2. 前置知识
 
-阅读本讲前，建议你已经读过 u1-l1，知道 TinyZero 是对 DeepSeek R1 Zero 的轻量化复现、基于 veRL 框架。此外需要几个最基础的背景：
+本篇假设你已具备：
 
-- **Python 包（package）**：一个可以被 `import` 的目录，目录里有 `__init__.py`。本仓库里 `verl/` 就是一个包，里面还有子包如 `verl/trainer/`、`verl/workers/`。
-- **依赖（dependency）**：项目运行需要用到的其他库，例如 `torch`、`vllm`、`ray`、`transformers`。
-- **打包/安装**：把一个 Python 项目「注册」到当前 Python 环境里，让解释器能找到它。传统用 `setup.py`，现代推荐用 `pyproject.toml`。
-- **可编辑安装（editable install）**：`pip install -e .`，不是把代码复制到 `site-packages`，而是建立一个「链接」指回你的源码目录，于是你改源码立即生效。这对读源码、改源码学习非常关键。
+- **Python 与 pip 的基础**：知道 `pip install` 装包、`python -m xxx` 运行模块。本讲会解释更细的部分。
+- **命令行基础**：能在终端里 `cd`、`ls`、设置环境变量（`export VAR=value`）。
+- **conda 的最基本概念**：conda 是一个「环境管理器」，可以把不同项目的 Python 版本和依赖隔离开，互不污染。你可以把一个 conda 环境理解成一个「一次性的、可删除的 Python 沙箱」。
+- **什么是「包（package）」**：一个 Python 包就是一个可以被 `import` 的目录（里面通常有 `__init__.py`）。`verl` 本身就是一个大包，里面又套着 `verl.trainer`、`verl.workers` 等子包。
 
-如果你对这些概念还模糊，不用担心，本讲会结合真实文件一步步讲清楚。
+如果上面这些对你来说很陌生也没关系，本讲会用通俗语言一步步带。
+
+> 名词速查
+> - **veRL**：Volcano Engine Reinforcement Learning，字节跳动开源的 LLM 强化学习训练框架，TinyZero 直接基于它。仓库里的 `verl/` 目录就是它的源码（注意大小写：仓库目录小写，框架名写作 veRL）。
+> - **可编辑安装（editable install）**：`pip install -e .` 会把你当前目录的代码「链接」进 Python 环境，而不是复制一份。这样你**改了源码，立刻生效**，不用反复重装——这正是我们要读源码、做实验所需要的。
+> - **vendored**：把第三方框架的源码直接拷贝进自己仓库里维护。`verl/` 目录就是把 veRL vendored 进来的结果。
 
 ## 3. 本讲源码地图
 
-本讲涉及的文件都属于「项目构建与安装」层面，不涉及训练逻辑本身：
+本讲涉及的「源码」其实主要是**构建与说明类文件**，它们决定了「怎么装」和「装进来的是什么」：
 
-| 文件 | 作用 |
-| --- | --- |
-| [README.md](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/README.md) | 项目说明与官方安装步骤（依赖版本、安装顺序）。 |
-| [pyproject.toml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml) | 现代 Python 打包的「主」配置：构建后端、元数据、依赖、版本来源、包数据。 |
-| [setup.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py) | 传统打包脚本，在注释里明确写着它是 `pyproject.toml` 失效时的「兜底（fallback）」方案。 |
-| [requirements.txt](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt) | 依赖清单。`setup.py` 直接读它来填充 `install_requires`。 |
-| [verl/\_\_init\_\_.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/__init__.py) | 包的入口，定义 `__version__` 并导出核心数据类型 `DataProto`。 |
-| [verl/version/version](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/version/version) | 一个只写了 `0.1` 的纯文本文件，是版本号的唯一真实来源。 |
+| 文件 | 作用 | 本讲怎么用 |
+| --- | --- | --- |
+| [README.md](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/README.md) | 项目首页说明，含官方安装步骤 | 提供「正确答案」式的安装顺序 |
+| [setup.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py) | 传统的 Python 安装脚本（备用） | 拆解 `name`、`install_requires`、`package_data` |
+| [pyproject.toml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml) | 现代化的项目元数据文件（主入口） | 拆解 `[build-system]`、`[project]`、动态版本 |
+| [requirements.txt](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt) | 运行期依赖清单 | 逐行解读每个依赖及其版本约束 |
+
+此外，我们会用 `git ls-files` / `ls` 去看清整个仓库目录长什么样，这是「目录结构」模块的素材。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成三个最小模块：
+本讲先把「安装流程」串起来（4.1），再分别精读三个最小模块——`requirements.txt`（4.2）、`setup.py`（4.3）、`pyproject.toml`（4.4），最后讲目录结构（4.5）。
 
-- **4.1** Python 打包三件套：`pyproject.toml` / `setup.py` / `requirements.txt` 的角色与关系。
-- **4.2** verl 包与可编辑安装：`pip install -e .` 背后发生了什么。
-- **4.3** 仓库目录结构与各目录职责划分。
-
-### 4.1 Python 打包三件套：pyproject.toml / setup.py / requirements.txt
+### 4.1 安装流程总览：从 conda 到 verl
 
 #### 4.1.1 概念说明
 
-一个 Python 项目要能被 `pip install`，需要告诉 pip 三件事：
+很多人照着 README 把命令敲一遍，跑起来了就不再深究。但要长期读源码、改实验，你必须理解每一步装的是什么、为什么是这个顺序。TinyZero 的依赖栈是「分层」的：
 
-1. **怎么构建**（build system）：用 `setuptools` 还是别的后端？
-2. **项目是谁、版本号多少、依赖哪些库**（metadata）。
-3. **哪些文件要打进包里**（packages / package_data），尤其是非 `.py` 的资源文件（本项目的 yaml 配置就属于这类）。
+1. **Python 解释器层**：conda 提供 `python=3.9`。
+2. **深度学习运行时层**：PyTorch（`torch==2.4.0`）+ CUDA 12.1。
+3. **推理加速层**：`vllm==0.6.3`，它对 torch 版本有严格要求，所以 README 说「你也可以跳过装 torch，让 vllm 帮你装对的版本」。
+4. **分布式调度层**：`ray`，veRL 用它来跨 GPU 编排 worker（这是 u3-l2 的内容）。
+5. **训练框架层**：`verl` 本身，用「可编辑安装」装进来。
+6. **可选增强层**：`flash-attn`（注意力加速）、`wandb`（实验记录）等。
 
-历史上这三件事全写在 `setup.py` 一个脚本里。现代 Python（PEP 517/518/621）推荐把这些信息放进声明式的 `pyproject.toml`，而 `requirements.txt` 则是「依赖清单」的常见载体。
-
-TinyZero（其实是上游 veRL）同时保留了这三者，并在文件里**写明了主次关系**：`pyproject.toml` 是主，`setup.py` 是兜底。这是一个值得注意的细节——它解释了为什么你改依赖时，可能要同时留意两个地方。
+这个顺序很重要：**vllm 必须在 verl 之前装**，因为 verl 的依赖声明里写了 `vllm<=0.6.3`，如果先装 verl，pip 可能拉一个不符合 vllm 自身要求的 torch 版本，造成版本打架。
 
 #### 4.1.2 核心流程
 
-当你执行 `pip install -e .` 时，pip 的大致流程是：
+官方安装步骤可以画成这样的流水线：
 
 ```
-1. 读取 pyproject.toml 的 [build-system] → 决定用 setuptools 构建
-2. 读取 [project] 元数据 → 包名 verl、版本（dynamic，去读 verl/version/version）
-3. 读取 dependencies → 安装运行期依赖（torch/vllm/ray/transformers…）
-4. 读取 [tool.setuptools.package-data] → 把 verl/trainer/config/*.yaml 打进包
-5. 建立「可编辑链接」指回当前源码目录 → import verl 立即生效
+conda create -n zero python=3.9          # ① 建沙箱
+        │
+        ▼
+pip install torch==2.4.0 (+cu121)        # ② 装 GPU 版 torch（可省，vllm 会兜底）
+        │
+        ▼
+pip3 install vllm==0.6.3                 # ③ 推理引擎（顺带锁 torch 版本）
+        │
+        ▼
+pip3 install ray                         # ④ 分布式编排
+        │
+        ▼
+pip install -e .                         # ⑤ 可编辑安装 verl（本仓库的核心）
+        │
+        ▼
+pip3 install flash-attn --no-build-isolation   # ⑥ 注意力加速（编译型，要单独装）
+pip install wandb IPython matplotlib           # ⑦ 实验记录与画图
 ```
-
-> 说明：`requirements.txt` 并不会被 pip 自动当作依赖来源。它在本项目里被 `setup.py` 读取（见 4.1.3），所以只有当走 `setup.py` 路径时，`requirements.txt` 里的依赖才会进入 `install_requires`。
 
 #### 4.1.3 源码精读
 
-**① pyproject.toml —— 主配置（构建后端 + 元数据 + 依赖）**
+这些步骤全部写在 README 的 Installation 小节里，我们逐句对一下：
 
-构建后端声明，告诉 pip 用 `setuptools` 来构建（[pyproject.toml:4-9](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L4-L9)）：
+[README.md:22-37](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/README.md#L22-L37) 给出了完整的安装命令块。下面是其中最关键的几行（注意 README 给的 `python=3.9` 和 `torch==2.4.0` 都是有意固定的版本）：
 
-```toml
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+```bash
+conda create -n zero python=3.9
+pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+pip3 install vllm==0.6.3
+pip3 install ray
+pip install -e .                  # 这一行就是「安装 verl 自己」
+pip3 install flash-attn --no-build-isolation
 ```
 
-项目元数据与依赖列表（[pyproject.toml:32-44](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L32-L44)）。注意几个带版本上限的「夹紧」约束，它们是为了和 veRL 当时的实现兼容：
+要点拆解：
 
-```toml
-dependencies = [
-    "accelerate", "codetiming", "datasets", "dill",
-    "hydra-core", "numpy", "pybind11", "ray",
-    "tensordict",
-    "transformers<4.48",
-    "vllm<=0.6.3",
-]
-```
+- `--index-url https://download.pytorch.org/whl/cu121`：从 PyTorch 官方的 CUDA 12.1 通道拉取带 GPU 支持的 torch；不加这个会装到 CPU 版，训练就跑不动了。
+- `pip install -e .` 里的 `-e` 就是 editable，`.` 表示「当前目录」。它要能在当前目录找到构建配置——也就是我们 4.3、4.4 要讲的 `pyproject.toml`（主）和 `setup.py`（备用）。
+- `flash-attn --no-build-isolation`：`flash-attn` 是要从源码编译的 C++/CUDA 扩展，`--no-build-isolation` 让它在**当前已装好 torch 的环境里**编译，否则它会在一个隔离的、没有 torch 的环境里编译失败。
 
-版本号是「动态」的——不写在 toml 里，而是去读 `verl/version/version` 文件（[pyproject.toml:65-66](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L65-L66)）：
+> 顺手记一个「弃用提示」：README 顶部（[README.md:1-5](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/README.md#L1-L5)）写明本仓库已停止维护，生产环境请直接用上游 [veRL](https://github.com/volcengine/verl)。这提醒我们：本系列的学习目标是**读懂实现与思路**，而不是拿它做生产训练。
 
-```toml
-[tool.setuptools.dynamic]
-version = {file = "verl/version/version"}
-```
+#### 4.1.4 代码实践
 
-包数据声明（[pyproject.toml:74-77](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L74-L77)）。这一段非常关键：训练用的 Hydra 配置 `ppo_trainer.yaml` 不是 `.py` 文件，必须在这里显式声明，否则 `pip install` 后 `import verl` 时会找不到配置文件：
+**实践目标**：在你自己的机器上把 conda 环境建出来，至少完成到 `pip install -e .`，验证 `import verl` 能成功。
 
-```toml
-[tool.setuptools.package-data]
-verl = [
-  "version/*",
-  "trainer/config/*.yaml"
-]
-```
+**操作步骤**：
 
-**② setup.py —— 兜底脚本**
+1. 确认你装了 conda（`conda --version` 有输出即可）。
+2. 执行 `conda create -n zero python=3.9 -y`，再 `conda activate zero`。
+3. 按 4.1.2 的流水线依次执行 torch → vllm → ray → `pip install -e .`。
+   - 如果没有 GPU，`vllm` 这一步很可能装不上或跑不动；这种情况下，本步可作为「待本地验证」，你只需在仓库根目录执行 `pip install -e .` 并跳过后续训练相关导入即可。
+4. 验证安装：进入仓库根目录，运行 `python -c "import verl; print(verl.__version__)"`。
 
-文件第 15 行的注释一语道破它的定位（[setup.py:15](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L15)）：
+**需要观察的现象**：
 
-```python
-# setup.py is the fallback installation script when pyproject.toml does not work
-```
+- `conda activate zero` 后，命令行提示符前出现 `(zero)`，说明进入了隔离环境。
+- `pip install -e .` 输出里能看到 `Successfully installed verl-0.1 ...`（注意版本号 0.1，来自 4.3 会讲到的版本文件）。
 
-`setup.py` 自己会去读 `requirements.txt` 来填充 `install_requires`（[setup.py:25-27](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L25-L27)），并跳过以 `#` 开头的注释行：
+**预期结果**：`python -c "import verl; print(verl.__version__)"` 打印出 `0.1`。
 
-```python
-with open('requirements.txt') as f:
-    required = f.read().splitlines()
-    install_requires = [item.strip() for item in required if item.strip()[0] != '#']
-```
+> 待本地验证：如果你在无 GPU 的环境里，`import verl` 可能因为缺 vllm/torch 而报错。这是正常的——本仓库是「面向 GPU 训练」的，没有 GPU 时，你可以只验证「目录与构建文件存在、`pip install -e .` 能解析依赖」这一层。
 
-最终的 `setup(...)` 调用（[setup.py:37-54](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L37-L54)）同样声明了 yaml 包数据，和 `pyproject.toml` 里的设置保持一致：
+#### 4.1.5 小练习与答案
 
-```python
-setup(
-    name='verl',
-    version=__version__,
-    packages=find_packages(where='.'),
-    package_data={'': ['version/*'],
-                  'verl': ['trainer/config/*.yaml']},
-    ...
-)
-```
+**练习 1**：README 说「装 torch 这一步可以跳过，让 vllm 帮你装」。请解释为什么把 torch 交给 vllm 来装是合理的，而不是自己随便装一个？
 
-> 注意：包名是 `verl`，不是 `tinyzero`。这正是 u1-l1 结论的佐证——你安装的就是 vendored 的 veRL。
+**答案**：vllm 对 torch、CUDA 的版本组合有严格要求，它自己的元数据里声明了兼容的 torch 版本区间。让 vllm 来装 torch，能保证「推理引擎 ↔ torch」这一对组合是经过验证的，避免后面 `import vllm` 时出现 ABI 不兼容（典型报错如 `undefined symbol`）。
 
-**③ requirements.txt —— 依赖清单**
+**练习 2**：`pip install -e .` 里的 `.` 为什么必须在你**执行命令时所在的目录**里运行？换个目录会怎样？
 
-完整清单只有 14 行（[requirements.txt:1-14](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt#L1-L14)）：
+**答案**：`.` 表示「当前目录」，pip 会在当前目录寻找构建配置文件（`pyproject.toml` 或 `setup.py`）来知道「这个包叫什么、包含哪些子包、依赖什么」。如果你在别的目录执行，pip 找不到这些文件，会报 `Directory '.' is not installable. Neither 'setup.py' nor 'pyproject.toml' found.`，所以必须 `cd` 到仓库根目录再执行。
+
+---
+
+### 4.2 requirements.txt：依赖清单与版本约束
+
+#### 4.2.1 概念说明
+
+`requirements.txt` 是 Python 生态里最朴素的依赖清单：一行一个包，可选地带上版本约束。它解决的问题是——**别人（或未来的你）拿到这个项目，怎么复现出一样的依赖环境**。
+
+需要先建立两个概念：
+
+- **版本约束符号**：`==`（精确等于）、`>=`（至少）、`<` / `<=`（不超过）、无符号（任意版本）。
+- **为什么要有上限约束**：很多库的新版本会改 API（比如 `transformers<4.48` 是因为 4.48 之后某些接口变了，veRL 还没适配）。写 `<4.48` 就是在「锁住一个已知可用的天花板」。
+
+#### 4.2.2 核心流程
+
+`requirements.txt` 的使用方式有两条路径，两条在 TinyZero 里**同时存在**：
+
+1. **直接给人用**：开发者执行 `pip install -r requirements.txt`，pip 会按文件装。
+2. **给 `setup.py` 用**：`setup.py` 在构建时读取这个文件，把它转成 `install_requires`，于是「安装 verl」会顺带把这些依赖都装上。
+
+这就是为什么你会看到：requirements.txt 里列的包，和「装完 verl 后看到的一堆依赖」高度重合。
+
+#### 4.2.3 源码精读
+
+[requirements.txt:1-14](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt#L1-L14) 全文如下：
 
 ```
 accelerate
@@ -164,187 +184,366 @@ vllm<=0.6.3
 wandb
 ```
 
-> **对比要点**：`requirements.txt` 比 `pyproject.toml` 的 `dependencies` 多了 `flash-attn`、`pandas`、`wandb`，并且给 `tensordict` 加了 `<0.6` 的上限。这说明两份依赖列表并不完全一致——学习时若要改依赖，需要确认你走的是哪条安装路径。
+逐个分组解读（不必背，理解「每类解决什么问题」即可）：
 
-#### 4.1.4 代码实践
+| 依赖 | 解决什么问题 | 版本约束含义 |
+| --- | --- | --- |
+| `transformers<4.48` | 加载 Qwen2.5 等 HuggingFace 模型 | 上限锁定，避开未适配的新接口 |
+| `vllm<=0.6.3` | 高速推理 / rollout 生成 | 上限锁定，与仓库 third_party 的 vLLM 桥接对齐 |
+| `tensordict<0.6` | DataProto 使用的张量字典容器（u3-l1 会讲） | 上限锁定 |
+| `ray` | 跨 GPU 分布式编排 worker（u3-l2 会讲） | 无约束 |
+| `hydra-core` | 配置系统（u1-l4 会讲 PPO yaml） | 无约束 |
+| `accelerate` / `datasets` | 模型/数据的常用工具 | 无约束 |
+| `flash-attn` | 注意力加速 | 注意：它其实**编译型**，requirements.txt 里写了但 README 让你单独装 |
+| `wandb` | 实验指标记录 | 无约束 |
+| `codetiming` / `dill` / `pybind11` / `numpy` / `pandas` | 计时、序列化、C++ 绑定、数值计算等基础设施 | 无约束 |
 
-**实践目标**：用肉眼比对两份依赖列表，理解它们的差异，并定位「夹紧版本」的约束。
-
-**操作步骤**：
-
-1. 打开 [requirements.txt](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt) 与 [pyproject.toml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L32-L44) 两个文件。
-2. 列出 `requirements.txt` 里有、但 `pyproject.toml` 的 `dependencies` 里没有的库。
-3. 找出所有带 `<` 或 `<=` 的版本约束。
-
-**需要观察的现象**：
-
-- `requirements.txt` 多出 `flash-attn`、`pandas`、`wandb` 三个。
-- 带版本上限的有：`tensordict<0.6`（仅 requirements.txt）、`transformers<4.48`、`vllm<=0.6.3`。
-
-**预期结果**：你会清楚看到，如果走 `setup.py` 路径，会安装到更全的依赖（含 flash-attn）；而走 `pyproject.toml` 路径则更精简。这也解释了为什么 README 的安装步骤里要**单独**再 `pip3 install flash-attn --no-build-isolation`——因为它不在 `pyproject.toml` 的核心依赖里，且它有特殊的编译要求（必须加 `--no-build-isolation`）。
-
-> 待本地验证：若你真的执行 `pip install -e .`，可用 `pip show verl` 看到包名是 `verl`、版本是 `0.1`，并可用 `pip list | grep -E "tensordict|vllm|transformers"` 复核夹紧的版本是否生效。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：为什么 `tensordict` 在 `requirements.txt` 里被限制为 `<0.6`，而 `pyproject.toml` 里没有这个限制？
-
-**参考答案**：`requirements.txt` 是 `setup.py`（兜底路径）读取的、更贴近实际运行验证过的依赖快照，作者发现 `tensordict>=0.6` 会有破坏性改动，于是夹紧版本；而 `pyproject.toml` 的 `dependencies` 是更「宽松/精简」的声明，没有同步这个约束。这正是两份依赖列表维护不同步带来的典型坑。
-
-**练习 2**：如果要新增一个运行依赖（比如 `scipy`），同时走 `pyproject.toml` 和 `setup.py` 两条路径都能生效，至少要改哪两个文件？
-
-**参考答案**：要在 [pyproject.toml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L32-L44) 的 `dependencies` 列表里加一行 `scipy`，并在 [requirements.txt](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt) 里加一行 `scipy`（因为 `setup.py` 从这里读依赖）。
-
----
-
-### 4.2 verl 包与可编辑安装：pip install -e . 背后发生了什么
-
-#### 4.2.1 概念说明
-
-README 的安装步骤里有一行 `pip install -e .`，这里的 `.` 指当前目录（仓库根目录）。这一行做的事情是：把仓库里的 `verl` 包以「可编辑」方式装进当前 Python 环境。
-
-可编辑安装（`-e`）的意义在于：它不复制源码到 `site-packages`，而是放一个「指回源码目录」的链接（`.pth` / `__editable__` 机制）。这样你在 `verl/` 下改任何 `.py`，下次 `import verl` 立刻就是新代码——这对「边读源码、边改、边调试」的学习场景几乎是必需的。
-
-由于包名是 `verl`，安装完之后你 `import verl` 拿到的，就是这个仓库里 `verl/` 目录的代码。
-
-#### 4.2.2 核心流程
-
-```
-pip install -e .
-  → 读 pyproject.toml（主）/ setup.py（兜底）
-  → 解析 name=verl, version=动态读取 verl/version/version (=0.1)
-  → 安装 dependencies（torch 已单独装过则跳过）
-  → 把 verl/trainer/config/*.yaml 作为 package_data 纳入
-  → 写入「可编辑链接」指向当前源码目录
-  → 之后 import verl 即从源码目录加载
-```
-
-成功后，`verl` 包入口 [verl/\_\_init\_\_.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/__init__.py) 会做三件事：读版本号、导出核心数据类型 `DataProto`、配置日志级别。
-
-#### 4.2.3 源码精读
-
-**① 版本号的真实来源**
-
-[verl/\_\_init\_\_.py:20](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/__init__.py#L20) 读取同目录下 `version/version` 文件，得到 `__version__`：
-
-```python
-with open(os.path.join(version_folder, 'version/version')) as f:
-    __version__ = f.read().strip()
-```
-
-而 [verl/version/version](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/version/version) 这个文件里只有一个字符串 `0.1`。这就是为什么 `pyproject.toml` 把 version 标记成 `dynamic` 并指向它——版本号只有这一个真实来源，`setup.py` 和 `pyproject.toml` 都从这里取值，避免多处维护。
-
-**② 导出核心数据类型 DataProto**
-
-[verl/\_\_init\_\_.py:22](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/__init__.py#L22)：
-
-```python
-from .protocol import DataProto
-```
-
-`DataProto` 是贯穿整个训练流程的统一数据容器（我们会在 u3-l1 专门讲它）。这里只要知道：`import verl` 之后就能用 `verl.DataProto`，这是 verl 包对外暴露的「门面」之一。这也提示我们，[verl/protocol.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/protocol.py) 是后续必读的核心文件。
-
-**③ 为什么 yaml 必须进 package_data**
-
-训练入口用 Hydra 加载 `verl/trainer/config/ppo_trainer.yaml`。它是数据文件，不是 `.py`，默认不会被打包。所以 [pyproject.toml:74-77](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L74-L77) 和 [setup.py:49-50](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L49-L50) 都显式声明了 `'verl': ['trainer/config/*.yaml']`。如果是可编辑安装，源码就在原地，这个声明主要影响「非可编辑」的打包分发，但理解它有助于你在 u1-l4 找到配置文件。
+> 注意一个「细节坑」：`flash-attn` 出现在 `requirements.txt` 里，但 README 又单独让你用 `--no-build-isolation` 装。这是因为普通的 `pip install -r requirements.txt` 装不好它。所以**清单声明 ≠ 安装顺序**，这是读构建文件时要留意的。
 
 #### 4.2.4 代码实践
 
-**实践目标**：验证「安装的就是 verl 包」，并确认版本号来源。
+**实践目标**：体会「版本上限约束」的作用，不实际破坏环境。
 
 **操作步骤**：
 
-1. 在装好依赖的 conda 环境里执行（待本地验证）：
+1. 打开 `requirements.txt`，找出所有「带 `<` 或 `<=`」的行。
+2. 想象一个场景：上游 `transformers` 升到了 4.55。问自己——如果不写 `<4.48`，本仓库最可能在哪一步出问题？
+3. 用 pip 的「干跑」查看依赖解析（不会真的装，需要网络）：
    ```bash
-   pip install -e .
-   python -c "import verl; print(verl.__version__)"
+   pip install --dry-run -r requirements.txt
    ```
-2. 用 `pip show verl` 查看包名与版本。
-3. 临时改一下 `verl/version/version` 的内容（比如改成 `0.1-test`），再跑一遍上面的 `python -c`，观察版本号变化，**验证后改回 `0.1`**。
+   如果你没有网络或环境不全，此步标注「待本地验证」。
 
-**需要观察的现象**：
+**需要观察的现象**：`--dry-run` 会打印出 pip 打算安装/跳过的每个包及解析出的版本，你能看到 `transformers` 被钉在 4.48 以下。
 
-- `import verl` 成功，打印 `0.1`。
-- `pip show verl` 里 Name 是 `verl`、Version 是 `0.1`。
-- 改了 version 文件后，`__version__` 立刻跟着变（可编辑安装下，version 文件就在源码目录里）。
-
-**预期结果**：你会直观体会到「包名是 verl、版本来自单个文本文件」这两件事，从而完全确认 u1-l1 的结论——TinyZero 在安装层面就是 veRL。
-
-> 待本地验证：若没装 GPU/torch/vllm，`import verl` 可能因为 `verl/__init__.py` 链路上的间接依赖报错；这不影响你阅读 `__init__.py` 本身。
+**预期结果**：能口头说出「三个带上限约束的包是 `tensordict<0.6`、`transformers<4.48`、`vllm<=0.6.3`，它们都是 API 变化敏感、必须锁天花板的包」。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么不把版本号直接写死在 `pyproject.toml` 里，而要单独放一个 `verl/version/version` 文件？
+**练习 1**：`ray` 这一行没有任何版本约束，这样安全吗？什么情况下你应该给它加约束？
 
-**参考答案**：为了让 `setup.py`、`pyproject.toml`、运行时 `verl/__init__.py` 三处都引用同一个真实来源，避免版本号在多个文件里各写一份、改一处忘改另一处导致不一致。这是单点真相（single source of truth）的做法。
+**答案**：不写约束意味着「装最新版」。在「能跑就行」的实验阶段可以接受；但一旦你要把环境**固定下来给团队复现**，就应该改成 `ray==<某个验证过的版本>`，否则某天 ray 发了大版本、API 改了，你的代码会莫名其妙报错却查不到原因。
 
-**练习 2**：可编辑安装（`-e`）相对普通安装，对「读源码学习」最大的好处是什么？
+**练习 2**：`flash-attn` 既然在 `requirements.txt` 里，为什么 README 还要单独装？
 
-**参考答案**：源码不会被复制走，你在 `verl/` 目录里的任何修改（加打印、改参数）在下次 `import` 时立即生效，不必反复 `pip install`。非常适合边读边改边验证。
+**答案**：因为 `flash-attn` 是带 C++/CUDA 内核的编译型扩展，`--no-build-isolation` 表示「在已有 torch 的环境里就地编译」。直接 `pip install -r requirements.txt` 时，pip 会在一个隔离环境里编译，那里没有正确版本的 torch/CUDA，几乎必然失败。所以它虽然在清单里，实际仍需按 README 的特殊方式单独安装。
 
 ---
 
-### 4.3 仓库目录结构与各目录职责划分
+### 4.3 setup.py：传统的安装脚本（备用入口）
 
 #### 4.3.1 概念说明
 
-仓库根目录下既有「学习 TinyZero 时会反复打开」的目录（`examples`、`scripts`），也有「构成 veRL 框架本体」的目录（`verl`），还有辅助目录（`tests`、`docs`、`docker`、`patches`）。理清它们的职责，能帮你快速定位「想看某个功能时该去哪个目录」。
+`setup.py` 是 Python「老一代」的打包方式：用一段 Python 脚本调用 `setuptools.setup(...)`，向打包工具描述「这个包叫什么、版本多少、包含哪些子包、依赖什么、附带哪些非代码文件」。
 
-需要再次强调：`verl/` 这个目录占据了仓库 90% 以上的代码量，它就是 veRL 框架；而 TinyZero 自己的贡献主要在 `examples/data_preprocess/`（任务数据生成）和 `verl/utils/reward_score/`（规则奖励函数）这两处。
+它现在多半是**备用方案**——文件里第一行注释就直说了：
 
-#### 4.3.2 目录地图（核心流程：一个真实文件清单）
+[setup.py:15-16](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L15-L16) 注释写明：`setup.py is the fallback installation script when pyproject.toml does not work`（当 pyproject.toml 不工作时，setup.py 作为兜底安装脚本）。所以它的存在是为了「兼容性兜底」，主入口其实是 4.4 的 `pyproject.toml`。
 
-下面这张表，把仓库顶层与 `verl/` 下的关键目录对应到「你在学习手册里会接触到的后续讲义」，帮你建立目录 ↔ 主题的映射：
+> 一个 `setup.py`（或 `pyproject.toml`）最核心要回答的五个问题：
+> 1. 包叫什么名字？（`name`）
+> 2. 版本号？（`version`）
+> 3. 哪些目录算作包？（`packages`）
+> 4. 依赖什么？（`install_requires`）
+> 5. 要不要附带非 Python 文件，比如 yaml 配置？（`package_data`）
 
-| 目录 | 职责（一句话） | 对应后续讲义 |
-| --- | --- | --- |
-| `scripts/` | 训练/格式化脚本，含核心入口 `train_tiny_zero.sh` | u1-l3、u1-l4 |
-| `examples/` | 各任务数据预处理脚本与各 trainer 启动脚本（`data_preprocess`、`ppo_trainer`、`grpo_trainer`、`sft`、`generation`、`ray`、`split_placement`） | u2-l1、u2-l2、u7-l3 |
-| `verl/` | veRL 框架本体（被 vendored 进来），几乎所有训练逻辑都在这里 | 贯穿全手册 |
-| `verl/trainer/` | 训练入口与 PPO 训练循环：`main_ppo.py`（主入口）、`ppo/`（`ray_trainer.py` 主循环 + `core_algos.py` 算法）、`config/`（yaml 配置） | u1-l4、u4-*、u5-* |
-| `verl/workers/` | 各角色 Worker 实现：`actor/`、`critic/`、`rollout/`、`reward_model/`、`sharding_manager/`，以及 `fsdp_workers.py`、`megatron_workers.py` 两种后端 | u6-*、u7-l4 |
-| `verl/utils/` | 工具集：`dataset/`（数据加载）、`reward_score/`（规则奖励）、`seqlen_balancing.py`（序列均衡）、`tracking.py`（实验跟踪）、`torch_functional.py`（数学函数）等 | u2-l3、u2-l4、u5-*、u7-l2 |
-| `verl/protocol.py` | 统一数据容器 `DataProto`（在 `verl/` 根下，非子目录） | u3-l1 |
-| `verl/single_controller/` | 「单控制器」+ Ray 资源池调度机制 | u3-l2、u3-l3 |
-| `verl/third_party/vllm/` | 对 vLLM 的封装与适配 | u6-l4、u6-l5 |
-| `tests/` | 端到端（e2e）最小化训练测试，含 `arithmetic_sequence`、`digit_completion` 等可跑样例 | u7-l5 |
-| `docs/` | 文档（`.rst`），含安装、奖励函数、实验说明等 | u7-l6 |
-| `docker/` | 两种预置环境的 Dockerfile（`ngc.vllm`、`vemlp.vllm.te`） | — |
-| `patches/` | Megatron 后端所需的补丁（`megatron_v4.patch`） | u7-l4 |
+#### 4.3.2 核心流程
+
+`setup.py` 在被 `pip install -e .` 调用时，会做这几件事：
+
+```
+1. 读取 verl/version/version 文件      → 得到版本号字符串
+2. 打开 requirements.txt 并逐行解析     → 得到 install_requires 列表
+3. 调用 find_packages(where='.')        → 自动发现所有可导入的子包
+4. 声明附带数据（version/*、trainer/config/*.yaml）
+5. 调用 setup(name=..., version=..., ...) → 把以上信息交给 setuptools 完成安装
+```
 
 #### 4.3.3 源码精读
 
-下面用仓库里真实存在的文件，佐证上表对 `examples/`、`verl/trainer/`、`verl/workers/`、`verl/utils/` 四个目录的职责描述。
+先看版本号怎么来的。[setup.py:19-22](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L19-L22) 直接读取 `verl/version/version` 文件的内容当版本号：
 
-**① examples/ —— 数据预处理与示例脚本**
+```python
+with open(os.path.join(version_folder, 'verl/version/version')) as f:
+    __version__ = f.read().strip()
+```
 
-`examples/data_preprocess/` 下有 `countdown.py`、`multiply.py`、`arth.py` 等（[examples/data_preprocess/countdown.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/examples/data_preprocess/countdown.py)）。这些是 TinyZero 自己写的任务数据生成脚本，README 的「Data Preparation」步骤正是调用它们。`examples/ppo_trainer/`、`examples/grpo_trainer/` 下则是各模型的启动脚本（如 `run_qwen2-7b.sh`）。
+这个文件的内容就一行 `0.1`（[verl/version/version](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/version/version)），所以装出来的包就是 `verl-0.1`。这正是 4.1.4 里 `import verl; print(verl.__version__)` 打印 `0.1` 的根源——`verl/__init__.py`（[verl/__init__.py:17-20](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/__init__.py#L17-L20)）用几乎一样的逻辑读同一个文件。
 
-**② verl/trainer/ —— 训练入口与 PPO 循环**
+接着看依赖怎么从 `requirements.txt` 转过来。[setup.py:25-27](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L25-L27) 读文件、去空行、去注释行：
 
-这个目录里最关键的是 [verl/trainer/main_ppo.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/main_ppo.py)，它是 `scripts/train_tiny_zero.sh` 最终 `python3 -m verl.trainer.main_ppo` 调用的入口。PPO 训练主循环在 [verl/trainer/ppo/ray_trainer.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/ppo/ray_trainer.py)，算法实现在 [verl/trainer/ppo/core_algos.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/ppo/core_algos.py)，配置在 [verl/trainer/config/ppo_trainer.yaml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/config/ppo_trainer.yaml)。
+```python
+with open('requirements.txt') as f:
+    required = f.read().splitlines()
+    install_requires = [item.strip() for item in required if item.strip()[0] != '#']
+```
 
-**③ verl/workers/ —— 各角色 Worker**
+这一段就是 4.2 说的「requirements.txt 给 setup.py 用」的具体写法：把文本清单转成 Python 列表，过滤掉 `#` 开头的注释。
 
-FSDP 后端的混合引擎 Worker 在 [verl/workers/fsdp_workers.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/workers/fsdp_workers.py)（`ActorRolloutRefWorker`），Megatron 后端在 [verl/workers/megatron_workers.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/workers/megatron_workers.py)。子目录 `actor/`、`critic/`、`rollout/`、`reward_model/`、`sharding_manager/` 分别对应策略、价值、生成、奖励模型、权重分片管理。
+最后看 `setup(...)` 的核心字段。[setup.py:37-54](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py#L37-L54) 集中回答了上面那五个问题：
 
-**④ verl/utils/ —— 工具集**
+```python
+setup(
+    name='verl',                 # ① 包名
+    version=__version__,         # ② 版本，来自 version 文件
+    package_dir={'': '.'},
+    packages=find_packages(where='.'),   # ③ 自动发现所有子包
+    ...
+    install_requires=install_requires,   # ④ 依赖，来自 requirements.txt
+    extras_require={'test': ['pytest', 'yapf']},  # 额外：测试用依赖
+    package_data={'': ['version/*'],                # ⑤ 附带非代码文件
+                  'verl': ['trainer/config/*.yaml'],},
+    ...
+)
+```
 
-规则奖励函数在 [verl/utils/reward_score/countdown.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/utils/reward_score/countdown.py)（TinyZero 自己的贡献），序列长度均衡在 [verl/utils/seqlen_balancing.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/utils/seqlen_balancing.py)，数学工具在 [verl/utils/torch_functional.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/utils/torch_functional.py)，数据加载在 [verl/utils/dataset/rl_dataset.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/utils/dataset/rl_dataset.py)。
+两个要点：
 
-#### 4.3.4 代码实践（本讲主实践任务）
+- `find_packages(where='.')`：自动把仓库里所有含 `__init__.py` 的目录识别为包，所以 `verl/`、`verl/trainer/`、`verl/workers/` 等都会被打包进去——这就是「目录即包」。
+- `package_data`：默认情况下 setuptools **只打包 `.py` 文件**。但 verl 的 PPO 配置是 `yaml` 文件，版本是纯文本文件，必须在这里显式声明 `package_data` 才会被装进去。这一行非常重要，它保证了 `import` 之后能找到 [verl/trainer/config/ppo_trainer.yaml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/config/ppo_trainer.yaml)（u1-l4 要精读它）。
+- `extras_require={'test': ['pytest', 'yapf']}`：声明「可选附加依赖」，用 `pip install -e .[test]` 才会装上，用来跑测试。
 
-**实践目标**：亲手把 `verl/` 的子目录列出来，并为 `examples/`、`verl/trainer/`、`verl/workers/`、`verl/utils/` 四个目录各写一句职责说明，建立「目录 ↔ 职责」的肌肉记忆。
+#### 4.3.4 代码实践
+
+**实践目标**：验证「版本号来自 version 文件」「依赖来自 requirements.txt」这两条事实。
 
 **操作步骤**：
 
-1. 在仓库根目录执行（只读操作）：
+1. 不修改任何文件，仅阅读：打开 `verl/version/version`，确认内容是 `0.1`。
+2. 在仓库根目录运行：
    ```bash
-   ls verl/
+   python -c "import verl; print('verl version =', verl.__version__)"
    ```
-   你应当看到：`__init__.py models protocol.py single_controller third_party trainer utils version workers`。
-2. 按 README 完成本讲的依赖安装（conda 环境 → torch → vllm → ray → `pip install -e .` → flash-attn → wandb 等），命令见 [README.md:20-37](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/README.md#L20-L37)。
-3. 为下列四个目录各写一句话的职责说明（可参考 4.3.2 的表格，但请用自己的话写）：
+3. 在仓库根目录运行一段「复刻 setup.py 依赖解析逻辑」的小脚本（**示例代码**，仅演示逻辑，不写入仓库）：
+   ```python
+   # 示例代码：模拟 setup.py 解析 requirements.txt
+   with open('requirements.txt') as f:
+       reqs = [x.strip() for x in f.read().splitlines() if x.strip() and x.strip()[0] != '#']
+   print(reqs[:5])   # 打印前 5 个依赖
+   ```
+
+**需要观察的现象**：步骤 2 打印 `verl version = 0.1`；步骤 3 打印出一个列表，前几项形如 `['accelerate', 'codetiming', 'datasets', 'dill', 'flash-attn']`。
+
+**预期结果**：你能复述「version 文件里写什么，`verl.__version__` 就是多少；requirements.txt 里去掉注释后的每一行，就是安装 verl 时会被装上的依赖」。
+
+#### 4.3.5 小练习与答案
+
+**练习 1**：如果你把 `verl/version/version` 的内容从 `0.1` 改成 `0.2`（重新 `pip install -e .` 后），`import verl; verl.__version__` 会变成什么？为什么？
+
+**答案**：会变成 `0.2`。因为 `setup.py` 和 `verl/__init__.py` 都是**运行时读取这个文件**得到版本字符串，没有任何地方硬编码 `0.1`。改文件即改版本——这是「单一数据源（single source of truth）」的简单实现。
+
+**练习 2**：`package_data` 里写了 `'verl': ['trainer/config/*.yaml']`。如果删掉这一行重新安装，会出什么问题？
+
+**答案**：安装出来的 `verl` 包里将**不包含 yaml 配置文件**。于是当代码（用 Hydra）去加载 `verl/trainer/config/ppo_trainer.yaml` 时会找不到文件而报错。这一行就是为了把「非 `.py` 的资源文件」一起打进包里。
+
+---
+
+### 4.4 pyproject.toml：现代化的主入口
+
+#### 4.4.1 概念说明
+
+`pyproject.toml` 是 Python 打包的「新标准」（PEP 517/518/621）。它用一种叫 **TOML** 的结构化配置格式，把 `setup.py` 里那段 Python 代码要做的事，全部用「键值对」声明出来。它的好处是：**不依赖运行 Python 代码就能解析**，更安全、更规范。
+
+一个 `pyproject.toml` 通常分三块：
+
+- `[build-system]`：用什么工具来构建这个包（构建后端）。
+- `[project]`：包的元数据（名字、版本、依赖、作者……），对应 `setup.py` 里的 `setup(...)` 参数。
+- `[tool.*]`：各种工具（setuptools、pytest、yapf……）的额外配置。
+
+在本仓库里，`pyproject.toml` 和 `setup.py` **描述的是同一个包**（都叫 `verl`，版本都来自同一个文件），只是一个为主、一个为备用。
+
+#### 4.4.2 核心流程
+
+当你在仓库根目录执行 `pip install -e .`，pip 的决策顺序大致是：
+
+```
+1. 找 pyproject.toml → 找到了
+2. 读 [build-system] → 用 setuptools.build_meta 作为构建后端
+3. 读 [project] 元数据 → 包名 verl，动态版本（从文件读）
+4. 执行可编辑安装
+（如果 pyproject.toml 缺失或损坏，才会退回去找 setup.py）
+```
+
+#### 4.4.3 源码精读
+
+**构建后端声明**。[pyproject.toml:4-9](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L4-L9) 说明用 setuptools 来构建：
+
+```toml
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+```
+
+**包名与动态版本**。[pyproject.toml:14-19](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L14-L19) 声明包名是 `verl`，版本是「动态」的（不从 toml 里写死，而是从文件读）：
+
+```toml
+[project]
+name = "verl"
+dynamic = ["version"]
+```
+
+动态版本具体从哪读？看 [pyproject.toml:64-66](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L64-L66)：
+
+```toml
+[tool.setuptools.dynamic]
+version = {file = "verl/version/version"}
+```
+
+这和 `setup.py` 读同一个 `verl/version/version` 文件——再次印证「两个构建入口，单一数据源」。
+
+**依赖列表**。[pyproject.toml:32-44](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L32-L44) 列出依赖，对应 `setup.py` 的 `install_requires`：
+
+```toml
+dependencies = [
+    "accelerate", "codetiming", "datasets", "dill", "hydra-core",
+    "numpy", "pybind11", "ray", "tensordict", "transformers<4.48",
+    "vllm<=0.6.3",
+]
+```
+
+> 对比一下：`pyproject.toml` 的 dependencies 和 `requirements.txt` 高度重合，但**不完全一致**。比如 `pyproject.toml` 这里没列 `flash-attn`、`wandb`、`pandas`，而 `requirements.txt` 里列了；而且 `pyproject.toml` 对 `tensordict` **没有** `<0.6` 的上限，`requirements.txt` 却有。这是因为 toml 描述的是「打包发布的最小依赖」，requirements.txt 描述的是「完整运行/开发环境」——两者用途不同，差别是正常的，但也意味着改依赖时要注意改的是哪一份。
+
+**附带数据文件**。[pyproject.toml:74-78](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml#L74-L78) 对应 `setup.py` 的 `package_data`，声明 yaml 与版本文件要打包：
+
+```toml
+[tool.setuptools.package-data]
+verl = [
+  "version/*",
+  "trainer/config/*.yaml"
+]
+```
+
+#### 4.4.4 代码实践
+
+**实践目标**：建立「pyproject.toml 是主入口、setup.py 是备用」的直观认识。
+
+**操作步骤**：
+
+1. 用 Python 自带（3.11+）或 `pip install tomli` 解析 `pyproject.toml`，打印包名和依赖（**示例代码**）：
+   ```python
+   # 示例代码：读取 pyproject.toml 元数据
+   try:
+       import tomllib          # Python 3.11+
+   except ModuleNotFoundError:
+       import tomli as tomllib
+   with open('pyproject.toml', 'rb') as f:
+       data = tomllib.load(f)
+   print('name =', data['project']['name'])
+   print('version is dynamic =', 'version' in data['project']['dynamic'])
+   print('num deps =', len(data['project']['dependencies']))
+   ```
+2. 思考题（不用动手）：如果 `pyproject.toml` 被误删，`pip install -e .` 还能成功吗？
+
+**需要观察的现象**：步骤 1 打印 `name = verl`、`version is dynamic = True`、依赖条数约为 11。
+
+**预期结果**：你能口头回答「删掉 pyproject.toml 后，pip 会回退到 setup.py，所以仍能安装；这就是 setup.py 作为 fallback 的意义」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`pyproject.toml` 里 `[project]` 的 `version` 没有直接写数字，而是写 `dynamic = ["version"]`。为什么不直接写 `version = "0.1"`？
+
+**答案**：为了让版本号「只在 `verl/version/version` 一个地方维护」。如果 toml 里也写、version 文件也写，就出现了两处来源，更新时容易忘记同步。用 `dynamic` + `file = "verl/version/version"` 让两边读同一个文件，避免不一致。
+
+**练习 2**：对比 `pyproject.toml` 的 `dependencies` 和 `requirements.txt`，哪个范围更大？为什么？
+
+**答案**：`requirements.txt` 范围更大（多了 `flash-attn`、`wandb`、`pandas`，且 `tensordict` 多了 `<0.6` 约束）。因为 `pyproject.toml` 的 dependencies 是「别人 `pip install verl` 时必须满足的最小核心依赖」，应尽量精简；而 `requirements.txt` 面向「在本仓库做开发/复现实验的人」，需要包含记录、画图、注意力加速等完整工具链。
+
+---
+
+### 4.5 仓库目录结构与各目录职责
+
+#### 4.5.1 概念说明
+
+装好之后，更重要的是知道「东西都放在哪」。一个训练框架的目录通常遵循这样的分工：
+
+- **入口/脚本**放最外层（`scripts/`），让人一眼能找到「怎么跑」。
+- **示例与数据预处理**放 `examples/`，是「改实验」的入口。
+- **框架核心源码**放 `verl/`，是「读实现」的入口。
+- **测试**放 `tests/`，是「验证正确性」的地方。
+- **文档**放 `docs/`。
+
+TinyZero 把这些分得很清楚。理解了这张地图，后面每一篇讲义你都能快速定位「它在讲哪个目录」。
+
+需要再次强调：`verl/` 占据了仓库绝大多数代码量，它就是 vendored 进来的 veRL 框架；而 TinyZero 自己的贡献主要集中在 `examples/data_preprocess/`（任务数据生成）和 `verl/utils/reward_score/`（规则奖励函数）这两处。
+
+#### 4.5.2 核心流程
+
+下面是仓库顶层目录与各自职责的一览（基于 `git ls-files` 的真实结果整理）：
+
+```
+TinyZero/
+├── README.md            # 项目首页（安装、快速开始）
+├── OLD_README.md        # 归档的旧版说明
+├── setup.py             # 备用安装脚本（4.3）
+├── pyproject.toml       # 主安装元数据（4.4）
+├── requirements.txt     # 依赖清单（4.2）
+├── scripts/             # 训练/格式化脚本（入口）
+│   ├── train_tiny_zero.sh   # ★ TinyZero 的主训练入口
+│   └── format.sh            # 代码格式化
+├── examples/            # 数据预处理 + 各类训练脚本示例
+│   ├── data_preprocess/     # ★ countdown/multiply 等数据生成（u2）
+│   ├── ppo_trainer/         # PPO 训练示例脚本
+│   ├── grpo_trainer/        # GRPO 训练示例脚本（u5-l5）
+│   └── sft/  generation/  ray/  split_placement/
+├── verl/                # ★ 框架核心源码（本系列主战场）
+│   ├── trainer/             # 训练入口与主循环（u4）
+│   ├── workers/             # Actor/Critic/Rollout 等 worker（u6）
+│   ├── single_controller/   # Ray 单控制器调度（u3）
+│   ├── utils/               # 数据/奖励/并行等工具（u2、u7）
+│   ├── protocol.py          # DataProto 数据协议（u3-l1）
+│   ├── models/  third_party/  version/
+├── tests/               # 单元/端到端测试（u7-l5）
+├── docs/                # Sphinx 文档
+├── docker/              # 可选的镜像构建文件
+└── patches/             # Megatron 等第三方补丁
+```
+
+打 ★ 的是 TinyZero 学习路线里**最重要**的几个目录。
+
+#### 4.5.3 源码精读
+
+我们重点看 `verl/` 内部，因为它会是后续讲义的主战场。基于 `git ls-files` 的真实结构，`verl/` 的二级目录如下：
+
+| `verl/` 子目录 / 文件 | 职责一句话 | 后续讲义 |
+| --- | --- | --- |
+| `verl/trainer/` | 训练入口 `main_ppo.py` 与 PPO 主循环 `ppo/ray_trainer.py`、算法 `ppo/core_algos.py`、配置 `config/*.yaml` | u1-l4、u4、u5 |
+| `verl/workers/` | 各角色 worker：`actor/`（策略）、`critic/`（价值）、`rollout/`（生成）、`reward_model/`、`sharding_manager/`，以及聚合入口 `fsdp_workers.py`、`megatron_workers.py` | u6、u7 |
+| `verl/utils/` | 工具集：`dataset/`（数据加载）、`reward_score/`（规则奖励）、`seqlen_balancing.py`（序列均衡）、`torch_functional.py`（masked_mean 等）、`tracking.py`（wandb 日志） | u2、u5、u7 |
+| `verl/single_controller/` | Ray 单控制器：`base/`（装饰器、worker 抽象）、`ray/`（RayWorkerGroup、资源池） | u3 |
+| `verl/protocol.py` | 统一数据容器 `DataProto` | u3-l1 |
+| `verl/models/` | 模型相关封装 | — |
+| `verl/third_party/vllm/` | 与 vLLM 推理引擎的桥接 | u6-l4、u6-l5 |
+| `verl/version/` | 版本号文件（`0.1`） | 本讲 4.3 |
+
+再看另外几个顶层目录的真实内容，印证上面的「一句话职责」：
+
+- **`scripts/`** 真实只有两个文件：`train_tiny_zero.sh`（TinyZero 的训练总入口，u1-l3 会逐行读）和 `format.sh`（代码格式化）。
+- **`examples/data_preprocess/`** 真实包含 `countdown.py`、`multiply.py`、`arth.py`、`gsm8k.py` 等——这些就是 u2 要讲的「任务数据生成」。
+- **`tests/`** 真实包含 `e2e/`（端到端训练测试，u7-l5 会用）、`rollout/`、`model/`、`sanity/` 等子目录。
+- **`docker/`** 真实有 `Dockerfile.ngc.vllm` 和 `Dockerfile.vemlp.vllm.te` 两个镜像文件——如果你嫌手动装依赖麻烦，也可以用它们起一个现成环境（属于可选方式，README 的主流程没提）。
+- **`patches/`** 真实有 `megatron_v4.patch`，是 Megatron 后端（u7-l4）所需的第三方补丁。
+
+> 读源码的「定位技巧」：当你后续看到讲义里提到某个文件，比如 `verl/workers/fsdp_workers.py`，你可以立刻根据这张表知道「它在 workers 下，是 FSDP 后端的 worker 聚合入口」——这就是目录地图的价值。
+
+#### 4.5.4 代码实践
+
+**实践目标**：亲手把仓库目录结构打印出来，并为四个关键目录各写一句职责说明。
+
+**操作步骤**：
+
+1. 进入仓库根目录，用 `ls` 查看顶层与 `verl/` 下面的子目录：
+   ```bash
+   ls -1                          # 顶层
+   ls -1 verl                     # verl/ 二级
+   ```
+   如果你装了 `tree`，可以 `tree verl -L 2 -d` 只看目录（看不到也没关系，`ls` 足够）。
+2. 用 `git ls-files` 统计每个顶层目录有多少个文件，确认你看到的结构是「仓库实际跟踪的」：
+   ```bash
+   git ls-files verl/trainer | wc -l
+   git ls-files verl/workers  | wc -l
+   git ls-files verl/utils     | wc -l
+   ```
+3. 在你的笔记里，为下面四个目录各写一句不超过 20 字的中文职责说明（参考 4.5.3 的表格，但**用自己的话**）：
    - `examples/`
    - `verl/trainer/`
    - `verl/workers/`
@@ -352,61 +551,50 @@ FSDP 后端的混合引擎 Worker 在 [verl/workers/fsdp_workers.py](https://git
 
 **需要观察的现象**：
 
-- `verl/` 下确实有 `trainer`、`workers`、`utils` 等子目录，且 `protocol.py` 是一个单独的文件（不是目录）。
-- 安装步骤里 `pip install -e .` 成功后，`pip show verl` 显示包名 `verl`。
+- `ls -1 verl` 能列出 `trainer workers utils single_controller protocol.py models third_party version __init__.py` 等条目。
+- `git ls-files verl/trainer | wc -l` 等命令各返回一个正整数（比如 trainer 几十个文件）。
 
-**预期结果（示例答案，供你对照）**：
+**预期结果（示例答案，供你对照）**：你产出四句职责说明，例如「`examples/`：数据预处理脚本与各类训练示例；`verl/trainer/`：训练入口与 PPO 主循环；`verl/workers/`：Actor/Critic/Rollout 等计算角色；`verl/utils/`：数据、奖励、并行等通用工具」。
 
-- `examples/`：放各任务的数据预处理脚本与各 trainer 的示例启动脚本，是 TinyZero 自己贡献最集中的地方之一。
-- `verl/trainer/`：训练入口与 PPO 训练循环，`main_ppo.py` 是总入口，`ppo/` 下是主循环与算法实现，`config/` 下是 Hydra 配置。
-- `verl/workers/`：各角色 Worker（actor/critic/rollout/reward_model/sharding_manager）以及 FSDP、Megatron 两种后端的 Worker 实现。
-- `verl/utils/`：工具函数集合，含数据加载、规则奖励、序列均衡、实验跟踪、数学函数等，是被各 Worker/Trainer 反复调用的「底座」。
+#### 4.5.5 小练习与答案
 
-> 待本地验证：安装过程是否顺利完成取决于本地是否有兼容的 GPU 与 CUDA；若仅做源码阅读，可跳过实际安装，直接用 `ls` 完成目录梳理部分。
+**练习 1**：你想找「countdown 任务的奖励函数」应该去哪个目录？为什么？
 
-#### 4.3.5 小练习与答案
+**答案**：去 `verl/utils/reward_score/`。因为根据 4.5.3 的表格，`verl/utils/` 下的 `reward_score/` 专门放「规则奖励函数」，`countdown.py` 就在那里（u2-l4 会精读）。这也体现了「按职责分目录」的好处：找东西有规律可循。
 
-**练习 1**：如果你想看「PPO 一步训练里到底先做什么、后做什么」，应该去哪个目录的哪个文件？
+**练习 2**：`scripts/train_tiny_zero.sh` 和 `examples/ppo_trainer/run_qwen2-7b.sh` 都是 shell 脚本，为什么一个放在 `scripts/`、一个放在 `examples/`？
 
-**参考答案**：去 [verl/trainer/](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/ppo/ray_trainer.py) 下的 `ppo/ray_trainer.py`，找 `RayPPOTrainer.fit()` 方法。这正是 u4-l3 的主题。
+**答案**：`scripts/` 放的是「本项目自己的、面向用户的总入口」，`train_tiny_zero.sh` 是 TinyZero 的官方训练脚本；`examples/` 放的是「框架能力演示/参考用法」，`examples/ppo_trainer/*.sh` 是 veRL 上游带来的、面向各种模型/场景的示例脚本，供你参考改写。前者是「直接拿来跑」，后者是「拿来学/改」。
 
-**练习 2**：仓库里哪个目录最能体现「TinyZero 区别于 veRL 的自己贡献」？
-
-**参考答案**：`examples/data_preprocess/`（任务数据生成，如 `countdown.py`）和 `verl/utils/reward_score/`（规则奖励函数，如 `countdown.py`）。这两处是 TinyZero 真正「自己写的」逻辑，也是 u2 单元的重点。
-
-**练习 3**：`tests/e2e/` 下的样例对学习有什么用？
-
-**参考答案**：它们是「最小可跑」的端到端训练样例（如 `arithmetic_sequence`、`digit_completion`），不需要大模型和大显存即可验证训练管线是否通畅，非常适合学习与调试，是 u7-l5 的主题。
+---
 
 ## 5. 综合实践
 
-把本讲的三个模块串起来，完成一次「安装 + 认图 + 定位」的小任务：
+把本讲学的「安装流程 + 构建文件 + 目录结构」串成一个综合任务：
 
-1. **安装**：按 [README.md:20-37](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/README.md#L20-L37) 在新 conda 环境里完成依赖安装，包括最后的 `pip install -e .`。
-2. **认图**：执行 `ls verl/` 与 `ls verl/trainer verl/workers verl/utils`，在纸上画一张三层的「目录树」，标注每个子目录的职责。
-3. **定位**：不打开文件内容，仅凭目录结构回答三个问题：
-   - 训练总入口在哪个文件？（答：`verl/trainer/main_ppo.py`）
-   - 统一数据容器 `DataProto` 在哪个文件？（答：`verl/protocol.py`）
-   - countdown 任务的规则奖励函数在哪个文件？（答：`verl/utils/reward_score/countdown.py`）
-4. **验证版本来源**：用 `python -c "import verl; print(verl.__version__)"` 确认打印 `0.1`，并指出这个值来自哪个文件（答：`verl/version/version`）。
+**任务：为 TinyZero 画一张「环境与代码地图」**
 
-> 这个任务把「会装、会看目录、会定位关键文件」三件事一次性走通，是进入后续源码精读前的最佳热身。若本地无 GPU，步骤 1 的实际安装可标记为「待本地验证」，重点完成 2、3、4 的源码阅读型任务。
+1. **复现安装**（条件允许时）：新建 `conda` 环境 `zero`，按 4.1.2 流水线装到 `pip install -e .`，用 `python -c "import verl; print(verl.__version__)"` 验证得到 `0.1`。无 GPU 环境可跳过 vllm/torch，只验证构建可解析。
+2. **追溯版本号**：用编辑器打开 `setup.py`、`pyproject.toml`、`verl/__init__.py`、`verl/version/version` 四个文件，把「版本号 0.1 是怎么一步步被读到的」画成一条数据流图（谁读了哪个文件、传给谁）。
+3. **画目录树**：用 `ls` / `tree` 生成 `verl/` 的二级目录树，标注每个子目录将在「哪一篇后续讲义」里被精读（参考 4.5.3 的表格）。
+4. **写一段复盘**（不超过 200 字）：解释「为什么 TinyZero 既能用 `pip install -e .` 装成一个叫 verl 的包，又能直接在仓库里读改源码」——把可编辑安装、`find_packages`、`package_data` 这几个概念串起来。
+
+**预期产出**：一张数据流图 + 一张目录树 + 一段复盘文字。这个任务的目的是让你从「会敲安装命令」升级到「理解安装背后发生了什么、代码是如何组织的」，为从 u2 开始的源码精读打好地图基础。
 
 ## 6. 本讲小结
 
-- TinyZero 的「安装」本质是 `pip install -e .` 把仓库里的 **`verl` 包**以可编辑方式装进环境，包名是 `verl` 不是 `tinyzero`——再次印证 u1-l1「TinyZero = veRL + 任务 + 奖励」的结论。
-- 打包「三件套」有主次：[pyproject.toml](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/pyproject.toml) 是主配置，[setup.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/setup.py) 是兜底，[requirements.txt](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/requirements.txt) 是被 `setup.py` 读取的依赖清单；两份依赖列表并不完全一致（如 `flash-attn`、`pandas`、`tensordict<0.6` 仅在 requirements.txt）。
-- 版本号遵循「单点真相」：只有 [verl/version/version](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/version/version) 一处写 `0.1`，`pyproject.toml`、`setup.py`、`verl/__init__.py` 都引用它。
-- 可编辑安装（`-e`）让你改源码立即生效，是读源码学习的关键；安装后 `import verl` 即拿到本仓库代码，并自动暴露核心数据类型 `DataProto`。
-- 仓库目录分工清晰：`scripts/`（脚本）、`examples/`（数据 + 示例，TinyZero 贡献集中地）、`verl/trainer/`（训练入口与循环）、`verl/workers/`（各角色 Worker）、`verl/utils/`（工具底座）、`tests/`（最小可跑 e2e）、`docs/`（文档）。
-- 记住一张「定位地图」：训练入口 `main_ppo.py`、主循环 `ppo/ray_trainer.py`、算法 `ppo/core_algos.py`、数据容器 `protocol.py`、规则奖励 `utils/reward_score/`——后续讲义会逐个深入。
+- TinyZero 的安装是**分层**的：conda 提供 Python → torch 提供 GPU 运行时 → vllm 提供推理 → ray 提供分布式 → `pip install -e .` 把 verl 以**可编辑**方式装进来。注意 vllm 要在 verl 之前装。
+- `requirements.txt` 是朴素依赖清单，既供人 `pip install -r` 用，也被 `setup.py` 读取转成 `install_requires`；其中 `tensordict<0.6`、`transformers<4.48`、`vllm<=0.6.3` 三个带上限约束（前一个仅在 requirements.txt），是为了锁住 API 敏感包的版本天花板。
+- `setup.py` 是**备用**安装脚本，`pyproject.toml` 是**主**入口，两者描述同一个包 `verl`、都从 `verl/version/version` 读版本号（`0.1`），构成「单一数据源」；`pyproject.toml` 被误删时才会回退到 `setup.py`。
+- `package_data` / `package-data` 的作用是把 yaml 配置、版本文件等**非 `.py` 资源**打进包里，否则 Hydra 加载 `ppo_trainer.yaml` 会找不到文件。
+- 仓库目录分工清晰：`scripts/` 是入口脚本、`examples/` 是数据预处理与示例（TinyZero 贡献集中地）、`verl/` 是框架核心（`trainer` 训练、`workers` 角色、`utils` 工具、`single_controller` 调度、`protocol.py` 数据协议）、`tests/` 测试、`docs/` 文档。
 
 ## 7. 下一步学习建议
 
-本讲解决了「怎么装、目录怎么分布」的问题。下一讲 **u1-l3「跑通第一次训练：Countdown 任务」** 会带你用 `scripts/train_tiny_zero.sh` 端到端跑通一次训练，把本讲看到的目录（`examples/data_preprocess/`、`scripts/`）和训练入口 `verl.trainer.main_ppo` 串起来。
+你已经把环境装好、把目录地图建好，下一步建议：
 
-在进入 u1-l3 前，建议你：
+- **u1-l3「跑通第一次训练：Countdown 任务」**：把本讲的 `scripts/train_tiny_zero.sh` 真正逐行读懂，并跑通端到端训练。这是从「看目录」到「跑流程」的跨越。
+- 想提前理解「配置是怎么被读进来的」，可以先把 `verl/trainer/config/ppo_trainer.yaml` 扫一遍，它会在 **u1-l4「配置系统：Hydra 与 ppo_trainer.yaml」** 里被精读。
+- 想验证自己环境是否健康，可以翻一眼 `tests/e2e/`（**u7-l5** 会讲），那里有一个最小化的端到端训练测试，适合用来检查安装。
 
-- 自己用 `ls` / `tree` 再走一遍 `verl/` 的子目录，确保能脱口说出 `trainer/workers/utils` 的职责。
-- 顺手打开 [verl/trainer/main_ppo.py](https://github.com/Jiayi-Pan/TinyZero/blob/95df88f2dcb05f33bd18da546531b52d0954c18b/verl/trainer/main_ppo.py) 扫一眼，不用看懂，只感受一下「入口文件长什么样」，为 u1-l3/ u1-l4 做心理预热。
-- 如果你对配置体系好奇，可以直接跳到 **u1-l4「配置系统：Hydra 与 ppo_trainer.yaml」**，但要先对 `train_tiny_zero.sh` 有印象，所以推荐顺序仍是 u1-l3 → u1-l4。
+> 本系列从下一篇起正式进入源码：u2 讲「数据与任务定义」（`examples/data_preprocess/` 与 `verl/utils/reward_score/`），u3 讲「数据协议与单控制器」（`verl/protocol.py` 与 `verl/single_controller/`）。你今天建立的目录地图，就是那时候的导航。

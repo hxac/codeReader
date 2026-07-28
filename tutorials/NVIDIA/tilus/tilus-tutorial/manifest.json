@@ -1,0 +1,1092 @@
+{
+  "project": "tilus",
+  "head": "9a22de0aac52beb8343c1f2511135f351848afbd",
+  "rationale": "Tilus 是一个面向线程块（tile）级、以张量为第一公民的 GPU 内核 DSL，自上而下可分为「用户编程面（Tilus Script + 指令/指令组）」「Tilus IR + 转译与变换」「布局系统（核心创新）」「后端代码生成（Emitter + Context）」「针对 Ampere/Hopper/Blackwell 的高性能内核实践」「缓存、自动调优、运行时与测试扩展」六大部分。本手册据此设计为「先能用、再读懂、后能改」的三层渐进路线：入门层（U1-U2）让读者从安装运行出发，写出 vector_add、naive matmul，并掌握 Script 语义、指令组、线程组与 autotune 等编程模型；进阶层（U3-U5）沿真实编译流水线 drivers.build_program 下钻，依次讲清 Transpiler（AST→IR）、Tilus IR 结构、Instruction/Tensor、IR 工具与验证，再深入项目最具特色的布局系统（RegisterLayout/SharedLayout/mfunction/推理规则），最后覆盖 Pass 框架与默认变换；专家层（U6-U8）讲解 generate_ir_module 到 Hidet IR 的代码生成、EmitterBase 注册机制、EmitContexts 与通用发射器，随后用三套真实 matmul 示例串起 Ampere(MMA/ldmatrix)、Hopper(wgmma/cp_async)、Blackwell(TMA/tcgen05/TMEM) 与异步流水线，最后落在缓存机制、自动调优 dispatch、运行时启动、调试测试与自定义扩展上。讲义之间遵循「编程模型 → IR → 布局 → 变换 → 后端 → 架构实践 → 工程化」的依赖链，每篇只解决一个主题、引用 1-6 个真实源码文件并配一个可操作的实践任务，适合大型编译器类项目分篇精读。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步：认识 Tilus 并写出第一个内核",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Tilus 是什么：项目定位与设计目标",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Tilus 作为线程块级 GPU 内核 DSL 的定位、核心卖点（张量为一等公民、显式共享内存/寄存器控制、任意位宽低精度、自动调优与缓存），及其与 Hidet/TVM/Triton/Hexcute 的关系。",
+          "learning_goals": [
+            "理解 tile-level 编程模型与张量优先的设计理念",
+            "说出 Tilus 相对 Triton 的差异（显式共享内存与寄存器张量）",
+            "了解项目支持的 GPU 架构（Ampere/Hopper/Blackwell）"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/programming-guides/overview.rst",
+            "docs/source/index.rst"
+          ],
+          "minimal_modules": [
+            "tile-level 与张量数据类型",
+            "低精度任意位宽类型",
+            "与 Hidet/TVM/Triton 的传承关系"
+          ],
+          "practice_task": "阅读 README 与 overview，用自己的话写一段 200 字总结：Tilus 解决了什么问题、相比 CUDA/Triton 的取舍是什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装、运行与包目录结构",
+          "order": 2,
+          "filename": "u1-l2-install-run-package-layout.md",
+          "level": "beginner",
+          "topic": "讲解如何 pip 安装 Tilus、依赖（cuda-python 版本兼容），以及 python/tilus 下的顶层包结构（lang/ir/backends/transforms/drivers/runtime/kernels/utils），让读者建立整体地图。",
+          "learning_goals": [
+            "完成 Tilus 的安装与环境检查",
+            "掌握 python/tilus 各顶层目录的职责",
+            "了解 option 模块提供的全局选项"
+          ],
+          "source_files": [
+            "pyproject.toml",
+            "python/tilus/__init__.py",
+            "python/tilus/option.py",
+            ".github/workflows/tests.yaml"
+          ],
+          "minimal_modules": [
+            "安装与依赖",
+            "顶层包目录职责",
+            "option 全局选项（cache_dir/dump_ir）"
+          ],
+          "practice_task": "安装 Tilus 后，调用 tilus.option.cache_dir 指定一个临时缓存目录，并打印 tilus.__version__ 与当前 target，确认环境可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "第一个内核：vector_add 逐行精读",
+          "order": 3,
+          "filename": "u1-l3-first-kernel-vector-add.md",
+          "level": "beginner",
+          "topic": "以 examples/vector_add 为最小范例，逐行讲解一个 tilus.Script：__init__ 设超参、__call__ 写算子逻辑，使用 global_view/load_global/元素级加法/store_global 完成全局内存到寄存器的读写。",
+          "learning_goals": [
+            "掌握 Script 类的 __init__/__call__ 双方法骨架",
+            "会用 global_view/load_global/store_global 读写全局张量",
+            "理解 attrs.blocks/attrs.warps 如何控制网格与线程块"
+          ],
+          "source_files": [
+            "examples/vector_add/vector_add.py",
+            "python/tilus/lang/script.py",
+            "python/tilus/lang/instructions/root.py"
+          ],
+          "minimal_modules": [
+            "Script 类骨架",
+            "global_view/load_global/store_global",
+            "attrs.blocks 与 attrs.warps"
+          ],
+          "practice_task": "基于 vector_add 改写一个 scale 内核：c = a * 2.0，运行并用 torch 校验结果正确。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "数据类型与指针类型",
+          "order": 4,
+          "filename": "u1-l4-datatypes-and-pointer-types.md",
+          "level": "beginner",
+          "topic": "讲解 Tilus 丰富的数据类型（标准 fp/int、bf16/tf32，以及任意位宽 1-8bit 低精度），以及 __call__ 参数的标注语义：int32/int 区分运行时与编译期常量，~float16 表示指针并触发 JIT。",
+          "learning_goals": [
+            "区分 int（编译期常量、触发 JIT）与 int32（运行时参数）",
+            "理解 ~float16 指针类型与 global_view 的配合",
+            "了解低精度类型在 __init__ 中的导出"
+          ],
+          "source_files": [
+            "python/tilus/__init__.py",
+            "python/tilus/lang/instantiated_script.py",
+            "python/tilus/ir/tensor.py"
+          ],
+          "minimal_modules": [
+            "数据类型与任意位宽",
+            "指针类型 ~dtype",
+            "常量参数 vs 运行时参数"
+          ],
+          "practice_task": "写一个 cast 内核：把 fp32 输入张量转成 fp16 输出，标注好指针类型并用不同 n 值触发两次 JIT。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "从 naive matmul 理解 Tilus Script 全貌",
+          "order": 5,
+          "filename": "u1-l5-naive-matmul-tilus-script.md",
+          "level": "beginner",
+          "topic": "以 examples/matmul/matmul_v0 为例，串起 register_tensor、load_global、dot、cast、store_global 与 for 循环分块，理解 block_m/block_n/block_k 超参与网格划分，建立完整内核的心智模型。",
+          "learning_goals": [
+            "理解 block_m/block_n/block_k 分块与网格划分",
+            "掌握 register_tensor/dot/cast 的配合完成矩阵乘",
+            "会用 blockIdx 计算每个线程块的偏移"
+          ],
+          "source_files": [
+            "examples/matmul/matmul_v0.py",
+            "examples/matmul/matmul_v1.py",
+            "python/tilus/lang/script.py"
+          ],
+          "minimal_modules": [
+            "分块超参与网格",
+            "register_tensor 累加器",
+            "dot 与 cast 收尾"
+          ],
+          "practice_task": "在 naive matmul 基础上调整 block_m/block_n/block_k 三个超参，benchmark 并记录 TFLOPS 变化，体会分块对性能的影响。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Tilus Script 编程模型",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Script 类语义：__init__、__call__ 与实例化",
+          "order": 1,
+          "filename": "u2-l1-script-init-call-semantics.md",
+          "level": "intermediate",
+          "topic": "深入 Script.__new__ 返回 InstantiatedScript 的机制，讲清 __init__ 编译期超参与 __call__ 运行时参数的边界、JIT 编译触发条件，以及 debug_schedule 如何固定单个调度便于调试。",
+          "learning_goals": [
+            "理解 Script 实例化即返回 InstantiatedScript 的机制",
+            "区分编译期超参与运行时参数",
+            "会用 debug_schedule 固定调度"
+          ],
+          "source_files": [
+            "python/tilus/lang/script.py",
+            "python/tilus/lang/instantiated_script.py",
+            "python/tilus/lang/constructs/state.py"
+          ],
+          "minimal_modules": [
+            "Script.__new__ 与 InstantiatedScript",
+            "编译期 vs 运行时参数",
+            "debug_schedule 调试"
+          ],
+          "practice_task": "为一个 matmul Script 添加 debug_schedule=dict(block_m=64,block_n=64,block_k=16)，确认只编译单个配置并检查缓存目录。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "指令与指令组（Instruction Groups）",
+          "order": 2,
+          "filename": "u2-l2-instructions-and-instruction-groups.md",
+          "level": "intermediate",
+          "topic": "系统讲解 self.* 上的通用指令（global_view/load_global/store_global/register_tensor/dot/cast/assume/range）与硬件指令组（tma/wgmma/tcgen05/mbarrier/atomic/fence/cluster/clc）的分层组织。",
+          "learning_goals": [
+            "掌握通用指令的 block 语义",
+            "识别各硬件指令组对应的能力与架构",
+            "理解 InstructionInterface 的组合方式"
+          ],
+          "source_files": [
+            "python/tilus/lang/instructions/__init__.py",
+            "python/tilus/lang/instructions/root.py",
+            "python/tilus/lang/instructions/base.py",
+            "python/tilus/lang/instructions/wgmma.py"
+          ],
+          "minimal_modules": [
+            "通用指令",
+            "硬件指令组",
+            "InstructionInterface 组合"
+          ],
+          "practice_task": "浏览 docs 中 instruction-groups 的 RST，列出一个表格：每个指令组对应的 GPU 架构与典型用途。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "控制流、线程组与 assume 提示",
+          "order": 3,
+          "filename": "u2-l3-control-flow-and-thread-groups.md",
+          "level": "intermediate",
+          "topic": "讲解 self.range/unroll 循环、thread_group/single_thread/single_warp 上下文（含 elect-any 语义）如何收窄执行线程，以及 assume 为编译器提供整除性等约束提示。",
+          "learning_goals": [
+            "会用 self.range 控制 for 循环与展开",
+            "理解 thread_group 嵌套与线程划分",
+            "掌握 assume 的整除性约束用法"
+          ],
+          "source_files": [
+            "python/tilus/lang/instructions/root.py",
+            "python/tilus/lang/constructs/contexts.py",
+            "python/tilus/lang/constructs/loops.py",
+            "docs/source/programming-guides/thread-group.rst"
+          ],
+          "minimal_modules": [
+            "range 与 unroll",
+            "thread_group/single_thread",
+            "assume 约束"
+          ],
+          "practice_task": "写一个内核：用 self.single_thread() 让单个线程发起一次全局写操作，并用 dump_ir 观察生成的线程划分代码。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "自动调优：@autotune 与调度空间",
+          "order": 4,
+          "filename": "u2-l4-autotune-and-schedule-space.md",
+          "level": "intermediate",
+          "topic": "讲解 @autotune 装饰器如何定义调优子空间，span_space 如何笛卡尔展开，generate_schedules 如何结合用户参数生成多份调度并自动 benchmark 选优。",
+          "learning_goals": [
+            "会用 @autotune 定义调优空间",
+            "理解 span_space 的展开规则",
+            "了解调优参数如何触发不同 JIT 实例"
+          ],
+          "source_files": [
+            "python/tilus/lang/script.py",
+            "python/tilus/lang/instantiated_script.py",
+            "docs/source/programming-guides/autotuning.rst"
+          ],
+          "minimal_modules": [
+            "@autotune 装饰器",
+            "span_space 展开",
+            "调度生成与 benchmark"
+          ],
+          "practice_task": "给 naive matmul 加上 @autotune 对 block_m/block_n/block_k 各给 2-3 个候选，运行后查看选中的最优调度。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "Tilus IR 与编译流水线",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "编译流水线总览：build_program 全流程",
+          "order": 1,
+          "filename": "u3-l1-compilation-pipeline-overview.md",
+          "level": "intermediate",
+          "topic": "以 drivers.build_program 为主线，讲清 verify → optimize_program(Tilus passes) → generate_ir_module(Hidet IR) → optimize_ir_module → codegen(CUDA C) → nvcc 编译六大阶段，以及基于程序文本哈希的缓存机制。",
+          "learning_goals": [
+            "掌握从 Script 到 .so 的完整阶段",
+            "区分 Tilus IR 优化与 Hidet IR 优化",
+            "理解缓存目录与缓存键的计算"
+          ],
+          "source_files": [
+            "python/tilus/drivers.py",
+            "CLAUDE.md",
+            "python/tilus/option.py"
+          ],
+          "minimal_modules": [
+            "build_program 六阶段",
+            "两层 IR 优化",
+            "程序哈希缓存"
+          ],
+          "practice_task": "开启 tilus.option.debug.dump_ir，编译一个 matmul，在缓存目录的 ir/ 与 module/ir/ 下观察各阶段产物。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Transpiler：从 Python AST 到 Tilus IR",
+          "order": 2,
+          "filename": "u3-l2-transpiler-ast-to-ir.md",
+          "level": "intermediate",
+          "topic": "讲解 Transpiler（继承 ScopedProgramBuilder 与 PythonAstFunctor）如何遍历用户 __call__ 的 Python AST，把 global_view/load_global 等调用翻译成 InstStmt，建立作用域与张量绑定。",
+          "learning_goals": [
+            "理解 AST 访问器如何生成 IR",
+            "掌握作用域与张量/变量绑定机制",
+            "了解 LambdaProxy 等表达式代理"
+          ],
+          "source_files": [
+            "python/tilus/lang/transpiler/transpiler.py",
+            "python/tilus/lang/transpiler/builder.py",
+            "python/tilus/lang/transpiler/common.py"
+          ],
+          "minimal_modules": [
+            "PythonAstFunctor 访问",
+            "ScopedProgramBuilder 作用域",
+            "指令调用到 InstStmt"
+          ],
+          "practice_task": "在 transpiler 中找到处理 for 循环与二元运算的 visit 方法，对照一个简单 Script 画出 AST→IR 的映射。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Tilus IR 结构：Program/Function/Stmt",
+          "order": 3,
+          "filename": "u3-l3-tilus-ir-program-function-stmt.md",
+          "level": "intermediate",
+          "topic": "讲清不可变 IR 的核心数据结构：Program=frozendict[str,Function]、Function(name/params/body/metadata)、Metadata(grid_blocks/cluster_blocks/num_warps/analysis)，以及 Stmt 层级（SeqStmt/ForStmt/IfStmt/LetStmt/InstStmt/ThreadGroupStmt 等）。",
+          "learning_goals": [
+            "掌握 frozen dataclass 的不可变 IR 设计",
+            "理解 Function/Metadata 携带的网格与线程信息",
+            "识别各类 Stmt 节点"
+          ],
+          "source_files": [
+            "python/tilus/ir/prog.py",
+            "python/tilus/ir/func.py",
+            "python/tilus/ir/stmt.py"
+          ],
+          "minimal_modules": [
+            "Program/Function/Metadata",
+            "Stmt 层级",
+            "InstStmt 与 ThreadGroupStmt"
+          ],
+          "practice_task": "用 Function.create/SeqStmt/InstStmt 手工构造一个极简 Function，并用 printer 打印出来。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "Instruction 与 Tensor：IR 的两大主角",
+          "order": 4,
+          "filename": "u3-l4-instruction-and-tensor.md",
+          "level": "intermediate",
+          "topic": "深入 Instruction(output/inputs/attributes) 的结构、功能指令与副作用指令的区别（基于白名单而非 output 是否为 None），以及四种 Tensor（Register/Shared/Global/TMemory）的身份相等语义。",
+          "learning_goals": [
+            "理解 Instruction 的 output/inputs/attributes",
+            "区分功能指令与副作用指令",
+            "掌握 Tensor 的身份相等(eq=False)语义"
+          ],
+          "source_files": [
+            "python/tilus/ir/inst.py",
+            "python/tilus/ir/tensor.py",
+            "python/tilus/ir/instructions/generic.py"
+          ],
+          "minimal_modules": [
+            "Instruction 结构",
+            "功能 vs 副作用指令",
+            "Tensor 身份相等"
+          ],
+          "practice_task": "在 generic.py 中找出若干功能指令与副作用指令，分类整理并说明为何副作用指令不可被消除。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "IR 工具：验证、打印与收集",
+          "order": 5,
+          "filename": "u3-l5-ir-tools-and-verification.md",
+          "level": "intermediate",
+          "topic": "讲解 ir/tools 下的工具集：verify 在编译前的合法性校验、printer 的人类可读输出、collector/instruction_collector 用于分析与统计指令，是阅读和调试 IR 的利器。",
+          "learning_goals": [
+            "会用 verify 在编译前校验程序",
+            "会用 printer 打印 IR",
+            "会用 collect_instructions 统计指令"
+          ],
+          "source_files": [
+            "python/tilus/ir/tools/verifier.py",
+            "python/tilus/ir/tools/printer.py",
+            "python/tilus/ir/tools/instruction_collector.py",
+            "python/tilus/ir/tools/collector.py"
+          ],
+          "minimal_modules": [
+            "verify 校验",
+            "printer 打印",
+            "instruction_collector 统计"
+          ],
+          "practice_task": "对一个已构造的 Function 调用 collect_instructions，统计各类指令数量，并打印整棵 IR 树。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "布局系统（Layout System）",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "张量与内存空间全景",
+          "order": 1,
+          "filename": "u4-l1-tensors-and-memory-spaces.md",
+          "level": "intermediate",
+          "topic": "系统对比四种张量及其内存空间：RegisterTensor（线程私有寄存器，分布式）、SharedTensor（片上共享内存）、GlobalTensor（DRAM，含布局）、TMemoryTensor（Blackwell 张量内存），以及 optional_layout 的延迟绑定。",
+          "learning_goals": [
+            "理解四种张量对应的 GPU 内存层次",
+            "掌握 optional_layout 的延迟绑定机制",
+            "区分 shape 与 layout 的关系"
+          ],
+          "source_files": [
+            "python/tilus/ir/tensor.py",
+            "docs/source/programming-guides/type-system/__init__.rst"
+          ],
+          "minimal_modules": [
+            "四种张量与内存空间",
+            "optional_layout 延迟绑定",
+            "shape 与 layout"
+          ],
+          "practice_task": "画一张张量—布局—内存空间的对应表，标注每种张量是否可延迟绑定布局。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "RegisterLayout：mode、spatial 与 local",
+          "order": 2,
+          "filename": "u4-l2-register-layout-spatial-local.md",
+          "level": "intermediate",
+          "topic": "深入 RegisterLayout 的 mode_shape/spatial_modes/local_modes 设计：mode 是对维度的细分（Cute 术语），spatial 模式跨线程分布，local 模式存于线程局部，负数表示复制；结合 MultiFunction 讲清空间映射。",
+          "learning_goals": [
+            "理解 mode/spatial/local/replicated 的含义",
+            "掌握 spatial_mfunction 的线程映射",
+            "会用 spatial/local 构造布局"
+          ],
+          "source_files": [
+            "python/tilus/ir/layout/register_layout.py",
+            "python/tilus/ir/layout/mfunction/mfunction.py",
+            "docs/source/programming-guides/layout-system/register-layout.rst"
+          ],
+          "minimal_modules": [
+            "mode 与 mode_shape",
+            "spatial/local/replicated",
+            "MultiFunction 空间映射"
+          ],
+          "practice_task": "用 register_layout 构造一个 [64,64] 张量在 128 线程上的典型 MMA 布局，并解释每个线程持有的 local_size。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "SharedLayout、GlobalLayout 与 TMemoryLayout",
+          "order": 3,
+          "filename": "u4-l3-shared-global-tmemory-layouts.md",
+          "level": "intermediate",
+          "topic": "讲解 SharedLayout（mode_shape/mode_strides/optional_swizzle 及其消除 bank conflict 的作用）、GlobalLayout（axes + offset 表达式，shape 可为符号）与 Blackwell 专用的 TMemoryLayout（lanes/column_strides）。",
+          "learning_goals": [
+            "理解 SharedLayout 的 swizzle 机制",
+            "掌握 GlobalLayout 的符号化 offset",
+            "了解 TMemoryLayout 的 lane 结构"
+          ],
+          "source_files": [
+            "python/tilus/ir/layout/shared_layout.py",
+            "python/tilus/ir/layout/global_layout.py",
+            "python/tilus/ir/layout/tmem_layout.py",
+            "docs/source/programming-guides/layout-system/shared-layout.rst"
+          ],
+          "minimal_modules": [
+            "SharedLayout 与 swizzle",
+            "GlobalLayout 符号 offset",
+            "TMemoryLayout lanes"
+          ],
+          "practice_task": "构造一个带 swizzle 的 SharedLayout，对比有/无 swizzle 时同一索引的 byte_offset 差异。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "布局操作：compose、divide 与 reduce",
+          "order": 4,
+          "filename": "u4-l4-layout-operations-and-compose.md",
+          "level": "intermediate",
+          "topic": "讲解 layout/ops 下的布局代数：spatial/local/replicated 创建、compose（外层×内层拼接 mode）、divide/left_divide（子布局关系）、reduce/reshape/permute 等变换，以及 MultiFunction 的 cover/collapse 用于验证。",
+          "learning_goals": [
+            "掌握 compose 的 mode 拼接语义",
+            "理解 divide 的子布局判定",
+            "会用 reduce/reshape 变换布局"
+          ],
+          "source_files": [
+            "python/tilus/ir/layout/ops/register_ops.py",
+            "python/tilus/ir/layout/ops/shared_ops.py",
+            "python/tilus/ir/layout/mfunction/ops.py"
+          ],
+          "minimal_modules": [
+            "spatial/local/compose",
+            "divide/reduce/reshape",
+            "MultiFunction cover/collapse"
+          ],
+          "practice_task": "用 compose 把一个外层分块布局与内层线程布局组合，验证组合后 shape 与 mode 数量的关系。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "布局自动推理（Layout Inference）",
+          "order": 5,
+          "filename": "u4-l5-layout-inference.md",
+          "level": "intermediate",
+          "topic": "讲清自动布局推理机制：每条指令注册 LayoutInferenceRule（前向输入→输出 / 反向输出→输入）与 LayoutValidationRule，infer_layout 按优先级（TMEM→Register→Shared，寄存器内 MMA→LoadStore→Elementwise）迭代求解缺失布局。",
+          "learning_goals": [
+            "理解推理规则的注册与优先级",
+            "掌握前向/反向布局传播",
+            "了解验证规则如何用 cover 检查覆盖"
+          ],
+          "source_files": [
+            "python/tilus/ir/layout/inference/inference.py",
+            "python/tilus/ir/layout/inference/rule.py",
+            "python/tilus/ir/layout/inference/order.py",
+            "python/tilus/transforms/layout_inference.py"
+          ],
+          "minimal_modules": [
+            "推理/验证规则注册",
+            "优先级迭代求解",
+            "前向/反向传播"
+          ],
+          "practice_task": "为一个简单 AddInst 推理规则画出输入输出布局传播方向，并用 mma_dot 规则对照理解 MMA 默认布局的生成。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "Tilus IR 变换（Transforms）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Pass 框架与 IRRewriter/IRVisitor",
+          "order": 1,
+          "filename": "u5-l1-pass-framework-irrewriter.md",
+          "level": "intermediate",
+          "topic": "讲解 transforms/base.py 的 Pass/PasContext/apply_transforms 框架，ir/functors 的 IRRewriter/IRVisitor 访问者模式（visit_* 分派、身份记忆化），以及 CLAUDE.md 中列出的常见陷阱（visit_Expr 不下钻、attributes 内含 Var 等）。",
+          "learning_goals": [
+            "掌握 Pass 基类与 process_function 重写",
+            "理解 IRRewriter 的身份记忆化分派",
+            "识别访问者模式的常见陷阱"
+          ],
+          "source_files": [
+            "python/tilus/transforms/base.py",
+            "python/tilus/ir/functors/functor.py",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "Pass/PasContext/apply_transforms",
+            "IRRewriter/IRVisitor",
+            "访问者陷阱"
+          ],
+          "practice_task": "写一个只统计 ForStmt 数量的 IRVisitor 子类，跑在一个真实 Function 上验证结果。",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "默认变换流水线 get_default_passes",
+          "order": 2,
+          "filename": "u5-l2-default-transform-pipeline.md",
+          "level": "intermediate",
+          "topic": "逐个讲解 get_default_passes 中的变换及其顺序：declare_to_let、let_propagation、lower_assume、lower_param_only_expr、analyze_scalar、layout_inference、lower_load_store、bound_aware_simplify、dead_code_elimination，理解为何布局推理前后各跑一次。",
+          "learning_goals": [
+            "掌握默认 Pass 的顺序与职责",
+            "理解布局推理在流水线中的位置",
+            "了解标量分析对后续优化的支撑"
+          ],
+          "source_files": [
+            "python/tilus/transforms/__init__.py",
+            "python/tilus/transforms/declare_to_let.py",
+            "python/tilus/transforms/let_propogation.py"
+          ],
+          "minimal_modules": [
+            "默认 Pass 顺序",
+            "布局推理时机",
+            "标量分析支撑"
+          ],
+          "practice_task": "用 dump_ir 导出某 matmul 各 Pass 后的 IR，对比 layout_inference 前后张量布局是否被填充。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "死代码消除与标量分析",
+          "order": 3,
+          "filename": "u5-l3-dead-code-elimination-and-scalar-analysis.md",
+          "level": "intermediate",
+          "topic": "深入 dead_code_elimination（基于功能指令白名单与活跃性分析消除无用指令）、scalar_analyze（推导变量 divisibility/lower/upper bound 形成 Analysis）与 bound_aware_simplify（利用界信息化简表达式）。",
+          "learning_goals": [
+            "理解 DCE 的活跃性与白名单判定",
+            "掌握标量分析产出的 Analysis",
+            "了解界感知化简的作用"
+          ],
+          "source_files": [
+            "python/tilus/transforms/dead_code_elimination.py",
+            "python/tilus/transforms/scalar_analyze.py",
+            "python/tilus/transforms/bound_aware_simplify.py"
+          ],
+          "minimal_modules": [
+            "DCE 活跃性",
+            "标量分析 Analysis",
+            "界感知化简"
+          ],
+          "practice_task": "参考 tests/transforms/test_dead_code_elimination.py，构造一段含无用功能指令的 IR，验证 DCE 能正确消除。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "Lowering 变换：load_store 与 param_only_expr",
+          "order": 4,
+          "filename": "u5-l4-lowering-passes-load-store.md",
+          "level": "intermediate",
+          "topic": "讲解把高层 Tilus IR 降级的变换：lower_load_store（将 load_global/store_global 等具象化为共享/寄存器搬运）、lower_param_only_expr（化简只依赖参数的纯表达式）、lower_assume（落地整除性约束），它们为后端代码生成做准备。",
+          "learning_goals": [
+            "理解 load_store 降级的搬运语义",
+            "掌握纯参数表达式的化简",
+            "了解 assume 约束的落地"
+          ],
+          "source_files": [
+            "python/tilus/transforms/lower_load_store.py",
+            "python/tilus/transforms/lower_param_only_expr.py",
+            "python/tilus/transforms/lower_assume.py"
+          ],
+          "minimal_modules": [
+            "load_store 降级",
+            "纯参数表达式化简",
+            "assume 落地"
+          ],
+          "practice_task": "对比 lower_load_store 前后的 IR，找出新增的共享内存搬运指令并解释其作用。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "后端与代码生成（Backends/Codegen）",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "generate_ir_module：Tilus IR → Hidet IR",
+          "order": 1,
+          "filename": "u6-l1-generate-ir-module-codegen.md",
+          "level": "advanced",
+          "topic": "讲解 backends/codegen.py 的 FunctionCodegen 如何遍历 Function：visit_Function 初始化上下文与设备/主机 builder，visit_Instruction 经 resolve_inst_emitter 分派到发射器，launch_kernel 生成主机侧启动语句。",
+          "learning_goals": [
+            "掌握 FunctionCodegen 的访问与分派流程",
+            "理解设备 kernel 与主机 launch 函数的分离",
+            "了解 Instruction 到 Hidet IR 的落地"
+          ],
+          "source_files": [
+            "python/tilus/backends/codegen.py",
+            "python/tilus/drivers.py"
+          ],
+          "minimal_modules": [
+            "FunctionCodegen 访问",
+            "resolve_inst_emitter 分派",
+            "launch_kernel 启动"
+          ],
+          "practice_task": "在一个简单内核的缓存里找到生成的 source.cu，对照 codegen 逻辑定位每段 CUDA 来自哪个发射器。",
+          "depends_on": [
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "EmitterBase 与发射器注册机制",
+          "order": 2,
+          "filename": "u6-l2-emitter-base-and-registry.md",
+          "level": "advanced",
+          "topic": "讲解 backends/emitter.py 的 BaseInstEmitter 与 REGISTRY 注册表、@register_emitter(inst_cls, target) 装饰器、按 GPU target 匹配发射器的机制，以及 emit/get_or_allocate_var/sync 等通用能力。",
+          "learning_goals": [
+            "掌握发射器注册表与装饰器机制",
+            "理解按 target 匹配发射器",
+            "了解 get_or_allocate_var/sync 通用能力"
+          ],
+          "source_files": [
+            "python/tilus/backends/emitter.py",
+            "python/tilus/backends/emitters/elementwise.py",
+            "python/tilus/backends/emitters/cast.py"
+          ],
+          "minimal_modules": [
+            "REGISTRY 与 @register_emitter",
+            "target 匹配",
+            "通用 emit 能力"
+          ],
+          "practice_task": "在 emitters/ 中找出 CastInst 对应发射器，说明它如何根据 dtype 选择 PTX 特殊 cast 指令。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "EmitContexts：内存分配与同步状态",
+          "order": 3,
+          "filename": "u6-l3-emit-contexts-alloc-and-sync.md",
+          "level": "advanced",
+          "topic": "讲解代码生成期间维护状态的 EmitContexts：smem_alloc_ctx（swizzle 感知的共享内存分配）、gmem_alloc_ctx（workspace 分配）、sync_ctx（命名 barrier/mbarrier 同步）、mbarrier_alloc_ctx、leader_lane_ctx、const_reg_ctx、invariant_ctx、global_view_ctx、tcgen05_ctx。",
+          "learning_goals": [
+            "理解共享/全局内存分配上下文",
+            "掌握同步上下文的 barrier 分配",
+            "了解 leader_lane/const_reg/invariant 等优化上下文"
+          ],
+          "source_files": [
+            "python/tilus/backends/contexts/contexts.py",
+            "python/tilus/backends/contexts/smem_alloc_ctx.py",
+            "python/tilus/backends/contexts/sync_ctx.py",
+            "python/tilus/backends/contexts/gmem_alloc_ctx.py"
+          ],
+          "minimal_modules": [
+            "smem/gmem 分配",
+            "sync/mbarrier 同步",
+            "leader/const/invariant 优化"
+          ],
+          "practice_task": "追踪一个 store_global 经 smem_alloc_ctx 与 sync_ctx 的处理路径，解释共享内存布局与同步的插入时机。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "通用发射器：elementwise/reduce/ldst/shared_ldst",
+          "order": 4,
+          "filename": "u6-l4-generic-emitters.md",
+          "level": "advanced",
+          "topic": "精读几类通用发射器的实现：elementwise（按线程局部布局展开）、reduce（跨线程规约与同步）、ldst（全局 load/store）、shared_ldst（含 ldmatrix/stmatrix），理解发射器如何把张量布局翻译成每线程的标量地址与操作。",
+          "learning_goals": [
+            "掌握 elementwise 发射器的逐线程展开",
+            "理解 reduce 的跨线程规约",
+            "了解 shared_ldst 与 ldmatrix 的关系"
+          ],
+          "source_files": [
+            "python/tilus/backends/emitters/elementwise.py",
+            "python/tilus/backends/emitters/reduce.py",
+            "python/tilus/backends/emitters/ldst.py",
+            "python/tilus/backends/emitters/shared_ldst.py"
+          ],
+          "minimal_modules": [
+            "elementwise 展开",
+            "reduce 规约",
+            "ldst 与 shared_ldst"
+          ],
+          "practice_task": "对照 elementwise 发射器与某张量的 RegisterLayout，手动推演每个线程应执行的具体标量运算。",
+          "depends_on": [
+            "u6-3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "GPU 架构特性与高性能内核实践",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Ampere matmul 进阶：分块、共享内存与 MMA",
+          "order": 1,
+          "filename": "u7-l1-ampere-matmul-deep-dive.md",
+          "level": "advanced",
+          "topic": "以 examples/matmul v2-v5 为进阶路线，讲解从 naive 到引入共享内存分块、ldmatrix 加载、MMA 张量核、double buffering 与 autotune 的逐步优化过程，体会 tile-level 编程如何映射到 Ampere 硬件。",
+          "learning_goals": [
+            "理解共享内存分块与 K 维循环",
+            "掌握 ldmatrix 与 MMA 的配合",
+            "体会 double buffering 与 autotune 的收益"
+          ],
+          "source_files": [
+            "examples/matmul/matmul_v2.py",
+            "examples/matmul/matmul_v3.py",
+            "examples/matmul/matmul_v4.py",
+            "examples/matmul/matmul_v5.py"
+          ],
+          "minimal_modules": [
+            "共享内存分块",
+            "ldmatrix + MMA",
+            "double buffer/autotune"
+          ],
+          "practice_task": "对比 v2 与 v5 的 TFLOPS，定位性能提升主要来自哪几个改动（共享内存、ldmatrix、流水线）。",
+          "depends_on": [
+            "u6-4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "Hopper：wgmma 与 cp_async 异步拷贝",
+          "order": 2,
+          "filename": "u7-l2-hopper-wgmma-cp-async.md",
+          "level": "advanced",
+          "topic": "讲解 Hopper（sm90）特性：wgmma 指令组（warp-group MMA、fence/commit_group/wait_group）、cp_async 系列异步拷贝与 mbarrier，结合 examples/hopper_matmul 说明如何用 Tilus 指令组直接驱动这些硬件单元。",
+          "learning_goals": [
+            "掌握 wgmma 指令组的三段式用法",
+            "理解 cp_async 异步拷贝与等待",
+            "了解 mbarrier 在异步同步中的作用"
+          ],
+          "source_files": [
+            "examples/hopper_matmul/matmul_v0.py",
+            "python/tilus/lang/instructions/wgmma.py",
+            "python/tilus/backends/emitters/cuda/wgmma.py",
+            "python/tilus/ir/instructions/cuda/wgmma.py"
+          ],
+          "minimal_modules": [
+            "wgmma 指令组",
+            "cp_async 异步拷贝",
+            "mbarrier 同步"
+          ],
+          "practice_task": "在一个 Hopper matmul 示例中找到 wgmma.commit_group/wait_group 的调用，画出异步 MMA 与等待的时序。",
+          "depends_on": [
+            "u7-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Blackwell：TMA、tcgen05 与 TMEM",
+          "order": 3,
+          "filename": "u7-l3-blackwell-tma-tcgen05-tmem.md",
+          "level": "advanced",
+          "topic": "讲解 Blackwell（sm100）特性：TMA（张量内存加速器，shared_to_global/global_to_shared）、tcgen05 指令组（第五代张量核、TMEM 分配/MMA/copy/slice）、TMemoryTensor 与 cluster，结合 examples/blackwell_matmul v0-v1 说明数据流。",
+          "learning_goals": [
+            "掌握 TMA 异步批量搬运",
+            "理解 tcgen05 与 TMEM 的编程模型",
+            "了解 cluster 与 TMA epilogue 的配合"
+          ],
+          "source_files": [
+            "examples/blackwell_matmul/matmul_v0.py",
+            "examples/blackwell_matmul/matmul_v1.py",
+            "python/tilus/lang/instructions/tma.py",
+            "python/tilus/lang/instructions/tcgen05.py"
+          ],
+          "minimal_modules": [
+            "TMA 搬运",
+            "tcgen05 与 TMEM",
+            "cluster/TMA epilogue"
+          ],
+          "practice_task": "参照 CLAUDE.md 中 store_shared 与 tma.shared_to_global 之间需要 proxy fence 的说明，在一个 Blackwell 内核里定位该 fence 并解释其必要性。",
+          "depends_on": [
+            "u7-2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "异步软件流水线（Software Pipeline）",
+          "order": 4,
+          "filename": "u7-l4-async-software-pipeline.md",
+          "level": "advanced",
+          "topic": "讲解 lang/classes/pipeline.py 提供的 Pipeline 抽象与多级流水线，如何用 mbarrier/cp_async/wgmma/tma 组合实现 overlap 计算与搬运，结合 blackwell v2 与 hopper v3 的软件流水线示例。",
+          "learning_goals": [
+            "理解软件流水线掩盖访存延迟的原理",
+            "掌握 Pipeline 抽象与多级缓冲",
+            "了解两级流水线的调度方式"
+          ],
+          "source_files": [
+            "python/tilus/lang/classes/pipeline.py",
+            "examples/blackwell_matmul/matmul_v2.py",
+            "examples/hopper_matmul/matmul_v3.py"
+          ],
+          "minimal_modules": [
+            "Pipeline 抽象",
+            "多级缓冲调度",
+            "overlap 计算与搬运"
+          ],
+          "practice_task": "对比无流水线与两级流水线版本的性能，分析多级缓冲如何掩盖全局访存延迟。",
+          "depends_on": [
+            "u7-3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "缓存、自动调优、运行时与扩展开发",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "缓存机制与缓存目录结构",
+          "order": 1,
+          "filename": "u8-l1-caching-mechanism.md",
+          "level": "advanced",
+          "topic": "深入 drivers.get_cache_dir 的缓存键（基于程序文本与选项的 SHA256，且键基于 IR 哈希而非 codegen 输出）、programs/ 目录结构，以及为何修改 emitter 后必须手动删缓存重新编译。",
+          "learning_goals": [
+            "掌握缓存键的计算与目录组织",
+            "理解为何 IR 哈希而非 codegen 决定缓存",
+            "知道何时需要手动清缓存"
+          ],
+          "source_files": [
+            "python/tilus/drivers.py",
+            "python/tilus/option.py",
+            "CLAUDE.md",
+            "docs/source/programming-guides/cache.rst"
+          ],
+          "minimal_modules": [
+            "缓存键计算",
+            "programs 目录结构",
+            "手动清缓存时机"
+          ],
+          "practice_task": "修改一个内核的代码gen 无关部分（如注释），观察缓存是否复用；再说明何时缓存不会失效。",
+          "depends_on": [
+            "u3-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "自动调优调度与硬件感知 dispatch 缓存",
+          "order": 2,
+          "filename": "u8-l2-autotune-dispatch-cache.md",
+          "level": "advanced",
+          "topic": "讲解 InstantiatedScript 的完整调优流程：CallParameters 区分常量/调优/内核参数、并行 benchmark 选优、dispatch 缓存表与 collect_tuning_metadata 的环境指纹（GPU/算力/版本），避免跨环境误用。",
+          "learning_goals": [
+            "掌握参数分类与调优触发",
+            "理解并行 benchmark 选优",
+            "了解 dispatch 缓存的环境指纹校验"
+          ],
+          "source_files": [
+            "python/tilus/lang/instantiated_script.py",
+            "python/tilus/utils/multiprocess.py",
+            "python/tilus/utils/bench_utils.py"
+          ],
+          "minimal_modules": [
+            "参数分类与调优",
+            "并行 benchmark",
+            "dispatch 环境指纹"
+          ],
+          "practice_task": "运行一个带 autotune 的内核两次，第二次确认直接命中 dispatch 缓存而无需重新调优。",
+          "depends_on": [
+            "u2-4",
+            "u8-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "运行时：CompiledProgram 与内核启动",
+          "order": 3,
+          "filename": "u8-l3-runtime-compiled-program.md",
+          "level": "advanced",
+          "topic": "讲解 runtime/compiled_program.py 的 CompiledProgram：build_and_load_program 如何加载 .so、把 torch 张量映射为设备指针、按 Metadata 的 grid/cluster/warps 启动内核，以及 top-level tensor.py 的 from_torch/empty 等张量工具。",
+          "learning_goals": [
+            "掌握 CompiledProgram 的加载与启动",
+            "理解 torch 张量到设备指针的映射",
+            "了解 Metadata 如何决定启动配置"
+          ],
+          "source_files": [
+            "python/tilus/runtime/compiled_program.py",
+            "python/tilus/runtime/__init__.py",
+            "python/tilus/tensor.py"
+          ],
+          "minimal_modules": [
+            "CompiledProgram 加载",
+            "指针映射与启动",
+            "张量工具函数"
+          ],
+          "practice_task": "跟踪一次 kernel(...) 调用，列出从 Python 参数到 CUDA launch 的完整调用链。",
+          "depends_on": [
+            "u6-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "调试、测试与性能剖析",
+          "order": 4,
+          "filename": "u8-l4-debugging-testing-profiling.md",
+          "level": "advanced",
+          "topic": "汇总调试与测试手段：debug.dump_ir 逐 Pass 导出 IR、debug.disable_ptxas_opt 保留 PTX、conftest 与 compile-only 模式测试、utils/profiler 的 ncu/nsys 剖析与 cuda_sanitizer，以及 how-to 读缓存里的 source.cu。",
+          "learning_goals": [
+            "会用 dump_ir 与 disable_ptxas_opt 调试",
+            "掌握 compile-only 测试模式",
+            "了解 ncu/nsys 剖析工作流"
+          ],
+          "source_files": [
+            "python/tilus/option.py",
+            "python/tilus/transforms/instruments/dump_ir.py",
+            "python/tilus/utils/profiler/ncu.py",
+            "tests/conftest.py"
+          ],
+          "minimal_modules": [
+            "dump_ir/disable_ptxas_opt",
+            "compile-only 测试",
+            "ncu/nsys 剖析"
+          ],
+          "practice_task": "对一个内核用 dump_ir + disable_ptxas_opt 生成可读 PTX，并用 ncu 报告找出其主要瓶颈指标。",
+          "depends_on": [
+            "u8-1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "扩展开发：自定义 Pass 与新增指令",
+          "order": 5,
+          "filename": "u8-l5-writing-custom-pass-and-extension.md",
+          "level": "advanced",
+          "topic": "作为收尾，讲解如何为 Tilus 做二次开发：写一个自定义 Pass（继承 Pass、用 IRRewriter、注册到 get_default_passes），以及新增一条指令需要同步提供 IR 定义、布局推理规则、发射器与发射器注册，参考 test_dead_code_elimination 的端到端测试范式。",
+          "learning_goals": [
+            "掌握自定义 Pass 的编写与注册",
+            "理解新增指令需同步的四处改动",
+            "会用 InstantiatedScript._jit_instance_for 做端到端测试"
+          ],
+          "source_files": [
+            "python/tilus/transforms/base.py",
+            "python/tilus/transforms/dead_code_elimination.py",
+            "CLAUDE.md",
+            "tests/transforms/test_dead_code_elimination.py"
+          ],
+          "minimal_modules": [
+            "自定义 Pass",
+            "新增指令的四件套",
+            "端到端测试范式"
+          ],
+          "practice_task": "实现一个简单的自定义 Pass（如统计并注释所有 dot 指令），注册后用 dump_ir 验证它被加入流水线。",
+          "depends_on": [
+            "u5-3",
+            "u6-2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

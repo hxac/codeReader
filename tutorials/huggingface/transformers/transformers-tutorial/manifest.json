@@ -1,0 +1,1550 @@
+{
+  "project": "transformers",
+  "head": "af71155683b4d34dd92d8f037392fa6bf334035e",
+  "rationale": "transformers 是一个超大型、多子系统的「模型定义框架」（v5.15.0.dev0，500+ 模型目录），本手册按「先会用、再懂原理、最后能扩展」的三层路线组织。入门层（u1-u2）先让读者跑通安装、pipeline 与 Auto 类，建立对 from_pretrained/save_pretrained 统一范式、惰性导入 _LazyModule 和源码目录的整体认知。进阶层（u3-u9）逐块拆解分词器（含聊天模板）、图像/音视频处理器、配置与 PreTrainedModel 基类、注意力/掩码/RoPE/KV-Cache/Flash Attention/AttentionInterface、以 Llama 为代表的真实模型精读、Modular 机制与权重转换、完整的 Generation 栈（generate 主循环、解码策略、Logits 处理器、停止/流式、投机解码）以及训练栈（Trainer、TrainingArguments、优化器与调度器、回调与状态、DataCollator、损失函数）。专家层（u10-u11）聚焦量化、导出（ONNX/Dynamo/ExecuTorch）、FSDP/张量并行、DeepSpeed 与各类集成、内核与注意力集成、推理服务与持续批处理，以及添加新模型、测试体系、make fix-repo 仓库一致性工具链等二次开发场景。单元与讲义之间通过 depends_on 形成从基础到高级的单向依赖，每篇讲义只解决一个主题、引用真实源码文件并附带可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目入门与整体认知",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与设计哲学",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 transformers 是什么：作为文本、视觉、音频、多模态模型的「模型定义框架」，连接训练框架与推理引擎的枢纽，以及它在生态中的定位。",
+          "learning_goals": [
+            "理解 transformers 作为模型定义框架而非训练框架的定位",
+            "了解其与 PyTorch、vLLM、DeepSpeed 等周边生态的关系",
+            "掌握「模型定义集中化」这一核心理念"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/en/philosophy.md"
+          ],
+          "minimal_modules": [
+            "README 概述",
+            "philosophy 文档"
+          ],
+          "practice_task": "阅读 README 与 philosophy.md，用自己的话写出 transformers 解决的三个核心问题，并列出两个依赖 transformers 模型定义的上下游工具。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境安装与首次运行",
+          "order": 2,
+          "filename": "u1-l2-install-and-run.md",
+          "level": "beginner",
+          "topic": "讲解 Python/PyTorch 版本要求、pip 与源码安装方式、可选依赖（torch/vision/audio），以及如何验证安装成功。",
+          "learning_goals": [
+            "掌握 transformers 的最低版本要求与安装命令",
+            "理解 setup.py / pyproject.toml 中的可选依赖 extras",
+            "能够从源码安装开发版本并验证"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/source/en/installation.md",
+            "docs/source/en/quicktour.md",
+            "pyproject.toml",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "installation 文档",
+            "setup.py 依赖声明",
+            "quicktour"
+          ],
+          "practice_task": "创建虚拟环境，分别用 pip extras 与源码方式安装 transformers，并运行一段加载模型做推理的最小脚本验证环境。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "源码目录结构地图",
+          "order": 3,
+          "filename": "u1-l3-source-directory-map.md",
+          "level": "beginner",
+          "topic": "梳理仓库顶层与 src/transformers/ 下的关键目录：models、generation、pipelines、quantizers、exporters、distributed、integrations、utils、cli、loss、data，建立全局心智模型。",
+          "learning_goals": [
+            "记住 src/transformers 下各子目录的职责",
+            "区分核心库代码、docs、examples、tests、utils 脚本",
+            "能在源码中快速定位功能模块"
+          ],
+          "source_files": [
+            "README.md",
+            "src/transformers/__init__.py"
+          ],
+          "minimal_modules": [
+            "src/transformers 顶层目录",
+            "docs / examples / tests"
+          ],
+          "practice_task": "绘制一份 src/transformers 子系统目录树，为每个目录写一句职责说明，并标注你最感兴趣的三个目录。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "库入口与惰性导入机制",
+          "order": 4,
+          "filename": "u1-l4-lazy-import-init.md",
+          "level": "beginner",
+          "topic": "讲解 src/transformers/__init__.py 如何用 _import_structure 字典与 _LazyModule 类实现延迟导入，使 import transformers 不立刻加载重量级后端。",
+          "learning_goals": [
+            "理解 _import_structure 的结构与作用",
+            "掌握 _LazyModule 的 __getattr__ 延迟加载原理",
+            "理解 TYPE_CHECKING 分支与运行时导入的区别"
+          ],
+          "source_files": [
+            "src/transformers/__init__.py",
+            "src/transformers/utils/import_utils.py"
+          ],
+          "minimal_modules": [
+            "__init__.py 顶层",
+            "_LazyModule",
+            "is_*_available 检测函数"
+          ],
+          "practice_task": "在 __init__.py 中追踪一个对象（如 AutoModel）的 _import_structure 声明，说明它在首次访问时如何被真正导入。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "五分钟上手 pipeline API",
+          "order": 5,
+          "filename": "u1-l5-pipeline-quickstart.md",
+          "level": "beginner",
+          "topic": "用 pipeline() 工厂函数快速完成文本生成、文本分类等任务，理解它如何把 tokenizer、model、后处理串成一条端到端流水线。",
+          "learning_goals": [
+            "会用 pipeline() 一行代码完成推理任务",
+            "理解 pipeline 内部 tokenization→model→postprocess 的三段式结构",
+            "知道如何指定 task、model 与 device"
+          ],
+          "source_files": [
+            "src/transformers/pipelines/__init__.py",
+            "src/transformers/pipelines/base.py",
+            "docs/source/en/quicktour.md"
+          ],
+          "minimal_modules": [
+            "pipeline 工厂函数",
+            "Pipeline 基类"
+          ],
+          "practice_task": "用 pipeline 分别跑通 text-generation 与 image-classification 两个任务，打印中间 tokenizer 输出与最终后处理结果。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Auto 类与预训练对象统一范式",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "AutoModel / AutoTokenizer 自动加载",
+          "order": 1,
+          "filename": "u2-l1-auto-classes.md",
+          "level": "beginner",
+          "topic": "讲解 models/auto/ 下的 Auto* 系列：根据 checkpoint 的 config.json 自动选择正确的具体类，屏蔽模型差异。",
+          "learning_goals": [
+            "理解 AutoModel/AutoTokenizer/AutoProcessor 的自动分发原理",
+            "掌握 auto_factory 与 auto_mappings 的协作",
+            "知道 Auto 类与具体类（如 LlamaForCausalLM）的关系"
+          ],
+          "source_files": [
+            "src/transformers/models/auto/auto_factory.py",
+            "src/transformers/models/auto/modeling_auto.py",
+            "src/transformers/models/auto/tokenization_auto.py",
+            "src/transformers/models/auto/auto_mappings.py"
+          ],
+          "minimal_modules": [
+            "auto_factory",
+            "modeling_auto / tokenization_auto",
+            "auto_mappings"
+          ],
+          "practice_task": "用 AutoModel 与 AutoTokenizer 加载同一个 checkpoint，再对照打印出的具体类名，验证 Auto 的分发结果。",
+          "depends_on": [
+            "u1-l5",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "from_pretrained / save_pretrained 统一范式",
+          "order": 2,
+          "filename": "u2-l2-from-pretrained-paradigm.md",
+          "level": "beginner",
+          "topic": "讲解 config、model、tokenizer、processor 都共享的 from_pretrained/save_pretrained 范式，以及权重与配置的加载/保存流程。",
+          "learning_goals": [
+            "理解四大预训练对象共享的加载/保存接口",
+            "掌握 from_pretrained 的参数（revision、trust_remote_code 等）",
+            "知道 config 与权重如何被分别加载"
+          ],
+          "source_files": [
+            "src/transformers/configuration_utils.py",
+            "src/transformers/modeling_utils.py",
+            "src/transformers/tokenization_utils_base.py"
+          ],
+          "minimal_modules": [
+            "PretrainedConfig",
+            "PreTrainedModel.from_pretrained",
+            "PreTrainedTokenizerBase.from_pretrained"
+          ],
+          "practice_task": "加载一个模型，修改其 config 的某个属性后 save_pretrained 到本地目录，再重新加载验证修改已持久化。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Hub 下载与本地缓存机制",
+          "order": 3,
+          "filename": "u2-l3-hub-download-and-cache.md",
+          "level": "beginner",
+          "topic": "讲解 utils/hub.py 与 core_model_loading.py 如何从 Hugging Face Hub 解析仓库、下载文件并命中本地缓存。",
+          "learning_goals": [
+            "理解 cached_file 与 snapshot_download 的下载/缓存流程",
+            "掌握本地缓存目录结构与复用机制",
+            "了解离线模式与镜像配置"
+          ],
+          "source_files": [
+            "src/transformers/utils/hub.py",
+            "src/transformers/core_model_loading.py",
+            "src/transformers/dependency_versions_check.py"
+          ],
+          "minimal_modules": [
+            "utils/hub.py",
+            "core_model_loading",
+            "依赖版本检查"
+          ],
+          "practice_task": "设置 HF_HOME 并加载一个 checkpoint，观察缓存目录结构；再用离线模式重复加载验证缓存命中。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "分词器 Tokenizer",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "分词器基础与 PreTrainedTokenizerBase",
+          "order": 1,
+          "filename": "u3-l1-tokenizer-base.md",
+          "level": "intermediate",
+          "topic": "讲解所有分词器的抽象基类 PreTrainedTokenizerBase，包括词表、特殊 token、encode/decode 接口与属性体系。",
+          "learning_goals": [
+            "理解 PreTrainedTokenizerBase 的职责与抽象方法",
+            "掌握 vocab、special tokens、model_max_length 等核心属性",
+            "了解分词器与模型 config 的关联"
+          ],
+          "source_files": [
+            "src/transformers/tokenization_utils_base.py"
+          ],
+          "minimal_modules": [
+            "PreTrainedTokenizerBase",
+            "特殊 token 管理",
+            "编码/解码接口"
+          ],
+          "practice_task": "继承 PreTrainedTokenizerBase 的思路（阅读一个具体 tokenizer），列出它必须实现的抽象方法，并解释每个方法的输入输出。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "BatchEncoding 与编码/解码/对齐",
+          "order": 2,
+          "filename": "u3-l2-batch-encoding-decode.md",
+          "level": "intermediate",
+          "topic": "讲解 __call__ 的填充/截断/返回张量选项、BatchEncoding 容器，以及 token 到字符/句子级 span 的对齐。",
+          "learning_goals": [
+            "掌握 padding/truncation/max_length 等编码选项",
+            "理解 BatchEncoding 的结构与 as_tensor 方法",
+            "会用 word_ids / char span 做标注对齐"
+          ],
+          "source_files": [
+            "src/transformers/tokenization_utils_base.py"
+          ],
+          "minimal_modules": [
+            "BatchEncoding",
+            "__call__ 编码选项",
+            "TruncationStrategy / Span"
+          ],
+          "practice_task": "对一批长度不一的文本调用 tokenizer，设置动态填充与截断，并用 word_ids 把 token 级输出对齐回原始单词。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "慢速 vs 快速分词器与转换",
+          "order": 3,
+          "filename": "u3-l3-slow-fast-convert.md",
+          "level": "intermediate",
+          "topic": "讲解 Python 慢速分词器（SentencePiece/Tiktoken 后端）与 Rust 快速分词器的差异，以及 convert_slow_tokenizer 如何把慢速转为快速。",
+          "learning_goals": [
+            "区分慢速与快速分词器的实现后端",
+            "理解 SentencePieceBackend 与 TokenizersBackend",
+            "了解 Converter/SpmConverter 的转换流程"
+          ],
+          "source_files": [
+            "src/transformers/tokenization_utils_sentencepiece.py",
+            "src/transformers/tokenization_utils_tokenizers.py",
+            "src/transformers/convert_slow_tokenizer.py"
+          ],
+          "minimal_modules": [
+            "SentencePieceBackend",
+            "TokenizersBackend",
+            "Converter 体系"
+          ],
+          "practice_task": "加载同一模型的慢速与快速 tokenizer，对比它们的类型与 encode 速度；再用 convert_slow_tokenizer 的思路理解转换过程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "聊天模板 Chat Template",
+          "order": 4,
+          "filename": "u3-l4-chat-template.md",
+          "level": "intermediate",
+          "topic": "讲解 chat template 如何把对话消息渲染成模型期望的输入格式，以及 apply_chat_template / chat_template_utils 的机制。",
+          "learning_goals": [
+            "理解 Jinja 聊天模板的作用与存储位置",
+            "掌握 apply_chat_template 与 add_generation_prompt",
+            "了解多模态与工具调用模板的扩展"
+          ],
+          "source_files": [
+            "src/transformers/tokenization_utils_base.py",
+            "src/transformers/utils/chat_template_utils.py",
+            "docs/source/en/chat_templating.md"
+          ],
+          "minimal_modules": [
+            "apply_chat_template",
+            "chat_template_utils",
+            "聊天模板文档"
+          ],
+          "practice_task": "为一个模型渲染一段多轮对话，设置 add_generation_prompt=True，并检查输出中模型特定特殊 token 是否正确插入。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "图像 / 音视频 处理器",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "图像处理器 BaseImageProcessor",
+          "order": 1,
+          "filename": "u4-l1-image-processor.md",
+          "level": "intermediate",
+          "topic": "讲解图像预处理的基类体系：ImageProcessingMixin/BaseImageProcessor、resize/normalize/rescale 等变换，以及后端（PIL/Torchvision）分发。",
+          "learning_goals": [
+            "理解图像处理器与分词器对称的 from_pretrained 范式",
+            "掌握 resize/normalize/rescale 等图像变换",
+            "了解 BatchFeature 容器与后端分发"
+          ],
+          "source_files": [
+            "src/transformers/image_processing_utils.py",
+            "src/transformers/image_processing_base.py",
+            "src/transformers/image_transforms.py",
+            "src/transformers/image_utils.py"
+          ],
+          "minimal_modules": [
+            "BaseImageProcessor",
+            "图像变换",
+            "图像后端分发"
+          ],
+          "practice_task": "加载一个图像模型的 image_processor，对一张图片做预处理，打印每一步变换后的张量形状与数值范围。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "多模态处理器 ProcessorMixin",
+          "order": 2,
+          "filename": "u4-l2-multimodal-processor.md",
+          "level": "intermediate",
+          "topic": "讲解 ProcessorMixin 如何把 tokenizer、image_processor、feature_extractor 组合成统一的多模态入口（如视觉语言模型的 Processor）。",
+          "learning_goals": [
+            "理解 ProcessorMixin 的组合模式与属性代理",
+            "掌握 __call__ 对不同模态输入的分发",
+            "了解 ProcessingKwargs 等类型化参数"
+          ],
+          "source_files": [
+            "src/transformers/processing_utils.py",
+            "src/transformers/models/auto/processing_auto.py"
+          ],
+          "minimal_modules": [
+            "ProcessorMixin",
+            "MultiModalData",
+            "ProcessingKwargs"
+          ],
+          "practice_task": "加载一个视觉语言模型的 processor，同时传入文本与图片，观察它如何分别调用 tokenizer 与 image_processor 并合并结果。",
+          "depends_on": [
+            "u4-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "特征提取器与音视频处理器",
+          "order": 3,
+          "filename": "u4-l3-feature-audio-video-processor.md",
+          "level": "intermediate",
+          "topic": "讲解音频特征提取 FeatureExtractionMixin、BatchFeature，以及视频处理器 BaseVideoProcessor 与音频处理工具的职责。",
+          "learning_goals": [
+            "理解 FeatureExtractionMixin 的保存/加载范式",
+            "掌握音频/视频预处理与图像处理的异同",
+            "了解 audio_utils / video_processing_utils 的作用"
+          ],
+          "source_files": [
+            "src/transformers/feature_extraction_utils.py",
+            "src/transformers/video_processing_utils.py",
+            "src/transformers/audio_utils.py",
+            "src/transformers/models/auto/feature_extraction_auto.py"
+          ],
+          "minimal_modules": [
+            "FeatureExtractionMixin",
+            "BaseVideoProcessor",
+            "audio_utils"
+          ],
+          "practice_task": "加载一个语音或视频模型的 feature_extractor/processor，预处理一段音频或视频，打印输出张量结构。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "配置与模型基类",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "PretrainedConfig 配置体系",
+          "order": 1,
+          "filename": "u5-l1-pretrained-config.md",
+          "level": "intermediate",
+          "topic": "讲解 PretrainedConfig：模型所有超参的来源，序列化为 config.json，以及 attribute_map、tp_plan 等机制。",
+          "learning_goals": [
+            "理解 config 如何描述模型结构与超参",
+            "掌握 config 的保存/加载与属性映射",
+            "了解 base_model_tp_plan 等分布式相关字段"
+          ],
+          "source_files": [
+            "src/transformers/configuration_utils.py",
+            "src/transformers/models/auto/configuration_auto.py"
+          ],
+          "minimal_modules": [
+            "PretrainedConfig",
+            "属性映射",
+            "config 序列化"
+          ],
+          "practice_task": "创建一个模型的 config，修改若干超参，save_pretrained 后检查 config.json 内容并重新加载。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "PreTrainedModel 模型基类",
+          "order": 2,
+          "filename": "u5-l2-pretrained-model-base.md",
+          "level": "intermediate",
+          "topic": "讲解所有 PyTorch 模型的基类 PreTrainedModel：from_pretrained 的权重加载、状态字典映射、设备/dtype 分配与 save_pretrained。",
+          "learning_goals": [
+            "理解 PreTrainedModel 作为 nn.Module 子类的职责",
+            "掌握 from_pretrained 的权重解析与 _load_state_dict_into_model",
+            "了解 dtype/device/low_cpu_mem_usage 等加载选项"
+          ],
+          "source_files": [
+            "src/transformers/modeling_utils.py",
+            "src/transformers/core_model_loading.py"
+          ],
+          "minimal_modules": [
+            "PreTrainedModel",
+            "from_pretrained 加载链路",
+            "状态字典转换"
+          ],
+          "practice_task": "用不同 dtype（fp16/bf16）加载同一模型，对比显存占用与 forward 输出，并阅读加载日志理解权重映射。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "权重初始化体系",
+          "order": 3,
+          "filename": "u5-l3-weight-initialization.md",
+          "level": "intermediate",
+          "topic": "讲解 initialization.py 中的初始化函数封装、no_init_weights/meta device 创建、guard_torch_init_functions，以及 activations.py 的激活函数。",
+          "learning_goals": [
+            "理解 _init_weights 与初始化函数封装",
+            "掌握 no_init_weights 与 meta 设备的延迟初始化",
+            "了解常见激活函数类（GELU/SiLU 等）"
+          ],
+          "source_files": [
+            "src/transformers/initialization.py",
+            "src/transformers/activations.py",
+            "src/transformers/modeling_utils.py"
+          ],
+          "minimal_modules": [
+            "initialization 工具",
+            "no_init_weights",
+            "激活函数类"
+          ],
+          "practice_task": "在 meta device 上创建一个模型，再调用 init_weights 完成真实初始化，对比两阶段的参数状态。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "ModelOutput 输出结构",
+          "order": 4,
+          "filename": "u5-l4-model-output.md",
+          "level": "intermediate",
+          "topic": "讲解 ModelOutput 数据类（来自 utils/generic.py）与 modeling_outputs.py 中的各类标准输出（BaseModelOutput、带 past/pooling/cross-attn 变体）。",
+          "learning_goals": [
+            "理解 ModelOutput 既能像 dict 又能像属性访问",
+            "掌握常见输出字段的含义（last_hidden_state/past_key_values 等）",
+            "了解输出类继承层次"
+          ],
+          "source_files": [
+            "src/transformers/modeling_outputs.py",
+            "src/transformers/utils/generic.py"
+          ],
+          "minimal_modules": [
+            "ModelOutput",
+            "BaseModelOutput 系列",
+            "OrderedDict 行为"
+          ],
+          "practice_task": "运行一个模型 forward，把返回的 ModelOutput 当 dict 与属性两种方式分别取值，并画出其输出类的继承关系。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "通用层与任务头",
+          "order": 5,
+          "filename": "u5-l5-modeling-layers-and-heads.md",
+          "level": "intermediate",
+          "topic": "讲解 modeling_layers.py 提供的可复用构建块：GradientCheckpointingLayer，以及 GenericForSequenceClassification / GenericForQuestionAnswering 等通用任务头。",
+          "learning_goals": [
+            "理解 GradientCheckpointingLayer 的作用",
+            "掌握通用任务头如何复用于多个模型",
+            "了解模型分层与任务头组合的设计"
+          ],
+          "source_files": [
+            "src/transformers/modeling_layers.py",
+            "src/transformers/modeling_utils.py"
+          ],
+          "minimal_modules": [
+            "GradientCheckpointingLayer",
+            "通用任务头",
+            "层级复用"
+          ],
+          "practice_task": "阅读一个使用 GenericForSequenceClassification 的模型，说明任务头如何复用，并启用 gradient_checkpointing 观察显存变化。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "注意力、掩码、RoPE 与 KV Cache",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "注意力掩码体系",
+          "order": 1,
+          "filename": "u6-l1-attention-mask.md",
+          "level": "intermediate",
+          "topic": "讲解 masking_utils.py 中统一的掩码生成：causal/bidirectional/sliding_window/chunked，以及针对不同注意力后端的 mask 函数（sdpa/eager/flash/flex）。",
+          "learning_goals": [
+            "理解 create_causal_mask 等掩码生成入口",
+            "掌握不同注意力实现对应不同掩码格式",
+            "了解 modeling_attn_mask_utils 的历史与迁移"
+          ],
+          "source_files": [
+            "src/transformers/masking_utils.py",
+            "src/transformers/modeling_attn_mask_utils.py"
+          ],
+          "minimal_modules": [
+            "create_causal_mask",
+            "AttentionMaskInterface",
+            "掩码后端函数"
+          ],
+          "practice_task": "为一个模型分别选用 eager 与 sdpa 注意力，打印/比较生成的 4D 注意力掩码形状与内容差异。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "旋转位置编码 RoPE",
+          "order": 2,
+          "filename": "u6-l2-rope.md",
+          "level": "intermediate",
+          "topic": "讲解 modeling_rope_utils.py：RoPE 参数的计算（线性缩放、动态 NTK、比例缩放）、dynamic_rope_update 装饰器与 ROPE_INIT_FUNCTIONS 注册表。",
+          "learning_goals": [
+            "理解旋转位置编码的基本原理与实现",
+            "掌握不同 scaling 策略（linear/dynamic_ntk）",
+            "了解 RoPE 初始化函数注册表"
+          ],
+          "source_files": [
+            "src/transformers/modeling_rope_utils.py",
+            "src/transformers/modeling_utils.py"
+          ],
+          "minimal_modules": [
+            "RoPE 参数计算",
+            "dynamic_rope_update",
+            "ROPE_INIT_FUNCTIONS"
+          ],
+          "practice_task": "修改一个模型的 rope_scaling 配置（如 linear），加载后比较其在长序列上的位置编码行为差异。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "KV Cache 体系",
+          "order": 3,
+          "filename": "u6-l3-kv-cache.md",
+          "level": "advanced",
+          "topic": "讲解 cache_utils.py 的 Cache 抽象与各类实现：DynamicCache、StaticCache、SlidingWindow、EncoderDecoderCache、QuantizedCache 及 CacheLayerMixin。",
+          "learning_goals": [
+            "理解 KV Cache 在自回归生成中的作用",
+            "掌握 DynamicCache 与 StaticCache 的差异与取舍",
+            "了解量化缓存与分层缓存设计"
+          ],
+          "source_files": [
+            "src/transformers/cache_utils.py",
+            "docs/source/en/cache_explanation.md",
+            "docs/source/en/kv_cache.md"
+          ],
+          "minimal_modules": [
+            "Cache / CacheLayerMixin",
+            "DynamicCache / StaticCache",
+            "量化缓存"
+          ],
+          "practice_task": "用 StaticCache 与 DynamicCache 分别跑一次生成，对比显存与速度，并阅读 cache_explanation 文档。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Flash Attention 集成",
+          "order": 4,
+          "filename": "u6-l4-flash-attention.md",
+          "level": "advanced",
+          "topic": "讲解 modeling_flash_attention_utils.py：Flash Attention 的兼容性矩阵、惰性导入、_flash_attention_forward 以及 padding 处理。",
+          "learning_goals": [
+            "理解 Flash Attention 的引入与版本兼容判断",
+            "掌握 _flash_attention_forward 的调用路径",
+            "了解 unpadded 输入处理"
+          ],
+          "source_files": [
+            "src/transformers/modeling_flash_attention_utils.py",
+            "src/transformers/integrations/flash_attention.py"
+          ],
+          "minimal_modules": [
+            "兼容性矩阵",
+            "惰性导入",
+            "FA forward"
+          ],
+          "practice_task": "在支持的环境下用 attn_implementation='flash_attention_2' 加载模型，对比与 sdpa 的显存与速度。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "注意力接口 AttentionInterface",
+          "order": 5,
+          "filename": "u6-l5-attention-interface.md",
+          "level": "advanced",
+          "topic": "讲解如何通过 AttentionInterface 注册和切换注意力实现（eager/sdpa/flash/flex），以及 how_to_hack_models 的扩展点。",
+          "learning_goals": [
+            "理解 AttentionInterface 注册表的工作方式",
+            "掌握如何注入自定义注意力实现",
+            "了解扩展注意力的官方文档指引"
+          ],
+          "source_files": [
+            "src/transformers/modeling_utils.py",
+            "docs/source/en/attention_interface.md"
+          ],
+          "minimal_modules": [
+            "AttentionInterface",
+            "注意力注册",
+            "how_to_hack_models 文档"
+          ],
+          "practice_task": "按照 attention_interface.md 的思路，为一个模型注入一个打印 attention 权重形状的自定义注意力函数并验证生效。",
+          "depends_on": [
+            "u6-l1",
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "走进一个真实模型",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "模型目录结构与命名规范",
+          "order": 1,
+          "filename": "u7-l1-model-directory-anatomy.md",
+          "level": "intermediate",
+          "topic": "以 models/llama/ 为例，讲解一个模型目录的标准文件组成：configuration_*.py、modeling_*.py、tokenization_*.py、__init__.py 与 convert 脚本。",
+          "learning_goals": [
+            "掌握模型目录的标准文件命名规范",
+            "理解 config/modeling/tokenization 三件套的分工",
+            "了解 __init__.py 的延迟导出"
+          ],
+          "source_files": [
+            "src/transformers/models/llama/__init__.py",
+            "src/transformers/models/llama/configuration_llama.py",
+            "src/transformers/models/llama/modeling_llama.py",
+            "src/transformers/models/llama/tokenization_llama.py"
+          ],
+          "minimal_modules": [
+            "模型目录三件套",
+            "命名规范",
+            "convert 脚本"
+          ],
+          "practice_task": "选取一个模型目录，列出其文件并说明每个文件对应的导出类，画出 config↔modeling↔tokenizer 的引用关系。",
+          "depends_on": [
+            "u5-l2",
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "精读 Llama 模型实现",
+          "order": 2,
+          "filename": "u7-l2-llama-walkthrough.md",
+          "level": "intermediate",
+          "topic": "从 LlamaConfig 到 LlamaModel、LlamaDecoderLayer、LlamaAttention、LlamaRMSNorm、LlamaRotaryEmbedding，完整走读一个 decoder-only 模型的前向。",
+          "learning_goals": [
+            "理解 decoder-only 架构各组件的协作",
+            "掌握 attention + rope + rmsnorm + mlp 的组合",
+            "能够把前面学到的掩码/rope/cache 串联到真实代码"
+          ],
+          "source_files": [
+            "src/transformers/models/llama/modeling_llama.py",
+            "src/transformers/models/llama/configuration_llama.py"
+          ],
+          "minimal_modules": [
+            "LlamaModel",
+            "LlamaDecoderLayer / LlamaAttention",
+            "LlamaRMSNorm / LlamaRotaryEmbedding"
+          ],
+          "practice_task": "在 modeling_llama.py 中标注一次前向的数据流：从 input_ids 到 logits，标出每一步用到的模块与本手册前序讲义的知识点。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "Modular 机制与 modular_*.py",
+          "order": 3,
+          "filename": "u7-l3-modular-system.md",
+          "level": "intermediate",
+          "topic": "讲解 modular 文件如何通过继承其他模型来减少重复，make fix-repo 如何从 modular_*.py 生成标准 modeling/config 文件。",
+          "learning_goals": [
+            "理解 Modular 系统解决代码重复的思路",
+            "掌握 modular 文件可继承、生成文件不可手改的规则",
+            "了解 # Copied from 与 modular 的关系"
+          ],
+          "source_files": [
+            "src/transformers/models/gemma2/modular_gemma2.py",
+            "src/transformers/models/qwen2/modular_qwen2.py",
+            "docs/source/en/modular_transformers.md"
+          ],
+          "minimal_modules": [
+            "modular 文件",
+            "继承与生成",
+            "# Copied from"
+          ],
+          "practice_task": "阅读 modular_gemma2.py，找出它继承自哪个模型、覆盖了哪些方法，并对照生成的 modeling_gemma2.py 验证生成结果。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "权重转换与 GGUF 加载",
+          "order": 4,
+          "filename": "u7-l4-weight-conversion-and-gguf.md",
+          "level": "intermediate",
+          "topic": "讲解 convert_*_weights_to_hf.py 的原始权重转换脚本，以及 modeling_gguf_pytorch_utils.py 如何把 gguf 格式权重加载进 transformers 模型。",
+          "learning_goals": [
+            "理解原始框架权重到 HF 格式的映射",
+            "掌握 GGUF 加载的键名映射与 TensorProcessor",
+            "了解 safetensors 自动转换流程"
+          ],
+          "source_files": [
+            "src/transformers/models/llama/convert_llama_weights_to_hf.py",
+            "src/transformers/modeling_gguf_pytorch_utils.py",
+            "src/transformers/safetensors_conversion.py",
+            "docs/source/en/gguf.md"
+          ],
+          "minimal_modules": [
+            "convert 权重脚本",
+            "GGUF 映射",
+            "safetensors 转换"
+          ],
+          "practice_task": "用 GGUF 加载一个开源 gguf 模型到对应的 transformers 类，打印映射前后的若干权重键名，理解转换过程。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "生成 Generation",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "GenerationConfig 与生成模式",
+          "order": 1,
+          "filename": "u8-l1-generation-config.md",
+          "level": "intermediate",
+          "topic": "讲解 GenerationConfig 数据类与 GenerationMode 枚举（greedy/sample/beam/contrastive/assisted 等），以及它与模型 config 的关系。",
+          "learning_goals": [
+            "理解 GenerationConfig 承载的所有采样参数",
+            "掌握各 GenerationMode 的触发条件",
+            "了解生成配置的加载与覆盖优先级"
+          ],
+          "source_files": [
+            "src/transformers/generation/configuration_utils.py",
+            "src/transformers/generation/__init__.py"
+          ],
+          "minimal_modules": [
+            "GenerationConfig",
+            "GenerationMode",
+            "参数优先级"
+          ],
+          "practice_task": "加载一个模型的 generation_config，修改 temperature/top_p 并保存，再在 generate 时用参数覆盖验证优先级。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "GenerationMixin 主循环 generate()",
+          "order": 2,
+          "filename": "u8-l2-generate-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 generation/utils.py 中 GenerationMixin.generate() 的整体流程：准备输入、选择模式、主解码循环、KV Cache 更新与收尾。",
+          "learning_goals": [
+            "理解 generate 的端到端控制流",
+            "掌握模型准备、logits 计算与 next-token 选择",
+            "了解 KV Cache 在生成循环中的更新"
+          ],
+          "source_files": [
+            "src/transformers/generation/utils.py"
+          ],
+          "minimal_modules": [
+            "GenerationMixin.generate",
+            "模式分发",
+            "主解码循环"
+          ],
+          "practice_task": "在 generate 调用前后打印 input_ids 与返回序列长度，并设置 return_dict_in_grouped/output_scores 观察中间产物。",
+          "depends_on": [
+            "u8-l1",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "解码策略：贪心/束搜/采样/对比",
+          "order": 3,
+          "filename": "u8-l3-decoding-strategies.md",
+          "level": "intermediate",
+          "topic": "对比 greedy_search、sample、beam_search、contrastive_search 的算法与适用场景，以及它们的代码入口。",
+          "learning_goals": [
+            "掌握四种主要解码策略的原理与差异",
+            "理解 beam search 的候选扩展与评分",
+            "了解 contrastive search 的惩罚机制"
+          ],
+          "source_files": [
+            "src/transformers/generation/utils.py",
+            "docs/source/en/generation_strategies.md"
+          ],
+          "minimal_modules": [
+            "greedy/sample/beam/contrastive",
+            "策略选择",
+            "generation_strategies 文档"
+          ],
+          "practice_task": "对同一 prompt 分别用 greedy、sampling、beam 生成，比较输出多样性与质量，并记录各自的耗时。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "Logits 处理器与 Warpers",
+          "order": 4,
+          "filename": "u8-l4-logits-processors.md",
+          "level": "intermediate",
+          "topic": "讲解 logits_process.py：LogitsProcessor/LogitsProcessorList，以及各类处理器（repetition penalty、no_repeat_ngram、min_length 等）与采样 warpers（temperature/top_k/top_p/min_p）。",
+          "learning_goals": [
+            "理解 LogitsProcessorList 的责任链模式",
+            "掌握常用处理器与 warper 的作用",
+            "了解如何自定义并注入处理器"
+          ],
+          "source_files": [
+            "src/transformers/generation/logits_process.py"
+          ],
+          "minimal_modules": [
+            "LogitsProcessor/List",
+            "处理器族",
+            "采样 warpers"
+          ],
+          "practice_task": "编写一个自定义 LogitsProcessor（如禁止某些 token），在 generate 时通过 logits_processor 注入并验证生效。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "停止条件与流式输出",
+          "order": 5,
+          "filename": "u8-l5-stopping-and-streaming.md",
+          "level": "intermediate",
+          "topic": "讲解 stopping_criteria.py（MaxLength/Eos/StopString/MaxTime 等）与 streamers.py（TextStreamer/TextIteratorStreamer）如何在生成中控制终止与实时输出。",
+          "learning_goals": [
+            "掌握 StoppingCriteriaList 的组合机制",
+            "理解基于字符串与 EOS 的停止条件",
+            "会用 TextIteratorStreamer 做流式输出"
+          ],
+          "source_files": [
+            "src/transformers/generation/stopping_criteria.py",
+            "src/transformers/generation/streamers.py"
+          ],
+          "minimal_modules": [
+            "StoppingCriteria/List",
+            "StopString/Eos",
+            "Streamer 系列"
+          ],
+          "practice_task": "用 TextIteratorStreamer 配合线程，实现一个逐 token 打印的流式生成，并加入一个 StopStringCriteria 提前终止。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l6",
+          "title": "投机解码与候选生成",
+          "order": 6,
+          "filename": "u8-l6-speculative-decoding.md",
+          "level": "advanced",
+          "topic": "讲解 candidate_generator.py 中的投机/辅助解码：AssistedCandidateGenerator、PromptLookupCandidateGenerator、MTP/early-exit 等候选生成策略。",
+          "learning_goals": [
+            "理解投机解码用小模型加速大模型生成的原理",
+            "掌握各类 CandidateGenerator 的差异",
+            "了解 assisted decoding 的使用方式"
+          ],
+          "source_files": [
+            "src/transformers/generation/candidate_generator.py",
+            "docs/source/en/assisted_decoding.md"
+          ],
+          "minimal_modules": [
+            "CandidateGenerator",
+            "Assisted/PromptLookup",
+            "assisted_decoding 文档"
+          ],
+          "practice_task": "用一个小模型作为 assistant 对大模型做 assisted generation，对比与普通生成的吞吐差异。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "训练 Training",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Trainer 训练主类",
+          "order": 1,
+          "filename": "u9-l1-trainer.md",
+          "level": "intermediate",
+          "topic": "讲解 trainer.py 的 Trainer 类：train/evaluate/predict 三大循环、训练步、梯度累计、checkpoint 保存与恢复。",
+          "learning_goals": [
+            "理解 Trainer 的训练循环控制流",
+            "掌握梯度累计、梯度裁剪与日志记录",
+            "了解 checkpoint 保存/恢复机制"
+          ],
+          "source_files": [
+            "src/transformers/trainer.py",
+            "src/transformers/trainer_seq2seq.py",
+            "examples/pytorch/language-modeling"
+          ],
+          "minimal_modules": [
+            "Trainer.train/evaluate/predict",
+            "训练步",
+            "checkpoint"
+          ],
+          "practice_task": "用 Trainer 在一个小数据集上微调一个文本分类模型，记录训练日志并从 checkpoint 恢复训练。",
+          "depends_on": [
+            "u5-l2",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "TrainingArguments 与参数解析",
+          "order": 2,
+          "filename": "u9-l2-training-arguments.md",
+          "level": "intermediate",
+          "topic": "讲解 training_args.py 的 TrainingArguments 数据类与 hf_argparser.py 的 HfArgumentParser，涵盖批大小、学习率、fp16/bf16、保存与评估策略等。",
+          "learning_goals": [
+            "掌握 TrainingArguments 的关键字段分组",
+            "理解 HfArgumentParser 从数据类生成 CLI 的机制",
+            "了解混合精度与梯度累计配置"
+          ],
+          "source_files": [
+            "src/transformers/training_args.py",
+            "src/transformers/training_args_seq2seq.py",
+            "src/transformers/hf_argparser.py"
+          ],
+          "minimal_modules": [
+            "TrainingArguments",
+            "HfArgumentParser",
+            "混合精度/梯度累计"
+          ],
+          "practice_task": "用 HfArgumentParser 把 TrainingArguments 转成 CLI 参数，从命令行解析一份训练配置并打印。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "优化器与学习率调度器",
+          "order": 3,
+          "filename": "u9-l3-optimization-schedulers.md",
+          "level": "intermediate",
+          "topic": "讲解 optimization.py 的 AdamW/Adafactor 与各类学习率调度（linear/cosine/inverse_sqrt/warmup），以及 trainer_optimizer.py 的优化器工厂分发。",
+          "learning_goals": [
+            "掌握 get_scheduler 与各类调度曲线",
+            "理解 Adafactor 的内存优势",
+            "了解 OptimizerHandler 对多种优化器后端的分发"
+          ],
+          "source_files": [
+            "src/transformers/optimization.py",
+            "src/transformers/trainer_optimizer.py",
+            "docs/source/en/main_classes/optimizer_schedules.md"
+          ],
+          "minimal_modules": [
+            "AdamW/Adafactor",
+            "get_scheduler",
+            "OptimizerHandler"
+          ],
+          "practice_task": "为同一模型分别配置 linear 与 cosine 调度器，训练若干步并绘制学习率曲线对比。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "回调、状态与控制",
+          "order": 4,
+          "filename": "u9-l4-callbacks-and-state.md",
+          "level": "intermediate",
+          "topic": "讲解 trainer_callback.py 的 TrainerCallback/CallbackHandler/TrainerState/TrainerControl，以及 trainer_utils.py 的策略枚举与工具（set_seed、get_last_checkpoint 等）。",
+          "learning_goals": [
+            "理解回调在训练各阶段的注入点",
+            "掌握 TrainerState/TrainerControl 对流程的控制",
+            "了解 EarlyStopping 等内置回调"
+          ],
+          "source_files": [
+            "src/transformers/trainer_callback.py",
+            "src/transformers/trainer_utils.py",
+            "src/transformers/trainer_jit_checkpoint.py"
+          ],
+          "minimal_modules": [
+            "TrainerCallback/CallbackHandler",
+            "TrainerState/TrainerControl",
+            "策略枚举"
+          ],
+          "practice_task": "实现一个自定义 TrainerCallback，在每个 epoch 结束时打印验证指标，并在训练中启用它。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "数据整理器 DataCollator",
+          "order": 5,
+          "filename": "u9-l5-data-collator.md",
+          "level": "intermediate",
+          "topic": "讲解 data/data_collator.py 的各类整理器：DataCollatorWithPadding、ForTokenClassification、ForSeq2Seq、ForLanguageModeling 等，以及 DataCollatorMixin。",
+          "learning_goals": [
+            "理解数据整理器在 DataLoader 中的作用",
+            "掌握动态填充与 MLM 掩码生成",
+            "了解不同任务对应的整理器选择"
+          ],
+          "source_files": [
+            "src/transformers/data/data_collator.py",
+            "docs/source/en/main_classes/data_collator.md"
+          ],
+          "minimal_modules": [
+            "DataCollatorMixin",
+            "WithPadding/ForSeq2Seq",
+            "ForLanguageModeling"
+          ],
+          "practice_task": "为一个 token-classification 任务选择并配置 DataCollator，对一个 batch 做整理并打印填充后的张量。",
+          "depends_on": [
+            "u9-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l6",
+          "title": "损失函数与标签处理",
+          "order": 6,
+          "filename": "u9-l6-loss-functions.md",
+          "level": "advanced",
+          "topic": "讲解 loss/loss_utils.py 的 ForCausalLMLoss/ForMaskedLMLoss（含标签 shift）、fixed_cross_entropy，以及 trainer_pt_utils.py 的辅助函数（LabelSmoother、nested_detach 等）。",
+          "learning_goals": [
+            "理解因果语言模型损失中的标签 shift",
+            "掌握 fixed_cross_entropy 的数值稳定性处理",
+            "了解 loss/ 目录按检测/语音任务的拆分"
+          ],
+          "source_files": [
+            "src/transformers/loss/loss_utils.py",
+            "src/transformers/trainer_pt_utils.py",
+            "src/transformers/loss/loss_for_object_detection.py"
+          ],
+          "minimal_modules": [
+            "ForCausalLMLoss",
+            "标签 shift",
+            "LabelSmoother"
+          ],
+          "practice_task": "手动实现一次 ForCausalLMLoss 的标签 shift 与交叉熵，与库实现对照验证结果一致。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "高级扩展与生态",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "量化体系 Quantizers",
+          "order": 1,
+          "filename": "u10-l1-quantization.md",
+          "level": "advanced",
+          "topic": "讲解 quantizers/ 的 HfQuantizer/AutoHfQuantizer 抽象与众多后端（bitsandbytes 4/8bit、GPTQ、AWQ、Quanto、HQQ 等），以及 QuantizationConfig。",
+          "learning_goals": [
+            "理解 AutoHfQuantizer 的后端分发",
+            "掌握 bitsandbytes 4bit 量化的使用",
+            "了解量化配置与加载流程"
+          ],
+          "source_files": [
+            "src/transformers/quantizers/base.py",
+            "src/transformers/quantizers/auto.py",
+            "src/transformers/quantizers/quantizer_bnb_4bit.py",
+            "src/transformers/utils/quantization_config.py",
+            "docs/source/en/main_classes/quantization.md"
+          ],
+          "minimal_modules": [
+            "HfQuantizer/AutoHfQuantizer",
+            "BitsAndBytes/GPTQ",
+            "QuantizationConfig"
+          ],
+          "practice_task": "用 BitsAndBytesConfig 4bit 加载一个大模型，对比量化前后的显存与生成质量。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l2",
+          "title": "模型导出 Exporters",
+          "order": 2,
+          "filename": "u10-l2-exporters.md",
+          "level": "advanced",
+          "topic": "讲解 exporters/ 的 HfExporter 抽象与 ONNX、Dynamo(torch.export)、ExecuTorch 三种导出后端，以及 ExportConfig 体系。",
+          "learning_goals": [
+            "理解 AutoHfExporter 与导出后端选择",
+            "掌握 OnnxConfig 与导出流程",
+            "了解 Dynamo/ExecuTorch 的适用场景"
+          ],
+          "source_files": [
+            "src/transformers/exporters/base.py",
+            "src/transformers/exporters/configs.py",
+            "src/transformers/exporters/exporter_onnx.py",
+            "src/transformers/exporters/exporter_dynamo.py",
+            "docs/source/en/exporters.md"
+          ],
+          "minimal_modules": [
+            "HfExporter/AutoHfExporter",
+            "OnnxConfig",
+            "ExportFormat"
+          ],
+          "practice_task": "把一个小模型导出为 ONNX，并用 ONNX Runtime 加载做一次推理验证结果与原模型一致。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l3",
+          "title": "分布式训练 FSDP 与张量并行",
+          "order": 3,
+          "filename": "u10-l3-distributed-fsdp-tp.md",
+          "level": "advanced",
+          "topic": "讲解 distributed/ 的 FSDP 初始化、分片工具与 DistributedMixin，以及 integrations/tensor_parallel.py 的张量并行初始化。",
+          "learning_goals": [
+            "理解 FSDP 的分片与 gather 机制",
+            "掌握 verify_fsdp_plan 与分布式 checkpoint",
+            "了解张量并行的初始化与 to_local"
+          ],
+          "source_files": [
+            "src/transformers/distributed/fsdp.py",
+            "src/transformers/distributed/utils.py",
+            "src/transformers/distributed/mixin.py",
+            "src/transformers/integrations/tensor_parallel.py",
+            "docs/source/en/fsdp.md"
+          ],
+          "minimal_modules": [
+            "FSDP 初始化",
+            "分布式 checkpoint",
+            "Tensor Parallel"
+          ],
+          "practice_task": "阅读 verify_fsdp_plan 与一个模型的 tp_plan，说明该模型如何被切分到多卡，并写出切分策略说明。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l4",
+          "title": "DeepSpeed 与集成生态",
+          "order": 4,
+          "filename": "u10-l4-deepspeed-integrations.md",
+          "level": "advanced",
+          "topic": "讲解 integrations/ 的 DeepSpeed（HfDeepSpeedConfig/deepspeed_init）、PEFT、Accelerate，以及 integration_utils.py 的各类日志回调（WandB/TensorBoard/MLflow 等）。",
+          "learning_goals": [
+            "理解 DeepSpeed ZeRO 的接入与配置",
+            "掌握 PEFT/Accelerate 集成入口",
+            "了解实验追踪回调的注册机制"
+          ],
+          "source_files": [
+            "src/transformers/integrations/deepspeed.py",
+            "src/transformers/integrations/peft.py",
+            "src/transformers/integrations/integration_utils.py",
+            "src/transformers/integrations/fsdp.py",
+            "docs/source/en/deepspeed.md"
+          ],
+          "minimal_modules": [
+            "HfDeepSpeedConfig",
+            "PEFT/Accelerate",
+            "日志回调"
+          ],
+          "practice_task": "为一次 Trainer 训练启用 WandB 或 TensorBoard 回调，记录训练曲线；并阅读一份 DeepSpeed 配置说明 ZeRO 阶段。",
+          "depends_on": [
+            "u9-l1",
+            "u10-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l5",
+          "title": "内核与注意力集成",
+          "order": 5,
+          "filename": "u10-l5-kernels-and-attention-integrations.md",
+          "level": "advanced",
+          "topic": "讲解 integrations/ 中各类注意力/内核后端（sdpa_attention、flex_attention、flash_attention、paged 变体）与 MoE/Liger 等，以及 kernels 文档。",
+          "learning_goals": [
+            "理解多种注意力后端的集成与切换",
+            "掌握 flex_attention/paged attention 的适用场景",
+            "了解 kernel 配置与 MoE 集成"
+          ],
+          "source_files": [
+            "src/transformers/integrations/sdpa_attention.py",
+            "src/transformers/integrations/flex_attention.py",
+            "src/transformers/integrations/moe.py",
+            "src/transformers/integrations/liger.py",
+            "docs/source/en/kernels.md"
+          ],
+          "minimal_modules": [
+            "sdpa/flex/paged attention",
+            "MoE 集成",
+            "kernel 配置"
+          ],
+          "practice_task": "为一个模型切换 sdpa 与 flex_attention 后端，对比长序列下的显存与速度，并记录结果。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u10-l6",
+          "title": "推理服务与持续批处理",
+          "order": 6,
+          "filename": "u10-l6-inference-serving.md",
+          "level": "advanced",
+          "topic": "讲解 cli/serve.py 与 cli/serving/ 的内置推理服务（chat/completion/transcription）、持续批处理 continuous batching，以及 ReasoningMode。",
+          "learning_goals": [
+            "理解 transformers 内置 serve 命令的架构",
+            "掌握持续批处理对吞吐的意义",
+            "了解服务端模型管理与响应格式"
+          ],
+          "source_files": [
+            "src/transformers/cli/serve.py",
+            "src/transformers/cli/serving/server.py",
+            "src/transformers/cli/serving/chat_completion.py",
+            "docs/source/en/continuous_batching.md"
+          ],
+          "minimal_modules": [
+            "Serve 命令",
+            "serving server",
+            "continuous batching"
+          ],
+          "practice_task": "用 transformers serve 启动一个本地推理服务，发送一条 chat 请求并观察响应；阅读 continuous_batching 文档总结其加速原理。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "工具链与二次开发",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "import_utils 与可选依赖管理",
+          "order": 1,
+          "filename": "u11-l1-import-utils-and-deps.md",
+          "level": "advanced",
+          "topic": "讲解 utils/import_utils.py 的 is_*_available 检测、_LazyModule、define_import_structure，以及 dependency_versions_check.py 的依赖版本校验。",
+          "learning_goals": [
+            "理解可选依赖的运行时检测机制",
+            "掌握 _LazyModule 与 import_structure 的协作",
+            "了解 dummy_*.py 占位文件的作用"
+          ],
+          "source_files": [
+            "src/transformers/utils/import_utils.py",
+            "src/transformers/dependency_versions_check.py",
+            "src/transformers/dependency_versions_table.py"
+          ],
+          "minimal_modules": [
+            "is_*_available",
+            "_LazyModule",
+            "依赖版本校验"
+          ],
+          "practice_task": "新增一个假设的可选依赖检测函数（仅阅读与设计，不提交），说明它如何接入 _import_structure 与 dummy 文件。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l2",
+          "title": "添加一个新模型",
+          "order": 2,
+          "filename": "u11-l2-add-new-model.md",
+          "level": "advanced",
+          "topic": "结合 add_new_model.md 与 modular_transformers.md，讲解从零（或基于现有模型用 cli/add_new_model_like.py）添加一个新模型的完整流程与规范。",
+          "learning_goals": [
+            "掌握新模型目录与文件的组织规范",
+            "理解用 modular 添加模型的标准流程",
+            "了解 AUTO 映射与文档/测试的配套要求"
+          ],
+          "source_files": [
+            "docs/source/en/add_new_model.md",
+            "docs/source/en/modular_transformers.md",
+            "src/transformers/cli/add_new_model_like.py",
+            "src/transformers/models/auto/auto_mappings.py"
+          ],
+          "minimal_modules": [
+            "add_new_model 流程",
+            "modular 添加",
+            "AUTO 映射"
+          ],
+          "practice_task": "参照 add_new_model 文档，规划一个新模型需要新增/修改的文件清单与 AUTO 映射注册点（无需实现完整模型）。",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l3",
+          "title": "测试体系",
+          "order": 3,
+          "filename": "u11-l3-testing-system.md",
+          "level": "advanced",
+          "topic": "讲解 tests/ 下的通用 tester mixin（test_modeling_common、causal_lm_tester、test_tokenization_common、test_training_mixin）与 RUN_SLOW 等运行方式。",
+          "learning_goals": [
+            "理解 tester mixin 如何复用于所有模型",
+            "掌握模型/分词器/训练的通用测试结构",
+            "了解慢速测试与标记机制"
+          ],
+          "source_files": [
+            "tests/test_modeling_common.py",
+            "tests/causal_lm_tester.py",
+            "tests/test_tokenization_common.py",
+            "tests/test_training_mixin.py"
+          ],
+          "minimal_modules": [
+            "modeling common tester",
+            "causal_lm_tester",
+            "RUN_SLOW 标记"
+          ],
+          "practice_task": "为一个已有模型运行其 modeling 与 tokenization 通用测试（部分），解释 tester mixin 覆盖了哪些用例。",
+          "depends_on": [
+            "u7-l2",
+            "u9-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l4",
+          "title": "仓库一致性工具链 make fix-repo",
+          "order": 4,
+          "filename": "u11-l4-repo-consistency-tooling.md",
+          "level": "advanced",
+          "topic": "讲解 Makefile 与 utils/checkers.py 驱动的 style/typing/check-repo/fix-repo 流程，涵盖 ruff、modular_conversion、copies、auto_mappings、docstrings 等一致性检查。",
+          "learning_goals": [
+            "理解 make style/typing/fix-repo 的分工",
+            "掌握 modular_conversion 与 copies 检查的意义",
+            "了解提交前的必做检查清单"
+          ],
+          "source_files": [
+            "Makefile",
+            "utils/checkers.py",
+            "docs/source/en/contributing.md"
+          ],
+          "minimal_modules": [
+            "Makefile 目标",
+            "checkers",
+            "modular_conversion/copies"
+          ],
+          "practice_task": "在一个本地改动上依次运行 make style 与 make check-repo，记录并修复报出的一致性问题。",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u11-l5",
+          "title": "Pipeline 进阶与自定义",
+          "order": 5,
+          "filename": "u11-l5-pipeline-advanced.md",
+          "level": "advanced",
+          "topic": "讲解 pipelines/base.py 的 Pipeline 抽象（preprocess/forward/postprocess/_sanitize_parameters）与如何新增一个自定义 pipeline，结合 add_new_pipeline 文档。",
+          "learning_goals": [
+            "理解 Pipeline 的三段式与参数注入",
+            "掌握实现自定义 pipeline 的步骤",
+            "了解 pipeline 的任务注册与自动分发"
+          ],
+          "source_files": [
+            "src/transformers/pipelines/base.py",
+            "src/transformers/pipelines/__init__.py",
+            "docs/source/en/add_new_pipeline.md",
+            "src/transformers/pipelines/text_generation.py"
+          ],
+          "minimal_modules": [
+            "Pipeline 基类",
+            "_sanitize_parameters",
+            "任务注册"
+          ],
+          "practice_task": "参照 add_new_pipeline，实现一个最小自定义 pipeline（如简单情感打分），用 pipeline() 加载并跑通一条输入。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
