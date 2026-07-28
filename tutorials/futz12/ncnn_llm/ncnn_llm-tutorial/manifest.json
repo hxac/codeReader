@@ -1,0 +1,1085 @@
+{
+  "project": "ncnn_llm",
+  "head": "f2f29e41be164c788c36cc44bdbf2d0d4810477e",
+  "rationale": "本手册围绕 ncnn_llm「以 ncnn 为底座、用一套共享解码+KV cache 运行时驱动多种模型家族」的核心定位来设计学习顺序。入门单元（U1）先让读者跑通项目、看清目录与 model.json 配置体系；进阶单元（U2）打通 LLM 推理主链路（基类→共享文本运行时→prefill→generate→上下文与多轮对话），这是理解后续一切模态的基础。U3 分词器与采样、U4 位置编码 RoPE 是推理链路上两个关键子系统的深入拆解；U5 视觉语言模型讲解图像如何进入主链路，U6 把同一套共享运行时扩展到嵌入、OCR、ASR、翻译四种模态。U7 讲对话模板与工具调用等工程化能力，U8 面向二次开发，覆盖 Vulkan/benchmark/测试/导出/平台适配与接入新模型。整体遵循「先主干后分支、先共享后特化」的顺序，保证每篇讲义依赖关系清晰、可独立操作实践。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "上手与项目全貌",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览与定位",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 ncnn_llm 是什么：基于 ncnn 的轻量级 C++ 推理运行时，统一支持 LLM、VLM、OCR、ASR、翻译与嵌入模型，面向边缘设备/桌面 CPU/Vulkan GPU。",
+          "learning_goals": [
+            "理解项目定位、起源（nihui 的 kvcache 工作）与目标场景",
+            "列出支持的模型类别与代表模型",
+            "理清 ncnn_llm 与底层 ncnn 的关系"
+          ],
+          "source_files": [
+            "readme.md",
+            "README_CN.md",
+            "LICENSE"
+          ],
+          "minimal_modules": [
+            "项目定位与特性清单",
+            "支持模型表",
+            "ncnn 后端关系"
+          ],
+          "practice_task": "阅读 README 与 README_CN，列出项目支持的全部模型类别，并用一句话描述 ncnn_llm 与 ncnn 的关系；在自己的笔记里画出「输入(prompt/图像/音频)→输出(文本/嵌入)」的高层管线图。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "构建系统与运行方式",
+          "order": 2,
+          "filename": "u1-l2-build-and-run.md",
+          "level": "beginner",
+          "topic": "讲解如何用 xmake 构建项目，依赖 ncnn(master) 与 nlohmann_json，如何构建单个 target 并运行 llm_ncnn_run。",
+          "learning_goals": [
+            "掌握 xmake 依赖声明与 target 划分",
+            "学会构建并运行主示例 llm_ncnn_run",
+            "理解各 target（示例/测试/benchmark）的用途"
+          ],
+          "source_files": [
+            "xmake.lua",
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "add_requires(ncnn master, nlohmann_json)",
+            "target 定义(ncnn_llm/llm_ncnn_run/test_llm/benchllm)",
+            "xmake build/run 用法"
+          ],
+          "practice_task": "安装 xmake 与 ncnn(master)，执行 xmake build llm_ncnn_run 并记录构建产物路径；再分别单独构建 test_llm 与 benchllm 两个 target，确认都能成功。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与源码地图",
+          "order": 3,
+          "filename": "u1-l3-directory-and-source-map.md",
+          "level": "beginner",
+          "topic": "对照 README 的 Project Layout，逐目录讲解 src/examples/utils/export/benchmark/tests 的职责，并建立源码地图。",
+          "learning_goals": [
+            "记住仓库主要目录的职责",
+            "知道核心运行时、示例、工具、导出脚本分别在哪",
+            "能在源码地图中快速定位某个功能"
+          ],
+          "source_files": [
+            "readme.md",
+            "xmake.lua"
+          ],
+          "minimal_modules": [
+            "src 核心运行时",
+            "examples 示例入口",
+            "src/utils 工具(tokenizer/rope/image/prompt)",
+            "export 导出脚本"
+          ],
+          "practice_task": "对照 README 的 Project Layout，在仓库里为每个目录(src、examples、src/utils、export、benchmark、tests)各找出一个代表文件，并用一两句话说明它的职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "CLI 入口、选项解析与 UTF-8",
+          "order": 4,
+          "filename": "u1-l4-cli-entry-and-options.md",
+          "level": "beginner",
+          "topic": "从 examples/llm_ncnn_run/main.cpp 入手，讲解 main 流程：UTF-8 参数处理、选项解析、模型路径归一化、模板检测、构造模型、进入 run_cli。",
+          "learning_goals": [
+            "读懂 main.cpp 的整体流程",
+            "理解 Options 结构与 parse_options 的命令行选项",
+            "了解 enable_utf8_console/get_utf8_args 的跨平台作用"
+          ],
+          "source_files": [
+            "examples/llm_ncnn_run/main.cpp",
+            "examples/llm_ncnn_run/options.h",
+            "examples/llm_ncnn_run/options.cpp",
+            "examples/llm_ncnn_run/utf8_args.h"
+          ],
+          "minimal_modules": [
+            "main 主流程",
+            "Options 结构与 parse_options",
+            "normalize_model_path",
+            "UTF-8 控制台/参数处理"
+          ],
+          "practice_task": "阅读 main.cpp 与 options.cpp，新增一个 --max-tokens <N> 选项：在 Options 中加字段、在 parse_options 中解析，并在 main 中打印它的值；同时说明 enable_utf8_console 与 get_utf8_args 解决了什么问题。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l5",
+          "title": "模型目录与 model.json 配置体系",
+          "order": 5,
+          "filename": "u1-l5-model-json-config.md",
+          "level": "beginner",
+          "topic": "讲解每个模型目录由 model.json 描述，结合 ncnn_llm_gpt 构造函数说明 params/tokenizer/setting(rope/attn_cnt/vision) 等字段如何被读取。",
+          "learning_goals": [
+            "理解 model.json 的整体结构(params/tokenizer/setting)",
+            "知道配置字段与构造函数读取代码的对应关系",
+            "能为一个文本模型写出最小可用配置"
+          ],
+          "source_files": [
+            "readme.md",
+            "src/ncnn_llm_gpt.cpp"
+          ],
+          "minimal_modules": [
+            "config['params'] 读取网络路径",
+            "config['tokenizer'] 读取分词器",
+            "config['setting'] 读取 attn_cnt/rope/vision"
+          ],
+          "practice_task": "对照 ncnn_llm_gpt 构造函数，为某个文本模型目录手写一份最小 model.json（含 params、tokenizer、setting.rope），并逐字段注明它被构造函数里哪几行代码读取。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "LLM 推理主链路",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "基类 ncnn_llm_base 与公共能力",
+          "order": 1,
+          "filename": "u2-l1-base-class-common.md",
+          "level": "intermediate",
+          "topic": "讲解 ncnn_llm_base 提供的公共能力：KVCache 类型、Vulkan/线程管理、create_option、load_net、sample_logits，以及若干 ncnn::Mat 工具函数。",
+          "learning_goals": [
+            "理解 KVCache 的类型定义与用途",
+            "掌握 create_option 如何把线程/Vulkan 设置传给 ncnn",
+            "了解基类内置的采样逻辑 sample_logits"
+          ],
+          "source_files": [
+            "src/ncnn_llm_base.h"
+          ],
+          "minimal_modules": [
+            "KVCache typedef",
+            "create_option",
+            "load_net",
+            "sample_logits(softmax/top_k/top_p)"
+          ],
+          "practice_task": "基于 ncnn_llm_base 写一个小测试：分别以 use_vulkan=true/false 构造一个派生类对象，打印内部 num_threads_ 与 use_vulkan_，并说明 create_option 如何把这些设置下发给 ncnn::Option。",
+          "depends_on": [
+            "u1-l3",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "ncnn 调用模式与共享文本运行时",
+          "order": 2,
+          "filename": "u2-l2-ncnn-pattern-and-text-runtime.md",
+          "level": "intermediate",
+          "topic": "讲解 ncnn 的 Extractor 调用模式(in0/out0、input/extract、KV cache 的 cache_k%d/cache_v%d 命名)，以及 ncnn_text_runtime 暴露的四个共享函数。",
+          "learning_goals": [
+            "掌握 ncnn Net/Extractor 的输入输出约定",
+            "理解 KV cache 在 prefill(decode) 阶段的输入输出张量命名",
+            "知道共享文本运行时四个函数的职责与签名"
+          ],
+          "source_files": [
+            "src/ncnn_text_runtime.h",
+            "src/ncnn_text_runtime.cpp"
+          ],
+          "minimal_modules": [
+            "llm_run_text_embed",
+            "llm_run_decoder_with_kv",
+            "llm_run_lm_head",
+            "llm_select_next_token"
+          ],
+          "practice_task": "用 llm_run_text_embed / llm_run_decoder_with_kv / llm_run_lm_head 三个函数串联一次「输入一串 token id → 得到 logits」的推理，并打印 argmax 得到的 token id（注意 attn_cnt 与 is_prefill 的取值）。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "prefill 文本预填充流程",
+          "order": 3,
+          "filename": "u2-l3-prefill-flow.md",
+          "level": "intermediate",
+          "topic": "逐步拆解 ncnn_llm_gpt::prefill(文本)：分词→生成 RoPE cache→embed→因果 mask→decoder(产出 KV cache)→proj_out→首个 token。",
+          "learning_goals": [
+            "理清 prefill 的完整步骤与顺序",
+            "理解为什么要把最后一个 token 弹出留给后续 decode",
+            "掌握因果掩码(mask)的构造方式"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "src/ncnn_llm_gpt.h"
+          ],
+          "minimal_modules": [
+            "bpe->encode",
+            "generate_rope_embed_cache",
+            "embed_net 提取 token_embed",
+            "因果 mask 构造",
+            "decoder_net + proj_out_net"
+          ],
+          "practice_task": "跟踪 ncnn_llm_gpt::prefill(input_text) 的一次调用，在源码里标注 tokenize→rope→embed→mask→decoder→proj_out 各步骤对应的代码行，并解释「token_ids.pop_back() 弹出最后一个 token」的原因。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "generate 自回归解码主循环",
+          "order": 4,
+          "filename": "u2-l4-generate-loop.md",
+          "level": "intermediate",
+          "topic": "讲解 generate 的自回归循环：每步 embed 上一个 token→decoder(cache in/out)→lm_head→采样→decode 文本→callback，并处理 eos、repetition penalty、think 标签与工具调用。",
+          "learning_goals": [
+            "理解自回归解码每一步的数据流",
+            "掌握 KV cache 在 decode 阶段的更新方式",
+            "了解 eos/think/tool_call 的停止与分流逻辑"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "src/ncnn_llm_gpt.h",
+            "src/ncnn_text_runtime.cpp"
+          ],
+          "minimal_modules": [
+            "自回归循环",
+            "KV cache in/out 更新",
+            "采样(贪心/temperature/top_k/top_p)",
+            "eos/think/tool_call 处理"
+          ],
+          "practice_task": "在 generate 循环里把 temperature/top_p/top_k 分别改为不同取值，观察输出文本的变化；并解释 llm_select_next_token 中 repetition_penalty 对历史 token 的惩罚逻辑（<0 时乘、>=0 时除）。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "推理上下文 ctx 与多轮对话",
+          "order": 5,
+          "filename": "u2-l5-context-and-multiturn.md",
+          "level": "intermediate",
+          "topic": "讲解 ncnn_llm_gpt_ctx 体系（base/qwen3_5 派生、clone、kv_cache/position_id/cur_token）以及 cli_runner 如何用它实现多轮对话。",
+          "learning_goals": [
+            "理解 ctx 如何保存 KV cache 与位置状态",
+            "掌握 clone() 在多轮对话中的作用",
+            "理清 run_cli 的多轮 prefill/generate 循环"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.h",
+            "examples/llm_ncnn_run/cli_runner.cpp"
+          ],
+          "minimal_modules": [
+            "ncnn_llm_gpt_ctx / clone",
+            "position_id 推进",
+            "qwen3_5_ctx 的 sconv/gdr cache",
+            "run_cli 多轮循环"
+          ],
+          "practice_task": "编写一段多轮对话：先 prefill system prompt，再 prefill 用户消息并 generate，把返回的 ctx 继续喂给下一轮 prefill，验证模型能记住前文（可参考 tests 里的 test_model_context_memory）。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "分词器与采样",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "分词器抽象与特殊令牌",
+          "order": 1,
+          "filename": "u3-l1-tokenizer-abstraction.md",
+          "level": "intermediate",
+          "topic": "讲解分词器的统一抽象：tokenizer_types.h 的 SpecialTokensConfig/SpecialTokenIds，以及构造函数里如何按 type 选择分词器并解析 eos/bos/additional_special_tokens。",
+          "learning_goals": [
+            "理解特殊令牌配置的数据结构",
+            "知道构造函数如何根据 tokenizer.type 选择 BPE/Unigram",
+            "掌握 eos/bos/additional_special_tokens 的解析方式"
+          ],
+          "source_files": [
+            "src/utils/tokenizer/tokenizer_types.h",
+            "src/ncnn_llm_gpt.cpp"
+          ],
+          "minimal_modules": [
+            "SpecialTokensConfig / SpecialTokenIds",
+            "tokenizer.type 分支(bpe/bbpe)",
+            "eos/bos/additional_special_tokens 解析"
+          ],
+          "practice_task": "用 SpecialTokensConfig 描述一组特殊令牌(bos/eos/unk)，参照构造函数里的写法编写代码把这些字符串解析为 id，并打印出来；说明 additional_special_tokens(如 <|image_pad|>) 为什么要单独加载。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "BPE / BBPE 分词器实现",
+          "order": 2,
+          "filename": "u3-l2-bpe-tokenizer.md",
+          "level": "intermediate",
+          "topic": "深入 BpeTokenizer：vocab/merges 加载、SentencePiece 预分词、BPE 合并(BpeForPiece + 缓存)、byte encoder(bbpe) 与 decode。",
+          "learning_goals": [
+            "掌握 BPE 合并算法与 merges_rank 的用法",
+            "理解 bbpe 的 byte encoder 与普通 bpe 的区别",
+            "了解 encode/decode 的往返行为与特殊令牌处理"
+          ],
+          "source_files": [
+            "src/utils/tokenizer/bpe_tokenizer.h",
+            "src/utils/tokenizer/bpe_tokenizer.cpp",
+            "examples/bytelevelbpe_main.cpp"
+          ],
+          "minimal_modules": [
+            "LoadFromFiles",
+            "BpeForPiece / 缓存",
+            "byte encoder(use_byte_encoder)",
+            "encode/decode"
+          ],
+          "practice_task": "用 BpeTokenizer::LoadFromFiles 加载一份 vocab+merges，对 \"Hello world\" 做 encode 再 decode，验证往返一致；再切换 use_byte_encoder=true 对比 bbpe 与 bpe 的 token 序列差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Unigram 分词器实现",
+          "order": 3,
+          "filename": "u3-l3-unigram-tokenizer.md",
+          "level": "intermediate",
+          "topic": "深入 UnigramTokenizer：sentencepiece model 加载、Trie 构建、基于对数概率的 Viterbi 分段(SegmentPiece + 缓存)与 unk_penalty。",
+          "learning_goals": [
+            "理解 Unigram 模型的词表与打分",
+            "掌握 Trie 匹配与 Viterbi 最优分段",
+            "了解 unk_penalty 对未登录词的影响"
+          ],
+          "source_files": [
+            "src/utils/tokenizer/unigram_tokenizer.h",
+            "src/utils/tokenizer/unigram_tokenizer.cpp",
+            "examples/unigram_main.cpp"
+          ],
+          "minimal_modules": [
+            "LoadFromFile(词表+对数概率)",
+            "BuildTrie/MatchAt",
+            "SegmentPiece(Viterbi)",
+            "unk_penalty"
+          ],
+          "practice_task": "用 UnigramTokenizer::LoadFromFile 加载 assets/mclip_unigram_tokenizer.txt，对一句中英文混合句子做 encode 并打印分段结果；再与 BPE 分词器对同一句的结果对比，说明两者分段风格的差异。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "采样与解码策略",
+          "order": 4,
+          "filename": "u3-l4-sampling-strategy.md",
+          "level": "intermediate",
+          "topic": "讲解采样实现：sampling.cpp 的 softmax_vec/apply_top_k/apply_top_p/sample_from_probs，以及 llm_select_next_token 与基类 sample_logits 如何组合这些策略。",
+          "learning_goals": [
+            "掌握 greedy/temperature/top_k/top_p 的实现细节",
+            "理解 repetition_penalty 的作用方式",
+            "能区分基类 sample_logits 与 llm_select_next_token 两套采样路径"
+          ],
+          "source_files": [
+            "src/sampling.h",
+            "src/sampling.cpp",
+            "src/ncnn_text_runtime.cpp",
+            "src/ncnn_llm_base.h"
+          ],
+          "minimal_modules": [
+            "softmax_vec(带温度)",
+            "apply_top_k / apply_top_p",
+            "sample_from_probs(discrete_distribution)",
+            "llm_select_next_token(含 repetition penalty)"
+          ],
+          "practice_task": "给定一段 logits（可构造小向量），分别用 greedy、top_k、top_p、带温度采样各取一次 token id 并打印；再在 llm_select_next_token 上用一段历史 token 复现 repetition_penalty 的惩罚效果。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "位置编码 RoPE",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "RoPE 基础与长上下文变体",
+          "order": 1,
+          "filename": "u4-l1-rope-basics-and-variants.md",
+          "level": "intermediate",
+          "topic": "讲解 rope_embed 的基础 RoPE cache 生成，以及 NTK/YaRN/LongRoPE 三种长上下文变体的 inv_freq 构造与缩放参数。",
+          "learning_goals": [
+            "掌握基础 RoPE 的 cos/sin cache 生成",
+            "理解 NTK/YaRN/LongRoPE 的缩放原理",
+            "知道构造函数如何根据 rope.type 选择变体"
+          ],
+          "source_files": [
+            "src/utils/rope_embed.h",
+            "src/utils/rope_embed.cpp",
+            "src/ncnn_llm_gpt.cpp"
+          ],
+          "minimal_modules": [
+            "generate_rope_embed_cache",
+            "generate_ntk_rope_embed_cache",
+            "generate_yarn_rope_embed_cache",
+            "generate_rope_embed_cache_LongRoPE"
+          ],
+          "practice_task": "调用 generate_rope_embed_cache 生成 cos/sin cache 并打印前若干维的值；再切换到 NTK/YaRN/LongRoPE 变体，比较同一 position_id 下 inv_freq（或对应 cos 值）的变化，说明长上下文变体为何能扩展上下文长度。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "视觉位置编码 mRoPE 与 Hunyuan xdrope",
+          "order": 2,
+          "filename": "u4-l2-vision-rope.md",
+          "level": "intermediate",
+          "topic": "讲解视觉场景下的多轴位置编码：Qwen-VL 的 mRoPE(interleaved 版本)、mrope_section 的轴分配，以及 HunyuanOCR 的 4 轴 xdrope 与 NTK-alpha 基。",
+          "learning_goals": [
+            "理解 mRoPE 如何为文本/图像 token 分配 t/h/w 轴位置",
+            "掌握 mrope_section 的含义",
+            "了解 Hunyuan xdrope 的 4 轴(pos4)与 alpha 基公式"
+          ],
+          "source_files": [
+            "src/utils/rope_embed.h",
+            "src/utils/rope_embed.cpp",
+            "src/utils/vision_rope.h"
+          ],
+          "minimal_modules": [
+            "generate_rope_embed_cache_vision_mrope",
+            "generate_rope_embed_cache_vision_mrope_interleaved",
+            "generate_hunyuan_xdrope_cos_sin",
+            "mrope_section / xdrope_section"
+          ],
+          "practice_task": "阅读视觉 mRoPE 与 Hunyuan xdrope 的生成函数，画出一次「文本段 + 图像段」序列里各 token 使用的时间轴(t)、高度轴(h)、宽度轴(w)分配示意（依据 mrope_section / xdrope_section 的前缀划分）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "视觉语言模型 VLM",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "视觉编码器加载与 vision_type 配置",
+          "order": 1,
+          "filename": "u5-l1-vision-encoder-load.md",
+          "level": "intermediate",
+          "topic": "讲解构造函数的 vision 分支：VISION_CLOSE/VISION_VIT/VISION_QWEN3_5_VL 三种类型，各自加载哪些视觉网络(vision_embed_patch/vision_embed_pos/vision_encoder)与配置字段。",
+          "learning_goals": [
+            "理解三种 vision_type 的区别",
+            "掌握视觉相关网络与 model.json 字段的对应",
+            "了解 <|image_pad|> 等图像相关 token 的加载"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "src/ncnn_llm_gpt.h"
+          ],
+          "minimal_modules": [
+            "vision_type 枚举",
+            "vision_embed_patch/pos/encoder 网络加载",
+            "patch_size/patch_dim/max_num_patches/spatial_merge_size",
+            "image_pad_id"
+          ],
+          "practice_task": "对照构造函数的 vision 分支，列一个表格说明 VISION_CLOSE、VISION_VIT、VISION_QWEN3_5_VL 三种类型各自会加载哪些 ncnn 网络、读取哪些 model.json 配置字段，以及是否需要 <|image_pad|>。",
+          "depends_on": [
+            "u2-l1",
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "图像预处理与 patch 切分",
+          "order": 2,
+          "filename": "u5-l2-image-preprocess-patches.md",
+          "level": "intermediate",
+          "topic": "讲解图像如何进入模型：load_image_to_ncnn_mat 加载，get_image_size_for_patches 计算目标 patch 网格，bgr_to_pixel_values 与 reorder_patches_for_merge 重排。",
+          "learning_goals": [
+            "掌握图像加载与缩放工具",
+            "理解 patch 网格尺寸的计算规则",
+            "了解 spatial_merge_size 下 patch 重排的目的"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "src/utils/image_utils.h",
+            "src/utils/image_utils.cpp"
+          ],
+          "minimal_modules": [
+            "load_image_to_ncnn_mat",
+            "get_image_size_for_patches",
+            "bgr_to_pixel_values",
+            "reorder_patches_for_merge"
+          ],
+          "practice_task": "用 load_image_to_ncnn_mat 加载一张测试图，跟踪 get_image_size_for_patches 计算目标高宽与 patch 数量的过程，画出最终的 patch 网格（行×列），并说明 reorder_patches_for_merge 在 spatial_merge_size=2 时如何重排。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "视觉特征提取与图像嵌入注入",
+          "order": 3,
+          "filename": "u5-l3-visual-features-and-inject.md",
+          "level": "intermediate",
+          "topic": "讲解 get_visiual_features(patch embed→vision encoder→得到 image_embeds)以及 inject_image_embeds 如何把图像嵌入拼接到 token 嵌入序列的 image_pad 占位处。",
+          "learning_goals": [
+            "掌握视觉特征提取的完整链路",
+            "理解 inject_image_embeds 的占位替换机制",
+            "了解图像嵌入如何影响序列长度与 position_id"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "src/utils/rope_embed.h"
+          ],
+          "minimal_modules": [
+            "get_visiual_features",
+            "vision_encoder 前向",
+            "inject_image_embeds",
+            "image_pad_index"
+          ],
+          "practice_task": "跟踪 get_visiual_features 的 patch embed→vision encoder 流程，再用 inject_image_embeds 把得到的 image_embeds 拼进 token 序列，打印拼接前后序列长度与 image_pad_index 的变化。",
+          "depends_on": [
+            "u5-l2",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "VLM prefill 完整流程",
+          "order": 4,
+          "filename": "u5-l4-vlm-prefill-flow.md",
+          "level": "intermediate",
+          "topic": "讲解 prefill(text, bgr, ctx) 的完整图文流程：克隆 ctx→提取视觉特征→注入图像嵌入→mRoPE cache→带历史 KV 的 mask→decoder→首个 token，对比纯文本 prefill 的差异。",
+          "learning_goals": [
+            "掌握图文 prefill 与纯文本 prefill 的差异",
+            "理解多轮下 mask 维度与历史 KV 的拼接",
+            "了解 position_id 在图像分支的推进方式"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "examples/llm_ncnn_run/cli_runner.cpp"
+          ],
+          "minimal_modules": [
+            "clone_ctx",
+            "get_visiual_features + inject_image_embeds",
+            "mRoPE cache 与 position_id 推进",
+            "带历史 KV 的 mask 构造"
+          ],
+          "practice_task": "用 prefill(input_text, bgr, ctx) 跑一次 VLM 推理（参考 cli_runner 里首轮带图的分支），与纯文本 prefill 对比，列出图像分支额外处理的环节：position_id 推进、mask 维度、mRoPE cache 的选择。",
+          "depends_on": [
+            "u5-l3",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "其他模态：嵌入 / OCR / ASR / 翻译",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "文本嵌入 API",
+          "order": 1,
+          "filename": "u6-l1-text-embedding.md",
+          "level": "intermediate",
+          "topic": "讲解 ncnn_embedding 的文本嵌入能力：构造与配置加载、encode_text/encode_text_batch、mean_pool 与 normalize 后处理，以及 embedding_main 的相似度矩阵用法。",
+          "learning_goals": [
+            "掌握 ncnn_embedding 的构造与文本编码 API",
+            "理解 mean_pool/normalize 的作用",
+            "能用余弦相似度比较文本向量"
+          ],
+          "source_files": [
+            "src/ncnn_embedding.h",
+            "src/ncnn_embedding.cpp",
+            "examples/embedding_main.cpp"
+          ],
+          "minimal_modules": [
+            "ncnn_embedding 构造与配置",
+            "encode_text/encode_text_batch",
+            "mean_pool/normalize",
+            "cosine_similarity"
+          ],
+          "practice_task": "用 ncnn_embedding::encode_text 编码若干句子并计算两两余弦相似度（参考 embedding_main.cpp），打印相似度矩阵，并解释 mean_pool 与 normalize 对结果的影响。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "CLIP 多模态嵌入",
+          "order": 2,
+          "filename": "u6-l2-clip-multimodal-embedding.md",
+          "level": "intermediate",
+          "topic": "讲解 CLIP 风格的图文嵌入：supports_image 判断、encode_image/encode_image_file、图像预处理(preprocess_image)，以及 clip_main 的图文相似度计算。",
+          "learning_goals": [
+            "掌握图像嵌入 API 与图像预处理",
+            "理解文本/图像向量到同一空间的对齐",
+            "能用余弦相似度做图文检索"
+          ],
+          "source_files": [
+            "src/ncnn_embedding.h",
+            "src/ncnn_embedding.cpp",
+            "examples/clip_main.cpp"
+          ],
+          "minimal_modules": [
+            "supports_image/vision_encoder_net",
+            "encode_image/encode_image_file",
+            "preprocess_image(resize/mean/std)",
+            "图文余弦相似度"
+          ],
+          "practice_task": "用 supports_image() 判断模型是否支持图像，编码一张图得到 image_vec，并与若干文本向量计算余弦相似度（参考 clip_main.cpp），找出最匹配的文本描述。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "GLM-OCR 与 HunyuanOCR 推理",
+          "order": 3,
+          "filename": "u6-l3-ocr-runtime.md",
+          "level": "intermediate",
+          "topic": "讲解 ncnn_llm_ocr：GLM-OCR 的图像 prefill + 共享文本解码，以及 HunyuanOCR 分支(prefill_hunyuan/generate_hunyuan)在视觉前处理、smart_resize 与 xdrope 上的差异。",
+          "learning_goals": [
+            "理解 OCR 复用共享文本运行时的方式",
+            "掌握 GLM-OCR 与 HunyuanOCR 两条路径的区别",
+            "了解 OCR 的图像 strip/patch 前处理"
+          ],
+          "source_files": [
+            "src/ncnn_llm_ocr.h",
+            "src/ncnn_llm_ocr.cpp",
+            "examples/ocr_main.cpp"
+          ],
+          "minimal_modules": [
+            "ncnn_llm_ocr 构造与 model_type 分流",
+            "prefill/run_vision(GLM)",
+            "prefill_hunyuan/smart_resize/run_vision_hunyuan",
+            "共享 generate 解码"
+          ],
+          "practice_task": "用 ocr_main 跑一次 GLM-OCR 识别；再阅读 prefill/generate 与 HunyuanOCR 分支(prefill_hunyuan)的源码，列表说明二者在视觉前处理(bgr_to_image_strip vs smart_resize+chw)、RoPE(xdrope) 与默认 prompt 上的不同。",
+          "depends_on": [
+            "u5-l4",
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "Qwen3-ASR 语音识别",
+          "order": 4,
+          "filename": "u6-l4-asr-runtime.md",
+          "level": "intermediate",
+          "topic": "讲解 ncnn_llm_asr 的端到端链路：pcm(16k 单声道)→mel(STFT)→audio_conv(按 100 帧分块)→audio_encoder→拼入 text_embed 的 audio_pad 槽位→decoder(KV cache)→lm_head→解码，复用共享文本运行时。",
+          "learning_goals": [
+            "理解 ASR 的音频前端(mel/conv/encoder)",
+            "掌握音频 token 与 mel 帧的换算(feat_out_len)",
+            "了解 ASR 如何复用文本 decoder 与 RoPE(theta 1e6)"
+          ],
+          "source_files": [
+            "src/ncnn_llm_asr.h",
+            "src/ncnn_llm_asr.cpp",
+            "examples/asr_main.cpp"
+          ],
+          "minimal_modules": [
+            "wav_to_logmel",
+            "run_audio(audio_conv+encoder)",
+            "audio_pad 槽位拼接 + 共享 decoder",
+            "feat_out_len 帧数换算"
+          ],
+          "practice_task": "用 asr_main 跑一段 16k 单声道 wav，跟踪 wav_to_logmel→run_audio→共享 decoder 的链路；用 feat_out_len 解释给定 mel 帧数对应多少个音频 token，并说明 prefix_ids/suffix_ids 围绕 audio_pad 的 prompt 模板作用。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "NLLB 机器翻译",
+          "order": 5,
+          "filename": "u6-l5-nllb-translation.md",
+          "level": "intermediate",
+          "topic": "讲解 nllb_600m 的 encoder-decoder 翻译流程：正弦位置编码、源/目标语言 token、encoder→cross-attention decoder 的自回归生成，以及 nllb_main 的用法。",
+          "learning_goals": [
+            "理解 encoder-decoder 架构在翻译里的应用",
+            "掌握正弦位置编码与语言 token 的作用",
+            "了解 translate 的多种重载与流式 callback"
+          ],
+          "source_files": [
+            "src/nllb_600m.h",
+            "src/nllb_600m.cpp",
+            "examples/nllb_main.cpp",
+            "src/ncnn_llm_base.h"
+          ],
+          "minimal_modules": [
+            "nllb_600m 构造(embed/encoder/decoder/vocab)",
+            "translate 重载与 callback",
+            "sinusoidal_positional_embedding",
+            "源/目标语言 token"
+          ],
+          "practice_task": "用 nllb_main 做一次中英翻译，阅读 translate 的 encoder-decoder 流程，说明 sinusoidal_positional_embedding 在 encoder/decoder 中的作用，以及 source_lang/target_lang token 如何引导翻译方向。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "对话模板、工具调用与扩展算子",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "对话模板 ChatML / YouTu 与 thinking",
+          "order": 1,
+          "filename": "u7-l1-chat-templates.md",
+          "level": "intermediate",
+          "topic": "讲解 prompt 模块：TemplateType(CHATML/YOUTU)、Message 结构、apply_chat_template 与 enable_thinking 开关，以及 detect_template_type 如何根据 model.json 选择模板。",
+          "learning_goals": [
+            "掌握 ChatML 与 YouTu 两种模板的差异",
+            "理解 Message 结构与多消息拼接",
+            "了解 thinking 模式开关的作用"
+          ],
+          "source_files": [
+            "src/utils/prompt.h",
+            "src/utils/prompt.cpp",
+            "examples/llm_ncnn_run/cli_runner.cpp"
+          ],
+          "minimal_modules": [
+            "TemplateType 枚举",
+            "Message 结构",
+            "apply_chat_template / apply_youtu_chat_template",
+            "detect_template_type"
+          ],
+          "practice_task": "用 apply_chat_template 分别构造 ChatML 与 YouTu 模板（含 system/user/assistant），对比二者标签差异；再切换 enable_thinking=true/false 观察输出变化，并用 tests 里的模板测试验证。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "工具调用机制",
+          "order": 2,
+          "filename": "u7-l2-tool-calling.md",
+          "level": "intermediate",
+          "topic": "讲解工具调用：make_function_tool 生成函数工具 JSON、define_tools 注入工具上下文、generate 中的 tool_callback 回调与 tool_call_id/tool_call_end_id 解析。",
+          "learning_goals": [
+            "掌握 make_function_tool 的用法与参数类型推断",
+            "理解 define_tools 如何把工具写入上下文",
+            "了解 generate 如何解析 tool_call 并触发回调"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.h",
+            "src/ncnn_llm_gpt.cpp",
+            "examples/llm_ncnn_run/cli_runner.cpp"
+          ],
+          "minimal_modules": [
+            "make_function_tool(json_type_name)",
+            "define_tools",
+            "GenerateConfig.tool_callback",
+            "tool_call_id/tool_call_end_id 解析"
+          ],
+          "practice_task": "用 make_function_tool<int,int,int> 定义一个 add(a,b) 工具，调用 define_tools 注入，再用 generate 让模型触发 tool_callback（参考 tests 的 test_model_tool_calling），在回调里计算并返回结果。",
+          "depends_on": [
+            "u2-l4",
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "内置工具、路由与 JSON 工具",
+          "order": 3,
+          "filename": "u7-l3-builtin-tools-json.md",
+          "level": "intermediate",
+          "topic": "讲解内置工具体系：make_builtin_tools/make_builtin_router 提供的演示工具与路由、tool_name_from_openai_tool/merge_tools_by_name，以及 json_utils 的消息解析与清洗工具。",
+          "learning_goals": [
+            "掌握内置工具与路由表的注册方式",
+            "理解 OpenAI 风格 tool 的命名与合并",
+            "了解 json_utils 里消息解析、base64、utf8 清洗等工具"
+          ],
+          "source_files": [
+            "examples/llm_ncnn_run/tools.h",
+            "examples/llm_ncnn_run/tools.cpp",
+            "examples/llm_ncnn_run/json_utils.h",
+            "examples/llm_ncnn_run/json_utils.cpp"
+          ],
+          "minimal_modules": [
+            "make_builtin_tools / make_builtin_router",
+            "tool_name_from_openai_tool / merge_tools_by_name",
+            "parse_messages / extract_content",
+            "sanitize_utf8 / strip_image_payloads"
+          ],
+          "practice_task": "阅读 make_builtin_tools/make_builtin_router，新增一个内置工具（例如返回当前时间的时间查询），并在 builtin_router 中注册对应路由，使 cli_runner 在收到该工具调用时能正确返回结果。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "自定义 ncnn 算子 GDR / ShortConv",
+          "order": 4,
+          "filename": "u7-l4-custom-ncnn-ops-gdr.md",
+          "level": "intermediate",
+          "topic": "讲解 Qwen3.5 混合架构用到的自定义 ncnn Layer：GatedDeltaRule 与 ShortConv 的 forward 实现、register_gdr_layers 注册，以及 sconv_cnt/gdr_cnt 如何控制 ctx 缓存。",
+          "learning_goals": [
+            "理解如何继承 ncnn::Layer 实现自定义算子",
+            "掌握 register_gdr_layers 的注册时机",
+            "了解 sconv_cache/gdr_cache 在 prefill/generate 中的传递"
+          ],
+          "source_files": [
+            "src/utils/gdr.h",
+            "src/utils/gdr.cpp",
+            "src/ncnn_llm_gpt.cpp",
+            "src/ncnn_llm_gpt.h"
+          ],
+          "minimal_modules": [
+            "GatedDeltaRule::forward",
+            "ShortConv::forward",
+            "register_gdr_layers",
+            "qwen3_5_ctx 的 sconv/gdr cache"
+          ],
+          "practice_task": "阅读 GatedDeltaRule/ShortConv 两个自定义 ncnn Layer 的 forward 与 register_gdr_layers，说明它们在构造函数里何时被注册到 decoder_net，以及 sconv_cnt/gdr_cnt 如何决定 create_ctx 选用 qwen3_5_ctx 并在 prefill/generate 中传递对应 cache。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "性能、测试、导出与二次开发",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Vulkan GPU 推理与线程/精度配置",
+          "order": 1,
+          "filename": "u8-l1-vulkan-threads.md",
+          "level": "advanced",
+          "topic": "讲解 GPU/CPU 执行配置：create_option 的 num_threads/use_vulkan_compute、构造函数里 Vulkan 设备选择与 bf16/fp16 存储开关的取舍，以及 NCNN_VULKAN 宏守护。",
+          "learning_goals": [
+            "掌握 Vulkan 启用与设备选择方式",
+            "理解 bf16/fp16 storage 与 arithmetic 的取舍",
+            "了解线程数与 use_vulkan_compute 对性能的影响"
+          ],
+          "source_files": [
+            "src/ncnn_llm_base.h",
+            "src/ncnn_llm_gpt.cpp"
+          ],
+          "minimal_modules": [
+            "create_option(num_threads/use_vulkan_compute)",
+            "vulkan_device_index 与 use_bf16_storage",
+            "use_fp16_* 开关",
+            "NCNN_VULKAN 宏守护的 create/destroy gpu instance"
+          ],
+          "practice_task": "分别用纯 CPU(use_vulkan=false)与 Vulkan(use_vulkan=true, --vulkan-device 0)构造同一模型并跑同一 prompt，记录耗时差异；解释构造函数里为何对 decoder_net 单独开启 use_vulkan_compute 与 use_bf16_storage，而 fp16 算术被关闭。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "benchmark 性能测试",
+          "order": 2,
+          "filename": "u8-l2-benchmark.md",
+          "level": "advanced",
+          "topic": "讲解 benchllm 的测时方式与命令行参数(loop_count/num_threads/powersave/gpu_device/cooling_down/seqlen)，以及如何用它衡量 tokens/s。",
+          "learning_goals": [
+            "掌握 benchllm 的运行方式与参数含义",
+            "理解其 prompt 预填与生成阶段的计时划分",
+            "能解读 tokens/s 等性能指标"
+          ],
+          "source_files": [
+            "benchmark/benchllm.cpp",
+            "readme.md"
+          ],
+          "minimal_modules": [
+            "命令行参数解析",
+            "prefill 预热与 generate 计时",
+            "tokens/s 计算",
+            "rundir 与模型依赖"
+          ],
+          "practice_task": "运行 benchllm，分别调整 loop_count、num_threads、seqlen 参数，记录每次的 tokens/s 与首 token 延迟，并解释 prefill 与 generate 两阶段在测时上的区别。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "测试框架与单元测试",
+          "order": 3,
+          "filename": "u8-l3-testing.md",
+          "level": "advanced",
+          "topic": "讲解 tests 下的测试体系：test_framework.h 的 TEST_ASSERT 与 TestRunner、test_llm.cpp 的模板/工具测试与可选的模型测试(has_model 跳过机制)。",
+          "learning_goals": [
+            "掌握测试框架的断言与运行机制",
+            "理解纯逻辑测试与依赖模型的测试如何分流",
+            "能为新功能补充单元测试"
+          ],
+          "source_files": [
+            "tests/test_framework.h",
+            "tests/test_llm.cpp"
+          ],
+          "minimal_modules": [
+            "TestRunner/TEST_ASSERT",
+            "模板与工具定义测试",
+            "has_model 模型存在性跳过",
+            "test_model_tool_calling/context_memory"
+          ],
+          "practice_task": "基于 test_framework.h，为 prompt.cpp 的某个函数（如 apply_youtu_chat_template）新增一个单元测试，加入 test_llm.cpp 的 runner，执行 xmake build test_llm && xmake run test_llm 通过。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "模型导出流程",
+          "order": 4,
+          "filename": "u8-l4-model-export.md",
+          "level": "advanced",
+          "topic": "梳理 export/ 下 Python 脚本的职责（PyTorch/HF→ncnn param/bin、tokenizer 导出、KV cache 注入），具体脚本细节以仓库最新版本为准(待确认)。",
+          "learning_goals": [
+            "了解从 HF 模型到 ncnn 的整体导出步骤",
+            "认识 extract_tokenizer/hunyuan/nllb 等脚本的角色",
+            "理解导出产物如何对应 model.json 字段"
+          ],
+          "source_files": [
+            "export/extract_tokenizer.py",
+            "export/hunyuan_ocr_add_kvcache.py",
+            "export/hunyuan_ocr_tokenizer.py",
+            "export/nllb_export.py"
+          ],
+          "minimal_modules": [
+            "HF→ncnn 权重导出(待确认)",
+            "extract_tokenizer 分词器导出",
+            "hunyuan_ocr_add_kvcache KV cache 注入",
+            "导出产物与 model.json 对应"
+          ],
+          "practice_task": "阅读 export/ 下的导出脚本，梳理「PyTorch/HF 模型→ncnn param/bin + tokenizer 文件 + model.json」的整体步骤（具体 API 细节以仓库最新版本为准，必要时标注待确认），并尝试运行其中最简单的一个脚本观察产物。",
+          "depends_on": [
+            "u1-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "平台适配：Windows / wasm / Android",
+          "order": 5,
+          "filename": "u8-l5-platform-adaptation.md",
+          "level": "advanced",
+          "topic": "讲解 xmake.lua 中的平台分支：Windows 的 NOMINMAX 与 /utf-8、wasm 的 emscripten 链接参数与内存配置，以及 utf8_args 在 GBK Windows 环境下的作用。",
+          "learning_goals": [
+            "理解 Windows 下 /utf-8 与 NOMINMAX 的必要性",
+            "掌握 wasm 目标的 emscripten 工具链与内存配置",
+            "了解跨平台 UTF-8 处理的痛点"
+          ],
+          "source_files": [
+            "xmake.lua",
+            "examples/llm_ncnn_run/utf8_args.h",
+            "examples/llm_ncnn_run/util.cpp"
+          ],
+          "minimal_modules": [
+            "windows 分支(NOMINMAX/utf-8)",
+            "wasm/emscripten 分支(内存/导出)",
+            "set_encodings(utf-8)",
+            "UTF-8 参数处理"
+          ],
+          "practice_task": "阅读 xmake.lua 的 wasm/windows/mingw 分支，说明 NOMINMAX、/utf-8、emscripten 的 -sINITIAL_MEMORY/-sEXPORTED_RUNTIME_METHODS 各自解决的问题；并了解 utf8_args 在 Windows GBK 环境下为何需要显式处理命令行参数。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l6",
+          "title": "二次开发：接入新模型家族",
+          "order": 6,
+          "filename": "u8-l6-add-new-model.md",
+          "level": "advanced",
+          "topic": "综合 model.json、分词器、构造函数配置与共享运行时，规划接入一个新 LLM 架构需要的改动清单与步骤。",
+          "learning_goals": [
+            "能规划新模型所需的 model.json 字段",
+            "判断是否需要新增 RoPE 变体或自定义算子",
+            "掌握把新模型接入共享 prefill/generate 的思路"
+          ],
+          "source_files": [
+            "src/ncnn_llm_gpt.cpp",
+            "src/ncnn_llm_gpt.h",
+            "src/utils/rope_embed.h",
+            "src/utils/tokenizer/tokenizer_types.h"
+          ],
+          "minimal_modules": [
+            "model.json setting(rope/attn_cnt/sconv_cnt/gdr_cnt)",
+            "tokenizer type 选择",
+            "RoPE 变体选择",
+            "构造函数配置读取与共享运行时接线"
+          ],
+          "practice_task": "综合 model.json + 分词器 + 构造函数配置，为接入一个新 LLM 架构写出改动清单：需要哪些 setting 字段、分词器类型、是否需要新 RoPE 变体或自定义算子、构造函数与 prefill/generate 哪里需要分支，并整理成一份接入步骤文档。",
+          "depends_on": [
+            "u1-l5",
+            "u2-l3",
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
