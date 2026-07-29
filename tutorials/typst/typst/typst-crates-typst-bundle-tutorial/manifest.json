@@ -1,7 +1,7 @@
 {
   "project": "typst-crates-typst-bundle",
-  "head": "9a1d84e9450c66adf9d2cb0068f4e0160e4ba34a",
-  "rationale": "typst-bundle 是一个体积很小（仅 4 个源文件、约 700 行）但横跨多个 crate 的核心模块：它把一次 Typst 编译扩展为「多文件输出」（多个 document + 原始 asset），并在统一内省、跨文档链接、并行与记忆化上与 typst-library / typst-realize / typst-layout / typst-html / typst-pdf / typst-svg / typst-render / typst-cli 深度协作。因此学习路线按「先认识定位 → 再走编译主链路 → 再理解数据模型与用户元素 → 再讲导出 → 最后深入内省/链接/性能/CLI 集成」五层推进：第 1 单元让读者从零认识 bundle 目标与入口；第 2 单元拆解 bundle_impl → collect → compile_document 的编译主链路；第 3 单元落到 Bundle/BundleFile/BundleDocument 数据模型与用户侧 document/asset 元素；第 4 单元讲 export 到 VirtualFs 与四种格式导出；第 5 单元（专家层）深入 BundleIntrospector 统一内省、跨文档链接锚点、并行+记忆化机制，并以 CLI 端到端实践收尾。依赖关系构成清晰 DAG，每篇只解决一个问题、引用 2–6 个真实源码文件，并配一个可操作的代码实践任务。",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "本次 incremental 分析：两次 HEAD 之间仅有一次提交（146a58329「Fix typo in raw documentation」），唯一改动是 crates/typst-library/src/text/raw.rs 的 1 行文档拼写修正，与 typst-bundle crate 完全无关，且未被任何讲义的 source_files 引用；所有讲义引用的源码文件（lib.rs/export.rs/link.rs/introspect.rs、typst-library 的 document/asset/path/link、typst-cli/compile.rs、typst/src/lib.rs、typst-realize 等）均逐字节未变。因此 11 篇已生成讲义全部设为 keep，无需重写或更新。唯一例外是 u5-l4（CLI 集成与端到端实践）：它在上一轮 manifest 中以 new 形式规划，但讲义目录中尚无 u5-l4-cli-integration-and-e2e.md 文件，仍未落地，故继续标记为 new 以便 worker 生成。其余学习顺序、单元划分与依赖关系维持原样：先认识定位 → 再走编译主链路 → 再讲数据模型与用户元素 → 再讲导出 → 最后深入内省/链接/性能/CLI 集成。",
   "units": [
     {
       "id": "u1",
@@ -36,7 +36,7 @@
           ],
           "practice_task": "在你的 Typst 项目里写一个最小 bundle 源文件（包含一个 #document(\"hello.html\")[Hello] 和一个 #asset(\"note.txt\", read(...))），用 typst compile --features bundle 编译，观察输出的多文件目录结构，并用一句话总结 bundle 相对单文件 PDF/SVG 输出的核心区别。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -65,7 +65,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -101,7 +101,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -130,7 +130,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -165,7 +165,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -195,7 +195,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -230,7 +230,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -258,7 +258,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -294,7 +294,7 @@
             "u2-l1",
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -324,7 +324,7 @@
             "u5-l1",
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -354,7 +354,7 @@
             "u2-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",

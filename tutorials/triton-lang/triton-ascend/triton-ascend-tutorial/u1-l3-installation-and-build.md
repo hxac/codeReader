@@ -6,11 +6,11 @@
 
 1. 说清楚 Triton-Ascend 为什么依赖 **CANN 工具链**，它在编译期和运行期分别扮演什么角色。
 2. 根据 usage 场景，在 **whl 安装 / 源码编译 / Docker 镜像** 三种方式中做出正确选择。
-3. 看懂 `setup.py` 这个构建入口：它如何驱动 CMake 构建 C++/MLIR 扩展，又如何把 `ascend` 后端「挂载」到 `triton` 命名空间。
+3. 看懂 `setup.py` 这个构建入口：它如何**先应用 Ascend 补丁**、再驱动 CMake 构建 C++/MLIR 扩展，又如何把 `ascend` 后端「挂载」到 `triton` 命名空间。
 4. 理解 `CMakeLists.txt` 与 **LLVM** 构建链路的关系，知道 LLVM 是从哪里来的（预编译下载还是源码自建）。
 5. 独立完成一次安装，并能记录、解释过程中遇到的关键环境变量（尤其是 CANN 的 `set_env.sh`）。
 
-> 本讲承接 [u1-l1](u1-l1-project-overview-and-architecture.md)（已建立「compiler / driver / 语言扩展」三大组件与 `TTIR → Linalg → AscendNPU IR → .o` 主链路的地图），把那张地图「落到地面」——告诉你这些东西是怎么装进机器里的。
+> 本讲承接 [u1-l1](u1-l1-project-overview-and-architecture.md)（已建立「compiler / driver / 语言扩展」三大组件与 `TTIR → Linalg → AscendNPU IR → .o` 主链路的地图），并延续 [u1-l2](u1-l2-directory-structure-and-layering.md) 讲过的「上游源文件保持干净、Ascend 改动以补丁交付」的分层原则——本讲会把那条原则在构建期是**如何落地**的讲清楚。
 
 ## 2. 前置知识
 
@@ -19,6 +19,7 @@
 - **CANN（Compute Architecture for Neural Networks）**：华为为昇腾 NPU 提供的整套软件栈，包含驱动接口、运行时库（ACL）、以及把中间表示编译成 NPU 二进制的 **BiSheng 编译器**。你可以把它类比为「NPU 版的 CUDA Toolkit」。
 - **torch_npu**：让 PyTorch 能把张量放到 `npu:0` 设备上、并调用 CANN 运行时的适配库。它之于 NPU，就像 CUDA 之于 GPU 上的 `torch.cuda`。
 - **setuptools / pip / CMake / Ninja / LLVM**：Python 打包与 C++ 构建的常规工具链。本讲会用到，但不要求精通。
+- **git patch（补丁）**：一种把「对源文件的若干修改」记录成文本、再用 `git apply` 贴回源文件的技术。本讲的「构建期补丁」用的就是它（概念见 [u1-l2](u1-l2-directory-structure-and-layering.md)）。
 
 ## 3. 本讲源码地图
 
@@ -26,12 +27,13 @@
 | --- | --- | --- |
 | `README.md` | 项目门面，含「快速安装 / 源码安装 / Docker」三段速查 | 版本要求与三种安装命令 |
 | `docs/en/quick_start.md` | 快速开始，以 vector-add 为例验证环境 | 软件依赖版本、`set_env.sh`、运行示例 |
-| `docs/en/installation_guide.md` | 最完整的安装手册 | 版本矩阵表、源码/镜像安装细节、FAQ |
-| `setup.py` | **源码安装的构建入口**（`pip install -e .` 触发） | 默认构建环境变量、后端发现与挂载、驱动 CMake、LLVM 下载 |
-| `CMakeLists.txt` | 顶层 CMake 构建脚本 | MLIR/LLVM 依赖、ascend 后端子目录、产物清单 |
+| `docs/en/installation_guide.md` | 最完整的安装手册 | 版本矩阵表、源码/镜像安装细节、离线 LLVM 构建、FAQ |
+| `setup.py` | **源码安装的构建入口**（`pip install -e .` 触发） | 默认构建环境变量、**构建期补丁应用**、后端发现与挂载、驱动 CMake、LLVM 下载 |
+| `third_party/ascend/patch/triton-ascend-3.6.0.patch` | **Ascend 对上游 Triton 的改动补丁** | 构建期被贴到干净上游源文件上的 Ascend 亲和改动 |
+| `CMakeLists.txt` | 顶层 CMake 构建脚本（仓库内为**干净上游版本**） | MLIR/LLVM 依赖、ascend 后端子目录、产物清单（Ascend 专属部分由补丁注入） |
 | `python/build_helpers.py` | 计算 CMake 构建目录 | `TRITON_BUILD_DIR` 覆盖构建路径 |
 | `docker/Dockerfile` | 镜像构建脚本 | CANN 基础镜像、构建依赖安装 |
-| `version.txt` / `cmake/llvm-hash.txt` / `third_party/ascend/patch/llvm_patch_*.patch` | 版本与 LLVM 补丁 | 确定要拉的 LLVM 版本与补丁 |
+| `cmake/llvm-hash.txt` / `third_party/ascend/patch/llvm_patch_*.patch` | LLVM 版本与 LLVM 补丁 | 确定要拉的 LLVM 版本与补丁 |
 
 ## 4. 核心概念与源码讲解
 
@@ -39,7 +41,7 @@
 
 - **4.1 三种安装方式的定位与选择**（建立全局选择直觉）
 - **4.2 CANN 工具链与软件依赖**（最小模块：CANN 工具链）
-- **4.3 setup.py：构建入口与后端打包机制**（最小模块：setup.py 构建入口）
+- **4.3 setup.py：构建入口、构建期补丁与后端打包**（最小模块：setup.py 构建入口与补丁应用）
 - **4.4 CMakeLists.txt 与 LLVM 构建链路**（最小模块：CMakeLists.txt）
 
 ---
@@ -70,33 +72,35 @@ Triton-Ascend 提供三种安装方式，**它们的产物几乎一样**（都�
 
 无论哪条路，**第一步都是先装好 NPU 驱动 + CANN + Python + torch_npu**，这是绕不开的前置依赖（见 4.2）。
 
+> 注意：whl 包安装不需要本地编译，自然**不会**触发 `setup.py` 的 CMake 构建与构建期补丁（这些在打包发布时已经做完）。源码安装才会现场执行它们（见 4.3）。
+
 #### 4.1.3 源码精读
 
 三种方式的命令分别出自以下位置：
 
 - whl 包安装命令（README 的 Quick Installation）：
 
-[README.md:77-80](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/README.md#L77-L80) —— 以 `pip install triton-ascend==3.2.1 --extra-index-url=...` 为例，`--extra-index-url` 指向华为云镜像源拉取昇腾相关的 wheel。
+[README.md:77-80](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/README.md#L77-L80) —— 以 `pip install triton-ascend==3.2.1 --extra-index-url=...` 为例，`--extra-index-url` 指向华为云镜像源拉取昇腾相关的 wheel。
 
-- 源码安装命令（README 的 Source Installation）：
+- 源码安装命令（README 的 Source Installation → Build Triton-Ascend）：
 
-[README.md:101-105](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/README.md#L101-L105) —— `git clone ... && cd triton-ascend` 后 `git checkout main`，再 `pip install -e .`（`-e` 是 editable/开发模式，改完 Python 代码即时生效，C++ 改动需重新编译）。
+[README.md:99-105](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/README.md#L99-L105) —— `git clone ... && cd triton-ascend` 后 `git checkout main`，再 `pip install -e .`（`-e` 是 editable/开发模式，改完 Python 代码即时生效，C++ 改动需重新编译）。
 
 - 镜像安装（README 的 Docker Image Usage）：
 
-[README.md:164-169](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/README.md#L164-L169) —— `docker build --build-arg CANN_BASE_IMAGE=... -f ./docker/Dockerfile .`，通过 `--build-arg CANN_BASE_IMAGE` 选择与你的芯片匹配的 CANN 基础镜像。
+[README.md:164-169](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/README.md#L164-L169) —— `docker build --build-arg CANN_BASE_IMAGE=... -f ./docker/Dockerfile .`，通过 `--build-arg CANN_BASE_IMAGE` 选择与你的芯片匹配的 CANN 基础镜像。
 
 镜像为什么快？因为 Dockerfile 直接以「已经装好 CANN」的 `quay.io/ascend/cann` 镜像为基底，省掉了最耗时的 CANN 安装：
 
-[docker/Dockerfile:1-2](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docker/Dockerfile#L1-L2) —— `ARG CANN_BASE_IMAGE=quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.10`，`FROM ${CANN_BASE_IMAGE}`。
+[docker/Dockerfile:1-2](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docker/Dockerfile#L1-L2) —— `ARG CANN_BASE_IMAGE=quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.10`，`FROM ${CANN_BASE_IMAGE}`。
 
 随后 Dockerfile 安装编译所需系统库（clang-15、lld-15、cmake、ninja、ccache、zlib1g-dev 等）并安装 Python 依赖：
 
-[docker/Dockerfile:13-36](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docker/Dockerfile#L13-L36) —— `apt install ... clang-15 lld-15 cmake ccache ninja-build zlib1g-dev ...`，并通过 `update-alternatives` 把 `clang/clang++/lld` 指向 `-15` 版本。
+[docker/Dockerfile:13-33](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docker/Dockerfile#L13-L33) —— `apt install ... clang-15 lld-15 cmake ccache ninja-build zlib1g-dev ...`，并通过 `update-alternatives` 把 `clang/clang++` 指向 `-15` 版本。
 
-[docker/Dockerfile:41-45](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docker/Dockerfile#L41-L45) —— `pip install -r requirements_dev.txt` 与 `pip install -r requirements.txt` 安装运行期与构建期 Python 依赖。
+[docker/Dockerfile:41-45](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docker/Dockerfile#L41-L45) —— `pip install -r requirements_dev.txt` 与 `pip install -r requirements.txt` 安装运行期与构建期 Python 依赖。
 
-> 注意：Dockerfile 里 `WORKDIR /home/triton` 之后并没有直接 `pip install -e .`，它只把「环境」备好；真正的 Triton-Ascend 源码是在容器启动后由你 `git clone` 进来再装的（见 installation_guide 的镜像使用步骤）。
+> 注意：Dockerfile 里 `WORKDIR /home/triton`（[docker/Dockerfile:47](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docker/Dockerfile#L47)）之后并没有直接 `pip install -e .`，它只把「环境」备好；真正的 Triton-Ascend 源码是在容器启动后由你 `git clone` 进来再装的（见 installation_guide 的镜像使用步骤）。
 
 #### 4.1.4 代码实践
 
@@ -104,7 +108,7 @@ Triton-Ascend 提供三种安装方式，**它们的产物几乎一样**（都�
 
 **操作步骤**：
 
-1. 阅读 `docs/en/installation_guide.md` 的「Installation Method Selection」对比表（[installation_guide.md:115-141](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/installation_guide.md#L115-L141)）。
+1. 阅读 `docs/en/installation_guide.md` 的「Installation Method Selection」对比表（[installation_guide.md:112-141](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L112-L141)）。
 2. 为下面三个场景各选一种方式并写出一句理由：
    - (a) 你要在 Atlas 800T A2 上跑别人的 Triton kernel，不改源码；
    - (b) 你想给 Triton-Ascend 新增一个 MLIR pass；
@@ -155,19 +159,19 @@ CANN 装好后，必须 `source <安装路径>/ascend-toolkit/set_env.sh` 来导
 
 软件依赖版本声明（README 的 Environment Preparation）：
 
-[README.md:61-69](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/README.md#L61-L69) —— 明确「Python py3.9-py3.11 / CANN 推荐 9.0.0 / TorchNPU 当前为 2.7.1.post4」。注意这是 README 的口径，偏保守。
+[README.md:61-69](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/README.md#L61-L69) —— 明确「Python py3.9-py3.11 / CANN 推荐 9.0.0 / TorchNPU 当前为 2.7.1.post4」。注意这是 README 的口径，偏保守。
 
 最权威的版本矩阵在安装手册里（含 Python 3.9–3.13、CANN 9.0.0、torch_npu 多版本）：
 
-[docs/en/installation_guide.md:168-190](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/installation_guide.md#L168-L190) —— 3.2.1 行：支持 Python 3.9–3.13、CANN 9.0.0、torch_npu 2.7.1.post4 / 2.8.0.post4 / 2.9.0.post2 / 2.10.0；备注「Python3.9.x 不支持 aarch64」。
+[docs/en/installation_guide.md:168-190](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L168-L190) —— 3.2.1 行（CANN `9.0.0` 见 [installation_guide.md:171](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L171)，torch_npu `2.7.1.post4 / 2.8.0.post4 / 2.9.0.post2 / 2.10.0` 见 [installation_guide.md:172](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L172)），备注「Python3.9.x 不支持 aarch64」。
 
 CANN 环境变量的加载与示例运行（quick_start）：
 
-[docs/en/quick_start.md:45-52](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/quick_start.md#L45-L52) —— `source /usr/local/Ascend/ascend-toolkit/set_env.sh` 后运行 `python3 ./third_party/ascend/tutorials/01-vector-add.py`，看到「The maximum difference between torch and triton is 0.0」即环境正确。
+[docs/en/quick_start.md:45-52](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/quick_start.md#L45-L52) —— `source /usr/local/Ascend/ascend-toolkit/set_env.sh` 后运行 `python3 ./third_party/ascend/tutorials/01-vector-add.py`，看到「The maximum difference between torch and triton is 0.0」即环境正确。
 
 如何确认芯片型号（FAQ 里给的 `npu-smi info` 示例）：
 
-[docs/en/installation_guide.md:577-596](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/installation_guide.md#L577-L596) —— 例如输出里 `910B4` 对应 A2（Ascend 910b 系列），据此选择对应的 CANN 镜像/版本。
+[docs/en/installation_guide.md:579-596](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L579-L596) —— 例如输出里 `910B4` 对应 A2（Ascend 910b 系列），据此选择对应的 CANN 镜像/版本。
 
 #### 4.2.4 代码实践
 
@@ -203,16 +207,17 @@ CANN 环境变量的加载与示例运行（quick_start）：
 
 ---
 
-### 4.3 setup.py：构建入口与后端打包机制
+### 4.3 setup.py：构建入口、构建期补丁与后端打包
 
 #### 4.3.1 概念说明
 
-`setup.py` 是**源码安装的核心入口**。当你执行 `pip install -e .`，setuptools 会调用它。它干两件事：
+`setup.py` 是**源码安装的核心入口**。当你执行 `pip install -e .`，setuptools 会调用它。它干三件事：
 
-1. **驱动 CMake 构建 C++/MLIR 扩展**：通过自定义的 `CMakeBuild`（继承 `build_ext`）调用 `cmake` + `ninja`，编译出 `libtriton`、`triton-mlir-opt`、`triton-opt`、`FileCheck`、`entryC` 等产物。
-2. **打包 Python 包并把 ascend 后端「挂载」到 triton 命名空间**：把 `third_party/ascend/language` 装到 `triton.language.extra.*`、把 `third_party/ascend/backend` 装到 `triton.backends.ascend`，并通过 entry points 让 core 在运行时自动发现 ascend 后端。
+1. **把 Ascend 补丁应用到干净的上游源文件**：这是 [u1-l2](u1-l2-directory-structure-and-layering.md) 讲过的「去侵入化」在构建期的落地——仓库里的上游 Triton 源文件（`CMakeLists.txt`、`python/*`、`include/*`、`lib/*`、`bin/*`）保持干净原貌，Ascend 亲和改动以补丁 `third_party/ascend/patch/triton-ascend-3.6.0.patch` 形式交付，构建时由 `apply_triton_ascend_patch()` 贴到工作区。
+2. **驱动 CMake 构建 C++/MLIR 扩展**：通过自定义的 `CMakeBuild`（继承 `build_ext`）调用 `cmake` + `ninja`，编译出 `libtriton`、`triton-mlir-opt`、`triton-opt`、`FileCheck`、`entryC` 等产物。
+3. **打包 Python 包并把 ascend 后端「挂载」到 triton 命名空间**：把 `third_party/ascend/language` 装到 `triton.language.extra.*`、把 `third_party/ascend/backend` 装到 `triton.backends.ascend`，并通过 entry points 让 core 在运行时自动发现 ascend 后端。
 
-> 这一步对应 [u1-l2](u1-l2-directory-structure-and-layering.md) 讲过的「分层由安装期机制强制」——`setup.py` 就是那个「安装期机制」的具体实现。读不懂它，就理解不了「为什么 `import triton.language.extra.cann` 能用」。
+> 这一步对应 [u1-l2](u1-l2-directory-structure-and-layering.md) 讲过的「分层由安装期机制强制」——`setup.py` 就是那个「安装期机制」的具体实现，其中 `apply_triton_ascend_patch()` 是「构建期补丁」，与运行期 monkey-patch（`_apply_ascend_patch`，见 [u1-l2](u1-l2-directory-structure-and-layering.md)）成对出现。
 
 #### 4.3.2 核心流程
 
@@ -222,96 +227,126 @@ CANN 环境变量的加载与示例运行（quick_start）：
 A. 加载 setup.py
    └─ 顶部 os.environ.setdefault(...) 写入默认构建环境变量
    └─ backends = BackendInstaller.copy(["ascend","nvidia","amd"])  # 发现三个内置后端
-B. 自定义命令钩子
+B. CMakeBuild.run()（自定义 build_ext）
+   ├─ download_and_copy_dependencies()      # 下载 NVIDIA ptxas 等工具链
+   ├─ apply_triton_ascend_patch()           # 【本讲重点】把 Ascend 补丁贴到干净的上游源文件
+   ├─ cmake --version 校验（要求 ≥ 3.20）
+   └─ build_extension → get_thirdparty → cmake configure → cmake build → 拷贝工具
+C. 自定义命令钩子
    ├─ plugin_editable_wheel.run → add_links(external_only=False)
    │     └─ 为每个后端创建符号链接：backend→python/triton/backends/<name>,
    │        language→python/triton/language/extra/<x>
-   └─ build_ext (CMakeBuild).run → 下载依赖 → cmake configure → cmake build → 拷贝工具
-C. setup() 注册
+   └─ build_ext 即上面的 CMakeBuild
+D. setup() 注册
    ├─ packages / package_dir：把 python/ 与各后端目录映射进 wheel
    ├─ entry_points["triton.backends"]：注册 ascend/nvidia/amd，供 core 自动发现
    └─ install_requires：声明运行期依赖（numpy/scipy/...）+ 架构相关的 triton==<版本>
-D. 安装完成后，import triton 时 core 按 entry_points 加载 ascend 后端
+E. 安装完成后，import triton 时 core 按 entry_points 加载 ascend 后端
 ```
+
+注意 B 里的顺序：**先打补丁、再 cmake configure/build**。也就是说，CMake 读到的 `CMakeLists.txt` 已经是「上游干净版 + Ascend 补丁」后的结果（详见 4.4 对 `CMakeLists.txt` 的讨论）。
 
 #### 4.3.3 源码精读
 
+**(0) 构建期补丁应用——把 Ascend 改动贴到干净的上游文件**（本讲最重要的新增点）：
+
+[setup.py:493-495](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L493-L495) —— `CMakeBuild.run()` 的开头两步：先 `download_and_copy_dependencies()`，再 `apply_triton_ascend_patch()`。补丁必须在任何 cmake 调用之前完成，否则 CMake 看到的是不含 Ascend 改动的干净 `CMakeLists.txt`。
+
+[setup.py:981-1009](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L981-L1009) —— `apply_triton_ascend_patch()` 的实现：它定位补丁目录 `third_party/ascend/patch`，准备两份补丁——`triton-ascend-dev-3.6.0.patch`（仅改 `autotuner.py` 的开发期补丁）与 `triton-ascend-3.6.0.patch`（主补丁）。对每一份，都**先 `checkout_file` 还原干净上游、再 `apply_patch` 贴补丁**，保证可重复构建。
+
+[setup.py:985-1002](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L985-L1002) —— 主补丁覆盖的 16 个上游文件清单，包括 `CMakeLists.txt`、`python/triton/compiler/compiler.py`、`python/triton/runtime/jit.py`、`python/src/ir.cc`、`bin/triton-opt.cpp`、`include/triton/Dialect/Triton/IR/TritonAttrDefs.td` 等。这正是 [u1-l2](u1-l2-directory-structure-and-layering.md) 所说「Ascend 改动覆盖 16 个上游文件」的具体出处。
+
+[setup.py:965-971](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L965-L971) —— `apply_patch(patch_path)`：执行 `git apply <patch>`，失败则抛 `RuntimeError`。
+
+[setup.py:974-978](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L974-L978) —— `checkout_file(files)`：执行 `git checkout -- <files>` 把工作区文件还原成干净上游版本。
+
+> 为什么「先 checkout 再 apply」？因为构建可能被重复触发；`git checkout --` 先把文件恢复成未打补丁的原始状态，`git apply` 才能干净地贴上，避免「补丁已存在」导致的失败。这就是构建期补丁的**幂等性**保障。它和运行期 `_apply_ascend_patch()`（带幂等保护的 monkey-patch，见 [u1-l2](u1-l2-directory-structure-and-layering.md)）思路一致，只是一个改源码树、一个改运行时 module。
+
+补丁实际往 `CMakeLists.txt` 里加了什么？可对照补丁文件：
+
+[third_party/ascend/patch/triton-ascend-3.6.0.patch:5-13](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L5-L13) —— 往 `CMakeLists.txt` 注入 `include(${CMAKE_CURRENT_SOURCE_DIR}/safe_compile.cmake)`（安全编译选项）。
+
+[third_party/ascend/patch/triton-ascend-3.6.0.patch:41-55](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L41-L55) —— 注入 `LLVM_MAJOR_VERSION_21_COMPATIBLE` / `LLVM_MAJOR_VERSION_22_COMPATIBLE` 两个 option（AscendNPU IR 的 LLVM 版本适配）。
+
+> 因此：你在仓库里直接读到的 `CMakeLists.txt` 是**干净上游版**，看不到上面这些 Ascend 内容；它们只有在 `apply_triton_ascend_patch()` 执行后才出现在工作区里。这一点是理解 4.4 的关键。
+
 **(1) 默认构建环境变量**——这是源码安装「开箱默认行为」的源头：
 
-[setup.py:52-56](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L52-L56) —— 用 `setdefault` 设定：`TRITON_BUILD_WITH_CCACHE=true`（启用 ccache 加速重编）、`TRITON_BUILD_WITH_CLANG_LLD=true`（用 clang/lld 而非 gcc）、`TRITON_BUILD_PROTON=OFF`（不构建 proton profiler）、`TRITON_WHEEL_NAME="triton-ascend"`（包名）、`TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF"`（默认不编 C++ 单测以省时）。这些就是 README 里源码安装命令所设的那些变量，`setup.py` 已替你设好默认值。
+[setup.py:52-56](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L52-L56) —— 用 `setdefault` 设定：`TRITON_BUILD_WITH_CCACHE=true`（启用 ccache 加速重编）、`TRITON_BUILD_WITH_CLANG_LLD=true`（用 clang/lld 而非 gcc）、`TRITON_BUILD_PROTON=OFF`（不构建 proton profiler）、`TRITON_WHEEL_NAME="triton-ascend"`（包名）、`TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF"`（默认不编 C++ 单测以省时）。这些就是 README 源码安装命令所设的那些变量，`setup.py` 已替你设好默认值。
 
 **(2) 后端发现**——ascend 只是三个内置后端之一：
 
-[setup.py:764](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L764) —— `backends = [*BackendInstaller.copy(["ascend", "nvidia", "amd"]), *BackendInstaller.copy_externals()]`，把 ascend/nvidia/amd 都当成 in-tree 后端处理。
+[setup.py:765](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L765) —— `backends = [*BackendInstaller.copy(["ascend", "nvidia", "amd"]), *BackendInstaller.copy_externals()]`，把 ascend/nvidia/amd 都当成 in-tree 后端处理。
 
-[setup.py:78-113](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L78-L113) —— `BackendInstaller.prepare` 探测每个后端的 `backend/language/tools` 子目录，**断言 `backend` 下必须存在 `compiler.py` 和 `driver.py`**（这正是 [u1-l1](u1-l1-project-overview-and-architecture.md) 讲的 compiler/driver 两大组件），并算出安装目标 `install_dir = python/triton/backends/<name>`。
+[setup.py:77-113](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L77-L113) —— `BackendInstaller.prepare` 探测每个后端的 `backend/language/tools` 子目录，**断言 `backend` 下必须存在 `compiler.py` 和 `driver.py`**（[setup.py:107-108](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L107-L108)，这正是 [u1-l1](u1-l1-project-overview-and-architecture.md) 讲的 compiler/driver 两大组件），并算出安装目标 `install_dir = python/triton/backends/<name>`。
 
 **(3) 打包映射**——把 ascend 的 language 挂到 `triton.language.extra`：
 
-[setup.py:767-791](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L767-L791) —— `get_package_dirs` 先 `yield ("", "python")`，再对每个后端 `yield (f"triton.language.extra.{x}", ...)`，从而把 `third_party/ascend/language/cann` 映射成 `triton.language.extra.cann`（即 `tl` 之外的 cann 扩展，见 [u1-l1](u1-l1-project-overview-and-architecture.md)）。
+[setup.py:768-793](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L768-L793) —— `get_package_dirs` 先 `yield ("", "python")`，再对每个后端 `yield (f"triton.backends.{backend.name}", ...)`，并把 `language` 下每个子目录 `yield (f"triton.language.extra.{x}", ...)`，从而把 `third_party/ascend/language/cann` 映射成 `triton.language.extra.cann`（即 `tl` 之外的 cann 扩展，见 [u1-l1](u1-l1-project-overview-and-architecture.md)）。
 
 **(4) editable 模式的符号链接**——开发模式下用软链而非拷贝，改源码即时生效：
 
-[setup.py:816-841](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L816-L841) —— `add_link_to_backends` 对每个后端调用 `update_symlink(backend.install_dir, backend.backend_dir)`，把 ascend 的 `backend`/`language` 软链到 `python/triton/...` 下。
+[setup.py:817-842](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L817-L842) —— `add_link_to_backends` 对每个后端调用 `update_symlink(backend.install_dir, backend.backend_dir)`，把 ascend 的 `backend`/`language` 软链到 `python/triton/...` 下。
 
-[setup.py:849-852](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L849-L852) —— `add_links(external_only=False)` 是 `plugin_develop` / `plugin_editable_wheel` 的统一入口；而 `plugin_bdist_wheel` / `plugin_install` 走 `external_only=True`（正式安装只链接外部插件，内置后端走 package 数据）。
+[setup.py:850-853](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L850-L853) —— `add_links(external_only=False)` 是 `plugin_editable_wheel` / `plugin_develop` 的统一入口；而 `plugin_bdist_wheel` / `plugin_install` 走 `external_only=True`（正式安装只链接外部插件，内置后端走 package 数据）。
 
 **(5) entry points——core 自动发现后端的钥匙**：
 
-[setup.py:927-935](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L927-L935) —— `get_entry_points` 生成 `entry_points["triton.backends"] = ["ascend = triton.backends.ascend", ...]`。core 在 `import triton` 时按这个入口点找到 ascend 后端并加载其 `compiler.py`。
+[setup.py:928-936](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L928-L936) —— `get_entry_points` 生成 `entry_points["triton.backends"] = ["ascend = triton.backends.ascend", ...]`。core 在 `import triton` 时按这个入口点找到 ascend 后端并加载其 `compiler.py`。
 
 **(6) 版本与依赖**：
 
-[setup.py:976-982](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L976-L982) —— `TRITON_VERSION = "3.6.0" + ...`（与 `version.txt` 的 `3.6.0` 对应），`MIN_PYTHON=(3,10)`、`MAX_PYTHON=(3,14)`，故 `PYTHON_REQUIRES=">=3.10,<3.15"`，这是源码安装 Python 版本的权威。
+[setup.py:1024-1030](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L1024-L1030) —— `TRITON_VERSION = "3.6.0" + ...`（与 `version.txt` 的 `3.6.0` 对应），`MIN_PYTHON=(3,10)`、`MAX_PYTHON=(3,14)`，故 `PYTHON_REQUIRES=">=3.10,<3.15"`，这是源码安装 Python 版本的权威。
 
-[setup.py:1014-1033](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L1014-L1033) —— `get_package_name` 返回 `triton_ascend`（或 `TRITON_WHEEL_NAME`）；`ARCHITECTURE_DEPENDENCIES` 对 x86/arm 都依赖 `triton==3.6.0`，即「先装社区 Triton 再被 ascend 覆盖」机制里锁定的社区 Triton 版本。
+[setup.py:1062-1081](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L1062-L1081) —— `get_package_name` 返回 `triton_ascend`（或 `TRITON_WHEEL_NAME`）；`ARCHITECTURE_DEPENDENCIES` 对 x86/arm 都依赖 `triton==3.6.0`，即「先装社区 Triton 再被 ascend 覆盖」机制里锁定的社区 Triton 版本。
 
-[setup.py:1044-1059](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L1044-L1059) —— `get_install_requirements` 列出 `attrs/numpy/scipy/decorator/psutil/pytest/pyyaml/pybind11/pandas` 等运行期依赖。
+[setup.py:1092-1107](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L1092-L1107) —— `get_install_requirements` 列出 `attrs/numpy/scipy/decorator/psutil/pytest/pyyaml/pybind11/pandas` 等运行期依赖。
 
-[setup.py:1069-1099](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L1069-L1099) —— 最终 `setup(...)` 调用：`ext_modules=[CMakeExtension("triton", "triton/_C/")]` 把 CMake 构建挂进来，`cmdclass` 把各命令替换成自定义的 `CMakeBuild/BuildWheel/plugin_develop/...`。
+[setup.py:1117-1169](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L1117-L1169) —— 最终 `setup(...)` 调用：`ext_modules=[CMakeExtension("triton", "triton/_C/")]` 把 CMake 构建挂进来，`cmdclass` 把各命令替换成自定义的 `CMakeBuild/BuildWheel/plugin_develop/...`。
 
-> 一个易错点（来自 [u1-l2](u1-l2-directory-structure-and-layering.md)）：`third_party/ascend/include` 与顶层 `include` 同名但完全不同；`setup.py` 这里处理的是 Python 侧的 `backends/language` 映射，C++ 侧的 `include/lib` 是由 CMake 负责的（见 4.4）。
+> 一个易错点（来自 [u1-l2](u1-l2-directory-structure-and-layering.md)）：`third_party/ascend/include` 与顶层 `include` 同名但完全不同；`setup.py` 这里处理的是 Python 侧的 `backends/language` 映射与构建期补丁，C++ 侧的 `include/lib` 是由 CMake 负责的（见 4.4）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：不动手装，仅靠读 `setup.py` 预测「editable 安装后，ascend 的 language 会出现在哪个 Python 路径」，再在有环境时验证。
+**实践目标**：亲眼看到「构建期补丁」这一步的存在与效果，理解它为什么排在 cmake 之前。
 
 **操作步骤**：
 
-1. 在仓库根目录，仅用源码追踪符号链接目标：
+1. **只读验证补丁清单**：确认 `setup.py` 会贴哪些补丁、覆盖哪些文件。
 
    ```bash
-   # 只读分析：找出 setup.py 会为 ascend 创建的软链目标
-   python3 - <<'PY'
-   # 示意代码：模拟 get_package_dirs 对 ascend 的映射
-   backend_name = "ascend"
-   # language 下的每个子目录（如 cann）会映射到这里：
-   print("language 映射目标前缀:", f"triton.language.extra.<x>")
-   print("backend  映射目标    :", f"python/triton/backends/{backend_name}")
-   PY
+   ls third_party/ascend/patch/
+   # 应能看到 triton-ascend-3.6.0.patch、triton-ascend-dev-3.6.0.patch、llvm_patch_f6ded0b.patch
    ```
 
-   上述为**示例代码**，仅演示映射逻辑；真实路径由 `setup.py:767-791` 与 `setup.py:816-841` 决定。
+   再对照 [setup.py:985-1002](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L985-L1002) 的 `patch_files` 清单，逐一确认这些文件确实存在于仓库（它们就是被打补丁的上游文件）。
 
-2. （本地有环境时验证）完成 `pip install -e .` 后执行：
+2. **手工模拟一次「checkout → apply」**（不真正编译，仅理解幂等性）：
 
    ```bash
-   python3 -c "import triton.language.extra.cann as c; print(c.__file__)"
-   python3 -c "import importlib.metadata as m; print(m.get_entry_points('triton.backends'))"
+   git status --short CMakeLists.txt        # 干净状态下应无输出
+   git apply third_party/ascend/patch/triton-ascend-3.6.0.patch
+   grep -c "LLVM_MAJOR_VERSION_22_COMPATIBLE" CMakeLists.txt   # 打补丁后应 ≥1
+   git checkout -- CMakeLists.txt            # 还原，模拟 checkout_file
+   grep -c "LLVM_MAJOR_VERSION_22_COMPATIBLE" CMakeLists.txt   # 还原后应为 0
    ```
 
-**需要观察的现象**：第 2 步应显示 `triton.language.extra.cann` 指向 `third_party/ascend/language/cann` 的软链；entry_points 列出 `ascend = triton.backends.ascend`。
+   上述为**示例代码**，演示 `apply_patch`/`checkout_file` 的净效果；真实构建中这两步由 `apply_triton_ascend_patch()` 自动完成。
 
-**预期结果**：能说清「`import triton.language.extra.cann` 之所以可用，是因为 `setup.py` 在安装期建立了这条映射/软链」。若无 NPU 环境，第 2 步标注「待本地验证」。
+3. （本地有环境且联网时验证）执行 `pip install -e .`，在构建日志里寻找补丁应用的痕迹，确认它发生在 cmake 配置之前。
+
+**需要观察的现象**：第 2 步中，打补丁后 `CMakeLists.txt` 出现 `LLVM_MAJOR_VERSION_22_COMPATIBLE`，`git checkout --` 后又消失——这正是「干净上游 ↔ 贴补丁」的来回切换。
+
+**预期结果**：能解释「`setup.py` 在 cmake 之前调用 `apply_triton_ascend_patch()`，所以 CMake 读到的 `CMakeLists.txt` 已经带有 Ascend 改动；若跳过这一步，`LLVM_MAJOR_VERSION_22_COMPATIBLE` 等 option 将不存在，构建会失败」。若无 NPU/不编译，第 3 步标注「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-- **Q1**：`pip install -e .` 与 `pip install .`（非 editable）对 ascend 后端代码的处理有何不同？
+- **Q1**：为什么 `apply_triton_ascend_patch()` 里对每份补丁都要「先 `checkout_file` 再 `apply_patch`」？
+  - **答**：为保证幂等——构建可重复执行，`git checkout --` 先把上游文件还原成未打补丁的干净状态，`git apply` 才能干净贴上，避免「补丁已存在」导致重复构建失败。
+- **Q2**：`pip install -e .` 与 `pip install .`（非 editable）对 ascend 后端代码的处理有何不同？
   - **答**：editable（`-e`）走 `plugin_editable_wheel`/`plugin_develop`，用**符号链接**把 ascend 的 backend/language 链到 `python/triton/...`，改源码即时生效；非 editable 走 `plugin_install`/`BuildWheel`，内置后端以**包数据**形式拷贝进 wheel，改动需重装。
-- **Q2**：为什么 `setup.py:107-108` 要断言 backend 下存在 `compiler.py` 和 `driver.py`？
+- **Q3**：为什么 `setup.py:107-108` 要断言 backend 下存在 `compiler.py` 和 `driver.py`？
   - **答**：这是 Triton 后端插件的契约——core 加载后端时需要这两个文件（compiler 提供编译阶段，driver 提供运行时启动），缺失则后端不完整，故在打包期就断言拦截。
-- **Q3**：默认 `TRITON_BUILD_PROTON=OFF`、`-DTRITON_BUILD_UT=OFF` 带来的好处是什么？
-  - **答**：跳过 proton profiler 与 C++ 单测的构建，显著缩短首次编译时间；需要时可通过环境变量重新打开。
 
 ---
 
@@ -325,6 +360,8 @@ D. 安装完成后，import triton 时 core 按 entry_points 加载 ascend 后�
 2. 编译 **ascend 后端插件**（`third_party/ascend` 下的 C++/MLIR pass、`triton-mlir-opt` 工具等）。
 3. 链接产出 `libtriton`（Python 扩展 `triton._C`）、`entryC`、以及运行时用到的 `triton-mlir-opt` / `triton-opt` / `FileCheck`。
 
+> **关键认知（承接 4.3）**：仓库里的 `CMakeLists.txt` 是**干净上游版本**。Ascend 专属的 CMake 内容——安全编译选项 `include(safe_compile.cmake)`、`LLVM_MAJOR_VERSION_22_COMPATIBLE` 版本适配 option、覆盖率钩子——都由 `apply_triton_ascend_patch()` 在 cmake 之前注入。所以下文引用的「base 行号」指干净上游版；打补丁后这些片段附近会多出若干行。
+
 **LLVM 从哪来？** 这是新手最容易卡住的地方。Triton-Ascend 用 LLVM 22 系列。它有两种来源：
 
 - **预编译下载（默认）**：`setup.py` 根据当前平台和 `cmake/llvm-hash.txt` + 补丁哈希，拼出一个预编译 LLVM 包名，从华为云 OBS 下载到 `~/.triton/llvm`。
@@ -335,7 +372,9 @@ D. 安装完成后，import triton 时 core 按 entry_points 加载 ascend 后�
 CMake 配置阶段的关键决策链：
 
 ```text
-setup.py: CMakeBuild.build_extension
+setup.py: CMakeBuild.run()
+  ├─ download_and_copy_dependencies()
+  ├─ apply_triton_ascend_patch()          # 先把补丁（含 CMakeLists 的 Ascend 改动）贴上
   ├─ get_thirdparty_packages([get_llvm_package_info()])
   │     ├─ 若设了 LLVM_SYSPATH        → 用本地 LLVM（离线）
   │     ├─ 若 TRITON_OFFLINE_BUILD=true → 强制 syspath，禁止下载
@@ -343,57 +382,58 @@ setup.py: CMakeBuild.build_extension
   ├─ cmake -G Ninja <cmake_args>
   │     ├─ -DTRITON_BUILD_PYTHON_MODULE=ON
   │     ├─ -DTRITON_CODEGEN_BACKENDS="ascend;nvidia;amd"   # 决定 add_subdirectory 哪些后端
-  │     ├─ -DLLVM_MAJOR_VERSION_22_COMPATIBLE=ON
-  │     └─ -DLLVM_ENABLE_WERROR=ON ...
+  │     └─ -DLLVM_MAJOR_VERSION_22_COMPATIBLE=ON           # 该 option 本身由补丁注入
   └─ cmake --build . -j<N>
         → libtriton.so / entryC.so / triton-mlir-opt / triton-opt / FileCheck
 ```
 
 预编译 LLVM 包名的组成（理解它就理解了「为什么换 patch 会触发重新下载」）：
 
-\[ \texttt{name} = \texttt{llvm-}\,\underbrace{\texttt{f6ded0b}}_{\text{llvm-hash.txt 前 8 位}}\texttt{-}\,\underbrace{\texttt{xxxxxxxx}}_{\text{patch 哈希前 8 位}}\texttt{-}\,\underbrace{\texttt{ubuntu-x64}}_{\text{系统后缀}} \]
+\[ \texttt{name} = \texttt{llvm-}\,\underbrace{\texttt{f6ded0b}}_{\text{llvm-hash.txt 前 8 位}}\texttt{-}\,\underbrace{\texttt{xxxxxxxx}}_{\text{LLVM patch 哈希前 8 位}}\texttt{-}\,\underbrace{\texttt{ubuntu-x64}}_{\text{系统后缀}} \]
 
-其中 patch 哈希由 `get_llvm_patch_hash` 对 `third_party/ascend/patch/llvm_patch_*.patch` 求 SHA256 得到；一旦 patch 内容变化，哈希变化，包名变化，就会触发重新下载——这套机制保证了「下载到的 LLVM 一定带着正确的 Ascend 补丁」。
+其中 LLVM patch 哈希由 `get_llvm_patch_hash` 对 `third_party/ascend/patch/llvm_patch_*.patch` 求 SHA256 得到；一旦 patch 内容变化，哈希变化，包名变化，就会触发重新下载——这套机制保证了「下载到的 LLVM 一定带着正确的 Ascend 补丁」。
 
 #### 4.4.3 源码精读
 
 **(1) CMake 最低版本与构建选项**：
 
-[CMakeLists.txt:1](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L1) —— `cmake_minimum_required(VERSION 3.20)`，与 `setup.py` 里 `CMake >= 3.20 is required` 的检查一致（[setup.py:504-505](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L504-L505)）。
+[CMakeLists.txt:1](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L1) —— `cmake_minimum_required(VERSION 3.20)`，与 `setup.py` 里 `CMake >= 3.20 is required` 的检查一致（[setup.py:505-506](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L505-L506)）。
 
-[CMakeLists.txt:22-26](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L22-L26) —— 关键 option：`TRITON_BUILD_PYTHON_MODULE`（构建 Python 绑定）、`TRITON_BUILD_PROTON`、`TRITON_BUILD_UT`、`TRITON_BUILD_WITH_CCACHE`，以及 `TRITON_CODEGEN_BACKENDS`（决定编译哪些后端，默认空、由 `setup.py` 传入 `ascend;nvidia;amd`）。
+[CMakeLists.txt:18-23](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L18-L23) —— 关键 option：`TRITON_BUILD_PYTHON_MODULE`（构建 Python 绑定）、`TRITON_BUILD_PROTON`、`TRITON_BUILD_UT`、`TRITON_BUILD_WITH_CCACHE`，以及 `TRITON_CODEGEN_BACKENDS`（决定编译哪些后端，默认空、由 `setup.py` 传入 `ascend;nvidia;amd`）。
 
-**(2) 查找 MLIR/LLVM 并按平台追加 codegen 库**：
+**(2) 查找 MLIR/LLVM**：
 
-[CMakeLists.txt:102](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L102) —— `find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})`，MLIR 目录由 `LLVM_LIBRARY_DIR/cmake/mlir` 推得（[CMakeLists.txt:93-99](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L93-L99)）。
+[CMakeLists.txt:90-92](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L90-L92) —— `MLIR_DIR` 由 `LLVM_LIBRARY_DIR/cmake/mlir` 推得。
 
-[CMakeLists.txt:287-306](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L287-L306) —— 根据系统架构（aarch64 / x86_64 / ppc64le）追加对应的 LLVM codegen/ASM 解析库；昇腾整机常见为 aarch64 或 x86_64。
+[CMakeLists.txt:99](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L99) —— `find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})`。
 
 **(3) 编译 ascend 后端——`add_subdirectory` 的关键循环**：
 
-[CMakeLists.txt:204-221](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L204-L221) —— 当 `TRITON_BUILD_PYTHON_MODULE` 打开时，对 `TRITON_CODEGEN_BACKENDS` 里每个后端 `add_subdirectory(third_party/${CODEGEN_BACKEND})`。也就是说 ascend 后端的 C++/MLIR pass（`third_party/ascend/lib/...`）正是在这里被纳入编译的（后续 [u4](u4-l1-ttir-to-linalg-pipeline-overview.md) 系列会深入这些 pass）。
+[CMakeLists.txt:180-182](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L180-L182) —— 当 `TRITON_BUILD_PYTHON_MODULE` 打开时，对 `TRITON_CODEGEN_BACKENDS` 里每个后端 `add_subdirectory(third_party/${CODEGEN_BACKEND})`。也就是说 ascend 后端的 C++/MLIR pass（`third_party/ascend/lib/...`）正是在这里被纳入编译的（后续 [u4](u4-l1-ttir-to-linalg-pipeline-overview.md) 系列会深入这些 pass）。
 
-**(4) LLVM 版本兼容性开关**：
+**(4) LLVM 版本兼容性开关（由补丁注入）**：
 
-[CMakeLists.txt:186-199](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L186-L199) —— 定义 `LLVM_MAJOR_VERSION_21_COMPATIBLE` / `LLVM_MAJOR_VERSION_22_COMPATIBLE` 两个 option，用于让 AscendNPU IR 适配不同 LLVM 大版本；`setup.py` 默认传 `-DLLVM_MAJOR_VERSION_22_COMPATIBLE=ON`（[setup.py:569](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L569)）。
+[third_party/ascend/patch/triton-ascend-3.6.0.patch:41-55](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L41-L55) —— 定义 `LLVM_MAJOR_VERSION_21_COMPATIBLE` / `LLVM_MAJOR_VERSION_22_COMPATIBLE` 两个 option，用于让 AscendNPU IR 适配不同 LLVM 大版本。注意：**这两段不在仓库的 base `CMakeLists.txt` 里**，而是构建期由补丁贴上；`setup.py` 默认传 `-DLLVM_MAJOR_VERSION_22_COMPATIBLE=ON`（[setup.py:570](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L570)）。
 
 **(5) LLVM_SYSPATH 与 FileCheck**：
 
-[CMakeLists.txt:341-352](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/CMakeLists.txt#L341-L352) —— 断言 `LLVM_SYSPATH` 必须设置（由 `setup.py` 的 `get_thirdparty_packages` 注入，指向下载或本地的 LLVM），并把 `FileCheck` 从 LLVM 拷贝到 wheel 目录（FileCheck 是后续 MLIR conversion 测试要用的工具，见 [u10-l4](u10-l4-writing-tests.md)）。
+[CMakeLists.txt:301-302](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L301-L302) —— 断言 `LLVM_SYSPATH` 必须设置（由 `setup.py` 的 `get_thirdparty_packages` 注入，指向下载或本地的 LLVM）。
+
+[CMakeLists.txt:309-312](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/CMakeLists.txt#L309-L312) —— 把 `FileCheck` 从 LLVM 拷贝到 wheel 目录（FileCheck 是后续 MLIR conversion 测试要用的工具，见 [u10-l4](u10-l4-writing-tests.md)）。
 
 **(6) LLVM 预编译包下载逻辑（在 setup.py 中）**：
 
-[setup.py:225-273](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L225-L273) —— `get_llvm_package_info`：读取 `cmake/llvm-hash.txt` 前 8 位（`f6ded0b`）作 `rev`，调 `get_llvm_patch_hash` 得 `patch_hash`，按平台选 `system_suffix`，拼出 `llvm-{rev}-{patch_hash}-{system_suffix}`，URL 指向 `https://triton-ascend-artifacts.obs.myhuaweicloud.com/llvm-builds/...`。
+[setup.py:226-273](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L226-L273) —— `get_llvm_package_info`：读取 `cmake/llvm-hash.txt` 前 8 位（`f6ded0b`）作 `rev`，调 `get_llvm_patch_hash` 得 `patch_hash`，按平台选 `system_suffix`，拼出 `llvm-{rev}-{patch_hash}-{system_suffix}`，URL 指向 `https://triton-ascend-artifacts.obs.myhuaweicloud.com/llvm-builds/...`。
 
-[setup.py:206-222](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L206-L222) —— `get_llvm_patch_hash`：对 `third_party/ascend/patch/llvm_patch_*.patch`（当前为 `llvm_patch_f6ded0b.patch`）求 SHA256，取前 8 位。
+[setup.py:206-222](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L206-L222) —— `get_llvm_patch_hash`：对 `third_party/ascend/patch/llvm_patch_*.patch`（当前为 `llvm_patch_f6ded0b.patch`）求 SHA256，取前 8 位。
 
 **(7) CMake 构建与产物拷贝（在 setup.py 的 CMakeBuild 中）**：
 
-[setup.py:636-638](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L636-L638) —— `cmake` 配置与 `cmake --build` 的实际调用。
+[setup.py:637-640](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L637-L640) —— `cmake` 配置与 `cmake --build` 的实际调用。
 
-[setup.py:641-657](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L641-L657) —— 把构建出的 `triton-mlir-opt`（位于 `cmake_dir/third_party/ascend/bin/`）拷贝到扩展目录并 `strip` 减小体积——这个工具正是 [u4](u4-l1-ttir-to-linalg-pipeline-overview.md) 里手动跑 pass 流水线要用的 `triton-mlir-opt`。
+[setup.py:644-658](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L644-L658) —— 把构建出的 `triton-mlir-opt`（位于 `cmake_dir/third_party/ascend/bin/`）拷贝到扩展目录并 `strip` 减小体积——这个工具正是 [u4](u4-l1-ttir-to-linalg-pipeline-overview.md) 里手动跑 pass 流水线要用的 `triton-mlir-opt`。
 
-> 离线自建 LLVM 的命令在安装手册里（[docs/en/installation_guide.md:297-369](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/installation_guide.md#L297-L369)）：`git checkout f6ded0be...` 后 `git apply llvm_patch_f6ded0b.patch`，再用 clang-15/lld-15 编 LLVM，最后 `LLVM_SYSPATH=... python3 setup.py install`。注意它 checkout 的 LLVM commit 与 `cmake/llvm-hash.txt` 一致（`f6ded0be897e2878612dd903f7e8bb85448269e5`）。
+> 离线自建 LLVM 的命令在安装手册里（[docs/en/installation_guide.md:290-365](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L290-L365)）：`git checkout f6ded0be...` 后 `git apply llvm_patch_f6ded0b.patch`（见 [installation_guide.md:306-310](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/installation_guide.md#L306-L310)），再用 clang-15/lld-15 编 LLVM，最后 `LLVM_SYSPATH=... python3 setup.py install`。注意它 checkout 的 LLVM commit 与 `cmake/llvm-hash.txt` 一致（`f6ded0be897e2878612dd903f7e8bb85448269e5`）。
 
 #### 4.4.4 代码实践
 
@@ -405,14 +445,14 @@ setup.py: CMakeBuild.build_extension
 
    ```bash
    cat cmake/llvm-hash.txt        # → f6ded0be897e2878612dd903f7e8bb85448269e5，取前 8 位 = f6ded0b
-   ls third_party/ascend/patch/   # → llvm_patch_f6ded0b.patch
+   ls third_party/ascend/patch/   # → 含 llvm_patch_f6ded0b.patch
    ```
 
-2. 计算 patch 哈希前 8 位（与 `setup.py:206-222` 的逻辑一致）：
+2. 计算 LLVM patch 哈希前 8 位（与 [setup.py:206-222](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L206-L222) 的逻辑一致）：
 
    ```bash
    python3 - <<'PY'
-   import hashlib, os, glob
+   import hashlib, os
    patch_dir = "third_party/ascend/patch"
    files = sorted(f for f in os.listdir(patch_dir)
                   if f.startswith("llvm_patch_") and f.endswith(".patch"))
@@ -429,12 +469,6 @@ setup.py: CMakeBuild.build_extension
    llvm-f6ded0b-<patch_hash>-ubuntu-x64
    ```
 
-4. 在仓库源码里反查这个逻辑：
-
-   ```bash
-   python3 -c "import setup_helper_llvm as _" 2>/dev/null || true   # 仅提示：真实逻辑在 setup.py:get_llvm_package_info
-   ```
-
 **需要观察的现象**：第 2 步打印出一个 8 位哈希；第 3 步得到完整包名；包名里同时包含 `rev` 和 `patch_hash`。
 
 **预期结果**：能解释「如果我修改了 `llvm_patch_*.patch`，`patch_hash` 改变，`setup.py` 会判定本地缓存失效并重新下载对应 LLVM」——这正是 `setup.py:320-324` 用 `version.txt == p.url` 做兼容性检查的意义。
@@ -445,10 +479,12 @@ setup.py: CMakeBuild.build_extension
 
 - **Q1**：`CMakeLists.txt` 中 `TRITON_CODEGEN_BACKENDS` 为空时会发生什么？
   - **答**：`add_subdirectory(third_party/${CODEGEN_BACKEND})` 循环不执行，不会编译任何后端的 C++/MLIR。`setup.py` 会把它填成 `ascend;nvidia;amd`，所以正常构建会编译全部三个后端。
-- **Q2**：为什么 `CMakeLists.txt:341` 断言 `LLVM_SYSPATH` 必须设置？它由谁注入？
+- **Q2**：为什么 `CMakeLists.txt:301` 断言 `LLVM_SYSPATH` 必须设置？它由谁注入？
   - **答**：MLIR/LLVM 的 include/lib 路径必须显式提供，不能凭空找到。`LLVM_SYSPATH` 由 `setup.py` 的 `get_thirdparty_packages`（基于 `get_llvm_package_info`）注入——要么指向下载到 `~/.triton/llvm` 的预编译包，要么指向用户 `LLVM_SYSPATH` 环境变量指定的本地 LLVM。
-- **Q3**：离线构建（`TRITON_OFFLINE_BUILD=true`）与设置 `LLVM_SYSPATH` 有何区别？
-  - **答**：`LLVM_SYSPATH` 单纯指定本地 LLVM 路径，但仍允许其他依赖联网；`TRITON_OFFLINE_BUILD=true` 是更强的开关，会禁止任何联网下载（包括 LLVM 与其他第三方包），强制所有依赖都通过各自 `syspath_var_name` 显式提供，适合无网沙箱（见 [setup.py:162-175](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L162-L175)）。
+- **Q3**：仓库里的 `CMakeLists.txt` 看不到 `LLVM_MAJOR_VERSION_22_COMPATIBLE`，但构建时它却生效了，为什么？
+  - **答**：因为该 option 是 Ascend 亲和改动，由 `apply_triton_ascend_patch()` 在 cmake 之前通过 `triton-ascend-3.6.0.patch` 注入到 `CMakeLists.txt`（见 4.3）。仓库里是干净上游版，构建工作区里才是「上游 + 补丁」版。
+- **Q4**：离线构建（`TRITON_OFFLINE_BUILD=true`）与设置 `LLVM_SYSPATH` 有何区别？
+  - **答**：`LLVM_SYSPATH` 单纯指定本地 LLVM 路径，但仍允许其他依赖联网；`TRITON_OFFLINE_BUILD=true` 是更强的开关，会禁止任何联网下载（包括 LLVM 与其他第三方包），强制所有依赖都通过各自 `syspath_var_name` 显式提供，适合无网沙箱（见 [setup.py:162-175](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L162-L175)）。
 
 ---
 
@@ -464,26 +500,26 @@ setup.py: CMakeBuild.build_extension
    - `npu-smi info` 记录芯片型号。
 3. **安装**：
    - whl：`pip install triton-ascend==3.2.1 --extra-index-url=https://mirrors.huaweicloud.com/ascend/repos/pypi`
-   - 或源码：`git clone ... && cd triton-ascend && pip install -e .`，并记录首次编译耗时与是否下载了预编译 LLVM。
-4. **验证**：运行 `python3 ./third_party/ascend/tutorials/01-vector-add.py`，确认输出 `The maximum difference between torch and triton is 0.0`（命令见 [docs/en/quick_start.md:45-52](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/quick_start.md#L45-L52)）。
-5. **溯源**（源码安装者额外做）：用 4.3.4 的方法确认 `triton.language.extra.cann` 的软链目标，用 4.4.4 的方法算出本次下载的 LLVM 包名。
+   - 或源码：`git clone ... && cd triton-ascend && pip install -e .`，并记录首次编译耗时、是否下载了预编译 LLVM，**以及在 cmake 之前是否能看到补丁被应用**（参考 4.3.4）。
+4. **验证**：运行 `python3 ./third_party/ascend/tutorials/01-vector-add.py`，确认输出 `The maximum difference between torch and triton is 0.0`（命令见 [docs/en/quick_start.md:45-52](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/quick_start.md#L45-L52)）。
+5. **溯源**（源码安装者额外做）：用 4.3.4 的方法确认 `triton.language.extra.cann` 的软链目标，并手工模拟一次 `git apply`/`git checkout` 观察 `CMakeLists.txt` 的 Ascend 改动增减；用 4.4.4 的方法算出本次下载的 LLVM 包名。
 
-**交付物**：一份 markdown 记录，包含选型理由、芯片型号、`set_env.sh` 影响的环境变量清单、安装耗时、vector-add 验证截图/输出、（可选）LLVM 包名。
+**交付物**：一份 markdown 记录，包含选型理由、芯片型号、`set_env.sh` 影响的环境变量清单、安装耗时、补丁应用观察、vector-add 验证截图/输出、（可选）LLVM 包名。
 
-> 如果手头没有 NPU：可退化为「源码阅读型实践」——只完成第 5 步的溯源分析，并对照本讲给出的源码链接，说明每一步在 `setup.py`/`CMakeLists.txt` 中的依据。真机运行部分标注「待本地验证」。
+> 如果手头没有 NPU：可退化为「源码阅读型实践」——只完成第 5 步的溯源分析（尤其 4.3.4 的补丁模拟可在任意 git 仓库完成），并对照本讲给出的源码链接，说明每一步在 `setup.py`/`CMakeLists.txt`/补丁文件中的依据。真机运行部分标注「待本地验证」。
 
 ## 6. 本讲小结
 
-- Triton-Ascend 有 **whl / 源码 / 镜像** 三种安装方式，产物相同，区别在于「谁来准备 CANN、谁来现场编译 C++」。
+- Triton-Ascend 有 **whl / 源码 / 镜像** 三种安装方式，产物相同，区别在于「谁来准备 CANN、谁来现场编译 C++」；whl 不触发本地 CMake 构建与构建期补丁，源码安装才会。
 - **CANN 是地基**：编译期提供 BiSheng（生成 `.o`），运行期提供 ACL/runtime（`rtKernelLaunch`）；`source set_env.sh` 不可省略，否则找不到编译器与运行时库。
 - 软件版本以 **`setup.py` 为源码安装权威**（当前 HEAD：Python `>=3.10,<3.15`，依赖 `triton==3.6.0`，与 `version.txt` 一致），README/quick_start 的措辞相对滞后。
-- **`setup.py` 是源码安装入口**：它驱动 CMake 构建 C++/MLIR 扩展，又通过 package 映射 + 符号链接 + entry points 把 `ascend` 后端挂载进 `triton` 命名空间（这是 [u1-l2](u1-l2-directory-structure-and-layering.md) 分层原则的落地机制）。
-- **`CMakeLists.txt` 负责真正的 C++ 编译**：查找 MLIR/LLVM、`add_subdirectory(third_party/ascend)` 编译后端 pass、产出 `libtriton`/`triton-mlir-opt`/`triton-opt`/`FileCheck`。
-- **LLVM 来自预编译下载或源码自建**：包名由 `llvm-hash.txt` + patch 哈希 + 平台后缀拼成，patch 变化会触发重新下载；离线场景用 `LLVM_SYSPATH` 或 `TRITON_OFFLINE_BUILD`。
+- **`setup.py` 是源码安装入口，做三件事**：(1) `apply_triton_ascend_patch()` 把 Ascend 补丁贴到干净上游源文件（先 `git checkout` 还原、再 `git apply`，幂等），排在 cmake 之前；(2) 驱动 CMake 构建 C++/MLIR 扩展；(3) 通过 package 映射 + 符号链接 + entry points 把 `ascend` 后端挂载进 `triton` 命名空间。
+- **`CMakeLists.txt`（仓库内为干净上游版）负责真正的 C++ 编译**：查找 MLIR/LLVM、`add_subdirectory(third_party/ascend)` 编译后端 pass、产出 `libtriton`/`triton-mlir-opt`/`triton-opt`/`FileCheck`；Ascend 专属 option（如 `LLVM_MAJOR_VERSION_22_COMPATIBLE`、`safe_compile.cmake`）由补丁在构建期注入。
+- **LLVM 来自预编译下载或源码自建**：包名由 `llvm-hash.txt`（`f6ded0b`）+ LLVM patch 哈希 + 平台后缀拼成，patch 变化会触发重新下载；离线场景用 `LLVM_SYSPATH` 或 `TRITON_OFFLINE_BUILD`。
 
 ## 7. 下一步学习建议
 
 - 装好后，立刻进入 [u1-l4 跑通第一个 kernel：vector-add 教程](u1-l4-first-kernel-vector-add.md)，用 `01-vector-add.py` 验证环境并建立对 `@triton.jit` / `tl.load` / `tl.store` 的第一印象。
+- 想理解「构建期补丁」与「运行期补丁」的全貌，复习 [u1-l2 代码结构、核心 vs Ascend 分层与补丁机制](u1-l2-directory-structure-and-layering.md)，把本讲的 `apply_triton_ascend_patch()`（构建期）与那里的 `_apply_ascend_patch()`（运行期 monkey-patch）对照着看。
 - 想理解安装后 `import triton` 是怎么找到 ascend 后端的，可先读 [u3-l1 @triton.jit 与编译入口](u3-l1-jit-and-compile-entry.md)，再回看本讲的 entry points 机制。
-- 对「为什么 ascend 是 in-tree 后端、安装期如何分层」想更系统了解，复习 [u1-l2 代码结构与「核心 vs Ascend」分层原则](u1-l2-directory-structure-and-layering.md)。
-- 后续若要给 Triton-Ascend 新增 C++/MLIR pass，本讲的 `CMakeLists.txt` 后端编译与 `setup.py` 默认构建变量（如 `TRITON_APPEND_CMAKE_ARGS`）会成为你的日常工具，届时可结合 [u10-l5 扩展 C++ pass：二次开发实战](u10-l5-extending-cpp-pass.md) 一起看。
+- 后续若要给 Triton-Ascend 新增 C++/MLIR pass，本讲的 `CMakeLists.txt` 后端编译、`setup.py` 默认构建变量（如 `TRITON_APPEND_CMAKE_ARGS`）以及补丁机制会成为你的日常工具，届时可结合 [u10-l5 扩展 C++ pass：二次开发实战](u10-l5-extending-cpp-pass.md) 一起看。

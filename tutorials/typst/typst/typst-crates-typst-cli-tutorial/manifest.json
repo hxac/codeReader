@@ -1,0 +1,600 @@
+{
+  "project": "typst-crates-typst-cli",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-cli 是 Typst 的命令行二进制（`typst` 命令），属于中等规模（约 4500 行、18 个源文件 + 1 个测试）。学习路径分四层：入门层（u1）先建立\"项目定位 / 入口分发 / clap 参数模型\"的全局认知；进阶层拆成两条互补的线——核心编译流水线（u2：SystemWorld 桥梁 → 编译配置 → 多格式导出 → 诊断与终端输出 → watch 增量重编译）与资源环境基础设施（u3：字体发现 / 包存储 / 网络下载 / 依赖追踪 / init 脚手架）；专家层（u4）聚焦高级机制与扩展点：eval 文档内省、query 弃用迁移、HTML/Bundle 导出与 http-server、自更新、构建期产物与 completions、info 环境内省、端到端 smoke 测试。单元内讲义按\"数据/依赖流动方向\"排序：先讲被依赖的底层抽象（World、参数模型），再讲使用它们的上层流程（编译、导出、watch），最后讲横切关注点（诊断、依赖、测试）。每篇讲义只解决一个主题，源码聚焦 1-6 个真实文件，并配一个可在本地构建运行验证的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst-cli 与运行方式",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目定位与工程结构",
+          "order": 1,
+          "filename": "u1-l1-project-positioning.md",
+          "level": "beginner",
+          "topic": "认识 typst-cli 是什么——Typst 的命令行二进制 crate，它在整个 typst 工作区中的位置、它的依赖与编译特性，以及如何构建运行。",
+          "learning_goals": [
+            "理解 typst-cli 在 typst workspace 中的角色：它是产出 `typst` 命令的二进制 crate",
+            "读懂 Cargo.toml 中的依赖、feature（embedded-fonts / http-server / self-update）与 [[bin]] 配置",
+            "掌握从源码构建并运行 typst CLI 的方式"
+          ],
+          "source_files": [
+            "../../README.md",
+            "Cargo.toml",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "typst 在 workspace 中的定位（编译器核心 + CLI 二进制）",
+            "Cargo.toml：依赖、feature 开关与 [[bin]] name=typst 配置",
+            "main.rs 顶层模块清单与子命令概览",
+            "如何 cargo build / cargo run 构建 CLI 二进制"
+          ],
+          "practice_task": "克隆仓库后，在 crates/typst-cli 目录下用 cargo build 构建出 typst 二进制，运行 ./target/debug/typst --version 与 ./target/debug/typst --help，记录输出的版本号与子命令列表，并对照 main.rs 的 dispatch 函数确认每个子命令对应的处理模块。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "入口与命令分发",
+          "order": 2,
+          "filename": "u1-l2-entry-dispatch.md",
+          "level": "beginner",
+          "topic": "从 main.rs 入口出发，理解 typst CLI 如何解析参数、分发到各子命令、处理错误与退出码，以及首次运行的问候逻辑。",
+          "learning_goals": [
+            "理解 main() 的执行流程：SIGPIPE 重置、dispatch、错误打印、退出码返回",
+            "掌握 ARGS 惰性解析与缺失子命令时调用 greet 的逻辑",
+            "理解应用级错误/提示的打印方式与 thread_local EXIT 退出码机制"
+          ],
+          "source_files": [
+            "src/main.rs",
+            "src/greet.rs"
+          ],
+          "minimal_modules": [
+            "main() 流程：sigpipe::reset、dispatch、错误与退出码",
+            "ARGS 惰性全局解析（LazyLock）与缺失子命令 → greet",
+            "set_failed / print_error / print_hint 与 thread_local EXIT",
+            "greet：首次运行问候、版本标记与 Windows 暂停"
+          ],
+          "practice_task": "阅读 main.rs 的 main 与 dispatch，画出从命令行输入到具体子命令执行的调用流程图；然后修改本地副本，在 dispatch 中为某个子命令（如 fonts）打印一条调试日志，重新构建并运行验证。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "命令行参数模型",
+          "order": 3,
+          "filename": "u1-l3-args-model.md",
+          "level": "beginner",
+          "topic": "深入 args.rs，理解 typst 如何用 clap 定义全部子命令与参数结构、自定义值解析器，以及输出格式 / PDF 标准 / 特性等各类枚举。",
+          "learning_goals": [
+            "理解 CliArguments / Command / CompileCommand 等结构如何用 clap 派生宏定义",
+            "掌握 Input/Output 枚举与自定义 value parser（区分 stdin 与路径）",
+            "认识 OutputFormat / Target / PdfStandard / Feature 等枚举与页面范围 Pages 的解析"
+          ],
+          "source_files": [
+            "src/args.rs"
+          ],
+          "minimal_modules": [
+            "clap 派生：CliArguments、Command 枚举与各子命令",
+            "CompileArgs / WorldArgs / ProcessArgs / FontArgs / PackageArgs 参数组",
+            "Input / Output 枚举与 input/output 值解析器（stdin = `-`）",
+            "枚举类型：OutputFormat / Target / PdfStandard / Feature / DiagnosticFormat",
+            "Pages 页面范围解析与 parse_sys_input_pair 键值解析"
+          ],
+          "practice_task": "运行 typst compile --help 与 typst fonts --help，把每个命令行选项映射到 args.rs 中对应结构体的字段；再用 --pages 2,4-6 编译文档，对照 Pages::from_str 理解解析逻辑。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：核心编译流水线",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "SystemWorld：编译器与操作系统的桥梁",
+          "order": 1,
+          "filename": "u2-l1-system-world.md",
+          "level": "intermediate",
+          "topic": "深入 world.rs，理解 SystemWorld 如何实现 typst::World trait，把文件系统、字体、包、时间等操作系统资源提供给编译器。",
+          "learning_goals": [
+            "理解 World trait 的作用，以及 SystemWorld 为何是 CLI 与编译器之间的核心桥梁",
+            "掌握 SystemFiles 如何解析项目根、主文件、stdin 与包路径（FileId / VirtualRoot）",
+            "理解字体惰性发现、依赖追踪与 WorldCreationError 错误模型"
+          ],
+          "source_files": [
+            "src/world.rs"
+          ],
+          "minimal_modules": [
+            "SystemWorld 结构与 World trait 实现（library/book/main/source/file/font/today）",
+            "SystemFiles：项目根解析、主文件、stdin/EMPTY 的 FileId",
+            "FileLoader 实现与 DiagnosticWorld 的 name 路径映射",
+            "构造逻辑：rayon 线程池、inputs、features、时间、WorldCreationError"
+          ],
+          "practice_task": "阅读 SystemWorld::new 与 SystemFiles::new，梳理一次 compile 如何确定 project root 与 main FileId；写一个最小 .typ 文件，分别从 stdin（`-`）和文件路径编译，对比两者的 main 与路径解析行为。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "编译配置与单次编译",
+          "order": 2,
+          "filename": "u2-l2-compile-config.md",
+          "level": "intermediate",
+          "topic": "深入 compile.rs，理解 CompileConfig 如何预处理命令行参数（推断输出格式、页面范围、PDF 标准等），以及 compile_once 的单次编译-导出-诊断流程。",
+          "learning_goals": [
+            "理解 CompileConfig::new_impl 如何推断输出格式、推导输出路径、校验 PDF 标准与 tagged 逻辑",
+            "掌握 compile_once 的完整流程：编译、静态警告合并、成功/失败分支、依赖写出",
+            "理解 Timer 计时与 #[typst_macros::time] 的用法"
+          ],
+          "source_files": [
+            "src/compile.rs"
+          ],
+          "minimal_modules": [
+            "CompileConfig 字段与 new_impl 预处理流程",
+            "输出格式推断与 --pages / --no-pdf-tags 的 tagged、警告、校验逻辑",
+            "compile_once 单次编译流程与 timer.record",
+            "PdfStandards 构造与 From<PdfStandard> 转换"
+          ],
+          "practice_task": "阅读 CompileConfig::new_impl，整理出"
+        },
+        {
+          "id": "u2-l3",
+          "title": "多格式导出",
+          "order": 3,
+          "filename": "u2-l3-multi-format-export.md",
+          "level": "intermediate",
+          "topic": "理解 compile_and_export 如何按目标格式（PDF/PNG/SVG/HTML/Bundle）分发到不同导出器，包括分页图片模板、并行渲染与导出缓存。",
+          "learning_goals": [
+            "理解 compile_and_export 如何根据 OutputFormat 选择 typst::compile 的目标类型并导出",
+            "掌握图片导出的页面模板（{p}/{0p}/{t}）与多页处理、rayon 并行渲染",
+            "理解 ExportCache 在 watch 模式下避免重复导出的原理"
+          ],
+          "source_files": [
+            "src/compile.rs"
+          ],
+          "minimal_modules": [
+            "compile_and_export：按 OutputFormat 分发（PagedDocument / HtmlDocument / Bundle）",
+            "export_paged：PDF 导出与图片导出",
+            "export_image / output_template：页面模板与多页并行导出",
+            "ExportCache：基于 frame hash 的缓存",
+            "pdf_options / svg_options / png_options 选项构造"
+          ],
+          "practice_task": "把一个 3 页文档编译为 PNG，使用 page-{0p}-of-{t}.png 模板输出，验证 output_template::format 如何替换占位符；再对照 export_image 理解无模板时多页导出为何会报错。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "诊断与终端输出",
+          "order": 4,
+          "filename": "u2-l4-diagnostics-terminal.md",
+          "level": "intermediate",
+          "topic": "理解编译产生的诊断（错误/警告）如何被格式化打印到终端，以及 terminal.rs 的彩色输出抽象与诊断格式（human/short）。",
+          "learning_goals": [
+            "理解 print_diagnostics 如何借助 codespan-reporting 与 typst_kit::diagnostics 输出诊断",
+            "掌握 terminal.rs 的 TermOut 抽象（颜色、清屏、清行）与 singleton 模式",
+            "理解应用级错误/提示（main.rs）与编译诊断的区别"
+          ],
+          "source_files": [
+            "src/compile.rs",
+            "src/terminal.rs",
+            "src/main.rs"
+          ],
+          "minimal_modules": [
+            "print_diagnostics：errors + warnings 合并输出与 DiagnosticFormat",
+            "terminal.rs TermOut：彩色、clear_screen / clear_last_line 与 singleton",
+            "main.rs print_error / print_hint 应用级错误",
+            "DiagnosticFormat human / short 与 --diagnostic-format"
+          ],
+          "practice_task": "制造一个带语法错误的 .typ 文件编译，对比 human 与 short 两种诊断格式输出差异；对照 terminal.rs 理解颜色在非 TTY 下如何被禁用（supports_color）。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Watch 模式与增量重编译",
+          "order": 5,
+          "filename": "u2-l5-watch-incremental.md",
+          "level": "intermediate",
+          "topic": "深入 watch.rs，理解 watch 命令如何监控依赖文件、在变更时增量重编译、维护状态显示与缓存淘汰。",
+          "learning_goals": [
+            "理解 watch 的主循环：更新监控依赖 → wait → reset → 重编译 → comemo evict",
+            "掌握文件不存在时阻塞等待、stdin 不可 watch 的警告处理",
+            "理解 Status 状态显示（Compiling/Success/PartialSuccess/Error）与终端清屏"
+          ],
+          "source_files": [
+            "src/watch.rs",
+            "src/compile.rs"
+          ],
+          "minimal_modules": [
+            "watch 主循环：watcher.update / wait、world.reset、comemo::evict",
+            "字体预扫描与首次编译、文件不存在时的等待重试",
+            "Status 枚举与 print：状态、耗时、HTTP server 地址显示",
+            "watching 配置与 warn_watching_std 警告"
+          ],
+          "practice_task": "运行 typst watch 编译一个文档，修改内容观察自动重编译；再修改被 #import 的依赖文件，对照 world.dependencies() 理解 watcher.update 监控的是哪些文件。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：资源与环境基础设施",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "字体发现与 fonts 命令",
+          "order": 1,
+          "filename": "u3-l1-font-discovery.md",
+          "level": "intermediate",
+          "topic": "理解 fonts.rs 如何发现系统/内嵌/自定义字体，以及 fonts 命令如何打印字体族与变体信息。",
+          "learning_goals": [
+            "理解 discover_fonts 如何按 FontArgs 组合系统、内嵌、自定义路径字体",
+            "掌握 fonts 命令的输出格式（字体族列表 + --variants 变体树）",
+            "理解 FontStore / FontBook 与字体变体轴（axes）的展示"
+          ],
+          "source_files": [
+            "src/fonts.rs",
+            "src/world.rs"
+          ],
+          "minimal_modules": [
+            "discover_fonts：system / embedded / scan 组合与 ignore 标志",
+            "fonts 命令：字体族遍历与 --variants 树形输出",
+            "write_variant / write_axis：变体与可变字体轴的格式化",
+            "discover_fonts 被 SystemWorld 复用的惰性发现"
+          ],
+          "practice_task": "运行 typst fonts 与 typst fonts --variants 对比输出；再用 --ignore-system-fonts --font-path 指定一个自定义字体目录，验证 discover_fonts 的组合逻辑。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "包存储与解析",
+          "order": 2,
+          "filename": "u3-l2-package-storage.md",
+          "level": "intermediate",
+          "topic": "理解 packages.rs 如何根据 PackageArgs 构造 SystemPackages（本地包路径、缓存路径、Universe 在线包），以及它如何被 World 与 init 复用。",
+          "learning_goals": [
+            "理解 system() 如何组合 FsPackages（本地/缓存）与 UniversePackages",
+            "掌握 SystemPackages 在 SystemWorld 与 init 中的作用",
+            "理解 TYPST_PACKAGE_PATH / TYPST_PACKAGE_CACHE_PATH 环境变量与覆盖逻辑"
+          ],
+          "source_files": [
+            "src/packages.rs",
+            "src/world.rs",
+            "src/init.rs"
+          ],
+          "minimal_modules": [
+            "system()：FsPackages 本地与缓存路径解析",
+            "UniversePackages 与下载器集成",
+            "SystemPackages 在 SystemWorld::new 中的使用",
+            "环境变量覆盖：--package-path / --package-cache-path"
+          ],
+          "practice_task": "准备一个本地 @local/demo:0.1.0 包目录，用 --package-path 指向它编译一个 #import 该包的文档（参考 smoke.rs 的 test_package_resolved），理解 obtain 如何定位包根目录。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "网络下载与进度报告",
+          "order": 3,
+          "filename": "u3-l3-download-progress.md",
+          "level": "intermediate",
+          "topic": "理解 download.rs 如何构造带 TLS 证书与进度报告的下载器，以及它如何被包下载与自更新复用。",
+          "learning_goals": [
+            "理解 downloader() 如何设置 user-agent、TYPST_CERT 证书并包装 ProgressDownloader",
+            "掌握 PrintProgress 如何在终端逐行更新下载进度",
+            "理解 Downloader / ProgressReporter trait 在包与更新场景的复用"
+          ],
+          "source_files": [
+            "src/download.rs",
+            "src/terminal.rs"
+          ],
+          "minimal_modules": [
+            "downloader()：SystemDownloader + 证书 + user-agent",
+            "ProgressDownloader 包装与 key → 名称映射（PackageSpec / release）",
+            "PrintProgress：start / update / finish 与 clear_last_line",
+            "terminal::out 在进度输出中的复用"
+          ],
+          "practice_task": "阅读 PrintProgress::update，理解它如何用 clear_last_line 实现行内进度刷新；用 --cert 指定自定义 CA 证书（或观察无网络时下载失败提示），梳理 downloader() 的证书传入路径。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "依赖追踪与构建集成",
+          "order": 4,
+          "filename": "u3-l4-dependency-tracking.md",
+          "level": "intermediate",
+          "topic": "理解 deps.rs 如何把一次编译依赖的文件写成 JSON / Zero / Make 三种格式，用于与 Make、Ninja 等构建系统集成。",
+          "learning_goals": [
+            "理解 write_deps 如何按 DepsFormat 分发到三种写入实现",
+            "掌握 Make 格式的 munge 转义与 JSON 的 inputs/outputs 结构",
+            "理解 relative_dependencies 如何把依赖路径转成相对当前目录"
+          ],
+          "source_files": [
+            "src/deps.rs"
+          ],
+          "minimal_modules": [
+            "write_deps：JSON / Zero / Make 三格式分发",
+            "write_deps_json：inputs / outputs 结构与 UTF-8 校验",
+            "write_deps_make 与 munge 转义（源自 GCC mkdeps）",
+            "relative_dependencies：相对路径计算"
+          ],
+          "practice_task": "编译一个 #image(\"tiger.jpg\") 文档并用 --deps - --deps-format json 输出依赖，对照 write_deps_json 理解 inputs 结构；再用 make 与 zero 格式输出，对比 munge 转义与 NUL 分隔的差异。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "init 项目脚手架",
+          "order": 5,
+          "filename": "u3-l5-init-scaffold.md",
+          "level": "intermediate",
+          "topic": "理解 init.rs 如何从模板包（本地或 @preview）解析 typst.toml 清单、校验模板并复制文件搭建新项目。",
+          "learning_goals": [
+            "理解 init 如何解析 PackageSpec（含自动获取最新版本）",
+            "掌握 PackageManifest 解析与 validate、TemplateInfo 提取",
+            "理解 scaffold_project 的目录复制与 print_summary 提示"
+          ],
+          "source_files": [
+            "src/init.rs",
+            "src/packages.rs"
+          ],
+          "minimal_modules": [
+            "init 流程：解析 spec、obtain 包、解析清单、校验模板",
+            "parse_manifest 与 PackageManifest::validate",
+            "scaffold_project：模板目录复制与已存在校验",
+            "print_summary：成功提示与下一步命令"
+          ],
+          "practice_task": "用 typst init @preview/<某个模板> 在空目录创建项目，对照 init.rs 理解它如何确定 project_dir 与 entrypoint；阅读 parse_manifest 后，手工写一个本地 @local 模板包并尝试 init 它。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家：高级机制与扩展点",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "eval 表达式求值与文档内省",
+          "order": 1,
+          "filename": "u4-l1-eval-introspection.md",
+          "level": "advanced",
+          "topic": "深入 eval.rs，理解 eval 命令如何先编译文档拿到 introspector，再用 ExpressionWorld 包装求值表达式并打印结果。",
+          "learning_goals": [
+            "理解 eval 如何按 Target 编译文档并取得 introspector 作为求值上下文",
+            "掌握 ExpressionWorld 包装器如何为表达式提供精确的诊断 span",
+            "理解 evaluate_expression 调用 typst_eval::eval_string 的参数（Scope/Context/SyntaxMode）"
+          ],
+          "source_files": [
+            "src/eval.rs",
+            "src/world.rs"
+          ],
+          "minimal_modules": [
+            "eval 流程：编译文档 → introspector → 求值表达式",
+            "ExpressionWorld：为 <input-expression> 提供文件与诊断 span",
+            "evaluate_expression：eval_string 参数（SpanMode / RangeMapper / SyntaxMode）",
+            "结果序列化与命令行输出"
+          ],
+          "practice_task": "运行 typst eval \"1+2\" 与 typst eval \"query(<lbl>)\" --in doc.typ，对照 evaluate_expression 理解表达式在无文档上下文与有上下文时分别如何求值；阅读 EXPRESSION_ID 理解诊断定位。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "query 命令与弃用迁移",
+          "order": 2,
+          "filename": "u4-l2-query-deprecated.md",
+          "level": "advanced",
+          "topic": "理解 query.rs（已弃用）如何用选择器检索文档元素，以及它如何生成等价的 typst eval 命令提示迁移。",
+          "learning_goals": [
+            "理解 query 的 retrieve + format 两步流程与 --field / --one 选项",
+            "掌握选择器求值（eval_string → LocatableSelector）与 introspector.query",
+            "理解 deprecation_warning 如何根据 --one / --field 生成等价 eval 命令"
+          ],
+          "source_files": [
+            "src/query.rs",
+            "src/eval.rs"
+          ],
+          "minimal_modules": [
+            "query 流程：编译 → retrieve → format",
+            "retrieve：eval_string 求值选择器 + introspector.query",
+            "format：--one / --field 处理与序列化",
+            "deprecation_warning：生成等价 typst eval 命令"
+          ],
+          "practice_task": "用 typst query 在一个带 label 的文档上检索元素并观察弃用提示；根据提示改写为 typst eval 命令运行，对照 deprecation_warning 的访问逻辑（.first() / .at()）验证两者等价。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "HTML / Bundle 导出与 http-server",
+          "order": 3,
+          "filename": "u4-l3-html-bundle-server.md",
+          "level": "advanced",
+          "topic": "深入 compile.rs 的 HTML 与 Bundle 导出路径，以及 watch 模式下内置 HTTP 服务器与 live reload 的机制。",
+          "learning_goals": [
+            "理解 export_html / export_bundle 的实现与 VirtualFs 写盘",
+            "掌握 Bundle / HtmlDocument 目标类型的编译与 BundleOptions 组合",
+            "理解 http-server feature 下 HttpServer 如何服务 HTML/bundle 与 live reload"
+          ],
+          "source_files": [
+            "src/compile.rs",
+            "src/args.rs"
+          ],
+          "minimal_modules": [
+            "export_html：HtmlOptions 与 server.set_html",
+            "export_bundle 与 write_virtual_fs：VirtualFs 并行写盘",
+            "BundleOptions 组合（html / pdf / png / svg）",
+            "ServerArgs 与 HttpServer：端口、no_serve / no_reload、open_output 跳转"
+          ],
+          "practice_task": "用 --features html 启用 HTML 目标，把文档编译为 HTML 观察输出；再用 typst watch（http-server feature）编译为 HTML，浏览器打开提示地址并修改源文件验证 live reload，对照 ServerArgs 理解端口与重载开关。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "自更新机制",
+          "order": 4,
+          "filename": "u4-l4-self-update.md",
+          "level": "advanced",
+          "topic": "深入 update.rs，理解 typst update 如何从 GitHub release 下载预编译二进制、解压并用 self_replace 替换当前可执行文件，以及 revert 回滚。",
+          "learning_goals": [
+            "理解 update 流程：备份、判断是否需要更新、下载资产、解压、self_replace",
+            "掌握 determine_asset! 宏如何按编译目标选择资产、zip / tar.xz 解压",
+            "理解 revert 回滚、--force 降级、backup_path 的平台目录选择"
+          ],
+          "source_files": [
+            "src/update.rs",
+            "src/download.rs"
+          ],
+          "minimal_modules": [
+            "update 流程：备份、Release::from_tag、update_needed、download_binary、self_replace",
+            "determine_asset! 宏：目标三元组 → 资产名映射",
+            "extract_binary_from_zip / extract_binary_from_tar_xz 解压",
+            "revert 回滚、backup_path 平台目录与 --force 降级校验"
+          ],
+          "practice_task": "阅读 determine_asset! 与 backup_path，梳理当前平台（用 rustc -vV 查 target）会下载哪个资产、备份文件写到哪；阅读 update_needed 理解版本比较与降级保护（不实际执行更新）。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "构建期产物与 completions 命令",
+          "order": 5,
+          "filename": "u4-l5-build-completions.md",
+          "level": "advanced",
+          "topic": "理解 build.rs 如何在构建时生成 man 手册页与 shell 补全脚本，以及运行时 completions 命令如何生成补全。",
+          "learning_goals": [
+            "理解 build.rs 如何通过 GEN_ARTIFACTS 生成 man 页与多 shell 补全（复用 args.rs）",
+            "掌握 args.rs 被运行时与构建脚本共享的导入约束",
+            "理解 completions 命令运行时用 clap_complete::generate 输出补全"
+          ],
+          "source_files": [
+            "build.rs",
+            "src/completions.rs",
+            "src/args.rs"
+          ],
+          "minimal_modules": [
+            "build.rs：GEN_ARTIFACTS、man 页（clap_mangen）、补全（generate_to）",
+            "args.rs 在运行时与 build script 共享的导入约束",
+            "completions 命令：CliArguments::command + generate",
+            "TARGET 环境变量注入与 rerun-if-env-changed"
+          ],
+          "practice_task": "设置 GEN_ARTIFACTS 环境变量后 cargo build，观察生成的 typst.1 man 页与各 shell 补全脚本；再运行 typst completions bash 生成补全，对比两种生成方式的差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "info 命令与环境内省",
+          "order": 6,
+          "filename": "u4-l6-info-env.md",
+          "level": "advanced",
+          "topic": "深入 info.rs，理解 info 命令如何收集版本、构建特性、运行时特性、字体/包配置与环境变量，并以人类可读或 JSON/YAML 输出。",
+          "learning_goals": [
+            "理解 Info 结构的分层（version/build/features/fonts/packages/env）与 serde 序列化",
+            "掌握人类可读格式 format_human_readable 的彩色 key/value/desc 输出",
+            "理解环境变量收集、parse_features / parse_bool 与平台相关变量"
+          ],
+          "source_files": [
+            "src/info.rs",
+            "src/terminal.rs"
+          ],
+          "minimal_modules": [
+            "Info 数据模型与 serde（kebab / SCREAMING_SNAKE_CASE）",
+            "get_vars：环境变量收集与 UTF-8 校验",
+            "parse_features / parse_bool 与平台相关变量（XDG / FONTCONFIG）",
+            "format_human_readable：彩色 key/value/desc 与对齐填充",
+            "--format json / yaml 机器可读输出"
+          ],
+          "practice_task": "运行 typst info 与 typst info --format json，对比人类可读与机器可读输出；设置若干 TYPST_* 环境变量后重新运行，对照 get_vars 与 parse_features 验证它们如何被收集与解析。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l7",
+          "title": "测试与 smoke 测试",
+          "order": 7,
+          "filename": "u4-l7-smoke-tests.md",
+          "level": "advanced",
+          "topic": "理解 tests/smoke.rs 如何以子进程方式端到端测试 typst CLI，覆盖编译、字体、依赖、包、诊断与 tracepoints 等场景。",
+          "learning_goals": [
+            "理解 smoke 测试用 CARGO_BIN_EXE_typst 子进程执行的端到端策略",
+            "掌握 TempFs 测试夹具与 Stream 断言辅助（must_contain / must_match_lines）",
+            "理解各测试覆盖的关键场景：PDF 编译、字体发现、依赖、本地包、诊断与 tracepoints"
+          ],
+          "source_files": [
+            "tests/smoke.rs"
+          ],
+          "minimal_modules": [
+            "exec / tempfs / Stream 测试夹具与断言辅助",
+            "编译与 PDF 测试（test_compile_pdf / test_compile_pdf_version）",
+            "字体与依赖测试（test_fonts_* / test_deps）",
+            "包与路径解析测试（test_package_resolved / test_path_*）",
+            "诊断与 tracepoints 测试（test_tracepoints / test_network_access_hint）"
+          ],
+          "practice_task": "阅读 smoke.rs 的 CommandExt 与 TempFs，运行 cargo test --test smoke 观察结果；参考现有测试，为一个尚未覆盖的 CLI 选项（如 --diagnostic-format short）新增一个最小 smoke 测试。",
+          "depends_on": [
+            "u1-l2",
+            "u2-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

@@ -5,7 +5,7 @@
 本讲是「SIMD 与 SIMT 双编译路径」单元的第一讲。读完本讲，你应当能够：
 
 - 说出 `simd` / `unstructured_in_simt` / `simt_only` 三种 `compile_mode` 各自的语义与编译路径差异；
-- 读懂 `NPUOptions.__post_init__` 如何由用户传入的一个 `compile_mode` 字符串，派生出 `force_simt_only`、`force_simt_template`、`parallel_mode` 等内部字段；
+- 读懂 `NPUOptions.__post_init__` 如何在最先应用运行期补丁 `_apply_ascend_patch()` 之后，再由用户传入的一个 `compile_mode` 字符串，派生出 `force_simt_only`、`force_simt_template`、`parallel_mode` 等内部字段；
 - 解释 `add_stages` 如何用 `force_simt_only` 决定编译阶段集合（决定是否跳过 Linalg 主线）；
 - 理解默认模式 `unstructured_in_simt` 的「混合」语义：结构化访存留在 SIMD，离散访存尽量走 SIMT 快路径；
 - 看懂 `parallel_mode` 这个字段如何在运行时（launcher）侧与启动 API 耦合。
@@ -77,7 +77,7 @@ else:                            # simd 或 unstructured_in_simt
 
 `compile_mode` 作为 `NPUOptions` 的一个字段定义在 compiler.py，默认值是 `"unstructured_in_simt"`：
 
-[third_party/ascend/backend/compiler.py:1088-1091](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1088-L1091) — 字段定义。注意第 1088 行的注释 `# compile_mode: "simd" (default), ...` 与第 1090 行的实际默认值 `"unstructured_in_simt"` **不一致**：这是源码中一处滞后的注释，真实默认以第 1090 行字段值和架构文档为准。
+[third_party/ascend/backend/compiler.py:1090-1093](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1090-L1093) — 字段定义。注意第 1090 行的注释 `# compile_mode: "simd" (default), ...` 与第 1092 行的实际默认值 `"unstructured_in_simt"` **不一致**：这是源码中一处滞后的注释，真实默认以第 1092 行字段值和架构文档为准。
 
 ```python
     # compile_mode: "simd" (default), "unstructured_in_simt", "simt_only"
@@ -90,7 +90,7 @@ else:                            # simd 或 unstructured_in_simt
 
 `compile_mode` 是怎么传进来的？用户在启动 kernel 时把它当作普通关键字参数传入，例如：
 
-[third_party/ascend/unittest/autotune_ut/test_reduce_simt.py:68-74](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/autotune_ut/test_reduce_simt.py#L68-L74) — 真实用例，`compile_mode='simt_only'` 作为启动参数传入。这个 reduce kernel 含间接索引访存（`tl.load(in_ptr0 + x1_numel * y0 + x1, ...)`），正是 SIMT 的用武之地，测试还用 `@pytest.mark.skipif(not is_compile_on_910_95(), ...)` 标明 SIMT 仅在 A5/950 上可用。
+[third_party/ascend/unittest/autotune_ut/test_reduce_simt.py:68-74](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/autotune_ut/test_reduce_simt.py#L68-L74) — 真实用例，`compile_mode='simt_only'` 作为启动参数传入。这个 reduce kernel 含间接索引访存（`tl.load(in_ptr0 + x1_numel * y0 + x1, ...)`），正是 SIMT 的用武之地，测试还用 `@pytest.mark.skipif(not is_compile_on_910_95(), ...)` 标明 SIMT 仅在 A5/950 上可用。
 
 ```python
     triton_unk_reduce[(grid_size, 1, 1)](
@@ -104,7 +104,7 @@ else:                            # simd 或 unstructured_in_simt
 
 这些启动关键字参数会经 core 的 `JITFunction.run → compile` 流到后端的 `parse_options`。`parse_options` 用白名单方式过滤——只接受 `NPUOptions` 已声明的字段，`compile_mode` 正是其中之一：
 
-[third_party/ascend/backend/compiler.py:1213-1232](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1213-L1232) — 关键是第 1216 行 `{k: opts[k] for k in NPUOptions.__dataclass_fields__.keys() if k in opts}`：只把 `NPUOptions` 认识的字段挑出来构造选项对象，随后触发 `__post_init__`（见 4.2）。同时这里还做了 `compile_on_910_95`、`enable_dynamic_cv_pipeline` 等字段的懒初始化。
+[third_party/ascend/backend/compiler.py:1218-1237](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1218-L1237) — 关键是第 1221 行 `{k: opts[k] for k in NPUOptions.__dataclass_fields__.keys() if k in opts}`：只把 `NPUOptions` 认识的字段挑出来构造选项对象，随后触发 `__post_init__`（见 4.2）。同时这里还做了 `compile_on_910_95`、`enable_dynamic_cv_pipeline` 等字段的懒初始化。
 
 ```python
     def parse_options(self, opts) -> Any:
@@ -117,11 +117,11 @@ else:                            # simd 或 unstructured_in_simt
 
 架构文档给出了三种模式的权威说明与编译流程图，是理解语义的最佳入口：
 
-[docs/en/architecture_design_and_core_features.md:214-233](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/architecture_design_and_core_features.md#L214-L233) — `compile_mode` 总览表与三种用法示例。文档明确：默认是 `unstructured_in_simt`，且 SIMT 路径是 950 代新增能力。
+[docs/en/architecture_design_and_core_features.md:214-233](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/architecture_design_and_core_features.md#L214-L233) — `compile_mode` 总览表与三种用法示例。文档明确：默认是 `unstructured_in_simt`，且 SIMT 路径是 950 代新增能力。
 
 文档还用一张表总结了三种模式在「离散掩码处理 / 非结构化访存 / TritonToLinalg」三个阶段的差异，值得逐行对照：
 
-[docs/en/architecture_design_and_core_features.md:275-280](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/architecture_design_and_core_features.md#L275-L280) — 三模式阶段差异表。`simt_only` 列三行全是「Not run」，印证了它跳过 Linalg 主线。
+[docs/en/architecture_design_and_core_features.md:275-280](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/architecture_design_and_core_features.md#L275-L280) — 三模式阶段差异表。`simt_only` 列三行全是「Not run」，印证了它跳过 Linalg 主线。
 
 #### 4.1.4 代码实践
 
@@ -129,9 +129,9 @@ else:                            # simd 或 unstructured_in_simt
 
 **操作步骤**（源码阅读型，无需设备）：
 
-1. 打开 `third_party/ascend/backend/compiler.py`，定位 `NPUOptions` 的 `compile_mode` 字段（约 1090 行），确认默认值。
+1. 打开 `third_party/ascend/backend/compiler.py`，定位 `NPUOptions` 的 `compile_mode` 字段（约 1092 行），确认默认值。
 2. 打开 `third_party/ascend/unittest/autotune_ut/test_reduce_simt.py`，看第 73 行如何把 `compile_mode='simt_only'` 传进 kernel 调用。
-3. 在 compiler.py 的 `parse_options`（约 1216 行）确认白名单逻辑：试着推断如果用户传了一个 `NPUOptions` 不认识的字段（例如 `compile_mode="typo_mode"`），会发生什么。
+3. 在 compiler.py 的 `parse_options`（约 1221 行）确认白名单逻辑：试着推断如果用户传了一个 `NPUOptions` 不认识的字段（例如 `compile_mode="typo_mode"`），会发生什么。
 
 **需要观察的现象**：
 
@@ -167,9 +167,11 @@ else:                            # simd 或 unstructured_in_simt
 
 #### 4.2.2 核心流程
 
-`__post_init__` 的派生规则（精确对应源码）：
+`__post_init__` 的派生规则（精确对应源码）。注意：在执行下面任何 `compile_mode` 解析之前，`__post_init__` 的第一行已无条件调用 `_apply_ascend_patch()` 应用运行期补丁——这是它被搬进 `__post_init__` 之后的新时序（详见 4.2.3），下面的派生发生在补丁应用之后：
 
 ```text
+__post_init__ 第一行: _apply_ascend_patch()      # 运行期补丁，幂等；先改装 IR 解析器
+
 compile_mode == "simd":
     parallel_mode = "simd"
     （force_simt_template 保持默认 False）
@@ -198,10 +200,13 @@ compile_mode == "simt_only":
 
 先看字段派生。`__post_init__` 是 `NPUOptions` 这个 frozen dataclass 的钩子方法。因为 dataclass 被声明为 `frozen=True`，普通赋值会抛异常，所以这里统一用 `object.__setattr__` 绕过冻结来改字段：
 
-[third_party/ascend/backend/compiler.py:1111-1126](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1111-L1126) — `__post_init__`。注意第 1116 行注释「For historical compatibility reasons, force_simt_template will still be used」：揭示了 `force_simt_template` 是历史遗留命名，`unstructured_in_simt` 这个新名字在内部仍映射到它。
+[third_party/ascend/backend/compiler.py:1113-1131](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1113-L1131) — `__post_init__`。**第一步不是派生字段，而是无条件调用 `_apply_ascend_patch()`**（第 1116 行）——这是本讲承接 u1-l2/u3-l2 的关键变化：运行期补丁（为生成的 module 注入 `hacc.target`、扩展 `compiler.parse` 识别 `ttadapter`/`mlirbc`/`bcmlir`/`npubin`、给 `tl.dot` 加 HF32 守卫）的触发点被前移到了 `__post_init__` 的最开头，刻意安排成「先改装 IR 解析器，再注册阶段、再派生 `compile_mode`」的时序。补丁调用之后才是本讲关心的 `compile_mode` 解析；注意第 1121 行注释「For historical compatibility reasons, force_simt_template will still be used」揭示了 `force_simt_template` 是历史遗留命名，`unstructured_in_simt` 这个新名字在内部仍映射到它。
 
 ```python
     def __post_init__(self):
+        from triton.backends.ascend import _apply_ascend_patch
+
+        _apply_ascend_patch()
         # Parse compile_mode and set related fields
         if self.compile_mode == "simd":
             object.__setattr__(self, "parallel_mode", "simd")
@@ -221,7 +226,7 @@ compile_mode == "simt_only":
 
 字段本身的声明（注意默认值）：
 
-[third_party/ascend/backend/compiler.py:1079-1091](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1079-L1091) — `parallel_mode` 默认 `"simd"`、`force_simt_only` 默认 `False`、`force_simt_template` 默认 `False`、`compile_mode` 默认 `"unstructured_in_simt"`。对照 `__post_init__` 即可还原三种模式的派生结果。
+[third_party/ascend/backend/compiler.py:1081-1093](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1081-L1093) — `parallel_mode` 默认 `"simd"`、`force_simt_only` 默认 `False`、`force_simt_template` 默认 `False`、`compile_mode` 默认 `"unstructured_in_simt"`。对照 `__post_init__` 即可还原三种模式的派生结果。
 
 ```python
     parallel_mode: str = "simd"
@@ -233,7 +238,7 @@ compile_mode == "simt_only":
 
 **消费点一：`add_stages` 的阶段分叉。** 这是 `force_simt_only` 唯一的、也是决定性的消费点：
 
-[third_party/ascend/backend/compiler.py:1269-1287](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1269-L1287) — `add_stages`。第 1272–1274 行：若 `force_simt_only` 为真，只注册 `ttir` 与 `npubin`（实现是 `ttir_to_npubin`）后**立即 return**，彻底跳过 `ttadapter`/`mlirbc`/`bcmlir`。否则注册完整的 SIMD/混合阶段链。
+[third_party/ascend/backend/compiler.py:1272-1290](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1272-L1290) — `add_stages`。第 1275–1277 行：若 `force_simt_only` 为真，只注册 `ttir` 与 `npubin`（实现是 `ttir_to_npubin`）后**立即 return**，彻底跳过 `ttadapter`/`mlirbc`/`bcmlir`。否则注册完整的 SIMD/混合阶段链。
 
 ```python
     def add_stages(self, stages, options, language):
@@ -248,7 +253,7 @@ compile_mode == "simt_only":
 
 **纯 SIMT 路径 `ttir_to_npubin` 内部长什么样？** 它把 Triton IR 直接喂给 BiSheng 编译器，并带上一组纯 SIMT 专用选项：
 
-[third_party/ascend/backend/compiler.py:1147-1164](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1147-L1164) — `if opt.force_simt_only:` 分支。`--enable-hivm-compile=false`（关闭 SIMD 的 hivm 编译）、`--enable-triton-ir-compile`（启用 Triton IR 直编）、`--pure-simt`（声明纯 SIMT）、并带上 `--num-warps` / `--threads-per-warp` 等 SIMT 执行模型参数。注意它用 `_parse_ttir_metadata`（而非 `_parse_linalg_metadata`），且把 `mix_mode` 固定为 `"aiv"`（因为纯 SIMT 只用向量核）。
+[third_party/ascend/backend/compiler.py:1152-1169](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1152-L1169) — `if opt.force_simt_only:` 分支。`--enable-hivm-compile=false`（关闭 SIMD 的 hivm 编译）、`--enable-triton-ir-compile`（启用 Triton IR 直编）、`--pure-simt`（声明纯 SIMT）、并带上 `--num-warps` / `--threads-per-warp` 等 SIMT 执行模型参数。注意它用 `_parse_ttir_metadata`（而非 `_parse_linalg_metadata`），且把 `mix_mode` 固定为 `"aiv"`（因为纯 SIMT 只用向量核）。
 
 ```python
         if opt.force_simt_only:
@@ -262,7 +267,7 @@ compile_mode == "simt_only":
 
 **消费点二：`ttir_to_linalg` 内的 `force_simt_template`。** 这是 `simd` 与 `unstructured_in_simt` 唯一的区别点。`force_simt_template` 从 metadata 取出，作为参数传给两个离散/非结构化访存 pass：
 
-[third_party/ascend/backend/compiler.py:204-207](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L204-L207) — 第 180 行先从 metadata 读 `force_simt_template`，再在第 204、207 行作为第 3 个实参传给 `add_discrete_mask_access_conversion` 和 `add_triton_to_unstructure`。
+[third_party/ascend/backend/compiler.py:206-209](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L206-L209) — 第 182 行先从 metadata 读 `force_simt_template`，再在第 206、209 行作为第 3 个实参传给 `add_discrete_mask_access_conversion` 和 `add_triton_to_unstructure`。
 
 ```python
         force_simt_template = metadata["force_simt_template"]
@@ -275,7 +280,7 @@ compile_mode == "simt_only":
 
 `force_simt_template` 传到 C++ 后做什么？以离散掩码 pass 为例，它只在「950 + force_simt_template + 秩 ≤ 5」三者同时满足时，给离散访存 op 打一个 `route_discrete_mask_to_simt` 标记后**立刻返回 failure（不改写 IR）**，把处理权让给下游的非结构化访存 pass：
 
-[third_party/ascend/lib/DiscreteMaskAccessConversion/DiscreteMaskAccessConversionPass.cpp:281-287](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/DiscreteMaskAccessConversion/DiscreteMaskAccessConversionPass.cpp#L281-L287) — 三个条件门控：`compileOn91095Flag && forceSimtTemplateFlag && rankWithinIndirectFastPathLimit`。注意它只是 `setAttr(...routeDiscreteMaskToSimt...)` 后 `return failure()`，即「打标记、让权」，而非当场改写。
+[third_party/ascend/lib/DiscreteMaskAccessConversion/DiscreteMaskAccessConversionPass.cpp:281-287](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/DiscreteMaskAccessConversion/DiscreteMaskAccessConversionPass.cpp#L281-L287) — 三个条件门控：`compileOn91095Flag && forceSimtTemplateFlag && rankWithinIndirectFastPathLimit`。注意它只是 `setAttr(...routeDiscreteMaskToSimt...)` 后 `return failure()`，即「打标记、让权」，而非当场改写。
 
 ```cpp
     bool rankWithinIndirectFastPathLimit =
@@ -289,7 +294,7 @@ compile_mode == "simt_only":
 
 下游非结构化访存 pass 则真正把 `load/store` 改写成 SIMT 的 `indirect_load/indirect_store`（同样是三条件门控）：
 
-[third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp:532-542](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L532-L542) — `indirectFastPathEnabled = compileOn91095Flag && forceSimtTemplateFlag && (...)`。条件不满足则回退到标量循环路径（与纯 `simd` 一致）。
+[third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp:550-559](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L550-L559) — `indirectFastPathEnabled = compileOn91095Flag && forceSimtTemplateFlag && (...)`。条件不满足则回退到标量循环路径（与纯 `simd` 一致）。
 
 ```cpp
   // SIMT Indirect Fast-Path Lowering in 950 seiries
@@ -304,11 +309,11 @@ compile_mode == "simt_only":
   }
 ```
 
-> 关键洞察：`unstructured_in_simt` 的「混合」语义就体现在这里——**它不是把整个 kernel 搬到 SIMT**，而是逐个访存点判断：结构化的留 SIMD，离散的（且满足 950 + 秩 ≤ 5）走 SIMT 模板，不满足的回退标量循环。这也是架构文档「Hybrid Mode: SIMT Only for Discrete Access」一节的含义（[docs/en/architecture_design_and_core_features.md:281-293](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/architecture_design_and_core_features.md#L281-L293)）。
+> 关键洞察：`unstructured_in_simt` 的「混合」语义就体现在这里——**它不是把整个 kernel 搬到 SIMT**，而是逐个访存点判断：结构化的留 SIMD，离散的（且满足 950 + 秩 ≤ 5）走 SIMT 模板，不满足的回退标量循环。这也是架构文档「Hybrid Mode: SIMT Only for Discrete Access」一节的含义（[docs/en/architecture_design_and_core_features.md:281-293](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/architecture_design_and_core_features.md#L281-L293)）。
 
 最后，这些派生字段都会进入缓存键，保证换模式必重编：
 
-[third_party/ascend/backend/compiler.py:1128-1131](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1128-L1131) — `hash()` 把 `self.__dict__`（含 `force_simt_*`、`parallel_mode`、`compile_mode`）全部拼进缓存键。所以同一个 kernel 用不同 `compile_mode` 编译，缓存键不同，不会串用。
+[third_party/ascend/backend/compiler.py:1133-1136](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1133-L1136) — `hash()` 把 `self.__dict__`（含 `force_simt_*`、`parallel_mode`、`compile_mode`）全部拼进缓存键。所以同一个 kernel 用不同 `compile_mode` 编译，缓存键不同，不会串用。
 
 #### 4.2.4 代码实践
 
@@ -382,7 +387,7 @@ __post_init__ 派生:
 
 `parallel_mode` 的字段声明与默认值：
 
-[third_party/ascend/backend/compiler.py:1079-1082](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1079-L1082) — `parallel_mode: str = "simd"`，默认 SIMD。紧随其后的 `force_simt_only`/`force_simt_template` 默认都是 `False`。
+[third_party/ascend/backend/compiler.py:1081-1084](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1081-L1084) — `parallel_mode: str = "simd"`，默认 SIMD。紧随其后的 `force_simt_only`/`force_simt_template` 默认都是 `False`。
 
 ```python
     parallel_mode: str = "simd"
@@ -394,7 +399,7 @@ __post_init__ 派生:
 
 Linalg 路径下，IR 中写入的并行模式会被解析覆盖 metadata（这是「混合模式」实际并行模式比选项字段更细的原因）：
 
-[third_party/ascend/backend/compiler.py:375-399](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L375-L399) — `_parse_linalg_metadata` 用 `PARALLEL_MODE_REGEX` 从 Linalg IR 抠出 `parallel_mode`（如 `mix_simd_simt`）写入 metadata，覆盖 `NPUOptions` 里粗粒度的 `"simd"`。也就是说，混合模式下即使选项字段是 `"simd"`，metadata 最终可能变成 `"mix_simd_simt"`。
+[third_party/ascend/backend/compiler.py:378-401](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L378-L401) — `_parse_linalg_metadata` 用 `PARALLEL_MODE_REGEX` 从 Linalg IR 抠出 `parallel_mode`（如 `mix_simd_simt`）写入 metadata，覆盖 `NPUOptions` 里粗粒度的 `"simd"`。也就是说，混合模式下即使选项字段是 `"simd"`，metadata 最终可能变成 `"mix_simd_simt"`。
 
 ```python
     # Example: parallel_mode = "mix_simd_simt" -> mix_simd_simt
@@ -405,7 +410,7 @@ Linalg 路径下，IR 中写入的并行模式会被解析覆盖 metadata（这�
 
 启动侧的真正消费点在 `driver.py` 的 `make_launcher`：
 
-[third_party/ascend/backend/driver.py:439-440](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/driver.py#L439-L440) — `enable_simt = ("simt" in parallel_mode) or metadata.force_simt_only`。这个 `enable_simt` 正是 u5-l3 讲过的两条启动 API（普通 `rtKernelLaunch` vs 950 `rtKernelLaunchWithFlagV2`）的分水岭。
+[third_party/ascend/backend/driver.py:439-440](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/driver.py#L439-L440) — `enable_simt = ("simt" in parallel_mode) or metadata.force_simt_only`。这个 `enable_simt` 正是 u5-l3 讲过的两条启动 API（普通 `rtKernelLaunch` vs 950 `rtKernelLaunchWithFlagV2`）的分水岭。
 
 ```python
     parallel_mode = metadata.parallel_mode
@@ -420,8 +425,8 @@ Linalg 路径下，IR 中写入的并行模式会被解析覆盖 metadata（这�
 
 **操作步骤**（源码阅读 + 可选运行）：
 
-1. 在 compiler.py 找到 `parallel_mode` 默认值（1079 行）与 `__post_init__` 对它的两次设置（1114、1120 行）。
-2. 在 `_parse_linalg_metadata`（约 399 行）确认 IR 写入的 `parallel_mode` 会覆盖选项字段。
+1. 在 compiler.py 找到 `parallel_mode` 默认值（1081 行）与 `__post_init__` 对它的两次设置（1119、1125 行）。
+2. 在 `_parse_linalg_metadata`（约 401 行）确认 IR 写入的 `parallel_mode` 会覆盖选项字段。
 3. 在 driver.py（439–440 行）确认 `enable_simt` 的计算公式。
 4. （可选，需 950 设备）开启 `TRITON_DEBUG=1`，对 `compile_mode="simt_only"` 的 kernel 查看 dump 出的 launcher `.cxx` 源码，定位 `rtKernelLaunchWithFlagV2` 的调用与 `localMemorySize` 参数。
 
@@ -465,7 +470,7 @@ Linalg 路径下，IR 中写入的并行模式会被解析覆盖 metadata（这�
 ## 6. 本讲小结
 
 - `compile_mode` 是用户旋钮，三值 `simd` / `unstructured_in_simt`（默认）/ `simt_only`；它本身不改 IR，只驱动内部字段派生。
-- `__post_init__` 把一个字符串派生成 `force_simt_only`、`force_simt_template`、`parallel_mode`，这是「用户语义→编译器内部开关」的唯一桥梁（用 `object.__setattr__` 绕过 frozen dataclass）。
+- `__post_init__` 的第一行无条件调用 `_apply_ascend_patch()` 应用运行期补丁（先改装 IR 解析器），随后才把 `compile_mode` 这个字符串派生成 `force_simt_only`、`force_simt_template`、`parallel_mode`——这是「用户语义→编译器内部开关」的桥梁（用 `object.__setattr__` 绕过 frozen dataclass）。
 - `force_simt_only` 是阶段集合的硬分叉：为真则 `add_stages` 只注册 `ttir→npubin`（`ttir_to_npubin`，带 `--pure-simt`），跳过整个 Linalg 主线。
 - `force_simt_template` 是 pass 行为的软开关：在 `ttir_to_linalg` 内控制离散掩码/非结构化访存 pass 是否启用 SIMT 模板路由（`indirect_load/store`），受「950 + 秩 ≤ 5」门控，不满足则回退标量循环。
 - `unstructured_in_simt` 的「混合」语义：逐访存点判断，结构化留 SIMD、离散走 SIMT、不可行回退——不是整 kernel 搬到 SIMT。

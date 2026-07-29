@@ -1,0 +1,715 @@
+{
+  "project": "typst-crates-typst-eval",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-eval 是 Typst 的代码解释器（tree-walking interpreter），它把 typst-syntax 解析出的 AST 节点求值成 typst-library 中的 Value/Content，核心抽象是 Eval trait 和 Vm 虚拟机。学习顺序遵循「先认识整体再深入各节点类型」的原则：第 1 单元让读者理解项目定位、模块地图与两个入口（eval / eval_string）及 Eval trait + Vm 两大基石；第 2 单元按三种语法模式（code/markup/math）讲解表达式、字面量、集合与作用域的求值；第 3 单元讲解控制流（if/while/for）、FlowEvent 事件机制、let 绑定与解构、运算符；第 4 单元讲解函数调用、字段访问与方法分派、闭包定义与执行、CapturesVisitor 变量捕获；第 5 单元进入进阶机制：模块导入/include、set/show 规则、Access 可变访问与内置方法；第 6 单元讲横切关注点——错误诊断与提示体系、tracing 追踪与 IDE 支持、递归深度/栈增长与 comemo 缓存。讲义之间存在严格的依赖链，每个主题只引用 1-6 个真实源文件，确保由浅入深、可操作。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst-eval 解释器",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与在 Typst 中的定位",
+          "order": 1,
+          "filename": "u1-l1-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-eval 是什么——Typst 的代码解释器 crate，它在整个 typst 仓库中处于 typst-syntax（解析）与 typst-library（运行时值）之间的位置，依赖了哪些 crate。",
+          "learning_goals": [
+            "理解 typst-eval 作为「代码解释器」的核心职责：把 AST 求值成 Value/Content",
+            "看懂 Cargo.toml 中的依赖关系，特别是 typst-syntax、typst-library、comemo",
+            "知道 typst-eval 在 typst 整体编译流水线中的上下游关系"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "eval 入口函数",
+            "Cargo.toml 依赖声明",
+            "comemo / typst-library / typst-syntax"
+          ],
+          "practice_task": "阅读 Cargo.toml，列出 typst-eval 的所有 workspace 依赖，并用一句话说明每个依赖（如 comemo、typst-syntax、ecow）在本解释器中可能扮演的角色；最后画出一条「源码文本 → 解析 → 求值 → 模块/内容」的数据流简图。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "源码模块结构地图",
+          "order": 2,
+          "filename": "u1-l2-module-map.md",
+          "level": "beginner",
+          "topic": "讲解 src/ 目录下 14 个源文件各自的职责，以及它们如何按 AST 节点类型切分（code/markup/math/flow/call/ops 等），并梳理 lib.rs 中的模块声明与 pub use 导出。",
+          "learning_goals": [
+            "掌握 typst-eval 的目录与模块组织方式",
+            "能根据一个 AST 节点类型快速定位对应的求值代码所在文件",
+            "理解 lib.rs 中 pub use 暴露了哪些对外 API（eval、eval_closure、import、Vm 等）"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/code.rs",
+            "src/markup.rs",
+            "src/math.rs",
+            "src/call.rs",
+            "src/flow.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块声明",
+            "Eval trait",
+            "按节点类型分文件的求值组织方式"
+          ],
+          "practice_task": "制作一张表格，左列是文件名（code.rs、markup.rs、flow.rs、binding.rs、call.rs、import.rs、rules.rs、ops.rs、access.rs、methods.rs、math.rs、vm.rs），右列用一句话概括该文件负责求值哪类结构；再标注 lib.rs 通过 pub use 对外暴露了哪些符号。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "解释器入口：eval 与 eval_string",
+          "order": 3,
+          "filename": "u1-l1-eval-entry.md",
+          "level": "beginner",
+          "topic": "逐行讲解 lib.rs 中两个带 #[comemo::memoize] 的入口函数 eval（求值整个源文件得到 Module）和 eval_string（按指定语法模式求值字符串得到 Value），包括循环求值防护、Engine/Vm 准备、错误与警告处理、模块装配。",
+          "learning_goals": [
+            "理解 eval() 如何构建 Engine 与 Vm、如何处理语法错误/警告、如何把求值结果装配成 Module",
+            "理解 eval_string() 支持的三种 SyntaxMode（Code/Markup/Math）及其返回值差异",
+            "掌握 comemo::memoize 缓存对求值入口的意义，以及 route.contains() 的循环求值防护"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/vm.rs"
+          ],
+          "minimal_modules": [
+            "eval / eval_string 入口",
+            "comemo::memoize",
+            "Engine、Route、Scopes、Context 准备",
+            "Module 装配"
+          ],
+          "practice_task": "对照源码写出 eval() 函数的 6 个主要步骤（循环防护 → 准备 Engine → 准备 Vm → 收集语法错误/警告 → 求值 Markup → 处理 flow 并装配 Module），并解释：为什么在发现语法错误但处于 inspect 模式时仍然继续求值？",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "Eval trait 与 Vm 虚拟机",
+          "order": 4,
+          "filename": "u1-l1-eval-trait-vm.md",
+          "level": "beginner",
+          "topic": "讲解贯穿全 crate 的两大基石：Eval trait（为每类 AST 节点实现 eval，返回各自 Output）和 Vm 虚拟机（持有 engine、scopes、flow、inspected、context 的求值状态），以及 Vm 的 define/bind/trace 等方法。",
+          "learning_goals": [
+            "理解 Eval trait 的设计：self 消费 + &mut Vm + SourceResult<Output>，以及各节点 impl 的分发模式",
+            "掌握 Vm 结构体各字段含义（engine、flow、scopes、inspected、context）",
+            "理解 Vm::define/bind/trace_at/trace 的作用，以及 trace 与 IDE 追踪的关系"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/vm.rs"
+          ],
+          "minimal_modules": [
+            "Eval trait",
+            "Vm 结构体及字段",
+            "Vm::define / bind / trace / trace_at",
+            "hint_if_shadowed_std"
+          ],
+          "practice_task": "在 vm.rs 中找到 Vm::bind 方法，解释它除了把绑定插入 scopes.top 之外还做了哪两件「副作用」（针对 `is` 标识符的警告、调用 trace_at），并思考为什么 trace 必须在每次产生值时被调用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心求值流程：表达式、字面量与语法模式",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "基础字面量与标识符求值",
+          "order": 1,
+          "filename": "u2-l1-literals-idents.md",
+          "level": "intermediate",
+          "topic": "讲解 code.rs 中 ast::Expr 的大分发 match，以及各类字面量（None/Auto/Bool/Int/Float/Numeric/Str）与 Ident 的 Eval 实现，重点是 span 标注、trace_at 调用约定和 Int 字面量溢出/非法数字错误。",
+          "learning_goals": [
+            "理解 ast::Expr::eval 作为「总分发器」如何把每种表达式派发到对应的 Eval 实现",
+            "掌握字面量求值如何把语法节点转成 Value，以及 set/show 在 Expr 上下文中被禁止的逻辑",
+            "理解 Ident 求值如何通过 vm.scopes.get 查找绑定并 read_checked，以及 trace_at 的统一约定"
+          ],
+          "source_files": [
+            "src/code.rs"
+          ],
+          "minimal_modules": [
+            "ast::Expr::eval 总分发",
+            "字面量 Eval 实现",
+            "Ident 求值与 Scopes::get",
+            "int_literal_error / find_bad_digits"
+          ],
+          "practice_task": "阅读 ast::Expr::eval 的 match 分支，找出哪些分支会调用 `.map(Value::Content)`，并解释为什么 set/show 在表达式上下文中要报错（forbidden 闭包）；再写出 0x 前缀整数包含非法字符时 find_bad_digits 会返回什么。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "集合类型求值：数组与字典",
+          "order": 2,
+          "filename": "u2-l2-array-dict.md",
+          "level": "intermediate",
+          "topic": "讲解 code.rs 中 Array 与 Dict 的 Eval 实现，重点展开展开运算符（spread ..）的行为、字典非法 key 的收集、以及「全是字典 spread 时建议写成字典」的错误提示。",
+          "learning_goals": [
+            "理解数组求值中 spread 处理 None/Array/Dict 的不同分支",
+            "理解字典求值中 named/keyed/spread 三类项的处理，以及 key 必须是 Str 的校验",
+            "掌握 all_dict_spreads 这种「前瞻式」错误诊断的设计意图"
+          ],
+          "source_files": [
+            "src/code.rs"
+          ],
+          "minimal_modules": [
+            "Array::eval（ArrayItem::Pos / Spread）",
+            "Dict::eval（Named / Keyed / Spread）",
+            "spread 展开 Value::None / Array / Dict"
+          ],
+          "practice_task": "在 Array::eval 中找到 all_dict_spreads 相关的逻辑，解释它如何通过 items.all(...) 做前瞻判断，并说明为什么 `((1,2))` 被当作数组而 `(..a, ..b)`（全字典 spread）会给出「加冒号变成字典」的修复提示。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "代码块、内容块与作用域进出",
+          "order": 3,
+          "filename": "u2-l3-blocks-scopes.md",
+          "level": "intermediate",
+          "topic": "讲解 code.rs 中 CodeBlock / ContentBlock 的求值（通过 scopes.enter/exit 创建新作用域）、Parenthesized、以及 eval_code 流式求值表达式流、set/show 规则对后续 tail 的样式应用。",
+          "learning_goals": [
+            "理解代码块/内容块求值如何用 scopes.enter/exit 划分词法作用域",
+            "理解 eval_code 如何流式迭代表达式并用 ops::join 拼接结果，遇到 flow 时如何中断并恢复",
+            "掌握 set/show 在代码块尾部作为「样式作用域」被应用到 tail 的机制"
+          ],
+          "source_files": [
+            "src/code.rs"
+          ],
+          "minimal_modules": [
+            "CodeBlock / ContentBlock Eval",
+            "eval_code 流式求值",
+            "Scopes::enter / exit",
+            "ops::join 拼接",
+            "set/show 对 tail 的样式应用"
+          ],
+          "practice_task": "对照 eval_code，画出在代码块中遇到一条 set 规则时的执行流程（求值 styles → 递归 eval_code 求 tail → 用 styled_with_map 包裹），并解释 vm.flow.take()/恢复 的「保存-恢复」模式为何能正确处理嵌套块。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Markup 模式求值：从文本到内容元素",
+          "order": 4,
+          "filename": "u2-l4-markup.md",
+          "level": "intermediate",
+          "topic": "讲解 markup.rs 中 Markup 的求值（eval_markup 流式拼接 Content 序列），以及 Text/Space/Strong/Emph/Heading/List/Enum/Term/Raw/Link/Label/Ref 等标记如何被打包成对应的 typst-library 元素，还有 label 附加到内容的逻辑。",
+          "learning_goals": [
+            "理解 eval_markup 如何把标记流拼接成 Content::sequence",
+            "掌握各类标记节点如何被打包成 NativeElement（如 HeadingElem、ListItem、RawElem）",
+            "理解 Label 求值后如何被「回溯」附加到前一个可标记元素，以及重复标记/孤立标记的警告"
+          ],
+          "source_files": [
+            "src/markup.rs"
+          ],
+          "minimal_modules": [
+            "Markup::eval / eval_markup",
+            "Text/Space/Strong/Emph/Heading 求值",
+            "List/Enum/Term/Raw/Link 求值",
+            "Label 附加与 Ref 求值"
+          ],
+          "practice_task": "在 markup.rs 中找到处理 Value::Label 的分支，解释它如何用 seq.iter_mut().rev().find(...) 把标签附加到「最后一个可标记元素」，并说明「标签多次附加」「标签无附着对象」分别产生什么警告。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Math 模式求值：方程与符号",
+          "order": 5,
+          "filename": "u2-l5-math.md",
+          "level": "intermediate",
+          "topic": "讲解 math.rs 中 Equation/Math 的求值，以及数学专用节点（MathIdent、MathShorthand、MathDelimited、MathAttach、MathPrimes、MathFrac、MathRoot）如何被打包成数学元素，重点说明 eval_display 与 was_deparenthesized 的作用。",
+          "learning_goals": [
+            "理解 Math 求值如何把表达式流打包成 EquationElem，以及 MathText 区分 grapheme/number",
+            "掌握 MathIdent 求值用 scopes.get_in_math（而非普通 get）的语义差异",
+            "理解 eval_display 辅助方法、MathAttach 上下标与 primes 的处理、MathFrac 的去括号标记"
+          ],
+          "source_files": [
+            "src/math.rs",
+            "src/code.rs"
+          ],
+          "minimal_modules": [
+            "Equation / Math Eval",
+            "MathIdent / get_in_math",
+            "MathAttach / MathPrimes / MathFrac / MathRoot",
+            "access_field（MathFieldAccess 复用）",
+            "ExprExt::eval_display"
+          ],
+          "practice_task": "阅读 MathFrac::eval，解释 num_depar/denom_depar 两个标记（was_deparenthesized）传递给 FracElem 的意义，并说明为什么 MathFieldAccess 要复用 code.rs 中的 access_field 而不是自己实现字段访问。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "控制流、绑定与运算",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "条件、循环与迭代求值",
+          "order": 1,
+          "filename": "u3-l1-conditionals-loops.md",
+          "level": "intermediate",
+          "topic": "讲解 flow.rs 中 Conditional、WhileLoop、ForLoop 的 Eval 实现，重点展开 for 循环对 array/dict/str(bytes/graphemes) 的多类型迭代、解构绑定、MAX_ITERATIONS 与 is_invariant 的「死循环」检测。",
+          "learning_goals": [
+            "理解 if/else 求值如何对条件做 bool cast 并标记条件 return",
+            "掌握 while 循环的不变量检测（is_invariant）与 MAX_ITERATIONS 上限",
+            "理解 for 循环如何按可迭代值类型（Array/Dict/Str graphemes/Bytes）分派，并对 pattern 做解构"
+          ],
+          "source_files": [
+            "src/flow.rs"
+          ],
+          "minimal_modules": [
+            "Conditional Eval",
+            "WhileLoop Eval（is_invariant / can_diverge / MAX_ITERATIONS）",
+            "ForLoop Eval（iter! 宏与多类型迭代）",
+            "ops::join 累加"
+          ],
+          "practice_task": "在 WhileLoop::eval 中找到 is_invariant 与 can_diverge 的配合逻辑，解释为什么「条件恒为真且循环体不会 break/return」会被判定为 `condition is always true`；再说明 for 循环中 String 为什么用 graphemes 迭代而 Bytes 用整数迭代。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "控制流事件：break / continue / return",
+          "order": 2,
+          "filename": "u3-l2-flow-events.md",
+          "level": "intermediate",
+          "topic": "讲解 flow.rs 中 FlowEvent 枚举（Break/Continue/Return）的语义、LoopBreak/LoopContinue/FuncReturn 的 Eval 实现如何写入 vm.flow、以及「保存-恢复」flow 与 forbidden() 在非法位置报错的机制。",
+          "learning_goals": [
+            "理解 FlowEvent 三种变体的含义，特别是 Return 的第三布尔字段 conditional",
+            "掌握 break/continue/return 如何通过 vm.flow 向上传递并被循环/函数消费",
+            "理解 flow 的 take()/恢复模式如何避免控制流跨作用域泄漏，以及 forbidden() 报错"
+          ],
+          "source_files": [
+            "src/flow.rs",
+            "src/code.rs"
+          ],
+          "minimal_modules": [
+            "FlowEvent 枚举",
+            "LoopBreak / LoopContinue / FuncReturn Eval",
+            "vm.flow 保存与恢复",
+            "FlowEvent::forbidden",
+            "warn_for_discarded_content"
+          ],
+          "practice_task": "对照 eval_closure（call.rs）与 WhileLoop/ForLoop 对 vm.flow 的处理，解释三种事件各自如何被「消费」（break 后清空并退出、continue 清空、return 直接跳出）；再说明 forbidden() 在模块顶层遇到 return 时如何报错。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "let 绑定与解构赋值",
+          "order": 3,
+          "filename": "u3-l3-let-destructure.md",
+          "level": "intermediate",
+          "topic": "讲解 binding.rs 中 LetBinding 与 DestructAssignment 的求值，以及 destructure / destructure_impl 如何把值按 pattern 解构到数组/字典，包括 spread sink、命名项、元素数量不匹配的错误。",
+          "learning_goals": [
+            "理解 let 绑定如何区分 Normal(pattern) 与 Closure(ident) 两种 kind，并处理缺失初始化值",
+            "掌握 destructure_impl 对 Normal/Placeholder/Parenthesized/Destructuring 的分派，以及数组/字典解构",
+            "理解 spread sink 在数组（按数量截取）与字典（收集未用键）中的不同语义，以及 wrong_number_of_elements 错误"
+          ],
+          "source_files": [
+            "src/binding.rs"
+          ],
+          "minimal_modules": [
+            "LetBinding / DestructAssignment Eval",
+            "destructure / destructure_impl",
+            "destructure_array / destructure_dict",
+            "wrong_number_of_elements"
+          ],
+          "practice_task": "对比 destructure（用于 let，通过 vm.define 绑定）与 DestructAssignment（通过 expr.access 可变写入）两者回调 f 的差异，并说明字典解构中 spread sink 是如何收集「未被显式命名」的键的。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "一元与二元运算符求值",
+          "order": 4,
+          "filename": "u3-l4-operators.md",
+          "level": "intermediate",
+          "topic": "讲解 ops.rs 中 Unary/Binary 的 Eval 实现：如何委托给 typst_library::foundations::ops，包括 and/or 短路求值、赋值/复合赋值运算、字段赋值的特殊路径，以及整数取负溢出错误。",
+          "learning_goals": [
+            "理解 Unary 求值如何映射到 ops::pos/neg/not，以及 neg 对正溢出整数的特殊报错",
+            "掌握 apply_binary 的 and/or 短路逻辑和其余运算对 ops 模块的委托",
+            "理解 apply_assignment 如何用 Access trait 实现可变赋值，以及字段赋值为何走 access_dict 的 insert 特殊路径"
+          ],
+          "source_files": [
+            "src/ops.rs",
+            "src/access.rs"
+          ],
+          "minimal_modules": [
+            "Unary / Binary Eval",
+            "apply_binary（短路求值）",
+            "apply_assignment（Access 可变写）",
+            "ops 委托",
+            "overflowing_int_negation_error"
+          ],
+          "practice_task": "在 apply_assignment 中找到「字段赋值」的特殊分支（BinOp::Assign + FieldAccess），解释为什么 `obj.field = x` 用 dict.insert 而不是普通 access 修改，并说明 `x += y` 复合赋值如何用 std::mem::take 取出旧值再写回。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "函数调用、闭包与变量捕获",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "函数调用与参数求值",
+          "order": 1,
+          "filename": "u4-l1-func-call-args.md",
+          "level": "intermediate",
+          "topic": "讲解 call.rs 中 FuncCall 与 Args 的 Eval：调用深度检查、callee 与 args 的求值顺序、call_func 如何用 stacker 防爆栈、Args 求值如何处理位置/命名/spread 参数。",
+          "learning_goals": [
+            "理解 FuncCall::eval 如何区分字段访问 callee 与普通 callee，以及「先求值 callee 再求值 args」的顺序",
+            "掌握 call_func 用 stacker::maybe_grow 保护调用栈（非 wasm）的设计",
+            "理解 Args 求值如何把 Pos/Named/Spread 转成 Arg items，并对 spread 的 None/Array/Dict/Args 做展平"
+          ],
+          "source_files": [
+            "src/call.rs"
+          ],
+          "minimal_modules": [
+            "FuncCall Eval",
+            "call_func（stacker）",
+            "route.check_call_depth",
+            "Args Eval（Pos / Named / Spread）"
+          ],
+          "practice_task": "阅读 FuncCall::eval，追踪一次普通函数调用 `f(a, b: 1, ..rest)` 的完整流程（check_call_depth → 求 callee → cast Func → 求 args → call_func），并说明为什么 Args 的 span 用 Span::detached 而不是 self.span()。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "字段访问与方法调用分派",
+          "order": 2,
+          "filename": "u4-l2-field-access-methods.md",
+          "level": "intermediate",
+          "topic": "讲解 code.rs 的 FieldAccess/access_field 与 call.rs 的 eval_field_callee，重点说明方法调用（优先类型/元素 scope 的 method）与字段调用（symbol/type/module/func）的优先级，以及字典为何禁止字段调用以避免歧义。",
+          "learning_goals": [
+            "理解 FieldAccess::eval 调用 access_field，以及 settable 字段在 context 下读取的兜底逻辑",
+            "掌握 eval_field_callee 如何区分 Method/Func/NonFunc，以及方法优先于字段的分派规则",
+            "理解 disallowed_field_call_error 为何对 Dict/Args/Content 直接报错并提供修复提示"
+          ],
+          "source_files": [
+            "src/call.rs",
+            "src/code.rs"
+          ],
+          "minimal_modules": [
+            "FieldAccess::eval / access_field",
+            "eval_field_callee（FieldCallee 分派）",
+            "disallowed_field_call_error",
+            "maybe_resolve_mutating",
+            "Contextual 元素的 settable 字段兜底"
+          ],
+          "practice_task": "在 eval_field_callee 中梳理方法查找的四条优先级路径（类型 scope → 元素 scope → symbol/type/module 字段 → func 字段），并解释为什么 `(at: x => ...).at(key)` 会被禁止字段调用（字典键会与内置方法名冲突）。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "闭包定义与 eval_closure 执行",
+          "order": 3,
+          "filename": "u4-l3-closure-eval.md",
+          "level": "intermediate",
+          "topic": "讲解 call.rs 中 Closure::eval 如何把函数字面量构造成 Closure（含 defaults、captured、num_pos_params），以及 eval_closure 如何新建独立 Scopes、绑定参数（含 pattern 解构、spread sink、命名参数默认值）、提供递归自引用并执行 body。",
+          "learning_goals": [
+            "理解 Closure::eval 如何先求值命名参数默认值、再收集捕获、再构造 Func",
+            "掌握 eval_closure 如何用捕获的 scope 重建 Scopes（不泄漏调用点作用域），并绑定各类参数",
+            "理解 spread sink 如何收集剩余位置参数、命名参数如何取默认值、以及函数名如何支持递归调用"
+          ],
+          "source_files": [
+            "src/call.rs"
+          ],
+          "minimal_modules": [
+            "Closure::eval",
+            "eval_closure（Scopes 重建 / 参数绑定）",
+            "pattern 参数解构",
+            "spread sink 收集",
+            "递归自引用",
+            "FlowEvent::Return 处理"
+          ],
+          "practice_task": "对照 eval_closure 的参数绑定循环，分别说明 Pos(Normal Ident)、Pos(pattern 解构)、Spread、Named 四种参数如何被绑定，并解释 `Some(FlowEvent::Return(_, Some(explicit), _))` 直接返回 explicit、而 `None` 返回 body 求值结果的语义。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "CapturesVisitor：闭包变量捕获",
+          "order": 4,
+          "filename": "u4-l4-captures-visitor.md",
+          "level": "intermediate",
+          "topic": "讲解 call.rs 中 CapturesVisitor 如何遍历 AST，区分「内部绑定」与「外部捕获」，正确处理 let/for/closure/import/field access/named pair 等结构，并附带测试用例验证捕获集合。",
+          "learning_goals": [
+            "理解 CapturesVisitor 用 internal/external 双 Scopes 判断标识符是「绑定」还是「捕获」的机制",
+            "掌握各类结构（闭包参数、let、for、import、code/content block）如何更新 internal 作用域",
+            "理解 capture() 如何按 Capturer（Function/Context）决定是否捕获，以及 finish() 返回捕获 scope"
+          ],
+          "source_files": [
+            "src/call.rs"
+          ],
+          "minimal_modules": [
+            "CapturesVisitor::new / visit / finish",
+            "capture / bind",
+            "internal vs external Scopes",
+            "Capturer",
+            "test_captures / test_captures_in_math"
+          ],
+          "practice_task": "阅读 test_captures 中的用例，预测 `#let f = (x, y) => f` 与 `#(x, y: x + z) => x + y` 各自捕获了哪些变量，然后对照 visitor 的 closure/let/named 分支解释为什么默认值不能访问后续参数绑定。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "模块系统、样式规则与可变性",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "模块导入与包含",
+          "order": 1,
+          "filename": "u5-l1-import-include.md",
+          "level": "advanced",
+          "topic": "讲解 import.rs 中 ModuleImport 与 ModuleInclude 的求值，以及 import/import_file/import_package/resolve_package 如何解析路径与包、读取 typst.toml 清单、调用 eval 递归求值并通过 route 防止循环导入。",
+          "learning_goals": [
+            "理解 ModuleImport 如何处理 func/type/module/str/path 多种来源，以及 rename/wildcard/具名导入的不同绑定方式",
+            "掌握 import() 如何区分包（@）与相对文件，import_file 如何通过 route.contains 防循环并递归 eval",
+            "理解 resolve_package 如何读取并校验 typst.toml 清单、解析 entrypoint，以及 bare 动态导入为何需要显式名"
+          ],
+          "source_files": [
+            "src/import.rs"
+          ],
+          "minimal_modules": [
+            "ModuleImport / ModuleInclude Eval",
+            "import / import_file",
+            "import_package / resolve_package",
+            "PackageManifest 校验",
+            "route 循环防护",
+            "BareImportError"
+          ],
+          "practice_task": "追踪一次 `import \"@preview/foo:0.1.0\": bar` 的完整路径（解析 PackageSpec → resolve_package 读 typst.toml 校验 → import_file 递归 eval → 在 scope 绑定 bar），并说明 import 与 include 在对求值结果的使用上有何不同（Module 作用域 vs Content）。",
+          "depends_on": [
+            "u1-l3",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "set 与 show 规则求值",
+          "order": 2,
+          "filename": "u5-l2-set-show-rules.md",
+          "level": "advanced",
+          "topic": "讲解 rules.rs 中 SetRule 与 ShowRule 的 Eval：set 的条件守卫与元素函数校验、show 的 selector+transform 构造 Recipe，以及 check_show_page_rule / check_show_par_set_block 两个兼容性警告。",
+          "learning_goals": [
+            "理解 SetRule::eval 如何处理可选条件、校验目标是元素函数、并用 target.set 生成 Styles",
+            "掌握 ShowRule::eval 如何把 selector 与 transform（含 set 子规则）组装成 Recipe",
+            "理解两个 lint 式警告：show page 无效、show par: set block(spacing) 需迁移为 set par"
+          ],
+          "source_files": [
+            "src/rules.rs"
+          ],
+          "minimal_modules": [
+            "SetRule Eval（条件守卫 / 元素校验）",
+            "ShowRule Eval（selector / transform / Recipe）",
+            "check_show_page_rule",
+            "check_show_par_set_block",
+            "hint_if_shadowed_std"
+          ],
+          "practice_task": "对照 SetRule::eval，解释为什么只有元素函数（func.to_element()）能用于 set 规则；再阅读 check_show_par_set_block，说明它检测哪种过时写法、给出什么迁移建议，并思考为什么这类检查放在求值阶段而非解析阶段。",
+          "depends_on": [
+            "u2-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "可变访问 Access 与内置方法",
+          "order": 3,
+          "filename": "u5-l3-access-methods.md",
+          "level": "advanced",
+          "topic": "讲解 access.rs 的 Access trait（如何对 Ident/Parenthesized/FieldAccess/FuncCall 取可变引用）与 methods.rs 的内置方法（push/pop/insert/remove 等变更方法、first/last/at 等访问器方法），以及 access_dict 对可变字段的支持边界。",
+          "learning_goals": [
+            "理解 Access trait 如何为赋值/复合赋值/变更方法提供 &mut Value，以及临时值不可变的报错",
+            "掌握 call_method_mut / call_method_access 对 Array/Dict 内置方法的实现",
+            "理解 access_dict 如何区分有自定义 getter 的类型（symbol/content/module/func/args）与静态字段，以及字段尚未可变时的提示"
+          ],
+          "source_files": [
+            "src/access.rs",
+            "src/methods.rs"
+          ],
+          "minimal_modules": [
+            "Access trait 及各 impl",
+            "call_method_mut（push/pop/insert/remove）",
+            "call_method_access（first/last/at）",
+            "access_dict",
+            "is_mutating_method / is_accessor_method"
+          ],
+          "practice_task": "追踪 `array.insert(0, x)` 的求值路径（FuncCall → is_mutating_method → maybe_resolve_mutating → target.access → call_method_mut），并解释 access_dict 为什么对 symbol/content/module/func/args 报「cannot mutate fields」而对普通类型报「fields not yet mutable」。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "深入机制：诊断、追踪与运行时安全",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "错误处理、诊断与提示体系",
+          "order": 1,
+          "filename": "u6-l1-diagnostics.md",
+          "level": "advanced",
+          "topic": "汇总全 crate 的错误处理约定：SourceResult/HintedStrResult 与 At trait、bail!/error!/warning! 宏的使用模式、Hint 与 Tracepoint 的叠加，以及 int_literal_error / wrong_number_of_elements / disallowed_field_call_error 等典型高质量诊断。",
+          "learning_goals": [
+            "理解 SourceResult、HintedStrResult、At trait 如何把字符串错误转成带 span 的源诊断",
+            "掌握 bail!/error!/warning! 宏与 hint 叠加的写法，以及 #[cold] 标注的错误构造函数",
+            "能从 code.rs/import.rs/call.rs 中提炼出「错误信息 + 修复提示 + 精确定位 sub-range」的诊断设计模式"
+          ],
+          "source_files": [
+            "src/code.rs",
+            "src/call.rs",
+            "src/binding.rs",
+            "src/ops.rs"
+          ],
+          "minimal_modules": [
+            "SourceResult / HintedStrResult / At",
+            "bail! / error! / warning! 宏",
+            "Hint 与 DiagSpan/SubRange",
+            "Tracepoint",
+            "int_literal_error / find_bad_digits"
+          ],
+          "practice_task": "在 code.rs 的 int_literal_error 与 find_bad_digits 中找出它如何用 SubRange 精确高亮非法数字位，并总结 typst-eval 一条好的诊断至少包含哪三要素（错误信息、定位、修复 hint）；再举一个用 hint_if_shadowed_std 增强 error 的例子。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "追踪机制与 IDE 支持",
+          "order": 2,
+          "filename": "u6-l2-tracing-ide.md",
+          "level": "advanced",
+          "topic": "讲解 vm.rs 中 inspected/trace/trace_at 如何驱动 IDE 的 hover/tooltip，eval 入口如何根据 engine.traced.get(id) 进入 inspect 模式，以及「即使有语法错误也继续求值」的设计，还有 read_checked 与 Binding::capture 的关系。",
+          "learning_goals": [
+            "理解 inspected span 如何在求值时触发 trace，把值写入 sink 供 IDE 读取",
+            "掌握 trace_at 作为「满足 trace 调用约定」的统一入口，以及 Expr::eval 末尾的统一 trace_at",
+            "理解 inspect 模式下为何要忽略语法错误继续求值，以及 Contextual/Capturer::Context 的捕获差异"
+          ],
+          "source_files": [
+            "src/vm.rs",
+            "src/lib.rs",
+            "src/code.rs",
+            "src/math.rs"
+          ],
+          "minimal_modules": [
+            "Vm::inspected / trace / trace_at",
+            "engine.traced.get(id)",
+            "Expr::eval 的统一 trace_at",
+            "Binding::read_checked / capture",
+            "Contextual 与 Capturer::Context"
+          ],
+          "practice_task": "解释 Vm::new 如何通过 engine.traced.get(id) 决定是否进入 inspect 模式，并追踪一个标识符求值时 trace 链路（Expr::eval 末尾 trace_at → 命中 inspected span → trace 写入 sink）；说明为什么 MathAccess::eval 要手动调用 trace_at。",
+          "depends_on": [
+            "u1-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "递归安全、栈增长与缓存",
+          "order": 3,
+          "filename": "u6-l3-recursion-cache.md",
+          "level": "advanced",
+          "topic": "讲解 typst-eval 三道运行时安全防线：route 的循环求值/导入防护与调用深度检查（check_call_depth）、call_func 用 stacker::maybe_grow 防爆栈（及 wasm 例外）、以及 eval/eval_closure 上 #[comemo::memoize] 的记忆化缓存。",
+          "learning_goals": [
+            "理解 Route 如何同时防止循环求值（eval）与循环导入（import_file），以及 check_call_depth 限制调用深度",
+            "掌握 stacker::maybe_grow 在 32KB/2MB 阈值下动态增长栈、为何 wasm 上禁用",
+            "理解 comemo::memoize 对 eval/eval_closure 的缓存命中如何避免重复求值与重复副作用"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/call.rs",
+            "src/import.rs"
+          ],
+          "minimal_modules": [
+            "route.contains（循环防护）",
+            "route.check_call_depth",
+            "stacker::maybe_grow（cfg wasm32）",
+            "eval / eval_closure 的 comemo::memoize",
+            "Route::extend / with_id"
+          ],
+          "practice_task": "分别说明三道防线各阻止什么问题：route.contains 阻止循环 eval/import、check_call_depth 阻止过深递归、stacker 阻止栈溢出；并讨论 comemo::memoize 缓存 eval_closure 时，传入的 Tracked<World> 等参数如何参与缓存键的相等性判定。",
+          "depends_on": [
+            "u4-l3",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

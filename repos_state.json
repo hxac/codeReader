@@ -36736,244 +36736,218 @@
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.861684,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l2": {
           "status": "done",
-          "action": "new",
+          "action": "rebuild",
           "retries": 0,
-          "cost": 1.0503770000000001,
+          "cost": 1.7636249999999998,
           "error": null
         },
         "u1-l3": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.006379,
+          "cost": 1.758672,
           "error": null
         },
         "u1-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.752598,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8785759999999999,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.288195,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.1340790000000003,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.507083,
+          "cost": 1.7020270000000002,
           "error": null
         },
         "u3-l2": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.201716,
+          "cost": 1.359427,
           "error": null
         },
         "u3-l3": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.0411339999999998,
+          "cost": 1.177587,
           "error": null
         },
         "u4-l1": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.6332910000000003,
+          "cost": 1.589276,
           "error": null
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4170140000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.537427,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l4": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.315647,
+          "cost": 1.478651,
           "error": null
         },
         "u4-l5": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.581056,
+          "cost": 2.190147,
           "error": null
         },
         "u4-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.580579,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.279253,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6527219999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.5802959999999997,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l1": {
           "status": "done",
-          "action": "new",
+          "action": "update",
           "retries": 0,
-          "cost": 1.2521069999999999,
+          "cost": 2.4917940000000005,
           "error": null
         },
         "u6-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.700774,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6715649999999997,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l2": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8bed28dd-719d-48b2-b11d-ca32cb2f5ec3\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u7-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "status": "failed",
+          "action": "update",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"278d4731-31fc-48b6-b9f0-0e752e2291bd\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
         "u8-l3": {
           "status": "pending",
-          "action": "new",
+          "action": "rebuild",
           "retries": 0
         },
         "u9-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l3": {
           "status": "pending",
-          "action": "new",
+          "action": "update",
           "retries": 0
         },
         "u9-l4": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l1": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l2": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l3": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u10-l4": {
           "status": "pending",
-          "action": "new",
+          "action": "update",
           "retries": 0
         },
         "u10-l5": {
-          "status": "pending",
-          "action": "new",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         }
       },
-      "manifest_head": "0a5378d28abf6bbcd8d8916e03d397e9ed886a55",
-      "prev_head": null,
+      "manifest_head": "0c3b1f6c32ff1e08bdde97597983a0937be8ae51",
+      "prev_head": "0a5378d28abf6bbcd8d8916e03d397e9ed886a55",
       "phase": "workers",
-      "mode": "full",
+      "mode": "incremental",
       "tutorial_path": "tutorials/triton-lang/triton-ascend/triton-ascend-tutorial",
-      "last_head": "0a5378d28abf6bbcd8d8916e03d397e9ed886a55",
-      "last_run_at": "2026-07-29T13:02:08Z",
+      "last_head": "0c3b1f6c32ff1e08bdde97597983a0937be8ae51",
+      "last_run_at": "2026-07-29T18:02:10Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "triton-lang/Triton-to-tile-IR": {
@@ -37106,36 +37080,43 @@
           "error": null
         },
         "u4-l1": {
-          "status": "failed",
+          "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6d8b3653-dc8f-414a-9b5b-042b216b44fc\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "cost": 1.632426,
+          "error": null
         },
         "u4-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3249939999999998,
+          "error": null
         },
         "u4-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.062995,
+          "error": null
         },
         "u4-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.533164,
+          "error": null
         }
       },
       "manifest_head": "1bd89c0dfb66fc99d4d338af4baddd2874de9d87",
       "prev_head": null,
-      "phase": "workers",
+      "phase": "done",
       "mode": "full",
       "tutorial_path": "tutorials/triton-lang/Triton-to-tile-IR/Triton-to-tile-IR-tutorial",
       "last_head": "1bd89c0dfb66fc99d4d338af4baddd2874de9d87",
-      "last_run_at": "2026-07-29T13:02:08Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-07-29T18:02:10Z",
+      "last_error": null,
+      "abandoned": []
     },
     "llvm/llvm-project": {},
     "llvm/llvm-project@clang": {},
@@ -37192,105 +37173,369 @@
     "ai-dynamo/dynamo": {},
     "typst/typst@”self“": {
       "last_error": "子目录不存在: '”self“'（检查 repos.yml 的 folders）",
-      "last_run_at": "2026-07-29T13:02:08Z"
+      "last_run_at": "2026-07-29T18:02:10Z"
     },
     "typst/typst@crates/typst-bundle": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u1-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u2-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
+        },
+        "u5-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3473799999999998,
+          "error": null
+        }
+      },
+      "manifest_head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+      "prev_head": "9a1d84e9450c66adf9d2cb0068f4e0160e4ba34a",
+      "phase": "done",
+      "mode": "incremental",
+      "tutorial_path": "tutorials/typst/typst/typst-crates-typst-bundle-tutorial",
+      "last_head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+      "last_run_at": "2026-07-29T18:02:10Z",
+      "last_error": null,
+      "abandoned": []
+    },
+    "typst/typst@crates/typst-cli": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.450379,
+          "cost": 0.749792,
           "error": null
         },
         "u1-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.3412140000000001,
+          "cost": 0.729347,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6768649999999999,
           "error": null
         },
         "u2-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.0900580000000002,
+          "cost": 1.110627,
           "error": null
         },
         "u2-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.9517070000000001,
+          "cost": 0.807866,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.041957,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9098060000000001,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6639059999999997,
           "error": null
         },
         "u3-l1": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.863495,
+          "cost": 0.929984,
           "error": null
         },
         "u3-l2": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.2910920000000001,
+          "cost": 1.0764470000000002,
           "error": null
         },
-        "u4-l1": {
+        "u3-l3": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 0.780327,
+          "cost": 0.9906590000000001,
           "error": null
         },
-        "u4-l2": {
+        "u3-l4": {
           "status": "done",
           "action": "new",
           "retries": 0,
-          "cost": 1.224974,
+          "cost": 1.017926,
           "error": null
         },
-        "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2742479999999998,
-          "error": null
-        },
-        "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0667950000000002,
-          "error": null
-        },
-        "u5-l3": {
+        "u3-l5": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"46d27074-575a-4f47-9859-265de871aadf\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"882677be-6cfe-4a42-8eb0-c09450c6eb9e\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
         },
-        "u5-l4": {
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l5": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l6": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l7": {
           "status": "pending",
           "action": "new",
           "retries": 0
         }
       },
-      "manifest_head": "9a1d84e9450c66adf9d2cb0068f4e0160e4ba34a",
+      "manifest_head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
       "prev_head": null,
       "phase": "workers",
       "mode": "full",
-      "tutorial_path": "tutorials/typst/typst/typst-crates-typst-bundle-tutorial",
-      "last_head": "9a1d84e9450c66adf9d2cb0068f4e0160e4ba34a",
-      "last_run_at": "2026-07-29T13:02:08Z",
+      "tutorial_path": "tutorials/typst/typst/typst-crates-typst-cli-tutorial",
+      "last_head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+      "last_run_at": "2026-07-29T18:02:10Z",
       "last_error": "quota exhausted; will resume next window"
     },
-    "typst/typst@crates/typst-cli": {},
-    "typst/typst@crates/typst-eval": {},
+    "typst/typst@crates/typst-eval": {
+      "prompt_hash": "b21aef51792b02df",
+      "lectures": {
+        "u1-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.659864,
+          "error": null
+        },
+        "u1-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1367600000000002,
+          "error": null
+        },
+        "u1-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.005418,
+          "error": null
+        },
+        "u1-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.755629,
+          "error": null
+        },
+        "u2-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3948139999999998,
+          "error": null
+        },
+        "u2-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3740940000000001,
+          "error": null
+        },
+        "u2-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.6295930000000003,
+          "error": null
+        },
+        "u2-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5502170000000002,
+          "error": null
+        },
+        "u2-l5": {
+          "status": "failed",
+          "action": "new",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n\n{\"is_error\":true,\"duration_api_ms\":0,\"num_turns\":1,\"stop_reason\":\"stop_sequence\",\"session_id\":\"eb5b0abf-3777-4ece-9e9f-8053658ea69a\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"cache_c"
+        },
+        "u3-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u3-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u4-l4": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u5-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l1": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l2": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        },
+        "u6-l3": {
+          "status": "pending",
+          "action": "new",
+          "retries": 0
+        }
+      },
+      "manifest_head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+      "prev_head": null,
+      "phase": "workers",
+      "mode": "full",
+      "tutorial_path": "tutorials/typst/typst/typst-crates-typst-eval-tutorial",
+      "last_head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+      "last_run_at": "2026-07-29T18:02:10Z",
+      "last_error": "quota exhausted; will resume next window"
+    },
     "typst/typst@crates/typst-html": {},
     "typst/typst@crates/typst-ide": {},
     "typst/typst@crates/typst-kit": {},

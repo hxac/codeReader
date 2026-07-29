@@ -4,7 +4,7 @@
 
 本讲是「Ascend 编译后端 MLIR pass 流水线」单元的**总览篇**。读完本讲，你应该能够：
 
-- 在 [compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py) 的 `ttir_to_linalg` 中，逐行说出从 TTIR 到 Linalg IR 之间所有 pass 的**注册顺序**。
+- 在 [compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py) 的 `ttir_to_linalg` 中，逐行说出从 TTIR 到 Linalg IR 之间所有 pass 的**注册顺序**。
 - 说清每个 pass 的**启用条件**，重点是 `compile_on_910_95`（950 代芯片）和 `enable_dynamic_cv_pipeline`（CV 流水线）这两个总开关，以及 `add_auto_scheduling`、`force_simt_template` 等条件分支。
 - 理解 `ir.pass_manager`、`ascend.passes.ttir` 与命令行工具 `triton-opt --pass-pipeline=...` 三者之间的**对应关系**，知道如何把 Python 里的 pass 流水线「搬」到命令行复现。
 
@@ -17,7 +17,7 @@
 - **TTIR**：Triton 上游产出的、与硬件无关的中间表示。`@triton.jit` 的 Python kernel 先被翻译成 TTIR（u3-l1）。
 - **Linalg IR**：更贴近张量运算的 MLIR 方言，是 Triton-Ascend 交给 BiSheng 工具链继续往下编（最终到 `.o`）的输入形式之一。
 - **编译阶段（stage）**：u3-l2 讲过，`AscendBackend.add_stages` 把每个编译阶段登记为「阶段名 → 处理函数」，core 按顺序执行，如 `ttir → ttadapter → mlirbc → bcmlir → npubin`。本讲的 `ttir_to_linalg` 正是 `ttadapter` 阶段的实现。
-- **NPUOptions**：u3-l2 讲过的不可变编译选项 `@dataclass(frozen=True)`，其中的 `compile_mode` 会在 `__post_init__` 里派生出 `force_simt_only`、`force_simt_template`、`parallel_mode` 等字段。
+- **NPUOptions**：u3-l2 讲过的不可变编译选项 `@dataclass(frozen=True)`，其中的 `compile_mode` 会在 `__post_init__` 里派生出 `force_simt_only`、`force_simt_template`、`parallel_mode` 等字段；而 `__post_init__` 的第一件事是无条件调用 `_apply_ascend_patch()` 应用运行期补丁。
 
 几个**初学者容易混淆的术语**，先在这里厘清：
 
@@ -34,11 +34,13 @@
 
 | 文件 | 作用 |
 |---|---|
-| [third_party/ascend/backend/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py) | Ascend 编译后端主体。本讲的绝对主角是其中 `ttir_to_linalg` 函数（L155-L264） |
-| [python/triton/compiler/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py) | Triton core 的编译总调度。`compile` 函数用 `**options.__dict__` 把 NPUOptions 灌进 `metadata`（L279-L285），这是理解所有门控字段来源的关键 |
-| [third_party/ascend/bin/triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/bin/triton-mlir-opt.cpp) | 一个 C++ 命令行驱动，注册 MLIR + BiShengIR 的全部方言与 pass，让 `.mlir` 文件可以在命令行被这些 pass 处理（L32-L42） |
+| [third_party/ascend/backend/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py) | Ascend 编译后端主体。本讲的绝对主角是其中 `ttir_to_linalg` 函数（L157-L266） |
+| [python/triton/compiler/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py) | Triton core 的编译总调度。`compile` 函数用 `**options.__dict__` 把 NPUOptions 灌进 `metadata`（L279-L285），这是理解所有门控字段来源的关键 |
+| [third_party/ascend/bin/triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/bin/triton-mlir-opt.cpp) | 一个 C++ 命令行驱动，注册 MLIR + BiShengIR 的全部方言与 pass，让 `.mlir` 文件可以在命令行被这些 pass 处理（L32-L42） |
 
 `ascend.passes.ttir` 和 `ir.pass_manager` 本身是 C++ 编译产物（`libtriton` 的一部分），没有可直接读的源码文件，本讲通过它们在 Python 侧的**调用方式**来讲解。
+
+此外，本文件顶部除了 `ir`、`passes`、`ascend` 之外，还新增导入了两个 C++ 绑定（[L36-L37](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L36-L37)）：`buffer_ir` 与 `triton._C.libtriton.ascend.ir`（记为 `ascend_ir`）。前者用于 `AscendBackend.load_dialects`（[L1265-L1270](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1265-L1270)）把 Ascend 专用方言注册进编译 context，后者用于在 `pm.run` 之后从 IR 模块对象读取结构化元数据（见 4.2.3）。
 
 ## 4. 核心概念与源码讲解
 
@@ -71,7 +73,7 @@ pm.run(mod, 'ttir_to_linalg')               # 4. 一次性把整条流水线跑�
 
 #### 4.1.3 源码精读
 
-构造 pass manager 的两行，见 [third_party/ascend/backend/compiler.py:L190-L191](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L190-L191)：
+构造 pass manager 的两行，见 [third_party/ascend/backend/compiler.py:L192-L193](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L192-L193)：
 
 ```python
 pm = ir.pass_manager(mod.context)
@@ -80,7 +82,7 @@ pm.enable_debug()
 
 这两行用模块 `mod` 自带的 `context`（MLIR 里管理方言、类型的上下文）创建一个空的 pass manager。`enable_debug()` 让 manager 在后续 `pm.run` 时能打印诊断信息，并保证 `get_pipeline_str()` 能还原出可复现的流水线。
 
-注意第 192 行有一行**被注释掉**的代码：
+注意第 194 行有一行**被注释掉**的代码：
 
 ```python
 # ascend.passes.ttir.add_auto_blockify(pm, auto_blockify_size)
@@ -88,7 +90,7 @@ pm.enable_debug()
 
 这说明 AutoBlockify（把 grid 映射到物理核的并行块优化，见 u2-l2、u2-l3）**当前不在这个函数里登记**，而是由 BiSheng 工具链在更下游处理。读源码时遇到注释掉的 pass 要留心：它代表「设计上有这一步，但当前实现把它挪走了」。
 
-最后统一执行，见 [third_party/ascend/backend/compiler.py:L254](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L254)：
+最后统一执行，见 [third_party/ascend/backend/compiler.py:L256](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L256)：
 
 ```python
 pm.run(mod, 'ttir_to_linalg')
@@ -101,11 +103,11 @@ pm.run(mod, 'ttir_to_linalg')
 > **实践目标**：确认 `add_*` 函数只是「登记」、`pm.run` 才「执行」。
 >
 > **操作步骤**：
-> 1. 打开 [compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py)，定位到 L190 的 `pm = ir.pass_manager(...)`。
-> 2. 数一数 L194 到 L214 之间调用了多少个 `ascend.passes.ttir.add_*` 与 `passes.common.add_*`（不计注释）。
-> 3. 确认直到 L254 的 `pm.run(mod, 'ttir_to_linalg')` 之前，没有任何一行真正改写 `mod`。
+> 1. 打开 [compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py)，定位到 L192 的 `pm = ir.pass_manager(...)`。
+> 2. 数一数 L196 到 L216 之间调用了多少个 `ascend.passes.ttir.add_*` 与 `passes.common.add_*`（不计注释）。
+> 3. 确认直到 L256 的 `pm.run(mod, 'ttir_to_linalg')` 之前，没有任何一行真正改写 `mod`。
 >
-> **需要观察的现象**：登记阶段（L194-L226）都是 `add_xxx(pm, ...)` 形式；真正的执行只有 L254 一处。
+> **需要观察的现象**：登记阶段（L196-L228）都是 `add_xxx(pm, ...)` 形式（外加 CV 分支里的 `set_*` 设置属性）；真正的执行只有 L256 一处。
 >
 > **预期结果**：你会看到主线大约 12~13 个 `add_*` 调用（含一次 `add_triton_to_structure` 的重复调用），全部在 `pm.run` 之前。
 >
@@ -145,7 +147,7 @@ make_ttir (ttir) ──► ttir_to_linalg (ttadapter) ──► [mlirbc ──�
 
 #### 4.2.3 源码精读
 
-阶段绑定见 [third_party/ascend/backend/compiler.py:L1269-L1275](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1269-L1275)：
+阶段绑定见 [third_party/ascend/backend/compiler.py:L1272-L1278](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1272-L1278)：
 
 ```python
 def add_stages(self, stages, options, language):
@@ -159,7 +161,7 @@ def add_stages(self, stages, options, language):
 
 可以看到：`ttadapter` 阶段调用的正是 `ttir_to_linalg`，而且默认把 `named_ops=True` 传进去（这会影响 linalg 输出是否带具名算子，供运行时识别）。
 
-函数入口与出口见 [third_party/ascend/backend/compiler.py:L155-L158](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L155-L158) 与 [L264](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L264)：
+函数入口与出口见 [third_party/ascend/backend/compiler.py:L157-L160](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L157-L160) 与 [L266](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L266)：
 
 ```python
 def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
@@ -169,14 +171,26 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
     return str(mod)               # 出口：返回 Linalg IR 文本
 ```
 
-L158 的 `ttir_code = str(mod)` 看似只是取文本，但它还有第二个用途：后面用正则扫描这段文本，判断 kernel 是否含 AutoBlockify 黑名单算子（L162-L170）。这是一个**运行时静态分析**的小细节——在跑 pass 之前先读一遍 IR 文本做策略判断。
+L160 的 `ttir_code = str(mod)` 看似只是取文本，但它还有第二个用途：后面用正则扫描这段文本，判断 kernel 是否含 AutoBlockify 黑名单算子（[L161-L172](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L161-L172)）。这是一个**运行时静态分析**的小细节——在跑 pass 之前先读一遍 IR 文本做策略判断；若 `metadata` 里已带 `has_auto_blockify_blacklist_op`，则直接复用，避免重复扫描。
+
+**别忘了 `pm.run` 之后还有收尾**。`pm.run(mod, 'ttir_to_linalg')`（L256）并不是本函数的最后一件事——它后面还跟着两步元数据收尾（[L257-L260](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L257-L260)）：
+
+```python
+pm.run(mod, 'ttir_to_linalg')
+_adjust_metadata_by_module_result(mod, metadata, opt, enable_mixed_cv=enable_mixed_cv,
+                                  disable_auto_inject_block_sync=disable_auto_inject_block_sync,
+                                  set_workspace_multibuffer=set_workspace_multibuffer)
+_export_coalesce_metadata(mod, metadata)
+```
+
+`_export_coalesce_metadata` 正是用本文件新增的 `ascend.ir`（`ascend_ir`）绑定，从**跑完 pass 后**的 IR 模块对象里读取结构化属性（如 `coalesce_factor`、动态 CV 流水线结果码等），写回 `metadata` 供下游 npubin 阶段使用。这就是 u3-l3 提到的「ascend.ir 在 ttir_to_linalg 阶段从 IR 模块对象读取结构化元数据」的落点——pass 先变换 IR，收尾步骤再从变换后的 IR 抽取信息。
 
 #### 4.2.4 代码实践
 
 > **实践目标**：在阶段流水线里定位 `ttir_to_linalg`，确认它前后各是谁。
 >
 > **操作步骤**：
-> 1. 阅读 [add_stages](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1269-L1290)（L1269-L1290）。
+> 1. 阅读 [add_stages](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1272-L1293)（L1272-L1293）。
 > 2. 画出 `use_bytecode=True`（默认）且 `force_simt_only=False` 时的完整阶段链。
 > 3. 标注每个阶段对应的处理函数。
 >
@@ -234,7 +248,7 @@ L158 的 `ttir_code = str(mod)` 看似只是取文本，但它还有第二个用
 
 #### 4.3.3 源码精读
 
-主线 pass 的登记代码见 [third_party/ascend/backend/compiler.py:L194-L214](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L194-L214)：
+主线 pass 的登记代码见 [third_party/ascend/backend/compiler.py:L196-L216](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L196-L216)：
 
 ```python
 ascend.passes.ttir.add_triton_control_flow_opt(pm)
@@ -262,7 +276,7 @@ ascend.passes.ttir.add_triton_to_linalg(pm, False, named_ops, enable_nd2nz_on_ve
 
 注意中间穿插的 `passes.common.add_cse` / `add_canonicalizer`（出现在 `add_auto_scheduling` 分支里）——它们是 MLIR 通用的公共子表达式消除和规范化 pass，不属于 `ascend.passes`，作用是「在 dag 系列变换之间清理冗余」。这印证了 u3-l3 讲过的：cse/canonicalizer 是所有后端共享的通用 pass。
 
-`add_auto_scheduling` 分支（[L195-L202](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L195-L202)）是一个较少开启的可选调度优化，会额外登记 `add_dag_sync` / `add_dag_scope` / `add_dag_ssbuffer` 三个与跨核数据流（SSBUFFER）相关的 pass，默认 `add_auto_scheduling=False`（见 4.4.3），所以日常编译这条分支不进。
+`add_auto_scheduling` 分支（[L197-L204](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L197-L204)）是一个较少开启的可选调度优化，会额外登记 `add_dag_sync` / `add_dag_scope` / `add_dag_ssbuffer` 三个与跨核数据流（SSBUFFER）相关的 pass，默认 `add_auto_scheduling=False`（见 4.4.3），所以日常编译这条分支不进。
 
 #### 4.3.4 代码实践
 
@@ -270,7 +284,7 @@ ascend.passes.ttir.add_triton_to_linalg(pm, False, named_ops, enable_nd2nz_on_ve
 >
 > **操作步骤**：
 > 1. 打印本讲的「主线 pass 顺序」清单。
-> 2. 在 [compiler.py L194-L214](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L194-L214) 里，为每个 `add_*` 标上序号 1~11。
+> 2. 在 [compiler.py L196-L216](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L196-L216) 里，为每个 `add_*` 标上序号 1~11。
 > 3. 特别圈出 `add_triton_to_structure` 的两次出现，以及每个带 `compile_on_910_95` 参数的 pass。
 >
 > **需要观察的现象**：哪些 pass 接收 `compile_on_910_95` 参数？（`add_discrete_mask_access_conversion`、`add_triton_to_unstructure`、`add_triton_to_hfusion`、`add_triton_to_linalg`）哪些完全不接参数？（`add_triton_to_annotation`、`add_triton_to_hivm`、`add_triton_to_llvm`、`add_bubble_up_operation`）
@@ -305,7 +319,7 @@ ascend.passes.ttir.add_triton_to_linalg(pm, False, named_ops, enable_nd2nz_on_ve
 ```text
 NPUOptions (dataclass)  ──parse_options()──►  options (含 compile_on_910_95, enable_dynamic_cv_pipeline ...)
         │                          │
-        │                   __post_init__ 派生 force_simt_only / force_simt_template / parallel_mode
+        │                   __post_init__ 先 _apply_ascend_patch()，再派生 force_simt_only / force_simt_template / parallel_mode
         ▼
 core compile():  metadata = {"hash", "target", **options.__dict__, ...}
         │                  ▲ 把 NPUOptions 的每个字段原样铺进 metadata
@@ -324,7 +338,7 @@ CV 流水线分支内部还会做一批**副作用改写**：把 `set_workspace_
 
 #### 4.4.3 源码精读
 
-门控字段的**读取**见 [third_party/ascend/backend/compiler.py:L177-L186](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L177-L186)：
+门控字段的**读取**见 [third_party/ascend/backend/compiler.py:L179-L189](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L179-L189)：
 
 ```python
 enable_nd2nz_on_vector = metadata["enable_nd2nz_on_vector"]
@@ -335,9 +349,12 @@ enable_sync_block_lock = metadata["enable_sync_block_lock"]
 enable_mask_fallback_conversion = metadata["enable_mask_fallback_conversion"]
 optimize_dynamic_offset = metadata["optimize_dynamic_offset"]
 auto_blockify_size = metadata["auto_blockify_size"]
+enable_mixed_cv = metadata.get("enable_mixed_cv")
+disable_auto_inject_block_sync = metadata.get("disable_auto_inject_block_sync")
+set_workspace_multibuffer = metadata.get("set_workspace_multibuffer")
 ```
 
-这些字段**在本文件里只读不写**，说明它们是从外部灌进 `metadata` 的。灌入发生在 Triton core 的 `compile`，见 [python/triton/compiler/compiler.py:L279-L285](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L279-L285)：
+读这段要注意一个**取值方式的差异**：前 8 个字段用 `metadata[...]`（必须存在，缺失即报错），说明它们是 NPUOptions 保证提供的「必有」字段；而最后 3 个 `enable_mixed_cv`、`disable_auto_inject_block_sync`、`set_workspace_multibuffer` 改用 `metadata.get(...)`（缺省返回 `None`）。这是因为这 3 个值会在下面 CV 流水线分支里被**覆写**（见下），这里先读一份「进入分支前的初值」留作 `pm.run` 之后 `_adjust_metadata_by_module_result` 的参数（4.2.3 已见过它）。所有这些字段**在本函数里只读**（或仅在 CV 分支里被赋值），它们最终都来自 `NPUOptions`，由 Triton core 灌进 `metadata`。灌入发生在 Triton core 的 `compile`，见 [python/triton/compiler/compiler.py:L279-L285](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L279-L285)：
 
 ```python
 metadata = {
@@ -348,7 +365,7 @@ metadata = {
 }
 ```
 
-两个开关的**懒初始化**见 [third_party/ascend/backend/compiler.py:L1219-L1224](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1219-L1224)：
+两个开关的**懒初始化**见 [third_party/ascend/backend/compiler.py:L1224-L1229](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1224-L1229)：
 
 ```python
 # Lazy init compile_on_910_95 if not provided
@@ -359,9 +376,9 @@ if options.enable_dynamic_cv_pipeline is None:
     object.__setattr__(options, "enable_dynamic_cv_pipeline", is_compile_on_910_95())
 ```
 
-注意：因为 `NPUOptions` 是 `@dataclass(frozen=True)`（不可变），所以这里用 `object.__setattr__` 绕过冻结限制来赋值（见 [L988-L989](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L988-L989)）。`enable_dynamic_cv_pipeline` 默认取 `is_compile_on_910_95()`，所以**950 代芯片默认启用 CV 流水线**。
+注意：因为 `NPUOptions` 是 `@dataclass(frozen=True)`（不可变，见 [L990-L991](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L990-L991)），所以这里用 `object.__setattr__` 绕过冻结限制来赋值。`enable_dynamic_cv_pipeline` 默认取 `is_compile_on_910_95()`，所以**950 代芯片默认启用 CV 流水线**。
 
-CV 流水线分支本身见 [third_party/ascend/backend/compiler.py:L215-L226](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L215-L226)：
+CV 流水线分支本身见 [third_party/ascend/backend/compiler.py:L217-L228](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L217-L228)：
 
 ```python
 if metadata["enable_dynamic_cv_pipeline"]:
@@ -370,6 +387,7 @@ if metadata["enable_dynamic_cv_pipeline"]:
     metadata["disable_auto_inject_block_sync"] = True
     ascend.passes.ttir.set_enable_cube_block_merge(metadata["enable_cube_block_merge"])
     ascend.passes.ttir.set_enable_ub_refine_opt(mod, metadata["enable_ub_refine_opt"])
+
     # Must run before add_dynamic_cv_pipeline because the driven
     # AddMultiBufferInnerScope pass reads the module-level
     # `ssbuffer.insertionOptimization` attribute (set here) at run time.
@@ -382,6 +400,8 @@ if metadata["enable_dynamic_cv_pipeline"]:
 1. **副作用改写 metadata**：开启 CV 流水线会强制改写多个 metadata 字段，这些改写会影响下游 npubin 阶段的代码生成。
 2. **`set_*` 不是登记 pass**：`set_enable_cube_block_merge` / `set_enable_ub_refine_opt` / `set_enable_buffer_insert_optimization` 是「设置模块级属性/全局开关」，不是 `add_*` 形式的 pass 登记。它们要在 `add_dynamic_cv_pipeline` **之前**调用——注释明确解释了原因：被驱动的 `AddMultiBufferInnerScope` pass 会在运行时读取这里设置的模块属性。
 3. **最后才登记 `add_dynamic_cv_pipeline(pm, compile_on_910_95)`**：CV 流水线本身是第 12 个、也是最靠后的主线 pass。
+
+CV 分支之后，还有另外三个 `set_*` 形式的条件块（[L230-L240](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L230-L240)），用 `set_buffer_count(mod, "INTRA"/"INTER"/"LOAD", ...)` 按需设置片上多缓冲的缓冲数量。它们同样是「设置模块级属性」而非登记 pass，仅当 `metadata` 里出现对应的 `intra_cache_num` / `inter_cache_num` / `load_cache_num` 时才触发——和 CV 分支里的 `set_*` 属于同一类「先设属性、后由 pm.run 里的 pass 读取」的模式。
 
 #### 4.4.4 代码实践
 
@@ -401,7 +421,7 @@ if metadata["enable_dynamic_cv_pipeline"]:
 #### 4.4.5 小练习与答案
 
 **练习 1**：`metadata["compile_on_910_95"]` 在 `ttir_to_linalg` 里被赋值过吗？它的值从哪来？
-**答案**：在本文件里只读不写。它来自 `NPUOptions.compile_on_910_95`，由 core 的 `compile` 用 `**options.__dict__` 铺进 `metadata`；`NPUOptions` 里若用户未指定，则在 `parse_options` 里用 `is_compile_on_910_95()` 硬件探测懒初始化。
+**答案**：在本函数里只读不写。它来自 `NPUOptions.compile_on_910_95`，由 core 的 `compile` 用 `**options.__dict__` 铺进 `metadata`；`NPUOptions` 里若用户未指定，则在 `parse_options` 里用 `is_compile_on_910_95()` 硬件探测懒初始化。
 
 **练习 2**：为什么 `set_enable_buffer_insert_optimization` 必须在 `add_dynamic_cv_pipeline` 之前调用？
 **答案**：注释说明，被 CV 流水线驱动的 `AddMultiBufferInnerScope` pass 在**运行时**（即 `pm.run` 执行时）会读取这里设置的模块级属性 `ssbuffer.insertionOptimization`。若顺序反了，该属性尚未写入，pass 读不到正确值。这体现了「登记顺序 = 执行顺序」之外，还有「属性必须先于读取它的 pass 登记」这一约束。
@@ -414,7 +434,7 @@ if metadata["enable_dynamic_cv_pipeline"]:
 
 MLIR 生态有一条贯穿始终的设计：**同一组 pass 既能在 Python 里用 pass manager 跑，也能在命令行用 `*-opt --pass-pipeline="..."` 跑**，两者等价。Triton-Ascend 在 `ttir_to_linalg` 里专门利用了这一点——当 `opt.debug=True` 时，它会把 Python 里登记的 pass 流水线导出成一条命令行，打印出来，让你能脱离 Python 环境复现调试。
 
-承担命令行执行的 C++ 工具是 `triton-opt`（以及结构更全的 `triton-mlir-opt`）。后者就是我们本讲列出的源码文件 [triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/bin/triton-mlir-opt.cpp)：它的 `main` 注册了 MLIR 和 BiShengIR 的**全部方言与 pass**，然后交给 MLIR 通用的 `MlirOptMain` 去解析命令行参数、加载 `.mlir`、按 `--pass-pipeline` 跑流水线。
+承担命令行执行的 C++ 工具是 `triton-opt`（以及结构更全的 `triton-mlir-opt`）。后者就是我们本讲列出的源码文件 [triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/bin/triton-mlir-opt.cpp)：它的 `main` 注册了 MLIR 和 BiShengIR 的**全部方言与 pass**，然后交给 MLIR 通用的 `MlirOptMain` 去解析命令行参数、加载 `.mlir`、按 `--pass-pipeline` 跑流水线。
 
 #### 4.5.2 核心流程
 
@@ -436,7 +456,7 @@ pm.run(mod, 'ttir_to_linalg')
 
 #### 4.5.3 源码精读
 
-导出命令行的 debug 代码块见 [third_party/ascend/backend/compiler.py:L240-L252](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L240-L252)：
+导出命令行的 debug 代码块见 [third_party/ascend/backend/compiler.py:L242-L254](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L242-L254)：
 
 ```python
 if opt.debug:
@@ -454,26 +474,32 @@ if opt.debug:
     print(f"[DEBUG] cmd list: {shlex.join(cmd)}")
 ```
 
-注意第 247 行 `f"--pass-pipeline={pm.get_pipeline_str()}"`——这就是 Python pass manager 与命令行 `triton-opt` 之间的**那座桥**。注释明确写了它的用途：让 pass 流水线能在 Python 之外被复现和调试。这个 debug 块在 `pm.run`（L254）之前执行，所以打印出的是「即将运行」的流水线。
+注意第 249 行 `f"--pass-pipeline={pm.get_pipeline_str()}"`——这就是 Python pass manager 与命令行 `triton-opt` 之间的**那座桥**。注释明确写了它的用途：让 pass 流水线能在 Python 之外被复现和调试。这个 debug 块在 `pm.run`（L256）之前执行，所以打印出的是「即将运行」的流水线。
 
-命令行工具的 C++ 实现见 [third_party/ascend/bin/triton-mlir-opt.cpp:L32-L42](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/bin/triton-mlir-opt.cpp#L32-L42)：
+命令行工具的 C++ 实现见 [third_party/ascend/bin/triton-mlir-opt.cpp:L32-L42](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/bin/triton-mlir-opt.cpp#L32-L42)：
 
 ```cpp
 int main(int argc, char **argv) {
+  // Register all MLIR dialects and passes
   mlir::DialectRegistry registry;
-  mlir::registerAllDialects(registry);        // 注册所有 MLIR 方言
-  bishengir::registerAllDialects(registry);   // 注册所有 BiShengIR 方言
+  mlir::registerAllDialects(registry);
+
+  // Register BishengIR dialects and passes
+  bishengir::registerAllDialects(registry);
+
   return mlir::asMainReturnCode(mlir::MlirOptMain(
       argc, argv, "Triton-Ascend optimizer driver\n", registry));
 }
 ```
 
-它本身**不含任何 pass 逻辑**——只是把方言和 pass 注册进一个 registry，然后交给 MLIR 标准的 `MlirOptMain`。`MlirOptMain` 负责解析 `--pass-pipeline`、加载输入 `.mlir`、依次执行流水线里的 pass、写出结果。从 [bin/CMakeLists.txt](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/bin/CMakeLists.txt) 可以看到，它链接了 MLIR 全套 pass 库和 BiShengIR 的各方言库（HACC/HFusion/HIVM/Annotation 等），所以才能识别这些昇腾专用方言里的算子和 pass。
+它本身**不含任何 pass 逻辑**——只是把方言和 pass 注册进一个 registry，然后交给 MLIR 标准的 `MlirOptMain`。`MlirOptMain` 负责解析 `--pass-pipeline`、加载输入 `.mlir`、依次执行流水线里的 pass、写出结果。从 [bin/CMakeLists.txt](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/bin/CMakeLists.txt) 可以看到，它链接了 MLIR 全套 pass 库和 BiShengIR 的各方言库（HACC/HFusion/HIVM/Annotation 等），所以才能识别这些昇腾专用方言里的算子和 pass。
 
-> 三个名字相近的工具，别混（路径在 [utils.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/utils.py) 里由 `_get_*_path` 解析）：
+那么 **Python 后端**侧，这些 Ascend 专用方言是在哪里注册进 pass manager 所用的 context 的？答案是 `AscendBackend.load_dialects`（[L1265-L1270](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1265-L1270)），它用本文件新增的 `buffer_ir`、`ascend_ir` 绑定以及 `ascend` 把方言逐个 `load_dialects(ctx)` 进来——这与上面 `triton-mlir-opt.cpp` 在命令行侧用 `registerAllDialects` 注册方言是一对镜像：**命令行靠 registry 注册，Python 后端靠 `load_dialects` 注入**，两者都保证 pass 在识别算子时所用方言齐全。
+
+> 三个名字相近的工具，别混（路径在 [utils.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/utils.py) 里由 `_get_*_path` 解析）：
 > - `triton-opt`：本讲 debug 命令用的工具，跑 TTIR→ttadapter 的 pass 流水线。
-> - `triton-mlir-opt`：上面的 [triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/bin/triton-mlir-opt.cpp)，用于 `mlirbc` 阶段把 Linalg IR 文本转成 MLIR 字节码。
-> - `triton_adapter_opt`：`ttir_to_linalg` 开头 L175 取过它的路径，是 triton_adapter 工具链的 opt 工具。
+> - `triton-mlir-opt`：上面的 [triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/bin/triton-mlir-opt.cpp)，用于 `mlirbc` 阶段把 Linalg IR 文本转成 MLIR 字节码。
+> - `triton_adapter_opt`：`ttir_to_linalg` 开头 L177 取过它的路径，是 triton_adapter 工具链的 opt 工具。
 
 #### 4.5.4 代码实践
 
@@ -485,7 +511,7 @@ int main(int argc, char **argv) {
 > 3. 在输出里搜索 `[DEBUG] cmd list:`，找到 `triton-opt ... --pass-pipeline=...` 那一行。
 > 4. 把 `--pass-pipeline=` 后面的字符串单独复制出来，观察里面依次列出的 pass 名（如 `triton-to-structure`、`triton-to-linalg` 等），与本讲 4.3 的清单对照。
 >
-> **需要观察的现象**：命令行里 pass 的出现顺序，与 [compiler.py L194-L226](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L194-L226) 里 `add_*` 的调用顺序一致；带开关参数的 pass 会带上 `{参数}` 后缀。
+> **需要观察的现象**：命令行里 pass 的出现顺序，与 [compiler.py L196-L228](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L196-L228) 里 `add_*` 的调用顺序一致；带开关参数的 pass 会带上 `{参数}` 后缀。
 >
 > **预期结果**：你能在 pipeline 字符串里数出与 4.3 相同数量的主线 pass，顺序吻合，从而验证「Python 登记 = 命令行执行」。
 >
@@ -496,7 +522,7 @@ int main(int argc, char **argv) {
 **练习 1**：`pm.get_pipeline_str()` 解决了什么问题？
 **答案**：它把 Python 里用 `add_*` 登记的 pass 流水线序列化成文本，使得这条流水线可以直接作为 `--pass-pipeline=` 喂给 `triton-opt`，实现「在 Python 之外、纯命令行复现调试」。
 
-**练习 2**：[triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/bin/triton-mlir-opt.cpp) 里为什么不写任何 pass 的实现？
+**练习 2**：[triton-mlir-opt.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/bin/triton-mlir-opt.cpp) 里为什么不写任何 pass 的实现？
 **答案**：所有 pass 都是作为库注册进 registry 的（链接自 MLIR 和 BiShengIR 的 pass 库）。这个 cpp 只是「装配工」：把方言和 pass 注册好，交给 MLIR 通用的 `MlirOptMain` 去解释命令行并执行。真正的 pass 实现在 `third_party/ascend/lib/` 下的各 pass 目录里（后续讲义会精读）。
 
 ---
@@ -520,17 +546,17 @@ int main(int argc, char **argv) {
 - 哪些 pass 受 950 开关影响？（4.4）
 - CV 流水线分支挂在哪、它开启时会改写哪些 metadata？（4.4.3）
 
-**待本地验证**：图上每个方框的 pass 名，都应能在 [compiler.py L194-L226](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L194-L226) 找到对应行，并在 debug 打印的 pipeline 字符串里找到同名条目。
+**待本地验证**：图上每个方框的 pass 名，都应能在 [compiler.py L196-L228](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L196-L228) 找到对应行，并在 debug 打印的 pipeline 字符串里找到同名条目。
 
 ## 6. 本讲小结
 
 - `ttir_to_linalg` 是 `ttadapter` 编译阶段的实现，把上一阶段 `make_ttir` 产出的 TTIR 文本 lower 成 Linalg IR 文本，输入输出都是字符串。
-- 它用 `ir.pass_manager` 构造一个 pass 管理器，用 `ascend.passes.ttir.add_*` 系列函数**按固定顺序登记**十几个 pass，最后用一次 `pm.run` 统一执行；登记顺序就是执行顺序。
+- 它用 `ir.pass_manager` 构造一个 pass 管理器，用 `ascend.passes.ttir.add_*` 系列函数**按固定顺序登记**十几个 pass，最后用一次 `pm.run` 统一执行；登记顺序就是执行顺序。`pm.run` 之后还有 `_adjust_metadata_by_module_result` / `_export_coalesce_metadata` 两步收尾，借助新增的 `ascend.ir` 绑定从变换后的 IR 抽取结构化元数据。
 - 主线顺序为：控制流优化 → （可选 dag 调度）→ 结构化 → 离散掩码转换 → annotation → 标量化 → hivm → hfusion → llvm → bubble-up → 二次结构化 → **转 linalg** → （可选 CV 流水线）。
 - 真正产出 Linalg IR 的是 `add_triton_to_linalg`，前面所有 pass 都是预处理；`add_triton_to_structure` 会跑两次，第二次为兜底。
-- 两个总门控开关：`compile_on_910_95`（950，作为参数影响若干 pass 内部行为）与 `enable_dynamic_cv_pipeline`（CV 流水线，门控一整个 pass 分支与一批 metadata 改写；950 代默认开启）。
+- 两个总门控开关：`compile_on_910_95`（950，作为参数影响若干 pass 内部行为）与 `enable_dynamic_cv_pipeline`（CV 流水线，门控一整个 pass 分支与一批 metadata 改写；950 代默认开启）；CV 分支及之后的 `set_buffer_count` 都是「设置模块级属性」而非登记 pass。
 - 所有门控字段都源自 `NPUOptions`，由 core 的 `compile` 用 `**options.__dict__` 灌进 `metadata`——这是理解 `ttir_to_linalg` 分支逻辑的钥匙。
-- `pm.get_pipeline_str()` 把 Python 流水线导出成文本，与 `triton-opt --pass-pipeline=...` 一一对应；`TRITON_DEBUG=1` 时会打印等价命令行，可在命令行复现调试。
+- `pm.get_pipeline_str()` 把 Python 流水线导出成文本，与 `triton-opt --pass-pipeline=...` 一一对应；`TRITON_DEBUG=1` 时会打印等价命令行，可在命令行复现调试。Python 后端用 `load_dialects` 注入 Ascend 方言，与命令行工具用 registry 注册是一对镜像。
 
 ## 7. 下一步学习建议
 

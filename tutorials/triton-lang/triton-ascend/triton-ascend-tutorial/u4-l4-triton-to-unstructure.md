@@ -9,6 +9,7 @@
 - 说清楚「结构化（structured）访存」与「非结构化（unstructured）访存」的区别，以及为什么后者必须标量化。
 - 读懂 `UnstructuredMemAccessConverter` 的核心逻辑：它如何按维度遍历，对结构化维保留向量化、对非结构化维套 `scf.for` 循环，最终把一条 `tt.load/store/atomic` 拆成「多循环 + extract/insert + 标量访存」。
 - 理解 `bubble-up-operation` 的「上提」思想：把 `tensor.extract` 推过它的定义算子，让 extract 发生在更小的数据上，从而让下游重新识别出可向量化的形态。
+- 认识 950 SIMT 间接访存**快路径的准入闸门**：为何 `block ptr`（块指针）会被排除、回退到标量循环，以及 `OffsetAnalysis` 对 `clampf` 算子偏移分析的参数修正。
 - 掌握该 pass 在「纯 SIMD 模式」与「unstructured_in_simt 混合模式」下的**回退语义**：何时走标量循环、何时走 SIMT 间接访存快路径（`indirect_load/store`）。
 
 ## 2. 前置知识
@@ -16,6 +17,7 @@
 本讲默认你已掌握：
 
 - **TTIR 与 `tt.load/store`**：Triton 用「指针张量」`tensor<Nx!tt.ptr<T>>` 描述一批地址，`tt.load` 一次性读出 `tensor<NxT>`。详见 [u1-l4](u1-l4-first-kernel-vector-add.md)。
+- **block ptr（块指针）**：Triton 的 `tl.make_block_ptr` / `tt.make_tensor_ptr` 会造出一种「指向带形状内存块的指针」`!tt.ptr<tensor<MxNxf32>>`——它的 pointee 本身是个张量。这与「标量元素指针」`!tt.ptr<f32>` 是两类不同的指针类型，本讲快路径闸门正是据此区分。
 - **MLIR 的 `scf.for` 与 `tensor.extract/insert`**：`scf.for` 是结构化循环，`iter_args`/`yield` 用来在循环间传递不断更新的张量（SSA 风格）；`tensor.extract` 从张量取一个标量元素，`tensor.insert` 写回一个标量元素。
 - **u4-l1 讲过的 pass 流水线**：`triton-to-unstructure` 处于 `ttir_to_linalg` 的中段，位于 `discrete-mask-access-conversion` 之后、`triton-to-linalg` 之前，是 TTIR→Linalg 的「预处理」之一。
 - **compile_mode 三模式**（[u6-l1](u6-l1-compile-mode-overview.md) 会详讲）：`simd`（纯向量化）、`unstructured_in_simt`（默认，结构化走 SIMD、离散走 SIMT）、`simt_only`（纯 SIMT，跳过整条 linalg 主线，因此**不经过本 pass**）。
@@ -26,13 +28,14 @@
 
 | 文件 | 作用 |
 |---|---|
-| [Passes.td](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/Passes.td) | 用 TableGen 注册 `triton-to-unstructure` 与 `bubble-up-operation` 两个 pass 及其命令行选项。 |
-| [OffsetAnalysis.h](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/OffsetAnalysis.h) | `PtrOffsetInfo` 数据结构：把每个指针的「偏移性质」分类为 structured / unstructured / scalarlike。 |
-| [UnstructureConversionPass.h](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h) | `UnstructuredMemAccessConverter` 模板类声明，以及一段极其重要的「转换前后」对照注释。 |
-| [UnstructureConversionPass.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp) | 转换主逻辑：标量循环生成 + 950 SIMT 间接访存快路径 + 回退。 |
-| [BubbleUpOperation.h](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/BubbleUpOperation.h) / [.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp) | `BubbleUpExtract` 模式：把 extract 推过父算子。 |
-| [compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py) | 把两个 pass 接入 `ttir_to_linalg` 流水线。 |
-| [unstructure_mix.mlir](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/unstructure_mix.mlir) / [bubbleupoperation.mlir](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/bubbleupoperation.mlir) | FileCheck 回归测试，是观察 IR 变化的最佳样本。 |
+| [Passes.td](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/Passes.td) | 用 TableGen 注册 `triton-to-unstructure` 与 `bubble-up-operation` 两个 pass 及其命令行选项。 |
+| [OffsetAnalysis.h](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/OffsetAnalysis.h) | `PtrOffsetInfo` 数据结构：把每个指针的「偏移性质」分类为 structured / unstructured / scalarlike。 |
+| [OffsetAnalysis.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp) | 分析引擎：遍历算子 DAG 给每个 `Value` 推断 `PtrOffsetInfo`，填出 `offsetMap`；本轮修正了 `parseClampF` 的 min/max 取参。 |
+| [UnstructureConversionPass.h](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h) | `UnstructuredMemAccessConverter` 模板类声明，以及一段极其重要的「转换前后」对照注释。 |
+| [UnstructureConversionPass.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp) | 转换主逻辑：标量循环生成 + 950 SIMT 间接访存快路径闸门（含拒绝 block ptr）+ 回退。 |
+| [BubbleUpOperation.h](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/BubbleUpOperation.h) / [.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp) | `BubbleUpExtract` 模式：把 extract 推过父算子。 |
+| [compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py) | 把两个 pass 接入 `ttir_to_linalg` 流水线。 |
+| [unstructure_mix.mlir](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/unstructure_mix.mlir) / [bubbleupoperation.mlir](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/bubbleupoperation.mlir) | FileCheck 回归测试，是观察 IR 变化的最佳样本。 |
 
 ## 4. 核心概念与源码讲解
 
@@ -48,12 +51,12 @@
 
 关键术语：
 
-- **DiscreteMemAccess**：本 pass 给展开出来的访存/extract/insert 打的属性标记（字符串 `"DiscreteMemAccess"`），见 [Utils.h](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/Utils/Utils.h#L48-L49)，防止下游 pass 把它误当成普通访存再处理。
+- **DiscreteMemAccess**：本 pass 给展开出来的访存/extract/insert 打的属性标记（字符串 `"DiscreteMemAccess"`），见 [Utils.h](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/Utils/Utils.h#L48-L49)，防止下游 pass 把它误当成普通访存再处理。
 - **ExtractedLoadOrStore**：打在生成的 `scf.for` 上的标记，表示「这个循环体是一次离散访存的展开」。
 
 #### 4.1.2 核心流程
 
-整个 pass 由「分析」与「重写」两阶段组成，在 [UnstructureConversionPass.cpp 的 runOnOperation](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L844-L904) 里编排：
+整个 pass 由「分析」与「重写」两阶段组成，在 [UnstructureConversionPass.cpp 的 runOnOperation](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L862-L922) 里编排：
 
 ```text
 1. 遍历所有 FuncOp，replacePtrArguments 处理指针参数
@@ -66,7 +69,7 @@
 6. 末尾跑 CSE + Canonicalizer 收尾
 ```
 
-重写阶段对每个访存 op 的决策树（见 [matchAndRewrite](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L448-L762)）：
+重写阶段对每个访存 op 的决策树（见 [matchAndRewrite](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L467-L780)）：
 
 ```text
 对 tt.load/store/atomic 的 ptr：
@@ -74,10 +77,12 @@
   ├─ 是 scalarLike（所有元素相同，如 splat/broadcast 到标量）→ 走 splatAndLoadScenario
   │                                                      （取一个标量再 splat 回去）
   ├─ 【950 快路径闸门开启 且 满足条件】→ tryRewriteIndirectFastPath
+  │      前置闸门 canUseIndirectFastPath：src 必须是标量元素指针、offset 必须是 int 张量
+  │        （block ptr —— pointee 为 ShapedType 的指针 —— 在此被拒绝，回退）
   │      tt.load  → tt.indirect_load        （rank ≤ 5）
   │      tt.store → tt.indirect_store       （rank ≤ 5）
   │      atomic   → hivm.hir.custom "__builtin_indirect_atomic"（静态形状）
-  │      └─ 快路径失败 → 继续往下（回退）
+  │      └─ 快路径失败（含 block ptr 被拒） → 继续往下（回退）
   └─ 【标量循环回退】按维度从外到内：
         structured 维 → 保留，extract_slice 整段
         unstructured 维 → 套一层 scf.for，extract 单个元素
@@ -85,13 +90,13 @@
 
 #### 4.1.3 源码精读
 
-**pass 注册与选项**。两个 pass 在 [Passes.td](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/Passes.td#L6-L28) 定义。`triton-to-unstructure` 有三个选项：
+**pass 注册与选项**。两个 pass 在 [Passes.td](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/Passes.td#L6-L28) 定义。`triton-to-unstructure` 有三个选项：
 
 - `force-scalarize-mode`：即使有结构化维混合，也强制全部标量化（默认 `false`）。
 - `compile-on-910-95`：是否在 910_95/950 代硬件上编译（控制快路径与若干内部行为，默认 `false`）。
 - `force-simt-template`：是否启用 SIMT 间接访存模板（默认 `false`）。
 
-**接入流水线**。[compiler.py:207-211](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L207-L211) 把它俩串进 `ttir_to_linalg`：
+**接入流水线**。[compiler.py:209-213](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L209-L213) 把它俩串进 `ttir_to_linalg`：
 
 ```python
 ascend.passes.ttir.add_triton_to_unstructure(pm, compile_on_910_95, force_simt_template)
@@ -103,7 +108,7 @@ ascend.passes.ttir.add_bubble_up_operation(pm)        # 紧随其后
 
 注意 `bubble-up-operation` 在 `triton-to-unstructure` **之后**才跑——因为标量化会产生大量 `tensor.extract`，bubble-up 正是来「收拾残局」的。
 
-**转换前后的经典对照**。源码头文件里写了一段绝佳的文档化示例，[UnstructureConversionPass.h:56-83](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h#L56-L83)。转换前是一条 `tt.addptr` + `tt.load` 的批量间接访存：
+**转换前后的经典对照**。源码头文件里写了一段绝佳的文档化示例，[UnstructureConversionPass.h:56-83](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h#L56-L83)。转换前是一条 `tt.addptr` + `tt.load` 的批量间接访存：
 
 ```mlir
 %0 = tt.load %structured : tensor<128x128x!tt.ptr<i32>>   // 读出一张「地址偏移表」
@@ -157,7 +162,7 @@ triton-opt --triton-to-unstructure demo.mlir
 
 **需要观察的现象**：输出里原来的单条 `%v = tt.load %ptrs` 消失，取而代之的是一个 `scf.for`，循环体里有带 `{DiscreteMemAccess}` 的 `tensor.extract`、标量 `tt.load`、`tensor.insert_slice`，且整个循环带 `{ExtractedLoadOrStore}` 属性。
 
-**预期结果**：与仓库自带测试 [unstructure_mix.mlir](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/unstructure_mix.mlir#L50-L62) 的 `CHECK` 输出形态一致——其中一维被展开成循环、另一维仍以 `extract_slice [1,8]` 保留向量化（混合形态）。若环境未编译 `triton-opt`，可改用 `MLIR_ENABLE_DUMP=1` 运行真实 kernel，在 dump 出的 `ttadapter` 阶段 IR 中寻找同样的 `scf.for {ExtractedLoadOrStore}`。**待本地验证**（取决于是否已构建该工具）。
+**预期结果**：与仓库自带测试 [unstructure_mix.mlir](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/unstructure_mix.mlir#L50-L62) 的 `CHECK` 输出形态一致——其中一维被展开成循环、另一维仍以 `extract_slice [1,8]` 保留向量化（混合形态）。若环境未编译 `triton-opt`，可改用 `MLIR_ENABLE_DUMP=1` 运行真实 kernel，在 dump 出的 `ttadapter` 阶段 IR 中寻找同样的 `scf.for {ExtractedLoadOrStore}`。**待本地验证**（取决于是否已构建该工具）。
 
 #### 4.1.5 小练习与答案
 
@@ -175,9 +180,9 @@ triton-opt --triton-to-unstructure demo.mlir
 
 #### 4.2.1 概念说明
 
-`UnstructuredMemAccessConverter` 是一个 C++ 模板，模板参数是四种访存 op 之一：`tt.LoadOp`、`tt.StoreOp`、`tt.AtomicRMWOp`、`tt.AtomicCASOp`（[UnstructureConversionPass.h:84-89](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h#L84-L89) 用 `static_assert` 限定）。它继承 `OpRewritePattern<MemAccOpTy>`，靠 `matchAndRewrite` 决定如何改写。
+`UnstructuredMemAccessConverter` 是一个 C++ 模板，模板参数是四种访存 op 之一：`tt.LoadOp`、`tt.StoreOp`、`tt.AtomicRMWOp`、`tt.AtomicCASOp`（[UnstructureConversionPass.h:84-89](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h#L84-L89) 用 `static_assert` 限定）。它继承 `OpRewritePattern<MemAccOpTy>`，靠 `matchAndRewrite` 决定如何改写。
 
-它依赖一个前置分析产物：`offsetMap`，把每个指针 `Value` 映射到一个 `PtrOffsetInfo`。`PtrOffsetInfo` 描述该指针偏移的「性质」，分类定义在 [OffsetAnalysis.h:42-74](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/OffsetAnalysis.h#L42-L74)：
+它依赖一个前置分析产物：`offsetMap`，把每个指针 `Value` 映射到一个 `PtrOffsetInfo`。这个 map 由 [OffsetAnalysis.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp) 的 `parse()` 在分析阶段遍历算子 DAG 递归推断得到（详见 4.2.3 末尾）。`PtrOffsetInfo` 描述该指针偏移的「性质」，分类定义在 [OffsetAnalysis.h:42-74](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/OffsetAnalysis.h#L42-L74)：
 
 - **ScalarLike**：所有元素相同（如 `splat`、`load tensor<1xptr>`）。它是 Structured 的特例。
 - **Structured**：能归纳成「基址 + 等差步长」的矩形块，硬件可向量化。
@@ -187,16 +192,17 @@ triton-opt --triton-to-unstructure demo.mlir
 
 \[ \text{ScalarLike} \subseteq \text{Structured}, \qquad \text{Unstructured} = \overline{\text{Structured}} \]
 
-每个维度还有逐维标记（`AxisInfo::structured/unstructured/scalarlike/scalar`，[OffsetAnalysis.h:77](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/OffsetAnalysis.h#L77)），允许「这一维连续、那一维散乱」的**混合**形态——这正是 pass 名里「mix」的来源，也是性能关键：只展开必须展开的维，其余维保持向量化。
+每个维度还有逐维标记（`AxisInfo::structured/unstructured/scalarlike/scalar`，[OffsetAnalysis.h:77](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/OffsetAnalysis.h#L77)），允许「这一维连续、那一维散乱」的**混合**形态——这正是 pass 名里「mix」的来源，也是性能关键：只展开必须展开的维，其余维保持向量化。
 
 #### 4.2.2 核心流程
 
-`matchAndRewrite` 的主干（[UnstructureConversionPass.cpp:448-762](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L448-L762)）分四步：
+`matchAndRewrite` 的主干（[UnstructureConversionPass.cpp:467-780](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L467-L780)）分四步：
 
 ```text
 Step 0  早退：若 ptr 全结构化且非全 1 形状 → failure()（无需处理）
 Step 1  快路径尝试（仅 950 + force_simt_template）：
-        indirectFastPathEnabled && tryRewriteIndirectFastPath 成功 → success()
+        先过 canUseIndirectFastPath 类型闸门（拒绝 block ptr），
+        再 indirectFastPathEnabled && tryRewriteIndirectFastPath 成功 → success()
 Step 2  对齐兜底：连续结构化维乘积的 sizeInByte 若不是 32 的倍数 → 全部标量化
 Step 3  按维度生成循环（核心）：
         for i in 0 .. rank:
@@ -205,7 +211,9 @@ Step 3  按维度生成循环（核心）：
         循环体最内层：extract 偏移 → addptr → 标量访存 → insert 回结果张量
 ```
 
-**对齐兜底**值得专门说明：[UnstructureConversionPass.cpp:512-521](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L512-L521) 从最内维往前累乘，算出连续结构化部分的总字节数 `sizeInByte`：
+> 注意 Step 1 与 Step 2 的次序：实际代码里「对齐兜底（算 sizeInByte 并可能强制全 unstructured）」发生在快路径判断**之前**，这样快路径闸门拿到的 `sizeInByte` 已是兜底后的值（快路径还额外要求 `sizeInByte < 64`）。
+
+**对齐兜底**值得专门说明：[UnstructureConversionPass.cpp:528-539](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L528-L539) 从最内维往前累乘，算出连续结构化部分的总字节数 `sizeInByte`：
 
 \[ \text{sizeInByte} = \text{elementSize} \times \prod_{\text{连续结构化维}} \text{dim}_i \]
 
@@ -213,7 +221,49 @@ Step 3  按维度生成循环（核心）：
 
 #### 4.2.3 源码精读
 
-**循环生成的核心循环**。[UnstructureConversionPass.cpp:577-636](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L577-L636) 按维度遍历，结构化维只填 offsets/sizes，非结构化维创建 `scf.for` 并把插入点移入循环体：
+**快路径准入闸门：拒绝 block ptr（本轮新增）**。在进入具体的间接访存重写之前，[tryRewriteIndirectFastPath](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L158-L172) 一进来就先用 `canUseIndirectFastPath` 做一道**类型闸门**：
+
+```cpp
+static bool canUseIndirectFastPath(Value srcPtr, Value ptrOffset) {
+  if (!srcPtr || !ptrOffset)
+    return false;
+  auto ptrTy = dyn_cast<triton::PointerType>(srcPtr.getType());
+  if (!ptrTy || isa<ShapedType>(ptrTy.getPointeeType()))   // 拒绝 block ptr
+    return false;
+  return isa<RankedTensorType>(ptrOffset.getType());
+}
+```
+
+（[UnstructureConversionPass.cpp:149-156](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L149-L156)）
+
+闸门的语义是：SIMT 间接访存模板（`indirect_load/store`）只认「**一个标量元素基址指针 `!tt.ptr<elem>` + 一张整数偏移张量**」这种形态。而 `tt.make_tensor_ptr` 造出来的 **block ptr**（块指针）指向的是一个带形状的内存块，其指针类型的 `pointeeType` 是 `ShapedType`，恰好落在 `isa<ShapedType>(ptrTy.getPointeeType())` 这一支里被直接拒绝。闸门失败时打一条 debug 日志（[L165-172](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L165-L172)）后 `return failure()`，控制流回到 `matchAndRewrite` **继续往下走标量循环回退**——block ptr 的离散访存由此被正确地引向标量循环，而非间接快路径。
+
+> 为什么要拦 block ptr？间接快路径下游要生成 `tt.indirect_load %scalarBase, %offsetTensor`，它假定基址是一个标量元素指针、偏移是一张与结果同形的整数张量；block ptr 的语义是「块基地址 + 每维 stride/shape」，强行套间接模板会得到错误的地址计算。与其在模板里处处设防，不如在入口用类型一刀切。
+
+**快路径总闸门**。过了 `canUseIndirectFastPath` 之后，外层 `matchAndRewrite` 还有一道总闸门，[UnstructureConversionPass.cpp:551-560](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L551-L560)：
+
+```cpp
+bool indirectFastPathEnabled =
+    compileOn91095Flag && forceSimtTemplateFlag &&
+    ((!ptrOffsetInfo.isStructured() && sizeInByte < 64) ||
+     routeDiscreteMaskToSimt);
+```
+
+即只有「950 硬件 + 启用 SIMT 模板」且「访存确实非结构化（且连续部分 < 64 字节）或带 `route_discrete_mask_to_simt` 标记」时才尝试快路径。文件顶部 [L114-148](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L114-L148) 有一段详尽注释定义了完整闸门：`load/store` 额外要求 rank ≤ 5；`atomic` 额外要求静态形状（由 [IndirectAtomicUtils](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/IndirectAtomicUtils.h#L33-L38) 的 `canUseIndirectAtomicFastPath` 判定）。
+
+**回退语义**。注释 [L145-148](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L145-L148) 明确——「若 SIMT 间接 lowering 无法对某 op 生成，则优雅地回退到 legacy 标量循环路径」。代码里这表现为：`canUseIndirectFastPath` 失败或 `tryRewriteIndirectFastPath` 返回 `failure()` 后，**不 return**，而是继续往下执行标量循环生成逻辑。block ptr 正是经此通道回退。
+
+由此可推出**模式语义**（呼应学习目标「SIMD 模式下的回退语义」）：
+
+| compile_mode | force_simt_template | 快路径状态 | 离散访存的归宿 |
+|---|---|---|---|
+| `simd` | `false` | 永久关闭 | **一律走标量循环**（这正是「SIMD 模式下的回退」） |
+| `unstructured_in_simt`（默认） | `true` | 在 950 上尝试 | 类型/形状满足→`indirect_load/store`；block ptr 或超限→标量循环 |
+| `simt_only` | — | — | 本 pass 不执行（走 `ttir_to_npubin`） |
+
+> `force_simt_template` 的取值来自 [compiler.py 的 __post_init__](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1118-L1125)：`unstructured_in_simt` 把它置 `True`，`simd` 不动（保持 `False`）。
+
+**循环生成的核心循环**。[UnstructureConversionPass.cpp:595-654](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L595-L654) 按维度遍历，结构化维只填 offsets/sizes，非结构化维创建 `scf.for` 并把插入点移入循环体：
 
 ```cpp
 for (size_t i = 0; i < resultShape.size(); i++) {
@@ -233,38 +283,20 @@ for (size_t i = 0; i < resultShape.size(); i++) {
 }
 ```
 
-**循环体最内层**。[UnstructureConversionPass.cpp:641-732](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L641-L732) 取出偏移、构造指针、做访存、写回。对 load 类（有结果）走 `tensor.empty` + `insert_slice`/`insert` 累积回结果张量；对 store/atomic 类（无结果）直接在循环体里执行。
+**循环体最内层**。[UnstructureConversionPass.cpp:659-749](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L659-L749) 取出偏移、构造指针、做访存、写回。对 load 类（有结果）走 `tensor.empty` + `insert_slice`/`insert` 累积回结果张量；对 store/atomic 类（无结果）直接在循环体里执行。
 
-**四种 op 的具体构造**由 `createMemAccOp` 模板特化提供：load 最简单（[L323-330](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L323-L330)），store/atomic 还要 `extract` 出对应的 value/mask（[L404-415](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L404-L415)）。
+**四种 op 的具体构造**由 `createMemAccOp` 模板特化提供：load 最简单（[L343-348](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L343-L348)），atomic/store 还要 `extract` 出对应的 value/mask（atomic 见 [L353-365](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L353-L365)）。
 
-**950 SIMT 快路径与回退**。代码顶部 [L114-148](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L114-L148) 有一段详尽注释，定义了快路径闸门：仅当 `compileOn91095Flag && forceSimtTemplateFlag` 且访存为 unstructured（或带 `route_discrete_mask_to_simt` 标记）时启用。`load/store` 额外要求 rank ≤ 5；`atomic` 额外要求静态形状（由 [IndirectAtomicUtils](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/IndirectAtomicUtils.h#L33-L38) 的 `canUseIndirectAtomicFastPath` 判定）。闸门判断在 [L533-542](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L533-L542)：
-
-```cpp
-bool indirectFastPathEnabled =
-    compileOn91095Flag && forceSimtTemplateFlag &&
-    ((!ptrOffsetInfo.isStructured() && sizeInByte < 64) || routeDiscreteMaskToSimt);
-```
-
-**回退语义**：注释 [L145-148](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp#L145-L148) 明确——「若 SIMT 间接 lowering 无法对某 op 生成，则优雅地回退到 legacy 标量循环路径」。代码里这表现为：`tryRewriteIndirectFastPath` 返回 `failure()` 后，**不 return**，而是继续往下执行标量循环生成逻辑。
-
-由此可推出**模式语义**（呼应学习目标「SIMD 模式下的回退语义」）：
-
-| compile_mode | force_simt_template | 快路径状态 | 离散访存的归宿 |
-|---|---|---|---|
-| `simd` | `false` | 永久关闭 | **一律走标量循环**（这正是「SIMD 模式下的回退」） |
-| `unstructured_in_simt`（默认） | `true` | 在 950 上尝试 | 满足条件→`indirect_load/store`；否则→标量循环 |
-| `simt_only` | — | — | 本 pass 不执行（走 `ttir_to_npubin`） |
-
-> `force_simt_template` 的取值来自 [compiler.py 的 __post_init__](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1113-L1120)：`unstructured_in_simt` 把它置 `True`，`simd` 不动（保持 `False`）。
+**补充：OffsetAnalysis 与 parseClampF 的参数修正**。整个 converter 的决策都建立在分析阶段的 `offsetMap` 上，而它由 [OffsetAnalysis.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp) 的 `parse()` 通过遍历算子 DAG（`parseArithOp`/`parseTritonOp` 等）逐个推断 `PtrOffsetInfo` 得到。其中 [parseClampF](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp#L760-L785) 处理 `tt.clampf` 算子，需要分别取 `src/min/max` 三个操作数递归 `parse`。本轮修正了一处复制粘贴错误：原先取 min、max 时**都误用了 `op.getX()`（即 src 本身）**，导致 min/max 的偏移信息与 src 混同；现已分别改为 `op.getMin()` / `op.getMax()`（[OffsetAnalysis.cpp:768-773](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp#L768-L773)）。修正后，clampf 结果的 scalarLike 分类才会真正综合三个操作数的偏移性质，分析名副其实。
 
 #### 4.2.4 代码实践
 
-**实践目标**：对比「混合模式（默认）」与「纯 SIMD 模式」下，同一段离散访存 dump 出的 IR，说明为何需要标量化展开。
+**实践目标**：对比「混合模式（默认）」与「纯 SIMD 模式」下，同一段离散访存 dump 出的 IR，说明为何需要标量化展开，并验证 block ptr 在快路径被跳过。
 
 **操作步骤**：
 
-1. 写一个含间接访存的 kernel（例如用 `tl.load` 配合一张运行时计算出的索引张量做 gather）。
-2. 用默认模式（`compile_mode="unstructured_in_simt"`）跑一次，导出 dump：
+1. 写一个含间接访存的 kernel（例如用 `tl.load` 配合一张运行时计算出的索引张量做 gather）。另写一个用 `tl.make_block_ptr` + `tl.advance` 的 block-ptr 版本作对照。
+2. 用默认模式（`compile_mode="unstructured_in_simt"`）在 950 上跑一次，导出 dump：
 
 ```bash
 MLIR_ENABLE_DUMP=1 python your_kernel.py 2>dump.log
@@ -280,10 +312,10 @@ MLIR_ENABLE_DUMP=1 python your_kernel.py 2>dump.log
 
 **需要观察的现象**：
 
-- 默认模式（950 硬件上）：若满足 rank ≤ 5 等条件，离散 load 可能变成 `tt.indirect_load`（一条指令，由 SIMT 模板执行）；不满足则仍是 `scf.for`。
+- 默认模式（950 硬件上）：若满足 rank ≤ 5 等条件，普通指针的离散 load 可能变成 `tt.indirect_load`（一条指令，由 SIMT 模板执行）；**block-ptr 版本则应始终是 `scf.for`**（被 `canUseIndirectFastPath` 拒绝）；其它不满足条件者也是 `scf.for`。
 - 纯 SIMD 模式：`force_simt_template=False`，快路径恒关，**一定**是 `scf.for` + `{DiscreteMemAccess}` 标量访存。
 
-**预期结果**：两种模式的 IR 在「离散访存」处形态不同——SIMD 模式永远展开成标量循环。**为何需要展开**：因为向量化访存单元只能搬运连续矩形地址，散点地址无法批量处理；标量循环把一次不可批量的访存拆成一串可执行的标量访存，保证语义正确（牺牲性能换正确性）。若无法实地运行，可改为阅读 [unstructure_mix.mlir](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/unstructure_mix.mlir) 的输入与 `CHECK` 输出做源码阅读型对比。
+**预期结果**：两种模式的 IR 在「离散访存」处形态不同——SIMD 模式永远展开成标量循环；block ptr 即便在默认 950 模式下也走标量循环。**为何需要展开**：因为向量化访存单元只能搬运连续矩形地址，散点地址（以及 block ptr 的逐元素离散访问）无法批量处理；标量循环把一次不可批量的访存拆成一串可执行的标量访存，保证语义正确（牺牲性能换正确性）。若无法实地运行，可改为阅读 [unstructure_mix.mlir](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/unstructure_mix.mlir) 的输入与 `CHECK` 输出做源码阅读型对比。**待本地验证**。
 
 #### 4.2.5 小练习与答案
 
@@ -294,6 +326,10 @@ MLIR_ENABLE_DUMP=1 python your_kernel.py 2>dump.log
 **练习 2**：`sizeInByte % 32 != 0` 时为什么要把所有维都强制设为 unstructured？
 
 > **答案**：昇腾向量化访存要求 32 字节对齐（见 u2-l3）。若连续结构化部分的总字节数不是 32 的倍数，硬件无法对齐搬运，强行向量化会出错或低效；降为全标量循环可绕过对齐要求，保证正确。
+
+**练习 3**：一个由 `tl.make_block_ptr` 产生的 block ptr 离散访存，在 950 + 默认模式下会走 `indirect_load` 快路径吗？为什么？
+
+> **答案**：不会。`canUseIndirectFastPath` 检查 `srcPtr` 的类型：block ptr 的 `pointeeType` 是 `ShapedType`（指向一个带形状的块），命中 `isa<ShapedType>(ptrTy.getPointeeType())` 分支，闸门返回 `false`，`tryRewriteIndirectFastPath` 立即 `failure()`，控制流回退到标量循环。
 
 ---
 
@@ -320,7 +356,7 @@ MLIR_ENABLE_DUMP=1 python your_kernel.py 2>dump.log
 
 #### 4.3.2 核心流程
 
-`BubbleUpExtract` 模板对 `tensor::ExtractOp` 和 `tensor::ExtractSliceOp` 两种取值操作各实例化一份（[BubbleUpOperation.cpp:513-515](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L513-L515)）。`matchAndRewrite` 的逻辑（[L38-146](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L38-L146)）：
+`BubbleUpExtract` 模板对 `tensor::ExtractOp` 和 `tensor::ExtractSliceOp` 两种取值操作各实例化一份（[BubbleUpOperation.cpp:513-515](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L513-L515)）。`matchAndRewrite` 的逻辑（[L38-146](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L38-L146)）：
 
 ```text
 1. 找到 extract 的源张量 %t 的定义算子 parentOp
@@ -334,20 +370,20 @@ MLIR_ENABLE_DUMP=1 python your_kernel.py 2>dump.log
 4. 若原 parentOp 已无用户 → 删除（消除整张量计算）
 ```
 
-它支持约 25 种父算子，覆盖了绝大多数逐元素算术与 Triton 形状算子（完整列表见 [BubbleUpOperation.h:71-102](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/BubbleUpOperation.h#L71-L102)）。
+它支持约 25 种父算子，覆盖了绝大多数逐元素算术与 Triton 形状算子（完整列表见 [BubbleUpOperation.h:71-102](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/BubbleUpOperation.h#L71-L102)）。
 
 #### 4.3.3 源码精读
 
-**闸门**。[BubbleUpOperation.cpp:59-61](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L59-L61)：
+**闸门**。[BubbleUpOperation.cpp:59-61](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L59-L61)：
 
 ```cpp
 if (!parentOp || (!enableAggressiveMode && !parentOp->hasOneUse()))
   return failure();
 ```
 
-`enableAggressiveMode` 默认 `true`（[Passes.td:25](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/include/TritonToUnstructure/Passes.td#L21-L28)），即默认激进上提；关闭时只对「独占」的 parentOp 上提，避免破坏被多处共享的整张量计算。
+`enableAggressiveMode` 默认 `true`（[Passes.td:21-28](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/include/TritonToUnstructure/Passes.td#L21-L28)），即默认激进上提；关闭时只对「独占」的 parentOp 上提，避免破坏被多处共享的整张量计算。
 
-**整型二元上提**。[L180-192](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L180-L192)：
+**整型二元上提**。[L180-192](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L180-L192)：
 
 ```cpp
 template <typename BinOpTy>
@@ -358,11 +394,11 @@ void bubbleUpIntBinaryOp(ExtractOpTy op, BinOpTy binOp, ...) const {
 }
 ```
 
-`createExtractOp` 用原 extract 的索引，对父算子的输入再做一个 extract（[L155-164](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L155-L164)）。最终若 `parentOp->use_empty()` 则删除（[L137-138](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L137-L138)）。
+`createExtractOp` 用原 extract 的索引，对父算子的输入再做一个 extract（[L155-164](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L155-L164)）。最终若 `parentOp->use_empty()` 则删除（[L137-138](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L137-L138)）。
 
-**Triton 形状算子的特殊处理**。`broadcast`/`expand_dims`/`splat`/`make_range` 不能简单地把索引搬过去，因为维度语义变了。例如 `make_range` 上提（[L358-374](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L358-L374)）：`extract(make_range(start,end)[i])` 直接化简成 `i + start` 这个标量，连循环都不需要。`splat` 上提（[L341-347](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L341-L347)）：`extract(splat(x)[i])` 直接替换成标量 `x`。这些是「上提即消除」的强优化。
+**Triton 形状算子的特殊处理**。`broadcast`/`expand_dims`/`splat`/`make_range` 不能简单地把索引搬过去，因为维度语义变了。例如 `make_range` 上提（[L358-374](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L358-L374)）：`extract(make_range(start,end)[i])` 直接化简成 `i + start` 这个标量，连循环都不需要。`splat` 上提（[L341-347](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L341-L347)）：`extract(splat(x)[i])` 直接替换成标量 `x`。这些是「上提即消除」的强优化。
 
-**pass 收尾**。[runOnOperation](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L508-L528) 跑完 greedy rewrite 后再跑一遍 CSE + Canonicalizer，把上提后冗余的 extract/常量折叠干净。
+**pass 收尾**。[runOnOperation](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/BubbleUpOperation.cpp#L508-L528) 跑完 greedy rewrite 后再跑一遍 CSE + Canonicalizer，把上提后冗余的 extract/常量折叠干净。
 
 #### 4.3.4 代码实践
 
@@ -370,7 +406,7 @@ void bubbleUpIntBinaryOp(ExtractOpTy op, BinOpTy binOp, ...) const {
 
 **操作步骤**：
 
-1. 仓库自带测试就是现成样本，直接用 [bubbleupoperation.mlir](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/bubbleupoperation.mlir)。挑其中一条：
+1. 仓库自带测试就是现成样本，直接用 [bubbleupoperation.mlir](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/bubbleupoperation.mlir)。挑其中一条：
 
 ```mlir
 tt.func @test_subi_extract_bubbleup(%a: tensor<128xi32>, %b: tensor<128xi32>, %i: index, %c: i32) -> i32 {
@@ -381,7 +417,7 @@ tt.func @test_subi_extract_bubbleup(%a: tensor<128xi32>, %b: tensor<128xi32>, %i
 }
 ```
 
-2. 运行（注意此测试用 `--bubble-up-operation` 标志，见其 [RUN 行](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/bubbleupoperation.mlir#L1)）：
+2. 运行（注意此测试用 `--bubble-up-operation` 标志，见其 [RUN 行](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/unittest/Conversion/General/TritonToUnstructure/bubbleupoperation.mlir#L1)）：
 
 ```bash
 triton-opt --bubble-up-operation bubbleupoperation.mlir
@@ -432,9 +468,9 @@ triton-opt --triton-to-unstructure --bubble-up-operation demo.mlir > after_bubbl
 
 - `triton-to-unstructure` 处理 `TritonToStructured` 归纳不了的**离散/间接访存**，把它们展开成 `scf.for` 标量循环，保证语义可执行。
 - 核心是 `UnstructuredMemAccessConverter` 模板（覆盖 load/store/atomic_rmw/atomic_cas），按维度决策：结构化维保留向量化 `extract_slice`，非结构化维套循环 `extract` 单元素。
-- `PtrOffsetInfo` 给每个指针打逐维 structured/unstructured/scalarlike 标签，允许「混合」形态——只展开必要的维。
+- `PtrOffsetInfo`（由 `OffsetAnalysis.cpp` 推断）给每个指针打逐维 structured/unstructured/scalarlike 标签，允许「混合」形态——只展开必要的维；本轮修正了 `parseClampF` 把 min/max 都误取成 `getX()` 的复制粘贴 bug。
 - 对齐兜底：连续结构化部分 `sizeInByte % 32 != 0` 时强制全标量化，呼应昇腾 32 字节对齐约束。
-- **回退语义**：纯 `simd` 模式（`force_simt_template=false`）下 SIMT 快路径恒关，离散访存一律走标量循环；默认 `unstructured_in_simt` 模式在 950 上优先尝试 `indirect_load/store` 快路径，失败才回退。
+- **950 SIMT 快路径有两道闸门**：`canUseIndirectFastPath` 类型闸门**拒绝 block ptr**（pointee 为 `ShapedType` 的指针），再加 `indirectFastPathEnabled` 总闸门（950 + 模板 + 非结构化）；任一不满足都 `failure()` 后回退到标量循环。
 - `bubble-up-operation` 紧随其后，把标量化制造的 `tensor.extract` 推过父算子，消除冗余的整张量计算，恢复效率。
 
 ## 7. 下一步学习建议
@@ -442,4 +478,4 @@ triton-opt --triton-to-unstructure --bubble-up-operation demo.mlir > after_bubbl
 - 下一篇 [u4-l5 TritonToLinalg：TTIR 到 Linalg 算子转换](u4-l5-triton-to-linalg.md) 将讲解本 pass 产出的（已预处理好的）TTIR 如何被系统性 lower 成 Linalg 算子——本 pass 是它的「清道夫」。
 - 若想深入「快路径」分支，跳到 [u6-l2 离散访存 SIMT 模板与纯 SIMT 路径](u6-l2-simt-templates-and-pure-simt.md)，那里详讲 `indirect_load/store` 与 `ttir_to_npubin` 的纯 SIMT 通道。
 - 想动手扩展 pass 的读者，可参考 [u10-l5 扩展 C++ pass：二次开发实战](u10-l5-extending-cpp-pass.md)，用本讲的 `Passes.td` 注册 + Converter 模式作为模板。
-- 推荐继续阅读 [OffsetAnalysis.cpp](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp)，理解 `PtrOffsetInfo` 是如何通过遍历算子 DAG（`parseArithOp`/`parseTritonOp`）推断出逐维标签的——这是本 pass 一切决策的数据基础。
+- 推荐继续阅读 [OffsetAnalysis.cpp](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp)，理解 `PtrOffsetInfo` 是如何通过遍历算子 DAG（`parseArithOp`/`parseTritonOp`/`parseClampF`）推断出逐维标签的——这是本 pass 一切决策的数据基础。

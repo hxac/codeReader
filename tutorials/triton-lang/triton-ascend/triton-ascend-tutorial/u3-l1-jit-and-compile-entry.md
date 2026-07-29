@@ -10,6 +10,7 @@
 2. 跟着源码走完「调用 `kernel[grid](...)` → 触发编译 → 生成 TTIR」的完整调用链，并指出**编译在哪一行被触发**。
 3. 回答本讲的核心问题：**TTIR 到底是在哪个阶段生成的？**（提示：它分两步，一步在 core，一步在 backend）
 4. 认识 `triton.backends.compiler.BaseBackend` 这个抽象基类，理解 Ascend 后端是如何「插」进 Triton 的编译流程的。
+5. **（承接 u1-l2）**理解「去侵入化」后的新维护机制：本讲引用的 `python/triton/runtime/jit.py` 等上游文件**保持干净原貌**，Ascend 对它们的定制一律以补丁形式在构建期贴上去；并能指出 Ascend 对 `jit.py` 的定制具体在补丁文件的哪一段。
 
 本讲只看 **Python 到 TTIR 这一段**，即编译流水线的「入口」。后续 TTIR 如何变成 Linalg、如何变成 `.o`，分别在 u3-l2、u4-* 讲。
 
@@ -20,23 +21,25 @@
 - **后端（backend）**：把硬件无关的 TTIR 一步步「下降（lowering）」成某类硬件能跑的二进制。Ascend 就是这样一个后端。后端用一个继承 `BaseBackend` 的类来表示。
 - **AST（抽象语法树）**：Python 解释器把源码解析成的树形结构。Triton 编译 kernel 的第一步，就是遍历 kernel 函数的 AST，边遍历边「吐」出 TTIR。
 - **特化（specialization）**：JIT 编译时，Triton 会根据参数的某些特征（是否是 16 的倍数、是否是 constexpr 常量等）为同一份 kernel 生成不同的编译产物。这部分细节本讲只点到为止。
+- **构建期补丁（patch）**：把对上游源文件的修改写成一个 `git diff` 风格的 `.patch` 文件，在构建（`pip install`）时由 `setup.py` 用 `git apply` 贴到干净的上游源文件上，从而「既不改坏上游仓库、又能获得 Ascend 亲和改动」。详见 u1-l2、u1-l3。
 
 如果你对 `grid`、`program`、`tl.load/tl.store` 还不熟，请先复习 u1-l4。
 
 ## 3. 本讲源码地图
 
-本讲涉及的文件都在 **Triton core**（`python/triton/`）下，目标无关；只有在最后讲 `BaseBackend` 的「具体实现」时，才会引用一处 Ascend 后端代码作为印证。
+本讲涉及的文件都在 **Triton core**（`python/triton/`）下，目标无关；只有在最后讲 `BaseBackend` 的「具体实现」时，才会引用一处 Ascend 后端代码作为印证。**注意（承接 u1-l2）**：下列前五个 core 文件在仓库里都是**干净的上游原貌**——Ascend 对它们的亲和定制不在这些文件里，而在补丁文件 `third_party/ascend/patch/triton-ascend-3.6.0.patch` 里，构建时才贴上去。
 
 | 文件 | 作用 |
 | --- | --- |
-| [python/triton/__init__.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/__init__.py) | `triton` 包的入口，把 `jit`、`JITFunction`、`compile` 等名字导出给用户。 |
-| [python/triton/runtime/jit.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py) | `@triton.jit` 装饰器、`JITFunction`、`KernelInterface` 的全部实现。本讲的主战场。 |
-| [python/triton/compiler/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py) | `compile()` 函数、`ASTSource`、`make_backend`、`CompiledKernel`。编译流程的总调度。 |
-| [python/triton/backends/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/backends/compiler.py) | `BaseBackend` 抽象基类、`GPUTarget` 数据类。后端的「契约」。 |
-| [python/triton/compiler/code_generator.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/code_generator.py) | `ast_to_ttir()`——真正把 Python AST 翻译成 TTIR 的地方。 |
-| [third_party/ascend/backend/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py) | `AscendBackend`（`BaseBackend` 的子类）与 `make_ttir`，用来印证 core↔backend 的衔接。 |
+| [python/triton/__init__.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/__init__.py) | `triton` 包的入口，把 `jit`、`JITFunction`、`compile` 等名字导出给用户。 |
+| [python/triton/runtime/jit.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py) | `@triton.jit` 装饰器、`JITFunction`、`KernelInterface` 的全部实现。本讲的主战场（上游原貌，定制在补丁里）。 |
+| [python/triton/compiler/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py) | `compile()` 函数、`ASTSource`、`make_backend`、`CompiledKernel`。编译流程的总调度。 |
+| [python/triton/backends/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/backends/compiler.py) | `BaseBackend` 抽象基类、`GPUTarget` 数据类。后端的「契约」。 |
+| [python/triton/compiler/code_generator.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/code_generator.py) | `ast_to_ttir()`——真正把 Python AST 翻译成 TTIR 的地方。 |
+| [third_party/ascend/patch/triton-ascend-3.6.0.patch](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch) | 构建期补丁；本讲用它来印证「Ascend 对 `jit.py` 的定制以补丁交付」（见 4.1.3）。 |
+| [third_party/ascend/backend/compiler.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py) | `AscendBackend`（`BaseBackend` 的子类）与 `make_ttir`，用来印证 core↔backend 的衔接。 |
 
-> 提醒（承接 u1-l2）：前五个文件是 **Triton core**，最后一个属于 **third_party/ascend**。本讲要讲的就是这两者如何衔接。
+> 提醒（承接 u1-l2）：前五个文件是 **Triton core**（干净上游），最后两个属于 **third_party/ascend**。本讲要讲的就是这两者如何衔接，以及 core 的那点 Ascend 定制如何以补丁形式存在。
 
 ## 4. 核心概念与源码讲解
 
@@ -83,9 +86,9 @@ jit(fn)  →  decorator(fn)     # 2. 判断是否处于解释器模式
 
 #### 4.1.3 源码精读
 
-装饰器本体在 [python/triton/runtime/jit.py:893-945](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L893-L945)，关键的内层 `decorator` 如下：
+装饰器本体在 [python/triton/runtime/jit.py:886-938](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L886-L938)（`jit()` 的实现函数），关键的内层 `decorator` 如下。
 
-[python/triton/runtime/jit.py:922-939](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L922-L939) —— 根据解释器开关，决定返回 `InterpretedFunction` 还是 `JITFunction`：
+[python/triton/runtime/jit.py:915-932](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L915-L932) —— 根据解释器开关，决定返回 `InterpretedFunction` 还是 `JITFunction`：
 
 ```python
 def decorator(fn: T) -> JITFunction[T]:
@@ -97,18 +100,25 @@ def decorator(fn: T) -> JITFunction[T]:
         return JITFunction(fn, ...)                   # 默认：待编译 kernel
 ```
 
-`knobs.runtime.interpret` 的来源在 [python/triton/knobs.py:461](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/knobs.py#L461)，它就是环境变量 `TRITON_INTERPRET` 的布尔映射：
+`knobs.runtime.interpret` 的来源在 [python/triton/knobs.py:461](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/knobs.py#L461)，它就是环境变量 `TRITON_INTERPRET` 的布尔映射：
 
 ```python
 class runtime_knobs(base_knobs):
     interpret: env_bool = env_bool("TRITON_INTERPRET")
 ```
 
-`@triton.jit` 还支持带括号的形式（如 `@triton.jit(do_not_specialize=[...])`）和不带括号的形式（如 `@triton.jit`），这在 [jit.py:941-945](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L941-L945) 用「`fn is not None`」来区分（直接传了函数 vs. 只传了关键字参数）。
+`@triton.jit` 还支持带括号的形式（如 `@triton.jit(do_not_specialize=[...])`）和不带括号的形式（如 `@triton.jit`），这在 [jit.py:934-938](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L934-L938) 用「`fn is not None`」来区分（直接传了函数 vs. 只传了关键字参数）：
 
-而 `JITFunction.__init__` 在构造时做了什么？见 [python/triton/runtime/jit.py:758-792](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L758-L792)。它**不编译**，只做三件事：把每个参数包成 `KernelParam`、初始化一个空的 kernel 缓存 `device_caches`、记录调试选项。其中最关键的一行是：
+```python
+if fn is not None:
+    return decorator(fn)      # 不带括号：fn 就是函数本体
+else:
+    return decorator          # 带括号：返回装饰器工厂，由 Python 套到函数上
+```
 
-[python/triton/runtime/jit.py:778](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L778) —— 每个设备首次被访问时，懒加载一个 `binder`（4.2 节会讲）：
+而 `JITFunction.__init__` 在构造时做了什么？见 [python/triton/runtime/jit.py:751-786](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L751-L786)。它**不编译**，只做三件事：把每个参数包成 `KernelParam`、初始化一个空的 kernel 缓存 `device_caches`、记录调试选项。其中最关键的一行是：
+
+[python/triton/runtime/jit.py:771](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L771) —— 每个设备首次被访问时，懒加载一个 `binder`（4.2 节会讲）：
 
 ```python
 self.device_caches = defaultdict(self.create_binder)
@@ -116,9 +126,17 @@ self.device_caches = defaultdict(self.create_binder)
 
 `defaultdict` 的意思是：当你第一次用某个 `device` 去 `self.device_caches[device]` 取值时，它会自动调用 `create_binder()` 初始化那一项。这是 Triton 「按设备缓存编译产物」的基础。
 
+> **（承接 u1-l2，本讲新增认知）jit.py 保持上游原貌，定制在补丁里。**
+>
+> 你在仓库里读到的 [python/triton/runtime/jit.py](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py) 是**干净的上游 Triton 文件**——可以直接去验证：在它里面**搜不到** `integer_annotation_types` 这个名字。那 Ascend 对 `jit.py` 唯一的亲和定制去哪了？答案在补丁里。
+>
+> Ascend 需要的定制是「整型注解特化（integer annotation specialization）」：当 kernel 参数带 `i8`/`i16`/`i32`/`i64`/`u8`… 这类整型注解时，特化逻辑要用一个 lambda **保留**此前已被识别为 `constexpr` 的分类（例如字面量 `1`），而不是粗暴覆盖。这段逻辑位于 `create_function_from_signature`（[jit.py:391](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L391)）里，但**它不在仓库的 jit.py 中**，而是以补丁形式写在 [third_party/ascend/patch/triton-ascend-3.6.0.patch:770-807](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L770-L807)。补丁的关键两行是新增 `integer_annotation_types` 集合（[补丁第 778 行](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L778)）与用它分支处理特化（[补丁第 798 行](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L798)）。
+>
+> 构建期，[setup.py:981](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L981) 的 `apply_triton_ascend_patch()` 会把这个补丁 `git apply` 到干净上游上（细节见 u1-l3）。所以：**你读到的源码 = 上游原貌；Ascend 的那点改动 = 补丁**。这正是「去侵入化」后 core 文件的交付方式。
+
 #### 4.1.4 代码实践
 
-**实践目标**：亲手确认「`@triton.jit` 返回的是一个 `JITFunction` 对象，而不是普通函数，且构造时不编译」。
+**实践目标**：亲手确认两件事——(a) `@triton.jit` 返回的是一个 `JITFunction` 对象，而不是普通函数，且构造时不编译；(b) 在补丁里定位 Ascend 对 `jit.py` 的那处定制。
 
 **操作步骤**（在装好 triton-ascend 的环境里）：
 
@@ -133,19 +151,27 @@ print(type(my_kernel))        # 应输出 JITFunction（或其子类），而非
 print(repr(my_kernel))        # JITFunction(__main__:my_kernel)
 ```
 
-**需要观察的现象**：`type(my_kernel)` 不是 `<class 'function'>`，而是 `JITFunction`。同时整个定义过程**没有任何编译动作**（没有打印、没有卡顿），证明编译是延迟的。
+然后做一段**纯源码阅读**：打开 [third_party/ascend/patch/triton-ascend-3.6.0.patch:770-807](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L770-L807)，确认这段补丁作用于 `python/triton/runtime/jit.py` 的 `create_function_from_signature`，新增了 `integer_annotation_types`。再到仓库的 [jit.py:391](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L391) 附近核对：committed 文件里**没有** `integer_annotation_types`，印证「源码干净、定制在补丁」。
+
+**需要观察的现象**：
+
+- `type(my_kernel)` 不是 `<class 'function'>`，而是 `JITFunction`；整个定义过程**没有任何编译动作**（没有打印、没有卡顿），证明编译是延迟的。
+- 补丁文件里能找到 `diff --git a/python/triton/runtime/jit.py ...` 这一段，且只新增了「整型注解特化」相关代码；仓库 `jit.py` 里则搜不到该符号。
 
 **进阶**：设置 `TRITON_INTERPRET=1` 后重新运行，观察 `type(my_kernel)` 是否变成 `InterpretedFunction`。
 
-**预期结果**：默认为 `JITFunction`；`TRITON_INTERPRET=1` 时为 `InterpretedFunction`。若环境无法运行，记为「待本地验证」。
+**预期结果**：默认为 `JITFunction`；`TRITON_INTERPRET=1` 时为 `InterpretedFunction`；补丁定位结论如上。若环境无法运行 Python 部分，记为「待本地验证」，但补丁阅读结论不受影响。
 
 #### 4.1.5 小练习与答案
 
 **练习 1**：`@triton.jit` 和 `@triton.jit(debug=True)` 在源码层面走的是同一段逻辑吗？
-**答案**：是的。两者都进入 `decorator(fn)`。区别只在于 `jit()` 在 [jit.py:941-945](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L941-L945) 通过判断 `fn is not None` 区分：不带括号时 `fn` 就是函数本体，直接 `return decorator(fn)`；带括号时 `fn` 为 `None`，先 `return decorator`（一个装饰器工厂），再由 Python 自动把它套到函数上。
+**答案**：是的。两者都进入 `decorator(fn)`。区别只在于 `jit()` 在 [jit.py:934-938](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L934-L938) 通过判断 `fn is not None` 区分：不带括号时 `fn` 就是函数本体，直接 `return decorator(fn)`；带括号时 `fn` 为 `None`，先 `return decorator`（一个装饰器工厂），再由 Python 自动把它套到函数上。
 
 **练习 2**：为什么 `JITFunction.__init__` 里不直接编译，而要用 `defaultdict(self.create_binder)` 懒加载？
 **答案**：因为编译需要知道「目标设备」和「实际参数」，而这些在装饰时（定义函数时）都还不知道。懒加载保证了只有在真正用某设备调用 kernel 时，才为该设备建立对应的 binder 和编译缓存。
+
+**练习 3**：如果你在仓库的 `python/triton/runtime/jit.py` 里搜不到 `integer_annotation_types`，是不是说明 Ascend 完全没有改过 `jit.py`？
+**答案**：不是。committed 的 `jit.py` 是干净上游，但 Ascend 对它有一处「整型注解特化」的定制，以补丁形式写在 [triton-ascend-3.6.0.patch:770-807](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L770-L807)，构建期由 `setup.py` 的 `apply_triton_ascend_patch()` 贴上去。这正是 u1-l2 讲的「去侵入化 + 补丁机制」。
 
 ---
 
@@ -158,7 +184,7 @@ print(repr(my_kernel))        # JITFunction(__main__:my_kernel)
 - **一个可调用的「启动器代理」**：用户写 `add_kernel[grid](args)` 来启动 kernel，这个方括号语法由 `KernelInterface.__getitem__` 提供。
 - **编译的触发者**：当缓存里没有对应的编译产物时，由 `JITFunction.run` 触发一次完整编译。
 
-`KernelInterface` 是一个很薄的基类（[jit.py:355-371](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L355-L371)），它只定义了 `__getitem__` 这个「记下 grid」的语法糖；真正的 `run` 逻辑由 `JITFunction` 实现（`JITFunction` 继承了 `JITCallable` 和 `KernelInterface`，见 [jit.py:606](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L606)）。
+`KernelInterface` 是一个很薄的基类（[jit.py:355-371](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L355-L371)），它只定义了 `__getitem__` 这个「记下 grid」的语法糖；真正的 `run` 逻辑由 `JITFunction` 实现（`JITFunction` 继承了 `JITCallable` 和 `KernelInterface`，见 [jit.py:599](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L599)）。
 
 #### 4.2.2 核心流程
 
@@ -170,7 +196,7 @@ add_kernel[grid](x, y, out, n, BLOCK_SIZE)
         │  KernelInterface.__getitem__(grid)  返回一个 lambda，
         │  它记住了 grid，等待被传入实际参数
         ▼
-JITFunction.run(*args, grid, warmup=False, **kwargs)        # jip.py:702
+JITFunction.run(*args, grid, warmup=False, **kwargs)        # jit.py:695
         │
         ├── 1. driver.active.get_current_device() / get_current_stream()
         │      拿到当前 NPU 设备和流
@@ -180,7 +206,7 @@ JITFunction.run(*args, grid, warmup=False, **kwargs)        # jip.py:702
         │      查「这个特化 + 这个设备」有没有编译过
         │
         ├── 命中 → 直接用缓存的 kernel，跳到第 5 步
-        └── 未命中 → JITFunction._do_compile(...)            # jit.py:833
+        └── 未命中 → JITFunction._do_compile(...)            # jit.py:826
                 │
                 ├── 构造 ASTSource(self, signature, constexprs, attrs)
                 └── self.compile(src, target=target, options=...)   # ← 编译触发点！
@@ -192,11 +218,11 @@ JITFunction.run(*args, grid, warmup=False, **kwargs)        # jip.py:702
    5. kernel.run(grid_0, grid_1, grid_2, stream, ...)        # 真正在硬件上启动
 ```
 
-**本模块的关键结论**：编译的「触发点」是 [jit.py:856](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L856) 的 `self.compile(src, target=target, options=options.__dict__)` 这一行。`self.compile` 不是 `JITFunction` 自己的方法，而是在 `create_binder` 里被绑定成了 `triton.compiler.compile`（见 4.3）。
+**本模块的关键结论**：编译的「触发点」是 [jit.py:849](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L849) 的 `kernel = self.compile(src, target=target, options=options.__dict__)` 这一行。`self.compile` 不是 `JITFunction` 自己的方法，而是在 `create_binder` 里被绑定成了 `triton.compiler.compile`（见 4.3）。
 
 #### 4.2.3 源码精读
 
-**方括号语法** —— [python/triton/runtime/jit.py:364-371](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L364-L371)：
+**方括号语法** —— [python/triton/runtime/jit.py:364-371](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L364-L371)：
 
 ```python
 def __getitem__(self, grid) -> T:
@@ -210,9 +236,9 @@ def __getitem__(self, grid) -> T:
 
 这就是为什么 `kernel[grid](args)` 等价于 `kernel.run(grid=grid, warmup=False, args)`。`grid` 被「记住」，真正调用 `run` 的是返回的那个 lambda。
 
-**运行与缓存查找** —— [python/triton/runtime/jit.py:702-753](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L702-L753)。其中触发编译的核心片段：
+**运行与缓存查找** —— [python/triton/runtime/jit.py:695-746](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L695-L746)。其中触发编译的核心片段：
 
-[python/triton/runtime/jit.py:714-727](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L714-L727)：
+[python/triton/runtime/jit.py:707-720](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L707-L720)：
 
 ```python
 kernel_cache, kernel_key_cache, target, backend, binder = self.device_caches[device]
@@ -228,16 +254,16 @@ if kernel is None:
 
 注意第一行：访问 `self.device_caches[device]` 会（首次）触发 `create_binder()`，于是 `target`、`backend`、`binder` 都在这一刻被懒加载出来。
 
-**编译触发点** —— [python/triton/runtime/jit.py:833-860](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L833-L860)（`_do_compile`）。它构造 `ASTSource`，然后调用编译：
+**编译触发点** —— [python/triton/runtime/jit.py:826-853](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L826-L853)（`_do_compile`）。它构造 `ASTSource`，然后调用编译：
 
 ```python
 src = self.ASTSource(self, signature, constexprs, attrs)
 ...
-kernel = self.compile(src, target=target, options=options.__dict__)   # ← 第 856 行，真正的编译入口
+kernel = self.compile(src, target=target, options=options.__dict__)   # ← 第 849 行，真正的编译入口
 kernel_cache[key] = kernel
 ```
 
-**`self.compile` / `self.ASTSource` 从哪来** —— [python/triton/runtime/jit.py:665-676](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L665-L676)（`create_binder`）：
+**`self.compile` / `self.ASTSource` 从哪来** —— [python/triton/runtime/jit.py:658-669](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L658-L669)（`create_binder`）：
 
 ```python
 def create_binder(self):
@@ -252,27 +278,29 @@ def create_binder(self):
 
 这就把 4.2 和 4.3 串起来了：`JITFunction` 通过 `create_binder` 把「编译」这件事委托给了 core 的 `triton.compiler.compile`，同时用 `make_backend(target)` 选定了具体的后端（Ascend）。
 
+> 顺带一笔：上面那行 `binder = create_function_from_signature(...)` 正是 4.1.3 里说的「被补丁定制」的函数——构建期补丁会给它注入整型注解特化逻辑。运行时 `create_binder` 直接 `import` 进来用，对调用方完全透明。
+
 #### 4.2.4 代码实践
 
 **实践目标**：用源码阅读的方式，定位「编译触发点」和「缓存命中」两条路径。
 
 **操作步骤**：
 
-1. 打开 [python/triton/runtime/jit.py:702](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L702)（`JITFunction.run`）。
-2. 顺着读：第 714 行取缓存 → 第 719 行算 key → 第 720 行 `kernel_cache.get(key, None)`。
-3. 回答：如果 `kernel is None`（第 723 行），代码走到第 727 行的 `_do_compile`；再进 [jit.py:856](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L856)，看到 `self.compile(src, ...)`。
-4. 回到 [jit.py:672](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L672)（`create_binder` 内），确认 `self.compile = compile`，而这个 `compile` 来自 `from ..compiler import ... compile`。
+1. 打开 [python/triton/runtime/jit.py:695](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L695)（`JITFunction.run`）。
+2. 顺着读：第 707 行取缓存 → 第 712 行算 key → 第 713 行 `kernel_cache.get(key, None)`。
+3. 回答：如果 `kernel is None`（第 716 行），代码走到第 720 行的 `_do_compile`；再进 [jit.py:849](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L849)，看到 `self.compile(src, ...)`。
+4. 回到 [jit.py:658-669](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L658-L669)（`create_binder` 内），确认 `self.compile = compile`，而这个 `compile` 来自 `from ..compiler import ... compile`。
 
 **需要观察的现象**：你能画出一条「`kernel[grid](...)` → `__getitem__` → `run` → `_do_compile` → `triton.compiler.compile`」的调用链，并指出缓存命中时**不会**进入 `_do_compile`。
 
-**预期结果**：调用链清晰可画；第二次用相同参数调用同一 kernel 时，`kernel_cache.get(key)` 命中，跳过编译，直接到 [jit.py:750-752](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L750-L752) 的 `kernel.run(...)` 启动。
+**预期结果**：调用链清晰可画；第二次用相同参数调用同一 kernel 时，`kernel_cache.get(key)` 命中，跳过编译，直接到 [jit.py:743-745](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L743-L745) 的 `kernel.run(...)` 启动。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：`add_kernel[grid](x, y, out, n, BLOCK_SIZE=1024)` 和 `add_kernel[grid](x, y, out, n, BLOCK_SIZE=2048)` 会触发几次编译？
 **答案**：通常**两次**。`BLOCK_SIZE` 是 `tl.constexpr`，不同值会产生不同的 specialization（特化 key 不同），`compute_cache_key` 算出的 key 不同，所以 `kernel_cache.get(key)` 两次都未命中，各编译一次。这正是 JIT「按特化缓存」的特点。
 
-**练习 2**：`KernelInterface` 里的 `run` 方法为什么写 `raise NotImplementedError`（[jit.py:361-362](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L361-L362)）？
+**练习 2**：`KernelInterface` 里的 `run` 方法为什么写 `raise NotImplementedError`（[jit.py:361-362](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L361-L362)）？
 **答案**：`KernelInterface` 是基类，只定义接口契约（`__getitem__` 记 grid、`run` 真正执行）。具体 `run` 由子类 `JITFunction`（真编译）和 `InterpretedFunction`（解释执行）各自实现，所以基类里抛 `NotImplementedError` 是为了防止有人直接调用未实现的基类 `run`。
 
 ---
@@ -297,7 +325,7 @@ def create_binder(self):
 
 #### 4.3.2 核心流程
 
-`compile()` 的主干（[compiler.py:227-383](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L227-L383)）：
+`compile()` 的主干（[compiler.py:226 起](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L226)，函数体直到 `make_backend` 之前）：
 
 ```text
 compile(src=ASTSource, target=GPUTarget("npu",...), options=...)
@@ -310,24 +338,24 @@ compile(src=ASTSource, target=GPUTarget("npu",...), options=...)
    ├── (缓存查 metadata_group：命中则直接返回 CompiledKernel)
    │
    ├── stages = {}
-   ├── backend.add_stages(stages, options, src.language) # 注册阶段
+   ├── backend.add_stages(stages, options, src.language) # 注册阶段（compiler.py:288）
    │     stages = {"ttir": make_ttir, "ttadapter": ttir_to_linalg, "npubin": ...}
    │
-   ├── first_stage = stages.keys().index(src.ext)        # src.ext == "ttir" → 0
+   ├── first_stage = stages.keys().index(src.ext)        # src.ext == "ttir" → 0（compiler.py:289）
    │
    ├── module = src.make_ir(target, options, ...)        # ★ 生成原始 TTIR（ast_to_ttir）
    │
-   └── for ext, compile_ir in stages[first_stage:]:      # 依次下降
+   └── for ext, compile_ir in stages[first_stage:]:      # 依次下降（compiler.py:323）
           module = compile_ir(module, metadata)          # 先 make_ttir，再 ttir_to_linalg，...
 ```
 
-这里有一个容易看漏的细节（[compiler.py:290-293](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L290-L293)）：`first_stage` 从 `src.ext`（对 `ASTSource` 是 `"ttir"`）开始算。因为 `ASTSource` 不是「从 IR 文件读进来的」（`ir_source` 为 `False`），所以 `first_stage` 不 +1，stages 循环**从 `"ttir"` 阶段开始**——也就是说 `make_ttir` 一定会被执行。如果你传入的是一个现成的 `.ttir` 文件（`IRSource`），则 `first_stage` 会 +1，跳过 `make_ttir`，方便写 IR 级测试。
+这里有一个容易看漏的细节（[compiler.py:289-292](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L289-L292)）：`first_stage` 从 `src.ext`（对 `ASTSource` 是 `"ttir"`）开始算。因为 `ASTSource` 不是「从 IR 文件读进来的」（`ir_source` 为 `False`），所以 `first_stage` 不 +1，stages 循环**从 `"ttir"` 阶段开始**——也就是说 `make_ttir` 一定会被执行。如果你传入的是一个现成的 `.ttir` 文件（`IRSource`），则 `first_stage` 会 +1，跳过 `make_ttir`，方便写 IR 级测试。
 
 #### 4.3.3 源码精读
 
-**`BaseBackend` 契约** —— [python/triton/backends/compiler.py:23-92](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/backends/compiler.py#L23-L92)。其中两个最关键的抽象方法：
+**`BaseBackend` 契约** —— [python/triton/backends/compiler.py:23-92](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/backends/compiler.py#L23-L92)。其中两个最关键的抽象方法：
 
-[python/triton/backends/compiler.py:30-33](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/backends/compiler.py#L30-L33)（`supports_target`，决定后端是否匹配当前硬件）：
+[python/triton/backends/compiler.py:30-33](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/backends/compiler.py#L30-L33)（`supports_target`，决定后端是否匹配当前硬件）：
 
 ```python
 @staticmethod
@@ -336,7 +364,7 @@ def supports_target(target: GPUTarget):
     raise NotImplementedError
 ```
 
-[python/triton/backends/compiler.py:48-58](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/backends/compiler.py#L48-L58)（`add_stages`，注册「阶段名 → 处理函数」的字典）：
+[python/triton/backends/compiler.py:48-58](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/backends/compiler.py#L48-L58)（`add_stages`，注册「阶段名 → 处理函数」的字典）：
 
 ```python
 @abstractmethod
@@ -349,9 +377,9 @@ def add_stages(self, stages: dict, options: object) -> None:
     """
 ```
 
-**`GPUTarget` 数据类** —— [python/triton/backends/compiler.py:8-13](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/backends/compiler.py#L8-L13)：只有三个字段 `backend`、`arch`、`warp_size`。对 Ascend，`backend="npu"`，由 [third_party/ascend/backend/driver.py:227-235](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/driver.py#L227-L235) 的 `NPUDriver.get_current_target` 构造。
+**`GPUTarget` 数据类** —— [python/triton/backends/compiler.py:8-13](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/backends/compiler.py#L8-L13)：只有三个字段 `backend`、`arch`、`warp_size`。对 Ascend，`backend="npu"`，由 [third_party/ascend/backend/driver.py:227-235](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/driver.py#L227-L235) 的 `NPUDriver.get_current_target` 构造。
 
-**`make_backend` 选后端** —— [python/triton/compiler/compiler.py:386-391](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L386-L391)：
+**`make_backend` 选后端** —— [python/triton/compiler/compiler.py:363-368](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L363-L368)：
 
 ```python
 def make_backend(target: GPUTarget) -> BaseBackend:
@@ -363,7 +391,7 @@ def make_backend(target: GPUTarget) -> BaseBackend:
 
 注意 `len(actives) != 1` 会报错：Triton 要求**恰好一个**后端匹配当前 target，避免歧义。
 
-**`AscendBackend` 实现** —— [third_party/ascend/backend/compiler.py:1200-1204](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1200-L1204)：
+**`AscendBackend` 实现** —— [third_party/ascend/backend/compiler.py:1205-1209](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1205-L1209)：
 
 ```python
 class AscendBackend(BaseBackend):
@@ -372,7 +400,7 @@ class AscendBackend(BaseBackend):
         return target.backend == "npu"
 ```
 
-[third_party/ascend/backend/compiler.py:1269-1290](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1269-L1290)（`add_stages`，注册阶段）：
+[third_party/ascend/backend/compiler.py:1272-1293](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1272-L1293)（`add_stages`，注册阶段）：
 
 ```python
 def add_stages(self, stages, options, language):
@@ -386,7 +414,7 @@ def add_stages(self, stages, options, language):
         stages["npubin"] = lambda src, metadata: linalg_to_bin_...(src, metadata, options)
 ```
 
-可以看到，`"ttir"` 这个阶段绑定到 `make_ttir`。`make_ttir` 本身在 [third_party/ascend/backend/compiler.py:132-152](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L132-L152)，它跑的就是一组通用优化 pass：
+可以看到，`"ttir"` 这个阶段绑定到 `make_ttir`。`make_ttir` 本身在 [third_party/ascend/backend/compiler.py:134-154](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L134-L154)，它跑的就是一组通用优化 pass：
 
 ```python
 def make_ttir(mod, metadata, opt):
@@ -404,7 +432,7 @@ def make_ttir(mod, metadata, opt):
 
 注释里写得很明白：「the same optimize pass for triton-ir as all other backends」——这是所有后端共用的 TTIR 优化，但因为它是 `compile()` stages 循环里由后端注册的第一个阶段，所以代码物理位置在 ascend 子树里（这正是 u1-l2 讲的「后端各自注册自己的阶段」）。
 
-**TTIR 真正生成的地方：`ast_to_ttir`** —— `compile()` 在 [python/triton/compiler/compiler.py:305](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L305) 调用 `src.make_ir(...)`。对 `ASTSource`，[compiler.py:79-82](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L79-L82)：
+**TTIR 真正生成的地方：`ast_to_ttir`** —— `compile()` 在 [python/triton/compiler/compiler.py:304](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L304) 调用 `module = src.make_ir(...)`。对 `ASTSource`，[compiler.py:78-81](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L78-L81)：
 
 ```python
 def make_ir(self, target, options, codegen_fns, module_map, context):
@@ -412,7 +440,7 @@ def make_ir(self, target, options, codegen_fns, module_map, context):
     return ast_to_ttir(self.fn, self, context=context, options=options, ...)
 ```
 
-而 [python/triton/compiler/code_generator.py:1659-1698](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/code_generator.py#L1659-L1698) 的 `ast_to_ttir`，核心就是「构造一个 `CodeGenerator`，然后访问 Python AST」：
+而 [python/triton/compiler/code_generator.py:1600-1639](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/code_generator.py#L1600-L1639) 的 `ast_to_ttir`，核心就是「构造一个 `CodeGenerator`，然后访问 Python AST」：
 
 ```python
 generator = CodeGenerator(context, prototype, ..., jit_fn=fn, is_kernel=True, ...)
@@ -422,7 +450,7 @@ module = generator.module
 return module
 ```
 
-`fn.parse()` 把 kernel 源码解析成 Python AST（定义在 [jit.py:530-535](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L530-L535)），`CodeGenerator`（一个 AST 访问者）在访问每个节点时，把 `tl.load`、`tl.store`、`+`、`tl.program_id` 等「翻译」成对应的 TTIR MLIR 算子。这一步完全目标无关——它不知道也不关心下游是 GPU 还是 NPU。
+`fn.parse()` 把 kernel 源码解析成 Python AST（定义在 [jit.py:523-528](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L523-L528)），`CodeGenerator`（一个 AST 访问者）在访问每个节点时，把 `tl.load`、`tl.store`、`+`、`tl.program_id` 等「翻译」成对应的 TTIR MLIR 算子。这一步完全目标无关——它不知道也不关心下游是 GPU 还是 NPU。
 
 > **小结一张表**：
 >
@@ -438,10 +466,10 @@ return module
 
 **操作步骤**：
 
-1. **定位编译触发点**：从 [python/triton/runtime/jit.py:856](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L856) 的 `self.compile(src, target=target, options=options.__dict__)` 出发，沿 `create_binder`（[jit.py:665-676](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L665-L676)）确认 `self.compile` 就是 [python/triton/compiler/compiler.py:227](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L227) 的 `compile()`。
-2. **定位 TTIR 生成**：在 `compile()` 里找到 [compiler.py:305](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L305) 的 `module = src.make_ir(...)`。点进 `ASTSource.make_ir`（[compiler.py:79-82](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L79-L82)），看到它调用 `ast_to_ttir`（[code_generator.py:1659](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/code_generator.py#L1659)）。**结论：原始 TTIR 在 `src.make_ir()` 这一步生成**。
-3. **定位 TTIR 优化**：再看 stages 循环 [compiler.py:324](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L324)，第一个执行的 `compile_ir` 就是 `make_ttir`（[ascend/compiler.py:132](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L132)）。
-4. **用 dump 佐证**（需要 NPU 环境）：设置 `TRITON_DEBUG=1`，跑 u1-l4 的 vector-add。`make_ttir` 会在 [ascend/compiler.py:147-150](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L147-L150) 打印 `Dumping intermediate results to <目录>`，并在该目录下生成 `kernel.ttir.mlir`。
+1. **定位编译触发点**：从 [python/triton/runtime/jit.py:849](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L849) 的 `self.compile(src, target=target, options=options.__dict__)` 出发，沿 `create_binder`（[jit.py:658-669](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L658-L669)）确认 `self.compile` 就是 [python/triton/compiler/compiler.py:226](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L226) 的 `compile()`。
+2. **定位 TTIR 生成**：在 `compile()` 里找到 [compiler.py:304](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L304) 的 `module = src.make_ir(...)`。点进 `ASTSource.make_ir`（[compiler.py:78-81](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L78-L81)），看到它调用 `ast_to_ttir`（[code_generator.py:1600](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/code_generator.py#L1600)）。**结论：原始 TTIR 在 `src.make_ir()` 这一步生成**。
+3. **定位 TTIR 优化**：再看 stages 循环 [compiler.py:323](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L323)，第一个执行的 `compile_ir` 就是 `make_ttir`（[ascend/compiler.py:134](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L134)）。
+4. **用 dump 佐证**（需要 NPU 环境）：设置 `TRITON_DEBUG=1`，跑 u1-l4 的 vector-add。`make_ttir` 会在 [ascend/compiler.py:150-152](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L150-L152) 打印 `Dumping intermediate results to <目录>`，并在该目录下生成 `kernel.ttir.mlir`。
 
 **需要观察的现象**：
 
@@ -453,7 +481,7 @@ return module
 #### 4.3.5 小练习与答案
 
 **练习 1**：如果把一个写好的 `.ttir` 文件路径直接传给 `triton.compile(path)`（而不是 `@triton.jit` 函数），还会执行 `ast_to_ttir` 吗？
-**答案**：不会。传字符串路径时，`compile()` 会把它包成 `IRSource`（[compiler.py:88](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L88)），此时 `ir_source=True`，于是 `first_stage` 会 +1（[compiler.py:292-293](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L292-L293)），跳过 `make_ttir`，直接从 `IRSource.make_ir`（它只 `parse_mlir_module`，不再走 AST）往下跑后续阶段。这正是「写 IR 级测试更方便」的原因。
+**答案**：不会。传字符串路径时，`compile()` 会把它包成 `IRSource`（[compiler.py:87](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L87)），此时 `ir_source=True`，于是 `first_stage` 会 +1（[compiler.py:292](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L292)），跳过 `make_ttir`，直接从 `IRSource.make_ir`（它只 `parse_mlir_module`，不再走 AST）往下跑后续阶段。这正是「写 IR 级测试更方便」的原因。
 
 **练习 2**：`make_backend` 为什么要强制 `len(actives) == 1`？
 **答案**：因为编译流程需要唯一的后端来提供 `add_stages`、`parse_options` 等。如果同时有多个后端 `supports_target` 返回 True，Triton 无法决定用谁的阶段流水线，所以直接报错，要求环境里对同一 target 只有一个匹配后端。
@@ -467,16 +495,17 @@ return module
 
 **任务**：针对 u1-l4 的 `add_kernel`，写一份**调用链说明文档**，要求覆盖以下每一个环节，并附上对应的源码永久链接和行号：
 
-1. `@triton.jit` 把 `add_kernel` 变成 `JITFunction`（引用 [jit.py:922-939](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L922-L939)）。
-2. `add_kernel[grid](...)` 经 `__getitem__` 调到 `run`（引用 [jit.py:364-371](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L364-L371)）。
-3. `run` 查缓存未命中，进入 `_do_compile`（引用 [jit.py:723-727](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L723-L727)）。
-4. `_do_compile` 调 `self.compile`，经 `create_binder` 得知它就是 `triton.compiler.compile`（引用 [jit.py:665-676](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/jit.py#L665-L676) 与 [compiler.py:227](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L227)）。
-5. `compile` 用 `make_backend` 选中 `AscendBackend`（引用 [compiler.py:386-391](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L386-L391) 与 [ascend/compiler.py:1202-1204](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L1202-L1204)）。
-6. `src.make_ir()` → `ast_to_ttir` 生成**原始 TTIR**（引用 [compiler.py:79-82](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L79-L82) 与 [code_generator.py:1659-1698](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/code_generator.py#L1659-L1698)）。
-7. stages 第一个阶段 `make_ttir` 优化 TTIR（引用 [ascend/compiler.py:132-152](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/compiler.py#L132-L152)）。
-8. （可选，若有 NPU）设 `TRITON_DEBUG=1` 运行，把 dump 出的 `kernel.ttir.mlir` 贴进文档，逐行标注它对应 kernel 的哪条语句。
+1. `@triton.jit` 把 `add_kernel` 变成 `JITFunction`（引用 [jit.py:915-932](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L915-L932)）。
+2. `add_kernel[grid](...)` 经 `__getitem__` 调到 `run`（引用 [jit.py:364-371](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L364-L371)）。
+3. `run` 查缓存未命中，进入 `_do_compile`（引用 [jit.py:716-720](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L716-L720)）。
+4. `_do_compile` 调 `self.compile`，经 `create_binder` 得知它就是 `triton.compiler.compile`（引用 [jit.py:658-669](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/runtime/jit.py#L658-L669) 与 [compiler.py:226](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L226)）。
+5. `compile` 用 `make_backend` 选中 `AscendBackend`（引用 [compiler.py:363-368](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L363-L368) 与 [ascend/compiler.py:1205-1209](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1205-L1209)）。
+6. `src.make_ir()` → `ast_to_ttir` 生成**原始 TTIR**（引用 [compiler.py:78-81](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L78-L81) 与 [code_generator.py:1600-1639](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/code_generator.py#L1600-L1639)）。
+7. stages 第一个阶段 `make_ttir` 优化 TTIR（引用 [ascend/compiler.py:134-154](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L134-L154)）。
+8. **（本讲新增）** 指出 Ascend 对 `jit.py` 的定制不在仓库 `jit.py`（干净上游）里，而在补丁 [triton-ascend-3.6.0.patch:770-807](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L770-L807) 的 `create_function_from_signature` 整型注解特化处，构建期由 `setup.py` 的 `apply_triton_ascend_patch()` 贴上。
+9. （可选，若有 NPU）设 `TRITON_DEBUG=1` 运行，把 dump 出的 `kernel.ttir.mlir` 贴进文档，逐行标注它对应 kernel 的哪条语句。
 
-**交付物**：一份 Markdown 文档，包含上面 8 个环节的「文字说明 + 源码链接 + 行号」。这个练习会把「装饰器 → 启动代理 → 编译触发 → 后端选择 → TTIR 生成与优化」整条链路牢牢焊在脑子里，是进入 u3-l2（`AscendBackend` 阶段注册细节）的前置必备。
+**交付物**：一份 Markdown 文档，包含上面各环节的「文字说明 + 源码链接 + 行号」。这个练习会把「装饰器 → 启动代理 → 编译触发 → 后端选择 → TTIR 生成与优化 → 补丁交付」整条链路牢牢焊在脑子里，是进入 u3-l2（`AscendBackend` 阶段注册细节）的前置必备。
 
 ## 6. 本讲小结
 
@@ -486,12 +515,13 @@ return module
 - `compile()` 是总调度：`make_backend(target)` 选中唯一的 `AscendBackend`（靠 `supports_target` 判断 `backend=="npu"`），再用 `add_stages` 注册阶段流水线。
 - **TTIR 分两步生成**：原始 TTIR 由 core 的 `ast_to_ttir`（`src.make_ir`，遍历 Python AST）产出，目标无关；优化由后端首阶段 `make_ttir`（stages 的 `"ttir"` 键）完成，跑的是通用 inliner/cse/licm 等 pass。
 - `BaseBackend` 是后端契约，规定了 `supports_target`、`parse_options`、`add_stages`、`load_dialects` 等必须实现的方法；Ascend 通过继承它「插」进 Triton 编译流程。
+- **（承接 u1-l2）去侵入化后**，本讲引用的 `jit.py` 等上游文件保持干净原貌，Ascend 对 `jit.py` 唯一的定制（`create_function_from_signature` 的整型注解特化）以补丁形式（`triton-ascend-3.6.0.patch:770-807`）在构建期由 `setup.py` 贴上。
 
 ## 7. 下一步学习建议
 
 本讲只走到「TTIR 生成与优化」就停了。接下来的学习路径：
 
-1. **u3-l2 AscendBackend：阶段注册与 NPUOptions**：精读 `AscendBackend.add_stages`，搞清 `ttir → ttadapter → npubin` 各阶段如何串联、`force_simt_only` 分支有何不同、`NPUOptions` 有哪些关键字段。
+1. **u3-l2 AscendBackend：阶段注册与 NPUOptions**：精读 `AscendBackend.add_stages`，搞清 `ttir → ttadapter → npubin` 各阶段如何串联、`force_simt_only` 分支有何不同、`NPUOptions` 有哪些关键字段（注意其 `__post_init__` 现会先应用运行期补丁 `_apply_ascend_patch`）。
 2. **u3-l3 make_ttir、编译产物、元数据与缓存**：深入了解 `make_ttir` 之后产出的元数据（`kernel_name`、`tensor_kinds`、`mix_mode`）和编译缓存目录结构。
 3. **u4 单元**：如果想直接看 TTIR 之后「怎么变成 Linalg、怎么变成 `.o`」，可以跳到 u4-l1（`ttir_to_linalg` pass 编排总览）。
-4. **延伸阅读**：通读一遍 [python/triton/compiler/compiler.py:227-383](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/compiler.py#L227-L383) 的 `compile()` 全文，理解缓存命中、override、dump、metadata 写回等机制——这些是日后调试编译问题（u10-l1）的基础。
+4. **延伸阅读**：通读一遍 [python/triton/compiler/compiler.py:226](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/python/triton/compiler/compiler.py#L226) 起的 `compile()` 全文（直到 `make_backend` 之前），理解缓存命中、override、dump、metadata 写回等机制——这些是日后调试编译问题（u10-l1）的基础。

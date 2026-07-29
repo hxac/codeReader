@@ -1,554 +1,387 @@
-# 代码结构与「核心 vs Ascend」分层原则
+# 代码结构、核心 vs Ascend 分层与补丁机制
+
+> 本讲承接 [u1-l1](u1-l1-project-overview-and-architecture.md)。在上一讲我们建立了「Triton-Ascend 是社区 Triton 的昇腾 NPU 可插拔后端」这张总导航图。本讲把镜头拉近，回答三个落地问题：**代码放在哪？谁属于核心、谁属于 Ascend？上游被「魔改」的部分怎么维护？**
 
 ## 1. 本讲目标
 
-上一讲（u1-l1）我们建立了 Triton-Ascend 的全局地图：它由三大组件构成——语言扩展、compiler、driver，主链路是 `TTIR → Linalg IR → AscendNPU IR → triton_xxx_kernel.o`。
+学完本讲，你应该能够：
 
-但地图只告诉我们「有哪些零件」。本讲要回答一个更实际的问题：**这些零件的源码到底放在仓库的哪里？为什么放在那里？** 当你以后想改一行代码、加一个功能、或者读一段实现时，第一个动作就是定位文件——本讲就是那张「仓库导航图」。
-
-学完本讲，你应当能够：
-
-1. 区分 **Triton core** 与 **Triton-Ascend** 两部分代码，知道它们各自的「家园目录」。
-2. 识别 `third_party/ascend/` 下 `language`、`backend`、`lib`、`include`、`costmodel` 等子目录的职责。
-3. 理解并运用项目的核心放置原则：**「目标无关的改动留在 Triton core，目标亲和的改动放进 Triton-Ascend」**。
-4. 看懂这条原则在「安装打包」阶段是如何被代码强制实现的（拷贝 + 挂载）。
-5. 诚实看待分层：理解 core 里少数几个「扩展点钩子」是刻意的、最小化的例外。
-
----
+- 在仓库里一眼分清「Triton core」与「Triton-Ascend」两部分代码，并说出判别依据。
+- 画出 `third_party/ascend/` 下 `language / backend / lib / include / costmodel / patch` 等子目录各自的职责。
+- 解释为什么上游 Triton 源文件（`python/`、`include/`、`lib/`、`bin/`）在仓库里保持「干净原貌」，而 Ascend 亲和改动以 **patch（补丁）** 形式交付。
+- 区分两种补丁机制：**构建期** 的 `apply_triton_ascend_patch()`（`setup.py`）与 **运行期** 的 `_apply_ascend_patch()`（`third_party/ascend/backend/__init__.py`，由 `NPUOptions.__post_init__` 触发）。
+- 独立在 patch 文件里找出真实的 Ascend 亲和修改，并判断一段代码的归属。
 
 ## 2. 前置知识
 
-本讲几乎不涉及算法，但要理解几个工程概念。我们用大白话逐一说明。
-
-### 2.1 什么是「目标无关」与「目标亲和」
-
-- **目标无关（target independent）**：这段代码跟「具体硬件」没有关系，换一块芯片它照样成立。比如 `@triton.jit` 装饰器的实现、IR 的内存分配逻辑、缓存目录管理。这些属于所有后端共享的「公共能力」。
-- **目标亲和（target affinitive）**：这段代码是专门为某一类硬件写的，离开了它就没有意义。比如「如何把一个指针表达式重写成昇腾能张量化的形式」「如何用 CANN 的 `rtKernelLaunch` 启动一个内核」。这些是 Ascend 专属的。
-
-> 一句话直觉：**如果你删掉这段代码，是「所有后端都坏了」还是「只有 Ascend 坏了」？** 前者说明它属于 core，后者说明它属于 Ascend。
-
-### 2.2 Python 的包与模块
-
-Python 用目录 + `__init__.py` 来组织代码包。`import triton.language.extra.cann` 这个写法，背后对应的是目录 `triton/language/extra/cann/`。本讲会看到，`cann` 这个目录在**源码仓库里**和**安装到 site-packages 之后**，物理位置是不一样的——这正是分层机制的关键。
-
-### 2.3 打包与安装的直觉（setuptools）
-
-`pip install -e .` 背后跑的是 `setup.py`（或 `pyproject.toml` 声明的构建后端）。`setup.py` 可以在安装时**把某些目录拷贝到另一个位置**，甚至**创建符号链接**。Triton-Ascend 正是用这个能力，把 `third_party/ascend/language/` 下的内容「挂载」到 `triton.language.extra` 下。你暂时只要知道「安装脚本可以在装的时候搬文件」就够了。
-
-### 2.4 git submodule（第三方后端的栖身之处）
-
-`third_party/` 是仓库里专门存放「可选后端」的地方。在本仓库里，Ascend 是默认构建的主后端之一，但代码仍按社区约定放在 `third_party/ascend/`，与 `nvidia`、`amd` 等其他后端并列。
-
----
+- **什么是 Triton / TTIR**：Triton 把 Python kernel 先翻译成与硬件无关的中间表示 TTIR，再交给「后端」翻译成具体硬件的二进制（详见 u1-l1）。本讲关心的是「仓库里这些代码到底怎么组织」。
+- **什么是 patch（补丁）**：patch 是一种文本差异格式（`diff`/`git diff` 输出），描述「把文件 A 的第 N 行改成什么样」。`git apply foo.patch` 会按照这份差异就地修改文件。本讲的关键结论是：Triton-Ascend 没有直接改坏上游源文件，而是把改动写成 `.patch` 文件，在需要时再「贴」上去。
+- **什么是 monkey-patch（运行期补丁）**：在程序运行时，用 Python 动态替换某个类/模块的属性（例如把 `CodeGenerator.__init__` 换成自己包装过的版本），从而在不改源码文件的前提下改变行为。这是「运行期补丁」的实现手段。
+- **install 时如何安装 backend**：标准 Triton 规定后端放在 `third_party/<名字>/`，安装时会被「链接」到 `python/triton/backends/<名字>` 和 `python/triton/language/extra/<名字>`，从而被主程序发现。理解这一点才能看懂目录里那些「看起来重复」的链接关系。
 
 ## 3. 本讲源码地图
 
-本讲涉及的关键文件如下表。读者现在不必逐一打开，后面讲解到时再对照查阅。
-
-| 文件 | 作用 | 本讲用来讲什么 |
+| 文件 / 目录 | 作用 | 本讲用它说明什么 |
 | --- | --- | --- |
-| `docs/en/architecture_design_and_core_features.md` | 架构与目录说明文档 | 「分层原则」与「目录职责表」的权威出处 |
-| `pyproject.toml` | 构建配置 | 看构建依赖、构建后端，确认 core 与 ascend 的构建关系 |
-| `setup.py` | 安装/打包入口 | 演示「拷贝 + 挂载」如何落地分层 |
-| `python/triton/backends/__init__.py` | 后端发现机制 | 解释安装后 Ascend 后端如何被 Triton 自动找到 |
-| `python/triton/compiler/code_generator.py` | core 的 IR 构造器 | 展示 core 里的「扩展点钩子」 |
-| `python/triton/runtime/interpreter.py` | core 的解释器 | 展示「带保护的可选导入」钩子 |
-| `third_party/ascend/backend/__init__.py` | Ascend 后端入口 | 展示「运行时 monkey patch」这一分层手段 |
-| `third_party/ascend/language/cann/__init__.py` | Ascend 语言扩展入口 | 展示 `cann` 模块对外暴露了什么 |
-| `third_party/ascend/backend/backend_register.py` | 运行时策略注册 | 展示 torch_npu/mindspore 两种运行时的策略分派 |
+| `docs/en/architecture_design_and_core_features.md` | 架构与代码结构官方说明 | 「核心 vs Ascend」分层原则与目录职责表 |
+| `setup.py` | 构建/打包入口 | 构建期补丁应用 `apply_triton_ascend_patch()`、安装时的 backend/language 链接 |
+| `pyproject.toml` | 构建系统声明 | 构建依赖（cmake、ninja、pybind11）与代码风格配置 |
+| `third_party/ascend/patch/triton-ascend-3.6.0.patch` | 主补丁文件 | 对 16 个上游文件的具体 Ascend 亲和修改 |
+| `third_party/ascend/patch/triton-ascend-dev-3.6.0.patch` | 开发期补丁 | 对 `autotuner.py` 的少量修改 |
+| `third_party/ascend/backend/__init__.py` | Ascend 后端入口 | 运行期 monkey-patch `_apply_ascend_patch()` |
+| `third_party/ascend/backend/compiler.py` | 编译后端主逻辑 | `NPUOptions.__post_init__` 触发运行期补丁 |
 
 ---
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成 5 个最小模块，从「原则」到「实现」，最后到「现实的例外」。
-
-### 4.1 两条代码线与「分层原则」
+### 4.1 顶层目录组织与「核心 vs Ascend」分层
 
 #### 4.1.1 概念说明
 
-整个仓库本质上只有「两条代码线」：
+打开仓库根目录，你会看到 `python/`、`include/`、`lib/`、`bin/`、`test/`、`cmake/`，以及一个 `third_party/`。前几个目录看起来「和 Triton 一模一样」——这不是巧合，它们 **就是** 社区 Triton 的源码；而所有昇腾相关的东西，都集中在 `third_party/ascend/`。
 
-1. **Triton core（核心线）**：来自社区标准 Triton 的、与硬件无关的通用实现。它负责把 Python kernel 翻译成与硬件无关的中间表示 TTIR，并提供 JIT、缓存、解释器等公共运行时。
-2. **Triton-Ascend（亲和线）**：所有为华为昇腾 NPU（CANN 软件栈）专门写的代码，它接在 core 后面，把 TTIR 一路变换成能在 NPU 上跑的二进制。
+官方文档用一句话总结了这条判别准则：
 
-项目对这两条线的划分立了一条**硬规矩**，原文如下：
+[architecture_design_and_core_features.md:33-38](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/architecture_design_and_core_features.md#L33-L38) 给出「代码结构原则」：
 
-> - **If the modification is target independent**, it should be retained in the **Triton core** part (such as general modifications to the language and runtime).
-> - **If the modification is target affinitive**, it should be placed in the **Triton-Ascend** part.
+> - 如果改动是 **target independent（与目标硬件无关）** 的，应该留在 **Triton core** 部分（例如对语言、runtime 的通用修改）。
+> - 如果改动是 **target affinitive（与目标硬件亲和）** 的，应该放在 **Triton-Ascend** 部分。
 
-我们把这条规矩叫做「**先 core、后 ascend**」：写新代码时，先问自己「这是不是与硬件无关的通用能力？」如果是，就放进 core；只有在确实离不开昇腾硬件时，才放进 ascend。
+也就是说，本项目的分层不是「按文件夹随便分」，而是有一条语义标准：**和 NPU/CANN/BiSheng 绑定的，进 `third_party/ascend/`；任何后端都能受益的通用改动，进 `python/` 等核心目录。**
 
 #### 4.1.2 核心流程
 
-「分层原则」如何影响日常开发？可以总结成一条简单的决策流：
+判别一段代码归属的决策流程（伪代码）：
 
 ```
-我要写/改一段代码
-        │
-        ▼
-它依赖昇腾硬件/CANN/BiSheng 吗？
-        │
-   ┌────┴────┐
-   否        是
-   │         │
-   ▼         ▼
- 放进 core   放进 third_party/ascend
-(python/    (language/backend/
- include/    include/lib/
- lib/)       costmodel/...)
+看到一段 Triton 源码改动
+├─ 它是否只在 Ascend NPU 上有意义？（涉及 CANN / BiSheng / Cube-Vector / UB 等）
+│   ├─ 是 → 属于 Triton-Ascend（third_party/ascend/）
+│   └─ 否 → 进入下一步
+├─ 它是否对所有后端（NVIDIA / AMD / Ascend）都通用？
+│   ├─ 是 → 属于 Triton core（python/、include/、lib/、bin/）
+│   └─ 边界模糊 → 优先保留在 core，仅把硬件专属部分抽出
 ```
 
-这条流不只是「美学」，它有现实意义：core 的改动理论上对所有后端（NVIDIA、AMD、Ascend）都生效；ascend 的改动只影响 Ascend。混放会导致「我以为只改了 Ascend，结果把别人的后端也改了」这类事故。
+> **注意一个反直觉点**：本项目里 `python/triton/runtime/jit.py`、`python/triton/language/semantic.py` 这些「核心」文件 **确实被 Ascend 改过**——但改动并没有直接写进文件，而是以补丁形式存在。这正是本讲后半段的重点。
 
 #### 4.1.3 源码精读
 
-分层原则的权威出处是架构文档的「Code Structure Principles」与「Directory Structure」两节。
+目录职责表见 [architecture_design_and_core_features.md:40-54](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/architecture_design_and_core_features.md#L40-L54)。关键几行翻译如下：
 
-**代码原则原文**（[docs/en/architecture_design_and_core_features.md:35-38](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/architecture_design_and_core_features.md#L35-L38)）——这一段把「target independent → core / target affinitive → ascend」白纸黑字写成了项目约束。
-
-紧接着的目录职责表（[docs/en/architecture_design_and_core_features.md:42-53](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/architecture_design_and_core_features.md#L42-L53)）把每个目录归到了某一层，下面是简化后的对照：
-
-| 目录 | 所属层 | 文档给的一句话职责 |
+| 目录 | 架构层 | 说明 |
 | --- | --- | --- |
-| `python/` | Triton core | 标准 Triton 的通用 Python：`triton.language`、JIT、runtime、cache、工具入口 |
-| `include/`、`lib/` | Triton core | 通用的 C++/MLIR 基础设施、方言、pass、转换 |
-| `third_party/ascend/` | Triton-Ascend | Ascend 后端根目录，包含语言扩展、编译后端、运行时驱动、MLIR pass、示例与测试 |
+| `python/` | Triton core | 标准 Triton 的通用 Python 实现（语言、JIT、runtime、cache、工具入口）。与目标无关的能力应优先放在这里 |
+| `include/`、`lib/` | Triton core | 标准 Triton 的 C++/MLIR 基础设施、方言、pass、转换逻辑。Ascend 专属后端代码不放这里 |
+| `third_party/ascend/` | Triton-Ascend | Ascend 后端根目录，含 NPU/CANN/BiSheng 专属的语言扩展、编译后端、runtime 驱动、MLIR pass、示例与测试 |
 | `third_party/ascend/language/` | 语言扩展 | 安装时被链接到 `triton.language.extra`，使 kernel 可用 `triton.language.extra.cann` |
-| `third_party/ascend/backend/compiler.py` | compiler | Ascend 编译后端主入口 |
-| `third_party/ascend/backend/driver.py` | driver | Ascend 运行时驱动 |
-| `third_party/ascend/include/`、`third_party/ascend/lib/` | compiler | Ascend 专属 MLIR 方言与 pass（`TritonToLinalg` 等） |
+| `third_party/ascend/backend/compiler.py` | compiler | Ascend 编译后端主入口，注册编译选项、组织 TTIR lowering 各阶段 |
 
-这张表是本讲的「地图主图」，后面几个模块都是对它的展开。
+构建系统层面，`setup.py` 在第 765 行一次性声明了三个内置后端，`ascend` 排在第一个：
+
+[setup.py:765](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L765) —— `backends = [*BackendInstaller.copy(["ascend", "nvidia", "amd"]), *BackendInstaller.copy_externals()]`
+
+而打包目录映射 `get_package_dirs()` 的第一条就是 `("", "python")`，即整个 `python/` 作为包根，随后才追加各后端目录：
+
+[setup.py:768-792](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L768-L792) —— 先 `yield ("", "python")`，再为每个 backend 产出 `triton.backends.<name>` 与 `triton.language.extra.<x>` 映射。
 
 #### 4.1.4 代码实践
 
-**实践目标**：用「删掉它会坏谁」的标准，亲手验证一次分层判断。
+**实践目标**：亲手验证「`python/` 是干净核心、`third_party/ascend/` 是 Ascend 专属」。
 
 **操作步骤**：
 
-1. 打开 [docs/en/architecture_design_and_core_features.md:42-53](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/docs/en/architecture_design_and_core_features.md#L42-L53) 的目录表。
-2. 任选表中的 3 个目录，分别为它们设想「如果删除这个目录」的后果。
-3. 把后果写成「所有后端都坏 / 只有 Ascend 坏」二选一。
+1. 用 `ls python/triton/` 列出核心包结构，你会看到 `compiler/`、`runtime/`、`language/`、`backends/` 等标准 Triton 目录。
+2. 用 `ls third_party/ascend/` 列出 Ascend 后端结构，对比二者差异。
+3. 用 `ls third_party/` 查看：除了 `ascend`，还有 `nvidia`、`amd`、`proton`、`f2reduce`——说明 Ascend 是与 NVIDIA/AMD 平级的「可插拔后端」。
 
-**需要观察的现象 / 预期结果**：
+**需要观察的现象**：`python/` 里看不到任何 `cann`/`npu`/`hacc` 字样；这些字样只出现在 `third_party/ascend/`。
 
-- `python/` 删除 → JIT、缓存、TTIR 生成都没了 → **所有后端都坏** → 它是 core。✅
-- `third_party/ascend/backend/compiler.py` 删除 → Ascend 没法把 TTIR 变成 `.o`，但 NVIDIA/AMD 后端不受影响 → **只有 Ascend 坏** → 它是 ascend。✅
-- `third_party/ascend/lib/TritonToLinalg` 删除 → Ascend 缺一个 lowering pass，别的后端照常 → **只有 Ascend 坏** → 它是 ascend。✅
-
-> 待本地验证：以上判断基于源码职责，不需要运行设备即可完成；结论与文档归类一致。
+**预期结果**：两个目录内容互补、不重叠，印证「核心 vs Ascend」分层。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：假设你想给 `@triton.jit` 增加一个「记录每次编译耗时的通用日志」，应该放在 core 还是 ascend？为什么？
+**练习 1**：`python/triton/backends/` 这个目录在仓库里几乎为空（或只有少量文件），为什么安装后却能 `import triton.backends.ascend`？
+**参考答案**：因为安装时 `setup.py` 的 `add_link_to_backends()` 把 `third_party/ascend/backend` 软链接到了 `python/triton/backends/ascend`（见 [setup.py:817-841](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L817-L841)）。源码在 `third_party/`，「安装态」在 `python/`，靠链接桥接。
 
-> **参考答案**：放在 **core**。因为「记录编译耗时」与具体硬件无关，对所有后端都有用，属于 target independent。
-
-**练习 2**：如果你想新增「让 Ascend 把某类访存用 UB（Unified Buffer）专门优化」的代码，应该放哪里？
-
-> **参考答案**：放在 **ascend**（很可能是 `third_party/ascend/lib/` 下新增一个 pass）。它强依赖昇腾的 UB 硬件单元，属于 target affinitive。
+**练习 2**：如果有人想给 Triton 加一个「所有后端都能用」的通用循环优化，应该放在哪个目录？
+**参考答案**：放在 `lib/` 或 `python/`（Triton core），因为它 target-independent；只有 NPU 专属部分才进 `third_party/ascend/lib/`。
 
 ---
 
-### 4.2 Triton core 的两个家园：`python/` 与 `include/`、`lib/`
+### 4.2 third_party/ascend 子目录职责地图
 
 #### 4.2.1 概念说明
 
-Triton core 的代码按「语言」分在两个家园：
-
-- **`python/`**：所有 Python 实现。kernel 作者直接打交道的 `@triton.jit`、`tl.load` 等都在这里。
-- **`include/` 与 `lib/`**：所有 C++/MLIR 实现。负责 IR 方言定义、分析、转换（Conversion）等底层基础设施。
-
-为什么要分 Python 和 C++？因为 Triton 是「Python 前端 + C++/MLIR 后端」的混合架构：Python 负责易用，C++ 负责高性能的 IR 处理。两者通过 pybind11 桥接（`triton._C.libtriton`）。
+`third_party/ascend/` 是一个「自包含」的后端：它几乎具备一个完整编译后端所需的全部部件——语言扩展、编译器、驱动、MLIR pass、代价模型、示例、测试。理解它的子目录划分，就等于拿到了后续所有讲义的「目录索引」。
 
 #### 4.2.2 核心流程
 
-core 内部的代码流可以粗略画成：
-
-```
-python/triton/runtime/jit.py        ← @triton.jit 触发编译
-        │
-        ▼
-python/triton/compiler/             ← 生成 TTIR（硬件无关）
-        │
-        ▼ (交给某个后端，例如 ascend)
-include/triton/ + lib/              ← 通用 C++/MLIR 基础设施（方言、分析、转换）
-```
-
-注意：core 的 C++ 基础设施里**没有** Ascend 专属 pass——`lib/Conversion/` 里是 `TritonGPUToLLVM`、`TritonToTritonGPU` 这类**面向 GPU** 的通用转换，与 Ascend 无关。
-
-#### 4.2.3 源码精读
-
-**Python 家园**（`python/triton/`）的顶层结构如下，全部属于 core：
-
-| 路径 | 职责 |
-| --- | --- |
-| `python/triton/runtime/jit.py` | `@triton.jit` 装饰器与 `JITFunction`（编译触发点） |
-| `python/triton/runtime/autotuner.py` | 通用的 `@triton.autotune` 机制 |
-| `python/triton/runtime/cache.py`、`code_cache.py` | 编译缓存 |
-| `python/triton/runtime/interpreter.py` | 解释器模式（精度基准） |
-| `python/triton/language/core.py` | `tl.*` 语言 API 的核心实现 |
-| `python/triton/compiler/` | TTIR 生成与编译驱动 |
-| `python/triton/backends/` | 后端**发现**机制（不包含具体后端实现） |
-
-**C++ 家园**（`include/triton/` 与 `lib/`）的顶层结构：
-
-| 路径 | 职责 |
-| --- | --- |
-| `include/triton/Dialect/`、`lib/Dialect/` | 通用方言：`Triton`、`TritonGPU`、`TritonInstrument`、`Gluon` 等 |
-| `lib/Conversion/TritonGPUToLLVM/` | GPU→LLVM 的通用转换 |
-| `lib/Conversion/TritonToTritonGPU/` | Triton→TritonGPU 的通用转换 |
-| `lib/Analysis/`、`lib/Tools/`、`lib/Target/` | 通用分析、工具、目标后端基础设施 |
-
-关键点：`lib/Conversion/` 里出现的是 `TritonGPUToLLVM`、`TritonInstrumentToLLVM`、`TritonToTritonGPU`——它们是社区 Triton 原有的、面向 GPU 的转换。**Ascend 的转换（`TritonToLinalg` 等）不在这里**，而在 `third_party/ascend/lib/`。这正是分层原则在 C++ 层的体现。
-
-#### 4.2.4 代码实践
-
-**实践目标**：在 core 的 Python 家园里走一遍「JIT 入口」的定位，确认它确实与硬件无关。
-
-**操作步骤**：
-
-1. 打开 `python/triton/runtime/jit.py`，找到 `@triton.jit` 对应的 `JITFunction` 类。
-2. 搜索它内部是否出现 `ascend`、`npu`、`cann` 等字样。
-3. 对比：再打开 `third_party/ascend/backend/compiler.py`，看它是否大量出现这些字样。
-
-**需要观察的现象 / 预期结果**：
-
-- `jit.py` 主要处理「函数签名、缓存键、何时触发编译」等通用逻辑，几乎不关心具体硬件——它是 core。
-- `compiler.py` 则满是 `Ascend`、`NPU`、`CANN`、`BiSheng` 相关代码——它是 ascend。
-- 这种对比会让你对「分层」产生直观感受。
-
-> 待本地验证：具体关键字出现频次可在本地用搜索工具统计确认。
-
-#### 4.2.5 小练习与答案
-
-**练习 1**：`lib/Conversion/TritonGPUToLLVM/` 属于 core 还是 ascend？为什么它在 core 里？
-
-> **参考答案**：属于 **core**。它是社区 Triton 原有的、面向 GPU 的通用转换，与昇腾无关，所以放在 core 的 `lib/Conversion/`。
-
-**练习 2**：用户写的 `import triton; import triton.language as tl` 中，`triton` 这个包的根目录对应仓库里的哪个文件夹？
-
-> **参考答案**：对应 `python/`。安装后 `triton` 包的内容来自 `python/triton/`。
-
----
-
-### 4.3 Triton-Ascend 的大本营：`third_party/ascend/`
-
-#### 4.3.1 概念说明
-
-`third_party/ascend/` 是 Ascend 后端的「大本营」。上一讲提到的三大组件（语言扩展、compiler、driver）以及它们的 C++ pass、调优、示例、测试，**全部**住在这一棵子树里。这样设计的好处是：如果某天不想支持 Ascend，理论上只要不构建这棵子树即可，core 完全不受影响。
-
-#### 4.3.2 核心流程
-
-这棵子树内部又按职责分成若干目录，对应上一讲三大组件 + 周边设施：
+各子目录与后续讲义的对应关系：
 
 ```
 third_party/ascend/
-├── language/          ← 语言扩展（cann）
-│   └── cann/
-│       ├── libdevice.py        ← 数学函数封装
-│       └── extension/          ← custom_op / compile_hint / 同步原语等
-├── backend/           ← compiler + driver
-│   ├── compiler.py             ← AscendBackend（编译阶段注册）
-│   ├── driver.py               ← NPUDriver / NPULauncher（运行时）
-│   ├── npu_utils.cpp           ← 硬件探测
-│   ├── backend_register.py     ← torch_npu/mindspore 策略分派
-│   └── runtime/                ← autotuner / costmodel / ubtuner 等
-├── include/ 与 lib/   ← Ascend 专属 MLIR 方言与 pass
-│   ├── TritonToLinalg/         ← ttir→linalg
-│   ├── TritonToStructured/     ← 指针/掩码张量化
-│   ├── DynamicCVPipeline/      ← Cube-Vector 流水线
-│   ├── AutoBlockify/           ← 并行块映射
-│   └── ...（共 14 个 pass 目录）
-├── costmodel/         ← 编译期代价模型（含硬件 schema JSON）
-├── AscendNPU-IR/      ← Ascend NPU IR 与 BiSheng 链路集成
-├── tutorials/         ← 示例（vector-add / softmax / matmul ...）
-└── unittest/          ← Python 单测与 MLIR conversion 测试
+├── language/      → Ascend 语言扩展（u7 整章）
+│   ├── cann/libdevice.py        数学函数封装
+│   └── cann/extension/          custom_op / mem_ops / sync 等亲和算子
+├── backend/       → 编译器 + 驱动 + 运行时（u3、u5、u9）
+│   ├── compiler.py              AscendBackend / NPUOptions / pass 编排
+│   ├── driver.py                NPUDriver / NPULauncher
+│   ├── __init__.py              运行期 monkey-patch（本讲）
+│   └── runtime/                 autotuner / costmodel / ubtuner
+├── lib/           → Ascend 专属 MLIR pass 的 C++ 实现（u4、u8）
+├── include/       → 上述 pass 的头文件 / Passes.td
+├── costmodel/     → 编译期代价模型 AscendModel（u9-l3）
+│   └── configs/ascend_910b.json 硬件 schema
+├── patch/         → 上游 Triton 补丁（本讲重点）
+├── AscendNPU-IR/  → AscendNPU IR 与 BiSheng 链路集成
+├── bin/           → triton-mlir-opt 等工具
+├── tutorials/     → 示例 kernel（u1-l4）
+└── unittest/      → pytest 与 MLIR conversion 测试（u10-l4）
 ```
 
-注意 `third_party/ascend/include/` 与顶层 `include/` 同名但**完全不同**：前者是 Ascend 专属 pass 头文件，后者是 core 通用基础设施。这是分层最容易让新手混淆的点，务必记住「带 `third_party/ascend/` 前缀的才是亲和代码」。
+注意 `lib/` 与 `include/` 的目录名和仓库根下的 `lib/`、`include/` **同名但内容完全不同**：根下的属于 Triton core（通用方言），`third_party/ascend/lib/` 下的全是 Ascend 专属 pass（如 `TritonToLinalg`、`DynamicCVPipeline`、`AutoBlockify`）。
+
+#### 4.2.3 源码精读
+
+`third_party/ascend/` 顶层除了子目录，还有两个值得注意的文件：
+
+- `ascend_ir.cc` / `triton_ascend.cc`：Ascend IR 的 pybind 绑定，供 `from triton._C.libtriton.ascend import ir as ascend_ir` 这类导入使用（见 [third_party/ascend/backend/__init__.py:22](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/__init__.py#L22)）。
+- `backend/name.conf`：声明后端的名字（`ascend`），标准 Triton 用它识别后端身份。
+
+`costmodel/` 是较独立的子系统，配置文件 `configs/ascend_910b.json`、`configs/hardware_schema.json` 描述硬件参数，C++ 代价模型实现在 `lib/AscendModel/`（详见 u9-l3）。
+
+#### 4.2.4 代码实践
+
+**实践目标**：用一次 `ls` 建立子目录与职责的对应记忆。
+
+**操作步骤**：执行 `ls third_party/ascend/lib/`，你会看到约 16 个 pass 目录（`TritonToLinalg`、`DynamicCVPipeline`、`AutoBlockify`、`TritonToStructured`…）。再执行 `ls third_party/ascend/include/`，会发现它与 `lib/` 目录名几乎一一对应——每个 pass 都有「头文件目录 + 实现目录」一对。
+
+**需要观察的现象**：`lib/` 与 `include/` 的目录名集合高度重合。
+
+**预期结果**：理解 Ascend pass 的代码组织是「声明在 `include/`、实现在 `lib/`」的标准 MLIR pass 布局。**待本地验证**：你环境里的目录列表数量。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：用户在 kernel 里写 `import triton.language.extra.cann as cann`，这个 `cann` 实际来自磁盘上哪个目录？
+**参考答案**：来自 `third_party/ascend/language/cann/`，安装时被链接到 `triton.language.extra.cann`（见架构表 [architecture_design_and_core_features.md:47](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/docs/en/architecture_design_and_core_features.md#L47)）。
+
+**练习 2**：为什么 `third_party/ascend/lib/TritonToLinalg/` 不放在仓库根的 `lib/` 下？
+**参考答案**：因为它 target-affinitive（把 TTIR 转成 Ascend 亲和的 Linalg/方言算子），按分层原则必须留在 `third_party/ascend/`；根下 `lib/` 只放通用方言。
+
+---
+
+### 4.3 构建期补丁机制：保持上游干净，Ascend 改动以 patch 交付
+
+#### 4.3.1 概念说明
+
+这是本讲最核心的机制。社区 Triton 的某些行为对 Ascend 并不友好（例如强制 tensor 元素数必须是 2 的幂），Triton-Ascend 需要修改这些上游文件。但项目选择 **不直接改坏源文件**，而是：
+
+1. 让 `python/`、`include/`、`lib/`、`bin/` 里的上游文件保持 **干净原貌**（和社区 Triton 一致）。
+2. 把所有 Ascend 亲和修改写成补丁文件 `triton-ascend-3.6.0.patch`。
+3. 在 **构建期**（`pip install` / 编译扩展时）由 `setup.py` 自动 `git apply` 这些补丁，把干净源码「临时」变成 Ascend 版本。
+
+这样做的好处是：上游文件可读、可对比、易于跟随社区升级；所有「魔改」集中、可审计、可回退。
+
+#### 4.3.2 核心流程
+
+构建期补丁应用的时序：
+
+```
+pip install / python setup.py build_ext
+        │
+        ▼
+CMakeBuild.run()                      # setup.py:493
+  ├─ download_and_copy_dependencies()  # 下载 NVIDIA 工具链等
+  └─ apply_triton_ascend_patch()       # ★ 应用 Ascend 补丁
+        │
+        ▼
+apply_triton_ascend_patch()           # setup.py:981
+  ├─ checkout_file(dev_patch_files)    # 先 git checkout 还原 autotuner.py 为干净态
+  ├─ apply_patch(dev patch)            # git apply 开发期补丁
+  ├─ checkout_file(patch_files)        # 再还原 16 个上游文件为干净态
+  └─ apply_patch(主 patch)             # git apply 主补丁
+        │
+        ▼
+随后 cmake / ninja 真正编译（此时源码已是「贴过补丁」的 Ascend 版本）
+```
+
+两个底层辅助函数：
+
+- `apply_patch(path)`：调用 `git apply` 把补丁贴到工作区（[setup.py:965-971](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L965-L971)）。
+- `checkout_file(files)`：调用 `git checkout --` 把指定文件还原成 git 里干净的版本（[setup.py:974-978](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L974-L978)）。
+
+「先 checkout 再 apply」是为了保证补丁能干净贴上——即便上一次构建残留了已打补丁的文件，`checkout` 会先把它们抹平。
 
 #### 4.3.3 源码精读
 
-我们看两个最能体现「Ascend 子树自成一体」的入口文件。
+构建入口 `CMakeBuild.run()` 在做任何 cmake 工作之前，先调用补丁应用：
 
-**语言扩展入口**（[third_party/ascend/language/cann/__init__.py:21-53](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/language/cann/__init__.py#L21-L53)）——这个文件对外暴露 `libdevice`（数学函数）和 `extension`（自定义算子等），并把部分接口映射到 Ascend 的专属实现（例如 `libdevice.tanh`、`extension.flip`）。这就是 kernel 里 `triton.language.extra.cann` 能用的东西的来源。
+[setup.py:493-495](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L493-L495) —— `run()` 内 `download_and_copy_dependencies()` 紧跟 `apply_triton_ascend_patch()`，之后才进入 cmake 版本检查与编译。
 
-```python
-from . import libdevice
-from . import extension
-# ...把若干数学函数指向 Ascend 专属实现或通用 math
-libdevice.exp = math.exp
-math.tanh = libdevice.tanh
-__all__ = ["libdevice", "extension"]
-```
+补丁应用本体 `apply_triton_ascend_patch()` 列出了被改的 **全部上游文件**：
 
-**后端策略注册**（[third_party/ascend/backend/backend_register.py:25-55](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/backend_register.py#L25-L55)）——它用 `BackendStrategyRegistry` 把「同一个能力」按运行时（`torch_npu` 或 `mindspore`）分别注册，例如「如何取当前流」：
+[setup.py:981-1009](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L981-L1009) —— 定义两个补丁路径与两组文件清单：
 
 ```python
-@backend_strategy_registry.register("torch_npu", "get_current_stream")
-def get_current_stream(device): ...
-
-@backend_strategy_registry.register("mindspore", "get_current_stream")
-def get_current_stream(device): ...
+patch_files = [                      # 主补丁覆盖的 16 个上游文件
+    "CMakeLists.txt",
+    "include/triton/Dialect/Triton/IR/TritonAttrDefs.td",
+    "lib/Dialect/Triton/IR/Traits.cpp",
+    "python/src/ir.cc",
+    "python/triton/_utils.py",
+    "python/triton/compiler/code_generator.py",
+    "python/triton/compiler/compiler.py",
+    "python/triton/compiler/errors.py",
+    "python/triton/language/math.py",
+    "python/triton/language/semantic.py",
+    "python/triton/language/standard.py",
+    "python/triton/runtime/interpreter.py",
+    "python/triton/runtime/jit.py",
+    "bin/RegisterTritonDialects.h",
+    "bin/triton-opt.cpp",
+    "bin/CMakeLists.txt",
+]
+dev_patch_files = ["python/triton/runtime/autotuner.py"]   # 开发期补丁只动这一个
 ```
 
-这说明：连「Ascend 内部」还要再按上层框架（torch_npu / mindspore）分策略，目标亲和代码被组织得非常细。
+这份清单本身就是一份「Ascend 改了上游哪里」的目录。注意它横跨 C++（`include/`、`lib/`、`bin/`）、构建脚本（`CMakeLists.txt`）和 Python（`python/triton/...`）三层。
+
+**三个真实的 Ascend 亲和修改示例**（直接摘自主补丁）：
+
+1. **放宽 tensor 元素数必须 2 的幂的约束**。社区 Triton 在 `Traits.cpp` 里强制校验元素数为 2 的幂，但 Ascend 的 tiling 经常产生非 2 幂的块。补丁把该校验注释掉：
+
+   [third_party/ascend/patch/triton-ascend-3.6.0.patch:105-117](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L105-L117) —— 把 `if ((numElements & (numElements - 1)) != 0) ...` 四行用 `// FIXME:patched triton community` 注释掉。这是典型 target-affinitive 改动，故以补丁交付而非进 core。
+
+2. **新增 Ascend 专属的 HF32 输入精度枚举**。社区 `TritonAttrDefs.td` 的 `TT_InputPrecisionAttr` 只有 TF32/TF32x3/IEEE/BF16x3/BF16x6，补丁插入 Ascend 的 `HF32` 并顺移后续枚举值：
+
+   [third_party/ascend/patch/triton-ascend-3.6.0.patch:89-100](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L89-L100) —— 新增 `I32EnumAttrCase<"HF32", 3, "hf32">`。HF32 是 Ascend 矩阵单元支持的精度模式，NVIDIA/AMD 后端不需要，因此只能走补丁。
+
+3. **CMake 注入安全编译选项与 LLVM 版本兼容**。补丁给根 `CMakeLists.txt` 加入 `safe_compile.cmake`、为 AscendNPU-IR 适配 LLVM 21/22 的兼容宏、以及覆盖率工具挂钩：
+
+   [third_party/ascend/patch/triton-ascend-3.6.0.patch:1-83](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch#L1-L83) —— `include(${CMAKE_CURRENT_SOURCE_DIR}/safe_compile.cmake)` 与 `LLVM_MAJOR_VERSION_22_COMPATIBLE` 选项。这些是构建链对 Ascend 工具链的专门适配。
+
+> 补充：`third_party/ascend/patch/` 下还有一个 `llvm_patch_f6ded0b.patch`（对 LLVM 本身的补丁）。`setup.py` 的 `get_llvm_patch_hash()` 会把所有 `llvm_patch_*.patch` 求哈希，拼进预编译 LLVM 包的文件名里（[setup.py:206-222](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/setup.py#L206-L222)），从而保证换补丁时能重新下载匹配的 LLVM。这是「补丁影响构建产物命名」的一个巧妙用法，但和上游 Triton 补丁是两件事。
 
 #### 4.3.4 代码实践
 
-**实践目标**：亲手列出 Ascend 子树下的全部 pass 目录，建立「亲和 C++ 代码量」的直觉。
+**实践目标**：从补丁文件里独立找出三处 Ascend 亲和修改，并解释「为何用补丁而非内联」。
 
 **操作步骤**：
 
-1. 列出 `third_party/ascend/lib/` 下的所有子目录。
-2. 与顶层 `lib/Conversion/` 的子目录对比。
+1. 打开 [third_party/ascend/patch/triton-ascend-3.6.0.patch](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch)。
+2. 用 `grep '^diff --git' third_party/ascend/patch/triton-ascend-3.6.0.patch` 列出全部被改文件（应与 4.3.3 的清单一致）。
+3. 任选三处 `diff --git` 块（建议选上面讲到的 `Traits.cpp`、`TritonAttrDefs.td`、`CMakeLists.txt`），阅读其 `+`/`-` 行。
+4. 对每处写一句话：改了什么 + 为什么这对 Ascend 必要但对其他后端不适用。
 
-**需要观察的现象 / 预期结果**：
+**需要观察的现象**：每个 hunk 都明确标注了上游文件路径与行号；所有改动都是「增量」而非整文件替换。
 
-- `third_party/ascend/lib/` 下有约 14 个 pass 目录（`TritonToLinalg`、`TritonToStructured`、`TritonToUnstructure`、`DynamicCVPipeline`、`AutoBlockify`、`DiscreteMaskAccessConversion`、`TritonToHIVM`、`TritonToHFusion`、`TritonToAnnotation`、`TritonToLLVM`、`TritonToGraph`、`TritonControlFlowOpt`、`Dialect`、`Utils`）。
-- 顶层 `lib/Conversion/` 只有面向 GPU 的 3 个。
-- 结论：Ascend 的 lowering 工作量集中在 `third_party/ascend/lib/`，core 的 C++ 部分与之泾渭分明。
-
-> 待本地验证：pass 目录数量可本地 `ls` 确认。
+**预期结果**：三处修改分别对应「约束放宽」「新增硬件精度」「构建链适配」三类典型的 target-affinitive 改动。**待本地验证**：你环境里补丁的具体行号（补丁可能随版本微调）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`third_party/ascend/lib/TritonToLinalg/` 和顶层 `lib/Conversion/TritonToTritonGPU/` 都是「转换」，它们为什么不在同一个目录？
+**练习 1**：为什么不直接把 `Traits.cpp` 里的 2 的幂校验删掉、提交进 `lib/`，而要写成补丁？
+**参考答案**：因为该项目要让 `lib/` 尽量与社区 Triton 保持一致，便于跟随上游升级、减少合并冲突；删校验是 Ascend 专属需求（target-affinitive），所以用补丁在构建期叠加，保持源文件干净。
 
-> **参考答案**：前者是 Ascend 专属的 ttir→linalg 转换（目标亲和），后者是社区原有的 Triton→TritonGPU 转换（目标无关）。按分层原则，亲和的放进 `third_party/ascend/lib/`，通用的留在 core 的 `lib/Conversion/`。
-
-**练习 2**：`third_party/ascend/include/` 和顶层 `include/` 同名，初学者怎么快速判断一个 `#include` 引到的是哪个？
-
-> **参考答案**：看构建目标与 CMake 配置。Ascend 专属 pass 的头文件通过 `third_party/ascend/CMakeLists.txt` 组织进 Ascend 后端目标；通用头文件来自顶层 `include/`。源码层面最简单的判别是看路径前缀是否带 `third_party/ascend/`。
+**练习 2**：`dev_patch_files` 只含 `autotuner.py`，它和主补丁为何要分开？
+**参考答案**：开发期补丁（`triton-ascend-dev-3.6.0.patch`）改动小且偏开发态（如把 autotune 的异常类型改成 `MLIRCompilationError`，见 [triton-ascend-dev-3.6.0.patch:1-22](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-dev-3.6.0.patch#L1-L22)），与发布版主补丁解耦，方便独立维护和回退。
 
 ---
 
-### 4.4 分层如何落地：安装期的「拷贝 + 挂载」机制
+### 4.4 运行期补丁机制：__post_init__ 里的 monkey-patch
 
 #### 4.4.1 概念说明
 
-到目前为止，分层还只是「源码放在不同目录」。但有一个问题没解决：用户写 kernel 时用的是 `triton.language.extra.cann`，而源码里 `cann` 明明在 `third_party/ascend/language/cann/`。这中间是怎么对上的？
+构建期补丁改的是 **文件**（编译前贴上去）。但有些 Ascend 行为不适合改源码文件——例如往生成的 MLIR module 里塞一个 `#hacc.target` 属性、或扩展 `compiler.parse` 支持新的 IR 扩展名。这些更适合在 **运行时** 用 Python 的 monkey-patch 动态注入。
 
-答案是：**`setup.py` 在安装时，把后端目录「搬」到了 core 的命名空间下**。具体有两种手段——正式安装时**拷贝**，开发模式（`pip install -e .`）下**创建符号链接**。这套机制让「源码物理位置」和「import 路径」解耦，是分层原则能真正工作的关键。
+Triton-Ascend 把这套运行期补丁放在 `third_party/ascend/backend/__init__.py` 的 `_apply_ascend_patch()` 里，并在 `NPUOptions.__post_init__`（每次创建编译选项时）触发它。这样既不污染上游文件，又能保证只要走 Ascend 后端就一定生效。
 
 #### 4.4.2 核心流程
 
-安装时的搬运流程：
+运行期补丁的触发与作用：
 
 ```
-源码仓库                                   安装后（site-packages / 可编辑目录）
-third_party/ascend/backend/      ──拷贝──▶  triton/backends/ascend/      (成为 triton.backends.ascend)
-third_party/ascend/language/cann ──挂载──▶  triton/language/extra/cann/  (成为 triton.language.extra.cann)
-                         │
-                         ▼
-python/triton/backends/__init__.py 在运行时扫描，发现 ascend 后端并加载它的 AscendBackend
+用户调用 kernel（触发 Ascend 编译）
+        │
+        ▼
+构造 NPUOptions(...)                     # compiler.py
+  └─ NPUOptions.__post_init__()          # compiler.py:1113
+        └─ from triton.backends.ascend import _apply_ascend_patch
+           _apply_ascend_patch()         # __init__.py:27  ★ 运行期补丁
+                │
+        ┌───────┼────────────────────────────┐
+        ▼       ▼                            ▼
+替换 CodeGenerator.__init__   替换 compiler.parse    替换 TritonSemantic.dot
+(注入 #hacc.target)           (支持 ttadapter/        (HF32 守卫 +
+                              mlirbc/npubin)          max_num_imprecise_acc)
 ```
 
-搬运完之后，Triton 启动时会自动「发现」这些后端，于是 Ascend 就被接进了编译流程。
+三处 monkey-patch 都用「`_xxx_patch_applied` 标志位」做 **幂等保护**——多次调用只会真正替换一次，避免反复嵌套包装。
 
 #### 4.4.3 源码精读
 
-**第一步：声明要构建哪些后端**（[setup.py:764](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L764)）——这一行说明 ascend 与 nvidia、amd 并列为「in-tree 后端」：
+触发点在 `NPUOptions.__post_init__` 的最开头，**先于** 任何字段派生（如 `compile_mode` 解析）：
 
-```python
-backends = [*BackendInstaller.copy(["ascend", "nvidia", "amd"]), *BackendInstaller.copy_externals()]
-```
+[third_party/ascend/backend/compiler.py:1113-1116](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1113-L1116) —— `__post_init__` 第一行就 `from triton.backends.ascend import _apply_ascend_patch` 并调用它。这保证后续编译流程用到的是已打过运行期补丁的对象。
 
-**第二步：定位后端的 `backend/`、`language/` 目录**（[setup.py:96-101](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L96-L101)）——注意它约定每个后端必须有 `backend/compiler.py` 和 `backend/driver.py`，并且可选地有 `language/` 目录：
+运行期补丁本体 `_apply_ascend_patch()` 包含三段独立的 monkey-patch（[third_party/ascend/backend/__init__.py:27-113](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/__init__.py#L27-L113)）：
 
-```python
-backend_path = os.path.join(backend_src_dir, "backend")
-...
-language_dir = os.path.join(backend_src_dir, "language")
-```
+1. **给生成的 module 注入 `#hacc.target` 属性**：包装 `CodeGenerator.__init__`，在原初始化之后，依据 `options.arch` 用 `ascend_ir` 构造 `#hacc.target<"arch">` 并 `set_attr` 到 module 上（[third_party/ascend/backend/__init__.py:30-51](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/__init__.py#L30-L51)）。`hacc` 是 Ascend 专属方言，社区 `CodeGenerator` 当然不会写它，所以只能运行期注入。
 
-**第三步：把 `language/` 挂载到 `triton.language.extra`**（[setup.py:823-830](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L823-L830)）——这是「挂载」的核心，它在开发模式下创建符号链接，把 `cann` 链到 core 的 `language/extra/` 下：
+2. **扩展 `compiler.parse` 的扩展名**：社区 `parse` 只认 `ttir/llir/ptx/cubin` 等，补丁新增对 `ttadapter`、`mlirbc`、`npubin` 的识别（[third_party/ascend/backend/__init__.py:57-74](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/__init__.py#L57-L74)）。这些是 Ascend 编译阶段产物（见 u3-l2 的 `add_stages`），社区 Triton 不存在。
 
-```python
-extra_dir = os.path.abspath(os.path.join(..., "python", "triton", "language", "extra"))
-for x in os.listdir(backend.language_dir):
-    src_dir = os.path.join(backend.language_dir, x)
-    install_dir = os.path.join(extra_dir, x)
-```
+3. **`tl.dot` 的 HF32 守卫与 imprecise_acc 处理**：包装 `TritonSemantic.dot`，当 `input_precision == "hf32"` 但输入不是 fp32 时静默回退默认精度，并把不支持的 `max_num_imprecise_acc` 强制置 None（[third_party/ascend/backend/__init__.py:80-113](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/__init__.py#L80-L113)）。注意这里的 HF32 与 4.3.3 里补丁新增的 HF32 枚举是 **配套** 的：枚举由构建期补丁引入，语义守卫由运行期补丁实现。
 
-安装打包阶段也有等价的「拷贝」声明（[setup.py:777-781](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L777-L781)），把后端的 `language` 内容安装为 `triton.language.extra.<名字>`。
-
-**第四步：运行时自动发现后端**（[python/triton/backends/__init__.py:38-63](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/backends/__init__.py#L38-L63)）——它通过 Python entry points（组名 `triton.backends`）或 in-tree 目录扫描，找到每个后端的 `compiler.py` 和 `driver.py`，并从中提取 `BaseBackend` 的具体子类（即 `AscendBackend`）：
-
-```python
-for ep in entry_points().select(group="triton.backends"):
-    compiler = importlib.import_module(f"{ep.value}.compiler")
-    driver = importlib.import_module(f"{ep.value}.driver")
-    backends[ep.name] = Backend(_find_concrete_subclasses(compiler, BaseBackend), ...)
-```
-
-这套「拷贝/挂载 + 自动发现」组合，正是「core 提供插槽、ascend 提供插件」的工程实现。
+> 为什么 `dot` 的 HF32 守卫用运行期补丁而不是构建期补丁？因为它依赖运行期的 dtype 判断（`lhs.dtype.is_fp32()`），且只是「在调用原函数前做参数修正」，逻辑薄、改源码收益小、用 monkey-patch 更轻量。
 
 #### 4.4.4 代码实践
 
-**实践目标**：亲眼看到「安装让 ascend 进入 core 命名空间」这件事。
+**实践目标**：确认运行期补丁确实在编译时被触发。
 
 **操作步骤**：
 
-1. 若已 `pip install -e .`，在仓库根目录查看是否生成了符号链接：`ls -la python/triton/language/extra/`，看是否有指向 `third_party/ascend/language/cann` 的 `cann` 链接。
-2. 在仓库根目录查看 `python/triton/backends/` 下是否出现了 `ascend/`（或对应的链接）。
-3. 若未安装，也可直接读 [setup.py:816-834](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/setup.py#L816-L834)，理解 `add_link_to_backends` 会在 `extra_dir` 下为每个后端的 `language` 子目录建链接。
+1. 在 [third_party/ascend/backend/compiler.py:1113-1116](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/compiler.py#L1113-L1116) 的 `_apply_ascend_patch()` 调用后临时加一行 `print("[probe] ascend runtime patch applied")`（仅本地调试，勿提交）。
+2. 运行任意一个 NPU kernel（如 u1-l4 的 vector-add）。
+3. 观察输出；如果开启了 IR dump（`MLIR_ENABLE_DUMP=1`），查找生成的 module 是否带有 `#hacc.target<"...">`。
 
-**需要观察的现象 / 预期结果**：
+**需要观察的现象**：每次构造 `NPUOptions` 都会打印一次 probe（受幂等标志保护，实际替换只发生一次）；dump 出的 module 顶层带 `hacc.target` 属性。
 
-- 开发模式下，`python/triton/language/extra/cann` 应是指向 `third_party/ascend/language/cann` 的符号链接；于是 `import triton.language.extra.cann` 在源码层面等价于读到了 ascend 的语言扩展。
-- `python/triton/backends/ascend/` 同理指向 `third_party/ascend/backend`。
-
-> 待本地验证：是否已生成链接取决于本地是否执行过安装；未安装时仅能通过阅读 `setup.py` 推断。这是「源码阅读型实践」，不强制运行设备。
+**预期结果**：印证「运行期补丁由 `__post_init__` 触发、为 module 注入 Ascend 属性」。**待本地验证**：需有 NPU 环境才能真正跑 kernel；无环境时可只做「源码阅读型实践」——跟踪 `_apply_ascend_patch` 三段 patch 各替换了哪个符号。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：用户在 kernel 里写 `import triton.language.extra.cann as cann`，请追溯这个 `cann` 模块在源码仓库里的真实出处。
+**练习 1**：`_apply_ascend_patch()` 里的 `_ascend_patch_applied` 标志有什么用？去掉会怎样？
+**参考答案**：保证幂等——只在首次调用时真正替换 `CodeGenerator.__init__`。去掉后，每次构造 `NPUOptions` 都会再包一层，导致 `_patched_cg_init` 无限嵌套调用、最终栈溢出。
 
-> **参考答案**：真实出处是 `third_party/ascend/language/cann/`。安装时由 `setup.py` 的挂载逻辑（`add_link_to_backends`）把它链接（或拷贝）到 `triton.language.extra.cann`，所以 import 路径与源码物理位置不同。
-
-**练习 2**：为什么 Triton 要用「entry points / 自动发现」而不是在 core 里硬编码 `import ascend`？
-
-> **参考答案**：为了保持 core 与具体后端解耦。硬编码会让 core 强依赖 ascend，违背分层；用自动发现，core 只定义 `BaseBackend` 抽象，任何后端只要放到 `triton.backends` 命名空间并实现该抽象，就能被接入。
-
----
-
-### 4.5 分层的现实：core 里的「扩展点钩子」
-
-#### 4.5.1 概念说明
-
-前面讲的都是「干净分层」的理想画面。但作为诚实的源码读者，必须指出一个现实：**分层不是 100% 纯净的**。
-
-为了让 Ascend 能深度介入编译流程（例如注入自己的 IR builder、提供解释器），core 里保留了**少数几个刻意的「扩展点钩子」**。这些钩子本身写得很「中性」（带保护、可降级），但它们确实让 core「知道」了 ascend 的存在。理解这一点，你才不会在 core 里看到 `ascend` 字样时感到困惑，也才能区分「这是破坏分层的污染」还是「这是设计好的插槽」。
-
-#### 4.5.2 核心流程
-
-Ascend 介入 core 行为，有三种典型手段，按「耦合程度」从低到高：
-
-```
-1. 带保护的可选导入（最松）   —— core 用 try/except 尝试加载 ascend，失败则降级
-2. core 暴露中性扩展点        —— core 留一个「builder 插槽」，ascend 往里塞方法
-3. 运行时 monkey patch（最紧）—— ascend 后端启动时替换 core 某些方法的行为
-```
-
-这三种都遵循同一个底线：**ascend 专属的代码体仍然住在 `third_party/ascend/`**，core 只是留了「接线端子」。
-
-#### 4.5.3 源码精读
-
-**手段一：带保护的可选导入**。core 的解释器尝试加载 ascend 解释器，失败就降级（[python/triton/runtime/interpreter.py:30-42](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/runtime/interpreter.py#L30-L42)）——注意这个钩子本身是中性的，它不假设 ascend 一定存在：
-
-```python
-def _try_import_ascend():
-    global _has_ascend_support, AscendInterpreterBuilder
-    try:
-        from . import ascend_interpreter
-        AscendInterpreterBuilder = ascend_interpreter.AscendInterpreterBuilder
-        _has_ascend_support = True
-    except ImportError:
-        _has_ascend_support = False
-        AscendInterpreterBuilder = None
-```
-
-**手段二：core 暴露中性扩展点**。core 的 IR 构造器在初始化时创建一个 `ascend_builder`，并通过 `setup_unified_builder` 把它的方法合并进主 builder（[python/triton/compiler/code_generator.py:331-333](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/code_generator.py#L331-L333)）——`ascend_builder` 来自 `libtriton.ascend` 这个 C++ 扩展（其源码在 `third_party/ascend/`），而 `setup_unified_builder` 是一个通用的「多 builder 合并」抽象：
-
-```python
-self.ascend_builder = ascend_ir.ascendnpu_ir_builder(context, getattr(options, "arch", ""))
-self.ascend_builder.set_loc(file_name, begin_line, 0)
-setup_unified_builder(self.builder, self.ascend_builder)
-```
-
-> 注：这里 core 直接 `import` 了 ascend 的 C++ 扩展（见 [code_generator.py:23](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/python/triton/compiler/code_generator.py#L23)），是一个相对紧的耦合点。它是分层原则下「为性能/耦合而做的最小妥协」，并非随意混放。
-
-**手段三：运行时 monkey patch**。Ascend 后端在导入时通过 `_apply_ascend_patch` 修改 core 的 `CodeGenerator.__init__`、`compiler.parse`、`TritonSemantic.dot` 等行为（[third_party/ascend/backend/__init__.py:27-51](https://github.com/triton-lang/triton-ascend/blob/0a5378d28abf6bbcd8d8916e03d397e9ed886a55/third_party/ascend/backend/__init__.py#L27-L51)）——关键在于：**patch 的代码体写在 ascend 子树里，而不是改 core 源码**：
-
-```python
-def _apply_ascend_patch():
-    from triton.compiler.code_generator import CodeGenerator
-    if not getattr(CodeGenerator, "_ascend_patch_applied", False):
-        _original_cg_init = CodeGenerator.__init__
-        def _patched_cg_init(self, *args, **kwargs):
-            """Monkey Patch for Ascend: 注入 hacc.target 属性"""
-            _original_cg_init(self, *args, **kwargs)
-            ...
-        CodeGenerator.__init__ = _patched_cg_init
-```
-
-这就是「分层原则」在现实里最精妙的体现：ascend 改了 core 的行为，但改动**逻辑**仍归属 ascend，core 的源码文件本身没有被动过一刀。
-
-#### 4.5.4 代码实践
-
-**实践目标**：学会区分「core 里的 ascend 字样」是钩子还是污染。
-
-**操作步骤**：
-
-1. 在 `python/triton/` 下搜索 `ascend` 关键字。
-2. 对每一处命中，判断它属于三类中的哪一类：
-   - **中性钩子**（带 try/except、可降级，如 `_try_import_ascend`）；
-   - **扩展点插槽**（core 留的接口，如 `ascend_builder`）；
-   - **疑似越界**（亲和逻辑直接写在了 core 里，没有保护也没有抽象）。
-
-**需要观察的现象 / 预期结果**：
-
-- `interpreter.py` 的 `_try_import_ascend` 属于**中性钩子**——它假设 ascend 可能不存在。
-- `code_generator.py` 的 `ascend_builder` 属于**扩展点插槽**——它把具体实现委托给 ascend 的 C++ 扩展。
-- 你大概率会发现命中很少，且大多是这两类——这说明 core 基本守住了分层边界。
-- `python/triton/runtime/ascend_interpreter.py` 是一个值得注意的**例外**：它是 ascend 专属的解释器代码，却物理上放在 core 的 `runtime/` 目录里（与 `interpreter.py` 强耦合）。这是一个为「紧耦合」而做的现实取舍，阅读时应把它视为「core 里被特许的 ascend 飞地」。
-
-> 待本地验证：搜索命中的具体行数与分类请在本地确认；本实践为「源码阅读型」，不依赖设备。
-
-#### 4.5.5 小练习与答案
-
-**练习 1**：core 的 `interpreter.py` 用 `_try_import_ascend()` 而不是直接 `import ascend_interpreter`，这样做的好处是什么？
-
-> **参考答案**：用 try/except 包裹后，即使没有 ascend 支持，core 解释器也能正常运行（只是 `_has_ascend_support=False`）。这让 core 保持「ascend 可有可无」的松耦合，是分层原则的体现。
-
-**练习 2**：ascend 用 monkey patch 改了 `CodeGenerator.__init__`，这算不算「破坏了分层」？
-
-> **参考答案**：不算「破坏」，而是「设计好的扩展手段」。因为改动的**代码体**（`_apply_ascend_patch`）写在 `third_party/ascend/backend/__init__.py` 里，core 的源码文件并未被修改。它利用了 Python 运行时的动态性，在不 fork core 的前提下注入 ascend 行为，恰恰是分层原则在工程上的落地方式之一。
+**练习 2**：构建期补丁（`Traits.cpp` 注释 2 的幂校验）和运行期补丁（`dot` 的 HF32 守卫）各自适合解决哪类问题？
+**参考答案**：构建期补丁适合改 **静态源码/编译期校验/构建链**（C++、CMake、TD 定义）；运行期补丁适合改 **运行时对象行为/依赖运行期数据的判断**（Python 对象方法、动态属性注入），且改动较薄、不希望污染上游文件时。
 
 ---
 
 ## 5. 综合实践
 
-把本讲所有知识串起来，完成下面这个「仓库考古」小任务。
+把本讲三件事（分层判别、构建期补丁、运行期补丁）串起来完成下面这个「代码归属鉴定」任务：
 
-**任务**：在仓库中找出 **3 处 Ascend 亲和代码** 与 **1 处目标无关代码**，分别为每一处写一段「它为什么放在当前位置」的说明，要求：
+1. **找三处构建期 Ascend 亲和修改**：在 [triton-ascend-3.6.0.patch](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/patch/triton-ascend-3.6.0.patch) 中挑三个不同上游文件（建议一个 C++、一个 Python、一个构建脚本），各写一句「为什么必须以补丁而非内联维护」。
+2. **找一处运行期补丁**：在 [third_party/ascend/backend/__init__.py:27-113](https://github.com/triton-lang/triton-ascend/blob/0c3b1f6c32ff1e08bdde97597983a0937be8ae51/third_party/ascend/backend/__init__.py#L27-L113) 里选一段 monkey-patch，说明它如果改用「构建期改源码」方式会有什么缺点。
+3. **找一处 target-independent 代码**：在 `python/triton/` 下任选一个文件（如 `runtime/jit.py` 的某段通用逻辑），论证它属于 Triton core 而非 Ascend——给出「它对所有后端通用」的理由。
+4. **画一张补丁时序图**：把 `pip install` 到「源码变成 Ascend 版本」的完整路径画出来，标注 `CMakeBuild.run` → `apply_triton_ascend_patch` → `checkout_file` → `apply_patch` → cmake 编译。
 
-1. 每一处都给出 `文件路径:行号` 与永久链接；
-2. 用「删掉它会坏谁」的标准论证它属于 core 还是 ascend；
-3. 对其中至少 1 处，说明它是通过本讲的哪种机制（拷贝/挂载/自动发现/扩展点钩子/monkey patch）与 core 发生联系的。
-
-**参考做法（示例，非唯一答案）**：
-
-- **亲和①**：`third_party/ascend/backend/compiler.py`（`AscendBackend`）。删掉它，Ascend 无法注册编译阶段，但 NVIDIA/AMD 不受影响 → ascend。通过「自动发现」机制（`triton.backends`）被 core 加载。
-- **亲和②**：`third_party/ascend/language/cann/libdevice.py`。删掉它，kernel 里 `cann.libdevice` 的数学函数失效，仅影响 Ascend → ascend。通过「挂载」机制变成 `triton.language.extra.cann`。
-- **亲和③**：`third_party/ascend/lib/TritonToLinalg/`（一个 lowering pass）。删掉它，Ascend 缺这个转换，别的后端照常 → ascend。它是 `third_party/ascend/lib/` 下的纯亲和 C++ 代码。
-- **无关④**：`python/triton/runtime/jit.py`（`@triton.jit`）。删掉它，所有后端的编译入口都没了 → core。它是典型的 target independent 能力。
-
-> 完成后，建议把结论整理成你自己的「仓库导航表」——后续阅读源码时它会持续派上用场。
-
----
+> 进阶（可选）：对比 `setup.py` 的 `apply_triton_ascend_patch()`（构建期、改文件）与 `_apply_ascend_patch()`（运行期、改对象），用一张表总结二者在「作用对象、触发时机、可逆性、适用场景」上的差异。
 
 ## 6. 本讲小结
 
-- 仓库只有两条代码线：**Triton core**（目标无关）与 **Triton-Ascend**（目标亲和），判定标准是「删掉它会坏所有后端，还是只坏 Ascend」。
-- core 的家园是 `python/`（Python）与顶层 `include/`、`lib/`（C++/MLIR）；ascend 的家园是 `third_party/ascend/`。
-- `third_party/ascend/` 内部按 `language`（语言扩展）、`backend`（compiler+driver）、`include/lib`（MLIR pass）、`costmodel`、`tutorials/unittest` 分工，共约 14 个 pass 目录。
-- 分层通过安装期的 **拷贝 / 挂载**（`setup.py`）把 ascend 的 `language` 挂到 `triton.language.extra`、把 `backend` 放进 `triton.backends`，再由 core 的 **自动发现** 机制加载。
-- 分层不是绝对纯净：core 里保留了少数中性「扩展点钩子」（如 `_try_import_ascend`、`ascend_builder`），ascend 还用 **运行时 monkey patch** 改 core 行为——但改动代码体始终留在 ascend 子树。
-- 记住一个易错点：`third_party/ascend/include` 与顶层 `include` 同名但完全不同，带 ascend 前缀的才是亲和代码。
-
----
+- 仓库按 **target-independent → Triton core（`python/`、`include/`、`lib/`、`bin/`），target-affinitive → Triton-Ascend（`third_party/ascend/`）** 的语义标准分层，不是随便分目录。
+- `third_party/ascend/` 是自包含后端，`language/backend/lib/include/costmodel/patch` 等子目录分别承载语言扩展、编译器/驱动、MLIR pass、代价模型与上游补丁。
+- 上游 Triton 源文件在仓库里保持 **干净原貌**；Ascend 亲和改动集中写在 `third_party/ascend/patch/triton-ascend-3.6.0.patch`，覆盖 16 个上游文件 + 1 个开发期文件。
+- **构建期补丁** 由 `setup.py` 的 `apply_triton_ascend_patch()`（在 `CMakeBuild.run()` 中、cmake 之前）通过 `git checkout` + `git apply` 应用，便于跟随上游升级、可审计、可回退。
+- **运行期补丁** 由 `third_party/ascend/backend/__init__.py` 的 `_apply_ascend_patch()` 实现，在 `NPUOptions.__post_init__` 触发，用 monkey-patch 注入 `hacc.target`、扩展 `parse`、给 `dot` 加 HF32 守卫，且带幂等保护。
+- 典型 Ascend 亲和改动示例：放宽「tensor 元素数必须 2 的幂」校验、新增 HF32 输入精度枚举、CMake 注入安全编译与 LLVM 版本兼容。
 
 ## 7. 下一步学习建议
 
-本讲让你掌握了「代码在哪、为什么在那」。接下来：
-
-- **想真正跑起来**：进入 u1-l3《环境准备、安装与构建》，亲手完成一次 `pip install -e .`，验证本讲的「挂载」是否真的生成了符号链接。
-- **想理解编译链路**：本讲提到的 `third_party/ascend/backend/compiler.py`（`AscendBackend`）是编译后端主入口，将在 u3-l2《AscendBackend：阶段注册与 NPUOptions》精读。
-- **想理解运行时**：`third_party/ascend/backend/driver.py` 将在 u5-l1《NPUDriver 与 NPUUtils》展开。
-- **想看语言扩展细节**：`cann/libdevice.py` 与 `cann/extension/` 将在 u7 单元（Ascend 语言扩展）系统讲解。
-
-建议在进入下一讲前，先完成第 5 节的综合实践，建立你自己的「仓库导航表」。
+- 想看补丁具体怎么影响编译流程 → 下一讲 [u1-l3 安装与构建](u1-l3-installation-and-build.md) 会完整走一遍 `pip install` 与 `setup.py` 构建链。
+- 想理解 `NPUOptions` 与 `AscendBackend` 如何组织编译阶段 → 直接跳到 u3-l2、u3-l3。
+- 想看 Ascend 专属 MLIR pass 如何落地 → 进入 u4（pass 流水线）与 u8（Cube-Vector 融合）。
+- 建议在本地把本讲的「代码归属鉴定」做一遍，再继续后续讲义——它能帮你后续读任何文件时迅速定位「这段代码归谁、由谁维护」。

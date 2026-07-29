@@ -1,7 +1,7 @@
 {
   "project": "triton-ascend",
-  "head": "0a5378d28abf6bbcd8d8916e03d397e9ed886a55",
-  "rationale": "triton-ascend 是标准 Triton 编译器针对华为昇腾 NPU（CANN/BiSheng 工具链）的后端实现，体积大、层次多，因此学习路线按「先会跑→懂迁移→懂编译流水线→懂运行时→懂进阶机制→能调试与二次开发」由浅入深铺开。第 1-2 单元面向初学者：先建立项目定位、目录分层（Triton core 与 third_party/ascend 分离）、安装运行与 GPU→NPU 迁移的直觉；第 3-5 单元进入核心主线——编译流水线（@triton.jit → AscendBackend → make_ttir/ttir_to_linalg/npubin）、Ascend MLIR pass 链与运行时驱动/launcher；第 6-8 单元覆盖昇腾特有的进阶机制：SIMD/SIMT 双编译路径、Ascend 语言扩展（cann/libdevice/custom_op/同步原语）、Cube-Vector 融合与 DynamicCVPipeline 流水线优化；第 9-10 单元落在自动调优（autotune/tiling/costmodel/ubtuner）与调试、性能分析、测试和 C++ pass 二次开发。讲义之间通过 depends_on 严格编排依赖，编译流水线（u3）作为枢纽，向后辐射 pass 链（u4）、运行时（u5）、模式（u6）、CV 流水线（u8）和调优（u9），保证读者始终在具备前置上下文的前提下阅读每一篇。",
+  "head": "0c3b1f6c32ff1e08bdde97597983a0937be8ae51",
+  "rationale": "本次增量更新围绕两条主线。主线一「去侵入化 + 补丁机制」：上游 Triton 源文件（python/、include/、lib/、bin/）被回退为干净原貌，Ascend 亲和改动改为通过 third_party/ascend/patch 下的补丁，在构建期由 setup.py 的 apply_triton_ascend_patch() 应用、在运行期由 compiler.py 的 _apply_ascend_patch()（现置于 NPUOptions.__post_init__）应用；这直接改写了 u1-l2「核心 vs Ascend 分层」的核心叙事，故重建该篇，并把补丁的构建/运行行为补充进 u1-l3（构建）与 u3-l1/u3-l2/u3-l3（编译入口与阶段、元数据）。主线二「Cube-Vector 流水线与代价模型的实质演进」：SeparateMemoryFromCompute 被整体重写（新增 MarkGMLoadPass、SplitDataflow 数据依赖重构、DecoupleComputeAndMemory 重组），故 u8-l3 重建；DynamicCVPipeline 新增大量手写 MLIR 测试用例（DynamicCVPipeline_ut）并重构 AddControlFlowCondition/SplitDataflow 等子 pass，故 u8-l2 与 u10-l4 增量更新以纳入新测试参考；costmodel 精度优化大幅扩充了 ascend_910b.json 与新增 HardwareConfig，u9-l3 增量更新以反映 AscendModel C++ 代价模型流水线（ConvertTritonToAscend→…→EstimateCycles）。此外 TritonToLinalg（associative_scan 包裹 scope 并附加 UB/tcore_type 属性）、TritonToUnstructure（simt fast path 跳过 block ptr、parseClampF 修复）属局部改动，对应 u4-l5、u4-l4 增量更新；compile_mode 所在 __post_init__ 因补丁调用行变化，u6-l1 增量更新；u4-l1 因 compiler.py 与 triton-opt.cpp 行号变化轻量更新。迁移（u2）、运行时驱动（u5，driver.py 未变）、语言扩展（u7，仅 builder.py 微调且未被引用）、SIMT 纯路径（u6-l2）、autotune/ubtuner（u9-l1/l2/l4）、调试与性能（u10-l1/l2/l3）、扩展 C++ pass（u10-l5）等以未改文档或未改核心源码为主，保持 keep。整体单元划分与依赖链不变，编译流水线（u3）与 pass 链（u4）仍是辐射枢纽。",
   "units": [
     {
       "id": "u1",
@@ -32,34 +32,36 @@
           ],
           "practice_task": "阅读架构文档，用自己的话画一张「Python kernel → .o 可执行文件」的数据流草图，标注三大组件分别介入的位置。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
-          "title": "代码结构与「核心 vs Ascend」分层原则",
+          "title": "代码结构、核心 vs Ascend 分层与补丁机制",
           "order": 2,
           "filename": "u1-l2-directory-structure-and-layering.md",
           "level": "beginner",
-          "topic": "讲解项目目录组织原则：目标无关改动留在 Triton core（python/include/lib），目标亲和改动放入 third_party/ascend，并梳理各子目录的职责。",
+          "topic": "讲解项目目录组织与「核心 vs Ascend」分层：上游 Triton 源文件（python/、include/、lib/、bin/）保持干净原貌，Ascend 亲和改动以补丁形式（third_party/ascend/patch/triton-ascend-3.6.0.patch）在构建期由 setup.py 的 apply_triton_ascend_patch() 应用；并梳理 third_party/ascend 下 language/backend/lib/include/costmodel/patch 等子目录职责。",
           "learning_goals": [
             "区分 Triton core 与 Triton-Ascend 两部分代码",
-            "识别 third_party/ascend 下 language/backend/lib/include/costmodel 等子目录职责",
-            "理解「先 core、后 ascend」的代码放置原则"
+            "理解上游源文件保持干净、Ascend 改动以补丁交付的新维护机制",
+            "识别 third_party/ascend 下 language/backend/lib/include/costmodel/patch 等子目录职责"
           ],
           "source_files": [
             "docs/en/architecture_design_and_core_features.md",
+            "setup.py",
+            "third_party/ascend/patch/triton-ascend-3.6.0.patch",
             "pyproject.toml"
           ],
           "minimal_modules": [
-            "python/ (Triton core)",
-            "third_party/ascend/",
-            "include/ 与 lib/"
+            "python/ (Triton core, 保持干净)",
+            "third_party/ascend/ (Ascend 亲和)",
+            "third_party/ascend/patch/ (上游补丁)"
           ],
-          "practice_task": "在仓库中找出三处 Ascend 亲和代码与一处 target-independent 代码，分别说明它们为何放在当前位置。",
+          "practice_task": "在 patch 文件中找出三处对上游 Triton 源文件的 Ascend 亲和修改，说明它们为何以补丁而非直接内联方式维护；再在仓库中找出一处 target-independent 代码并说明其归属。",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "rebuild"
         },
         {
           "id": "u1-l3",
@@ -67,11 +69,11 @@
           "order": 3,
           "filename": "u1-l3-installation-and-build.md",
           "level": "beginner",
-          "topic": "讲解 Python/CANN/TorchNPU 版本要求，以及 whl 安装、源码编译（setup.py）、Docker 三种方式与构建依赖。",
+          "topic": "讲解 Python/CANN/TorchNPU 版本要求，以及 whl 安装、源码编译（setup.py）、Docker 三种方式与构建依赖；重点说明 CMakeBuild.run() 会在编译前调用 apply_triton_ascend_patch() 把上游补丁应用到 Triton core。",
           "learning_goals": [
             "了解硬件/软件依赖（Python、CANN、torch_npu）",
             "掌握 pip 安装与源码 `pip install -e .` 编译流程",
-            "理解 Docker 基础镜像与 CMake/LLVM 构建链路的角色"
+            "理解构建期补丁应用（apply_triton_ascend_patch）与 CMake/LLVM 构建链路的角色"
           ],
           "source_files": [
             "README.md",
@@ -80,14 +82,14 @@
           ],
           "minimal_modules": [
             "CANN 工具链",
-            "setup.py 构建入口",
+            "setup.py 构建入口与补丁应用",
             "CMakeLists.txt"
           ],
-          "practice_task": "按照文档准备依赖并完成一次 whl 或源码安装，记录遇到的环境变量（如 CANN set_env）设置。",
+          "practice_task": "按照文档准备依赖并完成一次 whl 或源码安装，记录遇到的环境变量（如 CANN set_env）设置，并观察构建日志中补丁应用步骤。",
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u1-l4",
@@ -114,7 +116,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -149,7 +151,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -176,7 +178,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -204,7 +206,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -220,11 +222,11 @@
           "order": 1,
           "filename": "u3-l1-jit-and-compile-entry.md",
           "level": "intermediate",
-          "topic": "从 @triton.jit 出发，讲解 Triton 如何把 Python kernel 编译为 TTIR，以及 BaseBackend/GPUTarget 抽象在编译流程中的位置。",
+          "topic": "从 @triton.jit 出发，讲解 Triton 如何把 Python kernel 编译为 TTIR，以及 BaseBackend/GPUTarget 抽象在编译流程中的位置；说明 Ascend 对 jit.py 等上游文件的定制已迁入补丁、源码保持上游原貌。",
           "learning_goals": [
             "理解 @triton.jit 装饰器与 KernelInterface 的作用",
             "掌握 kernel 从 Python 到 TTIR 的编译入口",
-            "认识 triton.backends.compiler.BaseBackend 抽象"
+            "认识 triton.backends.compiler.BaseBackend 抽象与上游补丁的交付方式"
           ],
           "source_files": [
             "python/triton/runtime/jit.py",
@@ -235,11 +237,11 @@
             "JITFunction / KernelInterface",
             "BaseBackend"
           ],
-          "practice_task": "在 jit 调用链中定位编译触发点，说明 TTIR 是在哪个阶段生成的。",
+          "practice_task": "在 jit 调用链中定位编译触发点，说明 TTIR 是在哪个阶段生成的，并指出 Ascend 对 jit.py 的定制在补丁文件中的位置。",
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l2",
@@ -247,11 +249,11 @@
           "order": 2,
           "filename": "u3-l2-ascend-backend-stages-and-options.md",
           "level": "intermediate",
-          "topic": "精读 AscendBackend：supports_target/parse_options/add_stages 如何注册 ttir→ttadapter→npubin 各编译阶段，以及 NPUOptions 的关键字段。",
+          "topic": "精读 AscendBackend：supports_target/parse_options/add_stages 如何注册 ttir→ttadapter→npubin 各编译阶段，以及 NPUOptions 的关键字段；说明 NPUOptions.__post_init__ 现会先调用 _apply_ascend_patch() 应用运行期补丁，并新增 buffer_ir、ascend.ir 模块导入。",
           "learning_goals": [
             "理解 AscendBackend 如何向 Triton 注册编译阶段",
             "掌握 add_stages 中 ttir/ttadapter/mlirbc/npubin 的串联逻辑",
-            "认识 NPUOptions（compile_mode、num_warps、use_bytecode 等）的作用"
+            "认识 NPUOptions（compile_mode、num_warps、use_bytecode 等）与运行期补丁应用的作用"
           ],
           "source_files": [
             "third_party/ascend/backend/compiler.py"
@@ -259,13 +261,14 @@
           "minimal_modules": [
             "AscendBackend",
             "add_stages",
-            "NPUOptions"
+            "NPUOptions",
+            "_apply_ascend_patch"
           ],
-          "practice_task": "在 add_stages 中追踪一种典型配置下 kernel 经历的阶段顺序，并说明 force_simt_only 分支有何不同。",
+          "practice_task": "在 add_stages 中追踪一种典型配置下 kernel 经历的阶段顺序，并说明 _apply_ascend_patch 在 __post_init__ 中的时机与 force_simt_only 分支有何不同。",
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u3-l3",
@@ -273,7 +276,7 @@
           "order": 3,
           "filename": "u3-l3-ttir-metadata-and-cache.md",
           "level": "intermediate",
-          "topic": "讲解 make_ttir 的标准优化 pass、_parse_linalg_metadata 解析出的元数据（kernel_name、tensor_kinds、mix_mode）以及编译缓存机制。",
+          "topic": "讲解 make_ttir 的标准优化 pass、_parse_linalg_metadata 解析出的元数据（kernel_name、tensor_kinds、mix_mode）以及编译缓存机制；提及新增 ascend.ir 模块在 IR/元数据处理中的角色。",
           "learning_goals": [
             "了解 make_ttir 中 inliner/cse/licm 等标准 pass",
             "掌握元数据字段（kernel_name、tensor_kinds、mix_mode、bitcodes）含义",
@@ -285,13 +288,14 @@
           "minimal_modules": [
             "make_ttir",
             "_parse_linalg_metadata",
+            "ascend.ir 模块",
             "kernel cache"
           ],
           "practice_task": "开启 TRITON_DEBUG 找到 dump 目录，列出一次编译产出的中间文件并解释每个的作用。",
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -307,7 +311,7 @@
           "order": 1,
           "filename": "u4-l1-ttir-to-linalg-pipeline-overview.md",
           "level": "intermediate",
-          "topic": "精读 compiler.py 的 ttir_to_linalg，梳理从 TTIR 到 Linalg IR 之间所有 ascend.passes 的调用顺序与开关条件。",
+          "topic": "精读 compiler.py 的 ttir_to_linalg，梳理从 TTIR 到 Linalg IR 之间所有 ascend.passes 的调用顺序与开关条件；说明 triton-opt 中 Ascend 方言注册已迁入补丁。",
           "learning_goals": [
             "掌握 ttir_to_linalg 中 pass 的完整编排顺序",
             "理解各 pass 的启用条件（compile_on_910_95、enable_dynamic_cv_pipeline 等）",
@@ -326,7 +330,7 @@
           "depends_on": [
             "u3-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l2",
@@ -355,7 +359,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -382,7 +386,7 @@
           "depends_on": [
             "u4-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l4",
@@ -390,27 +394,29 @@
           "order": 4,
           "filename": "u4-l4-triton-to-unstructure.md",
           "level": "advanced",
-          "topic": "讲解 triton-to-unstructure 与 bubble-up-operation 如何把离散/非连续访存展开为标量循环，以及 extract op 上提优化。",
+          "topic": "讲解 triton-to-unstructure 与 bubble-up-operation 如何把离散/非连续访存展开为标量循环，以及 extract op 上提优化；说明 SIMT fast path 现会跳过 block ptr，以及 OffsetAnalysis.parseClampF 的参数修正。",
           "learning_goals": [
             "理解 UnstructuredMemAccessConverter 把 load/store/atomic 转为多循环标量访存",
-            "认识 bubble-up-operation 对 extract 的优化作用",
+            "认识 bubble-up-operation 对 extract 的优化作用与 SIMT fast path 跳过 block ptr 的逻辑",
             "了解该路径在 SIMD 模式下的回退语义"
           ],
           "source_files": [
             "third_party/ascend/lib/TritonToUnstructure/UnstructureConversionPass.cpp",
+            "third_party/ascend/lib/TritonToUnstructure/OffsetAnalysis.cpp",
             "third_party/ascend/include/TritonToUnstructure/UnstructureConversionPass.h",
             "third_party/ascend/backend/compiler.py"
           ],
           "minimal_modules": [
             "triton-to-unstructured",
             "UnstructuredMemAccessConverter",
+            "OffsetAnalysis",
             "bubble-up-operation"
           ],
-          "practice_task": "对比 SIMD 模式下离散访存展开为标量循环前后的 IR，说明为何需要展开。",
+          "practice_task": "对比 SIMD 模式下离散访存展开为标量循环前后的 IR，说明为何需要展开，并验证 block ptr 在 fast path 被跳过的行为。",
           "depends_on": [
             "u4-l3"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l5",
@@ -418,26 +424,28 @@
           "order": 5,
           "filename": "u4-l5-triton-to-linalg.md",
           "level": "advanced",
-          "topic": "精读 triton-to-linalg，讲解 LoadConverter/ReduceConverter/MatmulConverter 等如何把 ttir 算子系统性转换为 linalg/memref/tensor 算子。",
+          "topic": "精读 triton-to-linalg，讲解 LoadConverter/ReduceConverter/MatmulConverter 等如何把 ttir 算子系统性转换为 linalg/memref/tensor 算子；说明 associative_scan 现会被包裹 scope 并附加 UB/tcore_type 属性。",
           "learning_goals": [
             "掌握 StoreConverter/LoadConverter 到 memref::copy 的映射",
-            "理解 Reduce/ArgMax/Matmul/Scan 等算子到 linalg 的转换",
+            "理解 Reduce/ArgMax/Matmul/Scan 等算子到 linalg 的转换，以及 associative_scan 的 scope 包裹与 UB/tcore_type 属性",
             "认识 linalg IR 作为后续 BiSheng 编译输入的角色"
           ],
           "source_files": [
             "third_party/ascend/lib/TritonToLinalg/TritonToLinalgPass.cpp",
-            "third_party/ascend/lib/TritonToLinalg/LoadStoreConverter.cpp"
+            "third_party/ascend/lib/TritonToLinalg/LoadStoreConverter.cpp",
+            "third_party/ascend/lib/TritonToLinalg/TritonOpConverter.cpp"
           ],
           "minimal_modules": [
             "triton-to-linalg",
             "LoadConverter/StoreConverter",
-            "ReduceConverter/MatmulConverter"
+            "ReduceConverter/MatmulConverter",
+            "associative_scan scope"
           ],
-          "practice_task": "选择 dot/reduce 两个算子，在 IR 中找到其对应的 linalg lowering 结果并解释。",
+          "practice_task": "选择 dot/reduce/associative_scan 算子，在 IR 中找到其对应的 linalg lowering 结果并解释 scope 与属性标注。",
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u4-l6",
@@ -465,7 +473,7 @@
           "depends_on": [
             "u4-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -500,7 +508,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -526,7 +534,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -552,7 +560,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -568,11 +576,11 @@
           "order": 1,
           "filename": "u6-l1-compile-mode-overview.md",
           "level": "intermediate",
-          "topic": "讲解 simd / unstructured_in_simt / simt_only 三种 compile_mode 的语义、各自编译路径与 force_simt_template/force_simt_only 的联动。",
+          "topic": "讲解 simd / unstructured_in_simt / simt_only 三种 compile_mode 的语义、各自编译路径与 force_simt_template/force_simt_only 的联动；说明 NPUOptions.__post_init__ 在派生字段前会先应用运行期补丁。",
           "learning_goals": [
             "掌握三种 compile_mode 的编译路径差异",
             "理解 NPUOptions.__post_init__ 如何由 compile_mode 派生字段",
-            "认识默认模式（unstructured_in_simt）的混合语义"
+            "认识默认模式（unstructured_in_simt）的混合语义与补丁应用时机"
           ],
           "source_files": [
             "third_party/ascend/backend/compiler.py",
@@ -588,7 +596,7 @@
             "u3-l2",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u6-l2",
@@ -615,7 +623,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -650,7 +658,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -677,7 +685,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -705,7 +713,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -734,7 +742,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -771,7 +779,7 @@
             "u2-l2",
             "u4-l5"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -779,57 +787,63 @@
           "order": 2,
           "filename": "u8-l2-dynamic-cv-pipeline-analysis.md",
           "level": "advanced",
-          "topic": "精读 DynamicCVPipeline 的 AnalyzeDataFlow / PlanComputeBlock / PreCheckAvailable 等子 pass，讲解如何分析数据流并规划计算块。",
+          "topic": "精读 DynamicCVPipeline 的 AnalyzeDataFlow / PlanComputeBlock / PreCheckAvailable / SplitDataflow 等子 pass，讲解如何分析数据流并规划计算块；并以新增的 DynamicCVPipeline_ut 手写 MLIR 测试用例作为分析行为的参考样例。",
           "learning_goals": [
             "理解 DynamicCVPipeline 的整体目标与子 pass 编排",
-            "掌握 AnalyzeDataFlow 与 PlanComputeBlock 的职责",
-            "认识 PreCheckAvailable 对流水线可行性的预判"
+            "掌握 AnalyzeDataFlow、PlanComputeBlock 与 SplitDataflow 数据依赖分析的职责",
+            "认识 PreCheckAvailable 对流水线可行性的预判，以及手写 MLIR 测试如何覆盖各场景"
           ],
           "source_files": [
             "third_party/ascend/lib/DynamicCVPipeline/AddDynamicCVPipeline.cpp",
             "third_party/ascend/lib/DynamicCVPipeline/AnalyzeDataFlow.cpp",
             "third_party/ascend/lib/DynamicCVPipeline/PlanComputeBlock.cpp",
-            "third_party/ascend/include/DynamicCVPipeline/Passes.h"
+            "third_party/ascend/lib/DynamicCVPipeline/SplitDataflow/DataDependencyAnalysis.cpp",
+            "third_party/ascend/include/DynamicCVPipeline/Passes.h",
+            "third_party/ascend/unittest/DynamicCVPipeline_ut/test_pcb01_mlir_single_cube_single_vector.py"
           ],
           "minimal_modules": [
             "DynamicCVPipeline",
             "AnalyzeDataFlow",
-            "PlanComputeBlock"
+            "PlanComputeBlock",
+            "SplitDataflow"
           ],
-          "practice_task": "在 enable_dynamic_cv_pipeline 开启时 dump IR，定位 AnalyzeDataFlow/PlanComputeBlock 产生的标记并解释。",
+          "practice_task": "在 enable_dynamic_cv_pipeline 开启时 dump IR，定位 AnalyzeDataFlow/PlanComputeBlock/SplitDataflow 产生的标记，并对照 DynamicCVPipeline_ut 测试用例解释。",
           "depends_on": [
             "u8-l1",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u8-l3",
-          "title": "计算与访存解耦、MultiBuffer 与 AutoBlockify",
+          "title": "重写后的 SeparateMemoryFromCompute：访存/计算解耦、SplitDataflow 与 AutoBlockify",
           "order": 3,
           "filename": "u8-l3-decouple-memory-multibuffer-autoblockify.md",
           "level": "advanced",
-          "topic": "讲解 SeparateMemoryFromCompute（计算/访存解耦、异步 load 上提）、AllocMultiCache、MultiBuffer 与 AutoBlockify 并行块映射。",
+          "topic": "讲解重写后的 SeparateMemoryFromCompute：MarkGMLoadPass 标记 GM load、计算与访存解耦与异步 load 上提，配合 SplitDataflow 的数据依赖分析与跨核传输同步、AllocMultiCache 多缓冲，以及 AutoBlockify 并行块映射。",
           "learning_goals": [
-            "理解 SeparateMemoryFromCompute 的异步 load 上提与 ping-pong 流水线",
-            "掌握 multibuffer/num_stages 对多缓冲的开关作用",
-            "认识 AutoBlockify 与 TRITON_ALL_BLOCKS_PARALLEL 的并行块映射"
+            "理解重写后 SeparateMemoryFromCompute 以 MarkGMLoadPass 标记并解耦访存的新机制",
+            "掌握 SplitDataflow 数据依赖分析与跨核传输同步（InterCoreTransferAndSync）的重构",
+            "认识 AllocMultiCache/multibuffer 多缓冲与 AutoBlockify/TRITON_ALL_BLOCKS_PARALLEL 并行块映射"
           ],
           "source_files": [
             "third_party/ascend/lib/DynamicCVPipeline/SeparateMemoryFromComputePass.cpp",
+            "third_party/ascend/lib/DynamicCVPipeline/SeparateMemoryFromCompute/MarkGMLoadPass.cpp",
+            "third_party/ascend/lib/DynamicCVPipeline/SplitDataflow/DataDependencyAnalysis.cpp",
             "third_party/ascend/lib/AutoBlockify/AutoBlockify.cpp",
             "third_party/ascend/backend/compiler.py"
           ],
           "minimal_modules": [
             "SeparateMemoryFromCompute",
-            "multibuffer",
+            "MarkGMLoadPass",
+            "SplitDataflow",
             "AutoBlockify"
           ],
-          "practice_task": "对比 multibuffer 开关前后同一 kernel 的 dump，说明 ping-pong 流水线对访存/计算重叠的影响。",
+          "practice_task": "对比 multibuffer 开关前后同一 kernel 的 dump，结合新的 MarkGMLoad/SplitDataflow 标记说明访存/计算解耦与流水线重叠的实现方式。",
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "rebuild"
         }
       ]
     },
@@ -866,7 +880,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -894,35 +908,38 @@
             "u9-l1",
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
-          "title": "costmodel：编译期代价模型",
+          "title": "costmodel：编译期代价模型与 AscendModel 流水线",
           "order": 3,
           "filename": "u9-l3-costmodel.md",
           "level": "advanced",
-          "topic": "讲解 costmodel_runtime.run_costmodel 如何在不跑设备的情况下用代价模型评估 TTIR，以及硬件配置文件的作用。",
+          "topic": "讲解 costmodel_runtime.run_costmodel 如何在不跑设备的情况下驱动 AscendModel C++ 代价模型流水线（ConvertTritonToAscend→AssignOpIDs→InsertDataTransfers→HIVMAnalysis→PipelineAnalysis→EstimateCycles→PerfReport）评估 TTIR；以及 ascend_910b.json 等硬件 schema 配置文件在精度优化后的作用。",
           "learning_goals": [
-            "理解 run_costmodel 的进程内调用与缓存机制",
-            "掌握 costmodel 用于 compile-only autotune 路由的原理",
-            "认识硬件 schema 配置文件（ascend_910b.json 等）的作用"
+            "理解 run_costmodel 的进程内调用与缓存机制，以及 AscendModel MLIR 流水线的组成",
+            "掌握 HardwareConfig 与 ascend_910b.json 硬件 schema 如何驱动代价估算（含本轮精度优化）",
+            "认识 costmodel 用于 compile-only autotune 路由的原理"
           ],
           "source_files": [
             "third_party/ascend/backend/runtime/costmodel_runtime.py",
             "third_party/ascend/costmodel/configs/ascend_910b.json",
+            "third_party/ascend/costmodel/lib/AscendModel/Transforms/EstimateCycles.cpp",
+            "third_party/ascend/costmodel/include/AscendModel/Analysis/HardwareConfig.h",
             "docs/en/examples/09_costmodel_example.md"
           ],
           "minimal_modules": [
             "run_costmodel",
-            "costmodel cache",
-            "hardware schema"
+            "AscendModel 流水线",
+            "HardwareConfig / hardware schema",
+            "costmodel cache"
           ],
-          "practice_task": "用 enable_costmodel_backend 跑一次 autotune，对比代价模型选择与实测最优配置的差异。",
+          "practice_task": "用 enable_costmodel_backend 跑一次 autotune，对比代价模型选择与实测最优配置的差异，并指出 ascend_910b.json 中影响精度的关键字段。",
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u9-l4",
@@ -950,7 +967,7 @@
             "u9-l1",
             "u2-l3"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -986,7 +1003,7 @@
             "u3-l3",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1012,7 +1029,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -1040,35 +1057,37 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
-          "title": "编写算子测试与 MLIR conversion 测试",
+          "title": "编写算子测试与 MLIR conversion / 流水线测试",
           "order": 4,
           "filename": "u10-l4-writing-tests.md",
           "level": "advanced",
-          "topic": "讲解如何为 Ascend 算子编写 pytest 单元测试，以及用 FileCheck 编写 MLIR conversion 回归测试。",
+          "topic": "讲解如何为 Ascend 算子编写 pytest 单元测试，用 FileCheck 编写 MLIR conversion 回归测试，并以新增的 DynamicCVPipeline_ut 手写 MLIR 流水线测试套件与 costmodel contract 测试为例说明流水线级测试的组织方式。",
           "learning_goals": [
             "掌握 device_ut/pytest_ut 的算子正确性测试写法",
             "理解 unittest/Conversion 的 FileCheck MLIR 测试机制",
-            "认识 tutorials 与 unittest 的分工"
+            "认识 DynamicCVPipeline_ut 手写 MLIR 流水线测试与 costmodel contract 测试的组织方式"
           ],
           "source_files": [
             "third_party/ascend/unittest/Conversion/CMakeLists.txt",
+            "third_party/ascend/unittest/DynamicCVPipeline_ut/test_pcb01_mlir_single_cube_single_vector.py",
             "third_party/ascend/tutorials/03-matrix-multiplication.py",
             "third_party/ascend/unittest/conftest.py"
           ],
           "minimal_modules": [
             "pytest 算子测试",
             "FileCheck conversion 测试",
+            "DynamicCVPipeline 流水线 MLIR 测试",
             "lit 测试配置"
           ],
-          "practice_task": "为一个新算子或 lowering 写一个最小的 pytest 测试与一个 FileCheck conversion 测试。",
+          "practice_task": "为一个新算子或 lowering 写一个最小的 pytest 测试与一个 FileCheck conversion 测试；再仿照 DynamicCVPipeline_ut 写一个最小的手写 MLIR 流水线测试。",
           "depends_on": [
             "u4-l5"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l5",
@@ -1097,7 +1116,7 @@
             "u4-l1",
             "u10-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
