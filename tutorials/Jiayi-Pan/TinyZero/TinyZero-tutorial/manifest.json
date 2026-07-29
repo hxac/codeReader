@@ -1,0 +1,926 @@
+{
+  "project": "TinyZero",
+  "head": "95df88f2dcb05f33bd18da546531b52d0954c18b",
+  "rationale": "TinyZero 本质是“在 veRL 框架上加一层任务与奖励”的 R1 Zero 复现项目，因此学习路线先从“项目定位 + 跑通训练”入门，再讲“数据与奖励”这一层最贴近 TinyZero 的工作，然后进入贯穿全项目的两块基础设施——DataProto 数据协议与 Ray single-controller 调度机制；理解了数据如何流动、如何分发后，再顺着 main_ppo → RayPPOTrainer → fit() 主循环这条真实调用链阅读训练全流程；之后集中拆解 core_algos 中的 PPO/GRPO 数学（策略损失、价值损失、GAE、KL 控制器、GRPO 优势），再深入各 Worker 的混合引擎实现（Actor/Critic/vLLM rollout/FSDP↔vLLM 权重同步）；最后是面向二次开发与调优的高级主题（FSDP 并行、序列长度均衡、自定义新任务、Megatron 后端、测试调试、R1 Zero 的“Aha”现象解读）。层级从 beginner 到 advanced 单调递进，依赖关系严格沿“先懂数据→懂调度→懂主循环→懂算法→懂 Worker→懂扩展”展开，保证每篇只讲一个独立主题且都能绑定真实源码。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 TinyZero 与 R1 Zero",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "TinyZero 是什么：复现 DeepSeek R1 Zero",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 TinyZero 的定位——在 countdown/multiply 任务上用强化学习复现 DeepSeek R1 Zero，让 3B 基座模型自发涌现自我验证与搜索能力。",
+          "learning_goals": [
+            "理解 TinyZero 要解决的问题与 R1 Zero 的核心思想",
+            "知道项目基于 veRL 框架、使用 Qwen2.5 基座模型",
+            "了解“用 RL 让基座模型自己学会推理”的实验目标"
+          ],
+          "source_files": [
+            "README.md",
+            "OLD_README.md"
+          ],
+          "minimal_modules": [
+            "README.md",
+            "OLD_README.md"
+          ],
+          "practice_task": "阅读 README 与实验日志链接，用自己的话写一段不超过 200 字的说明：TinyZero 与 DeepSeek R1 Zero 的关系、它选用了哪两个任务、为什么强调“under $30”。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境安装与项目目录结构",
+          "order": 2,
+          "filename": "u1-l2-install-and-directory-layout.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 conda/torch/vllm/verl 等依赖，并梳理仓库顶层目录（scripts、examples、verl、tests、docs）的职责划分。",
+          "learning_goals": [
+            "掌握从 conda 环境到 verl 可编辑安装的完整步骤",
+            "理清仓库目录结构与各目录的职责",
+            "识别构建文件 setup.py、pyproject.toml、requirements.txt 的作用"
+          ],
+          "source_files": [
+            "README.md",
+            "setup.py",
+            "requirements.txt",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "setup.py",
+            "requirements.txt",
+            "pyproject.toml"
+          ],
+          "practice_task": "在本地新建 conda 环境，按 README 完成依赖安装；用 tree 或 ls 列出 verl/ 下的子目录，为 examples/、verl/trainer/、verl/workers/、verl/utils/ 各写一句职责说明。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "跑通第一次训练：Countdown 任务",
+          "order": 3,
+          "filename": "u1-l3-run-countdown-training.md",
+          "level": "beginner",
+          "topic": "以 countdown 任务为例，走通“生成数据 → 设置环境变量 → 执行 train_tiny_zero.sh”的端到端流程，理解单卡/多卡的差异。",
+          "learning_goals": [
+            "掌握数据预处理命令与训练脚本的调用关系",
+            "理解 N_GPUS、ROLLOUT_TP_SIZE、BASE_MODEL 等关键环境变量",
+            "知道脚本最终调用 python3 -m verl.trainer.main_ppo 这一入口"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/train_tiny_zero.sh",
+            "examples/data_preprocess/countdown.py"
+          ],
+          "minimal_modules": [
+            "scripts/train_tiny_zero.sh",
+            "examples/data_preprocess/countdown.py"
+          ],
+          "practice_task": "对照 README 执行 countdown 数据预处理；阅读 train_tiny_zero.sh，列出它向 main_ppo 传递的关键参数（如 train_batch_size、max_response_length、kl_coef），并说明单卡与 3B 模型两种配置的区别。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "配置系统：Hydra 与 ppo_trainer.yaml",
+          "order": 4,
+          "filename": "u1-l4-config-system.md",
+          "level": "beginner",
+          "topic": "介绍 verl 使用 Hydra + OmegaConf 的配置体系，逐节讲解 ppo_trainer.yaml 中 data、actor_rollout_ref、critic、algorithm、trainer 各分组的含义。",
+          "learning_goals": [
+            "理解 Hydra 配置覆盖与变量插值机制",
+            "读懂 ppo_trainer.yaml 的五大分组结构与默认值",
+            "明白命令行参数如何覆盖 yaml 默认值"
+          ],
+          "source_files": [
+            "verl/trainer/config/ppo_trainer.yaml",
+            "scripts/train_tiny_zero.sh",
+            "verl/trainer/main_ppo.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/config/ppo_trainer.yaml",
+            "scripts/train_tiny_zero.sh"
+          ],
+          "practice_task": "打开 ppo_trainer.yaml，找到 actor_rollout_ref.rollout.n、algorithm.adv_estimator、algorithm.kl_ctrl 三个配置项，说明它们分别控制什么；再从 train_tiny_zero.sh 中找出对 yaml 默认值的覆盖示例各一例。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "数据与任务定义",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Countdown 任务：数据生成与 prompt 模板",
+          "order": 1,
+          "filename": "u2-l1-countdown-data-generation.md",
+          "level": "intermediate",
+          "topic": "精读 countdown.py：gen_dataset 如何生成 (target, numbers) 样本，make_prefix 如何构造 base / qwen-instruct 两种 prompt 模板，以及最终 parquet 的字段结构。",
+          "learning_goals": [
+            "掌握 countdown 任务的样本生成逻辑与随机参数",
+            "理解 <think>/<answer> 标签在 prompt 模板中的作用",
+            "看懂输出 parquet 中 prompt、reward_model.ground_truth、data_source 等字段"
+          ],
+          "source_files": [
+            "examples/data_preprocess/countdown.py",
+            "verl/utils/hdfs_io.py"
+          ],
+          "minimal_modules": [
+            "examples/data_preprocess/countdown.py:gen_dataset",
+            "examples/data_preprocess/countdown.py:make_prefix",
+            "examples/data_preprocess/countdown.py:make_map_fn"
+          ],
+          "practice_task": "仿照 make_prefix 的 base 模板，新增一个 'qwen2.5-base-zh' 模板，用中文重述同一段指令；并解释为什么注释里强调“改动时也要同步改 reward_score/countdown.py”。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Multiply 与 Arithmetic 任务数据生成",
+          "order": 2,
+          "filename": "u2-l2-multiply-arithmetic-data.md",
+          "level": "intermediate",
+          "topic": "对比 multiply.py 与 arth.py：两者如何按 DIGIT/位数字范围生成 (num1, num2, result) 及运算，make_prefix 的差异，以及 data_source 命名（yolo/multiply-3_digit、yolo/arithmetic-3_digit）。",
+          "learning_goals": [
+            "理解按位数（DIGIT）随机生成数字的策略",
+            "对比 multiply（仅乘法）与 arithmetic（含 + - *）的生成差异",
+            "掌握生成数据集到 parquet 的统一处理流程"
+          ],
+          "source_files": [
+            "examples/data_preprocess/multiply.py",
+            "examples/data_preprocess/arth.py"
+          ],
+          "minimal_modules": [
+            "examples/data_preprocess/multiply.py:gen_dataset",
+            "examples/data_preprocess/multiply.py:make_prefix",
+            "examples/data_preprocess/arth.py:gen_dataset"
+          ],
+          "practice_task": "修改 arth.py 让 operations 同时包含 + - *（去掉硬编码的 ['*']），并说明为保证减法非负代码做了什么处理；解释 make_prefix 中 <think> 标签开头的用意。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "RLHFDataset 数据加载与 tokenization",
+          "order": 3,
+          "filename": "u2-l3-rlhf-dataset-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 RLHFDataset 如何读取 parquet、对 prompt 做 tokenize_and_postprocess_data（左填充、截断策略），并生成 input_ids/attention_mask/position_ids；以及 collate_fn 如何区分张量与非张量字段。",
+          "learning_goals": [
+            "掌握 RLHFDataset 从 parquet 到 token 的转换流程",
+            "理解左填充、position_ids 计算与 truncation='error' 的含义",
+            "看懂 collate_fn 如何把一批样本堆叠成张量与 object ndarray"
+          ],
+          "source_files": [
+            "verl/utils/dataset/rl_dataset.py",
+            "verl/utils/torch_functional.py",
+            "verl/utils/model.py"
+          ],
+          "minimal_modules": [
+            "verl/utils/dataset/rl_dataset.py:RLHFDataset",
+            "verl/utils/dataset/rl_dataset.py:collate_fn",
+            "verl/utils/model.py:compute_position_id_with_mask"
+          ],
+          "practice_task": "阅读 RLHFDataset.__getitem__，说明为什么 attention_mask 用左填充、position_ids 如何由 attention_mask 得到；用一个小 prompt 调用 tokenize_and_postprocess_data 打印三者形状。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "规则奖励函数：从答案到分数",
+          "order": 4,
+          "filename": "u2-l4-rule-based-reward.md",
+          "level": "intermediate",
+          "topic": "精读 countdown.py 与 multiply.py 的 compute_score：extract_solution 提取 <answer> 标签、validate_equation 校验数字、evaluate_equation 安全求值，以及 format_score（0.1）与 score（1.0）的分级打分。",
+          "learning_goals": [
+            "掌握 countdown 奖励的提取-校验-求值三步流程",
+            "理解 format_score 的作用（格式正确但答案错误给小分）",
+            "看清 eval 受限执行与正则白名单的安全防护"
+          ],
+          "source_files": [
+            "verl/utils/reward_score/countdown.py",
+            "verl/utils/reward_score/multiply.py",
+            "verl/utils/reward_score/gsm8k.py"
+          ],
+          "minimal_modules": [
+            "verl/utils/reward_score/countdown.py:compute_score",
+            "verl/utils/reward_score/countdown.py:extract_solution",
+            "verl/utils/reward_score/countdown.py:evaluate_equation"
+          ],
+          "practice_task": "为 countdown.compute_score 写 3 条测试输入：完全正确（应得 1.0）、格式正确但结果错误（应得 0.1）、无 <answer> 标签（应得 0），并解释 random 抽样打印（do_print）的作用。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "数据协议与单控制器",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "DataProto 数据传输协议",
+          "order": 1,
+          "filename": "u3-l1-dataproto-protocol.md",
+          "level": "intermediate",
+          "topic": "讲解 verl 的统一数据容器 DataProto：batch（TensorDict）、non_tensor_batch、meta_info 三部分，以及 chunk/concat/union/repeat/reorder/pop/select 等方法如何支撑训练循环的数据流转。",
+          "learning_goals": [
+            "理解 DataProto 的三段式结构与 batch_size 一致性约束",
+            "掌握 chunk（分发）、concat（汇聚）、union（合并字段）、repeat（复制样本）的用途",
+            "看清 from_single_dict/from_dict 与 pad_dataproto_to_divisor 的关系"
+          ],
+          "source_files": [
+            "verl/protocol.py",
+            "verl/__init__.py"
+          ],
+          "minimal_modules": [
+            "verl/protocol.py:DataProto",
+            "verl/protocol.py:pad_dataproto_to_divisor",
+            "verl/protocol.py:union_tensor_dict"
+          ],
+          "practice_task": "构造一个含 input_ids 与 data_source 的 DataProto，依次调用 chunk(2)、对两块分别 repeat(2)、再用 concat 拼回，打印每步 batch_size，验证你对数据切分与复制的理解。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "Single Controller 与 Ray 资源池",
+          "order": 2,
+          "filename": "u3-l2-single-controller-ray-pool.md",
+          "level": "intermediate",
+          "topic": "讲解 veRL 的“单控制器”架构：驱动进程通过 RayWorkerGroup 调度各 Worker，RayResourcePool/PlacementGroup 划分 GPU 资源，create_colocated_worker_cls 把多个角色合并到同一进程（colocate）。",
+          "learning_goals": [
+            "理解“driver 进程编排 + Ray worker 计算”的总体架构",
+            "掌握 RayResourcePool、PlacementGroup 与 colocate 放置策略",
+            "看懂 RayClassWithInitArgs 与 create_colocated_worker_cls 的协作"
+          ],
+          "source_files": [
+            "verl/single_controller/ray/base.py",
+            "verl/single_controller/base/worker.py",
+            "verl/single_controller/base/worker_group.py"
+          ],
+          "minimal_modules": [
+            "verl/single_controller/ray/base.py:RayWorkerGroup",
+            "verl/single_controller/ray/base.py:RayResourcePool",
+            "verl/single_controller/ray/base.py:create_colocated_worker_cls"
+          ],
+          "practice_task": "画出 main_ppo 中 global_pool 把 Actor/Critic/Ref 三个 Role colocate 到同一组 GPU 的资源映射图；说明 max_colocate_count=1 对 FSDP 后端的意义。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "Dispatch 机制：注册与数据分发",
+          "order": 3,
+          "filename": "u3-l3-dispatch-decorator.md",
+          "level": "intermediate",
+          "topic": "精读 decorator.py：@register 装饰器如何给方法打上 dispatch_mode 标记，ONE_TO_ALL / DP_COMPUTE_PROTO / ALL_TO_ALL 等 Dispatch 模式对应的 dispatch_fn 与 collect_fn 如何切分和合并 DataProto。",
+          "learning_goals": [
+            "理解 @register 装饰器与 MAGIC_ATTR 标记机制",
+            "区分 ONE_TO_ALL（广播）与 DP_COMPUTE_PROTO（按 dp 切分再拼接）",
+            "看懂 collect_dp_compute_data_proto 如何把各 rank 输出 concat 回来"
+          ],
+          "source_files": [
+            "verl/single_controller/base/decorator.py"
+          ],
+          "minimal_modules": [
+            "verl/single_controller/base/decorator.py:register",
+            "verl/single_controller/base/decorator.py:Dispatch",
+            "verl/single_controller/base/decorator.py:dispatch_dp_compute_data_proto"
+          ],
+          "practice_task": "在 fsdp_workers.py 中找出 update_actor、generate_sequences、init_model 分别用了哪种 Dispatch，解释为什么 init_model 用 ONE_TO_ALL 而 update_actor 用 DP_COMPUTE_PROTO。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "PPO 训练主流程",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "main_ppo 入口与组件拼装",
+          "order": 1,
+          "filename": "u4-l1-main-ppo-entry.md",
+          "level": "intermediate",
+          "topic": "精读 main_ppo.py：@ray.remote main_task 如何按 strategy 选择 FSDP/Megatron Worker、组装 role_worker_mapping 与 resource_pool_spec、实例化 RewardManager 与 RayPPOTrainer 并调用 fit()。",
+          "learning_goals": [
+            "掌握 main_ppo 从配置到启动训练的完整组装流程",
+            "理解 _select_rm_score_fn 如何按 data_source 路由奖励函数",
+            "看清 RewardManager 在 rule-based 与 model-based RM 之间的切换"
+          ],
+          "source_files": [
+            "verl/trainer/main_ppo.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/main_ppo.py:main_task",
+            "verl/trainer/main_ppo.py:RewardManager",
+            "verl/trainer/main_ppo.py:_select_rm_score_fn"
+          ],
+          "practice_task": "在 _select_rm_score_fn 中新增对 'countdown' 与 'yolo/multiply-3_digit' 的判断已存在，请为一个新的 'mytask' 数据源接入你自己的 compute_score 函数，说明需要改动的三处代码位置。",
+          "depends_on": [
+            "u2-l4",
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "RayPPOTrainer 初始化与 Worker 编排",
+          "order": 2,
+          "filename": "u4-l2-ray-trainer-init.md",
+          "level": "intermediate",
+          "topic": "讲解 RayPPOTrainer.__init__ 构建数据加载器与 KL 控制器，init_workers 如何创建资源池、按 adv_estimator 决定是否启用 critic、spawn 各 WorkerGroup 并调用 init_model。",
+          "learning_goals": [
+            "理解 Role 枚举与 ResourcePoolManager 的资源映射",
+            "掌握 adv_estimator=gae 与 grpo 对是否创建 critic 的影响",
+            "看清 init_workers 中 critic/ref/rollout 的初始化顺序及其原因"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/ray_trainer.py",
+            "verl/utils/seqlen_balancing.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/ray_trainer.py:RayPPOTrainer.init_workers",
+            "verl/trainer/ppo/ray_trainer.py:ResourcePoolManager",
+            "verl/trainer/ppo/ray_trainer.py:Role"
+          ],
+          "practice_task": "阅读 init_workers，解释为什么“rollout 要在最后创建”（提示：vLLM 的 KV cache 显存估算）；说明 gae 与 grpo 两种 adv_estimator 下 use_critic 的取值差异。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "fit() 训练主循环全流程",
+          "order": 3,
+          "filename": "u4-l3-fit-training-loop.md",
+          "level": "intermediate",
+          "topic": "逐段拆解 fit() 的数据流：generate → repeat/union → balance → ref_log_prob → values → reward → KL penalty → advantage → update_critic → update_actor → validate/checkpoint，串起整个 PPO 一步训练。",
+          "learning_goals": [
+            "掌握 fit() 单步训练的完整阶段与计时打点",
+            "理解 batch.repeat(n) 与 rollout 多次采样的对应关系",
+            "看清 _balance_batch、global_token_num 在分片中的作用"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/ray_trainer.py",
+            "verl/protocol.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/ray_trainer.py:RayPPOTrainer.fit",
+            "verl/trainer/ppo/ray_trainer.py:RayPPOTrainer._balance_batch",
+            "verl/trainer/ppo/ray_trainer.py:compute_timing_metrics"
+          ],
+          "practice_task": "把 fit() 内 with _timer 的每个阶段画成时序流程图，标注每个阶段调用的是哪个 worker group（actor_rollout_wg/ref_policy_wg/critic_wg/rm_wg），并说明 reward_fn 与 val_reward_fn 的区别。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "奖励计算与 RewardManager",
+          "order": 4,
+          "filename": "u4-l4-reward-computation.md",
+          "level": "intermediate",
+          "topic": "讲解奖励如何在 fit() 中被组合：先可选地用 rm_wg 计算 model-based 分数，再用 rule-based reward_fn 计算最终 token_level_scores，并把标量分数放到 response 最后一个有效 token 上。",
+          "learning_goals": [
+            "理解 model-based rm_scores 与 rule-based reward 的优先级",
+            "掌握 RewardManager 如何解码 prompt+response 并调用 compute_score",
+            "看清奖励标量如何被放置到 reward_tensor 的末位 token"
+          ],
+          "source_files": [
+            "verl/trainer/main_ppo.py",
+            "verl/trainer/ppo/ray_trainer.py",
+            "verl/utils/reward_score/countdown.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/main_ppo.py:RewardManager.__call__",
+            "verl/trainer/ppo/ray_trainer.py:RayPPOTrainer._validate",
+            "verl/utils/reward_score/countdown.py:compute_score"
+          ],
+          "practice_task": "阅读 RewardManager.__call__，解释为何用 attention_mask 计算 valid_response_length 并把分数放在 reward_tensor[i, valid_response_length-1]；说明 num_examine 控制什么。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "核心算法 core_algos",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "KL 惩罚与优势函数计算",
+          "order": 1,
+          "filename": "u5-l1-kl-penalty-advantage.md",
+          "level": "intermediate",
+          "topic": "讲解 apply_kl_penalty 如何用 old_log_probs 与 ref_log_prob 计算 token 级 KL 并从 score 中扣除得到 reward，以及 compute_advantage 如何按 gae/grpo 估计 advantage 与 returns。",
+          "learning_goals": [
+            "理解 token_level_rewards = score - beta*KL 的构造",
+            "掌握 response_mask 的提取与 KL 在序列上的平均",
+            "看清 compute_advantage 对 gae 与 grpo 两条分支的调度"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/ray_trainer.py",
+            "verl/trainer/ppo/core_algos.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/ray_trainer.py:apply_kl_penalty",
+            "verl/trainer/ppo/ray_trainer.py:compute_advantage",
+            "verl/trainer/ppo/core_algos.py:kl_penalty"
+          ],
+          "practice_task": "用一个小张量手算 apply_kl_penalty：给定 token_level_scores、old_log_probs、ref_log_prob 与 beta，写出 token_level_rewards 的逐元素公式；说明 use_kl_loss=True 时为何跳过 KL penalty。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "PPO 策略损失与 clipping",
+          "order": 2,
+          "filename": "u5-l2-policy-loss-clip.md",
+          "level": "advanced",
+          "topic": "精读 compute_policy_loss：用 old_log_prob 与 log_prob 构造 importance ratio，pg_losses 与 pg_losses2 的 clipped 形式，以及 masked_mean、pg_clipfrac、ppo_kl 三个度量。",
+          "learning_goals": [
+            "理解 PPO 的 importance ratio 与 cliprange 双侧裁剪",
+            "掌握 masked_mean 如何只在有效 token 上求平均",
+            "看清 pg_clipfrac、ppo_kl 作为训练监控指标的含义"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/core_algos.py",
+            "verl/utils/torch_functional.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/core_algos.py:compute_policy_loss",
+            "verl/utils/torch_functional.py:masked_mean",
+            "verl/utils/torch_functional.py:entropy_from_logits"
+          ],
+          "practice_task": "构造一组 old_log_prob、log_prob、advantages、eos_mask 与 cliprange=0.2，手动计算 ratio、两支 pg_loss 与 max 选择，验证与 compute_policy_loss 输出一致。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "GAE 优势与价值损失",
+          "order": 3,
+          "filename": "u5-l3-gae-value-loss.md",
+          "level": "advanced",
+          "topic": "讲解 compute_gae_advantage_return 的反向递推（lastgaelam、delta）与 masked_whiten，以及 compute_value_loss 的 vpred clipped 双侧损失与 vf_explained_var 度量。",
+          "learning_goals": [
+            "掌握 GAE 反向递推 delta 与 lastgaelam 的推导",
+            "理解 masked_whiten 对 advantage 的归一化",
+            "看清 value loss 的 clipped 形式与 returns=advantages+values"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/core_algos.py",
+            "verl/utils/torch_functional.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/core_algos.py:compute_gae_advantage_return",
+            "verl/trainer/ppo/core_algos.py:compute_value_loss",
+            "verl/utils/torch_functional.py:masked_whiten"
+          ],
+          "practice_task": "给定一个长度为 4 的 token_level_rewards 与 values 序列、gamma=1、lam=1，手算每步的 delta、advantages、returns；再说明 cliprange_value 在 compute_value_loss 中如何稳定训练。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "KL 控制器与 KL 估计变体",
+          "order": 4,
+          "filename": "u5-l4-kl-controller-variants.md",
+          "level": "advanced",
+          "topic": "对比 FixedKLController 与 AdaptiveKLController（按比例误差自适应调整 beta）的 update 逻辑，并梳理 kl_penalty 支持的 kl/abs/mse/low_var_kl 多种估计。",
+          "learning_goals": [
+            "掌握 AdaptiveKLController 的比例误差与 horizon 调节",
+            "理解 fixed 与 adaptive 两种 KL 控制策略的取舍",
+            "区分 kl、abs、mse、low_var_kl 四种 KL 估计的公式"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/core_algos.py",
+            "verl/trainer/ppo/ray_trainer.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/core_algos.py:AdaptiveKLController",
+            "verl/trainer/ppo/core_algos.py:FixedKLController",
+            "verl/trainer/ppo/core_algos.py:kl_penalty"
+          ],
+          "practice_task": "实现一个简易脚本：给定当前_kl 在 0~2 之间取若干值，画出 AdaptiveKLController 在 target=0.1、horizon=100 下 beta 的变化曲线；解释 low_var_kl 相对朴素 kl 的低方差优势。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "GRPO 算法实现",
+          "order": 5,
+          "filename": "u5-l5-grpo-algorithm.md",
+          "level": "advanced",
+          "topic": "讲解 compute_grpo_outcome_advantage：按同一 prompt 的多个采样（index/uid）分组，用组内均值与标准差归一化 outcome 奖励作为 advantage，以及 actor 端 use_kl_loss 与 kl_loss_coef 的配合。",
+          "learning_goals": [
+            "理解 GRPO 用组内归一化替代 critic 的核心思想",
+            "掌握 index/uid 分组、id2mean/id2std 的计算",
+            "看清 GRPO 通过 use_kl_loss=True 直接在 loss 中加 KL 的方式"
+          ],
+          "source_files": [
+            "verl/trainer/ppo/core_algos.py",
+            "verl/trainer/ppo/ray_trainer.py",
+            "verl/workers/actor/dp_actor.py"
+          ],
+          "minimal_modules": [
+            "verl/trainer/ppo/core_algos.py:compute_grpo_outcome_advantage",
+            "verl/workers/actor/dp_actor.py:update_policy",
+            "verl/trainer/ppo/ray_trainer.py:compute_advantage"
+          ],
+          "practice_task": "对照 examples/grpo_trainer 的脚本与配置，说明启用 GRPO 需要设置哪几个参数（adv_estimator、rollout.n、use_kl_loss、kl_loss_coef）；解释组内只有 1 个样本时 mean=0、std=1 的处理。",
+          "depends_on": [
+            "u5-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "Worker 与混合引擎实现",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "ActorRolloutRefWorker 混合引擎",
+          "order": 1,
+          "filename": "u6-l1-hybrid-actor-rollout-ref-worker.md",
+          "level": "advanced",
+          "topic": "讲解 ActorRolloutRefWorker 如何用一个类同时承担 actor/rollout/ref 三种角色（_is_actor/_is_rollout/_is_ref 标志），init_model 顺序构建 FSDP 模型、rollout 引擎与 reference policy。",
+          "learning_goals": [
+            "理解 HybridEngine 通过角色标志复用同一 Worker 的设计",
+            "掌握 init_model 中 actor/rollout/ref 的构建顺序",
+            "看清 update_actor/generate_sequences/compute_ref_log_prob 的 Dispatch 标记"
+          ],
+          "source_files": [
+            "verl/workers/fsdp_workers.py",
+            "verl/workers/sharding_manager/base.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/fsdp_workers.py:ActorRolloutRefWorker",
+            "verl/workers/fsdp_workers.py:ActorRolloutRefWorker.init_model",
+            "verl/workers/fsdp_workers.py:ActorRolloutRefWorker.generate_sequences"
+          ],
+          "practice_task": "梳理 ActorRolloutRefWorker 在 role='actor_rollout_ref' 下初始化了哪些子模块（actor_module_fsdp、rollout、ref_module_fsdp），并说明 generate_sequences 末尾为何要 recompute old_log_probs。",
+          "depends_on": [
+            "u4-l2",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "Actor 策略前向与更新",
+          "order": 2,
+          "filename": "u6-l2-actor-update.md",
+          "level": "advanced",
+          "topic": "精读 DataParallelPPOActor：compute_log_prob 与 update_policy 的 micro/mini batch 切分、_forward_micro_batch 对 log_prob/entropy 的计算，以及 use_remove_padding 与 Ulysses 序列并行的处理。",
+          "learning_goals": [
+            "掌握 update_policy 的 mini→micro 梯度累积流程",
+            "理解 _forward_micro_batch 中 logits 截取与 temperature 缩放",
+            "看清 remove_padding + flash_attn_varlen 的去填充优化"
+          ],
+          "source_files": [
+            "verl/workers/actor/dp_actor.py",
+            "verl/workers/actor/base.py",
+            "verl/trainer/ppo/core_algos.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/actor/dp_actor.py:update_policy",
+            "verl/workers/actor/dp_actor.py:compute_log_prob",
+            "verl/workers/actor/dp_actor.py:_forward_micro_batch"
+          ],
+          "practice_task": "在 update_policy 中追踪 policy_loss = pg_loss - entropy_loss*entropy_coeff (- kl_loss*kl_loss_coef) 的组合；说明 gradient_accumulation = ppo_mini_batch_size // ppo_micro_batch_size 如何用于 loss 缩放。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "Critic 价值估计与更新",
+          "order": 3,
+          "filename": "u6-l3-critic-value-update.md",
+          "level": "advanced",
+          "topic": "讲解 DataParallelPPOCritic 的 compute_values（前向、按 response 截取、乘 mask）与 update_critic（用 returns 拟合 value head，调用 compute_value_loss）。",
+          "learning_goals": [
+            "掌握 critic 用 AutoModelForTokenClassification 输出标量 value",
+            "理解 compute_values 取 response 段并乘 attention_mask 的处理",
+            "看清 update_critic 用 returns 监督 value 的损失流程"
+          ],
+          "source_files": [
+            "verl/workers/critic/dp_critic.py",
+            "verl/workers/critic/base.py",
+            "verl/trainer/ppo/core_algos.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/critic/dp_critic.py:update_critic",
+            "verl/workers/critic/dp_critic.py:compute_values",
+            "verl/workers/critic/dp_critic.py:_forward_micro_batch"
+          ],
+          "practice_task": "对比 dp_actor 与 dp_critic 的 _forward_micro_batch，说明二者取 response 段的切片范围（[-response_length-1:-1]）为何一致；解释 critic 为何不需要 ratio/clip。",
+          "depends_on": [
+            "u6-l1",
+            "u5-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "vLLM Rollout 生成",
+          "order": 4,
+          "filename": "u6-l4-vllm-rollout.md",
+          "level": "advanced",
+          "topic": "精读 vLLMRollout：用 _pre_process_inputs 去左填充、构造 SamplingParams、调用 inference_engine.generate，再拼接 prompt+response 并重建 attention_mask（get_eos_mask）与 position_ids。",
+          "learning_goals": [
+            "理解 vLLM 推理引擎与 FSDP 训练权重解耦的设计",
+            "掌握左填充 prompt 的去除与 response 右填充的对齐",
+            "看清 n>1 多次采样与 do_sample=False 贪心验证的差异"
+          ],
+          "source_files": [
+            "verl/workers/rollout/vllm_rollout/vllm_rollout.py",
+            "verl/workers/rollout/base.py",
+            "verl/utils/torch_functional.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/rollout/vllm_rollout/vllm_rollout.py:vLLMRollout.generate_sequences",
+            "verl/workers/rollout/vllm_rollout/vllm_rollout.py:vLLMRollout.__init__",
+            "verl/workers/rollout/vllm_rollout/vllm_rollout.py:_pre_process_inputs"
+          ],
+          "practice_task": "阅读 generate_sequences，画出 attention_mask 与 position_ids 在“左填充 prompt + 右填充 response”下的拼接示意；说明 free_cache_engine/enforce_eager 的约束关系。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "FSDP↔vLLM 权重同步",
+          "order": 5,
+          "filename": "u6-l5-fsdp-vllm-weight-sync.md",
+          "level": "advanced",
+          "topic": "讲解 FSDPVLLMShardingManager：__enter__ 中 state_dict + sync_model_weights 把训练权重同步到 vLLM，__exit__ 中 offload_model_weights，以及 preprocess/postprocess 在 tp 组上的 allgather/broadcast。",
+          "learning_goals": [
+            "理解训练态 FSDP 与推理态 vLLM 的权重同步时机",
+            "掌握 full_params 下 FULL/SHARDED state_dict 的取舍",
+            "看清 random states 在 tp 组间对齐的必要性"
+          ],
+          "source_files": [
+            "verl/workers/sharding_manager/fsdp_vllm.py",
+            "verl/third_party/vllm/vllm_v_0_6_3/__init__.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/sharding_manager/fsdp_vllm.py:FSDPVLLMShardingManager",
+            "verl/workers/sharding_manager/fsdp_vllm.py:preprocess_data",
+            "verl/workers/sharding_manager/fsdp_vllm.py:postprocess_data"
+          ],
+          "practice_task": "解释为何在每次 generate_sequences 时都要进入 sharding manager 重新同步权重（提示：actor 刚被 update_actor 更新）；说明 postprocess_data 中按 tp_size chunk 的目的。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "高级主题与二次开发",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "FSDP 模型构建与并行策略",
+          "order": 1,
+          "filename": "u7-l1-fsdp-build-parallelism.md",
+          "level": "advanced",
+          "topic": "精读 ActorRolloutRefWorker._build_model_optimizer：用 meta tensor 加载 HF 模型、FSDP wrap_policy 与 sharding strategy、mixed precision、Ulysses device mesh 与序列并行的搭建。",
+          "learning_goals": [
+            "掌握 FSDP 初始化（FULL_SHARD/SHARD_GRAD_OP、MixedPrecision）的配置",
+            "理解 device_mesh 与 Ulysses 序列并行的关系",
+            "看清 param/grad/optimizer offload 的显存优化开关"
+          ],
+          "source_files": [
+            "verl/workers/fsdp_workers.py",
+            "verl/utils/fsdp_utils.py",
+            "verl/utils/ulysses.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/fsdp_workers.py:ActorRolloutRefWorker._build_model_optimizer",
+            "verl/workers/fsdp_workers.py:ActorRolloutRefWorker._build_rollout",
+            "verl/utils/fsdp_utils.py:get_fsdp_wrap_policy"
+          ],
+          "practice_task": "对照 train_tiny_zero.sh 与 README 中“OOM 时开启 gradient_checkpointing”的建议，定位 enable_gradient_checkpointing、param_offload 等配置项；说明 actor 用 fp32 而 ref 用 bf16 的原因。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "序列长度均衡与动态 batching",
+          "order": 2,
+          "filename": "u7-l2-seqlen-balancing-dynamic-bsz.md",
+          "level": "advanced",
+          "topic": "讲解 seqlen_balancing.py 的 Karmarkar-Karp 分区算法（get_seqlen_balanced_partitions）如何让各 dp rank token 数均衡，以及 rearrange_micro_batches 按 max_token_len 动态切分 micro batch。",
+          "learning_goals": [
+            "理解 _balance_batch 在 driver 侧重排数据使各 rank token 均衡",
+            "掌握 Karmarkar-Karp 最大差分法的分组思想",
+            "看清 use_dynamic_bsz 按总 token 数而非固定条数切 micro batch"
+          ],
+          "source_files": [
+            "verl/utils/seqlen_balancing.py",
+            "verl/trainer/ppo/ray_trainer.py"
+          ],
+          "minimal_modules": [
+            "verl/utils/seqlen_balancing.py:karmarkar_karp",
+            "verl/utils/seqlen_balancing.py:get_seqlen_balanced_partitions",
+            "verl/utils/seqlen_balancing.py:rearrange_micro_batches",
+            "verl/trainer/ppo/ray_trainer.py:RayPPOTrainer._balance_batch"
+          ],
+          "practice_task": "给定一个 seqlen_list 与 k_partitions=2，手算 get_seqlen_balanced_partitions 的分组结果；说明 use_dynamic_bsz=True 时为什么能提升 GPU 利用率。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "自定义新任务：端到端扩展",
+          "order": 3,
+          "filename": "u7-l3-add-new-task.md",
+          "level": "advanced",
+          "topic": "以新增一个算术任务为例，串联三处改动：写 data_preprocess 生成 parquet、在 reward_score/ 实现 compute_score、在 main_ppo._select_rm_score_fn 注册路由，最后用 train_tiny_zero.sh 启动。",
+          "learning_goals": [
+            "掌握新增任务的“数据-奖励-路由”三件套改动",
+            "理解 data_source 字符串如何驱动奖励函数路由",
+            "能够复用现有 Worker 与训练循环跑自己的任务"
+          ],
+          "source_files": [
+            "examples/data_preprocess/countdown.py",
+            "verl/utils/reward_score/countdown.py",
+            "verl/trainer/main_ppo.py",
+            "scripts/train_tiny_zero.sh"
+          ],
+          "minimal_modules": [
+            "examples/data_preprocess/countdown.py:make_prefix",
+            "verl/utils/reward_score/countdown.py:compute_score",
+            "verl/trainer/main_ppo.py:_select_rm_score_fn"
+          ],
+          "practice_task": "新增一个“两数求和”任务：写 make_prefix、compute_score（比较整数结果）、在 _select_rm_score_fn 加入分支，给出 data_source 命名与最小可跑的 train_tiny_zero.sh 参数清单。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l4",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l4",
+          "title": "Megatron 后端与奖励模型 Worker",
+          "order": 4,
+          "filename": "u7-l4-megatron-backend-rm-worker.md",
+          "level": "advanced",
+          "topic": "讲解除 FSDP 外的另一条后端：Megatron Worker（tensor/pipeline 并行）与 RewardModelWorker（AutoModelForTokenClassification 输出 model-based 奖励、可选 chat template 切换）。",
+          "learning_goals": [
+            "理解 strategy=megatron 时的 WorkerGroup 与并行维度差异",
+            "掌握 RewardModelWorker 的前向与 token 级分数展开",
+            "看清 model-based 与 rule-based 奖励如何并存"
+          ],
+          "source_files": [
+            "verl/workers/megatron_workers.py",
+            "verl/workers/fsdp_workers.py",
+            "verl/workers/reward_model/base.py"
+          ],
+          "minimal_modules": [
+            "verl/workers/megatron_workers.py:ActorRolloutRefWorker",
+            "verl/workers/fsdp_workers.py:RewardModelWorker",
+            "verl/workers/fsdp_workers.py:RewardModelWorker.compute_rm_score"
+          ],
+          "practice_task": "对比 FSDP 与 Megatron 两种 strategy 在 main_ppo 中的导入与 worker_group_cls 选择；说明 reward_model.enable=False 时 TinyZero 为何仍能训练（提示：rule-based reward_fn）。",
+          "depends_on": [
+            "u6-l1",
+            "u4-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l5",
+          "title": "测试、调试与实验跟踪",
+          "order": 5,
+          "filename": "u7-l5-testing-debug-tracking.md",
+          "level": "advanced",
+          "topic": "梳理 tests/e2e 端到端测试（arithmetic_sequence、digit_completion）、debug 工具（log_gpu_memory_usage、trajectory_tracker）、tracking.py 的 wandb/console 日志，以及 ray_trainer 输出的指标体系。",
+          "learning_goals": [
+            "掌握用 tests/e2e 做最小化训练验证的方法",
+            "理解 compute_data_metrics 中各 metric 的含义",
+            "看清 Tracking 如何把指标写入 wandb"
+          ],
+          "source_files": [
+            "tests/e2e/run_ray_trainer.sh",
+            "verl/utils/debug/performance.py",
+            "verl/utils/tracking.py",
+            "verl/trainer/ppo/ray_trainer.py"
+          ],
+          "minimal_modules": [
+            "tests/e2e/arithmetic_sequence/rl/main_trainer.py",
+            "verl/utils/tracking.py:Tracking",
+            "verl/trainer/ppo/ray_trainer.py:compute_data_metrics"
+          ],
+          "practice_task": "用 tests/e2e/arithmetic_sequence 跑一次最小训练，收集 critic/score、response_length、actor/pg_loss 等指标，说明 response_length 随训练变长与 R1 Zero 现象的联系。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l6",
+          "title": "R1 Zero “Aha” 现象与调参解读",
+          "order": 6,
+          "filename": "u7-l6-aha-moment-and-tuning.md",
+          "level": "advanced",
+          "topic": "结合实验现象，解读 TinyZero 中模型如何自发涌现自我验证与搜索能力，以及 format_score、kl_coef、reward shaping、3B vs 0.5B 等关键选择对结果的影响。",
+          "learning_goals": [
+            "理解“纯 RL、无 SFT”下推理能力涌现的机制",
+            "掌握 format_score 作为塑形奖励的作用与风险",
+            "能够根据实验指标诊断并调整训练超参"
+          ],
+          "source_files": [
+            "docs/experiment/ppo.rst",
+            "verl/utils/reward_score/countdown.py",
+            "README.md",
+            "scripts/train_tiny_zero.sh"
+          ],
+          "minimal_modules": [
+            "verl/utils/reward_score/countdown.py:compute_score",
+            "scripts/train_tiny_zero.sh",
+            "docs/experiment/ppo.rst"
+          ],
+          "practice_task": "写一份实验复盘：分析 format_score=0.1 若设为 0 可能带来的“只刷格式”风险；结合 kl_coef=0.001 说明 KL 约束如何防止策略远离基座模型，并给出观察“response_length 上升 + score 上升”的监控方法。",
+          "depends_on": [
+            "u2-l4",
+            "u5-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
