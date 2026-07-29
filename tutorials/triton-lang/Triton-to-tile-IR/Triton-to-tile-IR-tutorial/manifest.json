@@ -1,0 +1,647 @@
+{
+  "project": "Triton-to-tile-IR",
+  "head": "1bd89c0dfb66fc99d4d338af4baddd2874de9d87",
+  "rationale": "本手册围绕「Triton 如何新增并接入一个 CUDA Tile IR 后端」这条主线展开，遵循「先总览后细节、先 Python 后 C++、先机制后调优」的顺序。第一单元(beginner)从零开始，让读者建立项目定位、安装运行、目录结构与端到端编译链路的整体认知。第二单元(intermediate)深入 Python 运行时层，讲解 ENABLE_TILE 后端选择、TileIROptions/环境配置、make_ttir/make_tileir/make_cubin 三段式编译流水线、AST→TTIR 前端、Driver/Launcher 的 tile 网格启动、TMA tensor descriptor 的拆解以及 tileiras 外部编译器调用。第三单元(intermediate)进入 MLIR 转换 Pass 体系，先讲 C++ pybind 插件入口与转换骨架，再依次剖析核心转换 pass、map_elementwise 预处理、控制流结构化、assume 重写、无序内存模型的 memory token 生成，以及 FMA 融合与 bytecode 输出收尾。第四单元(advanced)面向专家，讲解 triton-cuda-tile-opt 工具与 lit/FileCheck 测试体系、性能调优实践(occupancy/num_ctas/TMA 偏好)、编译/运行期 fallback 容错机制，以及构建系统对 NVIDIA cuda-tile 的克隆/补丁/链接管理。讲义之间通过 depends_on 严格串联，使每一篇只解决一个相对独立的主题。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 Triton-to-tile-IR 项目并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：Triton 与 CUDA Tile IR 后端",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Triton-to-tile-IR 是什么、它在上游 Triton 基础上增加了什么、CUDA Tile IR 后端的定位、目标硬件(Blackwell/CUDA 13.1)与 ENABLE_TILE 开关。",
+          "learning_goals": [
+            "理解项目的孵化性质与定位",
+            "理解 CUDA Tile IR 后端相对 NVIDIA PTX 后端的差异",
+            "知道 ENABLE_TILE 开关的作用与已知功能/性能限制"
+          ],
+          "source_files": [
+            "README.md",
+            "README.original.md"
+          ],
+          "minimal_modules": [
+            "项目背景与定位",
+            "TileIR 后端与 PTX 后端的差异",
+            "已知功能与性能限制"
+          ],
+          "practice_task": "阅读 README 的 ChangeList 与 Known issues，用自己的话写出：启用 TileIR 后端需要哪些环境变量？它默认关闭了哪两类数值优化？当前不支持哪些算子？",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与运行方式",
+          "order": 2,
+          "filename": "u1-l2-install-and-run.md",
+          "level": "beginner",
+          "topic": "讲解从源码 pip 安装、ENABLE_TILE=1 启用，以及用 nvtriton wheel 与上游 triton(oait) 并存并通过环境变量切换的安装方式。",
+          "learning_goals": [
+            "掌握从源码安装与 wheel 安装两种方式",
+            "学会用 PYTHONPATH/ENABLE_TILE 在 nvtriton 与 oait 之间切换并验证 driver"
+          ],
+          "source_files": [
+            "INSTALL.md",
+            "third_party/tileir/README.md",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "源码安装",
+            "wheel 并存安装",
+            "环境变量开关与验证"
+          ],
+          "practice_task": "按 INSTALL.md 在隔离目录安装 nvtriton wheel，并写出两条 shell 命令：一条确认默认走 oait，一条开启 ENABLE_TILE 后确认 driver.active 为 TileIRDriver。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "目录结构与代码组织",
+          "order": 3,
+          "filename": "u1-l3-repo-structure.md",
+          "level": "beginner",
+          "topic": "梳理仓库目录结构，重点说明 third_party/tileir、python/triton、lib、third_party/tileir/test 各自的职责，区分「Triton 核心改动」与「TileIR 新增模块」。",
+          "learning_goals": [
+            "识别 TileIR 后端代码在仓库中的位置",
+            "区分 Triton 核心改动与 TileIR 新增模块",
+            "知道后端 Python/C++/测试/构建各自位于哪些路径"
+          ],
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "setup.py"
+          ],
+          "minimal_modules": [
+            "顶层目录概览",
+            "third_party/tileir 结构",
+            "构建与测试目录"
+          ],
+          "practice_task": "画一张仓库目录树，标注出「后端 Python」「C++ 转换 Pass」「lit 测试」「构建脚本」四类文件分别位于哪些具体路径。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "端到端编译链路总览",
+          "order": 4,
+          "filename": "u1-l4-e2e-pipeline-overview.md",
+          "level": "beginner",
+          "topic": "从一段 Triton kernel 出发，串起 AST→TTIR→TileIR→cubin→启动的完整数据流，建立全局认知，引出后续单元。",
+          "learning_goals": [
+            "理解编译三阶段 make_ttir/make_tileir/make_cubin",
+            "理解 tileiras 外部编译器的角色",
+            "理解 launcher 负责以 tile 网格启动内核"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/compiler.py",
+            "third_party/tileir/backend/driver.py",
+            "third_party/tileir/triton_tileir.cc"
+          ],
+          "minimal_modules": [
+            "编译阶段划分",
+            "tileiras 外部调用",
+            "启动链路"
+          ],
+          "practice_task": "对照 compiler.py 的 add_stages，写出每个 stage 函数对应的 IR 形态与产出物，并标注哪一步交给外部 tileiras 处理。",
+          "depends_on": [
+            "u1-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "后端接入、编译流水线与运行时",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "后端选择机制：ENABLE_TILE 如何切换后端",
+          "order": 1,
+          "filename": "u2-l1-backend-selection.md",
+          "level": "intermediate",
+          "topic": "讲解 ENABLE_TILE=1 如何强制选中 TileIRDriver、compile() 如何把 target.backend 从 cuda 改写为 tileir、以及 triton.backends entry point 后端发现机制。",
+          "learning_goals": [
+            "理解 driver 单例与 _create_driver 的选择逻辑",
+            "理解 compile() 中 target.backend 的改写",
+            "理解 entry point 的 in-tree 后端发现机制"
+          ],
+          "source_files": [
+            "python/triton/runtime/driver.py",
+            "python/triton/compiler/compiler.py",
+            "python/triton/backends/__init__.py"
+          ],
+          "minimal_modules": [
+            "driver 选择逻辑",
+            "target 改写",
+            "后端发现"
+          ],
+          "practice_task": "在 _create_driver 与 compile 中追踪 ENABLE_TILE 分支，画出「环境变量→driver 实例→target.backend」的完整决策流。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "编译选项与环境配置",
+          "order": 2,
+          "filename": "u2-l2-options-and-env-config.md",
+          "level": "intermediate",
+          "topic": "讲解 TileIROptions 的字段含义、approx/ftz/tileiras 路径等环境变量如何在 TileIREnvConf 中解析。",
+          "learning_goals": [
+            "掌握 occupancy/num_ctas/num_stages/num_warps 等关键旋钮",
+            "理解 TILEIR_ENABLE_APPROX/FTZ 等环境变量",
+            "理解 tileiras 路径的三级解析顺序"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/conf.py",
+            "third_party/tileir/backend/compiler.py"
+          ],
+          "minimal_modules": [
+            "TileIROptions 字段",
+            "TileIREnvConf 环境变量",
+            "tileiras 路径解析"
+          ],
+          "practice_task": "列出影响 TileIR 编译行为的全部环境变量及其默认值，并说明 occupancy 与 num_warps 在 TileIR 下语义与 PTX 后端有何不同。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "三段式编译流水线 make_ttir/make_tileir/make_cubin",
+          "order": 3,
+          "filename": "u2-l3-compile-stages.md",
+          "level": "intermediate",
+          "topic": "逐段拆解 TileIRBackend 的三个编译阶段，说明每阶段挂载哪些 pass、如何做合法性校验。",
+          "learning_goals": [
+            "理解 make_ttir 的通用清理 pass",
+            "理解 make_tileir 中 lift_cf/assume/转换/memtoken/fma 的挂载顺序",
+            "理解 only_contain_legal_dialects 合法性校验"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/compiler.py",
+            "third_party/tileir/triton_tileir.cc"
+          ],
+          "minimal_modules": [
+            "make_ttir",
+            "make_tileir pass 挂载顺序",
+            "合法性校验"
+          ],
+          "practice_task": "对照 make_tileir 写出 pass 执行顺序，并解释为何在转换后要执行 only_contain_legal_dialects 检查、不通过时抛出什么错误。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "AST → TTIR 前端（TileIR 分支）",
+          "order": 4,
+          "filename": "u2-l4-ast-to-ttir-frontend.md",
+          "level": "intermediate",
+          "topic": "讲解 ENABLE_TILE 时为何使用独立的 code_generator.ast_to_ttir，以及 semantic.py 中 is_tileir() 分支点（如 debug_barrier、tensor_descriptor）。",
+          "learning_goals": [
+            "理解 TileIR 前端与上游前端的关系与复用方式",
+            "理解 is_tileir 在语言语义层的分支点"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/code_generator.py",
+            "python/triton/language/semantic.py"
+          ],
+          "minimal_modules": [
+            "ast_to_ttir 入口",
+            "前端复用与差异",
+            "semantic 分支点"
+          ],
+          "practice_task": "在 semantic.py 中找出 is_tileir() 的调用点，说明 debug_barrier 在 TileIR 下生成了哪个 IR 操作，并解释其注释给出的原因。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "Driver、Launcher 与内核启动",
+          "order": 5,
+          "filename": "u2-l5-driver-and-launcher.md",
+          "level": "intermediate",
+          "topic": "讲解 TileIRDriver/TileIRLauncher 如何生成 C 启动胶水代码、如何用 cuLaunchKernelEx 以 tile 为单位的网格启动内核。",
+          "learning_goals": [
+            "理解 make_launcher 生成的胶水代码结构",
+            "理解 TileIR 以 tile 为单位的 grid/block 启动",
+            "理解 TileIRUtils 如何编译 C 工具模块"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/driver.py",
+            "third_party/tileir/backend/driver.c"
+          ],
+          "minimal_modules": [
+            "TileIRDriver",
+            "make_launcher 胶水代码",
+            "cuLaunchKernelEx tile 启动"
+          ],
+          "practice_task": "阅读 make_launcher，说明 TileIR 启动时 grid/block 维度的含义，以及 launch_pdl 与 cluster scheduling 属性是如何被设置的。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "TMA Tensor Descriptor 的拆解与启动",
+          "order": 6,
+          "filename": "u2-l6-tma-tensor-descriptor.md",
+          "level": "intermediate",
+          "topic": "讲解 TileIR 如何把 host 端 TMA tensor descriptor 拆解为 ptr/shape/stride 传入内核，以及语义层 tileir_tensor_descriptor 的生成与 launcher 的展开。",
+          "learning_goals": [
+            "理解 TileIR 没有 host TMA、需在语言层降低的设计",
+            "理解 make_tensordesc_arg 的拆解逻辑",
+            "理解 launcher 对 descriptor 参数的展开"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/driver.py",
+            "python/triton/language/semantic.py",
+            "python/triton/tools/tensor_descriptor.py"
+          ],
+          "minimal_modules": [
+            "host TMA 缺失设计",
+            "描述符拆解",
+            "launcher 参数展开"
+          ],
+          "practice_task": "追踪一个 tensordesc 参数从 signature 展开（expand_tensordesc）到最终传入 _launch 的全过程，列出拆出的 i32/指针/shape/stride 序列。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "tileiras 外部编译器调用与 cubin 生成",
+          "order": 7,
+          "filename": "u2-l7-tileiras-invocation.md",
+          "level": "intermediate",
+          "topic": "讲解 call_tileiras 如何把 bytecode 交给外部 tileiras、如何注入 CUDA_HOME、如何处理共享内存/TMEM 资源超限与编译崩溃错误。",
+          "learning_goals": [
+            "理解 bytecode 写出与 tileiras 命令构造",
+            "理解 CUDA_HOME 注入与工具链解析",
+            "理解 OutOfResources/TileirasError 错误分类"
+          ],
+          "source_files": [
+            "third_party/tileir/backend/compiler.py",
+            "third_party/tileir/backend/conf.py",
+            "third_party/tileir/backend/errors.py"
+          ],
+          "minimal_modules": [
+            "bytecode 输出",
+            "tileiras 命令与环境",
+            "错误分类"
+          ],
+          "practice_task": "说明 tileiras 子进程的 CUDA_HOME 为何要从 tileiras 路径推导而非读系统变量，并写出 shared memory 与 tmem 两类资源超限错误的判别正则。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "MLIR 转换 Pass 体系",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "转换 Pass 的 C++ 插件入口与骨架",
+          "order": 1,
+          "filename": "u3-l1-pass-plugin-skeleton.md",
+          "level": "intermediate",
+          "topic": "讲解 triton_tileir.cc 如何通过 pybind 暴露 passes、Passes.td 如何定义 pass 选项、转换 target 与 type converter 的骨架。",
+          "learning_goals": [
+            "理解 tileir Python 模块从哪个 C++ 插件加载",
+            "理解 Passes.td 定义 pass 选项的方式",
+            "理解 CudaTileConversionTarget 的合法/非法方言划分"
+          ],
+          "source_files": [
+            "third_party/tileir/triton_tileir.cc",
+            "third_party/tileir/include/TritonToTileIR/Passes.td",
+            "third_party/tileir/lib/TritonToTileIR/TritonToTileIRPass.cpp"
+          ],
+          "minimal_modules": [
+            "pybind 入口",
+            "Passes.td 选项定义",
+            "转换目标骨架"
+          ],
+          "practice_task": "对照 Passes.td 与 triton_tileir.cc，列出 convert-triton-to-cuda-tile 的全部选项，并写出其 Python 侧 add_triton_to_cudatile 对应的参数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "核心转换 convert-triton-to-cuda-tile",
+          "order": 2,
+          "filename": "u3-l2-core-conversion-pass.md",
+          "level": "intermediate",
+          "topic": "深入主转换 pass 的实现：类型转换、reshape/elementwise/load/store 等算子到 cuda_tile 的 lowering 模式，以及 approx/ftz/capability 等选项如何注入。",
+          "learning_goals": [
+            "理解 CudaTileTypeConverter 的作用",
+            "理解常见算子到 cuda_tile 的 lowering 模式",
+            "理解 modifier 选项如何注入到操作上"
+          ],
+          "source_files": [
+            "third_party/tileir/lib/TritonToTileIR/TritonToTileIRPass.cpp",
+            "third_party/tileir/lib/TritonToTileIR/Utils.cpp",
+            "third_party/tileir/include/TritonToTileIR/Utils.h"
+          ],
+          "minimal_modules": [
+            "类型转换",
+            "算子 lowering 模式",
+            "modifier 选项注入"
+          ],
+          "practice_task": "选取一个 lit 测试用例（如 op-conversion.mlir），手动跟踪一个 tt.load 到 cuda_tile load 的转换结果，标注类型如何被转换。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "map_elementwise 预处理",
+          "order": 3,
+          "filename": "u3-l3-map-elementwise-expansion.md",
+          "level": "intermediate",
+          "topic": "讲解 MapElementwiseExpansion 如何在方言转换前把 tt.map_elementwise（含 scf.if）展开为张量级算术。",
+          "learning_goals": [
+            "理解 scf.if → arith.select 的标量级转换",
+            "理解标量算子到张量算子的提升",
+            "理解为何要擦除 map_elementwise"
+          ],
+          "source_files": [
+            "third_party/tileir/lib/TritonToTileIR/MapElementwiseExpansion.cpp",
+            "third_party/tileir/lib/TritonToTileIR/MapElementwiseExpansion.h"
+          ],
+          "minimal_modules": [
+            "if 转 select",
+            "张量级提升",
+            "擦除 map_elementwise"
+          ],
+          "practice_task": "解释为何要在转换 pass 之前预处理 map_elementwise，并说明 expandMapElementwiseOps 把标量算子提升为张量算子的整体思路。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "控制流结构化 LiftTTCFToSCF",
+          "order": 4,
+          "filename": "u3-l4-lift-cf-to-scf.md",
+          "level": "intermediate",
+          "topic": "讲解 lift-tt-cf-to-scf pass 如何把 tt.func 内的 cf 控制流(cond_br/switch)结构化为 scf，为后续 cuda_tile 转换铺路。",
+          "learning_goals": [
+            "理解 cf→scf 的结构化转换",
+            "理解该 pass 依赖的方言",
+            "理解它在转换链中的位置"
+          ],
+          "source_files": [
+            "third_party/tileir/lib/Transform/LiftTTCFToSCF.cpp",
+            "third_party/tileir/include/Transform/Passes.td"
+          ],
+          "minimal_modules": [
+            "cf→scf 结构化",
+            "依赖方言",
+            "转换链位置"
+          ],
+          "practice_task": "说明该 pass 为何要放在 convert-triton-to-cuda-tile 之前，并指出它依赖哪些方言、对哪些控制流算子生效。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "assume 重写 RewriteAssumeWithCudaTile",
+          "order": 5,
+          "filename": "u3-l5-rewrite-assume.md",
+          "level": "intermediate",
+          "topic": "讲解 rewrite-assume-with-cuda-tile 如何识别 llvm.intr.assume 的整除/对齐模式并改写为 cuda_tile.assume，无匹配时清理。",
+          "learning_goals": [
+            "理解 assume 整除/对齐模式的识别",
+            "理解 cuda_tile.assume 的生成",
+            "理解无匹配时的清理行为"
+          ],
+          "source_files": [
+            "third_party/tileir/lib/Transform/RewriteAssumeWithCudaTile.cpp",
+            "third_party/tileir/include/Transform/Passes.td"
+          ],
+          "minimal_modules": [
+            "assume 模式识别",
+            "cuda_tile.assume 生成",
+            "无匹配清理"
+          ],
+          "practice_task": "对照 Passes.td 中给出的示例，写出一个 llvm.intr.assume 被改写为 cuda_tile.assume div_by 的前后 IR。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l6",
+          "title": "无序内存模型与 AutoGenMemoryToken",
+          "order": 6,
+          "filename": "u3-l6-memory-token.md",
+          "level": "intermediate",
+          "topic": "讲解 CUDA Tile IR 的无序内存模型，以及 auto-gen-memory-token pass 如何为别名访存的 load/store/atomic 生成串行化 token、如何处理 barrier。",
+          "learning_goals": [
+            "理解无序内存模型与 token 语义",
+            "理解 token 串行化别名访存",
+            "理解 barrier 的处理方式"
+          ],
+          "source_files": [
+            "third_party/tileir/lib/Transform/AutoGenMemoryToken.cpp",
+            "third_party/tileir/test/FileCheck/op-conversion-auto-memtoken.mlir",
+            "third_party/tileir/test/FileCheck/op-conversion-barrier.mlir"
+          ],
+          "minimal_modules": [
+            "无序内存模型",
+            "token 串行化",
+            "barrier 处理"
+          ],
+          "practice_task": "阅读 op-conversion-barrier.mlir，说明 gpu.barrier 被移除后，token 如何把其前后的 load/store 串行化，并画出 token 依赖链。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l7",
+          "title": "后处理：FMA 融合、loop split 与 bytecode 输出",
+          "order": 7,
+          "filename": "u3-l7-fma-fusion-and-bytecode.md",
+          "level": "intermediate",
+          "topic": "讲解转换后的 cuda_tile 级 pass（fuse-fma、loop-split）、strip debug info，以及 write_bytecode 与 only_contain_legal_dialects 的收尾。",
+          "learning_goals": [
+            "理解 cuda_tile 级 pass 的嵌套方式",
+            "理解 write_bytecode 定位哪个 ModuleOp",
+            "理解合法性校验收尾"
+          ],
+          "source_files": [
+            "third_party/tileir/triton_tileir.cc",
+            "third_party/tileir/backend/compiler.py",
+            "third_party/tileir/test/FileCheck/fma.mlir"
+          ],
+          "minimal_modules": [
+            "cuda_tile 级 pass 嵌套",
+            "bytecode 写出",
+            "校验收尾"
+          ],
+          "practice_task": "说明 fuse-fma/loop-split 为何要嵌套进 cuda_tile.module/entry，并解释 write_bytecode 在 ModuleOp 中查找的是哪一个嵌套模块。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "调优、测试、容错与构建",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "triton-cuda-tile-opt 工具与 lit/FileCheck 测试",
+          "order": 1,
+          "filename": "u4-l1-opt-tool-and-lit-tests.md",
+          "level": "advanced",
+          "topic": "讲解 triton-cuda-tile-opt 独立工具的作用、lit 测试如何配置与运行、FileCheck 匹配语法，以及如何在本地复现 MLIR reproducer。",
+          "learning_goals": [
+            "理解 triton-cuda-tile-opt 工具的入口与注册",
+            "掌握 lit 测试的配置与运行命令",
+            "掌握 FileCheck 匹配语法与 reproducer 复现"
+          ],
+          "source_files": [
+            "third_party/tileir/tools/triton-cuda-tile-opt/triton-cuda-tile-opt.cpp",
+            "third_party/tileir/test/FileCheck/op-conversion.mlir",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "opt 工具入口",
+            "lit 配置与运行",
+            "FileCheck 匹配"
+          ],
+          "practice_task": "依据 AGENTS.md 的方法，写出在 build 目录构建 triton-cuda-tile-opt 并运行一个 lit 测试的完整命令，并解释 RUN 行 pass-pipeline 的串联顺序。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "性能调优实践",
+          "order": 2,
+          "filename": "u4-l2-performance-tuning.md",
+          "level": "advanced",
+          "topic": "讲解 occupancy/num_ctas/num_stages/TMA 偏好/CGA tile/approx/ftz 等调优要点，以及 Helion 集成与从 PTX 后端移植配置的注意事项。",
+          "learning_goals": [
+            "掌握 TileIR 的关键调优旋钮及推荐值",
+            "理解 TMA API 偏好与 CGA 级 tile 表示",
+            "理解 Helion 移植与 PTX 配置不可直接复用的原因"
+          ],
+          "source_files": [
+            "third_party/tileir/PerformanceTuningTips.md",
+            "README.md",
+            "HelionPerformanceTuningGuide.md"
+          ],
+          "minimal_modules": [
+            "关键调优旋钮",
+            "TMA 偏好与 CGA tile",
+            "Helion 移植注意"
+          ],
+          "practice_task": "针对一个 dot 类内核，给出一份合理的 autotune 配置（occupancy、num_ctas、num_stages 范围），并列出必须移除的 PTX 后端独有旋钮（如 range_*、static_ranges）。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "编译期与运行期 Fallback 容错",
+          "order": 3,
+          "filename": "u4-l3-fallback-mechanism.md",
+          "level": "advanced",
+          "topic": "讲解 TileIR 编译/运行失败时回退到 NVIDIA PTX 后端的机制：jit.py 的 tileir_run、TRITON_TILEIR_RUNTIME_FALLBACK、warp_specialize workaround 与 HitFallback 错误。",
+          "learning_goals": [
+            "理解运行期 fallback 的开关与切换流程",
+            "理解 warp_specialize 被 force off 的 workaround",
+            "理解 HitFallback 等错误类型的作用"
+          ],
+          "source_files": [
+            "python/triton/runtime/jit.py",
+            "third_party/tileir/backend/errors.py",
+            "python/triton/compiler/compiler.py"
+          ],
+          "minimal_modules": [
+            "运行期 fallback",
+            "warp_specialize workaround",
+            "错误类型"
+          ],
+          "practice_task": "追踪 tileir_run 的 try/except 流程，说明运行期 fallback 默认关闭的原因，以及它如何临时把 ENABLE_TILE 置 0、切换 driver 再恢复原状。",
+          "depends_on": [
+            "u2-l1",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "构建系统与 cuda-tile 依赖管理",
+          "order": 4,
+          "filename": "u4-l4-build-and-cuda-tile-deps.md",
+          "level": "advanced",
+          "topic": "讲解 CMake 如何克隆/补丁/构建 NVIDIA cuda-tile、setup.py 如何把 tileir 注册为 in-tree 后端(entry point)、TritonTileIR 插件如何链接静态库。",
+          "learning_goals": [
+            "理解 cuda-tile 的克隆 commit/tag 与 patch 流程",
+            "理解 setup.py 的后端注册与 entry point",
+            "理解 TritonTileIR 插件链接的静态库"
+          ],
+          "source_files": [
+            "third_party/tileir/CMakeLists.txt",
+            "setup.py",
+            "CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "cuda-tile 克隆与补丁",
+            "后端注册 entry point",
+            "插件链接"
+          ],
+          "practice_task": "说明构建时 cuda-tile 的来源（clone 的 commit 与 tag）、为何要执行 patch_bytecode_utils，并列出 TritonTileIR 插件最终链接的 CUDA Tile 静态库名称。",
+          "depends_on": [
+            "u3-l1",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

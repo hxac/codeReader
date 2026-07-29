@@ -1,7 +1,7 @@
 {
   "project": "transformers",
-  "head": "af71155683b4d34dd92d8f037392fa6bf334035e",
-  "rationale": "transformers 是一个超大型、多子系统的「模型定义框架」（v5.15.0.dev0，500+ 模型目录），本手册按「先会用、再懂原理、最后能扩展」的三层路线组织。入门层（u1-u2）先让读者跑通安装、pipeline 与 Auto 类，建立对 from_pretrained/save_pretrained 统一范式、惰性导入 _LazyModule 和源码目录的整体认知。进阶层（u3-u9）逐块拆解分词器（含聊天模板）、图像/音视频处理器、配置与 PreTrainedModel 基类、注意力/掩码/RoPE/KV-Cache/Flash Attention/AttentionInterface、以 Llama 为代表的真实模型精读、Modular 机制与权重转换、完整的 Generation 栈（generate 主循环、解码策略、Logits 处理器、停止/流式、投机解码）以及训练栈（Trainer、TrainingArguments、优化器与调度器、回调与状态、DataCollator、损失函数）。专家层（u10-u11）聚焦量化、导出（ONNX/Dynamo/ExecuTorch）、FSDP/张量并行、DeepSpeed 与各类集成、内核与注意力集成、推理服务与持续批处理，以及添加新模型、测试体系、make fix-repo 仓库一致性工具链等二次开发场景。单元与讲义之间通过 depends_on 形成从基础到高级的单向依赖，每篇讲义只解决一个主题、引用真实源码文件并附带可操作的代码实践任务。",
+  "head": "dfff6dc70d3fffadf539353743a9e176af8109e9",
+  "rationale": "transformers 是一个超大型、多子系统的「模型定义框架」（500+ 模型目录），本手册按「先会用、再懂原理、最后能扩展」的三层路线组织。入门层（u1-u2）先让读者跑通安装、pipeline 与 Auto 类，建立对 from_pretrained/save_pretrained 统一范式、惰性导入 _LazyModule 和源码目录的整体认知。进阶层（u3-u9）逐块拆解分词器（含聊天模板）、图像/音视频处理器、配置与 PreTrainedModel 基类、注意力/掩码/RoPE/KV-Cache/Flash Attention/AttentionInterface、以 Llama 为代表的真实模型精读、Modular 机制与权重转换、完整的 Generation 栈（generate 主循环、解码策略、Logits 处理器、停止/流式、投机解码）以及训练栈（Trainer、TrainingArguments、优化器与调度器、回调与状态、DataCollator、损失函数）。专家层（u10-u11）聚焦量化、导出（ONNX/Dynamo/ExecuTorch）、FSDP/张量并行、DeepSpeed 与各类集成、内核与注意力集成、推理服务与持续批处理，以及添加新模型、测试体系、make fix-repo 仓库一致性工具链等二次开发场景。单元与讲义之间通过 depends_on 形成从基础到高级的单向依赖，每篇讲义只解决一个主题、引用真实源码文件并附带可操作的代码实践任务。\\n\\n本次增量（af71155683..dfff6dc70d）仅 4 个提交、11 个文件：[docs] Exporters 重写了 docs/source/en/exporters.md 并新增 exporters_extend.md 与 main_classes/exporters.md（但 exporters 源码本身未变，因此 u10-l2 仅需 update，补充新文档引用，核心 HfExporter/AutoHfExporter/OnnxConfig/ExportFormat 概念不变）；Fix some processors 为 florence2/ovis2 等具体模型的 ProcessingKwargs 默认值微调，ProcessorMixin/ProcessingKwargs 机制（processing_utils.py）未变且不在相关讲义 source_files 中；FSDP mps 跳过仅为 tests/test_fsdp_mixin.py 测试改动，distributed 源码未变；CI review 工作流与讲义无关。故除 u10-l2 标记为 update 外，其余讲义均标记为 keep，无需新增或重建。",
   "units": [
     {
       "id": "u1",
@@ -31,7 +31,7 @@
           ],
           "practice_task": "阅读 README 与 philosophy.md，用自己的话写出 transformers 解决的三个核心问题，并列出两个依赖 transformers 模型定义的上下游工具。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -61,7 +61,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -87,7 +87,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -114,7 +114,7 @@
           "depends_on": [
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l5",
@@ -141,7 +141,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -179,7 +179,7 @@
             "u1-l5",
             "u1-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -207,7 +207,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -235,7 +235,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -269,7 +269,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -295,7 +295,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l3",
@@ -323,7 +323,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l4",
@@ -351,7 +351,7 @@
           "depends_on": [
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -388,7 +388,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -416,7 +416,7 @@
             "u4-l1",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -445,7 +445,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -480,7 +480,7 @@
           "depends_on": [
             "u2-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -507,7 +507,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -535,7 +535,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l4",
@@ -562,7 +562,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l5",
@@ -589,7 +589,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -624,7 +624,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -651,7 +651,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l3",
@@ -679,7 +679,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l4",
@@ -706,7 +706,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l5",
@@ -734,7 +734,7 @@
             "u6-l1",
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -772,7 +772,7 @@
             "u5-l2",
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -799,7 +799,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -827,7 +827,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l4",
@@ -856,7 +856,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -891,7 +891,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -918,7 +918,7 @@
             "u8-l1",
             "u6-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -945,7 +945,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l4",
@@ -971,7 +971,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l5",
@@ -998,7 +998,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l6",
@@ -1025,7 +1025,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1062,7 +1062,7 @@
             "u5-l2",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -1090,7 +1090,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -1118,7 +1118,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l4",
@@ -1146,7 +1146,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l5",
@@ -1174,7 +1174,7 @@
             "u9-l1",
             "u3-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l6",
@@ -1202,7 +1202,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1240,7 +1240,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -1248,9 +1248,9 @@
           "order": 2,
           "filename": "u10-l2-exporters.md",
           "level": "advanced",
-          "topic": "讲解 exporters/ 的 HfExporter 抽象与 ONNX、Dynamo(torch.export)、ExecuTorch 三种导出后端，以及 ExportConfig 体系。",
+          "topic": "讲解 exporters/ 的 HfExporter 抽象与 ONNX、Dynamo(torch.export)、ExecuTorch 三种导出后端，以及 AutoHfExporter/AutoExportConfig 自动分发与 ExportConfig 体系。本次 exporters 文档被重写并新增 exporters_extend.md 与 main_classes/exporters.md，需同步文档引用。",
           "learning_goals": [
-            "理解 AutoHfExporter 与导出后端选择",
+            "理解 AutoHfExporter 与 AutoExportConfig 的自动分发",
             "掌握 OnnxConfig 与导出流程",
             "了解 Dynamo/ExecuTorch 的适用场景"
           ],
@@ -1259,18 +1259,21 @@
             "src/transformers/exporters/configs.py",
             "src/transformers/exporters/exporter_onnx.py",
             "src/transformers/exporters/exporter_dynamo.py",
-            "docs/source/en/exporters.md"
+            "docs/source/en/exporters.md",
+            "docs/source/en/exporters_extend.md",
+            "docs/source/en/main_classes/exporters.md"
           ],
           "minimal_modules": [
             "HfExporter/AutoHfExporter",
+            "AutoExportConfig",
             "OnnxConfig",
             "ExportFormat"
           ],
-          "practice_task": "把一个小模型导出为 ONNX，并用 ONNX Runtime 加载做一次推理验证结果与原模型一致。",
+          "practice_task": "把一个小模型导出为 ONNX，并用 ONNX Runtime 加载做一次推理验证结果与原模型一致；并参照重写后的 exporters.md 用 AutoExportConfig + AutoHfExporter 写一遍自动分发的导出。",
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "update"
         },
         {
           "id": "u10-l3",
@@ -1300,7 +1303,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l4",
@@ -1331,7 +1334,7 @@
             "u9-l1",
             "u10-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l5",
@@ -1361,7 +1364,7 @@
           "depends_on": [
             "u6-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l6",
@@ -1390,7 +1393,7 @@
           "depends_on": [
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1426,7 +1429,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -1455,7 +1458,7 @@
           "depends_on": [
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1485,7 +1488,7 @@
             "u7-l2",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l4",
@@ -1513,7 +1516,7 @@
           "depends_on": [
             "u11-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l5",
@@ -1542,7 +1545,7 @@
           "depends_on": [
             "u1-l5"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }

@@ -1,7 +1,7 @@
 {
   "project": "triton",
-  "head": "23ca0e48a2bd5eac19745e4dd90d8b3933dba6db",
-  "rationale": "Triton 是一个横跨 Python 前端、MLIR/C++ 编译器与多硬件后端（NVIDIA/AMD）的大型 GPU kernel 语言与编译器项目，核心数据流为「Python AST → TTIR → TTGIR → LLIR → PTX → cubin/hsaco」。因此学习顺序严格沿着真实的编译与执行主链路展开：先用入门单元（Unit 1-2）让读者认识项目、能构建运行、并亲手写出第一个 kernel 并掌握 tl 语言；再用进阶单元（Unit 3-6）从用户视角（JIT 特化、自动调优）进入编译器视角（compile 编排、AST→TTIR 代码生成）；接着深入编译器内核（Unit 7-9）讲清 TTIR/TTGIR 两个核心方言、后端抽象与运行时驱动；最后用专家单元（Unit 10-12）覆盖优化 pass、lowering 到 LLVM、调试工具、Proton、插件、Gluon 与测试体系。每个单元只解决一组相对独立的问题，讲义之间通过 depends_on 形成清晰 DAG，从「会用」逐步过渡到「能改、能扩展」。",
+  "head": "d16541f83b135d4c9479be65897432207ed8f209",
+  "rationale": "本次为增量更新（previous_head 23ca0e4 → current_head d16541f8，共 8 个 commit）。代码变化主要集中在后端内部实现，未触及主编译/执行主链路的公共接口与核心模型：1) AMD 后端新增 RDNA4m 目标（gfx117）与 gfx1250 multicast 子组拆分，并引入基于特性开关的 TargetFeatures 门控机制；2) NVIDIA 新增一个 packed arithmetic 算子（TritonNvidiaGPU 方言 + ElementwiseOpToLLVM lowering）；3) FPSAN（FpSanitizer）小幅改进；4) LLIR→ASM 翻译中提前设置 target TTI 以修复 mandatory inlining（python/src/llvm.cc）。经逐文件比对 manifest 引用的 60+ 个源码文件，唯一被引用且实际改动的是 third_party/amd/backend/compiler.py（仅 2 行，新增 gfx117 到 in-thread transpose 判定）。其余所有核心教学文件（runtime/、compiler/、language/、backends/ 包、knobs.py、lib/Dialect/Triton、lib/Dialect/TritonGPU、lib/Conversion/TritonToTritonGPU、lib/Conversion/TritonGPUToLLVM、tutorials、Proton、Gluon、plugins、triton_kernels/matmul.py 等）均未变化，因此绝大多数讲义标记为 keep。唯一需要轻量更新的是 u8-l3（AMD 后端）：其引用的 compiler.py 发生了改动，且 AMD 架构覆盖范围扩展（gfx117/RDNA4m、gfx1250 multicast）正是该讲义「gfx 架构映射」教学点的核心，故标记为 update 并补充 TargetFeatures 门控这一新机制作为参考源码。本次不新增讲义、不重建：所引入的功能均为后端内部增量或实验性算子，未产生需要独立成篇的新高层机制，原有 12 单元 37 讲义的结构仍完整覆盖项目。",
   "units": [
     {
       "id": "u1",
@@ -33,7 +33,7 @@
           ],
           "practice_task": "阅读 README 与 __init__.py，整理一份「Triton 公开 API 清单」（如 jit、autotune、compile、language），并用一句话说明每个 API 在编译/运行流程中扮演的角色。",
           "depends_on": [],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l2",
@@ -65,7 +65,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l3",
@@ -93,7 +93,7 @@
           "depends_on": [
             "u1-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u1-l4",
@@ -122,7 +122,7 @@
           "depends_on": [
             "u1-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -158,7 +158,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l2",
@@ -186,7 +186,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u2-l3",
@@ -214,7 +214,7 @@
           "depends_on": [
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -250,7 +250,7 @@
           "depends_on": [
             "u1-l4"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u3-l2",
@@ -278,7 +278,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -314,7 +314,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l2",
@@ -341,7 +341,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u4-l3",
@@ -368,7 +368,7 @@
           "depends_on": [
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -405,7 +405,7 @@
             "u3-l1",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l2",
@@ -433,7 +433,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u5-l3",
@@ -462,7 +462,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -499,7 +499,7 @@
             "u5-l1",
             "u2-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u6-l2",
@@ -528,7 +528,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -565,7 +565,7 @@
           "depends_on": [
             "u6-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l2",
@@ -594,7 +594,7 @@
           "depends_on": [
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u7-l3",
@@ -622,7 +622,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -659,7 +659,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l2",
@@ -688,7 +688,7 @@
             "u8-l1",
             "u7-l3"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u8-l3",
@@ -696,27 +696,30 @@
           "order": 3,
           "filename": "u8-l3-amd-backend.md",
           "level": "advanced",
-          "topic": "讲解 third_party/amd/backend/compiler.py 与配套 C++（TritonAMDGPU 方言/transforms）：AMD 后端的阶段管线、gfx 架构映射与 hsaco 产物，及其与 NVIDIA 后端的异同。",
+          "topic": "讲解 third_party/amd/backend/compiler.py 与配套 C++（TritonAMDGPU 方言/transforms）：AMD 后端的阶段管线、gfx 架构映射（含新增的 gfx117/RDNA4m 与 gfx1250 multicast 支持）与 hsaco 产物，以及 TargetFeatures 基于特性的门控机制，及其与 NVIDIA 后端的异同。",
           "learning_goals": [
             "理解 AMD 后端的编译阶段与 hsaco 产物",
-            "掌握 gfx 架 arch 映射与 warp_size 差异",
+            "掌握 gfx 架 arch 映射（gfx942/gfx110/gfx115/gfx117/gfx120 等）与 warp_size 差异",
+            "了解 TargetFeatures 特性门控如何取代逐 arch 字符串硬编码",
             "对比 AMD 与 NVIDIA 后端在 pass 管线上的异同"
           ],
           "source_files": [
             "third_party/amd/backend/compiler.py",
-            "third_party/amd/backend/driver.py"
+            "third_party/amd/backend/driver.py",
+            "third_party/amd/lib/Dialect/TritonAMDGPU/IR/TargetFeatures.cpp"
           ],
           "minimal_modules": [
             "AMD 编译阶段",
-            "gfx 架构映射",
+            "gfx 架构映射（含 RDNA4m/gfx1250）",
+            "TargetFeatures 特性门控",
             "hsaco 产物",
             "与 NVIDIA 对比"
           ],
-          "practice_task": "对比 NVIDIA 与 AMD 两个 compiler.py 的 add_stages，列出两者阶段名称与最终二进制扩展名（cubin vs hsaco）的差异，并解释 arch 表示方式的不同（compute capability vs gfx 名）。",
+          "practice_task": "对比 NVIDIA 与 AMD 两个 compiler.py 的 add_stages，列出两者阶段名称与最终二进制扩展名（cubin vs hsaco）的差异，并解释 arch 表示方式的不同（compute capability vs gfx 名）；进一步在 is_in_thread_transpose_enabled 中观察 gfx117 等新架构如何被纳入特性判定。",
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "update"
         }
       ]
     },
@@ -753,7 +756,7 @@
           "depends_on": [
             "u8-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l2",
@@ -783,7 +786,7 @@
             "u5-l2",
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u9-l3",
@@ -811,7 +814,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -849,7 +852,7 @@
             "u7-l2",
             "u8-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l2",
@@ -878,7 +881,7 @@
           "depends_on": [
             "u10-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u10-l3",
@@ -907,7 +910,7 @@
           "depends_on": [
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -943,7 +946,7 @@
           "depends_on": [
             "u5-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l2",
@@ -973,7 +976,7 @@
             "u5-l2",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l3",
@@ -1001,7 +1004,7 @@
           "depends_on": [
             "u3-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u11-l4",
@@ -1029,7 +1032,7 @@
           "depends_on": [
             "u9-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     },
@@ -1067,7 +1070,7 @@
             "u8-l2",
             "u7-l1"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l2",
@@ -1097,7 +1100,7 @@
             "u5-l1",
             "u7-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l3",
@@ -1126,7 +1129,7 @@
           "depends_on": [
             "u5-l2"
           ],
-          "action": "new"
+          "action": "keep"
         },
         {
           "id": "u12-l4",
@@ -1155,7 +1158,7 @@
             "u2-l2",
             "u4-l1"
           ],
-          "action": "new"
+          "action": "keep"
         }
       ]
     }
