@@ -1,0 +1,1166 @@
+{
+  "project": "triton",
+  "head": "d16541f83b135d4c9479be65897432207ed8f209",
+  "rationale": "本次为增量更新（previous_head 23ca0e4 → current_head d16541f8，共 8 个 commit）。代码变化主要集中在后端内部实现，未触及主编译/执行主链路的公共接口与核心模型：1) AMD 后端新增 RDNA4m 目标（gfx117）与 gfx1250 multicast 子组拆分，并引入基于特性开关的 TargetFeatures 门控机制；2) NVIDIA 新增一个 packed arithmetic 算子（TritonNvidiaGPU 方言 + ElementwiseOpToLLVM lowering）；3) FPSAN（FpSanitizer）小幅改进；4) LLIR→ASM 翻译中提前设置 target TTI 以修复 mandatory inlining（python/src/llvm.cc）。经逐文件比对 manifest 引用的 60+ 个源码文件，唯一被引用且实际改动的是 third_party/amd/backend/compiler.py（仅 2 行，新增 gfx117 到 in-thread transpose 判定）。其余所有核心教学文件（runtime/、compiler/、language/、backends/ 包、knobs.py、lib/Dialect/Triton、lib/Dialect/TritonGPU、lib/Conversion/TritonToTritonGPU、lib/Conversion/TritonGPUToLLVM、tutorials、Proton、Gluon、plugins、triton_kernels/matmul.py 等）均未变化，因此绝大多数讲义标记为 keep。唯一需要轻量更新的是 u8-l3（AMD 后端）：其引用的 compiler.py 发生了改动，且 AMD 架构覆盖范围扩展（gfx117/RDNA4m、gfx1250 multicast）正是该讲义「gfx 架构映射」教学点的核心，故标记为 update 并补充 TargetFeatures 门控这一新机制作为参考源码。本次不新增讲义、不重建：所引入的功能均为后端内部增量或实验性算子，未产生需要独立成篇的新高层机制，原有 12 单元 37 讲义的结构仍完整覆盖项目。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "项目概览与上手",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "Triton 是什么：定位、技术栈与硬件支持",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Triton 作为 GPU 深度学习 kernel 语言与编译器的定位、Python+MLIR+C++ 三层技术栈、支持的 NVIDIA/AMD 硬件，以及它在 CUDA 与 DSL 之间的取舍。",
+          "learning_goals": [
+            "理解 Triton 解决的问题：比 CUDA 更高生产率、比通用 DSL 更灵活",
+            "掌握 Triton 的三层技术栈与编译产物链路（AST→TTIR→TTGIR→LLIR→PTX→cubin）",
+            "了解支持的平台、硬件与版本（Triton 3.x、Python 3.10-3.14）"
+          ],
+          "source_files": [
+            "README.md",
+            "python/triton/__init__.py",
+            "docs/getting-started/installation.rst"
+          ],
+          "minimal_modules": [
+            "项目定位",
+            "技术栈概览",
+            "硬件与平台支持"
+          ],
+          "practice_task": "阅读 README 与 __init__.py，整理一份「Triton 公开 API 清单」（如 jit、autotune、compile、language），并用一句话说明每个 API 在编译/运行流程中扮演的角色。",
+          "depends_on": [],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l2",
+          "title": "从源码构建、安装与运行测试",
+          "order": 2,
+          "filename": "u1-l2-build-install-test.md",
+          "level": "beginner",
+          "topic": "讲解如何通过 pip 安装、从源码 editable 安装、使用 make 与 CMake 构建 C++/MLIR 部分，以及如何运行 pytest 与 lit 测试。",
+          "learning_goals": [
+            "掌握 pip install -e . 与 python/requirements.txt 的构建时依赖关系",
+            "理解 CMake/setup.py 如何下载并链接指定版本的 LLVM（cmake/llvm-info.json 的 llvm_hash）",
+            "学会运行 make test / make test-nogpu 与 lit 测试",
+            "了解 TRITON_BUILD_WITH_CCACHE、MAX_JOBS 等构建调优开关"
+          ],
+          "source_files": [
+            "README.md",
+            "Makefile",
+            "setup.py",
+            "cmake/llvm-info.json",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "安装方式",
+            "CMake/LLVM 构建",
+            "测试运行",
+            "构建调优"
+          ],
+          "practice_task": "在本地从源码完成 editable 安装（或仅阅读 setup.py 与 Makefile 模拟），记录构建产物 build 目录的位置，并运行一个不依赖 GPU 的 lit 测试（如 test/Triton 下的 .mlir）验证工具链可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库与目录结构地图",
+          "order": 3,
+          "filename": "u1-l3-repository-structure.md",
+          "level": "beginner",
+          "topic": "梳理 Triton 仓库的顶层目录划分：python/（前端与运行时）、lib 与 include（MLIR/C++ 编译器）、third_party（NVIDIA/AMD/Proton 后端）、bin、test、docs、examples，建立全局心智地图。",
+          "learning_goals": [
+            "区分 Python 前端层、C++/MLIR 编译器层、硬件后端层的代码位置",
+            "定位关键入口：python/triton/__init__.py、lib/Dialect、third_party/{nvidia,amd}/backend",
+            "理解 test（lit）与 python/test（pytest）两套测试体系的分工"
+          ],
+          "source_files": [
+            "README.md",
+            "python/triton/__init__.py",
+            "examples/plugins/README.md"
+          ],
+          "minimal_modules": [
+            "顶层目录划分",
+            "前端/编译器/后端三层定位",
+            "测试目录"
+          ],
+          "practice_task": "绘制一张仓库目录树，用三种颜色分别标注「Python 前端」「C++/MLIR 编译器」「硬件后端」三类代码，并在每个关键目录旁注明其职责。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u1-l4",
+          "title": "编写并运行第一个 Triton kernel",
+          "order": 4,
+          "filename": "u1-l4-first-kernel.md",
+          "level": "beginner",
+          "topic": "以 vector-add 教程为例，演示 @triton.jit 装饰器、tl 语言、grid 与 program_id 的基本用法，让读者跑通第一个 kernel 并观察编译产物。",
+          "learning_goals": [
+            "掌握 @triton.jit 内核函数的写法与 tl.load/tl.store 的使用",
+            "理解 program_id、grid、BLOCK_SIZE 与分块并行的关系",
+            "学会用 kernel[grid](...) 启动内核并通过 .asm 查看生成的 IR"
+          ],
+          "source_files": [
+            "python/tutorials/01-vector-add.py",
+            "python/triton/__init__.py",
+            "python/triton/language/__init__.py"
+          ],
+          "minimal_modules": [
+            "jit 装饰器",
+            "tl.load/store",
+            "grid 与 program_id",
+            "编译产物查看"
+          ],
+          "practice_task": "参照 01-vector-add.py，写一个对长度为 N 的向量做「逐元素乘 2」的 Triton kernel，设置合适的 grid 与 BLOCK_SIZE，并在 TRITON_INTERPRET=1（无需 GPU）下运行验证结果正确。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "Python 前端语言：triton.language (tl)",
+      "level": "beginner",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "tl 核心类型、张量与 constexpr",
+          "order": 1,
+          "filename": "u2-l1-tl-core-types.md",
+          "level": "beginner",
+          "topic": "深入 triton.language 的核心抽象：tensor 与 block_type、标量/张量类型、constexpr 编译期常量、以及 core.py 中的基本算子（dot、load、store、reduce、arange 等）。",
+          "learning_goals": [
+            "理解 Triton tensor 的 block 语义与 dtype 体系（float16/16/bf16、float8 系列）",
+            "掌握 constexpr 的编译期特化作用及其与普通参数的区别",
+            "熟悉 core.py 暴露的常用算子与 tensor 的 shape/broadcast 规则"
+          ],
+          "source_files": [
+            "python/triton/language/__init__.py",
+            "python/triton/language/core.py"
+          ],
+          "minimal_modules": [
+            "tensor 与 block_type",
+            "dtype 体系",
+            "constexpr",
+            "核心算子"
+          ],
+          "practice_task": "写一个 kernel，定义一个 constexpr 的 BLOCK_SIZE，用 tl.arange 生成索引、用 tl.zeros 初始化累加器，并对一个块做 tl.sum 归约；尝试把 BLOCK_SIZE 改为普通参数，观察编译行为差异。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l2",
+          "title": "指针算术与分块矩阵乘法",
+          "order": 2,
+          "filename": "u2-l2-pointer-arithmetic-matmul.md",
+          "level": "intermediate",
+          "topic": "以矩阵乘法教程为核心，讲解多维指针算术（stride、行优先布局）、block 指针的构造与越界掩码、以及如何用 K 维循环累加实现分块 GEMM。",
+          "learning_goals": [
+            "掌握用 base + i*stride 的方式构造 2D block 指针",
+            "理解 BLOCK_M/BLOCK_N/BLOCK_K 分块与 K 维累加循环",
+            "学会用 mask 与 other_value 处理非整除边界"
+          ],
+          "source_files": [
+            "python/tutorials/03-matrix-multiplication.py",
+            "python/triton/language/core.py"
+          ],
+          "minimal_modules": [
+            "多维指针算术",
+            "分块 GEMM",
+            "边界掩码",
+            "program 重排与 L2 命中"
+          ],
+          "practice_task": "基于 03-matrix-multiplication.py，实现一个固定 BLOCK_SIZE 的简化 GEMM kernel（不含 autotune），在解释器模式下对随机小矩阵验证与 PyTorch torch.mm 结果一致。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u2-l3",
+          "title": "tl 标准库、数学函数与 libdevice",
+          "order": 3,
+          "filename": "u2-l3-tl-standard-math.md",
+          "level": "beginner",
+          "topic": "介绍 standard.py 提供的高层归约/扫描/排序算子（softmax、cumsum、sort、argmax）、math.py 的数学函数，以及 extra/libdevice.py 暴露的设备级内建函数。",
+          "learning_goals": [
+            "掌握 standard.py 中的归约、cumsum、softmax、sort 等可复用高层算子",
+            "了解 math.py 中 exp/log/sin 等 elementwise 数学函数的语义",
+            "认识 libdevice 设备函数扩展及其与硬件的对应"
+          ],
+          "source_files": [
+            "python/triton/language/standard.py",
+            "python/triton/language/math.py",
+            "python/triton/language/extra/libdevice.py"
+          ],
+          "minimal_modules": [
+            "standard 高层算子",
+            "math 数学函数",
+            "libdevice 设备函数"
+          ],
+          "practice_task": "写一个 kernel，对一个 block 内的向量计算 numerically-stable 的 softmax（可调用 tl.softmax 或自行用 exp/sum 实现），并与 NumPy 参考实现对比误差。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "JIT 机制与参数特化",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "JITFunction：从 Python 函数到可调用内核",
+          "order": 1,
+          "filename": "u3-l1-jitfunction.md",
+          "level": "intermediate",
+          "topic": "深入 jit.py 的 JITFunction 与 KernelInterface：装饰器如何包装函数、__getitem__(grid) 与 run 的调用链、签名解析与参数绑定。",
+          "learning_goals": [
+            "理解 @triton.jit 如何把普通函数变为 JITFunction",
+            "掌握 kernel[grid](...) 背后的 __getitem__ 与 run 调用链",
+            "了解 KernelInterface 抽象与 autotuner 复用同一接口的关系"
+          ],
+          "source_files": [
+            "python/triton/runtime/jit.py",
+            "python/triton/runtime/__init__.py"
+          ],
+          "minimal_modules": [
+            "JITFunction",
+            "KernelInterface",
+            "grid 与 run 调用链",
+            "签名解析"
+          ],
+          "practice_task": "在 jit.py 中追踪一次 kernel[grid](x, BLOCK_SIZE=128) 调用，画出从 __getitem__ 到最终触发 triton.compile 的方法调用时序图，并标注特化发生在哪一步。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u3-l2",
+          "title": "参数特化、依赖追踪与 cache_key",
+          "order": 2,
+          "filename": "u3-l2-specialization-cache-key.md",
+          "level": "intermediate",
+          "topic": "讲解 Triton 如何根据张量 dtype/形状对齐、整数取值对参数做特化，DependenciesFinder 如何用 AST 追踪依赖与全局变量以计算稳定的 cache_key。",
+          "learning_goals": [
+            "理解指针 divisibility 特化（D）与整数/张量特化策略",
+            "掌握 DependenciesFinder 如何遍历 AST 计算函数依赖哈希",
+            "认识 used_global_vals 校验与重编译触发条件"
+          ],
+          "source_files": [
+            "python/triton/runtime/jit.py",
+            "python/triton/backends/compiler.py"
+          ],
+          "minimal_modules": [
+            "参数特化策略",
+            "DependenciesFinder",
+            "cache_key 计算",
+            "全局变量校验"
+          ],
+          "practice_task": "写两个调用同一个 kernel 的例子：一次传入形状对齐、一次不对齐的指针，dump 出两者的 ttir，对比特化标签（如 tt.divisibility）的差异，并解释 cache_key 为何不同。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "性能调优：自动调优与启发式",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "Autotuner 与 Config 配置空间",
+          "order": 1,
+          "filename": "u4-l1-autotuner-config.md",
+          "level": "intermediate",
+          "topic": "讲解 @triton.autotune 装饰器、Config（num_warps/num_stages/num_ctas 与 kwargs）、autotuner 的缓存与挑选最优配置的流程。",
+          "learning_goals": [
+            "掌握 @triton.autotune 与 Config 的用法及关键字段含义",
+            "理解 Autotuner 如何遍历配置、按 key 缓存最优结果",
+            "了解 reset_to_zero / restore_value 在反复 benchmark 中的作用"
+          ],
+          "source_files": [
+            "python/triton/runtime/autotuner.py",
+            "python/tutorials/03-matrix-multiplication.py"
+          ],
+          "minimal_modules": [
+            "autotune 装饰器",
+            "Config 配置",
+            "配置缓存",
+            "reset/restore 钩子"
+          ],
+          "practice_task": "为你的 GEMM kernel 加上 @triton.autotune，提供 3-4 个不同 num_warps/num_stages/BLOCK 的 Config，在 GPU（或观察日志）下记录 autotuner 选出的最优配置；如无 GPU 则阅读代码说明选择流程。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l2",
+          "title": "heuristics：启发式生成配置",
+          "order": 2,
+          "filename": "u4-l2-heuristics.md",
+          "level": "intermediate",
+          "topic": "讲解 @triton.heuristics 如何根据运行时参数（如维度大小）动态推导 constexpr 值，实现基于规则的配置生成，及其与 autotune 的组合方式。",
+          "learning_goals": [
+            "掌握 heuristics 装饰器的签名与键值映射机制",
+            "理解启发式值如何作为 constexpr 注入 kernel",
+            "学会将 heuristics 与 autotune 组合使用"
+          ],
+          "source_files": [
+            "python/triton/runtime/autotuner.py",
+            "python/triton/runtime/__init__.py"
+          ],
+          "minimal_modules": [
+            "heuristics 装饰器",
+            "动态 constexpr",
+            "与 autotune 组合"
+          ],
+          "practice_task": "写一个 heuristics，根据输入向量长度自动选择 BLOCK_SIZE（如小于 1024 用 256 否则用 1024），验证同一 kernel 在不同输入下被特化为不同的 BLOCK 值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u4-l3",
+          "title": "基准测量与配置裁剪",
+          "order": 3,
+          "filename": "u4-l3-benchmark-prune.md",
+          "level": "intermediate",
+          "topic": "讲解 autotuner 的性能基准（do_bench、warmup/rep、cuda graph）、prune_configs_by 提前裁剪配置空间，以及结果持久化缓存。",
+          "learning_goals": [
+            "理解 do_bench 的 warmup/测量/分位数机制",
+            "掌握 prune_configs_by 的 perf_model/top_k/early_config_prune 三种裁剪手段",
+            "了解 cache_results 持久化与 TRITON_PRINT_AUTOTUNING"
+          ],
+          "source_files": [
+            "python/triton/runtime/autotuner.py",
+            "python/triton/testing.py"
+          ],
+          "minimal_modules": [
+            "do_bench 基准",
+            "配置裁剪",
+            "结果缓存"
+          ],
+          "practice_task": "为 autotune 增加一个 early_config_prune 函数：当 K 维小于阈值时丢弃大 BLOCK_K 的 Config，减少 benchmark 次数；打印裁剪前后的配置数量。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "编译管线编排（Python 层）",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "triton.compile：编译入口与阶段编排",
+          "order": 1,
+          "filename": "u5-l1-compile-entry-stages.md",
+          "level": "intermediate",
+          "topic": "深入 compiler.py 的 compile()：ASTSource/IRSource、backend.add_stages 注册的阶段字典、阶段顺序执行与 metadata 传递，以及缓存命中判定。",
+          "learning_goals": [
+            "掌握 compile() 从源到 CompiledKernel 的完整流程",
+            "理解 stages 字典（ttir→ttgir→llir→ptx→cubin）的顺序执行模型",
+            "了解缓存键计算与 always_compile/override/dump 的交互"
+          ],
+          "source_files": [
+            "python/triton/compiler/compiler.py",
+            "python/triton/backends/compiler.py"
+          ],
+          "minimal_modules": [
+            "compile 入口",
+            "ASTSource/IRSource",
+            "stages 编排",
+            "缓存判定"
+          ],
+          "practice_task": "用 triton.compile 直接编译一个 .ttir 文件（IRSource 路径），打印 first_stage 的选取逻辑，并解释「从 IR 文件编译时会跳过当前阶段 pass」这一行为（ir_source 分支）。",
+          "depends_on": [
+            "u3-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l2",
+          "title": "CompiledKernel：编译产物与延迟初始化",
+          "order": 2,
+          "filename": "u5-l2-compiled-kernel.md",
+          "level": "intermediate",
+          "topic": "讲解 CompiledKernel 如何装载 metadata、asm 字典（各级 IR 与二进制）、以及 _init_handles 的延迟加载、run/launch 与资源检查（共享内存/线程数）。",
+          "learning_goals": [
+            "理解 CompiledKernel 的 asm 字典与 metadata namedtuple 结构",
+            "掌握 _init_handles 延迟加载与 launcher 创建的时机",
+            "了解共享内存/tmem/线程数的 OutOfResources 检查"
+          ],
+          "source_files": [
+            "python/triton/compiler/compiler.py",
+            "python/triton/compiler/make_launcher.py"
+          ],
+          "minimal_modules": [
+            "CompiledKernel",
+            "asm 与 metadata",
+            "延迟加载",
+            "资源检查"
+          ],
+          "practice_task": "编译一个简单 kernel 得到 CompiledKernel，遍历打印 kernel.asm 的所有键（ttir/ttgir/llir/ptx/cubin），并说明为何 module/function 是延迟初始化的。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u5-l3",
+          "title": "缓存、override 与 IR dump 机制",
+          "order": 3,
+          "filename": "u5-l3-cache-override-dump.md",
+          "level": "intermediate",
+          "topic": "讲解 cache.py 的缓存管理器（FileCacheManager、远程缓存）、override（替换某阶段 IR）与 dump（导出各级 IR/PTX/SASS）三套机制及其与 knobs 的关系。",
+          "learning_goals": [
+            "理解 get_cache_manager/get_override_manager/get_dump_manager 的分工",
+            "掌握 TRITON_KERNEL_OVERRIDE / TRITON_KERNEL_DUMP 的覆盖流程",
+            "了解 RemoteCacheBackend 远程缓存扩展点"
+          ],
+          "source_files": [
+            "python/triton/runtime/cache.py",
+            "python/triton/compiler/compiler.py",
+            "python/triton/knobs.py"
+          ],
+          "minimal_modules": [
+            "缓存管理器",
+            "override 覆盖",
+            "dump 导出",
+            "远程缓存"
+          ],
+          "practice_task": "设置 TRITON_KERNEL_DUMP=1 与 TRITON_DUMP_DIR，编译一个 kernel，检查导出的各级 IR 文件；再修改其中 ttgir 文件并用 override 机制替换，验证改动生效。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "前端代码生成：AST → TTIR",
+      "level": "intermediate",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "code_generator：Python AST 到 TTIR",
+          "order": 1,
+          "filename": "u6-l1-code-generator.md",
+          "level": "intermediate",
+          "topic": "深入 code_generator.py：ast_to_ttir 如何用 AST 访问器把 Python kernel 函数体翻译成 TTIR，包括 builtin 调用、控制流（if/for）、constexpr 处理与依赖模块白名单。",
+          "learning_goals": [
+            "理解 ast_to_ttir 的 AST 访问与 IR builder 的工作方式",
+            "掌握 Python 控制流如何映射到 TTIR 的 scf/if",
+            "了解 supported_modules 白名单与跨 kernel 调用（noinline）"
+          ],
+          "source_files": [
+            "python/triton/compiler/code_generator.py",
+            "python/triton/compiler/compiler.py"
+          ],
+          "minimal_modules": [
+            "ast_to_ttir",
+            "AST 访问器",
+            "控制流映射",
+            "builtin 解析"
+          ],
+          "practice_task": "在一个 kernel 中使用 if/else 与 for 循环，dump 出其 TTIR，对照 code_generator.py 解释每个 Python 语句被翻译成了哪些 TTIR 操作（tt.scf.if / tt.make_range 等）。",
+          "depends_on": [
+            "u5-l1",
+            "u2-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u6-l2",
+          "title": "semantic：类型检查与语义约束",
+          "order": 2,
+          "filename": "u6-l2-semantic.md",
+          "level": "intermediate",
+          "topic": "讲解 language/semantic.py：在代码生成阶段对算子做类型推导、shape/broadcast 校验、原子操作与 dot 兼容性检查，并产生友好的错误信息。",
+          "learning_goals": [
+            "理解 semantic 层在 code_generator 中的拦截与校验角色",
+            "掌握广播、类型提升与 dot 维度兼容性的检查规则",
+            "了解 TritonError 如何被过滤与呈现给用户"
+          ],
+          "source_files": [
+            "python/triton/language/semantic.py",
+            "python/triton/errors.py",
+            "python/triton/compiler/compiler.py"
+          ],
+          "minimal_modules": [
+            "类型推导",
+            "广播校验",
+            "dot 兼容性",
+            "错误呈现"
+          ],
+          "practice_task": "故意写一个维度不匹配的 tl.dot 调用，触发 semantic 检查，阅读报错信息并在 semantic.py 中定位抛出该错误的代码路径。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "IR 方言：TTIR 与 TTGIR（C++/MLIR）",
+      "level": "intermediate",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "Triton IR (TTIR) 方言：类型与操作",
+          "order": 1,
+          "filename": "u7-l1-ttir-dialect.md",
+          "level": "intermediate",
+          "topic": "讲解 lib/Dialect/Triton 下 TTIR 方言的核心：tt.tensor 类型、block 指针、以及 dot/load/store/reduce/atomic 等操作的 C++ 定义与 traits。",
+          "learning_goals": [
+            "理解 tt.tensor/block_ptr 类型系统与 Traits",
+            "认识 TTIR 核心操作（dot、load、store、reduce、make_range）的语义",
+            "了解 Ops.cpp/Types.cpp/Dialect.cpp 在方言注册中的角色"
+          ],
+          "source_files": [
+            "lib/Dialect/Triton/IR/Ops.cpp",
+            "lib/Dialect/Triton/IR/Types.cpp",
+            "lib/Dialect/Triton/IR/Dialect.cpp"
+          ],
+          "minimal_modules": [
+            "tt 类型系统",
+            "TTIR 操作集",
+            "Traits 与接口",
+            "方言注册"
+          ],
+          "practice_task": "用 triton-opt 加载一个 kernel 的 .ttir，对照 Ops.cpp 识别其中的 tt.dot / tt.load / tt.store 操作，并说明每个操作的输入输出类型。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l2",
+          "title": "TritonGPU IR (TTGIR) 方言与张量布局",
+          "order": 2,
+          "filename": "u7-l2-ttgir-dialect-layouts.md",
+          "level": "intermediate",
+          "topic": "讲解 lib/Dialect/TritonGPU 下 TTGIR 方言：线程块/warp 级别的 blocked/warp/distributed layouts、num_warps/num_ctas 属性，以及布局如何编码数据到线程的映射。",
+          "learning_goals": [
+            "理解 TTGIR 相对 TTIR 引入的布局编码（layouts）",
+            "掌握 num-warps/num-ctas/threads-per-warp 等 module 属性",
+            "认识 layout 与 dot/load 在 GPU 上的对应关系"
+          ],
+          "source_files": [
+            "lib/Dialect/TritonGPU/IR/Ops.cpp",
+            "lib/Dialect/TritonGPU/IR/Types.cpp",
+            "lib/Dialect/TritonGPU/IR/Dialect.cpp"
+          ],
+          "minimal_modules": [
+            "TTGIR 方言",
+            "张量布局",
+            "warp/CTA 属性",
+            "线程映射"
+          ],
+          "practice_task": "编译一个 GEMM 得到 .ttgir，找到其中 dot 操作的 operand layouts（#blocked/#warp 等属性），解读这些布局如何把块分到 warp 与线程。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u7-l3",
+          "title": "TritonToTritonGPU：从逻辑到 GPU 的转换",
+          "order": 3,
+          "filename": "u7-l3-triton-to-tritongpu.md",
+          "level": "advanced",
+          "topic": "讲解 lib/Conversion/TritonToTritonGPU 转换 pass：如何为 TTIR 张量分配布局、把逻辑操作 lowered 到带布局的 TTGIR 操作，以及类型转换逻辑。",
+          "learning_goals": [
+            "理解 TritonToTritonGPUPass 的整体结构与触发位置",
+            "掌握布局分配（Relayout）与类型转换的基本策略",
+            "了解 make_ttgir 阶段中 add_convert_to_ttgpuir 的作用"
+          ],
+          "source_files": [
+            "lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp",
+            "lib/Conversion/TritonToTritonGPU/RelayoutTritonGPU.cpp",
+            "lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp"
+          ],
+          "minimal_modules": [
+            "转换 pass 结构",
+            "布局分配",
+            "类型转换"
+          ],
+          "practice_task": "对比同一 kernel 的 .ttir 与 .ttgir，列举 TritonToTritonGPU 转换引入的布局属性与新增操作，并在 RelayoutTritonGPU.cpp 中定位布局选择的代码。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "后端抽象与 NVIDIA/AMD 后端",
+      "level": "intermediate",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "后端发现与 BaseBackend 接口",
+          "order": 1,
+          "filename": "u8-l1-backend-discovery-interface.md",
+          "level": "intermediate",
+          "topic": "讲解 backends/__init__.py 的入口点（entry_points）发现机制、BaseBackend 抽象接口（supports_target/parse_options/add_stages/load_dialects/get_module_map）与 GPUTarget。",
+          "learning_goals": [
+            "理解后端如何通过 entry points 或 in-tree 方式被发现",
+            "掌握 BaseBackend 的核心抽象方法及其职责",
+            "了解 GPUTarget（backend/arch/warp_size）如何驱动后端选择"
+          ],
+          "source_files": [
+            "python/triton/backends/__init__.py",
+            "python/triton/backends/compiler.py",
+            "python/triton/backends/driver.py"
+          ],
+          "minimal_modules": [
+            "后端发现",
+            "BaseBackend 接口",
+            "GPUTarget",
+            "DriverBase"
+          ],
+          "practice_task": "阅读 _discover_backends，说明 TRITON_BACKENDS_IN_TREE=1 时如何跳过 entry point 发现；并列举 BaseBackend 中 add_stages 与 get_module_map 的契约。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l2",
+          "title": "NVIDIA 后端编译管线（add_stages）",
+          "order": 2,
+          "filename": "u8-l2-nvidia-backend-pipeline.md",
+          "level": "intermediate",
+          "topic": "深入 third_party/nvidia/backend/compiler.py：add_stages 注册的 make_ttir/make_ttgir/make_llir/make_ptx/make_cubin 五个阶段，以及每阶段的 pass 管线与 arch/capability 分支。",
+          "learning_goals": [
+            "掌握 NVIDIA 后端 ttir→ttgir→llir→ptx→cubin 五阶段的具体内容",
+            "理解 make_ttgir 中按 compute capability 分支（Ampere/Hopper/Blackwell）的优化差异",
+            "了解 make_ptx/make_cubin 调用 ptxas 生成二进制的流程"
+          ],
+          "source_files": [
+            "third_party/nvidia/backend/compiler.py",
+            "python/triton/compiler/compiler.py"
+          ],
+          "minimal_modules": [
+            "add_stages 注册",
+            "make_ttir/ttgir",
+            "make_llir/ptx/cubin",
+            "capability 分支"
+          ],
+          "practice_task": "在 NVIDIA compiler.py 的 make_ttgir 中，找出 Hopper（capability//10==9）相对 Ampere（8）多出的 pass（如 hopper_warpspec、schedule_loops、pipeline），说明它们解决的问题。",
+          "depends_on": [
+            "u8-l1",
+            "u7-l3"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u8-l3",
+          "title": "AMD (HIP/ROCm) 后端",
+          "order": 3,
+          "filename": "u8-l3-amd-backend.md",
+          "level": "advanced",
+          "topic": "讲解 third_party/amd/backend/compiler.py 与配套 C++（TritonAMDGPU 方言/transforms）：AMD 后端的阶段管线、gfx 架构映射（含新增的 gfx117/RDNA4m 与 gfx1250 multicast 支持）与 hsaco 产物，以及 TargetFeatures 基于特性的门控机制，及其与 NVIDIA 后端的异同。",
+          "learning_goals": [
+            "理解 AMD 后端的编译阶段与 hsaco 产物",
+            "掌握 gfx 架 arch 映射（gfx942/gfx110/gfx115/gfx117/gfx120 等）与 warp_size 差异",
+            "了解 TargetFeatures 特性门控如何取代逐 arch 字符串硬编码",
+            "对比 AMD 与 NVIDIA 后端在 pass 管线上的异同"
+          ],
+          "source_files": [
+            "third_party/amd/backend/compiler.py",
+            "third_party/amd/backend/driver.py",
+            "third_party/amd/lib/Dialect/TritonAMDGPU/IR/TargetFeatures.cpp"
+          ],
+          "minimal_modules": [
+            "AMD 编译阶段",
+            "gfx 架构映射（含 RDNA4m/gfx1250）",
+            "TargetFeatures 特性门控",
+            "hsaco 产物",
+            "与 NVIDIA 对比"
+          ],
+          "practice_task": "对比 NVIDIA 与 AMD 两个 compiler.py 的 add_stages，列出两者阶段名称与最终二进制扩展名（cubin vs hsaco）的差异，并解释 arch 表示方式的不同（compute capability vs gfx 名）；进一步在 is_in_thread_transpose_enabled 中观察 gfx117 等新架构如何被纳入特性判定。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "update"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "title": "运行时与驱动",
+      "level": "intermediate",
+      "order": 9,
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "Driver：设备、流与后端驱动管理",
+          "order": 1,
+          "filename": "u9-l1-driver.md",
+          "level": "intermediate",
+          "topic": "讲解 runtime/driver.py 的 DriverConfig（default/active/set_active）、TRITON_DEFAULT_BACKEND 选择，以及后端 DriverBase 提供的设备/流查询与二进制加载接口。",
+          "learning_goals": [
+            "理解 driver.active 单例与 default/active 的惰性初始化",
+            "掌握 TRITON_DEFAULT_BACKEND 的后端选择逻辑",
+            "认识 DriverBase 在设备/流管理与 load_binary 中的职责"
+          ],
+          "source_files": [
+            "python/triton/runtime/driver.py",
+            "python/triton/backends/driver.py",
+            "third_party/nvidia/backend/driver.py"
+          ],
+          "minimal_modules": [
+            "DriverConfig",
+            "后端选择",
+            "DriverBase 接口",
+            "设备/流管理"
+          ],
+          "practice_task": "阅读 NVIDIA driver.py，说明它如何通过 runtime/build.py 的 compile_module_from_file 把 driver.c 编译成可加载模块，并梳理 driver.active.utils.load_binary 的调用链。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l2",
+          "title": "启动器 make_launcher 与二进制加载",
+          "order": 2,
+          "filename": "u9-l2-launcher.md",
+          "level": "intermediate",
+          "topic": "讲解 compiler/make_launcher.py 与 runtime/build.py：如何为编译好的 kernel 生成调用入口（C 源码编译为 launcher）、把参数打包并最终在 GPU 上启动。",
+          "learning_goals": [
+            "理解 launcher 的生成与编译流程（make_launcher + build）",
+            "掌握 CompiledKernel._init_handles 中 launcher_cls 的创建",
+            "了解启动时参数打包（packed_metadata）与 hook 注入"
+          ],
+          "source_files": [
+            "python/triton/compiler/make_launcher.py",
+            "python/triton/runtime/build.py",
+            "python/triton/compiler/compiler.py"
+          ],
+          "minimal_modules": [
+            "launcher 生成",
+            "build 编译",
+            "参数打包",
+            "启动 hook"
+          ],
+          "practice_task": "追踪 CompiledKernel.__getitem__[grid] 的 runner 到 self.run 的完整路径，说明 launcher 如何把 grid/stream/function/packed_metadata 传到驱动层。",
+          "depends_on": [
+            "u5-l2",
+            "u9-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u9-l3",
+          "title": "显存分配、异步编译与 set_allocator",
+          "order": 3,
+          "filename": "u9-l3-allocation-async.md",
+          "level": "advanced",
+          "topic": "讲解 runtime/_allocation.py 的 set_allocator 机制（让宿主框架提供显存分配回调）、_async_compile.py 的异步/批量编译模式（AsyncCompileMode、FutureKernel）。",
+          "learning_goals": [
+            "理解 set_allocator 如何把 Triton 的临时显存分配委托给宿主（如 PyTorch）",
+            "掌握 AsyncCompileMode 的并发编译模式与 FutureKernel 句柄",
+            "了解异步编译对启动延迟与吞吐的影响"
+          ],
+          "source_files": [
+            "python/triton/runtime/_allocation.py",
+            "python/triton/runtime/_async_compile.py"
+          ],
+          "minimal_modules": [
+            "set_allocator",
+            "异步编译模式",
+            "FutureKernel",
+            "吞吐优化"
+          ],
+          "practice_task": "写一段示例代码用 triton.set_allocator 注册一个自定义分配回调（记录分配大小），并说明为何把分配委托给宿主框架能避免显存碎片；再阅读 _async_compile.py 说明 AsyncCompileMode.ASYNC 的语义。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u10",
+      "title": "TTGIR 优化 pass 与 lowering 到 LLVM",
+      "level": "advanced",
+      "order": 10,
+      "lectures": [
+        {
+          "id": "u10-l1",
+          "title": "核心 TTGIR 优化 pass",
+          "order": 1,
+          "filename": "u10-l1-ttgir-optimization-passes.md",
+          "level": "advanced",
+          "topic": "讲解 lib/Dialect/TritonGPU/Transforms 中的核心优化：Coalesce（合并访存）、AccelerateMatmul（选择 MMA）、RemoveLayoutConversions（消除冗余布局转换）、OptimizeDotOperands。",
+          "learning_goals": [
+            "理解 Coalesce 如何优化连续访存的布局",
+            "掌握 AccelerateMatmul 如何为 dot 选择硬件 MMA 指令",
+            "了解 RemoveLayoutConversions 消除冗余 layout 转换的原理"
+          ],
+          "source_files": [
+            "lib/Dialect/TritonGPU/Transforms/Coalesce.cpp",
+            "lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp",
+            "lib/Dialect/TritonGPU/Transforms/RemoveLayoutConversions.cpp"
+          ],
+          "minimal_modules": [
+            "Coalesce",
+            "AccelerateMatmul",
+            "RemoveLayoutConversions",
+            "OptimizeDotOperands"
+          ],
+          "practice_task": "用 MLIR_ENABLE_DUMP=1 观察一个 GEMM 在 AccelerateMatmul 前后的 ttgir，找出 dot operand 布局被改写为 MMA 友好布局的位置。",
+          "depends_on": [
+            "u7-l2",
+            "u8-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l2",
+          "title": "流水线（pipelining）与 warp specialization",
+          "order": 2,
+          "filename": "u10-l2-pipelining-warp-specialization.md",
+          "level": "advanced",
+          "topic": "讲解 Pipeliner（软件流水线、num_stages 多缓冲）与 WarpSpecialization（Hopper/Blackwell 的 warp 特化与 warpspec）这两项高级优化及其调度 pass。",
+          "learning_goals": [
+            "理解软件流水线如何用多缓冲隐藏访存延迟",
+            "掌握 warp specialization 把生产者/消费者 warp 解耦的机制",
+            "了解 schedule_loops/assign_latencies 与 pipeline 的配合"
+          ],
+          "source_files": [
+            "lib/Dialect/TritonGPU/Transforms/Pipeliner/CMakeLists.txt",
+            "lib/Dialect/TritonGPU/Transforms/WarpSpecialization/CMakeLists.txt",
+            "third_party/nvidia/backend/compiler.py"
+          ],
+          "minimal_modules": [
+            "软件流水线",
+            "num_stages 多缓冲",
+            "warp specialization",
+            "循环调度"
+          ],
+          "practice_task": "对比 num_stages=1 与 num_stages=3 时一个带 K 维循环的 GEMM 的 ttgir，观察 Pipeliner 引入的多缓冲与异步拷贝；并阅读 compiler.py 中 add_pipeline 的调用位置。",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u10-l3",
+          "title": "TritonGPUToLLVM：lowering 到 LLVM IR",
+          "order": 3,
+          "filename": "u10-l3-tritongpu-to-llvm.md",
+          "level": "advanced",
+          "topic": "讲解 lib/Conversion/TritonGPUToLLVM：如何把带布局的 TTGIR 操作 lowered 到 LLVM IR，包括 shared memory 分配、elementwise/dot/reduce/memory 各类 op 的转换，以及到 PTX 前的最后准备。",
+          "learning_goals": [
+            "理解 AllocateSharedMemory 与布局到 LLVM vector 的转换",
+            "掌握 DotOpToLLVM 如何把 dot 映射到 MMA 内联函数",
+            "了解 ElementwiseOpToLLVM/MemoryOpToLLVM 的通用 lowering 模式"
+          ],
+          "source_files": [
+            "lib/Conversion/TritonGPUToLLVM/AllocateSharedMemory.cpp",
+            "lib/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVM.cpp",
+            "lib/Conversion/TritonGPUToLLVM/ReduceOpToLLVM.cpp"
+          ],
+          "minimal_modules": [
+            "shared memory 分配",
+            "elementwise lowering",
+            "dot lowering",
+            "reduce lowering"
+          ],
+          "practice_task": "用一个 GEMM 的 .llir，定位其中的 shared memory 全局变量与 MMA 内联函数，回溯到 TritonGPUToLLVM 中 AllocateSharedMemory 与 DotOpToLLVM 的对应实现。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u11",
+      "title": "调试、工具、解释器与 Profiler",
+      "level": "advanced",
+      "order": 11,
+      "lectures": [
+        {
+          "id": "u11-l1",
+          "title": "knobs 配置旋钮与 IR dump 调试",
+          "order": 1,
+          "filename": "u11-l1-knobs-debugging.md",
+          "level": "advanced",
+          "topic": "系统讲解 knobs.py 的配置体系：cache/compilation/autotuning/runtime/nvidia/amd 各组旋钮，以及 MLIR_ENABLE_DUMP/LLVM_IR_ENABLE_DUMP/TRITON_REPRODUCER 等调试手段。",
+          "learning_goals": [
+            "理解 knobs 的分层结构与 env_* 读写环境变量的机制",
+            "掌握用 IR dump 与 reproducer 定位编译问题的方法",
+            "了解编译/autotuning listener 等可观测扩展点"
+          ],
+          "source_files": [
+            "python/triton/knobs.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "knobs 体系",
+            "IR dump",
+            "reproducer",
+            "listener 扩展"
+          ],
+          "practice_task": "设置 MLIR_ENABLE_DUMP=1 运行一个 kernel，导出每个 MLIR pass 前的 IR；再设置 TRITON_REPRODUCER_PATH，故意制造一个编译失败，用生成的 reproducer 文件本地复现。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l2",
+          "title": "命令行工具：triton-opt / compile / disasm",
+          "order": 2,
+          "filename": "u11-l2-cli-tools.md",
+          "level": "advanced",
+          "topic": "讲解 bin/triton-opt.cpp（MLIR 优化驱动）、tools/compile.py（AOT 编译内核）、disasm.py（反汇编 cubin/SASS）等命令行工具的用途与用法。",
+          "learning_goals": [
+            "掌握 triton-opt 独立运行 MLIR pass 管线的方式",
+            "理解 tools/compile.py 如何脱离运行时做 AOT 编译",
+            "了解 disasm 把二进制反汇编为 SASS 的流程"
+          ],
+          "source_files": [
+            "bin/triton-opt.cpp",
+            "python/triton/tools/compile.py",
+            "python/triton/tools/disasm.py"
+          ],
+          "minimal_modules": [
+            "triton-opt",
+            "AOT compile",
+            "disasm/SASS",
+            "工具链"
+          ],
+          "practice_task": "用 tools/compile.py 把一个 kernel 的 .ttir 编译到 cubin（无需运行），再用 disasm 查看 SASS；并用 triton-opt 对一个 .ttgir 手动运行某个 pass 观察输出。",
+          "depends_on": [
+            "u5-l2",
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l3",
+          "title": "解释器模式（TRITON_INTERPRET）",
+          "order": 3,
+          "filename": "u11-l3-interpreter.md",
+          "level": "advanced",
+          "topic": "讲解 runtime/interpreter.py：当 TRITON_INTERPRET=1 时，Triton 用纯 Python 逐 program 模拟 kernel 执行，无需 GPU，可设断点调试。",
+          "learning_goals": [
+            "理解解释器如何逐 program 模拟 tl 操作的语义",
+            "掌握用解释器无 GPU 调试 kernel 的方法",
+            "了解解释器与真实 GPU 执行在语义上的对应与局限"
+          ],
+          "source_files": [
+            "python/triton/runtime/interpreter.py",
+            "python/triton/runtime/jit.py"
+          ],
+          "minimal_modules": [
+            "解释器执行模型",
+            "无 GPU 调试",
+            "语义对应",
+            "局限性"
+          ],
+          "practice_task": "在 TRITON_INTERPREPT=1 下运行你的 GEMM kernel 并在 kernel 内插入 Python 断点，单步观察一个 program 实例里 tl.load/dot/store 的中间张量值。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u11-l4",
+          "title": "Proton：Triton 性能分析器",
+          "order": 4,
+          "filename": "u11-l4-proton.md",
+          "level": "advanced",
+          "topic": "介绍 third_party/proton：一个轻量级 Triton 专用 profiler，记录 Python 上下文、用户标注、launch metadata 与 GPU kernel 指标，及其启用与基本用法。",
+          "learning_goals": [
+            "理解 Proton 的设计目标：低开销、记录 launch 上下文与 kernel 指标",
+            "掌握启用 Proton 并采集 profile 的基本流程",
+            "了解 Proton 的 Dialect/csrc/proton 包结构"
+          ],
+          "source_files": [
+            "third_party/proton/README.md",
+            "third_party/proton/CMakeLists.txt"
+          ],
+          "minimal_modules": [
+            "Proton 定位",
+            "采集流程",
+            "上下文与 metadata",
+            "构建启用"
+          ],
+          "practice_task": "阅读 Proton README，按说明启用 Proton 对一个 kernel 做 profile（或在无 GPU 环境下梳理其采集 launch metadata 的代码路径），说明它如何关联 Python 上下文与 GPU 指标。",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "id": "u12",
+      "title": "扩展 Triton：插件、Gluon、测试与参考库",
+      "level": "advanced",
+      "order": 12,
+      "lectures": [
+        {
+          "id": "u12-l1",
+          "title": "MLIR 插件 pass（out-of-tree 扩展）",
+          "order": 1,
+          "filename": "u12-l1-plugin-passes.md",
+          "level": "advanced",
+          "topic": "讲解 examples/plugins 与 add_stages_inspection_hook：如何在不修改核心、不重编译的情况下，把自定义 MLIR pass/算子插入 TTIR/TTGIR 管线或整体覆盖编译管线。",
+          "learning_goals": [
+            "理解插件 pass 的 out-of-tree 共享库机制（TRITON_PLUGIN_PATHS）",
+            "掌握 add_stages_inspection_hook 动态插入/覆盖阶段的用法",
+            "了解自定义算子与 instrumentation pass 的典型场景"
+          ],
+          "source_files": [
+            "examples/plugins/README.md",
+            "examples/plugins/TritonPlugin.cpp",
+            "python/triton/knobs.py"
+          ],
+          "minimal_modules": [
+            "插件共享库",
+            "inspection hook",
+            "阶段插入/覆盖",
+            "自定义算子"
+          ],
+          "practice_task": "参照 examples/plugins README 的 Example 2，编写一个把 kernel 函数名重命名的插件 pass hook，设置 knobs.runtime.add_stages_inspection_hook 后验证 ttgir 中函数名被改动，再置 None 恢复。",
+          "depends_on": [
+            "u8-l2",
+            "u7-l1"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l2",
+          "title": "Gluon：低级显式布局语言",
+          "order": 2,
+          "filename": "u12-l2-gluon.md",
+          "level": "advanced",
+          "topic": "介绍 experimental/gluon：一种比 tl 更低级、显式控制布局与并行的实验性语言，其 language 子模块、_compiler 与 _runtime 如何接入主编译流程（Language.GLUN 与 gluon_to_ttgir）。",
+          "learning_goals": [
+            "理解 Gluon 相对 tl 的定位：显式布局与更低级控制",
+            "认识 Gluon 的 language/core/layout/semantic 子模块",
+            "了解 Gluon 经 _compiler 接入 backend 的 gluon_to_ttgir 路径"
+          ],
+          "source_files": [
+            "python/triton/experimental/gluon/__init__.py",
+            "python/triton/experimental/gluon/_compiler.py",
+            "python/triton/experimental/gluon/language/__init__.py"
+          ],
+          "minimal_modules": [
+            "Gluon 定位",
+            "显式布局",
+            "Gluon language",
+            "gluon_to_ttgir"
+          ],
+          "practice_task": "阅读一个 python/examples/gluon 下的示例（如 attention-forward）与 tutorials/gluon，对比 Gluon kernel 与等价 tl kernel 在布局控制上的差异，说明 Gluon 暴露了哪些 tl 隐藏的细节。",
+          "depends_on": [
+            "u5-l1",
+            "u7-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l3",
+          "title": "测试体系：lit 与 pytest",
+          "order": 3,
+          "filename": "u12-l3-testing.md",
+          "level": "advanced",
+          "topic": "讲解 Triton 的两套测试体系：test/ 下的 lit（MLIR FileCheck 测试，无需 GPU）与 python/test/ 下的 pytest（含 GPU 单元/回归/microbenchmark），以及 AGENTS.md 中的测试规范。",
+          "learning_goals": [
+            "理解 lit 测试与 FileCheck 在验证 pass 行为中的作用",
+            "掌握 pytest 测试的组织（unit/regression/gluon/microbenchmark）",
+            "了解 AGENTS.md 规定的测试命名与运行规范"
+          ],
+          "source_files": [
+            "test/lit.cfg.py",
+            "pytest.ini",
+            "AGENTS.md"
+          ],
+          "minimal_modules": [
+            "lit/FileCheck",
+            "pytest 体系",
+            "测试规范",
+            "无 GPU 测试"
+          ],
+          "practice_task": "在 build 目录运行 ninja triton-opt 后，用 lit -v 运行一个 test/Triton 下的 .mlir 测试；再阅读一个 python/test/unit 下的 pytest，说明它如何跨 backend 校验 kernel 正确性。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "keep"
+        },
+        {
+          "id": "u12-l4",
+          "title": "triton_kernels 参考实现库",
+          "order": 4,
+          "filename": "u12-l4-triton-kernels.md",
+          "level": "advanced",
+          "topic": "介绍 python/triton_kernels：一组高质量、可复用的参考 kernel（matmul、distributed、compaction、numerics），作为学习最佳实践与复用代码的范本。",
+          "learning_goals": [
+            "理解 triton_kernels 作为参考实现库的定位与组织",
+            "学习 matmul 等参考 kernel 中的分块/流水线/数值精度技巧",
+            "了解 bench/tests 子目录如何支撑参考库的开发"
+          ],
+          "source_files": [
+            "python/triton_kernels/triton_kernels/matmul.py",
+            "python/triton_kernels/pyproject.toml"
+          ],
+          "minimal_modules": [
+            "参考库定位",
+            "matmul 最佳实践",
+            "distributed/numerics",
+            "bench 与 tests"
+          ],
+          "practice_task": "阅读 triton_kernels 中的 matmul.py，总结它相对教程版 GEMM 多用了哪些高级技巧（如 persistent、TMA、块缩放），并挑选一项在你自己的 kernel 中尝试复用。",
+          "depends_on": [
+            "u2-l2",
+            "u4-l1"
+          ],
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
