@@ -1,0 +1,392 @@
+{
+  "project": "typst-crates-typst-bundle",
+  "head": "9a1d84e9450c66adf9d2cb0068f4e0160e4ba34a",
+  "rationale": "typst-bundle 是一个体积很小（仅 4 个源文件、约 700 行）但横跨多个 crate 的核心模块：它把一次 Typst 编译扩展为「多文件输出」（多个 document + 原始 asset），并在统一内省、跨文档链接、并行与记忆化上与 typst-library / typst-realize / typst-layout / typst-html / typst-pdf / typst-svg / typst-render / typst-cli 深度协作。因此学习路线按「先认识定位 → 再走编译主链路 → 再理解数据模型与用户元素 → 再讲导出 → 最后深入内省/链接/性能/CLI 集成」五层推进：第 1 单元让读者从零认识 bundle 目标与入口；第 2 单元拆解 bundle_impl → collect → compile_document 的编译主链路；第 3 单元落到 Bundle/BundleFile/BundleDocument 数据模型与用户侧 document/asset 元素；第 4 单元讲 export 到 VirtualFs 与四种格式导出；第 5 单元（专家层）深入 BundleIntrospector 统一内省、跨文档链接锚点、并行+记忆化机制，并以 CLI 端到端实践收尾。依赖关系构成清晰 DAG，每篇只解决一个问题、引用 2–6 个真实源码文件，并配一个可操作的代码实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "认识 typst-bundle 与 bundle 输出目标",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "typst-bundle 是什么：多文件输出目标概览",
+          "order": 1,
+          "filename": "u1-l1-bundle-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-bundle crate 的定位：它是 Typst 的「bundle」输出目标，能把单个 Typst 项目编译成多个文档（PDF/SVG/PNG/HTML）与原始 asset 文件。",
+          "learning_goals": [
+            "理解 bundle 输出目标（Target::Bundle）与 paged/html 目标的区别",
+            "理解为什么 Typst 需要多文件输出（documents + assets）",
+            "了解 bundle 是实验性特性、需要 --features bundle 开启",
+            "了解本 crate 在 typst 工作区中的位置与依赖"
+          ],
+          "source_files": [
+            "crates/typst-bundle/Cargo.toml",
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-library/src/foundations/target.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "bundle 输出目标与定位（lib.rs 顶部文档注释、Target::Bundle）",
+            "多文件输出的价值：document 与 asset",
+            "实验性 feature 开关与警告（src/lib.rs warn_or_error_for_bundle）",
+            "crate 依赖关系（Cargo.toml）"
+          ],
+          "practice_task": "在你的 Typst 项目里写一个最小 bundle 源文件（包含一个 #document(\"hello.html\")[Hello] 和一个 #asset(\"note.txt\", read(...))），用 typst compile --features bundle 编译，观察输出的多文件目录结构，并用一句话总结 bundle 相对单文件 PDF/SVG 输出的核心区别。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与编译入口：typst::compile::<Bundle> 如何到达 bundle()",
+          "order": 2,
+          "filename": "u1-l2-structure-and-entry.md",
+          "level": "beginner",
+          "topic": "讲解 typst-bundle 的四个源码文件职责划分，以及 Bundle 如何实现 Output trait，让泛型入口 typst::compile::<Bundle>(world) 调用到 bundle()。",
+          "learning_goals": [
+            "看懂 lib.rs / export.rs / introspect.rs / link.rs 四个文件的职责分工",
+            "理解 Output trait 与 Target 的 1-1 关系",
+            "理解 typst::compile::<Bundle> 通过 Output::create 调用 bundle() 的链路"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-bundle/Cargo.toml",
+            "crates/typst-library/src/foundations/target.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "四个源码文件职责划分",
+            "Output trait 与 Target 的对应（Bundle: Output, target() = Target::Bundle）",
+            "compile::<T: Output> 泛型入口如何触发 Output::create"
+          ],
+          "practice_task": "在源码中画出从 typst::compile::<Bundle>(world) 到 bundle_impl 的调用链（标出 Output::create、bundle、bundle_impl 三处），并说明为什么 bundle_impl 需要 #[comemo::memoize]。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "bundle 编译主流程",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "从源码到 Bundle：realize 与 collect 的实现化与校验",
+          "order": 1,
+          "filename": "u2-l1-realize-and-collect.md",
+          "level": "intermediate",
+          "topic": "拆解 bundle_impl 的整体流程：先用 RealizationKind::Bundle 做根级实现化，再用 collect() 收集并校验顶层元素、检测重复路径，最后并行编译各文档。",
+          "learning_goals": [
+            "理解 bundle_impl 的整体步骤：实现化 → collect → parallelize",
+            "理解 RealizationKind::Bundle 与 BUNDLE_RULES 的作用",
+            "理解 collect() 对顶层元素的校验（只允许 Tag/Asset/Document）与重复路径检测"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-library/src/routines.rs",
+            "crates/typst-realize/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "bundle_impl 实现化流程（realize RealizationKind::Bundle）",
+            "collect 顶层元素校验（Tag/Asset/Document，其余报错）",
+            "路径唯一性检测（Entry::Vacant/Occupied + delayed_error）"
+          ],
+          "practice_task": "阅读 collect() 函数，写一段说明：当用户在 bundle 顶层放了一个不允许的元素（例如普通段落）时会触发哪条错误与哪个 hint；再写一个会触发「path occurs multiple times」的 .typ 例子并解释 delayed_error 为何用 sink 延迟上报。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "编译单个文档：compile_document 的格式推断与分派",
+          "order": 2,
+          "filename": "u2-l2-compile-document.md",
+          "level": "intermediate",
+          "topic": "讲解 compile_document 如何为单个文档决定导出格式（显式 format 或路径扩展名推断）、切换目标、并分派到 paged 排版或 HTML，以及 PNG/SVG 的单页约束。",
+          "learning_goals": [
+            "理解文档格式如何由显式 format 或路径扩展名推断（determine_format）",
+            "理解目标切换：TargetElem::target 设置与样式链",
+            "理解分派到 typst_layout::layout_document_for_bundle 或 typst_html::html_document_for_bundle",
+            "理解 PNG/SVG 仅支持单页的约束与报错"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-library/src/model/document.rs"
+          ],
+          "minimal_modules": [
+            "文档格式推断（determine_format / determine_format_from_path）",
+            "目标切换与样式链（TargetElem::target.set().wrap()）",
+            "分页（layout_document_for_bundle）与 HTML（html_document_for_bundle）分派",
+            "PNG/SVG 单页约束与 HTML feature 门控"
+          ],
+          "practice_task": "给出四个 document 元素（扩展名分别为 .pdf/.svg/.png/.html），说明每个会走 compile_document 的哪条分支；再构造一个故意产生多页的 .png 文档，观察单页约束报错信息。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "bundle 的数据模型与用户侧元素",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "Bundle 的数据模型：Bundle / BundleFile / BundleDocument / PagedExtras",
+          "order": 1,
+          "filename": "u3-l1-bundle-data-model.md",
+          "level": "intermediate",
+          "topic": "梳理 lib.rs 中定义的核心数据结构：Bundle、BundleFile、BundleDocument、PagedExtras，以及它们如何对应 bundle 中的文件集合。",
+          "learning_goals": [
+            "理解 Bundle 的两个字段 files（IndexMap）与 introspector",
+            "理解 BundleFile（Document/Asset）与 BundleDocument（Paged/Html）的层级",
+            "理解 PagedExtras（format + anchors）的作用"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-library/src/model/document.rs"
+          ],
+          "minimal_modules": [
+            "Bundle 顶层结构（files + introspector，impl Output/Document）",
+            "BundleFile 与 BundleDocument 枚举",
+            "PagedExtras（PagedFormat + 命名锚点）"
+          ],
+          "practice_task": "用一张图表示 Bundle → files(IndexMap) → BundleFile(Document|Asset) → BundleDocument(Paged|Html) 的包含关系，并解释为什么 Paged 变体需要额外携带 PagedExtras 而 Html 变体不需要。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "用户视角的 document 与 asset 元素",
+          "order": 2,
+          "filename": "u3-l2-document-and-asset-elements.md",
+          "level": "intermediate",
+          "topic": "讲解 typst-library 中用户实际使用的 DocumentElem 与 AssetElem，以及 BundlePath、metadata 如何通过 ShowSet 在 bundle 中传播。",
+          "learning_goals": [
+            "理解 DocumentElem 的字段（path/format/title/author/body 等）与用途",
+            "理解 AssetElem 与 AssetData（原始字节，不参与排版）",
+            "理解 BundlePath 与元数据传播（ShowSet 把显式属性变成上下文可用）"
+          ],
+          "source_files": [
+            "crates/typst-library/src/model/document.rs",
+            "crates/typst-library/src/model/asset.rs",
+            "crates/typst-library/src/foundations/path.rs",
+            "crates/typst-bundle/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "DocumentElem 字段与 documents-in-bundle-export 语义",
+            "AssetElem / AssetData 与 read/json.encode 组合",
+            "BundlePath(VirtualPath) 与路径校验",
+            "元数据传播：ShowSet::show_set 把 document 属性变成上下文可用"
+          ],
+          "practice_task": "写一个 bundle：用 #document(\"paper.pdf\", include \"paper.typ\") 包含一个用 set document(title:...) 设置标题的子文件，验证标题被正确拾取；再写一段说明 show_set 为什么是「hack 但必要」（参考源码注释与 #6721）。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "导出：从 Bundle 到 VirtualFs",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "export 主流程与 VirtualFs",
+          "order": 1,
+          "filename": "u4-l1-export-and-virtualfs.md",
+          "level": "intermediate",
+          "topic": "讲解 export.rs 的 export() 如何把 Bundle 并行转换成 VirtualFs（路径→字节的映射），以及 BundleOptions 如何聚合四种格式的导出选项。",
+          "learning_goals": [
+            "理解 export() 用 rayon 并行遍历 files 的流程",
+            "理解 BundleOptions 聚合 html/pdf/png/svg 四类选项",
+            "理解 VirtualFs（IndexMap<VirtualPath, Bytes>）作为最终输出形态"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/export.rs",
+            "crates/typst-bundle/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "export() 并行遍历与 LateLinkResolver 构造",
+            "BundleOptions（html/pdf/png/svg 选项聚合）",
+            "VirtualFs 类型定义与 asset 直通"
+          ],
+          "practice_task": "在源码中追踪一个 BundleFile::Asset 与一个 BundleFile::Document 在 export() 中各自走哪条路径；并说明每个 document 的 link_resolver 为什么用 LateLinkResolver::new(Some(path), ...) 而非 None。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "四种格式的导出实现：pdf/png/svg/html 与 *_in_bundle 钩子",
+          "order": 2,
+          "filename": "u4-l2-format-exporters.md",
+          "level": "intermediate",
+          "topic": "讲解 export_document 的格式分派，以及 export_pdf/export_png/export_svg/export_html 如何调用其他 crate 暴露的 *_in_bundle 钩子并各自记忆化。",
+          "learning_goals": [
+            "理解 export_document 按 PagedFormat/Html 分派",
+            "理解每个格式对应的 *_in_bundle 钩子（pdf_in_bundle/svg_in_bundle/html_in_bundle/render）",
+            "理解导出函数为什么加 #[comemo::memoize] 以及 LateLinkResolver 的角色"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/export.rs",
+            "crates/typst-library/src/model/link.rs"
+          ],
+          "minimal_modules": [
+            "export_document 格式分派",
+            "各格式 *_in_bundle 钩子调用",
+            "导出函数记忆化与时间打点",
+            "LateLinkResolver 解析跨文档链接"
+          ],
+          "practice_task": "列表对比 PDF/SVG/PNG/HTML 四种导出：各自调用哪个钩子、是否需要 anchors、是否需要 link_resolver、输入是整文档还是单页或根元素，并解释 export_html 为什么接收 root 而非整文档（见源码注释）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家层：内省、跨文档链接、性能与 CLI 集成",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "统一内省器 BundleIntrospector",
+          "order": 1,
+          "filename": "u5-l1-bundle-introspector.md",
+          "level": "advanced",
+          "topic": "讲解 introspect.rs 的 BundleIntrospector：如何把多个文档聚合到一个内省循环，让它们彼此可见，并实现 Introspector trait 的各类查询。",
+          "learning_goals": [
+            "理解为什么 bundle 需要一个跨所有文档的统一内省器",
+            "理解 children（子内省器）与 elements（ElementIntrospector<Option<NonZeroUsize>>）结构",
+            "理解 BundleIntrospector 如何转发 query/position/page/path/document/anchor 等查询"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/introspect.rs",
+            "crates/typst-bundle/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "统一内省设计动机（一个 introspection loop）",
+            "children（ChildIntrospector: Paged/Html）与 elements（位置=子下标+1）",
+            "Introspector trait 查询实现与 path()/document()/anchor()"
+          ],
+          "practice_task": "阅读 child() 与 position()，解释「positions 是 off-by-one indices into children」这一设计如何让任意 Location 被路由到正确的子文档内省器；并说明 ChildIntrospector 的 Deref 如何复用 Paged/Html 既有内省器。",
+          "depends_on": [
+            "u2-l1",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "跨文档链接与锚点：create_link_anchors",
+          "order": 2,
+          "filename": "u5-l2-cross-document-links.md",
+          "level": "advanced",
+          "topic": "讲解 link.rs 的 create_link_anchors 与 introspect.rs 的 link_targets：如何收集所有被链接的目标、为它们生成锚点（HTML 注入 DOM id / paged 生成命名目的地），让跨文档链接精确跳转。",
+          "learning_goals": [
+            "理解 link_targets() 如何按文档路径分桶收集链接目标",
+            "理解 create_link_anchors 对 HTML（DOM 注入 id）与 paged（命名目的地）的不同处理",
+            "理解为何要为 document/asset 自身创建空锚点使其可被链接"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/link.rs",
+            "crates/typst-bundle/src/introspect.rs",
+            "crates/typst-library/src/model/link.rs"
+          ],
+          "minimal_modules": [
+            "link_targets 收集链接目标（LinkElem::find_destinations + frame_link_targets）",
+            "create_link_anchors 分派（HTML vs paged）",
+            "HTML 注入 DOM id 与 paged 命名目的地（AnchorGenerator）",
+            "document/asset 自身的空锚点"
+          ],
+          "practice_task": "构造两个相互 #link 的 HTML 文档（index.html ↔ list.html），编译后查看生成的 DOM id；再阅读 create_paged_link_anchors，解释 targets 为什么要按 loc_index 排序后再生成分配锚点。",
+          "depends_on": [
+            "u5-l1",
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "并行与记忆化：rayon + comemo 的性能设计",
+          "order": 3,
+          "filename": "u5-l3-parallelism-and-memoization.md",
+          "level": "advanced",
+          "topic": "分析 bundle 流水线中 rayon 并行（编译、导出、锚点生成）与 comemo 记忆化（bundle_impl、各导出函数）的结合，以及它们对内省收敛与性能的意义。",
+          "learning_goals": [
+            "理解 engine.parallelize / par_iter 在编译与导出中的并行使用",
+            "理解 comemo::memoize 跨 bundle_impl 与导出函数的作用",
+            "理解并行+记忆化如何支撑「多文档互相内省」这一迭代收敛场景"
+          ],
+          "source_files": [
+            "crates/typst-bundle/src/lib.rs",
+            "crates/typst-bundle/src/export.rs",
+            "crates/typst-bundle/src/link.rs",
+            "crates/typst-bundle/src/introspect.rs"
+          ],
+          "minimal_modules": [
+            "rayon 并行（parallelize/par_iter/par_iter_mut）",
+            "comemo 记忆化（bundle_impl 与 export_*）",
+            "设计取舍：并行编译 vs 统一内省收敛"
+          ],
+          "practice_task": "在源码中标出所有 rayon 并行点与 comemo 记忆化点，写一段分析：为什么编译阶段先并行编译各文档、再做一次统一的 BundleIntrospector::new + set_anchors，这种顺序如何保证跨文档内省的正确性。",
+          "depends_on": [
+            "u2-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "CLI 集成与端到端实践",
+          "order": 4,
+          "filename": "u5-l4-cli-integration-and-e2e.md",
+          "level": "advanced",
+          "topic": "讲解 typst-cli 如何驱动 bundle 导出：compile.rs 的 export_bundle → typst_bundle::export → write_virtual_fs 落盘，feature 警告/报错，以及 http-server 模式，并完成一个端到端实践。",
+          "learning_goals": [
+            "理解 typst-cli compile.rs 中 OutputFormat::Bundle 分支的驱动流程",
+            "理解 export_bundle 构造 BundleOptions、调用 export、再用 write_virtual_fs 落盘",
+            "理解 feature 门控（warn_or_error_for_bundle）与 http-server.set_bundle"
+          ],
+          "source_files": [
+            "crates/typst-cli/src/compile.rs",
+            "crates/typst-bundle/src/export.rs",
+            "crates/typst/src/lib.rs"
+          ],
+          "minimal_modules": [
+            "CLI 导出驱动（compile::<Bundle> → export_bundle）",
+            "BundleOptions 构造与 VirtualFs 落盘（write_virtual_fs）",
+            "feature 开关：warn_or_error_for_bundle 与 stdout 限制",
+            "http-server 模式（set_bundle）"
+          ],
+          "practice_task": "端到端实践：编写一个真实 bundle 项目（至少含 1 个 HTML 文档、1 个 PDF 文档、1 个由 #context + json.encode 生成的 meta.json asset，且文档之间存在 #link 跨链），用 typst compile --features bundle 编译到目录，逐项检查：文件是否齐全、跨文档链接是否可跳转、meta.json 内容是否正确，并对照源码说明 export_bundle 到落盘经过了哪几个函数。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

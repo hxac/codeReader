@@ -2,486 +2,431 @@
 
 ## 1. 本讲目标
 
-本讲聚焦 TileIR 后端编译链路的「最后一公里」：把已经 lowering 完成的 CUDA Tile IR（cuda_tile 方言）交给来自 CUDA 工具链的**外部编译器 `tileiras`**，生成可被 GPU 加载执行的 `.cubin`。
+本讲承接 u2-l3「三段式编译流水线 make_ttir/make_tileir/make_cubin」,聚焦流水线的**最后一段** `make_cubin`:当 TTIR 已经被 lowering 成 `cuda_tile` 方言 IR 之后,这份 IR 是怎么变成一块可以丢给 GPU 执行的 `.cubin` 二进制的?
 
-学完本讲，你应该能够：
+答案不是「Triton 自己接着编」,而是**交给一个外部的 NVIDIA 编译器 `tileiras`**。本讲就是要把这次「交接」讲透。学完本讲,你应该能够:
 
-- 说清 `make_cubin` 如何委托 `call_tileiras`，以及 bytecode 是如何被序列化、缓存并交给外部进程的。
-- 解释 `tileiras` 子进程的命令是如何拼出来的，以及 `CUDA_HOME` 为什么「从 `tileiras` 自身路径反推」而不是读系统环境变量。
-- 区分两类编译失败：资源超限（`OutOfResources`，可被 autotuner 剪枝）与一般编译崩溃（`TileirasError`），并写出判别它们的正则表达式。
+1. 说清楚 `make_cubin` 为什么只是 `call_tileiras` 的薄壳,以及 IR 是怎样被序列化成 bytecode 交给外部工具的。
+2. 读懂 `tileiras` 命令行是怎么拼出来的、`CUDA_HOME` 为什么刻意从 `tileiras` 自身的路径反推而不是读系统环境变量。
+3. 区分两类资源超限错误(`shared memory` / `tensor memory`)与一般编译崩溃错误,理解为什么前者要归为 `OutOfResources`、后者归为 `TileirasError`,以及这样分类对 autotuner 的意义。
 
-本讲承接 [u2-l3 三段式编译流水线](u2-l3-compile-stages.md)：`make_ttir`→`make_tileir` 产出的 cuda_tile IR，正是在本讲的 `make_cubin` 阶段离开 Triton、进入 NVIDIA 工具链的。
+---
 
 ## 2. 前置知识
 
-在进入源码前，先用三段话建立直觉。
+### 2.1 什么是 cubin,为什么需要它
 
-**为什么要有一个「外部编译器」？** Triton 自己能把 Python kernel 一路翻译到 cuda_tile 方言（这是本仓库 C++ 转换 Pass 的职责），但 cuda_tile 方言到 GPU 机器码（cubin）这一步，Triton 并不亲自做。它把这件事交给 NVIDIA 随 CUDA 工具链发布的 `tileiras`。这与 PTX 后端把 PTX 交给 `ptxas` 是同一种「各管一段」的分工。换言之：cuda_tile bytecode 是 Triton 与 NVIDIA 在这一层的**交接物**。
+`cubin`(CUDA binary)是 NVIDIA GPU 真正能执行的机器码二进制格式。Triton 的 `@triton.jit` kernel 最终都要变成 cubin 才能被 `cuLaunchKernelEx` 启动。
 
-**bytecode 是什么？** MLIR 的 IR 可以有两种落盘形式：人类可读的文本（`.mlir`，即 `module { ... }` 那种）和紧凑的二进制 **bytecode**。`tileiras` 读取的是后者——它更小、解析更快、且格式稳定。所以本讲提到的「bytecode」特指 cuda_tile 方言 IR 的二进制序列化结果。
+在**上游 NVIDIA PTX 后端**里,从 IR 到 cubin 的最后一步是调用 NVIDIA 的 `ptxas`(把 PTX 汇编编成 cubin)。而在 **CUDA Tile IR 后端**里,这一步换成了 `tileiras`——它是随 NVIDIA `cuda-tile`(CUDA 13.1 / 13.3 工具链)发布的编译器,专门消费 **cuda_tile 方言**的 IR,产出 SM100(Blackwell)的 cubin。
 
-**cubin 是什么？** cubin（CUDA binary）是 NVIDIA GPU 的最终可执行产物，对应某个 SM 架构（如 `sm_100a`）。`TileIRDriver` 启动内核时加载的就是这个 cubin。
+> 一句话:`ptxas` 消费 PTX 文本;`tileiras` 消费 cuda_tile bytecode。两者都是「外部独立可执行文件」,都不在 Triton 进程内。
 
-**子进程与 autotuner 剪枝。** `tileiras` 作为独立进程运行，可能因为「某个 autotune 配置要的共享内存/TMEM 超过硬件上限」而失败。这类失败是**可预期的、配置相关的**，应当被翻译成 `OutOfResources`，让 autotuner 把这个配置剪掉、继续试别的；而「`tileiras` 自己崩了（比如段错误）」则是不可预期的，翻译成 `TileirasError`。这条分类线是本讲错误处理的核心。
+### 2.2 什么是 MLIR bytecode
 
-> 小术语对照
->
-> | 术语 | 含义 |
-> |------|------|
-> | `tileiras` | NVIDIA 工具链里的外部编译器，cuda_tile bytecode → cubin |
-> | bytecode | cuda_tile 方言 IR 的二进制序列化 |
-> | cubin | GPU 最终可执行二进制 |
-> | `ptxas` / `libnvvm` / `libdevice` | `tileiras` 内部依赖、需在 `$CUDA_HOME` 下定位的工具链组件 |
-> | `OutOfResources` | 资源超限错误，可被 autotuner 剪枝 |
-> | `TileirasError` | 一般性 `tileiras` 失败（含崩溃） |
+`cuda_tile` IR 有两种表示:
+
+- **文本形式(printable `.mlir`)**:人能读,体积大,解析慢。
+- **bytecode(字节码)**:二进制,紧凑、解析快,是 MLIR 官方推荐的序列化交换格式。
+
+`tileiras` 作为独立进程,接收的就是 **bytecode 文件**——它看不到 Triton 内存里那个 IR 对象。所以 Triton 必须先把内存里的 `cuda_tile::ModuleOp` 序列化成字节,落盘成一个文件,再把文件路径作为命令行参数传给 `tileiras`。
+
+### 2.3 复习:u2-l3 的三段式流水线
+
+本讲频繁用到 u2-l3 建立的认知:
+
+- 后端在 `add_stages` 里把 `make_ttir` / `make_tileir` / `make_cubin` 三个工厂函数注册进一个有序字典,上游 `compile()` 按插入顺序驱动。
+- `make_tileir` 把 IR 从 `tt.*` lowering 成 `cuda_tile` 方言,并在最外层 builtin `ModuleOp` 之内插入一个嵌套的 `cuda_tile.module` 容器。
+- `make_cubin` 是流水线终点,它的产物是 `.cubin`。
+
+本讲要回答的,就是**这个 `make_cubin` 内部到底做了什么**。
+
+---
 
 ## 3. 本讲源码地图
 
-本讲涉及四个关键文件，分工如下：
-
 | 文件 | 作用 |
-|------|------|
-| `third_party/tileir/backend/compiler.py` | `call_tileiras` 所在地：拼命令、写 bytecode、跑子进程、分类错误；也包含 `make_cubin` 入口 |
-| `third_party/tileir/backend/conf.py` | `TileIREnvConf`：`tileiras` 路径的三级解析与 `CUDA_HOME` 的反推 |
-| `python/triton/runtime/errors.py` | `OutOfResources` 与 `TileirasError` 的真正定义（注意：不是 `tileir` 目录下的 `errors.py`） |
-| `third_party/tileir/triton_tileir.cc` | C++ pybind 层：`write_bytecode` 如何定位嵌套的 `cuda_tile::ModuleOp` 并序列化 |
+|---|---|
+| `third_party/tileir/backend/compiler.py` | TileIR 后端主体。本讲主角:`make_cubin`(薄壳)、`call_tileiras`(真正干活的静态方法),包含 bytecode 落盘、命令构造、`CUDA_HOME` 注入、错误分类。 |
+| `third_party/tileir/backend/conf.py` | 环境配置。`get_tileiras_path`(三级路径解析)、`get_tileir_cuda_home`(从 tileiras 路径反推 CUDA_HOME)。 |
+| `python/triton/runtime/errors.py` | 错误类定义。`OutOfResources`、`TileirasError`——`call_tileiras` 抛出的两类异常。 |
+| `third_party/tileir/triton_tileir.cc` | C++ pybind 插件。`write_bytecode`——在嵌套 `cuda_tile::ModuleOp` 上序列化 bytecode 的真正实现。 |
 
-> ⚠️ 容易踩的坑：`third_party/tileir/backend/errors.py` 里**只有** `HitFallback`，并没有 `OutOfResources`/`TileirasError`。后两者是在 `compiler.py` 顶部从 `triton.runtime.errors` 导入的。见 [third_party/tileir/backend/compiler.py:1](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L1)。
+> 注意:`OutOfResources` 与 `TileirasError` 定义在 `python/triton/runtime/errors.py`,而 `compiler.py` 第 1 行 `from triton.runtime.errors import OutOfResources, TileirasError` 把它们导入。本讲讲的是「编译期」错误分类;与之相对的「运行期 fallback」(jit.py 里的 `tileir_run` / `HitFallback`)属于 u4-l3,本讲只在最后做一句话区分。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-本讲按三个最小模块展开：**bytecode 输出** → **tileiras 命令与环境** → **错误分类**。这三者串起来就是 `call_tileiras` 的全部职责。
-
-### 4.1 bytecode 输出：把 cuda_tile IR 序列化交给外部编译器
+### 4.1 bytecode 输出:把 cuda_tile.module 序列化给外部工具
 
 #### 4.1.1 概念说明
 
-`make_cubin` 是三段式流水线的第三段（见 u2-l3），它本身只做一件事：把模块转交给 `call_tileiras`。
+`make_tileir` 跑完之后,Triton 内存里有一个 IR 模块,它的结构长这样(伪 IR):
 
-```python
-@staticmethod
-def make_cubin(mod, metadata, opt: TileIROptions, capability):
-    return TileIRBackend.call_tileiras(mod, metadata, opt, capability)
+```
+module {                 // 最外层是 MLIR 内置 builtin ModuleOp
+  "cuda_tile.module" : { // 嵌套的 cuda_tile 方言模块容器
+    ... 真正的 cuda_tile 算子(load / store / dot / ...)
+  }
+}
 ```
 
-参考 [third_party/tileir/backend/compiler.py:332-334](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L332-L334)。
+而 `tileiras` 是一个**独立进程**,它只能读文件。所以我们面临一个问题:
 
-真正的工作在 `call_tileiras` 里。它要解决一个关键问题：**给 `tileiras` 喂什么？** 答案是 cuda_tile 方言的 bytecode。这里有个细节——传入的 `mod` 是外层 `mlir::ModuleOp`，而 `tileiras` 想要的是嵌在它里面的 `cuda_tile::ModuleOp`。因此序列化这一步必须先「找到内层那个 cuda_tile 模块」。
+- 不能把最外层的 builtin `ModuleOp` 整个序列化——`tileiras` 只认 `cuda_tile` 方言。
+- 必须从 builtin 模块里**挑出那个嵌套的 `cuda_tile::ModuleOp`**,只对它做 bytecode 序列化。
 
-为什么 `tileiras` 看不到 Python 侧的编译旋钮（如 `occupancy`、`enable_approx`、`enable_ftz`）？因为这些旋钮早在 `make_tileir` 阶段就被**烘焙（bake）进了 IR**（见 u2-l2、u2-l3）。等执行到 `make_cubin` 时，旋钮已经是 IR 的一部分，`tileiras` 只看到最终 IR，命令行只接收架构与优化级别等少数全局参数。这一点是理解「为什么 tileiras 命令那么短」的关键。
+这一步由 C++ pybind 函数 `write_bytecode` 完成,Python 侧通过 `tileir.write_bytecode(mod)` 调用。
 
 #### 4.1.2 核心流程
 
-bytecode 输出这一小步的执行流程：
+`make_cubin` 到 bytecode 落盘的流程:
 
 ```
-make_cubin(mod, ...)
-   └─> call_tileiras(mod, metadata, opt, capability)
-          ├─ name      = metadata["name"]          # 内核名
-          ├─ cache_mgr = get_cache_manager(hash)   # 拿到该内核的缓存管理器
-          ├─ bytecode  = tileir.write_bytecode(mod) # C++ 序列化：定位嵌套 cuda_tile::ModuleOp
-          ├─ cache_mgr.put(bytecode, "{name}.bytecode")  # 落盘缓存（便于复现/调试）
-          └─ ... 后续构造 tileiras 命令（见 4.2）
+make_cubin(mod, metadata, opt, capability)
+   │  (薄壳,直接转发)
+   ▼
+call_tileiras(mod, metadata, opt, capability)
+   │
+   ├── ① tileir.write_bytecode(mod)   ──► bytes(在 C++ 里挑出嵌套 cuda_tile::ModuleOp)
+   │
+   ├── ② get_cache_manager(metadata["hash"]).put(bytes, f"{name}.bytecode")
+   │        ──► bytecode_file(落盘到缓存目录,带函数名)
+   │
+   └── ③ 把 bytecode_file 作为命令行位置参数传给 tileiras(见 4.2)
 ```
 
-要点：
-1. 序列化由 C++ pybind 函数 `tileir.write_bytecode` 完成，Python 侧只拿到 `py::bytes`。
-2. bytecode 同时被写进缓存目录（文件名 `{name}.bytecode`），这是为了出错时能复现——错误信息里的 repro 命令引用的就是这个文件。
-3. bytecode 的**对象**是嵌套的 `cuda_tile::ModuleOp`，不是外层 `mlir::ModuleOp`。
+要点:
+
+- **bytecode 同时被缓存**。`{name}.bytecode` 会写入缓存目录,这样既给 `tileiras` 用,又方便事后人工复现(repro),不必每次重跑整条流水线。
+- 缓存键用的是 `metadata["hash"]`——也就是说同一份「旋钮配置」的 bytecode 会命中同一份缓存,与 cubin 一起分级缓存(参见 u2-l3 / u1-l4 讲过的 `.ttir` / `.tileir` / `.cubin` 三级落盘)。
 
 #### 4.1.3 源码精读
 
-Python 侧的 bytecode 写出，见 [third_party/tileir/backend/compiler.py:216-219](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L216-L219)：
+`make_cubin` 只是一个把工作转交给 `call_tileiras` 的薄壳:
 
-```python
-# Save bytecode to cache
-bytecode = tileir.write_bytecode(mod)
-bytecode_cache_name = f"{name}.bytecode"
-bytecode_file = fn_cache_manager.put(bytecode, bytecode_cache_name)
-```
+[compiler.py:332-334](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L332-L334) —— `make_cubin` 静态方法,直接返回 `call_tileiras` 的结果,本身不做任何变换。
 
-这里 `tileir` 是从 `triton._C.libtriton` 导入的 C++ 模块（见文件顶部第 6 行的 `from triton._C.libtriton import ir, passes, tileir`）。`write_bytecode` 的真正实现在 C++ 侧，见 [third_party/tileir/triton_tileir.cc:129-149](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/triton_tileir.cc#L129-L149)：
+真正序列化发生在 `call_tileiras` 的开头。先取出 `tileiras` 可执行文件路径,然后调 `write_bytecode`,再把字节写进缓存:
 
-```cpp
-m.def("write_bytecode", [](mlir::ModuleOp mod) {
-  // Find the cuda_tile::ModuleOp within the mlir::ModuleOp.
-  cuda_tile::ModuleOp cudaTileModule;
-  if (!mod.getBody()->empty())
-    if (auto nestedCudaTileModule =
-            dyn_cast<cuda_tile::ModuleOp>(&mod.getBody()->front()))
-      cudaTileModule = nestedCudaTileModule;
+[compiler.py:210-219](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L210-L219) —— 取 `tileiras` 路径、构造命令开头;`bytecode = tileir.write_bytecode(mod)` 得到字节;`bytecode_cache_name = f"{name}.bytecode"`,用缓存管理器落盘得到 `bytecode_file`。
 
-  if (!cudaTileModule)
-    throw std::runtime_error(
-        "No cuda_tile::ModuleOp found in the input module");
-  // ...用 cuda_tile::writeBytecode 把 cudaTileModule 序列化成 py::bytes
-});
-```
+而 `write_bytecode` 的真正实现在 C++ 侧,关键是它「只序列化嵌套的 cuda_tile::ModuleOp」:
 
-这段代码做的事：取外层模块 body 的第一个操作（`mod.getBody()->front()`），若它是 `cuda_tile::ModuleOp` 就选定它；找不到就直接抛异常。这呼应了 `make_tileir` 里 `convert-triton-to-cuda-tile` 会「在外层 ModuleOp 内插入一个 cuda_tile 容器模块」的设计（见 u2-l3）。随后用 `cuda_tile::writeBytecode` 以 `kCurrentVersion` 序列化，返回 `py::bytes`。
+[triton_tileir.cc:129-149](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/triton_tileir.cc#L129-L149) —— `write_bytecode` 在 `mod.getBody()->front()`(模块体的第一个操作)上做 `dyn_cast<cuda_tile::ModuleOp>`;命中则对它调 `cuda_tile::writeBytecode`;找不到就抛 `"No cuda_tile::ModuleOp found in the input module"`。最后包成 `py::bytes` 返回。
 
-> 关于 `write_bytecode` 如何定位嵌套模块、以及它与 cuda_tile 级 pass 的关系，更深入的剖析放在 [u3-l7 后处理与 bytecode 输出](u3-l7-fma-fusion-and-bytecode.md)。本讲只需知道：它产出 `tileiras` 的输入字节流。
+> 这里解释了为什么 `make_tileir` 必须在转换开头**插入 `cuda_tile.module` 容器**(见 u2-l3):`write_bytecode` 依赖「模块体第一个操作就是 cuda_tile.module」这个约定。如果没有它,`write_bytecode` 会直接抛异常,`make_cubin` 也就无法进行。
 
-#### 4.1.4 代码实践
+#### 4.1.4 代码实践(源码阅读型)
 
-**实践目标**：在本地缓存目录中亲眼看到 `tileiras` 的输入文件，并确认它是二进制 bytecode 而非文本 IR。
+**目标**:确认 bytecode 缓存确实会被落盘,并能人工取到它用于复现。
 
-**操作步骤**：
+1. 打开 [compiler.py:205-219](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L205-L219),对照本节流程图,确认 `bytecode` 变量来自 `tileir.write_bytecode(mod)`,且文件名是 `f"{name}.bytecode"`。
+2. 在一个真实跑过 TileIR kernel 的环境里(需 Blackwell GPU,待本地验证),设置 `TRITON_CACHE_DIR` 指向一个干净目录,例如 `export TRITON_CACHE_DIR=/tmp/tcache`。
+3. 跑一个最小的 `@triton.jit` kernel(开 `ENABLE_TILE=1`)。
+4. 到缓存目录里翻找 `*.bytecode` 文件,确认它和对应 kernel 名同名。
 
-1. 在 `ENABLE_TILE=1` 下编译任意一个 Triton kernel（如向量加法），让它正常跑通。
-2. 找到 Triton 的缓存根目录（默认在 `~/.triton/cache/`，或由 `TRITON_CACHE_DIR` 指定）。
-3. 在缓存目录里搜索 `*.bytecode` 文件。
+**需要观察的现象**:缓存目录里出现 `<kernelname>.bytecode` 文件,且该文件是二进制(开头通常有 MLIR bytecode 魔数字节)。
 
-**需要观察的现象**：
+**预期结果**:能找到这份字节码文件,且后续可以用它脱离 Triton、直接手动喂给 `tileiras` 做复现(见 4.2 的命令拼接)。
 
-- 存在一个 `{kernel_name}.bytecode` 文件，与 `.ttir`、`.tileir`、`.cubin` 同目录。
-- 用 `file` 命令或 `xxd | head` 查看它：它不是人类可读的 `module { ... }` 文本，而是以特定 magic 开头的二进制。
-
-**预期结果**：`head -c 64 xxx.bytecode | xxd` 应输出一堆十六进制字节，而非 `module` 字样。这就证明 `tileiras` 吃的是 bytecode。
-
-> 待本地验证：具体缓存路径与文件名以你机器上的实际输出为准；无 GPU/CUDA 13.1 环境时无法实际触发 `call_tileiras`，可改为纯源码阅读型实践——对照 4.1.3 的两段代码，画出「外层 ModuleOp → 嵌套 cuda_tile::ModuleOp → bytecode 字节 → `{name}.bytecode` 缓存文件」的数据流。
+> 如果没有 Blackwell 硬件,这一步属于「待本地验证」,但你可以完成源码阅读部分:确认 `write_bytecode` 只挑嵌套 `cuda_tile::ModuleOp` 序列化。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：如果 `convert-triton-to-cuda-tile` 因为 bug 没有插入嵌套的 `cuda_tile::ModuleOp`，`call_tileiras` 会在哪一步、以什么形式失败？
+**Q1**:`write_bytecode` 为什么不直接序列化传入的 `mlir::ModuleOp`,而要先 `dyn_cast` 找嵌套的 `cuda_tile::ModuleOp`?
 
-> **参考答案**：会在 `tileir.write_bytecode(mod)` 这一步失败。C++ 侧找不到 `cuda_tile::ModuleOp`，直接抛 `std::runtime_error("No cuda_tile::ModuleOp found in the input module")`，Python 侧表现为 RuntimeError，**根本到不了** subprocess 调用。
+**参考答案**:因为 `tileiras` 只认识 `cuda_tile` 方言;最外层 `mlir::ModuleOp` 是 MLIR 内置容器,序列化它会带上 builtin 方言信息,不是 `tileiras` 期望的输入。所以必须精确挑出 `cuda_tile` 模块容器,只对它做 bytecode。
 
-**练习 2**：bytecode 为什么不直接传给 `tileiras` 进程的 stdin，而是先写进缓存文件？
+**Q2**:`bytecode_file` 这个变量最后被用在命令的哪个位置?
 
-> **参考答案**：因为出错时需要 repro。缓存里的 `{name}.bytecode` 文件就是 `tileiras` 的输入，错误信息里的 `Repro command` 引用它，开发者可以拿同一条命令、同一个文件复现问题。
+**参考答案**:作为 `tileiras` 命令的倒数第二个位置参数(输入文件),紧随其后是 `-o <cubin_file>`(见 4.2)。
 
 ---
 
-### 4.2 tileiras 命令与环境：子进程如何被构造
+### 4.2 tileiras 命令构造与 CUDA_HOME 注入
 
 #### 4.2.1 概念说明
 
-有了 bytecode 文件，下一步是构造并运行 `tileiras` 子进程。这一步有两个反直觉的设计需要重点理解：
+bytecode 文件准备好后,下一步就是**拼出一条 `tileiras` 命令行,起子进程执行它**。这里有两个关键设计:
 
-1. **`CUDA_HOME` 是「算出来」的，不是「读出来」的。** `tileiras` 内部要找 `ptxas`、`libnvvm.so`、`libdevice`，它们都应在 `$CUDA_HOME` 下。但本后端**故意不读系统 `CUDA_HOME` 环境变量**，而是从 `tileiras` 可执行文件自身的位置反推（`tileiras` 总在 `<CUDA_HOME>/bin/tileiras`）。
-2. **这个 `CUDA_HOME` 只注入给 `tileiras` 子进程，绝不写回 `os.environ`。** 这样一个陈旧的系统 CUDA（注释里举的例子是 13.2）永远不会盖过本仓库打包匹配的工具链。
-
-这两点合起来回答了实践任务的核心问题：**为什么从路径推导而非读系统变量？**——为了防止工具链错配，保证 `tileiras` 永远配对到它自己同目录下那套工具。
+1. **命令行怎么拼**:固定几个 flag(`--gpu-name`、`--opt-level`)+ 输入 bytecode 文件 + `-o` 输出 cubin 文件。注意:`tileiras` **看不到任何 Python 旋钮**(occupancy / num_ctas / num_stages / approx / ftz),这些旋钮在 u2-l3 的 `make_tileir` 里就已经被「烘焙」进 IR 了,到 `tileiras` 时它们已经体现为 IR 里的具体算子与属性。
+2. **`CUDA_HOME` 怎么给**:`tileiras` 内部还要调用 `ptxas`、`libnvvm.so`、`libdevice` 来做 SM100 codegen,它靠 `CUDA_HOME` 来定位这些工具。Triton 这里做了一个**刻意的决定**:不从系统的 `CUDA_HOME` 环境变量读,而是从 `tileiras` 自身的安装路径反推。
 
 #### 4.2.2 核心流程
 
-子进程构造的完整流程：
+最终拼出的命令形如:
 
 ```
-opt.tileir_tileiras_path   ← TileIROptions 字段，默认 = TileIREnvConf.get_tileiras_path()
-        │
-        ▼
-get_tileiras_path()  三级解析：
-   ① TRITON_TILEIRAS_PATH 环境变量 → $path/tileiras
-   ② 打包内置二进制 → backends/nvidia/tileir_cuda/bin/tileiras
-   ③ 系统 PATH → which("tileiras")
-        │
-        ▼  得到 tileiras 绝对路径
-get_tileir_cuda_home() = dirname(dirname(tileiras))
-        │
-        ▼
-tileiras_env = { **os.environ, "CUDA_HOME": <上面算出的 home> }   # 只给子进程
-        │
-        ▼
-subprocess.run([tileiras, --gpu-name, --opt-level, <bytecode_file>, -o, <cubin>],
-               check=True, close_fds=False, stderr=flog, env=tileiras_env)
+tileiras --gpu-name=sm_<capability> --opt-level=<opt_level> <bytecode_file> -o <cubin_file>
 ```
+
+环境与执行的流程:
+
+```
+call_tileiras
+   │
+   ├── 命令构造:[tileiras, "--gpu-name=sm_{cap}", "--opt-level={opt_level}"]
+   │             └── 在临时文件块里再 append: bytecode_file, "-o", fbin.name
+   │
+   ├── 环境构造:tileiras_env = {**os.environ, "CUDA_HOME": get_tileir_cuda_home()}
+   │             └── CUDA_HOME = dirname(dirname(tileiras))   ← 从 tileiras 路径反推
+   │
+   ├── subprocess.run(cmd, check=True, close_fds=False, stderr=flog, env=tileiras_env)
+   │
+   └── 成功 → 读 fbin.name 得到 cubin 字节,删临时文件,返回 cubin
+```
+
+`CUDA_HOME` 的反推逻辑基于一个布局约定:
+
+\[ \text{tileiras 位于}\ \langle \text{CUDA\_HOME} \rangle / \text{bin/tileiras} \]
+
+所以对 `tileiras` 路径做两次 `dirname`(先去掉 `tileiras`,再去掉 `bin`)就得到 `CUDA_HOME`:
+
+\[ \text{CUDA\_HOME} = \mathrm{dirname}(\mathrm{dirname}(\text{tileiras})) \]
+
+`tileiras` 路径本身有三级解析顺序(在 `get_tileiras_path` 里),所以 `CUDA_HOME` 也随之有三条推导路径:
+
+| `tileiras` 来源 | `CUDA_HOME` 推导结果 |
+|---|---|
+| `TRITON_TILEIRAS_PATH` 已设 | `dirname(TRITON_TILEIRAS_PATH)` |
+| 内置二进制 `<triton>/backends/nvidia/tileir_cuda/bin/tileiras` | `<triton>/backends/nvidia/tileir_cuda` |
+| 系统 PATH(`which tileiras`) | `dirname(dirname(which tileiras))` |
 
 #### 4.2.3 源码精读
 
-**命令拼装**——见 [third_party/tileir/backend/compiler.py:210-215](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L210-L215)：
+命令行的前半段(标志位):
 
-```python
-tileiras = opt.tileir_tileiras_path
-tileiras_cmd = [
-    tileiras,
-    f"--gpu-name=sm_{capability}",
-    f"--opt-level={opt.opt_level}",
-]
-```
+[compiler.py:210-215](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L210-L215) —— `tileiras = opt.tileir_tileiras_path`;`tileiras_cmd` 初始为 `[tileiras, "--gpu-name=sm_{capability}", "--opt-level={opt_level}"]`。注意这里的 `capability` 是数字 SM(例如 100),直接拼成 `sm_100`。
 
-注意命令只带了三个全局参数：可执行文件、目标架构（`sm_{capability}`，如 `sm_100a`）、优化级别（`opt.opt_level`，默认 3，见 `TileIROptions.opt_level` 在 [compiler.py:67](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L67)）。随后在 [compiler.py:232-234](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L232-L234) 追加输入 bytecode 文件与 `-o` 输出路径。
+`CUDA_HOME` 的注入——**只进子进程环境,不污染全局 `os.environ`**:
 
-**CUDA_HOME 注入**——见 [third_party/tileir/backend/compiler.py:221-225](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L221-L225)：
+[compiler.py:221-225](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L221-L225) —— 注释写明:这是「仅给 tileiras 子进程的作用域内 `CUDA_HOME`」(NOT global os.environ);`tileiras` 用它定位 SM100 codegen 所需的 `ptxas` + `libnvvm` + `libDevice`;值取自 `TileIREnvConf.get_tileir_cuda_home()`,刻意从内置 `tileiras` 位置反推,让「一个陈旧的系统 CUDA 永远不会遮蔽匹配的 13.3 工具链」。
 
-```python
-# Scoped CUDA_HOME for the tileiras subprocess only (NOT global os.environ):
-# tileiras locates ptxas + libnvvm + libdevice under $CUDA_HOME for SM100 codegen.
-# Derived from the bundled tileiras location (tileir_cuda) so a stale system
-# CUDA can never shadow the matching 13.3 toolchain.
-tileiras_env = {**os.environ, "CUDA_HOME": TileIREnvConf.get_tileir_cuda_home()}
-```
+`get_tileir_cuda_home` 的实现——两次 `dirname`:
 
-注意它先拷贝整个 `os.environ` 再**覆盖** `CUDA_HOME`，且只把这份 `tileiras_env` 传给 `subprocess.run` 的 `env=` 参数——进程级隔离。
+[conf.py:58-72](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L58-L72) —— 注释明确:「DELIVERED purely from the resolved tileiras location」「deliberately do NOT read the system CUDA_HOME env var」,最后 `return os.path.dirname(os.path.dirname(tileiras))`。
 
-**子进程执行**——见 [third_party/tileir/backend/compiler.py:236-237](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L236-L237)：
+`tileiras` 路径本身的三级解析:
 
-```python
-subprocess.run(tileiras_cmd, check=True, close_fds=False, stderr=flog, env=tileiras_env)
-```
+[conf.py:26-56](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L26-L56) —— 顺序为 `TRITON_TILEIRAS_PATH`(在其下拼 `tileiras`)> 内置 `<triton>/backends/nvidia/tileir_cuda/bin/tileiras` > 系统 PATH(`shutil.which`);都找不到则抛 `RuntimeError("tileiras not found ...")`。
 
-- `check=True`：`tileiras` 非零退出立即抛 `CalledProcessError`，进入 4.3 的错误分类。
-- `close_fds=False`：**故意**不关闭继承的文件描述符，这样 torch/CUDA 上下文相关的句柄（如 IPC handle）能透传给子进程。
-- `stderr=flog`：把 `tileiras` 的标准错误写进临时日志文件，供后续正则匹配。
+命令后半段(临时文件 + 输入输出路径)+ 子进程执行:
 
-**路径三级解析**——见 [third_party/tileir/backend/conf.py:26-56](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L26-L56)：
+[compiler.py:228-237](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L228-L237) —— 用 `NamedTemporaryFile` 开两个临时文件(`.log` 接 stderr、`.cubin` 接输出);把 `bytecode_file`、`-o`、`fbin.name` append 到命令;`subprocess.run(..., check=True, close_fds=False, stderr=flog, env=tileiras_env)`。`close_fds=False` 是为了让子进程能继承 Triton 已打开的 CUDA 句柄(如 stream)。
 
-```python
-@staticmethod
-def get_tileiras_path():
-    # ① 显式环境变量优先
-    env_path = os.getenv("TRITON_TILEIRAS_PATH", None)
-    if env_path is not None:
-        return os.path.join(env_path, "tileiras")
-    # ② 打包内置二进制
-    bundled_path = os.path.join(os.path.dirname(triton.__file__),
-        "backends", "nvidia", "tileir_cuda", "bin", "tileiras")
-    if os.path.isfile(bundled_path) and os.access(bundled_path, os.X_OK):
-        return bundled_path
-    # ③ 系统 PATH 兜底
-    from shutil import which
-    tileiras_path = which("tileiras")
-    if tileiras_path is None:
-        raise RuntimeError("tileiras not found: ...")
-    return tileiras_path
-```
+> 默认 `opt_level` 是 3,来自 u2-l2 讲过的 `TileIROptions.opt_level`(见 [compiler.py:67](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L67))。而 `tileir_tileiras_path` 默认值是 `TileIREnvConf.get_tileiras_path()`(见 [compiler.py:72](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L72)),也就是说 `TileIROptions` 实例化时就解析好了路径并冻结进选项对象。
 
-**CUDA_HOME 反推**——见 [third_party/tileir/backend/conf.py:58-72](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L58-L72)：
+#### 4.2.4 代码实践(源码阅读型)
 
-```python
-@staticmethod
-def get_tileir_cuda_home():
-    # ...注释明确：DERIVED purely from the resolved tileiras location...
-    # We deliberately do NOT read the system CUDA_HOME env var...
-    tileiras = TileIREnvConf.get_tileiras_path()
-    return os.path.dirname(os.path.dirname(tileiras))
-```
+**目标**:在脑中复现 `CUDA_HOME` 的三套推导结果,并理解为什么不能读系统变量。
 
-`dirname(dirname(<CUDA_HOME>/bin/tileiras))` = `<CUDA_HOME>`，正好回到工具链根目录。三种解析模式下结果一致：
+1. 读 [conf.py:26-72](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L26-L72),填出下表:
 
-| 解析模式 | `tileiras` 路径 | `get_tileir_cuda_home()` 结果 |
-|----------|----------------|------------------------------|
-| `TRITON_TILEIRAS_PATH` 设置 | `$path/tileiras` | `dirname($path)` |
-| 打包内置 | `.../tileir_cuda/bin/tileiras` | `.../tileir_cuda` |
-| 系统 PATH | `which("tileiras")` | `dirname(dirname(which(...)))` |
+   | 场景 | `get_tileiras_path()` 返回 | `get_tileir_cuda_home()` 返回 |
+   |---|---|---|
+   | 设了 `TRITON_TILEIRAS_PATH=/opt/tc` | ? | ? |
+   | 未设,有内置二进制 | `<triton>/backends/nvidia/tileir_cuda/bin/tileiras` | ? |
+   | 未设,无内置,PATH 里有 `/usr/local/cuda/bin/tileiras` | ? | ? |
 
-> 版本说明：README 指出本后端「只使用 CUDA 13.1 提供的特性」，依赖 `bin/tileiras`、`bin/ptxas`、`nvvm/lib64/libnvvm.so`；而 `conf.py` 的注释把打包工具链描述为「13.3 toolchain」（见上面 `get_tileir_cuda_home` 上方注释）。两者一个是「特性集版本」，一个是「打包工具链版本」，本讲只如实引用源码，不作合并。
+2. 回答:假设系统里装了一个**旧的 CUDA 13.2**,且 `CUDA_HOME=/usr/local/cuda-13.2`,而 Triton 内置的是 **13.3** 的 `tileir_cuda`。如果 `get_tileir_cuda_home` 改成读系统 `os.environ["CUDA_HOME"]`,会发生什么问题?
 
-#### 4.2.4 代码实践
+**预期结果**(表格答案):
 
-**实践目标**：回答「`tileiras` 子进程的 `CUDA_HOME` 为何要从 `tileiras` 路径推导而非读系统变量」，并对三种解析模式各写一行 shell 推导。
+| 场景 | `get_tileiras_path()` | `get_tileir_cuda_home()` |
+|---|---|---|
+| `TRITON_TILEIRAS_PATH=/opt/tc` | `/opt/tc/tileiras` | `/opt/tc` |
+| 内置二进制 | `<triton>/backends/nvidia/tileir_cuda/bin/tileiras` | `<triton>/backends/nvidia/tileir_cuda` |
+| PATH 里 `/usr/local/cuda/bin/tileiras` | `/usr/local/cuda/bin/tileiras` | `/usr/local/cuda` |
 
-**操作步骤（源码阅读型）**：
+第二问:旧版 13.2 的 `ptxas` / `libnvvm` / `libdevice` 会被 `tileiras` 拿去给 SM100 生成代码,可能产出**与 13.3 不匹配或不正确的 cubin**,且这种错最难排查(因为编译可能「成功」但结果错)。所以代码刻意从 `tileiras` 路径反推,保证工具链版本与 `tileiras` 自身一致。
 
-1. 打开 [conf.py:58-72](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L58-L72)，确认 `get_tileir_cuda_home` 完全没有调用 `os.getenv("CUDA_HOME")`。
-2. 打开 [compiler.py:221-225](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L221-L225)，确认 `CUDA_HOME` 只出现在传给 `subprocess.run` 的 `env=` 里。
-
-**需要观察的现象 / 需要回答的问题**：
-
-- 为什么「读系统变量」是危险的？→ 系统可能装了陈旧的 CUDA（注释里的 13.2 例子），它的 `ptxas`/`libnvvm` 与本仓库打包的 `tileiras` 不匹配，会让 SM100 codegen 出错。
-- 为什么只注入子进程？→ 避免污染 Triton 主进程（及 torch 等）的环境，做到「只为这次编译临时切换工具链」。
-
-**预期结果**（参考答案）：
-
-> `tileiras` 必须用与它**同源**的 `ptxas`/`libnvvm`/`libdevice`，否则 SM100 代码生成会出错。由于 `tileiras` 恒位于 `<CUDA_HOME>/bin/tileiras`，对其路径取两次 `dirname` 即可可靠还原出配套的 `<CUDA_HOME>`，无需依赖用户配置正确——这是一种「自描述、防错配」的设计。三级推导：
-> - 设 `TRITON_TILEIRAS_PATH=/opt/cuda` → home = `/opt/cuda`（实际 `dirname(/opt/cuda/tileiras)` 不对，应为 `dirname($path)`，见 conf.py L31）。
->
-> 修正：`get_tileiras_path` 在 ① 模式返回 `os.path.join(env_path, "tileiras")`，即 `<env_path>/tileiras`，故 home = `dirname(dirname(<env_path>/tileiras))` = `<env_path>`。三种模式：
-> - ① `TRITON_TILEIRAS_PATH=$P` → home = `$P`
-> - ② 打包内置 → home = `backends/nvidia/tileir_cuda`
-> - ③ PATH → home = `dirname(dirname(which tileiras))`
-
-> 待本地验证：若有 CUDA 13.x 环境，可用 `python -c "from triton.backends.tileir.conf import TileIREnvConf as C; print(C.get_tileiras_path(), C.get_tileir_cuda_home())"` 在 `ENABLE_TILE=1` 下打印两者，验证上表。
+> 待本地验证:在有内置 `tileir_cuda` 的环境里,`print(TileIREnvConf.get_tileir_cuda_home())` 应指向 `backends/nvidia/tileir_cuda`,且该目录下确有 `bin/tileiras`、`bin/ptxas`、`libnvvm.so` 等。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`close_fds=False` 改成 `True` 会怎样？为什么这里偏偏要 `False`？
+**Q1**:为什么 `tileiras_env` 要用 `{**os.environ, "CUDA_HOME": ...}` 这种写法,而不是直接 `os.environ["CUDA_HOME"] = ...`?
 
-> **参考答案**：`True` 会在 exec 前关闭所有继承的文件描述符。这里要 `False`，是为了让 torch/CUDA 上下文持有的句柄（如 IPC、设备句柄）能透传给 `tileiras` 子进程，避免子进程因拿不到必要句柄而出错。
+**参考答案**:前者是「复制一份环境字典,只在副本里覆盖 `CUDA_HOME`,且**只传给子进程**」,后者会**全局污染** Triton 自身进程的环境,影响其它代码对 `CUDA_HOME` 的认知。注释里特意标注 `NOT global os.environ`,目的就是隔离。
 
-**练习 2**：命令行里为什么没有 `--occupancy`、`--enable-approx` 之类的旋钮？
+**Q2**:`tileiras` 命令行里为什么没有 `occupancy`、`num_ctas` 这些旋钮?它们去哪了?
 
-> **参考答案**：因为这些旋钮在 `make_tileir` 阶段已被烘焙进 IR（见 u2-l2/u2-l3）。`tileiras` 只消费最终 IR 与 `--gpu-name`/`--opt-level` 等全局参数，看不到也不需要这些 Python 旋钮。
+**参考答案**:这些旋钮在 `make_tileir` 阶段就已经被 lowering pass 烘焙进了 `cuda_tile` IR(具体算子布局、`cuda_tile.module` 的属性等),到 `make_cubin` 时 IR 已经定型。`tileiras` 只看到最终的 bytecode,所以不需要、也看不到这些 Python 旋钮。
 
 ---
 
-### 4.3 错误分类：OutOfResources 与 TileirasError
+### 4.3 资源超限与编译崩溃的错误分类
 
 #### 4.3.1 概念说明
 
-`tileiras` 是子进程，它的失败有两类，必须被正确分类，因为下游对它们的处理完全不同：
+`tileiras` 可能因为各种原因失败,Triton 必须把它们**分成两类**对待,因为 autotuner 对这两类的处理完全不同:
 
-| 失败类别 | 含义 | 翻译成的异常 | 下游处理 |
-|----------|------|------------|----------|
-| 资源超限 | 某个 autotune 配置要的共享内存或 TMEM 超过硬件上限 | `OutOfResources` | autotuner **剪枝**该配置，继续试别的 |
-| 一般失败/崩溃 | `tileiras` 自身报错，或被信号杀死（如 SIGSEGV） | `TileirasError` | 当作真实编译错误上报（类比 `PTXASError`） |
+| 错误类型 | 触发场景 | 抛出的异常 | autotuner 行为 |
+|---|---|---|---|
+| **资源超限** | kernel 用的 shared memory 或 TMEM(tensor memory)超过硬件上限 | `OutOfResources` | 可剪枝:跳过该配置,换更小的 |
+| **编译崩溃/其它失败** | 包括被信号杀死(负 returncode,如 SIGSEGV -11)、未知错误 | `TileirasError` | 不当资源超限处理;记录日志并上抛 |
 
-这条分类线至关重要：把「可剪枝的资源超限」误判成 `TileirasError`，会让 autotuner 直接整体失败而不是换配置；反过来把崩溃误判成资源超限，则会让 autotuner 错误地「跳过」本该上报的 bug。代码靠**匹配 `tileiras` 日志文本**来区分前一类，其余统统归到后一类。
+为什么要这样分?
 
-两个错误类的真身在 `python/triton/runtime/errors.py`：
+- **资源超限是「正常的、可预期的」失败**:某个 autotune 配置把 block 开得太大,shared memory 装不下。这和上游 PTX 后端用 `ptxas` 时 shared memory 超限的情况一样——上游抛 `OutOfResources`,autotuner 据此剪枝。TileIR 后端在这里做了**镜像**(mirror)的处理。
+- **编译崩溃是「不正常的」失败**:工具链本身出 bug(segfault)或遇到不支持的情形,这不该被 autotuner 当成「配置太大」而悄悄跳过,而应该让用户看见。
 
-- `OutOfResources`（[runtime/errors.py:14-26](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/python/triton/runtime/errors.py#L14-L26)）：构造为 `(required, limit, name)`，`__str__` 提示「降低 block size 或 `num_stages` 可能有帮助」。
-- `TileirasError`（[runtime/errors.py:39-46](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/python/triton/runtime/errors.py#L39-L46)）：与 `PTXASError`（同文件 L29-36）平行，是「外部汇编/编译器失败」的对应物。
-
-> 补充：`third_party/tileir/backend/errors.py` 里的 `HitFallback` 是另一条链路（运行期回退，见 u4-l3），与本讲的编译期错误分类无关，不要混淆。
+其中 **TMEM(tensor memory)** 是 Blackwell(SM100)特有的片上存储资源,被 `tcgen05` MMA 使用。`shared memory` 则是所有架构都有的概念。这两类是 Blackwell TileIR 最常踩的资源上限。
 
 #### 4.3.2 核心流程
 
-错误处理的判定流程（伪代码）：
+`call_tileiras` 的错误处理流程:
 
 ```
-try:
-    subprocess.run(tileiras_cmd, check=True, stderr=flog, env=tileiras_env)
-except CalledProcessError as e:
-    log = 读 flog
-    if "uses too much shared data" in log:
-        用正则抓 used/max（十六进制）→ raise OutOfResources(used, max, "shared memory")
-    if "allocated tmem out of resource" in log:
-        用正则抓 used/max（十进制）→ raise OutOfResources(used, max, "tensor memory")
-    # 其余一律：
-    raise TileirasError(错误码 + stderr + repro 命令)
+subprocess.run(..., check=True)
+   │
+   ├── 成功(exit 0) → 读 cubin,返回
+   │
+   └── 抛 CalledProcessError(e)
+         │
+         ├── 读 flog(stderr 日志)
+         ├── 删临时 log 文件
+         │
+         ├── 日志含 "uses too much shared data" ?
+         │     ├── 是 → 正则取 hex used/max → OutOfResources(used, max, "shared memory")
+         │     └── 否 ↓
+         ├── 日志含 "allocated tmem out of resource" ?
+         │     ├── 是 → 正则取 十进制 used/max → OutOfResources(used, max, "tensor memory")
+         │     └── 否 ↓
+         │
+         └── 其它(含负 returncode 即被信号杀死)
+               ├── logging.warning(记录 returncode + repro 命令,绝不静默吞掉)
+               └── raise TileirasError(error + stderr + repro)
 ```
 
-注意两个资源正则的**进制不同**：shared memory 的数字是十六进制（`0x...`），TMEM 的数字是十进制——这是 `tileiras` 日志格式决定的，抓取时不能搞混。
+两个判别正则(本讲的实践重点):
+
+- **shared memory**——日志里是十六进制的「用了多少字节 vs 最大多少」:
+
+  ```
+  0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max
+  ```
+
+  捕获组 1 = 已用(十六进制),捕获组 2 = 上限(十六进制)。
+
+- **TMEM**——日志里是十进制的「用了多少 vs 最大多少」:
+
+  ```
+  allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)
+  ```
+
+  捕获组 1 = 已用(十进制),捕获组 2 = 上限(十进制)。
+
+> 注意两个正则的进制不同:shared memory 用十六进制(`0x` 前缀,`int(.., 16)`),TMEM 用十进制(`int(..)`)。这是由 `tileiras` 实际输出格式决定的,写正则时必须照搬。
 
 #### 4.3.3 源码精读
 
-完整错误处理块见 [third_party/tileir/backend/compiler.py:236-272](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L236-L272)。
+shared memory 超限的识别与抛出:
 
-**共享内存超限**——见 [compiler.py:244-250](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L244-L250)：
+[compiler.py:244-250](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L244-L250) —— 触发字符串是 `"uses too much shared data"`;正则 `r"0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max"`;命中后用 `int(match.group(1), 16)` / `int(match.group(2), 16)` 解析,**raise `OutOfResources(used_smem, max_smem, "shared memory")`**。
 
-```python
-if "uses too much shared data" in log:
-    pattern = r"0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max"
-    match = re.search(pattern, log)
-    if match:
-        used_smem = int(match.group(1), 16)
-        max_smem = int(match.group(2), 16)
-        raise OutOfResources(used_smem, max_smem, "shared memory")
-```
+TMEM 超限的识别与抛出:
 
-**TMEM（tensor memory）超限**——见 [compiler.py:251-260](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L251-L260)：
+[compiler.py:251-260](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L251-L260) —— 触发字符串是 `"allocated tmem out of resource"`;正则 `r"allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)"`;命中后用 `int(match.group(1))` / `int(match.group(2))`(十进制)解析,**raise `OutOfResources(used_tmem, max_tmem, "tensor memory")`**。
 
-```python
-if "allocated tmem out of resource" in log:
-    # "allocated tmem out of resource: <used> vs <max>"
-    pattern = r"allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)"
-    match = re.search(pattern, log)
-    if match:
-        used_tmem = int(match.group(1))     # 十进制
-        max_tmem = int(match.group(2))
-        raise OutOfResources(used_tmem, max_tmem, "tensor memory")
-```
+其余一切失败 → `TileirasError`,并且**先记 warning 再抛**:
 
-**一般失败/崩溃**——见 [compiler.py:261-272](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L261-L272)：
+[compiler.py:261-272](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L261-L272) —— 注释解释:负 returncode 意味着 `tileiras` 被信号杀死(如 -11 SIGSEGV),是**编译器崩溃**而非用户错误;抛 `TileirasError` 让 autotuner 能剪枝(镜像 PTX 后端的 `PTXASError`),但**总是先 `logging.warning`**,让底层失败保持可见、绝不被静默吞掉;异常信息里附上退出码、stderr 全文、以及可复现的 repro 命令。
 
-```python
-error = f"`tileiras` failed with error code {e.returncode}"
-repro = ' '.join(str(item) for item in tileiras_cmd)
-# 负的 returncode 表示 tileiras 被信号杀死（如 -11 SIGSEGV）——是编译器崩溃，不是用户错误。
-logging.warning("tileiras failed (code %s). Repro: %s", e.returncode, repro)
-raise TileirasError(
-    f"{error}\n"
-    f"`tileiras` stderr:\n{log}\n"
-    f"Repro command: {repro}\n"
-)
-```
+两个错误类的定义(注意它们的字段与可 pickle 化):
 
-注释点明：负的 `returncode`（如 `-11` = SIGSEGV）意味着 `tileiras` 被信号杀死，是**编译器自身崩溃**而非用户配置错误，仍归为 `TileirasError`，但用 `logging.warning` 始终留痕，避免被静默吞掉。`TileirasError` 携带 stderr 全文与 repro 命令，方便复现。
+[errors.py:14-26](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/python/triton/runtime/errors.py#L14-L26) —— `OutOfResources(required, limit, name)`,`__str__` 提示「Reducing block sizes or `num_stages` may help」;实现了 `__reduce__` 以便在多进程 autotuner 间可 pickle 传递。
 
-成功路径——见 [compiler.py:273-277](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L273-L277)：读出 cubin 字节、删除临时文件、`return cubin`，cubin 随后由上游落盘并以 `.cubin` 缓存（见 u1-l4）。
+[errors.py:39-46](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/python/triton/runtime/errors.py#L39-L46) —— `TileirasError(error_message)`,只承载一段错误信息字符串。
 
-#### 4.3.4 代码实践
+> 区分一下「编译期错误」与「运行期 fallback」:本讲的 `OutOfResources` / `TileirasError` 都是 **JIT 编译期**(`make_cubin` 阶段)抛出的;而 u4-l3 会讲 jit.py 里 `tileir_run` 在**运行期**失败时回退到 PTX 后端的机制(由 `TRITON_TILEIR_RUNTIME_FALLBACK` 开关,抛 `HitFallback`)。两者发生在不同阶段,不要混淆。
 
-**实践目标**：写出判别「共享内存超限」与「TMEM 超限」两类错误的正则，并与源码对照。
+#### 4.3.4 代码实践(源码阅读型)
 
-**操作步骤**：
+**目标**:亲手验证两条资源超限正则能正确解析 `tileiras` 的真实输出格式。
 
-1. 假设你拿到两段 `tileiras` stderr 片段（示例日志，非项目原有）：
-   - 共享内存类：`... uses too much shared data: needs 0x10000 bytes, 0x8000 max ...`
-   - TMEM 类：`... allocated tmem out of resource: 512 vs 256 ...`
-2. 不看源码，为每段写一个 Python 正则，提取「已用」与「上限」两个数。
-3. 打开 [compiler.py:244-260](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L244-L260) 与你的答案对照。
+1. 打开 [compiler.py:244-260](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L244-L260),抄下两条触发字符串与正则。
+2. 写一个最小 Python 脚本(示例代码,**不是项目原有代码**),模拟 `tileiras` 的 stderr 片段,验证正则能取到 used/max:
 
-**需要观察的现象**：
+   ```python
+   # 示例代码:验证两条资源超限正则
+   import re
 
-- 共享内存的两段数字是 `0x` 开头的十六进制，正则的字符类应是 `[0-9a-fA-F]`，且 `int(..., 16)` 解析。
-- TMEM 的两段数字是裸十进制，分隔符是 ` vs `，正则用 `([0-9]+)\s*vs\s*([0-9]+)`，`int(...)` 默认十进制。
+   # 模拟 shared memory 超限日志(十六进制)
+   smem_log = "... uses too much shared data. 0x10000 bytes, 0xc000 max ..."
+   m = re.search(r"0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max", smem_log)
+   if m:
+       print("smem:", int(m.group(1), 16), int(m.group(2), 16))  # 期望 65536 49152
 
-**预期结果（参考答案，即源码原文）**：
+   # 模拟 tmem 超限日志(十进制)
+   tmem_log = "... allocated tmem out of resource: 600 vs 512 ..."
+   m = re.search(r"allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)", tmem_log)
+   if m:
+       print("tmem:", int(m.group(1)), int(m.group(2)))           # 期望 600 512
+   ```
 
-```python
-# 共享内存（十六进制）
-re.search(r"0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max", log)
-# TMEM（十进制）
-re.search(r"allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)", log)
-```
+3. 运行它,确认两条 print 的输出与注释里的期望值一致。
 
-> 待本地验证：示例日志为讲解构造，实际 `tileiras` 输出文案以你机器上的真实 stderr 为准；可在故意设置超大 `num_stages` 触发共享内存超限后，查看 `OutOfResources` 的 `(required, limit, name)` 取值是否与日志一致。
+**需要观察的现象**:shared memory 行打印 `65536 49152`(十六进制 `0x10000` / `0xc000` 转十进制),tmem 行打印 `600 512`。
+
+**预期结果**:两组数字都能被正确解析,说明正则与 `tileiras` 输出格式匹配。若想验证真实格式,可在能触发超限的 kernel 上捕获 `tileiras` 的 stderr(待本地验证,需 Blackwell 且故意调大配置)。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：若把 shared memory 的 `int(match.group(1), 16)` 误写成 `int(match.group(1))`（漏掉进制参数），会发生什么？
+**Q1**:`OutOfResources` 的 `__str__` 提示「Reducing block sizes or `num_stages` may help」。结合 u2-l2,为什么减小 `num_stages` 有助于缓解 shared memory 超限?
 
-> **参考答案**：`int("10000")` 会按十进制解析为 10000，而真实含义是十六进制 0x10000 = 65536。导致 `OutOfResources` 报告的 `required` 数值错误（偏小），误导用户判断「离上限还有多远」。进制必须与日志格式匹配。
+**参考答案**:`num_stages` 控制 software pipelining 的流水级数,每一级通常要额外分配一份 shared memory 缓冲。级数越多,shared memory 占用越大。减小 `num_stages` 能直接降低 shared memory 占用,从而可能让超限的配置变得合法。
 
-**练习 2**：为什么 `TileirasError` 一定要带上 repro 命令和 stderr，而 `OutOfResources` 不需要？
+**Q2**:为什么不把 `tileiras` 的所有失败都归为 `OutOfResources`,让 autotuner 全部剪枝掉?
 
-> **参考答案**：资源超限是配置问题，autotuner 剪枝即可，用户需要的是「超了多少」（已在异常字段里）；而 `TileirasError` 往往是 `tileiras` 自身或 IR 的问题，需要开发者能精确复现，因此必须保留完整 stderr 和可重放的命令。
+**参考答案**:因为崩溃类失败(segfault、不支持的情形)**不是「配置太大」**。如果把它们也当资源超限剪枝,autotuner 会悄悄跳过,用户根本看不到工具链出了 bug;正确的做法是归为 `TileirasError` 并 `logging.warning` 记录,让失败可见、可复现、可上报。只有真正「配置超过硬件上限」这一类可预期的失败,才适合剪枝。
 
-**练习 3**：`tileiras` 被段错误杀死时，`e.returncode` 是正数还是负数？会被归为哪类异常？
-
-> **参考答案**：负数（SIGSEGV = 信号 11，故 `returncode = -11`）。它不匹配两条资源日志，因此走到末尾分支，归为 `TileirasError`，同时通过 `logging.warning` 留下 returncode 与 repro 痕迹。
+---
 
 ## 5. 综合实践
 
-把本讲三个模块串起来，完成一次「`call_tileiras` 全链路追踪」。
+把本讲三个模块串起来,完成下面这个**源码阅读 + 命令复现**任务。
 
-**任务**：阅读 [compiler.py:205-277](https://github.com/lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L205-L277) 的 `call_tileiras` 全函数，画出一张完整的时序图，并标注以下要素：
+**任务背景**:假设你在调一个 TileIR kernel,`tileiras` 报错退出了。你需要搞清楚:(a) 它是被怎么调起来的;(b) 它的 `CUDA_HOME` 从哪来;(c) 它的报错属于哪一类。
 
-1. **输入**：`mod`（外层 ModuleOp）、`metadata`（含 `name`、`hash`）、`opt`（`TileIROptions`）、`capability`。
-2. **bytecode 输出**：在哪一行调用 `tileir.write_bytecode`、缓存文件名是什么。
-3. **命令构造**：`tileiras_cmd` 的完整元素（可执行文件、两个 `--` 参数、bytecode 输入、`-o` cubin 输出）。
-4. **环境构造**：`tileiras_env` 如何由 `os.environ` + 推导出的 `CUDA_HOME` 组成，`get_tileir_cuda_home` 的两步 `dirname`。
-5. **错误分类**：三条出口（shared memory → `OutOfResources("shared memory")`、tmem → `OutOfResources("tensor memory")`、其余 → `TileirasError`），以及成功出口（读 cubin 返回）。
+**操作步骤**:
 
-**进阶**：写一个小脚本（示例代码，非项目原有），模拟 `call_tileiras` 的错误分类逻辑——给定一段伪造的 stderr 字符串，判断应抛哪类异常、提取哪些数值：
+1. **追命令构造**:从 [compiler.py:205](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L205) 开始,通读 `call_tileiras` 到第 277 行,写出 `tileiras` 的完整命令模板,标出每个参数的来源(`opt_level` 来自哪、`capability` 来自哪、bytecode 文件来自哪)。
 
-```python
-# 示例代码：仅供理解错误分类逻辑，非项目原有
-import re
+2. **解释 CUDA_HOME 推导**:用自己的话回答——为什么 `CUDA_HOME` 要从 `tileiras` 路径「`dirname(dirname(...))`」反推,而不是直接读系统 `CUDA_HOME`?如果系统装的是 CUDA 13.2、而内置工具链是 13.3,直接读系统变量会有什么风险?(提示:对照 [conf.py:58-72](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/conf.py#L58-L72) 的注释。)
 
-def classify_tileiras_log(log: str):
-    if "uses too much shared data" in log:
-        m = re.search(r"0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max", log)
-        if m:
-            return ("OutOfResources", int(m.group(1), 16), int(m.group(2), 16), "shared memory")
-    if "allocated tmem out of resource" in log:
-        m = re.search(r"allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)", log)
-        if m:
-            return ("OutOfResources", int(m.group(1)), int(m.group(2)), "tensor memory")
-    return ("TileirasError", log)
+3. **手写两条资源超限正则**:不查源码,默写出 shared memory 与 tmem 两条正则,并指出它们一个用十六进制、一个用十进制的原因。然后对照 [compiler.py:244-260](https://github.com/triton-lang/Triton-to-tile-IR/blob/1bd89c0dfb66fc99d4d338af4baddd2874de9d87/third_party/tileir/backend/compiler.py#L244-L260) 校对。
 
-# 自测用例（示例）
-assert classify_tileiras_log("uses too much shared data: 0x10000 bytes, 0x8000 max")[1:] == (65536, 32768, "shared memory")
-assert classify_tileiras_log("allocated tmem out of resource: 512 vs 256")[1:] == (512, 256, "tensor memory")
-assert classify_tileiras_log("Segmentation fault")[0] == "TileirasError"
-```
+4. **分类判断**:给定三种 `tileiras` 退出情形,说出会抛哪个异常:
+   - (a) stderr 含 `uses too much shared data. 0x20000 bytes, 0x10000 max`;
+   - (b) 退出码 `-11`(SIGSEGV),stderr 是段错误堆栈;
+   - (c) stderr 含 `allocated tmem out of resource: 700 vs 512`。
 
-> 待本地验证：示例代码可在任何 Python 环境运行以验证分类逻辑，但真实的 `tileiras` 输出文案需在 CUDA 13.x + Blackwell 环境下确认。
+**预期结果**:
+
+- (1) 命令模板:`tileiras --gpu-name=sm_<cap> --opt-level=<opt_level> <bytecode_file> -o <cubin_file>`,其中 `opt_level` 来自 `TileIROptions.opt_level`(默认 3),`capability` 来自 `add_stages` 里 `int(self._parse_arch(options.arch))`,bytecode 文件来自 `tileir.write_bytecode(mod)` 经缓存管理器落盘。
+- (2) 见 4.2.4 第二问的答案(避免旧工具链遮蔽匹配的 13.3)。
+- (3) shared memory:`0x([0-9a-fA-F]+) bytes, 0x([0-9a-fA-F]+) max`(十六进制,因为输出带 `0x` 前缀);tmem:`allocated tmem out of resource:\s*([0-9]+)\s*vs\s*([0-9]+)`(十进制,因为输出是纯数字)。进制差异是 `tileiras` 输出格式决定的,必须照搬,否则解析出错。
+- (4) (a) `OutOfResources(used=131072, limit=65536, "shared memory")`;(b) `TileirasError`(先 `logging.warning` 记录 repro);(c) `OutOfResources(used=700, limit=512, "tensor memory")`。
+
+---
 
 ## 6. 本讲小结
 
-- `make_cubin` 只是 `call_tileiras` 的薄包装；它把 `make_tileir` 产出的 cuda_tile IR 经 `tileir.write_bytecode` 序列化为 bytecode，缓存为 `{name}.bytecode`，作为 `tileiras` 的输入。
-- bytecode 序列化的对象是**嵌套的** `cuda_tile::ModuleOp`，C++ 侧若找不到它就直接抛异常，根本到不了子进程调用。
-- `tileiras` 命令很短（仅 `--gpu-name` 与 `--opt-level`），因为 Python 旋钮（occupancy/approx/ftz 等）早已在 `make_tileir` 烘焙进 IR；`tileiras` 只看最终 IR。
-- `CUDA_HOME` 由 `dirname(dirname(tileiras))` **反推**而非读系统变量，且**只注入子进程**，目的是防止陈旧系统 CUDA 盖过打包匹配的工具链。
-- 编译失败分两类：资源超限（shared memory / TMEM）→ `OutOfResources`，可被 autotuner 剪枝；其余含信号崩溃 → `TileirasError`，类比 `PTXASError`。两类资源正则的进制不同（十六进制 vs 十进制）。
-- `OutOfResources`/`TileirasError` 定义在 `python/triton/runtime/errors.py`；`tileir` 目录下的 `errors.py` 只有 `HitFallback`，属运行期回退链路（u4-l3），不要混淆。
+- `make_cubin` 只是 `call_tileiras` 的薄壳;真正的 cubin 生成由外部 NVIDIA 编译器 `tileiras`(随 CUDA 13.1/13.3 的 cuda-tile 发布)完成,它是独立进程,只消费 `cuda_tile` bytecode。
+- Triton 用 `write_bytecode` 把 IR 序列化:它从 builtin `ModuleOp` 里挑出**嵌套的 `cuda_tile::ModuleOp`**(即模块体第一个操作),只对它做 bytecode,产物以 `{name}.bytecode` 落盘缓存,既给 `tileiras` 用、又便于事后复现。
+- `tileiras` 命令是 `tileiras --gpu-name=sm_<cap> --opt-level=<opt_level> <bytecode> -o <cubin>`,**没有任何 Python 旋钮**——occupancy/num_ctas/num_stages/approx/ftz 已在 `make_tileir` 烘焙进 IR。
+- `CUDA_HOME` 刻意从 `tileiras` 路径做两次 `dirname` 反推,**不读系统变量**,且只注入子进程环境(不污染全局),目的是防止陈旧系统 CUDA 遮蔽匹配的 13.3 工具链。
+- 错误分两类:资源超限(shared memory / TMEM)抛 `OutOfResources`,autotuner 可剪枝,分别用十六进制与十进制正则解析;其余失败(含被信号杀死的崩溃)抛 `TileirasError`,先 `logging.warning` 再上抛,保证失败可见。
+- 本讲讲的是**编译期**错误分类;与 jit.py 里**运行期** fallback(`tileir_run` / `HitFallback` / `TRITON_TILEIR_RUNTIME_FALLBACK`)是两回事,后者在 u4-l3 讲。
+
+---
 
 ## 7. 下一步学习建议
 
-- 若想深入了解 `write_bytecode` 如何在 `make_tileir` 转换链中定位嵌套的 `cuda_tile::ModuleOp`，以及 fuse-fma/loop-split 等 cuda_tile 级 pass 如何嵌套进该容器，请阅读 [u3-l7 后处理：FMA 融合、loop split 与 bytecode 输出](u3-l7-fma-fusion-and-bytecode.md)。
-- 若想了解 `tileiras` 之外另一条「失败退路」——运行期 `tileir_run` 把整个后端临时切回 PTX 的 fallback，请阅读 [u4-l3 编译期与运行期 Fallback 容错](u4-l3-fallback-mechanism.md)。
-- 若想了解这套打包工具链（`tileir_cuda`、`tileiras`、`ptxas`、`libnvvm`）是如何在构建期被克隆与链接进插件的，请阅读 [u4-l4 构建系统与 cuda-tile 依赖管理](u4-l4-build-and-cuda-tile-deps.md)。
+本讲把流水线最后一段 `make_cubin` 讲完了,至此「Python 后端层」(u2 全单元)已闭合。接下来建议:
+
+1. **进入 u3 单元(MLIR 转换 Pass 体系)**:`tileiras` 消费的是 `cuda_tile` bytecode,而这些算子是怎么从 `tt.*` 转换来的?u3-l1「转换 Pass 的 C++ 插件入口与骨架」会从 `triton_tileir.cc` 的 pybind、`Passes.td`、转换 target 骨架讲起,正好承接本讲提到的 `write_bytecode`、`only_contain_legal_dialects` 等 C++ 入口。
+2. **若对工具链与测试感兴趣**:可先跳读 u4-l1「triton-cuda-tile-opt 工具与 lit/FileCheck 测试」——你会学到如何用 `triton-cuda-tile-opt` 独立跑 pass、用 lit/FileCheck 验证 IR 转换,这能帮你在不动 `tileiras` 的情况下复现和调试 IR。
+3. **若对容错机制感兴趣**:直接看 u4-l3「编译期与运行期 Fallback 容错」,把本讲的编译期错误与运行期 `HitFallback` 串成一张完整的容错图。
