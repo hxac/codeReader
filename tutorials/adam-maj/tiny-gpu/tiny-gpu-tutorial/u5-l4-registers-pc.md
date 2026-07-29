@@ -1,0 +1,440 @@
+# 寄存器堆与程序计数器
+
+## 1. 本讲目标
+
+学完本讲后，你应当能够：
+
+- 说清每个线程为什么拥有「16 个寄存器，其中 13 个自由、3 个只读」，以及只读寄存器 `%blockIdx`/`%blockDim`/`%threadIdx` 在 SIMD 中扮演的角色。
+- 画出寄存器堆在 `REQUEST` 阶段读出 `rs/rt`、在 `UPDATE` 阶段经 `reg_input_mux` 三路写回（算术 / 访存 / 常数）的完整数据流。
+- 解释程序计数器（PC）默认走 `PC+1`，而在 `BRnzp` 指令下如何依据 `NZP` 寄存器决定是否跳转到立即数。
+- 理解 `NZP` 寄存器由 `CMP` 在 `UPDATE` 阶段写入、由 `BRnzp` 在 `EXECUTE` 阶段读取的跨指令时序关系。
+
+本讲只拆两个文件：[src/registers.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv) 与 [src/pc.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv)。它们都是「每线程一份」的部件（见 u4-l1 的 core 解剖），本讲深入其内部实现。
+
+## 2. 前置知识
+
+在进入源码前，先用三段话建立直觉。
+
+**第一，寄存器是线程的「草稿纸」。** GPU 里上千个线程各自独立运算，每个线程都需要几块属于自己的临时存储来放中间结果——这就是寄存器堆（register file）。tiny-gpu 给每个线程配了 16 个 8 位寄存器。算术指令（如 `ADD R1, R2, R3`）的真正工作就是：从两个源寄存器读出操作数，算完再写回目标寄存器。
+
+**第二，有些寄存器是「天生注定」的。** SIMD（单指令多数据）能让同一段代码处理不同数据，靠的就是每个线程「知道自己是谁」。tiny-gpu 用三个只读寄存器告诉线程身份：
+
+| 寄存器 | 名字 | 含义 | 谁来填 |
+|--------|------|------|--------|
+| R13 | `%blockIdx` | 当前线程所在的 block 编号 | dispatcher 派活时（每周期刷新） |
+| R14 | `%blockDim` | 一个 block 含多少线程 | 硬件复位时写死 = `THREADS_PER_BLOCK` |
+| R15 | `%threadIdx` | 线程在 block 内的编号 | 硬件复位时写死 = 自己的 `THREAD_ID` |
+
+**第三，PC 和 NZP 是控制流的两个「指针」。** PC（Program Counter，程序计数器）指向下一条要执行的指令地址，默认每条指令执行完 `PC+1` 顺序前进；要跳转（循环、条件分支）就得改写 PC。NZP 是一个 3 位小寄存器，记录「上一次比较的结果是负/零/正」，供 `BRnzp` 指令判断要不要跳。NZP 的位编码细节（含无符号回绕的注意事项）已在 u5-l2 讲清，本讲直接承接其结论。
+
+> 名词提示：本讲频繁出现 `core_state` 的几个阶段值，它们的编码来自 scheduler.sv（u4-l2）：`REQUEST=3'b011`、`EXECUTE=3'b101`、`UPDATE=3'b110`。寄存器堆和 PC 都靠这几个值来决定「这一拍我该不该动手」。
+
+## 3. 本讲源码地图
+
+| 文件 | 作用 | 本讲关注点 |
+|------|------|-----------|
+| [src/registers.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv) | 每线程的寄存器堆 | 16 寄存器组织、只读保护、`rs/rt` 读出、三路写回、`%blockIdx` 刷新 |
+| [src/pc.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv) | 每线程的程序计数器 | `next_pc` 计算、`BRnzp` 跳转判定、`NZP` 写入 |
+| [src/core.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/core.sv) | 计算核心连线 | `current_pc` 为何是 core 级共享、`next_pc` 为何每线程一份 |
+| [src/alu.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/alu.sv) | 算术逻辑单元 | `CMP` 产生的 `alu_out[2:0]` 如何喂给 NZP（u5-l2 已详述） |
+| [src/decoder.sv](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/decoder.sv) | 指令译码 | 产生本讲用到的全部 `decoded_*` 控制信号 |
+
+## 4. 核心概念与源码讲解
+
+### 4.1 寄存器堆：16 个寄存器与只读机制
+
+#### 4.1.1 概念说明
+
+寄存器堆是线程内最贴近运算的存储。tiny-gpu 的设计非常简洁：每个线程 16 个 8 位寄存器，编号 R0–R15。其中 R0–R12 是「自由寄存器」，内核代码可以随便读写；R13–R15 是「只读寄存器」，分别固化成 `%blockIdx`/`%blockDim`/`%threadIdx`，内核代码只能读、不能写。
+
+为什么要把身份信息做成只读寄存器？因为 SIMD 的精髓是「同一段指令代码，被所有线程并行执行」。线程要知道自己处理的是哪一块数据，只能靠这三个「身份变量」。如果内核能改写它们，身份就会混乱，并行模型就崩溃了。所以硬件在写回通路加一道闸：编号 ≥ 13 的寄存器一律拒绝写入。
+
+#### 4.1.2 核心流程
+
+寄存器堆的复位与初始化逻辑：
+
+```text
+复位时：
+  rs, rt          ← 0                 // 源操作数寄存器清零
+  registers[0..12] ← 0                // 13 个自由寄存器清零
+  registers[13]   ← 0                 // %blockIdx 先置 0（运行时由 dispatcher 刷新）
+  registers[14]   ← THREADS_PER_BLOCK // %blockDim = block 大小（常数）
+  registers[15]   ← THREAD_ID         // %threadIdx = 自己的线程号（常数）
+```
+
+注意 `%blockDim` 和 `%threadIdx` 在复位时就用参数 `THREADS_PER_BLOCK`、`THREAD_ID` 写死，整个线程生命周期不变；而 `%blockIdx` 复位时只是 0，真实值要等运行时由 dispatcher 给出（见 4.2 节）。
+
+`THREAD_ID` 这个参数来自 core 的实例化：core.sv 在 `generate` 循环里为每个线程实例化寄存器堆时，把循环变量 `i` 当作 `THREAD_ID` 传入，于是第 i 号线程的 `%threadIdx` 恰好就是 i。
+
+#### 4.1.3 源码精读
+
+寄存器堆的存储声明只有一行——一个 16 元素的数组，每个元素 8 位：
+
+[src/registers.sv:L44-L45](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L44-L45) —— 声明 `reg [7:0] registers[15:0]`，即 16 个 8 位寄存器。
+
+复位分支里，13 个自由寄存器逐一清零，三个只读寄存器按身份写入：
+
+[src/registers.sv:L66-L69](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L66-L69) —— `registers[14] <= THREADS_PER_BLOCK`（%blockDim）、`registers[15] <= THREAD_ID`（%threadIdx）。
+
+`THREAD_ID` 由 core 在实例化时绑定到线程编号 `i`：
+
+[src/core.sv:L171-L175](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/core.sv#L171-L175) —— core 把 `THREAD_ID(i)` 传给每个线程的寄存器堆实例，于是 `%threadIdx` 自然等于线程号。
+
+只读保护将在 4.2.3 的写回逻辑里看到（`decoded_rd_address < 13` 这道闸）。
+
+#### 4.1.4 代码实践
+
+**目标**：在仿真日志里亲眼看到 16 个寄存器，并验证 `%blockDim`/`%threadIdx` 确实是身份常数。
+
+**步骤**：
+
+1. 按 u1-l3 装好工具链，运行 `make test_matadd`（或任一 `make test_*`）。
+2. 打开 `test/logs/` 下最新的 `log_<时间戳>.txt`，搜索 `Registers:`。
+3. 日志里每个线程每拍都会打印一行形如 `R0 = 0, R1 = 3, ..., %blockIdx = 0, %blockDim = 4, %threadIdx = 2` 的寄存器快照（格式化逻辑见 [test/helpers/format.py:L88-L95](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/test/helpers/format.py#L88-L95)，注意它把数组逆序后展示）。
+
+**需要观察的现象**：
+
+- `%blockDim` 在所有线程、所有周期里都等于 `THREADS_PER_BLOCK`（默认 4），永不改变。
+- `%threadIdx` 在同一线程内恒定，但不同线程互不相同（0、1、2、3…）。
+- `%blockIdx` 在同一个 block 执行期间保持不变，但 dispatcher 派发下一个 block 时会变（见 4.2）。
+
+**预期结果**：你能从日志确认「身份三寄存器」的可读性与恒定性。若无法本地运行，记为「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：如果某内核试图执行 `CONST R13, #5`（往 `%blockIdx` 写 5），硬件会发生什么？`%blockIdx` 真的变成 5 吗？
+
+**答案**：不会。写回逻辑里有 `decoded_rd_address < 13` 的判断（见 4.2.3），R13 被挡在门外，写入被静默忽略，`%blockIdx` 维持 dispatcher 给出的真实值。这正是只读保护的体现。
+
+**练习 2**：为什么 `%blockDim` 用复位时的参数 `THREADS_PER_BLOCK` 写死，而不是像 `%blockIdx` 那样每周期刷新？
+
+**答案**：因为一个 block 含多少线程是 core 的固定容量，对同一段内核代码而言是常数，不随 dispatcher 派发而变；而 `%blockIdx` 表示「当前在处理第几个 block」，会随派发进度变化，必须运行时刷新。
+
+---
+
+### 4.2 寄存器堆的读出与写回：REQUEST 与 UPDATE
+
+#### 4.2.1 概念说明
+
+寄存器堆在每个时钟周期只做两件事中的一件或两件，取决于 `core_state`：
+
+- **读出**（`REQUEST` 阶段）：把指令指定的两个源寄存器 `rs`、`rt` 的值搬到输出端口，供 ALU / LSU 使用。
+- **写回**（`UPDATE` 阶段）：把这一条指令的运算结果（来自 ALU、LSU 或立即数）写回目标寄存器 `rd`。
+
+这种「分阶段」工作的节奏由 scheduler 广播的 `core_state` 统一指挥（见 u4-l2）。寄存器堆自己不决定何时读、何时写，只是「在该动手的节拍动手」。
+
+#### 4.2.2 核心流程
+
+读出阶段（`core_state == REQUEST`）：
+
+```text
+rs ← registers[decoded_rs_address]
+rt ← registers[decoded_rt_address]
+```
+
+写回阶段（`core_state == UPDATE`），经 `decoded_reg_input_mux` 三选一：
+
+```text
+if (decoded_reg_write_enable && decoded_rd_address < 13):   # 写使能且目标可写
+    case decoded_reg_input_mux:
+        ARITHMETIC(00): registers[rd] ← alu_out      # ADD/SUB/MUL/DIV
+        MEMORY(01):     registers[rd] ← lsu_out      # LDR 取回的数据
+        CONSTANT(10):   registers[rd] ← decoded_immediate  # CONST 立即数
+```
+
+三路写回对应三类「结果来源」，由 decoder 在译码时设好 `reg_input_mux`（见 u4-l3、u5-l1）。整条通路 `registers → (rs/rt) → ALU/LSU → (alu_out/lsu_out) → registers` 正是 u4-l1 描述的闭合数据环路。
+
+#### 4.2.3 源码精读
+
+读出逻辑——`REQUEST` 阶段把源寄存器的值搬上 `rs/rt` 输出端口：
+
+[src/registers.sv:L74-L78](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L74-L78) —— `core_state == 3'b011`（REQUEST）时执行 `rs <= registers[decoded_rs_address]` 与 `rt <= registers[decoded_rt_address]`。由于是非阻塞赋值 `<=`，`rs/rt` 要到下一拍才真正可用——这正是 scheduler 在 REQUEST 后安排 WAIT/EXECUTE 等节拍的时序原因。
+
+写回逻辑——`UPDATE` 阶段的三路 case 与只读保护：
+
+[src/registers.sv:L81-L98](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L81-L98) —— `core_state == 3'b110`（UPDATE）时，先判断 `decoded_reg_write_enable && decoded_rd_address < 13`，再用 `case (decoded_reg_input_mux)` 在 `ARITHMETIC`/`MEMORY`/`CONSTANT` 三路里选一个写入。
+
+[src/registers.sv:L40-L42](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L40-L42) —— 定义三个常量 `ARITHMETIC=2'b00, MEMORY=2'b01, CONSTANT=2'b10`，与 decoder 里 `ADD`/`LDR`/`CONST` 等指令设置的 `reg_input_mux` 值一一对应（参见 [decoder.sv:L95-L126](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/decoder.sv#L95-L126)）。
+
+#### 4.2.4 代码实践
+
+**目标**：跟踪一条 `ADD R1, R2, R3` 在寄存器堆里的完整往返，确认「REQUEST 读、UPDATE 写」的两拍分离。
+
+**步骤**：
+
+1. 在日志里定位一条 `ADD` 指令的执行轨迹（`Instruction: ADD ...`）。
+2. 看 `Core State` 字段，找到 `REQUEST` 那一拍：记下此时 `RS`、`RT` 的值——它们应等于 R2、R3 的当前内容（但注意非阻塞延迟，`RS/RT` 实际在 REQUEST 的下一拍才更新，可在紧随其后的 `WAIT`/`EXECUTE` 拍看到生效后的值）。
+3. 找到 `UPDATE` 那一拍之后的下一拍快照：R1 应当等于「R2 + R3」。
+
+**需要观察的现象**：读出（REQUEST）和写回（UPDATE）之间隔着 WAIT、EXECUTE 两拍，期间 `rs/rt` 保持不变，供 ALU 在 EXECUTE 使用。
+
+**预期结果**：R1 的新值 = R2 + R3，验证三路写回里的 `ARITHMETIC` 分支。若无法本地运行，记为「待本地验证」。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`LDR R1, R2`（从内存地址 R2 读数据到 R1）走的是哪一路写回？`STR R2, R3`（把 R3 写到内存地址 R2）呢？
+
+**答案**：`LDR` 走 `MEMORY(01)` 路，写入 `lsu_out`（LSU 从外部内存取回的数据，见 u5-l3）。`STR` 是「写内存」而非「写寄存器」，故 `decoded_reg_write_enable=0`，寄存器堆根本不写回 `rd`——数据流向相反，经 LSU 送往外部内存。
+
+**练习 2**：`decoded_reg_input_mux` 有 4 个可能值（2 位），但 case 里只列了 3 个。第 4 个值 `2'b11` 会出现吗？
+
+**答案**：当前 ISA 没有指令把 `reg_input_mux` 设成 `2'b11`（decoder 只用 00/01/10），所以它属于「未定义但无害」的组合：case 不命中则不写任何寄存器，相当于一次空写回。
+
+---
+
+### 4.3 每周期刷新 `%blockIdx`：与 dispatcher 的契约
+
+#### 4.3.1 概念说明
+
+这个最小模块单独拎出来讲，因为它是一个看似古怪、实则关键的设计，也是本讲的代码实践任务。
+
+问题：`%blockIdx`（R13）表示「当前线程在处理第几个 block」。dispatcher 会把线程切成多个 block 依次派发给 core（见 u2-l2）。当一个 core 跑完一个 block、被回收、再派给新 block 时，`block_id` 这个输入信号会变成新值。可是寄存器堆的复位（`reset`）只在 core 启动时触发一次，不会在每个新 block 开始时重新触发。那么 R13 怎么更新？
+
+tiny-gpu 的解决办法有点「粗暴」：在 `enable` 有效时，**每个时钟周期都无条件地**把外部 `block_id` 写进 `registers[13]`。
+
+#### 4.3.2 核心流程
+
+```text
+每个周期（enable 且非复位）：
+    registers[13] ← block_id     # 无论 core_state 是什么，都刷新 %blockIdx
+```
+
+由于是每周期刷新，`block_id` 一旦从 dispatcher 到来，最迟下一拍就会反映到 R13。这样无论 core 正在处理哪个 block、处于七阶段状态机的哪一拍，R13 始终是「当前 block 的编号」。
+
+#### 4.3.3 源码精读
+
+[src/registers.sv:L70-L72](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L70-L72) —— `else if (enable)` 分支里的第一句就是 `registers[13] <= block_id;`，注释里作者自嘲 `[Bad Solution] Shouldn't need to set this every cycle`。它没有任何 `core_state` 条件守护，所以确实每拍都执行。
+
+`block_id` 这个输入由 core 从 dispatcher 接收并广播给本线程：
+
+[src/core.sv:L176-L179](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/core.sv#L176-L179) —— core 实例化寄存器堆时把 `block_id(block_id)` 接上，这个 `block_id` 又来自 core 端口，最终由 dispatcher 驱动（见 u2-l2）。
+
+#### 4.3.4 代码实践（本讲主实践任务）
+
+**目标**：解释「为什么每周期都要刷新 `registers[13]`」，并说明它对 dispatcher 切换 block 的意义。
+
+**操作步骤**：
+
+1. 重读 [registers.sv:L70-L72](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/registers.sv#L70-L72)，确认 `registers[13] <= block_id` 在 `enable` 下不受 `core_state` 约束。
+2. 回顾 u2-l2 的 dispatcher：它把线程切成多个 block，core 跑完一个 block（`core_done` 拉高）后被回收，再被派发下一个 block，期间 `block_id` 输入会改变，而 `reset` 不会重新触发。
+3. 推理：如果改成「只在 reset 时写 `block_id`」，会出什么问题？
+
+**需要给出的解释（参考答案）**：
+
+- **为什么每周期刷新**：复位信号 `reset` 只在 core 最初启动时触发一次。当 dispatcher 把同一个 core 回收、再派发新 block 时，`block_id` 输入会变成新值，但寄存器堆并不会再次复位。若不每周期刷新，R13 就会停留在第一个 block 的编号上，内核代码读到的 `%blockIdx` 就是错的。每周期无条件赋值是最简单的「保底」：保证 R13 始终与外部 `block_id` 同步。
+- **对 dispatcher 切换 block 的意义**：dispatcher 的复用模型（一个 core 接连处理 block 0、block 1、block 2…）依赖每个线程能立刻读到新的 `%blockIdx` 来定位自己处理的数据块。每周期刷新让「core 切换 block」对内核代码透明——内核只需读 R13，就自动得到当前 block 的正确编号，无需任何同步开销。
+- **为什么作者标注 `[Bad Solution]`**：因为大多数周期里 `block_id` 并未变化，每周期写属于冗余动作，浪费了写端口和动态功耗（真实硬件里这会增加功耗、限制时序）。更优雅的做法是「只在检测到 `block_id` 变化或新 block 开始时写一次」，但那需要额外的状态检测逻辑，与本项目「保持极简」的目标相悖，故留作 TODO。
+
+**预期结果**：你能用两三句话讲清「复位只在启动时触发一次 → 切换 block 靠每周期刷新补偿 → 这是用冗余换简单」这条因果链。
+
+#### 4.3.5 小练习与答案
+
+**练习**：如果把 `registers[13] <= block_id` 从 `enable` 分支移到 `reset` 分支里（即只在复位时写一次），用一个 2 个 block 的内核测试，会出现什么错误？
+
+**答案**：第一个 block 执行时 R13=0，正确；但 core 被回收、派发第二个 block 时，`block_id` 输入变成 1，由于不再每周期刷新，R13 仍然是 0。于是第二个 block 里的所有线程读到 `%blockIdx=0`，会去处理第一块的数据，导致结果错乱或重复计算。
+
+---
+
+### 4.4 程序计数器 PC：默认 PC+1 与 BRnzp 跳转
+
+#### 4.4.1 概念说明
+
+PC（程序计数器）存的是「下一条要取指的指令地址」。在 tiny-gpu 里，PC 模块不直接保存当前地址，而是负责**计算** `next_pc`——真正的「当前 PC」是 core 级的一个共享寄存器 `current_pc`（见 4.4.3），PC 模块以它为输入、算出 `next_pc` 交还给 scheduler。
+
+PC 的计算规则极其简单，只有两条路：
+
+1. **默认顺序执行**：`next_pc = current_pc + 1`。绝大多数指令（ADD、LDR、STR、CONST…）走这条。
+2. **条件跳转**：当指令是 `BRnzp` 且 NZP 条件匹配时，`next_pc = 立即数`（跳到目标地址）。
+
+`BRnzp` 是 tiny-gpu 唯一的控制流指令（见 u5-l1）。它的判定靠一个 3 位掩码 `decoded_nzp` 与 3 位 `nzp` 寄存器做**按位与**：只要两者有任意一位共同为 1，就跳转。
+
+#### 4.4.2 核心流程
+
+跳转判定（在 `EXECUTE` 阶段计算）：
+
+```text
+if core_state == EXECUTE:
+    if decoded_pc_mux == 1:                # 这是一条 BRnzp
+        if (nzp & decoded_nzp) != 0:       # 掩码与历史比较结果有交集
+            next_pc ← decoded_immediate    # 跳转
+        else:
+            next_pc ← current_pc + 1       # 条件不满足，顺序执行
+    else:                                  # 非跳转指令
+        next_pc ← current_pc + 1
+```
+
+匹配条件用数学表达即：设 `nzp` 寄存器为 \( n \)（3 位）、指令掩码为 \( m \)（3 位），则跳转当且仅当
+
+\[
+n \,\&\, m \;\neq\; 0
+\]
+
+即两者在 N/Z/P 任一维度上同时命中。例如 `BRz`（掩码只测「相等」位）只在 `nzp` 的相等位为 1 时跳转——也就是上一条 `CMP` 比出「相等」时。
+
+> 关于 N/Z/P 三位分别对应「大于/等于/小于」以及无符号回绕的细节，已在 u5-l2 详述：CMP 把结果打包成 `alu_out[2:0] = {rs-rt>0, rs-rt==0, rs-rt<0}`。本讲只关心这些位如何被 PC 模块消费。
+
+#### 4.4.3 源码精读
+
+PC 模块的 `EXECUTE` 分支——计算 `next_pc`：
+
+[src/pc.sv:L41-L55](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv#L41-L55) —— `core_state == 3'b101`（EXECUTE）时，若 `decoded_pc_mux==1`（BRnzp）则按 `(nzp & decoded_nzp) != 0` 决定跳到 `decoded_immediate` 还是 `current_pc + 1`；否则一律 `current_pc + 1`。
+
+关键判定行：
+
+[src/pc.sv:L43-L50](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv#L43-L50) —— `(nzp & decoded_nzp) != 0` 为真则 `next_pc <= decoded_immediate`，否则 `next_pc <= current_pc + 1`。
+
+那么 `current_pc` 从哪来、`next_pc` 又到哪去？看 core 的连线：
+
+[src/core.sv:L48-L49](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/core.sv#L48-L49) —— `current_pc` 是 core 级的单一 `reg`（所有线程共享同一个「当前 PC」，这正是 SIMD 单指令流的体现）；而 `next_pc` 是 `wire [7:0] next_pc[TPB-1:0]`，每线程各算一份。
+
+[src/core.sv:L194-L209](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/core.sv#L194-L209) —— 每个线程的 PC 实例都接同一个 `current_pc`，却输出到各自的 `next_pc[i]`。
+
+最后，scheduler 在 `UPDATE` 阶段把「当前 PC」推进到下一条指令——但它只取**最后一个线程**的 `next_pc`：
+
+[src/scheduler.sv:L102-L107](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/scheduler.sv#L102-L107) —— `current_pc <= next_pc[THREADS_PER_BLOCK-1]`，并附有 `TODO: Branch divergence. For now assume all next_pc converge`。这就是 u4-l2 讲过的 **PC 收敛假设**：硬件假设所有线程算出的 `next_pc` 一样，于是随便取一个（取最后一个）。
+
+#### 4.4.4 代码实践
+
+**目标**：在 matmul 内核里找到 `CMP` + `BRnzp` 构成的循环，确认 PC 在「跳转」与「顺序」之间的切换。
+
+**步骤**：
+
+1. 运行 `make test_matmul`，打开日志，搜索 `BR` 与 `CMP` 指令。
+2. matmul 用 `CMP` + 条件分支做循环计数（见 u6-l3）。定位一次「比较结果为相等」的 `CMP`，其后紧跟一条 `BRz`/`BRn` 之类的分支。
+3. 看 `PC` 字段：当条件匹配时，下一拍的 PC 应当等于 `BRnzp` 的立即数（跳回循环头）；当条件不匹配时，PC = 当前 PC + 1（走出循环）。
+
+**需要观察的现象**：同一个 `BRnzp` 指令，在不同周期里可能产生不同的 `next_pc`——条件匹配则跳、不匹配则顺序。这就是「条件分支」在硬件上的真实模样。
+
+**预期结果**：你能在日志里看到一个循环的 PC 值在「循环头地址 ↔ 循环头地址 +1」之间反复，直到计数器归零跳出。若无法本地运行，记为「待本地验证」。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：`BRnzp` 的掩码 `decoded_nzp` 来自指令的哪几位？如果写成 `BRnzp N|Z|P, #5`（三位全 1），等价于什么？
+
+**答案**：掩码取自 `instruction[11:9]`（见 decoder.sv，复用 rd 字段的高 3 位）。三位全 1 表示「无论比较结果是 N、Z 还是 P 都跳」，等价于**无条件跳转**——因为 `(nzp & 3'b111) != 0` 只要 nzp 任意一位为 1 就成立，而 CMP 之后 nzp 必有一位为 1。
+
+**练习 2**：为什么 `current_pc` 是全 core 共享的单一寄存器，而 `next_pc` 却要每线程算一份？
+
+**答案**：`current_pc` 共享，体现了 SIMD「同一拍所有线程执行同一条指令」——单指令流只需一个 PC 指向当前指令。`next_pc` 每线程一份，是因为理论上不同线程的 `BRnzp` 可能跳向不同目标（分支分歧），硬件为每个线程都算了 `next_pc`；只是当前用 PC 收敛假设把它们强制统一（取 `next_pc[TPB-1]`），这是 u7-l1 要讨论的简化点。
+
+---
+
+### 4.5 NZP 寄存器：CMP 写入与 BRnzp 读取的跨指令时序
+
+#### 4.5.1 概念说明
+
+NZP 是藏在我们刚讲的跳转逻辑背后的那个 3 位寄存器。它的工作看似简单——记录一次比较的结果——但它有一个最容易让人踩坑的特性：**写入和读取分属两条不同指令、两个不同阶段**。
+
+- `CMP` 指令负责**写** NZP：在它的 `UPDATE` 阶段，把 ALU 算出的 `alu_out[2:0]` 抄进 `nzp`。
+- `BRnzp` 指令负责**读** NZP：在它的 `EXECUTE` 阶段，用 `nzp` 的当前值判断跳不跳。
+
+所以典型用法总是成对出现：先 `CMP`，紧接 `BRnzp`。`CMP` 在自己的 `UPDATE` 把比较结果落盘到 `nzp`，下一条 `BRnzp` 在自己的 `EXECUTE` 读这个落盘值。两者通过 `nzp` 这个「一次性信箱」完成一次比较-跳转的交接。
+
+#### 4.5.2 核心流程
+
+NZP 写入（在 `UPDATE` 阶段，由 `CMP` 触发）：
+
+```text
+if core_state == UPDATE:
+    if decoded_nzp_write_enable:        # 这是一条 CMP
+        nzp[2] ← alu_out[2]             # 大于位
+        nzp[1] ← alu_out[1]             # 等于位
+        nzp[0] ← alu_out[0]             # 小于位
+```
+
+NZP 读取（在 `EXECUTE` 阶段，由 `BRnzp` 触发）：见 4.4.2 的 `(nzp & decoded_nzp) != 0`。
+
+注意时序错位：`next_pc` 在 `EXECUTE` 算，而 `nzp` 在 `UPDATE` 写。对同一条指令而言，`EXECUTE` 在 `UPDATE` 之前；因此一条 `BRnzp` 在自己的 `EXECUTE` 读到的 `nzp`，是**上一条** `CMP` 在它的 `UPDATE` 写入的值——不可能读到自己的（`BRnzp` 也不写 NZP）。这正是「信箱」交接能正常工作的根本原因。
+
+#### 4.5.3 源码精读
+
+NZP 寄存器声明与写入逻辑：
+
+[src/pc.sv:L34](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv#L34) —— `reg [2:0] nzp;`，一个 3 位寄存器，与 ALU 的 `alu_out[2:0]` 一一对应。
+
+[src/pc.sv:L57-L65](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv#L57-L65) —— `core_state == 3'b110`（UPDATE）且 `decoded_nzp_write_enable` 时，把 `alu_out[2]/[1]/[0]` 分别写入 `nzp[2]/[1]/[0]`。
+
+NZP 的「原料」由 ALU 在 `EXECUTE` 生产（u5-l2 已详述）：
+
+[src/alu.sv:L37-L39](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/alu.sv#L37-L39) —— `CMP` 模式下 `alu_out_reg <= {5'b0, (rs-rt>0), (rs-rt==0), (rs-rt<0)}`，把比较结果压进低 3 位。这 3 位经一拍延迟（UPDATE）落入 `nzp`，再供下一条 `BRnzp` 在它的 EXECUTE 读取。
+
+`decoded_nzp_write_enable` 由 decoder 在 `CMP` 时拉高：
+
+[src/decoder.sv:L91-L94](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/decoder.sv#L91-L94) —— `CMP` 设置 `decoded_alu_output_mux <= 1`（让 ALU 进比较模式）和 `decoded_nzp_write_enable <= 1`（让 PC 在 UPDATE 写 NZP）。
+
+#### 4.5.4 代码实践
+
+**目标**：在日志里追踪一对 `CMP` → `BRnzp`，亲眼看到 `nzp` 的「写后读」交接。
+
+**步骤**：
+
+1. 运行 `make test_matmul`，定位连续的 `CMP` 与 `BRnzp` 两条指令。
+2. 注意：`nzp` 寄存器不在默认日志输出里（format.py 只打印 16 个通用寄存器，不单独打印 nzp）。因此本实践为**源码推理型**：对照 [pc.sv:L57-L65](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/pc.sv#L57-L65) 与 [alu.sv:L37-L39](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/alu.sv#L37-L39)，按下表手工推演。
+3. 假设某 `CMP R1, R2`，且日志显示 `R1=3, R2=3`（相等）：
+
+| 阶段 | 指令 | 动作 | nzp 变化 |
+|------|------|------|---------|
+| EXECUTE | CMP | ALU 算 `alu_out[2:0]={0>0=F, 0==0... }` 实为 {3-3>0=0, 3-3==0=1, 3-3<0=0}=`3'b010` | 未写入（EXECUTE 不写 nzp） |
+| UPDATE | CMP | `decoded_nzp_write_enable=1`，写 `nzp ← 3'b010` | nzp = `010` |
+| EXECUTE | BRz | 读 `nzp & decoded_nzp`：若 BRz 掩码=`010`，则 `010 & 010 = 010 ≠ 0`，跳转 | 不变 |
+
+**需要观察的现象（通过推理）**：`CMP` 的 UPDATE 拍把比较结果落进 `nzp`；紧随其后的 `BRnzp` 在自己的 EXECUTE 拍读到这个值，从而决定 `next_pc`。
+
+**预期结果**：你能讲清「EXECUTE 早于 UPDATE」这一时序错位为什么不会导致 `BRnzp` 读到自己——因为 `BRnzp` 根本不写 NZP，它读的永远是前一条 `CMP` 留下的值。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：如果在 `CMP` 和 `BRnzp` 之间插一条 `ADD` 指令，`BRnzp` 还能正确反映那次 `CMP` 的结果吗？
+
+**答案**：能。`ADD` 不会拉高 `decoded_nzp_write_enable`，所以 `nzp` 在 `ADD` 的 UPDATE 阶段保持不变。`BRnzp` 读到的仍是之前 `CMP` 写入的值。NZP 是「粘性」的——一旦写入就保持，直到下一条 `CMP` 覆盖。
+
+**练习 2**：`nzp` 的写入用 `nzp[2] <= alu_out[2]` 等三句逐位赋值，为什么不直接写 `nzp <= alu_out[2:0]`？
+
+**答案**：功能上两者等价（都只更新低 3 位，`nzp` 本身就只有 3 位）。逐位写更多是风格选择，可能与作者想强调「每一位对应一种比较结果」有关；读者把它读作 `nzp <= alu_out[2:0]` 即可。
+
+---
+
+## 5. 综合实践
+
+把本讲四个最小模块串起来，做一次「纸面执行」一个小内核片段。
+
+**任务**：给定如下 3 条指令连续执行（假设初始 `R2 = 5, R3 = 5`，`current_pc = 0`），逐条推演寄存器堆、PC、NZP 的变化，并预测每条指令结束后的 `next_pc`。
+
+```text
+PC=0:  CMP R2, R3        # 比较 R2 与 R3
+PC=1:  BRz #4            # 若相等，跳到 PC=4
+PC=2:  ADD R1, R2, R3    # （被跳过）
+```
+
+**要求**：
+
+1. 指出 `CMP` 在哪个阶段写 `nzp`，写入的 3 位值是什么（提示：5 == 5，用 [alu.sv:L37-L39](https://github.com/adam-maj/tiny-gpu/blob/02b6c2ce223f606051a6d3a35ca942fbb1dffde2/src/alu.sv#L37-L39) 的公式算）。
+2. 指出 `BRz` 在哪个阶段读 `nzp`，掩码 `decoded_nzp` 是什么，是否跳转。
+3. 预测 `BRz` 执行完后 `current_pc` 变成多少（注意 PC 收敛假设下取 `next_pc[TPB-1]`）。
+4. 说明 `ADD R1, R2, R3` 这条指令**会不会**真正执行到它的写回——为什么？
+
+**参考答案**：
+
+1. `CMP` 在 `UPDATE` 阶段写 `nzp`。`rs-rt = 5-5 = 0`，故 `alu_out[2:0] = {>0=0, ==0=1, <0=0} = 3'b010`，`nzp ← 010`。
+2. `BRz` 在 `EXECUTE` 阶段读 `nzp`。`BRz` 只测 Z（相等）位，掩码 `decoded_nzp = 3'b010`。`nzp & decoded_nzp = 010 & 010 = 010 ≠ 0`，**跳转**，`next_pc ← 4`。
+3. scheduler 在 `UPDATE` 取 `next_pc[TPB-1] = 4`，故 `current_pc` 变成 4。
+4. PC=2 的 `ADD` **不会**执行写回。因为 `BRz` 跳到 PC=4，scheduler 下一步 `current_pc=4`，fetcher 会去取 PC=4 的指令，PC=2 的 `ADD` 被完全跳过——这正是条件分支改变控制流的效果。
+
+---
+
+## 6. 本讲小结
+
+- 每个线程拥有 16 个 8 位寄存器：R0–R12 自由读写，R13–R15 是只读的 `%blockIdx`/`%blockDim`/`%threadIdx`，写回时用 `decoded_rd_address < 13` 硬件保护。
+- 寄存器堆在 `REQUEST` 阶段读出 `rs/rt`，在 `UPDATE` 阶段经 `reg_input_mux` 三路写回（`ARITHMETIC`←alu_out、`MEMORY`←lsu_out、`CONSTANT`←立即数）。
+- `%blockIdx`（R13）每周期无条件刷新为外部 `block_id`，用冗余写入换取「dispatcher 切换 block 时无需重新复位」的简单性（作者自标 `[Bad Solution]`）。
+- PC 模块在 `EXECUTE` 阶段计算 `next_pc`：默认 `current_pc + 1`，`BRnzp` 则按 `(nzp & decoded_nzp) != 0` 决定是否跳到立即数。
+- `current_pc` 是全 core 共享的单一寄存器（单指令流），`next_pc` 每线程一份但被 PC 收敛假设统一取 `next_pc[TPB-1]`（u7-l1 讨论其代价）。
+- NZP 由 `CMP` 在 `UPDATE` 写入、由 `BRnzp` 在 `EXECUTE` 读取，两者分属不同指令与不同阶段，靠 `nzp` 这个「粘性信箱」完成比较-跳转交接。
+
+## 7. 下一步学习建议
+
+本讲讲完了「单个线程内部」的寄存器与 PC。接下来：
+
+- **向上一层**：学习 u6-l1（cocotb 仿真框架），看 Python 测试台如何装填内存、拉 `start`、驱动整个 core 跑起来，把你在这几讲里读到的 `core_state`、`rs/rt`、`nzp` 在真实仿真中观察一遍。
+- **向深一层**：学习 u7-l1（分支分歧与 warp 调度），理解本讲反复出现的「PC 收敛假设」`next_pc[TPB-1]` 在不同线程想跳向不同地址时会怎样崩坏，以及真实 GPU 如何用 warp 调度与分支栈解决它。
+- **动手验证**：学完 u6-l3 后，试着自己写一个用到 `CMP`+`BRnzp` 循环的小内核（如「把 R0 自减到 0 为止」），用日志确认 NZP 的写-读交接与 PC 跳转符合本讲的推演。
