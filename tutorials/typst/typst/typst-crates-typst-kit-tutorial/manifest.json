@@ -1,0 +1,563 @@
+{
+  "project": "typst-crates-typst-kit",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-kit 是面向「Typst 工具集成」的积木库，其全部模块都围绕一个核心契约展开——为 typst-library 的 World trait 提供字体、文件、包、时间等能力的具体实现。因此学习顺序的设计逻辑是：先建立全局认知（单元 1，讲清定位、feature-flag 体系与 World 契约），让读者明白「为什么这个库这样拆分」；随后进入两个直接实现 World 的「有状态存储」子系统——字体（单元 2）与文件/源码（单元 3），它们是绝大多数集成都会用到的核心；再讲包加载（单元 4），它依赖文件子系统中的 FsRoot，并进一步依赖网络下载（单元 5），形成 data→cache→网络下载的完整链条。后半部分是相对独立的「工具型能力」：单元 6 讲终端诊断美化，单元 7 讲 watch/watch 热重载所需的 HTTP 服务器与文件监视（watcher 依赖 FileStore 的 dependencies 机制），单元 8 讲性能追踪与可复现构建的时间处理。这样由「理解定位→掌握 World 数据源→打通资源加载链→掌握周边工具能力」层层递进，每个模块只解决一个独立问题，依赖关系清晰，便于读者按需选读。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "起步与全局认识",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目概览与定位：typst-kit 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-kit 在 typst 工作区中的定位：它是面向 Typst 工具集成的通用积木库，是字体查找、包加载等能力的 single source of truth，并承载了 typst-cli 所用的实现。",
+          "learning_goals": [
+            "理解 typst-kit 的定位与它在 typst 工作区中的角色",
+            "理解它作为 single source of truth 的含义与设计意图",
+            "了解 typst-kit 与 typst-cli、typst-library 之间的关系"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "Cargo.toml",
+            "../typst-cli/src/world.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs 模块级文档",
+            "Cargo.toml [package].description"
+          ],
+          "practice_task": "阅读 src/lib.rs 顶部的模块文档与 Cargo.toml 的 description 字段，用自己的话写一段 100 字以内的说明：typst-kit 解决了什么问题、谁会用到它，并指出它声明导出了哪些公开模块。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "特性开关体系：按需启用功能",
+          "order": 2,
+          "filename": "u1-l2-feature-flags.md",
+          "level": "beginner",
+          "topic": "讲解 typst-kit 重度依赖 feature-flag 的设计哲学：默认全部关闭，每个功能开关都对应引入一组额外依赖，用户可按需挑选。",
+          "learning_goals": [
+            "理解为什么 typst-kit 默认关闭所有特性",
+            "掌握每个特性开关（embedded-fonts / scan-fonts / system-files / system-packages / universe-packages / datetime / emit-diagnostics / system-downloader / watcher / timer / http-server / bundle）分别启用什么能力",
+            "学会在依赖 typst-kit 时通过 features 数组按需启用功能"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml [features]",
+            "lib.rs 特性文档注释"
+          ],
+          "practice_task": "在一个新的 Cargo 项目中依赖 typst-kit，仅在 features 中启用 embedded-fonts 与 datetime 两个特性，编写一段代码确认编译通过；然后试着调用一个需要 scan-fonts 才存在的函数，观察编译报错，从而体会特性开关的作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "模块地图与 World 契约",
+          "order": 3,
+          "filename": "u1-l3-modules-and-world-contract.md",
+          "level": "beginner",
+          "topic": "纵览 typst-kit 的 10 个公开模块，并讲解它们如何共同服务于 typst-library 的 World trait——即编译一份 Typst 文档所需的 library、font book、source、file、today 等回调。",
+          "learning_goals": [
+            "建立 typst-kit 全部 10 个模块的全景地图",
+            "理解 World trait 的核心回调（library/book/source/file/today）与各模块的对应关系",
+            "理解 FontStore、FileStore、SystemPackages、Time 等如何被组装成一个 World 实现"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "../typst-cli/src/world.rs"
+          ],
+          "minimal_modules": [
+            "lib.rs pub mod 声明",
+            "typst-cli SystemWorld 结构体与 impl World"
+          ],
+          "practice_task": "对照 typst-cli/src/world.rs 中的 SystemWorld，画出一张表格：左侧列 World trait 的每个方法，右侧列 typst-kit 的哪个模块/类型被用来实现它，体会 typst-kit 如何成为 CLI World 的积木来源。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "字体加载子系统",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "FontStore 与懒加载机制",
+          "order": 1,
+          "filename": "u2-l1-fontstore-lazy-loading.md",
+          "level": "intermediate",
+          "topic": "讲解 fonts.rs 的核心类型 FontStore、FontSlot、FontSource trait，以及如何通过 OnceLock 实现「按需首次访问才真正加载字体」的懒加载机制。",
+          "learning_goals": [
+            "理解 FontStore 如何以 (FontSource, FontInfo) 形式按序收录字体",
+            "掌握 FontSlot + OnceLock 的懒加载模式：先登记元数据，首次 source/font 请求时才真正读盘",
+            "理解 FontSource trait 的设计，以及 Font、FontPath 两种内置实现"
+          ],
+          "source_files": [
+            "src/fonts.rs"
+          ],
+          "minimal_modules": [
+            "FontStore",
+            "FontSlot",
+            "FontSource trait",
+            "FontPath"
+          ],
+          "practice_task": "实现一个自定义的 FontSource（例如从内存中的字节数组加载字体），用 FontStore::push 收录它，再通过 font(index) 验证只有第一次访问时才会触发实际的 load 调用。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "字体发现三连：embedded / scan / system",
+          "order": 2,
+          "filename": "u2-l2-font-discovery.md",
+          "level": "intermediate",
+          "topic": "讲解 fonts.rs 提供的三个顶层字体发现函数：embedded() 加载内置字体、scan() 递归扫描目录、system() 发现系统字体，并说明它们如何与 fontdb 配合。",
+          "learning_goals": [
+            "理解 embedded() 如何从 typst-assets 取出内置字体（Libertinus、New Computer Modern 等）",
+            "掌握 scan() 与 system() 的区别，以及它们如何借助 fontdb 收集 FontPath 与 FontInfo",
+            "了解 Windows/macOS 上额外加载 Adobe 字字的特殊处理"
+          ],
+          "source_files": [
+            "src/fonts.rs"
+          ],
+          "minimal_modules": [
+            "embedded()",
+            "scan()",
+            "system()",
+            "with_db()",
+            "load_adobe_fonts()"
+          ],
+          "practice_task": "启用 scan-fonts 特性，调用 fonts::scan 扫描一个含字体的目录，把返回的 (FontPath, FontInfo) 全部 push 进一个 FontStore，并打印每个字体的 family 名字，体会发现到加载的衔接过程。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "文件与源码加载子系统",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "FileStore 与 FileLoader 抽象",
+          "order": 1,
+          "filename": "u3-l1-filestore-and-fileloader.md",
+          "level": "intermediate",
+          "topic": "讲解 files.rs 的 FileStore 与 FileLoader trait：FileStore 负责按 FileId 缓存文件内容与创建 Source，FileLoader 是可替换的字节来源，二者配合即可实现 World::source 与 World::file。",
+          "learning_goals": [
+            "理解 FileStore 如何缓存加载结果并对外提供 source()/file() 两个入口",
+            "掌握 FileLoader trait 的职责：根据 FileId 返回 Bytes，并能匹配 root 区分项目文件与包文件",
+            "理解 dependencies() 与 reset() 如何支持依赖追踪与增量重编译"
+          ],
+          "source_files": [
+            "src/files.rs",
+            "../typst-cli/src/world.rs"
+          ],
+          "minimal_modules": [
+            "FileStore",
+            "FileLoader trait",
+            "FileStore::source/file/dependencies/reset"
+          ],
+          "practice_task": "参考文件中的 TestLoader，自己写一个返回固定字节的 FileLoader，构造 FileStore，分别用 source() 和 file() 读取同一个 FileId，并用 dependencies() 列出被访问过的文件。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "FileSlot 状态机与缓冲区复用",
+          "order": 2,
+          "filename": "u3-l2-fileslot-state-machine.md",
+          "level": "advanced",
+          "topic": "深入 files.rs 的 FileSlot 三态机 Empty/Loaded/Parsed，讲解它如何在 file() 与 source() 之间转换、处理 UTF-8 BOM，并复用底层缓冲区以提升增量编译性能。",
+          "learning_goals": [
+            "掌握 FileSlot 的 Empty→Loaded→Parsed 状态转换规则",
+            "理解 reset() 时如何保留 stale source 以便就地编辑、提升增量编译性能",
+            "理解 BOM 处理与 Bytes/Source 底层缓冲复用的优化技巧"
+          ],
+          "source_files": [
+            "src/files.rs"
+          ],
+          "minimal_modules": [
+            "FileSlot 枚举",
+            "FileSlot::source/file/reset",
+            "Stale<Source>",
+            "UTF8_BOM 处理"
+          ],
+          "practice_task": "梳理 test_file_store_storage_reuse 与 test_file_store_bom 两个测试用例，画出当请求 BOM 文件时 FileSlot 的状态迁移图，并解释为什么带 BOM 的文件无法复用同一块缓冲区。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "SystemFiles 与 FsRoot 路径解析",
+          "order": 3,
+          "filename": "u3-l3-systemfiles-and-fsroot.md",
+          "level": "intermediate",
+          "topic": "讲解 files.rs 的 SystemFiles 与 FsRoot：SystemFiles 把项目文件从 FsRoot 加载、包文件从 SystemPackages 加载；FsRoot 负责把虚拟路径解析为真实路径并阻止路径逃逸。",
+          "learning_goals": [
+            "理解 SystemFiles 如何按 VirtualRoot（Project / Package）分发到不同的根",
+            "掌握 FsRoot::resolve 与 FsRoot::load 如何把虚拟路径映射到磁盘并拒绝越界访问",
+            "理解项目根与每个包各自形成独立 root 的隔离机制"
+          ],
+          "source_files": [
+            "src/files.rs",
+            "../typst-cli/src/world.rs"
+          ],
+          "minimal_modules": [
+            "SystemFiles",
+            "FsRoot",
+            "FileLoader for SystemFiles",
+            "VirtualRoot"
+          ],
+          "practice_task": "构造一个 FsRoot 指向某个临时目录，在其中放置一个 .typ 文件，调用 resolve() 与 load() 验证能正确读取；再尝试构造一个包含 .. 的虚拟路径，验证 FsRoot::resolve 会拒绝它。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "包加载子系统",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "SystemPackages 与三级加载链",
+          "order": 1,
+          "filename": "u4-l1-systempackages-priority-chain.md",
+          "level": "intermediate",
+          "topic": "讲解 packages.rs 的 SystemPackages：它按 data 目录 → cache 目录 → 从 Typst Universe 下载的优先级链解析包，并对外暴露 obtain() 与 latest_version()。",
+          "learning_goals": [
+            "理解 SystemPackages 的三级优先级：系统数据目录、缓存目录、Universe 网络",
+            "掌握 obtain() 的解析流程：依次查找 data、cache，未命中且命名空间为 preview 时触发下载并落盘",
+            "理解为什么并发下载不会损坏包内容，以及与 FileStore 锁机制的关系"
+          ],
+          "source_files": [
+            "src/packages.rs",
+            "../typst-cli/src/packages.rs"
+          ],
+          "minimal_modules": [
+            "SystemPackages",
+            "SystemPackages::obtain",
+            "SystemPackages::new/from_parts"
+          ],
+          "practice_task": "用 from_parts 组装一个只带 data 与 cache、但 universe 使用 DummyDownloader 的 SystemPackages，分别对已存在与不存在的 PackageSpec 调用 obtain()，观察其返回的 FsRoot 或 NotFound 错误。",
+          "depends_on": [
+            "u1-l3",
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "FsPackages 目录约定与原子存储",
+          "order": 2,
+          "filename": "u4-l2-fspackages-atomic-storage.md",
+          "level": "intermediate",
+          "topic": "讲解 packages.rs 的 FsPackages：它按 namespace/name/version 的目录约定提供包，并通过临时目录 + rename 的方式原子地写入下载内容，避免并发写入导致损坏。",
+          "learning_goals": [
+            "理解 FsPackages 的目录层级约定（namespace/name/version）与标准数据/缓存目录的获取方式",
+            "掌握 store() 如何先写入临时目录再原子 rename，以及如何安全忽略 DirectoryNotEmpty 错误",
+            "理解 latest_version() 如何在本地目录中扫描版本号取最大值"
+          ],
+          "source_files": [
+            "src/packages.rs"
+          ],
+          "minimal_modules": [
+            "FsPackages",
+            "FsPackages::store",
+            "FsPackages::obtain/latest_version",
+            "Tempdir + Drop"
+          ],
+          "practice_task": "创建一个临时目录作为 FsPackages，调用 store() 写入一个伪造包的内容，验证它在正确的 namespace/name/version 子目录中生成；再检查 Tempdir 的 Drop 会在失败时清理临时目录。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "UniversePackages 与包索引",
+          "order": 3,
+          "filename": "u4-l3-universepackages-and-index.md",
+          "level": "intermediate",
+          "topic": "讲解 packages.rs 的 UniversePackages：它对接官方 Typst Universe 注册表，能下载指定包（.tar.gz 解包）并按需懒加载包索引以查询最新版本。",
+          "learning_goals": [
+            "理解 UniversePackages 如何拼接 URL 下载 .tar.gz 并用 flate2/tar 解包",
+            "掌握包索引 index() 的懒加载与惰性反序列化策略（跳过无法解析的条目而非整体失败）",
+            "理解 latest_version() 如何在索引中过滤同名包并取最大版本"
+          ],
+          "source_files": [
+            "src/packages.rs"
+          ],
+          "minimal_modules": [
+            "UniversePackages",
+            "UniversePackages::package",
+            "UniversePackages::index/latest_version",
+            "MinimalPackageInfo"
+          ],
+          "practice_task": "分析 lazy_deserialize_index 测试：理解为什么含有非法版本号 0.2.0-dev 的条目会被跳过而不是让整个 latest_version 失败，并说明这种惰性反序列化对向前兼容的意义。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "网络下载子系统",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "Downloader trait 与 SystemDownloader",
+          "order": 1,
+          "filename": "u5-l1-downloader-and-systemdownloader.md",
+          "level": "intermediate",
+          "topic": "讲解 downloader.rs 的 Downloader trait 与内置实现 SystemDownloader：后者基于 ureq + native-tls 实现一个最小 HTTPS 客户端，支持系统代理与自定义证书，并把 404 映射为 NotFound。",
+          "learning_goals": [
+            "理解 Downloader trait 的 stream()/download() 两层接口与 Box/Arc 透明转发",
+            "掌握 SystemDownloader 如何构建 Agent：设置 user-agent、读取环境代理、应用自定义 CA 证书",
+            "理解 404 → io::ErrorKind::NotFound 的映射约定，以及它如何被上层（如 UniversePackages）用来区分『版本不存在』与『网络失败』"
+          ],
+          "source_files": [
+            "src/downloader.rs"
+          ],
+          "minimal_modules": [
+            "Downloader trait",
+            "SystemDownloader",
+            "SystemDownloader::cert/with_cert_path"
+          ],
+          "practice_task": "实现一个返回固定字节的自定义 Downloader，验证 download() 默认实现会基于 stream() 工作；再阅读 SystemDownloader::stream，指出它如何把 ureq 的 404 错误转成 NotFound。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "进度下载：ProgressDownloader 与 ProgressReader",
+          "order": 2,
+          "filename": "u5-l2-progress-downloader.md",
+          "level": "advanced",
+          "topic": "讲解 downloader.rs 的进度下载机制：ProgressDownloader 包裹内层 downloader，通过 ProgressReader 分块读取并在固定周期回调 ProgressReporter，Progress 还负责统计字节速率与 ETA 并格式化显示。",
+          "learning_goals": [
+            "理解 ProgressDownloader 如何通过 key（如 PackageSpec 或 package index 字符串）让上层决定是否显示进度",
+            "掌握 ProgressReader 的分块读取、采样窗口（SAMPLES=25）与周期性回调逻辑",
+            "理解 Progress 的 Display 如何用滑动采样计算 bytes/s 与 ETA，以及 format_byte_unit 的单位换算"
+          ],
+          "source_files": [
+            "src/downloader.rs"
+          ],
+          "minimal_modules": [
+            "ProgressDownloader",
+            "ProgressReader",
+            "ProgressReporter trait",
+            "Progress"
+          ],
+          "practice_task": "实现一个最小 ProgressReporter（在 start/update/finish 时打印 Progress），用一个返回固定字节的自定义 Downloader 包成 ProgressDownloader，下载一段数据并观察进度回调被触发与 ETA/速率的输出。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "终端诊断输出",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "diagnostics：诊断美化与输出",
+          "order": 1,
+          "filename": "u6-l1-diagnostics-emit.md",
+          "level": "advanced",
+          "topic": "讲解 diagnostics.rs：它通过 DiagnosticWorld trait 扩展 World，把 Typst 的 SourceDiagnostic 适配为 codespan-reporting 的 Diagnostic，并提供 Human/Short 两种输出格式以及类似堆栈的 tracepoint 打印。",
+          "learning_goals": [
+            "理解 DiagnosticWorld trait 与 DiagnosticFormat（Human/Short）的作用",
+            "掌握 emit() 如何把诊断的 span/hints/trace 转成带主次标签的 codespan 诊断",
+            "理解 WorldFiles 适配器如何为 codespan 提供 name/line_index/column_number 等文件元数据"
+          ],
+          "source_files": [
+            "src/diagnostics.rs",
+            "../typst-cli/src/compile.rs"
+          ],
+          "minimal_modules": [
+            "DiagnosticWorld trait",
+            "DiagnosticFormat",
+            "emit()",
+            "WorldFiles"
+          ],
+          "practice_task": "阅读 emit_trace，说明 tracepoint 在 Human 格式下如何以 file:line:column 的形式单行展示源码上下文，并解释为什么 Short 格式不输出 trace。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "实时工具链：HTTP 热重载与文件监视",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "HTTP 热重载服务器",
+          "order": 1,
+          "filename": "u7-l1-http-server.md",
+          "level": "advanced",
+          "topic": "讲解 server.rs 的 HttpServer：一个极简的本地 HTTP 服务器，借助 tiny_http 提供 HTML 输出，并通过 /__events 的 Server-Sent Events 实现浏览器自动热重载。",
+          "learning_goals": [
+            "理解 HttpServer 的启动流程：端口选择（3000..=3005 自动尝试）、后台线程处理请求",
+            "掌握热重载原理：注入 EventSource 脚本 + /__events 的 SSE 长连接 + Bucket 的 mutex/condvar 通知",
+            "理解 HttpBody 的 Html/Raw 两种类型、MIME 类型选择（按扩展名优先、再按数据内容 infer）以及 set_bundle 路由"
+          ],
+          "source_files": [
+            "src/server.rs",
+            "../typst-cli/src/compile.rs"
+          ],
+          "minimal_modules": [
+            "HttpServer",
+            "HttpBody",
+            "Bucket<T>",
+            "handle_events_blocking",
+            "select_mime_type"
+          ],
+          "practice_task": "梳理一次热重载的完整链路：从 set_html 触发 Bucket.put → condvar.notify_all → /__events 长连接写入 reload 事件 → 浏览器 EventSource 收到后 location.reload()，用文字描述每个环节。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "文件监视 watcher",
+          "order": 2,
+          "filename": "u7-l2-file-watcher.md",
+          "level": "advanced",
+          "topic": "讲解 watcher.rs 的 Watcher：基于 notify-rs 实现依赖文件的增量增删监听（标记-清除式 GC）、事件批处理，以及对不存在文件回退轮询的能力，用于实现 typst watch。",
+          "learning_goals": [
+            "理解 update() 如何用标记-清除的方式增量 watch/unwatch 依赖路径",
+            "掌握 wait() 的事件批处理（BATCH_TIMEOUT/STARVE_TIMEOUT）以应对编辑器保存时的 remove+move 行为",
+            "理解对不存在文件（missing 集合）回退到定时轮询、忽略输出文件事件的处理逻辑"
+          ],
+          "source_files": [
+            "src/watcher.rs",
+            "../typst-cli/src/watch.rs"
+          ],
+          "minimal_modules": [
+            "Watcher",
+            "Watcher::update",
+            "Watcher::wait",
+            "is_relevant_event_kind",
+            "missing 轮询"
+          ],
+          "practice_task": "阅读 update() 中的标记-清除逻辑，解释 watched 哈希表里的布尔值在每轮更新中如何被重置并用于决定哪些路径要 unwatch；并说明为什么 notify-rs 在 inotify 后端的 remove/rename 后需要重新 watch。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "title": "性能追踪与时间处理",
+      "level": "advanced",
+      "order": 8,
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "Timer 性能追踪",
+          "order": 1,
+          "filename": "u8-l1-timer-tracing.md",
+          "level": "advanced",
+          "topic": "讲解 timer.rs 的 Timer：它通过 typst_timing 收集编译过程中各阶段的耗时事件，并把 span 解析回 (文件, 行号)，最终导出为兼容 Chrome tracing 工具的 JSON。",
+          "learning_goals": [
+            "理解 Timer 如何开启 typst_timing 事件收集、placeholder 与 new_or_placeholder 的统一代码路径设计",
+            "掌握 record() 的流程：clear → 运行编译 → 导出 JSON，以及路径中 {n} 占位符支持多次录制",
+            "理解 resolve_span 如何把原始 span 解析为人类可读的文件与行号"
+          ],
+          "source_files": [
+            "src/timer.rs",
+            "../typst-cli/src/compile.rs"
+          ],
+          "minimal_modules": [
+            "Timer",
+            "Timer::record",
+            "Timer::placeholder/new_or_placeholder",
+            "resolve_span"
+          ],
+          "practice_task": "用 Timer::new 创建一个带 {n} 的输出路径，连续 record 两次模拟编译，观察生成两个带序号的 JSON 文件；再阅读 resolve_span，说明 Detached/Number/Range 三种 span 各自如何解析出行号。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "DateTime 与可复现构建",
+          "order": 2,
+          "filename": "u8-l2-datetime-and-reproducible-builds.md",
+          "level": "advanced",
+          "topic": "讲解 datetime.rs 的 Time 类型：它为 World::today 提供当前日期，支持固定日期/时间戳（用于可复现构建）或依赖系统时间，并按可选时区偏移返回日期。",
+          "learning_goals": [
+            "理解 Time 的 Fixed / System 两种内部表示及其对编译可复现性的影响",
+            "掌握 today() 如何处理可选 UTC 时区偏移、并将秒数安全转换为 i32",
+            "理解 SOURCE_DATE_EPOCH 通过 fixed_timestamp 实现可复现构建，以及 reset() 在多次编译间刷新系统时间的机制"
+          ],
+          "source_files": [
+            "src/datetime.rs",
+            "../typst-cli/src/world.rs"
+          ],
+          "minimal_modules": [
+            "Time",
+            "TimeInner(Fixed/System)",
+            "Time::today",
+            "Time::fixed/fixed_timestamp/reset"
+          ],
+          "practice_task": "分别用 Time::system() 和 Time::fixed_timestamp(SOURCE_DATE_EPOCH) 构造 Time，调用 today() 比较两者行为差异；再验证给 System 时间传递时区偏移时，today() 返回的是该时区下的日期。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
