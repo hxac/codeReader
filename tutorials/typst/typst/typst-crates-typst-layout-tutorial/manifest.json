@@ -1,0 +1,974 @@
+{
+  "project": "typst-crates-typst-layout",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-layout 是 Typst 的分页（paged）排版引擎，职责是把 realized content 排版成 PagedDocument（由若干 Page/Frame 组成）。整个 crate 围绕一条主链路展开：Content → realize → pages（collect 切分 → 并行 page run → finalize 组装）→ flow（块级，collect→compose→distribute）→ inline（段落，collect→prepare→linebreak→finalize），辅以 grid/math/stack/lists/shapes/transforms 等专用 layouter，以及 introspect 与 rules 两个支撑子系统。\n\n学习顺序据此由浅入深设计三层：第一层（u1）先让读者建立全局地图与端到端流程认知；第二层（u2–u3）讲解贯穿全 crate 的通用原语（Engine/comemo 记忆化、Regions、Frame/Fragment、Locator/Tag）与文档/页面级布局，这是理解后续一切的基础；第三层（u4–u5）深入两条核心排版管线——块级 flow 与行内 inline；最后专家层（u6–u7）覆盖网格/数学/栈/列表/图形等专用 layouter 与 show 规则注册机制。每个子系统的拆分遵循 collect→排布→组装 的内在阶段，单元间通过 depends_on 形成清晰依赖链，保证读者按序学习时所需前置概念均已具备。大型 crate（22k 行）拆为 7 单元 33 篇讲义，逻辑优先于数量。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 typst-layout 排版引擎",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "typst-layout 是什么：Typst 的分页排版引擎",
+          "order": 1,
+          "filename": "u1-l1-layout-engine-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-layout crate 的定位：它是 Typst 的分页（paged）排版引擎，负责把已经 realized 的 content 排版成 PagedDocument（由若干 Page/Frame 组成）。说明它在 typst workspace 中的位置、主要依赖（typst-library、comemo、rustybuzz、icu、kurbo 等）以及与 typst-library 的分工。",
+          "learning_goals": [
+            "理解本 crate 的职责与边界（排版，而非语法解析或求值）",
+            "看懂 Cargo.toml 的依赖说明了哪些排版能力（字体整形、BiDi、断行、ICU）",
+            "知道 lib.rs 导出了哪些公共 API"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "typst-library",
+            "comemo",
+            "rustybuzz",
+            "icu_segmenter"
+          ],
+          "practice_task": "阅读 Cargo.toml 与 src/lib.rs，列出本 crate 导出的全部公共符号（layout_document、layout_fragment、register、PagedIntrospector、Page、PagedDocument 等）及一句话用途；并为每个关键依赖写出它为排版提供了什么能力。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "目录结构与模块地图",
+          "order": 2,
+          "filename": "u1-l2-module-map.md",
+          "level": "beginner",
+          "topic": "用 lib.rs 的 mod 声明串联整个 src 目录，建立“七大子系统”心智模型：document（产物）、pages（文档/页面）、flow（块级流）、inline（段落）、grid（表格/网格）、math（公式），以及 stack/lists/shapes/transforms/image/pad/repeat/modifiers/introspect/rules 等支撑模块。",
+          "learning_goals": [
+            "看懂模块划分与文件归属",
+            "能说出每个目录/文件大致负责什么",
+            "理解 Page/PagedDocument 作为最终产物的角色"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "document",
+            "pages",
+            "flow",
+            "inline",
+            "grid",
+            "math"
+          ],
+          "practice_task": "绘制一张模块调用关系草图：标出哪些 layouter 会回调 layout_fragment/layout_frame（例如 grid、math、stack、transforms），并把每个 .rs 文件归入对应子系统。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "公共 API 与入口函数",
+          "order": 3,
+          "filename": "u1-l3-public-api.md",
+          "level": "beginner",
+          "topic": "聚焦 lib.rs 的 pub use：layout_document/layout_document_for_bundle（文档级）、layout_fragment/layout_frame（片段级）、layout_columns、register（规则注册）、PagedIntrospector、Page/PagedDocument。重点说明 layout_frame 与 layout_fragment 的区别和适用场景。",
+          "learning_goals": [
+            "区分文档级与片段级入口",
+            "理解 layout_frame 是 layout_fragment 的单区域便捷封装",
+            "知道 register 把 show 规则挂载到 paged target"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/flow/mod.rs",
+            "src/pages/mod.rs"
+          ],
+          "minimal_modules": [
+            "flow",
+            "pages",
+            "rules"
+          ],
+          "practice_task": "在源码中找到每个 pub use 符号的定义处与至少一处调用点，写一段说明：何时该用 layout_frame、何时必须用 layout_fragment。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "端到端排版流程：Content 到 PagedDocument",
+          "order": 4,
+          "filename": "u1-l4-end-to-end-pipeline.md",
+          "level": "beginner",
+          "topic": "跟随 layout_document → layout_document_common → routines.realize(RealizationKind::Document) → layout_pages 的完整链路，理解 content 如何被“现实化”再被切分为 page run 并行排版，最终由 PagedDocument::new 组装并构建 introspector。",
+          "learning_goals": [
+            "理解 realize 这一步在排版前做了什么",
+            "看懂 layout_pages 的 collect→并行→finalize 三段式",
+            "理解 introspector 在 PagedDocument::new 时构建"
+          ],
+          "source_files": [
+            "src/pages/mod.rs",
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "pages",
+            "document",
+            "routines"
+          ],
+          "practice_task": "用一个简单文档（几段文字 + 一个 pagebreak）手动追踪 layout_pages：写出 collect 产出的 items（Run/Tags/Parity）、并行排版的 page run，以及最终 pages 列表。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：排版的通用原语",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "Engine 与状态传递：comemo 记忆化模式",
+          "order": 1,
+          "filename": "u2-l1-engine-and-comemo.md",
+          "level": "intermediate",
+          "topic": "解析贯穿全 crate 的“公开函数 + #[comemo::memoize] _impl 函数”模式：公开函数把 Engine 拆成 world/library/introspector/traced/sink/route/locator 等 Tracked/TrackedMut 参数，再调用记忆化的 impl。讲解为何这样设计（可缓存、可并行、可跨线程）。",
+          "learning_goals": [
+            "理解 Tracked/TrackedMut 的作用与 reborrow",
+            "看懂为何 _impl 的参数都是 tracked 且数量很多",
+            "理解 memoize 的缓存键与失效条件"
+          ],
+          "source_files": [
+            "src/flow/mod.rs",
+            "src/pages/mod.rs",
+            "src/inline/mod.rs"
+          ],
+          "minimal_modules": [
+            "engine",
+            "comemo",
+            "Route",
+            "Sink"
+          ],
+          "practice_task": "对照 layout_fragment 的公开函数与 layout_fragment_impl，列出每个 Tracked 参数的来源（Engine 的哪个字段），并解释 Route::extend 与 engine.route.check_layout_depth() 的作用。可临时在两函数间插入一条 eprintln! 打印 region 尺寸，运行 cargo test 观察 memoize 命中。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "Regions：区域与回退队列",
+          "order": 2,
+          "filename": "u2-l2-regions.md",
+          "level": "intermediate",
+          "topic": "讲解排版的通用输入 Regions：当前 size、是否 expand、backlog（后续候选区域尺寸）、full，以及单区域容器 Region（pod）。这是所有 layouter 的“画布”抽象，配合 regions.next()、base()、may_break/may_progress 使用。",
+          "learning_goals": [
+            "理解 region 的 size/expand/backlog 三要素",
+            "理解 regions.next() 与 may_break/may_progress 的语义",
+            "区分 base() 与 size、full"
+          ],
+          "source_files": [
+            "src/flow/mod.rs",
+            "src/stack.rs"
+          ],
+          "minimal_modules": [
+            "layout.Regions",
+            "layout.Region"
+          ],
+          "practice_task": "阅读 stack.rs 的 finish_region，画出 StackLayouter 在 backlog 提供多个候选尺寸时逐区域产出 frame 的流程，并标注 expand 如何影响最终 frame 尺寸。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "Frame 与 Fragment：排版结果的载体",
+          "order": 3,
+          "filename": "u2-l3-frame-and-fragment.md",
+          "level": "intermediate",
+          "topic": "讲解排版产出物 Frame（二维容器，含 FrameItem：Text/Shape/Image/Group/Tag/Link，支持 push/translate/resize/push_frame）和 Fragment（一序列 Frame）。理解 FrameItem 各变体与 Group/parent 的层级关系。",
+          "learning_goals": [
+            "理解 Frame 的坐标系与变换操作",
+            "理解 Fragment::into_frame/frames 的差别",
+            "看懂 finalize 如何把多个 frame 拼成完整页面"
+          ],
+          "source_files": [
+            "src/document.rs",
+            "src/flow/mod.rs",
+            "src/grid/mod.rs"
+          ],
+          "minimal_modules": [
+            "layout.Frame",
+            "layout.Fragment",
+            "layout.FrameItem"
+          ],
+          "practice_task": "在 grid/mod.rs 的 layout_cell 中找到手动向 frame 插入 Tag、并设置 FrameParent 的代码，解释 group/parent 机制在跨多 frame 的单元格中如何保证 introspection 顺序正确。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "Locator、Tag 与内省定位",
+          "order": 4,
+          "filename": "u2-l4-locator-and-tags.md",
+          "level": "intermediate",
+          "topic": "讲解 Locator/SplitLocator/LocatorLink 如何为每个排版实例分配稳定、唯一的 Location，以及 Tag（Start/End，带 TagFlags）如何被打入 frame 供 introspector 使用。这是 query/counter/label/outline 能工作的基础。",
+          "learning_goals": [
+            "理解 location 的稳定性与 disambiguator（重复表头等）",
+            "看懂 tag 如何随 frame 流动并携带 introspectable 标记",
+            "理解为何存在 migrate_unterminated_tags 这类边界处理"
+          ],
+          "source_files": [
+            "src/flow/mod.rs",
+            "src/introspect.rs",
+            "src/pages/collect.rs"
+          ],
+          "minimal_modules": [
+            "introspection.Locator",
+            "introspection.Tag"
+          ],
+          "practice_task": "阅读 pages/collect.rs 的 migrate_unterminated_tags，用具体例子（如 `show heading: it => pagebreak() + it`）说明为什么要把未终止的 start tag 迁到分页符之后。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：页面与文档布局",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "文档布局 layout_document 的实现",
+          "order": 1,
+          "filename": "u3-l1-layout-document.md",
+          "level": "intermediate",
+          "topic": "深入 pages/mod.rs：layout_document_common 如何构造 Engine、把外部样式标记为 outside、populate DocumentInfo（含 locale）、调用 routines.realize(RealizationKind::Document)，再交给 layout_pages。",
+          "learning_goals": [
+            "理解 styles.to_map().outside() 的含义",
+            "理解 DocumentInfo 的填充时机",
+            "区分 layout_document 与 layout_document_for_bundle（locator 来源不同）"
+          ],
+          "source_files": [
+            "src/pages/mod.rs"
+          ],
+          "minimal_modules": [
+            "pages",
+            "routines",
+            "DocumentInfo"
+          ],
+          "practice_task": "对比 layout_document_impl 与 layout_document_for_bundle_impl，写出二者在 locator 处理（Locator::root vs LocatorLink）上的差异，并说明 bundle 编译场景为何需要单独入口。",
+          "depends_on": [
+            "u1-l4",
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "页面收集：分页符、奇偶校验与标签",
+          "order": 2,
+          "filename": "u3-l2-page-collect.md",
+          "level": "intermediate",
+          "topic": "pages/collect.rs 的 collect 把扁平 children 切成 Item::Run/Tags/Parity；处理 weak/strong pagebreak、staged empty page、parity（奇偶页补页）、boundary pagebreak 与未终止 tag 的迁移。",
+          "learning_goals": [
+            "理解 page run 的切分逻辑",
+            "理解 weak/strong pagebreak 与 staged empty page 的配合",
+            "理解 parity 如何在末尾按物理页号补页"
+          ],
+          "source_files": [
+            "src/pages/collect.rs"
+          ],
+          "minimal_modules": [
+            "pages/collect",
+            "PagebreakElem",
+            "Parity"
+          ],
+          "practice_task": "给定一个 children 序列（正文 + weak pagebreak + strong pagebreak + 带 parity 的 pagebreak），手动模拟 collect 的输出 items 列表，并标注每步 staged_empty_page 的真假。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "页面运行 layout_page_run：边距与页眉页脚",
+          "order": 3,
+          "filename": "u3-l3-page-run.md",
+          "level": "intermediate",
+          "topic": "pages/run.rs 的 layout_page_run：从样式解析页面尺寸/边距/bleed/fill/页码/页眉页脚/前景背景，调用 layout_flow(FlowMode::Root) 排版正文，再用 layout_marginal 排版各 marginal，产出尚未最终化的 LayoutedPage。",
+          "learning_goals": [
+            "理解页面尺寸/边距解析（默认值、flipped、bleed）",
+            "理解 numbering marginal 如何根据 number_align 决定进 header 还是 footer",
+            "理解 LayoutedPage 为何暂存两套 margin/bleed（two_sided）"
+          ],
+          "source_files": [
+            "src/pages/run.rs"
+          ],
+          "minimal_modules": [
+            "pages/run",
+            "PageElem",
+            "LayoutedPage"
+          ],
+          "practice_task": "阅读 layout_page_run，说明 number_align.y 为 Top 时页码出现在哪里；并解释 header_ascent/footer_descent 如何缩小 marginal 可用区域。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "页面最终化 finalize：组装完整页面",
+          "order": 4,
+          "filename": "u3-l4-page-finalize.md",
+          "level": "intermediate",
+          "topic": "pages/finalize.rs 的 finalize：根据物理页号在 two_sided 时按 binding 左右互换 margin/bleed，按 background→header→inner→footer→foreground 顺序拼装，处理 tags、counter.visit 与页码 step，产出最终 Page。",
+          "learning_goals": [
+            "理解为何 finalize 必须在并行排版之后、已知物理页号时进行",
+            "理解 marginal 压入顺序对 introspection/counter 的影响",
+            "理解逻辑页号与物理页号的差别"
+          ],
+          "source_files": [
+            "src/pages/finalize.rs",
+            "src/pages/run.rs"
+          ],
+          "minimal_modules": [
+            "pages/finalize",
+            "ManualPageCounter",
+            "Binding"
+          ],
+          "practice_task": "解释 binding.swap(counter.physical()) 如何决定 left/right 互换；并说明 counter.logical() 与 counter.physical() 的区别，何时二者不一致。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l5",
+          "title": "PagedIntrospector：构建查询索引",
+          "order": 5,
+          "filename": "u3-l5-introspector.md",
+          "level": "intermediate",
+          "topic": "introspect.rs 的 PagedIntrospector：遍历每个 page 的 frame，通过 discover_frame 收集 Tag/Group/Link，构建 ElementIntrospector 加速结构，记录页码/编号/supplement 与 frame_link_targets，实现 Introspector trait 的各类 query。",
+          "learning_goals": [
+            "理解 introspector 是 pages 的纯派生产物",
+            "理解 group.parent 对元素插入顺序的影响（start/end insertion）",
+            "看懂 position/query/page_numbering 等查询如何实现"
+          ],
+          "source_files": [
+            "src/introspect.rs",
+            "src/document.rs"
+          ],
+          "minimal_modules": [
+            "introspect",
+            "Introspector",
+            "ElementIntrospector"
+          ],
+          "practice_task": "阅读 discover_frame，解释当遇到带 parent 的 Group 时 start_insertion/end_insertion 做了什么；并说明为何 PagedDocument::new 里 introspector 不参与 Hash（见 document.rs 的 Hash impl）。",
+          "depends_on": [
+            "u3-l4",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：流式（块级）布局",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "flow 布局总览：layout_flow 主循环",
+          "order": 1,
+          "filename": "u4-l1-flow-overview.md",
+          "level": "intermediate",
+          "topic": "flow/mod.rs 的 layout_fragment→layout_flow：先 configuration 求出 Config（列/脚注/行号），再 collect 出 Child，构造 Work，循环 compose 每个 region 直到 done。讲解 FlowMode（Root/Block/Inline）、Work 状态与 Stop 控制流。",
+          "learning_goals": [
+            "理解 flow 的“每区域 compose 一次”主循环",
+            "理解 Work 状态（children/spill/floats/footnotes/tags/skips）",
+            "理解 Stop::Finish(bool)/Relayout/Error 三类控制流"
+          ],
+          "source_files": [
+            "src/flow/mod.rs"
+          ],
+          "minimal_modules": [
+            "flow",
+            "FlowMode",
+            "Work",
+            "Stop"
+          ],
+          "practice_task": "在 layout_flow 主循环中标注：每一轮 compose 消费 Work 的哪些字段、regions.next() 何时发生、循环终止条件（work.done() 与 backlog）。可加一条断言/日志验证。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "flow 收集：Collector 与 Child 类型",
+          "order": 2,
+          "filename": "u4-l2-flow-collect.md",
+          "level": "intermediate",
+          "topic": "flow/collect.rs 的 collect 把 Pair 列表预处理成更易处理的 Child（LineChild/SingleChild/MultiChild/PlacedChild 等），处理 spacing、colbreak、place（浮动/非浮动）、par_situation。讲解 bump 分配器与 Collector 的 run_block/run_inline。",
+          "learning_goals": [
+            "理解为何要把 Pair 预处理成 Child",
+            "区分 single/multi child 与 MultiSpill",
+            "理解 PlacedChild 的作用域（parent/column/page）"
+          ],
+          "source_files": [
+            "src/flow/collect.rs",
+            "src/flow/mod.rs"
+          ],
+          "minimal_modules": [
+            "flow/collect",
+            "Child",
+            "PlacedChild"
+          ],
+          "practice_task": "阅读 Child 相关类型与 Collector::run，绘制一张从 Pair 到各 Child 变体的映射图，并说明 par_situation 如何在收集过程中被维护与传递。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "flow 分发 distribute：内容如何填入区域",
+          "order": 3,
+          "filename": "u4-l3-flow-distribute.md",
+          "level": "intermediate",
+          "topic": "flow/distribute.rs 的 distribute：Distributor 逐个把 child 放入当前 region，累计 used、处理 sticky/stickable 元素、在空间不足时返回 Stop::Finish(forced)，并支持列平衡的 balancing_target 测量。",
+          "learning_goals": [
+            "理解“能放多少放多少”的贪心分发",
+            "理解 sticky 元素与 forced break 的语义",
+            "理解 balancing_target 如何用于列高平衡的测量"
+          ],
+          "source_files": [
+            "src/flow/distribute.rs",
+            "src/flow/compose.rs"
+          ],
+          "minimal_modules": [
+            "flow/distribute",
+            "Distributor"
+          ],
+          "practice_task": "追踪一个不可断裂块在 region 剩余空间不足时的分发行为，说明 may_break/may_progress 如何避免在过小区域上死循环地不断开新 region。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "flow 组合 compose：浮动体与脚注",
+          "order": 4,
+          "filename": "u4-l4-flow-compose.md",
+          "level": "advanced",
+          "topic": "flow/compose.rs 的 compose/Composer：在 page/column 两层循环中处理 out-of-flow 插入（floats、footnotes），每加入一个 float 就缩小可用 region 并触发重排，再调用 distribute 排 in-flow 内容。",
+          "learning_goals": [
+            "理解 float/footnote 触发重排的机制",
+            "理解 page 级与 column 级 insertion 的区别",
+            "理解 footnote_spill/footnote_queue 的延续机制"
+          ],
+          "source_files": [
+            "src/flow/compose.rs",
+            "src/flow/mod.rs"
+          ],
+          "minimal_modules": [
+            "flow/compose",
+            "Composer",
+            "Insertions"
+          ],
+          "practice_task": "阅读 Composer 的 page/column 循环，解释一个 page-scoped float 加入后如何改变后续列的可用空间并触发重新 distribute；写出至少一轮重排前后 region 尺寸的变化。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l5",
+          "title": "块布局 block：单块与可断裂多块",
+          "order": 5,
+          "filename": "u4-l5-flow-block.md",
+          "level": "intermediate",
+          "topic": "flow/block.rs 的 layout_single_block/layout_multi_block 与 unbreakable_pod：区分不可断裂与可断裂块，multi_block 在空间不足时把块拆分到下一 region，并通过 MultiSpill 在 region 间延续。",
+          "learning_goals": [
+            "理解 single vs multi block 的排版策略",
+            "理解 spill 如何在 region 间保存剩余待排内容",
+            "理解 unbreakable_pod 的用途"
+          ],
+          "source_files": [
+            "src/flow/block.rs",
+            "src/flow/compose.rs"
+          ],
+          "minimal_modules": [
+            "flow/block",
+            "MultiSpill",
+            "unbreakable_pod"
+          ],
+          "practice_task": "阅读 layout_multi_block，说明一个可断裂块在两个 region 间被拆分时，MultiSpill 如何保存“剩余待排内容”并在下一 region 继续，直到排完。",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l6",
+          "title": "列布局 columns 与列平衡",
+          "order": 6,
+          "filename": "u4-l6-columns.md",
+          "level": "advanced",
+          "topic": "flow/mod.rs 的 layout_columns 与 ColumnOptions/ColumnConfig：列数、gutter、宽度计算、RTL 方向；balanced 列通过反复测量（balancing_target）使各列等高。",
+          "learning_goals": [
+            "理解列宽公式与 dir 的影响",
+            "理解 balanced 与非 balanced 的差别及测量机制",
+            "理解 parent-scoped placed 元素为何需要专门的列处理"
+          ],
+          "source_files": [
+            "src/flow/mod.rs",
+            "src/flow/compose.rs"
+          ],
+          "minimal_modules": [
+            "flow",
+            "ColumnsElem",
+            "ColumnConfig"
+          ],
+          "practice_task": "阅读 configuration 中的列宽计算，给定 regions.size.x、count、gutter 手算每列宽度；并解释 compose 里 column_balancing_height 在平衡过程中扮演的角色。",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "进阶：行内（段落）布局",
+      "level": "intermediate",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "段落布局总览：collect→prepare→linebreak→finalize",
+          "order": 1,
+          "filename": "u5-l1-inline-overview.md",
+          "level": "intermediate",
+          "topic": "inline/mod.rs 的 layout_par/layout_inline/layout_inline_impl 四段管线：collect 把 children 汇成单一文本与 segments；prepare 做 BiDi 与预处理；linebreak 断行；finalize 生成 frame。讲解 Config 与 ParSituation。",
+          "learning_goals": [
+            "理解段落排版的标准四步",
+            "理解 justify/linebreaks/hyphenate/lang 等配置如何流入",
+            "区分 ParSituation::First/Consecutive/Other 对首行缩进的影响"
+          ],
+          "source_files": [
+            "src/inline/mod.rs"
+          ],
+          "minimal_modules": [
+            "inline",
+            "Config",
+            "ParSituation"
+          ],
+          "practice_task": "在 layout_inline_impl 中标注四步各自的输入输出类型，并说明 first_line_indent 在 First/Consecutive/Other 三种 ParSituation 下分别何时生效（结合 in_list 判断）。",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "文本收集与 BiDi 准备",
+          "order": 2,
+          "filename": "u5-l2-collect-bidi.md",
+          "level": "intermediate",
+          "topic": "inline/collect.rs 把混合内容（文本、box、link、space…）汇成一个字符串与 segment 列表（字体/语言/颜色/装饰边界）；inline/prepare.rs 用 unicode-bidi 做 BiDi 分析、切分 level，准备断行所需数据。",
+          "learning_goals": [
+            "理解为何要把所有文本拼成一整段做 BiDi",
+            "理解 segment 如何携带每个子区间的样式",
+            "理解 prepare 产出的 Preparation 包含什么"
+          ],
+          "source_files": [
+            "src/inline/collect.rs",
+            "src/inline/prepare.rs"
+          ],
+          "minimal_modules": [
+            "inline/collect",
+            "inline/prepare",
+            "unicode-bidi"
+          ],
+          "practice_task": "阅读 collect，说明一个含 #box 与普通文字的段落如何被映射成字符串中的占位与对应 segment；并指出 SpanMapper 如何保留源码位置用于诊断。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "换行算法 linebreak",
+          "order": 3,
+          "filename": "u5-l3-linebreak.md",
+          "level": "advanced",
+          "topic": "inline/linebreak.rs：支持简单（first-fit）与优化（Knuth-Plass 风格）两种断行；用 ICU segmenter 确定可断点、计算每行 cost、处理连字符（hyphen）与两端对齐。讲解 cost 参数与 Breakpoint。",
+          "learning_goals": [
+            "理解 simple vs optimized 的取舍",
+            "理解 cost/badness/penalty 与连字成本",
+            "理解 hyphenation 与 CJK 断行的特殊处理"
+          ],
+          "source_files": [
+            "src/inline/linebreak.rs",
+            "src/inline/line.rs"
+          ],
+          "minimal_modules": [
+            "inline/linebreak",
+            "icu_segmenter",
+            "Breakpoint"
+          ],
+          "practice_task": "阅读成本常量（DEFAULT_HYPH_COST、DEFAULT_RUNT_COST、MIN_RATIO 等）与断点选择逻辑，解释为何 Typst 选了比 Knuth-Plass 论文更高的 hyphen cost（提示：没有 glue 概念）。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "文本整形 shaping",
+          "order": 4,
+          "filename": "u5-l4-shaping.md",
+          "level": "advanced",
+          "topic": "inline/shaping.rs：用 rustybuzz 对每个文本 run 做整形（字形、advance、kerning、OpenType feature），处理字体回退、cjk-latin 间距、shy/hyphen，产出 ShapedText/Glyphs；讲解 SharedShapingContext 与 create_shape_plan。",
+          "learning_goals": [
+            "理解整形的输入输出与 ShapedText 结构",
+            "理解字体回退与按需 reshaping",
+            "理解 shy 软连字符在断行后如何变成 hyphen"
+          ],
+          "source_files": [
+            "src/inline/shaping.rs",
+            "src/inline/box.rs"
+          ],
+          "minimal_modules": [
+            "inline/shaping",
+            "rustybuzz",
+            "ShapedText"
+          ],
+          "practice_task": "阅读 shape_range 与 ShapedText，说明同一 run 在不同断点被 reshape 时如何复用已整形结果（substring reshaping），以及 get_font_and_covers 如何参与回退。",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l5",
+          "title": "行构建与装饰：line/deco/finalize",
+          "order": 5,
+          "filename": "u5-l5-line-deco-finalize.md",
+          "level": "intermediate",
+          "topic": "inline/line.rs（构建单行 frame、对齐、apply_shift/commit）、inline/deco.rs（下划线/删除线/高亮等装饰跨字形 evade 处理）、inline/finalize.rs（把行组装成段落 frame、挂载行号 marker）。",
+          "learning_goals": [
+            "理解单行如何对齐与基线对齐",
+            "理解装饰如何“绕开”字形降部（evade）",
+            "理解行号 marker 如何挂载到行"
+          ],
+          "source_files": [
+            "src/inline/line.rs",
+            "src/inline/deco.rs",
+            "src/inline/finalize.rs"
+          ],
+          "minimal_modules": [
+            "inline/line",
+            "inline/deco",
+            "inline/finalize"
+          ],
+          "practice_task": "阅读 decorate，解释 evade 选项如何改变下划线在带降部字母（如 g、y）处的绘制路径；并说明 finalize 如何把多行 frame 组合成段落。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "title": "专家：网格、数学与容器布局",
+      "level": "advanced",
+      "order": 6,
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "网格与表格布局 GridLayouter",
+          "order": 1,
+          "filename": "u6-l1-grid-layouter.md",
+          "level": "advanced",
+          "topic": "grid/mod.rs + grid/layouter.rs：layout_grid/layout_table 构造 GridLayouter，解析列/行 sizing（auto/fr/fixed），逐 region 排版、处理可断裂行，layout_cell 排版单元格并手动注入 tag。",
+          "learning_goals": [
+            "理解 rcols/rrows 的解析与 fr 分配",
+            "理解 region 间表格断裂",
+            "理解 cell 的 tag 注入与 group/parent 处理"
+          ],
+          "source_files": [
+            "src/grid/mod.rs",
+            "src/grid/layouter.rs"
+          ],
+          "minimal_modules": [
+            "grid",
+            "GridLayouter",
+            "CellGrid"
+          ],
+          "practice_task": "阅读 GridLayouter::layout 与 layout_cell，说明一个跨多 region 的表格如何逐段产出 frame，以及为何要手动为 table/grid cell 生成 tag（结合注释中的 HACK 说明）。",
+          "depends_on": [
+            "u4-l1",
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "网格高级机制：rowspans、repeated 表头、lines",
+          "order": 2,
+          "filename": "u6-l2-grid-advanced.md",
+          "level": "advanced",
+          "topic": "grid/rowspans.rs（跨行单元格与不可断裂行组 UnbreakableRowGroup）、grid/repeated.rs（重复表头 header 的多级状态机）、grid/lines.rs（hline/vline 线段生成与 stroke 合并）。",
+          "learning_goals": [
+            "理解 rowspans 为何要延迟到所有跨及行排完",
+            "理解 repeating_headers 的多级 pending/upcoming/repeating 流转",
+            "理解线段如何按行/列生成与合并"
+          ],
+          "source_files": [
+            "src/grid/rowspans.rs",
+            "src/grid/repeated.rs",
+            "src/grid/lines.rs"
+          ],
+          "minimal_modules": [
+            "grid/rowspans",
+            "grid/repeated",
+            "grid/lines"
+          ],
+          "practice_task": "阅读 repeated.rs 中 pending_headers/upcoming_headers/repeating_headers 的流转，解释多级表头在新 region 顶部如何被重复，以及 unbreakable_rows_left 如何抑制断裂。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "数学公式布局 MathContext 与 Fragment",
+          "order": 3,
+          "filename": "u6-l3-math-context.md",
+          "level": "advanced",
+          "topic": "math/mod.rs：layout_equation_inline（行内）与 layout_equation_block（块级，含断行与公式编号）；MathContext 维护字体栈与 fragments；layout_realized 按 MathKind 分派；math/fragment 定义 MathFragment（Glyph/Frame/Space/Tag）与 FrameFragment。",
+          "learning_goals": [
+            "理解 inline 与 block 方程排版差异",
+            "理解字体栈随样式变化 push/pop",
+            "理解 MathFragment 的 text-likeness 与 math metrics（italics correction 等）"
+          ],
+          "source_files": [
+            "src/math/mod.rs",
+            "src/math/fragment/mod.rs",
+            "src/math/fragment/glyph.rs"
+          ],
+          "minimal_modules": [
+            "math",
+            "MathContext",
+            "MathFragment",
+            "FrameFragment"
+          ],
+          "practice_task": "阅读 layout_realized 的分派与 layout_into_fragment，说明多个 fragment 合成一个 FrameFragment 时 text_like 如何判定，以及字体不同时为何要 push 新字体到栈。",
+          "depends_on": [
+            "u4-l1",
+            "u5-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "数学元素：分数、根号、上下标、重音等",
+          "order": 4,
+          "filename": "u6-l4-math-elements.md",
+          "level": "advanced",
+          "topic": "逐一讲解 math 子模块：fraction（分数与 skewed fraction）、radical（根号）、scripts（上下标与 primes）、accent（重音）、fenced（括号定界）、cancel（删除线）、table（矩阵/数组）、run（多行与对齐组装）。",
+          "learning_goals": [
+            "理解各数学结构如何读取字体 MATH 表常量（axis_height、script scale、kern at height）",
+            "理解多行公式的对齐（align_form）与断行",
+            "理解 fenced 括号的伸缩与间距"
+          ],
+          "source_files": [
+            "src/math/fraction.rs",
+            "src/math/radical.rs",
+            "src/math/scripts.rs",
+            "src/math/run.rs",
+            "src/math/accent.rs"
+          ],
+          "minimal_modules": [
+            "math/fraction",
+            "math/radical",
+            "math/scripts",
+            "math/run"
+          ],
+          "practice_task": "选 scripts.rs，对照 style_for_script_scale 与字体 math 表常量，解释上下标的位置与缩放如何由 script_percent_scale_down 决定；并说明 primes 与 scripts 的差别。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "栈布局 StackLayouter",
+          "order": 5,
+          "filename": "u6-l5-stack.md",
+          "level": "advanced",
+          "topic": "stack.rs 的 layout_stack/layout_stack_internal：StackLayouter 沿主轴放置子项，处理绝对/分数（Fr）间距、主轴/交叉轴对齐、多 region 产出；StackLayoutChild::CustomLayouter 供 lists 等复用。",
+          "learning_goals": [
+            "理解主轴/交叉轴的通用化（GenericSize）",
+            "理解 Fr 分数的分配与 share",
+            "理解 ruler 对齐累积（取 max/min）"
+          ],
+          "source_files": [
+            "src/stack.rs"
+          ],
+          "minimal_modules": [
+            "stack",
+            "StackLayouter",
+            "GenericSize"
+          ],
+          "practice_task": "阅读 finish_region，给定若干 frame 与若干 Fr 间距、一个有限 full 高度，手算各 frame 在主轴上的最终位置（含 Fr.share 分配与 ruler 对齐）。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "列表/枚举/术语布局",
+          "order": 6,
+          "filename": "u6-l6-lists.md",
+          "level": "advanced",
+          "topic": "lists.rs：layout_list/layout_enum/layout_terms 基于 layout_stack_internal + 自定义 layouter，处理 marker/编号、indent/body_indent、tight/loose、RTL、PdfMarkerTag 标注。",
+          "learning_goals": [
+            "理解列表如何复用栈布局",
+            "理解 tight/loose 段落化差异",
+            "理解 marker 与 body 的对齐（baseline_align）"
+          ],
+          "source_files": [
+            "src/lists.rs",
+            "src/stack.rs"
+          ],
+          "minimal_modules": [
+            "lists",
+            "stack",
+            "ListLayouter"
+          ],
+          "practice_task": "阅读 layout_list，说明 tight 与 loose 列表在 body 处理上的差别（ParbreakElem 的加入），以及 body_indent 如何与 marker 共同形成悬挂缩进。",
+          "depends_on": [
+            "u6-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l7",
+          "title": "图形、变换与修饰符",
+          "order": 7,
+          "filename": "u6-l7-shapes-transforms.md",
+          "level": "advanced",
+          "topic": "shapes.rs（line/rect/square/ellipse/circle/polygon/curve 的几何构建与 stroke）、transforms.rs（move/rotate/scale/skew 的 measure_and_layout 与边界框）、image.rs/pad.rs/repeat.rs，以及 modifiers.rs 的 FrameModifiers（hide/link，在 flow/inline/math 中统一应用）。",
+          "learning_goals": [
+            "理解变换如何通过扩大 region + Transform 实现",
+            "理解 reflow 如何改变最终 frame 尺寸",
+            "理解 FrameModifiers 为何要在手动管理样式的 layouter（flow/inline/math）中统一应用"
+          ],
+          "source_files": [
+            "src/shapes.rs",
+            "src/transforms.rs",
+            "src/modifiers.rs",
+            "src/image.rs"
+          ],
+          "minimal_modules": [
+            "shapes",
+            "transforms",
+            "modifiers",
+            "image",
+            "pad",
+            "repeat"
+          ],
+          "practice_task": "阅读 transforms.rs 的 measure_and_layout，说明旋转一个有限尺寸块时如何先 compute_bounding_box 扩大 region、再施加 Transform；并解释 reflow=true 时最终 frame 尺寸如何变化。",
+          "depends_on": [
+            "u6-l5",
+            "u2-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "title": "专家：规则注册与集成",
+      "level": "advanced",
+      "order": 7,
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "show 规则注册 register 与 paged target",
+          "order": 1,
+          "filename": "u7-l1-rules-register.md",
+          "level": "advanced",
+          "topic": "rules.rs 的 register：把大量 *_RULE（ShowFn）注册到 NativeRuleMap 的 Paged target；解释 Target::Paged、ShowFn 签名，以及 register 在构建 Library 时被调用的时机。",
+          "learning_goals": [
+            "理解 show rule 与 layout 的衔接",
+            "理解 Target::Paged 的含义",
+            "看懂 register 的分类（Model/Text/Layout/Visualize/Math/PDF）"
+          ],
+          "source_files": [
+            "src/rules.rs",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "rules",
+            "NativeRuleMap",
+            "ShowFn",
+            "Target"
+          ],
+          "practice_task": "在 rules.rs 中按分类统计注册的规则数量；并挑选 STRONG_RULE、EMPH_RULE 说明它们如何把语义元素转成样式变更（set TextElem::delta / emph）。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "常用 show 规则实现详解",
+          "order": 2,
+          "filename": "u7-l2-rules-deep-dive.md",
+          "level": "advanced",
+          "topic": "深入 rules.rs 中较复杂的规则：HEADING_RULE（编号测量与悬挂缩进）、FIGURE_RULE（caption + float）、BIBLIOGRAPHY_RULE（grid/缩进两种布局）、TABLE_RULE/GRID_RULE（挂 multi_layouter）、LAYOUT_RULE（把 regions 尺寸传给用户函数）。",
+          "learning_goals": [
+            "理解 multi_layouter vs single_layouter 的挂载方式",
+            "理解 heading 编号为何要先 measure（LocatorLink::measure）",
+            "理解 LAYOUT_RULE 如何把当前 region 暴露给用户函数"
+          ],
+          "source_files": [
+            "src/rules.rs"
+          ],
+          "minimal_modules": [
+            "rules",
+            "BlockElem.multi_layouter",
+            "BlockElem.single_layouter"
+          ],
+          "practice_task": "阅读 LAYOUT_RULE，追踪 regions.base() 如何成为用户 layout 函数收到的 width/height，并说明其返回结果如何再交给 flow::layout_fragment 排版。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

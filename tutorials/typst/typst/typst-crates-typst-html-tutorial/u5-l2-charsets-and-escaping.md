@@ -2,14 +2,14 @@
 
 ## 1. 本讲目标
 
-本讲聚焦 typst-html 在「最后一公里」必须回答的一个问题：**哪些字符可以原样写进 HTML，哪些必须转义，哪些干脆写不进去？**
+本讲聚焦 typst-html 在「最后一公里」必须回答的一个最细粒度的问题：**单个字符落盘时，哪些可以原样写进 HTML、哪些必须转义、哪些干脆写不进去？**
 
 学完本讲，你应当能够：
 
-1. 说出 `charsets.rs` 中那一组「字符有效性」判定函数各自的职责，以及它们背后的 WHATWG/W3C 字符分类。
+1. 说清 `charsets.rs` 中那一组「字符有效性」判定函数各自的职责，以及它们背后的 WHATWG/W3C 字符分类。
 2. 看懂 `write_escape` 对 `& < > " '` 五个特殊字符的命名引用处理，以及对其余字符的「数字字符引用 / 不可编码报错」二分。
 3. 区分**普通文本**、**属性值**、**raw 文本元素**（`script`/`style`）、**可转义 raw 文本元素**（`textarea`/`title`）四种语境下完全不同的转义规则。
-4. 理解 raw 元素为何要做 `find_closing_tag` 防注入校验，并能预测一段文本是否会触发报错。
+4. 理解 raw 元素为何要做 `find_closing_tag` 防注入校验，并能从源码预测一段文本是否会触发报错。
 
 本讲承接 [u2-l2（HtmlTag 与驻留）](u2-l2-htmltag-interning.md) 中对 `charsets::is_valid_in_tag_name` 的初步认识，并延续 [u5-l1（DOM 到 HTML 字符串的编码）](u5-l1-dom-to-html-encoding.md) 对 `encode.rs` 整体编码流程的讲解，把镜头推进到「单个字符如何落盘」这一最细粒度。
 
@@ -40,14 +40,15 @@
 
 | 文件 | 作用 |
 |------|------|
-| [src/charsets.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs) | 一组纯函数，回答「某字符在某语境下是否合法」；无副作用、可在 `const fn` 中调用 |
+| [src/charsets.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs) | 一组纯函数，回答「某字符在某语境下是否合法」；无副作用、大多为 `const fn` |
 | [src/encode.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs) | DOM 树 → HTML 字符串的编码器；本讲聚焦其中 `write_text`/`write_escape`/`write_element`/`find_closing_tag` 等「字符级」函数 |
 
 辅助阅读：
 
 - [src/tag.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs)：`is_raw`/`is_escapable_raw` 决定一个标签走哪条编码分支。
 - [src/dom.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/dom.rs)：`HtmlElement.pre_span` 字段标记编译器生成的空白保护 span，影响转义路径。
-- 测试套件 `tests/suite/html/syntax.typ`：包含本讲所有报错路径的真实断言用例，强烈建议对照阅读。
+
+> 说明：typst-html 的 HTML 报错行为有配套测试覆盖，但这些测试位于本 crate 之外（仓库根的测试套件），本讲沙箱不可见，故下文一律从**源码逻辑**推导行为，不引用具体测试行号；如需对照真实断言，请到仓库的 HTML 测试套件中检索「cannot be encoded」「closing tag」等关键词。
 
 ---
 
@@ -59,7 +60,7 @@
 
 #### 4.1.1 概念说明
 
-`charsets.rs` 是一个只有 82 行的小文件，但它定义了 typst-html 全部「字符能否通过」的判据。它的设计有两个鲜明特点：
+[charsets.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs) 是一个只有 82 行的小文件，但它定义了 typst-html 全部「字符能否通过」的判据。它的设计有两个鲜明特点：
 
 1. **纯函数 + `const fn`**：所有函数都不依赖运行时状态，且大多标注为 `const fn`，因此能在编译期常量（如 `HtmlTag::constant`，见 u2-l2）和运行期校验（如 `HtmlTag::intern`）中**共用同一套规则**，避免「两套标准」。
 2. **按语境分函数**：不写一个万能的 `is_valid(c)`，而是为标签名、属性名、属性值、普通文本各写一个函数，因为每种语境的合法字符集不同。
@@ -71,12 +72,12 @@
 字符有效性判定的依赖关系如下（上层调用下层）：
 
 ```
-is_valid_in_tag_name        ── 独立白名单（仅字母数字与 '-'）
+is_valid_in_tag_name        ── 独立白名单（仅 ASCII 字母数字与 '-'）
 is_valid_in_attribute_name  ── 黑名单 + 非字符 + 控制字符
 is_valid_in_attribute_value ── is_w3c_text_char + 额外禁 '&' '"'
 is_valid_in_normal_element_text ── is_w3c_text_char + 额外禁 '&' '<'
         │
-        └── is_w3c_text_char ── 非字符? 控制字符? 
+        └── is_w3c_text_char ── 非字符? 控制字符?
                                   ├── is_whatwg_non_char
                                   └── is_whatwg_control_char
 ```
@@ -92,7 +93,7 @@ is_valid_in_normal_element_text ── is_w3c_text_char + 额外禁 '&' '<'
 \text{non-char}(c) \;\Longleftrightarrow\; (c \mathbin{\&} \texttt{0xFFFE}) = \texttt{0xFFFE} \;\wedge\; c \le \texttt{0x10FFFF}
 \]
 
-掩码 `0xFFFE` 的最低位恒为 0，因此它同时匹配 `0xFFFE` 与 `0xFFFF` 两种尾数，一条表达式覆盖整个非字符族。
+掩码 `0xFFFE` 的最低位恒为 0，因此它同时匹配 `0xFFFE` 与 `0xFFFF` 两种尾数，一条表达式覆盖整个非字符族。除此之外，`U+FDD0..=U+FDEF` 这一段也被单独列为非字符。
 
 #### 4.1.3 源码精读
 
@@ -100,7 +101,7 @@ is_valid_in_normal_element_text ── is_w3c_text_char + 额外禁 '&' '<'
 
 [is_whatwg_non_char 与 is_whatwg_control_char — charsets.rs:L64-L81](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/charsets.rs#L64-L81)
 
-这两个函数刻画了两类「永远不合法」的码点：C0 控制字符（`U+0000–U+001F`）、其余控制字符（`U+007F–U+009F`），以及非字符族。注意 `0x10ffff` 上界对 Rust 的 `char` 其实是冗余的（`char` 本就不超过该值），这里属于防御性写法。
+这段代码刻画了两类「永远不合法」的码点：C0 控制字符（`U+0000–U+001F`）、其余控制字符（`U+007F–U+009F`），以及非字符族。注意 `0x10ffff` 上界对 Rust 的 `char` 其实是冗余的（`char` 本就不超过该值），这里属于防御性写法。
 
 再看文本字符的总判据：
 
@@ -118,33 +119,47 @@ is_valid_in_normal_element_text ── is_w3c_text_char + 额外禁 '&' '<'
 
 #### 4.1.4 代码实践
 
-**实践目标**：用源码规则手工分类一批字符，建立对「四套判据」的肌肉记忆。
+**实践目标**：用源码规则手工分类一批字符，建立对「四套判据」的肌肉记忆。这是一个**源码阅读型实践**，无需运行。
 
 **操作步骤**：
 
 1. 准备下表，先**不看答案**，根据 4.1.2 的依赖关系逐个推断每个字符在四套规则下的取值（✓ 合法 / ✗ 非法）。
 
-| 字符 | 码点 | `tag_name` | `attr_name` | `attr_value` | `normal_text` |
-|------|------|-----------|-------------|--------------|---------------|
-| `a` | U+0061 | | | | |
-| `-` | U+002D | | | | |
-| `<` | U+003C | | | | |
-| `&` | U+0026 | | | | |
-| `"` | U+0022 | | | | |
-| `\t` | U+0009 | | | | |
-| `\u{1}` (SOH) | U+0001 | | | | |
-| `\u{fdd0}` | U+FDD0 | | | | |
-| `\u{200d}` (ZWJ) | U+200D | | | | |
+   | 字符 | 码点 | `tag_name` | `attr_name` | `attr_value` | `normal_text` |
+   |------|------|-----------|-------------|--------------|---------------|
+   | `a` | U+0061 |  |  |  |  |
+   | `-` | U+002D |  |  |  |  |
+   | `<` | U+003C |  |  |  |  |
+   | `&` | U+0026 |  |  |  |  |
+   | `"` | U+0022 |  |  |  |  |
+   | `\t` | U+0009 |  |  |  |  |
+   | `\u{1}` (SOH) | U+0001 |  |  |  |  |
+   | `\u{fdd0}` | U+FDD0 |  |  |  |  |
+   | `\u{200d}` (ZWJ) | U+200D |  |  |  |  |
 
-2. 推断完后，对照源码逐行核对。提醒两个易错点：`\t` 是控制字符但属于 ASCII 空白，故在 `attr_value`/`normal_text` 下**合法**；`\u{200d}`（零宽连接符）既非非字符也非控制字符，四处文本类判据均**合法**，但标签名/属性名里它会被 `tag_name` 拒（只认字母数字与 `-`）。
+2. 推断完后，对照源码逐行核对。提醒两个易错点：`\t` 是控制字符但属于 ASCII 空白，故在 `attr_value`/`normal_text` 下**合法**；`\u{200d}`（零宽连接符）既非非字符也非控制字符，两处文本类判据均**合法**，但 `tag_name` 只认 ASCII 字母数字与 `-`，会拒收它。
 
-**预期结果**：你能说出「为什么 `<` 在普通文本非法、在属性值却合法」这类判断的底层原因——因为二者共用 `is_w3c_text_char` 底座，但叠加了不同的危险字符集。
+**需要观察的现象**：你能解释「为什么 `<` 在普通文本非法、在属性值却合法」——因为二者共用 `is_w3c_text_char` 底座，但叠加了不同的危险字符集。
+
+**预期结果**（参考答案）：
+
+| 字符 | `tag_name` | `attr_name` | `attr_value` | `normal_text` |
+|------|-----------|-------------|--------------|---------------|
+| `a` | ✓ | ✓ | ✓ | ✓ |
+| `-` | ✓ | ✓ | ✓ | ✓ |
+| `<` | ✗（非字母数字/`-`） | ✓ | ✓ | ✗（普通文本禁 `<`） |
+| `&` | ✗ | ✓ | ✗（属性值禁 `&`） | ✗（普通文本禁 `&`） |
+| `"` | ✗ | ✗（黑名单） | ✗（属性值禁 `"`） | ✓ |
+| `\t` | ✗ | ✗（控制字符） | ✓（ASCII 空白放行） | ✓ |
+| `\u{1}` | ✗ | ✗（控制字符） | ✗ | ✗ |
+| `\u{fdd0}` | ✗ | ✗（非字符） | ✗ | ✗ |
+| `\u{200d}` | ✗ | ✓ | ✓ | ✓ |
 
 #### 4.1.5 小练习与答案
 
 **练习 1**：`is_valid_in_attribute_name(' ')` 与 `is_valid_in_attribute_name('\u{2028}')`（行分隔符）分别返回什么？为什么？
 
-> **答案**：前者返回 `false`（空格在黑名单里，且也是控制类字符），后者返回 `true`。属性名采用黑名单策略，只禁少数语法分隔符与非字符/控制字符，注释里特意写「Everything else is allowed, including U+2029」，所以连段落分隔符都放行。
+> **答案**：前者返回 `false`（空格在黑名单里），后者返回 `true`。属性名采用黑名单策略，只禁少数语法分隔符与非字符/控制字符，注释里特意写「_Everything_ else is allowed, including U+2029 paragraph separator」，所以连段落分隔符都放行。
 
 **练习 2**：若把 `is_w3c_text_char` 里的 `c.is_ascii_whitespace()` 条件去掉，会对哪类字符的判定产生影响？
 
@@ -190,18 +205,18 @@ match c:
 注意三个细节：
 
 1. **命名引用只有五个**：`& < > " '`。其中 `>`、`"`、`'` 在普通文本里其实合法、不会被走到；它们出现在这里，是给 `escape = true`（pre_span）这种「强制转义」场景兜底的。
-2. **数字引用用十六进制**：格式串为 `&#x{:x};`，例如空格写成 `&#x20;`、制表符写成 `&#x9;`、零宽连接符写成 `&#x200d;`。
-3. **`\r` 被排除在数字引用之外**：回车符既非命名字符，又被 `c != '\r'` 挡掉，于是落入最后的兜底分支——在强制转义路径下遇到 `\r` 会报「不可编码」。普通文本里 `\r` 合法（属 ASCII 空白），会被直接 push，不走这里。
+2. **数字引用用小写十六进制**：格式串为 `&#x{:x};`，例如空格写成 `&#x20;`、制表符写成 `&#x9;`、零宽连接符写成 `&#x200d;`。
+3. **`\r` 被排除在数字字符引用之外**：回车符既非命名字符，又被 `c != '\r'` 挡掉，于是落入最后的兜底分支——在强制转义路径下遇到 `\r` 会报「不可编码」。普通文本里 `\r` 合法（属 ASCII 空白），会被直接 push，不走这里。
 
 #### 4.2.3 源码精读
 
 [write_text — encode.rs:L100-L109](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L100-L109)
 
-这段代码做了两件事：逐字符遍历；按 `escape || !is_valid_in_normal_element_text(c)` 决定走转义还是原样输出。注意 `.at(span)` 把 `write_escape` 返回的 `StrResult`（无源码位置）绑上文本节点的 `Span`，从而让「不可编码」报错能精确定位到用户源码里的那个字符。
+这段代码做了两件事：逐字符遍历；按 `escape || !is_valid_in_normal_element_text(c)` 决定走转义还是原样输出。注意 `.at(span)` 把 `write_escape` 返回的 `StrResult`（本身无源码位置）绑上文本节点的 `Span`，从而让「不可编码」报错能精确定位到用户源码里的那个字符。
 
 [write_escape 与 unencodable — encode.rs:L368-L388](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L368-L388)
 
-`write_escape` 是本讲的「核心翻译表」。`unencodable` 用 `#[cold]` 标注提示编译器这是冷路径（报错很少发生），并用 `c.repr()`（来自 `typst_library::foundations::Repr` trait）把字符格式化成可读形式（如 `"\u{fdd0}"`）塞进错误消息。
+`write_escape` 是本讲的「核心翻译表」。`unencodable` 用 `#[cold]` 标注提示编译器这是冷路径（报错很少发生），并用 `c.repr()`（来自 `typst_library::foundations::Repr` trait）把字符格式化成可读形式塞进错误消息。
 
 `escape` 开关的来源——`pre_span` 字段：
 
@@ -209,48 +224,48 @@ match c:
 
 文档注释明确说明：这类 span 里的空格与制表符会被写成转义序列，**目的是防格式化工具破坏**，而非影响浏览器渲染。它在编码时的传播路径是 `write_children` 把 `element.pre_span` 作为 `escape_text` 传给 `write_node`，再传给 `write_text`：
 
-[write_node 与 write_children 的 escape 传递 — encode.rs:L89-L97](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L89-L97)
+[write_node 按 HtmlNode 变体分派 — encode.rs:L89-L97](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L89-L97)
 
-（`write_children` 内 `write_node(w, c, element.pre_span)?` 即 line 193，把每个孩子的转义模式统一交给父元素的 `pre_span` 决定。）
+（`write_children` 内部对每个孩子调用 `write_node(w, c, element.pre_span)?`，即把整段子树的转义模式统一交给父元素的 `pre_span` 决定，详见 [encode.rs:L193](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L193)。）
 
 #### 4.2.4 代码实践
 
-**实践目标**：亲眼看到 `&`、`<` 被转义、而不可编码字符触发报错。
+**实践目标**：预测 `&`、`<` 被转义、而不可编码字符触发报错的输出形态。下面是一段**示例代码**（非项目原有文件），用于演示。
 
 **操作步骤**：
 
-1. 新建 `escape.typ`：
+1. 新建 `escape.typ`（示例代码）：
 
    ```typst
    // 普通文本里的特殊字符
    价格 < 5 元 & 库存充足
 
    // 一个 WHATWG 非字符
-   \u{fdd0}
+   #"\u{fdd0}"
    ```
 
 2. 编译为 HTML：`typst compile escape.typ escape.html`（`.html` 后缀会自动触发 HTML 导出，见 u1-l3）。
 
 3. 用文本编辑器打开 `escape.html`，定位到正文那一段。
 
-**需要观察的现象**：
+**需要观察的现象**（基于源码推导的预测）：
 
-- `价格 < 5 元 & 库存充足` 中的 `<` 应变成 `&lt;`，`&` 应变成 `&amp;`；而 `>`（如果有的话）会原样保留。
-- 编译应**报错**，消息形如 `the character "\u{fdd0}" cannot be encoded in HTML`，并指向源码中 `\u{fdd0}` 所在位置。这条报错来自测试套件的真实断言，见后文 4.4 节引用。
+- `价格 < 5 元 & 库存充足` 中的 `<` 应变成 `&lt;`，`&` 应变成 `&amp;`；文本里若出现 `>` 会原样保留（`is_valid_in_normal_element_text('>')` 为真）。
+- 非字符 `\u{fdd0}` 应让编译**报错**，消息形如 `the character "\u{fdd0}" cannot be encoded in HTML`，并指向源码中该字符所在位置（由 `write_escape` 返回 `Err(unencodable(c))`、经 `.at(span)` 定位）。
 
 **预期结果**：转义只发生在不合法字符上；非字符直接让编译失败而非悄悄丢失——这正是 typst-html「不静默吞字符」的设计取向。
 
-> 说明：若你的 Typst 版本对源码内联的 `\u{fdd0}` 解析有差异，可改用 `#"\u{fdd0}"` 以字符串形式注入；行为一致。若暂时无法运行，记为「待本地验证」即可，重点是把预测与源码分支对上。
+> 待本地验证：不同 Typst 版本对源码内联 `\u{fdd0}` 的解析可能有差异；若行为不一致，可改用字符串表达式注入。重点是把预测与源码分支对上，而非记结论。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：普通文本中出现 `>` 时，输出是 `&gt;` 还是 `>`？为什么？
 
-> **答案**：输出 `>`（原样）。因为 `is_valid_in_normal_element_text('>')` 为真，`write_text` 直接 push，不进 `write_escape`。`write_escape` 里的 `>` → `&gt;` 分支只在 `escape = true`（pre_span 强制转义）时才会被走到。
+> **答案**：输出 `>`（原样）。因为 `is_valid_in_normal_element_text('>')` 为真（`is_w3c_text_char('>')` 为真，且 `>` 既不是 `&` 也不是 `<`），`write_text` 直接 push，不进 `write_escape`。`write_escape` 里的 `>` → `&gt;` 分支只在 `escape = true`（pre_span 强制转义）时才会被走到。
 
 **练习 2**：为什么 `write_escape` 要把 `\r` 单独排除在数字字符引用之外？
 
-> **答案**：回车符在 HTML 里有特殊的规范化规则，浏览器对裸 `\r` 与对字符引用 `&#xd;` 的处理并不等价；为了不产生语义偏差，typst-html 选择在强制转义路径下对 `\r` 报「不可编码」而非悄悄转义。普通文本里的 `\r` 仍合法、原样输出。
+> **答案**：回车符在 HTML 里有特殊的规范化规则（Newline normalization），浏览器对裸 `\r` 与对字符引用 `&#xd;` 的处理并不等价；为了不产生语义偏差，typst-html 选择在强制转义路径下对 `\r` 报「不可编码」而非悄悄转义。普通文本里的 `\r` 仍合法、原样输出，不会走到这个分支。
 
 ---
 
@@ -280,17 +295,17 @@ match c:
 
 [write_element 中属性值的写出与转义 — encode.rs:L116-L134](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L116-L134)
 
-注释 `// <elem attr="">..</div` 等价于 `// <elem attr>..</div>` 解释了空值简写。循环体里用 `is_valid_in_attribute_value(c)` 判定，不合法时复用同一个 `write_escape`（注意它对 `"` 命中 `&quot;` 分支），并用 `.at(element.span)` 把错误绑到元素本身的位置。
+注释 `// <elem attr="">..</elem> 等价于 <elem attr>..</elem>` 解释了空值简写。循环体里用 `is_valid_in_attribute_value(c)` 判定，不合法时复用同一个 `write_escape`（注意它对 `"` 命中 `&quot;` 分支），并用 `.at(element.span)` 把错误绑到元素本身的位置。
 
 注意这里与普通文本的**对照**：`<` 在属性值里 `is_valid_in_attribute_value('<')` 为真（`is_w3c_text_char('<')` 为真），因此原样保留；`"` 则被转义。这就是「同函数、不同语境判据」带来的差异。
 
 #### 4.3.4 代码实践
 
-**实践目标**：验证属性值中 `<` 原样、`"` 与 `&` 被转义。
+**实践目标**：验证属性值中 `<` 原样、`"` 与 `&` 被转义。下面是一段**示例代码**。
 
 **操作步骤**：
 
-1. 新建 `attr.typ`：
+1. 新建 `attr.typ`（示例代码）：
 
    ```typst
    #html.elem("a", attrs: (
@@ -303,12 +318,14 @@ match c:
 
 3. 打开 `attr.html` 查看 `<a>` 标签。
 
-**需要观察的现象**：
+**需要观察的现象**（基于源码推导的预测）：
 
 - `href` 值里的 `<` 应**原样**出现（`a < b`），而 `&` 应变成 `&amp;`。
 - `title` 值里的 `"` 应变成 `&quot;`（因为整个属性值用双引号包裹，内部的双引号必须转义）。
 
 **预期结果**：属性值的转义集合是 `{&, "}`（外加不可编码字符报错），与普通文本的 `{&, <}` 不同。如果你在属性里放进 `\u{fdd0}`，同样会触发 `cannot be encoded in HTML` 报错（路径相同，只是绑定到 `element.span`）。
+
+> 待本地验证。
 
 #### 4.3.5 小练习与答案
 
@@ -316,9 +333,9 @@ match c:
 
 > **答案**：理论上单引号定界的属性值里，`"` 可以原样、而 `'` 需转义。但 typst-html **总是用双引号**包裹属性值（见源码 `w.buf.push('"')`），因此只需转义 `"`，`'` 在属性值里原样保留、无需特殊处理。`write_escape` 里的 `&apos;` 分支主要服务于强制转义场景。
 
-**练习 2**：`html.elem("input", attrs: ("disabled": ""))` 生成的 HTML 是 `disabled="disabled"` 还是 `disabled`？
+**练习 2**：`html.elem("input", attrs: ("disabled": ""))` 生成的 HTML 是 `disabled="disabled"`、`disabled=""` 还是 `disabled`？
 
-> **答案**：生成 `disabled`（简写）。因为 `value.is_empty()` 为真，跳过了 `=""` 部分，这正是布尔属性的标准写法。
+> **答案**：生成 `disabled`（简写）。因为 `value.is_empty()` 为真，代码跳过了 `='""'` 部分，直接进入下一个属性或闭标签。这正是布尔属性的标准简写写法。
 
 ---
 
@@ -331,7 +348,7 @@ match c:
 1. **内容必须是合法文本**：raw 元素里若混入非字符或控制字符，浏览器也救不了，要在编码期就报错。
 2. **内容不能含「自己的闭合标签」**：一旦脚本文本里出现字面的 `</script>`（哪怕大小写不同、后面跟空格或 `>`），浏览器会提前结束脚本，造成注入/截断。这是 raw 元素**唯一无法靠转义解决**的安全问题，必须显式扫描。
 
-与 raw 相对的还有一类**可转义 raw 文本元素** `<textarea>`/`<title>`：它们会解析实体，所以走 `write_text(escape=false)`，即 `&`/`<` 照常转义——因此 textarea 里写 `</textarea>` 是安全的（`<` 会被转成 `&lt;`）。
+与 raw 相对的还有一类**可转义 raw 文本元素** `<textarea>`/`<title>`：它们会解析实体，所以走 `write_text(escape=false)`，即 `&`/`<` 照常转义——因此 textarea 里写 `</textarea>` 是安全的（`<` 会被转成 `&lt;`，不再像闭合标签）。
 
 #### 4.4.2 核心流程
 
@@ -361,42 +378,39 @@ write_element 发现 tag 是 raw (script/style):
 
 `is_raw` 与 `is_escapable_raw` 的定义在 tag.rs，分别只覆盖两组标签：
 
-[is_raw / is_escapable_raw — tag.rs:L145-L152](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L145-L152)
+[is_raw 与 is_escapable_raw — tag.rs:L144-L152](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/tag.rs#L144-L152)
+
+可以看到分类极其精确：`is_raw` 只匹配 `script | style`，`is_escapable_raw` 只匹配 `textarea | title`，正是 HTML 规范 §13.1.2 的「raw text / escapable raw text」两类。
 
 raw 文本的收集与校验：
 
 [collect_raw_text 与 walk_raw_text — encode.rs:L258-L286](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L258-L286)
 
-`walk_raw_text` 是共用遍历器：把 `Tag` 节点跳过、`Text` 节点交给闭包、遇到 `Element`/`Frame` 直接 bail。`collect_raw_text` 用它做两件事——逐片段用 `is_w3c_text_char` 找首个非法字符（找到即 `Err(unencodable(c))`），否则拼成完整字符串。
+`walk_raw_text` 是共用遍历器：把 `Tag` 节点跳过、`Text` 节点交给闭包、遇到 `Element`/`Frame` 直接 `bail!`（报 `HTML raw text element cannot have non-text children`）。`collect_raw_text` 用它做两件事——逐片段用 `is_w3c_text_char` 找首个非法字符（找到即 `Err(unencodable(c))`），否则拼成完整字符串。注意这里用的是 **`is_w3c_text_char`**（最宽松的文本判据），而不是 `is_valid_in_normal_element_text`——因为 raw 元素里 `<`/`&` 本来就是合法的字面字符，只需挡掉非字符与非法控制字符。
 
 防注入核心：
 
 [find_closing_tag — encode.rs:L291-L301](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L291-L301)
 
-它用 `match_indices("</")` 找到每个 `</` 起始位置，然后检查其后是否「忽略大小写等于标签名」且「再后一位是 `\t \n \f \r 空格 > /` 之一」。`eq_ignore_ascii_case` 解释了为什么测试里 `</SCRiPT` 也会被命中。命中时返回截取的 `</tag名` 字符串，供错误 hint 展示。
+它用 `match_indices("</")` 找到每个 `</` 起始位置，然后检查其后是否「忽略大小写等于标签名」且「再后一位是 `\t \n \f \r 空格 > /` 之一」。`eq_ignore_ascii_case` 解释了为什么 `</SCRiPT` 也会被命中。命中时返回截取的 `&text[i..i + 2 + len]`（即 `</` 加标签名，保留用户输入的原始大小写），供错误 hint 展示。
 
 报错与原样输出：
 
 [write_raw — encode.rs:L217-L250](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L217-L250)
 
-`find_closing_tag` 命中即 `bail!` 并附 hint；否则按 `RawMode`（Keep/Wrap/Indent）原样写出，**全程不做字符转义**。注意 script 的 `RawMode::of` 有个微妙分支：若文本含反引号（模板字符串可能跨行），只 Wrap 不 Indent，以免改写 JS 语义。
+`find_closing_tag` 命中即 `bail!` 并附 hint（展示命中的闭合序列）；否则按 `RawMode`（Keep/Wrap/Indent）原样写出，**全程不做字符转义**。注意 script 的 `RawMode::of` 有个微妙分支：若文本含反引号（模板字符串可能跨行），只 Wrap 不 Indent，以免改写 JS 语义。
 
 可转义 raw 的处理只有一行，复用 `write_text`：
 
 [write_escapable_raw — encode.rs:L253-L255](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-html/src/encode.rs#L253-L255)
 
-`escape=false` 表示「不强制全部转义」，只按普通文本规则处理 `&`/`<`。
+`escape=false` 表示「不强制全部转义」，只按普通文本规则处理 `&`/`<`。它内部也先经过 `walk_raw_text`（由 `write_text` 间接调用？不——`write_escapable_raw` 直接调 `walk_raw_text` 把每个文本片段交给 `write_text`），因此可转义 raw 同样**不允许非文本孩子**，遇到 `Element`/`Frame` 也会报 `cannot have non-text children`。
 
-**真实断言佐证**：以下测试用例（来自 `tests/suite/html/syntax.typ`，`// Error:` 行是框架断言）精确刻画了本模块的报错行为：
-
-- `\u{fdd0}` 出现在普通文本 → `the character "\u{fdd0}" cannot be encoded in HTML`（syntax.typ L238-240）
-- `#html.script("const x = \u{fdd0}")` → 同样报不可编码（syntax.typ L242-244）
-- `#html.script("hello </SCRiPT ")` → `HTML raw text element cannot contain its own closing tag`，hint 指出 `</SCRiPT`（syntax.typ L225-228，注意大小写不敏感）
-- `#html.textarea("hello </textarea>")` → **正常通过**，注释写 `This is okay because we escape it.`（syntax.typ L234-236）
+> 行为小结（从源码推导，非测试引用）：普通文本或可转义 raw 里出现非字符 → `cannot be encoded in HTML`；raw 元素里出现自身闭合序列 → `HTML raw text element cannot contain its own closing tag`（hint 指出命中的 `</tag`）；raw/可转义 raw 里塞入非文本孩子 → `HTML raw text element cannot have non-text children`。注意：`html.script` 这类类型化函数的 body 类型本身就是 `Str`（见 u2-l5），传错类型通常在 `construct` 阶段就以类型错误拦下，未必走到编码期的 `walk_raw_text`。
 
 #### 4.4.4 代码实践
 
-**实践目标**：对比 raw 与可转义 raw 对「自身闭合标签」的截然不同处理。
+**实践目标**：对比 raw 与可转义 raw 对「自身闭合标签」的截然不同处理。下面是一段**示例代码**。
 
 **操作步骤**：
 
@@ -413,14 +427,14 @@ raw 文本的收集与校验：
 2. 先只保留用例 A，编译：`typst compile raw.typ raw.html`，观察报错与 hint。
 3. 注释掉 A、只保留用例 B，重新编译，打开 `raw.html` 查看。
 
-**需要观察的现象**：
+**需要观察的现象**（基于源码推导的预测）：
 
 - 用例 A 报错：`HTML raw text element cannot contain its own closing tag`，hint 形如 `the sequence '</script' appears in the raw text`。
 - 用例 B 成功，输出的 textarea 内容里 `<` 变成了 `&lt;`，因此浏览器不会把它误判为闭合标签。
 
 **预期结果**：raw 元素靠「拒绝闭合序列」保安全，可转义 raw 元素靠「转义 `<`」保安全——两条不同的路通往同一个目的（不让内容意外终止元素）。
 
-> 待本地验证：hint 里展示的标签名大小写是否与输入完全一致（`</SCRiPT` vs `</script>`），可在运行后对照 `find_closing_tag` 返回的 `&text[i..i+2+len]` 确认——它截取的是**原始文本片段**，故保留用户输入的大小写。
+> 待本地验证：hint 里展示的标签名大小写是否与输入完全一致（`</SCRiPT` vs `</script>`）。从源码看，`find_closing_tag` 返回的是 `&text[i..i+2+len]`，截取自**原始文本片段**，故应保留用户输入的大小写。
 
 #### 4.4.5 小练习与答案
 
@@ -428,9 +442,9 @@ raw 文本的收集与校验：
 
 > **答案**：HTML 标签名本身是大小写不敏感的（`</SCRIPT>`、`</script>` 都能闭合 `<script>`），所以名称比较必须忽略大小写；而尾随的「空白或 `>`/`/`」是具体字符集，没有大小写问题，用精确匹配即可。混用这两种策略正好贴合规范 §13.1.2.6。
 
-**练习 2**：把 `#html.script(html.strong[Hi])` 编译会得到什么报错？来自哪个函数？
+**练习 2**：为什么 `collect_raw_text` 用 `is_w3c_text_char` 校验，而不是更严格的 `is_valid_in_normal_element_text`？
 
-> **答案**：报 `HTML raw text element cannot have non-text children`（测试 syntax.typ L217-219 断言为 `expected string, found content`，运行期由 `walk_raw_text` 中的 `bail!` 产生）。因为 raw 元素只允许纯文本孩子，遇到 `Element`/`Frame` 即拒绝。
+> **答案**：raw 元素的内容浏览器原样接收、不解析实体，因此 `<` 和 `&` 在其中是完全合法的字面字符，不能按普通文本规则转义或拒绝。`is_w3c_text_char` 恰好只挡掉「任何语境都不该出现」的非字符与非法控制字符，是 raw 元素能用的最宽（也最合适）的判据。
 
 ---
 
@@ -438,7 +452,7 @@ raw 文本的收集与校验：
 
 把四个模块串起来，做一个「预测—验证」的综合练习。
 
-**任务**：下面这份 `final.typ` 混合了普通文本、属性值、raw 元素和可转义 raw 元素，每处都埋了「陷阱字符」。请**先填好预测表**，再分块编译验证。
+**任务**：下面这份 `final.typ`（**示例代码**）混合了普通文本、属性值、raw 元素和可转义 raw 元素，每处都埋了「陷阱字符」。请**先填好预测表**，再分块编译验证。
 
 ```typst
 #html.elem("p", attrs: ("data-q": "a < b & c"))[
@@ -449,43 +463,44 @@ raw 文本的收集与校验：
 
 #html.textarea("备注: < 与 & 与 \" 三种")
 
-#"\u{fdd0}"  #"\t"  #"A\tB"
+#"\u{fdd0}"  #"A\tB"
 ```
 
 **预测表（先填，再编译对照）**：
 
 | 位置 | 你预测的结果（转义？原样？报错？） | 实际结果 |
 |------|-----------------------------------|----------|
-| `data-q` 属性值里的 `<` | | |
-| `data-q` 属性值里的 `&` | | |
-| `<p>` 正文里的 `<` | | |
-| `<p>` 正文里的 `&` | | |
-| `<p>` 正文里的 `>` | | |
-| `#html.script(...)` 整行 | | |
-| `textarea` 里的 `<` | | |
-| `textarea` 里的 `&` | | |
-| `textarea` 里的 `"` | | |
-| `\u{fdd0}` | | |
-| `\t`（普通文本里的制表符） | | |
-| `"A\tB"` 中的 `\t` | | |
+| `data-q` 属性值里的 `<` |  |  |
+| `data-q` 属性值里的 `&` |  |  |
+| `<p>` 正文里的 `<` |  |  |
+| `<p>` 正文里的 `&` |  |  |
+| `<p>` 正文里的 `>` |  |  |
+| `#html.script(...)` 整行 |  |  |
+| `textarea` 里的 `<` |  |  |
+| `textarea` 里的 `&` |  |  |
+| `textarea` 里的 `"` |  |  |
+| `\u{fdd0}` |  |  |
+| `"A\tB"` 中的 `\t` |  |  |
 
-**参考答案要点**：
+**参考答案要点**（从源码推导）：
 
-- 属性值 `<` 原样、`&` 转 `&amp;`；正文 `<` 转 `&lt;`、`&` 转 `&amp;`、`>` 原样。
-- `#html.script(...)` 整行**报错**（含 `</script>`，命中 `find_closing_tag`）。建议把这行注释掉再编译其余部分。
-- textarea 里 `<` 转 `&lt;`、`&` 转 `&amp;`、`"` **原样**（可转义 raw 只转义 `&`/`<`）。
+- 属性值 `<` 原样、`&` 转 `&amp;`；正文 `<` 转 `&lt;`、`&` 转 `&amp;`、`>` 原样（`>` 在普通文本合法）。
+- `#html.script(...)` 整行**报错**（含 `</script>`，命中 `find_closing_tag`，hint 指出 `</script`）。建议把这行注释掉再编译其余部分。
+- textarea 里 `<` 转 `&lt;`、`&` 转 `&amp;`、`"` **原样**（可转义 raw 只按普通文本规则转义 `&`/`<`）。
 - `\u{fdd0}` **报错**（非字符不可编码）。
-- 普通文本里裸 `\t`：若未被空白保护机制包进 pre_span，会原样输出；而 `"A\tB"` 经空白保护后会落在 pre_span 里，制表符被写成 `&#x9;`（详见 u4-1）。
+- `"A\tB"` 经空白保护后会落在 pre_span 里（详见 u4-l1），制表符被写成 `&#x9;`；若未被包进 pre_span 则原样输出。
 
 **验证方式**：由于 script 行与非字符行会触发报错，建议**逐块启用**——每启用一块就编译一次，把实际输出/报错填进表格右列，与左列预测对照。重点不是记结论，而是确认你能从 `charsets` 判据与 `write_escape` 分派推导出每一格。
+
+> 待本地验证。
 
 ## 6. 本讲小结
 
 - `charsets.rs` 用一组「按语境分」的纯 `const fn` 给出字符合法性判据：标签名/属性名走语法分隔符视角，属性值/普通文本以 `is_w3c_text_char` 为共同底座再叠加各自危险字符。
-- 两类码点「永远不合法」：WHATWG 非字符（位运算 `(c & 0xFFFE) == 0xFFFE` 匹配 xxFFFE/xxFFFF）与控制字符（仅放行其中的 ASCII 空白）。
-- `write_escape` 是核心翻译表：五个命名引用 `& < > " '`、其余合法文本字符走十六进制数字引用 `&#x{:hex:};`、真正不可编码的字符返回 `Err(unencodable)` 并经 `.at(span)` 定位到源码。
+- 两类码点「永远不合法」：WHATWG 非字符（位运算 `(c & 0xFFFE) == 0xFFFE` 匹配 xxFFFE/xxFFFF，外加 `U+FDD0..=U+FDEF`）与控制字符（仅放行其中的 ASCII 空白）。
+- `write_escape` 是核心翻译表：五个命名引用 `& < > " '`、其余合法文本字符走小写十六进制数字引用 `&#x{:hex:};`、真正不可编码的字符返回 `Err(unencodable)` 并经 `.at(span)` 定位到源码。
 - 普通文本转义 `{&, <}`，属性值转义 `{&, "}`——同一张翻译表、不同语境判据；`escape = true`（pre_span）会强制全部字符走转义，把空格/制表符写成数字引用以防格式化工具破坏空白保护。
-- raw 元素（`script`/`style`）**不转义**，但靠 `collect_raw_text` 拒绝非法字符、靠 `find_closing_tag` 拒绝「自身闭合序列」保安全；可转义 raw（`textarea`/`title`）复用普通文本转义，故其内部出现闭合标签是安全的。
+- raw 元素（`script`/`style`）**不转义**，但靠 `collect_raw_text`（用 `is_w3c_text_char`）拒绝非法字符、靠 `find_closing_tag` 拒绝「自身闭合序列」保安全；可转义 raw（`textarea`/`title`）复用普通文本转义，故其内部出现闭合标签是安全的。
 - typst-html 的取向是「不静默吞字符」：宁可报错让用户知道，也不产出错误或被篡改的 HTML。
 
 ## 7. 下一步学习建议
