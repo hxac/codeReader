@@ -1,0 +1,724 @@
+{
+  "project": "typst-crates-typst-pdf",
+  "head": "146a58329a30f6cd38978c22c6bf0e430d8962a1",
+  "rationale": "typst-pdf 的本质是「适配器层」：它不直接写 PDF 字节，而是把 Typst 排版后的 PagedDocument / Frame 树翻译成对底层 krilla 库的调用，并额外构建逻辑结构树（tagged PDF / 无障碍）、书签、元数据、命名目的地址、链接与附件。因此学习路线的设计围绕这条主线展开。第一单元先建立全局认知：项目定位、公共 API 与 PdfOptions、PDF 标准与校验配置、目录结构与构建依赖，让读者明白「这个 crate 在 Typst 工程中的位置」以及「它把工作委托给谁」。第二单元进入转换主链路：convert() 编排、页面导出与页码标签、递归 Frame 遍历器（handle_frame/handle_group 与变换状态栈）、以及类型转换工具集。第三单元按内容类型拆解：文字与字体、图形与几何、纯色与色彩空间、渐变与平铺图案、图像（栅格/SVG/嵌入 PDF）。第四单元讲文档级特性：链接与目的地址、书签大纲、元数据与时间戳、文件附件。第五单元（专家层）集中攻克最复杂的两块——错误与校验映射，以及 tagged PDF 子系统：该子系统采用「先构建逻辑树（build 预处理）→ 遍历时发射标记内容并处理重叠标签（tree 状态机）→ 解析为 krilla TagTree 并做 PDF/UA 结构校验（resolve）」的三段式，因此细分为概览、逻辑树构建、分组数据模型、遍历与重叠标签拆分、解析与校验、以及表格/列表/图表等结构化上下文六讲。整体 24 讲，依赖关系严格沿「先链路后细节、先内容后结构、先机制后校验」递进，每讲都锚定真实源码文件并配一个可操作的实践任务。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：项目定位、公共 API 与配置",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：typst-pdf 是什么",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 typst-pdf crate 的职责：把 Typst 排版产物导出为 PDF；阐明它是一个适配器层，把 Typst 的 Frame 树翻译为对底层 krilla 库的调用，而不是自己拼装 PDF 字节。",
+          "learning_goals": [
+            "理解 typst-pdf 在 Typst 工程中的定位与边界",
+            "认识它依赖的核心后端 krilla 以及其它关键依赖（typst-layout、typst-library 等）",
+            "建立「Typst Frame 树 → krilla 调用 → PDF 字节」的整体心智模型"
+          ],
+          "source_files": [
+            "Cargo.toml",
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "Cargo.toml [package] 与 [dependencies]",
+            "src/lib.rs 模块声明与文档注释"
+          ],
+          "practice_task": "阅读 Cargo.toml，列出 typst-pdf 的全部 workspace 依赖，并用自己的话写一段 100 字说明：为什么 typst-pdf 需要 krilla、typst-layout、typst-library 这三者各自提供什么。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "公共 API：pdf()、pdf_in_bundle() 与 PdfOptions",
+          "order": 2,
+          "filename": "u1-l2-public-api-and-pdfoptions.md",
+          "level": "beginner",
+          "topic": "讲解 lib.rs 暴露的两个入口函数 pdf() 与 pdf_in_bundle()，以及 PdfOptions 的每个字段（ident、creator、timestamp、page_ranges、standards、tagged、pretty）及其默认值含义。",
+          "learning_goals": [
+            "掌握 pdf() 与 pdf_in_bundle() 的签名差异与使用场景（独立导出 vs 打包导出）",
+            "理解 PdfOptions 各字段的语义与默认行为",
+            "了解 pdf_in_bundle() 中 anchors 与 link_resolver 的作用"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "pdf()",
+            "pdf_in_bundle()",
+            "PdfOptions 及其 Default 实现"
+          ],
+          "practice_task": "在本地写一个最小 Rust 测试或示例：构造一个默认 PdfOptions 并打印其各字段默认值；再尝试把 tagged 设为 false、pretty 设为 true，预测输出 PDF 的差异。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "PDF 标准与校验配置：PdfStandards 与 PdfStandard",
+          "order": 3,
+          "filename": "u1-l3-pdf-standards-and-configuration.md",
+          "level": "beginner",
+          "topic": "讲解 PdfStandard 枚举（PDF 1.4–2.0、PDF/A 各级、PDF/UA-1）与 PdfStandards 如何通过 krilla 的 ConfigurationBuilder 组装版本号、归档校验器与无障碍校验器，以及兼容性冲突如何报错。",
+          "learning_goals": [
+            "区分 PDF 版本、PDF/A 归档标准与 PDF/UA 无障碍标准三类目标",
+            "理解 PdfStandards::new() 如何把多个标准组装成 krilla Configuration 并检测冲突",
+            "认识 ConfigurationError（版本不重叠、版本与校验器不匹配）及其提示信息"
+          ],
+          "source_files": [
+            "src/lib.rs"
+          ],
+          "minimal_modules": [
+            "PdfStandard 枚举",
+            "PdfStandards::new() 与版本/校验器设置闭包",
+            "version_hint() 与 ConfigurationError 处理",
+            "PdfOptions::accessibility_validator()"
+          ],
+          "practice_task": "阅读 PdfStandards::new()，解释为什么「同时指定 PDF/A-1a 和 PDF/A-2b」会报错；再说明默认（Default）配置导出的 PDF 版本是多少、是否带校验器。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "目录结构、模块地图与构建运行方式",
+          "order": 4,
+          "filename": "u1-l4-directory-structure-and-build.md",
+          "level": "beginner",
+          "topic": "通览 src/ 目录与 tags/ 子系统，建立模块地图：convert.rs 是编排核心，text/shape/paint/image/link 等是内容翻译器，tags/ 是无障碍结构树；并说明如何在该 workspace 中构建与测试本 crate。",
+          "learning_goals": [
+            "掌握 src/ 下每个模块的职责与彼此调用关系",
+            "理解 tags/ 子目录的内部划分（groups/tree/context/resolve/util）",
+            "知道如何在 typst workspace 中编译、测试 typst-pdf"
+          ],
+          "source_files": [
+            "src/lib.rs",
+            "src/convert.rs",
+            "src/tags/mod.rs"
+          ],
+          "minimal_modules": [
+            "src/lib.rs 的 mod 声明",
+            "convert::convert() 对各子模块的调用",
+            "tags::init/resolve 在 convert() 中的位置"
+          ],
+          "practice_task": "画一张模块依赖草图：以 convert() 为中心，标出它调用了哪些子模块（attach/image/link/metadata/outline/page/shape/tags/text/util），并标注 tags/ 内部的五个子目录各自负责什么。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "进阶：转换主链路与 Frame 模型",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l5",
+          "title": "convert() 编排：从 PagedDocument 到 PDF 字节",
+          "order": 1,
+          "filename": "u2-l5-convert-orchestrator.md",
+          "level": "intermediate",
+          "topic": "逐段拆解 convert()：构造 SerializeSettings、创建 krilla Document、收集命名目的地址、初始化 tags、构建 GlobalContext、转换页面、附加文件、解析 tag 树、设置大纲/元数据/tag-tree，最后 finish()。",
+          "learning_goals": [
+            "掌握 convert() 的完整执行步骤与阶段顺序",
+            "理解 SerializeSettings 各项（压缩、XMP、tagging、pretty 等）如何由 PdfOptions 决定",
+            "认识 GlobalContext 承载的全局缓存与映射（字体、图像、位置→命名目的地址）"
+          ],
+          "source_files": [
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "convert::convert()",
+            "SerializeSettings 构造",
+            "GlobalContext::new() 与字段",
+            "convert_pages/attach_files/tags::resolve 调用顺序",
+            "finish()"
+          ],
+          "practice_task": "给 convert() 的每个主要阶段（设置、建文档、命名目的地址、tags init、建上下文、转页面、附件、解析 tags、大纲/元数据/tag-tree、finish）写一句话注释，说明若跳过该阶段会导致什么后果。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "页面导出：PageSettings、出血框与页码标签",
+          "order": 2,
+          "filename": "u2-l6-page-export-and-labels.md",
+          "level": "intermediate",
+          "topic": "讲解 convert_pages() 如何为每页计算尺寸（含 bleed 出血框与 trim box）、生成 PageLabel，以及 PageIndexConverter 如何处理「只导出部分页面」时的逻辑页号→PDF 页号映射。",
+          "learning_goals": [
+            "理解页面尺寸的最小值约束与出血框（bleed）/裁切框（trim box）处理",
+            "掌握 PageLabelExt 如何把 Typst Numbering 转成 krilla PageLabel（含罗马/拉丁/阿拉伯数字与前缀）",
+            "理解 PageIndexConverter 在 page_ranges 过滤场景下的页号重映射"
+          ],
+          "source_files": [
+            "src/convert.rs",
+            "src/page.rs"
+          ],
+          "minimal_modules": [
+            "convert::convert_pages()",
+            "PageIndexConverter::new/pdf_page_index/has_skipped_pages",
+            "page::PageLabelExt::generate/arabic"
+          ],
+          "practice_task": "追踪一个设置了出血框（bleed 非零）的页面：写出它的 PageSettings 是如何由 frame 尺寸加 bleed 计算出 trim box 的；再说明当 page_ranges 跳过某些页时，保留页的页码标签会如何显示。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l7",
+          "title": "Frame 遍历器：handle_frame 与 handle_group",
+          "order": 3,
+          "filename": "u2-l7-frame-walker.md",
+          "level": "intermediate",
+          "topic": "深入递归遍历 Frame 树的核心：handle_frame() 如何按 FrameItem 类型分派到 text/shape/image/link/tags，handle_group() 如何处理裁剪路径与子 frame；以及 State（变换、容器变换、容器尺寸）与 FrameContext 的状态栈 push/pop 机制。",
+          "learning_goals": [
+            "掌握 FrameItem 各变体（Group/Text/Shape/Image/Link/Tag）的分派逻辑",
+            "理解变换状态栈：为何每个 item 都 push 一次平移再 pop",
+            "认识 hard frame 的 container_transform/container_size 概念及其对渐变/图案的意义"
+          ],
+          "source_files": [
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "convert::handle_frame()",
+            "convert::handle_group()",
+            "State（transform/container_transform/container_size）",
+            "FrameContext（states 栈、push/pop、link_annotations）"
+          ],
+          "practice_task": "用伪代码画出 handle_frame 对一个含「背景填充 + 一段文字 + 一个图形」的 frame 的调用顺序，标出每次 push/pop 状态与 preconcat 平移的位置；解释为什么 container 只在 hard frame 上注册。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l8",
+          "title": "类型转换工具集与路径转换",
+          "order": 4,
+          "filename": "u2-l8-conversion-utilities.md",
+          "level": "intermediate",
+          "topic": "讲解 util.rs 中把 Typst 类型映射到 krilla 类型的各类 trait（Size/Point/Transform/LineCap/LineJoin/FillRule/Abs→f32/SpotColorant/Sides），convert_path() 如何把 Curve 转成 krilla PathBuilder 序列，以及 ValidatorsExt 的列表格式化。",
+          "learning_goals": [
+            "掌握典型「Typst 几何类型 → krilla 几何类型」的转换 trait 模式",
+            "理解 convert_path() 如何遍历 CurveItem（Move/Line/Cubic/Close）填充 PathBuilder",
+            "认识 AbsExt::to_f32（转 pt）与 display_font 等辅助函数"
+          ],
+          "source_files": [
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "SizeExt/PointExt/TransformExt/AbsExt",
+            "LineCapExt/LineJoinExt/FillRuleExt",
+            "convert_path()",
+            "ValidatorsExt::to_comma_list/to_and_list",
+            "display_font()"
+          ],
+          "practice_task": "挑选三个转换 trait（如 TransformExt、FillRuleExt、SpotColorantToNameExt），分别说明 Typst 侧枚举值与 krilla 侧枚举值的对应关系；再写一段说明 convert_path 为何需要分别处理 Move/Line/Cubic/Close。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "进阶：内容翻译——文字、图形、色彩、图像",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l9",
+          "title": "文字与字体：handle_text 与字形适配",
+          "order": 1,
+          "filename": "u3-l9-text-and-fonts.md",
+          "level": "intermediate",
+          "topic": "讲解 handle_text() 如何把 Typst TextItem 转成 krilla 文字绘制：字体转换 build_font()（comemo memoize、变体 variations）、PdfGlyph 通过 TransparentWrapper 适配 Typst Glyph → krilla Glyph 接口、以及填充/描边与 draw_glyphs。",
+          "learning_goals": [
+            "理解 convert_font/build_font 的字体缓存（前向/反向映射）与变体处理",
+            "掌握 PdfGlyph 如何零拷贝适配 krilla::text::Glyph trait（glyph_id/text_range/各 advance/offset）",
+            "认识 location() 如何把 Typst span 传给 krilla 以支持后续错误定位"
+          ],
+          "source_files": [
+            "src/text.rs"
+          ],
+          "minimal_modules": [
+            "handle_text()",
+            "convert_font()/build_font()（memoize）",
+            "PdfGlyph 与 krilla::text::Glyph 实现"
+          ],
+          "practice_task": "解释为什么 build_font 用 #[comemo::memoize] 缓存、而 convert_font 又在 GlobalContext 里维护 fonts_forward/fonts_backward 两张映射；再说明 PdfGlyph 用 TransparentWrapper + #[repr(transparent)] 带来了什么好处。",
+          "depends_on": [
+            "u2-l7",
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l10",
+          "title": "图形与几何：handle_shape",
+          "order": 2,
+          "filename": "u3-l10-shapes-and-geometry.md",
+          "level": "intermediate",
+          "topic": "讲解 handle_shape() 如何处理 Shape 的填充与描边，以及 convert_geometry() 把 Typst Geometry（Line/Rect/Curve）转成 krilla Path，包括对负尺寸矩形的变换修正。",
+          "learning_goals": [
+            "掌握 convert_geometry 对 Line/Rect/Curve 三种几何的路径构建",
+            "理解负尺寸矩形为何需要用 scale(signum) 变换修正",
+            "认识 fill 与 stroke 的判空逻辑（避免 krilla 默认黑色填充）"
+          ],
+          "source_files": [
+            "src/shape.rs",
+            "src/util.rs"
+          ],
+          "minimal_modules": [
+            "handle_shape()",
+            "convert_geometry()",
+            "util::convert_path()"
+          ],
+          "practice_task": "追踪一个「带描边但厚度为 0」的图形：说明 handle_shape 如何过滤掉该描边；再写出 Geometry::Rect 在 w 或 h 为负时，convert_geometry 是如何用 Rect::from_xywh + scale 变换来还原正确形状的。",
+          "depends_on": [
+            "u2-l7",
+            "u2-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l11",
+          "title": "纯色与色彩空间转换",
+          "order": 3,
+          "filename": "u3-l11-solid-paint-and-color-spaces.md",
+          "level": "intermediate",
+          "topic": "讲解 paint.rs 中 convert_fill/convert_stroke/convert_solid/convert_process_solid 如何把 Typst Color 映射到 krilla：RGB、CMYK、D65Gray 处理，以及专色（SpotColor / separation）的转换与不透明度分离。",
+          "learning_goals": [
+            "理解 ProcessColorSpace 到 krilla 颜色类型的分派（D65Gray→luma、Cmyk→cmyk、其它→rgb）",
+            "掌握专色（separation）的 SeparationSpace + 淡印（tint）转换",
+            "认识 convert_fill 如何把颜色与不透明度（alpha）拆分填充"
+          ],
+          "source_files": [
+            "src/paint.rs"
+          ],
+          "minimal_modules": [
+            "convert_fill()/convert_stroke()",
+            "convert_paint()/convert_solid()",
+            "convert_process_solid()/convert_rgb/convert_cmyk/convert_luma",
+            "convert_spot()"
+          ],
+          "practice_task": "给定一个 Oklab 颜色和一个 CMYK 颜色，分别追踪它们在 convert_process_solid 中走哪条分支、最终被转成 krilla 的哪种颜色类型；再说明专色的 fallback 颜色是如何参与 SeparationSpace 构造的。",
+          "depends_on": [
+            "u2-l8",
+            "u3-l10"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l12",
+          "title": "渐变与平铺图案",
+          "order": 4,
+          "filename": "u3-l12-gradients-and-tiling.md",
+          "level": "intermediate",
+          "topic": "讲解 convert_gradient() 对线性/径向/锥形渐变的几何与变换计算、convert_gradient_stops() 的色站插值（含色相空间与 Oklab 的中间色站），以及 convert_pattern() 如何用 stream_builder 把 Tiling 渲染成 krilla Pattern。",
+          "learning_goals": [
+            "掌握线性/径向/锥形渐变的方向角、缩放与变换矩阵计算",
+            "理解 RelativeTo::Self_/Parent 与 correct_transform() 的「先逆向再重加容器变换」逻辑",
+            "认识色站插值为何对色相/Oklab 空间要额外插入中间色站"
+          ],
+          "source_files": [
+            "src/paint.rs",
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "convert_gradient()（Linear/Radial/Conic）",
+            "convert_gradient_stops()",
+            "convert_pattern() 与 stream_builder",
+            "correct_transform()"
+          ],
+          "practice_task": "解释 correct_transform 在 RelativeTo::Parent 时为何要先 invert 当前 transform 再 preconcat container_transform；再说明 convert_pattern 如何借助 FrameContext + handle_frame 把一个 Tiling 的内部 frame 渲染成 krilla Pattern stream。",
+          "depends_on": [
+            "u3-l11",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l13",
+          "title": "图像：栅格、SVG 与嵌入 PDF",
+          "order": 5,
+          "filename": "u3-l13-images-raster-svg-pdf.md",
+          "level": "intermediate",
+          "topic": "讲解 handle_image() 对三种 ImageKind 的处理：栅格图（PdfRasterImage 实现 CustomImage，处理颜色/Alpha 通道/ICC、JPEG 直通）、SVG（krilla-svg draw_svg）、嵌入 PDF（draw_pdf_page），以及 JPEG 的 EXIF 方向变换。",
+          "learning_goals": [
+            "掌握 PdfRasterImage 如何惰性（OnceLock）提供 color_channel/alpha_channel/icc_profile",
+            "理解 JPEG 直通（from_jpeg_with_icc）与其它格式走 from_custom 的区别",
+            "认识 exif_transform() 对 8 种 EXIF 旋转方向的变换与尺寸翻转"
+          ],
+          "source_files": [
+            "src/image.rs"
+          ],
+          "minimal_modules": [
+            "handle_image()",
+            "PdfRasterImage 与 CustomImage 实现",
+            "convert_raster()（memoize）/convert_pdf()",
+            "exif_transform()"
+          ],
+          "practice_task": "说明 PdfRasterImage 为何只在「纯 luma8/rgb8」时返回原始 ICC profile、其它情况丢弃 ICC；再追踪一张带 EXIF orientation=6 的 JPEG，写出 exif_transform 返回的变换与翻转后的尺寸。",
+          "depends_on": [
+            "u2-l7",
+            "u2-l8"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "进阶：文档级特性",
+      "level": "intermediate",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l14",
+          "title": "链接与目的地址",
+          "order": 1,
+          "filename": "u4-l14-links-and-destinations.md",
+          "level": "intermediate",
+          "topic": "讲解 handle_link() 如何把 Typst Destination（Url/Position/Location）转成 krilla Target，包括跨文档链接解析、命名目的地址回退、XYZ 目的地计算，以及链接注记的矩形与 quadpoints 合并策略。",
+          "learning_goals": [
+            "掌握三种 Destination 的转换路径与 link_resolver / loc_to_names 的回退顺序",
+            "理解 pos_to_xyz() 的页号映射与 10pt 基线偏移修正",
+            "认识 PDF/UA 下用 quadpoints 合并多行链接注记、否则拆成多个注记的策略"
+          ],
+          "source_files": [
+            "src/link.rs",
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "handle_link()",
+            "LinkAnnotation/LinkAnnotationKind",
+            "bounding_box()",
+            "pos_to_xyz()",
+            "collect_named_destinations()（convert.rs）"
+          ],
+          "practice_task": "追踪一个指向文档内某标题（Location）的链接：写出它在 handle_link 中依次尝试 link_resolver、loc_to_names、introspector position 的回退顺序；再解释 pos_to_xyz 为何要把 y 坐标减 10pt。",
+          "depends_on": [
+            "u2-l6",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l15",
+          "title": "书签大纲",
+          "order": 2,
+          "filename": "u4-l15-outline.md",
+          "level": "intermediate",
+          "topic": "讲解 build_outline() 如何查询全部标题、用 OutlineNode::build_tree 构建层级、再递归 convert_node 生成 krilla OutlineNode（标题前缀编号、跳过被 page_ranges 排除的页）。",
+          "learning_goals": [
+            "掌握标题查询、bookmarked/outlined 标志与可见性过滤",
+            "理解 OutlineNode 层级树的构建与 convert_node 递归",
+            "认识大纲条目如何用 pos_to_xyz 得到目的地址"
+          ],
+          "source_files": [
+            "src/outline.rs"
+          ],
+          "minimal_modules": [
+            "build_outline()",
+            "convert_list()/convert_node()",
+            "HeadingElem 查询与 OutlineNode::build_tree"
+          ],
+          "practice_task": "说明 build_outline 中 boomarked 与 outinned 标志的回退关系，以及 visible 如何依据 page_ranges 决定某标题是否进入书签；再写出一个带编号标题（numbers 非空）在大纲中的显示文本是如何拼出来的。",
+          "depends_on": [
+            "u2-l6",
+            "u4-l14"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l16",
+          "title": "元数据与时间戳",
+          "order": 3,
+          "filename": "u4-l16-metadata-and-timestamps.md",
+          "level": "intermediate",
+          "topic": "讲解 build_metadata() 如何填充标题/作者/关键词/创建者/语言/书写方向/文档 ID/创建日期，creation_date() 的三级回退（document.date → options.timestamp → 无），以及 Timestamp/Timezone 的构造与校验。",
+          "learning_goals": [
+            "掌握元数据各字段的来源（document.info 与 PdfOptions）",
+            "理解 creation_date() 对 Smart<date> 与 timestamp 的回退逻辑与时区处理",
+            "认识 Timestamp::new_local 的时区偏移边界校验"
+          ],
+          "source_files": [
+            "src/metadata.rs"
+          ],
+          "minimal_modules": [
+            "build_metadata()",
+            "creation_date()",
+            "Timestamp::new_utc/new_local",
+            "Timezone 枚举"
+          ],
+          "practice_task": "阅读 test_timestamp_new_local，解释为何 minute_offset 要取 abs、以及 -23..=23 与 0..=59 的合法范围依据；再说明当用户既没设 document.date 也没传 timestamp 时，PDF 里是否会有创建日期。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l17",
+          "title": "文件附件",
+          "order": 4,
+          "filename": "u4-l17-file-attachments.md",
+          "level": "intermediate",
+          "topic": "讲解 attach_files() 如何把 AttachElem 转成 krilla EmbeddedFile（路径、mime_type、描述、关联类型、修改日期），以及 should_compress() 基于文件类型推断是否压缩的启发式策略。",
+          "learning_goals": [
+            "掌握 EmbeddedFile 各字段的构造与 AttachedFileRelationship → AssociationKind 映射",
+            "理解 should_compress() 按 infer 推断的 MatcherType/mime 决定压缩与否",
+            "认识重复附件会报错（embed_file 返回 None）"
+          ],
+          "source_files": [
+            "src/attach.rs"
+          ],
+          "minimal_modules": [
+            "attach_files()",
+            "should_compress()",
+            "AttachElem 查询与 EmbeddedFile 构造"
+          ],
+          "practice_task": "解释 should_compress 对已压缩格式（zip/mp4/jpeg 等）返回 Smart::Custom(false)、对未知格式返回 Smart::Auto 的设计意图；再说明附件的 modification_date 为何复用 metadata::creation_date。",
+          "depends_on": [
+            "u2-l5",
+            "u4-l16"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "title": "专家：错误处理与 tagged PDF 子系统",
+      "level": "advanced",
+      "order": 5,
+      "lectures": [
+        {
+          "id": "u5-l18",
+          "title": "错误处理与校验结果映射",
+          "order": 1,
+          "filename": "u5-l18-error-and-validation-mapping.md",
+          "level": "advanced",
+          "topic": "讲解 finish() 与 convert_error() 如何把 krilla 的 KrillaError（字体/校验/图像/PDF/标签/限制）和 ValidationError（透明度、PostScript、缺失 alt 文本、版本要求等）映射成带 span 与 hint 的 Typst SourceDiagnostic。",
+          "learning_goals": [
+            "掌握 KrillaError 各变体到 Typst 错误信息的映射",
+            "理解 ValidationError（如 Transparency、ContainsPostScript、RequiresNewerPdfVersion）如何生成精准 hint",
+            "认识 to_span() 如何把 krilla Location 还原为 Typst Span"
+          ],
+          "source_files": [
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "finish()",
+            "convert_error()",
+            "to_span()",
+            "KrillaError/ValidationError 各分支"
+          ],
+          "practice_task": "挑两个 ValidationError（如 Transparency 与 RequiresNewerPdfVersion），分别写出它们会在什么用户输入下触发、对应的 hint 文本是什么、读者应如何修正；再说明 image_spans 在透明度错误定位中的作用。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l19",
+          "title": "tagged PDF 概览与启停门控",
+          "order": 2,
+          "filename": "u5-l19-tagged-pdf-overview.md",
+          "level": "advanced",
+          "topic": "建立 tagged PDF 子系统全景：tags::init() 的门控（tagged 标志、与 page_ranges 互斥）、disabled() 在 tiling 内禁用、以及 text/image/shape/page/tiling/group 等 hook 如何在内容转换时穿插发射 krilla 标记内容，以及 add_link_annotations 与 TagHandle。",
+          "learning_goals": [
+            "理解 tagged PDF 的三段式流程：init 构建 → 遍历发射 → resolve 解析",
+            "掌握 disabled() 的两种禁用条件（用户关闭或处于 tiling 内）",
+            "认识 tags::text/image/shape 等 hook 如何在绘制同时插入 Span/Artifact 标记并收集 bbox"
+          ],
+          "source_files": [
+            "src/tags/mod.rs",
+            "src/convert.rs"
+          ],
+          "minimal_modules": [
+            "tags::init()",
+            "tags::disabled()",
+            "tags::text/image/shape/page/tiling/group",
+            "tags::add_link_annotations()",
+            "TagHandle"
+          ],
+          "practice_task": "解释为什么开启 tagged PDF 时不能同时导出 page_ranges（见 tagged_and_page_range 测试）；再追踪 tags::shape 如何在「父级是 artifact」时跳过再发射标记、以及 PDF 1.7 下 Background artifact 的特殊处理。",
+          "depends_on": [
+            "u2-l5",
+            "u2-l7"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l20",
+          "title": "构建逻辑树：TreeBuilder 与元素→GroupKind 映射",
+          "order": 3,
+          "filename": "u5-l20-building-logical-tree.md",
+          "level": "advanced",
+          "topic": "深入 tags/tree/build.rs：build() 预遍历所有 frame 的 introspection Tag，progress_tree_start() 把每个 Typst 元素（标题/列表/表格/图形/链接/代码块/文本属性等）映射成对应 GroupKind，并处理 logical children（place/脚注/跨页单元格）。",
+          "learning_goals": [
+            "理解为何要先做一遍预处理构建逻辑树（Frame 树≠逻辑结构）",
+            "掌握 progress_tree_start 中元素到 GroupKind 的大规模映射",
+            "认识 visit_group_frame 对带 parent 的 group（logical child）的处理"
+          ],
+          "source_files": [
+            "src/tags/tree/build.rs"
+          ],
+          "minimal_modules": [
+            "build()",
+            "visit_frame()/visit_group_frame()",
+            "progress_tree_start()",
+            "push_group/push_located/push_weak/push_tag/push_text_attr/push_artifact"
+          ],
+          "practice_task": "在 progress_tree_start 中选三种元素（如 HeadingElem、TableElem、RawElem），分别说明它们被映射成哪种 GroupKind、用的是 push_tag 还是 push_group/push_located；再解释 FigureElem 为何需要预先 new_bbox 与 FigureCtx。",
+          "depends_on": [
+            "u5-l19"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l21",
+          "title": "tag 树数据模型：Groups、Group 与 GroupKind",
+          "order": 4,
+          "filename": "u5-l21-groups-data-model.md",
+          "level": "advanced",
+          "topic": "讲解 tags/groups.rs 的核心数据结构：Groups（located/virtual/weak 三类分组）、Group 与庞大的 GroupKind 枚举、TagStorage、BreakOpportunity/BreakPriority，以及语言的层级传播 propagate_lang。",
+          "learning_goals": [
+            "掌握 located/virtual/weak 三种分组的区别与 multiple_parents 处理",
+            "理解 GroupKind 各变体所表达的语义结构及其 lang/bbox 访问器",
+            "认识 breakable()/break_group() 如何为重叠标签的拆分提供依据"
+          ],
+          "source_files": [
+            "src/tags/groups.rs"
+          ],
+          "minimal_modules": [
+            "Groups（new_located/new_virtual/new_weak/breakable/break_group）",
+            "Group 与 GroupKind",
+            "TagStorage",
+            "BreakOpportunity/BreakPriority",
+            "propagate_lang"
+          ],
+          "practice_task": "解释 located 与 virtual 分组的区别，以及当同一 Location 出现多次时 multiple_parents 在 PDF/UA 下为何报「ambiguous logical parent」；再说明 breakable() 如何用 Never/NoPdfUa/Always 三档决定一个标签能否被拆分。",
+          "depends_on": [
+            "u5-l19",
+            "u5-l20"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l22",
+          "title": "树遍历状态机与重叠标签拆分",
+          "order": 5,
+          "filename": "u5-l22-tree-traversal-and-overlap-splitting.md",
+          "level": "advanced",
+          "topic": "讲解 tags/tree/mod.rs 的遍历状态机：progressions/breaks/unfinished 三条游标如何驱动 step_start_tag/step_end_tag，enter/leave_logical_child 如何切换位置，以及 close_group 中针对每种 GroupKind 的树重构（移动到 table/list/figure 等语义父级）。同时讲解 build.rs 的 split_inner_groups/split_outer_group 如何处理重叠嵌套标签。",
+          "learning_goals": [
+            "掌握 progressions 线性序列如何在运行时还原逻辑树位置",
+            "理解 Break/Unfinished 标记如何在遍历时批量开关分组",
+            "认识 close_group 对 TableCell/GridCell/List/ListItem/Figure 等的重排逻辑与 split_inner/outer 的两种拆分策略"
+          ],
+          "source_files": [
+            "src/tags/tree/mod.rs",
+            "src/tags/tree/build.rs"
+          ],
+          "minimal_modules": [
+            "Tree（prog_cursor/break_cursor/unfinished_cursor）",
+            "step()/consume_break()/consume_unfinished()",
+            "step_start_tag/step_end_tag/step_break",
+            "open_group/close_group/semantic_parent",
+            "enter_logical_child/leave_logical_child",
+            "split_inner_groups/split_outer_group"
+          ],
+          "practice_task": "用 build.rs 注释里的「start a / start b / start c / end a / end c / end b」例子，分别画出 split_inner_groups 与 split_outer_group 产生的两棵不同的标签树；再说明 close_group 如何把一个 TableCell 移动进其 Table 的 TR/TBody 结构。",
+          "depends_on": [
+            "u5-l20",
+            "u5-l21"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l23",
+          "title": "解析为 TagTree 与 PDF/UA 结构校验",
+          "order": 6,
+          "filename": "u5-l23-resolve-to-tagtree-and-validation.md",
+          "level": "advanced",
+          "topic": "讲解 tags/resolve/mod.rs 的 resolve()：Resolver 如何遍历 Group 树、build_group_tag() 把 GroupKind 转成 krilla TagKind（Hn/L/Table/Figure 等）、resolve_text 包装文本属性、validate_children() 校验 PDF/UA 结构合法性（如 TOC/LI/Table 的子元素约束、标题层级连续性），以及 Accumulator 如何把标记内容包进 Span。",
+          "learning_goals": [
+            "掌握 resolve() 从内部 Group 树到 krilla TagTree 的转换流程",
+            "理解 build_group_tag 的 GroupKind→TagKind 映射与弱分组/扁平化（alt 文本）处理",
+            "认识 validate_children 对表格/列表/大纲子结构的合法性校验与标题层级检查"
+          ],
+          "source_files": [
+            "src/tags/resolve/mod.rs",
+            "src/tags/resolve/accumulator.rs"
+          ],
+          "minimal_modules": [
+            "resolve()",
+            "Resolver 与 resolve_node/resolve_group_node/resolve_text",
+            "build_group_tag()",
+            "validate_children()/validate_children_groups()",
+            "element_kind()/tag_name()",
+            "Accumulator（nest/push/flush_grouping_span）"
+          ],
+          "practice_task": "选两个校验场景（如「Table 直接含标记内容」与「标题从 H1 跳到 H3」），分别说明 validate_children_groups 与 build_group_tag 中 Hn 检查如何产生错误、给出的 hint 是什么；再解释 Accumulator 为何在 Grouping 元素里要把 Leaf 标记内容包进一个 Span。",
+          "depends_on": [
+            "u5-l21",
+            "u5-l22"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l24",
+          "title": "结构化上下文：表格、列表、图表、网格、大纲",
+          "order": 7,
+          "filename": "u5-l24-structure-contexts.md",
+          "level": "advanced",
+          "topic": "讲解 tags/context/ 下各结构专用上下文如何生成符合 PDF 规范的标签嵌套：表格（TableCtx/build_table 生成 THead/TBody/TFoot/TR/TH/TD、headers 属性、rowspan/colspan、边框与背景）、列表（ListCtx 生成 LI/Lbl/LBody 及嵌套列表外提）、图表（FigureCtx 的 Figure+Caption 包装）、网格与大纲（GridCtx/OutlineCtx）以及 BBoxCtx 的跨页边界框计算。",
+          "learning_goals": [
+            "掌握 build_table 如何按行类型分组生成 THead/TBody/TFoot 与 TR、以及单元格 headers/边框属性的最小化写入",
+            "理解 ListCtx 如何维护 last_item 并把嵌套列表从 LBody 中外提到同级",
+            "认识 Figure/Grid/Outline 上下文与 BBoxCtx 的多页边界框处理"
+          ],
+          "source_files": [
+            "src/tags/context/table.rs",
+            "src/tags/context/list.rs",
+            "src/tags/context/figure.rs",
+            "src/tags/context/grid.rs",
+            "src/tags/context/outline.rs",
+            "src/tags/context/mod.rs"
+          ],
+          "minimal_modules": [
+            "TableCtx::insert/build_tag 与 build_table()",
+            "resolve_cell_headers/place_explicit_lines/prioritize_strokes/resolve_sides",
+            "ListCtx::push_label/push_body/push_bib_entry",
+            "FigureCtx/GridCtx/OutlineCtx",
+            "BBoxCtx::expand_frame/expand_page/to_krilla",
+            "context::finish()"
+          ],
+          "practice_task": "追踪一个带表头与跨列单元格的表格：说明 build_table 如何决定是否生成 THead/TBody、TH 的 scope 与 headers 属性如何由 resolve_cell_headers 计算；再解释 ListCtx::push_body 为何要把嵌套的子 List 从当前 LBody 里弹出并挂到父 List 同级。",
+          "depends_on": [
+            "u5-l21",
+            "u5-l23"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

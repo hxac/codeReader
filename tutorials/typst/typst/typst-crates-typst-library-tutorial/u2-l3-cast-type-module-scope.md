@@ -2,472 +2,445 @@
 
 ## 1. 本讲目标
 
-本讲是「值与类型基础」单元的收束篇。在上一讲里，你已经认识了 `Value` 枚举和 `Array`/`Dict`/`Bytes`/`Label` 这些容器。但这些类型只是「数据本身」——Typst 还需要回答三个更上层的问题：
+本讲是「值与类型基础」单元的收口篇。前面两讲（u2-l1、u2-l2）认识了 `Value` 枚举和各种数据类型，但一直绕开了三个更上层的问题：Rust 类型怎么变成 Typst 的 `Value`、一个类型怎么获得名字与文档、这些定义到底存在哪里又怎么被查到。本讲就回答这三个问题。学完之后，你应该能够：
 
-1. 一个 Rust 类型（比如 `f64`、`Color`）如何变成 Typst 用户能看到的 `Value`，反过来一个 `Value` 又如何被还原成具体的 Rust 类型？
-2. 一个类型（比如 `color`、`str`）如何拥有名字、文档、构造函数，从而能被用户写进代码里？
-3. 这些「定义」（变量、函数、类型）到底存放在什么结构里，用户写 `#rect` 或 `#str` 时，编译器又是按什么顺序把它们找出来的？
-
-学完本讲，你将能够：
-
-- 说清 `Reflect` / `IntoValue` / `FromValue` 三段式转换模型的分工，以及 `CastInfo` 如何同时服务于「转换」与「报错」。
-- 读懂 `cast!` 宏的多分支声明，区分 `self =>`、`v: T =>`、`"字面量" =>` 三类分支。
-- 理解 `Type` / `Module` 如何把一个类型及其附属定义组织成带名字的命名空间。
-- 掌握 `Scope` / `Binding` / `Scopes` 的存储结构，并解释变量查找如何从局部作用域一路回退到标准库 `base` 与 `std`。
+- 说清 `Reflect` / `IntoValue` / `FromValue` 三个 trait 各自的职责，以及为什么 Typst 要把「类型转换」拆成三段而不是用标准库的 `From`/`TryFrom`。
+- 看懂项目里随处可见的 `cast! { ... }` 宏，能区分它的几种分支写法（字面量分支、类型输入分支、`self =>` 输出分支），并标注一段 `cast!` 的输入与输出。
+- 理解 `CastInfo` 这个「描述性类型」如何同时服务于文档、自动补全和「expected X, found Y」错误信息。
+- 解释 `Type`、`Module` 如何把一个 Rust 类型、一个命名空间表示成 Typst 里的一等值。
+- 画出 `Scopes::get` 的变量查找链：从当前作用域一路回退到标准库 `base.global`，并解释 `std` 这个特殊名字为什么能直接拿到整个全局库。
 
 ## 2. 前置知识
 
-本讲假设你已经掌握：
+本讲承接 u2-l1（`Value` 枚举与标量）和 u2-l2（容器类型）。在继续之前，请确认你已了解：
 
-- **`Value` 枚举**：Typst 运行时的万能值类型，约 30 个变体，体积被约束在 32 字节以内（见 u2-l1）。本讲会反复在 `Value::Int`、`Value::Float`、`Value::Str`、`Value::Type`、`Value::Module` 这些变体之间穿梭。
-- **弱类型提升**：Typst 允许「整数当浮点数用」这类隐式转换（见 u2-l1 中 `Int` 自动提升为 `Float`）。本讲会从源码层面解释这个行为是怎么来的。
-- **容器类型**：`Array` 用 `EcoVec`、`Dict` 用 `IndexMap`、`Label` 用字符串驻留实现 O(1) 操作（见 u2-l2）。本讲的 `Scope` 同样基于 `IndexMap`，理解写时复制与有序映射会很有帮助。
-- **标准库装配**：`Library` 经 `global()` 把各模块「定义」进一个全局 `Scope`（见 u1-l3）。本讲解释这些「定义」长什么样、怎么被查到。
+- `Value` 是 Typst 运行时的万能值类型，约 30 个变体，每个变体对应一个 Rust 类型（如 `Value::Int(i64)`、`Value::Str(Str)`），体积被约束在 32 字节以内。
+- `primitive!` 宏（见 u2-l1）批量为标量生成转换实现，并把它们注册为「一等类型」。
+- 容器类型 `Array`/`Dict` 用写时复制实现廉价克隆（见 u2-l2）；`Dict` 内部基于 `IndexMap`，本讲的 `Scope` 同样基于它。
 
-两个贯穿全讲的关键词，先在这里统一约定：
+本讲还会用到三个来自 u1-l3 的基础印象：
 
-- **转换（cast）**：Rust 类型与 Typst `Value` 之间的双向翻译。这不是「强制类型转换」，而是带校验、带错误信息的「适配」。
-- **命名空间（scope / module）**：一个「名字 → 定义」的有序映射。`Scope` 是底层容器，`Module` 是对外可见的、带名字和文件来源的 `Scope` 包装，`Type` 则是「类型的命名空间」，可挂载该类型专属的子函数（比如 `color.mix`）。
+- 标准库被装配成一个 `Library` 配置对象，其中的 `global` 和 `math` 字段都是 `Module`，每个 `Module` 内部包着一个 `Scope`。
+- `define` / `define_type` / `define_elem` / `define_func` 是把定义注入 `Scope` 的几条装配指令。
+- `Library.std` 是一个特殊的 `Binding`，用于提供 `std` 这个名字。
+
+下面凡是用到的术语（`Scope`、`Binding`、`Module`、`Library`）都会在本讲里逐个展开。
+
+> 术语约定：本讲的 **转换（cast）** 指 Rust 类型与 Typst `Value` 之间的双向翻译——这不是「强制类型转换」，而是带校验、带错误信息的「适配」。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
-| --- | --- |
-| [src/foundations/cast.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs) | 转换系统的核心：`Reflect` / `IntoValue` / `FromValue` 三 trait、`CastInfo` 描述类型、`cast!` 宏的若干内置实例。 |
-| [src/foundations/value.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs) | `Value::cast` 入口与 `primitive!` 宏——后者批量为标量生成三 trait 实现。 |
-| [src/foundations/ty.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs) | `Type` 类型句柄、`NativeType` / `NativeTypeData`——把一个类型注册为用户可见的一等类型。 |
-| [src/foundations/module.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs) | `Module`——带名字、带内容、带文件来源的命名空间包装。 |
-| [src/foundations/scope.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs) | `Scope` / `Binding` / `Scopes`——定义的存储、种类、查找与回退。 |
-| [src/foundations/int.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs) | `cast!` 多分支实例（`ToInt`）与整数族宏，演示 `v: T =>` 分支的写法。 |
-| [src/visualize/color.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs) | `#[ty(cast)]` 派生形式（`Color`）与显式 `cast!` 块（`ColorSpace` 等）的真实案例。 |
+本讲涉及四个核心源码文件，都在 `src/foundations/` 下：
+
+| 文件 | 作用 | 本讲用它讲什么 |
+|------|------|----------------|
+| [src/foundations/cast.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs) | 类型转换的三个核心 trait 与 `cast!` 宏的 reexport | `Reflect`/`IntoValue`/`FromValue`/`CastInfo` 三段式模型，以及几段真实的 `cast!` 示例 |
+| [src/foundations/ty.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs) | `Type` 类型对象 | 一个 Rust 类型如何被表示成 Typst 里的一等「类型值」 |
+| [src/foundations/module.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs) | `Module` 模块对象 | 模块如何把一组定义（一个 `Scope`）打包成可导入、可点取的值 |
+| [src/foundations/scope.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs) | `Scope` / `Binding` / `Scopes` | 名字→绑定的有序映射，以及运行时变量查找的回退链 |
+
+此外会引用三个「佐证文件」：
+
+- [src/foundations/value.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs)：`primitive!` 宏与 `Value::cast` 方法。
+- [src/foundations/mod.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/mod.rs)：标准库 foundations 分类的 `define` 装配。
+- [src/visualize/color.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs) 与 [src/foundations/int.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs)：两段真实的 `cast!` 实例。
+
+> 提示：`cast!`、`#[ty]`、`#[scope]`、`#[func]` 这些宏本身定义在 **`typst-macros`** crate 里（本 crate 在 [src/foundations/cast.rs:3](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L3) 只是 `pub use typst_macros::{cast, Cast};` 引入它们）。本讲只讲它们在 `typst-library` 里的**用法与效果**（即生成出来的 trait 实现），不深入宏的展开细节。
+
+---
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 类型转换三段式模型：Reflect / IntoValue / FromValue 与 CastInfo
+本讲拆成三个最小模块：
+
+- **4.1 cast 宏与 Reflect**：三段式转换模型（`Reflect`/`IntoValue`/`FromValue`）与 `CastInfo`，以及 `cast!` 的几种分支写法。
+- **4.2 Type / Module**：把「类型」和「模块」表示成 Typst 一等值的两个对象。
+- **4.3 Scope / Binding / Scopes**：定义的存储与运行时变量查找（含标准库回退）。
+
+### 4.1 cast 宏与 Reflect
 
 #### 4.1.1 概念说明
 
-Rust 是强类型语言，`f64` 和 `Color` 之间不能随便互换；但 Typst 用户写的是弱类型的脚本，`#let x = 10` 之后 `x` 既能当整数，也能（在某些函数里）当浮点数用。于是在 Rust 一侧的「具体类型」和用户一侧的「万能 `Value`」之间，必须有一座翻译桥梁。
+Typst 的运行时只认识一种值类型——`Value`；但 Rust 这边有几十种具体类型（`i64`、`Str`、`Color`、`Module`……）。两者之间需要一个**双向、带类型描述**的桥梁。Typst 没有用标准库的 `From<T> for Value` 或 `TryFrom<Value>`，而是设计了三个 trait，分工如下（这恰恰是 [src/foundations/cast.rs:20-32](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L20-L32) 顶部注释里写明的设计意图）：
 
-Typst 把这座桥拆成 **三个 trait**，文件开头的注释写得非常清楚：
+| Trait | 方向 | 是否可能失败 | 主要用途 |
+|-------|------|--------------|----------|
+| `Reflect` | （描述） | — | 描述 `T` 能接受/能产生哪些 Typst 值，供文档、自动补全、错误信息使用 |
+| `IntoValue` | `T → Value` | 不会失败 | 把一个 Rust 值变成 `Value`（构造方向） |
+| `FromValue` | `Value → T` | 可能失败 | 把一个 `Value` 还原成具体 Rust 类型（解析方向） |
 
-- `Reflect for T`：描述「`T` 能接受哪些 Typst 值」，用于**文档和自动补全**，也提供一个快速的「能不能转」判定。
-- `IntoValue for T`：`T -> Value`，**不会失败**（infallible）。
-- `FromValue for T`：`Value -> T`，**可能失败**（fallible）。
+为什么不用标准库方案？源码注释给了两点理由：
 
-> 为什么不直接用标准库的 `TryFrom<Value>`？源码注释给出两个原因：`TryFrom` 会与其他实现冲突；而 `From<T> for Value` 会把实现方向反过来，导致代码里到处是难懂的 `.into()`。所以 Typst 自定义了这三个 trait。
+1. 不能用 `TryFrom<Value>`：会和别的 `impl` 冲突（`Value` 上已经有许多 blanket impl）。
+2. 可以用 `From<T> for Value`，但那会把 `impl` 写在 `Value` 一侧，导致代码里到处 `.into()`，难以辨认。
 
-`CastInfo` 则是这套模型的「类型描述语言」：它用一个枚举来表达「我接受任意值 / 我接受某个特定值 / 我接受某种类型 / 我接受以下若干种之一」。它既喂给 `Reflect`（描述输入输出），又喂给错误信息生成器（告诉用户「我期望什么、却看到了什么」）。
+所以 Typst 选择用**专属 trait** 把三个关注点彻底分开：描述（Reflect）、构造（IntoValue）、解析（FromValue）。
+
+第三个概念是 `CastInfo`——它是一个**描述性枚举**，表达「这个位置能接受什么样的值」：
+
+- `CastInfo::Any`：任意值都行。
+- `CastInfo::Value(Value, &str)`：某个具体的值（比如字面量 `"markup"`），带一句文档。
+- `CastInfo::Type(Type)`：某一类类型的任意值（比如「任意整数」）。
+- `CastInfo::Union(Vec<Self>)`：以上几种的「或」组合。
+
+`Reflect::input()` / `Reflect::output()` 各返回一个 `CastInfo`，分别描述「能转换进 `T` 的值」和「`T` 能转换出去的值」。这套描述被三处复用：生成文档、IDE 自动补全、以及拼出错误信息。
 
 #### 4.1.2 核心流程
 
-三段式模型的数据流向可以画成一条双向通道：
+当你写 `value.cast::<T>()`（或函数参数解析时），数据流是这样的：
 
-```text
-         IntoValue (Rust -> Value)              FromValue (Value -> Rust)
-T (Rust) ───────────────────────────▶ Value ───────────────────────────▶ T (Rust)
-        IntoValue::into_value              T::from_value / Value::cast
-        （不会失败）                          （可能失败，返回 HintedStrResult）
+```
+            ┌─────────────────────────────────────────────┐
+            │  Value  ──────cast::<T>()──────►  T          │
+            └─────────────────────────────────────────────┘
+                          委托给 FromValue::from_value
+                          （FromValue: Sized + Reflect，必带描述能力）
 
-                 ▲                                          │
-                 │  Reflect::input()/output()               │  失败时
-                 │  返回 CastInfo                            ▼
-                 └──── 描述「期望什么」 ◀── CastInfo::error(found)
-                                                拼出 "expected X, found Y" + 提示
+   from_value 内部:
+     1. 先看 Value 是不是 T 直接对应的变体 ──► Ok(还原后的 T)
+     2. 否则看是否匹配某个「转换分支」(int→float 这类) ──► Ok(T)
+     3. 都不匹配 ──► Err( Reflect::error(&value) )
+                          └── 由 CastInfo::error 拼出
+                              "expected <input()描述>, found <实际类型>"
+                              并按需附加 hint（如「length 需要单位」）
+
+   反向（构造方向）:
+     T  ──into_value()──►  Value      （IntoValue，绝不失败）
+
+   辅助快速判断（用于 try 光标、show 选择等）:
+     Reflect::castable(&value) ──► bool   （比走 CastInfo 快得多）
 ```
 
-要点：
+三个要点：
 
-1. **`IntoValue` 与 `FromValue` 不必对称**。例如 `f64` 的 `FromValue` 愿意接受一个 `Value::Int`（整数提升为浮点），但 `i64` 的 `FromValue` 不接受 `Value::Float`（浮点不能无损变整数）。这就解释了 u2-l1 提到的「弱类型体验」的来源。
-2. **`Reflect` 是为工具与性能服务的**。`castable(value)` 是一个 `bool` 判定，注释明确说「这是为性能存在」——本可以通过 `CastInfo` 动态判断，但那样要堆分配 + 动态检查；为每个类型生成专用的优化机器代码快得多。
-3. **`CastInfo` 一物两用**：既描述类型，也驱动「智能错误信息」。比如用户传了一个 `Value::Int` 而你期望的是长度，错误信息会附带「长度需要单位——你是不是想写 `12pt`？」这类提示——这正是 `CastInfo::error` 干的事。
+- **`FromValue` 强制要求 `Reflect`**（见下方源码），所以「能被从 Value 解析出来的类型」一定也「能描述自己」——这正是失败时能给出漂亮错误信息的前提。
+- **`castable` 是性能优化**：完全可以用 `CastInfo` 判断一个值是否可转换，但那需要堆分配 + 动态遍历；`castable` 是为每种类型编译出的专用机器码，快得多（注释在 [src/foundations/cast.rs:41-45](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L41-L45) 里有说明）。
+- **`CastInfo` 可相加**：`impl Add for CastInfo` 会把两个描述合并成去重后的 `Union`（[src/foundations/cast.rs:389-417](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L389-L417)）。这正是「一个参数接受多种类型」的底层机制。
 
 #### 4.1.3 源码精读
 
-**三个 trait 的定义**位于 cast.rs 顶部。首先是 `Reflect`，它的文档注释把整个模型讲了一遍：
+**① 三个核心 trait 的定义。** 先看 `Reflect`：
 
-[cast.rs:20-58](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L20-L58) — `Reflect` trait 声明 `input` / `output` / `castable` / `error` 四个方法，并解释了三段式模型。`error` 默认委托给 `Self::input().error(found)`。
+[src/foundations/cast.rs:33-58](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L33-L58) —— `Reflect` trait，提供 `input()`/`output()`/`castable()`/`error()` 四个方法。`error()` 默认委托给 `Self::input().error(found)`，即用「输入描述」来生成「期望…却得到…」的错误。
 
-`IntoValue` 只有一个方法，极其简单：
+[src/foundations/cast.rs:175-178](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L175-L178) —— `IntoValue`，只有一个 `into_value(self) -> Value`，**没有** `Reflect` 约束（构造方向不需要自我描述）。
 
-[cast.rs:172-178](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L172-L178) — `IntoValue::into_value(self) -> Value`，`Value` 自身的实现就是 `self`（恒等）。
+[src/foundations/cast.rs:252-255](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L252-L255) —— `FromValue<V = Value>: Sized + Reflect`，**显式要求 `Reflect`**。这就是「能解析就必能描述」的类型层保证。
 
-`FromValue` 是会失败的逆向转换：
+**② `CastInfo` 枚举与错误生成。**
 
-[cast.rs:249-255](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L249-L255) — `FromValue::from_value(value) -> HintedStrResult<Self>`。注意它带一个上界 `Sized + Reflect`：**任何能从 `Value` 还原的类型，都必须先能「描述自己」**（实现 `Reflect`）。
+[src/foundations/cast.rs:294-304](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L294-L304) —— 四个变体 `Any`/`Value`/`Type`/`Union`。
 
-实际触发 `FromValue` 的统一入口是 `Value::cast`：
+[src/foundations/cast.rs:306-365](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L306-L365) —— `CastInfo::error(found)`：用 `walk` 把嵌套的 `Union` 摊平，收集所有可接受的「描述项」，拼成 `expected A, B or C, found <实际类型>`；并按实际值附加 hint（整数但期望 length → 提示「did you mean Npt?」；字符串但期望 label → 提示 `<...>`；decimal 但期望 float → 提示显式转换）。**你在 Typst 里看到的所有「expected X, found Y」错误都来自这里。**
 
-[value.rs:152-154](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L152-L154) — `value.cast::<T>()` 只是 `T::from_value(value)` 的一层语法糖。整个 crate 里到处出现的 `args.expect::<T>("name")?`，最终都会走到这里。
+**③ 统一入口 `Value::cast`。**
 
-**`CastInfo` 枚举**是这套模型的「语法」：
+[src/foundations/value.rs:151-154](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L151-L154) —— `Value::cast::<T>(self)` 直接委托 `T::from_value(self)`。这是整个转换系统的统一入口。
 
-[cast.rs:294-304](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L294-L304) — 四个变体：`Any`（任意值皆可）、`Value(Value, &str)`（特定值，带短文档）、`Type(Type)`（某类型的任意值）、`Union(Vec<Self>)`（多选一）。
+**④ `primitive!` 宏：批量给标量生成三件套。** `Value` 的每个变体对应的 Rust 类型，几乎都靠这个宏一次性生成 `Reflect`+`IntoValue`+`FromValue`：
 
-它的 `error` 方法把「期望 / 实际」拼成人类可读的错误，并附带智能提示：
+[src/foundations/value.rs:583-613](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L583-L613) —— 宏的一个分支：为 `$ty` 生成三件套，其中 `FromValue` 先匹配主变体，再匹配「转换分支」（如 `Int(v) => v as f64`，这就是 u2-l1 讲过的「弱类型自动提升」的落点），都不匹配则 `Err(Self::error(&v))`。
 
-[cast.rs:309-365](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L309-L365) — `CastInfo::error`。注意末尾三段特判：传了整数却期望长度 → 提示「加单位」；传了字符串却期望标签 → 提示「用 `<...>` 或 `label(...)`」；传了 `decimal` 却期望 `float` → 提示「显式用 `float(value)` 转换」。这些都是真实可复现的 Typst 报错提示的源头。
+[src/foundations/value.rs:619-663](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L619-L663) —— 真实的调用清单。注意 `f64`、`Str`、`Content`、`Func` 等都带「转换分支」：例如 `Func` 可以从 `Type(ty) => ty.constructor()?.clone()` 得到（把类型当函数用，就是调用其构造器）。
 
-为了最直观地看到三 trait 如何「成套」实现，最好的例子是 `primitive!` 宏——它一次性为某个标量生成 `Reflect + IntoValue + FromValue`：
+**⑤ `cast!` 宏的几种写法。** `cast!` 用于「`primitive!` 没覆盖到」的自定义类型（枚举、newtype 等）。它有几种典型分支：
 
-[value.rs:577-617](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L577-L617) — `primitive!` 宏。`Reflect::input/output` 都返回 `CastInfo::Type(Type::of::<Self>())`；`IntoValue` 把自己包成对应 `Value` 变体；`FromValue` 先匹配自己的变体，再匹配若干「其它可接受变体」（即类型提升分支），都不中就调用 `<Self as Reflect>::error(&v)`。
+- **字面量分支**：`"markup" => SyntaxMode::Markup`。见 [src/foundations/cast.rs:467-480](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L467-L480)（`SyntaxMode`）和 [src/foundations/cast.rs:482-527](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L482-L527)（`MathClass`，14 个字面量分支）。每一行既是「可接受的输入值」，也是「输出时的字符串」。
+- **类型输入分支**：`v: Color => ...`，接受某个已有的 Typst 类型并转换。见 [src/visualize/color.rs:2158-2165](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L2158-L2165) 的 `ProcessColor`：输入接受 `Color`、输出则包成 `Color::from(self)`；以及 [src/foundations/int.rs:454-461](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs#L454-L461) 的 `ToInt`，用 5 个 `v: <类型> =>` 分支表达「i64/bool/f64/Decimal/Str 都能转成它」。
+- **`self =>` 输出分支**：上面两例都带 `self => <expr>`，描述如何把 `T` 转回 `Value`（即生成 `IntoValue`）。
 
-具体调用处，浮点数之所以能接受整数，就来自这一行：
-
-[value.rs:619-621](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L619-L621) — `primitive! { f64: "float", Float, Int(v) => v as f64 }`。最后那个 `Int(v) => v as f64` 正是「整数自动提升为浮点」的源头。对比 `primitive! { i64: "integer", Int }` 没有额外分支，所以浮点不能反向变整数。
+> 一个边界例子：[src/foundations/cast.rs:437-465](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L437-L465) 的 `Never`（不可居住类型）。它的 `input()` 返回空 `Union`、`castable` 恒为 `false`——即「什么都转换不进来」，常用于表示「这个参数永不出现」。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手验证「整数提升为浮点」的报错行为，并对照 `CastInfo::error` 理解提示从何而来。
+**实践一（源码阅读型，本讲指定的核心实践）：标注一段 `cast!` 的输入与输出。**
 
-**操作步骤**（源码阅读型实践，无需编译）：
+1. **实践目标**：能说清 `cast!` 里每行的方向（输入还是输出）和作用。
+2. **操作步骤**：
+   - 打开 [src/visualize/color.rs:2158-2165](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L2158-L2165) 的 `ProcessColor` 这段 `cast!`。
+   - 把它抄到一张纸上，逐行标注。
+3. **参考标注**（答案示例）：
+   - 第 1 行 `ProcessColor,`：声明被转换的目标类型。
+   - 第 2 行 `self => Color::from(self).into_value(),`：**输出分支**（生成 `IntoValue`）。把一个 `ProcessColor` 包成 `Color::Process(...)` 再变成 `Value::Color`。
+   - 第 3–4 行 `v: Color => match v { Color::Process(c) => c, Color::Spot(_) => bail!(...) }`：**输入分支**（生成 `FromValue`）。接受 `Value::Color`，若内部是 `Process` 就取出，若是 `Spot` 则报错。
+4. **需要观察的现象**：注意这段 `cast!` 没有任何 `"字面量" =>` 分支，也没有多个 `v: 类型 =>` 分支——它只有「一个输入类型 + 一个输出」。对比 [src/foundations/int.rs:454-461](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs#L454-L461) 的 `ToInt`（5 个输入分支）和 [src/foundations/cast.rs:482-527](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L482-L527) 的 `MathClass`（14 个字面量分支），体会「分支越多 = `CastInfo::Union` 越大 = 错误信息里 expected 列表越长」。
+5. **预期结果**：你能画出 `ProcessColor` 的 `CastInfo` 大致是 `Union([ Type(Color) ])`（输入）和 `Type(Color)`（输出）。
 
-1. 打开 [value.rs:577-617](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L577-L617)，确认 `primitive!` 同时生成了三 trait。
-2. 对比 `i64`（L620）和 `f64`（L621）两条调用：`f64` 多了 `Int(v) => v as f64` 分支，`i64` 没有。
-3. 在脑海中模拟：某个函数参数声明为 `f64`，用户传入 `Value::Int(3)` → `FromValue for f64` 命中 `Int(v) => v as f64` → 返回 `3.0`，成功。
-4. 反向模拟：参数声明为 `i64`，用户传入 `Value::Float(3.0)` → `FromValue for i64` 的 `match` 不命中任何分支 → 走 `v => Err(<Self as Reflect>::error(&v))` → 最终由 [cast.rs:309-365](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L309-L365) 拼出 `expected integer, found float`。
+**实践二（运行观察型，待本地验证）：用错误信息反向观察 `CastInfo`。**
 
-**需要观察的现象**：`IntoValue`（`i64 -> Value::Int`）与 `FromValue`（`Value -> i64`，只认 `Int`）的「方向不对称」。
-
-**预期结果**：你能用一句话解释「为什么 `1 + 1.0` 在 Typst 里成立，而把 `1.0` 赋给一个只收整数的参数会报错」——前者算术层做了提升（见 u2-l1 的 `ops.rs`），后者类型层 `FromValue` 拒绝。
-
-> 本地验证（可选）：若有 typst CLI，写一个最小 `.typ` 文件，调用一个只收 `int` 的函数（如 `calc.even(2.0)`），观察报错文本是否与上面 `CastInfo::error` 的拼装一致。若不便运行，标注「待本地验证」。
+1. **实践目标**：亲眼看到 `CastInfo::error` 生成的提示。
+2. **操作步骤**：准备一个最小 `.typ` 文件，故意把错误类型传给函数：
+   ```typ
+   #set text(size: "big")
+   ```
+3. **需要观察的现象**：编译报错信息应类似 `expected length, found string`。
+4. **预期结果**：错误里的 `expected length` 正是 `TextSize` 的 `Reflect::input()`（一个 `CastInfo::Type(length)`）经 `error()` 拼出来的；`found string` 来自 `value.ty()`。这说明 `CastInfo` 不是抽象摆设，它直接决定用户看到的报错。
+5. 若本地没有 Typst CLI，可标记「待本地验证」，仅做源码层面的推理。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`Reflect::castable` 既然和 `CastInfo` 描述的信息重叠，为什么 Typst 还要单独提供它？
+**练习 1**：为什么 `FromValue` 要带 `Reflect` 约束，而 `IntoValue` 不带？
+> **答案**：`FromValue` 解析失败时要生成「expected …, found …」错误，这需要 `Reflect::input()` 来描述「期望什么」；所以能被解析的类型必须能自我描述。`IntoValue` 是构造方向，永不失败，不需要描述能力，故不要求 `Reflect`。
 
-**参考答案**：性能。注释 [cast.rs:40-45](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L40-L45) 说明，用 `CastInfo` 判定需要堆分配加动态检查；而 `castable` 为每个类型生成专用机器代码，是热路径上的快速预筛。
+**练习 2**：`Reflect::castable` 和直接用 `CastInfo` 判断「某值能否转换」有什么区别？
+> **答案**：功能上等价，但 `castable` 是为每个类型单独编译出的专用判断（直接模式匹配 `Value` 变体），而走 `CastInfo` 需要堆分配并动态遍历 `Union`。`castable` 存在纯粹是为了性能（见 cast.rs 注释）。
 
-**练习 2**：`FromValue` 的签名带约束 `Sized + Reflect`。如果某个类型只实现了 `FromValue` 却不实现 `Reflect`，会发生什么？
+**练习 3**：看 [src/foundations/int.rs:454-461](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs#L454-L461) 的 `ToInt`，它没有 `self =>` 输出分支。这意味着它**没有**生成 `IntoValue`。那它为什么还要写 `cast!`？
+> **答案**：`ToInt` 是一个内部聚合类型（把多种输入统一成一种），只用于「从 `Value` 解析」，不需要反向变回 `Value`，所以只声明输入分支、省略输出分支即可。`cast!` 允许只写需要的方向。
 
-**参考答案**：编译失败。`FromValue<V = Value>: Sized + Reflect`（[cast.rs:252](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L252)）把 `Reflect` 列为父 trait，强制「能被还原的类型必须先能描述自己」，保证 `error()` 总能用。
+---
 
-### 4.2 cast! 宏：多分支转换声明
+### 4.2 Type / Module
 
 #### 4.2.1 概念说明
 
-对内置标量，`primitive!` 已经够用。但对 `Color`、`ColorSpace`、`MathClass` 这类复合类型，转换规则更复杂：它们既要支持「字符串字面量 → 变体」（如 `"binary" => MathClass::Binary`），又要支持「另一种类型 → 本类型」（如 `v: Color => ...`），还要支持反向输出（`self => ...`）。
+`Value` 里的每个变体都对应一个「类型」。Typst 把「类型」本身也做成了一等值——你可以写 `type(12)` 得到 `int`，可以把 `int` 当函数调用来构造整数。表示「类型」的 Rust 结构就是 `Type`。
 
-为了不让人手写三 trait 的样板代码，`typst-macros` 提供了两个工具（本 crate 只是 reexport）：
+`Type` 解决的问题是：**一个 Rust 类型如何携带足够的元数据（名字、文档、构造器、子作用域），从而能在 Typst 里被命名、被文档化、被点取（如 `str.len`）？**
 
-[cast.rs:1-3](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L1-L3) — `pub use typst_macros::{cast, Cast};`。`cast!` 是声明式宏（生成三 trait 实现），`Cast` 是把 `IntoValue + FromValue` 合起来的便捷 trait。
+`Module` 解决的是另一个问题：**一组相关的定义（函数、常量、子类型）如何被打包成一个可整体导入、可点取的值？** 你写 `#import "utils.typ"` 拿到的就是一个 `Module`；内置的 `math`、`sys` 也是 `Module`。
 
-Typst 里有两种写法：
-
-- **派生形式**：在类型上加属性 `#[ty(cast)]`，让 `#[ty]` 宏自动生成「接受本类型对应 `Value` 变体」的实现。
-- **宏块形式**：显式写 `cast! { 目标类型, 分支... }`，列出所有输入/输出分支。
+两者的共同点：都把「一组定义」组织起来。区别在于 `Type` 是「类型的附属作用域」（放该类型的构造器和方法），`Module` 是「独立命名空间」（可来自文件、包、内置）。
 
 #### 4.2.2 核心流程
 
-一个 `cast!` 宏块最多有三类分支，顺序通常为：
+**一个 Rust 类型变成 Typst 一等类型的路径：**
 
-```text
-cast! {
-    目标 Rust 类型,
-
-    // ① 输出分支（生成 IntoValue）：self 指向被转换的值
-    self => <返回 Value 的表达式>,
-
-    // ② 类型分支（生成 FromValue 的某条路径）：v 是解构出的内部值
-    v: 另一种类型 => <返回 Self 的表达式>,
-
-    // ③ 字面量分支（也属于 FromValue）：匹配特定的字符串值
-    "字面量" => <返回 Self 的表达式>,
-}
+```
+Rust 类型 T（带 #[ty(...)] 注解）
+   │
+   │  typst-macros 生成
+   ▼
+impl NativeType for T          ← 提供 data(): &'static NativeTypeData
+   │
+   ▼
+Type::of::<T>() / T::ty()      ← 一个 Type(Static<NativeTypeData>) 句柄
+   │
+   │  在装配期由
+   │  scope.define_type::<T>()  注入全局 Scope
+   ▼
+用户可见的名字（如 "str"）→ Value::Type(...)
 ```
 
-- 分支 ① 对应 `IntoValue`，必须存在才能把该类型放进 `Value`。
-- 分支 ② / ③ 对应 `FromValue` 的多条路径，按声明顺序匹配；都不中则走 `Reflect::error`。
-- 字面量分支的文档注释（`/// ...`）会被收集进 `CastInfo::Value(value, "短文档")`，最终出现在文档与自动补全里。
+`#[ty(scope, cast, since = ...)]` 里的几个开关：
 
-派生形式 `#[ty(cast)]` 则等价于「只接受本类型自己的 `Value` 变体」，是一种简化版的 `cast!`。
+- `scope`：这个类型有一个附属作用域（由 `#[scope] impl` 块里的 `#[func]` 方法构成），`Type::scope()` 能取到它。
+- `cast`：这个类型本身可以被 `cast`（即 `Value::Type` 与 `Type` 之间能互转）。
+- `since = "x.y"`：文档里标注引入版本。
+
+**模块的构成与访问：**
+
+```
+Module { name, inner: Arc<ModuleInner{ scope, content, file_id }> }
+                                   │
+                                   └─ 访问 module.foo  ──►  scope.get("foo")
+                                                              （本质是一次 Scope 查找）
+```
+
+`Module` 内部用 `Arc` 引用计数，克隆廉价；两个 `Module` 相等当且仅当指向同一个内部对象（指针相等）。
 
 #### 4.2.3 源码精读
 
-**最清晰的字面量分支例子**是 `MathClass`——数学符号的分类，用字符串字面量对应各变体：
+**① `Type` 句柄与元数据。**
 
-[cast.rs:482-527](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L482-L527) — `cast! { MathClass, ... }`。`self =>` 用 `match` 把变体翻成字符串（输出）；随后每个 `"normal" => MathClass::Normal` 之类都是字面量输入分支，每个分支上方的 `///` 注释会成为该字面量的文档。`SyntaxMode`（[cast.rs:467-480](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L467-L480)）是同结构的更小例子。
+[src/foundations/ty.rs:63-65](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L63-L65) —— `#[ty(scope, cast, since = "0.8.0")]` 标注的 `pub struct Type(Static<NativeTypeData>);`。`Static` 是指向 `'static` 数据的轻量引用，所以 `Type` 是 `Copy`/廉价的。
 
-**类型分支（`v: T =>`）的典型例子**是 `ToInt`——它把多种数值/字符串统一收集成一个供 `int()` 构造器使用的中间类型：
+[src/foundations/ty.rs:67-133](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L67-L133) —— `Type` 的一组访问器：`short_name()`（代码里的名字，如 `str`）、`long_name()`（诊断里用的名字，如 `string`）、`title()`（文档标题，如 `String`）、`docs()`、`constructor()`（返回该类型的构造器函数）、`scope()`（附属作用域）、`field()`（从作用域取一个字段）。注意 [src/foundations/ty.rs:123-132](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L123-L132)：**`Type::field` 的实现就是去自己的 `scope()` 里 `get(field)`**——`str.len` 这种访问，本质是查类型的作用域。
 
-[int.rs:454-461](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs#L454-L461) — `cast! { ToInt, v: i64 => ..., v: bool => ..., v: f64 => ..., v: Decimal => ..., v: Str => ... }`。注意它没有 `self =>` 输出分支（`ToInt` 只是输入侧的聚合体，不需要放进 `Value`），却有 5 条 `v: T =>` 分支，演示了「一个 Rust 类型可接受多种 Typst 类型」。
+[src/foundations/ty.rs:194-231](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L194-L231) —— `NativeType` trait 与 `NativeTypeData` 结构。后者是「类型的全部静态元数据」：`name`/`long_name`/`title`/`since`/`docs`/`def_site`/`keywords`/`constructor`(LazyLock)/`scope`(LazyLock)。构造器和作用域都用 `LazyLock`，即**第一次用到才初始化**。
 
-> 整数族还有一个用宏生成的批量 cast：[int.rs:495-513](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs#L495-L513) 的 `signed_int!` 把 `i8/i16/i32/i128/isize` 统一处理，太大会回退成 `Value::Float`——这解释了为什么超大整数在 Typst 里会「悄悄」变浮点。
+**② `type()` 构造器。**
 
-**最丰富的三分支混合例子**在颜色模块。`ColorSpace`（色彩空间）同时有输出分支、类型分支、和一个兜底分支：
+[src/foundations/ty.rs:135-155](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L135-L155) —— `#[scope] impl Type` 里的 `#[func(constructor, since = "0.8.0")] pub fn construct(value: Value) -> Type { value.ty() }`。这就是用户写的 `type(x)`：接收任意 `Value`，返回它的类型。`#[func(constructor)]` 表示它既是 `type` 类型的作用域成员，也是 `type` 的构造器（于是 `type(12)` = 调用构造器）。
 
-[color.rs:2534-2553](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L2534-L2553) — `cast! { ColorSpace, ... }`。三类分支：
-- `self => match self { ... }`：把变体翻成对应的构造函数值（输出）。
-- `spot: SpotColorant => Self::Spot(spot)`：类型分支，从一个专色色料构造 `Spot` 变体。
-- `v: Value => { ... }`：兜底分支，期望收到一个函数（如 `rgb`、`oklch`），并尝试把它识别成某个处理色空间；不中就 `bail!` 报错。
+**③ `define_type`：把类型注入作用域。**
 
-而 `Color` 本身用的是**派生形式**：
+[src/foundations/scope.rs:151-156](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L151-L156) —— `define_type::<T>`：取 `T::ty()` 得到 `Type`，再用 `short_name()` 作为名字、`Type` 作为值调 `define`。于是装配后，全局作用域里就有 `"str" → Value::Type(...)` 这一条绑定。
 
-[color.rs:280-282](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L280-L282) — `#[ty(scope, cast, since = "forever")] pub enum Color { ... }`。`cast` 标志让宏自动生成「接受 `Value::Color`」的转换；`scope` 标志则额外生成一个附属作用域（承载 `color.mix`、`color.components` 等子函数，见 4.3）。
+[src/foundations/mod.rs:91-113](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/mod.rs#L91-L113) —— foundations 分类的装配：连续 `define_type::<bool>()`、`::<i64>()`、`::<Str>()` ……把所有基础类型注册进全局。这就是「为什么 `int`、`str` 这些名字在 Typst 里可用」的源头。
 
-#### 4.2.4 代码实践（本讲指定实践任务之一）
+**④ `Module` 结构与访问。**
 
-**实践目标**：选 `visualize/color.rs` 中的一个 `cast!` 实例，标注它的「输入分支」与「输出」，并区分派生形式与宏块形式。
+[src/foundations/module.rs:47-65](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L47-L65) —— `#[ty(cast, since = "forever")] pub struct Module { name, inner: Arc<ModuleInner> }`；`ModuleInner { scope, content, file_id }`。一个模块 = 名字 + 作用域 + 可排版内容 + 可选的来源文件 id。
 
-**操作步骤**：
+[src/foundations/module.rs:67-90](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L67-L90) —— 两种构造方式：`Module::new(name, scope)`（有名字，内置模块用）和 `Module::anonymous(scope)`（匿名）。还有一系列 `with_*` builder 方法。
 
-1. 打开 [color.rs:280-282](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L280-L282)，确认 `Color` 用的是 `#[ty(scope, cast)]` **派生形式**——它没有手写 `cast!` 块，转换实现由宏自动生成。
-2. 打开 [color.rs:2534-2553](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L2534-L2553) 的 `ColorSpace`，画一张表：
+[src/foundations/module.rs:139-147](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L139-L147) —— `Module::field`：访问 `module.foo` 时，**直接委托 `self.scope().get(field)`**，找不到就报 `module X does not contain Y`。这印证了「模块访问 = 作用域查找」。
 
-   | 分支 | 种类 | 对应生成 |
-   | --- | --- | --- |
-   | `self => match self { ... }` | 输出 | `IntoValue` |
-   | `spot: SpotColorant => Self::Spot(spot)` | 类型输入 | `FromValue` 路径 1 |
-   | `v: Value => { ... }` | 兜底输入 | `FromValue` 路径 2 |
+[src/foundations/module.rs:177-181](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L177-L181) —— `PartialEq`：两个模块相等当且仅当名字相同**且 `Arc::ptr_eq`**（指向同一份内部数据）。所以模块比较是 O(1) 指针比较，不逐字段比较内容。
 
-3. 再看一个更小的类型分支例子 [color.rs:2158-2165](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L2158-L2165) 的 `ProcessColor`：输出 `self => Color::from(self).into_value()`，输入 `v: Color => match v { ... }`——注意它把 `Color` 解构，遇到 `Spot` 变体就 `bail!`。
+[src/foundations/value.rs:663](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L663) —— `primitive! { Module: "module", Module }`：`Module` 也是一个一等类型（`type(sys)` 返回 `module`），并能在 `Value::Module` 与 `Module` 间互转。
 
-**需要观察的现象**：同一个文件里，`Color` 用派生、`ColorSpace`/`ProcessColor` 用宏块——选择哪种，取决于转换规则是「只认自己」还是「有多条输入路径」。
+#### 4.2.4 代码实践
 
-**预期结果**：你能说清「为什么 `Color` 不需要手写 `cast!`（派生够了），而 `ColorSpace` 必须手写（要接受函数值并智能识别）」。
+**实践（源码追踪型）：追踪一个类型从 Rust 到用户可见名字的完整路径。**
+
+1. **实践目标**：把「Rust 类型 → Typst 名字」的链条走通。
+2. **操作步骤**：
+   - 以 `Str` 为例。它由 [src/foundations/value.rs:636-640](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L636-L640) 的 `primitive! { Str: "string", Str, ... }` 注册为类型（类型名 `string`，变体 `Value::Str`）。
+   - 在 [src/foundations/mod.rs:96](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/mod.rs#L96) 看到 `global.define_type::<Str>();`。
+   - 追到 [src/foundations/scope.rs:151-156](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L151-L156)：`define_type::<Str>` 取 `Str::ty()`（一个 `Type`），用 `short_name()` 作为键写入 `Scope`。
+3. **需要观察的现象**：理清「`primitive!` 定义类型的变体与提升规则」和「`define_type` 把类型名挂进作用域」是**两个独立步骤**——前者管 `Value::Str ↔ Str`，后者管「`str` 这个名字指向谁」。
+4. **预期结果**：你能解释用户写 `str.len("abc")` 时发生什么——`str` 经 `Scopes::get` 找到 `Value::Type(Str 的 Type)`，`.len` 经 [src/foundations/ty.rs:123-132](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L123-L132) 的 `Type::field` 在 `Str` 的附属作用域里查到 `len` 函数。
+5. **关于类型名**：`primitive!` 里写的 `string` 是文档展示用的名字，而 `define_type` 用的是 `Type::short_name()`（取 `NativeTypeData::name`，对 `Str` 实际是 `str`）。两者的精确对应需对照 `src/foundations/str.rs` 里 `#[ty(...)]` 的标注确认；若不确定，标注「待确认：以 str.rs 中 `#[ty]` 的 name 为准」。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：在 `cast! { ColorSpace, ... }` 里，为什么 `v: Value => { ... }` 这条兜底分支放在最后？
+**练习 1**：`Type::field` 和 `Module::field` 的实现有什么共同点？
+> **答案**：两者最终都委托给一个 `Scope::get(field)` 查找。类型有「附属作用域」，模块本身包着一个作用域，所以 `a.b` 这种点取，底层统一是一次 `Scope` 查找。
 
-**参考答案**：`FromValue` 的多条路径按声明顺序匹配。`spot: SpotColorant` 是更具体的类型分支，应优先命中；`v: Value` 匹配任意值，必须放最后做兜底，否则会「吃掉」前面所有分支。
+**练习 2**：为什么 `Module` 的 `PartialEq` 用 `Arc::ptr_eq` 而不是逐字段比较？
+> **答案**：`Module` 内部是 `Arc<ModuleInner>`，引用计数让克隆廉价；用指针相等判断「是否同一个模块」是 O(1) 且语义清晰（两个文件各自 import 同一个包，得到的 Module 实例可视为同一份）。逐字段比较既慢又会递归比较 `scope`/`content`，没必要。
 
-**练习 2**：`ToInt`（[int.rs:454-461](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/int.rs#L454-L461)）没有 `self =>` 输出分支。这意味着什么？
+**练习 3**：`NativeTypeData` 的 `constructor` 和 `scope` 为什么是 `LazyLock`？
+> **答案**：很多类型在编译里根本用不到构造器或方法（比如你只读不构造）。`LazyLock` 让这些元数据**首次访问才初始化**，避免在装配期为所有类型都构建一遍，省启动时间和内存。
 
-**参考答案**：`ToInt` 只服务于 `int()` 构造器的**输入侧**（把多种类型聚合成一个可被还原成整数的中间体），它本身不会作为 `Value` 出现在用户代码里，因此不需要 `IntoValue`。这也说明 `cast!` 的输出分支是可选的。
+---
 
-### 4.3 Type 与 Module：类型与模块的命名空间
+### 4.3 Scope / Binding / Scopes
 
 #### 4.3.1 概念说明
 
-光有转换还不够。用户能写 `#type(x)`、能用 `str` 这个名字、能调用 `color.mix(...)`，是因为这些「类型」和「模块」被注册成了**一等公民**，拥有名字、文档、构造函数、乃至附属作用域。
+如果说 `Type`/`Module` 是「把定义打包」，那么 `Scope` 就是定义实际存放的地方：一张**有序**的「名字 → 绑定」映射。`Binding` 是这张表里的一条记录，除了值本身，还带 span、分类、是否只读、是否已弃用等元信息。
 
-- **`Type`**：描述「一种类型」的句柄。它本身也是一个 Typst 类型（你可以 `#type(type)`，结果还是 `type`）。`Type` 指向一块静态数据 `NativeTypeData`，里面存放名字、长短名、文档、关键词、构造函数和**一个附属 `Scope`**。
-- **`Module`**：一组相关定义的集合，带名字、带可排版内容（`content`）、带文件来源（`file_id`）。它对应「内置模块（如 `math`）」「文件/包 import 的产物」「`plugin` 函数的返回值」。
-- **`NativeType` / `NativeScope`**：Rust 侧的 trait，分别是「由原生 Rust 类型定义的 Typst 类型」和「类型的附属作用域」。
+需要区分两个名字相近的类型：
 
-一句话区分：`Type` 是「类型的元信息 + 附属子定义」；`Module` 是「一组任意定义 + 文档正文 + 文件来源」。两者内部都用 `Scope` 存定义，但 `Type` 的定义是该类型专属的子函数（`color.mix`），`Module` 的定义是模块顶层导出的任意东西。
+- **`Scope`**（单数）：一张名字表。装配期的 `define_type`/`define_func` 都往这里写；它也作为 `Module`/`Type` 的内部存储。
+- **`Scopes`**（复数，带生命周期 `'a`）：**求值期的变量查找栈**。它持有当前活动作用域 `top`、外层作用域栈 `scopes`，以及一个指向标准库 `Library` 的 `base` 引用。
+
+为什么要分两层？因为「定义在哪里登记」（装配期，单张 `Scope`）和「运行时按名字找到它」（求值期，多层 `Scopes` 含回退）是两个不同的问题。`Scopes` 的关键能力是**回退**：局部找不到就去外层找，外层找不到就去标准库找。
 
 #### 4.3.2 核心流程
 
-```text
-   用户写 #type(12)                 用户写 str                       用户写 color.mix
-        │                                │                                  │
-        ▼                                ▼                                  ▼
-  Type::construct (constructor)    全局 Scope 里查 "str"              先查 "color" 得到 Type
-  返回 value.ty()                  得到 Binding(Value::Type(str))    再用 Type::field 查 "mix"
-                                                                         （从 Type 的附属 Scope）
-        │                                │                                  │
-        └────────────── 数据来源 ─────────┴──────────────────────────────────┘
-                          NativeTypeData（静态）  ←  Type 持有
-                            ├ name / long_name / title
-                            ├ docs / keywords / since
-                            ├ constructor (LazyLock)
-                            └ scope: LazyLock<Scope>   ← 子函数挂在这里
+**装配期：往 `Scope` 里写。**
 
-   文件 import "a.typ" → 求值后得到 Module { name, scope, content, file_id }
-                          └ scope: Scope              ← 模块顶层定义挂在这里
+```
+scope.define("name", value)
+   └─► Binding::detached(value)   记下当前 category
+        └─► bind(name, binding)   写入 IndexMap（保留插入序）
+
+更专业的入口：
+  define_func::<T>()   ─► define(T::data().name, Func)
+  define_type::<T>()   ─► define(T::ty().short_name(), Type)
+  define_elem::<T>()   ─► define(T::ELEM.name(), elem)
 ```
 
-关键点：
+**求值期：`Scopes::get` 的查找链（本讲重点）。**
 
-1. `Type` 的数据是**静态的**（`Static<NativeTypeData>`），全局唯一、`Copy` 且廉价；其中 `constructor` 和 `scope` 都是 `LazyLock`（惰性初始化）。
-2. 查类型字段（`color.mix`）走 `Type::field` → `Type::scope().get(field)`；查模块字段（`std.rect`）走 `Module::field` → `Module::scope().get(field)`——最终都落到 `Scope::get`。
-3. `Module` 用 `Arc<ModuleInner>` 做引用计数，克隆廉价；相等性按「指针相等 + 同名」判定（见源码）。
+```
+查找变量 var:
+  1. 当前活动作用域 self.top                ┐
+  2. 由内向外遍历 self.scopes（.rev()）      ├─ 用户/局部作用域
+                                             ┘
+     └─ 都没找到？回退到 base（标准库 Library）:
+        3a. base.global.scope().get(var)     ── 全局标准库（code 模式）
+        3b. 特例：var == "std"  ──► 直接返回 &base.std
+     └─ 还是没有 ──► Err(unknown_variable(var))
+```
+
+数学模式下走 `get_in_math`，回退目标换成 `base.math.scope()`（数学有自己的命名空间）。
+
+**只读约束**：`get_mut`（可变访问）**不允许**改动标准库里的常量——若变量存在于 `base.global` 或就是 `std`，会返回 `cannot mutate a constant`。这就是为什么你不能重新赋值内置的 `int`（普通 `let` 同名遮蔽则另有 `check_std_shadowed` 检查）。
 
 #### 4.3.3 源码精读
 
-**`Type` 本身**是一个被注册的类型——注意它自己头上也有 `#[ty(scope, cast, since = "0.8.0")]`：
+**① `Scopes` 求值栈。**
 
-[ty.rs:63-65](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L63-L65) — `pub struct Type(Static<NativeTypeData>);`。`Static` 保证它 `Copy` 且指向进程生命周期的静态数据。
+[src/foundations/scope.rs:16-25](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L16-L25) —— `struct Scopes<'a> { top: Scope, scopes: Vec<Scope>, base: Option<&'a Library> }`。`base` 就是指向标准库的「最终回退点」。
 
-`Type` 的方法大多是只读访问器。其中两个最关键：取附属作用域，和按名取字段：
+[src/foundations/scope.rs:33-43](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L33-L43) —— `enter`/`exit`：进入/退出一层作用域。`enter` 把当前 `top` 存进 `scopes` 并换一张空表；`exit` 弹出恢复。这就是 `#{ ... }`、函数体、`let` 块的作用域嵌套机制。
 
-[ty.rs:117-132](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L117-L132) — `Type::scope()` 返回 `&'static Scope`；`Type::field()` 先在附属 scope 里查，查不到就 `bail!`，查到则用 `binding.read_checked(sink)` 读取（顺便触发弃用警告）。
+**② `Scopes::get` 的回退链（本讲指定实践的重点）。**
 
-`Type` 自己也是一个带构造函数的类型——用户写的 `#type(x)` 就走到它的构造函数：
+[src/foundations/scope.rs:45-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L45-L59) —— 逐行看 `get`：
 
-[ty.rs:148-154](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L148-L154) — `#[func(constructor, since = "0.8.0")] pub fn construct(value: Value) -> Type { value.ty() }`。`constructor` 标志声明这是该类型的构造函数，`value.ty()` 把任意值映射回它的 `Type`。
+1. `std::iter::once(&self.top).chain(self.scopes.iter().rev()).find_map(|scope| scope.get(var))`：先在 `top`，再从内到外遍历 `scopes`，找到就返回。
+2. `.or_else(|| { let base = self.base?; match base.global.scope().get(var) { Some(b) => Some(b), None if var == "std" => Some(&base.std), None => None } })`：局部全 miss 时回退到标准库全局作用域；**特判 `std`**——任何情况下 `std` 这个名字都返回 `&base.std`。
+3. `.ok_or_else(|| unknown_variable(var))`：仍找不到才报「unknown variable」。
 
-「一个原生类型要提供什么」由 `NativeType` trait 规定，实际数据放进 `NativeTypeData`：
+[src/foundations/scope.rs:61-73](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L61-L73) —— `get_mut`：同样的局部查找，但**不回退取值**，只在判断错误类型时检查 `base`——若发现在标准库里，就报 `cannot_mutate_constant`。即标准库常量只读。
 
-[ty.rs:195-208](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L195-L208) — `NativeType` trait，要求 `const NAME` 和 `fn data() -> &'static NativeTypeData`，并提供默认的 `fn ty()`。
+[src/foundations/scope.rs:75-94](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L75-L94) —— `get_in_math`：与 `get` 同构，但回退到 `base.math.scope()`，且找不到时的错误信息（`unknown_variable_math`）会贴心地提示「在数学里要多加空格 / 用引号 / 用 `#` 切到 code 模式」。
 
-[ty.rs:211-231](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L211-L231) — `NativeTypeData` 结构：`name`（短名，如 `str`）、`long_name`（长名，用于错误信息，如 `string`）、`title`（文档标题，如 `String`）、`since`、`docs`、`def_site`、`keywords`、`constructor`（`LazyLock`）、`scope`（`LazyLock<Scope>`，挂子函数）。
+**③ `std` 这个特殊绑定从哪来。**
 
-甚至连「静态数据引用」本身也能被 cast 成 `Type` 值：
+[src/lib.rs:179-180](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/lib.rs#L179-L180) —— `Library` 有一个 `pub std: Binding` 字段。
 
-[ty.rs:239-242](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L239-L242) — `cast! { &'static NativeTypeData, self => Type::from(self).into_value() }`。这是一个只有输出分支的最小 `cast!`，用于把静态数据引用直接当 `Type` 用。
+[src/lib.rs:221-234](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/lib.rs#L221-L234) —— `build()` 里由 `std: Binding::detached(global)` 赋值——即 **`std` 这个绑定的值，正是全局库 `global` 模块本身**。所以 `std.table` 等价于直接在全局作用域里查 `table`：`std` 是全局库的自引用别名。
 
-**`Module`** 的结构与 `Type` 平行，但多了「内容」与「文件来源」：
+**④ `Scope` 单张表与 `define`。**
 
-[module.rs:47-65](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L47-L65) — `Module` 用 `Arc<ModuleInner>`，内部 `ModuleInner` 含 `scope`（顶层定义）、`content`（可排版正文）、`file_id`（文件来源）。注意 `Module` 也注册为类型 `#[ty(cast, since = "forever")]`。
+[src/foundations/scope.rs:105-111](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L105-L111) —— `struct Scope { map: IndexMap<EcoString, Binding, FxBuildHasher>, deduplicate, category }`。用 `IndexMap` 是为了**保留插入顺序**（文档生成、稳定迭代都依赖它）；`FxBuildHasher` 是 rustc 的高速哈希。
 
-模块的创建与字段访问：
+[src/foundations/scope.rs:175-185](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L175-L185) —— `define(name, value)`：构造 `Binding::detached(value)`，打上当前 `category`，再 `bind`。debug 模式下若开了 `deduplicate` 且重名会直接 panic（防止装配期重复注册）。返回 `&mut Binding` 方便链式调用（如 `.deprecated(...)`）。
 
-[module.rs:67-78](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L67-L78) — `Module::new(name, scope)` 构造一个具名模块（content 空、无文件来源）。
+[src/foundations/scope.rs:135-163](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L135-L163) —— 三个语义化入口：`define_func::<T>`、`define_type::<T>`、`define_elem::<T>`，分别用各自的「标准名字」调 `define`。
 
-[module.rs:138-147](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L138-L147) — `Module::field()` 在 scope 里查字段，查不到时按「有无名字」给出不同错误信息，这与 `Type::field` 的错误信息风格一致。
+[src/foundations/scope.rs:189-217](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L189-L217) —— `bind`/`get`/`get_mut`/`iter`：底层就是 `IndexMap` 的 entry 操作。
+
+**⑤ `Binding` 与只读捕获。**
+
+[src/foundations/scope.rs:248-261](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L248-L261) —— `struct Binding { value, kind, span, category, deprecation }`。`kind` 区分 `Normal`（可写）与 `Captured(Capturer)`（闭包/上下文捕获的只读副本）。
+
+[src/foundations/scope.rs:295-327](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L295-L327) —— `read()` 直接返回值；`read_checked(sink)` 会在读取时按需发弃用警告；`write()` 对 `Captured` 绑定报错（这就是「闭包外变量只读」的来源，错误信息在 [src/foundations/scope.rs:315-327](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L315-L327)）。
 
 #### 4.3.4 代码实践
 
-**实践目标**：对照 `Type::field` 与 `Module::field`，理解「类型字段」和「模块字段」最终都走 `Scope::get`。
+**实践（本讲指定的第二个核心实践，源码阅读型）：解释 `Scopes::get` 如何回退到标准库与 `std`。**
 
-**操作步骤**：
-
-1. 阅读 [ty.rs:117-132](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L117-L132)（`Type::scope` / `Type::field`）和 [module.rs:138-147](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L138-L147)（`Module::field`）。
-2. 注意两者都调用 `something.scope().get(field)`，差别只在「scope 从哪来」：`Type` 从静态 `NativeTypeData.scope`，`Module` 从 `Arc<ModuleInner>.scope`。
-3. 回顾 [value.rs:156-169](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L156-L169) 的 `Value::field`：当对一个 `Value::Type(ty)` 或 `Value::Module(module)` 取字段时，正是分流到这两个 `field` 方法。
-
-**需要观察的现象**：`Type` 和 `Module` 在「字段访问」上几乎同构，只是数据来源（静态 vs `Arc`）和附带信息（content/file_id）不同。
-
-**预期结果**：你能解释「为什么 `color.mix` 和 `std.rect` 在底层走的是同一套查找逻辑」——它们最终都调用 `Scope::get`。
-
-> 待本地验证：若有 typst CLI，可分别试 `#color.mix(..)`（类型字段）和 `#std.rect(..)`（模块字段），观察两者都能正常解析；这正是同一套机制的两种入口。
+1. **实践目标**：能复述变量查找的三级回退，并解释 `std` 的特殊性。
+2. **操作步骤**：
+   - 读 [src/foundations/scope.rs:45-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L45-L59) 的 `get`。
+   - 跟踪用户在空文档里写 `#table()` 时，名字 `table` 是怎么被找到的：当前 `top`/`scopes` 都是空的（用户没定义），于是回退到 `base.global.scope().get("table")`，命中（因为 `model/table.rs` 的装配调用了 `define_elem::<TableElem>()`，把 `"table"` 写进了全局 `Scope`）。
+   - 再跟踪 `#std.table()`：`std` 在第 2 步特判里直接返回 `&base.std`（其值是全局模块），随后 `.table` 经 [src/foundations/module.rs:139-147](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L139-L147) 的 `Module::field` 又查一次全局作用域。
+3. **需要观察的现象**：`table` 与 `std.table` 走的是两条不同路径，但最终落到**同一个** `Binding`（都在全局 `Scope` 里）。这验证了「`std` 是全局库的自引用」。
+4. **预期结果**：你能解释——即使没有任何 `import`，`table` 也能用，是因为 `Scopes::get` 的标准库回退；而 `std` 总能用，是因为它被硬编码在回退逻辑里。
+5. 若想进一步验证只读约束：读 [src/foundations/scope.rs:61-73](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L61-L73)，说明为什么 `#(int = 5)` 这类对标准库名字的赋值会失败（`cannot_mutate_constant`）。具体报错信息「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`Type` 内部用 `Static<NativeTypeData>`，而 `Module` 用 `Arc<ModuleInner>`。为什么设计不同？
+**练习 1**：`Scopes::get` 查找变量时的顺序是什么？为什么用 `scopes.iter().rev()`？
+> **答案**：顺序是 `top` → `scopes` 由内向外 → `base.global`（标准库）→ 特判 `std`。用 `.rev()` 是因为 `scopes` 是一个栈，**后 push 的是更内层**的作用域（见 `enter` 把当前 `top` push 进去），要从最内层往外找，就要逆序遍历，这样才能正确实现「内层遮蔽外层」。
 
-**参考答案**：`Type` 描述的是编译期就完全确定的内置类型，数据是进程级静态的，用 `Static` 即可，`Copy` 且零分配；`Module` 的内容（尤其来自文件/包 import 的模块）是运行期产生的，需要引用计数共享与写时复制，所以用 `Arc`（配合 [module.rs:99-114](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/module.rs#L99-L114) 的 `Arc::make_mut` 修改）。
+**练习 2**：为什么 `std` 不需要写在全局 `Scope` 里，而是单独特判返回 `&base.std`？
+> **答案**：因为 `std` 的值就是「全局库模块本身」（见 [src/lib.rs:231](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/lib.rs#L231) `Binding::detached(global)`）。把它作为 `Library` 的一个独立字段 `std: Binding`，并在 `get` 里特判，既避免了循环构造（`global` 模块里再塞一个指向自己的条目），也让 `std` 永远可用、不受用户遮蔽影响。
 
-**练习 2**：`NativeTypeData` 里 `constructor` 和 `scope` 为什么用 `LazyLock` 而不是普通字段？
+**练习 3**：`Binding::write` 在什么情况下会失败？
+> **答案**：当 `Binding` 的 `kind` 是 `Captured(_)` 时。闭包或上下文表达式从外层捕获的变量是只读副本，对它赋值会报「variables from outside the function/context are read-only」。`Normal` 绑定则可写（前提是它不在只读的标准库作用域里——后者由 `Scopes::get_mut` 拦截）。
 
-**参考答案**：构造函数与附属作用域可能引用其他尚未完成静态初始化的类型/函数，存在循环引用风险；`LazyLock` 把初始化推迟到首次访问，打破静态初始化顺序依赖。同时并非每个类型都会被用到，惰性也省去无用开销。
-
-### 4.4 Scope / Binding / Scopes：定义的存储与查找
-
-#### 4.4.1 概念说明
-
-`Type` 和 `Module` 解决了「类型/模块长什么样」，但真正存放「名字 → 定义」的底层容器是 `Scope`。一个 `Scope` 就是一个有序映射（`IndexMap`），键是名字（`EcoString`），值是 `Binding`。
-
-`Binding` 不只是「一个值」，它还携带元信息：值的种类（普通绑定 vs 闭包捕获）、定义处的 `Span`、分类（`Category`）、弃用信息。这些元信息决定了「能不能改写」「报错指向哪里」「文档归到哪一类」。
-
-在求值时，变量查找不止看「当前作用域」。Typst 维护一个**作用域栈** `Scopes`：最上层是当前函数/块的局部变量，往下逐层是外层作用域，栈底回退到标准库的全局 `Scope`（`base.global`），最后还有一个特殊的 `std` 名字。数学模式则回退到 `base.math` 而非 `base.global`。
-
-#### 4.4.2 核心流程
-
-变量查找（代码模式）的回退顺序：
-
-```text
-Scopes::get("x")
-  │
-  ├─ 1. self.top            （当前局部作用域）
-  ├─ 2. self.scopes (rev)   （外层作用域，从内到外）
-  ├─ 3. base.global.scope() （标准库全局：rect / str / page ...）
-  ├─ 4. 若 var == "std"     （特殊名字 std，指向 base.std）
-  └─ 都没有 → unknown_variable(var)  （附带「是不是把减号写成了连字符」等提示）
-```
-
-数学模式（`get_in_math`）把第 3 步换成 `base.math.scope()`，且错误信息会区分「是不是该加 `#`」「是不是该用 `std.x`」。
-
-`Scope` 的写入侧有四个便捷方法，分别对应四种「定义」：
-
-| 方法 | 注册的对象 | 典型调用 |
-| --- | --- | --- |
-| `define_func::<F>()` | 原生函数 | `global.define_func::<panic_func>()` |
-| `define_type::<T>()` | 原生类型 | `global.define_type::<Str>()` |
-| `define_elem::<E>()` | 原生元素 | `global.define_elem::<RectElem>()` |
-| `define(name, value)` | 任意具名值 | `global.define("left", Align::LEFT)` |
-
-#### 4.4.3 源码精读
-
-**`Scopes`** 是求值期的变量查找栈：
-
-[scope.rs:16-25](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L16-L25) — `Scopes { top: Scope, scopes: Vec<Scope>, base: Option<&Library> }`。`top` 是当前活动作用域，`scopes` 是外层栈，`base` 指向标准库（提供全局/math/std 回退）。
-
-核心查找逻辑 `Scopes::get`：
-
-[scope.rs:46-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L46-L59) — 先用 `iter::once(&self.top).chain(self.scopes.iter().rev())` 从内到外找局部作用域；找不到再 `or_else` 回退到 `base`：查 `base.global.scope()`，再特判 `var == "std"` 返回 `base.std`；都失败则 `unknown_variable(var)`。这正是本讲指定实践要阅读的回退链。
-
-数学模式的变体 `get_in_math`：
-
-[scope.rs:76-94](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L76-L94) — `Scopes::get_in_math`。回退目标从 `base.global` 换成 `base.math`，错误信息 `unknown_variable_math` 会针对数学模式给出更贴切的提示（如「试试加 `#`」「用 `std.x` 访问」）。
-
-**`Scope`** 的存储结构：
-
-[scope.rs:105-111](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L105-L111) — `Scope { map: IndexMap<EcoString, Binding, FxBuildHasher>, deduplicate: bool, category: Option<Category> }`。用 `IndexMap` 保留插入顺序（文档顺序），`FxBuildHasher` 是快速非加密哈希，`deduplicate` 在 debug 模式下防重复定义，`category` 给随后注册的绑定盖上分类标签。
-
-四种 `define_*` 写入方法集中在 `Scope` 的构造 impl 里：
-
-[scope.rs:135-186](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L135-L186) — `define_func`（L137-140）从 `T::data()` 取函数数据；`define_type`（L152-156）用 `T::ty().short_name()` 作名；`define_elem`（L159-163）用 `T::ELEM` 的名字；`define`（L176-185）是通用入口，在 debug 下检查 `deduplicate`，并把当前 `self.category` 盖到新建 `Binding` 上。它们都最终落到 `bind`。
-
-**`Binding`** 的元信息：
-
-[scope.rs:248-261](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L248-L261) — `Binding { value, kind: BindingKind, span, category, deprecation }`。`BindingKind`（[scope.rs:264-270](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L264-L270)）区分 `Normal`（可改写）与 `Captured(Capturer)`（函数/上下文捕获，只读）。`write()`（[scope.rs:313-327](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L313-L327)）对捕获绑定会报「variables from outside the function/context are read-only」——这正是 Typst 里闭包捕获变量不可修改的来源。
-
-最后，类型的附属作用域由 `NativeScope` trait 提供：
-
-[scope.rs:239-246](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L239-L246) — `NativeScope` 规定类型可提供 `constructor()` 和 `scope()`，后者就是挂在 `NativeTypeData.scope` 上的那个 `Scope`（即 `color.mix` 这类子函数的家）。
-
-#### 4.4.4 代码实践（本讲指定实践任务之一）
-
-**实践目标**：阅读 `Scopes::get`，说清变量查找如何回退到标准库 `base.global` 与 `std`。
-
-**操作步骤**：
-
-1. 打开 [scope.rs:46-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L46-L59)，按 4.4.2 的回退顺序，逐行标注每一步对应哪段代码。
-2. 特别留意 `or_else(|| { let base = self.base?; match base.global.scope().get(var) { ... None if var == "std" => Some(&base.std) ... } })`：这是「最后回退到全局 + std 特例」的关键。
-3. 思考一个具体场景：用户在某个函数内部写 `#let len = calc.abs(-3)`。求值 `calc` 时，`top` 与所有外层 `scopes` 里都没有 `calc`，于是回退到 `base.global.scope().get("calc")` 命中（因为 `calc` 在 [foundations/mod.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/mod.rs) 被注入全局）。
-4. 对比 [scope.rs:62-73](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L62-L73) 的 `get_mut`：对在全局 `base` 中找到的变量，它返回 `cannot_mutate_constant` 错误——所以你不能给 `std` 或全局常量赋值。
-
-**需要观察的现象**：局部作用域优先，标准库兜底；标准库定义是只读常量。
-
-**预期结果**：你能解释「为什么用户写的 `#let calc = 1` 会临时遮蔽（shadow）全局的 `calc` 模块，但一旦离开该作用域，`calc` 又变回标准库模块」——因为查找总是从 `top` 开始，局部绑定优先命中。配合 [scope.rs:96-102](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L96-L102) 的 `check_std_shadowed`，Typst 还能对「遮蔽了标准库名字」给出提示。
-
-#### 4.4.5 小练习与答案
-
-**练习 1**：在 `Scopes::get` 中，为什么对 `std` 要做 `None if var == "std" => Some(&base.std)` 的特判，而不是把 `std` 直接定义在全局 scope 里？
-
-**参考答案**：`std` 是一个指向「整个标准库」的特殊别名（`base.std` 是一个预先构建好的 `Binding`/`Module`），它需要跨「全局模式」和「数学模式」都可用且语义一致（两种模式的 `get` / `get_in_math` 都特判 `std`）。把它作为 `Scopes` 层的特例，而不是塞进某个具体 `Scope`，能让它始终独立于作用域栈与模式切换存在。
-
-**练习 2**：`Binding::write()` 对 `Captured` 绑定会报错（[scope.rs:313-327](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L313-L327)）。请举一个会触发该错误的 Typst 代码片段。
-
-**参考答案**：在闭包里修改捕获的外层变量，例如：
-
-```typst
-#let x = 1
-#let f = () => { x = 2 }   // x 是从外层捕获的，只读
-#f()
-```
-
-求值 `x = 2` 时，`x` 在闭包的作用域里是 `BindingKind::Captured(Function)`，`write()` 会返回「variables from outside the function are read-only and cannot be modified」。
+---
 
 ## 5. 综合实践
 
-**任务**：追踪一个完整的「定义 → 查找 → 转换」链路，把本讲四个模块串起来。
+把三个最小模块串起来，做一个**「定义的一生」追踪任务**：跟踪一个标准库函数从「Rust 源码」到「用户在文档里调用」的完整生命。
 
-设想用户写了这样一段 Typst 代码（伪代码，仅用于追踪）：
+以 `panic` 函数（foundations 分类里的一个原生函数）为例：
 
-```typst
-#let my-color = color.mix((red, 50%), (blue, 50%))
-#set text(fill: my-color)
-```
+1. **定义与标注**：在 [src/foundations/mod.rs](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/mod.rs) 里找到它的 `#[func]` 定义（搜索 `pub fn panic`），看清它的参数签名——这些参数类型都实现了 `FromValue`（4.1）。
+2. **注册进作用域**：在 [src/foundations/mod.rs:115](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/mod.rs#L115) 看到 `global.define_func::<panic>();`，它经 [src/foundations/scope.rs:136-140](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L136-L140) 把名字 `panic` 和对应的 `Func` 写进全局 `Scope`（4.3）。
+3. **打包成库**：这个全局 `Scope` 在 [src/lib.rs:224](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/lib.rs#L224) 被 `global(...)` 包成 `Module`，存进 `Library.global`；同时 `Library.std = Binding::detached(global)`（4.3 的 `std` 特判）。
+4. **运行时被找到**：用户写 `#panic("oops")` 时，求值器的 `Scopes::get("panic")` 局部 miss，回退到 `base.global.scope().get("panic")` 命中（4.3）。
+5. **参数被转换**：调用时，`"oops"` 这个 `Value::Str` 经 `Args` 解析，用 `FromValue::from_value` 还原成 `panic` 函数签名要求的 Rust 类型（4.1）；若类型不符，`CastInfo::error` 负责生成报错。
 
-请按下列步骤，用本讲学到的源码知识解释每一步：
+**交付物**：画一张时序图（或写一份编号清单），标注上面 5 个阶段各自涉及的源码文件与行号。这张图能把本讲的「转换—类型/模块—作用域」三块知识连成一条线。
 
-1. **类型如何被注册**：`color` 这个名字为何能在全局被找到？它是一个 `Type`（由 `#[ty(scope, cast)]` 标注，见 [color.rs:280-282](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/visualize/color.rs#L280-L282)），经 `global()` 装配时由 `define_type::<Color>()`（[scope.rs:152-156](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L152-L156)）写入全局 `Scope`。
-2. **字段如何被查找**：`color.mix` 走 `Type::field("mix")` → `Type::scope().get("mix")`（[ty.rs:117-132](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/ty.rs#L117-L132)）；而 `my-color` 这个局部变量经 `Scopes::get("my-color")` 在 `top` 命中（[scope.rs:46-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L46-L59)）。
-3. **结果如何被转换**：`color.mix` 返回一个 `Color`。当 `set text(fill: ...)` 需要把它存进 `text` 元素的 `fill` 字段时，参数侧用 `FromValue for Color`（由 `#[ty(cast)]` 派生，对应 `primitive!`/`cast!` 生成的实现）把 `Value` 还原成 Rust 的 `Color`；反过来，运行期把 `Color` 放进 `Value` 时走 `IntoValue`。
-4. **错误如何产生**：假设用户误写成 `#set text(fill: "not a color")`，`FromValue for Color` 匹配失败，调用 `<Color as Reflect>::error(&v)`，最终由 [cast.rs:309-365](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L309-L365) 拼出 `expected color, found string`。
-
-**交付物**：画一张包含「`Scope` 存储 → `Scopes::get` 查找 → `Type::field` 取子函数 → `FromValue`/`IntoValue` 转换 → `CastInfo::error` 报错」五个环节的流程图，并在每个环节标注对应的源码文件与行号。这是一次纯源码阅读型实践，无需编译运行。
+> 若你想做扩展：把 `panic` 换成某个**元素**（如 `heading`，见 u3-l3），重复上述追踪。元素走的是 `define_elem` 而非 `define_func`，但「注册进 Scope → 被回退查找」的后半段完全一样。这能帮你体会函数与元素在装配层面的统一性。
 
 ## 6. 本讲小结
 
-- Typst 用 **`Reflect` / `IntoValue` / `FromValue` 三段式模型**在 Rust 类型与万能 `Value` 之间搭桥：`Reflect` 描述类型（用于文档/补全/快速判定），`IntoValue` 是不会失败的「Rust → Value」，`FromValue` 是可能失败的「Value → Rust」。
-- **`CastInfo`** 用 `Any` / `Value` / `Type` / `Union` 四变体描述「期望什么值」，既喂给 `Reflect`，又驱动 [cast.rs:309-365](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L309-L365) 的智能错误信息（如「长度需要单位」「用 `label(...)`」）。
-- **`cast!` 宏**用 `self =>`（输出）、`v: T =>`（类型输入）、`"字面量" =>`（字面量输入）三类分支批量生成三 trait；`primitive!` 是标量的批量版；`#[ty(cast)]` 是「只认自身变体」的派生简化版。`f64` 接受 `Int` 的隐式提升就来自 [value.rs:621](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L619-L621)。
-- **`Type`** 是「类型的元信息 + 附属 `Scope`」，数据静态（`Static<NativeTypeData>`）；**`Module`** 是「一组定义 + 文档正文 + 文件来源」，数据用 `Arc`。两者的 `field()` 最终都落到 `Scope::get`。
-- **`Scope`**（`IndexMap<名字, Binding>`）是底层存储；**`Binding`** 携带种类/`Span`/分类/弃用等元信息，`Captured` 绑定只读。**`Scopes::get`** 按「当前 → 外层 → `base.global` → `std`」回退查找（[scope.rs:46-59](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/scope.rs#L46-L59)），数学模式回退到 `base.math`。
+- Typst 的类型转换是**三段式**：`Reflect`（描述）、`IntoValue`（构造，不失败）、`FromValue`（解析，可能失败且要求 `Reflect`）。不用 `From`/`TryFrom` 是为了避免 impl 冲突和满天 `.into()`。
+- `CastInfo` 是「描述性类型」（`Any`/`Value`/`Type`/`Union`），同时服务于文档、自动补全和「expected X, found Y」错误信息；`Reflect::castable` 是同义的快速判断。
+- `cast!` 宏为非标量类型生成三件套，支持字面量分支（`"x" => V`）、类型输入分支（`v: T => ...`）和输出分支（`self => ...`），可只写需要的方向。
+- `Type` 是「类型的句柄」，指向静态元数据 `NativeTypeData`（名字/文档/构造器/作用域），由 `#[ty]` 生成、由 `define_type` 注入作用域；`type(x)` 构造器就是返回 `value.ty()`。
+- `Module` 是「带名字的作用域 + 可选内容 + 文件 id」，用 `Arc` 引用计数、指针判等；访问 `module.foo` 本质是一次 `Scope::get`。
+- `Scope` 是有序（`IndexMap`）的名字→`Binding` 映射；`Scopes` 是求值期的查找栈，`get` 按「top → 外层 → 标准库全局 → 特判 `std`」回退；标准库常量只读，`std` 是全局库的自引用别名。
 
 ## 7. 下一步学习建议
 
-本讲把「值、类型、定义」的静态结构讲完了。接下来应进入「内容与元素」单元（u3）：
+本讲完成了「值与类型基础」单元，把 `Value`（u2-l1）、容器（u2-l2）和转换/命名空间（本讲）三块拼齐。接下来进入 **u3「Content 与元素系统」**：
 
-- **u3-l1 Content 与 RawContent**：本讲的 `Value::Content` 变体只是个入口，下一讲深入 `Content` 这个「所有标记与函数调用的产物」是如何用 `Packed` 做类型擦除、如何携带 `span/label/meta`。
-- **u3-l2 Element、NativeElement 与能力 vtable**：本讲提到 `define_elem::<E>()` 注册元素；下一讲解释元素如何作为「类型擦除句柄」、如何用 `can<C>` 查询内省能力。
-- **u3-l3 elem 宏、字段系统与 Packed**：本讲的 `cast!` 处理「类型 ↔ Value」，下一讲的 `#[elem]` 宏则处理「元素字段 ↔ 样式」，两者结构高度相似（都用宏生成样板），对照学习会事半功倍。
+- **u3-l1（Content 与 RawContent）** 会讲 `Value::Content` 背后的核心类型——它正是本讲多次提到的「内容」的具体表示，且 `Content` 也是一个带 `#[ty]` 的一等类型。
+- **u3-l3（elem 宏、字段系统与 Packed）** 会深入 `#[elem]` 宏。元素的字段（required/default/ghost/fold/parse）大量用到本讲的 `cast!` 和 `FromValue`——每个字段都是一个会被 `cast` 的类型。读完 u3-l3 你会发现本讲的转换系统是元素字段解析的直接基石。
+- **u4-l1（Styles、StyleChain 与 fold/resolve）** 会用到本讲提到的 `Fold` trait（见 [src/foundations/cast.rs:575-582](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/cast.rs#L575-L582) 里 `Derived` 的 `Fold` 实现），把样式字段如何「折叠」讲透。
 
-建议同时复习 u2-l1 的 `Value::cast`（[value.rs:152-154](https://github.com/typst/typst/blob/146a58329a30f6cd38978c22c6bf0e430d8962a1/crates/typst-library/src/foundations/value.rs#L152-L154)）和 u1-l3 的 `global()` 装配，因为本讲所有查找与转换最终都服务于那条装配链。
+建议在进入 u3 之前，回头用本讲「综合实践」的方法，自己追踪一遍 `#panic("...")` 的完整路径——如果每一步都能对上行号，说明本讲已经吃透。
